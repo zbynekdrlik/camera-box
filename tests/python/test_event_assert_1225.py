@@ -47,6 +47,8 @@ def _clean_facts():
         "latency_calibrated_ms": 925,
         "ndi_mismatches": [],
         "artifacts_existing": [],
+        "stream_program_scene": "PRO",
+        "stream_production_scene": "PRO",
     }
 
 

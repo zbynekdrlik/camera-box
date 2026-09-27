@@ -632,13 +632,15 @@ fn recording_e2e_names_the_certified_prod_scenes() {
 #[test]
 fn recording_e2e_stream_records_already_active_prod_scene_no_reactivation() {
     let s = read("scripts/recording-e2e.sh");
-    // (a) The stream program scene default is the already-active prod scene `PRO` — never the
-    // ephemeral REC-STRIH-TMP (which is never already-program → forces a cold re-activation).
+    // (a) The stream program scene default is the stream development scene (issue 1380: the prod
+    // scene `PRO` nested inside `Development`, so NDI 2ME PGM stays the same warm receiver) —
+    // never the ephemeral REC-STRIH-TMP (never already-program → forces a cold re-activation).
     assert!(
-        s.contains("STREAM_PROG_SCENE=\"${STREAM_PROG_SCENE:-PRO}\""),
-        "#343: STREAM_PROG_SCENE must default to the already-active prod scene 'PRO' (NDI 2ME PGM \
-         already warm) so prod_scene's `curr_prog == target` branch fires and NO \
-         SetCurrentProgramScene runs (the >60s graphics-thread hang path)."
+        s.contains("STREAM_PROG_SCENE=\"${STREAM_PROG_SCENE:-$STREAM_DEV_SCENE_DEFAULT}\""),
+        "#343/issue 1380: STREAM_PROG_SCENE must default to the stream development scene (it nests \
+         the prod scene, NDI 2ME PGM already warm) so TEST mode leaves it on program, \
+         prod_scene's `curr_prog == target` branch fires and NO SetCurrentProgramScene runs (the \
+         >60s graphics-thread hang path)."
     );
     assert!(
         !s.contains("REC-STRIH-TMP"),

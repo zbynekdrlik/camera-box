@@ -1,17 +1,16 @@
-//! #985 — `rig-mode.sh test` must not PARK the rig on the desynced `PHASE2-PROBE` scene.
+//! #985 — `rig-mode.sh test` must not PARK the rig on a desynced measurement-only scene.
 //!
-//! `verify_stream_program_phase2()` (issue 901 gap 2) asserts+sets stream's PROGRAM to
-//! `PHASE2-PROBE` to prove the probe path is alive, but nothing ever switches it back — TEST mode
-//! is the rig's STANDING state, so the rig now parks indefinitely on a scene whose backing input
-//! (`phase2-probe-src`) runs OBS's build-default 3ms `genlock_latency_ms_src` while the certified
-//! prod input (`NDI 2ME PGM`, scene `PRO`) runs a ~948ms calibrated A/V-align hold — a
-//! ~945ms A/V-desync-by-construction left on the parked operator monitor.
+//! Originally `verify_stream_program_phase2()` (issue 901 gap 2) set stream's PROGRAM to the
+//! probe scene `PHASE2-PROBE` and nothing switched it back — TEST mode is the rig's STANDING
+//! state, so the rig parked on a scene whose probe input ran OBS's build-default 3ms
+//! `genlock_latency_ms_src` while the certified prod input (`NDI 2ME PGM`) runs a ~948ms
+//! calibrated A/V-align hold. Since issue 1380 gap 2 proves the stream program on the stream
+//! DEVELOPMENT scene (the production scene nested inside it, the same certified input), and
+//! `park_stream_program_dev` re-asserts that scene as the last OBS step of `do_test`.
 //!
 //! These are STATIC-ANCHOR tests only (the repo's established pattern for rig-mode.sh — see the
 //! project CLAUDE.md GOTCHA on the shared textual-collision risk): they assert the new
 //! constant/function exists and is CALLED from `do_test()`, never execute a live OBS-WS call.
-//!
-//! RED before this work exists (the constant/function are absent, every test fails); GREEN after.
 
 use std::fs;
 use std::path::PathBuf;
@@ -38,64 +37,66 @@ fn do_test_body(s: &str) -> &str {
 #[test]
 fn defines_stream_prog_scene_matching_recording_e2e_convention() {
     let s = read();
+    // issue 1380: the parked scene is the stream DEVELOPMENT scene (the production scene `PRO`
+    // nested inside it) -- the SAME lib default scripts/recording-e2e.sh uses for this box.
     assert!(
-        s.contains(r#"STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-PRO}""#),
-        "#985: rig-mode.sh must define STREAM_PROG_SCENE (default 'PRO' -- the SAME convention \
-         scripts/recording-e2e.sh:1291 already uses for this exact box/scene)"
+        s.contains(r#"STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-$STREAM_DEV_SCENE_DEFAULT}""#),
+        "#985/issue 1380: rig-mode.sh must define STREAM_PROG_SCENE defaulting to the stream \
+         development scene (the SAME convention scripts/recording-e2e.sh uses for this box)"
     );
 }
 
 #[test]
-fn do_test_restores_stream_program_to_pro_after_proving_phase2_probe_alive() {
+fn do_test_parks_stream_program_on_the_dev_scene_after_proving_it_alive() {
     let s = read();
     assert!(
-        s.contains("restore_stream_program_pro"),
-        "#985: rig-mode.sh must define + call restore_stream_program_pro"
+        s.contains("park_stream_program_dev"),
+        "#985: rig-mode.sh must define + call park_stream_program_dev"
     );
     let body = do_test_body(&s);
     assert!(
-        body.contains("restore_stream_program_pro"),
-        "#985: do_test must call restore_stream_program_pro (the rig must not stay parked on \
-         PHASE2-PROBE)"
+        body.contains("park_stream_program_dev"),
+        "#985: do_test must call park_stream_program_dev (the rig must end parked on \
+         the development scene)"
     );
-    // Ordering: the restore must happen AFTER verify_stream_program_phase2 proves the probe path
-    // alive (issue 901 gap 2) -- restoring before that would prove nothing.
+    // Ordering: the park must happen AFTER verify_stream_program_dev proves the program path
+    // alive (issue 901 gap 2, since issue 1380 on the development scene) -- restoring before that would prove nothing.
     let probe_pos = body
-        .find("verify_stream_program_phase2")
-        .expect("#901: verify_stream_program_phase2 must still be called from do_test");
+        .find("verify_stream_program_dev")
+        .expect("#901 gap 2: verify_stream_program_dev must still be called from do_test");
     let restore_pos = body
-        .find("restore_stream_program_pro")
-        .expect("#985: restore_stream_program_pro must be called from do_test");
+        .find("park_stream_program_dev")
+        .expect("#985: park_stream_program_dev must be called from do_test");
     assert!(
         restore_pos > probe_pos,
-        "#985: restore_stream_program_pro must run AFTER verify_stream_program_phase2 in \
+        "#985: park_stream_program_dev must run AFTER verify_stream_program_dev in \
          do_test, not before"
     );
 
     // The function itself must use obs_phase2.py's `switch` action (SetCurrentProgramScene +
     // its #312 non-black self-check) against STREAM_IP + the STREAM_PROG_SCENE constant -- the
-    // SAME mechanism verify_stream_program_phase2 already uses, no new OBS plumbing.
+    // SAME mechanism verify_stream_program_dev already uses, no new OBS plumbing.
     let def = s
-        .find("restore_stream_program_pro() {")
-        .expect("restore_stream_program_pro must be defined");
+        .find("park_stream_program_dev() {")
+        .expect("park_stream_program_dev must be defined");
     let body_end = s[def..].find("\n}\n").map(|i| def + i).unwrap_or(s.len());
     let fn_body = &s[def..body_end];
     assert!(
         fn_body.contains("obs_phase2.py"),
-        "restore_stream_program_pro must call obs_phase2.py: {fn_body}"
+        "park_stream_program_dev must call obs_phase2.py: {fn_body}"
     );
     assert!(
         fn_body.contains("switch"),
-        "restore_stream_program_pro must use the `switch` action (SetCurrentProgramScene + \
+        "park_stream_program_dev must use the `switch` action (SetCurrentProgramScene + \
          non-black self-check), not a new mechanism: {fn_body}"
     );
     assert!(
         fn_body.contains("STREAM_IP"),
-        "restore_stream_program_pro must target STREAM_IP: {fn_body}"
+        "park_stream_program_dev must target STREAM_IP: {fn_body}"
     );
     assert!(
         fn_body.contains("STREAM_PROG_SCENE"),
-        "restore_stream_program_pro must switch to $STREAM_PROG_SCENE (default PRO), not a \
+        "park_stream_program_dev must switch to $STREAM_PROG_SCENE (default: the development scene), not a \
          hardcoded literal: {fn_body}"
     );
 }

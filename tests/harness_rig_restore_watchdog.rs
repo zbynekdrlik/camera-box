@@ -682,6 +682,24 @@ fn prod_scene_pro_not_in_default_known_test_scenes() {
     );
 }
 
+#[test]
+fn stream_development_scene_is_not_a_stranded_test_scene_1380() {
+    // issue 1380: `Development` (the prod scene PRO nested inside it) is the stream box's STANDING
+    // TEST-mode program scene, not a stranded measurement scene — with no marker it must never
+    // trigger a restore, exactly like PRO.
+    let d = decide(
+        &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "1")],
+        &["obs strih scene=Cam 1", "obs stream scene=Development"],
+    );
+    assert_eq!(
+        d.get("act").map(String::as_str),
+        Some("0"),
+        "the stream development scene must NOT trigger a restore — got act={:?} reason={:?}",
+        d.get("act"),
+        d.get("reason")
+    );
+}
+
 // ─── heartbeat helpers ───────────────────────────────────────────────────────
 
 #[test]
