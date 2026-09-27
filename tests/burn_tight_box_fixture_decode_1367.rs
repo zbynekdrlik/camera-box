@@ -1,12 +1,13 @@
 //! issue 1367 regression LOCK — the slot recovery must read a crisp own-slot burn that the fixed
 //! slot crop misses.
 //!
-//! THE BUG: cam2 films the strih-lx HDMI multiview. In the strih recording its capture burn box is
-//! about 286 px instead of 320, and its centre sits about 16 px below the camera slot centre. The
-//! issue-1370 slot crop (slot + 8 px pad) then also holds a strip of the multiview's QR content
-//! along its left and top edges, and rqrr's single grid pass over it reads nothing. On the release
-//! E2E (run 324220913) that happened on 7 frames, which the verdict counted as cam2
-//! `BURN-UNREADABLE`, while the burn sits crisply in its own slot.
+//! THE BUG: the camera slot models the capture burn at its 320 px request, but the writer renders
+//! a version-4 QR with whole 7 px modules: a 287 px burn at (816, 769) on 1080p. So the issue-1370
+//! slot crop (792, 728, 336 x 336) always holds a 24 px strip left of the burn and a 41 px strip
+//! above it. cam2 films the strih-lx HDMI multiview, those strips hold multiview QR content, and
+//! rqrr's single grid pass over the crop reads nothing. On the release E2E (run 324220913) that
+//! happened on 7 frames, which the verdict counted as cam2 `BURN-UNREADABLE`, while the burn sits
+//! crisply in its own slot.
 //!
 //! THE FIX (issue 1367, design v2): when the 1x slot crop reads no burn of the slot, the recovery
 //! finds the burn's own white quiet-zone box inside the crop (`camera_box::burn_quiet_zone`),
@@ -21,7 +22,7 @@
 //!     three frames, while the neighbours carry it (1774 -> 43307, 1776 -> 43311);
 //!   * the real rqrr 0.9.3 (plain + the production Otsu) reads nothing from the camera recovery
 //!     crop (792, 728, 336 x 336) of these frames, and reads the payloads asserted below from the
-//!     tight white box (frame 816, 769, 286 x 287) inside a 31 px white border, centred at
+//!     tight white box (frame 816, 769, 286 x 287) inside a 28 px white border, centred at
 //!     (963, 916);
 //!   * `zbarimg -q --raw` reads the same 2008 and 8150 payloads from the full frames (it reads
 //!     nothing on 1775).
@@ -126,7 +127,7 @@ fn the_fixed_camera_slot_crop_reads_nothing_on_these_frames_1367() {
 /// THE issue-1367 lock at the recovery pass: with every camera id missing, the camera slot
 /// recovery reads cam2's crisp burn — the exact payload — and adds nothing else.
 #[test]
-fn the_slot_recovery_reads_the_shrunk_lower_cam2_burn_1367() {
+fn the_slot_recovery_reads_the_cam2_burn_beside_multiview_content_1367() {
     for case in cases() {
         let mut out = Vec::new();
         burn_region_passes(&fixture_luma(case.file), &CAMERA_IDS, &mut out);
