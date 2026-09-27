@@ -491,9 +491,9 @@ static void vban_out_loop(struct vban_out_s *v)
 			const uint8_t *ip = (const uint8_t *)&addr.sin_addr.s_addr;
 			blog(LOG_INFO,
 			     "obs-vban pacing: depth_ms=%.1f late_sends=%" PRIu64 " discontinuities=%" PRIu64
-			     " silence_ms=%.1f discarded_ms=%.1f resyncs=%" PRIu64 " late_max_ms=%.3f target_ms=%" PRIu32
-			     " dest=%u.%u.%u.%u:%u stream='%.*s'",
-			     (double)depth_samples * per_ms, pacing.late_sends, pacing.discontinuities,
+			     " repays=%" PRIu64 " silence_ms=%.1f discarded_ms=%.1f resyncs=%" PRIu64
+			     " late_max_ms=%.3f target_ms=%" PRIu32 " dest=%u.%u.%u.%u:%u stream='%.*s'",
+			     (double)depth_samples * per_ms, pacing.late_sends, pacing.discontinuities, pacing.repays,
 			     (double)pacing.silence_samples * per_ms, (double)pacing.discarded_samples * per_ms,
 			     pacing.resyncs, (double)late_ns / 1000000.0, pacing.target_ms, (unsigned)ip[0],
 			     (unsigned)ip[1], (unsigned)ip[2], (unsigned)ip[3], (unsigned)ntohs(addr.sin_port),

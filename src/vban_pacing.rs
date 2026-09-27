@@ -24,10 +24,12 @@
 //! * **Stale repay.** Each silence packet stands in for a packet of audio still to come, so the
 //!   episode leaves a debt of `stale_samples`. When the pacer is back on schedule and the buffer
 //!   holds `target + debt` (the stall's backlog has arrived), the debt is dropped in ONE drop of
-//!   whole packets and the latency is the anchored one again. The caller advances the VBAN frame
-//!   counter across every dropped packet, so the receiver's own loss counter sees it. A buffering
-//!   hole in OBS brings no backlog: its debt is never repaid (nothing is discarded, the silence IS
-//!   the hole) and it is forgiven when the next silence episode starts.
+//!   whole packets and the latency is the anchored one again. Until then the stalled audio plays
+//!   late, so the drop is a forward skip, its own audible splice: `repays` counts it. The caller
+//!   advances the VBAN frame counter across every dropped packet, so the receiver's own loss
+//!   counter sees it. A buffering hole in OBS brings no backlog: its debt is never repaid (nothing
+//!   is discarded, the silence IS the hole) and it is forgiven when the next silence episode
+//!   starts.
 //! * **Hard ceiling.** More than [`CEILING_MS`] buffered, or the next slot more than
 //!   [`CEILING_MS`] overdue (a send thread frozen for seconds, a host that slept), is one counted
 //!   resync: the buffer drops back to the target and the schedule continues at the first slot at
@@ -318,6 +320,9 @@ impl Pacing {
                 self.discarded_samples += t;
                 self.stale_samples -= t;
                 self.repay_ready = false;
+                if t > 0 {
+                    self.repays += 1;
+                }
             }
             if self.pending_drop_samples > 0 {
                 // never below the new target: a dip takes only what is above it
@@ -344,7 +349,8 @@ impl Pacing {
                 break;
             }
             if avail >= ps && (!self.silent || avail >= resume) {
-                let late = self.starved || self.catchup_ns > deadline;
+                // waited for its audio and really left after its (possibly moved) deadline
+                let late = (self.starved && now_ns > deadline) || self.catchup_ns > deadline;
                 let v = if self.starved { now_ns } else { eligible };
                 self.starved = false;
                 self.silent = false;
@@ -366,7 +372,7 @@ impl Pacing {
                     self.stale_samples = 0;
                     self.repay_ready = false;
                 }
-                self.late_max_ns = self.late_max_ns.max(now_ns - deadline);
+                // a silence slot is late by design; late_max is the lateness of AUDIO packets
                 self.silence_samples += ps;
                 self.stale_samples += ps;
                 d.silence += 1;

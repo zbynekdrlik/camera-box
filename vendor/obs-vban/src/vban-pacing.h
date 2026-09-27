@@ -22,9 +22,11 @@
  *  - Stale repay: each silence packet stands in for a packet of audio still to come. When the
  *    pacer is back on schedule and the buffer holds target + that debt (the stall's backlog has
  *    arrived), the debt is dropped in ONE drop of whole packets and the latency is the anchored
- *    one again. The caller advances nuFrame across every dropped packet, so the receiver's own
- *    loss counter sees it. A buffering hole in OBS brings no backlog: its debt is never repaid
- *    (the silence IS the hole) and it is forgiven when the next silence episode starts.
+ *    one again. Until then the stalled audio plays late, so the drop is a forward skip, its own
+ *    audible splice: repays counts it. The caller advances nuFrame across every dropped packet, so
+ *    the receiver's own loss counter sees it. A buffering hole in OBS brings no backlog: its debt
+ *    is never repaid (the silence IS the hole) and it is forgiven when the next silence episode
+ *    starts.
  *  - Hard ceiling: more than VBAN_PACING_CEILING_MS buffered, or the next slot more than
  *    VBAN_PACING_CEILING_MS overdue (a send thread frozen for seconds, a host that slept), is one
  *    counted resync back to the target, continuing at the first slot at or after now instead of
@@ -80,6 +82,7 @@ struct vban_pacing {
 	uint64_t pending_drop_samples; /* dropped at the next wake after a lower target */
 	uint64_t late_sends;           /* audio packets that left late because the audio came late */
 	uint64_t discontinuities;      /* silence episodes, resyncs and retarget drops */
+	uint64_t repays;               /* stale-debt drops after the audio resumed (forward skips) */
 	uint64_t silence_samples;
 	uint64_t discarded_samples;
 	uint64_t resyncs;
@@ -172,6 +175,7 @@ static inline void vban_pacing_init(struct vban_pacing *p, int64_t target_ms, ui
 	p->pending_drop_samples = 0;
 	p->late_sends = 0;
 	p->discontinuities = 0;
+	p->repays = 0;
 	p->silence_samples = 0;
 	p->discarded_samples = 0;
 	p->resyncs = 0;
@@ -286,6 +290,8 @@ static inline struct vban_pacing_step vban_pacing_step(struct vban_pacing *p, ui
 			p->discarded_samples += t;
 			p->stale_samples -= t;
 			p->repay_ready = false;
+			if (t > 0)
+				p->repays++;
 		}
 		if (p->pending_drop_samples > 0) {
 			/* never below the new target: a dip takes only what is above it */
@@ -311,7 +317,8 @@ static inline struct vban_pacing_step vban_pacing_step(struct vban_pacing *p, ui
 			break;
 		}
 		if (avail >= ps && (!p->silent || avail >= resume)) {
-			const bool late = p->starved || p->catchup_ns > deadline;
+			/* waited for its audio and really left after its (possibly moved) deadline */
+			const bool late = (p->starved && now_ns > deadline) || p->catchup_ns > deadline;
 			const uint64_t v = p->starved ? now_ns : eligible;
 			p->starved = false;
 			p->silent = false;
@@ -333,8 +340,7 @@ static inline struct vban_pacing_step vban_pacing_step(struct vban_pacing *p, ui
 				p->stale_samples = 0;
 				p->repay_ready = false;
 			}
-			if (now_ns - deadline > p->late_max_ns)
-				p->late_max_ns = now_ns - deadline;
+			/* a silence slot is late by design; late_max is the lateness of AUDIO packets */
 			p->silence_samples += ps;
 			p->stale_samples += ps;
 			d.silence++;
