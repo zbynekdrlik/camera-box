@@ -39,10 +39,17 @@ unread item is UNKNOWN, never OK:
   `Write-Error` throws and the `exit 11` after it never runs.
 - Sleep, USB suspend and WER are owner machine settings. They are reported, never written.
 - **What `DontShowUI` does and does not cover.** It stops the WER dialog for a process that has no
-  crash handler of its own (the obs-browser-page / CEF subprocesses, other rig tools). It does NOT
-  stop OBS's own task-modal "OBS has crashed!" MessageBox
-  (`vendor/obs-studio/frontend/obs-main.cpp`, OBS installs its own handler). Only the HKLM value
-  is read, so a `DontShowUI` set by Group Policy or in HKCU still reads DRIFT here.
+  crash handler of its own (the obs-browser-page / CEF subprocesses, other rig tools). It never
+  covered OBS's own crash handler (`vendor/obs-studio/frontend/obs-main.cpp`, OBS installs its own).
+  Since issue 1378 the genlock build's handler shows no dialog at all: it writes the crash file,
+  logs `Crash report written to <path>` and exits. The box's respawner can then start a fresh OBS,
+  where one runs: the `camera-box-obs-self-heal-stream` task on stream (ships disabled), the
+  owner's AHK safe-loop on resolume. This holds once the FULL bundle with that change is deployed;
+  an older build on a box still shows upstream's task-modal "OBS has crashed!" box.
+  `DontShowUI` still matters for obs64: an `abort()` or a second fault inside the crash path (an
+  exception out of the handler, a fault in `exit()`'s static destructors) goes to WER, not to the
+  OBS dialog. Only the HKLM value is read, so a `DontShowUI` set by Group Policy or in HKCU still
+  reads DRIFT here.
 - The timer resolution and MMCSS are not graded (they cannot be set persistently).
 
 **Match by NAME too.** stream's High performance scheme is a DUPLICATE with its own GUID
