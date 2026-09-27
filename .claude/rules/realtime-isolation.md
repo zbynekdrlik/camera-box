@@ -144,6 +144,9 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
   install"` — NEVER the tokens separately (`grep -q apt-get && grep -q install`), which passes while
   the real single-`assert!` is RED. A separate-token check is exactly how a self-collision slips past
   a "GREEN" bash-source pass (caught in #899 review, 2026-09-01).
+- The OBS boxes hit the same inheritance class in the vendored genlock render tick (issue 1357): its
+  affinity leaked too, which `SCHED_RESET_ON_FORK` does not reset, so the tick holds its pin only while
+  it sleeps (`genlock-render-tick-pin.md`).
 - **The per-thread FIFO raise MUST carry `SCHED_RESET_ON_FORK`, or children inherit it (issue 899,
   2026-09-15).** `set_current_thread_realtime(CaptureEmit)` runs on a tokio runtime WORKER thread. A
   Linux thread's scheduling policy is INHERITED across `clone()` unless `SCHED_RESET_ON_FORK` is set,

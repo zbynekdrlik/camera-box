@@ -1163,6 +1163,10 @@ value; `src_latency_ms=M` (underscore prefix) = per-source setting. The regex
 effective, not the setting.
 
 ## #484 — genlock render-tick thread pinned SCHED_FIFO to the isolated core (imag-nb, Linux-only)
+**SUPERSEDED IN PART by issue 1357 — read `.claude/rules/genlock-render-tick-pin.md`.** The pin now
+lands only on isolated AND nohz_full cores (no `{10,11}` fallback; none on any current box), is held
+only while the tick sleeps (children never inherit it), and no box grants rtprio any more. The
+history below is the original #484 design.
 The libobs graphics thread (`obs_graphics_thread`, `vendor/obs-studio/libobs/obs-video.c`) drives
 the wall-clock-slaved genlock render tick (`video_sleep` → `genlock_next_deadline`). On imag-nb it
 is now pinned by `genlock_pin_render_tick_thread()` — called from `obs_graphics_thread` right after

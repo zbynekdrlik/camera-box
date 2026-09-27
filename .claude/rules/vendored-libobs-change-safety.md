@@ -1,6 +1,7 @@
 ---
 paths:
   - "vendor/obs-studio/libobs/obs-source.c"
+  - "vendor/obs-studio/libobs/obs-video.c"
   - "vendor/obs-studio/libobs/obs-internal.h"
   - "vendor/obs-studio/libobs/obs-display.c"
   - "vendor/obs-studio/libobs/graphics/graphics.c"
@@ -67,6 +68,13 @@ what gets compiled — no substitution, so a pass is evidence about the shipped 
 
 Cheap structural check to run alongside it: compare `{}`/`()`/`[]` deltas against `git show
 HEAD:<file>`. A non-zero difference means an unbalanced edit, in one second.
+
+**Lifting code that makes SYSCALLS (issue 1357, `tests/genlock_render_tick_pin_1357.rs`).** Put the
+code in one BEGIN/END-marked block, give each fixed path an `#ifndef` macro seam, and compile the block
+twice. The first build macro-substitutes the syscalls (`#define pthread_setaffinity_np h_setaffinity`)
+with recording stubs, and asserts the exact call SEQUENCE. The second runs it on REAL threads to prove
+an OS-level effect (affinity inheritance), with a control case that shows the harness can see the
+effect at all. Under `-Wconversion`, glibc's `CPU_SET` needs `-Wno-sign-conversion`.
 
 ## Promote the harness to a committed gate when it checks a MIRROR
 

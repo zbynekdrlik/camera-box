@@ -1078,7 +1078,8 @@ mismatch. The smaller surface than a CI plugin build (no new CMake/Qt step). To 
 
 **verify placement:** item 35 sits BEFORE item 34. `tests/python/test_ndi_discovery_1342.py` RUNS
 the text from `# 34) NDI discovery` up to `# 32) the shared OBS-box` with only `ndi-discovery.sh`
-sourced, so any item placed between 34 and 32 would break it; and nothing may follow item 33.
+sourced, so any item placed between 34 and 32 would break it. Item 32 closes the list (the strih-only
+item 33 rtprio-off check is now the shared baseline `rtprio` row, issue 1357).
 
 ## 22.9.2026 live session — GPU, projector, Janus, NDI naming (issue 1352 + the #1317 findings comment)
 

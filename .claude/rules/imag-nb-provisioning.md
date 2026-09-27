@@ -589,7 +589,9 @@ regenerated, rather than merely not-writing a new one.
 **If a future SCHED_FIFO-class realtime thread genuinely needs kernel-level tick support** (the
 `nohz_full`/`irqaffinity` tokens existed to prepare for a genlock render-tick thread that, per
 #483/#484, does not exist yet — it uses `sched_setscheduler(SCHED_FIFO)` + an rtprio ulimit grant,
-neither of which needs a cmdline flag) — that is a NEW, explicit, tested, per-thread pinning
+neither of which needs a cmdline flag; since issue 1357 the pin lands ONLY on isolated nohz_full cores,
+so without kernel isolation it does not pin at all, and the rtprio grant is gone, see
+`genlock-render-tick-pin.md`) — that is a NEW, explicit, tested, per-thread pinning
 design of its own, never a blanket range-mask isolation reintroduced "because it was there before".
 #784 said it plainly: isolation may return "LEN s explicitným per-thread pinningom" (only with
 explicit per-thread pinning) — this is still the bar.
