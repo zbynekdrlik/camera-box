@@ -330,6 +330,12 @@ timeline.** The rate servo stretches the samples to follow the wall-vs-QPC drift
 `70 ms / drift` — ~2 h at resolume's ~10 ppm). The slew books its own steps out of that timeline;
 the servo's correction does not. Reported to the supervisor as a follow-up candidate.
 
+**The global audio buffering is a FLOOR (issue 1367).** Every genlock OBS launch now starts the mix
+window 85 ms behind real time (4 ticks at 48 kHz, `obs-genlock-audio-buffering.h`), and OBS's own
+dynamic increase stays active above it. The genlock audio holds above ride on top of that, so a cg
+feed's audio on resolume still grows the buffering on a media start (a loud `ABOVE the floor` line,
+never dropped). Full rule: `genlock-audio-buffering-floor.md`.
+
 ## LOCK-indicator audio DEGRADE term — audible-but-expected-silent (#1303 part 3b/c — DONE)
 
 Part 3c (the `audio_unexpected` axis) landed atop part 3b: `GenlockFacets`/`genlock_lock_facets_t`

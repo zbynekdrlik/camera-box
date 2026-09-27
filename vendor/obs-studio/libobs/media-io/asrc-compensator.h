@@ -258,7 +258,8 @@ extern "C" {
  * 58.9 ... 126.1 ms over 10 launches, 18.-23.9.) and the loop then HELD it, so every launch had its
  * own A/V level (the dock + `mbc` level ~= 135 +/- 6 ms invariant); now the P/I terms, plus the
  * restore burst the sustained-error arm fires, walk every launch to the SAME depth. Value from the
- * stream-box data: OBS's own audio buffering is 64 or 85 ms per launch (random), the offset-free depth
+ * stream-box data: OBS's own audio buffering was 64 or 85 ms per launch (random -- since issue 1367 every
+ * launch starts at a deterministic 85 ms floor, obs-genlock-audio-buffering.h), the offset-free depth
  * sat at ~70-102 ms; 100 ms is above the 85 ms buffering maximum with a margin wider than the
  * +/-8-10 ms 1-s level scatter, inside the observed 64-126 ms band, and near the level median
  * (~91 ms). A target the mixer cannot reach is bounded by ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS. Only

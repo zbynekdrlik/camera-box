@@ -692,6 +692,19 @@ so every launch had its own A/V level (dock + `mbc` level ≈ 135 ± 6 ms in eve
   (checked mechanically). The telemetry `fallbacks=%u (#1355)` is appended AFTER the
   byte-identical `restore=%d (#1335)`.
 
+## Issue 1367 — the #1355 absolute target needs a deterministic audio-buffering FLOOR
+
+The #1355 capture assumed the mix window could always reach `LEVEL_TARGET_MS` + offset. It can only
+reach it when libobs's global audio buffering sits near `100 − base` (base ≈ 9 ms for `mbc`): the
+natural offset-free depth is `buffering + base`, and the level servo can move the depth only
+±~60 ms before the 70 ms TS-smoothing re-placement snaps it back. Stock OBS drew the buffering per
+launch (85 ms or none, 27.9.2026), so a no-buffering launch left `mbc` 91 ms under its target and
+the fallback re-latched at a random depth. Since issue 1367 the genlock libobs raises an 85 ms FLOOR
+on the first audio tick of every launch and keeps OBS's dynamic increase above it; the band
+invariant, the evidence and the tests are in `genlock-audio-buffering-floor.md`. The
+UNREACHABLE fallback stays as a logged safety net and now names `total_audio_buffering=` and
+`floor=`.
+
 ## Issue 1372 — a CONFIRMED step is paid back at 1000 ppm, not restored proportionally
 
 At the first dantesync fleet date step the stream `mbc` lost ~44 ms of Dante samples upstream of
