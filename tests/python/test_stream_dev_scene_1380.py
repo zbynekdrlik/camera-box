@@ -304,10 +304,11 @@ def test_obs_phase2_holds_no_copy_of_the_seeder():
 
 # --- switch: skip when already on target, optional --min-mean -----------------------------------
 
-def _switch_args(scene, prod_floor=False, black_report_only=False, replace_preview=""):
+def _switch_args(scene, prod_floor=False, black_report_only=False, replace_preview="",
+                 only_from=""):
     return types.SimpleNamespace(host="10.77.9.204", password="", program_scene=scene,
                                  prod_floor=prod_floor, black_report_only=black_report_only,
-                                 replace_preview=replace_preview)
+                                 replace_preview=replace_preview, only_from=only_from)
 
 
 def test_switch_skips_set_when_the_target_is_already_on_program(monkeypatch, capsys):
@@ -577,13 +578,46 @@ def test_stale_preview_decision_is_pure():
     assert f(True, "PRO", "PRO", "PRO") is None
 
 
+def test_switch_only_from_switches_when_program_is_the_development_scene(monkeypatch):
+    # ROZHODNUTIE 27.9.2026: EVENT undoes development -- program Development -> PRO.
+    fake, calls, state = _fake_obs(["PRO", "Development"], {}, program="Development")
+    monkeypatch.setattr(obs_phase2, "_rpc", fake)
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    seen = {}
+    _spy_nonblack(monkeypatch, seen)
+    obs_phase2.switch(_switch_args("PRO", only_from="Development"))
+    assert state["program"] == "PRO"
+    assert "min_mean" in seen
+
+
+def test_switch_only_from_leaves_an_operator_scene_alone(monkeypatch, capsys):
+    # The operator is on PRE (or POST, or PRO already): EVENT never cuts it -- no scene set, no
+    # preview write, no black proof of a scene development never touched.
+    for live in ("PRE", "POST", "PRO"):
+        fake, calls, state = _fake_obs(["PRO", "PRE", "POST", "Development"], {}, program=live,
+                                       studio=True, preview="Development")
+        monkeypatch.setattr(obs_phase2, "_rpc", fake)
+        monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+        seen = {}
+        _spy_nonblack(monkeypatch, seen)
+        obs_phase2.switch(_switch_args("PRO", prod_floor=True, black_report_only=True,
+                                       replace_preview="Development", only_from="Development"))
+        assert state["program"] == live
+        assert _writes(calls) == []
+        assert seen == {}
+        err = capsys.readouterr().err
+        assert "left alone" in err and live in err
+
+
 def test_switch_cli_accepts_the_event_flags(monkeypatch):
     captured = {}
     monkeypatch.setattr(obs_phase2, "switch", lambda a: captured.update(vars(a)))
     monkeypatch.setattr(sys, "argv", ["obs_phase2.py", "switch", "--host", "h",
                                       "--program-scene", "PRO", "--prod-floor",
-                                      "--black-report-only", "--replace-preview", "Development"])
+                                      "--black-report-only", "--replace-preview", "Development",
+                                      "--only-from", "Development"])
     obs_phase2.main()
+    assert captured["only_from"] == "Development"
     assert captured["prod_floor"] is True
     assert captured["black_report_only"] is True
     assert captured["replace_preview"] == "Development"

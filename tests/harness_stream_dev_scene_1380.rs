@@ -126,6 +126,11 @@ fn rig_mode_event_puts_the_production_scene_back_before_the_contract() {
         "obs_phase2.py\" switch --host \"$STREAM_IP\" --program-scene \"$STREAM_EVENT_SCENE\""
     ));
     assert!(
+        body.contains("--only-from \"$STREAM_PROG_SCENE\""),
+        "EVENT switches to the production scene ONLY when the live program is the development \
+         scene (ROZHODNUTIE 27.9.2026): an operator scene is left alone"
+    );
+    assert!(
         body.contains("--prod-floor"),
         "EVENT's non-black proof on real production content uses the prod floor, not the \
          bright-QR #312 floor"
@@ -162,8 +167,12 @@ fn rig_mode_event_contract_reads_the_stream_program_scene() {
     let body = fn_body(&s, "event_mode_assert");
     assert!(body.contains("stream_program_scene_read \"$here\" \"$STREAM_IP\""));
     assert!(body.contains("--arg stream_program_scene"));
-    assert!(body.contains("--arg stream_production_scene \"$STREAM_EVENT_SCENE\""));
-    assert!(body.contains("stream_production_scene: $stream_production_scene"));
+    assert!(body.contains("--arg stream_dev_scene \"$STREAM_PROG_SCENE\""));
+    assert!(body.contains("stream_dev_scene: $stream_dev_scene"));
+    assert!(
+        !body.contains("stream_production_scene"),
+        "item 9 checks 'not the development scene', never 'equals the production scene'"
+    );
 }
 
 #[test]

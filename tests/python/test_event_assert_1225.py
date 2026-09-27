@@ -48,20 +48,20 @@ def _clean_facts():
         "ndi_mismatches": [],
         "artifacts_existing": [],
         "stream_program_scene": "PRO",
-        "stream_production_scene": "PRO",
+        "stream_dev_scene": "Development",
     }
 
 
 def test_stream_program_facet_none_fails_closed_never_raises():
-    # issue 1380 item 9: an unreadable stream program scene (None) or a missing expected name must
-    # fail the item, never raise and never read as "on the production scene".
+    # issue 1380 item 9: an unreadable stream program scene (None) or a missing development-scene
+    # name must fail the item, never raise and never read as "not on the development scene".
     facts = _clean_facts()
     facts["stream_program_scene"] = None
     results = ea.compute_item_results(facts)
-    assert results["stream_program_production"] is False
+    assert results["stream_program_not_development"] is False
     facts = _clean_facts()
-    facts["stream_production_scene"] = None
-    assert ea.compute_item_results(facts)["stream_program_production"] is False
+    facts["stream_dev_scene"] = None
+    assert ea.compute_item_results(facts)["stream_program_not_development"] is False
 
 
 def test_baseline_facts_pass_every_item():
