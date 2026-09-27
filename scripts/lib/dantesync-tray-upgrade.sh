@@ -137,8 +137,12 @@ if ($trayNotes.Count -eq 0 -and -not $trayCurrent) {
             if (@(Get-Process -Id $trayPids -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'dantesync-tray' }).Count -gt 0) { throw "the killed tray (pid $($trayPids -join ', ')) did not exit" }
         }
         if (-not (Test-Path $trayPre)) { Copy-Item -Force $trayExe $trayPre }
-        # the exe as it is now: a failed replace is "untouched" only when the file still hashes to this
-        $trayBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $trayExe).Hash
+        # the exe as it is now: a failed replace is "untouched" only when the file still hashes to this.
+        # On Windows PowerShell 5.1 Get-FileHash is a script function whose read failure is a
+        # non-terminating error (a null hash), so -ErrorAction Stop + an empty check: two unreadable
+        # hashes must never compare equal
+        $trayBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $trayExe -ErrorAction Stop).Hash
+        if (-not $trayBefore) { throw 'could not hash the tray exe before the replace' }
         # a tray relaunched since the kill holds the exe again: kill it right before the replace,
         # at most 3 times, and remember who started each NEW one (a PID tried before is not a relaunch)
         for ($trayTry = 1; $trayTry -le 3; $trayTry++) {
@@ -166,7 +170,10 @@ if ($trayNotes.Count -eq 0 -and -not $trayCurrent) {
             $trayInUse = @(32, 33) -contains ($_.Exception.HResult -band 0xFFFF)
             $trayUntouched = $false
             if ($trayInUse) {
-                try { $trayUntouched = ((Get-FileHash -Algorithm SHA256 -LiteralPath $trayExe).Hash -eq $trayBefore) } catch { }
+                try {
+                    $trayNowHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $trayExe -ErrorAction Stop).Hash
+                    $trayUntouched = ($trayNowHash -and $trayNowHash -eq $trayBefore)
+                } catch { }
             }
             # who holds it now: a NEW PID is a relaunch, a PID already tried is a tray that did not die
             $trayHolders = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue)
@@ -183,7 +190,9 @@ if ($trayNotes.Count -eq 0 -and -not $trayCurrent) {
                 $trayRestored = $false
                 try {
                     Copy-Item -Force $trayPre $trayExe
-                    $trayRestored = ((Get-FileHash -Algorithm SHA256 $trayExe).Hash -eq (Get-FileHash -Algorithm SHA256 $trayPre).Hash)
+                    # an unreadable (null) hash never proves a restore
+                    $trayRestoredHash = (Get-FileHash -Algorithm SHA256 $trayExe -ErrorAction Stop).Hash
+                    $trayRestored = ($trayRestoredHash -and $trayRestoredHash -eq (Get-FileHash -Algorithm SHA256 $trayPre).Hash)
                 } catch { }
                 if ($trayRestored) {
                     $trayNotes += ('tray swap failed, the previous tray restored: ' + $trayWhy)
@@ -238,7 +247,7 @@ if ($trayNotes.Count -gt 0) {
         $trayOkNote = ' (killed a relaunched tray before the swap, started by: ' + (($trayRespawnedBy | Select-Object -Unique) -join ' / ') + ')'
     }
     if ($trayKept) {
-        # the swap succeeded, so a tray running afterwards was started from the new exe
+        # the swap succeeded, so a tray running afterwards was started after the new exe landed
         $trayOkNote += ' (kept a tray that was running again, not launched)'
     }
     Write-Output ('TRAY OK: dantesync-tray.exe sha256 ' + $trayExpected + ' running in session ' + $trayProcs[0].SessionId + $trayOkNote)
