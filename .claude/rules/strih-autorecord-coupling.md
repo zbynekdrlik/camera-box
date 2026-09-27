@@ -113,6 +113,13 @@ stopped" classifier only re-derives the existing stray-signature heal, and the d
 owner-side (Companion). If a future ticket DOES harden camera-box, the honest improvement is a
 FLEET-AWARE stray test ("strih recording AND stream NOT streaming") rather than the per-box partition
 (which structurally can never exclude a never-streaming strih) — but that is optional and out of #1274.
+The fleet-aware test now exists as a pure, tested decision: `scripts/av_soak_rig_state.py` (issue
+1367, the soak's `--stop-leftovers`). Over one `rig-busy-check` read it returns `live` when ANY box
+streams and `unknown` on an incomplete read. It then proves a leftover is ours by the recording's own
+age: `recordTimecode`, obs-websocket's frame count x frame time, which undercounts wall time by every
+lagged frame, so "outside the window" means "cannot prove", never "someone else's". The age is
+compared against a flag time written just before our StartRecord. Reuse it for any new
+stop-a-leftover path instead of another per-box partition.
 
 - **CAVEAT — do NOT "fix" the stray signature.** "recording ON + streaming OFF" is strih's NORMAL
   broadcast state, because **strih never streams** (it feeds stream over NDI; only stream OBS holds

@@ -1576,3 +1576,15 @@ each mutant through one `rustc --test` and its binary. Also mutate C and Rust ID
 only the behavioural tests can kill that mutant, because the parity trace stays equal. A worked
 script (dev1-local, not committed): `~/.claude/work-products/issue-1381-vban-pacer-sim/mut_lane2.py`
 (44/44 killed).
+
+## Two fake-harness traps from the soak orchestrator tests (issue 1367)
+
+- **`bash -c 'sleep 30' marker` is not a process whose command line names `marker`.** bash execs
+  the last simple command of a `-c` string, so the process becomes `sleep 30` and `$0` is gone.
+  A stand-in that a script finds by its `/proc/<pid>/cmdline` (a "the run still runs" check) needs
+  `bash -c 'sleep 30; true' <name>`. The first draft of such a test proved nothing: the check it
+  was meant to trip never saw the name.
+- **A fake that logs its argv with `printf ' %q'` backslash-escapes the spaces INSIDE one
+  argument.** A parser that splits the logged line on whitespace then takes `\` as the next token
+  (the soak's `powershell ... -EncodedCommand <b64>` single ssh argument). Unescape (`\ ` -> ` `)
+  before splitting, or log with a separator that cannot occur in an argument.

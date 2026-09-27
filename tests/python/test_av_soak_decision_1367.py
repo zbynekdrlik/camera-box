@@ -1,0 +1,916 @@
+"""issue 1367 -- the PURE decision core of the 8 h stream-output A/V soak.
+
+Owner goal (24.9.2026): on the stream OBS output the picture/sound offset and the camera-to-camera
+alignment must hold for 8 h without drifting; any real drift already shows after about 1 h. The
+soak orchestrator (scripts/av-soak.sh) records one short window per 10-minute slot, decodes it with
+the same recording-verdict the E2E gate uses, and appends ONE CSV row per window. This module turns
+that CSV into the verdict:
+
+  - every sample graded against the gate's own bounds, READ from their single sources
+    (`AV_OFFSET_GATE_TOLERANCE_MS` in src/av_window.rs, `SPREAD_THRESHOLD_MS` in
+    src/switch_latency.rs) -- never retyped;
+  - a least-squares slope per series (ms/h), bound 2 ms/h;
+  - a 1 h partial report and the full report;
+  - an empty / partial / gappy CSV is UNKNOWN, never a false PASS.
+
+Tier-0: pure python, no rig, no cargo. Runnable directly or under pytest (the python-tests CI job).
+"""
+import csv
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import tempfile
+
+import pytest
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
+MODULE = os.path.join(REPO, "scripts", "av_soak_decision.py")
+
+_spec = importlib.util.spec_from_file_location("av_soak_decision", MODULE)
+asd = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(asd)
+
+CAMS = ["cam1", "cam2", "cam3"]
+T0 = 1_790_000_000  # an arbitrary epoch (2026-09) for the synthetic runs
+SLOT = 600
+
+
+# --- helpers -----------------------------------------------------------------------------------
+
+
+def _bounds(av=None, spread=None):
+    real = asd.load_gate_bounds(REPO)
+    return {
+        "av_tolerance_ms": real["av_tolerance_ms"] if av is None else av,
+        "spread_threshold_ms": real["spread_threshold_ms"] if spread is None else spread,
+        "sources": real["sources"],
+    }
+
+
+def _verdict(av=None, expected=0.0, source_spread=None, delivery_spread=None, segments=None,
+             burn_loss=None):
+    """A minimal merged-verdict JSON in the shape recording-verdict writes."""
+    v = {}
+    if av is not None:
+        block = {"expected_ms": expected, "gate_tolerance_ms": 30.0, "judged_cameras": len(av)}
+        for cam, (status, off) in av.items():
+            block[cam] = {"node": cam, "verdict": status, "av_offset_ms": off,
+                          "gate_pass": status == "measured"}
+        v["all_cambox_av_sync"] = block
+    v["all_cambox_latency"] = {"cross_camera_spread_ms": source_spread,
+                               "spread_gate_pass": None}
+    v["all_cambox_delivery_latency"] = {"cross_camera_spread_ms": delivery_spread,
+                                        "spread_gate_pass": None}
+    if segments is not None:
+        v["all_cambox_continuity"] = {"segments": segments}
+    if burn_loss is not None:
+        v["full_chain"] = {"loss": burn_loss}
+    return v
+
+
+def _meta(slot, epoch=None, outcome="ok"):
+    epoch = T0 + slot * SLOT if epoch is None else epoch
+    return {"ts_utc": asd.utc_iso(epoch), "epoch_s": epoch, "slot": slot, "window_s": 90,
+            "outcome": outcome, "verdict_rc": 1, "verdict_path": f"/runs/s{slot}/verdict.json",
+            "painter_run_id": "123"}
+
+
+def _clean_row(slot, av_by_cam=None, spread=10.0, loss_pass=True, epoch=None, expected=0.0,
+               delivery=None):
+    av_by_cam = av_by_cam or {"cam1": 1.0, "cam2": 2.0, "cam3": -1.0}
+    segs = [{"cambox": c.upper(), "pass": loss_pass, "copies": 0 if loss_pass else 2, "gaps": 0,
+             "undecodable": 0, "frames": 900} for c in CAMS]
+    v = _verdict(av={c: ("measured", o) for c, o in av_by_cam.items()}, expected=expected,
+                 source_spread=spread, delivery_spread=delivery if delivery is not None else spread,
+                 segments=segs,
+                 burn_loss={n: {"zero_loss": True, "real_drops": 0} for n in asd.HOP_NODES})
+    return asd.row_from_verdict(v, CAMS, _meta(slot, epoch=epoch))
+
+
+def _run(rows, **kw):
+    kw.setdefault("bounds", _bounds())
+    kw.setdefault("min_duration_s", 3600)
+    kw.setdefault("max_gap_s", asd.DEFAULT_MAX_GAP_S)
+    kw.setdefault("slope_bound", asd.SLOPE_BOUND_MS_PER_H)
+    kw.setdefault("spread_columns", ("source_spread_ms", "delivery_spread_ms"))
+    return asd.evaluate(rows, CAMS, **kw)
+
+
+def _stringify(row):
+    """What a row looks like after a CSV round trip (every value a string)."""
+    return {k: ("" if v is None else str(v)) for k, v in row.items()}
+
+
+# --- the bounds are READ from their single sources ----------------------------------------------
+
+
+def test_bounds_are_read_from_the_rust_sources():
+    b = asd.load_gate_bounds(REPO)
+    assert b["av_tolerance_ms"] > 0 and b["spread_threshold_ms"] > 0
+    assert b["sources"]["av_tolerance_ms"].endswith("src/av_window.rs AV_OFFSET_GATE_TOLERANCE_MS")
+    assert b["sources"]["spread_threshold_ms"].endswith(
+        "src/switch_latency.rs SPREAD_THRESHOLD_MS")
+
+
+def test_bounds_follow_the_source_file_not_a_literal(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "av_window.rs").write_text(
+        "/// doc\npub const AV_OFFSET_GATE_TOLERANCE_MS: f64 = 31.5;\n")
+    (tmp_path / "src" / "switch_latency.rs").write_text(
+        "pub const SPREAD_THRESHOLD_MS: f64 = 17.25;\n")
+    b = asd.load_gate_bounds(str(tmp_path))
+    assert b["av_tolerance_ms"] == 31.5
+    assert b["spread_threshold_ms"] == 17.25
+
+
+def test_a_missing_bound_constant_fails_closed(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "av_window.rs").write_text("pub const OTHER: f64 = 1.0;\n")
+    (tmp_path / "src" / "switch_latency.rs").write_text(
+        "pub const SPREAD_THRESHOLD_MS: f64 = 24.0;\n")
+    with pytest.raises(asd.BoundsError):
+        asd.load_gate_bounds(str(tmp_path))
+    with pytest.raises(asd.BoundsError):
+        asd.load_gate_bounds(str(tmp_path / "nope"))
+
+
+def test_parse_rust_f64_const():
+    assert asd.parse_rust_f64_const("pub const X: f64 = 12.5;", "X") == 12.5
+    assert asd.parse_rust_f64_const("pub const X: f64 = 3.0; // c", "X") == 3.0
+    assert asd.parse_rust_f64_const("pub const XY: f64 = 3.0;", "X") is None
+    assert asd.parse_rust_f64_const("", "X") is None
+
+
+# --- slope fit ----------------------------------------------------------------------------------
+
+
+def test_slope_of_a_line_is_exact_in_ms_per_hour():
+    pts = [(T0 + i * 600, 5.0 + 3.0 * (i * 600) / 3600.0) for i in range(7)]
+    assert asd.fit_slope_ms_per_h(pts) == pytest.approx(3.0)
+
+
+def test_slope_of_a_constant_is_zero_and_degenerate_input_is_none():
+    assert asd.fit_slope_ms_per_h([(T0 + i * 600, 4.0) for i in range(4)]) == pytest.approx(0.0)
+    assert asd.fit_slope_ms_per_h([(T0, 1.0)]) is None
+    assert asd.fit_slope_ms_per_h([(T0, 1.0), (T0, 2.0)]) is None
+    assert asd.fit_slope_ms_per_h([]) is None
+
+
+# --- one CSV row per window ---------------------------------------------------------------------
+
+
+def test_row_from_verdict_extracts_the_measured_offsets_spreads_and_loss():
+    segs = [
+        {"cambox": "CAM1", "pass": True, "copies": 0, "gaps": 1, "undecodable": 2, "frames": 400},
+        {"cambox": "CAM1", "pass": False, "copies": 3, "gaps": 0, "undecodable": 0, "frames": 500},
+        {"cambox": "CAM3", "pass": True, "copies": 0, "gaps": 0, "undecodable": 0, "frames": 900},
+    ]
+    v = _verdict(av={"cam1": ("measured", 10.0), "cam2": ("measured", 3.0),
+                     "cam3": ("measured", -5.0)},
+                 expected=0.0, source_spread=None, delivery_spread=12.3, segments=segs,
+                 burn_loss={"cam1": {"zero_loss": True, "real_drops": 0}})
+    row = asd.row_from_verdict(v, CAMS, _meta(4))
+    assert set(row) == set(asd.csv_fields(CAMS))
+    assert row["slot"] == "4" and row["outcome"] == "ok"
+    assert row["av_cam1_ms"] == "10.000" and row["av_cam1_status"] == "measured"
+    assert row["av_cam3_ms"] == "-5.000"
+    assert row["av_expected_ms"] == "0.000"
+    # cam2's number pools the WHOLE recording (whatever camera is on program), so it is not a
+    # camera path and stays out of the stream-output cross-camera spread
+    assert row["av_spread_ms"] == "15.000" and row["av_spread_cams"] == "2"
+    assert row["source_spread_ms"] == "" and row["delivery_spread_ms"] == "12.300"
+    # a camera's segments aggregate; its loss pass is the AND of the verdict's own segment passes
+    assert row["loss_cam1_frames"] == "900" and row["loss_cam1_copies"] == "3"
+    assert row["loss_cam1_gaps"] == "1" and row["loss_cam1_undecodable"] == "2"
+    assert row["loss_cam1_pass"] == "false" and row["loss_cam3_pass"] == "true"
+    assert row["loss_cam2_pass"] == ""  # no segment for cam2 in this window
+    assert row["burn_cam1_zero_loss"] == "true" and row["burn_cam1_real_drops"] == "0"
+    assert row["burn_cam3_zero_loss"] == ""
+
+
+def test_a_derived_or_unknown_offset_is_never_a_sample():
+    v = _verdict(av={"cam1": ("derived", None), "cam2": ("unknown", None),
+                     "cam3": ("excluded", None)})
+    v["all_cambox_av_sync"]["cam1"]["derived_offset_ms"] = 7.0
+    row = asd.row_from_verdict(v, CAMS, _meta(0))
+    assert row["av_cam1_ms"] == "" and row["av_cam1_status"] == "derived"
+    assert row["av_cam2_status"] == "unknown" and row["av_cam3_status"] == "excluded"
+    assert row["av_spread_ms"] == "" and row["av_spread_cams"] == "0"
+
+
+def test_a_hand_edited_non_measured_value_is_still_not_a_sample():
+    # the grading keys on the status column too, not only on a non-empty value
+    rows = []
+    for i in range(7):
+        r = _clean_row(i)
+        if i == 3:
+            r["av_cam1_status"] = "derived"
+            r["av_cam1_ms"] = "999.000"
+        rows.append(_stringify(r))
+    rep = _run(rows)
+    assert rep["series"]["av cam1"]["n"] == 6
+    assert rep["series"]["av cam1"]["breaches"] == 0
+
+
+def test_no_verdict_row_keeps_the_window_with_empty_measurements():
+    row = asd.row_from_verdict(None, CAMS, _meta(2, outcome="no_verdict:decode_failed"))
+    assert row["outcome"] == "no_verdict:decode_failed"
+    assert row["av_cam1_ms"] == "" and row["av_cam1_status"] == "absent"
+    assert row["av_expected_ms"] == "" and row["loss_cam1_pass"] == ""
+
+
+def test_camera_names_are_validated():
+    with pytest.raises(ValueError):
+        asd.csv_fields(["cam1", "cam1; rm -rf"])
+    with pytest.raises(ValueError):
+        asd.csv_fields([])
+
+
+def test_append_row_writes_the_header_once_and_refuses_a_schema_change(tmp_path):
+    path = str(tmp_path / "soak.csv")
+    asd.append_row(path, _clean_row(0), CAMS)
+    asd.append_row(path, _clean_row(1), CAMS)
+    with open(path, newline="") as f:
+        rows = list(csv.reader(f))
+    assert rows[0] == asd.csv_fields(CAMS) and len(rows) == 3
+    with pytest.raises(asd.CsvSchemaError):
+        asd.append_row(path, asd.row_from_verdict(None, ["cam1"], _meta(2)), ["cam1"])
+    fields, read = asd.read_rows(path)
+    assert fields == asd.csv_fields(CAMS) and len(read) == 2
+    assert asd.cams_from_fields(fields) == CAMS
+
+
+# --- grading ------------------------------------------------------------------------------------
+
+
+def test_empty_csv_is_unknown_never_a_pass():
+    rep = _run([])
+    assert rep["verdict"] == asd.UNKNOWN
+    assert asd.exit_code(rep) == 2
+
+
+def test_a_clean_hour_on_the_graded_spread_passes():
+    rows = [_stringify(_clean_row(i)) for i in range(7)]
+    rep = _run(rows)
+    assert rep["verdict"] == asd.PASS, rep["reasons"]
+    assert asd.exit_code(rep) == 0
+    assert rep["series"]["av cam1"]["verdict"] == asd.PASS
+    assert rep["series"]["av cam1"]["slope_ms_per_h"] == pytest.approx(0.0)
+
+
+def test_an_unmeasured_graded_spread_is_unknown_never_a_pass():
+    rows = []
+    for i in range(7):
+        r = _clean_row(i)
+        r["source_spread_ms"] = ""
+        r["delivery_spread_ms"] = ""
+        rows.append(_stringify(r))
+    rep = _run(rows)
+    assert rep["verdict"] == asd.UNKNOWN
+    assert "spread source_spread_ms" in " ".join(rep["reasons"])
+    # the stream-output spread from the A/V offsets is still reported (not graded by default)
+    assert rep["series"]["spread av_spread_ms"]["graded"] is False
+    assert rep["series"]["spread av_spread_ms"]["n"] == 7
+    # grading it instead is one option
+    rep_b = _run(rows, spread_columns=("av_spread_ms",))
+    assert rep_b["verdict"] == asd.PASS, rep_b["reasons"]
+
+
+def test_av_bound_is_inclusive_and_relative_to_the_expected_offset():
+    tol = _bounds()["av_tolerance_ms"]
+    at = [_stringify(_clean_row(i, av_by_cam={"cam1": 5.0 + tol, "cam2": 5.0, "cam3": 5.0},
+                                expected=5.0)) for i in range(7)]
+    assert _run(at)["verdict"] == asd.PASS
+    over = [_stringify(_clean_row(i, av_by_cam={"cam1": 5.0 + tol + (0.1 if i == 3 else 0.0),
+                                                "cam2": 5.0, "cam3": 5.0},
+                                  expected=5.0)) for i in range(7)]
+    rep = _run(over)
+    assert rep["verdict"] == asd.FAIL
+    assert rep["series"]["av cam1"]["breaches"] == 1
+    assert asd.exit_code(rep) == 1
+
+
+def test_grading_uses_the_loaded_bounds_not_a_literal():
+    rows = [_stringify(_clean_row(i, av_by_cam={"cam1": 6.0, "cam2": 0.0, "cam3": 0.0}))
+            for i in range(7)]
+    assert _run(rows)["verdict"] == asd.PASS
+    assert _run(rows, bounds=_bounds(av=5.0))["verdict"] == asd.FAIL
+    assert _run(rows, bounds=_bounds(spread=9.0))["verdict"] == asd.FAIL
+
+
+def test_spread_at_the_threshold_passes_and_above_fails():
+    thr = _bounds()["spread_threshold_ms"]
+    at = [_stringify(_clean_row(i, spread=thr)) for i in range(7)]
+    assert _run(at)["verdict"] == asd.PASS
+    over = [_stringify(_clean_row(i, spread=thr + (0.5 if i == 5 else 0.0))) for i in range(7)]
+    rep = _run(over)
+    assert rep["verdict"] == asd.FAIL
+    assert rep["series"]["spread source_spread_ms"]["breaches"] == 1
+
+
+def test_a_drift_inside_the_bound_still_fails_on_the_slope():
+    def drift(rate):
+        return [_stringify(_clean_row(i, av_by_cam={"cam1": rate * i * SLOT / 3600.0,
+                                                     "cam2": 0.0, "cam3": 0.0}))
+                for i in range(7)]
+    rep = _run(drift(3.0))
+    assert rep["verdict"] == asd.FAIL
+    assert rep["series"]["av cam1"]["slope_ms_per_h"] == pytest.approx(3.0)
+    assert "slope" in rep["series"]["av cam1"]["reason"]
+    assert _run(drift(1.5))["verdict"] == asd.PASS
+    assert _run(drift(-2.5))["verdict"] == asd.FAIL
+
+
+def test_a_loss_window_fails():
+    rows = [_stringify(_clean_row(i, loss_pass=(i != 2))) for i in range(7)]
+    rep = _run(rows)
+    assert rep["verdict"] == asd.FAIL
+    assert rep["series"]["loss cam1"]["breaches"] == 1
+    assert rep["series"]["loss cam1"]["copies"] == 2
+
+
+def test_a_burn_loss_fails_when_it_was_measured():
+    rows = []
+    for i in range(7):
+        r = _clean_row(i)
+        r["burn_cam3_zero_loss"] = "false" if i == 1 else "true"
+        rows.append(_stringify(r))
+    rep = _run(rows)
+    assert rep["verdict"] == asd.FAIL
+    assert rep["series"]["burn cam3"]["verdict"] == asd.FAIL
+
+
+def test_a_missing_window_is_a_cadence_gap_so_unknown():
+    rows = [_stringify(_clean_row(i)) for i in range(8) if i != 3]
+    rep = _run(rows)
+    assert rep["verdict"] == asd.UNKNOWN
+    assert rep["series"]["av cam1"]["max_gap_s"] == pytest.approx(2 * SLOT)
+    assert "gap" in rep["series"]["av cam1"]["reason"]
+
+
+def test_a_failed_decode_window_leaves_a_gap():
+    rows = []
+    for i in range(8):
+        if i == 4:
+            rows.append(_stringify(asd.row_from_verdict(None, CAMS,
+                                                        _meta(i, outcome="no_verdict:merge"))))
+        else:
+            rows.append(_stringify(_clean_row(i)))
+    rep = _run(rows)
+    assert rep["verdict"] == asd.UNKNOWN
+    assert rep["windows"] == 8 and rep["windows_ok"] == 7
+
+
+def test_a_camera_missing_at_the_start_is_a_gap_too():
+    rows = []
+    for i in range(7):
+        r = _clean_row(i)
+        if i < 2:
+            r["av_cam3_ms"] = ""
+            r["av_cam3_status"] = "unknown"
+        rows.append(_stringify(r))
+    rep = _run(rows)
+    assert rep["verdict"] == asd.UNKNOWN
+    assert rep["series"]["av cam3"]["max_gap_s"] == pytest.approx(2 * SLOT)
+
+
+def test_a_run_shorter_than_required_is_unknown():
+    rows = [_stringify(_clean_row(i)) for i in range(4)]  # 30 min of window starts
+    rep = _run(rows)
+    assert rep["verdict"] == asd.UNKNOWN
+    assert any("shorter" in r for r in rep["reasons"])
+
+
+def test_the_slope_needs_enough_span():
+    rows = [_stringify(_clean_row(i, epoch=T0 + i * 300)) for i in range(4)]  # 15 min
+    rep = _run(rows, min_duration_s=0)
+    assert rep["series"]["av cam1"]["slope_ms_per_h"] is None
+    assert rep["verdict"] == asd.UNKNOWN
+
+
+def test_an_operator_excluded_camera_is_not_required():
+    rows = []
+    for i in range(7):
+        r = _clean_row(i)
+        r["av_cam3_ms"] = ""
+        r["av_cam3_status"] = "excluded"
+        r["loss_cam3_pass"] = ""
+        rows.append(_stringify(r))
+    rep = _run(rows)
+    assert rep["series"]["av cam3"]["verdict"] == asd.EXCLUDED
+    assert rep["series"]["loss cam3"]["verdict"] == asd.EXCLUDED
+    assert rep["verdict"] == asd.PASS, rep["reasons"]
+
+
+def test_partial_hour_passes_while_the_full_run_drifts():
+    rows = []
+    for i in range(13):  # 2 h of windows
+        drift = 0.0 if i <= 6 else 8.0 * (i - 6) * SLOT / 3600.0
+        rows.append(_stringify(_clean_row(i, av_by_cam={"cam1": drift, "cam2": 0.0, "cam3": 0.0})))
+    scopes = asd.evaluate_scopes(rows, CAMS, bounds=_bounds(), partial_h=1.0, min_duration_h=2.0,
+                                 max_gap_s=asd.DEFAULT_MAX_GAP_S,
+                                 slope_bound=asd.SLOPE_BOUND_MS_PER_H,
+                                 spread_columns=("source_spread_ms",))
+    assert scopes["partial"]["verdict"] == asd.PASS, scopes["partial"]["reasons"]
+    assert scopes["partial"]["windows"] == 7
+    assert scopes["full"]["verdict"] == asd.FAIL
+
+
+def test_render_text_names_every_series_and_the_verdict():
+    rows = [_stringify(_clean_row(i)) for i in range(7)]
+    text = asd.render_text(asd.evaluate_scopes(rows, CAMS, bounds=_bounds(), partial_h=1.0,
+                                               min_duration_h=1.0,
+                                               max_gap_s=asd.DEFAULT_MAX_GAP_S,
+                                               slope_bound=asd.SLOPE_BOUND_MS_PER_H,
+                                               spread_columns=("source_spread_ms",)))
+    for needle in ("av cam1", "av cam3", "spread source_spread_ms", "spread av_spread_ms",
+                   "loss cam2", "VERDICT: PASS", "AV_OFFSET_GATE_TOLERANCE_MS",
+                   "SPREAD_THRESHOLD_MS"):
+        assert needle in text, needle
+
+
+# --- review round 1: real verdict fixtures, relaxed_pass, multi-source, hop burns, noise ----------
+
+FIXTURES = os.path.join(HERE, "fixtures", "e2e_discord_report")
+
+
+def _fixture(name):
+    with open(os.path.join(FIXTURES, name), encoding="utf-8") as f:
+        return json.load(f)
+
+
+REAL_CAMS = ["cam1", "cam2", "cam3"]
+
+
+def test_loss_is_graded_on_the_gates_relaxed_pass_and_the_strict_pass_is_reported():
+    # a real merged verdict: CAM1's strict `pass` is false (1 copy) but the gate folds relaxed_pass
+    row = asd.row_from_verdict(_fixture("verdict_real_pass_reportonly_1104689227.json"),
+                               REAL_CAMS, _meta(0))
+    assert row["loss_cam1_pass"] == "true"
+    assert row["loss_cam1_strict_pass"] == "false"
+    assert row["loss_cam1_copies"] == "2"
+
+
+def test_a_verdict_without_relaxed_pass_falls_back_to_the_strict_pass():
+    row = asd.row_from_verdict(_fixture("verdict_clean_pass.json"), REAL_CAMS, _meta(0))
+    assert row["loss_cam1_pass"] == "true" and row["loss_cam1_strict_pass"] == "true"
+
+
+def test_a_multi_source_window_is_graded_by_the_gates_scoped_term():
+    # the real issue-1367 multi-source run: CAM2 films an OBS multiview; the gate drops its
+    # copies/gaps (the window's own `multi_source` block) but presence + the optical floor still gate
+    v = _fixture("verdict_multi_source_pass_2059624745_1367.json")
+    row = asd.row_from_verdict(v, REAL_CAMS, _meta(0))
+    assert row["loss_cam2_pass"] == "true"
+    assert row["loss_cam2_multi_source"] == "true"
+    assert row["loss_cam2_strict_pass"] == "false"
+    assert row["loss_cam1_pass"] == "true"
+    floor = v["all_cambox_continuity"]["per_window_undecodable_floor"]
+    for seg in v["all_cambox_continuity"]["segments"]:
+        if seg["cambox"] == "CAM2":
+            seg["undecodable"] = floor + 1
+    assert asd.row_from_verdict(v, REAL_CAMS, _meta(0))["loss_cam2_pass"] == "false"
+
+
+def test_an_all_report_only_loss_series_is_reported_not_passed():
+    rows = []
+    for i in range(7):
+        r = _clean_row(i)
+        r["loss_cam2_pass"] = "report_only"
+        r["loss_cam2_multi_source"] = "true"
+        rows.append(_stringify(r))
+    rep = _run(rows)
+    assert rep["series"]["loss cam2"]["verdict"] == asd.REPORTED
+    assert rep["series"]["loss cam2"]["report_only"] == 7
+    assert rep["verdict"] == asd.PASS, rep["reasons"]
+
+
+AV_SOAK_FIXTURES = os.path.join(HERE, "fixtures", "av_soak")
+REAL_CONTINUITY = ("continuity_1004629195.json", "continuity_1564963303.json",
+                   "continuity_1388204139.json", "continuity_1968327292.json")
+
+
+@pytest.mark.parametrize("name", REAL_CONTINUITY)
+def test_the_loss_term_folds_exactly_to_the_gates_own_overall_pass_on_real_runs(name):
+    # trimmed all_cambox_continuity blocks of real recording-e2e verdicts (dev1 /tmp, 9.2026):
+    # the AND of the per-window term the soak grades IS the verdict's own run fold
+    with open(os.path.join(AV_SOAK_FIXTURES, name), encoding="utf-8") as f:
+        cont = json.load(f)["all_cambox_continuity"]
+    terms = [asd.gate_window_term(seg, cont) for seg in cont["segments"]]
+    assert None not in terms
+    assert all(terms) == cont["overall_pass"]
+
+
+def test_relaxed_pass_alone_is_not_the_gates_term():
+    # run 1004629195: the tolerance rescue was disarmed, so relaxed_pass passes windows the gate
+    # failed -- the reason the soak mirrors the gate's term from the verdict's own seam flags
+    with open(os.path.join(AV_SOAK_FIXTURES, "continuity_1004629195.json"), encoding="utf-8") as f:
+        cont = json.load(f)["all_cambox_continuity"]
+    diffs = [s for s in cont["segments"] if asd.gate_window_term(s, cont) != s.get("relaxed_pass")]
+    assert diffs, "the fixture must show relaxed_pass != the gate term"
+    v = {"all_cambox_continuity": cont}
+    cams = sorted({s["cambox"].lower() for s in cont["segments"]})
+    row = asd.row_from_verdict(v, cams, _meta(0))
+    for cam in cams:
+        want = all(asd.gate_window_term(s, cont) for s in cont["segments"]
+                   if s["cambox"].lower() == cam)
+        assert row[f"loss_{cam}_pass"] == ("true" if want else "false"), cam
+
+
+def test_the_strih_and_stream_hop_burn_loss_is_recorded_and_graded():
+    row = asd.row_from_verdict(_fixture("verdict_all_cambox_red_709.json"), REAL_CAMS, _meta(0))
+    assert row["burn_strih_zero_loss"] == "false" and row["burn_strih_real_drops"] == "4"
+    assert row["burn_stream_zero_loss"] == "true" and row["burn_stream_real_drops"] == "0"
+    rows = []
+    for i in range(7):
+        r = _clean_row(i)
+        r["burn_stream_zero_loss"] = "true"
+        r["burn_strih_zero_loss"] = "false" if i == 4 else "true"
+        rows.append(_stringify(r))
+    rep = _run(rows)
+    assert rep["series"]["burn strih"]["verdict"] == asd.FAIL
+    assert rep["series"]["burn stream"]["verdict"] == asd.PASS
+    assert rep["verdict"] == asd.FAIL
+
+
+def test_a_hop_burn_that_stops_being_measured_is_a_gap():
+    rows = []
+    for i in range(7):
+        r = _clean_row(i)
+        r["burn_stream_zero_loss"] = "true" if i < 3 else ""
+        rows.append(_stringify(r))
+    rep = _run(rows)
+    assert rep["series"]["burn stream"]["verdict"] == asd.UNKNOWN
+    assert "gap" in rep["series"]["burn stream"]["reason"]
+
+
+def test_slope_standard_error_is_zero_on_a_line_and_positive_on_noise():
+    line = [(T0 + i * 600, 1.0 + 0.5 * i) for i in range(7)]
+    slope, se = asd.fit_slope_with_se(line)
+    assert slope == pytest.approx(3.0) and se == pytest.approx(0.0, abs=1e-9)
+    noisy = [(T0 + i * 600, (2.0 if i % 2 else -2.0)) for i in range(7)]
+    slope, se = asd.fit_slope_with_se(noisy)
+    assert se > 0
+    assert asd.fit_slope_with_se([(T0, 1.0), (T0 + 600, 2.0)]) == (pytest.approx(6.0), None)
+
+
+def _noisy_rows(n, noise_ms, drift_ms_per_h=0.0):
+    rows = []
+    for i in range(n):
+        wobble = noise_ms if i % 2 else -noise_ms
+        off = drift_ms_per_h * i * SLOT / 3600.0 + wobble
+        rows.append(_stringify(_clean_row(i, av_by_cam={"cam1": off, "cam2": 0.0, "cam3": 0.0})))
+    return rows
+
+
+def test_noise_alone_is_never_a_slope_fail_on_the_one_hour_check():
+    rep = _run(_noisy_rows(7, 2.0))
+    s = rep["series"]["av cam1"]
+    assert s["verdict"] == asd.UNKNOWN, s
+    assert "straddles" in s["reason"]
+    assert s["slope_se_ms_per_h"] > 0
+
+
+def test_the_same_noise_over_eight_hours_passes():
+    rep = _run(_noisy_rows(49, 2.0), min_duration_s=8 * 3600)
+    assert rep["series"]["av cam1"]["verdict"] == asd.PASS, rep["series"]["av cam1"]
+    assert rep["verdict"] == asd.PASS, rep["reasons"]
+
+
+def test_a_clear_drift_through_the_noise_still_fails():
+    rep = _run(_noisy_rows(7, 1.0, drift_ms_per_h=20.0))
+    assert rep["series"]["av cam1"]["verdict"] == asd.FAIL
+    assert "slope" in rep["series"]["av cam1"]["reason"]
+
+
+def test_the_partial_is_graded_as_soon_as_the_first_hour_is_complete():
+    rows = [_stringify(_clean_row(i)) for i in range(7)]  # window starts span exactly 1 h
+    scopes = asd.evaluate_scopes(rows, CAMS, bounds=_bounds(), partial_h=1.0, min_duration_h=8.0,
+                                 max_gap_s=asd.DEFAULT_MAX_GAP_S,
+                                 slope_bound=asd.SLOPE_BOUND_MS_PER_H,
+                                 spread_columns=("source_spread_ms",))
+    assert scopes["partial"] is not None
+    assert scopes["partial"]["verdict"] == asd.PASS, scopes["partial"]["reasons"]
+    assert scopes["full"]["verdict"] == asd.UNKNOWN  # 1 h of an 8 h run
+    shorter = [_stringify(_clean_row(i)) for i in range(4)]
+    assert asd.evaluate_scopes(shorter, CAMS, bounds=_bounds(), partial_h=1.0,
+                               min_duration_h=8.0)["partial"] is None
+
+
+def test_no_camera_graded_is_unknown_never_a_pass():
+    # the verdict's own zero-judged-cameras floor: every camera excluded, the hops clean
+    rows = []
+    for i in range(7):
+        r = asd.row_from_verdict(None, CAMS, _meta(i))
+        for c in CAMS:
+            r[f"av_{c}_status"] = "excluded"
+        for n in asd.HOP_NODES:
+            r[f"burn_{n}_zero_loss"] = "true"
+        rows.append(_stringify(r))
+    rep = _run(rows, spread_columns=())
+    assert rep["verdict"] == asd.UNKNOWN
+    assert any("no camera" in r for r in rep["reasons"])
+
+
+def test_a_hop_burn_never_measured_is_unknown_not_a_pass():
+    # the soak turns the strih + stream measurement burns ON and refuses to start otherwise, so a
+    # verdict that never carries their loss is a broken measurement
+    rows = []
+    for i in range(7):
+        r = _clean_row(i)
+        r["burn_strih_zero_loss"] = ""
+        rows.append(_stringify(r))
+    rep = _run(rows)
+    assert rep["series"]["burn strih"]["verdict"] == asd.UNKNOWN
+    assert rep["verdict"] == asd.UNKNOWN
+
+
+def test_the_slope_band_uses_the_t_quantile_at_small_n():
+    assert asd.t95(1) == pytest.approx(12.706)
+    assert asd.t95(5) == pytest.approx(2.571)
+    assert 1.95 < asd.t95(10000) < 2.0
+    # 4 samples over 30 min: slope 4.2 +/- 1.04 SE -- 2 SE would call it a FAIL, t(2) = 4.303 cannot
+    rows = [_stringify(_clean_row(i, av_by_cam={"cam1": y, "cam2": 0.0, "cam3": 0.0}))
+            for i, y in enumerate((0.0, 0.0, 1.0, 2.0))]
+    rep = _run(rows, min_duration_s=0)
+    assert rep["series"]["av cam1"]["verdict"] == asd.UNKNOWN, rep["series"]["av cam1"]
+
+
+def test_exclusion_ignores_windows_that_produced_no_verdict():
+    rows = []
+    for i in range(7):
+        if i == 3:
+            rows.append(_stringify(asd.row_from_verdict(None, CAMS,
+                                                        _meta(i, outcome="skipped:painter_not_emitting"))))
+            continue
+        r = _clean_row(i)
+        r["av_cam3_ms"] = ""
+        r["av_cam3_status"] = "excluded"
+        r["loss_cam3_pass"] = ""
+        rows.append(_stringify(r))
+    rep = _run(rows)
+    assert rep["series"]["av cam3"]["verdict"] == asd.EXCLUDED
+
+
+def test_the_report_counts_windows_the_gate_itself_failed():
+    rows = []
+    for i in range(7):
+        r = _clean_row(i)
+        r["verdict_rc"] = "1" if i in (2, 5) else "0"
+        rows.append(_stringify(r))
+    rep = _run(rows)
+    assert rep["gate_failed_windows"] == 2
+    text = asd.render_text({"full": rep, "partial": None})
+    assert "the E2E gate itself failed 2 of 7 decoded window(s)" in text
+
+
+def test_the_sample_gap_bound_follows_the_slot_written_in_the_csv(tmp_path):
+    slot = 900
+    path = str(tmp_path / "soak.csv")
+    for i in range(5):  # 1 h of windows every 15 min
+        meta = _meta(i, epoch=T0 + i * slot)
+        meta["slot_s"] = slot
+        v = _verdict(av={c: ("measured", 1.0) for c in CAMS}, source_spread=5.0,
+                     delivery_spread=5.0,
+                     segments=[{"cambox": c.upper(), "pass": True, "copies": 0, "gaps": 0,
+                                "undecodable": 0, "frames": 900} for c in CAMS],
+                     burn_loss={n: {"zero_loss": True, "real_drops": 0} for n in asd.HOP_NODES})
+        asd.append_row(path, asd.row_from_verdict(v, CAMS, meta), CAMS)
+    p = _cli("report", "--csv", path, "--min-duration-h", "1")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "sample gap <= 960 s" in p.stdout
+
+
+# --- the CLI ------------------------------------------------------------------------------------
+
+
+def _cli(*args):
+    return subprocess.run([sys.executable, MODULE, *args], capture_output=True, text=True)
+
+
+def test_cli_bounds_prints_the_single_sourced_values():
+    p = _cli("bounds")
+    assert p.returncode == 0, p.stderr
+    b = asd.load_gate_bounds(REPO)
+    assert f"av_tolerance_ms={b['av_tolerance_ms']}" in p.stdout
+    assert f"spread_threshold_ms={b['spread_threshold_ms']}" in p.stdout
+    assert f"slope_bound_ms_per_h={asd.SLOPE_BOUND_MS_PER_H}" in p.stdout
+
+
+def test_cli_row_then_report_exit_codes(tmp_path):
+    csv_path = str(tmp_path / "soak.csv")
+    for i in range(7):
+        vpath = tmp_path / f"v{i}.json"
+        tol = asd.load_gate_bounds(REPO)["av_tolerance_ms"]
+        off = 1.0 if i != 6 else tol + 5.0
+        vpath.write_text(json.dumps(_verdict(
+            av={"cam1": ("measured", off), "cam2": ("measured", 0.0),
+                "cam3": ("measured", 0.0)},
+            source_spread=5.0, delivery_spread=5.0,
+            segments=[{"cambox": c.upper(), "pass": True, "copies": 0, "gaps": 0,
+                       "undecodable": 0, "frames": 900} for c in CAMS])))
+        p = _cli("row", "--csv", csv_path, "--cams", " ".join(CAMS), "--verdict-json", str(vpath),
+                 "--epoch-s", str(T0 + i * SLOT), "--slot", str(i), "--window-s", "90",
+                 "--outcome", "ok", "--verdict-rc", "1", "--painter-run-id", "77")
+        assert p.returncode == 0, p.stderr
+    json_out = str(tmp_path / "report.json")
+    p = _cli("report", "--csv", csv_path, "--min-duration-h", "1", "--json", json_out)
+    assert p.returncode == 1, p.stdout + p.stderr
+    assert "VERDICT: FAIL" in p.stdout
+    rep = json.load(open(json_out))
+    assert rep["full"]["verdict"] == "FAIL"
+    # the 8 h default on a 1 h CSV: the breach still wins over the short duration
+    assert _cli("report", "--csv", csv_path).returncode == 1
+
+
+def test_cli_row_without_a_verdict_and_report_unknown(tmp_path):
+    csv_path = str(tmp_path / "soak.csv")
+    p = _cli("row", "--csv", csv_path, "--cams", "cam1 cam3", "--no-verdict",
+             "--epoch-s", str(T0), "--slot", "0", "--window-s", "90",
+             "--outcome", "no_verdict:decode_failed")
+    assert p.returncode == 0, p.stderr
+    p = _cli("report", "--csv", csv_path, "--min-duration-h", "1")
+    assert p.returncode == 2
+    assert "VERDICT: UNKNOWN" in p.stdout
+
+
+def test_cli_report_on_a_missing_csv_is_a_usage_error(tmp_path):
+    p = _cli("report", "--csv", str(tmp_path / "absent.csv"))
+    assert p.returncode == 3
+
+
+def test_cli_unknown_spread_column_is_refused(tmp_path):
+    csv_path = str(tmp_path / "soak.csv")
+    asd.append_row(csv_path, _clean_row(0), CAMS)
+    p = _cli("report", "--csv", csv_path, "--spread-columns", "bogus_ms")
+    assert p.returncode == 3
+
+
+
+# --- review round 3: pins for the t-quantile degrees of freedom and the rarely armed gate arms ----
+
+
+def test_the_slope_band_takes_the_t_quantile_at_n_minus_2_degrees_of_freedom():
+    # 4 samples at 0 / 0.5 / 1 / 1.5 h: slope exactly 10 ms/h (the residuals +2 -2 -2 +2 are
+    # orthogonal to the line), SE = sqrt(16 / 2 / 1.25) = 2.53 ms/h. |slope| - 2 = 8 lies between
+    # t95(4) * SE = 7.0 (a FAIL if the quantile took n degrees of freedom) and t95(2) * SE = 10.9
+    # (n - 2, the correct least-squares count): an honest UNKNOWN, never a FAIL.
+    pts = [(T0 + int(h * 3600), y) for h, y in ((0.0, 2.0), (0.5, 3.0), (1.0, 8.0), (1.5, 17.0))]
+    slope, se = asd.fit_slope_with_se(pts)
+    assert slope == pytest.approx(10.0)
+    assert se == pytest.approx((16 / 2 / 1.25) ** 0.5)
+    assert asd.t95(4) * se < abs(slope) - 2.0 < asd.t95(2) * se
+    s = asd._value_series("av x", pts, 30.0, "A/V", pts[0][0], pts[-1][0], 10 ** 6, 2.0)
+    assert s["slope_band_ms_per_h"] == pytest.approx(asd.t95(2) * se)
+    assert s["verdict"] == asd.UNKNOWN, s
+
+
+def _tolerance_cont(tolerance=2):
+    with open(os.path.join(AV_SOAK_FIXTURES, "continuity_1564963303.json"), encoding="utf-8") as f:
+        cont = json.load(f)["all_cambox_continuity"]
+    cont["copies_gaps_tolerance_gates_overall_pass"] = True
+    cont["copies_gaps_tolerance"] = tolerance
+    return cont
+
+
+def test_the_armed_copies_gaps_tolerance_arm_of_the_gate_term():
+    # the tolerance rescue is disarmed on today's verdicts; once re-armed, a window passes with
+    # copies AND gaps at or below the tolerance (a segment's own value wins over the run's)
+    cont = _tolerance_cont(2)
+    base = {"frames": 900, "undecodable": 0, "copies": 2, "gaps": 2}
+    assert asd.gate_window_term(dict(base), cont) is True
+    assert asd.gate_window_term(dict(base, copies=3), cont) is False
+    assert asd.gate_window_term(dict(base, gaps=3), cont) is False
+    assert asd.gate_window_term(dict(base, copies=3, copies_gaps_tolerance=3), cont) is True
+    cont.pop("copies_gaps_tolerance")
+    assert asd.gate_window_term(dict(base), cont) is False, "no tolerance value = no rescue"
+
+
+def test_an_older_verdict_skips_a_multi_source_window_in_the_loss_grade():
+    # a verdict without the seam flags: relaxed_pass grades, a multi-source window never does
+    segs = [{"cambox": "CAM1", "pass": False, "relaxed_pass": False, "frames": 900,
+             "multi_source": {"suspect_fraction": 0.4}},
+            {"cambox": "CAM1", "pass": True, "relaxed_pass": True, "frames": 900},
+            {"cambox": "CAM3", "pass": False, "relaxed_pass": False, "frames": 900,
+             "multi_source": {"suspect_fraction": 0.4}}]
+    agg = asd._loss_by_camera(segs, ["cam1", "cam3"], {})
+    assert agg["cam1"]["graded"] is True and agg["cam1"]["multi"] is True
+    assert agg["cam3"]["graded"] is None and agg["cam3"]["multi"] is True
+    row = asd.row_from_verdict({"all_cambox_continuity": {"segments": segs}}, ["cam1", "cam3"],
+                               _meta(0))
+    assert row["loss_cam1_pass"] == "true" and row["loss_cam3_pass"] == "report_only"
+
+
+def test_a_window_with_no_decoded_frames_fails_the_gate_term():
+    # presence: a camera window that decoded nothing is a loss window, even with zero copies/gaps
+    # and the undecodable floor disarmed (src/window_gate.rs: `frame_count > 0 && floor_term && ..`)
+    cont = _tolerance_cont(2)
+    cont["undecodable_floor_gates_overall_pass"] = False
+    assert asd.gate_window_term({"frames": 0, "undecodable": 0, "copies": 0, "gaps": 0},
+                                cont) is False
+
+
+def test_a_derived_offset_that_carries_a_number_is_still_not_a_sample():
+    v = _verdict(av={"cam1": ("derived", 7.0), "cam2": ("measured", 2.0),
+                     "cam3": ("measured", 3.0)})
+    row = asd.row_from_verdict(v, CAMS, _meta(0))
+    assert row["av_cam1_ms"] == "" and row["av_cam1_status"] == "derived"
+    assert row["av_cam3_ms"] == "3.000"
+
+
+
+# --- review round 3: the gate's OWN continuity fold (run-wide undecodable floor + schedule) ------
+
+
+def _run_wide_cont(run_wide_ok, overall, floor_gates=True, undecodable=4):
+    """A continuity block whose per-window terms all pass; only the run-wide undecodable sum can
+    fail it (src/probe/recording_segments.rs: overall_pass &= run_wide || !floor_gates)."""
+    segs = [{"cambox": c.upper(), "pass": True, "relaxed_pass": True, "frames": 900,
+             "undecodable": undecodable, "copies": 0, "gaps": 0} for c in CAMS]
+    return {"segments": segs, "overall_pass": overall,
+            "run_wide_undecodable_within_floor": run_wide_ok,
+            "undecodable_floor_gates_overall_pass": floor_gates, "per_window_undecodable_floor": 4,
+            "copies_gaps_tolerance_gates_overall_pass": False, "copies_gaps_tolerance": 2,
+            "segment_singleton_allowance_gates_overall_pass": True,
+            "segment_singleton_copies_allowance": 1, "segment_singleton_gaps_allowance": 1}
+
+
+def _row_with_cont(slot, cont):
+    v = _verdict(av={"cam1": ("measured", 1.0), "cam2": ("measured", 2.0),
+                     "cam3": ("measured", -1.0)}, source_spread=10.0, delivery_spread=10.0,
+                 burn_loss={n: {"zero_loss": True, "real_drops": 0} for n in asd.HOP_NODES})
+    v["all_cambox_continuity"] = cont
+    return asd.row_from_verdict(v, CAMS, _meta(slot))
+
+
+def test_the_row_records_the_gates_own_continuity_fold():
+    row = _row_with_cont(0, _run_wide_cont(False, False))
+    assert row["cont_overall_pass"] == "false"
+    assert row["loss_run_wide_pass"] == "false"
+    assert row["loss_run_wide_undecodable"] == "12"
+    assert all(row[f"loss_{c}_pass"] == "true" for c in CAMS), "each window alone passes"
+    disarmed = _row_with_cont(0, _run_wide_cont(False, True, floor_gates=False))
+    assert disarmed["loss_run_wide_pass"] == "true", "a disarmed floor does not fold"
+    assert _clean_row(0)["cont_overall_pass"] == "" and _clean_row(0)["loss_run_wide_pass"] == ""
+
+
+def test_a_run_wide_undecodable_breach_fails_the_soak():
+    # 3 cameras x 4 undecodable per window: each window passes alone, the gate's run fold fails
+    rows = [_stringify(_row_with_cont(i, _run_wide_cont(False, False))) for i in range(7)]
+    rep = _run(rows)
+    assert rep["series"]["continuity gate"]["verdict"] == asd.FAIL
+    assert rep["verdict"] == asd.FAIL
+    assert rep["gate_term_mismatch_windows"] == 0, "the run-wide term explains the fold"
+
+
+def test_the_gates_continuity_fold_passes_a_clean_hour():
+    rows = [_stringify(_row_with_cont(i, _run_wide_cont(True, True))) for i in range(7)]
+    rep = _run(rows)
+    assert rep["series"]["continuity gate"]["verdict"] == asd.PASS
+    assert rep["verdict"] == asd.PASS, rep["reasons"]
+
+
+def test_a_verdict_without_the_fold_leaves_the_continuity_gate_not_measured():
+    rep = _run([_stringify(_clean_row(i)) for i in range(7)])
+    assert rep["series"]["continuity gate"]["verdict"] == asd.NOT_MEASURED
+    assert rep["verdict"] == asd.PASS, rep["reasons"]
+
+
+def test_a_drift_between_the_soaks_terms_and_the_gates_fold_is_reported():
+    # the verdict's fold says FAIL while every term the soak mirrors says pass: the Python copy
+    # of the Rust gate term drifted -- named, never hidden
+    rows = [_stringify(_row_with_cont(i, _run_wide_cont(True, i != 3))) for i in range(7)]
+    rep = _run(rows)
+    assert rep["gate_term_mismatch_windows"] == 1
+    assert any("disagree" in r for r in rep["reasons"]), rep["reasons"]
+    assert rep["verdict"] == asd.FAIL
+    assert "disagree" in asd.render_text({"full": rep})
+
+
+@pytest.mark.parametrize("name", REAL_CONTINUITY)
+def test_the_soaks_terms_agree_with_the_gates_fold_on_real_runs(name):
+    with open(os.path.join(AV_SOAK_FIXTURES, name), encoding="utf-8") as f:
+        cont = json.load(f)["all_cambox_continuity"]
+    cams = sorted({s["cambox"].lower() for s in cont["segments"]})
+    row = asd.row_from_verdict({"all_cambox_continuity": cont}, cams, _meta(0))
+    assert row["cont_overall_pass"] == ("true" if cont["overall_pass"] else "false")
+    assert asd.gate_term_disagrees(_stringify(row), cams) is False
+
+
+
+def test_a_run_wide_only_disagreement_is_unknown_never_a_pass():
+    # only the run-wide mirror disagrees (the soak reads a breach the verdict's fold does not):
+    # nothing fails, but the grading cannot be trusted -- UNKNOWN, never a quiet PASS
+    rows = [_stringify(_row_with_cont(i, _run_wide_cont(True, True))) for i in range(7)]
+    rows[3]["loss_run_wide_pass"] = "false"
+    rep = _run(rows)
+    assert rep["gate_term_mismatch_windows"] == 1
+    assert rep["series"]["continuity gate"]["verdict"] == asd.PASS
+    assert rep["verdict"] == asd.UNKNOWN, rep["reasons"]
+
+
+if __name__ == "__main__":
+    sys.exit(pytest.main([__file__, "-q"]))
