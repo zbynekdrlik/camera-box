@@ -9,6 +9,7 @@ paths:
   - "vendor/av-sync-dock/test/audio-worker-selftest.cpp"
   - "tests/av_sync_dock_audio_worker_1381.rs"
   - "tests/c/av_sync_dock_demod_bench_1381.cpp"
+  - "vendor/av-sync-dock/src/sync-test-dock.cpp"
 ---
 
 # No analysis on libobs's video-output thread (issue 1367)
@@ -203,6 +204,16 @@ source for every output. Live 27.9.2026 on the resolume cg OBS:
   worst-case 2 ms bound flakes on a loaded CI runner. No outcome rests on a sleep: a session end is
   proven delivered by a block published after it being handled, the lifecycle test waits for a
   flag the handler sets.
+  - Test-writing trap: `taken()` counts a block BEFORE the worker frees its slot, so right after
+    `wait_taken(n)` block n can still occupy one slot. A test that then publishes `slots` more
+    blocks can see the last one dropped: wait for the previous blocks first, and MODEL a drop the
+    race allows (the unseen session merges its end) instead of asserting it never happens.
+  - A state only a race reaches (the ring's `+ 1` end) needs a stress loop that checks every
+    delivered event; a correct FIFO can never fail it, and a mutant is caught in most rounds.
+    Measure the kill rate (the lane ran the correct FIFO 8x and the mutant 8x) before trusting it.
+- Shared dock constants go in `camera-box-audio.hpp` (both TUs include it). Do not include
+  `camera-box-audio-worker.hpp` in the Qt TU `sync-test-dock.cpp` just for a name: it uses
+  `std::min`, which a stray Windows `min` macro would break there.
 - The bench `tests/c/av_sync_dock_demod_bench_1381.cpp` (`-Ivendor/av-sync-dock/src
   -Ivendor/av-sync-dock/test`, arg: the stereo mbc fixture) measures the worker decode and the
   audio-thread share in THREAD CPU time (dev1 runs at load ~20; wall time there is scheduler noise)
