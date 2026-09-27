@@ -55,7 +55,8 @@ power envelope. A difference between boxes is a defect, not a per-box feature.
 - **rtprio stays OFF on every box** (comment 5793075833: the render-tick SCHED_FIFO pin assumed a
   reserved core and its FIFO + affinity leaked to every NDI receiver thread). `obs_box_rtprio_off`
   (step 8 on imag, step 11 on strih) removes every retired `95-<box>-genlock-rtprio.conf` grant, and
-  the grader row `rtprio` FAILs while one exists. imag's issue-484 grant was DROPPED, not gated: the
+  the grader row `rtprio` FAILs while one exists, or while the running OBS still holds a non-zero
+  realtime limit from a grant removed after it started. imag's issue-484 grant was DROPPED, not gated: the
   pin now serves only isolated nohz_full cores, which the `affinity` row forbids, so a gated grant
   could never fire. Full story: `genlock-render-tick-pin.md`.
 - **The dpkg lock wait is the FIRST action of every provisioning run.** `obs_box_apt_lock_timeout` writes `/etc/apt/apt.conf.d/90camera-box-lock-timeout` (`DPkg::Lock::Timeout "600";`) right after the root check in BOTH setup scripts, before any apt-get.
