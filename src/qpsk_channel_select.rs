@@ -679,4 +679,42 @@ mod tests {
         assert_eq!(none.peak_dbfs(), -120.0);
         assert_eq!(none.max_preamble_screens(), 0);
     }
+
+    #[test]
+    fn an_empty_pick_reads_not_recorded_never_channel_0() {
+        // An older partial carries no pick; its log line must not read like a real channel-0 pick.
+        assert_eq!(
+            ChannelPick::default().summary_line(),
+            "marker channel pick not recorded"
+        );
+    }
+
+    #[test]
+    fn probe_report_candidates_are_the_chosen_channel_attempts() {
+        // candidates = crc_ok + crc_fail of the CHOSEN channel (a non-zero crc_fail pins the sum).
+        let pick = ChannelPick {
+            chosen_channel: 0,
+            per_channel: vec![ChannelMarkerStats {
+                preamble_screens: 12,
+                crc_ok: 5,
+                crc_fail: 7,
+                ..stat(0, 5)
+            }],
+        };
+        let best = BestChannelDecode {
+            pick,
+            markers: vec![],
+            stats: DecodeStats {
+                preamble_screens_passed: 12,
+                crc_ok: 5,
+                crc_fail: 7,
+            },
+        };
+        let r = channel_probe_report(&best, &th());
+        assert_eq!(r.report.candidates, 12);
+        assert_eq!(r.report.crc_fail, 7);
+        assert!(channel_report_json(&r).starts_with(
+            "{\"preamble_screens\":12,\"candidates\":12,\"cluster_samples\":5,\"crc_ok\":5,\"crc_fail\":7,"
+        ));
+    }
 }
