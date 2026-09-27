@@ -96,7 +96,7 @@ _win_baseline_ac_index() {
 }
 
 _win_baseline_grade_power() {
-    local body line guid name
+    local body line guid="" name=""
     body="$(_win_baseline_section "$1" power_scheme)" || { echo "UNKNOWN active scheme unread (no complete power_scheme section)"; return; }
     while IFS= read -r line; do
         if [[ "$line" =~ Power\ Scheme\ GUID:\ ([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})[[:space:]]+\((.*)\)[[:space:]]*$ ]]; then
@@ -115,7 +115,7 @@ _win_baseline_grade_power() {
 
 # _win_baseline_grade_idle FILE ITEM SETTING_GUID LABEL -> a "never on AC" timeout item.
 _win_baseline_grade_idle() {
-    local body v
+    local body v=""
     body="$(_win_baseline_section "$1" "$2")" || { echo "UNKNOWN $4 unread (no complete $2 section)"; return; }
     v="$(_win_baseline_ac_index "$body" "$3")" || { echo "UNKNOWN $4 AC index unparseable"; return; }
     if [ "$v" = 0 ]; then
@@ -126,7 +126,7 @@ _win_baseline_grade_idle() {
 }
 
 _win_baseline_grade_usb() {
-    local body v
+    local body v=""
     body="$(_win_baseline_section "$1" usb_selective_suspend)" || { echo "UNKNOWN USB selective suspend unread (no complete section)"; return; }
     v="$(_win_baseline_ac_index "$body" "$WIN_BASELINE_USB_SS_GUID")" || { echo "UNKNOWN USB selective suspend AC index unparseable"; return; }
     case "$v" in
@@ -137,7 +137,7 @@ _win_baseline_grade_usb() {
 }
 
 _win_baseline_grade_wer() {
-    local body line v
+    local body line v=""
     body="$(_win_baseline_section "$1" wer_dontshowui)" || { echo "UNKNOWN DontShowUI unread (no complete section)"; return; }
     while IFS= read -r line; do
         if [[ "$line" =~ ^[[:space:]]*DontShowUI[[:space:]]+REG_DWORD[[:space:]]+0x([0-9a-fA-F]{1,8})[[:space:]]*$ ]]; then
@@ -158,7 +158,7 @@ _win_baseline_grade_wer() {
 # Pure over FILE (the gather output). rc 20 = at least one DRIFT, 11 = at least one UNKNOWN and no
 # DRIFT, 0 = every item OK. A missing / unreadable FILE grades every item UNKNOWN.
 win_baseline_grade() {
-    local file="${1:-}" item res drift=0 unknown=0
+    local file="${1:-}" item res="" drift=0 unknown=0
     for item in $WIN_BASELINE_ITEMS; do
         case "$item" in
             power_scheme) res="$(_win_baseline_grade_power "$file")" ;;
@@ -234,7 +234,9 @@ PSBODY
 # win_baseline_power_plan_ensure_ps -> the deploy program's step (0b): when the active scheme is NOT
 # max-performance class, activate the INSTALLED High performance scheme (the stock GUID when present,
 # else the first scheme NAMED High performance) and read it back; a failed read / no such scheme /
-# a set that does not take fails loud (exit 11) BEFORE the deploy touches OBS. It is the ONLY baseline
+# a set that does not take prints a FAIL line and exits 11 BEFORE the deploy touches OBS (not
+# Write-Error: under the deploy program's $ErrorActionPreference = 'Stop' it throws, so the exit
+# code would never run). It is the ONLY baseline
 # mutation; an already max-performance scheme (Bitsum, Ultimate, a duplicated High performance) is left
 # exactly as it is. The lists come from the constants above (the ONE list).
 win_baseline_power_plan_ensure_ps() {
@@ -266,7 +268,7 @@ function Test-WbMaxPerf($s) {
   return (($wbMaxPerfGuids -contains $s[0]) -or ($wbMaxPerfNames -contains $s[1]))
 }
 $wbBefore = Get-WbActiveScheme
-if (-not $wbBefore) { Write-Error "issue 1357 FAIL: could not read the active power scheme -- fix it before deploying"; exit 11 }
+if (-not $wbBefore) { Write-Host "issue 1357 FAIL: could not read the active power scheme -- fix it before deploying" -ForegroundColor Red; exit 11 }
 if (Test-WbMaxPerf $wbBefore) {
   Write-Host "issue 1357 power plan: $($wbBefore[1]) ($($wbBefore[0])) is max-performance class -- unchanged."
 } else {
@@ -278,10 +280,10 @@ if (Test-WbMaxPerf $wbBefore) {
       if ((-not $wbTarget) -and ($wbN -eq $wbHighPerfName)) { $wbTarget = @($wbG, $wbN) }
     }
   }
-  if (-not $wbTarget) { Write-Error "issue 1357 FAIL: the active power scheme $($wbBefore[1]) ($($wbBefore[0])) is not max-performance class and no High performance scheme is installed -- activate a max-performance scheme by hand, then rerun"; exit 11 }
+  if (-not $wbTarget) { Write-Host "issue 1357 FAIL: the active power scheme $($wbBefore[1]) ($($wbBefore[0])) is not max-performance class and no High performance scheme is installed -- activate a max-performance scheme by hand, then rerun" -ForegroundColor Red; exit 11 }
   powercfg /setactive $wbTarget[0]
   $wbAfter = Get-WbActiveScheme
-  if ((-not $wbAfter) -or ($wbAfter[0] -ne $wbTarget[0])) { Write-Error "issue 1357 FAIL: activating $($wbTarget[1]) ($($wbTarget[0])) did not take -- the active scheme reads $($wbAfter -join ' ')"; exit 11 }
+  if ((-not $wbAfter) -or ($wbAfter[0] -ne $wbTarget[0])) { Write-Host "issue 1357 FAIL: activating $($wbTarget[1]) ($($wbTarget[0])) did not take -- the active scheme reads $($wbAfter -join ' ')" -ForegroundColor Red; exit 11 }
   Write-Host "issue 1357 power plan: SET $($wbAfter[1]) ($($wbAfter[0])), was $($wbBefore[1]) ($($wbBefore[0])) -- read back OK."
 }
 PSBODY

@@ -43,7 +43,7 @@ SSH_PASS="${WIN_BASELINE_SSH_PASS:-newlevel}"
 SSH_TIMEOUT="${WIN_BASELINE_SSH_TIMEOUT:-20}"
 REMOTE_PS1="${WIN_BASELINE_REMOTE_PS1:-C:/camera-box-win-baseline-gather.ps1}"
 
-usage() { sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,3p;5,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 BOXES=""
 OUT_DIR=""
@@ -74,7 +74,7 @@ fetch_gather() {
   win_baseline_gather_ps1 >"$ps1"
   sshpass -p "$SSH_PASS" timeout "$SSH_TIMEOUT" scp -O -q "${opts[@]}" "$ps1" "${SSH_USER}@${host}:${REMOTE_PS1}" || return 1
   sshpass -p "$SSH_PASS" timeout "$SSH_TIMEOUT" ssh "${opts[@]}" "${SSH_USER}@${host}" \
-    "powershell -NoProfile -ExecutionPolicy Bypass -File ${REMOTE_PS1//\//\\}" >"$out"
+    "powershell -NoProfile -ExecutionPolicy Bypass -File \"${REMOTE_PS1//\//\\}\"" >"$out"
 }
 
 echo "== Windows OBS-box baseline (issue 1357): power plan, sleep, hibernate, USB suspend, WER -- report-only =="
@@ -100,7 +100,7 @@ for box in $BOXES; do
     echo "box=$box item=$item verdict=$verdict detail=$detail"
     case "$verdict" in
       DRIFT) drift_items="${drift_items:+$drift_items,}$item" ;;
-      UNKNOWN) unknown_items="${unknown_items:+$unknown_items,}$item" ;;
+      *) unknown_items="${unknown_items:+$unknown_items,}$item" ;;   # UNKNOWN (or no verdict at all)
     esac
   done <<<"$graded"
   case "$box_rc" in

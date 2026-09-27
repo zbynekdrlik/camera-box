@@ -671,10 +671,11 @@ def win_baseline_rows_from_output(stdout: str) -> dict[str, str]:
     overall: dict[str, str] = {}
     bad_items: dict[str, list[str]] = {}
     for ln in stdout.splitlines():
-        m = re.match(r"box=(\S+) item=(\S+) verdict=(\S+) detail=(.*)$", ln.strip())
+        m = re.match(r"box=(\S+) item=(\S+) verdict=(\S*) detail=(.*)$", ln.strip())
         if m:
-            if m.group(3) != "OK":
-                bad_items.setdefault(m.group(1), []).append(f"{m.group(2)}={m.group(3)}[{m.group(4)}]")
+            verdict = m.group(3) or "UNKNOWN"  # no verdict at all is never read as OK
+            if verdict != "OK":
+                bad_items.setdefault(m.group(1), []).append(f"{m.group(2)}={verdict}[{m.group(4)}]")
             continue
         m = re.match(r"box=(\S+) win_baseline=(\S+)", ln.strip())
         if m and m.group(2) != "SKIPPED":
@@ -690,12 +691,20 @@ def check_win_baseline() -> None:
     """issue 1357: REPORT-ONLY Windows OBS-box baseline rows (NOTE, never PASS/WARN/FAIL -> never
     changes the audit exit code). A tool error yields one NOTE row, never a page."""
     try:
-        out = subprocess.run(["bash", WIN_BASELINE_SCRIPT], capture_output=True, text=True,
-                             timeout=120).stdout
+        proc = subprocess.run(["bash", WIN_BASELINE_SCRIPT], capture_output=True, text=True,
+                              timeout=120)
     except (subprocess.TimeoutExpired, OSError) as exc:
         emit(WIN_BASELINE_REPORT_VERDICT, "win-baseline", f"tool error: {exc} (report-only issue 1357)")
         return
-    for box, detail in win_baseline_rows_from_output(out).items():
+    rows = win_baseline_rows_from_output(proc.stdout)
+    # rc 0/11/20 are the reader's verdicts; anything else with no box row is a crashed reader, which
+    # must show as a row -- silence would read as "nothing to report".
+    if not rows and proc.returncode not in (0, 11, 20):
+        tail = (proc.stderr.strip().splitlines() or ["no output"])[-1]
+        emit(WIN_BASELINE_REPORT_VERDICT, "win-baseline",
+             f"tool error: rc={proc.returncode} {tail} (report-only issue 1357)")
+        return
+    for box, detail in rows.items():
         emit(WIN_BASELINE_REPORT_VERDICT, f"{box}-win", detail)
 
 
