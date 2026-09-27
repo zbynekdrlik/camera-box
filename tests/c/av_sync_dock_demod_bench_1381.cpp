@@ -412,6 +412,17 @@ static void bench_worker()
 			if (nch == 2 && (kind == "music" || kind == "tone442"))
 				CHECK(mean <= CB_BENCH_WORKER_BUDGET_MS,
 				      "2-channel music / tone: the worker decode stays within its per-push budget");
+			if (kind == "tone442") {
+				/* The tone passes the screen at every position, so this counts the positions a push
+				 * screens: the new ones plus at most one refine span of re-screened tail, per
+				 * channel -- never the whole window again. */
+				const double span = std::ceil(2.0 * CB_AUDIO_SAMPLE_RATE / CB_AUDIO_CARRIER_HZ);
+				const double per_push = (double)pk.stats.preamble_screens_passed / (double)CB_BENCH_PUSHES;
+				CHECK(per_push >= 0.9 * (double)(nch * CB_BENCH_BLOCK),
+				      "tone: nearly every new position passes the screen");
+				CHECK(per_push <= (double)nch * ((double)CB_BENCH_BLOCK + span + 1.0),
+				      "tone: a push screens only the positions not final yet");
+			}
 		}
 	}
 }
