@@ -886,7 +886,7 @@ fi
 #     plugin into the /usr prefix OBS loads; FAIL unless the installed .so has the pinned sha256 (the
 #     exact file strih-lx ran by hand before) and its locale is present. Placed BEFORE item 34: the
 #     item-34 behaviour test runs the text from "# 34)" up to "# 32)" with only ndi-discovery.sh
-#     sourced, and nothing may sit after item 33 (its test slices "# 33)" to the closing summary).
+#     sourced; the baseline item 32 (which also grades rtprio-off, the retired item 33) closes the list.
 _dsk_so="$(obs_dsk_so_path "${STRIH_LIBDIR:-/usr/lib/x86_64-linux-gnu}")"
 _dsk_sha="$(sha256sum "$_dsk_so" 2>/dev/null | awk '{print $1}' || true)"
 _dsk_loc=0
@@ -904,8 +904,7 @@ fi
 #     carries no networks.discovery, in BOTH readers' config -- the desktop user's ~/.ndi (OBS +
 #     bkshading-service) and the system dir /etc/ndi (intercom-hub, whose ProtectHome hides ~/.ndi) --
 #     plus the intercom-hub NDI_CONFIG_DIR drop-in. Read-only; FAIL on any miss (a renumbered sender
-#     FAILs until the box is re-provisioned). Placed BEFORE item 32: the item-33 test slices "# 33)"
-#     to the closing summary, so nothing may sit after item 33.
+#     FAILs until the box is re-provisioned). Placed BEFORE item 32, which closes the list.
 _ndi_required="$(ndi_discovery_sender_ips pinned)" || _ndi_required=""
 _ndi_dropin_dir="$(ndi_discovery_dropin_config_dir "$(cat "$NDI_DISCOVERY_INTERCOM_DROPIN" 2>/dev/null || true)")"
 if [ -z "$_ndi_required" ]; then
@@ -961,16 +960,8 @@ if [ "$CRASH_REPORTS_V" != 0 ]; then
   note "(crash-popup) ${CRASH_REPORTS_V} stale crash report(s) in ${CRASH_DIR_V} -- update-notifier re-raises the popup for them at login; inspect (coredumpctl list) and clear them (supervisor data action)"
 fi
 
-# 33) NO realtime-priority grant (issue 1357 design): the render-tick SCHED_FIFO pin assumed a reserved
-#     core and its FIFO + affinity leaked to 28 NDI threads on strih-lx (issue comment 5793075833), so
-#     the baseline keeps rtprio OFF. FAIL while the retired grant file still exists (setup-strih.sh step
-#     11 removes it; it only takes effect for OBS after a reboot, so reboot once after removing it).
-RTPRIO_LEFTOVER_V="$(strih_rtprio_leftover_path)"
-if [ -e "$RTPRIO_LEFTOVER_V" ]; then
-  bad "(rtprio-off) ${RTPRIO_LEFTOVER_V} still grants realtime priority -- rtprio must stay OFF (issue 1357); re-run setup-strih.sh step 11 (it removes it) and reboot"
-else
-  ok "(rtprio-off) no realtime-priority grant (${RTPRIO_LEFTOVER_V} absent)"
-fi
+# (item 33, the strih-only rtprio-off check, moved into the shared grader as the baseline `rtprio`
+#  row graded by item 32 above -- issue 1357.)
 
 echo ""
 if [ "$FAILS" -eq 0 ]; then
