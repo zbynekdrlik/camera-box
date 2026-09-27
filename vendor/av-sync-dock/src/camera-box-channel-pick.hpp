@@ -57,11 +57,64 @@ inline uint32_t cb_circ_dist(uint32_t a, uint32_t b)
 inline uint64_t cb_consistency_cluster_size(const std::vector<std::pair<double, uint8_t>> &markers,
 					    uint32_t step_tol, double gap_ratio)
 {
-	/* RED stub (issue 1367): today's dock measures no per-channel cluster. */
-	(void)markers;
-	(void)step_tol;
-	(void)gap_ratio;
-	return 0;
+	if (markers.size() < 3)
+		return 0;
+	std::vector<std::pair<double, uint8_t>> m(markers);
+	std::stable_sort(m.begin(), m.end(),
+			 [](const std::pair<double, uint8_t> &a, const std::pair<double, uint8_t> &b) {
+				 return a.first < b.first;
+			 });
+	const size_t n = m.size();
+	std::vector<std::pair<double, uint32_t>> pairs; // (gap, step)
+	pairs.reserve(n - 1);
+	for (size_t i = 0; i + 1 < n; i++) {
+		const double gap = m[i + 1].first - m[i].first;
+		const int d = ((int)m[i + 1].second - (int)m[i].second) % 256;
+		pairs.push_back(std::make_pair(gap, (uint32_t)(d < 0 ? d + 256 : d)));
+	}
+	/* Modal step S: the step matched (+-step_tol) by the most pairs; the FIRST such step wins. */
+	bool have_s = false;
+	uint32_t s = 0;
+	size_t best_c = 0;
+	for (size_t i = 0; i < pairs.size(); i++) {
+		size_t c = 0;
+		for (size_t j = 0; j < pairs.size(); j++)
+			if (cb_circ_dist(pairs[j].second, pairs[i].second) <= step_tol)
+				c++;
+		if (c > best_c) {
+			best_c = c;
+			s = pairs[i].second;
+			have_s = true;
+		}
+	}
+	if (!have_s || best_c < 2)
+		return 0;
+	/* Modal gap G: the upper median of the positive gaps among the step-matching pairs. */
+	std::vector<double> gaps;
+	for (size_t i = 0; i < pairs.size(); i++)
+		if (cb_circ_dist(pairs[i].second, s) <= step_tol && pairs[i].first > 0.0)
+			gaps.push_back(pairs[i].first);
+	if (gaps.empty())
+		return 0;
+	std::sort(gaps.begin(), gaps.end());
+	const double g_ref = gaps[gaps.size() / 2];
+	const uint32_t s2 = (2u * s) % 256u;
+	uint64_t best = 1, cur = 1;
+	for (size_t i = 0; i < pairs.size(); i++) {
+		const double gap = pairs[i].first;
+		const uint32_t step = pairs[i].second;
+		const bool single = cb_circ_dist(step, s) <= step_tol && std::fabs(gap - g_ref) <= gap_ratio * g_ref;
+		const bool missed = cb_circ_dist(step, s2) <= step_tol &&
+				    std::fabs(gap - 2.0 * g_ref) <= gap_ratio * 2.0 * g_ref;
+		if (single || missed) {
+			cur++;
+			if (cur > best)
+				best = cur;
+		} else {
+			cur = 1;
+		}
+	}
+	return best;
 }
 
 /* The ONE channel rule (mirror of qpsk_channel_select::pick_marker_channel): the LOWEST channel whose
@@ -69,8 +122,9 @@ inline uint64_t cb_consistency_cluster_size(const std::vector<std::pair<double, 
  * the chosen position, or clusters.size() when there are no channels (the Rust `None`). */
 inline size_t cb_pick_marker_channel(const std::vector<uint64_t> &clusters, uint64_t min_clusters)
 {
-	/* RED stub (issue 1367): today's rule, the largest cluster with ties to the lowest. */
-	(void)min_clusters;
+	for (size_t i = 0; i < clusters.size(); i++)
+		if (clusters[i] >= min_clusters)
+			return i;
 	size_t best = clusters.size();
 	for (size_t i = 0; i < clusters.size(); i++)
 		if (best == clusters.size() || clusters[i] > clusters[best])
@@ -137,22 +191,41 @@ struct ChannelMarkerPicker {
 	 * markers (absolute sample index, index). `planes` must hold channels() pointers. */
 	std::vector<std::pair<uint64_t, uint8_t>> push(const float *const *planes, size_t frames)
 	{
-		/* RED stub (issue 1367): today's dock -- average the channels (a non-finite sample reads
-		 * as silence), decode that sum on one decoder, always channel 0, no per-channel cluster. */
+		std::vector<std::vector<std::pair<uint64_t, uint8_t>>> fresh;
+		fresh.reserve(decoders.size());
+		for (size_t i = 0; i < decoders.size(); i++)
+			fresh.push_back(decoders[i].push(planes[i], frames));
 		pushed += (uint64_t)frames;
-		if (decoders.empty())
-			return std::vector<std::pair<uint64_t, uint8_t>>();
-		std::vector<float> mono(frames, 0.0f);
-		for (size_t k = 0; k < frames; k++) {
-			float acc = 0.0f;
-			for (size_t i = 0; i < decoders.size(); i++)
-				if (std::isfinite(planes[i][k]))
-					acc += planes[i][k];
-			mono[k] = acc / (float)decoders.size();
+		const uint64_t cutoff = pushed > window_samples ? pushed - window_samples : 0;
+		const double sr = (double)sample_rate;
+		for (size_t i = 0; i < decoders.size(); i++) {
+			std::deque<std::pair<uint64_t, uint8_t>> &h = history[i];
+			bool changed = !fresh[i].empty();
+			h.insert(h.end(), fresh[i].begin(), fresh[i].end());
+			while (!h.empty() && h.front().first < cutoff) {
+				h.pop_front();
+				changed = true;
+			}
+			if (changed) {
+				std::vector<std::pair<double, uint8_t>> m;
+				m.reserve(h.size());
+				for (size_t k = 0; k < h.size(); k++)
+					m.push_back(std::make_pair((double)h[k].first / sr, h[k].second));
+				clusters[i] = cb_consistency_cluster_size(m, CB_CLUSTER_STEP_TOL, CB_CLUSTER_GAP_RATIO);
+			}
 		}
-		std::vector<std::pair<uint64_t, uint8_t>> out = decoders[0].push(mono.data(), frames);
-		stats = decoders[0].stats;
-		return out;
+		const size_t pick = cb_pick_marker_channel(clusters, min_clusters);
+		chosen = pick < clusters.size() ? pick : 0;
+		CbDecodeStats sum;
+		for (size_t i = 0; i < decoders.size(); i++) {
+			sum.preamble_screens_passed += decoders[i].stats.preamble_screens_passed;
+			sum.crc_ok += decoders[i].stats.crc_ok;
+			sum.crc_fail += decoders[i].stats.crc_fail;
+		}
+		stats = sum;
+		if (fresh.empty())
+			return std::vector<std::pair<uint64_t, uint8_t>>();
+		return fresh[chosen];
 	}
 
 	/* The #1153 dead-pairing reset: every decoder drops its window and dedup anchor (origin

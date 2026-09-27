@@ -188,8 +188,9 @@ pub fn f32le_to_channels(bytes: &[u8], channels: usize) -> Result<Vec<Vec<f32>>,
 /// measured A/V offset by ~10 ms, which the gate and the dock would read as drift. Both channels
 /// clear the same floor, so preferring the lowest one gives up nothing.
 pub fn pick_marker_channel(clusters: &[u64], min_clusters: u64) -> Option<usize> {
-    // RED stub (issue 1367): today's rule, the largest cluster with ties to the lowest index.
-    let _ = min_clusters;
+    if let Some(first) = clusters.iter().position(|&c| c >= min_clusters) {
+        return Some(first);
+    }
     let mut best: Option<usize> = None;
     for (i, &c) in clusters.iter().enumerate() {
         match best {

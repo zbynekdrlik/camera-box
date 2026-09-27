@@ -113,31 +113,37 @@ impl ChannelMarkerPicker {
             self.decoders.len(),
             "one audio plane per decoded channel"
         );
-        // RED stub (issue 1367): today's dock -- average the channels (a non-finite sample reads as
-        // silence), decode that sum on one decoder, always channel 0, no per-channel cluster.
         let frames = planes.first().map_or(0, |p| p.len());
+        let mut fresh: Vec<Vec<(u64, u8)>> = self
+            .decoders
+            .iter_mut()
+            .zip(planes)
+            .map(|(dec, plane)| dec.push(plane))
+            .collect();
         self.pushed += frames as u64;
-        let _ = (
-            &self.history,
-            self.window_samples,
-            self.sample_rate,
-            self.min_clusters,
-            pick_marker_channel as fn(&[u64], u64) -> Option<usize>,
-            consistency_cluster_size as fn(&[(f64, u8)], ClusterParams) -> u64,
-        );
-        if planes.is_empty() {
+        let cutoff = self.pushed.saturating_sub(self.window_samples);
+        let sr = self.sample_rate as f64;
+        for (c, new) in fresh.iter().enumerate() {
+            let history = &mut self.history[c];
+            let mut changed = !new.is_empty();
+            history.extend(new.iter().copied());
+            while history.front().is_some_and(|&(abs, _)| abs < cutoff) {
+                history.pop_front();
+                changed = true;
+            }
+            if changed {
+                let markers: Vec<(f64, u8)> = history
+                    .iter()
+                    .map(|&(abs, idx)| (abs as f64 / sr, idx))
+                    .collect();
+                self.clusters[c] = consistency_cluster_size(&markers, ClusterParams::default());
+            }
+        }
+        self.chosen = pick_marker_channel(&self.clusters, self.min_clusters).unwrap_or(0);
+        if fresh.is_empty() {
             return Vec::new();
         }
-        let mono: Vec<f32> = (0..frames)
-            .map(|i| {
-                let sum: f32 = planes
-                    .iter()
-                    .map(|p| if p[i].is_finite() { p[i] } else { 0.0 })
-                    .sum();
-                sum / planes.len() as f32
-            })
-            .collect();
-        self.decoders[0].push(&mono)
+        fresh.swap_remove(self.chosen)
     }
 
     /// Number of decoded channels.
@@ -160,8 +166,7 @@ impl ChannelMarkerPicker {
     /// reads exactly its one decoder's stats.
     pub fn stats(&self) -> DecodeStats {
         let mut s = DecodeStats::default();
-        // RED stub (issue 1367): today's dock has one decoder.
-        for d in self.decoders.iter().take(1) {
+        for d in &self.decoders {
             let x = d.stats();
             s.preamble_screens_passed += x.preamble_screens_passed;
             s.crc_ok += x.crc_ok;

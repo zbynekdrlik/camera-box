@@ -36,6 +36,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "peak-finder.hpp"
 #include "camera-box-qr.hpp"
 #include "camera-box-audio.hpp"
+#include "camera-box-channel-pick.hpp"
 #include "camera-box-video.hpp"
 #include "camera-box-frame-copy.hpp"
 #include "camera-box-decode-mailbox.hpp"
@@ -247,9 +248,11 @@ struct sync_test_output
 	 * densest-cluster estimator (survives the CRC-4 false-decode flood the offline path also fights,
 	 * where a plain 1 s median would not). Mirrors `src/av_sync_dock.rs`; touched only on the audio
 	 * thread. `cb_qr` is a SECOND quirc context sized to the better-scaled top-band decode (below).
-	 * The top band itself is gathered into the decode job's reused buffer (issue 1367). */
+	 * The top band itself is gathered into the decode job's reused buffer (issue 1367).
+	 * `cb_audio_dec` decodes every audio channel with its own decoder and keeps one channel
+	 * (camera-box-channel-pick.hpp, issue 1367), never their average. */
 	struct quirc *cb_qr = nullptr;
-	camerabox::StreamingMarkerDecoder *cb_audio_dec = nullptr;
+	camerabox::ChannelMarkerPicker *cb_audio_dec = nullptr;
 	camerabox::RollingOffsetCluster cb_offset_cluster = camerabox::RollingOffsetCluster::dock();
 	uint64_t cb_audio_pushed = 0;
 
@@ -1400,37 +1403,36 @@ static void cb_apply_pairing_recovery(struct sync_test_output *st,
  * (Audio Index) emitted — so the dock shows a number only when it is real, never a false blip. */
 static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_data *frames)
 {
+	/* issue 1367: decode the marker on EVERY channel and keep one, never their average. The stereo
+	 * mbc input carries the marker on L and R 10.17 ms apart, and their sum is undecodable. The
+	 * picker applies the offline gate's one channel rule (the lowest channel that clears the
+	 * decodability floor, else the largest cluster) and returns only the chosen channel's markers.
+	 * A non-finite sample stays on its own channel: each channel has its own decoder, whose kernel
+	 * reads it as silence (#1153). */
+	const size_t nch = st->audio_channels < MAX_AV_PLANES ? st->audio_channels : MAX_AV_PLANES;
+	if (st->cb_audio_dec && st->cb_audio_dec->channels() != nch) {
+		// A new channel layout: start the decode over, and the absolute sample count with it.
+		delete st->cb_audio_dec;
+		st->cb_audio_dec = nullptr;
+		st->cb_audio_pushed = 0;
+	}
 	if (!st->cb_audio_dec) {
 		size_t sig = camerabox::cb_signal_len(st->audio_sample_rate, CAMERA_BOX_AUDIO_F_HZ,
 		                                      CAMERA_BOX_AUDIO_C);
-		if (sig == 0)
+		if (sig == 0 || nch == 0)
 			return;
-		// window ≥ 3 marker lengths so any marker is wholly present; dedup gap one marker length.
-		st->cb_audio_dec = new camerabox::StreamingMarkerDecoder(
-			st->audio_sample_rate, CAMERA_BOX_AUDIO_F_HZ, CAMERA_BOX_AUDIO_C,
-			camerabox::CB_QPSK_THRESHOLD, sig * 3, (uint64_t)sig);
+		// per channel: window 3 marker lengths, dedup gap 1, pick window + floor from the header.
+		st->cb_audio_dec = new camerabox::ChannelMarkerPicker(camerabox::ChannelMarkerPicker::dock(
+			nch, st->audio_sample_rate, CAMERA_BOX_AUDIO_F_HZ, CAMERA_BOX_AUDIO_C));
 	}
 
-	// Mix all channels to mono (the marker survives the mix; the QPSK decode is amplitude-tolerant),
-	// matching the offline `recording-verdict --av-sync` `-ac 1` extraction.
 	size_t nf = frames->frames;
-	std::vector<float> mono(nf, 0.0f);
-	size_t ch = st->audio_channels;
-	for (size_t i = 0; i < nf; i++) {
-		float acc = 0.0f;
-		for (size_t cix = 0; cix < ch; cix++) {
-			/* #1153: skip non-finite samples per channel -- a poisoned upstream channel must
-			 * never wipe a marker riding another channel through the mono mixdown (and the
-			 * decode kernel's prefix sums must never see NaN/Inf at all). */
-			float s = ((float *)frames->data[cix])[i];
-			if (std::isfinite(s))
-				acc += s;
-		}
-		mono[i] = ch ? acc / (float)ch : 0.0f;
-	}
+	const float *planes[MAX_AV_PLANES];
+	for (size_t cix = 0; cix < nch; cix++)
+		planes[cix] = (const float *)frames->data[cix];
 
 	const uint64_t base = st->cb_audio_pushed; // absolute index of this callback's first sample
-	std::vector<std::pair<uint64_t, uint8_t>> markers = st->cb_audio_dec->push(mono.data(), nf);
+	std::vector<std::pair<uint64_t, uint8_t>> markers = st->cb_audio_dec->push(planes, nf);
 	st->cb_audio_pushed += (uint64_t)nf;
 
 	const double sr = (double)st->audio_sample_rate;
@@ -1742,11 +1744,16 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 		 * (appended at the END, existing tokens unchanged) the frames the video thread replaced in
 		 * the mailbox while the worker was still decoding, so video_frames + decode_dropped is every
 		 * frame OBS delivered; publish_max_us the longest st_raw_video (the video-output thread's
-		 * remaining cost) since the previous diag line. */
+		 * remaining cost) since the previous diag line. preambles/crc_ok/crc_fail are summed over
+		 * every audio channel (one decoder each); marker_channel is the channel whose markers are
+		 * paired (0-based) and channel_clusters each channel's self-consistency cluster over the
+		 * pick window, appended last. */
+		const std::string channel_clusters = camerabox::cb_channel_clusters_text(st->cb_audio_dec->clusters);
 		blog(LOG_INFO,
 		     "av-sync-dock: diag video_frames=%llu video_decoded=%llu(%.1f%%) "
 		     "audio_samples=%llu preambles=%llu crc_ok=%llu crc_fail=%llu "
-		     "ring_hit=%llu ring_miss=%llu locked=%s state=%s decode_dropped=%llu publish_max_us=%llu",
+		     "ring_hit=%llu ring_miss=%llu locked=%s state=%s decode_dropped=%llu publish_max_us=%llu "
+		     "marker_channel=%zu channel_clusters=%s",
 		     (unsigned long long)vseen, (unsigned long long)vdec, vpct,
 		     (unsigned long long)st->cb_audio_pushed,
 		     (unsigned long long)st->cb_audio_dec->stats.preamble_screens_passed,
@@ -1755,7 +1762,8 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 		     (unsigned long long)st->cb_ring_hits, (unsigned long long)st->cb_ring_misses,
 		     st->cb_lock_state ? "yes" : "no", input_stale ? "STALE" : "LIVE",
 		     (unsigned long long)st->cb_decode_mailbox.dropped(),
-		     (unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000));
+		     (unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen,
+		     channel_clusters.c_str());
 
 		/* #1153: dead-pairing recovery, evaluated at the SAME ~10s cadence. When the pairing has
 		 * been dead for a full epoch (no meaningful ring-hit advance, no genuine lock) while
