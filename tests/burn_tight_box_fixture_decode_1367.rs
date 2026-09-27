@@ -133,7 +133,7 @@ fn the_slot_recovery_reads_the_cam2_burn_beside_multiview_content_1367() {
         burn_region_passes(&fixture_luma(case.file), &CAMERA_IDS, &mut out);
         assert_eq!(
             out,
-            vec![case.cam2],
+            [case.cam2],
             "{}: the recovery must read exactly cam2's own-slot burn {:?}; got {:?}",
             case.file,
             case.cam2,
