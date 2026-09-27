@@ -518,6 +518,9 @@ clean launch restores it. **Launch-window only** — a 7h bad session showed ZER
 it cannot flip spontaneously mid-event; only a relaunch re-rolls the dice.
 
 **Diagnóza (10s):** v čerstvom logu `Select-String "Max audio buffering|total audio buffering"` —
-`960` = zlý štart (reštartuj OBS kým nie je 64ms); `64` = čistý. **Núdzová kompenzácia naživo bez
+`960` = zlý štart (reštartuj OBS kým nie je 64ms); `64` = čistý. **Od issue 1367** začína každý štart
+na pevnom 85 ms podlahe (`genlock audio buffering floor (issue 1367): total audio buffering is now 85
+milliseconds`), takže čistý štart = presne tento riadok a `85`; každé zvýšenie nad podlahu je hlasný
+`ABOVE the floor` riadok so zdrojom (`genlock-audio-buffering-floor.md`). **Núdzová kompenzácia naživo bez
 reštartu:** genlock latency +~900ms (overené operátorom). Trvalý fix = launch-gate v
 `launch-obs-genlock.sh` (#786).

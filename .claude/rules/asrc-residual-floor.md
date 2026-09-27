@@ -54,7 +54,7 @@ between them (or a value far outside ±10) is the thing worth chasing, not the n
 **Per-launch level history in one call (issue 1355):** plain ssh `cd /d "%APPDATA%\obs-studio\logs" &&
 findstr /c:"source 'mbc' estimated" *.txt` (and `/c:"audio buffering"`) returns every session's lines
 prefixed by the log file name, so each launch's captured `target=`, level median and OBS audio
-buffering (64 or 85 ms, random per launch) come out of one read — no PowerShell. Quote the command
+buffering (64 or 85 ms, random per launch until issue 1367; an 85 ms floor since) come out of one read — no PowerShell. Quote the command
 in bash DOUBLE quotes: inside a single-quoted bash string the `''` around `mbc` collapses and findstr
 matches nothing. The `mbc` sync offset in force lives in `basic\scenes\Stream_Obs.json` (`sync`, ns),
 readable with a `.ps1` via `-EncodedCommand`. Password via `$PW`, never literal.
@@ -175,7 +175,9 @@ after ~15 min, `restore=0`, `fallbacks=0 (#1355)` at the end of the line. A `LOG
 target … UNREACHABLE … fell back to the live depth … (#1355)` line (and `fallbacks=` > 0) means this
 source's buffer did NOT follow the stretch for 40 min. Its A/V level is then the per-launch value
 again. Chase why the depth cannot move there, for example OBS audio buffering or a source whose
-placement is not contiguous. Do not raise the bound. The one-time A/V shift at the first #1355
+placement is not contiguous. Since issue 1367 every launch starts at an 85 ms buffering floor and
+the fallback line names `total_audio_buffering=` / `floor=` (`genlock-audio-buffering-floor.md`):
+above the floor, a late source raised the buffering and its own `ABOVE the floor` line names it. Do not raise the bound. The one-time A/V shift at the first #1355
 deploy is `(100 + offset) − the level that launch had`, and the E2E calibrated pin/audio offset
 absorbs it once.
 
