@@ -23,13 +23,16 @@
  *         (`resets()` counts those) -- a gap can never stitch two stretches into a false marker;
  *       * the first block of a session (after start() or end_session()) carries
  *         CB_AUDIO_GAP_SESSION;
- *       * `end_session()` hands the worker one on_session_end call, after every block published
- *         before it and before any block published after it.
+ *       * every `end_session()` hands the worker one on_session_end call, after every block
+ *         published before it and before any block published after it. The pending ends are a
+ *         queue: a gate that closes, reopens and closes again inside the worker's backlog gets both
+ *         ends (review round 1). Two ends with no accepted block between them (a session whose
+ *         blocks were all dropped) are one end: the worker never saw that session.
  *     The producer copies into a slot the worker is not reading, under the FIFO lock, and never
  *     waits for a decode. The worker measures each block's handling (`take_process_*_ns`).
  *
  * Lifecycle, as the video mailbox (camera-box-decode-mailbox.hpp): start() spawns the worker, stop()
- * wakes it, waits for an in-flight block and joins; queued blocks and a pending session end are
+ * wakes it, waits for an in-flight block and joins; queued blocks and pending session ends are
  * discarded; publish()/end_session() on a stopped FIFO are no-ops (libobs can deliver one last
  * raw_audio after the output's stop callback returned). The destructor calls stop(). stop() must not
  * be called from inside a handler.
@@ -119,7 +122,13 @@ public:
 		std::function<void()> on_thread_start;              // once, on the worker, before the first call
 	};
 
-	explicit CbAudioBlockFifo(size_t slots = CB_AUDIO_FIFO_SLOTS) : slots_(slots < 2 ? 2 : slots) {}
+	/* The ends ring holds slots + 1 entries: a pending end ends after an accepted block (a later
+	 * one than the previous pending end, or it merges with it), and at most `slots` accepted
+	 * blocks are unhandled, so the ring never fills and end_session() never allocates. */
+	explicit CbAudioBlockFifo(size_t slots = CB_AUDIO_FIFO_SLOTS)
+		: slots_(slots < 2 ? 2 : slots), ends_(slots_.size() + 1)
+	{
+	}
 	~CbAudioBlockFifo() { stop(); }
 	CbAudioBlockFifo(const CbAudioBlockFifo &) = delete;
 	CbAudioBlockFifo &operator=(const CbAudioBlockFifo &) = delete;
@@ -141,7 +150,7 @@ public:
 		accepted_ = taken_seq_ = 0;
 		in_session_ = false;
 		pending_gap_ = 0;
-		end_pending_ = false;
+		ends_head_ = ends_count_ = 0;
 		stop_requested_ = false;
 		running_ = true;
 		try {
@@ -153,7 +162,7 @@ public:
 		return true;
 	}
 
-	/* Wake the worker, wait for an in-flight block and join; queued blocks and a pending session end
+	/* Wake the worker, wait for an in-flight block and join; queued blocks and pending session ends
 	 * are discarded. Idempotent. */
 	void stop()
 	{
@@ -171,7 +180,7 @@ public:
 		head_ = count_ = 0;
 		in_session_ = false;
 		pending_gap_ = 0;
-		end_pending_ = false;
+		ends_head_ = ends_count_ = 0;
 	}
 
 	/* Producer (libobs's audio thread): copy one block into the FIFO. False when stopped (nothing
@@ -216,9 +225,15 @@ public:
 			if (!running_ || !in_session_)
 				return;
 			in_session_ = false;
-			end_pending_ = true;
-			end_after_ = accepted_;
-			end_reason_ = reason;
+			SessionEnd *last = ends_count_ ? &ends_[(ends_head_ + ends_count_ - 1) % ends_.size()] : nullptr;
+			if (last && last->after == accepted_) {
+				last->reason = reason; // no accepted block since the last end: the same end
+			} else {
+				SessionEnd &e = ends_[(ends_head_ + ends_count_) % ends_.size()];
+				e.after = accepted_;
+				e.reason = reason;
+				ends_count_++;
+			}
 		}
 		cv_.notify_one();
 	}
@@ -240,7 +255,7 @@ public:
 	uint64_t take_process_sum_ns() { return process_sum_ns_.exchange(0); }
 
 private:
-	bool end_due() const { return end_pending_ && taken_seq_ >= end_after_; }
+	bool end_due() const { return ends_count_ > 0 && taken_seq_ >= ends_[ends_head_].after; }
 
 	void run()
 	{
@@ -254,8 +269,9 @@ private:
 			if (stop_requested_)
 				return;
 			if (end_due()) {
-				end_pending_ = false;
-				const unsigned reason = end_reason_;
+				const unsigned reason = ends_[ends_head_].reason;
+				ends_head_ = (ends_head_ + 1) % ends_.size();
+				ends_count_--;
 				lock.unlock();
 				if (h_.on_session_end)
 					h_.on_session_end(reason);
@@ -299,9 +315,13 @@ private:
 	bool stop_requested_ = false;
 	bool in_session_ = false;
 	unsigned pending_gap_ = 0;
-	bool end_pending_ = false;
-	uint64_t end_after_ = 0; // the session ends once this many blocks were accepted and handled
-	unsigned end_reason_ = 0;
+	struct SessionEnd {
+		uint64_t after = 0; // the session ends once this many blocks were accepted and handled
+		unsigned reason = 0;
+	};
+	std::vector<SessionEnd> ends_; // the pending ends, a ring of ends_[ends_head_ ..]
+	size_t ends_head_ = 0;
+	size_t ends_count_ = 0;
 	uint64_t accepted_ = 0;  // blocks accepted into the FIFO since start()
 	uint64_t taken_seq_ = 0; // blocks handled since start() (under the lock)
 	Handlers h_;

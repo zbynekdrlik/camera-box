@@ -87,11 +87,10 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 /* issue 1381: the camera-box audio decode runs only while the test signal is fresh -- the same window
  * as above since the last camera-box QR decode (camera-box-audio-worker.hpp cb_audio_decode_gate) --
- * and only on a box that has the measurement source it exists for: the cam2 QPSK marker input on the
- * stream box, the same name as sync-test-dock.cpp's CAMERA_BOX_ASRC_SOURCE_NAME. resolume and strih
- * never enter it. The source check takes the sources mutex, so it runs on the video decode worker,
- * at most once per CAMERA_BOX_MEASURE_SOURCE_RECHECK_NS of frame time, never on the audio thread. */
-#define CAMERA_BOX_MEASURE_SOURCE_NAME "mbc"
+ * and only on a box that has the measurement source it exists for (CAMERA_BOX_MEASURE_SOURCE_NAME in
+ * camera-box-audio.hpp, shared with sync-test-dock.cpp). resolume and strih never enter it.
+ * The source check takes the sources mutex, so it runs on the video decode worker, at most once per
+ * CAMERA_BOX_MEASURE_SOURCE_RECHECK_NS of frame time, never on the audio thread. */
 #define CAMERA_BOX_MEASURE_SOURCE_RECHECK_NS 5000000000ULL
 
 /* There are several reason to limit the width and the height.
@@ -625,7 +624,8 @@ static void signal_qrcode_found(obs_output_t *ctx, uint64_t timestamp, const str
 /* issue 1381: whether this box has the measurement source (CAMERA_BOX_MEASURE_SOURCE_NAME) the
  * camera-box audio decode exists for. Decode worker only (the lookup takes the sources mutex), at most
  * once per CAMERA_BOX_MEASURE_SOURCE_RECHECK_NS of frame time; the audio thread reads the atomic. The
- * first answer and every change are logged. */
+ * first answer and every change are logged, at INFO: resolume and strih have no such source by
+ * design, so "not found" there is the expected state, not a warning. */
 static void cb_refresh_measure_source(struct sync_test_output *st, uint64_t video_ts)
 {
 	if (st->cb_measure_source_checked && video_ts >= st->cb_measure_source_check_ts &&
@@ -639,7 +639,7 @@ static void cb_refresh_measure_source(struct sync_test_output *st, uint64_t vide
 	obs_source_release(src);
 	const bool was = st->cb_measure_source_present.exchange(present);
 	if (first || was != present)
-		blog(present ? LOG_INFO : LOG_WARNING, "av-sync-dock: measurement source '%s' %s (issue 1381)",
+		blog(LOG_INFO, "av-sync-dock: measurement source '%s' %s (issue 1381)",
 		     CAMERA_BOX_MEASURE_SOURCE_NAME,
 		     present ? "found -- the camera-box audio decode runs while the test signal is fresh"
 			     : "not found on this box -- the camera-box audio decode stays off");
@@ -1932,13 +1932,27 @@ static void st_audio_block_run(struct sync_test_output *st, const camerabox::CbA
 	st_raw_audio_camera_box(st, &frames);
 }
 
+/* issue 1381: the lock tracker forgets its state and the dock shows unlocked. A session END does
+ * it (no measurement is being made, so the last offset must not read as live) and so does a session
+ * BEGIN: an output restart discards a session end the worker had not reached yet. */
+static void cb_audio_forget_lock(struct sync_test_output *st)
+{
+	st->cb_lock_audit = camerabox::CbLockAuditTracker();
+	if (st->cb_lock_state) {
+		st->cb_lock_state = false;
+		signal_lock_state_changed(st->context, false);
+	}
+}
+
 /* issue 1381: a new decode session -- the gate reopened, or the output restarted. The staleness
- * and pairing watchdogs start a fresh baseline (the pause is not a dead input), the diag line goes
- * out on the first block, and a dock told STALE at the last session end goes LIVE again. */
+ * and pairing watchdogs start a fresh baseline (the pause is not a dead input), the lock starts
+ * over, the diag line goes out on the first block, and a dock told STALE at the last session end
+ * goes LIVE again. */
 static void cb_audio_session_begin(struct sync_test_output *st)
 {
 	st->cb_input_staleness = camerabox::CbDockInputStaleness();
 	st->cb_pairing_watchdog = camerabox::CbDockPairingWatchdog();
+	cb_audio_forget_lock(st);
 	st->cb_diag_last_log_ns = 0;
 	if (st->cb_audio_paused) {
 		st->cb_audio_paused = false;
@@ -1974,11 +1988,7 @@ static void st_audio_session_end(struct sync_test_output *st, unsigned reason)
 {
 	if (st->cb_audio_dec)
 		st->cb_audio_dec->reset_window();
-	st->cb_lock_audit = camerabox::CbLockAuditTracker();
-	if (st->cb_lock_state) {
-		st->cb_lock_state = false;
-		signal_lock_state_changed(st->context, false);
-	}
+	cb_audio_forget_lock(st);
 	if (!st->cb_input_staleness.is_stale())
 		signal_stale_changed(st->context, true);
 	st->cb_audio_paused = true;

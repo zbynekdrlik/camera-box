@@ -37,6 +37,12 @@
  * header (this one had grown past its size budget). */
 #include "camera-box-marker-scan.hpp"
 
+/* The measurement source: the cam2 QPSK marker input on the stream box. The dock's audio decode gate
+ * (sync-test-output.cpp, issue 1381) looks it up by this name, and its ASRC section
+ * (sync-test-dock.cpp's CAMERA_BOX_ASRC_SOURCE_NAME) is the same source. resolume and strih have no
+ * such source. */
+#define CAMERA_BOX_MEASURE_SOURCE_NAME "mbc"
+
 namespace camerabox {
 
 /* Fixed rig audio params (AudioParams::rig60()): 48 kHz, 442 Hz carrier, c = 1. */
