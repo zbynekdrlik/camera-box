@@ -13,6 +13,8 @@ paths:
   - "tests/burn_regions_cpp_parity_1370.rs"
   - "src/probe/burn_echo.rs"
   - "tests/burn_echo_fixture_decode_1367.rs"
+  - "src/burn_quiet_zone.rs"
+  - "tests/burn_tight_box_fixture_decode_1367.rs"
 ---
 
 # Burn-isolated slot recovery — a crisp node burn decodes whatever the camera shows (issue 1370)
@@ -67,14 +69,68 @@ nothing foreign in it for rqrr to group with.
 - Only those ids are MERGED. The result is a byte-identical superset of plain + tiles, and the pass
   never adds optical or aux (911013) payloads — the tear detector and the continuity metrics read
   those by run_id.
-- The 2x CatmullRom look runs only when the 1x crop read no burn of that slot. One slot carries one
-  burn, so a slot that read the deployed camera's burn never gets a 2x look for the other cams.
+- The looks run in order 1x, tight box, 2x CatmullRom. Each later look runs only when the looks
+  before it read no burn of that slot. One slot carries one burn, so a slot that read the deployed
+  camera's burn never gets another look for the other cams.
 - An id without a reserved slot is never localized: SongPlayer 911014 is painted by the sender,
   911013 is optical content, and an operator `--burn-*-run-id` override has no slot. A
   non-reserved expected id logs ONE warning per process, so an override is not a silent loss.
 - The verdict log line `recording analysis complete` carries `burn_region_recoveries`: how many
   burns only the slot crops read. A large count means the camera view pushed optical content into
   the burn tiles.
+
+## The tight-box look — the burn's own white box, decoded alone (issue 1367)
+
+The camera burn is not 320 px. `render_payload_qr(payload, 320)` builds the QR with whole-pixel
+modules (`qrcode`'s `max_dimensions` wins), and the burn payload encodes as a version-4 EC-H code:
+33 modules plus a 4-module quiet zone on each side, 41 in all. 320 / 41 floors to 7 px, so the
+burn is 287 px. `cam1_burn_origin` centres it at (816, 769) on 1080p. A longer payload needs
+version 5 (45 modules, still 7 px): 315 px. Every real camera-slot fixture in the repo shows the
+287 box at (24, 41) inside the 336 px crop.
+
+So the fixed camera crop (792, 728, 336 x 336) always holds a 24 px strip left of the burn and a
+41 px strip above it. Over ordinary camera picture that is harmless. When cam2 films the strih-lx
+multiview, those strips hold multiview QR content, and rqrr's one grid pass over the crop reads
+nothing. Run 324220913 had 7 such cam2 frames (1775, 2008, 7808, 8149, 8150, 8167, 8170), counted
+as `BURN-UNREADABLE`.
+
+The fix, in `burn_region_passes`, after a 1x look that read no burn of the slot:
+- `burn_quiet_zone::locate_burn_box` (pure, Tier-0) finds the white quiet-zone box inside the crop.
+  It keeps the columns and rows whose longest near-white run reaches 0.8 x the slot's design side
+  (`slot_rect(..).w`). The quiet zone's side columns and top/bottom rows carry such runs; inside the
+  code every run is broken by dark modules. It returns the span of those columns and rows when both
+  sides are within 0.8-1.05 x the design side. Otherwise nothing is decoded.
+- Near-white = the midpoint between the crop's Otsu threshold and its 99th-percentile white level.
+- `tight_box_reads` copies exactly that box into a white image with a border of a tenth of its side
+  (about four modules), decodes it plain then Otsu (`decode_qr_luma_all_reads`), and maps the reads
+  back to the frame (`bordered_origin`). They pass the same missing-id + own-slot filter as every
+  other look.
+- The box never leaves the crop, so it cannot admit an echo. Only missing ids merge.
+
+Do NOT locate the box as the bounding box of the largest bright connected component. On the
+run-324220913 crops the quiet zone touches bright multiview pixels, and the component leaks to the
+crop edge at every threshold from Otsu to 235. At the Otsu threshold itself the light rows above the
+box also join its top edge, so the threshold is the midpoint, not Otsu.
+
+Evidence (real rqrr 0.9.3 harness, `<scratchpad>/agent-ae8ef48-1367-tightbox/`):
+- 7 of 7 missed frames read, each centred at (963, 916), each id between its neighbours.
+- A sweep of every real 1080p fixture in the repo (23 frames x the 5 slots) read the SAME payload
+  as the 1x crop whenever a box was found, and never read anything outside the crop.
+- The functional replica mounts the real `burn_region_decode.rs` / `burn_echo.rs` /
+  `burn_regions.rs` / `burn_quiet_zone.rs` with the real rqrr and a behaviour-faithful `image` stub
+  (crop, replace, from_pixel, pixels, as_raw). It proved the glue RED (pre-fix: nothing on
+  2008-8170) and GREEN. A stub `camera_box` rlib built from the same files ran the fixture
+  integration test file locally. The stub's `image::open` reads a PIL `.y8` dump of each PNG, and
+  the grouped-decode test stays CI-only. The stub's 2x `resize` is NEAREST, not CatmullRom, so it
+  reads frame 1775 where production did not. Never count a replica 2x result as production.
+
+Lock: `tests/burn_tight_box_fixture_decode_1367.rs` + `tests/fixtures/burn-tight-box-1367/`
+(strih frames 1775, 2008, 8150, verbatim pixel proofs). Guards: the probe tests in
+`burn_region_decode.rs` (box out of the size band = nothing decoded, no burn = nothing read) and the
+Tier-0 tests in `burn_quiet_zone.rs`.
+
+Open question for the slot table (not changed here): `slot_rect(CameraCapture)` models 320 px
+where the writer renders 287 or 315. A tighter slot would still depend on the QR version.
 
 ## Adding a node burn or corner — `burn_regions` is the ONE Rust copy
 
