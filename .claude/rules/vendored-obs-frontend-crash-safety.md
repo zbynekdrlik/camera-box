@@ -2,6 +2,7 @@
 paths:
   - "vendor/obs-studio/frontend/**"
   - "tests/prop_dialog_*.rs"
+  - "tests/obs_crash_handler_*.rs"
 ---
 
 # Vendored OBS FRONTEND crash-safety (`vendor/obs-studio/frontend/**`) — the `obs_data_get_json()` NULL class (#773)
@@ -26,6 +27,57 @@ sibling `on_buttonBox_clicked` AcceptRole path (`std::string(obs_data_get_json(.
 detectable change" (return 0), so the dialog closes cleanly instead of dereferencing NULL (and
 without popping a Save/Discard prompt on settings that cannot even be serialised). When touching any
 frontend file, grep it for `strcmp(` and `std::string(obs_data_get_json(` before trusting it.
+
+## The rig build's crash handler never shows a dialog (issue 1378)
+
+Upstream `main_crash_handler` (`frontend/obs-main.cpp`, the `#ifdef _WIN32` block, reached from
+`libobs/obs-win-crash-handler.c` `exception_handler` -> `bcrash()`) writes the crash file, then shows
+a task-modal `MessageBoxA` offering to copy the log to the clipboard, and exits only after someone
+answers. Every managed Windows OBS box (stream, resolume) runs unattended. The crashed obs64 stayed
+alive behind the dialog, so the guarded launcher and the AHK safe-loop saw a live OBS and never
+started a fresh one. WER `DontShowUI` does not help: OBS installs its own handler.
+
+The genlock build's handler:
+
+- writes `obs-studio/crashes/Crash <date>.txt` exactly as upstream (rotation, path, content);
+- logs ONE line through `blog(LOG_ERROR, ...)`: `Crash report written to <path> -- exiting without
+  the crash dialog (rig build: never block on a modal)`. It lands in the OBS log the fleet reads.
+  It replaces a dialog window plus its message buffers and the clipboard copy, so the handler
+  allocates less than upstream. A crash while the crashing thread already held one of the frontend
+  log mutexes does not hang: the MSVC STL's `_Mtx_lock` checks the owning thread id and only counts
+  a re-lock by its owner (microsoft/STL `stl/src/mutex.cpp`, read 27.9.2026). The one remaining
+  hang shape is a crash on the thread that holds Qt's post-event lock, because the log line posts
+  to the UI. That is rare and was not measured;
+- canonicalises the path with the `std::error_code` overload. The one-argument `canonical()` throws
+  when the file could not be written, and an exception out of the handler ends in `abort()` -> WER,
+  which can show a dialog while `DontShowUI` is absent (stream and resolume, 27.9.2026). It falls
+  back to the written path;
+- calls `exit(-1)` as its last statement.
+
+Guards: `tests/obs_crash_handler_no_modal_1378.rs`.
+
+- **Facet A: source anchors** on the handler body. No `MessageBox`/`MB_TASKMODAL`/clipboard call;
+  the crash-file write, the log line and `exit(-1)` present, in that order; no throwing
+  `canonical()`. File-wide, the upstream title literal `"OBS has crashed!"` is absent.
+- **Facet B: the handler is lifted verbatim and run.**
+  - It is compiled with `c++ -std=c++17 -Werror` against stand-ins for the OBS helpers (`BPtr`,
+    `GetAppConfigPathPtr`, `delete_oldest_file`, `GenerateTimeDateFilename`, `blog`) AND for the
+    Windows dialog/clipboard API the upstream handler used.
+  - It then runs in a child process. A re-imported dialog prints `MODAL-DIALOG-SHOWN` at runtime,
+    not only a compile error, and a missing crash directory must still end in status 255, never
+    an abort.
+  - The lift compiles only the non-`_WIN32` branches of the two inner `#ifdef _WIN32` blocks. The
+    wide-path open and the `\` replace stay CI-only.
+- **The pwsh mirrors.** This is a rig-critical behavioural divergence that still compiles either way
+  (the #1195 class), so BOTH windows-genlock workflows carry a source-text step. It checks the
+  marker phrase is present and the `"OBS has crashed!"` literal is absent. Two other `MessageBoxA`
+  calls stay in obs-main.cpp (the VC-runtime check and `--help`), so the negative check keys on the
+  crash-only title, never a bare `MessageBoxA`.
+
+FRONTEND change: it lands in `obs64.exe`, so it needs a FULL-bundle deploy to stream and resolume,
+never the fast obs.dll path. After the deploy, a crash leaves no obs64 behind and the box's own
+launcher restarts OBS. The crash file stays the evidence, and the OBS log's `Crash report written
+to` line names it.
 
 ## Reading a live OBS crash log on strih/stream — win-* MCP, NOT ssh
 
@@ -68,7 +120,8 @@ Two frontend-specific differences from the libobs rule:
   Rust-test-only (a missing guard is caught by the full build's own compilation, and the ymls were
   never given one), but a rig-critical BEHAVIORAL divergence from upstream that STILL COMPILES
   either way and that a `git subtree pull` would silently revert (the #43/#152 class, and #1195's
-  auto-normal unclean-shutdown launch — `tests/obs_unclean_shutdown_auto_normal_1195.rs`) gets a
+  auto-normal unclean-shutdown launch — `tests/obs_unclean_shutdown_auto_normal_1195.rs` — and
+  issue 1378's no-dialog crash handler, `tests/obs_crash_handler_no_modal_1378.rs`) gets a
   pwsh source-text anchor in BOTH ymls, mirroring the Rust guard — exactly as
   `vendored-libobs-change-safety.md` + `av-sync-dock-anchor-refactor-safety.md` mandate for any
   vendored guard. Decide by: "would a subtree pull silently revert a behavior we depend on, while
