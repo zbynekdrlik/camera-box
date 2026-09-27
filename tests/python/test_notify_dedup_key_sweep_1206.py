@@ -186,8 +186,8 @@ _PRODUCTION_CRITICAL_TIME_BUCKETED = {
     # issue 1381 -- an OBS audio mixer off real time (BEHIND / OVERLOADED) or an obs-vban sender
     # losing audio (VBAN_LOSS) is audible on air (27.9: FOH dropouts for over an hour, noticed by
     # ear 55 min late). Its inputs are quality-gated: the mixer arm grades one complete dump window
-    # normalised by its measured length (a partial start window / a wall-clock step reads UNKNOWN),
-    # and the VBAN arm counts only loss counters that moved inside the window (late_sends excluded).
+    # as dumped (a partial start dump reads UNKNOWN; a wall-clock step never rescales the count), and
+    # the VBAN arm counts only loss counters that moved inside the window (late_sends excluded).
     "audio-mixer-alert-watchdog.sh",      # issue 1381 -- audio mixer off real time / VBAN pacer loss
 }
 

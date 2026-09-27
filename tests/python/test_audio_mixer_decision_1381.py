@@ -149,7 +149,7 @@ def test_analyze_reads_both_arms():
     body = _body(audio_mixer_ticks="2760", audio_mixer_ticks_over="797",
                  audio_mixer_window_ms="60014", audio_mixer_tick_ms="21.3", audio_mixer_age_s="5",
                  vban_pacer_loss_events="44", vban_pacer_loss_dest="stream=cg",
-                 vban_pacer_outputs="2", vban_pacer_age_s="0")
+                 vban_pacer_age_s="0")
     r = amd.analyze(body, 1)
     assert r["mixer_verdict"] == "BEHIND"
     assert r["vban_verdict"] == "VBAN_LOSS"
@@ -180,8 +180,7 @@ def test_cli_prints_key_value_lines():
     body = _body(audio_mixer_ticks="3857", audio_mixer_ticks_over="222",
                  audio_mixer_window_ms="60024", audio_mixer_tick_ms="21.3", audio_mixer_age_s="0",
                  vban_pacer_loss_events="0", vban_pacer_loss_ms="0.0",
-                 vban_pacer_loss_dest="10.77.7.106:6980", vban_pacer_outputs="2",
-                 vban_pacer_age_s="0")
+                 vban_pacer_loss_dest="10.77.7.106:6980", vban_pacer_age_s="0")
     out = subprocess.run([sys.executable, str(_SCRIPTS / "audio_mixer_decision.py"), "analyze",
                           "--box-reachable", "1"], input=body, capture_output=True, text=True,
                          check=True).stdout

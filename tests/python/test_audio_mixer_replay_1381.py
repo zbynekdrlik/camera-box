@@ -58,7 +58,7 @@ def _bundle_at(lines, t):
         audio_mixer_ticks=mixer[0], audio_mixer_ticks_over=mixer[1],
         audio_mixer_window_ms=mixer[2], audio_mixer_tick_ms=mixer[3], audio_mixer_age_s=mixer[4],
         vban_pacer_loss_events=vban[0], vban_pacer_loss_ms=vban[1], vban_pacer_loss_dest=vban[2],
-        vban_pacer_outputs=vban[3], vban_pacer_age_s=vban[4])
+        vban_pacer_age_s=vban[3])
     return json.dumps(st)
 
 
