@@ -269,4 +269,36 @@ struct ChannelMarkerPicker {
 	}
 };
 
+/* When a switch of the paired channel goes to the OBS log (mirror of
+ * av_sync_dock_channels::ChannelSwitchLog). A switch moves the dock's measured offset by ~10 ms and
+ * the offset cluster is not reset, so every switch is counted and logged: the first at once, then
+ * at most one line per interval, naming how many switches it stands for. */
+struct CbChannelSwitchLog {
+	uint64_t total;
+	uint64_t unlogged;
+	bool have_logged;
+	uint64_t last_log_ns;
+
+	CbChannelSwitchLog() : total(0), unlogged(0), have_logged(false), last_log_ns(0) {}
+
+	/* One push observed: the channel chosen before it (prev) and after it (chosen), at the callback
+	 * timestamp now_ns. Returns true when a log line goes out now, with *count = the switches it
+	 * stands for (this one included). A timestamp that goes backwards wraps the unsigned
+	 * difference, so it logs rather than hides a switch. */
+	bool observe(size_t prev, size_t chosen, uint64_t now_ns, uint64_t interval_ns, uint64_t *count)
+	{
+		if (chosen == prev)
+			return false;
+		total++;
+		unlogged++;
+		if (have_logged && now_ns - last_log_ns < interval_ns)
+			return false;
+		have_logged = true;
+		last_log_ns = now_ns;
+		*count = unlogged;
+		unlogged = 0;
+		return true;
+	}
+};
+
 } // namespace camerabox

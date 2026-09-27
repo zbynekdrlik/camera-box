@@ -16,7 +16,8 @@
 
 use camera_box::av_sync_dock::DOCK_QPSK_THRESHOLD;
 use camera_box::av_sync_dock_channels::{
-    ChannelMarkerPicker, DOCK_CHANNEL_PICK_MAX_MARKERS, DOCK_CHANNEL_PICK_WINDOW_S,
+    ChannelMarkerPicker, ChannelSwitchLog, DOCK_CHANNEL_PICK_MAX_MARKERS,
+    DOCK_CHANNEL_PICK_WINDOW_S,
 };
 use camera_box::qpsk_channel_select::{f32le_to_channels, pick_marker_channel};
 use camera_box::qpsk_marker::{decode_markers_with_stats, marker_signal, signal_len, AudioParams};
@@ -607,6 +608,69 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
     let line = |i: u64| t.lines().nth(i as usize).expect("push").to_string();
     assert!(line(k - 1).contains(" clusters=3 "), "{}", line(k - 1));
     assert!(line(k).contains(" clusters=0 "), "{}", line(k));
+}
+
+#[test]
+fn the_cpp_switch_log_matches_rust() {
+    // A generated sequence of picks: runs without a switch, flip-flops inside the interval, long
+    // gaps, the exact interval edge, and a timestamp that goes backwards.
+    const INTERVAL: u64 = 10_000_000_000;
+    let mut seed: u64 = 0x5856_5692_55aa_1367;
+    let mut next = move || {
+        seed = seed
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        seed >> 33
+    };
+    let (mut chosen, mut now) = (0usize, 1_000_000_000u64);
+    let mut rows = Vec::new();
+    for k in 0..600 {
+        let prev = chosen;
+        if next() % 3 == 0 {
+            chosen = (next() % 3) as usize;
+        }
+        now = match k % 97 {
+            40 => now - 3_000_000_000,
+            60 => now + INTERVAL,
+            _ => now + next() % 2_000_000_000,
+        };
+        rows.push((prev, chosen, now));
+    }
+    let scratch = Scratch::new("switchlog");
+    let path = scratch.path("switchlog.txt");
+    let text: String = rows
+        .iter()
+        .map(|(p, c, t)| format!("{p} {c} {t}\n"))
+        .collect();
+    std::fs::write(&path, text).expect("write the switch-log input");
+    let got = scratch.run(&[
+        "switchlog",
+        path.to_str().expect("utf-8 path"),
+        &INTERVAL.to_string(),
+    ]);
+    let mut log = ChannelSwitchLog::default();
+    let want: Vec<String> = rows
+        .iter()
+        .map(|&(p, c, t)| match log.observe(p, c, t, INTERVAL) {
+            Some(n) => format!("log {n} {}", log.total()),
+            None => format!("- {}", log.total()),
+        })
+        .collect();
+    assert_eq!(got.lines().collect::<Vec<_>>(), want);
+    // the sequence exercises both a carried count and a suppressed switch
+    assert!(want
+        .iter()
+        .any(|l| l.starts_with("log ") && !l.starts_with("log 1 ")));
+    let totals: Vec<u64> = want
+        .iter()
+        .map(|l| {
+            l.rsplit(' ')
+                .next()
+                .and_then(|t| t.parse().ok())
+                .expect("total")
+        })
+        .collect();
+    assert!((1..want.len()).any(|i| want[i].starts_with("- ") && totals[i] > totals[i - 1]));
 }
 
 #[test]

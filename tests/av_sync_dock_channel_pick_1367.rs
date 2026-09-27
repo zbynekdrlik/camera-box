@@ -110,7 +110,7 @@ fn the_diag_line_appends_the_channel_pick_after_the_existing_tokens() {
          channel_clusters=%s channel_switches=%llu` (existing tokens unchanged, appended last)"
     );
     assert!(code.contains(
-        "(unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen, channel_clusters.c_str(), (unsigned long long)st->cb_channel_switches);"
+        "(unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen, channel_clusters.c_str(), (unsigned long long)st->cb_switch_log.total);"
     ));
     assert!(code.contains(
         "const std::string channel_clusters = camerabox::cb_channel_clusters_text(st->cb_audio_dec->clusters);"
@@ -124,9 +124,9 @@ fn the_diag_line_appends_the_channel_pick_after_the_existing_tokens() {
 #[test]
 fn a_channel_switch_is_logged_and_counted() {
     let code = code();
-    assert!(code.contains("uint64_t cb_channel_switches = 0;"));
-    assert!(code.contains("uint64_t cb_channel_switches_unlogged = 0;"));
-    assert!(code.contains("uint64_t cb_channel_switch_last_log_ns = 0;"));
+    // the decision itself is the pure CbChannelSwitchLog (camera-box-channel-pick.hpp), pinned
+    // against the Rust reference by tests/qpsk_channel_pick_parity_1367.rs
+    assert!(code.contains("camerabox::CbChannelSwitchLog cb_switch_log;"));
     let body = body_of(&code, AUDIO_SIG);
     for needle in [
         "const size_t prev_channel = st->cb_audio_dec->chosen; const uint64_t base = st->cb_audio_pushed;",
@@ -142,11 +142,8 @@ fn a_channel_switch_is_logged_and_counted() {
         "static void cb_note_channel_switch(struct sync_test_output *st, size_t prev, const struct audio_data *frames)",
     );
     for needle in [
-        "if (st->cb_audio_dec->chosen == prev) return;",
-        "st->cb_channel_switches++;",
-        "CAMERA_BOX_DIAG_LOG_INTERVAL_NS",
-        "\"av-sync-dock: marker channel %zu -> %zu (channel_clusters=%s, %llu switch(es) since the last line)\"",
-        "st->cb_channel_switches_unlogged = 0;",
+        "uint64_t switches = 0; if (!st->cb_switch_log.observe(prev, st->cb_audio_dec->chosen, frames->timestamp, CAMERA_BOX_DIAG_LOG_INTERVAL_NS, &switches)) return;",
+        "\"av-sync-dock: marker channel %zu -> %zu (channel_clusters=%s, %llu switch(es) since the last line)\", prev, st->cb_audio_dec->chosen, clusters.c_str(), (unsigned long long)switches);",
     ] {
         assert!(
             note.contains(needle),

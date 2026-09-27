@@ -642,6 +642,19 @@ int main()
 		for (size_t k = 0; at_l && k < got.size(); k++)
 			at_l = got[k] + 8 >= l_starts[k] && got[k] <= l_starts[k] + 8;
 		CHECK(at_l, "1367: only the chosen channel's markers, at L's own sample positions");
+
+		/* the switch log: first switch at once, suppressed ones counted and carried, backwards
+		 * time logs (mirror of av_sync_dock_channels::ChannelSwitchLog's unit tests) */
+		const uint64_t S = 1000000000ull, I = 10 * S;
+		CbChannelSwitchLog log;
+		uint64_t n = 0;
+		CHECK(!log.observe(0, 0, 5 * S, I, &n) && log.total == 0, "1367: no switch, no line");
+		CHECK(log.observe(0, 1, 100 * S, I, &n) && n == 1, "1367: the first switch logs at once");
+		CHECK(!log.observe(1, 0, 103 * S, I, &n), "1367: a switch inside the interval waits");
+		CHECK(!log.observe(0, 1, 110 * S - 1, I, &n), "1367: still inside the interval");
+		CHECK(log.observe(1, 0, 110 * S, I, &n) && n == 3, "1367: the line names the suppressed two");
+		CHECK(log.total == 4, "1367: every switch counted");
+		CHECK(log.observe(0, 1, 90 * S, I, &n) && n == 1, "1367: time going backwards logs");
 	}
 
 	if (g_failures == 0) {

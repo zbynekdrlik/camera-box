@@ -21,6 +21,9 @@
  *       callbacks; with a non-zero <reset_after>, reset_window() runs right after that many
  *       pushes (the dead-pairing recovery). One line per push:
  *       "<push> chosen=<c> clusters=<a,b> markers=<abs:idx,...> stats=<preambles>/<crc_ok>/<crc_fail>".
+ *   switchlog <file> <interval_ns>
+ *       for every line "<prev> <chosen> <now_ns>": CbChannelSwitchLog::observe, printed as
+ *       "log <count> <total>" or "- <total>".
  *
  * Exit 0 on success, 2 on a usage or I/O error.
  */
@@ -41,7 +44,8 @@ using namespace camerabox;
 static int usage()
 {
 	std::fprintf(stderr, "usage: channel-pick-parity consts | pick <tsv> | cluster <file> | "
-			     "stream <file> <channels> <chunk> [<window_samples> [<reset_after>]]\n");
+			     "stream <file> <channels> <chunk> [<window_samples> [<reset_after>]] | "
+			     "switchlog <file> <interval_ns>\n");
 	return 2;
 }
 
@@ -183,6 +187,25 @@ static int cmd_stream(const char *path, size_t channels, size_t chunk, uint64_t 
 	return 0;
 }
 
+static int cmd_switchlog(const char *path, uint64_t interval_ns)
+{
+	std::ifstream in(path);
+	if (!in) {
+		std::fprintf(stderr, "cannot read %s\n", path);
+		return 2;
+	}
+	CbChannelSwitchLog log;
+	unsigned long long prev = 0, chosen = 0, now = 0;
+	while (in >> prev >> chosen >> now) {
+		uint64_t n = 0;
+		if (log.observe((size_t)prev, (size_t)chosen, (uint64_t)now, interval_ns, &n))
+			std::printf("log %llu %llu\n", (unsigned long long)n, (unsigned long long)log.total);
+		else
+			std::printf("- %llu\n", (unsigned long long)log.total);
+	}
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc < 2)
@@ -199,5 +222,7 @@ int main(int argc, char **argv)
 				  (size_t)std::strtoull(argv[4], nullptr, 10),
 				  argc >= 6 ? (uint64_t)std::strtoull(argv[5], nullptr, 10) : 0,
 				  argc == 7 ? (size_t)std::strtoull(argv[6], nullptr, 10) : 0);
+	if (cmd == "switchlog" && argc == 4)
+		return cmd_switchlog(argv[2], (uint64_t)std::strtoull(argv[3], nullptr, 10));
 	return usage();
 }

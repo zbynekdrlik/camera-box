@@ -215,6 +215,51 @@ impl ChannelMarkerPicker {
     }
 }
 
+/// When a switch of the paired channel goes to the OBS log (issue 1367, review round 3; mirrored
+/// by `CbChannelSwitchLog`). A switch moves the dock's measured offset by ~10 ms and the offset
+/// cluster is not reset, so every switch is counted and logged: the first at once, then at most
+/// one line per interval, naming how many switches it stands for, so an L/R flip-flop near the
+/// floor shows without flooding the log.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChannelSwitchLog {
+    total: u64,
+    unlogged: u64,
+    last_log_ns: Option<u64>,
+}
+
+impl ChannelSwitchLog {
+    /// One push observed: the channel chosen before it (`prev`) and after it (`chosen`), at the
+    /// callback timestamp `now_ns`. Returns `Some(n)` when a log line goes out now, `n` being the
+    /// switches it stands for (this one included); `None` for no switch or a suppressed one. A
+    /// timestamp that goes backwards reads as a long gap (the u64 difference wraps, as in the C++),
+    /// so it logs rather than hides a switch.
+    pub fn observe(
+        &mut self,
+        prev: usize,
+        chosen: usize,
+        now_ns: u64,
+        interval_ns: u64,
+    ) -> Option<u64> {
+        if chosen == prev {
+            return None;
+        }
+        self.total += 1;
+        self.unlogged += 1;
+        if let Some(last) = self.last_log_ns {
+            if now_ns.wrapping_sub(last) < interval_ns {
+                return None;
+            }
+        }
+        self.last_log_ns = Some(now_ns);
+        Some(std::mem::take(&mut self.unlogged))
+    }
+
+    /// Every switch seen, logged or not (the diag line's `channel_switches=`).
+    pub fn total(&self) -> u64 {
+        self.total
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,6 +568,63 @@ mod tests {
             "the oldest are dropped"
         );
         assert_eq!(picker.clusters(), &[DOCK_CHANNEL_PICK_MAX_MARKERS as u64]);
+    }
+
+    const S: u64 = 1_000_000_000;
+
+    #[test]
+    fn the_first_switch_logs_at_once_and_a_no_switch_push_is_nothing() {
+        let mut log = ChannelSwitchLog::default();
+        assert_eq!(log.observe(0, 0, 5 * S, 10 * S), None);
+        assert_eq!(log.total(), 0);
+        assert_eq!(log.observe(0, 1, 6 * S, 10 * S), Some(1));
+        assert_eq!(log.total(), 1);
+    }
+
+    #[test]
+    fn switches_inside_the_interval_are_counted_and_carried_to_the_next_line() {
+        let mut log = ChannelSwitchLog::default();
+        assert_eq!(log.observe(0, 1, 100 * S, 10 * S), Some(1));
+        assert_eq!(
+            log.observe(1, 0, 103 * S, 10 * S),
+            None,
+            "inside the interval"
+        );
+        assert_eq!(log.observe(0, 1, 109 * S, 10 * S), None, "still inside");
+        assert_eq!(
+            log.observe(1, 1, 109 * S + 5, 10 * S),
+            None,
+            "no switch, no line"
+        );
+        assert_eq!(
+            log.observe(1, 0, 110 * S + 1, 10 * S),
+            Some(3),
+            "the two suppressed switches plus this one"
+        );
+        assert_eq!(log.total(), 4);
+        assert_eq!(
+            log.observe(0, 1, 110 * S + 2, 10 * S),
+            None,
+            "a fresh interval"
+        );
+        assert_eq!(log.observe(1, 0, 120 * S + 1, 10 * S), Some(2));
+        assert_eq!(log.total(), 6);
+    }
+
+    #[test]
+    fn exactly_one_interval_later_logs() {
+        let mut log = ChannelSwitchLog::default();
+        assert_eq!(log.observe(0, 1, 50 * S, 10 * S), Some(1));
+        assert_eq!(log.observe(1, 0, 60 * S - 1, 10 * S), None);
+        assert_eq!(log.observe(0, 1, 60 * S, 10 * S), Some(2));
+    }
+
+    #[test]
+    fn a_timestamp_going_backwards_logs_rather_than_hides() {
+        let mut log = ChannelSwitchLog::default();
+        assert_eq!(log.observe(0, 1, 50 * S, 10 * S), Some(1));
+        assert_eq!(log.observe(1, 0, 40 * S, 10 * S), Some(1));
+        assert_eq!(log.total(), 2);
     }
 
     #[test]
