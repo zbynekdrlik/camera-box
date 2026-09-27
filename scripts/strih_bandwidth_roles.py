@@ -9,6 +9,8 @@ preview is accepted. Two receiver roles per camera:
     it (releases the NDI receiver, blanks the source) while nothing shows it and reconnects on show.
   * MONITOR twin (`MV NDI camN`, genlock_monitor=True): the #501 low-bandwidth receiver of the SAME
     sender, ALWAYS connected, rendered by the built-in multiview through an `MV <scene>` twin scene.
+    During an E2E run the hold takes it OFF THE WIRE (E2E_TWIN_HOLD: genlock off + audio-only), so the
+    run measures the program path at the pre-roles uplink load; its multiview cell is blank meanwhile.
 
 The built-in multiview must never render a scene that holds a full program-path input (directly or
 through a nested scene) -- `Multiview::Update` calls obs_source_inc_showing on every scene it renders,
@@ -43,6 +45,18 @@ E2E_HOLD_TTL_S = 4 * 3600
 E2E_HOLD_FUTURE_SKEW_S = 60
 GENLOCK_MONITOR_KEY = "genlock_monitor"
 TWIN_PREFIX = "MV "
+# DistroAV `ndi_bw_mode` values (vendor/distroav/src/ndi-source.cpp PROP_BW_*; pinned by the pytest).
+NDI_BW_LOWEST = 1
+NDI_BW_AUDIO_ONLY = 2
+# The E2E hold takes every monitor twin OFF THE WIRE for the run (obs_phase2.py connect-on-show --hold):
+# genlock off + audio-only bandwidth. With genlock_fifo on, DistroAV's #150 lockdown forces a monitor
+# twin back to LOWEST on EVERY settings update, so an audio-only write alone never sticks; outside the
+# lockdown audio-only stays and DistroAV's own receiver reset drops the video. The twin's NDI sender
+# name is never touched (an empty name would stop its receiver thread for good).
+E2E_TWIN_HOLD = {"genlock_fifo": False, "ndi_bw_mode": NDI_BW_AUDIO_ONLY}
+# A genlocked monitor twin on the wire: what the restore puts back for it. With genlock on, the
+# lockdown owns the bandwidth and pins it to LOWEST itself.
+TWIN_ON_WIRE = {"genlock_fifo": True, "ndi_bw_mode": NDI_BW_LOWEST}
 # The private scene setting the vendored multiview reads: the twin cell stands in for this scene.
 MULTIVIEW_TARGET_KEY = "camera_box_multiview_target"
 # A fleet camera sender (`CAM<n> (usb)`, `CAM<n> (30p)`, ...) -- the only program-path senders.
@@ -304,6 +318,70 @@ def role_update_needed(effective, desired):
     return False
 
 
+# --- the E2E twin hold (pure; applied by obs_phase2.py connect-on-show --hold/--restore) ------------
+
+def is_monitor_twin_input(name, settings):
+    """A role-marked monitor twin INPUT: the `MV ` twin name AND the genlock_monitor role flag (both
+    written by apply_bandwidth_roles). An `MV ` input without the role, or a monitor flag on a
+    non-twin name, is not one."""
+    return is_twin(name) and bool((settings or {}).get(GENLOCK_MONITOR_KEY))
+
+
+def twin_hold_targets(settings_by_input):
+    """The monitor twin input names the E2E hold takes off the wire (sorted)."""
+    return sorted(n for n, s in (settings_by_input or {}).items() if is_monitor_twin_input(n, s))
+
+
+def _genlock_on(settings):
+    # genlock_fifo DEFAULTS to true in this DistroAV build (ndi_source_getdefaults), so an absent key
+    # is a genlocked input.
+    return bool((settings or {}).get("genlock_fifo", True))
+
+
+def twin_is_held(settings):
+    """True iff these settings are a monitor twin HELD off the wire by the E2E hold: the role flag,
+    genlock off, audio-only bandwidth. The ONE predicate every consumer uses to read a twin as held by
+    design (the launch-time role apply, obs_phase2.hidden_by_design)."""
+    s = settings or {}
+    return (bool(s.get(GENLOCK_MONITOR_KEY)) and not _genlock_on(s)
+            and s.get("ndi_bw_mode") == NDI_BW_AUDIO_ONLY)
+
+
+def twin_hold_original(effective):
+    """The values the restore puts back on a twin, recorded from its EFFECTIVE settings BEFORE the hold
+    writes: a genlocked twin (and one that already reads HELD, e.g. a leftover whose state file was
+    lost) gets TWIN_ON_WIRE -- the lockdown owns its bandwidth; a twin that was not genlocked keeps its
+    own bandwidth. Never records the held values as an original."""
+    eff = effective or {}
+    already_held = not _genlock_on(eff) and eff.get("ndi_bw_mode") == NDI_BW_AUDIO_ONLY
+    if already_held or _genlock_on(eff):
+        return dict(TWIN_ON_WIRE)
+    return {"genlock_fifo": False, "ndi_bw_mode": int(eff.get("ndi_bw_mode", 0))}
+
+
+def twin_restore_values(original):
+    """The settings the restore writes (and verifies) for a recorded twin original. A genlocked
+    original -- or a HELD-shaped one (a hand-edited or older state file), which is never restored as
+    held -- comes back on the wire: TWIN_ON_WIRE plus the monitor ROLE, because the lockdown pins LOWEST
+    only for a genlock_monitor source (any other recorded bandwidth, or a twin that lost the flag, could
+    never read back). An original that was not genlocked gets its own bandwidth."""
+    o = original or {}
+    held_shape = not _genlock_on(o) and o.get("ndi_bw_mode") == NDI_BW_AUDIO_ONLY
+    if _genlock_on(o) or held_shape:
+        return dict(TWIN_ON_WIRE, **{GENLOCK_MONITOR_KEY: True})
+    return {"genlock_fifo": False, "ndi_bw_mode": int(o.get("ndi_bw_mode", 0))}
+
+
+def twin_main(name):
+    """'MV NDI cam3' -> 'NDI cam3' (the program-path main a twin stands for; twin_name's inverse)."""
+    return name[len(TWIN_PREFIX):] if is_twin(name) else name
+
+
+def settings_match(effective, want):
+    """True iff every key of `want` reads back in `effective` (the role_update_needed comparison)."""
+    return not role_update_needed(effective, want)
+
+
 # --- applying the roles over WS -----------------------------------------------------------------------
 
 def _scenes_module():
@@ -372,6 +450,8 @@ def apply_bandwidth_roles(obs, plan, hold_marker=E2E_HOLD_MARKER, now=None):
       2. every twin input is healed to its role settings (the sender name through the #795-safe
          read-back-verified re-enforce) -- skipped with a problem when the main has NO sender (an
          empty name would stop the twin's receiver thread) or a non-NDI input already owns the name;
+         while a FRESH E2E hold marker exists, a twin the E2E hold took off the wire (twin_is_held) is
+         left alone (reported in `twins_held`) -- the run's cleanup restores it;
       3. every scene that needs a twin (scenes_needing_twins) gets/keeps an `MV <scene>` twin mirroring
          it (rebuilt only on drift); a NEW or never-adopted twin gets the membership_on_create hand-off
          and its MULTIVIEW_TARGET_KEY; an existing adopted twin's membership is never re-imposed; a
@@ -384,8 +464,8 @@ def apply_bandwidth_roles(obs, plan, hold_marker=E2E_HOLD_MARKER, now=None):
     ss = _scenes_module()
     op = ss._obs_phase2_module()
     hold = e2e_hold_active(hold_marker, time.time() if now is None else now, E2E_HOLD_TTL_S)
-    summary = {"mains": [], "twins": [], "twin_scenes": [], "retired": [], "multiview_grid": [],
-               "problems": [], "refreshed": False, "e2e_hold": hold}
+    summary = {"mains": [], "twins": [], "twins_held": [], "twin_scenes": [], "retired": [],
+               "multiview_grid": [], "problems": [], "refreshed": False, "e2e_hold": hold}
     inputs = {i.get("inputName"): i.get("inputKind")
               for i in (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])}
     prog = [p for p in program_path_inputs(plan) if p in inputs]
@@ -415,7 +495,11 @@ def apply_bandwidth_roles(obs, plan, hold_marker=E2E_HOLD_MARKER, now=None):
         create_settings[tw] = twin_input_settings(main_eff[m])
         if tw in inputs:
             eff = ss._effective_input_settings(obs, tw)
-            if role_update_needed(eff, twin_role_settings(main_eff[m])):
+            if hold and twin_is_held(eff):
+                # the E2E hold took this twin off the wire; an OBS relaunch mid-run must not put it
+                # back (the role heal writes genlock_fifo=True). The run's cleanup restores it.
+                summary["twins_held"].append(tw)
+            elif role_update_needed(eff, twin_role_settings(main_eff[m])):
                 obs.req("SetInputSettings", {"inputName": tw, "inputSettings": twin_role_settings(main_eff[m]),
                                               "overlay": True}, ignore_err=True)
                 summary["twins"].append(tw)

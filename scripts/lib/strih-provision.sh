@@ -1749,14 +1749,6 @@ strih_lx_baked_pl1_watts() {
 # STRIH_LX_PL1_STEPDOWN_W overrides it.
 strih_lx_pl1_stepdown_watts() { printf '%s' "${STRIH_LX_PL1_STEPDOWN_W:-45}"; }
 
-# strih_rtprio_leftover_path -> the realtime-priority grant the retired setup-strih sub-step wrote
-# (issue 1357: rtprio stays OFF -- the render-tick SCHED_FIFO pin assumed a reserved core and leaked
-# FIFO + affinity to 28 NDI threads on strih-lx). setup-strih.sh removes it (self-heal) and
-# verify-strih.sh FAILs while it exists. STRIH_RTPRIO_LIMITS_FILE overrides it (the test seam).
-strih_rtprio_leftover_path() {
-  printf '%s' "${STRIH_RTPRIO_LIMITS_FILE:-/etc/security/limits.d/95-strih-genlock-rtprio.conf}"
-}
-
 # strih_lx_reboot_pending CMDLINE [LOWLATENCY_CFG] -> 0 iff the shared baseline's BOOT-time changes are
 # provisioned but not running yet: the lowlatency config drop-in exists while the running kernel
 # cmdline (CMDLINE = /proc/cmdline) carries no `preempt=full` token. The kernel, PRIME nvidia-primary

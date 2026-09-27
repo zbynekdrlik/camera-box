@@ -37,7 +37,7 @@ def test_detail_counts_sources_and_echoes_overall():
         "cg-obs sp-2_video no 2 9 0 0 0 0 0 -18.40 FAIL\n"
         "         reason: asrc residual out of band\n"
         "strih cg yes 3 7 0 0 0 0 0 8.01 PASS\n"
-        "stream NDI obs hudba yes 2 4 0 0 0 0 0 7.20 PASS\n"
+        "stream NDIA cg stream yes 2 4 0 0 0 0 0 7.20 PASS\n"
         "OVERALL: FAIL\n"
     )
     detail = mod.cg_chain_detail_from_output(out)
@@ -60,6 +60,21 @@ def test_detail_all_pass():
     assert "overall=PASS" in detail
     assert "sources_pass=2" in detail
     assert "sources_fail=0" in detail
+
+
+def test_detail_counts_an_absent_stream_input_separately():
+    # issue 1380: the stream hop reports ABSENT when its CG input is not on the stream OBS -- named
+    # in the detail, never folded into pass or fail.
+    mod = _load()
+    out = (
+        "strih cg yes 3 7 0 0 0 0 0 8.01 PASS\n"
+        "stream NDIA cg stream ABSENT\n"
+        "OVERALL: PASS\n"
+    )
+    detail = mod.cg_chain_detail_from_output(out)
+    assert "sources_pass=1" in detail
+    assert "sources_fail=0" in detail
+    assert "sources_absent=1" in detail
 
 
 def test_empty_output_is_safe():

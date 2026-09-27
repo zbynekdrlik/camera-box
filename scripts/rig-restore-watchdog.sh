@@ -87,7 +87,8 @@ REPO_SLUG="${RIG_WATCHDOG_REPO:-zbynekdrlik/camera-box}"
 # Export decision tunables consumed by rig_restore_decide.
 export RIG_CONFIRM_THRESHOLD="${RIG_CONFIRM_THRESHOLD:-2}"
 # #343/#353: REC-STRIH-TMP dropped from the default — the marker (below), not a scene name, detects a
-# stranded stream box now (recording-e2e.sh records the already-active prod scene PRO). PHASE2-PROBE
+# stranded stream box now (recording-e2e.sh records the stream development scene, issue 1380: the
+# production scene nested in it, TEST mode's STANDING program -- never a stranded scene). PHASE2-PROBE
 # stays (still a live obs_phase2 probe scene on strih). RIG_KNOWN_TEST_SCENES is now a fallback only.
 export RIG_KNOWN_TEST_SCENES="${RIG_KNOWN_TEST_SCENES:-PHASE2-PROBE}"
 export RIG_HEARTBEAT_STALE_SEC="${RIG_HEARTBEAT_STALE_SEC:-600}"

@@ -129,15 +129,14 @@ pub fn is_camera_input(name: &str) -> bool {
 }
 
 /// A program / music / SongPlayer NDI input whose audio MUST be enabled. Matched by the concrete rig
-/// naming (`sp-*_video`, `cg`, `NDI 2ME PGM`, `mbc`, `NDI obs hudba`, `NDIAr *`, `VBAN cg-resolume`).
+/// naming (`sp-*_video`, `cg`, `NDI 2ME PGM`, `mbc`, `NDIAr *`, `VBAN cg-resolume`).
 pub fn is_program_audio_input(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    const KEYS: [&str; 9] = [
+    const KEYS: [&str; 8] = [
         "sp-",
         "songplayer",
         "pgm",
         "program",
-        "hudba",
         "mbc",
         "vban",
         "ndiar",
@@ -151,7 +150,7 @@ pub fn is_program_audio_input(name: &str) -> bool {
 /// ostáva vypnuté").
 ///
 /// The cg OBS (`resolume`) is the ONLY box carrying program audio over NDI: its
-/// `sp-*`/SongPlayer/music program inputs (the 9 keys of `is_program_audio_input`) expect audio, its
+/// `sp-*`/SongPlayer/music program inputs (the 8 keys of `is_program_audio_input`) expect audio, its
 /// camera inputs expect silent, and any other input defaults to audio (a program-audio box). On the
 /// camera-chain boxes (`strih`/`stream`/`imag`) the mastered mix arrives over Dante/ASIO, NEVER over
 /// NDI, so EVERY NDI input expects silent — cameras, `cg`, `2ME PGM`, music alike; NDI audio enabled
@@ -270,7 +269,6 @@ mod tests {
             "cg",
             "NDI 2ME PGM",
             "mbc",
-            "NDI obs hudba",
             "NDIAr ppt",
             "VBAN cg-resolume",
         ] {
@@ -280,6 +278,14 @@ mod tests {
             );
         }
         assert!(!is_program_audio_input("CAM3 (usb)"));
+    }
+
+    #[test]
+    fn the_removed_stream_music_input_has_no_role_1380() {
+        // issue 1380: the owner removed the stream input `NDI obs hudba` on 27.9.2026, so the table
+        // drops its `hudba` key: the name is neither a program-audio nor a program-video role.
+        assert!(!is_program_audio_input("NDI obs hudba"));
+        assert!(!is_program_video_input(BoxClass::Stream, "NDI obs hudba"));
     }
 
     #[test]

@@ -405,11 +405,17 @@ genlock_latency_ms_from_log() {
 }
 
 # genlock_rt_pin_from_log TEXT -> "ok" if imag-nb's OBS log shows the genlock render-tick thread
-# achieved SCHED_FIFO (#484: vendor/obs-studio/libobs/obs-video.c genlock_pin_render_tick_thread,
+# achieved SCHED_FIFO (#484: vendor/obs-studio/libobs/obs-genlock-render-tick-pin.h
+# genlock_pin_render_tick_thread, included by obs-video.c,
 # Linux-only — the render tick is pinned SCHED_FIFO prio 10 on the isolated nohz_full cores so it
 # gets on-time wakeups), "failed" if the log shows the WARN-and-continue SCHED_OTHER fallback (the
 # syscall failed, almost always a missing rtprio ulimit grant) — the EXACT #572 root cause: imag-nb
 # ran an entire recording on ordinary SCHED_OTHER and lost 35 single-tick 60fps render deadlines.
+# "unpinned" (issue 1357) when the pin logged "render-tick thread not pinned: no isolated cores" -- the
+# CORRECT outcome on a box with no isolated nohz_full core (the shared baseline forbids kernel isolation),
+# where no pin and no rtprio grant is expected. "pin_failed" when the startup pin itself failed ("could
+# NOT pin render-tick thread" / "could NOT read the render-tick thread's CPU mask"): the tick runs unpinned.
+# "restore_failed" (checked FIRST) when the pin logged "... and the restore failed too": DRIFT.
 # "" (UNKNOWN/absent) when TEXT carries NEITHER line — the log was never read, or the deployed
 # build predates #484 (a stale build is a SEPARATE facet, imag_build_drift_report's dynamic
 # origin/main compare; this parser only judges the pin OUTCOME a #484-or-later build always logs
@@ -419,13 +425,36 @@ genlock_latency_ms_from_log() {
 # genlock_capability_from_log's own comment documents: `grep -q` can flip a genuine match into a
 # false non-match when the upstream `printf` is SIGPIPE'd after grep's early exit).
 genlock_rt_pin_from_log() {
-  local text="$1" ok_line failed_line
+  local text="$1" restore_failed_line ok_line unpinned_line pin_failed_line failed_line
+  # issue 1357: the pin's one LOG_ERROR (a restore that failed -- the thread may stay on the pin cores
+  # and SCHED_FIFO, the leak this issue is about) outranks every other line, even a FIFO success.
+  restore_failed_line="$(printf '%s\n' "$text" \
+    | LC_ALL=C grep -aE 'genlock: render-tick pin .* and the restore failed too' \
+    | head -1 || true)"
+  if [ -n "$restore_failed_line" ]; then
+    printf 'restore_failed\n'
+    return 0
+  fi
   # #1184: LC_ALL=C grep -a -> byte-literal, invalid-UTF-8-safe (same class as #1183).
   ok_line="$(printf '%s\n' "$text" \
     | LC_ALL=C grep -aiE 'genlock: render-tick thread set SCHED_FIFO prio [0-9]+ on the isolated core' \
     | head -1 || true)"
   if [ -n "$ok_line" ]; then
     printf 'ok\n'
+    return 0
+  fi
+  unpinned_line="$(printf '%s\n' "$text" \
+    | LC_ALL=C grep -aE 'genlock: render-tick thread not pinned: no isolated cores' \
+    | head -1 || true)"
+  if [ -n "$unpinned_line" ]; then
+    printf 'unpinned\n'
+    return 0
+  fi
+  pin_failed_line="$(printf '%s\n' "$text" \
+    | LC_ALL=C grep -aE "genlock: could NOT (pin render-tick thread|read the render-tick thread's CPU mask)" \
+    | head -1 || true)"
+  if [ -n "$pin_failed_line" ]; then
+    printf 'pin_failed\n'
     return 0
   fi
   failed_line="$(printf '%s\n' "$text" \
@@ -944,9 +973,10 @@ check_imag_report() {
   # (never read / OBS never launched); a NON-EMPTY log with NEITHER the success nor the failure
   # line is ALSO UNKNOWN (the deployed build predates #484 — imag_build_drift_report's dynamic
   # origin/main compare already flags a stale build separately; this facet stays silent rather
-  # than guessing at a pin outcome the build never attempted). Only the EXPLICIT "could NOT set
-  # ... SCHED_FIFO" line is DRIFT — the exact #572 signature (missing rtprio ulimit grant leaves
-  # the render-tick thread on ordinary SCHED_OTHER, causing occasional missed 60fps deadlines).
+  # than guessing at a pin outcome the build never attempted). Issue 1357 retired the #572 DRIFT:
+  # no OBS box grants rtprio any more (the shared baseline FAILs a grant) and the pin lands only on
+  # isolated nohz_full cores, so "not pinned" (no such core) and a pinned tick that could not get
+  # SCHED_FIFO are both the expected outcome and grade OK.
   if [ -z "$obs_log_text" ]; then
     printf '  %-22s UNKNOWN  (OBS log not read on imag-nb)\n' "genlock_rt_pin"
     unknown=$((unknown + 1))
@@ -957,9 +987,18 @@ check_imag_report() {
       ok)
         printf '  %-22s OK       (render-tick thread achieved SCHED_FIFO on the isolated core)\n' "genlock_rt_pin"
         ;;
-      failed)
-        printf '  %-22s DRIFT    (render-tick thread stuck SCHED_OTHER — missing rtprio ulimit grant, #572)\n' "genlock_rt_pin"
+      unpinned)
+        printf '  %-22s OK       (render-tick thread not pinned: no isolated cores on this box, by design -- issue 1357)\n' "genlock_rt_pin"
+        ;;
+      restore_failed)
+        printf '  %-22s DRIFT    (render-tick pin restore FAILED: the thread may stay on the pin cores / SCHED_FIFO -- see the OBS log ERROR, issue 1357)\n' "genlock_rt_pin"
         drift=$((drift + 1))
+        ;;
+      pin_failed)
+        printf '  %-22s OK       (render-tick pin FAILED at startup, the tick runs unpinned -- see the OBS log WARNING, issue 1357)\n' "genlock_rt_pin"
+        ;;
+      failed)
+        printf '  %-22s OK       (render-tick thread pinned but SCHED_OTHER: rtprio stays off on every box, issue 1357)\n' "genlock_rt_pin"
         ;;
       *)
         printf '  %-22s UNKNOWN  (no genlock RT-pin marker in the OBS log — build may predate #484)\n' "genlock_rt_pin"
@@ -1905,8 +1944,8 @@ Usage:
   SHA256 of
   `/usr/lib/x86_64-linux-gnu/obs-plugins/distroav.so` (the Linux plugin binary), the OBS log
   (`~/.config/obs-studio/logs/*.txt`, most recent file — OBS names logs `.txt`, #1151) for the genlock capability marker + the fps +
-  latency pins + the #484 render-tick SCHED_FIFO pin outcome (#572 — DRIFT if the log shows the
-  WARN-and-continue SCHED_OTHER fallback, i.e. a missing rtprio ulimit grant), and
+  latency pins + the #484 render-tick pin outcome (reported; since issue 1357 an unpinned or
+  SCHED_OTHER tick is the expected outcome, not DRIFT), and
   `journalctl -u dantesync` (#489) for the DanteSync PTP/NTP clock-lock pin.
   Optional `host=` / `user=` override the imag-nb defaults (`10.77.9.182` / `newlevel`). The
   remaining live-state pins live in vendor/README.md as `distroav_so_sha256_imag` (secondary) /

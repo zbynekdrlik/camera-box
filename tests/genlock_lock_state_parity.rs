@@ -423,7 +423,7 @@ fn c_name_is_camera_matches_the_rust_authority_1303() {
         "cg",
         "NDI 2ME PGM",
         "mbc",
-        "NDI obs hudba",
+        "NDIA cg stream",
         "NDIAr cg",
         "VBAN cg-resolume",
         "CAMERA",

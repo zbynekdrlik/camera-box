@@ -47,6 +47,15 @@ un-muted here; if it is un-muted it happens elsewhere.)
   → the StopRecord-both path DOES exist and IS auto-pressed — but ONLY by the `POST` trigger, i.e.
   only when the operator switches stream's program scene to `POST`.
 
+**Development no longer arms `PRODUCTION` (issue 1380, 27.9.2026).** Owner hard rule, verbatim:
+"nemas ti nikdy v stream obs davat do programu scenu PRO!!!!!". camera-box tooling programs the stream scene `Development` (the
+production scene `PRO` nested inside it) and NEVER puts `PRO` on program or preview: `obs_phase2.py`
+refuses it, EVENT mode leaves the stream program alone, and teardown / the restore watchdog skip a
+saved `PRO` (`.claude/rules/stream-development-scene.md`). The `PRODUCTION` trigger's condition is
+program scene == `PRO`, so a dev/CI stream started while program is `Development` no longer
+StartRecords both boxes; only the owner cutting to `PRO` arms it. This is a consequence of the
+trigger condition, not a live-verified observation.
+
 **The real root cause of the orphan (corrected — it is NOT "no off trigger"):** the OFF is a REAL,
 enabled trigger, but it is gated on **switching stream's PROGRAM SCENE to `POST`**, not on the stream
 stopping. A live operator ends a service by cutting to the `POST` scene → `POST` fires → StopRecord

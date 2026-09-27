@@ -99,6 +99,12 @@ pub mod qpsk_marker;
 // is the probe-gated `recording-verdict --qpsk-probe`.
 pub mod qpsk_probe_decision;
 
+// Issue 1367 — never downmix the measurement audio: decode the QPSK marker on EVERY channel of the
+// track and keep the lowest channel that clears the decodability floor, else the largest
+// self-consistency cluster (pure Tier-0, default features). The --qpsk-probe preflight, --av-sync,
+// the fused A/V gate and the live dock all apply this one rule.
+pub mod qpsk_channel_select;
+
 // #398 — the LIVE OBS A/V-sync dock decode logic, pure Tier-0 so the vendored C++ dock
 // (`vendor/av-sync-dock/src/camera-box-*.hpp`) can MIRROR it and a committed C++ self-test can
 // cross-check the mirror against these Rust results. Holds the streaming QPSK marker detector
@@ -107,6 +113,10 @@ pub mod qpsk_probe_decision;
 // geometry, and the Otsu threshold — all with NO probe deps, so it compiles + unit-tests on DEFAULT
 // features. The dock's OBS/quirc GLUE stays in `sync-test-output.cpp`; every DECISION lives here.
 pub mod av_sync_dock;
+// Issue 1367 — the live dock's per-channel marker decode + channel pick: the Rust reference of
+// vendor/av-sync-dock/src/camera-box-channel-pick.hpp, compared push by push with the C++ by
+// tests/qpsk_channel_pick_parity_1367.rs.
+pub mod av_sync_dock_channels;
 
 // #364 — per-camera COLOUR-correctness gate (pure decision + sampler). Iterates the SAME
 // `colour_scale` table/geometry, samples each reference patch's mean colour from a frame
@@ -390,6 +400,12 @@ pub mod genlock_n1_depth;
 // gate in `tests/genlock_grid_parity_1355.rs`.
 pub mod genlock_grid;
 
+// Issue 1357 — which cores the vendored genlock render tick may be pinned to: only the cores that
+// are both isolated and nohz_full, never a fallback pair. Crate-root + std-only (Tier-0); the C port
+// in obs-genlock-render-tick-pin.h (included by obs-video.c) is held identical by the committed gate
+// `tests/genlock_render_tick_pin_1357.rs`.
+pub mod genlock_render_tick_pin;
+
 // #1355 part 2 — the grid-drift bench: the deep N==1 stream `NDI 2ME PGM` FIFO fed by the
 // strih-lx sender, simulated tick by tick with the production decision functions under the
 // measured rig statistics; reproduces the live 31/32 depth flip on the 1970 grid and proves the
@@ -402,6 +418,15 @@ pub mod genlock_grid_bench;
 // std-only (Tier-0 verifiable); the C twin `vendor/obs-studio/libobs/obs-genlock-wall-step.h` is held
 // identical by the committed parity gate `tests/genlock_wall_step_parity_1372.rs`.
 pub mod genlock_wall_step;
+
+// Issue 1367 (ROZHODNUTÉ 5857354949) — the genlock audio-buffering FLOOR: every OBS launch starts
+// with the same mix-window buffering (85 ms at 48 kHz, raised on the first audio tick) and OBS's own
+// dynamic increase stays active above it, so the stream `mbc` ASRC level (its A/V position) no
+// longer depends on a startup race; plus the band that keeps the #1355 absolute level target within
+// the level servo's reach. Crate-root + std-only (Tier-0); the C twin
+// `vendor/obs-studio/libobs/obs-genlock-audio-buffering.h` is held identical by the committed
+// parity gate `tests/genlock_audio_buffering_parity_1367.rs`.
+pub mod genlock_audio_buffering;
 
 // Issue 1372 — the two-clock WALL-STEP bench: the logged −51 ms fleet date step replayed against the
 // render tick + sender stamp, the LOCK indicator's qpc_drift verdict and the stream `mbc` ASRC (a

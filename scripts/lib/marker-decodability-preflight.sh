@@ -15,11 +15,14 @@
 # the A/V-offset gate fails on cluster_samples=0.
 #
 # This preflight captures ~25 s of the stream mbc track (the SAME probe-recording hop the #748
-# audio-presence step uses), extracts the mbc audio track to a small mono-f32 WAV on the stream box
-# via ffmpeg, pulls it to dev1, and runs the AUDIO-ONLY QPSK decodability probe from the
-# probe-tools artifact ($PROBE_BIN_DIR/recording-verdict --qpsk-probe). The probe reuses the SAME
-# demod as --av-sync (no emit-log/video pairing) and prints ONE JSON line
-# {preamble_screens,candidates,cluster_samples,crc_ok,crc_fail,peak_dbfs,verdict}. This lib holds
+# audio-presence step uses), extracts the mbc audio track to a small f32 WAV on the stream box via
+# ffmpeg with EVERY channel kept, pulls it to dev1, and runs the AUDIO-ONLY QPSK decodability probe
+# from the probe-tools artifact ($PROBE_BIN_DIR/recording-verdict --qpsk-probe). The probe reuses the
+# SAME demod as --av-sync (no emit-log/video pairing), decodes each channel, keeps the best one
+# (issue 1367: never a mono downmix — the stereo mbc track carries the marker on L and R ~10 ms
+# apart, and their sum is undecodable), and prints ONE JSON line
+# {preamble_screens,candidates,cluster_samples,crc_ok,crc_fail,peak_dbfs,verdict,channels,
+# chosen_channel,per_channel:[...]} — the leading keys are the chosen channel's. This lib holds
 # the PURE decision logic (thresholds, the remote command builders, the JSON field parse, the
 # class-named messages) so it is Tier-0 unit-testable; the recording-e2e.sh [4b3/8] step is a thin
 # caller. Decodability is PRIMARY (a loud-but-decodable capture is OK); the #1323 −20 bar is a
@@ -30,8 +33,10 @@
 # marker_decodability_default_min_clusters -> the canonical minimum self-consistency cluster size
 # (4). Calibrated on the real 16.9 recordings: a healthy 25 s window clusters >= 7, a drowned one
 # <= 3, so 4 leaves margin on BOTH sides (never false-fail a good run, still catch the bad one).
-# This is the ONE source of the 4 literal — the [4b3/8] step's default-arg site references it, and
-# the same value is the Rust probe's --qpsk-min-clusters default (kept in lock-step by the tests).
+# The shell's ONE source of the 4 literal — the [4b3/8] step's default-arg site references it. The
+# Rust side is qpsk_probe_decision::DEFAULT_MIN_CLUSTERS (the --qpsk-min-clusters default, the
+# --av-sync channel pick and the live dock's CB_MARKER_MIN_CLUSTERS), and the test file
+# tests/qpsk_channel_pick_parity_1367.rs pins this function's value to it (issue 1367).
 marker_decodability_default_min_clusters() {
   printf '%s\n' "4"
 }
@@ -44,14 +49,23 @@ marker_decodability_default_probe_secs() {
 }
 
 # marker_decodability_extract_wav_ps REC_WIN WAV_WIN TRACK -> the PowerShell command text (for
-# win_ssh_run) that extracts audio TRACK of the probe recording REC_WIN to a mono f32 @ 48 kHz WAV
-# at WAV_WIN on the stream box. Mono mix + 48 kHz match what the probe re-reads (a passthrough
-# there); pcm_f32le keeps the marker amplitude intact. `-y` overwrites a stale WAV; stderr merged so
-# a failure surfaces in the captured output.
+# win_ssh_run) that extracts audio TRACK of the probe recording REC_WIN to an f32 @ 48 kHz WAV at
+# WAV_WIN on the stream box, with EVERY channel of the track kept (no `-ac`, no pan/amix): issue 1367
+# measured the stereo mbc track carrying the marker on L and R 10.17 ms apart, and a mono downmix of
+# the two copies is undecodable while each channel alone decodes — the probe picks the best channel.
+# 48 kHz matches what the probe re-reads (a passthrough there); pcm_f32le keeps the marker amplitude
+# intact. `-y` overwrites a stale WAV; stderr merged so a failure surfaces in the captured output.
 marker_decodability_extract_wav_ps() {
   local rec="$1" wav="$2" track="$3"
-  printf 'ffmpeg -hide_banner -nostats -y -i "%s" -map 0:a:%s -ac 1 -ar 48000 -c:a pcm_f32le "%s" 2>&1' \
+  printf 'ffmpeg -hide_banner -nostats -y -i "%s" -map 0:a:%s -ar 48000 -c:a pcm_f32le "%s" 2>&1' \
     "$rec" "$track" "$wav"
+}
+
+# marker_decodability_top_level JSON -> the probe JSON line with its `"per_channel":[...]` array
+# removed, so a field parse can only ever read the top-level (chosen-channel) value whatever the key
+# order (issue 1367). The per-channel objects hold no `]`, so the array ends at its first `]`.
+marker_decodability_top_level() {
+  printf '%s' "$1" | sed -E 's/"per_channel":[ ]*\[[^]]*\]//g'
 }
 
 # marker_decodability_delete_ps WIN_PATH -> best-effort delete of the throwaway WAV on the stream
@@ -65,7 +79,8 @@ marker_decodability_delete_ps() {
 # exit when absent (an unparseable probe output is NEVER treated as a pass — the caller routes an
 # empty parse to the unreadable diagnostic, mirroring audio_preflight_parse_max_db).
 marker_decodability_parse_num() {
-  local json="$1" key="$2" v
+  local json key="$2" v
+  json="$(marker_decodability_top_level "$1")"
   v="$(printf '%s' "$json" \
        | grep -aoE "\"${key}\":[ ]*-?[0-9]+(\.[0-9]+)?" \
        | head -1 \
@@ -78,7 +93,8 @@ marker_decodability_parse_num() {
 # marker_decodability_parse_verdict JSON -> the verdict word (OK/UNDECODED/SILENT/POLLUTED). Empty +
 # non-zero exit when absent.
 marker_decodability_parse_verdict() {
-  local json="$1" v
+  local json v
+  json="$(marker_decodability_top_level "$1")"
   v="$(printf '%s' "$json" \
        | grep -aoE '"verdict":[ ]*"[A-Z]+"' \
        | head -1 \
@@ -86,6 +102,21 @@ marker_decodability_parse_verdict() {
        | head -1)"
   [ -z "$v" ] && return 1
   printf '%s\n' "$v"
+}
+
+# marker_decodability_channel_note JSON -> "chosen channel C of N (cluster ch0=a ch1=b)" from the
+# probe's per-channel line (issue 1367), so the run log shows WHICH channel the verdict came from and
+# what every channel read. Empty (exit 0) for a line without a pick (an older probe binary). The
+# per_channel entries are in channel order, so the Nth ch_cluster_samples is channel N-1.
+marker_decodability_channel_note() {
+  local json="$1" chosen n clusters
+  chosen="$(marker_decodability_parse_num "$json" chosen_channel)" || return 0
+  n="$(marker_decodability_parse_num "$json" channels)" || return 0
+  clusters="$(printf '%s' "$json" \
+       | grep -aoE '"ch_cluster_samples":[ ]*[0-9]+' \
+       | grep -aoE '[0-9]+$' \
+       | awk '{ printf "%sch%d=%s", (NR > 1 ? " " : ""), NR - 1, $0 }' || true)"
+  printf 'chosen channel %s of %s (cluster %s)\n' "$chosen" "$n" "$clusters"
 }
 
 # marker_decodability_is_ok VERDICT -> "true"/"false". Only the literal OK verdict proceeds; every

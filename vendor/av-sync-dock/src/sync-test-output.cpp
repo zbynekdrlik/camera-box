@@ -36,6 +36,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "peak-finder.hpp"
 #include "camera-box-qr.hpp"
 #include "camera-box-audio.hpp"
+#include "camera-box-channel-pick.hpp"
 #include "camera-box-video.hpp"
 #include "camera-box-frame-copy.hpp"
 #include "camera-box-decode-mailbox.hpp"
@@ -247,9 +248,14 @@ struct sync_test_output
 	 * densest-cluster estimator (survives the CRC-4 false-decode flood the offline path also fights,
 	 * where a plain 1 s median would not). Mirrors `src/av_sync_dock.rs`; touched only on the audio
 	 * thread. `cb_qr` is a SECOND quirc context sized to the better-scaled top-band decode (below).
-	 * The top band itself is gathered into the decode job's reused buffer (issue 1367). */
+	 * The top band itself is gathered into the decode job's reused buffer (issue 1367).
+	 * `cb_audio_dec` decodes every audio channel with its own decoder and keeps one channel
+	 * (camera-box-channel-pick.hpp, issue 1367), never their average. */
 	struct quirc *cb_qr = nullptr;
-	camerabox::StreamingMarkerDecoder *cb_audio_dec = nullptr;
+	camerabox::ChannelMarkerPicker *cb_audio_dec = nullptr;
+	/* issue 1367: switches of the paired audio channel (a switch moves the measured offset by
+	 * ~10 ms) -- counted, and when to log them (camera-box-channel-pick.hpp). Audio thread only. */
+	camerabox::CbChannelSwitchLog cb_switch_log;
 	camerabox::RollingOffsetCluster cb_offset_cluster = camerabox::RollingOffsetCluster::dock();
 	uint64_t cb_audio_pushed = 0;
 
@@ -1389,6 +1395,131 @@ static void cb_apply_pairing_recovery(struct sync_test_output *st,
 	     (unsigned long long)(rec.window_ns / 1000000000ull));
 }
 
+/* issue 1367: the audio decode's per-channel picker (camera-box-channel-pick.hpp) for the output's
+ * current channel layout, at most MAX_AV_PLANES channels. A new layout starts the decode over, and
+ * the absolute sample count with it. Returns the number of channels to push, or 0 when there is
+ * nothing to decode. Audio thread only, like its caller. */
+static size_t cb_ensure_audio_picker(struct sync_test_output *st)
+{
+	const size_t nch = st->audio_channels < MAX_AV_PLANES ? st->audio_channels : MAX_AV_PLANES;
+	if (st->cb_audio_dec && st->cb_audio_dec->channels() != nch) {
+		delete st->cb_audio_dec;
+		st->cb_audio_dec = nullptr;
+		st->cb_audio_pushed = 0;
+	}
+	if (!st->cb_audio_dec) {
+		size_t sig = camerabox::cb_signal_len(st->audio_sample_rate, CAMERA_BOX_AUDIO_F_HZ,
+		                                      CAMERA_BOX_AUDIO_C);
+		if (sig == 0 || nch == 0)
+			return 0;
+		// per channel: window 3 marker lengths, dedup gap 1, pick window + floor from the header.
+		st->cb_audio_dec = new camerabox::ChannelMarkerPicker(camerabox::ChannelMarkerPicker::dock(
+			nch, st->audio_sample_rate, CAMERA_BOX_AUDIO_F_HZ, CAMERA_BOX_AUDIO_C));
+	}
+	return nch;
+}
+
+/* issue 1367: a switch of the paired audio channel moves the measured offset by ~10 ms (R is
+ * 10.17 ms behind L on the stereo mbc input) and the offset cluster is not reset, so it is logged
+ * when it happens: the first switch at once, then at most one line per diag interval, naming how
+ * many switches it stands for (the decision is CbChannelSwitchLog, tested in the header's
+ * mirrors). The diag line's channel_switches= is the running total. Audio thread only; `prev` is
+ * the channel chosen before this callback's push. */
+static void cb_note_channel_switch(struct sync_test_output *st, size_t prev, const struct audio_data *frames)
+{
+	uint64_t switches = 0;
+	if (!st->cb_switch_log.observe(prev, st->cb_audio_dec->chosen, frames->timestamp,
+				       CAMERA_BOX_DIAG_LOG_INTERVAL_NS, &switches))
+		return;
+	const std::string clusters = camerabox::cb_channel_clusters_text(st->cb_audio_dec->clusters);
+	blog(LOG_INFO, "av-sync-dock: marker channel %zu -> %zu (channel_clusters=%s, %llu switch(es) since the last line)",
+	     prev, st->cb_audio_dec->chosen, clusters.c_str(), (unsigned long long)switches);
+}
+
+/* The camera-box audio path's ~10 s tick (issue 1367 split it out of st_raw_audio_camera_box): the
+ * #1177 staleness evaluation, the #690 diag line and the #1153 dead-pairing recovery, in that order.
+ * Audio thread only; st->cb_audio_dec is set (the caller returns earlier otherwise). */
+static void cb_audio_diag_tick(struct sync_test_output *st, const struct audio_data *frames)
+{
+	/* #690: rate-limited (~10s) INFO diagnostic -- answers, from the OBS log alone, whether the
+	 * demod sees nothing (preambles=0), sees candidates but they're garbage (preambles>0, crc_ok=0),
+	 * decodes fine but never ring-hits (crc_ok>0, ring_hit=0 — video QR isn't decoding the same
+	 * frame ids), or ring-hits but never clusters tight enough to lock (ring_hit>0, locked=no). Also
+	 * carries the video-QR pair rate so a low decode% doesn't need a separate investigation to see.
+	 * Low-noise by construction: one line per ~10s of live audio, never per-callback. */
+	if (st->cb_diag_last_log_ns == 0 ||
+	    frames->timestamp - st->cb_diag_last_log_ns >= CAMERA_BOX_DIAG_LOG_INTERVAL_NS) {
+		st->cb_diag_last_log_ns = frames->timestamp;
+		const uint64_t vseen = st->cb_video_frames_seen.load(std::memory_order_relaxed);
+		const uint64_t vdec = st->cb_video_frames_decoded.load(std::memory_order_relaxed);
+		const double vpct = vseen > 0 ? 100.0 * (double)vdec / (double)vseen : 0.0;
+
+		/* #1177: evaluate measurement-input staleness at this SAME ~10s cadence -- the audio thread
+		 * keeps ticking in EVENT mode even though the marker/QR decode counters (video_decoded +
+		 * crc_ok) do not. On the boundary crossing, fire a one-shot log line + the sync_stale_changed
+		 * signal so the dock stops presenting the last locked offset as if it were live. */
+		const camerabox::CbDockStaleTransition strans = st->cb_input_staleness.observe(
+			vdec, st->cb_audio_dec->stats.crc_ok, frames->timestamp,
+			camerabox::CB_DOCK_INPUT_STALE_NS);
+		const bool input_stale = st->cb_input_staleness.is_stale();
+		if (strans == camerabox::CbDockStaleTransition::EnteredStale) {
+			blog(LOG_WARNING,
+			     "av-sync-dock: measurement input LOST -> STALE (no marker/QR decode advance for "
+			     ">=%llus -- EVENT mode? cam2 QPSK/QR off) -- display frozen on last offset, no longer live",
+			     (unsigned long long)(camerabox::CB_DOCK_INPUT_STALE_NS / 1000000000ull));
+			signal_stale_changed(st->context, true);
+		} else if (strans == camerabox::CbDockStaleTransition::RecoveredLive) {
+			blog(LOG_INFO,
+			     "av-sync-dock: measurement input RESTORED -> LIVE (marker/QR decode resumed)");
+			signal_stale_changed(st->context, false);
+		}
+
+		/* issue 1367: video_frames counts the frames the decode worker processed; decode_dropped
+		 * (appended at the END, existing tokens unchanged) the frames the video thread replaced in
+		 * the mailbox while the worker was still decoding, so video_frames + decode_dropped is every
+		 * frame OBS delivered; publish_max_us the longest st_raw_video (the video-output thread's
+		 * remaining cost) since the previous diag line. preambles/crc_ok/crc_fail are summed over
+		 * every audio channel (one decoder each); marker_channel is the channel whose markers are
+		 * paired (0-based), channel_clusters each channel's self-consistency cluster over the pick
+		 * window and channel_switches the running count of pick switches, appended last. */
+		const std::string channel_clusters = camerabox::cb_channel_clusters_text(st->cb_audio_dec->clusters);
+		blog(LOG_INFO,
+		     "av-sync-dock: diag video_frames=%llu video_decoded=%llu(%.1f%%) "
+		     "audio_samples=%llu preambles=%llu crc_ok=%llu crc_fail=%llu "
+		     "ring_hit=%llu ring_miss=%llu locked=%s state=%s decode_dropped=%llu publish_max_us=%llu "
+		     "marker_channel=%zu channel_clusters=%s channel_switches=%llu",
+		     (unsigned long long)vseen, (unsigned long long)vdec, vpct,
+		     (unsigned long long)st->cb_audio_pushed,
+		     (unsigned long long)st->cb_audio_dec->stats.preamble_screens_passed,
+		     (unsigned long long)st->cb_audio_dec->stats.crc_ok,
+		     (unsigned long long)st->cb_audio_dec->stats.crc_fail,
+		     (unsigned long long)st->cb_ring_hits, (unsigned long long)st->cb_ring_misses,
+		     st->cb_lock_state ? "yes" : "no", input_stale ? "STALE" : "LIVE",
+		     (unsigned long long)st->cb_decode_mailbox.dropped(),
+		     (unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen,
+		     channel_clusters.c_str(), (unsigned long long)st->cb_switch_log.total);
+
+		/* #1153: dead-pairing recovery, evaluated at the SAME ~10s cadence. When the pairing has
+		 * been dead for a full epoch (no meaningful ring-hit advance, no genuine lock) while
+		 * video QRs and audio candidates BOTH keep flowing, reset every piece of in-dock pairing
+		 * state and re-acquire from scratch -- the in-process poison a large video-latency step
+		 * leaves behind must never make a manual OBS restart the only cure. The epoch deltas in
+		 * the evidence line discriminate the poison class from the log alone: crc_ok near the
+		 * ~1/256 chance floor of the preamble delta = the marker waveform is degraded upstream
+		 * of the dock; a healthy crc_ok rate with a dead ring = in-dock pairing state (which
+		 * this reset clears). Input-dead states (EVENT mode) never fire -- they are the
+		 * staleness detector's domain above. Cumulative counters/stats are deliberately NOT
+		 * reset, so the diag line stays monotonic across recoveries. */
+		const camerabox::CbDockPairingRecovery rec = st->cb_pairing_watchdog.observe(
+			vdec, st->cb_audio_dec->stats.preamble_screens_passed,
+			st->cb_audio_dec->stats.crc_ok, st->cb_ring_hits, st->cb_lock_state,
+			frames->timestamp, camerabox::CB_DOCK_PAIRING_DEAD_NS,
+			camerabox::CB_DOCK_PAIRING_MIN_RING_HITS);
+		if (rec.fire)
+			cb_apply_pairing_recovery(st, rec);
+	}
+}
+
 /* #398 fix (Audio Index + Latency never locked): camera-box's OWN audio decode path, used once the
  * video QR has put us in camera-box mode. norihiro's `st_raw_audio*` demod cannot decode our marker
  * at c=1 (its `c1 = c/2` = 0 collapses the preamble finder; its 6-symbol read can't recover the
@@ -1400,38 +1531,26 @@ static void cb_apply_pairing_recovery(struct sync_test_output *st,
  * (Audio Index) emitted — so the dock shows a number only when it is real, never a false blip. */
 static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_data *frames)
 {
-	if (!st->cb_audio_dec) {
-		size_t sig = camerabox::cb_signal_len(st->audio_sample_rate, CAMERA_BOX_AUDIO_F_HZ,
-		                                      CAMERA_BOX_AUDIO_C);
-		if (sig == 0)
-			return;
-		// window ≥ 3 marker lengths so any marker is wholly present; dedup gap one marker length.
-		st->cb_audio_dec = new camerabox::StreamingMarkerDecoder(
-			st->audio_sample_rate, CAMERA_BOX_AUDIO_F_HZ, CAMERA_BOX_AUDIO_C,
-			camerabox::CB_QPSK_THRESHOLD, sig * 3, (uint64_t)sig);
-	}
+	/* issue 1367: decode the marker on EVERY channel and keep one, never their average. The stereo
+	 * mbc input carries the marker on L and R 10.17 ms apart, and their sum is undecodable. The
+	 * picker applies the offline gate's one channel rule (the lowest channel that clears the
+	 * decodability floor, else the largest cluster) and returns only the chosen channel's markers.
+	 * A non-finite sample stays on its own channel: each channel has its own decoder, whose kernel
+	 * reads it as silence (#1153). */
+	const size_t nch = cb_ensure_audio_picker(st);
+	if (nch == 0)
+		return;
 
-	// Mix all channels to mono (the marker survives the mix; the QPSK decode is amplitude-tolerant),
-	// matching the offline `recording-verdict --av-sync` `-ac 1` extraction.
 	size_t nf = frames->frames;
-	std::vector<float> mono(nf, 0.0f);
-	size_t ch = st->audio_channels;
-	for (size_t i = 0; i < nf; i++) {
-		float acc = 0.0f;
-		for (size_t cix = 0; cix < ch; cix++) {
-			/* #1153: skip non-finite samples per channel -- a poisoned upstream channel must
-			 * never wipe a marker riding another channel through the mono mixdown (and the
-			 * decode kernel's prefix sums must never see NaN/Inf at all). */
-			float s = ((float *)frames->data[cix])[i];
-			if (std::isfinite(s))
-				acc += s;
-		}
-		mono[i] = ch ? acc / (float)ch : 0.0f;
-	}
+	const float *planes[MAX_AV_PLANES];
+	for (size_t cix = 0; cix < nch; cix++)
+		planes[cix] = (const float *)frames->data[cix];
 
+	const size_t prev_channel = st->cb_audio_dec->chosen;
 	const uint64_t base = st->cb_audio_pushed; // absolute index of this callback's first sample
-	std::vector<std::pair<uint64_t, uint8_t>> markers = st->cb_audio_dec->push(mono.data(), nf);
+	std::vector<std::pair<uint64_t, uint8_t>> markers = st->cb_audio_dec->push(planes, nf);
 	st->cb_audio_pushed += (uint64_t)nf;
+	cb_note_channel_switch(st, prev_channel, frames);
 
 	const double sr = (double)st->audio_sample_rate;
 	for (size_t k = 0; k < markers.size(); k++) {
@@ -1705,77 +1824,7 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 		}
 	}
 
-	/* #690: rate-limited (~10s) INFO diagnostic -- answers, from the OBS log alone, whether the
-	 * demod sees nothing (preambles=0), sees candidates but they're garbage (preambles>0, crc_ok=0),
-	 * decodes fine but never ring-hits (crc_ok>0, ring_hit=0 — video QR isn't decoding the same
-	 * frame ids), or ring-hits but never clusters tight enough to lock (ring_hit>0, locked=no). Also
-	 * carries the video-QR pair rate so a low decode% doesn't need a separate investigation to see.
-	 * Low-noise by construction: one line per ~10s of live audio, never per-callback. */
-	if (st->cb_diag_last_log_ns == 0 ||
-	    frames->timestamp - st->cb_diag_last_log_ns >= CAMERA_BOX_DIAG_LOG_INTERVAL_NS) {
-		st->cb_diag_last_log_ns = frames->timestamp;
-		const uint64_t vseen = st->cb_video_frames_seen.load(std::memory_order_relaxed);
-		const uint64_t vdec = st->cb_video_frames_decoded.load(std::memory_order_relaxed);
-		const double vpct = vseen > 0 ? 100.0 * (double)vdec / (double)vseen : 0.0;
-
-		/* #1177: evaluate measurement-input staleness at this SAME ~10s cadence -- the audio thread
-		 * keeps ticking in EVENT mode even though the marker/QR decode counters (video_decoded +
-		 * crc_ok) do not. On the boundary crossing, fire a one-shot log line + the sync_stale_changed
-		 * signal so the dock stops presenting the last locked offset as if it were live. */
-		const camerabox::CbDockStaleTransition strans = st->cb_input_staleness.observe(
-			vdec, st->cb_audio_dec->stats.crc_ok, frames->timestamp,
-			camerabox::CB_DOCK_INPUT_STALE_NS);
-		const bool input_stale = st->cb_input_staleness.is_stale();
-		if (strans == camerabox::CbDockStaleTransition::EnteredStale) {
-			blog(LOG_WARNING,
-			     "av-sync-dock: measurement input LOST -> STALE (no marker/QR decode advance for "
-			     ">=%llus -- EVENT mode? cam2 QPSK/QR off) -- display frozen on last offset, no longer live",
-			     (unsigned long long)(camerabox::CB_DOCK_INPUT_STALE_NS / 1000000000ull));
-			signal_stale_changed(st->context, true);
-		} else if (strans == camerabox::CbDockStaleTransition::RecoveredLive) {
-			blog(LOG_INFO,
-			     "av-sync-dock: measurement input RESTORED -> LIVE (marker/QR decode resumed)");
-			signal_stale_changed(st->context, false);
-		}
-
-		/* issue 1367: video_frames counts the frames the decode worker processed; decode_dropped
-		 * (appended at the END, existing tokens unchanged) the frames the video thread replaced in
-		 * the mailbox while the worker was still decoding, so video_frames + decode_dropped is every
-		 * frame OBS delivered; publish_max_us the longest st_raw_video (the video-output thread's
-		 * remaining cost) since the previous diag line. */
-		blog(LOG_INFO,
-		     "av-sync-dock: diag video_frames=%llu video_decoded=%llu(%.1f%%) "
-		     "audio_samples=%llu preambles=%llu crc_ok=%llu crc_fail=%llu "
-		     "ring_hit=%llu ring_miss=%llu locked=%s state=%s decode_dropped=%llu publish_max_us=%llu",
-		     (unsigned long long)vseen, (unsigned long long)vdec, vpct,
-		     (unsigned long long)st->cb_audio_pushed,
-		     (unsigned long long)st->cb_audio_dec->stats.preamble_screens_passed,
-		     (unsigned long long)st->cb_audio_dec->stats.crc_ok,
-		     (unsigned long long)st->cb_audio_dec->stats.crc_fail,
-		     (unsigned long long)st->cb_ring_hits, (unsigned long long)st->cb_ring_misses,
-		     st->cb_lock_state ? "yes" : "no", input_stale ? "STALE" : "LIVE",
-		     (unsigned long long)st->cb_decode_mailbox.dropped(),
-		     (unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000));
-
-		/* #1153: dead-pairing recovery, evaluated at the SAME ~10s cadence. When the pairing has
-		 * been dead for a full epoch (no meaningful ring-hit advance, no genuine lock) while
-		 * video QRs and audio candidates BOTH keep flowing, reset every piece of in-dock pairing
-		 * state and re-acquire from scratch -- the in-process poison a large video-latency step
-		 * leaves behind must never make a manual OBS restart the only cure. The epoch deltas in
-		 * the evidence line discriminate the poison class from the log alone: crc_ok near the
-		 * ~1/256 chance floor of the preamble delta = the marker waveform is degraded upstream
-		 * of the dock; a healthy crc_ok rate with a dead ring = in-dock pairing state (which
-		 * this reset clears). Input-dead states (EVENT mode) never fire -- they are the
-		 * staleness detector's domain above. Cumulative counters/stats are deliberately NOT
-		 * reset, so the diag line stays monotonic across recoveries. */
-		const camerabox::CbDockPairingRecovery rec = st->cb_pairing_watchdog.observe(
-			vdec, st->cb_audio_dec->stats.preamble_screens_passed,
-			st->cb_audio_dec->stats.crc_ok, st->cb_ring_hits, st->cb_lock_state,
-			frames->timestamp, camerabox::CB_DOCK_PAIRING_DEAD_NS,
-			camerabox::CB_DOCK_PAIRING_MIN_RING_HITS);
-		if (rec.fire)
-			cb_apply_pairing_recovery(st, rec);
-	}
+	cb_audio_diag_tick(st, frames);
 }
 
 static void st_raw_audio(void *data, struct audio_data *frames)

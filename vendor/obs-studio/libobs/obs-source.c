@@ -38,6 +38,7 @@
 #include "obs.h"
 #include "obs-internal.h"
 #include "obs-genlock-grid.h" /* camera-box #1355: the ONE per-second genlock grid */
+#include "obs-genlock-audio-buffering.h" /* camera-box issue 1367: the audio-buffering floor */
 
 #define get_weak(source) ((obs_weak_source_t *)source->context.control)
 
@@ -4852,14 +4853,28 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	 * compensator (ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS of smoothed error outside the restore's exit
 	 * band -> fall back to the live depth). Say so LOUDLY, once per event -- it means this source's
 	 * buffer does not follow the stretch, and its A/V level is again the per-launch value. */
+	/* camera-box issue 1367: since the genlock audio-buffering FLOOR (obs-genlock-audio-buffering.h)
+	 * every launch starts with the buffering the absolute target was sized for, so this fallback is
+	 * only a logged SAFETY NET. The line names the global buffering at that moment against the
+	 * floor: above it, a late source raised the buffering (its own loud line says which); at it, the
+	 * cause is not the buffering. total_buffering_ticks is the mixer's; one unlocked int read, telemetry
+	 * like the #800 dump. */
 	if (source->asrc.level_fallback_pending) {
 		source->asrc.level_fallback_pending = false;
 		blog(LOG_WARNING,
 		     "asrc: source '%s' level target %.1fms UNREACHABLE after %d windows outside +/-%.0fms -- "
-		     "fell back to the live depth %.1fms (fallbacks=%u) (#1355)",
+		     "fell back to the live depth %.1fms (fallbacks=%u) (#1355) total_audio_buffering=%dms "
+		     "floor=%dms (issue 1367: a safety net -- above the floor a late source raised the buffering, at it "
+		     "the cause is not the buffering)",
 		     obs_source_get_name(source), source->asrc.level_fallback_from_ms,
 		     ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS, ASRC_LEVEL_RESTORE_ARM_MS, source->asrc.level_target_ms,
-		     source->asrc.level_fallback_count);
+		     source->asrc.level_fallback_count,
+		     (int)(genlock_audio_buffering_ticks_ns((uint32_t)obs->audio.total_buffering_ticks, AUDIO_OUTPUT_FRAMES,
+							    out_sample_rate) /
+			   1000000ULL),
+		     (int)(genlock_audio_buffering_ticks_ns((uint32_t)obs->audio.floor_buffering_ticks, AUDIO_OUTPUT_FRAMES,
+							    out_sample_rate) /
+			   1000000ULL));
 	}
 
 	/* Refresh the compensation over an ASRC_COMPENSATION_DISTANCE_MS window every callback --

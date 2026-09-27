@@ -325,6 +325,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/connect-on-show-hold.sh"
 # shellcheck source=scripts/lib/genlock-park.sh
 . "$HERE/lib/genlock-park.sh"
+# issue 1380: the stream development scene (the production scene nested in it) + its seeder.
+# shellcheck source=scripts/lib/stream-dev-scene.sh
+. "$HERE/lib/stream-dev-scene.sh"
 # #758 item 1 — the fleet-wide minute-0 preflight: a named, loud, self-expiring exclusion for a
 # box that's known-offline for a reason outside this harness's control (cambox-offline-ack.sh),
 # plus the per-box service-active/emitter-count/stray-unit check (preflight-fleet-check.sh).
@@ -2349,7 +2352,7 @@ interruptible_sleep() {
 # override still wins.
 STRIH_PROG_SCENE="${STRIH_PROG_SCENE:-$CAMERA_STRIH_SCENE}"   # prod scene showing the SOURCE camera
 STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-$CAMERA_STRIH_SOURCE}" # the prod input behind that scene (#246 burn-off target)
-STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-PRO}"          # #343: record the ALREADY-ACTIVE prod scene (NDI 2ME PGM already warm) — no cold re-activation
+STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-$STREAM_DEV_SCENE_DEFAULT}" # issue 1380: the stream DEVELOPMENT scene (nests the prod scene; NDI 2ME PGM stays warm, #343)
 STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # the prod input the scene shows
 # #691 belt-and-braces (OPTIONAL, empty by default): the known-good calibrated prod
 # genlock_latency_ms_src for $STREAM_PROG_SOURCE, from av-sync-last.json on the stream
@@ -3127,6 +3130,10 @@ fi
 echo "[4/8] OBS prod-scene routing — strih program='$STRIH_PROG_SCENE' ($CAMERA_NAME via $STRIH_PROG_SOURCE),"
 echo "      stream program='$STREAM_PROG_SCENE' (strih feed via '$STREAM_PROG_SOURCE')"
 echo "      #183: forcing genlock_preload=$TEST_PRELOAD on both recorded prod inputs for the test"
+# issue 1380: ensure the stream development scene nests the production scene BEFORE any program
+# scene is touched (idempotent, operator-wins, never writes to the production scene; a missing
+# production scene aborts here, loud, instead of routing the stream box anywhere else).
+stream_dev_scene_ensure "$HERE" "$STREAM" "${OBS_PASSWORD:-}" "$STREAM_PROG_SCENE" "$STREAM_PRODUCTION_SCENE_DEFAULT"
 if [ -n "$GENLOCK_TEST_LATENCY_MS" ]; then
   echo "      #358: forcing $GENLOCK_TEST_LATENCY_SOURCE genlock_latency_ms_src=$GENLOCK_TEST_LATENCY_MS for delivery-verify (explicit override)"
 else
@@ -3137,12 +3144,14 @@ STRIH_OUT=$(python3 "$HERE/obs_phase2.py" prod-scene --host "$STRIH" \
   --upstream "$STRIH_UPSTREAM_NDI" --test-preload "$TEST_PRELOAD")
 # stream's upstream is strih's program NDI name (just printed above) — force preload=1 on the
 # stream box's 'NDI 2ME PGM' input (the prod copy of 31 the issue calls out).
-# #343: record the ALREADY-ACTIVE prod scene 'PRO' (NDI 2ME PGM already warm) — NO --ensure-source.
-# A fresh ephemeral scene + --ensure-source would cold-activate the 450ms-FIFO NDI 2ME PGM on the
-# graphics thread → SetCurrentProgramScene blocks >60s (#328 timeout, proof can't run). With program
-# already on PRO, prod_scene's `curr_prog == target` branch skips the switch entirely → no hang.
-# PRECONDITION: the stream box runs on its prod 'PRO' scene in normal operation; if it has DRIFTED
-# off PRO, prod_scene takes the bounded switch and fails LOUD at the #328 timeout (no silent hang).
+# #343: record a scene whose NDI 2ME PGM is ALREADY warm — NO --ensure-source. A fresh ephemeral
+# scene + --ensure-source would cold-activate the 450ms-FIFO NDI 2ME PGM on the graphics thread →
+# SetCurrentProgramScene blocks >60s (#328 timeout, proof can't run). issue 1380: the recorded scene
+# is the stream DEVELOPMENT scene, whose one item is the production scene itself, so the input is the
+# SAME warm receiver whether program was already on the development scene (TEST mode's standing
+# state: prod_scene's `curr_prog == target` branch skips the switch) or still on the production scene
+# (the bounded switch only re-parents already-active sources). Development never programs the
+# production scene itself (owner request 27.9.2026), and the recording content is unchanged.
 # #691: --test-latency-ms is passed ONLY when GENLOCK_TEST_LATENCY_MS was explicitly set —
 # an unset flag lets obs_phase2.py's resolve_test_latency_ms auto-derive the effective
 # value from the box's own current latency at call time (see the #358/#691 block above).
@@ -3368,7 +3377,8 @@ echo "[4b3/8] #1324 marker-decodability preflight — the mbc QPSK marker MUST b
 # proves NOT-flooded, but neither can tell a DECODABLE marker from a chain at a plausible level whose
 # marker is not decodable (drowned / off-axis mic / wrong Dante channel / format mismatch). Make a
 # short probe recording on the stream box (same hop as [4b2/8]), extract the mbc audio track to a
-# small mono-f32 WAV, pull it to dev1, and run the AUDIO-ONLY QPSK decodability probe from the
+# small f32 WAV with every channel kept (issue 1367: never a downmix), pull it to dev1, and run the
+# AUDIO-ONLY QPSK decodability probe (it decodes each channel and keeps the best) from the
 # probe-tools artifact — decodability is PRIMARY, so a loud-but-decodable capture is OK. FAIL LOUD
 # and abort before recording begins so an undecodable chain never burns ~40 min on cluster_samples=0
 # (runs 622403283 / 977889848, 16.9.2026). Every knob is env-overridable; a preflight guarding the
@@ -3440,11 +3450,13 @@ else
   _md_cluster="$(marker_decodability_parse_num "$_md_json" cluster_samples || echo '?')"
   _md_preamble="$(marker_decodability_parse_num "$_md_json" preamble_screens || echo '?')"
   _md_peak="$(marker_decodability_parse_num "$_md_json" peak_dbfs || echo '?')"
+  # issue 1367: which channel of the stereo mbc track the verdict came from (empty on an old probe)
+  _md_chan="$(marker_decodability_channel_note "$_md_json" || true)"
   if [ "$(marker_decodability_is_ok "$_md_verdict")" != "true" ]; then
-    echo "ERROR: $(marker_decodability_fail_message "$_md_verdict" "$_md_cluster" "$AUDIO_DECODABILITY_MIN_CLUSTERS" "$_md_preamble" "$_md_peak")" >&2
+    echo "ERROR: $(marker_decodability_fail_message "$_md_verdict" "$_md_cluster" "$AUDIO_DECODABILITY_MIN_CLUSTERS" "$_md_preamble" "$_md_peak")${_md_chan:+ [${_md_chan}]}" >&2
     exit 1
   fi
-  echo "    ok: mbc QPSK marker DECODABLE (cluster_samples ${_md_cluster} >= ${AUDIO_DECODABILITY_MIN_CLUSTERS}, preamble_screens ${_md_preamble}, peak ${_md_peak} dBFS)"
+  echo "    ok: mbc QPSK marker DECODABLE (cluster_samples ${_md_cluster} >= ${AUDIO_DECODABILITY_MIN_CLUSTERS}, preamble_screens ${_md_preamble}, peak ${_md_peak} dBFS${_md_chan:+, ${_md_chan}})"
 fi
 
 echo "[4c/8] #365 frozen-camera gate — every strih raw NDI input must be updating (not a frozen feed)"
@@ -3548,6 +3560,7 @@ timeout "${FROZEN_CAM_PIXEL_REPORT_TIMEOUT_S:-180}" python3 "$HERE/frozen-camera
     --warm-settle "${FROZEN_CAM_WARM_SETTLE_S:-3}" >/dev/null 2>&1 || frozen_pixel_rc=$?
 if   [ "$frozen_pixel_rc" -eq 0 ];   then frozen_pixel_verdict=PASS
 elif [ "$frozen_pixel_rc" -eq 124 ]; then frozen_pixel_verdict=TIMEOUT
+elif [ "$frozen_pixel_rc" -eq 2 ];   then frozen_pixel_verdict=ERROR   # a refused scene select / guard load failure, issue 1380
 else                                      frozen_pixel_verdict=FROZEN
 fi
 echo "    [frozen-camera-gate] #1233 pixel-hash REPORT-ONLY: ${frozen_pixel_verdict} (content-dependent screenshot check — NOT the abort signal)"

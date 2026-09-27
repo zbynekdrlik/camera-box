@@ -5,8 +5,8 @@
 //! (dantesync clock discipline + fleet sync). #800 found its NDI source
 //! `RESOLUME-SNV (cg-obs)` drifting ~+65 ms/h against the rig all day because
 //! the box carried no dantesync. This module is the DETECTION half of the
-//! ticket's acceptance criterion #4 ("24h skew-latency flat ±20 ms, no
-//! drops/duplicates on the 'cg' / 'NDI obs hudba' inputs"): given ONE resolume
+//! ticket's acceptance criterion #4 (24h skew-latency flat ±20 ms, no
+//! drops/duplicates on the resolume feed inputs, e.g. 'cg'): given ONE resolume
 //! input's per-source [`jitter_audit::AuditSummary`] window (produced by the
 //! existing `genlock-jitter-report` pipeline), it returns a PASS/FAIL verdict
 //! against the acceptance bounds.

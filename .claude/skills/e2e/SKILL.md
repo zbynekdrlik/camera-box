@@ -496,7 +496,10 @@ scripts/rig-mode.sh event    # rig BACK to clean broadcast (stop QR + print OBS 
   burn run_id is fixed by the box role — strih 911002 (bottom-left) / stream 911004 (bottom-right) —
   NOT env. Relaunch the box's OBS only if it is wedged or pass-through:
   `scripts/launch-obs-genlock.sh --box {strih|stream} --force` (env-free; genlock latency is the
-  build const, floor 3 ms). Then confirm the PHASE2-PROBE scene + native-1080p recording (#225).
+  build const, floor 3 ms). Then confirm the stream program is the `Development` scene (issue 1380:
+  the production scene `PRO` nested in it; owner hard rule: our tooling NEVER programs `PRO`, EVENT
+  leaves the stream program alone — `.claude/rules/stream-development-scene.md`) + native-1080p
+  recording (#225).
 
 **EVENT mode (pinned — the #246 guard):**
 - **cam2:** stop the painter via its PID file (NOT `pkill -f frame-probe` — a shell whose cmdline
@@ -528,7 +531,8 @@ binary (a copy of `frame-probe` at `/usr/local/bin/cam2-painter`, `--duration-se
 `rig-mode.sh event` + a manual supervisor checklist BOTH said "clean" while a QR was live on air —
 the user caught it by EYE. So EVENT mode no longer trusts a process/flag check or anyone's memory:
 after the burn-off + painter-stop above, `do_event` runs the rig-test LEDGER cleanup then the
-8-item `event_mode_assert` (→ `scripts/event_assert.py`, the pure decision), fails LOUD on any
+8-item `event_mode_assert` (→ `scripts/event_assert.py`, the pure decision; since issue 1380 it
+also prints the stream program scene as a report-only line, never an item), fails LOUD on any
 item, and posts a Slovak confirmation to the owner's Discord thread on BOTH pass AND fail (#724).
 The two decisive additions this ticket demanded, which a supervisor must expect to see run:
 
@@ -2246,8 +2250,9 @@ subcommands the harness itself calls, directly from dev1, against the idle rig:
 
 1. `python3 scripts/obs_phase2.py rig-busy-check --strih-host <strih> --stream-host <stream>
    --password ""` first — confirm idle (busy=false) before touching prod OBS state.
-2. Exercise the real code path directly, e.g. `prod-scene --host <stream> --program-scene PRO
-   --test-latency-source "NDI 2ME PGM" --test-latency-ms <N>` (omit `--upstream` to skip the
+2. Exercise the real code path directly, e.g. `prod-scene --host <stream> --program-scene Development
+   --test-latency-source "NDI 2ME PGM" --test-latency-ms <N>` (issue 1380: development never
+   programs `PRO`; seed the scene first with `dev-scene --host <stream>`; omit `--upstream` to skip the
    unrelated preload-force and isolate just the one setting under test) immediately followed by
    `record --host <stream> --action start` (the #627 liveness check reports pass/fail in ~4s).
    `record --action stop` right after to end the test recording; `teardown --host <stream>`
@@ -2495,7 +2500,7 @@ cam5/6/7 powered off). Two fixes, both in `scripts/lib/cambox-offline-ack.sh`:
 ## CG-chain receiver-side verdict (#1300) — `scripts/cg-chain-verify.sh`
 
 The FIFO-audit-level equivalent of this harness for the CG chain (SongPlayer `SP-*` → cg OBS /
-RESOLUME-SNV → strih `cg` / stream `NDI obs hudba`). It runs the cadence-agnostic
+RESOLUME-SNV → strih `cg`; the stream hop only on request, issue 1380). It runs the cadence-agnostic
 `resolume_playback` verdict per hop off one aligned `genlock-fifo audit` window + the per-source
 `asrc:` ppm residual, prints a per-hop table + overall PASS/FAIL, and exits non-zero (3) on FAIL.
 This is what ACCEPTS the songplayer genlock series (songplayer 146–151) from the RECEIVER side
@@ -2511,7 +2516,10 @@ The per-hop log tail is supplied explicitly (the tool ships no untested ssh/MCP 
 export CG_CHAIN_CG_OBS_LOG=/tmp/cg-obs-obs.log     # from win-resolume MCP FileRead
 export CG_CHAIN_STRIH_CMD='ssh -o StrictHostKeyChecking=no newlevel@10.77.9.202 "powershell -c \"gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName | select -last 4000\""'
 export CG_CHAIN_STREAM_CMD='ssh -o StrictHostKeyChecking=no newlevel@10.77.9.204 "powershell -c \"gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName | select -last 4000\""'
-scripts/cg-chain-verify.sh                          # one window, all 3 hops → table + OVERALL, exit 3 on FAIL
+scripts/cg-chain-verify.sh                          # one window, default hops cg-obs + strih → table + OVERALL, exit 3 on FAIL
+# the stream hop only on request (its old input `NDI obs hudba` was removed 27.9.2026); an input with no
+# audit line is a named ABSENT row, never a FAIL:
+CG_CHAIN_STREAM_SRC='NDIA cg stream' scripts/cg-chain-verify.sh --hops "cg-obs strih stream"
 
 # 24 h soak → CSV (issue 1294 §8 flatness plot), then share the CSV:
 scripts/cg-chain-verify.sh --soak-hours 24 --interval-s 300 --csv /tmp/cg-chain-soak.csv

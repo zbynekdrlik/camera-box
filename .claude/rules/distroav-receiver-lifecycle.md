@@ -332,7 +332,7 @@ force-required, escalate through a BOUNDED BY-URL ladder before falling to by-na
 - **(a) fleet map:** after `NDI_FLEET_AFTER_NO_URL_CYCLES`=3 consecutive finder-blind resets, the pure
   `ndi_fleet_url_for_name(name, port_index, buf, buflen)` synthesizes the address from the naming
   contract (`CAMn (usb)` ↔ `10.77.9.6n:5961`, cf. `scripts/camera-set.sh`) — returns FALSE for any
-  non-camera name so `cg`/`NDI obs hudba` are NEVER given a guessed URL — cycling ports 5961..5963
+  non-camera name so `cg`/`NDIA cg stream` are NEVER given a guessed URL — cycling ports 5961..5963
   (`NDI_FLEET_PORT_CANDIDATES`) one-per-reset across consecutive frame-less fleet binds (bounded, never an
   in-reset socket loop — deliberately NO raw sockets, which would drag winsock2 into a CI-first-compile
   Windows build). The BY-URL fallback choice is the pure `ndi_fallback_bind_mode_1096(...)` ladder.

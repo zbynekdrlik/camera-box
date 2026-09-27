@@ -8,9 +8,9 @@
 //! the pairing state, so an OBS restart was the only cure. The fix: a pure, parity-mirrored
 //! epoch watchdog observed at the #690 diag tick, whose fire resets ALL in-dock pairing state
 //! (ring, cluster, offset history, audit tracker, decoder rolling window) and logs one
-//! PAIRING-RECOVER evidence line; plus non-finite-sample hardening in the mixdown + the shared
-//! decode kernel (a NaN prefix-sum poison is the one upstream latch class the dock can neutralize
-//! itself).
+//! PAIRING-RECOVER evidence line; plus non-finite-sample hardening in the shared decode kernel (a
+//! NaN prefix-sum poison is the one upstream latch class the dock can neutralize itself). The mono
+//! mixdown it also hardened was removed by issue 1367: every channel now has its own decoder.
 //!
 //! This file covers ONLY the OBS-glue half (`sync-test-output.cpp`, which pulls in libobs/quirc
 //! and is NOT compiled by this repo's Linux CI) plus source-presence of the mirrored seams —
@@ -59,13 +59,25 @@ fn pairing_watchdog_is_wired_into_the_diag_tick_and_resets_all_pairing_state() {
     }
 }
 
+/// #1153 guarded the old mono mixdown (skip a non-finite sample per channel, so one poisoned
+/// channel could never wipe a marker riding another). Issue 1367 removed the mixdown: every channel
+/// now has its own decoder (`camera-box-channel-pick.hpp`), so a poisoned channel cannot touch
+/// another at all, and the kernel reads a non-finite sample as silence
+/// (`cpp_mirror_carries_the_watchdog_and_the_kernel_sanitize` below).
 #[test]
-fn mono_mixdown_skips_non_finite_samples_per_channel() {
+fn a_poisoned_channel_cannot_touch_another_channel() {
+    let pick = squish(&repo_file(
+        "vendor/av-sync-dock/src/camera-box-channel-pick.hpp",
+    ));
+    assert!(
+        pick.contains("fresh.push_back(decoders[i].push(planes[i], frames));"),
+        "camera-box-channel-pick.hpp: each channel must feed its OWN decoder (issue 1367) — a \
+         shared sum would let a poisoned channel wipe a marker riding another (#1153)"
+    );
     let src = squish(&repo_file(DOCK_OUTPUT));
     assert!(
-        src.contains("if (std::isfinite(s)) acc += s;"),
-        "{DOCK_OUTPUT}: #1153 per-channel non-finite guard is gone from the mono mixdown — a \
-         poisoned upstream channel would again wipe a marker riding another channel. Re-apply."
+        !src.contains("acc += s;"),
+        "{DOCK_OUTPUT}: a channel sum is back in the audio path (issue 1367)"
     );
 }
 

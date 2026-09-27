@@ -44,7 +44,7 @@
 #endif
 
 #if defined(__linux__) && !defined(_WIN32)
-/* camera-box #484: headers for the genlock render-tick SCHED_FIFO + CPU-affinity pin. */
+#include "obs-genlock-render-tick-pin.h" /* camera-box #484 / issue 1357: the render-tick CPU pin */
 #include <errno.h>
 #include <pthread.h>
 #include <sched.h>
@@ -918,100 +918,6 @@ static uint64_t genlock_next_deadline(uint64_t cur_time, uint64_t interval_ns)
 	return deadline;
 }
 
-#if defined(__linux__) && !defined(_WIN32)
-/* camera-box #484: pin the genlock render-tick thread (THIS graphics thread, which drives
- * video_sleep -> genlock_next_deadline) to the kernel-reserved isolated cores under SCHED_FIFO.
- *
- * imag-nb's kernel cmdline reserves cpu10,11 (`nohz_full=10,11` inside `isolcpus=2-11`, #483) for
- * exactly this ONE timing-critical thread, so its wakeups are not jittered by kernel housekeeping.
- * Direct analogue of camera-box's src/affinity.rs (#289) capture-thread pin.
- *
- * SAFETY — the priority is LOW and every failure is WARN-and-CONTINUE. A HIGH-priority runaway
- * FIFO thread in this ~106-thread OBS process can lock out kernel housekeeping and HANG a headless
- * box (worse than the frame hitches this prevents), so we use a low priority and, on ANY syscall
- * failure (no rtprio grant, no such core, ...), log LOUD and keep running SCHED_OTHER. Never abort,
- * never retry-loop, never hang — mirrors the robust fallback in src/affinity.rs. Requires an rtprio
- * ulimit grant for the (unprivileged) desktop user OBS runs as — provisioned by scripts/setup-imag.sh
- * (/etc/security/limits.d/95-imag-genlock-rtprio.conf). */
-#define GENLOCK_RT_PRIORITY 10 /* LOW FIFO prio: on-time wakeups without starving the kernel */
-
-/* Parse a Linux cpulist ("10-11" / "10,11" / "10", trailing newline tolerated) into `set`. */
-static void genlock_parse_cpulist_into_set(const char *s, cpu_set_t *set)
-{
-	const char *p = s;
-	while (*p) {
-		while (*p == ' ' || *p == '\t' || *p == '\n' || *p == ',')
-			p++;
-		if (*p < '0' || *p > '9')
-			break;
-		/* Cap digit accumulation at CPU_SETSIZE so a pathological/corrupted /sys read (an
-		 * implausibly long digit run) cannot integer-overflow `a`/`b` — once the value is
-		 * already out of CPU_SET's range, stop accumulating but keep consuming the digits so
-		 * parsing of the rest of the list is not thrown off. */
-		int a = 0;
-		while (*p >= '0' && *p <= '9') {
-			if (a < CPU_SETSIZE)
-				a = a * 10 + (*p - '0');
-			p++;
-		}
-		int b = a;
-		if (*p == '-') {
-			p++;
-			b = 0;
-			while (*p >= '0' && *p <= '9') {
-				if (b < CPU_SETSIZE)
-					b = b * 10 + (*p - '0');
-				p++;
-			}
-		}
-		for (int c = a; c <= b && c >= 0 && c < CPU_SETSIZE; c++)
-			CPU_SET(c, set);
-	}
-}
-
-static void genlock_pin_render_tick_thread(void)
-{
-	cpu_set_t set;
-	CPU_ZERO(&set);
-
-	/* Derive the target cores ROBUSTLY from the kernel's reserved nohz_full cpulist (like
-	 * src/affinity.rs reads /sys), falling back to the hardcoded {10,11} pair (#483's
-	 * nohz_full=10,11 reservation) if /sys is unreadable/empty so the pin still lands. */
-	char buf[256];
-	FILE *f = fopen("/sys/devices/system/cpu/nohz_full", "r");
-	if (f) {
-		if (fgets(buf, sizeof(buf), f))
-			genlock_parse_cpulist_into_set(buf, &set);
-		fclose(f);
-	}
-	if (CPU_COUNT(&set) == 0) {
-		CPU_SET(10, &set);
-		CPU_SET(11, &set);
-	}
-
-	if (pthread_setaffinity_np(pthread_self(), sizeof(set), &set) != 0)
-		blog(LOG_WARNING,
-		     "genlock: could NOT pin render-tick thread to the isolated cores (errno %d) "
-		     "— continuing SCHED_OTHER (#484)",
-		     errno);
-	else
-		blog(LOG_INFO, "genlock: render-tick thread pinned to the isolated nohz_full cores "
-			       "(#483/#484)");
-
-	struct sched_param param;
-	memset(&param, 0, sizeof(param));
-	param.sched_priority = GENLOCK_RT_PRIORITY;
-	if (sched_setscheduler(0, SCHED_FIFO, &param) != 0)
-		blog(LOG_WARNING,
-		     "genlock: could NOT set render-tick thread SCHED_FIFO prio %d (errno %d — "
-		     "missing rtprio ulimit grant?) — continuing SCHED_OTHER (#484)",
-		     GENLOCK_RT_PRIORITY, errno);
-	else
-		blog(LOG_INFO,
-		     "genlock: render-tick thread set SCHED_FIFO prio %d on the isolated core (#484)",
-		     GENLOCK_RT_PRIORITY);
-}
-#endif /* __linux__ */
 /* ---- end genlock --------------------------------------------------------- */
 
 static inline void video_sleep(struct obs_core_video *video, uint64_t *p_time, uint64_t interval_ns)
@@ -1022,7 +928,17 @@ static inline void video_sleep(struct obs_core_video *video, uint64_t *p_time, u
 					    : cur_time + interval_ns;
 	int count;
 
-	if (os_sleepto_ns(t)) {
+#if defined(__linux__) && !defined(_WIN32)
+	/* camera-box issue 1357: the render-tick pin is held only while the tick sleeps (a late tick
+	 * does not sleep, so it does not pin either). */
+	const bool tick_pinned = genlock_tick_pin_sleep_begin(t);
+#endif
+	const bool slept = os_sleepto_ns(t);
+#if defined(__linux__) && !defined(_WIN32)
+	genlock_tick_pin_sleep_end(tick_pinned);
+#endif
+
+	if (slept) {
 		*p_time = t;
 		count = 1;
 	} else {
@@ -1448,8 +1364,8 @@ void *obs_graphics_thread(void *param)
 	os_set_thread_name("libobs: graphics thread");
 
 #if defined(__linux__) && !defined(_WIN32)
-	/* camera-box #484: pin THIS thread (the genlock render-tick driver) to the isolated cores
-	 * SCHED_FIFO (low prio). WARN-and-CONTINUE on failure — never blocks OBS startup. */
+	/* camera-box #484 / issue 1357: decide the render-tick pin (the isolated nohz_full cores, or none)
+	 * once; video_sleep holds it only while the tick sleeps. WARN-and-CONTINUE on failure. */
 	genlock_pin_render_tick_thread();
 #endif
 

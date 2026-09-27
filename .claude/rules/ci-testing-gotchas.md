@@ -57,6 +57,14 @@ report-only decoupling seam that added the `[4d1/8]` word is `scripts/lib/mv-fps
 `mv_fps_preflight_term_is_report_only` per-box term predicate — strih report-only while issue 1260
 open, imag strict, flipped back to strict in the PR closing issue 1260.)
 
+**The sweep reads SCRIPT TEXT, so it is also blind to a change in what a heredoc builder EMITS**
+(issue 1382). Several tests assert on the OUTPUT of a builder such as `painter_launch_remote`
+(`tests/rig_mode.rs` `painter_launch()`), not on `rig-mode.sh` itself. Removing backticks from a
+comment in an unquoted `<<REMOTE` heredoc changed no literal count in the source, yet the emitted
+script gained text that a negated `!p.contains(...)` on the output could have caught. When you change
+a heredoc builder, also grep the tests that call it for negated output assertions. Run the one or two
+real test files that drive it with plain rustc (the stub-rlib recipe below).
+
 ## Adding a STEP between the merge call and `exit "$GATE"`: the occurrence-count sweep is BLIND to the 703 byte-DISTANCE window too (#1265)
 
 Sibling blind-spot to the #1263 negated-region one above, hit live on #1265. `tests/harness_e2e_execute_verdict_703.rs` does NOT anchor on a literal — it slices a FIXED BYTE WINDOW from the
@@ -1421,6 +1429,47 @@ any template placeholder filled from a variable.
 - **A recursive `grep -r` whose path list includes `.claude` is refused** by the airuleset
   credential-store hook, which reads it as a recursive read of the store's parent directory. Use
   the Grep tool for repo-wide searches that must cover `.claude/rules/`.
+- **Pick a free version slot from the sibling lanes' backups, not from origin/dev alone** (issue
+  1367). A sibling lane's bump lives only on its `refs/autopilot-wip/<branch>` until integration.
+  `git ls-remote origin 'refs/autopilot-wip/*'`, fetch the newest into a temporary ref namespace,
+  read their `Cargo.toml` version, then delete those temporary refs (`git update-ref --stdin` with
+  `delete` lines) so the shared `.git` is left clean.
+
+## A plain-rustc replica can run SEVERAL real crate-root modules AND the real `tests/*.rs` files (issue 1367)
+
+Extends the stub-rlib recipe above for a change spread over a few crate-root modules that reference
+each other with `crate::`. Write one scratch `lib.rs`:
+- `extern crate self as camera_box;` at the top, so a real test file's `use camera_box::…` resolves
+  to this crate.
+- `#[path = "<worktree>/src/<m>.rs"] pub mod <m>;` for each real module.
+- `#[cfg(test)] #[path = "<worktree>/tests/<f>.rs"] mod <f>;` for each real test file.
+
+Then `CARGO_MANIFEST_DIR=<worktree> rustc --edition 2021 --test lib.rs` (the env var serves a test's
+`env!` fixture path) and `clippy-driver --edition 2021 --test -D warnings lib.rs`.
+- A module that derives `serde::{Serialize, Deserialize}` has no serde crate here. Include a COPY with
+  the `use serde::…` line and the `, Serialize, Deserialize` derive entries sed-stripped. The derive
+  is attribute-only, so the behaviour under test is unchanged.
+- The module's own `#[cfg(test)] mod tests` runs too.
+- Worked example: the issue-1367 `qpsk_marker` + `qpsk_probe_decision` + `qpsk_channel_select`
+  replica with `tests/qpsk_channel_select_fixture_1367.rs` and `tests/harness_qpsk_probe_decision_1324.rs`.
+- The same modules plus a small std-only `main` can also run the real ffprobe/ffmpeg argument
+  builders on real clips, which checks the probe-gated glue shape without cargo.
+- Two test files that both `#[path = "support/…"] mod x;` the same helper become ONE crate in the
+  replica, and clippy reports `clippy::duplicate_mod`. That lint cannot fire in the real layout
+  (each `tests/*.rs` is its own crate), so pass `-A clippy::duplicate_mod` to the replica's
+  clippy-driver only, and lint each std-only test file as its own crate too
+  (`clippy-driver --edition 2021 --test -D warnings tests/<f>.rs`) — that run catches a helper one
+  including crate leaves unused (dead_code), which the merged replica hides.
+- Worked example with a C++ mirror: the issue-1367 dock channel pick
+  (`src/av_sync_dock_channels.rs` + `tests/qpsk_channel_pick_parity_1367.rs`, which compiles
+  `vendor/av-sync-dock/test/channel-pick-parity.cpp` with g++ at test time).
+- Patch scripts: write them to a file (Write tool) and run them in their own Bash call. A python
+  heredoc that edits files in the same call as other commands is often refused by the worktree
+  guard as "too complex to verify", and a Write-tool file loses trailing spaces at line ends, so a
+  replace pattern must never depend on one.
+- The `Edit` tool drops a TRAILING space of `new_string` too (issue 1382): an edit whose strings
+  ended in `cam2 ` wrote `cam2"rig-mode.sh test"`, gluing two arguments into one. End every
+  old_string/new_string on a non-space character, and `git diff` the line after the edit.
 
 ## GOTCHA — a python harness test that passes on dev1 can be reaching the LIVE rig (issue 1372)
 
@@ -1445,3 +1494,67 @@ Typed inline in a worktree lane, the isolation guard REFUSES that command ("runs
 (`set -euo pipefail`, `cd` to the worktree, the one `sudo -n unshare -n ...` line), then run
 `bash /abs/nonet.sh` as its own call. The run is the same, and a test that needed the network now
 fails instead of passing.
+
+## Emitted PowerShell can be RUN locally, not only read as text (issue 1372)
+
+Several libs emit Windows PowerShell as text (the dantesync upgrade/tray programs, genlock deploy
+programs). There is no pwsh on dev1, so their tests read that text. That misses logic bugs; live
+case: a first cut that raced a relaunched tray, and a lock violation called "untouched".
+
+To run the text locally:
+- Unpack the `powershell-7.x-linux-x64` release tarball into the scratchpad.
+- Dot-source the emitted program from a harness that defines `[CmdletBinding()]` stub FUNCTIONS
+  for the cmdlets it calls. A function outranks the cmdlet.
+- Model the node's state in the stubs.
+- Parse the full program with `[System.Management.Automation.Language.Parser]::ParseFile`.
+- Worked example: `tests/pwsh/run_dantesync_tray_swap_1372.sh`. It needs `PWSH`, is not in CI,
+  and exits 2 without pwsh; it never skips.
+
+Limits:
+- pwsh 7 is not Windows PowerShell 5.1. In 5.1, `Get-FileHash` is a script FUNCTION: a read
+  failure is a non-terminating error that returns a NULL hash, while pwsh 7's cmdlet throws. So
+  every hash comparison in emitted text needs `-ErrorAction Stop` and a non-empty check. A pwsh 7
+  run cannot catch that.
+- A runner that sources a repo script must not reuse its variable names. The sourced
+  `dantesync-fleet-upgrade.sh` sets `HERE`.
+
+## A pytest that sources a bash lib must source it under the CALLER's `set -euo pipefail` (issue 1357)
+
+The #1133 entry above covers `-e` in a Rust `run_sourced` harness. The same blind spot hits a pytest
+that runs `bash -c '. lib.sh; fn …'` with no strict mode, and `-u` bites too. A grader whose
+`local guid name` stayed unset on one input path aborted with "unbound variable" inside `$(...)`
+under the real consumers (`win-baseline-check.sh`, `version-integrity-gate.sh`), so the LIVE state
+graded to an empty verdict. The plain-`bash -c` pytest stayed green. Source the lib under the
+consumer's `set -euo pipefail` in the test helper, assert every row carries a real verdict and that
+stderr has no "unbound variable", and initialise every local a lib function tests (`local v=""`).
+
+## Moving a test's assertions to another file can leave its HELPER dead — CI clippy then fails (issue 1357)
+
+When a refactor moves the last caller of a shared test helper (`run_block` in
+`tests/strih_provision_pure_functions.rs`) into another test file, the helper becomes dead code.
+`cargo clippy --all-targets -D warnings` on CI rejects it, and no Tier-0 step catches it (a plain
+standalone `rustc --test -A warnings` run hides it too). Run
+`clippy-driver --edition 2021 --test -D warnings <file>` (with the tempfile shim for files that need it)
+on every std-only test file you edit, and delete a helper whose last caller went away.
+
+## A pytest must not catch an exception CLASS from a module another test file may swap in `sys.modules` (issue 1380)
+
+Several `tests/python` files load `scripts/obs_phase2.py` through `importlib` and then assign their
+own copy to `sys.modules["obs_phase2"]` at COLLECTION time. A client script that imports the
+module lazily (`import obs_phase2` inside a function, the standalone OBS-WS clients since issue
+1380) gets whichever copy is registered when the test RUNS. A test that captured
+`obs_phase2.ForbiddenSceneError` at its own collection can then hold a different class object, and
+`pytest.raises(that_class)` misses the real raise, depending on file order. Catch the base class
+(`RuntimeError`) and check the type by NAME (`type(exc).__name__ == "ForbiddenSceneError"`), or
+resolve `sys.modules["obs_phase2"]` inside the test body. `tests/python/test_scene_select_guard_clients_1380.py`
+(`_is_refusal`) is the worked example; the whole `tests/python` suite stays order-independent.
+
+## A bash-vs-Rust parity gate over FINAL verdicts can be blind to a shared lookup table (issue 1380)
+
+`tests/genlock_forced_table_audit_1303.rs` pinned the bash replica to the Rust audio verdict over a
+vector set, and stayed green with a key present on one side only: no audio verdict depends on the
+program key list (the Dante-fed boxes grade everything silent, the cg box defaults to audio). Pin
+the lookup predicate itself (`genlock_forced_table_is_program` vs `is_program_audio_input`), and
+give every key one vector name that matches that key ONLY. A name matching two keys (`VBAN
+cg-resolume` also hits `cg`) keeps a dropped key green. Prove it by dropping one key on one side in
+a scratch run and watching the test go RED.

@@ -605,14 +605,10 @@ if [ -e /etc/systemd/logind.conf.d/90-strih-lx.conf ]; then
   rm -f /etc/systemd/logind.conf.d/90-strih-lx.conf || fail "could not remove the retired logind drop-in 90-strih-lx.conf"
   echo "  removed the retired logind drop-in 90-strih-lx.conf (superseded by the baseline never-sleep item)"
 fi
-# rtprio stays OFF (issue 1357 design): the retired 11c grant pinned the render tick SCHED_FIFO on cores
-# strih-lx never reserved and the FIFO + affinity leaked to 28 NDI threads (issue comment 5793075833).
-# Self-heal: remove a grant a previous run (or a hand fix) left behind -- verify-strih FAILs while it exists.
-RTPRIO_LEFTOVER="$(strih_rtprio_leftover_path)"
-if [ -e "$RTPRIO_LEFTOVER" ]; then
-  rm -f "$RTPRIO_LEFTOVER" || fail "could not remove the leftover rtprio grant ${RTPRIO_LEFTOVER}"
-  echo -e "  ${YELLOW}removed the leftover rtprio grant ${RTPRIO_LEFTOVER} (rtprio stays OFF, issue 1357)${NC}"
-fi
+# rtprio stays OFF (issue 1357): the retired 11c grant pinned the render tick SCHED_FIFO on cores strih-lx
+# never reserved and the FIFO + affinity leaked to 28 NDI threads (issue comment 5793075833). The shared
+# item removes a leftover grant; the grader's `rtprio` row (verify item 32) FAILs while one exists.
+obs_box_rtprio_off   # issue 1357: remove a retired render-tick rtprio grant
 
 # ---------------------------------------------------------------------------------------------
 # Lettered sub-step (TOTAL_STEPS unchanged -- the issue 1352/1353 precedent): the NIC-IRQ placement

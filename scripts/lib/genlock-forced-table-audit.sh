@@ -32,11 +32,11 @@ genlock_forced_table_is_camera() {
 }
 
 # genlock_forced_table_is_program NAME -> rc 0 iff NAME is a program/music/SongPlayer input whose
-# audio must be enabled. Mirror of is_program_audio_input in the Rust module (same 9 keys).
+# audio must be enabled. Mirror of is_program_audio_input in the Rust module (same 8 keys).
 genlock_forced_table_is_program() {
   local n k
   n="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
-  for k in "sp-" "songplayer" "pgm" "program" "hudba" "mbc" "vban" "ndiar" "cg"; do
+  for k in "sp-" "songplayer" "pgm" "program" "mbc" "vban" "ndiar" "cg"; do
     case "$n" in *"$k"*) return 0 ;; esac
   done
   return 1
@@ -55,7 +55,7 @@ genlock_forced_table_is_program_video() {
 
 # genlock_forced_table_expected BOX NAME -> "audio" | "silent". The per-box CERTIFIED table (owner
 # ruling 2026-09-15): the cg OBS (resolume) is the ONLY program-audio box -- camera inputs silent,
-# program inputs (the 9 keys) audio, otherwise the cg default (audio); strih/stream/imag carry the
+# program inputs (the 8 keys) audio, otherwise the cg default (audio); strih/stream/imag carry the
 # mastered mix over Dante/ASIO so EVERY NDI input is silent. Mirror of expected_audio in the Rust
 # module.
 genlock_forced_table_expected() {

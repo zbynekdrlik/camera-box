@@ -60,7 +60,11 @@ def warm_all(ws, scenes: "list[str]", settle_s: float) -> "list[str]":
             warmed.append(scene)
             time.sleep(settle_s)
     finally:
-        if orig:
+        if orig in op.NEVER_PROGRAM_SCENES:
+            # issue 1380: never put the production scene back on preview (the teardown rule).
+            sys.stderr.write(f"warm-cam-scenes: issue 1380 -- not restoring preview '{orig}': "
+                             f"our tooling never programs the production scene\n")
+        elif orig:
             op._rpc(ws, "SetCurrentPreviewScene", {"sceneName": orig}, ignore_err=True)
     return warmed
 

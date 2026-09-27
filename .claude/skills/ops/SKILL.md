@@ -125,8 +125,8 @@ because it carried no dantesync — this brings it under the fleet clock-discipl
 - **Frame-loss-free playback verify (acceptance #4).** After the roll, confirm its feed plays
   frame-loss-free by reading its genlock-FIFO audit on strih (and stream). Pull the box's OBS log,
   then run the verdict mode (INPUT names are whatever the OBS config uses for the resolume feed —
-  e.g. `cg`, `NDI obs hudba`, `RESOLUME-SNV (cg-obs)`):
-  `genlock-jitter-report --file <strih-obs.log> --verdict-source 'cg' --verdict-source 'NDI obs hudba'`
+  e.g. `cg`, `RESOLUME-SNV (cg-obs)`):
+  `genlock-jitter-report --file <strih-obs.log> --verdict-source 'cg'`
   → one `RESOLUME-VERDICT <name>: PASS/FAIL/ABSENT` line each (exits 3 on any FAIL/ABSENT, or 0
   with `--verdict-report-only`). PASS = skew flat within `--skew-bound-ms` (default 20) **and**
   zero drop/underrun/relock/late-hold/backward-regime deltas over the window. It is
@@ -709,8 +709,9 @@ RIG_KNOWN_TEST_SCENES="PHASE2-PROBE"
 ```
 
 - `PHASE2-PROBE` — the `obs_phase2.py` phase2 probe scene on strih (still a live test scene).
-- **`REC-STRIH-TMP` was DROPPED** (#343/#353): `recording-e2e.sh` now records the stream box's
-  already-active prod scene `PRO` (`STREAM_PROG_SCENE` default), so the stream box never lands on an
+- **`REC-STRIH-TMP` was DROPPED** (#343/#353): `recording-e2e.sh` records the stream box's
+  development scene `Development` (`STREAM_PROG_SCENE` default since issue 1380 — the production
+  scene `PRO` nested in it, TEST mode's standing program), so the stream box never lands on an
   ephemeral scene — the marker, not a scene name, detects a stranded stream box now.
 
 **INVARIANT (post-#353)**: prefer the MARKER for new rig-touching harnesses — wrap them so they

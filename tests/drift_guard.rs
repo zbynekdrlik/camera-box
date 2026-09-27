@@ -1238,7 +1238,7 @@ printf 'rtpin=%s\n' "$(genlock_rt_pin_from_log "$LOG")""#,
 }
 
 /// The imag-nb (#484) OBS log lines for the genlock render-tick SCHED_FIFO pin — SUCCESS shape
-/// (`vendor/obs-studio/libobs/obs-video.c genlock_pin_render_tick_thread`, Linux-only).
+/// (`vendor/obs-studio/libobs/obs-genlock-render-tick-pin.h genlock_pin_render_tick_thread`, Linux-only).
 const GENLOCK_RT_PIN_OK_LINE: &str =
     "14:27:54.427: genlock: render-tick thread set SCHED_FIFO prio 10 on the isolated core (#484)\n";
 
@@ -1246,6 +1246,87 @@ const GENLOCK_RT_PIN_OK_LINE: &str =
 /// could not get SCHED_FIFO (missing rtprio ulimit grant) and fell back to SCHED_OTHER.
 const GENLOCK_RT_PIN_FAILED_LINE: &str = "14:27:54.392: genlock: could NOT set render-tick thread \
      SCHED_FIFO prio 10 (errno 1 — missing rtprio ulimit grant?) — continuing SCHED_OTHER (#484)\n";
+
+/// Issue 1357: a box with no isolated nohz_full core is not pinned at all, by design — the pin's
+/// one "not pinned" line (obs-genlock-render-tick-pin.h genlock_pin_render_tick_thread).
+const GENLOCK_RT_PIN_UNPINNED_LINE: &str = "15:10:15.254: genlock: render-tick thread not pinned: \
+     no isolated cores (isolated=[] nohz_full=[]) -- it runs SCHED_OTHER on the process mask (issue 1357)\n";
+
+/// Review round 2: the pin itself failed at startup (it runs unpinned) — its own class, never the
+/// "build may predate #484" UNKNOWN.
+const GENLOCK_RT_PIN_PIN_FAILED_LINE: &str = "15:10:15.254: genlock: could NOT pin render-tick \
+     thread to the isolated cores (isolated=[2-11] nohz_full=[10-11], errno 22) -- continuing \
+     SCHED_OTHER on the process mask (issue 1357)\n";
+
+/// Review round 2: a pin that got SCHED_FIFO at startup and later could not restore the thread
+/// (the pin's one LOG_ERROR) may have left it on the pin cores + FIFO — the leak issue 1357 is about.
+/// It outranks the startup success line and grades DRIFT.
+#[test]
+fn a_failed_restore_outranks_the_fifo_success_line_and_is_drift_1357() {
+    let log = format!(
+        "genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}15:10:20.001: genlock: render-tick pin leave \
+         failed (errno 1) and the restore failed too (errno 1) -- the thread may stay on the pin cores \
+         and SCHED_FIFO; pin disabled (issue 1357)\n"
+    );
+    let out = run_sourced("genlock_rt_pin_from_log \"$LOG\"", &[("LOG", log.as_str())]);
+    assert_eq!(out.trim(), "restore_failed", "{out:?}");
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("LOG", log.as_str())]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("genlock_rt_pin"))
+        .unwrap_or_else(|| panic!("no genlock_rt_pin line printed: {out:?}"));
+    assert!(line.contains("DRIFT"), "{line:?}");
+    assert!(out.contains("RC=20"), "{out:?}");
+}
+
+#[test]
+fn genlock_rt_pin_parser_reads_a_failed_startup_pin_as_pin_failed() {
+    for line in [
+        GENLOCK_RT_PIN_PIN_FAILED_LINE,
+        "15:10:15.254: genlock: could NOT read the render-tick thread's CPU mask (errno 22) -- not \
+         pinned, continuing SCHED_OTHER (issue 1357)\n",
+    ] {
+        let out = run_sourced("genlock_rt_pin_from_log \"$LOG\"", &[("LOG", line)]);
+        assert_eq!(out.trim(), "pin_failed", "{line:?} -> {out:?}");
+    }
+}
+
+#[test]
+fn check_imag_report_genlock_rt_pin_reports_a_failed_pin_with_its_reason_1357() {
+    let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_PIN_FAILED_LINE}");
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("LOG", log.as_str())]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("genlock_rt_pin"))
+        .unwrap_or_else(|| panic!("no genlock_rt_pin line printed: {out:?}"));
+    assert!(
+        line.contains("OK") && line.contains("pin FAILED") && !line.contains("predate"),
+        "a failed pin is reported with its own reason: {line:?}"
+    );
+}
+
+#[test]
+fn genlock_rt_pin_parser_reads_the_1357_not_pinned_line_as_unpinned() {
+    let out = run_sourced(
+        "genlock_rt_pin_from_log \"$LOG\"",
+        &[("LOG", GENLOCK_RT_PIN_UNPINNED_LINE)],
+    );
+    assert_eq!(
+        out.trim(),
+        "unpinned",
+        "the issue-1357 not-pinned line must parse as unpinned: {out:?}"
+    );
+}
 
 #[test]
 fn genlock_rt_pin_parser_detects_the_484_success_line() {
@@ -4630,10 +4711,11 @@ fn check_imag_report_unknown_when_values_were_not_read_never_a_silent_pass_463()
     assert!(out.contains("UNKNOWN"), "must print UNKNOWN lines: {out:?}");
 }
 
+/// Issue 1357 reversed the #572 verdict: no OBS box grants rtprio any more (the shared baseline FAILs a
+/// grant), so a pinned tick that could not get SCHED_FIFO is the EXPECTED outcome — OK with its reason,
+/// never DRIFT.
 #[test]
-fn check_imag_report_flags_genlock_rt_pin_failure_as_drift_572() {
-    // The EXACT #572 signature: the OBS log shows the render-tick thread stuck SCHED_OTHER
-    // (missing rtprio ulimit grant) -> DRIFT, exit 20 — even though every other value matches.
+fn check_imag_report_genlock_rt_pin_sched_other_is_ok_now_that_rtprio_stays_off_1357() {
     let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_FAILED_LINE}");
     let body = r#"
         rc=0
@@ -4641,13 +4723,13 @@ fn check_imag_report_flags_genlock_rt_pin_failure_as_drift_572() {
         echo "RC=$rc"
     "#;
     let out = run_sourced(body, &[("LOG", log.as_str())]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("genlock_rt_pin"))
+        .unwrap_or_else(|| panic!("no genlock_rt_pin line printed: {out:?}"));
     assert!(
-        out.contains("RC=20"),
-        "the #572 SCHED_OTHER fallback line must DRIFT: {out:?}"
-    );
-    assert!(
-        out.contains("genlock_rt_pin") && out.contains("DRIFT"),
-        "must flag the genlock_rt_pin line as DRIFT: {out:?}"
+        line.contains("OK") && !line.contains("DRIFT") && line.contains("rtprio stays off"),
+        "a SCHED_OTHER tick must report OK with its reason: {line:?}"
     );
 }
 
@@ -4668,6 +4750,27 @@ fn check_imag_report_genlock_rt_pin_ok_when_pin_achieved_572() {
         .find(|l| l.contains("genlock_rt_pin"))
         .unwrap_or_else(|| panic!("no genlock_rt_pin line printed: {out:?}"));
     assert!(line.contains("OK"), "must report OK: {line:?}");
+}
+
+/// Issue 1357: an unpinned render tick on a box with no isolated core is the CORRECT outcome, so the
+/// facet reads OK, never DRIFT (no rtprio grant is expected any more) and never UNKNOWN.
+#[test]
+fn check_imag_report_genlock_rt_pin_ok_when_unpinned_by_design_1357() {
+    let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_UNPINNED_LINE}");
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("LOG", log.as_str())]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("genlock_rt_pin"))
+        .unwrap_or_else(|| panic!("no genlock_rt_pin line printed: {out:?}"));
+    assert!(
+        line.contains("OK") && line.contains("no isolated cores"),
+        "an unpinned tick must report OK with its reason: {line:?}"
+    );
 }
 
 #[test]

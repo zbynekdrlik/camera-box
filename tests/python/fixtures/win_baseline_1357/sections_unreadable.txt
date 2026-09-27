@@ -1,0 +1,17 @@
+==WINBASELINE-BEGIN== v1 host=X
+==WINBASELINE-SECTION== power_scheme
+ERROR: Access is denied.
+==WINBASELINE-EXIT== 1
+==WINBASELINE-SECTION== sleep_ac
+ERROR: Access is denied.
+==WINBASELINE-EXIT== 1
+==WINBASELINE-SECTION== hibernate_ac
+ERROR: Access is denied.
+==WINBASELINE-EXIT== 1
+==WINBASELINE-SECTION== usb_selective_suspend
+ERROR: Access is denied.
+==WINBASELINE-EXIT== 1
+==WINBASELINE-SECTION== wer_dontshowui
+ERROR: Access is denied.
+==WINBASELINE-EXIT== 1
+==WINBASELINE-END==

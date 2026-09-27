@@ -13,7 +13,8 @@ paths:
 `cg` OBS on **RESOLUME-SNV** (win-resolume MCP, traveling CG box, `resolume.lan`) is a first-class
 genlock fleet member: the SongPlayer `sp-*` inputs ride the genlock FIFO and `RESOLUME-SNV (cg-obs)`
 sends on the fleet wall-clock, locking the CG chain (SongPlayer → cg OBS → LED TVs + strih `cg` /
-stream `NDI obs hudba`) end-to-end like the camera chain. The CODE half (#1295) wires the
+stream -- the stream input `NDI obs hudba` was removed 27.9.2026, issue 1380; the stream hop is now
+on request only) end-to-end like the camera chain. The CODE half (#1295) wires the
 deploy/launch arms + the verify-read-back; the LIVE deploy/relaunch/pin/verify is a SUPERVISOR rig
 step (win-resolume MCP + read-only OBS-WS from dev1 — a worker never touches the box).
 
@@ -143,7 +144,7 @@ live `getent hosts resolume.lan` address.
    CG_CHAIN_CG_OBS_LOG=<that file> \
    CG_CHAIN_STRIH_CMD='<byte-safe ssh strih "gc <obslog> | select -last 4000">' \
    CG_CHAIN_STREAM_CMD='<...stream...>' \
-     bash scripts/cg-chain-verify.sh --hops "cg-obs strih stream"
+     bash scripts/cg-chain-verify.sh --hops "cg-obs strih stream"   # stream hop: CG_CHAIN_STREAM_SRC, ABSENT if missing (issue 1380)
    ```
 
    exit 0 = every hop PASS (`locked=1`, `ts_head_skew_ms` steady, `dropped_due`/`underruns`/`relocks`

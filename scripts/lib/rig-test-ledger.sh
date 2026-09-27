@@ -57,18 +57,50 @@ rig_test_ledger_is_expired() {
   if [ "$now" -ge "$((start + max_dur))" ]; then echo 1; else echo 0; fi
 }
 
+# RIG_TEST_LEDGER_ROW_FORMAT — the ONE printf format of a JSONL ledger row, shared by the local
+# builder (rig_test_ledger_entry_json) and the remote registration (rig_test_ledger_register_remote_cmds)
+# so the two can never drift. Every value is a `%s` ARGUMENT, never text spliced into the format:
+# a `%` in a value is data, not a printf directive (issue 1382). Never put a single quote in it:
+# rig_test_ledger_register_remote_cmds embeds it single-quoted in the remote text.
+RIG_TEST_LEDGER_ROW_FORMAT='{"what":"%s","pid_or_unit":"%s","box":"%s","started_by":"%s","max_duration_secs":%s,"start_epoch":%s}\n'
+
+# _rig_test_ledger_json_escape TEXT -> TEXT with the minimal JSON string escaping the ledger
+# needs (backslash + double-quote) — every caller passes internal, script-controlled values
+# (script/component names, PIDs or unit names, box hostnames), never arbitrary user input.
+_rig_test_ledger_json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"; s="${s//\"/\\\"}"
+  printf '%s' "$s"
+}
+
+# _rig_test_ledger_shell_quote TEXT -> TEXT as ONE single-quoted shell word (' -> '\''), so the
+# REMOTE shell takes it byte for byte: no $-expansion, no command substitution, no globbing.
+# Not printf %q: that emits bash-only $'...' for control characters, and the remote text must
+# also run under a POSIX sh.
+_rig_test_ledger_shell_quote() {
+  local s="$1" q="'\\''"
+  printf "'%s'" "${s//\'/$q}"
+}
+
+# _rig_test_ledger_dq_escape TEXT -> TEXT made safe INSIDE remote double quotes EXCEPT for `$`:
+# backslash, double-quote and backtick are escaped, a `$NAME` reference is deliberately left live
+# so it expands ON THE BOX. Used only for PID_OR_UNIT (issue 1382: the TEST painter's PID exists
+# only on cam2, in the remote script that just launched it).
+_rig_test_ledger_dq_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//\`/\\\`}"
+  printf '%s' "$s"
+}
+
 # rig_test_ledger_entry_json WHAT PID_OR_UNIT BOX STARTED_BY MAX_DURATION_SECS START_EPOCH ->
-# one-line JSON object (the JSONL row shape). Minimal manual escaping (backslash + double-quote)
-# — every caller passes internal, script-controlled string values (script/component names, PIDs
-# or unit names, box hostnames), never arbitrary user input.
+# one-line JSON object (the JSONL row shape, RIG_TEST_LEDGER_ROW_FORMAT).
 rig_test_ledger_entry_json() {
   local what="$1" pidunit="$2" box="$3" started_by="$4" max_duration="$5" start_epoch="$6"
-  what="${what//\\/\\\\}"; what="${what//\"/\\\"}"
-  pidunit="${pidunit//\\/\\\\}"; pidunit="${pidunit//\"/\\\"}"
-  box="${box//\\/\\\\}"; box="${box//\"/\\\"}"
-  started_by="${started_by//\\/\\\\}"; started_by="${started_by//\"/\\\"}"
-  printf '{"what":"%s","pid_or_unit":"%s","box":"%s","started_by":"%s","max_duration_secs":%s,"start_epoch":%s}\n' \
-    "$what" "$pidunit" "$box" "$started_by" "$max_duration" "$start_epoch"
+  # shellcheck disable=SC2059  # the shared row format constant IS the format, values are %s args
+  printf "$RIG_TEST_LEDGER_ROW_FORMAT" \
+    "$(_rig_test_ledger_json_escape "$what")" "$(_rig_test_ledger_json_escape "$pidunit")" \
+    "$(_rig_test_ledger_json_escape "$box")" "$(_rig_test_ledger_json_escape "$started_by")" \
+    "$max_duration" "$start_epoch"
 }
 
 # RIG_TEST_LEDGER_PATH_DEFAULT — the per-box ledger path (/run is tmpfs: auto-cleared on reboot,
@@ -80,14 +112,31 @@ RIG_TEST_LEDGER_PATH_DEFAULT="/run/camera-box-rig-tests.jsonl"
 # shape) to LEDGER_PATH, using the REMOTE box's OWN clock for start_epoch (consistent with expiry
 # checks later reading that same box's clock). Creates the ledger's directory first (defensive —
 # /run already exists on every box, but a custom LEDGER_PATH might not).
+#
+# PID_OR_UNIT is either a LITERAL (a PID resolved on dev1, as recording-e2e.sh does, or a unit
+# name) or a REMOTE variable reference such as '$PAINTER_PID' — pass the bare `$NAME` text (single
+# quotes at the call site, never `\$NAME`): it lands inside remote DOUBLE quotes as a printf `%s`
+# argument and expands on the box (issue 1382: the old single-quoted format wrote the literal text
+# `\$PAINTER_PID`, an invalid JSON escape the EVENT cleanup skipped as malformed). WHAT / BOX /
+# STARTED_BY / MAX_DURATION_SECS are pure data: JSON-escaped here, then passed single-quoted, so a
+# quote, backslash, `%`, `$` or backtick in them is written verbatim, never expanded on the box.
+# PID_OR_UNIT must be a literal PID / unit name or a bare `$NAME` that holds a PID: any other `$`
+# form (a `$(...)`) would run on the box, and a remote variable's value is not JSON-escaped.
 rig_test_ledger_register_remote_cmds() {
   local what="$1" pidunit="$2" box="$3" started_by="$4" max_duration="$5"
   local ledger="${6:-$RIG_TEST_LEDGER_PATH_DEFAULT}"
+  local what_arg box_arg started_by_arg max_arg pid_json_arg pid_text_arg
+  what_arg="$(_rig_test_ledger_shell_quote "$(_rig_test_ledger_json_escape "$what")")"
+  box_arg="$(_rig_test_ledger_shell_quote "$(_rig_test_ledger_json_escape "$box")")"
+  started_by_arg="$(_rig_test_ledger_shell_quote "$(_rig_test_ledger_json_escape "$started_by")")"
+  max_arg="$(_rig_test_ledger_shell_quote "$max_duration")"
+  pid_json_arg="\"$(_rig_test_ledger_dq_escape "$(_rig_test_ledger_json_escape "$pidunit")")\""
+  pid_text_arg="\"$(_rig_test_ledger_dq_escape "$pidunit")\""
   cat <<REMOTE
 mkdir -p "\$(dirname "$ledger")" 2>/dev/null || true
 NOW_EPOCH=\$(date +%s)
-printf '{"what":"$what","pid_or_unit":"$pidunit","box":"$box","started_by":"$started_by","max_duration_secs":$max_duration,"start_epoch":'"\$NOW_EPOCH"'}\n' >> "$ledger"
-echo "[#723] registered ledger entry: what=$what pid_or_unit=$pidunit box=$box max_duration=${max_duration}s (\$(basename "$ledger"))"
+printf '$RIG_TEST_LEDGER_ROW_FORMAT' $what_arg $pid_json_arg $box_arg $started_by_arg $max_arg "\$NOW_EPOCH" >> "$ledger"
+printf '[#723] registered ledger entry: what=%s pid_or_unit=%s box=%s max_duration=%ss (%s)\n' $(_rig_test_ledger_shell_quote "$what") $pid_text_arg $(_rig_test_ledger_shell_quote "$box") $max_arg "\$(basename "$ledger")"
 REMOTE
 }
 

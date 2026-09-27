@@ -2930,53 +2930,35 @@ fn setup_imag_1182_step27_defers_picom_daemon_reload_when_no_bus() {
 }
 
 // ============================================================================================
-// #484 -- the genlock render-tick thread pin (vendor/obs-studio/libobs/obs-video.c) calls
-// sched_setscheduler(SCHED_FIFO) on the ONE timing-critical graphics thread. OBS runs as the
-// unprivileged desktop user, so without an rtprio ulimit grant that syscall fails EPERM and the
-// pin silently degrades to SCHED_OTHER (the pin's warn-and-continue fallback). The provisioner
-// must write the limits.d drop-in that grants it, near the #483 CPU-isolation reservation.
+// #484 / issue 1357 -- the genlock render-tick pin (vendor/obs-studio/libobs/obs-video.c) pins only
+// onto isolated nohz_full cores. The shared baseline FAILs kernel isolation, so no OBS box has such a
+// core, and the old imag-only rtprio grant served nothing while it re-opened the SCHED_FIFO
+// starvation class (issue comment 5793075833). setup-imag no longer grants rtprio; it removes a
+// leftover grant through the shared baseline item.
 // ============================================================================================
 
-/// The provisioner must WRITE an idempotent /etc/security/limits.d/ drop-in granting the desktop
-/// user `rtprio`, so OBS's #484 genlock render-tick pin can actually enter SCHED_FIFO.
+/// setup-imag must NOT write an rtprio grant any more, and step 8 must run the shared
+/// `obs_box_rtprio_off` right after the CPU-affinity reservation.
 #[test]
-fn setup_imag_grants_rtprio_for_genlock_rt_pin_484() {
+fn setup_imag_no_longer_grants_rtprio_1357() {
     let body = read(SETUP);
-    assert!(
-        body.contains("/etc/security/limits.d/95-imag-genlock-rtprio.conf"),
-        "{SETUP} must WRITE the limits.d drop-in \
-         /etc/security/limits.d/95-imag-genlock-rtprio.conf — without an rtprio ulimit grant, OBS \
-         (running as the unprivileged desktop user) cannot set SCHED_FIFO and the #484 genlock \
-         render-tick pin degrades to SCHED_OTHER"
-    );
-    // The actual grant line must give the desktop user `rtprio` headroom (20 > the ~10 the thread
-    // requests). It is a limits.conf content line (not a shell/file comment), so exclude `#` lines.
-    let has_grant = body.lines().any(|l| {
+    let grant = body.lines().any(|l| {
         let t = l.trim_start();
-        !t.starts_with('#')
-            && t.contains("rtprio")
-            && t.contains("${DESKTOP_USER}")
-            && t.contains("20")
+        !t.starts_with('#') && t.contains("rtprio") && t.contains("${DESKTOP_USER}")
     });
     assert!(
-        has_grant,
-        "{SETUP} the rtprio drop-in must grant `${{DESKTOP_USER}} - rtprio 20` (headroom above the \
-         ~10 the #484 render-tick thread requests) — the ulimit that lets a non-root user request \
-         SCHED_FIFO"
+        !grant && !body.contains("cat > /etc/security/limits.d/95-imag-genlock-rtprio.conf"),
+        "{SETUP} must not write the imag rtprio grant any more (issue 1357)"
     );
-    // It is written right after step 8's CPU-affinity reservation (reserve + grant are one imag
-    // concern). issue 1357: the affinity item is the shared baseline call; the grant itself stays an
-    // imag-only line in setup-imag.sh -- the baseline keeps rtprio OFF (never in the libs).
     let iso_idx = body
         .find("obs_box_cpu_affinity imag")
         .expect("the #483/#816/#842 CPU-affinity reservation must still be present");
-    let rtprio_idx = body
-        .find("/etc/security/limits.d/95-imag-genlock-rtprio.conf")
-        .expect("the #484 rtprio drop-in must be present");
+    let off_idx = body
+        .find("\nobs_box_rtprio_off")
+        .expect("setup-imag must run the shared obs_box_rtprio_off item (issue 1357)");
     assert!(
-        iso_idx < rtprio_idx,
-        "{SETUP}: the #484 rtprio grant must be written alongside/after the #483/#842 CPU-affinity \
-         reservation (the reserved cores + the rtprio grant are one appliance-hardening concern)"
+        iso_idx < off_idx,
+        "{SETUP}: the rtprio-off self-heal runs in step 8, after the CPU-affinity reservation"
     );
     for lib in [BASELINE, KIOSK] {
         assert!(

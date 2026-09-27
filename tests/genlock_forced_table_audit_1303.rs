@@ -9,7 +9,8 @@
 
 use camera_box::genlock_forced_table_audit::{
     any_mismatch, audio_verdict, audit_box, classify, expected_audio, is_camera_input,
-    AudioExpectation, AudioVerdict, BoxClass, NdiInput,
+    is_program_audio_input, is_program_video_input, AudioExpectation, AudioVerdict, BoxClass,
+    NdiInput,
 };
 use std::path::PathBuf;
 use std::process::Command;
@@ -103,13 +104,14 @@ fn rust_any_mismatch_summary() {
 // „žiadny — zvuk na strih/stream ide cez Dante, NDI audio ostáva vypnuté" — program audio over NDI
 // exists on the cg OBS (resolume) ONLY; strih/stream/imag carry the mastered mix over Dante/ASIO, so
 // EVERY NDI input there is silent and NDI audio ENABLED on any of them is the double-audio defect.
-// These vectors are today's five live deploy-preflight rows (must grade OK), the inverse (audible on
-// a silent box = a mismatch), and the resolume program/camera pins.
+// These vectors are the live deploy-preflight rows (must grade OK), the inverse (audible on a silent
+// box = a mismatch), and the resolume program/camera pins.
 
 #[test]
-fn certified_five_strih_stream_program_rows_are_ok_1303() {
-    // The five FALSE MISMATCH-PROGRAM-SILENT rows from the 15.9 12:08 preflight: with NDI audio OFF
-    // on a strih/stream program input, the certified table grades OK (Dante carries the audio).
+fn certified_strih_stream_program_rows_are_ok_1303() {
+    // The FALSE MISMATCH-PROGRAM-SILENT rows from the 15.9 12:08 preflight whose inputs still exist
+    // (issue 1380: the stream music input was removed on 27.9.2026): with NDI audio OFF on a
+    // strih/stream program input, the certified table grades OK (Dante carries the audio).
     assert_eq!(
         classify(BoxClass::Strih, &input("cg", false, "")).verdict,
         AudioVerdict::Ok
@@ -120,10 +122,6 @@ fn certified_five_strih_stream_program_rows_are_ok_1303() {
     );
     assert_eq!(
         classify(BoxClass::Stream, &input("NDI 2ME PGM", false, "")).verdict,
-        AudioVerdict::Ok
-    );
-    assert_eq!(
-        classify(BoxClass::Stream, &input("NDI obs hudba", false, "")).verdict,
         AudioVerdict::Ok
     );
     assert_eq!(
@@ -138,7 +136,7 @@ fn certified_audible_on_a_silent_box_is_a_mismatch_1303() {
     // named -> a mismatch (not OK). (The specific MISMATCH-AUDIBLE token is pinned in the GREEN
     // variant test + the parity gate.)
     assert!(
-        classify(BoxClass::Stream, &input("NDI obs hudba", true, ""))
+        classify(BoxClass::Stream, &input("NDIA cg stream", true, ""))
             .verdict
             .is_mismatch()
     );
@@ -252,12 +250,12 @@ fn bash_yuv_advisory_covers_strih_program_video_1303() {
 fn bash_stream_audible_program_input_is_mismatch_audible_1303() {
     // The double-audio hazard: a program NDI input ENABLED on stream (Dante-fed box) -> the generic
     // MISMATCH-AUDIBLE (not CAMERA-AUDIBLE, it is not a camera). Silent siblings grade OK.
-    let body = "printf 'NDI obs hudba\\ttrue\\t\\t\\n\
+    let body = "printf 'NDIA cg stream\\ttrue\\t\\t\\n\
 NDI 2ME PGM\\tfalse\\t\\t\\n' | genlock_forced_table_audit stream";
     let (rc, out, err) = run_sourced(body);
     assert_eq!(rc, 0, "report-only.\nstdout={out}\nstderr={err}");
     assert!(
-        out.contains("NDI obs hudba: expected=silent ndi_audio=true -> MISMATCH-AUDIBLE"),
+        out.contains("NDIA cg stream: expected=silent ndi_audio=true -> MISMATCH-AUDIBLE"),
         "audible-program row on a silent box:\n{out}"
     );
     assert!(
@@ -267,6 +265,29 @@ NDI 2ME PGM\\tfalse\\t\\t\\n' | genlock_forced_table_audit stream";
     assert!(
         out.contains("# summary: 2 input(s), 1 MISMATCH"),
         "summary count:\n{out}"
+    );
+}
+
+#[test]
+fn bash_the_removed_stream_music_key_is_gone_1380() {
+    // issue 1380: the owner removed the stream input `NDI obs hudba` on 27.9.2026, so the bash
+    // replica drops the `hudba` key together with the Rust table: the name is no program input any
+    // more (no yuv NOTE at a forced partial range), exactly like the Rust `is_program_video_input`.
+    let (rc, _out, err) = run_sourced("genlock_forced_table_is_program 'NDI obs hudba'");
+    assert_eq!(
+        rc, 1,
+        "the hudba key must be gone from the bash table: {err}"
+    );
+    let body = "printf 'NDI obs hudba\\tfalse\\tpartial\\t\\n' | genlock_forced_table_audit stream";
+    let (rc, out, err) = run_sourced(body);
+    assert_eq!(rc, 0, "report-only.\nstdout={out}\nstderr={err}");
+    assert!(
+        out.contains("NDI obs hudba: expected=silent ndi_audio=false -> OK"),
+        "silent-OK row:\n{out}"
+    );
+    assert!(
+        !out.contains("NOTE yuv_range=partial"),
+        "no program-source yuv NOTE for the removed input:\n{out}"
     );
 }
 
@@ -294,12 +315,11 @@ fn bash_replica_matches_rust_over_a_fixed_vector_set() {
         "sp-fast_video",
         "cg",
         "NDI 2ME PGM",
-        // today's five live deploy-preflight rows (2026-09-15) — the certified-table exercise set.
+        // the live deploy-preflight rows (2026-09-15) — the certified-table exercise set.
         "NDI 2ME PGM (mv)",
         "NDIA cg stream",
         "NDI cam1",
         "mbc",
-        "NDI obs hudba",
         "NDIAr ppt",
         "VBAN cg-resolume",
         "CAM1 (usb)",
@@ -325,6 +345,57 @@ fn bash_replica_matches_rust_over_a_fixed_vector_set() {
                     out.trim()
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn bash_program_key_set_matches_rust_1380() {
+    // The audio-verdict parity above is BLIND to the program key set: strih/stream/imag grade every
+    // input silent and resolume defaults a non-camera input to audio, so a key present on one side
+    // only never changes a verdict. The key set drives the program-VIDEO eligibility (the yuv
+    // advisory), so pin both predicates over every key, the removed stream music key (issue 1380)
+    // and some non-program names. Each of the eight keys has one name below that matches that key
+    // ONLY (the first eight), so a key dropped on one side flips that name; `VBAN cg-resolume`
+    // also matches `cg` and could not do that alone.
+    let names = [
+        "sp-fast_video",
+        "SongPlayer out",
+        "NDI 2ME PGM",
+        "Program feed",
+        "mbc",
+        "VBAN foh",
+        "NDIAr ppt",
+        "cg",
+        "VBAN cg-resolume",
+        "NDI obs hudba",
+        "CAM1 (usb)",
+        "NDI cam1",
+        "some_odd_input",
+    ];
+    for name in names {
+        let (rc, _out, err) = run_sourced(&format!("genlock_forced_table_is_program '{name}'"));
+        assert_eq!(
+            rc == 0,
+            is_program_audio_input(name),
+            "KEY-SET drift for {name:?}: bash rc={rc} rust={} {err}",
+            is_program_audio_input(name)
+        );
+        for (bc, bname) in [
+            (BoxClass::Strih, "strih"),
+            (BoxClass::Stream, "stream"),
+            (BoxClass::Imag, "imag"),
+            (BoxClass::Resolume, "resolume"),
+        ] {
+            let (rc, _out, err) = run_sourced(&format!(
+                "genlock_forced_table_is_program_video {bname} '{name}'"
+            ));
+            assert_eq!(
+                rc == 0,
+                is_program_video_input(bc, name),
+                "PROGRAM-VIDEO drift for {bname}/{name:?}: bash rc={rc} rust={} {err}",
+                is_program_video_input(bc, name)
+            );
         }
     }
 }

@@ -3,12 +3,13 @@ paths:
   - "scripts/cg-chain-verify.sh"
   - "scripts/lib/cg-chain-verify.sh"
   - "tests/harness_cg_chain_verify_1300.rs"
+  - "tests/python/test_cg_chain_verify_hops_1380.py"
 ---
 
 # CG-chain receiver-side verdict (#1300)
 
 `scripts/cg-chain-verify.sh` is the CG chain's equivalent of `recording-e2e.sh` for the FIFO-audit
-level: per hop (SongPlayer `SP-*` → cg OBS/RESOLUME-SNV → strih `cg` / stream `NDI obs hudba`) it
+level: per hop (SongPlayer `SP-*` → cg OBS/RESOLUME-SNV → strih `cg`, stream only on request) it
 reads ONE aligned `genlock-fifo audit` window, runs the cadence-agnostic playback verdict, reads
 the per-source `asrc: source '<x>' estimated=` ppm residual, prints a per-hop table + overall
 PASS/FAIL, and **exits non-zero (3) on FAIL** (a verdict tool, NOT an always-exit-0 preflight). It
@@ -39,7 +40,19 @@ match, never let them drift.** Do not re-derive thresholds in bash from scratch.
   name is NOT yet confirmed against a real OBS log (the rig is off) — confirm it at the first live
   run and either pin it via `CG_CHAIN_CGOBS_SRC_RE` or update this default; a pattern that matches
   nothing makes the cg-obs hop report `NO SOURCES` and FAIL (fail-closed, never a false PASS).**
-  `strih` → `cg`. `stream` → `NDI obs hudba`.
+  `strih` → `cg` (expected: a missing `cg` audit line FAILs).
+- **The default hop list is `cg-obs strih` (issue 1380, ROZHODNUTIE 27.9.2026).** The owner removed
+  the stream input the stream hop used to read (`NDI obs hudba`). The stream hop runs only when asked
+  for: `--hops "... stream"` or env `CG_CHAIN_HOPS`. Its input is `CG_CHAIN_STREAM_SRC` (default
+  `NDIA cg stream`, the CG-named NDI input of the live stream production scene read 27.9.2026; it is
+  currently senderless, see genlock-lock-facet.md). When that input has no audit line in the window
+  (missing, or no frame received since OBS start) the hop prints a named `ABSENT` row + a reason and
+  does NOT fail the run (the pure `cg_chain_hop_absent_ok`, stream only); an unreadable stream log
+  still FAILs. A run where EVERY requested source is ABSENT verified nothing: `OVERALL: NO-DATA`,
+  exit 3 (a typo in `CG_CHAIN_STREAM_SRC` never looks like success). rig-health-audit runs only
+  `--hops strih` (strih is never ABSENT, so its `sources_absent` count stays 0; the counter is there
+  for a run that asks for the stream hop). Pinned by
+  `tests/python/test_cg_chain_verify_hops_1380.py`.
 - The log tail per hop is supplied explicitly so the tool is self-contained and ships no untested
   ssh/MCP default: `CG_CHAIN_<HOP>_LOG=<file>` (tests; and the supervisor's path for cg-obs — paste
   the win-resolume MCP FileRead of the RESOLUME-SNV OBS log to a file) or `CG_CHAIN_<HOP>_CMD="<cmd>"`

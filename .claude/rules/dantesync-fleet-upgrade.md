@@ -4,6 +4,7 @@ paths:
   - "tests/dantesync_fleet_upgrade.rs"
   - "scripts/lib/dantesync-tray-upgrade.sh"
   - "tests/python/test_dantesync_fleet_upgrade_tray_1372.py"
+  - "tests/pwsh/**"
 ---
 
 # dantesync fleet-upgrade mechanism (#876)
@@ -130,12 +131,36 @@ upgrade script under the ~1000-line budget.
     service upgrade still runs.
 - **Swap after the service is back (step 5).** `dantesync_windows_tray_swap_ps` runs after the
   service's try/catch and the dead-task purge.
-  - It stops `dantesync-tray` (exact name) and sets `$trayStopped`.
+  - It captures the running trays (exact name), kills them, sets `$trayStopped`, and waits on
+    THOSE PIDs only (`Wait-Process -Id $trayPids`). A PID that is still a live `dantesync-tray`
+    after 15 s is the named `the killed tray (pid N) did not exit` (a reused PID is not the tray).
   - It backs the tray up to `dantesync-tray.exe.pre-<version>` only when that file does not exist, so
     a re-run never overwrites the original pre-roll tray.
+  - It reads the exe's hash (`$trayBefore`, `-ErrorAction Stop`; an empty hash throws into the arm's
+    own catch before any copy), then, right before the replace, kills any tray started
+    since the kill, at most 3 times. It records who started each NEW PID (`Get-TrayParent`: the
+    parent's name + its command line cut at 120 chars, via CIM, never a throw); a PID it already
+    tried is not a relaunch.
   - It replaces the file and verifies the installed sha. A failed replace or a wrong sha restores the
     backup, and the restore is checked by hash: a failed restore is named (`the tray exe may be
     partial`), never claimed.
+  - A replace that fails with a sharing / lock violation (`HResult -band 0xFFFF` = 32 / 33) and
+    leaves the exe hashing to `$trayBefore` is UNTOUCHED: no restore (it would hit the same lock).
+    32 (a running exe) fails before the file is opened for write; 33 can come after truncation, so
+    "untouched" is proven by the hash, never assumed, and a changed exe is restored.
+    Windows PowerShell 5.1 trap: `Get-FileHash` is a script FUNCTION there, and a read failure is a
+    non-terminating error that returns a NULL hash (pwsh 7's cmdlet throws). Two null reads would
+    compare equal, so every hash read here uses `-ErrorAction Stop` and every comparison needs a
+    non-empty hash, for "untouched" and for "restored" alike. Who holds the
+    exe names the warning: a NEW PID = `a tray keeps relaunching: <parent>`, a PID already tried =
+    `a tray did not die (pid N)`, none = `the tray exe is locked by another process`.
+- **Why by PID (the 1.12.0 roll, 27.9.2026).** The first cut waited and re-checked by NAME. A tray
+  started after the kill (the Task Scheduler — parent `svchost -s Schedule`, e.g. the arm's own
+  relaunch task instance from an earlier pass — or the HKLM Run `DanteSyncTray` entry at logon) read
+  as the killed one still running: `the running tray did not exit` once each on stream, mbc and
+  fohabl, then OK on a re-run, while a manual `Stop-Process -Force` killed the tray at once. A
+  `TRAY OK` now says `killed a relaunched tray before the swap, started by: <parent>`, so the next
+  roll names the relaunch source.
 - **Relaunch whenever the tray was stopped or a current tray is not running (step 6), even after a
   failed swap**, so the operator is never left without a tray.
   - The temporary task (`DanteSyncTrayRelaunch-1372`) has the GROUP principal `BUILTIN\Users`, named
@@ -148,6 +173,12 @@ upgrade script under the ~1000-line budget.
   - The task has explicit settings: `-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
     -ExecutionTimeLimit 0`. Task Scheduler's defaults would refuse a FOH laptop on battery.
   - It is unregistered in a `finally`, and an unregister failure is a note.
+  - A tray already running in an interactive session when step 6 starts (relaunched meanwhile) is
+    kept: the task is not registered or started, so there is never a second tray, and `TRAY OK`
+    says `kept a tray that was running again, not launched`. After a successful swap that tray was
+    started after the new exe landed. The check matches by NAME only, deliberately: reading `.Path` of a
+    process in another session from the ssh session is unverified live and could turn every roll
+    into a false warning (review round 1 of the race fix, declined with this reason).
   - The count is read again AFTER the unregister: exactly ONE `dantesync-tray` process with
     `SessionId >= 1` (session 0 is the ssh/service session). A box with nobody logged on reads as a
     warning, which is honest. The downloaded tray and its `.sha256` are removed.
@@ -185,8 +216,43 @@ line 71, mid-paragraph. The header therefore documents `SSH_PASS` without its de
   - the gate's `DANTESYNC_GATE_WIN_HTTP_STREAM` seam is fed a fresh live `/status`;
   - the stub keys the version and the upload by host, so a mixed fleet is played too;
   - the tests cover warning, OK, canary abort, the all-current and the mixed-fleet SAME-node
-    refresh, and dry-run.
+    refresh, a relaunching tray (the named warning reaches the summary, the service stays), and
+    dry-run.
+- The race fix is pinned as text: the PID wait (no `Wait-Process -Name dantesync-tray` anywhere),
+  the bounded re-kill loop directly before the replace `try {`, `Get-TrayParent` defined before use
+  and never throwing, the in-use branch before (and exclusive of) the restore, and the step-6
+  keep-a-running-tray guard before `Register-ScheduledTask`, the hash-proven `$trayUntouched`,
+  the new-vs-tried holder split, the 120-char command-line cut and the `kept` note.
 - The Rust file runs locally with a plain `rustc --test`: it is std-only (`ci-testing-gotchas.md`).
+- **Running the emitted PowerShell, not only reading it: `tests/pwsh/run_dantesync_tray_swap_1372.sh`.**
+  The pytest reads the program as text. This runner RUNS it. It is not in CI, and it needs pwsh:
+  `PWSH=/path/to/pwsh`, else `pwsh` on PATH. It fails with exit 2 without pwsh, never skips.
+  - dev1 has no pwsh. Unpack the `powershell-7.x-linux-x64.tar.gz` release into a scratch dir and
+    point `PWSH` at it.
+  - The runner emits `dantesync_windows_tray_only_ps` and dot-sources it from
+    `tests/pwsh/dantesync_tray_swap_1372.ps1`.
+    - That harness defines `[CmdletBinding()]` stub FUNCTIONS for every cmdlet the arm calls. A
+      function outranks the cmdlet.
+    - The stubs model the node: a tray list; Stop-Process that starts a fresh tray N times; trays
+      that cannot be killed; Copy-Item that throws `IOException(msg, -2147024864)` (32) while a tray
+      holds the exe, or 33 after a partial write.
+    - Seven cases self-check the TRAY line, the exe hash, the tray count and the task starts: no
+      relaunch, relaunched once, keeps relaunching, a killed tray that survives, a relaunched tray
+      that survives, a lock violation after a partial write, and a tray relaunched right after the
+      swap (kept, not launched).
+    - It cannot reproduce the 5.1 null-hash behaviour: pwsh 7's `Get-FileHash` throws. That guard
+      is pinned as text in pytest.
+  - It also parses the full upgrade program with
+    `[System.Management.Automation.Language.Parser]::ParseFile`: 0 errors.
+  - Runs recorded for issue 1372:
+    - The first-cut text reproduced the live warning and left 2 trays.
+    - The round-1 text failed the lock-33 case (a partial exe was called "untouched") and the
+      did-not-die case.
+    - The fix passes 7/7.
+  - pwsh 7 is not Windows PowerShell 5.1. Keep the emitted text to 5.1 syntax: the run proves the
+    logic, not 5.1 compatibility.
+  - In the runner, name every variable so the sourced `dantesync-fleet-upgrade.sh` cannot overwrite
+    it: it sets `HERE`, which first pointed the harness path at `scripts/`.
 
 ## Testing (Tier-0)
 

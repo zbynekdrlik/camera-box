@@ -41,7 +41,7 @@ STREAM = "10.77.9.204"
 # grade_resolume_bundle / check_resolume.
 RESOLUME = "resolume.lan"
 DANTE_BOUND_US = 2000          # clock-offset-guard verdict bound
-AUDIO_BUF_BOUND_MS = 100       # #786 launch-gate bound (box standard 64/85)
+AUDIO_BUF_BOUND_MS = 100       # #786 launch-gate bound (box standard = the issue-1367 85 ms floor)
 # issue-1108 dantesync NTP step-rate facet: how often dantesync STEPPED the clock in the last hour.
 # A step-storm on the strih NTP master jumps every box's genlock timecode -> per-source FIFO
 # underruns -> the QR/burn ball skipping fleet-wide. Grade tiers from the issue's measured data:
@@ -101,6 +101,10 @@ def imag_is_retired() -> bool:
               file=sys.stderr)
     return False
 CG_CHAIN_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cg-chain-verify.sh")
+# issue 1357: the Windows OBS-box baseline (power plan, sleep, hibernate, USB suspend, WER) read by
+# scripts/win-baseline-check.sh -- REPORT-ONLY NOTE rows, one per read box, never counted.
+WIN_BASELINE_REPORT_VERDICT = "NOTE"
+WIN_BASELINE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "win-baseline-check.sh")
 
 results = []
 
@@ -599,7 +603,7 @@ def cg_chain_detail_from_output(stdout: str) -> str:
     the tool's own OVERALL verdict. No I/O -- unit-testable. The detail never implies a rig fault
     of its own; the audit's PASS/WARN/FAIL exit is untouched (this row is always emitted as NOTE).
     """
-    passes = fails = 0
+    passes = fails = absent = 0
     overall = "?"
     for ln in stdout.splitlines():
         s = ln.strip()
@@ -612,18 +616,21 @@ def cg_chain_detail_from_output(stdout: str) -> str:
                 passes += 1
             else:
                 fails += 1
+        elif parts and parts[-1] == "ABSENT":
+            absent += 1  # issue 1380: an optional hop's input is not on its OBS
     return (f"overall={overall} sources_pass={passes} sources_fail={fails} "
-            f"(report-only #1300; #787 resolume-rate exemption unchanged)")
+            f"sources_absent={absent} (report-only #1300; #787 resolume-rate exemption unchanged)")
 
 
 def check_cg_chain() -> None:
-    """REPORT-ONLY CG-chain row (#1300): fetch strih + stream OBS log tails, run cg-chain-verify.sh
-    --report-only over them, and emit ONE NOTE row. Never PASS/WARN/FAIL -> never changes the audit
+    """REPORT-ONLY CG-chain row (#1300): fetch the strih OBS log tail, run cg-chain-verify.sh
+    --hops strih --report-only over it, and emit ONE NOTE row (issue 1380: the stream hop is off the
+    default since the owner removed its input on 27.9.2026). Never PASS/WARN/FAIL -> never changes the audit
     exit code. A box that is off / unreachable yields a NOTE 'log unreadable', never a page."""
     import tempfile
 
     logs: dict[str, str] = {}
-    for hop, ip in (("strih", STRIH), ("stream", STREAM)):
+    for hop, ip in (("strih", STRIH),):
         tail = obs_log_tail(ip)
         if tail is None:
             emit(CG_CHAIN_REPORT_VERDICT, "cg-chain",
@@ -642,7 +649,7 @@ def check_cg_chain() -> None:
             env[f"CG_CHAIN_{hop.upper()}_LOG"] = path
         try:
             out = subprocess.run(
-                ["bash", CG_CHAIN_SCRIPT, "--hops", "strih stream", "--report-only"],
+                ["bash", CG_CHAIN_SCRIPT, "--hops", "strih", "--report-only"],
                 env=env, capture_output=True, text=True, timeout=30,
             ).stdout
         except (subprocess.TimeoutExpired, OSError) as exc:
@@ -655,6 +662,53 @@ def check_cg_chain() -> None:
                 os.unlink(path)
             except OSError as exc:  # airuleset:script-ok best-effort temp cleanup, nothing actionable
                 print(f"[NOTE] cg-chain  temp cleanup failed for {path}: {exc}", file=sys.stderr)
+
+
+def win_baseline_rows_from_output(stdout: str) -> dict[str, str]:
+    """issue 1357: fold win-baseline-check.sh output into one detail string per box.
+
+    `box=<b> win_baseline=<V>...` gives the box verdict; every `box=<b> item=<i> verdict=<V>
+    detail=<d>` whose verdict is not OK is appended as `<i>=<V>[<d>]`, so a drifted item names itself
+    (e.g. `power_scheme=DRIFT[Balanced (...) is not max-performance class ...]`). A SKIPPED box (a
+    traveling box away) is omitted -- its absence is normal, never a stale row. Pure (no I/O)."""
+    overall: dict[str, str] = {}
+    bad_items: dict[str, list[str]] = {}
+    for ln in stdout.splitlines():
+        m = re.match(r"box=(\S+) item=(\S+) verdict=(\S*) detail=(.*)$", ln.strip())
+        if m:
+            verdict = m.group(3) or "UNKNOWN"  # no verdict at all is never read as OK
+            if verdict != "OK":
+                bad_items.setdefault(m.group(1), []).append(f"{m.group(2)}={verdict}[{m.group(4)}]")
+            continue
+        m = re.match(r"box=(\S+) win_baseline=(\S+)", ln.strip())
+        if m and m.group(2) != "SKIPPED":
+            overall[m.group(1)] = m.group(2)
+    rows = {}
+    for box, verdict in overall.items():
+        items = " ".join(bad_items.get(box, []))
+        rows[box] = f"win_baseline={verdict}{(' ' + items) if items else ''} (report-only issue 1357)"
+    return rows
+
+
+def check_win_baseline() -> None:
+    """issue 1357: REPORT-ONLY Windows OBS-box baseline rows (NOTE, never PASS/WARN/FAIL -> never
+    changes the audit exit code). A tool error yields one NOTE row, never a page."""
+    try:
+        # errors="replace": scheme names / reg text arrive in the Windows OEM codepage, and one
+        # non-UTF-8 byte must never take the whole audit down (the ssh() helper does the same)
+        proc = subprocess.run(["bash", WIN_BASELINE_SCRIPT], capture_output=True, text=True,
+                              errors="replace", timeout=120)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        emit(WIN_BASELINE_REPORT_VERDICT, "win-baseline", f"tool error: {exc} (report-only issue 1357)")
+        return
+    for box, detail in win_baseline_rows_from_output(proc.stdout).items():
+        emit(WIN_BASELINE_REPORT_VERDICT, f"{box}-win", detail)
+    # rc 0/11/20 are the reader's verdicts; anything else is a crashed reader -- a row, even after
+    # some box rows, since a box it never reached would otherwise read as "away".
+    if proc.returncode not in (0, 11, 20):
+        tail = (proc.stderr.strip().splitlines() or ["no output"])[-1]
+        emit(WIN_BASELINE_REPORT_VERDICT, "win-baseline",
+             f"tool error: rc={proc.returncode} {tail} (report-only issue 1357)")
 
 
 def check_windows_box(name: str, ip: str, ws_password: str | None, program_fps: float,
@@ -776,6 +830,7 @@ def main() -> int:
     check_windows_box("stream", STREAM, strih_pw, program_fps=30.0, expect_latency=True)
     check_cg_chain()  # #1300 report-only CG-chain verdict row (NOTE; never affects the exit code)
     check_resolume()  # #1296: report-only, #787 rate-exempt; omitted when the traveling box is away
+    check_win_baseline()  # issue 1357: report-only Windows OBS-box baseline rows (NOTE)
     fails = results.count("FAIL")
     warns = results.count("WARN")
     print(f"\n=== RIG AUDIT: {results.count('PASS')} PASS / {warns} WARN / {fails} FAIL "

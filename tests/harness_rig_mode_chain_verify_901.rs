@@ -86,16 +86,16 @@ fn sources_audio_presence_preflight_and_win_ssh_exec_libs() {
 // --- new functions defined + called from do_test() ----------------------------------------------
 
 #[test]
-fn do_test_asserts_and_sets_stream_program_to_phase2_probe() {
+fn do_test_asserts_and_sets_stream_program_to_the_development_scene() {
     let s = read();
     assert!(
-        s.contains("verify_stream_program_phase2"),
-        "#901 gap 2: rig-mode.sh must define + call verify_stream_program_phase2"
+        s.contains("verify_stream_program_dev"),
+        "#901 gap 2: rig-mode.sh must define + call verify_stream_program_dev"
     );
     let body = do_test_body(&s);
     assert!(
-        body.contains("verify_stream_program_phase2"),
-        "#901 gap 2: do_test must call verify_stream_program_phase2 (was: a printed hint only)"
+        body.contains("verify_stream_program_dev"),
+        "#901 gap 2: do_test must call verify_stream_program_dev (was: a printed hint only)"
     );
     // The old prose-only hint must be GONE — this is now enforced, not recommended.
     assert!(
@@ -103,72 +103,63 @@ fn do_test_asserts_and_sets_stream_program_to_phase2_probe() {
         "#901 gap 2: the old unenforced hint must be removed now that it is actually asserted"
     );
     // The function itself must use obs_phase2.py's `switch` action (SetCurrentProgramScene + its
-    // #312 non-black self-check) against STREAM_IP + the PHASE2-PROBE scene.
+    // #312 non-black self-check) against STREAM_IP + the stream development scene (issue 1380:
+    // the production scene nested in `Development`, proven through the certified NDI 2ME PGM).
     let def = s
-        .find("verify_stream_program_phase2() {")
-        .expect("verify_stream_program_phase2 must be defined");
+        .find("verify_stream_program_dev() {")
+        .expect("verify_stream_program_dev must be defined");
     let body_end = s[def..].find("\n}\n").map(|i| def + i).unwrap_or(s.len());
     let fn_body = &s[def..body_end];
     assert!(fn_body.contains("obs_phase2.py"));
     assert!(fn_body.contains("switch"));
     assert!(fn_body.contains("STREAM_IP"));
-    assert!(fn_body.contains("PHASE2-PROBE"));
+    assert!(fn_body.contains("STREAM_PROG_SCENE"));
+    assert!(!fn_body.contains("PHASE2-PROBE"));
 }
 
-// #988: `teardown()` (every recording-e2e.sh run's cleanup) unbinds `phase2-probe-src` between
-// E2E runs -- the NORMAL rest state, not a fault -- so `switch` alone (which assumes the input is
-// already wired) guarantees gap-2 false-FAILs after every E2E run, including the PR-triggered
-// hardware gate that runs on every PR. Fix: establish the probe input via `obs_phase2.py setup`
-// BEFORE the existing switch+assert.
+// #988 made gap 2 establish the stream probe input first (`obs_phase2.py setup`), because every
+// E2E teardown left `phase2-probe-src` unbound. issue 1380 retires the stream probe scene and input
+// entirely (the owner removed both from the stream OBS on 27.9.2026): gap 2 instead SEEDS the
+// idempotent development scene before the switch, so the switch never false-fails on a missing
+// scene, and nothing re-creates the removed probe scene/input.
 #[test]
-fn verify_stream_program_phase2_establishes_the_probe_input_before_asserting_988() {
+fn verify_stream_program_dev_seeds_the_development_scene_before_asserting() {
     let s = read();
     let def = s
-        .find("verify_stream_program_phase2() {")
-        .expect("verify_stream_program_phase2 must be defined");
+        .find("verify_stream_program_dev() {")
+        .expect("verify_stream_program_dev must be defined");
     let body_end = s[def..].find("\n}\n").map(|i| def + i).unwrap_or(s.len());
     let fn_body = &s[def..body_end];
 
-    let setup_pos = fn_body.find("obs_phase2.py\" setup").expect(
-        "#988: verify_stream_program_phase2 must call `obs_phase2.py setup` to establish \
-         phase2-probe-src (teardown leaves it unbound between E2E runs) before the gap-2 assert",
+    let seed_pos = fn_body.find("stream_dev_scene_ensure").expect(
+        "issue 1380: verify_stream_program_dev must seed the development scene before the switch",
     );
     let switch_pos = fn_body
         .find("obs_phase2.py\" switch")
-        .expect("verify_stream_program_phase2 must still call `obs_phase2.py switch`");
+        .expect("verify_stream_program_dev must still call `obs_phase2.py switch`");
     assert!(
-        setup_pos < switch_pos,
-        "#988: the setup call must run BEFORE the existing switch+assert, not after"
-    );
-
-    // The setup call must target the SAME stream box, mark it terminal (stream has no downstream
-    // OBS hop for setup's own-output self-resolution to protect), and use the strih program
-    // sender name via the env-overridable $STREAM_PROBE_UPSTREAM (post-M4 default STRIH-LX
-    // (2ME PGM); the pre-M4 Windows STRIH-SNV literal binds phase2-probe-src to a dead sender).
-    assert!(
-        fn_body.contains(r#"--host "$STREAM_IP""#),
-        "the setup call must target STREAM_IP: {fn_body}"
+        seed_pos < switch_pos,
+        "the seeder must run BEFORE the switch+assert, not after"
     );
     assert!(
-        fn_body.contains(r#"--upstream "$STREAM_PROBE_UPSTREAM""#),
-        "the setup call must use the env-overridable $STREAM_PROBE_UPSTREAM as --upstream: {fn_body}"
+        fn_body.contains(r#""$STREAM_IP""#),
+        "the seeder and the switch must target STREAM_IP: {fn_body}"
     );
     assert!(
-        fn_body.contains("--terminal"),
-        "the setup call must pass --terminal (stream is a terminal box, no next OBS hop): \
-         {fn_body}"
+        !fn_body.contains("obs_phase2.py\" setup"),
+        "issue 1380: gap 2 must never re-create the stream probe input: {fn_body}"
     );
 }
 
-/// issue 1351 item — the STREAM_PROBE_UPSTREAM default must be the POST-M4 strih program sender
-/// name. A revert to the pre-M4 Windows 'STRIH-SNV (2ME PGM)' binds phase2-probe-src to a dead
-/// sender and PHASE2-PROBE renders BLACK, so pin the live default value (not just the indirection).
+/// issue 1351 pinned the stream probe's `--upstream` sender name; issue 1380 removed the stream
+/// probe (and its STREAM_PROBE_UPSTREAM knob) outright, so pin that no call site brings back the
+/// pre-M4 Windows sender name or the probe upstream knob.
 #[test]
-fn stream_probe_upstream_defaults_to_the_post_m4_strih_sender_name() {
+fn rig_mode_has_no_stream_probe_upstream_left() {
     let s = read();
     assert!(
-        s.contains(r#"STREAM_PROBE_UPSTREAM="${STREAM_PROBE_UPSTREAM:-STRIH-LX (2ME PGM)}""#),
-        "rig-mode.sh must default STREAM_PROBE_UPSTREAM to the post-M4 sender 'STRIH-LX (2ME PGM)'"
+        !s.contains("STREAM_PROBE_UPSTREAM"),
+        "issue 1380: the stream probe upstream knob must be gone with the stream probe"
     );
     assert!(
         !s.contains("--upstream 'STRIH-SNV (2ME PGM)'"),

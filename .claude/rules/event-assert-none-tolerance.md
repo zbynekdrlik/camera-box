@@ -53,6 +53,13 @@ module, because nothing forced the None-path to be exercised until a real RPC hi
    substitute for it: a future caller that forgets rule #1 still gets an unambiguous, non-`None`
    value instead of a crash-prone bare `None`.
 
+### The stream program scene is NOT a contract item (issue 1380)
+
+Owner hard rule, 27.9.2026, verbatim: "nemas ti nikdy v stream obs davat do programu scenu PRO!!!!!". EVENT mode never touches
+the stream program (the owner cuts to `PRO` himself), so no contract item grades it: `rig-mode.sh`'s
+`event_mode_assert` prints the program scene as a REPORT-ONLY line and it is never a FAIL. Pinned by
+`tests/python/test_event_assert_stream_program_1380.py`. Do not add a stream-program item back.
+
 ### Test pattern
 
 `tests/python/test_event_assert_1225.py` is the canonical shape for testing this: build a

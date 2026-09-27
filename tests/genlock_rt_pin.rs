@@ -1,26 +1,30 @@
-//! #484 — the genlock render-tick thread must be pinned SCHED_FIFO to the isolated core pair.
+//! #484 — the genlock render-tick thread pin, as reworked by issue 1357.
 //!
-//! imag-nb's kernel cmdline reserves cpu10,11 (`nohz_full=10,11` inside the `isolcpus=2-11` P-core
-//! block, #483) for exactly ONE timing-critical thread: the libobs graphics thread that drives the
-//! wall-clock-slaved genlock render tick (`genlock_next_deadline` -> `video_sleep`, obs-video.c).
-//! #484 pins THAT thread onto those cores under SCHED_FIFO at a LOW priority so its wakeups are not
-//! jittered by kernel housekeeping — the direct analogue of camera-box's `src/affinity.rs` (#289)
-//! capture-thread pin.
+//! The libobs graphics thread drives the wall-clock-slaved genlock render tick
+//! (`genlock_next_deadline` -> `video_sleep`, obs-video.c). #484 pinned it onto imag-nb's reserved
+//! `nohz_full` cores under a LOW SCHED_FIFO priority so its wakeups are not jittered by kernel
+//! housekeeping — the analogue of camera-box's `src/affinity.rs` (#289) capture-thread pin.
 //!
-//! CRITICAL SAFETY: the pin is WARN-and-CONTINUE. A high-priority runaway FIFO thread in a
-//! ~106-thread OBS process can lock out kernel housekeeping and HANG a headless box (worse than the
-//! frame hitches this prevents), so the priority is LOW (~10) and every syscall failure is logged
-//! loud and the thread keeps running SCHED_OTHER — never abort, never retry-loop, never hang.
+//! Issue 1357 (live on strih-lx 23.9 and 27.9.2026): the pin fell back to a hardcoded `{10,11}` on a
+//! box with no isolated core, and every thread the graphics thread created inherited that mask (and,
+//! with an rtprio grant, SCHED_FIFO) — the whole NDI receive path squeezed onto two cores. So now:
+//! the pin cores are the kernel's isolated cores that are ALSO nohz_full (none means no pin, and
+//! there is no fallback pair), and the pin is held only while the tick SLEEPS (`video_sleep` around
+//! `os_sleepto_ns`), so no thread is ever created under it; FIFO carries `SCHED_RESET_ON_FORK`.
 //!
-//! This is a SOURCE-level guard (same convention as `tests/obs_updater_disabled.rs`), NOT a runtime
-//! test: the pin lives in the vendored genlock C. It runs Tier-0 (default features — just reads the
-//! file), so a future `/update-av-stack` `git subtree pull` that silently drops the pin fails CI
-//! here. The C itself is compiled by `linux-genlock.yml` (vendored OBS + DistroAV); the live
-//! cyclictest/chrt verification on imag-nb is the supervisor's post-merge rig step.
+//! CRITICAL SAFETY (unchanged): the priority is LOW (~10) and every syscall failure is logged loud
+//! and the thread keeps running SCHED_OTHER — never abort, never retry-loop, never hang.
+//!
+//! This is a SOURCE-level guard (same convention as `tests/obs_updater_disabled.rs`): a future
+//! `/update-av-stack` `git subtree pull` that silently drops the rework fails CI here. The behaviour
+//! itself is executed by `tests/genlock_render_tick_pin_1357.rs` (the block lifted and compiled:
+//! parity, a syscall trace, and real-thread inheritance).
 
 use std::path::PathBuf;
 
 const OBS_VIDEO: &str = "vendor/obs-studio/libobs/obs-video.c";
+/// Issue 1357 moved the pin into its own header, included once by obs-video.c.
+const PIN_H: &str = "vendor/obs-studio/libobs/obs-genlock-render-tick-pin.h";
 
 fn vendor_file(rel: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -33,22 +37,28 @@ fn squish(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The pin must set CPU affinity to the isolated cores via `pthread_setaffinity_np` and the
-/// FIFO scheduler via `sched_setscheduler(SCHED_FIFO)` — the two syscalls that make up the pin.
+/// The pin must set CPU affinity via `pthread_setaffinity_np` and the scheduler via
+/// `sched_setscheduler(SCHED_FIFO | SCHED_RESET_ON_FORK)` — the reset flag makes the kernel give any
+/// thread created under FIFO plain SCHED_OTHER (issue 1357).
 #[test]
 fn render_tick_thread_is_pinned_sched_fifo_to_isolated_cores() {
-    let src = squish(&vendor_file(OBS_VIDEO));
+    let src = squish(&vendor_file(PIN_H));
 
     assert!(
-        src.contains("pthread_setaffinity_np(pthread_self(), sizeof(set), &set)"),
-        "{OBS_VIDEO}: #484 genlock render-tick pin missing — the graphics thread must set its CPU \
-         affinity to the isolated cores via `pthread_setaffinity_np(pthread_self(), ...)`. A \
-         `git subtree pull` upstream bump likely dropped it; re-apply the #484 patch."
+        src.contains("pthread_setaffinity_np(pthread_self(), sizeof(p->pin), &p->pin)"),
+        "{PIN_H}: the genlock render-tick pin must narrow the graphics thread to the pin cores \
+         via `pthread_setaffinity_np(pthread_self(), ...)`. A `git subtree pull` upstream bump \
+         likely dropped it; re-apply the #484 + issue 1357 patch."
     );
     assert!(
-        src.contains("sched_setscheduler(0, SCHED_FIFO, &param)"),
-        "{OBS_VIDEO}: #484 genlock render-tick pin missing — the graphics thread must go realtime \
-         via `sched_setscheduler(0, SCHED_FIFO, &param)`. Re-apply the #484 patch."
+        src.contains("sched_setscheduler(0, SCHED_FIFO | SCHED_RESET_ON_FORK, &param)"),
+        "{PIN_H}: the render tick must go realtime via \
+         `sched_setscheduler(0, SCHED_FIFO | SCHED_RESET_ON_FORK, &param)` — without the reset flag \
+         a thread created under FIFO inherits it (issue 1357)."
+    );
+    assert!(
+        !src.contains("sched_setscheduler(0, SCHED_FIFO, &param)"),
+        "{PIN_H}: a bare SCHED_FIFO without SCHED_RESET_ON_FORK is the issue 1357 leak"
     );
 }
 
@@ -56,23 +66,23 @@ fn render_tick_thread_is_pinned_sched_fifo_to_isolated_cores() {
 /// ~106-thread OBS process can lock out kernel housekeeping and hang the headless box.
 #[test]
 fn render_tick_fifo_priority_is_low() {
-    let src = squish(&vendor_file(OBS_VIDEO));
+    let src = squish(&vendor_file(PIN_H));
 
     assert!(
         src.contains("#define GENLOCK_RT_PRIORITY 10"),
-        "{OBS_VIDEO}: #484 pin must use a LOW SCHED_FIFO priority (`#define GENLOCK_RT_PRIORITY \
+        "{PIN_H}: #484 pin must use a LOW SCHED_FIFO priority (`#define GENLOCK_RT_PRIORITY \
          10`) — a HIGH-priority FIFO thread can starve kernel housekeeping and HANG a headless \
          box, the exact failure the ticket's safety note forbids."
     );
     assert!(
         src.contains("param.sched_priority = GENLOCK_RT_PRIORITY;"),
-        "{OBS_VIDEO}: #484 pin must apply the LOW `GENLOCK_RT_PRIORITY` to `sched_param` — not a \
+        "{PIN_H}: #484 pin must apply the LOW `GENLOCK_RT_PRIORITY` to `sched_param` — not a \
          hardcoded high number."
     );
     // The pin must NEVER reach for the maximum FIFO priority (99 / sched_get_priority_max).
     assert!(
         !src.contains("sched_get_priority_max"),
-        "{OBS_VIDEO}: #484 pin must NOT use the MAX FIFO priority — a max-prio render-tick thread \
+        "{PIN_H}: #484 pin must NOT use the MAX FIFO priority — a max-prio render-tick thread \
          can hang the headless box (the ticket's hard safety constraint)."
     );
 }
@@ -89,10 +99,10 @@ fn render_tick_fifo_priority_is_low() {
 /// silently not checking the intended condition at all — found in review (PR #542).
 #[test]
 fn render_tick_pin_is_warn_and_continue_never_aborts() {
-    let raw = vendor_file(OBS_VIDEO);
+    let raw = vendor_file(PIN_H);
 
     let fn_start = raw
-        .find("static void genlock_pin_render_tick_thread(void)")
+        .find("static inline void genlock_pin_render_tick_thread(void)")
         .expect("genlock_pin_render_tick_thread must be defined");
     let fn_end = raw[fn_start..]
         .find("\n}\n")
@@ -105,7 +115,7 @@ fn render_tick_pin_is_warn_and_continue_never_aborts() {
     let warn_count = body.matches("continuing SCHED_OTHER").count();
     assert!(
         warn_count >= 2,
-        "{OBS_VIDEO}: #484 pin must WARN-and-CONTINUE — BOTH the affinity-pin failure branch and \
+        "{PIN_H}: #484 pin must WARN-and-CONTINUE — BOTH the affinity-pin failure branch and \
          the SCHED_FIFO failure branch must log `continuing SCHED_OTHER` (found {warn_count} \
          occurrence(s) inside genlock_pin_render_tick_thread), never abort/retry-loop/hang (the \
          ticket's CRITICAL SAFETY requirement, mirroring the robust fallback in src/affinity.rs \
@@ -115,30 +125,75 @@ fn render_tick_pin_is_warn_and_continue_never_aborts() {
     for banned in ["abort(", "exit(", "assert("] {
         assert!(
             !body.contains(banned),
-            "{OBS_VIDEO}: genlock_pin_render_tick_thread must never call `{banned}...)` on a \
+            "{PIN_H}: genlock_pin_render_tick_thread must never call `{banned}...)` on a \
              failure path — a headless box must keep running SCHED_OTHER, never abort/exit/assert."
         );
     }
 }
 
-/// The pinned core set must be DERIVED from the kernel's reserved `nohz_full` cpulist (robust,
-/// mirroring src/affinity.rs reading /sys), with a hardcoded {10,11} fallback tying it to #483's
-/// `nohz_full=10,11` reservation so the pin still lands on a box where /sys is unreadable.
+/// Issue 1357: the pin cores are DERIVED from BOTH `/sys/devices/system/cpu/isolated` and
+/// `/sys/devices/system/cpu/nohz_full`, and there is NO hardcoded fallback set. The old `{10,11}`
+/// fallback pinned strih-lx (no isolated core at all) onto two ordinary cores and leaked that mask
+/// to 40 threads.
 #[test]
-fn render_tick_cores_derive_from_nohz_full_with_hardcoded_fallback() {
-    let src = squish(&vendor_file(OBS_VIDEO));
+fn render_tick_cores_derive_from_isolated_and_nohz_full_with_no_fallback() {
+    let src = squish(&vendor_file(PIN_H));
 
+    for path in [
+        "/sys/devices/system/cpu/isolated",
+        "/sys/devices/system/cpu/nohz_full",
+    ] {
+        assert!(
+            src.contains(path),
+            "{PIN_H}: the render-tick pin must read {path} (issue 1357: isolated AND nohz_full)"
+        );
+    }
     assert!(
-        src.contains("/sys/devices/system/cpu/nohz_full"),
-        "{OBS_VIDEO}: #484 pin must derive its target cores from \
-         /sys/devices/system/cpu/nohz_full (the #483-reserved cpu10,11) — robust like \
-         src/affinity.rs reading /sys, not a bare hardcode."
+        !src.contains("CPU_SET(10, &set)") && !src.contains("CPU_SET(11, &set)"),
+        "{PIN_H}: the hardcoded {{10,11}} fallback must be gone — a box with no isolated core \
+         is not pinned at all (issue 1357)"
     );
     assert!(
-        src.contains("CPU_SET(10, &set)") && src.contains("CPU_SET(11, &set)"),
-        "{OBS_VIDEO}: #484 pin must fall back to the hardcoded {{10,11}} pair (#483's \
-         nohz_full=10,11 reservation) when /sys/devices/system/cpu/nohz_full is unreadable/empty, \
-         so the pin still lands on a fresh box."
+        src.contains("render-tick thread not pinned: no isolated cores"),
+        "{PIN_H}: an unpinned render tick must say so in ONE log line (issue 1357)"
+    );
+    assert!(
+        !src.contains("pinned to the isolated nohz_full cores"),
+        "{PIN_H}: the old unconditional \"pinned to the isolated nohz_full cores\" line lied \
+         on strih-lx and must be gone"
+    );
+}
+
+/// Issue 1357: the pin is held only while the tick sleeps — `video_sleep` narrows before
+/// `os_sleepto_ns` and restores right after, so no thread is ever created under the pin.
+#[test]
+fn the_pin_wraps_only_the_tick_sleep() {
+    let raw = vendor_file(OBS_VIDEO);
+    let start = raw
+        .find("static inline void video_sleep(")
+        .expect("video_sleep must be defined");
+    let end = raw[start..]
+        .find("\n}\n")
+        .map(|i| start + i)
+        .expect("video_sleep must have a closing brace");
+    let body = &raw[start..end];
+    let begin = body
+        .find("const bool tick_pinned = genlock_tick_pin_sleep_begin(t);")
+        .expect("video_sleep must call genlock_tick_pin_sleep_begin(t) (issue 1357)");
+    let sleep = body
+        .find("os_sleepto_ns(t)")
+        .expect("video_sleep must still sleep with os_sleepto_ns(t)");
+    let finish = body
+        .find("genlock_tick_pin_sleep_end(tick_pinned);")
+        .expect("video_sleep must call genlock_tick_pin_sleep_end(tick_pinned) (issue 1357)");
+    assert!(
+        begin < sleep && sleep < finish,
+        "{OBS_VIDEO}: the pin must be taken right before os_sleepto_ns and dropped right after it"
+    );
+    assert_eq!(
+        body.matches("os_sleepto_ns(").count(),
+        1,
+        "{OBS_VIDEO}: video_sleep must sleep in exactly one place, inside the pin window"
     );
 }
 
@@ -148,10 +203,19 @@ fn render_tick_cores_derive_from_nohz_full_with_hardcoded_fallback() {
 #[test]
 fn pin_is_invoked_from_the_graphics_thread_linux_only() {
     let raw = vendor_file(OBS_VIDEO);
+    let header = vendor_file(PIN_H);
 
-    let def_idx = raw
-        .find("genlock_pin_render_tick_thread(void)")
-        .expect("obs-video.c must DEFINE genlock_pin_render_tick_thread (#484)");
+    assert!(
+        header.contains("static inline void genlock_pin_render_tick_thread(void)"),
+        "{PIN_H} must DEFINE genlock_pin_render_tick_thread (#484, issue 1357)"
+    );
+    assert!(
+        !raw.contains("genlock_pin_render_tick_thread(void)"),
+        "{OBS_VIDEO} must not carry a second copy of the pin (it lives in {PIN_H})"
+    );
+    let guard_idx = raw
+        .find("#if defined(__linux__) && !defined(_WIN32)\n#include \"obs-genlock-render-tick-pin.h\"")
+        .expect("obs-video.c must include the pin header inside its Linux-only guard (issue 1357)");
     let name_idx = raw
         .find(r#"os_set_thread_name("libobs: graphics thread")"#)
         .expect("obs_graphics_thread must still name the graphics thread");
@@ -160,21 +224,16 @@ fn pin_is_invoked_from_the_graphics_thread_linux_only() {
         .expect("obs_graphics_thread must CALL genlock_pin_render_tick_thread() (#484)");
 
     assert!(
-        def_idx < call_idx,
-        "{OBS_VIDEO}: genlock_pin_render_tick_thread must be defined before it is called"
+        guard_idx < call_idx,
+        "{OBS_VIDEO}: the pin header must be included before the call"
     );
     assert!(
         name_idx < call_idx,
         "{OBS_VIDEO}: the #484 pin must be invoked from obs_graphics_thread AFTER \
          os_set_thread_name — it pins the graphics thread itself (the genlock tick driver)"
     );
-
-    // Linux-only guard: the pin is wrapped in a __linux__ conditional (the Windows/macOS builds
-    // that strih/stream use have no equivalent and don't run on imag-nb).
-    let squished = squish(&raw);
     assert!(
-        squished.contains("#if defined(__linux__)"),
-        "{OBS_VIDEO}: the #484 pin must be guarded `#if defined(__linux__)` — it is a Linux-only \
-         (imag-nb) addition; the vendored Windows/macOS builds must be unaffected."
+        header.contains("#if defined(__linux__) && !defined(_WIN32)"),
+        "{PIN_H}: the pin is Linux-only — the vendored Windows/macOS builds must be unaffected"
     );
 }

@@ -45,6 +45,47 @@ MAIN_OUTPUT = "NDI Main Output"
 SCENE = "PHASE2-PROBE"
 INPUT = "phase2-probe-src"
 
+# issue 1380: a nested scene (or group) scene item; program-rendered-input descends into it.
+_SCENE_SOURCE_TYPE = "OBS_SOURCE_TYPE_SCENE"
+# issue 1380 -- owner hard rule, 27.9.2026, verbatim: "nemas ti nikdy v stream obs davat do programu scenu PRO!!!!!"
+# No request from this tool may put the owner's production scene on program or preview, on any box
+# (only the stream box has it). The name mirrors STREAM_PRODUCTION_SCENE_DEFAULT in
+# scripts/lib/stream-dev-scene.sh (pinned by a pytest); the guard lives in _rpc, the one choke point
+# every obs_phase2 request passes through, so ignore_err never bypasses it.
+NEVER_PROGRAM_SCENES = frozenset({"PRO"})
+_SCENE_SELECTING_REQUESTS = ("SetCurrentProgramScene", "SetCurrentPreviewScene")
+# A cut OFF a NEVER_PROGRAM_SCENES scene in Studio Mode makes OBS's swap put that scene into the
+# preview when the transition ends; the re-assert (scripts/stream_dev_scene.py) moves it out,
+# until the observed transition end (and any per-scene override) plus this margin, polling at this
+# cadence. It is reactive: the scene can sit in the preview for up to one poll plus the request /
+# Qt-queue delay before it is moved.
+PREVIEW_SWAP_MARGIN_S = float(os.environ.get("OBS_PREVIEW_SWAP_MARGIN_S", "1.5"))
+PREVIEW_POLL_S = 0.05
+
+
+class ForbiddenSceneError(RuntimeError):
+    """A request tried to put a scene from NEVER_PROGRAM_SCENES on program or preview."""
+
+
+def _refuse_forbidden_scene(rtype, rdata):
+    """issue 1380 (pure): raise ForbiddenSceneError when *rtype* selects a program/preview scene in
+    NEVER_PROGRAM_SCENES. The owner cuts to the production scene himself; our tooling never does."""
+    if rtype not in _SCENE_SELECTING_REQUESTS:
+        return
+    scene = (rdata or {}).get("sceneName")
+    if "sceneUuid" in (rdata or {}):
+        # obs-websocket resolves sceneUuid BEFORE sceneName, so a harmless name + the production
+        # scene's uuid would pass a name check: selecting requests may not carry a uuid at all.
+        raise ForbiddenSceneError(
+            f"{rtype} with a sceneUuid refused: select scenes by sceneName only so the "
+            f"production-scene guard can check it (issue 1380)"
+        )
+    if scene in NEVER_PROGRAM_SCENES:
+        raise ForbiddenSceneError(
+            f"{rtype} to '{scene}' refused: our tooling never programs the production scene "
+            f"(owner hard rule 27.9.2026, issue 1380); development uses its own scene"
+        )
+
 # #355: bound for waiting an orphan recording's output to FINALIZE (outputActive=False)
 # after StopRecord, before this run's StartRecord. A large MP4 (the live 24.5 GB stream-box
 # orphan) takes many seconds to finalize; a flat sleep(1.0) was too short, so StartRecord ran
@@ -360,6 +401,35 @@ def _measurement_pins_module():
         sys.path.insert(0, here)
     import e2e_measurement_pins  # noqa: E402
     return e2e_measurement_pins
+
+
+def _dev_scene_module():
+    """issue 1380: lazy import of the PURE stream development-scene module
+    (scripts/stream_dev_scene.py: the seeder + the Studio Mode preview re-assert) -- SAME lazy + own
+    sys.path insert pattern as _measurement_pins_module() above, so obs_phase2's module-level import
+    graph stays unchanged (tests load obs_phase2 via importlib without scripts/ on sys.path)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import stream_dev_scene  # noqa: E402
+    return stream_dev_scene
+
+
+def _keep_forbidden_scene_out_of_preview(ws, host, left_scene, target):
+    """issue 1380: after cutting program from *left_scene* to *target*, keep *left_scene* out of the
+    Studio Mode preview when it is a NEVER_PROGRAM_SCENES scene (OBS's swap would put it there when
+    the transition ends). No-op -- no request at all -- for any other scene, so the #312 strih sweep
+    is untouched."""
+    if left_scene not in NEVER_PROGRAM_SCENES or left_scene == target:
+        return
+    moved = _dev_scene_module().reassert_stale_preview(
+        _rpc, ws, left_scene, target, margin_s=PREVIEW_SWAP_MARGIN_S, poll_s=PREVIEW_POLL_S,
+        sleep=time.sleep, now=time.monotonic)
+    if moved:
+        sys.stderr.write(
+            f"[obs] {host}: issue 1380 preview '{left_scene}' -> '{target}' after the Studio Mode "
+            f"swap (our tooling never leaves the production scene on program or preview)\n"
+        )
 
 
 def _imag_scenes_module():
@@ -1047,6 +1117,7 @@ def _rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
     during an NDI renegotiation OBS can flood events while the response never arrives, so once the
     deadline passes we raise TimeoutError (fail loud). *ignore_err* suppresses an OBS request-level
     error (a normal failed RPC), but NEVER the timeout — a hang is always fatal to the op."""
+    _refuse_forbidden_scene(rtype, rdata)
     deadline_s = OBS_OP_TIMEOUT_S if timeout_s is None else timeout_s
     ws.send(json.dumps({"op": 6, "d": {
         "requestType": rtype, "requestId": rtype, "requestData": rdata or {}}}))
@@ -1629,7 +1700,8 @@ def _assert_program_nonblack(ws, host, scene, label, black_hint, min_mean=None):
     arbitrary, possibly dim, real production content), so each caller now owns its own floor instead
     of sharing one global default."""
     blackcheck_timeout = float(os.environ.get("OBS_BLACKCHECK_TIMEOUT_S", "20"))
-    # #312: switch() (the ONLY caller that omits min_mean) routes to a KNOWN-BRIGHT scene (the
+    # #312: switch() (the ONLY caller that omits min_mean, unless issue 1380's EVENT-mode
+    # production-scene restore passes --prod-floor) routes to a KNOWN-BRIGHT scene (the
     # dual-QR monitor, mean ~105 when settled), so it needs a MEAN floor — a mid-renegotiation frame
     # (peak ~117 but mean ~2.7 right after cam1's [2/8] restart) then keeps the poll WAITING until
     # cam1's NDI settles, instead of falsely passing on peak and recording a black program.
@@ -1667,6 +1739,13 @@ def _assert_program_nonblack(ws, host, scene, label, black_hint, min_mean=None):
             )
         # verdict == "WAIT": receiver may still be filling — keep polling.
         time.sleep(poll_interval)
+
+
+def _prod_nonblack_floor():
+    """#677: the ONE looser non-black MEAN floor for real (possibly dim) production content, read by
+    prod_scene() and by `switch --prod-floor` (issue 1380's EVENT restore of the production scene).
+    Env OBS_NONBLACK_MIN_MEAN_PROD, default 5."""
+    return float(os.environ.get("OBS_NONBLACK_MIN_MEAN_PROD", "5"))
 
 
 def _restore_target(prev, target, ephemeral, scenes, saved_prev=None):
@@ -1815,6 +1894,7 @@ def prod_scene(a):
         # not affect the recorded PROGRAM output).
         if studio:
             _rpc(ws, "SetCurrentPreviewScene", {"sceneName": target}, ignore_err=True)
+        _keep_forbidden_scene_out_of_preview(ws, a.host, curr_prog, target)
 
         # #183: FORCE the recorded prod genlock input to the test preload (1) so the run
         # measures the TRUE genlock hop (~33ms), not the prod audio-sync delay (preload≈31 ≈
@@ -1861,7 +1941,7 @@ def prod_scene(a):
             f"The source is not delivering frames; aborting BEFORE StartRecord so a black recording "
             f"never wastes a full run. Check the certified prod input feeding '{target}' is "
             f"receiving NDI.",
-            min_mean=float(os.environ.get("OBS_NONBLACK_MIN_MEAN_PROD", "5")),
+            min_mean=_prod_nonblack_floor(),
         )
 
         sys.stderr.write(
@@ -1902,6 +1982,17 @@ def teardown(a):
         # response, #328) when that scene carries the heavy NDI 2ME PGM source mid-renegotiation —
         # the teardown half of the proof-blocking hang. prod_scene already skips a same-scene
         # switch; teardown must too. Only switch when the current program differs from the target.
+        # issue 1380 (owner hard rule 27.9.2026): never restore the production scene onto program
+        # or preview -- the owner cuts to it himself. The program then stays where the run left it
+        # (the stream development scene), and the rest of the restore below still runs.
+        for kind, scene in (("program", prev), ("preview", host_state.get("prev_preview"))):
+            if scene in NEVER_PROGRAM_SCENES:
+                sys.stderr.write(
+                    f"[obs] {a.host}: issue 1380 {kind} NOT restored to '{scene}' -- our tooling "
+                    f"never programs the production scene (the owner cuts to it himself)\n"
+                )
+        if prev in NEVER_PROGRAM_SCENES:
+            prev = None
         if prev:
             curr_prog = _rpc(ws, "GetCurrentProgramScene", ignore_err=True).get(
                 "currentProgramSceneName")
@@ -1912,6 +2003,8 @@ def teardown(a):
         # spam). Falls back to the program scene when no prior preview was recorded. Same #343
         # skip-if-already-there guard — a same-scene preview set hangs on the heavy source too.
         prev_preview = host_state.get("prev_preview") or prev
+        if prev_preview in NEVER_PROGRAM_SCENES:
+            prev_preview = None
         if prev_preview:
             curr_preview = _rpc(ws, "GetCurrentPreviewScene", ignore_err=True).get(
                 "currentPreviewSceneName")
@@ -2306,19 +2399,29 @@ def switch(a):
     it marks when the new cambox enters program); the black-check polls AFTER and never moves it."""
     ws = _conn(a.host, a.password)
     try:
-        _rpc(ws, "SetCurrentProgramScene", {"sceneName": a.program_scene})
+        # issue 1380: skip the SetCurrentProgramScene when the target is already on program (the
+        # #343 same-scene hazard: re-setting a scene that carries the heavy NDI 2ME PGM can hang
+        # past the #328 deadline). The rig-mode TEST park re-asserts the development scene it just
+        # proved, and EVENT mode may find PRO already live. The non-black proof below still runs.
+        current = _rpc(ws, "GetCurrentProgramScene").get("currentProgramSceneName")
+        if current != a.program_scene:
+            _rpc(ws, "SetCurrentProgramScene", {"sceneName": a.program_scene})
         switch_ns = time.time_ns()  # the boundary — right after the switch lands
-        # Same POLLED non-black self-check prod_scene uses (shared helper) — a dead/black cambox
-        # scene fails loud instead of silently recording a black, all-undecodable segment.
+        _keep_forbidden_scene_out_of_preview(ws, a.host, current, a.program_scene)
+        # Same POLLED non-black self-check prod_scene uses (shared helper) — a dead/black scene
+        # fails loud instead of silently recording a black, all-undecodable segment.
+        # issue 1380: `--prod-floor` = the #677 production floor (the development program is real,
+        # possibly dim production content); omitted keeps the #312 bright-QR default.
         _assert_program_nonblack(
             ws,
             a.host,
             a.program_scene,
             "#312 switch",
-            "The cambox feeding it is not delivering frames; aborting the sweep so a black segment "
-            "never wastes the run. (#1223: a dark screen here can ALSO mean the cam2 painter/monitor "
-            "itself already went dark/expired -- check /tmp/painter.log on the painter box before "
-            "assuming the cambox is the culprit.)",
+            f"The input feeding program scene '{a.program_scene}' is not delivering frames. (In "
+            f"the #312 all-cambox sweep that is the cambox; #1223: a dark screen there can ALSO "
+            f"mean the cam2 painter/monitor went dark -- check /tmp/painter.log on the painter "
+            f"box first.)",
+            min_mean=_prod_nonblack_floor() if getattr(a, "prod_floor", False) else None,
         )
     finally:
         ws.close()
@@ -2780,16 +2883,52 @@ def _first_enabled_scene_item_source(items):
     EXPECTED source, this reads what a scene's CURRENT program item genuinely is (live evidence,
     2026-08-04: strih's program scene rendered 'NDI cam2' while the fixed default was
     'NDI cam1' — the burn landed on the wrong, non-rendered input)."""
+    item = _first_enabled_scene_item(items)
+    return None if item is None else item.get("sourceName")
+
+
+def _first_enabled_scene_item(items):
+    """The ITEM behind `_first_enabled_scene_item_source` (pure): the same selection, returning the
+    whole scene item so a caller can see whether it is a nested scene (issue 1380)."""
     first_enabled = None
     for item in items:
         if not bool(item.get("sceneItemEnabled", True)):
             continue
         if first_enabled is None:
-            first_enabled = item.get("sourceName")
+            first_enabled = item
         if item.get("inputKind") in _AUDIO_ONLY_INPUT_KINDS:
             continue
-        return item.get("sourceName")
+        return item
     return first_enabled
+
+
+def _resolve_rendered_input(fetch_items, scene, _seen=None, _is_group=False):
+    """issue 1380 (pure given *fetch_items*): the input ACTUALLY rendered by *scene*, descending into
+    a nested scene source. The stream development scene `Development` holds the scene `PRO` as its
+    one item, so without the descent the TEST burn would resolve the SCENE `PRO` and try to attach a
+    burn filter to it (a write to the production scene). *fetch_items(name, is_group)* returns that
+    scene's (or, for an OBS group, which is also OBS_SOURCE_TYPE_SCENE with isGroup true, that
+    group's) `sceneItems`. Returns None for an empty scene or a nesting cycle."""
+    seen = set() if _seen is None else _seen
+    if scene in seen:
+        return None
+    seen.add(scene)
+    item = _first_enabled_scene_item(fetch_items(scene, _is_group))
+    if item is None:
+        return None
+    if item.get("sourceType") == _SCENE_SOURCE_TYPE:
+        return _resolve_rendered_input(fetch_items, item.get("sourceName"), seen,
+                                       bool(item.get("isGroup")))
+    return item.get("sourceName")
+
+
+def _scene_items_fetcher(ws):
+    """The live *fetch_items* for `_resolve_rendered_input`: GetSceneItemList for a scene,
+    GetGroupSceneItemList for a group (GetSceneItemList on a group name fails)."""
+    def fetch(name, is_group=False):
+        request = "GetGroupSceneItemList" if is_group else "GetSceneItemList"
+        return _rpc(ws, request, {"sceneName": name}).get("sceneItems", [])
+    return fetch
 
 
 def program_rendered_input(a):
@@ -2802,12 +2941,11 @@ def program_rendered_input(a):
         scene = a.scene or _rpc(ws, "GetCurrentProgramScene").get("currentProgramSceneName", "")
         if not scene:
             raise SystemExit(f"[obs] {a.host}: could not resolve a program scene to inspect")
-        items = _rpc(ws, "GetSceneItemList", {"sceneName": scene}).get("sceneItems", [])
-        src = _first_enabled_scene_item_source(items)
+        src = _resolve_rendered_input(_scene_items_fetcher(ws), scene)
         if src is None:
             raise SystemExit(
-                f"[obs] {a.host}: program scene '{scene}' has NO enabled scene item — cannot "
-                f"resolve what is actually rendered."
+                f"[obs] {a.host}: program scene '{scene}' has NO enabled scene item (directly or "
+                f"through a nested scene) — cannot resolve what is actually rendered."
             )
     finally:
         ws.close()
@@ -2942,35 +3080,116 @@ def program_scene(a):
     print(scene)
 
 
+# --- issue 1380: the stream development scene CLI -------------------------------------------------
+# The seeder itself (idempotent, operator-wins, never writes to the production scene) lives in the
+# pure scripts/stream_dev_scene.py; this is only the connection + the CLI.
+
+
+def dev_scene(a):
+    """issue 1380 CLI: ensure the development scene nests the production scene on *a.host*; print
+    `DEV_SCENE=<name> created=<0|1> nested_added=<0|1>` on stdout, log to stderr. Exits non-zero
+    when the production scene is missing."""
+    m = _dev_scene_module()
+    a.scene = a.scene or m.STREAM_DEV_SCENE
+    a.nested = a.nested or m.STREAM_PRODUCTION_SCENE
+    ws = _conn(a.host, a.password)
+    try:
+        plan = m.ensure_dev_scene(_rpc, ws, a.scene, a.nested)
+    except m.DevSceneError as e:
+        raise SystemExit(f"[obs] {a.host}: issue 1380 development scene NOT ensured: {e}")
+    finally:
+        ws.close()
+    created = int("create_scene" in plan.actions)
+    added = int("add_nested" in plan.actions)
+    sys.stderr.write(
+        f"[obs] {a.host}: issue 1380 development scene '{a.scene}' nests '{a.nested}' "
+        f"(created={created} nested_added={added}; '{a.nested}' itself untouched)\n"
+    )
+    if plan.nested_hidden:
+        sys.stderr.write(
+            f"[obs] {a.host}: WARNING issue 1380: the '{a.nested}' item in '{a.scene}' is HIDDEN "
+            f"(an operator choice, left alone) -- the development program renders without it\n"
+        )
+    print(f"DEV_SCENE={a.scene} created={created} nested_added={added}")
+
+
 # --- issue 1242: strih connect-on-show (program-path inputs connect only while shown) ---------------
 # The vendored DistroAV receiver PARKS a genlocked input flagged `genlock_connect_on_show` (and not a
 # `genlock_monitor` twin) while nothing shows it: its NDI receiver is released, its received= counter
 # stops. The strih scene role lib (strih_scenes.py --apply-roles) sets the flag on the camera inputs.
 # An E2E run needs every program-path input full-bandwidth and connected for the whole measurement, so
 # recording-e2e.sh HOLDS the flag off for the run (connect_on_show_hold) and cleanup() restores it
-# (connect_on_show_restore). The hold's state file is written BEFORE any flag flips, so a run killed
-# mid-hold still leaves restore a complete list; it lives at a STABLE path on the runner
-# (~/.camera-box/connect-on-show-hold.json, recording-e2e.sh), so a re-hold by the NEXT run UNIONS a
-# SIGKILLed run's leftover file and that run's cleanup restores both. A leftover held flag is fail-SAFE
-# (today's always-connected bandwidth) and the next strih OBS launch re-applies the roles anyway.
+# (connect_on_show_restore). The SAME hold takes every always-connected `MV NDI camN` monitor twin OFF
+# THE WIRE for the run (strih_bandwidth_roles.E2E_TWIN_HOLD: genlock off + audio-only; ~58 Mbps each at
+# NDI lowest, so the run measures the program path at the pre-roles strih-lx uplink load). The hold /
+# restore / settle protocol and its STABLE state file (~/.camera-box/connect-on-show-hold.json,
+# recording-e2e.sh) live in the sibling scripts/e2e_bandwidth_hold.py; the wrappers below pass it this
+# module's `_rpc` and settle seams at call time. A leftover hold is fail-SAFE (the mains stay connected,
+# the twins' multiview cells stay blank) and the next strih OBS launch without a fresh hold marker
+# re-applies the roles anyway.
 CONNECT_ON_SHOW_KEY = "genlock_connect_on_show"
 GENLOCK_MONITOR_KEY = "genlock_monitor"
 
+# The hold/restore read-back SETTLE poll. OBS applies an input's settings UPDATE (ndi_source_update, and
+# with it DistroAV's #150 genlock lockdown that forces a genlocked monitor twin back to LOWEST) on the
+# next VIDEO TICK after the WS overlay lands, so an immediate GetInputSettings reads the overlay back
+# even when the update is about to revert it. Every read-back therefore starts _SETTLE_MIN_S (several
+# render ticks at 30/60 fps) after the writes and needs two consecutive matching reads; an input fails
+# only once _SETTLE_BUDGET_S has passed AND it had two complete sweeps (a slow WebSocket never fails a
+# write it never re-read). _settle_sleep/_settle_clock are module seams so the pytest drives a fake
+# clock; e2e_bandwidth_hold.await_settled implements the poll.
+_SETTLE_MIN_S = 0.25
+_SETTLE_POLL_S = 0.1
+_SETTLE_BUDGET_S = 5.0
+_settle_sleep = time.sleep
+_settle_clock = time.monotonic
+
+
+def _bandwidth_roles():
+    """Lazy import of the sibling strih_bandwidth_roles.py -- the ONE owner of the monitor-twin role and
+    its E2E hold values (E2E_TWIN_HOLD, twin_is_held). SAME lazy + own sys.path insert pattern as
+    _measurement_pins_module(): never imported at module load (obs_phase2.py is installed alone on some
+    boxes, and tests load it via importlib without scripts/ on sys.path)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import strih_bandwidth_roles  # noqa: E402 -- sibling module
+    return strih_bandwidth_roles
+
+
+def _twin_held(settings):
+    """strih_bandwidth_roles.twin_is_held -- False where the sibling module is not installed (a
+    can't-confirm never SKIPs a check)."""
+    try:
+        roles = _bandwidth_roles()
+    except ImportError:
+        return False
+    return roles.twin_is_held(settings)
+
 
 def hidden_by_design(settings, showing):
-    """PURE: is this input PARKED by design right now? True iff it is genlocked, flagged program-path
-    connect-on-show, NOT a monitor twin, and not showing anywhere. A consumer (e.g. a liveness verify)
-    must then SKIP it -- its held frame is the design, never a wedge."""
+    """PURE given the sibling strih_bandwidth_roles.py (no WebSocket): is this input hidden BY DESIGN
+    right now? True iff it is either
+      - a program-path main PARKED by connect-on-show: genlocked, flagged connect-on-show, NOT a
+        monitor twin, and not showing anywhere; or
+      - a monitor twin the E2E hold took OFF THE WIRE (strih_bandwidth_roles.twin_is_held), showing
+        or not -- the multiview shows its blank cell by design.
+    A consumer (e.g. a liveness verify) must then SKIP it -- its blank picture (DistroAV deactivates
+    the texture) is the design, never a wedge."""
     s = settings or {}
+    if _twin_held(s):
+        return True
     return (bool(s.get("genlock_fifo")) and bool(s.get(CONNECT_ON_SHOW_KEY))
             and not bool(s.get(GENLOCK_MONITOR_KEY)) and not showing)
 
 
 def input_hidden_by_design(ws, input_name):
-    """IMPURE wrapper: read the input's settings + GetSourceActive videoShowing and apply
-    hidden_by_design. A failed read -> False (never SKIP a check on a can't-confirm)."""
+    """IMPURE wrapper: read the input's settings (+ GetSourceActive videoShowing for a connect-on-show
+    main) and apply hidden_by_design. A failed read -> False (never SKIP a check on a can't-confirm)."""
     settings = (_rpc(ws, "GetInputSettings", {"inputName": input_name}, ignore_err=True)
                 or {}).get("inputSettings") or {}
+    if _twin_held(settings):
+        return True
     if not settings.get(CONNECT_ON_SHOW_KEY):
         return False
     active = _rpc(ws, "GetSourceActive", {"sourceName": input_name}, ignore_err=True) or {}
@@ -2979,100 +3198,65 @@ def input_hidden_by_design(ws, input_name):
     return hidden_by_design(settings, bool(active.get("videoShowing")))
 
 
-def connect_on_show_targets(settings_by_input):
-    """PURE: the input names whose settings carry genlock_connect_on_show=True (sorted)."""
-    return sorted(n for n, s in (settings_by_input or {}).items() if (s or {}).get(CONNECT_ON_SHOW_KEY))
+def _hold_module():
+    """Lazy import of the sibling scripts/e2e_bandwidth_hold.py (the E2E hold / restore / settle
+    protocol) -- the SAME lazy + own sys.path insert pattern as _measurement_pins_module()."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import e2e_bandwidth_hold  # noqa: E402 -- sibling module
+    return e2e_bandwidth_hold
+
+
+def _settle():
+    """The settle timing + seams, read at CALL time so a test's monkeypatch of this module applies."""
+    return _hold_module().Settle(_SETTLE_MIN_S, _SETTLE_POLL_S, _SETTLE_BUDGET_S, _settle_sleep,
+                                 _settle_clock)
 
 
 def _read_hold_state(path):
-    try:
-        with open(path) as fh:
-            names = json.load(fh)
-    except FileNotFoundError:
-        return []
-    except (OSError, ValueError) as e:
-        raise RuntimeError(f"connect-on-show hold state {path!r} unreadable: {e}") from e
-    return sorted({str(n) for n in names if n}) if isinstance(names, list) else []
-
-
-def _write_hold_state(path, names):
-    d = os.path.dirname(path)
-    if d:
-        os.makedirs(d, exist_ok=True)
-    tmp = f"{path}.tmp"
-    with open(tmp, "w") as fh:
-        json.dump(sorted(names), fh)
-    os.replace(tmp, path)
-
-
-def _set_connect_on_show(ws, names, value):
-    """Set the flag on each input (overlay) and read it back. Returns the names whose read-back
-    did not match (an empty list = every write landed)."""
-    failed = []
-    for n in names:
-        _rpc(ws, "SetInputSettings",
-             {"inputName": n, "inputSettings": {CONNECT_ON_SHOW_KEY: value}, "overlay": True},
-             ignore_err=True)
-        back = (_rpc(ws, "GetInputSettings", {"inputName": n}, ignore_err=True)
-                or {}).get("inputSettings") or {}
-        if bool(back.get(CONNECT_ON_SHOW_KEY)) != value:
-            failed.append(n)
-    return failed
+    """(held_mains, twin_originals) from the hold state file (e2e_bandwidth_hold.read_state)."""
+    return _hold_module().read_state(path)
 
 
 def connect_on_show_hold(ws, state_path):
-    """HOLD every connect-on-show input connected for an E2E run: record the targets (UNION with any
-    existing state file) BEFORE flipping, then set the flag off and read it back. Returns
-    (held_names, failed_names)."""
-    inputs = (_rpc(ws, "GetInputList", {"inputKind": "ndi_source"}) or {}).get("inputs") or []
-    settings = {}
-    for i in inputs:
-        name = i.get("inputName")
-        if name and i.get("inputKind", "ndi_source") == "ndi_source":
-            settings[name] = (_rpc(ws, "GetInputSettings", {"inputName": name}, ignore_err=True)
-                              or {}).get("inputSettings") or {}
-    targets = connect_on_show_targets(settings)
-    held = sorted(set(_read_hold_state(state_path)) | set(targets))
-    _write_hold_state(state_path, held)
-    failed = _set_connect_on_show(ws, held, False)
-    return held, failed
+    """HOLD for an E2E run (e2e_bandwidth_hold.hold over this module's `_rpc`): the connect-on-show mains
+    stay connected, the monitor twins go off the wire. Returns (held_mains, held_twins, failed)."""
+    return _hold_module().hold(_rpc, ws, state_path, _settle())
 
 
 def connect_on_show_restore(ws, state_path):
-    """RESTORE the connect-on-show flag on every input the hold recorded, read it back, and remove
-    the state file only when every restore landed. No state file -> ([], []). Returns
-    (restored_names, failed_names)."""
-    names = _read_hold_state(state_path)
-    if not names:
-        return [], []
-    # an input deleted / renamed since the hold has nothing to restore: done, never a read-back
-    # failure that would keep the state file (and its WARNING) alive forever.
-    present = {i.get("inputName") for i in
-               (_rpc(ws, "GetInputList", {"inputKind": "ndi_source"}) or {}).get("inputs") or []}
-    names = [n for n in names if n in present]
-    failed = _set_connect_on_show(ws, names, True)
-    if not failed:
-        os.remove(state_path)
-    return names, failed
+    """RESTORE the hold (e2e_bandwidth_hold.restore over this module's `_rpc`), twins first. Returns
+    (restored_names, failed_names, held_back_mains)."""
+    return _hold_module().restore(_rpc, ws, state_path, _settle())
 
 
 def connect_on_show(a):
-    """CLI: `connect-on-show --host H (--hold FILE | --restore FILE)`. Exit 1 when any flag write did
-    not read back (the caller decides: the E2E hold aborts the run, the cleanup restore only warns)."""
+    """CLI: `connect-on-show --host H (--hold FILE | --restore FILE)`. Exit 1 when any input failed
+    (the caller decides: the E2E hold aborts the run, the cleanup restore only warns)."""
     ws = _conn(a.host, a.password)
     try:
         if a.hold:
-            names, failed = connect_on_show_hold(ws, a.hold)
-            verb = "held (connect-on-show OFF for the run)"
+            mains, twins, failed = connect_on_show_hold(ws, a.hold)
+            held = [n for n in mains if n not in failed]
+            off = [n for n in twins if n not in failed]
+            msg = (f"issue 1242 connect-on-show held (connect-on-show OFF for the run): "
+                   f"{', '.join(held) if held else '(none)'}; monitor twins off the wire "
+                   f"(genlock off, audio-only): {', '.join(off) if off else '(none)'}")
+            err = (f"ERROR issue 1242: connect-on-show HOLD failed (unreadable, or no read-back after "
+                   f"the input update) on: {', '.join(failed)}")
         else:
-            names, failed = connect_on_show_restore(ws, a.restore)
-            verb = "restored (connect-on-show ON)"
+            names, failed, held_back = connect_on_show_restore(ws, a.restore)
+            msg = (f"issue 1242 connect-on-show restored (connect-on-show ON, monitor twins back on the "
+                   f"wire): {', '.join(names) if names else '(none)'}")
+            err = (f"ERROR issue 1242: connect-on-show RESTORE failed (no read-back after the input "
+                   f"update) on: {', '.join(failed)}; kept held because their MV twin did not "
+                   f"restore: {', '.join(held_back) if held_back else '(none)'}")
     finally:
         ws.close()
-    print(f"issue 1242 connect-on-show {verb}: {', '.join(names) if names else '(none)'}")
+    print(msg)
     if failed:
-        print(f"ERROR issue 1242: connect-on-show read-back FAILED on: {', '.join(failed)}",
-              file=sys.stderr)
+        print(err, file=sys.stderr)
         sys.exit(1)
 
 
@@ -3085,7 +3269,7 @@ def main():
         "ensure-studio-mode-on",
         "program-rendered-input", "assert-program-nonblack", "mbc-input-check",
         "republish-black-check", "idle-receiver", "apply-measurement-pins",
-        "verify-measurement-pins",
+        "verify-measurement-pins", "dev-scene",
     ):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
@@ -3214,6 +3398,18 @@ def main():
             # epoch-ns boundary. Lightweight — no preload/upstream dance (prod_scene already
             # routed the scenes); just SetCurrentProgramScene + the non-black self-check.
             p.add_argument("--program-scene", required=True)
+            # issue 1380: --prod-floor = the #677 production non-black floor
+            # (OBS_NONBLACK_MIN_MEAN_PROD) instead of the #312 default -- the stream development
+            # program is real production content.
+            p.add_argument("--prod-floor", action="store_true")
+        if name == "dev-scene":
+            # issue 1380: ensure the stream development scene nests the production scene
+            # (idempotent, operator-wins, never writes to the production scene).
+            # (empty = the names declared in scripts/stream_dev_scene.py, resolved in dev_scene()
+            # so no other subcommand imports that module -- obs_phase2.py is installed ALONE on
+            # the OBS boxes by setup-imag.sh / setup-strih.sh)
+            p.add_argument("--scene", default="")
+            p.add_argument("--nested", default="")
         if name == "idle-receiver":
             # #1086 keepalive-bypass PRIMITIVE (TEST TOOLING ONLY): --input is the strih NDI
             # input to idle/restore. Omit --restore to idle (tear the receiver down cold + print
@@ -3234,9 +3430,10 @@ def main():
     cos_mode.add_argument("--hold", default=None, metavar="STATE_FILE")
     cos_mode.add_argument("--restore", default=None, metavar="STATE_FILE")
     a = ap.parse_args()
-    {"setup": setup, "teardown": teardown, "record": record,
+    handler = {"setup": setup, "teardown": teardown, "record": record,
      "prod-scene": prod_scene, "switch": switch,
      "program-scene": program_scene, "rig-busy-check": rig_busy_check,
+     "dev-scene": dev_scene,
      "stream-status": stream_status, "stream-detail": stream_detail,
      "latency-check": latency_check,
      "open-projectors": open_projectors,
@@ -3249,7 +3446,12 @@ def main():
      "idle-receiver": idle_receiver,
      "apply-measurement-pins": apply_measurement_pins,
      "verify-measurement-pins": verify_measurement_pins,
-     "connect-on-show": connect_on_show}[a.cmd](a)
+     "connect-on-show": connect_on_show}[a.cmd]
+    try:
+        handler(a)
+    except ForbiddenSceneError as e:
+        # issue 1380: a refused production-scene program/preview request exits non-zero, loud.
+        raise SystemExit(f"[obs] {getattr(a, 'host', '?')}: {e}")
 
 
 if __name__ == "__main__":

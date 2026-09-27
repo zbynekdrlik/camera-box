@@ -57,12 +57,23 @@ impl QpskProbeVerdict {
     }
 }
 
+/// The decodability floor: the smallest self-consistency cluster ([`consistency_cluster_size`])
+/// that calls a window decodable. Calibrated on the real 16.9 recordings: a healthy 25 s window
+/// clusters >= 7 and a drowned one <= 3, so 4 leaves margin on both sides.
+///
+/// The ONE Rust source of the value (issue 1367). It is the `recording-verdict --qpsk-min-clusters`
+/// default, the channel pick's floor on the `--av-sync` path, and the live dock's
+/// `CB_MARKER_MIN_CLUSTERS`. The `[4b3/8]` shell default `marker_decodability_default_min_clusters`
+/// is pinned to it by `tests/qpsk_channel_pick_parity_1367.rs`.
+pub const DEFAULT_MIN_CLUSTERS: u64 = 4;
+
 /// The level bars + cluster floor the verdict keys on. `silent_db` / `loud_db` are READ from
 /// `scripts/lib/audio-presence-preflight.sh` (`audio_preflight_default_threshold_db` /
 /// `_default_ceiling_db`) and passed in — NEVER retyped here (the #748/#1323 single-source rule).
 #[derive(Debug, Clone, Copy)]
 pub struct QpskProbeThresholds {
-    /// Minimum self-consistent cluster size to call the chain decodable (#1324 default 4).
+    /// Minimum self-consistent cluster size to call the chain decodable ([`DEFAULT_MIN_CLUSTERS`]
+    /// unless the operator overrides it).
     pub min_clusters: u64,
     /// The #748 silence floor (dBFS, default −60): below it ⇒ SILENT.
     pub silent_db: f64,
@@ -258,10 +269,18 @@ pub fn build_report(
     }
 }
 
-/// The single JSON line the probe prints on stdout (parsed by `marker-decodability-preflight.sh`).
+/// The single JSON line for one report. `--qpsk-probe` itself prints
+/// `qpsk_channel_select::channel_report_json`, which keeps these keys first, with the same values,
+/// and appends the per-channel pick (issue 1367).
 pub fn report_json(r: &QpskProbeReport) -> String {
+    format!("{{{}}}", report_json_body(r))
+}
+
+/// The report's key/value pairs without the enclosing braces, shared by [`report_json`] and
+/// `qpsk_channel_select::channel_report_json` so the two lines can never drift apart.
+pub fn report_json_body(r: &QpskProbeReport) -> String {
     format!(
-        "{{\"preamble_screens\":{},\"candidates\":{},\"cluster_samples\":{},\"crc_ok\":{},\"crc_fail\":{},\"peak_dbfs\":{:.1},\"verdict\":\"{}\"}}",
+        "\"preamble_screens\":{},\"candidates\":{},\"cluster_samples\":{},\"crc_ok\":{},\"crc_fail\":{},\"peak_dbfs\":{:.1},\"verdict\":\"{}\"",
         r.preamble_screens,
         r.candidates,
         r.cluster_samples,
