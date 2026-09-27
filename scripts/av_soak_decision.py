@@ -116,8 +116,10 @@ DEFAULT_PARTIAL_H = 1.0
 DEFAULT_MIN_DURATION_H = 8.0
 
 SPREAD_COLUMNS = ("source_spread_ms", "delivery_spread_ms", "av_spread_ms")
-# The design as written grades the gate's own two spreads (issue 1367 design question, B = av).
-DEFAULT_SPREAD_COLUMNS = ("source_spread_ms", "delivery_spread_ms")
+# The passive soak deploys no capture burns, so the burn-based source/delivery spreads are empty on
+# every run; it grades the camera-to-camera spread of the A/V offsets at the stream output instead
+# (issue 1367, ROZHODNUTÉ 5860604301). A run with burns can still pick the others.
+DEFAULT_SPREAD_COLUMNS = ("av_spread_ms",)
 # cam2's A/V number pools the WHOLE recording (it is the painter's own emitter, no window of its own
 # shows the QR), so it is not a camera path and is left out of the stream-output spread.
 AV_SPREAD_EXCLUDED_CAMS = ("cam2",)

@@ -136,14 +136,15 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   E2E (measuring cold cuts would be a separate decision).
 - `av_<cam>_ms` = the verdict's MEASURED `all_cambox_av_sync.<cam>.av_offset_ms` only (a `derived`
   or `unknown` value is never a sample); graded `|offset - expected_ms| <= tolerance`, inclusive.
-- Spreads -- three columns, the graded set is `--spread-columns` (default = the design as written):
+- Spreads -- three columns, the graded set is `--spread-columns` (default `av_spread_ms`, ROZHODNUTÉ 5860604301):
   `source_spread_ms` / `delivery_spread_ms` are the verdict's gate spreads and need each camera's OWN
   capture burn (the probe-featured camera-box the E2E deploys in its cam1 / all-cambox deploy steps).
   TEST mode does not deploy it, so on a passive rig both are empty and a graded empty column is
   UNKNOWN. `av_spread_ms` = `max - min` of the measured per-camera A/V offsets, cam2 excluded (its
   number pools the whole recording) = the camera alignment AT THE STREAM OUTPUT, reported always
-  (note: a difference of two A/V medians carries both medians' noise). Which one to grade is the
-  open design question on the issue (comment 5858491691); switching is `--spread-columns av_spread_ms`.
+  (note: a difference of two A/V medians carries both medians' noise). It is the graded default of
+  the passive soak (ROZHODNUTÉ 5860604301); a run WITH capture burns can pick the gate spreads with
+  `--spread-columns source_spread_ms,delivery_spread_ms`.
 - Loss: the gate's OWN per-window term (`gate_window_term`) over the camera's segments -- the
   src/window_gate.rs `decide_with_tolerance(...).overall_pass_term` with the multi-source scope
   (a `multi_source` window's copies/gaps dropped, presence + the optical floor still gate), read
@@ -215,11 +216,10 @@ cat "$D/report-latest.txt" "$D/timing.tsv"        # progress + per-slot timing a
 bash scripts/av-soak.sh --report "$D" --hours 1   # re-grade any time (exit 0/1/2)
 ```
 
-**A passive TEST-mode run cannot PASS on the default graded spreads:** `source_spread_ms` /
-`delivery_spread_ms` need the capture burns the soak does not deploy, so they are empty and the
-run is UNKNOWN by construction until the open design question (comment 5858491691) is answered.
-Every other series is still graded; to read the passive verdict, re-grade with the stream-output
-spread: `bash scripts/av-soak.sh --report "$D" --hours 1 --spread-columns av_spread_ms`.
+**A passive TEST-mode run has no gate spreads:** `source_spread_ms` /
+`delivery_spread_ms` need the capture burns the soak does not deploy, so the passive soak grades
+`av_spread_ms` by default (ROZHODNUTÉ 5860604301); re-grading a run later is
+`bash scripts/av-soak.sh --report "$D" --hours 1`.
 
 The 8 h run is the same with `--unit=av-soak-8h --hours 8` (49 windows). **Stop:** `touch "$D/STOP"`
 (ends at the next wait/slot boundary with full cleanup + the report, exit = the verdict) or
