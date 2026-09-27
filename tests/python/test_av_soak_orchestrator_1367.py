@@ -122,11 +122,21 @@ elif cmd == "record":
         if not never and (os.environ.get("FAKE_STOP_STICKY") != box or bump("stop-" + box) > 1):
             if os.path.exists(flag):
                 os.remove(flag)
+        if os.environ.get("FAKE_STOP_LAGGY") == box:
+            # a real OBS stops asynchronously: the first status read after StopRecord still says active
+            with open(os.path.join(state, "lag-" + box), "w") as fh:
+                fh.write("1")
         if os.environ.get("FAKE_TOUCH_STOP"):
             open(os.environ["FAKE_TOUCH_STOP"], "w").close()
         print("/srv/_REC/2026-09-27 21-00-00.mkv" if box == "strih" else "C:/_REC/2026-09-27 21-00-00.mp4")
     elif act == "status":
-        print(f"active={os.path.exists(flag)} path=x")
+        lag = os.path.join(state, "lag-" + box)
+        if os.path.exists(lag) and open(lag).read().strip() not in ("", "0"):
+            with open(lag, "w") as fh:
+                fh.write("0")  # one lagging read only
+            print("active=True path=")
+        else:
+            print(f"active={os.path.exists(flag)} path=x")
 elif cmd == "switch":
     scene = arg("--program-scene")
     bump("switches")
@@ -488,6 +498,19 @@ def test_a_failed_stream_start_stops_both_boxes(rig):
     assert _csv_rows(p["run"])[0]["outcome"] == "skipped:start_record_failed"
     stops = [c for c in _calls(p["log"], "obs") if c[:1] == ["record"] and "stop" in c]
     assert {_host(c) for c in stops} == {STRIH, STREAM}, "the failed box is stopped too"
+    _assert_rig_restored(p)
+
+
+def test_a_stop_whose_status_lags_one_read_is_not_a_stuck_stop(rig):
+    # 27.9.2026 live 1 h run: OBS reports active=True on the status read right after StopRecord,
+    # then inactive; the soak must re-read (bounded) instead of flagging a stuck recording.
+    env, p = rig
+    r = _soak(dict(env, FAKE_STOP_LAGGY="stream"), "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "still recording after StopRecord" not in r.stdout
+    stops = [c for c in _calls(p["log"], "obs")
+             if c[:1] == ["record"] and "stop" in c and _host(c) == STREAM]
+    assert len(stops) == 1, "a lagging status is not a stop to retry in cleanup"
     _assert_rig_restored(p)
 
 
@@ -1086,16 +1109,39 @@ def test_lib_painter_ok_needs_active_and_a_growing_log(tmp_path):
 def test_lib_marker_csv_check(tmp_path):
     good = tmp_path / "g.csv"
     good.write_text("index,frame_id,emit_ts_ns\n1,2,3\n")
+    # the real emitter log (src/qpsk_marker.rs) starts with a `# qpsk-params` line
+    params = tmp_path / "p.csv"
+    params.write_text("# qpsk-params sr=48000 carrier=442 c=1 q=2 vr=60/1\nindex,frame_id,emit_ts_ns\n1,2,3\n")
+    params_no_header = tmp_path / "n.csv"
+    params_no_header.write_text("# qpsk-params sr=48000 carrier=442 c=1 q=2 vr=60/1\n1,2,3\n")
     head_only = tmp_path / "h.csv"
     head_only.write_text("index,frame_id,emit_ts_ns\n")
     wrong = tmp_path / "w.csv"
     wrong.write_text("tick,gen_ts_ns\n1,2\n")
     out = _lib(tmp_path, f"""
-        for f in {good} {head_only} {wrong} {tmp_path}/absent.csv; do
+        for f in {good} {head_only} {wrong} {tmp_path}/absent.csv {params} {params_no_header}; do
           av_soak_marker_csv_ok "$f" && echo ok || echo bad
         done
     """)
-    assert out.split() == ["ok", "bad", "bad", "bad"]
+    assert out.split() == ["ok", "bad", "bad", "bad", "ok", "bad"]
+
+
+def test_lib_marker_snapshot_keeps_the_params_line_and_the_header(tmp_path):
+    # 27.9.2026 live 1 h run: the snapshot kept only line 1 (`# qpsk-params`) and every window
+    # was graded marker_log_unreadable.
+    log = tmp_path / "rig-qpsk-markers.csv"
+    rows = "".join(f"{i},{88000 + i},{1790549977972122791 + i}\n" for i in range(1, 51))
+    log.write_text("# qpsk-params sr=48000 carrier=442 c=1 q=2 vr=60/1\nindex,frame_id,emit_ts_ns\n" + rows)
+    snap = tmp_path / "snap.csv"
+    out = _lib(tmp_path, f"""
+        bash -c "$(av_soak_marker_snapshot_cmd {log} 5)" > {snap}
+        av_soak_marker_csv_ok {snap} && echo ok || echo bad
+    """)
+    assert out.split()[-1] == "ok"
+    lines = snap.read_text().splitlines()
+    assert lines[0].startswith("# qpsk-params")
+    assert lines[1] == "index,frame_id,emit_ts_ns"
+    assert [l.split(",")[0] for l in lines[2:]] == ["46", "47", "48", "49", "50"]
 
 
 def test_lib_unacked_cams(tmp_path):
