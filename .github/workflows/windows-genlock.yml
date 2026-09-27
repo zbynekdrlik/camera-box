@@ -664,7 +664,7 @@ jobs:
             }
             Write-Error "sync-test-output.cpp: unbalanced body for '$sig' (issue 1367)"; exit 1
           }
-          foreach ($need in @('#include "camera-box-channel-pick.hpp"', 'camerabox::ChannelMarkerPicker *cb_audio_dec = nullptr;', 'camerabox::CbChannelSwitchLog cb_switch_log;', 'const std::string channel_clusters = camerabox::cb_channel_clusters_text(st->cb_audio_dec->clusters);', 'publish_max_us=%llu " "marker_channel=%zu channel_clusters=%s channel_switches=%llu"', '(unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen, channel_clusters.c_str(), (unsigned long long)st->cb_switch_log.total);')) {
+          foreach ($need in @('#include "camera-box-channel-pick.hpp"', 'camerabox::ChannelMarkerPicker *cb_audio_dec = nullptr;', 'camerabox::CbChannelSwitchLog cb_switch_log;', 'const std::string channel_clusters = camerabox::cb_channel_clusters_text(st->cb_audio_dec->clusters);', 'publish_max_us=%llu " "marker_channel=%zu channel_clusters=%s channel_switches=%llu"', '(unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen, channel_clusters.c_str(), (unsigned long long)st->cb_switch_log.total,')) {
             if (-not $output.Contains($need)) {
               Write-Error "sync-test-output.cpp: '$need' is gone -- the per-channel decode or its diag tokens regressed (issue 1367)"; exit 1
             }
@@ -696,6 +696,94 @@ jobs:
             }
           }
           Write-Output "dock per-channel marker decode (issue 1367) - OK"
+
+      - name: Assert dock audio decode runs off the audio thread (issue 1381)
+        shell: pwsh
+        run: |
+          # issue 1381: the dock demodulated the whole program mix inside raw_audio, i.e. on libobs's
+          # AUDIO thread, and camera-box mode latched on one QR forever; with music on program the
+          # resolume cg OBS mixer fell 13-22 s behind real time (27.9.2026). raw_audio must only run
+          # the freshness + measurement-source gate and copy the block into the FIFO worker
+          # (camera-box-audio-worker.hpp); the worker decodes, resets the decoders after a dropped
+          # block, and is started before data capture and joined on stop/destroy. Checks the same list
+          # as tests/av_sync_dock_audio_worker_1381.rs (the Rust test strips comments, these slices
+          # keep them); the FIFO policy is proven by the g++ self-test that Rust test runs on Linux CI.
+          if (-not (Test-Path "vendor/av-sync-dock/src/camera-box-audio-worker.hpp")) {
+            Write-Error "camera-box-audio-worker.hpp is gone (issue 1381) -- the dock has no audio decode worker"; exit 1
+          }
+          $output = (Get-Content "vendor/av-sync-dock/src/sync-test-output.cpp" -Raw) -replace '\s+', ' '
+          function Get-Body([string]$sig) {
+            $i = $output.IndexOf($sig)
+            if ($i -lt 0) { Write-Error "sync-test-output.cpp: '$sig' not found (issue 1381)"; exit 1 }
+            $depth = 0
+            for ($k = $output.IndexOf('{', $i + $sig.Length); $k -ge 0 -and $k -lt $output.Length; $k++) {
+              if ($output[$k] -eq '{') { $depth++ }
+              elseif ($output[$k] -eq '}') { $depth--; if ($depth -eq 0) { return $output.Substring($i, $k + 1 - $i) } }
+            }
+            Write-Error "sync-test-output.cpp: unbalanced body for '$sig' (issue 1381)"; exit 1
+          }
+          foreach ($need in @('#include "camera-box-audio-worker.hpp"', 'camerabox::CbAudioBlockFifo cb_audio_fifo;', '#define CAMERA_BOX_MEASURE_SOURCE_NAME "mbc"', 'std::atomic<bool> cb_measure_source_present{false};', 'channel_switches=%llu" " decode_ms_max=%.3f decode_ms_sum=%.1f audio_dropped=%llu decode_resets=%llu audio_publish_max_us=%llu"', '(unsigned long long)st->cb_switch_log.total, (double)st->cb_audio_fifo.take_process_max_ns() / 1e6, (double)st->cb_audio_fifo.take_process_sum_ns() / 1e6, (unsigned long long)st->cb_audio_fifo.dropped(), (unsigned long long)st->cb_audio_fifo.resets(), (unsigned long long)(st->cb_audio_publish_max_ns.exchange(0) / 1000));')) {
+            if (-not $output.Contains($need)) {
+              Write-Error "sync-test-output.cpp: '$need' is gone -- the audio decode worker or its diag tokens regressed (issue 1381)"; exit 1
+            }
+          }
+          $cb = Get-Body 'static void st_raw_audio(void *data, struct audio_data *frames)'
+          if (-not $cb.Contains('cb_active = st->cb_mode_active; last_qr_ns = st->cb_video_last_decode_ts_ns; } if (cb_active) { cb_audio_gate_and_publish(st, frames, last_qr_ns); return; }')) {
+            Write-Error "sync-test-output.cpp: st_raw_audio no longer hands camera-box mode to the gate + FIFO copy (issue 1381)"; exit 1
+          }
+          $publish = Get-Body 'static void cb_audio_gate_and_publish(struct sync_test_output *st, const struct audio_data *frames, uint64_t last_qr_ns)'
+          foreach ($need in @('const camerabox::CbAudioGate gate = camerabox::cb_audio_decode_gate( true, st->cb_measure_source_present.load(std::memory_order_relaxed), now, last_qr_ns, CAMERA_BOX_TEST_SIGNAL_FRESH_NS);', 'if (gate == camerabox::CbAudioGate::Open) {', 'st->cb_audio_fifo.publish(planes, nch, frames->frames, frames->timestamp);', 'st->cb_audio_fifo.end_session((unsigned)gate);', 'camerabox::cb_atomic_max_u64(st->cb_audio_publish_max_ns, os_gettime_ns() - publish_start_ns);')) {
+            if (-not $publish.Contains($need)) {
+              Write-Error "sync-test-output.cpp: cb_audio_gate_and_publish no longer has '$need' (issue 1381)"; exit 1
+            }
+          }
+          foreach ($body in @($cb, $publish)) {
+            foreach ($banned in @('st_raw_audio_camera_box(', '->push(', 'cb_audio_diag_tick(', 'cb_ensure_audio_picker(', 'signal_handler_signal(', 'obs_get_source_by_name(', 'blog(')) {
+              if ($body.Contains($banned)) {
+                Write-Error "sync-test-output.cpp: the audio callback runs $banned on libobs's audio thread again (issue 1381) -- the mixer falls behind real time"; exit 1
+              }
+            }
+          }
+          $run = Get-Body 'static void st_audio_block_run(struct sync_test_output *st, const camerabox::CbAudioBlock &block)'
+          foreach ($need in @('frames.data[c] = (uint8_t *)block.planes[c].data();', 'frames.frames = (uint32_t)block.frames; frames.timestamp = block.timestamp;', 'st_raw_audio_camera_box(st, &frames);')) {
+            if (-not $run.Contains($need)) { Write-Error "sync-test-output.cpp: st_audio_block_run no longer has '$need' (issue 1381)"; exit 1 }
+          }
+          $gap = Get-Body 'static void st_audio_block_gap(struct sync_test_output *st, const camerabox::CbAudioBlock &block)'
+          foreach ($need in @('if (st->cb_audio_dec) st->cb_audio_dec->reset_window();', 'if (block.gap & camerabox::CB_AUDIO_GAP_SESSION) cb_audio_session_begin(st);')) {
+            if (-not $gap.Contains($need)) { Write-Error "sync-test-output.cpp: st_audio_block_gap no longer has '$need' (issue 1381) -- a gap could stitch into a false marker"; exit 1 }
+          }
+          $end = Get-Body 'static void st_audio_session_end(struct sync_test_output *st, unsigned reason)'
+          foreach ($need in @('if (st->cb_audio_dec) st->cb_audio_dec->reset_window();', 'st->cb_lock_audit = camerabox::CbLockAuditTracker();', 'signal_lock_state_changed(st->context, false);', 'signal_stale_changed(st->context, true);', 'st->cb_audio_paused = true;')) {
+            if (-not $end.Contains($need)) { Write-Error "sync-test-output.cpp: st_audio_session_end no longer has '$need' (issue 1381)"; exit 1 }
+          }
+          $record = Get-Body 'static void cb_video_qr_record(struct sync_test_output *st, uint32_t frame_id, uint64_t video_ts)'
+          if (-not $record.Contains('cb_refresh_measure_source(st, video_ts);')) {
+            Write-Error "sync-test-output.cpp: the QR record no longer refreshes the measurement-source check on the decode worker (issue 1381)"; exit 1
+          }
+          $refresh = Get-Body 'static void cb_refresh_measure_source(struct sync_test_output *st, uint64_t video_ts)'
+          foreach ($need in @('video_ts - st->cb_measure_source_check_ts < CAMERA_BOX_MEASURE_SOURCE_RECHECK_NS', 'obs_source_t *src = obs_get_source_by_name(CAMERA_BOX_MEASURE_SOURCE_NAME);', 'st->cb_measure_source_present.exchange(present);')) {
+            if (-not $refresh.Contains($need)) { Write-Error "sync-test-output.cpp: cb_refresh_measure_source no longer has '$need' (issue 1381)"; exit 1 }
+          }
+          $start = Get-Body 'static bool st_start(void *data)'
+          $aStop = $start.IndexOf('st->cb_audio_fifo.stop();'); $aResize = $start.IndexOf('quirc_resize(')
+          $aStart = $start.IndexOf('st->cb_audio_fifo.start('); $aCapture = $start.IndexOf('obs_output_begin_data_capture(')
+          if ($aStop -lt 0 -or $aResize -lt 0 -or $aStop -gt $aResize -or $aStart -lt 0 -or $aCapture -lt 0 -or $aStart -gt $aCapture) {
+            Write-Error "sync-test-output.cpp: st_start must join a previous audio worker before rewriting state and start it before data capture (issue 1381)"; exit 1
+          }
+          if (-not $output.Contains('obs_output_end_data_capture(st->context); st->cb_decode_mailbox.stop(); st->cb_audio_fifo.stop();')) {
+            Write-Error "sync-test-output.cpp: st_stop no longer joins the audio worker after ending data capture (issue 1381)"; exit 1
+          }
+          $destroy = Get-Body 'static void st_destroy(void *data)'
+          $dStop = $destroy.IndexOf('st->cb_audio_fifo.stop();'); $dDel = $destroy.IndexOf('delete st;')
+          if ($dStop -lt 0 -or $dDel -lt 0 -or $dStop -gt $dDel) {
+            Write-Error "sync-test-output.cpp: st_destroy no longer joins the audio worker before freeing the output (issue 1381)"; exit 1
+          }
+          $dtor = Get-Body '~sync_test_output()'
+          $tStop = $dtor.IndexOf('cb_audio_fifo.stop();'); $tDel = $dtor.IndexOf('delete cb_audio_dec;')
+          if ($tStop -lt 0 -or $tDel -lt 0 -or $tStop -gt $tDel) {
+            Write-Error "sync-test-output.cpp: the destructor no longer joins the audio worker before freeing the picker (issue 1381)"; exit 1
+          }
+          Write-Output "dock audio decode off the audio thread (issue 1381) - OK"
 
       # #116: assert the build-latch drain-to-target patch is present in the vendored
       # OBS source BEFORE the 150-min build, so a future `git subtree pull` (#44) that

@@ -110,7 +110,7 @@ fn the_diag_line_appends_the_channel_pick_after_the_existing_tokens() {
          channel_clusters=%s channel_switches=%llu` (existing tokens unchanged, appended last)"
     );
     assert!(code.contains(
-        "(unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen, channel_clusters.c_str(), (unsigned long long)st->cb_switch_log.total);"
+        "(unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen, channel_clusters.c_str(), (unsigned long long)st->cb_switch_log.total,"
     ));
     assert!(code.contains(
         "const std::string channel_clusters = camerabox::cb_channel_clusters_text(st->cb_audio_dec->clusters);"
