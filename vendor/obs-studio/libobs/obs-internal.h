@@ -570,6 +570,9 @@ struct obs_core_audio {
 	uint64_t buffering_wait_ticks;
 	int total_buffering_ticks;
 	int max_buffering_ticks;
+	/* camera-box issue 1367: the genlock buffering FLOOR, in ticks, raised on the first mixer tick
+	 * of every launch; OBS's dynamic increase stays active above it (obs-genlock-audio-buffering.h). */
+	int floor_buffering_ticks;
 	bool fixed_buffer;
 
 	pthread_mutex_t monitoring_mutex;
