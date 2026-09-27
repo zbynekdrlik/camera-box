@@ -100,8 +100,9 @@ pub mod qpsk_marker;
 pub mod qpsk_probe_decision;
 
 // Issue 1367 — never downmix the measurement audio: decode the QPSK marker on EVERY channel of the
-// track and keep the channel with the largest self-consistency cluster (pure Tier-0, default
-// features). The --qpsk-probe preflight, --av-sync and the fused A/V gate all decode through it.
+// track and keep the lowest channel that clears the decodability floor, else the largest
+// self-consistency cluster (pure Tier-0, default features). The --qpsk-probe preflight, --av-sync,
+// the fused A/V gate and the live dock all apply this one rule.
 pub mod qpsk_channel_select;
 
 // #398 — the LIVE OBS A/V-sync dock decode logic, pure Tier-0 so the vendored C++ dock
@@ -112,6 +113,10 @@ pub mod qpsk_channel_select;
 // geometry, and the Otsu threshold — all with NO probe deps, so it compiles + unit-tests on DEFAULT
 // features. The dock's OBS/quirc GLUE stays in `sync-test-output.cpp`; every DECISION lives here.
 pub mod av_sync_dock;
+// Issue 1367 — the live dock's per-channel marker decode + channel pick: the Rust reference of
+// vendor/av-sync-dock/src/camera-box-channel-pick.hpp, compared push by push with the C++ by
+// tests/qpsk_channel_pick_parity_1367.rs.
+pub mod av_sync_dock_channels;
 
 // #364 — per-camera COLOUR-correctness gate (pure decision + sampler). Iterates the SAME
 // `colour_scale` table/geometry, samples each reference patch's mean colour from a frame

@@ -493,7 +493,8 @@ struct Args {
     /// #1324: minimum self-consistency cluster size to call the chain DECODABLE (else UNDECODED).
     /// Calibrated on the real 16.9 recordings (healthy 25 s window ≥ 7, drowned ≤ 3); default 4
     /// leaves margin on BOTH sides. Env-overridable via the shell step's `AUDIO_DECODABILITY_MIN_CLUSTERS`.
-    #[arg(long, default_value_t = 4)]
+    /// The default is the one Rust source `qpsk_probe_decision::DEFAULT_MIN_CLUSTERS` (issue 1367).
+    #[arg(long, default_value_t = camera_box::qpsk_probe_decision::DEFAULT_MIN_CLUSTERS)]
     qpsk_min_clusters: u64,
     /// #1324: the SILENCE floor (dBFS) — below it AND undecodable ⇒ SILENT. Single-sourced from
     /// `audio-presence-preflight.sh::audio_preflight_default_threshold_db` (−60) by the shell step.
@@ -8103,18 +8104,20 @@ fn qpsk_probe(args: &Args, audio: &Path) -> Result<()> {
             }
         }
     }
-    let best = decode_best_channel(
-        &channels,
-        &params,
-        args.av_threshold,
-        ClusterParams::default(),
-    )
-    .with_context(|| format!("{} has no audio channel to decode", audio.display()))?;
     let th = QpskProbeThresholds {
         min_clusters: args.qpsk_min_clusters,
         silent_db: args.qpsk_silent_db,
         loud_db: args.qpsk_loud_db,
     };
+    // The pick's floor is the verdict's floor, so a chosen channel that clears it is always OK.
+    let best = decode_best_channel(
+        &channels,
+        &params,
+        args.av_threshold,
+        ClusterParams::default(),
+        th.min_clusters,
+    )
+    .with_context(|| format!("{} has no audio channel to decode", audio.display()))?;
     println!("{}", channel_report_json(&channel_probe_report(&best, &th)));
     Ok(())
 }

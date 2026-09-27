@@ -750,6 +750,44 @@ jobs:
           }
           Write-Output "dock decode off the video-output thread (issue 1367) — OK"
 
+      - name: Assert dock decodes the marker per channel (issue 1367)
+        shell: pwsh
+        run: |
+          # issue 1367: st_raw_audio_camera_box mixed every audio channel to mono before its one
+          # marker decoder. The stereo mbc input carries the marker on L and R 10.17 ms apart, and
+          # that sum is undecodable. Every channel now has its own decoder (camera-box-channel-pick.hpp)
+          # and only the chosen channel's markers are paired. Mirrors
+          # tests/av_sync_dock_channel_pick_1367.rs; the C++<->Rust parity of the header runs on the
+          # Linux CI (tests/qpsk_channel_pick_parity_1367.rs).
+          if (-not (Test-Path "vendor/av-sync-dock/src/camera-box-channel-pick.hpp")) {
+            Write-Error "camera-box-channel-pick.hpp is gone (issue 1367) -- the dock has no per-channel marker decode"; exit 1
+          }
+          $output = (Get-Content "vendor/av-sync-dock/src/sync-test-output.cpp" -Raw) -replace '\s+', ' '
+          if ($output -notmatch [regex]::Escape('#include "camera-box-channel-pick.hpp"')) {
+            Write-Error "sync-test-output.cpp: camera-box-channel-pick.hpp is not included (issue 1367)"; exit 1
+          }
+          if ($output -notmatch [regex]::Escape('camerabox::ChannelMarkerPicker *cb_audio_dec = nullptr;')) {
+            Write-Error "sync-test-output.cpp: cb_audio_dec is no longer the per-channel ChannelMarkerPicker (issue 1367)"; exit 1
+          }
+          $sig = 'static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_data *frames)'
+          $i = $output.IndexOf($sig)
+          if ($i -lt 0) { Write-Error "sync-test-output.cpp: st_raw_audio_camera_box not found (issue 1367)"; exit 1 }
+          $j = $output.IndexOf('static void st_raw_audio(void *data', $i + $sig.Length)
+          if ($j -lt 0) { Write-Error "sync-test-output.cpp: st_raw_audio not found after st_raw_audio_camera_box (issue 1367)"; exit 1 }
+          $body = $output.Substring($i, $j - $i)
+          if (-not $body.Contains('st->cb_audio_dec->push(planes, nf);')) {
+            Write-Error "sync-test-output.cpp: the audio callback no longer hands every channel's plane to the picker (issue 1367)"; exit 1
+          }
+          foreach ($banned in @('acc +=', '/ (float)ch', 'std::vector<float> mono', 'camerabox::StreamingMarkerDecoder(')) {
+            if ($body.Contains($banned)) {
+              Write-Error "sync-test-output.cpp: the audio callback mixes channels again ($banned) -- the stereo mbc marker is undecodable as a sum (issue 1367)"; exit 1
+            }
+          }
+          if ($output -notmatch [regex]::Escape('publish_max_us=%llu " "marker_channel=%zu channel_clusters=%s"')) {
+            Write-Error "sync-test-output.cpp: the diag line no longer appends marker_channel + channel_clusters after publish_max_us (issue 1367)"; exit 1
+          }
+          Write-Output "dock per-channel marker decode (issue 1367) - OK"
+
       # #278/#275 (the #269 YAML lock-step): the FAST path COMPILES libobs (obs.dll) + the
       # DistroAV burn, so a `git subtree pull` reverting either to inert-but-still-compiling
       # would hot-swap a regressed obs.dll/distroav un-gated. Re-assert the tokens in pwsh

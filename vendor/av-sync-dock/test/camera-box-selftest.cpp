@@ -12,6 +12,7 @@
  */
 
 #include "../src/camera-box-audio.hpp"
+#include "../src/camera-box-channel-pick.hpp"
 #include "../src/camera-box-video.hpp"
 
 #include <cstdio>
@@ -574,6 +575,72 @@ int main()
 		CHECK(relocked_at != 0, "scenario: the dock re-locks by itself after the reset");
 		CHECK(relocked_at - fired_at <= 150 * S,
 		      "scenario: re-locks within the re-convergence budget");
+	}
+
+	/* issue 1367: the dock decodes every channel and keeps one by the offline gate's rule (the
+	 * lowest channel that clears the floor, else the largest cluster). The full C++<->Rust parity
+	 * runs in tests/qpsk_channel_pick_parity_1367.rs; these are the named cases. */
+	{
+		std::vector<uint64_t> live;
+		live.push_back(7);
+		live.push_back(8);
+		CHECK(cb_pick_marker_channel(live, CB_MARKER_MIN_CLUSTERS) == 0,
+		      "1367: both clear the floor (the live L 7, R 8) -> the lowest channel");
+		std::vector<uint64_t> fixture;
+		fixture.push_back(3);
+		fixture.push_back(4);
+		CHECK(cb_pick_marker_channel(fixture, CB_MARKER_MIN_CLUSTERS) == 1,
+		      "1367: only R clears (the 2 s fixture L 3, R 4) -> R");
+		std::vector<uint64_t> none_clear;
+		none_clear.push_back(2);
+		none_clear.push_back(3);
+		CHECK(cb_pick_marker_channel(none_clear, CB_MARKER_MIN_CLUSTERS) == 1,
+		      "1367: none clears -> the largest cluster");
+		CHECK(cb_pick_marker_channel(std::vector<uint64_t>(), CB_MARKER_MIN_CLUSTERS) == 0,
+		      "1367: no channels -> clusters.size() (none)");
+		CHECK(cb_channel_clusters_text(live) == "7,8", "1367: diag cluster list");
+
+		/* a clean 7-marker cadence chain (~3 s, index step 180) clusters 7; 2 markers are 0 */
+		std::vector<std::pair<double, uint8_t>> chain;
+		for (int k = 0; k < 7; k++)
+			chain.push_back(std::make_pair(0.5 + 3.0 * k, (uint8_t)(189 + 180 * k)));
+		CHECK(cb_consistency_cluster_size(chain, CB_CLUSTER_STEP_TOL, CB_CLUSTER_GAP_RATIO) == 7,
+		      "1367: a clean chain clusters fully");
+		chain.resize(2);
+		CHECK(cb_consistency_cluster_size(chain, CB_CLUSTER_STEP_TOL, CB_CLUSTER_GAP_RATIO) == 0,
+		      "1367: fewer than 3 markers cluster 0");
+
+		/* streaming: the same marker on L and R, R 488 samples (10.17 ms) late. Each channel
+		 * decodes all 6, L is chosen, and only L's markers come back (never a mix, never R's). */
+		const size_t sr = CB_AUDIO_SAMPLE_RATE;
+		std::vector<float> l(sr * 7, 0.0f), r(sr * 7, 0.0f);
+		std::vector<uint64_t> l_starts;
+		for (size_t k = 0; k < 6; k++) {
+			std::vector<float> m = marker_signal((uint8_t)(7 + 30 * k));
+			const size_t at = sr / 4 + k * sr;
+			l_starts.push_back(at);
+			for (size_t i = 0; i < m.size(); i++) {
+				l[at + i] += 0.25f * m[i];
+				r[at + 488 + i] += 0.25f * m[i];
+			}
+		}
+		ChannelMarkerPicker picker =
+			ChannelMarkerPicker::dock(2, CB_AUDIO_SAMPLE_RATE, CB_AUDIO_CARRIER_HZ, CB_AUDIO_C);
+		std::vector<uint64_t> got;
+		for (size_t at = 0; at < l.size(); at += 1024) {
+			const size_t n = l.size() - at < 1024 ? l.size() - at : 1024;
+			const float *planes[2] = {l.data() + at, r.data() + at};
+			std::vector<std::pair<uint64_t, uint8_t>> mk = picker.push(planes, n);
+			for (size_t k = 0; k < mk.size(); k++)
+				got.push_back(mk[k].first);
+		}
+		CHECK(picker.clusters.size() == 2 && picker.clusters[0] == 6 && picker.clusters[1] == 6,
+		      "1367: each channel decodes its own copy");
+		CHECK(picker.chosen == 0, "1367: both clear -> L");
+		bool at_l = got.size() == l_starts.size();
+		for (size_t k = 0; at_l && k < got.size(); k++)
+			at_l = got[k] + 8 >= l_starts[k] && got[k] <= l_starts[k] + 8;
+		CHECK(at_l, "1367: only the chosen channel's markers, at L's own sample positions");
 	}
 
 	if (g_failures == 0) {

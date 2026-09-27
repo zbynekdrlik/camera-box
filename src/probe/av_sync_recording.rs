@@ -19,7 +19,7 @@ use crate::qpsk_marker::{
     marker_coverage_overlaps_video_ticks, parse_ffprobe_start_time, parse_qpsk_marker_log,
     AudioParams, AvOffset, DEDUPE_SAME_FID_WINDOW_S,
 };
-use crate::qpsk_probe_decision::ClusterParams;
+use crate::qpsk_probe_decision::{ClusterParams, DEFAULT_MIN_CLUSTERS};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -176,7 +176,8 @@ pub fn extract_audio_channels_f32(
 }
 
 /// Issue 1367 — extract every channel of audio track `track` and decode the QPSK marker on each,
-/// keeping the channel with the largest self-consistency cluster. The ONE audio decode every A/V
+/// keeping the lowest channel that clears the decodability floor (`DEFAULT_MIN_CLUSTERS`), else the
+/// largest cluster (`qpsk_channel_select::pick_marker_channel`). The ONE audio decode every A/V
 /// consumer in this module uses.
 fn decode_best_audio_channel(
     path: &Path,
@@ -185,7 +186,14 @@ fn decode_best_audio_channel(
     threshold: f64,
 ) -> Result<BestChannelDecode> {
     let channels = extract_audio_channels_f32(path, track, params.sample_rate)?;
-    decode_best_channel(&channels, params, threshold, ClusterParams::default()).with_context(|| {
+    decode_best_channel(
+        &channels,
+        params,
+        threshold,
+        ClusterParams::default(),
+        DEFAULT_MIN_CLUSTERS,
+    )
+    .with_context(|| {
         format!(
             "audio track {track} of {} has no channels to decode",
             path.display()

@@ -13,10 +13,12 @@
 //!
 //! WHAT. [`f32le_to_channels`] splits the channel-preserving ffmpeg extract; [`decode_channel`] runs the
 //! UNCHANGED demod (`qpsk_marker::decode_markers_with_stats`) and the #1324 self-consistency cluster
-//! (`qpsk_probe_decision::consistency_cluster_size`) on one channel; [`best_marker_channel`] picks
-//! the channel with the LARGEST cluster, ties to the LOWEST index (deterministic); [`decode_best_channel`]
-//! composes them. Every consumer — the `[4b3/8]` preflight (`--qpsk-probe`), the standalone
-//! `--av-sync`, and the fused all-cambox A/V gate — decodes through this ONE pick, and the A/V
+//! (`qpsk_probe_decision::consistency_cluster_size`) on one channel; [`pick_marker_channel`] /
+//! [`best_marker_channel`] pick the LOWEST-index channel that clears the decodability floor, else
+//! the largest cluster with ties to the lowest index (deterministic, design 5856569255);
+//! [`decode_best_channel`] composes them. Every consumer — the `[4b3/8]` preflight
+//! (`--qpsk-probe`), the standalone `--av-sync`, the fused all-cambox A/V gate and the live dock
+//! (`camera-box-channel-pick.hpp` `ChannelMarkerPicker`) — decodes through this ONE rule, and the A/V
 //! offset is paired from the CHOSEN channel's markers only, so a channel skew can never average two
 //! arrival times. A mono track is the identity: one channel, chosen 0, the same decode as before.
 //!
@@ -173,18 +175,37 @@ pub fn f32le_to_channels(bytes: &[u8], channels: usize) -> Result<Vec<Vec<f32>>,
     Ok(out)
 }
 
-/// The pick: the channel with the LARGEST self-consistency cluster; ties go to the LOWEST index so
-/// the choice is deterministic. Returns a position into `per_channel`; `None` when it is empty. A
-/// single (mono) channel is always position 0.
-pub fn best_marker_channel(per_channel: &[ChannelMarkerStats]) -> Option<usize> {
+/// The ONE channel rule (design 5856569255), shared by the offline decode and the live dock
+/// (`camera-box-channel-pick.hpp` `cb_pick_marker_channel`, pinned by
+/// `tests/fixtures/qpsk_channel_pick_parity.tsv`): the LOWEST-index channel whose self-consistency
+/// cluster clears the `min_clusters` decodability floor; when none clears it, the channel with the
+/// largest cluster, ties to the lowest index. `clusters[i]` is channel i's cluster size. Returns a
+/// position; `None` when `clusters` is empty. A single (mono) channel is always position 0.
+///
+/// WHY floor-first, not simply the largest cluster: when both channels decode (the live 4 s clip,
+/// L 7 and R 8), the largest-cluster winner is decided by one false decode more or less in a
+/// strictly-consecutive chain, and R arrives 10.17 ms after L. A flip between runs would move the
+/// measured A/V offset by ~10 ms, which the gate and the dock would read as drift. Both channels
+/// clear the same floor, so preferring the lowest one gives up nothing.
+pub fn pick_marker_channel(clusters: &[u64], min_clusters: u64) -> Option<usize> {
+    // RED stub (issue 1367): today's rule, the largest cluster with ties to the lowest index.
+    let _ = min_clusters;
     let mut best: Option<usize> = None;
-    for (i, c) in per_channel.iter().enumerate() {
+    for (i, &c) in clusters.iter().enumerate() {
         match best {
-            Some(b) if per_channel[b].cluster_samples >= c.cluster_samples => {}
+            Some(b) if clusters[b] >= c => {}
             _ => best = Some(i),
         }
     }
     best
+}
+
+/// [`pick_marker_channel`] over the per-channel stats (their `cluster_samples`), with the
+/// decodability floor `min_clusters` (`qpsk_probe_decision::DEFAULT_MIN_CLUSTERS`, or the
+/// operator's `--qpsk-min-clusters` on the probe). Returns a position into `per_channel`.
+pub fn best_marker_channel(per_channel: &[ChannelMarkerStats], min_clusters: u64) -> Option<usize> {
+    let clusters: Vec<u64> = per_channel.iter().map(|c| c.cluster_samples).collect();
+    pick_marker_channel(&clusters, min_clusters)
 }
 
 /// One channel's full decode: its summary stats, its decoded markers and the raw demod counters.
@@ -232,13 +253,15 @@ pub struct BestChannelDecode {
     pub stats: DecodeStats,
 }
 
-/// Decode every channel and keep the best ([`best_marker_channel`]). `None` when `channels` is
-/// empty. A mono track decodes exactly as the pre-1367 single-buffer path did.
+/// Decode every channel and keep the one [`best_marker_channel`] picks against the decodability
+/// floor `min_clusters`. `None` when `channels` is empty. A mono track decodes exactly as the
+/// pre-1367 single-buffer path did.
 pub fn decode_best_channel(
     channels: &[Vec<f32>],
     p: &AudioParams,
     threshold: f64,
     cluster: ClusterParams,
+    min_clusters: u64,
 ) -> Option<BestChannelDecode> {
     let mut decoded: Vec<ChannelDecode> = channels
         .iter()
@@ -246,7 +269,7 @@ pub fn decode_best_channel(
         .map(|(i, s)| decode_channel(i as u32, s, p, threshold, cluster))
         .collect();
     let per_channel: Vec<ChannelMarkerStats> = decoded.iter().map(|d| d.stats).collect();
-    let chosen = best_marker_channel(&per_channel)?;
+    let chosen = best_marker_channel(&per_channel, min_clusters)?;
     let best = decoded.swap_remove(chosen);
     Some(BestChannelDecode {
         pick: ChannelPick {
@@ -318,7 +341,9 @@ pub fn channel_report_json(r: &ChannelProbeReport) -> String {
 mod tests {
     use super::*;
     use crate::qpsk_marker::marker_signal;
-    use crate::qpsk_probe_decision::{build_report, report_json, QpskProbeVerdict};
+    use crate::qpsk_probe_decision::{
+        build_report, report_json, QpskProbeVerdict, DEFAULT_MIN_CLUSTERS,
+    };
 
     fn stat(channel: u32, cluster_samples: u64) -> ChannelMarkerStats {
         ChannelMarkerStats {
@@ -333,7 +358,7 @@ mod tests {
 
     fn th() -> QpskProbeThresholds {
         QpskProbeThresholds {
-            min_clusters: 4,
+            min_clusters: DEFAULT_MIN_CLUSTERS,
             silent_db: -60.0,
             loud_db: -20.0,
         }
@@ -374,31 +399,100 @@ mod tests {
         )
     }
 
+    /// The decodability floor every consumer shares (4).
+    const FLOOR: u64 = DEFAULT_MIN_CLUSTERS;
+
     #[test]
-    fn best_channel_is_the_largest_cluster() {
-        assert_eq!(best_marker_channel(&[stat(0, 7), stat(1, 8)]), Some(1));
-        assert_eq!(best_marker_channel(&[stat(0, 9), stat(1, 2)]), Some(0));
+    fn both_channels_clear_the_floor_so_the_lowest_wins_even_when_the_other_is_larger() {
+        // The live 4 s clip of 27.9.2026: L 7, R 8, both above the floor. The largest-cluster rule
+        // picked R here, and one false decode more or less could flip it between runs.
         assert_eq!(
-            best_marker_channel(&[stat(0, 0), stat(1, 0), stat(2, 5)]),
+            best_marker_channel(&[stat(0, 7), stat(1, 8)], FLOOR),
+            Some(0)
+        );
+        assert_eq!(
+            best_marker_channel(&[stat(0, 4), stat(1, 12)], FLOOR),
+            Some(0)
+        );
+        assert_eq!(
+            best_marker_channel(&[stat(0, 9), stat(1, 2)], FLOOR),
+            Some(0)
+        );
+        assert_eq!(
+            best_marker_channel(&[stat(0, 1), stat(1, 5), stat(2, 9)], FLOOR),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn only_a_higher_channel_clears_the_floor() {
+        // The committed 2 s fixture: L 3 (below the floor), R 4.
+        assert_eq!(
+            best_marker_channel(&[stat(0, 3), stat(1, 4)], FLOOR),
+            Some(1)
+        );
+        assert_eq!(
+            best_marker_channel(&[stat(0, 0), stat(1, 0), stat(2, 5)], FLOOR),
             Some(2)
         );
     }
 
     #[test]
-    fn best_channel_tie_goes_to_the_lowest_index() {
-        assert_eq!(best_marker_channel(&[stat(0, 5), stat(1, 5)]), Some(0));
+    fn none_clears_the_floor_so_the_largest_wins_ties_to_the_lowest() {
         assert_eq!(
-            best_marker_channel(&[stat(0, 3), stat(1, 6), stat(2, 6)]),
+            best_marker_channel(&[stat(0, 2), stat(1, 3)], FLOOR),
             Some(1)
         );
-        assert_eq!(best_marker_channel(&[stat(0, 0), stat(1, 0)]), Some(0));
+        assert_eq!(
+            best_marker_channel(&[stat(0, 3), stat(1, 2)], FLOOR),
+            Some(0)
+        );
+        assert_eq!(
+            best_marker_channel(&[stat(0, 3), stat(1, 3)], FLOOR),
+            Some(0)
+        );
+        assert_eq!(
+            best_marker_channel(&[stat(0, 1), stat(1, 3), stat(2, 3)], FLOOR),
+            Some(1)
+        );
+        assert_eq!(
+            best_marker_channel(&[stat(0, 0), stat(1, 0)], FLOOR),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn the_floor_is_the_one_the_caller_passes() {
+        // The probe passes the operator's --qpsk-min-clusters, so its pick and its verdict agree.
+        assert_eq!(best_marker_channel(&[stat(0, 7), stat(1, 8)], 9), Some(1));
+        assert_eq!(best_marker_channel(&[stat(0, 7), stat(1, 8)], 8), Some(1));
+        assert_eq!(best_marker_channel(&[stat(0, 7), stat(1, 8)], 7), Some(0));
     }
 
     #[test]
     fn best_channel_mono_is_the_identity_and_empty_is_none() {
-        assert_eq!(best_marker_channel(&[stat(0, 0)]), Some(0));
-        assert_eq!(best_marker_channel(&[stat(0, 11)]), Some(0));
-        assert_eq!(best_marker_channel(&[]), None);
+        for c in [0, 3, 4, 11] {
+            assert_eq!(best_marker_channel(&[stat(0, c)], FLOOR), Some(0));
+        }
+        assert_eq!(best_marker_channel(&[], FLOOR), None);
+        assert_eq!(pick_marker_channel(&[], FLOOR), None);
+    }
+
+    #[test]
+    fn both_channels_decode_and_the_longer_chain_on_r_still_picks_l() {
+        // Signal level: the same marker on L and R, R 488 samples late and with the longer chain
+        // (8 markers vs 6). Both clear the floor, so L is chosen and the offset is L's.
+        let p = AudioParams::rig60();
+        let cl = ClusterParams::default();
+        let len = 48_000 * 5;
+        let l = marker_track(6, 0.5, 30, 0.25, 0, len);
+        let r = marker_track(8, 0.5, 30, 0.25, 488, len);
+        let best = decode_best_channel(&[l.clone(), r], &p, 0.35, cl, FLOOR).expect("two channels");
+        let per = &best.pick.per_channel;
+        assert_eq!(per[0].cluster_samples, 6, "{per:?}");
+        assert_eq!(per[1].cluster_samples, 8, "{per:?}");
+        assert_eq!(best.pick.chosen_channel, 0, "{per:?}");
+        assert_eq!(best.markers, decode_markers_with_stats(&l, &p, 0.35).0);
     }
 
     #[test]
@@ -515,8 +609,8 @@ mod tests {
             );
         }
         // The pick decodes, and the chosen markers are the chosen channel's own (never a mix).
-        let best =
-            decode_best_channel(&[l.clone(), r.clone()], &p, 0.35, cl).expect("two channels");
+        let best = decode_best_channel(&[l.clone(), r.clone()], &p, 0.35, cl, FLOOR)
+            .expect("two channels");
         assert_eq!(best.pick.per_channel.len(), 2);
         assert_eq!(
             best.pick.chosen_channel, 0,
@@ -534,8 +628,14 @@ mod tests {
         let p = AudioParams::rig60();
         let (_, r) = skewed_stereo();
         let silent = vec![0.0f32; r.len()];
-        let best = decode_best_channel(&[silent, r.clone()], &p, 0.35, ClusterParams::default())
-            .expect("two channels");
+        let best = decode_best_channel(
+            &[silent, r.clone()],
+            &p,
+            0.35,
+            ClusterParams::default(),
+            FLOOR,
+        )
+        .expect("two channels");
         assert_eq!(best.pick.chosen_channel, 1);
         assert_eq!(best.markers, decode_markers_with_stats(&r, &p, 0.35).0);
         assert_eq!(best.pick.per_channel[0].cluster_samples, 0);
@@ -554,9 +654,14 @@ mod tests {
         let (l, _) = skewed_stereo();
         let (markers, stats) = decode_markers_with_stats(&l, &p, 0.35);
         let old = build_report(&markers, &stats, &l, ClusterParams::default(), &th());
-        let best =
-            decode_best_channel(std::slice::from_ref(&l), &p, 0.35, ClusterParams::default())
-                .expect("one channel");
+        let best = decode_best_channel(
+            std::slice::from_ref(&l),
+            &p,
+            0.35,
+            ClusterParams::default(),
+            FLOOR,
+        )
+        .expect("one channel");
         let new = channel_probe_report(&best, &th());
         assert_eq!(
             new.report, old,
@@ -575,7 +680,7 @@ mod tests {
     #[test]
     fn empty_track_has_no_pick() {
         let p = AudioParams::rig60();
-        assert!(decode_best_channel(&[], &p, 0.35, ClusterParams::default()).is_none());
+        assert!(decode_best_channel(&[], &p, 0.35, ClusterParams::default(), FLOOR).is_none());
     }
 
     #[test]

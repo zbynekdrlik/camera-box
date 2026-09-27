@@ -17,6 +17,7 @@ use camera_box::qpsk_channel_select::{
 use camera_box::qpsk_marker::{decode_markers_with_stats, AudioParams};
 use camera_box::qpsk_probe_decision::{
     consistency_cluster_size, ClusterParams, QpskProbeThresholds, QpskProbeVerdict,
+    DEFAULT_MIN_CLUSTERS,
 };
 
 /// The `--av-threshold` default of `recording-verdict` (the preflight passes no override).
@@ -24,7 +25,7 @@ const PROBE_THRESHOLD: f64 = 0.35;
 
 fn th() -> QpskProbeThresholds {
     QpskProbeThresholds {
-        min_clusters: 4,
+        min_clusters: DEFAULT_MIN_CLUSTERS,
         silent_db: -60.0,
         loud_db: -20.0,
     }
@@ -89,6 +90,7 @@ fn probe(channels: &[Vec<f32>]) -> ChannelProbeReport {
         &AudioParams::rig60(),
         PROBE_THRESHOLD,
         ClusterParams::default(),
+        th().min_clusters,
     )
     .expect("at least one channel");
     channel_probe_report(&best, &th())
@@ -121,6 +123,8 @@ fn real_skewed_stereo_picks_the_decodable_channel() {
         per[1].cluster_samples >= 4,
         "R alone decodes the cadence: {per:?}"
     );
+    // Only R clears the floor in this window, so the floor-first rule (design 5856569255) keeps R;
+    // the "both clear, the lowest wins" case is the live 4 s clip (L 7, R 8), pinned in the module.
     assert_eq!(rep.pick.chosen_channel, 1, "the best channel is R: {per:?}");
     assert_eq!(rep.report.cluster_samples, per[1].cluster_samples);
     assert_eq!(rep.report.crc_ok, per[1].crc_ok);
