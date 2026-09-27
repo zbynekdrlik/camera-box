@@ -1044,7 +1044,7 @@ verify_stream_program_dev() {
   fi
   echo "[obs stream ${STREAM_IP}] #901 assert+set PROGRAM = '${STREAM_PROG_SCENE}' (non-black proof through the nested production scene)"
   python3 "$here/obs_phase2.py" switch --host "$STREAM_IP" --program-scene "$STREAM_PROG_SCENE" \
-    --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [stream program] /' || switch_rc=$?
+    --prod-floor --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [stream program] /' || switch_rc=$?
   if [ "$switch_rc" -ne 0 ]; then
     echo "[obs stream ${STREAM_IP}] #901 gap-2 FAILED (switch_rc=${switch_rc}) -- see the [stream program] lines above"
     rc=1
@@ -1187,13 +1187,14 @@ verify_measurement_audio_arrives() {
 # parked on the calibrated feed, never on a by-construction A/V-desynced measurement-only scene
 # (the #985 incident: a probe input on OBS's build-default latency, ~945ms off the prod hold).
 # Reuses the SAME `switch` action as gap 2 above; `switch` skips the scene set when the scene is
-# already on program (issue 1380), so this is a cheap re-assert plus the non-black proof.
+# already on program (issue 1380), so this is a cheap re-assert plus the non-black proof. Both use
+# --prod-floor: the development program is production content (the #677 floor prod-scene uses).
 park_stream_program_dev() {
   local here rc=0
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   echo "[obs stream ${STREAM_IP}] #985 park PROGRAM on the development scene '${STREAM_PROG_SCENE}' (the calibrated hold, never a measurement-only scene)"
   python3 "$here/obs_phase2.py" switch --host "$STREAM_IP" --program-scene "$STREAM_PROG_SCENE" \
-    --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [stream restore] /' || rc=$?
+    --prod-floor --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [stream restore] /' || rc=$?
   return $rc
 }
 

@@ -25,7 +25,6 @@ Requires: pip install websocket-client. OBS WebSocket :4455 (pass --password if 
 host requires auth; LAN boxes here use none).
 """
 import argparse
-import collections
 import json
 import os
 import re
@@ -46,13 +45,13 @@ MAIN_OUTPUT = "NDI Main Output"
 SCENE = "PHASE2-PROBE"
 INPUT = "phase2-probe-src"
 
-# issue 1380: the stream OBS development program scene and the owner's production scene nested in
-# it. Development never programs `PRO` itself; it programs `Development`, whose one scene item is
-# the scene `PRO` (same pixels, the same warm `NDI 2ME PGM` receiver). The bash defaults live in
-# scripts/lib/stream-dev-scene.sh and are pinned to these by a pytest.
-STREAM_DEV_SCENE = "Development"
-STREAM_PRODUCTION_SCENE = "PRO"
+# issue 1380: a nested scene (or group) scene item; program-rendered-input descends into it.
 _SCENE_SOURCE_TYPE = "OBS_SOURCE_TYPE_SCENE"
+# issue 1380: `switch --replace-preview` keeps the Studio Mode preview off the stale scene for the
+# transition duration plus this margin (the swap lands when the transition ENDS), polling at this
+# cadence (scripts/stream_dev_scene.py reassert_stale_preview).
+PREVIEW_SWAP_MARGIN_S = float(os.environ.get("OBS_PREVIEW_SWAP_MARGIN_S", "1.5"))
+PREVIEW_POLL_S = 0.25
 
 # #355: bound for waiting an orphan recording's output to FINALIZE (outputActive=False)
 # after StopRecord, before this run's StartRecord. A large MP4 (the live 24.5 GB stream-box
@@ -369,6 +368,18 @@ def _measurement_pins_module():
         sys.path.insert(0, here)
     import e2e_measurement_pins  # noqa: E402
     return e2e_measurement_pins
+
+
+def _dev_scene_module():
+    """issue 1380: lazy import of the PURE stream development-scene module
+    (scripts/stream_dev_scene.py: the seeder + the Studio Mode preview re-assert) -- SAME lazy + own
+    sys.path insert pattern as _measurement_pins_module() above, so obs_phase2's module-level import
+    graph stays unchanged (tests load obs_phase2 via importlib without scripts/ on sys.path)."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import stream_dev_scene  # noqa: E402
+    return stream_dev_scene
 
 
 def _imag_scenes_module():
@@ -1686,17 +1697,6 @@ def _prod_nonblack_floor():
     return float(os.environ.get("OBS_NONBLACK_MIN_MEAN_PROD", "5"))
 
 
-def _stale_preview_target(studio, preview, stale_scene, target):
-    """issue 1380 (pure): the scene `switch --replace-preview` must set as the Studio Mode PREVIEW,
-    or None. Only when Studio Mode is on, a stale scene was named, it differs from the target, and
-    the current preview IS that stale scene (an E2E leaves the development scene in preview; after
-    EVENT a Transition click must never put it back on program). An operator's own preview is left
-    alone."""
-    if not studio or not stale_scene or stale_scene == target or preview != stale_scene:
-        return None
-    return target
-
-
 def _restore_target(prev, target, ephemeral, scenes, saved_prev=None):
     """#163 (pure, testable): decide the scene teardown should restore PROGRAM to, given
     the program scene seen at prod-scene time (*prev*), the record *target*, whether the
@@ -2342,21 +2342,22 @@ def switch(a):
         if current != a.program_scene:
             _rpc(ws, "SetCurrentProgramScene", {"sceneName": a.program_scene})
         switch_ns = time.time_ns()  # the boundary — right after the switch lands
-        # issue 1380: `--replace-preview <scene>` moves a Studio Mode PREVIEW left on <scene> (the
-        # development scene an E2E put there) to the new program scene; an operator's own preview
-        # is never touched.
+        # issue 1380: `--replace-preview <scene>` keeps a Studio Mode PREVIEW off <scene> (the
+        # development scene, which OBS's swap puts into the preview when the cut to the production
+        # scene ENDS) for the transition duration + a margin; an operator's own preview is never
+        # touched (scripts/stream_dev_scene.py reassert_stale_preview).
         stale = getattr(a, "replace_preview", "")
         if stale:
-            studio = bool(_rpc(ws, "GetStudioModeEnabled", ignore_err=True).get(
-                "studioModeEnabled"))
-            preview = (_rpc(ws, "GetCurrentPreviewScene", ignore_err=True).get(
-                "currentPreviewSceneName") if studio else None)
-            new_preview = _stale_preview_target(studio, preview, stale, a.program_scene)
-            if new_preview:
-                _rpc(ws, "SetCurrentPreviewScene", {"sceneName": new_preview})
+            duration_ms = _rpc(ws, "GetCurrentSceneTransition", ignore_err=True).get(
+                "transitionDuration") or 0
+            moved = _dev_scene_module().reassert_stale_preview(
+                _rpc, ws, stale, a.program_scene,
+                window_s=float(duration_ms) / 1000.0 + PREVIEW_SWAP_MARGIN_S,
+                poll_s=PREVIEW_POLL_S, sleep=time.sleep, now=time.monotonic)
+            if moved:
                 sys.stderr.write(
-                    f"[obs] {a.host}: issue 1380 preview '{stale}' -> '{new_preview}' (a Transition "
-                    f"can no longer put '{stale}' back on program)\n"
+                    f"[obs] {a.host}: issue 1380 preview '{stale}' -> '{a.program_scene}' (moved "
+                    f"{moved}x; a Transition can no longer put '{stale}' back on program)\n"
                 )
         # Same POLLED non-black self-check prod_scene uses (shared helper) — a dead/black scene
         # fails loud instead of silently recording a black, all-undecodable segment.
@@ -3040,79 +3041,22 @@ def program_scene(a):
     print(scene)
 
 
-# --- issue 1380: the stream development scene (the production scene nested as a source) ------------
-# Owner request 27.9.2026: development never programs the owner's production scene `PRO` on the
-# stream OBS. It programs its own `Development` scene, whose one item is the scene `PRO`: the same
-# pixels and the same warm `NDI 2ME PGM` receiver, so the recording and the 911004 burn are
-# unchanged, and the Companion PRE/PRODUCTION/POST machine (keyed on program == "PRO") is not armed
-# by development. The seeder is idempotent and operator-wins: it only ever CREATES the scene and the
-# nested item when they are missing, never edits an existing item or its transform, and never
-# writes to the production scene.
-
-
-class DevSceneError(Exception):
-    """The development scene cannot be ensured (the production scene is missing, or the names are
-    unusable). Fail loud; never guess another scene."""
-
-
-DevScenePlan = collections.namedtuple("DevScenePlan", "actions nested_hidden")
-
-
-def dev_scene_plan(scene_names, dev_items, dev_scene, nested_scene):
-    """issue 1380 (pure): what the seeder must do. *scene_names* = GetSceneList names; *dev_items* =
-    the development scene's GetSceneItemList `sceneItems` (None when the scene does not exist).
-    Returns DevScenePlan(actions, nested_hidden) with actions a subset of
-    ["create_scene", "add_nested"] in that order. `nested_hidden` reports an existing nested item the
-    operator disabled: it is left alone (operator-wins) but the caller says why the development
-    program would render black. Raises DevSceneError when the production scene is missing or the
-    two names are empty or equal (nesting a scene in itself)."""
-    if not dev_scene or not nested_scene:
-        raise DevSceneError("the development and production scene names must both be non-empty")
-    if dev_scene == nested_scene:
-        raise DevSceneError(
-            f"the development scene must differ from the production scene '{nested_scene}' "
-            f"(development never programs the production scene itself)"
-        )
-    if nested_scene not in scene_names:
-        raise DevSceneError(
-            f"the production scene '{nested_scene}' does not exist on this OBS (scenes: "
-            f"{sorted(scene_names)}); refusing to build '{dev_scene}' around a missing scene"
-        )
-    if dev_scene not in scene_names:
-        return DevScenePlan(["create_scene", "add_nested"], False)
-    nested = [it for it in (dev_items or []) if it.get("sourceName") == nested_scene]
-    if not nested:
-        return DevScenePlan(["add_nested"], False)
-    hidden = not any(bool(it.get("sceneItemEnabled", True)) for it in nested)
-    return DevScenePlan([], hidden)
-
-
-def ensure_dev_scene(ws, dev_scene, nested_scene):
-    """issue 1380: apply dev_scene_plan over an open obs-websocket. Reads the scene list and ONLY the
-    development scene's items; writes only CreateScene / CreateSceneItem on the development scene,
-    never with ignore_err (a failed write fails loud). Returns the DevScenePlan it applied."""
-    scenes = [s.get("sceneName") for s in _rpc(ws, "GetSceneList").get("scenes", [])]
-    dev_items = None
-    if dev_scene in scenes:
-        dev_items = _rpc(ws, "GetSceneItemList", {"sceneName": dev_scene}).get("sceneItems", [])
-    plan = dev_scene_plan(scenes, dev_items, dev_scene, nested_scene)
-    for action in plan.actions:
-        if action == "create_scene":
-            _rpc(ws, "CreateScene", {"sceneName": dev_scene})
-        elif action == "add_nested":
-            _rpc(ws, "CreateSceneItem", {
-                "sceneName": dev_scene, "sourceName": nested_scene, "sceneItemEnabled": True})
-    return plan
+# --- issue 1380: the stream development scene CLI -------------------------------------------------
+# The seeder itself (idempotent, operator-wins, never writes to the production scene) lives in the
+# pure scripts/stream_dev_scene.py; this is only the connection + the CLI.
 
 
 def dev_scene(a):
     """issue 1380 CLI: ensure the development scene nests the production scene on *a.host*; print
     `DEV_SCENE=<name> created=<0|1> nested_added=<0|1>` on stdout, log to stderr. Exits non-zero
     when the production scene is missing."""
+    m = _dev_scene_module()
+    a.scene = a.scene or m.STREAM_DEV_SCENE
+    a.nested = a.nested or m.STREAM_PRODUCTION_SCENE
     ws = _conn(a.host, a.password)
     try:
-        plan = ensure_dev_scene(ws, a.scene, a.nested)
-    except DevSceneError as e:
+        plan = m.ensure_dev_scene(_rpc, ws, a.scene, a.nested)
+    except m.DevSceneError as e:
         raise SystemExit(f"[obs] {a.host}: issue 1380 development scene NOT ensured: {e}")
     finally:
         ws.close()
@@ -3412,8 +3356,11 @@ def main():
         if name == "dev-scene":
             # issue 1380: ensure the stream development scene nests the production scene
             # (idempotent, operator-wins, never writes to the production scene).
-            p.add_argument("--scene", default=STREAM_DEV_SCENE)
-            p.add_argument("--nested", default=STREAM_PRODUCTION_SCENE)
+            # (empty = the names declared in scripts/stream_dev_scene.py, resolved in dev_scene()
+            # so no other subcommand imports that module -- obs_phase2.py is installed ALONE on
+            # the OBS boxes by setup-imag.sh / setup-strih.sh)
+            p.add_argument("--scene", default="")
+            p.add_argument("--nested", default="")
         if name == "idle-receiver":
             # #1086 keepalive-bypass PRIMITIVE (TEST TOOLING ONLY): --input is the strih NDI
             # input to idle/restore. Omit --restore to idle (tear the receiver down cold + print
