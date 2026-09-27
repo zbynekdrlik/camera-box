@@ -399,3 +399,191 @@ def test_the_av_soak_keeps_its_lease_through_the_one_helper():
     assert 'rig_lease_refresh_if_mine "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS"' in src
     assert "rig_lease_heartbeat_touch" not in src, \
         "a bare heartbeat touch would bump a foreign holder's heartbeat too"
+
+
+# --- review round: the hold ceiling, the gate bridge, a visible start beat -----------------------
+
+RIG_BUSY_GATE = os.path.join(REPO, "scripts", "rig-busy-gate.sh")
+FULL_PATH_WORKFLOW = os.path.join(REPO, ".github", "workflows", "full-path-e2e.yml")
+
+
+def test_past_the_hold_ceiling_the_lease_is_no_longer_beaten(tmp_path, lease):
+    # a still-running but stuck holder must age into the heartbeat-stale reclaim again: the keep-alive
+    # stops at acquired_at + RIG_LEASE_MAX_HOLD_SECS (default 4500 s = the full-path job timeout)
+    _write_holder(lease, acquired_at=_iso(_now() - timedelta(seconds=4600)))
+    raw = (lease / "holder.json").read_bytes()
+    stamp = _age_heartbeat(lease)
+    r = _refresh(tmp_path, lease, REPO_ID, RUN_ID, "900")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert "RIG_LEASE_REFRESH=over-hold" in r.stdout
+    assert (lease / "holder.json").read_bytes() == raw
+    assert abs((lease / "heartbeat").stat().st_mtime - stamp) < 1
+
+
+def test_a_holder_may_declare_a_longer_hold_ceiling(tmp_path, lease):
+    _write_holder(lease, acquired_at=_iso(_now() - timedelta(seconds=4600)))
+    _age_heartbeat(lease)
+    r = _refresh(tmp_path, lease, REPO_ID, RUN_ID, "900", RIG_LEASE_MAX_HOLD_SECS="30000")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _hb_age(lease) < 5
+
+
+def test_an_unanchored_hold_is_refused_never_beaten_forever(tmp_path, lease):
+    _write_holder(lease, acquired_at="garbage")
+    raw = (lease / "holder.json").read_bytes()
+    r = _refresh(tmp_path, lease, REPO_ID, RUN_ID, "900")
+    assert r.returncode == 3, r.stdout + r.stderr
+    assert (lease / "holder.json").read_bytes() == raw
+
+
+def test_the_default_hold_ceiling_matches_the_full_path_job_timeout():
+    import re
+    lib = open(LEASE_LIB).read()
+    m = re.search(r"RIG_LEASE_MAX_HOLD_SECS:-(\d+)", lib)
+    assert m, "rig-lease.sh names the default hold ceiling"
+    timeouts = [int(t) for t in re.findall(r"^\s+timeout-minutes:\s*(\d+)\s*$",
+                                           open(FULL_PATH_WORKFLOW).read(), re.M)]
+    assert timeouts, "full-path-e2e.yml declares a job timeout"
+    assert int(m.group(1)) == max(timeouts) * 60, (m.group(1), timeouts)
+
+
+def test_the_start_beat_reports_the_lease_identity_once_on_stderr(tmp_path, lease):
+    _write_holder(lease)
+    p = _start_refresher(tmp_path, lease, 1, '"recording-e2e"', RIG_HEARTBEAT_REFRESH_SEC="60",
+                         GITHUB_REPOSITORY=REPO_ID, GITHUB_RUN_ID=RUN_ID)
+    out, err = p.communicate(timeout=30)
+    assert p.returncode == 0, out + err
+    lines = [ln for ln in err.splitlines() if "lease keep-alive" in ln]
+    assert len(lines) == 1, err
+    assert f"{REPO_ID}#{RUN_ID}" in lines[0] and "RIG_LEASE_REFRESH=refreshed" in lines[0]
+    assert out == ""
+
+
+def test_no_identity_means_no_lease_line_either(tmp_path, lease):
+    _write_holder(lease)
+    p = _start_refresher(tmp_path, lease, 1, '"recording-e2e"', RIG_HEARTBEAT_REFRESH_SEC="60")
+    out, err = p.communicate(timeout=30)
+    assert p.returncode == 0, out + err
+    assert "lease keep-alive" not in err and out == ""
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _spawn_keepalive(tmp_path, lease, repo=REPO_ID, run_id=RUN_ID, **extra):
+    script = f'set -uo pipefail\n. "$LEASE_LIB"\nrig_lease_keepalive_spawn "{repo}" "{run_id}"\n'
+    r = subprocess.run(["bash", "-c", script],
+                       env=_env(tmp_path, lease, LEASE_LIB=LEASE_LIB, **extra),
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stdout + r.stderr
+    line = [ln for ln in r.stdout.splitlines() if ln.startswith("RIG_LEASE_KEEPALIVE=started")]
+    assert len(line) == 1, r.stdout
+    return int(line[0].split("pid=")[1].split()[0])
+
+
+def _release(tmp_path, lease):
+    return subprocess.run(["bash", "-c", f'. "$LEASE_LIB"\nrig_lease_release "{RUN_ID}"\n'],
+                          env=_env(tmp_path, lease, LEASE_LIB=LEASE_LIB),
+                          capture_output=True, text=True, timeout=30)
+
+
+def test_the_keepalive_outlives_its_spawner_and_stops_on_release(tmp_path, lease):
+    # rig-busy-gate.sh exits right after the acquire; the lease must stay beaten until the E2E's own
+    # refresher takes over (the verdict-exe fetch step + [0/8] ran ~18 min unbeaten, 27.9.2026)
+    _write_holder(lease)
+    pid = _spawn_keepalive(tmp_path, lease, RIG_LEASE_KEEPALIVE_SEC="1")
+    try:
+        assert _pid_alive(pid), "the spawner returned, the keep-alive runs on"
+        _age_heartbeat(lease)
+        assert _wait_for(lambda: _hb_age(lease) < 5, 3.5), "the keep-alive beats the lease"
+        assert _wait_for(lambda: (_release_time(lease) or _now()) >= _now()
+                         + timedelta(seconds=880), 3.5)
+        r = _release(tmp_path, lease)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert _wait_for(lambda: not _pid_alive(pid), 4), "a released lease ends the keep-alive"
+        assert not lease.exists(), "and it is never re-created"
+    finally:
+        if _pid_alive(pid):
+            os.kill(pid, 15)
+
+
+def test_the_keepalive_ends_when_the_lease_goes_foreign(tmp_path, lease):
+    _write_holder(lease)
+    pid = _spawn_keepalive(tmp_path, lease, RIG_LEASE_KEEPALIVE_SEC="1")
+    try:
+        _write_holder(lease, repo="zbynekdrlik/restreamer", run_id="888")
+        stamp = _age_heartbeat(lease)
+        assert _wait_for(lambda: not _pid_alive(pid), 4)
+        assert abs((lease / "heartbeat").stat().st_mtime - stamp) < 1
+    finally:
+        if _pid_alive(pid):
+            os.kill(pid, 15)
+
+
+def test_the_keepalive_ends_at_the_hold_ceiling(tmp_path, lease):
+    _write_holder(lease)
+    pid = _spawn_keepalive(tmp_path, lease, RIG_LEASE_KEEPALIVE_SEC="1")
+    try:
+        _write_holder(lease, acquired_at=_iso(_now() - timedelta(seconds=5000)))
+        assert _wait_for(lambda: not _pid_alive(pid), 4)
+    finally:
+        if _pid_alive(pid):
+            os.kill(pid, 15)
+
+
+def test_the_keepalive_needs_an_identity(tmp_path, lease):
+    _write_holder(lease)
+    script = '. "$LEASE_LIB"\nrig_lease_keepalive_spawn "" ""\n'
+    r = subprocess.run(["bash", "-c", script], env=_env(tmp_path, lease, LEASE_LIB=LEASE_LIB),
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0 and "RIG_LEASE_KEEPALIVE=started" not in r.stdout, r.stdout
+
+
+def test_the_gate_exits_promptly_and_leaves_the_lease_beaten(tmp_path, lease):
+    fake = tmp_path / "fake_obs_phase2.py"
+    fake.write_text('import sys\nprint(\'{"busy": false, "reasons": []}\')\nsys.exit(0)\n')
+    env = _env(tmp_path, lease, OBS_PHASE2_PY=str(fake), RIG_BUSY_GATE_ITERATIONS="3",
+               RIG_BUSY_GATE_SLEEP_SECS="0", RIG_LEASE_REPO=REPO_ID, RIG_LEASE_RUN_ID=RUN_ID,
+               RIG_LEASE_RUN_URL="https://example/run", RIG_LEASE_JOB="full-path",
+               RIG_LEASE_KEEPALIVE_SEC="1")
+    pid = None
+    try:
+        # capture_output + a timeout: a keep-alive that kept the step's pipes open would hang here
+        r = subprocess.run(["bash", RIG_BUSY_GATE], env=env, capture_output=True, text=True,
+                           timeout=60)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "OUTCOME=RIG_FREE" in r.stdout and "RIG_LEASE_ACQUIRED" in r.stdout
+        line = [ln for ln in r.stdout.splitlines() if ln.startswith("RIG_LEASE_KEEPALIVE=started")]
+        assert len(line) == 1, r.stdout
+        pid = int(line[0].split("pid=")[1].split()[0])
+        _age_heartbeat(lease)
+        assert _wait_for(lambda: _hb_age(lease) < 5, 3.5), "the lease is beaten after the gate exit"
+    finally:
+        _release(tmp_path, lease)
+        if pid is not None:
+            assert _wait_for(lambda: not _pid_alive(pid), 4)
+
+
+def test_the_gate_keeps_its_lease_through_the_one_helper():
+    src = open(RIG_BUSY_GATE).read()
+    assert "rig_lease_heartbeat_touch" not in src
+    assert 'rig_lease_refresh_if_mine "$RIG_LEASE_REPO" "$RIG_LEASE_RUN_ID"' in src
+    proceed = src.index("RIG_LEASE_PROCEEDING=1\n")
+    spawn = src.index('rig_lease_keepalive_spawn "$RIG_LEASE_REPO" "$RIG_LEASE_RUN_ID"')
+    assert proceed < spawn < src.index('report_outcome "OUTCOME=RIG_FREE"'), \
+        "the bridge starts only on the success path, where the lease stays held across the exit"
+
+
+def test_the_av_soak_declares_its_hold_ceiling_and_tells_the_abort_reasons_apart():
+    src = open(AV_SOAK).read()
+    assert 'RIG_LEASE_MAX_HOLD_SECS="$LEASE_HOLD_S"' in src
+    assert src.index('RIG_LEASE_MAX_HOLD_SECS="$LEASE_HOLD_S"') \
+        < src.index('rig_heartbeat_start av-soak "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS"'), \
+        "the refresher subshell inherits the ceiling only when it is set before the start"
+    assert "ran past its declared lease window" in src
+    assert "could not refresh the rig lease" in src
