@@ -25,9 +25,10 @@
 #
 # The SAME hold takes every always-connected `MV NDI camN` monitor twin OFF THE WIRE for the run
 # (genlock off + audio-only; a twin costs ~58 Mbps at NDI lowest, so 7 mains + 7 twins overloaded the
-# strih-lx uplink during the E2E). The state file records each twin's original; the restore puts the
-# twins back first, then the mains. The twins never deliver video during the hold, so the wait below
-# reads only the held MAINS from the state file (connect_on_show_held_mains).
+# strih-lx uplink during the E2E). The state file records each twin's original; the hold settles the
+# mains before any twin goes off the wire, and the restore puts the twins back first and gives
+# connect-on-show back only to a main whose twin landed. The twins never deliver video during the hold,
+# so the wait below reads only the held MAINS from the state file (connect_on_show_held_mains).
 #
 #   connect_on_show_e2e_hold      HERE STRIH STATE_FILE -> 0 held (read back) | non-zero: the run
 #                                                          must abort (a hidden input would be measured
@@ -177,6 +178,6 @@ connect_on_show_e2e_restore() {
       --host "$strih" --password "${OBS_PASSWORD:-}" --restore "$state"; then
     return 0
   fi
-  echo "WARNING: issue 1242 connect-on-show restore FAILED on $strih (state kept at $state) -- the held mains stay connected (full bandwidth) and a held MV twin stays off the wire (its multiview cell frozen) until the next run's cleanup, the next strih OBS launch re-applying the roles, or a manual: python3 scripts/obs_phase2.py connect-on-show --host $strih --restore $state" >&2
+  echo "WARNING: issue 1242 connect-on-show restore FAILED on $strih (state kept at $state) -- whatever did not restore stays held -- a main at full bandwidth, an MV twin off the wire with a blank multiview cell (its main then stays held too) -- until the next run's cleanup, the next strih OBS launch re-applying the roles, or a manual: python3 scripts/obs_phase2.py connect-on-show --host $strih --restore $state" >&2
   return 0
 }

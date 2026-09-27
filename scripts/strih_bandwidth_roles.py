@@ -10,7 +10,7 @@ preview is accepted. Two receiver roles per camera:
   * MONITOR twin (`MV NDI camN`, genlock_monitor=True): the #501 low-bandwidth receiver of the SAME
     sender, ALWAYS connected, rendered by the built-in multiview through an `MV <scene>` twin scene.
     During an E2E run the hold takes it OFF THE WIRE (E2E_TWIN_HOLD: genlock off + audio-only), so the
-    run measures the program path at the pre-roles uplink load; its multiview cell freezes meanwhile.
+    run measures the program path at the pre-roles uplink load; its multiview cell is blank meanwhile.
 
 The built-in multiview must never render a scene that holds a full program-path input (directly or
 through a nested scene) -- `Multiview::Update` calls obs_source_inc_showing on every scene it renders,
@@ -360,13 +360,21 @@ def twin_hold_original(effective):
 
 
 def twin_restore_values(original):
-    """The settings the restore writes (and verifies) for a recorded twin original: a genlocked original
-    comes back as TWIN_ON_WIRE (the lockdown pins its bandwidth to LOWEST, so any other recorded
-    bandwidth could never read back); an original that was not genlocked gets its own bandwidth."""
+    """The settings the restore writes (and verifies) for a recorded twin original. A genlocked
+    original -- or a HELD-shaped one (a hand-edited or older state file), which is never restored as
+    held -- comes back on the wire: TWIN_ON_WIRE plus the monitor ROLE, because the lockdown pins LOWEST
+    only for a genlock_monitor source (any other recorded bandwidth, or a twin that lost the flag, could
+    never read back). An original that was not genlocked gets its own bandwidth."""
     o = original or {}
-    if _genlock_on(o):
-        return dict(TWIN_ON_WIRE)
+    held_shape = not _genlock_on(o) and o.get("ndi_bw_mode") == NDI_BW_AUDIO_ONLY
+    if _genlock_on(o) or held_shape:
+        return dict(TWIN_ON_WIRE, **{GENLOCK_MONITOR_KEY: True})
     return {"genlock_fifo": False, "ndi_bw_mode": int(o.get("ndi_bw_mode", 0))}
+
+
+def twin_main(name):
+    """'MV NDI cam3' -> 'NDI cam3' (the program-path main a twin stands for; twin_name's inverse)."""
+    return name[len(TWIN_PREFIX):] if is_twin(name) else name
 
 
 def settings_match(effective, want):

@@ -202,15 +202,26 @@ launch re-applies the roles).
   reads held (a leftover whose state file was lost) records `TWIN_ON_WIRE`, never the held values.
 - **State file:** `{"connect_on_show": [...], "twins": {name: original}}`. A legacy list of mains
   still reads. A leftover file is unioned, and its recorded twin original wins.
-- **Writes only present inputs**, mains first, then twins, so a camera always has one live receiver.
+- **Writes only present inputs, and the ORDER is enforced, not just issued.** The hold writes the
+  mains and WAITS for them to settle, then writes the twins. A twin whose main did not settle stays on
+  the wire, so a camera always has one live receiver. An input the hold cannot read at enumeration is
+  a failure: it may be a twin still on the wire, or a main about to be measured parked.
 - **Every read-back is a SETTLE poll**, `_await_settled`. OBS applies an input update on the next
   VIDEO TICK after the WS overlay (`obs_source_update` defers `info.update`), so an immediate
-  `GetInputSettings` reads the overlay back even when the update is about to revert it. The poll
-  starts `_SETTLE_MIN_S` (0.25 s) after the writes, needs two consecutive matching reads, and stops at
-  `_SETTLE_BUDGET_S` (5 s). A twin that does not settle fails the hold (exit 1): the run aborts,
-  and its cleanup restores what was recorded.
-- **Restore:** the twins first (`twin_restore_values`: genlock on, and the lockdown pins LOWEST
-  itself), then the mains. Verified by the same settle poll; a deleted/renamed input is done; the
+  `GetInputSettings` reads the overlay back even when the update is about to revert it. The poll:
+  - starts `_SETTLE_MIN_S` (0.25 s) after the writes;
+  - needs two consecutive matching reads;
+  - never counts a request error as a match (a main's hold target equals the type default);
+  - reads the type defaults once per settle;
+  - fails an input only after `_SETTLE_BUDGET_S` (5 s) AND two complete sweeps, so a slow WebSocket
+    never fails a write it never re-read.
+
+  A failure fails the hold (exit 1): the run aborts, and its cleanup restores what was recorded.
+- **Restore, twins FIRST:** `twin_restore_values` writes genlock on plus the monitor ROLE (the
+  lockdown pins LOWEST only for a `genlock_monitor` source), and a held-shaped original is never
+  restored as held. Only then do the mains get connect-on-show back. A main whose twin did not
+  settle stays HELD (full bandwidth) and stays in the state file, so the camera never has neither
+  receiver. Every write is verified by the same settle poll. A deleted/renamed input is done. The
   file is removed only when every restore landed.
 - **Mid-run strih OBS relaunch:** the launch-time role apply leaves a held twin alone
   (`twin_is_held`, `summary["twins_held"]`) while the fresh E2E hold marker exists. Without the
@@ -218,7 +229,9 @@ launch re-applies the roles).
   back on the wire at the next launch. A twin whose held settings were never saved to the scene file
   before an OBS crash comes back on the wire for the rest of that run (a higher load, never wrong
   data).
-- **Cost:** the multiview twin cells freeze for the run.
+- **Cost:** the multiview twin cells go BLANK for the run. Audio-only makes DistroAV deactivate the
+  texture (`deactivate_source_output_video_texture`), so the operator sees blank cells, not frozen
+  frames.
 
 **Live check (supervisor):** during the next release E2E, read the `ether2` tx-drop delta before
 and after, and the per-source rx rates (the twins at ~0 video).
