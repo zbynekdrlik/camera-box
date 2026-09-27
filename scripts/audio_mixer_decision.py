@@ -143,7 +143,7 @@ def analyze(bundle_json_text, box_reachable, tolerance=DEFAULT_TOLERANCE,
                                       vban_stale_after_s),
         "vban_events": events, "vban_loss_ms": loss_ms,
         "vban_dest": obj.get("vban_pacer_loss_dest") if isinstance(obj, dict) else None,
-        "vban_outputs": _num(obj, "vban_pacer_outputs", int), "vban_age_s": vban_age,
+        "vban_age_s": vban_age,
     }
 
 
@@ -174,8 +174,7 @@ def _main(argv):
                   ns.vban_stale_after_s)
     for k in ("mixer_verdict", "ticks", "ticks_over", "window_ms", "tick_ms", "age_s",
               "rate_per_min", "expected_per_min", "deviation_per_min", "over_per_min",
-              "vban_verdict", "vban_events", "vban_loss_ms", "vban_dest", "vban_outputs",
-              "vban_age_s"):
+              "vban_verdict", "vban_events", "vban_loss_ms", "vban_dest", "vban_age_s"):
         print(f"{k}={_fmt(k, res[k])}")
     return 0
 

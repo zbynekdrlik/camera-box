@@ -20,7 +20,7 @@ audio-lag (issue 1226): box facets on `:8899`, a pure python decision, a bash or
 | Facet group (gather) | Log line | Arm | Pages |
 |---|---|---|---|
 | `audio_mixer_ticks` / `_ticks_over` / `_tick_ms` / `_window_ms` / `_age_s` | `audio-stall #1367: ... ticks=N ticks_over=M tick_ms=21.3` (obs-audio.c, one per dump) | MIXER | BEHIND: `abs(ticks - 2812.5) > 5`; OVERLOADED: `ticks_over > 30` |
-| `vban_pacer_loss_events` / `_loss_ms` / `_loss_dest` / `vban_pacer_outputs` / `vban_pacer_age_s` | `[obs-vban] obs-vban pacing: ...` (every 10 s per output) | VBAN | VBAN_LOSS: any loss counter moved in the window |
+| `vban_pacer_loss_events` / `_loss_ms` / `_loss_dest` / `vban_pacer_age_s` | `[obs-vban] obs-vban pacing: ...` (every 10 s per output) | VBAN | VBAN_LOSS: any loss counter moved in the window |
 
 Both are parsed from the TAIL of the #1222 bounded read, in the server's one `obs_log_parse`
 tuple (appended at the END; the unpack is order-sensitive). Omit-when-empty: a box with no dump yet
@@ -44,8 +44,9 @@ its own rate and an unknown tick length is UNKNOWN).
   and a surplus in the next, both BEHIND. A surplus IS the mixer catching up (27.9: 3857 at 08:00).
 - **STALE** (newest dump > 180 s behind the log head: the audio thread stopped dumping while the log
   advanced) is log-only, the audio-lag sibling's rule. On resolume a wedged mixer still pages
-  through VBAN_LOSS, because the pacer thread keeps logging. On a box without VBAN, STALE alone is
-  not paged (a follow-up candidate, see below).
+  through VBAN_LOSS, because the pacer thread keeps logging. On a box without VBAN outputs a
+  stopped audio thread is not paged by this watchdog (nor by audio-lag, whose STALE is log-only
+  too); promoting it was reported to the supervisor as a follow-up candidate.
 
 ## VBAN loss = counter increase inside a 660 s window, per destination
 
@@ -59,17 +60,28 @@ survives the 2-pass confirm, the render-freeze freshness shape). Stateless on th
   **`late_sends` is NOT a loss** — late but complete audio, and it climbs ~200/s after an in-grace
   buffering hole (the pacer rule's known consequence). Counting it would page every growth step of
   resolume's legitimate 85 → 362 ms buffering.
-- **The shipped line has no destination and the two resolume outputs print identical-looking lines
-  at the same millisecond.** `_vban_pick_track` splits them into tracks: a line continues the live
-  track (fed within 25 s, not already fed within 5 s of this logging period) whose counters it
-  continues monotonically, nearest by L1, ties to the older track. With no loss every line equals
-  its own track exactly, so the delta is 0 BY CONSTRUCTION — the never-false-page property. A counter
-  drop (output restart, `pacing-config ... counters=reset`) starts a new track whose first line is
-  only a baseline. A mis-assignment under loss can only move increments between tracks of the same
-  key; the key total stays right.
+- **The shipped line has no destination and the two resolume outputs print identical-looking lines,
+  so an output's identity cannot be recovered from it.** A first cut split them into per-output
+  tracks by monotone continuation; review round 1 showed it false-paging on a clean log (outputs
+  whose logging phases are 5-10 s apart, or a common pause > 25 s: the second output's first line
+  continued the first output's track and their counter gap read as 65-130 events). The parser now
+  works on NEW COUNTER TUPLES per key: the counters only grow on a loss, so a loss is a tuple never
+  seen before for that key that dominates (every counter >=) one seen earlier, measured against
+  the nearest such tuple (never more than the true growth). A clean output repeats its own tuple
+  and adds nothing; a restarted output starts at 0 and dominates nothing it has not shown.
+- **The key's first `VBAN_BASELINE_S` (10.5 s) in the tail only seeds.** Each output logs once per
+  >= 10 s, so within one period every output has shown its current counters, whatever their
+  phase. A loss inside that first period is not counted (under-count, never a false page).
+- **Residual (documented, not fixed):** an output whose FIRST line in the tail comes only after a
+  logging pause longer than that seed period, with counters that dominate another output's, reads
+  that difference as a loss once. It needs the tail to start exactly inside a multi-second freeze
+  of the whole OBS, which the mixer arm pages on its own anyway. The fixed-timeline line (`dest=`,
+  one output per key) has no such case.
 - `vban_pacer_loss_dest` = the worst key (events first, then ms): `ip:port` on the new line,
-  `stream=<name>` on the shipped one. `vban_pacer_outputs` = tracks that logged within 25 s of the
-  log head (context; a stopped output drops out).
+  `stream=<name>` on the shipped one. There is no live-output count: it cannot be derived honestly
+  from the destination-less line.
+- The server timestamp-parses the tail ONCE (`timestamped_tail_lines`) and hands it to both
+  parsers (`tail=`), so the two facets add one pass over the bounded tail, not two.
 - Timestamps become positions by FILE ORDER (`_file_order_elapsed`): a step back of more than 12 h
   is a midnight wrap, a smaller one is two threads logging out of order (counted as 0). Unlike a
   single head-vs-line gap, this stays right across several midnights in one tail.
@@ -84,6 +96,10 @@ the three quiet windows never grade a paging verdict; the onset pages VBAN_LOSS 
 after 06:00:14 (≤ 06:10) and the mixer arm by 06:16 (the onset alternates 22/36/12/43/10 late ticks
 per minute before 06:05, so a phase on the quiet minutes confirms later). The same replay also runs
 through the REAL bash watchdog `--dry-run` via `AUDIO_MIXER_FETCH_CMD`.
+
+The other boxes, read-only on 27.9/28.9: the stream box's current log (19:57–00:20, 263 full
+dumps) read ticks=2813 and ticks_over=0 in every dump and has no obs-vban line (VBAN arm UNKNOWN);
+strih-lx's current log (196 dumps, review round 1) read ticks=2813 with ticks_over <= 1.
 
 ## Watchdog shape
 
@@ -105,9 +121,9 @@ through the REAL bash watchdog `--dry-run` via `AUDIO_MIXER_FETCH_CMD`.
 on the watchdog. No cargo involved. The obs-fleet Rust harness is std-only and runs with plain
 `rustc --test` (`tests/harness_obs_fleet_list_1296.rs`).
 
-## Open follow-ups (not done here)
+## File size
 
-- A stopped audio thread on a box WITHOUT VBAN outputs reads STALE (log-only) here and in audio-lag.
-  Promoting it to a page is a separate decision.
-- `bundle_state_gather.py` is past 1900 lines. A split needs every installer that ships the fixed
-  three-file server tree (setup-imag, setup-strih, the Windows raw-fetch runbook) updated together.
+`bundle_state_gather.py` is past 1900 lines. It is a flat set of independent pure parsers, and a
+split has to update every installer that ships the fixed three-file server tree together
+(setup-imag.sh, setup-strih.sh, the Windows raw-fetch runbook). The split was reported to the
+supervisor as a follow-up candidate.

@@ -1154,8 +1154,10 @@ VBAN_LOSS_EVENTS = ("discontinuities", "repays", "resyncs")
 VBAN_LOSS_MS = ("silence_ms", "discarded_ms")   # `late_sends` is late but COMPLETE audio: no loss
 # The loss window: two dev1 passes (5 min) + timer slack, so one burst survives the 2-pass confirm.
 VBAN_LOSS_WINDOW_S = 660
-VBAN_SLOT_S = 5.0     # a track takes at most one line per 10 s logging period
-VBAN_LIVE_S = 25.0    # an output that logged within ~2.5 periods of the log head is live
+# Each output logs once per >= 10 s, so within this span of a key's FIRST line in the tail every
+# output of that key has shown its current counters once. Those lines only seed what is known.
+VBAN_BASELINE_S = 10.5
+VBAN_PREDECESSOR_SCAN = 64   # a loss is measured against the newest dominated tuples only
 
 
 def _file_order_elapsed(ts_values):
@@ -1179,10 +1181,12 @@ def _file_order_elapsed(ts_values):
     return out
 
 
-def _timestamped_tail_lines(text):
+def timestamped_tail_lines(text):
     """The tail slice's lines that carry an OBS `HH:MM:SS.mmm` prefix, as `(pos_s, line)` in file
     order, where pos_s is `_file_order_elapsed` of their timestamps; plus the log head's pos_s
-    (the LAST such line). `([], None)` when none."""
+    (the LAST such line). `([], None)` when none. The server computes it ONCE per request and
+    hands it to `audio_mixer_from_log` and `vban_pacer_loss_from_log` (`tail=`), so the tail
+    is timestamp-parsed a single time."""
     t = text or ""
     if LOG_BOUNDED_READ_SEPARATOR in t:
         t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
@@ -1197,14 +1201,16 @@ def _timestamped_tail_lines(text):
     return (list(zip(pos, (ln for _, ln in stamped))), pos[-1])
 
 
-def audio_mixer_from_log(text):
+def audio_mixer_from_log(text, tail=None):
     """issue 1381 -- `(ticks, ticks_over, window_ms, tick_ms, age_s)` of the NEWEST
     `audio-stall #1367` dump in the tail, or five `""` when fewer than two dumps are there (the
     first dump after an OBS start is partial, so a normal start reads absent -> UNKNOWN, never
-    BEHIND). `window_ms` is the log interval since the previous dump, so the dev1 decision grades
-    ticks PER MINUTE on the window the mixer actually counted; `age_s` is the newest dump's in-log
-    age behind the log head (a stopped audio thread stops dumping while the log advances)."""
-    stamped, head = _timestamped_tail_lines(text)
+    BEHIND). The dump's own tick count is already the per-minute rate (its window is 60 s on the
+    audio thread's clock); `window_ms` is only the WALL-clock log interval since the previous dump,
+    reported as context and never used to rescale the count (dantesync steps the wall clock).
+    `age_s` is the newest dump's in-log age behind the log head (a stopped audio thread stops
+    dumping while the log advances). `tail` = a precomputed `timestamped_tail_lines(text)`."""
+    stamped, head = tail if tail is not None else timestamped_tail_lines(text)
     prev = last = None
     for pos, line in stamped:
         if "audio-stall #1367" not in line:
@@ -1216,17 +1222,6 @@ def audio_mixer_from_log(text):
         return ("", "", "", "", "")
     return (last[1], last[2], str(round((last[0] - prev[0]) * 1000.0)), last[3],
             str(round(head - last[0])))
-
-
-class _VbanTrack:
-    """One sender's cumulative counters, fed its lines in file order."""
-    __slots__ = ("last", "last_pos", "events", "loss_ms")
-
-    def __init__(self, vec, pos):
-        self.last = vec
-        self.last_pos = pos
-        self.events = 0
-        self.loss_ms = 0.0
 
 
 def _vban_vector(fields):
@@ -1248,38 +1243,47 @@ def _vban_vector(fields):
     return None
 
 
-def _vban_pick_track(tracks, vec, pos):
-    """The existing track this line continues: still live (fed within VBAN_LIVE_S -- a stopped or
-    restarted output's old track retires), not already fed in this logging period, every counter
-    >= its last value, nearest by L1 (ties -> the older track). None -> a new track (an output
-    restart reset its counters, or another output appeared). With no loss every line equals its
-    own track's last vector, so the increments are 0 by construction."""
+def _vban_increment(vec, seen, n_events):
+    """How much a NEW counter tuple grew: against the nearest earlier tuple it dominates (every
+    counter >=), `(events, ms)`; None when it dominates none (an output restart reset its counters,
+    or a smaller tuple of another output). Only the newest VBAN_PREDECESSOR_SCAN distinct tuples
+    are searched -- an output's own predecessor is always among the last few."""
     best = None
-    for tr in tracks:
-        gap = pos - tr.last_pos
-        if gap < VBAN_SLOT_S or gap > VBAN_LIVE_S or len(tr.last) != len(vec):
+    for old in reversed(seen[-VBAN_PREDECESSOR_SCAN:]):
+        if len(old) != len(vec) or any(n < o for n, o in zip(vec, old)):
             continue
-        if any(n < o for n, o in zip(vec, tr.last)):
-            continue
-        dist = sum(n - o for n, o in zip(vec, tr.last))
-        if best is None or dist < best[0]:
-            best = (dist, tr)
-    return None if best is None else best[1]
+        inc = (sum(n - o for n, o in zip(vec[:n_events], old[:n_events])),
+               sum(n - o for n, o in zip(vec[n_events:], old[n_events:])))
+        if best is None or inc < best:
+            best = inc
+    return best
 
 
-def vban_pacer_loss_from_log(text, window_s=VBAN_LOSS_WINDOW_S):
-    """issue 1381 -- `(loss_events, loss_ms, dest, outputs, age_s)` for the obs-vban pacer, or five
-    `""` when the tail has no `obs-vban pacing:` status line (no VBAN output on this box).
+def vban_pacer_loss_from_log(text, window_s=VBAN_LOSS_WINDOW_S, tail=None):
+    """issue 1381 -- `(loss_events, loss_ms, dest, age_s)` for the obs-vban pacer, or four `""` when
+    the tail has no `obs-vban pacing:` status line (no VBAN output on this box).
 
-    Per destination key, the INCREASE of the loss counters over the last `window_s` of the log
+    Per destination key, how much the loss counters grew over the last `window_s` of the log
     (legacy: underflows + overflows + trims; fixed-timeline: discontinuities + repays + resyncs,
-    and silence_ms + discarded_ms as `loss_ms`). The worst key is reported (events first, then ms).
-    `loss_ms` is `""` when that key's line carries no ms counters (the shipped format). The shipped
-    format's two outputs are split into tracks by `_vban_pick_track`; a new track's first line is
-    only a baseline (its earlier counts cannot be placed in time). `outputs` counts the tracks that
-    logged within VBAN_LIVE_S of the log head; `age_s` is the newest status line's in-log age."""
-    stamped, head = _timestamped_tail_lines(text)
-    tracks = {}     # key -> [_VbanTrack]
+    and silence_ms + discarded_ms as `loss_ms`). The worst key is reported (events first, then ms);
+    `loss_ms` is `""` when that key's line carries no ms counters (the shipped format).
+
+    The shipped line names no destination, and the two resolume outputs print identical-looking
+    lines, so an output's identity cannot be recovered from it. The counters only grow on a loss,
+    so a loss is a counter tuple NEVER SEEN BEFORE for that key that dominates one seen earlier; it
+    counts by how much it exceeds the nearest dominated tuple (never more than the true growth).
+    A clean output repeats its own tuple every period and adds nothing; an output restart starts
+    at 0 and dominates nothing it has not shown. The lines of a key's first VBAN_BASELINE_S in the
+    tail only seed the known tuples: within one logging period every output has shown its current
+    counters once, whatever their phase. Residual: an output whose first line in the tail comes
+    only after a logging pause longer than that span, with counters that dominate another output's,
+    reads that difference as a loss once. `age_s` is the newest status line's in-log age.
+    `tail` = a precomputed `timestamped_tail_lines(text)`."""
+    stamped, head = tail if tail is not None else timestamped_tail_lines(text)
+    seen = {}       # key -> [distinct tuples in file order]
+    seen_set = {}   # key -> set(tuples)
+    first = {}      # key -> pos of the key's first line in the tail
+    loss = {}       # key -> [events, ms]
     has_ms = {}     # key -> bool
     newest = None
     for pos, line in stamped:
@@ -1294,28 +1298,28 @@ def vban_pacer_loss_from_log(text, window_s=VBAN_LOSS_WINDOW_S):
         key, vec, n_events, key_has_ms = parsed
         newest = pos
         has_ms[key] = key_has_ms
-        key_tracks = tracks.setdefault(key, [])
-        tr = _vban_pick_track(key_tracks, vec, pos)
-        if tr is None:
-            key_tracks.append(_VbanTrack(vec, pos))
+        loss.setdefault(key, [0, 0.0])
+        key_first = first.setdefault(key, pos)
+        key_seen = seen.setdefault(key, [])
+        key_set = seen_set.setdefault(key, set())
+        if vec in key_set:
             continue
-        if head - pos <= window_s:
-            tr.events += sum(n - o for n, o in zip(vec[:n_events], tr.last[:n_events]))
-            tr.loss_ms += sum(n - o for n, o in zip(vec[n_events:], tr.last[n_events:]))
-        tr.last, tr.last_pos = vec, pos
+        if pos - key_first > VBAN_BASELINE_S and head - pos <= window_s:
+            inc = _vban_increment(vec, key_seen, n_events)
+            if inc is not None:
+                loss[key][0] += inc[0]
+                loss[key][1] += inc[1]
+        key_seen.append(vec)
+        key_set.add(vec)
     if newest is None:
-        return ("", "", "", "", "")
+        return ("", "", "", "")
     worst = None
-    outputs = 0
-    for key in sorted(tracks):
-        events = sum(tr.events for tr in tracks[key])
-        loss_ms = sum(tr.loss_ms for tr in tracks[key])
-        outputs += sum(1 for tr in tracks[key] if head - tr.last_pos <= VBAN_LIVE_S)
+    for key in sorted(loss):
+        events, loss_ms = loss[key]
         if worst is None or (events, loss_ms) > (worst[1], worst[2]):
             worst = (key, events, loss_ms)
     key, events, loss_ms = worst
-    return (str(events), f"{loss_ms:.1f}" if has_ms[key] else "", key, str(outputs),
-            str(round(head - newest)))
+    return (str(events), f"{loss_ms:.1f}" if has_ms[key] else "", key, str(round(head - newest)))
 
 
 def distroav_dll_paths(scan_roots):
@@ -1769,7 +1773,6 @@ def build_bundle_state(
     vban_pacer_loss_events="",
     vban_pacer_loss_ms="",
     vban_pacer_loss_dest="",
-    vban_pacer_outputs="",
     vban_pacer_age_s="",
 ):
     """Assemble the flat bundle-state dict `version-integrity-gate.sh --win-state`'s
@@ -1928,7 +1931,6 @@ def build_bundle_state(
         "vban_pacer_loss_events": vban_pacer_loss_events,
         "vban_pacer_loss_ms": vban_pacer_loss_ms,
         "vban_pacer_loss_dest": vban_pacer_loss_dest,
-        "vban_pacer_outputs": vban_pacer_outputs,
         "vban_pacer_age_s": vban_pacer_age_s,
     }
     return {k: v for k, v in values.items() if v}

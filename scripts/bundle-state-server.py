@@ -670,6 +670,8 @@ def gather_bundle_state(
     ref_band_src = os.environ.get("AUDIO_REF_BAND_SRC", bsg.AUDIO_REF_BAND_DEFAULT_SRC)
 
     def _parse_log_facets():
+        # issue 1381: the timestamped tail is parsed ONCE and shared by the two facets below.
+        stamped_tail = bsg.timestamped_tail_lines(log_text)
         return (
             bsg.obs_version_from_log(log_text),
             bsg.distroav_version_from_log(log_text),
@@ -719,8 +721,8 @@ def gather_bundle_state(
             # issue 1381 -- the audio MIXER real-time facet (newest complete audio-stall dump) and
             # the obs-vban PACER loss facet from the SAME bounded log_text (no second read); the
             # dev1 audio-mixer watchdog reads them. Appended at the END (order-sensitive unpack).
-            bsg.audio_mixer_from_log(log_text),
-            bsg.vban_pacer_loss_from_log(log_text),
+            bsg.audio_mixer_from_log(log_text, tail=stamped_tail),
+            bsg.vban_pacer_loss_from_log(log_text, tail=stamped_tail),
         )
 
     (obs_version, distroav_version, output_fps, genlock_wall_clock, genlock_capability,
@@ -731,7 +733,7 @@ def gather_bundle_state(
     (audio_mixer_ticks_val, audio_mixer_ticks_over_val, audio_mixer_window_ms_val,
      audio_mixer_tick_ms_val, audio_mixer_age_s_val) = audio_mixer
     (vban_pacer_loss_events_val, vban_pacer_loss_ms_val, vban_pacer_loss_dest_val,
-     vban_pacer_outputs_val, vban_pacer_age_s_val) = vban_pacer
+     vban_pacer_age_s_val) = vban_pacer
     av_offset_recent_mad_ms_val, av_offset_recent_matched_min_val = av_offset_quality
     relock_bursts_val, relock_bursts_age_s_val = relock_bursts
     (buffered_ms_slope_val, buffered_ms_max_step_val, buffered_ms_n_val,
@@ -918,7 +920,6 @@ def gather_bundle_state(
         vban_pacer_loss_events=vban_pacer_loss_events_val,
         vban_pacer_loss_ms=vban_pacer_loss_ms_val,
         vban_pacer_loss_dest=vban_pacer_loss_dest_val,
-        vban_pacer_outputs=vban_pacer_outputs_val,
         vban_pacer_age_s=vban_pacer_age_s_val,
     )
 

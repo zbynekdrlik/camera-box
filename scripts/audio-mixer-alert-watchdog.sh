@@ -181,7 +181,7 @@ field() { printf '%s\n' "$1" | sed -n "s/^$2=//p"; }
 handle_box() {
   local box="$1" ip="$2" body reachable out
   local mverdict ticks over tick_ms age expected dev window
-  local vverdict events loss_ms dest outputs vage loss_txt
+  local vverdict events loss_ms dest vage loss_txt
 
   if body="$(fetch_bundle_json "$ip")"; then reachable=1; else reachable=0; body=""; fi
   out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" \
@@ -193,8 +193,8 @@ handle_box() {
   dev="$(field "$out" deviation_per_min)"; window="$(field "$out" window_ms)"
   vverdict="$(field "$out" vban_verdict)"; events="$(field "$out" vban_events)"
   loss_ms="$(field "$out" vban_loss_ms)"; dest="$(field "$out" vban_dest)"
-  outputs="$(field "$out" vban_outputs)"; vage="$(field "$out" vban_age_s)"
-  log "$box ($ip): reachable=$reachable mixer=${mverdict:-<none>} ticks=${ticks} over=${over} tick_ms=${tick_ms} window_ms=${window} age=${age} dev=${dev} | vban=${vverdict:-<none>} events=${events} loss_ms=${loss_ms} dest=${dest} outputs=${outputs} age=${vage}"
+  vage="$(field "$out" vban_age_s)"
+  log "$box ($ip): reachable=$reachable mixer=${mverdict:-<none>} ticks=${ticks} over=${over} tick_ms=${tick_ms} window_ms=${window} age=${age} dev=${dev} | vban=${vverdict:-<none>} events=${events} loss_ms=${loss_ms} dest=${dest} age=${vage}"
 
   # MIXER arm
   case "$mverdict" in
