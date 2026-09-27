@@ -187,7 +187,9 @@ def test_the_killed_tray_is_waited_on_by_its_pids_never_by_name(ps):
     kill = _at(swap, "$trayKilled | Stop-Process -Force", capture)
     pids = _at(swap, "$trayPids = @($trayKilled | ForEach-Object { $_.Id })", kill)
     wait = _at(swap, "Wait-Process -Id $trayPids -Timeout 15", pids)
-    check = _at(swap, "@(Get-Process -Id $trayPids -ErrorAction SilentlyContinue).Count -gt 0", wait)
+    # review round 3: a reused PID is not the tray -- only a still-alive dantesync-tray counts
+    check = _at(swap, "@(Get-Process -Id $trayPids -ErrorAction SilentlyContinue | Where-Object "
+                      "{ $_.ProcessName -eq 'dantesync-tray' }).Count -gt 0", wait)
     assert "did not exit" in swap[check:check + 200], swap[check:check + 200]
     # nothing between the wait and the backup re-reads the tray by name and throws on it
     backup = _at(swap, "Copy-Item -Force $trayExe $trayPre", check)
@@ -234,6 +236,58 @@ def test_a_copy_blocked_by_a_relaunched_tray_is_a_named_warning_without_a_restor
     assert in_use < warn < restore, catch
     assert "} else {" in catch[warn:restore], "the restore runs only when the file was not in use"
     assert "the previous tray exe is untouched" in catch[warn:restore]
+
+
+def test_untouched_is_proven_by_the_hash_never_assumed(ps):
+    """Review round 3: error 32 (a running exe) fails before the file is opened for write, but 33
+    (lock violation) can come after truncation. So "untouched" compares the exe's hash with the one
+    read before the copy; anything else restores."""
+    swap = _swap(ps)
+    backup = _at(swap, "Copy-Item -Force $trayExe $trayPre")
+    before = _at(swap, "$trayBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $trayExe).Hash", backup)
+    assert before < _at(swap, "for ($trayTry = 1;", backup)
+    catch = swap[_at(swap, "} catch {", _at(swap, "Copy-Item -Force $trayTmp $trayExe")):]
+    proof = _at(catch, "$trayUntouched = ((Get-FileHash -Algorithm SHA256 -LiteralPath $trayExe).Hash -eq $trayBefore)")
+    assert _at(catch, "$trayInUse = ") < proof
+    first_branch = _at(catch, "if ($trayUntouched -and $trayNew.Count -gt 0) {", proof)
+    assert first_branch < _at(catch, "'a tray keeps relaunching: '") < _at(catch, "Copy-Item -Force $trayPre $trayExe")
+
+
+def test_a_tray_that_did_not_die_is_named_apart_from_a_relaunch(ps):
+    """Review round 3: "keeps relaunching" only for a NEW PID holding the exe; a tray the arm already
+    tried to kill is "did not die"; nothing holding it is "locked by another process"."""
+    swap = _swap(ps)
+    loop = swap[_at(swap, "for ($trayTry = 1;"):_at(swap, "Copy-Item -Force $trayTmp $trayExe")]
+    record = _at(loop, "if ($trayTried -notcontains $trayP.Id) {")
+    assert record < _at(loop, "$trayRespawnedBy += (Get-TrayParent $trayP.Id)", record)
+    assert "$trayTried += $trayP.Id" in loop
+    assert "$trayTried = @($trayPids)" in swap
+    catch = swap[_at(swap, "} catch {", _at(swap, "Copy-Item -Force $trayTmp $trayExe")):]
+    assert "$trayNew = @($trayHolders | Where-Object { $trayTried -notcontains $_.Id })" in catch
+    assert "$trayStuck = @($trayHolders | Where-Object { $trayTried -contains $_.Id })" in catch
+    relaunching = _at(catch, "'a tray keeps relaunching: '")
+    stuck = _at(catch, "'a tray did not die (pid '", relaunching)
+    locked = _at(catch, "'the tray exe is locked by another process", stuck)
+    assert locked < _at(catch, "Copy-Item -Force $trayPre $trayExe", locked)
+
+
+def test_the_parent_command_line_is_cut(ps):
+    """Review round 3: the parent's command line lands in the roll summary; an unexpected parent's
+    arguments must not be printed in full."""
+    fn = _at(ps, "function Get-TrayParent(")
+    body = ps[fn:_at(ps, "\n}\n", fn)]
+    assert "if ($trayCmd.Length -gt 120) { $trayCmd = $trayCmd.Substring(0, 120) + '...' }" in body
+
+
+def test_tray_ok_says_when_a_running_tray_was_kept(ps):
+    """Review round 3: TRAY OK is true when the swap succeeded (any tray kept started from the new
+    exe), but it names that the tray was kept, not launched."""
+    relaunch = ps[_at(ps, "# 6. relaunch the tray"):]
+    guard = _at(relaunch, "if ($trayProcs.Count -eq 0) {")
+    kept = _at(relaunch, "} else {\n            $trayKept = $true\n        }", guard)
+    assert kept < _at(relaunch, "$trayProcs.Count -ne 1", kept)
+    report = relaunch[_at(relaunch, "if ($trayNotes.Count -gt 0) {\n    Write-Output ('TRAY-WARNING: '"):]
+    assert "if ($trayKept) {" in report and "not launched" in report
 
 
 def test_the_relaunch_never_starts_a_second_tray(ps):
@@ -501,3 +555,17 @@ def test_roll_names_a_relaunching_tray_and_keeps_the_service(tmp_path):
     assert "[stream] verified" in out and "rolled back" not in out
     assert "WARNING: dantesync-tray was NOT refreshed on 1 node" in out, out
     assert f"stream: a tray keeps relaunching: {parent}" in out, out
+
+
+def test_roll_reports_a_tray_that_was_killed_once_before_the_swap(tmp_path):
+    """The one-time respawn: the stubbed node reports TRAY OK naming the relaunch it killed, and the
+    roll prints it as OK with no warning. Like every roll case here, this tests how the outcome line
+    is read; the emitted PowerShell itself is run against stubbed cmdlets by
+    tests/pwsh/run_dantesync_tray_swap_1372.sh (needs pwsh, not on dev1)."""
+    ok = ("TRAY OK: dantesync-tray.exe sha256 93748C27 running in session 1 (killed a relaunched tray "
+          "before the swap, started by: svchost.exe (C:\\Windows\\system32\\svchost.exe -k netsvcs -p -s Schedule))")
+    r = _roll(tmp_path, f"{ok}\ndantesync {_TARGET}\n")
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "[stream] tray OK: dantesync-tray.exe sha256 93748C27 running in session 1 (killed a relaunched" in out
+    assert "NOT refreshed" not in out
