@@ -57,6 +57,14 @@ report-only decoupling seam that added the `[4d1/8]` word is `scripts/lib/mv-fps
 `mv_fps_preflight_term_is_report_only` per-box term predicate — strih report-only while issue 1260
 open, imag strict, flipped back to strict in the PR closing issue 1260.)
 
+**The sweep reads SCRIPT TEXT, so it is also blind to a change in what a heredoc builder EMITS**
+(issue 1382). Several tests assert on the OUTPUT of a builder such as `painter_launch_remote`
+(`tests/rig_mode.rs` `painter_launch()`), not on `rig-mode.sh` itself. Removing backticks from a
+comment in an unquoted `<<REMOTE` heredoc changed no literal count in the source, yet the emitted
+script gained text that a negated `!p.contains(...)` on the output could have caught. When you change
+a heredoc builder, also grep the tests that call it for negated output assertions. Run the one or two
+real test files that drive it with plain rustc (the stub-rlib recipe below).
+
 ## Adding a STEP between the merge call and `exit "$GATE"`: the occurrence-count sweep is BLIND to the 703 byte-DISTANCE window too (#1265)
 
 Sibling blind-spot to the #1263 negated-region one above, hit live on #1265. `tests/harness_e2e_execute_verdict_703.rs` does NOT anchor on a literal — it slices a FIXED BYTE WINDOW from the
@@ -1459,6 +1467,9 @@ Then `CARGO_MANIFEST_DIR=<worktree> rustc --edition 2021 --test lib.rs` (the env
   heredoc that edits files in the same call as other commands is often refused by the worktree
   guard as "too complex to verify", and a Write-tool file loses trailing spaces at line ends, so a
   replace pattern must never depend on one.
+- The `Edit` tool drops a TRAILING space of `new_string` too (issue 1382): an edit whose strings
+  ended in `cam2 ` wrote `cam2"rig-mode.sh test"`, gluing two arguments into one. End every
+  old_string/new_string on a non-space character, and `git diff` the line after the edit.
 
 ## GOTCHA — a python harness test that passes on dev1 can be reaching the LIVE rig (issue 1372)
 

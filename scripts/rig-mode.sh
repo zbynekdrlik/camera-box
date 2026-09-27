@@ -458,11 +458,11 @@ PAINTER_PID=\$(cat "$pidfile")
 #      renamed/copied elsewhere (the #721 incident class). $dur is TEST mode's own intentional
 #      measurement-window length (often > the 3600s safety cap) — passed WITH a reason so it is
 #      honored verbatim rather than clamped (rig_test_ledger_effective_max_duration).
-$(rig_test_ledger_register_remote_cmds "frame-probe --paint-only (rig-mode TEST painter)" '\$PAINTER_PID' cam2 "rig-mode.sh test" "$(rig_test_ledger_effective_max_duration "$dur" "rig-mode TEST measurement window")")
+$(rig_test_ledger_register_remote_cmds "frame-probe --paint-only (rig-mode TEST painter)" '$PAINTER_PID' cam2 "rig-mode.sh test" "$(rig_test_ledger_effective_max_duration "$dur" "rig-mode TEST measurement window")")
 sleep 3
 # (5) verify the painter is UP and ACTUALLY PAINTING — presenter-aware (#464). --presenter auto
 #     (the default here) may land on the KMS page-flip presenter, which by design NEVER opens
-#     /dev/fb0 (see src/presenter_kind.rs::resolve_presenter_kind) — a bare `fuser -s /dev/fb0`
+#     /dev/fb0 (see src/presenter_kind.rs::resolve_presenter_kind) — a bare 'fuser -s /dev/fb0'
 #     reported a healthy, correctly-painting KMS run as FAIL (confirmed live on cam2, #464).
 #     scripts/lib/presenter-liveness-check.sh reads the painter's own log to know which presenter
 #     actually came up and asserts the matching signal (KMS: the DRM device held + vblank-locked;
