@@ -179,6 +179,10 @@ fn the_rtprio_row_passes_when_obs_is_not_running() {
         "obs_running=0\nobs_rtprio_limit=\n",
         1,
     );
+    assert_ne!(
+        facts, GOOD_FACTS,
+        "the fixture must carry the running-OBS facts"
+    );
     let (c, rows) = verdict(&facts);
     assert_eq!(c, 0, "{rows:?}");
 }
