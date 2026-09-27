@@ -140,6 +140,10 @@ fn compile(dir: &Scratch, c: &str) -> PathBuf {
             "-Wall",
             "-Wextra",
             "-Wconversion",
+            // glibc's CPU_SET/CPU_ISSET macros assign their `int cpu` argument to a size_t
+            // inside the macro, which -Wconversion's sign half flags at every call site. That
+            // is the libc macro, not the lifted code; every other narrowing stays an error.
+            "-Wno-sign-conversion",
             "-Wformat=2",
             "-Werror",
             "-pthread",
@@ -276,7 +280,10 @@ fn pin_cores_c_matches_the_rust_authority() {
         c.push_str(&format!("\t{{{}, {}}},\n", c_string(a), c_string(b)));
     }
     c.push_str(
-        "};\nint main(void)\n{\n\tfor (size_t i = 0; i < sizeof(V) / sizeof(V[0]); i++) {\n\
+        "};\nint main(void)\n{\n\t/* the block's thread-side functions are exercised by the other gates */\n\
+         \t(void)&genlock_pin_render_tick_thread;\n\t(void)&genlock_tick_pin_sleep_begin;\n\
+         \t(void)&genlock_tick_pin_sleep_end;\n\
+         \tfor (size_t i = 0; i < sizeof(V) / sizeof(V[0]); i++) {\n\
          \t\tcpu_set_t out;\n\t\tgenlock_render_tick_pin_set(V[i][0], V[i][1], &out);\n\
          \t\tprint_set(\"PIN\", &out);\n\t}\n\treturn 0;\n}\n",
     );
