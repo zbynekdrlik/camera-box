@@ -10,11 +10,10 @@
 # OBS. The tooling programs its own development scene, which holds the production scene as a
 # nested scene source (same pixels, the same warm `NDI 2ME PGM` receiver, the same 911004 burn),
 # and EVENT mode never touches the stream program (the owner cuts to it himself). The two names are
-# declared ONCE here
-# (the python defaults in scripts/obs_phase2.py are pinned to these by a pytest); recording-e2e.sh
+# declared ONCE here (the python defaults in scripts/obs_phase2.py are pinned to these by a pytest); recording-e2e.sh
 # and rig-mode.sh derive their STREAM_PROG_SCENE default from them. Owner hard rule 27.9.2026,
 # verbatim: "nemas ti nikdy v stream obs davat do programu scenu PRO!!!!!" -- the production scene
-# is only ever NESTED, never programmed (obs_phase2.py refuses it).
+# is only ever NESTED, never put on program or preview (obs_phase2.py refuses it).
 #
 #   stream_dev_scene_ensure  SCRIPTS_DIR HOST PASSWORD DEV_SCENE PRODUCTION_SCENE
 #       -> obs_phase2.py dev-scene: creates the development scene and its nested production-scene

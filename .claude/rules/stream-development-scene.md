@@ -34,8 +34,8 @@ paths:
 - Code layout: `scripts/stream_dev_scene.py` is the PURE module (the seeder decision + apply and
   the swap preview re-assert; `rpc` injected; it never selects the program, pinned). `obs_phase2.py`
   wires the CLI and imports it LAZILY (inside `dev-scene`, and in a cut off `PRO`): setup-imag.sh and
-  setup-strih.sh install `obs_phase2.py` ALONE on the boxes, where no `PRO` scene exists (pinned by a
-  pytest running a lone copy).
+  setup-strih.sh install `obs_phase2.py` ALONE on the boxes, where no `PRO` scene exists. Pinned: a
+  lone copy's CLI loads, and a non-`PRO` cut never imports the module.
 
 ## The guard — `obs_phase2._rpc` refuses `PRO`
 
@@ -50,16 +50,21 @@ the stream box has a `PRO` scene).
   saved `prev_scene`/`prev_preview` of `PRO` is skipped with a named line ("never programs the
   production scene"), the program stays on `Development`, and the rest of the restore (latency,
   pins, preload, probe-input idle) still runs. An operator scene (`PRE`...) is still restored.
-- The guard also refuses a `sceneUuid`-only selection (a uuid would slip past a name check).
+- The guard also refuses ANY selecting request that carries a `sceneUuid` (obs-websocket resolves
+  the uuid before the name, so a harmless name + `PRO`'s uuid would slip past a name check).
 - Studio Mode swap: with swap mode on (the OBS default), a cut FROM `PRO` to `Development` makes OBS
   put the old program (`PRO`) into the PREVIEW when the transition ends -- a side effect of our own
   request. `switch` and `prod-scene` therefore run `_keep_forbidden_scene_out_of_preview` when (and
   only when) the program they leave is `PRO`: `stream_dev_scene.reassert_stale_preview` follows the
-  OBSERVED transition end (`GetCurrentSceneTransitionCursor` to 1.0, a 1 s start timeout for a stale
-  1.0 or a cut, then `OBS_PREVIEW_SWAP_MARGIN_S` 1.5 s, a 30 s cap; never a configured duration --
-  a stinger reports none) and moves a `PRO` preview to the scene just programmed. It only ever writes
-  that scene; an operator's own preview is untouched. Any other cut (the #312 strih sweep) sends no
-  preview request at all.
+  OBSERVED transition end (`GetCurrentSceneTransitionCursor` to 1.0; a cut reads 1.0 at once, so a
+  1 s start timeout; a failed read mid-transition keeps polling), waits out a per-scene transition
+  OVERRIDE of the target as a minimum (`GetSceneSceneTransitionOverride`; the cursor only sees the UI
+  transition), then `OBS_PREVIEW_SWAP_MARGIN_S` 1.5 s, polling every 50 ms under a 30 s poll cap;
+  never a configured UI duration (a stinger reports none). It moves a `PRO` preview to the scene
+  just programmed and only ever writes that scene; a preview that is not `PRO` is left alone. It is
+  REACTIVE: after OBS's swap, `PRO` can sit in the preview for up to one poll plus the request /
+  Qt-queue delay. Any other cut (the #312 strih sweep) sends no preview request and does not import
+  the module (pinned).
 
 ## The seeder — `obs_phase2.py dev-scene` (bash: `stream_dev_scene_ensure`)
 

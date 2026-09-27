@@ -88,6 +88,18 @@ def _transition_cursor(rpc, ws):
     return None if value is None else float(value)
 
 
+def _override_min_wait_s(rpc, ws, target, cap_s):
+    """How long a per-scene transition OVERRIDE of *target* forces the wait: its duration in seconds,
+    the whole *cap_s* when the override has no duration (a fixed transition such as a stinger), or 0
+    when there is no override. GetCurrentSceneTransitionCursor reports the UI transition, never the
+    override, so the cursor alone cannot see its end."""
+    ov = rpc(ws, "GetSceneSceneTransitionOverride", {"sceneName": target}, ignore_err=True)
+    if not ov.get("transitionName"):
+        return 0.0
+    duration_ms = ov.get("transitionDuration")
+    return cap_s if duration_ms is None else float(duration_ms) / 1000.0
+
+
 def reassert_stale_preview(rpc, ws, stale_scene, target, margin_s, poll_s, start_timeout_s=1.0,
                            cap_s=30.0, sleep=time.sleep, now=time.monotonic):
     """Keep *stale_scene* out of the Studio Mode PREVIEW after we cut program to *target*.
@@ -98,20 +110,23 @@ def reassert_stale_preview(rpc, ws, stale_scene, target, margin_s, poll_s, start
     scene would therefore leave the production scene in the preview as a side effect of OUR request
     (owner hard rule 27.9.2026: never program or preview it). Every poll that shows *stale_scene* in
     the preview moves it to *target* -- the scene the caller just programmed; nothing else is ever
-    written, and an operator's own preview is left alone.
+    written. A preview that is not *stale_scene* is left alone. The fix is reactive: after OBS's swap
+    the stale scene can sit in the preview for up to one poll plus the request/queue delay.
 
-    The end is OBSERVED, never taken from a configured duration (a stinger is a FIXED transition,
-    GetCurrentSceneTransition reports no duration for it; a per-scene override is not reported):
-    GetCurrentSceneTransitionCursor below 1.0 = running; 1.0 = ended once this transition was seen
-    running or *start_timeout_s* passed (right after the request the cursor can still read the
-    previous transition's 1.0, and a cut is 1.0 at once). No cursor -> the margin alone. Then
-    *margin_s*; bounded by *cap_s*; never a busy loop; a failed preview set fails loud. Returns how
-    many times it moved the preview."""
+    The end is OBSERVED, never taken from the UI transition's configured duration (a stinger is a
+    FIXED transition and reports none): GetCurrentSceneTransitionCursor below 1.0 = running; 1.0 =
+    ended once this transition was seen running or *start_timeout_s* passed (a cut reads 1.0 at
+    once). A failed cursor read before the transition was seen running = the margin alone; after it
+    was seen running the loop keeps polling. A per-scene transition override of *target* is not
+    visible to the cursor, so its duration is waited out as a minimum. Then *margin_s*; the POLL loop
+    is capped at *cap_s* (each request keeps its own obs_phase2 deadline); never a busy loop; a
+    failed preview set fails loud. Returns how many times it moved the preview."""
     studio = bool(rpc(ws, "GetStudioModeEnabled", ignore_err=True).get("studioModeEnabled"))
     if not studio or not stale_scene or stale_scene == target:
         return 0
     moved = 0
     t0 = now()
+    min_end = t0 + _override_min_wait_s(rpc, ws, target, cap_s)
     started = False
     end_at = None
     while True:
@@ -124,11 +139,13 @@ def reassert_stale_preview(rpc, ws, stale_scene, target, margin_s, poll_s, start
         if end_at is None:
             cursor = _transition_cursor(rpc, ws)
             if cursor is None:
-                end_at = t + max(0.0, margin_s)
+                if not started:
+                    end_at = t + max(0.0, margin_s)
             elif cursor < 1.0:
                 started = True
             elif started or t - t0 >= start_timeout_s:
                 end_at = t + max(0.0, margin_s)
-        if (end_at is not None and t >= end_at) or t - t0 >= cap_s:
+        done = end_at is not None and t >= end_at and t >= min_end + max(0.0, margin_s)
+        if done or t - t0 >= cap_s:
             return moved
         sleep(poll_s)

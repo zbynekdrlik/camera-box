@@ -55,10 +55,12 @@ _SCENE_SOURCE_TYPE = "OBS_SOURCE_TYPE_SCENE"
 NEVER_PROGRAM_SCENES = frozenset({"PRO"})
 _SCENE_SELECTING_REQUESTS = ("SetCurrentProgramScene", "SetCurrentPreviewScene")
 # A cut OFF a NEVER_PROGRAM_SCENES scene in Studio Mode makes OBS's swap put that scene into the
-# preview when the transition ends; the re-assert (scripts/stream_dev_scene.py) keeps it out, until
-# the observed transition end plus this margin, polling at this cadence.
+# preview when the transition ends; the re-assert (scripts/stream_dev_scene.py) moves it out,
+# until the observed transition end (and any per-scene override) plus this margin, polling at this
+# cadence. It is reactive: the scene can sit in the preview for up to one poll plus the request /
+# Qt-queue delay before it is moved.
 PREVIEW_SWAP_MARGIN_S = float(os.environ.get("OBS_PREVIEW_SWAP_MARGIN_S", "1.5"))
-PREVIEW_POLL_S = 0.25
+PREVIEW_POLL_S = 0.05
 
 
 class ForbiddenSceneError(RuntimeError):
@@ -71,10 +73,12 @@ def _refuse_forbidden_scene(rtype, rdata):
     if rtype not in _SCENE_SELECTING_REQUESTS:
         return
     scene = (rdata or {}).get("sceneName")
-    if not scene and (rdata or {}).get("sceneUuid"):
+    if "sceneUuid" in (rdata or {}):
+        # obs-websocket resolves sceneUuid BEFORE sceneName, so a harmless name + the production
+        # scene's uuid would pass a name check: selecting requests may not carry a uuid at all.
         raise ForbiddenSceneError(
-            f"{rtype} by sceneUuid refused: select scenes by sceneName so the production-scene "
-            f"guard can check it (issue 1380)"
+            f"{rtype} with a sceneUuid refused: select scenes by sceneName only so the "
+            f"production-scene guard can check it (issue 1380)"
         )
     if scene in NEVER_PROGRAM_SCENES:
         raise ForbiddenSceneError(
