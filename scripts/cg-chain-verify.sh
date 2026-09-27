@@ -54,7 +54,7 @@ INTERVAL_S=300
 CSV_PATH=""
 REPORT_ONLY=0
 
-usage() { sed -n '2,39p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,41p' "${BASH_SOURCE[0]}"; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in

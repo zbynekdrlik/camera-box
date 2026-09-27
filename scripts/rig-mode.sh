@@ -1430,7 +1430,7 @@ _bool_or_failclosed() {
   esac
 }
 
-# event_mode_assert -> #722 EVENT-mode CONTRACT: gather every item's facts (9 since issue 1380) (the fleet ssh sweep
+# event_mode_assert -> #722 EVENT-mode CONTRACT: gather all 8 items' facts (the fleet ssh sweep
 # above + the existing/new OBS-WS tools: obs_burn_filter.py check, obs_phase2.py
 # record/stream-status/latency-check, set-ndi-mapping.py --verify-only,
 # qr_screenshot_check.py), hand them to scripts/event_assert.py for the pure decision +
@@ -1454,7 +1454,7 @@ event_mode_assert() {
   # outcomes).
   EVENT_ASSERT_DISCORD_MSG_PATH="$(mktemp /tmp/event-assert-discord.XXXXXX.txt)"
 
-  echo "[#722] EVENT-mode CONTRACT -- gathering the assert-phase facts (9 items, issue 1380 added the stream program scene):"
+  echo "[#722] EVENT-mode CONTRACT -- gathering the 8-item assert-phase facts (issue 1380: the stream program scene is a report-only line):"
 
   # --- item 1 + part of item 5: fleet paint-process / service / stray-unit sweep -------------
   # #827/#1135: the sweep target list is the RESOLVED source box + cam2(painter) + every camera in

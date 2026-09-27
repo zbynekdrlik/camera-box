@@ -9,7 +9,8 @@
 # Owner request 27.9.2026: development never programs the owner's production scene on the stream
 # OBS. The tooling programs its own development scene, which holds the production scene as a
 # nested scene source (same pixels, the same warm `NDI 2ME PGM` receiver, the same 911004 burn),
-# and EVENT mode puts the production scene back on program. The two names are declared ONCE here
+# and EVENT mode never touches the stream program (the owner cuts to it himself). The two names are
+# declared ONCE here
 # (the python defaults in scripts/obs_phase2.py are pinned to these by a pytest); recording-e2e.sh
 # and rig-mode.sh derive their STREAM_PROG_SCENE default from them. Owner hard rule 27.9.2026,
 # verbatim: "nemas ti nikdy v stream obs davat do programu scenu PRO!!!!!" -- the production scene
@@ -26,7 +27,7 @@
 #          that scene to exist already.
 #   stream_program_scene_read SCRIPTS_DIR HOST PASSWORD
 #       -> prints the current program scene name, or NOTHING when OBS cannot be read. ALWAYS 0 --
-#          the caller's decision treats an empty read as a failure (fail closed), never this helper.
+#          the caller prints it as a report-only line (an empty read = "unreadable").
 
 # shellcheck disable=SC2034  # consumed by the sourcing scripts (recording-e2e.sh, rig-mode.sh)
 STREAM_DEV_SCENE_DEFAULT="Development"

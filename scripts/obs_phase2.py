@@ -54,6 +54,11 @@ _SCENE_SOURCE_TYPE = "OBS_SOURCE_TYPE_SCENE"
 # every obs_phase2 request passes through, so ignore_err never bypasses it.
 NEVER_PROGRAM_SCENES = frozenset({"PRO"})
 _SCENE_SELECTING_REQUESTS = ("SetCurrentProgramScene", "SetCurrentPreviewScene")
+# A cut OFF a NEVER_PROGRAM_SCENES scene in Studio Mode makes OBS's swap put that scene into the
+# preview when the transition ends; the re-assert (scripts/stream_dev_scene.py) keeps it out, until
+# the observed transition end plus this margin, polling at this cadence.
+PREVIEW_SWAP_MARGIN_S = float(os.environ.get("OBS_PREVIEW_SWAP_MARGIN_S", "1.5"))
+PREVIEW_POLL_S = 0.25
 
 
 class ForbiddenSceneError(RuntimeError):
@@ -63,8 +68,15 @@ class ForbiddenSceneError(RuntimeError):
 def _refuse_forbidden_scene(rtype, rdata):
     """issue 1380 (pure): raise ForbiddenSceneError when *rtype* selects a program/preview scene in
     NEVER_PROGRAM_SCENES. The owner cuts to the production scene himself; our tooling never does."""
+    if rtype not in _SCENE_SELECTING_REQUESTS:
+        return
     scene = (rdata or {}).get("sceneName")
-    if rtype in _SCENE_SELECTING_REQUESTS and scene in NEVER_PROGRAM_SCENES:
+    if not scene and (rdata or {}).get("sceneUuid"):
+        raise ForbiddenSceneError(
+            f"{rtype} by sceneUuid refused: select scenes by sceneName so the production-scene "
+            f"guard can check it (issue 1380)"
+        )
+    if scene in NEVER_PROGRAM_SCENES:
         raise ForbiddenSceneError(
             f"{rtype} to '{scene}' refused: our tooling never programs the production scene "
             f"(owner hard rule 27.9.2026, issue 1380); development uses its own scene"
@@ -397,6 +409,23 @@ def _dev_scene_module():
         sys.path.insert(0, here)
     import stream_dev_scene  # noqa: E402
     return stream_dev_scene
+
+
+def _keep_forbidden_scene_out_of_preview(ws, host, left_scene, target):
+    """issue 1380: after cutting program from *left_scene* to *target*, keep *left_scene* out of the
+    Studio Mode preview when it is a NEVER_PROGRAM_SCENES scene (OBS's swap would put it there when
+    the transition ends). No-op -- no request at all -- for any other scene, so the #312 strih sweep
+    is untouched."""
+    if left_scene not in NEVER_PROGRAM_SCENES or left_scene == target:
+        return
+    moved = _dev_scene_module().reassert_stale_preview(
+        _rpc, ws, left_scene, target, margin_s=PREVIEW_SWAP_MARGIN_S, poll_s=PREVIEW_POLL_S,
+        sleep=time.sleep, now=time.monotonic)
+    if moved:
+        sys.stderr.write(
+            f"[obs] {host}: issue 1380 preview '{left_scene}' -> '{target}' after the Studio Mode "
+            f"swap (our tooling never leaves the production scene on program or preview)\n"
+        )
 
 
 def _imag_scenes_module():
@@ -1861,6 +1890,7 @@ def prod_scene(a):
         # not affect the recorded PROGRAM output).
         if studio:
             _rpc(ws, "SetCurrentPreviewScene", {"sceneName": target}, ignore_err=True)
+        _keep_forbidden_scene_out_of_preview(ws, a.host, curr_prog, target)
 
         # #183: FORCE the recorded prod genlock input to the test preload (1) so the run
         # measures the TRUE genlock hop (~33ms), not the prod audio-sync delay (preload≈31 ≈
@@ -2373,6 +2403,7 @@ def switch(a):
         if current != a.program_scene:
             _rpc(ws, "SetCurrentProgramScene", {"sceneName": a.program_scene})
         switch_ns = time.time_ns()  # the boundary — right after the switch lands
+        _keep_forbidden_scene_out_of_preview(ws, a.host, current, a.program_scene)
         # Same POLLED non-black self-check prod_scene uses (shared helper) — a dead/black scene
         # fails loud instead of silently recording a black, all-undecodable segment.
         # issue 1380: `--prod-floor` = the #677 production floor (the development program is real,

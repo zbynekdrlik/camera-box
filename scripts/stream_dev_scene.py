@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""issue 1380 -- the stream OBS DEVELOPMENT scene: the seeder decision + apply. Pure given an
+"""issue 1380 -- the stream OBS DEVELOPMENT scene: the seeder decision + apply, and the Studio Mode
+swap re-assert that keeps the production scene out of the preview after our own cut. Pure given an
 injected obs-websocket `rpc(ws, request_type, data=None, ignore_err=False)`
 (scripts/obs_phase2.py passes its own `_rpc` and owns the connection + the CLI).
 
@@ -20,6 +21,7 @@ The two scene names are declared in scripts/lib/stream-dev-scene.sh; the constan
 to those by tests/python/test_stream_dev_scene_1380.py.
 """
 import collections
+import time
 
 STREAM_DEV_SCENE = "Development"
 STREAM_PRODUCTION_SCENE = "PRO"
@@ -78,3 +80,55 @@ def ensure_dev_scene(rpc, ws, dev_scene, nested_scene):
             rpc(ws, "CreateSceneItem", {
                 "sceneName": dev_scene, "sourceName": nested_scene, "sceneItemEnabled": True})
     return plan
+
+
+def _transition_cursor(rpc, ws):
+    """The current scene transition's cursor (0.0..1.0), or None when OBS cannot report it."""
+    value = rpc(ws, "GetCurrentSceneTransitionCursor", ignore_err=True).get("transitionCursor")
+    return None if value is None else float(value)
+
+
+def reassert_stale_preview(rpc, ws, stale_scene, target, margin_s, poll_s, start_timeout_s=1.0,
+                           cap_s=30.0, sleep=time.sleep, now=time.monotonic):
+    """Keep *stale_scene* out of the Studio Mode PREVIEW after we cut program to *target*.
+
+    In Studio Mode with swap mode on (the OBS default, `SwapScenesMode`), SetCurrentProgramScene is
+    a transition, and when it ENDS OBS puts the OLD program into the preview
+    (OBSBasic_Transitions.cpp TransitionStopped). A cut from the production scene to the development
+    scene would therefore leave the production scene in the preview as a side effect of OUR request
+    (owner hard rule 27.9.2026: never program or preview it). Every poll that shows *stale_scene* in
+    the preview moves it to *target* -- the scene the caller just programmed; nothing else is ever
+    written, and an operator's own preview is left alone.
+
+    The end is OBSERVED, never taken from a configured duration (a stinger is a FIXED transition,
+    GetCurrentSceneTransition reports no duration for it; a per-scene override is not reported):
+    GetCurrentSceneTransitionCursor below 1.0 = running; 1.0 = ended once this transition was seen
+    running or *start_timeout_s* passed (right after the request the cursor can still read the
+    previous transition's 1.0, and a cut is 1.0 at once). No cursor -> the margin alone. Then
+    *margin_s*; bounded by *cap_s*; never a busy loop; a failed preview set fails loud. Returns how
+    many times it moved the preview."""
+    studio = bool(rpc(ws, "GetStudioModeEnabled", ignore_err=True).get("studioModeEnabled"))
+    if not studio or not stale_scene or stale_scene == target:
+        return 0
+    moved = 0
+    t0 = now()
+    started = False
+    end_at = None
+    while True:
+        preview = rpc(ws, "GetCurrentPreviewScene", ignore_err=True).get(
+            "currentPreviewSceneName")
+        if preview == stale_scene:
+            rpc(ws, "SetCurrentPreviewScene", {"sceneName": target})
+            moved += 1
+        t = now()
+        if end_at is None:
+            cursor = _transition_cursor(rpc, ws)
+            if cursor is None:
+                end_at = t + max(0.0, margin_s)
+            elif cursor < 1.0:
+                started = True
+            elif started or t - t0 >= start_timeout_s:
+                end_at = t + max(0.0, margin_s)
+        if (end_at is not None and t >= end_at) or t - t0 >= cap_s:
+            return moved
+        sleep(poll_s)

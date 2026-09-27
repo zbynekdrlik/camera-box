@@ -31,10 +31,11 @@ paths:
   (`STREAM_DEV_SCENE_DEFAULT` / `STREAM_PRODUCTION_SCENE_DEFAULT`). `scripts/stream_dev_scene.py`
   (`STREAM_DEV_SCENE` / `STREAM_PRODUCTION_SCENE`) and `obs_phase2.NEVER_PROGRAM_SCENES` are pinned
   to them by pytests. Never retype `"PRO"` or `"Development"` in a consumer.
-- Code layout: `scripts/stream_dev_scene.py` is the PURE seeder (decision + apply, `rpc` injected;
-  no program/preview writer, pinned). `obs_phase2.py` wires the CLI and imports it LAZILY inside
-  `dev-scene` only: setup-imag.sh and setup-strih.sh install `obs_phase2.py` ALONE on the boxes
-  (pinned by a pytest running a lone copy).
+- Code layout: `scripts/stream_dev_scene.py` is the PURE module (the seeder decision + apply and
+  the swap preview re-assert; `rpc` injected; it never selects the program, pinned). `obs_phase2.py`
+  wires the CLI and imports it LAZILY (inside `dev-scene`, and in a cut off `PRO`): setup-imag.sh and
+  setup-strih.sh install `obs_phase2.py` ALONE on the boxes, where no `PRO` scene exists (pinned by a
+  pytest running a lone copy).
 
 ## The guard — `obs_phase2._rpc` refuses `PRO`
 
@@ -49,9 +50,16 @@ the stream box has a `PRO` scene).
   saved `prev_scene`/`prev_preview` of `PRO` is skipped with a named line ("never programs the
   production scene"), the program stays on `Development`, and the rest of the restore (latency,
   pins, preload, probe-input idle) still runs. An operator scene (`PRE`...) is still restored.
-- Residual, not our write: in Studio Mode with swap mode on (the OBS default), a cut FROM `PRO` to
-  `Development` makes OBS itself put the old program (`PRO`) into the PREVIEW when the transition
-  ends. That is harmless (preview is not on air) and is OBS behavior, not a tool setting the preview.
+- The guard also refuses a `sceneUuid`-only selection (a uuid would slip past a name check).
+- Studio Mode swap: with swap mode on (the OBS default), a cut FROM `PRO` to `Development` makes OBS
+  put the old program (`PRO`) into the PREVIEW when the transition ends -- a side effect of our own
+  request. `switch` and `prod-scene` therefore run `_keep_forbidden_scene_out_of_preview` when (and
+  only when) the program they leave is `PRO`: `stream_dev_scene.reassert_stale_preview` follows the
+  OBSERVED transition end (`GetCurrentSceneTransitionCursor` to 1.0, a 1 s start timeout for a stale
+  1.0 or a cut, then `OBS_PREVIEW_SWAP_MARGIN_S` 1.5 s, a 30 s cap; never a configured duration --
+  a stinger reports none) and moves a `PRO` preview to the scene just programmed. It only ever writes
+  that scene; an operator's own preview is untouched. Any other cut (the #312 strih sweep) sends no
+  preview request at all.
 
 ## The seeder — `obs_phase2.py dev-scene` (bash: `stream_dev_scene_ensure`)
 
@@ -83,8 +91,8 @@ the stream box has a `PRO` scene).
 - The EVENT contract (#722, `event_assert.py`) has NO stream-program item. `event_mode_assert`
   prints the current program scene as a REPORT-ONLY line; it is never a FAIL and never a switch.
 - History: an earlier cut of this ticket made EVENT restore `PRO` (with `--only-from`,
-  `--black-report-only`, `--replace-preview` and a Studio Mode swap preview re-assert). The owner's
-  rule removed all of it; do not bring any of it back.
+  `--black-report-only`, `--replace-preview`). The owner's rule removed all of it; do not bring any
+  of it back.
 
 ## The retired stream probe
 

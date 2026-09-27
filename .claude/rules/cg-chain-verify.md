@@ -50,7 +50,8 @@ match, never let them drift.** Do not re-derive thresholds in bash from scratch.
   does NOT fail the run (the pure `cg_chain_hop_absent_ok`, stream only); an unreadable stream log
   still FAILs. A run where EVERY requested source is ABSENT verified nothing: `OVERALL: NO-DATA`,
   exit 3 (a typo in `CG_CHAIN_STREAM_SRC` never looks like success). rig-health-audit runs only
-  `--hops strih` and counts any ABSENT as `sources_absent`. Pinned by
+  `--hops strih` (strih is never ABSENT, so its `sources_absent` count stays 0; the counter is there
+  for a run that asks for the stream hop). Pinned by
   `tests/python/test_cg_chain_verify_hops_1380.py`.
 - The log tail per hop is supplied explicitly so the tool is self-contained and ships no untested
   ssh/MCP default: `CG_CHAIN_<HOP>_LOG=<file>` (tests; and the supervisor's path for cg-obs — paste
