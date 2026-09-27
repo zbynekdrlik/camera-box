@@ -6,7 +6,12 @@ paths:
   - "src/probe/av_sync_recording.rs"
   - "scripts/lib/marker-decodability-preflight.sh"
   - "vendor/av-sync-dock/src/camera-box-audio.hpp"
+  - "vendor/av-sync-dock/src/camera-box-channel-pick.hpp"
   - "vendor/av-sync-dock/test/camera-box-selftest.cpp"
+  - "vendor/av-sync-dock/test/channel-pick-parity.cpp"
+  - "src/av_sync_dock_channels.rs"
+  - "tests/qpsk_channel_pick_parity_1367.rs"
+  - "tests/fixtures/qpsk_channel_pick_parity.tsv"
 ---
 
 # QPSK A/V-sync marker demod — the word's full redundancy + Tier-0 verification of a gate change
@@ -62,11 +67,29 @@ real 4 s clip the old `-ac 1` path read `preamble_screens 9212, cluster 2, crc_o
 while L alone read `653 / cluster 7 / crc_ok 7` and R alone `8 / cluster 8 / crc_ok 8`, both OK. The owner
 ruled the skew is not his to fix — the gate must be robust to it.
 - **The ONE pick:** `src/qpsk_channel_select.rs` (crate root, default features) — `decode_best_channel`
-  runs the unchanged demod + the #1324 `consistency_cluster_size` on EACH channel and keeps the channel
-  with the LARGEST cluster; ties go to the LOWEST index (deterministic); a mono track is the identity
-  (chosen 0, byte-identical report). The `[4b3/8]` preflight (`--qpsk-probe`), `--av-sync` and the fused
-  all-cambox A/V gate (`decode_av_marker_inputs`) all decode through it; the offset is paired from the
-  CHOSEN channel's markers only (a skew can never average two arrival times).
+  runs the unchanged demod + the #1324 `consistency_cluster_size` on EACH channel, and
+  `pick_marker_channel` keeps the LOWEST-index channel whose cluster clears the decodability floor;
+  when none clears it, the largest cluster, ties to the lowest (design 5856569255); a mono track is
+  the identity (chosen 0, byte-identical report). The `[4b3/8]` preflight (`--qpsk-probe`),
+  `--av-sync`, the fused all-cambox A/V gate (`decode_av_marker_inputs`) and the live dock all apply
+  it; the offset is paired from the CHOSEN channel's markers only (a skew can never average two
+  arrival times).
+- **Why floor-first, not the largest cluster:** R arrives 10.17 ms after L. When both channels
+  decode (the live 4 s clip: L 7, R 8), the largest-cluster winner is decided by one false decode
+  more or less in a strictly-consecutive chain, so the chosen channel, and with it the measured
+  offset (~10 ms, a third of the ±30 ms band; ~4 ms after the 0.4 loop gain), could flip between
+  runs and read as drift. Both channels clear the same floor, so preferring the lower one costs
+  nothing. On the 2 s fixture only R clears (L 3), so R is still chosen there.
+- **The floor is ONE value:** `qpsk_probe_decision::DEFAULT_MIN_CLUSTERS` (4) is the
+  `--qpsk-min-clusters` clap default, the `--av-sync` pick floor and the dock's
+  `CB_MARKER_MIN_CLUSTERS`; the shell `marker_decodability_default_min_clusters` is pinned to it by
+  `tests/qpsk_channel_pick_parity_1367.rs`. The probe passes the operator's `--qpsk-min-clusters`
+  to the pick, so its pick and its verdict use the same floor.
+- **One rule, not always one channel:** the preflight picks with the operator's floor,
+  `--av-sync` / the fused gate with the default; the offline paths judge a channel over their whole
+  window (25 s probe capture, ~300 s recording), the dock over a rolling 25 s window. Under a floor
+  override or with a channel hovering at the floor they can choose different channels ~10 ms
+  apart, so compare `chosen_channel` before comparing offsets.
 - **Level and silence are judged over the WHOLE track, decodability on the chosen channel:** the probe's
   `peak_dbfs` covariate and the #748 `audio_preamble_screens_passed` are the MAX over channels, so a
   silent channel 0 never reads "the chain is silent" while channel 1 carries audio.
@@ -84,25 +107,75 @@ ruled the skew is not his to fix — the gate must be robust to it.
   `tracing_subscriber::fmt()`, which writes to STDOUT, and the preflight captures the probe's
   stdout (2>&1) and greps it; the probe-gated test takes the last `{` line. The pick is carried in
   the JSON line instead. `--av-sync` logs its pick in the info line printed AFTER its JSON.
-- **Which channel wins can move the offset by ~10 ms** (R arrives later than L). Carried as
-  `audio_channel_pick` in the `--av-sync` JSON and the fused `all_cambox_av_sync` block — read it when
-  comparing runs.
+- **Which channel wins moves the offset by ~10 ms** (R arrives later than L), which is why the
+  rule is floor-first. The pick is carried as `audio_channel_pick` in the `--av-sync` JSON and the
+  fused `all_cambox_av_sync` block — read it when comparing runs; a change of `chosen_channel`
+  between two runs now means channel 0 crossed the floor.
 - **Real-signal fixture:** `tests/fixtures/mbc-stereo-skew-1367/mbc-stereo-2s.wav` (the first 2 s of
   that recording): downmix cluster 0, L 3 (below the floor of 4), R 4 — so both a downmix and a fixed
   "always channel 0" pick FAIL there and only the per-channel pick passes. Tier-0 proof: a plain
   `rustc --test` crate that `#[path]`-includes the real `qpsk_marker` / `qpsk_probe_decision` /
   `qpsk_channel_select` (serde derives sed-stripped) + the real test files, with
   `CARGO_MANIFEST_DIR` set for the fixture path; `clippy-driver --test -D warnings` on the same crate.
-- **The pick key is the longest strictly-consecutive run**, so on a long recording where both channels
-  decode, a single false decode can decide which one wins and the offset can move by ~10 ms between
-  runs (worst case ~10 ms raw, ~4 ms after the 0.4 loop gain, inside the ±30 ms band). The design
-  keeps "largest cluster, ties lowest"; a stability refinement (prefer the lowest channel that clears
-  the floor, or hold the apply when `chosen_channel` changes) is proposed on issue 1367, comment
-  5856387351. On the rig L also carries a low-frequency hum (many more preamble screens than R), so
-  R is expected to win consistently.
 - **Not yet re-measured:** the 16.9 drowned-chain recordings were never re-run per channel (they are
   not on dev1). Per-channel reads of two local noise-flooded stereo captures (17 s and 120 s, 18.9)
   stayed at cluster 2, below the floor of 4.
-- **Out of scope / still mono:** the live dock (`vendor/av-sync-dock`, `st_raw_audio_camera_box`)
-  still averages all channels before its streaming decoder, so it is exposed to the same skew (not
-  measured on the dock).
+
+## The live dock applies the same rule per channel (issue 1367, design 5856569255)
+`st_raw_audio_camera_box` (`vendor/av-sync-dock/src/sync-test-output.cpp`) no longer averages the
+channels. It hands every channel's plane to `camerabox::ChannelMarkerPicker`
+(`vendor/av-sync-dock/src/camera-box-channel-pick.hpp`, split out of the over-budget
+`camera-box-audio.hpp`) and pairs only the markers the picker returns.
+- **The picker:** one `StreamingMarkerDecoder` per channel; each channel's decoded markers kept for
+  the last `CB_CHANNEL_PICK_WINDOW_S` (25 s, the #1324 calibration window = the shell
+  `marker_decodability_default_probe_secs`); each channel's cluster recomputed only when its window
+  changes (a new marker, a window eviction, or the cap); `cb_pick_marker_channel` re-applied after
+  every push; only the chosen channel's NEW markers returned. A mono input is the single decoder
+  exactly.
+- **One physical marker is paired once:** on a pick switch the newly chosen channel's copy of the
+  marker the picker returned last (same index, within one dedup gap = 1085 samples, wider than the
+  488-sample L/R skew) is dropped. Without it (review round 1) the real 2 s fixture returned markers
+  155 and 185 twice, 10.17 ms apart, both into the offset cluster. A different index inside the gap
+  is still returned.
+- **The history is capped:** each channel keeps at most `CB_CHANNEL_PICK_MAX_MARKERS` (256, the
+  newest). The cluster is O(n²) on the OBS audio thread; a decode flood (one marker per dedup gap)
+  measured ~1.4 ms per recompute uncapped. A real chain has ~8 markers in 25 s.
+- **Consequences to expect:** a marker a channel decodes while another channel is chosen feeds
+  nothing, so when the marker rides only on R its first two markers are not paired (a chain needs
+  three). A channel that stops decoding hands over once its markers age out of the window. The
+  offset cluster is NOT reset on a hand-over; the ~10 ms step between L and R walks through the
+  180 s offset window.
+- **Diag line:** `preambles/crc_ok/crc_fail` are now SUMMED over the channels (monotonic, so the
+  staleness detector and the pairing watchdog keep working; a mono input reads its one decoder);
+  `marker_channel=<c> channel_clusters=<a,b>` are appended after `publish_max_us` (0-based channel).
+  A channel-count change restarts the decode and `cb_audio_pushed`. `reset_window()` (the pairing
+  recovery) resets every decoder but keeps the histories and the pick.
+- **The Rust reference** is `src/av_sync_dock_channels.rs` (`ChannelMarkerPicker::dock`).
+  `tests/qpsk_channel_pick_parity_1367.rs` compiles `vendor/av-sync-dock/test/channel-pick-parity.cpp`
+  with g++ and compares it with the Rust: the pick over the shared table
+  `tests/fixtures/qpsk_channel_pick_parity.tsv`, the cluster over 400 generated + crafted (even-count
+  median, long equal-timestamp groups) + the real fixture's decodes, and whole streaming transcripts
+  push by push (real fixture, both clear, R only, hand-over, three channels, mono, the switch with
+  and without a same-index copy, a decode flood past the cap, the window boundary via the tool's
+  optional `<window_samples>` argument). Thirteen C++ mutations (floor `>`, tie to highest, lower
+  median, unstable sort, no missed-marker branch, return channel 0, evict `<=`, window 20, stats of
+  one channel, last modal step, no switch dedup, dedup ignoring the index, cap off by one) are all
+  caught. A mirror mutation that BOTH sides share is invisible to parity: the double return was one,
+  so every behaviour also has its own Rust unit test. Each parity test compiles the tool into its
+  own temp dir and removes it on drop.
+- **The glue:** `st_raw_audio_camera_box` calls `cb_ensure_audio_picker` (one picker per channel
+  layout) and `cb_audio_diag_tick` (the ~10 s staleness / diag line / pairing recovery, split out in
+  review round 1 so the callback stays under ~300 lines).
+- **The glue anchors:** `tests/av_sync_dock_channel_pick_1367.rs` (with the shared
+  `tests/support/cpp_source.rs` helpers, also used by `av_sync_dock_decode_mailbox_1367.rs`) + the
+  pwsh step "Assert dock decodes the marker per channel (issue 1367)" in BOTH windows-genlock
+  workflows, which checks the same things (the pwsh slice keeps comments, so a comment inside
+  `st_raw_audio_camera_box` must never spell `acc +=`, `/ (float)ch`, `std::vector<float> mono`,
+  `mono.data()` or `camerabox::StreamingMarkerDecoder(`).
+- **Tier-0 verify:** the plain-rustc replica above (with the new test files included; add
+  `-A clippy::duplicate_mod` to its clippy-driver run, since two test files there share one
+  `#[path]` module — in the real layout each test file is its own crate), each std-only anchor test
+  also through `clippy-driver --test -D warnings` as its own crate, `g++ -std=c++11 -Wall -Wextra
+  -Werror` on both test programs, and `-fsyntax-only` of `sync-test-output.cpp` with the two
+  stub headers (`.claude/rules/av-sync-dock-decode-worker.md`). The dock change is live only after a
+  FULL-bundle Windows deploy (`.claude/rules/rig-state-inspection.md`).

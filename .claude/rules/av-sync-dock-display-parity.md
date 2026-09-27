@@ -5,6 +5,8 @@ paths:
   - "tests/av_sync_dock_latency_display_*.rs"
   - "tests/av_sync_dock_cpp_mirror_gate.rs"
   - "tests/av_sync_dock_pairing_recover_1153.rs"
+  - "tests/av_sync_dock_channel_pick_1367.rs"
+  - "vendor/av-sync-dock/src/camera-box-channel-pick.hpp"
 ---
 
 # A/V-sync dock display: Rust↔C++ parity seam, which box it locks on, residual pairing
@@ -97,8 +99,9 @@ cluster window is 180 s and `locked` only flips on a push, which needs a decode)
 the input is demonstrably alive (video_decoded AND preambles both advancing — EVENT mode / silence
 stay #1177's domain, never a reset loop). The fire (`cb_apply_pairing_recovery`,
 sync-test-output.cpp, audio thread) resets ALL in-dock pairing state — ring under the mutex, fresh
-cluster, offset history, fresh audit tracker, `StreamingMarkerDecoder::reset_window()`
-(origin-continuous; cumulative stats PRESERVED so the diag counters stay monotonic and BOTH
+cluster, offset history, fresh audit tracker, `ChannelMarkerPicker::reset_window()` (every
+channel's `StreamingMarkerDecoder::reset_window()` since issue 1367; the per-channel pick history is
+kept) (origin-continuous; cumulative stats PRESERVED so the diag counters stay monotonic and BOTH
 counter-advance detectors stay consistent) — drops a stale `cb_lock_state` (+
 `lock_state_changed(false)`), and logs ONE `av-sync-dock: PAIRING-RECOVER` line whose epoch deltas
 DISCRIMINATE the poison class from the OBS log alone: crc_ok near the 1/256 chance floor of the
@@ -106,7 +109,8 @@ preamble delta = the marker WAVEFORM is degraded UPSTREAM of the dock (the reset
 the periodic recover lines ARE the evidence trail for the follow-up); a healthy crc_ok rate with a
 dead ring = in-dock pairing state (which the reset clears). Every in-dock struct otherwise
 self-heals ≤20 s by design — that code-trace is why a 2-hour sticky state implicates the upstream
-audio chain. Non-finite hardening rides along: the mono mixdown skips NaN/Inf per channel and the
+audio chain. Non-finite hardening rides along: each channel has its own decoder (issue 1367 removed
+the mono mixdown, `camera-box-channel-pick.hpp`, so a poisoned channel cannot touch another) and the
 shared decode kernel sanitizes its prefix-sum input (one NaN otherwise kills the whole ~68 ms
 window, on the live AND offline decode paths). Parity-mirrored + selftest-cross-checked like the
 rest of this file; the wiring/anchors are pinned by `tests/av_sync_dock_pairing_recover_1153.rs`.

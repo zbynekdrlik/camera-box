@@ -120,10 +120,13 @@ with the emitter confirmed live before any number is trusted again.
   with R 10.17 ms late; the old `-ac 1` mono sum comb-filtered the two copies into an undecodable
   signal (cluster 2, POLLUTED — the release gate aborted) while each channel alone decoded. The
   extract now keeps every channel and `qpsk_channel_select::decode_best_channel` picks ONE channel
-  (largest self-consistency cluster, ties to the lowest index); the offset pairs only that channel's
-  markers. `--av-sync` JSON carries `audio_channel_pick` {chosen_channel, per_channel[]}. The two
-  channels differ by ~10 ms of arrival, so which channel wins can move the offset by ~10 ms — read
-  `audio_channel_pick.chosen_channel` when comparing runs. Never re-add a downmix
+  (the LOWEST channel whose self-consistency cluster clears the decodability floor of 4, else the
+  largest cluster, ties to the lowest index); the offset pairs only that channel's markers.
+  `--av-sync` JSON carries `audio_channel_pick` {chosen_channel, per_channel[]}. The two channels
+  differ by ~10 ms of arrival, which is why the rule is floor-first: L stays chosen whenever it
+  decodes, so the offset does not flip between runs — still read
+  `audio_channel_pick.chosen_channel` when comparing runs. The live dock applies the same rule per
+  channel (`camera-box-channel-pick.hpp`). Never re-add a downmix
   (`.claude/rules/qpsk-marker-demod.md`).
 
 ## Decode robustness — expect a false-decode FLOOD
