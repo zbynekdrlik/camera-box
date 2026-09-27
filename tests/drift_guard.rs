@@ -1247,6 +1247,24 @@ const GENLOCK_RT_PIN_OK_LINE: &str =
 const GENLOCK_RT_PIN_FAILED_LINE: &str = "14:27:54.392: genlock: could NOT set render-tick thread \
      SCHED_FIFO prio 10 (errno 1 — missing rtprio ulimit grant?) — continuing SCHED_OTHER (#484)\n";
 
+/// Issue 1357: a box with no isolated nohz_full core is not pinned at all, by design — the pin's
+/// one "not pinned" line (obs-video.c genlock_pin_render_tick_thread).
+const GENLOCK_RT_PIN_UNPINNED_LINE: &str = "15:10:15.254: genlock: render-tick thread not pinned: \
+     no isolated cores (isolated=[] nohz_full=[]) -- it runs SCHED_OTHER on the process mask (issue 1357)\n";
+
+#[test]
+fn genlock_rt_pin_parser_reads_the_1357_not_pinned_line_as_unpinned() {
+    let out = run_sourced(
+        "genlock_rt_pin_from_log \"$LOG\"",
+        &[("LOG", GENLOCK_RT_PIN_UNPINNED_LINE)],
+    );
+    assert_eq!(
+        out.trim(),
+        "unpinned",
+        "the issue-1357 not-pinned line must parse as unpinned: {out:?}"
+    );
+}
+
 #[test]
 fn genlock_rt_pin_parser_detects_the_484_success_line() {
     let out = run_sourced(
@@ -4668,6 +4686,27 @@ fn check_imag_report_genlock_rt_pin_ok_when_pin_achieved_572() {
         .find(|l| l.contains("genlock_rt_pin"))
         .unwrap_or_else(|| panic!("no genlock_rt_pin line printed: {out:?}"));
     assert!(line.contains("OK"), "must report OK: {line:?}");
+}
+
+/// Issue 1357: an unpinned render tick on a box with no isolated core is the CORRECT outcome, so the
+/// facet reads OK, never DRIFT (no rtprio grant is expected any more) and never UNKNOWN.
+#[test]
+fn check_imag_report_genlock_rt_pin_ok_when_unpinned_by_design_1357() {
+    let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_UNPINNED_LINE}");
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("LOG", log.as_str())]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("genlock_rt_pin"))
+        .unwrap_or_else(|| panic!("no genlock_rt_pin line printed: {out:?}"));
+    assert!(
+        line.contains("OK") && line.contains("no isolated cores"),
+        "an unpinned tick must report OK with its reason: {line:?}"
+    );
 }
 
 #[test]
