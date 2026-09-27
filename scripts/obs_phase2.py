@@ -3121,13 +3121,12 @@ def dev_scene(a):
 # recording-e2e.sh HOLDS the flag off for the run (connect_on_show_hold) and cleanup() restores it
 # (connect_on_show_restore). The SAME hold takes every always-connected `MV NDI camN` monitor twin OFF
 # THE WIRE for the run (strih_bandwidth_roles.E2E_TWIN_HOLD: genlock off + audio-only; ~58 Mbps each at
-# NDI lowest, so the run measures the program path at the pre-roles strih-lx uplink load). The hold's
-# state file (the held mains + each twin's ORIGINAL settings) is written BEFORE any write, so a run
-# killed mid-hold still leaves restore a complete list; it lives at a STABLE path on the runner
-# (~/.camera-box/connect-on-show-hold.json, recording-e2e.sh), so a re-hold by the NEXT run UNIONS a
-# SIGKILLed run's leftover file and that run's cleanup restores both. A leftover hold is fail-SAFE (the
-# mains stay connected, the twins' multiview cells stay blank) and the next strih OBS launch without a
-# fresh hold marker re-applies the roles anyway.
+# NDI lowest, so the run measures the program path at the pre-roles strih-lx uplink load). The hold /
+# restore / settle protocol and its STABLE state file (~/.camera-box/connect-on-show-hold.json,
+# recording-e2e.sh) live in the sibling scripts/e2e_bandwidth_hold.py; the wrappers below pass it this
+# module's `_rpc` and settle seams at call time. A leftover hold is fail-SAFE (the mains stay connected,
+# the twins' multiview cells stay blank) and the next strih OBS launch without a fresh hold marker
+# re-applies the roles anyway.
 CONNECT_ON_SHOW_KEY = "genlock_connect_on_show"
 GENLOCK_MONITOR_KEY = "genlock_monitor"
 
@@ -3138,7 +3137,7 @@ GENLOCK_MONITOR_KEY = "genlock_monitor"
 # render ticks at 30/60 fps) after the writes and needs two consecutive matching reads; an input fails
 # only once _SETTLE_BUDGET_S has passed AND it had two complete sweeps (a slow WebSocket never fails a
 # write it never re-read). _settle_sleep/_settle_clock are module seams so the pytest drives a fake
-# clock.
+# clock; e2e_bandwidth_hold.await_settled implements the poll.
 _SETTLE_MIN_S = 0.25
 _SETTLE_POLL_S = 0.1
 _SETTLE_BUDGET_S = 5.0
@@ -3199,159 +3198,37 @@ def input_hidden_by_design(ws, input_name):
     return hidden_by_design(settings, bool(active.get("videoShowing")))
 
 
-def connect_on_show_targets(settings_by_input):
-    """PURE: the input names whose settings carry genlock_connect_on_show=True (sorted)."""
-    return sorted(n for n, s in (settings_by_input or {}).items() if (s or {}).get(CONNECT_ON_SHOW_KEY))
+def _hold_module():
+    """Lazy import of the sibling scripts/e2e_bandwidth_hold.py (the E2E hold / restore / settle
+    protocol) -- the SAME lazy + own sys.path insert pattern as _measurement_pins_module()."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import e2e_bandwidth_hold  # noqa: E402 -- sibling module
+    return e2e_bandwidth_hold
+
+
+def _settle():
+    """The settle timing + seams, read at CALL time so a test's monkeypatch of this module applies."""
+    return _hold_module().Settle(_SETTLE_MIN_S, _SETTLE_POLL_S, _SETTLE_BUDGET_S, _settle_sleep,
+                                 _settle_clock)
 
 
 def _read_hold_state(path):
-    """(held_mains, twin_originals) from the hold state file:
-    {"connect_on_show": [...], "twins": {name: {"genlock_fifo": bool, "ndi_bw_mode": int}}}. The legacy
-    list of held mains (a leftover from before the twin hold) reads as ([...], {}); no file -> ([], {}).
-    scripts/lib/connect-on-show-hold.sh `connect_on_show_held_mains` reads the SAME shape (pinned by
-    tests/python/test_e2e_twin_hold_1242.py)."""
-    try:
-        with open(path) as fh:
-            data = json.load(fh)
-    except FileNotFoundError:
-        return [], {}
-    except (OSError, ValueError) as e:
-        raise RuntimeError(f"connect-on-show hold state {path!r} unreadable: {e}") from e
-    if isinstance(data, list):
-        mains, twins = data, {}
-    elif isinstance(data, dict):
-        mains, twins = data.get("connect_on_show") or [], data.get("twins") or {}
-    else:
-        mains, twins = [], {}
-    mains = sorted({str(n) for n in mains if n}) if isinstance(mains, list) else []
-    twins = ({str(n): dict(v) for n, v in twins.items() if n and isinstance(v, dict)}
-             if isinstance(twins, dict) else {})
-    return mains, twins
-
-
-def _write_hold_state(path, mains, twins):
-    d = os.path.dirname(path)
-    if d:
-        os.makedirs(d, exist_ok=True)
-    tmp = f"{path}.tmp"
-    with open(tmp, "w") as fh:
-        json.dump({"connect_on_show": sorted(mains),
-                   "twins": {n: twins[n] for n in sorted(twins)}}, fh)
-    os.replace(tmp, path)
-
-
-def _await_settled(ws, wants, match):
-    """Poll each input's EFFECTIVE settings until match(effective, wants[name]) holds on two consecutive
-    reads, the first no earlier than _SETTLE_MIN_S after the caller's writes (see the settle constants
-    above). A GetInputSettings request error is never a match (a hold target can equal the type
-    default). The type defaults are read once per call. An input fails only once _SETTLE_BUDGET_S has
-    passed and it had two complete sweeps. Returns the names that never settled (sorted; [] = every
-    write landed)."""
-    if not wants:
-        return []
-    start = _settle_clock()
-    _settle_sleep(_SETTLE_MIN_S)
-    defaults = (_rpc(ws, "GetInputDefaultSettings", {"inputKind": "ndi_source"}, ignore_err=True)
-                or {}).get("defaultInputSettings") or {}
-    streak = {n: 0 for n in wants}
-    sweeps = 0
-    while True:
-        for n in sorted(streak):
-            if streak[n] >= 2:
-                continue
-            resp = _rpc(ws, "GetInputSettings", {"inputName": n}, ignore_err=True) or {}
-            ok = "inputSettings" in resp and match({**defaults, **(resp.get("inputSettings") or {})},
-                                                   wants[n])
-            streak[n] = streak[n] + 1 if ok else 0
-        sweeps += 1
-        pending = sorted(n for n, c in streak.items() if c < 2)
-        if not pending or (sweeps >= 2 and _settle_clock() - start >= _SETTLE_BUDGET_S):
-            return pending
-        _settle_sleep(_SETTLE_POLL_S)
-
-
-def _write_input(ws, name, values):
-    _rpc(ws, "SetInputSettings", {"inputName": name, "inputSettings": dict(values), "overlay": True},
-         ignore_err=True)
-
-
-def _write_and_settle(ws, wants, match):
-    """Write every wants[name] (overlay), then wait for all of them to settle. Returns the failed
-    names (sorted)."""
-    for n in sorted(wants):
-        _write_input(ws, n, wants[n])
-    return _await_settled(ws, wants, match)
+    """(held_mains, twin_originals) from the hold state file (e2e_bandwidth_hold.read_state)."""
+    return _hold_module().read_state(path)
 
 
 def connect_on_show_hold(ws, state_path):
-    """HOLD for an E2E run: every connect-on-show MAIN stays connected (flag off) and every role-marked
-    monitor TWIN goes off the wire (strih_bandwidth_roles.E2E_TWIN_HOLD).
-      1. Records the held mains and each twin's ORIGINAL (strih_bandwidth_roles.twin_hold_original of
-         its EFFECTIVE settings) -- UNION with any leftover state file, a leftover's recorded original
-         winning -- BEFORE any write. An input whose settings cannot be read is a failure (it may be a
-         twin still on the wire, or a main about to be measured parked).
-      2. Writes the mains present and WAITS for them to settle.
-      3. Only then writes the twins present, except a twin whose main did not settle or could not be
-         read (that main may still be parked, so the camera keeps its twin as its one configured
-         receiver), and waits for them to settle.
-    Returns (held_mains, held_twins, failed_names): the inputs written this run and the ones that
-    failed (unreadable, or a write that never read back)."""
-    roles = _bandwidth_roles()
-    inputs = (_rpc(ws, "GetInputList", {"inputKind": "ndi_source"}) or {}).get("inputs") or []
-    settings, unreadable = {}, []
-    for i in inputs:
-        name = i.get("inputName")
-        if not name or i.get("inputKind", "ndi_source") != "ndi_source":
-            continue
-        resp = _rpc(ws, "GetInputSettings", {"inputName": name}, ignore_err=True) or {}
-        if "inputSettings" not in resp:
-            unreadable.append(name)
-            continue
-        settings[name] = resp.get("inputSettings") or {}
-    left_mains, left_twins = _read_hold_state(state_path)
-    twin_targets = roles.twin_hold_targets(settings)
-    defaults = ((_rpc(ws, "GetInputDefaultSettings", {"inputKind": "ndi_source"}, ignore_err=True)
-                 or {}).get("defaultInputSettings") or {}) if twin_targets else {}
-    twins = {tw: roles.twin_hold_original({**defaults, **settings[tw]}) for tw in twin_targets}
-    twins.update(left_twins)  # a leftover twin reads HELD now; its recorded original is the truth
-    mains = sorted(set(left_mains) | set(connect_on_show_targets(settings)))
-    _write_hold_state(state_path, mains, twins)
-    held_mains = [n for n in mains if n in settings]
-    failed_mains = _write_and_settle(ws, {n: {CONNECT_ON_SHOW_KEY: False} for n in held_mains},
-                                     roles.settings_match)
-    unconfirmed = set(failed_mains) | set(unreadable)
-    held_twins = sorted(n for n in twins if n in settings and roles.twin_main(n) not in unconfirmed)
-    failed_twins = _write_and_settle(ws, {n: dict(roles.E2E_TWIN_HOLD) for n in held_twins},
-                                     roles.settings_match)
-    return held_mains, held_twins, sorted(set(unreadable) | set(failed_mains) | set(failed_twins))
+    """HOLD for an E2E run (e2e_bandwidth_hold.hold over this module's `_rpc`): the connect-on-show mains
+    stay connected, the monitor twins go off the wire. Returns (held_mains, held_twins, failed)."""
+    return _hold_module().hold(_rpc, ws, state_path, _settle())
 
 
 def connect_on_show_restore(ws, state_path):
-    """RESTORE the hold, twins FIRST: every recorded twin present gets
-    strih_bandwidth_roles.twin_restore_values(original) (genlock on + the monitor role -- DistroAV's
-    lockdown then puts LOWEST back itself) and is verified after it settles; only then does every held
-    main present get connect-on-show back -- EXCEPT a main whose twin did not settle, which stays held
-    (full bandwidth, and in the state file), so a camera always keeps one receiver configured to
-    connect. An input deleted / renamed since the hold has nothing to restore (done). The state file
-    is removed only when every restore landed. No state file -> ([], [], []). Returns (restored_names,
-    failed_names, held_back_mains)."""
-    if not os.path.exists(state_path):
-        return [], [], []
-    roles = _bandwidth_roles()
-    mains, twins = _read_hold_state(state_path)
-    present = {i.get("inputName") for i in
-               (_rpc(ws, "GetInputList", {"inputKind": "ndi_source"}) or {}).get("inputs") or []}
-    twin_wants = {n: roles.twin_restore_values(twins[n]) for n in twins if n in present}
-    failed_twins = _write_and_settle(ws, twin_wants, roles.settings_match)
-    main_names = [n for n in mains if n in present and roles.twin_name(n) not in failed_twins]
-    held_back = [n for n in mains if n in present and roles.twin_name(n) in failed_twins]
-    failed_mains = _write_and_settle(ws, {n: {CONNECT_ON_SHOW_KEY: True} for n in main_names},
-                                     roles.settings_match)
-    failed = sorted(set(failed_twins) | set(failed_mains))
-    if not failed:
-        os.remove(state_path)
-    restored = [n for n in sorted(twin_wants) + main_names if n not in failed]
-    return restored, failed, held_back
+    """RESTORE the hold (e2e_bandwidth_hold.restore over this module's `_rpc`), twins first. Returns
+    (restored_names, failed_names, held_back_mains)."""
+    return _hold_module().restore(_rpc, ws, state_path, _settle())
 
 
 def connect_on_show(a):

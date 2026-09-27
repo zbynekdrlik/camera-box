@@ -134,8 +134,8 @@ connect_on_show_e2e_wait_live() {
 
 # connect_on_show_held_mains STATE_FILE -> stdout: the held program-path MAINS, one per line (sorted,
 # de-duplicated); nothing when the file is absent/unreadable. ALWAYS 0. Reads the SAME shape as
-# obs_phase2._read_hold_state -- {"connect_on_show": [...], "twins": {...}} or the legacy list of mains
-# -- pinned to it by tests/python/test_e2e_twin_hold_1242.py. The twins are never listed: a held twin
+# e2e_bandwidth_hold.read_state (obs_phase2._read_hold_state) -- {"connect_on_show": [...],
+# "twins": {...}} or the legacy list of mains -- pinned to it by tests/python/test_e2e_twin_hold_1242.py. The twins are never listed: a held twin
 # delivers no video by design.
 connect_on_show_held_mains() {
   python3 -c '

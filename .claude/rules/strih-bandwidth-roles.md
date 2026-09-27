@@ -20,6 +20,7 @@ paths:
   - "tests/python/test_genlock_park_1242.py"
   - "tests/python/test_strih_bandwidth_roles_1242.py"
   - "tests/python/test_e2e_twin_hold_1242.py"
+  - "scripts/e2e_bandwidth_hold.py"
 ---
 
 # strih bandwidth roles — full bandwidth only for SHOWN cameras (issue 1242)
@@ -159,7 +160,7 @@ not parked (normal classification).
 | set-ndi-mapping `--verify-live` | `hidden=obs_phase2.input_hidden_by_design` (settings + `GetSourceActive.videoShowing`) → SKIP, never screenshot-sampled; a twin the E2E hold took off the wire (`strih_bandwidth_roles.twin_is_held`) is hidden by design too, showing or not |
 | asio-starve watchdog | n/a (reads `asrc:` audio lines; camera inputs carry no audio) |
 | `[4c/8]`, mv-reverify-escalate, ndi-cadence-heal, `[4j/8settle]`, `recording-e2e.sh` | the E2E HOLD (below) keeps every program-path input connected, so nothing parks during a run — including across a mid-run strih OBS relaunch (the strih-side marker makes the launch-time role apply keep the mains connected). Their input sets are the `NDI camN` mains only (`camera_*_ndi_sources*_csv`, `NDI cam${cam_n}`, the `NDI_CADENCE_INPUTS` default; the live freeze watch too), so a twin the hold took off the wire is never read — pinned by `tests/python/test_e2e_twin_hold_1242.py` |
-| the hold's own `connect_on_show_e2e_wait_live` | reads only the held MAINS from the hold state file (`connect_on_show_held_mains`, the bash twin of `obs_phase2._read_hold_state`, pinned to it); a held twin delivers no video and is never waited on |
+| the hold's own `connect_on_show_e2e_wait_live` | reads only the held MAINS from the hold state file (`connect_on_show_held_mains`, the bash twin of `e2e_bandwidth_hold.read_state`, pinned to it); a held twin delivers no video and is never waited on |
 | in-OBS LOCK widget / the `genlock_lock` facet / its watchdog | a held twin runs with `genlock_fifo=false`, and the widget scan skips a non-genlock source (`!st.genlock_fifo`, `OBSBasicStatusBar.cpp`) — never unlocked / absent / idle, never a `recent_event` offender. Its restore at cleanup re-enables genlock, so a short `recent_event` DEGRADED after the run is expected |
 | `[0/8]` reads | run BEFORE the hold. A twin left held by a SIGKILLed run is non-genlock, so the lock widget and the mains-only input sets ignore it; the next run's hold unions it and its cleanup restores it |
 | dev1 frozen-input watchdog during the hold | the mains are unparked, so `genlock_park_watch_set` drops their twins; a held twin logs no audit line |
@@ -187,7 +188,10 @@ with a blank multiview cell (its main then stays held too), until the next run's
 launch re-applies the roles.
 
 **The same hold takes every monitor twin OFF THE WIRE for the run** (design 5859315296, finding
-5859213950). A twin from a camera-box sender costs ~58 Mbps at NDI "lowest", not a small proxy, so
+5859213950). The protocol (state file, hold, restore, settle poll) is `scripts/e2e_bandwidth_hold.py`;
+`obs_phase2.py connect-on-show` calls it with its own `_rpc` and settle seams passed in at call time,
+so the module has no WebSocket dependency and every obs_phase2 test that monkeypatches `_rpc` drives
+it. A twin from a camera-box sender costs ~58 Mbps at NDI "lowest", not a small proxy, so
 7 mains + 7 twins (~1.4 Gbps) tail-dropped the strih-lx `foh1_video ether2` uplink during the E2E
 (~480 drops/min) and failed release E2E attempts on camera arrival holds. Now:
 
@@ -209,7 +213,7 @@ launch re-applies the roles.
   receiver CONFIGURED to connect (the settle confirms the setting read back, not that frames arrive —
   an unpark or re-bind takes ~1-2 s). An input the hold cannot read at enumeration is a failure: it
   may be a twin still on the wire, or a main about to be measured parked.
-- **Every read-back is a SETTLE poll**, `_await_settled`. OBS applies an input update on the next
+- **Every read-back is a SETTLE poll**, `e2e_bandwidth_hold.await_settled`. OBS applies an input update on the next
   VIDEO TICK after the WS overlay (`obs_source_update` defers `info.update`), so an immediate
   `GetInputSettings` reads the overlay back even when the update is about to revert it. The poll:
   - starts `_SETTLE_MIN_S` (0.25 s) after the writes;
