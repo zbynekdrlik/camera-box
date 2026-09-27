@@ -254,7 +254,8 @@ def test_gate_win_baseline_facet_is_report_only(tmp_path):
     assert "report-only" in drift.stdout
     assert re.search(r"stream\s+win_baseline power_scheme\s+OK", ok.stdout), ok.stdout
     assert re.search(r"stream\s+win_baseline power_scheme\s+UNKNOWN", unread.stdout), unread.stdout
-    assert "win_baseline" not in base.stdout
+    # (the tmp dir name carries the test name, so assert on the row shape, not the bare word)
+    assert not re.search(r"win_baseline power_scheme", base.stdout), base.stdout
 
 
 # --- the dev1 reader -----------------------------------------------------------------------------
