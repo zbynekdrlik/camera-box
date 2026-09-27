@@ -275,7 +275,10 @@ def _ps_commands(log):
     out = []
     for line in log.read_text().splitlines():
         if line.startswith("sshpass") and "-EncodedCommand" in line:
-            blob = line.split("-EncodedCommand", 1)[1].strip().split()[0].strip("'\"")
+            # the fake logs its argv with printf %q, so the one "powershell ... -EncodedCommand B"
+            # argument arrives with its spaces backslash-escaped
+            rest = line.split("-EncodedCommand", 1)[1].replace("\\ ", " ").strip()
+            blob = rest.split()[0].strip("'\"")
             out.append(base64.b64decode(blob).decode("utf-16-le"))
     return out
 
@@ -609,6 +612,7 @@ def test_the_cleanup_plan_names_the_on_box_verdict_artifacts(rig):
     assert _soak(env, "--run").returncode == 2
     plan = (p["run"] / "cleanup-plan.txt").read_text()
     assert "verdict-out/av-soak-" in plan and "Remove-Item -Recurse" in plan
+    assert "verdict-out\\av-soak-" in plan, "a literal backslash, never a printf escape"
 
 
 def test_a_negative_decode_budget_names_the_slot_budget(rig):
