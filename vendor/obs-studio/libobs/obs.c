@@ -1636,9 +1636,9 @@ bool obs_reset_audio2(const struct obs_audio_info2 *oai)
 	 * obs-audio.c), and OBS's dynamic increase stays active above it up to the maximum. Stock OBS
 	 * started at 0 and grew only on a startup race, which made the stream `mbc` ASRC level (and its
 	 * A/V position) differ per launch. Fixed buffering is never used: the frontend low-latency
-	 * toggle is overridden and logged. The decision is the pure genlock_audio_buffering_plan()
+	 * toggle is overridden and logged. The decision is the pure genlock_audio_buffering_make_plan()
 	 * (obs-genlock-audio-buffering.h <-> src/genlock_audio_buffering.rs). */
-	const struct genlock_audio_buffering_plan genlock_buf = genlock_audio_buffering_plan(
+	const struct genlock_audio_buffering_plan genlock_buf = genlock_audio_buffering_make_plan(
 		oai->max_buffering_ms, oai->fixed_buffering, oai->samples_per_sec, AUDIO_OUTPUT_FRAMES);
 	audio->max_buffering_ticks = (int)genlock_buf.max_ticks;
 	audio->floor_buffering_ticks = (int)genlock_buf.floor_ticks;

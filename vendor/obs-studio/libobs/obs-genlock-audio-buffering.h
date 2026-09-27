@@ -12,7 +12,7 @@
  * because past it the packet is re-placed at its raw stamp. The band held here is half of that,
  * with a lower AND an upper edge.
  *
- * - genlock_audio_buffering_plan() (obs_reset_audio2): the floor is GENLOCK_AUDIO_BUFFERING_FLOOR_MS
+ * - genlock_audio_buffering_make_plan() (obs_reset_audio2): the floor is GENLOCK_AUDIO_BUFFERING_FLOOR_MS
  *   rounded up to whole ticks the way OBS rounds its own maximum. Fixed buffering is never used, so
  *   the frontend low-latency toggle is overridden. The maximum stays the caller's, or 45 ticks.
  * - genlock_audio_buffering_action() (every mixer tick): below the floor raise to the floor (the
@@ -43,14 +43,16 @@
 #define GENLOCK_AUDIO_LEVEL_BASE_NOMINAL_NS 9000000ULL
 
 /* genlock_audio_buffering_action() results. Mirror of src/genlock_audio_buffering.rs BufferingAction. */
-#define GENLOCK_AUDIO_BUFFERING_NONE 0
-#define GENLOCK_AUDIO_BUFFERING_FLOOR 1
-#define GENLOCK_AUDIO_BUFFERING_DYNAMIC 2
+#define GENLOCK_AUDIO_BUFFERING_ACTION_NONE 0
+#define GENLOCK_AUDIO_BUFFERING_ACTION_FLOOR 1
+#define GENLOCK_AUDIO_BUFFERING_ACTION_DYNAMIC 2
 
 /* The reset decision. Mirror of src/genlock_audio_buffering.rs BufferingPlan. */
 struct genlock_audio_buffering_plan {
 	uint32_t floor_ticks;
 	uint32_t max_ticks;
+	/* Always false: the genlock build never uses OBS's fixed mode (the floor is the fixed part).
+	 * obs-audio.c keeps the upstream fixed branch byte-identical for rebases; it is unreachable. */
 	bool fixed;
 	bool overridden;
 };
@@ -76,7 +78,7 @@ static inline uint64_t genlock_audio_buffering_ticks_ns(uint32_t ticks, uint32_t
 
 /* The floor, the dynamic maximum, and whether the request was overridden. req_max_ms == 0 means
  * OBS's default maximum. Mirror of plan. */
-static inline struct genlock_audio_buffering_plan genlock_audio_buffering_plan(uint32_t req_max_ms, bool req_fixed,
+static inline struct genlock_audio_buffering_plan genlock_audio_buffering_make_plan(uint32_t req_max_ms, bool req_fixed,
 									       uint32_t rate, uint32_t frames)
 {
 	struct genlock_audio_buffering_plan p;
@@ -96,10 +98,10 @@ static inline struct genlock_audio_buffering_plan genlock_audio_buffering_plan(u
 static inline int genlock_audio_buffering_action(int total_ticks, int floor_ticks, int max_ticks, bool source_behind)
 {
 	if (total_ticks >= max_ticks)
-		return GENLOCK_AUDIO_BUFFERING_NONE;
+		return GENLOCK_AUDIO_BUFFERING_ACTION_NONE;
 	if (total_ticks < floor_ticks)
-		return GENLOCK_AUDIO_BUFFERING_FLOOR;
-	return source_behind ? GENLOCK_AUDIO_BUFFERING_DYNAMIC : GENLOCK_AUDIO_BUFFERING_NONE;
+		return GENLOCK_AUDIO_BUFFERING_ACTION_FLOOR;
+	return source_behind ? GENLOCK_AUDIO_BUFFERING_ACTION_DYNAMIC : GENLOCK_AUDIO_BUFFERING_ACTION_NONE;
 }
 
 /* The gap the level servo must bridge, ns: target - (buffering + base). The sync offset moves both

@@ -697,7 +697,8 @@ so every launch had its own A/V level (dock + `mbc` level ≈ 135 ± 6 ms in eve
 The #1355 capture assumed the mix window could always reach `LEVEL_TARGET_MS` + offset. It can only
 reach it when libobs's global audio buffering sits near `100 − base` (base ≈ 9 ms for `mbc`): the
 natural offset-free depth is `buffering + base`, and the level servo can move the depth only
-±~60 ms before the 70 ms TS-smoothing re-placement snaps it back. Stock OBS drew the buffering per
+about 51–59 ms (observed live) before the 70 ms TS-smoothing re-placement snaps it back; the
+floor keeps the gap inside a chosen ±35 ms margin (half the threshold). Stock OBS drew the buffering per
 launch (85 ms or none, 27.9.2026), so a no-buffering launch left `mbc` 91 ms under its target and
 the fallback re-latched at a random depth. Since issue 1367 the genlock libobs raises an 85 ms FLOOR
 on the first audio tick of every launch and keeps OBS's dynamic increase above it; the band

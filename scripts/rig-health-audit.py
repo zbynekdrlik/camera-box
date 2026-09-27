@@ -41,7 +41,7 @@ STREAM = "10.77.9.204"
 # grade_resolume_bundle / check_resolume.
 RESOLUME = "resolume.lan"
 DANTE_BOUND_US = 2000          # clock-offset-guard verdict bound
-AUDIO_BUF_BOUND_MS = 100       # #786 launch-gate bound (box standard 64/85)
+AUDIO_BUF_BOUND_MS = 100       # #786 launch-gate bound (box standard = the issue-1367 85 ms floor)
 # issue-1108 dantesync NTP step-rate facet: how often dantesync STEPPED the clock in the last hour.
 # A step-storm on the strih NTP master jumps every box's genlock timecode -> per-source FIFO
 # underruns -> the QR/burn ball skipping fleet-wide. Grade tiers from the issue's measured data:
