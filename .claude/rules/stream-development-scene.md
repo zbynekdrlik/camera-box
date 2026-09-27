@@ -76,13 +76,13 @@ the stream box has a `PRO` scene).
 
 Standalone clients have their own transport, or they select a scene before the guarded cut. Each
 reuses the ONE guard: `obs_phase2._refuse_forbidden_scene` + `NEVER_PROGRAM_SCENES` +
-`ForbiddenSceneError`, imported lazily from the sibling `obs_phase2.py` with its own `sys.path`
-insert. None of them retypes the scene name.
+`ForbiddenSceneError`, imported from the sibling `obs_phase2.py` with its own `sys.path` insert
+(lazily in the other four clients; `warm_cam_scenes.py` has always imported it at module load). None of them retypes the scene name.
 
 | Client | Where the guard runs | A refusal |
 |---|---|---|
 | `glk_wire.py` | its `_rpc`, plus its `SCENE` target checked before connecting | `sys.exit`, nothing written |
-| `frozen-camera-gate.py` | its `_rpc` | exit **2** (ERROR), never 1 (FROZEN) |
+| `frozen-camera-gate.py` | its `_rpc` | exit **2** (its ERROR code), never 1 (its FROZEN code) |
 | `imag_scenes.py` | `Obs.req`, before sending, also with `ignore_err` | `sys.exit("FAIL: …")` |
 | `cg_chain_scene.py` | `program` / `strih-solo` check the target before the snapshot and any write; its transport is `obs_phase2._rpc` | exit 2 |
 | `warm_cam_scenes.py` | its transport is `obs_phase2._rpc` | (raises) |
@@ -92,6 +92,10 @@ insert. None of them retypes the scene name.
   gate and `warm_cam_scenes.py` preview restores, and the imag `--bootstrap` restore of
   `~/.config/imag-last-program`. That last one falls back to its own `Cam 1` default, because a
   refusal would abort the boot seed and Restart-loop the imag OBS (the issue-1156 class).
+- **The frozen gate's callers.** The `[4c/8]` report-only pixel line in `recording-e2e.sh` labels
+  every exit other than 0 / 124 as FROZEN, a gate ERROR (2) included; that predates this slice
+  (a connection failure has always exited 2), and the refusal cannot happen on strih, which has
+  no `PRO`. A `#328` `TimeoutError` inside the capture still exits 1 (outside the rule).
 - **imag without the guard.** `setup-imag.sh` installs `obs_phase2.py` next to `imag_scenes.py`.
   `_scene_guard()` accepts it as the guard only when it carries `_refuse_forbidden_scene`,
   `ForbiddenSceneError` and `NEVER_PROGRAM_SCENES`. A missing module or an older copy (a

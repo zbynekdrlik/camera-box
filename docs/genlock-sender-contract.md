@@ -267,14 +267,16 @@ The per-box-class AUDIO expectation (the canonical table is
 
 | Box class | Role | Camera inputs (`CAM* (usb)`) | Program / music / SongPlayer inputs (`sp-*`, `cg`, `NDI 2ME PGM`, `mbc`, `NDIAr *`, `VBAN *`) | Unknown-name default |
 |---|---|---|---|---|
-| strih | camera switcher | `ndi_audio=false` (expected-silent) | `ndi_audio=true` (expected-audio: the `cg` program input) | silent |
-| stream | program encoder | expected-silent | expected-audio (`NDI 2ME PGM` program + `mbc` / music) | silent |
-| imag | 60fps projection | expected-silent | expected-audio | silent |
+| strih | camera switcher | `ndi_audio=false` (expected-silent) | expected-silent (the mix arrives over Dante/ASIO) | silent |
+| stream | program encoder | expected-silent | expected-silent (the mix arrives over Dante/ASIO) | silent |
+| imag | 60fps projection | expected-silent | expected-silent | silent |
 | resolume | cg OBS | expected-silent | expected-audio (SongPlayer `sp-*`, `NDIAr`, `VBAN`) | audio |
 
-A MISMATCH is either an expected-audio source with `ndi_audio=false` (the #1303 live defect: silent
-program audio) or an expected-silent camera source with `ndi_audio=true` (audio bleeding into the
-camera chain). A program source with a forced `yuv_range=partial` gets a report-only advisory (a
+The cg OBS (resolume) is the ONLY box carrying program audio over NDI (owner ruling 2026-09-15);
+on strih/stream/imag NDI audio on ANY input would be double audio in the Dante-fed mix.
+A MISMATCH is an expected-audio source with `ndi_audio=false` (the #1303 live defect: silent
+program audio), an expected-silent camera source with `ndi_audio=true` (audio bleeding into the
+camera chain), or any other audible input on a silent box (the double-audio hazard). A program source with a forced `yuv_range=partial` gets a report-only advisory (a
 full-range sender then colour-shifts — the owner's "distorted picture" secondary symptom). The
 audit is REPORT-ONLY: `scripts/deploy-genlock-fleet.sh` prints it BEFORE the swap (never a write,
 never a gate) so the operator sets `ndi_audio`/`yuv_*` per source over OBS-WS before deploying; it
