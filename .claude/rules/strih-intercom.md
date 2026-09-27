@@ -726,7 +726,9 @@ setup-strih) — those are the sibling lane's files. Design: issue 1345 comment 
 - **The real browser check is COMMITTED and runs in CI** (`intercom-web-e2e` job, `npm ci` on a
   committed lockfile): `intercom/tests/e2e/phone.spec.js` against `stub_hub.py` (serves the REAL
   `intercom/web` INCLUDING the vendored `janus.js`, `/` with `{{VERSION}}` substituted, stub
-  `/api/state` / `/api/version` / a PNG at `/interkom.mjpeg`). Only the external Janus SERVER is
+  `/api/state` / `/api/version` / a real endless multipart JPEG stream at `/interkom.mjpeg` since
+  issue 1379; `picture-sw.spec.js` also runs on WebKit, see "The service worker must never proxy the
+  picture stream" below). Only the external Janus SERVER is
   faked: the init script `fake-janus-server.js` replaces `window.WebSocket` for `…/janus` URLs with
   an in-page socket speaking the Janus WS API (create/attach/message/trickle/keepalive/hangup/
   detach/destroy + audiobridge join/configure) whose offers are answered by a REAL
@@ -842,6 +844,91 @@ Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
 - **Live end-to-end (supervisor, needs the rig):** run the hub `--features ndi` against a live NDI
   source, open the phone PWA, confirm the picture appears within ~2 s and the placeholder/retry kicks
   in when the source drops.
+
+## The service worker must never proxy the picture stream (issue 1379, 27.9.2026)
+
+- **What broke.** `intercom/web/sw.js` answered every fetch with `respondWith(fetch(event.request))`,
+  including the endless `multipart/x-mixed-replace` `/interkom.mjpeg`. WebKit (iPhone Safari) never
+  hands that never-ending response to the page's `<img>` through a worker.
+  - The `load` event never fires, so the `<img>` stays `hidden` and the 5 s retry loops forever.
+  - dev1 nginx logged the iPhone's picture requests as 200 with 0 bytes on hub 711 AND hub 676. The
+    phone keeps its registered worker across hub versions, so the 711 rollback could not help.
+  - Chromium delivers the same stream fine through the worker. And `phone.spec.js` neutralises the
+    worker registration. So no Chromium run could catch it.
+- **The rule for `sw.js`.**
+  - Requests in `STREAM_PATHS` (matched on the URL pathname, so the `?t=` buster still matches) and
+    every non-GET request get NO `respondWith`, so the browser fetches them itself. Everything else
+    keeps the passthrough.
+  - Any NEW endless or streaming route (another MJPEG, SSE) goes into `STREAM_PATHS` in the same
+    change.
+  - Never delete the `fetch` handler: the Android install path keys on it (design comment
+    5858372332, approach 2 rejected).
+  - Bump the `Worker version:` line on every `sw.js` change. An installed phone replaces its worker
+    only when the bytes of `/sw.js` differ; the update check runs on the next navigation.
+    - iPhone (WebKit): the new worker activates at once (`skipWaiting` + `clients.claim`) and the
+      page's 5 s picture retry then fetches the stream natively. In headless WebKit that swap can
+      race the reloaded page's own requests ("Service Worker context closed", about 1 in 60 runs),
+      so a real phone may need ONE extra reload on the first visit after the hub update.
+    - Android (Chromium): a skip-waiting worker stays in `waiting` while the old one still serves
+      the endless stream and activates once the old one is idle (probed 27.9.2026). The next
+      navigation tears the old stream down, so it swaps then. The picture worked there throughout.
+  - `bkshading/service/web/sw.js` has the same proxy-everything shape. Its preview is a polled
+    single JPEG (`preview.jpg?t=`), a finite response, so it is not affected. If it ever moves to a
+    multipart stream, give it the same exclusion.
+- **The regression tests** (`intercom/tests/e2e/`, shared helpers in `picture-helpers.js`) never
+  neutralise the worker.
+  - `picture-sw.spec.js` waits for `navigator.serviceWorker.ready`, reloads so the worker controls
+    the page, and asserts `controller` is set. The picture must decode at 320x180, and its centre
+    band must change colour (at least two of red / green / blue), which proves progressive delivery
+    and not one frozen part. Its second test is the iPhone native-player tap with the worker in
+    control; it also requires the video's track to be the mirror canvas's capture track
+    (`track.canvas === nativeCanvas`). It runs in the Chromium `phone` project AND the
+    `iphone-webkit` project (`devices["iPhone 14"]`), with a completely clean console.
+  - `picture-sw-upgrade.spec.js` (WebKit only; the `phone` project ignores it) is the upgrade every
+    installed iPhone takes. `/__test/legacy-sw/on` makes the stub serve the old proxy-everything
+    worker; the page is loaded under it; the test PROVES that worker breaks the picture (a failed
+    `/interkom.mjpeg` request in the controlled page, counted after `openControlledByWorker`
+    because its reload also cancels the uncontrolled page's stream); `/off`; then an explicit
+    `reg.update()` must end in a `controllerchange`. The running page must then heal by itself
+    (its 5 s picture retry goes past the new worker; about 1-4 s), and the next load must show the
+    moving picture too. Both must keep a clean console and no failed picture request, the running
+    page from the moment its picture is back, the next load from its commit on.
+    - Why not a bare reload under the old worker: it races the swap (the "context closed" above),
+      and while the old worker proxies the picture WebKit logs a varying set of errors per failed
+      request (page errors `""` / `"Cannot load ."` / `"Load failed"`, sometimes a console `Failed
+      to load resource: ...`). Three review rounds tried to excuse that noise by text, then by
+      coincidence; both flaked (about 8 %). The fix was to assert nothing before the swap: that
+      console belongs to the old worker, and the new worker's own console is proven clean from a
+      fresh load by `picture-sw.spec.js`.
+    - Mutants it catches: the switch path broken (404), the switch silently serving the new worker,
+      and the pre-fix worker as the "new" one. Local stability (27.9.2026): 55/55 WebKit repeats of
+      the final version (with the same-document heal check), 195/195 across the explicit-update
+      design.
+  - `stub_hub.py` streams the three committed frames `fixtures/picture-{0,1,2}.jpg` as HTTP/1.1
+    chunked multipart parts framed like `mjpeg_part`, at 10 fps, until the client leaves. Stdlib
+    Python has no JPEG encoder, so the frames are committed files (made once with PIL). The real
+    phone gets HTTP/2 over TLS from the dev1 nginx front; the bypass does not depend on the
+    transport.
+  - Timing coupling: the mirror check needs `NATIVE_IDLE_MS` (500 ms) NOT to be a multiple of the
+    stub's 300 ms colour cycle, or every redraw lands on the same colour. Change the stub's frame
+    count or rate if that interval ever moves.
+  - `tests/python/test_intercom_webui_1345.py` also checks statically that `sw.js` names
+    `"/interkom.mjpeg"`, carries the version line, and returns for bypassed requests before its
+    `respondWith`.
+  - The audio specs need Chromium's fake media devices, so WebKit runs only the picture specs. The
+    `intercom-web-e2e` CI job installs `chromium webkit`.
+- **Gotcha: in Playwright's headless WebKit, `drawImage` of ANY `captureStream`-fed `<video>` reads
+  transparent `[0,0,0,0]`.** A control video fed by a solid-green canvas stream reads the same
+  (probed 27.9.2026). So verify the native player through its mirror canvas and the video's
+  `readyState` / `videoWidth`, never through a video pixel. The mirror is `nativeCanvas`, a
+  top-level `let` of the classic `app.js`, reachable by name from `page.evaluate`.
+- **Local run on dev1.** `npm ci` in `intercom/tests/e2e`. Playwright 1.49.1's WebKit (revision
+  2104, WebKit 18.2) is already in `~/.cache/ms-playwright`. Run the script-file wrapper with
+  `--project=iphone-webkit`.
+- **After merge (supervisor).** The web assets are embedded, so the new `sw.js` ships with the hub
+  binary. Redeploy the hub on strih-lx with `install`, keeping the old binary. Then read `/sw.js`
+  from the public URL and confirm it carries `Worker version: 2`. The real-iPhone check is passive:
+  the owner's next use.
 
 ## M3 live findings on strih-lx / dev1 (19.9.2026) — read before the phone test or the M4 cut-over
 

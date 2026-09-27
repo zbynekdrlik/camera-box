@@ -89,6 +89,18 @@ def test_service_worker_is_passthrough_no_cache():
     assert "fetch(event.request)" in sw, "sw.js must be a pure network passthrough"
 
 
+def test_service_worker_leaves_the_picture_stream_to_the_browser_1379():
+    # The behavioural guard is the WebKit E2E (intercom/tests/e2e/picture-sw.spec.js); this static
+    # check also catches a removed path or a removed/moved bypass in a Chromium-only or Python-only
+    # run: the fetch listener must return BEFORE its respondWith for the bypassed requests.
+    sw = _read(SW)
+    assert '"/interkom.mjpeg"' in sw, "sw.js must leave the endless MJPEG stream to the browser"
+    assert "Worker version:" in sw, "sw.js carries the version line installed phones update on"
+    bypass = sw.find("if (leaveToBrowser(event.request)) return;")
+    respond = sw.find("event.respondWith(")
+    assert 0 <= bypass < respond, "the fetch listener returns for bypassed requests before respondWith"
+
+
 def test_index_links_manifest_and_serves_pwa_icons():
     html = _read(INDEX)
     assert 'rel="manifest"' in html and "/manifest.webmanifest" in html
