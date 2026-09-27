@@ -462,7 +462,7 @@ $(rig_test_ledger_register_remote_cmds "frame-probe --paint-only (rig-mode TEST 
 sleep 3
 # (5) verify the painter is UP and ACTUALLY PAINTING — presenter-aware (#464). --presenter auto
 #     (the default here) may land on the KMS page-flip presenter, which by design NEVER opens
-#     /dev/fb0 (see src/presenter_kind.rs::resolve_presenter_kind) — a bare `fuser -s /dev/fb0`
+#     /dev/fb0 (see src/presenter_kind.rs::resolve_presenter_kind) — a bare 'fuser -s /dev/fb0'
 #     reported a healthy, correctly-painting KMS run as FAIL (confirmed live on cam2, #464).
 #     scripts/lib/presenter-liveness-check.sh reads the painter's own log to know which presenter
 #     actually came up and asserts the matching signal (KMS: the DRM device held + vblank-locked;
