@@ -221,6 +221,47 @@ def test_legacy_loss_on_one_of_two_outputs_is_counted():
     assert events == "10"
 
 
+@pytest.mark.parametrize("skew", [10.6, 12.0])
+def test_legacy_second_output_logging_a_little_late_is_still_a_seed(skew):
+    # Review round 2: the seed spans two logging periods. A second output whose first line in the
+    # tail lands 10.6 s or 12 s after the first (one status line late, a forward wall step) is
+    # that output's own value, never a loss.
+    a = [_legacy(_hms(6 * 3600 + i * 10), 1, 0, 1) for i in range(30)]
+    b = [_legacy(_hms(6 * 3600 + skew + i * 10), 45, 13, 9) for i in range(30)]
+    lines = sorted(a + b, key=lambda ln: ln[:12])
+    events, _ms, _dest, _age = bsg.vban_pacer_loss_from_log(_text(lines))
+    assert events == "0"
+
+
+def test_legacy_scan_keeps_an_output_s_own_value_in_reach():
+    # Review round 2: output A shows a new value every period for 80 periods while B sits clean
+    # at 200/200/5; then B takes one underflow. B's own value repeats every period, so it stays
+    # among the newest values searched and B's loss counts as 1 (never 200-odd).
+    def b(i):
+        return (200, 200, 5) if i < 79 else (201, 200, 5)
+    lines = _pairs(6 * 3600, 80, lambda i: (i, 0, 0), b)
+    events, _ms, _dest, _age = bsg.vban_pacer_loss_from_log(_text(lines))
+    # A grows by 1 in every period inside the 660 s window (periods 14..79 = 66), plus B's 1.
+    assert events == "67"
+
+
+def test_legacy_collision_under_count_is_documented():
+    # Characterization of the documented residual, on the real 27.9 06:02 shape: both outputs at
+    # 7/1/4, then A 12/3/6 + B 13/3/6, then A steps onto B's value 13/3/6 while B goes 14/3/6.
+    # True growth: A 10 + B 11 = 21. A's last step lands on a value already seen for the key, so
+    # it is invisible without an output identity: 11 counted. The loss still pages, and the
+    # count is an under-count, never an over-count.
+    def a(i):
+        return (7, 1, 4) if i < 4 else ((12, 3, 6) if i == 4 else (13, 3, 6))
+
+    def b(i):
+        return (7, 1, 4) if i < 4 else ((13, 3, 6) if i == 4 else (14, 3, 6))
+    lines = _pairs(6 * 3600, 12, a, b)
+    events, _ms, _dest, _age = bsg.vban_pacer_loss_from_log(_text(lines))
+    assert 0 < int(events) < 21
+    assert events == "11"
+
+
 def test_legacy_output_restart_resets_counters_without_a_false_loss():
     # An output restart (pacing-config counters=reset) drops its counters back to 0.
     lines = _pairs(6 * 3600, 10, lambda i: (7, 2, 3), lambda i: (7, 2, 3))
@@ -299,6 +340,36 @@ def test_new_format_discarded_and_resyncs_count():
     events, loss_ms, _dest, _age = bsg.vban_pacer_loss_from_log(_text(lines))
     assert events == "2"
     assert loss_ms == "120.5"
+
+
+def test_new_format_restart_then_a_loss_onto_an_old_value_is_counted():
+    # Review round 2: a dest= key is exactly one output, so its loss is the plain delta against
+    # its own previous line. After a restart (counters back to 0) a first loss that lands on a
+    # value seen before the restart still counts.
+    lines = []
+    for i in range(20):
+        s = 6 * 3600 + i * 10
+        if i < 5:
+            disc, sil = 0, "0.0"
+        elif i < 10:
+            disc, sil = 1, "5.0"
+        elif i < 15:
+            disc, sil = 0, "0.0"        # restart
+        else:
+            disc, sil = 1, "5.0"
+        lines.append(_new(_hms(s), "10.77.7.106:6980", disc=disc, silence=sil))
+    events, loss_ms, _dest, _age = bsg.vban_pacer_loss_from_log(_text(lines))
+    assert events == "2"
+    assert loss_ms == "10.0"
+
+
+def test_new_format_counts_from_its_second_line():
+    # A dest= key needs no seed period: the second line's growth is a loss of that one output.
+    lines = [_new(_hms(6 * 3600), "10.77.7.106:6980"),
+             _new(_hms(6 * 3600 + 10), "10.77.7.106:6980", repays=1, discarded="21.3")]
+    events, loss_ms, _dest, _age = bsg.vban_pacer_loss_from_log(_text(lines))
+    assert events == "1"
+    assert loss_ms == "21.3"
 
 
 # ---------------------------------------------------------------------------------------------
