@@ -26,9 +26,11 @@
 # beat and each loop tick, after the owner check) calls rig_lease_refresh_if_mine for the lease
 # identity this run holds, so the :8890 lease JSON of a live E2E / av-soak always shows a fresh
 # heartbeat and a future expected_release_at. The identity (rig_heartbeat_start's optional 2nd/3rd
-# arguments) resolves exactly like scripts/rig-busy-gate.sh names the holder it acquires for:
-# RIG_LEASE_REPO / RIG_LEASE_RUN_ID, else GITHUB_REPOSITORY / GITHUB_RUN_ID (the E2E step has the
-# same GitHub run id the gate step took the lease for). No identity = the lease is never touched.
+# arguments) uses the same env precedence as scripts/rig-busy-gate.sh when it names the holder it
+# acquires for -- RIG_LEASE_REPO / RIG_LEASE_RUN_ID, else GITHUB_REPOSITORY / GITHUB_RUN_ID (the E2E
+# step has the same GitHub run id the gate step took the lease for) -- but WITHOUT the gate's local
+# fallback (camera-box-local / local-<pid>): no identity = the lease is never touched. The start
+# beat reports its outcome once on stderr, so a mismatched identity is visible in the run log.
 
 # The lease keep-alive lives in the lease lib (sibling file); pull it in unless the caller already
 # sourced it. rig-lease.sh is source-only (function definitions, no side effects).
@@ -100,11 +102,16 @@ rig_heartbeat_active() {
   rig_heartbeat_is_fresh "$last" "$now" "${RIG_HEARTBEAT_STALE_SEC:-600}"
 }
 
-# _rig_hb_lease_beat <lease_repo> <lease_run_id> -> one lease keep-alive beat (issue 1383). Never
-# fails the caller: a foreign/absent lease or an empty identity is simply not refreshed.
+# _rig_hb_lease_beat <lease_repo> <lease_run_id> [report] -> one lease keep-alive beat (issue 1383).
+# Never fails the caller: a foreign/absent lease or an empty identity is simply not refreshed. With
+# "report" (the start beat only) the outcome line goes to stderr once; the per-tick beats stay quiet.
 _rig_hb_lease_beat() {
   [ -n "${1:-}" ] && [ -n "${2:-}" ] || return 0
-  rig_lease_refresh_if_mine "$1" "$2" >/dev/null 2>&1 || true
+  local out
+  out="$(rig_lease_refresh_if_mine "$1" "$2" 2>&1)" || true
+  if [ "${3:-}" = report ]; then
+    printf '[rig-heartbeat] lease keep-alive %s#%s: %s\n' "$1" "$2" "${out:-no output}" >&2
+  fi
   return 0
 }
 
@@ -118,7 +125,7 @@ rig_heartbeat_start() {
   local lease_repo="${2-${RIG_LEASE_REPO:-${GITHUB_REPOSITORY:-}}}"
   local lease_run_id="${3-${RIG_LEASE_RUN_ID:-${GITHUB_RUN_ID:-}}}"
   rig_heartbeat_write "$label"
-  _rig_hb_lease_beat "$lease_repo" "$lease_run_id"
+  _rig_hb_lease_beat "$lease_repo" "$lease_run_id" report
   local interval="${RIG_HEARTBEAT_REFRESH_SEC:-30}"
   # The OWNER is the harness shell that called start. The refresher self-terminates AND removes the
   # heartbeat the moment the owner dies — even on SIGKILL (-9), which bypasses the harness's cleanup

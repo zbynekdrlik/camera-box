@@ -19,12 +19,14 @@
 #   /var/tmp/rig-lease/holder.json {"repo","run_id","run_url","job","acquired_at","expected_release_at"}
 #   /var/tmp/rig-lease/heartbeat   mtime bumped by the holder while it works
 #
-# ROLLING KEEP-ALIVE (issue 1383): while the holder is alive its issue-281 refresher
-# (scripts/lib/rig-heartbeat.sh rig_heartbeat_start) calls rig_lease_refresh_if_mine on every beat:
-# the heartbeat is bumped and expected_release_at rolls forward to max(current, now + look-ahead),
-# ONLY for the holder.json that names that run. A live run therefore always shows a fresh heartbeat
-# and a future release time; a dead run's refresher stops with its owner, so its lease still ages
-# into the heartbeat-stale reclaim below.
+# ROLLING KEEP-ALIVE (issue 1383): while the holder is alive, rig_lease_refresh_if_mine bumps the
+# heartbeat and rolls expected_release_at forward to max(current, now + look-ahead), ONLY for the
+# holder.json that names that run. Two beaters call it: the gate's lease-only keep-alive
+# (rig_lease_keepalive_spawn, from acquire to release) and the holder's issue-281 refresher
+# (scripts/lib/rig-heartbeat.sh rig_heartbeat_start, for the E2E / av-soak run itself). A live run
+# therefore always shows a fresh heartbeat and a future release time. Beating stops at the hold
+# CEILING (acquired_at + RIG_LEASE_MAX_HOLD_SECS) and when the refresher's owner dies, so a dead
+# or stuck holder's lease still ages into the heartbeat-stale reclaim below.
 #
 # The restreamer half is filed as zbynekdrlik/restreamer#349 -- until it participates, this lease
 # is one-directional (camera-box takes it; restreamer does not yet check it). That is fine: the
@@ -48,7 +50,8 @@
 #                                 is ALSO released on the success path and on cancellation -- never
 #                                 only on rig-busy-gate.sh's own success path, per the issue)
 #   - scripts/lib/rig-heartbeat.sh (the holder's issue-281 refresher: rig_lease_refresh_if_mine on
-#                                 every beat, issue 1383) + scripts/av-soak.sh (slot boundaries)
+#                                 every beat, issue 1383) + scripts/av-soak.sh (slot boundaries) +
+#                                 scripts/rig-busy-gate.sh (busy-wait + the lease-only keep-alive)
 #
 # Tunables (env, all optional):
 #   RIG_LEASE_DIR              lockdir path (default /var/tmp/rig-lease; tests override for isolation)
@@ -61,6 +64,10 @@
 #                              self-heal: never a permanent deadlock, just a bounded worst case).
 #   RIG_LEASE_LOOKAHEAD_SECS   how far past "now" rig_lease_refresh_if_mine rolls the holder's
 #                              expected_release_at (default 900 = 15 min, issue 1383)
+#   RIG_LEASE_MAX_HOLD_SECS    the hold CEILING: no beat past acquired_at + this (default 4500 =
+#                              full-path-e2e.yml's timeout-minutes 75; the av-soak sets its own
+#                              declared run window, issue 1383)
+#   RIG_LEASE_KEEPALIVE_SEC    the gate keep-alive's beat period (default 30, issue 1383)
 
 rig_lease_dir() {
   printf '%s\n' "${RIG_LEASE_DIR:-/var/tmp/rig-lease}"
@@ -241,28 +248,27 @@ with open(path, "w") as f:
 }
 
 # rig_lease_refresh_if_mine <repo> <run_id> [<lookahead_secs>] -> the HOLDER's own keep-alive
-# (issue 1383). ONLY when the current holder.json names exactly <repo> + <run_id>: bump the
-# heartbeat and roll expected_release_at forward to max(current, now + lookahead) -- never
-# backward, so a holder that declared a longer run up front (the av-soak) keeps its declaration.
-# lookahead defaults to RIG_LEASE_LOOKAHEAD_SECS, else 900 s.
+# (issue 1383). ONLY when the current holder.json names exactly <repo> + <run_id> and the hold is
+# still under its ceiling (acquired_at + RIG_LEASE_MAX_HOLD_SECS, default 4500 s = the full-path
+# job's timeout-minutes): bump the heartbeat and roll expected_release_at forward to
+# max(current, now + lookahead) -- never backward, so a holder that declared a longer run up front
+# (the av-soak) keeps its declaration. lookahead defaults to RIG_LEASE_LOOKAHEAD_SECS, else 900 s.
+# The ceiling keeps the #830 "never a permanent deadlock" backstop: a stuck-but-alive holder stops
+# being beaten and ages into the heartbeat-stale reclaim.
 #
-# Check-and-update in ONE python process anchored on a directory FD of the lease dir:
-#   - a missing lease dir, a missing/corrupt holder.json, a foreign holder or an empty identity is
-#     a no-op -- nothing is created, a foreign heartbeat never moves;
-#   - holder.json is replaced by temp + rename (never truncated and rewritten in place), so the
-#     :8890 server and every peer read either the old or the new complete file;
-#   - every write goes through the dir FD, so a lease released (renamed aside, #857) between the
-#     read and the write is never re-created at the lease path and a NEW holder's lockdir (a
-#     different directory) is never written; holder.json is re-read just before the rename and a
-#     changed owner wins (a concurrent reclaim is never overwritten by our stale copy).
+# The check-and-update is ONE python process, scripts/rig_lease_refresh.py (its module doc holds the
+# full safety contract): every write goes through a directory FD of the lease dir; holder.json is
+# replaced by an O_EXCL temp + rename; a missing lease dir, a missing/corrupt holder.json, a foreign
+# holder or an empty identity creates and touches nothing; holder.json and the lease path are
+# re-checked just before the rename, so a concurrent reclaim or release wins (the remaining window
+# between that check and the rename is unreachable while the holder beats).
 #
-# Prints exactly one line and returns 0 only for "refreshed":
-#   RIG_LEASE_REFRESH=refreshed expected_release_at=<ts>
-#   RIG_LEASE_REFRESH=not-mine holder=<repo>#<run_id>   (rc 1)
-#   RIG_LEASE_REFRESH=no-lease | no-holder | corrupt | no-identity   (rc 1)
-#   RIG_LEASE_REFRESH=error <what>   (rc 2, an unexpected fs error)
+# Prints exactly one `RIG_LEASE_REFRESH=<status>` line. Returns 0 refreshed; 1 not ours (not-mine /
+# no-lease / no-holder / corrupt / no-identity / released-during-refresh); 2 a filesystem error (the
+# lease may still be ours); 3 past the hold ceiling or no parseable acquired_at.
 rig_lease_refresh_if_mine() {
   local repo="${1:-}" run_id="${2:-}" lookahead="${3:-${RIG_LEASE_LOOKAHEAD_SECS:-900}}"
+  local max_hold="${RIG_LEASE_MAX_HOLD_SECS:-4500}"
   if [ -z "$repo" ] || [ -z "$run_id" ]; then
     printf 'RIG_LEASE_REFRESH=no-identity\n'
     return 1
@@ -270,81 +276,47 @@ rig_lease_refresh_if_mine() {
   case "$lookahead" in
     "" | *[!0-9]*) lookahead=900 ;;
   esac
-  python3 -c '
-import json, os, sys
-from datetime import datetime, timedelta, timezone
+  case "$max_hold" in
+    "" | *[!0-9]*) max_hold=4500 ;;
+  esac
+  python3 "$(dirname "${BASH_SOURCE[0]}")/../rig_lease_refresh.py" \
+    "$(rig_lease_dir)" "$repo" "$run_id" "$lookahead" "$max_hold"
+}
 
-lease_dir, repo, run_id, lookahead = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
-ISO = "%Y-%m-%dT%H:%M:%SZ"
-
-
-def done(status, rc):
-    print("RIG_LEASE_REFRESH=" + status)
-    sys.exit(rc)
-
-
-def read_holder(dfd):
-    try:
-        fd = os.open("holder.json", os.O_RDONLY, dir_fd=dfd)
-    except FileNotFoundError:
-        return None, "no-holder"
-    with os.fdopen(fd) as f:
-        try:
-            data = json.load(f)
-        except ValueError:
-            return None, "corrupt"
-    if not isinstance(data, dict):
-        return None, "corrupt"
-    return data, ""
-
-
-def owner(data):
-    return str(data.get("repo", "") or ""), str(data.get("run_id", "") or "")
-
-
-def parse(ts):
-    try:
-        return datetime.strptime(str(ts), ISO).replace(tzinfo=timezone.utc)
-    except ValueError:
-        return None
-
-
-try:
-    try:
-        dfd = os.open(lease_dir, os.O_RDONLY | os.O_DIRECTORY)
-    except (FileNotFoundError, NotADirectoryError):
-        done("no-lease", 1)
-    data, why = read_holder(dfd)
-    if data is None:
-        done(why, 1)
-    if owner(data) != (repo, run_id):
-        done("not-mine holder=%s#%s" % owner(data), 1)
-
-    hb = os.open("heartbeat", os.O_WRONLY | os.O_CREAT, 0o666, dir_fd=dfd)
-    try:
-        os.utime(hb)
-    finally:
-        os.close(hb)
-
-    target = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=lookahead)
-    current = parse(data.get("expected_release_at", ""))
-    if current is not None and current >= target:
-        done("refreshed expected_release_at=" + str(data["expected_release_at"]), 0)
-
-    data["expected_release_at"] = target.strftime(ISO)
-    tmp = "holder.json.refresh.%d" % os.getpid()
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o666, dir_fd=dfd)
-    with os.fdopen(fd, "w") as f:
-        json.dump(data, f)
-    again, _ = read_holder(dfd)
-    if again is None or owner(again) != (repo, run_id):
-        os.unlink(tmp, dir_fd=dfd)
-        done("not-mine holder=changed-before-the-rename", 1)
-    os.replace(tmp, "holder.json", src_dir_fd=dfd, dst_dir_fd=dfd)
-    done("refreshed expected_release_at=" + data["expected_release_at"], 0)
-except OSError as e:
-    done("error %s" % e, 2)
-' "$(rig_lease_dir)" "$repo" "$run_id" "$lookahead"
+# rig_lease_keepalive_spawn <repo> <run_id> -> detach a LEASE-ONLY keep-alive (issue 1383) that runs
+# rig_lease_refresh_if_mine every RIG_LEASE_KEEPALIVE_SEC (default 30 s). rig-busy-gate.sh starts it
+# on its success path: it bridges the gap between the acquire and the E2E's own heartbeat refresher
+# (the verdict-exe fetch step and the first preflight ran ~18 min unbeaten on 27.9.2026) and keeps
+# beating until the lease is released or goes foreign (rc 1) or the hold ceiling is reached (rc 3);
+# a filesystem error (rc 2) is retried on the next tick. Every fd is on /dev/null, so a GitHub
+# Actions step or a test's captured pipes are never held open; the runner's end-of-job orphan
+# cleanup ends it at the latest. Prints `RIG_LEASE_KEEPALIVE=started pid=<pid> every=<s>s for
+# <repo>#<run_id>`; without an identity it starts nothing.
+rig_lease_keepalive_spawn() {
+  local repo="${1:-}" run_id="${2:-}"
+  local interval="${RIG_LEASE_KEEPALIVE_SEC:-30}"
+  if [ -z "$repo" ] || [ -z "$run_id" ]; then
+    return 0
+  fi
+  case "$interval" in
+    "" | 0 | *[!0-9]*) interval=30 ;;
+  esac
+  (
+    trap - EXIT
+    set +e
+    while :; do
+      sleep "$interval" || exit 0
+      rig_lease_refresh_if_mine "$repo" "$run_id" >/dev/null 2>&1
+      case "$?" in
+        0 | 2) ;;
+        *) exit 0 ;;
+      esac
+    done
+  ) </dev/null >/dev/null 2>&1 &
+  local kpid=$!
+  disown "$kpid" 2>/dev/null || true
+  printf 'RIG_LEASE_KEEPALIVE=started pid=%s every=%ss for %s#%s\n' \
+    "$kpid" "$interval" "$repo" "$run_id"
 }
 
 # rig_lease_try_acquire -> the ATOMIC primitive: `mkdir` the lockdir. exit 0 iff WE created it

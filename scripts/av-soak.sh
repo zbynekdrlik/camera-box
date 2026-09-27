@@ -245,7 +245,12 @@ RUN_DIR="${AV_SOAK_RUN_DIR:-$HOME/.camera-box/av-soak/$STAMP}"
 CSV="$RUN_DIR/soak.csv"
 RIG_LEASE_REPO_NAME="${AV_SOAK_LEASE_REPO:-camera-box-av-soak}"
 RIG_LEASE_OURS="av-soak-${STAMP}-$$"
-LEASE_EXPECTED_AT="$(date -u -d "+$(( DURATION_S + SLOT_S + 1800 )) seconds" +%Y-%m-%dT%H:%M:%SZ)"
+LEASE_HOLD_S=$(( DURATION_S + SLOT_S + 1800 ))
+LEASE_EXPECTED_AT="$(date -u -d "+${LEASE_HOLD_S} seconds" +%Y-%m-%dT%H:%M:%SZ)"
+# issue 1383: the lease keep-alive stops beating past acquired_at + this ceiling (the declared run
+# window), so a stuck-but-alive soak still ages into the heartbeat-stale reclaim. Set before the
+# heartbeat refresher starts: its subshell inherits the value.
+RIG_LEASE_MAX_HOLD_SECS="$LEASE_HOLD_S"
 VERDICT_BIN="${PROBE_BIN_DIR:+$PROBE_BIN_DIR/recording-verdict}"
 
 # --- --plan: print every step, touch nothing ------------------------------------------------------
@@ -697,6 +702,29 @@ add_row() {  # K EPOCH OUTCOME [VERDICT_JSON] [RC] [RUN_ID]
     || log "WARNING: could not append the slot-$1 row"
 }
 
+# issue 1383: the soak's own lease keep-alive (slot start + the between-slot wait) on the one holder
+# helper. Not ours any more -> abort; past the declared window (the hold ceiling) -> abort with that
+# reason; a filesystem error -> log and carry on (the heartbeat refresher beats again within 30 s).
+soak_lease_keepalive() {
+  local out="" rc=0
+  out="$(rig_lease_refresh_if_mine "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS")" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    2)
+      log "WARNING: could not refresh the rig lease (${out#RIG_LEASE_REFRESH=}) -- next beat retries"
+      return 0
+      ;;
+    3)
+      ABORT_REASON="the soak ran past its declared lease window (${out#RIG_LEASE_REFRESH=})"
+      return 1
+      ;;
+    *)
+      ABORT_REASON="the rig lease is no longer ours"
+      return 1
+      ;;
+  esac
+}
+
 run_slot() {
   local k="$1" sd pk probe rid seg scene label ns start_ns="" outcome=ok bounds=() rc box host fs sp tp
   local strih_path="" stream_path="" marker_win sched_win partial_win strih_argv stream_argv merge_argv
@@ -705,8 +733,7 @@ run_slot() {
   pk="$(printf '%03d' "$k")"
   sd="$RUN_DIR/slot-$pk"
   mkdir -p "$sd"
-  rig_lease_refresh_if_mine "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" >/dev/null \
-    || { ABORT_REASON="the rig lease is no longer ours"; exit 5; }
+  soak_lease_keepalive || exit 5
   for box in strih stream; do
     if [ "$box" = strih ]; then host="$STRIH_HOST"; else host="$STREAM_HOST"; fi
     fs="$(av_soak_free_space_verdict "$host" "$BUNDLE_STATE_PORT" "$RECORDINGS_FREE_MIN_GB" "$HERE")"
@@ -913,7 +940,7 @@ wait_until() {  # TARGET_EPOCH -> 0 when reached, 1 when STOP was requested; a b
     fi
     left=$(( target - now ))
     [ "$left" -gt 0 ] || break
-    rig_lease_refresh_if_mine "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" >/dev/null || true
+    soak_lease_keepalive || exit 5
     isleep $(( left < 10 ? left : 10 ))
   done
   if [ "$left" -lt -60 ]; then log "slot starts $(( -left )) s late (the previous slot overran)"; fi
