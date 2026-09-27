@@ -212,9 +212,10 @@ def test_legacy_loss_older_than_the_window_is_not_reported():
 
 
 def test_legacy_loss_on_one_of_two_outputs_is_counted():
-    # A = 44+k underflows, B = 90 fixed. Only A moves: 10 underflows in the window.
+    # A = 44 then +1 underflow per period for 10 periods, B = 90 fixed: 10 underflows. The loss
+    # starts after the tail's first logging period, which only seeds the known counters.
     def a(i):
-        return (44 + (i if i < 10 else 10), 13, 9)
+        return (44 + min(max(i - 1, 0), 10), 13, 9)
     lines = _pairs(6 * 3600, 30, a, lambda i: (90, 13, 9))
     events, _ms, _dest, _age = bsg.vban_pacer_loss_from_log(_text(lines))
     assert events == "10"
