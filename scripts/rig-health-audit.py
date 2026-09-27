@@ -623,13 +623,14 @@ def cg_chain_detail_from_output(stdout: str) -> str:
 
 
 def check_cg_chain() -> None:
-    """REPORT-ONLY CG-chain row (#1300): fetch strih + stream OBS log tails, run cg-chain-verify.sh
-    --report-only over them, and emit ONE NOTE row. Never PASS/WARN/FAIL -> never changes the audit
+    """REPORT-ONLY CG-chain row (#1300): fetch the strih OBS log tail, run cg-chain-verify.sh
+    --hops strih --report-only over it, and emit ONE NOTE row (issue 1380: the stream hop is off the
+    default since the owner removed its input on 27.9.2026). Never PASS/WARN/FAIL -> never changes the audit
     exit code. A box that is off / unreachable yields a NOTE 'log unreadable', never a page."""
     import tempfile
 
     logs: dict[str, str] = {}
-    for hop, ip in (("strih", STRIH), ("stream", STREAM)):
+    for hop, ip in (("strih", STRIH),):
         tail = obs_log_tail(ip)
         if tail is None:
             emit(CG_CHAIN_REPORT_VERDICT, "cg-chain",
@@ -648,7 +649,7 @@ def check_cg_chain() -> None:
             env[f"CG_CHAIN_{hop.upper()}_LOG"] = path
         try:
             out = subprocess.run(
-                ["bash", CG_CHAIN_SCRIPT, "--hops", "strih stream", "--report-only"],
+                ["bash", CG_CHAIN_SCRIPT, "--hops", "strih", "--report-only"],
                 env=env, capture_output=True, text=True, timeout=30,
             ).stdout
         except (subprocess.TimeoutExpired, OSError) as exc:

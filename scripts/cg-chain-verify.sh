@@ -29,14 +29,16 @@ set -euo pipefail
 # Usage:
 #   scripts/cg-chain-verify.sh [--hops "cg-obs strih"] [--skew-bound-ms 20] [--min-samples 2]
 #       [--asrc-floor-ppm 10] [--soak-hours N] [--interval-s 300] [--csv <path>] [--report-only]
-# Exit: 0 all hops PASS (or --report-only); 3 any hop/source FAIL or a hop log is UNREADABLE.
+# Exit: 0 all hops PASS (or --report-only); 3 any hop/source FAIL, a hop log is UNREADABLE, or
+#   NO source was verified at all (every requested source ABSENT -> OVERALL: NO-DATA).
 #
 # HOPS (issue 1380, ROZHODNUTIE 27.9.2026): the default is `cg-obs strih`. The owner removed the
 # stream OBS input the stream hop used to read, so the stream hop runs ONLY when asked for
 # (`--hops "... stream"` or env CG_CHAIN_HOPS). Its input is CG_CHAIN_STREAM_SRC (default
-# `NDIA cg stream`, the CG-named NDI input of the live stream production scene read 27.9.2026). When
-# that input has no `genlock-fifo audit` line in the window the hop prints a named ABSENT row and
-# does not fail the run (cg_chain_hop_absent_ok); a missing strih `cg` still FAILs.
+# `NDIA cg stream`, the CG-named NDI input of the live stream production scene read 27.9.2026; it is
+# currently senderless). When that input has no `genlock-fifo audit` line in the window -- it is
+# missing, or it has received no frame since OBS start -- the hop prints a named ABSENT row and does
+# not fail the run (cg_chain_hop_absent_ok); a missing strih `cg` still FAILs.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/cg-chain-verify.sh
@@ -120,6 +122,7 @@ printf '%-7s %-14s %-4s %-5s %-7s %-6s %-5s %-5s %-6s %-5s %-9s %-12s %s\n' \
   HOP SOURCE LOCK SAMP SKEWms dDROP dUND dREL dLATE dBRT ASRCppm AUDIO VERDICT
 
 overall_fail=0
+verified=0
 if [ -n "$CSV_PATH" ] && [ ! -s "$CSV_PATH" ]; then
   cg_chain_csv_header > "$CSV_PATH"
 fi
@@ -147,7 +150,7 @@ run_one_window() {
       # a named ABSENT row -- never a false FAIL, never counted as PASS.
       if [ -z "$summary" ] && cg_chain_hop_absent_ok "$hop"; then
         printf '%-7s %-14s %s\n' "$hop" "$src" "ABSENT"
-        printf '         reason: no genlock-fifo audit line for %s on the %s hop (input not present; set CG_CHAIN_STREAM_SRC)\n' "'$src'" "$hop"
+        printf '         reason: no genlock-fifo audit line for %s on the %s hop (input missing, or no frame received since OBS start; set CG_CHAIN_STREAM_SRC)\n' "'$src'" "$hop"
         if [ -n "$CSV_PATH" ]; then
           ts="$(_now_utc)"
           cg_chain_csv_row "$ts" "$hop" "$src" "ABSENT" "" "" "" "" "" "" "" "" "" "" >> "$CSV_PATH"
@@ -187,6 +190,7 @@ run_one_window() {
       fi
       printf '%-7s %-14s %-4s %-5s %-7s %-6s %-5s %-5s %-6s %-5s %-9s %-12s %s\n' \
         "$hop" "$src" "$lockw" "$samples" "$maxskew" "$d_drop" "$d_und" "$d_rel" "$d_late" "$d_brt" "$asrcw" "$audiow" "$verdict"
+      verified=$((verified + 1))
       if [ "$verdict" != "PASS" ]; then
         overall_fail=1
         printf '%s\n' "$verdict_out" | tail -n +2 | sed 's/^/         reason: /'
@@ -208,7 +212,13 @@ while [ "$w" -lt "$iters" ]; do
   if [ "$w" -lt "$iters" ]; then "$CG_CHAIN_SLEEP_CMD" "$INTERVAL_S" || true; fi
 done
 
-if [ "$overall_fail" -eq 0 ]; then
+if [ "$overall_fail" -eq 0 ] && [ "$verified" -eq 0 ]; then
+  # issue 1380: every requested source was ABSENT -- nothing was verified, so never a PASS (a typo in
+  # CG_CHAIN_STREAM_SRC must not look like success).
+  echo "OVERALL: NO-DATA"
+  [ "$REPORT_ONLY" -eq 1 ] && exit 0
+  exit 3
+elif [ "$overall_fail" -eq 0 ]; then
   echo "OVERALL: PASS"
   exit 0
 else

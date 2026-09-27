@@ -603,11 +603,11 @@ STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}" # stream program input (
 # issue 1380 (owner request 27.9.2026): stream's DEVELOPMENT program scene -- its one item is the
 # owner's production scene nested as a scene source (same pixels, the same calibrated NDI 2ME PGM
 # hold, #985), so TEST mode programs + parks on it and development never programs the production
-# scene itself. The SAME lib default scripts/recording-e2e.sh records.
+# scene itself. The SAME lib default scripts/recording-e2e.sh records. Owner hard rule 27.9.2026,
+# verbatim: "nemas ti nikdy v stream obs davat do programu scenu PRO!!!!!" -- the development scene is the ONLY scene
+# this tooling programs on the stream box; nothing here ever sets the production scene on program or
+# preview (obs_phase2.py refuses it), and EVENT mode leaves the stream program alone.
 STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-$STREAM_DEV_SCENE_DEFAULT}"
-# issue 1380: the production scene EVENT mode puts back on the stream program (and the #722
-# contract checks it is there).
-STREAM_EVENT_SCENE="${STREAM_EVENT_SCENE:-$STREAM_PRODUCTION_SCENE_DEFAULT}"
 # #462 (EPIC #466 Topology v2): imag-nb — the new 60fps low-latency IMAG cutter. Its scene->camera
 # mapping is the Phase 1 1:1 pin (setup-imag.sh, #458): 'NDI CAM1'..'NDI CAM6' -> 'CAMx (usb)'
 # 1:1, so cam1 (the SOURCE camera that films cam2's monitor) rides 'NDI CAM1' / scene 'Cam 1'.
@@ -1035,8 +1035,8 @@ set_imag_test_program() {
 verify_stream_program_dev() {
   local here rc=0 seed_rc=0 switch_rc=0
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
-  echo "[obs stream ${STREAM_IP}] issue 1380: ensure the development scene '${STREAM_PROG_SCENE}' nests '${STREAM_EVENT_SCENE}' (created when missing; '${STREAM_EVENT_SCENE}' itself is never written)"
-  stream_dev_scene_ensure "$here" "$STREAM_IP" "$OBS_WS_PASSWORD" "$STREAM_PROG_SCENE" "$STREAM_EVENT_SCENE" \
+  echo "[obs stream ${STREAM_IP}] issue 1380: ensure the development scene '${STREAM_PROG_SCENE}' nests '${STREAM_PRODUCTION_SCENE_DEFAULT}' (created when missing; '${STREAM_PRODUCTION_SCENE_DEFAULT}' itself is never written or programmed)"
+  stream_dev_scene_ensure "$here" "$STREAM_IP" "$OBS_WS_PASSWORD" "$STREAM_PROG_SCENE" "$STREAM_PRODUCTION_SCENE_DEFAULT" \
     2>&1 | sed 's/^/    [stream dev scene] /' || seed_rc=$?
   if [ "$seed_rc" -ne 0 ]; then
     echo "[obs stream ${STREAM_IP}] issue 1380 gap-2 FAILED: the development scene could not be ensured (seed_rc=${seed_rc}) -- see the [stream dev scene] lines above"
@@ -1198,29 +1198,6 @@ park_stream_program_dev() {
   return $rc
 }
 
-# restore_stream_program_production -> issue 1380: EVENT mode undoes development -- it puts the
-# production scene ($STREAM_EVENT_SCENE) back on stream's PROGRAM ONLY when the live program is the
-# development scene (--only-from); an operator's scene (PRE/POST/PRO/...) is left alone
-# (ROZHODNUTIE 27.9.2026: forcing PRO while streaming would arm the Companion auto-record). The
-# same `switch` action, with the prod non-black floor (--prod-floor: real
-# production content can be legitimately dim, #677) and --black-report-only (before a service the
-# cameras may be dark; a BLACK program is a WARNING once the scene is SET, only a failed set or
-# transport returns non-zero). --replace-preview moves a Studio Mode preview an E2E left on the
-# development scene to the production scene, so a Transition click cannot put the development scene
-# back on program. Never fatal to the EVENT switch on its own -- the caller records the rc, finishes
-# the burn-clear + contract, and fails loud at the end.
-restore_stream_program_production() {
-  local here rc=0
-  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
-  echo "[obs stream ${STREAM_IP}] issue 1380: if PROGRAM is still the development scene '${STREAM_PROG_SCENE}', put the production scene '${STREAM_EVENT_SCENE}' back (an operator scene is left alone)"
-  python3 "$here/obs_phase2.py" switch --host "$STREAM_IP" --program-scene "$STREAM_EVENT_SCENE" \
-    --only-from "$STREAM_PROG_SCENE" \
-    --prod-floor --black-report-only --replace-preview "$STREAM_PROG_SCENE" \
-    --password "$OBS_WS_PASSWORD" \
-    2>&1 | sed 's/^/    [stream event program] /' || rc=$?
-  return $rc
-}
-
 # print_genlock_relaunch_note MODE -> the genlock RELAUNCH step (printed, not run — a Windows GUI
 # OBS launch goes via the win-* MCP; #701 proved plain scp/ssh reaches stream, but that doesn't
 # drive/verify a GUI app; the Linux strih-lx restarts its supervised user unit, issue 1317). #257: env-free; the wrapper just verifies the genlock
@@ -1237,7 +1214,7 @@ print_genlock_relaunch_note() {
 #   strih-lx : ssh newlevel@${STRIH_IP} 'systemctl --user restart strih-obs.service'
 #   stream   : scripts/launch-obs-genlock.sh --box stream --force
 # Then confirm (per the e2e / obs-ops playbook skills): the right stream scene (${STREAM_PROG_SCENE}
-# for test, ${STREAM_EVENT_SCENE} for event), recording NATIVE 1080p (#225), DanteSync locked. The wrapper EXITS 0 only when the OBS
+# for test; EVENT leaves the stream program to the owner, issue 1380), recording NATIVE 1080p (#225), DanteSync locked. The wrapper EXITS 0 only when the OBS
 # log shows the genlock render tick ENABLED.
 EOF
 }
@@ -1387,7 +1364,7 @@ do_test() {
   echo "                     source camera ${RIG_SOURCE_BOX} (${RIG_SOURCE_IP}) left on its DEPLOYED service (already at the 30 fps test rate)."
   echo "ACHIEVED (obs side): genlock_burn=true on strih + stream + imag program inputs (WebSocket, no relaunch)."
   echo "                     imag-nb (${IMAG_IP}) PROGRAM routed to '${IMAG_PROG_SCENE}' (${RIG_SOURCE_BOX}, #462)."
-  echo "                     stream PROGRAM proved alive + PARKED on the development scene '${STREAM_PROG_SCENE}' (#901/#985, issue 1380 — the production scene '${STREAM_EVENT_SCENE}' nested, the calibrated hold; '${STREAM_EVENT_SCENE}' itself never programmed by development)."
+  echo "                     stream PROGRAM proved alive + PARKED on the development scene '${STREAM_PROG_SCENE}' (#901/#985, issue 1380 — the production scene '${STREAM_PRODUCTION_SCENE_DEFAULT}' nested, the calibrated hold; our tooling never programs '${STREAM_PRODUCTION_SCENE_DEFAULT}' itself)."
   echo "ACHIEVED (chain, #901): strih's live program scene confirmed NON-BLACK — the camera genuinely sees content, not just a live process."
   echo "                        mbc Dante transport confirmed bound + unmuted on stream."
   echo "                        measurement-audio arrival checked end to end (verdict printed above — PASS / non-blocking WARN / hard FAIL)."
@@ -1607,11 +1584,12 @@ event_mode_assert() {
   artifacts_json="$(printf '%s\n%s\n' "$artifacts_remote" "$artifacts_local" | jq -R -s 'split("\n") | map(select(length>0))')"
   echo "    [artifacts] $artifacts_json"
 
-  # --- item 9 (issue 1380): the stream PROGRAM is no longer the development scene -------------
-  # An unreadable program reads empty and fails the item closed in event_assert.py.
+  # --- issue 1380: the stream PROGRAM scene, report-only (never a contract item, never a switch) --
+  # Owner hard rule 27.9.2026: our tooling never programs the production scene; EVENT leaves the
+  # stream program to the owner, who cuts to it himself. This line only names what is live.
   local stream_program_scene
   stream_program_scene="$(stream_program_scene_read "$here" "$STREAM_IP" "$OBS_WS_PASSWORD")"
-  echo "    [stream program] '${stream_program_scene}' (must not be the development scene '${STREAM_PROG_SCENE}')"
+  echo "    [stream program] '${stream_program_scene:-unreadable}' (report-only, issue 1380: EVENT never switches the stream program; the owner cuts to '${STREAM_PRODUCTION_SCENE_DEFAULT}' himself)"
 
   # --- assemble the facts JSON + decide -------------------------------------------------------
   jq -n \
@@ -1626,8 +1604,6 @@ event_mode_assert() {
     --argjson ndi_mismatches "$ndi_mismatches" \
     --argjson artifacts_existing "$artifacts_json" \
     --arg latency_detail "$latency_detail" \
-    --arg stream_program_scene "$stream_program_scene" \
-    --arg stream_dev_scene "$STREAM_PROG_SCENE" \
     '{
       fleet_paint_process_counts: $fleet_paint_process_counts,
       fleet_service_active: $fleet_service_active,
@@ -1639,12 +1615,7 @@ event_mode_assert() {
       latency_calibrated_ms: (if ($latency_calibrated_ms | length) > 0 then ($latency_calibrated_ms | tonumber) else null end),
       ndi_mismatches: $ndi_mismatches,
       artifacts_existing: $artifacts_existing,
-      stream_program_scene: (if ($stream_program_scene | length) > 0 then $stream_program_scene else null end),
-      stream_dev_scene: $stream_dev_scene,
-      details: {
-        latency_calibrated: $latency_detail,
-        stream_program_not_development: ("program=\($stream_program_scene), nesmie byt \($stream_dev_scene)")
-      }
+      details: {latency_calibrated: $latency_detail}
     }' > "$facts_json"
 
   echo
@@ -1712,15 +1683,6 @@ do_event() {
   echo "[obs] #399 enforce the strih NDI-input→camera mapping (4 distinct — correct for broadcast too):"
   enforce_strih_ndi_mapping
   echo
-  # issue 1380: development ran on the development scene; if the stream PROGRAM is still on it,
-  # put the production scene back before the contract checks it (an operator scene is left alone). A failure is recorded, never fatal here, and folded
-  # into the exit status below (the #868 shape): the contract + Discord confirmation still run.
-  _stream_event_rc=0
-  restore_stream_program_production || _stream_event_rc=$?
-  if [ "$_stream_event_rc" -ne 0 ]; then
-    echo "WARNING issue 1380: putting the production scene back on the stream PROGRAM FAILED (rc=$_stream_event_rc) — continuing to the contract; EVENT mode will still exit non-zero." >&2
-  fi
-  echo
   print_genlock_relaunch_note event
   echo
   echo "ACHIEVED (cam side): cam2 painter stopped, camera-box active + unconditional HDMI preview restored."
@@ -1739,14 +1701,12 @@ do_event() {
   echo
   # #868: fold the recorded cam-side restore failure into the final verdict — deferring it past the
   # burn-clear must never SWALLOW it.
-  if [ "$EVENT_ASSERT_PASS" -eq 0 ] && [ "${_cam_restore_rc:-0}" -eq 0 ] && [ "${_stream_event_rc:-0}" -eq 0 ]; then
+  if [ "$EVENT_ASSERT_PASS" -eq 0 ] && [ "${_cam_restore_rc:-0}" -eq 0 ]; then
     echo "RESULT: EVENT mode — cam side PASS, burns OFF, #722 CONTRACT CONFIRMED clean for broadcast."
     exit 0
   fi
   if [ "${_cam_restore_rc:-0}" -ne 0 ]; then
     echo "RESULT: EVENT mode — cam-side restore FAILED (#868, rc=${_cam_restore_rc}). Burns were still cleared, but the rig is NOT confirmed clean — see the cam-side failure above." >&2
-  elif [ "${_stream_event_rc:-0}" -ne 0 ]; then
-    echo "RESULT: EVENT mode — the stream PROGRAM could not be moved off the development scene to '${STREAM_EVENT_SCENE}' (issue 1380, rc=${_stream_event_rc}). The rig is NOT confirmed clean for broadcast — see the [stream event program] lines above." >&2
   else
     echo "RESULT: EVENT mode — #722 CONTRACT FAILED. The rig is NOT confirmed clean for broadcast — see the assert summary above." >&2
   fi

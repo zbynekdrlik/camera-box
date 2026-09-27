@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
-"""#722 -- EVENT-mode CONTRACT: PURE decision + aggregation for rig-mode.sh event's machine-checkable
-assert phase (8 items at #722; issue 1380 added the 9th, the stream program no longer on the
-development scene).
+"""#722 -- EVENT-mode CONTRACT: PURE decision + aggregation for rig-mode.sh event's 8-item
+machine-checkable assert phase.
 
 Trigger (2026-07-12 live incident, #721): rig-mode event + a manual supervisor checklist BOTH
 said "clean" while a QR was live on air; the user caught it by eye minutes before broadcast.
@@ -19,7 +18,7 @@ the decision layer pure makes it trivially unit-testable with fixtures
 place, never re-derived ad hoc.
 
 CLI entrypoint (`decide`): reads a facts JSON (assembled by rig-mode.sh's event_mode_ledger_...
-/ event assert wiring), computes the per-item verdict + aggregate, prints the Slovak summary, and
+/ event assert wiring), computes the 8-item verdict + aggregate, prints the Slovak summary, and
 exits 0 (PASS) / 1 (FAIL). Also writes a machine-readable result JSON (consumed by the #724
 Discord confirmation composer) when --result-out is given.
 """
@@ -28,7 +27,7 @@ import argparse
 import json
 import sys
 
-# The contract items, in a FIXED order -- both the Slovak summary and the aggregate()
+# The 8 contract items, in a FIXED order -- both the Slovak summary and the aggregate()
 # failed-items list always follow this order, never dict/insertion order (a missing/absent item
 # must never silently vanish from the printed summary).
 ITEM_ORDER = [
@@ -40,7 +39,6 @@ ITEM_ORDER = [
     "latency_calibrated",
     "ndi_mapping",
     "artifacts_cleared",
-    "stream_program_not_development",
 ]
 
 ITEM_LABELS_SK = {
@@ -52,7 +50,6 @@ ITEM_LABELS_SK = {
     "latency_calibrated": "latencia zodpoveda kalibrovanej hodnote",
     "ndi_mapping": "mapovanie kamier je spravne (#399)",
     "artifacts_cleared": "testovacie artefakty su vymazane",
-    "stream_program_not_development": "stream program uz nie je vyvojova scena Development",
 }
 
 
@@ -203,23 +200,6 @@ def artifacts_cleared_ok(existing_paths: list) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Item 9 (issue 1380) -- the stream program is no longer the development scene.
-# ---------------------------------------------------------------------------
-
-
-def stream_program_not_development_ok(program_scene, dev_scene) -> bool:
-    """Development programs the stream OBS's own development scene (the production scene nested
-    inside it). EVENT mode undoes that -- it switches to the production scene ONLY when the live
-    program is the development scene, and leaves an operator's scene (PRE/POST/PRO/...) alone
-    (ROZHODNUTIE 27.9.2026). PASS iff the program scene is READABLE and is NOT the development
-    scene. An unreadable program (None/empty) or an unknown development-scene name fails CLOSED --
-    never "we could not read it, so it is fine" (#1225)."""
-    if not program_scene or not dev_scene:
-        return False
-    return program_scene != dev_scene
-
-
-# ---------------------------------------------------------------------------
 # Aggregation.
 # ---------------------------------------------------------------------------
 
@@ -257,8 +237,8 @@ def format_discord_message_sk(overall_pass: bool, item_results: dict, details: d
     terminal claim about the rig being broadcast-clean. PASS -> "EVENT mod POTVRDENY" (a
     confirmation); FAIL -> "EVENT mod NEPRESIEL" (a WARNING naming every failing item with a
     CHYBA mark). Reuses format_summary_sk's per-item lines -- one source of truth for what
-    "clean" means, never a second, divergent description of the same items. Always
-    comfortably under Discord's 2000-char single-message hard cap (a short fixed 9-item
+    "clean" means, never a second, divergent description of the same 8 items. Always
+    comfortably under Discord's 2000-char single-message hard cap (a short fixed 8-item
     checklist, even with details populated for every item)."""
     header_emoji = "✅" if overall_pass else "⚠️"  # checkmark / warning
     summary = format_summary_sk(overall_pass, item_results, details)
@@ -284,9 +264,6 @@ def compute_item_results(facts: dict) -> dict:
         ),
         "ndi_mapping": ndi_mapping_ok(facts.get("ndi_mismatches", [])),
         "artifacts_cleared": artifacts_cleared_ok(facts.get("artifacts_existing", [])),
-        "stream_program_not_development": stream_program_not_development_ok(
-            facts.get("stream_program_scene"), facts.get("stream_dev_scene")
-        ),
     }
 
 

@@ -12,125 +12,112 @@ paths:
   - "tests/harness_stream_dev_scene_1380.rs"
 ---
 
-# The stream OBS `Development` scene — development never programs `PRO` (issue 1380)
+# The stream OBS `Development` scene — our tooling NEVER programs `PRO` (issue 1380)
 
-Owner request 27.9.2026: on the stream OBS (10.77.9.204) development uses its own scene
-`Development`, whose ONE item is the owner's production scene `PRO` as a nested scene source.
-Development never programs `PRO` itself. EVENT mode puts `PRO` back.
+**Owner hard rule, 27.9.2026, verbatim: "nemas ti nikdy v stream obs davat do programu scenu PRO!!!!!"**
+
+- No tool of ours may EVER put the owner's production scene `PRO` on the stream OBS program OR
+  preview. That covers rig-mode TEST and EVENT, the E2E, the restore helpers and cleanup.
+- `Development` is the ONLY scene our tooling programs on the stream box.
+- EVENT mode does NOT touch the stream program; the owner cuts to `PRO` himself.
 
 ## What it is
 
-- `Development` renders exactly `PRO` (same pixels, the same warm `NDI 2ME PGM` receiver, the same
-  calibrated hold). The 911004 burn, the latency pins and every NDI target stay on the input
-  `NDI 2ME PGM`, so the recording and the verdict are unchanged.
+- `Development` (on the stream OBS, 10.77.9.204) has ONE item: the scene `PRO` as a nested source.
+  It renders exactly `PRO` (same pixels, the same warm `NDI 2ME PGM` receiver, the same calibrated
+  hold). The 911004 burn, the latency pins and every NDI target stay on `NDI 2ME PGM`, so the
+  recording and the verdict are unchanged.
 - Both names are declared ONCE in `scripts/lib/stream-dev-scene.sh`
-  (`STREAM_DEV_SCENE_DEFAULT` / `STREAM_PRODUCTION_SCENE_DEFAULT`). The python module
-  `scripts/stream_dev_scene.py` (`STREAM_DEV_SCENE` / `STREAM_PRODUCTION_SCENE`) is pinned to them
-  by a pytest. Never retype `"PRO"` or `"Development"` in a consumer — derive from these.
-- Code layout: `scripts/stream_dev_scene.py` is the PURE module (the seeder decision + apply, the
-  Studio Mode preview re-assert; the obs-websocket `rpc` is injected). `obs_phase2.py` only wires the
-  CLI and imports that module LAZILY inside `dev-scene` / `switch --replace-preview`: setup-imag.sh
-  and setup-strih.sh install `obs_phase2.py` ALONE on the boxes, so no other subcommand may need the
-  module next to it (pinned by a pytest that runs a lone copy).
+  (`STREAM_DEV_SCENE_DEFAULT` / `STREAM_PRODUCTION_SCENE_DEFAULT`). `scripts/stream_dev_scene.py`
+  (`STREAM_DEV_SCENE` / `STREAM_PRODUCTION_SCENE`) and `obs_phase2.NEVER_PROGRAM_SCENES` are pinned
+  to them by pytests. Never retype `"PRO"` or `"Development"` in a consumer.
+- Code layout: `scripts/stream_dev_scene.py` is the PURE seeder (decision + apply, `rpc` injected;
+  no program/preview writer, pinned). `obs_phase2.py` wires the CLI and imports it LAZILY inside
+  `dev-scene` only: setup-imag.sh and setup-strih.sh install `obs_phase2.py` ALONE on the boxes
+  (pinned by a pytest running a lone copy).
 
-## The seeder — `obs_phase2.py dev-scene` → `stream_dev_scene.ensure_dev_scene` (bash: `stream_dev_scene_ensure`)
+## The guard — `obs_phase2._rpc` refuses `PRO`
 
-- Pure decision `dev_scene_plan(scene_names, dev_items, dev, nested)`: missing scene → create it +
-  the nested item; scene without the item → add the item; item present → nothing.
-- Operator-wins: an existing item or transform is never edited. A hidden `PRO` item is left hidden
-  and reported as a WARNING (the development program then renders without it).
-- It reads only the scene list and the DEVELOPMENT scene's items, and writes only
-  `CreateScene` / `CreateSceneItem` on the development scene, never with `ignore_err`. `PRO` is never
-  read or written. A missing `PRO`, or the two names equal / empty, fails loud (`DevSceneError` → non-zero).
-- Callers: `recording-e2e.sh` right after the `[4/8]` banner (after the pre-`[4/8]` rig-busy
-  re-check, before any program scene is touched), and `rig-mode.sh test` gap 2
-  (`verify_stream_program_dev`). Live seeding is the supervisor's step.
-- The bash wrapper `stream_dev_scene_ensure` seeds ONLY the default `Development`: an env override
-  of `STREAM_PROG_SCENE` naming another scene is never filled (a note, rc 0; that scene must already
-  exist), and an override naming the production scene itself is refused (rc 1).
+`_refuse_forbidden_scene` runs at the top of `_rpc`, the one choke point every obs_phase2 request
+passes through (and `warm_cam_scenes.py` reuses). A `SetCurrentProgramScene` / `SetCurrentPreviewScene`
+whose sceneName is in `NEVER_PROGRAM_SCENES` raises `ForbiddenSceneError` BEFORE anything is sent,
+also with `ignore_err=True`; `main()` turns it into a non-zero exit naming the scene. So `switch
+--program-scene PRO` and `prod-scene --program-scene PRO` fail loud. The guard is host-agnostic (only
+the stream box has a `PRO` scene).
 
-## Who uses which scene
+- `teardown` (E2E cleanup, the restore watchdog) never restores `PRO` onto program or preview: a
+  saved `prev_scene`/`prev_preview` of `PRO` is skipped with a named line ("never programs the
+  production scene"), the program stays on `Development`, and the rest of the restore (latency,
+  pins, preload, probe-input idle) still runs. An operator scene (`PRE`...) is still restored.
+- Residual, not our write: in Studio Mode with swap mode on (the OBS default), a cut FROM `PRO` to
+  `Development` makes OBS itself put the old program (`PRO`) into the PREVIEW when the transition
+  ends. That is harmless (preview is not on air) and is OBS behavior, not a tool setting the preview.
+
+## The seeder — `obs_phase2.py dev-scene` (bash: `stream_dev_scene_ensure`)
+
+- Pure `dev_scene_plan`: missing scene → create it + the nested item; scene without the item → add
+  it; item present → nothing. Operator-wins: an existing item/transform is never edited; a hidden
+  `PRO` item is left hidden and reported.
+- It reads only the scene list and the DEVELOPMENT scene's items and writes only `CreateScene` /
+  `CreateSceneItem` on the development scene (fail loud). `PRO`'s own items are never read or
+  written. A missing `PRO`, or the two names equal/empty, fails loud.
+- Callers: `recording-e2e.sh` right after the `[4/8]` banner (after the rig-busy re-check, before any
+  program switch) and `rig-mode.sh test` gap 2. Live seeding is the supervisor's step.
+- The bash wrapper seeds ONLY the default `Development`: an override naming another scene is left
+  alone (a note, rc 0); an override naming the production scene is refused (rc 1).
+
+## Who programs what on the stream box
 
 | Path | Stream program | How |
 |---|---|---|
 | `recording-e2e.sh` `[4/8]` | `Development` | `STREAM_PROG_SCENE` default; `prod-scene` records it |
-| `rig-mode.sh test` gap 2 | `Development` | `verify_stream_program_dev`: seed + `switch --prod-floor` (non-black proof) |
-| `rig-mode.sh test` park (#985) | `Development` | `park_stream_program_dev`: `switch --prod-floor`, a cheap re-assert |
-| `rig-mode.sh event` | `PRO` only if program is `Development` | `restore_stream_program_production`: `switch --only-from Development --prod-floor --black-report-only --replace-preview Development` |
-| EVENT contract item 9 | readable AND not `Development` | `event_assert.stream_program_not_development_ok`, fail-closed |
-
-**ROZHODNUTIE 27.9.2026 (main):** EVENT undoes development and never overrides an operator's scene.
-It switches to `PRO` only when the live program is `Development`; an operator on `PRE`/`POST`/`PRO`/
-anything else is left alone — no scene set, no preview write, no black proof (forcing `PRO` while
-streaming would arm the Companion `PRODUCTION` auto-record). Item 9 passes on any readable scene
-other than `Development`.
+| `rig-mode.sh test` gap 2 | `Development` | `verify_stream_program_dev`: seed + `switch --prod-floor` |
+| `rig-mode.sh test` park (#985) | `Development` | `park_stream_program_dev`: `switch --prod-floor` |
+| `rig-mode.sh event` | untouched | the owner cuts to `PRO` himself |
+| E2E cleanup / restore watchdog | `prev_scene` unless it is `PRO` | `teardown` skips `PRO` |
 
 - `switch` skips `SetCurrentProgramScene` when the target is already on program (the #343
-  same-scene hang with the heavy `NDI 2ME PGM`); the non-black proof still runs. So a park right
-  after gap 2, or an EVENT run that finds `PRO` already live, costs no scene set.
-- EVENT's `switch` flags: `--prod-floor` = the ONE #677 production floor (`_prod_nonblack_floor`,
-  env `OBS_NONBLACK_MIN_MEAN_PROD`, default 5 — never retyped in bash); `--black-report-only` = a dark
-  production scene (cameras off before a service) is a WARNING once the scene is SET;
-  `--replace-preview Development` = keep the Studio Mode preview off `Development`. Cause: with swap
-  mode on (the OBS default, `SwapScenesMode`), a program change is a transition and when it ENDS OBS
-  puts the OLD program into the preview (`TransitionStopped`). After development the program is
-  `Development`, so the cut to `PRO` leaves `Development` in the preview a moment LATER — a one-shot
-  check runs before that. `reassert_stale_preview` follows the OBSERVED end: it polls
-  `GetCurrentSceneTransitionCursor` until the transition was seen running and reads 1.0 (a stale 1.0
-  from the previous transition is trusted only after a 1 s start timeout; a cut is 1.0 at once),
-  then waits `OBS_PREVIEW_SWAP_MARGIN_S` (1.5 s), under a 30 s cap; no cursor = the margin only.
-  Never the configured duration: a stinger is a FIXED transition (`GetCurrentSceneTransition`
-  reports no duration) and a per-scene override duration is not reported. Every poll moves the
-  preview when it shows `Development`; an operator's own preview is untouched (pure
-  `stale_preview_target`); a failed preview set fails loud, also under `--black-report-only`. Otherwise a Transition click would put `Development` back on air and skip
-  the Companion `PRODUCTION` trigger.
-- TEST gap 2 and the park use `--prod-floor` too: the development program is production content,
-  proven with the same #677 floor `prod-scene` uses for the same scene.
-- A failed EVENT restore (a failed set or transport, not a dark picture) is recorded, the
-  burn-clear + contract + Discord confirmation still run, and EVENT exits non-zero at the end
-  (the #868 fold).
+  same-scene hang with the heavy `NDI 2ME PGM`); the non-black proof still runs.
+- `--prod-floor` = the ONE #677 production floor (`_prod_nonblack_floor`, env
+  `OBS_NONBLACK_MIN_MEAN_PROD`, default 5), shared with `prod-scene`.
+- The EVENT contract (#722, `event_assert.py`) has NO stream-program item. `event_mode_assert`
+  prints the current program scene as a REPORT-ONLY line; it is never a FAIL and never a switch.
+- History: an earlier cut of this ticket made EVENT restore `PRO` (with `--only-from`,
+  `--black-report-only`, `--replace-preview` and a Studio Mode swap preview re-assert). The owner's
+  rule removed all of it; do not bring any of it back.
 
 ## The retired stream probe
 
 TEST gap 2 used to `obs_phase2.py setup` a stream probe scene `PHASE2-PROBE` + input
-`phase2-probe-src` (a second receiver of the strih program; #988 re-created it every run). The owner
-deleted both on 27.9.2026, so gap 2 now screenshots the development program (the production
-composite: `NDI 2ME PGM` plus the scene's other layers). That proves the stream program renders,
-not the strih→stream leg alone; gap 3 then resolves `NDI 2ME PGM` as the rendered input (the
-input the pinned burn is on). `rig-mode.sh` no
-longer calls `setup` or carries `STREAM_PROBE_UPSTREAM`.
-`obs_phase2.py setup`/`teardown` and the `PHASE2-PROBE` constants stay (teardown's input idle is
-`ignore_err`, so an absent input is harmless). The restore watchdog's `PHASE2-PROBE` known-test-scene
-default is unchanged; `Development` is NOT a stranded scene (it is TEST mode's standing state).
+`phase2-probe-src`. The owner deleted both on 27.9.2026, so gap 2 screenshots the development
+program (the production composite: `NDI 2ME PGM` plus the scene's other layers) — it proves the
+stream program renders, not the strih→stream leg alone; gap 3 then resolves `NDI 2ME PGM` as the
+rendered input. `rig-mode.sh` no longer calls `setup` or carries `STREAM_PROBE_UPSTREAM`. The
+restore watchdog's `PHASE2-PROBE` known-test-scene default is unchanged; `Development` is NOT a
+stranded scene (it is TEST mode's standing state).
 
 ## `program-rendered-input` descends into a nested scene
 
-With `Development` on program, the first enabled item is the SCENE `PRO`.
-`_resolve_rendered_input` follows a `OBS_SOURCE_TYPE_SCENE` item into that scene (cycle-guarded; an
-OBS group, also `OBS_SOURCE_TYPE_SCENE` with `isGroup`, is read with `GetGroupSceneItemList`), so
-the TEST gap-3 burn resolves `NDI 2ME PGM` and never attaches a burn filter to the scene `PRO`.
-
-The descent applies to every caller: the strih gap-3 resolve in `rig-mode.sh test` and the imag
-issue-1204 burn cross-check (`recording-e2e.sh`, `scripts/lib/imag-burn-verify.sh`). A program
-scene whose first enabled item is a nested scene used to resolve the nested SCENE's name (a burn on a
-scene / a cross-check mismatch); it now resolves the real input. Pinned with a strih-shaped fixture.
+With `Development` on program the first enabled item is the SCENE `PRO`. `_resolve_rendered_input`
+follows an `OBS_SOURCE_TYPE_SCENE` item into that scene (cycle-guarded; a group is read with
+`GetGroupSceneItemList`), so the TEST gap-3 burn resolves `NDI 2ME PGM` and never targets the scene
+`PRO`. The descent applies to every caller (strih gap 3, the imag issue-1204 cross-check).
 
 ## The removed stream input and the CG-chain tool
 
-The same 27.9.2026 cleanup removed the stream input `NDI obs hudba`. `scripts/cg-chain-verify.sh`
-now defaults to `cg-obs strih`; its stream hop is on request only and reports `ABSENT` when its
-input is missing (`.claude/rules/cg-chain-verify.md`).
+The same cleanup removed the stream input `NDI obs hudba`. `scripts/cg-chain-verify.sh` defaults to
+`cg-obs strih`; its stream hop is on request only and reports `ABSENT` when its input has no audit
+line (`.claude/rules/cg-chain-verify.md`).
 
 ## Consumers that did NOT need a change
 
-- `rig-restore-watchdog.sh` reads the program scene name-agnostically (`program-scene`); only its
-  comment changed. `harness_rig_restore_watchdog.rs` pins that `Development` never triggers a restore.
-- The handover check's `mode` item (`rig-dev-handover-check.sh` + `rig_dev_handover_decision.py`) is
-  derived from the cam2 painter state (`rig-mode-state.sh`), never from a scene name, so
-  `Development` on program already reads as TEST there.
+- `rig-restore-watchdog.sh` reads the program scene name-agnostically; its restore goes through
+  `teardown`, which skips `PRO`.
+- The handover check's `mode` item is derived from the cam2 painter state (`rig-mode-state.sh`),
+  never from a scene name, so `Development` on program reads as TEST there.
 
 ## Companion
 
 The Bitfocus Companion `PRODUCTION` trigger keys on program == `PRO` AND streaming
-(`.claude/rules/strih-autorecord-coupling.md`), so development on `Development` no longer arms the
-production auto-record. Stated from the trigger condition, not verified live.
+(`.claude/rules/strih-autorecord-coupling.md`); since no tool programs `PRO`, development never arms
+the production auto-record. Stated from the trigger condition, not verified live.

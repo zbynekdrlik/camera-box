@@ -13,7 +13,8 @@ paths:
 `cg` OBS on **RESOLUME-SNV** (win-resolume MCP, traveling CG box, `resolume.lan`) is a first-class
 genlock fleet member: the SongPlayer `sp-*` inputs ride the genlock FIFO and `RESOLUME-SNV (cg-obs)`
 sends on the fleet wall-clock, locking the CG chain (SongPlayer → cg OBS → LED TVs + strih `cg` /
-stream `NDI obs hudba`) end-to-end like the camera chain. The CODE half (#1295) wires the
+stream -- the stream input `NDI obs hudba` was removed 27.9.2026, issue 1380; the stream hop is now
+on request only) end-to-end like the camera chain. The CODE half (#1295) wires the
 deploy/launch arms + the verify-read-back; the LIVE deploy/relaunch/pin/verify is a SUPERVISOR rig
 step (win-resolume MCP + read-only OBS-WS from dev1 — a worker never touches the box).
 

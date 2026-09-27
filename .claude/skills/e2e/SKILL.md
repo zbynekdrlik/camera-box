@@ -497,8 +497,9 @@ scripts/rig-mode.sh event    # rig BACK to clean broadcast (stop QR + print OBS 
   NOT env. Relaunch the box's OBS only if it is wedged or pass-through:
   `scripts/launch-obs-genlock.sh --box {strih|stream} --force` (env-free; genlock latency is the
   build const, floor 3 ms). Then confirm the stream program is the `Development` scene (issue 1380:
-  the production scene `PRO` nested in it; TEST never programs `PRO` itself, EVENT puts it back —
-  `.claude/rules/stream-development-scene.md`) + native-1080p recording (#225).
+  the production scene `PRO` nested in it; owner hard rule: our tooling NEVER programs `PRO`, EVENT
+  leaves the stream program alone — `.claude/rules/stream-development-scene.md`) + native-1080p
+  recording (#225).
 
 **EVENT mode (pinned — the #246 guard):**
 - **cam2:** stop the painter via its PID file (NOT `pkill -f frame-probe` — a shell whose cmdline
@@ -530,8 +531,8 @@ binary (a copy of `frame-probe` at `/usr/local/bin/cam2-painter`, `--duration-se
 `rig-mode.sh event` + a manual supervisor checklist BOTH said "clean" while a QR was live on air —
 the user caught it by EYE. So EVENT mode no longer trusts a process/flag check or anyone's memory:
 after the burn-off + painter-stop above, `do_event` runs the rig-test LEDGER cleanup then the
-`event_mode_assert` (9 items since issue 1380 added "the stream program is no longer `Development`";
-→ `scripts/event_assert.py`, the pure decision), fails LOUD on any
+8-item `event_mode_assert` (→ `scripts/event_assert.py`, the pure decision; since issue 1380 it
+also prints the stream program scene as a report-only line, never an item), fails LOUD on any
 item, and posts a Slovak confirmation to the owner's Discord thread on BOTH pass AND fail (#724).
 The two decisive additions this ticket demanded, which a supervisor must expect to see run:
 

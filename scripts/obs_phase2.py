@@ -47,11 +47,28 @@ INPUT = "phase2-probe-src"
 
 # issue 1380: a nested scene (or group) scene item; program-rendered-input descends into it.
 _SCENE_SOURCE_TYPE = "OBS_SOURCE_TYPE_SCENE"
-# issue 1380: `switch --replace-preview` keeps the Studio Mode preview off the stale scene until the
-# OBSERVED transition end (the cursor) plus this margin -- the swap lands when the transition ENDS --
-# polling at this cadence (scripts/stream_dev_scene.py reassert_stale_preview).
-PREVIEW_SWAP_MARGIN_S = float(os.environ.get("OBS_PREVIEW_SWAP_MARGIN_S", "1.5"))
-PREVIEW_POLL_S = 0.25
+# issue 1380 -- owner hard rule, 27.9.2026, verbatim: "nemas ti nikdy v stream obs davat do programu scenu PRO!!!!!"
+# No request from this tool may put the owner's production scene on program or preview, on any box
+# (only the stream box has it). The name mirrors STREAM_PRODUCTION_SCENE_DEFAULT in
+# scripts/lib/stream-dev-scene.sh (pinned by a pytest); the guard lives in _rpc, the one choke point
+# every obs_phase2 request passes through, so ignore_err never bypasses it.
+NEVER_PROGRAM_SCENES = frozenset({"PRO"})
+_SCENE_SELECTING_REQUESTS = ("SetCurrentProgramScene", "SetCurrentPreviewScene")
+
+
+class ForbiddenSceneError(RuntimeError):
+    """A request tried to put a scene from NEVER_PROGRAM_SCENES on program or preview."""
+
+
+def _refuse_forbidden_scene(rtype, rdata):
+    """issue 1380 (pure): raise ForbiddenSceneError when *rtype* selects a program/preview scene in
+    NEVER_PROGRAM_SCENES. The owner cuts to the production scene himself; our tooling never does."""
+    scene = (rdata or {}).get("sceneName")
+    if rtype in _SCENE_SELECTING_REQUESTS and scene in NEVER_PROGRAM_SCENES:
+        raise ForbiddenSceneError(
+            f"{rtype} to '{scene}' refused: our tooling never programs the production scene "
+            f"(owner hard rule 27.9.2026, issue 1380); development uses its own scene"
+        )
 
 # #355: bound for waiting an orphan recording's output to FINALIZE (outputActive=False)
 # after StopRecord, before this run's StartRecord. A large MP4 (the live 24.5 GB stream-box
@@ -1067,6 +1084,7 @@ def _rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
     during an NDI renegotiation OBS can flood events while the response never arrives, so once the
     deadline passes we raise TimeoutError (fail loud). *ignore_err* suppresses an OBS request-level
     error (a normal failed RPC), but NEVER the timeout — a hang is always fatal to the op."""
+    _refuse_forbidden_scene(rtype, rdata)
     deadline_s = OBS_OP_TIMEOUT_S if timeout_s is None else timeout_s
     ws.send(json.dumps({"op": 6, "d": {
         "requestType": rtype, "requestId": rtype, "requestData": rdata or {}}}))
@@ -1930,6 +1948,17 @@ def teardown(a):
         # response, #328) when that scene carries the heavy NDI 2ME PGM source mid-renegotiation —
         # the teardown half of the proof-blocking hang. prod_scene already skips a same-scene
         # switch; teardown must too. Only switch when the current program differs from the target.
+        # issue 1380 (owner hard rule 27.9.2026): never restore the production scene onto program
+        # or preview -- the owner cuts to it himself. The program then stays where the run left it
+        # (the stream development scene), and the rest of the restore below still runs.
+        for kind, scene in (("program", prev), ("preview", host_state.get("prev_preview"))):
+            if scene in NEVER_PROGRAM_SCENES:
+                sys.stderr.write(
+                    f"[obs] {a.host}: issue 1380 {kind} NOT restored to '{scene}' -- our tooling "
+                    f"never programs the production scene (the owner cuts to it himself)\n"
+                )
+        if prev in NEVER_PROGRAM_SCENES:
+            prev = None
         if prev:
             curr_prog = _rpc(ws, "GetCurrentProgramScene", ignore_err=True).get(
                 "currentProgramSceneName")
@@ -1940,6 +1969,8 @@ def teardown(a):
         # spam). Falls back to the program scene when no prior preview was recorded. Same #343
         # skip-if-already-there guard — a same-scene preview set hangs on the heavy source too.
         prev_preview = host_state.get("prev_preview") or prev
+        if prev_preview in NEVER_PROGRAM_SCENES:
+            prev_preview = None
         if prev_preview:
             curr_preview = _rpc(ws, "GetCurrentPreviewScene", ignore_err=True).get(
                 "currentPreviewSceneName")
@@ -2334,20 +2365,6 @@ def switch(a):
     it marks when the new cambox enters program); the black-check polls AFTER and never moves it."""
     ws = _conn(a.host, a.password)
     try:
-        # issue 1380 (ROZHODNUTIE 27.9.2026): `--only-from <scene>` switches ONLY when the live
-        # program is <scene> (EVENT undoes development: Development -> PRO). Any other program -- an
-        # operator's PRE/POST/PRO -- is left alone: no scene set, no preview write, no black proof
-        # of a scene this tool never touched.
-        only_from = getattr(a, "only_from", "")
-        if only_from:
-            live = _rpc(ws, "GetCurrentProgramScene").get("currentProgramSceneName")
-            if live != only_from:
-                sys.stderr.write(
-                    f"[obs] {a.host}: issue 1380 program is '{live}', not '{only_from}' -- left "
-                    f"alone (not switched to '{a.program_scene}')\n"
-                )
-                print(time.time_ns())
-                return
         # issue 1380: skip the SetCurrentProgramScene when the target is already on program (the
         # #343 same-scene hazard: re-setting a scene that carries the heavy NDI 2ME PGM can hang
         # past the #328 deadline). The rig-mode TEST park re-asserts the development scene it just
@@ -2356,45 +2373,21 @@ def switch(a):
         if current != a.program_scene:
             _rpc(ws, "SetCurrentProgramScene", {"sceneName": a.program_scene})
         switch_ns = time.time_ns()  # the boundary — right after the switch lands
-        # issue 1380: `--replace-preview <scene>` keeps a Studio Mode PREVIEW off <scene> (the
-        # development scene, which OBS's swap puts into the preview when the cut to the production
-        # scene ENDS) until the observed transition end + a margin; an operator's own preview is
-        # never touched (scripts/stream_dev_scene.py reassert_stale_preview).
-        stale = getattr(a, "replace_preview", "")
-        if stale:
-            moved = _dev_scene_module().reassert_stale_preview(
-                _rpc, ws, stale, a.program_scene, margin_s=PREVIEW_SWAP_MARGIN_S,
-                poll_s=PREVIEW_POLL_S, sleep=time.sleep, now=time.monotonic)
-            if moved:
-                sys.stderr.write(
-                    f"[obs] {a.host}: issue 1380 preview '{stale}' -> '{a.program_scene}' (moved "
-                    f"{moved}x; a Transition can no longer put '{stale}' back on program)\n"
-                )
         # Same POLLED non-black self-check prod_scene uses (shared helper) — a dead/black scene
         # fails loud instead of silently recording a black, all-undecodable segment.
-        # issue 1380: `--prod-floor` = the #677 production floor (real, possibly dim content); omitted
-        # keeps the #312 bright-QR default. `--black-report-only` (EVENT's restore of the production
-        # scene, whose cameras may legitimately be dark before a service) turns a BLACK verdict into a
-        # WARNING once the scene is set; a failed set/transport still fails.
-        try:
-            _assert_program_nonblack(
-                ws,
-                a.host,
-                a.program_scene,
-                "#312 switch",
-                f"The input feeding program scene '{a.program_scene}' is not delivering frames. (In "
-                f"the #312 all-cambox sweep that is the cambox; #1223: a dark screen there can ALSO "
-                f"mean the cam2 painter/monitor went dark -- check /tmp/painter.log on the painter "
-                f"box first.)",
-                min_mean=_prod_nonblack_floor() if getattr(a, "prod_floor", False) else None,
-            )
-        except SystemExit as e:
-            if not getattr(a, "black_report_only", False):
-                raise
-            sys.stderr.write(
-                f"[obs] {a.host}: WARNING issue 1380 program '{a.program_scene}' is SET but reads "
-                f"BLACK (report-only): {e}\n"
-            )
+        # issue 1380: `--prod-floor` = the #677 production floor (the development program is real,
+        # possibly dim production content); omitted keeps the #312 bright-QR default.
+        _assert_program_nonblack(
+            ws,
+            a.host,
+            a.program_scene,
+            "#312 switch",
+            f"The input feeding program scene '{a.program_scene}' is not delivering frames. (In "
+            f"the #312 all-cambox sweep that is the cambox; #1223: a dark screen there can ALSO "
+            f"mean the cam2 painter/monitor went dark -- check /tmp/painter.log on the painter "
+            f"box first.)",
+            min_mean=_prod_nonblack_floor() if getattr(a, "prod_floor", False) else None,
+        )
     finally:
         ws.close()
     print(switch_ns)  # stdout = the switch boundary epoch-ns (burn gen_ts_ns timeline)
@@ -3357,16 +3350,10 @@ def main():
             # epoch-ns boundary. Lightweight — no preload/upstream dance (prod_scene already
             # routed the scenes); just SetCurrentProgramScene + the non-black self-check.
             p.add_argument("--program-scene", required=True)
-            # issue 1380 (EVENT's restore of the production scene): --prod-floor = the #677
-            # production non-black floor (OBS_NONBLACK_MIN_MEAN_PROD) instead of the #312 default;
-            # --black-report-only = a BLACK program is a WARNING once the scene is set;
-            # --replace-preview <scene> = move a Studio Mode preview left on <scene> to the target.
+            # issue 1380: --prod-floor = the #677 production non-black floor
+            # (OBS_NONBLACK_MIN_MEAN_PROD) instead of the #312 default -- the stream development
+            # program is real production content.
             p.add_argument("--prod-floor", action="store_true")
-            p.add_argument("--black-report-only", action="store_true")
-            p.add_argument("--replace-preview", default="")
-            # --only-from <scene> = switch only when the live program is <scene> (EVENT undoes
-            # development and never overrides an operator's scene, ROZHODNUTIE 27.9.2026).
-            p.add_argument("--only-from", default="")
         if name == "dev-scene":
             # issue 1380: ensure the stream development scene nests the production scene
             # (idempotent, operator-wins, never writes to the production scene).
@@ -3395,7 +3382,7 @@ def main():
     cos_mode.add_argument("--hold", default=None, metavar="STATE_FILE")
     cos_mode.add_argument("--restore", default=None, metavar="STATE_FILE")
     a = ap.parse_args()
-    {"setup": setup, "teardown": teardown, "record": record,
+    handler = {"setup": setup, "teardown": teardown, "record": record,
      "prod-scene": prod_scene, "switch": switch,
      "program-scene": program_scene, "rig-busy-check": rig_busy_check,
      "dev-scene": dev_scene,
@@ -3411,7 +3398,12 @@ def main():
      "idle-receiver": idle_receiver,
      "apply-measurement-pins": apply_measurement_pins,
      "verify-measurement-pins": verify_measurement_pins,
-     "connect-on-show": connect_on_show}[a.cmd](a)
+     "connect-on-show": connect_on_show}[a.cmd]
+    try:
+        handler(a)
+    except ForbiddenSceneError as e:
+        # issue 1380: a refused production-scene program/preview request exits non-zero, loud.
+        raise SystemExit(f"[obs] {getattr(a, 'host', '?')}: {e}")
 
 
 if __name__ == "__main__":

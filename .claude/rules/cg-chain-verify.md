@@ -44,11 +44,14 @@ match, never let them drift.** Do not re-derive thresholds in bash from scratch.
 - **The default hop list is `cg-obs strih` (issue 1380, ROZHODNUTIE 27.9.2026).** The owner removed
   the stream input the stream hop used to read (`NDI obs hudba`). The stream hop runs only when asked
   for: `--hops "... stream"` or env `CG_CHAIN_HOPS`. Its input is `CG_CHAIN_STREAM_SRC` (default
-  `NDIA cg stream`, the CG-named NDI input of the live stream production scene read 27.9.2026 — not
-  yet confirmed to carry a genlock audit line). When that input has no audit line in the window the
-  hop prints a named `ABSENT` row + a reason and does NOT fail the run (the pure
-  `cg_chain_hop_absent_ok`, stream only); rig-health-audit counts it as `sources_absent`, never pass
-  or fail. Pinned by `tests/python/test_cg_chain_verify_hops_1380.py`.
+  `NDIA cg stream`, the CG-named NDI input of the live stream production scene read 27.9.2026; it is
+  currently senderless, see genlock-lock-facet.md). When that input has no audit line in the window
+  (missing, or no frame received since OBS start) the hop prints a named `ABSENT` row + a reason and
+  does NOT fail the run (the pure `cg_chain_hop_absent_ok`, stream only); an unreadable stream log
+  still FAILs. A run where EVERY requested source is ABSENT verified nothing: `OVERALL: NO-DATA`,
+  exit 3 (a typo in `CG_CHAIN_STREAM_SRC` never looks like success). rig-health-audit runs only
+  `--hops strih` and counts any ABSENT as `sources_absent`. Pinned by
+  `tests/python/test_cg_chain_verify_hops_1380.py`.
 - The log tail per hop is supplied explicitly so the tool is self-contained and ships no untested
   ssh/MCP default: `CG_CHAIN_<HOP>_LOG=<file>` (tests; and the supervisor's path for cg-obs — paste
   the win-resolume MCP FileRead of the RESOLUME-SNV OBS log to a file) or `CG_CHAIN_<HOP>_CMD="<cmd>"`

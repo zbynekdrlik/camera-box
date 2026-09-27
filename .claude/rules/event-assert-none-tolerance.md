@@ -8,7 +8,7 @@ paths:
 
 ## `event_assert.py`'s `compute_item_results()` facets MUST be None-tolerant, fail-closed, by construction (#1225)
 
-`scripts/event_assert.py`'s EVENT-mode CONTRACT (#722; 9 items since issue 1380) is a chain of pure `*_ok(...)`
+`scripts/event_assert.py`'s 8-item EVENT-mode CONTRACT (#722) is a chain of pure `*_ok(...)`
 decision functions, each consuming one or two "facets" gathered elsewhere (fleet ssh sweeps,
 OBS-WS reads via `qr_screenshot_check.py`/`obs_phase2.py`/`set-ndi-mapping.py`) and assembled
 into a `facts` dict by `scripts/rig-mode.sh`'s `event_mode_assert()`. A gather step can
@@ -52,6 +52,13 @@ module, because nothing forced the None-path to be exercised until a real RPC hi
    `screenshot_qr_findings()`. This is defense-in-depth on TOP OF the consumer guard above, not a
    substitute for it: a future caller that forgets rule #1 still gets an unambiguous, non-`None`
    value instead of a crash-prone bare `None`.
+
+### The stream program scene is NOT a contract item (issue 1380)
+
+Owner hard rule, 27.9.2026, verbatim: "nemas ti nikdy v stream obs davat do programu scenu PRO!!!!!". EVENT mode never touches
+the stream program (the owner cuts to `PRO` himself), so no contract item grades it: `rig-mode.sh`'s
+`event_mode_assert` prints the program scene as a REPORT-ONLY line and it is never a FAIL. Pinned by
+`tests/python/test_event_assert_stream_program_1380.py`. Do not add a stream-program item back.
 
 ### Test pattern
 

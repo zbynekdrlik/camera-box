@@ -11,8 +11,9 @@ These tests pin, with a fake `_rpc` (no live OBS):
     the live 27.9.2026 state (Development present, its one item = the scene PRO);
   * the `dev-scene` CLI wiring and its defaults, pinned to the bash lib defaults;
   * `switch` skips SetCurrentProgramScene when the target is already on program (the #343
-    same-scene hazard); the EVENT flags `--prod-floor` (the ONE prod floor, #677),
-    `--black-report-only` and `--replace-preview`;
+    same-scene hazard) and takes `--prod-floor` (the ONE prod floor, #677);
+  * the owner's hard rule: `_rpc` refuses to put PRO on program/preview, switch/prod-scene to PRO
+    exit non-zero, teardown never restores PRO;
   * `program-rendered-input` descends into a nested scene source (a group via its own item list),
     so the TEST burn resolves `NDI 2ME PGM` through `Development -> PRO` and never tries to burn the
     scene `PRO`;
