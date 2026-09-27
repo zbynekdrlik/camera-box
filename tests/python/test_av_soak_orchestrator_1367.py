@@ -660,6 +660,19 @@ def test_stop_leftovers_touches_nothing_on_an_unreadable_rig(rig):
     assert "unreadable" in r.stdout + r.stderr
 
 
+def test_stop_leftovers_retries_an_unreadable_read(rig):
+    # one unreadable rig-busy read (a stream OBS restart) is retried, not a kept leftover
+    env, p = rig
+    _leftover_state(p, "stream")
+    (p["state"] / "recording-stream").write_text(str(time.time()))
+    (p["state"] / "count-switches").write_text("1")  # arms the fake's unreadable trigger
+    r = _soak(dict(env, FAKE_UNREADABLE_AFTER_SWITCHES="1", FAKE_UNREADABLE_TIMES="1"),
+              "--stop-leftovers", str(p["run"]))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert [_host(c) for c in _record_stops(p)] == [STREAM]
+    assert (p["state"] / "count-unreadable").read_text() == "1"
+
+
 def test_stop_leftovers_leaves_a_recording_the_soak_did_not_start(rig):
     env, p = rig
     _leftover_state(p, "strih")
