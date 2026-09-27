@@ -27,18 +27,26 @@ verdict JSON / the CSV and two Rust source files, so it is exhaustively pytest-a
       common, so this is the camera-to-camera alignment AT THE STREAM OUTPUT.
   Which one the soak grades is an open design question on issue 1367 (comment 5858491691); the
   default is the design as written (the gate's two spreads).
-- **loss per camera** (`loss <cam>`): the verdict's own per-segment `pass` of the camera's windows in
-  `all_cambox_continuity.segments` (that is the existing zero-loss bar, with whatever tolerance the
-  verdict applies -- never re-derived here). Raw copies/gaps/undecodable are summed and reported.
-- **burn loss per camera** (`burn <cam>`): `full_chain.loss.<cam>.zero_loss` when the verdict has it
-  (only with the capture burns). Optional: never measured = not required; a measured `false` fails.
-- **slope** of every value series: least squares over (hours, value), `|slope| <= 2 ms/h`
-  (`SLOPE_BOUND_MS_PER_H`, the acceptance on issue 1367). Needs >= 3 samples over >= 30 min.
-- **cadence**: the acceptance asks for a sample at least every 10 min, so every required series
-  must have no gap longer than `DEFAULT_MAX_GAP_S` (the 600 s slot + 60 s allowance for the
-  per-slot pre-record steps' start jitter; one missed slot is a 1200 s gap), counting the gap from
-  the run's first window to the series' first sample and from its last sample to the last window.
+- **loss per camera** (`loss <cam>`): the term the gate itself folds for each of the camera's windows
+  in `all_cambox_continuity.segments` -- `relaxed_pass` (the per-window copies/gaps tolerance,
+  src/probe/recording_segments.rs), or `pass` on an older verdict that has no `relaxed_pass`. A
+  window carrying its own `multi_source` block (issue 1367: the camera films an OBS monitor) has
+  its copies/gaps REPORT-ONLY in the gate, so it is `report_only` here: a sample, never a breach.
+  The strict `pass` and the raw copies/gaps/undecodable are recorded and reported.
+- **burn loss** (`burn <node>`): `full_chain.loss.<node>.zero_loss` for every camera (only with the
+  capture burns) and for the `strih` + `stream` hops (the OBS measurement burns the soak turns on).
+  A measured `false` fails; a node never measured is not required; once measured, a gap counts.
+- **slope** of every value series: least squares over (hours, value) with its standard error;
+  FAIL only when `|slope| - 2 SE > 2 ms/h` (`SLOPE_BOUND_MS_PER_H`, the acceptance on issue 1367),
+  PASS only when `|slope| + 2 SE <= 2 ms/h`, UNKNOWN when the interval straddles the bound (per-window
+  noise alone over 1 h cannot prove either). Needs >= 3 samples over >= 30 min.
+- **cadence**: the acceptance asks for a sample at least every slot (10 min), so every required
+  series must have no gap longer than the slot + 60 s start-jitter allowance (the slot is read from
+  the CSV's `slot_s`; one missed slot is a 2-slot gap), counting the gap from the run's first window
+  to the series' first sample and from its last sample to the last window.
 - **duration**: the run's window starts must span `min_duration - 60 s`.
+- **something graded**: a run where no series was graded at all is UNKNOWN (the verdict's own
+  zero-judged-cameras floor).
 
 The two gate bounds are READ from their single sources (`src/av_window.rs`
 `AV_OFFSET_GATE_TOLERANCE_MS`, `src/switch_latency.rs` `SPREAD_THRESHOLD_MS`); a missing constant
@@ -54,7 +62,7 @@ evidence. `3`: a usage / input error (unreadable CSV, a missing bound constant, 
 `REPORTED` / `NOT_MEASURED`: a non-graded spread column / a burn column never measured.
 
 Subcommands: `bounds` (print the loaded bounds), `row` (append one window's row), `report` (grade;
-prints the 1 h partial when the CSV extends past it, and the full run; `--json` writes both).
+prints the 1 h partial once the CSV covers the first hour, and the full run; `--json` writes both).
 """
 import argparse
 import csv
@@ -75,6 +83,8 @@ SLOPE_BOUND_MS_PER_H = 2.0
 # A slope from fewer points or a shorter span is noise, not a trend: UNKNOWN instead.
 MIN_SLOPE_SAMPLES = 3
 MIN_SLOPE_SPAN_S = 1800
+# The slope is judged with its uncertainty: +/- this many standard errors (~95 %).
+SLOPE_SE_K = 2.0
 # "at least one every 10 min" on a fixed 10-min slot grid; the allowance absorbs the per-slot
 # pre-record steps' start jitter (never a missed slot, which is a 1200 s gap).
 DEFAULT_SLOT_S = 600
@@ -96,17 +106,22 @@ _BOUND_SOURCES = {
     "spread_threshold_ms": ("src/switch_latency.rs", "SPREAD_THRESHOLD_MS"),
 }
 
+# The two OBS hops whose own measurement burns (strih 911002 / stream 911004) the soak turns on.
+HOP_NODES = ("strih", "stream")
+
 _CAM_RE = re.compile(r"^cam[0-9]+$")
 _BASE_FIELDS = (
-    "ts_utc", "epoch_s", "slot", "window_s", "outcome", "verdict_rc", "verdict_path",
+    "ts_utc", "epoch_s", "slot", "slot_s", "window_s", "outcome", "verdict_rc", "verdict_path",
     "painter_run_id", "av_expected_ms", "av_judged_cameras",
     "source_spread_ms", "delivery_spread_ms", "av_spread_ms", "av_spread_cams",
-)
+) + tuple(f"burn_{n}_{k}" for n in HOP_NODES for k in ("zero_loss", "real_drops"))
 _CAM_FIELDS = (
     "av_{c}_ms", "av_{c}_status", "av_{c}_gate_pass",
     "loss_{c}_frames", "loss_{c}_copies", "loss_{c}_gaps", "loss_{c}_undecodable", "loss_{c}_pass",
+    "loss_{c}_strict_pass", "loss_{c}_multi_source",
     "burn_{c}_zero_loss", "burn_{c}_real_drops",
 )
+_LOSS_SAMPLE = ("true", "false", "report_only")
 
 
 class BoundsError(Exception):
@@ -224,7 +239,7 @@ def row_from_verdict(verdict, cams, meta):
     epoch = meta.get("epoch_s")
     row["epoch_s"] = _fmt_int(epoch) if _num(epoch) else str(epoch or "")
     row["ts_utc"] = meta.get("ts_utc") or (utc_iso(epoch) if _num(epoch) else "")
-    for k in ("slot", "window_s", "verdict_rc"):
+    for k in ("slot", "slot_s", "window_s", "verdict_rc"):
         v = meta.get(k)
         row[k] = _fmt_int(v) if _num(v) else ("" if v is None else str(v))
     for k in ("outcome", "verdict_path", "painter_run_id"):
@@ -259,32 +274,51 @@ def row_from_verdict(verdict, cams, meta):
     row["delivery_spread_ms"] = _fmt_ms(
         _get(verdict, "all_cambox_delivery_latency", "cross_camera_spread_ms"))
 
-    segs = _get(verdict, "all_cambox_continuity", "segments")
+    for c, a in _loss_by_camera(_get(verdict, "all_cambox_continuity", "segments"), cams).items():
+        for k in ("frames", "copies", "gaps", "undecodable"):
+            row[f"loss_{c}_{k}"] = str(a[k])
+        row[f"loss_{c}_strict_pass"] = _fmt_bool(a["strict"])
+        row[f"loss_{c}_multi_source"] = _fmt_bool(a["multi"])
+        if a["graded"] is not None:
+            row[f"loss_{c}_pass"] = _fmt_bool(a["graded"])
+        elif a["multi"]:
+            row[f"loss_{c}_pass"] = "report_only"
+
+    loss = _get(verdict, "full_chain", "loss")
+    for node_name in list(cams) + list(HOP_NODES):
+        node = loss.get(node_name) if isinstance(loss, dict) else None
+        if isinstance(node, dict):
+            row[f"burn_{node_name}_zero_loss"] = _fmt_bool(node.get("zero_loss"))
+            row[f"burn_{node_name}_real_drops"] = _fmt_int(node.get("real_drops"))
+    return row
+
+
+def _loss_by_camera(segments, cams):
+    """Aggregate one window's `all_cambox_continuity.segments` per camera (a camera may own several
+    cycled segments). `graded` = the AND of the term the GATE folds per segment -- `relaxed_pass`,
+    or `pass` on an older verdict without it -- over the camera's segments that are NOT multi-source
+    (issue 1367: a `multi_source` window's copies/gaps are report-only in the gate); None when every
+    segment was multi-source. `strict` = the AND of the strict `pass` (reported only). Unlike the
+    Discord report's strict aggregation, this grades the gate's own per-window term."""
     agg = {}
-    for seg in segs if isinstance(segs, list) else []:
+    for seg in segments if isinstance(segments, list) else []:
         if not isinstance(seg, dict):
             continue
         cam = str(seg.get("cambox", "")).lower()
         if cam not in cams:
             continue
         a = agg.setdefault(cam, {"frames": 0, "copies": 0, "gaps": 0, "undecodable": 0,
-                                 "pass": True})
+                                 "strict": True, "graded": None, "multi": False})
         for k in ("frames", "copies", "gaps", "undecodable"):
             v = seg.get(k)
             a[k] += int(v) if _num(v) else 0
-        a["pass"] = a["pass"] and seg.get("pass") is True
-    for c, a in agg.items():
-        for k in ("frames", "copies", "gaps", "undecodable"):
-            row[f"loss_{c}_{k}"] = str(a[k])
-        row[f"loss_{c}_pass"] = _fmt_bool(a["pass"])
-
-    loss = _get(verdict, "full_chain", "loss")
-    for c in cams:
-        node = loss.get(c) if isinstance(loss, dict) else None
-        if isinstance(node, dict):
-            row[f"burn_{c}_zero_loss"] = _fmt_bool(node.get("zero_loss"))
-            row[f"burn_{c}_real_drops"] = _fmt_int(node.get("real_drops"))
-    return row
+        a["strict"] = a["strict"] and seg.get("pass") is True
+        if seg.get("multi_source"):
+            a["multi"] = True
+            continue
+        term = seg.get("relaxed_pass") if "relaxed_pass" in seg else seg.get("pass")
+        a["graded"] = (True if a["graded"] is None else a["graded"]) and term is True
+    return agg
 
 
 def append_row(csv_path, row, cams):
@@ -323,11 +357,13 @@ def _f(s):
     return v if math.isfinite(v) else None
 
 
-def fit_slope_ms_per_h(points):
-    """Least-squares slope of [(epoch_s, value_ms)] in ms per hour, or None when degenerate."""
+def fit_slope_with_se(points):
+    """Least-squares slope of [(epoch_s, value_ms)] in ms per hour + its standard error.
+    Returns (slope, se); slope None when degenerate (< 2 points or no time spread); se None with
+    fewer than 3 points (no residual degree of freedom)."""
     pts = [(float(t), float(v)) for t, v in points]
     if len(pts) < 2:
-        return None
+        return None, None
     t0 = pts[0][0]
     xs = [(t - t0) / 3600.0 for t, _ in pts]
     ys = [v for _, v in pts]
@@ -335,8 +371,18 @@ def fit_slope_ms_per_h(points):
     my = sum(ys) / len(ys)
     sxx = sum((x - mx) ** 2 for x in xs)
     if sxx <= 0:
-        return None
-    return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx
+        return None, None
+    slope = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sxx
+    if len(pts) < 3:
+        return slope, None
+    intercept = my - slope * mx
+    rss = sum((y - (intercept + slope * x)) ** 2 for x, y in zip(xs, ys))
+    return slope, math.sqrt(max(rss, 0.0) / (len(pts) - 2) / sxx)
+
+
+def fit_slope_ms_per_h(points):
+    """Least-squares slope of [(epoch_s, value_ms)] in ms per hour, or None when degenerate."""
+    return fit_slope_with_se(points)[0]
 
 
 def _max_gap(epochs, run_start, run_end):
@@ -368,32 +414,38 @@ def _value_series(name, points, bound, bound_label, run_start, run_end, max_gap_
             breaches += 1
     vals = [v for _, v in points]
     span = (points[-1][0] - points[0][0]) if points else 0
-    slope = None
+    slope, se = None, None
     if len(points) >= MIN_SLOPE_SAMPLES and span >= MIN_SLOPE_SPAN_S:
-        slope = fit_slope_ms_per_h(points)
+        slope, se = fit_slope_with_se(points)
+    band = None if se is None else SLOPE_SE_K * se
     gap = _max_gap([t for t, _ in points], run_start, run_end)
     s = {
         "name": name, "graded": True, "n": len(points),
         "min": min(vals) if vals else None, "max": max(vals) if vals else None,
         "last": vals[-1] if vals else None, "worst_residual": worst, "bound": bound,
         "bound_label": bound_label, "breaches": breaches, "ungradable": ungradable,
-        "slope_ms_per_h": slope, "max_gap_s": gap,
+        "slope_ms_per_h": slope, "slope_se_ms_per_h": se, "max_gap_s": gap,
     }
     if not points:
         s["verdict"], s["reason"] = UNKNOWN, "no samples"
     elif breaches:
         s["verdict"] = FAIL
         s["reason"] = f"{breaches} sample(s) outside {bound_label} {bound:g} ms"
-    elif slope is not None and abs(slope) > slope_bound:
+    elif slope is not None and band is not None and abs(slope) - band > slope_bound:
         s["verdict"] = FAIL
-        s["reason"] = f"slope {slope:+.2f} ms/h outside +/-{slope_bound:g} ms/h"
+        s["reason"] = (f"slope {slope:+.2f} +/- {band:.2f} ms/h ({SLOPE_SE_K:g} SE) is outside "
+                       f"+/-{slope_bound:g} ms/h")
     elif ungradable:
         s["verdict"] = UNKNOWN
         s["reason"] = f"{ungradable} sample(s) without an expected offset"
-    elif slope is None:
+    elif slope is None or band is None:
         s["verdict"] = UNKNOWN
         s["reason"] = (f"slope needs >= {MIN_SLOPE_SAMPLES} samples over >= "
                        f"{MIN_SLOPE_SPAN_S // 60} min (have {len(points)} over {span / 60:.0f} min)")
+    elif abs(slope) + band > slope_bound:
+        s["verdict"] = UNKNOWN
+        s["reason"] = (f"slope {slope:+.2f} +/- {band:.2f} ms/h ({SLOPE_SE_K:g} SE) straddles the "
+                       f"+/-{slope_bound:g} ms/h bound -- not enough evidence either way")
     elif gap is not None and gap > max_gap_s:
         s["verdict"] = UNKNOWN
         s["reason"] = f"sample gap {gap:.0f} s > {max_gap_s:g} s"
@@ -402,19 +454,23 @@ def _value_series(name, points, bound, bound_label, run_start, run_end, max_gap_
     return s
 
 
-def _bool_series(name, points, run_start, run_end, max_gap_s, required, extra=None):
-    """Grade a per-window boolean series (loss / burn loss). points = [(epoch, bool)]."""
-    fails = sum(1 for _, ok in points if not ok)
+def _state_series(name, points, run_start, run_end, max_gap_s, required, extra=None,
+                  never_reason="no samples"):
+    """Grade a per-window state series (loss / burn loss). points = [(epoch, state)] with state
+    "true" (clean), "false" (a loss window) or "report_only" (measured, not gating)."""
+    fails = sum(1 for _, st in points if st == "false")
+    report_only = sum(1 for _, st in points if st == "report_only")
     gap = _max_gap([t for t, _ in points], run_start, run_end)
-    s = {"name": name, "graded": True, "n": len(points), "breaches": fails, "max_gap_s": gap,
-         "slope_ms_per_h": None}
+    s = {"name": name, "graded": True, "n": len(points), "breaches": fails,
+         "report_only": report_only, "max_gap_s": gap, "slope_ms_per_h": None,
+         "slope_se_ms_per_h": None}
     s.update(extra or {})
     if fails:
         s["verdict"], s["reason"] = FAIL, f"{fails} window(s) with loss"
     elif not points:
         s["verdict"] = UNKNOWN if required else NOT_MEASURED
-        s["reason"] = "no samples" if required else "never measured (needs the capture burns)"
-    elif required and gap is not None and gap > max_gap_s:
+        s["reason"] = never_reason
+    elif gap is not None and gap > max_gap_s:
         s["verdict"], s["reason"] = UNKNOWN, f"sample gap {gap:.0f} s > {max_gap_s:g} s"
     else:
         s["verdict"], s["reason"] = PASS, ""
@@ -424,7 +480,14 @@ def _bool_series(name, points, run_start, run_end, max_gap_s, required, extra=No
 # --- the verdict --------------------------------------------------------------------------------
 
 
-def evaluate(rows, cams, *, bounds, min_duration_s, max_gap_s=DEFAULT_MAX_GAP_S,
+def max_gap_from_rows(rows):
+    """The allowed sample gap for these rows: the largest `slot_s` written into the CSV + the start
+    jitter allowance; the 600 s default slot when the CSV carries none."""
+    slots = [v for v in (_f(r.get("slot_s")) for r in rows) if v is not None and v > 0]
+    return (max(slots) if slots else DEFAULT_SLOT_S) + START_JITTER_ALLOWANCE_S
+
+
+def evaluate(rows, cams, *, bounds, min_duration_s, max_gap_s=None,
              slope_bound=SLOPE_BOUND_MS_PER_H, spread_columns=DEFAULT_SPREAD_COLUMNS,
              scope="full"):
     """Grade the rows (CSV dicts, string values). Returns the report dict for ONE scope."""
@@ -433,13 +496,15 @@ def evaluate(rows, cams, *, bounds, min_duration_s, max_gap_s=DEFAULT_MAX_GAP_S,
             raise ValueError(f"unknown spread column {c!r} (expected one of {SPREAD_COLUMNS})")
     rows = sorted((r for r in rows if _f(r.get("epoch_s")) is not None),
                   key=lambda r: _f(r["epoch_s"]))
+    if max_gap_s is None:
+        max_gap_s = max_gap_from_rows(rows)
     tol = bounds["av_tolerance_ms"]
     thr = bounds["spread_threshold_ms"]
     rep = {"scope": scope, "windows": len(rows),
            "windows_ok": sum(1 for r in rows if r.get("outcome") == "ok"),
            "bounds": {"av_tolerance_ms": tol, "spread_threshold_ms": thr,
-                      "slope_bound_ms_per_h": slope_bound, "max_gap_s": max_gap_s,
-                      "sources": dict(bounds.get("sources", {}))},
+                      "slope_bound_ms_per_h": slope_bound, "slope_se_k": SLOPE_SE_K,
+                      "max_gap_s": max_gap_s, "sources": dict(bounds.get("sources", {}))},
            "spread_columns": list(spread_columns), "min_duration_s": min_duration_s,
            "series": {}, "reasons": []}
     if not rows:
@@ -477,21 +542,25 @@ def evaluate(rows, cams, *, bounds, min_duration_s, max_gap_s=DEFAULT_MAX_GAP_S,
         tot = {"copies": 0, "gaps": 0, "undecodable": 0, "frames": 0}
         for r in rows:
             p = r.get(f"loss_{c}_pass")
-            if p in ("true", "false"):
-                lpts.append((_f(r["epoch_s"]), p == "true"))
+            if p in _LOSS_SAMPLE:
+                lpts.append((_f(r["epoch_s"]), p))
                 for k in tot:
                     tot[k] += int(_f(r.get(f"loss_{c}_{k}")) or 0)
-        ls = _bool_series(f"loss {c}", lpts, start, end, max_gap_s, required=not excluded,
-                          extra=tot)
+        ls = _state_series(f"loss {c}", lpts, start, end, max_gap_s, required=not excluded,
+                           extra=tot)
         if excluded and not lpts:
             ls.update(verdict=EXCLUDED, graded=False, reason="operator-excluded in every window")
         series[ls["name"]] = ls
 
-        bpts = [(_f(r["epoch_s"]), r.get(f"burn_{c}_zero_loss") == "true") for r in rows
-                if r.get(f"burn_{c}_zero_loss") in ("true", "false")]
-        drops = sum(int(_f(r.get(f"burn_{c}_real_drops")) or 0) for r in rows)
-        series[f"burn {c}"] = _bool_series(f"burn {c}", bpts, start, end, max_gap_s,
-                                           required=False, extra={"real_drops": drops})
+    for node in list(cams) + list(HOP_NODES):
+        bpts = [(_f(r["epoch_s"]), r.get(f"burn_{node}_zero_loss")) for r in rows
+                if r.get(f"burn_{node}_zero_loss") in ("true", "false")]
+        drops = sum(int(_f(r.get(f"burn_{node}_real_drops")) or 0) for r in rows)
+        why = ("never measured (needs the camera's capture burn)" if node in cams
+               else "never measured (the OBS measurement burn was not in the recording)")
+        series[f"burn {node}"] = _state_series(f"burn {node}", bpts, start, end, max_gap_s,
+                                               required=False, extra={"real_drops": drops},
+                                               never_reason=why)
 
     for col in SPREAD_COLUMNS:
         pts = [(_f(r["epoch_s"]), _f(r.get(col))) for r in rows if _f(r.get(col)) is not None]
@@ -511,10 +580,12 @@ def evaluate(rows, cams, *, bounds, min_duration_s, max_gap_s=DEFAULT_MAX_GAP_S,
         rep["reasons"].append(
             f"run shorter than required: window starts span {rep['span_s'] / 3600:.2f} h < "
             f"{min_duration_s / 3600:.2f} h")
+    if not graded:
+        rep["reasons"].append("nothing was graded (every camera excluded and no graded spread)")
     rep["reasons"].extend(f"{s['name']}: {s['reason']}" for s in unknowns)
     if fails:
         rep["verdict"] = FAIL
-    elif short or unknowns:
+    elif short or unknowns or not graded:
         rep["verdict"] = UNKNOWN
     else:
         rep["verdict"] = PASS
@@ -522,18 +593,20 @@ def evaluate(rows, cams, *, bounds, min_duration_s, max_gap_s=DEFAULT_MAX_GAP_S,
 
 
 def evaluate_scopes(rows, cams, *, bounds, partial_h=DEFAULT_PARTIAL_H,
-                    min_duration_h=DEFAULT_MIN_DURATION_H, max_gap_s=DEFAULT_MAX_GAP_S,
+                    min_duration_h=DEFAULT_MIN_DURATION_H, max_gap_s=None,
                     slope_bound=SLOPE_BOUND_MS_PER_H, spread_columns=DEFAULT_SPREAD_COLUMNS):
-    """The 1 h partial (its own verdict, graded as a 1 h run) + the full run."""
+    """The partial (the first `partial_h`, its own verdict graded as a `partial_h` run, present as
+    soon as the CSV covers it) + the full run."""
     kw = dict(bounds=bounds, max_gap_s=max_gap_s, slope_bound=slope_bound,
               spread_columns=spread_columns)
     full = evaluate(rows, cams, min_duration_s=min_duration_h * 3600, scope="full", **kw)
     out = {"full": full, "partial": None}
     epochs = [e for e in (_f(r.get("epoch_s")) for r in rows) if e is not None]
     if epochs and partial_h:
-        cut = min(epochs) + partial_h * 3600 + START_JITTER_ALLOWANCE_S
-        prows = [r for r in rows if (_f(r.get("epoch_s")) or math.inf) <= cut]
-        if len(prows) < len(epochs):
+        first = min(epochs)
+        if max(epochs) - first >= partial_h * 3600 - START_JITTER_ALLOWANCE_S:
+            cut = first + partial_h * 3600 + START_JITTER_ALLOWANCE_S
+            prows = [r for r in rows if (_f(r.get("epoch_s")) or math.inf) <= cut]
             out["partial"] = evaluate(prows, cams, min_duration_s=partial_h * 3600,
                                       scope=f"partial (first {partial_h:g} h)", **kw)
     return out
@@ -559,24 +632,29 @@ def _render_one(rep):
         f"(span {rep.get('span_s', 0) / 3600:.2f} h, required {rep['min_duration_s'] / 3600:.2f} h)",
         f"  bounds: A/V |offset - expected| <= {b['av_tolerance_ms']:g} ms "
         f"({src.get('av_tolerance_ms', '?')}); spread <= {b['spread_threshold_ms']:g} ms "
-        f"({src.get('spread_threshold_ms', '?')}); |slope| <= {b['slope_bound_ms_per_h']:g} ms/h; "
-        f"sample gap <= {b['max_gap_s']:g} s; graded spread: {', '.join(rep['spread_columns'])}",
-        f"  {'series':<30} {'n':>3} {'min':>9} {'max':>9} {'last':>9} {'slope/h':>9} "
+        f"({src.get('spread_threshold_ms', '?')}); |slope| <= {b['slope_bound_ms_per_h']:g} ms/h "
+        f"(judged +/- {b.get('slope_se_k', SLOPE_SE_K):g} SE); sample gap <= {b['max_gap_s']:g} s; "
+        f"graded spread: {', '.join(rep['spread_columns']) or 'none'}",
+        f"  {'series':<30} {'n':>3} {'min':>9} {'max':>9} {'last':>9} {'slope/h':>9} {'2SE':>6} "
         f"{'gap s':>6}  verdict",
     ]
     for s in rep["series"].values():
         if s["name"].startswith(("loss ", "burn ")):
             detail = (f"copies={s.get('copies', '-')} gaps={s.get('gaps', '-')} "
-                      f"undecodable={s.get('undecodable', '-')}" if s["name"].startswith("loss ")
+                      f"undecodable={s.get('undecodable', '-')} report_only={s.get('report_only', 0)}"
+                      if s["name"].startswith("loss ")
                       else f"real_drops={s.get('real_drops', 0)}")
-            lines.append(f"  {s['name']:<30} {s['n']:>3} {detail:<39} "
+            lines.append(f"  {s['name']:<30} {s['n']:>3} {detail:<46} "
                          f"{_n(s['max_gap_s'], '{:.0f}'):>6}  {s['verdict']}"
                          + (f" -- {s['reason']}" if s.get("reason") else ""))
             continue
+        se = s.get("slope_se_ms_per_h")
+        band = None if se is None else SLOPE_SE_K * se
         lines.append(
             f"  {s['name']:<30} {s['n']:>3} {_n(s['min'], '{:+.1f}'):>9} "
             f"{_n(s['max'], '{:+.1f}'):>9} {_n(s['last'], '{:+.1f}'):>9} "
-            f"{_n(s['slope_ms_per_h']):>9} {_n(s['max_gap_s'], '{:.0f}'):>6}  {s['verdict']}"
+            f"{_n(s['slope_ms_per_h']):>9} {_n(band, '{:.2f}'):>6} "
+            f"{_n(s['max_gap_s'], '{:.0f}'):>6}  {s['verdict']}"
             + (f" -- {s['reason']}" if s.get("reason") else ""))
     lines.append(f"  VERDICT: {rep['verdict']}")
     for r in rep["reasons"]:
@@ -598,7 +676,8 @@ def render_text(scopes):
 def _cmd_bounds(a):
     b = load_gate_bounds(a.repo_root)
     print(f"av_tolerance_ms={b['av_tolerance_ms']} spread_threshold_ms={b['spread_threshold_ms']} "
-          f"slope_bound_ms_per_h={SLOPE_BOUND_MS_PER_H} max_gap_s={DEFAULT_MAX_GAP_S}")
+          f"slope_bound_ms_per_h={SLOPE_BOUND_MS_PER_H} slope_se_k={SLOPE_SE_K} "
+          f"max_gap_s=slot+{START_JITTER_ALLOWANCE_S}")
     for k, v in b["sources"].items():
         print(f"  {k} <- {v}")
     return 0
@@ -618,7 +697,8 @@ def _cmd_row(a):
             verdict = None
             if outcome == "ok":
                 outcome = "no_verdict:unreadable_json"
-    meta = {"epoch_s": a.epoch_s, "slot": a.slot, "window_s": a.window_s, "outcome": outcome,
+    meta = {"epoch_s": a.epoch_s, "slot": a.slot, "slot_s": a.slot_s, "window_s": a.window_s,
+            "outcome": outcome,
             "verdict_rc": a.verdict_rc, "verdict_path": a.verdict_path or a.verdict_json or "",
             "painter_run_id": a.painter_run_id}
     row = row_from_verdict(verdict, cams, meta)
@@ -662,6 +742,7 @@ def main(argv=None):
     r.add_argument("--epoch-s", type=float, required=True)
     r.add_argument("--slot", type=int, required=True)
     r.add_argument("--window-s", type=int, required=True)
+    r.add_argument("--slot-s", type=int, default=None, help="the slot length (sets the gap bound)")
     r.add_argument("--outcome", default="ok")
     r.add_argument("--verdict-rc", type=int, default=None)
     r.add_argument("--verdict-path", default="")
@@ -672,7 +753,8 @@ def main(argv=None):
     p.add_argument("--json", default="")
     p.add_argument("--min-duration-h", type=float, default=DEFAULT_MIN_DURATION_H)
     p.add_argument("--partial-h", type=float, default=DEFAULT_PARTIAL_H)
-    p.add_argument("--max-gap-s", type=float, default=DEFAULT_MAX_GAP_S)
+    p.add_argument("--max-gap-s", type=float, default=None,
+                   help="default: the CSV's slot_s + the start-jitter allowance")
     p.add_argument("--slope-bound", type=float, default=SLOPE_BOUND_MS_PER_H)
     p.add_argument("--spread-columns", default=",".join(DEFAULT_SPREAD_COLUMNS))
     a = ap.parse_args(argv)
