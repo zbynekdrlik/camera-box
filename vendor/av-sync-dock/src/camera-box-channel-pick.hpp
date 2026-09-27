@@ -6,7 +6,7 @@
  * The stream box's `mbc` input is stereo and carries the same cam2 marker on L and R, R 10.17 ms
  * behind L. Their average (what `st_raw_audio_camera_box` used to decode) comb-filters the two
  * copies into an undecodable signal. This header decodes each channel with its own
- * StreamingMarkerDecoder (camera-box-audio.hpp), keeps each channel's decoded markers over the last
+ * StreamingMarkerDecoder (camera-box-marker-scan.hpp), keeps each channel's decoded markers over the last
  * CB_CHANNEL_PICK_WINDOW_S, measures each channel's self-consistency cluster, and applies the ONE
  * channel rule the offline gate uses: the lowest channel that clears the decodability floor, else
  * the largest cluster, ties to the lowest. Only the chosen channel's markers reach the ring pairing.
@@ -39,8 +39,8 @@ static const uint64_t CB_MARKER_MIN_CLUSTERS = 4;
 /* Mirror of av_sync_dock_channels::DOCK_CHANNEL_PICK_WINDOW_S -- the #1324 calibration window. */
 static const uint64_t CB_CHANNEL_PICK_WINDOW_S = 25;
 /* Mirror of av_sync_dock_channels::DOCK_CHANNEL_PICK_MAX_MARKERS -- the most markers one channel
- * keeps in its pick window (the newest), so the O(n^2) cluster on the audio thread stays bounded
- * under a decode flood. */
+ * keeps in its pick window (the newest), so the O(n^2) cluster on the audio decode worker (the OBS
+ * audio thread until issue 1381) stays bounded under a decode flood. */
 static const size_t CB_CHANNEL_PICK_MAX_MARKERS = 256;
 /* Mirror of qpsk_probe_decision::ClusterParams::default(). */
 static const uint32_t CB_CLUSTER_STEP_TOL = 3;

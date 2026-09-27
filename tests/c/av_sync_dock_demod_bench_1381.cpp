@@ -19,19 +19,26 @@
  *      work itself, not the scheduling noise of a loaded box), for silence / white / pink /
  *      music-like / a 442 Hz tone, mono and stereo. The 2-channel music-like input and the
  *      2-channel tone (every position passes the preamble screen -- the worst case) must stay
- *      <= CB_BENCH_WORKER_BUDGET_MS per push on average.
+ *      <= CB_BENCH_WORKER_BUDGET_MS per push on average;
+ *   3. the audio-thread cost: the dock's share of libobs's audio thread is the gate and a
+ *      CbAudioBlockFifo::publish of the stereo block, while the worker decodes the blocks with the
+ *      same picker. For every signal the publish must stay <= CB_BENCH_AUDIO_THREAD_BUDGET_MS of
+ *      thread CPU time, the mean and the worst push alike (wall-clock p99 / max are reported).
  *
- * Build (Linux; tests/av_sync_dock_audio_worker_1381.rs does this on every CI run):
+ * Build (Linux; tests/av_sync_dock_demod_bench_1381.rs does this on every CI run):
  *   g++ -std=c++11 -O2 -Wall -Wextra -Werror -pthread -Ivendor/av-sync-dock/src
  *       -Ivendor/av-sync-dock/test tests/c/av_sync_dock_demod_bench_1381.cpp -o bench
  *   ./bench tests/fixtures/mbc-stereo-skew-1367/mbc-stereo-2s.wav
  */
 
+#include "camera-box-audio-worker.hpp"
 #include "camera-box-channel-pick.hpp"
 #include "cb-marker-emitter.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <complex>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -40,6 +47,7 @@
 #include <iterator>
 #include <random>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace camerabox;
@@ -56,6 +64,8 @@ static int g_failures = 0;
 /* The design acceptance (issue 1381, comment 5858886583): the audio-worker decode of a 2-channel
  * music-like mix stays within 2 ms per 1024-frame push. */
 static const double CB_BENCH_WORKER_BUDGET_MS = 2.0;
+/* The design acceptance: the audio thread's share stays within 0.2 ms per push for every signal. */
+static const double CB_BENCH_AUDIO_THREAD_BUDGET_MS = 0.2;
 static const size_t CB_BENCH_BLOCK = 1024;
 static const size_t CB_BENCH_PUSHES = 1406; // ~30 s of 48 kHz audio
 
@@ -406,10 +416,79 @@ static void bench_worker()
 	}
 }
 
+static double wall_ms()
+{
+	return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+static void bench_audio_thread()
+{
+	std::printf("== audio-thread cost per %zu-frame push (gate + FIFO copy, worker decoding) ==\n",
+		    CB_BENCH_BLOCK);
+	const char *kinds[5] = {"silence", "white", "pink", "music", "tone442"};
+	const size_t pushes = 1000;
+	for (int k = 0; k < 5; k++) {
+		const std::string kind = kinds[k];
+		std::vector<float> L = make(kind, CB_BENCH_BLOCK * pushes, 1);
+		std::vector<float> R = make(kind, CB_BENCH_BLOCK * pushes, 2);
+		ChannelMarkerPicker pk = ChannelMarkerPicker::dock(2, CB_AUDIO_SAMPLE_RATE, CB_AUDIO_CARRIER_HZ, CB_AUDIO_C);
+		CbAudioBlockFifo fifo;
+		CbAudioBlockFifo::Handlers h;
+		h.process = [&pk](const CbAudioBlock &b) {
+			const float *planes[2] = {b.planes[0].data(), b.planes[1].data()};
+			(void)pk.push(planes, b.frames);
+		};
+		h.on_gap = [&pk](const CbAudioBlock &) { pk.reset_window(); };
+		fifo.start(h, 2, CB_BENCH_BLOCK);
+		std::vector<double> cpu, wall;
+		cpu.reserve(pushes);
+		wall.reserve(pushes);
+		uint64_t accepted = 0;
+		/* 2 ms per push: ten times real time, still slower than the worker's worst case */
+		const double period_ms = 2.0;
+		double next = wall_ms();
+		for (size_t p = 0; p < pushes; p++) {
+			const float *planes[2] = {L.data() + p * CB_BENCH_BLOCK, R.data() + p * CB_BENCH_BLOCK};
+			const double w0 = wall_ms(), c0 = thread_cpu_ms();
+			const CbAudioGate gate = cb_audio_decode_gate(true, true, (uint64_t)p * 21333333u,
+								      (uint64_t)p * 21333333u, 20000000000ull);
+			if (gate == CbAudioGate::Open && fifo.publish(planes, 2, CB_BENCH_BLOCK, (uint64_t)p))
+				accepted++;
+			cpu.push_back(thread_cpu_ms() - c0);
+			wall.push_back(wall_ms() - w0);
+			next += period_ms;
+			const double wait = next - wall_ms();
+			if (wait > 0)
+				std::this_thread::sleep_for(std::chrono::microseconds((long long)(wait * 1000.0)));
+		}
+		for (int spin = 0; fifo.taken() < accepted && spin < 5000; spin++)
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+		const uint64_t worker_sum_ns = fifo.take_process_sum_ns();
+		const uint64_t worker_max_ns = fifo.take_process_max_ns();
+		fifo.stop();
+		std::vector<double> sc = cpu, sw = wall;
+		std::sort(sc.begin(), sc.end());
+		std::sort(sw.begin(), sw.end());
+		double sum = 0;
+		for (size_t i = 0; i < cpu.size(); i++)
+			sum += cpu[i];
+		const double mean = sum / (double)cpu.size();
+		std::printf("  %-8s ch=2  cpu mean_ms=%.4f max_ms=%.4f  wall p99_ms=%.4f max_ms=%.4f  dropped=%llu  "
+			    "worker mean_ms=%.3f max_ms=%.3f\n",
+			    kind.c_str(), mean, sc.back(), sw[sw.size() * 99 / 100], sw.back(),
+			    (unsigned long long)fifo.dropped(),
+			    accepted ? (double)worker_sum_ns / 1e6 / (double)accepted : 0.0, (double)worker_max_ns / 1e6);
+		CHECK(mean <= CB_BENCH_AUDIO_THREAD_BUDGET_MS && sc.back() <= CB_BENCH_AUDIO_THREAD_BUDGET_MS,
+		      "the audio thread's share (gate + FIFO copy) stays within its per-push budget");
+		CHECK(fifo.taken() == accepted, "the worker handled every accepted block");
+	}
+}
+
 int main(int argc, char **argv)
 {
 	check_identity(argc > 1 ? argv[1] : nullptr);
 	bench_worker();
+	bench_audio_thread();
 	if (g_failures) {
 		std::printf("%d FAILURE(S)\n", g_failures);
 		return 1;

@@ -44,7 +44,8 @@ namespace camerabox {
 
 /* Raise `a` to `v` if `v` is larger (lock-free high-water mark). The dock keeps the per-diag-window
  * max of st_raw_video's own cost this way: written on the video-output thread, read-and-reset with
- * exchange(0) on the audio thread's diag tick. */
+ * exchange(0) on the audio decode worker's diag tick (issue 1381 uses it for the audio thread's own
+ * cost too). */
 inline void cb_atomic_max_u64(std::atomic<uint64_t> &a, uint64_t v)
 {
 	uint64_t cur = a.load(std::memory_order_relaxed);
