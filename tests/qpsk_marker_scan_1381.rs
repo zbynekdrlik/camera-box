@@ -284,8 +284,8 @@ fn fixture_channels() -> [Vec<f32>; 2] {
         if &b[pos..pos + 4] == b"data" {
             let data = &b[pos + 8..(pos + 8 + len).min(b.len())];
             let mut ch = [Vec::new(), Vec::new()];
-            for (k, s) in data.chunks_exact(2).enumerate() {
-                ch[k % 2].push(i16::from_le_bytes([s[0], s[1]]) as f32 / 32768.0);
+            for (k, s) in data.as_chunks::<2>().0.iter().enumerate() {
+                ch[k % 2].push(i16::from_le_bytes(*s) as f32 / 32768.0);
             }
             return ch;
         }
