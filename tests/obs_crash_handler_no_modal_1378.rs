@@ -5,31 +5,39 @@
 //! `obs-studio/crashes/Crash <date>.txt`, then shows a task-modal
 //! `MessageBoxA(..., MB_YESNO | MB_ICONERROR | MB_TASKMODAL)` asking whether to copy the crash log
 //! to the clipboard, and only calls `exit(-1)` once somebody answers. Every managed Windows OBS box
-//! (stream, resolume) runs unattended, so nobody answers: the crashed obs64 stays alive, and the
-//! guarded launcher and the AHK safe-loop see a live obs64 and never start a fresh OBS. WER
-//! `DontShowUI` does not cover it, because OBS installs its own handler.
+//! (stream, resolume) runs unattended, so nobody is there to answer it. The crashed obs64 would stay
+//! alive behind the dialog, and every OBS launcher first checks for a live obs64, so the box's
+//! respawner (the `camera-box-obs-self-heal-stream` task on stream where it is enabled, the owner's
+//! AHK safe-loop on resolume) could not start a fresh OBS. WER `DontShowUI` does not cover the
+//! dialog, because OBS installs its own handler.
 //!
-//! The rig build's handler writes the crash file exactly as upstream, logs ONE line naming it
-//! through `blog(LOG_ERROR, ...)` and exits at once. The path is canonicalised with the
-//! non-throwing `std::error_code` overload, because the one-argument `canonical()` throws when the
-//! crash file could not be written and an exception out of a crash handler ends in `abort()` and a
-//! WER report.
+//! The rig build's handler writes the crash file exactly as upstream, logs ONE line through
+//! `blog(LOG_ERROR, ...)` that names the file (and says so when the write failed), and exits at
+//! once. The path is canonicalised with the non-throwing `std::error_code` overload, because the
+//! one-argument `canonical()` throws when the crash file could not be written, and an exception
+//! out of a crash handler ends in `abort()` and a WER report.
 //!
 //! Two facets, the same shape as the other vendored-frontend guards (the vendored C++ compiles only
 //! on CI, per the project's Tier-0 policy):
 //!
-//! - **Facet A**: std-only source anchors on the handler body (no dialog, no clipboard, the crash
-//!   file still written, the log line, `exit(-1)` last) plus the pwsh lock-step in BOTH
-//!   windows-genlock workflows. This is revert protection against a future `git subtree pull`
-//!   re-importing the upstream dialog while the build still compiles.
+//! - **Facet A**: std-only source anchors on the comment-stripped handler body (no dialog, no
+//!   clipboard, the crash file still written, the log line, `exit(-1)` last) plus the pwsh
+//!   lock-step in BOTH windows-genlock workflows. This is revert protection against a future
+//!   `git subtree pull` re-importing the upstream dialog while the build still compiles.
 //! - **Facet B**: the handler is lifted VERBATIM, compiled with the C++ toolchain against small
 //!   stand-ins for the OBS helpers AND for the Windows dialog/clipboard API the upstream handler
 //!   used, and run in a child process. A re-imported dialog is then caught at RUNTIME (the
 //!   stand-in `MessageBoxA` prints a marker), not only as a compile error. It fails loudly when no
-//!   C++ compiler is present (a gate that skips is worse than none).
+//!   C++ compiler is present (a gate that skips is worse than none). The lift compiles the
+//!   non-`_WIN32` branches of the handler's two inner `#ifdef _WIN32` blocks; the wide-path open
+//!   and the separator replace stay CI-only.
 //!
 //! FRONTEND change: it lands in `obs64.exe`, so it ships with a FULL-bundle deploy, never the fast
 //! obs.dll path.
+
+#[path = "support/cpp_source.rs"]
+mod cpp_source;
+use cpp_source::{body_of, squish, strip_cpp_comments};
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -68,37 +76,20 @@ fn repo_file(rel: &str) -> String {
     fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
 }
 
-/// Collapse every run of ASCII whitespace to one space (mirrors the pwsh `-replace '\s+', ' '`).
-fn squish(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
+/// The handler body from its opening to its closing brace, straight from the vendored file.
+fn raw_handler_body(src: &str) -> &str {
+    assert!(
+        src.contains(HANDLER_SIG),
+        "{OBS_MAIN}: `{HANDLER_SIG}` not found -- the Windows crash handler was renamed or \
+         removed; re-check the issue-1378 no-dialog patch."
+    );
+    body_of(src, HANDLER_SIG)
 }
 
-/// The handler from its signature to its matching closing brace.
-fn handler_source(src: &str) -> &str {
-    let start = src.find(HANDLER_SIG).unwrap_or_else(|| {
-        panic!(
-            "{OBS_MAIN}: `{HANDLER_SIG}` not found -- the Windows crash handler was renamed or \
-             removed; re-check the issue-1378 no-dialog patch."
-        )
-    });
-    let rest = &src[start..];
-    let open = rest
-        .find('{')
-        .expect("the crash handler has no opening brace");
-    let mut depth = 0usize;
-    for (i, c) in rest[open..].char_indices() {
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return &rest[..open + i + 1];
-                }
-            }
-            _ => {}
-        }
-    }
-    panic!("{OBS_MAIN}: unbalanced braces in the crash handler");
+/// The handler body with comments dropped and whitespace collapsed, for the source anchors: prose
+/// in a comment can then neither satisfy nor break an anchor.
+fn handler_body() -> String {
+    squish(&strip_cpp_comments(raw_handler_body(&repo_file(OBS_MAIN))))
 }
 
 // ----------------------------------------------------------------------------------------------
@@ -107,8 +98,7 @@ fn handler_source(src: &str) -> &str {
 
 #[test]
 fn windows_crash_handler_never_shows_a_dialog_1378() {
-    let raw = repo_file(OBS_MAIN);
-    let body = squish(handler_source(&raw));
+    let body = handler_body();
 
     for banned in [
         "MessageBox",
@@ -122,13 +112,14 @@ fn windows_crash_handler_never_shows_a_dialog_1378() {
             !body.contains(banned),
             "{OBS_MAIN}: the Windows crash handler contains `{banned}` -- the task-modal crash \
              dialog (or its clipboard copy) is BACK. On an unattended OBS box nobody answers it, \
-             the crashed obs64 stays alive and no launcher restarts OBS. Re-apply the issue-1378 \
-             patch (write the crash file, log one line, exit(-1))."
+             the crashed obs64 stays alive and no respawner can start a fresh OBS. Re-apply the \
+             issue-1378 patch (write the crash file, log one line, exit(-1))."
         );
     }
 
-    // The upstream dialog text lives in a file-level macro, so check the whole file too.
-    let file = squish(&raw);
+    // The upstream dialog text lives in a file-level macro, so check the whole file too (the same
+    // raw text the pwsh mirrors read).
+    let file = squish(&repo_file(OBS_MAIN));
     for banned in [
         UPSTREAM_DIALOG_TITLE,
         "Would you like to copy the crash log",
@@ -143,7 +134,7 @@ fn windows_crash_handler_never_shows_a_dialog_1378() {
 
 #[test]
 fn windows_crash_handler_still_writes_the_crash_file_1378() {
-    let body = squish(handler_source(&repo_file(OBS_MAIN)));
+    let body = handler_body();
     for kept in [
         "string crashFilePath = \"obs-studio/crashes\";",
         "delete_oldest_file(true, crashFilePath.c_str());",
@@ -163,26 +154,33 @@ fn windows_crash_handler_still_writes_the_crash_file_1378() {
 
 #[test]
 fn windows_crash_handler_logs_the_path_then_exits_1378() {
-    let body = squish(handler_source(&repo_file(OBS_MAIN)));
+    let body = handler_body();
 
-    let log_at = body
-        .find(&format!(
-            "blog(LOG_ERROR, \"Crash report written to %s -- {NO_DIALOG_MARKER}\""
-        ))
-        .unwrap_or_else(|| {
-            panic!(
-                "{OBS_MAIN}: the Windows crash handler does not log the one issue-1378 line \
-                 (`blog(LOG_ERROR, \"Crash report written to %s -- {NO_DIALOG_MARKER}\", ...)`)."
-            )
-        });
+    let log_call = format!("blog(LOG_ERROR, \"Crash report %s %s -- {NO_DIALOG_MARKER}\"");
+    let log_at = body.find(&log_call).unwrap_or_else(|| {
+        panic!(
+            "{OBS_MAIN}: the Windows crash handler does not log the one issue-1378 line \
+             (`{log_call}, ...)`)."
+        )
+    });
+    assert!(
+        body.contains("crashFileWritten ? \"written to\" : \"could NOT be written to\""),
+        "{OBS_MAIN}: the log line must say whether the crash file was written."
+    );
     let write_at = body.find("file << text;").expect("crash-file write");
+    let written_at = body
+        .find("const bool crashFileWritten = !file.fail();")
+        .unwrap_or_else(|| {
+            panic!("{OBS_MAIN}: the handler no longer records whether the crash-file write worked")
+        });
     let exit_at = body.find("exit(-1);").unwrap_or_else(|| {
         panic!("{OBS_MAIN}: the Windows crash handler no longer calls exit(-1)")
     });
 
     assert!(
-        write_at < log_at && log_at < exit_at,
-        "{OBS_MAIN}: the order must be: write the crash file, log its path, exit(-1)."
+        write_at < written_at && written_at < log_at && log_at < exit_at,
+        "{OBS_MAIN}: the order must be: write the crash file, record the result, log its path, \
+         exit(-1)."
     );
     assert!(
         body.trim_end().ends_with("exit(-1); }"),
@@ -198,7 +196,7 @@ fn windows_crash_handler_logs_the_path_then_exits_1378() {
 
 #[test]
 fn crash_file_canonicalisation_cannot_throw_1378() {
-    let body = squish(handler_source(&repo_file(OBS_MAIN)));
+    let body = handler_body();
     assert!(
         body.contains("canonical(filesystem::path(pathString), canonicalError)"),
         "{OBS_MAIN}: the crash-file path must be canonicalised with the non-throwing \
@@ -355,10 +353,35 @@ int main(int argc, char **argv)
 }
 "#;
 
-/// Build the lifted handler once per test into its own pid-keyed scratch dir.
+/// A pid-keyed scratch dir that is removed when the test ends, pass or fail.
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "obs_crash_handler_1378_{tag}_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create the scratch dir");
+        Scratch(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Lift the handler VERBATIM (signature + body) and build it into the scratch dir.
 fn build_harness(dir: &Path) -> PathBuf {
     let raw = repo_file(OBS_MAIN);
-    let handler = handler_source(&raw);
+    let handler = format!("{HANDLER_SIG}\n{}", raw_handler_body(&raw));
     let src = format!("{HARNESS_PRELUDE}{handler}{HARNESS_MAIN}");
     let cpp = dir.join("crash_handler.cpp");
     let bin = dir.join("crash_handler.bin");
@@ -386,16 +409,6 @@ fn build_harness(dir: &Path) -> PathBuf {
         String::from_utf8_lossy(&out.stderr)
     );
     bin
-}
-
-fn scratch(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "obs_crash_handler_1378_{tag}_{}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create the scratch dir");
-    dir
 }
 
 struct Run {
@@ -457,7 +470,7 @@ fn assert_exits_without_dialog(run: &Run, case: &str) -> String {
     );
     let line = blog_lines[0];
     assert!(
-        line.starts_with("BLOG 100: Crash report written to ") && line.ends_with(NO_DIALOG_MARKER),
+        line.starts_with("BLOG 100: Crash report ") && line.ends_with(NO_DIALOG_MARKER),
         "issue 1378 ({case}): the log line is not the LOG_ERROR crash-path line: {line}"
     );
     assert!(
@@ -469,9 +482,9 @@ fn assert_exits_without_dialog(run: &Run, case: &str) -> String {
 
 #[test]
 fn lifted_crash_handler_writes_the_file_logs_it_and_exits_1378() {
-    let dir = scratch("written");
-    let bin = build_harness(&dir);
-    let root = dir.join("config");
+    let dir = Scratch::new("written");
+    let bin = build_harness(dir.path());
+    let root = dir.path().join("config");
     let crashes = root.join("obs-studio").join("crashes");
     fs::create_dir_all(&crashes).expect("create obs-studio/crashes");
 
@@ -492,22 +505,23 @@ fn lifted_crash_handler_writes_the_file_logs_it_and_exits_1378() {
 
     let canonical = fs::canonicalize(&crash_file).expect("canonicalise the crash file");
     assert!(
-        line.contains(&format!("written to {} -- ", canonical.display())),
+        line.contains(&format!(
+            "Crash report written to {} -- ",
+            canonical.display()
+        )),
         "issue 1378: the log line must name the canonical crash-file path {}: {line}",
         canonical.display()
     );
-
-    fs::remove_dir_all(&dir).expect("remove the scratch dir");
 }
 
 #[test]
 fn lifted_crash_handler_exits_cleanly_when_the_crash_file_cannot_be_written_1378() {
     // No obs-studio/crashes directory: the crash file cannot be written and canonical() has
-    // nothing to resolve. The handler must still log the (uncanonicalised) path and exit(-1),
+    // nothing to resolve. The handler must say so, name the requested path, and exit(-1) --
     // never throw into abort().
-    let dir = scratch("unwritable");
-    let bin = build_harness(&dir);
-    let root = dir.join("config");
+    let dir = Scratch::new("unwritable");
+    let bin = build_harness(dir.path());
+    let root = dir.path().join("config");
     fs::create_dir_all(&root).expect("create the config root");
 
     let run = run_handler(&bin, &root);
@@ -515,10 +529,10 @@ fn lifted_crash_handler_exits_cleanly_when_the_crash_file_cannot_be_written_1378
 
     let expected = format!("{}/obs-studio/crashes/{CRASH_FILE_NAME}", root.display());
     assert!(
-        line.contains(&format!("written to {expected} -- ")),
-        "issue 1378: with no crash directory the log line must name the requested path \
-         {expected}: {line}"
+        line.contains(&format!(
+            "Crash report could NOT be written to {expected} -- "
+        )),
+        "issue 1378: with no crash directory the log line must say the file could NOT be written \
+         and name the requested path {expected}: {line}"
     );
-
-    fs::remove_dir_all(&dir).expect("remove the scratch dir");
 }
