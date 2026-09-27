@@ -25,6 +25,7 @@ Requires: pip install websocket-client. OBS WebSocket :4455 (pass --password if 
 host requires auth; LAN boxes here use none).
 """
 import argparse
+import collections
 import json
 import os
 import re
@@ -44,6 +45,14 @@ MAIN_OUTPUT = "NDI Main Output"
 # fix the names and keep the artifacts dormant between runs instead of recreating them.
 SCENE = "PHASE2-PROBE"
 INPUT = "phase2-probe-src"
+
+# issue 1380: the stream OBS development program scene and the owner's production scene nested in
+# it. Development never programs `PRO` itself; it programs `Development`, whose one scene item is
+# the scene `PRO` (same pixels, the same warm `NDI 2ME PGM` receiver). The bash defaults live in
+# scripts/lib/stream-dev-scene.sh and are pinned to these by a pytest.
+STREAM_DEV_SCENE = "Development"
+STREAM_PRODUCTION_SCENE = "PRO"
+_SCENE_SOURCE_TYPE = "OBS_SOURCE_TYPE_SCENE"
 
 # #355: bound for waiting an orphan recording's output to FINALIZE (outputActive=False)
 # after StopRecord, before this run's StartRecord. A large MP4 (the live 24.5 GB stream-box
@@ -1629,7 +1638,8 @@ def _assert_program_nonblack(ws, host, scene, label, black_hint, min_mean=None):
     arbitrary, possibly dim, real production content), so each caller now owns its own floor instead
     of sharing one global default."""
     blackcheck_timeout = float(os.environ.get("OBS_BLACKCHECK_TIMEOUT_S", "20"))
-    # #312: switch() (the ONLY caller that omits min_mean) routes to a KNOWN-BRIGHT scene (the
+    # #312: switch() (the ONLY caller that omits min_mean, unless issue 1380's EVENT-mode
+    # production-scene restore passes --min-mean) routes to a KNOWN-BRIGHT scene (the
     # dual-QR monitor, mean ~105 when settled), so it needs a MEAN floor — a mid-renegotiation frame
     # (peak ~117 but mean ~2.7 right after cam1's [2/8] restart) then keeps the poll WAITING until
     # cam1's NDI settles, instead of falsely passing on peak and recording a black program.
@@ -2306,7 +2316,13 @@ def switch(a):
     it marks when the new cambox enters program); the black-check polls AFTER and never moves it."""
     ws = _conn(a.host, a.password)
     try:
-        _rpc(ws, "SetCurrentProgramScene", {"sceneName": a.program_scene})
+        # issue 1380: skip the SetCurrentProgramScene when the target is already on program (the
+        # #343 same-scene hazard: re-setting a scene that carries the heavy NDI 2ME PGM can hang
+        # past the #328 deadline). The rig-mode TEST park re-asserts the development scene it just
+        # proved, and EVENT mode may find PRO already live. The non-black proof below still runs.
+        current = _rpc(ws, "GetCurrentProgramScene").get("currentProgramSceneName")
+        if current != a.program_scene:
+            _rpc(ws, "SetCurrentProgramScene", {"sceneName": a.program_scene})
         switch_ns = time.time_ns()  # the boundary — right after the switch lands
         # Same POLLED non-black self-check prod_scene uses (shared helper) — a dead/black cambox
         # scene fails loud instead of silently recording a black, all-undecodable segment.
@@ -2319,6 +2335,9 @@ def switch(a):
             "never wastes the run. (#1223: a dark screen here can ALSO mean the cam2 painter/monitor "
             "itself already went dark/expired -- check /tmp/painter.log on the painter box before "
             "assuming the cambox is the culprit.)",
+            # issue 1380: EVENT mode's switch back to the production scene checks real (possibly
+            # dim) production content, so it passes the prod floor; None keeps the #312 default.
+            min_mean=getattr(a, "min_mean", None),
         )
     finally:
         ws.close()
@@ -2780,16 +2799,41 @@ def _first_enabled_scene_item_source(items):
     EXPECTED source, this reads what a scene's CURRENT program item genuinely is (live evidence,
     2026-08-04: strih's program scene rendered 'NDI cam2' while the fixed default was
     'NDI cam1' — the burn landed on the wrong, non-rendered input)."""
+    item = _first_enabled_scene_item(items)
+    return None if item is None else item.get("sourceName")
+
+
+def _first_enabled_scene_item(items):
+    """The ITEM behind `_first_enabled_scene_item_source` (pure): the same selection, returning the
+    whole scene item so a caller can see whether it is a nested scene (issue 1380)."""
     first_enabled = None
     for item in items:
         if not bool(item.get("sceneItemEnabled", True)):
             continue
         if first_enabled is None:
-            first_enabled = item.get("sourceName")
+            first_enabled = item
         if item.get("inputKind") in _AUDIO_ONLY_INPUT_KINDS:
             continue
-        return item.get("sourceName")
+        return item
     return first_enabled
+
+
+def _resolve_rendered_input(fetch_items, scene, _seen=None):
+    """issue 1380 (pure given *fetch_items*): the input ACTUALLY rendered by *scene*, descending into
+    a nested scene source. The stream development scene `Development` holds the scene `PRO` as its
+    one item, so without the descent the TEST burn would resolve the SCENE `PRO` and try to attach a
+    burn filter to it (a write to the production scene). *fetch_items(scene_name)* returns that
+    scene's GetSceneItemList `sceneItems`. Returns None for an empty scene or a nesting cycle."""
+    seen = set() if _seen is None else _seen
+    if scene in seen:
+        return None
+    seen.add(scene)
+    item = _first_enabled_scene_item(fetch_items(scene))
+    if item is None:
+        return None
+    if item.get("sourceType") == _SCENE_SOURCE_TYPE:
+        return _resolve_rendered_input(fetch_items, item.get("sourceName"), seen)
+    return item.get("sourceName")
 
 
 def program_rendered_input(a):
@@ -2802,12 +2846,14 @@ def program_rendered_input(a):
         scene = a.scene or _rpc(ws, "GetCurrentProgramScene").get("currentProgramSceneName", "")
         if not scene:
             raise SystemExit(f"[obs] {a.host}: could not resolve a program scene to inspect")
-        items = _rpc(ws, "GetSceneItemList", {"sceneName": scene}).get("sceneItems", [])
-        src = _first_enabled_scene_item_source(items)
+        src = _resolve_rendered_input(
+            lambda name: _rpc(ws, "GetSceneItemList", {"sceneName": name}).get("sceneItems", []),
+            scene,
+        )
         if src is None:
             raise SystemExit(
-                f"[obs] {a.host}: program scene '{scene}' has NO enabled scene item — cannot "
-                f"resolve what is actually rendered."
+                f"[obs] {a.host}: program scene '{scene}' has NO enabled scene item (directly or "
+                f"through a nested scene) — cannot resolve what is actually rendered."
             )
     finally:
         ws.close()
@@ -2940,6 +2986,96 @@ def program_scene(a):
     finally:
         ws.close()
     print(scene)
+
+
+# --- issue 1380: the stream development scene (the production scene nested as a source) ------------
+# Owner request 27.9.2026: development never programs the owner's production scene `PRO` on the
+# stream OBS. It programs its own `Development` scene, whose one item is the scene `PRO`: the same
+# pixels and the same warm `NDI 2ME PGM` receiver, so the recording and the 911004 burn are
+# unchanged, and the Companion PRE/PRODUCTION/POST machine (keyed on program == "PRO") is not armed
+# by development. The seeder is idempotent and operator-wins: it only ever CREATES the scene and the
+# nested item when they are missing, never edits an existing item or its transform, and never
+# writes to the production scene.
+
+
+class DevSceneError(Exception):
+    """The development scene cannot be ensured (the production scene is missing, or the names are
+    unusable). Fail loud; never guess another scene."""
+
+
+DevScenePlan = collections.namedtuple("DevScenePlan", "actions nested_hidden")
+
+
+def dev_scene_plan(scene_names, dev_items, dev_scene, nested_scene):
+    """issue 1380 (pure): what the seeder must do. *scene_names* = GetSceneList names; *dev_items* =
+    the development scene's GetSceneItemList `sceneItems` (None when the scene does not exist).
+    Returns DevScenePlan(actions, nested_hidden) with actions a subset of
+    ["create_scene", "add_nested"] in that order. `nested_hidden` reports an existing nested item the
+    operator disabled: it is left alone (operator-wins) but the caller says why the development
+    program would render black. Raises DevSceneError when the production scene is missing or the
+    two names are empty or equal (nesting a scene in itself)."""
+    if not dev_scene or not nested_scene:
+        raise DevSceneError("the development and production scene names must both be non-empty")
+    if dev_scene == nested_scene:
+        raise DevSceneError(
+            f"the development scene must differ from the production scene '{nested_scene}' "
+            f"(development never programs the production scene itself)"
+        )
+    if nested_scene not in scene_names:
+        raise DevSceneError(
+            f"the production scene '{nested_scene}' does not exist on this OBS (scenes: "
+            f"{sorted(scene_names)}); refusing to build '{dev_scene}' around a missing scene"
+        )
+    if dev_scene not in scene_names:
+        return DevScenePlan(["create_scene", "add_nested"], False)
+    nested = [it for it in (dev_items or []) if it.get("sourceName") == nested_scene]
+    if not nested:
+        return DevScenePlan(["add_nested"], False)
+    hidden = not any(bool(it.get("sceneItemEnabled", True)) for it in nested)
+    return DevScenePlan([], hidden)
+
+
+def ensure_dev_scene(ws, dev_scene, nested_scene):
+    """issue 1380: apply dev_scene_plan over an open obs-websocket. Reads the scene list and ONLY the
+    development scene's items; writes only CreateScene / CreateSceneItem on the development scene,
+    never with ignore_err (a failed write fails loud). Returns the DevScenePlan it applied."""
+    scenes = [s.get("sceneName") for s in _rpc(ws, "GetSceneList").get("scenes", [])]
+    dev_items = None
+    if dev_scene in scenes:
+        dev_items = _rpc(ws, "GetSceneItemList", {"sceneName": dev_scene}).get("sceneItems", [])
+    plan = dev_scene_plan(scenes, dev_items, dev_scene, nested_scene)
+    for action in plan.actions:
+        if action == "create_scene":
+            _rpc(ws, "CreateScene", {"sceneName": dev_scene})
+        elif action == "add_nested":
+            _rpc(ws, "CreateSceneItem", {
+                "sceneName": dev_scene, "sourceName": nested_scene, "sceneItemEnabled": True})
+    return plan
+
+
+def dev_scene(a):
+    """issue 1380 CLI: ensure the development scene nests the production scene on *a.host*; print
+    `DEV_SCENE=<name> created=<0|1> nested_added=<0|1>` on stdout, log to stderr. Exits non-zero
+    when the production scene is missing."""
+    ws = _conn(a.host, a.password)
+    try:
+        plan = ensure_dev_scene(ws, a.scene, a.nested)
+    except DevSceneError as e:
+        raise SystemExit(f"[obs] {a.host}: issue 1380 development scene NOT ensured: {e}")
+    finally:
+        ws.close()
+    created = int("create_scene" in plan.actions)
+    added = int("add_nested" in plan.actions)
+    sys.stderr.write(
+        f"[obs] {a.host}: issue 1380 development scene '{a.scene}' nests '{a.nested}' "
+        f"(created={created} nested_added={added}; '{a.nested}' itself untouched)\n"
+    )
+    if plan.nested_hidden:
+        sys.stderr.write(
+            f"[obs] {a.host}: WARNING issue 1380: the '{a.nested}' item in '{a.scene}' is HIDDEN "
+            f"(an operator choice, left alone) -- the development program renders without it\n"
+        )
+    print(f"DEV_SCENE={a.scene} created={created} nested_added={added}")
 
 
 # --- issue 1242: strih connect-on-show (program-path inputs connect only while shown) ---------------
@@ -3085,7 +3221,7 @@ def main():
         "ensure-studio-mode-on",
         "program-rendered-input", "assert-program-nonblack", "mbc-input-check",
         "republish-black-check", "idle-receiver", "apply-measurement-pins",
-        "verify-measurement-pins",
+        "verify-measurement-pins", "dev-scene",
     ):
         p = sub.add_parser(name)
         p.add_argument("--host", required=True)
@@ -3214,6 +3350,14 @@ def main():
             # epoch-ns boundary. Lightweight — no preload/upstream dance (prod_scene already
             # routed the scenes); just SetCurrentProgramScene + the non-black self-check.
             p.add_argument("--program-scene", required=True)
+            # issue 1380: EVENT mode's switch back to the production scene checks real (possibly
+            # dim) production content with the prod floor; omitted -> the #312 default.
+            p.add_argument("--min-mean", type=float, default=None)
+        if name == "dev-scene":
+            # issue 1380: ensure the stream development scene nests the production scene
+            # (idempotent, operator-wins, never writes to the production scene).
+            p.add_argument("--scene", default=STREAM_DEV_SCENE)
+            p.add_argument("--nested", default=STREAM_PRODUCTION_SCENE)
         if name == "idle-receiver":
             # #1086 keepalive-bypass PRIMITIVE (TEST TOOLING ONLY): --input is the strih NDI
             # input to idle/restore. Omit --restore to idle (tear the receiver down cold + print
@@ -3237,6 +3381,7 @@ def main():
     {"setup": setup, "teardown": teardown, "record": record,
      "prod-scene": prod_scene, "switch": switch,
      "program-scene": program_scene, "rig-busy-check": rig_busy_check,
+     "dev-scene": dev_scene,
      "stream-status": stream_status, "stream-detail": stream_detail,
      "latency-check": latency_check,
      "open-projectors": open_projectors,

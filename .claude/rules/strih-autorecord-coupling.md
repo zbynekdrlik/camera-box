@@ -47,6 +47,13 @@ un-muted here; if it is un-muted it happens elsewhere.)
   → the StopRecord-both path DOES exist and IS auto-pressed — but ONLY by the `POST` trigger, i.e.
   only when the operator switches stream's program scene to `POST`.
 
+**Development no longer arms `PRODUCTION` (issue 1380, 27.9.2026).** camera-box development now
+programs the stream scene `Development` (the production scene `PRO` nested inside it), never `PRO`
+itself (`.claude/rules/stream-development-scene.md`). The `PRODUCTION` trigger's condition is
+program scene == `PRO`, so a dev/CI stream started while program is `Development` no longer
+StartRecords both boxes. Only EVENT mode (`rig-mode.sh event`) puts `PRO` back on program. This is a
+consequence of the trigger condition, not a live-verified observation.
+
 **The real root cause of the orphan (corrected — it is NOT "no off trigger"):** the OFF is a REAL,
 enabled trigger, but it is gated on **switching stream's PROGRAM SCENE to `POST`**, not on the stream
 stopping. A live operator ends a service by cutting to the `POST` scene → `POST` fires → StopRecord
