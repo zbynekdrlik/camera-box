@@ -3259,6 +3259,7 @@ def connect_on_show(a):
         print(err, file=sys.stderr)
         sys.exit(1)
 
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)

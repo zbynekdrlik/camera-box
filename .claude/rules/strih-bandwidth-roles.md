@@ -209,12 +209,14 @@ it. A twin from a camera-box sender costs ~58 Mbps at NDI "lowest", not a small 
   still reads. A leftover file is unioned, and its recorded twin original wins.
 - **Writes only present inputs, and the ORDER is enforced, not just issued.** The hold writes the
   mains and WAITS for them to settle, then writes the twins. A twin whose main did not settle stays on
-  the wire, and so does the twin of a main the hold could not read: a camera always keeps one
-  receiver CONFIGURED to connect (the settle confirms the setting read back, not that frames arrive —
-  an unpark or re-bind takes ~1-2 s). An input the hold cannot read at enumeration is a failure: it
+  the wire, and so does the twin of a main the hold could not read: a camera whose main may still be
+  parked keeps its twin CONFIGURED to connect (the settle confirms the setting read back, not that
+  frames arrive — an unpark or re-bind takes ~1-2 s). A twin whose main is not an input at all
+  (deleted/renamed) still goes off the wire — that camera is not measured, and the twin would only
+  cost uplink. An input the hold cannot read at enumeration is a failure: it
   may be a twin still on the wire, or a main about to be measured parked.
-- **Every read-back is a SETTLE poll**, `e2e_bandwidth_hold.await_settled`. OBS applies an input update on the next
-  VIDEO TICK after the WS overlay (`obs_source_update` defers `info.update`), so an immediate
+- **Every read-back is a SETTLE poll**, `e2e_bandwidth_hold.await_settled`. OBS applies an input
+  update on the next VIDEO TICK after the WS overlay (`obs_source_update` defers `info.update`), so an immediate
   `GetInputSettings` reads the overlay back even when the update is about to revert it. The poll:
   - starts `_SETTLE_MIN_S` (0.25 s) after the writes;
   - needs two consecutive matching reads;
@@ -227,7 +229,7 @@ it. A twin from a camera-box sender costs ~58 Mbps at NDI "lowest", not a small 
 - **Restore, twins FIRST:** `twin_restore_values` writes genlock on plus the monitor ROLE (the
   lockdown pins LOWEST only for a `genlock_monitor` source), and a held-shaped original is never
   restored as held. Only then do the mains get connect-on-show back. A main whose twin did not
-  settle stays HELD (full bandwidth) and stays in the state file, so the camera keeps one receiver
+  settle stays HELD (full bandwidth) and stays in the state file, so that camera keeps its main
   configured to connect. The restore returns `(restored, failed, held_back)`, and the CLI names the
   held-back mains. Every write is verified by the same settle poll. A deleted/renamed input is done.
   The file is removed only when every restore landed.

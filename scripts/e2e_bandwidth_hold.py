@@ -170,8 +170,8 @@ def restore(rpc, ws, state_path, settle):
     """RESTORE the hold, twins FIRST: every recorded twin present gets roles.twin_restore_values(original)
     (genlock on + the monitor role -- DistroAV's lockdown then puts LOWEST back itself) and is verified
     after it settles; only then does every held main present get connect-on-show back -- EXCEPT a main
-    whose twin did not settle, which stays held (full bandwidth, and in the state file), so a camera
-    always keeps one receiver configured to connect. An input deleted / renamed since the hold has
+    whose twin did not settle, which stays held (full bandwidth, and in the state file), so that camera
+    keeps its main configured to connect. An input deleted / renamed since the hold has
     nothing to restore (done). The state file is removed only when every restore landed. No state
     file -> ([], [], []). Returns (restored_names, failed_names, held_back_mains)."""
     if not os.path.exists(state_path):

@@ -611,7 +611,8 @@ def test_the_hold_protocol_is_its_own_module_without_a_websocket_dependency():
     # review round 2: the protocol lives beside obs_phase2 (not in it); obs_phase2 passes its `_rpc` and
     # settle seams at call time, so this module never imports a WebSocket client or obs_phase2
     src = (SCRIPTS / "e2e_bandwidth_hold.py").read_text()
-    assert "websocket" not in src and "import obs_phase2" not in src
+    imports = [ln.strip() for ln in src.splitlines() if ln.strip().startswith(("import ", "from "))]
+    assert not any("websocket" in ln or "obs_phase2" in ln for ln in imports), imports
     mod = _load("e2e_bandwidth_hold_twinhold", SCRIPTS / "e2e_bandwidth_hold.py")
     assert mod.Settle._fields == ("min_s", "poll_s", "budget_s", "sleep", "clock")
     op_src = (SCRIPTS / "obs_phase2.py").read_text()
