@@ -3,14 +3,15 @@
 //!
 //! WHY (measured 27.9.2026, release E2E run 36317806422 / PR 1376 at 1.7.0-dev.712). The stream
 //! program recording's `mbc` audio is stereo (DVS ch1 → L, ch2 → R) and carries the SAME cam2 QPSK
-//! marker on both channels, but R lags L by 10.17 ms. Two copies 10 ms apart overlap ~4.4 of the
-//! marker's ten 2.26 ms symbols with a ~150° carrier phase offset, so the mono sum comb-filters the
-//! symbols into garbage: on the real 4 s clip of `2026-09-27 14-29-50.mp4` the downmix (`-ac 1`)
+//! marker on both channels, but R lags L by 10.17 ms (488 samples). One symbol is one 442 Hz carrier
+//! cycle (2.26 ms), so the two copies sit ~4.5 symbols apart at ~178° carrier phase, nearly
+//! anti-phase, and the mono sum smears every symbol into another: on the real 4 s clip of
+//! `2026-09-27 14-29-50.mp4` the downmix (`-ac 1`)
 //! read `preamble_screens 9212, cluster_samples 2, crc_ok 3` → POLLUTED, while L alone read
 //! `cluster 7, crc_ok 7` and R alone `cluster 8, crc_ok 8`, both OK. The owner ruled the skew is not
 //! ours to police ("je tam len nejaky sum ten by ti predsa nemal vadit") — the gate must be robust.
 //!
-//! WHAT. [`deinterleave`] splits the channel-preserving ffmpeg extract; [`decode_channel`] runs the
+//! WHAT. [`f32le_to_channels`] splits the channel-preserving ffmpeg extract; [`decode_channel`] runs the
 //! UNCHANGED demod (`qpsk_marker::decode_markers_with_stats`) and the #1324 self-consistency cluster
 //! (`qpsk_probe_decision::consistency_cluster_size`) on one channel; [`best_marker_channel`] picks
 //! the channel with the LARGEST cluster, ties to the LOWEST index (deterministic); [`decode_best_channel`]
@@ -106,23 +107,6 @@ impl ChannelPick {
             clusters.join(" ")
         )
     }
-}
-
-/// Split interleaved samples (`ffmpeg -f f32le` with the channels kept) into one `Vec` per channel.
-/// `channels == 0` ⇒ no channels. A trailing partial frame is dropped (the glue checks the byte
-/// count divides evenly and fails loud before calling this).
-pub fn deinterleave(interleaved: &[f32], channels: usize) -> Vec<Vec<f32>> {
-    if channels == 0 {
-        return Vec::new();
-    }
-    let frames = interleaved.len() / channels;
-    let mut out: Vec<Vec<f32>> = (0..channels).map(|_| Vec::with_capacity(frames)).collect();
-    for frame in interleaved.chunks_exact(channels) {
-        for (ch, &s) in frame.iter().enumerate() {
-            out[ch].push(s);
-        }
-    }
-    out
 }
 
 /// Parse the first line of `ffprobe -show_entries stream=channels -of default=nw=1:nk=1` into a
@@ -418,22 +402,18 @@ mod tests {
     }
 
     #[test]
-    fn deinterleave_splits_frames_in_channel_order() {
-        let s = [1.0f32, -1.0, 2.0, -2.0, 3.0, -3.0];
+    fn f32le_split_keeps_channel_order() {
+        let bytes: Vec<u8> = [1.0f32, -1.0, 2.0, -2.0, 3.0, -3.0]
+            .iter()
+            .flat_map(|x| x.to_le_bytes())
+            .collect();
         assert_eq!(
-            deinterleave(&s, 2),
-            vec![vec![1.0, 2.0, 3.0], vec![-1.0, -2.0, -3.0]]
+            f32le_to_channels(&bytes, 3),
+            Ok(vec![vec![1.0, -2.0], vec![-1.0, 3.0], vec![2.0, -3.0]])
         );
-        assert_eq!(deinterleave(&s, 1), vec![s.to_vec()]);
         assert_eq!(
-            deinterleave(&s, 3),
-            vec![vec![1.0, -2.0], vec![-1.0, 3.0], vec![2.0, -3.0]]
-        );
-        assert!(deinterleave(&s, 0).is_empty());
-        // a trailing partial frame is dropped
-        assert_eq!(
-            deinterleave(&s[..5], 2),
-            vec![vec![1.0, 2.0], vec![-1.0, -2.0]]
+            f32le_to_channels(&bytes, 2),
+            Ok(vec![vec![1.0, 2.0, 3.0], vec![-1.0, -2.0, -3.0]])
         );
     }
 

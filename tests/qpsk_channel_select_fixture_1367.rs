@@ -12,7 +12,7 @@
 //! and channel pick the probe-gated `recording-verdict` glue calls.
 
 use camera_box::qpsk_channel_select::{
-    channel_probe_report, decode_best_channel, deinterleave, ChannelProbeReport,
+    channel_probe_report, decode_best_channel, f32le_to_channels, ChannelProbeReport,
 };
 use camera_box::qpsk_marker::{decode_markers_with_stats, AudioParams};
 use camera_box::qpsk_probe_decision::{
@@ -31,8 +31,9 @@ fn th() -> QpskProbeThresholds {
 }
 
 /// Minimal RIFF/WAVE reader for the committed 16-bit PCM fixture: returns (channels, sample_rate,
-/// interleaved f32). s16 → f32 is x / 32768, the conversion ffmpeg's `-f f32le` applies.
-fn read_pcm16_wav(path: &std::path::Path) -> (usize, u32, Vec<f32>) {
+/// interleaved f32 LE bytes, i.e. what `ffmpeg -f f32le` hands the probe glue). s16 → f32 is
+/// x / 32768, the conversion ffmpeg applies.
+fn read_pcm16_wav(path: &std::path::Path) -> (usize, u32, Vec<u8>) {
     let b = std::fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     assert_eq!(&b[0..4], b"RIFF", "not a RIFF file");
     assert_eq!(&b[8..12], b"WAVE", "not a WAVE file");
@@ -57,7 +58,7 @@ fn read_pcm16_wav(path: &std::path::Path) -> (usize, u32, Vec<f32>) {
             let data = &b[body..(body + len).min(b.len())];
             let samples = data
                 .chunks_exact(2)
-                .map(|c| i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0)
+                .flat_map(|c| (i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0).to_le_bytes())
                 .collect();
             return (channels, rate, samples);
         }
@@ -69,10 +70,11 @@ fn read_pcm16_wav(path: &std::path::Path) -> (usize, u32, Vec<f32>) {
 fn fixture() -> (Vec<f32>, Vec<f32>) {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/mbc-stereo-skew-1367/mbc-stereo-2s.wav");
-    let (channels, rate, interleaved) = read_pcm16_wav(&path);
+    let (channels, rate, f32le) = read_pcm16_wav(&path);
     assert_eq!(channels, 2, "the fixture is the stereo mbc track");
     assert_eq!(rate, 48_000);
-    let mut ch = deinterleave(&interleaved, channels);
+    // the same splitter the probe glue runs on ffmpeg's raw f32le output
+    let mut ch = f32le_to_channels(&f32le, channels).expect("whole stereo frames");
     assert_eq!(ch[0].len(), 96_000, "2 s at 48 kHz");
     let r = ch.pop().expect("R");
     let l = ch.pop().expect("L");
