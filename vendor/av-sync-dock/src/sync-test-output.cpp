@@ -253,6 +253,12 @@ struct sync_test_output
 	 * (camera-box-channel-pick.hpp, issue 1367), never their average. */
 	struct quirc *cb_qr = nullptr;
 	camerabox::ChannelMarkerPicker *cb_audio_dec = nullptr;
+	/* issue 1367: switches of the paired audio channel (a switch moves the measured offset by
+	 * ~10 ms): the running total on the diag line, the ones not yet named in a switch log line,
+	 * and when that line last went out. Audio thread only. */
+	uint64_t cb_channel_switches = 0;
+	uint64_t cb_channel_switches_unlogged = 0;
+	uint64_t cb_channel_switch_last_log_ns = 0;
 	camerabox::RollingOffsetCluster cb_offset_cluster = camerabox::RollingOffsetCluster::dock();
 	uint64_t cb_audio_pushed = 0;
 
@@ -1416,6 +1422,28 @@ static size_t cb_ensure_audio_picker(struct sync_test_output *st)
 	return nch;
 }
 
+/* issue 1367: a switch of the paired audio channel moves the measured offset by ~10 ms (R is
+ * 10.17 ms behind L on the stereo mbc input) and the offset cluster is not reset, so it is logged
+ * when it happens: the first switch at once, then at most one line per diag interval, naming how
+ * many switches it stands for. The diag line's channel_switches= is the running total. Audio thread
+ * only; `prev` is the channel chosen before this callback's push. */
+static void cb_note_channel_switch(struct sync_test_output *st, size_t prev, const struct audio_data *frames)
+{
+	if (st->cb_audio_dec->chosen == prev)
+		return;
+	st->cb_channel_switches++;
+	st->cb_channel_switches_unlogged++;
+	if (st->cb_channel_switch_last_log_ns != 0 &&
+	    frames->timestamp - st->cb_channel_switch_last_log_ns < CAMERA_BOX_DIAG_LOG_INTERVAL_NS)
+		return;
+	st->cb_channel_switch_last_log_ns = frames->timestamp;
+	const std::string clusters = camerabox::cb_channel_clusters_text(st->cb_audio_dec->clusters);
+	blog(LOG_INFO, "av-sync-dock: marker channel %zu -> %zu (channel_clusters=%s, %llu switch(es) since the last line)",
+	     prev, st->cb_audio_dec->chosen, clusters.c_str(),
+	     (unsigned long long)st->cb_channel_switches_unlogged);
+	st->cb_channel_switches_unlogged = 0;
+}
+
 /* The camera-box audio path's ~10 s tick (issue 1367 split it out of st_raw_audio_camera_box): the
  * #1177 staleness evaluation, the #690 diag line and the #1153 dead-pairing recovery, in that order.
  * Audio thread only; st->cb_audio_dec is set (the caller returns earlier otherwise). */
@@ -1460,14 +1488,14 @@ static void cb_audio_diag_tick(struct sync_test_output *st, const struct audio_d
 		 * frame OBS delivered; publish_max_us the longest st_raw_video (the video-output thread's
 		 * remaining cost) since the previous diag line. preambles/crc_ok/crc_fail are summed over
 		 * every audio channel (one decoder each); marker_channel is the channel whose markers are
-		 * paired (0-based) and channel_clusters each channel's self-consistency cluster over the
-		 * pick window, appended last. */
+		 * paired (0-based), channel_clusters each channel's self-consistency cluster over the pick
+		 * window and channel_switches the running count of pick switches, appended last. */
 		const std::string channel_clusters = camerabox::cb_channel_clusters_text(st->cb_audio_dec->clusters);
 		blog(LOG_INFO,
 		     "av-sync-dock: diag video_frames=%llu video_decoded=%llu(%.1f%%) "
 		     "audio_samples=%llu preambles=%llu crc_ok=%llu crc_fail=%llu "
 		     "ring_hit=%llu ring_miss=%llu locked=%s state=%s decode_dropped=%llu publish_max_us=%llu "
-		     "marker_channel=%zu channel_clusters=%s",
+		     "marker_channel=%zu channel_clusters=%s channel_switches=%llu",
 		     (unsigned long long)vseen, (unsigned long long)vdec, vpct,
 		     (unsigned long long)st->cb_audio_pushed,
 		     (unsigned long long)st->cb_audio_dec->stats.preamble_screens_passed,
@@ -1477,7 +1505,7 @@ static void cb_audio_diag_tick(struct sync_test_output *st, const struct audio_d
 		     st->cb_lock_state ? "yes" : "no", input_stale ? "STALE" : "LIVE",
 		     (unsigned long long)st->cb_decode_mailbox.dropped(),
 		     (unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen,
-		     channel_clusters.c_str());
+		     channel_clusters.c_str(), (unsigned long long)st->cb_channel_switches);
 
 		/* #1153: dead-pairing recovery, evaluated at the SAME ~10s cadence. When the pairing has
 		 * been dead for a full epoch (no meaningful ring-hit advance, no genuine lock) while
@@ -1526,9 +1554,11 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 	for (size_t cix = 0; cix < nch; cix++)
 		planes[cix] = (const float *)frames->data[cix];
 
+	const size_t prev_channel = st->cb_audio_dec->chosen;
 	const uint64_t base = st->cb_audio_pushed; // absolute index of this callback's first sample
 	std::vector<std::pair<uint64_t, uint8_t>> markers = st->cb_audio_dec->push(planes, nf);
 	st->cb_audio_pushed += (uint64_t)nf;
+	cb_note_channel_switch(st, prev_channel, frames);
 
 	const double sr = (double)st->audio_sample_rate;
 	for (size_t k = 0; k < markers.size(); k++) {
