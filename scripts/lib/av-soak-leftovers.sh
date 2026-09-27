@@ -10,13 +10,15 @@
 # soak itself is gone (a SIGKILL, a cleanup that could not stop a recording, a broadcast that kept
 # it from stopping one) it stops what the soak provably left and releases the soak's lease.
 #
-# The decision is the pure `scripts/av_soak_rig_state.py leftovers` plan over ONE
+# The decision is the pure `scripts/av_soak_rig_state.py leftovers` plan over one (settled)
 # `obs_phase2.py rig-busy-check` read and the run's own <run-dir>/recording.state:
 #   - nothing is touched while ANY box streams (strih never streams, so strih "recording, not
 #     streaming" can be the broadcast's own recording) or while a box is unreadable;
 #   - a flagged box's recording is stopped only when its own age puts its start at the soak's flag
 #     time (the window written into recording.state by the run);
 #   - everything else is kept, with the reason.
+# An unreadable rig-busy read is retried (AV_SOAK_BROADCAST_READS, default 3, AV_SOAK_BROADCAST_RETRY_S,
+# default 20 s apart) before it counts.
 # Exit: 0 nothing left (the soak's lease released, holder-checked -- a lease another run holds is
 # never touched), 5 something kept (the lease stays held), 4 the soak's own process still runs,
 # 3 the plan could not be made.
@@ -29,7 +31,8 @@ _av_soak_leftovers_log() { printf '%s [av-soak] %s\n' "$(date -u +%Y-%m-%dT%H:%M
 # av_soak_stop_leftovers RUN_DIR OBS_DIR STRIH_HOST STREAM_HOST OBS_TIMEOUT_S RIG_STATE_PY
 av_soak_stop_leftovers() {
   local run_dir="$1" obs_dir="$2" strih_host="$3" stream_host="$4" obs_timeout="$5" rig_state="$6"
-  local state="$run_dir/recording.state" pid busy plan rc=0 box action reason host lease
+  local state="$run_dir/recording.state" pid busy plan rc=0 box action reason host lease i
+  local reads="${AV_SOAK_BROADCAST_READS:-3}" gap="${AV_SOAK_BROADCAST_RETRY_S:-20}"
   if [ ! -f "$state" ]; then
     _av_soak_leftovers_log "stop-leftovers: no $state -- nothing to do"
     return 0
@@ -44,8 +47,16 @@ av_soak_stop_leftovers() {
       fi
       ;;
   esac
-  busy="$(timeout "$obs_timeout" python3 "$obs_dir/obs_phase2.py" rig-busy-check --strih-host "$strih_host" \
-    --stream-host "$stream_host" --password "${OBS_PASSWORD:-}" 2>/dev/null || true)"
+  # an unreadable read is retried (AV_SOAK_BROADCAST_READS x AV_SOAK_BROADCAST_RETRY_S) before the
+  # plan keeps everything for it -- a stream OBS restart must not leave the leftover running
+  for ((i = 1; i <= reads; i++)); do
+    busy="$(timeout "$obs_timeout" python3 "$obs_dir/obs_phase2.py" rig-busy-check --strih-host "$strih_host" \
+      --stream-host "$stream_host" --password "${OBS_PASSWORD:-}" 2>/dev/null || true)"
+    if [ "$(printf '%s' "$busy" | python3 "$rig_state" broadcast 2>/dev/null || echo unknown)" != unknown ]; then
+      break
+    fi
+    if [ "$i" -lt "$reads" ]; then sleep "$gap"; fi
+  done
   if ! plan="$(printf '%s' "$busy" | python3 "$rig_state" leftovers --state "$state" --now "$(date +%s)" \
       --start-window-s "$((obs_timeout + 30))")"; then
     echo "av-soak: ERROR: the stop-leftovers plan could not be made from $state" >&2

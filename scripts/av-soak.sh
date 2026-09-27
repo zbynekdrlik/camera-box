@@ -31,7 +31,10 @@ set -euo pipefail
 #       -- the E2E all-cambox sweep), StopRecord (verified by a status read)
 #     - a live broadcast (a box streams) aborts the soak, exit 5: checked by the slot guard, before
 #       every sweep cut, before the StopRecords and every ~60 s between slots -- never a cut and
-#       never a StopRecord while it streams (the soak's file may then be the show's recording)
+#       never a StopRecord while it streams (the soak's file may then be the show's recording).
+#       A recording is started or stopped only on a PROVEN idle rig: an unreadable read is retried
+#       (AV_SOAK_BROADCAST_READS x AV_SOAK_BROADCAST_RETRY_S); still unreadable at a slot start =
+#       a skipped row (nothing started), before the StopRecords = abort with the recordings kept
 #     - a tail of the painter's marker log (read-only ssh), pushed with the schedule to the stream
 #       box; the strih recording decoded IN PLACE on strih-lx (recording-verdict-on-strih-lx.sh),
 #       the stream recording IN PLACE on the stream box (recording-verdict-on-stream.sh --execute),
@@ -73,7 +76,8 @@ set -euo pipefail
 #   recording-e2e.sh), STREAM_PROG_SOURCE ("NDI 2ME PGM", as recording-e2e.sh / rig-mode.sh),
 #   AV_SOAK_MERGE_TIMEOUT_S (90), AV_SOAK_OVERHEAD_S (90, the per-slot pre/stop/upload budget),
 #   AV_SOAK_DECODE_TIMEOUT_S (default: what the slot leaves = slot - window - merge - overhead),
-#   AV_SOAK_OBS_TIMEOUT_S (30), RECORDINGS_FREE_MIN_GB (50), CONNECT_ON_SHOW_HOLD_STATE (the E2E's
+#   AV_SOAK_OBS_TIMEOUT_S (30), AV_SOAK_BROADCAST_READS (3) / AV_SOAK_BROADCAST_RETRY_S (20, the
+#   retried broadcast read), RECORDINGS_FREE_MIN_GB (50), CONNECT_ON_SHOW_HOLD_STATE (the E2E's
 #   ~/.camera-box/connect-on-show-hold.json). Test seams: AV_SOAK_OBS_DIR (dir of obs_phase2.py +
 #   obs_burn_filter.py), AV_SOAK_STRIH_DECODE, AV_SOAK_STREAM_DECODE, AV_SOAK_MIN_SEGMENT_SECS (10),
 #   AV_SOAK_MIN_DECODE_S (60),
@@ -163,6 +167,12 @@ OBS_DIR="${AV_SOAK_OBS_DIR:-$HERE}"
 STRIH_HOST="${STRIH_HOST:-$(obs_fleet_host strih-lx)}"
 STREAM_HOST="${STREAM_HOST:-$(obs_fleet_host stream)}"
 OBS_TIMEOUT_S="${AV_SOAK_OBS_TIMEOUT_S:-30}"
+BROADCAST_READS="${AV_SOAK_BROADCAST_READS:-3}"
+BROADCAST_RETRY_S="${AV_SOAK_BROADCAST_RETRY_S:-20}"
+case "$OBS_TIMEOUT_S$BROADCAST_READS$BROADCAST_RETRY_S" in
+  *[!0-9]* | "") die 3 "AV_SOAK_OBS_TIMEOUT_S / AV_SOAK_BROADCAST_READS / AV_SOAK_BROADCAST_RETRY_S must be integers" ;;
+esac
+[ "$BROADCAST_READS" -ge 1 ] || die 3 "AV_SOAK_BROADCAST_READS must be >= 1"
 
 if [ "$MODE" = report ]; then
   [ -f "$REPORT_DIR/soak.csv" ] || die 3 "--report needs a run dir holding soak.csv (got '${REPORT_DIR}')"
@@ -277,7 +287,8 @@ EOF
   echo "EVERY SLOT k (slot start = run start + k x ${SLOT_S} s; files under ${RUN_DIR}/slot-NNN):"
   echo "  a. lease still ours; record volumes free >= ${RECORDINGS_FREE_MIN_GB} GB (curl http://<box>:${BUNDLE_STATE_PORT}/record-dir-stats.json -> bundle_state_gather.recordings_free_line; below = stop the soak)"
   echo "  b. read-only: stream program still '${STREAM_DEV_SCENE}' and the painter service active (else the rig left TEST mode: the run STOPS); an unreadable read or a stalled marker log = a skipped row"
-  echo "  c. rig-busy guard: stray_session_check_assert ... 'the slot-k StartRecord' (a live broadcast aborts the soak, exit 5)"
+  echo "  c. a proven idle rig (rig-busy-check, an unreadable read retried ${BROADCAST_READS}x ${BROADCAST_RETRY_S} s apart; still unreadable = a skipped row, nothing started),"
+  echo "     then the rig-busy guard: stray_session_check_assert ... 'the slot-k StartRecord' (a live broadcast aborts the soak, exit 5)"
   echo "     connect_on_show_strih_marker set ${STRIH_HOST} (re-asserts the 4 h hold marker)"
   echo "  d. StartRecord (the started flag is set BEFORE the call; any start failure stops both boxes):"
   plan_cmd python3 "$OBS_DIR/obs_phase2.py" record --host "$STRIH_HOST" --action start
@@ -503,6 +514,18 @@ broadcast_now() {
     --password "${OBS_PASSWORD:-}" 2>/dev/null || true)"
   printf '%s' "$out" | python3 "$RIG_STATE" broadcast 2>/dev/null || echo unknown
 }
+# broadcast_settled -> live | unknown | idle, an unreadable read retried (BROADCAST_READS reads,
+# BROADCAST_RETRY_S apart) before it counts: one stream OBS restart must neither end an 8 h run nor
+# keep a recording running. Used wherever a recording is started or stopped.
+broadcast_settled() {
+  local i b=unknown
+  for ((i = 1; i <= BROADCAST_READS; i++)); do
+    b="$(broadcast_now)"
+    if [ "$b" != unknown ]; then break; fi
+    if [ "$i" -lt "$BROADCAST_READS" ]; then sleep "$BROADCAST_RETRY_S"; fi
+  done
+  printf '%s\n' "$b"
+}
 
 cleanup() {
   local rc=$? rrc=2 t pid bstate="" why=""
@@ -521,7 +544,7 @@ cleanup() {
     # soak's recording may already be the show's own (a go-live StartRecord is a no-op on a box
     # that records) and strih's program feeds the stream box's program
     if [ "$STRIH_REC_STARTED" = 1 ] || [ "$STREAM_REC_STARTED" = 1 ] || [ "$STRIH_SWEPT" = 1 ]; then
-      bstate="$(broadcast_now)"
+      bstate="$(broadcast_settled)"
       if [ "$bstate" = live ]; then why="a broadcast is live"; else why="the rig state is unreadable"; fi
     fi
     if [ "$STRIH_REC_STARTED" = 1 ] || [ "$STREAM_REC_STARTED" = 1 ]; then
@@ -644,6 +667,11 @@ for _t in "${BURN_TARGETS[@]}"; do
   esac
 done
 
+case "$(broadcast_settled)" in
+  idle) ;;
+  live) refuse "a broadcast is live (a box streams)" ;;
+  *) refuse "the rig state is unreadable (a box did not answer rig-busy-check) -- the soak never starts on a rig it cannot observe" ;;
+esac
 guard_ok "the av-soak setup mutations" || refuse "the rig became busy before the setup mutations"
 MUTATED=1
 HOLD_ATTEMPTED=1
@@ -721,6 +749,13 @@ run_slot() {
     log "WARNING: the painter's run_id is not in its journal -- slot $k decodes with an unpinned cam2 (--cam2-run-id 0)"
     rid=0
   fi
+  if [ "$STRIH_REC_STARTED" = 1 ] || [ "$STREAM_REC_STARTED" = 1 ]; then
+    # the previous slot's StopRecord did not take: stop it only on a proven idle rig
+    if [ "$(broadcast_settled)" != idle ]; then
+      ABORT_REASON="the soak's own recording from the previous slot still runs and the rig is not proven idle (slot $k)"
+      exit 5
+    fi
+  fi
   for box in strih stream; do  # the soak's OWN recording left running by the previous slot
     if [ "$box" = strih ]; then host="$STRIH_HOST"; else host="$STREAM_HOST"; fi
     if { [ "$box" = strih ] && [ "$STRIH_REC_STARTED" = 1 ]; } || { [ "$box" = stream ] && [ "$STREAM_REC_STARTED" = 1 ]; }; then
@@ -731,11 +766,24 @@ run_slot() {
     ABORT_REASON="the soak's own recording would not stop (slot $k)"
     exit 5
   fi
-  guard_ok "the slot-$k StartRecord" || { ABORT_REASON="a broadcast is live (slot $k)"; exit 5; }
+  case "$(broadcast_settled)" in
+    idle) ;;
+    live) ABORT_REASON="a broadcast is live (slot $k)"; exit 5 ;;
+    *)
+      log "slot $k skipped: the rig state is unreadable -- no recording is started that could not be stopped again"
+      add_row "$k" "$(date +%s)" "skipped:rig_state_unreadable" "" "" "$rid"
+      return 0
+      ;;
+  esac
   connect_on_show_strih_marker set "$STRIH_HOST"
+  guard_ok "the slot-$k StartRecord" || { ABORT_REASON="a broadcast is live (slot $k)"; exit 5; }
   if ! rec_start strih "$STRIH_HOST" "$sd/record-start.log" \
      || ! rec_start stream "$STREAM_HOST" "$sd/record-start.log"; then
     log "slot $k: a StartRecord failed -- stopping both boxes (see $sd/record-start.log)"
+    if [ "$(broadcast_settled)" != idle ]; then
+      ABORT_REASON="a StartRecord failed and the rig is not proven idle (slot $k)"
+      exit 5
+    fi
     [ "$STRIH_REC_STARTED" = 1 ] && rec_stop "$k" strih "$STRIH_HOST" "$sd/record-stop.log"
     [ "$STREAM_REC_STARTED" = 1 ] && rec_stop "$k" stream "$STREAM_HOST" "$sd/record-stop.log"
     add_row "$k" "$(date +%s)" "skipped:start_record_failed" "" "" "$rid"
@@ -764,7 +812,7 @@ run_slot() {
       > "$sd/switch-schedule.json" 2>>"$sd/sweep.log"; then
     outcome="no_verdict:schedule_build_failed"
   fi
-  if [ "$(broadcast_now)" != idle ]; then
+  if [ "$(broadcast_settled)" != idle ]; then
     # cleanup re-reads: a proven idle rig there stops both recordings, a live one keeps them
     ABORT_REASON="a broadcast went live (or the rig is unreadable) before the slot-$k StopRecord"
     exit 5
