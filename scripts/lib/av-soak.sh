@@ -106,11 +106,22 @@ av_soak_unacked_cams() {
   printf '%s\n' "$out"
 }
 
-# av_soak_strih_decode_kill_cmd -> REMOTE (strih-lx) text stopping a recording-verdict strih extract.
-# The bracketed pattern never matches the remote shell's own command line (the issue-626 pkill
-# self-match gotcha). Ends with `;`.
+# av_soak_strih_decode_kill_cmd STAMP -> REMOTE (strih-lx) text stopping THIS run's recording-verdict
+# strih extract only: the pattern also needs the run's own output name (av-soak-<STAMP>-s...), so
+# no other decode on the box is touched. The bracketed pattern never matches the remote shell's own
+# command line (the issue-626 pkill self-match gotcha). Ends with `;`.
 av_soak_strih_decode_kill_cmd() {
-  printf '%s\n' "pkill -f 'recording-verdic[t] --extract-partial strih' || true;"
+  local stamp="$1"
+  printf '%s\n' "pkill -f 'recording-verdic[t] --extract-partial strih .*av-soak-${stamp}-s' || true;"
+}
+
+# av_soak_stream_decode_kill_ps STAMP -> PowerShell (stream box) stopping THIS run's
+# recording-verdict.exe only: matched by the run's own output name on its command line, never by
+# the process name alone.
+av_soak_stream_decode_kill_ps() {
+  local stamp="$1"
+  # shellcheck disable=SC2016  # PowerShell variables, expanded on the box
+  printf '%s\n' "Get-CimInstance Win32_Process -Filter \"Name='recording-verdict.exe'\" | Where-Object { \$_.CommandLine -like '*av-soak-${stamp}-s*' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force -ErrorAction SilentlyContinue }"
 }
 
 # av_soak_onbox_cleanup_lines STRIH_HOST STRIH_OUT_DIR OUT_DIR_WIN STAMP -> the plan lines (never run

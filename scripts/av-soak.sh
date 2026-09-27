@@ -134,6 +134,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 DECISION="$HERE/av_soak_decision.py"
+RIG_STATE="$HERE/av_soak_rig_state.py"
 HOURS="${AV_SOAK_HOURS:-8}"
 SLOT_S="${AV_SOAK_SLOT_SECS:-600}"
 SEGMENT_S="${AV_SOAK_SEGMENT_SECS:-30}"
@@ -157,45 +158,64 @@ if [ "$MODE" = report ]; then
   exit "$rc"
 fi
 
-# --stop-leftovers RUN_DIR: the ExecStopPost safety net. Stops a box's recording ONLY when the run's
-# own recording.state still marks it AND the rig-busy read shows it recording but NOT streaming (the
-# issue-657 stray signature -- a broadcast streams, so a broadcast is never stopped).
+# --stop-leftovers RUN_DIR: the ExecStopPost safety net, after the soak itself is gone. The plan is
+# the pure scripts/av_soak_rig_state.py `leftovers`: nothing is touched while ANY box streams (strih
+# never streams, so strih "recording, not streaming" can be the broadcast's own recording) or a box is
+# unreadable, and a flagged box's recording is stopped only when its own age puts its start at the
+# soak's flag time (recording.state). Exit 0 = nothing left (the soak's lease is released,
+# holder-checked); 5 = something was kept (the lease stays held); 4 = the soak still runs.
 if [ "$MODE" = stop-leftovers ]; then
   _state="$REPORT_DIR/recording.state"
   [ -f "$_state" ] || { log "stop-leftovers: no $_state -- nothing to do"; exit 0; }
+  _pid="$(head -n 1 "$REPORT_DIR/pid" 2>/dev/null || true)"
+  case "$_pid" in
+    '' | *[!0-9]*) ;;
+    *)
+      if kill -0 "$_pid" 2>/dev/null && grep -qa 'av-soak\.sh' "/proc/$_pid/cmdline" 2>/dev/null; then
+        die 4 "the soak (pid $_pid) is still running -- stop it first (touch $REPORT_DIR/STOP); --stop-leftovers only cleans up after it"
+      fi
+      ;;
+  esac
   _busy="$(timeout "$OBS_TIMEOUT_S" python3 "$OBS_DIR/obs_phase2.py" rig-busy-check --strih-host "$STRIH_HOST" \
     --stream-host "$STREAM_HOST" --password "${OBS_PASSWORD:-}" 2>/dev/null || true)"
-  for _box in strih stream; do
-    [ "$(sed -n "s/^${_box}=//p" "$_state" | head -n 1)" = 1 ] || continue
+  _plan="$(printf '%s' "$_busy" | python3 "$RIG_STATE" leftovers --state "$_state" --now "$(date +%s)" \
+    --start-window-s "$((OBS_TIMEOUT_S + 30))")" || die 3 "the stop-leftovers plan could not be made from $_state"
+  _rc=0
+  while IFS=$'\t' read -r _box _action _reason; do
+    [ -n "$_box" ] || continue
     if [ "$_box" = strih ]; then _host="$STRIH_HOST"; else _host="$STREAM_HOST"; fi
-    _rs="$(printf '%s' "$_busy" | python3 -c '
-import json, sys
-try:
-    d = json.load(sys.stdin)
-except ValueError:
-    print("unknown"); sys.exit(0)
-for x in d.get("diagnostics") or []:
-    if x.get("host") == sys.argv[1]:
-        print("streaming" if x.get("streaming") else ("recording" if x.get("recording") else "idle"))
-        sys.exit(0)
-print("unknown")' "$_box" 2>/dev/null || echo unknown)"
-    case "$_rs" in
-      recording)
+    case "$_action" in
+      stop)
         timeout "$OBS_TIMEOUT_S" python3 "$OBS_DIR/obs_phase2.py" record --host "$_host" --action stop >/dev/null 2>&1 || true
         if timeout "$OBS_TIMEOUT_S" python3 "$OBS_DIR/obs_phase2.py" record --host "$_host" --action status 2>/dev/null \
             | grep -q '^active=False'; then
           sed -i "s/^${_box}=1\$/${_box}=0/" "$_state"
-          log "stop-leftovers: stopped the soak's leftover recording on $_box"
+          log "stop-leftovers: stopped $_reason on $_box"
         else
           log "WARNING: stop-leftovers: the $_box recording did not stop -- stop it by hand"
+          _rc=5
         fi
         ;;
-      idle) sed -i "s/^${_box}=1\$/${_box}=0/" "$_state"; log "stop-leftovers: $_box is not recording" ;;
-      streaming) log "stop-leftovers: NOT stopping $_box -- it is streaming (a broadcast)" ;;
-      *) log "WARNING: stop-leftovers: the $_box state is unreadable -- check it by hand" ;;
+      clear)
+        sed -i "s/^${_box}=1\$/${_box}=0/" "$_state"
+        log "stop-leftovers: $_box is not recording"
+        ;;
+      *)
+        log "stop-leftovers: NOT stopping $_box -- $_reason"
+        _rc=5
+        ;;
     esac
-  done
-  exit 0
+  done <<<"$_plan"
+  _lease="$(sed -n '/^lease=/{s/^lease=//p;q;}' "$_state")"
+  if [ "$_rc" = 0 ] && ! grep -q '^\(strih\|stream\)=1$' "$_state"; then
+    if [ -n "$_lease" ]; then
+      rig_lease_release "$_lease" >/dev/null 2>&1 || true
+      log "stop-leftovers: rig lease released ($_lease; a lease another run holds is never touched)"
+    fi
+  elif [ -n "$_lease" ]; then
+    log "stop-leftovers: rig lease KEPT ($_lease) -- a recording the soak may have left is still there"
+  fi
+  exit "$_rc"
 fi
 
 for _n in "$SLOT_S" "$SEGMENT_S" "$MIN_SEGMENT_S"; do
@@ -339,9 +359,11 @@ EOF
   plan_cmd python3 "$DECISION" report --csv "$CSV" --min-duration-h "$HOURS" "${SPREAD_ARGS[@]}"
   echo "  k. wait for the next slot start (lease heartbeat every <= 10 s; <run-dir>/STOP ends the run)"
   echo
-  echo "CLEANUP (every exit; signals ignored; remote calls under setsid -w): stop remote decodes still running; StopRecord what is still recording (a recording that will not stop = exit 5);"
-  echo "  strih program back to the snapshot (switch --prod-floor) when swept; connect_on_show_e2e_restore; obs_burn_filter.py"
-  echo "  remove on the burns this run turned on; rig_heartbeat_stop; rig_lease_release ${RIG_LEASE_OURS}; the final report:"
+  echo "CLEANUP (every exit; signals ignored; remote calls under setsid -w): stop this run's remote decodes still running;"
+  echo "  StopRecord what is still recording (a recording that will not stop = exit 5 and the lease is KEPT for --stop-leftovers);"
+  echo "  strih program back to the snapshot (switch --prod-floor) when swept AND no broadcast is live (a cut there would be on air);"
+  echo "  connect_on_show_e2e_restore; obs_burn_filter.py remove on the burns this run turned on; rig_heartbeat_stop;"
+  echo "  rig_lease_release ${RIG_LEASE_OURS}; the final report:"
   plan_cmd python3 "$DECISION" report --csv "$CSV" --min-duration-h "$HOURS" --json "$RUN_DIR/report.json" "${SPREAD_ARGS[@]}"
   echo "  recordings are NOT deleted (owner-only): ${RUN_DIR}/cleanup-plan.txt lists the exact-path removal lines."
   echo
@@ -380,10 +402,14 @@ for _t in sshpass curl timeout setsid python3; do
 done
 python3 "$DECISION" bounds >/dev/null || die 4 "the gate bounds cannot be read from their Rust sources (a renamed constant?)"
 
+# a run dir is one run: a second --run there would reset a live run's recording.state, delete its
+# STOP file and append to its CSV (two runs graded as one series)
+for _f in pid soak.csv recording.state; do
+  [ ! -e "$RUN_DIR/$_f" ] || die 4 "the run dir $RUN_DIR already holds a run ($_f) -- give --run-dir a new directory (--report / --stop-leftovers read an old one)"
+done
 mkdir -p "$RUN_DIR"
 printf '%s\n' "$$" > "$RUN_DIR/pid"
 rm -f "$RUN_DIR/STOP"
-printf 'strih=0\nstream=0\n' > "$RUN_DIR/recording.state"
 
 SETUP_STARTED=0
 MUTATED=0
@@ -394,6 +420,8 @@ STOPPED=0
 IN_CLEANUP=0
 STRIH_REC_STARTED=0
 STREAM_REC_STARTED=0
+STRIH_REC_SINCE=""
+STREAM_REC_SINCE=""
 STRIH_SWEPT=0
 STRIH_PROGRAM_SNAPSHOT=""
 BURNS_TURNED_ON=()
@@ -435,17 +463,16 @@ win_bounded() {
 }
 # kill_remote_decode strih|stream -> stop this run's recording-verdict decode ON the box (a local
 # timeout only kills the local ssh; the remote decode would keep loading the box into the next
-# recording). Only the soak can be decoding there: it holds the rig lease.
+# recording). Matched by this run's own output names, so no other decode on the box is touched.
 kill_remote_decode() {
   local pre=()
   if [ "$IN_CLEANUP" = 1 ]; then pre=(setsid -w); fi
   if [ "$1" = strih ]; then
     "${pre[@]}" timeout "$SSH_TIMEOUT_S" sshpass -p "$STRIH_PW" ssh -o StrictHostKeyChecking=no \
       -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 "$STRIH_USER@$STRIH_HOST" \
-      "$(av_soak_strih_decode_kill_cmd)" >/dev/null 2>&1 || true
+      "$(av_soak_strih_decode_kill_cmd "$STAMP")" >/dev/null 2>&1 || true
   else
-    win_bounded win_ssh_run "$STREAM_HOST" \
-      "Get-Process -Name recording-verdict -ErrorAction SilentlyContinue | Stop-Process -Force" >/dev/null 2>&1 || true
+    win_bounded win_ssh_run "$STREAM_HOST" "$(av_soak_stream_decode_kill_ps "$STAMP")" >/dev/null 2>&1 || true
   fi
 }
 guard_ok() {
@@ -472,10 +499,24 @@ note_recording() {  # K BOX PATH -> recordings.tsv + the exact-path removal plan
     echo "win-stream-snv Shell: Remove-Item -Force -LiteralPath '$path'" >> "$RUN_DIR/cleanup-plan.txt"
   fi
 }
-set_rec_flag() {  # BOX 0|1 -> also persisted to <run-dir>/recording.state (read by --stop-leftovers)
-  if [ "$1" = strih ]; then STRIH_REC_STARTED="$2"; else STREAM_REC_STARTED="$2"; fi
-  printf 'strih=%s\nstream=%s\n' "$STRIH_REC_STARTED" "$STREAM_REC_STARTED" > "$RUN_DIR/recording.state"
+# <run-dir>/recording.state -- read by --stop-leftovers: the flags, the time each flag was set (right
+# before its StartRecord: the ownership proof) and the soak's lease run id.
+write_rec_state() {
+  printf 'strih=%s\nstrih_since=%s\nstream=%s\nstream_since=%s\nlease=%s\n' \
+    "$STRIH_REC_STARTED" "$STRIH_REC_SINCE" "$STREAM_REC_STARTED" "$STREAM_REC_SINCE" \
+    "$RIG_LEASE_OURS" > "$RUN_DIR/recording.state"
 }
+set_rec_flag() {  # BOX 0|1
+  if [ "$1" = strih ]; then
+    STRIH_REC_STARTED="$2"
+    if [ "$2" = 1 ]; then STRIH_REC_SINCE="$(date +%s)"; fi
+  else
+    STREAM_REC_STARTED="$2"
+    if [ "$2" = 1 ]; then STREAM_REC_SINCE="$(date +%s)"; fi
+  fi
+  write_rec_state
+}
+write_rec_state  # the run starts with nothing flagged
 rec_start() {  # BOX HOST LOG -> the started flag is set BEFORE the call (a start that fails after
   # StartRecord, or times out, must still be stopped)
   set_rec_flag "$1" 1
@@ -492,8 +533,16 @@ rec_stop() {  # K BOX HOST LOG -> REC_PATH; the flag clears only when the status
   note_recording "$1" "$2" "$REC_PATH"
 }
 
+# broadcast_now -> live | unknown | idle (the pure av_soak_rig_state.py decision over one rig-busy read)
+broadcast_now() {
+  local out
+  out="$(obs rig-busy-check --strih-host "$STRIH_HOST" --stream-host "$STREAM_HOST" \
+    --password "${OBS_PASSWORD:-}" 2>/dev/null || true)"
+  printf '%s' "$out" | python3 "$RIG_STATE" broadcast 2>/dev/null || echo unknown
+}
+
 cleanup() {
-  local rc=$? rrc=2 t pid
+  local rc=$? rrc=2 t pid bstate
   set +e
   trap '' INT TERM HUP PIPE
   IN_CLEANUP=1
@@ -508,14 +557,21 @@ cleanup() {
     [ "$STRIH_REC_STARTED" = 1 ] && rec_stop cleanup strih "$STRIH_HOST" "$RUN_DIR/cleanup.log"
     [ "$STREAM_REC_STARTED" = 1 ] && rec_stop cleanup stream "$STREAM_HOST" "$RUN_DIR/cleanup.log"
     if [ "$STRIH_SWEPT" = 1 ] && [ -n "$STRIH_PROGRAM_SNAPSHOT" ]; then
-      # the switch sets the scene first and can then fail its non-black check on a dim operator
-      # scene, so the outcome is confirmed by re-reading the program scene
-      obs switch --host "$STRIH_HOST" --program-scene "$STRIH_PROGRAM_SNAPSHOT" --prod-floor \
-        >> "$RUN_DIR/cleanup.log" 2>&1
-      if [ "$(obs program-scene --host "$STRIH_HOST" 2>/dev/null | tr -d '\r' | head -n 1)" = "$STRIH_PROGRAM_SNAPSHOT" ]; then
-        log "strih program restored to '$STRIH_PROGRAM_SNAPSHOT'" 2>/dev/null
+      # strih's program feeds the stream box's program: a cut there while a broadcast is live (or
+      # may be -- an unreadable rig) is a cut on air, so the restore needs a proven idle rig
+      bstate="$(broadcast_now)"
+      if [ "$bstate" != idle ]; then
+        log "WARNING: strih program NOT restored -- $([ "$bstate" = live ] && echo 'a broadcast is live' || echo 'the rig state is unreadable'); a cut there would be a cut on air. It stays on the last sweep scene; set it back to '$STRIH_PROGRAM_SNAPSHOT' by hand once the broadcast ends" 2>/dev/null
       else
-        log "WARNING: could not restore the strih program to '$STRIH_PROGRAM_SNAPSHOT'" 2>/dev/null
+        # the switch sets the scene first and can then fail its non-black check on a dim operator
+        # scene, so the outcome is confirmed by re-reading the program scene
+        obs switch --host "$STRIH_HOST" --program-scene "$STRIH_PROGRAM_SNAPSHOT" --prod-floor \
+          >> "$RUN_DIR/cleanup.log" 2>&1
+        if [ "$(obs program-scene --host "$STRIH_HOST" 2>/dev/null | tr -d '\r' | head -n 1)" = "$STRIH_PROGRAM_SNAPSHOT" ]; then
+          log "strih program restored to '$STRIH_PROGRAM_SNAPSHOT'" 2>/dev/null
+        else
+          log "WARNING: could not restore the strih program to '$STRIH_PROGRAM_SNAPSHOT'" 2>/dev/null
+        fi
       fi
     fi
     if [ "$HOLD_ATTEMPTED" = 1 ]; then
@@ -533,10 +589,6 @@ cleanup() {
       fi
     done
     rig_heartbeat_stop >/dev/null 2>&1
-  fi
-  if [ "$LEASE_HELD" = 1 ]; then
-    rig_lease_release "$RIG_LEASE_OURS" >/dev/null 2>&1
-    log "rig lease released" 2>/dev/null
   fi
   if [ -s "$CSV" ]; then
     python3 "$DECISION" report --csv "$CSV" --min-duration-h "$HOURS" --json "$RUN_DIR/report.json" \
@@ -559,7 +611,14 @@ cleanup() {
       echo "av-soak: ERROR: RECORDING MAY STILL BE RUNNING on $t -- it did not stop after two StopRecords; run: scripts/av-soak.sh --stop-leftovers $RUN_DIR" >&2 2>/dev/null
       log "ERROR: RECORDING MAY STILL BE RUNNING on $t (see $RUN_DIR/recording.state)" 2>/dev/null
     done
+    if [ "$LEASE_HELD" = 1 ]; then
+      log "rig lease KEPT ($RIG_LEASE_OURS) -- no E2E may start over a recording the soak may have left; --stop-leftovers releases it once nothing is left" 2>/dev/null
+    fi
     exit 5
+  fi
+  if [ "$LEASE_HELD" = 1 ]; then
+    rig_lease_release "$RIG_LEASE_OURS" >/dev/null 2>&1
+    log "rig lease released" 2>/dev/null
   fi
   if [ "$LOOP_DONE" = 1 ] || [ "$STOPPED" = 1 ]; then
     exit "$rrc"

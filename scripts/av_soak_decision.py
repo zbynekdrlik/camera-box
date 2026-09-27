@@ -38,6 +38,14 @@ verdict JSON / the CSV and two Rust source files, so it is exhaustively pytest-a
   flags falls back to `relaxed_pass`, then `pass` (a multi-source window there is `report_only`: a
   sample, never a breach; an all-`report_only` series is REPORTED, never a PASS). The strict `pass`
   and the raw copies/gaps/undecodable are recorded and reported.
+- **continuity gate**: the verdict's OWN `all_cambox_continuity.overall_pass` per window. It adds
+  what the per-window term cannot see: the run-wide undecodable sum over `RUN_UNDECODABLE_FLOOR`
+  (src/probe/recording_segments.rs `overall_pass &= run_wide_undecodable_within_floor ||
+  !optical_floor::gates_overall_pass()`, recorded as `loss_run_wide_pass`) and an empty schedule.
+  A `false` window fails; a verdict without the field leaves the series NOT_MEASURED. A window
+  where the soak's mirrored terms (every camera's loss term AND the run-wide term) disagree with
+  the fold is counted (`gate_term_mismatch_windows`) and named: the Python copy of the Rust gate
+  term drifted.
 - **burn loss** (`burn <node>`): `full_chain.loss.<node>.zero_loss` for the `strih` + `stream` hops
   (the OBS measurement burns the soak turns on and requires -- never measured is UNKNOWN) and for
   every camera (only with the capture burns: never measured is not required). A measured `false`
@@ -128,6 +136,7 @@ _BASE_FIELDS = (
     "ts_utc", "epoch_s", "slot", "slot_s", "window_s", "outcome", "verdict_rc", "verdict_path",
     "painter_run_id", "av_expected_ms", "av_judged_cameras",
     "source_spread_ms", "delivery_spread_ms", "av_spread_ms", "av_spread_cams",
+    "cont_overall_pass", "loss_run_wide_pass", "loss_run_wide_undecodable",
 ) + tuple(f"burn_{n}_{k}" for n in HOP_NODES for k in ("zero_loss", "real_drops"))
 _CAM_FIELDS = (
     "av_{c}_ms", "av_{c}_status", "av_{c}_gate_pass",
@@ -293,6 +302,12 @@ def row_from_verdict(verdict, cams, meta):
 
     cont = _get(verdict, "all_cambox_continuity")
     cont = cont if isinstance(cont, dict) else {}
+    if "overall_pass" in cont:
+        row["cont_overall_pass"] = _fmt_bool(cont.get("overall_pass"))
+    row["loss_run_wide_pass"] = _fmt_bool(run_wide_term(cont))
+    if isinstance(cont.get("segments"), list):
+        row["loss_run_wide_undecodable"] = str(sum(_int(g.get("undecodable"))
+                                                   for g in cont["segments"] if isinstance(g, dict)))
     for c, a in _loss_by_camera(cont.get("segments"), cams, cont).items():
         for k in ("frames", "copies", "gaps", "undecodable"):
             row[f"loss_{c}_{k}"] = str(a[k])
@@ -342,6 +357,34 @@ def gate_window_term(seg, cont):
     else:
         copies_gaps_ok = copies == 0 and gaps == 0
     return frames > 0 and floor_ok and bool(copies_gaps_ok)
+
+
+def run_wide_term(cont):
+    """The run-wide half of the gate's continuity fold: src/probe/recording_segments.rs
+    `overall_pass &= run_wide_undecodable_within_floor || !optical_floor::gates_overall_pass()`
+    (the verdict serializes the latter as `undecodable_floor_gates_overall_pass`). None when the
+    verdict does not carry both flags."""
+    if not isinstance(cont, dict):
+        return None
+    if "run_wide_undecodable_within_floor" not in cont \
+            or "undecodable_floor_gates_overall_pass" not in cont:
+        return None
+    return (cont["run_wide_undecodable_within_floor"] is True
+            or cont["undecodable_floor_gates_overall_pass"] is not True)
+
+
+def gate_term_disagrees(row, cams):
+    """True when the soak's mirrored terms for one window (every camera's loss term AND the
+    run-wide term) differ from the verdict's own `cont_overall_pass`; False when they agree; None
+    when the row cannot be compared (no fold recorded, or a camera without a loss term)."""
+    fold = row.get("cont_overall_pass")
+    if fold not in ("true", "false"):
+        return None
+    terms = [row.get(f"loss_{c}_pass") for c in cams]
+    if any(t not in _LOSS_SAMPLE for t in terms):
+        return None
+    mine = all(t != "false" for t in terms) and row.get("loss_run_wide_pass") != "false"
+    return mine != (fold == "true")
 
 
 def _loss_by_camera(segments, cams, cont=None):
@@ -578,7 +621,7 @@ def evaluate(rows, cams, *, bounds, min_duration_s, max_gap_s=None,
                       "slope_bound_ms_per_h": slope_bound, "slope_band": "95 % t",
                       "max_gap_s": max_gap_s, "sources": dict(bounds.get("sources", {}))},
            "spread_columns": list(spread_columns), "min_duration_s": min_duration_s,
-           "series": {}, "reasons": []}
+           "gate_term_mismatch_windows": 0, "series": {}, "reasons": []}
     if not rows:
         rep.update(verdict=UNKNOWN, first_ts=None, last_ts=None, span_s=0)
         rep["reasons"].append("no windows in the CSV")
@@ -623,6 +666,21 @@ def evaluate(rows, cams, *, bounds, min_duration_s, max_gap_s=None,
         if excluded and not lpts:
             ls.update(verdict=EXCLUDED, graded=False, reason="operator-excluded in every window")
         series[ls["name"]] = ls
+
+    cpts = [(_f(r["epoch_s"]), r.get("cont_overall_pass")) for r in rows
+            if r.get("cont_overall_pass") in ("true", "false")]
+    series["continuity gate"] = _state_series(
+        "continuity gate", cpts, start, end, max_gap_s, required=False,
+        extra={"run_wide_breaches": sum(1 for r in rows if r.get("loss_run_wide_pass") == "false"),
+               "undecodable": sum(int(_f(r.get("loss_run_wide_undecodable")) or 0) for r in rows)},
+        never_reason="never measured (a verdict without all_cambox_continuity.overall_pass)")
+    mismatch = sum(1 for r in ok_rows if gate_term_disagrees(r, cams) is True)
+    rep["gate_term_mismatch_windows"] = mismatch
+    if mismatch:
+        rep["reasons"].append(
+            f"the soak's mirrored loss terms disagree with the verdict's own "
+            f"all_cambox_continuity.overall_pass in {mismatch} window(s) -- the Python copy of the "
+            f"Rust gate term may have drifted (src/window_gate.rs, src/probe/recording_segments.rs)")
 
     for node in list(cams) + list(HOP_NODES):
         bpts = [(_f(r["epoch_s"]), r.get(f"burn_{node}_zero_loss")) for r in rows
@@ -714,11 +772,16 @@ def _render_one(rep):
         f"{'gap s':>6}  verdict",
     ]
     for s in rep["series"].values():
-        if s["name"].startswith(("loss ", "burn ")):
-            detail = (f"copies={s.get('copies', '-')} gaps={s.get('gaps', '-')} "
-                      f"undecodable={s.get('undecodable', '-')} report_only={s.get('report_only', 0)}"
-                      if s["name"].startswith("loss ")
-                      else f"real_drops={s.get('real_drops', 0)}")
+        if s["name"].startswith(("loss ", "burn ", "continuity ")):
+            if s["name"].startswith("loss "):
+                detail = (f"copies={s.get('copies', '-')} gaps={s.get('gaps', '-')} "
+                          f"undecodable={s.get('undecodable', '-')} "
+                          f"report_only={s.get('report_only', 0)}")
+            elif s["name"].startswith("continuity "):
+                detail = (f"run_wide_breaches={s.get('run_wide_breaches', 0)} "
+                          f"undecodable={s.get('undecodable', 0)}")
+            else:
+                detail = f"real_drops={s.get('real_drops', 0)}"
             lines.append(f"  {s['name']:<30} {s['n']:>3} {detail:<46} "
                          f"{_n(s['max_gap_s'], '{:.0f}'):>6}  {s['verdict']}"
                          + (f" -- {s['reason']}" if s.get("reason") else ""))
