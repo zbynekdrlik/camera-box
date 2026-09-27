@@ -4648,10 +4648,11 @@ fn check_imag_report_unknown_when_values_were_not_read_never_a_silent_pass_463()
     assert!(out.contains("UNKNOWN"), "must print UNKNOWN lines: {out:?}");
 }
 
+/// Issue 1357 reversed the #572 verdict: no OBS box grants rtprio any more (the shared baseline FAILs a
+/// grant), so a pinned tick that could not get SCHED_FIFO is the EXPECTED outcome — OK with its reason,
+/// never DRIFT.
 #[test]
-fn check_imag_report_flags_genlock_rt_pin_failure_as_drift_572() {
-    // The EXACT #572 signature: the OBS log shows the render-tick thread stuck SCHED_OTHER
-    // (missing rtprio ulimit grant) -> DRIFT, exit 20 — even though every other value matches.
+fn check_imag_report_genlock_rt_pin_sched_other_is_ok_now_that_rtprio_stays_off_1357() {
     let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_FAILED_LINE}");
     let body = r#"
         rc=0
@@ -4659,13 +4660,13 @@ fn check_imag_report_flags_genlock_rt_pin_failure_as_drift_572() {
         echo "RC=$rc"
     "#;
     let out = run_sourced(body, &[("LOG", log.as_str())]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("genlock_rt_pin"))
+        .unwrap_or_else(|| panic!("no genlock_rt_pin line printed: {out:?}"));
     assert!(
-        out.contains("RC=20"),
-        "the #572 SCHED_OTHER fallback line must DRIFT: {out:?}"
-    );
-    assert!(
-        out.contains("genlock_rt_pin") && out.contains("DRIFT"),
-        "must flag the genlock_rt_pin line as DRIFT: {out:?}"
+        line.contains("OK") && !line.contains("DRIFT") && line.contains("rtprio stays off"),
+        "a SCHED_OTHER tick must report OK with its reason: {line:?}"
     );
 }
 
