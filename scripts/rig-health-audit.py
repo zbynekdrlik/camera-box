@@ -101,6 +101,10 @@ def imag_is_retired() -> bool:
               file=sys.stderr)
     return False
 CG_CHAIN_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cg-chain-verify.sh")
+# issue 1357: the Windows OBS-box baseline (power plan, sleep, hibernate, USB suspend, WER) read by
+# scripts/win-baseline-check.sh -- REPORT-ONLY NOTE rows, one per read box, never counted.
+WIN_BASELINE_REPORT_VERDICT = "NOTE"
+WIN_BASELINE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "win-baseline-check.sh")
 
 results = []
 
@@ -657,6 +661,44 @@ def check_cg_chain() -> None:
                 print(f"[NOTE] cg-chain  temp cleanup failed for {path}: {exc}", file=sys.stderr)
 
 
+def win_baseline_rows_from_output(stdout: str) -> dict[str, str]:
+    """issue 1357: fold win-baseline-check.sh output into one detail string per box.
+
+    `box=<b> win_baseline=<V>...` gives the box verdict; every `box=<b> item=<i> verdict=<V>
+    detail=<d>` whose verdict is not OK is appended as `<i>=<V>[<d>]`, so a drifted item names itself
+    (e.g. `power_scheme=DRIFT[Balanced (...) is not max-performance class ...]`). A SKIPPED box (a
+    traveling box away) is omitted -- its absence is normal, never a stale row. Pure (no I/O)."""
+    overall: dict[str, str] = {}
+    bad_items: dict[str, list[str]] = {}
+    for ln in stdout.splitlines():
+        m = re.match(r"box=(\S+) item=(\S+) verdict=(\S+) detail=(.*)$", ln.strip())
+        if m:
+            if m.group(3) != "OK":
+                bad_items.setdefault(m.group(1), []).append(f"{m.group(2)}={m.group(3)}[{m.group(4)}]")
+            continue
+        m = re.match(r"box=(\S+) win_baseline=(\S+)", ln.strip())
+        if m and m.group(2) != "SKIPPED":
+            overall[m.group(1)] = m.group(2)
+    rows = {}
+    for box, verdict in overall.items():
+        items = " ".join(bad_items.get(box, []))
+        rows[box] = f"win_baseline={verdict}{(' ' + items) if items else ''} (report-only issue 1357)"
+    return rows
+
+
+def check_win_baseline() -> None:
+    """issue 1357: REPORT-ONLY Windows OBS-box baseline rows (NOTE, never PASS/WARN/FAIL -> never
+    changes the audit exit code). A tool error yields one NOTE row, never a page."""
+    try:
+        out = subprocess.run(["bash", WIN_BASELINE_SCRIPT], capture_output=True, text=True,
+                             timeout=120).stdout
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        emit(WIN_BASELINE_REPORT_VERDICT, "win-baseline", f"tool error: {exc} (report-only issue 1357)")
+        return
+    for box, detail in win_baseline_rows_from_output(out).items():
+        emit(WIN_BASELINE_REPORT_VERDICT, f"{box}-win", detail)
+
+
 def check_windows_box(name: str, ip: str, ws_password: str | None, program_fps: float,
                       expect_latency: bool, check_camera_cadence: bool = False) -> None:
     procs = ssh(ip, _obs_count_cmd(ip), user="newlevel", timeout=20)
@@ -776,6 +818,7 @@ def main() -> int:
     check_windows_box("stream", STREAM, strih_pw, program_fps=30.0, expect_latency=True)
     check_cg_chain()  # #1300 report-only CG-chain verdict row (NOTE; never affects the exit code)
     check_resolume()  # #1296: report-only, #787 rate-exempt; omitted when the traveling box is away
+    check_win_baseline()  # issue 1357: report-only Windows OBS-box baseline rows (NOTE)
     fails = results.count("FAIL")
     warns = results.count("WARN")
     print(f"\n=== RIG AUDIT: {results.count('PASS')} PASS / {warns} WARN / {fails} FAIL "

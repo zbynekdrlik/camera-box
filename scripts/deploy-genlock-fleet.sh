@@ -67,6 +67,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/genlock-plugin-deploy.sh
 # #1115 + issue 1372: the FULL-mode plugin deploy + byte-verify PowerShell blocks (distroav, obs-vban).
 . "$HERE/lib/genlock-plugin-deploy.sh"
+# shellcheck source=scripts/lib/obs-box-baseline-win.sh
+# issue 1357: the Windows OBS-box baseline -- step (0b) sets + reads back a max-performance power plan.
+. "$HERE/lib/obs-box-baseline-win.sh"
 # shellcheck source=scripts/lib/strih-lx-deploy.sh
 # issue 1317 part 6: the strih-lx EXECUTE arm + the builders its --plan arm prints (plan == execute).
 . "$HERE/lib/strih-lx-deploy.sh"
@@ -163,7 +166,9 @@ fleet_pick_run_at_sha() {
 # build_windows_deploy_program BOX MODE STAGE OBS_DIR HAS_AHK BACKUP_ROOT KEEP GSHA DSHA
 #   Emit the PowerShell program the agent pastes into the box's win-* MCP Shell. HAS_AHK=guard (the
 #   planner's pick for resolume, issue 1372) stops a RUNNING AutoHotkey64 and never restarts it; HAS_AHK=1
-#   stops + restart-verifies it. It stops obs64, clears crash sentinels, backs up the components it overwrites,
+#   stops + restart-verifies it. Step (0b, issue 1357) first sets + reads back a max-performance
+#   power plan when the active one is not (the only Windows-baseline mutation, before any OBS stop,
+#   scripts/lib/obs-box-baseline-win.sh). It stops obs64, clears crash sentinels, backs up the components it overwrites,
 #   copies the new bytes from STAGE (full = 3 surgical robocopies; fast = obs.dll only), writes BOTH
 #   markers + DEPLOYED_AT temp-then-rename, sha256-verifies the deployed obs.dll against the bundle
 #   manifest (fail-closed), and prints a box-backup RETENTION PLAN (keep newest KEEP; delete only
@@ -332,6 +337,9 @@ PSFAST
   local plugin_backup_block plugin_deploy_block
   plugin_backup_block="$(genlock_plugin_backup_ps "$mode")"
   plugin_deploy_block="$(genlock_plugin_deploy_ps "$mode")"
+  # issue 1357: the power-plan set + read-back (the ONLY baseline mutation), before OBS is touched.
+  local power_plan_block
+  power_plan_block="$(win_baseline_power_plan_ensure_ps)"
 
   cat <<PS
 # ===== issue 789 genlock FLEET deploy -- box=${box} mode=${mode} (paste into the ${box} win-* MCP Shell) =====
@@ -348,6 +356,8 @@ PSFAST
 # (0) preflight -- the staged bundle must already be on the box (STEP 0 of the plan uploads it).
 if (-not (Test-Path \$stage))  { Write-Error "stage \$stage not found -- upload the artifact first (plan STEP 0)"; exit 2 }
 if (-not (Test-Path \$obsDir)) { Write-Error "OBS install \$obsDir not found"; exit 2 }
+
+${power_plan_block}
 
 ${ahk_stop}
 
