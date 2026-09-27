@@ -20,8 +20,7 @@
 //! genlock-jitter-report < obs.log
 //! genlock-jitter-report --file /path/to/obs.log
 //! genlock-jitter-report --file /path/to/obs.log --json
-//! genlock-jitter-report --file /path/to/strih-obs.log \
-//!     --verdict-source 'cg' --verdict-source 'NDI obs hudba'
+//! genlock-jitter-report --file /path/to/strih-obs.log --verdict-source 'cg'
 //! ```
 //!
 //! `--verdict-source <NAME>` (#811, repeatable): a distinct SCRIPTABLE verdict mode for the
@@ -445,14 +444,14 @@ mod verdict_tests {
             "cg",
             "--json",
             "--verdict-source",
-            "NDI obs hudba",
+            "NDIA cg stream",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
         assert_eq!(
             collect_repeated_flag(&args, "--verdict-source"),
-            vec!["cg".to_string(), "NDI obs hudba".to_string()]
+            vec!["cg".to_string(), "NDIA cg stream".to_string()]
         );
     }
 

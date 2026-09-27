@@ -371,13 +371,16 @@ input there would be DOUBLE audio in the mix.
 
 | box | expected `ndi_audio` |
 |---|---|
-| **resolume** (cg OBS) | camera inputs → silent; `sp-*`/SongPlayer/`cg`/music program inputs (the 9 keys) → **audio**; any other input → audio (the cg-box default). The ONLY program-audio box. |
-| **strih** / **stream** / **imag** | **EVERY** NDI input silent — cameras AND `cg` AND `2ME PGM` AND `NDI obs hudba` alike. Program audio comes from Dante/ASIO, never NDI. |
+| **resolume** (cg OBS) | camera inputs → silent; `sp-*`/SongPlayer/`cg`/music program inputs (the 8 keys) → **audio**; any other input → audio (the cg-box default). The ONLY program-audio box. |
+| **strih** / **stream** / **imag** | **EVERY** NDI input silent — cameras AND `cg` AND `2ME PGM` alike (the stream music input and its `hudba` key were removed 27.9.2026, issue 1380). Program audio comes from Dante/ASIO, never NDI. |
 
 The classifier `src/genlock_forced_table_audit.rs` (canonical) + the byte-for-byte bash replica
 `scripts/lib/genlock-forced-table-audit.sh` encode exactly this; `tests/genlock_forced_table_audit_1303.rs`
 pins the two together over a fixed vector set (bash verdict == Rust `audio_verdict` for every
-box×name×`ndi_audio`). Verdicts: `OK`, `MISMATCH-PROGRAM-SILENT` (a cg program source with audio off
+box×name×`ndi_audio`). That verdict parity is BLIND to the program key set (no verdict depends on
+it), so `bash_program_key_set_matches_rust_1380` also pins the two program predicates
+(`is_program_audio_input` / `is_program_video_input`) over every key; a key on one side only goes
+RED there (issue 1380). Verdicts: `OK`, `MISMATCH-PROGRAM-SILENT` (a cg program source with audio off
 — the #1295 event-morning defect), `MISMATCH-CAMERA-AUDIBLE` (a camera audible), and
 `MISMATCH-AUDIBLE` (a NON-camera input audible on a Dante-fed silent box — the double-audio hazard;
 added per the owner's own term). `deploy-genlock-fleet.sh` emits the report-only preflight

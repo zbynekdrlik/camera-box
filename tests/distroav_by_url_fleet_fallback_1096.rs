@@ -12,7 +12,7 @@
 //!   (a) after K=`NDI_FLEET_AFTER_NO_URL_CYCLES` consecutive finder-blind resets, synthesize the URL
 //!       from the camera-box naming contract via the pure `ndi_fleet_url_for_name(name, port_index,
 //!       buf, buflen)` ("CAMn (usb)" <-> 10.77.9.6n:5961; false for any non-camera name so cg /
-//!       "NDI obs hudba" are never guessed), cycling ports 5961..5963 across consecutive frame-less
+//!       "NDIA cg stream" are never guessed), cycling ports 5961..5963 across consecutive frame-less
 //!       fleet binds. The BY-URL fallback choice is the pure `ndi_fallback_bind_mode_1096(...)`.
 //! Both new binds are BY-URL, so `connected_by_url_1180` stays `= url_resolved_1096` and the existing
 //! #1180 identity verify + #1287 frame-less alternation apply UNCHANGED (a wrong-sender/dead-port
@@ -263,7 +263,7 @@ fn fleet_url_computes_the_spec_truth_table() {
         ("CAM8 (usb)", 0, "NONE"), // n out of contract range
         ("CAM0 (usb)", 0, "NONE"),
         ("cg", 0, "NONE"),
-        ("NDI obs hudba", 0, "NONE"),
+        ("NDIA cg stream", 0, "NONE"),
         ("CAM7", 0, "NONE"),             // missing suffix
         ("CAM7 (usb) extra", 0, "NONE"), // trailing junk
         ("CAM70 (usb)", 0, "NONE"),      // two digits

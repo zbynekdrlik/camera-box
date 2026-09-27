@@ -265,7 +265,7 @@ The per-box-class AUDIO expectation (the canonical table is
 `scripts/lib/genlock-forced-table-audit.sh`, pinned byte-for-byte by
 `tests/genlock_forced_table_audit_1303.rs`):
 
-| Box class | Role | Camera inputs (`CAM* (usb)`) | Program / music / SongPlayer inputs (`sp-*`, `cg`, `NDI 2ME PGM`, `mbc`, `NDI obs hudba`, `NDIAr *`, `VBAN *`) | Unknown-name default |
+| Box class | Role | Camera inputs (`CAM* (usb)`) | Program / music / SongPlayer inputs (`sp-*`, `cg`, `NDI 2ME PGM`, `mbc`, `NDIAr *`, `VBAN *`) | Unknown-name default |
 |---|---|---|---|---|
 | strih | camera switcher | `ndi_audio=false` (expected-silent) | `ndi_audio=true` (expected-audio: the `cg` program input) | silent |
 | stream | program encoder | expected-silent | expected-audio (`NDI 2ME PGM` program + `mbc` / music) | silent |

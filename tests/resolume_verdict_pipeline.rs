@@ -83,5 +83,5 @@ fn faulty_resolume_window_fails_with_drop_relock_skew_and_jump() {
 fn absent_source_has_no_summary() {
     // A source name that never appears in the log yields no summary at all —
     // the bin's `--verdict-source` mode reports this as ABSENT.
-    assert!(verdict_for(CLEAN_LOG, "NDI obs hudba").is_none());
+    assert!(verdict_for(CLEAN_LOG, "NDIA cg stream").is_none());
 }
