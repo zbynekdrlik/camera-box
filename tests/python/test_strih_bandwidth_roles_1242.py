@@ -555,13 +555,14 @@ def test_connect_on_show_hold_and_restore(tmp_path, monkeypatch):
     # a second hold (e.g. a crashed run left the state file) keeps the union -> restore catches all
     held2, twins2, _ = op.connect_on_show_hold(FakeWs(), str(sf))
     assert held2 == ["NDI cam1", "NDI cam3"] and twins2 == ["MV NDI cam3"]
-    restored, failed = op.connect_on_show_restore(FakeWs(), str(sf))
+    restored, failed, held_back = op.connect_on_show_restore(FakeWs(), str(sf))
+    assert held_back == []
     assert sorted(restored) == ["MV NDI cam3", "NDI cam1", "NDI cam3"] and failed == []
     assert state["inputs"]["NDI cam3"]["genlock_connect_on_show"] is True
     assert state["inputs"]["MV NDI cam3"]["genlock_fifo"] is True
     assert not sf.exists(), "a clean restore removes the state file"
     # restore with no state file is a no-op
-    assert op.connect_on_show_restore(FakeWs(), str(sf)) == ([], [])
+    assert op.connect_on_show_restore(FakeWs(), str(sf)) == ([], [], [])
 
 
 def test_connect_on_show_restore_treats_a_vanished_input_as_done(tmp_path, monkeypatch):
@@ -570,7 +571,7 @@ def test_connect_on_show_restore_treats_a_vanished_input_as_done(tmp_path, monke
     monkeypatch.setattr(op, "_settle_sleep", lambda dt: None)
     sf = tmp_path / "hold.json"
     sf.write_text(json.dumps(["NDI cam1", "NDI cam9"]))  # cam9 was deleted/renamed since the hold
-    restored, failed = op.connect_on_show_restore(FakeWs(), str(sf))
+    restored, failed, _ = op.connect_on_show_restore(FakeWs(), str(sf))
     assert restored == ["NDI cam1"] and failed == []
     assert not sf.exists(), "a vanished input must never keep the state file (and its WARN) alive"
 

@@ -307,8 +307,9 @@ def test_restore_keeps_the_main_held_while_its_twin_is_still_off_the_wire(fake, 
     sf = tmp_path / "hold.json"
     op.connect_on_show_hold(None, str(sf))
     f.ignore_writes.add("MV NDI cam1")
-    restored, failed = op.connect_on_show_restore(None, str(sf))
+    restored, failed, held_back = op.connect_on_show_restore(None, str(sf))
     assert failed == ["MV NDI cam1"]
+    assert held_back == ["NDI cam1"], "the restore names the main it kept held"
     # never a camera with neither receiver: full bandwidth on the main is the fail-safe
     assert f.inputs["NDI cam1"]["genlock_connect_on_show"] is False
     assert f.inputs["NDI cam3"]["genlock_connect_on_show"] is True
@@ -316,7 +317,7 @@ def test_restore_keeps_the_main_held_while_its_twin_is_still_off_the_wire(fake, 
     state = json.loads(sf.read_text())
     assert "NDI cam1" in state["connect_on_show"] and "MV NDI cam1" in state["twins"]
     f.ignore_writes.clear()
-    restored, failed = op.connect_on_show_restore(None, str(sf))
+    restored, failed, _ = op.connect_on_show_restore(None, str(sf))
     assert failed == [] and not sf.exists()
     assert f.inputs["NDI cam1"]["genlock_connect_on_show"] is True
 
@@ -327,6 +328,53 @@ def test_an_unreadable_input_at_enumeration_fails_the_hold(fake, tmp_path):
     assert "MV NDI cam3" in failed, "a twin the hold could not read may still be on the wire"
     assert "MV NDI cam3" not in twins and "MV NDI cam1" in twins
     assert "MV NDI cam3" not in f.written, "an input of unknown role is never written"
+
+
+def test_the_twin_of_an_unreadable_main_stays_on_the_wire(fake, tmp_path):
+    # review round 2: a main the hold could not read may still be parked -- its twin stays its one
+    # configured receiver
+    f = fake(unreadable={"NDI cam3"})
+    _, twins, failed = op.connect_on_show_hold(None, str(tmp_path / "hold.json"))
+    assert "NDI cam3" in failed
+    assert "MV NDI cam3" not in twins and "MV NDI cam3" not in f.written
+    assert "MV NDI cam1" in twins
+
+
+def _cli(monkeypatch, capsys, **ns):
+    class _Ws:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(op, "_conn", lambda host, pw: _Ws())
+    args = dict({"host": "h", "password": "", "hold": None, "restore": None}, **ns)
+    code = 0
+    try:
+        op.connect_on_show(type("A", (), args))
+    except SystemExit as e:
+        code = e.code
+    out = capsys.readouterr()
+    return code, out.out, out.err
+
+
+def test_hold_cli_names_the_held_inputs_and_the_failures_apart(fake, tmp_path, monkeypatch, capsys):
+    fake(ignore_writes={"NDI cam1"})
+    code, out, err = _cli(monkeypatch, capsys, hold=str(tmp_path / "h.json"))
+    assert code == 1
+    held_line = out.split("held")[1]
+    assert "NDI cam1" not in held_line.split(";")[0], "a main that failed is not reported held"
+    assert "NDI cam3" in out and "NDI cam1" in err
+    assert "restore" not in err, "a hold failure never prints the restore's text"
+
+
+def test_restore_cli_names_the_mains_it_kept_held(fake, tmp_path, monkeypatch, capsys):
+    f = fake()
+    sf = tmp_path / "h.json"
+    op.connect_on_show_hold(None, str(sf))
+    f.ignore_writes.add("MV NDI cam1")
+    code, out, err = _cli(monkeypatch, capsys, restore=str(sf))
+    assert code == 1
+    assert "MV NDI cam1" in err
+    assert "NDI cam1" in err.replace("MV NDI cam1", ""), "the held-back main is named"
 
 
 def test_an_unreadable_read_back_never_counts_as_settled(fake, tmp_path):
@@ -409,7 +457,7 @@ def test_restore_puts_the_original_back_twins_first_and_verifies_after_the_tick(
     sf = tmp_path / "hold.json"
     op.connect_on_show_hold(None, str(sf))
     f.calls.clear()
-    restored, failed = op.connect_on_show_restore(None, str(sf))
+    restored, failed, _ = op.connect_on_show_restore(None, str(sf))
     assert failed == []
     assert set(restored) == {"NDI cam1", "NDI cam3", "MV NDI cam1", "MV NDI cam3"}
     for tw in ("MV NDI cam1", "MV NDI cam3"):
@@ -444,7 +492,7 @@ def test_restore_reasserts_the_monitor_role_so_the_lockdown_pins_lowest(fake, tm
     sf = tmp_path / "hold.json"
     sf.write_text(json.dumps({"connect_on_show": [],
                               "twins": {"MV NDI cam1": {"genlock_fifo": True, "ndi_bw_mode": 1}}}))
-    restored, failed = op.connect_on_show_restore(None, str(sf))
+    restored, failed, _ = op.connect_on_show_restore(None, str(sf))
     assert failed == [] and restored == ["MV NDI cam1"]
     assert _twin(f, "MV NDI cam1")["genlock_monitor"] is True
     assert _twin(f, "MV NDI cam1")["ndi_bw_mode"] == 1 and _twin(f, "MV NDI cam1")["genlock_fifo"] is True
@@ -455,7 +503,7 @@ def test_restore_of_a_hand_edited_original_still_lands(fake, tmp_path):
     sf = tmp_path / "hold.json"
     sf.write_text(json.dumps({"connect_on_show": [],
                               "twins": {"MV NDI cam1": {"genlock_fifo": True, "ndi_bw_mode": 0}}}))
-    restored, failed = op.connect_on_show_restore(None, str(sf))
+    restored, failed, _ = op.connect_on_show_restore(None, str(sf))
     assert restored == ["MV NDI cam1"] and failed == []
     assert _twin(f, "MV NDI cam1")["genlock_fifo"] is True and _twin(f, "MV NDI cam1")["ndi_bw_mode"] == 1
     assert not sf.exists()
@@ -466,7 +514,7 @@ def test_restore_keeps_the_state_file_when_a_twin_does_not_settle(fake, tmp_path
     sf = tmp_path / "hold.json"
     op.connect_on_show_hold(None, str(sf))
     f.ignore_writes.add("MV NDI cam1")
-    _, failed = op.connect_on_show_restore(None, str(sf))
+    _, failed, _ = op.connect_on_show_restore(None, str(sf))
     assert failed == ["MV NDI cam1"]
     assert sf.exists(), "an unlanded restore keeps the list for the next run's cleanup"
 
@@ -476,7 +524,7 @@ def test_restore_skips_a_deleted_twin(fake, tmp_path):
     sf = tmp_path / "hold.json"
     op.connect_on_show_hold(None, str(sf))
     del f.inputs["MV NDI cam3"]
-    restored, failed = op.connect_on_show_restore(None, str(sf))
+    restored, failed, _ = op.connect_on_show_restore(None, str(sf))
     assert failed == [] and "MV NDI cam3" not in restored
     assert not sf.exists()
 
