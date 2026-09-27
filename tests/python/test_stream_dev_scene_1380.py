@@ -11,9 +11,11 @@ These tests pin, with a fake `_rpc` (no live OBS):
     the live 27.9.2026 state (Development present, its one item = the scene PRO);
   * the `dev-scene` CLI wiring and its defaults, pinned to the bash lib defaults;
   * `switch` skips SetCurrentProgramScene when the target is already on program (the #343
-    same-scene hazard), and takes an optional `--min-mean`;
-  * `program-rendered-input` descends into a nested scene source, so the TEST burn resolves
-    `NDI 2ME PGM` through `Development -> PRO` and never tries to burn the scene `PRO`;
+    same-scene hazard); the EVENT flags `--prod-floor` (the ONE prod floor, #677),
+    `--black-report-only` and `--replace-preview`;
+  * `program-rendered-input` descends into a nested scene source (a group via its own item list),
+    so the TEST burn resolves `NDI 2ME PGM` through `Development -> PRO` and never tries to burn the
+    scene `PRO`;
   * the bash lib `stream_dev_scene_ensure` / `stream_program_scene_read` call shapes.
 """
 import importlib.util
@@ -63,10 +65,11 @@ _PRO_ITEMS = [
 ]
 
 
-def _fake_obs(scenes, items_by_scene, program="PRO"):
-    """A fake `_rpc` over an in-memory OBS: scene list + per-scene items. Records every call."""
+def _fake_obs(scenes, items_by_scene, program="PRO", studio=False, preview="PRE"):
+    """A fake `_rpc` over an in-memory OBS: scene list + per-scene items, program, Studio Mode +
+    preview. Records every call."""
     state = {"scenes": list(scenes), "items": {k: list(v) for k, v in items_by_scene.items()},
-             "program": program}
+             "program": program, "studio": studio, "preview": preview}
     calls = []
 
     def fake_rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
@@ -92,6 +95,15 @@ def _fake_obs(scenes, items_by_scene, program="PRO"):
         if rtype == "SetCurrentProgramScene":
             state["program"] = rdata["sceneName"]
             return {}
+        if rtype == "GetStudioModeEnabled":
+            return {"studioModeEnabled": state["studio"]}
+        if rtype == "GetCurrentPreviewScene":
+            return {"currentPreviewSceneName": state["preview"]}
+        if rtype == "SetCurrentPreviewScene":
+            state["preview"] = rdata["sceneName"]
+            return {}
+        if rtype == "GetGroupSceneItemList":
+            return {"sceneItems": state["items"][rdata["sceneName"]]}
         return {}
 
     return fake_rpc, calls, state
@@ -237,9 +249,10 @@ def test_python_defaults_match_the_bash_lib_defaults():
 
 # --- switch: skip when already on target, optional --min-mean -----------------------------------
 
-def _switch_args(scene, min_mean=None):
+def _switch_args(scene, prod_floor=False, black_report_only=False, replace_preview=""):
     return types.SimpleNamespace(host="10.77.9.204", password="", program_scene=scene,
-                                 min_mean=min_mean)
+                                 prod_floor=prod_floor, black_report_only=black_report_only,
+                                 replace_preview=replace_preview)
 
 
 def test_switch_skips_set_when_the_target_is_already_on_program(monkeypatch, capsys):
@@ -256,57 +269,175 @@ def test_switch_skips_set_when_the_target_is_already_on_program(monkeypatch, cap
     assert capsys.readouterr().out.strip().isdigit()
 
 
-def test_switch_sets_program_when_it_differs_and_passes_min_mean(monkeypatch):
+def _spy_nonblack(monkeypatch, seen, raise_black=False):
+    def spy(ws, host, scene, label, hint, min_mean=None):
+        seen["min_mean"] = min_mean
+        seen["hint"] = hint
+        if raise_black:
+            raise SystemExit(f"[obs] {host}: {label} program '{scene}' BLACK")
+    monkeypatch.setattr(obs_phase2, "_assert_program_nonblack", spy)
+
+
+def test_switch_sets_program_when_it_differs_and_uses_the_prod_floor(monkeypatch):
     fake, calls, state = _fake_obs(["PRO", "Development"], {}, program="Development")
     monkeypatch.setattr(obs_phase2, "_rpc", fake)
     monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    monkeypatch.delenv("OBS_NONBLACK_MIN_MEAN_PROD", raising=False)
     seen = {}
-    monkeypatch.setattr(obs_phase2, "_assert_program_nonblack",
-                        lambda ws, host, scene, label, hint, min_mean=None: seen.update(
-                            min_mean=min_mean))
-    obs_phase2.switch(_switch_args("PRO", min_mean=5.0))
+    _spy_nonblack(monkeypatch, seen)
+    obs_phase2.switch(_switch_args("PRO", prod_floor=True))
     assert [c["data"] for c in calls if c["op"] == "SetCurrentProgramScene"] == [
         {"sceneName": "PRO"}]
     assert state["program"] == "PRO"
     assert seen["min_mean"] == 5.0
 
 
-def test_switch_cli_accepts_min_mean(monkeypatch):
+def test_the_prod_floor_is_the_one_prod_scene_env_knob(monkeypatch):
+    fake, _, _ = _fake_obs(["PRO"], {}, program="PRO")
+    monkeypatch.setattr(obs_phase2, "_rpc", fake)
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    monkeypatch.setenv("OBS_NONBLACK_MIN_MEAN_PROD", "7.5")
+    seen = {}
+    _spy_nonblack(monkeypatch, seen)
+    obs_phase2.switch(_switch_args("PRO", prod_floor=True))
+    assert seen["min_mean"] == 7.5
+    assert obs_phase2._prod_nonblack_floor() == 7.5
+
+
+def test_switch_without_prod_floor_keeps_the_312_default(monkeypatch):
+    fake, _, _ = _fake_obs(["Cam 1"], {}, program="Cam 1")
+    monkeypatch.setattr(obs_phase2, "_rpc", fake)
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    seen = {}
+    _spy_nonblack(monkeypatch, seen)
+    obs_phase2.switch(_switch_args("Cam 1"))
+    assert seen["min_mean"] is None
+
+
+def test_switch_black_report_only_warns_and_still_succeeds(monkeypatch, capsys):
+    # EVENT mode: a legitimately dark production scene (cameras not powered yet) must not fail the
+    # EVENT switch once the scene itself is set; a real set/transport failure still fails.
+    fake, _, state = _fake_obs(["PRO", "Development"], {}, program="Development")
+    monkeypatch.setattr(obs_phase2, "_rpc", fake)
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    _spy_nonblack(monkeypatch, {}, raise_black=True)
+    obs_phase2.switch(_switch_args("PRO", prod_floor=True, black_report_only=True))
+    out = capsys.readouterr()
+    assert state["program"] == "PRO"
+    assert out.out.strip().isdigit()
+    assert "WARNING" in out.err and "BLACK" in out.err
+
+
+def test_switch_black_without_report_only_still_fails(monkeypatch):
+    fake, _, _ = _fake_obs(["PRO"], {}, program="Development")
+    monkeypatch.setattr(obs_phase2, "_rpc", fake)
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    _spy_nonblack(monkeypatch, {}, raise_black=True)
+    with pytest.raises(SystemExit):
+        obs_phase2.switch(_switch_args("PRO", prod_floor=True))
+
+
+def test_switch_black_hint_names_the_program_not_a_cambox(monkeypatch):
+    fake, _, _ = _fake_obs(["Development"], {}, program="Development")
+    monkeypatch.setattr(obs_phase2, "_rpc", fake)
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    seen = {}
+    _spy_nonblack(monkeypatch, seen)
+    obs_phase2.switch(_switch_args("Development"))
+    assert "'Development'" in seen["hint"]
+
+
+def test_switch_moves_a_stale_development_preview_to_the_target(monkeypatch):
+    # Studio Mode: an E2E leaves the development scene in PREVIEW; after EVENT a Transition click
+    # must never put the development scene back on program.
+    fake, calls, state = _fake_obs(["PRO", "Development"], {}, program="Development",
+                                   studio=True, preview="Development")
+    monkeypatch.setattr(obs_phase2, "_rpc", fake)
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    _spy_nonblack(monkeypatch, {})
+    obs_phase2.switch(_switch_args("PRO", replace_preview="Development"))
+    assert state["preview"] == "PRO"
+    assert [c["data"] for c in calls if c["op"] == "SetCurrentPreviewScene"] == [
+        {"sceneName": "PRO"}]
+
+
+def test_switch_leaves_an_operator_preview_alone(monkeypatch):
+    fake, calls, state = _fake_obs(["PRO", "PRE", "Development"], {}, program="Development",
+                                   studio=True, preview="PRE")
+    monkeypatch.setattr(obs_phase2, "_rpc", fake)
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    _spy_nonblack(monkeypatch, {})
+    obs_phase2.switch(_switch_args("PRO", replace_preview="Development"))
+    assert state["preview"] == "PRE"
+    assert not any(c["op"] == "SetCurrentPreviewScene" for c in calls)
+
+
+def test_stale_preview_decision_is_pure():
+    f = obs_phase2._stale_preview_target
+    assert f(True, "Development", "Development", "PRO") == "PRO"
+    assert f(True, "PRE", "Development", "PRO") is None
+    assert f(False, "Development", "Development", "PRO") is None
+    assert f(True, "Development", "", "PRO") is None
+    assert f(True, "PRO", "PRO", "PRO") is None
+
+
+def test_switch_cli_accepts_the_event_flags(monkeypatch):
     captured = {}
     monkeypatch.setattr(obs_phase2, "switch", lambda a: captured.update(vars(a)))
     monkeypatch.setattr(sys, "argv", ["obs_phase2.py", "switch", "--host", "h",
-                                      "--program-scene", "PRO", "--min-mean", "5"])
+                                      "--program-scene", "PRO", "--prod-floor",
+                                      "--black-report-only", "--replace-preview", "Development"])
     obs_phase2.main()
-    assert captured["min_mean"] == 5.0
+    assert captured["prod_floor"] is True
+    assert captured["black_report_only"] is True
+    assert captured["replace_preview"] == "Development"
 
 
 # --- program-rendered-input descends into a nested scene -----------------------------------------
 
+def _fetch(items):
+    return lambda name, is_group=False: items[name]
+
+
 def test_rendered_input_resolves_through_the_nested_production_scene():
     items = {"Development": [_nested_item()], "PRO": _PRO_ITEMS}
-    assert obs_phase2._resolve_rendered_input(lambda s: items[s], "Development") == "NDI 2ME PGM"
+    assert obs_phase2._resolve_rendered_input(_fetch(items), "Development") == "NDI 2ME PGM"
 
 
 def test_rendered_input_of_a_plain_scene_is_unchanged():
     items = {"Cam 1": [_input_item("NDI cam1", "ndi_source")]}
-    assert obs_phase2._resolve_rendered_input(lambda s: items[s], "Cam 1") == "NDI cam1"
+    assert obs_phase2._resolve_rendered_input(_fetch(items), "Cam 1") == "NDI cam1"
 
 
 def test_rendered_input_skips_a_hidden_nested_scene():
     items = {"Development": [_nested_item(enabled=False),
                              _input_item("timer", "text_ft2_source_v2")],
              "PRO": _PRO_ITEMS}
-    assert obs_phase2._resolve_rendered_input(lambda s: items[s], "Development") == "timer"
+    assert obs_phase2._resolve_rendered_input(_fetch(items), "Development") == "timer"
 
 
 def test_rendered_input_returns_none_for_an_empty_nested_scene():
     items = {"Development": [_nested_item()], "PRO": []}
-    assert obs_phase2._resolve_rendered_input(lambda s: items[s], "Development") is None
+    assert obs_phase2._resolve_rendered_input(_fetch(items), "Development") is None
 
 
 def test_rendered_input_stops_on_a_nesting_cycle():
     items = {"A": [_nested_item("B")], "B": [_nested_item("A")]}
-    assert obs_phase2._resolve_rendered_input(lambda s: items[s], "A") is None
+    assert obs_phase2._resolve_rendered_input(_fetch(items), "A") is None
+
+
+def test_rendered_input_reads_a_group_through_the_group_item_list():
+    # An OBS group is also OBS_SOURCE_TYPE_SCENE (isGroup true); GetSceneItemList on a group name
+    # fails, the group's items come from GetGroupSceneItemList.
+    group = dict(_nested_item("Cams"), isGroup=True)
+    seen = []
+
+    def fetch(name, is_group=False):
+        seen.append((name, is_group))
+        return {"Main": [group], "Cams": [_input_item("NDI cam3", "ndi_source")]}[name]
+
+    assert obs_phase2._resolve_rendered_input(fetch, "Main") == "NDI cam3"
+    assert seen == [("Main", False), ("Cams", True)]
 
 
 def test_program_rendered_input_cli_prints_the_nested_input(monkeypatch, capsys):
@@ -340,6 +471,22 @@ def test_lib_ensure_calls_dev_scene_with_the_scene_names(tmp_path):
     _, argv = _run_lib(tmp_path, 'stream_dev_scene_ensure SCRIPTS 10.77.9.204 pw Development PRO')
     assert argv.strip() == (
         "dev-scene --host 10.77.9.204 --password pw --scene Development --nested PRO")
+
+
+def test_lib_ensure_never_seeds_a_non_default_scene_override(tmp_path):
+    # An override naming another (possibly the owner's) scene must never get a nested production
+    # item added; the caller's prod-scene/switch then needs that scene to already exist.
+    fake_dir = tmp_path / "scripts"
+    fake_dir.mkdir()
+    log = tmp_path / "argv.log"
+    (fake_dir / "obs_phase2.py").write_text(
+        f"import sys\nopen({str(log)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n")
+    script = (f'set -euo pipefail\n. "{_LIB}"\n'
+              f'stream_dev_scene_ensure "{fake_dir}" h pw POST PRO\necho rc=$?\n')
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True)
+    assert out.stdout.strip().splitlines()[-1] == "rc=0"
+    assert "not seeding" in out.stdout
+    assert not log.exists()
 
 
 def test_lib_program_scene_read_prints_the_scene(tmp_path):

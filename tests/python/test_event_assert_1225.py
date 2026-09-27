@@ -52,6 +52,18 @@ def _clean_facts():
     }
 
 
+def test_stream_program_facet_none_fails_closed_never_raises():
+    # issue 1380 item 9: an unreadable stream program scene (None) or a missing expected name must
+    # fail the item, never raise and never read as "on the production scene".
+    facts = _clean_facts()
+    facts["stream_program_scene"] = None
+    results = ea.compute_item_results(facts)
+    assert results["stream_program_production"] is False
+    facts = _clean_facts()
+    facts["stream_production_scene"] = None
+    assert ea.compute_item_results(facts)["stream_program_production"] is False
+
+
 def test_baseline_facts_pass_every_item():
     # Sanity check: the shared clean fixture actually passes on its own, so every None-injection
     # test below is exercising exactly the ONE facet under test, not some unrelated bug.

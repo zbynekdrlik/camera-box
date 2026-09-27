@@ -115,9 +115,21 @@ fn rig_mode_event_puts_the_production_scene_back_before_the_contract() {
         "obs_phase2.py\" switch --host \"$STREAM_IP\" --program-scene \"$STREAM_EVENT_SCENE\""
     ));
     assert!(
-        body.contains("--min-mean \"${OBS_NONBLACK_MIN_MEAN_PROD:-5}\""),
+        body.contains("--prod-floor"),
         "EVENT's non-black proof on real production content uses the prod floor, not the \
          bright-QR #312 floor"
+    );
+    assert!(
+        body.contains("--black-report-only"),
+        "a dark production scene must not fail the EVENT switch once the scene is set"
+    );
+    assert!(
+        body.contains("--replace-preview \"$STREAM_PROG_SCENE\""),
+        "EVENT must move a stale development-scene PREVIEW off the development scene"
+    );
+    assert!(
+        !s.contains("OBS_NONBLACK_MIN_MEAN_PROD"),
+        "the prod non-black floor is read in obs_phase2.py only, never retyped in rig-mode.sh"
     );
     let ev = fn_body(&s, "do_event");
     let restore = ev

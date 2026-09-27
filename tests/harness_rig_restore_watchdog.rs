@@ -684,9 +684,10 @@ fn prod_scene_pro_not_in_default_known_test_scenes() {
 
 #[test]
 fn stream_development_scene_is_not_a_stranded_test_scene_1380() {
-    // issue 1380: `Development` (the prod scene PRO nested inside it) is the stream box's STANDING
-    // TEST-mode program scene, not a stranded measurement scene — with no marker it must never
-    // trigger a restore, exactly like PRO.
+    // issue 1380 (a characterization pin, green before and after the change — the decision keys
+    // on the marker + known-test-scene list, never the stream scene name): `Development` (the
+    // prod scene PRO nested inside it) is the stream box's STANDING TEST-mode program scene, not a
+    // stranded measurement scene — with no marker it must never trigger a restore, like PRO.
     let d = decide(
         &[("RIG_HB_ACTIVE", "0"), ("RIG_PREV_CONFIRM", "1")],
         &["obs strih scene=Cam 1", "obs stream scene=Development"],
