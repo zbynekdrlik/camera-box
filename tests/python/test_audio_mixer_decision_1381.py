@@ -79,15 +79,17 @@ def test_behind_wins_over_overloaded():
     assert _mixer(2760, 797, 60014) == "BEHIND"
 
 
-def test_normalised_by_the_measured_window():
-    # A 500 ms late dump: 2836 ticks over 60.5 s is real time (2812.6/min), not a surplus.
-    assert _mixer(2836, 0, 60500) == "HEALTHY"
-
-
-def test_window_shorter_than_the_dump_period_is_unknown():
-    # A dump window is >= 60 s on the audio thread's clock, so a shorter log interval is a wall-clock
-    # step, never a mixer reading.
-    assert _mixer(2813, 0, 57000) == "UNKNOWN"
+def test_the_count_is_graded_as_dumped_never_rescaled_by_the_log_interval():
+    # The dump window is 60 s on the audio thread's own disciplined clock (dumped by the first
+    # callback past 60 s), so its tick count already IS the per-minute rate. The log timestamps are
+    # the wall clock, which dantesync steps: the real 27.9 log shows 03:59:13.844 -> 04:00:14.037
+    # (60.193 s) around the 02:00 UTC nightly date step with ticks=2813. Rescaling by that interval
+    # read 2804/min -> a false BEHIND; the count itself is real time.
+    assert _mixer(2813, 0, 60193) == "HEALTHY"
+    assert _mixer(2813, 0, 57000) == "HEALTHY"
+    # A genuine stall still shows in the count (fewer ticks in the window, a surplus in the next).
+    assert _mixer(2789, 0, 60400) == "BEHIND"
+    assert _mixer(2836, 0, 60000) == "BEHIND"
 
 
 def test_stale_dump_is_not_a_page():
@@ -98,9 +100,9 @@ def test_stale_dump_is_not_a_page():
 
 def test_mixer_absent_or_ungradable_is_unknown():
     assert _mixer(None, None, None, None, None) == "UNKNOWN"
-    assert _mixer(2813, 0, None) == "UNKNOWN"
+    assert _mixer(None, 0, 60011) == "UNKNOWN"
+    assert _mixer(2813, None, 60011) == "UNKNOWN"
     assert _mixer(2813, 0, 60011, tick_ms="17.0") == "UNKNOWN"
-    assert _mixer(2813, 0, 0) == "UNKNOWN"
 
 
 def test_mixer_unreachable_is_skip():
@@ -109,9 +111,9 @@ def test_mixer_unreachable_is_skip():
 
 def test_mixer_reports_the_rates_it_graded():
     r = amd.classify_mixer(2760, 797, 60014, "21.3", 5, 1)
-    assert round(r["rate_per_min"], 1) == 2759.4
-    assert round(r["deviation_per_min"], 1) == -53.1
-    assert round(r["over_per_min"], 1) == 796.8
+    assert r["rate_per_min"] == 2760
+    assert r["deviation_per_min"] == -52.5
+    assert r["over_per_min"] == 797
     assert r["expected_per_min"] == 2812.5
 
 
@@ -185,8 +187,8 @@ def test_cli_prints_key_value_lines():
                          check=True).stdout
     kv = dict(line.split("=", 1) for line in out.strip().splitlines())
     assert kv["mixer_verdict"] == "BEHIND"
-    assert kv["rate_per_min"] == "3855.5"
-    assert kv["deviation_per_min"] == "+1043.0"
+    assert kv["rate_per_min"] == "3857.0"
+    assert kv["deviation_per_min"] == "+1044.5"
     assert kv["vban_verdict"] == "HEALTHY"
     assert kv["vban_dest"] == "10.77.7.106:6980"
 
