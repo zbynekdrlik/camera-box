@@ -71,6 +71,9 @@ the two `video_sleep` calls.
     the process mask" warning.
   - Never abort, never retry-loop.
 - **Log lines drift-guard reads (`genlock_rt_pin_from_log`) keep their wording:**
+  - checked FIRST: `... and the restore failed too` (the disarm's LOG_ERROR) -> `restore_failed`,
+    **DRIFT**: the thread may stay on the pin cores / FIFO, the leak this issue is about. It outranks
+    a startup FIFO success line in the same log.
   - `render-tick thread set SCHED_FIFO prio N on the isolated core` -> `ok`
   - `could NOT set render-tick thread SCHED_FIFO` -> `failed`. Since issue 1357 this grades **OK**,
     not DRIFT: no box grants rtprio, so a pinned SCHED_OTHER tick is expected. The #572 DRIFT is
