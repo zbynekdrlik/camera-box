@@ -676,7 +676,8 @@ def test_the_sample_gap_bound_follows_the_slot_written_in_the_csv(tmp_path):
         v = _verdict(av={c: ("measured", 1.0) for c in CAMS}, source_spread=5.0,
                      delivery_spread=5.0,
                      segments=[{"cambox": c.upper(), "pass": True, "copies": 0, "gaps": 0,
-                                "undecodable": 0, "frames": 900} for c in CAMS])
+                                "undecodable": 0, "frames": 900} for c in CAMS],
+                     burn_loss={n: {"zero_loss": True, "real_drops": 0} for n in asd.HOP_NODES})
         asd.append_row(path, asd.row_from_verdict(v, CAMS, meta), CAMS)
     p = _cli("report", "--csv", path, "--min-duration-h", "1")
     assert p.returncode == 0, p.stdout + p.stderr

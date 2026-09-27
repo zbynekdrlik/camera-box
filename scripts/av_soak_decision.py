@@ -28,25 +28,34 @@ verdict JSON / the CSV and two Rust source files, so it is exhaustively pytest-a
   Which one the soak grades is an open design question on issue 1367 (comment 5858491691); the
   default is the design as written (the gate's two spreads).
 - **loss per camera** (`loss <cam>`): the term the gate itself folds for each of the camera's windows
-  in `all_cambox_continuity.segments` -- `relaxed_pass` (the per-window copies/gaps tolerance,
-  src/probe/recording_segments.rs), or `pass` on an older verdict that has no `relaxed_pass`. A
-  window carrying its own `multi_source` block (issue 1367: the camera films an OBS monitor) has
-  its copies/gaps REPORT-ONLY in the gate, so it is `report_only` here: a sample, never a breach.
-  The strict `pass` and the raw copies/gaps/undecodable are recorded and reported.
-- **burn loss** (`burn <node>`): `full_chain.loss.<node>.zero_loss` for every camera (only with the
-  capture burns) and for the `strih` + `stream` hops (the OBS measurement burns the soak turns on).
-  A measured `false` fails; a node never measured is not required; once measured, a gap counts.
-- **slope** of every value series: least squares over (hours, value) with its standard error;
-  FAIL only when `|slope| - 2 SE > 2 ms/h` (`SLOPE_BOUND_MS_PER_H`, the acceptance on issue 1367),
-  PASS only when `|slope| + 2 SE <= 2 ms/h`, UNKNOWN when the interval straddles the bound (per-window
-  noise alone over 1 h cannot prove either). Needs >= 3 samples over >= 30 min.
+  in `all_cambox_continuity.segments` (`gate_window_term`): src/window_gate.rs
+  `decide_with_tolerance(...).overall_pass_term` with the issue-1367 multi-source scope
+  (src/multi_source_window.rs `scoped_continuity_term`: a `multi_source` window's copies/gaps are
+  dropped, its presence + optical floor still gate), evaluated with the verdict's OWN serialized
+  seam flags (`copies_gaps_tolerance_gates_overall_pass`, the singleton allowance, the per-window
+  undecodable floor + `undecodable_floor_gates_overall_pass`). On real runs the AND of these terms is
+  exactly the verdict's `overall_pass` (tests/python/fixtures/av_soak). An older verdict without the
+  flags falls back to `relaxed_pass`, then `pass` (a multi-source window there is `report_only`: a
+  sample, never a breach; an all-`report_only` series is REPORTED, never a PASS). The strict `pass`
+  and the raw copies/gaps/undecodable are recorded and reported.
+- **burn loss** (`burn <node>`): `full_chain.loss.<node>.zero_loss` for the `strih` + `stream` hops
+  (the OBS measurement burns the soak turns on and requires -- never measured is UNKNOWN) and for
+  every camera (only with the capture burns: never measured is not required). A measured `false`
+  fails; once measured, a gap counts.
+- **slope** of every value series: least squares over (hours, value) with its standard error and
+  the two-sided 95 % Student-t quantile for its n - 2 degrees of freedom (`t95`): FAIL only when
+  `|slope| - t*SE > 2 ms/h` (`SLOPE_BOUND_MS_PER_H`, the acceptance on issue 1367), PASS only when
+  `|slope| + t*SE <= 2 ms/h`, UNKNOWN when the interval straddles the bound (per-window noise alone
+  over 1 h cannot prove either). Needs >= 3 samples over >= 30 min.
 - **cadence**: the acceptance asks for a sample at least every slot (10 min), so every required
   series must have no gap longer than the slot + 60 s start-jitter allowance (the slot is read from
   the CSV's `slot_s`; one missed slot is a 2-slot gap), counting the gap from the run's first window
   to the series' first sample and from its last sample to the last window.
 - **duration**: the run's window starts must span `min_duration - 60 s`.
-- **something graded**: a run where no series was graded at all is UNKNOWN (the verdict's own
-  zero-judged-cameras floor).
+- **a camera graded**: a run where no camera's A/V series was graded (every camera
+  operator-excluded) is UNKNOWN -- the verdict's own zero-judged-cameras floor.
+- The windows the E2E gate itself failed (`verdict_rc` != 0 on a decoded window) are counted and
+  printed; informational, the soak grades its own series.
 
 The two gate bounds are READ from their single sources (`src/av_window.rs`
 `AV_OFFSET_GATE_TOLERANCE_MS`, `src/switch_latency.rs` `SPREAD_THRESHOLD_MS`); a missing constant
@@ -83,8 +92,13 @@ SLOPE_BOUND_MS_PER_H = 2.0
 # A slope from fewer points or a shorter span is noise, not a trend: UNKNOWN instead.
 MIN_SLOPE_SAMPLES = 3
 MIN_SLOPE_SPAN_S = 1800
-# The slope is judged with its uncertainty: +/- this many standard errors (~95 %).
-SLOPE_SE_K = 2.0
+# The slope is judged with its uncertainty: the two-sided 95 % Student-t quantile for n - 2 degrees
+# of freedom (2 SE would over-call a slope from 3-4 samples). Table values; a dof between two rows
+# takes the smaller dof's (larger, conservative) quantile.
+_T95 = ((1, 12.706), (2, 4.303), (3, 3.182), (4, 2.776), (5, 2.571), (6, 2.447), (7, 2.365),
+        (8, 2.306), (9, 2.262), (10, 2.228), (12, 2.179), (15, 2.131), (20, 2.086), (25, 2.060),
+        (30, 2.042), (40, 2.021), (60, 2.000), (120, 1.980))
+_T95_INF = 1.960
 # "at least one every 10 min" on a fixed 10-min slot grid; the allowance absorbs the per-slot
 # pre-record steps' start jitter (never a missed slot, which is a 1200 s gap).
 DEFAULT_SLOT_S = 600
@@ -122,6 +136,9 @@ _CAM_FIELDS = (
     "burn_{c}_zero_loss", "burn_{c}_real_drops",
 )
 _LOSS_SAMPLE = ("true", "false", "report_only")
+# The verdict's own seam flags the per-window gate term needs (all_cambox_continuity).
+_GATE_TERM_KEYS = ("copies_gaps_tolerance_gates_overall_pass", "undecodable_floor_gates_overall_pass",
+                   "per_window_undecodable_floor")
 
 
 class BoundsError(Exception):
@@ -274,7 +291,9 @@ def row_from_verdict(verdict, cams, meta):
     row["delivery_spread_ms"] = _fmt_ms(
         _get(verdict, "all_cambox_delivery_latency", "cross_camera_spread_ms"))
 
-    for c, a in _loss_by_camera(_get(verdict, "all_cambox_continuity", "segments"), cams).items():
+    cont = _get(verdict, "all_cambox_continuity")
+    cont = cont if isinstance(cont, dict) else {}
+    for c, a in _loss_by_camera(cont.get("segments"), cams, cont).items():
         for k in ("frames", "copies", "gaps", "undecodable"):
             row[f"loss_{c}_{k}"] = str(a[k])
         row[f"loss_{c}_strict_pass"] = _fmt_bool(a["strict"])
@@ -293,13 +312,45 @@ def row_from_verdict(verdict, cams, meta):
     return row
 
 
-def _loss_by_camera(segments, cams):
+def _int(v):
+    return int(v) if _num(v) else 0
+
+
+def gate_window_term(seg, cont):
+    """The per-window term the gate folds into `all_cambox_continuity.overall_pass`, from the
+    verdict's OWN serialized seam flags: src/window_gate.rs `decide_with_tolerance(frames,
+    undecodable, copies, gaps, tolerance).overall_pass_term`, with src/multi_source_window.rs
+    `scoped_continuity_term` dropping a multi-source window's copies/gaps. None when the verdict
+    does not carry the flags (an older verdict)."""
+    if not isinstance(seg, dict) or not isinstance(cont, dict):
+        return None
+    if not all(k in cont for k in _GATE_TERM_KEYS):
+        return None
+    frames = _int(seg.get("frames"))
+    undecodable = _int(seg.get("undecodable"))
+    copies, gaps = _int(seg.get("copies")), _int(seg.get("gaps"))
+    if seg.get("multi_source"):
+        copies = gaps = 0
+    floor_ok = (cont["undecodable_floor_gates_overall_pass"] is not True
+                or (frames > 0 and undecodable <= _int(cont["per_window_undecodable_floor"])))
+    if cont["copies_gaps_tolerance_gates_overall_pass"] is True:
+        tol = seg.get("copies_gaps_tolerance", cont.get("copies_gaps_tolerance"))
+        copies_gaps_ok = _num(tol) and copies <= tol and gaps <= tol
+    elif cont.get("segment_singleton_allowance_gates_overall_pass") is True:
+        copies_gaps_ok = (copies <= _int(cont.get("segment_singleton_copies_allowance"))
+                          and gaps <= _int(cont.get("segment_singleton_gaps_allowance")))
+    else:
+        copies_gaps_ok = copies == 0 and gaps == 0
+    return frames > 0 and floor_ok and bool(copies_gaps_ok)
+
+
+def _loss_by_camera(segments, cams, cont=None):
     """Aggregate one window's `all_cambox_continuity.segments` per camera (a camera may own several
-    cycled segments). `graded` = the AND of the term the GATE folds per segment -- `relaxed_pass`,
-    or `pass` on an older verdict without it -- over the camera's segments that are NOT multi-source
-    (issue 1367: a `multi_source` window's copies/gaps are report-only in the gate); None when every
-    segment was multi-source. `strict` = the AND of the strict `pass` (reported only). Unlike the
-    Discord report's strict aggregation, this grades the gate's own per-window term."""
+    cycled segments). `graded` = the AND of the gate's own per-window term (`gate_window_term`) over
+    the camera's segments; on an older verdict without the seam flags, the AND of `relaxed_pass`
+    (else `pass`) over its non-multi-source segments, None when every segment was multi-source.
+    `strict` = the AND of the strict `pass` (reported only). Unlike the Discord report's strict
+    aggregation, this grades the gate's own per-window term."""
     agg = {}
     for seg in segments if isinstance(segments, list) else []:
         if not isinstance(seg, dict):
@@ -315,8 +366,11 @@ def _loss_by_camera(segments, cams):
         a["strict"] = a["strict"] and seg.get("pass") is True
         if seg.get("multi_source"):
             a["multi"] = True
-            continue
-        term = seg.get("relaxed_pass") if "relaxed_pass" in seg else seg.get("pass")
+        term = gate_window_term(seg, cont)
+        if term is None:
+            if seg.get("multi_source"):
+                continue
+            term = seg.get("relaxed_pass") if "relaxed_pass" in seg else seg.get("pass")
         a["graded"] = (True if a["graded"] is None else a["graded"]) and term is True
     return agg
 
@@ -380,6 +434,18 @@ def fit_slope_with_se(points):
     return slope, math.sqrt(max(rss, 0.0) / (len(pts) - 2) / sxx)
 
 
+def t95(dof):
+    """Two-sided 95 % Student-t quantile for `dof` degrees of freedom (conservative table lookup)."""
+    if dof < 1:
+        return math.inf
+    if dof >= 1000:
+        return _T95_INF
+    for d, v in reversed(_T95):
+        if dof >= d:
+            return v
+    return _T95[0][1]
+
+
 def fit_slope_ms_per_h(points):
     """Least-squares slope of [(epoch_s, value_ms)] in ms per hour, or None when degenerate."""
     return fit_slope_with_se(points)[0]
@@ -417,14 +483,15 @@ def _value_series(name, points, bound, bound_label, run_start, run_end, max_gap_
     slope, se = None, None
     if len(points) >= MIN_SLOPE_SAMPLES and span >= MIN_SLOPE_SPAN_S:
         slope, se = fit_slope_with_se(points)
-    band = None if se is None else SLOPE_SE_K * se
+    band = None if se is None else t95(len(points) - 2) * se
     gap = _max_gap([t for t, _ in points], run_start, run_end)
     s = {
         "name": name, "graded": True, "n": len(points),
         "min": min(vals) if vals else None, "max": max(vals) if vals else None,
         "last": vals[-1] if vals else None, "worst_residual": worst, "bound": bound,
         "bound_label": bound_label, "breaches": breaches, "ungradable": ungradable,
-        "slope_ms_per_h": slope, "slope_se_ms_per_h": se, "max_gap_s": gap,
+        "slope_ms_per_h": slope, "slope_se_ms_per_h": se, "slope_band_ms_per_h": band,
+        "max_gap_s": gap,
     }
     if not points:
         s["verdict"], s["reason"] = UNKNOWN, "no samples"
@@ -433,7 +500,7 @@ def _value_series(name, points, bound, bound_label, run_start, run_end, max_gap_
         s["reason"] = f"{breaches} sample(s) outside {bound_label} {bound:g} ms"
     elif slope is not None and band is not None and abs(slope) - band > slope_bound:
         s["verdict"] = FAIL
-        s["reason"] = (f"slope {slope:+.2f} +/- {band:.2f} ms/h ({SLOPE_SE_K:g} SE) is outside "
+        s["reason"] = (f"slope {slope:+.2f} +/- {band:.2f} ms/h (95 % t band) is outside "
                        f"+/-{slope_bound:g} ms/h")
     elif ungradable:
         s["verdict"] = UNKNOWN
@@ -444,7 +511,7 @@ def _value_series(name, points, bound, bound_label, run_start, run_end, max_gap_
                        f"{MIN_SLOPE_SPAN_S // 60} min (have {len(points)} over {span / 60:.0f} min)")
     elif abs(slope) + band > slope_bound:
         s["verdict"] = UNKNOWN
-        s["reason"] = (f"slope {slope:+.2f} +/- {band:.2f} ms/h ({SLOPE_SE_K:g} SE) straddles the "
+        s["reason"] = (f"slope {slope:+.2f} +/- {band:.2f} ms/h (95 % t band) straddles the "
                        f"+/-{slope_bound:g} ms/h bound -- not enough evidence either way")
     elif gap is not None and gap > max_gap_s:
         s["verdict"] = UNKNOWN
@@ -463,10 +530,13 @@ def _state_series(name, points, run_start, run_end, max_gap_s, required, extra=N
     gap = _max_gap([t for t, _ in points], run_start, run_end)
     s = {"name": name, "graded": True, "n": len(points), "breaches": fails,
          "report_only": report_only, "max_gap_s": gap, "slope_ms_per_h": None,
-         "slope_se_ms_per_h": None}
+         "slope_se_ms_per_h": None, "slope_band_ms_per_h": None}
     s.update(extra or {})
     if fails:
         s["verdict"], s["reason"] = FAIL, f"{fails} window(s) with loss"
+    elif points and report_only == len(points):
+        s["graded"] = False
+        s["verdict"], s["reason"] = REPORTED, "every window report-only (multi-source)"
     elif not points:
         s["verdict"] = UNKNOWN if required else NOT_MEASURED
         s["reason"] = never_reason
@@ -500,10 +570,12 @@ def evaluate(rows, cams, *, bounds, min_duration_s, max_gap_s=None,
         max_gap_s = max_gap_from_rows(rows)
     tol = bounds["av_tolerance_ms"]
     thr = bounds["spread_threshold_ms"]
-    rep = {"scope": scope, "windows": len(rows),
-           "windows_ok": sum(1 for r in rows if r.get("outcome") == "ok"),
+    ok_rows = [r for r in rows if r.get("outcome") == "ok"]
+    rep = {"scope": scope, "windows": len(rows), "windows_ok": len(ok_rows),
+           "gate_failed_windows": sum(1 for r in ok_rows
+                                      if r.get("verdict_rc") not in (None, "", "0")),
            "bounds": {"av_tolerance_ms": tol, "spread_threshold_ms": thr,
-                      "slope_bound_ms_per_h": slope_bound, "slope_se_k": SLOPE_SE_K,
+                      "slope_bound_ms_per_h": slope_bound, "slope_band": "95 % t",
                       "max_gap_s": max_gap_s, "sources": dict(bounds.get("sources", {}))},
            "spread_columns": list(spread_columns), "min_duration_s": min_duration_s,
            "series": {}, "reasons": []}
@@ -517,7 +589,7 @@ def evaluate(rows, cams, *, bounds, min_duration_s, max_gap_s=None,
 
     series = rep["series"]
     for c in cams:
-        statuses = [r.get(f"av_{c}_status", "") for r in rows]
+        statuses = [r.get(f"av_{c}_status", "") for r in rows if r.get("outcome") == "ok"]
         excluded = bool(statuses) and all(s == "excluded" for s in statuses)
         pts = []
         expected = {}
@@ -557,10 +629,10 @@ def evaluate(rows, cams, *, bounds, min_duration_s, max_gap_s=None,
                 if r.get(f"burn_{node}_zero_loss") in ("true", "false")]
         drops = sum(int(_f(r.get(f"burn_{node}_real_drops")) or 0) for r in rows)
         why = ("never measured (needs the camera's capture burn)" if node in cams
-               else "never measured (the OBS measurement burn was not in the recording)")
+               else "never measured (the OBS measurement burn the soak turned on is missing)")
         series[f"burn {node}"] = _state_series(f"burn {node}", bpts, start, end, max_gap_s,
-                                               required=False, extra={"real_drops": drops},
-                                               never_reason=why)
+                                               required=node in HOP_NODES,
+                                               extra={"real_drops": drops}, never_reason=why)
 
     for col in SPREAD_COLUMNS:
         pts = [(_f(r["epoch_s"]), _f(r.get(col))) for r in rows if _f(r.get(col)) is not None]
@@ -580,12 +652,13 @@ def evaluate(rows, cams, *, bounds, min_duration_s, max_gap_s=None,
         rep["reasons"].append(
             f"run shorter than required: window starts span {rep['span_s'] / 3600:.2f} h < "
             f"{min_duration_s / 3600:.2f} h")
-    if not graded:
-        rep["reasons"].append("nothing was graded (every camera excluded and no graded spread)")
+    judged = [s for s in series.values() if s["name"].startswith("av ") and s["graded"]]
+    if not judged:
+        rep["reasons"].append("no camera was graded (every camera operator-excluded)")
     rep["reasons"].extend(f"{s['name']}: {s['reason']}" for s in unknowns)
     if fails:
         rep["verdict"] = FAIL
-    elif short or unknowns or not graded:
+    elif short or unknowns or not judged:
         rep["verdict"] = UNKNOWN
     else:
         rep["verdict"] = PASS
@@ -633,9 +706,11 @@ def _render_one(rep):
         f"  bounds: A/V |offset - expected| <= {b['av_tolerance_ms']:g} ms "
         f"({src.get('av_tolerance_ms', '?')}); spread <= {b['spread_threshold_ms']:g} ms "
         f"({src.get('spread_threshold_ms', '?')}); |slope| <= {b['slope_bound_ms_per_h']:g} ms/h "
-        f"(judged +/- {b.get('slope_se_k', SLOPE_SE_K):g} SE); sample gap <= {b['max_gap_s']:g} s; "
+        f"(judged +/- the 95 % t band); sample gap <= {b['max_gap_s']:g} s; "
         f"graded spread: {', '.join(rep['spread_columns']) or 'none'}",
-        f"  {'series':<30} {'n':>3} {'min':>9} {'max':>9} {'last':>9} {'slope/h':>9} {'2SE':>6} "
+        f"  the E2E gate itself failed {rep.get('gate_failed_windows', 0)} of {rep['windows_ok']} "
+        f"decoded window(s) (its own verdict; informational)",
+        f"  {'series':<30} {'n':>3} {'min':>9} {'max':>9} {'last':>9} {'slope/h':>9} {'band':>6} "
         f"{'gap s':>6}  verdict",
     ]
     for s in rep["series"].values():
@@ -648,8 +723,7 @@ def _render_one(rep):
                          f"{_n(s['max_gap_s'], '{:.0f}'):>6}  {s['verdict']}"
                          + (f" -- {s['reason']}" if s.get("reason") else ""))
             continue
-        se = s.get("slope_se_ms_per_h")
-        band = None if se is None else SLOPE_SE_K * se
+        band = s.get("slope_band_ms_per_h")
         lines.append(
             f"  {s['name']:<30} {s['n']:>3} {_n(s['min'], '{:+.1f}'):>9} "
             f"{_n(s['max'], '{:+.1f}'):>9} {_n(s['last'], '{:+.1f}'):>9} "
@@ -676,7 +750,7 @@ def render_text(scopes):
 def _cmd_bounds(a):
     b = load_gate_bounds(a.repo_root)
     print(f"av_tolerance_ms={b['av_tolerance_ms']} spread_threshold_ms={b['spread_threshold_ms']} "
-          f"slope_bound_ms_per_h={SLOPE_BOUND_MS_PER_H} slope_se_k={SLOPE_SE_K} "
+          f"slope_bound_ms_per_h={SLOPE_BOUND_MS_PER_H} slope_band=t95(n-2)*SE "
           f"max_gap_s=slot+{START_JITTER_ALLOWANCE_S}")
     for k, v in b["sources"].items():
         print(f"  {k} <- {v}")
