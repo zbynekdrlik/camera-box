@@ -431,6 +431,161 @@ def test_render_text_names_every_series_and_the_verdict():
         assert needle in text, needle
 
 
+# --- review round 1: real verdict fixtures, relaxed_pass, multi-source, hop burns, noise ----------
+
+FIXTURES = os.path.join(HERE, "fixtures", "e2e_discord_report")
+
+
+def _fixture(name):
+    with open(os.path.join(FIXTURES, name), encoding="utf-8") as f:
+        return json.load(f)
+
+
+REAL_CAMS = ["cam1", "cam2", "cam3"]
+
+
+def test_loss_is_graded_on_the_gates_relaxed_pass_and_the_strict_pass_is_reported():
+    # a real merged verdict: CAM1's strict `pass` is false (1 copy) but the gate folds relaxed_pass
+    row = asd.row_from_verdict(_fixture("verdict_real_pass_reportonly_1104689227.json"),
+                               REAL_CAMS, _meta(0))
+    assert row["loss_cam1_pass"] == "true"
+    assert row["loss_cam1_strict_pass"] == "false"
+    assert row["loss_cam1_copies"] == "2"
+
+
+def test_a_verdict_without_relaxed_pass_falls_back_to_the_strict_pass():
+    row = asd.row_from_verdict(_fixture("verdict_clean_pass.json"), REAL_CAMS, _meta(0))
+    assert row["loss_cam1_pass"] == "true" and row["loss_cam1_strict_pass"] == "true"
+
+
+def test_a_multi_source_window_is_report_only_for_loss():
+    # the real issue-1367 multi-source run: CAM2 films an OBS multiview, its copies/gaps are
+    # report-only in the gate (the window's own `multi_source` block), never a soak breach
+    row = asd.row_from_verdict(_fixture("verdict_multi_source_pass_2059624745_1367.json"),
+                               REAL_CAMS, _meta(0))
+    assert row["loss_cam2_pass"] == "report_only"
+    assert row["loss_cam2_multi_source"] == "true"
+    assert row["loss_cam1_pass"] == "true"
+    rows = []
+    for i in range(7):
+        r = _clean_row(i)
+        r["loss_cam2_pass"] = "report_only"
+        r["loss_cam2_multi_source"] = "true"
+        rows.append(_stringify(r))
+    rep = _run(rows)
+    assert rep["series"]["loss cam2"]["verdict"] == asd.PASS
+    assert rep["series"]["loss cam2"]["report_only"] == 7
+    assert rep["verdict"] == asd.PASS, rep["reasons"]
+
+
+def test_the_strih_and_stream_hop_burn_loss_is_recorded_and_graded():
+    row = asd.row_from_verdict(_fixture("verdict_all_cambox_red_709.json"), REAL_CAMS, _meta(0))
+    assert row["burn_strih_zero_loss"] == "false" and row["burn_strih_real_drops"] == "4"
+    assert row["burn_stream_zero_loss"] == "true" and row["burn_stream_real_drops"] == "0"
+    rows = []
+    for i in range(7):
+        r = _clean_row(i)
+        r["burn_stream_zero_loss"] = "true"
+        r["burn_strih_zero_loss"] = "false" if i == 4 else "true"
+        rows.append(_stringify(r))
+    rep = _run(rows)
+    assert rep["series"]["burn strih"]["verdict"] == asd.FAIL
+    assert rep["series"]["burn stream"]["verdict"] == asd.PASS
+    assert rep["verdict"] == asd.FAIL
+
+
+def test_a_hop_burn_that_stops_being_measured_is_a_gap():
+    rows = []
+    for i in range(7):
+        r = _clean_row(i)
+        r["burn_stream_zero_loss"] = "true" if i < 3 else ""
+        rows.append(_stringify(r))
+    rep = _run(rows)
+    assert rep["series"]["burn stream"]["verdict"] == asd.UNKNOWN
+    assert "gap" in rep["series"]["burn stream"]["reason"]
+
+
+def test_slope_standard_error_is_zero_on_a_line_and_positive_on_noise():
+    line = [(T0 + i * 600, 1.0 + 0.5 * i) for i in range(7)]
+    slope, se = asd.fit_slope_with_se(line)
+    assert slope == pytest.approx(3.0) and se == pytest.approx(0.0, abs=1e-9)
+    noisy = [(T0 + i * 600, (2.0 if i % 2 else -2.0)) for i in range(7)]
+    slope, se = asd.fit_slope_with_se(noisy)
+    assert se > 0
+    assert asd.fit_slope_with_se([(T0, 1.0), (T0 + 600, 2.0)]) == (pytest.approx(6.0), None)
+
+
+def _noisy_rows(n, noise_ms, drift_ms_per_h=0.0):
+    rows = []
+    for i in range(n):
+        wobble = noise_ms if i % 2 else -noise_ms
+        off = drift_ms_per_h * i * SLOT / 3600.0 + wobble
+        rows.append(_stringify(_clean_row(i, av_by_cam={"cam1": off, "cam2": 0.0, "cam3": 0.0})))
+    return rows
+
+
+def test_noise_alone_is_never_a_slope_fail_on_the_one_hour_check():
+    rep = _run(_noisy_rows(7, 2.0))
+    s = rep["series"]["av cam1"]
+    assert s["verdict"] == asd.UNKNOWN, s
+    assert "straddles" in s["reason"]
+    assert s["slope_se_ms_per_h"] > 0
+
+
+def test_the_same_noise_over_eight_hours_passes():
+    rep = _run(_noisy_rows(49, 2.0), min_duration_s=8 * 3600)
+    assert rep["series"]["av cam1"]["verdict"] == asd.PASS, rep["series"]["av cam1"]
+    assert rep["verdict"] == asd.PASS, rep["reasons"]
+
+
+def test_a_clear_drift_through_the_noise_still_fails():
+    rep = _run(_noisy_rows(7, 1.0, drift_ms_per_h=20.0))
+    assert rep["series"]["av cam1"]["verdict"] == asd.FAIL
+    assert "slope" in rep["series"]["av cam1"]["reason"]
+
+
+def test_the_partial_is_graded_as_soon_as_the_first_hour_is_complete():
+    rows = [_stringify(_clean_row(i)) for i in range(7)]  # window starts span exactly 1 h
+    scopes = asd.evaluate_scopes(rows, CAMS, bounds=_bounds(), partial_h=1.0, min_duration_h=8.0,
+                                 max_gap_s=asd.DEFAULT_MAX_GAP_S,
+                                 slope_bound=asd.SLOPE_BOUND_MS_PER_H,
+                                 spread_columns=("source_spread_ms",))
+    assert scopes["partial"] is not None
+    assert scopes["partial"]["verdict"] == asd.PASS, scopes["partial"]["reasons"]
+    assert scopes["full"]["verdict"] == asd.UNKNOWN  # 1 h of an 8 h run
+    shorter = [_stringify(_clean_row(i)) for i in range(4)]
+    assert asd.evaluate_scopes(shorter, CAMS, bounds=_bounds(), partial_h=1.0,
+                               min_duration_h=8.0)["partial"] is None
+
+
+def test_nothing_graded_is_unknown_never_a_pass():
+    rows = []
+    for i in range(7):
+        r = asd.row_from_verdict(None, CAMS, _meta(i))
+        for c in CAMS:
+            r[f"av_{c}_status"] = "excluded"
+        rows.append(_stringify(r))
+    rep = _run(rows, spread_columns=())
+    assert rep["verdict"] == asd.UNKNOWN
+    assert any("nothing" in r for r in rep["reasons"])
+
+
+def test_the_sample_gap_bound_follows_the_slot_written_in_the_csv(tmp_path):
+    slot = 900
+    path = str(tmp_path / "soak.csv")
+    for i in range(5):  # 1 h of windows every 15 min
+        meta = _meta(i, epoch=T0 + i * slot)
+        meta["slot_s"] = slot
+        v = _verdict(av={c: ("measured", 1.0) for c in CAMS}, source_spread=5.0,
+                     delivery_spread=5.0,
+                     segments=[{"cambox": c.upper(), "pass": True, "copies": 0, "gaps": 0,
+                                "undecodable": 0, "frames": 900} for c in CAMS])
+        asd.append_row(path, asd.row_from_verdict(v, CAMS, meta), CAMS)
+    p = _cli("report", "--csv", path, "--min-duration-h", "1")
+    assert p.returncode == 0, p.stdout + p.stderr
+    assert "sample gap <= 960 s" in p.stdout
+
+
 # --- the CLI ------------------------------------------------------------------------------------
 
 
