@@ -414,6 +414,15 @@ pub mod genlock_grid_bench;
 // identical by the committed parity gate `tests/genlock_wall_step_parity_1372.rs`.
 pub mod genlock_wall_step;
 
+// Issue 1367 (ROZHODNUTÉ 5857354949) — the genlock audio-buffering FLOOR: every OBS launch starts
+// with the same mix-window buffering (85 ms at 48 kHz, raised on the first audio tick) and OBS's own
+// dynamic increase stays active above it, so the stream `mbc` ASRC level (its A/V position) no
+// longer depends on a startup race; plus the band that keeps the #1355 absolute level target within
+// the level servo's reach. Crate-root + std-only (Tier-0); the C twin
+// `vendor/obs-studio/libobs/obs-genlock-audio-buffering.h` is held identical by the committed
+// parity gate `tests/genlock_audio_buffering_parity_1367.rs`.
+pub mod genlock_audio_buffering;
+
 // Issue 1372 — the two-clock WALL-STEP bench: the logged −51 ms fleet date step replayed against the
 // render tick + sender stamp, the LOCK indicator's qpc_drift verdict and the stream `mbc` ASRC (a
 // confirmed 44 ms sample loss paid back at 1000 ppm). Test-only.
