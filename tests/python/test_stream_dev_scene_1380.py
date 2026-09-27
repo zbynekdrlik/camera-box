@@ -246,13 +246,33 @@ def test_dev_scene_cli_prints_the_scene_it_ensured(monkeypatch, capsys):
     assert out[-1] == "DEV_SCENE=Development created=0 nested_added=0"
 
 
-def test_dev_scene_cli_defaults(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(obs_phase2, "dev_scene", lambda a: captured.update(vars(a)))
+def test_dev_scene_cli_defaults_to_development_nesting_pro(monkeypatch, capsys):
+    # With no --scene/--nested the CLI ensures the declared names (resolved from the pure module at
+    # call time, so the other subcommands never import it).
+    fake, calls, _ = _fake_obs(["PRO"], {"PRO": _PRO_ITEMS})
+    monkeypatch.setattr(obs_phase2, "_rpc", fake)
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
     monkeypatch.setattr(sys, "argv", ["obs_phase2.py", "dev-scene", "--host", "h"])
     obs_phase2.main()
-    assert captured["scene"] == "Development"
-    assert captured["nested"] == "PRO"
+    writes = _writes(calls)
+    assert [w["data"] for w in writes] == [
+        {"sceneName": "Development"},
+        {"sceneName": "Development", "sourceName": "PRO", "sceneItemEnabled": True}]
+    assert capsys.readouterr().out.strip().splitlines()[-1] == (
+        "DEV_SCENE=Development created=1 nested_added=1")
+
+
+def test_obs_phase2_cli_works_where_only_obs_phase2_is_deployed(tmp_path):
+    # setup-imag.sh / setup-strih.sh install obs_phase2.py ALONE on the boxes; no other subcommand
+    # may need scripts/stream_dev_scene.py next to it.
+    lone = tmp_path / "obs_phase2.py"
+    lone.write_text(_MOD_PATH.read_text())
+    out = subprocess.run([sys.executable, str(lone), "switch", "--help"], capture_output=True,
+                         text=True)
+    assert out.returncode == 0, out.stderr
+    out = subprocess.run([sys.executable, str(lone), "program-scene", "--help"],
+                         capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
 
 
 def _lib_default(name):
