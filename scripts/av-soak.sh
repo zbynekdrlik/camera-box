@@ -84,7 +84,9 @@ set -euo pipefail
 #   RIG_LEASE_DIR, CAMERA_BOX_RIG_HEARTBEAT, CONNECT_ON_SHOW_MARKER_CMD, CONNECT_ON_SHOW_LOG_READ_CMD.
 #
 # STOP: `touch <run-dir>/STOP` (stops at the next wait/slot boundary, full cleanup + report), or
-# `kill -TERM $(cat <run-dir>/pid)` (cleanup runs from the trap).
+# `kill -TERM $(cat <run-dir>/pid)` (cleanup runs from the trap; a SIGTERM that lands during a
+# retried broadcast read runs after that read, up to ~2 min with the defaults -- `systemctl stop`
+# of the unit signals every process in it and is not delayed).
 #
 # EXIT: 0 PASS / 1 FAIL / 2 UNKNOWN (the final report of a run that ended normally or by STOP / a
 #       low record volume / the rig leaving TEST mode), 3 usage error, 4 refused before any rig

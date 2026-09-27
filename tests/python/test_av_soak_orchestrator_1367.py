@@ -817,6 +817,18 @@ def test_an_unreadable_rig_before_stoprecord_keeps_the_recordings(rig):
     assert p["lease"].exists()
 
 
+def test_cleanup_retries_an_unreadable_read_and_stops_the_recordings(rig):
+    # the three reads before the StopRecords are unreadable (the slot aborts); cleanup's first
+    # read is unreadable too, its retry reads an idle rig: cleanup stops both recordings
+    env, p = rig
+    r = _soak(dict(env, FAKE_UNREADABLE_AFTER_SWITCHES="2", FAKE_UNREADABLE_TIMES="4"), "--run")
+    assert r.returncode == 5, r.stdout + r.stderr
+    stops = [c for c in _calls(p["log"], "obs") if c[:1] == ["record"] and "stop" in c]
+    assert {_host(c) for c in stops} == {STRIH, STREAM}
+    assert (p["state"] / "count-unreadable").read_text() == "4"
+    _assert_rig_restored(p)
+
+
 def test_one_unreadable_read_before_stoprecord_is_retried(rig):
     env, p = rig
     r = _soak(dict(env, FAKE_UNREADABLE_AFTER_SWITCHES="2", FAKE_UNREADABLE_TIMES="1"), "--run")
