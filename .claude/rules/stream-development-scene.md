@@ -93,9 +93,9 @@ reuses the ONE guard: `obs_phase2._refuse_forbidden_scene` + `NEVER_PROGRAM_SCEN
   `~/.config/imag-last-program`. That last one falls back to its own `Cam 1` default, because a
   refusal would abort the boot seed and Restart-loop the imag OBS (the issue-1156 class).
 - **The frozen gate's callers.** The `[4c/8]` report-only pixel line in `recording-e2e.sh` labels
-  every exit other than 0 / 124 as FROZEN, a gate ERROR (2) included; that predates this slice
-  (a connection failure has always exited 2), and the refusal cannot happen on strih, which has
-  no `PRO`. A `#328` `TimeoutError` inside the capture still exits 1 (outside the rule).
+  exit 0 PASS, 124 TIMEOUT, 2 ERROR (a refused select, a guard load failure or a connection
+  failure) and everything else FROZEN, pinned by `tests/python/test_frozen_pixel_label_1380.py`.
+  A `#328` `TimeoutError` inside the capture still exits 1 (outside the rule).
 - **imag without the guard.** `setup-imag.sh` installs `obs_phase2.py` next to `imag_scenes.py`.
   `_scene_guard()` accepts it as the guard only when it carries `_refuse_forbidden_scene`,
   `ForbiddenSceneError` and `NEVER_PROGRAM_SCENES`. A missing module or an older copy (a
