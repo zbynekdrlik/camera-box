@@ -8,7 +8,9 @@
 //! - the audio callback hands every channel's plane to the picker and pairs only what it returns;
 //! - no channel sum remains anywhere in the callback;
 //! - the pairing recovery, the staleness detector and the diag line read the picker;
-//! - the diag line appends the chosen channel and every channel's cluster AFTER the existing tokens.
+//! - the diag line appends the chosen channel, every channel's cluster and the switch count AFTER
+//!   the existing tokens;
+//! - a switch of the paired channel is logged when it happens (rate-limited, with a count).
 //!
 //! The dock compiles ONLY on the Windows runner, so the same checks are mirrored by the pwsh step
 //! "Assert dock decodes the marker per channel (issue 1367)" in BOTH windows-genlock workflows
@@ -102,15 +104,53 @@ fn the_diag_line_appends_the_channel_pick_after_the_existing_tokens() {
     let code = code();
     assert!(
         code.contains(
-            "locked=%s state=%s decode_dropped=%llu publish_max_us=%llu \" \"marker_channel=%zu channel_clusters=%s\""
+            "locked=%s state=%s decode_dropped=%llu publish_max_us=%llu \" \"marker_channel=%zu channel_clusters=%s channel_switches=%llu\""
         ),
         "{DOCK_OUTPUT}: the diag line must end `... publish_max_us=%llu marker_channel=%zu \
-         channel_clusters=%s` (existing tokens unchanged, the pick appended last)"
+         channel_clusters=%s channel_switches=%llu` (existing tokens unchanged, appended last)"
     );
     assert!(code.contains(
-        "(unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen, channel_clusters.c_str());"
+        "(unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen, channel_clusters.c_str(), (unsigned long long)st->cb_channel_switches);"
     ));
     assert!(code.contains(
         "const std::string channel_clusters = camerabox::cb_channel_clusters_text(st->cb_audio_dec->clusters);"
     ));
+}
+
+/// A switch of the paired channel moves the measured offset by ~10 ms (R is 10.17 ms behind L) and
+/// the offset cluster is not reset, so it must show in the OBS log when it happens, not only in the
+/// 10 s diag sample: logged at once, then at most one line per diag interval carrying how many
+/// switches it stands for, and counted on the diag line.
+#[test]
+fn a_channel_switch_is_logged_and_counted() {
+    let code = code();
+    assert!(code.contains("uint64_t cb_channel_switches = 0;"));
+    assert!(code.contains("uint64_t cb_channel_switches_unlogged = 0;"));
+    assert!(code.contains("uint64_t cb_channel_switch_last_log_ns = 0;"));
+    let body = body_of(&code, AUDIO_SIG);
+    for needle in [
+        "const size_t prev_channel = st->cb_audio_dec->chosen; const uint64_t base = st->cb_audio_pushed;",
+        "st->cb_audio_pushed += (uint64_t)nf; cb_note_channel_switch(st, prev_channel, frames);",
+    ] {
+        assert!(
+            body.contains(needle),
+            "{DOCK_OUTPUT}: the audio callback no longer has `{needle}` (issue 1367)"
+        );
+    }
+    let note = body_of(
+        &code,
+        "static void cb_note_channel_switch(struct sync_test_output *st, size_t prev, const struct audio_data *frames)",
+    );
+    for needle in [
+        "if (st->cb_audio_dec->chosen == prev) return;",
+        "st->cb_channel_switches++;",
+        "CAMERA_BOX_DIAG_LOG_INTERVAL_NS",
+        "\"av-sync-dock: marker channel %zu -> %zu (channel_clusters=%s, %llu switch(es) since the last line)\"",
+        "st->cb_channel_switches_unlogged = 0;",
+    ] {
+        assert!(
+            note.contains(needle),
+            "{DOCK_OUTPUT}: cb_note_channel_switch no longer has `{needle}` (issue 1367)"
+        );
+    }
 }

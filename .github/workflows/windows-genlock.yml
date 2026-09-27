@@ -653,11 +653,19 @@ jobs:
               Write-Error "sync-test-output.cpp: the audio callback mixes channels again ($banned) -- the stereo mbc marker is undecodable as a sum (issue 1367)"; exit 1
             }
           }
-          if ($output -notmatch [regex]::Escape('publish_max_us=%llu " "marker_channel=%zu channel_clusters=%s"')) {
-            Write-Error "sync-test-output.cpp: the diag line no longer appends marker_channel + channel_clusters after publish_max_us (issue 1367)"; exit 1
+          if ($output -notmatch [regex]::Escape('publish_max_us=%llu " "marker_channel=%zu channel_clusters=%s channel_switches=%llu"')) {
+            Write-Error "sync-test-output.cpp: the diag line no longer appends marker_channel + channel_clusters + channel_switches after publish_max_us (issue 1367)"; exit 1
           }
-          if ($output -notmatch [regex]::Escape('(unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen, channel_clusters.c_str());')) {
-            Write-Error "sync-test-output.cpp: the diag line's marker_channel / channel_clusters arguments moved or changed (issue 1367)"; exit 1
+          if ($output -notmatch [regex]::Escape('(unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen, channel_clusters.c_str(), (unsigned long long)st->cb_channel_switches);')) {
+            Write-Error "sync-test-output.cpp: the diag line's marker_channel / channel_clusters / channel_switches arguments moved or changed (issue 1367)"; exit 1
+          }
+          foreach ($need in @('const size_t prev_channel = st->cb_audio_dec->chosen;', 'cb_note_channel_switch(st, prev_channel, frames);')) {
+            if (-not $body.Contains($need)) {
+              Write-Error "sync-test-output.cpp: the audio callback no longer has '$need' -- a channel switch must be logged (issue 1367)"; exit 1
+            }
+          }
+          if ($output -notmatch [regex]::Escape('"av-sync-dock: marker channel %zu -> %zu (channel_clusters=%s, %llu switch(es) since the last line)"')) {
+            Write-Error "sync-test-output.cpp: the channel-switch log line is gone (issue 1367)"; exit 1
           }
           Write-Output "dock per-channel marker decode (issue 1367) - OK"
 
