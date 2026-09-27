@@ -53,6 +53,16 @@ late.
   arrived. The debt is then dropped in ONE whole-packet drop, and the latency is the anchored one
   again. The thread advances `nuFrame` by the dropped packets, so the receiver's own loss counter
   sees it.
+  - **A stall past the grace is therefore TWO audible splices** (review round 1). The listener
+    hears the silence, then the stalled audio played late by the silence length while the audio
+    thread catches up at its own 1.0–1.5× pace (1.2–2.9 s for a 290–600 ms stall on the logged
+    pattern), then a forward skip of exactly the silence. The episode counts one
+    `discontinuities`, the skip one `repays`.
+  - Dropping the stale audio itself as one splice (the design's "drop exactly the stale samples
+    once") would need the silence to last until the backlog covers the debt: about 5× the excess
+    at a 1.2× catch-up, and forever after a buffering hole, which never brings one. The pacer
+    instead resumes at the target depth and repays later. That trade-off was put to the main
+    session.
 - **A buffering hole has no backlog.** OBS raising its audio buffering skips ticks and delays
   everything after them. Such a debt is never repaid: nothing is discarded, and the silence IS the
   hole. It is forgiven when the next silence episode starts.
@@ -71,30 +81,51 @@ The lane's integer model and the bench use the logged callback pattern (14–21 
 
 - One mixer stall stays clean up to about 180 ms at target 64 (target + G = 164 ms; the 14 ms
   anchor reference adds the rest).
-- A 150 ms stall leaves the wire 79 ms late, so G = 80 would keep only ~1 ms of margin there.
+- A 150 ms stall leaves the wire 73–79 ms late (bench / model), so G = 80 would keep only a few
+  ms of margin there; 200 ms is the first stall that cuts a silence.
 - G = 100 covers the list's 150 ms stall and the largest non-pathological 27.9 hole (128 ms) with
   ≥ 20 ms margin. The quiet-regime worst stall (70 ms) sits far inside it.
 - The target stays 64 ms: 64 + G already covers every measured quiet-regime stall.
 
-| scenario (64 ms, worst of 4 seeds) | shipped 1372: discarded / wire gap | 1381: silence / discarded |
-|---|---|---|
-| stall 55.3 / 70 ms | 0 / 0 | 0 / 0 |
-| stall 100 ms | 79.7 / 83.2 ms | 0 / 0 |
-| stall 150 ms | 204.1 / 155.9 ms | 0 / 0 (late sends) |
-| stall 290 ms | 293.8 / 292.8 ms | 234 / 234 ms, 1 discontinuity |
-| hole 42 / 85 / 106 / 128 ms | 0 / 0–156 ms | 0 / 0 |
-| hole 490 ms | 0 / 500.1 ms | 458 / 0 ms, 1 discontinuity |
-| 27.9 hole list (6 holes, 957 ms) | 0 / 1034 ms, 5 underflows | 921 / 0 ms, 3–4 discontinuities |
+| scenario (64 ms) | shipped 1372: discarded / wire gap | 1381: silence / discarded | 1381: max wire gap |
+|---|---|---|---|
+| stall 55.3 / 70 ms | 0 / 0 | 0 / 0 | 35 ms (wake lateness) |
+| stall 100 ms | 79.7 / 83.2 ms | 0 / 0 | 35 ms |
+| stall 150 ms | 204.1 / 155.9 ms | 0 / 0 (75 late sends) | 72.8 ms |
+| stall 290 ms | 293.8 / 292.8 ms | 214 / 214 ms, 1 discontinuity + 1 repay | 119 ms |
+| hole 42 / 85 / 106 / 128 ms | 0 / 0–156 ms | 0 / 0 | 35–62 ms |
+| hole 490 ms | 0 / 500.1 ms | 463 / 0 ms, 1 discontinuity | 91 ms |
+| 27.9 hole list (6 holes, 957 ms) | 0 / 1034 ms, 5 underflows | 921 / 0 ms, 4 discontinuities | 111 ms |
+| hole 128 ms, then stall 100 ms | — | 110 / 0 ms, 1 discontinuity | 82 ms |
 
-### Known consequence: after a hole shorter than target + G the sender stays late
+The shipped column is the Python port of the 1372 header, worst of 4 seeds. The 1381 columns are
+`the_1381_scenario_table`, seed 1.
 
-A buffering hole brings no backlog and `t0` never moves. So after a hole longer than the target
-but inside the grace (85, 106, 128 ms), every later packet leaves `hole − target` behind its slot.
-Nothing is lost, but `late_sends` climbs about 200 per second, and the wire follows the audio
-thread's arrival jitter (smoothed by the 2× cap) until the next silence episode or an OBS restart.
-A `late_sends` count that climbs steadily with `silence_ms` flat means exactly this. Restoring the
-margin needs a policy decision: re-anchoring costs a silence of the target. It was reported to the
-main session as a follow-up candidate.
+"Loses nothing" means the SENDER silenced and discarded nothing. A stall inside the grace still
+reaches FOH as a wire gap of up to about `stall − 78 ms` (72.8 ms for a 150 ms stall), followed
+by a 2× catch-up. The receiver's own jitter buffer has to ride that out. How VB-Matrix on fohabl
+handles such a gap is measured by the ≥ 2 h rehearsal, not by this bench.
+
+### Known consequence: after a hole inside the grace the sender stays late
+
+A buffering hole brings no backlog and `t0` never moves.
+
+- **Which holes.** A hole longer than about target + 14 ms (78 ms at 64) but shorter than about
+  target + 14 ms + grace (178 ms). The 27.9 holes of 85, 106 and 128 ms are in that range; the
+  42 ms hole leaves nothing late.
+- **What follows.** Every later packet leaves about `hole − 78 ms` behind its slot. Nothing is
+  lost, but:
+  - `late_sends` climbs about 200 per second;
+  - the wire follows the audio thread's arrival jitter (smoothed by the 2× cap);
+  - the grace left for the next stall is only `G − (hole − 78 ms)`.
+- **Measured.** After a 128 ms hole, a 100 ms stall that a fresh schedule absorbs cuts a 110 ms
+  silence. `known_limit_after_an_in_grace_hole_the_grace_left_for_a_stall_is_smaller_1381` pins
+  this, as a RED for the fix.
+- **When it ends.** At the next silence episode (it rebuilds the target depth) or an OBS restart.
+- **On the status line.** A `late_sends` count that climbs steadily with `silence_ms` flat means
+  exactly this.
+- **Why not fixed here.** Restoring the margin needs a policy decision: re-anchoring costs a silence
+  of the target. It was reported to the main session as a follow-up candidate.
 
 ## The pieces and how they are held together
 
@@ -111,20 +142,25 @@ main session as a follow-up candidate.
     resume depth and one sample below it, the repay edge and one sample short, both ceilings and
     one over, and retargets while running, starved and silent.
   - A second test counts those boundary hits, so the gate cannot quietly go blind.
-- **Mutation proof (issue 1381).** 33 hand mutants were run on a scratch copy of the tree:
+- **Mutation proof (issue 1381).** 41 hand mutants were run on a scratch copy of the tree:
   - Rust mutants: the grace edge, the resume depth, the cap on/off/anchor, the repay condition and
-    size, the forgiveness, both ceilings, the constants and `wait_ms` rounding.
+    size, the `repays` count, the forgiveness, both ceilings, the constants, `wait_ms` rounding,
+    the late-send condition and `late_max` for silence.
   - The same mutants in the C.
   - The same mutant in BOTH C and Rust, which only the behavioural tests can kill.
-  - Wiring mutants: the frame-counter skip, the silence send, the event wait and the zero fill.
+  - Wiring mutants: the frame-counter skip, the silence send, the send order, the event wait,
+    the zero fill and the `repays=` field.
   - Every mutant was killed.
+- **The bench's wake model.** A timed wake (a deadline, or an event wait that timed out) is
+  0–30 ms late, as measured. An audio arrival ends an event wait within 0–2 ms (review round 1).
+  A 30 ms-late anchor would give the bench more margin than the real thread has.
 - The same test file pins the wiring:
   - both `windows-genlock*.yml` files build the plugin and assert the patch, including the
     `late_sends` status line and the `send_silence` call;
   - the full build stages `obs-plugins/64bit/obs-vban.dll`;
   - the thread calls the decision, sleeps to the deadline (`pacing_sleep_until`) or waits on the
     audio event (`vban_pacing_wait_ms`), zero-fills silence packets and advances `nuFrame` by the
-    dropped packets;
+    dropped packets, in the order drop and skip, audio packets, silence packets;
   - `obs-vban pacing:` appears on exactly one log line, and the retired `underflows` /
     `overflows` / `trims` / `OVERFLOW_HEADROOM` / `TRIM_WINDOW` never come back.
 - `scripts/lib/genlock-plugin-deploy.sh` runs on a FULL fleet deploy. It keeps the box's old
@@ -181,20 +217,21 @@ After a FULL-bundle deploy on resolume, read these lines in the OBS log:
 
 - `obs-vban pacing-config: target_ms=… grace_ms=100 packet_samples=… rate=… counters=reset
   stream='…'` once per output.
-- `obs-vban pacing: depth_ms=… late_sends=… discontinuities=… silence_ms=… discarded_ms=…
-  resyncs=… late_max_ms=… target_ms=… dest=<ip>:<port> stream='…'` every 10 s. The counters are
-  cumulative since the thread started; `late_max_ms` is the largest send lateness in the window.
+- `obs-vban pacing: depth_ms=… late_sends=… discontinuities=… repays=… silence_ms=…
+  discarded_ms=… resyncs=… late_max_ms=… target_ms=… dest=<ip>:<port> stream='…'` every 10 s.
+  The counters are cumulative since the thread started. `late_max_ms` is the largest lateness of
+  an AUDIO packet in the window (a silence slot is late by design and does not count).
 
 What healthy looks like:
 
-- `discontinuities`, `silence_ms`, `discarded_ms` and `resyncs` stay flat. This is the owner's
-  bar: every one of them is audible.
+- `discontinuities`, `repays`, `silence_ms`, `discarded_ms` and `resyncs` stay flat. This is the
+  owner's bar: every one of them is audible.
 - `late_sends` stays flat in the quiet regime. A step with flat `silence_ms` means an audio-thread
   stall was absorbed inside the grace. A steady climb means a buffering hole left the sender late
   (see the known consequence above).
 - `depth_ms` stays near the target, within about one audio block (21 ms).
-- After a stall's discontinuity, `discarded_ms` catches up with `silence_ms` once the backlog
-  arrives (the repay). After a buffering hole, `discarded_ms` stays behind (no backlog).
+- After a stall's discontinuity, `repays` steps and `discarded_ms` catches up with `silence_ms`
+  once the backlog arrives. After a buffering hole, `discarded_ms` stays behind (no backlog).
 - `dest=` names the receiver, so FOH and lv1 are told apart.
 
 A growing `late_max_ms` with flat `late_sends` means the send thread wakes late. Suspect the timer

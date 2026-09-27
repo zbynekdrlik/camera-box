@@ -55,8 +55,9 @@ How the paced `vban_out_loop` works:
   every following slot, on schedule, until the buffer holds the target again. One episode is one
   counted `discontinuities`.
 - **Stale repay.** Each silence packet is a debt. When the pacer is on schedule and the buffer holds
-  target + debt (the backlog arrived), the debt is dropped once, in whole packets. A buffering hole
-  has no backlog: nothing is dropped, and its debt is forgiven at the next episode.
+  target + debt (the backlog arrived), the debt is dropped once, in whole packets. The stalled
+  audio plays late until then, so the drop is a forward skip, counted as `repays`. A buffering
+  hole has no backlog: nothing is dropped, and its debt is forgiven at the next episode.
 - **Ceilings.** More than 2 s buffered, or the next slot more than 2 s overdue, is one counted
   `resyncs`: back to the target, on the grid.
 - **Retarget.** A new target while running moves the schedule later (up) or drops the difference
@@ -71,12 +72,12 @@ How the paced `vban_out_loop` works:
 
 ```
 obs-vban pacing-config: target_ms=64 grace_ms=100 packet_samples=239 rate=48000 counters=reset stream='cg'
-obs-vban pacing: depth_ms=… late_sends=… discontinuities=… silence_ms=… discarded_ms=… resyncs=… late_max_ms=… target_ms=64 dest=10.77.x.x:6980 stream='cg'
+obs-vban pacing: depth_ms=… late_sends=… discontinuities=… repays=… silence_ms=… discarded_ms=… resyncs=… late_max_ms=… target_ms=64 dest=10.77.x.x:6980 stream='cg'
 ```
 
 The second line comes every 10 s. The counters are cumulative since the thread started
-(`counters=reset`); a Send Buffer change logs `counters=kept`. `late_max_ms` is the largest send
-lateness in the window. `dest=` is the resolved receiver address and port.
+(`counters=reset`); a Send Buffer change logs `counters=kept`. `late_max_ms` is the largest
+lateness of an audio packet in the window. `dest=` is the resolved receiver address and port.
 
 ## Re-basing onto a newer upstream
 
