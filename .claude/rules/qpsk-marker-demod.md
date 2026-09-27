@@ -55,8 +55,9 @@ To render an ARBITRARY (non-marker) word in a test, both sides expose a pure `ma
 ## NEVER downmix the measurement audio — decode every channel, keep the best one (issue 1367)
 The stream program recording's `mbc` audio is STEREO and carries the SAME cam2 marker on L and R, with R
 10.17 ms (488 samples @ 48 kHz) behind L (zero-lag L/R correlation ≈ 0; measured 27.9.2026 on
-`2026-09-27 14-29-50.mp4`, release E2E run 36317806422). A 10 ms offset is ~4.4 of the marker's ten
-2.26 ms symbols at a ~150° carrier phase, so a mono SUM smears every symbol into its neighbours: on the
+`2026-09-27 14-29-50.mp4`, release E2E run 36317806422). One symbol is one 442 Hz carrier cycle
+(2.26 ms), so the copies sit ~4.5 symbols apart at ~178° carrier phase (nearly anti-phase), and a mono
+SUM smears every symbol into another: on the
 real 4 s clip the old `-ac 1` path read `preamble_screens 9212, cluster 2, crc_ok 3` → **POLLUTED**,
 while L alone read `653 / cluster 7 / crc_ok 7` and R alone `8 / cluster 8 / crc_ok 8`, both OK. The owner
 ruled the skew is not his to fix — the gate must be robust to it.
@@ -73,7 +74,12 @@ ruled the skew is not his to fix — the gate must be robust to it.
   (a known raw stride, never a downmix); the preflight's Windows-side ffmpeg keeps every channel (no
   `-ac`). The one-line JSON keeps every pre-1367 key FIRST with the chosen channel's values, then
   `channels`, `chosen_channel`, `per_channel` (keys `ch_*`, so a first-match grep can never read one);
-  the shell parse also strips `"per_channel":[...]` before it greps.
+  the shell parse also strips `"per_channel":[...]` before it greps, and the `[4b3/8]` ok/abort line
+  appends `chosen channel C of N (cluster ch0=a ch1=b)` (`marker_decodability_channel_note`). Two key
+  spellings on purpose: the grep-parsed probe line uses `ch_*`, the serde-built `--av-sync` JSON and
+  the fused block use the plain `ChannelMarkerStats` names under `audio_channel_pick.per_channel`.
+- **An empty pick means "not recorded"** (an older partial): `per_channel` is `[]` and the log line
+  reads `marker channel pick not recorded`, never a real channel 0.
 - **Which channel wins can move the offset by ~10 ms** (R arrives later than L). Carried as
   `audio_channel_pick` in the `--av-sync` JSON and the fused `all_cambox_av_sync` block — read it when
   comparing runs.
@@ -83,5 +89,13 @@ ruled the skew is not his to fix — the gate must be robust to it.
   `rustc --test` crate that `#[path]`-includes the real `qpsk_marker` / `qpsk_probe_decision` /
   `qpsk_channel_select` (serde derives sed-stripped) + the real test files, with
   `CARGO_MANIFEST_DIR` set for the fixture path; `clippy-driver --test -D warnings` on the same crate.
+- **The pick key is the longest strictly-consecutive run**, so on a long recording where both channels
+  decode, a single false decode can decide which one wins and the offset can move by ~10 ms between
+  runs. The design keeps "largest cluster, ties lowest"; a stability rule (e.g. prefer the lowest
+  channel that clears the floor) is a design question left to the main session.
+- **Not yet re-measured:** the 16.9 drowned-chain recordings were never re-run per channel (they are
+  not on dev1). Per-channel reads of two local noise-flooded stereo captures (17 s and 120 s, 18.9)
+  stayed at cluster 2, below the floor of 4.
 - **Out of scope / still mono:** the live dock (`vendor/av-sync-dock`, `st_raw_audio_camera_box`)
-  still averages all channels before its streaming decoder — the same skew hurts its lock.
+  still averages all channels before its streaming decoder, so it is exposed to the same skew (not
+  measured on the dock).
