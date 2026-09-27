@@ -123,8 +123,14 @@ fn every_buffering_line_keeps_the_786_launch_gate_text_1367() {
     let floor = s
         .find("\"genlock audio buffering floor (issue 1367): total audio buffering is now %d milliseconds")
         .expect("issue 1367: the floor line lost the `total audio buffering is now %d milliseconds` text");
+    // Squished, with the C string-literal joins removed, so a clang-format reflow cannot break it.
+    let joined = squish(&s).replace("\" \"", "");
+    assert!(
+        joined.contains("\"genlock audio buffering ABOVE the floor (issue 1367): adding %d milliseconds of audio buffering, total audio buffering is now %d milliseconds (source: %s)"),
+        "issue 1367: the above-floor line lost the #786 `total audio buffering is now %d milliseconds` text"
+    );
     let above = s
-        .find("\"genlock audio buffering ABOVE the floor (issue 1367): adding %d milliseconds of audio buffering, total \"\n\t     \"audio buffering is now %d milliseconds (source: %s)")
+        .find("\"genlock audio buffering ABOVE the floor (issue 1367)")
         .expect("issue 1367: the above-floor line lost the #786 `total ... audio buffering is now %d milliseconds` text");
     assert!(floor < above);
     assert!(
@@ -142,6 +148,38 @@ fn the_unreachable_fallback_names_the_buffering_1367() {
             && s.contains("#include \"obs-genlock-audio-buffering.h\""),
         "issue 1367: the #1355 UNREACHABLE line must name the global buffering and the floor \
          (the fallback is only a logged safety net now)"
+    );
+}
+
+#[test]
+fn the_unreachable_line_prints_total_then_floor_1367() {
+    // The format names total_audio_buffering= before floor=; the arguments must follow in that
+    // order (a swap would print the floor as the total and hide a late source).
+    let s = squish(&read(OBS_SOURCE));
+    let call = s
+        .find("UNREACHABLE after %d windows outside +/-%.0fms")
+        .expect("issue 1367: the UNREACHABLE line is gone");
+    let end = call
+        + s[call..]
+            .find(");")
+            .expect("issue 1367: the UNREACHABLE call does not end");
+    let body = &s[call..end];
+    let fmt_total = body
+        .find("total_audio_buffering=%dms")
+        .expect("total_audio_buffering=");
+    let fmt_floor = body.find("floor=%dms").expect("floor=");
+    let arg_count = body
+        .find("source->asrc.level_fallback_count,")
+        .expect("fallback count arg");
+    let arg_total = body
+        .find("(uint32_t)obs->audio.total_buffering_ticks")
+        .expect("total arg");
+    let arg_floor = body
+        .find("(uint32_t)obs->audio.floor_buffering_ticks")
+        .expect("floor arg");
+    assert!(
+        fmt_total < fmt_floor && arg_count < arg_total && arg_total < arg_floor,
+        "issue 1367: the UNREACHABLE line's total / floor arguments are out of order"
     );
 }
 
@@ -324,16 +362,16 @@ static void reset(uint32_t rate, uint32_t max_ms, bool fixed)
 }}
 
 /* One audio_callback tick at the real-time window [start, start + a tick]. The window it processes
- * is the front of buffered_timestamps: the real-time one when nothing waits, else the oldest
- * pushed window, buffered_ts - wait * tick. A source's oldest audio sits behind_ms before the
- * REAL-TIME start (0 = none behind). Then the stock tail: a waiting tick is consumed. */
+ * is the front of buffered_timestamps. audio_callback pushes the real-time window and pops one
+ * every tick, so the queue holds total_buffering_ticks windows ahead of it forever: the front is
+ * start - total * tick (while ticks wait that is also buffered_ts - wait * tick). A source's
+ * oldest audio sits behind_ms before the REAL-TIME start (0 = none behind). Then the stock
+ * tail: a waiting tick is consumed. */
 static void tick(size_t sample_rate, uint64_t start, uint64_t behind_ms, const char *buffering_name)
 {{
 	struct obs_core_audio *audio = &core;
-	const uint64_t front = audio->buffering_wait_ticks
-				      ? audio->buffered_ts - audio_frames_to_ns(sample_rate, audio->buffering_wait_ticks *
-												    AUDIO_OUTPUT_FRAMES)
-				      : start;
+	const uint64_t front =
+		start - audio_frames_to_ns(sample_rate, (uint64_t)audio->total_buffering_ticks * AUDIO_OUTPUT_FRAMES);
 	struct ts_info ts = {{front, front + audio_frames_to_ns(sample_rate, AUDIO_OUTPUT_FRAMES)}};
 	const uint64_t min_ts = behind_ms ? start - behind_ms * 1000000ULL : front;
 /* ---- lifted verbatim from obs-audio.c audio_callback ---- */
@@ -366,17 +404,21 @@ int main(void)
 	drain(48000, &t);
 	t += tick_ns;
 	tick(48000, t, 0, "-");
-	/* A source 50 ms behind: OBS's own dynamic increase above the floor, band broken. */
+	/* A source 136 ms behind real time: OBS's own dynamic increase above the floor (+3 ticks = 7 =
+	 * ceil(136 / tick), what stock OBS reaches alone), band broken. */
 	t += tick_ns;
-	tick(48000, t, 50, "mbc");
+	tick(48000, t, 136, "mbc");
 
-	/* A source 10 ms behind: one tick above the floor, band still held. */
+	/* A source 10 ms behind real time is absorbed by the floor (the property the floor exists for);
+	 * 96 ms behind adds one tick (5 = ceil(96 / tick)), band still held. */
 	reset(48000, 0, false);
 	t += tick_ns;
 	tick(48000, t, 0, "-");
 	drain(48000, &t);
 	t += tick_ns;
-	tick(48000, t, 10, "ASIO Input Capture");
+	tick(48000, t, 10, "mbc");
+	t += tick_ns;
+	tick(48000, t, 96, "ASIO Input Capture");
 
 	/* A source already behind at the FIRST tick (the stream ASIO startup race): the floor is raised
 	 * first; OBS's dynamic check runs on the next, UNDRAINED ticks against the window the floor
@@ -405,19 +447,19 @@ int main(void)
 	tick(48000, t, 0, "-");
 	drain(48000, &t);
 	t += tick_ns;
-	tick(48000, t, 30, "NDI test");
+	tick(48000, t, 116, "NDI test");
 
 	/* 44.1 kHz. */
 	reset(44100, 0, false);
 	tick(44100, t, 0, "-");
 
-	/* A maximum at the floor: nothing grows above it. */
+	/* A maximum at the floor: nothing grows above it, even for a source 136 ms behind. */
 	reset(48000, 85, false);
 	t += tick_ns;
 	tick(48000, t, 0, "-");
 	drain(48000, &t);
 	t += tick_ns;
-	tick(48000, t, 50, "mbc");
+	tick(48000, t, 136, "mbc");
 
 	/* A late source past the maximum: clamped, both loud lines. */
 	reset(48000, 150, false);
@@ -425,7 +467,7 @@ int main(void)
 	tick(48000, t, 0, "-");
 	drain(48000, &t);
 	t += tick_ns;
-	tick(48000, t, 200, "sp-slow_video");
+	tick(48000, t, 286, "sp-slow_video");
 	return 0;
 }}
 "#,
@@ -526,15 +568,16 @@ fn expected_trace() -> Vec<String> {
         floor_line(85),
         "tick total=4 wait=4 pushes=4 window_back_ms=85".into(),
         "tick total=4 wait=3 pushes=4 window_back_ms=85".into(),
-        "tick total=4 wait=0 pushes=4 window_back_ms=0".into(),
+        "tick total=4 wait=0 pushes=4 window_back_ms=85".into(),
         above(64, 149, "mbc", "BROKEN", "-58.3", BROKEN_TAIL),
-        "tick total=7 wait=3 pushes=7 window_back_ms=64".into(),
-        // 10 ms behind
+        "tick total=7 wait=3 pushes=7 window_back_ms=149".into(),
+        // 10 ms behind real time absorbed, 96 ms adds one tick
         "reset rate=48000 max_ms=0 fixed=0 -> floor=4 max=45 fixed_buffer=0".into(),
         floor_line(85),
         "tick total=4 wait=4 pushes=4 window_back_ms=85".into(),
+        "tick total=4 wait=0 pushes=4 window_back_ms=85".into(),
         above(21, 106, "ASIO Input Capture", "ok", "-15.7", ""),
-        "tick total=5 wait=1 pushes=5 window_back_ms=21".into(),
+        "tick total=5 wait=1 pushes=5 window_back_ms=106".into(),
         // late at the first tick, then undrained: 85 ms absorbed, 100 ms adds one tick
         "reset rate=48000 max_ms=0 fixed=0 -> floor=4 max=45 fixed_buffer=0".into(),
         floor_line(85),
@@ -548,7 +591,7 @@ fn expected_trace() -> Vec<String> {
         floor_line(85),
         "tick total=4 wait=4 pushes=4 window_back_ms=85".into(),
         above(42, 128, "NDI test", "BROKEN", "-37.0", BROKEN_TAIL),
-        "tick total=6 wait=2 pushes=6 window_back_ms=42".into(),
+        "tick total=6 wait=2 pushes=6 window_back_ms=127".into(),
         // 44.1 kHz
         "reset rate=44100 max_ms=0 fixed=0 -> floor=4 max=45 fixed_buffer=0".into(),
         floor_line(92),
@@ -557,14 +600,14 @@ fn expected_trace() -> Vec<String> {
         "reset rate=48000 max_ms=85 fixed=0 -> floor=4 max=4 fixed_buffer=0".into(),
         floor_line(85),
         "tick total=4 wait=4 pushes=4 window_back_ms=85".into(),
-        "tick total=4 wait=0 pushes=4 window_back_ms=0".into(),
+        "tick total=4 wait=0 pushes=4 window_back_ms=85".into(),
         // past the maximum
         "reset rate=48000 max_ms=150 fixed=0 -> floor=4 max=8 fixed_buffer=0".into(),
         floor_line(85),
         "tick total=4 wait=4 pushes=4 window_back_ms=85".into(),
         "L200 Max audio buffering reached!".into(),
         above(85, 170, "sp-slow_video", "BROKEN", "-79.7", BROKEN_TAIL),
-        "tick total=8 wait=4 pushes=8 window_back_ms=85".into(),
+        "tick total=8 wait=4 pushes=8 window_back_ms=170".into(),
     ]
 }
 
