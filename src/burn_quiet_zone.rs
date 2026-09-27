@@ -25,7 +25,10 @@
 //!
 //! [`locate_burn_box`] keeps the columns and rows whose longest near-white run reaches the lower
 //! edge of the size band ([`size_band`]) and returns the rectangle they span, when both of its
-//! sides are inside the band. A connected-component bounding box does not work here: on the
+//! sides are inside the band. The burn is square, so a clearly non-square span is cut to a square
+//! at the end where both new edges still qualify: a bright strip joined to one quiet band (light
+//! rows above the camera burn on several real fixtures) would otherwise keep that strip in the
+//! box. A connected-component bounding box does not work here: on the
 //! run-324220913 crops the box touches bright multiview pixels, and the component leaks to the crop
 //! edge at every threshold measured (the white box spans columns 24..=309, the component 0..=335).
 //!
@@ -50,6 +53,10 @@ pub const BURN_BOX_MAX_FRACTION: (u64, u64) = (21, 20);
 /// The white level of a crop is this percentile of its luma (the burn's quiet zone and light
 /// modules cover far more than the top 1 % of a slot crop that holds a burn).
 pub const WHITE_LEVEL_PERCENTILE: f64 = 0.99;
+
+/// A real burn box's column span and row span differ by a pixel or two. Spans that differ by more
+/// than the longer one divided by this (about two modules) are squared ([`square_span`]).
+pub const SQUARE_TOLERANCE_DIVISOR: u32 = 20;
 
 /// The white border added around the located box is its longer side divided by this: about four
 /// modules of the node burn: its payload encodes as a version-4 EC-H code, 41 modules wide with
@@ -131,7 +138,7 @@ pub fn locate_burn_box(
     // Longest near-white run per column (kept while scanning rows) and per row.
     let mut col_run = vec![0usize; w];
     let mut col_best = vec![0usize; w];
-    let mut rows: Vec<usize> = Vec::new();
+    let mut row_ok = vec![false; h];
     for (y, row) in luma.chunks_exact(w).enumerate() {
         let mut run = 0usize;
         let mut best = 0usize;
@@ -146,13 +153,14 @@ pub fn locate_burn_box(
                 col_run[x] = 0;
             }
         }
-        if best >= lo_len {
-            rows.push(y);
-        }
+        row_ok[y] = best >= lo_len;
     }
-    let x0 = col_best.iter().position(|&b| b >= lo_len)?;
-    let x1 = col_best.iter().rposition(|&b| b >= lo_len)?;
-    let (y0, y1) = (*rows.first()?, *rows.last()?);
+    let col_ok: Vec<bool> = col_best.iter().map(|&b| b >= lo_len).collect();
+    let x0 = col_ok.iter().position(|&q| q)?;
+    let x1 = col_ok.iter().rposition(|&q| q)?;
+    let y0 = row_ok.iter().position(|&q| q)?;
+    let y1 = row_ok.iter().rposition(|&q| q)?;
+    let ((x0, x1), (y0, y1)) = square_span((x0, x1), (y0, y1), &col_ok, &row_ok)?;
     let b = Rect {
         x: x0 as u32,
         y: y0 as u32,
@@ -161,6 +169,36 @@ pub fn locate_burn_box(
     };
     let in_band = |s: u32| (lo..=hi).contains(&s);
     (in_band(b.w) && in_band(b.h)).then_some(b)
+}
+
+/// The burn box is square, so two spans (inclusive `(first, last)` qualifying column and row)
+/// that differ by more than [`SQUARE_TOLERANCE_DIVISOR`] of the longer one are squared: the
+/// longer span is cut to the shorter one's length, anchored at whichever end gives a qualifying
+/// line at BOTH new edges (the start end first). A bright strip that joins one quiet band (the
+/// light rows above the camera burn on the burn-reframed and stream fixtures) is cut off that
+/// way. `None` when neither anchor has qualifying lines at both edges.
+fn square_span(
+    cols: (usize, usize),
+    rows: (usize, usize),
+    col_ok: &[bool],
+    row_ok: &[bool],
+) -> Option<((usize, usize), (usize, usize))> {
+    let (sw, sh) = (cols.1 - cols.0 + 1, rows.1 - rows.0 + 1);
+    let tol = sw.max(sh) / SQUARE_TOLERANCE_DIVISOR as usize;
+    if sw.abs_diff(sh) <= tol {
+        return Some((cols, rows));
+    }
+    // Cut `span` to `side` lines at the end whose two edge lines both qualify.
+    let cut = |span: (usize, usize), side: usize, ok: &[bool]| {
+        [(span.0, span.0 + side - 1), (span.1 + 1 - side, span.1)]
+            .into_iter()
+            .find(|&(a, b)| ok[a] && ok[b])
+    };
+    if sh > sw {
+        Some((cols, cut(rows, sw, row_ok)?))
+    } else {
+        Some((cut(cols, sh, col_ok)?, rows))
+    }
 }
 
 /// The white border, in px, added on every side of a located box before it is decoded.

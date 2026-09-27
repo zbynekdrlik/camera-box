@@ -219,6 +219,8 @@ pub fn tight_box_reads(
     let mut bordered = GrayImage::from_pixel(b.w + 2 * border, b.h + 2 * border, Luma([255u8]));
     let boxed = image::imageops::crop_imm(crop, b.x, b.y, b.w, b.h).to_image();
     image::imageops::replace(&mut bordered, &boxed, i64::from(border), i64::from(border));
+    // Mapped by hand, not with `reads_in_frame`: the bordered origin can lie left of or above the
+    // frame, and `LocatedPayload::in_frame` takes unsigned offsets.
     let (ox, oy) = bordered_origin(crop_rect.x, crop_rect.y, b, border);
     decode_qr_luma_all_reads(bordered)
         .into_iter()

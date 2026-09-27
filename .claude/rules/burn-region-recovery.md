@@ -86,8 +86,9 @@ The camera burn is not 320 px. `render_payload_qr(payload, 320)` builds the QR w
 modules (`qrcode`'s `max_dimensions` wins), and the burn payload encodes as a version-4 EC-H code:
 33 modules plus a 4-module quiet zone on each side, 41 in all. 320 / 41 floors to 7 px, so the
 burn is 287 px. `cam1_burn_origin` centres it at (816, 769) on 1080p. A longer payload needs
-version 5 (45 modules, still 7 px): 315 px. Every real camera-slot fixture in the repo shows the
-287 box at (24, 41) inside the 336 px crop.
+version 5 (45 modules, still 7 px): 315 px. In every real camera-slot fixture in the repo the burn
+SITS at (24, 41) inside the 336 px crop, 287 px (286 wide after the recording scale on the
+multiview frames).
 
 So the fixed camera crop (792, 728, 336 x 336) always holds a 24 px strip left of the burn and a
 41 px strip above it. Over ordinary camera picture that is harmless. When cam2 films the strih-lx
@@ -101,6 +102,11 @@ The fix, in `burn_region_passes`, after a 1x look that read no burn of the slot:
   (`slot_rect(..).w`). The quiet zone's side columns and top/bottom rows carry such runs; inside the
   code every run is broken by dark modules. It returns the span of those columns and rows when both
   sides are within 0.8-1.05 x the design side. Otherwise nothing is decoded.
+- A clearly non-square span (sides differing by more than a twentieth, about two modules) is
+  squared: the longer span is cut to the shorter one, at the end where both new edge lines still
+  qualify, else nothing is decoded. On 4 real fixtures (burn-reframed-1370 frames 355/532,
+  tear-781 stream-2099068429 frames 1399/4792) light rows above the burn join its top quiet band
+  and the raw span is 287 x 328 at (24, 0); squaring gives the 287 x 287 box at (24, 41).
 - Near-white = the midpoint between the crop's Otsu threshold and its 99th-percentile white level.
 - `tight_box_reads` copies exactly that box into a white image with a border of a tenth of its side
   (about four modules), decodes it plain then Otsu (`decode_qr_luma_all_reads`), and maps the reads
