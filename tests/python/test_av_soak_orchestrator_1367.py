@@ -642,7 +642,9 @@ def test_stop_leftovers_refuses_while_the_soak_still_runs(rig):
     env, p = rig
     _leftover_state(p, "stream")
     (p["state"] / "recording-stream").write_text(str(time.time()))
-    live = subprocess.Popen(["bash", "-c", "sleep 30", "av-soak.sh"])
+    # a stand-in whose command line names av-soak.sh, like `bash scripts/av-soak.sh --run`; the
+    # `; true` keeps bash from exec'ing sleep (which would replace that command line)
+    live = subprocess.Popen(["bash", "-c", "sleep 30; true", "av-soak.sh"])
     try:
         (p["run"] / "pid").write_text(f"{live.pid}\n")
         r = _soak(env, "--stop-leftovers", str(p["run"]))
