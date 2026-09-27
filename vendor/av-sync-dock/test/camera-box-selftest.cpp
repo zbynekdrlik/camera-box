@@ -680,9 +680,7 @@ int main()
 			seed = seed * 6364136223846793005ull + 1442695040888963407ull;
 			if ((seed >> 33) % 3 == 0) {
 				const size_t hi = i + span < last ? i + span : last;
-				window.slide(lo, hi, [&](size_t p) { return mag[p]; });
-				const size_t best = window.argmax();
-				const size_t base = window.at(best) > mag[i] ? best : i;
+				const size_t base = window.refine(i, lo, hi, [&](size_t p) { return mag[p]; });
 				size_t linear = i;
 				double bestm = mag[i];
 				for (size_t cand = lo; cand <= hi; cand++)

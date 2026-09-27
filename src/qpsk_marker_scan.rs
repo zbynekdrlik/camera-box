@@ -120,6 +120,24 @@ impl RefineWindow {
     fn argmax(&self) -> usize {
         self.q[self.head % self.q.len()]
     }
+
+    /// The refine for the screen position `i`: slide to `[from, to]` (which holds `i`) and return
+    /// the position of the maximum magnitude, `i` itself on a tie, else the leftmost maximum.
+    fn refine(
+        &mut self,
+        i: usize,
+        from: usize,
+        to: usize,
+        magnitude: impl Fn(usize) -> f64,
+    ) -> usize {
+        self.slide(from, to, magnitude);
+        let best = self.argmax();
+        if self.at(best) > self.at(i) {
+            best
+        } else {
+            i
+        }
+    }
 }
 
 /// Detect QPSK markers in mono f32 audio, screening positions from `start` on (issue 1381: the ONE
@@ -217,9 +235,7 @@ pub fn scan_markers(samples: &[f32], p: &AudioParams, threshold: f64, start: usi
             }
             // The max magnitude over [i-4, i+span] (a candidate past `last` cannot hold a whole
             // marker); i itself wins a tie, else the leftmost maximum.
-            window.slide(lo, hi, magnitude);
-            let best = window.argmax();
-            let base = if window.at(best) > mag_i { best } else { i };
+            let base = window.refine(i, lo, hi, magnitude);
             // Rotate the preamble reference by −45° (× (1,−1)) so the on-axis symbol constellation
             // becomes diagonal (±0.5, ±0.5); then sign-of-real and sign-of-imag are each a robust
             // bit, tolerant of the ~45° phasor rotation the single-cycle edge taper introduces at
@@ -297,9 +313,7 @@ mod tests {
             assert_eq!(window.at(i), mag[i], "position {i}");
             if next() % 3 == 0 {
                 let hi = (i + span).min(last);
-                window.slide(lo, hi, |p| mag[p]);
-                let best = window.argmax();
-                let base = if window.at(best) > mag[i] { best } else { i };
+                let base = window.refine(i, lo, hi, |p| mag[p]);
                 assert_eq!(base, linear_refine(&mag, i, lo, hi), "refine at {i}");
                 refines += 1;
                 if next() % 97 == 0 {

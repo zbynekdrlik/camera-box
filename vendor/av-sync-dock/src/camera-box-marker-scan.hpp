@@ -129,6 +129,14 @@ struct CbRefineWindow {
 	double at(size_t p) const { return mag[p % mag.size()]; }
 	/* The leftmost position holding the maximum of [lo, hi). */
 	size_t argmax() const { return q[head % q.size()]; }
+	/* The refine for the screen position `i`: slide to [from, to] (which holds `i`) and return the
+	 * position of the maximum magnitude, `i` itself on a tie, else the leftmost maximum. */
+	template<typename F> size_t refine(size_t i, size_t from, size_t to, F magnitude)
+	{
+		slide(from, to, magnitude);
+		const size_t best = argmax();
+		return at(best) > at(i) ? best : i;
+	}
 };
 
 /* issue 1381 -- the buffers one decoder reuses across scans, so a push allocates nothing once they
@@ -137,7 +145,7 @@ struct CbScanWorkspace {
 	double w = 0.0; // the carrier angle the table holds
 	std::vector<double> cosv, sinv;
 	std::vector<double> pc, ps, pe;
-	CbRefineWindow refine;
+	CbRefineWindow window;
 
 	void build_carrier(size_t n, uint32_t sample_rate, uint32_t carrier_hz)
 	{
@@ -259,13 +267,13 @@ inline void cb_scan_markers(const float *samples, size_t n, uint32_t sample_rate
 	 * refine searches the whole preamble span (+ a few back) for the max preamble magnitude. */
 	const size_t span = (size_t)std::ceil(2.0 * sps);
 	const size_t last = n - sig_len; // the last position a marker can start at
-	W.refine.reset(span + 8);
+	W.window.reset(span + 8);
 	bool resume_set = false;
 	size_t i = start;
 	while (i + sig_len <= n) {
 		const size_t lo = i >= 4 ? i - 4 : 0;
-		W.refine.slide(lo, i, magnitude);
-		const double mag_i = W.refine.at(i);
+		W.window.slide(lo, i, magnitude);
+		const double mag_i = W.window.at(i);
 		if (mag_i / norm_at(i) >= threshold) {
 			out.stats.preamble_screens_passed++;
 			const size_t hi = i + span < last ? i + span : last;
@@ -275,9 +283,7 @@ inline void cb_scan_markers(const float *samples, size_t n, uint32_t sample_rate
 			}
 			/* The refine: the max magnitude over [i-4, i+span] (candidates past `last` cannot
 			 * hold a whole marker); i itself wins a tie, else the leftmost maximum. */
-			W.refine.slide(lo, hi, magnitude);
-			const size_t best = W.refine.argmax();
-			const size_t base = W.refine.at(best) > mag_i ? best : i;
+			const size_t base = W.window.refine(i, lo, hi, magnitude);
 			cd refp = preamble(base) * cd(1.0, -1.0);
 			uint32_t word = 0;
 			for (uint32_t k = 0; k < CB_N_SYMBOLS; k++) {
