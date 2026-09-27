@@ -334,6 +334,27 @@ def test_restore_puts_the_original_back_twins_first_and_verifies_after_the_tick(
     assert _settle_gap(f) >= op._SETTLE_MIN_S > 0
 
 
+def test_twin_restore_values_let_the_lockdown_own_a_genlocked_bandwidth():
+    assert roles.twin_restore_values({"genlock_fifo": True, "ndi_bw_mode": 1}) == roles.TWIN_ON_WIRE
+    # a genlocked original with any other recorded bandwidth could never read back (the lockdown
+    # pins LOWEST): it is restored as TWIN_ON_WIRE
+    assert roles.twin_restore_values({"genlock_fifo": True, "ndi_bw_mode": 0}) == roles.TWIN_ON_WIRE
+    assert roles.twin_restore_values({}) == roles.TWIN_ON_WIRE
+    assert roles.twin_restore_values({"genlock_fifo": False, "ndi_bw_mode": 0}) == \
+        {"genlock_fifo": False, "ndi_bw_mode": 0}
+
+
+def test_restore_of_a_hand_edited_original_still_lands(fake, tmp_path):
+    f = fake(_rig(**{"MV NDI cam1": dict(TWIN_ON_WIRE, genlock_fifo=False, ndi_bw_mode=2)}))
+    sf = tmp_path / "hold.json"
+    sf.write_text(json.dumps({"connect_on_show": [],
+                              "twins": {"MV NDI cam1": {"genlock_fifo": True, "ndi_bw_mode": 0}}}))
+    restored, failed = op.connect_on_show_restore(None, str(sf))
+    assert restored == ["MV NDI cam1"] and failed == []
+    assert _twin(f, "MV NDI cam1")["genlock_fifo"] is True and _twin(f, "MV NDI cam1")["ndi_bw_mode"] == 1
+    assert not sf.exists()
+
+
 def test_restore_keeps_the_state_file_when_a_twin_does_not_settle(fake, tmp_path):
     f = fake()
     sf = tmp_path / "hold.json"
