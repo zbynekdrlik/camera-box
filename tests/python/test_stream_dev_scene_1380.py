@@ -37,6 +37,20 @@ sys.modules["obs_phase2_dev_scene_1380"] = obs_phase2
 _spec.loader.exec_module(obs_phase2)
 
 _WRITE_PREFIXES = ("Create", "Set", "Remove", "Duplicate")
+_SDS_PATH = _ROOT / "scripts" / "stream_dev_scene.py"
+_SDS = {}
+
+
+def _sds():
+    """review round 2: the seeder + the Studio Mode preview logic live in their own pure module
+    (scripts/stream_dev_scene.py, rpc injected); obs_phase2.py keeps only the CLI wiring."""
+    if "m" not in _SDS:
+        spec = importlib.util.spec_from_file_location("stream_dev_scene_1380", _SDS_PATH)
+        mod = importlib.util.module_from_spec(spec)
+        sys.modules["stream_dev_scene_1380"] = mod
+        spec.loader.exec_module(mod)
+        _SDS["m"] = mod
+    return _SDS["m"]
 
 
 class FakeWS:
@@ -65,11 +79,14 @@ _PRO_ITEMS = [
 ]
 
 
-def _fake_obs(scenes, items_by_scene, program="PRO", studio=False, preview="PRE"):
+def _fake_obs(scenes, items_by_scene, program="PRO", studio=False, preview="PRE",
+              swap_reads=None):
     """A fake `_rpc` over an in-memory OBS: scene list + per-scene items, program, Studio Mode +
-    preview. Records every call."""
+    preview. Records every call. `swap_reads` models OBS's Studio Mode SWAP (default on,
+    OBSApp.cpp SwapScenesMode): a program change queues the OLD program for the preview, applied
+    when the transition ends -- here, just before the `swap_reads`-th later preview read."""
     state = {"scenes": list(scenes), "items": {k: list(v) for k, v in items_by_scene.items()},
-             "program": program, "studio": studio, "preview": preview}
+             "program": program, "studio": studio, "preview": preview, "pending": None}
     calls = []
 
     def fake_rpc(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
@@ -93,11 +110,18 @@ def _fake_obs(scenes, items_by_scene, program="PRO", studio=False, preview="PRE"
         if rtype == "GetCurrentProgramScene":
             return {"currentProgramSceneName": state["program"]}
         if rtype == "SetCurrentProgramScene":
+            if state["studio"] and swap_reads is not None:
+                state["pending"] = [state["program"], swap_reads]
             state["program"] = rdata["sceneName"]
             return {}
         if rtype == "GetStudioModeEnabled":
             return {"studioModeEnabled": state["studio"]}
         if rtype == "GetCurrentPreviewScene":
+            if state["pending"] is not None:
+                state["pending"][1] -= 1
+                if state["pending"][1] <= 0:
+                    state["preview"] = state["pending"][0]
+                    state["pending"] = None
             return {"currentPreviewSceneName": state["preview"]}
         if rtype == "SetCurrentPreviewScene":
             state["preview"] = rdata["sceneName"]
@@ -116,18 +140,18 @@ def _writes(calls):
 # --- the pure decision ---------------------------------------------------------------------------
 
 def test_plan_creates_the_scene_and_the_nested_item_when_the_scene_is_missing():
-    plan = obs_phase2.dev_scene_plan(["PRO", "POST", "PRE"], None, "Development", "PRO")
+    plan = _sds().dev_scene_plan(["PRO", "POST", "PRE"], None, "Development", "PRO")
     assert plan.actions == ["create_scene", "add_nested"]
     assert plan.nested_hidden is False
 
 
 def test_plan_adds_only_the_nested_item_when_the_scene_exists_without_it():
-    plan = obs_phase2.dev_scene_plan(["PRO", "Development"], [], "Development", "PRO")
+    plan = _sds().dev_scene_plan(["PRO", "Development"], [], "Development", "PRO")
     assert plan.actions == ["add_nested"]
 
 
 def test_plan_is_a_noop_when_the_scene_already_nests_the_production_scene():
-    plan = obs_phase2.dev_scene_plan(
+    plan = _sds().dev_scene_plan(
         ["PRO", "POST", "Development", "PRE"], [_nested_item()], "Development", "PRO")
     assert plan.actions == []
     assert plan.nested_hidden is False
@@ -136,7 +160,7 @@ def test_plan_is_a_noop_when_the_scene_already_nests_the_production_scene():
 def test_plan_never_touches_an_operator_hidden_nested_item_but_reports_it():
     # Operator-wins: a hidden PRO item is the operator's choice -- no write, but it is reported so
     # the caller can say why the development program would render black.
-    plan = obs_phase2.dev_scene_plan(
+    plan = _sds().dev_scene_plan(
         ["PRO", "Development"], [_nested_item(enabled=False)], "Development", "PRO")
     assert plan.actions == []
     assert plan.nested_hidden is True
@@ -144,25 +168,25 @@ def test_plan_never_touches_an_operator_hidden_nested_item_but_reports_it():
 
 def test_plan_keeps_extra_operator_items_untouched():
     items = [_input_item("timer", "text_ft2_source_v2"), _nested_item()]
-    plan = obs_phase2.dev_scene_plan(["PRO", "Development"], items, "Development", "PRO")
+    plan = _sds().dev_scene_plan(["PRO", "Development"], items, "Development", "PRO")
     assert plan.actions == []
 
 
 def test_plan_fails_loud_when_the_production_scene_is_missing():
-    with pytest.raises(obs_phase2.DevSceneError, match="PRO"):
-        obs_phase2.dev_scene_plan(["POST", "PRE"], None, "Development", "PRO")
+    with pytest.raises(_sds().DevSceneError, match="PRO"):
+        _sds().dev_scene_plan(["POST", "PRE"], None, "Development", "PRO")
 
 
 def test_plan_refuses_a_development_scene_equal_to_the_production_scene():
-    with pytest.raises(obs_phase2.DevSceneError):
-        obs_phase2.dev_scene_plan(["PRO"], [], "PRO", "PRO")
+    with pytest.raises(_sds().DevSceneError):
+        _sds().dev_scene_plan(["PRO"], [], "PRO", "PRO")
 
 
 def test_plan_refuses_empty_scene_names():
-    with pytest.raises(obs_phase2.DevSceneError):
-        obs_phase2.dev_scene_plan(["PRO"], None, "", "PRO")
-    with pytest.raises(obs_phase2.DevSceneError):
-        obs_phase2.dev_scene_plan(["PRO"], None, "Development", "")
+    with pytest.raises(_sds().DevSceneError):
+        _sds().dev_scene_plan(["PRO"], None, "", "PRO")
+    with pytest.raises(_sds().DevSceneError):
+        _sds().dev_scene_plan(["PRO"], None, "Development", "")
 
 
 # --- ensure_dev_scene over a fake OBS ------------------------------------------------------------
@@ -170,16 +194,14 @@ def test_plan_refuses_empty_scene_names():
 def test_ensure_is_a_noop_on_the_live_27_9_state(monkeypatch):
     fake, calls, _ = _fake_obs(["PRO", "POST", "Development", "PRE"],
                                {"PRO": _PRO_ITEMS, "Development": [_nested_item()]})
-    monkeypatch.setattr(obs_phase2, "_rpc", fake)
-    plan = obs_phase2.ensure_dev_scene(FakeWS(), "Development", "PRO")
+    plan = _sds().ensure_dev_scene(fake, FakeWS(), "Development", "PRO")
     assert plan.actions == []
     assert _writes(calls) == []
 
 
 def test_ensure_creates_the_scene_and_nests_pro_writing_only_to_development(monkeypatch):
     fake, calls, state = _fake_obs(["PRO", "POST", "PRE"], {"PRO": _PRO_ITEMS})
-    monkeypatch.setattr(obs_phase2, "_rpc", fake)
-    plan = obs_phase2.ensure_dev_scene(FakeWS(), "Development", "PRO")
+    plan = _sds().ensure_dev_scene(fake, FakeWS(), "Development", "PRO")
     assert plan.actions == ["create_scene", "add_nested"]
     writes = _writes(calls)
     assert [w["op"] for w in writes] == ["CreateScene", "CreateSceneItem"]
@@ -193,16 +215,14 @@ def test_ensure_creates_the_scene_and_nests_pro_writing_only_to_development(monk
 
 def test_ensure_never_reads_or_writes_items_of_the_production_scene(monkeypatch):
     fake, calls, _ = _fake_obs(["PRO", "Development"], {"PRO": _PRO_ITEMS, "Development": []})
-    monkeypatch.setattr(obs_phase2, "_rpc", fake)
-    obs_phase2.ensure_dev_scene(FakeWS(), "Development", "PRO")
+    _sds().ensure_dev_scene(fake, FakeWS(), "Development", "PRO")
     assert not any(c["data"].get("sceneName") == "PRO" for c in calls)
 
 
 def test_ensure_fails_loud_without_any_write_when_pro_is_missing(monkeypatch):
     fake, calls, _ = _fake_obs(["POST", "PRE"], {})
-    monkeypatch.setattr(obs_phase2, "_rpc", fake)
-    with pytest.raises(obs_phase2.DevSceneError):
-        obs_phase2.ensure_dev_scene(FakeWS(), "Development", "PRO")
+    with pytest.raises(_sds().DevSceneError):
+        _sds().ensure_dev_scene(fake, FakeWS(), "Development", "PRO")
     assert _writes(calls) == []
 
 
@@ -242,9 +262,17 @@ def _lib_default(name):
 
 
 def test_python_defaults_match_the_bash_lib_defaults():
-    assert obs_phase2.STREAM_DEV_SCENE == _lib_default("STREAM_DEV_SCENE_DEFAULT") == "Development"
-    assert obs_phase2.STREAM_PRODUCTION_SCENE == _lib_default(
+    assert _sds().STREAM_DEV_SCENE == _lib_default("STREAM_DEV_SCENE_DEFAULT") == "Development"
+    assert _sds().STREAM_PRODUCTION_SCENE == _lib_default(
         "STREAM_PRODUCTION_SCENE_DEFAULT") == "PRO"
+
+
+def test_obs_phase2_holds_no_copy_of_the_seeder():
+    # One home for the seeder + the preview logic; obs_phase2.py only wires the CLI (file size).
+    src = _MOD_PATH.read_text()
+    for name in ("def dev_scene_plan", "class DevSceneError", "def ensure_dev_scene",
+                 "def _stale_preview_target", "STREAM_PRODUCTION_SCENE = "):
+        assert name not in src, name
 
 
 # --- switch: skip when already on target, optional --min-mean -----------------------------------
@@ -352,6 +380,7 @@ def test_switch_moves_a_stale_development_preview_to_the_target(monkeypatch):
     # must never put the development scene back on program.
     fake, calls, state = _fake_obs(["PRO", "Development"], {}, program="Development",
                                    studio=True, preview="Development")
+    monkeypatch.setattr(obs_phase2, "PREVIEW_SWAP_MARGIN_S", 0.0)
     monkeypatch.setattr(obs_phase2, "_rpc", fake)
     monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
     _spy_nonblack(monkeypatch, {})
@@ -364,6 +393,7 @@ def test_switch_moves_a_stale_development_preview_to_the_target(monkeypatch):
 def test_switch_leaves_an_operator_preview_alone(monkeypatch):
     fake, calls, state = _fake_obs(["PRO", "PRE", "Development"], {}, program="Development",
                                    studio=True, preview="PRE")
+    monkeypatch.setattr(obs_phase2, "PREVIEW_SWAP_MARGIN_S", 0.0)
     monkeypatch.setattr(obs_phase2, "_rpc", fake)
     monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
     _spy_nonblack(monkeypatch, {})
@@ -372,8 +402,67 @@ def test_switch_leaves_an_operator_preview_alone(monkeypatch):
     assert not any(c["op"] == "SetCurrentPreviewScene" for c in calls)
 
 
+def test_preview_reassert_waits_out_the_studio_mode_swap():
+    # The real post-TEST state: program Development, preview PRO. EVENT's cut to PRO makes OBS put
+    # Development into the preview when the transition ENDS -- after a one-shot check would run.
+    fake, calls, state = _fake_obs(["PRO", "Development"], {}, program="Development",
+                                   studio=True, preview="PRO", swap_reads=3)
+    fake(None, "SetCurrentProgramScene", {"sceneName": "PRO"})
+    clock = [0.0]
+
+    def sleep(dt):
+        clock[0] += dt
+
+    moved = _sds().reassert_stale_preview(fake, FakeWS(), "Development", "PRO", window_s=1.0,
+                                          poll_s=0.25, sleep=sleep, now=lambda: clock[0])
+    assert state["preview"] == "PRO"
+    assert moved == 1
+    assert [c["data"] for c in calls if c["op"] == "SetCurrentPreviewScene"] == [
+        {"sceneName": "PRO"}]
+
+
+def test_preview_reassert_is_bounded_and_idle_outside_studio_mode():
+    fake, calls, _ = _fake_obs(["PRO", "Development"], {}, program="PRO", studio=False)
+    moved = _sds().reassert_stale_preview(fake, FakeWS(), "Development", "PRO", window_s=5.0,
+                                          poll_s=0.25, sleep=lambda dt: None, now=lambda: 0.0)
+    assert moved == 0
+    assert not any(c["op"] == "GetCurrentPreviewScene" for c in calls)
+
+
+def test_switch_fixes_the_preview_after_the_studio_mode_swap(monkeypatch):
+    fake, calls, state = _fake_obs(["PRO", "Development"], {}, program="Development",
+                                   studio=True, preview="PRO", swap_reads=2)
+    monkeypatch.setattr(obs_phase2, "_rpc", fake)
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    monkeypatch.setattr(obs_phase2, "PREVIEW_SWAP_MARGIN_S", 0.2)
+    monkeypatch.setattr(obs_phase2, "PREVIEW_POLL_S", 0.01)
+    _spy_nonblack(monkeypatch, {})
+    obs_phase2.switch(_switch_args("PRO", replace_preview="Development"))
+    # The transition has ended by now: any swap still queued lands on these reads.
+    for _ in range(3):
+        fake(None, "GetCurrentPreviewScene")
+    assert state["program"] == "PRO"
+    assert state["pending"] is None
+    assert state["preview"] == "PRO"
+
+
+def test_switch_transport_failure_still_fails_under_black_report_only(monkeypatch):
+    fake, _, _ = _fake_obs(["PRO"], {}, program="Development")
+
+    def failing(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+        if rtype == "SetCurrentProgramScene":
+            raise TimeoutError("obs-websocket request 'SetCurrentProgramScene' got no response")
+        return fake(ws, rtype, rdata, ignore_err, timeout_s)
+
+    monkeypatch.setattr(obs_phase2, "_rpc", failing)
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    _spy_nonblack(monkeypatch, {})
+    with pytest.raises(TimeoutError):
+        obs_phase2.switch(_switch_args("PRO", prod_floor=True, black_report_only=True))
+
+
 def test_stale_preview_decision_is_pure():
-    f = obs_phase2._stale_preview_target
+    f = _sds().stale_preview_target
     assert f(True, "Development", "Development", "PRO") == "PRO"
     assert f(True, "PRE", "Development", "PRO") is None
     assert f(False, "Development", "Development", "PRO") is None
@@ -424,6 +513,15 @@ def test_rendered_input_returns_none_for_an_empty_nested_scene():
 def test_rendered_input_stops_on_a_nesting_cycle():
     items = {"A": [_nested_item("B")], "B": [_nested_item("A")]}
     assert obs_phase2._resolve_rendered_input(_fetch(items), "A") is None
+
+
+def test_rendered_input_strih_shaped_nested_first_item_resolves_the_camera_input():
+    # The descent also applies to strih (rig-mode gap 3) and imag (the issue-1204 cross-check): a
+    # program scene whose first enabled item is a nested scene now resolves the real camera input
+    # instead of the nested scene's name.
+    items = {"Cam 1": [_input_item("ASIO zvuk", "asio_input_capture"), _nested_item("Cam 1 base")],
+             "Cam 1 base": [_input_item("NDI cam1", "ndi_source")]}
+    assert obs_phase2._resolve_rendered_input(_fetch(items), "Cam 1") == "NDI cam1"
 
 
 def test_rendered_input_reads_a_group_through_the_group_item_list():

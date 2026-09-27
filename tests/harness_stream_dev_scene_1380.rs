@@ -105,6 +105,17 @@ fn rig_mode_test_seeds_then_switches_to_the_development_scene() {
         .expect("verify_stream_program_dev must switch the stream program to $STREAM_PROG_SCENE");
     assert!(seed < switch, "the seeder must run before the switch");
     assert!(body.contains("\"$STREAM_EVENT_SCENE\""));
+    // The development program is production content (the prod scene nested), so gap 2 and the
+    // park prove it with the SAME #677 floor prod-scene uses, not the #312 bright-QR floor.
+    assert!(
+        body.contains("--prod-floor"),
+        "gap 2 must use the prod floor: {body}"
+    );
+    let park = fn_body(&s, "park_stream_program_dev");
+    assert!(
+        park.contains("--prod-floor"),
+        "the park must use the prod floor: {park}"
+    );
 }
 
 #[test]
