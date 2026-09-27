@@ -467,7 +467,11 @@ fn known_limit_after_an_in_grace_hole_the_grace_left_for_a_stall_is_smaller_1381
     for seed in 1..=4u64 {
         let (fresh, _) = scenario(seed, &[(EVENT_BLOCK + 2_000, 100 * MS)], &[]);
         assert_eq!(fresh.silence_samples, 0, "seed {seed}: fresh schedule");
-        let (p, sim) = scenario(seed, &[(EVENT_BLOCK + 2_000, 100 * MS)], &[(EVENT_BLOCK, 6)]);
+        let (p, sim) = scenario(
+            seed,
+            &[(EVENT_BLOCK + 2_000, 100 * MS)],
+            &[(EVENT_BLOCK, 6)],
+        );
         let what = format!("128 ms hole then a 100 ms stall, seed {seed}");
         assert_accounted(&p, &sim, &what);
         assert_eq!(p.discontinuities, 1, "{what}");
