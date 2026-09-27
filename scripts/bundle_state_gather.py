@@ -1160,6 +1160,10 @@ VBAN_LOSS_WINDOW_S = 660
 # or a forward wall-clock step. Those lines only seed what is known.
 VBAN_BASELINE_S = 20.5
 VBAN_PREDECESSOR_SCAN = 64   # a loss is measured against the most recently seen tuples only
+# One sender logs every >= 10.0 s. Two lines of one destination+stream key closer than this come
+# from several senders (two hosts resolving to one receiver), so that key falls back to the
+# identity-less tuple method.
+VBAN_MULTI_SENDER_GAP_S = 8.0
 
 
 def _file_order_elapsed(ts_values):
@@ -1228,16 +1232,18 @@ def audio_mixer_from_log(text, tail=None):
 
 def _vban_vector(fields):
     """A pacing line's `(key, loss vector, n_event_counters, has_ms, one_output)` or None for a line
-    of neither format. The key is the destination (fixed-timeline line, `one_output` True: a key is
-    exactly one sender) or `stream=<name>` (shipped line, which names no destination). The vector is
-    the event counters then the ms counters."""
+    of neither format. The key is `<dest>/<stream>` on the fixed-timeline line (`one_output` True:
+    presumed one sender, checked by `_VbanKey`; a VBAN receiver port takes many streams, so the
+    destination alone is not a sender) or `stream=<name>` on the shipped line, which names no
+    destination. The vector is the event counters then the ms counters."""
     stream = fields.get("stream", "").strip("'")
     try:
         if "discontinuities" in fields:
             vec = tuple(int(fields[k]) for k in VBAN_LOSS_EVENTS) + tuple(
                 float(fields[k]) for k in VBAN_LOSS_MS)
             dest = fields.get("dest")
-            return (dest or f"stream={stream}", vec, len(VBAN_LOSS_EVENTS), True, bool(dest))
+            key = f"{dest}/{stream}" if dest else f"stream={stream}"
+            return (key, vec, len(VBAN_LOSS_EVENTS), True, bool(dest))
         if "underflows" in fields:
             vec = tuple(int(fields[k]) for k in VBAN_LEGACY_LOSS_EVENTS)
             return (f"stream={stream}", vec, len(VBAN_LEGACY_LOSS_EVENTS), False, False)
@@ -1270,35 +1276,67 @@ def _vban_increment(vec, seen, n_events):
 
 class _VbanKey:
     """The loss state of one pacer key."""
-    __slots__ = ("one_output", "has_ms", "first", "prev", "seen", "events", "loss_ms")
+    __slots__ = ("one_output", "has_ms", "first", "prev", "last_pos", "history", "seen", "events",
+                 "loss_ms")
 
     def __init__(self, one_output, has_ms, pos):
         self.one_output = one_output
         self.has_ms = has_ms
         self.first = pos
-        self.prev = None          # one-output key: the previous line's vector
-        self.seen = {}            # legacy key: distinct tuples in last-seen order (dict order)
+        self.prev = None          # one-sender key: the previous line's vector
+        self.last_pos = None      # one-sender key: the previous line's position
+        self.history = []         # one-sender key: its lines, replayed if it proves multi-sender
+        self.seen = {}            # tuple method: distinct tuples in last-seen order (dict order)
         self.events = 0
         self.loss_ms = 0.0
+
+    def _add(self, inc):
+        self.events += inc[0]
+        self.loss_ms += inc[1]
 
     def feed(self, vec, n_events, pos, counts):
         """One status line; `counts` = it lies inside the loss window."""
         if self.one_output:
-            prev, self.prev = self.prev, vec
-            if prev is None or len(prev) != len(vec) or any(n < o for n, o in zip(vec, prev)):
-                return            # first line, or a restart: a new baseline
-            inc = _vban_growth(vec, prev, n_events)
-        else:
-            if vec in self.seen:
-                self.seen[vec] = self.seen.pop(vec)   # move to the end: last-seen order
+            if self.last_pos is not None and pos - self.last_pos < VBAN_MULTI_SENDER_GAP_S:
+                self._become_multi_sender()
+            else:
+                self._feed_one_sender(vec, n_events, pos, counts)
                 return
-            inc = None
-            if counts and pos - self.first > VBAN_BASELINE_S:
-                inc = _vban_increment(vec, list(self.seen), n_events)
-            self.seen[vec] = True
-        if counts and inc is not None:
-            self.events += inc[0]
-            self.loss_ms += inc[1]
+        self._feed_tuple(vec, n_events, pos, counts)
+
+    def _feed_one_sender(self, vec, n_events, pos, counts):
+        """The plain delta against this sender's previous line. A counter that went DOWN is a sender
+        restart: the new thread started at 0, so its counts are losses since the restart."""
+        self.history.append((vec, n_events, pos, counts))
+        self.last_pos = pos
+        prev, self.prev = self.prev, vec
+        if prev is None or len(prev) != len(vec):
+            return
+        if any(n < o for n, o in zip(vec, prev)):
+            prev = tuple(0 for _ in vec)
+        if counts:
+            self._add(_vban_growth(vec, prev, n_events))
+
+    def _become_multi_sender(self):
+        """Two lines of this key closer than one logging period: several senders share it. Forget
+        the per-line deltas and replay the key's lines through the tuple method."""
+        self.one_output = False
+        self.events, self.loss_ms = 0, 0.0
+        history, self.history = self.history, []
+        for vec, n_events, pos, counts in history:
+            self._feed_tuple(vec, n_events, pos, counts)
+
+    def _feed_tuple(self, vec, n_events, pos, counts):
+        """The identity-less method: a loss is a tuple never seen before that dominates one seen
+        earlier; the key's first VBAN_BASELINE_S only seed."""
+        if vec in self.seen:
+            self.seen[vec] = self.seen.pop(vec)   # move to the end: last-seen order
+            return
+        if counts and pos - self.first > VBAN_BASELINE_S:
+            inc = _vban_increment(vec, list(self.seen), n_events)
+            if inc is not None:
+                self._add(inc)
+        self.seen[vec] = True
 
 
 def vban_pacer_loss_from_log(text, window_s=VBAN_LOSS_WINDOW_S, tail=None):
@@ -1310,8 +1348,14 @@ def vban_pacer_loss_from_log(text, window_s=VBAN_LOSS_WINDOW_S, tail=None):
     silence_ms + discarded_ms as `loss_ms`). The worst key is reported (events first, then ms);
     `loss_ms` is `""` when that key's line carries no ms counters (the shipped format).
 
-    - **A `dest=` key is exactly one sender**: its loss is the plain delta against its own previous
-      line; a counter that went DOWN is a restart and starts a new baseline. Exact.
+    - **A `dest=` line is keyed on destination + stream** (a VBAN receiver port takes many streams)
+      and presumed to be one sender: its loss is the plain delta against the key's previous line,
+      and a counter that went DOWN is a sender restart whose new counts (the thread starts at 0)
+      are losses since the restart. The premise is CHECKED: two lines of the key closer than
+      VBAN_MULTI_SENDER_GAP_S (one sender logs every >= 10 s) mean several senders share it (two
+      hosts resolving to one PC), and the key is replayed through the tuple method below. Never
+      an over-count; a loss hidden inside a restart (the old thread's last counts before it
+      stopped logging) may be missed.
     - **The shipped line names no destination**, and the two resolume outputs print identical-looking
       lines, so an output's identity cannot be recovered. The counters only grow on a loss, so a loss
       is a tuple NEVER SEEN BEFORE for that key that dominates one seen earlier, counted by how much
@@ -1322,8 +1366,9 @@ def vban_pacer_loss_from_log(text, window_s=VBAN_LOSS_WINDOW_S, tail=None):
       other output's current counters) is not counted, and a step's size is taken from the nearest
       dominated tuple, which may be the other output's. So the count can be LOWER than the true
       growth: a sustained fault still pages, an isolated single step onto the other output's value
-      does not. Only a second output whose first line in the tail comes more than two periods
-      after the first reads its counter gap as a loss once.
+      does not. The only over-count: a second output whose first line in the tail comes more than
+      two periods after the first reads its counter gap as a loss once (the same holds for a
+      multi-sender dest= key, which uses this method).
     `age_s` is the newest status line's in-log age. `tail` = a precomputed
     `timestamped_tail_lines(text)`."""
     stamped, head = tail if tail is not None else timestamped_tail_lines(text)

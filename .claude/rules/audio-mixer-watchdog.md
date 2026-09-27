@@ -60,9 +60,16 @@ survives the 2-pass confirm, the render-freeze freshness shape). Stateless on th
   **`late_sends` is NOT a loss** — late but complete audio, and it climbs ~200/s after an in-grace
   buffering hole (the pacer rule's known consequence). Counting it would page every growth step of
   resolume's legitimate 85 → 362 ms buffering.
-- **A `dest=` key (the fixed-timeline line) is exactly one sender:** its loss is the plain delta
-  against its own previous line; a counter that went down is a restart and starts a new
-  baseline. Exact, and it counts from the key's second line.
+- **A `dest=` line (the fixed-timeline pacer) is keyed on destination + stream**
+  (`10.77.7.106:6980/cg`): a VBAN receiver port takes many streams, so a destination alone is not
+  a sender (review round 3: two clean senders to one port read 160 events). The key is presumed
+  one sender: its loss is the plain delta against its previous line, counted from the key's
+  second line, and a counter that went down is a sender restart whose new counts (the thread
+  starts at 0) are losses since the restart. The premise is CHECKED: two lines of the key
+  closer than `VBAN_MULTI_SENDER_GAP_S` (8 s; one sender logs every >= 10 s) mean several
+  senders share it (e.g. fohabl.lan and lv1.lan resolving to one PC at a venue; resolume sends
+  both outputs as stream `cg`), and the key's lines are replayed through the tuple method below.
+  Never an over-count; the old thread's last counts before a restart may be missed.
 - **The shipped line has no destination and the two resolume outputs print identical-looking lines,
   so an output's identity cannot be recovered from it.** A first cut split them into per-output
   tracks by monotone continuation; review round 1 showed it false-paging on a clean log (outputs
@@ -87,8 +94,9 @@ survives the 2-pass confirm, the render-freeze freshness shape). Stateless on th
   06:02 shape it counts 11 of 21. A sustained fault still pages (the replay onset does); an
   isolated single step onto the other output's value does not. The only over-count case is a
   second output whose first line in the tail comes more than two periods after the first, which
-  needs the tail to start inside a logging stall of the whole pacer. The fixed-timeline line has
-  none of these residuals; it replaces the shipped one with the pacer fix of this same issue.
+  needs the tail to start inside a logging stall of the whole pacer. A multi-sender `dest=` key
+  uses the same method and carries the same residuals; a one-sender `dest=` key has none of them.
+  The fixed-timeline line replaces the shipped one with the pacer fix of this same issue.
 - `vban_pacer_loss_dest` = the worst key (events first, then ms): `ip:port` on the new line,
   `stream=<name>` on the shipped one. There is no live-output count: it cannot be derived honestly
   from the destination-less line.

@@ -16,7 +16,9 @@ It reads two facet groups `bundle_state_gather` exposes on each box's `:8899/bun
 - **`vban_pacer_*`** — per destination, how much the obs-vban pacer's loss counters grew inside the
   last 660 s of the log (two passes plus slack): underflows / overflows / trims on the shipped
   pacer, discontinuities / repays / resyncs + silence_ms / discarded_ms on the fixed-timeline
-  pacer. `late_sends` is not a loss. A `dest=` key is one sender: a plain per-line delta. The
+  pacer. `late_sends` is not a loss. A `dest=` line is keyed on destination + stream and, while
+  it is one sender, graded by a plain per-line delta (two senders sharing it fall back to the
+  method below). The
   shipped line has no destination and the two outputs print identical lines, so a loss is a
   counter tuple never seen before that dominates one seen earlier (a clean or restarted output
   never produces one). That can under-count, never over-count: see
