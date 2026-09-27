@@ -2,6 +2,9 @@
 paths:
   - "scripts/lib/obs-box-baseline-win.sh"
   - "scripts/win-baseline-check.sh"
+  - "scripts/deploy-genlock-fleet.sh"
+  - "scripts/version-integrity-gate.sh"
+  - "scripts/rig-health-audit.py"
   - "tests/python/test_obs_box_baseline_win_1357.py"
   - "tests/python/fixtures/win_baseline_1357/**"
 ---
@@ -31,14 +34,18 @@ unread item is UNKNOWN, never OK:
   (`win_baseline_power_plan_ensure_ps`, embedded by `build_windows_deploy_program` for stream and
   resolume). The step runs before any OBS stop. When the active scheme is not max-performance class,
   it activates the INSTALLED High performance scheme (the stock GUID, else the first scheme NAMED High
-  performance), reads it back, and fails loud (exit 11) otherwise.
+  performance) and reads it back. On failure it prints a FAIL line and exits 11. It uses `Write-Host`,
+  not `Write-Error`: the deploy program runs under `$ErrorActionPreference = 'Stop'`, where
+  `Write-Error` throws and the `exit 11` after it never runs.
 - Sleep, USB suspend and WER are owner machine settings. They are reported, never written.
 - The timer resolution and MMCSS are not graded (they cannot be set persistently).
 
 **Match by NAME too.** stream's High performance scheme is a DUPLICATE with its own GUID
 (`659aca3b-…`). The stock `8c5e7fda-…` is not installed there, and Process Lasso's Bitsum GUID is
 per install. A GUID-only list would grade stream's High performance as DRIFT, and a hard-coded
-`/setactive 8c5e7fda-…` would fail on stream.
+`/setactive 8c5e7fda-…` would fail on stream. The accepted trade-off: the NAME is trusted, so a
+user scheme named "High performance" that was duplicated from Balanced would grade OK, and could
+become the `/setactive` target when the stock GUID is absent.
 
 **Live state 27.9.2026:** stream = Bitsum, resolume = stock High performance. Sleep, hibernate and
 USB are OK on both. `DontShowUI` is absent on BOTH, so `wer_dontshowui` reads DRIFT on both until the
@@ -56,9 +63,16 @@ owner sets it. That is an expected report-only row, not a bug.
 - **The grader is English-label based** (`Power Scheme GUID:`, `Current AC Power Setting Index:`).
   A localized Windows reads UNKNOWN (fail-safe), never OK. The setting GUID line must match the
   section's setting, so a value read from the wrong setting is UNKNOWN.
+- **The grader runs under the CALLER's `set -euo pipefail`** (both consumers set it). Every local it
+  tests must be initialised. An unset one aborted the grade into an empty verdict on the LIVE state
+  (DontShowUI absent), and a pytest that sourced the lib without `-u` stayed green. The pytest
+  `_grade` helper now grades under `set -euo pipefail` and requires a real verdict on every row.
 - **`scripts/win-baseline-check.sh`** is the dev1 reader. It scp's the gather to
   `C:/camera-box-win-baseline-gather.ps1`, runs it by path and grades each box of the obs-fleet
-  facet `win-baseline` (stream, resolume). resolume is SKIPPED when away. `--out-dir DIR` keeps
+  facet `win-baseline` (stream, resolume). resolume is SKIPPED when away. The home gate is the
+  obs-fleet one (OBS-WS :4455), so a resolume that is up with OBS down is also skipped. That is
+  deliberate: the `resolume.lan` / `bridge` .201 address collision (`obs-fleet-list.md`) makes a
+  bare ssh-reachability probe unsafe to read as "this is resolume". `--out-dir DIR` keeps
   `DIR/<box>.txt`. The test seam is `WIN_BASELINE_FETCH_CMD <box> <host> <out>`.
 - **`version-integrity-gate.sh --win-baseline NAME=FILE`** prints report-only rows
   (`win_baseline_report_rows`) and never touches bad/unknown/ok. `recording-e2e.sh` does NOT feed it
@@ -90,5 +104,8 @@ owner sets it. That is an expected report-only row, not a bug.
 - No error message may contain the literal `powercfg /setactive`. The pytest counts the powercfg
   mutating verbs in the whole deploy program and expects exactly one.
 - `deploy-genlock-fleet.sh` is at 975 of its 1000-line budget (asserted in `deploy_genlock_fleet.rs`).
-- `version-integrity-gate.sh` is already over 1000 lines. That is why the facet's rendering lives in
-  the lib, and the gate only calls `win_baseline_report_rows`.
+- `version-integrity-gate.sh` was over its 1000-line budget before this facet (1013 lines). That is
+  why the facet's rendering lives in the lib and the gate only adds the wiring (1022 lines). A split
+  of the gate is a separate refactor for the supervisor to schedule, not part of this facet.
+- **rig-health:** a reader rc outside 0/11/20 with no box row is a crashed reader, and it emits a
+  NOTE row. An empty verdict is read as UNKNOWN.
