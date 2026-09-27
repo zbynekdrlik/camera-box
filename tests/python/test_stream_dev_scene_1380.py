@@ -80,7 +80,7 @@ _PRO_ITEMS = [
 
 
 def _fake_obs(scenes, items_by_scene, program="PRO", studio=False, preview="PRE",
-              swap_reads=None):
+              swap_reads=None, cursor_seq=None, fail_preview_set=False):
     """A fake `_rpc` over an in-memory OBS: scene list + per-scene items, program, Studio Mode +
     preview. Records every call. `swap_reads` models OBS's Studio Mode SWAP (default on,
     OBSApp.cpp SwapScenesMode): a program change queues the OLD program for the preview, applied
@@ -124,8 +124,15 @@ def _fake_obs(scenes, items_by_scene, program="PRO", studio=False, preview="PRE"
                     state["pending"] = None
             return {"currentPreviewSceneName": state["preview"]}
         if rtype == "SetCurrentPreviewScene":
+            if fail_preview_set:
+                raise RuntimeError("SetCurrentPreviewScene failed: {'result': False}")
             state["preview"] = rdata["sceneName"]
             return {}
+        if rtype == "GetCurrentSceneTransitionCursor":
+            if cursor_seq is None:
+                return {}
+            value = cursor_seq.pop(0) if len(cursor_seq) > 1 else cursor_seq[0]
+            return {"transitionCursor": value}
         if rtype == "GetGroupSceneItemList":
             return {"sceneItems": state["items"][rdata["sceneName"]]}
         return {}
@@ -422,31 +429,111 @@ def test_switch_leaves_an_operator_preview_alone(monkeypatch):
     assert not any(c["op"] == "SetCurrentPreviewScene" for c in calls)
 
 
-def test_preview_reassert_waits_out_the_studio_mode_swap():
-    # The real post-TEST state: program Development, preview PRO. EVENT's cut to PRO makes OBS put
-    # Development into the preview when the transition ENDS -- after a one-shot check would run.
-    fake, calls, state = _fake_obs(["PRO", "Development"], {}, program="Development",
-                                   studio=True, preview="PRO", swap_reads=3)
-    fake(None, "SetCurrentProgramScene", {"sceneName": "PRO"})
+def _clock():
     clock = [0.0]
 
     def sleep(dt):
         clock[0] += dt
 
-    moved = _sds().reassert_stale_preview(fake, FakeWS(), "Development", "PRO", window_s=1.0,
-                                          poll_s=0.25, sleep=sleep, now=lambda: clock[0])
+    return sleep, (lambda: clock[0])
+
+
+def test_preview_reassert_waits_out_the_studio_mode_swap():
+    # The real post-TEST state: program Development, preview PRO. EVENT's cut to PRO makes OBS put
+    # Development into the preview when the transition ENDS -- after a one-shot check would run.
+    # The cursor reads the previous transition's 1.0 first, then this 300 ms fade.
+    fake, calls, state = _fake_obs(["PRO", "Development"], {}, program="Development",
+                                   studio=True, preview="PRO", swap_reads=4,
+                                   cursor_seq=[1.0, 0.3, 0.8, 1.0])
+    fake(None, "SetCurrentProgramScene", {"sceneName": "PRO"})
+    sleep, now = _clock()
+    moved = _sds().reassert_stale_preview(fake, FakeWS(), "Development", "PRO", margin_s=0.5,
+                                          poll_s=0.25, sleep=sleep, now=now)
     assert state["preview"] == "PRO"
+    assert state["pending"] is None
     assert moved == 1
     assert [c["data"] for c in calls if c["op"] == "SetCurrentPreviewScene"] == [
         {"sceneName": "PRO"}]
 
 
+def test_preview_reassert_outlasts_a_long_fixed_transition():
+    # A stinger is a FIXED transition: GetCurrentSceneTransition reports no duration, and it can run
+    # for seconds. The re-assert follows the observed cursor to 1.0, then the margin -- a
+    # configured-duration window (null -> margin only) would exit before the swap lands.
+    fake, _, state = _fake_obs(["PRO", "Development"], {}, program="Development",
+                               studio=True, preview="PRO", swap_reads=15,
+                               cursor_seq=[0.05 * i for i in range(1, 14)] + [1.0])
+    fake(None, "SetCurrentProgramScene", {"sceneName": "PRO"})
+    sleep, now = _clock()
+    moved = _sds().reassert_stale_preview(fake, FakeWS(), "Development", "PRO", margin_s=0.5,
+                                          poll_s=0.25, sleep=sleep, now=now)
+    for _ in range(3):
+        fake(None, "GetCurrentPreviewScene")
+    assert state["pending"] is None
+    assert state["preview"] == "PRO"
+    assert moved == 1
+
+
+def test_preview_reassert_stops_at_the_hard_cap():
+    fake, _, _ = _fake_obs(["PRO", "Development"], {}, program="PRO", studio=True,
+                           preview="PRO", cursor_seq=[0.5])
+    sleep, now = _clock()
+    _sds().reassert_stale_preview(fake, FakeWS(), "Development", "PRO", margin_s=0.5,
+                                  poll_s=0.25, cap_s=3.0, sleep=sleep, now=now)
+    assert 3.0 <= now() <= 3.5
+
+
+def test_preview_reassert_without_a_cursor_waits_the_margin_only():
+    fake, _, _ = _fake_obs(["PRO", "Development"], {}, program="PRO", studio=True,
+                           preview="PRO")
+    sleep, now = _clock()
+    _sds().reassert_stale_preview(fake, FakeWS(), "Development", "PRO", margin_s=1.0,
+                                  poll_s=0.25, sleep=sleep, now=now)
+    assert 1.0 <= now() <= 1.25
+
+
+def test_preview_reassert_waits_for_a_transition_that_starts_late():
+    # The cursor still reads the PREVIOUS transition's 1.0 for a moment after the cut is requested;
+    # the re-assert must not take that for "already ended" before the start timeout.
+    fake, _, state = _fake_obs(["PRO", "Development"], {}, program="Development",
+                               studio=True, preview="PRO", swap_reads=8,
+                               cursor_seq=[1.0, 1.0, 0.2, 0.5, 0.9, 1.0])
+    fake(None, "SetCurrentProgramScene", {"sceneName": "PRO"})
+    sleep, now = _clock()
+    _sds().reassert_stale_preview(fake, FakeWS(), "Development", "PRO", margin_s=0.5,
+                                  poll_s=0.25, start_timeout_s=1.0, sleep=sleep, now=now)
+    for _ in range(3):
+        fake(None, "GetCurrentPreviewScene")
+    assert state["preview"] == "PRO"
+
+
 def test_preview_reassert_is_bounded_and_idle_outside_studio_mode():
     fake, calls, _ = _fake_obs(["PRO", "Development"], {}, program="PRO", studio=False)
-    moved = _sds().reassert_stale_preview(fake, FakeWS(), "Development", "PRO", window_s=5.0,
+    moved = _sds().reassert_stale_preview(fake, FakeWS(), "Development", "PRO", margin_s=5.0,
                                           poll_s=0.25, sleep=lambda dt: None, now=lambda: 0.0)
     assert moved == 0
     assert not any(c["op"] == "GetCurrentPreviewScene" for c in calls)
+
+
+def test_preview_reassert_fails_loud_when_the_preview_set_fails():
+    fake, _, _ = _fake_obs(["PRO", "Development"], {}, program="PRO", studio=True,
+                           preview="Development", fail_preview_set=True)
+    sleep, now = _clock()
+    with pytest.raises(RuntimeError):
+        _sds().reassert_stale_preview(fake, FakeWS(), "Development", "PRO", margin_s=0.5,
+                                      poll_s=0.25, sleep=sleep, now=now)
+
+
+def test_switch_preview_failure_is_not_swallowed_by_black_report_only(monkeypatch):
+    fake, _, _ = _fake_obs(["PRO", "Development"], {}, program="Development", studio=True,
+                           preview="Development", fail_preview_set=True)
+    monkeypatch.setattr(obs_phase2, "_rpc", fake)
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    monkeypatch.setattr(obs_phase2, "PREVIEW_SWAP_MARGIN_S", 0.0)
+    _spy_nonblack(monkeypatch, {})
+    with pytest.raises(RuntimeError):
+        obs_phase2.switch(_switch_args("PRO", prod_floor=True, black_report_only=True,
+                                       replace_preview="Development"))
 
 
 def test_switch_fixes_the_preview_after_the_studio_mode_swap(monkeypatch):
