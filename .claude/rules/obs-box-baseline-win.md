@@ -28,7 +28,7 @@ unread item is UNKNOWN, never OK:
 | `sleep_ac` | STANDBYIDLE AC index 0 |
 | `hibernate_ac` | HIBERNATEIDLE AC index 0 |
 | `usb_selective_suspend` | USB selective suspend AC index 0 (Disabled) |
-| `wer_dontshowui` | `HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting` `DontShowUI` = 1. The value being absent means the crash dialog shows, so absent = DRIFT |
+| `wer_dontshowui` | `HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting` `DontShowUI` = 1. The value being absent means the WER crash dialog shows, so absent = DRIFT |
 
 - **Only the power plan is ever SET**, by the Windows genlock deploy program's step `(0b)`
   (`win_baseline_power_plan_ensure_ps`, embedded by `build_windows_deploy_program` for stream and
@@ -38,6 +38,11 @@ unread item is UNKNOWN, never OK:
   not `Write-Error`: the deploy program runs under `$ErrorActionPreference = 'Stop'`, where
   `Write-Error` throws and the `exit 11` after it never runs.
 - Sleep, USB suspend and WER are owner machine settings. They are reported, never written.
+- **What `DontShowUI` does and does not cover.** It stops the WER dialog for a process that has no
+  crash handler of its own (the obs-browser-page / CEF subprocesses, other rig tools). It does NOT
+  stop OBS's own task-modal "OBS has crashed!" MessageBox
+  (`vendor/obs-studio/frontend/obs-main.cpp`, OBS installs its own handler). Only the HKLM value
+  is read, so a `DontShowUI` set by Group Policy or in HKCU still reads DRIFT here.
 - The timer resolution and MMCSS are not graded (they cannot be set persistently).
 
 **Match by NAME too.** stream's High performance scheme is a DUPLICATE with its own GUID
@@ -107,5 +112,9 @@ owner sets it. That is an expected report-only row, not a bug.
 - `version-integrity-gate.sh` was over its 1000-line budget before this facet (1013 lines). That is
   why the facet's rendering lives in the lib and the gate only adds the wiring (1022 lines). A split
   of the gate is a separate refactor for the supervisor to schedule, not part of this facet.
-- **rig-health:** a reader rc outside 0/11/20 with no box row is a crashed reader, and it emits a
-  NOTE row. An empty verdict is read as UNKNOWN.
+- **rig-health:** a reader rc outside 0/11/20 is a crashed reader and always emits a NOTE row,
+  even after some box rows. An empty verdict is read as UNKNOWN, and the reader output is decoded
+  with `errors="replace"` (OEM-codepage scheme names must not crash the audit).
+- **The reader's box summary line** lists only DRIFT items (`drift=`) and unread items
+  (`unknown=`), never OK ones. The tests anchor the whole line (`re.M`, `^…$`), because an `in`
+  substring check passed while every OK item was listed as unknown.

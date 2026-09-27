@@ -18,8 +18,12 @@
 #   sleep_ac              "Sleep after" (STANDBYIDLE) on AC = 0 (never)
 #   hibernate_ac          "Hibernate after" (HIBERNATEIDLE) on AC = 0 (never)
 #   usb_selective_suspend USB selective suspend on AC = 0 (Disabled)
-#   wer_dontshowui        HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting DontShowUI = 1, so no
-#                         crash dialog blocks an unattended OBS (absent = the dialog shows = DRIFT)
+#   wer_dontshowui        HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting DontShowUI = 1, so
+#                         Windows Error Reporting shows no crash dialog for a process that has no crash
+#                         handler of its own (the obs-browser-page / CEF subprocesses, other rig tools).
+#                         It does NOT govern OBS's own "OBS has crashed!" MessageBox (OBS installs its
+#                         own handler). Absent = the WER dialog shows = DRIFT. Only this HKLM value is
+#                         read: a Group Policy or HKCU DontShowUI would still read DRIFT here.
 # NOT graded: the timer resolution / MMCSS (not settable persistently).
 #
 # MUTATION POLICY (the design, Approach 1): ONLY the power plan is ever SET, and only by the Windows
@@ -146,9 +150,9 @@ _win_baseline_grade_wer() {
         fi
     done <<<"$body"
     if [ -n "$v" ]; then
-        if [ "$v" = 1 ]; then echo "OK DontShowUI=0x1"; else printf 'DRIFT DontShowUI=0x%x (want 0x1: a crash dialog can block an unattended OBS)\n' "$v"; fi
+        if [ "$v" = 1 ]; then echo "OK DontShowUI=0x1"; else printf 'DRIFT DontShowUI=0x%x (want 0x1: WER crash dialogs can block unattended processes)\n' "$v"; fi
     elif grep -q 'unable to find the specified registry key or value' <<<"$body"; then
-        echo "DRIFT DontShowUI not set (absent = Windows shows the crash dialog; want 0x1)"
+        echo "DRIFT DontShowUI not set (absent = WER shows its crash dialog; want 0x1)"
     else
         echo "UNKNOWN DontShowUI unparseable (reg query)"
     fi
