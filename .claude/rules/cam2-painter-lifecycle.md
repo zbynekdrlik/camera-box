@@ -10,6 +10,9 @@ paths:
   - "tests/harness_cam2_painter_steady_state_handoff.rs"
   - "tests/harness_cam2_painter_coordination.rs"
   - "tests/harness_cam2_painter_restore_recheck_1126.rs"
+  - "scripts/lib/rig-test-ledger.sh"
+  - "tests/harness_rig_test_ledger_723.rs"
+  - "tests/python/test_rig_test_ledger_register_1382.py"
 ---
 
 # cam2 painter lifecycle — WHO paints /dev/fb0 (+ emits the QPSK marker) in each state (#1008/#937)
@@ -70,6 +73,39 @@ since #984, emitting the QPSK marker default-ON.
   A/V verdict path (`av_sync_recording.rs` pairs by fid, ignores `emit_ts`) — the E2E burn painter
   in `recording-e2e.sh` already carries it. Both changes take effect only after a cam2 re-provision
   (or a remount-rw unit edit + `daemon-reload` + painter restart) — a supervisor rig step.
+
+## The TEST painter's rig-test LEDGER entry — quoting the remote PID (issue 1382)
+
+`painter_launch_remote` registers the transient painter in the ledger
+(`scripts/lib/rig-test-ledger.sh` `rig_test_ledger_register_remote_cmds`) with a PID that exists
+only on cam2, in the same remote script that just launched it. So the PID argument is a REMOTE
+variable reference, and it has to reach the box in a form that expands THERE:
+
+- **Pass the bare `$PAINTER_PID` text:** `'$PAINTER_PID'`, single quotes inside the heredoc's
+  `$(...)` (the same idiom as the `'kill "$PAINTER_PID" ...'` argument of
+  `audio_marker_check_cmds`). Never `'\$PAINTER_PID'`: that delivers a backslash too.
+- **The builder puts PID_OR_UNIT in remote DOUBLE quotes as a printf `%s` argument**, so the
+  variable expands on the box. A literal PID resolved on dev1 (recording-e2e.sh's pgrep) or a unit
+  name passes through unchanged: backslash, double quote and backtick are escaped, `$` is left live.
+- **WHAT / BOX / STARTED_BY / MAX_DURATION are data:** JSON-escaped, then single-quoted, so a quote,
+  backslash, `%`, `$` or backtick is written verbatim.
+- **One row format:** the local `rig_test_ledger_entry_json` and the remote registration share the
+  printf format `RIG_TEST_LEDGER_ROW_FORMAT`; every value is an argument, never spliced into it.
+- **The failure this fixed (27.9.2026, found at the EVENT switch):** the old builder spliced every
+  value into a SINGLE-quoted printf format. With `'\$PAINTER_PID'`, cam2 wrote the literal
+  `"\$PAINTER_PID"`, an invalid JSON escape. `event_mode_ledger_cleanup`'s jq read then came back
+  empty and it printed `skipping malformed ledger line`. The painter was never terminated through
+  the ledger; EVENT still stopped it through its own pidfile path, so only the safety net was lost.
+- **Test by EXECUTING the text, never by matching it.** `tests/python/test_rig_test_ledger_register_1382.py`:
+  - runs the builder's output, and the real registration block cut out of `painter_launch_remote`,
+    in a local bash with `PAINTER_PID=4242` and a temp ledger;
+  - parses the row as JSON and reads it back with jq, the way the EVENT reader does.
+  - A text match passes a single-quoted `$PAINTER_PID` too.
+- **A backtick in a COMMENT inside an unquoted `<<REMOTE` heredoc is a command substitution run on
+  dev1.** Step (5)'s comment spelled a fuser command in backticks, so every `rig-mode.sh test` ran
+  fuser locally while building the cam2 script and sent the comment with the text missing. Write
+  commands in these comments with plain quotes. The same test file puts a stub `fuser` first on PATH
+  and asserts building the script never calls it.
 
 ## Recovering a dead standing painter after a run (#1072)
 
