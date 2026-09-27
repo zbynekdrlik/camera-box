@@ -320,13 +320,17 @@ static inline bool audio_buffering_maxed(struct obs_core_audio *audio)
 
 /* camera-box issue 1367: raise the total buffering to target_ticks in ONE tick. This is the body of
  * upstream's fixed mode (set_fixed_audio_buffering, target = max_buffering_ticks), shared with the
- * genlock floor (set_floor_audio_buffering, target = floor_buffering_ticks). The caller guarantees
- * total_buffering_ticks < target_ticks. Returns the new total in ms. */
+ * genlock floor (set_floor_audio_buffering, target = floor_buffering_ticks). A target at or below the
+ * current total is a no-op (the window and the timestamp queue are left alone; without the guard a
+ * negative count would loop ~2^31 times on the audio thread). Returns the new total in ms. */
 static size_t raise_audio_buffering(struct obs_core_audio *audio, size_t sample_rate, struct ts_info *ts,
 				    int target_ticks)
 {
 	struct ts_info new_ts;
 	int ticks;
+
+	if (target_ticks <= audio->total_buffering_ticks)
+		return (size_t)audio->total_buffering_ticks * AUDIO_OUTPUT_FRAMES * 1000 / sample_rate;
 
 	if (!audio->buffering_wait_ticks)
 		audio->buffered_ts = ts->start;

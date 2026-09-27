@@ -126,8 +126,13 @@ its #1355 absolute level target (100 ms + the sync offset) at all. The two strea
   - the wiring file: plain `rustc --test` with `CARGO_MANIFEST_DIR`;
   - the three C files: the `obs-drm-output.md` `-fsyntax-only` recipe.
 - Mutation proof: point `CARGO_MANIFEST_DIR` at a scratch tree holding the mutated header /
-  `obs.c` / `obs-audio.c` plus the lifted files, and recompile each test per mutant. 19/19 C mutants
-  died at landing, and 3/3 Rust constant mutants.
+  `obs.c` / `obs-audio.c` plus the lifted files, and recompile each test per mutant. 22/22 C mutants
+  died after review round 1 (incl. each band edge made strict, the raise no-op guard removed), and
+  3/3 Rust constant mutants.
+- The C lift models the window `audio_callback` really processes: the front of
+  `buffered_timestamps`, `buffered_ts − wait × tick` while ticks wait. The stream ASIO startup
+  race runs undrained: 85 ms behind is absorbed by the floor, 100 ms behind adds one tick, so the
+  total is `max(floor, stock)`. `raise_audio_buffering` to the current total is a no-op.
 
 ## Live acceptance (supervisor)
 
