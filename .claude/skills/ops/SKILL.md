@@ -709,8 +709,9 @@ RIG_KNOWN_TEST_SCENES="PHASE2-PROBE"
 ```
 
 - `PHASE2-PROBE` — the `obs_phase2.py` phase2 probe scene on strih (still a live test scene).
-- **`REC-STRIH-TMP` was DROPPED** (#343/#353): `recording-e2e.sh` now records the stream box's
-  already-active prod scene `PRO` (`STREAM_PROG_SCENE` default), so the stream box never lands on an
+- **`REC-STRIH-TMP` was DROPPED** (#343/#353): `recording-e2e.sh` records the stream box's
+  development scene `Development` (`STREAM_PROG_SCENE` default since issue 1380 — the production
+  scene `PRO` nested in it, TEST mode's standing program), so the stream box never lands on an
   ephemeral scene — the marker, not a scene name, detects a stranded stream box now.
 
 **INVARIANT (post-#353)**: prefer the MARKER for new rig-touching harnesses — wrap them so they

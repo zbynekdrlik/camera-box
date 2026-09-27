@@ -496,7 +496,9 @@ scripts/rig-mode.sh event    # rig BACK to clean broadcast (stop QR + print OBS 
   burn run_id is fixed by the box role — strih 911002 (bottom-left) / stream 911004 (bottom-right) —
   NOT env. Relaunch the box's OBS only if it is wedged or pass-through:
   `scripts/launch-obs-genlock.sh --box {strih|stream} --force` (env-free; genlock latency is the
-  build const, floor 3 ms). Then confirm the PHASE2-PROBE scene + native-1080p recording (#225).
+  build const, floor 3 ms). Then confirm the stream program is the `Development` scene (issue 1380:
+  the production scene `PRO` nested in it; TEST never programs `PRO` itself, EVENT puts it back —
+  `.claude/rules/stream-development-scene.md`) + native-1080p recording (#225).
 
 **EVENT mode (pinned — the #246 guard):**
 - **cam2:** stop the painter via its PID file (NOT `pkill -f frame-probe` — a shell whose cmdline
@@ -2246,7 +2248,8 @@ subcommands the harness itself calls, directly from dev1, against the idle rig:
 
 1. `python3 scripts/obs_phase2.py rig-busy-check --strih-host <strih> --stream-host <stream>
    --password ""` first — confirm idle (busy=false) before touching prod OBS state.
-2. Exercise the real code path directly, e.g. `prod-scene --host <stream> --program-scene PRO
+2. Exercise the real code path directly, e.g. `prod-scene --host <stream> --program-scene Development
+   (issue 1380: development never programs `PRO`; seed it first with `dev-scene --host <stream>`)
    --test-latency-source "NDI 2ME PGM" --test-latency-ms <N>` (omit `--upstream` to skip the
    unrelated preload-force and isolate just the one setting under test) immediately followed by
    `record --host <stream> --action start` (the #627 liveness check reports pass/fail in ~4s).
