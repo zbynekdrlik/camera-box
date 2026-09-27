@@ -44,10 +44,11 @@ def _legacy(ts, u, o, t, late="3.000", depth="65.5", stream="cg"):
             f"late_max_ms={late} trims={t} target_ms=64 stream='{stream}'")
 
 
-def _new(ts, dest, disc=0, repays=0, resyncs=0, silence="0.0", discarded="0.0", late_sends=0):
+def _new(ts, dest, disc=0, repays=0, resyncs=0, silence="0.0", discarded="0.0", late_sends=0,
+         stream="cg"):
     return (f"{ts}: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends={late_sends} "
             f"discontinuities={disc} repays={repays} silence_ms={silence} discarded_ms={discarded} "
-            f"resyncs={resyncs} late_max_ms=3.000 target_ms=64 dest={dest} stream='cg'")
+            f"resyncs={resyncs} late_max_ms=3.000 target_ms=64 dest={dest} stream='{stream}'")
 
 
 def _cfg(ts):
@@ -316,7 +317,7 @@ def test_new_format_splits_by_destination_and_reports_the_worst():
         lines.append(_new(_hms(s), "10.77.7.106:6980", disc=disc, silence=silence))
         lines.append(_new(_hms(s + 0.01), "10.77.8.20:6980"))
     events, loss_ms, dest, _age = bsg.vban_pacer_loss_from_log(_text(lines))
-    assert dest == "10.77.7.106:6980"
+    assert dest == "10.77.7.106:6980/cg"
     assert events == "1"
     assert loss_ms == "254.0"
 
@@ -361,6 +362,52 @@ def test_new_format_restart_then_a_loss_onto_an_old_value_is_counted():
     events, loss_ms, _dest, _age = bsg.vban_pacer_loss_from_log(_text(lines))
     assert events == "2"
     assert loss_ms == "10.0"
+
+
+def _shared_dest(n, a, b, name_a="cg", name_b="cg", skew=0.04):
+    """Two senders to ONE destination, n periods; a(i)/b(i) -> (disc, silence) per period."""
+    out = []
+    for i in range(n):
+        s = 6 * 3600 + i * 10
+        da, sa = a(i)
+        db, sb = b(i)
+        out.append(_new(_hms(s), "10.77.7.106:6980", disc=da, silence=sa, stream=name_a))
+        out.append(_new(_hms(s + skew), "10.77.7.106:6980", disc=db, silence=sb, stream=name_b))
+    return out
+
+
+@pytest.mark.parametrize("name_b", ["cgB", "cg"])
+@pytest.mark.parametrize("skew", [0.04, 6.0])
+def test_new_format_two_clean_senders_to_one_destination_read_zero(name_b, skew):
+    # Review round 3: a VBAN receiver port takes many streams, so a destination is not a sender.
+    # Two clean senders to one dest (different stream names, or the same name from two hosts
+    # resolving to one PC) must never read their counter gap as a loss.
+    lines = _shared_dest(40, lambda i: (0, "0.0"), lambda i: (4, "28.0"), name_b=name_b, skew=skew)
+    events, loss_ms, _dest, _age = bsg.vban_pacer_loss_from_log(_text(lines))
+    assert events == "0"
+    assert loss_ms == "0.0"
+
+
+def test_new_format_shared_destination_same_name_still_counts_a_loss():
+    # The same shared destination + name: a real loss on one sender is still counted.
+    lines = _shared_dest(40, lambda i: (0, "0.0"),
+                         lambda i: (4, "28.0") if i < 20 else (5, "128.0"))
+    events, loss_ms, _dest, _age = bsg.vban_pacer_loss_from_log(_text(lines))
+    assert events == "1"
+    assert loss_ms == "100.0"
+
+
+def test_new_format_restart_counts_its_new_counters_from_zero():
+    # Review round 3: a counter going down is a sender restart, and the new thread starts at 0,
+    # so the counts it already shows are losses since that restart.
+    lines = []
+    for i in range(12):
+        s = 6 * 3600 + i * 10
+        disc, sil = (0, "0.0") if i < 5 else ((2, "10.0") if i < 8 else (1, "5.0"))
+        lines.append(_new(_hms(s), "10.77.7.106:6980", disc=disc, silence=sil))
+    events, loss_ms, _dest, _age = bsg.vban_pacer_loss_from_log(_text(lines))
+    assert events == "3"
+    assert loss_ms == "15.0"
 
 
 def test_new_format_counts_from_its_second_line():
