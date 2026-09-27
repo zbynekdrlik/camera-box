@@ -749,5 +749,77 @@ def test_cli_unknown_spread_column_is_refused(tmp_path):
     assert p.returncode == 3
 
 
+
+# --- review round 3: pins for the t-quantile degrees of freedom and the rarely armed gate arms ----
+
+
+def test_the_slope_band_takes_the_t_quantile_at_n_minus_2_degrees_of_freedom():
+    # 4 samples at 0 / 0.5 / 1 / 1.5 h: slope exactly 10 ms/h (the residuals +2 -2 -2 +2 are
+    # orthogonal to the line), SE = sqrt(16 / 2 / 1.25) = 2.53 ms/h. |slope| - 2 = 8 lies between
+    # t95(4) * SE = 7.0 (a FAIL if the quantile took n degrees of freedom) and t95(2) * SE = 10.9
+    # (n - 2, the correct least-squares count): an honest UNKNOWN, never a FAIL.
+    pts = [(T0 + int(h * 3600), y) for h, y in ((0.0, 2.0), (0.5, 3.0), (1.0, 8.0), (1.5, 17.0))]
+    slope, se = asd.fit_slope_with_se(pts)
+    assert slope == pytest.approx(10.0)
+    assert se == pytest.approx((16 / 2 / 1.25) ** 0.5)
+    assert asd.t95(4) * se < abs(slope) - 2.0 < asd.t95(2) * se
+    s = asd._value_series("av x", pts, 30.0, "A/V", pts[0][0], pts[-1][0], 10 ** 6, 2.0)
+    assert s["slope_band_ms_per_h"] == pytest.approx(asd.t95(2) * se)
+    assert s["verdict"] == asd.UNKNOWN, s
+
+
+def _tolerance_cont(tolerance=2):
+    with open(os.path.join(AV_SOAK_FIXTURES, "continuity_1564963303.json"), encoding="utf-8") as f:
+        cont = json.load(f)["all_cambox_continuity"]
+    cont["copies_gaps_tolerance_gates_overall_pass"] = True
+    cont["copies_gaps_tolerance"] = tolerance
+    return cont
+
+
+def test_the_armed_copies_gaps_tolerance_arm_of_the_gate_term():
+    # the tolerance rescue is disarmed on today's verdicts; once re-armed, a window passes with
+    # copies AND gaps at or below the tolerance (a segment's own value wins over the run's)
+    cont = _tolerance_cont(2)
+    base = {"frames": 900, "undecodable": 0, "copies": 2, "gaps": 2}
+    assert asd.gate_window_term(dict(base), cont) is True
+    assert asd.gate_window_term(dict(base, copies=3), cont) is False
+    assert asd.gate_window_term(dict(base, gaps=3), cont) is False
+    assert asd.gate_window_term(dict(base, copies=3, copies_gaps_tolerance=3), cont) is True
+    cont.pop("copies_gaps_tolerance")
+    assert asd.gate_window_term(dict(base), cont) is False, "no tolerance value = no rescue"
+
+
+def test_an_older_verdict_skips_a_multi_source_window_in_the_loss_grade():
+    # a verdict without the seam flags: relaxed_pass grades, a multi-source window never does
+    segs = [{"cambox": "CAM1", "pass": False, "relaxed_pass": False, "frames": 900,
+             "multi_source": {"suspect_fraction": 0.4}},
+            {"cambox": "CAM1", "pass": True, "relaxed_pass": True, "frames": 900},
+            {"cambox": "CAM3", "pass": False, "relaxed_pass": False, "frames": 900,
+             "multi_source": {"suspect_fraction": 0.4}}]
+    agg = asd._loss_by_camera(segs, ["cam1", "cam3"], {})
+    assert agg["cam1"]["graded"] is True and agg["cam1"]["multi"] is True
+    assert agg["cam3"]["graded"] is None and agg["cam3"]["multi"] is True
+    row = asd.row_from_verdict({"all_cambox_continuity": {"segments": segs}}, ["cam1", "cam3"],
+                               _meta(0))
+    assert row["loss_cam1_pass"] == "true" and row["loss_cam3_pass"] == "report_only"
+
+
+def test_a_window_with_no_decoded_frames_fails_the_gate_term():
+    # presence: a camera window that decoded nothing is a loss window, even with zero copies/gaps
+    # and the undecodable floor disarmed (src/window_gate.rs: `frame_count > 0 && floor_term && ..`)
+    cont = _tolerance_cont(2)
+    cont["undecodable_floor_gates_overall_pass"] = False
+    assert asd.gate_window_term({"frames": 0, "undecodable": 0, "copies": 0, "gaps": 0},
+                                cont) is False
+
+
+def test_a_derived_offset_that_carries_a_number_is_still_not_a_sample():
+    v = _verdict(av={"cam1": ("derived", 7.0), "cam2": ("measured", 2.0),
+                     "cam3": ("measured", 3.0)})
+    row = asd.row_from_verdict(v, CAMS, _meta(0))
+    assert row["av_cam1_ms"] == "" and row["av_cam1_status"] == "derived"
+    assert row["av_cam3_ms"] == "3.000"
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
