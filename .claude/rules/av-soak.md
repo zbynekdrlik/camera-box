@@ -21,33 +21,52 @@ align), so looping it would hide the drift. The soak only measures.
 | `scripts/av-soak.sh` | the orchestrator: `--plan` (DEFAULT, touches nothing), `--run`, `--report RUN_DIR` |
 | `scripts/lib/av-soak.sh` | pure builders shared by plan AND run (argv of the two extracts + the merge), the window arithmetic, the two read-only cam2 reads, the record-volume free-space read |
 | `scripts/av_soak_decision.py` | pure decision: `bounds`, `row` (one CSV row per window from the merged verdict JSON), `report` (1 h partial + full, exit 0 PASS / 1 FAIL / 2 UNKNOWN / 3 input error) |
+| `bundle_state_gather.recordings_free_line` | the one "<VERDICT> <free_gb>" line the free-space read prints (recording-e2e.sh keeps its inline copy -- static-anchor minefield) |
 
 Every rig action is an existing primitive: the issue-830 lease (own holder name
 `camera-box-av-soak`, expected release = the whole run, so a CI E2E fails fast), the issue-281
-heartbeat, `stray_session_check_assert` (before the burn-on and before EVERY StartRecord),
-`obs_phase2.py record/switch/program-scene`, `obs_burn_filter.py check/add/remove`, the E2E sweep
-(`switch_schedule.py plan/build`), `recording-verdict-on-strih-lx.sh` + `recording-verdict-on-stream.sh
---execute` (parallel, each under `timeout`), `recording-verdict --merge-partials`. The free-space
-read copies the call shape of recording-e2e.sh's inline `check_recordings_free_space` into the lib
-(never edit the harness for it).
+heartbeat, `stray_session_check_assert` (at setup, before the setup mutations, before EVERY
+StartRecord), the issue-1242 connect-on-show HOLD the E2E uses (`connect_on_show_e2e_hold` /
+`_wait_live` / `_restore` in `scripts/lib/connect-on-show-hold.sh`, the strih-side 4 h marker
+re-asserted every slot), `obs_phase2.py record/switch/program-scene`, `obs_burn_filter.py
+check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-verdict-on-strih-lx.sh`
++ `recording-verdict-on-stream.sh --execute` (parallel, each under `timeout`), `recording-verdict
+--merge-partials`.
 
 ## Hard rules
 
 - **Measure-only.** Never a latency pin, an audio sync offset, `av_sync_calibrate --apply`,
   `qr_align`, measurement pins, an NDI mapping. Never a stream scene switch: the stream program must
-  ALREADY be the development scene (`Development`, issue 1380 -- the soak refuses with exit 4
-  otherwise; run `scripts/rig-mode.sh test` first). Only the strih program is swept, and it is
-  restored to its snapshot at cleanup. The production scene name is never typed (the one
-  declaration is `scripts/lib/stream-dev-scene.sh`).
+  ALREADY be the development scene (`Development`, issue 1380 -- refused with exit 4 otherwise; run
+  `scripts/rig-mode.sh test` first) and is re-read every slot (a drift = a skipped row). Only the
+  strih program is swept; the sweep flag is set BEFORE the first cut, so the snapshot is restored
+  (`switch --prod-floor`) even when a cut fails; an unreadable snapshot refuses the run. The
+  production scene name is never typed (the one declaration is `scripts/lib/stream-dev-scene.sh`).
+- **Reads before writes.** Setup does every read (guard, both program scenes, painter, every burn
+  state) before the first mutation; a refusal there is exit 4 and nothing changed. After the first
+  mutation (the connect-on-show hold) every abort is exit 5 and cleanup restores.
+- **Recording flags are conservative.** A box's "started" flag is set BEFORE `record --action start`
+  (the start verifies the file grows AFTER StartRecord, so a failed or timed-out start can leave OBS
+  recording); any start failure stops both boxes; a flag clears only when `record --action status`
+  reads `active=False`, else cleanup stops it again.
+- **Cleanup cannot be cut short** (the issue-808 recipe, `.claude/rules/ci-testing-gotchas.md`):
+  `set +e; trap '' INT TERM HUP PIPE`, every OBS/burn/connect-on-show call in its own session
+  (`setsid -w`), background sleeps/decodes killed. Proven by a second-SIGTERM test.
 - **Burns:** only the ones that were OFF are turned on, and exactly those are turned off again.
 - **Recordings are not deleted** (deletion is owner-only, `.claude/rules/recordings-retention.md`):
-  the exact paths go to `recordings.tsv` and `cleanup-plan.txt` (the E2E's own exact-path plan lines,
-  `strih_lx_recording_cleanup_note` + the stream `Remove-Item`). Before every slot a record volume
-  below `RECORDINGS_FREE_MIN_GB` (50) STOPS the run cleanly (UNKNOWN, never a false pass). At well
-  under 1 GiB per box per window, 49 windows fit easily.
+  the exact paths (incl. the ones cleanup stopped) go to `recordings.tsv` and `cleanup-plan.txt` (the
+  E2E's own exact-path plan lines, `strih_lx_recording_cleanup_note` + the stream `Remove-Item`).
+  Before every slot a record volume below `RECORDINGS_FREE_MIN_GB` (50) STOPS the run cleanly
+  (UNKNOWN, never a false pass).
+- **The slot budget is checked up front:** window + decode + merge + overhead (90 s) must fit the
+  slot; the decode bound defaults to what the slot leaves (210 s for 7 x 30 s in 600 s), merge 90 s.
+  A stream decode that hits its bound gets the box's `recording-verdict` stopped (else the next
+  slot's exe upload meets a locked file). Every slot writes a `timing.tsv` line -- read it after the
+  1 h run before trusting the budget.
 - **The bounds are read, never retyped:** `AV_OFFSET_GATE_TOLERANCE_MS` from `src/av_window.rs`,
-  `SPREAD_THRESHOLD_MS` from `src/switch_latency.rs` (a missing constant = exit 3). The slope bound
-  2 ms/h (`SLOPE_BOUND_MS_PER_H`) is the issue's acceptance, defined once in the decision module.
+  `SPREAD_THRESHOLD_MS` from `src/switch_latency.rs` (a missing constant = exit 3 for `report`, exit
+  4 before `--run` starts). The slope bound 2 ms/h (`SLOPE_BOUND_MS_PER_H`) is the issue's
+  acceptance, defined once in the decision module.
 - **The verdict's own defaults are single sources too:** the soak never passes `--burn-*-run-id`
   (it deploys no burn) nor `--av-expected-ms` (unless `AV_EXPECTED_MS` is set explicitly).
 
@@ -56,7 +75,8 @@ read copies the call shape of recording-e2e.sh's inline `check_recordings_free_s
 - Window = ONE sweep over the soak cameras, `AV_SOAK_SEGMENT_SECS` (30, the E2E's calibrated
   `SEGMENT_SECS`) each: 7 cameras = 210 s. A per-camera A/V offset needs that camera on program and
   `av_window::MIN_AV_SAMPLES` (8) clustered markers, so a flat 60 s window cannot measure every camera.
-  A window + 60 s must fit the slot (else exit 3).
+  The connect-on-show hold keeps every camera's main input connected, so each cut is warm, as in the
+  E2E (measuring cold cuts would be a separate decision).
 - `av_<cam>_ms` = the verdict's MEASURED `all_cambox_av_sync.<cam>.av_offset_ms` only (a `derived`
   or `unknown` value is never a sample); graded `|offset - expected_ms| <= tolerance`, inclusive.
 - Spreads -- three columns, the graded set is `--spread-columns` (default = the design as written):
@@ -64,12 +84,15 @@ read copies the call shape of recording-e2e.sh's inline `check_recordings_free_s
   capture burn (the probe-featured camera-box the E2E deploys in its cam1 / all-cambox deploy steps).
   TEST mode does not deploy it, so on a passive rig both are empty and a graded empty column is
   UNKNOWN. `av_spread_ms` = `max - min` of the measured per-camera A/V offsets, cam2 excluded (its
-  number pools the whole recording) = the camera alignment AT THE STREAM OUTPUT, reported always.
-  Which one to grade is the open design question on the issue (comment 5858491691); switching is
-  `--spread-columns av_spread_ms`.
-- Loss: the verdict's own per-segment `pass` of `all_cambox_continuity.segments` (the existing bar,
-  its tolerances included, never re-derived) + raw copies/gaps/undecodable; `burn_<cam>` loss only
-  when the capture burns were present.
+  number pools the whole recording) = the camera alignment AT THE STREAM OUTPUT, reported always
+  (note: a difference of two A/V medians carries both medians' noise). Which one to grade is the
+  open design question on the issue (comment 5858491691); switching is `--spread-columns av_spread_ms`.
+- Loss: the gate's own per-window term -- `relaxed_pass` (`pass` on an older verdict) over the
+  camera's segments; a segment with its own `multi_source` block (issue 1367) is `report_only`, a
+  sample but never a breach. The strict `pass` and raw copies/gaps/undecodable are recorded.
+- Burn loss: `full_chain.loss.<node>.zero_loss` for the `strih` + `stream` hops (the OBS measurement
+  burns the soak turns on -- the zero-loss signal at the stream output) and for each camera (only
+  with capture burns). A node never measured is not required; once measured, a gap counts.
 - The painter is the PERMANENT `cam2-painter.service` (TEST mode). Its QR `run_id` is read from its
   own `frame-probe start:` journal line each slot (`--cam2-run-id`; 0 = unpinned when unreadable) and
   a tail of `/run/rig-qpsk-markers.csv` (header kept) is the window's emit log -- pairing works on a
@@ -77,13 +100,15 @@ read copies the call shape of recording-e2e.sh's inline `check_recordings_free_s
 
 ## Grading (`report`)
 
-Per series: FAIL on any out-of-bound sample or `|slope| > 2 ms/h`; UNKNOWN on no samples, fewer than
-3 samples / under 30 min for the slope, or a sample gap over 660 s (the 600 s slot + 60 s start
-jitter; the gap counts from the run's first window and to its last window, so a camera missing at
-either end shows). The run: FAIL beats UNKNOWN beats PASS; a run whose window starts span less than
-the required duration - 60 s is UNKNOWN. An operator-excluded camera (every window `excluded`) is
-not required. The 1 h partial is graded on its own (as a 1 h run) and printed when the CSV extends
-past it; the exit code is the FULL run's.
+Per series: FAIL on any out-of-bound sample or a slope confidently over the bound (`|slope| - 2 SE >
+2 ms/h`); PASS needs `|slope| + 2 SE <= 2 ms/h`; UNKNOWN on no samples, fewer than 3 samples / under
+30 min, a slope interval that straddles the bound (per-window noise of ~2 ms over 1 h makes 2 SE
+about 4.5 ms/h, so the 1 h check can prove a clear drift but rarely a pass -- over 8 h the same
+noise is ~0.4 ms/h), or a sample gap over the CSV's `slot_s` + 60 s (counted from the run's first
+window and to its last window). The run: FAIL beats UNKNOWN beats PASS; a run whose window starts
+span less than the required duration - 60 s is UNKNOWN; a run where nothing was graded is UNKNOWN.
+An operator-excluded camera (every window `excluded`) is not required. The 1 h partial is graded on
+its own as soon as the CSV covers the first hour; the exit code is the FULL run's.
 
 ## Runbook (SUPERVISOR -- the lane never touches the rig)
 
@@ -105,28 +130,34 @@ bash scripts/av-soak.sh --plan --hours 1          # review the exact steps; touc
 
 # the 1 h trend check (7 windows, +0 .. +60 min), detached from the Claude session:
 D=$HOME/.camera-box/av-soak/1h-$(date -u +%Y%m%dT%H%MZ)
-systemd-run --user --unit=av-soak-1h --collect -p EnvironmentFile=$HOME/.config/camera-box/av-soak.env \
+systemd-run --user --unit=av-soak-1h --collect -p TimeoutStopSec=15min \
+  -p EnvironmentFile=$HOME/.config/camera-box/av-soak.env \
   --working-directory=$HOME/devel/camera-box \
   bash scripts/av-soak.sh --run --hours 1 --run-dir "$D" \
   --probe-bin-dir "$A/linux" --win-verdict-exe "$A/win/recording-verdict.exe"
 journalctl --user -u av-soak-1h -f                # live log; the final report is its tail
-cat "$D/report-latest.txt"                        # progress after every window
+cat "$D/report-latest.txt" "$D/timing.tsv"        # progress + per-slot timing after every window
 bash scripts/av-soak.sh --report "$D" --hours 1   # re-grade any time (exit 0/1/2)
 ```
 
 The 8 h run is the same with `--unit=av-soak-8h --hours 8` (49 windows). **Stop:** `touch "$D/STOP"`
 (ends at the next wait/slot boundary with full cleanup + the report, exit = the verdict) or
-`systemctl --user stop av-soak-1h` (SIGTERM -> cleanup, exit 5). **What it holds:** the rig lease
-for the whole run (a CI full-path E2E fails fast with `OUTCOME=RIG_LEASE_HELD`; restreamer waits a
-bounded time), the strih program (swept), the burns it turned on, and a recording on strih + stream
-for ~4 min of every 10. Post the report (`$D/report.txt` + `report.json`) on issue 1367, then hand
-the owner `$D/cleanup-plan.txt` if the disk needs the space.
+`systemctl --user stop av-soak-1h` (SIGTERM -> cleanup, exit 5; `TimeoutStopSec` leaves cleanup
+its time). **What it holds:** the rig lease for the whole run (a CI full-path E2E fails fast with
+`OUTCOME=RIG_LEASE_HELD`; restreamer waits a bounded time), connect-on-show held off on strih (full
+bandwidth for every camera, as during an E2E), the strih program (swept), the burns it turned on,
+and a recording on strih + stream for ~4 min of every 10. Post the report (`$D/report.txt` +
+`report.json`) on issue 1367, then hand the owner `$D/cleanup-plan.txt` if the disk needs the space.
 
 ## Tier-0 verification (dev1: no cargo, no heavy checks)
 
 `python3 -m pytest tests/python/test_av_soak_decision_1367.py tests/python/test_av_soak_orchestrator_1367.py`
-(the orchestrator harness drives setup, one full window and cleanup with fakes behind the seams
-`AV_SOAK_OBS_DIR`, `AV_SOAK_STRIH_DECODE`, `AV_SOAK_STREAM_DECODE`, `PROBE_BIN_DIR`, a fake
-`sshpass`/`curl` on PATH, and a tmp `RIG_LEASE_DIR` + `CAMERA_BOX_RIG_HEARTBEAT` -- NEVER the real
-`/var/tmp/rig-lease`, an E2E may hold it), `bash -n`, `shellcheck -S warning scripts/av-soak.sh
-scripts/lib/av-soak.sh` (never `-x`).
+(the decision tests use REAL merged verdict fixtures from `tests/python/fixtures/e2e_discord_report/`
+where the shape matters; the orchestrator harness drives setup, full windows, the failure paths
+(start/stop failure, a failed cut, SIGTERM and a second SIGTERM during cleanup, the STOP file, a low
+volume, a painter/stream-program drift) and cleanup with fakes behind the seams `AV_SOAK_OBS_DIR`,
+`AV_SOAK_STRIH_DECODE`, `AV_SOAK_STREAM_DECODE`, `PROBE_BIN_DIR`, `CONNECT_ON_SHOW_MARKER_CMD`,
+`CONNECT_ON_SHOW_LOG_READ_CMD`, a fake `sshpass`/`curl` on PATH, and a tmp `RIG_LEASE_DIR` +
+`CAMERA_BOX_RIG_HEARTBEAT` + `CONNECT_ON_SHOW_HOLD_STATE` -- NEVER the real `/var/tmp/rig-lease`, an
+E2E may hold it), `bash -n`, `shellcheck -S warning scripts/av-soak.sh scripts/lib/av-soak.sh` (never
+`-x`).

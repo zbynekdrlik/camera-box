@@ -14,30 +14,29 @@ set -euo pipefail
 #     - take the issue-830 rig lease under its OWN holder name (repo `camera-box-av-soak`) with an
 #       expected release = the whole run, so a CI E2E fails fast instead of waiting; refuse when a
 #       live foreign holder has it; start the issue-281 rig-active heartbeat
-#     - the shared issue-1271 rig-busy guard (stray_session_check_assert) before the first mutation
-#     - read-only: the stream program must ALREADY be the development scene (`Development`, issue
-#       1380 -- TEST mode is a precondition, `scripts/rig-mode.sh test`); the soak never selects a
-#       stream scene and never names the production scene. Snapshot the strih program scene.
-#     - read-only: the permanent cam2 painter is active and its QPSK marker log grows
-#     - the measurement burns ON (obs_burn_filter.py add + check, the E2E pre-record gate's own
-#       calls) on every soak camera's strih input and the stream program input; only the ones that
-#       were OFF are turned back OFF at cleanup
+#     - READ-ONLY checks first: the shared issue-1271 rig-busy guard; the stream program must
+#       ALREADY be the development scene (`Development`, issue 1380 -- TEST mode is a precondition,
+#       `scripts/rig-mode.sh test`); the strih program scene (snapshot, restored at cleanup); the
+#       permanent cam2 painter active with a growing QPSK marker log; every burn state readable
+#     - the rig-busy guard again, then the mutations: the issue-1242 connect-on-show HOLD the E2E
+#       uses (connect-on-show-hold.sh -- a hidden program-path input would otherwise be cut in cold
+#       and parked), and the measurement burns ON (obs_burn_filter.py) only where they were OFF
 #   every slot (default every 600 s, on a fixed grid from the first slot):
-#     - the lease still ours, both record volumes above RECORDINGS_FREE_MIN_GB, the painter live,
-#       the rig-busy guard again (a broadcast that started mid-run aborts the soak)
+#     - the lease still ours, both record volumes above RECORDINGS_FREE_MIN_GB, the stream program
+#       still the development scene, the painter live, the rig-busy guard (a broadcast that started
+#       mid-run aborts the soak), the strih-side hold marker re-asserted (its TTL is 4 h)
 #     - StartRecord strih + stream (obs_phase2.py record), ONE sweep that cuts each soak camera into
 #       strih program for AV_SOAK_SEGMENT_SECS (obs_phase2.py switch, switch_schedule.py plan/build
-#       -- the E2E all-cambox sweep), StopRecord
+#       -- the E2E all-cambox sweep), StopRecord (verified by a status read)
 #     - a tail of the painter's marker log (read-only ssh), pushed with the schedule to the stream
 #       box; the strih recording decoded IN PLACE on strih-lx (recording-verdict-on-strih-lx.sh),
 #       the stream recording IN PLACE on the stream box (recording-verdict-on-stream.sh --execute),
 #       both bounded + in parallel; the dev1 merge (recording-verdict --merge-partials)
-#     - ONE CSV row (av_soak_decision.py row); the recordings are NOT deleted (deletion is an
-#       owner-only step): their exact paths go to recordings.tsv + a cleanup-plan.txt printed with
-#       the E2E's own plan lines
-#   cleanup, on EVERY exit: StopRecord what we started, restore the strih program scene, turn off
-#   the burns we turned on, stop the heartbeat, release the lease, write + print the final report
-#   (av_soak_decision.py report).
+#     - ONE CSV row (av_soak_decision.py row) + one timing.tsv line; the recordings are NOT deleted
+#       (deletion is an owner-only step): their exact paths go to recordings.tsv + cleanup-plan.txt
+#   cleanup, on EVERY exit (signals ignored, remote calls in their own session): StopRecord what is
+#   still recording, restore the strih program scene when swept, restore connect-on-show, turn off
+#   the burns this run turned on, stop the heartbeat, release the lease, write + print the report.
 #
 # MODES:
 #   --plan  (DEFAULT) print every step with the exact commands; touches NOTHING (no lease, no ssh,
@@ -55,21 +54,25 @@ set -euo pipefail
 #   --probe-bin-dir D  [PROBE_BIN_DIR]           dir holding the Linux recording-verdict
 #   --win-verdict-exe P [WIN_VERDICT_EXE_LOCAL]  the Windows recording-verdict.exe
 #   --spread-columns C [AV_SOAK_SPREAD_COLUMNS]  graded spread columns (see av_soak_decision.py)
-# Other env: AV_SOAK_CAMS (default CAMERA_ACTIVE_SET minus CAMBOX_OFFLINE_ACK/rig-fleet.txt),
-#   STRIH_HOST / STREAM_HOST (default from scripts/lib/obs-fleet.sh), PAINTER_IP (default cam2 from
-#   scripts/camera-set.sh), STRIH_CAPTURE_FPS / STREAM_CAPTURE_FPS (30, as recording-e2e.sh),
-#   STREAM_PROG_SOURCE ("NDI 2ME PGM", as recording-e2e.sh / rig-mode.sh), AV_SOAK_DECODE_TIMEOUT_S
-#   (480), AV_SOAK_MERGE_TIMEOUT_S (300), AV_SOAK_OBS_TIMEOUT_S (30), RECORDINGS_FREE_MIN_GB (50).
-#   Test seams: AV_SOAK_OBS_DIR (dir of obs_phase2.py + obs_burn_filter.py), AV_SOAK_STRIH_DECODE,
-#   AV_SOAK_STREAM_DECODE, AV_SOAK_MIN_SEGMENT_SECS (10), RIG_LEASE_DIR, CAMERA_BOX_RIG_HEARTBEAT.
+# Other env: AV_SOAK_CAMS (default CAMERA_ACTIVE_SET; CAMBOX_OFFLINE_ACK/rig-fleet.txt acks are
+#   always removed), STRIH_HOST / STREAM_HOST (default from scripts/lib/obs-fleet.sh), PAINTER_IP
+#   (default cam2 from scripts/camera-set.sh), STRIH_CAPTURE_FPS / STREAM_CAPTURE_FPS (30, as
+#   recording-e2e.sh), STREAM_PROG_SOURCE ("NDI 2ME PGM", as recording-e2e.sh / rig-mode.sh),
+#   AV_SOAK_MERGE_TIMEOUT_S (90), AV_SOAK_OVERHEAD_S (90, the per-slot pre/stop/upload budget),
+#   AV_SOAK_DECODE_TIMEOUT_S (default: what the slot leaves = slot - window - merge - overhead),
+#   AV_SOAK_OBS_TIMEOUT_S (30), RECORDINGS_FREE_MIN_GB (50), CONNECT_ON_SHOW_HOLD_STATE (the E2E's
+#   ~/.camera-box/connect-on-show-hold.json). Test seams: AV_SOAK_OBS_DIR (dir of obs_phase2.py +
+#   obs_burn_filter.py), AV_SOAK_STRIH_DECODE, AV_SOAK_STREAM_DECODE, AV_SOAK_MIN_SEGMENT_SECS (10),
+#   RIG_LEASE_DIR, CAMERA_BOX_RIG_HEARTBEAT, CONNECT_ON_SHOW_MARKER_CMD, CONNECT_ON_SHOW_LOG_READ_CMD.
 #
 # STOP: `touch <run-dir>/STOP` (stops at the next wait/slot boundary, full cleanup + report), or
 # `kill -TERM $(cat <run-dir>/pid)` (cleanup runs from the trap).
 #
-# EXIT: 0 PASS / 1 FAIL / 2 UNKNOWN (the final report of a run that ended normally or by STOP),
-#       3 usage error, 4 refused before any rig change (lease held, rig busy, not in TEST mode,
-#       painter dead, burn unreadable, missing credential/binary), 5 aborted mid-run (lease lost,
-#       broadcast started, a setup mutation failed); the report is still written on 5.
+# EXIT: 0 PASS / 1 FAIL / 2 UNKNOWN (the final report of a run that ended normally or by STOP / a
+#       low record volume), 3 usage error, 4 refused before any rig change (lease held, rig busy,
+#       not in TEST mode, painter dead, a burn unreadable, missing credential/binary/bound), 5
+#       aborted after a rig change (lease lost, broadcast started, a setup mutation failed, a
+#       signal); the report is still written on 5.
 #
 # Runbook + the rule: .claude/rules/av-soak.md.
 
@@ -90,12 +93,19 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/cambox-offline-ack.sh"
 # shellcheck source=scripts/lib/stream-dev-scene.sh
 . "$HERE/lib/stream-dev-scene.sh"
+# shellcheck source=scripts/lib/mv-reverify-escalate.sh
+. "$HERE/lib/mv-reverify-escalate.sh"
+# shellcheck source=scripts/lib/genlock-park.sh
+. "$HERE/lib/genlock-park.sh"
+# shellcheck source=scripts/lib/connect-on-show-hold.sh
+. "$HERE/lib/connect-on-show-hold.sh"
 # shellcheck source=scripts/lib/av-soak.sh
 . "$HERE/lib/av-soak.sh"
 
-usage() {
-  sed -n '2,/^# Runbook/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
-}
+log() { printf '%s [av-soak] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+die() { echo "av-soak: ERROR: $2" >&2; exit "$1"; }
+usage() { sed -n '2,/^# Runbook/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+need_value() { [ "$2" -ge 2 ] || die 3 "$1 needs a value (try --help)"; }
 
 MODE=plan
 REPORT_DIR=""
@@ -103,45 +113,42 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --plan) MODE=plan ;;
     --run) MODE=run ;;
-    --report) MODE=report; REPORT_DIR="${2:-}"; shift ;;
-    --hours) AV_SOAK_HOURS="${2:-}"; shift ;;
-    --slot-secs) AV_SOAK_SLOT_SECS="${2:-}"; shift ;;
-    --segment-secs) AV_SOAK_SEGMENT_SECS="${2:-}"; shift ;;
-    --run-dir) AV_SOAK_RUN_DIR="${2:-}"; shift ;;
-    --probe-bin-dir) PROBE_BIN_DIR="${2:-}"; shift ;;
-    --win-verdict-exe) WIN_VERDICT_EXE_LOCAL="${2:-}"; shift ;;
-    --spread-columns) AV_SOAK_SPREAD_COLUMNS="${2:-}"; shift ;;
+    --report) need_value "$1" "$#"; MODE=report; REPORT_DIR="$2"; shift ;;
+    --hours) need_value "$1" "$#"; AV_SOAK_HOURS="$2"; shift ;;
+    --slot-secs) need_value "$1" "$#"; AV_SOAK_SLOT_SECS="$2"; shift ;;
+    --segment-secs) need_value "$1" "$#"; AV_SOAK_SEGMENT_SECS="$2"; shift ;;
+    --run-dir) need_value "$1" "$#"; AV_SOAK_RUN_DIR="$2"; shift ;;
+    --probe-bin-dir) need_value "$1" "$#"; PROBE_BIN_DIR="$2"; shift ;;
+    --win-verdict-exe) need_value "$1" "$#"; WIN_VERDICT_EXE_LOCAL="$2"; shift ;;
+    --spread-columns) need_value "$1" "$#"; AV_SOAK_SPREAD_COLUMNS="$2"; shift ;;
     -h | --help) usage; exit 0 ;;
-    *) echo "av-soak: unknown argument '$1' (try --help)" >&2; exit 3 ;;
+    *) die 3 "unknown argument '$1' (try --help)" ;;
   esac
   shift
 done
-
-log() { printf '%s [av-soak] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
-die() { echo "av-soak: ERROR: $2" >&2; exit "$1"; }
 
 DECISION="$HERE/av_soak_decision.py"
 HOURS="${AV_SOAK_HOURS:-8}"
 SLOT_S="${AV_SOAK_SLOT_SECS:-600}"
 SEGMENT_S="${AV_SOAK_SEGMENT_SECS:-30}"
 MIN_SEGMENT_S="${AV_SOAK_MIN_SEGMENT_SECS:-10}"
-SPREAD_COLUMNS="${AV_SOAK_SPREAD_COLUMNS:-}"
 SPREAD_ARGS=()
-if [ -n "$SPREAD_COLUMNS" ]; then SPREAD_ARGS=(--spread-columns "$SPREAD_COLUMNS"); fi
+if [ -n "${AV_SOAK_SPREAD_COLUMNS+x}" ]; then SPREAD_ARGS=(--spread-columns "$AV_SOAK_SPREAD_COLUMNS"); fi
 
 case "$HOURS" in '' | *[!0-9.]* | *.*.*) die 3 "--hours must be a non-negative number, got '$HOURS'" ;; esac
 DURATION_S="$(awk -v h="$HOURS" 'BEGIN { printf "%d", h * 3600 + 0.5 }')"
 
 if [ "$MODE" = report ]; then
-  [ -n "$REPORT_DIR" ] && [ -f "$REPORT_DIR/soak.csv" ] || die 3 "--report needs a run dir holding soak.csv (got '${REPORT_DIR}')"
+  [ -f "$REPORT_DIR/soak.csv" ] || die 3 "--report needs a run dir holding soak.csv (got '${REPORT_DIR}')"
   rc=0
   python3 "$DECISION" report --csv "$REPORT_DIR/soak.csv" --min-duration-h "$HOURS" \
     --json "$REPORT_DIR/report-latest.json" "${SPREAD_ARGS[@]}" || rc=$?
   exit "$rc"
 fi
 
-case "$SLOT_S" in '' | *[!0-9]*) die 3 "--slot-secs must be an integer, got '$SLOT_S'" ;; esac
-case "$SEGMENT_S" in '' | *[!0-9]*) die 3 "--segment-secs must be an integer, got '$SEGMENT_S'" ;; esac
+for _n in "$SLOT_S" "$SEGMENT_S" "$MIN_SEGMENT_S"; do
+  case "$_n" in '' | *[!0-9]*) die 3 "--slot-secs / --segment-secs must be integers (got '$_n')" ;; esac
+done
 [ "$SEGMENT_S" -ge 1 ] && [ "$SEGMENT_S" -ge "$MIN_SEGMENT_S" ] || die 3 "--segment-secs $SEGMENT_S is below $MIN_SEGMENT_S s (each camera needs enough QPSK markers for a measured A/V offset)"
 
 OBS_DIR="${AV_SOAK_OBS_DIR:-$HERE}"
@@ -154,12 +161,13 @@ STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}"
 STREAM_DEV_SCENE="${STREAM_PROG_SCENE:-$STREAM_DEV_SCENE_DEFAULT}"
 STRIH_CAPTURE_FPS="${STRIH_CAPTURE_FPS:-30}"
 STREAM_CAPTURE_FPS="${STREAM_CAPTURE_FPS:-30}"
-DECODE_TIMEOUT_S="${AV_SOAK_DECODE_TIMEOUT_S:-480}"
-MERGE_TIMEOUT_S="${AV_SOAK_MERGE_TIMEOUT_S:-300}"
 OBS_TIMEOUT_S="${AV_SOAK_OBS_TIMEOUT_S:-30}"
 SSH_TIMEOUT_S="${AV_SOAK_SSH_TIMEOUT_S:-60}"
+MERGE_TIMEOUT_S="${AV_SOAK_MERGE_TIMEOUT_S:-90}"
+OVERHEAD_S="${AV_SOAK_OVERHEAD_S:-90}"
 RECORDINGS_FREE_MIN_GB="${RECORDINGS_FREE_MIN_GB:-50}"
 BUNDLE_STATE_PORT="${WIN_BUNDLE_STATE_PORT:-8899}"
+HOLD_STATE="${CONNECT_ON_SHOW_HOLD_STATE:-$HOME/.camera-box/connect-on-show-hold.json}"
 STRIH_DECODE="${AV_SOAK_STRIH_DECODE:-$HERE/recording-verdict-on-strih-lx.sh}"
 STREAM_DECODE="${AV_SOAK_STREAM_DECODE:-$HERE/recording-verdict-on-stream.sh}"
 # relative to the strih-lx login home: the same dir recording-verdict-on-strih-lx.sh defaults to
@@ -167,11 +175,11 @@ STRIH_LX_OUT_DIR="${AV_SOAK_STRIH_LX_OUT_DIR:-verdict-out}"
 OUT_DIR_WIN="${OUT_DIR_WIN:-C:\\camera-box\\verdict-out}"
 CAMBOX_OFFLINE_ACK="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "${RIG_FLEET_ACK_FILE:-$HERE/../rig-fleet.txt}")"
 export CAMBOX_OFFLINE_ACK
-SOAK_CAMS="${AV_SOAK_CAMS:-$(av_soak_unacked_cams "$CAMERA_ACTIVE_SET")}"
+SOAK_CAMS="$(av_soak_unacked_cams "${AV_SOAK_CAMS:-$CAMERA_ACTIVE_SET}")"
+[ -n "$SOAK_CAMS" ] || die 3 "no camera to soak (the set minus the acked-offline ones is empty)"
 for _c in $SOAK_CAMS; do
   camera_resolve "$_c" >/dev/null || die 3 "unknown camera '$_c' in the soak set"
 done
-[ -n "$SOAK_CAMS" ] || die 3 "no camera to soak (CAMERA_ACTIVE_SET minus the acked ones is empty)"
 SWEEP="$(CAMERA_ACTIVE_SET="$SOAK_CAMS" camera_active_sweep_pairs)"
 read -r -a _SOAK_CAM_ARR <<< "$SOAK_CAMS"
 N_CAMS="${#_SOAK_CAM_ARR[@]}"
@@ -179,7 +187,12 @@ WINDOW_S=$(( N_CAMS * SEGMENT_S ))
 MIN_SECS="$(av_soak_min_secs "$WINDOW_S")"
 WINDOWS="$(av_soak_windows_count "$DURATION_S" "$SLOT_S")"
 MARKER_ROWS="$(av_soak_marker_rows "$WINDOW_S")"
-[ $(( WINDOW_S + 60 )) -lt "$SLOT_S" ] || die 3 "a window (${N_CAMS} cameras x ${SEGMENT_S} s = ${WINDOW_S} s) + 60 s does not fit the ${SLOT_S} s slot"
+_decode_left=$(( SLOT_S - WINDOW_S - MERGE_TIMEOUT_S - OVERHEAD_S ))
+DECODE_TIMEOUT_S="${AV_SOAK_DECODE_TIMEOUT_S:-$_decode_left}"
+case "$DECODE_TIMEOUT_S$MERGE_TIMEOUT_S$OVERHEAD_S" in *[!0-9]* | "") die 3 "the timeouts must be integers" ;; esac
+[ "$DECODE_TIMEOUT_S" -ge 60 ] \
+  && [ $(( WINDOW_S + DECODE_TIMEOUT_S + MERGE_TIMEOUT_S + OVERHEAD_S )) -le "$SLOT_S" ] \
+  || die 3 "the slot budget does not fit: window ${WINDOW_S} s (${N_CAMS} cameras x ${SEGMENT_S} s) + decode ${DECODE_TIMEOUT_S} s (>= 60) + merge ${MERGE_TIMEOUT_S} s + overhead ${OVERHEAD_S} s must be <= the ${SLOT_S} s slot"
 [ "$STREAM_DEV_SCENE" != "$STREAM_PRODUCTION_SCENE_DEFAULT" ] || die 3 "STREAM_PROG_SCENE names the production scene; the soak only runs on the development scene (issue 1380)"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${AV_SOAK_RUN_DIR:-$HOME/.camera-box/av-soak/$STAMP}"
@@ -188,14 +201,13 @@ RIG_LEASE_REPO_NAME="${AV_SOAK_LEASE_REPO:-camera-box-av-soak}"
 RIG_LEASE_OURS="av-soak-${STAMP}-$$"
 LEASE_EXPECTED_AT="$(date -u -d "+$(( DURATION_S + SLOT_S + 1800 )) seconds" +%Y-%m-%dT%H:%M:%SZ)"
 VERDICT_BIN="${PROBE_BIN_DIR:+$PROBE_BIN_DIR/recording-verdict}"
-STRIH_PARTIAL_NAME="av-soak-${STAMP}-sNNN-strih-partial.json"
 
 # --- --plan: print every step, touch nothing ------------------------------------------------------
 
 plan_cmd() { printf '      '; printf '%q ' "$@"; printf '\n'; }
 
 print_plan() {
-  local strih_argv stream_argv merge_argv marker_win sched_win partial_win bounds_line
+  local strih_argv stream_argv merge_argv marker_win sched_win partial_win bounds_line c seg scene label
   bounds_line="$(python3 "$DECISION" bounds 2>&1)" || bounds_line="UNREADABLE: $bounds_line"
   cat <<EOF
 ===== av-soak PLAN (issue 1367) -- nothing below is executed; run with --run =====
@@ -203,58 +215,62 @@ bounds (read from their single sources): ${bounds_line//$'\n'/; }
 run: ${HOURS} h = ${DURATION_S} s, one window every ${SLOT_S} s -> ${WINDOWS} window(s) at +0 s .. +$(( (WINDOWS - 1) * SLOT_S )) s
 cameras: ${SOAK_CAMS}   (CAMERA_ACTIVE_SET='${CAMERA_ACTIVE_SET}', acked offline: '${CAMBOX_OFFLINE_ACK:-none}')
 window: ONE sweep '${SWEEP}' = ${N_CAMS} x ${SEGMENT_S} s = ${WINDOW_S} s (merge --min-secs ${MIN_SECS})
+slot budget: window ${WINDOW_S} s + decode <= ${DECODE_TIMEOUT_S} s + merge <= ${MERGE_TIMEOUT_S} s + overhead ${OVERHEAD_S} s <= slot ${SLOT_S} s
 boxes: strih ${STRIH_HOST} ($(strih_platform "$STRIH_HOST")), stream ${STREAM_HOST}, cam2 painter ${PAINTER_IP} (marker log ${MARKER_LOG})
-run dir: ${RUN_DIR}  (soak.csv, report-latest.txt, report.json, recordings.tsv, cleanup-plan.txt, pid, STOP)
+run dir: ${RUN_DIR}  (soak.csv, timing.tsv, report-latest.txt, report.txt/json, recordings.tsv, cleanup-plan.txt, pid, STOP)
 EOF
   if [ "$(strih_platform "$STRIH_HOST")" != linux ]; then
     echo "NOTE: --run refuses a Windows strih (retired at M4); only the strih-lx in-place decode is supported."
   fi
   echo
-  echo "SETUP (once):"
+  echo "SETUP (once) -- reads first, nothing changes until step 6:"
   echo "  1. rig lease (issue 830): rig_lease_acquire repo=${RIG_LEASE_REPO_NAME} run_id=${RIG_LEASE_OURS} job=av-soak expected_release_at=${LEASE_EXPECTED_AT}"
   echo "     a live foreign holder -> refuse (exit 4); rig_heartbeat_start av-soak (issue 281)"
   echo "  2. rig-busy guard (issue 1271, read-only): stray_session_check_assert ${OBS_DIR} ${STRIH_HOST} ${STREAM_HOST} 'the av-soak setup'"
-  echo "  3. read-only: stream program must be '${STREAM_DEV_SCENE}' (else refuse: run scripts/rig-mode.sh test first)"
+  echo "  3. read-only: stream program must be '${STREAM_DEV_SCENE}' (else refuse: run scripts/rig-mode.sh test first); strih program snapshot:"
   plan_cmd python3 "$OBS_DIR/obs_phase2.py" program-scene --host "$STREAM_HOST"
-  echo "     read-only: snapshot the strih program scene (restored at cleanup)"
   plan_cmd python3 "$OBS_DIR/obs_phase2.py" program-scene --host "$STRIH_HOST"
   echo "  4. read-only: the permanent cam2 painter is active + its marker log grows (ssh root@${PAINTER_IP}):"
   echo "      $(av_soak_painter_probe_cmd "$MARKER_LOG")"
-  echo "  5. measurement burns ON (check; add only when off; re-check; only the ones turned on are turned off at cleanup):"
-  local c
+  echo "  5. read-only: every burn state:"
   for c in $SOAK_CAMS; do
     plan_cmd python3 "$OBS_DIR/obs_burn_filter.py" check --host "$STRIH_HOST" --input "NDI $c"
   done
   plan_cmd python3 "$OBS_DIR/obs_burn_filter.py" check --host "$STREAM_HOST" --input "$STREAM_PROG_SOURCE"
-  echo "      (when burn_on=False: the rig-busy guard, then obs_burn_filter.py add --host <ip> --input <input>, then check again)"
+  echo "  6. the rig-busy guard again, then: connect-on-show HOLD (issue 1242, the E2E's own helper, state ${HOLD_STATE}):"
+  echo "      connect_on_show_e2e_hold ${OBS_DIR} ${STRIH_HOST} ${HOLD_STATE}; connect_on_show_e2e_wait_live (bounded)"
+  echo "  7. obs_burn_filter.py add --host <ip> --input <input> for each burn that was OFF, then check it again"
   echo
   echo "EVERY SLOT k (slot start = run start + k x ${SLOT_S} s; files under ${RUN_DIR}/slot-NNN):"
-  echo "  a. lease still ours; record volumes free >= ${RECORDINGS_FREE_MIN_GB} GB (curl http://<box>:${BUNDLE_STATE_PORT}/record-dir-stats.json -> bundle_state_gather.recordings_free_verdict; below = stop the soak)"
-  echo "  b. painter probe (as setup 4); not emitting -> the slot is recorded as skipped:painter_not_emitting"
+  echo "  a. lease still ours; record volumes free >= ${RECORDINGS_FREE_MIN_GB} GB (curl http://<box>:${BUNDLE_STATE_PORT}/record-dir-stats.json -> bundle_state_gather.recordings_free_line; below = stop the soak)"
+  echo "  b. read-only: stream program still '${STREAM_DEV_SCENE}' and the painter emitting (else a skipped row)"
   echo "  c. rig-busy guard: stray_session_check_assert ... 'the slot-k StartRecord' (a live broadcast aborts the soak, exit 5)"
-  echo "  d. StartRecord:"
+  echo "     connect_on_show_strih_marker set ${STRIH_HOST} (re-asserts the 4 h hold marker)"
+  echo "  d. StartRecord (the started flag is set BEFORE the call; any start failure stops both boxes):"
   plan_cmd python3 "$OBS_DIR/obs_phase2.py" record --host "$STRIH_HOST" --action start
   plan_cmd python3 "$OBS_DIR/obs_phase2.py" record --host "$STREAM_HOST" --action start
   echo "  e. the sweep -- strih program only (the stream program is never switched):"
   plan_cmd python3 "$HERE/switch_schedule.py" plan --sweep "$SWEEP" --segment-secs "$SEGMENT_S" --duration "$WINDOW_S"
-  local seg scene label
   while IFS= read -r seg; do
     [ -n "$seg" ] || continue
     scene="${seg%%$'\t'*}"; label="${seg##*$'\t'}"
     echo "      [$label] $(printf '%q ' python3 "$OBS_DIR/obs_phase2.py" switch --host "$STRIH_HOST" --program-scene "$scene"); sleep ${SEGMENT_S}"
   done < <(python3 "$HERE/switch_schedule.py" plan --sweep "$SWEEP" --segment-secs "$SEGMENT_S" --duration "$WINDOW_S")
   plan_cmd python3 "$HERE/switch_schedule.py" build --sweep "$SWEEP" --segment-secs "$SEGMENT_S" --duration "$WINDOW_S" --start-ns "<first switch ns>" --boundaries "<later switches + stop ns>"
-  echo "  f. StopRecord (prints each box's recording path -> recordings.tsv + cleanup-plan.txt):"
+  echo "  f. StopRecord, verified (the flag clears only when 'record --action status' reads active=False):"
   plan_cmd python3 "$OBS_DIR/obs_phase2.py" record --host "$STRIH_HOST" --action stop
+  plan_cmd python3 "$OBS_DIR/obs_phase2.py" record --host "$STRIH_HOST" --action status
   plan_cmd python3 "$OBS_DIR/obs_phase2.py" record --host "$STREAM_HOST" --action stop
+  plan_cmd python3 "$OBS_DIR/obs_phase2.py" record --host "$STREAM_HOST" --action status
   echo "  g. read-only marker-log tail from cam2 (${MARKER_ROWS} rows): $(av_soak_marker_snapshot_cmd "$MARKER_LOG" "$MARKER_ROWS")"
   marker_win="$(av_soak_win_join "$OUT_DIR_WIN" "av-soak-${STAMP}-sNNN-markers.csv")"
   sched_win="$(av_soak_win_join "$OUT_DIR_WIN" "av-soak-${STAMP}-sNNN-switch-schedule.json")"
   partial_win="$(av_soak_win_join "$OUT_DIR_WIN" "av-soak-${STAMP}-sNNN-stream-partial.json")"
   echo "     push to the stream box: win_ssh_upload markers -> ${marker_win}; schedule -> ${sched_win}"
-  echo "  h. decode in place, both in parallel, each bounded by ${DECODE_TIMEOUT_S} s:"
+  echo "  h. decode in place, both in parallel, each bounded by ${DECODE_TIMEOUT_S} s (a stream timeout stops the box's recording-verdict):"
   av_soak_strih_extract_argv strih_argv "$STRIH_DECODE" "${VERDICT_BIN:-<PROBE_BIN_DIR>/recording-verdict}" \
-    "$STRIH_LX_OUT_DIR" "$RUN_DIR/slot-NNN" "<strih StopRecord path>" "$STRIH_CAPTURE_FPS" "$STRIH_PARTIAL_NAME"
+    "$STRIH_LX_OUT_DIR" "$RUN_DIR/slot-NNN" "<strih StopRecord path>" "$STRIH_CAPTURE_FPS" \
+    "av-soak-${STAMP}-sNNN-strih-partial.json"
   plan_cmd env STRIH_LX_BOX="$STRIH_HOST" "${strih_argv[@]}"
   av_soak_stream_extract_argv stream_argv "$STREAM_DECODE" "${WIN_VERDICT_EXE_LOCAL:-<WIN_VERDICT_EXE_LOCAL>}" \
     "$OUT_DIR_WIN" "$RUN_DIR/slot-NNN" "<stream StopRecord path>" "$STRIH_CAPTURE_FPS" "$STREAM_CAPTURE_FPS" \
@@ -262,18 +278,19 @@ EOF
   plan_cmd env STREAM_BOX="$STREAM_HOST" "${stream_argv[@]}"
   echo "  i. merge on dev1 (bounded by ${MERGE_TIMEOUT_S} s; its exit code is not the soak verdict):"
   av_soak_merge_argv merge_argv "${VERDICT_BIN:-<PROBE_BIN_DIR>/recording-verdict}" \
-    "$RUN_DIR/slot-NNN/$STRIH_PARTIAL_NAME" "$RUN_DIR/slot-NNN/av-soak-${STAMP}-sNNN-stream-partial.json" \
+    "$RUN_DIR/slot-NNN/av-soak-${STAMP}-sNNN-strih-partial.json" "$RUN_DIR/slot-NNN/av-soak-${STAMP}-sNNN-stream-partial.json" \
     "$MIN_SECS" "$STRIH_CAPTURE_FPS" "$STREAM_CAPTURE_FPS" "<painter run_id>" "$CAMBOX_OFFLINE_ACK" \
     "$RUN_DIR/slot-NNN/switch-schedule.json" "$RUN_DIR/slot-NNN/pixel-proof" "$RUN_DIR/slot-NNN/verdict.json" \
     "${AV_EXPECTED_MS:-}"
   plan_cmd "${merge_argv[@]}"
-  echo "  j. one CSV row + the progress report:"
-  plan_cmd python3 "$DECISION" row --csv "$CSV" --cams "$SOAK_CAMS" --verdict-json "$RUN_DIR/slot-NNN/verdict.json" --epoch-s "<window start>" --slot "<k>" --window-s "$WINDOW_S"
+  echo "  j. one CSV row, one timing.tsv line, the progress report (printed once the first hour is complete):"
+  plan_cmd python3 "$DECISION" row --csv "$CSV" --cams "$SOAK_CAMS" --verdict-json "$RUN_DIR/slot-NNN/verdict.json" --epoch-s "<window start>" --slot "<k>" --slot-s "$SLOT_S" --window-s "$WINDOW_S"
   plan_cmd python3 "$DECISION" report --csv "$CSV" --min-duration-h "$HOURS" "${SPREAD_ARGS[@]}"
   echo "  k. wait for the next slot start (lease heartbeat every <= 10 s; <run-dir>/STOP ends the run)"
   echo
-  echo "CLEANUP (every exit): StopRecord what this run started; switch strih program back to the snapshot; obs_burn_filter.py remove"
-  echo "  on the burns this run turned on; rig_heartbeat_stop; rig_lease_release ${RIG_LEASE_OURS}; the final report:"
+  echo "CLEANUP (every exit; signals ignored; remote calls under setsid -w): StopRecord what is still recording;"
+  echo "  strih program back to the snapshot (switch --prod-floor) when swept; connect_on_show_e2e_restore; obs_burn_filter.py"
+  echo "  remove on the burns this run turned on; rig_heartbeat_stop; rig_lease_release ${RIG_LEASE_OURS}; the final report:"
   plan_cmd python3 "$DECISION" report --csv "$CSV" --min-duration-h "$HOURS" --json "$RUN_DIR/report.json" "${SPREAD_ARGS[@]}"
   echo "  recordings are NOT deleted (owner-only): ${RUN_DIR}/cleanup-plan.txt lists the exact-path removal lines."
   echo
@@ -305,74 +322,149 @@ done
 export STREAM_USER STREAM_PW
 [ -n "${VERDICT_BIN:-}" ] && [ -x "$VERDICT_BIN" ] || die 4 "PROBE_BIN_DIR must hold the CI-built Linux recording-verdict (probe-tools-linux-amd64)"
 [ -n "${WIN_VERDICT_EXE_LOCAL:-}" ] && [ -f "$WIN_VERDICT_EXE_LOCAL" ] || die 4 "WIN_VERDICT_EXE_LOCAL must be the CI-built recording-verdict.exe (probe-tools-windows-amd64)"
-for _t in sshpass curl timeout python3; do
+for _t in sshpass curl timeout setsid python3; do
   command -v "$_t" >/dev/null 2>&1 || die 4 "'$_t' not found on PATH"
 done
+python3 "$DECISION" bounds >/dev/null || die 4 "the gate bounds cannot be read from their Rust sources (a renamed constant?)"
 
 mkdir -p "$RUN_DIR"
 printf '%s\n' "$$" > "$RUN_DIR/pid"
 rm -f "$RUN_DIR/STOP"
 
 SETUP_STARTED=0
+MUTATED=0
 LEASE_HELD=0
+HOLD_ATTEMPTED=0
 LOOP_DONE=0
 STOPPED=0
+IN_CLEANUP=0
 STRIH_REC_STARTED=0
 STREAM_REC_STARTED=0
+STRIH_SWEPT=0
 STRIH_PROGRAM_SNAPSHOT=""
-LAST_STRIH_SCENE=""
 BURNS_TURNED_ON=()
-DECODE_PIDS=()
+BG_PIDS=()
+SLEEP_PID=""
 ABORT_REASON=""
+REC_PATH=""
 
-obs() { timeout "$OBS_TIMEOUT_S" python3 "$OBS_DIR/obs_phase2.py" "$@"; }
-burn() { timeout "$OBS_TIMEOUT_S" python3 "$OBS_DIR/obs_burn_filter.py" "$@"; }
+# Every OBS / burn call is bounded; inside cleanup it runs in its own session (setsid -w) so a
+# second Ctrl-C at the terminal cannot kill the restore (the issue-808 trap recipe).
+obs() {
+  if [ "$IN_CLEANUP" = 1 ]; then
+    setsid -w timeout "$OBS_TIMEOUT_S" python3 "$OBS_DIR/obs_phase2.py" "$@"
+  else
+    timeout "$OBS_TIMEOUT_S" python3 "$OBS_DIR/obs_phase2.py" "$@"
+  fi
+}
+burn() {
+  if [ "$IN_CLEANUP" = 1 ]; then
+    setsid -w timeout "$OBS_TIMEOUT_S" python3 "$OBS_DIR/obs_burn_filter.py" "$@"
+  else
+    timeout "$OBS_TIMEOUT_S" python3 "$OBS_DIR/obs_burn_filter.py" "$@"
+  fi
+}
 cam2_read() {
   timeout "$SSH_TIMEOUT_S" sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
     -o LogLevel=ERROR -o ConnectTimeout=10 "root@$PAINTER_IP" "$1"
 }
-# win_ssh_* (scripts/lib/win-ssh-exec.sh) run in a child bash so `timeout` bounds the whole group.
+# win_bounded FUNC HOST ARGS... -> a scripts/lib/win-ssh-exec.sh call in a child bash, so `timeout`
+# bounds the whole group; the stream credentials come from the (exported) environment, not argv.
 win_bounded() {
-  timeout "$SSH_TIMEOUT_S" bash -c '. "$1"; shift; "$@"' _ "$HERE/lib/win-ssh-exec.sh" "$@"
+  # shellcheck disable=SC2016  # expanded by the child bash
+  timeout "$SSH_TIMEOUT_S" bash -c '. "$1"; f="$2"; h="$3"; shift 3; "$f" "$STREAM_USER" "$STREAM_PW" "$h" "$@"' \
+    _ "$HERE/lib/win-ssh-exec.sh" "$@"
 }
 guard_ok() {
   ( stray_session_check_assert "$OBS_DIR" "$STRIH_HOST" "$STREAM_HOST" "$1" )
 }
+refuse() {  # REASON -> exit 4 while nothing was changed, else 5
+  ABORT_REASON="$1"
+  if [ "$MUTATED" = 1 ]; then exit 5; fi
+  exit 4
+}
+isleep() {  # SECS -> a sleep a signal interrupts at once (only the CURRENT sleep is tracked)
+  sleep "$1" &
+  SLEEP_PID=$!
+  wait "$SLEEP_PID" || true
+  SLEEP_PID=""
+}
+note_recording() {  # K BOX PATH -> recordings.tsv + the exact-path removal plan line
+  local k="$1" box="$2" path="${3:-}"
+  [ -n "$path" ] || return 0
+  printf '%s\t%s\t%s\n' "$k" "$box" "$path" >> "$RUN_DIR/recordings.tsv"
+  if [ "$box" = strih ]; then
+    strih_lx_recording_cleanup_note "" "$STRIH_HOST" "$path" >> "$RUN_DIR/cleanup-plan.txt"
+  else
+    echo "win-stream-snv Shell: Remove-Item -Force -LiteralPath '$path'" >> "$RUN_DIR/cleanup-plan.txt"
+  fi
+}
+set_rec_flag() {  # BOX 0|1
+  if [ "$1" = strih ]; then STRIH_REC_STARTED="$2"; else STREAM_REC_STARTED="$2"; fi
+}
+rec_start() {  # BOX HOST LOG -> the started flag is set BEFORE the call (a start that fails after
+  # StartRecord, or times out, must still be stopped)
+  set_rec_flag "$1" 1
+  obs record --host "$2" --action start >> "$3" 2>&1
+}
+rec_stop() {  # K BOX HOST LOG -> REC_PATH; the flag clears only when the status reads inactive
+  local st
+  REC_PATH="$(obs record --host "$3" --action stop 2>>"$4" | tail -n 1 || true)"
+  st="$(obs record --host "$3" --action status 2>>"$4" | tail -n 1 || true)"
+  case "$st" in
+    active=False*) set_rec_flag "$2" 0 ;;
+    *) log "WARNING: $2 is still recording after StopRecord (status '${st:-unreadable}') -- cleanup retries" ;;
+  esac
+  note_recording "$1" "$2" "$REC_PATH"
+}
 
 cleanup() {
   local rc=$? rrc=2 t pid
-  trap - EXIT INT TERM HUP
   set +e
-  for pid in "${DECODE_PIDS[@]}"; do kill -TERM "$pid" 2>/dev/null; done
+  trap '' INT TERM HUP PIPE
+  IN_CLEANUP=1
+  for pid in "${BG_PIDS[@]}" $SLEEP_PID; do kill -TERM "$pid" 2>/dev/null; done
   if [ "$SETUP_STARTED" = 1 ]; then
-    log "cleanup${ABORT_REASON:+ (aborted: $ABORT_REASON)}"
-    [ "$STRIH_REC_STARTED" = 1 ] && { obs record --host "$STRIH_HOST" --action stop >/dev/null 2>&1 || log "WARNING: strih StopRecord failed"; }
-    [ "$STREAM_REC_STARTED" = 1 ] && { obs record --host "$STREAM_HOST" --action stop >/dev/null 2>&1 || log "WARNING: stream StopRecord failed"; }
-    if [ -n "$STRIH_PROGRAM_SNAPSHOT" ] && [ -n "$LAST_STRIH_SCENE" ] && [ "$LAST_STRIH_SCENE" != "$STRIH_PROGRAM_SNAPSHOT" ]; then
-      obs switch --host "$STRIH_HOST" --program-scene "$STRIH_PROGRAM_SNAPSHOT" >/dev/null 2>&1 \
-        && log "strih program restored to '$STRIH_PROGRAM_SNAPSHOT'" \
-        || log "WARNING: could not restore the strih program to '$STRIH_PROGRAM_SNAPSHOT'"
+    log "cleanup${ABORT_REASON:+ (stopping: $ABORT_REASON)}" 2>/dev/null
+    [ "$STRIH_REC_STARTED" = 1 ] && rec_stop cleanup strih "$STRIH_HOST" "$RUN_DIR/cleanup.log"
+    [ "$STREAM_REC_STARTED" = 1 ] && rec_stop cleanup stream "$STREAM_HOST" "$RUN_DIR/cleanup.log"
+    if [ "$STRIH_SWEPT" = 1 ] && [ -n "$STRIH_PROGRAM_SNAPSHOT" ]; then
+      if obs switch --host "$STRIH_HOST" --program-scene "$STRIH_PROGRAM_SNAPSHOT" --prod-floor \
+          >> "$RUN_DIR/cleanup.log" 2>&1; then
+        log "strih program restored to '$STRIH_PROGRAM_SNAPSHOT'" 2>/dev/null
+      else
+        log "WARNING: could not restore the strih program to '$STRIH_PROGRAM_SNAPSHOT'" 2>/dev/null
+      fi
+    fi
+    if [ "$HOLD_ATTEMPTED" = 1 ]; then
+      # shellcheck disable=SC2016  # expanded by the child bash
+      setsid -w bash -c '. "$1"; . "$2"; shift 2; connect_on_show_e2e_restore "$@"' _ \
+        "$HERE/lib/strih-platform.sh" "$HERE/lib/connect-on-show-hold.sh" "$OBS_DIR" "$STRIH_HOST" "$HOLD_STATE" \
+        >> "$RUN_DIR/cleanup.log" 2>&1
+      log "connect-on-show restored (see cleanup.log)" 2>/dev/null
     fi
     for t in "${BURNS_TURNED_ON[@]}"; do
-      burn remove --host "${t%%|*}" --input "${t#*|}" >/dev/null 2>&1 \
-        && log "burn OFF again on ${t%%|*} '${t#*|}' (it was off before the soak)" \
-        || log "WARNING: could not turn the burn back off on ${t%%|*} '${t#*|}'"
+      if burn remove --host "${t%%|*}" --input "${t#*|}" >> "$RUN_DIR/cleanup.log" 2>&1; then
+        log "burn OFF again on ${t%%|*} '${t#*|}' (it was off before the soak)" 2>/dev/null
+      else
+        log "WARNING: could not turn the burn back off on ${t%%|*} '${t#*|}'" 2>/dev/null
+      fi
     done
     rig_heartbeat_stop >/dev/null 2>&1
   fi
   if [ "$LEASE_HELD" = 1 ]; then
     rig_lease_release "$RIG_LEASE_OURS" >/dev/null 2>&1
-    log "rig lease released"
+    log "rig lease released" 2>/dev/null
   fi
   if [ -s "$CSV" ]; then
     python3 "$DECISION" report --csv "$CSV" --min-duration-h "$HOURS" --json "$RUN_DIR/report.json" \
       "${SPREAD_ARGS[@]}" > "$RUN_DIR/report.txt" 2>&1
     rrc=$?
-    cat "$RUN_DIR/report.txt"
+    cat "$RUN_DIR/report.txt" 2>/dev/null
   else
-    log "no window was recorded -- no report"
+    log "no window was recorded -- no report" 2>/dev/null
   fi
-  [ -s "$RUN_DIR/cleanup-plan.txt" ] && log "recordings kept; the exact-path removal plan: $RUN_DIR/cleanup-plan.txt"
+  [ -s "$RUN_DIR/cleanup-plan.txt" ] && log "recordings kept; the exact-path removal plan: $RUN_DIR/cleanup-plan.txt" 2>/dev/null
   if [ "$LOOP_DONE" = 1 ] || [ "$STOPPED" = 1 ]; then
     exit "$rrc"
   fi
@@ -396,20 +488,16 @@ LEASE_HELD=1
 rig_heartbeat_start av-soak || log "WARNING: could not start the rig-active heartbeat"
 SETUP_STARTED=1
 
-guard_ok "the av-soak setup" || { ABORT_REASON="rig busy at setup"; exit 4; }
+guard_ok "the av-soak setup reads" || refuse "the rig is busy (recording or streaming) at setup"
 stream_prog="$(stream_program_scene_read "$OBS_DIR" "$STREAM_HOST" "")"
-if [ "$stream_prog" != "$STREAM_DEV_SCENE" ]; then
-  ABORT_REASON="stream program is '${stream_prog:-unreadable}', not '$STREAM_DEV_SCENE' (run scripts/rig-mode.sh test first)"
-  exit 4
-fi
+[ "$stream_prog" = "$STREAM_DEV_SCENE" ] \
+  || refuse "the stream program is '${stream_prog:-unreadable}', not '$STREAM_DEV_SCENE' (run scripts/rig-mode.sh test first)"
 STRIH_PROGRAM_SNAPSHOT="$(stream_program_scene_read "$OBS_DIR" "$STRIH_HOST" "")"
-log "stream program '$stream_prog' (development scene); strih program snapshot '${STRIH_PROGRAM_SNAPSHOT:-unreadable}'"
-
+[ -n "$STRIH_PROGRAM_SNAPSHOT" ] || refuse "the strih program scene is unreadable (it could not be restored after the sweep)"
+log "stream program '$stream_prog' (development scene); strih program snapshot '$STRIH_PROGRAM_SNAPSHOT'"
 probe="$(cam2_read "$(av_soak_painter_probe_cmd "$MARKER_LOG")" 2>/dev/null || true)"
-if ! av_soak_painter_ok "$(av_soak_kv active "$probe")" "$(av_soak_kv markers "$probe")" "$(av_soak_kv markers2 "$probe")"; then
-  ABORT_REASON="the cam2 painter is not emitting (${probe//$'\n'/ }) -- TEST mode must be on"
-  exit 4
-fi
+av_soak_painter_ok "$(av_soak_kv active "$probe")" "$(av_soak_kv markers "$probe")" "$(av_soak_kv markers2 "$probe")" \
+  || refuse "the cam2 painter is not emitting (${probe//$'\n'/ }) -- TEST mode must be on"
 
 burn_state() {  # IP INPUT -> True / False / "" (unreadable)
   burn check --host "$1" --input "$2" 2>/dev/null | sed -n 's/.*burn_on=\(True\|False\).*/\1/p' | head -n 1 || true
@@ -417,24 +505,26 @@ burn_state() {  # IP INPUT -> True / False / "" (unreadable)
 BURN_TARGETS=()
 for _c in $SOAK_CAMS; do BURN_TARGETS+=("$STRIH_HOST|NDI $_c"); done
 BURN_TARGETS+=("$STREAM_HOST|$STREAM_PROG_SOURCE")
-guarded_burn=0
+BURNS_OFF=()
 for _t in "${BURN_TARGETS[@]}"; do
-  _ip="${_t%%|*}"; _in="${_t#*|}"
-  _st="$(burn_state "$_ip" "$_in")"
+  _st="$(burn_state "${_t%%|*}" "${_t#*|}")"
   case "$_st" in
-    True) log "burn already ON: $_ip '$_in'" ;;
-    False)
-      if [ "$guarded_burn" = 0 ]; then
-        guard_ok "the av-soak burn-on" || { ABORT_REASON="rig busy before the burn-on"; exit 4; }
-        guarded_burn=1
-      fi
-      burn add --host "$_ip" --input "$_in" >/dev/null 2>&1 || true
-      BURNS_TURNED_ON+=("$_t")
-      [ "$(burn_state "$_ip" "$_in")" = True ] || { ABORT_REASON="the burn did not turn on: $_ip '$_in'"; exit 5; }
-      log "burn turned ON: $_ip '$_in'"
-      ;;
-    *) ABORT_REASON="burn state unreadable: $_ip '$_in'"; exit 4 ;;
+    True) log "burn already ON: ${_t%%|*} '${_t#*|}'" ;;
+    False) BURNS_OFF+=("$_t") ;;
+    *) refuse "burn state unreadable: ${_t%%|*} '${_t#*|}'" ;;
   esac
+done
+
+guard_ok "the av-soak setup mutations" || refuse "the rig became busy before the setup mutations"
+MUTATED=1
+HOLD_ATTEMPTED=1
+connect_on_show_e2e_hold "$OBS_DIR" "$STRIH_HOST" "$HOLD_STATE" || refuse "the connect-on-show hold failed"
+connect_on_show_e2e_wait_live "$OBS_DIR" "$STRIH_HOST" "$HOLD_STATE"
+for _t in "${BURNS_OFF[@]}"; do
+  BURNS_TURNED_ON+=("$_t")
+  burn add --host "${_t%%|*}" --input "${_t#*|}" >/dev/null 2>&1 || true
+  [ "$(burn_state "${_t%%|*}" "${_t#*|}")" = True ] || refuse "the burn did not turn on: ${_t%%|*} '${_t#*|}'"
+  log "burn turned ON: ${_t%%|*} '${_t#*|}'"
 done
 
 # ---- one slot ----
@@ -443,29 +533,35 @@ add_row() {  # K EPOCH OUTCOME [VERDICT_JSON] [RC] [RUN_ID]
   if [ -n "${4:-}" ] && [ -s "$4" ]; then src=(--verdict-json "$4"); fi
   if [ -n "${5:-}" ]; then src+=(--verdict-rc "$5"); fi
   python3 "$DECISION" row --csv "$CSV" --cams "$SOAK_CAMS" "${src[@]}" --epoch-s "$2" --slot "$1" \
-    --window-s "$WINDOW_S" --outcome "$3" --painter-run-id "${6:-}" \
+    --slot-s "$SLOT_S" --window-s "$WINDOW_S" --outcome "$3" --painter-run-id "${6:-}" \
     || log "WARNING: could not append the slot-$1 row"
 }
 
 run_slot() {
-  local k="$1" sd pk probe rid seg scene label ns start_ns="" outcome=ok bounds=() rc
+  local k="$1" sd pk probe rid seg scene label ns start_ns="" outcome=ok bounds=() rc box host fs sp tp
   local strih_path="" stream_path="" marker_win sched_win partial_win strih_argv stream_argv merge_argv
-  local spid tpid src trc
+  local spid tpid mpid src trc t0 t_rec t_stop t_dec t_merge epoch sname
+  t0="$(date +%s)"
   pk="$(printf '%03d' "$k")"
   sd="$RUN_DIR/slot-$pk"
   mkdir -p "$sd"
   [ "$(rig_lease_read_holder_field run_id)" = "$RIG_LEASE_OURS" ] || { ABORT_REASON="the rig lease is no longer ours"; exit 5; }
   rig_lease_heartbeat_touch
-  local box host fs
   for box in strih stream; do
     if [ "$box" = strih ]; then host="$STRIH_HOST"; else host="$STREAM_HOST"; fi
     fs="$(av_soak_free_space_verdict "$host" "$BUNDLE_STATE_PORT" "$RECORDINGS_FREE_MIN_GB" "$HERE")"
     if [ "${fs%% *}" = WARN ]; then
-      log "STOP: $box record volume has only ${fs#* } GB free (< ${RECORDINGS_FREE_MIN_GB} GB)"
+      ABORT_REASON="the $box record volume has only ${fs#* } GB free (< ${RECORDINGS_FREE_MIN_GB} GB)"
+      log "STOP: $ABORT_REASON"
       STOPPED=1
       return 1
     fi
   done
+  if [ "$(stream_program_scene_read "$OBS_DIR" "$STREAM_HOST" "")" != "$STREAM_DEV_SCENE" ]; then
+    log "slot $k skipped: the stream program is no longer '$STREAM_DEV_SCENE'"
+    add_row "$k" "$(date +%s)" "skipped:stream_not_dev_scene"
+    return 0
+  fi
   probe="$(cam2_read "$(av_soak_painter_probe_cmd "$MARKER_LOG")" 2>/dev/null || true)"
   if ! av_soak_painter_ok "$(av_soak_kv active "$probe")" "$(av_soak_kv markers "$probe")" "$(av_soak_kv markers2 "$probe")"; then
     log "slot $k skipped: the cam2 painter is not emitting (${probe//$'\n'/ })"
@@ -475,29 +571,27 @@ run_slot() {
   rid="$(av_soak_kv run_id "$probe")"
   rid="${rid:-0}"
   guard_ok "the slot-$k StartRecord" || { ABORT_REASON="a broadcast is live (slot $k)"; exit 5; }
-  if ! obs record --host "$STRIH_HOST" --action start > "$sd/record-start.log" 2>&1; then
-    add_row "$k" "$(date +%s)" "skipped:strih_start_record_failed"
+  connect_on_show_strih_marker set "$STRIH_HOST"
+  if ! rec_start strih "$STRIH_HOST" "$sd/record-start.log" \
+     || ! rec_start stream "$STREAM_HOST" "$sd/record-start.log"; then
+    log "slot $k: a StartRecord failed -- stopping both boxes (see $sd/record-start.log)"
+    [ "$STRIH_REC_STARTED" = 1 ] && rec_stop "$k" strih "$STRIH_HOST" "$sd/record-stop.log"
+    [ "$STREAM_REC_STARTED" = 1 ] && rec_stop "$k" stream "$STREAM_HOST" "$sd/record-stop.log"
+    add_row "$k" "$(date +%s)" "skipped:start_record_failed" "" "" "$rid"
     return 0
   fi
-  STRIH_REC_STARTED=1
-  if ! obs record --host "$STREAM_HOST" --action start >> "$sd/record-start.log" 2>&1; then
-    strih_path="$(obs record --host "$STRIH_HOST" --action stop 2>/dev/null || true)"
-    STRIH_REC_STARTED=0
-    add_row "$k" "$(date +%s)" "skipped:stream_start_record_failed"
-    return 0
-  fi
-  STREAM_REC_STARTED=1
+  t_rec="$(date +%s)"
   while IFS= read -r seg; do
     [ -n "$seg" ] || continue
     scene="${seg%%$'\t'*}"; label="${seg##*$'\t'}"
+    STRIH_SWEPT=1
     if ! ns="$(obs switch --host "$STRIH_HOST" --program-scene "$scene" </dev/null 2>>"$sd/sweep.log" | tail -n 1)" \
         || [ -z "$ns" ]; then
       outcome="no_verdict:switch_failed_${label}"
       break
     fi
-    LAST_STRIH_SCENE="$scene"
     if [ -z "$start_ns" ]; then start_ns="$ns"; else bounds+=("$ns"); fi
-    sleep "$SEGMENT_S"
+    isleep "$SEGMENT_S"
   done < <(python3 "$HERE/switch_schedule.py" plan --sweep "$SWEEP" --segment-secs "$SEGMENT_S" --duration "$WINDOW_S")
   bounds+=("$(date +%s%N)")
   if [ "$outcome" = ok ] && ! python3 "$HERE/switch_schedule.py" build --sweep "$SWEEP" --segment-secs "$SEGMENT_S" \
@@ -505,16 +599,9 @@ run_slot() {
       > "$sd/switch-schedule.json" 2>>"$sd/sweep.log"; then
     outcome="no_verdict:schedule_build_failed"
   fi
-  strih_path="$(obs record --host "$STRIH_HOST" --action stop 2>>"$sd/record-stop.log" | tail -n 1 || true)"
-  STRIH_REC_STARTED=0
-  stream_path="$(obs record --host "$STREAM_HOST" --action stop 2>>"$sd/record-stop.log" | tail -n 1 || true)"
-  STREAM_REC_STARTED=0
-  printf '%s\tstrih\t%s\n%s\tstream\t%s\n' "$k" "$strih_path" "$k" "$stream_path" >> "$RUN_DIR/recordings.tsv"
-  {
-    [ -n "$strih_path" ] && strih_lx_recording_cleanup_note "" "$STRIH_HOST" "$strih_path"
-    [ -n "$stream_path" ] && echo "win-stream-snv Shell: Remove-Item -Force -LiteralPath '$stream_path'"
-  } >> "$RUN_DIR/cleanup-plan.txt" || true
-  local epoch
+  rec_stop "$k" strih "$STRIH_HOST" "$sd/record-stop.log"; strih_path="$REC_PATH"
+  rec_stop "$k" stream "$STREAM_HOST" "$sd/record-stop.log"; stream_path="$REC_PATH"
+  t_stop="$(date +%s)"
   if [ -n "$start_ns" ]; then epoch=$(( start_ns / 1000000000 )); else epoch="$(date +%s)"; fi
   if [ "$outcome" != ok ]; then add_row "$k" "$epoch" "$outcome" "" "" "$rid"; return 0; fi
   if [ -z "$strih_path" ] || [ -z "$stream_path" ]; then
@@ -528,14 +615,14 @@ run_slot() {
   marker_win="$(av_soak_win_join "$OUT_DIR_WIN" "av-soak-${STAMP}-s${pk}-markers.csv")"
   sched_win="$(av_soak_win_join "$OUT_DIR_WIN" "av-soak-${STAMP}-s${pk}-switch-schedule.json")"
   partial_win="$(av_soak_win_join "$OUT_DIR_WIN" "av-soak-${STAMP}-s${pk}-stream-partial.json")"
-  if ! win_bounded win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM_HOST" \
+  if ! win_bounded win_ssh_run "$STREAM_HOST" \
         "New-Item -ItemType Directory -Force -Path \"$OUT_DIR_WIN\" | Out-Null" > "$sd/upload.log" 2>&1 \
-     || ! win_bounded win_ssh_upload "$STREAM_USER" "$STREAM_PW" "$STREAM_HOST" "$sd/markers.csv" "$marker_win" >> "$sd/upload.log" 2>&1 \
-     || ! win_bounded win_ssh_upload "$STREAM_USER" "$STREAM_PW" "$STREAM_HOST" "$sd/switch-schedule.json" "$sched_win" >> "$sd/upload.log" 2>&1; then
+     || ! win_bounded win_ssh_upload "$STREAM_HOST" "$sd/markers.csv" "$marker_win" >> "$sd/upload.log" 2>&1 \
+     || ! win_bounded win_ssh_upload "$STREAM_HOST" "$sd/switch-schedule.json" "$sched_win" >> "$sd/upload.log" 2>&1; then
     add_row "$k" "$epoch" "no_verdict:stream_upload_failed" "" "" "$rid"; return 0
   fi
 
-  local sname="av-soak-${STAMP}-s${pk}-strih-partial.json"
+  sname="av-soak-${STAMP}-s${pk}-strih-partial.json"
   av_soak_strih_extract_argv strih_argv "$STRIH_DECODE" "$VERDICT_BIN" "$STRIH_LX_OUT_DIR" "$sd" \
     "$strih_path" "$STRIH_CAPTURE_FPS" "$sname"
   av_soak_stream_extract_argv stream_argv "$STREAM_DECODE" "$WIN_VERDICT_EXE_LOCAL" "$OUT_DIR_WIN" "$sd" \
@@ -544,19 +631,36 @@ run_slot() {
   spid=$!
   STREAM_BOX="$STREAM_HOST" timeout "$DECODE_TIMEOUT_S" "${stream_argv[@]}" > "$sd/stream-extract.log" 2>&1 &
   tpid=$!
-  DECODE_PIDS=("$spid" "$tpid")
+  BG_PIDS=("$spid" "$tpid")
   src=0; wait "$spid" || src=$?
   trc=0; wait "$tpid" || trc=$?
-  DECODE_PIDS=()
-  local sp="$sd/$sname" tp="$sd/av-soak-${STAMP}-s${pk}-stream-partial.json"
+  BG_PIDS=()
+  t_dec="$(date +%s)"
+  if [ "$trc" -eq 124 ]; then
+    log "slot $k: the stream decode hit its ${DECODE_TIMEOUT_S} s bound -- stopping the box's recording-verdict"
+    win_bounded win_ssh_run "$STREAM_HOST" \
+      "Get-Process -Name recording-verdict -ErrorAction SilentlyContinue | Stop-Process -Force" \
+      >> "$sd/stream-extract.log" 2>&1 || true
+  fi
+  sp="$sd/$sname"
+  tp="$sd/av-soak-${STAMP}-s${pk}-stream-partial.json"
   if [ "$src" -ne 0 ] || [ "$trc" -ne 0 ] || [ ! -s "$sp" ] || [ ! -s "$tp" ]; then
     log "slot $k: decode failed (strih rc=$src, stream rc=$trc; logs in $sd)"
+    printf '%s\t%s\t%s\t%s\t-\t%s\n' "$k" $(( t_rec - t0 )) $(( t_stop - t_rec )) $(( t_dec - t_stop )) \
+      $(( t_dec - t0 )) >> "$RUN_DIR/timing.tsv"
     add_row "$k" "$epoch" "no_verdict:decode_failed" "" "" "$rid"; return 0
   fi
   av_soak_merge_argv merge_argv "$VERDICT_BIN" "$sp" "$tp" "$MIN_SECS" "$STRIH_CAPTURE_FPS" "$STREAM_CAPTURE_FPS" \
     "$rid" "$CAMBOX_OFFLINE_ACK" "$sd/switch-schedule.json" "$sd/pixel-proof" "$sd/verdict.json" "${AV_EXPECTED_MS:-}"
-  rc=0
-  timeout "$MERGE_TIMEOUT_S" "${merge_argv[@]}" > "$sd/merge.log" 2>&1 || rc=$?
+  timeout "$MERGE_TIMEOUT_S" "${merge_argv[@]}" > "$sd/merge.log" 2>&1 &
+  mpid=$!
+  BG_PIDS=("$mpid")
+  rc=0; wait "$mpid" || rc=$?
+  BG_PIDS=()
+  t_merge="$(date +%s)"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$k" $(( t_rec - t0 )) $(( t_stop - t_rec )) $(( t_dec - t_stop )) \
+    $(( t_merge - t_dec )) $(( t_merge - t0 )) >> "$RUN_DIR/timing.tsv"
+  log "slot $k timing: pre $(( t_rec - t0 )) s, record $(( t_stop - t_rec )) s, decode $(( t_dec - t_stop )) s, merge $(( t_merge - t_dec )) s, total $(( t_merge - t0 )) s of ${SLOT_S} s"
   if [ -s "$sd/verdict.json" ]; then
     add_row "$k" "$epoch" ok "$sd/verdict.json" "$rc" "$rid"
   else
@@ -566,19 +670,25 @@ run_slot() {
 }
 
 wait_until() {  # TARGET_EPOCH -> 0 when reached, 1 when STOP was requested
-  local target="$1" now left
+  local target="$1" now left=0
   while :; do
-    [ -e "$RUN_DIR/STOP" ] && { log "STOP file found -- ending the run"; STOPPED=1; return 1; }
+    if [ -e "$RUN_DIR/STOP" ]; then
+      ABORT_REASON="the STOP file"
+      log "STOP file found -- ending the run"
+      STOPPED=1
+      return 1
+    fi
     now="$(date +%s)"
     left=$(( target - now ))
     [ "$left" -gt 0 ] || break
     rig_lease_heartbeat_touch
-    sleep $(( left < 10 ? left : 10 ))
+    isleep $(( left < 10 ? left : 10 ))
   done
-  [ "$left" -lt -60 ] && log "slot starts $(( -left )) s late (the previous slot overran)"
+  if [ "$left" -lt -60 ]; then log "slot starts $(( -left )) s late (the previous slot overran)"; fi
   return 0
 }
 
+printf 'slot\tpre_s\trecord_s\tdecode_s\tmerge_s\ttotal_s\n' > "$RUN_DIR/timing.tsv"
 T0="$(date +%s)"
 PARTIAL_PRINTED=0
 for ((k = 0; k < WINDOWS; k++)); do
@@ -588,9 +698,9 @@ for ((k = 0; k < WINDOWS; k++)); do
   if [ -s "$CSV" ]; then
     python3 "$DECISION" report --csv "$CSV" --min-duration-h "$HOURS" "${SPREAD_ARGS[@]}" \
       > "$RUN_DIR/report-latest.txt" 2>&1 || true
-    if [ "$PARTIAL_PRINTED" = 0 ] && [ $(( $(date +%s) - T0 )) -ge 3600 ]; then
-      log "1 h partial:"
-      cat "$RUN_DIR/report-latest.txt"
+    if [ "$PARTIAL_PRINTED" = 0 ] && grep -q '^AV-SOAK PARTIAL' "$RUN_DIR/report-latest.txt"; then
+      log "the first hour is complete -- the 1 h partial:"
+      sed -n '/^AV-SOAK PARTIAL/,/^$/p' "$RUN_DIR/report-latest.txt"
       PARTIAL_PRINTED=1
     fi
   fi

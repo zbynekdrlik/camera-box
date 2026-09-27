@@ -1462,6 +1462,25 @@ def recordings_free_verdict(free_bytes, min_free_gb):
     return "WARN" if free_gb < min_free_gb else "OK"
 
 
+def recordings_free_line(stats_json_text, min_free_gb):
+    """issue 1367 -- the ONE "<VERDICT> <free_gb>" line a bash caller prints from a box's
+    `/record-dir-stats.json` body: `recordings_free_verdict` on its `free_bytes`, the free space in
+    decimal GB with one decimal, or `-1` when unknown. An empty / non-JSON / non-object body is
+    "UNKNOWN -1" (never a false WARN). recording-e2e.sh keeps its inline copy of this shape (that
+    harness is a static-anchor minefield); scripts/lib/av-soak.sh calls this one."""
+    try:
+        d = json.loads(stats_json_text or "")
+    except ValueError:
+        return "UNKNOWN -1"
+    if not isinstance(d, dict):
+        return "UNKNOWN -1"
+    fb = d.get("free_bytes")
+    if not isinstance(fb, (int, float)) or isinstance(fb, bool):
+        fb = None
+    verdict = recordings_free_verdict(fb, float(min_free_gb))
+    return f"{verdict} {'-1' if fb is None else '%.1f' % (fb / 1e9)}"
+
+
 def genlock_build_sha_from_file(path):
     """#756 — the box's DEPLOYED genlock build commit SHA, read from its `GENLOCK_BUILD_SHA.txt`
     (imag: `/opt/obs-genlock/GENLOCK_BUILD_SHA.txt`; the Windows boxes: the SAME file in the

@@ -158,25 +158,17 @@ av_soak_merge_argv() {
 
 # av_soak_free_space_verdict HOST PORT MIN_FREE_GB SCRIPTS_DIR -> prints "<VERDICT> <free_gb>" for
 # the box's OBS record volume: OK / WARN (strictly below MIN_FREE_GB) / UNKNOWN (unreachable or
-# unreadable -- never a false WARN). Copied call shape of recording-e2e.sh check_recordings_free_space
-# (:8899/record-dir-stats.json + bundle_state_gather.recordings_free_verdict). Always returns 0.
+# unreadable -- never a false WARN). The read is recording-e2e.sh check_recordings_free_space's
+# (:8899/record-dir-stats.json); the verdict line is bundle_state_gather.recordings_free_line.
+# Always returns 0.
 av_soak_free_space_verdict() {
   local host="$1" port="$2" min_gb="$3" here="$4" stats out
   stats="$(curl -fsS --max-time 30 "http://${host}:${port}/record-dir-stats.json" 2>/dev/null)" || {
     printf 'UNKNOWN -1\n'
     return 0
   }
-  out="$(printf '%s' "$stats" | PYTHONPATH="$here" python3 -c '
-import json, sys
-import bundle_state_gather as bsg
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    print("UNKNOWN -1")
-    sys.exit(0)
-fb = d.get("free_bytes")
-v = bsg.recordings_free_verdict(fb, float(sys.argv[1]))
-print(v, "-1" if fb is None else "%.1f" % (fb / 1e9))
-' "$min_gb" 2>/dev/null)" || out="UNKNOWN -1"
+  out="$(printf '%s' "$stats" | PYTHONPATH="$here" python3 -c \
+    'import sys, bundle_state_gather as b; print(b.recordings_free_line(sys.stdin.read(), float(sys.argv[1])))' \
+    "$min_gb" 2>/dev/null)" || out="UNKNOWN -1"
   printf '%s\n' "${out:-UNKNOWN -1}"
 }
