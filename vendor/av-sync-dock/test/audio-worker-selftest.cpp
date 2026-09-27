@@ -63,7 +63,9 @@ static double ms_since(steady::time_point t0)
 	return std::chrono::duration<double, std::milli>(steady::now() - t0).count();
 }
 
-/* A gate the worker waits at inside a handler, so the test controls what is queued behind it. */
+/* A gate the worker waits at inside a handler, so the test controls what is queued behind it.
+ * Both waits are bounded (5 s) and a timeout is a FAIL: a FIFO that deadlocks its producer (say, a
+ * lock held across the handler) then fails the run instead of hanging it. */
 struct Latch {
 	std::mutex m;
 	std::condition_variable cv;
@@ -74,12 +76,14 @@ struct Latch {
 		std::unique_lock<std::mutex> lock(m);
 		entered = true;
 		cv.notify_all();
-		cv.wait(lock, [this]() { return open; });
+		CHECK(cv.wait_for(lock, std::chrono::seconds(5), [this]() { return open; }),
+		      "latch: the test released the worker within 5 s");
 	}
 	void wait_entered()
 	{
 		std::unique_lock<std::mutex> lock(m);
-		cv.wait(lock, [this]() { return entered; });
+		CHECK(cv.wait_for(lock, std::chrono::seconds(5), [this]() { return entered; }),
+		      "latch: the worker entered the handler within 5 s");
 	}
 	void release()
 	{
@@ -306,19 +310,16 @@ static void test_sessions()
 	fifo.publish(p, 1, BLOCK, 5);
 	fifo.end_session(4); // the second session ends while the first end is still queued
 	latch.release();
-	CHECK(wait_taken(fifo, 3), "session: every block handled");
-	{
-		const steady::time_point t0 = steady::now();
-		while (ms_since(t0) < 200)
-			std::this_thread::sleep_for(std::chrono::milliseconds(5));
-	}
+	/* A block published after the last end is handled after it: once b9 is handled, every end is. */
+	fifo.publish(p, 1, BLOCK, 9);
+	CHECK(wait_taken(fifo, 4), "session: every block handled");
 	fifo.stop();
 	std::string trace;
 	for (size_t k = 0; k < events.size(); k++)
 		trace += (k ? " " : "") + events[k];
-	CHECK(trace == "gap2@1 b1 b2 end3 gap2@5 b5 end4",
-	      "session: each end comes after its session's blocks and before the next session's");
-	if (trace != "gap2@1 b1 b2 end3 gap2@5 b5 end4")
+	const std::string want = "gap2@1 b1 b2 end3 gap2@5 b5 end4 gap2@9 b9";
+	CHECK(trace == want, "session: each end comes after its session's blocks and before the next session's");
+	if (trace != want)
 		std::printf("  trace: %s\n", trace.c_str());
 }
 
@@ -369,8 +370,9 @@ static void test_dropped_session_merges_its_end()
 		std::printf("  trace: %s\n", trace.c_str());
 }
 
-/* Many sessions end inside the worker's backlog: every end is delivered, in order, and the end ring
- * (slots + 1 entries) never overflows, since each queued end follows a later accepted block. */
+/* Many sessions end inside the worker's backlog: every end is delivered, in order, merged only over
+ * the sessions whose blocks were all dropped. (The ring's slots + 1 bound is stressed by
+ * test_ring_holds_slots_plus_one_ends below.) */
 static void test_every_end_in_a_full_backlog()
 {
 	std::vector<std::string> events;
@@ -400,20 +402,95 @@ static void test_every_end_in_a_full_backlog()
 	}
 	latch.release();
 	CHECK(wait_taken(fifo, 4), "backlog: the accepted blocks are handled");
-	{
-		const steady::time_point t0 = steady::now();
-		while (ms_since(t0) < 200)
-			std::this_thread::sleep_for(std::chrono::milliseconds(5));
-	}
+	CHECK(fifo.publish(p, 1, BLOCK, 13), "backlog: a block after the backlog is accepted");
+	CHECK(wait_taken(fifo, 5), "backlog: the block after every earlier end is handled");
 	fifo.stop();
 	std::string trace;
 	for (size_t k = 0; k < events.size(); k++)
 		trace += (k ? " " : "") + events[k];
-	const std::string want = "b0 end100 b1 end101 b2 end102 b3 end112";
+	const std::string want = "b0 end100 b1 end101 b2 end102 b3 end112 b13";
 	CHECK(trace == want, "backlog: every end is delivered in order, merged only over dropped sessions");
 	if (trace != want)
 		std::printf("  trace: %s\n", trace.c_str());
 	CHECK(fifo.dropped() == 9, "backlog: nine blocks dropped");
+}
+
+/* The ring's (slots + 1)-th entry: pending ends have distinct `after` values within
+ * [handled blocks, accepted blocks], so there are at most count + 1 of them, and the + 1 is an end
+ * queued after the worker handled every block, before it retakes the lock to deliver it. Only a race
+ * reaches that state (the worker woken, not yet running), so this is a stress loop: each round ends a
+ * fully handled session and at once publishes + ends two more sessions into a 2-slot FIFO. Every
+ * delivered event must be the expected one; a correct FIFO can never fail it, while a ring of only
+ * `slots` entries overwrites its front end in the rounds that fill it (most of them on dev1). */
+static void test_ring_holds_slots_plus_one_ends()
+{
+	const int rounds = 2000;
+	std::mutex m;
+	std::vector<int64_t> events; // a block = its timestamp, an end = -(reason)
+	events.reserve((size_t)rounds * 6 + 1);
+	CbAudioBlockFifo fifo(2);
+	CbAudioBlockFifo::Handlers h;
+	h.process = [&](const CbAudioBlock &b) {
+		std::lock_guard<std::mutex> lock(m);
+		events.push_back((int64_t)b.timestamp);
+	};
+	h.on_session_end = [&](unsigned reason) {
+		std::lock_guard<std::mutex> lock(m);
+		events.push_back(-(int64_t)reason);
+	};
+	CHECK(fifo.start(h, 1, BLOCK), "ring: start");
+	std::vector<float> x(BLOCK, 0.f);
+	const float *p[1] = {x.data()};
+	std::vector<int64_t> want;
+	uint64_t handled = 0;
+	bool first_two_accepted = true;
+	int third_dropped = 0;
+	for (int r = 0; r < rounds; r++) {
+		const uint64_t a = (uint64_t)r * 3 + 1;
+		if (!wait_taken(fifo, handled)) // the previous round's blocks, so `a` finds a free slot
+			break;
+		first_two_accepted = fifo.publish(p, 1, BLOCK, a) && first_two_accepted;
+		handled++;
+		if (!wait_taken(fifo, handled))
+			break;
+		fifo.end_session((unsigned)a);
+		first_two_accepted = fifo.publish(p, 1, BLOCK, a + 1) && first_two_accepted;
+		fifo.end_session((unsigned)(a + 1));
+		/* `taken()` counts a block before the worker frees its slot, so block `a` can still hold
+		 * one: then this third block finds both slots full and is dropped, and its session (never
+		 * seen by the worker) merges its end into the previous one. */
+		const bool third = fifo.publish(p, 1, BLOCK, a + 2);
+		fifo.end_session((unsigned)(a + 2));
+		want.push_back((int64_t)a);
+		want.push_back(-(int64_t)a);
+		want.push_back((int64_t)(a + 1));
+		if (third) {
+			handled += 2;
+			want.push_back(-(int64_t)(a + 1));
+			want.push_back((int64_t)(a + 2));
+		} else {
+			handled += 1;
+			third_dropped++;
+		}
+		want.push_back(-(int64_t)(a + 2));
+	}
+	const uint64_t last = (uint64_t)rounds * 3 + 1;
+	CHECK(wait_taken(fifo, handled), "ring: the last round's blocks handled");
+	first_two_accepted = fifo.publish(p, 1, BLOCK, last) && first_two_accepted; // after every end
+	handled++;
+	want.push_back((int64_t)last);
+	CHECK(wait_taken(fifo, handled), "ring: every block handled");
+	fifo.stop();
+	CHECK(first_two_accepted, "ring: the first two blocks of a round always fit");
+	std::printf("ring: %d rounds, %d with the third block dropped\n", rounds, third_dropped);
+	size_t first_bad = 0;
+	while (first_bad < want.size() && first_bad < events.size() && want[first_bad] == events[first_bad])
+		first_bad++;
+	CHECK(events.size() == want.size() && first_bad == want.size(),
+	      "ring: every block and every end arrives once, in order, over 2000 racing rounds");
+	if (first_bad < want.size() || events.size() != want.size())
+		std::printf("  ring: %zu events (want %zu), first difference at %zu\n", events.size(), want.size(),
+			    first_bad);
 }
 
 static void test_lifecycle_and_timing()
@@ -471,6 +548,8 @@ static void test_lifecycle_and_timing()
 
 int main()
 {
+	/* Line-buffered: a FAIL line reaches the log even if a later check hangs or crashes. */
+	std::setvbuf(stdout, nullptr, _IOLBF, 0);
 	test_gate();
 	test_order_and_contents();
 	test_producer_never_blocked();
@@ -478,6 +557,7 @@ int main()
 	test_sessions();
 	test_dropped_session_merges_its_end();
 	test_every_end_in_a_full_backlog();
+	test_ring_holds_slots_plus_one_ends();
 	test_lifecycle_and_timing();
 	if (g_failures == 0) {
 		std::printf("audio-worker-selftest: ALL PASS\n");
