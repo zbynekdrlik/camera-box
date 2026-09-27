@@ -391,7 +391,10 @@ wrong PR with no review of it.
   three sibling lanes dispatched the same way sat on `origin/dev`). Before EVERY integration merge
   run `git merge-base <lane-branch> dev` / `git log --oneline dev..<lane-branch>`: if main-side merge
   commits show up in that range, `git cherry-pick` the lane's own commits onto `dev` instead of
-  `git merge` — a merge would drag main's merge commits into dev's history.
+  `git merge` — a merge would drag main's merge commits into dev's history. Worker side (issue 1377,
+  2026-09-27): such a lane's startup `git merge --ff-only origin/dev` FAILS (main's merge commits are
+  never dev ancestors); with no own commits yet, `git switch -c worktree-issue-<N> origin/dev` in the
+  lane's own worktree gives a clean dev-based branch — report that branch name, not the stale one.
 - **A worker's OWN local `origin/dev` tracking ref can drift AHEAD mid-session too** (confirmed
   live, issue 1278, 2026-09-02: a lane's local `origin/dev` moved from its own fork point
   `85ee75632` to `ddf43a3a8` — a SIBLING lane's merge — sometime between the lane's initial fetch

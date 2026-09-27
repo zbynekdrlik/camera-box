@@ -29,7 +29,12 @@ and REFUSES the run on DRIFT (exit 20) or UNKNOWN (exit 11). Exit-code roll-up i
 `scripts/lib/version-integrity-vendor-pin.sh`. The gate sources both BEFORE its source-guard, so
 sourcing the gate (`run_sourced` in `tests/version_integrity_gate.rs`) still defines every function;
 a new pure facet family goes into its own `scripts/lib/version-integrity-*.sh` the same way, never
-back into the gate body.
+back into the gate body. Proving such a move is behaviour-neutral with zero cargo (Tier-0): `git show
+origin/dev:<gate>` into a scratch `scripts/` copy (its sourced siblings copied alongside), source old
+and new under the tests' `set -uo pipefail; . gate; set +e` shape and diff `declare -f` of every moved
+function + fixture calls of every verdict branch; then execute the gate end-to-end from two scratch
+`scripts/` trees that differ ONLY in the moved files, with the hermetic
+`VERSION_INTEGRITY_GATE_VENDOR_NEWEST/_PENDING` seams, and `cmp` stdout+stderr+exit codes.
 
 ## Two-step facet rollout: opt-in (#756-shape) → ENFORCED (#758-shape)
 
