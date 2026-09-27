@@ -69,10 +69,14 @@ Development never programs `PRO` itself. EVENT mode puts `PRO` back.
   mode on (the OBS default, `SwapScenesMode`), a program change is a transition and when it ENDS OBS
   puts the OLD program into the preview (`TransitionStopped`). After development the program is
   `Development`, so the cut to `PRO` leaves `Development` in the preview a moment LATER — a one-shot
-  check runs before that. `reassert_stale_preview` polls for the transition duration
-  (`GetCurrentSceneTransition`) + `OBS_PREVIEW_SWAP_MARGIN_S` (1.5 s) and moves the preview every
-  time it shows `Development`; an operator's own preview is untouched (pure
-  `stale_preview_target`). Otherwise a Transition click would put `Development` back on air and skip
+  check runs before that. `reassert_stale_preview` follows the OBSERVED end: it polls
+  `GetCurrentSceneTransitionCursor` until the transition was seen running and reads 1.0 (a stale 1.0
+  from the previous transition is trusted only after a 1 s start timeout; a cut is 1.0 at once),
+  then waits `OBS_PREVIEW_SWAP_MARGIN_S` (1.5 s), under a 30 s cap; no cursor = the margin only.
+  Never the configured duration: a stinger is a FIXED transition (`GetCurrentSceneTransition`
+  reports no duration) and a per-scene override duration is not reported. Every poll moves the
+  preview when it shows `Development`; an operator's own preview is untouched (pure
+  `stale_preview_target`); a failed preview set fails loud, also under `--black-report-only`. Otherwise a Transition click would put `Development` back on air and skip
   the Companion `PRODUCTION` trigger.
 - TEST gap 2 and the park use `--prod-floor` too: the development program is production content,
   proven with the same #677 floor `prod-scene` uses for the same scene.

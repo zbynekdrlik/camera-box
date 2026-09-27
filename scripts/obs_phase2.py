@@ -47,9 +47,9 @@ INPUT = "phase2-probe-src"
 
 # issue 1380: a nested scene (or group) scene item; program-rendered-input descends into it.
 _SCENE_SOURCE_TYPE = "OBS_SOURCE_TYPE_SCENE"
-# issue 1380: `switch --replace-preview` keeps the Studio Mode preview off the stale scene for the
-# transition duration plus this margin (the swap lands when the transition ENDS), polling at this
-# cadence (scripts/stream_dev_scene.py reassert_stale_preview).
+# issue 1380: `switch --replace-preview` keeps the Studio Mode preview off the stale scene until the
+# OBSERVED transition end (the cursor) plus this margin -- the swap lands when the transition ENDS --
+# polling at this cadence (scripts/stream_dev_scene.py reassert_stale_preview).
 PREVIEW_SWAP_MARGIN_S = float(os.environ.get("OBS_PREVIEW_SWAP_MARGIN_S", "1.5"))
 PREVIEW_POLL_S = 0.25
 
@@ -2344,15 +2344,12 @@ def switch(a):
         switch_ns = time.time_ns()  # the boundary — right after the switch lands
         # issue 1380: `--replace-preview <scene>` keeps a Studio Mode PREVIEW off <scene> (the
         # development scene, which OBS's swap puts into the preview when the cut to the production
-        # scene ENDS) for the transition duration + a margin; an operator's own preview is never
-        # touched (scripts/stream_dev_scene.py reassert_stale_preview).
+        # scene ENDS) until the observed transition end + a margin; an operator's own preview is
+        # never touched (scripts/stream_dev_scene.py reassert_stale_preview).
         stale = getattr(a, "replace_preview", "")
         if stale:
-            duration_ms = _rpc(ws, "GetCurrentSceneTransition", ignore_err=True).get(
-                "transitionDuration") or 0
             moved = _dev_scene_module().reassert_stale_preview(
-                _rpc, ws, stale, a.program_scene,
-                window_s=float(duration_ms) / 1000.0 + PREVIEW_SWAP_MARGIN_S,
+                _rpc, ws, stale, a.program_scene, margin_s=PREVIEW_SWAP_MARGIN_S,
                 poll_s=PREVIEW_POLL_S, sleep=time.sleep, now=time.monotonic)
             if moved:
                 sys.stderr.write(

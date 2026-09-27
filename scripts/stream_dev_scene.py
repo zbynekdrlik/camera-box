@@ -87,23 +87,38 @@ def stale_preview_target(studio, preview, stale_scene, target):
     return target
 
 
-def reassert_stale_preview(rpc, ws, stale_scene, target, window_s, poll_s, sleep=time.sleep,
-                           now=time.monotonic):
-    """Keep the Studio Mode PREVIEW off *stale_scene* for *window_s* after a program change.
+def _transition_cursor(rpc, ws):
+    """The current scene transition's cursor (0.0..1.0), or None when OBS cannot report it."""
+    value = rpc(ws, "GetCurrentSceneTransitionCursor", ignore_err=True).get("transitionCursor")
+    return None if value is None else float(value)
+
+
+def reassert_stale_preview(rpc, ws, stale_scene, target, margin_s, poll_s, start_timeout_s=1.0,
+                           cap_s=30.0, sleep=time.sleep, now=time.monotonic):
+    """Keep the Studio Mode PREVIEW off *stale_scene* until the program transition has ENDED plus
+    *margin_s*.
 
     In Studio Mode with swap mode on (the OBS default, `SwapScenesMode`), SetCurrentProgramScene is
     a transition, and when it ENDS OBS puts the OLD program into the preview
     (OBSBasic_Transitions.cpp TransitionStopped). After development the program is `Development`,
     so EVENT's cut to `PRO` leaves `Development` in the preview once the transition finishes; a
-    Transition click would then put it back on air and skip the Companion `PRODUCTION` trigger. A
-    one-shot check runs BEFORE that swap lands, so poll for the whole window (transition duration
-    plus a margin) and move the preview to *target* every time it shows the stale scene. Bounded,
-    never a busy loop; a failed preview set fails loud. Returns how many times it moved it."""
+    Transition click would then put it back on air and skip the Companion `PRODUCTION` trigger.
+
+    The end is OBSERVED, never taken from the configured duration: a stinger is a FIXED transition
+    (GetCurrentSceneTransition reports no duration for it) and a per-scene override duration is not
+    reported at all. So poll GetCurrentSceneTransitionCursor: a value below 1.0 means the transition
+    is running; 1.0 means ended -- but only once this transition was seen running or *start_timeout_s*
+    passed (right after the request the cursor can still read the PREVIOUS transition's 1.0, and a
+    cut is 1.0 at once). No cursor available -> the margin alone. Every poll moves the preview to
+    *target* when it shows the stale scene (an operator's own preview is left alone). Bounded by
+    *cap_s*, never a busy loop; a failed preview set fails loud. Returns how many times it moved it."""
     studio = bool(rpc(ws, "GetStudioModeEnabled", ignore_err=True).get("studioModeEnabled"))
     if not studio or not stale_scene or stale_scene == target:
         return 0
     moved = 0
-    deadline = now() + max(0.0, window_s)
+    t0 = now()
+    started = False
+    end_at = None
     while True:
         preview = rpc(ws, "GetCurrentPreviewScene", ignore_err=True).get(
             "currentPreviewSceneName")
@@ -111,6 +126,15 @@ def reassert_stale_preview(rpc, ws, stale_scene, target, window_s, poll_s, sleep
         if new_preview:
             rpc(ws, "SetCurrentPreviewScene", {"sceneName": new_preview})
             moved += 1
-        if now() >= deadline:
+        t = now()
+        if end_at is None:
+            cursor = _transition_cursor(rpc, ws)
+            if cursor is None:
+                end_at = t + max(0.0, margin_s)
+            elif cursor < 1.0:
+                started = True
+            elif started or t - t0 >= start_timeout_s:
+                end_at = t + max(0.0, margin_s)
+        if (end_at is not None and t >= end_at) or t - t0 >= cap_s:
             return moved
         sleep(poll_s)
