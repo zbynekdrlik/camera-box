@@ -97,7 +97,8 @@ survives the 2-pass confirm, the render-freeze freshness shape). Stateless on th
   needs the tail to start inside a logging stall of the whole pacer. A multi-sender `dest=` key
   uses the same method and carries the same residuals; a one-sender `dest=` key has none of them.
   The fixed-timeline line replaces the shipped one with the pacer fix of this same issue.
-- `vban_pacer_loss_dest` = the worst key (events first, then ms): `ip:port` on the new line,
+- `vban_pacer_loss_dest` = the worst key (events first, then ms): `ip:port/stream` on the new line
+  (e.g. `10.77.7.106:6980/cg`),
   `stream=<name>` on the shipped one. There is no live-output count: it cannot be derived honestly
   from the destination-less line.
 - The server timestamp-parses the tail ONCE (`timestamped_tail_lines`) and hands it to both
