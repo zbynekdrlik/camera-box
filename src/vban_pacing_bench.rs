@@ -13,9 +13,11 @@
 //!   its audio buffering by N ticks: no block for N ticks and every later tick N ticks later, so
 //!   no backlog ever comes (the 27.9 holes: 85, 42, 106, 128, 106 and 490 ms).
 //! * **The send thread.** It sleeps to its deadline, or waits on the audio event for at most
-//!   [`wait_ms`], exactly as `vban_out_loop` does, and every wake is 0–30 ms late: the
-//!   `late_max_ms` measured on resolume on 27.9 reached 30.8 ms (the issue-1372 bench assumed
-//!   0.3 ms).
+//!   [`wait_ms`], exactly as `vban_out_loop` does. A timed wake (a deadline, or an event wait
+//!   that timed out) is 0–30 ms late: the `late_max_ms` measured on resolume on 27.9 reached
+//!   30.8 ms (the issue-1372 bench assumed 0.3 ms). An audio arrival ends an event wait within
+//!   0–2 ms, so the anchor and a late packet start from the real arrival (review round 1: a
+//!   30 ms-late anchor gave the bench more margin than the thread has).
 //!
 //! What the receiver would see is recorded: every packet (audio or silence) with its send instant,
 //! the VBAN frame counter, and every sample produced, sent, dropped or still buffered.
@@ -33,8 +35,10 @@ const BASE_NS: u64 = 1_000_000_000;
 const BLOCKS_10_MIN: usize = 28_125;
 const EVENT_BLOCK: usize = 15_000;
 const LOGGED_STALL_NS: u64 = 55_300_000;
-/// The send thread's measured wake lateness (resolume, 27.9: `late_max_ms` up to 30.8 ms).
+/// The send thread's measured timed-wake lateness (resolume, 27.9: `late_max_ms` up to 30.8 ms).
 const WAKE_LATE_MAX_NS: u64 = 30 * MS;
+/// How late an audio arrival wakes a thread waiting on the audio event.
+const EVENT_WAKE_LATE_MAX_NS: u64 = 2 * MS;
 /// The OBS buffering holes of 27.9 in ticks of 1024 samples: 85, 42, 106, 128, 106, 490 ms.
 const HOLES_27_9: [(usize, u64); 6] = [
     (3_000, 4),
@@ -105,10 +109,9 @@ fn block_arrivals(
 struct Sim {
     /// The send instant of every packet, in order, and whether it carried audio.
     sends: Vec<(u64, bool)>,
-    /// The VBAN frame counter at the end: +1 per packet, + dropped packets (`vban_out_loop`).
-    frames: u64,
-    /// The frame-counter advance from drops alone.
-    frame_holes: u64,
+    /// The instant of the first audio packet after the last silence, and of the last drop.
+    resumed_at: u64,
+    dropped_at: u64,
     produced: u64,
     sent_samples: u64,
     dropped: u64,
@@ -162,7 +165,11 @@ fn run_paced(p: &mut Pacing, arrivals: &[u64], rng: &mut Rng, wake_late_max: u64
         let t = if s.wait_audio {
             let limit = now + u64::from(wait_ms(now, s.wake_ns)) * MS;
             let event = arrivals.get(next).copied().unwrap_or(u64::MAX);
-            event.min(limit).max(now) + rng.uniform(0, wake_late_max)
+            if event <= limit {
+                event.max(now) + rng.uniform(0, EVENT_WAKE_LATE_MAX_NS)
+            } else {
+                limit + rng.uniform(0, wake_late_max)
+            }
         } else {
             s.wake_ns.max(now) + rng.uniform(0, wake_late_max)
         };
@@ -181,8 +188,12 @@ fn run_paced(p: &mut Pacing, arrivals: &[u64], rng: &mut Rng, wake_late_max: u64
         buffered -= s.drop_samples + u64::from(s.send) * ps;
         sim.dropped += s.drop_samples;
         consumed += s.drop_samples;
-        sim.frame_holes += s.drop_samples / ps;
-        sim.frames += s.drop_samples / ps + u64::from(s.send) + u64::from(s.silence);
+        if s.drop_samples > 0 {
+            sim.dropped_at = now;
+        }
+        if s.send > 0 && sim.sends.last().is_some_and(|&(_, audio)| !audio) {
+            sim.resumed_at = now;
+        }
         sim.max_send_per_wake = sim.max_send_per_wake.max(s.send + s.silence);
         for _ in 0..s.send {
             sim.latency
@@ -248,19 +259,12 @@ fn assert_accounted(p: &Pacing, sim: &Sim, what: &str) {
         sim.sent_samples + sim.dropped + sim.left,
         "{what}: every produced sample is sent, dropped (counted) or still buffered; none fabricated"
     );
+    // Every drop is whole packets (asserted per wake in `run_paced`), so the frame-counter skip
+    // `drop / packet_samples` the thread applies before its sends (pinned by the wiring test) is
+    // exact: the receiver's loss counter sees every dropped sample.
     assert_eq!(
         sim.dropped, p.discarded_samples,
         "{what}: every drop is counted"
-    );
-    assert_eq!(
-        sim.frame_holes * P,
-        sim.dropped,
-        "{what}: the frame counter skips exactly the dropped packets"
-    );
-    assert_eq!(
-        sim.frames,
-        sim.sends.len() as u64 + sim.frame_holes,
-        "{what}: one frame per packet plus the skipped ones"
     );
     assert_eq!(
         (sim.sends.len() as u64 - sim.audio_packets()) * P,
@@ -411,25 +415,36 @@ fn every_buffering_hole_up_to_target_plus_grace_loses_nothing_1381() {
 }
 
 #[test]
-fn a_stall_beyond_target_plus_grace_is_exactly_one_counted_discontinuity_1381() {
+fn a_stall_beyond_target_plus_grace_is_one_silence_episode_and_one_counted_repay_1381() {
+    // The shape of a stall past the grace on the logged (1.0-1.5x catch-up) pattern: a silence
+    // episode, then the stalled audio plays late by the silence length while the backlog comes in,
+    // then ONE drop of exactly the silence brings the latency back. Two audible splices (the
+    // pause, the forward skip), each counted: `discontinuities` and `repays` (review round 1).
     for stall_ms in [250u64, 290, 600] {
         for seed in 1..=4u64 {
             let (p, sim) = scenario(seed, &[(EVENT_BLOCK, stall_ms * MS)], &[]);
             let what = format!("{stall_ms} ms stall, seed {seed}");
             assert_accounted(&p, &sim, &what);
-            assert_eq!(p.discontinuities, 1, "{what}");
-            assert_eq!(p.resyncs, 0, "{what}");
+            assert_eq!(
+                (p.discontinuities, p.repays, p.resyncs),
+                (1, 1, 0),
+                "{what}"
+            );
             assert!(p.silence_samples > 0, "{what}: no silence past the grace");
-            // The stall's backlog arrived: the debt was dropped once, exactly the silence, and
-            // the receiver's frame counter skips exactly those packets.
             assert_eq!(p.discarded_samples, p.silence_samples, "{what}");
             assert_eq!(p.stale_samples, 0, "{what}");
-            assert_eq!(sim.frame_holes, p.discarded_samples / P, "{what}");
             // The silence never exceeds the stall itself.
             assert!(
                 ms_of(p.silence_samples) < stall_ms as f64,
                 "{what}: {:.1} ms of silence",
                 ms_of(p.silence_samples)
+            );
+            // How long the stalled audio plays late before the skip: while the backlog arrives
+            // (the audio thread catches up at its own 1.0-1.5x pace).
+            let late_play = sim.dropped_at - sim.resumed_at;
+            assert!(
+                sim.dropped_at > sim.resumed_at && late_play < 5_000 * MS,
+                "{what}: the repay came {late_play} ns after the resume"
             );
             let t = event_ns();
             let before = sim.median_latency(t - 5_000 * MS, t);
@@ -440,6 +455,30 @@ fn a_stall_beyond_target_plus_grace_is_exactly_one_counted_discontinuity_1381() 
                 "{what}: latency before {before} ns, after {after} ns"
             );
         }
+    }
+}
+
+#[test]
+fn known_limit_after_an_in_grace_hole_the_grace_left_for_a_stall_is_smaller_1381() {
+    // t0 never moves and a buffering hole brings no backlog, so after a 128 ms hole the sender
+    // runs about 50 ms late for good and a later stall has only the rest of the grace. A 100 ms
+    // stall that a fresh schedule absorbs (0 silence) then cuts a silence episode. Pinned so the
+    // follow-up that restores the margin has a RED to flip.
+    for seed in 1..=4u64 {
+        let (fresh, _) = scenario(seed, &[(EVENT_BLOCK + 2_000, 100 * MS)], &[]);
+        assert_eq!(fresh.silence_samples, 0, "seed {seed}: fresh schedule");
+        let (p, sim) = scenario(seed, &[(EVENT_BLOCK + 2_000, 100 * MS)], &[(EVENT_BLOCK, 6)]);
+        let what = format!("128 ms hole then a 100 ms stall, seed {seed}");
+        assert_accounted(&p, &sim, &what);
+        assert_eq!(p.discontinuities, 1, "{what}");
+        assert!(
+            p.silence_samples > 0,
+            "{what}: the stall was absorbed after all"
+        );
+        assert_eq!(
+            p.discarded_samples, 0,
+            "{what}: the hole's debt is never repaid"
+        );
     }
 }
 
@@ -457,7 +496,7 @@ fn a_buffering_hole_beyond_target_plus_grace_is_one_silence_that_discards_nothin
             "{what}: more silence than the hole"
         );
         assert_eq!(
-            (p.discarded_samples, sim.frame_holes, p.resyncs),
+            (p.discarded_samples, p.repays, p.resyncs),
             (0, 0, 0),
             "{what}: a hole has no backlog, nothing is stale"
         );
@@ -477,7 +516,7 @@ fn the_27_9_hole_list_never_discards_audio_1381() {
         let what = format!("27.9 holes, seed {seed}");
         assert_accounted(&p, &sim, &what);
         assert_eq!(
-            (p.discarded_samples, sim.frame_holes, p.resyncs),
+            (p.discarded_samples, p.repays, p.resyncs),
             (0, 0, 0),
             "{what}"
         );
@@ -562,16 +601,24 @@ fn the_1381_scenario_table() {
         ("hole 128 ms", vec![], vec![(EVENT_BLOCK, 6)]),
         ("hole 490 ms", vec![], vec![(EVENT_BLOCK, 23)]),
         ("27.9 hole list", vec![], HOLES_27_9.to_vec()),
+        (
+            "hole 128 ms, then stall 100 ms",
+            vec![(EVENT_BLOCK + 2_000, 100 * MS)],
+            vec![(EVENT_BLOCK, 6)],
+        ),
     ];
-    println!("scenario | late_sends | discontinuities | silence_ms | discarded_ms | max_gap_ms");
+    println!(
+        "scenario | late_sends | discontinuities | repays | silence_ms | discarded_ms | max_wire_gap_ms"
+    );
     for (name, stalls, holes) in rows {
         let (p, sim) = scenario(1, &stalls, &holes);
         assert_accounted(&p, &sim, name);
         assert!(p.discarded_samples == 0 || p.discarded_samples == p.silence_samples);
         println!(
-            "{name} | {} | {} | {:.1} | {:.1} | {:.1}",
+            "{name} | {} | {} | {} | {:.1} | {:.1} | {:.1}",
             p.late_sends,
             p.discontinuities,
+            p.repays,
             ms_of(p.silence_samples),
             ms_of(p.discarded_samples),
             sim.max_gap() as f64 / 1e6

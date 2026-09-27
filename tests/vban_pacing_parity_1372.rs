@@ -314,7 +314,7 @@ const WAIT_INPUTS: [(u64, u64); 8] = [
 
 fn line(p: &Pacing, s: Step) -> String {
     format!(
-        "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+        "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
         s.send,
         s.silence,
         s.drop_samples,
@@ -333,6 +333,7 @@ fn line(p: &Pacing, s: Step) -> String {
         p.pending_drop_samples,
         p.late_sends,
         p.discontinuities,
+        p.repays,
         p.silence_samples,
         p.discarded_samples,
         p.resyncs,
@@ -392,11 +393,11 @@ fn c_driver(scripts: &[Script]) -> String {
     writeln!(
         c,
         "static void line(const struct vban_pacing *p, struct vban_pacing_step s)\n{{\n\
-         \tprintf(\"%\" PRIu32 \" %\" PRIu32 \" %\" PRIu64 \" %\" PRIu64 \" %d %d %d %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %d %d %\" PRIu64 \" %d %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu32 \" %\" PRIu64 \"\\n\",\n\
+         \tprintf(\"%\" PRIu32 \" %\" PRIu32 \" %\" PRIu64 \" %\" PRIu64 \" %d %d %d %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %d %d %\" PRIu64 \" %d %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu32 \" %\" PRIu64 \"\\n\",\n\
          \t       s.send, s.silence, s.drop_samples, s.wake_ns, s.wait_audio ? 1 : 0, p->running ? 1 : 0,\n\
          \t       p->primed ? 1 : 0, p->prime_ns, p->t0_ns, p->n_sent, p->catchup_ns, p->starved ? 1 : 0,\n\
          \t       p->silent ? 1 : 0, p->stale_samples, p->repay_ready ? 1 : 0, p->pending_drop_samples,\n\
-         \t       p->late_sends, p->discontinuities, p->silence_samples, p->discarded_samples, p->resyncs,\n\
+         \t       p->late_sends, p->discontinuities, p->repays, p->silence_samples, p->discarded_samples, p->resyncs,\n\
          \t       p->late_max_ns, p->target_ms, p->target_samples);\n}}"
     )
     .unwrap();
@@ -688,6 +689,7 @@ fn the_paced_obs_vban_is_built_staged_and_wired_1372() {
         "send_silence(&t, vban_buf, nbs, sample_size, &addr);",
         "t.header->nuFrame += (uint32_t)(d.drop_samples / nbs);",
         "\"obs-vban pacing: depth_ms=%.1f late_sends=%\"",
+        " repays=%\"",
         " silence_ms=%.1f discarded_ms=%.1f resyncs=%\"",
         " dest=%u.%u.%u.%u:%u stream='%.*s'\"",
     ] {
@@ -696,6 +698,28 @@ fn the_paced_obs_vban_is_built_staged_and_wired_1372() {
             "issue 1381: vban-output-thread.c lost `{needle}`"
         );
     }
+    // In the loop the decision is applied in its contract order: the drop and its frame-counter
+    // skip, then the audio packets, then the silence packets (review round 1).
+    let step_at = thread.find("vban_pacing_step(&pacing, now,").unwrap();
+    let order: Vec<usize> = [
+        "t.header->nuFrame += (uint32_t)(d.drop_samples / nbs);",
+        "send_packet(&t, vban_buf, nbs, sample_size, &addr);",
+        "send_silence(&t, vban_buf, nbs, sample_size, &addr);",
+    ]
+    .iter()
+    .map(|n| {
+        assert_eq!(
+            thread.matches(n).count(),
+            1,
+            "issue 1381: `{n}` must appear once"
+        );
+        thread.find(n).unwrap()
+    })
+    .collect();
+    assert!(
+        step_at < order[0] && order[0] < order[1] && order[1] < order[2],
+        "issue 1381: vban_out_loop must skip the frame counter, then send audio, then silence"
+    );
     // The retired overflow drop, trim and their counters are gone for good.
     let header = read(HEADER);
     for gone in [

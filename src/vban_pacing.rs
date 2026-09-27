@@ -157,6 +157,8 @@ pub struct Pacing {
     pub late_sends: u64,
     /// Silence episodes, resyncs and retarget drops.
     pub discontinuities: u64,
+    /// Stale-debt drops made after the audio resumed: each is a forward skip, its own splice.
+    pub repays: u64,
     pub silence_samples: u64,
     pub discarded_samples: u64,
     pub resyncs: u64,
@@ -190,6 +192,7 @@ impl Pacing {
             pending_drop_samples: 0,
             late_sends: 0,
             discontinuities: 0,
+            repays: 0,
             silence_samples: 0,
             discarded_samples: 0,
             resyncs: 0,
@@ -633,7 +636,10 @@ mod tests {
         assert!(p.silent && !p.starved);
         assert_eq!(p.discontinuities, 1);
         assert_eq!((p.silence_samples, p.stale_samples), (P, P));
-        assert_eq!(p.late_max_ns, GRACE_MS * MS);
+        assert_eq!(
+            p.late_max_ns, 0,
+            "late_max is the lateness of AUDIO packets; a silence slot is late by design"
+        );
         // The overdue slots follow at twice real time, then silence goes out on schedule.
         assert_eq!(s.wake_ns, now + p.half_packet_ns);
         let mut t = s.wake_ns;
@@ -720,10 +726,9 @@ mod tests {
         assert_eq!(s.send, 1);
         assert_eq!(p.stale_samples, 0);
         assert_eq!(p.discarded_samples, p.silence_samples);
-        assert_eq!(
-            p.discontinuities, 1,
-            "the repay is part of the same discontinuity"
-        );
+        // One silence episode, and the repay is its own audible splice (a forward skip after the
+        // stalled audio played late): counted as a repay, not hidden in the episode.
+        assert_eq!((p.discontinuities, p.repays), (1, 1));
         // Never twice.
         let s = p.step(s.wake_ns, p.target_samples + stale + 3 * P);
         assert_eq!(s.drop_samples, 0);
@@ -769,6 +774,30 @@ mod tests {
         let s = p.step(t, deep);
         assert_eq!(s.drop_samples, stale);
         assert_eq!(p.discarded_samples, p.silence_samples);
+        assert_eq!((p.discontinuities, p.repays), (1, 1));
+    }
+
+    #[test]
+    fn a_retarget_up_while_waiting_never_counts_an_on_time_packet_late() {
+        // Review round 1: the waiting slot moves 36 ms into the future; its audio then arrives
+        // exactly at the moved deadline. That packet is on time, not a late send.
+        let mut p = starved_on_slot_1();
+        let d1 = p.deadline_ns(1);
+        p.retarget(100);
+        let moved = p.deadline_ns(1);
+        assert_eq!(moved, d1 + 36 * MS);
+        let s = p.step(moved, 10 * P);
+        assert_eq!(s.send, 1);
+        assert_eq!(p.late_sends, 0, "on time at the moved deadline");
+        assert_eq!(p.catchup_ns, 0, "no catch-up cap for an on-time packet");
+        // Still overdue after a small move: that one IS a late send.
+        let mut q = starved_on_slot_1();
+        let d1 = q.deadline_ns(1);
+        q.step(d1 + 50 * MS, 0);
+        q.retarget(74);
+        assert!(q.deadline_ns(1) < d1 + 60 * MS);
+        q.step(d1 + 60 * MS, 10 * P);
+        assert_eq!(q.late_sends, 1);
     }
 
     #[test]
