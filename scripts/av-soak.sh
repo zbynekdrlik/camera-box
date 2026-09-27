@@ -171,6 +171,9 @@ STREAM_HOST="${STREAM_HOST:-$(obs_fleet_host stream)}"
 OBS_TIMEOUT_S="${AV_SOAK_OBS_TIMEOUT_S:-30}"
 BROADCAST_READS="${AV_SOAK_BROADCAST_READS:-3}"
 BROADCAST_RETRY_S="${AV_SOAK_BROADCAST_RETRY_S:-20}"
+# StopRecord settles asynchronously: re-read the status this many times, this far apart.
+REC_STOP_STATUS_READS="${AV_SOAK_REC_STOP_STATUS_READS:-10}"
+REC_STOP_STATUS_POLL_S="${AV_SOAK_REC_STOP_STATUS_POLL_S:-1}"
 case "$OBS_TIMEOUT_S$BROADCAST_READS$BROADCAST_RETRY_S" in
   *[!0-9]* | "") die 3 "AV_SOAK_OBS_TIMEOUT_S / AV_SOAK_BROADCAST_READS / AV_SOAK_BROADCAST_RETRY_S must be integers" ;;
 esac
@@ -500,8 +503,14 @@ rec_start() {  # BOX HOST LOG -> the started flag is set BEFORE the call (a star
 }
 rec_stop() {  # K BOX HOST LOG -> REC_PATH; the flag clears only when the status reads inactive
   local st
+  local i
   REC_PATH="$(obs record --host "$3" --action stop 2>>"$4" | tail -n 1 || true)"
-  st="$(obs record --host "$3" --action status 2>>"$4" | tail -n 1 || true)"
+  # OBS stops asynchronously: the first status read after StopRecord can still say active
+  for ((i = 1; i <= REC_STOP_STATUS_READS; i++)); do
+    st="$(obs record --host "$3" --action status 2>>"$4" | tail -n 1 || true)"
+    case "$st" in active=False*) break ;; esac
+    if [ "$i" -lt "$REC_STOP_STATUS_READS" ]; then sleep "$REC_STOP_STATUS_POLL_S"; fi
+  done
   case "$st" in
     active=False*) set_rec_flag "$2" 0 ;;
     *) log "WARNING: $2 is still recording after StopRecord (status '${st:-unreadable}') -- cleanup retries" ;;

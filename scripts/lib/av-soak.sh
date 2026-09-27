@@ -82,17 +82,22 @@ av_soak_painter_ok() {
 av_soak_marker_snapshot_cmd() {
   local log="${1:-/run/rig-qpsk-markers.csv}" rows="${2:-2000}"
   case "$rows" in *[!0-9]* | "") rows=2000 ;; esac
-  printf '%s\n' "head -n 1 '${log}'; tail -n +2 '${log}' | tail -n ${rows};"
+  # The emitter log (src/qpsk_marker.rs) opens with a `# qpsk-params` line, then the column header:
+  # keep the non-data lines of its first three (the params line and/or the header), then its last
+  # ROWS data rows (read from the file's tail only; data rows start with the marker index).
+  printf '%s\n' "head -n 3 '${log}' | grep -v '^[0-9]'; tail -n $((rows + 3)) '${log}' | grep '^[0-9]' | tail -n ${rows};"
 }
 
 # av_soak_marker_csv_ok FILE -> 0 iff FILE starts with the QPSK emit-log header
 # (`index,frame_id,emit_ts_ns`, src/qpsk_marker.rs serialize_qpsk_marker_log) and has >= 1 row.
 av_soak_marker_csv_ok() {
-  local f="$1" head
+  local f="$1" head skip
   [ -s "$f" ] || return 1
-  head="$(head -n 1 "$f" | tr -d '\r')"
+  # leading `#` lines (the emitter's `# qpsk-params` line) precede the header
+  skip="$(grep -c '^#' "$f" || true)"
+  head="$(sed -n "$((skip + 1))p" "$f" | tr -d '\r')"
   [ "$head" = "index,frame_id,emit_ts_ns" ] || return 1
-  [ "$(wc -l < "$f")" -ge 2 ]
+  [ "$(wc -l < "$f")" -ge $((skip + 2)) ]
 }
 
 # av_soak_unacked_cams CAMS -> CAMS minus every camera acked offline in CAMBOX_OFFLINE_ACK (the
