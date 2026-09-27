@@ -326,6 +326,7 @@ def test_an_unreadable_input_at_enumeration_fails_the_hold(fake, tmp_path):
     _, twins, failed = op.connect_on_show_hold(None, str(tmp_path / "hold.json"))
     assert "MV NDI cam3" in failed, "a twin the hold could not read may still be on the wire"
     assert "MV NDI cam3" not in twins and "MV NDI cam1" in twins
+    assert "MV NDI cam3" not in f.written, "an input of unknown role is never written"
 
 
 def test_an_unreadable_read_back_never_counts_as_settled(fake, tmp_path):
@@ -333,12 +334,14 @@ def test_an_unreadable_read_back_never_counts_as_settled(fake, tmp_path):
     f = fake(unreadable_after_write={"NDI cam3"})
     _, _, failed = op.connect_on_show_hold(None, str(tmp_path / "hold.json"))
     assert failed == ["NDI cam3"]
+    assert "MV NDI cam3" not in f.written, "its twin stays on the wire (the main is unconfirmed)"
 
 
 def test_a_slow_websocket_still_gets_two_full_sweeps(fake, tmp_path):
     f = fake(read_cost=3.0)  # one sweep of the mains alone outlasts the 5 s budget
     _, twins, failed = op.connect_on_show_hold(None, str(tmp_path / "hold.json"))
     assert failed == [] and twins == ["MV NDI cam1", "MV NDI cam3"]
+    assert f.t > op._SETTLE_BUDGET_S, "the scenario really ran past the budget"
 
 
 def test_the_settle_poll_reads_the_type_defaults_once_per_settle(fake, tmp_path):
