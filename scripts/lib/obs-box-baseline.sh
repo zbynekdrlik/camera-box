@@ -28,6 +28,7 @@
 #   obs_box_apt_update [every list refresh on both paths: the package-lists lock wait]
 #   obs_box_network_tuning [2]   obs_box_max_performance [4]   obs_box_never_sleep [5]
 #   obs_box_boot_safety_net [6]  obs_box_lowlatency_kernel [7] obs_box_cpu_affinity [8]
+#   obs_box_rtprio_off [8, after the affinity: removes a retired render-tick rtprio grant]
 #   obs_box_nvidia_prime [9]     obs_box_dejitter [14] (+ obs_box_crash_popups_off)
 #   obs_box_kiosk [15]           openbox autostart [16]: the caller writes its role autostart (which
 #                                OBS unit, which projector layout) starting with the
@@ -36,9 +37,10 @@
 #   obs_box_cpu_latency [26, after maxperf: the PM QoS idle wake-up latency bound]
 # One grader for every item: scripts/lib/obs-box-baseline-verify.sh (verify-imag.sh + verify-strih.sh).
 #
-# NOT in the baseline (issue 1357 design, comment 5793075833): a realtime (rtprio) grant for the genlock
-# render tick. Its SCHED_FIFO pin assumes a reserved core, and the FIFO policy + affinity leak to every
-# NDI thread OBS spawns from it -- so the baseline keeps rtprio OFF until that vendored defect is fixed.
+# NEVER in the baseline (issue 1357, comment 5793075833): a realtime (rtprio) grant for the genlock render
+# tick. The vendored pin now lands only on isolated nohz_full cores, and the `affinity` row FAILs kernel
+# isolation, so a grant serves nothing and only re-opens the SCHED_FIFO starvation class.
+# obs_box_rtprio_off removes a retired one.
 #
 # Source-only: defines functions, runs nothing. The bodies keep setup-imag.sh's column-0 layout on
 # purpose -- their heredocs must stay byte-identical to what imag has always written. The functions
@@ -513,9 +515,7 @@ echo "  NOTE: preempt=full takes effect on the NEXT boot — this script does no
 # P-core block from THIS box's thread_siblings_list topology, persist it to /etc/<BOX>-isolated-cpus.conf
 # (the OBS launcher's taskset fallback) and self-heal a leftover kernel-isolation grub.d drop-in.
 # Exports OBS_BOX_ISOLATION_PLAN + OBS_BOX_ISOLATED_CPUS (global) for the caller's later steps.
-# issue 1357: NO rtprio grant here -- the render-tick SCHED_FIFO pin assumes a reserved core and its
-# FIFO+affinity leaks to every NDI thread OBS spawns from it (issue comment 5793075833), so the
-# baseline keeps rtprio OFF.
+# issue 1357: NO rtprio grant here -- see obs_box_rtprio_off below.
 obs_box_cpu_affinity() {
     local BOX="${1:?obs_box_cpu_affinity: BOX required}"
 # #842 (recurrence of #784, live-diagnosed 2026-07-28): isolcpus= REMOVES the listed CPUs from the
@@ -581,6 +581,21 @@ if [ -f "/etc/default/grub.d/98-${BOX}-isolation.cfg" ]; then
     echo "  #842: leftover kernel-isolation drop-in removed + grub regenerated"
 fi
 echo "  #483/#842: OBS core reservation is AFFINITY-ONLY (taskset ${OBS_BOX_ISOLATED_CPUS} via /etc/${BOX}-isolated-cpus.conf) -- no kernel isolcpus/nohz_full/irqaffinity written"
+}
+
+# obs_box_rtprio_off -- issue 1357: no OBS box grants realtime priority. The genlock render tick pins
+# itself only onto isolated nohz_full cores, and a box that passes the grader's `affinity` row has none,
+# so a grant serves nothing; its SCHED_FIFO leaked to every NDI thread on strih-lx (comment 5793075833).
+# Self-heal: remove every retired `95-<box>-genlock-rtprio.conf` grant (imag's issue-484 one, strih's
+# retired 11c one); other limits.d files stay. OBS drops the grant at the next boot. The grader row
+# `rtprio` FAILs while one exists. OBS_BOX_LIMITS_DIR overrides the directory (the test seam).
+obs_box_rtprio_off() {
+    local dir="${OBS_BOX_LIMITS_DIR:-/etc/security/limits.d}" f
+    for f in "$dir"/95-*-genlock-rtprio.conf; do
+        [ -e "$f" ] || continue
+        rm -f "$f" || fail "could not remove the leftover rtprio grant ${f}"
+        echo -e "  ${YELLOW}removed the leftover rtprio grant ${f} (rtprio stays OFF, issue 1357; OBS drops it at the next boot)${NC}"
+    done
 }
 
 # obs_box_nvidia_prime BOX -- the imag step 9 (#500/#816/#841) GPU step: on a box with a DISCRETE NVIDIA

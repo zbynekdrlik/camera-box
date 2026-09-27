@@ -410,6 +410,9 @@ genlock_latency_ms_from_log() {
 # gets on-time wakeups), "failed" if the log shows the WARN-and-continue SCHED_OTHER fallback (the
 # syscall failed, almost always a missing rtprio ulimit grant) — the EXACT #572 root cause: imag-nb
 # ran an entire recording on ordinary SCHED_OTHER and lost 35 single-tick 60fps render deadlines.
+# "unpinned" (issue 1357) when the pin logged "render-tick thread not pinned: no isolated cores" -- the
+# CORRECT outcome on a box with no isolated nohz_full core (the shared baseline forbids kernel isolation),
+# where no pin and no rtprio grant is expected.
 # "" (UNKNOWN/absent) when TEXT carries NEITHER line — the log was never read, or the deployed
 # build predates #484 (a stale build is a SEPARATE facet, imag_build_drift_report's dynamic
 # origin/main compare; this parser only judges the pin OUTCOME a #484-or-later build always logs
@@ -419,13 +422,20 @@ genlock_latency_ms_from_log() {
 # genlock_capability_from_log's own comment documents: `grep -q` can flip a genuine match into a
 # false non-match when the upstream `printf` is SIGPIPE'd after grep's early exit).
 genlock_rt_pin_from_log() {
-  local text="$1" ok_line failed_line
+  local text="$1" ok_line unpinned_line failed_line
   # #1184: LC_ALL=C grep -a -> byte-literal, invalid-UTF-8-safe (same class as #1183).
   ok_line="$(printf '%s\n' "$text" \
     | LC_ALL=C grep -aiE 'genlock: render-tick thread set SCHED_FIFO prio [0-9]+ on the isolated core' \
     | head -1 || true)"
   if [ -n "$ok_line" ]; then
     printf 'ok\n'
+    return 0
+  fi
+  unpinned_line="$(printf '%s\n' "$text" \
+    | LC_ALL=C grep -aE 'genlock: render-tick thread not pinned: no isolated cores' \
+    | head -1 || true)"
+  if [ -n "$unpinned_line" ]; then
+    printf 'unpinned\n'
     return 0
   fi
   failed_line="$(printf '%s\n' "$text" \
@@ -956,6 +966,9 @@ check_imag_report() {
     case "$rt_pin_status" in
       ok)
         printf '  %-22s OK       (render-tick thread achieved SCHED_FIFO on the isolated core)\n' "genlock_rt_pin"
+        ;;
+      unpinned)
+        printf '  %-22s OK       (render-tick thread not pinned: no isolated cores on this box, by design -- issue 1357)\n' "genlock_rt_pin"
         ;;
       failed)
         printf '  %-22s DRIFT    (render-tick thread stuck SCHED_OTHER — missing rtprio ulimit grant, #572)\n' "genlock_rt_pin"

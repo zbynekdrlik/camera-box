@@ -541,22 +541,10 @@ obs_box_cpu_affinity imag
 # #841: the SAME derived value feeds the boot autostart's env export (step 16) and step 17's launch.
 IMAG_ISOLATED_CPUS="$OBS_BOX_ISOLATED_CPUS"
 
-# camera-box #484: grant the desktop user rtprio so OBS's genlock render-tick pin can go SCHED_FIFO.
-# The #484 pin (vendor/obs-studio/libobs/obs-video.c) calls sched_setscheduler(SCHED_FIFO) on the ONE
-# timing-critical graphics thread and pins it to the nohz_full=10,11 cores reserved just above. OBS
-# runs as the UNPRIVILEGED ${DESKTOP_USER}, so without an rtprio ulimit grant that syscall fails
-# EPERM and the pin's warn-and-continue fallback silently leaves the thread SCHED_OTHER (harmless but
-# inert). This limits.d drop-in grants rtprio 20 (headroom above the ~10 the thread requests); PAM
-# applies it at the user's next login session — i.e. from the next boot's lightdm autologin, the same
-# boot the #483 isolation takes effect. Idempotent (rewritten each run).
-cat > /etc/security/limits.d/95-imag-genlock-rtprio.conf <<EOF
-# camera-box #484: allow ${DESKTOP_USER} to set SCHED_FIFO (rtprio) so OBS's genlock render-tick
-# thread can be pinned realtime on the #483-reserved nohz_full cores (cpu10,11). Value 20 = headroom
-# above the ~10 the thread requests. Applied by PAM at session start (next boot's autologin).
-${DESKTOP_USER}   -   rtprio   20
-EOF
-echo "  #484: /etc/security/limits.d/95-imag-genlock-rtprio.conf grants ${DESKTOP_USER} rtprio 20"
-echo "  NOTE: the rtprio grant applies at the next login session (next boot's autologin)"
+# issue 1357: rtprio stays OFF. The #484 grant served the render-tick SCHED_FIFO pin, which now lands only
+# on isolated nohz_full cores; obs_box_cpu_affinity above keeps kernel isolation off, so the grant served
+# nothing and its FIFO leaked to the NDI threads (issue comment 5793075833). Remove a leftover grant.
+obs_box_rtprio_off   # issue 1357: remove a retired render-tick rtprio grant
 
 # =============================================================================
 step 9 "NVIDIA dGPU driver (#500): nvidia-driver-595-open + PRIME nvidia-primary"
