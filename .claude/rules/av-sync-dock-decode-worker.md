@@ -172,9 +172,12 @@ source for every output. Live 27.9.2026 on the resolume cg OBS:
     both ends, in order. A single "end pending" slot overwrote the first end and let the worker
     decode the second session's blocks on the first session's lock.
   - **Two ends with no accepted block between them are ONE end** (the second session's blocks were
-    all dropped, so the worker never saw it). That merge is what bounds the ring: every queued end
-    follows a distinct accepted block the worker has not finished, so it never holds more than
-    `slots + 1` entries and `end_session()` never allocates on the audio thread.
+    all dropped, so the worker never saw it). That merge is what bounds the ring: pending ends have
+    distinct `after` values within [handled, accepted] blocks, at most `slots` blocks are unhandled,
+    so there are at most `slots + 1` ends. The `+ 1` is an end queued after the worker handled
+    every block and before it retakes the lock: a race, reached in most rounds of the self-test's
+    stress loop on dev1, and a ring of only `slots` entries corrupts ends there.
+    `end_session()` never allocates on the audio thread.
   - `stop()` discards pending ends (an output stop / restart), which is why a session BEGIN forgets
     the lock too.
 - **The worker runs `st_raw_audio_camera_box` unchanged** on an `audio_data` view of the copied
@@ -192,11 +195,14 @@ source for every output. Live 27.9.2026 on the resolume cg OBS:
 - `g++ -std=c++11 -O2 -Wall -Wextra -Werror -pthread vendor/av-sync-dock/test/audio-worker-selftest.cpp`
   then run it; `-fsanitize=thread` under `setarch -R` for races (clean at issue 1381). Mutants it
   kills: a single overwritten pending end, no merge over a dropped session, a merged end keeping
-  the first reason, an end due one block late, and the FIFO lock held across the handler. The
-  producer check is a paced publish loop judged on p95 (< 2 ms) + max (< 15 ms): an unpaced loop
-  only waits once for a lock-holding worker and its p95 cannot see it, and a single worst-case
-  2 ms bound flakes on a loaded CI runner. Other waits are on flags the handler sets, never a
-  sleep of guessed length.
+  the first reason, an end due one block late, a ring of `slots` entries instead of `slots + 1`
+  (the stress loop), and the FIFO lock held across the handler (the latch waits are bounded, so
+  that deadlock FAILS the run instead of hanging CI; stdout is line-buffered so the FAIL lines
+  survive). The producer check is a paced publish loop judged on p95 (< 2 ms) + max (< 15 ms): an
+  unpaced loop only waits once for a lock-holding worker and its p95 cannot see it, and a single
+  worst-case 2 ms bound flakes on a loaded CI runner. No outcome rests on a sleep: a session end is
+  proven delivered by a block published after it being handled, the lifecycle test waits for a
+  flag the handler sets.
 - The bench `tests/c/av_sync_dock_demod_bench_1381.cpp` (`-Ivendor/av-sync-dock/src
   -Ivendor/av-sync-dock/test`, arg: the stereo mbc fixture) measures the worker decode and the
   audio-thread share in THREAD CPU time (dev1 runs at load ~20; wall time there is scheduler noise)
