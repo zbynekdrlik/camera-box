@@ -109,3 +109,8 @@ def test_rig_health_runs_only_the_strih_hop():
     src = (_ROOT / "scripts" / "rig-health-audit.py").read_text()
     assert '"--hops", "strih", "--report-only"' in src
     assert '("stream", STREAM)' not in src
+
+
+def test_help_prints_the_whole_header():
+    r = subprocess.run(["bash", str(_TOOL), "--help"], capture_output=True, text=True)
+    assert "a missing strih `cg` still FAILs" in r.stdout

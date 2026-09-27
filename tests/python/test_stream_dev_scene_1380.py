@@ -1,8 +1,9 @@
 """issue 1380 -- the stream OBS `Development` scene (the production scene `PRO` nested as a source).
 
-Owner request 27.9.2026: development must never program the owner's production scene `PRO` on the
-stream OBS. The tooling programs its own `Development` scene, which holds `PRO` as a nested scene
-source (same pixels, the same warm `NDI 2ME PGM` receiver), and EVENT mode puts `PRO` back.
+Owner hard rule 27.9.2026, verbatim: "nemas ti nikdy v stream obs davat do programu scenu PRO!!!!!"
+Our tooling programs its own `Development` scene, which holds `PRO` as a nested scene source (same
+pixels, the same warm `NDI 2ME PGM` receiver), and never puts `PRO` on program or preview; EVENT
+mode leaves the stream program to the owner.
 
 These tests pin, with a fake `_rpc` (no live OBS):
   * the pure seeder decision `dev_scene_plan` (missing scene / scene present / item present /
@@ -626,7 +627,148 @@ def test_teardown_still_restores_an_operator_scene(monkeypatch):
     assert state["preview"] == "PRE"
 
 
-def test_the_seeder_module_holds_no_preview_writer():
+def test_the_module_never_programs_a_scene():
+    # The module never selects the program; its one preview write (the swap re-assert below) only
+    # ever writes the scene the caller just programmed, and obs_phase2._rpc refuses PRO anyway.
     src = _SDS_PATH.read_text()
-    assert "SetCurrentPreviewScene" not in src
-    assert "SetCurrentProgramScene" not in src
+    assert '"SetCurrentProgramScene"' not in src
+
+
+def test_rpc_refuses_a_scene_uuid_only_selection():
+    # A uuid would slip past a name check: selecting requests must name the scene.
+    ws = _SendWS()
+    with pytest.raises(obs_phase2.ForbiddenSceneError):
+        obs_phase2._rpc(ws, "SetCurrentProgramScene", {"sceneUuid": "abc-123"})
+    assert ws.sent == []
+
+
+# --- the Studio Mode swap must not leave PRO in the preview after OUR cut ----------------------
+# In Studio Mode with swap mode on (the OBS default), a program change is a transition and when it
+# ENDS OBS puts the OLD program into the preview. Cutting PRO -> Development would therefore leave
+# PRO in the preview as a side effect of our own request; the re-assert moves the preview to the
+# scene we programmed (Development), and only ever writes that scene.
+
+
+def _clock():
+    clock = [0.0]
+
+    def sleep(dt):
+        clock[0] += dt
+
+    return sleep, (lambda: clock[0])
+
+
+def test_reassert_moves_a_swapped_pro_preview_to_the_development_scene():
+    fake, calls, state = _fake_obs(["PRO", "Development"], {}, program="PRO", studio=True,
+                                   preview="PRE", swap_reads=4, cursor_seq=[1.0, 0.3, 0.8, 1.0])
+    fake(None, "SetCurrentProgramScene", {"sceneName": "Development"})
+    sleep, now = _clock()
+    moved = _sds().reassert_stale_preview(fake, FakeWS(), "PRO", "Development", margin_s=0.5,
+                                          poll_s=0.25, sleep=sleep, now=now)
+    for _ in range(3):
+        fake(None, "GetCurrentPreviewScene")
+    assert state["pending"] is None
+    assert state["preview"] == "Development"
+    assert moved == 1
+    assert [c["data"] for c in calls if c["op"] == "SetCurrentPreviewScene"] == [
+        {"sceneName": "Development"}]
+
+
+def test_reassert_outlasts_a_long_fixed_transition():
+    # A stinger reports no configured duration: follow the observed cursor to 1.0, then the margin.
+    fake, _, state = _fake_obs(["PRO", "Development"], {}, program="PRO", studio=True,
+                               preview="PRE", swap_reads=15,
+                               cursor_seq=[0.05 * i for i in range(1, 14)] + [1.0])
+    fake(None, "SetCurrentProgramScene", {"sceneName": "Development"})
+    sleep, now = _clock()
+    _sds().reassert_stale_preview(fake, FakeWS(), "PRO", "Development", margin_s=0.5,
+                                  poll_s=0.25, sleep=sleep, now=now)
+    for _ in range(3):
+        fake(None, "GetCurrentPreviewScene")
+    assert state["preview"] == "Development"
+
+
+def test_reassert_is_bounded_and_idle_outside_studio_mode():
+    fake, calls, _ = _fake_obs(["PRO", "Development"], {}, program="Development", studio=False)
+    moved = _sds().reassert_stale_preview(fake, FakeWS(), "PRO", "Development", margin_s=5.0,
+                                          poll_s=0.25, sleep=lambda dt: None, now=lambda: 0.0)
+    assert moved == 0
+    assert not any(c["op"] == "GetCurrentPreviewScene" for c in calls)
+
+
+def test_reassert_stops_at_the_hard_cap():
+    fake, _, _ = _fake_obs(["PRO", "Development"], {}, program="Development", studio=True,
+                           preview="PRE", cursor_seq=[0.5])
+    sleep, now = _clock()
+    _sds().reassert_stale_preview(fake, FakeWS(), "PRO", "Development", margin_s=0.5,
+                                  poll_s=0.25, cap_s=3.0, sleep=sleep, now=now)
+    assert 3.0 <= now() <= 3.5
+
+
+def test_reassert_fails_loud_when_the_preview_set_fails():
+    fake, _, _ = _fake_obs(["PRO", "Development"], {}, program="Development", studio=True,
+                           preview="PRO", fail_preview_set=True)
+    sleep, now = _clock()
+    with pytest.raises(RuntimeError):
+        _sds().reassert_stale_preview(fake, FakeWS(), "PRO", "Development", margin_s=0.5,
+                                      poll_s=0.25, sleep=sleep, now=now)
+
+
+def test_switch_off_pro_never_leaves_pro_in_the_preview(monkeypatch):
+    fake, calls, state = _fake_obs(["PRO", "Development"], {}, program="PRO", studio=True,
+                                   preview="PRE", swap_reads=2)
+    monkeypatch.setattr(obs_phase2, "_rpc", fake)
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    monkeypatch.setattr(obs_phase2, "PREVIEW_SWAP_MARGIN_S", 0.2)
+    monkeypatch.setattr(obs_phase2, "PREVIEW_POLL_S", 0.01)
+    _spy_nonblack(monkeypatch, {})
+    obs_phase2.switch(_switch_args("Development", prod_floor=True))
+    for _ in range(3):
+        fake(None, "GetCurrentPreviewScene")
+    assert state["program"] == "Development"
+    assert state["preview"] == "Development"
+    assert all(c["data"].get("sceneName") != "PRO" for c in calls
+               if c["op"].startswith("SetCurrent"))
+
+
+def test_switch_from_any_other_scene_does_not_poll_the_preview(monkeypatch):
+    # The #312 all-cambox sweep switches among strih scenes every segment: no preview re-assert and
+    # no transition polling unless the program we leave is the production scene.
+    fake, calls, _ = _fake_obs(["Cam 1", "Cam 2"], {}, program="Cam 1", studio=True,
+                               preview="Cam 2")
+    monkeypatch.setattr(obs_phase2, "_rpc", fake)
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    _spy_nonblack(monkeypatch, {})
+    obs_phase2.switch(_switch_args("Cam 2"))
+    assert not any(c["op"] in ("GetCurrentPreviewScene", "GetCurrentSceneTransitionCursor",
+                               "SetCurrentPreviewScene") for c in calls)
+
+
+def test_prod_scene_off_pro_never_leaves_pro_in_the_preview(monkeypatch):
+    fake, calls, state = _fake_obs(["PRO", "Development"], {}, program="PRO", studio=True,
+                                   preview="PRE", swap_reads=3)
+    monkeypatch.setattr(obs_phase2, "_rpc", fake)
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    monkeypatch.setattr(obs_phase2, "PREVIEW_SWAP_MARGIN_S", 0.2)
+    monkeypatch.setattr(obs_phase2, "PREVIEW_POLL_S", 0.01)
+    monkeypatch.setattr(obs_phase2, "_load_state", lambda: {})
+    monkeypatch.setattr(obs_phase2, "_save_state", lambda st: None)
+    monkeypatch.setattr(obs_phase2, "_force_test_preload", lambda *a, **k: None)
+    monkeypatch.setattr(obs_phase2, "_snapshot_and_set_test_latency", lambda *a, **k: None)
+    _spy_nonblack(monkeypatch, {})
+
+    def fake_out(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+        if rtype == "GetOutputSettings":
+            return {"outputSettings": {"ndi_name": "STREAM (TEST)"}}
+        return fake(ws, rtype, rdata, ignore_err, timeout_s)
+
+    monkeypatch.setattr(obs_phase2, "_rpc", fake_out)
+    args = types.SimpleNamespace(host="10.77.9.204", password="", program_scene="Development",
+                                 ensure_source="", upstream="", test_preload=1,
+                                 test_latency_source="", test_latency_ms=None,
+                                 test_latency_prod_ref=None, test_latency_slack=40)
+    obs_phase2.prod_scene(args)
+    for _ in range(3):
+        fake(None, "GetCurrentPreviewScene")
+    assert state["program"] == "Development"
+    assert state["preview"] == "Development"

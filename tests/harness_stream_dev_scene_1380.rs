@@ -1,5 +1,6 @@
 //! issue 1380 — development programs the stream OBS's own `Development` scene (the production
-//! scene `PRO` nested inside it as a scene source), never `PRO` itself; EVENT mode puts `PRO` back.
+//! scene `PRO` nested inside it as a scene source), never `PRO` itself. Owner hard rule 27.9.2026:
+//! no tool ever puts `PRO` on program or preview; EVENT mode leaves the stream program alone.
 //!
 //! STATIC-ANCHOR tests (the repo's pattern for `recording-e2e.sh` / `rig-mode.sh`, see the
 //! project CLAUDE.md GOTCHA on shared textual anchors). The seeder decision, the `switch`
@@ -150,6 +151,15 @@ fn rig_mode_event_contract_reports_the_stream_program_scene_only() {
     assert!(!body.contains("--arg stream_program_scene"));
     assert!(!body.contains("stream_dev_scene"));
     assert!(!body.contains("stream_production_scene"));
+    assert!(
+        !s.contains("9 items") && !s.contains("9 since issue 1380"),
+        "the #722 contract is back to 8 items; the stream program scene is report-only"
+    );
+    let lib = read("scripts/lib/stream-dev-scene.sh");
+    assert!(
+        !lib.contains("EVENT mode puts the production scene back"),
+        "the lib header must not describe the removed EVENT restore"
+    );
 }
 
 #[test]
