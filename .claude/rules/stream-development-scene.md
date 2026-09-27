@@ -10,6 +10,12 @@ paths:
   - "tests/python/test_stream_dev_scene_1380.py"
   - "tests/python/test_event_assert_stream_program_1380.py"
   - "tests/harness_stream_dev_scene_1380.rs"
+  - "scripts/glk_wire.py"
+  - "scripts/frozen-camera-gate.py"
+  - "scripts/imag_scenes.py"
+  - "scripts/cg_chain_scene.py"
+  - "scripts/warm_cam_scenes.py"
+  - "tests/python/test_scene_select_guard_clients_1380.py"
 ---
 
 # The stream OBS `Development` scene — our tooling NEVER programs `PRO` (issue 1380)
@@ -66,6 +72,35 @@ the stream box has a `PRO` scene).
   Qt-queue delay. Any other cut (the #312 strih sweep) sends no preview request and does not import
   the module (pinned).
 
+## Guard coverage — every OBS-WS client that selects a scene (slice 2)
+
+Standalone clients have their own transport, or they select a scene before the guarded cut. Each
+reuses the ONE guard: `obs_phase2._refuse_forbidden_scene` + `NEVER_PROGRAM_SCENES` +
+`ForbiddenSceneError`, imported lazily from the sibling `obs_phase2.py` with its own `sys.path`
+insert. None of them retypes the scene name.
+
+| Client | Where the guard runs | A refusal |
+|---|---|---|
+| `glk_wire.py` | its `_rpc`, plus its `SCENE` target checked before connecting | `sys.exit`, nothing written |
+| `frozen-camera-gate.py` | its `_rpc` | exit **2** (ERROR), never 1 (FROZEN) |
+| `imag_scenes.py` | `Obs.req`, before sending, also with `ignore_err` | `sys.exit("FAIL: …")` |
+| `cg_chain_scene.py` | `program` / `strih-solo` check the target before the snapshot and any write; its transport is `obs_phase2._rpc` | exit 2 |
+| `warm_cam_scenes.py` | its transport is `obs_phase2._rpc` | (raises) |
+
+- **A restore of a recorded state never re-selects `PRO`.** It skips that one request with a named
+  line and restores the rest, like `teardown`: the `cg_chain_scene.py restore` snapshot, the frozen
+  gate and `warm_cam_scenes.py` preview restores, and the imag `--bootstrap` restore of
+  `~/.config/imag-last-program`. That last one falls back to its own `Cam 1` default, because a
+  refusal would abort the boot seed and Restart-loop the imag OBS (the issue-1156 class).
+- **imag without obs_phase2.** `setup-imag.sh` installs `obs_phase2.py` next to `imag_scenes.py`. If
+  the module cannot be imported (an older box), `Obs.req` cannot check anything. The one selection
+  the seed makes, the `--bootstrap` program restore, then sends nothing and prints why; OBS keeps its
+  saved scene.
+- **Completeness pin.** `tests/python/test_scene_select_guard_clients_1380.py` checks that every
+  `scripts/**/*.py` naming `SetCurrentProgramScene` / `SetCurrentPreviewScene` is in the covered
+  list (the five clients + `obs_phase2.py` + `stream_dev_scene.py`, whose `rpc` is obs_phase2's). A
+  new client must join the list and reuse the guard.
+
 ## The seeder — `obs_phase2.py dev-scene` (bash: `stream_dev_scene_ensure`)
 
 - Pure `dev_scene_plan`: missing scene → create it + the nested item; scene without the item → add
@@ -120,7 +155,10 @@ follows an `OBS_SOURCE_TYPE_SCENE` item into that scene (cycle-guarded; a group 
 
 The same cleanup removed the stream input `NDI obs hudba`. `scripts/cg-chain-verify.sh` defaults to
 `cg-obs strih`; its stream hop is on request only and reports `ABSENT` when its input has no audit
-line (`.claude/rules/cg-chain-verify.md`).
+line (`.claude/rules/cg-chain-verify.md`). Slice 2 dropped the name everywhere else: the certified
+audio table lost its `hudba` key (Rust + the bash replica, 9 → 8 keys, no verdict changed, see
+`genlock-audio-pairing.md`), and the docs, the ops skill, `targets.md` and four test fixtures no
+longer name it. `scripts/latency-pins-baseline.json` never had an entry for it.
 
 ## Consumers that did NOT need a change
 
