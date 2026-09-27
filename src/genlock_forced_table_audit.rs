@@ -270,7 +270,6 @@ mod tests {
             "cg",
             "NDI 2ME PGM",
             "mbc",
-            "NDI obs hudba",
             "NDIAr ppt",
             "VBAN cg-resolume",
         ] {
@@ -280,6 +279,14 @@ mod tests {
             );
         }
         assert!(!is_program_audio_input("CAM3 (usb)"));
+    }
+
+    #[test]
+    fn the_removed_stream_music_input_has_no_role_1380() {
+        // issue 1380: the owner removed the stream input `NDI obs hudba` on 27.9.2026, so the table
+        // drops its `hudba` key: the name is neither a program-audio nor a program-video role.
+        assert!(!is_program_audio_input("NDI obs hudba"));
+        assert!(!is_program_video_input(BoxClass::Stream, "NDI obs hudba"));
     }
 
     #[test]
