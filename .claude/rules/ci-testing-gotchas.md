@@ -1487,3 +1487,25 @@ When a refactor moves the last caller of a shared test helper (`run_block` in
 standalone `rustc --test -A warnings` run hides it too). Run
 `clippy-driver --edition 2021 --test -D warnings <file>` (with the tempfile shim for files that need it)
 on every std-only test file you edit, and delete a helper whose last caller went away.
+
+## A pytest must not catch an exception CLASS from a module another test file may swap in `sys.modules` (issue 1380)
+
+Several `tests/python` files load `scripts/obs_phase2.py` through `importlib` and then assign their
+own copy to `sys.modules["obs_phase2"]` at COLLECTION time. A client script that imports the
+module lazily (`import obs_phase2` inside a function, the standalone OBS-WS clients since issue
+1380) gets whichever copy is registered when the test RUNS. A test that captured
+`obs_phase2.ForbiddenSceneError` at its own collection can then hold a different class object, and
+`pytest.raises(that_class)` misses the real raise, depending on file order. Catch the base class
+(`RuntimeError`) and check the type by NAME (`type(exc).__name__ == "ForbiddenSceneError"`), or
+resolve `sys.modules["obs_phase2"]` inside the test body. `tests/python/test_scene_select_guard_clients_1380.py`
+(`_is_refusal`) is the worked example; the whole `tests/python` suite stays order-independent.
+
+## A bash-vs-Rust parity gate over FINAL verdicts can be blind to a shared lookup table (issue 1380)
+
+`tests/genlock_forced_table_audit_1303.rs` pinned the bash replica to the Rust audio verdict over a
+vector set, and stayed green with a key present on one side only: no audio verdict depends on the
+program key list (the Dante-fed boxes grade everything silent, the cg box defaults to audio). Pin
+the lookup predicate itself (`genlock_forced_table_is_program` vs `is_program_audio_input`), and
+give every key one vector name that matches that key ONLY. A name matching two keys (`VBAN
+cg-resolume` also hits `cg`) keeps a dropped key green. Prove it by dropping one key on one side in
+a scratch run and watching the test go RED.
