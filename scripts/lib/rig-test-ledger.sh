@@ -60,7 +60,8 @@ rig_test_ledger_is_expired() {
 # RIG_TEST_LEDGER_ROW_FORMAT — the ONE printf format of a JSONL ledger row, shared by the local
 # builder (rig_test_ledger_entry_json) and the remote registration (rig_test_ledger_register_remote_cmds)
 # so the two can never drift. Every value is a `%s` ARGUMENT, never text spliced into the format:
-# a `%` in a value is data, not a printf directive (issue 1382).
+# a `%` in a value is data, not a printf directive (issue 1382). Never put a single quote in it:
+# rig_test_ledger_register_remote_cmds embeds it single-quoted in the remote text.
 RIG_TEST_LEDGER_ROW_FORMAT='{"what":"%s","pid_or_unit":"%s","box":"%s","started_by":"%s","max_duration_secs":%s,"start_epoch":%s}\n'
 
 # _rig_test_ledger_json_escape TEXT -> TEXT with the minimal JSON string escaping the ledger
@@ -74,6 +75,8 @@ _rig_test_ledger_json_escape() {
 
 # _rig_test_ledger_shell_quote TEXT -> TEXT as ONE single-quoted shell word (' -> '\''), so the
 # REMOTE shell takes it byte for byte: no $-expansion, no command substitution, no globbing.
+# Not printf %q: that emits bash-only $'...' for control characters, and the remote text must
+# also run under a POSIX sh.
 _rig_test_ledger_shell_quote() {
   local s="$1" q="'\\''"
   printf "'%s'" "${s//\'/$q}"
@@ -117,6 +120,8 @@ RIG_TEST_LEDGER_PATH_DEFAULT="/run/camera-box-rig-tests.jsonl"
 # `\$PAINTER_PID`, an invalid JSON escape the EVENT cleanup skipped as malformed). WHAT / BOX /
 # STARTED_BY / MAX_DURATION_SECS are pure data: JSON-escaped here, then passed single-quoted, so a
 # quote, backslash, `%`, `$` or backtick in them is written verbatim, never expanded on the box.
+# PID_OR_UNIT must be a literal PID / unit name or a bare `$NAME` that holds a PID: any other `$`
+# form (a `$(...)`) would run on the box, and a remote variable's value is not JSON-escaped.
 rig_test_ledger_register_remote_cmds() {
   local what="$1" pidunit="$2" box="$3" started_by="$4" max_duration="$5"
   local ledger="${6:-$RIG_TEST_LEDGER_PATH_DEFAULT}"
