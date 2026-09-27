@@ -458,7 +458,7 @@ PAINTER_PID=\$(cat "$pidfile")
 #      renamed/copied elsewhere (the #721 incident class). $dur is TEST mode's own intentional
 #      measurement-window length (often > the 3600s safety cap) — passed WITH a reason so it is
 #      honored verbatim rather than clamped (rig_test_ledger_effective_max_duration).
-$(rig_test_ledger_register_remote_cmds "frame-probe --paint-only (rig-mode TEST painter)" '\$PAINTER_PID' cam2 "rig-mode.sh test" "$(rig_test_ledger_effective_max_duration "$dur" "rig-mode TEST measurement window")")
+$(rig_test_ledger_register_remote_cmds "frame-probe --paint-only (rig-mode TEST painter)" '$PAINTER_PID' cam2 "rig-mode.sh test" "$(rig_test_ledger_effective_max_duration "$dur" "rig-mode TEST measurement window")")
 sleep 3
 # (5) verify the painter is UP and ACTUALLY PAINTING — presenter-aware (#464). --presenter auto
 #     (the default here) may land on the KMS page-flip presenter, which by design NEVER opens
