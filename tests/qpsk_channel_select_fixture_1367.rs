@@ -9,7 +9,7 @@
 //! the per-channel best pick passes.
 //!
 //! Default features, no ffmpeg, no rig: the WAV is parsed here and fed to the same crate-root demod
-//! + channel pick the probe-gated `recording-verdict` glue calls.
+//! and channel pick the probe-gated `recording-verdict` glue calls.
 
 use camera_box::qpsk_channel_select::{
     channel_probe_report, decode_best_channel, deinterleave, ChannelProbeReport,

@@ -9,11 +9,16 @@
 //! is pure Tier-0 in `crate::qpsk_marker`; this module is only the ffmpeg I/O glue.
 
 use crate::probe::recording::analyze_recording;
-use crate::qpsk_marker::{
-    av_offset_candidates_deduped, cluster_offset_ms, decode_markers, decode_markers_with_stats,
-    marker_coverage_gap_message, marker_coverage_overlaps_video_ticks, parse_ffprobe_start_time,
-    parse_qpsk_marker_log, AudioParams, AvOffset, DEDUPE_SAME_FID_WINDOW_S,
+use crate::qpsk_channel_select::{
+    decode_best_channel, f32le_to_channels, ffmpeg_extract_args, ffprobe_channels_args,
+    parse_ffprobe_channels, BestChannelDecode, ChannelPick,
 };
+use crate::qpsk_marker::{
+    av_offset_candidates_deduped, cluster_offset_ms, marker_coverage_gap_message,
+    marker_coverage_overlaps_video_ticks, parse_ffprobe_start_time, parse_qpsk_marker_log,
+    AudioParams, AvOffset, DEDUPE_SAME_FID_WINDOW_S,
+};
+use crate::qpsk_probe_decision::ClusterParams;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -36,6 +41,9 @@ pub struct AvSyncReport {
     /// offset is the median of the densest cluster of these; `candidates − matched` is the rejected
     /// scatter (false audio decodes + wrong-lap matches).
     pub candidates: usize,
+    /// Issue 1367: which channel of the audio track the markers were decoded from, and what every
+    /// channel read. The offset uses ONLY the chosen channel's markers.
+    pub audio_channels: ChannelPick,
 }
 
 /// Video frame rate of `path`'s first video stream (`r_frame_rate` "num/den"), via ffprobe.
@@ -111,23 +119,46 @@ fn probe_stream_start_time(path: &Path, selector: &str) -> Result<f64> {
     Ok(parse_ffprobe_start_time(s.lines().next().unwrap_or("")))
 }
 
-/// Extract audio track `track` of `path` as mono f32 @ 48 kHz via ffmpeg (channels mixed to mono —
-/// the marker survives the mix, and the QPSK decode is amplitude-tolerant).
-pub fn extract_audio_mono_f32(path: &Path, track: u32, sample_rate: u32) -> Result<Vec<f32>> {
+/// Channel count of audio stream `track` of `path`, via ffprobe. Fails loud on a missing / `N/A` /
+/// zero count (the extract stride would be unknown).
+fn probe_audio_channels(path: &Path, track: u32) -> Result<usize> {
+    let out = Command::new("ffprobe")
+        .args(ffprobe_channels_args(track))
+        .arg(path)
+        .stderr(Stdio::piped())
+        .output()
+        .context("spawn ffprobe (install ffmpeg)")?;
+    anyhow::ensure!(
+        out.status.success(),
+        "ffprobe channels (a:{track}) failed on {}: {}",
+        path.display(),
+        String::from_utf8_lossy(&out.stderr).trim()
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    parse_ffprobe_channels(&s).with_context(|| {
+        format!(
+            "ffprobe reported no channel count for {} track {track}: {:?}",
+            path.display(),
+            s.trim()
+        )
+    })
+}
+
+/// Issue 1367 — extract audio track `track` of `path` as f32 @ `sample_rate` via ffmpeg, keeping
+/// EVERY channel (one `Vec` per channel, in channel order). Never a downmix: the stereo mbc track
+/// carries the marker on L and R about 10 ms apart, and a mono sum of the two copies comb-filters
+/// the marker into an undecodable signal. The caller decodes each channel and keeps the best one
+/// (`qpsk_channel_select::decode_best_channel`).
+pub fn extract_audio_channels_f32(
+    path: &Path,
+    track: u32,
+    sample_rate: u32,
+) -> Result<Vec<Vec<f32>>> {
+    let channels = probe_audio_channels(path, track)?;
     let out = Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(path)
-        .args([
-            "-map",
-            &format!("0:a:{track}"),
-            "-ac",
-            "1",
-            "-ar",
-            &sample_rate.to_string(),
-            "-f",
-            "f32le",
-            "-",
-        ])
+        .args(ffmpeg_extract_args(track, sample_rate, channels))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
@@ -138,20 +169,27 @@ pub fn extract_audio_mono_f32(path: &Path, track: u32, sample_rate: u32) -> Resu
         path.display(),
         String::from_utf8_lossy(&out.stderr).trim()
     );
-    let bytes = out.stdout;
-    anyhow::ensure!(
-        bytes.len() >= 4 && bytes.len() % 4 == 0,
-        "ffmpeg returned {} bytes (not whole f32) for {} track {track}",
-        bytes.len(),
-        path.display()
-    );
-    let samples: Vec<f32> = bytes
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|c| f32::from_le_bytes(*c))
-        .collect();
-    Ok(samples)
+    f32le_to_channels(&out.stdout, channels)
+        .map_err(anyhow::Error::msg)
+        .with_context(|| format!("ffmpeg audio extract of {} track {track}", path.display()))
+}
+
+/// Issue 1367 — extract every channel of audio track `track` and decode the QPSK marker on each,
+/// keeping the channel with the largest self-consistency cluster. The ONE audio decode every A/V
+/// consumer in this module uses.
+fn decode_best_audio_channel(
+    path: &Path,
+    track: u32,
+    params: &AudioParams,
+    threshold: f64,
+) -> Result<BestChannelDecode> {
+    let channels = extract_audio_channels_f32(path, track, params.sample_rate)?;
+    decode_best_channel(&channels, params, threshold, ClusterParams::default()).with_context(|| {
+        format!(
+            "audio track {track} of {} has no channels to decode",
+            path.display()
+        )
+    })
 }
 
 /// Measure the A/V-sync offset of `recording` (which carries BOTH the cam2 dual-QR video and the
@@ -211,9 +249,12 @@ pub fn av_sync_from_recording(
         marker_coverage_gap_message(&emit_log, &ticks)
     );
 
-    // Audio: extract the mbc track → QPSK markers (audio_ts, index), on the container origin.
-    let audio = extract_audio_mono_f32(recording, audio_track, params.sample_rate)?;
-    let audio_markers: Vec<(f64, u8)> = decode_markers(&audio, params, threshold)
+    // Audio: extract the mbc track with every channel kept, decode the QPSK markers per channel
+    // and keep ONLY the best channel's (audio_ts, index) (issue 1367 — a channel skew must never
+    // average two arrival times), on the container origin.
+    let best = decode_best_audio_channel(recording, audio_track, params, threshold)?;
+    let audio_markers: Vec<(f64, u8)> = best
+        .markers
         .into_iter()
         .map(|(ts, idx)| (audio_start + ts, idx))
         .collect();
@@ -235,8 +276,9 @@ pub fn av_sync_from_recording(
         cluster_offset_ms(&candidates, min_matched, cluster_tol_ms).with_context(|| {
             format!(
                 "too few clustered A/V pairs to estimate (audio markers {n_audio}, video ticks \
-             {video_ticks}, candidates {n_cand}, need {min_matched} within ±{cluster_tol_ms} ms) — \
-             check the audio track index and the emit log"
+             {video_ticks}, candidates {n_cand}, need {min_matched} within ±{cluster_tol_ms} ms, \
+             {}) — check the audio track index and the emit log",
+                best.pick.summary_line()
             )
         })?;
 
@@ -247,6 +289,7 @@ pub fn av_sync_from_recording(
         video_ticks,
         emit_rows: emit_log.len(),
         candidates: n_cand,
+        audio_channels: best.pick,
     })
 }
 
@@ -280,6 +323,11 @@ pub struct AvMarkerInputs {
     /// deserializes to 0 — the safe, loud default (treated as silent on an all-zero run).
     #[serde(default)]
     pub audio_preamble_screens_passed: u64,
+    /// Issue 1367: which channel of the audio track `audio_markers` were decoded from, and what every
+    /// channel read (the pick is the channel with the largest self-consistency cluster). Additive:
+    /// an older partial without it reads [`ChannelPick::default`] (no channels recorded).
+    #[serde(default)]
+    pub audio_channels: ChannelPick,
 }
 
 /// Decode the [`AvMarkerInputs`] for `recording` — the exact SAME ffmpeg/ffprobe glue
@@ -308,12 +356,10 @@ pub fn decode_av_marker_inputs(
     );
     let video_start = probe_stream_start_time(recording, "v:0")?;
     let audio_start = probe_stream_start_time(recording, &format!("a:{audio_track}"))?;
-    let audio = extract_audio_mono_f32(recording, audio_track, params.sample_rate)?;
-    // #748: keep the decode STATS — `preamble_screens_passed` is the silent-vs-undecoded signal
-    // the fused verdict emits (see `AvMarkerInputs::audio_preamble_screens_passed`). Same decode
-    // as before, stats no longer discarded.
-    let (decoded, stats) = decode_markers_with_stats(&audio, params, threshold);
-    let audio_markers: Vec<(f64, u8)> = decoded
+    // Issue 1367: decode every channel and keep only the best channel's markers.
+    let best = decode_best_audio_channel(recording, audio_track, params, threshold)?;
+    let audio_markers: Vec<(f64, u8)> = best
+        .markers
         .into_iter()
         .map(|(ts, idx)| (audio_start + ts, idx))
         .collect();
@@ -322,6 +368,10 @@ pub fn decode_av_marker_inputs(
         video_start_s: video_start,
         emit_log,
         audio_markers,
-        audio_preamble_screens_passed: stats.preamble_screens_passed,
+        // #748: the silent-vs-undecoded signal. Silence is judged over the WHOLE track: zero only
+        // when EVERY channel saw no preamble energy (a silent channel 0 never reads "silent" while
+        // another channel carries audio).
+        audio_preamble_screens_passed: best.pick.max_preamble_screens(),
+        audio_channels: best.pick,
     })
 }

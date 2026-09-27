@@ -1,6 +1,10 @@
 ---
 paths:
   - "src/qpsk_marker.rs"
+  - "src/qpsk_channel_select.rs"
+  - "src/qpsk_probe_decision.rs"
+  - "src/probe/av_sync_recording.rs"
+  - "scripts/lib/marker-decodability-preflight.sh"
   - "vendor/av-sync-dock/src/camera-box-audio.hpp"
   - "vendor/av-sync-dock/test/camera-box-selftest.cpp"
 ---
@@ -47,3 +51,37 @@ No local cargo compiles the probe/vendor code. The working proof chain, all loca
    test files) parses / is brace-balanced. CI is the FIRST place the Rust actually type-checks + runs.
 To render an ARBITRARY (non-marker) word in a test, both sides expose a pure `marker_signal_for_word(word,p)`
 (Rust) / `marker_signal_from_word(word)` (C++ self-test); `marker_signal(index)` delegates to it.
+
+## NEVER downmix the measurement audio — decode every channel, keep the best one (issue 1367)
+The stream program recording's `mbc` audio is STEREO and carries the SAME cam2 marker on L and R, with R
+10.17 ms (488 samples @ 48 kHz) behind L (zero-lag L/R correlation ≈ 0; measured 27.9.2026 on
+`2026-09-27 14-29-50.mp4`, release E2E run 36317806422). A 10 ms offset is ~4.4 of the marker's ten
+2.26 ms symbols at a ~150° carrier phase, so a mono SUM smears every symbol into its neighbours: on the
+real 4 s clip the old `-ac 1` path read `preamble_screens 9212, cluster 2, crc_ok 3` → **POLLUTED**,
+while L alone read `653 / cluster 7 / crc_ok 7` and R alone `8 / cluster 8 / crc_ok 8`, both OK. The owner
+ruled the skew is not his to fix — the gate must be robust to it.
+- **The ONE pick:** `src/qpsk_channel_select.rs` (crate root, default features) — `decode_best_channel`
+  runs the unchanged demod + the #1324 `consistency_cluster_size` on EACH channel and keeps the channel
+  with the LARGEST cluster; ties go to the LOWEST index (deterministic); a mono track is the identity
+  (chosen 0, byte-identical report). The `[4b3/8]` preflight (`--qpsk-probe`), `--av-sync` and the fused
+  all-cambox A/V gate (`decode_av_marker_inputs`) all decode through it; the offset is paired from the
+  CHOSEN channel's markers only (a skew can never average two arrival times).
+- **Level and silence are judged over the WHOLE track, decodability on the chosen channel:** the probe's
+  `peak_dbfs` covariate and the #748 `audio_preamble_screens_passed` are the MAX over channels, so a
+  silent channel 0 never reads "the chain is silent" while channel 1 carries audio.
+- **Extract:** the probe glue asks ffprobe for the stream's channel count and passes `-ac <that count>`
+  (a known raw stride, never a downmix); the preflight's Windows-side ffmpeg keeps every channel (no
+  `-ac`). The one-line JSON keeps every pre-1367 key FIRST with the chosen channel's values, then
+  `channels`, `chosen_channel`, `per_channel` (keys `ch_*`, so a first-match grep can never read one);
+  the shell parse also strips `"per_channel":[...]` before it greps.
+- **Which channel wins can move the offset by ~10 ms** (R arrives later than L). Carried as
+  `audio_channel_pick` in the `--av-sync` JSON and the fused `all_cambox_av_sync` block — read it when
+  comparing runs.
+- **Real-signal fixture:** `tests/fixtures/mbc-stereo-skew-1367/mbc-stereo-2s.wav` (the first 2 s of
+  that recording): downmix cluster 0, L 3 (below the floor of 4), R 4 — so both a downmix and a fixed
+  "always channel 0" pick FAIL there and only the per-channel pick passes. Tier-0 proof: a plain
+  `rustc --test` crate that `#[path]`-includes the real `qpsk_marker` / `qpsk_probe_decision` /
+  `qpsk_channel_select` (serde derives sed-stripped) + the real test files, with
+  `CARGO_MANIFEST_DIR` set for the fixture path; `clippy-driver --test -D warnings` on the same crate.
+- **Out of scope / still mono:** the live dock (`vendor/av-sync-dock`, `st_raw_audio_camera_box`)
+  still averages all channels before its streaming decoder — the same skew hurts its lock.

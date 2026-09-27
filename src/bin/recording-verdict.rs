@@ -3016,6 +3016,9 @@ fn run_av_sync(args: &Args) -> Result<()> {
         "emit_rows": report.emit_rows,
         "video_fps": report.fps,
         "latency_adjust_ms": -report.offset.offset_ms,
+        // issue 1367: the audio channel the markers were decoded from + what every channel read
+        // (additive key; every pre-existing key keeps its name and meaning).
+        "audio_channel_pick": report.audio_channels,
     });
     // issue 930/1032 — lipsync cross-validation: only added when the caller supplied the paired
     // lipsync-test-mode run's SyncNet offset (never printed on a plain --av-sync call, so every
@@ -3068,6 +3071,7 @@ fn run_av_sync(args: &Args) -> Result<()> {
         matched = report.offset.matched,
         audio_markers = report.audio_markers,
         video_ticks = report.video_ticks,
+        audio_channel = %report.audio_channels.summary_line(),
         "A/V-sync offset measured (video − audio; >0 = video lags audio)"
     );
     // issue 1032 — fold the lipsync cross-check into this --av-sync run's exit code. The JSON above
@@ -7137,6 +7141,8 @@ fn build_and_print_verdict_with_stream_diffs(
                         av.emit_log.len(),
                         av.audio_markers.len()
                     );
+                    // issue 1367: which channel of the audio track carried the decoded markers.
+                    println!("  A/V audio: {}", av.audio_channels.summary_line());
                     // #855: operator-acknowledged offline boxes (CAMBOX_OFFLINE_ACK / rig-fleet.txt,
                     // carried here via --offline-ack-cams) are EXCLUDED from this gate below,
                     // never judged UNKNOWN/FAIL on samples they were never going to produce. A box
@@ -7519,6 +7525,12 @@ fn build_and_print_verdict_with_stream_diffs(
                     av_json.insert(
                         "av_audio_preamble_screens".to_string(),
                         serde_json::json!(av.audio_preamble_screens_passed),
+                    );
+                    // issue 1367: the audio channel the markers were decoded from + what every
+                    // channel read (an older partial carries the empty default pick).
+                    av_json.insert(
+                        "audio_channel_pick".to_string(),
+                        serde_json::json!(av.audio_channels),
                     );
                     report["all_cambox_av_sync"] = serde_json::Value::Object(av_json);
                     // #861: folds into `all_pass` again — a no-op when the gate PASSES (av_all_pass
@@ -8070,31 +8082,40 @@ fn args_expected_burns_for(box_name: &str, args: &Args) -> Option<Vec<u32>> {
 /// reads the JSON and decides the abort. A genuine read error (ffmpeg missing / unreadable file)
 /// propagates as `Err` (non-zero exit, no JSON) so the shell can tell "unreadable" from "UNDECODED".
 fn qpsk_probe(args: &Args, audio: &Path) -> Result<()> {
-    use camera_box::probe::av_sync_recording::extract_audio_mono_f32;
-    use camera_box::qpsk_marker::{decode_markers_with_stats, AudioParams};
-    use camera_box::qpsk_probe_decision::{
-        build_report, report_json, ClusterParams, QpskProbeThresholds,
+    use camera_box::probe::av_sync_recording::extract_audio_channels_f32;
+    use camera_box::qpsk_channel_select::{
+        channel_probe_report, channel_report_json, decode_best_channel,
     };
+    use camera_box::qpsk_marker::AudioParams;
+    use camera_box::qpsk_probe_decision::{ClusterParams, QpskProbeThresholds};
     // The emitter's rig params (48 kHz / 442 Hz / c=1) — the SAME the recording av-sync path uses.
     let params = AudioParams::rig60();
-    // Reuse the recording av-sync ffmpeg mono-f32 @ 48 kHz extraction (channels mixed — the marker
-    // survives, the decode is amplitude-tolerant). On a pre-extracted mono WAV this is a passthrough.
-    let mut samples = extract_audio_mono_f32(audio, args.av_audio_track, params.sample_rate)?;
+    // Issue 1367: reuse the recording av-sync f32 @ 48 kHz extraction with EVERY channel kept —
+    // never a downmix (the stereo mbc track carries the marker on L and R ~10 ms apart, and their
+    // mono sum is undecodable). Each channel is decoded and the best one decides the verdict.
+    let mut channels = extract_audio_channels_f32(audio, args.av_audio_track, params.sample_rate)?;
     // Bound to the first N seconds when requested (the [4b3/8] window matches the calibration).
     if args.qpsk_probe_seconds > 0.0 {
         let want = (args.qpsk_probe_seconds * params.sample_rate as f64) as usize;
-        if want > 0 && want < samples.len() {
-            samples.truncate(want);
+        if want > 0 {
+            for ch in channels.iter_mut().filter(|ch| want < ch.len()) {
+                ch.truncate(want);
+            }
         }
     }
-    let (markers, stats) = decode_markers_with_stats(&samples, &params, args.av_threshold);
+    let best = decode_best_channel(
+        &channels,
+        &params,
+        args.av_threshold,
+        ClusterParams::default(),
+    )
+    .with_context(|| format!("{} has no audio channel to decode", audio.display()))?;
     let th = QpskProbeThresholds {
         min_clusters: args.qpsk_min_clusters,
         silent_db: args.qpsk_silent_db,
         loud_db: args.qpsk_loud_db,
     };
-    let report = build_report(&markers, &stats, &samples, ClusterParams::default(), &th);
-    println!("{}", report_json(&report));
+    println!("{}", channel_report_json(&channel_probe_report(&best, &th)));
     Ok(())
 }
 
@@ -8254,6 +8275,10 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
     } else {
         None
     };
+    if let Some(av) = &av_sync {
+        // issue 1367: which channel of the audio track carried the decoded markers.
+        println!("A/V audio [stream]: {}", av.audio_channels.summary_line());
+    }
     // #1112 — when the STREAM box extracts for an all-cambox run (`--switch-schedule` is present,
     // which the production `VERDICT_ON_STREAM=1` gate ALWAYS pushes to the stream box — so this is
     // default-on, never a new forgettable flag), row-sample every recorded frame's content hash ON
@@ -13259,6 +13284,7 @@ mod tests {
             video_start_s: 0.0,
             emit_log,
             audio_preamble_screens_passed: audio_markers.len() as u64,
+            audio_channels: Default::default(),
             audio_markers,
         };
         let v = build_all_cambox_av_sync_fixture(
@@ -13396,6 +13422,7 @@ mod tests {
             video_start_s: 0.0,
             emit_log,
             audio_preamble_screens_passed: audio_markers.len() as u64,
+            audio_channels: Default::default(),
             audio_markers,
         };
         // Spread = 10ms <= SPREAD_THRESHOLD_MS (24ms) -> the cross-camera spread gate PASSES; see
@@ -13461,6 +13488,7 @@ mod tests {
             video_start_s: 0.0,
             emit_log,
             audio_preamble_screens_passed: audio_markers.len() as u64,
+            audio_channels: Default::default(),
             audio_markers,
         };
         let cameras: &[(&str, u32, i64)] = &[("CAM1", CAM1B, 800_000_000)];
@@ -13735,6 +13763,7 @@ mod tests {
             video_start_s: 0.0,
             emit_log,
             audio_preamble_screens_passed: audio_markers.len() as u64,
+            audio_channels: Default::default(),
             audio_markers,
         };
         // Spread = 815-800 = 15ms <= SPREAD_THRESHOLD_MS (24ms) — the earlier 790..820 fixture
@@ -13813,6 +13842,7 @@ mod tests {
             video_start_s: 0.0,
             emit_log,
             audio_preamble_screens_passed: audio_markers.len() as u64,
+            audio_channels: Default::default(),
             audio_markers,
         };
         let cameras: &[(&str, u32, i64)] =
@@ -13878,6 +13908,7 @@ mod tests {
             video_start_s: 0.0,
             emit_log,
             audio_preamble_screens_passed: audio_markers.len() as u64,
+            audio_channels: Default::default(),
             audio_markers,
         };
         let cameras: &[(&str, u32, i64)] = &[("CAM1", CAM1B, 800_000_000)];
@@ -13931,6 +13962,7 @@ mod tests {
             video_start_s: 0.0,
             emit_log,
             audio_preamble_screens_passed: audio_markers.len() as u64,
+            audio_channels: Default::default(),
             audio_markers,
         };
         let cameras: &[(&str, u32, i64)] = &[("CAM1", CAM1B, 800_000_000)];
@@ -14105,6 +14137,7 @@ mod tests {
             video_start_s: 0.0,
             emit_log,
             audio_preamble_screens_passed: audio_markers.len() as u64,
+            audio_channels: Default::default(),
             audio_markers,
         };
         // cam1: delivery p50 = 800ms. cam3: delivery p50 = 840ms (40ms above cam1's) — mean of
@@ -14191,6 +14224,7 @@ mod tests {
             video_start_s: 0.0,
             emit_log,
             audio_preamble_screens_passed: audio_markers.len() as u64,
+            audio_channels: Default::default(),
             audio_markers,
         };
         // cam1: 800ms delivery. cam3: 2×(tolerance+10ms) above cam1's, so with the two-camera

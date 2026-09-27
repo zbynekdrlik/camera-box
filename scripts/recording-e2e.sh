@@ -3377,7 +3377,8 @@ echo "[4b3/8] #1324 marker-decodability preflight — the mbc QPSK marker MUST b
 # proves NOT-flooded, but neither can tell a DECODABLE marker from a chain at a plausible level whose
 # marker is not decodable (drowned / off-axis mic / wrong Dante channel / format mismatch). Make a
 # short probe recording on the stream box (same hop as [4b2/8]), extract the mbc audio track to a
-# small mono-f32 WAV, pull it to dev1, and run the AUDIO-ONLY QPSK decodability probe from the
+# small f32 WAV with every channel kept (issue 1367: never a downmix), pull it to dev1, and run the
+# AUDIO-ONLY QPSK decodability probe (it decodes each channel and keeps the best) from the
 # probe-tools artifact — decodability is PRIMARY, so a loud-but-decodable capture is OK. FAIL LOUD
 # and abort before recording begins so an undecodable chain never burns ~40 min on cluster_samples=0
 # (runs 622403283 / 977889848, 16.9.2026). Every knob is env-overridable; a preflight guarding the

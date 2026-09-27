@@ -202,6 +202,7 @@ fn merge_subprocess_exits_nonzero_when_av_offset_gate_fails_861_rearmed() {
         video_start_s: 0.0,
         emit_log,
         audio_preamble_screens_passed: audio_markers.len() as u64,
+        audio_channels: Default::default(),
         audio_markers,
     };
 
@@ -278,6 +279,7 @@ fn merge_subprocess_exits_zero_when_av_offset_gate_passes_861_control() {
         video_start_s: 0.0,
         emit_log,
         audio_preamble_screens_passed: audio_markers.len() as u64,
+        audio_channels: Default::default(),
         audio_markers,
     };
 
@@ -353,6 +355,7 @@ fn merge_subprocess_exits_nonzero_when_av_sync_unknown_from_silent_audio_861_rea
         emit_log: (0..10u8).map(|k| (k, 1000 + k as u32, 0)).collect(),
         audio_markers: vec![], // silent audio track — zero decoded candidates
         audio_preamble_screens_passed: 0, // #748: no preamble energy ⇒ silent chain
+        audio_channels: Default::default(),
     };
 
     let stream_partial = write_stream_partial(&dir, frames, Some(av));
