@@ -1258,6 +1258,32 @@ const GENLOCK_RT_PIN_PIN_FAILED_LINE: &str = "15:10:15.254: genlock: could NOT p
      thread to the isolated cores (isolated=[2-11] nohz_full=[10-11], errno 22) -- continuing \
      SCHED_OTHER on the process mask (issue 1357)\n";
 
+/// Review round 2: a pin that got SCHED_FIFO at startup and later could not restore the thread
+/// (the pin's one LOG_ERROR) may have left it on the pin cores + FIFO — the leak issue 1357 is about.
+/// It outranks the startup success line and grades DRIFT.
+#[test]
+fn a_failed_restore_outranks_the_fifo_success_line_and_is_drift_1357() {
+    let log = format!(
+        "genlock: latency = 3 ms\n{GENLOCK_RT_PIN_OK_LINE}15:10:20.001: genlock: render-tick pin leave \
+         failed (errno 1) and the restore failed too (errno 1) -- the thread may stay on the pin cores \
+         and SCHED_FIFO; pin disabled (issue 1357)\n"
+    );
+    let out = run_sourced("genlock_rt_pin_from_log \"$LOG\"", &[("LOG", log.as_str())]);
+    assert_eq!(out.trim(), "restore_failed", "{out:?}");
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("LOG", log.as_str())]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("genlock_rt_pin"))
+        .unwrap_or_else(|| panic!("no genlock_rt_pin line printed: {out:?}"));
+    assert!(line.contains("DRIFT"), "{line:?}");
+    assert!(out.contains("RC=20"), "{out:?}");
+}
+
 #[test]
 fn genlock_rt_pin_parser_reads_a_failed_startup_pin_as_pin_failed() {
     for line in [
