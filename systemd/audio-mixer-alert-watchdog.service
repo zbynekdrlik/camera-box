@@ -1,0 +1,17 @@
+[Unit]
+# OBS audio-mixer real-time + obs-vban pacer-loss alert (issue 1381), DEV1-SIDE. ONE fetch -> decide
+# -> alert pass. Reads the `audio_mixer_*` + `vban_pacer_*` facets bundle_state_gather exposes on
+# :8899/bundle-state.json and pages when an OBS audio mixer leaves real time (BEHIND / OVERLOADED)
+# or an obs-vban sender loses audio (VBAN_LOSS) -- the 27.9.2026 resolume cg OBS event-morning
+# failure FOH heard 55 minutes before anything else noticed. DETECTION ONLY -- no auto-action.
+# SAME dev1 topology as render-freeze-alert-watchdog.service (issue 1320).
+Description=camera-box audio-mixer / VBAN-loss alert (issue 1381) — one fetch/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/audio-mixer-alert-watchdog.sh
+# Per pass: up to 3 boxes × one :8899 curl (AUDIO_MIXER_CURL_TIMEOUT, default 10 s each) + the
+# resolume home probe + a local python decision. Generous ceiling so a slow link never hangs the timer.
+TimeoutStartSec=60
