@@ -914,3 +914,13 @@ def test_a_run_wide_only_disagreement_is_unknown_never_a_pass():
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
+
+
+def test_passive_soak_grades_the_stream_output_camera_spread_by_default():
+    # ROZHODNUTÉ 5860604301: the passive soak deploys no capture burns, so the burn-based
+    # source/delivery spreads are always empty; its default graded spread is the camera-to-camera
+    # spread of the A/V offsets measured at the stream output.
+    assert asd.DEFAULT_SPREAD_COLUMNS == ("av_spread_ms",)
+    out = subprocess.run([sys.executable, MODULE, "report", "--help"], capture_output=True, text=True)
+    assert out.returncode == 0
+    assert "--spread-columns" in out.stdout
