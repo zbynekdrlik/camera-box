@@ -104,6 +104,32 @@ def test_parse_reads_the_chosen_channel_fields_of_the_per_channel_line():
     assert run(f"marker_decodability_parse_verdict '{_JSON_STEREO}'")[1] == "OK"
 
 
+def test_channel_note_names_the_chosen_channel_and_every_cluster():
+    ok, note = run(f"marker_decodability_channel_note '{_JSON_STEREO}'")
+    assert ok
+    assert note == "chosen channel 1 of 2 (cluster ch0=3 ch1=4)"
+
+
+def test_channel_note_is_empty_for_a_line_without_a_pick():
+    # an older probe binary prints no per-channel pick: no note, never a failure
+    ok, note = run(f"marker_decodability_channel_note '{_JSON_OK}'")
+    assert ok and note == ""
+
+
+def test_e2e_step_reports_the_chosen_channel_on_ok_and_on_abort():
+    s = _E2E.read_text(encoding="utf-8")
+    start = s.find('echo "[4b3/8]')
+    end = s.find('echo "[4c/8]', start)
+    region = s[start:end]
+    assert "marker_decodability_channel_note" in region
+    ok_line = next(l for l in region.splitlines() if "ok: mbc QPSK marker DECODABLE" in l)
+    assert "_md_chan" in ok_line, ok_line
+    err_line = next(
+        l for l in region.splitlines() if "marker_decodability_fail_message" in l and "ERROR" in l
+    )
+    assert "_md_chan" in err_line, err_line
+
+
 def test_parse_never_reads_a_per_channel_value_whatever_the_key_order():
     """The gate's decision point must not depend on the producer's key order: even a line whose
     per-channel array comes FIRST with unprefixed keys yields the top-level (chosen) values."""
