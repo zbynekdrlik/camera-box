@@ -38,6 +38,10 @@ namespace camerabox {
 static const uint64_t CB_MARKER_MIN_CLUSTERS = 4;
 /* Mirror of av_sync_dock_channels::DOCK_CHANNEL_PICK_WINDOW_S -- the #1324 calibration window. */
 static const uint64_t CB_CHANNEL_PICK_WINDOW_S = 25;
+/* Mirror of av_sync_dock_channels::DOCK_CHANNEL_PICK_MAX_MARKERS -- the most markers one channel
+ * keeps in its pick window (the newest), so the O(n^2) cluster on the audio thread stays bounded
+ * under a decode flood. */
+static const size_t CB_CHANNEL_PICK_MAX_MARKERS = 256;
 /* Mirror of qpsk_probe_decision::ClusterParams::default(). */
 static const uint32_t CB_CLUSTER_STEP_TOL = 3;
 static const double CB_CLUSTER_GAP_RATIO = 0.25;

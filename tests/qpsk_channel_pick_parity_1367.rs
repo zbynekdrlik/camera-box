@@ -15,7 +15,9 @@
 //! Default features, no rig, no ffmpeg: g++ and bash are the only tools.
 
 use camera_box::av_sync_dock::DOCK_QPSK_THRESHOLD;
-use camera_box::av_sync_dock_channels::{ChannelMarkerPicker, DOCK_CHANNEL_PICK_WINDOW_S};
+use camera_box::av_sync_dock_channels::{
+    ChannelMarkerPicker, DOCK_CHANNEL_PICK_MAX_MARKERS, DOCK_CHANNEL_PICK_WINDOW_S,
+};
 use camera_box::qpsk_channel_select::{f32le_to_channels, pick_marker_channel};
 use camera_box::qpsk_marker::{decode_markers_with_stats, marker_signal, signal_len, AudioParams};
 use camera_box::qpsk_probe_decision::{
@@ -381,6 +383,47 @@ fn marker_track(n: usize, cadence_s: f64, start_s: f64, delay: usize, len: usize
     buf
 }
 
+/// Marker k (index 189 + 180k) at `start + k * spacing` samples plus `delay`, for each k in `ks`.
+fn markers_at(ks: &[usize], spacing: usize, start: usize, delay: usize, len: usize) -> Vec<f32> {
+    let p = AudioParams::rig60();
+    let mut buf = vec![0.0f32; len];
+    for &k in ks {
+        let idx = 189u8.wrapping_add((k as u32 * 180) as u8);
+        let off = start + k * spacing + delay;
+        for (i, &s) in marker_signal(idx, &p).iter().enumerate() {
+            if off + i < buf.len() {
+                buf[off + i] += s * 0.25;
+            }
+        }
+    }
+    buf
+}
+
+/// Every returned marker `(abs, idx)` of a transcript, in order.
+fn returned(t: &str) -> Vec<(u64, u8)> {
+    t.lines()
+        .filter_map(|l| l.split(" markers=").nth(1)?.split(' ').next())
+        .flat_map(|m| m.split(',').filter(|x| !x.is_empty()))
+        .map(|x| {
+            let (a, i) = x.split_once(':').expect("abs:idx");
+            (a.parse().expect("abs"), i.parse().expect("idx"))
+        })
+        .collect()
+}
+
+/// No marker index is returned twice within one marker length (one physical marker, one pairing).
+fn assert_no_double_return(name: &str, t: &str) {
+    let sig = signal_len(&AudioParams::rig60()) as u64;
+    let got = returned(t);
+    for w in got.windows(2) {
+        assert!(
+            !(w[0].1 == w[1].1 && w[1].0 <= w[0].0 + sig),
+            "{name}: marker {} returned twice: {got:?}",
+            w[1].1
+        );
+    }
+}
+
 fn assert_same_transcript(
     name: &str,
     channels: &[Vec<f32>],
@@ -412,7 +455,33 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
     for chunk in [1024, 441] {
         let t = assert_same_transcript(&format!("real-{chunk}"), &real, chunk, None);
         assert!(last_line(&t).contains(" chosen=1 "), "{}", last_line(&t));
+        // the switch to R happens mid-clip: R's copy of a marker L already returned is not paired
+        assert_no_double_return(&format!("real-{chunk}"), &t);
     }
+    // The same switch, synthetic: L carries markers 1-3, R markers 0-3 488 samples later; in
+    // 256-frame callbacks R's copies of markers 2 and 3 tip the pick after L returned them.
+    let l = markers_at(&[1, 2, 3], SR / 2, SR / 4, 0, SR * 3);
+    let r = markers_at(&[0, 1, 2, 3], SR / 2, SR / 4, 488, SR * 3);
+    let t = assert_same_transcript("switch", &[l, r], 256, None);
+    assert_no_double_return("switch", &t);
+    assert!(
+        last_line(&t).contains(" chosen=1 clusters=3,4 "),
+        "{}",
+        last_line(&t)
+    );
+    assert_eq!(returned(&t).len(), 3, "L's three markers, each once");
+    // A decode flood (one marker every 1200 samples, more than the cap): both mirrors keep only
+    // the newest markers, so the cluster stops at the cap.
+    let n = DOCK_CHANNEL_PICK_MAX_MARKERS + 40;
+    let ks: Vec<usize> = (0..n).collect();
+    let flood = vec![markers_at(&ks, 1200, SR / 4, 0, SR / 2 + n * 1200)];
+    let t = assert_same_transcript("flood", &flood, 1024, None);
+    assert_eq!(returned(&t).len(), n);
+    assert!(
+        last_line(&t).contains(&format!(" clusters={DOCK_CHANNEL_PICK_MAX_MARKERS} ")),
+        "{}",
+        last_line(&t)
+    );
     // Both channels decode, R later and with the longer chain: L stays chosen.
     let l = marker_track(6, 1.0, 0.25, 0, SR * 9);
     let r = marker_track(8, 1.0, 0.25, 488, SR * 9);
@@ -488,6 +557,10 @@ fn the_constants_are_single_sourced() {
     let cl = ClusterParams::default();
     assert_eq!(get("min_clusters"), DEFAULT_MIN_CLUSTERS.to_string());
     assert_eq!(get("pick_window_s"), DOCK_CHANNEL_PICK_WINDOW_S.to_string());
+    assert_eq!(
+        get("max_markers"),
+        DOCK_CHANNEL_PICK_MAX_MARKERS.to_string()
+    );
     assert_eq!(get("step_tol"), cl.step_tol.to_string());
     assert_eq!(get("gap_ratio").parse::<f64>().ok(), Some(cl.gap_ratio));
     assert_eq!(

@@ -48,6 +48,7 @@ static int cmd_consts()
 {
 	std::printf("min_clusters %llu\n", (unsigned long long)CB_MARKER_MIN_CLUSTERS);
 	std::printf("pick_window_s %llu\n", (unsigned long long)CB_CHANNEL_PICK_WINDOW_S);
+	std::printf("max_markers %zu\n", CB_CHANNEL_PICK_MAX_MARKERS);
 	std::printf("step_tol %u\n", (unsigned)CB_CLUSTER_STEP_TOL);
 	std::printf("gap_ratio %.17g\n", CB_CLUSTER_GAP_RATIO);
 	std::printf("qpsk_threshold %.17g\n", CB_QPSK_THRESHOLD);

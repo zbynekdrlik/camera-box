@@ -40,6 +40,12 @@ use std::collections::VecDeque;
 /// `CB_CHANNEL_PICK_WINDOW_S`.
 pub const DOCK_CHANNEL_PICK_WINDOW_S: u64 = 25;
 
+/// The most markers one channel keeps in its pick window (the newest). The self-consistency
+/// cluster is O(n²) and runs on the OBS audio thread: a real chain puts ~8 markers in 25 s, but a
+/// decode flood can reach one per dedup gap (~1100 in 25 s, ~1.4 ms per recompute). 256 keeps a
+/// recompute near 0.1 ms and never touches a real chain. Mirrored by `CB_CHANNEL_PICK_MAX_MARKERS`.
+pub const DOCK_CHANNEL_PICK_MAX_MARKERS: usize = 256;
+
 /// The dock's per-channel marker decode + channel pick (module docs). Every channel advances by the
 /// same number of samples per [`push`](Self::push), so one absolute sample index serves all of them.
 pub struct ChannelMarkerPicker {
@@ -199,6 +205,28 @@ mod tests {
         for k in 0..n {
             let idx = 7u8.wrapping_add((k as u16 * 30) as u8);
             let off = ((start_s + k as f64 * cadence_s) * sr) as usize + delay;
+            for (i, &s) in marker_signal(idx, &p).iter().enumerate() {
+                if off + i < buf.len() {
+                    buf[off + i] += s * 0.25;
+                }
+            }
+        }
+        buf
+    }
+
+    /// Marker k (index 7 + 30k) at `start + k * spacing` samples plus `delay`, for each k in `ks`.
+    fn markers_at(
+        ks: &[usize],
+        spacing: usize,
+        start: usize,
+        delay: usize,
+        len: usize,
+    ) -> Vec<f32> {
+        let p = AudioParams::rig60();
+        let mut buf = vec![0.0f32; len];
+        for &k in ks {
+            let idx = 7u8.wrapping_add((k as u32 * 30) as u8);
+            let off = start + k * spacing + delay;
             for (i, &s) in marker_signal(idx, &p).iter().enumerate() {
                 if off + i < buf.len() {
                     buf[off + i] += s * 0.25;
@@ -369,6 +397,51 @@ mod tests {
         picker.reset_window();
         assert_eq!(picker.stats(), s, "cumulative counters stay monotonic");
         assert_eq!((picker.clusters().to_vec(), picker.chosen()), before);
+    }
+
+    #[test]
+    fn a_pick_switch_never_returns_the_same_marker_twice() {
+        // The committed 2 s fixture's shape: L below the floor, R clearing it, R 488 samples late.
+        // L carries markers 1-3, R markers 0-3. In 256-frame callbacks L's copy of marker 2 is
+        // returned while L is still chosen, then R's copy tips the pick to R one callback later;
+        // that copy (and R's copy of marker 3) is the SAME physical marker and must not be paired
+        // a second time.
+        let p = AudioParams::rig60();
+        let sig = signal_len(&p) as u64;
+        let len = SR * 3;
+        let l = markers_at(&[1, 2, 3], SR / 2, SR / 4, 0, len);
+        let r = markers_at(&[0, 1, 2, 3], SR / 2, SR / 4, 488, len);
+        let mut picker = ChannelMarkerPicker::dock(2, p);
+        let got = run(&mut picker, &[l.clone(), r], 256);
+        for w in got.windows(2) {
+            assert!(
+                !(w[0].1 == w[1].1 && w[1].0 <= w[0].0 + sig),
+                "marker {} returned twice: {got:?}",
+                w[1].1
+            );
+        }
+        assert_eq!(picker.clusters(), &[3, 4]);
+        assert_eq!(picker.chosen(), 1, "only R clears the floor");
+        assert_eq!(got, single(&l, 256).0, "L's own three markers, each once");
+    }
+
+    #[test]
+    fn a_decode_flood_keeps_only_the_newest_markers_per_channel() {
+        // One marker every 1200 samples (just over the 1085-sample dedup gap), more than the cap.
+        let n = DOCK_CHANNEL_PICK_MAX_MARKERS + 40;
+        let ks: Vec<usize> = (0..n).collect();
+        let track = markers_at(&ks, 1200, SR / 4, 0, SR / 4 + n * 1200 + SR / 4);
+        let mut picker = ChannelMarkerPicker::dock(1, AudioParams::rig60());
+        let got = run(&mut picker, std::slice::from_ref(&track), 1024);
+        assert_eq!(got.len(), n, "every marker still decodes and is returned");
+        assert_eq!(picker.history[0].len(), DOCK_CHANNEL_PICK_MAX_MARKERS);
+        assert_eq!(picker.history[0].back(), got.last(), "the newest are kept");
+        assert_eq!(
+            picker.history[0].front(),
+            got.get(40),
+            "the oldest are dropped"
+        );
+        assert_eq!(picker.clusters(), &[DOCK_CHANNEL_PICK_MAX_MARKERS as u64]);
     }
 
     #[test]
