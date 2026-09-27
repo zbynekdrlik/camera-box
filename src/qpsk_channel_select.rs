@@ -155,7 +155,7 @@ pub fn ffmpeg_extract_args(track: u32, sample_rate: u32, channels: usize) -> Vec
 /// `channels`-wide frames — the extract and the stride disagree.
 pub fn f32le_to_channels(bytes: &[u8], channels: usize) -> Result<Vec<Vec<f32>>, String> {
     let frame_bytes = 4 * channels;
-    if channels == 0 || bytes.len() < frame_bytes || !bytes.len().is_multiple_of(frame_bytes) {
+    if channels == 0 || bytes.is_empty() || !bytes.len().is_multiple_of(frame_bytes) {
         return Err(format!(
             "{} bytes is not a whole number of {channels}-channel f32 frames",
             bytes.len()
@@ -484,6 +484,11 @@ mod tests {
             "not whole f32 samples"
         );
         assert!(f32le_to_channels(&[], 2).is_err(), "no frame at all");
+        // exactly one whole frame is accepted
+        assert_eq!(
+            f32le_to_channels(&frames[..8], 2),
+            Ok(vec![vec![0.5], vec![-0.25]])
+        );
         assert!(f32le_to_channels(&frames, 0).is_err());
     }
 

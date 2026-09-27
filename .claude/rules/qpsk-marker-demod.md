@@ -91,8 +91,11 @@ ruled the skew is not his to fix — the gate must be robust to it.
   `CARGO_MANIFEST_DIR` set for the fixture path; `clippy-driver --test -D warnings` on the same crate.
 - **The pick key is the longest strictly-consecutive run**, so on a long recording where both channels
   decode, a single false decode can decide which one wins and the offset can move by ~10 ms between
-  runs. The design keeps "largest cluster, ties lowest"; a stability rule (e.g. prefer the lowest
-  channel that clears the floor) is a design question left to the main session.
+  runs (worst case ~10 ms raw, ~4 ms after the 0.4 loop gain, inside the ±30 ms band). The design
+  keeps "largest cluster, ties lowest"; a stability refinement (prefer the lowest channel that clears
+  the floor, or hold the apply when `chosen_channel` changes) is proposed on issue 1367, comment
+  5856387351. On the rig L also carries a low-frequency hum (many more preamble screens than R), so
+  R is expected to win consistently.
 - **Not yet re-measured:** the 16.9 drowned-chain recordings were never re-run per channel (they are
   not on dev1). Per-channel reads of two local noise-flooded stereo captures (17 s and 120 s, 18.9)
   stayed at cluster 2, below the floor of 4.

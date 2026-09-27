@@ -8076,9 +8076,9 @@ fn args_expected_burns_for(box_name: &str, args: &Args) -> Option<Vec<u32>> {
 /// stream box decodes its stream recording (all three burns). dev1 then `--merge-partials` the
 /// small JSONs (+ pulls back the pixel dirs) — the recording is NEVER copied box-to-box (nor to dev1).
 /// #1324 — the AUDIO-ONLY QPSK decodability probe. Reuse the SAME `qpsk_marker` demod as `--av-sync`
-/// over a short audio-only capture (WAV/MKV, NO emit-log / video pairing), then hand the decoded
-/// markers + stats + samples to the pure crate-root decision (`qpsk_probe_decision`) and print ONE
-/// JSON line. A pure REPORTER — always exits 0 when it prints a verdict; the `[4b3/8]` shell step
+/// over a short audio-only capture (WAV/MKV, NO emit-log / video pairing): every channel is decoded
+/// and the best one picked by the pure crate-root `qpsk_channel_select` (issue 1367 — never a
+/// downmix), whose report reuses the `qpsk_probe_decision` verdict, and print ONE JSON line. A pure REPORTER — always exits 0 when it prints a verdict; the `[4b3/8]` shell step
 /// reads the JSON and decides the abort. A genuine read error (ffmpeg missing / unreadable file)
 /// propagates as `Err` (non-zero exit, no JSON) so the shell can tell "unreadable" from "UNDECODED".
 fn qpsk_probe(args: &Args, audio: &Path) -> Result<()> {

@@ -6,7 +6,8 @@
 //! (`index → frame_id`) to compute the video↔audio offset. Cross-platform (ffmpeg + the pure
 //! `qpsk_marker` decode + `recording::analyze_recording`) so it runs ON stream.lan alongside the
 //! zero-loss `recording-verdict` (#193). All the JUDGEMENT (decode, pair, offset, interpolation)
-//! is pure Tier-0 in `crate::qpsk_marker`; this module is only the ffmpeg I/O glue.
+//! is pure Tier-0 in `crate::qpsk_marker`, and the per-channel decode + best-channel pick (issue
+//! 1367, never a downmix) in `crate::qpsk_channel_select`; this module is only the ffmpeg I/O glue.
 
 use crate::probe::recording::analyze_recording;
 use crate::qpsk_channel_select::{
@@ -31,7 +32,7 @@ pub struct AvSyncReport {
     pub offset: AvOffset,
     /// Video frame rate used to convert frame_index → time.
     pub fps: f64,
-    /// QPSK markers decoded from the audio track.
+    /// QPSK markers decoded from the CHOSEN channel of the audio track (see `audio_channels`).
     pub audio_markers: usize,
     /// Distinct cam2 dual-QR ticks read from the video.
     pub video_ticks: usize,
