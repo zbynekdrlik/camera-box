@@ -79,30 +79,34 @@ late.
 The lane's integer model and the bench use the logged callback pattern (14–21 ms callbacks, one of
 28 ms a second) and a send thread that wakes 0–30 ms late.
 
-- One mixer stall stays clean up to about 180 ms at target 64 (target + G = 164 ms; the 14 ms
-  anchor reference adds the rest).
-- A 150 ms stall leaves the wire 73–79 ms late (bench / model), so G = 80 would keep only a few
+- On a fresh schedule one mixer stall stays clean up to target + G = 164 ms at target 64 (the
+  bench pins it; the model had it clean up to ~180 ms, the 14 ms anchor reference adds the rest).
+- A 150 ms stall leaves the wire 66–79 ms late (bench / model), so G = 80 would keep only a few
   ms of margin there; 200 ms is the first stall that cuts a silence.
-- G = 100 covers the list's 150 ms stall and the largest non-pathological 27.9 hole (128 ms) with
-  ≥ 20 ms margin. The quiet-regime worst stall (70 ms) sits far inside it.
-- The target stays 64 ms: 64 + G already covers every measured quiet-regime stall.
+- G = 100 covers the list's 150 ms stall and the largest non-pathological 27.9 hole (128 ms). The
+  quiet-regime worst stall (70 ms) sits far inside it ON A FRESH SCHEDULE; after a hole inside the
+  grace it may not (see the known consequence).
+- The target stays 64 ms: on a fresh schedule 64 + G covers every measured quiet-regime stall.
 
 | scenario (64 ms) | shipped 1372: discarded / wire gap | 1381: silence / discarded | 1381: max wire gap |
 |---|---|---|---|
 | stall 55.3 / 70 ms | 0 / 0 | 0 / 0 | 35 ms (wake lateness) |
 | stall 100 ms | 79.7 / 83.2 ms | 0 / 0 | 35 ms |
-| stall 150 ms | 204.1 / 155.9 ms | 0 / 0 (75 late sends) | 72.8 ms |
-| stall 290 ms | 293.8 / 292.8 ms | 214 / 214 ms, 1 discontinuity + 1 repay | 119 ms |
-| hole 42 / 85 / 106 / 128 ms | 0 / 0–156 ms | 0 / 0 | 35–62 ms |
-| hole 490 ms | 0 / 500.1 ms | 463 / 0 ms, 1 discontinuity | 91 ms |
-| 27.9 hole list (6 holes, 957 ms) | 0 / 1034 ms, 5 underflows | 921 / 0 ms, 4 discontinuities | 111 ms |
-| hole 128 ms, then stall 100 ms | — | 110 / 0 ms, 1 discontinuity | 82 ms |
+| stall 150 ms | 204.1 / 155.9 ms | 0 / 0 (104 late sends) | 66.2 ms |
+| stall 290 ms | 293.8 / 292.8 ms | 254 / 254 ms, 1 discontinuity + 1 repay | 91 ms |
+| hole 42 / 85 / 106 / 128 ms | 0 / 0–156 ms | 0 / 0 | 35–70 ms |
+| hole 149 ms | — | 75 / 0 ms, 1 discontinuity | 91 ms |
+| hole 490 ms | 0 / 500.1 ms | 468 / 0 ms, 1 discontinuity | 127 ms |
+| 27.9 hole list (6 holes, 957 ms) | 0 / 1034 ms, 5 underflows | 941 / 0 ms, 3 discontinuities | 97 ms |
+| hole 128 ms, then stall 55.3 ms | — | 0 / 0 in seed 1 (a silence in some seeds) | 62 ms |
+| hole 128 ms, then stall 70 ms | — | 105 / 0 ms, 1 discontinuity | 62 ms |
+| hole 128 ms, then stall 100 ms | — | 134 / 0 ms, 1 discontinuity | 62 ms |
 
 The shipped column is the Python port of the 1372 header, worst of 4 seeds. The 1381 columns are
 `the_1381_scenario_table`, seed 1.
 
 "Loses nothing" means the SENDER silenced and discarded nothing. A stall inside the grace still
-reaches FOH as a wire gap of up to about `stall − 78 ms` (72.8 ms for a 150 ms stall), followed
+reaches FOH as a wire gap of up to about `stall − 78 ms` (66 ms for a 150 ms stall), followed
 by a 2× catch-up. The receiver's own jitter buffer has to ride that out. How VB-Matrix on fohabl
 handles such a gap is measured by the ≥ 2 h rehearsal, not by this bench.
 
@@ -110,17 +114,23 @@ handles such a gap is measured by the ≥ 2 h rehearsal, not by this bench.
 
 A buffering hole brings no backlog and `t0` never moves.
 
-- **Which holes.** A hole longer than about target + 14 ms (78 ms at 64) but shorter than about
-  target + 14 ms + grace (178 ms). The 27.9 holes of 85, 106 and 128 ms are in that range; the
-  42 ms hole leaves nothing late.
+- **Which holes.** A hole longer than about target + 14 ms (78 ms at 64) that still stays inside
+  the grace: up to about 130 ms in the bench (the 149 ms hole already cuts a silence, which
+  rebuilds the margin). The 27.9 holes of 85, 106 and 128 ms are in that range; the 42 ms hole
+  leaves nothing late.
 - **What follows.** Every later packet leaves about `hole − 78 ms` behind its slot. Nothing is
   lost, but:
   - `late_sends` climbs about 200 per second;
   - the wire follows the audio thread's arrival jitter (smoothed by the 2× cap);
   - the grace left for the next stall is only `G − (hole − 78 ms)`.
-- **Measured.** After a 128 ms hole, a 100 ms stall that a fresh schedule absorbs cuts a 110 ms
-  silence. `known_limit_after_an_in_grace_hole_the_grace_left_for_a_stall_is_smaller_1381` pins
-  this, as a RED for the fix.
+- **Measured: the quiet regime itself is no longer covered.** After a 128 ms hole, the quiet
+  regime's 70 ms stall and a 100 ms stall, both clean on a fresh schedule, cut 105 and 134 ms
+  silences (4 of 4 seeds); the logged 55.3 ms stall does in some seeds.
+  `known_limit_after_an_in_grace_hole_the_grace_left_for_a_stall_is_smaller_1381` pins the 70 and
+  100 ms cases, as a RED for the fix.
+- **Why it matters on resolume.** The cg OBS grows its audio buffering legitimately, from the
+  85 ms floor to 128–362 ms (the audio-buffering floor rule of issue 1367), and every growth step
+  is a hole of that size for this sender.
 - **When it ends.** At the next silence episode (it rebuilds the target depth) or an OBS restart.
 - **On the status line.** A `late_sends` count that climbs steadily with `silence_ms` flat means
   exactly this.
@@ -142,18 +152,20 @@ A buffering hole brings no backlog and `t0` never moves.
     resume depth and one sample below it, the repay edge and one sample short, both ceilings and
     one over, and retargets while running, starved and silent.
   - A second test counts those boundary hits, so the gate cannot quietly go blind.
-- **Mutation proof (issue 1381).** 41 hand mutants were run on a scratch copy of the tree:
+- **Mutation proof (issue 1381).** 44 hand mutants were run on a scratch copy of the final tree:
   - Rust mutants: the grace edge, the resume depth, the cap on/off/anchor, the repay condition and
     size, the `repays` count, the forgiveness, both ceilings, the constants, `wait_ms` rounding,
-    the late-send condition and `late_max` for silence.
+    the late-send condition, `late_max` for silence and the waiting flag after a retarget.
   - The same mutants in the C.
   - The same mutant in BOTH C and Rust, which only the behavioural tests can kill.
   - Wiring mutants: the frame-counter skip, the silence send, the send order, the event wait,
     the zero fill and the `repays=` field.
   - Every mutant was killed.
 - **The bench's wake model.** A timed wake (a deadline, or an event wait that timed out) is
-  0–30 ms late, as measured. An audio arrival ends an event wait within 0–2 ms (review round 1).
-  A 30 ms-late anchor would give the bench more margin than the real thread has.
+  0–30 ms late, as measured. An audio arrival ends an event wait within 0–2 ms, also one that
+  lands in the overshoot of a wait that already timed out (`WaitForSingleObject` is still waiting
+  then). A late anchor gives the bench more margin than the real thread has: review rounds 1 and 2
+  each found one, and the second made the 149 ms hole and the hole-then-stall cases honest.
 - The same test file pins the wiring:
   - both `windows-genlock*.yml` files build the plugin and assert the patch, including the
     `late_sends` status line and the `send_silence` call;
