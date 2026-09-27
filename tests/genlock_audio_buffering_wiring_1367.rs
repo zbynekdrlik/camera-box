@@ -323,13 +323,19 @@ static void reset(uint32_t rate, uint32_t max_ms, bool fixed)
 	       audio->floor_buffering_ticks, audio->max_buffering_ticks, audio->fixed_buffer ? 1 : 0);
 }}
 
-/* One audio_callback tick: its window [start, start + a tick], a source whose oldest audio sits
- * behind_ms before it (0 = none behind), then the stock tail (a waiting tick is consumed). */
+/* One audio_callback tick at the real-time window [start, start + a tick]. The window it processes
+ * is the front of buffered_timestamps: the real-time one when nothing waits, else the oldest
+ * pushed window, buffered_ts - wait * tick. A source's oldest audio sits behind_ms before the
+ * REAL-TIME start (0 = none behind). Then the stock tail: a waiting tick is consumed. */
 static void tick(size_t sample_rate, uint64_t start, uint64_t behind_ms, const char *buffering_name)
 {{
 	struct obs_core_audio *audio = &core;
-	struct ts_info ts = {{start, start + audio_frames_to_ns(sample_rate, AUDIO_OUTPUT_FRAMES)}};
-	const uint64_t min_ts = behind_ms ? start - behind_ms * 1000000ULL : start;
+	const uint64_t front = audio->buffering_wait_ticks
+				      ? audio->buffered_ts - audio_frames_to_ns(sample_rate, audio->buffering_wait_ticks *
+												    AUDIO_OUTPUT_FRAMES)
+				      : start;
+	struct ts_info ts = {{front, front + audio_frames_to_ns(sample_rate, AUDIO_OUTPUT_FRAMES)}};
+	const uint64_t min_ts = behind_ms ? start - behind_ms * 1000000ULL : front;
 /* ---- lifted verbatim from obs-audio.c audio_callback ---- */
 {decision}
 /* ---- end lift ---- */
@@ -372,11 +378,26 @@ int main(void)
 	t += tick_ns;
 	tick(48000, t, 10, "ASIO Input Capture");
 
-	/* A source already behind at the FIRST tick: the floor is raised first; OBS's dynamic check
-	 * runs on the next tick, against the window the floor moved back by 85 ms. */
+	/* A source already behind at the FIRST tick (the stream ASIO startup race): the floor is raised
+	 * first; OBS's dynamic check runs on the next, UNDRAINED ticks against the window the floor
+	 * moved back. 85 ms behind is absorbed by the floor; 100 ms behind adds one tick, so the total
+	 * is ceil(100 ms / tick) = 5 = what stock OBS reaches alone: max(floor, stock). */
 	reset(48000, 0, false);
 	t += tick_ns;
 	tick(48000, t, 85, "ASIO Input Capture");
+	{{
+		/* Raising to the current total must be a no-op (a caller that breaks the precondition
+		 * must not rewrite the window or push timestamps). */
+		struct ts_info probe = {{t + 5u, t + 7u}};
+		const size_t ms = raise_audio_buffering(&core, 48000, &probe, core.total_buffering_ticks);
+		printf("raise-noop ms=%zu total=%d wait=%" PRIu64 " pushes=%zu ts_moved=%d\n", ms,
+		       core.total_buffering_ticks, core.buffering_wait_ticks, core.buffered_timestamps.pushes,
+		       (probe.start != t + 5u || probe.end != t + 7u) ? 1 : 0);
+	}}
+	t += tick_ns;
+	tick(48000, t, 85, "ASIO Input Capture");
+	t += tick_ns;
+	tick(48000, t, 100, "ASIO Input Capture");
 
 	/* The frontend low-latency toggle (fixed 20 ms): overridden, still floor then dynamic. */
 	reset(48000, 20, true);
@@ -504,7 +525,7 @@ fn expected_trace() -> Vec<String> {
         "reset rate=48000 max_ms=0 fixed=0 -> floor=4 max=45 fixed_buffer=0".into(),
         floor_line(85),
         "tick total=4 wait=4 pushes=4 window_back_ms=85".into(),
-        "tick total=4 wait=3 pushes=4 window_back_ms=0".into(),
+        "tick total=4 wait=3 pushes=4 window_back_ms=85".into(),
         "tick total=4 wait=0 pushes=4 window_back_ms=0".into(),
         above(64, 149, "mbc", "BROKEN", "-58.3", BROKEN_TAIL),
         "tick total=7 wait=3 pushes=7 window_back_ms=64".into(),
@@ -514,10 +535,14 @@ fn expected_trace() -> Vec<String> {
         "tick total=4 wait=4 pushes=4 window_back_ms=85".into(),
         above(21, 106, "ASIO Input Capture", "ok", "-15.7", ""),
         "tick total=5 wait=1 pushes=5 window_back_ms=21".into(),
-        // 85 ms late at the first tick
+        // late at the first tick, then undrained: 85 ms absorbed, 100 ms adds one tick
         "reset rate=48000 max_ms=0 fixed=0 -> floor=4 max=45 fixed_buffer=0".into(),
         floor_line(85),
         "tick total=4 wait=4 pushes=4 window_back_ms=85".into(),
+        "raise-noop ms=85 total=4 wait=3 pushes=4 ts_moved=0".into(),
+        "tick total=4 wait=3 pushes=4 window_back_ms=85".into(),
+        above(21, 106, "ASIO Input Capture", "ok", "-15.7", ""),
+        "tick total=5 wait=3 pushes=5 window_back_ms=106".into(),
         // the low-latency toggle
         "reset rate=48000 max_ms=20 fixed=1 -> floor=4 max=45 fixed_buffer=0".into(),
         floor_line(85),

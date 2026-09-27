@@ -84,6 +84,8 @@ fn band_vectors() -> Vec<(u64, u64, i64)> {
     for buf in [
         0_u64,
         64_000_000,
+        64_999_999,
+        65_000_000,
         85_333_333,
         106_666_666,
         126_000_000,
@@ -315,7 +317,9 @@ fn c_audio_buffering_matches_the_rust_authority_1367() {
             && r.iter()
                 .any(|l| l.starts_with("band ") && l.ends_with(" 0"))
             && r.iter()
-                .any(|l| l.starts_with("band ") && l.ends_with(" 1")),
+                .any(|l| l.starts_with("band ") && l.ends_with(" 1"))
+            && has("band 65000000 0 100000000 35000000 1")
+            && has("band 64999999 0 100000000 35000001 0"),
         "issue 1367: the parity vectors no longer reach the floor, the override, the maximum, the \
          dynamic increase and both band outcomes"
     );
@@ -479,6 +483,7 @@ fn the_floor_reads_clean_on_every_786_launch_gate_1367() {
         launch_gate_bound("scripts/rig-health-audit.py", "AUDIO_BUF_BOUND_MS = "),
         launch_gate_bound("scripts/obs-guarded-launch.ps1", "$threshold  = "),
         launch_gate_bound("scripts/launch-obs-genlock.sh", "$bufPeak -le "),
+        launch_gate_bound("scripts/launch-obs-genlock.sh", "$d.Peak -le "),
     ];
     for rate in [44_100, 48_000] {
         let floor = plan(0, false, rate, AUDIO_OUTPUT_FRAMES).floor_ticks;
