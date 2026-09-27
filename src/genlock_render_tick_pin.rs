@@ -1,6 +1,6 @@
 //! Issue 1357 — which CPU cores the vendored genlock render tick may be pinned to.
 //!
-//! `vendor/obs-studio/libobs/obs-video.c` pins the libobs graphics thread (the thread that drives
+//! The vendored OBS (`vendor/obs-studio/libobs/obs-genlock-render-tick-pin.h`) pins the libobs graphics thread (the thread that drives
 //! the genlock render tick through `video_sleep`) onto cores the kernel keeps free for it. Until
 //! issue 1357 it read only `nohz_full` and fell back to a hardcoded `{10,11}` pair, so on strih-lx
 //! (no isolated core at all) it pinned the thread onto two ordinary cores, and every thread the
@@ -12,7 +12,8 @@
 //!
 //! This module is the Tier-0 authority for that decision. The C port (`genlock_render_tick_pin_set`
 //! and the cpulist parser `genlock_parse_cpulist_into_set`, inside the `camera-box issue 1357
-//! render-tick pin BEGIN … END` block of obs-video.c) is held identical by the committed parity gate
+//! render-tick pin BEGIN … END` block of `obs-genlock-render-tick-pin.h`, which obs-video.c
+//! includes) is held identical by the committed parity gate
 //! `tests/genlock_render_tick_pin_1357.rs`, which lifts the block, compiles it and compares every
 //! vector.
 //!
@@ -28,40 +29,37 @@ pub const CPU_SETSIZE: usize = 1024;
 /// Parse a Linux cpulist the way the vendored C `genlock_parse_cpulist_into_set` does.
 ///
 /// Separators (space, tab, newline, comma) are skipped between entries. An entry is a number or a
-/// `a-b` range; anything else ends the parse. A number keeps accumulating digits only while it is
-/// below `CPU_SETSIZE` (the rest of its digits are consumed), so a corrupted read cannot overflow.
-/// A reversed range (`5-3`) contributes nothing. The result is sorted and deduplicated.
+/// `a-b` range; anything else ends the parse. A number saturates at `CPU_SETSIZE` (the C stops
+/// accumulating once it is out of range and consumes the rest of the digits; both leave a value no
+/// `cpu_set_t` holds), so a corrupted read cannot overflow. A reversed range (`5-3`) contributes
+/// nothing. The result is sorted and deduplicated.
 pub fn parse_cpulist(s: &str) -> Vec<usize> {
     let b = s.as_bytes();
     let mut i = 0usize;
     let mut set = [false; CPU_SETSIZE];
     let number = |i: &mut usize| -> usize {
         let mut v = 0usize;
-        while *i < b.len() && b[*i].is_ascii_digit() {
-            if v < CPU_SETSIZE {
-                v = v * 10 + usize::from(b[*i] - b'0');
-            }
+        while let Some(d) = b.get(*i).filter(|c| c.is_ascii_digit()) {
+            v = (v * 10 + usize::from(d - b'0')).min(CPU_SETSIZE);
             *i += 1;
         }
         v
     };
-    while i < b.len() {
-        while i < b.len() && matches!(b[i], b' ' | b'\t' | b'\n' | b',') {
+    loop {
+        while matches!(b.get(i), Some(b' ' | b'\t' | b'\n' | b',')) {
             i += 1;
         }
-        if i >= b.len() || !b[i].is_ascii_digit() {
+        if !b.get(i).is_some_and(u8::is_ascii_digit) {
             break;
         }
         let first = number(&mut i);
         let mut last = first;
-        if i < b.len() && b[i] == b'-' {
+        if b.get(i) == Some(&b'-') {
             i += 1;
             last = number(&mut i);
         }
-        let mut c = first;
-        while c <= last && c < CPU_SETSIZE {
-            set[c] = true;
-            c += 1;
+        for cell in set.iter_mut().take(last.saturating_add(1)).skip(first) {
+            *cell = true;
         }
     }
     (0..CPU_SETSIZE).filter(|&c| set[c]).collect()
