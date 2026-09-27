@@ -372,9 +372,9 @@ def verify_live_mapping(op, ws, want, sampler, log_err, hidden=None):
     issue 1242: `hidden(ws, input) -> bool` (optional, obs_phase2.input_hidden_by_design in the CLI)
     SKIPs an input hidden by design -- a program-path camera with connect-on-show that nothing shows
     has released its NDI receiver, and an MV twin an E2E hold took off the wire (genlock off,
-    audio-only) receives no video, so either one's screenshot is a held frame by design, never a
-    wedge. It is logged and counted in none of the three buckets (never a false FROZEN, never
-    sampled)."""
+    audio-only) receives no video, so either one's screenshot is a blank picture by design (DistroAV
+    deactivates the texture), never a wedge. It is logged and counted in none of the three buckets
+    (never a false FROZEN, never sampled)."""
     live = frozen = inconclusive = 0
     for inp, _snd in want:
         if hidden is not None and hidden(ws, inp):

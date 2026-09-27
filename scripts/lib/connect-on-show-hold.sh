@@ -34,10 +34,11 @@
 #                                                          must abort (a hidden input would be measured
 #                                                          cold)
 #   connect_on_show_e2e_wait_live HERE STRIH STATE_FILE -> ALWAYS 0 (bounded wait, fail-open WARNING)
-#   connect_on_show_e2e_restore   HERE STRIH STATE_FILE -> ALWAYS 0 (cleanup-safe; a failed restore is
-#                                                          fail-SAFE: the inputs just stay connected
-#                                                          until the next strih OBS launch re-applies
-#                                                          the roles)
+#   connect_on_show_e2e_restore   HERE STRIH STATE_FILE -> ALWAYS 0 (cleanup-safe; a failed restore
+#                                                          leaves a main held at full bandwidth, or an
+#                                                          MV twin off the wire with a blank multiview
+#                                                          cell, until the next run's cleanup or the
+#                                                          next strih OBS launch re-applies the roles)
 
 # connect_on_show_strih_marker set|clear STRIH -> ALWAYS 0. The strih-side hold marker, over plain ssh
 # on the Linux strih only (a Windows strih never runs the role apply). CONNECT_ON_SHOW_MARKER_CMD

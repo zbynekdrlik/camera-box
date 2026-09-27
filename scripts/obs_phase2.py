@@ -3175,8 +3175,8 @@ def hidden_by_design(settings, showing):
         monitor twin, and not showing anywhere; or
       - a monitor twin the E2E hold took OFF THE WIRE (strih_bandwidth_roles.twin_is_held), showing
         or not -- the multiview shows its blank cell by design.
-    A consumer (e.g. a liveness verify) must then SKIP it -- its held frame is the design, never a
-    wedge."""
+    A consumer (e.g. a liveness verify) must then SKIP it -- its blank picture (DistroAV deactivates
+    the texture) is the design, never a wedge."""
     s = settings or {}
     if _twin_held(s):
         return True
@@ -3291,8 +3291,9 @@ def connect_on_show_hold(ws, state_path):
          winning -- BEFORE any write. An input whose settings cannot be read is a failure (it may be a
          twin still on the wire, or a main about to be measured parked).
       2. Writes the mains present and WAITS for them to settle.
-      3. Only then writes the twins present, except a twin whose main did not settle (that camera keeps
-         its twin as its one live receiver), and waits for them to settle.
+      3. Only then writes the twins present, except a twin whose main did not settle or could not be
+         read (that main may still be parked, so the camera keeps its twin as its one configured
+         receiver), and waits for them to settle.
     Returns (held_mains, held_twins, failed_names): the inputs written this run and the ones that
     failed (unreadable, or a write that never read back)."""
     roles = _bandwidth_roles()
@@ -3318,7 +3319,8 @@ def connect_on_show_hold(ws, state_path):
     held_mains = [n for n in mains if n in settings]
     failed_mains = _write_and_settle(ws, {n: {CONNECT_ON_SHOW_KEY: False} for n in held_mains},
                                      roles.settings_match)
-    held_twins = sorted(n for n in twins if n in settings and roles.twin_main(n) not in failed_mains)
+    unconfirmed = set(failed_mains) | set(unreadable)
+    held_twins = sorted(n for n in twins if n in settings and roles.twin_main(n) not in unconfirmed)
     failed_twins = _write_and_settle(ws, {n: dict(roles.E2E_TWIN_HOLD) for n in held_twins},
                                      roles.settings_match)
     return held_mains, held_twins, sorted(set(unreadable) | set(failed_mains) | set(failed_twins))
@@ -3329,12 +3331,12 @@ def connect_on_show_restore(ws, state_path):
     strih_bandwidth_roles.twin_restore_values(original) (genlock on + the monitor role -- DistroAV's
     lockdown then puts LOWEST back itself) and is verified after it settles; only then does every held
     main present get connect-on-show back -- EXCEPT a main whose twin did not settle, which stays held
-    (full bandwidth, and in the state file), so a camera is never left with neither a live main nor a
-    live twin. An input deleted / renamed since the hold has nothing to restore (done). The state file
-    is removed only when every restore landed. No state file -> ([], []). Returns (restored_names,
-    failed_names)."""
+    (full bandwidth, and in the state file), so a camera always keeps one receiver configured to
+    connect. An input deleted / renamed since the hold has nothing to restore (done). The state file
+    is removed only when every restore landed. No state file -> ([], [], []). Returns (restored_names,
+    failed_names, held_back_mains)."""
     if not os.path.exists(state_path):
-        return [], []
+        return [], [], []
     roles = _bandwidth_roles()
     mains, twins = _read_hold_state(state_path)
     present = {i.get("inputName") for i in
@@ -3342,13 +3344,14 @@ def connect_on_show_restore(ws, state_path):
     twin_wants = {n: roles.twin_restore_values(twins[n]) for n in twins if n in present}
     failed_twins = _write_and_settle(ws, twin_wants, roles.settings_match)
     main_names = [n for n in mains if n in present and roles.twin_name(n) not in failed_twins]
+    held_back = [n for n in mains if n in present and roles.twin_name(n) in failed_twins]
     failed_mains = _write_and_settle(ws, {n: {CONNECT_ON_SHOW_KEY: True} for n in main_names},
                                      roles.settings_match)
     failed = sorted(set(failed_twins) | set(failed_mains))
     if not failed:
         os.remove(state_path)
     restored = [n for n in sorted(twin_wants) + main_names if n not in failed]
-    return restored, failed
+    return restored, failed, held_back
 
 
 def connect_on_show(a):
@@ -3358,22 +3361,26 @@ def connect_on_show(a):
     try:
         if a.hold:
             mains, twins, failed = connect_on_show_hold(ws, a.hold)
+            held = [n for n in mains if n not in failed]
+            off = [n for n in twins if n not in failed]
             msg = (f"issue 1242 connect-on-show held (connect-on-show OFF for the run): "
-                   f"{', '.join(mains) if mains else '(none)'}; monitor twins off the wire "
-                   f"(genlock off, audio-only): {', '.join(twins) if twins else '(none)'}")
+                   f"{', '.join(held) if held else '(none)'}; monitor twins off the wire "
+                   f"(genlock off, audio-only): {', '.join(off) if off else '(none)'}")
+            err = (f"ERROR issue 1242: connect-on-show HOLD failed (unreadable, or no read-back after "
+                   f"the input update) on: {', '.join(failed)}")
         else:
-            names, failed = connect_on_show_restore(ws, a.restore)
+            names, failed, held_back = connect_on_show_restore(ws, a.restore)
             msg = (f"issue 1242 connect-on-show restored (connect-on-show ON, monitor twins back on the "
                    f"wire): {', '.join(names) if names else '(none)'}")
+            err = (f"ERROR issue 1242: connect-on-show RESTORE failed (no read-back after the input "
+                   f"update) on: {', '.join(failed)}; kept held because their MV twin did not "
+                   f"restore: {', '.join(held_back) if held_back else '(none)'}")
     finally:
         ws.close()
     print(msg)
     if failed:
-        print(f"ERROR issue 1242: connect-on-show hold/restore failed (unreadable, or no read-back "
-              f"after the input update) on: {', '.join(failed)} -- a main whose twin did not restore "
-              f"stays held", file=sys.stderr)
+        print(err, file=sys.stderr)
         sys.exit(1)
-
 
 def main():
     ap = argparse.ArgumentParser()

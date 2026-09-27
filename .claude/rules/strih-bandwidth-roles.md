@@ -182,8 +182,9 @@ leftover file (a SIGKILLed run's list is restored by the next run's cleanup), an
 back (failure → the run aborts: a hidden input would be measured cold). `cleanup()` restores it
 AFTER `cleanup_mv_reverify_active_boxes` + `ndi_cadence_verify_and_heal` (both read every input
 connected — restoring earlier would make the #759 reverify see parked mains as wedged and escalate);
-always returns 0; a failed restore is fail-SAFE (the inputs just stay connected until the next
-launch re-applies the roles).
+always returns 0. A failed restore leaves a main held at full bandwidth, or an MV twin off the wire
+with a blank multiview cell (its main then stays held too), until the next run's cleanup or the next
+launch re-applies the roles.
 
 **The same hold takes every monitor twin OFF THE WIRE for the run** (design 5859315296, finding
 5859213950). A twin from a camera-box sender costs ~58 Mbps at NDI "lowest", not a small proxy, so
@@ -204,8 +205,10 @@ launch re-applies the roles).
   still reads. A leftover file is unioned, and its recorded twin original wins.
 - **Writes only present inputs, and the ORDER is enforced, not just issued.** The hold writes the
   mains and WAITS for them to settle, then writes the twins. A twin whose main did not settle stays on
-  the wire, so a camera always has one live receiver. An input the hold cannot read at enumeration is
-  a failure: it may be a twin still on the wire, or a main about to be measured parked.
+  the wire, and so does the twin of a main the hold could not read: a camera always keeps one
+  receiver CONFIGURED to connect (the settle confirms the setting read back, not that frames arrive —
+  an unpark or re-bind takes ~1-2 s). An input the hold cannot read at enumeration is a failure: it
+  may be a twin still on the wire, or a main about to be measured parked.
 - **Every read-back is a SETTLE poll**, `_await_settled`. OBS applies an input update on the next
   VIDEO TICK after the WS overlay (`obs_source_update` defers `info.update`), so an immediate
   `GetInputSettings` reads the overlay back even when the update is about to revert it. The poll:
@@ -220,9 +223,10 @@ launch re-applies the roles).
 - **Restore, twins FIRST:** `twin_restore_values` writes genlock on plus the monitor ROLE (the
   lockdown pins LOWEST only for a `genlock_monitor` source), and a held-shaped original is never
   restored as held. Only then do the mains get connect-on-show back. A main whose twin did not
-  settle stays HELD (full bandwidth) and stays in the state file, so the camera never has neither
-  receiver. Every write is verified by the same settle poll. A deleted/renamed input is done. The
-  file is removed only when every restore landed.
+  settle stays HELD (full bandwidth) and stays in the state file, so the camera keeps one receiver
+  configured to connect. The restore returns `(restored, failed, held_back)`, and the CLI names the
+  held-back mains. Every write is verified by the same settle poll. A deleted/renamed input is done.
+  The file is removed only when every restore landed.
 - **Mid-run strih OBS relaunch:** the launch-time role apply leaves a held twin alone
   (`twin_is_held`, `summary["twins_held"]`) while the fresh E2E hold marker exists. Without the
   marker its twin role heal writes `genlock_fifo=True`, so a twin left held by a SIGKILLed run comes
