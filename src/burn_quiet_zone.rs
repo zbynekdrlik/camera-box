@@ -13,7 +13,8 @@
 //! The fallback, run only when the 1x slot crop read no burn of the slot: find the burn's own
 //! white box inside the crop ([`locate_burn_box`]), crop exactly that box, surround it with a white
 //! border of about four modules ([`tight_border`]) and decode that. The search never leaves the
-//! slot crop, so it cannot pick up an echo.
+//! slot crop, so this look never reads anything outside it (an echo inside the crop is the same
+//! known limit the 1x and 2x looks have).
 //!
 //! ## How the box is found
 //!
@@ -32,9 +33,9 @@
 //! ([`near_white_threshold`]). At the Otsu threshold itself the light multiview rows above the box
 //! join its top edge (the box then reads 328 px tall on those crops).
 //!
-//! This is the pure, Tier-0 half (default features). The probe-gated decode glue builds the
-//! histogram, takes the Otsu threshold from `probe::qr::otsu_threshold`, crops, borders and
-//! decodes.
+//! This is the pure, Tier-0 half (default features). The probe-gated decode glue takes the
+//! histogram from [`luma_histogram`] and the Otsu threshold from `probe::qr::otsu_threshold`,
+//! crops, borders and decodes.
 
 use crate::colour_scale::Rect;
 
@@ -63,7 +64,20 @@ pub fn size_band(expected_side: u32) -> (u32, u32) {
     let (max_n, max_d) = BURN_BOX_MAX_FRACTION;
     let lo = (side * min_n).div_ceil(min_d);
     let hi = side * max_n / max_d;
-    (lo.max(1) as u32, hi as u32)
+    // lo <= side always fits; 1.05 x a side above ~4.09e9 does not, so saturate.
+    (
+        u32::try_from(lo.max(1)).unwrap_or(u32::MAX),
+        u32::try_from(hi).unwrap_or(u32::MAX),
+    )
+}
+
+/// The luma histogram of a crop: `hist[v]` = how many bytes of `luma` equal `v`.
+pub fn luma_histogram(luma: &[u8]) -> [u64; 256] {
+    let mut hist = [0u64; 256];
+    for &v in luma {
+        hist[usize::from(v)] += 1;
+    }
+    hist
 }
 
 /// The near-white threshold of a crop: the midpoint between its Otsu threshold `otsu` and its
@@ -344,6 +358,14 @@ mod tests {
         assert_eq!(locate_burn_box(&[250u8; 10], 5, 5, 188, 320), None);
         assert_eq!(locate_burn_box(&[], 0, 0, 188, 320), None);
         assert_eq!(locate_burn_box(&[250u8; 16], 4, 4, 188, 0), None);
+    }
+
+    #[test]
+    fn luma_histogram_counts_every_byte_1367() {
+        let h = luma_histogram(&[0, 40, 40, 255, 255, 255]);
+        assert_eq!((h[0], h[40], h[255]), (1, 2, 3));
+        assert_eq!(h.iter().sum::<u64>(), 6);
+        assert_eq!(luma_histogram(&[]).iter().sum::<u64>(), 0);
     }
 
     #[test]

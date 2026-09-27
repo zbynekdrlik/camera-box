@@ -41,7 +41,7 @@
 //! the reserved run_ids (`probe::recording_latency`).
 
 use crate::burn_quiet_zone::{
-    bordered_origin, locate_burn_box, near_white_threshold, tight_border,
+    bordered_origin, locate_burn_box, luma_histogram, near_white_threshold, tight_border,
 };
 use crate::burn_regions::{
     node_burn_in_own_slot, recovery_crop, recovery_slots, slot_for_run_id, slot_rect,
@@ -197,16 +197,14 @@ pub fn burn_region_passes(img: &GrayImage, missing_run_ids: &[u32], out: &mut Ve
 /// frame; the reads come back in frame pixels, so the caller's own-slot check applies to them.
 ///
 /// Empty when no box inside the size band is found: nothing is decoded then. The box never leaves
-/// the crop, so this cannot read anything the slot crop does not hold.
+/// the crop, so this never reads anything the slot crop does not hold.
 pub fn tight_box_reads(
     crop: &GrayImage,
     crop_rect: Rect,
     expected_side: u32,
 ) -> Vec<LocatedPayload> {
-    let mut hist = [0u64; 256];
-    for p in crop.pixels() {
-        hist[usize::from(p.0[0])] += 1;
-    }
+    // `crop` is an owned `to_image()` crop, so its raw buffer is exactly its pixels.
+    let hist = luma_histogram(crop.as_raw());
     let near_white = near_white_threshold(&hist, otsu_threshold(&hist));
     let Some(b) = locate_burn_box(
         crop.as_raw(),

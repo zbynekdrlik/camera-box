@@ -10,6 +10,8 @@ paths:
   - "src/probe/qr_tests.rs"
   - "src/probe/recording_decode.rs"
   - "src/probe/recording_decode_tests.rs"
+  - "src/burn_quiet_zone.rs"
+  - "src/probe/burn_region_decode.rs"
 ---
 
 # Zmena vzoru => decode fixture test (#921, #690, #751/#754)

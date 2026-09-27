@@ -15,6 +15,7 @@ paths:
   - "tests/burn_echo_fixture_decode_1367.rs"
   - "src/burn_quiet_zone.rs"
   - "tests/burn_tight_box_fixture_decode_1367.rs"
+  - "tests/fixtures/burn-tight-box-1367/**"
 ---
 
 # Burn-isolated slot recovery — a crisp node burn decodes whatever the camera shows (issue 1370)
@@ -105,17 +106,20 @@ The fix, in `burn_region_passes`, after a 1x look that read no burn of the slot:
   (about four modules), decodes it plain then Otsu (`decode_qr_luma_all_reads`), and maps the reads
   back to the frame (`bordered_origin`). They pass the same missing-id + own-slot filter as every
   other look.
-- The box never leaves the crop, so it cannot admit an echo. Only missing ids merge.
+- The box never leaves the crop, so this look reads nothing the crop does not hold (an echo
+  inside the camera crop stays the known limit below). Only missing ids merge.
 
 Do NOT locate the box as the bounding box of the largest bright connected component. On the
 run-324220913 crops the quiet zone touches bright multiview pixels, and the component leaks to the
 crop edge at every threshold from Otsu to 235. At the Otsu threshold itself the light rows above the
 box also join its top edge, so the threshold is the midpoint, not Otsu.
 
-Evidence (real rqrr 0.9.3 harness, `<scratchpad>/agent-ae8ef48-1367-tightbox/`):
+Evidence (a local real-rqrr 0.9.3 harness, built like the one in "Verifying a decode change here
+at Tier-0" above):
 - 7 of 7 missed frames read, each centred at (963, 916), each id between its neighbours.
-- A sweep of every real 1080p fixture in the repo (23 frames x the 5 slots) read the SAME payload
-  as the 1x crop whenever a box was found, and never read anything outside the crop.
+- A sweep of every real 1080p fixture in the repo (23 frames x the 5 slots): wherever a box was
+  found, the tight box read the same payload as the 1x crop or nothing. The only new reads were
+  the cam2 burns on the 3 committed fixtures, and no read fell outside the crop.
 - The functional replica mounts the real `burn_region_decode.rs` / `burn_echo.rs` /
   `burn_regions.rs` / `burn_quiet_zone.rs` with the real rqrr and a behaviour-faithful `image` stub
   (crop, replace, from_pixel, pixels, as_raw). It proved the glue RED (pre-fix: nothing on
@@ -129,8 +133,9 @@ Lock: `tests/burn_tight_box_fixture_decode_1367.rs` + `tests/fixtures/burn-tight
 `burn_region_decode.rs` (box out of the size band = nothing decoded, no burn = nothing read) and the
 Tier-0 tests in `burn_quiet_zone.rs`.
 
-Open question for the slot table (not changed here): `slot_rect(CameraCapture)` models 320 px
-where the writer renders 287 or 315. A tighter slot would still depend on the QR version.
+Not changed here: `slot_rect(CameraCapture)` still models 320 px where the writer renders 287 or
+315. The issue-1367 design (comment 5851384821) rejected changing the fixed crop; the rendered-size
+finding is on the ticket (comment 5851477988). A tighter slot would still depend on the QR version.
 
 ## Adding a node burn or corner — `burn_regions` is the ONE Rust copy
 
