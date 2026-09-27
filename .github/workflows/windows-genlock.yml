@@ -94,6 +94,26 @@ jobs:
           }
           Write-Output "#1195 auto-normal unclean-shutdown launch (no blocking Safe-Mode modal) -- OK"
 
+      # #1378: the rig build's Windows crash handler (main_crash_handler in obs-main.cpp) must
+      # NEVER show upstream's task-modal "OBS has crashed!" dialog -- on an unattended box
+      # nobody answers it, the crashed obs64 stays alive and no launcher starts a fresh OBS. It
+      # writes the crash file, logs one line naming it and exits. Assert the patch in the
+      # vendored source BEFORE the 150-min build, so a `git subtree pull` (#44) that re-imports
+      # the dialog fails HERE. Mirrors tests/obs_crash_handler_no_modal_1378.rs (Linux-only,
+      # cannot compile on this Windows runner). Keep this and the FAST workflow's copy in
+      # lock-step.
+      - name: Assert the OBS crash handler exits without a dialog (#1378)
+        shell: pwsh
+        run: |
+          $m = (Get-Content "vendor/obs-studio/frontend/obs-main.cpp" -Raw) -replace '\s+', ' '
+          if ($m -notmatch [regex]::Escape('exiting without the crash dialog (rig build: never block on a modal)')) {
+            Write-Error "obs-main.cpp: the #1378 crash-handler log line is missing -- main_crash_handler must write the crash file, log it and exit(-1) without a dialog. A subtree pull likely restored the upstream dialog; re-apply the #1378 patch."; exit 1
+          }
+          if ($m -match [regex]::Escape('"OBS has crashed!"')) {
+            Write-Error "obs-main.cpp: the upstream task-modal crash dialog (""OBS has crashed!"") is BACK -- re-apply the #1378 patch (no dialog, log the crash file, exit)."; exit 1
+          }
+          Write-Output "#1378 crash handler exits without a dialog (crash file + one log line) -- OK"
+
       # #70/#102: assert the genlock FIFO patch is present in the vendored OBS source
       # BEFORE the 150-min build, so a future `git subtree pull` (#44) that reverts the
       # zero-loss fix fails HERE rather than shipping a regressed binary. #102 changed

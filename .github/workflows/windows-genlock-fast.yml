@@ -950,6 +950,24 @@ jobs:
           }
           Write-Output "#1195 auto-normal unclean-shutdown launch (no blocking Safe-Mode modal) -- OK"
 
+      # #1378 (the #269 YAML lock-step): main_crash_handler is frontend-only -- the FAST path
+      # does NOT build the frontend -- but the source-text check still catches a `git subtree
+      # pull` (#44) that re-imports upstream's task-modal "OBS has crashed!" dialog (which keeps
+      # a crashed obs64 alive on an unattended box, so no launcher restarts OBS). Mirrors
+      # tests/obs_crash_handler_no_modal_1378.rs (Linux-only, can't compile on this runner) AND
+      # the full windows-genlock.yml #1378 gate; keep all three in lock-step.
+      - name: Assert the OBS crash handler exits without a dialog (#1378)
+        shell: pwsh
+        run: |
+          $m = (Get-Content "vendor/obs-studio/frontend/obs-main.cpp" -Raw) -replace '\s+', ' '
+          if ($m -notmatch [regex]::Escape('exiting without the crash dialog (rig build: never block on a modal)')) {
+            Write-Error "obs-main.cpp: the #1378 crash-handler log line is missing -- main_crash_handler must write the crash file, log it and exit(-1) without a dialog. A subtree pull likely restored the upstream dialog; re-apply the #1378 patch."; exit 1
+          }
+          if ($m -match [regex]::Escape('"OBS has crashed!"')) {
+            Write-Error "obs-main.cpp: the upstream task-modal crash dialog (""OBS has crashed!"") is BACK -- re-apply the #1378 patch (no dialog, log the crash file, exit)."; exit 1
+          }
+          Write-Output "#1378 crash handler exits without a dialog (crash file + one log line) -- OK"
+
       # Same configure as the full build (downloads the obs-deps bundle the preset
       # pins); we just build a single target afterwards.
       - name: Configure OBS (windows-x64 preset)
