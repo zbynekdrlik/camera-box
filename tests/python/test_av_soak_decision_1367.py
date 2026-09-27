@@ -900,5 +900,17 @@ def test_the_soaks_terms_agree_with_the_gates_fold_on_real_runs(name):
     assert asd.gate_term_disagrees(_stringify(row), cams) is False
 
 
+
+def test_a_run_wide_only_disagreement_is_unknown_never_a_pass():
+    # only the run-wide mirror disagrees (the soak reads a breach the verdict's fold does not):
+    # nothing fails, but the grading cannot be trusted -- UNKNOWN, never a quiet PASS
+    rows = [_stringify(_row_with_cont(i, _run_wide_cont(True, True))) for i in range(7)]
+    rows[3]["loss_run_wide_pass"] = "false"
+    rep = _run(rows)
+    assert rep["gate_term_mismatch_windows"] == 1
+    assert rep["series"]["continuity gate"]["verdict"] == asd.PASS
+    assert rep["verdict"] == asd.UNKNOWN, rep["reasons"]
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

@@ -46,11 +46,19 @@ def bump(name):
     n = int(open(p).read()) + 1 if os.path.exists(p) else 1
     open(p, "w").write(str(n))
     return n
+def count(name):
+    p = os.path.join(state, "count-" + name)
+    return int(open(p).read()) if os.path.exists(p) else 0
+def reached(env_name, n):
+    k = int(os.environ.get(env_name, "0") or 0)
+    return k > 0 and n >= k
 cmd = a[0]
 host = arg("--host")
 if cmd == "rig-busy-check":
     n = bump("busy")
-    live = n > int(os.environ.get("FAKE_LIVE_AFTER", "0") or 0) > 0
+    live = (n > int(os.environ.get("FAKE_LIVE_AFTER", "0") or 0) > 0
+            or reached("FAKE_LIVE_AFTER_STOPS", count("stops"))
+            or reached("FAKE_LIVE_AFTER_SWITCHES", count("switches")))
     busy = os.environ.get("FAKE_BUSY") == "1"
     diags = []
     for box in ("strih", "stream"):
@@ -79,6 +87,9 @@ elif cmd == "program-scene":
         n = bump("stream-program")
         after = int(os.environ.get("FAKE_STREAM_PROGRAM_DRIFT_AFTER", "0") or 0)
         drifted = after and n > after
+        blank = int(os.environ.get("FAKE_STREAM_PROGRAM_BLANK_AFTER", "0") or 0)
+        if blank and n > blank:
+            sys.exit("fake: program-scene read failed")
         print("Other scene" if drifted else os.environ.get("FAKE_STREAM_PROGRAM", "Development"))
     else:
         print("Cam 1")
@@ -92,6 +103,7 @@ elif cmd == "record":
         if os.environ.get("FAKE_START_FAIL") == box:
             sys.exit("fake: StartRecord verify failed")
     elif act == "stop":
+        bump("stops")
         never = os.environ.get("FAKE_STOP_NEVER") == box
         if not never and (os.environ.get("FAKE_STOP_STICKY") != box or bump("stop-" + box) > 1):
             if os.path.exists(flag):
@@ -103,6 +115,7 @@ elif cmd == "record":
         print(f"active={os.path.exists(flag)} path=x")
 elif cmd == "switch":
     scene = arg("--program-scene")
+    bump("switches")
     if os.environ.get("FAKE_SWITCH_FAIL") == scene:
         sys.exit("fake: scene renders black")
     if os.environ.get("FAKE_RESTORE_DELAY") and "--prod-floor" in a:
@@ -151,7 +164,10 @@ case "$*" in
     active="${FAKE_PAINTER_ACTIVE:-active}"
     if [ -n "${FAKE_PAINTER_FAIL_AFTER:-}" ] && [ "$n" -gt "$FAKE_PAINTER_FAIL_AFTER" ]; then active=inactive; fi
     rid=4242; [ -n "${FAKE_PAINTER_NO_RUN_ID:-}" ] && rid=""
-    printf 'active=%s\nrun_id=%s\nmarkers=10\nmarkers2=14\n' "$active" "$rid" ;;
+    m2=14
+    if [ -n "${FAKE_PAINTER_STUCK_AFTER:-}" ] && [ "$n" -gt "$FAKE_PAINTER_STUCK_AFTER" ]; then m2=10; fi
+    if [ -n "${FAKE_PAINTER_UNREADABLE_AFTER:-}" ] && [ "$n" -gt "$FAKE_PAINTER_UNREADABLE_AFTER" ]; then exit 255; fi
+    printf 'active=%s\nrun_id=%s\nmarkers=10\nmarkers2=%s\n' "$active" "$rid" "$m2" ;;
   *"head -n 1"*)
     printf 'index,frame_id,emit_ts_ns\n1,100,5\n2,130,6\n' ;;
   *) : ;;
@@ -565,6 +581,7 @@ def test_a_recording_that_never_stops_is_a_loud_exit_5(rig):
     state = (p["run"] / "recording.state").read_text()
     assert "stream=1" in state and "strih=0" in state
     assert "stream_since=" in state and "lease=av-soak-" in state
+    assert "start_window_s=" in state, "the ownership window is persisted, not re-derived"
     assert p["lease"].exists(), "no E2E may start over a recording the soak may have left"
     assert "rig lease KEPT" in r.stdout + r.stderr
 
@@ -635,7 +652,7 @@ def test_stop_leftovers_leaves_a_recording_the_soak_did_not_start(rig):
     r = _soak(env, "--stop-leftovers", str(p["run"]))
     assert r.returncode == 5, r.stdout + r.stderr
     assert not _record_stops(p)
-    assert "not the soak" in r.stdout + r.stderr
+    assert "cannot prove" in r.stdout + r.stderr
 
 
 def test_stop_leftovers_refuses_while_the_soak_still_runs(rig):
@@ -699,11 +716,11 @@ def test_an_unpinned_painter_run_id_is_a_warning(rig):
 
 
 def test_a_broadcast_that_starts_mid_run_leaves_the_strih_program_alone(rig):
-    # rig-busy-check calls: setup reads, setup mutations, slot 0 -- the stream box goes live
-    # before the slot-1 guard: the soak stops, and its cleanup must not cut the (on-air) strih
-    # program; burns + connect-on-show still go back to production
+    # the stream box goes live right after slot 0's StopRecord: the wait for slot 1 sees it and
+    # stops the soak, and its cleanup must not cut the (on-air) strih program; burns +
+    # connect-on-show still go back to production
     env, p = rig
-    r = _soak(dict(env, FAKE_LIVE_AFTER="3", **QUICK_TWO_WINDOWS), "--run")
+    r = _soak(dict(env, FAKE_LIVE_AFTER_STOPS="1", **QUICK_TWO_WINDOWS), "--run")
     assert r.returncode == 5, r.stdout + r.stderr
     out = r.stdout + r.stderr
     assert "a broadcast is live" in out
@@ -712,6 +729,52 @@ def test_a_broadcast_that_starts_mid_run_leaves_the_strih_program_alone(rig):
     assert [c for c in _calls(p["log"], "obs") if c[:1] == ["connect-on-show"] and "--restore" in c]
     assert not [f for f in os.listdir(p["state"]) if f.startswith("burn-")]
     assert not p["lease"].exists()
+
+
+def test_a_broadcast_between_slots_aborts_the_soak_before_the_next_slot(rig):
+    env, p = rig
+    r = _soak(dict(env, FAKE_LIVE_AFTER_STOPS="1", **QUICK_TWO_WINDOWS), "--run")
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert "a broadcast went live" in r.stdout + r.stderr
+    assert len(_csv_rows(p["run"])) == 1, "slot 1 never started"
+    starts = [c for c in _calls(p["log"], "obs") if c[:1] == ["record"] and "start" in c]
+    assert len(starts) == 2, "only slot 0's two StartRecords"
+
+
+def test_a_broadcast_that_goes_live_mid_sweep_keeps_the_recordings_running(rig):
+    # after the first cut the stream box streams: the soak stops cutting, and during a broadcast
+    # its own file may already be the show's recording (Companion's StartRecord is a no-op on a
+    # box that already records) -- nothing is stopped, the lease is kept for --stop-leftovers
+    env, p = rig
+    r = _soak(dict(env, FAKE_LIVE_AFTER_SWITCHES="1"), "--run")
+    assert r.returncode == 5, r.stdout + r.stderr
+    out = r.stdout + r.stderr
+    assert "a broadcast went live" in out
+    switches = [c for c in _calls(p["log"], "obs") if c[:1] == ["switch"]]
+    assert len(switches) == 1, "no cut after the broadcast started, and no restore cut"
+    assert not [c for c in _calls(p["log"], "obs") if c[:1] == ["record"] and "stop" in c]
+    assert "NOT stopping" in out and "RECORDING MAY STILL BE RUNNING" in out
+    assert (p["state"] / "recording-strih").exists() and (p["state"] / "recording-stream").exists()
+    assert p["lease"].exists() and "rig lease KEPT" in out
+
+
+def test_the_rig_leaving_test_mode_stops_the_run(rig):
+    # slot 1 reads another stream program: the rig was handed to production, the soak ends (it
+    # never runs on skipping slots while holding the lease and the connect-on-show hold)
+    env, p = rig
+    r = _soak(dict(env, FAKE_STREAM_PROGRAM_DRIFT_AFTER="2", **QUICK_TWO_WINDOWS), "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "left TEST mode" in r.stdout + r.stderr
+    assert len(_csv_rows(p["run"])) == 1
+    _assert_rig_restored(p)
+
+
+def test_an_unreadable_stream_program_is_a_skipped_row(rig):
+    env, p = rig
+    r = _soak(dict(env, FAKE_STREAM_PROGRAM_BLANK_AFTER="1"), "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert _csv_rows(p["run"])[0]["outcome"] == "skipped:stream_program_unreadable"
+    _assert_rig_restored(p)
 
 
 def test_a_run_dir_that_already_holds_a_run_is_refused(rig):
@@ -767,21 +830,41 @@ def test_a_low_record_volume_stops_before_recording(rig):
     _assert_rig_restored(p)
 
 
-def test_a_painter_that_stops_emitting_gives_a_skipped_row(rig):
+def test_a_painter_that_is_switched_off_stops_the_run(rig):
+    # rig-mode.sh event stops the painter: TEST mode is gone, the soak ends before recording
     env, p = rig
     r = _soak(dict(env, FAKE_PAINTER_FAIL_AFTER="1"), "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "left TEST mode" in r.stdout + r.stderr
+    assert not (p["run"] / "soak.csv").exists()
+    assert not [c for c in _calls(p["log"], "obs") if c[:1] == ["record"]]
+    _assert_rig_restored(p)
+
+
+def test_a_painter_whose_marker_log_stalls_gives_a_skipped_row(rig):
+    env, p = rig
+    r = _soak(dict(env, FAKE_PAINTER_STUCK_AFTER="1"), "--run")
     assert r.returncode == 2, r.stdout + r.stderr
     assert _csv_rows(p["run"])[0]["outcome"] == "skipped:painter_not_emitting"
     assert not [c for c in _calls(p["log"], "obs") if c[:1] == ["record"]]
     _assert_rig_restored(p)
 
 
-def test_a_stream_program_that_left_the_development_scene_gives_a_skipped_row(rig):
+def test_an_unreadable_painter_is_a_skipped_row(rig):
     env, p = rig
-    r = _soak(dict(env, FAKE_STREAM_PROGRAM_DRIFT_AFTER="1"), "--run")
+    r = _soak(dict(env, FAKE_PAINTER_UNREADABLE_AFTER="1"), "--run")
     assert r.returncode == 2, r.stdout + r.stderr
-    assert _csv_rows(p["run"])[0]["outcome"] == "skipped:stream_not_dev_scene"
-    assert not [c for c in _calls(p["log"], "obs") if c[:1] == ["record"]]
+    assert _csv_rows(p["run"])[0]["outcome"] == "skipped:painter_not_emitting"
+    _assert_rig_restored(p)
+
+
+def test_the_help_describes_the_safe_stop_leftovers_rule(rig):
+    env, _p = rig
+    h = _soak(env, "--help")
+    assert h.returncode == 0
+    assert "streams" in h.stdout and "flag time" in h.stdout, "the fleet-aware ownership rule"
+    assert "never while a broadcast" in h.stdout
+    assert "lease" in h.stdout and "already holds a run" in h.stdout
 
 
 # --- refusals before any rig change ---------------------------------------------------------------

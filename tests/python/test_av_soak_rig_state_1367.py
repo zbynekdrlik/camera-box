@@ -46,10 +46,13 @@ def _busy(strih=(False, False, None), stream=(False, False, None), busy=None, dr
     return json.dumps(out)
 
 
-def _state(strih=0, stream=0, strih_since=None, stream_since=None, lease="av-soak-X-1"):
+def _state(strih=0, stream=0, strih_since=None, stream_since=None, lease="av-soak-X-1",
+           window=None):
     lines = [f"strih={strih}", f"strih_since={'' if strih_since is None else int(strih_since)}",
              f"stream={stream}", f"stream_since={'' if stream_since is None else int(stream_since)}",
              f"lease={lease}"]
+    if window is not None:
+        lines.append(f"start_window_s={window}")
     return "\n".join(lines) + "\n"
 
 
@@ -137,7 +140,9 @@ def test_a_recording_that_started_before_the_soak_set_its_flag_is_not_the_soaks(
     plan = _plan(_state(strih=1, strih_since=NOW - 100),
                  _busy(strih=(False, True, "01:00:00.000")))
     assert plan["strih"][0] == ars.KEEP
-    assert "not the soak" in plan["strih"][1]
+    # the age is OBS's frame-count duration (lagged frames undercount it): never a claim that the
+    # recording is someone else's, only that it cannot be proven to be the soak's
+    assert "cannot prove" in plan["strih"][1] and "not the soak" not in plan["strih"][1]
 
 
 def test_a_recording_that_started_long_after_the_flag_is_not_the_soaks():
@@ -159,6 +164,16 @@ def test_the_ownership_window_edges():
                      window=60)
     assert ok_early["strih"][0] == ars.STOP and ok_late["strih"][0] == ars.STOP
     assert too_early["strih"][0] == ars.KEEP and too_late["strih"][0] == ars.KEEP
+
+
+def test_the_start_window_written_by_the_run_wins_over_the_callers():
+    since = NOW - 1000
+    busy = _busy(strih=(False, True, "00:16:10.000"))  # started at since + 30
+    assert _plan(_state(strih=1, strih_since=since), busy, window=60)["strih"][0] == ars.STOP
+    kept = _plan(_state(strih=1, strih_since=since, window=10), busy, window=60)
+    assert kept["strih"][0] == ars.KEEP
+    assert ars.parse_state(_state(window=10))["start_window_s"] == 10.0
+    assert ars.parse_state(_state())["start_window_s"] is None
 
 
 def test_no_start_time_means_no_proof_of_ownership():
