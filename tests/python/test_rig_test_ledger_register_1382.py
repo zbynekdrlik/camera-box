@@ -129,8 +129,8 @@ def test_register_keeps_the_row_valid_json_when_text_needs_escaping_1382(tmp_pat
     assert row["pid_or_unit"] == "4242", row
 
 
-def _rig_mode_register_block() -> str:
-    """The ledger-registration lines exactly as `rig-mode.sh test` sends them to cam2."""
+def _painter_launch_remote(path: str = "/usr/bin:/bin") -> str:
+    """The full remote script `rig-mode.sh test` sends to cam2 (built on dev1, never run here)."""
     proc = subprocess.run(
         [
             "bash",
@@ -139,12 +139,17 @@ def _rig_mode_register_block() -> str:
             "painter_launch_remote /usr/local/bin/frame-probe 7200 700 /run/rig-painter.pid '' 60 "
             "'' hw:CARD=PCH,DEV=3 180 /run/rig-qpsk-markers.csv",
         ],
-        env={"PATH": "/usr/bin:/bin", "SCRIPT": str(_RIG_MODE)},
+        env={"PATH": path, "SCRIPT": str(_RIG_MODE)},
         capture_output=True,
         text=True,
     )
     assert proc.returncode == 0, f"painter_launch_remote exited {proc.returncode}: {proc.stderr!r}"
-    lines = proc.stdout.splitlines()
+    return proc.stdout
+
+
+def _rig_mode_register_block() -> str:
+    """The ledger-registration lines exactly as `rig-mode.sh test` sends them to cam2."""
+    lines = _painter_launch_remote().splitlines()
     start = next(i for i, ln in enumerate(lines) if ln.startswith("PAINTER_PID="))
     end = next(i for i in range(start + 1, len(lines)) if lines[i] == "sleep 3")
     block = "\n".join(ln for ln in lines[start + 1 : end] if not ln.lstrip().startswith("#"))
@@ -167,3 +172,19 @@ def test_rig_mode_test_painter_registration_records_the_numeric_pid_1382(tmp_pat
         ["jq", "-r", ".pid_or_unit // empty"], input=ledger.read_text(), capture_output=True, text=True
     )
     assert jq.returncode == 0 and jq.stdout.strip() == "4242", (jq.returncode, jq.stdout, jq.stderr)
+
+
+def test_painter_launch_remote_runs_nothing_on_dev1_while_building_the_cam2_script_1382(tmp_path):
+    # Found next to the ledger call (same unquoted <<REMOTE heredoc): a comment spelling a command
+    # in backticks is a COMMAND SUBSTITUTION there, so building the cam2 script ran `fuser` on
+    # dev1 (stderr "Specified filename /dev/fb0 does not exist.") and the comment reached cam2
+    # with the command text gone. A stub `fuser` first on PATH must never be called by the builder.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    marker = tmp_path / "fuser-ran-locally"
+    stub = bindir / "fuser"
+    stub.write_text(f"#!/bin/sh\necho \"$*\" >> '{marker}'\nexit 1\n")
+    stub.chmod(0o755)
+    text = _painter_launch_remote(f"{bindir}:/usr/bin:/bin")
+    assert not marker.exists(), f"painter_launch_remote ran fuser on dev1: {marker.read_text()!r}"
+    assert "fuser -s /dev/fb0" in text  # the remote checks themselves are still in the script
