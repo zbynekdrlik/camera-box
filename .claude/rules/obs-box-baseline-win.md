@@ -1,0 +1,94 @@
+---
+paths:
+  - "scripts/lib/obs-box-baseline-win.sh"
+  - "scripts/win-baseline-check.sh"
+  - "tests/python/test_obs_box_baseline_win_1357.py"
+  - "tests/python/fixtures/win_baseline_1357/**"
+---
+
+# The ONE Windows OBS-box baseline (issue 1357)
+
+**Why it exists.** On 26.9.2026 RESOLUME-SNV ran the Windows `Balanced` power plan. stream and mbc
+ran `Bitsum Highest Performance`, fohabl `High performance`. Balanced caused 10-22 ms host stalls,
+and the FOH VB-Matrix underran on both resolume VBAN senders (U+58/+50 per 5 min, then U+1/+16 after
+the switch to High performance, issue 1372 comment 5849221193). Nothing graded the difference. This
+is the Windows sibling of the Linux baseline (`obs-box-baseline.md`).
+
+## The list, and who may change what
+
+`scripts/lib/obs-box-baseline-win.sh` holds the list. Each item grades OK / DRIFT / UNKNOWN, and an
+unread item is UNKNOWN, never OK:
+
+| item | OK when |
+|---|---|
+| `power_scheme` | the stock High performance (`8c5e7fda-…`) or Ultimate (`e9a42b02-…`) GUID, or a scheme NAMED High performance / Ultimate Performance / Bitsum Highest Performance (case-insensitive) |
+| `sleep_ac` | STANDBYIDLE AC index 0 |
+| `hibernate_ac` | HIBERNATEIDLE AC index 0 |
+| `usb_selective_suspend` | USB selective suspend AC index 0 (Disabled) |
+| `wer_dontshowui` | `HKLM\SOFTWARE\Microsoft\Windows\Windows Error Reporting` `DontShowUI` = 1. The value being absent means the crash dialog shows, so absent = DRIFT |
+
+- **Only the power plan is ever SET**, by the Windows genlock deploy program's step `(0b)`
+  (`win_baseline_power_plan_ensure_ps`, embedded by `build_windows_deploy_program` for stream and
+  resolume). The step runs before any OBS stop. When the active scheme is not max-performance class,
+  it activates the INSTALLED High performance scheme (the stock GUID, else the first scheme NAMED High
+  performance), reads it back, and fails loud (exit 11) otherwise.
+- Sleep, USB suspend and WER are owner machine settings. They are reported, never written.
+- The timer resolution and MMCSS are not graded (they cannot be set persistently).
+
+**Match by NAME too.** stream's High performance scheme is a DUPLICATE with its own GUID
+(`659aca3b-…`). The stock `8c5e7fda-…` is not installed there, and Process Lasso's Bitsum GUID is
+per install. A GUID-only list would grade stream's High performance as DRIFT, and a hard-coded
+`/setactive 8c5e7fda-…` would fail on stream.
+
+**Live state 27.9.2026:** stream = Bitsum, resolume = stock High performance. Sleep, hibernate and
+USB are OK on both. `DontShowUI` is absent on BOTH, so `wer_dontshowui` reads DRIFT on both until the
+owner sets it. That is an expected report-only row, not a bug.
+
+## Gather, grade, consumers
+
+- **Gather** = `win_baseline_gather_ps1`, a read-only `.ps1`. Run it as a FILE
+  (`powershell -NoProfile -ExecutionPolicy Bypass -File …`), never as nested PowerShell over ssh
+  (`rig-state-inspection.md` §2).
+- **Output format:** `==WINBASELINE-SECTION== <item>`, the raw stdout+stderr lines, then
+  `==WINBASELINE-EXIT== <rc>`. A section without its EXIT marker is UNKNOWN. CRLF is tolerated.
+- **`reg query` stderr is kept on purpose.** The grader reads "unable to find the specified registry
+  key or value" as "value absent". Any other text there is UNKNOWN.
+- **The grader is English-label based** (`Power Scheme GUID:`, `Current AC Power Setting Index:`).
+  A localized Windows reads UNKNOWN (fail-safe), never OK. The setting GUID line must match the
+  section's setting, so a value read from the wrong setting is UNKNOWN.
+- **`scripts/win-baseline-check.sh`** is the dev1 reader. It scp's the gather to
+  `C:/camera-box-win-baseline-gather.ps1`, runs it by path and grades each box of the obs-fleet
+  facet `win-baseline` (stream, resolume). resolume is SKIPPED when away. `--out-dir DIR` keeps
+  `DIR/<box>.txt`. The test seam is `WIN_BASELINE_FETCH_CMD <box> <host> <out>`.
+- **`version-integrity-gate.sh --win-baseline NAME=FILE`** prints report-only rows
+  (`win_baseline_report_rows`) and never touches bad/unknown/ok. `recording-e2e.sh` does NOT feed it
+  yet. Wiring the gather into `[0/8]` means an ssh + scp to stream on every run, plus the static-anchor
+  discipline for that file.
+- **`rig-health-audit.py`** `check_win_baseline` emits one NOTE row per read box, naming every
+  non-OK item. NOTE rows are never counted.
+
+## Verify without touching a setting
+
+- **Tier-0 net:** the pytest file (plus the no-network run from `ci-testing-gotchas.md`),
+  `bash -n` + `shellcheck -S warning -x` on the touched scripts, and the std-only Rust files through
+  `rustc --test` with the tempfile stub (`deploy_genlock_fleet`, `version_integrity_gate`,
+  `harness_obs_fleet_list_1296`).
+- **Live, read-only:** paste the gather body (without its final `exit 0`) into the box's win-* MCP
+  Shell and grade the output. The real resolume output is the fixture
+  `resolume_gather_program_live_2026-09-27.txt`.
+- **Check the deploy block without running it:**
+  `[System.Management.Automation.Language.Parser]::ParseInput($src, [ref]$tok, [ref]$errs)` on the
+  block text. That is a parse, it executes nothing. For the logic, run only the `Get-WbActiveScheme`
+  / `Test-WbMaxPerf` / target-pick part, never the `/setactive` line.
+
+## Traps when editing the deploy block
+
+- `tests/deploy_genlock_fleet.rs` finds the FIRST `# (1b)`, `# (8)`, `# (8b)`,
+  `Get-Process obs64,obs-browser-page` and `Stop-Process -Name AutoHotkey64`, and counts
+  `$ErrorActionPreference = 'Stop'`. The block's comment is labelled `# (0b)` and must never contain
+  any of those strings.
+- No error message may contain the literal `powercfg /setactive`. The pytest counts the powercfg
+  mutating verbs in the whole deploy program and expects exactly one.
+- `deploy-genlock-fleet.sh` is at 975 of its 1000-line budget (asserted in `deploy_genlock_fleet.rs`).
+- `version-integrity-gate.sh` is already over 1000 lines. That is why the facet's rendering lives in
+  the lib, and the gate only calls `win_baseline_report_rows`.
