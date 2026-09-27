@@ -132,17 +132,23 @@ pub fn ticks_ns(ticks: u32, frames: u32, rate: u32) -> u64 {
 /// The buffering plan for a reset request: the floor, the dynamic maximum, and whether the
 /// request was overridden. `req_max_ms == 0` means "OBS default" ([`DEFAULT_MAX_TICKS`]).
 pub fn plan(req_max_ms: u32, req_fixed: bool, rate: u32, frames: u32) -> BufferingPlan {
-    // RED stub: stock obs_reset_audio2 -- no floor, the caller's fixed flag and maximum as-is.
-    let max_ticks = if req_max_ms != 0 {
+    let floor_ticks = ticks_for_ms(FLOOR_MS, rate, frames);
+    let req_ticks = if req_max_ms != 0 {
         ticks_for_ms(req_max_ms, rate, frames)
     } else {
         DEFAULT_MAX_TICKS
     };
+    let overridden = req_fixed || req_ticks < floor_ticks;
+    let max_ticks = if overridden {
+        DEFAULT_MAX_TICKS
+    } else {
+        req_ticks
+    };
     BufferingPlan {
-        floor_ticks: 0,
-        max_ticks,
-        fixed: req_fixed,
-        overridden: false,
+        floor_ticks,
+        max_ticks: max_ticks.max(floor_ticks),
+        fixed: false,
+        overridden,
     }
 }
 
@@ -155,9 +161,11 @@ pub fn action(
     max_ticks: i32,
     source_behind: bool,
 ) -> BufferingAction {
-    // RED stub: stock audio_callback -- only the dynamic increase, no floor.
-    let _ = floor_ticks;
-    if total_ticks < max_ticks && source_behind {
+    if total_ticks >= max_ticks {
+        BufferingAction::None
+    } else if total_ticks < floor_ticks {
+        BufferingAction::Floor
+    } else if source_behind {
         BufferingAction::Dynamic
     } else {
         BufferingAction::None

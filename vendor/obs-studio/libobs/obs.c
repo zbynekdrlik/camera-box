@@ -24,6 +24,7 @@
 #include "obs-internal.h"
 #include "obs-display-budget.h" /* camera-box #879: aux sender budget gate */
 #include "obs-drm-output.h"     /* camera-box #1152: DEFAULT-OFF in-OBS DRM-lease HDMI output */
+#include "obs-genlock-audio-buffering.h" /* camera-box issue 1367: the audio-buffering floor */
 
 struct obs_core *obs = NULL;
 
@@ -1630,17 +1631,24 @@ bool obs_reset_audio2(const struct obs_audio_info2 *oai)
 	if (!oai)
 		return true;
 
-	if (oai->max_buffering_ms) {
-		uint32_t max_frames = oai->max_buffering_ms * oai->samples_per_sec / SEC_TO_MSEC;
-		max_frames += (AUDIO_OUTPUT_FRAMES - 1);
-		audio->max_buffering_ticks = max_frames / AUDIO_OUTPUT_FRAMES;
-	} else {
-		audio->max_buffering_ticks = 45;
-	}
-	audio->fixed_buffer = oai->fixed_buffering;
+	/* camera-box issue 1367 (ROZHODNUTE 5857354949): the genlock audio-buffering FLOOR. Every launch
+	 * starts at the same GENLOCK_AUDIO_BUFFERING_FLOOR_MS (raised on the first mixer tick,
+	 * obs-audio.c), and OBS's dynamic increase stays active above it up to the maximum. Stock OBS
+	 * started at 0 and grew only on a startup race, which made the stream `mbc` ASRC level (and its
+	 * A/V position) differ per launch. Fixed buffering is never used: the frontend low-latency
+	 * toggle is overridden and logged. The decision is the pure genlock_audio_buffering_plan()
+	 * (obs-genlock-audio-buffering.h <-> src/genlock_audio_buffering.rs). */
+	const struct genlock_audio_buffering_plan genlock_buf = genlock_audio_buffering_plan(
+		oai->max_buffering_ms, oai->fixed_buffering, oai->samples_per_sec, AUDIO_OUTPUT_FRAMES);
+	audio->max_buffering_ticks = (int)genlock_buf.max_ticks;
+	audio->floor_buffering_ticks = (int)genlock_buf.floor_ticks;
+	audio->fixed_buffer = genlock_buf.fixed;
 
 	int max_buffering_ms =
 		audio->max_buffering_ticks * AUDIO_OUTPUT_FRAMES * SEC_TO_MSEC / (int)oai->samples_per_sec;
+	const int genlock_floor_ms = (int)(genlock_audio_buffering_ticks_ns(genlock_buf.floor_ticks, AUDIO_OUTPUT_FRAMES,
+									     oai->samples_per_sec) /
+					   1000000ULL);
 
 	ai.name = "Audio";
 	ai.samples_per_sec = oai->samples_per_sec;
@@ -1654,9 +1662,15 @@ bool obs_reset_audio2(const struct obs_audio_info2 *oai)
 	     "\tsamples per sec: %d\n"
 	     "\tspeakers:        %d\n"
 	     "\tmax buffering:   %d milliseconds\n"
-	     "\tbuffering type:  %s",
-	     (int)ai.samples_per_sec, (int)ai.speakers, max_buffering_ms,
-	     oai->fixed_buffering ? "fixed" : "dynamically increasing");
+	     "\tbuffering type:  fixed floor %d ms, dynamically increasing above",
+	     (int)ai.samples_per_sec, (int)ai.speakers, max_buffering_ms, genlock_floor_ms);
+	if (genlock_buf.overridden)
+		blog(LOG_WARNING,
+		     "genlock audio buffering (issue 1367): the requested %s audio buffering (max %u ms) is "
+		     "OVERRIDDEN -- every launch starts at the fixed %d ms floor and increases dynamically above it "
+		     "(max %d ms)",
+		     oai->fixed_buffering ? "fixed (low-latency)" : "dynamic", oai->max_buffering_ms, genlock_floor_ms,
+		     max_buffering_ms);
 
 	return obs_init_audio(&ai);
 }
