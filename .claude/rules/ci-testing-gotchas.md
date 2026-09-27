@@ -1445,3 +1445,13 @@ Typed inline in a worktree lane, the isolation guard REFUSES that command ("runs
 (`set -euo pipefail`, `cd` to the worktree, the one `sudo -n unshare -n ...` line), then run
 `bash /abs/nonet.sh` as its own call. The run is the same, and a test that needed the network now
 fails instead of passing.
+
+## A pytest that sources a bash lib must source it under the CALLER's `set -euo pipefail` (issue 1357)
+
+The #1133 entry above covers `-e` in a Rust `run_sourced` harness. The same blind spot hits a pytest
+that runs `bash -c '. lib.sh; fn …'` with no strict mode, and `-u` bites too. A grader whose
+`local guid name` stayed unset on one input path aborted with "unbound variable" inside `$(...)`
+under the real consumers (`win-baseline-check.sh`, `version-integrity-gate.sh`), so the LIVE state
+graded to an empty verdict. The plain-`bash -c` pytest stayed green. Source the lib under the
+consumer's `set -euo pipefail` in the test helper, assert every row carries a real verdict and that
+stderr has no "unbound variable", and initialise every local a lib function tests (`local v=""`).
