@@ -33,51 +33,88 @@ frontend file, grep it for `strcmp(` and `std::string(obs_data_get_json(` before
 Upstream `main_crash_handler` (`frontend/obs-main.cpp`, the `#ifdef _WIN32` block, reached from
 `libobs/obs-win-crash-handler.c` `exception_handler` -> `bcrash()`) writes the crash file, then shows
 a task-modal `MessageBoxA` offering to copy the log to the clipboard, and exits only after someone
-answers. Every managed Windows OBS box (stream, resolume) runs unattended. The crashed obs64 stayed
-alive behind the dialog, so the guarded launcher and the AHK safe-loop saw a live OBS and never
-started a fresh one. WER `DontShowUI` does not help: OBS installs its own handler.
+answers. Every managed Windows OBS box (stream, resolume) runs unattended, so nobody is there to
+answer it. The crashed obs64 would stay alive behind the dialog. Every OBS launcher first checks
+for a live obs64 (`scripts/obs-guarded-launch.ps1` exits on one), so the box's respawner could not
+start a fresh OBS. WER `DontShowUI` does not help: OBS installs its own handler. The live
+behaviour on a box was NOT measured before the fix; this is the mechanism read from the code.
+
+The respawner differs per box, and the fix only brings OBS back where one is running:
+
+- **stream:** no AHK. Its obs64 respawner is the `camera-box-obs-self-heal-stream` task
+  (`scripts/obs-self-heal-install.sh`), which SHIPS DISABLED; the supervisor enables it.
+- **resolume:** the owner's AHK safe-loop (`NL_STARTUP.ahk`). Under the issue-1372 ruling the
+  owner decides whether it runs.
+- `obs-guarded-launch.ps1` is a one-shot shortcut target, not a respawner.
 
 The genlock build's handler:
 
 - writes `obs-studio/crashes/Crash <date>.txt` exactly as upstream (rotation, path, content);
 - logs ONE line through `blog(LOG_ERROR, ...)`: `Crash report written to <path> -- exiting without
-  the crash dialog (rig build: never block on a modal)`. It lands in the OBS log the fleet reads.
-  It replaces a dialog window plus its message buffers and the clipboard copy, so the handler
-  allocates less than upstream. A crash while the crashing thread already held one of the frontend
-  log mutexes does not hang: the MSVC STL's `_Mtx_lock` checks the owning thread id and only counts
-  a re-lock by its owner (microsoft/STL `stl/src/mutex.cpp`, read 27.9.2026). The one remaining
-  hang shape is a crash on the thread that holds Qt's post-event lock, because the log line posts
-  to the UI. That is rare and was not measured;
+  the crash dialog (rig build: never block on a modal)`, or `Crash report could NOT be written to
+  <path> -- …` when the write or close failed (`!file.fail()` after `close()`). It lands in the OBS
+  log the fleet reads. It replaces a dialog window plus its message buffers and the clipboard copy,
+  so the handler allocates less than upstream;
 - canonicalises the path with the `std::error_code` overload. The one-argument `canonical()` throws
   when the file could not be written, and an exception out of the handler ends in `abort()` -> WER,
   which can show a dialog while `DontShowUI` is absent (stream and resolume, 27.9.2026). It falls
   back to the written path;
-- calls `exit(-1)` as its last statement.
+- calls `exit(-1)` as its last statement, as upstream's own post-dialog path did.
+
+What can still go wrong inside the handler:
+
+- **A frontend log mutex already held by the crashing thread.** MSVC's `std::mutex` is a
+  `_Mtx_try` mutex. A re-lock by its owner returns busy in `_Mtx_lock`, and `_Mutex_base::lock()`
+  then THROWS `std::system_error` (microsoft/STL `stl/inc/mutex` + `stl/src/mutex.cpp`, read
+  27.9.2026). The exception escapes `blog`, `exit(-1)` is never reached, and the process ends
+  through terminate -> abort -> WER. It is rare: `logfile_mutex` and `log_mutex` are held only
+  around one `logFile << … << endl`, and a bad-format crash in `vsnprintf` happens before any lock.
+- **Qt's post-event lock.** The log line posts to the UI (`QMetaObject::invokeMethod`). A crash on
+  the thread holding that Qt lock would deadlock the handler. Rare and not measured.
+- **`exit()` runs static destructors while other threads are alive.** A fault there becomes a second
+  exception, which `exception_handler` passes on to WER. `_exit` / `TerminateProcess` would skip
+  that, but the design keeps upstream's `exit(-1)`. The log line is already flushed by `endl` and
+  the crash file is closed before it.
+- Every WER path above shows a dialog only while `DontShowUI` is absent. The durable cure is the
+  owner setting it (the baseline reports it as DRIFT). A `SetErrorMode(SEM_NOGPFAULTERRORBOX)` at
+  the top of the handler was considered and NOT added: whether `abort()`'s fastfail honours the
+  error mode is unverified without a box.
+
+Trade-off: while the upstream dialog was up, the other threads kept running (`handle_exception`
+walks them without suspending them), so a crash on a worker thread could leave render, outputs and
+WS limping. Now the process exits at once, and the output is dark until the respawner acts (on
+stream at least one self-heal pass plus its confirm, when the task is enabled). That is upstream's
+intended end state too.
 
 Guards: `tests/obs_crash_handler_no_modal_1378.rs`.
 
-- **Facet A: source anchors** on the handler body. No `MessageBox`/`MB_TASKMODAL`/clipboard call;
-  the crash-file write, the log line and `exit(-1)` present, in that order; no throwing
-  `canonical()`. File-wide, the upstream title literal `"OBS has crashed!"` is absent.
+- **Facet A: source anchors** on the comment-stripped handler body (`tests/support/cpp_source.rs`).
+  No `MessageBox`/`MB_TASKMODAL`/clipboard call; the crash-file write, the recorded write result,
+  the log line and `exit(-1)` present, in that order; no throwing `canonical()`. File-wide, the
+  upstream title literal `"OBS has crashed!"` is absent.
 - **Facet B: the handler is lifted verbatim and run.**
   - It is compiled with `c++ -std=c++17 -Werror` against stand-ins for the OBS helpers (`BPtr`,
     `GetAppConfigPathPtr`, `delete_oldest_file`, `GenerateTimeDateFilename`, `blog`) AND for the
     Windows dialog/clipboard API the upstream handler used.
   - It then runs in a child process. A re-imported dialog prints `MODAL-DIALOG-SHOWN` at runtime,
-    not only a compile error, and a missing crash directory must still end in status 255, never
-    an abort.
+    not only a compile error. A missing crash directory must still end in status 255 (never an
+    abort) with the `could NOT be written to` line.
   - The lift compiles only the non-`_WIN32` branches of the two inner `#ifdef _WIN32` blocks. The
     wide-path open and the `\` replace stay CI-only.
 - **The pwsh mirrors.** This is a rig-critical behavioural divergence that still compiles either way
-  (the #1195 class), so BOTH windows-genlock workflows carry a source-text step. It checks the
-  marker phrase is present and the `"OBS has crashed!"` literal is absent. Two other `MessageBoxA`
-  calls stay in obs-main.cpp (the VC-runtime check and `--help`), so the negative check keys on the
-  crash-only title, never a bare `MessageBoxA`.
+  (the #1195 class), so BOTH windows-genlock workflows carry a source-text step. It checks that the
+  marker phrase is present FILE-WIDE (like the #1195 step; the Rust Facet A does the scoped check)
+  and that the `"OBS has crashed!"` literal is absent. Two other `MessageBoxA` calls stay in
+  obs-main.cpp (the VC-runtime check and `--help`), so the negative check keys on the crash-only
+  title, never a bare `MessageBoxA`.
 
 FRONTEND change: it lands in `obs64.exe`, so it needs a FULL-bundle deploy to stream and resolume,
-never the fast obs.dll path. After the deploy, a crash leaves no obs64 behind and the box's own
-launcher restarts OBS. The crash file stays the evidence, and the OBS log's `Crash report written
-to` line names it.
+never the fast obs.dll path. The live acceptance after the deploy is the supervisor's:
+
+1. Read the respawner state on each box first: the self-heal task on stream, the AHK process on
+   resolume.
+2. Then check that a crash leaves no obs64 behind and that the respawner starts a fresh OBS.
+3. Read the crash file and the OBS log's `Crash report written to` line.
 
 ## Reading a live OBS crash log on strih/stream — win-* MCP, NOT ssh
 
