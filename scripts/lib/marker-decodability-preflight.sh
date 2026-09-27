@@ -33,8 +33,10 @@
 # marker_decodability_default_min_clusters -> the canonical minimum self-consistency cluster size
 # (4). Calibrated on the real 16.9 recordings: a healthy 25 s window clusters >= 7, a drowned one
 # <= 3, so 4 leaves margin on BOTH sides (never false-fail a good run, still catch the bad one).
-# This is the ONE source of the 4 literal — the [4b3/8] step's default-arg site references it, and
-# the same value is the Rust probe's --qpsk-min-clusters default (kept in lock-step by the tests).
+# The shell's ONE source of the 4 literal — the [4b3/8] step's default-arg site references it. The
+# Rust side is qpsk_probe_decision::DEFAULT_MIN_CLUSTERS (the --qpsk-min-clusters default, the
+# --av-sync channel pick and the live dock's CB_MARKER_MIN_CLUSTERS), and the test file
+# tests/qpsk_channel_pick_parity_1367.rs pins this function's value to it (issue 1367).
 marker_decodability_default_min_clusters() {
   printf '%s\n' "4"
 }

@@ -16,6 +16,10 @@
 
 use std::path::PathBuf;
 
+#[path = "support/cpp_source.rs"]
+mod cpp_source;
+use cpp_source::{body_of, squish, strip_cpp_comments};
+
 const DOCK_OUTPUT: &str = "vendor/av-sync-dock/src/sync-test-output.cpp";
 const AUDIO_SIG: &str =
     "static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_data *frames)";
@@ -23,62 +27,6 @@ const AUDIO_SIG: &str =
 fn vendor_file(rel: &str) -> String {
     let p: PathBuf = [env!("CARGO_MANIFEST_DIR"), rel].iter().collect();
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
-}
-
-fn squish(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Drop `/* ... */` and `// ...` comments so prose in a comment never satisfies or breaks an anchor.
-fn strip_cpp_comments(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut rest = s;
-    let mut in_str = false;
-    while let Some(c) = rest.chars().next() {
-        if in_str {
-            if c == '\\' {
-                let esc: String = rest.chars().take(2).collect();
-                out.push_str(&esc);
-                rest = &rest[esc.len()..];
-                continue;
-            }
-            in_str = c != '"';
-            out.push(c);
-            rest = &rest[c.len_utf8()..];
-        } else if rest.starts_with("/*") {
-            out.push(' ');
-            rest = rest[2..].find("*/").map_or("", |e| &rest[2 + e + 2..]);
-        } else if rest.starts_with("//") {
-            rest = rest.find('\n').map_or("", |e| &rest[e..]);
-        } else {
-            in_str = c == '"';
-            out.push(c);
-            rest = &rest[c.len_utf8()..];
-        }
-    }
-    out
-}
-
-/// The balanced-brace body of the function whose signature is `sig`.
-fn body_of<'a>(src: &'a str, sig: &str) -> &'a str {
-    let start = src
-        .find(sig)
-        .unwrap_or_else(|| panic!("{DOCK_OUTPUT}: `{sig}` not found"));
-    let open = start + src[start..].find('{').expect("function body opening brace");
-    let mut depth = 0usize;
-    for (off, ch) in src[open..].char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return &src[open..=open + off];
-                }
-            }
-            _ => {}
-        }
-    }
-    panic!("{DOCK_OUTPUT}: unbalanced body for `{sig}`");
 }
 
 fn code() -> String {
@@ -96,15 +44,32 @@ fn the_audio_callback_decodes_every_channel_through_the_picker() {
     }
     let body = body_of(&code, AUDIO_SIG);
     for needle in [
-        "camerabox::ChannelMarkerPicker::dock( nch, st->audio_sample_rate, CAMERA_BOX_AUDIO_F_HZ, CAMERA_BOX_AUDIO_C)",
+        "const size_t nch = cb_ensure_audio_picker(st); if (nch == 0) return;",
         "planes[cix] = (const float *)frames->data[cix];",
         "st->cb_audio_dec->push(planes, nf);",
-        "st->cb_audio_dec->channels() != nch",
+        "cb_audio_diag_tick(st, frames);",
     ] {
         assert!(
             body.contains(needle),
             "{DOCK_OUTPUT}: the audio callback no longer has `{needle}` — the per-channel decode \
              (issue 1367) regressed"
+        );
+    }
+    // The picker lifecycle: one picker per channel layout, rebuilt (with a fresh sample count)
+    // when the layout changes, built with the dock configuration.
+    let ensure = body_of(
+        &code,
+        "static size_t cb_ensure_audio_picker(struct sync_test_output *st)",
+    );
+    for needle in [
+        "const size_t nch = st->audio_channels < MAX_AV_PLANES ? st->audio_channels : MAX_AV_PLANES;",
+        "st->cb_audio_dec->channels() != nch",
+        "st->cb_audio_pushed = 0;",
+        "camerabox::ChannelMarkerPicker::dock( nch, st->audio_sample_rate, CAMERA_BOX_AUDIO_F_HZ, CAMERA_BOX_AUDIO_C)",
+    ] {
+        assert!(
+            ensure.contains(needle),
+            "{DOCK_OUTPUT}: cb_ensure_audio_picker no longer has `{needle}` (issue 1367)"
         );
     }
 }

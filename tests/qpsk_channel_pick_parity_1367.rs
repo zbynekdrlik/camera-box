@@ -26,7 +26,6 @@ use camera_box::qpsk_probe_decision::{
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 
 const TABLE: &str = "tests/fixtures/qpsk_channel_pick_parity.tsv";
 const TOOL: &str = "vendor/av-sync-dock/test/channel-pick-parity.cpp";
@@ -37,31 +36,30 @@ fn repo(rel: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join(rel)
 }
 
-/// A per-process scratch directory for the compiled tool and its input files.
-fn scratch() -> &'static Path {
-    static DIR: OnceLock<PathBuf> = OnceLock::new();
-    DIR.get_or_init(|| {
-        let d = std::env::temp_dir().join(format!(
-            "qpsk-channel-pick-parity-{}-{}",
-            std::process::id(),
-            env!("CARGO_PKG_VERSION")
-        ));
-        std::fs::create_dir_all(&d).expect("create the scratch dir");
-        d
-    })
+/// One test's scratch directory: the compiled C++ side and its input files, removed when the test
+/// ends, pass or panic.
+struct Scratch {
+    dir: PathBuf,
+    tool: PathBuf,
 }
 
-/// The C++ side, compiled once per test process (`-std=c++11 -Wall -Wextra -Werror`, like the
-/// dock's other mirror gates).
-fn tool() -> &'static Path {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| {
-        let bin = scratch().join("channel-pick-parity");
+impl Scratch {
+    /// Create the directory and compile the C++ side into it (`-std=c++11 -Wall -Wextra -Werror`,
+    /// like the dock's other mirror gates).
+    fn new(tag: &str) -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "qpsk-channel-pick-parity-{}-{tag}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create the scratch dir");
+        let tool = dir.join("channel-pick-parity");
+        // built before the compile, so a failed compile still removes the directory
+        let scratch = Scratch { dir, tool };
         let out = Command::new("g++")
             .args(["-std=c++11", "-O2", "-Wall", "-Wextra", "-Werror"])
             .arg(repo(TOOL))
             .arg("-o")
-            .arg(&bin)
+            .arg(&scratch.tool)
             .output()
             .expect("spawn g++ (install build-essential) for the dock channel-pick mirror");
         assert!(
@@ -69,22 +67,34 @@ fn tool() -> &'static Path {
             "the dock channel-pick mirror must compile clean:\n{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        bin
-    })
+        scratch
+    }
+
+    fn path(&self, name: &str) -> PathBuf {
+        self.dir.join(name)
+    }
+
+    /// Run the C++ side with `args`; its stdout.
+    fn run(&self, args: &[&str]) -> String {
+        let out = Command::new(&self.tool)
+            .args(args)
+            .output()
+            .expect("run the channel-pick parity tool");
+        assert!(
+            out.status.success(),
+            "channel-pick-parity {args:?} failed:\n{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).expect("utf-8 output")
+    }
 }
 
-fn run_tool(args: &[&str]) -> String {
-    let out = Command::new(tool())
-        .args(args)
-        .output()
-        .expect("run the channel-pick parity tool");
-    assert!(
-        out.status.success(),
-        "channel-pick-parity {args:?} failed:\n{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    String::from_utf8(out.stdout).expect("utf-8 output")
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        // Best effort: a temp directory that cannot be removed must not fail the test it served.
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 struct Row {
@@ -141,7 +151,8 @@ fn the_table_is_the_rust_rule() {
 #[test]
 fn the_cpp_pick_follows_the_table() {
     let path = repo(TABLE);
-    let got = run_tool(&["pick", path.to_str().expect("utf-8 path")]);
+    let scratch = Scratch::new("pick");
+    let got = scratch.run(&["pick", path.to_str().expect("utf-8 path")]);
     let want: Vec<String> = table()
         .iter()
         .map(|r| r.expected.map_or("none".to_string(), |p| p.to_string()))
@@ -283,9 +294,10 @@ fn the_cpp_cluster_size_matches_rust_on_generated_and_real_decodes() {
         }
         text.push('\n');
     }
-    let path = scratch().join("cluster-input.txt");
+    let scratch = Scratch::new("cluster");
+    let path = scratch.path("cluster-input.txt");
     std::fs::write(&path, text).expect("write the cluster input");
-    let got = run_tool(&["cluster", path.to_str().expect("utf-8 path")]);
+    let got = scratch.run(&["cluster", path.to_str().expect("utf-8 path")]);
     let got: Vec<u64> = got.lines().map(|l| l.parse().expect("u64")).collect();
     let want: Vec<u64> = seqs
         .iter()
@@ -348,8 +360,14 @@ fn rust_transcript(channels: &[Vec<f32>], chunk: usize, window: Option<u64>) -> 
     out
 }
 
-fn cpp_transcript(name: &str, channels: &[Vec<f32>], chunk: usize, window: Option<u64>) -> String {
-    let path = scratch().join(format!("{name}.f32"));
+fn cpp_transcript(
+    scratch: &Scratch,
+    name: &str,
+    channels: &[Vec<f32>],
+    chunk: usize,
+    window: Option<u64>,
+) -> String {
+    let path = scratch.path(&format!("{name}.f32"));
     let bytes: Vec<u8> = channels
         .iter()
         .flat_map(|c| c.iter().flat_map(|x| x.to_le_bytes()))
@@ -362,7 +380,7 @@ fn cpp_transcript(name: &str, channels: &[Vec<f32>], chunk: usize, window: Optio
         chunk.to_string(),
     ];
     args.extend(window.map(|w| w.to_string()));
-    run_tool(&args.iter().map(String::as_str).collect::<Vec<_>>())
+    scratch.run(&args.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
 /// `n` real markers every `cadence_s` from `start_s`, index stepping by 180 (the rig's ~3 s /
@@ -425,13 +443,14 @@ fn assert_no_double_return(name: &str, t: &str) {
 }
 
 fn assert_same_transcript(
+    scratch: &Scratch,
     name: &str,
     channels: &[Vec<f32>],
     chunk: usize,
     window: Option<u64>,
 ) -> String {
     let rust = rust_transcript(channels, chunk, window);
-    let cpp = cpp_transcript(name, channels, chunk, window);
+    let cpp = cpp_transcript(scratch, name, channels, chunk, window);
     for (i, (r, c)) in rust.lines().zip(cpp.lines()).enumerate() {
         assert_eq!(c, r, "{name}: push {i} differs (left C++, right Rust)");
     }
@@ -449,11 +468,12 @@ fn last_line(t: &str) -> &str {
 
 #[test]
 fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
+    let scratch = Scratch::new("stream");
     const SR: usize = 48_000;
     // The real 2 s stereo fixture: L below the floor, R clears it, so R is chosen.
     let real = fixture_channels();
     for chunk in [1024, 441] {
-        let t = assert_same_transcript(&format!("real-{chunk}"), &real, chunk, None);
+        let t = assert_same_transcript(&scratch, &format!("real-{chunk}"), &real, chunk, None);
         assert!(last_line(&t).contains(" chosen=1 "), "{}", last_line(&t));
         // the switch to R happens mid-clip: R's copy of a marker L already returned is not paired
         assert_no_double_return(&format!("real-{chunk}"), &t);
@@ -462,7 +482,7 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
     // 256-frame callbacks R's copies of markers 2 and 3 tip the pick after L returned them.
     let l = markers_at(&[1, 2, 3], SR / 2, SR / 4, 0, SR * 3);
     let r = markers_at(&[0, 1, 2, 3], SR / 2, SR / 4, 488, SR * 3);
-    let t = assert_same_transcript("switch", &[l, r], 256, None);
+    let t = assert_same_transcript(&scratch, "switch", &[l, r], 256, None);
     assert_no_double_return("switch", &t);
     assert!(
         last_line(&t).contains(" chosen=1 clusters=3,4 "),
@@ -479,7 +499,7 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
     for (i, &s) in marker_signal(200, &AudioParams::rig60()).iter().enumerate() {
         l[at + i] += s * 0.25;
     }
-    let t = assert_same_transcript("switch-other", &[l, r], 256, None);
+    let t = assert_same_transcript(&scratch, "switch-other", &[l, r], 256, None);
     let got = returned(&t);
     assert_eq!(got.len(), 2, "{got:?}");
     assert_eq!(got[0].1, 200, "{got:?}");
@@ -489,7 +509,7 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
     let n = DOCK_CHANNEL_PICK_MAX_MARKERS + 40;
     let ks: Vec<usize> = (0..n).collect();
     let flood = vec![markers_at(&ks, 1200, SR / 4, 0, SR / 2 + n * 1200)];
-    let t = assert_same_transcript("flood", &flood, 1024, None);
+    let t = assert_same_transcript(&scratch, "flood", &flood, 1024, None);
     assert_eq!(returned(&t).len(), n);
     assert!(
         last_line(&t).contains(&format!(" clusters={DOCK_CHANNEL_PICK_MAX_MARKERS} ")),
@@ -499,7 +519,7 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
     // Both channels decode, R later and with the longer chain: L stays chosen.
     let l = marker_track(6, 1.0, 0.25, 0, SR * 9);
     let r = marker_track(8, 1.0, 0.25, 488, SR * 9);
-    let t = assert_same_transcript("both-clear", &[l, r], 1024, None);
+    let t = assert_same_transcript(&scratch, "both-clear", &[l, r], 1024, None);
     assert!(
         last_line(&t).contains(" chosen=0 clusters=6,8 "),
         "{}",
@@ -508,7 +528,7 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
     // The marker only on R.
     let silent = vec![0.0f32; SR * 9];
     let r = marker_track(8, 1.0, 0.25, 488, SR * 9);
-    let t = assert_same_transcript("r-only", &[silent, r], 1024, None);
+    let t = assert_same_transcript(&scratch, "r-only", &[silent, r], 1024, None);
     assert!(
         last_line(&t).contains(" chosen=1 clusters=0,8 "),
         "{}",
@@ -518,7 +538,7 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
     let len = SR * 40;
     let l = marker_track(8, 1.0, 0.25, 0, len);
     let r = marker_track(40, 1.0, 0.25, 488, len);
-    let t = assert_same_transcript("hand-over", &[l, r], 1024, None);
+    let t = assert_same_transcript(&scratch, "hand-over", &[l, r], 1024, None);
     let at_8s = t.lines().nth(8 * SR / 1024).expect("a push at 8 s");
     assert!(at_8s.contains(" chosen=0 "), "{at_8s}");
     assert!(last_line(&t).contains(" chosen=1 "), "{}", last_line(&t));
@@ -528,10 +548,10 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
         vec![0.0f32; SR * 6],
         marker_track(5, 1.0, 0.25, 0, SR * 6),
     ];
-    let t = assert_same_transcript("three", &three, 1024, None);
+    let t = assert_same_transcript(&scratch, "three", &three, 1024, None);
     assert!(last_line(&t).contains(" chosen=2 "), "{}", last_line(&t));
     let mono = vec![marker_track(5, 1.0, 0.25, 0, SR * 6)];
-    let t = assert_same_transcript("mono", &mono, 1024, None);
+    let t = assert_same_transcript(&scratch, "mono", &mono, 1024, None);
     assert!(
         last_line(&t).contains(" chosen=0 clusters=5 "),
         "{}",
@@ -551,7 +571,7 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
         .expect("the first marker's absolute sample index");
     let k = 107u64; // push k - 1 ends at 107 x 1024 samples, after the third marker (2.25 s)
     let window = k * 1024 - first;
-    let t = assert_same_transcript("boundary", &track, 1024, Some(window));
+    let t = assert_same_transcript(&scratch, "boundary", &track, 1024, Some(window));
     let line = |i: u64| t.lines().nth(i as usize).expect("push").to_string();
     assert!(line(k - 1).contains(" clusters=3 "), "{}", line(k - 1));
     assert!(line(k).contains(" clusters=0 "), "{}", line(k));
@@ -559,7 +579,8 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
 
 #[test]
 fn the_constants_are_single_sourced() {
-    let consts = run_tool(&["consts"]);
+    let scratch = Scratch::new("consts");
+    let consts = scratch.run(&["consts"]);
     let get = |name: &str| -> String {
         consts
             .lines()

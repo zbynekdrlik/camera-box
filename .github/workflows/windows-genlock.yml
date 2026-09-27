@@ -638,16 +638,26 @@ jobs:
           $j = $output.IndexOf('static void st_raw_audio(void *data', $i + $sig.Length)
           if ($j -lt 0) { Write-Error "sync-test-output.cpp: st_raw_audio not found after st_raw_audio_camera_box (issue 1367)"; exit 1 }
           $body = $output.Substring($i, $j - $i)
-          if (-not $body.Contains('st->cb_audio_dec->push(planes, nf);')) {
-            Write-Error "sync-test-output.cpp: the audio callback no longer hands every channel's plane to the picker (issue 1367)"; exit 1
+          foreach ($need in @('const size_t nch = cb_ensure_audio_picker(st);', 'planes[cix] = (const float *)frames->data[cix];', 'st->cb_audio_dec->push(planes, nf);', 'cb_audio_diag_tick(st, frames);')) {
+            if (-not $body.Contains($need)) {
+              Write-Error "sync-test-output.cpp: the audio callback no longer has '$need' -- every channel's plane goes to the picker (issue 1367)"; exit 1
+            }
           }
-          foreach ($banned in @('acc +=', '/ (float)ch', 'std::vector<float> mono', 'camerabox::StreamingMarkerDecoder(')) {
+          foreach ($need in @('st->cb_audio_dec->channels() != nch', 'st->cb_audio_pushed = 0;', 'camerabox::ChannelMarkerPicker::dock( nch, st->audio_sample_rate, CAMERA_BOX_AUDIO_F_HZ, CAMERA_BOX_AUDIO_C)')) {
+            if ($output -notmatch [regex]::Escape($need)) {
+              Write-Error "sync-test-output.cpp: the picker lifecycle no longer has '$need' (issue 1367)"; exit 1
+            }
+          }
+          foreach ($banned in @('acc +=', '/ (float)ch', 'std::vector<float> mono', 'mono.data()', 'camerabox::StreamingMarkerDecoder(')) {
             if ($body.Contains($banned)) {
               Write-Error "sync-test-output.cpp: the audio callback mixes channels again ($banned) -- the stereo mbc marker is undecodable as a sum (issue 1367)"; exit 1
             }
           }
           if ($output -notmatch [regex]::Escape('publish_max_us=%llu " "marker_channel=%zu channel_clusters=%s"')) {
             Write-Error "sync-test-output.cpp: the diag line no longer appends marker_channel + channel_clusters after publish_max_us (issue 1367)"; exit 1
+          }
+          if ($output -notmatch [regex]::Escape('(unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen, channel_clusters.c_str());')) {
+            Write-Error "sync-test-output.cpp: the diag line's marker_channel / channel_clusters arguments moved or changed (issue 1367)"; exit 1
           }
           Write-Output "dock per-channel marker decode (issue 1367) - OK"
 

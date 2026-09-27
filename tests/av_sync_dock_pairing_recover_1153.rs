@@ -8,9 +8,9 @@
 //! the pairing state, so an OBS restart was the only cure. The fix: a pure, parity-mirrored
 //! epoch watchdog observed at the #690 diag tick, whose fire resets ALL in-dock pairing state
 //! (ring, cluster, offset history, audit tracker, decoder rolling window) and logs one
-//! PAIRING-RECOVER evidence line; plus non-finite-sample hardening in the mixdown + the shared
-//! decode kernel (a NaN prefix-sum poison is the one upstream latch class the dock can neutralize
-//! itself).
+//! PAIRING-RECOVER evidence line; plus non-finite-sample hardening in the shared decode kernel (a
+//! NaN prefix-sum poison is the one upstream latch class the dock can neutralize itself). The mono
+//! mixdown it also hardened was removed by issue 1367: every channel now has its own decoder.
 //!
 //! This file covers ONLY the OBS-glue half (`sync-test-output.cpp`, which pulls in libobs/quirc
 //! and is NOT compiled by this repo's Linux CI) plus source-presence of the mirrored seams —

@@ -26,6 +26,10 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+#[path = "support/cpp_source.rs"]
+mod cpp_source;
+use cpp_source::{body_of, squish, strip_cpp_comments};
+
 const DOCK_OUTPUT: &str = "vendor/av-sync-dock/src/sync-test-output.cpp";
 
 fn manifest(rel: &str) -> PathBuf {
@@ -37,77 +41,9 @@ fn vendor_file(rel: &str) -> String {
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
 }
 
-fn squish(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Drop `/* ... */` and `// ...` comments so a prose mention of a function name never satisfies
-/// or breaks an anchor (the source has no comment markers inside string literals it matters for).
-fn strip_cpp_comments(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let b = s.as_bytes();
-    let mut i = 0;
-    let mut in_str = false;
-    while i < b.len() {
-        let c = b[i];
-        if in_str {
-            out.push(c as char);
-            if c == b'\\' && i + 1 < b.len() {
-                out.push(b[i + 1] as char);
-                i += 2;
-                continue;
-            }
-            if c == b'"' {
-                in_str = false;
-            }
-            i += 1;
-        } else if c == b'"' {
-            in_str = true;
-            out.push('"');
-            i += 1;
-        } else if c == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
-            let end = s[i + 2..]
-                .find("*/")
-                .map(|e| i + 2 + e + 2)
-                .unwrap_or(b.len());
-            out.push(' ');
-            i = end;
-        } else if c == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
-            let end = s[i..].find('\n').map(|e| i + e).unwrap_or(b.len());
-            i = end;
-        } else {
-            out.push(c as char);
-            i += 1;
-        }
-    }
-    out
-}
-
 /// The comment-stripped, whitespace-squished source.
 fn code() -> String {
     squish(&strip_cpp_comments(&vendor_file(DOCK_OUTPUT)))
-}
-
-/// The balanced-brace body of the first function whose signature starts with `sig`.
-fn body_of<'a>(src: &'a str, sig: &str) -> &'a str {
-    let start = src
-        .find(sig)
-        .unwrap_or_else(|| panic!("{DOCK_OUTPUT}: `{sig}` not found"));
-    let open = start + src[start..].find('{').expect("function body opening brace");
-    let mut depth = 0usize;
-    for (off, ch) in src[open..].char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return &src[open..=open + off];
-                }
-            }
-            _ => {}
-        }
-    }
-    panic!("{DOCK_OUTPUT}: unbalanced body for `{sig}`");
 }
 
 #[test]

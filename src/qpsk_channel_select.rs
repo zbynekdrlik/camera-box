@@ -26,6 +26,13 @@
 //! [`ChannelPick::max_preamble_screens`] take the max over channels), decodability on the chosen
 //! channel: a silent channel 0 must never read "the chain is silent" while channel 1 carries audio.
 //!
+//! One rule, but not always the same channel everywhere: the `[4b3/8]` preflight picks with the
+//! operator's `--qpsk-min-clusters` (so its pick and its verdict agree), `--av-sync` and the fused
+//! gate with `DEFAULT_MIN_CLUSTERS`; the offline paths judge a channel over their whole window (the
+//! 25 s probe capture, the ~300 s recording), the live dock over a rolling 25 s window. Under a
+//! floor override, or on a channel hovering at the floor, two of them can choose different channels
+//! (~10 ms apart) — compare the reported `chosen_channel` before comparing offsets.
+//!
 //! Pure, no I/O, default features (Tier-0 testable). The ffmpeg/ffprobe glue is the probe-gated
 //! `probe::av_sync_recording::extract_audio_channels_f32`.
 
