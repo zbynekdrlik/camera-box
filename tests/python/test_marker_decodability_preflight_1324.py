@@ -72,12 +72,50 @@ def test_is_ok_only_the_literal_ok_word():
 
 
 # --- remote command builders ------------------------------------------------
-def test_extract_wav_ps_builds_a_mono_f32_48k_extract_of_the_track():
+def test_extract_wav_ps_keeps_every_channel_of_the_track():
+    """Issue 1367: the stereo mbc track carries the marker on L and R with R 10.17 ms late; a mono
+    downmix comb-filters the two copies into an undecodable signal (cluster 2, POLLUTED) while each
+    channel alone decodes. The extract must keep every channel so the probe can pick the best."""
     _, c = run("marker_decodability_extract_wav_ps 'D:\\_REC\\p.mp4' 'C:\\camera-box\\mbc.wav' 0")
     assert "ffmpeg" in c
     assert "-map 0:a:0" in c
-    assert "-ac 1" in c and "-ar 48000" in c and "pcm_f32le" in c
+    assert "-ar 48000" in c and "pcm_f32le" in c
+    assert "-ac" not in c, "no channel downmix before the QPSK demod"
+    assert "pan=" not in c and "amix" not in c, "no filter-based downmix either"
     assert 'D:\\_REC\\p.mp4' in c and 'C:\\camera-box\\mbc.wav' in c
+
+
+# the probe's per-channel JSON line (issue 1367): every pre-1367 key first, then the pick
+_JSON_STEREO = (
+    '{"preamble_screens":4,"candidates":4,"cluster_samples":4,"crc_ok":4,"crc_fail":0,'
+    '"peak_dbfs":-17.8,"verdict":"OK","channels":2,"chosen_channel":1,"per_channel":['
+    '{"channel":0,"ch_preamble_screens":649,"ch_cluster_samples":3,"ch_crc_ok":3,'
+    '"ch_crc_fail":646,"ch_peak_dbfs":-17.8},'
+    '{"channel":1,"ch_preamble_screens":4,"ch_cluster_samples":4,"ch_crc_ok":4,'
+    '"ch_crc_fail":0,"ch_peak_dbfs":-17.9}]}'
+)
+
+
+def test_parse_reads_the_chosen_channel_fields_of_the_per_channel_line():
+    assert run(f"marker_decodability_parse_num '{_JSON_STEREO}' cluster_samples")[1] == "4"
+    assert run(f"marker_decodability_parse_num '{_JSON_STEREO}' preamble_screens")[1] == "4"
+    assert run(f"marker_decodability_parse_num '{_JSON_STEREO}' peak_dbfs")[1] == "-17.8"
+    assert run(f"marker_decodability_parse_num '{_JSON_STEREO}' chosen_channel")[1] == "1"
+    assert run(f"marker_decodability_parse_verdict '{_JSON_STEREO}'")[1] == "OK"
+
+
+def test_parse_never_reads_a_per_channel_value_whatever_the_key_order():
+    """The gate's decision point must not depend on the producer's key order: even a line whose
+    per-channel array comes FIRST with unprefixed keys yields the top-level (chosen) values."""
+    reordered = (
+        '{"per_channel":[{"channel":0,"preamble_screens":649,"cluster_samples":3,'
+        '"peak_dbfs":-5.0,"verdict":"POLLUTED"}],"preamble_screens":4,"candidates":4,'
+        '"cluster_samples":4,"crc_ok":4,"crc_fail":0,"peak_dbfs":-17.8,"verdict":"OK"}'
+    )
+    assert run(f"marker_decodability_parse_num '{reordered}' cluster_samples")[1] == "4"
+    assert run(f"marker_decodability_parse_num '{reordered}' preamble_screens")[1] == "4"
+    assert run(f"marker_decodability_parse_num '{reordered}' peak_dbfs")[1] == "-17.8"
+    assert run(f"marker_decodability_parse_verdict '{reordered}'")[1] == "OK"
 
 
 def test_delete_ps_removes_the_wav():

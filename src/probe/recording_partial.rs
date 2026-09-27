@@ -389,6 +389,21 @@ mod tests {
     }
 
     #[test]
+    fn av_sync_without_a_channel_pick_reads_the_default_1367() {
+        // issue 1367: a partial from a build before the per-channel marker pick carries no
+        // `audio_channels`; it reads as the default pick (no channels recorded). Additive field,
+        // no schema bump.
+        let j = r#"{"schema_version":6,"box":"stream","recording":"s.mp4","expected_burns":[],"frames":[],"av_sync":{"fps":60.0,"video_start_s":0.0,"emit_log":[[0,100,1]],"audio_markers":[[0.5,0]]}}"#;
+        let p = RecordingPartial::from_json(j).unwrap();
+        let av = p.av_sync.expect("av_sync carried");
+        assert_eq!(
+            av.audio_channels,
+            crate::qpsk_channel_select::ChannelPick::default()
+        );
+        assert!(av.audio_channels.per_channel.is_empty());
+    }
+
+    #[test]
     fn av_sync_inputs_survive_the_partial_roundtrip_312() {
         // #312 item 2 (PR A) — the carried AvMarkerInputs (emit log + rebased audio markers + fps
         // + video_start_s) must round-trip through the partial JSON so the dev1 merge can pair
@@ -402,6 +417,28 @@ mod tests {
             ],
             audio_markers: vec![(0.812, 0), (3.805, 1)],
             audio_preamble_screens_passed: 2, // #748: proves the new field round-trips
+            // issue 1367: the per-channel marker pick round-trips (a non-default pick)
+            audio_channels: crate::qpsk_channel_select::ChannelPick {
+                chosen_channel: 1,
+                per_channel: vec![
+                    crate::qpsk_channel_select::ChannelMarkerStats {
+                        channel: 0,
+                        preamble_screens: 649,
+                        crc_ok: 3,
+                        crc_fail: 646,
+                        cluster_samples: 3,
+                        peak_dbfs: -17.8,
+                    },
+                    crate::qpsk_channel_select::ChannelMarkerStats {
+                        channel: 1,
+                        preamble_screens: 4,
+                        crc_ok: 4,
+                        crc_fail: 0,
+                        cluster_samples: 4,
+                        peak_dbfs: -17.9,
+                    },
+                ],
+            },
         };
         let p = RecordingPartial::from_frames(
             "stream",

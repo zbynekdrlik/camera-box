@@ -258,10 +258,18 @@ pub fn build_report(
     }
 }
 
-/// The single JSON line the probe prints on stdout (parsed by `marker-decodability-preflight.sh`).
+/// The single JSON line for one report. `--qpsk-probe` itself prints
+/// `qpsk_channel_select::channel_report_json`, which keeps these keys first, with the same values,
+/// and appends the per-channel pick (issue 1367).
 pub fn report_json(r: &QpskProbeReport) -> String {
+    format!("{{{}}}", report_json_body(r))
+}
+
+/// The report's key/value pairs without the enclosing braces, shared by [`report_json`] and
+/// `qpsk_channel_select::channel_report_json` so the two lines can never drift apart.
+pub fn report_json_body(r: &QpskProbeReport) -> String {
     format!(
-        "{{\"preamble_screens\":{},\"candidates\":{},\"cluster_samples\":{},\"crc_ok\":{},\"crc_fail\":{},\"peak_dbfs\":{:.1},\"verdict\":\"{}\"}}",
+        "\"preamble_screens\":{},\"candidates\":{},\"cluster_samples\":{},\"crc_ok\":{},\"crc_fail\":{},\"peak_dbfs\":{:.1},\"verdict\":\"{}\"",
         r.preamble_screens,
         r.candidates,
         r.cluster_samples,
