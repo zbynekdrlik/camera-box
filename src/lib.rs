@@ -99,6 +99,11 @@ pub mod qpsk_marker;
 // is the probe-gated `recording-verdict --qpsk-probe`.
 pub mod qpsk_probe_decision;
 
+// Issue 1367 — never downmix the measurement audio: decode the QPSK marker on EVERY channel of the
+// track and keep the channel with the largest self-consistency cluster (pure Tier-0, default
+// features). The --qpsk-probe preflight, --av-sync and the fused A/V gate all decode through it.
+pub mod qpsk_channel_select;
+
 // #398 — the LIVE OBS A/V-sync dock decode logic, pure Tier-0 so the vendored C++ dock
 // (`vendor/av-sync-dock/src/camera-box-*.hpp`) can MIRROR it and a committed C++ self-test can
 // cross-check the mirror against these Rust results. Holds the streaming QPSK marker detector
