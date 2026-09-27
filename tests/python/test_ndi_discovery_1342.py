@@ -507,14 +507,17 @@ class StrihWiring(unittest.TestCase):
         self.assertTrue(0 <= gen < user < system < dropin, (gen, user, system, dropin))
         self.assertNotIn("ndi_discovery_enabled", code)
 
-    def test_item_34_sits_before_item_32_and_33_stays_last(self):
+    def test_item_34_sits_before_item_32(self):
         text = _read(VERIFY_STRIH)
         self.assertRegex(text, r'(?m)^\. "\$\{HERE\}/lib/ndi-discovery\.sh"')
         item = text.find("# 34) NDI discovery")
         self.assertGreaterEqual(item, 0)
         end = text.find("\n# 32) the shared OBS-box appliance baseline", item)
         self.assertGreater(end, item, "item 34 must sit before item 32")
-        self.assertGreater(text.find("# 33) NO realtime-priority grant"), end, "item 33 stays the last item")
+        # issue 1357: the strih-only item 33 (rtprio-off) became the shared baseline `rtprio` row
+        # graded inside item 32, which now closes the list.
+        self.assertNotIn("# 33) NO realtime-priority grant", text)
+        self.assertEqual(text.find("\n# 3", end + 1), -1, "no numbered item follows item 32")
         block = text[item:end]
         self.assertIn("ndi_discovery_sender_ips pinned", block)
         self.assertIn("ndi_discovery_config_verdict", block)
