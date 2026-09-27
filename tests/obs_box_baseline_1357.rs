@@ -171,16 +171,20 @@ fn obs_box_rtprio_off_removes_every_retired_genlock_grant() {
     assert!(out.trim().is_empty(), "nothing left -> quiet: {out}");
 }
 
-/// Issue 1357: the gather reports every retired genlock rtprio grant it finds, and the `rtprio` row
-/// FAILs on one. The real gather runs with only its limits.d path moved into a temp dir.
 /// No OBS running is not a FAIL: the live-limit half grades only a running OBS.
 #[test]
 fn the_rtprio_row_passes_when_obs_is_not_running() {
-    let facts = GOOD_FACTS.replacen("obs_rtprio_limit=0\n", "obs_rtprio_limit=\n", 1);
+    let facts = GOOD_FACTS.replacen(
+        "obs_running=1\nobs_rtprio_limit=0\n",
+        "obs_running=0\nobs_rtprio_limit=\n",
+        1,
+    );
     let (c, rows) = verdict(&facts);
     assert_eq!(c, 0, "{rows:?}");
 }
 
+/// Issue 1357: the gather reports every retired genlock rtprio grant it finds, and the `rtprio` row
+/// FAILs on one. The real gather runs with only its limits.d path moved into a temp dir.
 #[test]
 fn the_gather_reports_a_retired_rtprio_grant_and_the_row_fails() {
     let dir = tempfile::tempdir().unwrap();
@@ -715,6 +719,7 @@ cmdline=BOOT_IMAGE=/vmlinuz ro quiet splash preempt=full rcu_nocbs=all
 lowlatency_cfg=1
 isolated_cpus=2,3,4,5,6,7,8,9,10,11
 rtprio_grants=
+obs_running=1
 obs_rtprio_limit=0
 dgpu=1
 prime=nvidia
@@ -847,6 +852,9 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
         ),
         // issue 1357 review: the running OBS still holds a grant removed after it started
         ("rtprio", "obs_rtprio_limit=0", "obs_rtprio_limit=20"),
+        // review round 2: a running OBS whose limit could not be read, or no pgrep at all
+        ("rtprio", "obs_rtprio_limit=0", "obs_rtprio_limit="),
+        ("rtprio", "obs_running=1", "obs_running="),
         ("gpu", "prime=nvidia", "prime=on-demand"),
         ("dejitter", "oomd=masked", "oomd=enabled"),
         ("dejitter", "process_priority=1", "process_priority=0"),
