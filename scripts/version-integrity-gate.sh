@@ -53,6 +53,8 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DRIFT_GUARD="$HERE/drift-guard.sh"
+# shellcheck source=scripts/lib/obs-box-baseline-win.sh
+. "$HERE/lib/obs-box-baseline-win.sh"
 DEFAULT_README="vendor/README.md"
 
 # --- PURE function (no network, no MCP — unit-tested) ---------------------------------------
@@ -509,6 +511,8 @@ Options:
                     (obs_dll_sha256 / distroav_dll_sha256 / genlock_capability / genlock_build_sha
                     parity), so strih's actual genlock build stays verified. WITHOUT this flag
                     strih is graded exactly as before (Windows-shaped, byte-identical).
+  --win-baseline N=FILE  issue 1357 -- REPORT-ONLY rows: box N's raw Windows baseline gather
+                    (scripts/win-baseline-check.sh --out-dir), graded per item, NEVER counted.
 
 Exit: 0 = every box matches the pinned set (proceed), 20 = a box DRIFTED (REFUSED),
 11 = a box UNKNOWN/unread (INCOMPLETE, not clean), 1 = usage error.
@@ -550,6 +554,7 @@ main() {
   # identity in the gate output. Repeatable. A report-only box with no/empty file prints an
   # "unread (report-only)" row and still never blocks.
   local -a win_state_report_only=()
+  local -a win_baseline=()   # issue 1357 -- report-only Windows baseline gathers (NAME=FILE)
   while [ $# -gt 0 ]; do
     case "$1" in
       --readme)             shift; readme="${1:-}" ;;
@@ -557,6 +562,7 @@ main() {
       --alt-manifest)       shift; alt_manifest="${1:-}" ;;
       --win-state)          shift; win_state+=("${1:-}") ;;
       --win-state-report-only) shift; win_state_report_only+=("${1:-}") ;;
+      --win-baseline)       shift; win_baseline+=("${1:-}") ;;
       --genlock-sha)        shift; genlock_sha+=("${1:-}") ;;
       --imag-manifest)      shift; imag_manifest="${1:-}" ;;
       --imag-bytes)         shift; imag_bytes="${1:-}" ;;
@@ -992,6 +998,9 @@ main() {
         "$ro_name" "${ro_sha:-n/a}" "${ro_obs:-n/a}" "${ro_port4455:-n/a}"
     done
   fi
+
+  # issue 1357 -- REPORT-ONLY Windows OBS-box baseline rows (the lib renders them; never counted).
+  [ "${#win_baseline[@]}" -eq 0 ] || win_baseline_report_rows "${win_baseline[@]}"
 
   echo
   if [ "$bad" -gt 0 ]; then
