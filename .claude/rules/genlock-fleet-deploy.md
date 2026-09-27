@@ -409,3 +409,12 @@ guard with a named FAIL on the same line: `X="\$(… || true)"; [ -n "\$X" ] || 
 FAIL: …" >&2; exit 4; }` (`\$` inside the unquoted `EOS` heredoc). Resolve the desktop user and home
 ONCE (step 5a) and reuse them — never a hardcoded `/home/<user>`. The script has a < 1000-line
 test budget (it sits at 999), so a new step must trim elsewhere.
+
+## `Write-Error …; exit N` never exits N in the Windows deploy program (issue 1357)
+
+`build_windows_deploy_program` starts with `$ErrorActionPreference = 'Stop'`. Under Stop,
+`Write-Error` throws a terminating error, so the `exit N` after it never runs and the program ends
+with PowerShell's generic failure code, not N. It still fails loud and early, so the existing
+`exit 2/4/9/10` lines are safe, but a caller or test that keys on the NUMBER sees the wrong one.
+A new step that needs its own exit code prints the failure with `Write-Host "..." -ForegroundColor
+Red` and then `exit N` (the issue-1357 power-plan step 0b, `scripts/lib/obs-box-baseline-win.sh`).

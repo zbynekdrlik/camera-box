@@ -1468,3 +1468,13 @@ Limits:
   run cannot catch that.
 - A runner that sources a repo script must not reuse its variable names. The sourced
   `dantesync-fleet-upgrade.sh` sets `HERE`.
+
+## A pytest that sources a bash lib must source it under the CALLER's `set -euo pipefail` (issue 1357)
+
+The #1133 entry above covers `-e` in a Rust `run_sourced` harness. The same blind spot hits a pytest
+that runs `bash -c '. lib.sh; fn …'` with no strict mode, and `-u` bites too. A grader whose
+`local guid name` stayed unset on one input path aborted with "unbound variable" inside `$(...)`
+under the real consumers (`win-baseline-check.sh`, `version-integrity-gate.sh`), so the LIVE state
+graded to an empty verdict. The plain-`bash -c` pytest stayed green. Source the lib under the
+consumer's `set -euo pipefail` in the test helper, assert every row carries a real verdict and that
+stderr has no "unbound variable", and initialise every local a lib function tests (`local v=""`).
