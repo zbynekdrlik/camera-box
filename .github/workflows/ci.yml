@@ -596,10 +596,10 @@ jobs:
     # the mic off, the mic toggle + both live meters, tap-to-fullscreen, the reconnect state, the
     # remembered name, the tap-for-sound layer — and an empty browser console in every test. No Rust
     # build needed: the page is plain static files.
-    # Issue 1379: a second project, `iphone-webkit`, runs picture-sw.spec.js on WebKit (the iPhone
-    # engine) with the PWA service worker registered and in control, against a real endless
-    # multipart MJPEG stream. The worker used to swallow that stream in WebKit only, which no
-    # Chromium run can catch, so WebKit is installed here too.
+    # Issue 1379: a second project, `iphone-webkit`, runs picture-sw.spec.js and
+    # picture-sw-upgrade.spec.js on WebKit (the iPhone engine) with the PWA service worker registered
+    # and in control, against a real endless multipart MJPEG stream. The worker used to swallow that
+    # stream in WebKit only, which no Chromium run can catch, so WebKit is installed here too.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
