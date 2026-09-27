@@ -6,7 +6,11 @@
 # stubs model the node: a tray list, Stop-Process that may start a fresh tray N times (the Task
 # Scheduler / the HKLM Run entry relaunching it), trays that cannot be killed, and Copy-Item that
 # throws a sharing violation (Win32 32) while any tray holds the exe, or a lock violation (Win32 33)
-# after a partial write.
+# after a partial write, and a relaunch right after the new exe landed.
+#
+# Get-FileHash is a CMDLET in pwsh 7 (a read failure throws) but a script FUNCTION in Windows
+# PowerShell 5.1 (a read failure is a non-terminating error -> a null hash). The emitted text guards
+# that with -ErrorAction Stop + non-empty checks; this harness cannot reproduce the 5.1 behaviour.
 #
 # Run: tests/pwsh/run_dantesync_tray_swap_1372.sh (it emits the program and needs pwsh).
 # pwsh 7 is not Windows PowerShell 5.1: this proves the logic, not 5.1 compatibility.
@@ -16,13 +20,14 @@ $env:TEMP = [System.IO.Path]::GetTempPath()
 $script:Exe = 'C:\Program Files\DanteSync\dantesync-tray.exe'
 $script:TmpNew = Join-Path $env:TEMP 'dantesync-tray-new.exe'
 
-function Reset-Node([int]$Respawn, [string]$Unkillable, [bool]$Lock33) {
+function Reset-Node([int]$Respawn, [string]$Unkillable, [bool]$Lock33, [bool]$SpawnAfterCopy) {
     $script:S = @{
         procs = [System.Collections.ArrayList]@()
         nextId = 100
         respawn = $Respawn
         unkillable = $Unkillable
         lock33 = $Lock33
+        spawnAfterCopy = $SpawnAfterCopy
         files = @{}
         started = 0
     }
@@ -77,6 +82,8 @@ function Copy-Item {
         throw [System.IO.IOException]::new('The process cannot access the file because another process has locked a portion of the file.', -2147024863)
     }
     $script:S.files[$Destination] = $script:S.files[$Path]
+    # the relaunch source starts the tray again right after the new exe landed
+    if ($Destination -eq $script:Exe -and $Path -eq $script:TmpNew -and $script:S.spawnAfterCopy) { [void](New-Tray) }
 }
 function Get-FileHash {
     [CmdletBinding()] param([string]$Algorithm, [Parameter(Position = 0)]$Path, $LiteralPath)
@@ -98,9 +105,9 @@ function Start-ScheduledTask { [CmdletBinding()] param($TaskName) $script:S.star
 function Unregister-ScheduledTask { [CmdletBinding()] param($TaskName, $Confirm) }
 
 function Invoke-Case {
-    param([string]$Name, [int]$Respawn, [string]$Unkillable, [bool]$Lock33,
+    param([string]$Name, [int]$Respawn, [string]$Unkillable, [bool]$Lock33, [bool]$SpawnAfterCopy,
           [string]$Want, [string[]]$Has, [string[]]$HasNot, [string]$Exe, [int]$Trays, [int]$Starts)
-    Reset-Node -Respawn $Respawn -Unkillable $Unkillable -Lock33 $Lock33
+    Reset-Node -Respawn $Respawn -Unkillable $Unkillable -Lock33 $Lock33 -SpawnAfterCopy $SpawnAfterCopy
     $out = . $Program
     $line = [string](@($out | Where-Object { "$_" -like 'TRAY*' }) | Select-Object -Last 1)
     $why = @()
@@ -136,6 +143,9 @@ $results = @(
     (Invoke-Case -Name 'lock violation after a partial write' -Respawn 0 -Unkillable '' -Lock33 $true `
         -Want 'TRAY-WARNING: tray swap failed, the previous tray restored' `
         -Has @() -HasNot @('untouched') -Exe 'OLDHASH' -Trays 1 -Starts 1)
+    (Invoke-Case -Name 'relaunched right after the swap' -Respawn 0 -Unkillable '' -Lock33 $false -SpawnAfterCopy $true `
+        -Want 'TRAY OK: ' -Has @('kept a tray that was running again, not launched') -HasNot @('killed a relaunched') `
+        -Exe 'NEWHASH' -Trays 1 -Starts 0)
 )
 $failed = @($results | Where-Object { -not $_ }).Count
 Write-Host ("tray swap cases: " + ($results.Count - $failed) + '/' + $results.Count + ' ok')

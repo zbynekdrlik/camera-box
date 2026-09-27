@@ -167,6 +167,10 @@ def test_a_failed_restore_is_named_not_claimed(ps):
     swap = ps[_at(ps, "# 5. the tray"):_at(ps, "# 6. relaunch the tray")]
     assert "(Get-FileHash -Algorithm SHA256 $trayPre).Hash" in swap
     assert "the previous tray restored" in swap and "may be partial" in swap
+    # race-fix review round 2: a restore is never "proven" by two unreadable (null) hashes
+    assert "$trayRestoredHash = (Get-FileHash -Algorithm SHA256 $trayExe -ErrorAction Stop).Hash" in swap
+    assert ("$trayRestored = ($trayRestoredHash -and $trayRestoredHash -eq "
+            "(Get-FileHash -Algorithm SHA256 $trayPre).Hash)") in swap
 
 
 # ---------------------------------------------------------------------------------------------
@@ -187,7 +191,7 @@ def test_the_killed_tray_is_waited_on_by_its_pids_never_by_name(ps):
     kill = _at(swap, "$trayKilled | Stop-Process -Force", capture)
     pids = _at(swap, "$trayPids = @($trayKilled | ForEach-Object { $_.Id })", kill)
     wait = _at(swap, "Wait-Process -Id $trayPids -Timeout 15", pids)
-    # review round 3: a reused PID is not the tray -- only a still-alive dantesync-tray counts
+    # race-fix review round 1: a reused PID is not the tray -- only a still-alive dantesync-tray counts
     check = _at(swap, "@(Get-Process -Id $trayPids -ErrorAction SilentlyContinue | Where-Object "
                       "{ $_.ProcessName -eq 'dantesync-tray' }).Count -gt 0", wait)
     assert "did not exit" in swap[check:check + 200], swap[check:check + 200]
@@ -239,22 +243,27 @@ def test_a_copy_blocked_by_a_relaunched_tray_is_a_named_warning_without_a_restor
 
 
 def test_untouched_is_proven_by_the_hash_never_assumed(ps):
-    """Review round 3: error 32 (a running exe) fails before the file is opened for write, but 33
+    """Race-fix review round 1: error 32 (a running exe) fails before the file is opened for write, but 33
     (lock violation) can come after truncation. So "untouched" compares the exe's hash with the one
     read before the copy; anything else restores."""
     swap = _swap(ps)
     backup = _at(swap, "Copy-Item -Force $trayExe $trayPre")
-    before = _at(swap, "$trayBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $trayExe).Hash", backup)
-    assert before < _at(swap, "for ($trayTry = 1;", backup)
+    before = _at(swap, "$trayBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $trayExe -ErrorAction Stop).Hash",
+                 backup)
+    # race-fix review round 2: on Windows PowerShell 5.1 Get-FileHash is a script function whose
+    # read failure is a non-terminating error -> a null hash; two null reads must never compare equal
+    unreadable = _at(swap, "if (-not $trayBefore) { throw 'could not hash the tray exe before the replace' }", before)
+    assert unreadable < _at(swap, "for ($trayTry = 1;", backup)
     catch = swap[_at(swap, "} catch {", _at(swap, "Copy-Item -Force $trayTmp $trayExe")):]
-    proof = _at(catch, "$trayUntouched = ((Get-FileHash -Algorithm SHA256 -LiteralPath $trayExe).Hash -eq $trayBefore)")
+    now = _at(catch, "$trayNowHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $trayExe -ErrorAction Stop).Hash")
+    proof = _at(catch, "$trayUntouched = ($trayNowHash -and $trayNowHash -eq $trayBefore)", now)
     assert _at(catch, "$trayInUse = ") < proof
     first_branch = _at(catch, "if ($trayUntouched -and $trayNew.Count -gt 0) {", proof)
     assert first_branch < _at(catch, "'a tray keeps relaunching: '") < _at(catch, "Copy-Item -Force $trayPre $trayExe")
 
 
 def test_a_tray_that_did_not_die_is_named_apart_from_a_relaunch(ps):
-    """Review round 3: "keeps relaunching" only for a NEW PID holding the exe; a tray the arm already
+    """Race-fix review round 1: "keeps relaunching" only for a NEW PID holding the exe; a tray the arm already
     tried to kill is "did not die"; nothing holding it is "locked by another process"."""
     swap = _swap(ps)
     loop = swap[_at(swap, "for ($trayTry = 1;"):_at(swap, "Copy-Item -Force $trayTmp $trayExe")]
@@ -272,7 +281,7 @@ def test_a_tray_that_did_not_die_is_named_apart_from_a_relaunch(ps):
 
 
 def test_the_parent_command_line_is_cut(ps):
-    """Review round 3: the parent's command line lands in the roll summary; an unexpected parent's
+    """Race-fix review round 1: the parent's command line lands in the roll summary; an unexpected parent's
     arguments must not be printed in full."""
     fn = _at(ps, "function Get-TrayParent(")
     body = ps[fn:_at(ps, "\n}\n", fn)]
@@ -280,7 +289,7 @@ def test_the_parent_command_line_is_cut(ps):
 
 
 def test_tray_ok_says_when_a_running_tray_was_kept(ps):
-    """Review round 3: TRAY OK is true when the swap succeeded (any tray kept started from the new
+    """Race-fix review round 1: TRAY OK is true when the swap succeeded (any tray kept started from the new
     exe), but it names that the tray was kept, not launched."""
     relaunch = ps[_at(ps, "# 6. relaunch the tray"):]
     guard = _at(relaunch, "if ($trayProcs.Count -eq 0) {")
