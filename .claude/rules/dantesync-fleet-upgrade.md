@@ -130,12 +130,27 @@ upgrade script under the ~1000-line budget.
     service upgrade still runs.
 - **Swap after the service is back (step 5).** `dantesync_windows_tray_swap_ps` runs after the
   service's try/catch and the dead-task purge.
-  - It stops `dantesync-tray` (exact name) and sets `$trayStopped`.
+  - It captures the running trays (exact name), kills them, sets `$trayStopped`, and waits on
+    THOSE PIDs only (`Wait-Process -Id $trayPids`). A PID that is still alive after 15 s is the named
+    `the killed tray (pid N) did not exit`.
   - It backs the tray up to `dantesync-tray.exe.pre-<version>` only when that file does not exist, so
     a re-run never overwrites the original pre-roll tray.
+  - Right before the replace it kills any tray started since the kill, at most 3 times, and records
+    who started it (`Get-TrayParent`: the parent's name + command line via CIM, never a throw).
   - It replaces the file and verifies the installed sha. A failed replace or a wrong sha restores the
     backup, and the restore is checked by hash: a failed restore is named (`the tray exe may be
     partial`), never claimed.
+  - A replace that fails with a sharing / lock violation (`HResult -band 0xFFFF` = 32 / 33) never
+    wrote the file. It restores nothing (a restore would hit the same lock) and is the named
+    `a tray keeps relaunching: <parent>; the previous tray exe is untouched` when a tray was seen,
+    else `the tray exe is locked by another process`.
+- **Why by PID (the 1.12.0 roll, 27.9.2026).** The first cut waited and re-checked by NAME. A tray
+  started after the kill (the Task Scheduler — parent `svchost -s Schedule`, e.g. the arm's own
+  relaunch task instance from an earlier pass — or the HKLM Run `DanteSyncTray` entry at logon) read
+  as the killed one still running: `the running tray did not exit` once each on stream, mbc and
+  fohabl, then OK on a re-run, while a manual `Stop-Process -Force` killed the tray at once. A
+  `TRAY OK` now says `killed a relaunched tray before the swap, started by: <parent>`, so the next
+  roll names the relaunch source.
 - **Relaunch whenever the tray was stopped or a current tray is not running (step 6), even after a
   failed swap**, so the operator is never left without a tray.
   - The temporary task (`DanteSyncTrayRelaunch-1372`) has the GROUP principal `BUILTIN\Users`, named
@@ -148,6 +163,8 @@ upgrade script under the ~1000-line budget.
   - The task has explicit settings: `-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
     -ExecutionTimeLimit 0`. Task Scheduler's defaults would refuse a FOH laptop on battery.
   - It is unregistered in a `finally`, and an unregister failure is a note.
+  - A tray already running in an interactive session when step 6 starts (relaunched meanwhile) is
+    kept: the task is not registered or started, so there is never a second tray.
   - The count is read again AFTER the unregister: exactly ONE `dantesync-tray` process with
     `SessionId >= 1` (session 0 is the ssh/service session). A box with nobody logged on reads as a
     warning, which is honest. The downloaded tray and its `.sha256` are removed.
@@ -185,8 +202,29 @@ line 71, mid-paragraph. The header therefore documents `SSH_PASS` without its de
   - the gate's `DANTESYNC_GATE_WIN_HTTP_STREAM` seam is fed a fresh live `/status`;
   - the stub keys the version and the upload by host, so a mixed fleet is played too;
   - the tests cover warning, OK, canary abort, the all-current and the mixed-fleet SAME-node
-    refresh, and dry-run.
+    refresh, a relaunching tray (the named warning reaches the summary, the service stays), and
+    dry-run.
+- The race fix is pinned as text: the PID wait (no `Wait-Process -Name dantesync-tray` anywhere),
+  the bounded re-kill loop directly before the replace `try {`, `Get-TrayParent` defined before use
+  and never throwing, the in-use branch before (and exclusive of) the restore, and the step-6
+  keep-a-running-tray guard before `Register-ScheduledTask`.
 - The Rust file runs locally with a plain `rustc --test`: it is std-only (`ci-testing-gotchas.md`).
+- **Running the emitted PowerShell, not only reading it (local, not a committed test).** There is no
+  pwsh on dev1, so the committed tests read the program as text. To run it:
+  - Unpack the `powershell-7.x-linux-x64.tar.gz` release into the scratchpad.
+  - Emit `dantesync_windows_tray_only_ps` to a file.
+  - Dot-source it from a harness that defines `[CmdletBinding()]` stub FUNCTIONS for Get-Process,
+    Stop-Process, Wait-Process, Get-CimInstance, Copy-Item, Get-FileHash, Invoke-WebRequest,
+    Get-Content, Test-Path and the ScheduledTask cmdlets. A function outranks the cmdlet.
+  - Model the node in the stubs: a tray list; Stop-Process that spawns a fresh tray N times; Copy-Item
+    that throws `[System.IO.IOException]::new(msg, -2147024864)` while any tray holds the exe.
+  - Issue 1372 ran it for four cases. The old text reproduced the live warning and left 2 trays. The
+    fix reported `TRAY OK` with the parent named for one respawn, and the named warning with the exe
+    untouched for a persistent respawner.
+  - Also parse the full upgrade program with `[System.Management.Automation.Language.Parser]::ParseFile`
+    (0 errors) to catch a syntax slip in text no test executes.
+  - pwsh 7 is not Windows PowerShell 5.1: keep the emitted text to 5.1 syntax; a stub run proves the
+    logic, not 5.1 compatibility.
 
 ## Testing (Tier-0)
 
