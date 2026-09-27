@@ -23,6 +23,8 @@
 use std::path::PathBuf;
 
 const OBS_VIDEO: &str = "vendor/obs-studio/libobs/obs-video.c";
+/// Issue 1357 moved the pin into its own header, included once by obs-video.c.
+const PIN_H: &str = "vendor/obs-studio/libobs/obs-genlock-render-tick-pin.h";
 
 fn vendor_file(rel: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -40,7 +42,7 @@ fn squish(s: &str) -> String {
 /// thread created under FIFO plain SCHED_OTHER (issue 1357).
 #[test]
 fn render_tick_thread_is_pinned_sched_fifo_to_isolated_cores() {
-    let src = squish(&vendor_file(OBS_VIDEO));
+    let src = squish(&vendor_file(PIN_H));
 
     assert!(
         src.contains("pthread_setaffinity_np(pthread_self(), sizeof(p->pin), &p->pin)"),
@@ -64,7 +66,7 @@ fn render_tick_thread_is_pinned_sched_fifo_to_isolated_cores() {
 /// ~106-thread OBS process can lock out kernel housekeeping and hang the headless box.
 #[test]
 fn render_tick_fifo_priority_is_low() {
-    let src = squish(&vendor_file(OBS_VIDEO));
+    let src = squish(&vendor_file(PIN_H));
 
     assert!(
         src.contains("#define GENLOCK_RT_PRIORITY 10"),
@@ -97,10 +99,10 @@ fn render_tick_fifo_priority_is_low() {
 /// silently not checking the intended condition at all — found in review (PR #542).
 #[test]
 fn render_tick_pin_is_warn_and_continue_never_aborts() {
-    let raw = vendor_file(OBS_VIDEO);
+    let raw = vendor_file(PIN_H);
 
     let fn_start = raw
-        .find("static void genlock_pin_render_tick_thread(void)")
+        .find("static inline void genlock_pin_render_tick_thread(void)")
         .expect("genlock_pin_render_tick_thread must be defined");
     let fn_end = raw[fn_start..]
         .find("\n}\n")
@@ -135,7 +137,7 @@ fn render_tick_pin_is_warn_and_continue_never_aborts() {
 /// to 40 threads.
 #[test]
 fn render_tick_cores_derive_from_isolated_and_nohz_full_with_no_fallback() {
-    let src = squish(&vendor_file(OBS_VIDEO));
+    let src = squish(&vendor_file(PIN_H));
 
     for path in [
         "/sys/devices/system/cpu/isolated",
@@ -176,14 +178,14 @@ fn the_pin_wraps_only_the_tick_sleep() {
         .expect("video_sleep must have a closing brace");
     let body = &raw[start..end];
     let begin = body
-        .find("genlock_tick_pin_sleep_begin();")
-        .expect("video_sleep must call genlock_tick_pin_sleep_begin() (issue 1357)");
+        .find("const bool tick_pinned = genlock_tick_pin_sleep_begin(t);")
+        .expect("video_sleep must call genlock_tick_pin_sleep_begin(t) (issue 1357)");
     let sleep = body
         .find("os_sleepto_ns(t)")
         .expect("video_sleep must still sleep with os_sleepto_ns(t)");
     let finish = body
-        .find("genlock_tick_pin_sleep_end();")
-        .expect("video_sleep must call genlock_tick_pin_sleep_end() (issue 1357)");
+        .find("genlock_tick_pin_sleep_end(tick_pinned);")
+        .expect("video_sleep must call genlock_tick_pin_sleep_end(tick_pinned) (issue 1357)");
     assert!(
         begin < sleep && sleep < finish,
         "{OBS_VIDEO}: the pin must be taken right before os_sleepto_ns and dropped right after it"
@@ -201,10 +203,19 @@ fn the_pin_wraps_only_the_tick_sleep() {
 #[test]
 fn pin_is_invoked_from_the_graphics_thread_linux_only() {
     let raw = vendor_file(OBS_VIDEO);
+    let header = vendor_file(PIN_H);
 
-    let def_idx = raw
-        .find("genlock_pin_render_tick_thread(void)")
-        .expect("obs-video.c must DEFINE genlock_pin_render_tick_thread (#484)");
+    assert!(
+        header.contains("static inline void genlock_pin_render_tick_thread(void)"),
+        "{PIN_H} must DEFINE genlock_pin_render_tick_thread (#484, issue 1357)"
+    );
+    assert!(
+        !raw.contains("genlock_pin_render_tick_thread(void)"),
+        "{OBS_VIDEO} must not carry a second copy of the pin (it lives in {PIN_H})"
+    );
+    let guard_idx = raw
+        .find("#if defined(__linux__) && !defined(_WIN32)\n#include \"obs-genlock-render-tick-pin.h\"")
+        .expect("obs-video.c must include the pin header inside its Linux-only guard (issue 1357)");
     let name_idx = raw
         .find(r#"os_set_thread_name("libobs: graphics thread")"#)
         .expect("obs_graphics_thread must still name the graphics thread");
@@ -213,21 +224,16 @@ fn pin_is_invoked_from_the_graphics_thread_linux_only() {
         .expect("obs_graphics_thread must CALL genlock_pin_render_tick_thread() (#484)");
 
     assert!(
-        def_idx < call_idx,
-        "{OBS_VIDEO}: genlock_pin_render_tick_thread must be defined before it is called"
+        guard_idx < call_idx,
+        "{OBS_VIDEO}: the pin header must be included before the call"
     );
     assert!(
         name_idx < call_idx,
         "{OBS_VIDEO}: the #484 pin must be invoked from obs_graphics_thread AFTER \
          os_set_thread_name — it pins the graphics thread itself (the genlock tick driver)"
     );
-
-    // Linux-only guard: the pin is wrapped in a __linux__ conditional (the Windows/macOS builds
-    // that strih/stream use have no equivalent and don't run on imag-nb).
-    let squished = squish(&raw);
     assert!(
-        squished.contains("#if defined(__linux__)"),
-        "{OBS_VIDEO}: the #484 pin must be guarded `#if defined(__linux__)` — it is a Linux-only \
-         (imag-nb) addition; the vendored Windows/macOS builds must be unaffected."
+        header.contains("#if defined(__linux__) && !defined(_WIN32)"),
+        "{PIN_H}: the pin is Linux-only — the vendored Windows/macOS builds must be unaffected"
     );
 }
