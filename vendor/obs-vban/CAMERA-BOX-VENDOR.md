@@ -23,7 +23,7 @@ grandmaster within 0.2 ppm (finding in issue 1372, comment 5845239583).
 | file | change |
 |---|---|
 | `src/vban-pacing.h` | NEW. The pure pacing decision (see below). It has no OBS dependency, and `tests/vban_pacing_parity_1372.rs` compiles it and pins it to `src/vban_pacing.rs`. |
-| `src/vban-output-thread.c` | `vban_out_loop` is paced (details below). `send_packet` and `packet_samples_for` are the 0.3.1 packet code, moved into helpers without changing it. `pacing_sleep_until` waits on a Windows high-resolution timer and spins only the last 0.2 ms. The unused `buf_ts_ns` field is removed. |
+| `src/vban-output-thread.c` | `vban_out_loop` is paced (details below). `send_packet` and `packet_samples_for` are the 0.3.1 packet code, moved into helpers without changing it. `send_silence` sends a zero-filled packet of the same size (issue 1381). `pacing_sleep_until` waits on a Windows high-resolution timer and spins only the last 0.2 ms. The unused `buf_ts_ns` field is removed. |
 | `src/vban-output.c` | Adds the `pacing_target_ms` setting: the "Send Buffer" property (20–200 ms), with a default of 64. |
 | `src/vban-output-internal.h` | Adds `pacing_target_ms` to `struct vban_out_s`. |
 | `data/locale/en-US.ini` | Adds `VBAN.out.prop.pacing_target_ms="Send Buffer"`. |
@@ -31,8 +31,11 @@ grandmaster within 0.2 ppm (finding in issue 1372, comment 5845239583).
 How the paced `vban_out_loop` works:
 
 - It converts every queued mix block into the jitter buffer as soon as the block arrives.
-- It calls `vban_pacing_step()` on each wake, to learn how many packets to send.
-- It sleeps to the next deadline with `os_sleepto_ns()`.
+- It calls `vban_pacing_step()` on each wake, to learn what to drop, how many audio packets and
+  how many silence packets to send.
+- A drop is always whole packets; the thread advances `nuFrame` by the dropped packets.
+- It sleeps to the next deadline with `pacing_sleep_until()`, or, while a slot waits for its
+  audio, waits on the audio event (`vban_pacing_wait_ms()`: at most until the grace ends).
 - It logs the 10 s status line and a line whenever the config changes.
 
 ### The pacing (`vban-pacing.h`)
@@ -40,34 +43,40 @@ How the paced `vban_out_loop` works:
 - **Buffer.** A jitter buffer with a target depth, 64 ms by default and clamped to 20–200 ms. A
   value of 0 or a negative value means the default. So a Lua script that never sets the value
   gets 64 ms.
-- **Schedule.** Packet `n` leaves at `t0 + n × packet_samples / rate` on the disciplined
-  `os_gettime_ns()`, the media clock from issue 1372 part A. `t0` = the moment a full packet is
-  first buffered + the target.
+- **Schedule (a fixed timeline, issue 1381).** Packet slot `n` leaves at
+  `t0 + n × packet_samples / rate` on the disciplined `os_gettime_ns()`, the media clock from issue
+  1372 part A. `t0` = the moment a full packet is first buffered + the target, set once; lateness
+  never moves it.
 - **Send.** Every due packet goes out in the same wake, never one per wake.
-- **Underflow.** When a packet is due and less than one packet is buffered, the thread sends
-  nothing: no zero-fill, no fabricated samples. It counts `underflows`, and the next full
-  packet re-anchors the schedule.
-- **Overflow.** Above target + 200 ms, the oldest whole packets are dropped down to the target,
-  and `overflows` counts it.
-- **Trim.** After an underflow the re-anchor lands on the audio thread's catch-up backlog. When
-  the minimum depth over a 2 s window stayed above target + max(target / 2, 20 ms), the excess is
-  dropped back to the target (whole packets) and `trims` counts it.
+- **Late audio.** A due slot whose audio is not buffered yet waits for it up to 100 ms (the
+  grace). It then leaves late but complete (`late_sends`). The catch-up after it is capped at twice
+  real time.
+- **Silence.** A slot still without audio at the grace end is a zero-filled silence packet. So is
+  every following slot, on schedule, until the buffer holds the target again. One episode is one
+  counted `discontinuities`.
+- **Stale repay.** Each silence packet is a debt. When the pacer is on schedule and the buffer holds
+  target + debt (the backlog arrived), the debt is dropped once, in whole packets. A buffering hole
+  has no backlog: nothing is dropped, and its debt is forgiven at the next episode.
+- **Ceilings.** More than 2 s buffered, or the next slot more than 2 s overdue, is one counted
+  `resyncs`: back to the target, on the grid.
 - **Retarget.** A new target while running moves the schedule later (up) or drops the difference
-  at the next wake (down, a trim). The counters carry on.
-- **Unchanged.** The packet contents and the frame counter are unchanged. The stream is cut into
-  the same packets as in 0.3.1: 256 samples, or 239 for 24-bit stereo. The payload bytes and
-  `nuFrame` are the same.
+  at the next wake, never below the new target (down, a counted discontinuity). The counters
+  carry on.
+- **No trim, no overflow drop** (both removed by issue 1381).
+- **Packets.** The stream is cut into the same packets as in 0.3.1: 256 samples, or 239 for 24-bit
+  stereo. The payload bytes of an audio packet are the same. `nuFrame` counts every packet, audio
+  or silence, and skips the dropped packets so the receiver's own loss counter sees a drop.
 
 ### Log lines (OBS log, prefixed `[obs-vban]` by the plugin macro)
 
 ```
-obs-vban pacing-config: target_ms=64 packet_samples=239 rate=48000 counters=reset stream='cg'
-obs-vban pacing: depth_ms=… underflows=… overflows=… late_max_ms=… trims=… target_ms=64 stream='cg'
+obs-vban pacing-config: target_ms=64 grace_ms=100 packet_samples=239 rate=48000 counters=reset stream='cg'
+obs-vban pacing: depth_ms=… late_sends=… discontinuities=… silence_ms=… discarded_ms=… resyncs=… late_max_ms=… target_ms=64 dest=10.77.x.x:6980 stream='cg'
 ```
 
-The second line comes every 10 s. `underflows`, `overflows` and `trims` are cumulative since the
-thread started (`counters=reset`); a Send Buffer change logs `counters=kept`. `late_max_ms` is
-the largest send lateness in the window.
+The second line comes every 10 s. The counters are cumulative since the thread started
+(`counters=reset`); a Send Buffer change logs `counters=kept`. `late_max_ms` is the largest send
+lateness in the window. `dest=` is the resolved receiver address and port.
 
 ## Re-basing onto a newer upstream
 
