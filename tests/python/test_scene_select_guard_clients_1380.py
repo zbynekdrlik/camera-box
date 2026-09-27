@@ -196,6 +196,23 @@ def test_frozen_gate_refused_warm_target_is_an_error_never_a_frozen_verdict(monk
                                                    {"sceneName": "Multiview"})]
 
 
+def test_frozen_gate_a_broken_guard_import_is_an_error_never_frozen(monkeypatch, capsys):
+    # review round 1: ANY failure to load the guard exits 2 (ERROR); 1 would read as FROZEN.
+    gate = _gate()
+
+    def broken():
+        raise RuntimeError("obs_phase2 failed to load")
+
+    monkeypatch.setattr(gate, "_obs_phase2", broken)
+    monkeypatch.setattr(gate, "_conn", lambda host, password="": pytest.fail("connected"))
+    monkeypatch.setattr(sys, "argv", ["frozen-camera-gate.py", "--host", "10.77.9.202",
+                                      "--verdict-bin", "/nonexistent"])
+    with pytest.raises(SystemExit) as exc:
+        gate.main()
+    assert exc.value.code == 2
+    assert "obs_phase2" in capsys.readouterr().err
+
+
 def test_frozen_gate_never_restores_a_production_preview(monkeypatch, capsys):
     gate = _gate()
     code, ws, err = _run_gate(gate, monkeypatch, capsys, preview="PRO")
@@ -290,6 +307,32 @@ def test_imag_bootstrap_selects_nothing_when_the_guard_is_unavailable(monkeypatc
                                                                      capsys):
     imag = _imag()
     monkeypatch.setattr(imag, "_obs_phase2_module", lambda: None)
+    selects = _bootstrap_seed(imag, monkeypatch, tmp_path, "Cam 3")
+    assert selects == [], "an unguardable scene selection is never sent"
+    assert "guard" in capsys.readouterr().out
+
+
+def _pre_guard_obs_phase2():
+    """An obs_phase2.py from before the guard (a half-finished setup-imag fetch, a hand copy): it
+    carries the name-heal policy but not the production-scene guard."""
+    return types.SimpleNamespace(REENFORCE_HEALED="healed",
+                                 reenforce_ndi_name=lambda ws, inp, name: "offline")
+
+
+def test_imag_an_obs_phase2_without_the_guard_never_breaks_a_request(monkeypatch):
+    # review round 1: an importable obs_phase2 WITHOUT the guard must read as "no guard", never
+    # crash every Obs.req (a crashed boot seed Restart-loops the imag OBS, the issue-1156 class).
+    imag = _imag()
+    monkeypatch.setattr(imag, "_obs_phase2_module", _pre_guard_obs_phase2)
+    obs, ws = _imag_obs(imag, monkeypatch, {"GetVideoSettings": {"fpsNumerator": 60}})
+    assert obs.req("GetVideoSettings") == {"fpsNumerator": 60}
+    assert ws.sent == [("GetVideoSettings", {})]
+
+
+def test_imag_bootstrap_selects_nothing_with_an_obs_phase2_without_the_guard(monkeypatch,
+                                                                            tmp_path, capsys):
+    imag = _imag()
+    monkeypatch.setattr(imag, "_obs_phase2_module", _pre_guard_obs_phase2)
     selects = _bootstrap_seed(imag, monkeypatch, tmp_path, "Cam 3")
     assert selects == [], "an unguardable scene selection is never sent"
     assert "guard" in capsys.readouterr().out
@@ -442,9 +485,21 @@ def test_client_reuses_the_one_guard_and_holds_no_copy_of_the_rule(name):
         f"{name} must reuse obs_phase2's guard")
 
 
+# Every request that can put a scene on program/preview: the obs-websocket v5 selections, the v4
+# names, and the Studio Mode transition (it moves the preview onto program). A request name only
+# counts QUOTED, as a client sends it; the shell scripts only mention them in comments.
+_SCENE_SELECT_REQUEST_RE = re.compile(
+    r"""["'](SetCurrentProgramScene|SetCurrentPreviewScene|SetCurrentScene|SetPreviewScene"""
+    r"""|TransitionToProgram|TriggerStudioModeTransition)["']""")
+_SCRIPT_SUFFIXES = (".py", ".sh", ".ps1", ".psm1", ".js", ".ahk", ".cmd", ".bat")
+
+
 def test_every_scene_selecting_script_is_a_covered_client():
-    # A new standalone OBS-WS client that selects a scene must join this list (and reuse the guard).
+    # A new OBS-WS client that selects a scene must join this list (and reuse the guard; a
+    # TriggerStudioModeTransition user must also be checked against the rule by hand).
     covered = set(_CLIENTS) | {"obs_phase2.py", "stream_dev_scene.py"}
-    senders = {p.name for p in SCRIPTS.rglob("*.py")
-               if re.search(r"""["']SetCurrent(Program|Preview)Scene["']""", p.read_text())}
+    senders = {p.name for p in SCRIPTS.rglob("*")
+               if p.is_file() and p.suffix in _SCRIPT_SUFFIXES
+               and _SCENE_SELECT_REQUEST_RE.search(p.read_text(errors="replace"))}
     assert senders <= covered, f"uncovered scene-selecting scripts: {sorted(senders - covered)}"
+    assert senders == covered, f"a covered client stopped selecting scenes: {covered - senders}"

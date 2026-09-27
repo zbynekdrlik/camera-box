@@ -355,16 +355,19 @@ fn bash_program_key_set_matches_rust_1380() {
     // input silent and resolume defaults a non-camera input to audio, so a key present on one side
     // only never changes a verdict. The key set drives the program-VIDEO eligibility (the yuv
     // advisory), so pin both predicates over every key, the removed stream music key (issue 1380)
-    // and some non-program names.
+    // and some non-program names. Each of the eight keys has one name below that matches that key
+    // ONLY (the first eight), so a key dropped on one side flips that name; `VBAN cg-resolume`
+    // also matches `cg` and could not do that alone.
     let names = [
         "sp-fast_video",
         "SongPlayer out",
         "NDI 2ME PGM",
         "Program feed",
         "mbc",
-        "VBAN cg-resolume",
+        "VBAN foh",
         "NDIAr ppt",
         "cg",
+        "VBAN cg-resolume",
         "NDI obs hudba",
         "CAM1 (usb)",
         "NDI cam1",
