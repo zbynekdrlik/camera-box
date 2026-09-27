@@ -722,10 +722,14 @@ static int run_program(fstream &logFile, int argc, char *argv[])
 
 #ifdef _WIN32
 
-#define CRASH_MESSAGE                                                      \
-	"Woops, OBS has crashed!\n\nWould you like to copy the crash log " \
-	"to the clipboard? The crash log will still be saved to:\n\n%s"
-
+/* camera-box genlock rig build (issue 1378): every managed Windows OBS box runs unattended, so this
+ * handler never shows upstream's task-modal crash dialog (the offer to copy the crash log to the
+ * clipboard). Nobody answered it on stream or resolume: the crashed obs64 stayed alive, and the
+ * guarded launcher and the AHK safe-loop saw a live OBS and never started a fresh one. The crash
+ * file is written exactly as upstream, one OBS-log line names it, and the process exits at once.
+ * The log line replaces a whole dialog window plus its message buffers and the clipboard copy, so
+ * the handler allocates less than upstream did. Pinned by tests/obs_crash_handler_no_modal_1378.rs
+ * and the pwsh mirrors in both windows-genlock workflows. */
 static void main_crash_handler(const char *format, va_list args, void * /* param */)
 {
 	char *text = new char[MAX_CRASH_REPORT_SIZE];
@@ -760,30 +764,14 @@ static void main_crash_handler(const char *format, va_list args, void * /* param
 	std::replace(pathString.begin(), pathString.end(), '/', '\\');
 #endif
 
-	string absolutePath = canonical(filesystem::path(pathString)).u8string();
+	/* The error_code overload: the one-argument form throws when the crash file could not be
+	 * written, and an exception out of a crash handler ends in abort() and a WER report. */
+	std::error_code canonicalError;
+	filesystem::path canonicalPath = canonical(filesystem::path(pathString), canonicalError);
+	string absolutePath = canonicalError ? pathString : canonicalPath.u8string();
 
-	size_t size = snprintf(nullptr, 0, CRASH_MESSAGE, absolutePath.c_str());
-
-	unique_ptr<char[]> message_buffer(new char[size + 1]);
-
-	snprintf(message_buffer.get(), size + 1, CRASH_MESSAGE, absolutePath.c_str());
-
-	string finalMessage = string(message_buffer.get(), message_buffer.get() + size);
-
-	int ret = MessageBoxA(NULL, finalMessage.c_str(), "OBS has crashed!", MB_YESNO | MB_ICONERROR | MB_TASKMODAL);
-
-	if (ret == IDYES) {
-		size_t len = strlen(text);
-
-		HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, len);
-		memcpy(GlobalLock(mem), text, len);
-		GlobalUnlock(mem);
-
-		OpenClipboard(0);
-		EmptyClipboard();
-		SetClipboardData(CF_TEXT, mem);
-		CloseClipboard();
-	}
+	blog(LOG_ERROR, "Crash report written to %s -- exiting without the crash dialog (rig build: never block on a modal)",
+	     absolutePath.c_str());
 
 	exit(-1);
 }
