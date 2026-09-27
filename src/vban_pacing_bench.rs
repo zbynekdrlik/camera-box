@@ -16,8 +16,10 @@
 //!   [`wait_ms`], exactly as `vban_out_loop` does. A timed wake (a deadline, or an event wait
 //!   that timed out) is 0–30 ms late: the `late_max_ms` measured on resolume on 27.9 reached
 //!   30.8 ms (the issue-1372 bench assumed 0.3 ms). An audio arrival ends an event wait within
-//!   0–2 ms, so the anchor and a late packet start from the real arrival (review round 1: a
-//!   30 ms-late anchor gave the bench more margin than the thread has).
+//!   0–2 ms, also one that lands in the overshoot of a wait that already timed out
+//!   (`WaitForSingleObject` is still waiting then), so the anchor and a late packet start from the
+//!   real arrival. Review rounds 1 and 2: a late anchor gave the bench more margin than the
+//!   thread has.
 //!
 //! What the receiver would see is recorded: every packet (audio or silence) with its send instant,
 //! the VBAN frame counter, and every sample produced, sent, dropped or still buffered.
@@ -163,12 +165,13 @@ fn run_paced(p: &mut Pacing, arrivals: &[u64], rng: &mut Rng, wake_late_max: u64
     };
     loop {
         let t = if s.wait_audio {
-            let limit = now + u64::from(wait_ms(now, s.wake_ns)) * MS;
+            let timed =
+                now + u64::from(wait_ms(now, s.wake_ns)) * MS + rng.uniform(0, wake_late_max);
             let event = arrivals.get(next).copied().unwrap_or(u64::MAX);
-            if event <= limit {
+            if event <= timed {
                 event.max(now) + rng.uniform(0, EVENT_WAKE_LATE_MAX_NS)
             } else {
-                limit + rng.uniform(0, wake_late_max)
+                timed
             }
         } else {
             s.wake_ns.max(now) + rng.uniform(0, wake_late_max)
@@ -387,8 +390,9 @@ fn every_mixer_stall_up_to_target_plus_grace_loses_nothing_1381() {
 
 #[test]
 fn every_buffering_hole_up_to_target_plus_grace_loses_nothing_1381() {
-    // 2..=7 ticks = 42.7..149.3 ms, the 27.9 holes of 42, 85, 106 and 128 ms among them.
-    for ticks in 2..=7u64 {
+    // 2..=6 ticks = 42.7..128 ms: the 27.9 holes of 42, 85, 106 and 128 ms. A 149 ms hole
+    // already cuts a silence (the grace starts at the ~78 ms anchor margin, not at the target).
+    for ticks in 2..=6u64 {
         for seed in 1..=4u64 {
             let (p, sim) = scenario(seed, &[], &[(EVENT_BLOCK, ticks)]);
             let what = format!("{ticks}-tick hole, seed {seed}");
@@ -461,28 +465,31 @@ fn a_stall_beyond_target_plus_grace_is_one_silence_episode_and_one_counted_repay
 #[test]
 fn known_limit_after_an_in_grace_hole_the_grace_left_for_a_stall_is_smaller_1381() {
     // t0 never moves and a buffering hole brings no backlog, so after a 128 ms hole the sender
-    // runs about 50 ms late for good and a later stall has only the rest of the grace. A 100 ms
-    // stall that a fresh schedule absorbs (0 silence) then cuts a silence episode. Pinned so the
+    // runs about 50 ms late for good and a later stall has only the rest of the grace. Even the
+    // quiet regime's 70 ms stall, and a 100 ms stall, that a fresh schedule absorbs (0 silence)
+    // then cut a silence episode (the logged 55.3 ms one does in some seeds). Pinned so the
     // follow-up that restores the margin has a RED to flip.
-    for seed in 1..=4u64 {
-        let (fresh, _) = scenario(seed, &[(EVENT_BLOCK + 2_000, 100 * MS)], &[]);
-        assert_eq!(fresh.silence_samples, 0, "seed {seed}: fresh schedule");
-        let (p, sim) = scenario(
-            seed,
-            &[(EVENT_BLOCK + 2_000, 100 * MS)],
-            &[(EVENT_BLOCK, 6)],
-        );
-        let what = format!("128 ms hole then a 100 ms stall, seed {seed}");
-        assert_accounted(&p, &sim, &what);
-        assert_eq!(p.discontinuities, 1, "{what}");
-        assert!(
-            p.silence_samples > 0,
-            "{what}: the stall was absorbed after all"
-        );
-        assert_eq!(
-            p.discarded_samples, 0,
-            "{what}: the hole's debt is never repaid"
-        );
+    for stall_ms in [70u64, 100] {
+        for seed in 1..=4u64 {
+            let (fresh, _) = scenario(seed, &[(EVENT_BLOCK + 2_000, stall_ms * MS)], &[]);
+            assert_eq!(fresh.silence_samples, 0, "seed {seed}: fresh schedule");
+            let (p, sim) = scenario(
+                seed,
+                &[(EVENT_BLOCK + 2_000, stall_ms * MS)],
+                &[(EVENT_BLOCK, 6)],
+            );
+            let what = format!("128 ms hole then a {stall_ms} ms stall, seed {seed}");
+            assert_accounted(&p, &sim, &what);
+            assert_eq!(p.discontinuities, 1, "{what}");
+            assert!(
+                p.silence_samples > 0,
+                "{what}: the stall was absorbed after all"
+            );
+            assert_eq!(
+                p.discarded_samples, 0,
+                "{what}: the hole's debt is never repaid"
+            );
+        }
     }
 }
 
@@ -605,6 +612,17 @@ fn the_1381_scenario_table() {
         ("hole 128 ms", vec![], vec![(EVENT_BLOCK, 6)]),
         ("hole 490 ms", vec![], vec![(EVENT_BLOCK, 23)]),
         ("27.9 hole list", vec![], HOLES_27_9.to_vec()),
+        ("hole 149 ms", vec![], vec![(EVENT_BLOCK, 7)]),
+        (
+            "hole 128 ms, then stall 55.3 ms",
+            vec![(EVENT_BLOCK + 2_000, LOGGED_STALL_NS)],
+            vec![(EVENT_BLOCK, 6)],
+        ),
+        (
+            "hole 128 ms, then stall 70 ms",
+            vec![(EVENT_BLOCK + 2_000, 70 * MS)],
+            vec![(EVENT_BLOCK, 6)],
+        ),
         (
             "hole 128 ms, then stall 100 ms",
             vec![(EVENT_BLOCK + 2_000, 100 * MS)],

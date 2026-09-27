@@ -807,6 +807,24 @@ mod tests {
     }
 
     #[test]
+    fn a_retarget_up_that_moves_the_waiting_slot_ahead_ends_the_wait() {
+        // Review round 2: the thread steps right after a retarget (same loop turn). When the
+        // waiting slot moved into the future nothing is waiting any more, so a later wake that
+        // finds its audio there is a merely late wake: every due packet at once, no late send, no
+        // catch-up cap.
+        let mut p = starved_on_slot_1();
+        let d1 = p.deadline_ns(1);
+        p.retarget(100);
+        let s = p.step(d1 + 5 * MS, 0);
+        assert_eq!((s.send, s.silence, s.wait_audio), (0, 0, false));
+        assert_eq!(s.wake_ns, p.deadline_ns(1));
+        assert!(!p.starved, "the moved slot is not due: nothing is waiting");
+        let s = p.step(p.deadline_ns(1) + 12 * MS, 10 * P);
+        assert_eq!(s.send, 3, "packets 1, 2 and 3 are due and buffered");
+        assert_eq!((p.late_sends, p.catchup_ns), (0, 0));
+    }
+
+    #[test]
     fn a_new_episode_forgives_a_debt_whose_backlog_never_came() {
         let mut p = silent_from_slot_1();
         let mut t = p.catchup_ns.max(p.deadline_ns(p.n_sent));
