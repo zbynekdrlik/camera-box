@@ -4,6 +4,7 @@ paths:
   - "scripts/lib/av-soak.sh"
   - "scripts/av_soak_decision.py"
   - "scripts/av_soak_rig_state.py"
+  - "scripts/lib/av-soak-leftovers.sh"
   - "tests/python/test_av_soak_decision_1367.py"
   - "tests/python/test_av_soak_rig_state_1367.py"
   - "tests/python/test_av_soak_orchestrator_1367.py"
@@ -23,6 +24,7 @@ align), so looping it would hide the drift. The soak only measures.
 | `scripts/av-soak.sh` | the orchestrator: `--plan` (DEFAULT, touches nothing), `--run`, `--report RUN_DIR`, `--stop-leftovers RUN_DIR` (the unit's `ExecStopPost` safety net) |
 | `scripts/lib/av-soak.sh` | pure builders shared by plan AND run (argv of the two extracts + the merge), the window arithmetic, the two read-only cam2 reads, the record-volume free-space read |
 | `scripts/av_soak_decision.py` | pure decision: `bounds`, `row` (one CSV row per window from the merged verdict JSON), `report` (1 h partial + full, exit 0 PASS / 1 FAIL / 2 UNKNOWN / 3 input error) |
+| `scripts/lib/av-soak-leftovers.sh` | the `--stop-leftovers` mode (`av_soak_stop_leftovers`): runs the `leftovers` plan, stops/clears, releases the soak's lease when nothing is left |
 | `scripts/av_soak_rig_state.py` | pure rig-state decisions over one `rig-busy-check` read: `broadcast` (live / unknown / idle -- may cleanup cut the strih program?) and `leftovers` (the `--stop-leftovers` plan: which flagged recording is provably the soak's) |
 | `bundle_state_gather.recordings_free_line` | the one "<VERDICT> <free_gb>" line the free-space read prints (recording-e2e.sh keeps its inline copy -- static-anchor minefield) |
 
@@ -41,7 +43,7 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
 - **Measure-only.** Never a latency pin, an audio sync offset, `av_sync_calibrate --apply`,
   `qr_align`, measurement pins, an NDI mapping. Never a stream scene switch: the stream program must
   ALREADY be the development scene (`Development`, issue 1380 -- refused with exit 4 otherwise; run
-  `scripts/rig-mode.sh test` first) and is re-read every slot (a drift = a skipped row). Only the
+  `scripts/rig-mode.sh test` first) and is re-read every slot. Only the
   strih program is swept; the sweep flag is set BEFORE the first cut, so the snapshot is restored
   (`switch --prod-floor`) even when a cut fails; an unreadable snapshot refuses the run. The
   production scene name is never typed (the one declaration is `scripts/lib/stream-dev-scene.sh`).
@@ -53,15 +55,20 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   recording); any start failure stops both boxes; a flag clears only when `record --action status`
   reads `active=False`, else cleanup stops it again. A recording that still reads active after a
   retried stop aborts the run, and cleanup prints `RECORDING MAY STILL BE RUNNING on <box>` and
-  exits 5 -- never a clean exit over a live recording -- and KEEPS the rig lease (no E2E may
-  start over it). `<run-dir>/recording.state` holds each flag, the time it was set (right before
-  its StartRecord) and the lease run id.
+  exits 5 -- never a clean exit over a live recording -- and KEEPS the rig lease: a CI E2E fails
+  fast on it, but only until it goes stale (90 min without the heartbeat, which stops with the
+  run); after that an E2E may reclaim it, its own guard still refuses while a box streams, and its
+  stray-recording self-heal then stops the leftover. `<run-dir>/recording.state` holds each flag,
+  the time it was set (right before its StartRecord), the lease run id and the ownership window
+  (`start_window_s`).
 - **`--stop-leftovers <run-dir>`** (the unit's `ExecStopPost`) runs the pure `leftovers` plan.
   Strih never streams, so "recording and not streaming" on strih alone is strih's NORMAL
   broadcast state (Companion records both boxes) -- a per-box check proves nothing. So: nothing
   is touched while ANY box streams or a box is unreadable; a flagged box's recording is stopped
   only when its own `recordTimecode` age puts its start in [flag time - 5 s, flag time +
-  `AV_SOAK_OBS_TIMEOUT_S` + 30 s]; anything else is kept with the reason (exit 5, lease kept).
+  `start_window_s`] (the run writes `AV_SOAK_OBS_TIMEOUT_S` + 30 s); anything else is kept with the
+  reason (exit 5, lease kept) -- "cannot prove it is the soak's", never "someone else's": the age is
+  obs-websocket's frame count x frame time, which undercounts wall time by every lagged frame.
   With nothing left it releases the soak's lease (holder-checked, exit 0). It refuses (exit 4)
   while the soak's own process (`<run-dir>/pid`) still runs.
 - **Cleanup cannot be cut short** (the issue-808 recipe, `.claude/rules/ci-testing-gotchas.md`):
@@ -69,10 +76,21 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   (`setsid -w`), background sleeps/decodes killed. The second-SIGTERM and process-group Ctrl-C
   tests prove the `trap ''` half; `setsid -w` is defence in depth the fakes cannot isolate (GNU
   `timeout` already starts its child in its own process group).
-- **Cleanup never cuts a broadcast.** Strih's program feeds the stream box's program, so the
-  strih program is restored only when `broadcast` reads a proven `idle` rig; `live` or
-  `unknown` leaves it on the last sweep scene with a loud `strih program NOT restored` line (the
-  issue-1271 rule). Burns and connect-on-show still go back: that returns production state.
+- **Cleanup never touches the air during a broadcast.** ONE `broadcast` read (issue-1271 rule)
+  gates both air-touching steps: the StopRecords (during a broadcast the soak's file may already
+  be the show's recording -- Companion's go-live StartRecord is a no-op on a box that records) and
+  the strih program restore (strih's program feeds the stream box's program). Only a proven `idle`
+  rig gets them; `live` or `unknown` leaves the recordings running (`NOT stopping`, exit 5, lease
+  kept for `--stop-leftovers`) and the strih program on the last sweep scene (`strih program NOT
+  restored`). Burns and connect-on-show still go back: that returns production state.
+- **A broadcast mid-run aborts the soak** (exit 5), checked by the slot guard, before EVERY sweep
+  cut, before the StopRecords (an unreadable rig there aborts too; cleanup re-reads) and every
+  ~60 s between slots -- never a cut and never a StopRecord while a box streams.
+- **Leaving TEST mode ends the run.** A stream program that reads another scene, or a painter
+  service that reads `inactive` (`rig-mode.sh event` stops it), STOPS the run (like a low record
+  volume: full cleanup, exit = the report's verdict) -- it never holds the lease and the
+  connect-on-show hold (full bandwidth on every strih camera) through a production. An unreadable
+  read or a stalled marker log is a transient: a skipped row.
 - **A decode is stopped on the box too.** Killing the local `timeout` does not stop a remote
   `recording-verdict`: on a decode timeout, and in cleanup while a decode runs, the soak stops
   THIS run's decode, matched by its own output name `av-soak-<stamp>-s...`
@@ -131,7 +149,8 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   `RUN_UNDECODABLE_FLOOR` (`loss_run_wide_pass`, src/probe/recording_segments.rs) and an empty
   schedule. A window where the soak's mirrored terms (every camera's loss term AND the run-wide
   term) disagree with the fold is counted (`gate_term_mismatch_windows`) and named: the Python
-  copy of the Rust term drifted, so the live data itself checks the copy.
+  copy of the Rust term drifted, so the live data itself checks the copy. A mismatch makes the run
+  at least UNKNOWN (a FAIL still wins).
 - Burn loss: `full_chain.loss.<node>.zero_loss` for the `strih` + `stream` hops (the OBS measurement
   burns the soak turns on -- the zero-loss signal at the stream output; REQUIRED, a hop never
   measured is UNKNOWN) and for each camera (only with capture burns; a camera never measured is
@@ -214,8 +233,10 @@ and a recording on strih + stream for ~4 min of every 10. Post the report (`$D/r
 where the shape matters; the orchestrator harness drives setup, full windows, the failure paths
 (start/stop failure, a recording that never stops, a failed cut, SIGTERM and a second SIGTERM
 during cleanup, a process-group Ctrl-C, SIGTERM during a decode, the STOP file, a low volume, a
-painter/stream-program drift, a broadcast that starts mid-run, `--stop-leftovers` never touching
-a broadcast, an unreadable rig or a recording the soak did not start) and cleanup with
+the rig leaving TEST mode (stream program / painter service), an unreadable program or painter
+read, a stalled marker log, a broadcast between slots and one mid-sweep (nothing stopped, lease
+kept), `--stop-leftovers` never touching a broadcast, an unreadable rig or a recording the soak
+cannot prove is its own) and cleanup with
 fakes behind the seams `AV_SOAK_OBS_DIR`,
 `AV_SOAK_STRIH_DECODE`, `AV_SOAK_STREAM_DECODE`, `PROBE_BIN_DIR`, `CONNECT_ON_SHOW_MARKER_CMD`,
 `CONNECT_ON_SHOW_LOG_READ_CMD`, a fake `sshpass`/`curl` on PATH, and a tmp `RIG_LEASE_DIR` +
