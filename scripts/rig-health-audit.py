@@ -691,21 +691,21 @@ def check_win_baseline() -> None:
     """issue 1357: REPORT-ONLY Windows OBS-box baseline rows (NOTE, never PASS/WARN/FAIL -> never
     changes the audit exit code). A tool error yields one NOTE row, never a page."""
     try:
+        # errors="replace": scheme names / reg text arrive in the Windows OEM codepage, and one
+        # non-UTF-8 byte must never take the whole audit down (the ssh() helper does the same)
         proc = subprocess.run(["bash", WIN_BASELINE_SCRIPT], capture_output=True, text=True,
-                              timeout=120)
+                              errors="replace", timeout=120)
     except (subprocess.TimeoutExpired, OSError) as exc:
         emit(WIN_BASELINE_REPORT_VERDICT, "win-baseline", f"tool error: {exc} (report-only issue 1357)")
         return
-    rows = win_baseline_rows_from_output(proc.stdout)
-    # rc 0/11/20 are the reader's verdicts; anything else with no box row is a crashed reader, which
-    # must show as a row -- silence would read as "nothing to report".
-    if not rows and proc.returncode not in (0, 11, 20):
+    for box, detail in win_baseline_rows_from_output(proc.stdout).items():
+        emit(WIN_BASELINE_REPORT_VERDICT, f"{box}-win", detail)
+    # rc 0/11/20 are the reader's verdicts; anything else is a crashed reader -- a row, even after
+    # some box rows, since a box it never reached would otherwise read as "away".
+    if proc.returncode not in (0, 11, 20):
         tail = (proc.stderr.strip().splitlines() or ["no output"])[-1]
         emit(WIN_BASELINE_REPORT_VERDICT, "win-baseline",
              f"tool error: rc={proc.returncode} {tail} (report-only issue 1357)")
-        return
-    for box, detail in rows.items():
-        emit(WIN_BASELINE_REPORT_VERDICT, f"{box}-win", detail)
 
 
 def check_windows_box(name: str, ip: str, ws_password: str | None, program_fps: float,

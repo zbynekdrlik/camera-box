@@ -99,6 +99,7 @@ for box in $BOXES; do
     [ -n "$item" ] || continue
     echo "box=$box item=$item verdict=$verdict detail=$detail"
     case "$verdict" in
+      OK) ;;
       DRIFT) drift_items="${drift_items:+$drift_items,}$item" ;;
       *) unknown_items="${unknown_items:+$unknown_items,}$item" ;;   # UNKNOWN (or no verdict at all)
     esac
