@@ -332,6 +332,54 @@ mod tests {
     }
 
     #[test]
+    fn a_bright_band_above_the_burn_is_cut_off_by_squaring_the_box_1367() {
+        // The burn-reframed / stream fixtures: light rows fill the 41 px strip above the burn and
+        // join its top quiet band, so the qualifying rows span 0..=326 (a 286 x 327 span). The
+        // burn is square, so the box is the bottom-anchored square whose top row qualifies.
+        let (w, h) = (336u32, 336u32);
+        let mut px = crop_with_box(w, h, 40, 24, 41, 286, 30);
+        for y in 0..41 {
+            for x in 0..w {
+                px[(y * w + x) as usize] = 250;
+            }
+        }
+        assert_eq!(
+            locate_burn_box(&px, w, h, 188, 320),
+            Some(Rect {
+                x: 24,
+                y: 41,
+                w: 286,
+                h: 286
+            })
+        );
+        // The transpose (a bright strip left of the burn): the right-anchored square.
+        let mut px = crop_with_box(w, h, 40, 41, 24, 286, 30);
+        for y in 0..h {
+            for x in 0..41 {
+                px[(y * w + x) as usize] = 250;
+            }
+        }
+        assert_eq!(
+            locate_burn_box(&px, w, h, 188, 320),
+            Some(Rect {
+                x: 41,
+                y: 24,
+                w: 286,
+                h: 286
+            })
+        );
+    }
+
+    #[test]
+    fn a_non_square_span_with_no_qualifying_square_is_rejected_1367() {
+        // Thin bars: columns 0..6 and 286..292 (w = 292), rows 0..6 and 327..333 (h = 333). Both
+        // sides are in the 320 band, but no square of side 292 has a qualifying row at both edges.
+        let (w, h) = (336u32, 336u32);
+        let px = crop_with_bars(w, h, &[0, 286], &[0, 327], 6);
+        assert_eq!(locate_burn_box(&px, w, h, 188, 320), None);
+    }
+
+    #[test]
     fn a_box_outside_the_size_band_is_rejected_1367() {
         // 240 px < 0.8 x 320: too small.
         let px = crop_with_box(336, 336, 40, 40, 40, 240, 30);
