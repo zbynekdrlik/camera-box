@@ -657,6 +657,54 @@ int main()
 		CHECK(log.observe(0, 1, 90 * S, I, &n) && n == 1, "1367: time going backwards logs");
 	}
 
+	/* issue 1381: the refine's sliding window (CbRefineWindow) lands where the old linear refine did
+	 * -- i itself on a tie with the maximum, else the leftmost maximum -- on magnitudes full of ties,
+	 * over the scan's own access pattern (screen [i-4, i], refine [i-4, min(i+span, last)], steps of
+	 * one and marker-length jumps). Mirror of qpsk_marker_scan's refine_window test. */
+	{
+		const size_t span = 218, last = 60000;
+		uint64_t seed = 0x13810000ull;
+		std::vector<double> mag(last + 1);
+		for (size_t p = 0; p <= last; p++) {
+			seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+			mag[p] = (double)((seed >> 33) % 4);
+		}
+		CbRefineWindow window;
+		window.reset(span + 8);
+		size_t i = 0, refines = 0, wrong = 0;
+		while (i <= last) {
+			const size_t lo = i >= 4 ? i - 4 : 0;
+			window.slide(lo, i, [&](size_t p) { return mag[p]; });
+			if (window.at(i) != mag[i])
+				wrong++;
+			seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+			if ((seed >> 33) % 3 == 0) {
+				const size_t hi = i + span < last ? i + span : last;
+				window.slide(lo, hi, [&](size_t p) { return mag[p]; });
+				const size_t best = window.argmax();
+				const size_t base = window.at(best) > mag[i] ? best : i;
+				size_t linear = i;
+				double bestm = mag[i];
+				for (size_t cand = lo; cand <= hi; cand++)
+					if (mag[cand] > bestm) {
+						bestm = mag[cand];
+						linear = cand;
+					}
+				if (base != linear)
+					wrong++;
+				refines++;
+				seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+				if ((seed >> 33) % 97 == 0) {
+					i = base + 1085;
+					continue;
+				}
+			}
+			i++;
+		}
+		CHECK(refines > 1000, "1381: the refine window test exercised its refines");
+		CHECK(wrong == 0, "1381: the refine window lands where the linear refine did");
+	}
+
 	if (g_failures == 0) {
 		std::printf("camera-box-selftest: ALL PASS\n");
 		return 0;

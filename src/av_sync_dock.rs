@@ -25,9 +25,8 @@
 //!      large, with an Otsu-binarized retry — the same techniques `src/probe/qr.rs` proved on the
 //!      real soft optical frames (#202/#363). The geometry is [`top_band_decode_plan`].
 
-use crate::qpsk_marker::{
-    cluster_offset_ms, decode_markers_with_stats, AudioParams, AvOffset, DecodeStats,
-};
+use crate::qpsk_marker::{cluster_offset_ms, AudioParams, AvOffset, DecodeStats};
+use crate::qpsk_marker_scan::scan_markers;
 
 /// QPSK preamble-screen threshold for the live decode — MATCHES the proven offline
 /// `recording-verdict --av-sync` default (`av_threshold`). Low enough to catch a marker buried in
@@ -226,15 +225,22 @@ pub fn otsu_threshold(hist: &[u64; 256]) -> u8 {
 }
 
 /// Streaming QPSK marker detector for the LIVE audio path: keeps a rolling window of the most recent
-/// raw mono samples, runs the proven [`crate::qpsk_marker::decode_markers`] over it each `push`, and
-/// returns each NEWLY detected marker as `(absolute_sample_index_from_stream_start, index)`.
+/// raw mono samples, scans it with the proven [`crate::qpsk_marker_scan::scan_markers`] on each `push`,
+/// and returns each NEWLY detected marker as `(absolute_sample_index_from_stream_start, index)`.
 ///
-/// WHY a rolling window over the batched `decode_markers` (rather than a bespoke incremental demod):
-/// `decode_markers` is round-trip tested for every one of the 256 indices AT the rig's c=1 and under
-/// noise+gain — it is the ONE audio demod known to decode exactly what cam2 emits. Re-running it over
-/// a small window each audio callback reuses that tested code verbatim. The window is a few marker
-/// lengths so any marker is wholly present in some call; dedup by absolute position (a marker seen in
-/// two overlapping windows lands at the SAME absolute index) reports each marker exactly once.
+/// WHY a rolling window over the one batch kernel (rather than a bespoke incremental demod): the
+/// kernel behind `decode_markers` is round-trip tested for every one of the 256 indices AT the rig's
+/// c=1 and under noise+gain — it is the ONE audio demod known to decode exactly what cam2 emits. The
+/// window is a few marker lengths so any marker is wholly present in some call; dedup by absolute
+/// position (a marker seen in two overlapping windows lands at the SAME absolute index) reports each
+/// marker exactly once.
+///
+/// issue 1381: `push` scans only the positions that are not final yet (`next_scan`, the scan's own
+/// [`crate::qpsk_marker_scan::MarkerScan::resume`]): the new positions, plus the tail whose refine range
+/// the previous window end cut. It used to re-decode the WHOLE window every call, which on the dock
+/// (the OBS audio thread until issue 1381) cost 6.8 ms of CPU per stereo 1024-frame push for music
+/// and 35 ms for a 442 Hz tone on an N100. Re-screening the cut tail keeps the reported markers
+/// identical to that whole-window decode, whose first sight of a marker can be such a cut refine.
 ///
 /// The absolute sample index is stream-relative and monotone; the caller maps it to an OBS timestamp
 /// using the callback clock (kept in the C++ glue, drift-anchored per callback). The false CRC-4
@@ -253,15 +259,17 @@ pub struct StreamingMarkerDecoder {
     last_reported: Option<u64>,
     /// Minimum absolute-index gap for a detection to count as a NEW marker (dedup width).
     min_gap: u64,
+    /// issue 1381 — absolute index of the first position the next `push()` screens.
+    next_scan: u64,
     /// #690 — cumulative [`DecodeStats`] across every `push()` call, for the live dock's periodic
-    /// audio diagnostic (`sync-test-output.cpp`'s rate-limited INFO log). Counts are a DELIBERATE
-    /// over-count, not a per-marker tally: each `push()` re-decodes the WHOLE rolling window, so a
-    /// real onset near the front of the window gets re-screened/re-counted on every subsequent
-    /// `push()` until it ages out of `capacity` — the same reason `push()`'s own dedup (`last_reported`
-    /// / `min_gap`) exists for the returned markers. That's fine for this counter's purpose: telling
-    /// "zero vs nonzero" (does the demod see anything at all / does anything ever decode) and rough
-    /// relative magnitude (`crc_fail` swamping `crc_ok` means mostly noise) — never an exact count of
-    /// distinct real markers (use the deduped `push()` return value / [`RollingOffsetCluster`] for that).
+    /// audio diagnostic (`sync-test-output.cpp`'s rate-limited INFO log). Each screened position
+    /// counts once, and a position of the cut tail again when it is re-screened (at most one refine
+    /// span per push) — so a real onset is counted a push or two, not once per distinct marker.
+    /// That's fine for this counter's purpose: telling "zero vs nonzero" (does the demod see
+    /// anything at all / does anything ever decode) and rough relative magnitude (`crc_fail`
+    /// swamping `crc_ok` means mostly noise) — never an exact count of distinct real markers (use
+    /// the deduped `push()` return value / [`RollingOffsetCluster`] for that). Until issue 1381 the
+    /// whole window was re-screened every push, so these counts ran about twice as high.
     stats: DecodeStats,
 }
 
@@ -278,13 +286,14 @@ impl StreamingMarkerDecoder {
             origin: 0,
             last_reported: None,
             min_gap: min_gap.max(1),
+            next_scan: 0,
             stats: DecodeStats::default(),
         }
     }
 
-    /// Append `samples`, trim to `capacity`, decode the window, and return the ABSOLUTE start index
-    /// and `index` of each newly detected marker (in ascending absolute order). Also accumulates
-    /// [`Self::stats`] — see its field doc for the over-counting caveat.
+    /// Append `samples`, trim to `capacity`, scan the positions not final yet, and return the
+    /// ABSOLUTE start index and `index` of each newly detected marker (in ascending absolute order).
+    /// Also accumulates [`Self::stats`] — see its field doc for what the counts mean.
     pub fn push(&mut self, samples: &[f32]) -> Vec<(u64, u8)> {
         self.buf.extend_from_slice(samples);
         if self.buf.len() > self.capacity {
@@ -292,18 +301,15 @@ impl StreamingMarkerDecoder {
             self.buf.drain(0..drop);
             self.origin += drop as u64;
         }
+        let start = self.next_scan.saturating_sub(self.origin) as usize;
+        let scan = scan_markers(&self.buf, &self.params, self.threshold, start);
+        self.stats.preamble_screens_passed += scan.stats.preamble_screens_passed;
+        self.stats.crc_ok += scan.stats.crc_ok;
+        self.stats.crc_fail += scan.stats.crc_fail;
+        self.next_scan = self.origin + scan.resume as u64;
         let mut out = Vec::new();
-        let sr = self.params.sample_rate as f64;
-        let (markers, batch_stats) =
-            decode_markers_with_stats(&self.buf, &self.params, self.threshold);
-        self.stats.preamble_screens_passed += batch_stats.preamble_screens_passed;
-        self.stats.crc_ok += batch_stats.crc_ok;
-        self.stats.crc_fail += batch_stats.crc_fail;
-        for (ts_s, idx) in markers {
-            // decode_markers reports the marker start in seconds within the window; convert to an
-            // absolute stream index. Round to the nearest sample so the same marker seen in two
-            // overlapping windows maps to an identical absolute index (stable dedup).
-            let abs = self.origin + (ts_s * sr).round() as u64;
+        for (base, idx) in scan.markers {
+            let abs = self.origin + base as u64;
             let is_new = match self.last_reported {
                 None => true,
                 Some(prev) => abs > prev.saturating_add(self.min_gap),
@@ -317,7 +323,7 @@ impl StreamingMarkerDecoder {
     }
 
     /// Cumulative decode diagnostics since construction — see [`Self::stats`]'s field doc for what
-    /// these counts mean (and why they over-count relative to distinct real markers).
+    /// these counts mean (and why they are not a count of distinct real markers).
     pub fn stats(&self) -> DecodeStats {
         self.stats
     }
@@ -331,6 +337,7 @@ impl StreamingMarkerDecoder {
         self.origin += self.buf.len() as u64;
         self.buf.clear();
         self.last_reported = None;
+        self.next_scan = self.origin;
     }
 }
 
@@ -1153,7 +1160,10 @@ impl DockPairingWatchdog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::qpsk_marker::{frame_id_to_index, marker_signal, signal_len, AV_SYNC_RING_CYCLE_NS};
+    use crate::qpsk_marker::{
+        decode_markers_with_stats, frame_id_to_index, marker_signal, signal_len,
+        AV_SYNC_RING_CYCLE_NS,
+    };
 
     // ---- #999 dock_latency_display_ms ----
 

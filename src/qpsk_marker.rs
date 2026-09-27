@@ -217,27 +217,6 @@ pub fn to_stereo_i16(mono: &[f32], amplitude: f64) -> Vec<i16> {
     out
 }
 
-// Complex helpers (re, im) as f64 pairs — no external num-complex dep, Tier-0.
-#[inline]
-fn cadd(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
-    (a.0 + b.0, a.1 + b.1)
-}
-#[inline]
-fn cmag(a: (f64, f64)) -> f64 {
-    (a.0 * a.0 + a.1 * a.1).sqrt()
-}
-/// a / b for complex numbers.
-#[inline]
-fn cdiv(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
-    let d = b.0 * b.0 + b.1 * b.1 + 1e-12;
-    ((a.0 * b.0 + a.1 * b.1) / d, (a.1 * b.0 - a.0 * b.1) / d)
-}
-/// a * b for complex numbers.
-#[inline]
-fn cmul(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
-    (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0)
-}
-
 /// Diagnostic counters for one [`decode_markers_with_stats`] call — the #690 live-dock ask: tell a
 /// live session apart-and-not-guessing WHETHER the demod (a) sees no candidate onsets at all (bad
 /// audio routing/level — `preamble_screens_passed == 0`), (b) sees candidates that never decode a
@@ -279,121 +258,20 @@ pub fn decode_markers(samples: &[f32], p: &AudioParams, threshold: f64) -> Vec<(
 /// Same decode as [`decode_markers`], plus [`DecodeStats`] counting how many candidate onsets were
 /// screened, and of those, how many decoded a valid marker vs. failed the preamble/CRC check. See
 /// [`DecodeStats`] for why this exists (the #690 live-dock "audio index never locks" diagnosis).
+/// The whole-buffer [`crate::qpsk_marker_scan::scan_markers`] (issue 1381 moved the kernel there).
 pub fn decode_markers_with_stats(
     samples: &[f32],
     p: &AudioParams,
     threshold: f64,
 ) -> (Vec<(f64, u8)>, DecodeStats) {
-    let mut stats = DecodeStats::default();
     let ar = p.sample_rate as f64;
-    let f = p.carrier_hz as f64;
-    let c = p.c.max(1) as f64;
-    let sps = ar * c / f; // samples per symbol (fractional)
-    let sig_len = signal_len(p);
-    let n = samples.len();
-    if sig_len == 0 || n < sig_len || sps < 1.0 {
-        return (Vec::new(), stats);
-    }
-    // Prefix sums (f64): signal·cos, signal·sin, signal² — absolute carrier phase. Any window's
-    // IQ and energy are then O(1). Absolute-vs-relative phase differs only by a constant rotation,
-    // which the preamble derotation cancels.
-    let w = 2.0 * PI * f / ar;
-    let mut pc = vec![0f64; n + 1];
-    let mut ps = vec![0f64; n + 1];
-    let mut pe = vec![0f64; n + 1];
-    for m in 0..n {
-        let ph = m as f64 * w;
-        let x = samples[m] as f64;
-        // #1153: a non-finite input sample would otherwise contaminate every prefix sum after it,
-        // silently killing decode for the REST of the window; treat it as silence instead.
-        let x = if x.is_finite() { x } else { 0.0 };
-        pc[m + 1] = pc[m] + x * ph.cos();
-        ps[m + 1] = ps[m] + x * ph.sin();
-        pe[m + 1] = pe[m] + x * x;
-    }
-    // Z over [a,b): e^{-iθ} = cosθ - i·sinθ ⇒ (re = Σ signal·cos, im = -Σ signal·sin).
-    let z = |a: usize, b: usize| -> (f64, f64) {
-        let a = a.min(n);
-        let b = b.min(n);
-        (pc[b] - pc[a], -(ps[b] - ps[a]))
-    };
-    let sym_win = |base: usize, k: usize| -> (usize, usize) {
-        (
-            base + (k as f64 * sps).round() as usize,
-            base + ((k + 1) as f64 * sps).round() as usize,
-        )
-    };
-    let preamble = |base: usize| -> (f64, f64) {
-        let (a0, b0) = sym_win(base, 0);
-        let (a1, b1) = sym_win(base, 1);
-        cadd(z(a0, b0), z(a1, b1))
-    };
-    // Cauchy-Schwarz normaliser for the 2-symbol preamble window: |Z| ≤ e·√N.
-    let two_sym = (2.0 * sps).round() as usize;
-    let norm_at = |base: usize| -> f64 {
-        let e = (pe[(base + two_sym).min(n)] - pe[base.min(n)])
-            .max(0.0)
-            .sqrt();
-        e * (two_sym as f64).sqrt() + 1e-12
-    };
-
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    while i + sig_len <= n {
-        let refph = preamble(i);
-        if cmag(refph) / norm_at(i) >= threshold {
-            stats.preamble_screens_passed += 1;
-            // The screen crosses threshold on the RISING edge, up to ~one symbol before the true
-            // onset. Search forward across the whole preamble span (+ a few back) for the max
-            // preamble magnitude — the true onset, where the 2-symbol window aligns with the 0xF
-            // preamble. A too-narrow refine locks onto a misaligned base that can still CRC-pass to
-            // a wrong index (observed: onset 65 samples early → 200 misread as 98).
-            let span = (2.0 * sps).ceil() as usize;
-            let lo = i.saturating_sub(4);
-            let mut base = i;
-            let mut bestm = cmag(refph);
-            for cand in lo..=(i + span) {
-                if cand + sig_len <= n {
-                    let m = cmag(preamble(cand));
-                    if m > bestm {
-                        bestm = m;
-                        base = cand;
-                    }
-                }
-            }
-            // Rotate the preamble reference by −45° (× (1,−1)) so the on-axis symbol constellation
-            // becomes diagonal (±0.5, ±0.5); then sign-of-real and sign-of-imag are each a robust
-            // bit, tolerant of the ~45° phasor rotation the single-cycle edge taper introduces at
-            // c=1 (norihiro `x *= (1,-1)` then quadrant sign test). Canonical after rotation:
-            // sym3→(+,+), sym0→(−,−), sym1→(+,−), sym2→(−,+); sym = 2·(im>0) | 1·(re>0).
-            let refp = cmul(preamble(base), (1.0, -1.0));
-            let mut word = 0u32;
-            for k in 0..N_SYMBOLS as usize {
-                let (a, b) = sym_win(base, k);
-                let (re, im) = cdiv(z(a, b), refp);
-                let sym = (if im > 0.0 { 2u32 } else { 0 }) | (if re > 0.0 { 1 } else { 0 });
-                word |= sym << (N_PAYLOAD_BITS - 2 - 2 * k as u32);
-            }
-            // #1153: the emitter ALWAYS sends the zero nibble (bits[15:12]) == 0, but only the
-            // preamble nibble + CRC-4 (8 bits) were ever checked — leaving the CRC-passing
-            // accept-space 16x too large (256 valid vs 3840 "poison" words a music mix decodes
-            // from noise). Enforcing the zero nibble reclaims those 4 bits of built-in
-            // redundancy and cuts the false-decode flood ~16x, with no real marker lost (a real
-            // marker's zero nibble is 0 and is already covered by the CRC).
-            if (word >> 16) & 0xF == PREAMBLE_NIBBLE
-                && (word >> 12) & 0xF == 0
-                && crc4_check(word, N_PAYLOAD_BITS) == 0
-            {
-                stats.crc_ok += 1;
-                out.push((base as f64 / ar, ((word >> 4) & 0xFF) as u8));
-                i = base + sig_len; // markers are far apart; skip past this one
-                continue;
-            }
-            stats.crc_fail += 1;
-        }
-        i += 1;
-    }
-    (out, stats)
+    let scan = crate::qpsk_marker_scan::scan_markers(samples, p, threshold, 0);
+    let markers = scan
+        .markers
+        .into_iter()
+        .map(|(base, idx)| (base as f64 / ar, idx))
+        .collect();
+    (markers, scan.stats)
 }
 
 /// The marker-log CSV header: a `#`-comment recording the emit `AudioParams` (the decoder MUST

@@ -10,10 +10,11 @@
  *
  * Checks (exit 0 + "ALL PASS"):
  *   1. identity: StreamingMarkerDecoder reports the same (absolute sample, index) markers, push by
- *      push, as the pre-1381 decoder (re-decode the whole window each push, `ReferenceDecoder`
- *      below) on the marker fixtures: every one of the 256 indices, a rig-cadence marker track over
- *      silence and over white noise, and both channels of the real stereo mbc fixture, at several
- *      callback sizes;
+ *      push, as the pre-1381 decoder (`ReferenceDecoder` below: the whole window re-decoded each push
+ *      by a FROZEN copy of the pre-1381 kernel) on the marker fixtures: every one of the 256 indices,
+ *      a rig-cadence marker track over silence and over white noise, markers over music-like and
+ *      pink program audio (including the music's false decodes), and both channels of the real
+ *      stereo mbc fixture, at several callback sizes;
  *   2. the worker cost: ChannelMarkerPicker::dock, per 1024-frame push, in THREAD CPU time (the
  *      work itself, not the scheduling noise of a loaded box), for silence / white / pink /
  *      music-like / a 442 Hz tone, mono and stereo. The 2-channel music-like input and the
@@ -65,6 +66,104 @@ static double thread_cpu_ms()
 	return (double)ts.tv_sec * 1e3 + (double)ts.tv_nsec / 1e6;
 }
 
+/* The pre-1381 cb_decode_markers_with_stats, frozen verbatim (camera-box-audio.hpp at dev.716): the
+ * whole-window decode with the linear refine and std::abs magnitudes. The identity reference. */
+static std::vector<std::pair<double, uint8_t>> reference_decode_markers(const std::vector<float> &samples)
+{
+	typedef std::complex<double> cd;
+	std::vector<std::pair<double, uint8_t>> out;
+	const uint32_t sample_rate = CB_AUDIO_SAMPLE_RATE, carrier_hz = CB_AUDIO_CARRIER_HZ, c = CB_AUDIO_C;
+	const double threshold = CB_QPSK_THRESHOLD;
+
+	double ar = (double)sample_rate;
+	double f = (double)carrier_hz;
+	double cc = (double)(c < 1 ? 1 : c);
+	double sps = ar * cc / f;
+	size_t sig_len = cb_signal_len(sample_rate, carrier_hz, (c < 1 ? 1 : c));
+	size_t n = samples.size();
+	if (sig_len == 0 || n < sig_len || sps < 1.0)
+		return out;
+
+	double w = 2.0 * CB_PI * f / ar;
+	std::vector<double> pc(n + 1, 0.0), ps(n + 1, 0.0), pe(n + 1, 0.0);
+	for (size_t m = 0; m < n; m++) {
+		double ph = (double)m * w;
+		double x = (double)samples[m];
+		if (!std::isfinite(x))
+			x = 0.0;
+		pc[m + 1] = pc[m] + x * std::cos(ph);
+		ps[m + 1] = ps[m] + x * std::sin(ph);
+		pe[m + 1] = pe[m] + x * x;
+	}
+	auto z = [&](size_t a, size_t b) -> cd {
+		if (a > n)
+			a = n;
+		if (b > n)
+			b = n;
+		return cd(pc[b] - pc[a], -(ps[b] - ps[a]));
+	};
+	auto sym_win = [&](size_t base, size_t k) -> std::pair<size_t, size_t> {
+		size_t a = base + (size_t)std::llround((double)k * sps);
+		size_t b = base + (size_t)std::llround((double)(k + 1) * sps);
+		return std::make_pair(a, b);
+	};
+	auto preamble = [&](size_t base) -> cd {
+		std::pair<size_t, size_t> s0 = sym_win(base, 0);
+		std::pair<size_t, size_t> s1 = sym_win(base, 1);
+		return z(s0.first, s0.second) + z(s1.first, s1.second);
+	};
+	size_t two_sym = (size_t)std::llround(2.0 * sps);
+	auto norm_at = [&](size_t base) -> double {
+		size_t hi = base + two_sym;
+		if (hi > n)
+			hi = n;
+		size_t lo = base > n ? n : base;
+		double e = pe[hi] - pe[lo];
+		if (e < 0.0)
+			e = 0.0;
+		return std::sqrt(e) * std::sqrt((double)two_sym) + 1e-12;
+	};
+
+	size_t i = 0;
+	while (i + sig_len <= n) {
+		cd refph = preamble(i);
+		if (std::abs(refph) / norm_at(i) >= threshold) {
+			size_t span = (size_t)std::ceil(2.0 * sps);
+			size_t lo = i >= 4 ? i - 4 : 0;
+			size_t base = i;
+			double bestm = std::abs(refph);
+			for (size_t cand = lo; cand <= i + span; cand++) {
+				if (cand + sig_len <= n) {
+					double m = std::abs(preamble(cand));
+					if (m > bestm) {
+						bestm = m;
+						base = cand;
+					}
+				}
+			}
+			cd refp = preamble(base) * cd(1.0, -1.0);
+			uint32_t word = 0;
+			for (uint32_t k = 0; k < CB_N_SYMBOLS; k++) {
+				std::pair<size_t, size_t> ab = sym_win(base, k);
+				cd zz = z(ab.first, ab.second);
+				double d = refp.real() * refp.real() + refp.imag() * refp.imag() + 1e-12;
+				double re = (zz.real() * refp.real() + zz.imag() * refp.imag()) / d;
+				double im = (zz.imag() * refp.real() - zz.real() * refp.imag()) / d;
+				uint32_t sym = (uint32_t)(im > 0.0 ? 2 : 0) | (uint32_t)(re > 0.0 ? 1 : 0);
+				word |= sym << (CB_N_PAYLOAD_BITS - 2 - 2 * k);
+			}
+			if (((word >> 16) & 0xF) == CB_PREAMBLE_NIBBLE && ((word >> 12) & 0xF) == 0 &&
+			    cb_crc4_check(word, CB_N_PAYLOAD_BITS) == 0) {
+				out.push_back(std::make_pair((double)base / ar, (uint8_t)((word >> 4) & 0xFF)));
+				i = base + sig_len;
+				continue;
+			}
+		}
+		i += 1;
+	}
+	return out;
+}
+
 /* The pre-1381 StreamingMarkerDecoder::push, verbatim: append, trim to capacity, re-decode the WHOLE
  * window, report each marker once by absolute sample index. The identity reference. */
 struct ReferenceDecoder {
@@ -87,10 +186,7 @@ struct ReferenceDecoder {
 		}
 		std::vector<std::pair<uint64_t, uint8_t>> out;
 		const double sr = (double)CB_AUDIO_SAMPLE_RATE;
-		std::vector<std::pair<double, uint8_t>> found =
-			cb_decode_markers_with_stats(buf, CB_AUDIO_SAMPLE_RATE, CB_AUDIO_CARRIER_HZ, CB_AUDIO_C,
-						     CB_QPSK_THRESHOLD)
-				.first;
+		std::vector<std::pair<double, uint8_t>> found = reference_decode_markers(buf);
 		for (size_t k = 0; k < found.size(); k++) {
 			uint64_t abs = origin + (uint64_t)std::llround(found[k].first * sr);
 			if (!have_last || abs > last_reported + min_gap) {
@@ -239,6 +335,22 @@ static void check_identity(const char *fixture)
 				    chunks[c], ok ? "identical" : "DIFFERENT", got.size());
 			CHECK(ok, "marker track: the new decoder matches the whole-window decode");
 			CHECK(got.size() == 7, "marker track: all 7 markers decode");
+		}
+	}
+	/* program audio: markers over the music-like mix (which also decodes false markers) and over
+	 * pink noise -- the scan-path cases where the incremental screen could part from the reference */
+	const char *mixes[2] = {"music", "pink"};
+	for (int k = 0; k < 2; k++) {
+		std::vector<float> x = make(mixes[k], 48000 * 8, 11 + k);
+		std::vector<float> m = marker_track(x.size(), 23456, 0.2f);
+		for (size_t i = 0; i < x.size(); i++)
+			x[i] += m[i];
+		for (size_t c = 0; c < 4; c += 3) {
+			Markers got;
+			const bool ok = same_as_reference(x, chunks[c], &got);
+			std::printf("  %s + markers chunk %zu: %s, %zu markers\n", mixes[k], chunks[c],
+				    ok ? "identical" : "DIFFERENT", got.size());
+			CHECK(ok, "markers over program audio: the new decoder matches the whole-window decode");
 		}
 	}
 	/* the real stereo mbc fixture, per channel (issue 1367) */
