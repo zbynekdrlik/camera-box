@@ -1421,6 +1421,31 @@ any template placeholder filled from a variable.
 - **A recursive `grep -r` whose path list includes `.claude` is refused** by the airuleset
   credential-store hook, which reads it as a recursive read of the store's parent directory. Use
   the Grep tool for repo-wide searches that must cover `.claude/rules/`.
+- **Pick a free version slot from the sibling lanes' backups, not from origin/dev alone** (issue
+  1367). A sibling lane's bump lives only on its `refs/autopilot-wip/<branch>` until integration.
+  `git ls-remote origin 'refs/autopilot-wip/*'`, fetch the newest into a temporary ref namespace,
+  read their `Cargo.toml` version, then delete those temporary refs (`git update-ref --stdin` with
+  `delete` lines) so the shared `.git` is left clean.
+
+## A plain-rustc replica can run SEVERAL real crate-root modules AND the real `tests/*.rs` files (issue 1367)
+
+Extends the stub-rlib recipe above for a change spread over a few crate-root modules that reference
+each other with `crate::`. Write one scratch `lib.rs`:
+- `extern crate self as camera_box;` at the top, so a real test file's `use camera_box::…` resolves
+  to this crate.
+- `#[path = "<worktree>/src/<m>.rs"] pub mod <m>;` for each real module.
+- `#[cfg(test)] #[path = "<worktree>/tests/<f>.rs"] mod <f>;` for each real test file.
+
+Then `CARGO_MANIFEST_DIR=<worktree> rustc --edition 2021 --test lib.rs` (the env var serves a test's
+`env!` fixture path) and `clippy-driver --edition 2021 --test -D warnings lib.rs`.
+- A module that derives `serde::{Serialize, Deserialize}` has no serde crate here. Include a COPY with
+  the `use serde::…` line and the `, Serialize, Deserialize` derive entries sed-stripped. The derive
+  is attribute-only, so the behaviour under test is unchanged.
+- The module's own `#[cfg(test)] mod tests` runs too.
+- Worked example: the issue-1367 `qpsk_marker` + `qpsk_probe_decision` + `qpsk_channel_select`
+  replica with `tests/qpsk_channel_select_fixture_1367.rs` and `tests/harness_qpsk_probe_decision_1324.rs`.
+- The same modules plus a small std-only `main` can also run the real ffprobe/ffmpeg argument
+  builders on real clips, which checks the probe-gated glue shape without cargo.
 
 ## GOTCHA — a python harness test that passes on dev1 can be reaching the LIVE rig (issue 1372)
 

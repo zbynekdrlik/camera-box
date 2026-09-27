@@ -80,6 +80,10 @@ ruled the skew is not his to fix — the gate must be robust to it.
   the fused block use the plain `ChannelMarkerStats` names under `audio_channel_pick.per_channel`.
 - **An empty pick means "not recorded"** (an older partial): `per_channel` is `[]` and the log line
   reads `marker channel pick not recorded`, never a real channel 0.
+- **No `tracing::info!` in the `--qpsk-probe` path.** `recording-verdict` initialises
+  `tracing_subscriber::fmt()`, which writes to STDOUT, and the preflight captures the probe's
+  stdout (2>&1) and greps it; the probe-gated test takes the last `{` line. The pick is carried in
+  the JSON line instead. `--av-sync` logs its pick in the info line printed AFTER its JSON.
 - **Which channel wins can move the offset by ~10 ms** (R arrives later than L). Carried as
   `audio_channel_pick` in the `--av-sync` JSON and the fused `all_cambox_av_sync` block — read it when
   comparing runs.
