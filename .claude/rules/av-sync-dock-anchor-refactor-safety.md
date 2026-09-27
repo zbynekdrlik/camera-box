@@ -109,7 +109,8 @@ channel's plane to `camerabox::ChannelMarkerPicker` (`camera-box-channel-pick.hp
 switch through `cb_note_channel_switch` and ends with `cb_audio_diag_tick`. Its anchors live in
 `tests/av_sync_dock_channel_pick_1367.rs` AND the pwsh step "Assert dock decodes the marker per
 channel (issue 1367)" in both windows-genlock workflows, which check the same list over the same
-three function bodies (the helper calls, the plane hand-off, the picker lifecycle, the switch log,
+three brace-balanced function bodies (the helper calls and their order, the plane hand-off, the
+picker lifecycle, the switch-log call into the pure `CbChannelSwitchLog`,
 the banned mixdown forms, the diag line's appended `marker_channel=%zu channel_clusters=%s
 channel_switches=%llu` and its argument order).
 Moving or renaming any of those means editing all three places; the Rust test uses the shared

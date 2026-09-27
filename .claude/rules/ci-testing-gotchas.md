@@ -1446,6 +1446,19 @@ Then `CARGO_MANIFEST_DIR=<worktree> rustc --edition 2021 --test lib.rs` (the env
   replica with `tests/qpsk_channel_select_fixture_1367.rs` and `tests/harness_qpsk_probe_decision_1324.rs`.
 - The same modules plus a small std-only `main` can also run the real ffprobe/ffmpeg argument
   builders on real clips, which checks the probe-gated glue shape without cargo.
+- Two test files that both `#[path = "support/…"] mod x;` the same helper become ONE crate in the
+  replica, and clippy reports `clippy::duplicate_mod`. That lint cannot fire in the real layout
+  (each `tests/*.rs` is its own crate), so pass `-A clippy::duplicate_mod` to the replica's
+  clippy-driver only, and lint each std-only test file as its own crate too
+  (`clippy-driver --edition 2021 --test -D warnings tests/<f>.rs`) — that run catches a helper one
+  including crate leaves unused (dead_code), which the merged replica hides.
+- Worked example with a C++ mirror: the issue-1367 dock channel pick
+  (`src/av_sync_dock_channels.rs` + `tests/qpsk_channel_pick_parity_1367.rs`, which compiles
+  `vendor/av-sync-dock/test/channel-pick-parity.cpp` with g++ at test time).
+- Patch scripts: write them to a file (Write tool) and run them in their own Bash call. A python
+  heredoc that edits files in the same call as other commands is often refused by the worktree
+  guard as "too complex to verify", and a Write-tool file loses trailing spaces at line ends, so a
+  replace pattern must never depend on one.
 
 ## GOTCHA — a python harness test that passes on dev1 can be reaching the LIVE rig (issue 1372)
 

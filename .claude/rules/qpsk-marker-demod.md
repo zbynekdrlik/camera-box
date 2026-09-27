@@ -147,7 +147,12 @@ channels. It hands every channel's plane to `camerabox::ChannelMarkerPicker`
   180 s offset window. A switch is therefore logged when it happens (`cb_note_channel_switch`):
   `av-sync-dock: marker channel A -> B (channel_clusters=..., N switch(es) since the last line)`,
   the first at once, then at most one line per diag interval; `channel_switches=` on the diag line
-  is the running total, so an L/R flip-flop near the floor shows without flooding the log.
+  is the running total, so an L/R flip-flop near the floor shows without flooding the log. The
+  decision is the pure mirrored seam `ChannelSwitchLog` / `CbChannelSwitchLog` (round 3 moved it
+  out of the glue, where three rate-limit mutants passed every token anchor). A suppressed switch
+  is only named by the NEXT switch line, so after a burst the last switch line can be stale; the
+  diag line's `marker_channel=` shows the truth within ~10 s. A channel-layout change rebuilds the
+  picker at channel 0 and is not counted as a switch.
 - **Diag line:** `preambles/crc_ok/crc_fail` are now SUMMED over the channels (monotonic, so the
   staleness detector and the pairing watchdog keep working; a mono input reads its one decoder);
   `marker_channel=<c> channel_clusters=<a,b> channel_switches=<n>` are appended after
@@ -162,11 +167,13 @@ channels. It hands every channel's plane to `camerabox::ChannelMarkerPicker`
   push by push (real fixture, both clear, R only, hand-over, three channels, mono, the switch with
   and without a same-index copy, a decode flood past the cap, the window boundary via the tool's
   optional `<window_samples>` argument, and the dead-pairing `reset_window()` via its optional
-  `<reset_after>`). Fifteen C++ mutations (floor `>`, tie to highest, lower median, unstable sort,
-  no missed-marker branch, return channel 0, evict `<=`, window 20, stats of one channel, last modal
-  step, no switch dedup, dedup ignoring the index, dedup boundary `<`, cap off by one, a no-op
-  reset) and four Rust-reference mutations (no-op reset, boundary `<`, no dedup, no cap) are all
-  caught. A mutation that BOTH mirrors share is invisible to parity: the round-1 double return was
+  `<reset_after>`), plus the switch log over a generated pick sequence (the tool's `switchlog`
+  command). Eighteen C++ mutations (floor `>`, tie to highest, lower median, unstable sort, no
+  missed-marker branch, return channel 0, evict `<=`, window 20, stats of one channel, last modal
+  step, no switch dedup, dedup ignoring the index, dedup boundary `<`, cap off by one, a no-op reset,
+  and in the switch log: the suppressed count not kept, the rate limit flipped, the last log time
+  not stored) and seven Rust-reference mutations (no-op reset, boundary `<`, no dedup, no cap, the
+  three switch-log ones) are all caught. A mutation that BOTH mirrors share is invisible to parity: the round-1 double return was
   one, and in round 2 a no-op `reset_window()` survived both languages until the reset got its own
   tests. So every picker behaviour (the pick, the window, the cap, the switch dedup and its
   boundary, the reset) also has its own Rust unit test. Each parity test compiles the tool into its
@@ -178,8 +185,10 @@ channels. It hands every channel's plane to `camerabox::ChannelMarkerPicker`
 - **The glue anchors:** `tests/av_sync_dock_channel_pick_1367.rs` (with the shared
   `tests/support/cpp_source.rs` helpers, also used by `av_sync_dock_decode_mailbox_1367.rs`) + the
   pwsh step "Assert dock decodes the marker per channel (issue 1367)" in BOTH windows-genlock
-  workflows, which checks the same list, slicing the same three function bodies (the callback,
-  `cb_ensure_audio_picker`, `cb_note_channel_switch`) with a small `Get-Body` helper. Replay the pwsh
+  workflows, which checks the same list (including the two ADJACENCY needles that pin the
+  `prev_channel` capture before the push and the switch note right after it), slicing the same three
+  function bodies (the callback, `cb_ensure_audio_picker`, `cb_note_channel_switch`) with a
+  brace-matching `Get-Body` helper, so a slice never runs into the next function's comment. Replay the pwsh
   checks from the YAML text itself before pushing (a python `re.sub(r"\s+", " ", …)` + the literal
   lists), since pwsh only runs on the Windows runner. The pwsh slices keep comments, so a comment
   inside `st_raw_audio_camera_box` must never spell `acc +=`, `/ (float)ch`,

@@ -148,11 +148,20 @@ istý, či si kanál vrátil späť, spusti tento test alebo sa opýtaj niekoho,
   `video_decoded`%), (b) zvuk — demodulátor nič nepočuje (`preambles=0`, zvuková vetva/hlasitosť),
   (c) zvuk počuje, ale je to šum (`preambles>0`, `crc_ok=0`), alebo (d) zvuk dekóduje správne, ale
   nepáruje sa s obrazom / nezamkne (`crc_ok>0`, `locked=no`). Od issue 1367 dekóduje obraz samostatné
-  vlákno, nie vlákno, ktoré posiela obraz do výstupov OBS. Na konci riadku pribudli dve položky:
+  vlákno, nie vlákno, ktoré posiela obraz do výstupov OBS. Na konci riadku pribudlo päť položiek:
   - `decode_dropped=` = snímky, ktoré dekodér nestihol a preskočil;
-  - `publish_max_us=` = najdlhší čas, ktorý dock v poslednom okne zobral video vláknu OBS.
+  - `publish_max_us=` = najdlhší čas, ktorý dock v poslednom okne zobral video vláknu OBS;
+  - `marker_channel=` = zvukový kanál (0 = ľavý, 1 = pravý), z ktorého dock práve berie značky;
+  - `channel_clusters=` = pre každý kanál, koľko značiek za posledných 25 s ide v pravidelnom rytme
+    (4 a viac = kanál je čitateľný);
+  - `channel_switches=` = koľkokrát dock od štartu zmenil kanál.
 
-  `video_frames=` teraz počíta iba snímky, ktoré dekodér naozaj spracoval.
+  `video_frames=` teraz počíta iba snímky, ktoré dekodér naozaj spracoval. `preambles`, `crc_ok` a
+  `crc_fail` sú od issue 1367 súčtom za všetky kanály: dock už kanály nemieša do jedného, každý
+  dekóduje zvlášť a berie najnižší kanál, ktorý je čitateľný. Keď kanál zmení, zapíše riadok
+  `av-sync-dock: marker channel A -> B (...)`. Pravý kanál mbc mešká za ľavým o ~10 ms, takže
+  zmena kanála posunie nameraný posun o ~10 ms. Ak takých riadkov pribúda veľa, jeden z kanálov je
+  na hrane čitateľnosti.
 
 ## Poznámka pre technikov (dôvod, prečo dock číta práve tento zvuk/obraz)
 
