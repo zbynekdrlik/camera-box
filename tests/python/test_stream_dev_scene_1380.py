@@ -489,6 +489,13 @@ def test_lib_ensure_never_seeds_a_non_default_scene_override(tmp_path):
     assert not log.exists()
 
 
+def test_lib_ensure_refuses_an_override_naming_the_production_scene(tmp_path):
+    script = f'. "{_LIB}"\nstream_dev_scene_ensure /nonexistent h pw PRO PRO\necho rc=$?\n'
+    out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True)
+    assert out.stdout.strip() == "rc=1"
+    assert "IS the production scene" in out.stderr
+
+
 def test_lib_program_scene_read_prints_the_scene(tmp_path):
     out, argv = _run_lib(tmp_path, 'stream_program_scene_read SCRIPTS 10.77.9.204 pw')
     assert out.strip() == "Development"

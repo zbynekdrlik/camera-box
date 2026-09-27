@@ -1639,7 +1639,7 @@ def _assert_program_nonblack(ws, host, scene, label, black_hint, min_mean=None):
     of sharing one global default."""
     blackcheck_timeout = float(os.environ.get("OBS_BLACKCHECK_TIMEOUT_S", "20"))
     # #312: switch() (the ONLY caller that omits min_mean, unless issue 1380's EVENT-mode
-    # production-scene restore passes --min-mean) routes to a KNOWN-BRIGHT scene (the
+    # production-scene restore passes --prod-floor) routes to a KNOWN-BRIGHT scene (the
     # dual-QR monitor, mean ~105 when settled), so it needs a MEAN floor — a mid-renegotiation frame
     # (peak ~117 but mean ~2.7 right after cam1's [2/8] restart) then keeps the poll WAITING until
     # cam1's NDI settles, instead of falsely passing on peak and recording a black program.
@@ -1677,6 +1677,24 @@ def _assert_program_nonblack(ws, host, scene, label, black_hint, min_mean=None):
             )
         # verdict == "WAIT": receiver may still be filling — keep polling.
         time.sleep(poll_interval)
+
+
+def _prod_nonblack_floor():
+    """#677: the ONE looser non-black MEAN floor for real (possibly dim) production content, read by
+    prod_scene() and by `switch --prod-floor` (issue 1380's EVENT restore of the production scene).
+    Env OBS_NONBLACK_MIN_MEAN_PROD, default 5."""
+    return float(os.environ.get("OBS_NONBLACK_MIN_MEAN_PROD", "5"))
+
+
+def _stale_preview_target(studio, preview, stale_scene, target):
+    """issue 1380 (pure): the scene `switch --replace-preview` must set as the Studio Mode PREVIEW,
+    or None. Only when Studio Mode is on, a stale scene was named, it differs from the target, and
+    the current preview IS that stale scene (an E2E leaves the development scene in preview; after
+    EVENT a Transition click must never put it back on program). An operator's own preview is left
+    alone."""
+    if not studio or not stale_scene or stale_scene == target or preview != stale_scene:
+        return None
+    return target
 
 
 def _restore_target(prev, target, ephemeral, scenes, saved_prev=None):
@@ -1871,7 +1889,7 @@ def prod_scene(a):
             f"The source is not delivering frames; aborting BEFORE StartRecord so a black recording "
             f"never wastes a full run. Check the certified prod input feeding '{target}' is "
             f"receiving NDI.",
-            min_mean=float(os.environ.get("OBS_NONBLACK_MIN_MEAN_PROD", "5")),
+            min_mean=_prod_nonblack_floor(),
         )
 
         sys.stderr.write(
@@ -2324,21 +2342,47 @@ def switch(a):
         if current != a.program_scene:
             _rpc(ws, "SetCurrentProgramScene", {"sceneName": a.program_scene})
         switch_ns = time.time_ns()  # the boundary — right after the switch lands
-        # Same POLLED non-black self-check prod_scene uses (shared helper) — a dead/black cambox
-        # scene fails loud instead of silently recording a black, all-undecodable segment.
-        _assert_program_nonblack(
-            ws,
-            a.host,
-            a.program_scene,
-            "#312 switch",
-            "The cambox feeding it is not delivering frames; aborting the sweep so a black segment "
-            "never wastes the run. (#1223: a dark screen here can ALSO mean the cam2 painter/monitor "
-            "itself already went dark/expired -- check /tmp/painter.log on the painter box before "
-            "assuming the cambox is the culprit.)",
-            # issue 1380: EVENT mode's switch back to the production scene checks real (possibly
-            # dim) production content, so it passes the prod floor; None keeps the #312 default.
-            min_mean=getattr(a, "min_mean", None),
-        )
+        # issue 1380: `--replace-preview <scene>` moves a Studio Mode PREVIEW left on <scene> (the
+        # development scene an E2E put there) to the new program scene; an operator's own preview
+        # is never touched.
+        stale = getattr(a, "replace_preview", "")
+        if stale:
+            studio = bool(_rpc(ws, "GetStudioModeEnabled", ignore_err=True).get(
+                "studioModeEnabled"))
+            preview = (_rpc(ws, "GetCurrentPreviewScene", ignore_err=True).get(
+                "currentPreviewSceneName") if studio else None)
+            new_preview = _stale_preview_target(studio, preview, stale, a.program_scene)
+            if new_preview:
+                _rpc(ws, "SetCurrentPreviewScene", {"sceneName": new_preview})
+                sys.stderr.write(
+                    f"[obs] {a.host}: issue 1380 preview '{stale}' -> '{new_preview}' (a Transition "
+                    f"can no longer put '{stale}' back on program)\n"
+                )
+        # Same POLLED non-black self-check prod_scene uses (shared helper) — a dead/black scene
+        # fails loud instead of silently recording a black, all-undecodable segment.
+        # issue 1380: `--prod-floor` = the #677 production floor (real, possibly dim content); omitted
+        # keeps the #312 bright-QR default. `--black-report-only` (EVENT's restore of the production
+        # scene, whose cameras may legitimately be dark before a service) turns a BLACK verdict into a
+        # WARNING once the scene is set; a failed set/transport still fails.
+        try:
+            _assert_program_nonblack(
+                ws,
+                a.host,
+                a.program_scene,
+                "#312 switch",
+                f"The input feeding program scene '{a.program_scene}' is not delivering frames. (In "
+                f"the #312 all-cambox sweep that is the cambox; #1223: a dark screen there can ALSO "
+                f"mean the cam2 painter/monitor went dark -- check /tmp/painter.log on the painter "
+                f"box first.)",
+                min_mean=_prod_nonblack_floor() if getattr(a, "prod_floor", False) else None,
+            )
+        except SystemExit as e:
+            if not getattr(a, "black_report_only", False):
+                raise
+            sys.stderr.write(
+                f"[obs] {a.host}: WARNING issue 1380 program '{a.program_scene}' is SET but reads "
+                f"BLACK (report-only): {e}\n"
+            )
     finally:
         ws.close()
     print(switch_ns)  # stdout = the switch boundary epoch-ns (burn gen_ts_ns timeline)
@@ -2818,22 +2862,33 @@ def _first_enabled_scene_item(items):
     return first_enabled
 
 
-def _resolve_rendered_input(fetch_items, scene, _seen=None):
+def _resolve_rendered_input(fetch_items, scene, _seen=None, _is_group=False):
     """issue 1380 (pure given *fetch_items*): the input ACTUALLY rendered by *scene*, descending into
     a nested scene source. The stream development scene `Development` holds the scene `PRO` as its
     one item, so without the descent the TEST burn would resolve the SCENE `PRO` and try to attach a
-    burn filter to it (a write to the production scene). *fetch_items(scene_name)* returns that
-    scene's GetSceneItemList `sceneItems`. Returns None for an empty scene or a nesting cycle."""
+    burn filter to it (a write to the production scene). *fetch_items(name, is_group)* returns that
+    scene's (or, for an OBS group, which is also OBS_SOURCE_TYPE_SCENE with isGroup true, that
+    group's) `sceneItems`. Returns None for an empty scene or a nesting cycle."""
     seen = set() if _seen is None else _seen
     if scene in seen:
         return None
     seen.add(scene)
-    item = _first_enabled_scene_item(fetch_items(scene))
+    item = _first_enabled_scene_item(fetch_items(scene, _is_group))
     if item is None:
         return None
     if item.get("sourceType") == _SCENE_SOURCE_TYPE:
-        return _resolve_rendered_input(fetch_items, item.get("sourceName"), seen)
+        return _resolve_rendered_input(fetch_items, item.get("sourceName"), seen,
+                                       bool(item.get("isGroup")))
     return item.get("sourceName")
+
+
+def _scene_items_fetcher(ws):
+    """The live *fetch_items* for `_resolve_rendered_input`: GetSceneItemList for a scene,
+    GetGroupSceneItemList for a group (GetSceneItemList on a group name fails)."""
+    def fetch(name, is_group=False):
+        request = "GetGroupSceneItemList" if is_group else "GetSceneItemList"
+        return _rpc(ws, request, {"sceneName": name}).get("sceneItems", [])
+    return fetch
 
 
 def program_rendered_input(a):
@@ -2846,10 +2901,7 @@ def program_rendered_input(a):
         scene = a.scene or _rpc(ws, "GetCurrentProgramScene").get("currentProgramSceneName", "")
         if not scene:
             raise SystemExit(f"[obs] {a.host}: could not resolve a program scene to inspect")
-        src = _resolve_rendered_input(
-            lambda name: _rpc(ws, "GetSceneItemList", {"sceneName": name}).get("sceneItems", []),
-            scene,
-        )
+        src = _resolve_rendered_input(_scene_items_fetcher(ws), scene)
         if src is None:
             raise SystemExit(
                 f"[obs] {a.host}: program scene '{scene}' has NO enabled scene item (directly or "
@@ -3350,9 +3402,13 @@ def main():
             # epoch-ns boundary. Lightweight — no preload/upstream dance (prod_scene already
             # routed the scenes); just SetCurrentProgramScene + the non-black self-check.
             p.add_argument("--program-scene", required=True)
-            # issue 1380: EVENT mode's switch back to the production scene checks real (possibly
-            # dim) production content with the prod floor; omitted -> the #312 default.
-            p.add_argument("--min-mean", type=float, default=None)
+            # issue 1380 (EVENT's restore of the production scene): --prod-floor = the #677
+            # production non-black floor (OBS_NONBLACK_MIN_MEAN_PROD) instead of the #312 default;
+            # --black-report-only = a BLACK program is a WARNING once the scene is set;
+            # --replace-preview <scene> = move a Studio Mode preview left on <scene> to the target.
+            p.add_argument("--prod-floor", action="store_true")
+            p.add_argument("--black-report-only", action="store_true")
+            p.add_argument("--replace-preview", default="")
         if name == "dev-scene":
             # issue 1380: ensure the stream development scene nests the production scene
             # (idempotent, operator-wins, never writes to the production scene).

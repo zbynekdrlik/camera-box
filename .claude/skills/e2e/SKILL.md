@@ -530,7 +530,8 @@ binary (a copy of `frame-probe` at `/usr/local/bin/cam2-painter`, `--duration-se
 `rig-mode.sh event` + a manual supervisor checklist BOTH said "clean" while a QR was live on air —
 the user caught it by EYE. So EVENT mode no longer trusts a process/flag check or anyone's memory:
 after the burn-off + painter-stop above, `do_event` runs the rig-test LEDGER cleanup then the
-8-item `event_mode_assert` (→ `scripts/event_assert.py`, the pure decision), fails LOUD on any
+`event_mode_assert` (9 items since issue 1380 added "the stream program is back on `PRO`";
+→ `scripts/event_assert.py`, the pure decision), fails LOUD on any
 item, and posts a Slovak confirmation to the owner's Discord thread on BOTH pass AND fail (#724).
 The two decisive additions this ticket demanded, which a supervisor must expect to see run:
 
@@ -2249,8 +2250,8 @@ subcommands the harness itself calls, directly from dev1, against the idle rig:
 1. `python3 scripts/obs_phase2.py rig-busy-check --strih-host <strih> --stream-host <stream>
    --password ""` first — confirm idle (busy=false) before touching prod OBS state.
 2. Exercise the real code path directly, e.g. `prod-scene --host <stream> --program-scene Development
-   (issue 1380: development never programs `PRO`; seed it first with `dev-scene --host <stream>`)
-   --test-latency-source "NDI 2ME PGM" --test-latency-ms <N>` (omit `--upstream` to skip the
+   --test-latency-source "NDI 2ME PGM" --test-latency-ms <N>` (issue 1380: development never
+   programs `PRO`; seed the scene first with `dev-scene --host <stream>`; omit `--upstream` to skip the
    unrelated preload-force and isolate just the one setting under test) immediately followed by
    `record --host <stream> --action start` (the #627 liveness check reports pass/fail in ~4s).
    `record --action stop` right after to end the test recording; `teardown --host <stream>`

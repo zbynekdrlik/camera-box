@@ -1027,9 +1027,11 @@ set_imag_test_program() {
 # issue 1380: this used to build + switch to a stream PROBE scene/input over a second NDI receiver
 # (and #988 re-established that input first, because every E2E teardown unbinds it). The owner
 # removed both from the stream OBS on 27.9.2026: the development scene nests the production scene,
-# so the non-black proof now runs through the certified NDI 2ME PGM itself -- a stronger proof than
-# a second receiver -- and nothing re-creates the removed probe scene/input. The idempotent seeder
-# runs first so the switch never false-fails on a missing scene.
+# so the non-black proof now screenshots the production composite (NDI 2ME PGM plus the scene's other
+# layers -- it proves the stream program renders, not the strih->stream leg alone; gap 3 then
+# resolves NDI 2ME PGM as the rendered input, the input the pinned burn is on) and nothing re-creates
+# the removed probe scene/input. The idempotent
+# seeder runs first so the switch never false-fails on a missing scene.
 verify_stream_program_dev() {
   local here rc=0 seed_rc=0 switch_rc=0
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
@@ -1197,16 +1199,20 @@ park_stream_program_dev() {
 
 # restore_stream_program_production -> issue 1380: EVENT mode puts the production scene itself
 # ($STREAM_EVENT_SCENE) back on stream's PROGRAM (development ran on the development scene, which
-# only nests it). The same `switch` action, with the prod non-black floor: real production content
-# can be legitimately dim (#677), so the #312 bright-QR floor does not apply. Never fatal to the
-# EVENT switch on its own -- the caller records the rc, finishes the burn-clear + contract, and
-# fails loud at the end.
+# only nests it). The same `switch` action, with the prod non-black floor (--prod-floor: real
+# production content can be legitimately dim, #677) and --black-report-only (before a service the
+# cameras may be dark; a BLACK program is a WARNING once the scene is SET, only a failed set or
+# transport returns non-zero). --replace-preview moves a Studio Mode preview an E2E left on the
+# development scene to the production scene, so a Transition click cannot put the development scene
+# back on program. Never fatal to the EVENT switch on its own -- the caller records the rc, finishes
+# the burn-clear + contract, and fails loud at the end.
 restore_stream_program_production() {
   local here rc=0
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   echo "[obs stream ${STREAM_IP}] issue 1380: put the production scene '${STREAM_EVENT_SCENE}' back on PROGRAM (development ran on '${STREAM_PROG_SCENE}')"
   python3 "$here/obs_phase2.py" switch --host "$STREAM_IP" --program-scene "$STREAM_EVENT_SCENE" \
-    --min-mean "${OBS_NONBLACK_MIN_MEAN_PROD:-5}" --password "$OBS_WS_PASSWORD" \
+    --prod-floor --black-report-only --replace-preview "$STREAM_PROG_SCENE" \
+    --password "$OBS_WS_PASSWORD" \
     2>&1 | sed 's/^/    [stream event program] /' || rc=$?
   return $rc
 }
@@ -1443,7 +1449,7 @@ _bool_or_failclosed() {
   esac
 }
 
-# event_mode_assert -> #722 EVENT-mode CONTRACT: gather all 8 items' facts (the fleet ssh sweep
+# event_mode_assert -> #722 EVENT-mode CONTRACT: gather every item's facts (9 since issue 1380) (the fleet ssh sweep
 # above + the existing/new OBS-WS tools: obs_burn_filter.py check, obs_phase2.py
 # record/stream-status/latency-check, set-ndi-mapping.py --verify-only,
 # qr_screenshot_check.py), hand them to scripts/event_assert.py for the pure decision +

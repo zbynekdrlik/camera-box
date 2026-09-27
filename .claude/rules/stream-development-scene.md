@@ -36,8 +36,12 @@ Development never programs `PRO` itself. EVENT mode puts `PRO` back.
 - It reads only the scene list and the DEVELOPMENT scene's items, and writes only
   `CreateScene` / `CreateSceneItem` on the development scene, never with `ignore_err`. `PRO` is never
   read or written. A missing `PRO`, or the two names equal / empty, fails loud (`DevSceneError` → non-zero).
-- Callers: `recording-e2e.sh` right after the `[4/8]` banner (before any program scene is touched),
-  and `rig-mode.sh test` gap 2 (`verify_stream_program_dev`). Live seeding is the supervisor's step.
+- Callers: `recording-e2e.sh` right after the `[4/8]` banner (after the pre-`[4/8]` rig-busy
+  re-check, before any program scene is touched), and `rig-mode.sh test` gap 2
+  (`verify_stream_program_dev`). Live seeding is the supervisor's step.
+- The bash wrapper `stream_dev_scene_ensure` seeds ONLY the default `Development`: an env override
+  of `STREAM_PROG_SCENE` naming another scene is never filled (a note, rc 0; that scene must already
+  exist), and an override naming the production scene itself is refused (rc 1).
 
 ## Who uses which scene
 
@@ -46,21 +50,31 @@ Development never programs `PRO` itself. EVENT mode puts `PRO` back.
 | `recording-e2e.sh` `[4/8]` | `Development` | `STREAM_PROG_SCENE` default; `prod-scene` records it |
 | `rig-mode.sh test` gap 2 | `Development` | `verify_stream_program_dev`: seed + `switch` (non-black proof) |
 | `rig-mode.sh test` park (#985) | `Development` | `park_stream_program_dev`, a cheap re-assert |
-| `rig-mode.sh event` | `PRO` | `restore_stream_program_production`, prod non-black floor 5 (#677) |
+| `rig-mode.sh event` | `PRO` | `restore_stream_program_production`: `switch --prod-floor --black-report-only --replace-preview Development` |
 | EVENT contract item 9 | must read `PRO` | `event_assert.stream_program_production_ok`, fail-closed |
 
 - `switch` skips `SetCurrentProgramScene` when the target is already on program (the #343
   same-scene hang with the heavy `NDI 2ME PGM`); the non-black proof still runs. So a park right
   after gap 2, or an EVENT run that finds `PRO` already live, costs no scene set.
-- A failed EVENT restore is recorded, the burn-clear + contract + Discord confirmation still run,
-  and EVENT exits non-zero at the end (the #868 fold).
+- EVENT's `switch` flags: `--prod-floor` = the ONE #677 production floor (`_prod_nonblack_floor`,
+  env `OBS_NONBLACK_MIN_MEAN_PROD`, default 5 — never retyped in bash); `--black-report-only` = a dark
+  production scene (cameras off before a service) is a WARNING once the scene is SET;
+  `--replace-preview Development` = a Studio Mode preview an E2E left on `Development` moves to `PRO`
+  (pure `_stale_preview_target`; an operator's own preview is untouched), so a Transition click
+  cannot put `Development` back on program and skip the Companion `PRODUCTION` trigger.
+- A failed EVENT restore (a failed set or transport, not a dark picture) is recorded, the
+  burn-clear + contract + Discord confirmation still run, and EVENT exits non-zero at the end
+  (the #868 fold).
 
 ## The retired stream probe
 
 TEST gap 2 used to `obs_phase2.py setup` a stream probe scene `PHASE2-PROBE` + input
 `phase2-probe-src` (a second receiver of the strih program; #988 re-created it every run). The owner
-deleted both on 27.9.2026, so gap 2 now proves the stream program through the nested production
-scene instead, and `rig-mode.sh` no longer calls `setup` or carries `STREAM_PROBE_UPSTREAM`.
+deleted both on 27.9.2026, so gap 2 now screenshots the development program (the production
+composite: `NDI 2ME PGM` plus the scene's other layers). That proves the stream program renders,
+not the strih→stream leg alone; gap 3 then resolves `NDI 2ME PGM` as the rendered input (the
+input the pinned burn is on). `rig-mode.sh` no
+longer calls `setup` or carries `STREAM_PROBE_UPSTREAM`.
 `obs_phase2.py setup`/`teardown` and the `PHASE2-PROBE` constants stay (teardown's input idle is
 `ignore_err`, so an absent input is harmless). The restore watchdog's `PHASE2-PROBE` known-test-scene
 default is unchanged; `Development` is NOT a stranded scene (it is TEST mode's standing state).
@@ -68,7 +82,8 @@ default is unchanged; `Development` is NOT a stranded scene (it is TEST mode's s
 ## `program-rendered-input` descends into a nested scene
 
 With `Development` on program, the first enabled item is the SCENE `PRO`.
-`_resolve_rendered_input` follows a `OBS_SOURCE_TYPE_SCENE` item into that scene (cycle-guarded), so
+`_resolve_rendered_input` follows a `OBS_SOURCE_TYPE_SCENE` item into that scene (cycle-guarded; an
+OBS group, also `OBS_SOURCE_TYPE_SCENE` with `isGroup`, is read with `GetGroupSceneItemList`), so
 the TEST gap-3 burn resolves `NDI 2ME PGM` and never attaches a burn filter to the scene `PRO`.
 
 ## Consumers that did NOT need a change
