@@ -42,7 +42,9 @@ behaviour on a box was NOT measured before the fix; this is the mechanism read f
 The respawner differs per box, and the fix only brings OBS back where one is running:
 
 - **stream:** no AHK. Its obs64 respawner is the `camera-box-obs-self-heal-stream` task
-  (`scripts/obs-self-heal-install.sh`), which SHIPS DISABLED; the supervisor enables it.
+  (`scripts/obs-self-heal-install.sh`), which SHIPS DISABLED. Enabling it follows that script's
+  install + live-verify procedure (`--help`); while it is disabled, a crash leaves stream without
+  OBS until someone relaunches it.
 - **resolume:** the owner's AHK safe-loop (`NL_STARTUP.ahk`). Under the issue-1372 ruling the
   owner decides whether it runs.
 - `obs-guarded-launch.ps1` is a one-shot shortcut target, not a respawner.
