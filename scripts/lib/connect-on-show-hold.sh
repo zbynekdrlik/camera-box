@@ -19,8 +19,15 @@
 #   1. a strih-side MARKER (~/.camera-box/connect-on-show-e2e-hold on strih-lx, touched over ssh at the
 #      hold, removed first thing at the restore): while it is fresh, the role apply keeps the mains
 #      connected (strih_bandwidth_roles.e2e_hold_active, 4 h TTL so a SIGKILLed run cannot pin it);
-#   2. the live WS flip (obs_phase2.py connect-on-show --hold/--restore, read back), recorded in a
-#      STABLE dev1 state file so a killed run's list is unioned + restored by the next run.
+#   2. the live WS flip (obs_phase2.py connect-on-show --hold/--restore, read back after the input
+#      update settles), recorded in a STABLE dev1 state file so a killed run's list is unioned +
+#      restored by the next run.
+#
+# The SAME hold takes every always-connected `MV NDI camN` monitor twin OFF THE WIRE for the run
+# (genlock off + audio-only; a twin costs ~58 Mbps at NDI lowest, so 7 mains + 7 twins overloaded the
+# strih-lx uplink during the E2E). The state file records each twin's original; the restore puts the
+# twins back first, then the mains. The twins never deliver video during the hold, so the wait below
+# reads only the held MAINS from the state file (connect_on_show_held_mains).
 #
 #   connect_on_show_e2e_hold      HERE STRIH STATE_FILE -> 0 held (read back) | non-zero: the run
 #                                                          must abort (a hidden input would be measured
@@ -62,11 +69,11 @@ connect_on_show_strih_marker() {
 
 connect_on_show_e2e_hold() {
   local here="$1" strih="$2" state="$3"
-  echo "    issue 1242 connect-on-show hold: every strih program-path camera input stays connected for this run (state $state)"
+  echo "    issue 1242 connect-on-show hold: every strih program-path camera input stays connected and every MV twin goes off the wire for this run (state $state)"
   connect_on_show_strih_marker set "$strih"
   if ! timeout "${CONNECT_ON_SHOW_HOLD_TIMEOUT_S:-60}" python3 "$here/obs_phase2.py" connect-on-show \
       --host "$strih" --password "${OBS_PASSWORD:-}" --hold "$state"; then
-    echo "ERROR: issue 1242 connect-on-show hold FAILED on $strih -- a hidden program-path input would be measured cold/parked; aborting the run" >&2
+    echo "ERROR: issue 1242 connect-on-show hold FAILED on $strih -- a hidden program-path input would be measured cold/parked, or an MV twin would stay on the wire; aborting the run" >&2
     return 1
   fi
   return 0
@@ -84,7 +91,7 @@ connect_on_show_e2e_hold() {
 # OBS-log reader, scripts/lib/mv-reverify-escalate.sh) -- both sourced by recording-e2e.sh.
 connect_on_show_e2e_wait_live() {
   local here="$1" strih="$2" state="$3" names raw n recv st budget poll lag start now
-  names="$(python3 -c 'import json, sys; print("\n".join(json.load(open(sys.argv[1]))))' "$state" 2>/dev/null || true)"
+  names="$(connect_on_show_held_mains "$state")"
   if [ -z "$names" ]; then
     return 0
   fi
@@ -123,6 +130,24 @@ connect_on_show_e2e_wait_live() {
   done
 }
 
+# connect_on_show_held_mains STATE_FILE -> stdout: the held program-path MAINS, one per line (sorted,
+# de-duplicated); nothing when the file is absent/unreadable. ALWAYS 0. Reads the SAME shape as
+# obs_phase2._read_hold_state -- {"connect_on_show": [...], "twins": {...}} or the legacy list of mains
+# -- pinned to it by tests/python/test_e2e_twin_hold_1242.py. The twins are never listed: a held twin
+# delivers no video by design.
+connect_on_show_held_mains() {
+  python3 -c '
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+m = d if isinstance(d, list) else (d.get("connect_on_show") or [] if isinstance(d, dict) else [])
+m = m if isinstance(m, list) else []
+print("\n".join(sorted({str(n) for n in m if n})))
+' "$1" 2>/dev/null || true
+}
+
 # connect_on_show_read_log STRIH -> stdout: the strih OBS-log tail (empty on a failed read).
 connect_on_show_read_log() {
   if [ -n "${CONNECT_ON_SHOW_LOG_READ_CMD:-}" ]; then
@@ -152,6 +177,6 @@ connect_on_show_e2e_restore() {
       --host "$strih" --password "${OBS_PASSWORD:-}" --restore "$state"; then
     return 0
   fi
-  echo "WARNING: issue 1242 connect-on-show restore FAILED on $strih (state kept at $state) -- the held inputs stay connected (full bandwidth) until the next strih OBS launch re-applies the roles or a manual: python3 scripts/obs_phase2.py connect-on-show --host $strih --restore $state" >&2
+  echo "WARNING: issue 1242 connect-on-show restore FAILED on $strih (state kept at $state) -- the held mains stay connected (full bandwidth) and a held MV twin stays off the wire (its multiview cell frozen) until the next run's cleanup, the next strih OBS launch re-applying the roles, or a manual: python3 scripts/obs_phase2.py connect-on-show --host $strih --restore $state" >&2
   return 0
 }

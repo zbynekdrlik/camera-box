@@ -370,14 +370,17 @@ def verify_live_mapping(op, ws, want, sampler, log_err, hidden=None):
     with fakes, no live OBS. Returns (live, frozen, inconclusive).
 
     issue 1242: `hidden(ws, input) -> bool` (optional, obs_phase2.input_hidden_by_design in the CLI)
-    SKIPs an input PARKED by design -- a program-path camera with connect-on-show that nothing shows
-    has released its NDI receiver, so its screenshot is a held frame by design, never a wedge. It is
-    logged and counted in none of the three buckets (never a false FROZEN, never sampled)."""
+    SKIPs an input hidden by design -- a program-path camera with connect-on-show that nothing shows
+    has released its NDI receiver, and an MV twin an E2E hold took off the wire (genlock off,
+    audio-only) receives no video, so either one's screenshot is a held frame by design, never a
+    wedge. It is logged and counted in none of the three buckets (never a false FROZEN, never
+    sampled)."""
     live = frozen = inconclusive = 0
     for inp, _snd in want:
         if hidden is not None and hidden(ws, inp):
-            log_err(f"issue 1242 liveness: '{inp}' is parked (connect-on-show, not shown anywhere) -- "
-                    f"hidden by design, SKIP (its always-connected 'MV {inp}' twin carries the leg)")
+            log_err(f"issue 1242 liveness: '{inp}' is hidden by design -- a parked connect-on-show "
+                    f"main (its 'MV' twin carries the leg) or an MV twin an E2E hold took off the "
+                    f"wire -- SKIP")
             continue
         state, reason = sampler(ws, inp)
         if state == op.LIVENESS_LIVE:
