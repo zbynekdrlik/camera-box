@@ -97,6 +97,7 @@ def test_balanced_and_every_drifted_item_is_drift_and_named():
     assert "10800" in rows["hibernate_ac"][1]
     assert "Enabled" in rows["usb_selective_suspend"][1]
     assert "0x0" in rows["wer_dontshowui"][1]
+    assert "OBS" not in rows["wer_dontshowui"][1], rows["wer_dontshowui"]
     assert rc == 20
 
 
@@ -308,8 +309,10 @@ def test_check_reads_each_box_and_names_the_drift(tmp_path):
                        env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream resolume"},
                        timeout=60)
     assert r.returncode == 20, r.stdout + r.stderr
-    assert "box=stream win_baseline=OK" in r.stdout
-    assert re.search(r"box=resolume win_baseline=DRIFT .*power_scheme", r.stdout), r.stdout
+    assert re.search(r"^box=stream win_baseline=OK$", r.stdout, re.M), r.stdout
+    assert re.search(r"^box=resolume win_baseline=DRIFT "
+                     r"drift=power_scheme,sleep_ac,hibernate_ac,usb_selective_suspend,wer_dontshowui$",
+                     r.stdout, re.M), r.stdout
     assert re.search(r"box=resolume item=power_scheme verdict=DRIFT detail=.*Balanced", r.stdout), r.stdout
 
 
@@ -322,7 +325,7 @@ def test_check_over_the_live_captures_names_the_wer_drift(tmp_path):
     assert r.returncode == 20, r.stdout + r.stderr
     for box in ("stream", "resolume"):
         assert f"box={box} item=wer_dontshowui verdict=DRIFT" in r.stdout, r.stdout
-        assert f"box={box} win_baseline=DRIFT drift=wer_dontshowui" in r.stdout, r.stdout
+        assert re.search(rf"^box={box} win_baseline=DRIFT drift=wer_dontshowui$", r.stdout, re.M), r.stdout
     assert "unbound variable" not in r.stderr, r.stderr
 
 
@@ -342,7 +345,8 @@ def test_check_failed_fetch_is_unknown(tmp_path):
                        env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream"},
                        timeout=60)
     assert r.returncode == 11, r.stdout + r.stderr
-    assert "box=stream win_baseline=UNKNOWN" in r.stdout
+    assert re.search(r"^box=stream win_baseline=UNKNOWN unknown=power_scheme,sleep_ac,hibernate_ac,"
+                     r"usb_selective_suspend,wer_dontshowui$", r.stdout, re.M), r.stdout
 
 
 def test_check_emit_ps1_is_the_lib_gather_program():
@@ -396,6 +400,36 @@ def test_rig_health_empty_verdict_is_unknown_and_named():
     rows = _audit().win_baseline_rows_from_output(
         "box=stream item=wer_dontshowui verdict= detail=\nbox=stream win_baseline=UNKNOWN\n")
     assert "wer_dontshowui=UNKNOWN" in rows["stream"], rows
+
+
+def _fake_reader(tmp_path, body):
+    reader = tmp_path / "reader.py"
+    reader.write_text("import sys\nsys.stdout.buffer.write(" + repr(body) + ")\nsys.exit(" +
+                      ("3" if b"CRASH" in body else "20") + ")\n")
+    wrap = tmp_path / "reader.sh"
+    wrap.write_text(f"#!/usr/bin/env bash\nexec python3 {reader}\n")
+    return str(wrap)
+
+
+def test_rig_health_survives_a_non_utf8_reader_byte(tmp_path, capsys):
+    # scheme names / reg text arrive in the Windows OEM codepage; one non-UTF-8 byte must never
+    # take the whole audit down
+    mod = _audit()
+    mod.WIN_BASELINE_SCRIPT = _fake_reader(
+        tmp_path, b"box=stream item=power_scheme verdict=DRIFT detail=Vysok\xec v\xfdkon (x) is not\n"
+                  b"box=stream win_baseline=DRIFT drift=power_scheme\n")
+    mod.check_win_baseline()
+    out = capsys.readouterr().out
+    assert "[NOTE] stream-win win_baseline=DRIFT power_scheme=DRIFT[" in out, out
+
+
+def test_rig_health_reader_crash_after_some_rows_is_still_a_note_row(tmp_path, capsys):
+    mod = _audit()
+    mod.WIN_BASELINE_SCRIPT = _fake_reader(tmp_path, b"box=stream win_baseline=OK\nCRASH\n")
+    mod.check_win_baseline()
+    out = capsys.readouterr().out
+    assert "[NOTE] stream-win win_baseline=OK" in out, out
+    assert "[NOTE] win-baseline" in out and "rc=3" in out, out
 
 
 def test_rig_health_crashed_tool_is_a_note_row(tmp_path, capsys):
