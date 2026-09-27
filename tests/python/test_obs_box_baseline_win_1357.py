@@ -143,6 +143,17 @@ def test_a_value_read_from_the_wrong_setting_is_unknown(tmp_path):
     assert rows["sleep_ac"][0] == "UNKNOWN", out
 
 
+def test_real_gather_program_output_grades():
+    # The EMITTED gather program run read-only on resolume through the win-* MCP Shell (27.9.2026),
+    # as printed (CRLF, and the reg query stderr line its 2>&1 captures). This is the program's real
+    # output shape, not a reassembled one.
+    rc, rows, out = _grade(FIX / "resolume_gather_program_live_2026-09-27.txt")
+    assert {k: v[0] for k, v in rows.items()} == {
+        "power_scheme": "OK", "sleep_ac": "OK", "hibernate_ac": "OK",
+        "usb_selective_suspend": "OK", "wer_dontshowui": "DRIFT"}, out
+    assert rc == 20
+
+
 def test_maxperf_predicate():
     ok = [("8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c", "Vysoký výkon"),
           ("E9A42B02-D5DF-448D-AA00-03F14749EB61", "x"),
