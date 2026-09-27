@@ -52,10 +52,12 @@ power envelope. A difference between boxes is a defect, not a per-box feature.
 - **The power-envelope tool + unit names stay `imag-power-envelope*` on every box.** The shared
   gather/verdict lib `scripts/lib/imag-power-envelope.sh` grades exactly those names; renaming them
   fleet-wide is its own ticket, not a baseline edit.
-- **rtprio stays OFF in the baseline** (comment 5793075833: the render-tick SCHED_FIFO pin assumed a
-  reserved core and its FIFO + affinity leaked to every NDI receiver thread). imag's own issue-484
-  limits.d line stays in setup-imag.sh outside the lib (behaviour-identical); setup-strih removes a
-  leftover grant and verify-strih item 33 FAILs while one exists.
+- **rtprio stays OFF on every box** (comment 5793075833: the render-tick SCHED_FIFO pin assumed a
+  reserved core and its FIFO + affinity leaked to every NDI receiver thread). `obs_box_rtprio_off`
+  (step 8 on imag, step 11 on strih) removes every retired `95-<box>-genlock-rtprio.conf` grant, and
+  the grader row `rtprio` FAILs while one exists. imag's issue-484 grant was DROPPED, not gated: the
+  pin now serves only isolated nohz_full cores, which the `affinity` row forbids, so a gated grant
+  could never fire. Full story: `genlock-render-tick-pin.md`.
 - **The dpkg lock wait is the FIRST action of every provisioning run.** `obs_box_apt_lock_timeout` writes `/etc/apt/apt.conf.d/90camera-box-lock-timeout` (`DPkg::Lock::Timeout "600";`) right after the root check in BOTH setup scripts, before any apt-get.
   - It exists because a periodic apt run held the lock and failed the strih-lx deploy twice at step 4 (24.9.2026). apt-get's default lock wait is 0.
   - Ubuntu's `Version::2.0::Dpkg::Lock::Timeout` applies only to the `apt` front end, never to apt-get.
@@ -249,12 +251,12 @@ graded), and lightdm + openbox installed.
    the boot stays on the running HWE kernel. Confirm `nvidia-smi` and `prime-select query` = nvidia after the boot. OBS starts from
    `~/.config/openbox/autostart` via `strih-obs.service`; the autostart pins both outputs to
    1920x1080@60 (`--auto` only as a fallback).
-3. Run `verify-strih.sh`: every `(baseline:*)` row must be PASS, and item 33 (rtprio-off) must PASS
+3. Run `verify-strih.sh`: every `(baseline:*)` row must be PASS, including `rtprio`
    (setup-strih removed the leftover grant; the reviewer found it still present on the box).
 
 Live conversion results (strih-lx, 23.9.2026, first kiosk boot on 7.0.0-31 + `preempt=full`):
 
-- Every `(baseline:*)` row and item 33 (rtprio-off) PASS; OBS on the RTX via NVIDIA-primary Xorg,
+- Every `(baseline:*)` row and the then-separate item 33 (rtprio-off, now the baseline `rtprio` row) PASS; OBS on the RTX via NVIDIA-primary Xorg,
   program `avg_frame_ms` ~19-20 `lagged=0`, MV 30 fps.
 - **power-profiles-daemon 0.30 resets every core's governor to `powersave` when it starts** -- the
   first kiosk boot came up powersave. The max-performance item now stops + masks it and the perf row
