@@ -31,6 +31,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import itertools
 import json
 import math
 import os
@@ -1154,10 +1155,11 @@ VBAN_LOSS_EVENTS = ("discontinuities", "repays", "resyncs")
 VBAN_LOSS_MS = ("silence_ms", "discarded_ms")   # `late_sends` is late but COMPLETE audio: no loss
 # The loss window: two dev1 passes (5 min) + timer slack, so one burst survives the 2-pass confirm.
 VBAN_LOSS_WINDOW_S = 660
-# Each output logs once per >= 10 s, so within this span of a key's FIRST line in the tail every
-# output of that key has shown its current counters once. Those lines only seed what is known.
-VBAN_BASELINE_S = 10.5
-VBAN_PREDECESSOR_SCAN = 64   # a loss is measured against the newest dominated tuples only
+# Each output logs once per >= 10 s (observed 10.0-10.2 s), so within TWO periods of a legacy
+# key's first line in the tail every output has shown its current counters, even with a line late
+# or a forward wall-clock step. Those lines only seed what is known.
+VBAN_BASELINE_S = 20.5
+VBAN_PREDECESSOR_SCAN = 64   # a loss is measured against the most recently seen tuples only
 
 
 def _file_order_elapsed(ts_values):
@@ -1225,66 +1227,107 @@ def audio_mixer_from_log(text, tail=None):
 
 
 def _vban_vector(fields):
-    """A pacing line's `(key, loss vector, n_event_counters, has_ms)` or None for a line of neither
-    format. The key is the destination (fixed-timeline line) or `stream=<name>` (shipped line, which
-    has no destination). The vector is the event counters then the ms counters."""
+    """A pacing line's `(key, loss vector, n_event_counters, has_ms, one_output)` or None for a line
+    of neither format. The key is the destination (fixed-timeline line, `one_output` True: a key is
+    exactly one sender) or `stream=<name>` (shipped line, which names no destination). The vector is
+    the event counters then the ms counters."""
     stream = fields.get("stream", "").strip("'")
     try:
         if "discontinuities" in fields:
             vec = tuple(int(fields[k]) for k in VBAN_LOSS_EVENTS) + tuple(
                 float(fields[k]) for k in VBAN_LOSS_MS)
-            key = fields.get("dest") or f"stream={stream}"
-            return (key, vec, len(VBAN_LOSS_EVENTS), True)
+            dest = fields.get("dest")
+            return (dest or f"stream={stream}", vec, len(VBAN_LOSS_EVENTS), True, bool(dest))
         if "underflows" in fields:
             vec = tuple(int(fields[k]) for k in VBAN_LEGACY_LOSS_EVENTS)
-            return (f"stream={stream}", vec, len(VBAN_LEGACY_LOSS_EVENTS), False)
+            return (f"stream={stream}", vec, len(VBAN_LEGACY_LOSS_EVENTS), False, False)
     except (KeyError, ValueError):
         return None
     return None
 
 
+def _vban_growth(vec, old, n_events):
+    """`(events, ms)` by which `vec` exceeds `old` (the caller ensures every counter is >=)."""
+    return (sum(n - o for n, o in zip(vec[:n_events], old[:n_events])),
+            sum(n - o for n, o in zip(vec[n_events:], old[n_events:])))
+
+
 def _vban_increment(vec, seen, n_events):
-    """How much a NEW counter tuple grew: against the nearest earlier tuple it dominates (every
-    counter >=), `(events, ms)`; None when it dominates none (an output restart reset its counters,
-    or a smaller tuple of another output). Only the newest VBAN_PREDECESSOR_SCAN distinct tuples
-    are searched -- an output's own predecessor is always among the last few."""
+    """How much a NEW legacy counter tuple grew: against the nearest earlier tuple it dominates
+    (every counter >=), `(events, ms)`; None when it dominates none (an output restart reset its
+    counters, or a smaller tuple of another output). `seen` is in LAST-SEEN order (a repeated tuple
+    moves to the end), so each live output's own current tuple is among the newest
+    VBAN_PREDECESSOR_SCAN searched."""
     best = None
-    for old in reversed(seen[-VBAN_PREDECESSOR_SCAN:]):
+    for old in itertools.islice(reversed(seen), VBAN_PREDECESSOR_SCAN):
         if len(old) != len(vec) or any(n < o for n, o in zip(vec, old)):
             continue
-        inc = (sum(n - o for n, o in zip(vec[:n_events], old[:n_events])),
-               sum(n - o for n, o in zip(vec[n_events:], old[n_events:])))
+        inc = _vban_growth(vec, old, n_events)
         if best is None or inc < best:
             best = inc
     return best
+
+
+class _VbanKey:
+    """The loss state of one pacer key."""
+    __slots__ = ("one_output", "has_ms", "first", "prev", "seen", "events", "loss_ms")
+
+    def __init__(self, one_output, has_ms, pos):
+        self.one_output = one_output
+        self.has_ms = has_ms
+        self.first = pos
+        self.prev = None          # one-output key: the previous line's vector
+        self.seen = {}            # legacy key: distinct tuples in last-seen order (dict order)
+        self.events = 0
+        self.loss_ms = 0.0
+
+    def feed(self, vec, n_events, pos, counts):
+        """One status line; `counts` = it lies inside the loss window."""
+        if self.one_output:
+            prev, self.prev = self.prev, vec
+            if prev is None or len(prev) != len(vec) or any(n < o for n, o in zip(vec, prev)):
+                return            # first line, or a restart: a new baseline
+            inc = _vban_growth(vec, prev, n_events)
+        else:
+            if vec in self.seen:
+                self.seen[vec] = self.seen.pop(vec)   # move to the end: last-seen order
+                return
+            inc = None
+            if counts and pos - self.first > VBAN_BASELINE_S:
+                inc = _vban_increment(vec, list(self.seen), n_events)
+            self.seen[vec] = True
+        if counts and inc is not None:
+            self.events += inc[0]
+            self.loss_ms += inc[1]
 
 
 def vban_pacer_loss_from_log(text, window_s=VBAN_LOSS_WINDOW_S, tail=None):
     """issue 1381 -- `(loss_events, loss_ms, dest, age_s)` for the obs-vban pacer, or four `""` when
     the tail has no `obs-vban pacing:` status line (no VBAN output on this box).
 
-    Per destination key, how much the loss counters grew over the last `window_s` of the log
-    (legacy: underflows + overflows + trims; fixed-timeline: discontinuities + repays + resyncs,
-    and silence_ms + discarded_ms as `loss_ms`). The worst key is reported (events first, then ms);
+    Per key, how much the loss counters grew over the last `window_s` of the log (legacy:
+    underflows + overflows + trims; fixed-timeline: discontinuities + repays + resyncs, and
+    silence_ms + discarded_ms as `loss_ms`). The worst key is reported (events first, then ms);
     `loss_ms` is `""` when that key's line carries no ms counters (the shipped format).
 
-    The shipped line names no destination, and the two resolume outputs print identical-looking
-    lines, so an output's identity cannot be recovered from it. The counters only grow on a loss,
-    so a loss is a counter tuple NEVER SEEN BEFORE for that key that dominates one seen earlier; it
-    counts by how much it exceeds the nearest dominated tuple (never more than the true growth).
-    A clean output repeats its own tuple every period and adds nothing; an output restart starts
-    at 0 and dominates nothing it has not shown. The lines of a key's first VBAN_BASELINE_S in the
-    tail only seed the known tuples: within one logging period every output has shown its current
-    counters once, whatever their phase. Residual: an output whose first line in the tail comes
-    only after a logging pause longer than that span, with counters that dominate another output's,
-    reads that difference as a loss once. `age_s` is the newest status line's in-log age.
-    `tail` = a precomputed `timestamped_tail_lines(text)`."""
+    - **A `dest=` key is exactly one sender**: its loss is the plain delta against its own previous
+      line; a counter that went DOWN is a restart and starts a new baseline. Exact.
+    - **The shipped line names no destination**, and the two resolume outputs print identical-looking
+      lines, so an output's identity cannot be recovered. The counters only grow on a loss, so a loss
+      is a tuple NEVER SEEN BEFORE for that key that dominates one seen earlier, counted by how much
+      it exceeds the nearest such tuple. A clean output repeats its own tuple and adds nothing; a
+      restarted output starts at 0 and dominates nothing it has not shown. The first VBAN_BASELINE_S
+      (two logging periods) of the key in the tail only seed the known tuples.
+      Residuals: a step that lands on a tuple already seen for the key (one output reaching the
+      other output's current counters) is not counted, and a step's size is taken from the nearest
+      dominated tuple, which may be the other output's. So the count can be LOWER than the true
+      growth: a sustained fault still pages, an isolated single step onto the other output's value
+      does not. Only a second output whose first line in the tail comes more than two periods
+      after the first reads its counter gap as a loss once.
+    `age_s` is the newest status line's in-log age. `tail` = a precomputed
+    `timestamped_tail_lines(text)`."""
     stamped, head = tail if tail is not None else timestamped_tail_lines(text)
-    seen = {}       # key -> [distinct tuples in file order]
-    seen_set = {}   # key -> set(tuples)
-    first = {}      # key -> pos of the key's first line in the tail
-    loss = {}       # key -> [events, ms]
-    has_ms = {}     # key -> bool
+    keys = {}
     newest = None
     for pos, line in stamped:
         if "obs-vban pacing:" not in line:
@@ -1295,31 +1338,22 @@ def vban_pacer_loss_from_log(text, window_s=VBAN_LOSS_WINDOW_S, tail=None):
         parsed = _vban_vector(dict(_VBAN_KV_RE.findall(m.group(1))))
         if parsed is None:
             continue
-        key, vec, n_events, key_has_ms = parsed
+        key, vec, n_events, has_ms, one_output = parsed
         newest = pos
-        has_ms[key] = key_has_ms
-        loss.setdefault(key, [0, 0.0])
-        key_first = first.setdefault(key, pos)
-        key_seen = seen.setdefault(key, [])
-        key_set = seen_set.setdefault(key, set())
-        if vec in key_set:
-            continue
-        if pos - key_first > VBAN_BASELINE_S and head - pos <= window_s:
-            inc = _vban_increment(vec, key_seen, n_events)
-            if inc is not None:
-                loss[key][0] += inc[0]
-                loss[key][1] += inc[1]
-        key_seen.append(vec)
-        key_set.add(vec)
+        state = keys.get(key)
+        if state is None:
+            state = keys[key] = _VbanKey(one_output, has_ms, pos)
+        state.feed(vec, n_events, pos, head - pos <= window_s)
     if newest is None:
         return ("", "", "", "")
     worst = None
-    for key in sorted(loss):
-        events, loss_ms = loss[key]
-        if worst is None or (events, loss_ms) > (worst[1], worst[2]):
-            worst = (key, events, loss_ms)
-    key, events, loss_ms = worst
-    return (str(events), f"{loss_ms:.1f}" if has_ms[key] else "", key, str(round(head - newest)))
+    for key in sorted(keys):
+        st = keys[key]
+        if worst is None or (st.events, st.loss_ms) > (worst[1].events, worst[1].loss_ms):
+            worst = (key, st)
+    key, st = worst
+    return (str(st.events), f"{st.loss_ms:.1f}" if st.has_ms else "", key,
+            str(round(head - newest)))
 
 
 def distroav_dll_paths(scan_roots):

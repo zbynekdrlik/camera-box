@@ -60,23 +60,35 @@ survives the 2-pass confirm, the render-freeze freshness shape). Stateless on th
   **`late_sends` is NOT a loss** — late but complete audio, and it climbs ~200/s after an in-grace
   buffering hole (the pacer rule's known consequence). Counting it would page every growth step of
   resolume's legitimate 85 → 362 ms buffering.
+- **A `dest=` key (the fixed-timeline line) is exactly one sender:** its loss is the plain delta
+  against its own previous line; a counter that went down is a restart and starts a new
+  baseline. Exact, and it counts from the key's second line.
 - **The shipped line has no destination and the two resolume outputs print identical-looking lines,
   so an output's identity cannot be recovered from it.** A first cut split them into per-output
   tracks by monotone continuation; review round 1 showed it false-paging on a clean log (outputs
   whose logging phases are 5-10 s apart, or a common pause > 25 s: the second output's first line
-  continued the first output's track and their counter gap read as 65-130 events). The parser now
-  works on NEW COUNTER TUPLES per key: the counters only grow on a loss, so a loss is a tuple never
-  seen before for that key that dominates (every counter >=) one seen earlier, measured against
-  the nearest such tuple (never more than the true growth). A clean output repeats its own tuple
-  and adds nothing; a restarted output starts at 0 and dominates nothing it has not shown.
-- **The key's first `VBAN_BASELINE_S` (10.5 s) in the tail only seeds.** Each output logs once per
-  >= 10 s, so within one period every output has shown its current counters, whatever their
-  phase. A loss inside that first period is not counted (under-count, never a false page).
-- **Residual (documented, not fixed):** an output whose FIRST line in the tail comes only after a
-  logging pause longer than that seed period, with counters that dominate another output's, reads
-  that difference as a loss once. It needs the tail to start exactly inside a multi-second freeze
-  of the whole OBS, which the mixer arm pages on its own anyway. The fixed-timeline line (`dest=`,
-  one output per key) has no such case.
+  continued the first output's track and their counter gap read as 65-130 events). The legacy key
+  now works on NEW COUNTER TUPLES: the counters only grow on a loss, so a loss is a tuple never
+  seen before for that key that dominates (every counter >=) one seen earlier, counted against the
+  nearest such tuple. A clean output repeats its own tuple and adds nothing; a restarted output
+  starts at 0 and dominates nothing it has not shown. The known tuples are kept in LAST-SEEN order
+  (a repeat moves to the end), so each live output's own value stays among the newest 64 searched
+  (review round 2: first-seen order inflated one underflow to 327 after 80 periods of the other
+  output growing).
+- **The legacy key's first `VBAN_BASELINE_S` (20.5 s = two logging periods) in the tail only
+  seeds.** Each output logs every 10.0-10.2 s, so within two periods every output has shown its
+  current counters even with a line late or a forward wall step (round 2: a one-period seed read
+  65 false events for a second output first logging at +10.6 s). A loss inside the seed is not
+  counted.
+- **Legacy residuals (stated, pinned by `test_legacy_collision_under_count_is_documented`):** a
+  step that lands on a tuple already seen for the key (one output reaching the other output's
+  current counters) is not counted, and a step's size may be taken from the other output's
+  tuple. The count can therefore be LOWER than the true growth, never higher: on the real 27.9
+  06:02 shape it counts 11 of 21. A sustained fault still pages (the replay onset does); an
+  isolated single step onto the other output's value does not. The only over-count case is a
+  second output whose first line in the tail comes more than two periods after the first, which
+  needs the tail to start inside a logging stall of the whole pacer. The fixed-timeline line has
+  none of these residuals; it replaces the shipped one with the pacer fix of this same issue.
 - `vban_pacer_loss_dest` = the worst key (events first, then ms): `ip:port` on the new line,
   `stream=<name>` on the shipped one. There is no live-output count: it cannot be derived honestly
   from the destination-less line.

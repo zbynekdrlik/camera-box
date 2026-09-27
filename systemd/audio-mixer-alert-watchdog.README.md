@@ -16,9 +16,11 @@ It reads two facet groups `bundle_state_gather` exposes on each box's `:8899/bun
 - **`vban_pacer_*`** — per destination, how much the obs-vban pacer's loss counters grew inside the
   last 660 s of the log (two passes plus slack): underflows / overflows / trims on the shipped
   pacer, discontinuities / repays / resyncs + silence_ms / discarded_ms on the fixed-timeline
-  pacer. `late_sends` is not a loss. The shipped line has no destination and the two outputs
-  print identical lines, so a loss is a counter tuple never seen before that dominates one seen
-  earlier (a clean or restarted output never produces one).
+  pacer. `late_sends` is not a loss. A `dest=` key is one sender: a plain per-line delta. The
+  shipped line has no destination and the two outputs print identical lines, so a loss is a
+  counter tuple never seen before that dominates one seen earlier (a clean or restarted output
+  never produces one). That can under-count, never over-count: see
+  `.claude/rules/audio-mixer-watchdog.md`.
   - **VBAN_LOSS** — any loss counter moved.
 
 Roster: the obs-fleet **`audio-mixer`** facet (`strih-lx stream resolume`). resolume travels, so it
