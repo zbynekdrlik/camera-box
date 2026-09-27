@@ -50,13 +50,14 @@ its #1355 absolute level target (100 ms + the sync offset) at all. The two strea
     at the measured base. This is the live-proven `01-33-25` configuration.
   - 0, 3 ticks (64 ms) and 6 ticks (128 ms) all leave the band. 5 ticks (106.67 ms) would still
     hold it.
+  - The ±35 ms band is a chosen margin; the observed physical reach is about 51–59 ms.
 
 ## What ships
 
 | Piece | C | Rust / test |
 |---|---|---|
-| the plan (floor, max, override) | `genlock_audio_buffering_plan` in `obs-genlock-audio-buffering.h`, called by `obs_reset_audio2` | `plan` in `src/genlock_audio_buffering.rs` |
-| the tick rule (floor first, then OBS's dynamic increase) | `genlock_audio_buffering_action` → `set_floor_audio_buffering` / `add_audio_buffering` in `audio_callback` | `action` |
+| the plan (floor, max, override) | `genlock_audio_buffering_make_plan` (→ `struct genlock_audio_buffering_plan`) in `obs-genlock-audio-buffering.h`, called by `obs_reset_audio2` | `plan` in `src/genlock_audio_buffering.rs` |
+| the tick rule (floor first, then OBS's dynamic increase) | `genlock_audio_buffering_action` (`GENLOCK_AUDIO_BUFFERING_ACTION_*`) → `set_floor_audio_buffering` / `add_audio_buffering` in `audio_callback` | `action` |
 | the band | `genlock_audio_buffering_band_error_ns` / `_band_ok` | `band_error_ns` / `band_ok` / `floor_holds_band` |
 | raise-to-N-ticks body | `raise_audio_buffering` (upstream's fixed-mode body, shared by fixed and floor) | the C lift in `tests/genlock_audio_buffering_wiring_1367.rs` |
 
@@ -65,7 +66,8 @@ its #1355 absolute level target (100 ms + the sync offset) at all. The two strea
   late audio on FOH/VBAN. The maximum stays the caller's (45 ticks by default).
 - **Fixed buffering is never used.** The frontend LowLatencyAudioBuffering toggle (fixed 20 ms) is
   overridden: one `genlock audio buffering (issue 1367): … OVERRIDDEN` WARNING at reset, max back to
-  45 ticks.
+  45 ticks. The upstream fixed branch in `audio_callback` (and `set_fixed_audio_buffering`) stays
+  byte-identical for rebases; the plan never sets `fixed_buffer`, so it is unreachable.
 - **The log:**
   - `buffering type:  fixed floor 85 ms, dynamically increasing above` in the reset block;
   - `genlock audio buffering floor (issue 1367): total audio buffering is now 85 milliseconds …`
@@ -73,8 +75,9 @@ its #1355 absolute level target (100 ms + the sync offset) at all. The two strea
   - every later increase is ONE `LOG_WARNING` line, `genlock audio buffering ABOVE the floor
     (issue 1367): adding N … total audio buffering is now M milliseconds (source: <name>); ASRC
     level band ok|BROKEN: …`. BROKEN means buffering + the 9 ms nominal base left the band (M above
-    126 ms): a mixed source on an absolute ASRC level target (the stream `mbc`) is out of reach until
-    OBS restarts.
+    126 ms): a mixed source on an absolute ASRC level target (the stream `mbc`) cannot reach it at
+    this buffering. libobs has no box identity, so the note prints on every box; on resolume it only
+    matters for a mixed non-genlock source on an absolute target there.
 - **The #786 launch gates keep working.** `obs-guarded-launch.ps1`, `launch-obs-genlock.sh` (3b)
   and `rig-health-audit.py` parse `total audio buffering is now (\d+) milliseconds` against a 100 ms
   bound.
@@ -82,11 +85,21 @@ its #1355 absolute level target (100 ms + the sync offset) at all. The two strea
   - The floor alone reads 85 / 92 ms, a clean draw.
   - A late-source increase above 100 ms is still a BAD draw, as before (the 960 ms ASIO ratchet of
     #786 is unchanged: the dynamic increase above the floor is stock OBS).
-  - The "box standard 64 ms" wording in those scripts' comments predates the floor: a clean launch
-    now logs exactly the floor line, 85 ms at 48 kHz.
-- **The #1355 UNREACHABLE fallback is only a logged safety net now.** Its line also names
-  `total_audio_buffering=` and `floor=` at that moment: above the floor, a late source raised the
-  buffering (its own ABOVE line says which); at the floor, the cause is not the buffering.
+  - A clean launch now logs exactly the floor line (85 ms at 48 kHz); the scripts' comments, the
+    guarded launcher's popup (`norma 85 ms`) and the obs-ops skill say so since issue 1367.
+- **The #1355 UNREACHABLE fallback is only a logged safety net now — on the stream box.** Its line
+  also names `total_audio_buffering=` and `floor=` at that moment: above the floor, a late source
+  raised the buffering (its own ABOVE line says which); at the floor, the cause is not the buffering.
+  On resolume a media / `NDI test` start still grows the buffering past the band (128–362 ms), so a
+  mixed, non-genlock, non-monitor-only source there (the ASRC is on by default and its target is
+  absolute for such a source) can still fall back — a follow-up candidate, not this slice.
+- **Other boxes.** The floor applies to every genlock OBS (same libobs). The mix output lags real
+  time by the buffering, and wall-clock-stamped audio outputs follow it: on resolume the DistroAV
+  NDI output audio and the obs-vban send to FOH run ≥ 85 ms behind from the first tick, where they
+  used to run at 0 until the first media start grew it to 128–362 ms. No rig input consumes
+  resolume's NDI audio (the certified table: every strih/stream NDI input is silent), so the
+  visible effect is the FOH VBAN latency while idle. strih-lx carries no mixed program audio over
+  NDI either; its mix now starts 85 ms behind.
 
 ## Tests and Tier-0
 
@@ -121,5 +134,10 @@ its #1355 absolute level target (100 ms + the sync offset) at all. The two strea
 Full-bundle deploy on stream (and resolume + strih-lx, same libobs), then at least two OBS
 restarts. After each:
 - the log shows `buffering type:  fixed floor 85 ms` and exactly one floor line;
-- `mbc` `target=` = 100 + offset and `level_avg` within ~5 ms of it after ~15 min, `fallbacks=0`;
-- the release A/V gate is green and the per-camera A/V is the same across the restarts.
+- stream: `mbc` `target=` = 100 + offset and `level_avg` within ~5 ms of it after ~15 min,
+  `fallbacks=0`; the release A/V gate is green and the per-camera A/V is the same across the
+  restarts;
+- resolume: the floor line, then an `ABOVE the floor` line per media / `NDI test` start (expected);
+  the `sp-*_video` audio pairing (`audio_pairing_offset_ms`, `audio_health=0`) and the songplayer
+  A/V gate unchanged; FOH hears the program audio ≥ 85 ms later than before while idle;
+- strih-lx: the floor line, no UNREACHABLE line, OBS audio monitoring normal.

@@ -10,8 +10,9 @@
 # WHY: some launches hit an ASIO init race ('ASIO Input Capture' on VB-Matrix VASIO-8 floods
 # stale audio before Dante VSC finishes init) -> libobs ratchets its GLOBAL audio buffering to
 # the 960 ms max within the first seconds and it NEVER shrinks until OBS restarts -> the whole
-# session's A/V is off by ~0.9 s (live incident 2026-07-15). Box standard is 64 ms (some days
-# 85); threshold 100 = standard + small headroom. Permanent fix is OBS-level (#786) -- this is
+# session's A/V is off by ~0.9 s (live incident 2026-07-15). Box standard is the genlock libobs
+# 85 ms floor since issue 1367 (92 ms at 44.1 kHz; 64 ms or 85 ms per launch before it);
+# threshold 100 = standard + small headroom. Permanent fix is OBS-level (#786) -- this is
 # the launch-path hotfix.
 #
 # Flow:
@@ -32,7 +33,7 @@ $exe        = 'C:\Program Files\obs-studio\bin\64bit\obs64.exe'
 $cwd        = 'C:\Program Files\obs-studio\bin\64bit'
 $logDir     = "$env:APPDATA\obs-studio\logs"
 $runLog     = 'C:\camera-box\obs-guarded-launch.log'
-$threshold  = 100   # ms; box standard 64/85 -- same bound as launch-obs-genlock.sh (3b) + its pin test
+$threshold  = 100   # ms; box standard 85 (the issue-1367 floor) -- same bound as launch-obs-genlock.sh (3b) + its pin test
 $maxDraws   = 3
 
 Add-Type -AssemblyName System.Windows.Forms | Out-Null
@@ -76,7 +77,7 @@ if ($running) {
     $d = Get-BufferDraw
     if ($d.Peak -gt $threshold -or $d.Maxed) {
         Write-RunLog ("already-running BAD peak={0}ms maxed={1} log={2}" -f $d.Peak, $d.Maxed, $d.Name)
-        Show-Alert ("POZOR: beziace OBS ma audio buffer {0} ms (norma 64 ms) -- zvuk ide o ~{0} ms neskor, A/V sync je MIMO.`n`nFix: zavri OBS a spusti ho znova (tato ochrana pri starte zly zreb sama vymeni). OBS teraz NEVYPINAM -- rozhodni ty." -f $d.Peak)
+        Show-Alert ("POZOR: beziace OBS ma audio buffer {0} ms (norma 85 ms) -- zvuk ide o ~{0} ms neskor, A/V sync je MIMO.`n`nFix: zavri OBS a spusti ho znova (tato ochrana pri starte zly zreb sama vymeni). OBS teraz NEVYPINAM -- rozhodni ty." -f $d.Peak)
     } else {
         Write-RunLog ("already-running clean peak={0}ms log={1}" -f $d.Peak, $d.Name)
     }
@@ -105,7 +106,7 @@ for ($draw = 1; $draw -le $maxDraws; $draw++) {
     }
     Write-RunLog ("draw {0}: BAD peak={1}ms maxed={2} log={3}" -f $draw, $d.Peak, $d.Maxed, $d.Name)
     if ($draw -eq $maxDraws) {
-        Show-Alert ("OBS 3x za sebou nabehli so zlym audio bufferom (teraz {0} ms, norma 64 ms) -- A/V sync bude MIMO o ~{0} ms.`n`nOBS necham BEZAT (radsej bezi nez nic), ale zvuk/obraz nesedi. Skus OBS vypnut a spustit este raz; ak to nepomoze, problem je v ASIO zariadeniach (VB-Matrix / Dante) -- pozri #786." -f $d.Peak)
+        Show-Alert ("OBS 3x za sebou nabehli so zlym audio bufferom (teraz {0} ms, norma 85 ms) -- A/V sync bude MIMO o ~{0} ms.`n`nOBS necham BEZAT (radsej bezi nez nic), ale zvuk/obraz nesedi. Skus OBS vypnut a spustit este raz; ak to nepomoze, problem je v ASIO zariadeniach (VB-Matrix / Dante) -- pozri #786." -f $d.Peak)
         exit 7
     }
     Stop-Process -Name obs64 -Force -ErrorAction SilentlyContinue

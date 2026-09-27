@@ -418,10 +418,12 @@ static void add_audio_buffering(struct obs_core_audio *audio, size_t sample_rate
 
 	/* camera-box issue 1367: an increase ABOVE the genlock floor is one LOUD named line: the late
 	 * source and the new total (keeping the "total audio buffering is now %d milliseconds" text the
-	 * #786 launch gates parse), and where the new total leaves the #1335/#1355 ASRC level band -- an
-	 * absolute level target (the stream `mbc`) then sits more than GENLOCK_AUDIO_LEVEL_REACH_NS from
-	 * the natural depth (buffering + the ~9 ms base) and is out of the servo's reach until OBS
-	 * restarts. On the resolume cg OBS a media / NDI start legitimately grows it. */
+	 * #786 launch gates parse), and where the new total leaves the #1335/#1355 ASRC level band -- a
+	 * mixed source on an absolute level target (the stream `mbc`) then sits more than
+	 * GENLOCK_AUDIO_LEVEL_REACH_NS from its natural depth (buffering + the ~9 ms nominal base) and
+	 * the servo cannot reach it. libobs has no box identity: on the resolume cg OBS a media / NDI
+	 * start legitimately grows the buffering, and the note then only matters for a mixed source
+	 * on an absolute target there. */
 	const int64_t genlock_band_err_ns = genlock_audio_buffering_band_error_ns(
 		genlock_audio_buffering_ticks_ns((uint32_t)audio->total_buffering_ticks, AUDIO_OUTPUT_FRAMES,
 						 (uint32_t)sample_rate),
@@ -435,8 +437,8 @@ static void add_audio_buffering(struct obs_core_audio *audio, size_t sample_rate
 	     (int)(GENLOCK_AUDIO_LEVEL_BASE_NOMINAL_NS / 1000000ULL), (double)genlock_band_err_ns / 1e6,
 	     ASRC_LEVEL_TARGET_MS, (int)(GENLOCK_AUDIO_LEVEL_REACH_NS / 1000000LL),
 	     genlock_band_ok ? ""
-			     : " -- an absolute ASRC level target (#1335/#1355, the stream mbc) is out of reach until "
-			       "OBS restarts");
+			     : " -- a mixed source on an absolute ASRC level target (#1335/#1355, e.g. the stream mbc) "
+			       "cannot reach it at this buffering");
 #if DEBUG_AUDIO == 1
 	blog(LOG_DEBUG,
 	     "min_ts (%" PRIu64 ") < start timestamp "
@@ -800,16 +802,18 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 	/* ------------------------------------------------ */
 	/* if a source has gone backward in time, buffer    */
 	/* camera-box issue 1367: the genlock floor first (the first tick of every launch), then OBS's own
-	 * dynamic increase above it -- genlock_audio_buffering_action() (obs-genlock-audio-buffering.h). */
+	 * dynamic increase above it -- genlock_audio_buffering_action() (obs-genlock-audio-buffering.h).
+	 * The upstream fixed branch stays byte-identical for rebases; the genlock plan never sets
+	 * fixed_buffer, so it is unreachable. */
 	const int genlock_buffering = genlock_audio_buffering_action(
 		audio->total_buffering_ticks, audio->floor_buffering_ticks, audio->max_buffering_ticks, min_ts < ts.start);
 	if (audio->fixed_buffer) {
 		if (!audio_buffering_maxed(audio)) {
 			set_fixed_audio_buffering(audio, sample_rate, &ts);
 		}
-	} else if (genlock_buffering == GENLOCK_AUDIO_BUFFERING_FLOOR) {
+	} else if (genlock_buffering == GENLOCK_AUDIO_BUFFERING_ACTION_FLOOR) {
 		set_floor_audio_buffering(audio, sample_rate, &ts);
-	} else if (genlock_buffering == GENLOCK_AUDIO_BUFFERING_DYNAMIC) {
+	} else if (genlock_buffering == GENLOCK_AUDIO_BUFFERING_ACTION_DYNAMIC) {
 		add_audio_buffering(audio, sample_rate, &ts, min_ts, buffering_name);
 	}
 

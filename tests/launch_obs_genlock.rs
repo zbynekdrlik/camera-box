@@ -162,7 +162,7 @@ fn program_gates_on_audio_buffering_and_redraws_786() {
     // but loosens the threshold / attempt count / clean-condition must go RED here.
     assert!(
         p.contains("$bufPeak -le 100"),
-        "#786: the clean-draw threshold must stay 100 ms (box standard 64/85 ms + headroom) (peak above it = bad draw). Program:\n{p}"
+        "#786: the clean-draw threshold must stay 100 ms (box standard = the issue-1367 85 ms floor + headroom) (peak above it = bad draw). Program:\n{p}"
     );
     assert!(
         p.contains("$maxLaunchAttempts = 3"),

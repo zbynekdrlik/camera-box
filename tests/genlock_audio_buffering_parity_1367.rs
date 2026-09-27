@@ -208,7 +208,7 @@ static void ns_line(uint32_t ticks, uint32_t frames, uint32_t rate)
 
 static void plan_line(uint32_t max, bool fixed, uint32_t rate, uint32_t frames)
 {{
-	const struct genlock_audio_buffering_plan p = genlock_audio_buffering_plan(max, fixed, rate, frames);
+	const struct genlock_audio_buffering_plan p = genlock_audio_buffering_make_plan(max, fixed, rate, frames);
 	printf("plan %" PRIu32 " %d %" PRIu32 " %" PRIu32 " %" PRIu32 " %" PRIu32 " %d %d\n", max, fixed ? 1 : 0, rate,
 	       frames, p.floor_ticks, p.max_ticks, p.fixed ? 1 : 0, p.overridden ? 1 : 0);
 }}
@@ -341,9 +341,15 @@ fn the_header_defines_are_the_rust_constants_1367() {
         LEVEL_BASE_NOMINAL_NS.to_string()
     );
     for (name, v) in [
-        ("GENLOCK_AUDIO_BUFFERING_NONE", BufferingAction::None),
-        ("GENLOCK_AUDIO_BUFFERING_FLOOR", BufferingAction::Floor),
-        ("GENLOCK_AUDIO_BUFFERING_DYNAMIC", BufferingAction::Dynamic),
+        ("GENLOCK_AUDIO_BUFFERING_ACTION_NONE", BufferingAction::None),
+        (
+            "GENLOCK_AUDIO_BUFFERING_ACTION_FLOOR",
+            BufferingAction::Floor,
+        ),
+        (
+            "GENLOCK_AUDIO_BUFFERING_ACTION_DYNAMIC",
+            BufferingAction::Dynamic,
+        ),
     ] {
         assert_eq!(lift_define(&h, name), (v as i32).to_string(), "{name}");
     }

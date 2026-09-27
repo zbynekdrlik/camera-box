@@ -80,7 +80,7 @@ pub const LEVEL_BASE_NOMINAL_NS: u64 = 9_000_000;
 pub const LEVEL_BASE_MAX_NS: u64 = 25_000_000;
 
 /// What [`plan`] decides at `obs_reset_audio2`. Mirror of the C
-/// `struct genlock_audio_buffering_plan`.
+/// `struct genlock_audio_buffering_plan` (built by `genlock_audio_buffering_make_plan`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BufferingPlan {
     /// The floor, in ticks, applied on the first mixer tick of every launch.
@@ -88,7 +88,8 @@ pub struct BufferingPlan {
     /// The ceiling of the dynamic increase above the floor, in ticks. Never below the floor.
     pub max_ticks: u32,
     /// Whether OBS's fixed-buffering mode is used. Always false under the floor: the floor is
-    /// the fixed part, and the part above it stays dynamic.
+    /// the fixed part, and the part above it stays dynamic. obs-audio.c keeps the upstream fixed
+    /// branch byte-identical for rebases; it is unreachable in the genlock build.
     pub fixed: bool,
     /// True when the request (a fixed / low-latency buffering, or a maximum below the floor) was
     /// replaced; libobs logs it.
@@ -96,7 +97,7 @@ pub struct BufferingPlan {
 }
 
 /// What the mixer does about its buffering on one tick. Mirror of the C
-/// `GENLOCK_AUDIO_BUFFERING_*` values.
+/// `GENLOCK_AUDIO_BUFFERING_ACTION_*` values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BufferingAction {
     /// Nothing: at the maximum, or no source is behind the window.

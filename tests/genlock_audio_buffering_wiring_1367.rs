@@ -50,11 +50,11 @@ const WIRING: [(&str, &str); 12] = [
     (OBS_AUDIO, "const int genlock_buffering = genlock_audio_buffering_action("),
     (
         OBS_AUDIO,
-        "} else if (genlock_buffering == GENLOCK_AUDIO_BUFFERING_FLOOR) { set_floor_audio_buffering(audio, sample_rate, &ts);",
+        "} else if (genlock_buffering == GENLOCK_AUDIO_BUFFERING_ACTION_FLOOR) { set_floor_audio_buffering(audio, sample_rate, &ts);",
     ),
     (
         OBS_AUDIO,
-        "} else if (genlock_buffering == GENLOCK_AUDIO_BUFFERING_DYNAMIC) { add_audio_buffering(audio, sample_rate, &ts, min_ts, buffering_name);",
+        "} else if (genlock_buffering == GENLOCK_AUDIO_BUFFERING_ACTION_DYNAMIC) { add_audio_buffering(audio, sample_rate, &ts, min_ts, buffering_name);",
     ),
     (
         OBS_AUDIO,
@@ -482,7 +482,7 @@ fn build_and_run_lift() -> Vec<String> {
 }
 
 const BROKEN_TAIL: &str =
-    " -- an absolute ASRC level target (#1335/#1355, the stream mbc) is out of reach until OBS restarts";
+    " -- a mixed source on an absolute ASRC level target (#1335/#1355, e.g. the stream mbc) cannot reach it at this buffering";
 
 fn expected_trace() -> Vec<String> {
     let floor_line = |ms: u32| {
