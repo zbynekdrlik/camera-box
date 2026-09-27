@@ -19,6 +19,7 @@ paths:
   - "tests/distroav_connect_on_show_park_1242.rs"
   - "tests/python/test_genlock_park_1242.py"
   - "tests/python/test_strih_bandwidth_roles_1242.py"
+  - "tests/python/test_e2e_twin_hold_1242.py"
 ---
 
 # strih bandwidth roles — full bandwidth only for SHOWN cameras (issue 1242)
@@ -155,9 +156,13 @@ not parked (normal classification).
 | strih frozen-input watchdog (#1069 enumeration) | `genlock_park_watch_set`: one live receiver per camera — a live main (twin dropped), or the twin of a parked main; never both (no double page) |
 | frozen-input static SOURCES / cadence / ndi-halving | parked → SKIP, no blind-tap count, stale baseline dropped |
 | rig-health-audit `arrivals-low` + `cadence_check` | `park_touched_sources` (ANY park line, parked or unparked, in the window: a partial history is no measurement) + `MV` twins excluded |
-| set-ndi-mapping `--verify-live` | `hidden=obs_phase2.input_hidden_by_design` (settings + `GetSourceActive.videoShowing`) → SKIP, never screenshot-sampled |
+| set-ndi-mapping `--verify-live` | `hidden=obs_phase2.input_hidden_by_design` (settings + `GetSourceActive.videoShowing`) → SKIP, never screenshot-sampled; a twin the E2E hold took off the wire (`strih_bandwidth_roles.twin_is_held`) is hidden by design too, showing or not |
 | asio-starve watchdog | n/a (reads `asrc:` audio lines; camera inputs carry no audio) |
-| `[4c/8]`, mv-reverify-escalate, ndi-cadence-heal, `[4j/8settle]`, `recording-e2e.sh` | the E2E HOLD (below) keeps every program-path input connected, so nothing parks during a run — including across a mid-run strih OBS relaunch (the strih-side marker makes the launch-time role apply keep the mains connected) |
+| `[4c/8]`, mv-reverify-escalate, ndi-cadence-heal, `[4j/8settle]`, `recording-e2e.sh` | the E2E HOLD (below) keeps every program-path input connected, so nothing parks during a run — including across a mid-run strih OBS relaunch (the strih-side marker makes the launch-time role apply keep the mains connected). Their input sets are the `NDI camN` mains only (`camera_*_ndi_sources*_csv`, `NDI cam${cam_n}`, the `NDI_CADENCE_INPUTS` default; the live freeze watch too), so a twin the hold took off the wire is never read — pinned by `tests/python/test_e2e_twin_hold_1242.py` |
+| the hold's own `connect_on_show_e2e_wait_live` | reads only the held MAINS from the hold state file (`connect_on_show_held_mains`, the bash twin of `obs_phase2._read_hold_state`, pinned to it); a held twin delivers no video and is never waited on |
+| in-OBS LOCK widget / the `genlock_lock` facet / its watchdog | a held twin runs with `genlock_fifo=false`, and the widget scan skips a non-genlock source (`!st.genlock_fifo`, `OBSBasicStatusBar.cpp`) — never unlocked / absent / idle, never a `recent_event` offender. Its restore at cleanup re-enables genlock, so a short `recent_event` DEGRADED after the run is expected |
+| `[0/8]` reads | run BEFORE the hold. A twin left held by a SIGKILLed run is non-genlock, so the lock widget and the mains-only input sets ignore it; the next run's hold unions it and its cleanup restores it |
+| dev1 frozen-input watchdog during the hold | the mains are unparked, so `genlock_park_watch_set` drops their twins; a held twin logs no audit line |
 | genlock_audit_snapshot / e2e_discord_report / churn / arrival_floor | report-only analysis; arrival_floor already filters `^NDI cam` |
 
 ## The E2E hold
@@ -178,14 +183,51 @@ back (failure → the run aborts: a hidden input would be measured cold). `clean
 AFTER `cleanup_mv_reverify_active_boxes` + `ndi_cadence_verify_and_heal` (both read every input
 connected — restoring earlier would make the #759 reverify see parked mains as wedged and escalate);
 always returns 0; a failed restore is fail-SAFE (the inputs just stay connected until the next
-launch re-applies the roles). During a run the uplink carries 7 full inputs + 7 LOWEST twins — more
-than before this change — so the live acceptance also reads `ether2` drops DURING an E2E.
+launch re-applies the roles).
+
+**The same hold takes every monitor twin OFF THE WIRE for the run** (design 5859315296, finding
+5859213950). A twin from a camera-box sender costs ~58 Mbps at NDI "lowest", not a small proxy, so
+7 mains + 7 twins (~1.4 Gbps) tail-dropped the strih-lx `foh1_video ether2` uplink during the E2E
+(~480 drops/min) and failed release E2E attempts on camera arrival holds. Now:
+
+- **Which inputs:** the role-marked twins, `strih_bandwidth_roles.twin_hold_targets` = the `MV ` name
+  AND `genlock_monitor`.
+- **What is written:** `E2E_TWIN_HOLD` = `{"genlock_fifo": false, "ndi_bw_mode": 2}` (audio-only).
+  With genlock on, DistroAV's #150 lockdown (`force_genlock_certified_settings`) forces a monitor twin
+  back to LOWEST on EVERY settings update, so an audio-only write alone never sticks. With genlock
+  off the coercion does not run: audio-only stays and DistroAV's own `reset_ndi_receiver` drops the
+  video. The sender name is never touched (no empty-name wedge, `ndi-name-recovery.md`).
+- **Recorded before any write:** each twin's original, `twin_hold_original` of its EFFECTIVE settings
+  (`genlock_fifo` defaults to TRUE in this build, so an absent key is genlocked). A twin that already
+  reads held (a leftover whose state file was lost) records `TWIN_ON_WIRE`, never the held values.
+- **State file:** `{"connect_on_show": [...], "twins": {name: original}}`. A legacy list of mains
+  still reads. A leftover file is unioned, and its recorded twin original wins.
+- **Writes only present inputs**, mains first, then twins, so a camera always has one live receiver.
+- **Every read-back is a SETTLE poll**, `_await_settled`. OBS applies an input update on the next
+  VIDEO TICK after the WS overlay (`obs_source_update` defers `info.update`), so an immediate
+  `GetInputSettings` reads the overlay back even when the update is about to revert it. The poll
+  starts `_SETTLE_MIN_S` (0.25 s) after the writes, needs two consecutive matching reads, and stops at
+  `_SETTLE_BUDGET_S` (5 s). A twin that does not settle fails the hold (exit 1): the run aborts,
+  and its cleanup restores what was recorded.
+- **Restore:** the twins first (`twin_restore_values`: genlock on, and the lockdown pins LOWEST
+  itself), then the mains. Verified by the same settle poll; a deleted/renamed input is done; the
+  file is removed only when every restore landed.
+- **Mid-run strih OBS relaunch:** the launch-time role apply leaves a held twin alone
+  (`twin_is_held`, `summary["twins_held"]`) while the fresh E2E hold marker exists. Without the
+  marker its twin role heal writes `genlock_fifo=True`, so a twin left held by a SIGKILLed run comes
+  back on the wire at the next launch. A twin whose held settings were never saved to the scene file
+  before an OBS crash comes back on the wire for the rest of that run (a higher load, never wrong
+  data).
+- **Cost:** the multiview twin cells freeze for the run.
+
+**Live check (supervisor):** during the next release E2E, read the `ether2` tx-drop delta before
+and after, and the per-source rx rates (the twins at ~0 video).
 
 ## Live acceptance (supervisor, never on a production day)
 
 Full-bundle deploy (vendored DistroAV + OBS frontend) → `strih_scenes.py --apply-roles` (or an OBS
 relaunch) → fix the multiview tile order once → multiview: every cell live, labels read the program
 scene names, a cut lights the right cell red, a click selects the program scene (never an `MV`
-scene) → `ether2` tx-drop = 0 over 30 min idle AND during an E2E → PVW-select → first-frame time
+scene) → `ether2` tx-drop = 0 over 30 min idle AND during an E2E (the twins off the wire) → PVW-select → first-frame time
 measured → E2E green. Unverified until then: whether an unpark's fresh-finder bind ever hits the
 #1287 frame-less alternation on the rig.
