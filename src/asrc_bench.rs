@@ -401,7 +401,7 @@ pub const LEVEL_EMA_TAU_S: f64 = 10.0;
 /// P/I terms, plus the restore burst the sustained-error arm fires, walk every launch to the SAME depth.
 /// Value from the stream-box data: OBS's own audio buffering was 0, 64 or 85 ms per launch (random —
 /// since issue 1367 every launch starts at a deterministic 85 ms floor, `genlock_audio_buffering`),
-/// the offset-free depth sat at ≈ 70–102 ms; 100 ms is above the 85 ms buffering maximum with a
+/// the offset-free depth sat at ≈ 70–102 ms; 100 ms is above the 85 ms buffering floor with a
 /// margin wider than the ±8–10 ms 1-s level scatter, inside the observed 64–126 ms band, and near the
 /// level median (≈ 91 ms), so the one-time A/V shift the calibrated pin/audio offset absorbs stays
 /// small. A target the mixer cannot reach is bounded by [`LEVEL_TARGET_UNREACHABLE_WINDOWS`]. Only

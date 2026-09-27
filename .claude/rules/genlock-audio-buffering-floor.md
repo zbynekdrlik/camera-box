@@ -8,6 +8,7 @@ paths:
   - "tests/genlock_audio_buffering_wiring_1367.rs"
   - "scripts/obs-guarded-launch.ps1"
   - "scripts/rig-health-audit.py"
+  - "scripts/launch-obs-genlock.sh"
 ---
 
 # The genlock audio-buffering FLOOR (issue 1367, ROZHODNUTÉ 5857354949)
@@ -66,8 +67,9 @@ its #1355 absolute level target (100 ms + the sync offset) at all. The two strea
   late audio on FOH/VBAN. The maximum stays the caller's (45 ticks by default).
 - **Fixed buffering is never used.** The frontend LowLatencyAudioBuffering toggle (fixed 20 ms) is
   overridden: one `genlock audio buffering (issue 1367): … OVERRIDDEN` WARNING at reset, max back to
-  45 ticks. The upstream fixed branch in `audio_callback` (and `set_fixed_audio_buffering`) stays
-  byte-identical for rebases; the plan never sets `fixed_buffer`, so it is unreachable.
+  45 ticks. The upstream fixed branch in `audio_callback` stays byte-identical for rebases
+  (`set_fixed_audio_buffering` is now a thin wrapper over the shared `raise_audio_buffering`); the
+  plan never sets `fixed_buffer`, so that branch is unreachable.
 - **The log:**
   - `buffering type:  fixed floor 85 ms, dynamically increasing above` in the reset block;
   - `genlock audio buffering floor (issue 1367): total audio buffering is now 85 milliseconds …`
@@ -92,7 +94,8 @@ its #1355 absolute level target (100 ms + the sync offset) at all. The two strea
   raised the buffering (its own ABOVE line says which); at the floor, the cause is not the buffering.
   On resolume a media / `NDI test` start still grows the buffering past the band (128–362 ms), so a
   mixed, non-genlock, non-monitor-only source there (the ASRC is on by default and its target is
-  absolute for such a source) can still fall back — a follow-up candidate, not this slice.
+  absolute for such a source) can still fall back — reported to the supervisor as a follow-up
+  candidate, not this slice.
 - **Other boxes.** The floor applies to every genlock OBS (same libobs). The mix output lags real
   time by the buffering, and wall-clock-stamped audio outputs follow it: on resolume the DistroAV
   NDI output audio and the obs-vban send to FOH run ≥ 85 ms behind from the first tick, where they
@@ -126,13 +129,16 @@ its #1355 absolute level target (100 ms + the sync offset) at all. The two strea
   - the wiring file: plain `rustc --test` with `CARGO_MANIFEST_DIR`;
   - the three C files: the `obs-drm-output.md` `-fsyntax-only` recipe.
 - Mutation proof: point `CARGO_MANIFEST_DIR` at a scratch tree holding the mutated header /
-  `obs.c` / `obs-audio.c` plus the lifted files, and recompile each test per mutant. 22/22 C mutants
-  died after review round 1 (incl. each band edge made strict, the raise no-op guard removed), and
-  3/3 Rust constant mutants.
+  `obs.c` / `obs-audio.c` plus the lifted files, and recompile each test per mutant. 23/23 C mutants
+  died after review round 2 (incl. each band edge made strict, the raise no-op guard removed, the
+  UNREACHABLE total/floor arguments swapped), and 3/3 Rust constant mutants.
 - The C lift models the window `audio_callback` really processes: the front of
-  `buffered_timestamps`, `buffered_ts − wait × tick` while ticks wait. The stream ASIO startup
-  race runs undrained: 85 ms behind is absorbed by the floor, 100 ms behind adds one tick, so the
-  total is `max(floor, stock)`. `raise_audio_buffering` to the current total is a no-op.
+  `buffered_timestamps`, which stays `start − total × tick` behind real time (the queue keeps
+  `total_buffering_ticks` windows forever; while ticks wait that is `buffered_ts − wait × tick`).
+  Delays are behind REAL time: 10 ms is absorbed by the floor; the stream ASIO startup race runs
+  undrained (85 ms absorbed, 100 ms adds one tick); every total is `max(floor, stock)`.
+  `raise_audio_buffering` to the current total is a no-op. (Review round 2 caught the first model,
+  which put the window back at real time once the waits drained.)
 
 ## Live acceptance (supervisor)
 
