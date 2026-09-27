@@ -3,7 +3,8 @@
 set -euo pipefail
 
 # Per-hop genlock-FIFO playback verdict for SongPlayer SP-* -> cg OBS (RESOLUME-SNV) -> strih `cg`
-# / stream `NDI obs hudba`, the way recording-e2e.sh answers cam2 -> strih -> stream. For each hop
+# (-> stream, only on request -- see HOPS below), the way recording-e2e.sh answers cam2 -> strih ->
+# stream. For each hop
 # it reads ONE aligned `genlock-fifo audit` window, runs the cadence-agnostic resolume_playback
 # verdict REPLICA (scripts/lib/cg-chain-verify.sh -- pinned to camera_box::resolume_playback by
 # tests/harness_cg_chain_verify_1300.rs), reads the per-source `asrc: source '<x>' estimated=` ppm
@@ -26,15 +27,23 @@ set -euo pipefail
 # .claude/rules/ps-log-byte-safety-extraction.md (the audit line carries the `~=` glyph).
 #
 # Usage:
-#   scripts/cg-chain-verify.sh [--hops "cg-obs strih stream"] [--skew-bound-ms 20] [--min-samples 2]
+#   scripts/cg-chain-verify.sh [--hops "cg-obs strih"] [--skew-bound-ms 20] [--min-samples 2]
 #       [--asrc-floor-ppm 10] [--soak-hours N] [--interval-s 300] [--csv <path>] [--report-only]
 # Exit: 0 all hops PASS (or --report-only); 3 any hop/source FAIL or a hop log is UNREADABLE.
+#
+# HOPS (issue 1380, ROZHODNUTIE 27.9.2026): the default is `cg-obs strih`. The owner removed the
+# stream OBS input the stream hop used to read, so the stream hop runs ONLY when asked for
+# (`--hops "... stream"` or env CG_CHAIN_HOPS). Its input is CG_CHAIN_STREAM_SRC (default
+# `NDIA cg stream`, the CG-named NDI input of the live stream production scene read 27.9.2026). When
+# that input has no `genlock-fifo audit` line in the window the hop prints a named ABSENT row and
+# does not fail the run (cg_chain_hop_absent_ok); a missing strih `cg` still FAILs.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/cg-chain-verify.sh
 . "$HERE/lib/cg-chain-verify.sh"
 
-HOPS="cg-obs strih stream"
+HOPS="${CG_CHAIN_HOPS:-cg-obs strih}"
+CG_CHAIN_STREAM_SRC="${CG_CHAIN_STREAM_SRC:-NDIA cg stream}"
 SKEW_BOUND_MS=20
 MIN_SAMPLES=2
 ASRC_FLOOR_PPM=10
@@ -43,7 +52,7 @@ INTERVAL_S=300
 CSV_PATH=""
 REPORT_ONLY=0
 
-usage() { sed -n '2,40p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,39p' "${BASH_SOURCE[0]}"; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -76,7 +85,7 @@ _hop_sources() {
   case "$hop" in
     cg-obs) printf '%s\n' "$log" | cg_chain_enumerate_sources "$CG_CHAIN_CGOBS_SRC_RE" ;;
     strih)  printf 'cg\n' ;;
-    stream) printf 'NDI obs hudba\n' ;;
+    stream) printf '%s\n' "$CG_CHAIN_STREAM_SRC" ;;
     *) : ;;
   esac
 }
@@ -134,6 +143,17 @@ run_one_window() {
     while IFS= read -r src; do
       [ -z "$src" ] && continue
       summary="$(printf '%s\n' "$log" | cg_chain_summarize_window "$src")"
+      # issue 1380: an optional hop whose input is not on that OBS (no audit line in the window) is
+      # a named ABSENT row -- never a false FAIL, never counted as PASS.
+      if [ -z "$summary" ] && cg_chain_hop_absent_ok "$hop"; then
+        printf '%-7s %-14s %s\n' "$hop" "$src" "ABSENT"
+        printf '         reason: no genlock-fifo audit line for %s on the %s hop (input not present; set CG_CHAIN_STREAM_SRC)\n' "'$src'" "$hop"
+        if [ -n "$CSV_PATH" ]; then
+          ts="$(_now_utc)"
+          cg_chain_csv_row "$ts" "$hop" "$src" "ABSENT" "" "" "" "" "" "" "" "" "" "" >> "$CSV_PATH"
+        fi
+        continue
+      fi
       verdict_out="$(cg_chain_verdict "$summary" "$SKEW_BOUND_MS" "$MIN_SAMPLES")"
       verdict="$(printf '%s\n' "$verdict_out" | head -1)"
       asrc="$(printf '%s\n' "$log" | cg_chain_parse_asrc_ppm "$src")"

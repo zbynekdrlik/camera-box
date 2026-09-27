@@ -56,8 +56,14 @@ Development never programs `PRO` itself. EVENT mode puts `PRO` back.
 | `recording-e2e.sh` `[4/8]` | `Development` | `STREAM_PROG_SCENE` default; `prod-scene` records it |
 | `rig-mode.sh test` gap 2 | `Development` | `verify_stream_program_dev`: seed + `switch --prod-floor` (non-black proof) |
 | `rig-mode.sh test` park (#985) | `Development` | `park_stream_program_dev`: `switch --prod-floor`, a cheap re-assert |
-| `rig-mode.sh event` | `PRO` | `restore_stream_program_production`: `switch --prod-floor --black-report-only --replace-preview Development` |
-| EVENT contract item 9 | must read `PRO` | `event_assert.stream_program_production_ok`, fail-closed |
+| `rig-mode.sh event` | `PRO` only if program is `Development` | `restore_stream_program_production`: `switch --only-from Development --prod-floor --black-report-only --replace-preview Development` |
+| EVENT contract item 9 | readable AND not `Development` | `event_assert.stream_program_not_development_ok`, fail-closed |
+
+**ROZHODNUTIE 27.9.2026 (main):** EVENT undoes development and never overrides an operator's scene.
+It switches to `PRO` only when the live program is `Development`; an operator on `PRE`/`POST`/`PRO`/
+anything else is left alone — no scene set, no preview write, no black proof (forcing `PRO` while
+streaming would arm the Companion `PRODUCTION` auto-record). Item 9 passes on any readable scene
+other than `Development`.
 
 - `switch` skips `SetCurrentProgramScene` when the target is already on program (the #343
   same-scene hang with the heavy `NDI 2ME PGM`); the non-black proof still runs. So a park right
@@ -109,12 +115,11 @@ issue-1204 burn cross-check (`recording-e2e.sh`, `scripts/lib/imag-burn-verify.s
 scene whose first enabled item is a nested scene used to resolve the nested SCENE's name (a burn on a
 scene / a cross-check mismatch); it now resolves the real input. Pinned with a strih-shaped fixture.
 
-## Decided NOT to do (review round 2, Y-B)
+## The removed stream input and the CG-chain tool
 
-EVENT puts `PRO` on program whatever scene is live, and item 9 requires `== PRO`. A reviewer proposed
-switching only when program is `Development` (so an operator already on `PRE`/`POST` is not cut to
-`PRO`). Not done here: the ticket's acceptance says "EVENT mode puts `PRO` back on program" and the
-main session's design says the same; the question is recorded on the ticket for the main session.
+The same 27.9.2026 cleanup removed the stream input `NDI obs hudba`. `scripts/cg-chain-verify.sh`
+now defaults to `cg-obs strih`; its stream hop is on request only and reports `ABSENT` when its
+input is missing (`.claude/rules/cg-chain-verify.md`).
 
 ## Consumers that did NOT need a change
 

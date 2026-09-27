@@ -1198,9 +1198,11 @@ park_stream_program_dev() {
   return $rc
 }
 
-# restore_stream_program_production -> issue 1380: EVENT mode puts the production scene itself
-# ($STREAM_EVENT_SCENE) back on stream's PROGRAM (development ran on the development scene, which
-# only nests it). The same `switch` action, with the prod non-black floor (--prod-floor: real
+# restore_stream_program_production -> issue 1380: EVENT mode undoes development -- it puts the
+# production scene ($STREAM_EVENT_SCENE) back on stream's PROGRAM ONLY when the live program is the
+# development scene (--only-from); an operator's scene (PRE/POST/PRO/...) is left alone
+# (ROZHODNUTIE 27.9.2026: forcing PRO while streaming would arm the Companion auto-record). The
+# same `switch` action, with the prod non-black floor (--prod-floor: real
 # production content can be legitimately dim, #677) and --black-report-only (before a service the
 # cameras may be dark; a BLACK program is a WARNING once the scene is SET, only a failed set or
 # transport returns non-zero). --replace-preview moves a Studio Mode preview an E2E left on the
@@ -1210,8 +1212,9 @@ park_stream_program_dev() {
 restore_stream_program_production() {
   local here rc=0
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
-  echo "[obs stream ${STREAM_IP}] issue 1380: put the production scene '${STREAM_EVENT_SCENE}' back on PROGRAM (development ran on '${STREAM_PROG_SCENE}')"
+  echo "[obs stream ${STREAM_IP}] issue 1380: if PROGRAM is still the development scene '${STREAM_PROG_SCENE}', put the production scene '${STREAM_EVENT_SCENE}' back (an operator scene is left alone)"
   python3 "$here/obs_phase2.py" switch --host "$STREAM_IP" --program-scene "$STREAM_EVENT_SCENE" \
+    --only-from "$STREAM_PROG_SCENE" \
     --prod-floor --black-report-only --replace-preview "$STREAM_PROG_SCENE" \
     --password "$OBS_WS_PASSWORD" \
     2>&1 | sed 's/^/    [stream event program] /' || rc=$?
@@ -1604,11 +1607,11 @@ event_mode_assert() {
   artifacts_json="$(printf '%s\n%s\n' "$artifacts_remote" "$artifacts_local" | jq -R -s 'split("\n") | map(select(length>0))')"
   echo "    [artifacts] $artifacts_json"
 
-  # --- item 9 (issue 1380): the stream PROGRAM is back on the production scene ----------------
+  # --- item 9 (issue 1380): the stream PROGRAM is no longer the development scene -------------
   # An unreadable program reads empty and fails the item closed in event_assert.py.
   local stream_program_scene
   stream_program_scene="$(stream_program_scene_read "$here" "$STREAM_IP" "$OBS_WS_PASSWORD")"
-  echo "    [stream program] '${stream_program_scene}' (expected '${STREAM_EVENT_SCENE}')"
+  echo "    [stream program] '${stream_program_scene}' (must not be the development scene '${STREAM_PROG_SCENE}')"
 
   # --- assemble the facts JSON + decide -------------------------------------------------------
   jq -n \
@@ -1624,7 +1627,7 @@ event_mode_assert() {
     --argjson artifacts_existing "$artifacts_json" \
     --arg latency_detail "$latency_detail" \
     --arg stream_program_scene "$stream_program_scene" \
-    --arg stream_production_scene "$STREAM_EVENT_SCENE" \
+    --arg stream_dev_scene "$STREAM_PROG_SCENE" \
     '{
       fleet_paint_process_counts: $fleet_paint_process_counts,
       fleet_service_active: $fleet_service_active,
@@ -1637,10 +1640,10 @@ event_mode_assert() {
       ndi_mismatches: $ndi_mismatches,
       artifacts_existing: $artifacts_existing,
       stream_program_scene: (if ($stream_program_scene | length) > 0 then $stream_program_scene else null end),
-      stream_production_scene: $stream_production_scene,
+      stream_dev_scene: $stream_dev_scene,
       details: {
         latency_calibrated: $latency_detail,
-        stream_program_production: ("program=\($stream_program_scene), ocakavane=\($stream_production_scene)")
+        stream_program_not_development: ("program=\($stream_program_scene), nesmie byt \($stream_dev_scene)")
       }
     }' > "$facts_json"
 
@@ -1709,8 +1712,8 @@ do_event() {
   echo "[obs] #399 enforce the strih NDI-input→camera mapping (4 distinct — correct for broadcast too):"
   enforce_strih_ndi_mapping
   echo
-  # issue 1380: development ran on the development scene; put the production scene back on the
-  # stream PROGRAM before the contract checks it. A failure is recorded, never fatal here, and folded
+  # issue 1380: development ran on the development scene; if the stream PROGRAM is still on it,
+  # put the production scene back before the contract checks it (an operator scene is left alone). A failure is recorded, never fatal here, and folded
   # into the exit status below (the #868 shape): the contract + Discord confirmation still run.
   _stream_event_rc=0
   restore_stream_program_production || _stream_event_rc=$?
@@ -1743,7 +1746,7 @@ do_event() {
   if [ "${_cam_restore_rc:-0}" -ne 0 ]; then
     echo "RESULT: EVENT mode — cam-side restore FAILED (#868, rc=${_cam_restore_rc}). Burns were still cleared, but the rig is NOT confirmed clean — see the cam-side failure above." >&2
   elif [ "${_stream_event_rc:-0}" -ne 0 ]; then
-    echo "RESULT: EVENT mode — the stream PROGRAM could not be put back on the production scene '${STREAM_EVENT_SCENE}' (issue 1380, rc=${_stream_event_rc}). The rig is NOT confirmed clean for broadcast — see the [stream event program] lines above." >&2
+    echo "RESULT: EVENT mode — the stream PROGRAM could not be moved off the development scene to '${STREAM_EVENT_SCENE}' (issue 1380, rc=${_stream_event_rc}). The rig is NOT confirmed clean for broadcast — see the [stream event program] lines above." >&2
   else
     echo "RESULT: EVENT mode — #722 CONTRACT FAILED. The rig is NOT confirmed clean for broadcast — see the assert summary above." >&2
   fi

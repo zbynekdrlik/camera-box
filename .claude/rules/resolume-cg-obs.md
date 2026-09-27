@@ -143,7 +143,7 @@ live `getent hosts resolume.lan` address.
    CG_CHAIN_CG_OBS_LOG=<that file> \
    CG_CHAIN_STRIH_CMD='<byte-safe ssh strih "gc <obslog> | select -last 4000">' \
    CG_CHAIN_STREAM_CMD='<...stream...>' \
-     bash scripts/cg-chain-verify.sh --hops "cg-obs strih stream"
+     bash scripts/cg-chain-verify.sh --hops "cg-obs strih stream"   # stream hop: CG_CHAIN_STREAM_SRC, ABSENT if missing (issue 1380)
    ```
 
    exit 0 = every hop PASS (`locked=1`, `ts_head_skew_ms` steady, `dropped_due`/`underruns`/`relocks`

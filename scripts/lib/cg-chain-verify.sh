@@ -118,6 +118,14 @@ cg_chain_summarize_window() {
   ' || true
 }
 
+# cg_chain_hop_absent_ok <hop> -- issue 1380: 0 when a hop's input may legitimately be absent from
+#   its OBS (the optional stream hop: the owner removed its old input on 27.9.2026), so a source with
+#   no audit line in the window is reported ABSENT instead of FAIL; 1 for every other hop (the
+#   cg-obs SongPlayer sources and the strih `cg` input are expected, a missing one is a FAIL).
+cg_chain_hop_absent_ok() {
+  [ "${1:-}" = "stream" ]
+}
+
 # cg_chain_verdict <summary_line> [skew_bound_ms] [min_samples] -- replicate
 #   `resolume_playback::evaluate`. stdout: line 1 is `PASS` or `FAIL`; each subsequent line is one
 #   evidence-carrying reason. An EMPTY summary_line (source absent from the window) -> FAIL with an

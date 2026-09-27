@@ -2334,6 +2334,20 @@ def switch(a):
     it marks when the new cambox enters program); the black-check polls AFTER and never moves it."""
     ws = _conn(a.host, a.password)
     try:
+        # issue 1380 (ROZHODNUTIE 27.9.2026): `--only-from <scene>` switches ONLY when the live
+        # program is <scene> (EVENT undoes development: Development -> PRO). Any other program -- an
+        # operator's PRE/POST/PRO -- is left alone: no scene set, no preview write, no black proof
+        # of a scene this tool never touched.
+        only_from = getattr(a, "only_from", "")
+        if only_from:
+            live = _rpc(ws, "GetCurrentProgramScene").get("currentProgramSceneName")
+            if live != only_from:
+                sys.stderr.write(
+                    f"[obs] {a.host}: issue 1380 program is '{live}', not '{only_from}' -- left "
+                    f"alone (not switched to '{a.program_scene}')\n"
+                )
+                print(time.time_ns())
+                return
         # issue 1380: skip the SetCurrentProgramScene when the target is already on program (the
         # #343 same-scene hazard: re-setting a scene that carries the heavy NDI 2ME PGM can hang
         # past the #328 deadline). The rig-mode TEST park re-asserts the development scene it just
@@ -3350,6 +3364,9 @@ def main():
             p.add_argument("--prod-floor", action="store_true")
             p.add_argument("--black-report-only", action="store_true")
             p.add_argument("--replace-preview", default="")
+            # --only-from <scene> = switch only when the live program is <scene> (EVENT undoes
+            # development and never overrides an operator's scene, ROZHODNUTIE 27.9.2026).
+            p.add_argument("--only-from", default="")
         if name == "dev-scene":
             # issue 1380: ensure the stream development scene nests the production scene
             # (idempotent, operator-wins, never writes to the production scene).

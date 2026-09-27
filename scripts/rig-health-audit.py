@@ -603,7 +603,7 @@ def cg_chain_detail_from_output(stdout: str) -> str:
     the tool's own OVERALL verdict. No I/O -- unit-testable. The detail never implies a rig fault
     of its own; the audit's PASS/WARN/FAIL exit is untouched (this row is always emitted as NOTE).
     """
-    passes = fails = 0
+    passes = fails = absent = 0
     overall = "?"
     for ln in stdout.splitlines():
         s = ln.strip()
@@ -616,8 +616,10 @@ def cg_chain_detail_from_output(stdout: str) -> str:
                 passes += 1
             else:
                 fails += 1
+        elif parts and parts[-1] == "ABSENT":
+            absent += 1  # issue 1380: an optional hop's input is not on its OBS
     return (f"overall={overall} sources_pass={passes} sources_fail={fails} "
-            f"(report-only #1300; #787 resolume-rate exemption unchanged)")
+            f"sources_absent={absent} (report-only #1300; #787 resolume-rate exemption unchanged)")
 
 
 def check_cg_chain() -> None:
