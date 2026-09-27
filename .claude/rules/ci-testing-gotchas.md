@@ -1558,3 +1558,21 @@ the lookup predicate itself (`genlock_forced_table_is_program` vs `is_program_au
 give every key one vector name that matches that key ONLY. A name matching two keys (`VBAN
 cg-resolume` also hits `cg`) keeps a dropped key green. Prove it by dropping one key on one side in
 a scratch run and watching the test go RED.
+
+## A compiled-header parity gate with a STALE test binary reports a fake C-vs-Rust divergence (issue 1381)
+
+The parity gates that `#include` a shipped C header (`tests/vban_pacing_parity_1372.rs` and its
+siblings) compile the C driver at RUN time from the header on disk, but the Rust authority is
+baked in at COMPILE time. If the step that rebuilds the test binary did not run, the old binary
+compares the NEW C against the OLD Rust. A typical cause is a `rustfmt --check && rustc …` chain
+that stopped at the format check. The trace then diverges on exactly the lines the change
+touched, which reads like a real C/Rust mismatch. When a parity failure lists only the fields you
+just changed, rebuild the binary before you debug the C.
+
+The same split makes a scratch-tree mutation check cheap. Copy the few files the gate reads (the
+Rust module, its `#[path]` children, the test file, the header and the wiring-pinned sources and
+workflows) into a scratch dir, mutate there, and build with `CARGO_MANIFEST_DIR=<scratch>`. Run
+each mutant through one `rustc --test` and its binary. Also mutate C and Rust IDENTICALLY once:
+only the behavioural tests can kill that mutant, because the parity trace stays equal. A worked
+script (dev1-local, not committed): `~/.claude/work-products/issue-1381-vban-pacer-sim/mut_lane2.py`
+(44/44 killed).
