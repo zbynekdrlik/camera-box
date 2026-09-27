@@ -1681,10 +1681,10 @@ mod tests {
         // The decode kernel builds cos/sin/energy PREFIX SUMS over the whole buffer; a single
         // NaN/Inf sample therefore contaminates EVERY sum after it, silently killing decode for
         // the remainder of the window (every preamble-screen comparison against NaN is false).
-        // The live dock feeds this kernel a mono mixdown of the OBS program audio — an upstream
-        // in-process poison (a wedged resampler channel emitting non-finite samples) must degrade
-        // at most the poisoned samples, never the whole rolling window. Treat non-finite input as
-        // silence.
+        // The live dock feeds this kernel one channel of the OBS program audio per decoder (issue
+        // 1367) — an upstream in-process poison (a wedged resampler channel emitting non-finite
+        // samples) must degrade at most the poisoned samples, never the whole rolling window.
+        // Treat non-finite input as silence.
         let p = AudioParams::rig60();
         let sr = p.sample_rate as usize;
         let idx = 42u8;

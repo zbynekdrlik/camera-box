@@ -144,10 +144,14 @@ channels. It hands every channel's plane to `camerabox::ChannelMarkerPicker`
   nothing, so when the marker rides only on R its first two markers are not paired (a chain needs
   three). A channel that stops decoding hands over once its markers age out of the window. The
   offset cluster is NOT reset on a hand-over; the ~10 ms step between L and R walks through the
-  180 s offset window.
+  180 s offset window. A switch is therefore logged when it happens (`cb_note_channel_switch`):
+  `av-sync-dock: marker channel A -> B (channel_clusters=..., N switch(es) since the last line)`,
+  the first at once, then at most one line per diag interval; `channel_switches=` on the diag line
+  is the running total, so an L/R flip-flop near the floor shows without flooding the log.
 - **Diag line:** `preambles/crc_ok/crc_fail` are now SUMMED over the channels (monotonic, so the
   staleness detector and the pairing watchdog keep working; a mono input reads its one decoder);
-  `marker_channel=<c> channel_clusters=<a,b>` are appended after `publish_max_us` (0-based channel).
+  `marker_channel=<c> channel_clusters=<a,b> channel_switches=<n>` are appended after
+  `publish_max_us` (0-based channel).
   A channel-count change restarts the decode and `cb_audio_pushed`. `reset_window()` (the pairing
   recovery) resets every decoder but keeps the histories and the pick.
 - **The Rust reference** is `src/av_sync_dock_channels.rs` (`ChannelMarkerPicker::dock`).
@@ -157,21 +161,29 @@ channels. It hands every channel's plane to `camerabox::ChannelMarkerPicker`
   median, long equal-timestamp groups) + the real fixture's decodes, and whole streaming transcripts
   push by push (real fixture, both clear, R only, hand-over, three channels, mono, the switch with
   and without a same-index copy, a decode flood past the cap, the window boundary via the tool's
-  optional `<window_samples>` argument). Thirteen C++ mutations (floor `>`, tie to highest, lower
-  median, unstable sort, no missed-marker branch, return channel 0, evict `<=`, window 20, stats of
-  one channel, last modal step, no switch dedup, dedup ignoring the index, cap off by one) are all
-  caught. A mirror mutation that BOTH sides share is invisible to parity: the double return was one,
-  so every behaviour also has its own Rust unit test. Each parity test compiles the tool into its
+  optional `<window_samples>` argument, and the dead-pairing `reset_window()` via its optional
+  `<reset_after>`). Fifteen C++ mutations (floor `>`, tie to highest, lower median, unstable sort,
+  no missed-marker branch, return channel 0, evict `<=`, window 20, stats of one channel, last modal
+  step, no switch dedup, dedup ignoring the index, dedup boundary `<`, cap off by one, a no-op
+  reset) and four Rust-reference mutations (no-op reset, boundary `<`, no dedup, no cap) are all
+  caught. A mutation that BOTH mirrors share is invisible to parity: the round-1 double return was
+  one, and in round 2 a no-op `reset_window()` survived both languages until the reset got its own
+  tests. So every picker behaviour (the pick, the window, the cap, the switch dedup and its
+  boundary, the reset) also has its own Rust unit test. Each parity test compiles the tool into its
   own temp dir and removes it on drop.
 - **The glue:** `st_raw_audio_camera_box` calls `cb_ensure_audio_picker` (one picker per channel
-  layout) and `cb_audio_diag_tick` (the ~10 s staleness / diag line / pairing recovery, split out in
-  review round 1 so the callback stays under ~300 lines).
+  layout), `cb_note_channel_switch` and `cb_audio_diag_tick` (the ~10 s staleness / diag line /
+  pairing recovery, split out in review round 1). The callback is ~298 lines: the next addition to
+  it must split it further first.
 - **The glue anchors:** `tests/av_sync_dock_channel_pick_1367.rs` (with the shared
   `tests/support/cpp_source.rs` helpers, also used by `av_sync_dock_decode_mailbox_1367.rs`) + the
   pwsh step "Assert dock decodes the marker per channel (issue 1367)" in BOTH windows-genlock
-  workflows, which checks the same things (the pwsh slice keeps comments, so a comment inside
-  `st_raw_audio_camera_box` must never spell `acc +=`, `/ (float)ch`, `std::vector<float> mono`,
-  `mono.data()` or `camerabox::StreamingMarkerDecoder(`).
+  workflows, which checks the same list, slicing the same three function bodies (the callback,
+  `cb_ensure_audio_picker`, `cb_note_channel_switch`) with a small `Get-Body` helper. Replay the pwsh
+  checks from the YAML text itself before pushing (a python `re.sub(r"\s+", " ", …)` + the literal
+  lists), since pwsh only runs on the Windows runner. The pwsh slices keep comments, so a comment
+  inside `st_raw_audio_camera_box` must never spell `acc +=`, `/ (float)ch`,
+  `std::vector<float> mono`, `mono.data()` or `camerabox::StreamingMarkerDecoder(`.
 - **Tier-0 verify:** the plain-rustc replica above (with the new test files included; add
   `-A clippy::duplicate_mod` to its clippy-driver run, since two test files there share one
   `#[path]` module — in the real layout each test file is its own crate), each std-only anchor test

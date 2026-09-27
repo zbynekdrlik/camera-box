@@ -756,33 +756,33 @@ jobs:
           # issue 1367: st_raw_audio_camera_box mixed every audio channel to mono before its one
           # marker decoder. The stereo mbc input carries the marker on L and R 10.17 ms apart, and
           # that sum is undecodable. Every channel now has its own decoder (camera-box-channel-pick.hpp)
-          # and only the chosen channel's markers are paired. Mirrors
-          # tests/av_sync_dock_channel_pick_1367.rs; the C++<->Rust parity of the header runs on the
-          # Linux CI (tests/qpsk_channel_pick_parity_1367.rs).
+          # and only the chosen channel's markers are paired; a switch of that channel is logged.
+          # Checks the same list as tests/av_sync_dock_channel_pick_1367.rs (the Rust test strips
+          # comments, this slice keeps them); the C++<->Rust parity of the header runs on the Linux
+          # CI (tests/qpsk_channel_pick_parity_1367.rs).
           if (-not (Test-Path "vendor/av-sync-dock/src/camera-box-channel-pick.hpp")) {
             Write-Error "camera-box-channel-pick.hpp is gone (issue 1367) -- the dock has no per-channel marker decode"; exit 1
           }
           $output = (Get-Content "vendor/av-sync-dock/src/sync-test-output.cpp" -Raw) -replace '\s+', ' '
-          if ($output -notmatch [regex]::Escape('#include "camera-box-channel-pick.hpp"')) {
-            Write-Error "sync-test-output.cpp: camera-box-channel-pick.hpp is not included (issue 1367)"; exit 1
+          function Get-Body([string]$sig, [string]$next) {
+            $i = $output.IndexOf($sig)
+            if ($i -lt 0) { Write-Error "sync-test-output.cpp: '$sig' not found (issue 1367)"; exit 1 }
+            $j = $output.IndexOf($next, $i + $sig.Length)
+            if ($j -lt 0) { Write-Error "sync-test-output.cpp: nothing after '$sig' (issue 1367)"; exit 1 }
+            return $output.Substring($i, $j - $i)
           }
-          if ($output -notmatch [regex]::Escape('camerabox::ChannelMarkerPicker *cb_audio_dec = nullptr;')) {
-            Write-Error "sync-test-output.cpp: cb_audio_dec is no longer the per-channel ChannelMarkerPicker (issue 1367)"; exit 1
-          }
-          $sig = 'static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_data *frames)'
-          $i = $output.IndexOf($sig)
-          if ($i -lt 0) { Write-Error "sync-test-output.cpp: st_raw_audio_camera_box not found (issue 1367)"; exit 1 }
-          $j = $output.IndexOf('static void st_raw_audio(void *data', $i + $sig.Length)
-          if ($j -lt 0) { Write-Error "sync-test-output.cpp: st_raw_audio not found after st_raw_audio_camera_box (issue 1367)"; exit 1 }
-          $body = $output.Substring($i, $j - $i)
-          foreach ($need in @('const size_t nch = cb_ensure_audio_picker(st);', 'planes[cix] = (const float *)frames->data[cix];', 'st->cb_audio_dec->push(planes, nf);', 'cb_audio_diag_tick(st, frames);')) {
-            if (-not $body.Contains($need)) {
-              Write-Error "sync-test-output.cpp: the audio callback no longer has '$need' -- every channel's plane goes to the picker (issue 1367)"; exit 1
+          foreach ($need in @('#include "camera-box-channel-pick.hpp"', 'camerabox::ChannelMarkerPicker *cb_audio_dec = nullptr;', 'uint64_t cb_channel_switches = 0;', 'uint64_t cb_channel_switches_unlogged = 0;', 'uint64_t cb_channel_switch_last_log_ns = 0;', 'const std::string channel_clusters = camerabox::cb_channel_clusters_text(st->cb_audio_dec->clusters);', 'publish_max_us=%llu " "marker_channel=%zu channel_clusters=%s channel_switches=%llu"', '(unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen, channel_clusters.c_str(), (unsigned long long)st->cb_channel_switches);')) {
+            if (-not $output.Contains($need)) {
+              Write-Error "sync-test-output.cpp: '$need' is gone -- the per-channel decode or its diag tokens regressed (issue 1367)"; exit 1
             }
           }
-          foreach ($need in @('st->cb_audio_dec->channels() != nch', 'st->cb_audio_pushed = 0;', 'camerabox::ChannelMarkerPicker::dock( nch, st->audio_sample_rate, CAMERA_BOX_AUDIO_F_HZ, CAMERA_BOX_AUDIO_C)')) {
-            if ($output -notmatch [regex]::Escape($need)) {
-              Write-Error "sync-test-output.cpp: the picker lifecycle no longer has '$need' (issue 1367)"; exit 1
+          if ($output.Contains('camerabox::StreamingMarkerDecoder *cb_audio_dec')) {
+            Write-Error "sync-test-output.cpp: the single mono decoder member is back (issue 1367)"; exit 1
+          }
+          $body = Get-Body 'static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_data *frames)' 'static void st_raw_audio(void *data'
+          foreach ($need in @('const size_t nch = cb_ensure_audio_picker(st); if (nch == 0) return;', 'planes[cix] = (const float *)frames->data[cix];', 'st->cb_audio_dec->push(planes, nf);', 'const size_t prev_channel = st->cb_audio_dec->chosen;', 'cb_note_channel_switch(st, prev_channel, frames);', 'cb_audio_diag_tick(st, frames);')) {
+            if (-not $body.Contains($need)) {
+              Write-Error "sync-test-output.cpp: the audio callback no longer has '$need' (issue 1367)"; exit 1
             }
           }
           foreach ($banned in @('acc +=', '/ (float)ch', 'std::vector<float> mono', 'mono.data()', 'camerabox::StreamingMarkerDecoder(')) {
@@ -790,19 +790,17 @@ jobs:
               Write-Error "sync-test-output.cpp: the audio callback mixes channels again ($banned) -- the stereo mbc marker is undecodable as a sum (issue 1367)"; exit 1
             }
           }
-          if ($output -notmatch [regex]::Escape('publish_max_us=%llu " "marker_channel=%zu channel_clusters=%s channel_switches=%llu"')) {
-            Write-Error "sync-test-output.cpp: the diag line no longer appends marker_channel + channel_clusters + channel_switches after publish_max_us (issue 1367)"; exit 1
-          }
-          if ($output -notmatch [regex]::Escape('(unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen, channel_clusters.c_str(), (unsigned long long)st->cb_channel_switches);')) {
-            Write-Error "sync-test-output.cpp: the diag line's marker_channel / channel_clusters / channel_switches arguments moved or changed (issue 1367)"; exit 1
-          }
-          foreach ($need in @('const size_t prev_channel = st->cb_audio_dec->chosen;', 'cb_note_channel_switch(st, prev_channel, frames);')) {
-            if (-not $body.Contains($need)) {
-              Write-Error "sync-test-output.cpp: the audio callback no longer has '$need' -- a channel switch must be logged (issue 1367)"; exit 1
+          $ensure = Get-Body 'static size_t cb_ensure_audio_picker(struct sync_test_output *st)' ' static '
+          foreach ($need in @('const size_t nch = st->audio_channels < MAX_AV_PLANES ? st->audio_channels : MAX_AV_PLANES;', 'st->cb_audio_dec->channels() != nch', 'st->cb_audio_pushed = 0;', 'camerabox::ChannelMarkerPicker::dock( nch, st->audio_sample_rate, CAMERA_BOX_AUDIO_F_HZ, CAMERA_BOX_AUDIO_C)')) {
+            if (-not $ensure.Contains($need)) {
+              Write-Error "sync-test-output.cpp: cb_ensure_audio_picker no longer has '$need' (issue 1367)"; exit 1
             }
           }
-          if ($output -notmatch [regex]::Escape('"av-sync-dock: marker channel %zu -> %zu (channel_clusters=%s, %llu switch(es) since the last line)"')) {
-            Write-Error "sync-test-output.cpp: the channel-switch log line is gone (issue 1367)"; exit 1
+          $note = Get-Body 'static void cb_note_channel_switch(struct sync_test_output *st, size_t prev, const struct audio_data *frames)' ' static '
+          foreach ($need in @('if (st->cb_audio_dec->chosen == prev) return;', 'st->cb_channel_switches++;', 'CAMERA_BOX_DIAG_LOG_INTERVAL_NS', '"av-sync-dock: marker channel %zu -> %zu (channel_clusters=%s, %llu switch(es) since the last line)"', 'st->cb_channel_switches_unlogged = 0;')) {
+            if (-not $note.Contains($need)) {
+              Write-Error "sync-test-output.cpp: cb_note_channel_switch no longer has '$need' (issue 1367)"; exit 1
+            }
           }
           Write-Output "dock per-channel marker decode (issue 1367) - OK"
 

@@ -333,7 +333,8 @@ pub struct AvMarkerInputs {
     #[serde(default)]
     pub audio_preamble_screens_passed: u64,
     /// Issue 1367: which channel of the audio track `audio_markers` were decoded from, and what every
-    /// channel read (the pick is the channel with the largest self-consistency cluster). Additive:
+    /// channel read (the pick is the lowest channel that clears the decodability floor, else the
+    /// largest self-consistency cluster: `qpsk_channel_select::pick_marker_channel`). Additive:
     /// an older partial without it reads [`ChannelPick::default`] (no channels recorded).
     #[serde(default)]
     pub audio_channels: ChannelPick,

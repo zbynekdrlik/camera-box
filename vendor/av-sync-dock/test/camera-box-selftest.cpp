@@ -209,8 +209,9 @@ int main()
 		/* 2c. #1153 (sticky-unlock recovery): the decode kernel builds cos/sin/energy PREFIX
 		 * SUMS over the whole buffer, so a single non-finite sample contaminates every sum
 		 * after it and silently kills decode for the REST of the window (every preamble-screen
-		 * comparison against NaN is false). The live dock feeds a mono mixdown of the OBS
-		 * program audio — an in-process upstream poison emitting non-finite samples must
+		 * comparison against NaN is false). The live dock feeds each channel of the OBS
+		 * program audio to its own decoder (issue 1367) — an in-process upstream poison emitting
+		 * non-finite samples must
 		 * degrade at most the poisoned samples, never the whole rolling window. Non-finite
 		 * input is treated as silence — mirrors
 		 * qpsk_marker::a_single_non_finite_sample_must_not_poison_the_rest_of_the_window_1153. */
