@@ -196,6 +196,68 @@ mod tests {
         // A zero side has no band.
         let (lo, hi) = size_band(0);
         assert!(lo > hi);
+        // A side whose 1.05 x overflows u32 saturates instead of wrapping to a tiny upper edge.
+        assert_eq!(size_band(u32::MAX), (3_435_973_836, u32::MAX));
+    }
+
+    /// A `w` x `h` dark crop with full-height white bars at the given columns and full-width white
+    /// bars at the given rows (each bar `bar` px thick).
+    fn crop_with_bars(w: u32, h: u32, cols: &[u32], rows: &[u32], bar: u32) -> Vec<u8> {
+        let mut px = vec![40u8; (w * h) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let on_col = cols.iter().any(|&c| x >= c && x < c + bar);
+                let on_row = rows.iter().any(|&r| y >= r && y < r + bar);
+                if on_col || on_row {
+                    px[(y * w + x) as usize] = 250;
+                }
+            }
+        }
+        px
+    }
+
+    #[test]
+    fn each_side_of_the_box_is_checked_against_the_band_on_its_own_1367() {
+        let (w, h) = (336u32, 336u32);
+        // Tall bars at x 0 and 300 (w = 330, in band for 320), one wide bar at y 100 (h = 10).
+        let px = crop_with_bars(w, h, &[0, 300], &[100], 30);
+        assert_eq!(
+            locate_burn_box(&px, w, h, 188, 320),
+            None,
+            "h below the band"
+        );
+        // The transpose: w below the band.
+        let px = crop_with_bars(w, h, &[100], &[0, 300], 30);
+        assert_eq!(
+            locate_burn_box(&px, w, h, 188, 320),
+            None,
+            "w below the band"
+        );
+        // For a 302 px slot (band 242..317): w = 336 is above the band, h = 271 is inside it.
+        let px = crop_with_bars(w, h, &[0, 330], &[10, 275], 6);
+        assert_eq!(
+            locate_burn_box(&px, w, h, 188, 302),
+            None,
+            "w above the band"
+        );
+        // The transpose: h above the band.
+        let px = crop_with_bars(w, h, &[10, 275], &[0, 330], 6);
+        assert_eq!(
+            locate_burn_box(&px, w, h, 188, 302),
+            None,
+            "h above the band"
+        );
+        // Both sides in band: found.
+        let px = crop_with_bars(w, h, &[10, 275], &[10, 275], 6);
+        assert_eq!(
+            locate_burn_box(&px, w, h, 188, 302),
+            Some(Rect {
+                x: 10,
+                y: 10,
+                w: 271,
+                h: 271
+            })
+        );
     }
 
     #[test]
@@ -294,6 +356,21 @@ mod tests {
         };
         // 287 / 10 = 28 px; a module of the 41-module box is 287 / 41 = 7 px.
         assert_eq!(tight_border(b), 28);
+        // The LONGER side sets it.
+        let tall = Rect {
+            x: 0,
+            y: 0,
+            w: 279,
+            h: 287,
+        };
+        assert_eq!(tight_border(tall), 28);
+        let wide = Rect {
+            x: 0,
+            y: 0,
+            w: 287,
+            h: 279,
+        };
+        assert_eq!(tight_border(wide), 28);
     }
 
     #[test]

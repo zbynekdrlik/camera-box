@@ -477,12 +477,14 @@ mod tests {
 
     #[test]
     fn a_white_box_outside_the_size_band_is_never_decoded_1367() {
-        // The same crisp burn, but a slot that expects a 400 px burn (band 320..420): the 287 px
-        // box is out of band, so nothing is decoded.
+        // The same crisp burn, read at the camera slot's own design side.
         let luma = dark_frame_with_camera_burn(Some(&p(BURN_RUN_ID_CAM2, 1, 1)));
         let (crop, r) = camera_crop(&luma);
         assert!(!tight_box_reads(&crop, r, CAM_BURN_QR_PX).is_empty());
+        // A slot that expects a 400 px burn (band 320..420): the 287 px box is below the band.
         assert!(tight_box_reads(&crop, r, 400).is_empty());
+        // A slot that expects a 200 px burn (band 160..210): the 287 px box is above the band.
+        assert!(tight_box_reads(&crop, r, 200).is_empty());
     }
 
     #[test]
