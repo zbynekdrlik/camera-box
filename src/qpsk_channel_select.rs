@@ -173,23 +173,30 @@ pub fn f32le_to_channels(bytes: &[u8], channels: usize) -> Result<Vec<Vec<f32>>,
             bytes.len()
         ));
     }
-    let interleaved: Vec<f32> = bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect();
-    Ok(deinterleave(&interleaved, channels))
+    // Straight from the bytes into the per-channel buffers: a long recording's audio is hundreds of
+    // MB, so no intermediate interleaved copy.
+    let frames = bytes.len() / frame_bytes;
+    let mut out: Vec<Vec<f32>> = (0..channels).map(|_| Vec::with_capacity(frames)).collect();
+    for frame in bytes.chunks_exact(frame_bytes) {
+        for (ch, s) in frame.chunks_exact(4).enumerate() {
+            out[ch].push(f32::from_le_bytes([s[0], s[1], s[2], s[3]]));
+        }
+    }
+    Ok(out)
 }
 
 /// The pick: the channel with the LARGEST self-consistency cluster; ties go to the LOWEST index so
 /// the choice is deterministic. Returns a position into `per_channel`; `None` when it is empty. A
 /// single (mono) channel is always position 0.
 pub fn best_marker_channel(per_channel: &[ChannelMarkerStats]) -> Option<usize> {
-    // RED STUB (issue 1367): today's behaviour — always the first channel.
-    if per_channel.is_empty() {
-        None
-    } else {
-        Some(0)
+    let mut best: Option<usize> = None;
+    for (i, c) in per_channel.iter().enumerate() {
+        match best {
+            Some(b) if per_channel[b].cluster_samples >= c.cluster_samples => {}
+            _ => best = Some(i),
+        }
     }
+    best
 }
 
 /// One channel's full decode: its summary stats, its decoded markers and the raw demod counters.
@@ -245,12 +252,11 @@ pub fn decode_best_channel(
     threshold: f64,
     cluster: ClusterParams,
 ) -> Option<BestChannelDecode> {
-    // RED STUB (issue 1367): today's behaviour — mix every channel to mono (`-ac 1`), decode that.
-    let first = channels.first()?;
-    let mono: Vec<f32> = (0..first.len())
-        .map(|i| channels.iter().map(|c| c[i]).sum::<f32>() / channels.len() as f32)
+    let mut decoded: Vec<ChannelDecode> = channels
+        .iter()
+        .enumerate()
+        .map(|(i, s)| decode_channel(i as u32, s, p, threshold, cluster))
         .collect();
-    let mut decoded = vec![decode_channel(0, &mono, p, threshold, cluster)];
     let per_channel: Vec<ChannelMarkerStats> = decoded.iter().map(|d| d.stats).collect();
     let chosen = best_marker_channel(&per_channel)?;
     let best = decoded.swap_remove(chosen);

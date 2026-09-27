@@ -26,8 +26,11 @@ alert blames the right link:
   all-zero) → `Measured`. Reuse this — never re-derive the classification.
 - **Carrier:** `AvMarkerInputs.audio_preamble_screens_passed: u64` (`#[serde(default)]` so an older
   partial JSON, or a rollout where the stream box still runs an old binary, deserializes to 0 = the
-  LOUD fail-safe: treated as Silent → "check mbc mute"). `decode_av_marker_inputs` must use
-  `decode_markers_with_stats` (not `decode_markers`) to keep the stat.
+  LOUD fail-safe: treated as Silent → "check mbc mute"). `decode_av_marker_inputs` decodes EVERY
+  channel of the track (issue 1367, `qpsk_channel_select::decode_best_channel`) and carries the MAX
+  preamble count over the channels (`ChannelPick::max_preamble_screens`): zero only when every channel
+  is silent. The pick itself rides in `AvMarkerInputs.audio_channels` (`#[serde(default)]`, empty on an
+  older partial) and surfaces as `all_cambox_av_sync.audio_channel_pick`.
 - **Verdict JSON:** the emission inserts `av_audio_silent` (`true` silent / `false` present-undecoded
   / `null` N-A) + `av_audio_preamble_screens` into the `all_cambox_av_sync` block.
 - **Consumer:** `e2e_discord_report.py` — `_section_av_sync` and `_av_reason(node, av_audio_silent)`
@@ -40,7 +43,9 @@ alert blames the right link:
 `AvMarkerInputs` has NO `Default` derive, so a new field must be added to EVERY struct-literal site
 (there were 13: 9 in `recording-verdict.rs` tests, 3 in `tests/recording_verdict_merge_gate_exit_code.rs`,
 1 in `recording_partial.rs`) plus the real `decode_av_marker_inputs` constructor, or CI fails to
-compile. For a shorthand `audio_markers,` site, place `audio_preamble_screens_passed:
+compile. (Issue 1367 added `audio_channels` to all of them as `Default::default()` — a sed over
+`audio_preamble_screens_passed:` lines hits exactly the literal sites; count them against
+`grep -c 'AvMarkerInputs {'`.) For a shorthand `audio_markers,` site, place `audio_preamble_screens_passed:
 audio_markers.len() as u64` BEFORE the `audio_markers` move (struct fields evaluate in source order,
 so the `.len()` borrow is released before the move — no use-after-move). `AvMarkerInputs` derives only
 `PartialEq`, not `Eq`, so a future `f64` field is safe (the #726 Eq-derive trap does not bite here).
@@ -70,7 +75,8 @@ decision is `src/qpsk_probe_decision.rs` (crate-root, default-feature, Tier-0): 
   single-sourced) ⇒ POLLUTED; else ⇒ UNDECODED. Verdict words are DISJOINT so the abort names the class.
 - **`[4b3/8]` step** (`scripts/lib/marker-decodability-preflight.sh` + a thin block in `recording-e2e.sh`,
   after the #1323 ceiling, before StartRecord): make a ~25 s stream probe recording, ffmpeg-extract the
-  mbc `a:0` track to a mono-f32 WAV on the stream box (`win_ssh_run`), `win_ssh_download` to dev1, run
+  mbc `a:0` track to an f32 WAV with EVERY channel kept (issue 1367 — never a mono downmix; the probe
+  decodes each channel and keeps the best, see `qpsk-marker-demod.md`) on the stream box (`win_ssh_run`), `win_ssh_download` to dev1, run
   the probe from `$PROBE_BIN_DIR`, abort (`exit 1`) naming the class on any non-OK verdict. SKIP only
   when the probe binary is absent (a loud UNVERIFIED, never a silent pass). Every knob env-overridable
   (`AUDIO_DECODABILITY_*`); the −60/−20 bars are READ from `audio-presence-preflight.sh`, never retyped.
