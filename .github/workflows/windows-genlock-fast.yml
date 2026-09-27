@@ -1195,6 +1195,7 @@ jobs:
           if ($thread -notmatch [regex]::Escape('pacing_sleep_until(&sleeper, wake_ns);')) { Write-Error "vban-output-thread.c no longer sleeps to the packet deadline (issue 1372)"; exit 1 }
           if ($thread -notmatch [regex]::Escape('"obs-vban pacing: depth_ms=%.1f late_sends=%"')) { Write-Error "the obs-vban fixed-timeline pacing log line is gone (issue 1381)"; exit 1 }
           if ($thread -notmatch [regex]::Escape('send_silence(&t, vban_buf, nbs, sample_size, &addr);')) { Write-Error "vban-output-thread.c no longer fills a late slot with silence (issue 1381)"; exit 1 }
+          if ($thread -notmatch [regex]::Escape('" repays=%"')) { Write-Error "the obs-vban status line lost its repays counter (issue 1381)"; exit 1 }
           Write-Output "issue 1372 obs-vban send pacing present - OK"
 
       - name: Configure obs-vban against the genlocked OBS (issue 1372)

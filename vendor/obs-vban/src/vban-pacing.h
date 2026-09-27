@@ -313,6 +313,9 @@ static inline struct vban_pacing_step vban_pacing_step(struct vban_pacing *p, ui
 		const uint64_t deadline = vban_pacing_deadline_ns(p, p->n_sent);
 		const uint64_t eligible = p->catchup_ns > deadline ? p->catchup_ns : deadline;
 		if (eligible > now_ns) {
+			/* the next slot is not due: nothing waits (a retarget up can move a waiting slot into
+			 * the future) */
+			p->starved = false;
 			d.wake_ns = eligible;
 			break;
 		}

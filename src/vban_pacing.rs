@@ -345,6 +345,9 @@ impl Pacing {
             let deadline = self.deadline_ns(self.n_sent);
             let eligible = self.catchup_ns.max(deadline);
             if eligible > now_ns {
+                // the next slot is not due: nothing waits (a retarget up can move a waiting slot
+                // into the future)
+                self.starved = false;
                 d.wake_ns = eligible;
                 break;
             }
