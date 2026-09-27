@@ -200,6 +200,20 @@ def test_a_derived_or_unknown_offset_is_never_a_sample():
     assert row["av_spread_ms"] == "" and row["av_spread_cams"] == "0"
 
 
+def test_a_hand_edited_non_measured_value_is_still_not_a_sample():
+    # the grading keys on the status column too, not only on a non-empty value
+    rows = []
+    for i in range(7):
+        r = _clean_row(i)
+        if i == 3:
+            r["av_cam1_status"] = "derived"
+            r["av_cam1_ms"] = "999.000"
+        rows.append(_stringify(r))
+    rep = _run(rows)
+    assert rep["series"]["av cam1"]["n"] == 6
+    assert rep["series"]["av cam1"]["breaches"] == 0
+
+
 def test_no_verdict_row_keeps_the_window_with_empty_measurements():
     row = asd.row_from_verdict(None, CAMS, _meta(2, outcome="no_verdict:decode_failed"))
     assert row["outcome"] == "no_verdict:decode_failed"
