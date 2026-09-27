@@ -3557,6 +3557,7 @@ timeout "${FROZEN_CAM_PIXEL_REPORT_TIMEOUT_S:-180}" python3 "$HERE/frozen-camera
     --warm-settle "${FROZEN_CAM_WARM_SETTLE_S:-3}" >/dev/null 2>&1 || frozen_pixel_rc=$?
 if   [ "$frozen_pixel_rc" -eq 0 ];   then frozen_pixel_verdict=PASS
 elif [ "$frozen_pixel_rc" -eq 124 ]; then frozen_pixel_verdict=TIMEOUT
+elif [ "$frozen_pixel_rc" -eq 2 ];   then frozen_pixel_verdict=ERROR   # a refused scene select / guard load failure, issue 1380
 else                                      frozen_pixel_verdict=FROZEN
 fi
 echo "    [frozen-camera-gate] #1233 pixel-hash REPORT-ONLY: ${frozen_pixel_verdict} (content-dependent screenshot check — NOT the abort signal)"
