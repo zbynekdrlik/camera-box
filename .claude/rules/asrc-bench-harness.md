@@ -784,3 +784,74 @@ OBS (a real loss: `last_step_ms=-43.7`, `restore=1`, `ts_lag_ms` flat). The foll
   tail); the #1355 capture anchor now ends `: window_level_ms;`. No pwsh change: the anchored
   `ASRC_LEVEL_KI_PPM_PER_MS_S * err_ms * window_master_s` and `level=%.1fms target=%.1fms
   integral=%.3fppm (#1335)` lines stay byte-identical.
+
+## Issue 1367 (design 5845361166) — the TIMECODE mode: a timecode-placed source is judged by its stamp
+
+**Why.** The resolume `sp-*` inputs (SongPlayer over NDI) carry their audio at the NDI timecode (the
+pairing's `audio_hold=timecode`). The arrival servo read two things wrong there (finding 5845350148):
+a skipped SongPlayer slot counted as a loss by arrival while the buffer moved the OTHER way (an
+80 ms stamp jump placed at its stamp), so the signed corroboration refused the 1000 ppm booking and
+the ~130 ppm level loop dragged the audio ~40 ms off its stamps for ~9 min; and a sender restart
+catch-up read as a +200…+288 ppm "rate". `audio_place_err_ms` compared against the already-snapped
+stamp and read 0.
+
+**What.** One mode, set per packet by the ingest (`genlock_audio_asrc_timecode`: timecode hold, not
+MONITOR_ONLY, a resampler), everything else byte-identical (the tick/shift/step C traces equal
+before/after over 283 lines):
+
+| Piece | Rust | C |
+|---|---|---|
+| mode (a change discards the open window + flushes) | `set_timecode` (`src/asrc_bench_timecode.rs`, a `#[path]` child of `asrc_bench.rs`) | `asrc_compensator_set_timecode` |
+| the level = the placement error, setpoint 0 | capture ternary in `compensate_core` | capture `if (c->timecode) … = 0.0;` |
+| jump booking, own sign, band max(½ packet, `PLACE_JUMP_MIN_MS` 10), vs setpoint + smoothed error; a PLACED packet drops what is owed | `observe_placement` + `step_recover_set` | `asrc_compensator_observe_placement` + `asrc_step_recover_set` |
+| residual booking, setpoint shift and the #1355 unreachable fallback OFF in the mode (the setpoint 0 is always reachable; a fallback would accept a lasting A/V offset) | `if !self.timecode { step_recover_book }`, early return in `shift_level_target`, `!self.timecode &&` on the fallback | same, C |
+| a packet beyond the owed cap books and counts nothing | `owed_ms == step_recover_ms` early return in `observe_placement` | same, C |
+| the payment rides on the NEXT packet exactly once | `take_step_recover_ppm` | `asrc_compensator_take_step_recover_ppm` |
+| ingest inputs | `audio_intended_raw_ns` / `audio_asrc_error_ms` / `audio_stamp_mono_ns` / `audio_stamp_interval_s` (`genlock_audio_pairing.rs`) | the same `genlock_audio_*` helpers in the parity-lifted block, `asrc_timecode_ingest` (obs-source.c) |
+
+- **The error** = actual landing (buffer end when appended, the placed timestamp when placed) − the
+  RAW-stamp intended landing (`data->timestamp` + timing_adjust + sync − resample_offset + the
+  genlock term: the same term as the placement, so one source), in ms, **plus the placement slew
+  still owed** (a #1367 hold slew is its own 1000 ppm term; until it is paid the packet is early by
+  exactly that). `audio_place_err_ms` now smooths this pre-smoothing error WITHOUT the slew
+  exclusion (the pairing offset is honest: an owed slew and a skipped slot both read).
+- **The rate** = the regression fed the STAMP advance (raw stamp + the live wall→mono offset) between
+  two APPENDED packets as master and the previous packet's PRE-resample duration as raw. A placed
+  packet or a non-positive advance (a duplicated slot = the same stamp) adds no point and never
+  flushes. A fleet date step moves the stamp and the offset by the same amount (cancels; a one-packet
+  sender/receiver skew books and un-books ±50 ms, net ~0).
+- **Order in the ingest:** `set_timecode` right after the hold is decided (before the PLACE /
+  sync-offset / fold shifts, which are no-ops in the mode), the servo after the buffer unlock,
+  `asrc_process_audio` only READS applied + takes the recovery for such a source.
+
+**Bench** (`src/asrc_timecode_bench.rs`, crate-level test module): the OBS ingest replayed step for
+step (snap, >2 s reset, push-back, term, append/place incl. `reset_audio_data`, the mixer 64 ms
+behind), a correct 1600-sample sender with 1 ms emit jitter and 2–5 ms arrival jitter. Production
+holds |A/V| ≤ 2 ms from event + 60 s and |est| ≤ 5 ppm for a skipped slot, a duplicated slot (same
+stamp), a restart catch-up (+300 ppm arrival transient: Legacy 68 ms / 315 ppm), a +50 ms date
+step and a stamp leap placed at its stamp (the live shape: Legacy 33 ms, `last_step=-33.6`, no
+booking), a one-frame hold SLEW while playing (`HoldSlew`: nothing booked, trails ≤ a frame, in 2 ms at +60 s) and a skip then that slew 5 s later (`SkipThenSlew`: the payment waits while the slew owes — no resampler call ever carries both — in 2 ms at +75 s). **Flagged, not retuned:** two skipped slots owe 66.7 ms, which the 1000 ppm budget pays in
+66.7 s, so that case is held from event + 72 s (comment 5845468362). `NoBooking` (the level loop
+alone) fails the skip and the dup (28 ms at +60 s). The bench's glue is keyed on `c.timecode()`, so
+the RED (API inert) runs the pure arrival servo: the catch-up ends 68 ms off. **RED trap (hit
+here):** the first RED kept the mode flag settable while stubbing the internals, and the bench's
+own glue (stamp master + placement level) passed every scenario through the OLD residual booking
+— a vacuous RED. Key a bench's production glue on the servo's own state and make the RED stub
+leave that state unset, so RED is the genuine pre-change path.
+
+**Parity + mutation.** `tests/asrc_compensator_parity_1367.rs` scenario `tc` (a closed-loop
+placement-error plant) — skip booked and paid at −1000, a held payment, a dup booked (+1000), a
+placement dropping what is owed, a no-op shift, a mode flip, a pre-capture skip (inert), a 12 ms
+stamp jump under the half-packet band that re-bases (never booked). 14/14 scratch C mutants diverge (with the `tce` open-loop edges: no fallback, one count at the cap)
+(compile the parity test ONCE with `CARGO_MANIFEST_DIR` at a scratch tree holding the media-io
+`.c/.h` + `util/c99defs.h`, then swap the mutated `.c` in and re-run the same binary — the C is read
+at run time). Wiring: `tests/genlock_audio_timecode_placement_1367.rs::the_timecode_asrc_reads_the_raw_stamp_placement_not_arrival_1367`,
+`tests/genlock_preload.rs::asrc_timecode_mode_judges_the_placement_not_arrival_1367`, both pwsh gates.
+
+**Reading the `asrc:` line.** It ends `… recover_ms=%.1f (issue 1372) timecode=%d place_jumps=%u
+last_jump_ms=%.1f (issue 1367)`. With `timecode=1`, `level=` / `level_avg=` are the placement error
+in ms (≈ 0 healthy), `target=` is 0 minus what is still owed, `estimated=` follows the stamps (≈ 0
+on a correct sender, NOT the arrival pacing), `steps=` counts rate re-bases and `place_jumps=` the
+booked placement jumps. A `place_jumps=` rising with no `stamp_gap=` on the video audit points at
+the audio stamps alone; pairs of opposite `last_jump_ms` around a date step are the sender/receiver
+step skew and net to ~0.

@@ -2,6 +2,8 @@
 paths:
   - "scripts/dantesync-fleet-upgrade.sh"
   - "tests/dantesync_fleet_upgrade.rs"
+  - "scripts/lib/dantesync-tray-upgrade.sh"
+  - "tests/python/test_dantesync_fleet_upgrade_tray_1372.py"
 ---
 
 # dantesync fleet-upgrade mechanism (#876)
@@ -105,8 +107,86 @@ a box (mbc sat one release behind on 25.9.2026). A node whose fleet row names it
 `NTP_MASTER`, the fleet's `ntp-master` row (strih-lx) gets the master-aware verify. An
 audio-role node (mbc, fohabl) is verified with `RIG_GRANDMASTER_IP` = the audio grandmaster
 (`dantesync_gate_env_for`), never the video one, so GM enforcement cannot fail its verify. Always
-`--fleet --dry-run` first. A daemon roll does NOT refresh `dantesync-tray.exe`; the version gate's
-report-only tray check names a lagging tray (mbc, 25.9.2026).
+`--fleet --dry-run` first. A roll also refreshes `dantesync-tray.exe` on every Windows node, including
+one whose service is already on the target (next section); the version gate's report-only tray
+sha-pin names any tray that still lags.
+
+## The tray rides the roll (issue 1372)
+
+Before this, a roll swapped only the service, and the tray (the version the operator sees) lagged
+until someone swapped it by hand (after the 1.11.0 and 1.11.1 rolls, 26.9.2026). The emitted `.ps1`
+now carries a tray arm. Its text lives in `scripts/lib/dantesync-tray-upgrade.sh`, which keeps the
+upgrade script under the ~1000-line budget.
+
+- **Fetch before any stop.** `dantesync_windows_tray_fetch_ps VERSION` runs right after the service
+  binary is verified. It reads the SAME pinned tag's `dantesync-tray-windows-amd64.exe.sha256`
+  (`dantesync_release_url_windows_tray`, never latest).
+  - If the installed tray already has that sha, it sets `$trayCurrent`: no download, no restart. A
+    current tray is still checked for a running process in an interactive session; none running
+    (a relaunch that found nobody logged on leaves exactly that) sets `$trayLaunch`, so step 6
+    launches it and a re-run never reports a dead tray OK.
+  - Otherwise it downloads the exe and verifies it.
+  - A missing install or a failed download / sha is recorded in `$trayNotes` and never thrown, so the
+    service upgrade still runs.
+- **Swap after the service is back (step 5).** `dantesync_windows_tray_swap_ps` runs after the
+  service's try/catch and the dead-task purge.
+  - It stops `dantesync-tray` (exact name) and sets `$trayStopped`.
+  - It backs the tray up to `dantesync-tray.exe.pre-<version>` only when that file does not exist, so
+    a re-run never overwrites the original pre-roll tray.
+  - It replaces the file and verifies the installed sha. A failed replace or a wrong sha restores the
+    backup, and the restore is checked by hash: a failed restore is named (`the tray exe may be
+    partial`), never claimed.
+- **Relaunch whenever the tray was stopped or a current tray is not running (step 6), even after a
+  failed swap**, so the operator is never left without a tray.
+  - The temporary task (`DanteSyncTrayRelaunch-1372`) has the GROUP principal `BUILTIN\Users`, named
+    by its well-known SID `S-1-5-32-545` because the account name is localized, with
+    `-RunLevel Limited`. It starts the tray in the logged-on user's interactive session. The NAME
+    form with default settings was proven live on mbc and fohabl, where the ssh account (`master`)
+    differs from the desktop user (`Ableton-FOH`). The SID + settings form is the same principal by
+    the documented API but is UNVERIFIED live until the next roll: check `TRAY OK` on all four
+    Windows nodes then.
+  - The task has explicit settings: `-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    -ExecutionTimeLimit 0`. Task Scheduler's defaults would refuse a FOH laptop on battery.
+  - It is unregistered in a `finally`, and an unregister failure is a note.
+  - The count is read again AFTER the unregister: exactly ONE `dantesync-tray` process with
+    `SessionId >= 1` (session 0 is the ssh/service session). A box with nobody logged on reads as a
+    warning, which is honest. The downloaded tray and its `.sha256` are removed.
+- **Never a throw, never a rollback.** The block ends with ONE `TRAY OK: …` or `TRAY-WARNING: …`
+  line.
+  - `dantesync_tray_outcome` reads the last one; a missing line is a warning too.
+  - `dantesync_tray_note` logs `[name] tray OK/WARNING`.
+  - `dantesync_tray_report` prints `WARNING: dantesync-tray was NOT refreshed on N node(s)`, one
+    reason per node, before EVERY exit after the roll started (canary abort, incomplete, complete).
+  - The exit code stays the service's: the tray is UI, the service is the clock.
+- **Re-running the roll repairs a tray.** A Windows node whose service is already on the target
+  (`SAME`) is collected into `TRAY_ONLY`. After the roll, and on the all-current early exit,
+  `refresh_same_node_trays` sends it `dantesync_windows_tray_only_ps` (fetch + swap + relaunch, no
+  service step). A current tray costs one `.sha256` read. `--dry-run` only names these nodes. A
+  canary abort does not touch them.
+- **Anchors.** The Rust test `windows_upgrade_ps_waits_for_the_process_to_exit_between_stop_and_swap_1265`
+  bans `dantesync-tray` only inside the daemon's stop -> swap window; the wildcard ban stays
+  program-wide. The tray code uses its own variable names (`$trayExe`, `$trayTmp`, `$trayPre`), so the
+  service anchors `Copy-Item -Force $exe $bak` / `$tmp $exe` / `$bak $exe` stay unique.
+- **The service rollback does not touch the tray.** On a verify failure the service goes back to
+  `.bak` while the tray stays on the target release. The node already counts as a failed node, and
+  the version gate names the service drift. To restore the tray by hand, use
+  `dantesync-tray.exe.pre-<version>`.
+
+`--help` prints the whole extended header (`sed -n '2p;4,/^HERE=/…'`); it used to stop at a fixed
+line 71, mid-paragraph. The header therefore documents `SSH_PASS` without its default value.
+
+**Tier-0:** `pytest tests/python/test_dantesync_fleet_upgrade_tray_1372.py`.
+- The emitted program is tested as text: order, SID + settings, `finally`, the step-6 guard, no throw
+  after the last catch.
+- The orchestrator runs end to end:
+  - a stateful PATH `sshpass` stub plays the Windows node: scp saves the `.ps1`, `--version` answers
+    from a state file, and `-File` flips it (or not, for the canary abort) and prints the stubbed
+    TRAY line;
+  - the gate's `DANTESYNC_GATE_WIN_HTTP_STREAM` seam is fed a fresh live `/status`;
+  - the stub keys the version and the upload by host, so a mixed fleet is played too;
+  - the tests cover warning, OK, canary abort, the all-current and the mixed-fleet SAME-node
+    refresh, and dry-run.
+- The Rust file runs locally with a plain `rustc --test`: it is std-only (`ci-testing-gotchas.md`).
 
 ## Testing (Tier-0)
 

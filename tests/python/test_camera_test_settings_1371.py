@@ -273,7 +273,15 @@ STUB_SYSTEMCTL = r'''
 import json, os, sys
 d = os.environ["FAKE_CAM_DIR"]
 state = json.load(open(os.path.join(d, "state.json")))
-assert sys.argv[1] == "is-active" and sys.argv[2] == "bkshading-relay.service", sys.argv
+assert sys.argv[2] == "bkshading-relay.service", sys.argv
+if sys.argv[1] == "stop":
+    # the production-exposure restore stops the relay on the camera box before its read
+    with open(os.path.join(d, "calls.log"), "a") as f:
+        f.write("RELAYSTOP " + os.environ["FAKE_IP"] + "\n")
+    state["relay_state"] = "inactive"
+    json.dump(state, open(os.path.join(d, "state.json"), "w"))
+    sys.exit(0)
+assert sys.argv[1] == "is-active", sys.argv
 s = state.get("relay_state", "inactive")
 after = state.get("relay_active_after_reads")
 if after is not None and state.get("reads", 0) >= after:
@@ -306,6 +314,8 @@ sets = [args[i + 1] for i in range(len(args) - 1) if args[i] == "--set-config"]
 gets = [args[i + 1] for i in range(len(args) - 1) if args[i] == "--get-config"]
 if sets:
     log("SET " + ip + " " + " ".join(sets))
+    # was the production-exposure snapshot already on disk when the camera was changed?
+    state["snapshot_at_set"] = os.path.exists(os.path.join(d, "home", ".camera-box", "camera-prod-exposure.json"))
     for kv in sets:
         k, v = kv.split("=", 1)
         if k not in state.get("ignore", []):
@@ -329,7 +339,8 @@ sys.exit(0)
 FAKE_OBS_PHASE2 = r'''#!/usr/bin/env python3
 import json, os, sys
 with open(os.path.join(os.environ["FAKE_CAM_DIR"], "calls.log"), "a") as f:
-    f.write("GUARD " + sys.argv[1] + "\n")
+    pw = sys.argv[sys.argv.index("--password") + 1] if "--password" in sys.argv else "-"
+    f.write("GUARD " + sys.argv[1] + " pw=" + pw + "\n")
 busy = os.environ.get("FAKE_BUSY") == "1"
 print(json.dumps({"busy": busy, "diagnostics": [{"host": "stream", "streaming": busy, "recording": False}]}))
 '''
@@ -338,8 +349,21 @@ print(json.dumps({"busy": busy, "diagnostics": [{"host": "stream", "streaming": 
 class Rig:
     def __init__(self, present, camera, baseline_values, ack="", busy=False, ignore=(), read_fail=False,
                  relay_state="inactive", relay_active_after_reads=None, gphoto2_busy=False, read_exit=0,
-                 no_pgrep=False):
+                 no_pgrep=False, snapshot=None, pipefail=True, readonly_snap_dir=False, extra_env=None):
         self.root = tempfile.mkdtemp(prefix="cts1371-")
+        # A temp HOME: the production-exposure snapshot lives in ~/.camera-box on the runner, and a
+        # test must never read or write the real one.
+        self.home = os.path.join(self.root, "home")
+        self.snap_dir = os.path.join(self.home, ".camera-box")
+        self.snap_path = os.path.join(self.snap_dir, "camera-prod-exposure.json")
+        os.makedirs(self.home)
+        if snapshot is not None:
+            os.makedirs(self.snap_dir)
+            with open(self.snap_path, "w") as f:
+                f.write(snapshot if isinstance(snapshot, str) else json.dumps(snapshot))
+        self.shell_opts = "set -euo pipefail\n" if pipefail else "set -eu\n"
+        self.readonly_snap_dir = readonly_snap_dir
+        self.extra_env = dict(extra_env or {})
         self.here = os.path.join(self.root, "scripts")
         self.bin = os.path.join(self.root, "bin")
         stubs = os.path.join(self.root, "stubs")
@@ -375,27 +399,61 @@ class Rig:
             f.write(text)
         os.chmod(path, os.stat(path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
-    def run(self):
+    def run(self, mode="enforce"):
         script = os.path.join(self.root, "run.sh")
         with open(script, "w") as f:
-            f.write(
-                "set -euo pipefail\n"
-                '. "%s/lib/camera-test-settings.sh"\n'
-                'camera_test_settings_enforce "%s" 10.0.0.2 10.0.0.4 pw "cam1=10.77.9.61" "cam2=10.77.9.62"\n'
-                'echo "AFTER-ENFORCE rc=0"\n' % (self.here, self.here)
-            )
+            if mode == "enforce":
+                f.write(
+                    self.shell_opts
+                    + '. "%s/lib/camera-test-settings.sh"\n'
+                    'camera_test_settings_enforce "%s" 10.0.0.2 10.0.0.4 pw "cam1=10.77.9.61" "cam2=10.77.9.62"\n'
+                    'echo "AFTER-ENFORCE rc=0"\n' % (self.here, self.here)
+                )
+            else:
+                # the rig-mode EVENT caller: under set -euo pipefail, the restore must NEVER abort it
+                f.write(
+                    "set -euo pipefail\n"
+                    '. "%s/lib/camera-test-settings.sh"\n'
+                    "rrc=0\n"
+                    'camera_test_settings_restore "%s" 10.0.0.2 10.0.0.4 pw "cam1=10.77.9.61" "cam2=10.77.9.62" || rrc=$?\n'
+                    'echo "AFTER-RESTORE rc=$rrc outcome=${CTS_RESTORE_OUTCOME:-}"\n'
+                    "printf 'EVENT contract ok\\n' >\"%s/discord.txt\"\n"
+                    'camera_test_settings_restore_discord_note "%s/discord.txt"\n'
+                    'echo "AFTER-NOTE"\n' % (self.here, self.here, self.root, self.root)
+                )
         env = dict(os.environ)
+        env["HOME"] = self.home
+        env.pop("CAMERA_PROD_EXPOSURE_SNAPSHOT", None)
         env["PATH"] = self.bin + os.pathsep + env["PATH"]
         env["FAKE_CAM_DIR"] = self.root
         env["FAKE_BUSY"] = "1" if self.busy else "0"
         env["CAMBOX_OFFLINE_ACK"] = self.ack
         env.pop("CAMERA_TEST_BASELINE", None)
         env.pop("OBS_PASSWORD", None)
+        env.pop("OBS_WS_PASSWORD", None)
+        env.update(self.extra_env)
+        if self.readonly_snap_dir:
+            os.chmod(self.snap_dir, 0o555)
         r = subprocess.run(["bash", script], capture_output=True, text=True, env=env)
         self.out = r.stdout + r.stderr
         self.rc = r.returncode
         self.calls = open(os.path.join(self.root, "calls.log")).read().splitlines()
-        self.camera = json.load(open(os.path.join(self.root, "state.json")))["camera"]
+        if self.readonly_snap_dir:
+            os.chmod(self.snap_dir, 0o755)
+        state = json.load(open(os.path.join(self.root, "state.json")))
+        self.camera = state["camera"]
+        self.snapshot_at_set = state.get("snapshot_at_set")
+        self.snapshot = None
+        if os.path.exists(self.snap_path):
+            with open(self.snap_path) as f:
+                self.snapshot = f.read()
+        self.consumed = sorted(n for n in (os.listdir(self.snap_dir) if os.path.isdir(self.snap_dir) else [])
+                               if ".consumed-" in n)
+        failed = os.path.join(self.snap_dir, "camera-prod-exposure.restore-failed.json")
+        self.restore_failed = json.load(open(failed)) if os.path.exists(failed) else None
+        self.consumed_docs = [json.load(open(os.path.join(self.snap_dir, n))) for n in self.consumed]
+        dpath = os.path.join(self.root, "discord.txt")
+        self.discord = open(dpath).read() if os.path.exists(dpath) else None
         shutil.rmtree(self.root)
         return self
 

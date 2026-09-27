@@ -386,6 +386,8 @@ def test_evaluate_over_a_work_dir(tmp_path):
         "avlatency": (AVLAT_ALIGNED, 0),
         "shading": (SHADING_ON, 0),
         "watchdogs": (WATCHDOGS_OK, 0),
+        # issue 1371: no production-exposure snapshot pending for the test camera
+        "exposure": ("exposure state=none\n", 0),
     }
     for name, (text, rc) in caps.items():
         (tmp_path / (name + ".out")).write_text(text, encoding="utf-8")

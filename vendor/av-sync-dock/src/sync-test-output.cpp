@@ -18,6 +18,8 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 */
 
 #include <obs-module.h>
+#include <util/threading.h>
+#include <util/platform.h>
 #include <inttypes.h>
 #include <deque>
 #include <list>
@@ -28,12 +30,15 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include <complex>
 #include <vector>
 #include <utility>
+#include <cstring>
 #include "quirc.h"
 #include "sync-test-output.hpp"
 #include "peak-finder.hpp"
 #include "camera-box-qr.hpp"
 #include "camera-box-audio.hpp"
 #include "camera-box-video.hpp"
+#include "camera-box-frame-copy.hpp"
+#include "camera-box-decode-mailbox.hpp"
 
 #include "plugin-macros.generated.h"
 
@@ -131,6 +136,28 @@ struct corner_type
 	uint32_t r = 0;
 };
 
+/* issue 1367: one decode job = the bounded copy st_raw_video makes of what the decoders read. It is
+ * taken on libobs's single video-output thread and decoded on the dock's own worker thread
+ * (camera-box-decode-mailbox.hpp), so a slow QR decode can never make video-io skip output frames.
+ * The buffers live in the mailbox's two slots and are reused, so there is no per-frame allocation
+ * once they have grown. */
+struct st_marker_patch
+{
+	camerabox::CbPatchRect rect; // the circle's bounding box in the full-res frame
+	std::vector<uint8_t> luma;   // rect.w x rect.h intensity samples, origin (rect.x0, rect.y0)
+};
+
+struct st_video_decode_job
+{
+	uint64_t timestamp = 0;    // the frame's own timestamp, so the marker/QR timing is unchanged
+	std::vector<uint8_t> band; // camera-box top band, video_width x plan.band_h luma
+	/* Outside camera-box mode: norihiro's whole-frame grid and the marker window are copied too. */
+	bool norihiro = false;
+	std::vector<uint8_t> grid;                  // qr_grid_w x qr_grid_h, what quirc_begin() takes
+	struct corner_type corners[N_CORNERS] = {}; // the corners the marker patches were cut around
+	struct st_marker_patch patches[N_CORNERS];
+};
+
 struct sync_test_output
 {
 	obs_output_t *context;
@@ -145,11 +172,21 @@ struct sync_test_output
 	size_t audio_channels = 0;
 
 	/* Sync pattern detection from video */
-	uint64_t start_ts = 0;
+	/* issue 1367: written once by the video-output thread (first frame), read by the decode
+	 * worker and the audio thread -- atomic, no lock needed. */
+	std::atomic<uint64_t> start_ts{0};
 
 	struct quirc *qr = nullptr;
 	uint32_t qr_step;
-	struct corner_type qr_corners[N_CORNERS];
+	/* issue 1367: the size quirc_resize() gave `qr` in st_start -- the video thread samples
+	 * norihiro's grid at exactly this size, the worker hands it to quirc_begin(). */
+	uint32_t qr_grid_w = 0, qr_grid_h = 0;
+	/* `qr_corners`, `qr_data`, `video_level_prev*`, `video_marker_max_ts`, `qr`, `cb_qr` and
+	 * `cb_qr_resize_cache` are owned by the decode worker thread (issue 1367). */
+	struct corner_type qr_corners[N_CORNERS] = {};
+	/* issue 1367: the worker's latest norihiro corners, published under `mutex` so the video
+	 * thread can cut the marker window around them for the next frame. */
+	struct corner_type marker_corners[N_CORNERS] = {};
 	st_qr_data qr_data;
 
 	int64_t video_level_prev = 0;
@@ -192,7 +229,7 @@ struct sync_test_output
 	/* #926 fix-up (review finding 6): the video_ts of the MOST RECENT successful video-QR decode,
 	 * across ANY ring slot -- the overall "is the test signal genuinely still here right now"
 	 * signal, distinct from a single ring slot's own per-idx8 freshness (both are checked against
-	 * CAMERA_BOX_TEST_SIGNAL_FRESH_NS). Written on the video thread in `cb_video_qr_record`, read
+	 * CAMERA_BOX_TEST_SIGNAL_FRESH_NS). Written on the decode worker thread in `cb_video_qr_record`, read
 	 * on the audio thread under the same mutex as the other cb_video_* fields. */
 	uint64_t cb_video_last_decode_ts_ns = 0;
 
@@ -210,17 +247,16 @@ struct sync_test_output
 	 * densest-cluster estimator (survives the CRC-4 false-decode flood the offline path also fights,
 	 * where a plain 1 s median would not). Mirrors `src/av_sync_dock.rs`; touched only on the audio
 	 * thread. `cb_qr` is a SECOND quirc context sized to the better-scaled top-band decode (below).
-	 * `cb_src_buf` is a reused top-band gather buffer (no per-frame alloc). */
+	 * The top band itself is gathered into the decode job's reused buffer (issue 1367). */
 	struct quirc *cb_qr = nullptr;
 	camerabox::StreamingMarkerDecoder *cb_audio_dec = nullptr;
 	camerabox::RollingOffsetCluster cb_offset_cluster = camerabox::RollingOffsetCluster::dock();
 	uint64_t cb_audio_pushed = 0;
-	std::vector<uint8_t> cb_src_buf;
 
 	/* #921: skips the redundant per-frame quirc_resize(cb_qr, ...) once the decode-plan geometry
 	 * (a pure function of video_width/video_height, fixed for the output's lifetime) stops
 	 * changing -- see camera-box-video.hpp's own doc comment on CbQrResizeCache for why this
-	 * matters. Touched only on the video thread (same thread that owns cb_qr itself). */
+	 * matters. Touched only on the decode worker thread (same thread that owns cb_qr itself). */
 	camerabox::CbQrResizeCache cb_qr_resize_cache;
 
 	/* #634: audit-log lock/unlock/offset-update transitions of the cluster above, so a live
@@ -238,7 +274,7 @@ struct sync_test_output
 	/* #690: periodic live diagnostic -- tells a live session WHY the audio index/latency never
 	 * lock (does the demod see nothing / decode garbage / decode fine but never ring-hit or
 	 * cluster) and how well the video-QR decode is doing, from the OBS log alone (no rig access
-	 * needed to read it). video counters are written on the VIDEO thread and read on the AUDIO
+	 * needed to read it). video counters are written on the DECODE WORKER thread and read on the AUDIO
 	 * thread (which owns the periodic log) -- atomic, no lock needed for plain counters. Ring
 	 * hit/miss and the log-rate-limit timestamp are touched only on the audio thread. */
 	std::atomic<uint64_t> cb_video_frames_seen{0};
@@ -276,8 +312,20 @@ struct sync_test_output
 	 * pin move is visible in the log. Touched only on the audio thread. */
 	int32_t cb_last_seen_pin_ms = -1;
 
+	/* issue 1367: the video decode's latest-pending mailbox + worker thread. st_raw_video (libobs's
+	 * video-output thread) only publishes a bounded copy of the frame here; the worker runs the
+	 * decoders on it. Started in st_start, stopped + joined in st_stop / st_destroy. */
+	camerabox::CbDecodeMailbox<st_video_decode_job> cb_decode_mailbox;
+	/* issue 1367: the max ns st_raw_video itself took (snapshot + copy + publish) since the last diag
+	 * line -- the video-output thread's remaining cost, reported as publish_max_us. Raised on the
+	 * video thread with cb_atomic_max_u64, read-and-reset on the audio thread's diag tick. */
+	std::atomic<uint64_t> cb_publish_max_ns{0};
+
 	~sync_test_output()
 	{
+		/* issue 1367: join the decode worker FIRST -- it decodes with `qr` / `cb_qr`, which the
+		 * lines below free. */
+		cb_decode_mailbox.stop();
 		if (qr)
 			quirc_destroy(qr);
 		if (cb_qr)
@@ -287,6 +335,8 @@ struct sync_test_output
 };
 
 static void video_marker_found(struct sync_test_output *st, uint64_t timestamp, float score);
+static void st_video_decode_job_run(struct sync_test_output *, st_video_decode_job &);
+static void st_decode_worker_thread_setup();
 
 static const char *st_get_name(void *)
 {
@@ -322,6 +372,9 @@ static void *st_create(obs_data_t *, obs_output_t *output)
 static void st_destroy(void *data)
 {
 	auto *st = (struct sync_test_output *)data;
+	/* issue 1367: libobs has disconnected the raw callbacks by now (obs_output_destroy joins its
+	 * end-capture thread first); wait for an in-flight decode, then free. */
+	st->cb_decode_mailbox.stop();
 	delete st;
 }
 
@@ -334,6 +387,10 @@ static uint8_t get_intensity_10le(const uint8_t *data)
 static bool st_start(void *data)
 {
 	auto *st = (struct sync_test_output *)data;
+
+	/* issue 1367: st_start rewrites state the decode worker reads (the quirc size, the video
+	 * geometry) -- join any worker left from a previous start first. A no-op when none runs. */
+	st->cb_decode_mailbox.stop();
 
 	const video_t *video = obs_output_video(st->context);
 	if (!video) {
@@ -415,9 +472,21 @@ static bool st_start(void *data)
 		blog(LOG_ERROR, "failed to set-up QR code encoding context");
 		return false;
 	}
+	st->qr_grid_w = qr_width;
+	st->qr_grid_h = qr_height;
 
 	st->audio_sample_rate = audio_output_get_sample_rate(audio);
 	st->audio_channels = audio_output_get_channels(audio);
+
+	/* issue 1367: the QR decode runs on this worker, never on libobs's video-output thread (a
+	 * decode there made OBS skip 28 % of output frames on the cg OBS). Started before data capture
+	 * so the first frame already has somewhere to go. */
+	if (!st->cb_decode_mailbox.start([st](st_video_decode_job &job) { st_video_decode_job_run(st, job); },
+					 st_decode_worker_thread_setup)) {
+		blog(LOG_ERROR, "av-sync-dock: failed to start the video decode worker thread");
+		return false;
+	}
+	blog(LOG_INFO, "av-sync-dock: video decode worker started (off the video-output thread, issue 1367)");
 
 	obs_output_begin_data_capture(st->context, OBS_OUTPUT_VIDEO | OBS_OUTPUT_AUDIO);
 
@@ -428,31 +497,18 @@ static void st_stop(void *data, uint64_t)
 {
 	auto *st = (struct sync_test_output *)data;
 
+	/* issue 1367: libobs disconnects the raw callbacks on its own end-capture thread, so one last
+	 * raw_video can still arrive after this returns -- publishing into a stopped mailbox is a
+	 * no-op. */
 	obs_output_end_data_capture(st->context);
+	st->cb_decode_mailbox.stop();
+	blog(LOG_INFO, "av-sync-dock: video decode worker stopped (decoded=%llu decode_dropped=%llu)",
+	     (unsigned long long)st->cb_decode_mailbox.taken(), (unsigned long long)st->cb_decode_mailbox.dropped());
 }
 
-template<typename T> T sq(T x)
-{
-	return x * x;
-}
-
-static inline uint32_t diff_u32(uint32_t x, uint32_t y)
-{
-	if (x < y)
-		return y - x;
-	else
-		return x - y;
-}
-
-static inline uint32_t sqrt_u32(uint32_t x)
-{
-	uint32_t r = 0;
-	for (uint32_t b = 1 << 15; b; b >>= 1) {
-		if (sq(r | b) <= x)
-			r |= b;
-	}
-	return r;
-}
+/* issue 1367: norihiro's sq / diff_u32 / sqrt_u32 circle-row math moved, unchanged, into
+ * camera-box-frame-copy.hpp (cb_marker_circle_row / cb_isqrt_u32), where the self-test proves the
+ * copied marker patches cover every pixel it reads. */
 
 static inline int qrcode_length(const struct corner_type *cc)
 {
@@ -510,7 +566,7 @@ static void cb_video_qr_record(struct sync_test_output *st, uint32_t frame_id, u
 	uint8_t low = (uint8_t)(frame_id & 0xFFu);
 	{
 		// Same mutex the audio thread locks to READ these — the video ring + f/c/q_ms are written
-		// here (video thread) and read on the audio thread; both sides must take the lock.
+		// here (decode worker thread) and read on the audio thread; both sides must take the lock.
 		std::unique_lock<std::mutex> lock(st->mutex);
 		st->cb_video_ts_ns[low] = video_ts;
 		st->cb_video_valid[low] = true;
@@ -529,34 +585,39 @@ static void cb_video_qr_record(struct sync_test_output *st, uint32_t frame_id, u
 	st->qr_data.valid = true;
 }
 
-static void st_raw_video_qrcode_decode(struct sync_test_output *st, struct video_data *frame)
+/* issue 1367: the frame's first plane as camera-box-frame-copy.hpp reads it. */
+static camerabox::CbPlaneView st_plane_view(const struct sync_test_output *st, const struct video_data *frame)
+{
+	camerabox::CbPlaneView v;
+	v.data = frame->data[0];
+	v.linesize = frame->linesize[0];
+	v.pixelsize = st->video_pixelsize;
+	v.pixeloffset = st->video_pixeloffset;
+	v.intensity = st->video_get_intensity;
+	return v;
+}
+
+/* issue 1367 (producer, libobs's video-output thread): sample norihiro's whole-frame QR grid --
+ * every qr_step-th pixel of every qr_step-th row, the sampling st_raw_video_qrcode_decode used to do
+ * straight into quirc's buffer -- into the decode job, at the size quirc_resize() got in st_start. */
+static void st_norihiro_gather_grid(const struct sync_test_output *st, const struct video_data *frame,
+				    std::vector<uint8_t> &dst)
+{
+	const size_t need = (size_t)st->qr_grid_w * st->qr_grid_h;
+	if (dst.size() < need)
+		dst.resize(need);
+	camerabox::cb_copy_step_grid(st_plane_view(st, frame), st->qr_step, st->qr_grid_w, st->qr_grid_h,
+				     dst.data());
+}
+
+/* Decode worker thread (issue 1367): `grid` is the qr_grid_w x qr_grid_h sample
+ * st_norihiro_gather_grid took on the video thread, `timestamp` that frame's own timestamp. */
+static void st_raw_video_qrcode_decode(struct sync_test_output *st, const uint8_t *grid, uint64_t timestamp)
 {
 	int w, h;
 	auto qr = st->qr;
 	uint8_t *qrbuf = quirc_begin(qr, &w, &h);
-
-	const auto qr_step = st->qr_step;
-	const auto pixelsize = st->video_pixelsize * qr_step;
-	const uint8_t *linedata = frame->data[0] + frame->linesize[0] * (qr_step / 2);
-	auto *ptr = qrbuf;
-	for (int y = 0; y < h; y++) {
-		const uint8_t *data = linedata + st->video_pixeloffset + st->video_pixelsize * (qr_step / 2);
-		if (!st->video_get_intensity) {
-			for (int x = 0; x < w; x++) {
-				*ptr++ = *data;
-				data += pixelsize;
-			}
-		}
-		else {
-			for (int x = 0; x < w; x++) {
-				*ptr++ = st->video_get_intensity(data);
-				data += pixelsize;
-			}
-		}
-
-		linedata += frame->linesize[0] * qr_step;
-	}
-
+	memcpy(qrbuf, grid, (size_t)w * (size_t)h);
 	quirc_end(qr);
 
 	int num_codes = quirc_count(qr);
@@ -592,9 +653,9 @@ static void st_raw_video_qrcode_decode(struct sync_test_output *st, struct video
 				st->qr_corners[j].x = code.corners[j].x * st->qr_step;
 				st->qr_corners[j].y = code.corners[j].y * st->qr_step;
 			}
-			signal_qrcode_found(st->context, frame->timestamp - st->start_ts, st->qr_corners);
-			cb_video_qr_record(st, cb.frame_id, frame->timestamp - st->start_ts);
-			video_marker_found(st, frame->timestamp, 1.0f);
+			signal_qrcode_found(st->context, timestamp - st->start_ts, st->qr_corners);
+			cb_video_qr_record(st, cb.frame_id, timestamp - st->start_ts);
+			video_marker_found(st, timestamp, 1.0f);
 			continue;
 		}
 
@@ -606,7 +667,7 @@ static void st_raw_video_qrcode_decode(struct sync_test_output *st, struct video
 			st->qr_corners[j].y = code.corners[j].y * st->qr_step;
 		}
 
-		signal_qrcode_found(st->context, frame->timestamp - st->start_ts, st->qr_corners);
+		signal_qrcode_found(st->context, timestamp - st->start_ts, st->qr_corners);
 
 		adjust_corners(st->qr_corners);
 
@@ -617,52 +678,62 @@ static void st_raw_video_qrcode_decode(struct sync_test_output *st, struct video
 			st->q_ms = st->qr_data.q_ms;
 		}
 
-		st->video_marker_max_ts = frame->timestamp + st->qr_data.q_ms * 3 * 1000000;
+		st->video_marker_max_ts = timestamp + st->qr_data.q_ms * 3 * 1000000;
 		st->video_level_prev = 0;
 	}
 }
 
-static void st_raw_video_find_marker(struct sync_test_output *st, struct video_data *frame)
+/* issue 1367 (producer, libobs's video-output thread): copy the intensity inside each corner's
+ * circle bounding box -- the only pixels st_raw_video_find_marker reads -- around the corner
+ * snapshot already stored in `job.corners`. A corner with r == 0 or a box outside the frame gets an
+ * empty patch; the marker search reads nothing there, exactly as its own loop bounds dictate. */
+static void st_marker_cut_patches(const struct sync_test_output *st, const struct video_data *frame,
+				  struct st_video_decode_job &job)
+{
+	const camerabox::CbPlaneView v = st_plane_view(st, frame);
+	for (size_t i = 0; i < N_CORNERS; i++) {
+		const struct corner_type c = job.corners[i];
+		struct st_marker_patch &p = job.patches[i];
+		p.rect = camerabox::cb_marker_patch_rect(c.x, c.y, c.r, st->video_width, st->video_height);
+		const size_t need = (size_t)p.rect.w * p.rect.h;
+		if (p.luma.size() < need)
+			p.luma.resize(need);
+		camerabox::cb_copy_patch(v, p.rect, p.luma.data());
+	}
+}
+
+/* Decode worker thread (issue 1367): the same circle sums as before, read from the patches the video
+ * thread cut around `job.corners` (the corners the worker published after its previous norihiro
+ * decode), with the frame's own timestamp. */
+static void st_raw_video_find_marker(struct sync_test_output *st, const struct st_video_decode_job &job)
 {
 	int64_t sum = 0;
 
-	if (frame->timestamp > st->video_marker_max_ts) {
+	if (job.timestamp > st->video_marker_max_ts) {
 		st->video_level_prev = 0;
 		return;
 	}
 
-	const uint8_t *linedata = frame->data[0];
-	const uint32_t pixelsize = st->video_pixelsize;
-
 	for (size_t i = 0; i < N_CORNERS; i++) {
-		const struct corner_type c = st->qr_corners[i];
+		const struct corner_type c = job.corners[i];
 		if (c.r == 0)
 			return;
+		const struct st_marker_patch &p = job.patches[i];
 		uint32_t y0 = c.y > c.r ? c.y - c.r : 0;
 		uint32_t y1 = std::min(c.y + c.r, st->video_height);
-		uint32_t sq_r = sq(c.r);
 
 		for (uint32_t y = y0; y < y1; y++) {
-			uint32_t dx = sqrt_u32(sq_r - sq(diff_u32(y, c.y)));
-			uint32_t x0 = c.x > dx ? c.x - dx : 0;
-			uint32_t x1 = std::min(c.x + dx, st->video_width);
-
-			const uint8_t *data =
-				linedata + frame->linesize[0] * y + st->video_pixeloffset + st->video_pixelsize * x0;
+			const camerabox::CbSpan s = camerabox::cb_marker_circle_row(c.x, c.y, c.r, y, st->video_width);
 
 			uint32_t line_sum = 0;
 
-			if (!st->video_get_intensity) {
-				for (uint32_t x = x0; x < x1; x++) {
-					line_sum += *data;
-					data += pixelsize;
-				}
-			}
-			else {
-				for (uint32_t x = x0; x < x1; x++) {
-					line_sum += st->video_get_intensity(data);
-					data += pixelsize;
-				}
+			/* The span lies inside the patch the video thread copied (cb_marker_patch_rect), which
+			 * the self-test's corner sweep proves over every frame edge. */
+			if (s.x0 < s.x1) {
+				const uint8_t *data =
+					p.luma.data() + (size_t)(y - p.rect.y0) * p.rect.w + (s.x0 - p.rect.x0);
+				for (uint32_t x = s.x0; x < s.x1; x++)
+					line_sum += *data++;
 			}
 
 			if (i & 1)
@@ -672,16 +743,16 @@ static void st_raw_video_find_marker(struct sync_test_output *st, struct video_d
 		}
 	}
 
-	// blog(LOG_INFO, "st_raw_video-plot: %.03f %f", (frame->timestamp - st->start_ts) * 1e-9, (double)sum / (255.0 * M_PI * sq(st->qr_corners[0].r)));
+	// blog(LOG_INFO, "st_raw_video-plot: %.03f %f", (job.timestamp - st->start_ts) * 1e-9, (double)sum / (255.0 * M_PI * sq(st->qr_corners[0].r)));
 
 	if (st->qr_data.valid && st->video_level_prev < 0 && sum >= 0) {
 		/* Calculate the time half frame later than the zero-cross of `sum`. */
-		uint64_t t = frame->timestamp - st->video_level_prev_ts;
+		uint64_t t = job.timestamp - st->video_level_prev_ts;
 		uint64_t add = util_mul_div64(t, sum - st->video_level_prev * 3, (sum - st->video_level_prev) * 2);
 		video_marker_found(st, st->video_level_prev_ts + add, (float)(sum - st->video_level_prev));
 	}
 	st->video_level_prev = sum;
-	st->video_level_prev_ts = frame->timestamp;
+	st->video_level_prev_ts = job.timestamp;
 }
 
 static bool is_overlapped(uint32_t index, uint32_t index_max, uint32_t next_index)
@@ -806,39 +877,18 @@ static void video_marker_found(struct sync_test_output *st, uint64_t timestamp, 
  * nearest) to a scale that keeps each QR large, with an Otsu-binarized retry — the techniques
  * `src/probe/qr.rs` proved on the real soft optical stream frames. The plan geometry + downscale +
  * Otsu are the Tier-0-tested `camera-box-video.hpp` mirror; only the quirc driving is here. Returns
- * true if any camera-box QR decoded (and records it into the ring). */
-static bool st_raw_video_camera_box_decode(struct sync_test_output *st, struct video_data *frame)
+ * true if any camera-box QR decoded (and records it into the ring).
+ *
+ * issue 1367: this runs on the decode worker thread. `src` is the top band st_cb_gather_top_band
+ * copied on libobs's video-output thread (video_width x plan.band_h luma), `timestamp` that frame's
+ * own timestamp. */
+static bool st_raw_video_camera_box_decode(struct sync_test_output *st, const uint8_t *src, uint64_t timestamp)
 {
 	st->cb_video_frames_seen.fetch_add(1, std::memory_order_relaxed);
 
 	camerabox::CbTopBandPlan plan = camerabox::cb_top_band_decode_plan(st->video_width, st->video_height);
 	if (plan.band_h == 0 || plan.dst_w == 0 || plan.dst_h == 0)
 		return false;
-
-	// Gather the TOP band (rows 0..band_h) into a tight full-res luma buffer (reused, no per-frame
-	// alloc), honoring the pixel format's stride / offset / intensity extractor.
-	const size_t need = (size_t)st->video_width * plan.band_h;
-	if (st->cb_src_buf.size() < need)
-		st->cb_src_buf.resize(need);
-	uint8_t *src = st->cb_src_buf.data();
-	const uint32_t pixelsize = st->video_pixelsize;
-	for (uint32_t y = 0; y < plan.band_h; y++) {
-		const uint8_t *line = frame->data[0] + (size_t)frame->linesize[0] * y + st->video_pixeloffset;
-		uint8_t *dstrow = src + (size_t)y * st->video_width;
-		if (!st->video_get_intensity) {
-			const uint8_t *d = line;
-			for (uint32_t x = 0; x < st->video_width; x++) {
-				dstrow[x] = *d;
-				d += pixelsize;
-			}
-		} else {
-			const uint8_t *d = line;
-			for (uint32_t x = 0; x < st->video_width; x++) {
-				dstrow[x] = st->video_get_intensity(d);
-				d += pixelsize;
-			}
-		}
-	}
 
 	if (!st->cb_qr)
 		st->cb_qr = quirc_new();
@@ -895,9 +945,9 @@ static bool st_raw_video_camera_box_decode(struct sync_test_output *st, struct v
 				st->qr_corners[j].y =
 					(uint32_t)((uint64_t)code.corners[j].y * plan.band_h / (h > 0 ? h : 1));
 			}
-			signal_qrcode_found(st->context, frame->timestamp - st->start_ts, st->qr_corners);
-			cb_video_qr_record(st, cb.frame_id, frame->timestamp - st->start_ts);
-			video_marker_found(st, frame->timestamp, 1.0f);
+			signal_qrcode_found(st->context, timestamp - st->start_ts, st->qr_corners);
+			cb_video_qr_record(st, cb.frame_id, timestamp - st->start_ts);
+			video_marker_found(st, timestamp, 1.0f);
 			found_any = true;
 		}
 	}
@@ -906,6 +956,29 @@ static bool st_raw_video_camera_box_decode(struct sync_test_output *st, struct v
 	return found_any;
 }
 
+/* issue 1367 (producer, libobs's video-output thread): gather the TOP band (rows 0..band_h) into a
+ * tight full-res luma buffer, honoring the pixel format's stride / offset / intensity extractor --
+ * the gather st_raw_video_camera_box_decode used to do inline, now into the decode job. */
+static void st_cb_gather_top_band(const struct sync_test_output *st, const struct video_data *frame,
+				  std::vector<uint8_t> &dst)
+{
+	camerabox::CbTopBandPlan plan = camerabox::cb_top_band_decode_plan(st->video_width, st->video_height);
+	if (plan.band_h == 0 || plan.dst_w == 0 || plan.dst_h == 0)
+		return;
+
+	const size_t need = (size_t)st->video_width * plan.band_h;
+	if (dst.size() < need)
+		dst.resize(need);
+	camerabox::cb_copy_top_band(st_plane_view(st, frame), st->video_width, plan.band_h, dst.data());
+}
+
+/* issue 1367: libobs calls this on its ONE video-output thread, shared by every raw output on the
+ * box (NDI outputs, recordings). A QR decode here took longer than the frame budget and made
+ * video-io skip output frames (28 % on the cg OBS, 26.9.2026). So this only copies what the
+ * decoders read -- the top band, and outside camera-box mode norihiro's grid + the marker window --
+ * into the decode mailbox and returns. The worker (st_video_decode_job_run) decodes the copy with
+ * this frame's own timestamp; a frame that arrives while the worker is busy replaces the pending one
+ * and is counted as decode_dropped on the dock diag line. */
 static void st_raw_video(void *data, struct video_data *frame)
 {
 	auto *st = (struct sync_test_output *)data;
@@ -916,21 +989,67 @@ static void st_raw_video(void *data, struct video_data *frame)
 	if (!st->start_ts)
 		st->start_ts = frame->timestamp;
 
+	const uint64_t publish_start_ns = os_gettime_ns();
+	bool cb_active;
+	struct corner_type corners[N_CORNERS];
+	{
+		std::unique_lock<std::mutex> lock(st->mutex);
+		cb_active = st->cb_mode_active;
+		std::copy(st->marker_corners, st->marker_corners + N_CORNERS, corners);
+	}
+
+	st->cb_decode_mailbox.publish([&](st_video_decode_job &job) {
+		job.timestamp = frame->timestamp;
+		st_cb_gather_top_band(st, frame, job.band);
+		job.norihiro = !cb_active;
+		if (job.norihiro) {
+			st_norihiro_gather_grid(st, frame, job.grid);
+			std::copy(corners, corners + N_CORNERS, job.corners);
+			st_marker_cut_patches(st, frame, job);
+		}
+	});
+	camerabox::cb_atomic_max_u64(st->cb_publish_max_ns, os_gettime_ns() - publish_start_ns);
+}
+
+/* issue 1367: once, on the decode worker thread before its first job. Names it (15 characters: the
+ * Linux thread-name limit; visible in top -H / gdb, and to an attached debugger on Windows).
+ * The worker deliberately stays at NORMAL priority: the video-output thread takes `st->mutex` and
+ * the mailbox lock every frame and the worker holds both briefly, and a Windows std::mutex (SRW
+ * lock) has no priority inheritance -- a starved below-normal worker preempted inside one of those
+ * sections would stall the video thread, the very stall this worker exists to remove. */
+static void st_decode_worker_thread_setup()
+{
+	os_set_thread_name("avsync-decode");
+}
+
+/* issue 1367: the decode worker thread's per-frame body -- the decode st_raw_video used to run
+ * inline, now on the copied frame. */
+static void st_video_decode_job_run(struct sync_test_output *st, st_video_decode_job &job)
+{
 	// #398: camera-box's own better-scaled top-band decode first. Once camera-box mode is active it
 	// is the SOLE video-QR source (norihiro's ÷qr_step whole-frame pass misses our big top QR), so
 	// skip norihiro's decode + marker-window logic — those are kept only for the phone-based method
 	// when NOT in camera-box mode.
-	st_raw_video_camera_box_decode(st, frame);
+	st_raw_video_camera_box_decode(st, job.band.data(), job.timestamp);
 	bool cb_active;
 	{
 		std::unique_lock<std::mutex> lock(st->mutex);
 		cb_active = st->cb_mode_active;
 	}
-	if (cb_active)
+	/* `norihiro` is false only when camera-box mode was already active when the frame was copied;
+	 * the mode never switches back off, so this is the same gate one frame earlier. */
+	if (cb_active || !job.norihiro)
 		return;
 
-	st_raw_video_qrcode_decode(st, frame);
-	st_raw_video_find_marker(st, frame);
+	if (job.grid.size() >= (size_t)st->qr_grid_w * st->qr_grid_h)
+		st_raw_video_qrcode_decode(st, job.grid.data(), job.timestamp);
+	{
+		/* Publish the corners the decode just left (adjust_corners() output) for the video thread
+		 * to cut the NEXT frame's marker window around. */
+		std::unique_lock<std::mutex> lock(st->mutex);
+		std::copy(st->qr_corners, st->qr_corners + N_CORNERS, st->marker_corners);
+	}
+	st_raw_video_find_marker(st, job);
 }
 
 static uint32_t identify_audio_index_max(struct sync_test_output *st, int index)
@@ -1619,17 +1738,24 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 			signal_stale_changed(st->context, false);
 		}
 
+		/* issue 1367: video_frames counts the frames the decode worker processed; decode_dropped
+		 * (appended at the END, existing tokens unchanged) the frames the video thread replaced in
+		 * the mailbox while the worker was still decoding, so video_frames + decode_dropped is every
+		 * frame OBS delivered; publish_max_us the longest st_raw_video (the video-output thread's
+		 * remaining cost) since the previous diag line. */
 		blog(LOG_INFO,
 		     "av-sync-dock: diag video_frames=%llu video_decoded=%llu(%.1f%%) "
 		     "audio_samples=%llu preambles=%llu crc_ok=%llu crc_fail=%llu "
-		     "ring_hit=%llu ring_miss=%llu locked=%s state=%s",
+		     "ring_hit=%llu ring_miss=%llu locked=%s state=%s decode_dropped=%llu publish_max_us=%llu",
 		     (unsigned long long)vseen, (unsigned long long)vdec, vpct,
 		     (unsigned long long)st->cb_audio_pushed,
 		     (unsigned long long)st->cb_audio_dec->stats.preamble_screens_passed,
 		     (unsigned long long)st->cb_audio_dec->stats.crc_ok,
 		     (unsigned long long)st->cb_audio_dec->stats.crc_fail,
 		     (unsigned long long)st->cb_ring_hits, (unsigned long long)st->cb_ring_misses,
-		     st->cb_lock_state ? "yes" : "no", input_stale ? "STALE" : "LIVE");
+		     st->cb_lock_state ? "yes" : "no", input_stale ? "STALE" : "LIVE",
+		     (unsigned long long)st->cb_decode_mailbox.dropped(),
+		     (unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000));
 
 		/* #1153: dead-pairing recovery, evaluated at the SAME ~10s cadence. When the pairing has
 		 * been dead for a full epoch (no meaningful ring-hit advance, no genuine lock) while

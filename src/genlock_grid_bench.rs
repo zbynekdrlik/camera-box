@@ -69,9 +69,10 @@ use crate::genlock_grid::{
 };
 use crate::genlock_n1_depth::{
     n1_base_frames, n1_depth_frames, n1_is_deep_source, n1_shallow_gap_hold_due,
-    n1_shallow_gap_is_relock, n1_shallow_governs, n1_shallow_hold_due, n1_shallow_shed_due,
-    n1_shallow_track, n1_shed_due, n1_tick_on_grid, n1_tick_wall_ns, should_hold_n1_phase,
-    ShallowDepth, ShallowTick, N1_ON_GRID_NS,
+    n1_shallow_gap_is_relock, n1_shallow_governs, n1_shallow_hold_due,
+    n1_shallow_latch_floor_frames, n1_shallow_shed_due, n1_shallow_sticky_track, n1_shallow_track,
+    n1_shed_due, n1_tick_on_grid, n1_tick_wall_ns, should_hold_n1_phase, ShallowDepth,
+    ShallowSticky, ShallowTick, N1_ON_GRID_NS,
 };
 use std::collections::{BTreeMap, VecDeque};
 
@@ -362,6 +363,15 @@ pub(crate) struct Fifo {
     pub(crate) shallow: ShallowDepth,
     /// This tick presented a frame (false on every hold / underrun).
     pub(crate) presented_now: bool,
+    /// issue 1367 (ROZHODNUTÉ 5842640404): the newest RECEIVED frame's arrival lag (`arrival wall −
+    /// stamp`, saturating at 0), recorded on receive (the C `genlock_rx_arrival_lag_ns`).
+    pub(crate) rx_lag_ns: u64,
+    /// issue 1367 (design 5844353368): the sticky content floor (the C `genlock_shallow_sticky_*`).
+    pub(crate) sticky: ShallowSticky,
+    /// issue 1367 (design 5844353368): the source's audio flows (the C `genlock_audio_hold_mode ==
+    /// GENLOCK_AUDIO_HOLD_TIMECODE`); false = a video-only source, which keeps no sticky floor. The
+    /// shallow A/V bench sets it from its audio leg; the video-only grid bench leaves it false.
+    pub(crate) audio_flowing: bool,
 }
 
 /// Counter deltas of one tick (only the post-warm-up ones are reported).
@@ -381,6 +391,14 @@ pub(crate) struct TickCounters {
 }
 
 impl Fifo {
+    /// Receive one frame (the C producer push site of `obs_source_output_video_internal`): queue its
+    /// stamp and record its arrival lag at the arrival wall instant, like the C
+    /// `genlock_rx_arrival_lag_ns = genlock_wall_now_ns() − output->timestamp`.
+    pub(crate) fn receive(&mut self, arrival_wall_ns: u64, stamp_ns: u64) {
+        self.queue.push_back(stamp_ns);
+        self.rx_lag_ns = arrival_wall_ns.saturating_sub(stamp_ns);
+    }
+
     /// One render tick: the N==1 branches of the C `genlock_release_tick`, in its order. `wall` is
     /// the processing wall (the C `wall_now`), `scheduled` the wall instant the tick was scheduled
     /// for (the C `obs->video.video_time`, here already in wall time).
@@ -604,28 +622,37 @@ impl Fifo {
         // once its window closes (the C present tail, `genlock_n1_shallow_track`).
         let newest = *self.queue.back().expect("release keeps at least one frame");
         let tick_wall = n1_tick_wall_ns(wall, wall, scheduled);
-        if cfg.shallow_depth_rule
-            && n1_shallow_track(
-                &mut self.shallow,
-                ShallowTick {
-                    n1: true,
-                    relock: shallow_relock,
-                    on_grid: tick_on_grid(cfg.grid, tick_wall),
-                    floor_frames: n1_depth_frames(tick_wall, newest, CANVAS_INTERVAL_NS),
-                    base_frames: n1_base_frames(cfg.latency_ms, CANVAS_INTERVAL_NS),
-                    deep: n1_is_deep_source(
-                        wall.saturating_sub(newest),
-                        cfg.latency_ms,
-                        CANVAS_INTERVAL_NS,
-                    ),
-                    min_latency_box: cfg.min_latency_box,
-                    // the frame this tick presents (the C `source->last_frame_ts`).
-                    realized_frames: n1_depth_frames(tick_wall, self.queue[0], CANVAS_INTERVAL_NS),
-                    backlog_relock,
-                },
-            )
-        {
-            c.shallow_latches += 1;
+        if cfg.shallow_depth_rule {
+            let mut t = ShallowTick {
+                n1: true,
+                relock: shallow_relock,
+                on_grid: tick_on_grid(cfg.grid, tick_wall),
+                floor_frames: n1_depth_frames(tick_wall, newest, CANVAS_INTERVAL_NS),
+                // ROZHODNUTÉ 5842640404: the newest received frame's receive-time lag plus the
+                // arrival-jitter budget (the C `genlock_rx_arrival_lag_ns`).
+                latch_floor_frames: n1_shallow_latch_floor_frames(
+                    self.rx_lag_ns,
+                    CANVAS_INTERVAL_NS,
+                ),
+                base_frames: n1_base_frames(cfg.latency_ms, CANVAS_INTERVAL_NS),
+                deep: n1_is_deep_source(
+                    wall.saturating_sub(newest),
+                    cfg.latency_ms,
+                    CANVAS_INTERVAL_NS,
+                ),
+                min_latency_box: cfg.min_latency_box,
+                // the frame this tick presents (the C `source->last_frame_ts`).
+                realized_frames: n1_depth_frames(tick_wall, self.queue[0], CANVAS_INTERVAL_NS),
+                backlog_relock,
+                sticky_floor_frames: 0,
+            };
+            // design 5844353368: the sticky content floor first (the C `genlock_shallow_latch`
+            // order), then the latch that never goes under it.
+            t.sticky_floor_frames =
+                n1_shallow_sticky_track(&mut self.sticky, &t, self.audio_flowing, tick_wall);
+            if n1_shallow_track(&mut self.shallow, t) {
+                c.shallow_latches += 1;
+            }
         }
         let presented = self
             .queue
@@ -710,8 +737,8 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
             pending.push_back((arrival, stamp));
         }
         while pending.front().is_some_and(|&(arrival, _)| arrival <= wall) {
-            let (_, stamp) = pending.pop_front().expect("front exists");
-            fifo.queue.push_back(stamp);
+            let (arrival, stamp) = pending.pop_front().expect("front exists");
+            fifo.receive(arrival, stamp);
         }
         let counted = nominal >= warm;
         let mut tc = TickCounters::default();

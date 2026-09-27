@@ -3,50 +3,147 @@
 # `clock_discipline_unlocked` / `date_master_verdict` (scripts/lib/dantesync-clock-discipline.sh,
 # sourced by scripts/clock-offset-guard.sh) and the python twin `classify_clock_discipline` /
 # `clock_discipline_unlocked` / `date_master_verdict` (scripts/dantesync_fleet.py), pinned by
-# tests/python/test_clock_discipline_1372.py.
-# Columns (TAB-separated): case, status, class, date_verdict (margin 1000 us), unlocked.
+# tests/python/test_clock_discipline_1372.py. The journal_grade column pins the JOURNAL path's date
+# grade: bash `journal_date_grade_from_step` (under dantesync_journal_clock_verdict) and python
+# `journal_date_grade`.
+# Columns (TAB-separated): case, status, class, date_verdict (margin 1000 us, micro bound 5 ms,
+# daily bound 3000 ms, now = DANTESYNC_DATE_NOW_S 1790501400 = 2026-09-27T09:30:00Z), unlocked,
+# journal_grade.
 #   status  = `@<repo-relative path>` to a /status JSON file, or an inline compact JSON object.
 #   class   = PTP_PHASE_LOCK | LEGACY_SLEW | LEGACY_NO_SLEW | UNKNOWN
-#   date_verdict = none (not the date master) | ok | out | unknown (master, fields unreadable)
+#   date_verdict = none (not the date master) | ok | out | paused (a dantesync 1.11.0 master whose
+#              micro-corrections are paused: no UTC reading) | unknown (master, fields unreadable)
 #   unlocked = yes only for clock_discipline=ptp_phase_lock with ptp_phase_locked=false (the
 #              named PTP-PHASE UNLOCKED failure: clock_discipline_unlocked), else no
+#   journal_grade = how a date-authority journal line `(..., step bound 50000us)` is graded when the
+#              SAME node's /status is this row (margin 1000 us, micro bound 5 ms):
+#              micro:<us> (a micro-capable 1.11.x date master: median-only on micro bound + margin)
+#              | step:<us> (a readable /status that is not one: the journal's step bound + margin)
+#              | step-unread:<us> (no readable /status, no date_authority: the step bound, named)
+#              | out (date_correction_falling_behind=true) | paused (date_micro_paused=true)
+#              | unknown (a micro-capable master whose flags are not JSON booleans)
 # The four @ files are /status captured read-only from the live fleet on 26.9.2026 (strih-lx master
 # and the stream slave, both dantesync 1.9.0) plus two legacy nodes synthesized from the pre-1.9.0
 # field shape (no clock_discipline / ptp_phase_locked / date_* fields).
-live_master_1_9_0	@tests/fixtures/dantesync_status_1372/strih-lx-master-1.9.0.json	PTP_PHASE_LOCK	ok	no
-live_slave_1_9_0	@tests/fixtures/dantesync_status_1372/stream-slave-1.9.0.json	PTP_PHASE_LOCK	none	no
-legacy_build_slew_on	@tests/fixtures/dantesync_status_1372/legacy-slew-1.8.52.json	LEGACY_SLEW	none	no
-legacy_build_slew_off	@tests/fixtures/dantesync_status_1372/legacy-no-slew-1.8.52.json	LEGACY_NO_SLEW	none	no
-explicit_legacy_slew_on	{"clock_discipline":"legacy","phase_slew_enabled":true,"ptp_phase_locked":false}	LEGACY_SLEW	none	no
-explicit_legacy_slew_off	{"clock_discipline":"legacy","phase_slew_enabled":false,"ptp_phase_locked":false}	LEGACY_NO_SLEW	none	no
-empty_discipline_is_an_older_blob	{"clock_discipline":"","phase_slew_enabled":true}	LEGACY_SLEW	none	no
-null_discipline_is_an_older_blob	{"clock_discipline":null,"phase_slew_enabled":false}	LEGACY_NO_SLEW	none	no
-spaced_json	{ "clock_discipline" : "ptp_phase_lock" , "ptp_phase_locked" : true }	PTP_PHASE_LOCK	none	no
-phase_lock_not_locked	{"clock_discipline":"ptp_phase_lock","ptp_phase_locked":false,"phase_slew_enabled":false}	UNKNOWN	none	yes
-phase_lock_locked_unread	{"clock_discipline":"ptp_phase_lock","phase_slew_enabled":false}	UNKNOWN	none	no
-phase_lock_locked_is_a_string	{"clock_discipline":"ptp_phase_lock","ptp_phase_locked":"true"}	UNKNOWN	none	no
-unknown_discipline_value	{"clock_discipline":"foo","ptp_phase_locked":true,"phase_slew_enabled":true}	UNKNOWN	none	no
-legacy_slew_unread	{"clock_discipline":"legacy"}	UNKNOWN	none	no
-older_blob_slew_unread	{"mode":"LOCK","is_locked":true}	UNKNOWN	none	no
-empty_object	{}	UNKNOWN	none	no
-master_on_the_line	{"date_authority":"master","date_offset_error_ms":0.0,"date_step_bound_ms":50.0}	UNKNOWN	ok	no
-master_at_bound_plus_margin	{"date_authority":"master","date_offset_error_ms":-51.0,"date_step_bound_ms":50.0}	UNKNOWN	ok	no
-master_step_pending_positive	{"date_authority":"master","date_offset_error_ms":50.9,"date_step_bound_ms":50.0}	UNKNOWN	ok	no
-master_past_bound_plus_margin	{"date_authority":"master","date_offset_error_ms":-51.5,"date_step_bound_ms":50.0}	UNKNOWN	out	no
-master_far_out	{"date_authority":"master","date_offset_error_ms":120.25,"date_step_bound_ms":50.0}	UNKNOWN	out	no
-master_smaller_bound	{"date_authority":"master","date_offset_error_ms":12.0,"date_step_bound_ms":10.0}	UNKNOWN	out	no
-master_integer_fields	{"date_authority":"master","date_offset_error_ms":-3,"date_step_bound_ms":50}	UNKNOWN	ok	no
-master_error_null	{"date_authority":"master","date_offset_error_ms":null,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no
-master_bound_null	{"date_authority":"master","date_offset_error_ms":-1.0,"date_step_bound_ms":null}	UNKNOWN	unknown	no
-master_bound_zero	{"date_authority":"master","date_offset_error_ms":-1.0,"date_step_bound_ms":0.0}	UNKNOWN	unknown	no
-master_fields_absent	{"date_authority":"master"}	UNKNOWN	unknown	no
-follower	{"date_authority":"follower","date_offset_error_ms":null,"date_step_bound_ms":null}	UNKNOWN	none	no
-local	{"date_authority":"local","date_offset_error_ms":null}	UNKNOWN	none	no
-legacy_empty_authority	{"date_authority":"","date_offset_error_ms":null}	UNKNOWN	none	no
-non_string_discipline_number	{"clock_discipline":5,"phase_slew_enabled":true}	UNKNOWN	none	no
-non_string_discipline_bool	{"clock_discipline":true,"ptp_phase_locked":true}	UNKNOWN	none	no
-legacy_value_with_lock_false	{"clock_discipline":"legacy","ptp_phase_locked":false}	UNKNOWN	none	no
-master_error_not_finite	{"date_authority":"master","date_offset_error_ms":1e400,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no
-master_error_absurd	{"date_authority":"master","date_offset_error_ms":1e20,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no
-master_bound_absurd	{"date_authority":"master","date_offset_error_ms":-1.0,"date_step_bound_ms":1e20}	UNKNOWN	unknown	no
-master_error_huge_integer	{"date_authority":"master","date_offset_error_ms":10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no
+# The two 1.11.1 @ files are /status captured read-only from the same two live nodes on 26.9.2026
+# after the fleet roll to dantesync 1.11.1 (dantesync PR 121 date micro-corrections + PR 122): the
+# master reads date_offset_error_ms=0.471 with last_date_step_kind=micro; the slave is a follower.
+# They replaced the synthesized 1.11.0 fixtures. A master that carries
+# date_correction_falling_behind is graded on the micro bound (DANTESYNC_DATE_MICRO_BOUND_MS,
+# default 5) + margin, falling behind = out, paused = paused; a master without it (1.9.0 / 1.10.0)
+# is graded on date_step_bound_ms exactly as before (the mixed fleet during the roll).
+live_master_1_9_0	@tests/fixtures/dantesync_status_1372/strih-lx-master-1.9.0.json	PTP_PHASE_LOCK	ok	no	step:51000
+live_slave_1_9_0	@tests/fixtures/dantesync_status_1372/stream-slave-1.9.0.json	PTP_PHASE_LOCK	none	no	step:51000
+legacy_build_slew_on	@tests/fixtures/dantesync_status_1372/legacy-slew-1.8.52.json	LEGACY_SLEW	none	no	step-unread:51000
+legacy_build_slew_off	@tests/fixtures/dantesync_status_1372/legacy-no-slew-1.8.52.json	LEGACY_NO_SLEW	none	no	step-unread:51000
+explicit_legacy_slew_on	{"clock_discipline":"legacy","phase_slew_enabled":true,"ptp_phase_locked":false}	LEGACY_SLEW	none	no	step-unread:51000
+explicit_legacy_slew_off	{"clock_discipline":"legacy","phase_slew_enabled":false,"ptp_phase_locked":false}	LEGACY_NO_SLEW	none	no	step-unread:51000
+empty_discipline_is_an_older_blob	{"clock_discipline":"","phase_slew_enabled":true}	LEGACY_SLEW	none	no	step-unread:51000
+null_discipline_is_an_older_blob	{"clock_discipline":null,"phase_slew_enabled":false}	LEGACY_NO_SLEW	none	no	step-unread:51000
+spaced_json	{ "clock_discipline" : "ptp_phase_lock" , "ptp_phase_locked" : true }	PTP_PHASE_LOCK	none	no	step-unread:51000
+phase_lock_not_locked	{"clock_discipline":"ptp_phase_lock","ptp_phase_locked":false,"phase_slew_enabled":false}	UNKNOWN	none	yes	step-unread:51000
+phase_lock_locked_unread	{"clock_discipline":"ptp_phase_lock","phase_slew_enabled":false}	UNKNOWN	none	no	step-unread:51000
+phase_lock_locked_is_a_string	{"clock_discipline":"ptp_phase_lock","ptp_phase_locked":"true"}	UNKNOWN	none	no	step-unread:51000
+unknown_discipline_value	{"clock_discipline":"foo","ptp_phase_locked":true,"phase_slew_enabled":true}	UNKNOWN	none	no	step-unread:51000
+legacy_slew_unread	{"clock_discipline":"legacy"}	UNKNOWN	none	no	step-unread:51000
+older_blob_slew_unread	{"mode":"LOCK","is_locked":true}	UNKNOWN	none	no	step-unread:51000
+empty_object	{}	UNKNOWN	none	no	step-unread:51000
+master_on_the_line	{"date_authority":"master","date_offset_error_ms":0.0,"date_step_bound_ms":50.0}	UNKNOWN	ok	no	step:51000
+master_at_bound_plus_margin	{"date_authority":"master","date_offset_error_ms":-51.0,"date_step_bound_ms":50.0}	UNKNOWN	ok	no	step:51000
+master_step_pending_positive	{"date_authority":"master","date_offset_error_ms":50.9,"date_step_bound_ms":50.0}	UNKNOWN	ok	no	step:51000
+master_past_bound_plus_margin	{"date_authority":"master","date_offset_error_ms":-51.5,"date_step_bound_ms":50.0}	UNKNOWN	out	no	step:51000
+master_far_out	{"date_authority":"master","date_offset_error_ms":120.25,"date_step_bound_ms":50.0}	UNKNOWN	out	no	step:51000
+master_smaller_bound	{"date_authority":"master","date_offset_error_ms":12.0,"date_step_bound_ms":10.0}	UNKNOWN	out	no	step:51000
+master_integer_fields	{"date_authority":"master","date_offset_error_ms":-3,"date_step_bound_ms":50}	UNKNOWN	ok	no	step:51000
+master_error_null	{"date_authority":"master","date_offset_error_ms":null,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no	step:51000
+master_bound_null	{"date_authority":"master","date_offset_error_ms":-1.0,"date_step_bound_ms":null}	UNKNOWN	unknown	no	step:51000
+master_bound_zero	{"date_authority":"master","date_offset_error_ms":-1.0,"date_step_bound_ms":0.0}	UNKNOWN	unknown	no	step:51000
+master_fields_absent	{"date_authority":"master"}	UNKNOWN	unknown	no	step:51000
+follower	{"date_authority":"follower","date_offset_error_ms":null,"date_step_bound_ms":null}	UNKNOWN	none	no	step:51000
+local	{"date_authority":"local","date_offset_error_ms":null}	UNKNOWN	none	no	step:51000
+legacy_empty_authority	{"date_authority":"","date_offset_error_ms":null}	UNKNOWN	none	no	step-unread:51000
+non_string_discipline_number	{"clock_discipline":5,"phase_slew_enabled":true}	UNKNOWN	none	no	step-unread:51000
+non_string_discipline_bool	{"clock_discipline":true,"ptp_phase_locked":true}	UNKNOWN	none	no	step-unread:51000
+legacy_value_with_lock_false	{"clock_discipline":"legacy","ptp_phase_locked":false}	UNKNOWN	none	no	step-unread:51000
+master_error_not_finite	{"date_authority":"master","date_offset_error_ms":1e400,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no	step:51000
+master_error_absurd	{"date_authority":"master","date_offset_error_ms":1e20,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no	step:51000
+master_bound_absurd	{"date_authority":"master","date_offset_error_ms":-1.0,"date_step_bound_ms":1e20}	UNKNOWN	unknown	no	step:51000
+master_error_huge_integer	{"date_authority":"master","date_offset_error_ms":10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no	step:51000
+live_master_1_11_1	@tests/fixtures/dantesync_status_1372/strih-lx-master-1.11.1.json	PTP_PHASE_LOCK	ok	no	micro:6000
+live_slave_1_11_1	@tests/fixtures/dantesync_status_1372/stream-slave-1.11.1.json	PTP_PHASE_LOCK	none	no	step:51000
+master_1_10_shape_on_step_bound	{"date_authority":"master","date_offset_error_ms":-28.8,"date_step_bound_ms":50.0,"date_slew_active":false,"date_slew_remaining_ms":null,"date_slew_ppm":null}	UNKNOWN	ok	no	step:51000
+master_1_10_shape_past_step_bound	{"date_authority":"master","date_offset_error_ms":-51.5,"date_step_bound_ms":50.0,"date_slew_active":false,"date_slew_remaining_ms":null,"date_slew_ppm":null}	UNKNOWN	out	no	step:51000
+micro_on_the_line	{"date_authority":"master","date_offset_error_ms":-2.1,"date_step_bound_ms":50.0,"date_micro_active":true,"date_micro_last_us":500,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	ok	no	micro:6000
+micro_at_bound_plus_margin	{"date_authority":"master","date_offset_error_ms":-6.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	ok	no	micro:6000
+micro_past_bound_plus_margin	{"date_authority":"master","date_offset_error_ms":6.001,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	out	no	micro:6000
+micro_inside_step_bound_is_still_out	{"date_authority":"master","date_offset_error_ms":-28.776,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	out	no	micro:6000
+micro_falling_behind	{"date_authority":"master","date_offset_error_ms":-3.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":true,"date_micro_paused":false}	UNKNOWN	out	no	out
+micro_falling_behind_wins_over_paused	{"date_authority":"master","date_offset_error_ms":-3.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":true,"date_micro_paused":true}	UNKNOWN	out	no	out
+micro_paused	{"date_authority":"master","date_offset_error_ms":-1.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":true}	UNKNOWN	paused	no	paused
+micro_paused_error_null	{"date_authority":"master","date_offset_error_ms":null,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":true}	UNKNOWN	paused	no	paused
+micro_error_null	{"date_authority":"master","date_offset_error_ms":null,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	unknown	no	micro:6000
+micro_step_bound_null_is_not_needed	{"date_authority":"master","date_offset_error_ms":-2.0,"date_step_bound_ms":null,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	ok	no	micro:6000
+micro_falling_behind_is_a_string	{"date_authority":"master","date_offset_error_ms":-2.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":"false","date_micro_paused":false}	UNKNOWN	unknown	no	unknown
+micro_falling_behind_null	{"date_authority":"master","date_offset_error_ms":-2.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":null,"date_micro_paused":false}	UNKNOWN	unknown	no	unknown
+micro_paused_null	{"date_authority":"master","date_offset_error_ms":-2.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":null}	UNKNOWN	unknown	no	unknown
+micro_paused_absent	{"date_authority":"master","date_offset_error_ms":-2.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false}	UNKNOWN	unknown	no	unknown
+micro_spaced_json	{ "date_authority" : "master" , "date_offset_error_ms" : -2.5 , "date_correction_falling_behind" : false , "date_micro_paused" : false }	UNKNOWN	ok	no	micro:6000
+micro_error_absurd	{"date_authority":"master","date_offset_error_ms":1e20,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	unknown	no	micro:6000
+micro_follower	{"date_authority":"follower","date_offset_error_ms":null,"date_step_bound_ms":null,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	none	no	step:51000
+authority_not_a_string	{"date_authority":5,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	none	no	step-unread:51000
+authority_null	{"date_authority":null,"date_offset_error_ms":-1.0}	UNKNOWN	none	no	step-unread:51000
+micro_falling_behind_is_a_number	{"date_authority":"master","date_offset_error_ms":-1.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":0,"date_micro_paused":false}	UNKNOWN	unknown	no	unknown
+# dantesync 1.12.0 (PR 123, the NIGHTLY date step): a master whose date_correction_mode is "daily"
+# corrects nothing by day -- its date_offset_error_ms grows to a day's drift (~1.5 s on the rig) until
+# ONE coordinated step at the nightly window (02:00 UTC). It is graded on its schedule: the next
+# window (date_daily_next_utc) within (now, now + 24 h 30 min], the last nightly step
+# (date_daily_last_step_ts) within the last 26 h (null = none seen since the master started, a NOTE;
+# up to 30 min in the future = announced, not landed yet), and |error| <= DANTESYNC_DATE_DAILY_BOUND_MS
+# (default 3000) + margin. A read, wrong field wins over an unreadable one (out before unknown).
+# journal_grade: daily:<us> (a live schedule: the journal median on the daily bound + margin) |
+# daily-out (a missing / past / far schedule, or a stale last step) | daily-unknown (a schedule
+# field, the mode or the daily bound unreadable). date_correction_mode "micro" or "" keeps the
+# 1.11 grade. The two 1.12.0 @ files are SYNTHESIZED from the 1.11.1 captures plus the four new
+# fields in dantesync src/status.rs order, until a live capture after the roll replaces them.
+live_master_1_12_0	@tests/fixtures/dantesync_status_1372/strih-lx-master-1.12.0.json	PTP_PHASE_LOCK	ok	no	daily:3001000
+live_slave_1_12_0	@tests/fixtures/dantesync_status_1372/stream-slave-1.12.0.json	PTP_PHASE_LOCK	none	no	step:51000
+daily_a_days_drift_is_ok	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	ok	no	daily:3001000
+daily_first_day_no_nightly_step_yet	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":null,"date_daily_last_step_ms":null}	UNKNOWN	ok	no	daily:3001000
+daily_error_at_bound_plus_margin	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":-3001.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	ok	no	daily:3001000
+daily_error_past_bound_plus_margin	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":3001.001,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	out	no	daily:3001000
+daily_ignores_the_micro_bound	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":-28.776,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	ok	no	daily:3001000
+daily_ignores_the_micro_flags	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":true,"date_micro_paused":true,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	ok	no	daily:3001000
+daily_schedule_null	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":null,"date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	out	no	daily-out
+daily_schedule_absent	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	out	no	daily-out
+daily_schedule_in_the_past	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-27T02:00:00Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	out	no	daily-out
+daily_schedule_is_now	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-27T09:30:00Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	out	no	daily-out
+daily_schedule_one_second_ahead	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-27T09:30:01Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	ok	no	daily:3001000
+daily_schedule_at_24h30m	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T10:00:00Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	ok	no	daily:3001000
+daily_schedule_past_24h30m	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T10:00:01Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	out	no	daily-out
+daily_last_step_26h_ago	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":1790407800,"date_daily_last_step_ms":-1523.4}	UNKNOWN	ok	no	daily:3001000
+daily_last_step_stale	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":1790407799,"date_daily_last_step_ms":-1523.4}	UNKNOWN	out	no	daily-out
+daily_last_step_announced_not_landed	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":1790503200,"date_daily_last_step_ms":-1523.4}	UNKNOWN	ok	no	daily:3001000
+daily_last_step_far_future	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":1790503201,"date_daily_last_step_ms":-1523.4}	UNKNOWN	out	no	daily-out
+daily_schedule_not_a_string	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":5,"date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	unknown	no	daily-unknown
+daily_schedule_unparseable	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"tomorrow","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	unknown	no	daily-unknown
+daily_schedule_empty_string	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	unknown	no	daily-unknown
+daily_schedule_not_utc_z	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00+00:00","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	unknown	no	daily-unknown
+daily_schedule_impossible_date	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-02-30T02:00:00Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	unknown	no	daily-unknown
+daily_schedule_hour_24	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-27T24:00:00Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	unknown	no	daily-unknown
+daily_last_step_a_fraction	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":1790474400.5,"date_daily_last_step_ms":-1523.4}	UNKNOWN	unknown	no	daily-unknown
+daily_last_step_a_string	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":"1790474400","date_daily_last_step_ms":-1523.4}	UNKNOWN	unknown	no	daily-unknown
+daily_last_step_negative	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":-5,"date_daily_last_step_ms":-1523.4}	UNKNOWN	unknown	no	daily-unknown
+daily_last_step_a_bool	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":true,"date_daily_last_step_ms":-1523.4}	UNKNOWN	unknown	no	daily-unknown
+daily_last_step_absent	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ms":-1523.4}	UNKNOWN	unknown	no	daily-unknown
+daily_error_null	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":null,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	unknown	no	daily:3001000
+daily_error_absurd	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1e+20,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	unknown	no	daily:3001000
+daily_out_wins_over_unknown	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":null,"date_daily_last_step_ts":"x","date_daily_last_step_ms":-1523.4}	UNKNOWN	out	no	daily-out
+daily_error_out_wins_over_unknown	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":4000.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":"x","date_daily_last_step_ms":-1523.4}	UNKNOWN	out	no	daily-unknown
+daily_spaced_json	{ "date_authority" : "master" , "date_correction_mode" : "daily" , "date_offset_error_ms" : -812.25 , "date_daily_next_utc" : "2026-09-28T02:00:00Z" , "date_daily_last_step_ts" : null }	UNKNOWN	ok	no	daily:3001000
+mode_micro_1_12_is_the_micro_grade	{"date_authority":"master","date_correction_mode":"micro","date_offset_error_ms":-7.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":null,"date_daily_last_step_ts":null,"date_daily_last_step_ms":null}	UNKNOWN	out	no	micro:6000
+mode_empty_on_a_1_12_master_is_the_micro_grade	{"date_authority":"master","date_correction_mode":"","date_offset_error_ms":-2.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	ok	no	micro:6000
+mode_unknown_value	{"date_authority":"master","date_correction_mode":"weekly","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	unknown	no	daily-unknown
+mode_not_a_string	{"date_authority":"master","date_correction_mode":1,"date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	unknown	no	daily-unknown
+mode_daily_on_a_follower	{"date_authority":"follower","date_correction_mode":"daily","date_daily_next_utc":null}	UNKNOWN	none	no	step:51000
+daily_schedule_before_1970	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"1969-12-31T00:00:00Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	unknown	no	daily-unknown
+daily_last_step_negative_zero	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":-0,"date_daily_last_step_ms":null}	UNKNOWN	out	no	daily-out

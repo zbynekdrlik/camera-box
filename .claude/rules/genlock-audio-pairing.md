@@ -226,7 +226,14 @@ pure module + mirror:
 - The ingest MEASURES every packet under `audio_buf_mutex`: `audio_actual_place_ns` (appended → the
   buffer end `audio_ts + buffered`; placed → its own timestamp) minus the intended `in.timestamp`
   (`audio_place_error_ns`), EMA 1/16 per packet (`audio_place_error_smooth_ns`), reset whenever the
-  hold is not active. `audio_pairing_offset_ms` now uses `audio_realized_delay_ns` = hold + that error
+  hold is not active. **Design 5845361166:** the intended timestamp is the RAW stamp's
+  (`audio_intended_raw_ns` / `genlock_audio_intended_raw_ns`: `data->timestamp` + the same offsets
+  and term), measured BEFORE the 70 ms TS smoothing snap — against the snapped `in.timestamp` a
+  skipped or duplicated sender slot read 0. This holds for BOTH active holds (a latency-hold
+  source's `audio_place_err_ms` / pairing offset now also read the raw-stamp error, the arrival
+  jitter of its stamps included). The same error (+ the owed slew) is the TIMECODE ASRC's
+  input: `asrc_timecode_ingest` books its jumps at 1000 ppm and feeds the rate the stamp advance
+  (`asrc-bench-harness.md`, the issue-1367 TIMECODE section). `audio_pairing_offset_ms` now uses `audio_realized_delay_ns` = hold + that error
   (an owed slew is in it; hold − owed slew only until a measurement exists), and the audit carries
   `audio_place_err_ms=`. A hold missing from the samples reads as the gap, never 0.
 - The benches model OBS's append-after-reset (the `AudioLeg` used to re-place on every resync, which

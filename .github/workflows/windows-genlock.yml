@@ -555,6 +555,64 @@ jobs:
           }
           Write-Output "dock bias observability (lag_idx/cands + pin-change marker, #1319) — OK"
 
+      - name: Assert dock decode runs off the video-output thread (issue 1367)
+        shell: pwsh
+        run: |
+          # issue 1367: the dock's per-frame QR decode ran inside st_raw_video, i.e. on libobs's ONE
+          # video-output thread; with QR content on screen OBS skipped 28 % of output frames for
+          # every raw output on the resolume cg OBS. The callback must only hand a bounded copy to
+          # the decode worker, which is started on output start and joined on stop/destroy. Mirrors
+          # tests/av_sync_dock_decode_mailbox_1367.rs (the mailbox policy itself is proven by the
+          # g++ self-test that Rust test compiles and runs on the Linux CI).
+          $output = (Get-Content "vendor/av-sync-dock/src/sync-test-output.cpp" -Raw) -replace '\s+', ' '
+          if ($output -notmatch [regex]::Escape('#include "camera-box-decode-mailbox.hpp"')) {
+            Write-Error "sync-test-output.cpp: camera-box-decode-mailbox.hpp is not included (issue 1367)"; exit 1
+          }
+          $sig = 'static void st_raw_video(void *data, struct video_data *frame)'
+          $i = $output.IndexOf($sig)
+          if ($i -lt 0) { Write-Error "sync-test-output.cpp: st_raw_video not found (issue 1367)"; exit 1 }
+          $j = $output.IndexOf(' static ', $i + $sig.Length)
+          if ($j -lt 0) { $j = $output.Length }
+          $body = $output.Substring($i, $j - $i)
+          if (-not $body.Contains('st->cb_decode_mailbox.publish(')) {
+            Write-Error "sync-test-output.cpp: st_raw_video no longer hands the frame copy to the decode worker (issue 1367)"; exit 1
+          }
+          foreach ($banned in @('st_raw_video_camera_box_decode(', 'st_raw_video_qrcode_decode(', 'st_raw_video_find_marker(', 'st_video_decode_job_run(', 'video_marker_found(', 'cb_video_qr_record(', 'quirc_', 'signal_handler_signal(')) {
+            if ($body.Contains($banned)) {
+              Write-Error "sync-test-output.cpp: st_raw_video runs $banned on the video-output thread again (issue 1367) -- OBS would skip output frames"; exit 1
+            }
+          }
+          if ($output -notmatch [regex]::Escape('st->cb_decode_mailbox.start(')) {
+            Write-Error "sync-test-output.cpp: st_start no longer starts the decode worker (issue 1367)"; exit 1
+          }
+          if ($output -notmatch [regex]::Escape('obs_output_end_data_capture(st->context); st->cb_decode_mailbox.stop();')) {
+            Write-Error "sync-test-output.cpp: st_stop no longer joins the decode worker after ending data capture (issue 1367)"; exit 1
+          }
+          $dsig = 'static void st_destroy(void *data)'
+          $di = $output.IndexOf($dsig)
+          if ($di -lt 0) { Write-Error "sync-test-output.cpp: st_destroy not found (issue 1367)"; exit 1 }
+          $dj = $output.IndexOf(' static ', $di + $dsig.Length)
+          if ($dj -lt 0) { $dj = $output.Length }
+          $dbody = $output.Substring($di, $dj - $di)
+          $dstop = $dbody.IndexOf('st->cb_decode_mailbox.stop();')
+          $ddel = $dbody.IndexOf('delete st;')
+          if ($dstop -lt 0 -or $ddel -lt 0 -or $dstop -gt $ddel) {
+            Write-Error "sync-test-output.cpp: st_destroy no longer joins the decode worker before freeing the output (issue 1367)"; exit 1
+          }
+          if (-not $body.Contains('job.timestamp = frame->timestamp;')) {
+            Write-Error "sync-test-output.cpp: the decode job no longer carries the frame's own timestamp (issue 1367)"; exit 1
+          }
+          if (-not $body.Contains('camerabox::cb_atomic_max_u64(st->cb_publish_max_ns, os_gettime_ns() - publish_start_ns);')) {
+            Write-Error "sync-test-output.cpp: st_raw_video no longer records its own cost for publish_max_us (issue 1367)"; exit 1
+          }
+          if ($output -notmatch [regex]::Escape('locked=%s state=%s decode_dropped=%llu publish_max_us=%llu')) {
+            Write-Error "sync-test-output.cpp: the diag line no longer reports decode_dropped + publish_max_us (issue 1367)"; exit 1
+          }
+          if ($output -notmatch [regex]::Escape('#include "camera-box-frame-copy.hpp"')) {
+            Write-Error "sync-test-output.cpp: the frame copies no longer come from camera-box-frame-copy.hpp (issue 1367)"; exit 1
+          }
+          Write-Output "dock decode off the video-output thread (issue 1367) — OK"
+
       # #116: assert the build-latch drain-to-target patch is present in the vendored
       # OBS source BEFORE the 150-min build, so a future `git subtree pull` (#44) that
       # reverts it fails HERE rather than shipping a binary where cameras freeze at
@@ -673,6 +731,10 @@ jobs:
           # #1303: receiver-side AUDIO genlock parity — the audio HOLD wired at the source_output_audio_data ingest seam + the audit facet. Mirror of tests/genlock_preload.rs::audio_genlock_parity_present_1303 + tests/genlock_audio_timecode_placement_1367.rs (issue 1367: audio placed at its NDI timecode + the MEASURED video delay through the LIVE wall->mono offset, re-placed with an ASRC level-target shift on a change) + the C-vs-Rust parity gate tests/genlock_audio_pairing_parity.rs.
           if ($src -notmatch [regex]::Escape('static inline uint64_t genlock_audio_present_delay_ns(uint32_t latency_ms)') -or $src -notmatch [regex]::Escape('in.timestamp += (uint64_t)genlock_term_ns;') -or $src -notmatch [regex]::Escape('const int64_t genlock_off_live_ns = genlock_audio_needs_live_offset(genlock_hold_mode, prev_genlock_audio_hold_mode) ? genlock_audio_wall_to_mono_ns(os_gettime_ns(), genlock_wall_now_ns()) : 0;') -or $src -notmatch [regex]::Escape('const uint64_t genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now); if (genlock_n1_tick_is_on_grid(genlock_delay_tick_wall, interval)) genlock_video_delay_track(&source->genlock_video_delay_smoothed_ns,') -or $src -notmatch [regex]::Escape('genlock_video_delay_sample_ns(genlock_delay_tick_wall, next_frame->timestamp), interval);') -or $src -notmatch [regex]::Escape('if (genlock_action == GENLOCK_AUDIO_ACT_SLEW) {') -or $src -notmatch [regex]::Escape('push_back = false; asrc_compensator_shift_level_target( &source->asrc, (double)genlock_audio_level_shift_ns(') -or $src -notmatch [regex]::Escape('source->next_audio_ts_min = genlock_audio_slew_book_ts_ns(source->next_audio_ts_min, genlock_slew_step_ns);') -or $src -notmatch [regex]::Escape('const int64_t genlock_fold_ns = genlock_audio_placed_slew_fold_ns( genlock_action, !(push_back && source->audio_ts), source->genlock_audio_slew_remaining_ns);') -or $src -notmatch [regex]::Escape('asrc_compensator_shift_level_target(&source->asrc, (double)genlock_slew_step_ns / 1e6);') -or $src -notmatch [regex]::Escape('audio_resampler_set_compensation_ppm(source->resampler, genlock_slew_ppm - applied_ppm - asrc_recover_ppm, ASRC_COMPENSATION_DISTANCE_MS);') -or $src -notmatch [regex]::Escape('if (genlock_action != GENLOCK_AUDIO_ACT_WITHHOLD && source->monitoring_type != OBS_MONITORING_TYPE_MONITOR_ONLY) {') -or $src -match [regex]::Escape('push_back = false; asrc_compensator_shift_level_target(&source->asrc, genlock_audio_place_shift_ms(genlock_term_ns, genlock_prev_term_ns));') -or $src -notmatch [regex]::Escape('genlock_audio_video_delay_ref_ns(source->genlock_video_delay_smoothed_ns, effective_latency_ms));') -or $src -notmatch [regex]::Escape('genlock_audio_realized_delay_ns(source->genlock_audio_delay_ms, source->genlock_audio_slew_remaining_ns, source->genlock_audio_place_err_ns, source->genlock_audio_place_err_seeded),') -or $src -notmatch [regex]::Escape('push_back = genlock_audio_push_back_allowed(push_back, genlock_timeline_reset, genlock_hold_mode);') -or $src -notmatch [regex]::Escape('handle_ts_jump(source, source->next_audio_ts_min, in.timestamp, diff, os_time); genlock_timeline_reset = true;') -or $src -notmatch [regex]::Escape('audio_enabled=%d audio_delay_ms=%u audio_pairing_offset_ms=%lld')) {
             Write-Error "obs-source.c: #1303 receiver-side audio genlock parity gone — the audio HOLD is not wired at source_output_audio_data and/or the audit line dropped the audio facet; audio would no longer be genlocked to the video FIFO — re-apply"; exit 1
+          }
+          # issue 1367 (design 5845361166): the timecode ASRC -- a source whose audio is placed at its NDI timecode is judged by where each packet lands against its RAW stamp (before the 70 ms smoothing), never by arrival timing or its buffer depth. Mirror of tests/genlock_audio_timecode_placement_1367.rs::the_timecode_asrc_reads_the_raw_stamp_placement_not_arrival_1367.
+          if ($src -notmatch [regex]::Escape('const uint64_t genlock_intended_ns = genlock_audio_intended_raw_ns( data->timestamp, genlock_timing_adjust, sync_offset, source->resample_offset, genlock_term_ns);') -or $src -notmatch [regex]::Escape('asrc_compensator_set_timecode(&source->asrc, genlock_asrc_tc);') -or $src -notmatch [regex]::Escape('asrc_timecode_ingest(source, genlock_audio_stamp_mono_ns(data->timestamp, genlock_off_live_ns), genlock_asrc_err_ms, genlock_asrc_appended);') -or $src -notmatch [regex]::Escape('if (source->asrc.timecode) applied_ppm = source->asrc.applied_ppm; else asrc_compensator_compensate(') -or $src -match [regex]::Escape('genlock_audio_place_error_ns(genlock_actual_ns, in.timestamp)')) {
+            Write-Error "obs-source.c: issue 1367 timecode ASRC gone -- a timecode-placed source (resolume sp-*) would be judged by arrival timing again: a skipped SongPlayer slot left to the ~130 ppm level loop, a restart catch-up read as a rate -- re-apply"; exit 1
           }
           Write-Output "genlock timestamp-aligned release patch present (#257 build-default ts-align + wall-clock guard + present_ts + #147/#1009 re-qualified backward-step recovery + self-heal + #800 wall-qpc drift + #1303 audio genlock parity) — OK"
 
@@ -902,8 +964,13 @@ jobs:
           }
           # issue 1367 (ROZHODNUTÉ 5827497952): the SHALLOW N==1 per-lock depth wiring. Mirror of
           # tests/genlock_shallow_depth_wiring_1367.rs.
-          if ($src -notmatch [regex]::Escape('genlock_n1_shallow_shed_due(tick_wall, source->genlock_locked_next_boundary_ns, arrival_floor, reserve_ms, interval, source->genlock_shallow_target_frames, source->genlock_ticks_since_drain));') -or $src -notmatch [regex]::Escape('genlock_n1_shallow_hold_due(tick_wall, head_stamp, arrival_floor, reserve_ms, interval, source->genlock_shallow_target_frames, source->genlock_ticks_since_drain));') -or $src -notmatch [regex]::Escape('bool genlock_shallow_relock = source->genlock_locked_next_boundary_ns == 0;') -or $src -notmatch [regex]::Escape('if (genlock_n1_shallow_gap_is_relock(source->async_frames.array[0]->timestamp - source->genlock_locked_next_boundary_ns)) genlock_shallow_relock = true;') -or $src -notmatch [regex]::Escape('if (genlock_n1_shallow_governs_now(source, reserve_ms, interval, wall_now)) drain_eligible = false;') -or $src -notmatch [regex]::Escape('genlock_video_delay_lock_ms(source->genlock_shallow_target_frames, source->genlock_shallow_measuring, interval), genlock_video_delay_sample_ns(genlock_delay_tick_wall, next_frame->timestamp), interval);') -or $src -notmatch [regex]::Escape('genlock_shallow_latch(source, genlock_delay_tick_wall, wall_now, interval, reserve_ms, genlock_shallow_relock);') -or $src -notmatch [regex]::Escape('source->genlock_last_known_n < 2, relock, genlock_n1_tick_is_on_grid(tick_wall, interval), genlock_n1_depth_frames(tick_wall, newest_stamp, interval), base_frames, genlock_n1_is_deep_source(') -or $src -notmatch [regex]::Escape('reserve_ms, interval), genlock_min_latency_box(), genlock_n1_depth_frames(tick_wall, source->last_frame_ts, interval), backlog_relock,') -or $src -notmatch [regex]::Escape('source->genlock_shallow_hist, &source->genlock_shallow_under_ticks, &source->genlock_shallow_churn_relocks, &source->genlock_shallow_churn_quiet_ticks, &source->genlock_shallow_rejects);') -or $src -notmatch [regex]::Escape('const bool backlog_relock = source->genlock_relocks != source->genlock_shallow_relocks_seen; source->genlock_shallow_relocks_seen = source->genlock_relocks;') -or $src -notmatch [regex]::Escape('"genlock-shallow-remeasure ''%s'': reason=%s depth_frames=%llu realized_frames=%llu floor_frames=%llu "') -or $src -notmatch [regex]::Escape('"latch_floor_frames=%llu spread_frames=%llu rejects=%u "') -or $src -notmatch [regex]::Escape('_Static_assert(GENLOCK_SHALLOW_HIST_FIELD_BINS == GENLOCK_N1_SHALLOW_HIST_BINS,') -or $src -notmatch [regex]::Escape('&source->genlock_video_delay_settle_ticks, &source->genlock_video_delay_locked_ms, genlock_video_delay_lock_ms(') -or $src -notmatch [regex]::Escape('if (source->genlock_last_known_n < 2) genlock_n1_shallow_rearm(&source->genlock_shallow_floor_max_frames, &source->genlock_shallow_window_ticks, &source->genlock_shallow_over_ticks, &source->genlock_shallow_deep_ticks, &source->genlock_shallow_measuring);') -or $src -notmatch [regex]::Escape('&source->genlock_shallow_deep_ticks, &source->genlock_shallow_measuring, &source->genlock_shallow_capped, source->genlock_last_known_n < 2, relock,') -or $src -notmatch [regex]::Escape('snprintf(path, sizeof(path), "%s/.camera-box/genlock-min-latency", home);') -or $src -notmatch [regex]::Escape('"shallow_depth=%llu shallow_capped=%d shallow_latches=%u audio_slew_ms=%lld audio_slews=%u "')) {
-            Write-Error "obs-source.c: the SHALLOW per-lock depth (ROZHODNUTÉ 5827497952) is not wired -- the shed/hold toward the latched D, the ACQUIRE/sender-restart relock, the drain suppression, the present-tail latch the audio tracker follows (design 5830750134: its p90 histogram, spread reject, base + 3 clamp and downward re-measure state, the realized depth + backlog-relock inputs, the remeasure log, and the tracker's remembered lock), the pin re-arm, the min-latency (imag) marker or the audit tokens are gone (issue 1367); a shallow cg feed's depth would float and re-time its audio again"; exit 1
+          if ($src -notmatch [regex]::Escape('genlock_n1_shallow_shed_due(tick_wall, source->genlock_locked_next_boundary_ns, arrival_floor, reserve_ms, interval, source->genlock_shallow_target_frames, source->genlock_ticks_since_drain));') -or $src -notmatch [regex]::Escape('genlock_n1_shallow_hold_due(tick_wall, head_stamp, arrival_floor, reserve_ms, interval, source->genlock_shallow_target_frames, source->genlock_ticks_since_drain));') -or $src -notmatch [regex]::Escape('bool genlock_shallow_relock = source->genlock_locked_next_boundary_ns == 0;') -or $src -notmatch [regex]::Escape('if (genlock_n1_shallow_gap_is_relock(source->async_frames.array[0]->timestamp - source->genlock_locked_next_boundary_ns)) genlock_shallow_relock = true;') -or $src -notmatch [regex]::Escape('if (genlock_n1_shallow_governs_now(source, reserve_ms, interval, wall_now)) drain_eligible = false;') -or $src -notmatch [regex]::Escape('genlock_video_delay_lock_ms(source->genlock_shallow_target_frames, source->genlock_shallow_measuring, interval), genlock_video_delay_sample_ns(genlock_delay_tick_wall, next_frame->timestamp), interval);') -or $src -notmatch [regex]::Escape('genlock_shallow_latch(source, genlock_delay_tick_wall, wall_now, interval, reserve_ms, genlock_shallow_relock);') -or $src -notmatch [regex]::Escape('source->genlock_last_known_n < 2, relock, genlock_n1_tick_is_on_grid(tick_wall, interval), genlock_n1_depth_frames(tick_wall, newest_stamp, interval), genlock_n1_shallow_latch_floor_frames(source->genlock_rx_arrival_lag_ns, interval), base_frames, genlock_n1_is_deep_source(') -or $src -notmatch [regex]::Escape('const uint64_t rx_wall = genlock_wall_now_ns(); source->genlock_rx_arrival_lag_ns = rx_wall > output->timestamp ? rx_wall - output->timestamp : 0;') -or $src -notmatch [regex]::Escape('source->genlock_rx_last_ts = 0; source->genlock_rx_min_delta_ns = 0; source->genlock_rx_arrival_lag_ns = 0;') -or $src -notmatch [regex]::Escape('reserve_ms, interval), genlock_min_latency_box(), genlock_n1_depth_frames(tick_wall, source->last_frame_ts, interval), backlog_relock,') -or $src -notmatch [regex]::Escape('source->genlock_shallow_hist, &source->genlock_shallow_under_ticks, &source->genlock_shallow_churn_relocks, &source->genlock_shallow_churn_quiet_ticks, &source->genlock_shallow_rejects);') -or $src -notmatch [regex]::Escape('const bool backlog_relock = source->genlock_relocks != source->genlock_shallow_relocks_seen; source->genlock_shallow_relocks_seen = source->genlock_relocks;') -or $src -notmatch [regex]::Escape('"genlock-shallow-remeasure ''%s'': reason=%s depth_frames=%llu realized_frames=%llu floor_frames=%llu "') -or $src -notmatch [regex]::Escape('"latch_floor_frames=%llu spread_frames=%llu rejects=%u "') -or $src -notmatch [regex]::Escape('_Static_assert(GENLOCK_SHALLOW_HIST_FIELD_BINS == GENLOCK_N1_SHALLOW_HIST_BINS,') -or $src -notmatch [regex]::Escape('&source->genlock_video_delay_settle_ticks, &source->genlock_video_delay_locked_ms, genlock_video_delay_lock_ms(') -or $src -notmatch [regex]::Escape('if (source->genlock_last_known_n < 2) genlock_n1_shallow_rearm(&source->genlock_shallow_floor_max_frames, &source->genlock_shallow_window_ticks, &source->genlock_shallow_over_ticks, &source->genlock_shallow_deep_ticks, &source->genlock_shallow_measuring);') -or $src -notmatch [regex]::Escape('&source->genlock_shallow_deep_ticks, &source->genlock_shallow_measuring, &source->genlock_shallow_capped, source->genlock_last_known_n < 2, relock,') -or $src -notmatch [regex]::Escape('snprintf(path, sizeof(path), "%s/.camera-box/genlock-min-latency", home);') -or $src -notmatch [regex]::Escape('"shallow_depth=%llu shallow_capped=%d shallow_latches=%u audio_slew_ms=%lld audio_slews=%u "')) {
+            Write-Error "obs-source.c: the SHALLOW per-lock depth (ROZHODNUTÉ 5827497952) is not wired -- the shed/hold toward the latched D, the ACQUIRE/sender-restart relock, the drain suppression, the present-tail latch the audio tracker follows (ROZHODNUTÉ 5842640404: its latch floor is the receive-time arrival lag plus the jitter budget; design 5830750134: its p90 histogram, spread reject, base + 3 clamp and downward re-measure state, the realized depth + backlog-relock inputs, the remeasure log, and the tracker's remembered lock), the pin re-arm, the min-latency (imag) marker or the audit tokens are gone (issue 1367); a shallow cg feed's depth would float and re-time its audio again"; exit 1
+          }
+          # issue 1367 (design 5844353368): the sticky content floor. Mirror of
+          # tests/genlock_shallow_depth_wiring_1367.rs.
+          if ($src -notmatch [regex]::Escape('const uint64_t sticky_floor = genlock_n1_shallow_sticky_track(') -or $src -notmatch [regex]::Escape('source->genlock_audio_hold_mode == GENLOCK_AUDIO_HOLD_TIMECODE, genlock_min_latency_box(),') -or $src -notmatch [regex]::Escape('backlog_relock, sticky_floor, source->genlock_shallow_hist,') -or $src -notmatch [regex]::Escape('"sticky_floor_frames=%llu "') -or $src -notmatch [regex]::Escape('const uint64_t sticky = min_latency_box ? 0 : sticky_floor_frames > sticky_limit ? sticky_limit : sticky_floor_frames;') -or ([regex]::Matches($src, [regex]::Escape('genlock_n1_shallow_sticky_track('))).Count -ne 2) {
+            Write-Error "obs-source.c: the STICKY content floor (design 5844353368) is not wired -- the present-tail latch must run genlock_n1_shallow_sticky_track first (audio hold mode timecode, never on the imag marker) and the tracker must never latch under it; an idle re-lock would forget the song content level and every song start re-measures and slews the audio again (issue 1367)"; exit 1
           }
           if ($src -notmatch [regex]::Escape('static bool genlock_should_converge_phase(')) {
             Write-Error "obs-source.c: the source wrapper genlock_should_converge_phase is gone (#1049)"; exit 1
@@ -1535,6 +1602,46 @@ jobs:
         shell: bash
         run: cmake --build build_x64 --config RelWithDebInfo --parallel
 
+      # issue 1372: the vendored obs-vban (norihiro/obs-vban 0.3.1 + the camera-box send pacing,
+      # vendor/obs-vban/CAMERA-BOX-VENDOR.md) replaces the stock 0.3.1 DLL on the boxes that send
+      # VBAN. Fail fast if the pacing patch is gone, then build it standalone against the SAME
+      # genlocked OBS SDK, exactly like av-sync-dock (libobs only, no Qt / frontend-api).
+      - name: Assert obs-vban send pacing present (issue 1372)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "vendor/obs-vban/src/vban-pacing.h")) { Write-Error "vendor/obs-vban/src/vban-pacing.h is gone (issue 1372) - the VBAN sender would send one packet per wake again"; exit 1 }
+          $thread = (Get-Content "vendor/obs-vban/src/vban-output-thread.c" -Raw) -replace '\s+', ' '
+          if ($thread -notmatch [regex]::Escape('#include "vban-pacing.h"')) { Write-Error "vban-output-thread.c no longer includes vban-pacing.h (issue 1372)"; exit 1 }
+          if ($thread -notmatch [regex]::Escape('vban_pacing_step(&pacing, now,')) { Write-Error "vban-output-thread.c no longer asks vban_pacing_step what to send (issue 1372)"; exit 1 }
+          if ($thread -notmatch [regex]::Escape('pacing_sleep_until(&sleeper, wake_ns);')) { Write-Error "vban-output-thread.c no longer sleeps to the packet deadline (issue 1372)"; exit 1 }
+          if ($thread -notmatch [regex]::Escape('"obs-vban pacing: depth_ms=%.1f underflows=%"')) { Write-Error "the obs-vban pacing log line is gone (issue 1372)"; exit 1 }
+          Write-Output "issue 1372 obs-vban send pacing present - OK"
+
+      - name: Configure obs-vban against the genlocked OBS (issue 1372)
+        working-directory: vendor/obs-vban
+        shell: bash
+        run: |
+          set -eu
+          WS=$(cygpath "$GITHUB_WORKSPACE")
+          # Same prefix recipe as av-sync-dock: the obs-sdk Development component + the obs-deps
+          # roots, so libobsConfig's find_dependency(SIMDe, Threads) and w32-pthreads resolve.
+          PREFIX="$(cygpath -m "$WS/obs-sdk")"
+          for d in "$WS"/vendor/obs-studio/.deps/*-x64 "$WS"/vendor/distroav/.deps/*-x64; do
+            [ -d "$d" ] && PREFIX="$PREFIX;$(cygpath -m "$d")"
+          done
+          LIBOBS_CFG=$(find "$WS/obs-sdk" -maxdepth 6 -iname 'libobs*config.cmake' | head -1)
+          echo "prefix=$PREFIX"; echo "libobs cfg=$LIBOBS_CFG"
+          test -n "$LIBOBS_CFG" || { echo "ERROR: libobsConfig.cmake not in obs-sdk (Development install failed?)"; exit 1; }
+          cmake -B build_x64 -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_PREFIX_PATH="$PREFIX" \
+            -Dlibobs_DIR="$(cygpath -m "$(dirname "$LIBOBS_CFG")")" \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Build obs-vban (issue 1372)
+        working-directory: vendor/obs-vban
+        shell: bash
+        run: cmake --build build_x64 --config RelWithDebInfo --parallel
+
       # SECONDARY / defense-in-depth (#55): the disable MECHANISM is the SOURCE gate at
       # the top of this job; this is a packaging-layout check that the built rundir ships
       # no `updater.exe` binary at all. It is intentionally redundant — belt-and-braces
@@ -1568,6 +1675,13 @@ jobs:
           Copy-Item $dockdll.FullName "stage/obs-plugins/64bit/"
           New-Item -ItemType Directory -Force -Path "stage/data/obs-plugins/obs-audio-video-sync-dock" | Out-Null
           Copy-Item -Recurse "vendor/av-sync-dock/data/*" "stage/data/obs-plugins/obs-audio-video-sync-dock/"
+          # obs-vban plugin + data (the first-party OBS plugin path, where the stock 0.3.1 DLL lives
+          # on the boxes, issue 1372). Fail loud if unbuilt.
+          $vbandll = Get-ChildItem -Recurse vendor/obs-vban/build_x64 -Filter obs-vban.dll | Where-Object { $_.FullName -notmatch 'CMakeFiles' } | Select-Object -First 1
+          if (!$vbandll) { Write-Error "obs-vban.dll not built (issue 1372)"; exit 1 }
+          Copy-Item $vbandll.FullName "stage/obs-plugins/64bit/"
+          New-Item -ItemType Directory -Force -Path "stage/data/obs-plugins/obs-vban" | Out-Null
+          Copy-Item -Recurse "vendor/obs-vban/data/*" "stage/data/obs-plugins/obs-vban/"
           git rev-parse HEAD | Out-File stage/GENLOCK_BUILD_SHA.txt -Encoding ascii
 
       # #120: emit the per-component SHA manifest INTO the bundle (stage/BUNDLE_MANIFEST.json).

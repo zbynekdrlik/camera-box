@@ -173,7 +173,7 @@ def test_upgrade_verify_grades_an_audio_node_against_the_audio_grandmaster(tmp_p
     grandmaster for an audio node, and nothing for a video node (the gate keeps its own default)."""
     r = _source_upgrade(tmp_path, 'echo "A=[$(dantesync_gate_env_for mbc)]"; echo "V=[$(dantesync_gate_env_for cam1)]";'
                                   ' echo "U=[$(dantesync_gate_env_for nosuchbox)]"')
-    assert "A=[RIG_GRANDMASTER_IP=10.77.7.106]" in r.stdout, r.stdout + r.stderr
+    assert "A=[RIG_GRANDMASTER_IP=10.77.7.104]" in r.stdout, r.stdout + r.stderr
     assert "V=[]" in r.stdout and "U=[]" in r.stdout
     src = _UPGRADE.read_text()
     assert src.count('"${gate_env[@]}" "$HERE/dantesync-gate.sh"') == 2

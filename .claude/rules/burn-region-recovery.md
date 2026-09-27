@@ -3,6 +3,9 @@ paths:
   - "src/burn_regions.rs"
   - "src/probe/burn_region_decode.rs"
   - "src/probe/qr.rs"
+  - "src/probe/qr_tests.rs"
+  - "src/probe/recording_decode.rs"
+  - "src/probe/recording_decode_tests.rs"
   - "src/probe/colour_sample.rs"
   - "src/probe/recording_latency.rs"
   - "vendor/distroav/src/burn-geom.hpp"
@@ -10,9 +13,32 @@ paths:
   - "tests/burn_regions_cpp_parity_1370.rs"
   - "src/probe/burn_echo.rs"
   - "tests/burn_echo_fixture_decode_1367.rs"
+  - "src/burn_quiet_zone.rs"
+  - "tests/burn_tight_box_fixture_decode_1367.rs"
+  - "tests/fixtures/burn-tight-box-1367/**"
 ---
 
 # Burn-isolated slot recovery — a crisp node burn decodes whatever the camera shows (issue 1370)
+
+## Where the decode core lives (issue 1374)
+
+The recording decode core is `src/probe/recording_decode.rs`, with its tests in the `#[path]`
+child `src/probe/recording_decode_tests.rs`. It holds the fast-then-robust family, the
+`_gated` core, the #202 tiles, the #754 top band, `optical_read_short`, `fast_path_gate_satisfied`,
+`DecodePath` and the decode-path counters. `src/probe/qr.rs` keeps the QR primitives (render, the
+plain/Otsu rqrr passes, `decode_qr_luma_all[_reads]`, `merge_payloads`, `OPTICAL_TOP_BAND_FRAC`,
+the live-tap captures) and `pub use`-re-exports the public decode items, so every
+`qr::decode_qr_luma_all_fast_then_robust_*` / `qr::DecodePath` path in this file and in callers
+still resolves. Put a new decode pass in `recording_decode`, not `qr`. `qr`'s own tests are the
+`#[path]` child `src/probe/qr_tests.rs`; a test that needs its fixture/blit helpers imports
+`crate::probe::qr::tests::{optical_fixture_luma, blit_burn_luma}`.
+
+Proving a future probe-module split is a pure move (no local compile): moving an inline
+`mod tests` into a `#[path]` child de-indents it, and rustfmt then re-joins calls that now fit and
+drops their trailing commas. So compare whitespace-stripped text with `,)` / `,]` / `,}` normalized
+(token-identical modulo trailing commas), check no multi-line string literal lacks a `\`
+continuation (de-indenting would change it), and use `git diff --color-moved=plain
+--color-moved-ws=allow-indentation-change` (after `git add -N` on new files) to count moved lines.
 
 ## What it is
 
@@ -44,14 +70,78 @@ nothing foreign in it for rqrr to group with.
 - Only those ids are MERGED. The result is a byte-identical superset of plain + tiles, and the pass
   never adds optical or aux (911013) payloads — the tear detector and the continuity metrics read
   those by run_id.
-- The 2x CatmullRom look runs only when the 1x crop read no burn of that slot. One slot carries one
-  burn, so a slot that read the deployed camera's burn never gets a 2x look for the other cams.
+- The looks run in order 1x, tight box, 2x CatmullRom. Each later look runs only when the looks
+  before it read no burn of that slot. One slot carries one burn, so a slot that read the deployed
+  camera's burn never gets another look for the other cams.
 - An id without a reserved slot is never localized: SongPlayer 911014 is painted by the sender,
   911013 is optical content, and an operator `--burn-*-run-id` override has no slot. A
   non-reserved expected id logs ONE warning per process, so an override is not a silent loss.
 - The verdict log line `recording analysis complete` carries `burn_region_recoveries`: how many
   burns only the slot crops read. A large count means the camera view pushed optical content into
   the burn tiles.
+
+## The tight-box look — the burn's own white box, decoded alone (issue 1367)
+
+The camera burn is not 320 px. `render_payload_qr(payload, 320)` builds the QR with whole-pixel
+modules (`qrcode`'s `max_dimensions` wins), and the burn payload encodes as a version-4 EC-H code:
+33 modules plus a 4-module quiet zone on each side, 41 in all. 320 / 41 floors to 7 px, so the
+burn is 287 px. `cam1_burn_origin` centres it at (816, 769) on 1080p. A longer payload needs
+version 5 (45 modules, still 7 px): 315 px. In every real camera-slot fixture in the repo the burn
+SITS at (24, 41) inside the 336 px crop, 287 px (286 wide after the recording scale on the
+multiview frames).
+
+So the fixed camera crop (792, 728, 336 x 336) always holds a 24 px strip left of the burn and a
+41 px strip above it. Over ordinary camera picture that is harmless. When cam2 films the strih-lx
+multiview, those strips hold multiview QR content, and rqrr's one grid pass over the crop reads
+nothing. Run 324220913 had 7 such cam2 frames (1775, 2008, 7808, 8149, 8150, 8167, 8170), counted
+as `BURN-UNREADABLE`.
+
+The fix, in `burn_region_passes`, after a 1x look that read no burn of the slot:
+- `burn_quiet_zone::locate_burn_box` (pure, Tier-0) finds the white quiet-zone box inside the crop.
+  It keeps the columns and rows whose longest near-white run reaches 0.8 x the slot's design side
+  (`slot_rect(..).w`). The quiet zone's side columns and top/bottom rows carry such runs; inside the
+  code every run is broken by dark modules. It returns the span of those columns and rows when both
+  sides are within 0.8-1.05 x the design side. Otherwise nothing is decoded.
+- A clearly non-square span (sides differing by more than a twentieth, about two modules) is
+  squared: the longer span is cut to the shorter one, at the end where both new edge lines still
+  qualify, else nothing is decoded. On 4 real fixtures (burn-reframed-1370 frames 355/532,
+  tear-781 stream-2099068429 frames 1399/4792) light rows above the burn join its top quiet band
+  and the raw span is 287 x 328 at (24, 0); squaring gives the 287 x 287 box at (24, 41).
+- Near-white = the midpoint between the crop's Otsu threshold and its 99th-percentile white level.
+- `tight_box_reads` copies exactly that box into a white image with a border of a tenth of its side
+  (about four modules), decodes it plain then Otsu (`decode_qr_luma_all_reads`), and maps the reads
+  back to the frame (`bordered_origin`). They pass the same missing-id + own-slot filter as every
+  other look.
+- The box never leaves the crop, so this look reads nothing the crop does not hold (an echo
+  inside the camera crop stays the known limit below). Only missing ids merge.
+
+Do NOT locate the box as the bounding box of the largest bright connected component. On the
+run-324220913 crops the quiet zone touches bright multiview pixels, and the component leaks to the
+crop edge at every threshold from Otsu to 235. At the Otsu threshold itself the light rows above the
+box also join its top edge, so the threshold is the midpoint, not Otsu.
+
+Evidence (a local real-rqrr 0.9.3 harness, built like the one in "Verifying a decode change here
+at Tier-0" above):
+- 7 of 7 missed frames read, each centred at (963, 916), each id between its neighbours.
+- A sweep of every real 1080p fixture in the repo (23 frames x the 5 slots): wherever a box was
+  found, the tight box read the same payload as the 1x crop or nothing. The only new reads were
+  the cam2 burns on the 3 committed fixtures, and no read fell outside the crop.
+- The functional replica mounts the real `burn_region_decode.rs` / `burn_echo.rs` /
+  `burn_regions.rs` / `burn_quiet_zone.rs` with the real rqrr and a behaviour-faithful `image` stub
+  (crop, replace, from_pixel, pixels, as_raw). It proved the glue RED (pre-fix: nothing on
+  2008-8170) and GREEN. A stub `camera_box` rlib built from the same files ran the fixture
+  integration test file locally. The stub's `image::open` reads a PIL `.y8` dump of each PNG, and
+  the grouped-decode test stays CI-only. The stub's 2x `resize` is NEAREST, not CatmullRom, so it
+  reads frame 1775 where production did not. Never count a replica 2x result as production.
+
+Lock: `tests/burn_tight_box_fixture_decode_1367.rs` + `tests/fixtures/burn-tight-box-1367/`
+(strih frames 1775, 2008, 8150, verbatim pixel proofs). Guards: the probe tests in
+`burn_region_decode.rs` (box out of the size band = nothing decoded, no burn = nothing read) and the
+Tier-0 tests in `burn_quiet_zone.rs`.
+
+Not changed here: `slot_rect(CameraCapture)` still models 320 px where the writer renders 287 or
+315. The issue-1367 design (comment 5851384821) rejected changing the fixed crop; the rendered-size
+finding is on the ticket (comment 5851477988). A tighter slot would still depend on the QR version.
 
 ## Adding a node burn or corner — `burn_regions` is the ONE Rust copy
 
@@ -100,8 +190,37 @@ Two extensions from the issue-1367 lane:
   functions VERBATIM (regex from `fn name(` to the next `\n}\n`) into a replica module. Mount it
   with the real `burn_regions.rs` / `burn_echo.rs` via `#[path]`, stub `rqrr_decode_all_catch`
   and `binarize_otsu`, and run `clippy-driver --test -D warnings`.
+- A `recording_decode.rs` edit needs no extraction (issue 1374): mount the WHOLE real file via
+  `#[path]` (its `#[path]` tests child follows under `--test`), next to the real
+  `burn_echo.rs` / `burn_regions.rs` / `colour_scale.rs` with their own test modules stripped.
+  Give it a `qr` stub that carries qr.rs's REAL `pub use` re-export block, the real
+  `merge_payloads` and the real `qr_tests.rs` helpers (extracted verbatim), plus stub `image` /
+  `tracing` rlibs shaped like the used API. Set `CARGO_MANIFEST_DIR` for the `env!` in the test
+  helper, and run `clippy-driver` for the lib and for `--test` with `-D warnings`. Prove the
+  harness bites with a negative control (e.g. drop a helper's `pub(in crate::probe)` → E0603).
 - Before trusting "flat vs grouped" routing, follow the call chain: `analyze_recording_with_burns`
   (the flat-looking one) goes through the GROUPED per-frame decode.
+
+Two more from the issue-1367 tight-box lane:
+- **RUN the real glue, not just type-check it.** Make the `image` stub behave, not only
+  type-check: keep the pixels plus working `crop_imm().to_image()`, `replace`, `from_pixel`,
+  `pixels` and `as_raw`. Give the stub `qr` module a `decode_qr_luma_all_reads` that calls the real
+  rqrr (plain, then the production Otsu). Then mount the real `burn_region_decode.rs` /
+  `burn_echo.rs` / `burn_regions.rs` and call `burn_region_passes` on `.y8` frames: that is a
+  RED/GREEN of the actual glue. Swap in `git show HEAD:<file>` for the RED side.
+  - Build the same modules as a `--crate-name camera_box` rlib, and add an `image::open` stub that
+    reads `$Y8_DIR/<png name>.y8` (a PIL `convert('L')` dump). A probe-gated `tests/*.rs` file then
+    compiles with `--cfg 'feature="probe"'` and runs.
+  - Stub any function the file needs but the stub crate lacks with `unimplemented!()`, and skip
+    that test at run time with `--skip`.
+  - The `tracing` stub needs one macro arm per call shape. When a field list changes, the pre-fix
+    file needs its old arm too.
+  - The stub's 2x `resize` is NEAREST, not CatmullRom, so it can read a frame production missed.
+- **Synthetic burns in python:** `qrcode.QRCode(error_correction=ERROR_CORRECT_H, box_size=7,
+  border=4)` on the payload string renders the same 287 px version-4 burn as the Rust writer.
+  Paste it at `((1920 - 287) / 2, 1080 - 287 - 24)`. The mode choice matters (digits plus `P`
+  and `.` go alphanumeric): a short payload like `P911009.1.1.<crc>` is version 3 and renders
+  about 296 px.
 
 ## The echo gate — a node burn counts only in its own slot (issue 1367)
 

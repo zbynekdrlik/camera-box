@@ -3,7 +3,8 @@
 //! Pure, unit-tested logic: `payload`, `luma`, `qr`, `analyzer`, `differ`,
 //! `genlock`, plus the `kms`/`presenter` decision functions. `recording`'s
 //! per-frame decode is pure-tested; its ffmpeg/ffprobe glue is exercised
-//! end-to-end by the `recording_decode` integration test.
+//! end-to-end by the `tests/recording_decode.rs` integration test (not the `recording_decode`
+//! module, which is the per-frame decode core split out of `qr`, issue 1374).
 //! Hardware glue (excluded from coverage): `fb`, `kms` (live DRM), `painter`,
 //! `reader`, `run`, `multi_reader`.
 
@@ -23,6 +24,9 @@ pub mod obs_log_audit;
 pub mod payload;
 pub mod qr;
 pub mod recording;
+// issue 1374 — the recording decode core (fast-then-robust gate, #202 tiles, #754 top band, the
+// issue-1367 echo-gated core), split out of `qr`, which keeps the QR primitives and re-exports it.
+pub mod recording_decode;
 pub mod recording_latency;
 pub mod recording_partial;
 pub mod recording_segments;

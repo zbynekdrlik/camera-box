@@ -109,6 +109,7 @@ PINS_PROBE="${RDH_PINS_PROBE:-$HERE/latency_pins_verify.py}"
 DANTESYNC_PROBE="${RDH_DANTESYNC_PROBE:-$HERE/dantesync-version-gate.sh}"
 CAMBOX_PROBE="${RDH_CAMBOX_PROBE:-$HERE/camera-box-version-gate.sh}"
 AVLATENCY_PROBE="${RDH_AVLATENCY_PROBE:-$HERE/measurement-chain-latency.sh}"
+EXPOSURE_PROBE="${RDH_EXPOSURE_PROBE:-$HERE/camera_test_settings.py}"
 RIGMODE_LIB="${RDH_RIGMODE_LIB:-$HERE/lib/rig-mode-state.sh}"
 WATCHDOG_ROSTER="${RDH_WATCHDOG_ROSTER:-$HERE/lib/watchdog-roster.sh}"
 DECIDE="${RDH_DECIDE:-$HERE/rig_dev_handover_decision.py}"
@@ -328,6 +329,13 @@ probe_watchdogs() {
 }
 probe_watchdogs "$WATCHDOG_ROSTER" >"$WORKDIR/watchdogs.out" 2>&1 || true
 echo 0 >"$WORKDIR/watchdogs.rc"
+
+# --- item 17: exposure (the test camera's production ISO/shutter snapshot, issue 1371) ----------
+# dev1-LOCAL read of the snapshot the E2E takes before its first exposure set and `rig-mode.sh event`
+# restores + moves aside: ONE `exposure state=none|pending|restored|invalid ...` line. At the handover
+# a PENDING snapshot means the last EVENT switch did NOT restore it (production ran on the TEST
+# exposure). Read-only; the path honours CAMERA_PROD_EXPOSURE_SNAPSHOT like the E2E + rig-mode do.
+run_probe exposure python3 "$EXPOSURE_PROBE" snapshot-state
 
 # --- decide + print ------------------------------------------------------------------------------
 json_flag=()

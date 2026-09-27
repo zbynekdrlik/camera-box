@@ -303,8 +303,11 @@ pub const PHASE_PIN_HYSTERESIS_NS: u64 = 5_000_000; // 5 ms
 /// covering every measured slow-output event <=17 ms. The conveyor then sits ~10 ms deeper per
 /// input — uniform across inputs, invisible to the E2E aligner which pins RELATIVE offsets. Taking
 /// the `max` with the grid hysteresis keeps the sub-frame flapping floor honoured even if this
-/// constant were ever set below it. Mirror of the C `GENLOCK_N2_JITTER_BUDGET_NS` (obs-source.c) —
-/// keep byte-parallel, the #1201-style single-source discipline.
+/// constant were ever set below it. Issue 1367 (ROZHODNUTÉ 5842640404) reuses the SAME
+/// arrival-jitter budget for the shallow N==1 latch
+/// (`crate::genlock_n1_depth::n1_shallow_latch_floor_frames`): no second, shallow-only constant.
+/// Mirror of the C `GENLOCK_N2_JITTER_BUDGET_NS` (obs-source.c) — keep byte-parallel, the
+/// #1201-style single-source discipline.
 pub const GENLOCK_N2_JITTER_BUDGET_NS: u64 = 15_000_000; // 15 ms
 
 /// Is `frame_ts_ns` due against the phase-pinned `deadline_ns` (already

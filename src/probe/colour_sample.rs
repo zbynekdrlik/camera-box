@@ -267,8 +267,9 @@ fn detect_dual_qr_pass(luma: &GrayImage, top_half_frame_h: f64) -> Option<QrAnch
 }
 
 /// Detect the dual-QR fiducials in an RGB frame (#364/#400), with the SAME recovery cascade the
-/// continuity decoder already has (`qr::decode_qr_luma_all` + `qr::robust_optical_top_band`) —
-/// which this colour-gate localizer never got until #718.
+/// continuity decoder already has (`qr::decode_qr_luma_all` +
+/// `recording_decode::robust_optical_top_band`) — which this colour-gate localizer never got
+/// until #718.
 ///
 /// **#718 root cause:** this function used to run ONE bare full-frame rqrr pass — the plain
 /// adaptive-threshold `detect_grids`, no Otsu retry, no top-band crop. Both of those are

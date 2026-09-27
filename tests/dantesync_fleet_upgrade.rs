@@ -1088,9 +1088,12 @@ fn windows_upgrade_ps_waits_for_the_process_to_exit_between_stop_and_swap_1265()
          (wait={wait} kill={kill} swap={swap}). Got:\n{ps}"
     );
     // exact-name process cmdlets only — `dantesync-tray.exe` (the autostart tray, a separate
-    // process) must never be waited on or killed by the daemon swap.
+    // process) must never be waited on or killed by the daemon swap. Issue 1372: the same program
+    // now refreshes the tray in its OWN step after the service is back, so the invariant is scoped
+    // to the daemon's stop -> swap window (and a wildcard stays banned everywhere).
+    let daemon_swap = &ps[stop..swap];
     assert!(
-        !ps.contains("dantesync*") && !ps.contains("dantesync-tray"),
+        !ps.contains("dantesync*") && !daemon_swap.contains("dantesync-tray"),
         "#1265: the process wait/kill must target the daemon process name EXACTLY, never a wildcard \
          that would also hit dantesync-tray. Got:\n{ps}"
     );

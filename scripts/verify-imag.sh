@@ -1258,7 +1258,11 @@ if [ -n "$DS_HTTP_STATUS" ]; then
   rc_ps=0; clock_discipline_check imag "$DS_HTTP_STATUS" || rc_ps=$?
   [ "$rc_ptp" -eq 0 ] && ok "dantesync PTP servo LOCKED (via :8898/status)" || fail "dantesync PTP servo not LOCKED (via :8898/status)"
   [ "$rc_off" -eq 0 ] && ok "dantesync clock offset within ${ds_bound}us bound" || fail "dantesync clock offset OUTSIDE bound or unreadable (rc=$rc_off)"
-  [ "$rc_date" -eq 0 ] || fail "dantesync fleet date master outside its own step bound or unreadable (rc=$rc_date, dantesync#88/#1372)"
+  if [ "$rc_date" -eq 4 ]; then
+    warn "dantesync fleet date master micro-corrections PAUSED (date_micro_paused=true: no UTC reading, the fleet date runs free until UTC is back -- dantesync 1.11.0, #1372)"
+  elif [ "$rc_date" -ne 0 ]; then
+    fail "dantesync fleet date master outside its own date bound or unreadable (rc=$rc_date, dantesync#88/#1372)"
+  fi
   [ "$rc_gm" -eq 0 ] && ok "dantesync grandmaster = ${gm_actual} (matches the rig, #834)" || fail "dantesync grandmaster mismatch/unreadable (rc=$rc_gm, want ${RIG_GRANDMASTER_IP})"
   [ "$rc_ps" -eq 0 ] && ok "dantesync clock discipline healthy (1.9.0 ptp_phase_lock, or legacy phase_slew ENABLED -- #1215/#1372)" || fail "dantesync clock discipline wrong/unreadable (rc=$rc_ps, #1215/#1372) -- legacy without phase_slew STEPS the clock in discrete jumps, a ptp_phase_lock that is not locked does not own the clock"
 elif [ "$rc" -ne 0 ] || [ -z "$DS_JOURNAL" ]; then

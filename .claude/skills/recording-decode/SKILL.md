@@ -1,4 +1,11 @@
-# Recording-verdict QR decode path (`src/probe/qr.rs` + `src/probe/recording.rs`)
+# Recording-verdict QR decode path (`src/probe/qr.rs` + `src/probe/recording_decode.rs` + `src/probe/recording.rs`)
+
+Since issue 1374 the per-frame RECORDING decode core (the fast-then-robust family, the `_gated`
+core, `robust_tile_passes` / the #202 tiles, the #754 top band, `optical_read_short`,
+`fast_path_gate_satisfied`, `DecodePath`, `decode_path_counts`) lives in
+`src/probe/recording_decode.rs` (tests: `src/probe/recording_decode_tests.rs`). `qr.rs` keeps
+the primitives (`decode_qr_luma_all`, the rqrr/Otsu passes, `merge_payloads`, render) and
+re-exports the public decode items, so every `qr::` name below still resolves.
 
 The offline recording verdict decodes every recorded frame's QR(s): the big optical
 **cam2 dual-QR** (top band, always decodes full-frame) + the small ~300px **node burns**
@@ -638,7 +645,7 @@ encoder-degraded 4K pixels). So:
   `full_frame_otsu_union_recovers_a_softened_burn_bare_rqrr_misses` (bare single rqrr misses →
   the Otsu union recovers).
 
-RED→GREEN lock (probe-gated, CI-only, in `src/probe/qr.rs`):
+RED→GREEN lock (probe-gated, CI-only, in `src/probe/qr_tests.rs` since issue 1374):
 `optical_soft_dual_qr_recovered_on_real_stream_frames` (fixtures `tests/fixtures/optical-soft-f5.png`
 / `optical-soft-f150.png`, run 354003): the plain pass returns NO run_id 354003; `decode_qr_luma_all`
 returns BOTH optical halves; the recording per-frame path surfaces it too. Reverting to the

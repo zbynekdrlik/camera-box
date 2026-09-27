@@ -140,6 +140,9 @@ void asrc_compensator_init(struct asrc_compensator *c)
 	c->step_recover_ms = 0.0; /* camera-box issue 1372 */
 	c->step_recover_ppm = 0.0; /* camera-box issue 1372 */
 	c->step_recover_hold = false; /* camera-box issue 1372 */
+	c->timecode = false; /* camera-box issue 1367 */
+	c->place_jump_count = 0; /* camera-box issue 1367 */
+	c->last_place_jump_ms = 0.0; /* camera-box issue 1367 */
 	asrc_regression_flush(c); /* camera-box #1084/#1335: empty buffer, 0 cumulatives, 0 integral, unlocked */
 }
 
@@ -250,8 +253,11 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 				/* camera-box issue 1372 (ROZHODNUTE 5841039244): a step the buffer level CONFIRMS
 				 * (a real sample loss/dup, not a wall-clock-only jump) is BOOKED and paid back at
 				 * ASRC_STEP_RECOVER_PPM -- the live 44 ms loss in ~44 s -- instead of arming the
-				 * proportional restore (3-4 min). */
-				asrc_step_recover_book(c, r_s, buffered_ms);
+				 * proportional restore (3-4 min). camera-box issue 1367: in timecode mode the re-base only
+				 * keeps the rate regression clean; the placement error books the jump
+				 * (asrc_compensator_observe_placement), never this residual. */
+				if (!c->timecode)
+					asrc_step_recover_book(c, r_s, buffered_ms);
 				rebased = true;
 			}
 
@@ -329,9 +335,14 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 						 * placement offset the buffered samples carry -- NOT whatever depth the mixer
 						 * happened to have at lock (that froze a random per-launch A/V level).
 						 * Re-captured (to the same absolute value) after every flush/relock; the P term
-						 * plus the restore burst the sustained-error arm fires walk the buffer there. */
-						c->level_target_ms = c->level_absolute ? ASRC_LEVEL_TARGET_MS + c->level_offset_ms
-										       : window_level_ms;
+						 * plus the restore burst the sustained-error arm fires walk the buffer there.
+						 * camera-box issue 1367: in timecode mode the level is the placement error, whose
+						 * setpoint is 0 (the packet lands where its stamp says), never the lock-time depth. */
+						if (c->timecode)
+							c->level_target_ms = 0.0;
+						else
+							c->level_target_ms = c->level_absolute ? ASRC_LEVEL_TARGET_MS + c->level_offset_ms
+											       : window_level_ms;
 						c->level_captured = true;
 					}
 					/* camera-box #1335 follow-up 5: SMOOTH the per-window level error with an EMA (tau
@@ -398,7 +409,11 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 					 * per capture (level_fallback_done, cleared only by a re-capture): a steady residual
 					 * the P+I terms hold at >= 5 ms would otherwise re-trip the bound every 40 min and
 					 * ratchet the target away. Mirror of src/asrc_bench.rs compensate_with_level. */
-					if (!c->level_fallback_done && fabs(c->level_err_ema_ms) >= ASRC_LEVEL_RESTORE_ARM_MS) {
+					/* camera-box issue 1367 (review round 1): never in timecode mode -- the setpoint is
+					 * the packet's own stamp (0), always reachable by the stretch; falling back would
+					 * accept a lasting A/V offset as the new truth. */
+					if (!c->timecode && !c->level_fallback_done &&
+					    fabs(c->level_err_ema_ms) >= ASRC_LEVEL_RESTORE_ARM_MS) {
 						if (++c->level_unconverged_windows >= ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS) {
 							c->level_fallback_from_ms = c->level_target_ms;
 							c->level_target_ms += c->level_err_ema_ms;
@@ -535,6 +550,11 @@ double asrc_compensator_get_outer_bias_ppm(const struct asrc_compensator *c)
  * 12 h series). A sub-band shift arms nothing -- the gentle I+P loop absorbs it. */
 void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delta_ms)
 {
+	/* camera-box issue 1367 (design 5845361166): in timecode mode the level loop reads the PLACEMENT
+	 * error, which already moves with every deliberate placement change (the intended landing time
+	 * carries the new offset or hold), so a setpoint shift would itself be the error. No-op. */
+	if (c->timecode)
+		return;
 	/* camera-box #1367: the level loop reads the per-window MEAN. The buffer moves by delta in the
 	 * same callback as this shift, so the readings already folded into the open window are moved by
 	 * delta too: the closing mean is then all in the new frame, and the smoothed error sees no blended
@@ -599,4 +619,61 @@ void asrc_compensator_set_level_absolute(struct asrc_compensator *c, bool absolu
 void asrc_compensator_set_step_recover_hold(struct asrc_compensator *c, bool hold)
 {
 	c->step_recover_hold = hold;
+}
+
+/* camera-box issue 1367 (design 5845361166): the TIMECODE mode. See the header and
+ * src/asrc_bench_timecode.rs (the Rust authority) for the full contract. */
+void asrc_compensator_set_timecode(struct asrc_compensator *c, bool timecode)
+{
+	if (timecode == c->timecode)
+		return;
+	c->timecode = timecode;
+	c->window_raw_s = 0.0;
+	c->window_master_s = 0.0;
+	c->window_block_count = 0;
+	c->window_level_sum_ms = 0.0;
+	c->window_level_count = 0;
+	asrc_regression_flush(c);
+}
+
+/* camera-box issue 1367: set what is owed to owed_ms. The setpoint moves by the change of the owed
+ * amount (a booked loss lowers it to where the early audio sits, a payment walks it back) and the open
+ * window's readings move with it, so the window mean stays in one frame. Mirror of
+ * RealtimeAsrcCompensator::step_recover_set. */
+static void asrc_step_recover_set(struct asrc_compensator *c, double owed_ms)
+{
+	const double shift_ms = c->step_recover_ms - owed_ms;
+	c->level_target_ms += shift_ms;
+	c->window_level_sum_ms += shift_ms * (double)c->window_level_count;
+	c->step_recover_ms = owed_ms;
+}
+
+void asrc_compensator_observe_placement(struct asrc_compensator *c, double place_err_ms, double packet_ms,
+					bool placed)
+{
+	if (!c->timecode || !c->level_captured)
+		return;
+	if (placed)
+		asrc_step_recover_set(c, 0.0);
+	const double jump_ms = place_err_ms - (c->level_target_ms + c->level_err_ema_ms);
+	const double half_packet_ms = 0.5 * packet_ms;
+	const double band_ms = half_packet_ms > ASRC_PLACE_JUMP_MIN_MS ? half_packet_ms : ASRC_PLACE_JUMP_MIN_MS;
+	if (fabs(jump_ms) < band_ms)
+		return;
+	const double owed_ms =
+		asrc_clamp(c->step_recover_ms - jump_ms, -ASRC_STEP_RECOVER_MAX_MS, ASRC_STEP_RECOVER_MAX_MS);
+	/* review round 1: at the owed cap a packet still beyond it books nothing and counts nothing */
+	if (owed_ms == c->step_recover_ms)
+		return;
+	asrc_step_recover_set(c, owed_ms);
+	if (c->place_jump_count < UINT32_MAX)
+		c->place_jump_count++;
+	c->last_place_jump_ms = jump_ms;
+}
+
+double asrc_compensator_take_step_recover_ppm(struct asrc_compensator *c)
+{
+	const double ppm = c->step_recover_ppm;
+	c->step_recover_ppm = 0.0;
+	return ppm;
 }

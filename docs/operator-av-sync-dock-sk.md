@@ -147,7 +147,12 @@ istý, či si kanál vrátil späť, spusti tento test alebo sa opýtaj niekoho,
   prístupu k rigu vyčítať, či problém je (a) obraz — kamera vôbec nevidí QR kód (nízke
   `video_decoded`%), (b) zvuk — demodulátor nič nepočuje (`preambles=0`, zvuková vetva/hlasitosť),
   (c) zvuk počuje, ale je to šum (`preambles>0`, `crc_ok=0`), alebo (d) zvuk dekóduje správne, ale
-  nepáruje sa s obrazom / nezamkne (`crc_ok>0`, `locked=no`).
+  nepáruje sa s obrazom / nezamkne (`crc_ok>0`, `locked=no`). Od issue 1367 dekóduje obraz samostatné
+  vlákno, nie vlákno, ktoré posiela obraz do výstupov OBS. Na konci riadku pribudli dve položky:
+  - `decode_dropped=` = snímky, ktoré dekodér nestihol a preskočil;
+  - `publish_max_us=` = najdlhší čas, ktorý dock v poslednom okne zobral video vláknu OBS.
+
+  `video_frames=` teraz počíta iba snímky, ktoré dekodér naozaj spracoval.
 
 ## Poznámka pre technikov (dôvod, prečo dock číta práve tento zvuk/obraz)
 

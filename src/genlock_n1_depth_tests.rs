@@ -296,6 +296,9 @@ fn tick(relock: bool, floor_frames: u64) -> ShallowTick {
         relock,
         on_grid: true,
         floor_frames,
+        // ROZHODNUTÉ 5842640404: the budgeted latch floor equals the raw floor unless a test says
+        // otherwise, so the older scenarios keep their meaning.
+        latch_floor_frames: floor_frames,
         base_frames: 1,
         deep: false,
         min_latency_box: false,
@@ -303,6 +306,8 @@ fn tick(relock: bool, floor_frames: u64) -> ShallowTick {
         // says otherwise, so the downward re-measure stays out of the older scenarios.
         realized_frames: u64::MAX,
         backlog_relock: false,
+        // design 5844353368: no sticky content floor unless a test says otherwise.
+        sticky_floor_frames: 0,
     }
 }
 
@@ -939,3 +944,12 @@ fn a_gap_whose_head_is_duplicated_behind_it_presents_on_time_1367() {
     );
     assert!(hold(0), "nothing queued behind it: hold");
 }
+
+// ROZHODNUTÉ 5842640404: the latch budgets the receive-time arrival lag -- a child module (this file
+// sits at the ~1000-line budget); it reuses `tick` and the interval constants above.
+#[path = "genlock_n1_depth_latch_budget_tests.rs"]
+mod latch_budget;
+
+// design 5844353368: the sticky content floor -- a child module, like the latch budget above.
+#[path = "genlock_n1_depth_sticky_tests.rs"]
+mod sticky;

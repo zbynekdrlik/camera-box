@@ -5,6 +5,7 @@ paths:
   - "scripts/lib/watchdog-roster.sh"
   - "tests/python/test_rig_dev_handover_1312.py"
   - "tests/python/test_rig_dev_handover_watchdogs_1319.py"
+  - "tests/python/test_rig_dev_handover_exposure_1371.py"
 ---
 
 # "development" handover check (#1312)
@@ -50,6 +51,7 @@ ONE Slovak checklist of what the owner forgot to switch back into development st
 | cambox | `camera-box-version-gate.sh` | exit 0 | exit 20 (drift) | exit 11 |
 | avlatency | `measurement-chain-latency.sh` (marker emit vs `mbc` relative onset) | `verdict=ALIGNED` | `verdict=DRIFTED` (>90 ms vs baseline) | monotonic-emit / no-baseline / **ambiguous-cadence** (#1332) / chain-silent (all <−60 dB) / <3 onsets / cam2 down / stream OBS down |
 | watchdogs | `systemctl --user` per timer in `lib/watchdog-roster.sh` (dev1-local, no ssh) | all enabled+active+fired <15 min → OK | disabled/inactive/never-run/stale → **SUPERVISOR** (`nezapnutý watchdog: …`, never `zabudol si`) | no unit file → UNKNOWN with names |
+| exposure | `camera_test_settings.py snapshot-state` (dev1-local file, issue 1371) + the `mode` capture | `state=none` / `state=restored` → OK; `state=pending` with mode TEST (waiting for its EVENT switch) → OK | `state=pending` with mode EVENT, `… restore_failed=<utc>`, `state=invalid` → **SUPERVISOR** (the owner's ISO/shutter were not put back; summary `supervisor musí vyriešiť: …`, next to the watchdog clause) | no line, or pending with an unreadable mode → UNKNOWN |
 
 ## `avlatency` (#1312) — the mbc measurement-chain LATENCY, not just presence
 
