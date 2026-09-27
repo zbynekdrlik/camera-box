@@ -415,6 +415,7 @@ genlock_latency_ms_from_log() {
 # CORRECT outcome on a box with no isolated nohz_full core (the shared baseline forbids kernel isolation),
 # where no pin and no rtprio grant is expected. "pin_failed" when the startup pin itself failed ("could
 # NOT pin render-tick thread" / "could NOT read the render-tick thread's CPU mask"): the tick runs unpinned.
+# "restore_failed" (checked FIRST) when the pin logged "... and the restore failed too": DRIFT.
 # "" (UNKNOWN/absent) when TEXT carries NEITHER line — the log was never read, or the deployed
 # build predates #484 (a stale build is a SEPARATE facet, imag_build_drift_report's dynamic
 # origin/main compare; this parser only judges the pin OUTCOME a #484-or-later build always logs
@@ -424,7 +425,16 @@ genlock_latency_ms_from_log() {
 # genlock_capability_from_log's own comment documents: `grep -q` can flip a genuine match into a
 # false non-match when the upstream `printf` is SIGPIPE'd after grep's early exit).
 genlock_rt_pin_from_log() {
-  local text="$1" ok_line unpinned_line pin_failed_line failed_line
+  local text="$1" restore_failed_line ok_line unpinned_line pin_failed_line failed_line
+  # issue 1357: the pin's one LOG_ERROR (a restore that failed -- the thread may stay on the pin cores
+  # and SCHED_FIFO, the leak this issue is about) outranks every other line, even a FIFO success.
+  restore_failed_line="$(printf '%s\n' "$text" \
+    | LC_ALL=C grep -aE 'genlock: render-tick pin .* and the restore failed too' \
+    | head -1 || true)"
+  if [ -n "$restore_failed_line" ]; then
+    printf 'restore_failed\n'
+    return 0
+  fi
   # #1184: LC_ALL=C grep -a -> byte-literal, invalid-UTF-8-safe (same class as #1183).
   ok_line="$(printf '%s\n' "$text" \
     | LC_ALL=C grep -aiE 'genlock: render-tick thread set SCHED_FIFO prio [0-9]+ on the isolated core' \
@@ -979,6 +989,10 @@ check_imag_report() {
         ;;
       unpinned)
         printf '  %-22s OK       (render-tick thread not pinned: no isolated cores on this box, by design -- issue 1357)\n' "genlock_rt_pin"
+        ;;
+      restore_failed)
+        printf '  %-22s DRIFT    (render-tick pin restore FAILED: the thread may stay on the pin cores / SCHED_FIFO -- see the OBS log ERROR, issue 1357)\n' "genlock_rt_pin"
+        drift=$((drift + 1))
         ;;
       pin_failed)
         printf '  %-22s OK       (render-tick pin FAILED at startup, the tick runs unpinned -- see the OBS log WARNING, issue 1357)\n' "genlock_rt_pin"
