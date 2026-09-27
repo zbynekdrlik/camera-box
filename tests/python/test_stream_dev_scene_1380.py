@@ -82,7 +82,7 @@ _PRO_ITEMS = [
 
 
 def _fake_obs(scenes, items_by_scene, program="PRO", studio=False, preview="PRE",
-              swap_reads=None, cursor_seq=None, fail_preview_set=False):
+              swap_reads=None, cursor_seq=None, fail_preview_set=False, override=None):
     """A fake `_rpc` over an in-memory OBS: scene list + per-scene items, program, Studio Mode +
     preview. Records every call. `swap_reads` models OBS's Studio Mode SWAP (default on,
     OBSApp.cpp SwapScenesMode): a program change queues the OLD program for the preview, applied
@@ -130,11 +130,13 @@ def _fake_obs(scenes, items_by_scene, program="PRO", studio=False, preview="PRE"
                 raise RuntimeError("SetCurrentPreviewScene failed: {'result': False}")
             state["preview"] = rdata["sceneName"]
             return {}
+        if rtype == "GetSceneSceneTransitionOverride":
+            return dict(override or {"transitionName": None, "transitionDuration": None})
         if rtype == "GetCurrentSceneTransitionCursor":
             if cursor_seq is None:
                 return {}
             value = cursor_seq.pop(0) if len(cursor_seq) > 1 else cursor_seq[0]
-            return {"transitionCursor": value}
+            return {} if value is None else {"transitionCursor": value}
         if rtype == "GetGroupSceneItemList":
             return {"sceneItems": state["items"][rdata["sceneName"]]}
         return {}
@@ -631,7 +633,17 @@ def test_the_module_never_programs_a_scene():
     # The module never selects the program; its one preview write (the swap re-assert below) only
     # ever writes the scene the caller just programmed, and obs_phase2._rpc refuses PRO anyway.
     src = _SDS_PATH.read_text()
-    assert '"SetCurrentProgramScene"' not in src
+    assert not re.search(r"""["']SetCurrentProgramScene["']""", src)
+
+
+def test_rpc_refuses_any_scene_uuid_on_a_selecting_request():
+    # obs-websocket resolves sceneUuid BEFORE sceneName: a harmless name + PRO's uuid would program
+    # PRO past a name check, so a selecting request may not carry a uuid at all.
+    ws = _SendWS()
+    with pytest.raises(obs_phase2.ForbiddenSceneError):
+        obs_phase2._rpc(ws, "SetCurrentProgramScene",
+                        {"sceneName": "Development", "sceneUuid": "pro-uuid"})
+    assert ws.sent == []
 
 
 def test_rpc_refuses_a_scene_uuid_only_selection():
@@ -732,10 +744,16 @@ def test_switch_off_pro_never_leaves_pro_in_the_preview(monkeypatch):
 
 
 def test_switch_from_any_other_scene_does_not_poll_the_preview(monkeypatch):
-    # The #312 all-cambox sweep switches among strih scenes every segment: no preview re-assert and
-    # no transition polling unless the program we leave is the production scene.
+    # The #312 all-cambox sweep switches among strih scenes every segment: no preview re-assert, no
+    # transition polling, and no import of the dev-scene module (obs_phase2.py may be installed alone)
+    # unless the program we leave is the production scene.
     fake, calls, _ = _fake_obs(["Cam 1", "Cam 2"], {}, program="Cam 1", studio=True,
                                preview="Cam 2")
+
+    def no_import():
+        raise AssertionError("the dev-scene module must not be imported for a non-PRO cut")
+
+    monkeypatch.setattr(obs_phase2, "_dev_scene_module", no_import)
     monkeypatch.setattr(obs_phase2, "_rpc", fake)
     monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
     _spy_nonblack(monkeypatch, {})
@@ -771,4 +789,49 @@ def test_prod_scene_off_pro_never_leaves_pro_in_the_preview(monkeypatch):
     for _ in range(3):
         fake(None, "GetCurrentPreviewScene")
     assert state["program"] == "Development"
+    assert state["preview"] == "Development"
+
+
+def test_reassert_after_a_cut_waits_the_start_timeout_plus_margin_only():
+    # A cut ends at once (the cursor reads 1.0 from the start): the loop leaves after the start
+    # timeout + the margin, not the 30 s cap, and still moves a swapped PRO preview.
+    fake, _, state = _fake_obs(["PRO", "Development"], {}, program="PRO", studio=True,
+                               preview="PRE", swap_reads=2, cursor_seq=[1.0])
+    fake(None, "SetCurrentProgramScene", {"sceneName": "Development"})
+    sleep, now = _clock()
+    moved = _sds().reassert_stale_preview(fake, FakeWS(), "PRO", "Development", margin_s=0.5,
+                                          poll_s=0.05, start_timeout_s=1.0, sleep=sleep, now=now)
+    assert moved == 1 and state["preview"] == "Development"
+    assert 1.5 <= now() <= 1.7
+
+
+def test_reassert_follows_a_per_scene_transition_override():
+    # The cursor reports the UI transition (idle 1.0), not the target scene's override: a 3 s
+    # override must still be waited out before the loop may leave.
+    fake, _, state = _fake_obs(["PRO", "Development"], {}, program="PRO", studio=True,
+                               preview="PRE", swap_reads=60, cursor_seq=[1.0],
+                               override={"transitionName": "Fade", "transitionDuration": 3000})
+    fake(None, "SetCurrentProgramScene", {"sceneName": "Development"})
+    sleep, now = _clock()
+    moved = _sds().reassert_stale_preview(fake, FakeWS(), "PRO", "Development", margin_s=0.5,
+                                          poll_s=0.05, sleep=sleep, now=now)
+    for _ in range(3):
+        fake(None, "GetCurrentPreviewScene")
+    assert state["pending"] is None
+    assert moved == 1 and state["preview"] == "Development"
+    assert now() >= 3.5
+
+
+def test_reassert_keeps_polling_when_the_cursor_read_fails_mid_transition():
+    # A failed cursor read after the transition was seen running must not end the wait early.
+    fake, _, state = _fake_obs(["PRO", "Development"], {}, program="PRO", studio=True,
+                               preview="PRE", swap_reads=12,
+                               cursor_seq=[0.1, 0.2, None, None, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95,
+                                           0.99, 1.0])
+    fake(None, "SetCurrentProgramScene", {"sceneName": "Development"})
+    sleep, now = _clock()
+    _sds().reassert_stale_preview(fake, FakeWS(), "PRO", "Development", margin_s=0.2,
+                                  poll_s=0.05, sleep=sleep, now=now)
+    for _ in range(3):
+        fake(None, "GetCurrentPreviewScene")
     assert state["preview"] == "Development"
