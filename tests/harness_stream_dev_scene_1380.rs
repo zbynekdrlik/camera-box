@@ -71,14 +71,26 @@ fn recording_e2e_records_the_development_scene_seeded_before_4_8() {
 }
 
 #[test]
-fn rig_mode_defaults_test_to_development_and_event_to_pro() {
+fn rig_mode_programs_only_the_development_scene_on_stream() {
     let s = read("scripts/rig-mode.sh");
     assert!(s.contains(". \"$RIG_MODE_DIR/lib/stream-dev-scene.sh\""));
     assert!(s.contains(r#"STREAM_PROG_SCENE="${STREAM_PROG_SCENE:-$STREAM_DEV_SCENE_DEFAULT}""#));
-    assert!(s.contains(
-        r#"STREAM_EVENT_SCENE="${STREAM_EVENT_SCENE:-$STREAM_PRODUCTION_SCENE_DEFAULT}""#
-    ));
     assert!(!s.contains(":-PRO}"));
+    // Owner hard rule 27.9.2026: our tooling never programs PRO -- no EVENT restore, no variable
+    // that names the production scene as a program target.
+    assert!(!s.contains("STREAM_EVENT_SCENE"));
+    assert!(!s.contains("restore_stream_program_production"));
+    // every stream `switch` targets the development scene
+    let n_stream_switches = s
+        .matches("obs_phase2.py\" switch --host \"$STREAM_IP\" --program-scene ")
+        .count();
+    let n_dev_switches = s
+        .matches(
+            "obs_phase2.py\" switch --host \"$STREAM_IP\" --program-scene \"$STREAM_PROG_SCENE\"",
+        )
+        .count();
+    assert_eq!(n_stream_switches, n_dev_switches);
+    assert!(n_dev_switches >= 1);
 }
 
 #[test]
@@ -104,7 +116,7 @@ fn rig_mode_test_seeds_then_switches_to_the_development_scene() {
         .find("obs_phase2.py\" switch --host \"$STREAM_IP\" --program-scene \"$STREAM_PROG_SCENE\"")
         .expect("verify_stream_program_dev must switch the stream program to $STREAM_PROG_SCENE");
     assert!(seed < switch, "the seeder must run before the switch");
-    assert!(body.contains("\"$STREAM_EVENT_SCENE\""));
+    assert!(body.contains("\"$STREAM_PRODUCTION_SCENE_DEFAULT\""));
     // The development program is production content (the prod scene nested), so gap 2 and the
     // park prove it with the SAME #677 floor prod-scene uses, not the #312 bright-QR floor.
     assert!(
@@ -119,60 +131,40 @@ fn rig_mode_test_seeds_then_switches_to_the_development_scene() {
 }
 
 #[test]
-fn rig_mode_event_puts_the_production_scene_back_before_the_contract() {
+fn rig_mode_event_never_switches_the_stream_program() {
     let s = read("scripts/rig-mode.sh");
-    let body = fn_body(&s, "restore_stream_program_production");
-    assert!(body.contains(
-        "obs_phase2.py\" switch --host \"$STREAM_IP\" --program-scene \"$STREAM_EVENT_SCENE\""
-    ));
-    assert!(
-        body.contains("--only-from \"$STREAM_PROG_SCENE\""),
-        "EVENT switches to the production scene ONLY when the live program is the development \
-         scene (ROZHODNUTIE 27.9.2026): an operator scene is left alone"
-    );
-    assert!(
-        body.contains("--prod-floor"),
-        "EVENT's non-black proof on real production content uses the prod floor, not the \
-         bright-QR #312 floor"
-    );
-    assert!(
-        body.contains("--black-report-only"),
-        "a dark production scene must not fail the EVENT switch once the scene is set"
-    );
-    assert!(
-        body.contains("--replace-preview \"$STREAM_PROG_SCENE\""),
-        "EVENT must move a stale development-scene PREVIEW off the development scene"
-    );
-    assert!(
-        !s.contains("OBS_NONBLACK_MIN_MEAN_PROD"),
-        "the prod non-black floor is read in obs_phase2.py only, never retyped in rig-mode.sh"
-    );
     let ev = fn_body(&s, "do_event");
-    let restore = ev
-        .find("restore_stream_program_production ||")
-        .expect("EVENT mode must restore the production scene and keep going on a failure");
-    let contract = ev
-        .find("\n  event_mode_assert\n")
-        .expect("EVENT mode must still run the #722 contract");
-    assert!(restore < contract);
     assert!(
-        ev.contains("_stream_event_rc"),
-        "a failed production-scene restore must be folded into the EVENT exit status"
+        !ev.contains("--program-scene") && !ev.contains("switch --host \"$STREAM_IP\""),
+        "EVENT mode must not touch the stream program at all (the owner cuts to PRO himself)"
     );
+    assert!(!ev.contains("_stream_event_rc"));
 }
 
 #[test]
-fn rig_mode_event_contract_reads_the_stream_program_scene() {
+fn rig_mode_event_contract_reports_the_stream_program_scene_only() {
     let s = read("scripts/rig-mode.sh");
     let body = fn_body(&s, "event_mode_assert");
     assert!(body.contains("stream_program_scene_read \"$here\" \"$STREAM_IP\""));
-    assert!(body.contains("--arg stream_program_scene"));
-    assert!(body.contains("--arg stream_dev_scene \"$STREAM_PROG_SCENE\""));
-    assert!(body.contains("stream_dev_scene: $stream_dev_scene"));
-    assert!(
-        !body.contains("stream_production_scene"),
-        "item 9 checks 'not the development scene', never 'equals the production scene'"
-    );
+    assert!(body.contains("report-only"));
+    assert!(!body.contains("--arg stream_program_scene"));
+    assert!(!body.contains("stream_dev_scene"));
+    assert!(!body.contains("stream_production_scene"));
+}
+
+#[test]
+fn the_rules_quote_the_owner_hard_rule() {
+    for rel in [
+        ".claude/rules/stream-development-scene.md",
+        ".claude/rules/strih-autorecord-coupling.md",
+        ".claude/rules/event-assert-none-tolerance.md",
+    ] {
+        let r = read(rel);
+        assert!(
+            r.contains("nemas ti nikdy v stream obs davat do programu scenu PRO"),
+            "{rel} must quote the owner's hard rule verbatim"
+        );
+    }
 }
 
 #[test]

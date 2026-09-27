@@ -304,11 +304,9 @@ def test_obs_phase2_holds_no_copy_of_the_seeder():
 
 # --- switch: skip when already on target, optional --min-mean -----------------------------------
 
-def _switch_args(scene, prod_floor=False, black_report_only=False, replace_preview="",
-                 only_from=""):
+def _switch_args(scene, prod_floor=False):
     return types.SimpleNamespace(host="10.77.9.204", password="", program_scene=scene,
-                                 prod_floor=prod_floor, black_report_only=black_report_only,
-                                 replace_preview=replace_preview, only_from=only_from)
+                                 prod_floor=prod_floor)
 
 
 def test_switch_skips_set_when_the_target_is_already_on_program(monkeypatch, capsys):
@@ -335,27 +333,27 @@ def _spy_nonblack(monkeypatch, seen, raise_black=False):
 
 
 def test_switch_sets_program_when_it_differs_and_uses_the_prod_floor(monkeypatch):
-    fake, calls, state = _fake_obs(["PRO", "Development"], {}, program="Development")
+    fake, calls, state = _fake_obs(["PRO", "Development"], {}, program="PRE")
     monkeypatch.setattr(obs_phase2, "_rpc", fake)
     monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
     monkeypatch.delenv("OBS_NONBLACK_MIN_MEAN_PROD", raising=False)
     seen = {}
     _spy_nonblack(monkeypatch, seen)
-    obs_phase2.switch(_switch_args("PRO", prod_floor=True))
+    obs_phase2.switch(_switch_args("Development", prod_floor=True))
     assert [c["data"] for c in calls if c["op"] == "SetCurrentProgramScene"] == [
-        {"sceneName": "PRO"}]
-    assert state["program"] == "PRO"
+        {"sceneName": "Development"}]
+    assert state["program"] == "Development"
     assert seen["min_mean"] == 5.0
 
 
 def test_the_prod_floor_is_the_one_prod_scene_env_knob(monkeypatch):
-    fake, _, _ = _fake_obs(["PRO"], {}, program="PRO")
+    fake, _, _ = _fake_obs(["PRO", "Development"], {}, program="Development")
     monkeypatch.setattr(obs_phase2, "_rpc", fake)
     monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
     monkeypatch.setenv("OBS_NONBLACK_MIN_MEAN_PROD", "7.5")
     seen = {}
     _spy_nonblack(monkeypatch, seen)
-    obs_phase2.switch(_switch_args("PRO", prod_floor=True))
+    obs_phase2.switch(_switch_args("Development", prod_floor=True))
     assert seen["min_mean"] == 7.5
     assert obs_phase2._prod_nonblack_floor() == 7.5
 
@@ -370,29 +368,6 @@ def test_switch_without_prod_floor_keeps_the_312_default(monkeypatch):
     assert seen["min_mean"] is None
 
 
-def test_switch_black_report_only_warns_and_still_succeeds(monkeypatch, capsys):
-    # EVENT mode: a legitimately dark production scene (cameras not powered yet) must not fail the
-    # EVENT switch once the scene itself is set; a real set/transport failure still fails.
-    fake, _, state = _fake_obs(["PRO", "Development"], {}, program="Development")
-    monkeypatch.setattr(obs_phase2, "_rpc", fake)
-    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
-    _spy_nonblack(monkeypatch, {}, raise_black=True)
-    obs_phase2.switch(_switch_args("PRO", prod_floor=True, black_report_only=True))
-    out = capsys.readouterr()
-    assert state["program"] == "PRO"
-    assert out.out.strip().isdigit()
-    assert "WARNING" in out.err and "BLACK" in out.err
-
-
-def test_switch_black_without_report_only_still_fails(monkeypatch):
-    fake, _, _ = _fake_obs(["PRO"], {}, program="Development")
-    monkeypatch.setattr(obs_phase2, "_rpc", fake)
-    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
-    _spy_nonblack(monkeypatch, {}, raise_black=True)
-    with pytest.raises(SystemExit):
-        obs_phase2.switch(_switch_args("PRO", prod_floor=True))
-
-
 def test_switch_black_hint_names_the_program_not_a_cambox(monkeypatch):
     fake, _, _ = _fake_obs(["Development"], {}, program="Development")
     monkeypatch.setattr(obs_phase2, "_rpc", fake)
@@ -402,228 +377,6 @@ def test_switch_black_hint_names_the_program_not_a_cambox(monkeypatch):
     obs_phase2.switch(_switch_args("Development"))
     assert "'Development'" in seen["hint"]
 
-
-def test_switch_moves_a_stale_development_preview_to_the_target(monkeypatch):
-    # Studio Mode: an E2E leaves the development scene in PREVIEW; after EVENT a Transition click
-    # must never put the development scene back on program.
-    fake, calls, state = _fake_obs(["PRO", "Development"], {}, program="Development",
-                                   studio=True, preview="Development")
-    monkeypatch.setattr(obs_phase2, "PREVIEW_SWAP_MARGIN_S", 0.0)
-    monkeypatch.setattr(obs_phase2, "_rpc", fake)
-    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
-    _spy_nonblack(monkeypatch, {})
-    obs_phase2.switch(_switch_args("PRO", replace_preview="Development"))
-    assert state["preview"] == "PRO"
-    assert [c["data"] for c in calls if c["op"] == "SetCurrentPreviewScene"] == [
-        {"sceneName": "PRO"}]
-
-
-def test_switch_leaves_an_operator_preview_alone(monkeypatch):
-    fake, calls, state = _fake_obs(["PRO", "PRE", "Development"], {}, program="Development",
-                                   studio=True, preview="PRE")
-    monkeypatch.setattr(obs_phase2, "PREVIEW_SWAP_MARGIN_S", 0.0)
-    monkeypatch.setattr(obs_phase2, "_rpc", fake)
-    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
-    _spy_nonblack(monkeypatch, {})
-    obs_phase2.switch(_switch_args("PRO", replace_preview="Development"))
-    assert state["preview"] == "PRE"
-    assert not any(c["op"] == "SetCurrentPreviewScene" for c in calls)
-
-
-def _clock():
-    clock = [0.0]
-
-    def sleep(dt):
-        clock[0] += dt
-
-    return sleep, (lambda: clock[0])
-
-
-def test_preview_reassert_waits_out_the_studio_mode_swap():
-    # The real post-TEST state: program Development, preview PRO. EVENT's cut to PRO makes OBS put
-    # Development into the preview when the transition ENDS -- after a one-shot check would run.
-    # The cursor reads the previous transition's 1.0 first, then this 300 ms fade.
-    fake, calls, state = _fake_obs(["PRO", "Development"], {}, program="Development",
-                                   studio=True, preview="PRO", swap_reads=4,
-                                   cursor_seq=[1.0, 0.3, 0.8, 1.0])
-    fake(None, "SetCurrentProgramScene", {"sceneName": "PRO"})
-    sleep, now = _clock()
-    moved = _sds().reassert_stale_preview(fake, FakeWS(), "Development", "PRO", margin_s=0.5,
-                                          poll_s=0.25, sleep=sleep, now=now)
-    assert state["preview"] == "PRO"
-    assert state["pending"] is None
-    assert moved == 1
-    assert [c["data"] for c in calls if c["op"] == "SetCurrentPreviewScene"] == [
-        {"sceneName": "PRO"}]
-
-
-def test_preview_reassert_outlasts_a_long_fixed_transition():
-    # A stinger is a FIXED transition: GetCurrentSceneTransition reports no duration, and it can run
-    # for seconds. The re-assert follows the observed cursor to 1.0, then the margin -- a
-    # configured-duration window (null -> margin only) would exit before the swap lands.
-    fake, _, state = _fake_obs(["PRO", "Development"], {}, program="Development",
-                               studio=True, preview="PRO", swap_reads=15,
-                               cursor_seq=[0.05 * i for i in range(1, 14)] + [1.0])
-    fake(None, "SetCurrentProgramScene", {"sceneName": "PRO"})
-    sleep, now = _clock()
-    moved = _sds().reassert_stale_preview(fake, FakeWS(), "Development", "PRO", margin_s=0.5,
-                                          poll_s=0.25, sleep=sleep, now=now)
-    for _ in range(3):
-        fake(None, "GetCurrentPreviewScene")
-    assert state["pending"] is None
-    assert state["preview"] == "PRO"
-    assert moved == 1
-
-
-def test_preview_reassert_stops_at_the_hard_cap():
-    fake, _, _ = _fake_obs(["PRO", "Development"], {}, program="PRO", studio=True,
-                           preview="PRO", cursor_seq=[0.5])
-    sleep, now = _clock()
-    _sds().reassert_stale_preview(fake, FakeWS(), "Development", "PRO", margin_s=0.5,
-                                  poll_s=0.25, cap_s=3.0, sleep=sleep, now=now)
-    assert 3.0 <= now() <= 3.5
-
-
-def test_preview_reassert_without_a_cursor_waits_the_margin_only():
-    fake, _, _ = _fake_obs(["PRO", "Development"], {}, program="PRO", studio=True,
-                           preview="PRO")
-    sleep, now = _clock()
-    _sds().reassert_stale_preview(fake, FakeWS(), "Development", "PRO", margin_s=1.0,
-                                  poll_s=0.25, sleep=sleep, now=now)
-    assert 1.0 <= now() <= 1.25
-
-
-def test_preview_reassert_waits_for_a_transition_that_starts_late():
-    # The cursor still reads the PREVIOUS transition's 1.0 for a moment after the cut is requested;
-    # the re-assert must not take that for "already ended" before the start timeout.
-    fake, _, state = _fake_obs(["PRO", "Development"], {}, program="Development",
-                               studio=True, preview="PRO", swap_reads=8,
-                               cursor_seq=[1.0, 1.0, 0.2, 0.5, 0.9, 1.0])
-    fake(None, "SetCurrentProgramScene", {"sceneName": "PRO"})
-    sleep, now = _clock()
-    _sds().reassert_stale_preview(fake, FakeWS(), "Development", "PRO", margin_s=0.5,
-                                  poll_s=0.25, start_timeout_s=1.0, sleep=sleep, now=now)
-    for _ in range(3):
-        fake(None, "GetCurrentPreviewScene")
-    assert state["preview"] == "PRO"
-
-
-def test_preview_reassert_is_bounded_and_idle_outside_studio_mode():
-    fake, calls, _ = _fake_obs(["PRO", "Development"], {}, program="PRO", studio=False)
-    moved = _sds().reassert_stale_preview(fake, FakeWS(), "Development", "PRO", margin_s=5.0,
-                                          poll_s=0.25, sleep=lambda dt: None, now=lambda: 0.0)
-    assert moved == 0
-    assert not any(c["op"] == "GetCurrentPreviewScene" for c in calls)
-
-
-def test_preview_reassert_fails_loud_when_the_preview_set_fails():
-    fake, _, _ = _fake_obs(["PRO", "Development"], {}, program="PRO", studio=True,
-                           preview="Development", fail_preview_set=True)
-    sleep, now = _clock()
-    with pytest.raises(RuntimeError):
-        _sds().reassert_stale_preview(fake, FakeWS(), "Development", "PRO", margin_s=0.5,
-                                      poll_s=0.25, sleep=sleep, now=now)
-
-
-def test_switch_preview_failure_is_not_swallowed_by_black_report_only(monkeypatch):
-    fake, _, _ = _fake_obs(["PRO", "Development"], {}, program="Development", studio=True,
-                           preview="Development", fail_preview_set=True)
-    monkeypatch.setattr(obs_phase2, "_rpc", fake)
-    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
-    monkeypatch.setattr(obs_phase2, "PREVIEW_SWAP_MARGIN_S", 0.0)
-    _spy_nonblack(monkeypatch, {})
-    with pytest.raises(RuntimeError):
-        obs_phase2.switch(_switch_args("PRO", prod_floor=True, black_report_only=True,
-                                       replace_preview="Development"))
-
-
-def test_switch_fixes_the_preview_after_the_studio_mode_swap(monkeypatch):
-    fake, calls, state = _fake_obs(["PRO", "Development"], {}, program="Development",
-                                   studio=True, preview="PRO", swap_reads=2)
-    monkeypatch.setattr(obs_phase2, "_rpc", fake)
-    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
-    monkeypatch.setattr(obs_phase2, "PREVIEW_SWAP_MARGIN_S", 0.2)
-    monkeypatch.setattr(obs_phase2, "PREVIEW_POLL_S", 0.01)
-    _spy_nonblack(monkeypatch, {})
-    obs_phase2.switch(_switch_args("PRO", replace_preview="Development"))
-    # The transition has ended by now: any swap still queued lands on these reads.
-    for _ in range(3):
-        fake(None, "GetCurrentPreviewScene")
-    assert state["program"] == "PRO"
-    assert state["pending"] is None
-    assert state["preview"] == "PRO"
-
-
-def test_switch_transport_failure_still_fails_under_black_report_only(monkeypatch):
-    fake, _, _ = _fake_obs(["PRO"], {}, program="Development")
-
-    def failing(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
-        if rtype == "SetCurrentProgramScene":
-            raise TimeoutError("obs-websocket request 'SetCurrentProgramScene' got no response")
-        return fake(ws, rtype, rdata, ignore_err, timeout_s)
-
-    monkeypatch.setattr(obs_phase2, "_rpc", failing)
-    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
-    _spy_nonblack(monkeypatch, {})
-    with pytest.raises(TimeoutError):
-        obs_phase2.switch(_switch_args("PRO", prod_floor=True, black_report_only=True))
-
-
-def test_stale_preview_decision_is_pure():
-    f = _sds().stale_preview_target
-    assert f(True, "Development", "Development", "PRO") == "PRO"
-    assert f(True, "PRE", "Development", "PRO") is None
-    assert f(False, "Development", "Development", "PRO") is None
-    assert f(True, "Development", "", "PRO") is None
-    assert f(True, "PRO", "PRO", "PRO") is None
-
-
-def test_switch_only_from_switches_when_program_is_the_development_scene(monkeypatch):
-    # ROZHODNUTIE 27.9.2026: EVENT undoes development -- program Development -> PRO.
-    fake, calls, state = _fake_obs(["PRO", "Development"], {}, program="Development")
-    monkeypatch.setattr(obs_phase2, "_rpc", fake)
-    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
-    seen = {}
-    _spy_nonblack(monkeypatch, seen)
-    obs_phase2.switch(_switch_args("PRO", only_from="Development"))
-    assert state["program"] == "PRO"
-    assert "min_mean" in seen
-
-
-def test_switch_only_from_leaves_an_operator_scene_alone(monkeypatch, capsys):
-    # The operator is on PRE (or POST, or PRO already): EVENT never cuts it -- no scene set, no
-    # preview write, no black proof of a scene development never touched.
-    for live in ("PRE", "POST", "PRO"):
-        fake, calls, state = _fake_obs(["PRO", "PRE", "POST", "Development"], {}, program=live,
-                                       studio=True, preview="Development")
-        monkeypatch.setattr(obs_phase2, "_rpc", fake)
-        monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
-        seen = {}
-        _spy_nonblack(monkeypatch, seen)
-        obs_phase2.switch(_switch_args("PRO", prod_floor=True, black_report_only=True,
-                                       replace_preview="Development", only_from="Development"))
-        assert state["program"] == live
-        assert _writes(calls) == []
-        assert seen == {}
-        err = capsys.readouterr().err
-        assert "left alone" in err and live in err
-
-
-def test_switch_cli_accepts_the_event_flags(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(obs_phase2, "switch", lambda a: captured.update(vars(a)))
-    monkeypatch.setattr(sys, "argv", ["obs_phase2.py", "switch", "--host", "h",
-                                      "--program-scene", "PRO", "--prod-floor",
-                                      "--black-report-only", "--replace-preview", "Development",
-                                      "--only-from", "Development"])
-    obs_phase2.main()
-    assert captured["only_from"] == "Development"
-    assert captured["prod_floor"] is True
-    assert captured["black_report_only"] is True
-    assert captured["replace_preview"] == "Development"
-
-
-# --- program-rendered-input descends into a nested scene -----------------------------------------
 
 def _fetch(items):
     return lambda name, is_group=False: items[name]
@@ -748,3 +501,131 @@ def test_lib_program_scene_read_prints_nothing_when_obs_is_unreachable(tmp_path)
     script = f'set -euo pipefail\n. "{_LIB}"\nstream_program_scene_read "{fake_dir}" h pw\necho rc=$?\n'
     out = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True)
     assert out.stdout.strip() == "rc=0"
+
+
+# --- the owner's hard rule: our tooling NEVER programs PRO ---------------------------------------
+# Owner, 27.9.2026, verbatim: "nemas ti nikdy v stream obs davat do programu scenu PRO!!!!!"
+
+
+class _SendWS:
+    """A fake obs-websocket that records every request SENT and answers it with success."""
+
+    def __init__(self):
+        self.sent = []
+        self._pending = []
+
+    def send(self, raw):
+        import json
+        msg = json.loads(raw)
+        self.sent.append(msg["d"])
+        self._pending.append({"op": 7, "d": {"requestId": msg["d"]["requestId"],
+                                             "requestStatus": {"result": True},
+                                             "responseData": {}}})
+
+    def recv(self):
+        import json
+        return json.dumps(self._pending.pop(0))
+
+    def close(self):
+        pass
+
+
+def test_rpc_refuses_to_program_or_preview_the_production_scene():
+    for request in ("SetCurrentProgramScene", "SetCurrentPreviewScene"):
+        for ignore_err in (False, True):
+            ws = _SendWS()
+            with pytest.raises(obs_phase2.ForbiddenSceneError, match="PRO"):
+                obs_phase2._rpc(ws, request, {"sceneName": "PRO"}, ignore_err=ignore_err)
+            assert ws.sent == [], "the forbidden request must never reach OBS"
+
+
+def test_rpc_still_programs_the_development_scene():
+    ws = _SendWS()
+    obs_phase2._rpc(ws, "SetCurrentProgramScene", {"sceneName": "Development"})
+    assert [d["requestType"] for d in ws.sent] == ["SetCurrentProgramScene"]
+
+
+def test_the_forbidden_scene_is_the_declared_production_scene():
+    assert obs_phase2.NEVER_PROGRAM_SCENES == frozenset({_lib_default(
+        "STREAM_PRODUCTION_SCENE_DEFAULT")})
+
+
+def test_switch_to_pro_exits_non_zero_and_sends_nothing(monkeypatch):
+    ws = _SendWS()
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": ws)
+    monkeypatch.setattr(sys, "argv", ["obs_phase2.py", "switch", "--host", "10.77.9.204",
+                                      "--program-scene", "PRO"])
+    with pytest.raises(SystemExit) as exc:
+        obs_phase2.main()
+    assert exc.value.code not in (0, None)
+    assert "PRO" in str(exc.value.code)
+    assert not any(d["requestType"].startswith("Set") for d in ws.sent)
+
+
+def test_prod_scene_to_pro_exits_non_zero(monkeypatch):
+    fake, calls, _ = _fake_obs(["PRO", "Development"], {}, program="Development")
+
+    def guarded(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+        obs_phase2._refuse_forbidden_scene(rtype, rdata)
+        return fake(ws, rtype, rdata, ignore_err, timeout_s)
+
+    monkeypatch.setattr(obs_phase2, "_rpc", guarded)
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    monkeypatch.setattr(obs_phase2, "_load_state", lambda: {})
+    monkeypatch.setattr(obs_phase2, "_save_state", lambda state: None)
+    monkeypatch.setattr(sys, "argv", ["obs_phase2.py", "prod-scene", "--host", "10.77.9.204",
+                                      "--program-scene", "PRO"])
+    with pytest.raises(SystemExit) as exc:
+        obs_phase2.main()
+    assert exc.value.code not in (0, None)
+    assert not any(c["op"].startswith("SetCurrent") and c["data"].get("sceneName") == "PRO"
+                   for c in calls)
+
+
+def test_teardown_never_restores_pro_and_still_idles_the_probe_input(monkeypatch, capsys):
+    # An E2E that started with PRO on program/preview: teardown leaves the development scene where
+    # it is (the owner cuts to PRO himself) and still does the rest of its restore.
+    fake, calls, state = _fake_obs(["PRO", "Development"], {}, program="Development",
+                                   studio=True, preview="Development")
+
+    def guarded(ws, rtype, rdata=None, ignore_err=False, timeout_s=None):
+        obs_phase2._refuse_forbidden_scene(rtype, rdata)
+        return fake(ws, rtype, rdata, ignore_err, timeout_s)
+
+    monkeypatch.setattr(obs_phase2, "_rpc", guarded)
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    monkeypatch.setattr(obs_phase2, "_load_state", lambda: {
+        "10.77.9.204": {"prev_scene": "PRO", "prev_preview": "PRO"}})
+    monkeypatch.setattr(obs_phase2, "_restore_test_latency", lambda *a, **k: None)
+    monkeypatch.setattr(obs_phase2, "_restore_measurement_pins", lambda *a, **k: None)
+    monkeypatch.setattr(obs_phase2, "_restore_test_preload", lambda *a, **k: None)
+    obs_phase2.teardown(types.SimpleNamespace(host="10.77.9.204", password="",
+                                              calibrated_latency_ms=None))
+    assert state["program"] == "Development"
+    assert state["preview"] == "Development"
+    assert any(c["op"] == "SetInputSettings" for c in calls), "the probe input idle must still run"
+    err = capsys.readouterr().err
+    assert "teardown warning" not in err
+    assert "never programs" in err
+
+
+def test_teardown_still_restores_an_operator_scene(monkeypatch):
+    fake, calls, state = _fake_obs(["PRO", "PRE", "Development"], {}, program="Development",
+                                   studio=True, preview="Development")
+    monkeypatch.setattr(obs_phase2, "_rpc", fake)
+    monkeypatch.setattr(obs_phase2, "_conn", lambda host, password="": FakeWS())
+    monkeypatch.setattr(obs_phase2, "_load_state", lambda: {
+        "10.77.9.204": {"prev_scene": "PRE", "prev_preview": "PRE"}})
+    monkeypatch.setattr(obs_phase2, "_restore_test_latency", lambda *a, **k: None)
+    monkeypatch.setattr(obs_phase2, "_restore_measurement_pins", lambda *a, **k: None)
+    monkeypatch.setattr(obs_phase2, "_restore_test_preload", lambda *a, **k: None)
+    obs_phase2.teardown(types.SimpleNamespace(host="10.77.9.204", password="",
+                                              calibrated_latency_ms=None))
+    assert state["program"] == "PRE"
+    assert state["preview"] == "PRE"
+
+
+def test_the_seeder_module_holds_no_preview_writer():
+    src = _SDS_PATH.read_text()
+    assert "SetCurrentPreviewScene" not in src
+    assert "SetCurrentProgramScene" not in src

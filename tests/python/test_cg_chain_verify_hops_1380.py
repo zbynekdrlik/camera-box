@@ -77,3 +77,35 @@ def test_a_missing_strih_cg_input_still_fails(tmp_path):
     r = _run(tmp_path, args=("--hops", "strih"), logs=logs)
     assert r.returncode == 3, r.stdout
     assert "OVERALL: FAIL" in r.stdout
+
+
+def test_an_unreadable_stream_log_still_fails(tmp_path):
+    logs = _logs(tmp_path)
+    logs["STREAM"] = tmp_path / "does-not-exist.log"
+    r = _run(tmp_path, args=("--hops", "strih stream"), logs=logs)
+    assert r.returncode == 3, r.stdout
+    assert any(ln.startswith("stream") and "UNREADABLE" in ln for ln in r.stdout.splitlines())
+
+
+def test_a_run_where_every_requested_source_is_absent_is_not_a_pass(tmp_path):
+    # A typo in CG_CHAIN_STREAM_SRC must never look like success: nothing was verified.
+    logs = _logs(tmp_path)
+    r = _run(tmp_path, args=("--hops", "stream"), env_extra={"CG_CHAIN_STREAM_SRC": "nothere"},
+             logs=logs)
+    assert "OVERALL: PASS" not in r.stdout
+    assert "OVERALL: NO-DATA" in r.stdout
+    assert r.returncode == 3
+
+
+def test_the_absent_reason_does_not_claim_the_input_is_missing(tmp_path):
+    # A present but senderless input also emits no audit line (no frame since OBS start).
+    logs = _logs(tmp_path, stream_sources=("NDI 2ME PGM",))
+    r = _run(tmp_path, args=("--hops", "strih stream"), logs=logs)
+    reason = [ln for ln in r.stdout.splitlines() if "reason:" in ln and "stream" in ln]
+    assert reason and "no frame" in reason[0], r.stdout
+
+
+def test_rig_health_runs_only_the_strih_hop():
+    src = (_ROOT / "scripts" / "rig-health-audit.py").read_text()
+    assert '"--hops", "strih", "--report-only"' in src
+    assert '("stream", STREAM)' not in src
