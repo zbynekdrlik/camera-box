@@ -169,6 +169,89 @@ def test_a_failed_restore_is_named_not_claimed(ps):
     assert "the previous tray restored" in swap and "may be partial" in swap
 
 
+# ---------------------------------------------------------------------------------------------
+# a tray that re-spawns during the swap (the 1.12.0 roll, 27.9.2026): the arm reported "the running
+# tray did not exit" once each on stream, mbc and fohabl, then OK on a re-run. The kill worked; the
+# wait and the re-check went by NAME, so a tray started meanwhile (the Task Scheduler, the HKLM Run
+# `DanteSyncTray` entry) read as the killed one still running.
+# ---------------------------------------------------------------------------------------------
+
+def _swap(ps):
+    return ps[_at(ps, "# 5. the tray"):_at(ps, "# 6. relaunch the tray")]
+
+
+def test_the_killed_tray_is_waited_on_by_its_pids_never_by_name(ps):
+    swap = _swap(ps)
+    assert "Wait-Process -Name dantesync-tray" not in ps, "a wait by NAME also waits for a relaunched tray"
+    capture = _at(swap, "$trayKilled = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue)")
+    kill = _at(swap, "$trayKilled | Stop-Process -Force", capture)
+    pids = _at(swap, "$trayPids = @($trayKilled | ForEach-Object { $_.Id })", kill)
+    wait = _at(swap, "Wait-Process -Id $trayPids -Timeout 15", pids)
+    check = _at(swap, "@(Get-Process -Id $trayPids -ErrorAction SilentlyContinue).Count -gt 0", wait)
+    assert "did not exit" in swap[check:check + 200], swap[check:check + 200]
+    # nothing between the wait and the backup re-reads the tray by name and throws on it
+    backup = _at(swap, "Copy-Item -Force $trayExe $trayPre", check)
+    assert "throw" not in swap[check + 200:backup], swap[check:backup]
+
+
+def test_a_relaunched_tray_is_killed_again_right_before_the_replace(ps):
+    """Bounded to 3 attempts, and nothing but the `try {` of the replace runs after the loop."""
+    swap = _swap(ps)
+    backup = _at(swap, "Copy-Item -Force $trayExe $trayPre")
+    loop = _at(swap, "for ($trayTry = 1; $trayTry -le 3; $trayTry++) {", backup)
+    replace = _at(swap, "Copy-Item -Force $trayTmp $trayExe", loop)
+    body = swap[loop:replace]
+    assert "$trayFresh = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue)" in body
+    assert "if ($trayFresh.Count -eq 0) { break }" in body
+    assert "$trayRespawnedBy += (Get-TrayParent $trayP.Id)" in body, "who relaunched it is recorded"
+    assert "$trayFresh | Stop-Process -Force" in body
+    tail = body[body.rindex("Wait-Process -Id"):]
+    assert re.fullmatch(r"Wait-Process -Id [^\n]*\n\s*\}\n\s*try \{\n\s*", tail), repr(tail)
+
+
+def test_the_parent_of_a_relaunched_tray_is_named_never_thrown(ps):
+    """The parent (svchost -s Schedule, explorer for the Run key) is what the warning names."""
+    fn = _at(ps, "function Get-TrayParent(")
+    assert fn < _at(ps, "Get-TrayParent $trayP.Id"), "defined before its first use"
+    body = ps[fn:_at(ps, "\n}\n", fn)]
+    assert "Get-CimInstance Win32_Process -Filter ('ProcessId=' + $trayChildId)" in body
+    assert "ParentProcessId" in body and "CommandLine" in body
+    catch = body[body.index("} catch {"):]
+    assert "return (" in catch and "throw" not in catch, catch
+
+
+def test_a_copy_blocked_by_a_relaunched_tray_is_a_named_warning_without_a_restore(ps):
+    """A copy that fails because a fresh tray holds the exe never wrote the file, so the previous
+    tray is untouched; a restore would hit the same lock and wrongly report a partial exe."""
+    swap = _swap(ps)
+    replace = _at(swap, "Copy-Item -Force $trayTmp $trayExe")
+    catch = swap[_at(swap, "} catch {", replace):]
+    in_use = _at(catch, "$trayInUse = ")
+    assert "-band 0xFFFF" in catch[in_use:in_use + 300], catch[in_use:in_use + 300]
+    assert "32" in catch[in_use:in_use + 300] and "33" in catch[in_use:in_use + 300]
+    warn = _at(catch, "'a tray keeps relaunching: '")
+    restore = _at(catch, "Copy-Item -Force $trayPre $trayExe")
+    assert in_use < warn < restore, catch
+    assert "} else {" in catch[warn:restore], "the restore runs only when the file was not in use"
+    assert "the previous tray exe is untouched" in catch[warn:restore]
+
+
+def test_the_relaunch_never_starts_a_second_tray(ps):
+    """A tray relaunched meanwhile (by the scheduler or the Run entry) is kept; starting another
+    would leave two and fail the one-tray check."""
+    relaunch = ps[_at(ps, "# 6. relaunch the tray"):]
+    running = _at(relaunch, "$trayProcs = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue "
+                            "| Where-Object { $_.SessionId -ge 1 })")
+    guard = _at(relaunch, "if ($trayProcs.Count -eq 0) {", running)
+    assert running < guard < _at(relaunch, "Register-ScheduledTask"), relaunch[:800]
+
+
+def test_tray_ok_names_a_relaunched_tray_that_was_killed_first(ps):
+    report = ps[_at(ps, "if ($trayNotes.Count -gt 0) {\n    Write-Output ('TRAY-WARNING: '"):]
+    assert "$trayRespawnedBy.Count -gt 0" in report
+    assert "killed a relaunched tray before the swap" in report
+
+
 def test_the_tray_download_is_cleaned_up(ps):
     tail = ps[_at(ps, "# 6. relaunch the tray"):]
     assert "Remove-Item -Force -ErrorAction SilentlyContinue $trayTmp, ($trayTmp + '.sha256')" in tail
@@ -404,3 +487,17 @@ def test_roll_refreshes_the_tray_of_a_current_node_in_a_mixed_fleet(tmp_path):
     tray_only = (tmp_path / "uploaded-10.77.7.232.ps1").read_text()
     assert "dantesync-tray-windows-amd64.exe" in tray_only and "Stop-Service" not in tray_only
     assert "Stop-Service" in (tmp_path / "uploaded-10.77.9.204.ps1").read_text()
+
+
+def test_roll_names_a_relaunching_tray_and_keeps_the_service(tmp_path):
+    """The stubbed node plays a tray that re-spawned during the swap: the roll exits 0, the service
+    is verified, and the summary names who keeps relaunching the tray."""
+    parent = "svchost.exe (C:\\Windows\\system32\\svchost.exe -k netsvcs -p -s Schedule)"
+    r = _roll(tmp_path, f"TRAY-WARNING: a tray keeps relaunching: {parent}; the previous tray exe is "
+                        "untouched: The process cannot access the file because it is being used by "
+                        f"another process.\ndantesync {_TARGET}\n")
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "[stream] verified" in out and "rolled back" not in out
+    assert "WARNING: dantesync-tray was NOT refreshed on 1 node" in out, out
+    assert f"stream: a tray keeps relaunching: {parent}" in out, out
