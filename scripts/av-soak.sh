@@ -13,7 +13,8 @@ set -euo pipefail
 #   setup, once:
 #     - take the issue-830 rig lease under its OWN holder name (repo `camera-box-av-soak`) with an
 #       expected release = the whole run, so a CI E2E fails fast instead of waiting; refuse when a
-#       live foreign holder has it; start the issue-281 rig-active heartbeat
+#       live foreign holder has it; start the issue-281 rig-active heartbeat (its refresher also
+#       keeps this lease's heartbeat + release time fresh on every beat, issue 1383)
 #     - READ-ONLY checks first: the shared issue-1271 rig-busy guard; the stream program must
 #       ALREADY be the development scene (`Development`, issue 1380 -- TEST mode is a precondition,
 #       `scripts/rig-mode.sh test`); the strih program scene (snapshot, restored at cleanup); the
@@ -270,7 +271,7 @@ EOF
   echo
   echo "SETUP (once) -- reads first, nothing changes until step 6:"
   echo "  1. rig lease (issue 830): rig_lease_acquire repo=${RIG_LEASE_REPO_NAME} run_id=${RIG_LEASE_OURS} job=av-soak expected_release_at=${LEASE_EXPECTED_AT}"
-  echo "     a live foreign holder -> refuse (exit 4); rig_heartbeat_start av-soak (issue 281)"
+  echo "     a live foreign holder -> refuse (exit 4); rig_heartbeat_start av-soak ${RIG_LEASE_REPO_NAME} ${RIG_LEASE_OURS} (issue 281; every beat refreshes this lease, issue 1383)"
   echo "  2. rig-busy guard (issue 1271, read-only): stray_session_check_assert ${OBS_DIR} ${STRIH_HOST} ${STREAM_HOST} 'the av-soak setup'"
   echo "  3. read-only: stream program must be '${STREAM_DEV_SCENE}' (else refuse: run scripts/rig-mode.sh test first); strih program snapshot:"
   plan_cmd python3 "$OBS_DIR/obs_phase2.py" program-scene --host "$STREAM_HOST"
@@ -639,7 +640,7 @@ set -e
 log "$lease_out"
 [ "$lease_rc" -eq 0 ] || die 4 "the rig lease is held (${lease_out#RIG_LEASE_HELD_BY=}) -- rerun when it is free"
 LEASE_HELD=1
-rig_heartbeat_start av-soak || log "WARNING: could not start the rig-active heartbeat"
+rig_heartbeat_start av-soak "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" || log "WARNING: could not start the rig-active heartbeat"
 SETUP_STARTED=1
 
 guard_ok "the av-soak setup reads" || refuse "the rig is busy (recording or streaming) at setup"
@@ -704,8 +705,8 @@ run_slot() {
   pk="$(printf '%03d' "$k")"
   sd="$RUN_DIR/slot-$pk"
   mkdir -p "$sd"
-  [ "$(rig_lease_read_holder_field run_id)" = "$RIG_LEASE_OURS" ] || { ABORT_REASON="the rig lease is no longer ours"; exit 5; }
-  rig_lease_heartbeat_touch
+  rig_lease_refresh_if_mine "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" >/dev/null \
+    || { ABORT_REASON="the rig lease is no longer ours"; exit 5; }
   for box in strih stream; do
     if [ "$box" = strih ]; then host="$STRIH_HOST"; else host="$STREAM_HOST"; fi
     fs="$(av_soak_free_space_verdict "$host" "$BUNDLE_STATE_PORT" "$RECORDINGS_FREE_MIN_GB" "$HERE")"
@@ -912,7 +913,7 @@ wait_until() {  # TARGET_EPOCH -> 0 when reached, 1 when STOP was requested; a b
     fi
     left=$(( target - now ))
     [ "$left" -gt 0 ] || break
-    rig_lease_heartbeat_touch
+    rig_lease_refresh_if_mine "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" >/dev/null || true
     isleep $(( left < 10 ? left : 10 ))
   done
   if [ "$left" -lt -60 ]; then log "slot starts $(( -left )) s late (the previous slot overran)"; fi
