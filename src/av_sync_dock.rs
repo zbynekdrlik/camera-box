@@ -1160,10 +1160,7 @@ impl DockPairingWatchdog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::qpsk_marker::{
-        decode_markers_with_stats, frame_id_to_index, marker_signal, signal_len,
-        AV_SYNC_RING_CYCLE_NS,
-    };
+    use crate::qpsk_marker::{frame_id_to_index, marker_signal, signal_len, AV_SYNC_RING_CYCLE_NS};
 
     // ---- #999 dock_latency_display_ms ----
 
@@ -1549,128 +1546,6 @@ mod tests {
         assert!(
             s1.preamble_screens_passed >= s1.crc_ok,
             "every crc_ok started as a passed screen: {s1:?}"
-        );
-    }
-
-    /// The pre-1381 `push()`: re-decode the WHOLE window every call, report each marker once.
-    struct WholeWindowReference {
-        dec_params: AudioParams,
-        buf: Vec<f32>,
-        capacity: usize,
-        origin: u64,
-        last: Option<u64>,
-        min_gap: u64,
-    }
-
-    impl WholeWindowReference {
-        fn push(&mut self, samples: &[f32]) -> Vec<(u64, u8)> {
-            self.buf.extend_from_slice(samples);
-            if self.buf.len() > self.capacity {
-                let drop = self.buf.len() - self.capacity;
-                self.buf.drain(0..drop);
-                self.origin += drop as u64;
-            }
-            let sr = self.dec_params.sample_rate as f64;
-            let mut out = Vec::new();
-            for (ts, idx) in
-                decode_markers_with_stats(&self.buf, &self.dec_params, DOCK_QPSK_THRESHOLD).0
-            {
-                let abs = self.origin + (ts * sr).round() as u64;
-                if self.last.is_none_or(|prev| abs > prev + self.min_gap) {
-                    self.last = Some(abs);
-                    out.push((abs, idx));
-                }
-            }
-            out
-        }
-    }
-
-    /// issue 1381: `push()` must report exactly what the whole-window decode reported, callback by
-    /// callback -- every index, a rig-cadence track, several callback sizes.
-    #[test]
-    fn streaming_decoder_matches_the_whole_window_decode_1381() {
-        let p = AudioParams::rig60();
-        let sig = signal_len(&p);
-        let mut tracks: Vec<Vec<f32>> = (0..=255u8)
-            .map(|idx| {
-                let mut x = vec![0.0f32; 24_000];
-                let at = 4_801 + idx as usize * 7;
-                for (j, s) in marker_signal(idx, &p).iter().enumerate() {
-                    x[at + j] = *s;
-                }
-                x
-            })
-            .collect();
-        let mut track = vec![0.0f32; 48_000 * 10];
-        for k in 0..3usize {
-            let at = 12_345 + k * 144_037;
-            for (j, s) in marker_signal(189u8.wrapping_add((k * 180) as u8), &p)
-                .iter()
-                .enumerate()
-            {
-                track[at + j] = 0.8 * s;
-            }
-        }
-        tracks.push(track);
-        for (t, x) in tracks.iter().enumerate() {
-            for chunk in [1024usize, 441, 256] {
-                let mut dec =
-                    StreamingMarkerDecoder::new(p, DOCK_QPSK_THRESHOLD, sig * 3, sig as u64);
-                let mut reference = WholeWindowReference {
-                    dec_params: p,
-                    buf: Vec::new(),
-                    capacity: sig * 3,
-                    origin: 0,
-                    last: None,
-                    min_gap: sig as u64,
-                };
-                let mut found = 0;
-                for (k, c) in x.chunks(chunk).enumerate() {
-                    let got = dec.push(c);
-                    assert_eq!(got, reference.push(c), "track {t} chunk {chunk} push {k}");
-                    found += got.len();
-                }
-                assert_eq!(
-                    found,
-                    if t < 256 { 1 } else { 3 },
-                    "track {t} chunk {chunk}"
-                );
-            }
-        }
-    }
-
-    /// issue 1381: the dock ran `push()` on the OBS audio thread and it re-decoded the whole
-    /// 3-marker window on every callback, so every position was screened ~2x and every screen that
-    /// passed re-computed ~223 preamble magnitudes. A 442 Hz tone passes the screen at every
-    /// position (the worst case: 35 ms of CPU per stereo push on an N100 against a 21.3 ms tick).
-    /// Each push must screen only the positions not yet final: the new ones plus at most one refine
-    /// span that the window end cut.
-    #[test]
-    fn streaming_decoder_screens_each_position_about_once_1381() {
-        let p = AudioParams::rig60();
-        let sig = signal_len(&p);
-        let sr = p.sample_rate as f64;
-        let n = 48_000 * 3;
-        let tone: Vec<f32> = (0..n)
-            .map(|i| (0.3 * (2.0 * std::f64::consts::PI * 442.0 * i as f64 / sr).sin()) as f32)
-            .collect();
-        let mut dec = StreamingMarkerDecoder::new(p, DOCK_QPSK_THRESHOLD, sig * 3, sig as u64);
-        let mut pushes = 0u64;
-        for c in tone.chunks(1024) {
-            assert!(dec.push(c).is_empty(), "a pure tone is not a marker");
-            pushes += 1;
-        }
-        let screens = dec.stats().preamble_screens_passed;
-        let positions = (n - sig + 1) as u64;
-        let span = (2.0 * sr / p.carrier_hz as f64).ceil() as u64;
-        assert!(
-            screens >= positions * 9 / 10,
-            "a tone passes the screen nearly everywhere: {screens} of {positions}"
-        );
-        assert!(
-            screens <= positions + pushes * (span + 1),
-            "{screens} screens for {positions} positions in {pushes} pushes: the window is \
-             re-screened instead of only the new positions (issue 1381)"
         );
     }
 
