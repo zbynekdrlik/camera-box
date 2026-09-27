@@ -57,8 +57,10 @@ fn read_pcm16_wav(path: &std::path::Path) -> (usize, u32, Vec<u8>) {
             assert_eq!(bits, 16, "16-bit PCM only");
             let data = &b[body..(body + len).min(b.len())];
             let samples = data
-                .chunks_exact(2)
-                .flat_map(|c| (i16::from_le_bytes([c[0], c[1]]) as f32 / 32768.0).to_le_bytes())
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .flat_map(|c| (i16::from_le_bytes(*c) as f32 / 32768.0).to_le_bytes())
                 .collect();
             return (channels, rate, samples);
         }
