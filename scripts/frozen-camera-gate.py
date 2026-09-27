@@ -321,8 +321,10 @@ def main():
 
     try:
         guard = _obs_phase2()
-    except ImportError as e:
-        sys.stderr.write(f"ERROR: the production-scene guard (obs_phase2.py) is not importable: {e}\n")
+    except Exception as e:  # noqa: BLE001 -- any load failure is an ERROR (2), never FROZEN (1)
+        sys.stderr.write(
+            f"ERROR: the production-scene guard (obs_phase2.py) could not be loaded: {e}\n"
+        )
         sys.exit(2)
 
     try:

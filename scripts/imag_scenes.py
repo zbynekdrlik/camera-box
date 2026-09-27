@@ -143,6 +143,26 @@ def _obs_phase2_module():
         return None
 
 
+_SCENE_GUARD_ATTRS = ("_refuse_forbidden_scene", "ForbiddenSceneError", "NEVER_PROGRAM_SCENES")
+
+
+def _scene_guard():
+    """issue 1380: obs_phase2 as the production-scene guard, or None when it cannot guard on
+    this host -- not importable, or an obs_phase2.py from before the guard (a half-finished
+    setup-imag fetch, a hand copy). None never breaks a request (a crashed boot seed
+    Restart-loops the imag OBS, the issue-1156 class); the one selection the seed makes then
+    sends nothing (seed(), --bootstrap)."""
+    op = _obs_phase2_module()
+    if op is None:
+        return None
+    missing = [a for a in _SCENE_GUARD_ATTRS if not hasattr(op, a)]
+    if missing:
+        print("issue 1380: obs_phase2.py on this host predates the production-scene guard "
+              "(missing %s) -- no program scene is selected" % ", ".join(missing))
+        return None
+    return op
+
+
 def enforce_ndi_names(obs):
     """issue 1230 (revert of #1218's behavioural half): the ONE imag NDI-name enforcement point.
     Owner ruling 2026-08-30 ("no idle policy") -- EVERY camera in CAMS is ALWAYS kept NAMED + alive;
@@ -206,12 +226,12 @@ class Obs:
         json.loads(self.ws.recv())
         self._rid = 0
         # issue 1380: the ONE production-scene guard module, resolved once per connection.
-        self._guard = _obs_phase2_module()
+        self._guard = _scene_guard()
 
     def req(self, req_type: str, data: dict | None = None, ignore_err: bool = False):
         # issue 1380 (owner hard rule 27.9.2026): obs_phase2._refuse_forbidden_scene runs at this
         # choke point, so a production-scene (or sceneUuid) selection exits non-zero before it is
-        # sent, also with ignore_err. Without the module (an older box) nothing can be checked
+        # sent, also with ignore_err. Without the guard (an older box) nothing can be checked
         # here; the one selection this seed makes checks for that itself (seed(), --bootstrap).
         if self._guard is not None:
             try:
@@ -475,7 +495,7 @@ def seed(obs: Obs) -> None:
         # issue 1380: a saved production scene is never restored (the owner hard rule; Obs.req
         # would refuse it and abort the boot seed, a Restart-loop of the imag OBS), and without
         # the guard module no scene is selected at all -- OBS keeps its saved current scene.
-        guard = _obs_phase2_module()
+        guard = _scene_guard()
         if guard is None:
             print(f"seed: issue 1380 -- the production-scene guard (obs_phase2.py) is not "
                   f"importable, so no program scene is selected ('{program}' not applied)")
