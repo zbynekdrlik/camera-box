@@ -3837,7 +3837,9 @@ fn setup_strih_step_11_runs_the_shared_baseline_in_imag_order() {
     );
 }
 
-/// rtprio stays OFF: setup-strih writes NO limits.d grant any more and SELF-HEALS a leftover one.
+/// rtprio stays OFF: setup-strih writes NO limits.d grant and SELF-HEALS a leftover one through the
+/// shared baseline item `obs_box_rtprio_off` (issue 1357; its behaviour is pinned in
+/// obs_box_baseline_1357.rs), never a strih-only copy.
 #[test]
 fn setup_strih_never_grants_rtprio_and_removes_a_leftover_grant() {
     let s = read_script("scripts/setup-strih.sh");
@@ -3845,65 +3847,30 @@ fn setup_strih_never_grants_rtprio_and_removes_a_leftover_grant() {
         !s.contains("rtprio   20") && !s.contains("strih_rtprio_limits_text"),
         "setup-strih must never write an rtprio grant (issue 1357 design)"
     );
-    let fragment = block_between(
-        &s,
-        "RTPRIO_LEFTOVER=\"$(strih_rtprio_leftover_path)\"",
-        "\n# -----------",
-    );
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("95-strih-genlock-rtprio.conf");
-    std::fs::write(&f, "alice   -   rtprio   20\n").unwrap();
-    let prelude = "YELLOW=''; NC=''\nfail() { echo \"FAIL: $1\" >&2; exit 1; }";
-    let (c, out, err) = run_block(
-        &[("STRIH_RTPRIO_LIMITS_FILE", f.to_str().unwrap())],
-        prelude,
-        fragment,
-    );
-    assert_eq!(c, 0, "stderr={err}");
-    assert!(!f.exists(), "the leftover grant must be removed");
-    assert!(out.contains("removed the leftover rtprio grant"), "{out}");
-    // absent -> a quiet no-op
-    let (c, out, _e) = run_block(
-        &[("STRIH_RTPRIO_LIMITS_FILE", f.to_str().unwrap())],
-        prelude,
-        fragment,
-    );
-    assert_eq!(c, 0);
     assert!(
-        out.trim().is_empty(),
-        "no leftover -> nothing to report: {out}"
+        s.contains("\nobs_box_rtprio_off "),
+        "setup-strih must run the shared obs_box_rtprio_off item"
+    );
+    assert!(
+        !s.contains("strih_rtprio_leftover_path")
+            && !read_script("scripts/lib/strih-provision.sh")
+                .contains("strih_rtprio_leftover_path"),
+        "the strih-only leftover path is gone (one shared item, issue 1357)"
     );
 }
 
-/// verify-strih FAILs while the retired grant exists, PASSes without it (item 33).
+/// verify-strih grades rtprio-off through the SHARED baseline row `rtprio` (item 32); its own
+/// strih-only item 33 is gone (issue 1357).
 #[test]
-fn verify_strih_fails_while_an_rtprio_grant_exists() {
+fn verify_strih_grades_rtprio_off_through_the_shared_row() {
     let v = read_script("scripts/verify-strih.sh");
-    let item = block_between(&v, "# 33) NO realtime-priority grant", "\necho \"\"");
-    let prelude =
-        "FAILS=0\nok() { echo \"PASS $1\"; }\nbad() { echo \"FAIL $1\"; FAILS=$((FAILS+1)); }\n\
-                   note() { echo \"NOTE $1\"; }";
-    let dir = tempfile::tempdir().unwrap();
-    let f = dir.path().join("95-strih-genlock-rtprio.conf");
-    let run = || {
-        run_block(
-            &[("STRIH_RTPRIO_LIMITS_FILE", f.to_str().unwrap())],
-            prelude,
-            &format!("{item}\necho \"FAILS=$FAILS\""),
-        )
-    };
-    let (c, out, err) = run();
-    assert_eq!(c, 0, "stderr={err}");
     assert!(
-        out.contains("PASS (rtprio-off)") && out.contains("FAILS=0"),
-        "{out}"
+        !v.contains("# 33) NO realtime-priority grant") && !v.contains("(rtprio-off)"),
+        "the strih-only item 33 must be gone"
     );
-    std::fs::write(&f, "alice   -   rtprio   20\n").unwrap();
-    let (c, out, err) = run();
-    assert_eq!(c, 0, "stderr={err}");
     assert!(
-        out.contains("FAIL (rtprio-off)") && out.contains("FAILS=1"),
-        "{out}"
+        read_script("scripts/lib/obs-box-baseline-verify.sh").contains("_obs_box_item rtprio "),
+        "the shared grader carries the rtprio row"
     );
 }
 

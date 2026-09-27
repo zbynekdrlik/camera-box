@@ -127,15 +127,82 @@ fn each_baseline_lib_stays_under_the_line_budget() {
 
 /// The design constraint (issue comment 5793075833): the render-tick SCHED_FIFO pin assumed a
 /// reserved core and its FIFO + affinity leaked to every NDI thread, so the baseline NEVER grants
-/// rtprio. (imag's own issue-484 line stays in setup-imag.sh, outside the shared baseline.)
+/// rtprio (issue 1357 dropped imag's own issue-484 grant too). It only ever REMOVES a retired one.
 #[test]
 fn the_baseline_never_grants_rtprio() {
     for lib in [BASELINE, KIOSK, VERIFY_LIB] {
         let text = read(lib);
         assert!(
-            !text.contains("rtprio   20") && !text.contains("limits.d/95-"),
+            !text.contains("rtprio   20")
+                && !text.contains("- rtprio")
+                && !text.contains("> /etc/security/limits.d"),
             "{lib} must never write an rtprio limits.d grant"
         );
+    }
+}
+
+/// Issue 1357: `obs_box_rtprio_off` removes every retired `95-<box>-genlock-rtprio.conf` grant
+/// (imag's issue-484 one, strih's retired 11c one), leaves every other limits.d file alone, and is a
+/// quiet no-op once none is left.
+#[test]
+fn obs_box_rtprio_off_removes_every_retired_genlock_grant() {
+    let dir = tempfile::tempdir().unwrap();
+    let imag = dir.path().join("95-imag-genlock-rtprio.conf");
+    let strih = dir.path().join("95-strih-genlock-rtprio.conf");
+    let other = dir.path().join("25-pw-rlimits.conf");
+    for f in [&imag, &strih, &other] {
+        std::fs::write(f, "alice   -   rtprio   20\n").unwrap();
+    }
+    let env = [("OBS_BOX_LIMITS_DIR", dir.path().to_str().unwrap())];
+    let (c, out, err) = run(BASELINE, &env, "obs_box_rtprio_off");
+    assert_eq!(c, 0, "stderr={err}");
+    assert!(
+        !imag.exists() && !strih.exists(),
+        "both retired grants go: {out}"
+    );
+    assert!(other.exists(), "an unrelated limits.d file stays");
+    assert_eq!(
+        out.matches("removed the leftover rtprio grant").count(),
+        2,
+        "one line per removed grant: {out}"
+    );
+    let (c, out, err) = run(BASELINE, &env, "obs_box_rtprio_off");
+    assert_eq!(c, 0, "stderr={err}");
+    assert!(out.trim().is_empty(), "nothing left -> quiet: {out}");
+}
+
+/// Issue 1357: the gather reports every retired genlock rtprio grant it finds, and the `rtprio` row
+/// FAILs on one. The real gather runs with only its limits.d path moved into a temp dir.
+#[test]
+fn the_gather_reports_a_retired_rtprio_grant_and_the_row_fails() {
+    let dir = tempfile::tempdir().unwrap();
+    let grant = dir.path().join("95-imag-genlock-rtprio.conf");
+    std::fs::write(&grant, "alice   -   rtprio   20\n").unwrap();
+    std::fs::write(
+        dir.path().join("25-pw-rlimits.conf"),
+        "@pipewire - rtprio 95\n",
+    )
+    .unwrap();
+    let body = r#"s="$(obs_box_baseline_gather_snippet nosuchbox nosuchuser nosuch.service)"
+s="${s//\/etc\/security\/limits.d\//"$GLIMS"/}"
+bash -c "$s""#;
+    let (c, out, err) = run(VERIFY_LIB, &[("GLIMS", dir.path().to_str().unwrap())], body);
+    assert_eq!(c, 0, "stderr={err}");
+    let line = out
+        .lines()
+        .find(|l| l.starts_with("rtprio_grants="))
+        .unwrap_or_else(|| panic!("the gather must emit rtprio_grants=:\n{out}"));
+    assert_eq!(
+        line,
+        format!("rtprio_grants={}", grant.display()),
+        "only the genlock grant is reported"
+    );
+    let facts = GOOD_FACTS.replacen("rtprio_grants=\n", &format!("{line}\n"), 1);
+    let (c, rows) = verdict(&facts);
+    assert_eq!(c, 1, "{rows:?}");
+    for (name, st) in &rows {
+        let want = if name == "rtprio" { "FAIL" } else { "OK" };
+        assert_eq!(st, want, "item {name} must be {want}: {rows:?}");
     }
 }
 
@@ -246,6 +313,7 @@ fn setup_imag_runs_every_baseline_item_in_its_original_step() {
         (6, "obs_box_boot_safety_net \"$IMAG_KERNEL_SERIES\" imag"),
         (7, "obs_box_lowlatency_kernel \"$IMAG_KERNEL_SERIES\""),
         (8, "obs_box_cpu_affinity imag"),
+        (8, "obs_box_rtprio_off"),
         (9, "obs_box_nvidia_prime imag"),
         (14, "obs_box_dejitter \"$DESKTOP_USER\" imag \"$OBS_CFG\""),
         (15, "obs_box_kiosk \"$DESKTOP_USER\" imag"),
@@ -638,6 +706,7 @@ holds=linux-generic-hwe-26.04 linux-image-generic-hwe-26.04 lowlatency-kernel li
 cmdline=BOOT_IMAGE=/vmlinuz ro quiet splash preempt=full rcu_nocbs=all
 lowlatency_cfg=1
 isolated_cpus=2,3,4,5,6,7,8,9,10,11
+rtprio_grants=
 dgpu=1
 prime=nvidia
 igpu_unit=
@@ -673,7 +742,7 @@ touchpad=1
 gather_done=1
 ";
 
-const ITEMS: [&str; 16] = [
+const ITEMS: [&str; 17] = [
     "net",
     "perf",
     "cstate",
@@ -681,6 +750,7 @@ const ITEMS: [&str; 16] = [
     "boot",
     "kernel",
     "affinity",
+    "rtprio",
     "gpu",
     "dejitter",
     "crash",
@@ -760,6 +830,11 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
             "affinity",
             "preempt=full rcu",
             "preempt=full isolcpus=2-11 rcu",
+        ),
+        (
+            "rtprio",
+            "rtprio_grants=\n",
+            "rtprio_grants=/etc/security/limits.d/95-imag-genlock-rtprio.conf\n",
         ),
         ("gpu", "prime=nvidia", "prime=on-demand"),
         ("dejitter", "oomd=masked", "oomd=enabled"),
@@ -940,6 +1015,7 @@ fn setup_strih_consumes_the_same_baseline() {
         "obs_box_boot_safety_net",
         "obs_box_lowlatency_kernel",
         "obs_box_cpu_affinity",
+        "obs_box_rtprio_off",
         "obs_box_nvidia_prime",
         "obs_box_dejitter",
         "obs_box_kiosk",
