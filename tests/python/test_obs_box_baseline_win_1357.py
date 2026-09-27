@@ -49,12 +49,18 @@ def _bash(script, env=None):
 
 
 def _grade(path):
-    r = _bash(f'. "{LIB}"; win_baseline_grade "{path}"')
+    # Graded exactly as its consumers run it: under `set -euo pipefail` (win-baseline-check.sh and
+    # version-integrity-gate.sh both set it). Every item must print a real verdict.
+    r = _bash(f'set -euo pipefail; . "{LIB}"; win_baseline_grade "{path}"')
     rows = {}
     for ln in r.stdout.splitlines():
         parts = ln.split(None, 2)
-        if len(parts) >= 2 and parts[0] in ITEMS:
-            rows[parts[0]] = (parts[1], parts[2] if len(parts) > 2 else "")
+        if parts and parts[0] in ITEMS:
+            rows[parts[0]] = (parts[1] if len(parts) > 1 else "", parts[2] if len(parts) > 2 else "")
+    assert list(rows) == ITEMS, r.stdout + r.stderr
+    for item, (verdict, _) in rows.items():
+        assert verdict in ("OK", "DRIFT", "UNKNOWN"), (item, r.stdout, r.stderr)
+    assert "unbound variable" not in r.stderr, r.stderr
     return r.returncode, rows, r.stdout
 
 
@@ -205,8 +211,15 @@ def test_ensure_block_sets_only_the_power_plan_then_reads_it_back():
     after = ps[set_at:]
     assert "Get-WbActiveScheme" in after
     assert "exit 11" in after
-    # only when the active scheme is NOT max-performance class
-    assert ps.index("Test-WbMaxPerf") < set_at
+    # only in the ELSE branch of the max-performance test, and the read-back is compared with the target
+    guard_at = ps.index("if (Test-WbMaxPerf $wbBefore)")
+    else_at = ps.index("} else {", guard_at)
+    assert guard_at < else_at < ps.index("powercfg /setactive $wbTarget[0]")
+    assert ps.index("($wbAfter[0] -ne $wbTarget[0])") > set_at
+    # the deploy program runs under $ErrorActionPreference = 'Stop', where Write-Error THROWS and the
+    # following `exit 11` never runs -- the block must fail with its own exit code
+    assert "Write-Error" not in ps, ps
+    assert ps.count("exit 11") == 3
     # the named output line
     assert "issue 1357 power plan" in ps
 
@@ -259,8 +272,16 @@ def test_gate_win_baseline_facet_is_report_only(tmp_path):
     drift = _gate(tmp_path, ["--win-baseline", f"resolume={FIX / 'resolume_balanced_all_drift.txt'}"])
     ok = _gate(tmp_path, ["--win-baseline", f"stream={FIX / 'dup_high_performance_all_ok.txt'}"])
     unread = _gate(tmp_path, ["--win-baseline", f"stream={tmp_path / 'absent.txt'}"])
-    assert drift.returncode == base.returncode == ok.returncode == unread.returncode, (
-        base.returncode, drift.returncode, ok.returncode, unread.returncode)
+    live = _gate(tmp_path, ["--win-baseline", f"stream={FIX / 'stream_live_2026-09-27.txt'}",
+                            "--win-baseline", "resolume"])
+    assert drift.returncode == base.returncode == ok.returncode == unread.returncode == live.returncode, (
+        base.returncode, drift.returncode, ok.returncode, unread.returncode, live.returncode)
+    # the roll-up (the GATE FAILED / INCOMPLETE lines and their box counts) must be byte-identical:
+    # a baseline row can never add a box to bad/unknown, whatever it grades
+    for run in (drift, ok, unread, live):
+        assert run.stderr == base.stderr, (base.stderr, run.stderr)
+    assert re.search(r"stream\s+win_baseline wer_dontshowui\s+DRIFT", live.stdout), live.stdout
+    assert re.search(r"resolume\s+win_baseline power_scheme\s+UNKNOWN", live.stdout), live.stdout
     assert re.search(r"resolume\s+win_baseline power_scheme\s+DRIFT .*Balanced", drift.stdout), drift.stdout
     assert "report-only" in drift.stdout
     assert re.search(r"stream\s+win_baseline power_scheme\s+OK", ok.stdout), ok.stdout
@@ -290,6 +311,19 @@ def test_check_reads_each_box_and_names_the_drift(tmp_path):
     assert "box=stream win_baseline=OK" in r.stdout
     assert re.search(r"box=resolume win_baseline=DRIFT .*power_scheme", r.stdout), r.stdout
     assert re.search(r"box=resolume item=power_scheme verdict=DRIFT detail=.*Balanced", r.stdout), r.stdout
+
+
+def test_check_over_the_live_captures_names_the_wer_drift(tmp_path):
+    seam = _seam(tmp_path, {"stream": FIX / "stream_live_2026-09-27.txt",
+                            "resolume": FIX / "resolume_gather_program_live_2026-09-27.txt"})
+    r = subprocess.run(["bash", str(SCRIPTS / "win-baseline-check.sh")], capture_output=True, text=True,
+                       env={**os.environ, "WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream resolume"},
+                       timeout=60)
+    assert r.returncode == 20, r.stdout + r.stderr
+    for box in ("stream", "resolume"):
+        assert f"box={box} item=wer_dontshowui verdict=DRIFT" in r.stdout, r.stdout
+        assert f"box={box} win_baseline=DRIFT drift=wer_dontshowui" in r.stdout, r.stdout
+    assert "unbound variable" not in r.stderr, r.stderr
 
 
 def test_check_skips_a_traveling_box_that_is_away(tmp_path):
@@ -356,3 +390,20 @@ def test_rig_health_win_baseline_row_is_note_and_names_drift():
     assert rows["stream"].startswith("win_baseline=OK")
     assert "report-only" in rows["stream"]
     assert "imag" not in rows  # a skipped (away) box is omitted, never a stale row
+
+
+def test_rig_health_empty_verdict_is_unknown_and_named():
+    rows = _audit().win_baseline_rows_from_output(
+        "box=stream item=wer_dontshowui verdict= detail=\nbox=stream win_baseline=UNKNOWN\n")
+    assert "wer_dontshowui=UNKNOWN" in rows["stream"], rows
+
+
+def test_rig_health_crashed_tool_is_a_note_row(tmp_path, capsys):
+    mod = _audit()
+    crash = tmp_path / "crash.sh"
+    crash.write_text("#!/usr/bin/env bash\necho boom >&2\nexit 3\n")
+    mod.WIN_BASELINE_SCRIPT = str(crash)
+    mod.check_win_baseline()
+    out = capsys.readouterr().out
+    assert "[NOTE] win-baseline" in out and "rc=3" in out, out
+    assert mod.results == ["NOTE"]
