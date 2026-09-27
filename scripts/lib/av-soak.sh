@@ -56,7 +56,7 @@ av_soak_marker_rows() {
 av_soak_painter_probe_cmd() {
   local log="${1:-/run/rig-qpsk-markers.csv}"
   printf '%s' "st=\$(systemctl is-active cam2-painter 2>/dev/null || true); "
-  printf '%s' "rid=\$(journalctl -b -u cam2-painter -o cat --no-pager 2>/dev/null | sed -n 's/.*frame-probe start: .*run_id=\\([0-9][0-9]*\\).*/\\1/p' | tail -n 1); "
+  printf '%s' "rid=\$(journalctl -b -u cam2-painter -o cat --no-pager -g 'frame-probe start' 2>/dev/null | sed -n 's/.*frame-probe start: .*run_id=\\([0-9][0-9]*\\).*/\\1/p' | tail -n 1); "
   printf '%s' "n1=\$(wc -l < '${log}' 2>/dev/null || echo 0); sleep 2; n2=\$(wc -l < '${log}' 2>/dev/null || echo 0); "
   printf '%s\n' "printf 'active=%s\\nrun_id=%s\\nmarkers=%s\\nmarkers2=%s\\n' \"\$st\" \"\$rid\" \"\$n1\" \"\$n2\";"
 }
@@ -106,6 +106,23 @@ av_soak_unacked_cams() {
   printf '%s\n' "$out"
 }
 
+# av_soak_strih_decode_kill_cmd -> REMOTE (strih-lx) text stopping a recording-verdict strih extract.
+# The bracketed pattern never matches the remote shell's own command line (the issue-626 pkill
+# self-match gotcha). Ends with `;`.
+av_soak_strih_decode_kill_cmd() {
+  printf '%s\n' "pkill -f 'recording-verdic[t] --extract-partial strih' || true;"
+}
+
+# av_soak_onbox_cleanup_lines STRIH_HOST STRIH_OUT_DIR OUT_DIR_WIN STAMP -> the plan lines (never run
+# by the soak) removing this run's own on-box decode artifacts (partials, pixel proofs, marker logs,
+# schedules), scoped to the run's stamp.
+av_soak_onbox_cleanup_lines() {
+  local host="$1" sdir="$2" wdir="$3" stamp="$4"
+  printf "strih-lx ssh:         ssh <STRIH_USER>@%s \"rm -rf -- %s/av-soak-%s-*\"\n" "$host" "$sdir" "$stamp"
+  printf "win-stream-snv Shell: Remove-Item -Recurse -Force '%s'\n" \
+    "$(av_soak_win_join "$wdir" "av-soak-${stamp}-*")"
+}
+
 # av_soak_win_join DIR NAME -> DIR\NAME (a Windows path on the stream box).
 av_soak_win_join() {
   printf '%s\\%s\n' "${1%\\}" "$2"
@@ -114,8 +131,8 @@ av_soak_win_join() {
 # av_soak_strih_extract_argv OUTVAR DECODE_SCRIPT VERDICT_BIN REMOTE_OUT_DIR LOCAL_OUT_DIR REC
 #   CAPTURE_FPS PARTIAL_NAME -> fills the array OUTVAR with the strih-lx in-place extract call, the
 # SAME shape recording-e2e.sh's run_strih_extract uses for a Linux strih. The --burn-*-run-id flags
-# are omitted on purpose: the soak deploys no burn, so the verdict's own defaults (its single source)
-# classify every burn it sees.
+# are omitted on purpose: the soak deploys no camera capture burn, and the OBS measurement burns it
+# turns on (strih / stream) stamp the verdict's own default run ids -- the single source.
 av_soak_strih_extract_argv() {
   local -n _av_sx="$1"
   local script="$2" bin="$3" rdir="$4" ldir="$5" rec="$6" fps="$7" name="$8"

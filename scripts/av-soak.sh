@@ -41,10 +41,14 @@ set -euo pipefail
 # MODES:
 #   --plan  (DEFAULT) print every step with the exact commands; touches NOTHING (no lease, no ssh,
 #           no OBS, no curl). Needs no credential and no binary.
-#   --run   the soak. Needs CAM_PW (cam2 root, read-only use), STREAM_USER + STREAM_PW (the stream box
-#           ssh, the same values recording-e2e.sh uses), PROBE_BIN_DIR with the CI-built Linux
-#           recording-verdict, WIN_VERDICT_EXE_LOCAL = the CI-built recording-verdict.exe.
+#   --run   the soak. Needs CAM_PW (cam2 root, read-only use), STREAM_USER + STREAM_PW and
+#           STRIH_USER + STRIH_PW (the stream box / strih-lx ssh, the same values recording-e2e.sh
+#           uses), PROBE_BIN_DIR with the CI-built Linux recording-verdict, WIN_VERDICT_EXE_LOCAL =
+#           the CI-built recording-verdict.exe.
 #   --report RUN_DIR  re-grade an existing (or still running) run's CSV and exit with its verdict.
+#   --stop-leftovers RUN_DIR  stop a recording the run left marked in <run-dir>/recording.state,
+#           only when that box is recording and NOT streaming (a broadcast is never touched) -- the
+#           systemd ExecStopPost hook, so even a SIGKILLed run leaves no recording running.
 #
 # OPTIONS (env equivalent in brackets):
 #   --hours H          [AV_SOAK_HOURS, 8]        run length; the last window starts at H
@@ -63,6 +67,7 @@ set -euo pipefail
 #   AV_SOAK_OBS_TIMEOUT_S (30), RECORDINGS_FREE_MIN_GB (50), CONNECT_ON_SHOW_HOLD_STATE (the E2E's
 #   ~/.camera-box/connect-on-show-hold.json). Test seams: AV_SOAK_OBS_DIR (dir of obs_phase2.py +
 #   obs_burn_filter.py), AV_SOAK_STRIH_DECODE, AV_SOAK_STREAM_DECODE, AV_SOAK_MIN_SEGMENT_SECS (10),
+#   AV_SOAK_MIN_DECODE_S (60),
 #   RIG_LEASE_DIR, CAMERA_BOX_RIG_HEARTBEAT, CONNECT_ON_SHOW_MARKER_CMD, CONNECT_ON_SHOW_LOG_READ_CMD.
 #
 # STOP: `touch <run-dir>/STOP` (stops at the next wait/slot boundary, full cleanup + report), or
@@ -114,6 +119,7 @@ while [ "$#" -gt 0 ]; do
     --plan) MODE=plan ;;
     --run) MODE=run ;;
     --report) need_value "$1" "$#"; MODE=report; REPORT_DIR="$2"; shift ;;
+    --stop-leftovers) need_value "$1" "$#"; MODE=stop-leftovers; REPORT_DIR="$2"; shift ;;
     --hours) need_value "$1" "$#"; AV_SOAK_HOURS="$2"; shift ;;
     --slot-secs) need_value "$1" "$#"; AV_SOAK_SLOT_SECS="$2"; shift ;;
     --segment-secs) need_value "$1" "$#"; AV_SOAK_SEGMENT_SECS="$2"; shift ;;
@@ -138,6 +144,11 @@ if [ -n "${AV_SOAK_SPREAD_COLUMNS+x}" ]; then SPREAD_ARGS=(--spread-columns "$AV
 case "$HOURS" in '' | *[!0-9.]* | *.*.*) die 3 "--hours must be a non-negative number, got '$HOURS'" ;; esac
 DURATION_S="$(awk -v h="$HOURS" 'BEGIN { printf "%d", h * 3600 + 0.5 }')"
 
+OBS_DIR="${AV_SOAK_OBS_DIR:-$HERE}"
+STRIH_HOST="${STRIH_HOST:-$(obs_fleet_host strih-lx)}"
+STREAM_HOST="${STREAM_HOST:-$(obs_fleet_host stream)}"
+OBS_TIMEOUT_S="${AV_SOAK_OBS_TIMEOUT_S:-30}"
+
 if [ "$MODE" = report ]; then
   [ -f "$REPORT_DIR/soak.csv" ] || die 3 "--report needs a run dir holding soak.csv (got '${REPORT_DIR}')"
   rc=0
@@ -146,14 +157,52 @@ if [ "$MODE" = report ]; then
   exit "$rc"
 fi
 
+# --stop-leftovers RUN_DIR: the ExecStopPost safety net. Stops a box's recording ONLY when the run's
+# own recording.state still marks it AND the rig-busy read shows it recording but NOT streaming (the
+# issue-657 stray signature -- a broadcast streams, so a broadcast is never stopped).
+if [ "$MODE" = stop-leftovers ]; then
+  _state="$REPORT_DIR/recording.state"
+  [ -f "$_state" ] || { log "stop-leftovers: no $_state -- nothing to do"; exit 0; }
+  _busy="$(timeout "$OBS_TIMEOUT_S" python3 "$OBS_DIR/obs_phase2.py" rig-busy-check --strih-host "$STRIH_HOST" \
+    --stream-host "$STREAM_HOST" --password "${OBS_PASSWORD:-}" 2>/dev/null || true)"
+  for _box in strih stream; do
+    [ "$(sed -n "s/^${_box}=//p" "$_state" | head -n 1)" = 1 ] || continue
+    if [ "$_box" = strih ]; then _host="$STRIH_HOST"; else _host="$STREAM_HOST"; fi
+    _rs="$(printf '%s' "$_busy" | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except ValueError:
+    print("unknown"); sys.exit(0)
+for x in d.get("diagnostics") or []:
+    if x.get("host") == sys.argv[1]:
+        print("streaming" if x.get("streaming") else ("recording" if x.get("recording") else "idle"))
+        sys.exit(0)
+print("unknown")' "$_box" 2>/dev/null || echo unknown)"
+    case "$_rs" in
+      recording)
+        timeout "$OBS_TIMEOUT_S" python3 "$OBS_DIR/obs_phase2.py" record --host "$_host" --action stop >/dev/null 2>&1 || true
+        if timeout "$OBS_TIMEOUT_S" python3 "$OBS_DIR/obs_phase2.py" record --host "$_host" --action status 2>/dev/null \
+            | grep -q '^active=False'; then
+          sed -i "s/^${_box}=1\$/${_box}=0/" "$_state"
+          log "stop-leftovers: stopped the soak's leftover recording on $_box"
+        else
+          log "WARNING: stop-leftovers: the $_box recording did not stop -- stop it by hand"
+        fi
+        ;;
+      idle) sed -i "s/^${_box}=1\$/${_box}=0/" "$_state"; log "stop-leftovers: $_box is not recording" ;;
+      streaming) log "stop-leftovers: NOT stopping $_box -- it is streaming (a broadcast)" ;;
+      *) log "WARNING: stop-leftovers: the $_box state is unreadable -- check it by hand" ;;
+    esac
+  done
+  exit 0
+fi
+
 for _n in "$SLOT_S" "$SEGMENT_S" "$MIN_SEGMENT_S"; do
   case "$_n" in '' | *[!0-9]*) die 3 "--slot-secs / --segment-secs must be integers (got '$_n')" ;; esac
 done
 [ "$SEGMENT_S" -ge 1 ] && [ "$SEGMENT_S" -ge "$MIN_SEGMENT_S" ] || die 3 "--segment-secs $SEGMENT_S is below $MIN_SEGMENT_S s (each camera needs enough QPSK markers for a measured A/V offset)"
 
-OBS_DIR="${AV_SOAK_OBS_DIR:-$HERE}"
-STRIH_HOST="${STRIH_HOST:-$(obs_fleet_host strih-lx)}"
-STREAM_HOST="${STREAM_HOST:-$(obs_fleet_host stream)}"
 camera_resolve cam2
 PAINTER_IP="${PAINTER_IP:-$CAMERA_IP}"
 MARKER_LOG="${AV_SOAK_MARKER_LOG:-/run/rig-qpsk-markers.csv}"
@@ -161,7 +210,6 @@ STREAM_PROG_SOURCE="${STREAM_PROG_SOURCE:-NDI 2ME PGM}"
 STREAM_DEV_SCENE="${STREAM_PROG_SCENE:-$STREAM_DEV_SCENE_DEFAULT}"
 STRIH_CAPTURE_FPS="${STRIH_CAPTURE_FPS:-30}"
 STREAM_CAPTURE_FPS="${STREAM_CAPTURE_FPS:-30}"
-OBS_TIMEOUT_S="${AV_SOAK_OBS_TIMEOUT_S:-30}"
 SSH_TIMEOUT_S="${AV_SOAK_SSH_TIMEOUT_S:-60}"
 MERGE_TIMEOUT_S="${AV_SOAK_MERGE_TIMEOUT_S:-90}"
 OVERHEAD_S="${AV_SOAK_OVERHEAD_S:-90}"
@@ -187,12 +235,15 @@ WINDOW_S=$(( N_CAMS * SEGMENT_S ))
 MIN_SECS="$(av_soak_min_secs "$WINDOW_S")"
 WINDOWS="$(av_soak_windows_count "$DURATION_S" "$SLOT_S")"
 MARKER_ROWS="$(av_soak_marker_rows "$WINDOW_S")"
+MIN_DECODE_S="${AV_SOAK_MIN_DECODE_S:-60}"
+case "$MERGE_TIMEOUT_S$OVERHEAD_S$MIN_DECODE_S" in *[!0-9]* | "") die 3 "the timeouts must be integers" ;; esac
 _decode_left=$(( SLOT_S - WINDOW_S - MERGE_TIMEOUT_S - OVERHEAD_S ))
 DECODE_TIMEOUT_S="${AV_SOAK_DECODE_TIMEOUT_S:-$_decode_left}"
-case "$DECODE_TIMEOUT_S$MERGE_TIMEOUT_S$OVERHEAD_S" in *[!0-9]* | "") die 3 "the timeouts must be integers" ;; esac
-[ "$DECODE_TIMEOUT_S" -ge 60 ] \
+_budget_msg="the slot budget does not fit: window ${WINDOW_S} s (${N_CAMS} cameras x ${SEGMENT_S} s) + decode ${DECODE_TIMEOUT_S} s (>= ${MIN_DECODE_S}) + merge ${MERGE_TIMEOUT_S} s + overhead ${OVERHEAD_S} s must be <= the ${SLOT_S} s slot"
+case "$DECODE_TIMEOUT_S" in '' | *[!0-9]*) die 3 "$_budget_msg" ;; esac
+[ "$DECODE_TIMEOUT_S" -ge "$MIN_DECODE_S" ] \
   && [ $(( WINDOW_S + DECODE_TIMEOUT_S + MERGE_TIMEOUT_S + OVERHEAD_S )) -le "$SLOT_S" ] \
-  || die 3 "the slot budget does not fit: window ${WINDOW_S} s (${N_CAMS} cameras x ${SEGMENT_S} s) + decode ${DECODE_TIMEOUT_S} s (>= 60) + merge ${MERGE_TIMEOUT_S} s + overhead ${OVERHEAD_S} s must be <= the ${SLOT_S} s slot"
+  || die 3 "$_budget_msg"
 [ "$STREAM_DEV_SCENE" != "$STREAM_PRODUCTION_SCENE_DEFAULT" ] || die 3 "STREAM_PROG_SCENE names the production scene; the soak only runs on the development scene (issue 1380)"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${AV_SOAK_RUN_DIR:-$HOME/.camera-box/av-soak/$STAMP}"
@@ -267,7 +318,7 @@ EOF
   sched_win="$(av_soak_win_join "$OUT_DIR_WIN" "av-soak-${STAMP}-sNNN-switch-schedule.json")"
   partial_win="$(av_soak_win_join "$OUT_DIR_WIN" "av-soak-${STAMP}-sNNN-stream-partial.json")"
   echo "     push to the stream box: win_ssh_upload markers -> ${marker_win}; schedule -> ${sched_win}"
-  echo "  h. decode in place, both in parallel, each bounded by ${DECODE_TIMEOUT_S} s (a stream timeout stops the box's recording-verdict):"
+  echo "  h. decode in place, both in parallel, each bounded by ${DECODE_TIMEOUT_S} s (a timeout stops that box's recording-verdict):"
   av_soak_strih_extract_argv strih_argv "$STRIH_DECODE" "${VERDICT_BIN:-<PROBE_BIN_DIR>/recording-verdict}" \
     "$STRIH_LX_OUT_DIR" "$RUN_DIR/slot-NNN" "<strih StopRecord path>" "$STRIH_CAPTURE_FPS" \
     "av-soak-${STAMP}-sNNN-strih-partial.json"
@@ -288,7 +339,7 @@ EOF
   plan_cmd python3 "$DECISION" report --csv "$CSV" --min-duration-h "$HOURS" "${SPREAD_ARGS[@]}"
   echo "  k. wait for the next slot start (lease heartbeat every <= 10 s; <run-dir>/STOP ends the run)"
   echo
-  echo "CLEANUP (every exit; signals ignored; remote calls under setsid -w): StopRecord what is still recording;"
+  echo "CLEANUP (every exit; signals ignored; remote calls under setsid -w): stop remote decodes still running; StopRecord what is still recording (a recording that will not stop = exit 5);"
   echo "  strih program back to the snapshot (switch --prod-floor) when swept; connect_on_show_e2e_restore; obs_burn_filter.py"
   echo "  remove on the burns this run turned on; rig_heartbeat_stop; rig_lease_release ${RIG_LEASE_OURS}; the final report:"
   plan_cmd python3 "$DECISION" report --csv "$CSV" --min-duration-h "$HOURS" --json "$RUN_DIR/report.json" "${SPREAD_ARGS[@]}"
@@ -299,6 +350,8 @@ EOF
   [ -n "${CAM_PW:-}" ] || missing+=(CAM_PW)
   [ -n "${STREAM_USER:-}" ] || missing+=(STREAM_USER)
   [ -n "${STREAM_PW:-}" ] || missing+=(STREAM_PW)
+  [ -n "${STRIH_USER:-}" ] || missing+=(STRIH_USER)
+  [ -n "${STRIH_PW:-}" ] || missing+=(STRIH_PW)
   [ -n "${VERDICT_BIN:-}" ] && [ -x "$VERDICT_BIN" ] || missing+=("PROBE_BIN_DIR (recording-verdict)")
   [ -n "${WIN_VERDICT_EXE_LOCAL:-}" ] && [ -f "$WIN_VERDICT_EXE_LOCAL" ] || missing+=("WIN_VERDICT_EXE_LOCAL")
   if [ "${#missing[@]}" -gt 0 ]; then
@@ -316,10 +369,10 @@ fi
 # --- --run ----------------------------------------------------------------------------------------
 
 [ "$(strih_platform "$STRIH_HOST")" = linux ] || die 4 "strih ${STRIH_HOST} is not the Linux strih-lx; the soak only decodes strih in place on strih-lx"
-for _v in CAM_PW STREAM_USER STREAM_PW; do
+for _v in CAM_PW STREAM_USER STREAM_PW STRIH_USER STRIH_PW; do
   [ -n "${!_v:-}" ] || die 4 "$_v is not set (the same value recording-e2e.sh uses; see targets.md)"
 done
-export STREAM_USER STREAM_PW
+export STREAM_USER STREAM_PW STRIH_USER STRIH_PW
 [ -n "${VERDICT_BIN:-}" ] && [ -x "$VERDICT_BIN" ] || die 4 "PROBE_BIN_DIR must hold the CI-built Linux recording-verdict (probe-tools-linux-amd64)"
 [ -n "${WIN_VERDICT_EXE_LOCAL:-}" ] && [ -f "$WIN_VERDICT_EXE_LOCAL" ] || die 4 "WIN_VERDICT_EXE_LOCAL must be the CI-built recording-verdict.exe (probe-tools-windows-amd64)"
 for _t in sshpass curl timeout setsid python3; do
@@ -330,6 +383,7 @@ python3 "$DECISION" bounds >/dev/null || die 4 "the gate bounds cannot be read f
 mkdir -p "$RUN_DIR"
 printf '%s\n' "$$" > "$RUN_DIR/pid"
 rm -f "$RUN_DIR/STOP"
+printf 'strih=0\nstream=0\n' > "$RUN_DIR/recording.state"
 
 SETUP_STARTED=0
 MUTATED=0
@@ -345,7 +399,9 @@ STRIH_PROGRAM_SNAPSHOT=""
 BURNS_TURNED_ON=()
 BG_PIDS=()
 SLEEP_PID=""
+DECODES_RUNNING=0
 ABORT_REASON=""
+FS_UNKNOWN_LOGGED=""
 REC_PATH=""
 
 # Every OBS / burn call is bounded; inside cleanup it runs in its own session (setsid -w) so a
@@ -371,9 +427,26 @@ cam2_read() {
 # win_bounded FUNC HOST ARGS... -> a scripts/lib/win-ssh-exec.sh call in a child bash, so `timeout`
 # bounds the whole group; the stream credentials come from the (exported) environment, not argv.
 win_bounded() {
+  local pre=()
+  if [ "$IN_CLEANUP" = 1 ]; then pre=(setsid -w); fi
   # shellcheck disable=SC2016  # expanded by the child bash
-  timeout "$SSH_TIMEOUT_S" bash -c '. "$1"; f="$2"; h="$3"; shift 3; "$f" "$STREAM_USER" "$STREAM_PW" "$h" "$@"' \
+  "${pre[@]}" timeout "$SSH_TIMEOUT_S" bash -c '. "$1"; f="$2"; h="$3"; shift 3; "$f" "$STREAM_USER" "$STREAM_PW" "$h" "$@"' \
     _ "$HERE/lib/win-ssh-exec.sh" "$@"
+}
+# kill_remote_decode strih|stream -> stop this run's recording-verdict decode ON the box (a local
+# timeout only kills the local ssh; the remote decode would keep loading the box into the next
+# recording). Only the soak can be decoding there: it holds the rig lease.
+kill_remote_decode() {
+  local pre=()
+  if [ "$IN_CLEANUP" = 1 ]; then pre=(setsid -w); fi
+  if [ "$1" = strih ]; then
+    "${pre[@]}" timeout "$SSH_TIMEOUT_S" sshpass -p "$STRIH_PW" ssh -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 "$STRIH_USER@$STRIH_HOST" \
+      "$(av_soak_strih_decode_kill_cmd)" >/dev/null 2>&1 || true
+  else
+    win_bounded win_ssh_run "$STREAM_HOST" \
+      "Get-Process -Name recording-verdict -ErrorAction SilentlyContinue | Stop-Process -Force" >/dev/null 2>&1 || true
+  fi
 }
 guard_ok() {
   ( stray_session_check_assert "$OBS_DIR" "$STRIH_HOST" "$STREAM_HOST" "$1" )
@@ -399,8 +472,9 @@ note_recording() {  # K BOX PATH -> recordings.tsv + the exact-path removal plan
     echo "win-stream-snv Shell: Remove-Item -Force -LiteralPath '$path'" >> "$RUN_DIR/cleanup-plan.txt"
   fi
 }
-set_rec_flag() {  # BOX 0|1
+set_rec_flag() {  # BOX 0|1 -> also persisted to <run-dir>/recording.state (read by --stop-leftovers)
   if [ "$1" = strih ]; then STRIH_REC_STARTED="$2"; else STREAM_REC_STARTED="$2"; fi
+  printf 'strih=%s\nstream=%s\n' "$STRIH_REC_STARTED" "$STREAM_REC_STARTED" > "$RUN_DIR/recording.state"
 }
 rec_start() {  # BOX HOST LOG -> the started flag is set BEFORE the call (a start that fails after
   # StartRecord, or times out, must still be stopped)
@@ -426,11 +500,19 @@ cleanup() {
   for pid in "${BG_PIDS[@]}" $SLEEP_PID; do kill -TERM "$pid" 2>/dev/null; done
   if [ "$SETUP_STARTED" = 1 ]; then
     log "cleanup${ABORT_REASON:+ (stopping: $ABORT_REASON)}" 2>/dev/null
+    if [ "$DECODES_RUNNING" = 1 ]; then
+      kill_remote_decode strih
+      kill_remote_decode stream
+      log "remote decodes stopped" 2>/dev/null
+    fi
     [ "$STRIH_REC_STARTED" = 1 ] && rec_stop cleanup strih "$STRIH_HOST" "$RUN_DIR/cleanup.log"
     [ "$STREAM_REC_STARTED" = 1 ] && rec_stop cleanup stream "$STREAM_HOST" "$RUN_DIR/cleanup.log"
     if [ "$STRIH_SWEPT" = 1 ] && [ -n "$STRIH_PROGRAM_SNAPSHOT" ]; then
-      if obs switch --host "$STRIH_HOST" --program-scene "$STRIH_PROGRAM_SNAPSHOT" --prod-floor \
-          >> "$RUN_DIR/cleanup.log" 2>&1; then
+      # the switch sets the scene first and can then fail its non-black check on a dim operator
+      # scene, so the outcome is confirmed by re-reading the program scene
+      obs switch --host "$STRIH_HOST" --program-scene "$STRIH_PROGRAM_SNAPSHOT" --prod-floor \
+        >> "$RUN_DIR/cleanup.log" 2>&1
+      if [ "$(obs program-scene --host "$STRIH_HOST" 2>/dev/null | tr -d '\r' | head -n 1)" = "$STRIH_PROGRAM_SNAPSHOT" ]; then
         log "strih program restored to '$STRIH_PROGRAM_SNAPSHOT'" 2>/dev/null
       else
         log "WARNING: could not restore the strih program to '$STRIH_PROGRAM_SNAPSHOT'" 2>/dev/null
@@ -464,11 +546,25 @@ cleanup() {
   else
     log "no window was recorded -- no report" 2>/dev/null
   fi
-  [ -s "$RUN_DIR/cleanup-plan.txt" ] && log "recordings kept; the exact-path removal plan: $RUN_DIR/cleanup-plan.txt" 2>/dev/null
+  if [ -s "$RUN_DIR/cleanup-plan.txt" ]; then
+    av_soak_onbox_cleanup_lines "$STRIH_HOST" "$STRIH_LX_OUT_DIR" "$OUT_DIR_WIN" "$STAMP" \
+      >> "$RUN_DIR/cleanup-plan.txt" 2>/dev/null
+    log "recordings kept; the exact-path removal plan: $RUN_DIR/cleanup-plan.txt" 2>/dev/null
+  fi
+  local stuck=""
+  [ "$STRIH_REC_STARTED" = 1 ] && stuck="strih"
+  [ "$STREAM_REC_STARTED" = 1 ] && stuck="${stuck:+$stuck }stream"
+  if [ -n "$stuck" ]; then
+    for t in $stuck; do
+      echo "av-soak: ERROR: RECORDING MAY STILL BE RUNNING on $t -- it did not stop after two StopRecords; run: scripts/av-soak.sh --stop-leftovers $RUN_DIR" >&2 2>/dev/null
+      log "ERROR: RECORDING MAY STILL BE RUNNING on $t (see $RUN_DIR/recording.state)" 2>/dev/null
+    done
+    exit 5
+  fi
   if [ "$LOOP_DONE" = 1 ] || [ "$STOPPED" = 1 ]; then
     exit "$rrc"
   fi
-  [ "$rc" -eq 0 ] && rc=5
+  case "$rc" in 4 | 5) ;; *) rc=5 ;; esac
   exit "$rc"
 }
 trap cleanup EXIT
@@ -550,6 +646,10 @@ run_slot() {
   for box in strih stream; do
     if [ "$box" = strih ]; then host="$STRIH_HOST"; else host="$STREAM_HOST"; fi
     fs="$(av_soak_free_space_verdict "$host" "$BUNDLE_STATE_PORT" "$RECORDINGS_FREE_MIN_GB" "$HERE")"
+    if [ "${fs%% *}" = UNKNOWN ] && [[ " $FS_UNKNOWN_LOGGED " != *" $box "* ]]; then
+      log "WARNING: the $box record volume free space unreadable (:${BUNDLE_STATE_PORT}/record-dir-stats.json) -- the low-disk stop cannot fire for it (logged once)"
+      FS_UNKNOWN_LOGGED="$FS_UNKNOWN_LOGGED $box"
+    fi
     if [ "${fs%% *}" = WARN ]; then
       ABORT_REASON="the $box record volume has only ${fs#* } GB free (< ${RECORDINGS_FREE_MIN_GB} GB)"
       log "STOP: $ABORT_REASON"
@@ -569,7 +669,20 @@ run_slot() {
     return 0
   fi
   rid="$(av_soak_kv run_id "$probe")"
-  rid="${rid:-0}"
+  if [ -z "$rid" ]; then
+    log "WARNING: the painter's run_id is not in its journal -- slot $k decodes with an unpinned cam2 (--cam2-run-id 0)"
+    rid=0
+  fi
+  for box in strih stream; do  # the soak's OWN recording left running by the previous slot
+    if [ "$box" = strih ]; then host="$STRIH_HOST"; else host="$STREAM_HOST"; fi
+    if { [ "$box" = strih ] && [ "$STRIH_REC_STARTED" = 1 ]; } || { [ "$box" = stream ] && [ "$STREAM_REC_STARTED" = 1 ]; }; then
+      rec_stop "$k" "$box" "$host" "$sd/record-stop.log"
+    fi
+  done
+  if [ "$STRIH_REC_STARTED" = 1 ] || [ "$STREAM_REC_STARTED" = 1 ]; then
+    ABORT_REASON="the soak's own recording would not stop (slot $k)"
+    exit 5
+  fi
   guard_ok "the slot-$k StartRecord" || { ABORT_REASON="a broadcast is live (slot $k)"; exit 5; }
   connect_on_show_strih_marker set "$STRIH_HOST"
   if ! rec_start strih "$STRIH_HOST" "$sd/record-start.log" \
@@ -632,15 +745,19 @@ run_slot() {
   STREAM_BOX="$STREAM_HOST" timeout "$DECODE_TIMEOUT_S" "${stream_argv[@]}" > "$sd/stream-extract.log" 2>&1 &
   tpid=$!
   BG_PIDS=("$spid" "$tpid")
+  DECODES_RUNNING=1
   src=0; wait "$spid" || src=$?
   trc=0; wait "$tpid" || trc=$?
   BG_PIDS=()
+  DECODES_RUNNING=0
   t_dec="$(date +%s)"
+  if [ "$src" -eq 124 ]; then
+    log "slot $k: the strih decode hit its ${DECODE_TIMEOUT_S} s bound -- stopping recording-verdict on strih-lx"
+    kill_remote_decode strih
+  fi
   if [ "$trc" -eq 124 ]; then
     log "slot $k: the stream decode hit its ${DECODE_TIMEOUT_S} s bound -- stopping the box's recording-verdict"
-    win_bounded win_ssh_run "$STREAM_HOST" \
-      "Get-Process -Name recording-verdict -ErrorAction SilentlyContinue | Stop-Process -Force" \
-      >> "$sd/stream-extract.log" 2>&1 || true
+    kill_remote_decode stream
   fi
   sp="$sd/$sname"
   tp="$sd/av-soak-${STAMP}-s${pk}-stream-partial.json"
