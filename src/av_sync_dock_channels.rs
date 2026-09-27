@@ -450,6 +450,28 @@ mod tests {
     }
 
     #[test]
+    fn a_switch_keeps_a_different_marker_inside_the_dedup_gap() {
+        // The switch filter drops only the SAME marker. L's lone marker (index 200) is returned
+        // while L is chosen; R's third chain marker (index 67), 300 samples later, tips the pick to
+        // R and must still be returned.
+        let p = AudioParams::rig60();
+        let sig = signal_len(&p) as u64;
+        let len = SR * 2;
+        let r = markers_at(&[0, 1, 2], SR / 2, SR / 4, 0, len);
+        let mut l = vec![0.0f32; len];
+        let at = SR / 4 + 2 * (SR / 2) - 300;
+        for (i, &s) in marker_signal(200, &p).iter().enumerate() {
+            l[at + i] += s * 0.25;
+        }
+        let mut picker = ChannelMarkerPicker::dock(2, p);
+        let got = run(&mut picker, &[l, r], 256);
+        assert_eq!(picker.chosen(), 1);
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert_eq!((got[0].1, got[1].1), (200, 67), "{got:?}");
+        assert!(got[1].0 <= got[0].0 + sig, "inside the gap: {got:?}");
+    }
+
+    #[test]
     fn a_decode_flood_keeps_only_the_newest_markers_per_channel() {
         // One marker every 1200 samples (just over the 1085-sample dedup gap), more than the cap.
         let n = DOCK_CHANNEL_PICK_MAX_MARKERS + 40;

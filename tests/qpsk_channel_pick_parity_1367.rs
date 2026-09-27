@@ -470,6 +470,20 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
         last_line(&t)
     );
     assert_eq!(returned(&t).len(), 3, "L's three markers, each once");
+    // The filter drops only the SAME marker: a different index inside the dedup gap on the newly
+    // chosen channel (L's lone index-200 marker, then R's third chain marker 300 samples later)
+    // is still returned.
+    let r = markers_at(&[0, 1, 2], SR / 2, SR / 4, 0, SR * 2);
+    let mut l = vec![0.0f32; SR * 2];
+    let at = SR / 4 + 2 * (SR / 2) - 300;
+    for (i, &s) in marker_signal(200, &AudioParams::rig60()).iter().enumerate() {
+        l[at + i] += s * 0.25;
+    }
+    let t = assert_same_transcript("switch-other", &[l, r], 256, None);
+    let got = returned(&t);
+    assert_eq!(got.len(), 2, "{got:?}");
+    assert_eq!(got[0].1, 200, "{got:?}");
+    assert!(last_line(&t).contains(" chosen=1 "), "{}", last_line(&t));
     // A decode flood (one marker every 1200 samples, more than the cap): both mirrors keep only
     // the newest markers, so the cluster stops at the cap.
     let n = DOCK_CHANNEL_PICK_MAX_MARKERS + 40;
