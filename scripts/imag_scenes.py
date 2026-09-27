@@ -494,11 +494,13 @@ def seed(obs: Obs) -> None:
             print(f"seed: no last-program state ({state_path}: {exc}) — fallback '{program}'")
         # issue 1380: a saved production scene is never restored (the owner hard rule; Obs.req
         # would refuse it and abort the boot seed, a Restart-loop of the imag OBS), and without
-        # the guard module no scene is selected at all -- OBS keeps its saved current scene.
-        guard = _scene_guard()
+        # the guard no scene is selected at all -- OBS keeps its saved current scene. The guard
+        # the connection already resolved is reused (a lookup warns again on a degraded box).
+        guard = obs._guard if hasattr(obs, "_guard") else _scene_guard()
         if guard is None:
-            print(f"seed: issue 1380 -- the production-scene guard (obs_phase2.py) is not "
-                  f"importable, so no program scene is selected ('{program}' not applied)")
+            print(f"seed: issue 1380 -- the production-scene guard (obs_phase2.py) is "
+                  f"unavailable on this host, so no program scene is selected "
+                  f"('{program}' not applied)")
         else:
             if program in guard.NEVER_PROGRAM_SCENES:
                 print(f"seed: issue 1380 -- the saved program '{program}' is the production "
