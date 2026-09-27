@@ -14,6 +14,7 @@
 #include "../src/camera-box-audio.hpp"
 #include "../src/camera-box-channel-pick.hpp"
 #include "../src/camera-box-video.hpp"
+#include "cb-marker-emitter.hpp"
 
 #include <cstdio>
 #include <cmath>
@@ -32,73 +33,12 @@ static int g_failures = 0;
 		}                                                           \
 	} while (0)
 
-/* ----- reference emitter (port of qpsk_marker.rs::marker_signal at c=1) -----
- * Kept in the TEST only (never compiled into the plugin): the dock never emits — cam2 does. This
- * lets the self-test round-trip a marker the SAME way the Rust `round_trip_all_256_indices` does. */
-static uint32_t enc_crc4(uint32_t data, uint32_t size)
-{
-	data <<= 4;
-	uint32_t p = 0x13u << (size - 1);
-	long s = (long)size;
-	while (s > 0) {
-		if (data & (0x8u << s))
-			data ^= p;
-		s -= 1;
-		p >>= 1;
-	}
-	return data;
-}
-static uint32_t enc_payload_word(uint8_t index)
-{
-	uint32_t data16 = 0xF000u | (uint32_t)index;
-	return (data16 << 4) | enc_crc4(data16, 16);
-}
-static double sym_wave(uint32_t sym, double phase)
-{
-	switch (sym) {
-	case 0:
-		return std::sin(phase);
-	case 1:
-		return std::cos(phase);
-	case 2:
-		return -std::cos(phase);
-	case 3:
-		return -std::sin(phase);
-	}
-	return 0.0;
-}
-static std::vector<float> marker_signal_from_word(uint32_t word)
-{
-	const uint32_t sr = CB_AUDIO_SAMPLE_RATE, f = CB_AUDIO_CARRIER_HZ, c = CB_AUDIO_C;
-	uint32_t sym[10];
-	for (uint32_t i = 0; i < 10; i++)
-		sym[i] = (word >> (20 - 2 - 2 * i)) & 0x3u;
-	size_t n = cb_signal_len(sr, f, c);
-	std::vector<float> out;
-	out.reserve(n);
-	const double CONT = 0.25;
-	for (uint32_t i = 0; i < n; i++) {
-		double phase = (double)i * 2.0 * CB_PI * (double)f / (double)sr;
-		uint32_t k = (i * f) / (sr * c);
-		if (k > 9)
-			k = 9;
-		double v = sym_wave(sym[k], phase);
-		double f_sym = (double)((i * f) % (sr * c)) / (double)sr;
-		int prev = k > 0 ? (int)sym[k - 1] : -1;
-		int next = k + 1 < 10 ? (int)sym[k + 1] : -1;
-		if (f_sym < CONT && (int)sym[k] != prev)
-			v *= 0.5 - std::cos(f_sym / CONT * CB_PI) * 0.5;
-		else if (((double)c - f_sym) < CONT && (int)sym[k] != next)
-			v *= 0.5 - std::cos(((double)c - f_sym) / CONT * CB_PI) * 0.5;
-		out.push_back((float)v);
-	}
-	return out;
-}
-
-static std::vector<float> marker_signal(uint8_t index)
-{
-	return marker_signal_from_word(enc_payload_word(index));
-}
+/* The reference emitter (a port of qpsk_marker.rs::marker_signal at c=1) lives in the test-only
+ * cb-marker-emitter.hpp, shared with the issue-1381 audio self-test and bench; never compiled into
+ * the plugin (the dock never emits, cam2 does). It lets the self-test round-trip a marker the SAME
+ * way the Rust `round_trip_all_256_indices` does. */
+using cbtest::marker_signal;
+using cbtest::marker_signal_from_word;
 
 int main()
 {

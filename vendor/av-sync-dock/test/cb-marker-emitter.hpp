@@ -2,9 +2,8 @@
 
 /*
  * Test-only reference emitter of the cam2 QPSK marker (a port of qpsk_marker.rs::marker_signal at
- * c = 1), shared by the issue-1381 audio self-test and bench. Never compiled into the plugin: the
- * dock never emits, cam2 does. The same code lives inline in camera-box-selftest.cpp, which predates
- * this header.
+ * c = 1), shared by camera-box-selftest.cpp and the issue-1381 audio self-test and bench. Never
+ * compiled into the plugin: the dock never emits, cam2 does.
  */
 
 #include "../src/camera-box-audio.hpp"
