@@ -1,6 +1,8 @@
 ---
 paths:
   - "scripts/version-integrity-gate.sh"
+  - "scripts/lib/version-integrity-obs-identity.sh"
+  - "scripts/lib/version-integrity-vendor-pin.sh"
   - "scripts/bundle_state_gather.py"
   - "scripts/bundle-state-server.py"
   - "tests/version_integrity_gate.rs"
@@ -18,6 +20,16 @@ observed state (served by `bundle-state-server.py` on `:8899`, gathered by `bund
 and REFUSES the run on DRIFT (exit 20) or UNKNOWN (exit 11). Exit-code roll-up in `main()`:
 `bad>0 → 20`, else `unknown>0 → 11`, else `GATE PASS → 0`. It is invoked with `--win-state
 "strih=<file>"` + `--win-state "stream=<file>"` (labels are the box `$name`).
+
+**File layout (issue 1377, the 1000-line budget):** the #826 OBS-identity verdicts
+(`obs_installs_verdict` / `port_identity_verdict` / `obs_process_count_verdict` /
+`startup_chain_verdict` + the `DEFAULT_OBS_INSTALL_*` / `DEFAULT_STARTUP_SHORTCUT` pins) live in
+`scripts/lib/version-integrity-obs-identity.sh`, the vendor-pin family (`vendor_pin_range_log` /
+`vendor_pin_ahead_log` / `vendor_pin_on_dev` / `genlock_vendor_pin_verdict`) in
+`scripts/lib/version-integrity-vendor-pin.sh`. The gate sources both BEFORE its source-guard, so
+sourcing the gate (`run_sourced` in `tests/version_integrity_gate.rs`) still defines every function;
+a new pure facet family goes into its own `scripts/lib/version-integrity-*.sh` the same way, never
+back into the gate body.
 
 ## Two-step facet rollout: opt-in (#756-shape) → ENFORCED (#758-shape)
 

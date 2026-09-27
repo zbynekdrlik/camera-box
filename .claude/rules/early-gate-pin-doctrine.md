@@ -3,6 +3,7 @@ paths:
   - "scripts/camera-box-version-gate.sh"
   - "scripts/dantesync-version-gate.sh"
   - "scripts/version-integrity-gate.sh"
+  - "scripts/lib/version-integrity-vendor-pin.sh"
   - "scripts/recording-e2e.sh"
   - "scripts/drift-guard.sh"
   - "tests/camera_box_version_gate.rs"
@@ -170,7 +171,8 @@ repo isolating the exact DAG shape: `tests/drift_guard.rs`.)
 `version-integrity-gate.sh`'s own #1137 report-only vendor-pin ALARM** — its `genlock_vendor_pin_verdict`
 caller computed PENDING_LIST via the same plain `deployed..origin/main` ancestry range. Fixed by
 mirroring the same three-function shape scoped to the whole `vendor/` tree: `vendor_pin_range_log` /
-`vendor_pin_ahead_log` / `vendor_pin_on_dev` (`scripts/version-integrity-gate.sh`), extending
+`vendor_pin_ahead_log` / `vendor_pin_on_dev` (`scripts/lib/version-integrity-vendor-pin.sh`, sourced by
+`scripts/version-integrity-gate.sh` since issue 1377), extending
 `genlock_vendor_pin_verdict` with optional AHEAD_LIST/ON_DEV args (rc 30 for both the LAGS and the
 ORPHAN reason — report-only semantics unchanged); regression coverage against its own synthetic
 two-branch repo: `tests/version_integrity_gate.rs`. Two independent gates sharing the exact same
