@@ -74,6 +74,7 @@ const PRELUDE: &str = r#"#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#define LOG_ERROR 100
 #define LOG_WARNING 200
 #define LOG_INFO 300
 /* The block's only libobs clock: os_gettime_ns. h_now = 0 keeps every deadline ahead. */
@@ -322,19 +323,24 @@ fn pin_cores_c_matches_the_rust_authority() {
 // ---------------------------------------------------------------------------------------------
 
 /// Recording stubs, macro-substituted into the lifted block. The fake thread mask ("home") is
-/// 0-3. `h_fail_aff_at` / `h_fail_sched_at` make exactly the Nth `pthread_setaffinity_np` /
-/// `sched_setscheduler` call fail with EPERM (0 = never). Call order: startup trial (1) and startup
-/// restore (2), then enter (3) / leave (4) of the first tick, and so on.
+/// 0-3. `h_fail_aff_at` / `h_fail_sched_at` make the Nth `pthread_setaffinity_np` /
+/// `sched_setscheduler` call fail with EPERM (0 = never); `h_sticky` makes every later call fail
+/// too. Call order: startup trial (1) and startup restore (2), then enter (3) / leave (4) of the
+/// first tick, and so on.
 const TRACE_STUBS: &str = r#"
 static const char *h_isolated_path;
 static const char *h_nohz_path;
-static int h_fail_aff_at, h_fail_sched_at, h_aff_calls, h_sched_calls;
+static int h_fail_aff_at, h_fail_sched_at, h_aff_calls, h_sched_calls, h_sticky;
+static int h_fails(int call, int at)
+{
+	return at > 0 && (h_sticky ? call >= at : call == at);
+}
 static int h_setaffinity(pthread_t t, size_t n, const cpu_set_t *s)
 {
 	(void)t;
 	(void)n;
 	print_set("SETAFF", s);
-	return ++h_aff_calls == h_fail_aff_at ? EPERM : 0;
+	return h_fails(++h_aff_calls, h_fail_aff_at) ? EPERM : 0;
 }
 static int h_getaffinity(pthread_t t, size_t n, cpu_set_t *s)
 {
@@ -351,7 +357,7 @@ static int h_setscheduler(pid_t pid, int policy, const struct sched_param *p)
 	const int base = policy & ~SCHED_RESET_ON_FORK;
 	printf("SCHED pid=%d %s%s prio=%d\n", (int)pid, base == SCHED_FIFO ? "FIFO" : base == SCHED_OTHER ? "OTHER" : "?",
 	       (policy & SCHED_RESET_ON_FORK) ? "|RESET_ON_FORK" : "", p->sched_priority);
-	if (++h_sched_calls == h_fail_sched_at) {
+	if (h_fails(++h_sched_calls, h_fail_sched_at)) {
 		errno = EPERM;
 		return -1;
 	}
@@ -368,12 +374,13 @@ static int h_setscheduler(pid_t pid, int policy, const struct sched_param *p)
 const TRACE_MAIN: &str = r#"
 int main(int argc, char **argv)
 {
-	if (argc != 6)
+	if (argc != 7)
 		return 2;
 	h_isolated_path = argv[1];
 	h_nohz_path = argv[2];
 	h_fail_aff_at = atoi(argv[3]);
 	h_fail_sched_at = atoi(argv[4]);
+	h_sticky = atoi(argv[6]);
 	printf("== START\n");
 	genlock_pin_render_tick_thread();
 	h_now = atoi(argv[5]) ? 2000u : 0u;
@@ -395,13 +402,14 @@ fn trace_harness(dir: &Scratch) -> PathBuf {
     compile(dir, &c)
 }
 
-/// One scripted run: the sysfs state, the setaffinity / setscheduler call to fail (0 = none), and
-/// whether every tick is already late.
+/// One scripted run: the sysfs state, the setaffinity / setscheduler call to fail (0 = none),
+/// whether that failure sticks for every later call, and whether every tick is already late.
 struct Run<'a> {
     isolated: &'a str,
     nohz: &'a str,
     fail_aff_at: u32,
     fail_sched_at: u32,
+    sticky: bool,
     late: bool,
 }
 
@@ -421,6 +429,7 @@ fn trace_ticks(r: &Run) -> (Vec<String>, Vec<Vec<String>>) {
             &aff,
             &sched,
             if r.late { "1" } else { "0" },
+            if r.sticky { "1" } else { "0" },
         ],
     );
     let sections: Vec<Vec<String>> = out
@@ -444,6 +453,7 @@ fn trace(
         nohz,
         fail_aff_at,
         fail_sched_at,
+        sticky: false,
         late: false,
     });
     assert!(
@@ -596,12 +606,14 @@ fn a_per_tick_failure_restores_disarms_and_warns_once() {
         ("enter affinity", 3, 0, "render-tick pin enter failed"),
         ("enter FIFO", 0, 3, "render-tick pin enter failed"),
         ("leave affinity", 4, 0, "render-tick pin leave failed"),
+        ("leave FIFO drop", 0, 4, "render-tick pin leave failed"),
     ] {
         let (_start, ticks) = trace_ticks(&Run {
             isolated: "2-11\n",
             nohz: "10-11\n",
             fail_aff_at,
             fail_sched_at,
+            sticky: false,
             late: false,
         });
         let all: Vec<&String> = ticks.iter().flatten().collect();
@@ -629,6 +641,62 @@ fn a_per_tick_failure_restores_disarms_and_warns_once() {
     }
 }
 
+/// Review round 2: a failed restore at STARTUP (the trial pinned, going back failed) disarms,
+/// retries the restore, warns once, and never claims the pin is armed.
+#[test]
+fn a_failed_startup_restore_disarms_before_the_first_tick() {
+    let (start, ticks) = trace_ticks(&Run {
+        isolated: "2-11\n",
+        nohz: "10-11\n",
+        fail_aff_at: 2,
+        fail_sched_at: 0,
+        sticky: false,
+        late: false,
+    });
+    let warns: Vec<&String> = start
+        .iter()
+        .filter(|l| l.starts_with("LOG 200 ") && l.contains("render-tick pin startup leave failed"))
+        .collect();
+    assert_eq!(warns.len(), 1, "{start:?}");
+    assert!(ends_with_restore(&start), "{start:?}");
+    assert!(
+        !start.iter().any(|l| l.contains("only while it sleeps")),
+        "a disarmed pin must not be announced as armed: {start:?}"
+    );
+    for t in &ticks {
+        assert_eq!(t, &vec!["SLEEP".to_string()], "{ticks:?}");
+    }
+}
+
+/// Review round 2: when the restore itself keeps failing, the thread may stay on the pin cores (and
+/// FIFO), so the log must say so at ERROR level and must NOT claim it is back on the process mask.
+#[test]
+fn a_restore_that_keeps_failing_is_an_error_not_a_reassuring_warning() {
+    let (_start, ticks) = trace_ticks(&Run {
+        isolated: "2-11\n",
+        nohz: "10-11\n",
+        fail_aff_at: 4,
+        fail_sched_at: 0,
+        sticky: true,
+        late: false,
+    });
+    let all: Vec<&String> = ticks.iter().flatten().collect();
+    let errors: Vec<&&String> = all.iter().filter(|l| l.starts_with("LOG 100 ")).collect();
+    assert_eq!(errors.len(), 1, "exactly one error: {ticks:?}");
+    assert!(
+        errors[0].contains("restore failed too") && errors[0].contains("SCHED_FIFO"),
+        "the error names what may have stayed: {errors:?}"
+    );
+    assert!(
+        !all.iter()
+            .any(|l| l.contains("continuing SCHED_OTHER on the process mask")),
+        "no reassuring line when the restore failed: {ticks:?}"
+    );
+    for later in &ticks[1..] {
+        assert_eq!(later, &vec!["SLEEP".to_string()], "{ticks:?}");
+    }
+}
+
 /// Issue 1357 review: a tick that is already late does not sleep, so it does not pin either.
 #[test]
 fn a_late_tick_skips_the_pin() {
@@ -637,6 +705,7 @@ fn a_late_tick_skips_the_pin() {
         nohz: "10-11\n",
         fail_aff_at: 0,
         fail_sched_at: 0,
+        sticky: false,
         late: true,
     });
     assert!(

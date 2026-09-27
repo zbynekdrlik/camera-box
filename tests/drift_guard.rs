@@ -1252,6 +1252,43 @@ const GENLOCK_RT_PIN_FAILED_LINE: &str = "14:27:54.392: genlock: could NOT set r
 const GENLOCK_RT_PIN_UNPINNED_LINE: &str = "15:10:15.254: genlock: render-tick thread not pinned: \
      no isolated cores (isolated=[] nohz_full=[]) -- it runs SCHED_OTHER on the process mask (issue 1357)\n";
 
+/// Review round 2: the pin itself failed at startup (it runs unpinned) — its own class, never the
+/// "build may predate #484" UNKNOWN.
+const GENLOCK_RT_PIN_PIN_FAILED_LINE: &str = "15:10:15.254: genlock: could NOT pin render-tick \
+     thread to the isolated cores (isolated=[2-11] nohz_full=[10-11], errno 22) -- continuing \
+     SCHED_OTHER on the process mask (issue 1357)\n";
+
+#[test]
+fn genlock_rt_pin_parser_reads_a_failed_startup_pin_as_pin_failed() {
+    for line in [
+        GENLOCK_RT_PIN_PIN_FAILED_LINE,
+        "15:10:15.254: genlock: could NOT read the render-tick thread's CPU mask (errno 22) -- not \
+         pinned, continuing SCHED_OTHER (issue 1357)\n",
+    ] {
+        let out = run_sourced("genlock_rt_pin_from_log \"$LOG\"", &[("LOG", line)]);
+        assert_eq!(out.trim(), "pin_failed", "{line:?} -> {out:?}");
+    }
+}
+
+#[test]
+fn check_imag_report_genlock_rt_pin_reports_a_failed_pin_with_its_reason_1357() {
+    let log = format!("genlock: latency = 3 ms\n{GENLOCK_RT_PIN_PIN_FAILED_LINE}");
+    let body = r#"
+        rc=0
+        check_imag_report "DSHA_A" "DSHA_A" "60" "60" "3" "3" "$LOG" "/plugin/path" "1" || rc=$?
+        echo "RC=$rc"
+    "#;
+    let out = run_sourced(body, &[("LOG", log.as_str())]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("genlock_rt_pin"))
+        .unwrap_or_else(|| panic!("no genlock_rt_pin line printed: {out:?}"));
+    assert!(
+        line.contains("OK") && line.contains("pin FAILED") && !line.contains("predate"),
+        "a failed pin is reported with its own reason: {line:?}"
+    );
+}
+
 #[test]
 fn genlock_rt_pin_parser_reads_the_1357_not_pinned_line_as_unpinned() {
     let out = run_sourced(
