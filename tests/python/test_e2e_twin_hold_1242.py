@@ -123,14 +123,22 @@ class FakeObsTick:
     """obs-websocket over a clock. SetInputSettings overlays the explicit settings at once (libobs
     obs_data_apply) and marks the input for a deferred update; the update runs on the next video tick
     (any clock advance) and applies the vendored lockdown: genlock on -> bandwidth HIGHEST, then LOWEST
-    for a monitor twin. `always_coerce` models an OBS whose coercion would ignore genlock_fifo=False."""
+    for a monitor twin. `always_coerce` models an OBS whose coercion would ignore genlock_fifo=False;
+    `unreadable` inputs answer GetInputSettings with a request error (ignore_err -> {}), and
+    `unreadable_after_write` ones start doing so once written; `read_cost` is the fake seconds one
+    GetInputSettings round trip takes (a slow WebSocket)."""
 
-    def __init__(self, inputs, always_coerce=(), ignore_writes=()):
+    def __init__(self, inputs, always_coerce=(), ignore_writes=(), unreadable=(),
+                 unreadable_after_write=(), read_cost=0.0):
         self.inputs = {n: dict(s) for n, s in inputs.items()}
         self.t = 0.0
         self.pending = set()
         self.always_coerce = set(always_coerce)
         self.ignore_writes = set(ignore_writes)
+        self.unreadable = set(unreadable)
+        self.unreadable_after_write = set(unreadable_after_write)
+        self.read_cost = float(read_cost)
+        self.written = set()
         self.calls = []
         self.reads = []  # (t, name) of every GetInputSettings
 
@@ -157,7 +165,13 @@ class FakeObsTick:
             return {"inputs": [{"inputName": n, "inputKind": "ndi_source"} for n in self.inputs]}
         if rt == "GetInputSettings":
             self.reads.append((self.t, rdata["inputName"]))
-            s = self.inputs.get(rdata["inputName"])
+            self.t += self.read_cost
+            n = rdata["inputName"]
+            if n in self.unreadable or (n in self.unreadable_after_write and n in self.written):
+                if ignore_err:
+                    return {}
+                raise RuntimeError("request failed")
+            s = self.inputs.get(n)
             if s is None:
                 if ignore_err:
                     return {}
@@ -171,6 +185,7 @@ class FakeObsTick:
                 return {}
             self.inputs[n].update(rdata["inputSettings"])
             self.pending.add(n)
+            self.written.add(n)
             return {}
         raise AssertionError(rt)
 
@@ -264,12 +279,83 @@ def test_hold_waits_for_the_input_update_and_fails_a_twin_that_does_not_settle(f
     assert _settle_gap(f) >= op._SETTLE_MIN_S > 0
 
 
+def test_hold_settles_the_mains_before_any_twin_goes_off_the_wire(fake, tmp_path):
+    f = fake()
+    op.connect_on_show_hold(None, str(tmp_path / "hold.json"))
+    sets = [(i, c[2]["inputName"]) for i, c in enumerate(f.calls) if c[1] == "SetInputSettings"]
+    last_main = max(i for i, n in sets if not n.startswith("MV "))
+    first_twin = min(i for i, n in sets if n.startswith("MV "))
+    assert last_main < first_twin
+    main_reads = [c for c in f.calls[last_main + 1:first_twin]
+                  if c[1] == "GetInputSettings" and not c[2]["inputName"].startswith("MV ")]
+    assert len(main_reads) >= 4, "both mains read back twice before a twin goes off the wire"
+    assert f.calls[first_twin][0] - f.calls[last_main][0] >= op._SETTLE_MIN_S
+
+
+def test_hold_keeps_a_twin_on_the_wire_when_its_main_did_not_settle(fake, tmp_path):
+    f = fake(ignore_writes={"NDI cam1"})
+    sf = tmp_path / "hold.json"
+    mains, twins, failed = op.connect_on_show_hold(None, str(sf))
+    assert failed == ["NDI cam1"]
+    assert "MV NDI cam1" not in twins and _twin(f, "MV NDI cam1")["genlock_fifo"] is True
+    assert "MV NDI cam3" in twins and _twin(f, "MV NDI cam3")["genlock_fifo"] is False
+    assert "MV NDI cam1" in json.loads(sf.read_text())["twins"], "recorded before the writes"
+
+
+def test_restore_keeps_the_main_held_while_its_twin_is_still_off_the_wire(fake, tmp_path):
+    f = fake()
+    sf = tmp_path / "hold.json"
+    op.connect_on_show_hold(None, str(sf))
+    f.ignore_writes.add("MV NDI cam1")
+    restored, failed = op.connect_on_show_restore(None, str(sf))
+    assert failed == ["MV NDI cam1"]
+    # never a camera with neither receiver: full bandwidth on the main is the fail-safe
+    assert f.inputs["NDI cam1"]["genlock_connect_on_show"] is False
+    assert f.inputs["NDI cam3"]["genlock_connect_on_show"] is True
+    assert "NDI cam1" not in restored and "NDI cam3" in restored
+    state = json.loads(sf.read_text())
+    assert "NDI cam1" in state["connect_on_show"] and "MV NDI cam1" in state["twins"]
+    f.ignore_writes.clear()
+    restored, failed = op.connect_on_show_restore(None, str(sf))
+    assert failed == [] and not sf.exists()
+    assert f.inputs["NDI cam1"]["genlock_connect_on_show"] is True
+
+
+def test_an_unreadable_input_at_enumeration_fails_the_hold(fake, tmp_path):
+    f = fake(unreadable={"MV NDI cam3"})
+    _, twins, failed = op.connect_on_show_hold(None, str(tmp_path / "hold.json"))
+    assert "MV NDI cam3" in failed, "a twin the hold could not read may still be on the wire"
+    assert "MV NDI cam3" not in twins and "MV NDI cam1" in twins
+
+
+def test_an_unreadable_read_back_never_counts_as_settled(fake, tmp_path):
+    # the main's hold target equals the type default, so a failed read must not look like a match
+    f = fake(unreadable_after_write={"NDI cam3"})
+    _, _, failed = op.connect_on_show_hold(None, str(tmp_path / "hold.json"))
+    assert failed == ["NDI cam3"]
+
+
+def test_a_slow_websocket_still_gets_two_full_sweeps(fake, tmp_path):
+    f = fake(read_cost=3.0)  # one sweep of the mains alone outlasts the 5 s budget
+    _, twins, failed = op.connect_on_show_hold(None, str(tmp_path / "hold.json"))
+    assert failed == [] and twins == ["MV NDI cam1", "MV NDI cam3"]
+
+
+def test_the_settle_poll_reads_the_type_defaults_once_per_settle(fake, tmp_path):
+    f = fake()
+    op.connect_on_show_hold(None, str(tmp_path / "hold.json"))
+    # one for the enumeration, one per settle (mains, twins) -- never one per input per sweep
+    assert sum(1 for c in f.calls if c[1] == "GetInputDefaultSettings") <= 3
+
+
 def test_the_settle_poll_is_bounded(fake, tmp_path):
     f = fake(always_coerce={"MV NDI cam1", "MV NDI cam3"})
     start = f.t
     _, _, failed = op.connect_on_show_hold(None, str(tmp_path / "hold.json"))
     assert failed == ["MV NDI cam1", "MV NDI cam3"]
-    assert f.t - start <= op._SETTLE_BUDGET_S + op._SETTLE_POLL_S + op._SETTLE_MIN_S
+    # the mains settle quickly, the never-settling twins end at the budget
+    one = op._SETTLE_BUDGET_S + op._SETTLE_POLL_S + op._SETTLE_MIN_S
+    assert f.t - start <= 2 * one
 
 
 def test_hold_cli_exits_non_zero_when_a_twin_does_not_settle(fake, tmp_path, monkeypatch, capsys):
@@ -335,13 +421,30 @@ def test_restore_puts_the_original_back_twins_first_and_verifies_after_the_tick(
 
 
 def test_twin_restore_values_let_the_lockdown_own_a_genlocked_bandwidth():
-    assert roles.twin_restore_values({"genlock_fifo": True, "ndi_bw_mode": 1}) == roles.TWIN_ON_WIRE
+    # review round 1: the restore also re-asserts the monitor ROLE -- the lockdown pins LOWEST only for
+    # a genlock_monitor source, so a twin that lost the flag would read back HIGHEST forever
+    on_wire = dict(roles.TWIN_ON_WIRE, genlock_monitor=True)
+    assert roles.twin_restore_values({"genlock_fifo": True, "ndi_bw_mode": 1}) == on_wire
     # a genlocked original with any other recorded bandwidth could never read back (the lockdown
-    # pins LOWEST): it is restored as TWIN_ON_WIRE
-    assert roles.twin_restore_values({"genlock_fifo": True, "ndi_bw_mode": 0}) == roles.TWIN_ON_WIRE
-    assert roles.twin_restore_values({}) == roles.TWIN_ON_WIRE
+    # pins LOWEST): it is restored on the wire
+    assert roles.twin_restore_values({"genlock_fifo": True, "ndi_bw_mode": 0}) == on_wire
+    assert roles.twin_restore_values({}) == on_wire
+    # a HELD-shaped original (a hand-edited / older file) is never restored as "held"
+    assert roles.twin_restore_values({"genlock_fifo": False, "ndi_bw_mode": 2}) == on_wire
     assert roles.twin_restore_values({"genlock_fifo": False, "ndi_bw_mode": 0}) == \
         {"genlock_fifo": False, "ndi_bw_mode": 0}
+
+
+def test_restore_reasserts_the_monitor_role_so_the_lockdown_pins_lowest(fake, tmp_path):
+    lost = {"genlock_fifo": False, "ndi_bw_mode": 2, "ndi_source_name": "CAM1 (usb)"}  # no monitor flag
+    f = fake(_rig(**{"MV NDI cam1": lost}))
+    sf = tmp_path / "hold.json"
+    sf.write_text(json.dumps({"connect_on_show": [],
+                              "twins": {"MV NDI cam1": {"genlock_fifo": True, "ndi_bw_mode": 1}}}))
+    restored, failed = op.connect_on_show_restore(None, str(sf))
+    assert failed == [] and restored == ["MV NDI cam1"]
+    assert _twin(f, "MV NDI cam1")["genlock_monitor"] is True
+    assert _twin(f, "MV NDI cam1")["ndi_bw_mode"] == 1 and _twin(f, "MV NDI cam1")["genlock_fifo"] is True
 
 
 def test_restore_of_a_hand_edited_original_still_lands(fake, tmp_path):
