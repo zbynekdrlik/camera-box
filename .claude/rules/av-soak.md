@@ -76,7 +76,7 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   (`setsid -w`), background sleeps/decodes killed. The second-SIGTERM and process-group Ctrl-C
   tests prove the `trap ''` half; `setsid -w` is defence in depth the fakes cannot isolate (GNU
   `timeout` already starts its child in its own process group).
-- **Cleanup never touches the air during a broadcast.** ONE `broadcast` read (issue-1271 rule)
+- **Cleanup never touches the air during a broadcast.** ONE settled `broadcast` read (issue-1271 rule)
   gates both air-touching steps: the StopRecords (during a broadcast the soak's file may already
   be the show's recording -- Companion's go-live StartRecord is a no-op on a box that records) and
   the strih program restore (strih's program feeds the stream box's program). Only a proven `idle`
@@ -84,8 +84,16 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   kept for `--stop-leftovers`) and the strih program on the last sweep scene (`strih program NOT
   restored`). Burns and connect-on-show still go back: that returns production state.
 - **A broadcast mid-run aborts the soak** (exit 5), checked by the slot guard, before EVERY sweep
-  cut, before the StopRecords (an unreadable rig there aborts too; cleanup re-reads) and every
-  ~60 s between slots -- never a cut and never a StopRecord while a box streams.
+  cut, before the StopRecords and every ~60 s between slots -- never a cut while a box streams.
+- **A recording is started or stopped only on a PROVEN idle rig** (`broadcast_settled`: an
+  unreadable read is retried `AV_SOAK_BROADCAST_READS` x `AV_SOAK_BROADCAST_RETRY_S`, default
+  3 x 20 s, so one stream OBS restart neither ends an 8 h run nor keeps a recording running).
+  Setup refuses an unreadable rig (exit 4) before any mutation; a slot that cannot prove idle
+  starts nothing (`skipped:rig_state_unreadable`); every StopRecord path -- a previous slot's
+  leftover, the start-failure path, the end of the sweep, cleanup, `--stop-leftovers` -- needs the
+  same proof, else the recording is kept (exit 5, lease kept). The one remaining window is the
+  seconds between the slot guard and the two StartRecords (the guard directly precedes them;
+  `obs_phase2 record --action start` would stop an already-running recording first).
 - **Leaving TEST mode ends the run.** A stream program that reads another scene, or a painter
   service that reads `inactive` (`rig-mode.sh event` stops it), STOPS the run (like a low record
   volume: full cleanup, exit = the report's verdict) -- it never holds the lease and the
@@ -232,14 +240,16 @@ and a recording on strih + stream for ~4 min of every 10. Post the report (`$D/r
 (the decision tests use REAL merged verdict fixtures from `tests/python/fixtures/e2e_discord_report/`
 where the shape matters; the orchestrator harness drives setup, full windows, the failure paths
 (start/stop failure, a recording that never stops, a failed cut, SIGTERM and a second SIGTERM
-during cleanup, a process-group Ctrl-C, SIGTERM during a decode, the STOP file, a low volume, a
+during cleanup, a process-group Ctrl-C, SIGTERM during a decode, the STOP file, a low volume,
 the rig leaving TEST mode (stream program / painter service), an unreadable program or painter
 read, a stalled marker log, a broadcast between slots and one mid-sweep (nothing stopped, lease
-kept), `--stop-leftovers` never touching a broadcast, an unreadable rig or a recording the soak
-cannot prove is its own) and cleanup with
+kept), an unreadable rig at setup / a slot start / before the StopRecords (retried once, or
+kept), a failed start and a previous slot's leftover during a broadcast, `--stop-leftovers` never
+touching a broadcast, an unreadable rig or a recording the soak cannot prove is its own, and
+retrying an unreadable read) and cleanup with
 fakes behind the seams `AV_SOAK_OBS_DIR`,
 `AV_SOAK_STRIH_DECODE`, `AV_SOAK_STREAM_DECODE`, `PROBE_BIN_DIR`, `CONNECT_ON_SHOW_MARKER_CMD`,
 `CONNECT_ON_SHOW_LOG_READ_CMD`, a fake `sshpass`/`curl` on PATH, and a tmp `RIG_LEASE_DIR` +
 `CAMERA_BOX_RIG_HEARTBEAT` + `CONNECT_ON_SHOW_HOLD_STATE` -- NEVER the real `/var/tmp/rig-lease`, an
-E2E may hold it), `bash -n`, `shellcheck -S warning scripts/av-soak.sh scripts/lib/av-soak.sh` (never
-`-x`).
+E2E may hold it), `bash -n`, `shellcheck -S warning scripts/av-soak.sh scripts/lib/av-soak.sh
+scripts/lib/av-soak-leftovers.sh` (never `-x`); the test rig sets `AV_SOAK_BROADCAST_RETRY_S=0`.
