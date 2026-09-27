@@ -3450,11 +3450,13 @@ else
   _md_cluster="$(marker_decodability_parse_num "$_md_json" cluster_samples || echo '?')"
   _md_preamble="$(marker_decodability_parse_num "$_md_json" preamble_screens || echo '?')"
   _md_peak="$(marker_decodability_parse_num "$_md_json" peak_dbfs || echo '?')"
+  # issue 1367: which channel of the stereo mbc track the verdict came from (empty on an old probe)
+  _md_chan="$(marker_decodability_channel_note "$_md_json" || true)"
   if [ "$(marker_decodability_is_ok "$_md_verdict")" != "true" ]; then
-    echo "ERROR: $(marker_decodability_fail_message "$_md_verdict" "$_md_cluster" "$AUDIO_DECODABILITY_MIN_CLUSTERS" "$_md_preamble" "$_md_peak")" >&2
+    echo "ERROR: $(marker_decodability_fail_message "$_md_verdict" "$_md_cluster" "$AUDIO_DECODABILITY_MIN_CLUSTERS" "$_md_preamble" "$_md_peak")${_md_chan:+ [${_md_chan}]}" >&2
     exit 1
   fi
-  echo "    ok: mbc QPSK marker DECODABLE (cluster_samples ${_md_cluster} >= ${AUDIO_DECODABILITY_MIN_CLUSTERS}, preamble_screens ${_md_preamble}, peak ${_md_peak} dBFS)"
+  echo "    ok: mbc QPSK marker DECODABLE (cluster_samples ${_md_cluster} >= ${AUDIO_DECODABILITY_MIN_CLUSTERS}, preamble_screens ${_md_preamble}, peak ${_md_peak} dBFS${_md_chan:+, ${_md_chan}})"
 fi
 
 echo "[4c/8] #365 frozen-camera gate — every strih raw NDI input must be updating (not a frozen feed)"
