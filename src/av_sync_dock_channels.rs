@@ -472,6 +472,41 @@ mod tests {
     }
 
     #[test]
+    fn a_same_index_copy_exactly_one_gap_later_is_still_the_same_marker() {
+        // The filter's boundary is inclusive: R's copy exactly one dedup gap (one marker length)
+        // after L's copy of the same marker is still that marker, and is dropped.
+        let p = AudioParams::rig60();
+        let len = SR * 3;
+        let l = markers_at(&[1, 2, 3], SR / 2, SR / 4, 0, len);
+        let r = markers_at(&[0, 1, 2, 3], SR / 2, SR / 4, signal_len(&p), len);
+        let mut picker = ChannelMarkerPicker::dock(2, p);
+        let got = run(&mut picker, &[l.clone(), r], 256);
+        assert_eq!(picker.chosen(), 1);
+        assert_eq!(got, single(&l, 256).0, "R's copies are the same markers");
+    }
+
+    #[test]
+    fn a_window_reset_drops_the_marker_in_flight_and_keeps_the_sample_clock() {
+        // The dead-pairing recovery calls reset_window(). Marker 2 starts at 60000 samples and is
+        // 1085 long; after 59 pushes of 1024 (60416 samples) only its head is in. The reset throws
+        // the head away, so marker 2 is never reported, and every later marker decodes at the same
+        // absolute sample index as without the reset.
+        let track = markers_at(&[0, 1, 2, 3, 4], SR / 2, SR / 4, 0, SR * 3);
+        let mut want = single(&track, 1024).0;
+        assert_eq!(want.len(), 5);
+        want.remove(2);
+        let mut picker = ChannelMarkerPicker::dock(1, AudioParams::rig60());
+        let mut got = Vec::new();
+        for (push, chunk) in track.chunks(1024).enumerate() {
+            got.extend(picker.push(&[chunk]));
+            if push + 1 == 59 {
+                picker.reset_window();
+            }
+        }
+        assert_eq!(got, want);
+    }
+
+    #[test]
     fn a_decode_flood_keeps_only_the_newest_markers_per_channel() {
         // One marker every 1200 samples (just over the 1085-sample dedup gap), more than the cap.
         let n = DOCK_CHANNEL_PICK_MAX_MARKERS + 40;

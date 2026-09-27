@@ -318,7 +318,14 @@ fn the_cpp_cluster_size_matches_rust_on_generated_and_real_decodes() {
 
 /// The Rust reference's transcript, in the C++ tool's exact line format.
 /// `window` = `None` is the dock configuration; `Some(w)` the same with a pick window of `w` samples.
-fn rust_transcript(channels: &[Vec<f32>], chunk: usize, window: Option<u64>) -> String {
+/// `reset_after` = `Some(n)` runs `reset_window()` right after the n-th push (the dead-pairing
+/// recovery).
+fn rust_transcript(
+    channels: &[Vec<f32>],
+    chunk: usize,
+    window: Option<u64>,
+    reset_after: Option<usize>,
+) -> String {
     let p = AudioParams::rig60();
     let sig = signal_len(&p);
     let mut picker = match window {
@@ -340,6 +347,9 @@ fn rust_transcript(channels: &[Vec<f32>], chunk: usize, window: Option<u64>) -> 
         let end = (at + chunk).min(frames);
         let planes: Vec<&[f32]> = channels.iter().map(|c| &c[at..end]).collect();
         let markers = picker.push(&planes);
+        if reset_after == Some(push + 1) {
+            picker.reset_window();
+        }
         let clusters: Vec<String> = picker.clusters().iter().map(|c| c.to_string()).collect();
         let markers: Vec<String> = markers.iter().map(|(a, i)| format!("{a}:{i}")).collect();
         let s = picker.stats();
@@ -366,6 +376,7 @@ fn cpp_transcript(
     channels: &[Vec<f32>],
     chunk: usize,
     window: Option<u64>,
+    reset_after: Option<usize>,
 ) -> String {
     let path = scratch.path(&format!("{name}.f32"));
     let bytes: Vec<u8> = channels
@@ -379,7 +390,8 @@ fn cpp_transcript(
         channels.len().to_string(),
         chunk.to_string(),
     ];
-    args.extend(window.map(|w| w.to_string()));
+    args.push(window.unwrap_or(0).to_string());
+    args.push(reset_after.unwrap_or(0).to_string());
     scratch.run(&args.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
@@ -448,9 +460,10 @@ fn assert_same_transcript(
     channels: &[Vec<f32>],
     chunk: usize,
     window: Option<u64>,
+    reset_after: Option<usize>,
 ) -> String {
-    let rust = rust_transcript(channels, chunk, window);
-    let cpp = cpp_transcript(scratch, name, channels, chunk, window);
+    let rust = rust_transcript(channels, chunk, window, reset_after);
+    let cpp = cpp_transcript(scratch, name, channels, chunk, window, reset_after);
     for (i, (r, c)) in rust.lines().zip(cpp.lines()).enumerate() {
         assert_eq!(c, r, "{name}: push {i} differs (left C++, right Rust)");
     }
@@ -473,7 +486,8 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
     // The real 2 s stereo fixture: L below the floor, R clears it, so R is chosen.
     let real = fixture_channels();
     for chunk in [1024, 441] {
-        let t = assert_same_transcript(&scratch, &format!("real-{chunk}"), &real, chunk, None);
+        let t =
+            assert_same_transcript(&scratch, &format!("real-{chunk}"), &real, chunk, None, None);
         assert!(last_line(&t).contains(" chosen=1 "), "{}", last_line(&t));
         // the switch to R happens mid-clip: R's copy of a marker L already returned is not paired
         assert_no_double_return(&format!("real-{chunk}"), &t);
@@ -482,7 +496,7 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
     // 256-frame callbacks R's copies of markers 2 and 3 tip the pick after L returned them.
     let l = markers_at(&[1, 2, 3], SR / 2, SR / 4, 0, SR * 3);
     let r = markers_at(&[0, 1, 2, 3], SR / 2, SR / 4, 488, SR * 3);
-    let t = assert_same_transcript(&scratch, "switch", &[l, r], 256, None);
+    let t = assert_same_transcript(&scratch, "switch", &[l, r], 256, None, None);
     assert_no_double_return("switch", &t);
     assert!(
         last_line(&t).contains(" chosen=1 clusters=3,4 "),
@@ -499,17 +513,35 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
     for (i, &s) in marker_signal(200, &AudioParams::rig60()).iter().enumerate() {
         l[at + i] += s * 0.25;
     }
-    let t = assert_same_transcript(&scratch, "switch-other", &[l, r], 256, None);
+    let t = assert_same_transcript(&scratch, "switch-other", &[l, r], 256, None, None);
     let got = returned(&t);
     assert_eq!(got.len(), 2, "{got:?}");
     assert_eq!(got[0].1, 200, "{got:?}");
     assert!(last_line(&t).contains(" chosen=1 "), "{}", last_line(&t));
+    // The dedup boundary is inclusive: R's copy exactly one dedup gap after L's copy is the same
+    // marker.
+    let gap = signal_len(&AudioParams::rig60());
+    let l = markers_at(&[1, 2, 3], SR / 2, SR / 4, 0, SR * 3);
+    let r = markers_at(&[0, 1, 2, 3], SR / 2, SR / 4, gap, SR * 3);
+    let t = assert_same_transcript(&scratch, "switch-gap", &[l, r], 256, None, None);
+    assert_no_double_return("switch-gap", &t);
+    assert_eq!(returned(&t).len(), 3, "L's three markers, each once");
+    // The dead-pairing recovery's reset_window() on the real fixture while L's copy of marker 155
+    // is in flight (it starts at 48934; 48 pushes of 1024 end at 49152): both mirrors drop the same
+    // samples and agree push by push, and the reset really changes what comes back.
+    let plain = returned(&rust_transcript(&real, 1024, None, None));
+    let t = assert_same_transcript(&scratch, "reset", &real, 1024, None, Some(48));
+    assert_ne!(
+        returned(&t),
+        plain,
+        "the reset must drop the marker in flight"
+    );
     // A decode flood (one marker every 1200 samples, more than the cap): both mirrors keep only
     // the newest markers, so the cluster stops at the cap.
     let n = DOCK_CHANNEL_PICK_MAX_MARKERS + 40;
     let ks: Vec<usize> = (0..n).collect();
     let flood = vec![markers_at(&ks, 1200, SR / 4, 0, SR / 2 + n * 1200)];
-    let t = assert_same_transcript(&scratch, "flood", &flood, 1024, None);
+    let t = assert_same_transcript(&scratch, "flood", &flood, 1024, None, None);
     assert_eq!(returned(&t).len(), n);
     assert!(
         last_line(&t).contains(&format!(" clusters={DOCK_CHANNEL_PICK_MAX_MARKERS} ")),
@@ -519,7 +551,7 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
     // Both channels decode, R later and with the longer chain: L stays chosen.
     let l = marker_track(6, 1.0, 0.25, 0, SR * 9);
     let r = marker_track(8, 1.0, 0.25, 488, SR * 9);
-    let t = assert_same_transcript(&scratch, "both-clear", &[l, r], 1024, None);
+    let t = assert_same_transcript(&scratch, "both-clear", &[l, r], 1024, None, None);
     assert!(
         last_line(&t).contains(" chosen=0 clusters=6,8 "),
         "{}",
@@ -528,7 +560,7 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
     // The marker only on R.
     let silent = vec![0.0f32; SR * 9];
     let r = marker_track(8, 1.0, 0.25, 488, SR * 9);
-    let t = assert_same_transcript(&scratch, "r-only", &[silent, r], 1024, None);
+    let t = assert_same_transcript(&scratch, "r-only", &[silent, r], 1024, None, None);
     assert!(
         last_line(&t).contains(" chosen=1 clusters=0,8 "),
         "{}",
@@ -538,7 +570,7 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
     let len = SR * 40;
     let l = marker_track(8, 1.0, 0.25, 0, len);
     let r = marker_track(40, 1.0, 0.25, 488, len);
-    let t = assert_same_transcript(&scratch, "hand-over", &[l, r], 1024, None);
+    let t = assert_same_transcript(&scratch, "hand-over", &[l, r], 1024, None, None);
     let at_8s = t.lines().nth(8 * SR / 1024).expect("a push at 8 s");
     assert!(at_8s.contains(" chosen=0 "), "{at_8s}");
     assert!(last_line(&t).contains(" chosen=1 "), "{}", last_line(&t));
@@ -548,10 +580,10 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
         vec![0.0f32; SR * 6],
         marker_track(5, 1.0, 0.25, 0, SR * 6),
     ];
-    let t = assert_same_transcript(&scratch, "three", &three, 1024, None);
+    let t = assert_same_transcript(&scratch, "three", &three, 1024, None, None);
     assert!(last_line(&t).contains(" chosen=2 "), "{}", last_line(&t));
     let mono = vec![marker_track(5, 1.0, 0.25, 0, SR * 6)];
-    let t = assert_same_transcript(&scratch, "mono", &mono, 1024, None);
+    let t = assert_same_transcript(&scratch, "mono", &mono, 1024, None, None);
     assert!(
         last_line(&t).contains(" chosen=0 clusters=5 "),
         "{}",
@@ -562,7 +594,7 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
     // is still in the window; one push later it is out. Three markers (cluster 3) on one channel,
     // the window set so the first one sits exactly on the boundary after push k - 1.
     let track = vec![marker_track(3, 1.0, 0.25, 0, SR * 4)];
-    let first = rust_transcript(&track, 1024, None)
+    let first = rust_transcript(&track, 1024, None, None)
         .lines()
         .find_map(|l| {
             let m = l.split(" markers=").nth(1)?.split(' ').next()?;
@@ -571,7 +603,7 @@ fn the_cpp_streaming_picker_matches_rust_callback_by_callback() {
         .expect("the first marker's absolute sample index");
     let k = 107u64; // push k - 1 ends at 107 x 1024 samples, after the third marker (2.25 s)
     let window = k * 1024 - first;
-    let t = assert_same_transcript(&scratch, "boundary", &track, 1024, Some(window));
+    let t = assert_same_transcript(&scratch, "boundary", &track, 1024, Some(window), None);
     let line = |i: u64| t.lines().nth(i as usize).expect("push").to_string();
     assert!(line(k - 1).contains(" clusters=3 "), "{}", line(k - 1));
     assert!(line(k).contains(" clusters=0 "), "{}", line(k));

@@ -14,11 +14,12 @@
  *       "<empty>"; '#' lines are comments): the chosen position, or "none".
  *   cluster <file>
  *       for every line "<n> <ts> <idx> <ts> <idx> ...": the self-consistency cluster size.
- *   stream <file> <channels> <chunk> [<window_samples>]
+ *   stream <file> <channels> <chunk> [<window_samples> [<reset_after>]]
  *       <file> holds <channels> planes of f32 LE samples back to back, all the same length. They
- *       are pushed through ChannelMarkerPicker::dock at the rig's audio params (or, with
- *       <window_samples>, the same configuration with that pick window) in <chunk>-frame
- *       callbacks, one line per push:
+ *       are pushed through ChannelMarkerPicker::dock at the rig's audio params (or, with a
+ *       non-zero <window_samples>, the same configuration with that pick window) in <chunk>-frame
+ *       callbacks; with a non-zero <reset_after>, reset_window() runs right after that many
+ *       pushes (the dead-pairing recovery). One line per push:
  *       "<push> chosen=<c> clusters=<a,b> markers=<abs:idx,...> stats=<preambles>/<crc_ok>/<crc_fail>".
  *
  * Exit 0 on success, 2 on a usage or I/O error.
@@ -40,7 +41,7 @@ using namespace camerabox;
 static int usage()
 {
 	std::fprintf(stderr, "usage: channel-pick-parity consts | pick <tsv> | cluster <file> | "
-			     "stream <file> <channels> <chunk> [<window_samples>]\n");
+			     "stream <file> <channels> <chunk> [<window_samples> [<reset_after>]]\n");
 	return 2;
 }
 
@@ -138,7 +139,8 @@ static int cmd_cluster(const char *path)
 	return 0;
 }
 
-static int cmd_stream(const char *path, size_t channels, size_t chunk, uint64_t window)
+static int cmd_stream(const char *path, size_t channels, size_t chunk, uint64_t window,
+		      size_t reset_after)
 {
 	std::ifstream in(path, std::ios::binary);
 	if (!in || channels == 0 || chunk == 0) {
@@ -168,6 +170,8 @@ static int cmd_stream(const char *path, size_t channels, size_t chunk, uint64_t 
 		for (size_t c = 0; c < channels; c++)
 			planes[c] = all.data() + c * frames + at;
 		std::vector<std::pair<uint64_t, uint8_t>> markers = picker.push(planes.data(), n);
+		if (reset_after != 0 && push + 1 == reset_after)
+			picker.reset_window();
 		std::printf("%zu chosen=%zu clusters=%s markers=", push, picker.chosen,
 			    cb_channel_clusters_text(picker.clusters).c_str());
 		for (size_t k = 0; k < markers.size(); k++)
@@ -190,9 +194,10 @@ int main(int argc, char **argv)
 		return cmd_pick(argv[2]);
 	if (cmd == "cluster" && argc == 3)
 		return cmd_cluster(argv[2]);
-	if (cmd == "stream" && (argc == 5 || argc == 6))
+	if (cmd == "stream" && argc >= 5 && argc <= 7)
 		return cmd_stream(argv[2], (size_t)std::strtoull(argv[3], nullptr, 10),
 				  (size_t)std::strtoull(argv[4], nullptr, 10),
-				  argc == 6 ? (uint64_t)std::strtoull(argv[5], nullptr, 10) : 0);
+				  argc >= 6 ? (uint64_t)std::strtoull(argv[5], nullptr, 10) : 0,
+				  argc == 7 ? (size_t)std::strtoull(argv[6], nullptr, 10) : 0);
 	return usage();
 }
