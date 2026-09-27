@@ -167,8 +167,9 @@ failed on today's arithmetic and the GREEN one passes.
   frame below a two-interval overrun; only >= 2 intervals skips slots — `skipped_ticks`). The
   numbers above were measured before those changes; the issue-1367 tests carry their own.
 
-`video_sleep` also wraps its one `os_sleepto_ns` in the issue-1357 render-tick pin window
-(`genlock_tick_pin_sleep_begin/end`, `genlock-render-tick-pin.md`); keep exactly one sleep call there.
+`video_sleep` also wraps its one `os_sleepto_ns(t)` in the issue-1357 render-tick pin window
+(`genlock_tick_pin_sleep_begin(t)` / `genlock_tick_pin_sleep_end(tick_pinned)`, from
+`obs-genlock-render-tick-pin.h`, see `genlock-render-tick-pin.md`); keep exactly one sleep call there.
 
 ## The stamp counters (`stamp_dup=` / `stamp_gap=`)
 
