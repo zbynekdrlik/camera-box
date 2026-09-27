@@ -919,21 +919,42 @@ static uint64_t genlock_next_deadline(uint64_t cur_time, uint64_t interval_ns)
 }
 
 #if defined(__linux__) && !defined(_WIN32)
-/* camera-box #484: pin the genlock render-tick thread (THIS graphics thread, which drives
- * video_sleep -> genlock_next_deadline) to the kernel-reserved isolated cores under SCHED_FIFO.
+/* camera-box issue 1357 render-tick pin BEGIN
  *
- * imag-nb's kernel cmdline reserves cpu10,11 (`nohz_full=10,11` inside `isolcpus=2-11`, #483) for
- * exactly this ONE timing-critical thread, so its wakeups are not jittered by kernel housekeeping.
- * Direct analogue of camera-box's src/affinity.rs (#289) capture-thread pin.
+ * The genlock render tick (THIS graphics thread, which drives video_sleep -> genlock_next_deadline)
+ * may run on cores the kernel keeps free for it, under a LOW SCHED_FIFO priority, so its wake-ups
+ * are not jittered by kernel housekeeping (#484, the analogue of camera-box's src/affinity.rs #289
+ * capture-thread pin).
  *
- * SAFETY — the priority is LOW and every failure is WARN-and-CONTINUE. A HIGH-priority runaway
- * FIFO thread in this ~106-thread OBS process can lock out kernel housekeeping and HANG a headless
- * box (worse than the frame hitches this prevents), so we use a low priority and, on ANY syscall
- * failure (no rtprio grant, no such core, ...), log LOUD and keep running SCHED_OTHER. Never abort,
- * never retry-loop, never hang — mirrors the robust fallback in src/affinity.rs. Requires an rtprio
- * ulimit grant for the (unprivileged) desktop user OBS runs as — provisioned by scripts/setup-imag.sh
- * (/etc/security/limits.d/95-imag-genlock-rtprio.conf). */
+ * Issue 1357 reworked it after the pin harmed strih-lx twice (23.9 and 27.9.2026):
+ * - The pin cores are the kernel's ISOLATED cores that are ALSO nohz_full. Either list empty means
+ *   NO pin and one "not pinned: no isolated cores" line. The old hardcoded {10,11} fallback pinned a
+ *   box with no isolated core onto two ordinary cores.
+ * - The pin is held only while the tick SLEEPS: video_sleep narrows the mask (and raises FIFO) right
+ *   before os_sleepto_ns and drops FIFO + restores the saved startup mask right after it. The
+ *   graphics thread creates threads while it works (NDI receivers, driver threads) for its whole
+ *   life, and a new thread inherits its creator's affinity + policy. Pinned for its whole life, it
+ *   leaked cores 10-11 to 40 OBS threads (and, with an rtprio grant, SCHED_FIFO to 28 of them). A
+ *   sleeping thread creates nothing, so nothing inherits the pin now. FIFO also carries
+ *   SCHED_RESET_ON_FORK, so the kernel resets it for any thread created under it.
+ * - The per-tick cost (four syscalls and a migration onto the pin cores) exists only on a box that
+ *   really has isolated cores. The shared OBS-box baseline grader FAILs kernel isolation, so no
+ *   current box pins at all.
+ * The pure core-selection decision (genlock_render_tick_pin_set) is mirrored by the Tier-0 authority
+ * src/genlock_render_tick_pin.rs; tests/genlock_render_tick_pin_1357.rs lifts THIS whole block and
+ * compiles it (parity, a syscall trace, real-thread inheritance).
+ *
+ * SAFETY -- the priority is LOW and every failure is WARN-and-CONTINUE. A HIGH-priority runaway FIFO
+ * thread in this ~106-thread OBS process can lock out kernel housekeeping and HANG a headless box,
+ * so we use a low priority and, on ANY syscall failure, log LOUD and keep running SCHED_OTHER on the
+ * process mask. Never abort, never retry-loop, never hang. */
 #define GENLOCK_RT_PRIORITY 10 /* LOW FIFO prio: on-time wakeups without starving the kernel */
+#ifndef GENLOCK_SYSFS_ISOLATED
+#define GENLOCK_SYSFS_ISOLATED "/sys/devices/system/cpu/isolated"
+#endif
+#ifndef GENLOCK_SYSFS_NOHZ_FULL
+#define GENLOCK_SYSFS_NOHZ_FULL "/sys/devices/system/cpu/nohz_full"
+#endif
 
 /* Parse a Linux cpulist ("10-11" / "10,11" / "10", trailing newline tolerated) into `set`. */
 static void genlock_parse_cpulist_into_set(const char *s, cpu_set_t *set)
@@ -969,48 +990,169 @@ static void genlock_parse_cpulist_into_set(const char *s, cpu_set_t *set)
 	}
 }
 
+/* The pin cores: the isolated cores that are also nohz_full. Empty = do not pin. Pure. */
+static void genlock_render_tick_pin_set(const char *isolated, const char *nohz_full, cpu_set_t *out)
+{
+	cpu_set_t iso, nohz;
+	CPU_ZERO(&iso);
+	CPU_ZERO(&nohz);
+	genlock_parse_cpulist_into_set(isolated, &iso);
+	genlock_parse_cpulist_into_set(nohz_full, &nohz);
+	CPU_ZERO(out);
+	CPU_AND(out, &iso, &nohz);
+}
+
+/* First line of a sysfs cpulist file, newline stripped; "" when unreadable. */
+static void genlock_read_cpulist_file(const char *path, char *buf, size_t size)
+{
+	buf[0] = '\0';
+	FILE *f = fopen(path, "r");
+	if (!f)
+		return;
+	if (!fgets(buf, (int)size, f))
+		buf[0] = '\0';
+	fclose(f);
+	buf[strcspn(buf, "\n")] = '\0';
+}
+
+/* Graphics-thread-only state, (re)initialised by genlock_pin_render_tick_thread. */
+struct genlock_tick_pin {
+	bool armed;     /* the pin cores are set and the pin worked at startup */
+	bool fifo;      /* SCHED_FIFO worked at startup */
+	cpu_set_t pin;  /* isolated AND nohz_full */
+	cpu_set_t home; /* the thread's mask at startup = the process mask */
+};
+static struct genlock_tick_pin genlock_tick_pin;
+
+/* Narrow to the pin cores, then raise FIFO. 0 or an errno. */
+static int genlock_tick_pin_enter(struct genlock_tick_pin *p)
+{
+	if (!p->armed)
+		return 0;
+	int err = pthread_setaffinity_np(pthread_self(), sizeof(p->pin), &p->pin);
+	if (err != 0)
+		return err;
+	if (p->fifo) {
+		struct sched_param param;
+		memset(&param, 0, sizeof(param));
+		param.sched_priority = GENLOCK_RT_PRIORITY;
+		if (sched_setscheduler(0, SCHED_FIFO | SCHED_RESET_ON_FORK, &param) != 0)
+			return errno;
+	}
+	return 0;
+}
+
+/* Drop FIFO first, then widen back to the saved mask: never FIFO on a shared core. Always tries both.
+ * The reset flag stays set (an unprivileged thread may not clear it). 0 or the first errno. */
+static int genlock_tick_pin_leave(struct genlock_tick_pin *p)
+{
+	if (!p->armed)
+		return 0;
+	int err = 0;
+	if (p->fifo) {
+		struct sched_param param;
+		memset(&param, 0, sizeof(param));
+		if (sched_setscheduler(0, SCHED_OTHER | SCHED_RESET_ON_FORK, &param) != 0)
+			err = errno;
+	}
+	const int aerr = pthread_setaffinity_np(pthread_self(), sizeof(p->home), &p->home);
+	return err != 0 ? err : aerr;
+}
+
+/* A per-tick failure: restore what can be restored, stop pinning, say so once. */
+static void genlock_tick_pin_disarm(int err, const char *where)
+{
+	struct genlock_tick_pin *p = &genlock_tick_pin;
+	if (!p->armed)
+		return;
+	(void)genlock_tick_pin_leave(p);
+	p->armed = false;
+	blog(LOG_WARNING,
+	     "genlock: render-tick pin %s failed (errno %d) -- pin disabled, continuing SCHED_OTHER on the "
+	     "process mask (issue 1357)",
+	     where, err);
+}
+
+/* video_sleep: right before the tick sleeps. */
+static void genlock_tick_pin_sleep_begin(void)
+{
+	const int err = genlock_tick_pin_enter(&genlock_tick_pin);
+	if (err != 0)
+		genlock_tick_pin_disarm(err, "enter");
+}
+
+/* video_sleep: right after the tick woke up, before it works (and may create threads). */
+static void genlock_tick_pin_sleep_end(void)
+{
+	const int err = genlock_tick_pin_leave(&genlock_tick_pin);
+	if (err != 0)
+		genlock_tick_pin_disarm(err, "leave");
+}
+
 static void genlock_pin_render_tick_thread(void)
 {
-	cpu_set_t set;
-	CPU_ZERO(&set);
-
-	/* Derive the target cores ROBUSTLY from the kernel's reserved nohz_full cpulist (like
-	 * src/affinity.rs reads /sys), falling back to the hardcoded {10,11} pair (#483's
-	 * nohz_full=10,11 reservation) if /sys is unreadable/empty so the pin still lands. */
-	char buf[256];
-	FILE *f = fopen("/sys/devices/system/cpu/nohz_full", "r");
-	if (f) {
-		if (fgets(buf, sizeof(buf), f))
-			genlock_parse_cpulist_into_set(buf, &set);
-		fclose(f);
-	}
-	if (CPU_COUNT(&set) == 0) {
-		CPU_SET(10, &set);
-		CPU_SET(11, &set);
+	struct genlock_tick_pin *p = &genlock_tick_pin;
+	char isolated[256];
+	char nohz_full[256];
+	memset(p, 0, sizeof(*p));
+	genlock_read_cpulist_file(GENLOCK_SYSFS_ISOLATED, isolated, sizeof(isolated));
+	genlock_read_cpulist_file(GENLOCK_SYSFS_NOHZ_FULL, nohz_full, sizeof(nohz_full));
+	genlock_render_tick_pin_set(isolated, nohz_full, &p->pin);
+	if (CPU_COUNT(&p->pin) == 0) {
+		blog(LOG_INFO,
+		     "genlock: render-tick thread not pinned: no isolated cores (isolated=[%s] nohz_full=[%s]) "
+		     "-- it runs SCHED_OTHER on the process mask (issue 1357)",
+		     isolated, nohz_full);
+		return;
 	}
 
-	if (pthread_setaffinity_np(pthread_self(), sizeof(set), &set) != 0)
+	int err = pthread_getaffinity_np(pthread_self(), sizeof(p->home), &p->home);
+	if (err != 0) {
 		blog(LOG_WARNING,
-		     "genlock: could NOT pin render-tick thread to the isolated cores (errno %d) "
-		     "— continuing SCHED_OTHER (#484)",
-		     errno);
-	else
-		blog(LOG_INFO, "genlock: render-tick thread pinned to the isolated nohz_full cores "
-			       "(#483/#484)");
+		     "genlock: could NOT read the render-tick thread's CPU mask (errno %d) -- not pinned, "
+		     "continuing SCHED_OTHER (issue 1357)",
+		     err);
+		return;
+	}
+	err = pthread_setaffinity_np(pthread_self(), sizeof(p->pin), &p->pin);
+	if (err != 0) {
+		blog(LOG_WARNING,
+		     "genlock: could NOT pin render-tick thread to the isolated cores (isolated=[%s] nohz_full=[%s], "
+		     "errno %d) -- continuing SCHED_OTHER on the process mask (issue 1357)",
+		     isolated, nohz_full, err);
+		return;
+	}
 
 	struct sched_param param;
 	memset(&param, 0, sizeof(param));
 	param.sched_priority = GENLOCK_RT_PRIORITY;
-	if (sched_setscheduler(0, SCHED_FIFO, &param) != 0)
+	if (sched_setscheduler(0, SCHED_FIFO | SCHED_RESET_ON_FORK, &param) != 0) {
 		blog(LOG_WARNING,
-		     "genlock: could NOT set render-tick thread SCHED_FIFO prio %d (errno %d — "
-		     "missing rtprio ulimit grant?) — continuing SCHED_OTHER (#484)",
+		     "genlock: could NOT set render-tick thread SCHED_FIFO prio %d (errno %d -- "
+		     "missing rtprio ulimit grant?) -- continuing SCHED_OTHER (#484)",
 		     GENLOCK_RT_PRIORITY, errno);
-	else
+		p->fifo = false;
+	} else {
 		blog(LOG_INFO,
-		     "genlock: render-tick thread set SCHED_FIFO prio %d on the isolated core (#484)",
+		     "genlock: render-tick thread set SCHED_FIFO prio %d on the isolated core while it sleeps "
+		     "(#484, issue 1357)",
 		     GENLOCK_RT_PRIORITY);
+		p->fifo = true;
+	}
+
+	/* The trial worked: arm it and go back to the process mask until the first sleep. */
+	p->armed = true;
+	err = genlock_tick_pin_leave(p);
+	if (err != 0) {
+		genlock_tick_pin_disarm(err, "startup leave");
+		return;
+	}
+	blog(LOG_INFO,
+	     "genlock: render-tick thread pinned to %d isolated core(s) (isolated=[%s] nohz_full=[%s]) only "
+	     "while it sleeps; threads it creates keep the process mask (issue 1357)",
+	     CPU_COUNT(&p->pin), isolated, nohz_full);
 }
+/* camera-box issue 1357 render-tick pin END */
 #endif /* __linux__ */
 /* ---- end genlock --------------------------------------------------------- */
 
@@ -1022,7 +1164,16 @@ static inline void video_sleep(struct obs_core_video *video, uint64_t *p_time, u
 					    : cur_time + interval_ns;
 	int count;
 
-	if (os_sleepto_ns(t)) {
+#if defined(__linux__) && !defined(_WIN32)
+	/* camera-box issue 1357: the render-tick pin is held only while the tick sleeps. */
+	genlock_tick_pin_sleep_begin();
+#endif
+	const bool slept = os_sleepto_ns(t);
+#if defined(__linux__) && !defined(_WIN32)
+	genlock_tick_pin_sleep_end();
+#endif
+
+	if (slept) {
 		*p_time = t;
 		count = 1;
 	} else {
@@ -1448,8 +1599,8 @@ void *obs_graphics_thread(void *param)
 	os_set_thread_name("libobs: graphics thread");
 
 #if defined(__linux__) && !defined(_WIN32)
-	/* camera-box #484: pin THIS thread (the genlock render-tick driver) to the isolated cores
-	 * SCHED_FIFO (low prio). WARN-and-CONTINUE on failure — never blocks OBS startup. */
+	/* camera-box #484 / issue 1357: decide the render-tick pin (the isolated nohz_full cores, or none)
+	 * once; video_sleep holds it only while the tick sleeps. WARN-and-CONTINUE on failure. */
 	genlock_pin_render_tick_thread();
 #endif
 
