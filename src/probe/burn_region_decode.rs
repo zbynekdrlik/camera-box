@@ -20,8 +20,14 @@
 //!   So the result is a strict SUPERSET of the plain + tile result, byte-identical for everything
 //!   already read. It never adds optical or aux content, which the tear and continuity metrics
 //!   read by run_id.
-//! - Each slot gets a 1x look, then a [`BURN_REGION_UPSCALE`]x CatmullRom look only when the 1x
-//!   look read no burn of that slot at all (a slot carries one burn).
+//! - Each slot gets a 1x look. When it read no burn of that slot at all (a slot carries one burn),
+//!   the slot gets the issue-1367 tight-box look ([`tight_box_reads`]): the burn's own white
+//!   quiet-zone box, located inside the crop by [`crate::burn_quiet_zone`], decoded alone inside a
+//!   white border. The camera slot models the burn at 320 px, the writer renders it 287 px (315 for
+//!   a version-5 payload), so the fixed crop also holds 24-41 px of whatever surrounds the burn;
+//!   when cam2 films the strih-lx multiview that is QR content, and rqrr's one pass reads nothing.
+//!   Only when that also read no burn of the slot does it get a [`BURN_REGION_UPSCALE`]x CatmullRom
+//!   look.
 //! - A run_id without a reserved slot (the aux marks, SongPlayer, an operator override) is never
 //!   localized, so it costs nothing here.
 //! - issue 1367: each read is placed on the frame and kept only inside its own slot, like every
@@ -34,12 +40,18 @@
 //! glue plus the probe-gated pins of that table against the camera-burn writer (`probe::qr`) and
 //! the reserved run_ids (`probe::recording_latency`).
 
-use crate::burn_regions::{node_burn_in_own_slot, recovery_crop, recovery_slots, slot_for_run_id};
+use crate::burn_quiet_zone::{
+    bordered_origin, locate_burn_box, near_white_threshold, tight_border,
+};
+use crate::burn_regions::{
+    node_burn_in_own_slot, recovery_crop, recovery_slots, slot_for_run_id, slot_rect,
+};
+use crate::colour_scale::Rect;
 use crate::probe::burn_echo::{reads_in_frame, LocatedPayload};
 use crate::probe::payload::Payload;
-use crate::probe::qr::{decode_qr_luma_all_reads, merge_payloads};
+use crate::probe::qr::{decode_qr_luma_all_reads, merge_payloads, otsu_threshold};
 use crate::probe::recording_latency::{AUX_TICK_RUN_ID, BURN_RUN_ID_SONGPLAYER};
-use image::GrayImage;
+use image::{GrayImage, Luma};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// The upscale factor of the second, conditional look at a slot crop. The 1x crop already reads
@@ -115,11 +127,14 @@ pub fn burn_region_passes(img: &GrayImage, missing_run_ids: &[u32], out: &mut Ve
         // Reads in frame pixels, so the issue-1367 own-slot check below sees where they sit.
         let first = reads_in_frame(decode_qr_luma_all_reads(crop.clone()), r.x, r.y, 1.0, 1.0);
         // One slot carries one burn: if the 1x look read THIS slot's burn under a run_id that is
-        // not missing (for example the deployed camera while the others are "missing"), a 2x
-        // look cannot find a missing one there.
-        let slot_occupied = first
-            .iter()
-            .any(|l| slot_for_run_id(l.payload.run_id) == Some(slot));
+        // not missing (for example the deployed camera while the others are "missing"), neither
+        // the tight-box look nor the 2x look can find a missing one there.
+        let holds_slot_burn = |reads: &[LocatedPayload]| {
+            reads
+                .iter()
+                .any(|l| slot_for_run_id(l.payload.run_id) == Some(slot))
+        };
+        let mut slot_occupied = holds_slot_burn(&first);
         let keep_wanted = |reads: Vec<LocatedPayload>| -> Vec<Payload> {
             reads
                 .into_iter()
@@ -131,7 +146,18 @@ pub fn burn_region_passes(img: &GrayImage, missing_run_ids: &[u32], out: &mut Ve
                 .collect()
         };
         let mut found = keep_wanted(first);
+        let mut look = "1x";
         if found.is_empty() && !slot_occupied {
+            // issue 1367: the burn's own white box, decoded alone. The slot's design burn side
+            // sets the accepted box size.
+            let side = slot_rect(slot, w, h).map_or(0, |s| s.w);
+            let tight = tight_box_reads(&crop, r, side);
+            slot_occupied = holds_slot_burn(&tight);
+            found = keep_wanted(tight);
+            look = "tight-box";
+        }
+        if found.is_empty() && !slot_occupied {
+            look = "2x";
             let upscaled = image::imageops::resize(
                 &crop,
                 r.w * BURN_REGION_UPSCALE,
@@ -155,12 +181,55 @@ pub fn burn_region_passes(img: &GrayImage, missing_run_ids: &[u32], out: &mut Ve
             tracing::debug!(
                 slot = ?slot,
                 added,
+                look,
                 crop = ?r,
                 "issue 1370: burn-isolated slot crop recovered node burn(s) the plain + tile \
                  passes missed"
             );
         }
     }
+}
+
+/// issue 1367 — the tight-box look at one slot crop: locate the burn's white quiet-zone box inside
+/// `crop` ([`locate_burn_box`], sized by the slot's design burn side `expected_side`), copy exactly
+/// that box into a white image with a border of about four modules ([`tight_border`]), and decode
+/// it plain, then Otsu ([`decode_qr_luma_all_reads`]). `crop_rect` is where `crop` sits on the
+/// frame; the reads come back in frame pixels, so the caller's own-slot check applies to them.
+///
+/// Empty when no box inside the size band is found: nothing is decoded then. The box never leaves
+/// the crop, so this cannot read anything the slot crop does not hold.
+pub fn tight_box_reads(
+    crop: &GrayImage,
+    crop_rect: Rect,
+    expected_side: u32,
+) -> Vec<LocatedPayload> {
+    let mut hist = [0u64; 256];
+    for p in crop.pixels() {
+        hist[usize::from(p.0[0])] += 1;
+    }
+    let near_white = near_white_threshold(&hist, otsu_threshold(&hist));
+    let Some(b) = locate_burn_box(
+        crop.as_raw(),
+        crop.width(),
+        crop.height(),
+        near_white,
+        expected_side,
+    ) else {
+        return Vec::new();
+    };
+    let border = tight_border(b);
+    let mut bordered = GrayImage::from_pixel(b.w + 2 * border, b.h + 2 * border, Luma([255u8]));
+    let boxed = image::imageops::crop_imm(crop, b.x, b.y, b.w, b.h).to_image();
+    image::imageops::replace(&mut bordered, &boxed, i64::from(border), i64::from(border));
+    let (ox, oy) = bordered_origin(crop_rect.x, crop_rect.y, b, border);
+    decode_qr_luma_all_reads(bordered)
+        .into_iter()
+        .map(|l| LocatedPayload {
+            payload: l.payload,
+            cx: ox + l.cx,
+            cy: oy + l.cy,
+        })
+        .collect()
 }
 
 /// Log ONCE per process when an expected burn run_id is not a reserved id at all (an operator
@@ -348,6 +417,84 @@ mod tests {
         let mut out = already.clone();
         recover_missing_burns(&luma, &[BURN_RUN_ID_STRIH], &[], &mut out);
         assert_eq!(out, already);
+    }
+
+    /// A dark 1920x1080 frame (camera picture stand-in) with `burn` blitted where the camera burn
+    /// writer puts it (`qr::cam1_burn_origin` of the rendered QR), or no burn at all. The painter
+    /// canvas is white, which would merge with the quiet zone, so these tests use a dark one.
+    fn dark_frame_with_camera_burn(burn: Option<&Payload>) -> GrayImage {
+        let (w, h) = (1920u32, 1080u32);
+        let mut luma = GrayImage::from_pixel(w, h, Luma([40u8]));
+        if let Some(b) = burn {
+            let qr = render_payload_qr(b, CAM1_BURN_QR_PX);
+            let (ox, oy) = cam1_burn_origin(w, h, qr.width(), qr.height());
+            blit(&mut luma, b, CAM1_BURN_QR_PX, ox, oy);
+        }
+        luma
+    }
+
+    /// The camera slot's recovery crop of `luma` and where it sits on the frame.
+    fn camera_crop(luma: &GrayImage) -> (GrayImage, Rect) {
+        let r = recovery_crop(BurnSlot::CameraCapture, luma.width(), luma.height()).unwrap();
+        (
+            image::imageops::crop_imm(luma, r.x, r.y, r.w, r.h).to_image(),
+            r,
+        )
+    }
+
+    #[test]
+    fn the_tight_box_reads_the_rendered_burn_and_places_it_on_the_frame_1367() {
+        // The writer renders the 320 px request as a 287 px version-4 code at (816, 769); the
+        // tight box finds that box and maps the read back to the burn centre.
+        let cam2 = p(BURN_RUN_ID_CAM2, 43775, 1_790_467_880_086_585_221);
+        let luma = dark_frame_with_camera_burn(Some(&cam2));
+        let side = render_payload_qr(&cam2, CAM1_BURN_QR_PX).width();
+        assert!(
+            side < CAM_BURN_QR_PX,
+            "the rendered burn ({side} px) is smaller than the 320 px slot"
+        );
+        let (crop, r) = camera_crop(&luma);
+        let reads = tight_box_reads(&crop, r, CAM_BURN_QR_PX);
+        assert!(!reads.is_empty(), "the tight box must read the burn");
+        let (ox, oy) = cam1_burn_origin(1920, 1080, side, side);
+        let (cx, cy) = (
+            f64::from(ox) + f64::from(side) / 2.0,
+            f64::from(oy) + f64::from(side) / 2.0,
+        );
+        // rqrr's grid centre (the mean of its four corners) sits about half a module off the
+        // ideal centre (963, 916 vs 959.5, 912.5 on the real frames); allow one 7 px module.
+        for l in &reads {
+            assert_eq!(l.payload, cam2);
+            assert!(
+                (l.cx - cx).abs() < 8.0 && (l.cy - cy).abs() < 8.0,
+                "read at ({}, {}) must map to the burn centre ({cx}, {cy})",
+                l.cx,
+                l.cy
+            );
+            assert!(node_burn_in_own_slot(cam2.run_id, l.cx, l.cy, 1920, 1080));
+        }
+    }
+
+    #[test]
+    fn a_white_box_outside_the_size_band_is_never_decoded_1367() {
+        // The same crisp burn, but a slot that expects a 400 px burn (band 320..420): the 287 px
+        // box is out of band, so nothing is decoded.
+        let luma = dark_frame_with_camera_burn(Some(&p(BURN_RUN_ID_CAM2, 1, 1)));
+        let (crop, r) = camera_crop(&luma);
+        assert!(!tight_box_reads(&crop, r, CAM_BURN_QR_PX).is_empty());
+        assert!(tight_box_reads(&crop, r, 400).is_empty());
+    }
+
+    #[test]
+    fn a_slot_without_a_burn_reads_nothing_in_the_tight_box_1367() {
+        // No burn in the camera slot: no white box, nothing decoded, and the whole recovery adds
+        // nothing.
+        let luma = dark_frame_with_camera_burn(None);
+        let (crop, r) = camera_crop(&luma);
+        assert!(tight_box_reads(&crop, r, CAM_BURN_QR_PX).is_empty());
+        let mut out = Vec::new();
+        burn_region_passes(&luma, &CAMERA_IDS, &mut out);
+        assert!(out.is_empty(), "{out:?}");
     }
 
     // ---- parity pins: the Tier-0 slot table vs the probe-side writers and ids ----

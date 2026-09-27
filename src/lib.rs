@@ -618,6 +618,11 @@ pub mod aux_tick;
 // to the shipped burn-geom.hpp by tests/burn_regions_cpp_parity_1370.rs; the camera slot and the
 // run_id map by probe-gated tests in burn_region_decode.rs.
 pub mod burn_regions;
+// issue 1367 — find a node burn's white quiet-zone box inside its slot crop (pure, Tier-0 beside
+// burn_regions). The probe-gated slot recovery decodes that box alone inside a white border when
+// the fixed slot crop reads nothing: the crop models the camera burn at 320 px, the writer
+// renders it 287 px, and a camera filming an OBS multiview puts QR content in the strips around it.
+pub mod burn_quiet_zone;
 // #1141 — head-end OPTICAL blur/shutter preflight: pure crate-root classifier (Tier-0) over
 // the running service's `rough=` capture telemetry, consumed by scripts/lib/optical-preflight.sh.
 pub mod optical_preflight;
