@@ -161,20 +161,7 @@ pub struct Pacing {
     pub discarded_samples: u64,
     pub resyncs: u64,
     pub late_max_ns: u64,
-    // RED stub state (issue 1372 decision): the overflow limit and the 2 s trim window.
-    overflow_samples: u64,
-    trim_threshold_samples: u64,
-    win_open: bool,
-    win_start_ns: u64,
-    win_min_samples: u64,
 }
-
-// RED stub (issue 1381): the issue-1372 decision behind the fixed-timeline API, so the new tests
-// compile and fail on BEHAVIOUR. An underflow stops the schedule and re-anchors, above target +
-// 200 ms the oldest audio is dropped, a sustained excess is trimmed. The GREEN commit replaces it.
-const STUB_OVERFLOW_HEADROOM_MS: u64 = 200;
-const STUB_TRIM_WINDOW_NS: u64 = 2_000_000_000;
-const STUB_TRIM_HYSTERESIS_MIN_MS: u64 = 20;
 
 impl Pacing {
     pub fn new(target_ms: i64, packet_samples: u32, rate: u32) -> Self {
@@ -207,11 +194,6 @@ impl Pacing {
             discarded_samples: 0,
             resyncs: 0,
             late_max_ns: 0,
-            overflow_samples: 0,
-            trim_threshold_samples: 0,
-            win_open: false,
-            win_start_ns: 0,
-            win_min_samples: 0,
         };
         p.set_target(clamp_target_ms(target_ms));
         p
@@ -221,10 +203,6 @@ impl Pacing {
         self.target_ms = target_ms;
         self.target_ns = u64::from(target_ms) * NS_PER_MS;
         self.target_samples = ms_to_samples(u64::from(target_ms), self.rate);
-        self.overflow_samples =
-            self.target_samples + ms_to_samples(STUB_OVERFLOW_HEADROOM_MS, self.rate);
-        let hysteresis_ms = (u64::from(target_ms) / 2).max(STUB_TRIM_HYSTERESIS_MIN_MS);
-        self.trim_threshold_samples = self.target_samples + ms_to_samples(hysteresis_ms, self.rate);
     }
 
     /// A new target (an output setting value) while the output exists. Running: a higher target
@@ -244,7 +222,6 @@ impl Pacing {
                 self.pending_drop_samples += ms_to_samples(u64::from(old_ms - new_ms), self.rate);
             }
         }
-        self.win_open = false;
     }
 
     /// The deadline of slot `n` of the schedule.
@@ -257,22 +234,57 @@ impl Pacing {
         self.target_samples.max(u64::from(self.packet_samples))
     }
 
+    /// The first slot at or after `now_ns` (never before the next unsent one).
+    fn first_slot_at_or_after(&self, now_ns: u64) -> u64 {
+        let mut k = if now_ns > self.t0_ns {
+            ns_to_samples(now_ns - self.t0_ns, self.rate) / u64::from(self.packet_samples)
+        } else {
+            0
+        };
+        k = k.max(self.n_sent);
+        while self.deadline_ns(k) < now_ns {
+            k += 1;
+        }
+        k
+    }
+
+    /// After a packet that virtually left at `v`: the next one may leave half a packet later,
+    /// until that is no later than its own deadline (caught up).
+    fn catch_up_from(&mut self, v: u64) {
+        let next = v + self.half_packet_ns;
+        self.catchup_ns = if next > self.deadline_ns(self.n_sent) {
+            next
+        } else {
+            0
+        };
+    }
+
     /// The decision for a wake at `now_ns` with `buffered` samples waiting.
     pub fn step(&mut self, now_ns: u64, buffered: u64) -> Step {
         let ps = u64::from(self.packet_samples);
         let mut d = Step::default();
         let mut avail = buffered;
 
-        if avail > self.overflow_samples {
-            let excess = avail - self.target_samples;
-            d.drop_samples = excess - excess % ps;
-            avail -= d.drop_samples;
-            self.discarded_samples += d.drop_samples;
+        if self.running
+            && (avail > self.ceiling_samples
+                || now_ns > self.deadline_ns(self.n_sent) + self.ceiling_ns)
+        {
+            // The hard ceiling: one counted resync back to the target, on the grid.
+            let excess = avail.saturating_sub(self.target_samples);
+            let t = excess - excess % ps;
+            avail -= t;
+            d.drop_samples = t;
+            self.discarded_samples += t;
+            self.resyncs += 1;
             self.discontinuities += 1;
-            self.win_open = false;
-        }
-
-        if !self.running {
+            self.n_sent = self.first_slot_at_or_after(now_ns);
+            self.catchup_ns = 0;
+            self.starved = false;
+            self.silent = false;
+            self.stale_samples = 0;
+            self.repay_ready = false;
+            self.pending_drop_samples = 0;
+        } else if !self.running {
             if !self.primed {
                 if avail < ps {
                     d.wait_audio = true;
@@ -289,61 +301,90 @@ impl Pacing {
             self.running = true;
             self.t0_ns = start;
             self.n_sent = 0;
-            self.win_open = false;
-        } else if self.pending_drop_samples > 0 {
-            let mut t = self
-                .pending_drop_samples
-                .min(avail.saturating_sub(self.target_samples));
-            t -= t % ps;
-            avail -= t;
-            d.drop_samples += t;
-            self.pending_drop_samples = 0;
-            if t > 0 {
-                self.discarded_samples += t;
-                self.discontinuities += 1;
-            }
-            self.win_open = false;
-        } else if self.win_open && now_ns.saturating_sub(self.win_start_ns) >= STUB_TRIM_WINDOW_NS {
-            if self.win_min_samples > self.trim_threshold_samples {
-                let excess = (self.win_min_samples - self.target_samples)
-                    .min(avail.saturating_sub(self.target_samples));
-                let t = excess - excess % ps;
+            self.catchup_ns = 0;
+            self.starved = false;
+            self.silent = false;
+            self.stale_samples = 0;
+            self.repay_ready = false;
+        } else {
+            if self.repay_ready {
+                // the backlog is here: the debt goes in one drop of whole packets
+                let t = self.stale_samples.min(avail - avail % ps);
                 avail -= t;
                 d.drop_samples += t;
+                self.discarded_samples += t;
+                self.stale_samples -= t;
+                self.repay_ready = false;
+            }
+            if self.pending_drop_samples > 0 {
+                // never below the new target: a dip takes only what is above it
+                let mut t = self
+                    .pending_drop_samples
+                    .min(avail.saturating_sub(self.target_samples));
+                t -= t % ps;
+                avail -= t;
+                d.drop_samples += t;
+                self.pending_drop_samples = 0;
                 if t > 0 {
                     self.discarded_samples += t;
                     self.discontinuities += 1;
                 }
             }
-            self.win_open = false;
         }
 
-        let mut deadline = self.deadline_ns(self.n_sent);
-        while deadline <= now_ns {
-            if avail < ps {
-                self.running = false;
-                self.primed = false;
-                self.discontinuities += 1;
-                self.win_open = false;
-                d.wake_ns = 0;
-                d.wait_audio = true;
-                return d;
+        let resume = self.resume_samples();
+        loop {
+            let deadline = self.deadline_ns(self.n_sent);
+            let eligible = self.catchup_ns.max(deadline);
+            if eligible > now_ns {
+                d.wake_ns = eligible;
+                break;
             }
-            self.late_max_ns = self.late_max_ns.max(now_ns - deadline);
-            avail -= ps;
-            d.send += 1;
-            self.n_sent += 1;
-            deadline = self.deadline_ns(self.n_sent);
+            if avail >= ps && (!self.silent || avail >= resume) {
+                let late = self.starved || self.catchup_ns > deadline;
+                let v = if self.starved { now_ns } else { eligible };
+                self.starved = false;
+                self.silent = false;
+                if late {
+                    self.late_sends += 1;
+                }
+                self.late_max_ns = self.late_max_ns.max(now_ns - deadline);
+                avail -= ps;
+                d.send += 1;
+                self.n_sent += 1;
+                self.catch_up_from(v);
+            } else if self.silent || now_ns - deadline >= self.grace_ns {
+                let v = if self.silent { eligible } else { now_ns };
+                if !self.silent {
+                    // a new episode; an earlier debt never got its backlog and is forgiven
+                    self.silent = true;
+                    self.starved = false;
+                    self.discontinuities += 1;
+                    self.stale_samples = 0;
+                    self.repay_ready = false;
+                }
+                self.late_max_ns = self.late_max_ns.max(now_ns - deadline);
+                self.silence_samples += ps;
+                self.stale_samples += ps;
+                d.silence += 1;
+                self.n_sent += 1;
+                self.catch_up_from(v);
+            } else {
+                self.starved = true;
+                d.wake_ns = deadline + self.grace_ns;
+                d.wait_audio = true;
+                break;
+            }
         }
 
-        if self.win_open {
-            self.win_min_samples = self.win_min_samples.min(avail);
-        } else {
-            self.win_open = true;
-            self.win_start_ns = now_ns;
-            self.win_min_samples = avail;
+        if !self.starved
+            && !self.silent
+            && self.catchup_ns == 0
+            && self.stale_samples > 0
+            && avail >= self.target_samples + self.stale_samples
+        {
+            self.repay_ready = true;
         }
-        d.wake_ns = deadline;
         d
     }
 

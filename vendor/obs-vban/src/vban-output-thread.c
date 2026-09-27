@@ -245,7 +245,8 @@ static void convert_from_packet(struct output_thread_s *t, struct audio_data *pk
 }
 
 /* camera-box issue 1372: one VBAN packet of nbs samples from the head of the converted buffer.
- * The payload bytes and the nuFrame counter are exactly what 0.3.1 sent for the same samples. */
+ * The payload bytes are exactly what 0.3.1 sent for the same samples; nuFrame counts every packet
+ * and skips the packets the pacer dropped (issue 1381). */
 static void send_packet(struct output_thread_s *t, char *vban_buf, size_t nbs, size_t sample_size,
 			struct sockaddr_in *addr)
 {
@@ -260,6 +261,19 @@ static void send_packet(struct output_thread_s *t, char *vban_buf, size_t nbs, s
 	blog(LOG_DEBUG, "sent packet nuFrame: %d", t->header->nuFrame);
 #endif
 
+	t->header->nuFrame++;
+}
+
+/* camera-box issue 1381: one packet of nbs samples of digital silence, for a slot whose audio has
+ * not come within the pacing grace. All-zero bytes are silence in every sample format this output
+ * sends (16/24/32-bit integer, 32-bit float). It takes the next nuFrame like any other packet. */
+static void send_silence(struct output_thread_s *t, char *vban_buf, size_t nbs, size_t sample_size,
+			 struct sockaddr_in *addr)
+{
+	t->header->format_nbs = (uint8_t)(nbs - 1);
+	size_t n = nbs * sample_size;
+	memset(t->payload, 0, n);
+	sendto(t->vban_socket, vban_buf, VBAN_HEADER_SIZE + n, 0, (struct sockaddr *)addr, (socklen_t)sizeof(*addr));
 	t->header->nuFrame++;
 }
 
@@ -347,12 +361,14 @@ static void free_blocks(struct darray *blocks)
 	blocks->num = 0;
 }
 
-/* camera-box issue 1372: the send thread is paced. Every audio block is converted into the jitter
- * buffer (t.buffer) the moment it arrives, and vban_pacing_step() (vban-pacing.h) decides when and
- * how many packets leave: packet n at t0 + n * packet_duration on the disciplined os_gettime_ns(),
- * every due packet per wake, an underflow waited out (no zero-fill), an overflow or a sustained
- * excess dropped from the oldest, all counted. The thread sleeps to the next deadline with
- * pacing_sleep_until(). */
+/* camera-box issues 1372 + 1381: the send thread is paced on a fixed timeline. Every audio block
+ * is converted into the jitter buffer (t.buffer) the moment it arrives, and vban_pacing_step()
+ * (vban-pacing.h) decides when and how many packets leave: packet n at t0 + n * packet_duration on
+ * the disciplined os_gettime_ns(), every due packet per wake; a slot whose audio is late waits for
+ * it up to the grace (the thread waits on the audio event, at most until the grace ends), then
+ * silence goes out on schedule; the stale samples are dropped once when they arrive, and the
+ * frame counter skips every dropped packet so the receiver counts the loss. Otherwise the thread
+ * sleeps to the next deadline with pacing_sleep_until(). */
 static void vban_out_loop(struct vban_out_s *v)
 {
 	char vban_buf[VBAN_PROTOCOL_MAX_SIZE];
@@ -376,6 +392,7 @@ static void vban_out_loop(struct vban_out_s *v)
 	bool pacing_ready = false;
 	int64_t pacing_target_ms = 0;
 	uint64_t wake_ns = 0;
+	bool wait_audio = true;
 	uint64_t next_log_ns = 0;
 
 	struct pacing_sleeper sleeper;
@@ -386,10 +403,10 @@ static void vban_out_loop(struct vban_out_s *v)
 		struct sockaddr_in addr;
 		addr.sin_family = AF_INET;
 
-		if (wake_ns)
-			pacing_sleep_until(&sleeper, wake_ns);
+		if (wait_audio)
+			os_event_timedwait(v->event, vban_pacing_wait_ms(os_gettime_ns(), wake_ns));
 		else
-			os_event_timedwait(v->event, VBAN_PACING_IDLE_WAIT_MS);
+			pacing_sleep_until(&sleeper, wake_ns);
 
 		pthread_mutex_lock(&v->mutex);
 
@@ -429,10 +446,10 @@ static void vban_out_loop(struct vban_out_s *v)
 			pacing_target_ms = target_ms;
 			next_log_ns = now + VBAN_PACING_LOG_INTERVAL_NS;
 			blog(LOG_INFO,
-			     "obs-vban pacing-config: target_ms=%" PRIu32 " packet_samples=%" PRIu32 " rate=%" PRIu32
-			     " counters=reset stream='%.*s'",
-			     pacing.target_ms, pacing.packet_samples, pacing.rate, (int)VBAN_STREAM_NAME_SIZE,
-			     t.header->streamname);
+			     "obs-vban pacing-config: target_ms=%" PRIu32 " grace_ms=%" PRIu64 " packet_samples=%" PRIu32
+			     " rate=%" PRIu32 " counters=reset stream='%.*s'",
+			     pacing.target_ms, (uint64_t)(pacing.grace_ns / VBAN_PACING_NS_PER_MS), pacing.packet_samples, pacing.rate,
+			     (int)VBAN_STREAM_NAME_SIZE, t.header->streamname);
 		} else if (pacing_target_ms != target_ms &&
 			   vban_pacing_clamp_target_ms(target_ms) == pacing.target_ms) {
 			/* a new setting value that clamps to the same target: nothing to move */
@@ -442,10 +459,10 @@ static void vban_out_loop(struct vban_out_s *v)
 			vban_pacing_retarget(&pacing, target_ms);
 			pacing_target_ms = target_ms;
 			blog(LOG_INFO,
-			     "obs-vban pacing-config: target_ms=%" PRIu32 " packet_samples=%" PRIu32 " rate=%" PRIu32
-			     " counters=kept stream='%.*s'",
-			     pacing.target_ms, pacing.packet_samples, pacing.rate, (int)VBAN_STREAM_NAME_SIZE,
-			     t.header->streamname);
+			     "obs-vban pacing-config: target_ms=%" PRIu32 " grace_ms=%" PRIu64 " packet_samples=%" PRIu32
+			     " rate=%" PRIu32 " counters=kept stream='%.*s'",
+			     pacing.target_ms, (uint64_t)(pacing.grace_ns / VBAN_PACING_NS_PER_MS), pacing.packet_samples, pacing.rate,
+			     (int)VBAN_STREAM_NAME_SIZE, t.header->streamname);
 		}
 
 		const struct vban_pacing_step d = vban_pacing_step(&pacing, now, (uint64_t)(t.buffer.num / sample_size));
@@ -454,22 +471,33 @@ static void vban_out_loop(struct vban_out_s *v)
 			size_t n = (size_t)d.drop_samples * sample_size;
 			memmove(t.buffer.array, (char *)t.buffer.array + n, t.buffer.num - n);
 			t.buffer.num -= n;
+			/* camera-box issue 1381: a drop is always whole packets; skipping their frame numbers
+			 * lets the receiver's own loss counter see it */
+			t.header->nuFrame += (uint32_t)(d.drop_samples / nbs);
 		}
 
 		for (uint32_t i = 0; i < d.send; i++)
 			send_packet(&t, vban_buf, nbs, sample_size, &addr);
+		for (uint32_t i = 0; i < d.silence; i++)
+			send_silence(&t, vban_buf, nbs, sample_size, &addr);
 
 		wake_ns = d.wake_ns;
+		wait_audio = d.wait_audio;
 
 		if (now >= next_log_ns) {
 			const uint64_t depth_samples = t.buffer.num / sample_size;
 			const uint64_t late_ns = vban_pacing_take_late_max_ns(&pacing);
+			const double per_ms = 1000.0 / (double)pacing.rate;
+			const uint8_t *ip = (const uint8_t *)&addr.sin_addr.s_addr;
 			blog(LOG_INFO,
-			     "obs-vban pacing: depth_ms=%.1f underflows=%" PRIu64 " overflows=%" PRIu64
-			     " late_max_ms=%.3f trims=%" PRIu64 " target_ms=%" PRIu32 " stream='%.*s'",
-			     (double)depth_samples * 1000.0 / (double)pacing.rate, pacing.underflows, pacing.overflows,
-			     (double)late_ns / 1000000.0, pacing.trims, pacing.target_ms, (int)VBAN_STREAM_NAME_SIZE,
-			     t.header->streamname);
+			     "obs-vban pacing: depth_ms=%.1f late_sends=%" PRIu64 " discontinuities=%" PRIu64
+			     " silence_ms=%.1f discarded_ms=%.1f resyncs=%" PRIu64 " late_max_ms=%.3f target_ms=%" PRIu32
+			     " dest=%u.%u.%u.%u:%u stream='%.*s'",
+			     (double)depth_samples * per_ms, pacing.late_sends, pacing.discontinuities,
+			     (double)pacing.silence_samples * per_ms, (double)pacing.discarded_samples * per_ms,
+			     pacing.resyncs, (double)late_ns / 1000000.0, pacing.target_ms, (unsigned)ip[0],
+			     (unsigned)ip[1], (unsigned)ip[2], (unsigned)ip[3], (unsigned)ntohs(addr.sin_port),
+			     (int)VBAN_STREAM_NAME_SIZE, t.header->streamname);
 			next_log_ns = now + VBAN_PACING_LOG_INTERVAL_NS;
 		}
 	}
