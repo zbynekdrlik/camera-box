@@ -27,6 +27,12 @@
 //!   only on R, R's first two markers (a chain needs three to count) are therefore not paired.
 //! - The pick is re-applied after every push, so a channel that stops decoding hands over once its
 //!   markers age out of the window and its cluster drops below the floor.
+//! - A pick switch never pairs one physical marker twice: when the newly chosen channel's copy of
+//!   the marker the previous channel just returned arrives (same index, within one dedup gap), it is
+//!   dropped. Without this, R's copy of the marker that tips the pick to R came back 10.17 ms after
+//!   L's copy of it (two of four markers on the committed 2 s fixture).
+//! - Each channel keeps at most [`DOCK_CHANNEL_PICK_MAX_MARKERS`] (the newest), so the O(n²)
+//!   cluster on the OBS audio thread stays bounded under a decode flood.
 
 use crate::av_sync_dock::{StreamingMarkerDecoder, DOCK_QPSK_THRESHOLD};
 use crate::qpsk_channel_select::pick_marker_channel;
@@ -63,6 +69,10 @@ pub struct ChannelMarkerPicker {
     sample_rate: u32,
     window_samples: u64,
     min_clusters: u64,
+    /// The decoders' dedup gap: one physical marker's copies on two channels lie within it.
+    min_gap: u64,
+    /// The last marker `(absolute sample index, index)` this picker returned, from any channel.
+    last_returned: Option<(u64, u8)>,
 }
 
 impl ChannelMarkerPicker {
@@ -88,6 +98,8 @@ impl ChannelMarkerPicker {
             sample_rate: params.sample_rate,
             window_samples,
             min_clusters,
+            min_gap,
+            last_returned: None,
         }
     }
 
@@ -110,7 +122,8 @@ impl ChannelMarkerPicker {
 
     /// Decode one callback's planar audio (`planes[c]` is channel c; every plane has the same
     /// length) on every channel, age the per-channel histories, re-apply the pick, and return the
-    /// CHOSEN channel's newly decoded markers `(absolute sample index, index)`.
+    /// CHOSEN channel's newly decoded markers `(absolute sample index, index)`, minus the other
+    /// channel's copy of the marker this picker returned last (a pick switch, module docs).
     ///
     /// Panics when `planes.len() != self.channels()`: the caller hands one plane per channel.
     pub fn push(&mut self, planes: &[&[f32]]) -> Vec<(u64, u8)> {
@@ -137,6 +150,10 @@ impl ChannelMarkerPicker {
                 history.pop_front();
                 changed = true;
             }
+            while history.len() > DOCK_CHANNEL_PICK_MAX_MARKERS {
+                history.pop_front();
+                changed = true;
+            }
             if changed {
                 let markers: Vec<(f64, u8)> = history
                     .iter()
@@ -149,7 +166,14 @@ impl ChannelMarkerPicker {
         if fresh.is_empty() {
             return Vec::new();
         }
-        fresh.swap_remove(self.chosen)
+        let mut out = fresh.swap_remove(self.chosen);
+        if let Some((last_abs, last_idx)) = self.last_returned {
+            out.retain(|&(abs, idx)| !(idx == last_idx && abs <= last_abs + self.min_gap));
+        }
+        if let Some(&last) = out.last() {
+            self.last_returned = Some(last);
+        }
+        out
     }
 
     /// Number of decoded channels.

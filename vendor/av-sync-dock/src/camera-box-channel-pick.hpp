@@ -164,6 +164,12 @@ struct ChannelMarkerPicker {
 	uint32_t sample_rate;
 	uint64_t window_samples;
 	uint64_t min_clusters;
+	/* The decoders' dedup gap: one physical marker's copies on two channels lie within it. */
+	uint64_t min_gap;
+	/* The last marker (absolute sample index, index) this picker returned, from any channel. */
+	bool have_last_returned;
+	uint64_t last_returned_abs;
+	uint8_t last_returned_idx;
 	/* The decode diagnostics summed over every channel (cumulative, monotonic across a
 	 * reset_window()); a mono input reads its one decoder's stats. */
 	CbDecodeStats stats;
@@ -171,7 +177,8 @@ struct ChannelMarkerPicker {
 	ChannelMarkerPicker(size_t channels, uint32_t sr, uint32_t f, uint32_t c, double thr, size_t cap,
 			    uint64_t gap, uint64_t window, uint64_t min_cl)
 		: history(channels), clusters(channels, 0), chosen(0), pushed(0), sample_rate(sr),
-		  window_samples(window), min_clusters(min_cl)
+		  window_samples(window), min_clusters(min_cl), min_gap(gap), have_last_returned(false),
+		  last_returned_abs(0), last_returned_idx(0)
 	{
 		decoders.reserve(channels);
 		for (size_t i = 0; i < channels; i++)
@@ -192,7 +199,10 @@ struct ChannelMarkerPicker {
 
 	/* Decode one callback's planar audio (planes[i] is channel i, `frames` samples each) on every
 	 * channel, age the histories, re-apply the pick, and return the CHOSEN channel's newly decoded
-	 * markers (absolute sample index, index). `planes` must hold channels() pointers. */
+	 * markers (absolute sample index, index). `planes` must hold channels() pointers. A pick switch
+	 * never returns one physical marker twice: the newly chosen channel's copy of the marker this
+	 * picker returned last (same index, within one dedup gap) is dropped. Each channel keeps at most
+	 * CB_CHANNEL_PICK_MAX_MARKERS (the newest). */
 	std::vector<std::pair<uint64_t, uint8_t>> push(const float *const *planes, size_t frames)
 	{
 		std::vector<std::vector<std::pair<uint64_t, uint8_t>>> fresh;
@@ -207,6 +217,10 @@ struct ChannelMarkerPicker {
 			bool changed = !fresh[i].empty();
 			h.insert(h.end(), fresh[i].begin(), fresh[i].end());
 			while (!h.empty() && h.front().first < cutoff) {
+				h.pop_front();
+				changed = true;
+			}
+			while (h.size() > CB_CHANNEL_PICK_MAX_MARKERS) {
 				h.pop_front();
 				changed = true;
 			}
@@ -227,9 +241,22 @@ struct ChannelMarkerPicker {
 			sum.crc_fail += decoders[i].stats.crc_fail;
 		}
 		stats = sum;
+		std::vector<std::pair<uint64_t, uint8_t>> out;
 		if (fresh.empty())
-			return std::vector<std::pair<uint64_t, uint8_t>>();
-		return fresh[chosen];
+			return out;
+		for (size_t k = 0; k < fresh[chosen].size(); k++) {
+			const std::pair<uint64_t, uint8_t> &m = fresh[chosen][k];
+			if (have_last_returned && m.second == last_returned_idx &&
+			    m.first <= last_returned_abs + min_gap)
+				continue;
+			out.push_back(m);
+		}
+		if (!out.empty()) {
+			have_last_returned = true;
+			last_returned_abs = out.back().first;
+			last_returned_idx = out.back().second;
+		}
+		return out;
 	}
 
 	/* The #1153 dead-pairing reset: every decoder drops its window and dedup anchor (origin
