@@ -1,4 +1,4 @@
-//! Issue 1372 — EXECUTABLE C-vs-Rust parity gate for the obs-vban send pacing.
+//! Issues 1372 + 1381 — EXECUTABLE C-vs-Rust parity gate for the obs-vban send pacing.
 //!
 //! The patched obs-vban send thread (`vendor/obs-vban/src/vban-output-thread.c`) calls the pure
 //! decision in `vendor/obs-vban/src/vban-pacing.h` on every wake. That plugin only compiles on the
@@ -6,11 +6,14 @@
 //!
 //! 1. It `#include`s the SHIPPED header by its absolute path (nothing is retyped) into a driver
 //!    and compiles it with `cc -Wall -Wextra -Wconversion -Wsign-conversion -Wformat=2 -Werror`.
-//! 2. It drives scripted wakes (`now`, `buffered`) that land on every boundary: a packet one
-//!    sample short, exactly one packet, the anchor instant and one ns before it, a deadline and
-//!    one ns before it, several due packets in one wake, an underflow part way through a burst,
-//!    exactly the overflow limit and one sample over it, and other rates, packet sizes and targets
-//!    (clamped ones included).
+//! 2. It drives scripted wakes (`now`, `buffered`) that land on every boundary of the fixed
+//!    timeline (issue 1381): a packet one sample short, the anchor instant and one ns before it, a
+//!    deadline and one ns before it, several due packets in one wake, a slot waiting for its audio
+//!    one ns before and exactly at the grace end, the catch-up cap instants, a silence episode one
+//!    sample below and exactly at the resume depth, the stale repay one sample short and exactly
+//!    met, the buffer ceiling and one sample over it, the schedule ceiling and one ns over it, and
+//!    other rates, packet sizes and targets (clamped ones included), retargets while running,
+//!    starved and silent.
 //! 3. It requires the C decision and state after every wake to equal the Tier-0 authority
 //!    `src/vban_pacing.rs` exactly.
 //!
@@ -32,7 +35,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use vban_pacing::{clamp_target_ms, samples_to_ns, Pacing, Step, TRIM_WINDOW_NS};
+use vban_pacing::{clamp_target_ms, ns_to_samples, samples_to_ns, wait_ms, Pacing, Step};
 
 const HEADER: &str = "vendor/obs-vban/src/vban-pacing.h";
 
@@ -46,14 +49,6 @@ struct Wake {
     now: u64,
     buffered: u64,
     retarget: Option<i64>,
-}
-
-fn w(now: u64, buffered: u64) -> Wake {
-    Wake {
-        now,
-        buffered,
-        retarget: None,
-    }
 }
 
 /// One scripted output: its config and the wakes it sees.
@@ -82,7 +77,7 @@ impl Rng {
 }
 
 /// Builds a wake script while running the Rust model, so the next wake can land on the model's
-/// own deadlines and window boundaries.
+/// own deadlines, grace ends, catch-up instants and repay edges.
 struct Builder {
     p: Pacing,
     wakes: Vec<Wake>,
@@ -134,24 +129,42 @@ fn steered_script(seed: u64, target_ms: i64, packet_samples: u32, rate: u32, n: 
     let targets = [-5i64, 0, 19, 20, 30, 64, 90, 200, 250];
     let (mut now, mut wake) = (1_000_000_000u64, 0u64);
     for _ in 0..n {
-        let candidate = match (wake != 0, rng.below(8)) {
-            (true, 0) | (true, 1) => wake,
-            (true, 2) => wake.saturating_sub(1),
-            (true, 3) => wake + rng.below(3_000_000),
-            (true, 4) => wake + rng.below(40_000_000),
+        let p = &bld.p;
+        let deadline = p.deadline_ns(p.n_sent);
+        let (running, grace, ceiling_ns, catchup) =
+            (p.running, p.grace_ns, p.ceiling_ns, p.catchup_ns);
+        let (target, stale, resume) = (p.target_samples, p.stale_samples, p.resume_samples());
+        let ceiling = p.ceiling_samples;
+        let (pick, rare, small, big) = (
+            rng.below(12),
+            rng.below(8),
+            rng.below(3_000_000),
+            rng.below(40_000_000),
+        );
+        let candidate = match pick {
+            0 | 1 if wake != 0 => wake,
+            2 if wake != 0 => wake.saturating_sub(1),
+            3 if wake != 0 => wake + small,
+            4 if wake != 0 => wake + big,
+            5 if running => deadline + grace,
+            6 if running => (deadline + grace).saturating_sub(1),
+            7 if running && rare == 0 => deadline + ceiling_ns + (small & 1),
+            8 if catchup != 0 => catchup,
             _ => now + rng.below(12_000_000),
         };
         now = now.max(candidate);
         let prev = bld.buffered;
-        let buffered = match rng.below(14) {
+        let buffered = match rng.below(18) {
             0 => ps.saturating_sub(1),
             1 => ps,
-            2 => bld.p.overflow_samples,
-            3 => bld.p.overflow_samples + 1,
+            2 => ceiling,
+            3 => ceiling + 1,
             4 => 0,
             5 => prev + 3 * block,
             6 => prev.saturating_sub(rng.below(ps)),
-            7 | 8 => bld.p.trim_threshold_samples + ps + rng.below(2),
+            7 => resume.saturating_sub(1),
+            8 => resume,
+            9 | 10 => target + stale + ps * rng.below(3) + rng.below(2),
             _ => prev + block * rng.below(2),
         };
         let retarget = if rng.below(20) == 0 {
@@ -166,47 +179,64 @@ fn steered_script(seed: u64, target_ms: i64, packet_samples: u32, rate: u32, n: 
 
 /// Hand-written wakes that hit each boundary in order (64 ms, 239-sample packets, 48 kHz).
 fn boundary_script() -> Script {
-    let p = Pacing::new(64, 239, 48_000);
-    let d = |n: u64| 1_064_000_000 + samples_to_ns(n * 239, 48_000);
-    let wakes = vec![
-        w(1_000_000_000, 0),
-        w(1_000_000_000, 238),
-        w(1_000_000_000, 239), // primed: anchor at 1.064 s
-        w(1_064_000_000 - 1, 4096),
-        w(1_064_000_000, 4096), // packet 0
-        w(d(1) - 1, 4096 - 239),
-        w(d(1), 4096 - 239), // packet 1
-        w(d(4), 4096 - 478), // packets 2, 3, 4 in one wake
-        w(d(5) - 1, p.overflow_samples),
-        w(d(5) - 1, p.overflow_samples + 1), // overflow: drop to the target
-        w(d(9), 239 * 2 + 5),                // packets 5, 6, then an underflow
-        w(d(9) + 1, 5),
-        w(d(9) + 2, 239), // re-primed
-        w(d(9) + 2 + 64_000_000, 239),
-    ];
-    Script {
-        target_ms: 64,
-        packet_samples: 239,
-        rate: 48_000,
-        wakes,
+    let mut b = Builder::new(64, 239, 48_000);
+    let g = b.p.grace_ns;
+    b.wake(1_000_000_000, 0, None);
+    b.wake(1_000_000_000, 238, None);
+    b.wake(1_000_000_000, 239, None); // primed: anchor at 1.064 s
+    b.wake(1_064_000_000 - 1, 4096, None);
+    b.wake(1_064_000_000, 4096, None); // packet 0
+    let d1 = b.p.deadline_ns(1);
+    b.wake(d1 - 1, 3857, None);
+    b.wake(d1, 3857, None); // packet 1
+
+    // Packets 2, 3 and 4 in one wake: the audio is there.
+    let d4 = b.p.deadline_ns(4);
+    b.wake(d4, 3618, None);
+    // Slot 5 waits for its audio; one ns before the grace end it is still short, then it comes.
+    let d5 = b.p.deadline_ns(5);
+    b.wake(d5, 100, None);
+    b.wake(d5 + g - 1, 238, None);
+    let mut next = b.wake(d5 + g - 1, 239 * 12, None).wake_ns; // a late send, capped catch-up
+    while b.p.catchup_ns != 0 {
+        next = b.wake(next, 239 * 12, None).wake_ns;
     }
+    // Starve again; exactly at the grace end with no audio: a silence episode.
+    let dn = b.p.deadline_ns(b.p.n_sent).max(next);
+    b.wake(dn, 0, None);
+    let dn = b.p.deadline_ns(b.p.n_sent);
+    next = b.wake(dn + g, 0, None).wake_ns;
+    // Silence one sample below the resume depth, then audio exactly at it.
+    let resume = b.p.resume_samples();
+    for _ in 0..30 {
+        next = b.wake(next, resume - 1, None).wake_ns;
+    }
+    next = b.wake(next, resume, None).wake_ns;
+    // Back on schedule; the repay one sample short, then exactly met, then the drop.
+    while b.p.catchup_ns != 0 {
+        next = b.wake(next, b.p.target_samples + 239, None).wake_ns;
+    }
+    let (t, stale) = (b.p.target_samples, b.p.stale_samples);
+    next = b.wake(next, t + stale + 239 - 1, None).wake_ns;
+    next = b.wake(next, t + stale + 239, None).wake_ns;
+    next = b.wake(next, t + stale + 2 * 239, None).wake_ns;
+    // The buffer ceiling exactly, then one sample over it.
+    next = b.wake(next, b.p.ceiling_samples, None).wake_ns;
+    next = b.wake(next, b.p.ceiling_samples + 1, None).wake_ns;
+    // The schedule ceiling exactly (a silence episode), then one ns over it (a resync).
+    let dn = b.p.deadline_ns(b.p.n_sent).max(next);
+    b.wake(dn + b.p.ceiling_ns, 0, None);
+    let dn = b.p.deadline_ns(b.p.n_sent);
+    b.wake(dn + b.p.ceiling_ns + 1, 0, None);
+    b.script(64, 239, 48_000)
 }
 
-/// The trim window closing one ns early and exactly on time, then target changes up, down, to
-/// the same value and to a value that clamps (64 ms, 239-sample packets, 48 kHz).
-fn trim_and_retarget_script() -> Script {
-    let mut bld = Builder::new(64, 239, 48_000);
-    let full = 12_000;
-    bld.wake(1_000_000_000, full, None);
-    bld.wake(1_064_000_000, full, None);
-    let t0 = bld.p.t0_ns;
-    let mut next = bld.p.deadline_ns(bld.p.n_sent);
-    while next < t0 + TRIM_WINDOW_NS - 1 {
-        next = bld.wake(next, full, None).wake_ns;
-    }
-    bld.wake(t0 + TRIM_WINDOW_NS - 1, full, None);
-    bld.wake(t0 + TRIM_WINDOW_NS, full, None); // the window closes: trimmed to the target
-    let mut next = bld.p.deadline_ns(bld.p.n_sent);
+/// Target changes up, down, to the same value and to a value that clamps; a large drop during a
+/// dip; and a retarget while starved and while silent (64 ms, 239-sample packets, 48 kHz).
+fn retarget_script() -> Script {
+    let mut b = Builder::new(64, 239, 48_000);
+    b.wake(1_000_000_000, 12_000, None);
+    let mut next = b.wake(1_064_000_000, 12_000, None).wake_ns;
     for rt in [
         Some(100),
         None,
@@ -219,40 +249,22 @@ fn trim_and_retarget_script() -> Script {
         Some(0),
         None,
     ] {
-        next = bld.wake(next, 6_000, rt).wake_ns;
+        next = b.wake(next, 6_000, rt).wake_ns;
     }
-    // A whole window whose minimum sits exactly ON the threshold: never trimmed.
-    let on = bld.p.trim_threshold_samples + u64::from(bld.p.packet_samples);
-    let until = next + TRIM_WINDOW_NS + 100_000_000;
-    while next < until {
-        next = bld.wake(next, on, None).wake_ns;
-    }
-    // A window closing on a wake that sees LESS than the window minimum: the trim stops at the
-    // target (review round 2), and a wake with less than a packet above the target drops nothing
-    // and counts no trim.
-    for low in [5_000, 3_100] {
-        loop {
-            let p = &bld.p;
-            let closes_high = p.win_open
-                && next >= p.win_start_ns + TRIM_WINDOW_NS
-                && p.win_min_samples > p.trim_threshold_samples;
-            if closes_high {
-                break;
-            }
-            next = bld.wake(next, 12_000, None).wake_ns;
-        }
-        next = bld.wake(next, low, None).wake_ns;
-    }
-    // A large retarget down during a dip: dropped only down to the new target.
-    next = bld.wake(next, 9_000, Some(200)).wake_ns;
-    next = bld.wake(next, 12_000, None).wake_ns;
-    next = bld.wake(next, 3_000, Some(20)).wake_ns;
-    bld.wake(next, 3_000, None);
-    bld.script(64, 239, 48_000)
+    next = b.wake(next, 9_000, Some(200)).wake_ns;
+    next = b.wake(next, 12_000, None).wake_ns;
+    next = b.wake(next, 3_000, Some(20)).wake_ns;
+    let d = b.p.deadline_ns(b.p.n_sent).max(next);
+    b.wake(d, 0, None); // starved
+    b.wake(d + 1, 0, Some(64)); // up while starved
+    let d = b.p.deadline_ns(b.p.n_sent).max(d + 1);
+    let s = b.wake(d + b.p.grace_ns, 0, None); // silent
+    b.wake(s.wake_ns, 0, Some(30)); // down while silent
+    b.script(64, 239, 48_000)
 }
 
 fn scripts() -> Vec<Script> {
-    let mut v = vec![boundary_script(), trim_and_retarget_script()];
+    let mut v = vec![boundary_script(), retarget_script()];
     let configs: [(i64, u32, u32); 8] = [
         (64, 239, 48_000),
         (20, 256, 44_100),
@@ -281,25 +293,52 @@ const NS_INPUTS: [(u64, u32); 7] = [
     (5, 0),
     (123_456_789_012, 192_000),
 ];
+const NS2S_INPUTS: [(u64, u32); 6] = [
+    (0, 48_000),
+    (4_979_166, 48_000),
+    (4_979_167, 48_000),
+    (86_400_000_000_001, 48_000),
+    (999_999_999, 44_100),
+    (7, 0),
+];
+const WAIT_INPUTS: [(u64, u64); 8] = [
+    (5, 0),
+    (5_000_000, 5_000_000),
+    (5_000_000, 4_000_000),
+    (5_000_000, 5_000_001),
+    (0, 3_000_000),
+    (0, 3_000_001),
+    (0, 10_000_000),
+    (0, 250_000_000),
+];
 
-fn line(p: &Pacing, send: u32, drop: u64, wake: u64) -> String {
+fn line(p: &Pacing, s: Step) -> String {
     format!(
-        "{send} {drop} {wake} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+        "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+        s.send,
+        s.silence,
+        s.drop_samples,
+        s.wake_ns,
+        u8::from(s.wait_audio),
         u8::from(p.running),
         u8::from(p.primed),
         p.prime_ns,
         p.t0_ns,
         p.n_sent,
-        p.underflows,
-        p.overflows,
+        p.catchup_ns,
+        u8::from(p.starved),
+        u8::from(p.silent),
+        p.stale_samples,
+        u8::from(p.repay_ready),
+        p.pending_drop_samples,
+        p.late_sends,
+        p.discontinuities,
+        p.silence_samples,
+        p.discarded_samples,
+        p.resyncs,
         p.late_max_ns,
-        p.trims,
         p.target_ms,
-        p.target_samples,
-        u8::from(p.win_open),
-        p.win_start_ns,
-        p.win_min_samples,
-        p.pending_trim_samples
+        p.target_samples
     )
 }
 
@@ -311,15 +350,23 @@ fn rust_trace(scripts: &[Script]) -> Vec<String> {
     for &(s, r) in &NS_INPUTS {
         out.push(format!("ns {}", samples_to_ns(s, r)));
     }
+    for &(ns, r) in &NS2S_INPUTS {
+        out.push(format!("ns2s {}", ns_to_samples(ns, r)));
+    }
+    for &(now, wake) in &WAIT_INPUTS {
+        out.push(format!("wait {}", wait_ms(now, wake)));
+    }
     for sc in scripts {
         let mut p = Pacing::new(sc.target_ms, sc.packet_samples, sc.rate);
         out.push(format!(
-            "init {} {} {} {} {} {} {}",
+            "init {} {} {} {} {} {} {} {} {}",
             p.target_ms,
             p.target_ns,
             p.target_samples,
-            p.overflow_samples,
-            p.trim_threshold_samples,
+            p.grace_ns,
+            p.ceiling_samples,
+            p.ceiling_ns,
+            p.half_packet_ns,
             p.packet_samples,
             p.rate
         ));
@@ -328,7 +375,7 @@ fn rust_trace(scripts: &[Script]) -> Vec<String> {
                 p.retarget(t);
             }
             let s = p.step(wk.now, wk.buffered);
-            out.push(line(&p, s.send, s.drop_samples, s.wake_ns));
+            out.push(line(&p, s));
             if i % 7 == 6 {
                 out.push(format!("take {}", p.take_late_max_ns()));
             }
@@ -345,10 +392,12 @@ fn c_driver(scripts: &[Script]) -> String {
     writeln!(
         c,
         "static void line(const struct vban_pacing *p, struct vban_pacing_step s)\n{{\n\
-         \tprintf(\"%\" PRIu32 \" %\" PRIu64 \" %\" PRIu64 \" %d %d %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu32 \" %\" PRIu64 \" %d %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \"\\n\",\n\
-         \t       s.send, s.drop_samples, s.wake_ns, p->running ? 1 : 0, p->primed ? 1 : 0, p->prime_ns, p->t0_ns,\n\
-         \t       p->n_sent, p->underflows, p->overflows, p->late_max_ns, p->trims, p->target_ms, p->target_samples,\n\
-         \t       p->win_open ? 1 : 0, p->win_start_ns, p->win_min_samples, p->pending_trim_samples);\n}}"
+         \tprintf(\"%\" PRIu32 \" %\" PRIu32 \" %\" PRIu64 \" %\" PRIu64 \" %d %d %d %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %d %d %\" PRIu64 \" %d %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu32 \" %\" PRIu64 \"\\n\",\n\
+         \t       s.send, s.silence, s.drop_samples, s.wake_ns, s.wait_audio ? 1 : 0, p->running ? 1 : 0,\n\
+         \t       p->primed ? 1 : 0, p->prime_ns, p->t0_ns, p->n_sent, p->catchup_ns, p->starved ? 1 : 0,\n\
+         \t       p->silent ? 1 : 0, p->stale_samples, p->repay_ready ? 1 : 0, p->pending_drop_samples,\n\
+         \t       p->late_sends, p->discontinuities, p->silence_samples, p->discarded_samples, p->resyncs,\n\
+         \t       p->late_max_ns, p->target_ms, p->target_samples);\n}}"
     )
     .unwrap();
     writeln!(
@@ -380,6 +429,20 @@ fn c_driver(scripts: &[Script]) -> String {
         )
         .unwrap();
     }
+    for (ns, r) in NS2S_INPUTS {
+        writeln!(
+            c,
+            "\tprintf(\"ns2s %\" PRIu64 \"\\n\", vban_pacing_ns_to_samples({ns}ULL, {r}U));"
+        )
+        .unwrap();
+    }
+    for (now, wake) in WAIT_INPUTS {
+        writeln!(
+            c,
+            "\tprintf(\"wait %\" PRIu32 \"\\n\", vban_pacing_wait_ms({now}ULL, {wake}ULL));"
+        )
+        .unwrap();
+    }
     for (i, sc) in scripts.iter().enumerate() {
         writeln!(
             c,
@@ -389,7 +452,7 @@ fn c_driver(scripts: &[Script]) -> String {
         .unwrap();
         writeln!(
             c,
-            "\tprintf(\"init %\" PRIu32 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu32 \" %\" PRIu32 \"\\n\", p.target_ms, p.target_ns, p.target_samples, p.overflow_samples, p.trim_threshold_samples, p.packet_samples, p.rate);"
+            "\tprintf(\"init %\" PRIu32 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu32 \" %\" PRIu32 \"\\n\", p.target_ms, p.target_ns, p.target_samples, p.grace_ns, p.ceiling_samples, p.ceiling_ns, p.half_packet_ns, p.packet_samples, p.rate);"
         )
         .unwrap();
         writeln!(
@@ -491,47 +554,69 @@ fn c_vban_pacing_matches_the_rust_authority_1372() {
 }
 
 #[test]
-fn the_scripts_reach_every_boundary_1372() {
+fn the_scripts_reach_every_boundary_1381() {
     // A parity gate is only as good as the states it visits (the libobs tie-break lesson).
     let scripts = scripts();
-    let mut hits = [0usize; 8];
+    let names = [
+        "exact-deadline wakes",
+        "multi-packet wakes",
+        "waits for late audio",
+        "late sends",
+        "capped catch-up wakes",
+        "silence episodes",
+        "resumes from silence",
+        "stale repays",
+        "buffer-ceiling resyncs",
+        "schedule-ceiling resyncs",
+        "at-ceiling depths",
+        "running retargets up",
+        "running retargets down",
+    ];
+    let mut hits = [0usize; 13];
     for sc in &scripts {
         let mut p = Pacing::new(sc.target_ms, sc.packet_samples, sc.rate);
-        let mut wake = 0u64;
+        let mut last = Step::default();
         for wk in &sc.wakes {
-            if wake != 0 && wk.now == wake && p.running {
+            if last.wake_ns != 0 && wk.now == last.wake_ns && !last.wait_audio && p.running {
                 hits[0] += 1;
             }
-            if wk.buffered == p.overflow_samples {
-                hits[1] += 1;
+            if wk.buffered == p.ceiling_samples {
+                hits[10] += 1;
             }
             if let Some(t) = wk.retarget {
                 let before = (p.target_ms, p.running);
                 p.retarget(t);
-                hits[2] += usize::from(before.1 && p.target_ms > before.0);
-                hits[3] += usize::from(before.1 && p.target_ms < before.0);
+                hits[11] += usize::from(before.1 && p.target_ms > before.0);
+                hits[12] += usize::from(before.1 && p.target_ms < before.0);
             }
-            let (u, o, tr) = (p.underflows, p.overflows, p.trims);
+            let (late, disc, silent, stale, resyncs) = (
+                p.late_sends,
+                p.discontinuities,
+                p.silent,
+                p.stale_samples,
+                p.resyncs,
+            );
             let s = p.step(wk.now, wk.buffered);
-            hits[4] += usize::from(s.send >= 2);
-            hits[5] += usize::from(p.underflows > u);
-            hits[6] += usize::from(p.overflows > o);
-            hits[7] += usize::from(p.trims > tr);
-            wake = s.wake_ns;
+            hits[1] += usize::from(s.send + s.silence >= 2);
+            hits[2] += usize::from(s.wait_audio && s.wake_ns != 0);
+            hits[3] += usize::from(p.late_sends > late);
+            hits[4] += usize::from(p.catchup_ns != 0 && s.send > 0);
+            hits[5] +=
+                usize::from(s.silence > 0 && p.discontinuities > disc && p.resyncs == resyncs);
+            hits[6] += usize::from(silent && !p.silent && s.send > 0);
+            hits[7] += usize::from(stale > 0 && p.stale_samples < stale && p.resyncs == resyncs);
+            if p.resyncs > resyncs {
+                if wk.buffered > p.ceiling_samples {
+                    hits[8] += 1;
+                } else {
+                    hits[9] += 1;
+                }
+            }
+            last = s;
         }
     }
-    let names = [
-        "exact-deadline wakes",
-        "at-limit depths",
-        "running retargets up",
-        "running retargets down",
-        "multi-packet wakes",
-        "underflows",
-        "overflows",
-        "trims",
-    ];
     for (name, n) in names.iter().zip(hits) {
-        assert!(n >= 5, "issue 1372: the parity scripts hit only {n} {name}");
+        assert!(n >= 5, "issue 1381: the parity scripts hit only {n} {name}");
     }
 }
 
@@ -574,20 +659,55 @@ fn the_paced_obs_vban_is_built_staged_and_wired_1372() {
             "issue 1372: windows-genlock-fast.yml lost `{needle}`"
         );
     }
+    // Both pwsh assert steps look for the CURRENT status line (issue 1381), not the old one.
+    for (name, yml) in [
+        ("windows-genlock.yml", &full),
+        ("windows-genlock-fast.yml", &fast),
+    ] {
+        assert!(
+            yml.contains("[regex]::Escape('\"obs-vban pacing: depth_ms=%.1f late_sends=%\"')"),
+            "issue 1381: {name}'s pacing assert does not look for the fixed-timeline status line"
+        );
+        assert!(
+            !yml.contains("underflows=%"),
+            "issue 1381: {name} still asserts the retired underflow status line"
+        );
+    }
 
-    // The send thread asks the pure decision and sleeps to the deadline; its status line keeps a
-    // marker no other obs-vban line contains.
+    // The send thread asks the pure decision, sleeps to the deadline or waits on the audio event,
+    // sends silence packets, advances the frame counter across every dropped packet, and its
+    // status line keeps a marker no other obs-vban line contains.
     let thread = read("vendor/obs-vban/src/vban-output-thread.c");
     for needle in [
         "#include \"vban-pacing.h\"",
         "vban_pacing_step(&pacing, now,",
         "pacing_sleep_until(&sleeper, wake_ns);",
         "os_sleepto_ns(deadline_ns);",
-        "\"obs-vban pacing: depth_ms=%.1f underflows=%\"",
+        "os_event_timedwait(v->event, vban_pacing_wait_ms(os_gettime_ns(), wake_ns));",
+        "memset(t->payload, 0, n);",
+        "send_silence(&t, vban_buf, nbs, sample_size, &addr);",
+        "t.header->nuFrame += (uint32_t)(d.drop_samples / nbs);",
+        "\"obs-vban pacing: depth_ms=%.1f late_sends=%\"",
+        " silence_ms=%.1f discarded_ms=%.1f resyncs=%\"",
+        " dest=%u.%u.%u.%u:%u stream='%.*s'\"",
     ] {
         assert!(
             thread.contains(needle),
-            "issue 1372: vban-output-thread.c lost `{needle}`"
+            "issue 1381: vban-output-thread.c lost `{needle}`"
+        );
+    }
+    // The retired overflow drop, trim and their counters are gone for good.
+    let header = read(HEADER);
+    for gone in [
+        "OVERFLOW_HEADROOM",
+        "TRIM_WINDOW",
+        "trims",
+        "underflows",
+        "overflows",
+    ] {
+        assert!(
+            !header.contains(gone) && !thread.contains(gone),
+            "issue 1381: `{gone}` is back in the obs-vban pacing"
         );
     }
     let mut marker_lines = 0;
