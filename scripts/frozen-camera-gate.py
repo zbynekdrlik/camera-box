@@ -33,7 +33,10 @@ Usage:
 Exit codes (same as frozen-camera-gate Rust binary):
   0   PASS  — all cameras are live
   1   FAIL  — one or more cameras are FROZEN (names printed to stdout)
-  2   ERROR — bad args / OBS WS connection failure
+  2   ERROR — bad args / OBS WS connection failure / a refused production-scene selection
+
+issue 1380: every scene selection goes through obs_phase2's production-scene guard (owner hard
+rule 27.9.2026); a refusal is an ERROR (2), and a production preview is never restored.
 
 Env:
   OBS_PASSWORD  — OBS WebSocket password (override --password)
@@ -140,6 +143,18 @@ def _find_verdict_bin(explicit: "str | None") -> str:
 OBS_OP_TIMEOUT_S = float(os.environ.get("OBS_OP_TIMEOUT_S", "60"))
 
 
+def _obs_phase2():
+    """issue 1380: the sibling obs_phase2.py holds the ONE production-scene guard
+    (`_refuse_forbidden_scene`, the owner hard rule "nemas ti nikdy v stream obs davat do programu
+    scenu PRO!!!!!"). Imported lazily with its own sys.path insert, the same pattern as
+    obs_phase2._dev_scene_module(); never a copy of the rule here."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import obs_phase2  # noqa: E402  (sibling module; needs the sys.path insert just above)
+    return obs_phase2
+
+
 def _conn(host, password=""):
     ws = create_connection(f"ws://{host}:{PORT}", timeout=10)
     hello = json.loads(ws.recv())
@@ -160,7 +175,9 @@ def _conn(host, password=""):
 
 
 def _rpc(ws, rtype, rdata=None, ignore_err=False):
-    """Send an obs-websocket request and return its responseData."""
+    """Send an obs-websocket request and return its responseData. issue 1380: a
+    production-scene (or sceneUuid) selection is refused before it is sent."""
+    _obs_phase2()._refuse_forbidden_scene(rtype, rdata)
     ws.send(json.dumps({"op": 6, "d": {
         "requestType": rtype, "requestId": rtype, "requestData": rdata or {}}}))
     t0 = time.monotonic()
@@ -303,6 +320,12 @@ def main():
     )
 
     try:
+        guard = _obs_phase2()
+    except ImportError as e:
+        sys.stderr.write(f"ERROR: the production-scene guard (obs_phase2.py) is not importable: {e}\n")
+        sys.exit(2)
+
+    try:
         ws = _conn(args.host, password)
     except Exception as e:
         sys.stderr.write(f"ERROR: cannot connect to OBS at {args.host}:{PORT}: {e}\n")
@@ -324,8 +347,18 @@ def main():
                 "scenes onto preview; sampling sources as-is (#747 warm-up skipped)\n"
             )
         timelines = _capture_timelines(ws, sources, args.samples, args.cadence, warm_settle_s)
+    except guard.ForbiddenSceneError as e:
+        # issue 1380: a refused selection is an ERROR (2), never read as a frozen camera (1).
+        sys.stderr.write(f"[frozen-camera-gate] ERROR: {e}\n")
+        sys.exit(2)
     finally:
-        if studio and orig_preview:
+        if studio and orig_preview in guard.NEVER_PROGRAM_SCENES:
+            # issue 1380: never put the production scene back on preview (the teardown rule).
+            sys.stderr.write(
+                f"[frozen-camera-gate] issue 1380: not restoring preview {orig_preview!r} -- "
+                f"our tooling never programs the production scene\n"
+            )
+        elif studio and orig_preview:
             _rpc(ws, "SetCurrentPreviewScene", {"sceneName": orig_preview}, ignore_err=True)
         try:
             ws.close()

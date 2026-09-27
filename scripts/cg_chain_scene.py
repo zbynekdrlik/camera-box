@@ -26,6 +26,11 @@ The pure decisions (which scene, which items change, which restore calls) take p
 glue takes an ``rpc(rtype, rdata)`` callable, so both are pytest-Tier-0 testable with no OBS
 (tests/python/test_cg_chain_scene_1302.py). The WebSocket transport is obs_phase2's own
 ``_conn``/``_rpc`` (the #328 bounded request loop), never a second client.
+
+issue 1380 (owner hard rule 27.9.2026): a cut to the production scene is refused BEFORE the
+snapshot and any write, with obs_phase2's one guard (its ``_rpc`` refuses it too), and a
+restore never re-selects the production scene: it skips that one request with a named line and
+restores the rest (the obs_phase2 teardown contract).
 """
 import argparse
 import json
@@ -93,11 +98,13 @@ def cut_transition_name(listing):
     raise ValueError("no cut transition on this box — a program cut would blend frames")
 
 
-def restore_calls(state):
+def restore_calls(state, never_program=frozenset()):
     """The WS requests that undo a snapshot: the previous program scene first, then each item's
-    recorded enabled state, then the previous transition (so the restore itself still cuts)."""
+    recorded enabled state, then the previous transition (so the restore itself still cuts).
+    issue 1380: a previous program in ``never_program`` (obs_phase2.NEVER_PROGRAM_SCENES) is
+    left out -- the restore never programs the production scene."""
     calls = []
-    if state.get("prev_program"):
+    if state.get("prev_program") and state["prev_program"] not in never_program:
         calls.append(("SetCurrentProgramScene", {"sceneName": state["prev_program"]}))
     for item in state.get("items") or []:
         calls.append(
@@ -139,6 +146,12 @@ def _read_cut_context(rpc):
     return prev_program, prev_transition, cut
 
 
+def _refuse_program_target(scene):
+    """issue 1380: refuse a cut to the production scene BEFORE the snapshot or any write, with
+    the ONE guard obs_phase2 also applies at its transport."""
+    _obs_phase2()._refuse_forbidden_scene("SetCurrentProgramScene", {"sceneName": scene})
+
+
 def _cut_program(rpc, scene, prev_transition, cut):
     """Cut program to ``scene`` under the cut transition (switching to it only when needed)."""
     if prev_transition != cut:
@@ -152,6 +165,7 @@ def strih_solo(rpc, host, input_name, override, state_path, after_cut=None):
     non-black check). Returns the scene name. Snapshot written before the first change."""
     by_scene = _items_by_scene(rpc)
     scene = choose_scene(scenes_carrying_input(by_scene, input_name), input_name, override)
+    _refuse_program_target(scene)
     items = by_scene[scene]
     plan = solo_plan(items, input_name)
     prev_program, prev_transition, cut = _read_cut_context(rpc)
@@ -179,6 +193,7 @@ def strih_solo(rpc, host, input_name, override, state_path, after_cut=None):
 def program_select(rpc, host, scene, state_path):
     """Cut program to ``scene`` under the Cut transition (fails loud if it does not exist).
     Snapshot written first."""
+    _refuse_program_target(scene)
     scenes = [s["sceneName"] for s in rpc("GetSceneList")["scenes"]]
     if scene not in scenes:
         raise ValueError(f"scene {scene!r} does not exist on {host} (scenes: {scenes})")
@@ -203,8 +218,15 @@ def restore(rpc_for_host, state_path):
         return False
     with open(state_path, encoding="utf-8") as f:
         state = json.load(f)
+    never = _obs_phase2().NEVER_PROGRAM_SCENES
+    if state.get("prev_program") in never:
+        sys.stderr.write(
+            f"[cg_chain_scene] issue 1380: not restoring program {state['prev_program']!r} on "
+            f"{state['host']} -- our tooling never programs the production scene; the rest of "
+            f"the snapshot is restored\n"
+        )
     rpc = rpc_for_host(state["host"])
-    for rtype, rdata in restore_calls(state):
+    for rtype, rdata in restore_calls(state, never):
         rpc(rtype, rdata)
     os.replace(state_path, f"{state_path}.restored")
     return True
@@ -261,6 +283,7 @@ def _nonblack_check(ws, host):
 
 def main(argv=None):
     a = build_parser().parse_args(argv)
+    forbidden = _obs_phase2().ForbiddenSceneError
     opened = []
 
     def session(host):
@@ -285,7 +308,7 @@ def main(argv=None):
                 print(f"restored {a.state_file}")
             else:
                 print(f"nothing to restore ({a.state_file} absent)")
-    except ValueError as e:
+    except (ValueError, forbidden) as e:
         sys.stderr.write(f"[cg_chain_scene] {e}\n")
         return 2
     finally:

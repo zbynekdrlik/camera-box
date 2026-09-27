@@ -125,19 +125,21 @@ CANONICAL_NDI_SOURCES = {
 
 
 def _obs_phase2_module():
-    """Lazy import of the sibling obs_phase2.py (the SHARED #795-safe reenforce_ndi_name policy).
-    Returns the module, or None when it is not importable on this host: the imag box installs
-    imag_scenes.py (+ imag_record_encoder.py) and, since issue 1218, obs_phase2.py -- but an
-    older box may not carry it yet, so the on-box --bootstrap enforce must DEGRADE to a direct set
-    rather than crash the boot seed (the #1156 import-dependency class). Never imported at module
-    load (imag-obs-start.sh's launch preflight only imports imag_scenes)."""
+    """Lazy import of the sibling obs_phase2.py (the SHARED #795-safe reenforce_ndi_name policy,
+    and since issue 1380 the ONE production-scene guard that Obs.req and the --bootstrap program
+    restore apply). Returns the module, or None when it is not importable on this host: the imag
+    box installs imag_scenes.py (+ imag_record_encoder.py) and, since issue 1218, obs_phase2.py --
+    but an older box may not carry it yet, so the on-box --bootstrap enforce must DEGRADE to a
+    direct set rather than crash the boot seed (the #1156 import-dependency class). Never imported
+    at module load (imag-obs-start.sh's launch preflight only imports imag_scenes)."""
     try:
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import obs_phase2  # noqa: E402
         return obs_phase2
     except Exception as e:  # noqa: BLE001 -- absence is expected on an older box; degrade, never crash
         print("#1230: obs_phase2 not importable (%s) -- imag NDI-name heal uses a direct set "
-              "(the discoverability gate is unavailable on this host)" % e)
+              "and the --bootstrap program restore selects no scene (the discoverability "
+              "gate and the issue 1380 production-scene guard are unavailable on this host)" % e)
         return None
 
 
@@ -203,8 +205,19 @@ class Obs:
         self.ws.send(json.dumps(ident))
         json.loads(self.ws.recv())
         self._rid = 0
+        # issue 1380: the ONE production-scene guard module, resolved once per connection.
+        self._guard = _obs_phase2_module()
 
     def req(self, req_type: str, data: dict | None = None, ignore_err: bool = False):
+        # issue 1380 (owner hard rule 27.9.2026): obs_phase2._refuse_forbidden_scene runs at this
+        # choke point, so a production-scene (or sceneUuid) selection exits non-zero before it is
+        # sent, also with ignore_err. Without the module (an older box) nothing can be checked
+        # here; the one selection this seed makes checks for that itself (seed(), --bootstrap).
+        if self._guard is not None:
+            try:
+                self._guard._refuse_forbidden_scene(req_type, data)
+            except self._guard.ForbiddenSceneError as e:
+                sys.exit(f"FAIL: {e}")
         self._rid += 1
         rid = str(self._rid)
         self.ws.send(json.dumps({"op": 6, "d": {
@@ -449,7 +462,8 @@ def seed(obs: Obs) -> None:
         # always parking on "Cam 1" — the operator's cut must survive an OBS restart.
         # Unknown/stale scene name -> ignore_err leaves the collection default; missing
         # state file -> the old "Cam 1" fallback.
-        program = "Cam 1"
+        fallback = "Cam 1"
+        program = fallback
         state_path = os.path.expanduser("~/.config/imag-last-program")
         try:
             with open(state_path) as fh:
@@ -458,7 +472,19 @@ def seed(obs: Obs) -> None:
                 program = saved
         except OSError as exc:
             print(f"seed: no last-program state ({state_path}: {exc}) — fallback '{program}'")
-        obs.req("SetCurrentProgramScene", {"sceneName": program}, ignore_err=True)
+        # issue 1380: a saved production scene is never restored (the owner hard rule; Obs.req
+        # would refuse it and abort the boot seed, a Restart-loop of the imag OBS), and without
+        # the guard module no scene is selected at all -- OBS keeps its saved current scene.
+        guard = _obs_phase2_module()
+        if guard is None:
+            print(f"seed: issue 1380 -- the production-scene guard (obs_phase2.py) is not "
+                  f"importable, so no program scene is selected ('{program}' not applied)")
+        else:
+            if program in guard.NEVER_PROGRAM_SCENES:
+                print(f"seed: issue 1380 -- the saved program '{program}' is the production "
+                      f"scene, which our tooling never programs -- fallback '{fallback}'")
+                program = fallback
+            obs.req("SetCurrentProgramScene", {"sceneName": program}, ignore_err=True)
 
     v = obs.req("GetVideoSettings")
     ok = (v["fpsNumerator"], v["baseWidth"], v["baseHeight"]) == (FPS, CANVAS_W, CANVAS_H)

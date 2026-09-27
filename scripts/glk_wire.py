@@ -7,12 +7,16 @@ transform to fill the canvas (SCALE_INNER — a stale transform from a previous
 source resolution otherwise shrinks the QR below decodability), and switches
 program to the scene. Never touches any other scene (the own-scene rule).
 
+issue 1380: every scene selection goes through obs_phase2's production-scene guard, and a
+production-scene target is refused before connecting (owner hard rule 27.9.2026).
+
 Usage:
   glk_wire.py --host 10.77.9.202 --port 4471 --upstream "DEVELBOX (SYNTH)" \
               --canvas-w 1920 --canvas-h 1080
 """
 import argparse
 import json
+import os
 import sys
 
 try:
@@ -24,6 +28,18 @@ SCENE = "PHASE2-GENLOCK"
 INPUT = "genlock-in"
 
 
+def _obs_phase2():
+    """issue 1380: the sibling obs_phase2.py holds the ONE production-scene guard
+    (`_refuse_forbidden_scene`, the owner hard rule "nemas ti nikdy v stream obs davat do programu
+    scenu PRO!!!!!"). Imported lazily with its own sys.path insert, the same pattern as
+    obs_phase2._dev_scene_module(); never a copy of the rule here."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import obs_phase2  # noqa: E402  (sibling module; needs the sys.path insert just above)
+    return obs_phase2
+
+
 def _conn(host, port):
     ws = create_connection(f"ws://{host}:{port}", timeout=10)
     json.loads(ws.recv())
@@ -33,6 +49,8 @@ def _conn(host, port):
 
 
 def _rpc(ws, rtype, rdata=None, ignore_err=False):
+    # issue 1380: a production-scene (or sceneUuid) selection is refused before it is sent.
+    _obs_phase2()._refuse_forbidden_scene(rtype, rdata)
     ws.send(json.dumps({"op": 6, "d": {
         "requestType": rtype, "requestId": rtype, "requestData": rdata or {}}}))
     while True:
@@ -52,7 +70,16 @@ def main():
     ap.add_argument("--canvas-w", type=int, required=True)
     ap.add_argument("--canvas-h", type=int, required=True)
     a = ap.parse_args()
+    guard = _obs_phase2()
+    try:
+        # issue 1380: refuse a production-scene target before connecting or writing anything.
+        guard._refuse_forbidden_scene("SetCurrentProgramScene", {"sceneName": SCENE})
+        _wire(a)
+    except guard.ForbiddenSceneError as e:
+        sys.exit(f"[glk_wire] {a.host}:{a.port}: {e}")
 
+
+def _wire(a):
     ws = _conn(a.host, a.port)
     scenes = [s["sceneName"] for s in _rpc(ws, "GetSceneList")["scenes"]]
     if SCENE not in scenes:
