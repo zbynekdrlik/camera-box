@@ -122,9 +122,11 @@ public:
 		std::function<void()> on_thread_start;              // once, on the worker, before the first call
 	};
 
-	/* The ends ring holds slots + 1 entries: a pending end ends after an accepted block (a later
-	 * one than the previous pending end, or it merges with it), and at most `slots` accepted
-	 * blocks are unhandled, so the ring never fills and end_session() never allocates. */
+	/* The ends ring holds slots + 1 entries. Pending ends have distinct `after` values (an end with
+	 * no accepted block since the previous one merges into it) within [handled, accepted] blocks,
+	 * and at most `slots` accepted blocks are unhandled, so there are at most slots + 1 of them.
+	 * The + 1 is an end queued after the worker handled every block, before it retakes the lock
+	 * to deliver it. The ring never overflows and end_session() never allocates. */
 	explicit CbAudioBlockFifo(size_t slots = CB_AUDIO_FIFO_SLOTS)
 		: slots_(slots < 2 ? 2 : slots), ends_(slots_.size() + 1)
 	{

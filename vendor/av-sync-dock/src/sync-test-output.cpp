@@ -378,6 +378,7 @@ static void st_decode_worker_thread_setup();
 static void st_audio_block_run(struct sync_test_output *, const camerabox::CbAudioBlock &);
 static void st_audio_block_gap(struct sync_test_output *, const camerabox::CbAudioBlock &);
 static void st_audio_session_end(struct sync_test_output *, unsigned);
+static void cb_audio_forget_lock(struct sync_test_output *);
 static void st_audio_worker_thread_setup();
 
 static const char *st_get_name(void *)
@@ -1462,15 +1463,10 @@ static void cb_apply_pairing_recovery(struct sync_test_output *st,
 		st->cb_offset_history.clear();
 	}
 	st->cb_offset_cluster = camerabox::RollingOffsetCluster::dock();
-	st->cb_lock_audit = camerabox::CbLockAuditTracker();
+	/* A stale-held lock (zero ring hits all epoch) must not survive the reset on the UI either --
+	 * the audit tracker could never fire its own Unlocked transition without a decode to push. */
+	cb_audio_forget_lock(st);
 	st->cb_audio_dec->reset_window();
-	if (st->cb_lock_state) {
-		/* A stale-held lock (zero ring hits all epoch) must not survive the reset on the UI
-		 * either -- the audit tracker could never fire its own Unlocked transition without a
-		 * decode to push. */
-		st->cb_lock_state = false;
-		signal_lock_state_changed(st->context, false);
-	}
 	blog(LOG_WARNING,
 	     "av-sync-dock: PAIRING-RECOVER dead pairing window (ring_hit +%llu, crc_ok "
 	     "+%llu, preambles +%llu, video_decoded +%llu in %llus) -- reset "
@@ -1933,8 +1929,10 @@ static void st_audio_block_run(struct sync_test_output *st, const camerabox::CbA
 }
 
 /* issue 1381: the lock tracker forgets its state and the dock shows unlocked. A session END does
- * it (no measurement is being made, so the last offset must not read as live) and so does a session
- * BEGIN: an output restart discards a session end the worker had not reached yet. */
+ * it (no measurement is being made, so the last offset must not read as live), so does a session
+ * BEGIN (an output restart discards a session end the worker had not reached yet), and so does the
+ * dead-pairing recovery. The offset cluster keeps its own window (CB_CLUSTER_WINDOW_NS): after a
+ * short pause the first new markers can lock again on offsets measured before it, the same chain. */
 static void cb_audio_forget_lock(struct sync_test_output *st)
 {
 	st->cb_lock_audit = camerabox::CbLockAuditTracker();
@@ -1945,9 +1943,9 @@ static void cb_audio_forget_lock(struct sync_test_output *st)
 }
 
 /* issue 1381: a new decode session -- the gate reopened, or the output restarted. The staleness
- * and pairing watchdogs start a fresh baseline (the pause is not a dead input), the lock starts
- * over, the diag line goes out on the first block, and a dock told STALE at the last session end
- * goes LIVE again. */
+ * and pairing watchdogs start a fresh baseline (the pause is not a dead input), the lock tracker
+ * starts over, the diag line goes out on the first block, and a dock told STALE at the last session
+ * end goes LIVE again. */
 static void cb_audio_session_begin(struct sync_test_output *st)
 {
 	st->cb_input_staleness = camerabox::CbDockInputStaleness();

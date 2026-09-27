@@ -192,6 +192,14 @@ fn the_audio_worker_decodes_the_copy_and_resets_on_a_gap() {
             "{DOCK_OUTPUT}: cb_audio_forget_lock no longer has `{need}` (issue 1381)"
         );
     }
+    let recovery = body_of(
+        &src,
+        "static void cb_apply_pairing_recovery(struct sync_test_output *st, const camerabox::CbDockPairingRecovery &rec)",
+    );
+    assert!(
+        recovery.contains("cb_audio_forget_lock(st);"),
+        "{DOCK_OUTPUT}: the dead-pairing recovery forgets the lock through the one helper (issue 1381)"
+    );
     let end = body_of(
         &src,
         "static void st_audio_session_end(struct sync_test_output *st, unsigned reason)",

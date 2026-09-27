@@ -902,6 +902,10 @@ jobs:
           foreach ($need in @('st->cb_lock_audit = camerabox::CbLockAuditTracker();', 'signal_lock_state_changed(st->context, false);')) {
             if (-not $forget.Contains($need)) { Write-Error "sync-test-output.cpp: cb_audio_forget_lock no longer has '$need' (issue 1381)"; exit 1 }
           }
+          $recovery = Get-Body 'static void cb_apply_pairing_recovery(struct sync_test_output *st, const camerabox::CbDockPairingRecovery &rec)'
+          if (-not $recovery.Contains('cb_audio_forget_lock(st);')) {
+            Write-Error "sync-test-output.cpp: the dead-pairing recovery no longer forgets the lock through cb_audio_forget_lock (issue 1381)"; exit 1
+          }
           $begin = Get-Body 'static void cb_audio_session_begin(struct sync_test_output *st)'
           foreach ($need in @('st->cb_input_staleness = camerabox::CbDockInputStaleness();', 'st->cb_pairing_watchdog = camerabox::CbDockPairingWatchdog();', 'cb_audio_forget_lock(st);', 'signal_stale_changed(st->context, false);')) {
             if (-not $begin.Contains($need)) { Write-Error "sync-test-output.cpp: cb_audio_session_begin no longer has '$need' (issue 1381)"; exit 1 }
