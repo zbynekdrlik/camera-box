@@ -166,8 +166,8 @@ pub fn f32le_to_channels(bytes: &[u8], channels: usize) -> Result<Vec<Vec<f32>>,
     let frames = bytes.len() / frame_bytes;
     let mut out: Vec<Vec<f32>> = (0..channels).map(|_| Vec::with_capacity(frames)).collect();
     for frame in bytes.chunks_exact(frame_bytes) {
-        for (ch, s) in frame.chunks_exact(4).enumerate() {
-            out[ch].push(f32::from_le_bytes([s[0], s[1], s[2], s[3]]));
+        for (ch, s) in frame.as_chunks::<4>().0.iter().enumerate() {
+            out[ch].push(f32::from_le_bytes(*s));
         }
     }
     Ok(out)
