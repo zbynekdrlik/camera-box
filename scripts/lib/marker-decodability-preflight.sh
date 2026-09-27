@@ -102,6 +102,21 @@ marker_decodability_parse_verdict() {
   printf '%s\n' "$v"
 }
 
+# marker_decodability_channel_note JSON -> "chosen channel C of N (cluster ch0=a ch1=b)" from the
+# probe's per-channel line (issue 1367), so the run log shows WHICH channel the verdict came from and
+# what every channel read. Empty (exit 0) for a line without a pick (an older probe binary). The
+# per_channel entries are in channel order, so the Nth ch_cluster_samples is channel N-1.
+marker_decodability_channel_note() {
+  local json="$1" chosen n clusters
+  chosen="$(marker_decodability_parse_num "$json" chosen_channel)" || return 0
+  n="$(marker_decodability_parse_num "$json" channels)" || return 0
+  clusters="$(printf '%s' "$json" \
+       | grep -aoE '"ch_cluster_samples":[ ]*[0-9]+' \
+       | grep -aoE '[0-9]+$' \
+       | awk '{ printf "%sch%d=%s", (NR > 1 ? " " : ""), NR - 1, $0 }' || true)"
+  printf 'chosen channel %s of %s (cluster %s)\n' "$chosen" "$n" "$clusters"
+}
+
 # marker_decodability_is_ok VERDICT -> "true"/"false". Only the literal OK verdict proceeds; every
 # other word (UNDECODED/SILENT/POLLUTED) is a fail that names its class in the message below.
 marker_decodability_is_ok() {

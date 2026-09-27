@@ -88,8 +88,12 @@ impl ChannelPick {
             .unwrap_or(0)
     }
 
-    /// One log line: `marker channel 1 of 2 (cluster ch0=3 ch1=4)`.
+    /// One log line: `marker channel 1 of 2 (cluster ch0=3 ch1=4)`, or `marker channel pick not
+    /// recorded` for an empty (older-partial) pick, which must never read like a real channel 0.
     pub fn summary_line(&self) -> String {
+        if self.per_channel.is_empty() {
+            return "marker channel pick not recorded".to_string();
+        }
         let clusters: Vec<String> = self
             .per_channel
             .iter()
