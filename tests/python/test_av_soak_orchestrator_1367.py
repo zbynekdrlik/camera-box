@@ -58,7 +58,20 @@ if cmd == "rig-busy-check":
     n = bump("busy")
     live = (n > int(os.environ.get("FAKE_LIVE_AFTER", "0") or 0) > 0
             or reached("FAKE_LIVE_AFTER_STOPS", count("stops"))
-            or reached("FAKE_LIVE_AFTER_SWITCHES", count("switches")))
+            or reached("FAKE_LIVE_AFTER_SWITCHES", count("switches"))
+            or reached("FAKE_LIVE_AFTER_STARTS", count("starts"))
+            or reached("FAKE_LIVE_AFTER_PROGRAM_READS", count("stream-program")))
+    unreadable = (reached("FAKE_UNREADABLE_AFTER_SWITCHES", count("switches"))
+                  or reached("FAKE_UNREADABLE_AFTER_PROGRAM_READS", count("stream-program")))
+    times = int(os.environ.get("FAKE_UNREADABLE_TIMES", "0") or 0)
+    if unreadable and times and count("unreadable") >= times:
+        unreadable = False
+    if unreadable:
+        bump("unreadable")
+        print(json.dumps({"busy": None, "reasons": ["stream unreachable"],
+                          "diagnostics": [{"host": "strih", "streaming": False, "recording": False,
+                                           "recordTimecode": None}]}))
+        sys.exit(3)
     busy = os.environ.get("FAKE_BUSY") == "1"
     diags = []
     for box in ("strih", "stream"):
@@ -98,6 +111,7 @@ elif cmd == "record":
     box = "stream" if host == os.environ["FAKE_STREAM_HOST"] else "strih"
     flag = os.path.join(state, "recording-" + box)
     if act == "start":
+        bump("starts")
         with open(flag, "w") as fh:
             fh.write(str(time.time()))
         if os.environ.get("FAKE_START_FAIL") == box:
@@ -274,6 +288,7 @@ def rig(tmp_path):
         "CAM_PW": "x", "STREAM_USER": "u", "STREAM_PW": "y", "STRIH_USER": "su", "STRIH_PW": "sp",
         "STRIH_HOST": STRIH, "STREAM_HOST": STREAM,
         "E2E_ONBOX_DECODE_PRIORITY": "BelowNormal",
+        "AV_SOAK_BROADCAST_RETRY_S": "0",
     })
     return env, {"log": log, "run": tmp_path / "run", "lease": tmp_path / "lease",
                  "hb": tmp_path / "heartbeat", "state": state, "hold": tmp_path / "hold.json"}
@@ -581,7 +596,7 @@ def test_a_recording_that_never_stops_is_a_loud_exit_5(rig):
     state = (p["run"] / "recording.state").read_text()
     assert "stream=1" in state and "strih=0" in state
     assert "stream_since=" in state and "lease=av-soak-" in state
-    assert "start_window_s=" in state, "the ownership window is persisted, not re-derived"
+    assert "start_window_s=60\n" in state, "the ownership window (OBS timeout 30 s + 30 s) is persisted"
     assert p["lease"].exists(), "no E2E may start over a recording the soak may have left"
     assert "rig lease KEPT" in r.stdout + r.stderr
 
@@ -775,6 +790,70 @@ def test_an_unreadable_stream_program_is_a_skipped_row(rig):
     assert r.returncode == 2, r.stdout + r.stderr
     assert _csv_rows(p["run"])[0]["outcome"] == "skipped:stream_program_unreadable"
     _assert_rig_restored(p)
+
+
+def test_an_unreadable_rig_before_stoprecord_keeps_the_recordings(rig):
+    # the stream box stops answering after the last cut: the retried reads never prove an idle
+    # rig, so neither the slot nor cleanup stops a recording that may be a show's
+    env, p = rig
+    r = _soak(dict(env, FAKE_UNREADABLE_AFTER_SWITCHES="2"), "--run")
+    assert r.returncode == 5, r.stdout + r.stderr
+    out = r.stdout + r.stderr
+    assert not [c for c in _calls(p["log"], "obs") if c[:1] == ["record"] and "stop" in c]
+    assert "NOT stopping" in out and "the rig state is unreadable" in out
+    assert p["lease"].exists()
+
+
+def test_one_unreadable_read_before_stoprecord_is_retried(rig):
+    env, p = rig
+    r = _soak(dict(env, FAKE_UNREADABLE_AFTER_SWITCHES="2", FAKE_UNREADABLE_TIMES="1"), "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert _csv_rows(p["run"])[0]["outcome"] == "ok"
+    _assert_rig_restored(p)
+
+
+def test_an_unreadable_rig_at_a_slot_start_records_nothing(rig):
+    # never start a recording the soak could not prove it may stop again
+    env, p = rig
+    r = _soak(dict(env, FAKE_UNREADABLE_AFTER_PROGRAM_READS="2"), "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert _csv_rows(p["run"])[0]["outcome"] == "skipped:rig_state_unreadable"
+    assert not [c for c in _calls(p["log"], "obs") if c[:1] == ["record"]]
+    _assert_rig_restored(p)
+
+
+def test_an_unreadable_rig_at_setup_is_refused(rig):
+    env, p = rig
+    r = _soak(dict(env, FAKE_BUSY_UNREADABLE="stream"), "--run")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "unreadable" in r.stdout + r.stderr
+    assert not [c for c in _calls(p["log"], "obs") if c[:1] == ["connect-on-show"]]
+    assert not [c for c in _calls(p["log"], "burn") if c[0] == "add"]
+    assert not p["lease"].exists()
+
+
+def test_a_failed_start_during_a_broadcast_stops_nothing(rig):
+    # strih starts, the stream box goes live, the stream start fails: the soak's strih file may
+    # now be the show's recording -- the start-failure path stops nothing
+    env, p = rig
+    r = _soak(dict(env, FAKE_LIVE_AFTER_STARTS="1", FAKE_START_FAIL="stream"), "--run")
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert not [c for c in _calls(p["log"], "obs") if c[:1] == ["record"] and "stop" in c]
+    assert "NOT stopping" in r.stdout + r.stderr
+    assert p["lease"].exists()
+
+
+def test_a_leftover_recording_is_not_stopped_while_a_broadcast_is_live(rig):
+    # slot 0's stream StopRecord does not take; the stream box goes live when slot 1 starts (after
+    # the between-slot check): slot 1 must not stop the leftover, cleanup neither
+    env, p = rig
+    r = _soak(dict(env, FAKE_STOP_STICKY="stream", FAKE_LIVE_AFTER_PROGRAM_READS="3",
+                   **QUICK_TWO_WINDOWS), "--run")
+    assert r.returncode == 5, r.stdout + r.stderr
+    stream_stops = [c for c in _calls(p["log"], "obs")
+                    if c[:1] == ["record"] and "stop" in c and _host(c) == STREAM]
+    assert len(stream_stops) == 1, "only slot 0's own StopRecord, never one during the broadcast"
+    assert "NOT stopping" in r.stdout + r.stderr
 
 
 def test_a_run_dir_that_already_holds_a_run_is_refused(rig):
