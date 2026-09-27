@@ -198,6 +198,29 @@ def test_e2e_hold_marker_keeps_the_mains_connected(tmp_path):
     assert "MV NDI cam3" in obs.inputs and _mv(obs, "MV Cam 3") is True
 
 
+def test_e2e_hold_marker_leaves_a_held_twin_alone(tmp_path):
+    """The E2E hold takes the twins off the wire (genlock off + audio-only, obs_phase2 connect-on-show
+    --hold). A strih OBS relaunch DURING the run re-applies the roles: under a FRESH hold marker it must
+    leave a held twin alone (its twin role heal would write genlock_fifo=True = back on the wire);
+    without the marker the heal puts it back on the wire (a SIGKILLed run self-heals at the next
+    launch)."""
+    marker = tmp_path / "connect-on-show-e2e-hold"
+    marker.write_text("")
+    now = marker.stat().st_mtime
+    obs = FakeObs()
+    roles.apply_bandwidth_roles(obs, PLAN, hold_marker=str(tmp_path / "absent"), now=now)
+    tw = obs.inputs["MV NDI cam3"]["settings"]
+    assert tw["genlock_fifo"] is True
+    tw.update(roles.E2E_TWIN_HOLD)  # the E2E hold landed
+    summary = roles.apply_bandwidth_roles(obs, PLAN, hold_marker=str(marker), now=now + 60)
+    assert tw["genlock_fifo"] is False and tw["ndi_bw_mode"] == roles.NDI_BW_AUDIO_ONLY
+    assert "MV NDI cam3" in summary["twins_held"]
+    assert "MV NDI cam3" not in summary["twins"]
+    # the marker gone (the restore cleared it, or it expired): the role heal takes the twin back
+    summary = roles.apply_bandwidth_roles(obs, PLAN, hold_marker=str(tmp_path / "absent"), now=now + 60)
+    assert tw["genlock_fifo"] is True and "MV NDI cam3" in summary["twins"]
+
+
 def test_bandwidth_role_problems_is_a_report():
     actual = {
         "NDI cam1": {"genlock_connect_on_show": True},
@@ -500,6 +523,8 @@ def _fake_rpc(state):
             return {"inputs": [{"inputName": n, "inputKind": "ndi_source"} for n in state["inputs"]]}
         if rt == "GetInputSettings":
             return {"inputSettings": dict(state["inputs"][rdata["inputName"]])}
+        if rt == "GetInputDefaultSettings":
+            return {"defaultInputSettings": {"genlock_fifo": True, "ndi_bw_mode": 0}}
         if rt == "SetInputSettings":
             state["inputs"][rdata["inputName"]].update(rdata["inputSettings"])
             return {}
@@ -517,17 +542,23 @@ def test_connect_on_show_hold_and_restore(tmp_path, monkeypatch):
         "NDI 2ME PVW": {},
     }}
     monkeypatch.setattr(op, "_rpc", _fake_rpc(state))
+    monkeypatch.setattr(op, "_settle_sleep", lambda dt: None)
     sf = tmp_path / "sub" / "hold.json"  # the state dir is created on demand
-    held, failed = op.connect_on_show_hold(FakeWs(), str(sf))
-    assert held == ["NDI cam1", "NDI cam3"] and failed == []
+    held, twins, failed = op.connect_on_show_hold(FakeWs(), str(sf))
+    assert held == ["NDI cam1", "NDI cam3"] and twins == ["MV NDI cam3"] and failed == []
     assert state["inputs"]["NDI cam1"]["genlock_connect_on_show"] is False
-    assert json.loads(sf.read_text()) == ["NDI cam1", "NDI cam3"]
+    # the MV twin is taken off the wire for the run (tests/python/test_e2e_twin_hold_1242.py)
+    assert state["inputs"]["MV NDI cam3"]["genlock_fifo"] is False
+    assert json.loads(sf.read_text()) == {
+        "connect_on_show": ["NDI cam1", "NDI cam3"],
+        "twins": {"MV NDI cam3": {"genlock_fifo": True, "ndi_bw_mode": 1}}}
     # a second hold (e.g. a crashed run left the state file) keeps the union -> restore catches all
-    held2, _ = op.connect_on_show_hold(FakeWs(), str(sf))
-    assert held2 == ["NDI cam1", "NDI cam3"]
+    held2, twins2, _ = op.connect_on_show_hold(FakeWs(), str(sf))
+    assert held2 == ["NDI cam1", "NDI cam3"] and twins2 == ["MV NDI cam3"]
     restored, failed = op.connect_on_show_restore(FakeWs(), str(sf))
-    assert restored == ["NDI cam1", "NDI cam3"] and failed == []
+    assert sorted(restored) == ["MV NDI cam3", "NDI cam1", "NDI cam3"] and failed == []
     assert state["inputs"]["NDI cam3"]["genlock_connect_on_show"] is True
+    assert state["inputs"]["MV NDI cam3"]["genlock_fifo"] is True
     assert not sf.exists(), "a clean restore removes the state file"
     # restore with no state file is a no-op
     assert op.connect_on_show_restore(FakeWs(), str(sf)) == ([], [])
@@ -536,6 +567,7 @@ def test_connect_on_show_hold_and_restore(tmp_path, monkeypatch):
 def test_connect_on_show_restore_treats_a_vanished_input_as_done(tmp_path, monkeypatch):
     state = {"calls": [], "showing": {}, "inputs": {"NDI cam1": {"genlock_connect_on_show": False}}}
     monkeypatch.setattr(op, "_rpc", _fake_rpc(state))
+    monkeypatch.setattr(op, "_settle_sleep", lambda dt: None)
     sf = tmp_path / "hold.json"
     sf.write_text(json.dumps(["NDI cam1", "NDI cam9"]))  # cam9 was deleted/renamed since the hold
     restored, failed = op.connect_on_show_restore(FakeWs(), str(sf))
