@@ -45,7 +45,7 @@ verdict JSON / the CSV and two Rust source files, so it is exhaustively pytest-a
   A `false` window fails; a verdict without the field leaves the series NOT_MEASURED. A window
   where the soak's mirrored terms (every camera's loss term AND the run-wide term) disagree with
   the fold is counted (`gate_term_mismatch_windows`) and named: the Python copy of the Rust gate
-  term drifted.
+  term drifted. A mismatch makes the run at least UNKNOWN (a FAIL still wins).
 - **burn loss** (`burn <node>`): `full_chain.loss.<node>.zero_loss` for the `strih` + `stream` hops
   (the OBS measurement burns the soak turns on and requires -- never measured is UNKNOWN) and for
   every camera (only with the capture burns: never measured is not required). A measured `false`
@@ -716,7 +716,9 @@ def evaluate(rows, cams, *, bounds, min_duration_s, max_gap_s=None,
     rep["reasons"].extend(f"{s['name']}: {s['reason']}" for s in unknowns)
     if fails:
         rep["verdict"] = FAIL
-    elif short or unknowns or not judged:
+    elif short or unknowns or not judged or mismatch:
+        # a mismatch without a failing series (only the run-wide mirror disagrees): the grading
+        # itself cannot be trusted -- UNKNOWN, never a quiet PASS
         rep["verdict"] = UNKNOWN
     else:
         rep["verdict"] = PASS

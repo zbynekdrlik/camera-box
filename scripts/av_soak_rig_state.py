@@ -21,14 +21,20 @@ here, never by hand-parsing that line in the shell:
     * stops a flagged box's recording only when it provably is the soak's: the recording's own
       age (`recordTimecode`) puts its START inside [flag time - SINCE_SLACK_S, flag time +
       start window] -- the soak writes the flag time into recording.state right BEFORE its
-      StartRecord, and that bounded call cannot start a recording later than its own timeout;
-    * keeps everything else (no flag time, an unreadable age, a recording older or much younger
-      than the flag), always with the reason.
+      StartRecord, and that bounded call cannot start a recording later than its own timeout
+      (the window is written by the run itself, `start_window_s`; the caller's value is only the
+      fallback for an older state file);
+    * keeps everything else (no flag time, an unreadable age, a start outside the window), always
+      with the reason. Outside the window is "cannot prove it is the soak's", never "someone
+      else's": the age is obs-websocket's frame-count duration (total frames x frame time), which
+      undercounts wall time by every lagged render frame, so over hours even the soak's own
+      recording can read as started later than it did.
   An unflagged box is never in the plan.
 
 recording.state (written by the soak, one `key=value` per line):
 ``strih=0|1``, ``strih_since=<epoch s>``, ``stream=0|1``, ``stream_since=<epoch s>``,
-``lease=<the soak's rig-lease run id>``. The pre-round-3 two-line shape still parses.
+``lease=<the soak's rig-lease run id>``, ``start_window_s=<s>``. The pre-round-3 two-line shape
+still parses.
 
 CLI (for the shell): ``broadcast`` (stdin = the rig-busy JSON -> prints live|unknown|idle) and
 ``leftovers --state FILE --now EPOCH --start-window-s S`` (stdin = the rig-busy JSON -> one
@@ -97,8 +103,12 @@ def parse_state(text):
             since[b] = float(kv.get(f"{b}_since", ""))
         except ValueError:
             since[b] = None
+    try:
+        window = float(kv.get("start_window_s", ""))
+    except ValueError:
+        window = None
     return {"flags": {b: kv.get(b) == "1" for b in BOXES}, "since": since,
-            "lease": kv.get("lease") or None}
+            "lease": kv.get("lease") or None, "start_window_s": window}
 
 
 def leftovers_plan(state_text, busy_text, now_s, start_window_s):
@@ -116,6 +126,7 @@ def leftovers_plan(state_text, busy_text, now_s, start_window_s):
     if not complete:
         return [(b, KEEP, "the rig state is unreadable (a box did not answer) -- nothing is touched")
                 for b in flagged]
+    window = st["start_window_s"] if st["start_window_s"] is not None else start_window_s
     plan = []
     for b in flagged:
         diag = diags[b]
@@ -133,12 +144,13 @@ def leftovers_plan(state_text, busy_text, now_s, start_window_s):
                                   f"({diag.get('recordTimecode')!r}) -- cannot prove it is the soak's"))
             continue
         start = now_s - age
-        if since - SINCE_SLACK_S <= start <= since + start_window_s:
+        if since - SINCE_SLACK_S <= start <= since + window:
             plan.append((b, STOP, f"the soak's own recording (started {start - since:+.0f} s from "
                                   f"its flag)"))
         else:
             plan.append((b, KEEP, f"the recording started {start - since:+.0f} s from the soak's "
-                                  f"flag -- not the soak's"))
+                                  f"flag, outside [-{SINCE_SLACK_S}, +{window:g}] s -- cannot prove "
+                                  f"it is the soak's"))
     return plan
 
 
