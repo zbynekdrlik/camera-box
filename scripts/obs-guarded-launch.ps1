@@ -11,7 +11,7 @@
 # stale audio before Dante VSC finishes init) -> libobs ratchets its GLOBAL audio buffering to
 # the 960 ms max within the first seconds and it NEVER shrinks until OBS restarts -> the whole
 # session's A/V is off by ~0.9 s (live incident 2026-07-15). Box standard is the genlock libobs
-# 85 ms floor since issue 1367 (92 ms at 44.1 kHz; 64 ms or 85 ms per launch before it);
+# 85 ms floor since issue 1367 (92 ms at 44.1 kHz; 0, 64 or 85 ms per launch before it);
 # threshold 100 = standard + small headroom. Permanent fix is OBS-level (#786) -- this is
 # the launch-path hotfix.
 #
