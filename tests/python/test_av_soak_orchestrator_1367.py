@@ -49,13 +49,29 @@ def bump(name):
 cmd = a[0]
 host = arg("--host")
 if cmd == "rig-busy-check":
+    n = bump("busy")
+    live = n > int(os.environ.get("FAKE_LIVE_AFTER", "0") or 0) > 0
     busy = os.environ.get("FAKE_BUSY") == "1"
     diags = []
     for box in ("strih", "stream"):
-        streaming = busy or os.environ.get("FAKE_STREAMING_BOX") == box
-        diags.append({"host": box, "streaming": streaming,
-                      "recording": os.path.exists(os.path.join(state, "recording-" + box))})
-    print(json.dumps({"busy": busy, "diagnostics": diags}))
+        if os.environ.get("FAKE_BUSY_UNREADABLE") == box:
+            continue
+        streaming = busy or os.environ.get("FAKE_STREAMING_BOX") == box or (live and box == "stream")
+        flag = os.path.join(state, "recording-" + box)
+        recording = os.path.exists(flag)
+        tc = None
+        if recording:
+            txt = open(flag).read().strip()
+            age = time.time() - float(txt) if txt else 0.0
+            age = float(os.environ.get("FAKE_RECORD_AGE_" + box, age))
+            ms = int(round(age * 1000))
+            tc = "%02d:%02d:%02d.%03d" % (ms // 3600000, ms // 60000 % 60, ms // 1000 % 60, ms % 1000)
+        diags.append({"host": box, "streaming": streaming, "recording": recording,
+                      "recordTimecode": tc})
+    if os.environ.get("FAKE_BUSY_UNREADABLE"):
+        print(json.dumps({"busy": None, "reasons": ["unreachable"], "diagnostics": diags}))
+        sys.exit(3)
+    print(json.dumps({"busy": busy or live, "diagnostics": diags}))
 elif cmd == "stream-detail":
     pass
 elif cmd == "program-scene":
@@ -71,7 +87,8 @@ elif cmd == "record":
     box = "stream" if host == os.environ["FAKE_STREAM_HOST"] else "strih"
     flag = os.path.join(state, "recording-" + box)
     if act == "start":
-        open(flag, "w").close()
+        with open(flag, "w") as fh:
+            fh.write(str(time.time()))
         if os.environ.get("FAKE_START_FAIL") == box:
             sys.exit("fake: StartRecord verify failed")
     elif act == "stop":
@@ -516,6 +533,7 @@ def test_a_strih_decode_timeout_stops_the_decode_on_strih_lx(rig):
     assert kills and all("su@10.77.9.202" in k for k in kills), kills
     assert "recording-verdic\\[t\\]\\ --extract-partial\\ strih" in kills[0] \
         or "recording-verdic[t] --extract-partial strih" in kills[0], kills[0]
+    assert "av-soak-" in kills[0], "the kill is scoped to this run's own output names"
     _assert_rig_restored(p)
 
 
@@ -532,7 +550,10 @@ def test_sigterm_during_the_decode_stops_both_remote_decodes(rig):
     assert proc.returncode == 5, out + err
     assert any(line.startswith("sshpass") and "pkill" in line
                for line in p["log"].read_text().splitlines())
-    assert any("Stop-Process" in c for c in _ps_commands(p["log"]))
+    stops = [c for c in _ps_commands(p["log"]) if "Stop-Process" in c]
+    assert stops, "the stream decode is stopped on the box"
+    assert all("CommandLine" in c and "av-soak-" in c for c in stops), \
+        "only this run's own recording-verdict (by its output name), never every one"
     _assert_rig_restored(p)
 
 
@@ -543,30 +564,106 @@ def test_a_recording_that_never_stops_is_a_loud_exit_5(rig):
     assert "RECORDING MAY STILL BE RUNNING on stream" in r.stdout + r.stderr
     state = (p["run"] / "recording.state").read_text()
     assert "stream=1" in state and "strih=0" in state
+    assert "stream_since=" in state and "lease=av-soak-" in state
+    assert p["lease"].exists(), "no E2E may start over a recording the soak may have left"
+    assert "rig lease KEPT" in r.stdout + r.stderr
+
+
+def _leftover_state(p, box, since=None, lease="av-soak-test-1"):
+    """A run dir the soak left: `box` flagged, its flag set `since` (epoch, default now)."""
+    p["run"].mkdir(exist_ok=True)
+    since = time.time() if since is None else since
+    lines = [f"strih={int(box == 'strih')}", f"strih_since={int(since) if box == 'strih' else ''}",
+             f"stream={int(box == 'stream')}",
+             f"stream_since={int(since) if box == 'stream' else ''}", f"lease={lease}"]
+    (p["run"] / "recording.state").write_text("\n".join(lines) + "\n")
+
+
+def _record_stops(p):
+    return [c for c in _calls(p["log"], "obs") if c[:1] == ["record"] and "stop" in c]
 
 
 def test_stop_leftovers_stops_only_the_soaks_own_recording(rig):
     env, p = rig
-    p["run"].mkdir()
-    (p["run"] / "recording.state").write_text("strih=0\nstream=1\n")
-    (p["state"] / "recording-stream").write_text("")
+    _leftover_state(p, "stream")
+    (p["state"] / "recording-stream").write_text(str(time.time()))
+    (p["state"] / "recording-strih").write_text(str(time.time()))  # strih records, not flagged
     r = _soak(env, "--stop-leftovers", str(p["run"]))
     assert r.returncode == 0, r.stdout + r.stderr
-    stops = [c for c in _calls(p["log"], "obs") if c[:1] == ["record"] and "stop" in c]
-    assert [_host(c) for c in stops] == [STREAM]
+    assert [_host(c) for c in _record_stops(p)] == [STREAM]
     assert not (p["state"] / "recording-stream").exists()
+    assert (p["state"] / "recording-strih").exists(), "an unflagged box is never touched"
     assert "stream=0" in (p["run"] / "recording.state").read_text()
 
 
 def test_stop_leftovers_never_stops_a_streaming_box(rig):
     env, p = rig
-    p["run"].mkdir()
-    (p["run"] / "recording.state").write_text("strih=0\nstream=1\n")
-    (p["state"] / "recording-stream").write_text("")
+    _leftover_state(p, "stream")
+    (p["state"] / "recording-stream").write_text(str(time.time()))
     r = _soak(dict(env, FAKE_STREAMING_BOX="stream"), "--stop-leftovers", str(p["run"]))
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert not [c for c in _calls(p["log"], "obs") if c[:1] == ["record"] and "stop" in c]
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert not _record_stops(p)
     assert "NOT stopping" in r.stdout + r.stderr
+
+
+def test_stop_leftovers_never_stops_strih_while_the_stream_box_broadcasts(rig):
+    # strih never streams: "recording, not streaming" is strih's own broadcast state
+    env, p = rig
+    _leftover_state(p, "strih")
+    (p["state"] / "recording-strih").write_text(str(time.time()))
+    r = _soak(dict(env, FAKE_STREAMING_BOX="stream"), "--stop-leftovers", str(p["run"]))
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert not _record_stops(p)
+    assert "broadcast" in r.stdout + r.stderr
+    assert "strih=1" in (p["run"] / "recording.state").read_text()
+
+
+def test_stop_leftovers_touches_nothing_on_an_unreadable_rig(rig):
+    env, p = rig
+    _leftover_state(p, "strih")
+    (p["state"] / "recording-strih").write_text(str(time.time()))
+    r = _soak(dict(env, FAKE_BUSY_UNREADABLE="stream"), "--stop-leftovers", str(p["run"]))
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert not _record_stops(p)
+    assert "unreadable" in r.stdout + r.stderr
+
+
+def test_stop_leftovers_leaves_a_recording_the_soak_did_not_start(rig):
+    env, p = rig
+    _leftover_state(p, "strih")
+    (p["state"] / "recording-strih").write_text(str(time.time() - 3600))
+    r = _soak(env, "--stop-leftovers", str(p["run"]))
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert not _record_stops(p)
+    assert "not the soak" in r.stdout + r.stderr
+
+
+def test_stop_leftovers_refuses_while_the_soak_still_runs(rig):
+    env, p = rig
+    _leftover_state(p, "stream")
+    (p["state"] / "recording-stream").write_text(str(time.time()))
+    live = subprocess.Popen(["bash", "-c", "sleep 30", "av-soak.sh"])
+    try:
+        (p["run"] / "pid").write_text(f"{live.pid}\n")
+        r = _soak(env, "--stop-leftovers", str(p["run"]))
+    finally:
+        live.kill()
+        live.wait()
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert not _record_stops(p)
+    assert "still running" in r.stdout + r.stderr
+
+
+def test_a_stuck_recording_keeps_the_lease_until_stop_leftovers_clears_it(rig):
+    env, p = rig
+    r = _soak(dict(env, FAKE_STOP_NEVER="stream"), "--run")
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert p["lease"].exists()
+    r = _soak(env, "--stop-leftovers", str(p["run"]))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not (p["state"] / "recording-stream").exists()
+    assert not p["lease"].exists(), "the leftover is stopped, so the soak's lease is released"
+    assert "rig lease released" in r.stdout + r.stderr
 
 
 def test_run_without_the_strih_credentials_is_refused(rig):
@@ -597,6 +694,33 @@ def test_an_unpinned_painter_run_id_is_a_warning(rig):
     assert "WARNING" in r.stdout and "unpinned" in r.stdout
     merge = _calls(p["log"], "verdict")[0]
     assert merge[merge.index("--cam2-run-id") + 1] == "0"
+
+
+def test_a_broadcast_that_starts_mid_run_leaves_the_strih_program_alone(rig):
+    # rig-busy-check calls: setup reads, setup mutations, slot 0 -- the stream box goes live
+    # before the slot-1 guard: the soak stops, and its cleanup must not cut the (on-air) strih
+    # program; burns + connect-on-show still go back to production
+    env, p = rig
+    r = _soak(dict(env, FAKE_LIVE_AFTER="3", **QUICK_TWO_WINDOWS), "--run")
+    assert r.returncode == 5, r.stdout + r.stderr
+    out = r.stdout + r.stderr
+    assert "a broadcast is live" in out
+    assert not [c for c in _calls(p["log"], "obs") if c[:1] == ["switch"] and "--prod-floor" in c]
+    assert "strih program NOT restored" in out
+    assert [c for c in _calls(p["log"], "obs") if c[:1] == ["connect-on-show"] and "--restore" in c]
+    assert not [f for f in os.listdir(p["state"]) if f.startswith("burn-")]
+    assert not p["lease"].exists()
+
+
+def test_a_run_dir_that_already_holds_a_run_is_refused(rig):
+    env, p = rig
+    p["run"].mkdir()
+    (p["run"] / "soak.csv").write_text("a previous run\n")
+    r = _soak(env, "--run")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "already holds" in r.stdout + r.stderr
+    assert (p["run"] / "soak.csv").read_text() == "a previous run\n"
+    assert not p["lease"].exists() and p["log"].read_text() == ""
 
 
 def test_a_restore_that_fails_its_brightness_check_is_confirmed_by_a_re_read(rig):
@@ -804,6 +928,19 @@ def test_lib_merge_argv_passes_the_expected_offset_only_when_given(tmp_path):
     assert "--av-expected-ms" not in first
     assert second.endswith("--av-expected-ms|-5|")
     assert "--merge-partials|strih=S|--merge-partials|stream=T|--min-secs|189|" in first
+
+
+def test_lib_decode_kills_are_scoped_to_the_run_stamp(tmp_path):
+    out = subprocess.run(
+        ["bash", "-c", f'. "{LIB}"; av_soak_strih_decode_kill_cmd 20260927T205047Z; echo; '
+                       f'av_soak_stream_decode_kill_ps 20260927T205047Z'],
+        capture_output=True, text=True, timeout=30)
+    assert out.returncode == 0, out.stderr
+    strih, stream = out.stdout.split("\n", 1)
+    assert strih.startswith("pkill -f 'recording-verdic[t] --extract-partial strih")
+    assert "av-soak-20260927T205047Z-s" in strih and strih.rstrip().endswith(";")
+    assert "Win32_Process" in stream and "recording-verdict.exe" in stream
+    assert "*av-soak-20260927T205047Z-s*" in stream and "Stop-Process" in stream
 
 
 def test_lib_probe_and_snapshot_commands_are_read_only(tmp_path):

@@ -821,5 +821,84 @@ def test_a_derived_offset_that_carries_a_number_is_still_not_a_sample():
     assert row["av_cam3_ms"] == "3.000"
 
 
+
+# --- review round 3: the gate's OWN continuity fold (run-wide undecodable floor + schedule) ------
+
+
+def _run_wide_cont(run_wide_ok, overall, floor_gates=True, undecodable=4):
+    """A continuity block whose per-window terms all pass; only the run-wide undecodable sum can
+    fail it (src/probe/recording_segments.rs: overall_pass &= run_wide || !floor_gates)."""
+    segs = [{"cambox": c.upper(), "pass": True, "relaxed_pass": True, "frames": 900,
+             "undecodable": undecodable, "copies": 0, "gaps": 0} for c in CAMS]
+    return {"segments": segs, "overall_pass": overall,
+            "run_wide_undecodable_within_floor": run_wide_ok,
+            "undecodable_floor_gates_overall_pass": floor_gates, "per_window_undecodable_floor": 4,
+            "copies_gaps_tolerance_gates_overall_pass": False, "copies_gaps_tolerance": 2,
+            "segment_singleton_allowance_gates_overall_pass": True,
+            "segment_singleton_copies_allowance": 1, "segment_singleton_gaps_allowance": 1}
+
+
+def _row_with_cont(slot, cont):
+    v = _verdict(av={"cam1": ("measured", 1.0), "cam2": ("measured", 2.0),
+                     "cam3": ("measured", -1.0)}, source_spread=10.0, delivery_spread=10.0,
+                 burn_loss={n: {"zero_loss": True, "real_drops": 0} for n in asd.HOP_NODES})
+    v["all_cambox_continuity"] = cont
+    return asd.row_from_verdict(v, CAMS, _meta(slot))
+
+
+def test_the_row_records_the_gates_own_continuity_fold():
+    row = _row_with_cont(0, _run_wide_cont(False, False))
+    assert row["cont_overall_pass"] == "false"
+    assert row["loss_run_wide_pass"] == "false"
+    assert row["loss_run_wide_undecodable"] == "12"
+    assert all(row[f"loss_{c}_pass"] == "true" for c in CAMS), "each window alone passes"
+    disarmed = _row_with_cont(0, _run_wide_cont(False, True, floor_gates=False))
+    assert disarmed["loss_run_wide_pass"] == "true", "a disarmed floor does not fold"
+    assert _clean_row(0)["cont_overall_pass"] == "" and _clean_row(0)["loss_run_wide_pass"] == ""
+
+
+def test_a_run_wide_undecodable_breach_fails_the_soak():
+    # 3 cameras x 4 undecodable per window: each window passes alone, the gate's run fold fails
+    rows = [_stringify(_row_with_cont(i, _run_wide_cont(False, False))) for i in range(7)]
+    rep = _run(rows)
+    assert rep["series"]["continuity gate"]["verdict"] == asd.FAIL
+    assert rep["verdict"] == asd.FAIL
+    assert rep["gate_term_mismatch_windows"] == 0, "the run-wide term explains the fold"
+
+
+def test_the_gates_continuity_fold_passes_a_clean_hour():
+    rows = [_stringify(_row_with_cont(i, _run_wide_cont(True, True))) for i in range(7)]
+    rep = _run(rows)
+    assert rep["series"]["continuity gate"]["verdict"] == asd.PASS
+    assert rep["verdict"] == asd.PASS, rep["reasons"]
+
+
+def test_a_verdict_without_the_fold_leaves_the_continuity_gate_not_measured():
+    rep = _run([_stringify(_clean_row(i)) for i in range(7)])
+    assert rep["series"]["continuity gate"]["verdict"] == asd.NOT_MEASURED
+    assert rep["verdict"] == asd.PASS, rep["reasons"]
+
+
+def test_a_drift_between_the_soaks_terms_and_the_gates_fold_is_reported():
+    # the verdict's fold says FAIL while every term the soak mirrors says pass: the Python copy
+    # of the Rust gate term drifted -- named, never hidden
+    rows = [_stringify(_row_with_cont(i, _run_wide_cont(True, i != 3))) for i in range(7)]
+    rep = _run(rows)
+    assert rep["gate_term_mismatch_windows"] == 1
+    assert any("disagree" in r for r in rep["reasons"]), rep["reasons"]
+    assert rep["verdict"] == asd.FAIL
+    assert "disagree" in asd.render_text({"full": rep})
+
+
+@pytest.mark.parametrize("name", REAL_CONTINUITY)
+def test_the_soaks_terms_agree_with_the_gates_fold_on_real_runs(name):
+    with open(os.path.join(AV_SOAK_FIXTURES, name), encoding="utf-8") as f:
+        cont = json.load(f)["all_cambox_continuity"]
+    cams = sorted({s["cambox"].lower() for s in cont["segments"]})
+    row = asd.row_from_verdict({"all_cambox_continuity": cont}, cams, _meta(0))
+    assert row["cont_overall_pass"] == ("true" if cont["overall_pass"] else "false")
+    assert asd.gate_term_disagrees(_stringify(row), cams) is False
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
