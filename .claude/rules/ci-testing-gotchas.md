@@ -1478,3 +1478,12 @@ under the real consumers (`win-baseline-check.sh`, `version-integrity-gate.sh`),
 graded to an empty verdict. The plain-`bash -c` pytest stayed green. Source the lib under the
 consumer's `set -euo pipefail` in the test helper, assert every row carries a real verdict and that
 stderr has no "unbound variable", and initialise every local a lib function tests (`local v=""`).
+
+## Moving a test's assertions to another file can leave its HELPER dead — CI clippy then fails (issue 1357)
+
+When a refactor moves the last caller of a shared test helper (`run_block` in
+`tests/strih_provision_pure_functions.rs`) into another test file, the helper becomes dead code.
+`cargo clippy --all-targets -D warnings` on CI rejects it, and no Tier-0 step catches it (a plain
+standalone `rustc --test -A warnings` run hides it too). Run
+`clippy-driver --edition 2021 --test -D warnings <file>` (with the tempfile shim for files that need it)
+on every std-only test file you edit, and delete a helper whose last caller went away.
