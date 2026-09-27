@@ -40,6 +40,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "camera-box-video.hpp"
 #include "camera-box-frame-copy.hpp"
 #include "camera-box-decode-mailbox.hpp"
+#include "camera-box-audio-worker.hpp"
 
 #include "plugin-macros.generated.h"
 
@@ -83,6 +84,14 @@ with this program; if not, write to the Free Software Foundation, Inc.,
  * old a paired video timestamp is allowed to be before it is trusted for either ring pairing or
  * actuation. */
 #define CAMERA_BOX_TEST_SIGNAL_FRESH_NS 20000000000ULL
+
+/* issue 1381: the camera-box audio decode runs only while the test signal is fresh -- the same window
+ * as above since the last camera-box QR decode (camera-box-audio-worker.hpp cb_audio_decode_gate) --
+ * and only on a box that has the measurement source it exists for (CAMERA_BOX_MEASURE_SOURCE_NAME in
+ * camera-box-audio.hpp, shared with sync-test-dock.cpp). resolume and strih never enter it.
+ * The source check takes the sources mutex, so it runs on the video decode worker, at most once per
+ * CAMERA_BOX_MEASURE_SOURCE_RECHECK_NS of frame time, never on the audio thread. */
+#define CAMERA_BOX_MEASURE_SOURCE_RECHECK_NS 5000000000ULL
 
 /* There are several reason to limit the width and the height.
  * - Since a square of 3/8 QR-code-length is calculated using uint32_t,
@@ -174,7 +183,7 @@ struct sync_test_output
 
 	/* Sync pattern detection from video */
 	/* issue 1367: written once by the video-output thread (first frame), read by the decode
-	 * worker and the audio thread -- atomic, no lock needed. */
+	 * worker and the audio decode worker -- atomic, no lock needed. */
 	std::atomic<uint64_t> start_ts{0};
 
 	struct quirc *qr = nullptr;
@@ -231,13 +240,13 @@ struct sync_test_output
 	 * across ANY ring slot -- the overall "is the test signal genuinely still here right now"
 	 * signal, distinct from a single ring slot's own per-idx8 freshness (both are checked against
 	 * CAMERA_BOX_TEST_SIGNAL_FRESH_NS). Written on the decode worker thread in `cb_video_qr_record`, read
-	 * on the audio thread under the same mutex as the other cb_video_* fields. */
+	 * on the audio decode worker (issue 1381) under the same mutex as the other cb_video_* fields. */
 	uint64_t cb_video_last_decode_ts_ns = 0;
 
 	/* #398 fix: rolling history of recently-resolved (audio_ts, offset_ns) samples for
 	 * `cb_smooth_offset_ns` — median-smooths the displayed offset so a single false CRC-4 accept
 	 * (~1/16 likely on real program audio) can't show garbage (review MEDIUM finding). Touched
-	 * only from the audio-decode thread; no cross-thread sharing, but guarded by the same mutex
+	 * only from the audio decode worker; no cross-thread sharing, but guarded by the same mutex
 	 * as the other cb_* fields for consistency. */
 	std::deque<std::pair<uint64_t, int64_t>> cb_offset_history;
 
@@ -254,7 +263,7 @@ struct sync_test_output
 	struct quirc *cb_qr = nullptr;
 	camerabox::ChannelMarkerPicker *cb_audio_dec = nullptr;
 	/* issue 1367: switches of the paired audio channel (a switch moves the measured offset by
-	 * ~10 ms) -- counted, and when to log them (camera-box-channel-pick.hpp). Audio thread only. */
+	 * ~10 ms) -- counted, and when to log them (camera-box-channel-pick.hpp). Audio decode worker only. */
 	camerabox::CbChannelSwitchLog cb_switch_log;
 	camerabox::RollingOffsetCluster cb_offset_cluster = camerabox::RollingOffsetCluster::dock();
 	uint64_t cb_audio_pushed = 0;
@@ -267,22 +276,22 @@ struct sync_test_output
 
 	/* #634: audit-log lock/unlock/offset-update transitions of the cluster above, so a live
 	 * desync (like the closed #529) can be diagnosed from the OBS log alone. Pure/tested in
-	 * camera-box-audio.hpp (tests/av_sync_dock_audit_log.rs) — touched only on the audio thread. */
+	 * camera-box-audio.hpp (tests/av_sync_dock_audit_log.rs) — touched only on the audio decode worker. */
 	camerabox::CbLockAuditTracker cb_lock_audit;
 
 	/* #926: holds CAMERA_BOX_LOCK_SOURCE_NAME's genlock_latency_ms_src so the dock's own displayed
 	 * offset (audio_ts - video_ts) never rests negative ("audio early", a forbidden steady state).
 	 * Only ever acts on a Locked/Updated lock-audit transition above; an Unlocked transition (real
 	 * event, no test signal) freezes it -- see camera-box-audio.hpp's own doc comment. Touched only
-	 * on the audio thread. */
+	 * on the audio decode worker. */
 	camerabox::CbDockLockCorrector cb_lock_corrector;
 
 	/* #690: periodic live diagnostic -- tells a live session WHY the audio index/latency never
 	 * lock (does the demod see nothing / decode garbage / decode fine but never ring-hit or
 	 * cluster) and how well the video-QR decode is doing, from the OBS log alone (no rig access
-	 * needed to read it). video counters are written on the DECODE WORKER thread and read on the AUDIO
-	 * thread (which owns the periodic log) -- atomic, no lock needed for plain counters. Ring
-	 * hit/miss and the log-rate-limit timestamp are touched only on the audio thread. */
+	 * needed to read it). video counters are written on the video DECODE WORKER and read on the AUDIO
+	 * decode worker (which owns the periodic log) -- atomic, no lock needed for plain counters. Ring
+	 * hit/miss and the log-rate-limit timestamp are touched only on the audio decode worker. */
 	std::atomic<uint64_t> cb_video_frames_seen{0};
 	std::atomic<uint64_t> cb_video_frames_decoded{0};
 	uint64_t cb_ring_hits = 0;   // decoded audio marker whose idx8 already had a valid video ring slot
@@ -293,10 +302,12 @@ struct sync_test_output
 	/* #1177: watches whether the measurement INPUT is still advancing (video_decoded + crc_ok). When
 	 * the marker/QR input disappears (EVENT mode) every existing unlock path is dead (all are
 	 * decoded-marker-driven), so cb_lock_state would hold `yes` and the dock would show the last
-	 * offset forever. Evaluated once per diag tick (below) -- the audio thread keeps ticking in EVENT
-	 * mode -- and drives the sync_stale_changed signal + the diag line's state=LIVE/STALE token.
+	 * offset forever. Evaluated once per diag tick (below) -- the audio decode worker ticks while the
+	 * issue-1381 gate is open (a QR is still decoding), so this catches the marker going away under a
+	 * live QR; the whole test signal going away closes the gate, and its session end shows STALE --
+	 * and drives the sync_stale_changed signal + the diag line's state=LIVE/STALE token.
 	 * Pure/tested in av_sync_dock.rs, mirrored in camera-box-audio.hpp. Touched only on the audio
-	 * thread (same thread that owns the diag block). */
+	 * decode worker (the thread that owns the diag block). */
 	camerabox::CbDockInputStaleness cb_input_staleness;
 
 	/* #1153: dead-pairing watchdog -- fires when the marker<->QR pairing stays dead (no
@@ -304,18 +315,18 @@ struct sync_test_output
 	 * itself keeps flowing; the diag tick then resets ALL in-dock pairing state and re-acquires
 	 * from scratch, so a manual OBS restart is never the only cure for a sticky
 	 * post-latency-step unlock. Pure/tested in av_sync_dock.rs, mirrored in
-	 * camera-box-audio.hpp. Touched only on the audio thread (same thread that owns the diag
+	 * camera-box-audio.hpp. Touched only on the audio decode worker (same thread that owns the diag
 	 * block). */
 	camerabox::CbDockPairingWatchdog cb_pairing_watchdog;
 
 	/* #926 fix-up (review finding 9/16): latches so each condition logs ONCE (and again after it
 	 * clears and re-occurs) instead of spamming a blog() line per trusted marker while the
-	 * condition persists. Touched only on the audio thread. */
+	 * condition persists. Touched only on the audio decode worker. */
 	bool cb_lock_source_missing_logged = false; // CAMERA_BOX_LOCK_SOURCE_NAME not found
 	bool cb_rail_pinned_logged = false;         // pinned at a hardware rail with audio still early
 	/* #1319 Part 2: last genlock_latency_ms_src pin observed on a trusted push; -1 = none seen yet.
 	 * A CHANGE is logged once (`pin-change observed <old> -> <new>`) so a wrong-cluster pick after a
-	 * pin move is visible in the log. Touched only on the audio thread. */
+	 * pin move is visible in the log. Touched only on the audio decode worker. */
 	int32_t cb_last_seen_pin_ms = -1;
 
 	/* issue 1367: the video decode's latest-pending mailbox + worker thread. st_raw_video (libobs's
@@ -324,14 +335,35 @@ struct sync_test_output
 	camerabox::CbDecodeMailbox<st_video_decode_job> cb_decode_mailbox;
 	/* issue 1367: the max ns st_raw_video itself took (snapshot + copy + publish) since the last diag
 	 * line -- the video-output thread's remaining cost, reported as publish_max_us. Raised on the
-	 * video thread with cb_atomic_max_u64, read-and-reset on the audio thread's diag tick. */
+	 * video thread with cb_atomic_max_u64, read-and-reset on the audio decode worker's diag tick. */
 	std::atomic<uint64_t> cb_publish_max_ns{0};
+
+	/* issue 1381: the camera-box audio decode's FIFO + worker thread. st_raw_audio (libobs's audio
+	 * thread) only runs the gate and copies the block here; the worker runs st_raw_audio_camera_box
+	 * on the copy, so every piece of state that function touches is owned by the audio worker.
+	 * Started in st_start, stopped + joined in st_stop / st_destroy / the destructor. */
+	camerabox::CbAudioBlockFifo cb_audio_fifo;
+	/* issue 1381: the longest gate + copy on the audio thread since the last diag line
+	 * (audio_publish_max_us); raised on the audio thread, read-and-reset on the audio worker. */
+	std::atomic<uint64_t> cb_audio_publish_max_ns{0};
+	/* issue 1381: whether CAMERA_BOX_MEASURE_SOURCE_NAME exists; written on the video decode worker,
+	 * read on the audio thread. The check's own state is decode-worker only. */
+	std::atomic<bool> cb_measure_source_present{false};
+	bool cb_measure_source_checked = false;
+	uint64_t cb_measure_source_check_ts = 0;
+	/* issue 1381: audio worker only -- the gate closed the last session (the dock was told STALE),
+	 * and when the last "blocks dropped" warning went out. */
+	bool cb_audio_paused = false;
+	bool cb_audio_drop_logged = false;
+	uint64_t cb_audio_drop_log_ns = 0;
 
 	~sync_test_output()
 	{
 		/* issue 1367: join the decode worker FIRST -- it decodes with `qr` / `cb_qr`, which the
 		 * lines below free. */
 		cb_decode_mailbox.stop();
+		/* issue 1381: the same for the audio decode worker and the picker it decodes with. */
+		cb_audio_fifo.stop();
 		if (qr)
 			quirc_destroy(qr);
 		if (cb_qr)
@@ -343,6 +375,11 @@ struct sync_test_output
 static void video_marker_found(struct sync_test_output *st, uint64_t timestamp, float score);
 static void st_video_decode_job_run(struct sync_test_output *, st_video_decode_job &);
 static void st_decode_worker_thread_setup();
+static void st_audio_block_run(struct sync_test_output *, const camerabox::CbAudioBlock &);
+static void st_audio_block_gap(struct sync_test_output *, const camerabox::CbAudioBlock &);
+static void st_audio_session_end(struct sync_test_output *, unsigned);
+static void cb_audio_forget_lock(struct sync_test_output *);
+static void st_audio_worker_thread_setup();
 
 static const char *st_get_name(void *)
 {
@@ -381,6 +418,7 @@ static void st_destroy(void *data)
 	/* issue 1367: libobs has disconnected the raw callbacks by now (obs_output_destroy joins its
 	 * end-capture thread first); wait for an in-flight decode, then free. */
 	st->cb_decode_mailbox.stop();
+	st->cb_audio_fifo.stop();
 	delete st;
 }
 
@@ -397,6 +435,8 @@ static bool st_start(void *data)
 	/* issue 1367: st_start rewrites state the decode worker reads (the quirc size, the video
 	 * geometry) -- join any worker left from a previous start first. A no-op when none runs. */
 	st->cb_decode_mailbox.stop();
+	/* issue 1381: the audio worker reads the channel layout rewritten below -- join it too. */
+	st->cb_audio_fifo.stop();
 
 	const video_t *video = obs_output_video(st->context);
 	if (!video) {
@@ -494,6 +534,22 @@ static bool st_start(void *data)
 	}
 	blog(LOG_INFO, "av-sync-dock: video decode worker started (off the video-output thread, issue 1367)");
 
+	/* issue 1381: the camera-box audio decode runs on this worker, never on libobs's audio thread
+	 * (a decode there put the cg OBS mixer 13-22 s behind real time). Started before data capture;
+	 * every slot is sized for a full AUDIO_OUTPUT_FRAMES block so the audio thread never allocates. */
+	camerabox::CbAudioBlockFifo::Handlers audio_handlers;
+	audio_handlers.process = [st](const camerabox::CbAudioBlock &block) { st_audio_block_run(st, block); };
+	audio_handlers.on_gap = [st](const camerabox::CbAudioBlock &block) { st_audio_block_gap(st, block); };
+	audio_handlers.on_session_end = [st](unsigned reason) { st_audio_session_end(st, reason); };
+	audio_handlers.on_thread_start = st_audio_worker_thread_setup;
+	if (!st->cb_audio_fifo.start(audio_handlers, st->audio_channels < MAX_AV_PLANES ? st->audio_channels : MAX_AV_PLANES,
+				     AUDIO_OUTPUT_FRAMES)) {
+		st->cb_decode_mailbox.stop();
+		blog(LOG_ERROR, "av-sync-dock: failed to start the audio decode worker thread");
+		return false;
+	}
+	blog(LOG_INFO, "av-sync-dock: audio decode worker started (off the audio thread, issue 1381)");
+
 	obs_output_begin_data_capture(st->context, OBS_OUTPUT_VIDEO | OBS_OUTPUT_AUDIO);
 
 	return true;
@@ -508,8 +564,12 @@ static void st_stop(void *data, uint64_t)
 	 * no-op. */
 	obs_output_end_data_capture(st->context);
 	st->cb_decode_mailbox.stop();
+	st->cb_audio_fifo.stop();
 	blog(LOG_INFO, "av-sync-dock: video decode worker stopped (decoded=%llu decode_dropped=%llu)",
 	     (unsigned long long)st->cb_decode_mailbox.taken(), (unsigned long long)st->cb_decode_mailbox.dropped());
+	blog(LOG_INFO, "av-sync-dock: audio decode worker stopped (blocks=%llu audio_dropped=%llu decode_resets=%llu)",
+	     (unsigned long long)st->cb_audio_fifo.taken(), (unsigned long long)st->cb_audio_fifo.dropped(),
+	     (unsigned long long)st->cb_audio_fifo.resets());
 }
 
 /* issue 1367: norihiro's sq / diff_u32 / sqrt_u32 circle-row math moved, unchanged, into
@@ -562,6 +622,30 @@ static void signal_qrcode_found(obs_output_t *ctx, uint64_t timestamp, const str
 	signal_handler_signal(sh, "qrcode_found", &cd);
 }
 
+/* issue 1381: whether this box has the measurement source (CAMERA_BOX_MEASURE_SOURCE_NAME) the
+ * camera-box audio decode exists for. Decode worker only (the lookup takes the sources mutex), at most
+ * once per CAMERA_BOX_MEASURE_SOURCE_RECHECK_NS of frame time; the audio thread reads the atomic. The
+ * first answer and every change are logged, at INFO: resolume and strih have no such source by
+ * design, so "not found" there is the expected state, not a warning. */
+static void cb_refresh_measure_source(struct sync_test_output *st, uint64_t video_ts)
+{
+	if (st->cb_measure_source_checked && video_ts >= st->cb_measure_source_check_ts &&
+	    video_ts - st->cb_measure_source_check_ts < CAMERA_BOX_MEASURE_SOURCE_RECHECK_NS)
+		return;
+	const bool first = !st->cb_measure_source_checked;
+	st->cb_measure_source_checked = true;
+	st->cb_measure_source_check_ts = video_ts;
+	obs_source_t *src = obs_get_source_by_name(CAMERA_BOX_MEASURE_SOURCE_NAME);
+	const bool present = src != nullptr;
+	obs_source_release(src);
+	const bool was = st->cb_measure_source_present.exchange(present);
+	if (first || was != present)
+		blog(LOG_INFO, "av-sync-dock: measurement source '%s' %s (issue 1381)",
+		     CAMERA_BOX_MEASURE_SOURCE_NAME,
+		     present ? "found -- the camera-box audio decode runs while the test signal is fresh"
+			     : "not found on this box -- the camera-box audio decode stays off");
+}
+
 /* #398 Option A: record a decoded camera-box dual-QR into the direct video<->audio ring keyed on the
  * frame_id low byte (the SAME value the audio index carries) and set the FIXED rig audio params +
  * dock-UI qr_data. The SINGLE source of truth for that update, called by BOTH the norihiro
@@ -571,8 +655,8 @@ static void cb_video_qr_record(struct sync_test_output *st, uint32_t frame_id, u
 {
 	uint8_t low = (uint8_t)(frame_id & 0xFFu);
 	{
-		// Same mutex the audio thread locks to READ these — the video ring + f/c/q_ms are written
-		// here (decode worker thread) and read on the audio thread; both sides must take the lock.
+		// Same mutex the audio side locks to READ these — the video ring + f/c/q_ms are written
+		// here (decode worker thread) and read on the audio thread (gate) and the audio decode worker; all sides must take the lock.
 		std::unique_lock<std::mutex> lock(st->mutex);
 		st->cb_video_ts_ns[low] = video_ts;
 		st->cb_video_valid[low] = true;
@@ -582,6 +666,7 @@ static void cb_video_qr_record(struct sync_test_output *st, uint32_t frame_id, u
 		st->c = CAMERA_BOX_AUDIO_C;
 		st->q_ms = CAMERA_BOX_AUDIO_Q_MS;
 	}
+	cb_refresh_measure_source(st, video_ts);
 	// Reuse the existing dock-UI plumbing (video index / missed% / frequency labels).
 	st->qr_data.f = CAMERA_BOX_AUDIO_F_HZ;
 	st->qr_data.c = CAMERA_BOX_AUDIO_C;
@@ -1309,15 +1394,15 @@ static bool cb_read_lock_latency_ms(int32_t *out_ms)
  * CAMERA_BOX_LOCK_SOURCE_NAME, mirroring the SAME settings-update mechanism
  * `scripts/av_sync_calibrate.py`'s `apply_latency()` performs over the OBS WebSocket
  * (GetInputSettings/SetInputSettings), done here in-process instead -- but marshaled onto the OBS
- * UI thread via `obs_queue_task`, never mutated directly from the raw-audio callback (the core
- * AUDIO thread): mutating a LIVE source's settings `obs_data` (no internal mutex of its own) from
+ * UI thread via `obs_queue_task`, never mutated directly from the camera-box audio decode (the core
+ * AUDIO thread until issue 1381, its own worker since): mutating a LIVE source's settings `obs_data` (no internal mutex of its own) from
  * a real-time audio callback races the video thread's own reads/writes of the same source and any
  * UI/WebSocket access, and `obs_get_source_by_name` itself takes the global sources-list mutex,
  * which the UI thread is the expected/serialized caller of throughout the rest of this codebase.
  * The queued task uses a FRESH `obs_data_create()` holding only the ONE key -- never the shared
  * `obs_source_get_settings()` object handed back in place (finding 12's fragile "mutate the live
  * settings object" idiom) -- and reads the value back right after the update to catch a mismatch
- * (finding 8) close to the write. Fire-and-forget (`wait=false`): the audio thread must never
+ * (finding 8) close to the write. Fire-and-forget (`wait=false`): the audio decode must never
  * block on the UI thread's own scheduling. */
 struct CbApplyLockLatencyTask {
 	int32_t new_delay_ms;
@@ -1365,8 +1450,9 @@ static void cb_apply_lock_latency_ms(int32_t new_ms)
  * diag line must stay monotonic -- supervisors parse it); the evidence line's epoch deltas
  * discriminate the poison class from the OBS log alone: crc_ok near the ~1/256 chance floor of the
  * preamble delta = the marker waveform is degraded upstream of the dock, while a healthy crc_ok
- * rate with a dead ring = in-dock pairing state, which this reset clears. Runs on the audio thread
- * only, same as its caller (the diag block); the ring is the one mutex-shared piece. */
+ * rate with a dead ring = in-dock pairing state, which this reset clears. Runs on the audio decode
+ * worker only, same as its caller (the diag block); the ring and the offset history are the pieces
+ * shared under the mutex. */
 static void cb_apply_pairing_recovery(struct sync_test_output *st,
                                       const camerabox::CbDockPairingRecovery &rec)
 {
@@ -1374,18 +1460,13 @@ static void cb_apply_pairing_recovery(struct sync_test_output *st,
 		std::unique_lock<std::mutex> lock(st->mutex);
 		for (size_t slot = 0; slot < CAMERA_BOX_RING_SLOTS; slot++)
 			st->cb_video_valid[slot] = false;
+		st->cb_offset_history.clear();
 	}
 	st->cb_offset_cluster = camerabox::RollingOffsetCluster::dock();
-	st->cb_offset_history.clear();
-	st->cb_lock_audit = camerabox::CbLockAuditTracker();
+	/* A stale-held lock (zero ring hits all epoch) must not survive the reset on the UI either --
+	 * the audit tracker could never fire its own Unlocked transition without a decode to push. */
+	cb_audio_forget_lock(st);
 	st->cb_audio_dec->reset_window();
-	if (st->cb_lock_state) {
-		/* A stale-held lock (zero ring hits all epoch) must not survive the reset on the UI
-		 * either -- the audit tracker could never fire its own Unlocked transition without a
-		 * decode to push. */
-		st->cb_lock_state = false;
-		signal_lock_state_changed(st->context, false);
-	}
 	blog(LOG_WARNING,
 	     "av-sync-dock: PAIRING-RECOVER dead pairing window (ring_hit +%llu, crc_ok "
 	     "+%llu, preambles +%llu, video_decoded +%llu in %llus) -- reset "
@@ -1398,7 +1479,7 @@ static void cb_apply_pairing_recovery(struct sync_test_output *st,
 /* issue 1367: the audio decode's per-channel picker (camera-box-channel-pick.hpp) for the output's
  * current channel layout, at most MAX_AV_PLANES channels. A new layout starts the decode over, and
  * the absolute sample count with it. Returns the number of channels to push, or 0 when there is
- * nothing to decode. Audio thread only, like its caller. */
+ * nothing to decode. Audio decode worker only, like its caller. */
 static size_t cb_ensure_audio_picker(struct sync_test_output *st)
 {
 	const size_t nch = st->audio_channels < MAX_AV_PLANES ? st->audio_channels : MAX_AV_PLANES;
@@ -1423,7 +1504,7 @@ static size_t cb_ensure_audio_picker(struct sync_test_output *st)
  * 10.17 ms behind L on the stereo mbc input) and the offset cluster is not reset, so it is logged
  * when it happens: the first switch at once, then at most one line per diag interval, naming how
  * many switches it stands for (the decision is CbChannelSwitchLog, tested in the header's
- * mirrors). The diag line's channel_switches= is the running total. Audio thread only; `prev` is
+ * mirrors). The diag line's channel_switches= is the running total. Audio decode worker only; `prev` is
  * the channel chosen before this callback's push. */
 static void cb_note_channel_switch(struct sync_test_output *st, size_t prev, const struct audio_data *frames)
 {
@@ -1438,7 +1519,7 @@ static void cb_note_channel_switch(struct sync_test_output *st, size_t prev, con
 
 /* The camera-box audio path's ~10 s tick (issue 1367 split it out of st_raw_audio_camera_box): the
  * #1177 staleness evaluation, the #690 diag line and the #1153 dead-pairing recovery, in that order.
- * Audio thread only; st->cb_audio_dec is set (the caller returns earlier otherwise). */
+ * Audio decode worker only; st->cb_audio_dec is set (the caller returns earlier otherwise). */
 static void cb_audio_diag_tick(struct sync_test_output *st, const struct audio_data *frames)
 {
 	/* #690: rate-limited (~10s) INFO diagnostic -- answers, from the OBS log alone, whether the
@@ -1454,10 +1535,11 @@ static void cb_audio_diag_tick(struct sync_test_output *st, const struct audio_d
 		const uint64_t vdec = st->cb_video_frames_decoded.load(std::memory_order_relaxed);
 		const double vpct = vseen > 0 ? 100.0 * (double)vdec / (double)vseen : 0.0;
 
-		/* #1177: evaluate measurement-input staleness at this SAME ~10s cadence -- the audio thread
-		 * keeps ticking in EVENT mode even though the marker/QR decode counters (video_decoded +
-		 * crc_ok) do not. On the boundary crossing, fire a one-shot log line + the sync_stale_changed
-		 * signal so the dock stops presenting the last locked offset as if it were live. */
+		/* #1177: evaluate measurement-input staleness at this SAME ~10s cadence -- the audio decode
+		 * worker keeps ticking while the issue-1381 gate is open, even when the marker decode counter
+		 * (crc_ok) stops. On the boundary crossing, fire a one-shot log line + the sync_stale_changed
+		 * signal so the dock stops presenting the last locked offset as if it were live. When the whole
+		 * test signal goes away (EVENT mode) the gate closes and st_audio_session_end shows STALE. */
 		const camerabox::CbDockStaleTransition strans = st->cb_input_staleness.observe(
 			vdec, st->cb_audio_dec->stats.crc_ok, frames->timestamp,
 			camerabox::CB_DOCK_INPUT_STALE_NS);
@@ -1487,7 +1569,8 @@ static void cb_audio_diag_tick(struct sync_test_output *st, const struct audio_d
 		     "av-sync-dock: diag video_frames=%llu video_decoded=%llu(%.1f%%) "
 		     "audio_samples=%llu preambles=%llu crc_ok=%llu crc_fail=%llu "
 		     "ring_hit=%llu ring_miss=%llu locked=%s state=%s decode_dropped=%llu publish_max_us=%llu "
-		     "marker_channel=%zu channel_clusters=%s channel_switches=%llu",
+		     "marker_channel=%zu channel_clusters=%s channel_switches=%llu"
+		     " decode_ms_max=%.3f decode_ms_sum=%.1f audio_dropped=%llu decode_resets=%llu audio_publish_max_us=%llu",
 		     (unsigned long long)vseen, (unsigned long long)vdec, vpct,
 		     (unsigned long long)st->cb_audio_pushed,
 		     (unsigned long long)st->cb_audio_dec->stats.preamble_screens_passed,
@@ -1497,7 +1580,11 @@ static void cb_audio_diag_tick(struct sync_test_output *st, const struct audio_d
 		     st->cb_lock_state ? "yes" : "no", input_stale ? "STALE" : "LIVE",
 		     (unsigned long long)st->cb_decode_mailbox.dropped(),
 		     (unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen,
-		     channel_clusters.c_str(), (unsigned long long)st->cb_switch_log.total);
+		     channel_clusters.c_str(), (unsigned long long)st->cb_switch_log.total,
+		     (double)st->cb_audio_fifo.take_process_max_ns() / 1e6,
+		     (double)st->cb_audio_fifo.take_process_sum_ns() / 1e6,
+		     (unsigned long long)st->cb_audio_fifo.dropped(), (unsigned long long)st->cb_audio_fifo.resets(),
+		     (unsigned long long)(st->cb_audio_publish_max_ns.exchange(0) / 1000));
 
 		/* #1153: dead-pairing recovery, evaluated at the SAME ~10s cadence. When the pairing has
 		 * been dead for a full epoch (no meaningful ring-hit advance, no genuine lock) while
@@ -1827,6 +1914,124 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 	cb_audio_diag_tick(st, frames);
 }
 
+static_assert(MAX_AV_PLANES <= camerabox::CB_AUDIO_FIFO_MAX_CHANNELS, "the audio FIFO holds every OBS plane");
+
+/* issue 1381: the audio worker's per-block body -- the camera-box decode st_raw_audio used to run
+ * inline, now on the copied block, with the block's own timestamp. */
+static void st_audio_block_run(struct sync_test_output *st, const camerabox::CbAudioBlock &block)
+{
+	struct audio_data frames = {};
+	for (size_t c = 0; c < block.channels; c++)
+		frames.data[c] = (uint8_t *)block.planes[c].data();
+	frames.frames = (uint32_t)block.frames;
+	frames.timestamp = block.timestamp;
+	st_raw_audio_camera_box(st, &frames);
+}
+
+/* issue 1381: the lock tracker forgets its state and the dock shows unlocked. A session END does
+ * it (no measurement is being made, so the last offset must not read as live), so does a session
+ * BEGIN (an output restart discards a session end the worker had not reached yet), and so does the
+ * dead-pairing recovery. The offset cluster keeps its own window (CB_CLUSTER_WINDOW_NS): after a
+ * short pause the first new markers can lock again on offsets measured before it, the same chain. */
+static void cb_audio_forget_lock(struct sync_test_output *st)
+{
+	st->cb_lock_audit = camerabox::CbLockAuditTracker();
+	if (st->cb_lock_state) {
+		st->cb_lock_state = false;
+		signal_lock_state_changed(st->context, false);
+	}
+}
+
+/* issue 1381: a new decode session -- the gate reopened, or the output restarted. The staleness
+ * and pairing watchdogs start a fresh baseline (the pause is not a dead input), the lock tracker
+ * starts over, the diag line goes out on the first block, and a dock told STALE at the last session
+ * end goes LIVE again. */
+static void cb_audio_session_begin(struct sync_test_output *st)
+{
+	st->cb_input_staleness = camerabox::CbDockInputStaleness();
+	st->cb_pairing_watchdog = camerabox::CbDockPairingWatchdog();
+	cb_audio_forget_lock(st);
+	st->cb_diag_last_log_ns = 0;
+	if (st->cb_audio_paused) {
+		st->cb_audio_paused = false;
+		signal_stale_changed(st->context, false);
+	}
+	blog(LOG_INFO, "av-sync-dock: camera-box audio decode ON -- test signal fresh, measurement source present (issue 1381)");
+}
+
+/* issue 1381: the block follows a gap -- dropped blocks (the FIFO was full), or a new session. The
+ * decoders must not see the two stretches of audio as contiguous, or a marker cut by the gap could
+ * decode from the stitched halves: every decoder drops its window (histories and pick kept). */
+static void st_audio_block_gap(struct sync_test_output *st, const camerabox::CbAudioBlock &block)
+{
+	if (st->cb_audio_dec)
+		st->cb_audio_dec->reset_window();
+	if (block.gap & camerabox::CB_AUDIO_GAP_SESSION)
+		cb_audio_session_begin(st);
+	if ((block.gap & camerabox::CB_AUDIO_GAP_DROPPED) &&
+	    (!st->cb_audio_drop_logged || block.timestamp - st->cb_audio_drop_log_ns >= CAMERA_BOX_DIAG_LOG_INTERVAL_NS)) {
+		st->cb_audio_drop_logged = true;
+		st->cb_audio_drop_log_ns = block.timestamp;
+		blog(LOG_WARNING,
+		     "av-sync-dock: audio decode fell behind -- blocks dropped, marker decoders reset "
+		     "(audio_dropped=%llu decode_resets=%llu, issue 1381)",
+		     (unsigned long long)st->cb_audio_fifo.dropped(), (unsigned long long)st->cb_audio_fifo.resets());
+	}
+}
+
+/* issue 1381: the gate closed (`reason` is the camerabox::CbAudioGate). The decoders drop their
+ * window, the lock tracker forgets its state, and the dock shows unlocked + STALE -- no measurement
+ * is being made, so the last offset must not read as live. The next session starts over. */
+static void st_audio_session_end(struct sync_test_output *st, unsigned reason)
+{
+	if (st->cb_audio_dec)
+		st->cb_audio_dec->reset_window();
+	cb_audio_forget_lock(st);
+	if (!st->cb_input_staleness.is_stale())
+		signal_stale_changed(st->context, true);
+	st->cb_audio_paused = true;
+	const camerabox::CbDecodeStats stats = st->cb_audio_dec ? st->cb_audio_dec->stats : camerabox::CbDecodeStats();
+	blog(LOG_INFO,
+	     "av-sync-dock: camera-box audio decode OFF -- %s; decoders reset, dock STALE "
+	     "(preambles=%llu crc_ok=%llu audio_dropped=%llu decode_resets=%llu, issue 1381)",
+	     camerabox::cb_audio_gate_text((camerabox::CbAudioGate)reason),
+	     (unsigned long long)stats.preamble_screens_passed, (unsigned long long)stats.crc_ok,
+	     (unsigned long long)st->cb_audio_fifo.dropped(), (unsigned long long)st->cb_audio_fifo.resets());
+}
+
+/* issue 1381: once, on the audio worker before its first block. Named (15 characters, the Linux
+ * limit) and left at NORMAL priority, like the video decode worker: the audio thread takes the FIFO
+ * lock every callback and the worker holds it briefly, and a Windows std::mutex has no priority
+ * inheritance. */
+static void st_audio_worker_thread_setup()
+{
+	os_set_thread_name("avsync-audio");
+}
+
+/* issue 1381: the audio thread's whole share of the camera-box audio decode -- the gate (a fresh
+ * camera-box QR, the measurement source on this box) and a copy of every channel into the FIFO. The
+ * worker decodes the copy; a closed gate ends the worker's session (decoders reset, dock STALE).
+ * Bounded work: no decode, no log line, no source lookup, no signal here. */
+static void cb_audio_gate_and_publish(struct sync_test_output *st, const struct audio_data *frames, uint64_t last_qr_ns)
+{
+	const uint64_t publish_start_ns = os_gettime_ns();
+	const uint64_t start_ts = st->start_ts;
+	const uint64_t now = frames->timestamp > start_ts ? frames->timestamp - start_ts : 0;
+	const camerabox::CbAudioGate gate = camerabox::cb_audio_decode_gate(
+		true, st->cb_measure_source_present.load(std::memory_order_relaxed), now, last_qr_ns,
+		CAMERA_BOX_TEST_SIGNAL_FRESH_NS);
+	if (gate == camerabox::CbAudioGate::Open) {
+		const size_t nch = st->audio_channels < MAX_AV_PLANES ? st->audio_channels : MAX_AV_PLANES;
+		const float *planes[MAX_AV_PLANES];
+		for (size_t c = 0; c < nch; c++)
+			planes[c] = (const float *)frames->data[c];
+		st->cb_audio_fifo.publish(planes, nch, frames->frames, frames->timestamp);
+	} else {
+		st->cb_audio_fifo.end_session((unsigned)gate);
+	}
+	camerabox::cb_atomic_max_u64(st->cb_audio_publish_max_ns, os_gettime_ns() - publish_start_ns);
+}
+
 static void st_raw_audio(void *data, struct audio_data *frames)
 {
 	auto *st = (struct sync_test_output *)data;
@@ -1836,13 +2041,17 @@ static void st_raw_audio(void *data, struct audio_data *frames)
 
 	// #398: once the video QR has activated camera-box mode, decode the audio with camera-box's own
 	// proven demod (norihiro's is broken at c=1). Skip norihiro's audio path entirely then.
+	// issue 1381: that decode runs on the audio worker, and only while the test signal is fresh;
+	// this thread only runs the gate and copies the block.
 	bool cb_active;
+	uint64_t last_qr_ns;
 	{
 		std::unique_lock<std::mutex> lock(st->mutex);
 		cb_active = st->cb_mode_active;
+		last_qr_ns = st->cb_video_last_decode_ts_ns;
 	}
 	if (cb_active) {
-		st_raw_audio_camera_box(st, frames);
+		cb_audio_gate_and_publish(st, frames, last_qr_ns);
 		return;
 	}
 

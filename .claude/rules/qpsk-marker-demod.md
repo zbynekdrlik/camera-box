@@ -1,6 +1,10 @@
 ---
 paths:
   - "src/qpsk_marker.rs"
+  - "src/qpsk_marker_scan.rs"
+  - "vendor/av-sync-dock/src/camera-box-marker-scan.hpp"
+  - "tests/qpsk_marker_scan_1381.rs"
+  - "tests/av_sync_dock_streaming_decoder_1381.rs"
   - "src/qpsk_channel_select.rs"
   - "src/qpsk_probe_decision.rs"
   - "src/probe/av_sync_recording.rs"
@@ -25,13 +29,43 @@ marker has the zero nibble == 0 by construction.
   Before #1153 it checked only preamble + CRC (8 bits), leaving the zero nibble unchecked → of the 4096
   words that pass preamble+CRC, only **256 are valid vs 3840 "poison"** (nonzero zero-nibble) that a music
   mix decodes from noise → a **16× false-positive flood** that drowns the offset cluster (live dock:
-  matched only ~26, mad ~30ms). The gate lives in ONE Rust kernel (`decode_markers_with_stats`, feeding
-  BOTH offline `recording-verdict --av-sync` AND the live-dock `StreamingMarkerDecoder`) mirrored
-  byte-for-byte into `cb_decode_markers_with_stats`. Change BOTH in lockstep.
+  matched only ~26, mad ~30ms). The gate lives in ONE Rust kernel (`qpsk_marker_scan::scan_markers`,
+  behind `decode_markers_with_stats` for the offline `recording-verdict --av-sync` AND behind the
+  live-dock `StreamingMarkerDecoder`) mirrored byte-for-byte into `cb_scan_markers`
+  (`camera-box-marker-scan.hpp`). Change BOTH in lockstep.
 - **"98.7% CRC fail" is inherent CRC-4 physics, NOT a bug** — a 4-bit CRC passes ~1/16 of preamble-screened
   noise, so a high crc_fail rate is expected and can never go >50% on a music mix. The reliability metric is
   the CLUSTER (matched size / mad / offset stability), never the crc_ok/crc_fail ratio (a stronger gate
   correctly LOWERS that ratio by moving false decodes into crc_fail). Don't tune to the ratio.
+
+## The scan kernel and the streaming decoder (issue 1381)
+Issue 1381 split the kernel out (`src/qpsk_marker_scan.rs`, `camera-box-marker-scan.hpp`) and made it
+cheap without changing a decoded marker or a counter of the batch decode:
+- **The refine is a sliding-window maximum** (`RefineWindow` / `CbRefineWindow`): each position's
+  preamble magnitude is computed once per scan, and a monotonic queue returns the LEFTMOST maximum of
+  `[i-4, min(i+span, last)]`; `i` itself wins a tie. That is exactly where the old linear refine
+  landed (it moved only on a strictly larger magnitude). The C++ magnitude is now
+  `sqrt(re^2 + im^2)` like the Rust `cmag` (it was `std::abs` = hypot, last-bit differences).
+- **`scan_markers(samples, p, thr, start)` returns a `resume`**: the first visited position whose
+  screen passed while its refine range was cut by the end of the samples, else where the scan stopped.
+  The streaming decoder scans from `next_scan` (that resume, in absolute samples): the new positions
+  plus the cut tail. Re-screening the cut tail is what keeps its markers the same as the old
+  whole-window re-decode's, whose first sight of a marker can be such a cut refine (a pure "screen
+  each position once" decoder can report a marker a few samples off). That sameness is CHECKED push
+  by push on every fixture and noisy case below, not proven for every input; the batch decode's
+  sameness (markers and counters) follows from the refine rule.
+- **Stats changed meaning for the streaming decoder**: each screen counts once, a cut-tail position
+  again when re-screened -- about half the old whole-window over-count. The dock diag's `preambles=`
+  dropped accordingly (still monotonic; the #1153 watchdog only needs "advanced > 0").
+- **Proof**: `tests/qpsk_marker_scan_1381.rs` = the batch decode vs a FROZEN copy of the old Rust
+  kernel (markers and counters, noise/music/tone/every index/non-finite/the stereo fixture);
+  `tests/av_sync_dock_streaming_decoder_1381.rs` = streaming vs whole-window, callback by callback;
+  the bench checks the C++ decoder against a frozen copy of the old C++ kernel (including music +
+  markers, where false decodes and skips exercise the scan path); the refine window vs the linear
+  rule on tie-heavy data in both `qpsk_marker_scan`'s tests and the camera-box self-test.
+- **Cost** (THREAD CPU, N100 at load ~20, per 1024-frame stereo push, the bench's RED run vs GREEN):
+  music 6.8 -> 0.18-0.24 ms, a 442 Hz tone (every position passes the screen, the worst case)
+  34.8 -> 0.56-0.7 ms. The investigation bench's 11.5 / 65 ms were WALL time on the same loaded box.
 
 ## Reading the live dock's own decode health (diagnosis before touching code)
 The deployed stream-box dock logs a ~10s diag line — read it via win-stream-snv MCP, not ssh:
@@ -138,8 +172,9 @@ channels. It hands every channel's plane to `camerabox::ChannelMarkerPicker`
   155 and 185 twice, 10.17 ms apart, both into the offset cluster. A different index inside the gap
   is still returned.
 - **The history is capped:** each channel keeps at most `CB_CHANNEL_PICK_MAX_MARKERS` (256, the
-  newest). The cluster is O(n²) on the OBS audio thread; a decode flood (one marker per dedup gap)
-  measured ~1.4 ms per recompute uncapped. A real chain has ~8 markers in 25 s.
+  newest). The cluster is O(n²) on the dock's audio decode worker (the OBS audio thread until issue
+  1381); a decode flood (one marker per dedup gap) measured ~1.4 ms per recompute uncapped. A real
+  chain has ~8 markers in 25 s.
 - **Consequences to expect:** a marker a channel decodes while another channel is chosen feeds
   nothing, so when the marker rides only on R its first two markers are not paired (a chain needs
   three). A channel that stops decoding hands over once its markers age out of the window. The

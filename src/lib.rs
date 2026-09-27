@@ -93,6 +93,11 @@ pub mod audio_marker_policy;
 // ALSA emitter (`probe::qpsk_emit`) and recording-verdict decode call into this. Supersedes the chirp.
 pub mod qpsk_marker;
 
+// issue 1381 — the QPSK marker demod kernel `scan_markers` (the ONE demod behind
+// `qpsk_marker::decode_markers_with_stats` and the live dock's streaming decoder), split out of
+// `qpsk_marker`. Pure Tier-0, default features.
+pub mod qpsk_marker_scan;
+
 // #1324 — the AUDIO-ONLY QPSK decodability probe decision (pure Tier-0, default features):
 // the [4b3/8] preflight's verdict from the demod's decoded markers + stats. No I/O, no probe deps
 // (like `qpsk_marker` / `colour_scale`), so it unit-tests on default features; the ffmpeg/WAV glue

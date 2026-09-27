@@ -2,6 +2,7 @@
 paths:
   - "vendor/av-sync-dock/src/sync-test-output.cpp"
   - "vendor/av-sync-dock/src/camera-box-audio.hpp"
+  - "vendor/av-sync-dock/src/camera-box-audio-worker.hpp"
   - "tests/genlock_preload.rs"
   - ".github/workflows/windows-genlock.yml"
   - ".github/workflows/windows-genlock-fast.yml"
@@ -115,3 +116,18 @@ the banned mixdown forms, the diag line's appended `marker_channel=%zu channel_c
 channel_switches=%llu` and its argument order).
 Moving or renaming any of those means editing all three places; the Rust test uses the shared
 `tests/support/cpp_source.rs` (comment-stripped `body_of`), while the pwsh slice keeps comments.
+
+## The audio decode worker's anchors (issue 1381)
+
+`tests/av_sync_dock_audio_worker_1381.rs` + the pwsh step "Assert dock audio decode runs off the audio
+thread (issue 1381)" in BOTH windows-genlock workflows pin the gate + FIFO copy in `st_raw_audio` /
+`cb_audio_gate_and_publish`, the worker handlers (`st_audio_block_run`, `st_audio_block_gap`,
+`st_audio_session_end`, `cb_audio_session_begin`, and `cb_audio_forget_lock` that both session
+handlers call), `cb_refresh_measure_source`, the ONE declaration of `CAMERA_BOX_MEASURE_SOURCE_NAME`
+(in `camera-box-audio.hpp`, with `sync-test-dock.cpp` defining its ASRC name from it and none in
+`sync-test-output.cpp`), the worker lifecycle and the diag line's appended `decode_ms_max=
+decode_ms_sum= audio_dropped= decode_resets= audio_publish_max_us=`. The per-channel step's
+diag-ARGUMENT anchor now ends at `(unsigned long long)st->cb_switch_log.total,` (the new arguments
+follow it) in the Rust test and both pwsh copies. Replay all of them from the YAML text before pushing: a python squish
+(`re.sub(r"\s+", " ", ...)`, comments kept) + the brace-balanced `Get-Body`, reading the needle lists
+out of each step's `foreach (... in @(...))`.
