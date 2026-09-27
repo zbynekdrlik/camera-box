@@ -642,7 +642,8 @@ main() {
   # NEWEST origin/main commit touching vendor/** and SCREAMS when it lags. It NEVER touches the gate's
   # bad/unknown counters (report-only) -- the coordinated-restart bundle deploy makes a hard block on
   # every E2E too blunt, so #1136's doctrine assigns this component an ALARM (see
-  # genlock_vendor_pin_verdict's header for the two-step upgrade to a hard-gate). Reuses the deployed
+  # genlock_vendor_pin_verdict's header in scripts/lib/version-integrity-vendor-pin.sh for the
+  # two-step upgrade to a hard-gate). Reuses the deployed
   # SHAs already gathered in parity_args (no new read). Fail-closed-LOUD on an unreadable pin. Fixture
   # seams for the flow test: VERSION_INTEGRITY_GATE_VENDOR_NEWEST (override the newest vendor HEAD),
   # VERSION_INTEGRITY_GATE_VENDOR_PENDING (override the pending list; set-but-empty = "current"), and

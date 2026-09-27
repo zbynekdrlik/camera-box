@@ -7,6 +7,9 @@
 # tests/version_integrity_gate.rs) still defines every function, and the gate's main() still reads the
 # three DEFAULT_* pins below. The only additions to the moved text are the three
 # `shellcheck disable=SC2034` lines: the pins are read by the sourcing gate, not in this file.
+# The moved comments were written inside the gate: their "`main` below" is the gate's main(), and
+# the facet they call OPT-IN has since been ENFORCED there (issue 829; port4455_identity last, in
+# issue 1067) -- the gate's main() is the authority on how each verdict is wired.
 
 # --- #826: strih OBS-identity machine-check facet — PURE verdict functions -------------------
 #

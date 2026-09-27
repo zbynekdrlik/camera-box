@@ -7,7 +7,8 @@
 # tests in tests/version_integrity_gate.rs) still defines every function. The three git range helpers
 # mirror drift-guard.sh's imag_genlock_range_log / imag_genlock_ahead_log / imag_genlock_on_dev;
 # genlock_vendor_pin_verdict is the pure verdict the gate's main() prints (report-only, never folded
-# into the gate's exit code).
+# into the gate's exit code). The moved comments were written inside the gate: "this file's own
+# pre-existing `--format=` style elsewhere" and "main()" mean scripts/version-integrity-gate.sh.
 
 # vendor_pin_range_log REPO_ROOT DEPLOYED_SHA -> #1292 review follow-up: prints `git log
 # --format='%h %s' $(git merge-base DEPLOYED_SHA origin/main)..origin/main -- vendor/` (one
