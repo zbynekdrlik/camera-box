@@ -46,19 +46,19 @@ fn render_tick_thread_is_pinned_sched_fifo_to_isolated_cores() {
 
     assert!(
         src.contains("pthread_setaffinity_np(pthread_self(), sizeof(p->pin), &p->pin)"),
-        "{OBS_VIDEO}: the genlock render-tick pin must narrow the graphics thread to the pin cores \
+        "{PIN_H}: the genlock render-tick pin must narrow the graphics thread to the pin cores \
          via `pthread_setaffinity_np(pthread_self(), ...)`. A `git subtree pull` upstream bump \
          likely dropped it; re-apply the #484 + issue 1357 patch."
     );
     assert!(
         src.contains("sched_setscheduler(0, SCHED_FIFO | SCHED_RESET_ON_FORK, &param)"),
-        "{OBS_VIDEO}: the render tick must go realtime via \
+        "{PIN_H}: the render tick must go realtime via \
          `sched_setscheduler(0, SCHED_FIFO | SCHED_RESET_ON_FORK, &param)` — without the reset flag \
          a thread created under FIFO inherits it (issue 1357)."
     );
     assert!(
         !src.contains("sched_setscheduler(0, SCHED_FIFO, &param)"),
-        "{OBS_VIDEO}: a bare SCHED_FIFO without SCHED_RESET_ON_FORK is the issue 1357 leak"
+        "{PIN_H}: a bare SCHED_FIFO without SCHED_RESET_ON_FORK is the issue 1357 leak"
     );
 }
 
@@ -70,19 +70,19 @@ fn render_tick_fifo_priority_is_low() {
 
     assert!(
         src.contains("#define GENLOCK_RT_PRIORITY 10"),
-        "{OBS_VIDEO}: #484 pin must use a LOW SCHED_FIFO priority (`#define GENLOCK_RT_PRIORITY \
+        "{PIN_H}: #484 pin must use a LOW SCHED_FIFO priority (`#define GENLOCK_RT_PRIORITY \
          10`) — a HIGH-priority FIFO thread can starve kernel housekeeping and HANG a headless \
          box, the exact failure the ticket's safety note forbids."
     );
     assert!(
         src.contains("param.sched_priority = GENLOCK_RT_PRIORITY;"),
-        "{OBS_VIDEO}: #484 pin must apply the LOW `GENLOCK_RT_PRIORITY` to `sched_param` — not a \
+        "{PIN_H}: #484 pin must apply the LOW `GENLOCK_RT_PRIORITY` to `sched_param` — not a \
          hardcoded high number."
     );
     // The pin must NEVER reach for the maximum FIFO priority (99 / sched_get_priority_max).
     assert!(
         !src.contains("sched_get_priority_max"),
-        "{OBS_VIDEO}: #484 pin must NOT use the MAX FIFO priority — a max-prio render-tick thread \
+        "{PIN_H}: #484 pin must NOT use the MAX FIFO priority — a max-prio render-tick thread \
          can hang the headless box (the ticket's hard safety constraint)."
     );
 }
@@ -115,7 +115,7 @@ fn render_tick_pin_is_warn_and_continue_never_aborts() {
     let warn_count = body.matches("continuing SCHED_OTHER").count();
     assert!(
         warn_count >= 2,
-        "{OBS_VIDEO}: #484 pin must WARN-and-CONTINUE — BOTH the affinity-pin failure branch and \
+        "{PIN_H}: #484 pin must WARN-and-CONTINUE — BOTH the affinity-pin failure branch and \
          the SCHED_FIFO failure branch must log `continuing SCHED_OTHER` (found {warn_count} \
          occurrence(s) inside genlock_pin_render_tick_thread), never abort/retry-loop/hang (the \
          ticket's CRITICAL SAFETY requirement, mirroring the robust fallback in src/affinity.rs \
@@ -125,7 +125,7 @@ fn render_tick_pin_is_warn_and_continue_never_aborts() {
     for banned in ["abort(", "exit(", "assert("] {
         assert!(
             !body.contains(banned),
-            "{OBS_VIDEO}: genlock_pin_render_tick_thread must never call `{banned}...)` on a \
+            "{PIN_H}: genlock_pin_render_tick_thread must never call `{banned}...)` on a \
              failure path — a headless box must keep running SCHED_OTHER, never abort/exit/assert."
         );
     }
@@ -145,21 +145,21 @@ fn render_tick_cores_derive_from_isolated_and_nohz_full_with_no_fallback() {
     ] {
         assert!(
             src.contains(path),
-            "{OBS_VIDEO}: the render-tick pin must read {path} (issue 1357: isolated AND nohz_full)"
+            "{PIN_H}: the render-tick pin must read {path} (issue 1357: isolated AND nohz_full)"
         );
     }
     assert!(
         !src.contains("CPU_SET(10, &set)") && !src.contains("CPU_SET(11, &set)"),
-        "{OBS_VIDEO}: the hardcoded {{10,11}} fallback must be gone — a box with no isolated core \
+        "{PIN_H}: the hardcoded {{10,11}} fallback must be gone — a box with no isolated core \
          is not pinned at all (issue 1357)"
     );
     assert!(
         src.contains("render-tick thread not pinned: no isolated cores"),
-        "{OBS_VIDEO}: an unpinned render tick must say so in ONE log line (issue 1357)"
+        "{PIN_H}: an unpinned render tick must say so in ONE log line (issue 1357)"
     );
     assert!(
         !src.contains("pinned to the isolated nohz_full cores"),
-        "{OBS_VIDEO}: the old unconditional \"pinned to the isolated nohz_full cores\" line lied \
+        "{PIN_H}: the old unconditional \"pinned to the isolated nohz_full cores\" line lied \
          on strih-lx and must be gone"
     );
 }

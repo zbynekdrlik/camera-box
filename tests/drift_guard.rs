@@ -1238,7 +1238,7 @@ printf 'rtpin=%s\n' "$(genlock_rt_pin_from_log "$LOG")""#,
 }
 
 /// The imag-nb (#484) OBS log lines for the genlock render-tick SCHED_FIFO pin — SUCCESS shape
-/// (`vendor/obs-studio/libobs/obs-video.c genlock_pin_render_tick_thread`, Linux-only).
+/// (`vendor/obs-studio/libobs/obs-genlock-render-tick-pin.h genlock_pin_render_tick_thread`, Linux-only).
 const GENLOCK_RT_PIN_OK_LINE: &str =
     "14:27:54.427: genlock: render-tick thread set SCHED_FIFO prio 10 on the isolated core (#484)\n";
 
@@ -1248,7 +1248,7 @@ const GENLOCK_RT_PIN_FAILED_LINE: &str = "14:27:54.392: genlock: could NOT set r
      SCHED_FIFO prio 10 (errno 1 — missing rtprio ulimit grant?) — continuing SCHED_OTHER (#484)\n";
 
 /// Issue 1357: a box with no isolated nohz_full core is not pinned at all, by design — the pin's
-/// one "not pinned" line (obs-video.c genlock_pin_render_tick_thread).
+/// one "not pinned" line (obs-genlock-render-tick-pin.h genlock_pin_render_tick_thread).
 const GENLOCK_RT_PIN_UNPINNED_LINE: &str = "15:10:15.254: genlock: render-tick thread not pinned: \
      no isolated cores (isolated=[] nohz_full=[]) -- it runs SCHED_OTHER on the process mask (issue 1357)\n";
 

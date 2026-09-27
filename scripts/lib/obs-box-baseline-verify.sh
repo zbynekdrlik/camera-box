@@ -198,6 +198,7 @@ echo "lowlatency_cfg=$(if grep -qw 'preempt=full' /etc/default/grub.d/99-lowlate
 echo "isolated_cpus=$( { first < "/etc/${BOX}-isolated-cpus.conf"; } 2>/dev/null)"
 echo "rtprio_grants=$(ls -1 /etc/security/limits.d/95-*-genlock-rtprio.conf 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
 _op="$(pgrep -xo obs 2>/dev/null)"
+echo "obs_running=$(if ! command -v pgrep >/dev/null 2>&1; then :; elif [ -n "$_op" ]; then echo 1; else echo 0; fi)"
 echo "obs_rtprio_limit=$(if [ -n "$_op" ]; then awk '/^Max realtime priority/{print $4; exit}' "/proc/${_op}/limits" 2>/dev/null; fi)"
 echo "dgpu=$(if lspci -nn 2>/dev/null | obs_box_has_discrete_nvidia; then echo 1; else echo 0; fi)"
 echo "prime=$(prime-select query 2>/dev/null | first)"
@@ -334,11 +335,17 @@ obs_box_baseline_verdict() {
     # rtprio -- no retired render-tick rtprio grant (issue 1357: the pin serves only isolated cores, which the
     # affinity row forbids, and a grant re-opens the SCHED_FIFO starvation class; obs_box_rtprio_off removes it)
     # (the running OBS keeps a removed grant's limit until it restarts in a fresh session, so its live
-    # soft limit counts too; no OBS running = nothing to grade there)
-    local rl
+    # soft limit counts too; no OBS running = nothing to grade there; a running OBS whose limit could
+    # not be read, or no pgrep to tell, FAILs -- unreadable is never a pass)
+    local rl orun live_ok=0
     rl="$(_obs_box_f obs_rtprio_limit)"
-    ok=0; [ -z "$(_obs_box_f rtprio_grants)" ] && { [ -z "$rl" ] || [ "$rl" = 0 ]; } && ok=1
-    _obs_box_item rtprio "$ok" "genlock rtprio grants=[$(_obs_box_f rtprio_grants)] running OBS realtime limit=${rl:-no OBS running}"
+    orun="$(_obs_box_f obs_running)"
+    case "$orun" in
+        0) live_ok=1 ;;
+        1) [ "$rl" = 0 ] && live_ok=1 ;;
+    esac
+    ok=0; [ -z "$(_obs_box_f rtprio_grants)" ] && [ "$live_ok" = 1 ] && ok=1
+    _obs_box_item rtprio "$ok" "genlock rtprio grants=[$(_obs_box_f rtprio_grants)] OBS running=${orun:-unreadable} realtime limit=${rl:-unreadable}"
     # gpu -- a dGPU box renders NVIDIA-primary (PRIME); an iGPU-only box has nothing to select
     if [ "$(_obs_box_f dgpu)" = 1 ]; then
         ok=0; [ "$(_obs_box_f prime)" = nvidia ] && ok=1

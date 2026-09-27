@@ -940,8 +940,8 @@ fi
 # 32) the shared OBS-box appliance baseline (issue 1357) -- the ONE grader verify-imag.sh runs too
 #     (scripts/lib/obs-box-baseline-verify.sh): network tuning, governor + strih-maxperf persistence,
 #     the PM QoS CPU idle wake-up latency bound (`cstate`), never-sleep, boot safety net,
-#     preempt=full low-latency kernel, AFFINITY-ONLY core reservation,
-#     PRIME nvidia-primary, de-jitter, no operator crash popups, the lightdm -> openbox Xorg kiosk with
+#     preempt=full low-latency kernel, AFFINITY-ONLY core reservation, rtprio off (no genlock grant, no
+#     realtime limit on the running OBS -- the retired item 33), PRIME nvidia-primary, de-jitter, no operator crash popups, the lightdm -> openbox Xorg kiosk with
 #     GNOME purged, the openbox autostart contract, the power envelope, the touchpad InputClass. One
 #     PASS/FAIL line per item; a box missing ANY item FAILS (it supersedes the old never-sleep,
 #     governor and crash-popup items).

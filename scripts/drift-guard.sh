@@ -405,14 +405,16 @@ genlock_latency_ms_from_log() {
 }
 
 # genlock_rt_pin_from_log TEXT -> "ok" if imag-nb's OBS log shows the genlock render-tick thread
-# achieved SCHED_FIFO (#484: vendor/obs-studio/libobs/obs-video.c genlock_pin_render_tick_thread,
+# achieved SCHED_FIFO (#484: vendor/obs-studio/libobs/obs-genlock-render-tick-pin.h
+# genlock_pin_render_tick_thread, included by obs-video.c,
 # Linux-only — the render tick is pinned SCHED_FIFO prio 10 on the isolated nohz_full cores so it
 # gets on-time wakeups), "failed" if the log shows the WARN-and-continue SCHED_OTHER fallback (the
 # syscall failed, almost always a missing rtprio ulimit grant) — the EXACT #572 root cause: imag-nb
 # ran an entire recording on ordinary SCHED_OTHER and lost 35 single-tick 60fps render deadlines.
 # "unpinned" (issue 1357) when the pin logged "render-tick thread not pinned: no isolated cores" -- the
 # CORRECT outcome on a box with no isolated nohz_full core (the shared baseline forbids kernel isolation),
-# where no pin and no rtprio grant is expected.
+# where no pin and no rtprio grant is expected. "pin_failed" when the startup pin itself failed ("could
+# NOT pin render-tick thread" / "could NOT read the render-tick thread's CPU mask"): the tick runs unpinned.
 # "" (UNKNOWN/absent) when TEXT carries NEITHER line — the log was never read, or the deployed
 # build predates #484 (a stale build is a SEPARATE facet, imag_build_drift_report's dynamic
 # origin/main compare; this parser only judges the pin OUTCOME a #484-or-later build always logs
@@ -422,7 +424,7 @@ genlock_latency_ms_from_log() {
 # genlock_capability_from_log's own comment documents: `grep -q` can flip a genuine match into a
 # false non-match when the upstream `printf` is SIGPIPE'd after grep's early exit).
 genlock_rt_pin_from_log() {
-  local text="$1" ok_line unpinned_line failed_line
+  local text="$1" ok_line unpinned_line pin_failed_line failed_line
   # #1184: LC_ALL=C grep -a -> byte-literal, invalid-UTF-8-safe (same class as #1183).
   ok_line="$(printf '%s\n' "$text" \
     | LC_ALL=C grep -aiE 'genlock: render-tick thread set SCHED_FIFO prio [0-9]+ on the isolated core' \
@@ -436,6 +438,13 @@ genlock_rt_pin_from_log() {
     | head -1 || true)"
   if [ -n "$unpinned_line" ]; then
     printf 'unpinned\n'
+    return 0
+  fi
+  pin_failed_line="$(printf '%s\n' "$text" \
+    | LC_ALL=C grep -aE "genlock: could NOT (pin render-tick thread|read the render-tick thread's CPU mask)" \
+    | head -1 || true)"
+  if [ -n "$pin_failed_line" ]; then
+    printf 'pin_failed\n'
     return 0
   fi
   failed_line="$(printf '%s\n' "$text" \
@@ -970,6 +979,9 @@ check_imag_report() {
         ;;
       unpinned)
         printf '  %-22s OK       (render-tick thread not pinned: no isolated cores on this box, by design -- issue 1357)\n' "genlock_rt_pin"
+        ;;
+      pin_failed)
+        printf '  %-22s OK       (render-tick pin FAILED at startup, the tick runs unpinned -- see the OBS log WARNING, issue 1357)\n' "genlock_rt_pin"
         ;;
       failed)
         printf '  %-22s OK       (render-tick thread pinned but SCHED_OTHER: rtprio stays off on every box, issue 1357)\n' "genlock_rt_pin"
