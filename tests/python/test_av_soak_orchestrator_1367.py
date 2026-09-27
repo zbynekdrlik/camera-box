@@ -192,8 +192,9 @@ case "$*" in
     if [ -n "${FAKE_PAINTER_STUCK_AFTER:-}" ] && [ "$n" -gt "$FAKE_PAINTER_STUCK_AFTER" ]; then m2=10; fi
     if [ -n "${FAKE_PAINTER_UNREADABLE_AFTER:-}" ] && [ "$n" -gt "$FAKE_PAINTER_UNREADABLE_AFTER" ]; then exit 255; fi
     printf 'active=%s\nrun_id=%s\nmarkers=10\nmarkers2=%s\n' "$active" "$rid" "$m2" ;;
-  *"head -n 1"*)
-    printf 'index,frame_id,emit_ts_ns\n1,100,5\n2,130,6\n' ;;
+  *"tail -n +2"* | *"grep '^[0-9]'"*)
+    # the marker-log snapshot (whatever its head/tail shape): the emitter's real format
+    printf '# qpsk-params sr=48000 carrier=442 c=1 q=2 vr=60/1\nindex,frame_id,emit_ts_ns\n1,100,5\n2,130,6\n' ;;
   *) : ;;
 esac
 '''
