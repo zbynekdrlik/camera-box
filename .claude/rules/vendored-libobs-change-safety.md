@@ -78,6 +78,21 @@ an OS-level effect (affinity inheritance), with a control case that shows the ha
 effect at all, and a call-number fault injector (fail exactly the Nth call) for the error paths.
 Under `-Wconversion`, glibc's `CPU_SET` needs `-Wno-sign-conversion`.
 
+**Lifting a statement block from INSIDE a big function (issue 1367, audio-buffering floor).** The
+decision in `audio_callback` and the plan block in `obs_reset_audio2` are a few statements in the
+middle of long functions. Lift them by a start text and an end text (`s.find(start)` →
+`s[a..].find(tail) + tail.len()`), then paste them into a driver function that declares the SAME
+local names (`audio`, `ts`, `min_ts`, `sample_rate`, `buffering_name`, `oai`) from a stub struct.
+The shipped bytes compile unchanged. Two traps:
+- **Model what the real caller hands the block, not what is convenient.** The first lift passed the
+  real-time window as `ts`. libobs's `buffered_timestamps` queue keeps `total_buffering_ticks`
+  windows forever, so the processed window stays `start − total × tick` behind real time; the
+  convenient model put it back at real time once the wait ticks drained. The truth table was then
+  wrong in a way no mutant could detect (review round 2).
+- **Build a shared lift ONCE per test binary.** Two `#[test]`s that each compiled the harness into
+  the same per-process scratch dir, then `remove_dir_all`ed it, raced: the linker could not open
+  its output. Cache the trace in a `OnceLock<Vec<String>>`.
+
 ## Promote the harness to a committed gate when it checks a MIRROR
 
 `src/genlock_backlog.rs` is the Tier-0 authority and the C is the port; they are required to be
