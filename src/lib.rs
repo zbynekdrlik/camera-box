@@ -392,7 +392,8 @@ pub mod genlock_grid;
 
 // Issue 1357 — which cores the vendored genlock render tick may be pinned to: only the cores that
 // are both isolated and nohz_full, never a fallback pair. Crate-root + std-only (Tier-0); the C port
-// in obs-video.c is held identical by the committed gate `tests/genlock_render_tick_pin_1357.rs`.
+// in obs-genlock-render-tick-pin.h (included by obs-video.c) is held identical by the committed gate
+// `tests/genlock_render_tick_pin_1357.rs`.
 pub mod genlock_render_tick_pin;
 
 // #1355 part 2 — the grid-drift bench: the deep N==1 stream `NDI 2ME PGM` FIFO fed by the

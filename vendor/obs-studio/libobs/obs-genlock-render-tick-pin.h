@@ -170,18 +170,25 @@ static inline int genlock_tick_pin_leave(struct genlock_tick_pin *p)
 	return err != 0 ? err : aerr;
 }
 
-/* A per-tick failure: restore what can be restored, stop pinning, say so once. */
+/* A failure: restore what can be restored, stop pinning, say so once -- and say it honestly: when the
+ * restore fails too, the thread may stay on the pin cores (and FIFO), which is an ERROR. */
 static inline void genlock_tick_pin_disarm(int err, const char *where)
 {
 	struct genlock_tick_pin *p = &genlock_tick_pin;
 	if (!p->armed)
 		return;
-	(void)genlock_tick_pin_leave(p);
+	const int rerr = genlock_tick_pin_leave(p);
 	p->armed = false;
-	blog(LOG_WARNING,
-	     "genlock: render-tick pin %s failed (errno %d) -- pin disabled, continuing SCHED_OTHER on the "
-	     "process mask (issue 1357)",
-	     where, err);
+	if (rerr != 0)
+		blog(LOG_ERROR,
+		     "genlock: render-tick pin %s failed (errno %d) and the restore failed too (errno %d) -- the "
+		     "thread may stay on the pin cores%s; pin disabled (issue 1357)",
+		     where, err, rerr, p->fifo ? " and SCHED_FIFO" : "");
+	else
+		blog(LOG_WARNING,
+		     "genlock: render-tick pin %s failed (errno %d) -- pin disabled, continuing SCHED_OTHER on "
+		     "the process mask (issue 1357)",
+		     where, err);
 }
 
 /* video_sleep: right before the tick sleeps until `deadline_ns` (the os_gettime_ns timebase). Pins only
