@@ -284,14 +284,17 @@ def test_teardown_skips_program_switch_when_already_on_prev(monkeypatch):
 def test_teardown_switches_program_when_different(monkeypatch):
     """Regression: when program is NOT on prev_scene, teardown MUST restore it (the legit
     restore path is preserved — only the redundant same-scene switch is skipped)."""
+    # issue 1380: the restore target is an operator scene ('PRE'), not the production scene 'PRO'
+    # -- the owner's hard rule forbids any tool from programming 'PRO' (teardown skips it; pinned in
+    # tests/python/test_stream_dev_scene_1380.py). The #343 restore path itself is unchanged.
     fake_rpc, calls = _make_teardown_rpc(curr_prog="REC-LEFTOVER", curr_preview="REC-LEFTOVER")
     monkeypatch.setattr(obs_phase2, "_rpc", fake_rpc)
-    _patch_teardown_helpers(monkeypatch, prev_scene="PRO", prev_preview="PRO")
+    _patch_teardown_helpers(monkeypatch, prev_scene="PRE", prev_preview="PRE")
 
     obs_phase2.teardown(_make_teardown_args())
 
     prog = [c for c in calls if c["op"] == "SetCurrentProgramScene"]
-    assert len(prog) == 1 and prog[0]["payload"].get("sceneName") == "PRO", (
-        f"#343 teardown: when program differs from prev_scene it MUST be restored to 'PRO'; "
+    assert len(prog) == 1 and prog[0]["payload"].get("sceneName") == "PRE", (
+        f"#343 teardown: when program differs from prev_scene it MUST be restored to 'PRE'; "
         f"got {prog}"
     )
