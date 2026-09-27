@@ -9,8 +9,10 @@
 //! issue 1381 made the refine a sliding-window maximum ([`RefineWindow`]): each position's preamble
 //! magnitude is computed once per scan instead of once per refine that covers it (~223 per passing
 //! position), and the window maximum lands on the same position the old linear refine did, so every
-//! decoded marker and every counter is unchanged (`tests/qpsk_marker_scan_1381.rs` checks the scan
-//! against a frozen copy of the old kernel).
+//! decoded marker and every counter of a batch decode (a scan from 0) is unchanged
+//! (`tests/qpsk_marker_scan_1381.rs` checks the scan against a frozen copy of the old kernel). The
+//! streaming decoder's markers match the old whole-window re-decode on every fixture tested; its
+//! counters changed meaning (see [`crate::av_sync_dock::StreamingMarkerDecoder`]).
 
 use crate::qpsk_marker::{
     crc4_check, signal_len, AudioParams, DecodeStats, N_PAYLOAD_BITS, N_SYMBOLS, PREAMBLE_NIBBLE,

@@ -224,7 +224,7 @@ pub fn to_stereo_i16(mono: &[f32], amplitude: f64) -> Vec<i16> {
 /// markers fine (`crc_ok > 0`) — in which case a still-empty live "Audio Index" points further
 /// downstream (the ring lookup / rolling-cluster lock gates in `av_sync_dock.rs`, not the demod
 /// itself). Pure counting, zero effect on [`decode_markers`]'s returned markers — mirrored
-/// byte-for-byte into `camera-box-audio.hpp`'s `CbDecodeStats`.
+/// byte-for-byte into `camera-box-marker-scan.hpp`'s `CbDecodeStats`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DecodeStats {
     /// Number of sample onsets whose 2-symbol preamble screen crossed `threshold` (a candidate the

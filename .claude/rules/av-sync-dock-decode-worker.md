@@ -144,10 +144,12 @@ source for every output. Live 27.9.2026 on the resolume cg OBS:
   no log line, no source lookup, no signal. Its cost is on the diag line as `audio_publish_max_us=`.
 - **The gate** (`cb_audio_decode_gate`, `camera-box-audio-worker.hpp`) opens only while ALL hold:
   - camera-box mode is on (`cb_mode_active`, still the latched "QR seen" flag for the video side);
-  - the box has the measurement source `mbc` (`CAMERA_BOX_MEASURE_SOURCE_NAME`), looked up on the
-    VIDEO decode worker in `cb_refresh_measure_source`, at most every 5 s of frame time, and read on
-    the audio thread from an atomic -- `obs_get_source_by_name` takes the sources mutex and never
-    runs on the audio thread;
+  - the box has the measurement source `mbc` (`CAMERA_BOX_MEASURE_SOURCE_NAME`, declared once in
+    `camera-box-audio.hpp`; the dock UI's `CAMERA_BOX_ASRC_SOURCE_NAME` is defined from it), looked
+    up on the VIDEO decode worker in `cb_refresh_measure_source`, at most every 5 s of frame time,
+    and read on the audio thread from an atomic -- `obs_get_source_by_name` takes the sources mutex
+    and never runs on the audio thread. Its first answer and every change are logged at INFO: "not
+    found" is the designed state on resolume and strih;
   - a camera-box QR was decoded within `CAMERA_BOX_TEST_SIGNAL_FRESH_NS` (20 s).
   On resolume and strih (no `mbc`) the audio decode never starts. The norihiro audio path stays
   unreachable once camera-box mode latched, so a closed gate means NO audio work at all.
@@ -159,10 +161,22 @@ source for every output. Live 27.9.2026 on the resolume cg OBS:
     decoder before it is decoded (`decode_resets=`), so a marker cut by the gap never decodes from
     the stitched halves (the self-test proves both: no marker with the reset, marker 77 without);
   - the first block of a session carries `CB_AUDIO_GAP_SESSION`: decoders reset, the staleness and
-    pairing watchdogs re-seeded, the dock shown LIVE again (`cb_audio_session_begin`).
+    pairing watchdogs re-seeded, the lock forgotten, the dock shown LIVE again
+    (`cb_audio_session_begin`).
 - **A closed gate ends the session** (`st_audio_session_end`, after every block published before
-  it): decoders reset, lock tracker cleared, `lock_state_changed(false)` + `sync_stale_changed(true)`,
-  one `camera-box audio decode OFF -- <reason>` line. No diag lines while the gate is closed.
+  it): decoders reset, the lock forgotten (`cb_audio_forget_lock`: tracker cleared +
+  `lock_state_changed(false)`), `sync_stale_changed(true)`, one `camera-box audio decode OFF --
+  <reason>` line. No diag lines while the gate is closed.
+  - **Every end is delivered** (review round 1): the pending ends are a ring of `(after, reason)`
+    entries, so a gate that closes, reopens and closes again while the worker is still behind gets
+    both ends, in order. A single "end pending" slot overwrote the first end and let the worker
+    decode the second session's blocks on the first session's lock.
+  - **Two ends with no accepted block between them are ONE end** (the second session's blocks were
+    all dropped, so the worker never saw it). That merge is what bounds the ring: every queued end
+    follows a distinct accepted block the worker has not finished, so it never holds more than
+    `slots + 1` entries and `end_session()` never allocates on the audio thread.
+  - `stop()` discards pending ends (an output stop / restart), which is why a session BEGIN forgets
+    the lock too.
 - **The worker runs `st_raw_audio_camera_box` unchanged** on an `audio_data` view of the copied
   block (`st_audio_block_run`, the block's own timestamp), so everything that function and its
   helpers touch (the picker, the cluster, the lock audit/corrector, the diag tick, the ring reads)
@@ -176,12 +190,19 @@ source for every output. Live 27.9.2026 on the resolume cg OBS:
 ## Verifying (Tier-0)
 
 - `g++ -std=c++11 -O2 -Wall -Wextra -Werror -pthread vendor/av-sync-dock/test/audio-worker-selftest.cpp`
-  then run it; `-fsanitize=thread` under `setarch -R` for races (clean at issue 1381).
+  then run it; `-fsanitize=thread` under `setarch -R` for races (clean at issue 1381). Mutants it
+  kills: a single overwritten pending end, no merge over a dropped session, a merged end keeping
+  the first reason, an end due one block late, and the FIFO lock held across the handler. The
+  producer check is a paced publish loop judged on p95 (< 2 ms) + max (< 15 ms): an unpaced loop
+  only waits once for a lock-holding worker and its p95 cannot see it, and a single worst-case
+  2 ms bound flakes on a loaded CI runner. Other waits are on flags the handler sets, never a
+  sleep of guessed length.
 - The bench `tests/c/av_sync_dock_demod_bench_1381.cpp` (`-Ivendor/av-sync-dock/src
   -Ivendor/av-sync-dock/test`, arg: the stereo mbc fixture) measures the worker decode and the
   audio-thread share in THREAD CPU time (dev1 runs at load ~20; wall time there is scheduler noise)
-  and checks the decoder against a frozen copy of the pre-1381 kernel. Measured on the N100: gate +
-  copy <= 0.06 ms per stereo push for every signal; worker 0.24 ms (music) / 0.7 ms (442 Hz tone).
+  and checks the decoder against a frozen copy of the pre-1381 kernel. Measured on the N100 (thread
+  CPU): gate + copy <= 0.1 ms per stereo push for every signal (mean ~0.01 ms); worker 0.18-0.24 ms
+  (music) / 0.56-0.7 ms (442 Hz tone), against 6.8 / 34.8 ms for the pre-1381 decoder.
 - Anchors: `tests/av_sync_dock_audio_worker_1381.rs` (comment-stripped) + the pwsh step "Assert
   dock audio decode runs off the audio thread (issue 1381)" in both windows-genlock workflows
   (comments kept). A comment inside `st_raw_audio` or `cb_audio_gate_and_publish` must never spell

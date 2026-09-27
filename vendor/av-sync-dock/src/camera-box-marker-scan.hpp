@@ -13,16 +13,19 @@
  *
  * issue 1381 -- the cost. The dock used to re-decode its whole 3-marker window on every OBS audio
  * push, re-computing ~223 preamble magnitudes for every position that passed the screen: 6.8 ms of
- * CPU per stereo push for music, 35 ms for a 442 Hz tone (N100), against a 21.3 ms audio tick. Two
- * changes, neither of which changes a single decoded marker:
+ * thread CPU per stereo push for music, 35 ms for a 442 Hz tone (N100, the RED run of
+ * tests/c/av_sync_dock_demod_bench_1381.cpp), against a 21.3 ms audio tick. Two changes:
  *   - the refine is a sliding-window maximum (`CbRefineWindow`): each position's |preamble| is
  *     computed once per scan and the window maximum comes from a monotonic queue, O(1) amortized,
  *     landing on the same position the old linear refine did; the carrier cos/sin over the window
- *     is a table (`CbScanWorkspace`), bit-identical to the inline calls;
+ *     is a table (`CbScanWorkspace`), bit-identical to the inline calls. The batch decode
+ *     (`cb_decode_markers_with_stats`) is therefore unchanged, markers and counters;
  *   - the streaming decoder screens only positions that are not final yet (`next_scan`): the new
  *     positions, plus the tail whose refine range the previous window end cut. Re-screening that
- *     tail is what keeps the reported markers identical to the whole-window decode, whose first
- *     sight of a marker can be such a cut refine.
+ *     tail is what keeps the reported markers the same as the whole-window decode's, whose first
+ *     sight of a marker can be such a cut refine -- checked push by push on every fixture and noisy
+ *     case the bench and the Rust tests run, not proven for every input. Its counters now count
+ *     each screen once (plus a re-screened tail), no longer once per window it sat in.
  *
  * Dependency-free (STL + <cmath> only), C++11.
  */

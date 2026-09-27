@@ -49,9 +49,11 @@ cheap without changing a decoded marker or a counter of the batch decode:
 - **`scan_markers(samples, p, thr, start)` returns a `resume`**: the first visited position whose
   screen passed while its refine range was cut by the end of the samples, else where the scan stopped.
   The streaming decoder scans from `next_scan` (that resume, in absolute samples): the new positions
-  plus the cut tail. Re-screening the cut tail is what keeps its markers IDENTICAL to the old
-  whole-window re-decode, whose first sight of a marker can be such a cut refine (a pure "screen each
-  position once" decoder can report a marker a few samples off).
+  plus the cut tail. Re-screening the cut tail is what keeps its markers the same as the old
+  whole-window re-decode's, whose first sight of a marker can be such a cut refine (a pure "screen
+  each position once" decoder can report a marker a few samples off). That sameness is CHECKED push
+  by push on every fixture and noisy case below, not proven for every input; the batch decode's
+  sameness (markers and counters) follows from the refine rule.
 - **Stats changed meaning for the streaming decoder**: each screen counts once, a cut-tail position
   again when re-screened -- about half the old whole-window over-count. The dock diag's `preambles=`
   dropped accordingly (still monotonic; the #1153 watchdog only needs "advanced > 0").
@@ -61,8 +63,9 @@ cheap without changing a decoded marker or a counter of the batch decode:
   the bench checks the C++ decoder against a frozen copy of the old C++ kernel (including music +
   markers, where false decodes and skips exercise the scan path); the refine window vs the linear
   rule on tie-heavy data in both `qpsk_marker_scan`'s tests and the camera-box self-test.
-- **Cost** (thread CPU, N100, per 1024-frame stereo push): music 6.8 -> 0.24 ms, a 442 Hz tone (every
-  position passes the screen, the worst case) 34.8 -> 0.7 ms.
+- **Cost** (THREAD CPU, N100 at load ~20, per 1024-frame stereo push, the bench's RED run vs GREEN):
+  music 6.8 -> 0.18-0.24 ms, a 442 Hz tone (every position passes the screen, the worst case)
+  34.8 -> 0.56-0.7 ms. The investigation bench's 11.5 / 65 ms were WALL time on the same loaded box.
 
 ## Reading the live dock's own decode health (diagnosis before touching code)
 The deployed stream-box dock logs a ~10s diag line — read it via win-stream-snv MCP, not ssh:

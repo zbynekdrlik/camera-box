@@ -238,9 +238,10 @@ pub fn otsu_threshold(hist: &[u64; 256]) -> u8 {
 /// issue 1381: `push` scans only the positions that are not final yet (`next_scan`, the scan's own
 /// [`crate::qpsk_marker_scan::MarkerScan::resume`]): the new positions, plus the tail whose refine range
 /// the previous window end cut. It used to re-decode the WHOLE window every call, which on the dock
-/// (the OBS audio thread until issue 1381) cost 6.8 ms of CPU per stereo 1024-frame push for music
-/// and 35 ms for a 442 Hz tone on an N100. Re-screening the cut tail keeps the reported markers
-/// identical to that whole-window decode, whose first sight of a marker can be such a cut refine.
+/// (the OBS audio thread until issue 1381) cost 6.8 ms of thread CPU per stereo 1024-frame push for
+/// music and 35 ms for a 442 Hz tone on an N100. Re-screening the cut tail keeps the reported
+/// markers the same as that whole-window decode's (whose first sight of a marker can be such a cut
+/// refine) on every fixture tested (`tests/av_sync_dock_streaming_decoder_1381.rs`).
 ///
 /// The absolute sample index is stream-relative and monotone; the caller maps it to an OBS timestamp
 /// using the callback clock (kept in the C++ glue, drift-anchored per callback). The false CRC-4
@@ -332,7 +333,7 @@ impl StreamingMarkerDecoder {
     /// absolute-sample coordinate the caller's own pushed-sample count mirrors) and the cumulative
     /// [`Self::stats`] (the live diag counters must stay monotonic across a pairing recovery).
     /// Part of the dead-pairing reset: the decoder re-acquires from a clean window without
-    /// disturbing the caller's timestamp mapping. Mirrored by `camera-box-audio.hpp`.
+    /// disturbing the caller's timestamp mapping. Mirrored by `camera-box-marker-scan.hpp`.
     pub fn reset_window(&mut self) {
         self.origin += self.buf.len() as u64;
         self.buf.clear();

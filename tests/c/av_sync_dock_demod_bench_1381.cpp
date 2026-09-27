@@ -5,8 +5,10 @@
  * Live 27.9.2026 on the resolume cg OBS the dock demodulated the whole program mix on libobs's
  * audio thread, re-decoding its whole 3-marker window on every 1024-frame push: with music on
  * program the mixer fell 13-22 s behind real time. The investigation bench (this file's origin,
- * work-products/issue-1381-dock-bench) measured 11.5 ms per push for 2-channel music and 65 ms for
- * a 2-channel 442 Hz tone, on an N100, against a 21.3 ms audio tick.
+ * work-products/issue-1381-dock-bench) measured 11.5 ms of WALL time per push for 2-channel music
+ * and 65 ms for a 2-channel 442 Hz tone, on an N100 at load ~20, against a 21.3 ms audio tick. This
+ * bench measures THREAD CPU instead: the pre-1381 decoder (its RED run) took 6.8 ms (music) and
+ * 34.8 ms (tone) per stereo push, the incremental decoder 0.18-0.24 ms and 0.56-0.7 ms.
  *
  * Checks (exit 0 + "ALL PASS"):
  *   1. identity: StreamingMarkerDecoder reports the same (absolute sample, index) markers, push by
