@@ -5,14 +5,20 @@ A remote NDI finder with a cambox on its extra-IP list holds a TCP discovery con
 cambox's `:5960` listener, and libndi 6.3.2 intermittently aborts the whole camera-box process (an
 uncaught `std::system_error` in its own `disc:recv` thread) when that connection closes. The camera
 walk stays as the FORBIDDEN set: the generator drops a cambox IP by construction, the verdict FAILs a
-config that lists one, the Windows `.ps1` removes them, and `--cambox-apply` rewrites ONLY a
-cambox's `/etc/ndi/ndi-config.v1.json` inside its read-only-root window.
+config that lists one, and the Windows `.ps1` removes them.
+
+ROZHODNUTÉ 5879261962 (supervisor, 28.9.2026): a cambox's OWN config carries NO `networks.ips` at
+all -- the camboxes are mDNS-only receivers, so they open no outbound discovery connection either.
+The cambox writer (setup-device STEP 7 and the `--cambox-apply` program) strips the list, keeps any
+other key, and removes the config and the camera-box `NDI_CONFIG_DIR` drop-in when nothing else is
+left; verify-device `(an)` FAILs a cambox that still lists any IP (`ndi_discovery_cambox_verdict`).
 
 The shared helpers and the issue-1342 tests live in tests/python/test_ndi_discovery_1342.py; the
 grader-behaviour cases for the cambox facet stay next to their harnesses there.
 """
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -143,215 +149,268 @@ class CamboxFreeList1389(unittest.TestCase):
         self.assertIn("cambox", r.stdout)
 
 
+class CamboxVerdict1389(unittest.TestCase):
+    """ROZHODNUTÉ 5879261962: a cambox carries NO networks.ips at all (mDNS only). The verdict
+    verify-device (an) grades a cambox with: its /etc/ndi config + its camera-box drop-in."""
+
+    DROPIN = "[Service]\nEnvironment=NDI_CONFIG_DIR=/etc/ndi\n"
+
+    def _verdict(self, conf, dropin):
+        return _lib(f"ndi_discovery_cambox_verdict {shlex.quote(conf)} {shlex.quote(dropin)}")
+
+    def test_no_config_and_no_dropin_is_ok(self):
+        self.assertEqual(self._verdict("", "").stdout.strip(), "ok")
+
+    def test_the_fleet_only_list_fails_naming_it(self):
+        conf = json.dumps({"ndi": {"networks": {"ips": _pinned()}}})
+        r = self._verdict(conf, self.DROPIN)
+        self.assertTrue(r.stdout.startswith("FAIL:"), r.stdout)
+        self.assertIn(_pinned(), r.stdout)
+        self.assertIn("mDNS", r.stdout)
+
+    def test_the_issue_1342_list_fails_naming_it(self):
+        conf = json.dumps({"ndi": {"networks": {"ips": ISSUE_1342_LIST}}})
+        r = self._verdict(conf, self.DROPIN)
+        self.assertIn(ISSUE_1342_LIST, r.stdout)
+
+    def test_a_list_without_the_dropin_still_fails(self):
+        # Unread today, but a cambox carries no list at all: a later drop-in would load it again.
+        conf = json.dumps({"ndi": {"networks": {"ips": _pinned()}}})
+        self.assertTrue(self._verdict(conf, "").stdout.startswith("FAIL:"))
+
+    def test_other_keys_without_a_list_are_ok(self):
+        conf = json.dumps({"ndi": {"groups": {"recv": "Public"}, "networks": {}}})
+        self.assertEqual(self._verdict(conf, self.DROPIN).stdout.strip(), "ok")
+
+    def test_a_discovery_server_fails(self):
+        conf = json.dumps({"ndi": {"networks": {"discovery": "10.77.9.200"}}})
+        r = self._verdict(conf, self.DROPIN)
+        self.assertTrue(r.stdout.startswith("FAIL:"), r.stdout)
+        self.assertIn("discovery", r.stdout)
+
+    def test_a_config_that_is_not_json_fails(self):
+        r = self._verdict('{"ndi": {', self.DROPIN)
+        self.assertTrue(r.stdout.startswith("FAIL:"), r.stdout)
+        self.assertIn("JSON", r.stdout)
+
+    def test_a_dropin_pointing_elsewhere_fails(self):
+        r = self._verdict("", "[Service]\nEnvironment=NDI_CONFIG_DIR=/somewhere/else\n")
+        self.assertTrue(r.stdout.startswith("FAIL:"), r.stdout)
+        self.assertIn("/somewhere/else", r.stdout)
+
+    def test_a_quoted_dropin_line_is_read_like_systemd_reads_it(self):
+        dropin = '[Service]\nEnvironment="NDI_CONFIG_DIR=/etc/ndi"\n'
+        self.assertEqual(_lib(f"ndi_discovery_dropin_config_dir {shlex.quote(dropin)}").stdout.strip(), "/etc/ndi")
+        self.assertEqual(self._verdict("", dropin).stdout.strip(), "ok")
+
+
 class CamboxApply1389(unittest.TestCase):
-    """The smallest safe cambox writer: the on-box program `--cambox-apply` prints rewrites ONLY
-    /etc/ndi/ndi-config.v1.json with the SAME ndi_discovery_write_config STEP 7 calls, inside the
-    read-only-root window, and restores ro (retried, loud). Run here with findmnt/mount/sync stubbed."""
+    """The cambox writer: the plan/apply pair setup-device STEP 7 calls, and the on-box program
+    `--cambox-apply` prints around it (the read-only-root window). It strips networks.ips and
+    networks.discovery, keeps every other key, and removes the config AND the camera-box drop-in when
+    nothing else is left. Run here with findmnt/mount/sync/systemctl stubbed."""
 
     def _env(self, tmp):
         return {"NDI_DISCOVERY_SYSTEM_DIR": os.path.join(tmp, "etc-ndi"),
                 "NDI_DISCOVERY_CAMBOX_DROPIN": os.path.join(tmp, "camera-box-ndi-discovery.conf")}
 
-    def _run(self, tmp, root_opts="ro,relatime", ro_fails=0, ips=None, extra_stubs=""):
-        log = os.path.join(tmp, "mount.log")
+    def _paths(self, tmp):
         env = self._env(tmp)
-        lst = ips if ips is not None else _pinned()
-        prog = _lib(f'ndi_discovery_cambox_apply_remote_snippet "{lst}"', env=env)
+        return os.path.join(env["NDI_DISCOVERY_SYSTEM_DIR"], "ndi-config.v1.json"), env["NDI_DISCOVERY_CAMBOX_DROPIN"]
+
+    def _seed(self, tmp, conf=None, dropin=True):
+        path, dropin_path = self._paths(tmp)
+        if conf is not None:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w") as fh:
+                fh.write(conf)
+        if dropin:
+            text = dropin if isinstance(dropin, str) else _lib("ndi_discovery_dropin_content", env=self._env(tmp)).stdout
+            with open(dropin_path, "w") as fh:
+                fh.write(text)
+        return path, dropin_path
+
+    def _canonical(self, tmp, ips):
+        return _lib(f'ndi_discovery_config_json "{ips}"', env=self._env(tmp)).stdout
+
+    def _run(self, tmp, root_opts="ro,relatime", ro_fails=0, extra_stubs=""):
+        log = os.path.join(tmp, "mount.log")
+        slog = os.path.join(tmp, "systemctl.log")
+        prog = _lib("ndi_discovery_cambox_apply_remote_snippet", env=self._env(tmp))
         self.assertEqual(prog.returncode, 0, prog.stderr)
         stubs = (
             f'findmnt() {{ printf "%s\\n" "{root_opts}"; }}\n'
             f'_ro_fails={ro_fails}\n'
             f'mount() {{ printf "%s\\n" "$*" >> "{log}"; '
             'if [ "$*" = "-o remount,ro /" ] && [ "$_ro_fails" -gt 0 ]; then _ro_fails=$((_ro_fails - 1)); return 32; fi; }\n'
+            f'systemctl() {{ printf "%s\\n" "$*" >> "{slog}"; }}\n'
             'sync() { :; }\nsleep() { :; }\n' + extra_stubs
         )
         # Fed on stdin to `bash -s`, exactly as the runbook's `ssh root@<cambox> bash -s < apply.sh` does.
         r = subprocess.run(["bash", "-s"], input=stubs + prog.stdout, capture_output=True, text=True, timeout=30)
         calls = _read(log).splitlines() if os.path.exists(log) else []
-        return r, calls, os.path.join(tmp, "etc-ndi", "ndi-config.v1.json")
+        sd = _read(slog).splitlines() if os.path.exists(slog) else []
+        return r, calls, sd
 
-    def _seed(self, tmp, ips, dropin=True):
-        env = self._env(tmp)
-        self.assertEqual(_lib(f'ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" "{ips}"', env=env).returncode, 0)
-        if dropin:
-            with open(env["NDI_DISCOVERY_CAMBOX_DROPIN"], "w") as fh:
-                fh.write(_lib("ndi_discovery_dropin_content", env=env).stdout)
+    def _listing(self, path):
+        return sorted(os.listdir(os.path.dirname(path))) if os.path.isdir(os.path.dirname(path)) else []
 
-    def test_a_box_without_the_dropin_is_left_alone(self):
-        # camera-box reads /etc/ndi only through the drop-in: without it the box is mDNS-only already.
+    def test_the_old_list_and_the_dropin_are_removed_in_one_rw_window(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self._seed(tmp, ISSUE_1342_LIST, dropin=False)
-            before = _read(os.path.join(tmp, "etc-ndi", "ndi-config.v1.json"))
-            r, calls, path = self._run(tmp)
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(calls, [], "no remount, no write to the stick")
-            self.assertEqual(_read(path), before)
-            self.assertIn("mDNS-only", r.stdout)
-            self.assertNotIn("OK", r.stdout)
+            path, dropin = self._seed(tmp, self._canonical(tmp, ISSUE_1342_LIST))
+            r, calls, sd = self._run(tmp)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"])
+            self.assertFalse(os.path.exists(path), "the config is gone")
+            self.assertFalse(os.path.exists(dropin), "the NDI_CONFIG_DIR drop-in is gone")
+            self.assertEqual(self._listing(path), [], "no backup of the lib's own file")
+            self.assertEqual(sd, ["daemon-reload"], "the removed drop-in is unloaded")
+            self.assertIn("OK", r.stdout)
 
-    def test_a_correct_list_with_other_keys_is_unchanged(self):
+    def test_the_fleet_only_list_is_removed_too(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self._seed(tmp, _pinned())
-            path = os.path.join(tmp, "etc-ndi", "ndi-config.v1.json")
-            with open(path, "w") as fh:
-                json.dump({"ndi": {"groups": {"recv": "Public"}, "networks": {"ips": _pinned()}}}, fh)
+            path, dropin = self._seed(tmp, self._canonical(tmp, _pinned()))
             r, calls, _ = self._run(tmp)
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(calls, [], "the right list needs no write, whatever other keys the file has")
-            self.assertIn("unchanged", r.stdout)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertFalse(os.path.exists(path))
+            self.assertFalse(os.path.exists(dropin))
 
-    def test_a_dropin_pointing_elsewhere_is_left_alone(self):
-        # The gate reads the drop-in's NDI_CONFIG_DIR, as verify-device (an) does, never mere existence.
+    def test_other_keys_survive_with_the_dropin(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self._seed(tmp, ISSUE_1342_LIST)
-            env = self._env(tmp)
-            with open(env["NDI_DISCOVERY_CAMBOX_DROPIN"], "w") as fh:
-                fh.write("[Service]\nEnvironment=NDI_CONFIG_DIR=/somewhere/else\n")
-            before = _read(os.path.join(tmp, "etc-ndi", "ndi-config.v1.json"))
-            r, calls, path = self._run(tmp)
+            conf = json.dumps({"ndi": {"groups": {"recv": "Public"},
+                                       "networks": {"ips": ISSUE_1342_LIST, "discovery": "10.77.9.200"}},
+                               "other": 1})
+            path, dropin = self._seed(tmp, conf)
+            r, calls, sd = self._run(tmp)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"])
+            self.assertEqual(json.loads(_read(path)), {"ndi": {"groups": {"recv": "Public"}}, "other": 1})
+            self.assertTrue(os.path.exists(dropin), "the other keys still matter, so the drop-in stays")
+            self.assertEqual(sd, [])
+
+    def test_an_mdns_only_box_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r, calls, sd = self._run(tmp)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual((calls, sd), ([], []), "no remount, no write to the stick")
+            self.assertIn("nothing written", r.stdout)
+
+    def test_a_config_with_only_other_keys_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, dropin = self._seed(tmp, json.dumps({"ndi": {"groups": {"recv": "Public"}}}))
+            before = _read(path)
+            r, calls, _ = self._run(tmp)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual(calls, [])
             self.assertEqual(_read(path), before)
-            self.assertIn("mDNS-only", r.stdout)
+            self.assertTrue(os.path.exists(dropin))
 
-    def test_a_quoted_dropin_line_is_read_like_systemd_reads_it(self):
-        # systemd accepts Environment="NDI_CONFIG_DIR=/etc/ndi": camera-box DOES read /etc/ndi there.
-        text = '[Service]\nEnvironment="NDI_CONFIG_DIR=/etc/ndi"'
-        r = _lib(f"ndi_discovery_dropin_config_dir '{text}'")
-        self.assertEqual(r.stdout.strip(), "/etc/ndi")
+    def test_a_lone_dropin_is_removed(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self._seed(tmp, ISSUE_1342_LIST)
+            _, dropin = self._seed(tmp, None)
+            r, calls, sd = self._run(tmp)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"])
+            self.assertFalse(os.path.exists(dropin))
+            self.assertEqual(sd, ["daemon-reload"])
+
+    def test_a_quoted_dropin_line_is_ours(self):
+        with tempfile.TemporaryDirectory() as tmp:
             env = self._env(tmp)
-            with open(env["NDI_DISCOVERY_CAMBOX_DROPIN"], "w") as fh:
-                fh.write(f'[Service]\nEnvironment="NDI_CONFIG_DIR={env["NDI_DISCOVERY_SYSTEM_DIR"]}"\n')
-            r, calls, path = self._run(tmp)
+            quoted = f'[Service]\nEnvironment="NDI_CONFIG_DIR={env["NDI_DISCOVERY_SYSTEM_DIR"]}"\n'
+            path, dropin = self._seed(tmp, self._canonical(tmp, ISSUE_1342_LIST), dropin=quoted)
+            r, _, _ = self._run(tmp)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"])
-            self.assertEqual(_read(path), _lib("ndi_discovery_config_json").stdout)
+            self.assertFalse(os.path.exists(path))
+            self.assertFalse(os.path.exists(dropin))
 
-    def test_a_broken_json_file_with_the_right_list_is_rewritten(self):
-        # verify-device (an) FAILs such a file as "not valid JSON" and names --cambox-apply: it must converge.
+    def test_a_foreign_dropin_is_refused_and_nothing_touched(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self._seed(tmp, _pinned())
-            path = os.path.join(tmp, "etc-ndi", "ndi-config.v1.json")
-            with open(path, "w") as fh:
-                fh.write('{"ndi": {"networks": {"ips": "' + _pinned() + '"}}')  # a brace short
-            r, calls, _ = self._run(tmp)
-            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"])
-            self.assertEqual(_read(path), _lib("ndi_discovery_config_json").stdout)
-            self.assertNotIn("unchanged", r.stdout)
-
-    def test_without_python3_only_the_canonical_file_counts_as_unchanged(self):
-        # No JSON parser on the box: a cambox in ndi.networks.ips must never hide behind a later "ips".
-        with tempfile.TemporaryDirectory() as tmp:
-            self._seed(tmp, _pinned())
-            path = os.path.join(tmp, "etc-ndi", "ndi-config.v1.json")
-            with open(path, "w") as fh:
-                json.dump({"ndi": {"networks": {"ips": _pinned() + ",10.77.9.61"}}, "other": {"ips": _pinned()}}, fh)
-            r, calls, _ = self._run(tmp, extra_stubs="python3() { return 1; }\n")
-            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"])
-            self.assertEqual(_read(path), _lib("ndi_discovery_config_json").stdout)
-            # ... and the canonical file itself stays a no-op without python3 too.
-            r, calls, _ = self._run(tmp, extra_stubs="python3() { return 1; }\n")
-            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"], "calls accumulate in the log")
-            self.assertIn("unchanged", r.stdout)
-
-    def test_a_stray_discovery_key_is_still_rewritten(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            self._seed(tmp, _pinned())
-            path = os.path.join(tmp, "etc-ndi", "ndi-config.v1.json")
-            with open(path, "w") as fh:
-                json.dump({"ndi": {"networks": {"ips": _pinned(), "discovery": "10.77.9.200"}}}, fh)
-            r, calls, _ = self._run(tmp)
-            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"])
-            self.assertEqual(json.loads(_read(path)), {"ndi": {"networks": {"ips": _pinned()}}})
-
-    def test_ro_root_rewrites_the_config_inside_one_rw_window(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            self._seed(tmp, ISSUE_1342_LIST)
-            r, calls, path = self._run(tmp)
-            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"])
-            self.assertEqual(_read(path), _lib("ndi_discovery_config_json").stdout)
-            self.assertEqual(sorted(os.listdir(os.path.dirname(path))), ["ndi-config.v1.json"],
-                             "only the config file, no temp / backup left on the stick")
-            self.assertIn("OK", r.stdout)
-
-    def test_a_box_without_python3_keeps_the_step_7_backup(self):
-        # The STEP 7 writer cannot merge without python3: canonical file + a backup of the old list.
-        with tempfile.TemporaryDirectory() as tmp:
-            self._seed(tmp, ISSUE_1342_LIST)
-            r, calls, path = self._run(tmp, extra_stubs="python3() { return 1; }\n")
-            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"])
-            self.assertEqual(_read(path), _lib("ndi_discovery_config_json").stdout)
-            baks = [f for f in os.listdir(os.path.dirname(path)) if f.startswith("ndi-config.v1.json.bak-")]
-            self.assertEqual(len(baks), 1, os.listdir(os.path.dirname(path)))
-            self.assertIn("10.77.9.61", _read(os.path.join(os.path.dirname(path), baks[0])))
-
-    def test_a_failed_write_still_puts_the_root_back_read_only(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            self._seed(tmp, ISSUE_1342_LIST)
-            r, calls, path = self._run(tmp, extra_stubs="mktemp() { return 1; }\n")
+            foreign = "[Service]\nEnvironment=NDI_CONFIG_DIR=/somewhere/else\n"
+            path, dropin = self._seed(tmp, self._canonical(tmp, ISSUE_1342_LIST), dropin=foreign)
+            before = _read(path)
+            r, calls, sd = self._run(tmp)
             self.assertNotEqual(r.returncode, 0)
-            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"], "the EXIT trap restores ro")
-            self.assertIn("10.77.9.61", _read(path), "the old file is left as it was")
-            self.assertNotIn("OK", r.stdout)
+            self.assertIn("REFUSED", r.stderr)
+            self.assertIn("/somewhere/else", r.stderr)
+            self.assertEqual((calls, sd), ([], []))
+            self.assertEqual(_read(path), before)
+            self.assertEqual(_read(dropin), foreign)
 
-    def test_an_unchanged_config_writes_nothing_and_never_remounts(self):
+    def test_a_broken_json_file_is_removed_with_a_backup(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self._seed(tmp, _pinned())
-            before = os.stat(os.path.join(tmp, "etc-ndi", "ndi-config.v1.json")).st_mtime_ns
-            r, calls, path = self._run(tmp)
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(calls, [], "no remount for a no-op")
-            self.assertEqual(os.stat(path).st_mtime_ns, before)
-            self.assertIn("unchanged", r.stdout)
+            path, dropin = self._seed(tmp, '{"ndi": {"networks": {"ips": "10.77.9.61"}}')  # a brace short
+            r, calls, _ = self._run(tmp)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertFalse(os.path.exists(path))
+            self.assertFalse(os.path.exists(dropin))
+            baks = [f for f in self._listing(path) if f.startswith("ndi-config.v1.json.bak-")]
+            self.assertEqual(len(baks), 1, self._listing(path))
+
+    def test_without_python3_the_libs_own_file_goes_without_a_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, dropin = self._seed(tmp, self._canonical(tmp, ISSUE_1342_LIST))
+            r, _, _ = self._run(tmp, extra_stubs="python3() { return 1; }\n")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertFalse(os.path.exists(path))
+            self.assertEqual(self._listing(path), [])
+
+    def test_without_python3_a_foreign_file_is_backed_up_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = json.dumps({"ndi": {"groups": {"recv": "Public"}, "networks": {"ips": "10.77.9.61"}}})
+            path, dropin = self._seed(tmp, conf)
+            r, _, _ = self._run(tmp, extra_stubs="python3() { return 1; }\n")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertFalse(os.path.exists(path))
+            baks = [f for f in self._listing(path) if f.startswith("ndi-config.v1.json.bak-")]
+            self.assertEqual(len(baks), 1)
+            self.assertEqual(_read(os.path.join(os.path.dirname(path), baks[0])), conf)
 
     def test_a_rw_root_is_never_remounted(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self._seed(tmp, ISSUE_1342_LIST)
-            r, calls, path = self._run(tmp, root_opts="rw,relatime,errors=remount-ro")
+            path, _ = self._seed(tmp, self._canonical(tmp, ISSUE_1342_LIST))
+            r, calls, _ = self._run(tmp, root_opts="rw,relatime,errors=remount-ro")
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual(calls, [])
-            self.assertEqual(_read(path), _lib("ndi_discovery_config_json").stdout)
+            self.assertFalse(os.path.exists(path))
 
     def test_a_transient_busy_ro_remount_is_retried(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self._seed(tmp, ISSUE_1342_LIST)
+            self._seed(tmp, self._canonical(tmp, ISSUE_1342_LIST))
             r, calls, _ = self._run(tmp, ro_fails=2)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual(calls.count("-o remount,ro /"), 3)
 
     def test_a_failed_ro_remount_is_loud_and_non_zero(self):
         with tempfile.TemporaryDirectory() as tmp:
-            self._seed(tmp, ISSUE_1342_LIST)
-            r, calls, _ = self._run(tmp, ro_fails=99)
+            self._seed(tmp, self._canonical(tmp, ISSUE_1342_LIST))
+            r, _, _ = self._run(tmp, ro_fails=99)
             self.assertNotEqual(r.returncode, 0)
             self.assertIn("read-WRITE", r.stderr)
             self.assertNotIn("OK", r.stdout)
 
-    def test_the_program_refuses_a_cambox_or_an_empty_list(self):
-        for lst in ("10.77.9.202,10.77.9.61", ""):
-            r = _lib(f'ndi_discovery_cambox_apply_remote_snippet "{lst}"; echo "rc=$?"')
-            self.assertIn("rc=1", r.stdout, lst)
-            self.assertNotIn("remount", r.stdout, lst)
+    def test_a_failed_strip_still_puts_the_root_back_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = json.dumps({"ndi": {"groups": {"recv": "Public"}, "networks": {"ips": "10.77.9.61"}}})
+            path, _ = self._seed(tmp, conf)
+            r, calls, _ = self._run(tmp, extra_stubs="mktemp() { return 1; }\n")
+            self.assertNotEqual(r.returncode, 0)
+            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"], "the EXIT trap restores ro")
+            self.assertEqual(_read(path), conf, "the file is left as it was")
+            self.assertNotIn("OK", r.stdout)
 
-    def test_the_program_embeds_the_step_7_writer(self):
-        prog = _lib(f'ndi_discovery_cambox_apply_remote_snippet "{_pinned()}"').stdout
-        self.assertIn("ndi_discovery_write_config ()", prog, "declare -f of the ONE writer, never a copy")
-        self.assertIn('ndi_discovery_write_config "$_ndi_dir" "$_ndi_ips"', prog)
+    def test_the_program_embeds_the_shared_plan_and_never_the_list_writer(self):
+        prog = _lib("ndi_discovery_cambox_apply_remote_snippet").stdout
+        self.assertIn("ndi_discovery_cambox_plan ()", prog, "declare -f of the ONE plan, never a copy")
+        self.assertIn("ndi_discovery_cambox_apply_plan ()", prog)
+        self.assertNotIn("ndi_discovery_write_config", prog, "a cambox never gets a list written")
 
-    def test_cli_prints_the_program_for_the_generated_list(self):
-        r = _bash(f'bash "{LIB}" --cambox-apply pinned')
+    def test_cli_prints_the_program_and_needs_no_fleet_list(self):
+        r = _bash(f'bash "{LIB}" --cambox-apply')
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(r.stdout, _lib(f'ndi_discovery_cambox_apply_remote_snippet "{_pinned()}"').stdout)
-        r = _bash(f'bash "{LIB}" --cambox-apply pinned', env={"OBS_FLEET": "stream|10.77.9.204|windows-genlock|always"})
-        self.assertNotEqual(r.returncode, 0, "a generator failure never prints a program")
-        self.assertEqual(r.stdout, "")
+        self.assertEqual(r.stdout, _lib("ndi_discovery_cambox_apply_remote_snippet").stdout)
+        r = _bash(f'bash "{LIB}" --cambox-apply', env={"OBS_FLEET": "stream|10.77.9.204|windows-genlock|always"})
+        self.assertEqual(r.returncode, 0, "the cambox program does not depend on the OBS-fleet list")
 
 
 class LaptopScriptRun1389(unittest.TestCase):

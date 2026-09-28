@@ -425,21 +425,24 @@ class Cli(unittest.TestCase):
 
 
 class CamboxWiring(unittest.TestCase):
-    def test_setup_device_writes_config_and_dropin_in_step_7_ungated(self):
+    """ROZHODNUTÉ 5879261962 (issue 1389): a cambox carries NO networks.ips -- STEP 7 strips the
+    receiver config it used to write, and (an) grades that no list is left."""
+
+    def test_setup_device_strips_the_cambox_config_in_step_7_1389(self):
         text = _read(SETUP_DEVICE)
         self.assertRegex(text, r'(?m)^\. "\$HERE/lib/ndi-discovery\.sh"')
         live = _strip_comments(_live_flow(SETUP_DEVICE, "stop here -- never run the destructive"))
-        gen = live.find('NDI_IPS="$(ndi_discovery_sender_ips)"')
-        write = live.find('ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_IPS"')
-        dropin = live.find('ndi_discovery_dropin_content > "$NDI_DISCOVERY_CAMBOX_DROPIN"')
-        self.assertTrue(0 <= gen < write, "STEP 7 generates the list, then writes /etc/ndi/ndi-config.v1.json")
-        self.assertGreaterEqual(dropin, 0, "STEP 7 must write the camera-box NDI_CONFIG_DIR drop-in")
-        reload = live.find("systemctl daemon-reload", max(write, dropin))
+        plan = live.find('ndi_discovery_cambox_plan "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_DISCOVERY_CAMBOX_DROPIN"')
+        apply = live.find('ndi_discovery_cambox_apply_plan "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_DISCOVERY_CAMBOX_DROPIN"')
+        self.assertTrue(0 <= plan < apply, "STEP 7 plans the cleanup, then applies it")
+        reload = live.find("systemctl daemon-reload", apply)
         step8 = live.find("[8/${TOTAL_STEPS}]")
-        self.assertTrue(0 <= reload < step8, "both writes sit inside STEP 7, before its daemon-reload")
-        self.assertNotIn("ndi_discovery_enabled", live, "no rollout gate: receiver config ships ungated")
+        self.assertTrue(0 <= reload < step8, "the cleanup sits inside STEP 7, before its daemon-reload")
+        for banned in ("ndi_discovery_write_config", "ndi_discovery_dropin_content", "ndi_discovery_sender_ips"):
+            self.assertNotIn(banned, live, f"a cambox never gets a list: setup-device must not call {banned}")
+        self.assertNotIn("ndi_discovery_enabled", live, "no rollout gate")
 
-    def test_verify_device_an_grades_against_the_generator(self):
+    def test_verify_device_an_grades_no_list_on_a_cambox_1389(self):
         text = _read(VERIFY_DEVICE)
         self.assertRegex(text, r'(?m)^\. "\$HERE/lib/ndi-discovery\.sh"')
         self.assertGreaterEqual(len(re.findall(r"\(an\) NDI discovery", text)), 3, "header + usage + exec block")
@@ -447,9 +450,10 @@ class CamboxWiring(unittest.TestCase):
         q = text.rfind("# (q) .bak cruft drift")
         self.assertTrue(0 <= an < q, "(an) must sit BEFORE (q), which stays the last check")
         block = text[an:q]
-        self.assertIn('NDI_DISC_REQUIRED="$(ndi_discovery_sender_ips pinned)"', block)
-        self.assertIn('ndi_discovery_config_verdict "$NDI_DISC_CONF" "$NDI_DISC_REQUIRED"', block)
-        self.assertIn("ndi_discovery_dropin_config_dir", block)
+        self.assertIn('ndi_discovery_cambox_verdict "$NDI_DISC_CONF" "$NDI_DISC_DROPIN"', block)
+        code = _strip_comments(block)
+        self.assertNotIn("ndi_discovery_sender_ips", code)
+        self.assertNotIn("ndi_discovery_config_verdict", code)
         self.assertIn("fail ", block)
         self.assertNotIn('warn "', block)
         self.assertNotIn("rollout_pending", block)
@@ -492,40 +496,43 @@ class VerifyDeviceAnBehaviour(unittest.TestCase):
         }
         return _bash(f'set -euo pipefail\n. "{LIB}"\n{prelude}{block}', env=env)
 
-    def test_configured_box_passes(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            env = {"NDI_DISCOVERY_SYSTEM_DIR": os.path.join(tmp, "etc-ndi")}
-            self.assertEqual(_lib(f'ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" "{_pinned()}"', env=env).returncode, 0)
+    def _seed(self, tmp, ips=None, dropin=True):
+        env = {"NDI_DISCOVERY_SYSTEM_DIR": os.path.join(tmp, "etc-ndi")}
+        if ips is not None:
+            self.assertEqual(_lib(f'ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" "{ips}"', env=env).returncode, 0)
+        if dropin:
             with open(os.path.join(tmp, "camera-box-ndi-discovery.conf"), "w") as fh:
                 fh.write(_lib("ndi_discovery_dropin_content", env=env).stdout)
+
+    def test_an_mdns_only_box_passes_1389(self):
+        # ROZHODNUTÉ 5879261962: no config and no drop-in is the target state of a cambox.
+        with tempfile.TemporaryDirectory() as tmp:
             r = self._run(tmp)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertTrue(r.stdout.startswith("OK NDI receiver config"), r.stdout)
 
-    def test_unconfigured_box_fails_on_the_missing_config(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            r = self._run(tmp)
-            self.assertIn("FAIL NDI receiver config", r.stdout)
-            self.assertIn("config missing", r.stdout)
-
-    def test_missing_dropin_fails(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            env = {"NDI_DISCOVERY_SYSTEM_DIR": os.path.join(tmp, "etc-ndi")}
-            _lib(f'ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" "{_pinned()}"', env=env)
-            r = self._run(tmp)
-            self.assertIn("FAIL camera-box.service.d/ndi-discovery.conf missing", r.stdout)
-
     def test_a_box_still_listing_the_camboxes_fails_1389(self):
         with tempfile.TemporaryDirectory() as tmp:
-            env = {"NDI_DISCOVERY_SYSTEM_DIR": os.path.join(tmp, "etc-ndi")}
-            _lib(f'ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" "{ISSUE_1342_LIST}"', env=env)
-            with open(os.path.join(tmp, "camera-box-ndi-discovery.conf"), "w") as fh:
-                fh.write(_lib("ndi_discovery_dropin_content", env=env).stdout)
+            self._seed(tmp, ISSUE_1342_LIST)
             r = self._run(tmp)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("FAIL NDI receiver config", r.stdout)
-            self.assertIn("cambox", r.stdout)
+            self.assertIn("10.77.9.61", r.stdout)
             self.assertNotIn("OK NDI receiver config", r.stdout)
+
+    def test_a_box_listing_the_obs_boxes_fails_too_1389(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, _pinned())
+            r = self._run(tmp)
+            self.assertIn("FAIL NDI receiver config", r.stdout)
+            self.assertIn(_pinned(), r.stdout)
+            self.assertIn("--cambox-apply", r.stdout)
+
+    def test_a_leftover_list_without_the_dropin_still_fails_1389(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, _pinned(), dropin=False)
+            r = self._run(tmp)
+            self.assertIn("FAIL NDI receiver config", r.stdout)
 
 
 class StrihWiring(unittest.TestCase):
@@ -766,11 +773,14 @@ class Rule(unittest.TestCase):
     def test_rule_states_the_cambox_exclusion_and_its_runbook_1389(self):
         text = _read(RULE)
         for needle in ("issue 1389", "disc:recv", "Never list a cambox IP in `networks.ips`",
-                       "--cambox-apply", "--cambox-ips", "-RemoveIps", "ss -Htnp"):
+                       "--cambox-apply", "--cambox-ips", "-RemoveIps", "ss -Htnp",
+                       "ROZHODNUTÉ 5879261962", "A cambox carries NO `networks.ips`"):
             self.assertIn(needle, text)
+        self.assertNotIn("Open question", text, "the outbound question is decided (ROZHODNUTÉ 5879261962)")
         router = [l for l in _read(CLAUDE_MD).splitlines() if ".claude/rules/ndi-discovery.md" in l][0]
         self.assertIn("1389", router)
         self.assertIn("never a cambox", router)
+        self.assertIn("carry no `networks.ips`", router)
 
 
 if __name__ == "__main__":
