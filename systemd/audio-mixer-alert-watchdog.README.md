@@ -41,7 +41,10 @@ UNKNOWN.
 - **STALE** (an old dump with no proof the log is live NOW — OBS down or hung, or a gather without
   `obs_log_head_age_s`; or the pacer line stopped) is logged on the machine channel only, never
   paged. obs-liveness / bundle-state own a dead OBS.
-- 2 consecutive confirmations before a page; a HEALTHY pass clears the arm.
+- 2 confirmations before a page; a HEALTHY pass clears the arm, and on the mixer arm a STALE pass
+  resets the pending confirmation (issue 1385: the date-less log of a dead OBS reads live ~70 s once
+  a day, and a held confirm would pair two such days into a false STALLED). A frozen log (head
+  older than 180 s) reads STALE and never grades its last counts.
 
 Replay proof (`tests/python/test_audio_mixer_replay_1381.py`, real 27.9 resolume log excerpts):
 03:00–04:15, a normal OBS start and the clean window after the 716 deploy never grade a paging

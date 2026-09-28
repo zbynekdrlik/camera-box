@@ -166,6 +166,14 @@ handle_arm() {
   fi
 }
 
+# reset_arm_confirm <box> <prefix> -> zero this arm's pending confirmation only (issue 1385). The
+# mixer arm's STALE means the log is not live NOW. The OBS log has no date, so a log that stopped
+# days ago reads live for ~70 s once a day; a confirm HELD across STALE would pair two of those
+# days into a STALLED page on a dead OBS. Alert state (throttle, alerted flag) is left alone.
+reset_arm_confirm() {
+  write_state_field "${2}_confirm_${1}" 0
+}
+
 # handle_healthy_arm <box> <prefix> -> clear this arm's confirm + throttle and log a machine-channel
 # recovery line once if it had paged. Recovery is NEVER a phone ping (issue 1206).
 handle_healthy_arm() {
@@ -206,9 +214,10 @@ handle_box() {
   case "$mverdict" in
     SKIP)    log "$box mixer: :$BUNDLE_PORT not fetchable -- bundle-state / reach watchdog territory; holding, no page" ;;
     UNKNOWN) log "$box mixer: no complete audio-stall dump (fresh OBS start / older build) -- holding, no page" ;;
-    STALE)   log "$box mixer: STALE -- newest audio-stall dump ${age}s behind the log head, but the log head is not live (${head_age:-no}s old: OBS down / hung / older gather) -- obs-liveness territory, machine channel only, no page" ;;
+    STALE)   log "$box mixer: STALE -- newest audio-stall dump ${age}s behind the log head, but the log head is not live (${head_age:-no}s old: OBS down / hung / older gather) -- obs-liveness territory, machine channel only, no page"
+             reset_arm_confirm "$box" "audio-mixer" ;;
     STALLED) handle_arm "$box" "STALLED" "audio-mixer" "audio-mixer" \
-      "🚨 Zvukový mixér ($REPO_SLUG): **$box** ($ip) — zvukové vlákno OBS stojí: posledný zvukový záznam je **${age} s** starý, hoci OBS stále zapisuje log (pred ${head_age} s). Z tohto OBS nejde zvuk (ticho vo vysielaní). Treba zistiť príčinu a rozhodnúť o reštarte OBS. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol." ;;
+      "🚨 Zvukový mixér ($REPO_SLUG): **$box** ($ip) — zvukové vlákno OBS stojí: posledný zvukový záznam je aspoň **${age} s** starý, hoci OBS stále zapisuje log (pred ${head_age} s). Z tohto OBS nejde zvuk (ticho vo vysielaní). Treba zistiť príčinu a rozhodnúť o reštarte OBS. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol." ;;
     HEALTHY) handle_healthy_arm "$box" "audio-mixer" ;;
     BEHIND)  handle_arm "$box" "BEHIND" "audio-mixer" "audio-mixer" \
       "🚨 Zvukový mixér ($REPO_SLUG): **$box** ($ip) — OBS mixér nebeží v reálnom čase: **${ticks} tickov za minútu** (reálny čas ${expected}, odchýlka ${dev}), oneskorených tickov ${over}/min. Zvuk z tohto OBS sa trhá alebo dobieha (27.9.: FOH výpadky celú hodinu). Treba zistiť príčinu (záťaž zvukového vlákna, dock) a rozhodnúť o reštarte OBS. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol." ;;

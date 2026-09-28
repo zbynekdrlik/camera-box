@@ -1261,9 +1261,10 @@ def _audio_stall_dump_in_head(text):
 # local HH:MM:SS.mmm and the gather runs on the same box, so the two clocks are one. The log has
 # no date: a head AHEAD of "now" (read right after the log) can only be a wall-clock step back
 # (dantesync steps ~50 ms) and reads 0 up to this slack; further ahead it is a previous day's line
-# (+24 h), which the decision reads as not live. A log dead for a whole number of days reads live
-# for about 70 s once a day (this slack + the decision's 60 s) -- shorter than one 300 s dev1 pass,
-# so the 2-pass confirm never pages on it.
+# (+24 h), which the decision reads as not live. A log dead for a whole number of days still reads
+# live for about 70 s once a day (this slack + the decision's 60 s), so at most one pass a day; the
+# dev1 watchdog resets the mixer confirm on every STALE pass in between, so two such days never pair
+# into a page (issue 1385 review).
 LOG_HEAD_CLOCK_SLACK_S = 10.0
 
 
@@ -1280,16 +1281,19 @@ def obs_log_head_age_s_from_log(text, now_s):
     box's local seconds of the day, taken right after the log read), or `""` when the tail has no
     timestamped line (omit-when-empty -> the decision has no liveness proof)."""
     t = text or ""
-    if LOG_BOUNDED_READ_SEPARATOR in t:
-        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
-    for line in reversed(t.splitlines()):
-        ts = _log_line_seconds(line)
-        if ts is None:
-            continue
-        gap = float(now_s) - ts
-        if gap < 0.0:
-            gap = 0.0 if gap >= -LOG_HEAD_CLOCK_SLACK_S else gap + 86400.0
-        return str(round(gap))
+    sep = t.rfind(LOG_BOUNDED_READ_SEPARATOR)
+    floor = sep + len(LOG_BOUNDED_READ_SEPARATOR) if sep >= 0 else 0
+    # Walk back line by line from the end (the head is in the last few lines): no copy of the tail.
+    end = len(t)
+    while end > floor:
+        start = max(t.rfind("\n", floor, end), floor - 1) + 1
+        ts = _log_line_seconds(t[start:end])
+        if ts is not None:
+            gap = float(now_s) - ts
+            if gap < 0.0:
+                gap = 0.0 if gap >= -LOG_HEAD_CLOCK_SLACK_S else gap + 86400.0
+            return str(round(gap))
+        end = start - 1
     return ""
 
 

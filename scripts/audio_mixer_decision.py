@@ -22,6 +22,9 @@ around the 02:00 UTC nightly date step with a real-time ticks=2813).
               the age alone: a dump that left the tail of a long session reports only its age.
   STALE       the same old dump WITHOUT that proof (OBS down or hung, the log frozen, an older
               gather without the facet): log-only -- obs-liveness / bundle-state own a dead OBS.
+              Also a FROZEN log: the log head more than STALE_AFTER_S old on the box clock, so its
+              last counts are never graded (a dead OBS whose last dump was BEHIND would otherwise
+              page every hour). The watchdog resets the mixer confirm on STALE.
   UNKNOWN     facet absent (a normal OBS start: one partial dump only) or a tick length that is no
               known sample rate.
   BEHIND      ticks in the minute more than TOLERANCE off real time (2812.5 at 48 kHz). A SURPLUS
@@ -46,8 +49,9 @@ DEFAULT_OVER_MAX = 30.0             # late ticks/min
 DEFAULT_STALE_AFTER_S = 180         # 3x the 60 s dump period (the audio-lag sibling's bound)
 DEFAULT_VBAN_STALE_AFTER_S = 180    # 18 missed 10 s status lines
 # issue 1385 -- the log head counts as live while it is at most this old on the box's own clock. A
-# genlock OBS logs every ~5 s (program-render-audit); it stays below the 300 s dev1 pass, so a
-# date-less log dead for whole days never reads live on two passes in a row.
+# genlock OBS logs every ~5 s (program-render-audit). A date-less log dead for whole days reads live
+# for one pass a day at most; the watchdog resets the mixer confirm on the STALE passes between, so
+# two such days never pair into a page.
 DEFAULT_LOG_LIVE_S = 60
 
 
@@ -85,6 +89,11 @@ def classify_mixer(ticks, ticks_over, window_ms, tick_ms, age_s, box_reachable,
     expected = expected_ticks_per_min(tick_ms)
     if ticks is None or ticks_over is None or expected is None:
         res["verdict"] = "UNKNOWN"
+        return res
+    if log_head_age_s is not None and log_head_age_s > stale_after_s:
+        # The log itself stopped (OBS down / hung): its last counts are frozen, not current. The
+        # bound is the stale window, not the live one, so a quiet but live log still grades.
+        res["verdict"] = "STALE"
         return res
     res.update(rate_per_min=ticks, expected_per_min=expected, deviation_per_min=ticks - expected,
                over_per_min=ticks_over)

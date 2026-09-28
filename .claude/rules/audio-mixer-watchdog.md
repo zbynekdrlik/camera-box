@@ -67,20 +67,39 @@ arm + box throttle signature).
   `program_render_lagged_age_s` is the age of the WORST `lagged` window in the tail, not recency —
   772 s on strih-lx and 1287 s on resolume, both healthy. `ndi_input_latency` (the one OBS-WS fact)
   is absent on resolume, `obs_process_count` is Windows-only. Neither says the log advances.
-- **Date-less log.** "Now" is read after the log, so a head AHEAD of it can only be a wall-clock
-  step back: up to 10 s (`LOG_HEAD_CLOCK_SLACK_S`) it reads 0, further ahead it is a previous day's
-  line (+24 h, not live). A log dead for a whole number of days therefore reads live for about 70 s
-  once a day, shorter than one 300 s pass, so the 2-pass confirm never pages on it. Keep
-  slack + `LOG_LIVE_S` below the timer period.
+- **Date-less log, and why STALE RESETS the mixer confirm.** "Now" is read after the log, so a
+  head AHEAD of it can only be a wall-clock step back: up to 10 s (`LOG_HEAD_CLOCK_SLACK_S`) it reads
+  0, further ahead it is a previous day's line (+24 h, not live). A log dead for a whole number of
+  days still reads live for about 70 s once a day, so at most ONE pass a day reads STALLED (on
+  roughly a quarter of the days, as the timer phase drifts). The 2-pass confirm alone does NOT stop
+  that: the fleet rule holds a confirm across SKIP / UNKNOWN / STALE, so two such days, however far
+  apart, confirmed a page on a dead OBS (review round 1, reproduced through the real bash dry-run).
+  So the mixer arm's STALE resets its confirm (`reset_arm_confirm`; the alert state is left alone),
+  while SKIP / UNKNOWN still hold. Pinned by the 3-day frozen-log replay (one false-live pass every
+  day, python model + the real bash) and the STALLED -> STALE -> STALLED dry-run. Keep slack +
+  `LOG_LIVE_S` below the 300 s timer period.
+- **A frozen log never grades its old counts.** When the log head is more than 180 s old (the stale
+  window, not the 60 s live bound, so a quiet but live log still grades) the mixer reads STALE even
+  when its last dump is fresh behind that head. Before this, a dead OBS whose last dump graded
+  BEHIND paged every hour for as long as it stayed dead. With the facet absent (an older gather)
+  grading is unchanged.
 - **STALLED is decided FIRST, from the age alone.** A stale dump's counts describe a minute long
   gone, so the old counts are not graded (a stale BEHIND dump reads STALLED). A tick length of an
   unknown sample rate does not hide it either.
-- **A long session keeps paging.** A 5 MB tail spans about 35-80 min on these boxes (~5-9 MB/h), so
+- **A long session keeps paging.** A 5 MB tail spans about 33-60 min on these boxes (~5-9 MB/h), so
   a thread dead longer than that would lose its last dumps from the tail and decay to UNKNOWN,
   ending the time-bucketed re-ping. For a bounded read whose HEAD slice holds a dump (this build
   dumps), a tail with fewer than two dumps reports only `audio_mixer_age_s`: the newest tail dump's
-  age, or the whole tail span when none is left. A whole-file log (a normal start) and a build
-  without the probe (no dump anywhere) stay absent.
+  age, or the whole tail span when none is left (a lower bound, so the page says "aspoň N s"). A
+  whole-file log (a normal start) and a build without the probe (no dump anywhere) stay absent.
+- **One throttle for the whole mixer arm (a stated choice).** STALLED shares the `audio-mixer:<box>`
+  throttle signature with BEHIND / OVERLOADED, as the design says: a mixer that goes BEHIND and then
+  stops is one incident, so the escalation to silence can wait up to the 12-pass throttle (the owner
+  already has the BEHIND page for that box). A per-verdict signature would re-page on every
+  BEHIND <-> STALLED flip of a flapping thread.
+- **On resolume a stopped thread pages twice, through two arms (accepted).** Its VBAN pacer keeps
+  logging, so the pacer's underflows page VBAN_LOSS while STALLED pages the mixer arm. Same accepted
+  shape as BEHIND + VBAN_LOSS in issue 1381: two different effects of one fault, both on air.
 - **A normal OBS start never stalls.** Fewer than two dumps in a whole-file log = the whole facet
   absent = UNKNOWN. An audio thread that dies before its second dump in a fresh log is therefore
   not paged here (a stated residual: the start dump count is absent at a normal start too, so no
@@ -179,7 +198,10 @@ pass time. Every pass phase reads STALLED from ~03:32:30 on and pages by the sec
 the real bash `--dry-run` fires exactly one `alert_now=1` STALLED in the window. The same cut with
 OBS dying at 03:45 reads STALE from 03:46 on, and a log with no other advancing line never pages.
 The quiet windows and the real onset (the mixer kept dumping while it fell behind) never read
-STALLED.
+STALLED. A stream-shaped variant (the same real dumps, no obs-vban line, a synthetic
+`program-render-audit` line every 5 s keeping the log moving -- the stream / strih-lx case) pages
+once through the real bash dry-run for box `stream`. Two frozen logs replayed for 3 days (a stopped
+thread, and the onset frozen at 06:20 on a BEHIND dump) never page.
 
 The other boxes, read-only on 27.9/28.9: the stream box's current log (19:57–00:20, 263 full
 dumps) read ticks=2813 and ticks_over=0 in every dump and has no obs-vban line (VBAN arm UNKNOWN);
