@@ -47,6 +47,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/network-reach-health.sh
 . "$HERE/lib/network-reach-health.sh"
 # shellcheck source=scripts/lib/obs-fleet.sh
@@ -149,13 +151,9 @@ probe_tcp() {
 }
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
+# read_state_field and clear_box_throttle live in scripts/lib/watchdog-common.sh. This
+# write_state_field stays here and overrides the lib's copy: it is the same read-first design, but
+# its printf formats carry a literal newline instead of `\n`, so its code is not the lib's.
 write_state_field() {
   local key="$1" val="$2" tmp existing=""
   mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
@@ -180,16 +178,10 @@ write_state_field() {
   fi
 }
 
-# A REACHABLE box is not an incident: clear its confirm counter AND its throttle sig so a genuinely
-# NEW outage later pages fresh instead of being dedup'd against a stale signature (mirrors the sibling
-# reset discipline). Does NOT clear the `alerted` flag -- that is the recovery-ping latch, handled
-# separately so a box we paged for still emits a "reachable again" ping.
-clear_box_throttle() {
-  local box="$1"
-  write_state_field "confirm_${box}" 0
-  write_state_field "alert_sig_${box}" ""
-  write_state_field "alert_passes_${box}" 0
-}
+# A REACHABLE box is not an incident: clear_box_throttle clears its confirm counter AND its throttle
+# sig so a genuinely NEW outage later pages fresh instead of being dedup'd against a stale signature
+# (mirrors the sibling reset discipline). It does NOT clear the `alerted` flag -- that is the
+# recovery-ping latch, handled separately so a box we paged for still emits a "reachable again" ping.
 
 # -- per-box decision --------------------------------------------------------------------------
 # handle_box <box> <ip> <ping_ok> <ws_ok> <bundle_ok> — the probe results are gathered ONCE in main()

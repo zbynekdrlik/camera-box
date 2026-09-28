@@ -36,6 +36,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/optical-chain-health.sh
 . "$HERE/lib/optical-chain-health.sh"
 # #1117: the "a live gate/TEST harness is coordinating the rig THIS pass" signal -- the SAME fresh
@@ -98,13 +100,12 @@ measure() {
   OPTICAL_RC=$?
 }
 
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
+# read_state_field and clear_throttle live in scripts/lib/watchdog-common.sh. A healthy / skip /
+# unverified window is NOT an incident: clear_throttle clears the confirm counter AND the throttle
+# sig so a genuinely NEW episode later pages fresh instead of being dedup'd against a stale
+# signature (mirrors the imag-obs-alert-watchdog reset discipline). This older write_state_field
+# stays here on purpose and overrides the lib's copy (it writes through the state file itself when
+# mktemp fails).
 write_state_field() {
   local key="$1" val="$2" tmp
   mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
@@ -112,15 +113,6 @@ write_state_field() {
   { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
     > "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-}
-
-clear_throttle() {
-  # A healthy / skip / unverified window is NOT an incident: clear the confirm counter AND the
-  # throttle sig so a genuinely NEW episode later pages fresh instead of being dedup'd against a
-  # stale signature (mirrors the imag-obs-alert-watchdog reset discipline).
-  write_state_field confirm 0
-  write_state_field alert_sig ""
-  write_state_field alert_passes 0
 }
 
 main() {

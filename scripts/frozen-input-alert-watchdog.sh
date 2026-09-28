@@ -45,6 +45,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/frozen-input-health.sh
 . "$HERE/lib/frozen-input-health.sh"
 # shellcheck source=scripts/lib/mv-reverify-escalate.sh
@@ -136,6 +138,7 @@ _state_default="$STATE_DIR/camera-box-frozen-input-alert.state"
 [ "$DRY_RUN" -eq 1 ] && _state_default="$STATE_DIR/camera-box-frozen-input-alert-dryrun.state"
 STATE_FILE="${FROZEN_INPUT_ALERT_STATE_FILE:-$_state_default}"
 # Issue-1001's OWN state file -- read (never written) for the no-double-page guard.
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 NETREACH_STATE_FILE="${FROZEN_INPUT_NETREACH_STATE_FILE:-$STATE_DIR/camera-box-network-reach-alert.state}"
 
 # EXPECTED_LIVE is 1 for every configured source (the list is the scope). Kept as a seam input so a
@@ -231,25 +234,18 @@ probe_enumerate() {
 }
 
 # -- issue-1001 reachability read (never re-probed) ---------------------------------------------
-# netreach_box_alerted <box> -> "1" iff #1001 has that box CONFIRMED unreachable (paged). Absent
-# state file / field -> "0" (either #1001 has not run yet, or the box is reachable) -- the probe
-# itself still fails-safe to UNKNOWN if the box is genuinely down.
-netreach_box_alerted() {
-  local box="$1"
-  [ -f "$NETREACH_STATE_FILE" ] || { printf '0'; return 0; }
-  local v
-  v="$(sed -n "s/^alerted_${box}=//p" "$NETREACH_STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-0}"
-}
+# netreach_box_alerted <box> (scripts/lib/watchdog-common.sh) -> "1" iff #1001 has that box
+# CONFIRMED unreachable (paged). Absent state file / field -> "0" (either #1001 has not run yet, or
+# the box is reachable) -- the probe itself still fails-safe to UNKNOWN if the box is genuinely down.
 
 # -- persisted per-source state (key=value lines) -----------------------------------------------
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
+# read_state_field, source_key and clear_source_throttle live in scripts/lib/watchdog-common.sh.
+# source_key appends a short cksum of the RAW source name, so two names that sanitize identically
+# (e.g. "NDI 2ME PGM" vs "NDI-2ME-PGM") never silently share `recv_/confirm_/alerted_` state. An
+# ADVANCING source is not an incident: clear_source_throttle clears its confirm counter + throttle
+# sig so a genuinely NEW freeze later pages fresh; the `alerted` recovery-ping latch stays. This
+# older write_state_field stays here on purpose and overrides the lib's copy (it writes through the
+# state file itself when mktemp fails).
 write_state_field() {
   local key="$1" val="$2" tmp
   mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
@@ -257,25 +253,6 @@ write_state_field() {
   { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
     > "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-}
-
-# A source key safe for state-field names (source names carry spaces / punctuation). A short cksum of
-# the RAW name is appended so two distinct names that sanitize identically (e.g. "NDI 2ME PGM" vs
-# "NDI-2ME-PGM") never silently share `recv_/confirm_/alerted_` state.
-source_key() {
-  local san sum
-  san="$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '_')"
-  sum="$(printf '%s' "$1" | cksum | cut -d' ' -f1)"
-  printf '%s_%s' "$san" "$sum"
-}
-
-# An ADVANCING source is not an incident: clear its confirm counter + throttle sig so a genuinely NEW
-# freeze later pages fresh. Does NOT clear the `alerted` latch (the recovery-ping latch).
-clear_source_throttle() {
-  local k="$1"
-  write_state_field "confirm_${k}" 0
-  write_state_field "alert_sig_${k}" ""
-  write_state_field "alert_passes_${k}" 0
 }
 
 # -- per-source decision ------------------------------------------------------------------------

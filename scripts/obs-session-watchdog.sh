@@ -48,6 +48,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/obs-session-visibility.sh
 . "$HERE/lib/obs-session-visibility.sh"
 # shellcheck source=scripts/lib/win-ssh-exec.sh
@@ -94,13 +96,8 @@ log() { printf '%s [obs-session-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
 #   <b>_confirm=<n>       — consecutive-invisibility confirmation counter
 #   <b>_alert_sig=<str>   — fingerprint of the last-alerted condition (throttle dedup)
 #   <b>_alert_passes=<n>  — passes elapsed since the last alert for the same sig
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
+# read_state_field lives in scripts/lib/watchdog-common.sh. This older write_state_field stays here
+# on purpose and overrides the lib's copy (it writes through the state file itself when mktemp fails).
 write_state_field() {
   local key="$1" val="$2" tmp
   mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true

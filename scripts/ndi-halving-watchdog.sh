@@ -72,6 +72,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/camera-box-restart-verify.sh
 # #1203 (c): the cambox `systemctl restart camera-box` + verify text builder for the sender arm.
 . "$HERE/lib/camera-box-restart-verify.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -159,8 +161,10 @@ REPO_SLUG="${NDI_HALVING_ALERT_REPO:-zbynekdrlik/camera-box}"
 STATE_DIR="${NDI_HALVING_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 _state_default="$STATE_DIR/camera-box-ndi-halving.state"
 [ "$DRY_RUN" -eq 1 ] && _state_default="$STATE_DIR/camera-box-ndi-halving-dryrun.state"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${NDI_HALVING_STATE_FILE:-$_state_default}"
 # Issue-1001's OWN state file -- read (never written) for the no-double-page guard.
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 NETREACH_STATE_FILE="${NDI_HALVING_NETREACH_STATE_FILE:-$STATE_DIR/camera-box-network-reach-alert.state}"
 
 log() { printf '%s [ndi-halving-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
@@ -301,43 +305,12 @@ $verify" >&2 2>&1; then
   return 1
 }
 
-# -- issue-1001 reachability read (never re-probed) ---------------------------------------------
-netreach_box_alerted() {
-  local box="$1"
-  [ -f "$NETREACH_STATE_FILE" ] || { printf '0'; return 0; }
-  local v
-  v="$(sed -n "s/^alerted_${box}=//p" "$NETREACH_STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-0}"
-}
+# -- issue-1001 reachability read (never re-probed): netreach_box_alerted, lib/watchdog-common.sh
 
 # -- persisted per-input state (key=value lines) ------------------------------------------------
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
-write_state_field() {
-  local key="$1" val="$2" tmp existing=""
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  # Read the OTHER keys into memory FIRST, before any file is opened for writing -- so even the
-  # mktemp-failure fallback (a direct rewrite of STATE_FILE) can never truncate-before-read and drop
-  # them (the previous `tmp=$STATE_FILE` fallback had exactly that latent state-loss bug: a failed
-  # mktemp truncated STATE_FILE via the redirect before `grep` read it, collapsing it to the one
-  # written key and losing every alerted_/cure_ts_ latch). Mirrors network-reach-alert-watchdog.sh.
-  [ -f "$STATE_FILE" ] && existing="$(grep -v "^${key}=" "$STATE_FILE" 2>/dev/null)"
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || true)"
-  if [ -n "$tmp" ]; then
-    { [ -n "$existing" ] && printf '%s\n' "$existing"; printf '%s=%s\n' "$key" "$val"; } \
-      > "$tmp" 2>/dev/null || true
-    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-  else
-    # mktemp unavailable: `existing` is already captured, so a direct (non-atomic) rewrite is safe.
-    { [ -n "$existing" ] && printf '%s\n' "$existing"; printf '%s=%s\n' "$key" "$val"; } \
-      > "$STATE_FILE" 2>/dev/null || true
-  fi
-}
+# read_state_field / write_state_field live in scripts/lib/watchdog-common.sh (its write_state_field
+# reads the other keys before any write, so a failed mktemp never drops the alerted_/cure_ts_
+# latches).
 
 # An input key safe for state-field names (input names carry spaces). A short cksum of the RAW name
 # is appended so two names that sanitize identically never share state.

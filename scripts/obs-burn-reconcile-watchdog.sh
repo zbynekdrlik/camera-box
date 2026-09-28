@@ -64,6 +64,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-burn-reconcile-decision.sh
 . "$HERE/lib/obs-burn-reconcile-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/rig-heartbeat.sh
 . "$HERE/lib/rig-heartbeat.sh"
 # shellcheck source=scripts/lib/rig-lease.sh
@@ -117,13 +119,8 @@ SWEEP_ENUM_FAILED=2
 log() { printf '%s [obs-burn-reconcile-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 # ── read / write per-box persisted renderTotalFrames baseline ─────────────────
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
+# read_state_field lives in scripts/lib/watchdog-common.sh. This write_state_field stays here (its
+# fixed temp path differs) and overrides the lib's copy.
 write_state_field() {
   local key="$1" val="$2" tmp
   mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true

@@ -62,6 +62,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/obs-fleet.sh
 . "$HERE/lib/obs-fleet.sh"
 # shellcheck source=scripts/lib/rig-grandmaster.sh
@@ -160,6 +162,7 @@ VERSION_GATE="${DANTE_CLOCK_VERSION_GATE:-$HERE/dantesync-version-gate.sh}"
 STATE_DIR="${DANTE_CLOCK_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 _state_default="$STATE_DIR/camera-box-dantesync-clock-alert.state"
 [ "$DRY_RUN" -eq 1 ] && _state_default="$STATE_DIR/camera-box-dantesync-clock-alert-dryrun.state"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${DANTE_CLOCK_ALERT_STATE_FILE:-$_state_default}"
 
 log() { printf '%s [dantesync-clock-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
@@ -294,27 +297,7 @@ resolve_version_pin() {
 }
 
 # -- persisted per-key state (key=value lines) -- verbatim shape from the genlock-lock sibling -----
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
-write_state_field() {
-  local key="$1" val="$2" tmp existing=""
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  [ -f "$STATE_FILE" ] && existing="$(grep -v "^${key}=" "$STATE_FILE" 2>/dev/null)"
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || true)"
-  if [ -n "$tmp" ]; then
-    { [ -n "$existing" ] && printf '%s\n' "$existing"; printf '%s=%s\n' "$key" "$val"; } \
-      > "$tmp" 2>/dev/null || true
-    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-  else
-    { [ -n "$existing" ] && printf '%s\n' "$existing"; printf '%s=%s\n' "$key" "$val"; } \
-      > "$STATE_FILE" 2>/dev/null || true
-  fi
-}
+# read_state_field / write_state_field live in scripts/lib/watchdog-common.sh.
 
 # now_epoch -> seconds since the epoch (injectable for tests via DANTE_CLOCK_NOW).
 now_epoch() { printf '%s' "${DANTE_CLOCK_NOW:-$(date +%s)}"; }

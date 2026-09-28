@@ -35,6 +35,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/grabber-stuck-health.sh
 . "$HERE/lib/grabber-stuck-health.sh"
 # shellcheck source=scripts/camera-set.sh
@@ -94,13 +96,9 @@ probe_box() {
 }
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
+# read_state_field and clear_box_throttle live in scripts/lib/watchdog-common.sh. This older
+# write_state_field stays here on purpose and overrides the lib's copy (it writes through the state
+# file itself when mktemp fails).
 write_state_field() {
   local key="$1" val="$2" tmp
   mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
@@ -110,16 +108,10 @@ write_state_field() {
   mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
 }
 
-# OK (genuine recovery) — clear this box's confirm counter AND its throttle sig so a genuinely NEW
-# stuck episode later pages fresh. Does NOT clear the `alerted` recovery latch (handled in
-# handle_box so a box we paged for still emits a recovery ping on OK).
-clear_box_throttle() {
-  local box="$1"
-  write_state_field "confirm_${box}" 0
-  write_state_field "alert_sig_${box}" ""
-  write_state_field "alert_passes_${box}" 0
-}
-
+# OK (genuine recovery) — clear_box_throttle clears this box's confirm counter AND its throttle sig
+# so a genuinely NEW stuck episode later pages fresh. It does NOT clear the `alerted` recovery latch
+# (handled in handle_box so a box we paged for still emits a recovery ping on OK).
+#
 # NODATA (a transient ssh/journal blip, NOT a recovery) — clear ONLY the confirm counter, and LEAVE
 # the throttle sig/passes intact. Otherwise a single blip mid-episode would reset the
 # one-ping-per-episode latch, and the next two STUCK passes would page a SECOND time for the SAME

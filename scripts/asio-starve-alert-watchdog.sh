@@ -58,6 +58,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/asio-starve-health.sh
 . "$HERE/lib/asio-starve-health.sh"
 # shellcheck source=scripts/lib/ps-encoded.sh
@@ -123,6 +125,7 @@ _state_default="$STATE_DIR/camera-box-asio-starve-alert.state"
 [ "$DRY_RUN" -eq 1 ] && _state_default="$STATE_DIR/camera-box-asio-starve-alert-dryrun.state"
 STATE_FILE="${ASIO_STARVE_ALERT_STATE_FILE:-$_state_default}"
 # Issue-1001's OWN state file -- read (never written) for the no-double-page guard.
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 NETREACH_STATE_FILE="${ASIO_STARVE_NETREACH_STATE_FILE:-$STATE_DIR/camera-box-network-reach-alert.state}"
 
 # EXPECTED_LIVE is 1 for every configured source (the list is the scope). Kept as a seam input.
@@ -178,23 +181,14 @@ fetch_box_log() {
     2>/dev/null || true
 }
 
-# -- issue-1001 reachability read (never re-probed) ---------------------------------------------
-netreach_box_alerted() {
-  local box="$1"
-  [ -f "$NETREACH_STATE_FILE" ] || { printf '0'; return 0; }
-  local v
-  v="$(sed -n "s/^alerted_${box}=//p" "$NETREACH_STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-0}"
-}
+# -- issue-1001 reachability read (never re-probed): netreach_box_alerted, lib/watchdog-common.sh
 
 # -- persisted per-source state (key=value lines) -----------------------------------------------
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
+# read_state_field, source_key (a state-field-safe key per source name: sources carry spaces and
+# punctuation) and clear_source_throttle (an OK sample is not an incident: clear its confirm counter
+# + throttle sig so a genuinely NEW starvation later pages fresh; the `alerted` recovery-ping latch
+# stays) live in scripts/lib/watchdog-common.sh. This older write_state_field stays here on purpose
+# and overrides the lib's copy (it writes through the state file itself when mktemp fails).
 write_state_field() {
   local key="$1" val="$2" tmp
   mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
@@ -202,24 +196,6 @@ write_state_field() {
   { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
     > "$tmp" 2>/dev/null || true
   mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-}
-
-# A source key safe for state-field names (source names carry spaces / punctuation). A short cksum of
-# the RAW name is appended so two distinct names that sanitize identically never share state.
-source_key() {
-  local san sum
-  san="$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '_')"
-  sum="$(printf '%s' "$1" | cksum | cut -d' ' -f1)"
-  printf '%s_%s' "$san" "$sum"
-}
-
-# An OK sample is not an incident: clear its confirm counter + throttle sig so a genuinely NEW
-# starvation later pages fresh. Does NOT clear the `alerted` latch (the recovery-ping latch).
-clear_source_throttle() {
-  local k="$1"
-  write_state_field "confirm_${k}" 0
-  write_state_field "alert_sig_${k}" ""
-  write_state_field "alert_passes_${k}" 0
 }
 
 # -- per-source decision ------------------------------------------------------------------------

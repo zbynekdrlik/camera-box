@@ -49,6 +49,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/mv-fps-health.sh
 . "$HERE/lib/mv-fps-health.sh"
 # shellcheck source=scripts/lib/ps-encoded.sh
@@ -112,8 +114,10 @@ REPO_SLUG="${MV_FPS_ALERT_REPO:-zbynekdrlik/camera-box}"
 STATE_DIR="${MV_FPS_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 _state_default="$STATE_DIR/camera-box-mv-fps-alert.state"
 [ "$DRY_RUN" -eq 1 ] && _state_default="$STATE_DIR/camera-box-mv-fps-alert-dryrun.state"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${MV_FPS_ALERT_STATE_FILE:-$_state_default}"
 # #1001's OWN state file -- read (never written) for the no-double-page guard.
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 NETREACH_STATE_FILE="${MV_FPS_NETREACH_STATE_FILE:-$STATE_DIR/camera-box-network-reach-alert.state}"
 
 log() { printf '%s [mv-fps-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
@@ -166,40 +170,11 @@ probe_mv_log() {
 }
 
 # -- #1001 reachability read (never re-probed) --------------------------------------------------
-# netreach_box_alerted <box> -> "1" iff #1001 has that box CONFIRMED unreachable (paged). Absent
-# state file / field -> "0".
-netreach_box_alerted() {
-  local box="$1"
-  [ -f "$NETREACH_STATE_FILE" ] || { printf '0'; return 0; }
-  local v
-  v="$(sed -n "s/^alerted_${box}=//p" "$NETREACH_STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-0}"
-}
+# netreach_box_alerted <box> (scripts/lib/watchdog-common.sh) -> "1" iff #1001 has that box
+# CONFIRMED unreachable (paged). Absent state file / field -> "0".
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
-write_state_field() {
-  local key="$1" val="$2" tmp existing=""
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  # Read the OTHER keys into memory FIRST, before any file is opened for writing (mirrors
-  # obs-liveness-watchdog's issue-732 state-loss fix).
-  [ -f "$STATE_FILE" ] && existing="$(grep -v "^${key}=" "$STATE_FILE" 2>/dev/null)"
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || true)"
-  if [ -n "$tmp" ]; then
-    { [ -n "$existing" ] && printf '%s\n' "$existing"; printf '%s=%s\n' "$key" "$val"; } \
-      > "$tmp" 2>/dev/null || true
-    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-  else
-    { [ -n "$existing" ] && printf '%s\n' "$existing"; printf '%s=%s\n' "$key" "$val"; } \
-      > "$STATE_FILE" 2>/dev/null || true
-  fi
-}
+# read_state_field / write_state_field live in scripts/lib/watchdog-common.sh.
 
 # A box name safe for state-field names (imag/strih are alnum, but stay defensive).
 box_key() { printf '%s' "$1" | tr -c 'A-Za-z0-9' '_'; }

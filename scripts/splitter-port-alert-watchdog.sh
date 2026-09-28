@@ -49,6 +49,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/splitter-health.sh
 . "$HERE/lib/splitter-health.sh"
 # shellcheck source=scripts/camera-set.sh
@@ -154,13 +156,9 @@ rig_mode_probe() {
 }
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
+# read_state_field and clear_box_throttle live in scripts/lib/watchdog-common.sh. This older
+# write_state_field stays here on purpose and overrides the lib's copy (it writes through the state
+# file itself when mktemp fails).
 write_state_field() {
   local key="$1" val="$2" tmp
   mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
@@ -170,16 +168,10 @@ write_state_field() {
   mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
 }
 
-# A non-DEAD_PORT pass (OK / SOURCE_WIDE / NODATA) is not a confirmed per-port fault: clear this box's
-# confirm counter AND its throttle sig so a genuinely NEW port fault later pages fresh. Does NOT clear
-# the `alerted` recovery latch (handled separately so a box we paged for still emits a "colour again"
-# ping when it returns to OK).
-clear_box_throttle() {
-  local box="$1"
-  write_state_field "confirm_${box}" 0
-  write_state_field "alert_sig_${box}" ""
-  write_state_field "alert_passes_${box}" 0
-}
+# A non-DEAD_PORT pass (OK / SOURCE_WIDE / NODATA) is not a confirmed per-port fault:
+# clear_box_throttle clears this box's confirm counter AND its throttle sig so a genuinely NEW port
+# fault later pages fresh. It does NOT clear the `alerted` recovery latch (handled separately so a
+# box we paged for still emits a "colour again" ping when it returns to OK).
 
 # -- per-box decision --------------------------------------------------------------------------
 # handle_box <box> <ip> <verdict> <capturing> <colour> <u_dev> <v_dev> <rough> -- the verdict + parsed
