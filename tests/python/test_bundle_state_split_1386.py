@@ -418,20 +418,25 @@ def _functions(path):
             yield node.name, _own_lines(node)
 
 
+# The server-side modules (slice D): imported by the server directly, never through the facade.
+_SERVER_MODULES = ("bundle_state_windows", "bundle_state_serverlog")
+
+
 def test_the_split_files_and_functions_stay_inside_the_budget():
-    files = [_SCRIPTS / "bundle_state_gather.py"] + [_SCRIPTS / f"{f}.py" for f in _FAMILIES]
+    files = [_SCRIPTS / "bundle_state_gather.py"] + [
+        _SCRIPTS / f"{f}.py" for f in _FAMILIES + _SERVER_MODULES]
     for path in files:
         n = path.read_text(encoding="utf-8").count("\n")
         assert n <= 800, f"{path.name} is {n} lines (budget 800): split it by responsibility"
     for path in files + [_SCRIPTS / "bundle-state-server.py"]:
         for name, n in _functions(path):
             assert n <= 100, f"{path.name}:{name} is {n} own lines (budget 100): cut it into helpers"
-    # The server itself is still over the ~1000-line file budget (issue 1386 scoped its server work
-    # to cutting gather_bundle_state). It must not grow further: a change that needs more room moves
-    # the Windows-only identity readers (port4455 / tasklist / VB-Matrix start / shortcut / AHK /
-    # NDI runtime + their caches) into a bundle_state_* module and lists it in bundle-state-files.
+    # Slice D moved the Windows-only identity readers (+ their caches) into bundle_state_windows and
+    # the logger into bundle_state_serverlog, so the server holds only the orchestration + HTTP. It
+    # is ratcheted at that size: a change that needs more room moves a responsibility out into a
+    # bundle_state_* module (listed in bundle-state-files) instead of growing the server again.
     server = (_SCRIPTS / "bundle-state-server.py").read_text(encoding="utf-8").count("\n")
-    assert server <= 1110, f"bundle-state-server.py grew to {server} lines (ratchet 1110): split it"
+    assert server <= 675, f"bundle-state-server.py grew to {server} lines (ratchet 675): split it"
 
 
 if __name__ == "__main__" and sys.argv[1:] == ["--write-golden"]:

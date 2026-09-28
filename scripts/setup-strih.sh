@@ -542,8 +542,9 @@ if [ -n "${GH_TOKEN:-}" ]; then
   done
   chmod 0644 /opt/camera-box/*.py
   # issue 1386: the files come from origin dev, the list from this checkout -- prove the installed
-  # tree is complete (the gather facade imports every facet module) before enabling the unit.
-  python3 -I -B -c 'import sys; sys.path.insert(0, "/opt/camera-box"); import bundle_state_gather' \
+  # tree is complete (the gather facade imports every facet module, bundle_state_windows the
+  # server-side modules) before enabling the unit.
+  python3 -I -B -c 'import sys; sys.path.insert(0, "/opt/camera-box"); import bundle_state_gather, bundle_state_windows' \
     || fail "issue 1386: /opt/camera-box holds a partial bundle-state server tree -- re-run from a current checkout"
   echo "  installed bundle-state server tree -> /opt/camera-box (${BUNDLE_STATE_SERVER_FILES[*]})"
   sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user enable strih-bundle-state-server.service 2>/dev/null \

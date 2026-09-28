@@ -30,6 +30,7 @@ change, never to absorb a refactor diff:
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import importlib.util
 import io
@@ -437,6 +438,36 @@ def test_the_golden_exercises_every_reader_and_both_cache_outcomes(golden):
 def test_every_name_the_tests_and_the_orchestration_reach_still_resolves_on_the_server():
     missing = [n for n in _SERVER_SURFACE if not hasattr(bss, n)]
     assert missing == []
+
+
+# --- the moved layout (added with the move; the proof above ran unchanged before and after it) ---
+
+def test_the_server_reexports_the_moved_objects_not_copies():
+    # The reader tests reset the caches IN PLACE through the server module, and the server's
+    # orchestration calls the readers through its own globals: both only work while each server
+    # name is the very object the readers module holds. The logger is ONE function for both.
+    import bundle_state_serverlog
+    import bundle_state_windows as bsw
+    moved = [n for n in _SERVER_SURFACE if n in vars(bsw)]
+    assert {"port4455_owner", "_port4455_cache", "tasklist_csv", "vb_matrix_start_time",
+            "resolve_shortcut", "ndi_runtime_version", "read_ahk_text", "log"} <= set(moved)
+    for name in moved:
+        assert getattr(bss, name) is vars(bsw)[name], f"bss.{name} is a copy, not the moved object"
+    assert bss.log is bsw.log is bundle_state_serverlog.log
+    for name in ("port4455_owner", "tasklist_csv", "vb_matrix_start_time", "resolve_shortcut",
+                 "ndi_runtime_version", "read_ahk_text", "_port4455_cache", "_shortcut_cache"):
+        assert name not in _server_own_definitions(), f"the server still defines {name} itself"
+
+
+def _server_own_definitions():
+    tree = ast.parse((_SCRIPTS / "bundle-state-server.py").read_text(encoding="utf-8"))
+    names = set()
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            names.update(t.id for t in node.targets if isinstance(t, ast.Name))
+    return names
 
 
 if __name__ == "__main__" and sys.argv[1:] == ["--write-golden"]:

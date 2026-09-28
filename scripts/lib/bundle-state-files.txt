@@ -13,4 +13,6 @@ bundle_state_audio.py
 bundle_state_vban.py
 bundle_state_av_offset.py
 bundle_state_host.py
+bundle_state_windows.py
+bundle_state_serverlog.py
 obs_phase2.py

@@ -135,7 +135,11 @@ def test_the_closure_reaches_every_facet_module():
     assert split <= closure, f"{sorted(split - closure)} exist but the server never reaches them"
 
 
-_SMOKE = "import sys; sys.path.insert(0, \"/opt/camera-box\"); import bundle_state_gather"
+_SMOKE = ("import sys; sys.path.insert(0, \"/opt/camera-box\"); "
+          "import bundle_state_gather, bundle_state_windows")
+# The two tree files the smoke import cannot load: the server itself and obs_phase2 need the
+# websocket-client package, which `-I` (no user site-packages) hides on some boxes.
+_NOT_SMOKE_IMPORTABLE = {_SERVER, "obs_phase2.py"}
 
 
 def _smoke_rc(tree_dir, cwd):
@@ -171,6 +175,23 @@ def test_the_smoke_import_catches_a_partial_tree_even_from_the_scripts_dir(tmp_p
             (tree / name).write_bytes((_SCRIPTS / name).read_bytes())
     assert _smoke_rc(full, _SCRIPTS) == 0
     assert _smoke_rc(part, _SCRIPTS) != 0
+
+
+def test_the_smoke_import_catches_every_missing_module_it_can_load(tmp_path):
+    # Slice D added server-side modules outside the gather facade, so importing the facade alone no
+    # longer proves the tree complete. Every listed module the smoke import can load at all must
+    # make it fail when absent -- including one a later change adds to the list.
+    names = _txt_list()
+    for missing in names:
+        if missing in _NOT_SMOKE_IMPORTABLE:
+            continue
+        tree = tmp_path / missing.replace(".", "_")
+        tree.mkdir()
+        for name in names:
+            if name != missing:
+                (tree / name).write_bytes((_SCRIPTS / name).read_bytes())
+        assert _smoke_rc(tree, _SCRIPTS) != 0, (
+            f"a tree without {missing} passes the post-install smoke import -- extend the import")
 
 
 def test_both_setup_scripts_iterate_the_declared_list():
