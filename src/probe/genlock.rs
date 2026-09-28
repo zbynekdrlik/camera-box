@@ -1708,7 +1708,7 @@ impl ReleaseCadence {
             //
             // On a drain tick, drop the CURRENT oldest (what would otherwise be presented) and
             // present the NEXT one instead, re-anchoring the boundary to IT — the same
-            // drop-older/present-newest idiom the ACQUIRE/relock/N>=2 paths already use. Simply
+            // drop-older/present-newest idiom the ACQUIRE/relock paths already use. Simply
             // keeping the same presented frame and dropping the one behind it does NOT converge:
             // it desyncs the re-anchored boundary from the real (evenly-spaced) frame timeline,
             // so the VERY NEXT tick reads as a HOLD (nothing yet matured) and the queue regains

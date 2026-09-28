@@ -206,7 +206,8 @@ anchor-clears against `free_async_cache()` call sites, so a fourth seam cannot b
 `free_async_cache(source);`, never between it and `genlock_phase_anchor_ns = 0;` (#1161).** The
 #1003 seam guard above counts the exact squished adjacency
 `source->genlock_phase_anchor_ns = 0; free_async_cache(source);` and asserts it equals the
-`free_async_cache(source);` count. A second field (e.g. `genlock_acquire_bracket_ticks`, #1161)
+`free_async_cache(source);` count. A second field (e.g. `genlock_acquire_bracket_ticks`, #1161 —
+removed with the N>=2 boundary conveyor by issue 1367 slice D1, the pattern below still holds)
 must clear at the identical three sites, but inserting `source->genlock_new_field = 0;` BETWEEN the
 anchor-clear and the `free_async_cache` call SPLITS that adjacency → the #1003 count drops to 0 and
 its `seams == frees` test fails (cost one live break here). Place the new clear on the line

@@ -200,7 +200,16 @@ arrival edge has no leverage (live E2E 32556463012: cam3 17→50 read-back OK, f
 This is NOT a settle-time issue and NOT fixable by the rejected wall-clock frame-grid pin (issue 1003,
 2026-08-17/18/20).
 
-**The frame-mover LANDED (sibling genlock-C, `genlock_relock_acquire_should_hold` in
+**SUPERSEDED for the strih cameras by issue 1367 slice D1 (`genlock-n2-grid-conveyor.md`).** An N>=2
+source presents `grid_floor(T − 50 ms − pin, canvas / N)`: the presented age is a pure function of the
+pin (66.7 ms at pins 1-16, +16.7 ms per source interval of pin), independent of the arrival lag while
+it stays inside the budget. The #1161 ACQUIRE bracket below was removed as dead code with the N>=2
+boundary conveyor. The additive plan (`current_pin + hold`) still moves exactly one frame per
+~16.7 ms of hold, but the budget check's `arrival_floor + hold` model is stale on the grid: the audit
+head is always one source frame older than the target, every camera reads ~86 ms, and a hold over
+~8 ms reads over the 94 ms ceiling (BUDGET_BOUND soft-release). A follow-up for the main to decide.
+
+(Historical, pre-D1.) **The frame-mover LANDED (sibling genlock-C, `genlock_relock_acquire_should_hold` in
 `src/genlock_backlog.rs` + `vendor/obs-studio/libobs/obs-source.c`):** on a pin RISE the setter zeroes
 the conveyor boundary to force a bounded re-acquire, and the ACQUIRE branch (N>=2) HOLDs until the
 oldest queued frame ages to the raised reserve, then re-anchors via the history-anchored
