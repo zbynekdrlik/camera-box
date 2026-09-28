@@ -539,9 +539,10 @@ int main(void)
 	h_summary("hidden-ingest-race");
 
 	/* (a''') an audio reset of a running OBS (the core audio state starts over, the sources go on): a
-	 * source mixed on the 50 ticks before it keeps tick 50. Hidden after it, it delivers a 300 ms
-	 * backlog on the 50th tick after the reset -- where a counter reset with the core state would
-	 * read its stale tick as a member again. It is still not mixed. */
+	 * source mixed on the 50 ticks before it, hidden after it, delivers a 300 ms backlog on the 50th
+	 * tick after the reset. Under a mix tick counter in struct obs_core_audio (restarting with it)
+	 * that is where its stale tick would read as a member again; the shipped counter is a
+	 * file-static that never restarts, so it is still not mixed. */
 	h_begin("audio-reset", "NDI old", false, 0, false);
 	for (int i = 0; i < 50; i++)
 		h_step(true);

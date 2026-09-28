@@ -53,7 +53,9 @@ static inline bool genlock_mix_is_member(uint64_t source_tick, uint64_t cur_tick
 
 /* On marking a member for tick `cur_tick`: did it JOIN the mix on this tick? A source never marked
  * (tick 0) joins on its first membership; a marked one when it was not in the mix on the previous
- * tick. */
+ * tick. The `prev_source_tick == 0` term only changes the answer on the process's first mixer tick
+ * (cur_tick 1, where `0 + 1 == 1` would otherwise read a never-marked source as a member of tick 0);
+ * on every later tick the second term already says "joined". */
 static inline bool genlock_mix_joined(uint64_t prev_source_tick, uint64_t cur_tick)
 {
 	return prev_source_tick == 0 || prev_source_tick + 1 != cur_tick;
