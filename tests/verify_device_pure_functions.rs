@@ -688,8 +688,8 @@ CPUAffinity=3'
 // ---------------------------------------------------------------------------------------------
 // issue 1342 -- the camboxes publish ONE NDI output (`CAMn (usb)`); the unconsumed issue-792
 // `CAMn (30p)` blend stream, its publish-30p.conf drop-in and the old (z) check are removed. The
-// (an) NDI-discovery check (the receiver-side networks.ips list, graded by
-// scripts/lib/ndi-discovery.sh) replaces it.
+// (an) NDI receiver-config check replaces it; since issue 1389 it grades that a cambox carries NO
+// networks.ips at all (ndi_discovery_cambox_verdict in scripts/lib/ndi-discovery.sh).
 // ---------------------------------------------------------------------------------------------
 
 #[test]

@@ -492,6 +492,76 @@ class CamboxApply1389(unittest.TestCase):
         self.assertEqual(r.returncode, 0, "the cambox program does not depend on the OBS-fleet list")
 
 
+class SetupDeviceStep7Run1389(unittest.TestCase):
+    """Run the REAL STEP 7 NDI block (sliced from setup-device.sh) against temp paths: the plan's
+    none / apply / refuse branches and a failed apply, each with the message the operator sees."""
+
+    def _block(self):
+        text = _read(os.path.join(REPO, "scripts", "setup-device.sh"))
+        start = text.find('NDI_PLAN="$(ndi_discovery_cambox_plan')
+        self.assertGreaterEqual(start, 0, "STEP 7 plan line")
+        end = text.find("\nesac\n", start)
+        self.assertGreater(end, start, "the STEP 7 case block ends")
+        return text[start:end + len("\nesac\n")]
+
+    def _env(self, tmp):
+        return {"NDI_DISCOVERY_SYSTEM_DIR": os.path.join(tmp, "etc-ndi"),
+                "NDI_DISCOVERY_CAMBOX_DROPIN": os.path.join(tmp, "camera-box-ndi-discovery.conf")}
+
+    def _run(self, tmp, extra=""):
+        prelude = 'fail() { echo "FAIL $1"; exit 1; }\n' + extra
+        return _bash(f'set -euo pipefail\n. "{LIB}"\n{prelude}{self._block()}', env=self._env(tmp))
+
+    def _seed(self, tmp, conf, dropin_text=None):
+        env = self._env(tmp)
+        os.makedirs(env["NDI_DISCOVERY_SYSTEM_DIR"], exist_ok=True)
+        path = os.path.join(env["NDI_DISCOVERY_SYSTEM_DIR"], "ndi-config.v1.json")
+        with open(path, "w") as fh:
+            fh.write(conf)
+        if dropin_text is None:
+            dropin_text = _lib("ndi_discovery_dropin_content", env=env).stdout
+        with open(env["NDI_DISCOVERY_CAMBOX_DROPIN"], "w") as fh:
+            fh.write(dropin_text)
+        return path, env["NDI_DISCOVERY_CAMBOX_DROPIN"]
+
+    def test_a_clean_box_is_left_alone(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self._run(tmp)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("no networks.ips on this cambox", r.stdout)
+            self.assertIn("nothing to change", r.stdout)
+
+    def test_the_old_list_is_taken_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, dropin = self._seed(tmp, json.dumps({"ndi": {"networks": {"ips": ISSUE_1342_LIST}}}))
+            r = self._run(tmp)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("NDI receiver config: remove", r.stdout)
+            self.assertFalse(os.path.exists(path))
+            self.assertFalse(os.path.exists(dropin))
+
+    def test_a_foreign_dropin_fails_loud_and_touches_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = json.dumps({"ndi": {"networks": {"ips": ISSUE_1342_LIST}}})
+            foreign = "[Service]\nEnvironment=NDI_CONFIG_DIR=/somewhere/else\n"
+            path, dropin = self._seed(tmp, conf, foreign)
+            r = self._run(tmp)
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("FAIL NDI receiver config:", r.stdout)
+            self.assertIn("/somewhere/else", r.stdout)
+            self.assertEqual(_read(path), conf)
+            self.assertEqual(_read(dropin), foreign)
+
+    def test_a_failed_apply_fails_loud(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = json.dumps({"ndi": {"groups": {"recv": "Public"}, "networks": {"ips": ISSUE_1342_LIST}}})
+            path, _ = self._seed(tmp, conf)
+            r = self._run(tmp, extra="mktemp() { return 1; }\n")
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("FAIL NDI receiver config cleanup (strip) failed", r.stdout)
+            self.assertEqual(_read(path), conf)
+
+
 class LaptopScriptRun1389(unittest.TestCase):
     """RUN the real scripts/ndi-discovery-laptop.ps1 (the Windows writer for stream / resolume) through
     tests/pwsh/run_ndi_discovery_laptop_1389.sh. ubuntu-latest ships pwsh; dev1 has a portable one

@@ -15,8 +15,9 @@ Three parts, all pure-bash / file-content checks (no cargo, no rig):
      queries the listed IPs IN ADDITION to mDNS, and senders never read the list. So senders keep
      announcing over mDNS, and stock TVs, guest laptops and the avahi port-map audit keep working.
    - There is no gate: receiver config is safe to ship.
-   - The writers are setup-device STEP 7, setup-strih step 4b and the Windows `.ps1`. The graders are
-     verify-device `(an)` and verify-strih item 34, which use the SAME generator.
+   - The writers are setup-strih step 4b and the Windows `.ps1`; the grader is verify-strih item 34,
+     which uses the SAME generator. (setup-device STEP 7 and verify-device `(an)` wrote and graded the
+     list on the camboxes until issue 1389 took it off them -- see part 4.)
 3. The Discovery-Server model of part 1 is dead code and is removed: the dev1 server unit, the
    `networks.discovery` writers, the rollout gates and the server list.
 4. Issue 1389: the list names ONLY the obs-fleet `ndi-sender` hosts, NEVER a cambox. A remote finder
@@ -24,8 +25,10 @@ Three parts, all pure-bash / file-content checks (no cargo, no rig):
    listener, and libndi 6.3.2 intermittently aborts the whole camera-box process (an uncaught
    `std::system_error` in its own `disc:recv` thread) when that connection closes. The camera walk
    stays as the FORBIDDEN set: the generator drops a cambox IP by construction, the verdict FAILs a
-   config that lists one, the Windows `.ps1` removes them, and `--cambox-apply` rewrites ONLY a
-   cambox's `/etc/ndi/ndi-config.v1.json` inside its read-only-root window. The generator and apply
+   config that lists one, and the Windows `.ps1` removes them. ROZHODNUTÉ 5879261962 then took the
+   list off the camboxes entirely: setup-device STEP 7 and `--cambox-apply` strip it (removing the
+   config and its NDI_CONFIG_DIR drop-in when nothing else is left), and verify-device `(an)` FAILs a
+   cambox that still lists any IP. The generator and apply
    tests live in tests/python/test_ndi_discovery_1389.py (it imports the helpers below); the grader,
    checked-in-config, `.ps1` and rule cases stay here next to their issue-1342 siblings.
 """
@@ -533,6 +536,18 @@ class VerifyDeviceAnBehaviour(unittest.TestCase):
             self._seed(tmp, _pinned(), dropin=False)
             r = self._run(tmp)
             self.assertIn("FAIL NDI receiver config", r.stdout)
+
+    def test_the_fail_line_names_the_dev1_ssh_path_1389(self):
+        # `--cambox-apply` only PRINTS the on-box program: the operator pipes it from dev1 into
+        # `ssh root@<box> bash -s`. Telling them to run it "on the box" would change nothing.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, _pinned())
+            r = self._run(tmp)
+            self.assertIn("FAIL NDI receiver config", r.stdout)
+            self.assertIn("--cambox-apply", r.stdout)
+            self.assertIn("bash -s", r.stdout)
+            self.assertIn("from dev1", r.stdout)
+            self.assertNotIn("on the box", r.stdout)
 
     def _write_raw(self, tmp, conf, dropin):
         os.makedirs(os.path.join(tmp, "etc-ndi"), exist_ok=True)
