@@ -207,6 +207,13 @@ class CamboxVerdict1389(unittest.TestCase):
         self.assertIn(_pinned(), r.stdout)
         self.assertNotIn("JSON", r.stdout)
 
+    def test_a_non_string_list_still_fails(self):
+        # The SDK documents a comma-separated string, but a hand-edited array is still a list.
+        conf = json.dumps({"ndi": {"groups": {"recv": "Public"}, "networks": {"ips": ["10.77.9.61"]}}})
+        r = self._verdict(conf, self.DROPIN)
+        self.assertTrue(r.stdout.startswith("FAIL:"), r.stdout)
+        self.assertIn("10.77.9.61", r.stdout)
+
     def test_a_blank_dropin_is_inert(self):
         # The same blank drop-in the plan removes as stale (CamboxApply1389) grades as no drop-in.
         self.assertEqual(self._verdict("", "  \n").stdout.strip(), "ok")
@@ -377,6 +384,16 @@ class CamboxApply1389(unittest.TestCase):
             path, dropin = self._seed(tmp, conf)
             r, _, _ = self._run(tmp)
             self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(json.loads(_read(path)), {"ndi": {"groups": {"recv": "Public"}}})
+            self.assertTrue(os.path.exists(dropin))
+
+    def test_a_non_string_list_is_stripped_keeping_other_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = json.dumps({"ndi": {"groups": {"recv": "Public"}, "networks": {"ips": ["10.77.9.61"]}}})
+            path, dropin = self._seed(tmp, conf)
+            r, calls, _ = self._run(tmp)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"])
             self.assertEqual(json.loads(_read(path)), {"ndi": {"groups": {"recv": "Public"}}})
             self.assertTrue(os.path.exists(dropin))
 

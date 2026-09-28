@@ -549,6 +549,17 @@ class VerifyDeviceAnBehaviour(unittest.TestCase):
             self.assertIn("from dev1", r.stdout)
             self.assertNotIn("on the box", r.stdout)
 
+    def test_the_fail_line_keeps_each_facet_apart_1389(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dir_ = os.path.join(tmp, "etc-ndi")
+            self._write_raw(tmp, '{"ndi": {"networks": {"ips": "10.77.9.202", "discovery": "10.77.9.200"}}}\n',
+                            f"[Service]\nEnvironment=NDI_CONFIG_DIR={dir_}\n")
+            r = self._run(tmp)
+            line = next(ln for ln in r.stdout.splitlines() if ln.startswith("FAIL NDI receiver config"))
+            self.assertIn("issue 1389); networks.discovery=", line, "one '; ' between two facets")
+            self.assertIn("is set (a configured sender stops mDNS) -- from dev1", line)
+            self.assertNotIn("FAIL:", line)
+
     def _write_raw(self, tmp, conf, dropin):
         os.makedirs(os.path.join(tmp, "etc-ndi"), exist_ok=True)
         with open(os.path.join(tmp, "etc-ndi", "ndi-config.v1.json"), "w") as fh:
