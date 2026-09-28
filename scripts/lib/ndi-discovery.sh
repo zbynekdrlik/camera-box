@@ -223,7 +223,13 @@ except Exception:
     sys.exit(1)
 for part in ("ndi", "networks", os.environ["NDI_DISCOVERY_KEY"]):
     node = node.get(part) if isinstance(node, dict) else None
-sys.stdout.write(node if isinstance(node, str) else "")
+# A string is the value; absent / null is ""; any other type (a hand-edited array) is still set, so
+# it comes back as its compact JSON -- never "" (issue 1389: a cambox carries no networks.ips at all).
+if node is None:
+    node = ""
+elif not isinstance(node, str):
+    node = json.dumps(node, separators=(",", ":"))
+sys.stdout.write(node)
 ' 2>/dev/null)"; then
     # Same output shape as the grep reader: the value plus a newline, nothing when absent.
     [ -z "$v" ] || printf '%s\n' "$v"

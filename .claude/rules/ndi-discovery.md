@@ -91,7 +91,9 @@ to measure.
     use the ONE test `_ndi_discovery_dropin_foreign`.
   - verify-device `(an)` grades it with `ndi_discovery_cambox_verdict`: no config is ok. A config
     that lists ANY IP FAILs naming it, with or without the drop-in (a drop-in would load it again).
-    So do a `networks.discovery`, a config that is not JSON, and a foreign drop-in.
+    So do a `networks.discovery`, a config that is not JSON, and a foreign drop-in. A value of any
+    other type (a hand-edited `"ips": [...]`) is still a list: the reader returns its compact JSON,
+    so the verdict FAILs it and the plan strips it.
   - With python3 (every cambox has it; the lib falls back to a grep reader without it) the plan and
     the verdict read the same file the same way, and a leading UTF-8 BOM is valid JSON for both. The
     `(an)` gather puts a newline after each file, so a hand edit without a final newline never glues
