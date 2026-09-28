@@ -27,7 +27,8 @@ TOL = BOUNDS["av_tolerance_ms"]
 THR = BOUNDS["spread_threshold_ms"]
 
 
-def verdict(offsets=None, expected=0.0, loss=None, hops=(True, True), cont=True, statuses=None):
+def verdict(offsets=None, expected=0.0, loss=None, hops=(True, True), cont=True, statuses=None,
+            cam_burns=None, multi=(), run_wide=None):
     offsets = offsets or {"cam1": 3.0, "cam2": 4.0, "cam3": 5.0}
     statuses = statuses or {}
     loss = loss or {}
@@ -36,15 +37,22 @@ def verdict(offsets=None, expected=0.0, loss=None, hops=(True, True), cont=True,
          "all_cambox_delivery_latency": {"cross_camera_spread_ms": None},
          "all_cambox_continuity": {"segments": [], "overall_pass": cont},
          "full_chain": {"loss": {}}}
+    if run_wide is not None:
+        # the run-wide half of the gate's fold (src/probe/recording_segments.rs), as serialized
+        v["all_cambox_continuity"].update(run_wide_undecodable_within_floor=run_wide,
+                                          undecodable_floor_gates_overall_pass=True)
     for c, off in offsets.items():
         st = statuses.get(c, "measured")
         v["all_cambox_av_sync"][c] = {"verdict": st, "av_offset_ms": off, "gate_pass": True}
         v["all_cambox_continuity"]["segments"].append(
             {"cambox": c.upper(), "pass": loss.get(c, True), "relaxed_pass": loss.get(c, True),
-             "copies": 0 if loss.get(c, True) else 3, "gaps": 0, "undecodable": 0, "frames": 60})
+             "copies": 0 if loss.get(c, True) else 3, "gaps": 0, "undecodable": 0, "frames": 60,
+             "multi_source": c in multi})
     for node, ok in zip(soak.HOP_NODES, hops):
         if ok is not None:
             v["full_chain"]["loss"][node] = {"zero_loss": ok, "real_drops": 0 if ok else 2}
+    for c, ok in (cam_burns or {}).items():
+        v["full_chain"]["loss"][c] = {"zero_loss": ok, "real_drops": 0 if ok else 1}
     return v
 
 
@@ -96,6 +104,36 @@ def test_an_operator_excluded_camera_is_not_required():
     v = verdict({"cam1": 3.0, "cam2": 4.0, "cam3": 5.0, "cam4": 0.0}, statuses={"cam4": "excluded"})
     g = m.grade_window(row(v, cams=cams), cams, BOUNDS)
     assert g["verdict"] == m.PASS, g
+
+
+def test_an_excluded_camera_still_fails_on_a_measured_loss_or_camera_burn():
+    # the soak only drops the REQUIREMENT for an excluded camera; a measured `false` still fails
+    cams = CAMS + ["cam4"]
+    base = {"cam1": 3.0, "cam2": 4.0, "cam3": 5.0, "cam4": 0.0}
+    lost = verdict(base, statuses={"cam4": "excluded"}, loss={"cam4": False})
+    assert m.grade_window(row(lost, cams=cams), cams, BOUNDS)["verdict"] == m.FAIL
+    burnt = verdict(base, statuses={"cam4": "excluded"}, cam_burns={"cam4": False})
+    assert m.grade_window(row(burnt, cams=cams), cams, BOUNDS)["verdict"] == m.FAIL
+
+
+def test_a_camera_burn_that_lost_frames_fails_and_one_never_measured_is_not_required():
+    assert m.grade_window(row(verdict(cam_burns={"cam3": False})), CAMS, BOUNDS)["verdict"] == m.FAIL
+    assert m.grade_window(row(verdict(cam_burns={"cam3": True})), CAMS, BOUNDS)["verdict"] == m.PASS
+
+
+def test_a_report_only_multi_source_loss_window_is_a_sample_never_a_breach():
+    r = row(verdict(loss={"cam2": False}, multi=("cam2",)))
+    assert r["loss_cam2_pass"] == "report_only"
+    assert m.grade_window(r, CAMS, BOUNDS)["verdict"] == m.PASS
+
+
+def test_mirrored_terms_that_disagree_with_the_fold_are_unknown_never_a_pass():
+    # the run-wide term fails while the verdict's own fold says pass: the copy may have drifted
+    r = row(verdict(run_wide=False))
+    assert r["loss_run_wide_pass"] == "false" and r["cont_overall_pass"] == "true"
+    g = m.grade_window(r, CAMS, BOUNDS)
+    assert g["verdict"] == m.UNKNOWN
+    assert any("disagree" in x for x in g["reasons"])
 
 
 def test_a_breach_wins_over_missing_evidence():
@@ -246,6 +284,25 @@ def test_a_failed_restart_command_fails_but_a_restart_never_performed_is_unknown
     assert rep["kinds"]["cambox"]["verdict"] == m.FAIL
     assert rep["kinds"]["strih-obs"]["verdict"] == m.UNKNOWN
     assert rep["verdict"] == m.FAIL
+
+
+def test_a_window_the_soak_stopped_is_unknown(tmp_path):
+    d = make_matrix(tmp_path, extra={("cambox", 2): {"outcome": "window_stopped",
+                                                     "note": "STOP: the rig left TEST mode"}})
+    rep = m.evaluate_dir(str(d), BOUNDS)
+    assert rep["kinds"]["cambox"]["verdict"] == m.UNKNOWN
+    assert "TEST mode" in rep["kinds"]["cambox"]["repeats"][1]["reason"]
+
+
+def test_the_restarted_cameras_receiver_state_is_reported_never_graded(tmp_path):
+    d = make_matrix(tmp_path, extra={("cambox", r): {"receiver": "parked"} for r in (1, 2, 3)})
+    rep = m.evaluate_dir(str(d), BOUNDS)
+    assert rep["kinds"]["cambox"]["verdict"] == m.PASS, "the receiver state is context, not a gate"
+    assert [x["receiver"] for x in rep["kinds"]["cambox"]["repeats"]] == ["parked"] * 3
+    assert rep["kinds"]["cambox"]["receivers"] == {"parked": 3}
+    text = m.render_text(rep)
+    assert "receiver parked" in text
+    assert "parked during 3/3" in text
 
 
 def test_a_missing_repeat_is_unknown_never_a_pass(tmp_path):

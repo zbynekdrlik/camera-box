@@ -65,6 +65,9 @@ open(os.path.join(d, "pid"), "w").write(str(os.getpid()))
 def on_term(*_):
     with open(log, "a") as f:
         f.write("soak-term %d\n" % n)
+    time.sleep(float(os.environ.get("FAKE_SOAK_TERM_SLEEP", "0") or 0))  # the soak's own cleanup
+    with open(log, "a") as f:
+        f.write("soak-cleanup-done %d\n" % n)
     sys.exit(5)
 signal.signal(signal.SIGTERM, on_term)
 if os.environ.get("FAKE_SOAK_SLEEP_WINDOW") == str(n):
@@ -72,6 +75,18 @@ if os.environ.get("FAKE_SOAK_SLEEP_WINDOW") == str(n):
         time.sleep(0.1)
 if os.environ.get("FAKE_SOAK_TOUCH_STOP_WINDOW") == str(n):
     open(os.path.join(os.environ["FAKE_MATRIX_DIR"], "STOP"), "w").close()
+if os.environ.get("FAKE_SOAK_FOREIGN_LEASE_WINDOW") == str(n):
+    hp = os.path.join(os.environ["RIG_LEASE_DIR"], "holder.json")
+    h = json.load(open(hp))
+    h["run_id"] = "foreign-run"
+    json.dump(h, open(hp, "w"))
+if os.environ.get("FAKE_SOAK_STOP_WINDOW") == str(n):
+    # the soak STOPs a window without a measurement (the rig left TEST mode / a low record volume):
+    # the report's exit code (2), no CSV row
+    print("2026-09-28T00:00:00Z [av-soak] STOP: the rig left TEST mode: the stream program is 'Other'")
+    open(os.path.join(d, "recording.state"), "w").write(
+        "strih=0\nstrih_since=\nstream=0\nstream_since=\nlease=\nstart_window_s=60\n")
+    sys.exit(2)
 rcmap = dict(x.split(":") for x in os.environ.get("FAKE_SOAK_RC_MAP", "").split(",") if x)
 rc = int(rcmap.get(str(n), "2"))
 stuck = os.environ.get("FAKE_SOAK_STUCK_WINDOW") == str(n)
@@ -130,10 +145,18 @@ elif cmd == "stream-detail":
 elif cmd == "program-scene":
     host = arg("--host")
     if host == os.environ["FAKE_STREAM_HOST"]:
-        n = bump("stream-reads")
-        if n <= int(os.environ.get("FAKE_STREAM_WS_DOWN_READS", "0") or 0):
-            sys.exit("fake: stream OBS WebSocket is not answering")
-        print("Development")
+        mdir = os.environ["FAKE_MATRIX_DIR"]
+        confirmed = os.path.isdir(mdir) and any(f.startswith("confirm-stream-obs-")
+                                                for f in os.listdir(mdir))
+        if confirmed:
+            n = bump("stream-reads-after-confirm")
+            if n <= int(os.environ.get("FAKE_STREAM_WS_DOWN_AFTER_CONFIRM", "0") or 0):
+                sys.exit("fake: stream OBS WebSocket is not answering")
+            print(os.environ.get("FAKE_STREAM_RELAUNCH_SCENE", "Development"))
+        else:
+            after = os.environ.get("FAKE_STREAM_PROGRAM_OTHER_AFTER_WINDOWS", "")
+            other = after != "" and windows() >= int(after)
+            print("Other" if other else "Development")
     else:
         print("Cam 1")
 else:
@@ -143,26 +166,42 @@ else:
 FAKE_SSHPASS = r'''#!/usr/bin/env bash
 set -euo pipefail
 text="${!#}"
+if [ "${1:-}" != "-e" ] || [ -z "${SSHPASS:-}" ]; then
+  echo "fake sshpass: the password must come through SSHPASS (-e), got: $1" >&2; exit 9
+fi
 host=""
-for x in "${@:1:$#-1}"; do case "$x" in *@*) host="${x#*@}" ;; esac; done  # the remote text is the last arg
+for x in "${@:1:$#-1}"; do
+  case "$x" in *@*) host="${x#*@}" ;; esac  # the remote text is the last arg
+  if [ "$x" = "$SSHPASS" ]; then echo "fake sshpass: the password is in argv" >&2; exit 9; fi
+done
 printf 'sshpass %s %s\n' "$host" "$(printf '%s' "$text" | base64 -w0)" >> "$FAKE_LOG"
+windows="$(cat "$FAKE_STATE/windows" 2>/dev/null || echo 0)"
 case "$text" in
   *"restart strih-obs.service"*)
-    printf 'AV_MATRIX_RESTART_AT=1790000000\n'
     if [ -n "${FAKE_STRIH_NO_UNIT:-}" ]; then
       echo "MV_REVERIFY_NO_UNIT: strih-obs.service is not installed on strih-lx"; exit 2
     fi
     echo "MV_REVERIFY_OBS_RESTART: strih-obs.service restarted" ;;
   *"systemctl restart camera-box"* | *"systemctl restart dantesync"*)
-    printf 'AV_MATRIX_RESTART_AT=1790000000\n'
+    printf 'AV_MATRIX_INVOCATION_BEFORE=inv-old\n'
     if [ -n "${FAKE_RESTART_FAIL:-}" ]; then echo AV_MATRIX_RESTART_FAILED; exit 1; fi
     echo AV_MATRIX_RESTART_OK ;;
   *"start strih-obs.service"* | *"systemctl start camera-box"* | *"systemctl start dantesync"*)
     echo "active=active" ;;
-  *"journalctl -u camera-box"*)
-    printf 'active=active\nstreaming=%s\n' "${FAKE_CAMBOX_STREAMING:-2}" ;;
+  *"_SYSTEMD_INVOCATION_ID"*)
+    inv=inv-new; [ -n "${FAKE_CAMBOX_SAME_INVOCATION:-}" ] && inv=inv-old
+    printf 'active=active\ninvocation=%s\nstreaming=%s\n' "$inv" "${FAKE_CAMBOX_STREAMING:-2}" ;;
   *"is-active strih-obs.service"*)
     printf 'active=%s\n' "${FAKE_STRIH_ACTIVE:-active}" ;;
+  *"systemctl is-active cam2-painter"*)
+    active=active
+    if [ -n "${FAKE_PAINTER_INACTIVE_AFTER_WINDOWS:-}" ] && [ "$windows" -ge "$FAKE_PAINTER_INACTIVE_AFTER_WINDOWS" ]; then active=inactive; fi
+    printf 'active=%s\nrun_id=4242\nmarkers=10\nmarkers2=14\n' "$active" ;;
+  *"obs-studio/logs"*)
+    printf 'info: genlock-fifo audit something\n'
+    if [ -n "${FAKE_PARKED:-}" ]; then
+      printf "info: genlock-park 'NDI %s': state=parked parked_s=35 (hidden)\n" "${FAKE_PARKED}"
+    fi ;;
   *) echo "fake sshpass: unexpected remote text" >&2; exit 3 ;;
 esac
 '''
@@ -291,7 +330,7 @@ def test_plan_is_the_default_and_touches_nothing(rig):
     for needle in ("rig_lease_acquire", "camera-box-av-restart-matrix", "stray_session_check_assert",
                    "--run --hours 0", "--lease-run-id av-matrix-", "w-00-baseline",
                    "systemctl --user restart strih-obs.service", "systemctl restart camera-box",
-                   "systemctl restart dantesync", "journalctl -u camera-box",
+                   "systemctl restart dantesync", "_SYSTEMD_INVOCATION_ID",
                    ":8898/status", "dantesync_clock_decision.py analyze",
                    "launch-obs-genlock.sh --box stream --force", "win-stream-snv",
                    "confirm-stream-obs-r1", "av_tolerance_ms=", "x 3 repeats",
@@ -311,7 +350,7 @@ def test_plan_never_names_a_forbidden_action_or_the_production_scene(rig):
         assert banned not in body, banned
 
 
-def test_the_lib_builds_no_reboot_and_ends_every_remote_text_with_a_separator():
+def test_the_lib_builds_one_service_restart_never_a_reboot():
     for kind in ("strih-obs", "cambox", "dantesync"):
         for fn in ("av_matrix_restart_remote_cmd", "av_matrix_ensure_running_remote_cmd"):
             txt = subprocess.run(["bash", "-c", f'. "{LIB}"; . "{REPO}/scripts/lib/mv-reverify-escalate.sh"; {fn} {kind}'],
@@ -392,8 +431,10 @@ def test_the_health_checks_gate_each_window(rig):
     ev = _events(p["log"])
     texts = [d[1] for k, d in ev if k == "ssh"]
     assert any("is-active strih-obs.service" in t for t in texts)
-    assert any("journalctl -u camera-box" in t and "--since @1790000000" in t for t in texts), \
-        "the cambox Streaming: line is read since the box's OWN restart time"
+    assert any("_SYSTEMD_INVOCATION_ID" in t and "Streaming: " in t for t in texts), \
+        "the cambox Streaming: lines are counted for the NEW process only (its systemd invocation)"
+    assert any("systemctl restart camera-box" in t and "InvocationID" in t for t in texts), \
+        "the restart reports the invocation it replaced"
     assert any(k == "curl" and f"{CAM1}:8898/status" in d for k, d in ev)
     assert any(k == "obs" and d[:1] == ["program-scene"] and STRIH in d for k, d in ev)
 
@@ -556,17 +597,29 @@ def test_stop_leftovers_refuses_while_the_matrix_still_runs(rig):
 
 def test_sigterm_during_a_window_waits_for_the_windows_own_cleanup(rig):
     env, p = rig
-    proc = subprocess.Popen(["bash", MATRIX, "--run"], env=dict(env, FAKE_SOAK_SLEEP_WINDOW="1"),
+    e = dict(env, AV_MATRIX_KINDS="cambox", AV_MATRIX_REPEATS="1", FAKE_SOAK_SLEEP_WINDOW="2",
+             FAKE_SOAK_TERM_SLEEP="2")
+    proc = subprocess.Popen(["bash", MATRIX, "--run"], env=e,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     deadline = time.time() + 60
-    while time.time() < deadline and not _windows(p["log"]):
+    while time.time() < deadline and len(_windows(p["log"])) < 2:
         time.sleep(0.2)
     time.sleep(0.5)
     proc.send_signal(signal.SIGTERM)
     out, err = proc.communicate(timeout=60)
     assert proc.returncode == 5, out + err
-    assert any(k == "soak-term" for k, _ in _events(p["log"])), "the running window got SIGTERM"
-    assert _restart_kinds(p["log"]) == []
+    lines = p["log"].read_text().splitlines()
+    done = [i for i, line in enumerate(lines) if line.startswith("soak-cleanup-done")]
+    assert done, "the running window got SIGTERM and ran its own cleanup"
+    ensure = [i for i, (k, d) in enumerate(_events(p["log"]))
+              if k == "ssh" and "systemctl start camera-box" in d[1]]
+    assert ensure, "cleanup leaves the restarted camera-box running"
+    # _events drops no line kind that matters here, so compare positions in the raw log
+    ensure_raw = [i for i, line in enumerate(lines) if line.startswith("sshpass")
+                  and "systemctl start camera-box" in base64.b64decode(line.split(" ", 2)[2]).decode()]
+    assert done[0] < ensure_raw[0], "the matrix waited for the window's cleanup before its own"
+    steps = _steps(p["run"])
+    assert steps[-1]["kind"] == "cambox" and steps[-1]["outcome"] == "window_aborted"
     assert not p["lease"].exists()
 
 
@@ -616,7 +669,8 @@ def _confirm_when_asked(run, repeat, delay=0.5):
 
 def test_the_stream_obs_kind_waits_for_the_supervisor_and_is_graded(rig):
     env, p = rig
-    e = dict(env, AV_MATRIX_KINDS="stream-obs", AV_MATRIX_REPEATS="1", FAKE_STREAM_WS_DOWN_READS="1")
+    e = dict(env, AV_MATRIX_KINDS="stream-obs", AV_MATRIX_REPEATS="1",
+             FAKE_STREAM_WS_DOWN_AFTER_CONFIRM="1")
     t = _confirm_when_asked(p["run"], 1)
     r = _matrix(e, "--run")
     t.join(timeout=5)
@@ -625,7 +679,9 @@ def test_the_stream_obs_kind_waits_for_the_supervisor_and_is_graded(rig):
     assert "launch-obs-genlock.sh --box stream --force" in step_txt
     assert "win-stream-snv" in step_txt and "confirm-stream-obs-r1" in step_txt
     assert "SUPERVISOR STEP" in r.stdout
-    assert not [d for k, d in _events(p["log"]) if k == "ssh"], "the stream box is never driven over ssh"
+    assert not [d for k, d in _events(p["log"]) if k == "ssh" and d[0] == STREAM], \
+        "the stream box is never driven over ssh"
+    assert "kill" in step_txt and "relaunch" in step_txt, "the step says what the kind measures"
     steps = _steps(p["run"])
     assert steps[-1]["kind"] == "stream-obs" and steps[-1]["outcome"] == "measured"
     assert len(_windows(p["log"])) == 2
@@ -660,3 +716,105 @@ def test_the_new_scripts_set_strict_mode_early_and_parse():
     for path in (MATRIX, LIB):
         assert subprocess.run(["bash", "-n", path]).returncode == 0
     assert re.search(r"^# airuleset:script-ok", open(LIB).read(), re.M)
+
+
+# --- review round 1: stop conditions, the receiver state, the lease ---------------------------------
+
+
+def test_a_rig_not_in_test_mode_is_refused_before_anything_changes(rig):
+    env, p = rig
+    r = _matrix(dict(env, FAKE_STREAM_PROGRAM_OTHER_AFTER_WINDOWS="0"), "--run")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert "TEST mode" in r.stdout + r.stderr
+    assert _windows(p["log"]) == [] and _restart_kinds(p["log"]) == []
+    assert not p["lease"].exists()
+
+
+def test_leaving_test_mode_between_steps_stops_before_the_next_restart(rig):
+    env, p = rig
+    # the stream program reads another scene once the second window (strih-obs r1) is done
+    r = _matrix(dict(env, FAKE_STREAM_PROGRAM_OTHER_AFTER_WINDOWS="2"), "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert _restart_kinds(p["log"]) == [("strih-obs", STRIH)], "no restart on a rig out of TEST mode"
+    assert "TEST mode" in r.stdout
+    assert not p["lease"].exists()
+
+
+def test_a_stopped_painter_stops_the_matrix_before_any_restart(rig):
+    env, p = rig
+    r = _matrix(dict(env, FAKE_PAINTER_INACTIVE_AFTER_WINDOWS="1"), "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert _restart_kinds(p["log"]) == []
+    assert "painter" in r.stdout
+
+
+def test_a_window_the_soak_stopped_is_not_a_measurement(rig):
+    env, p = rig
+    r = _matrix(dict(env, FAKE_SOAK_STOP_WINDOW="2"), "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    steps = _steps(p["run"])
+    assert steps[-1]["outcome"] == "window_stopped"
+    assert "TEST mode" in steps[-1]["note"]
+    assert len(_restart_kinds(p["log"])) == 1, "the matrix stops with the window"
+
+
+def test_a_stream_relaunch_on_another_program_scene_fails_and_is_never_switched_back(rig):
+    env, p = rig
+    e = dict(env, AV_MATRIX_KINDS="stream-obs", AV_MATRIX_REPEATS="1",
+             FAKE_STREAM_RELAUNCH_SCENE="PRO", AV_MATRIX_HEALTHY_TIMEOUT_S="20")
+    t = _confirm_when_asked(p["run"], 1)
+    r = _matrix(e, "--run")
+    t.join(timeout=5)
+    assert r.returncode == 1, r.stdout + r.stderr
+    steps = _steps(p["run"])
+    assert steps[-1]["outcome"] == "not_healthy"
+    assert "Development" in steps[-1]["note"]
+    assert len(_windows(p["log"])) == 1, "no window, no settle on a wrong program scene"
+    assert not [d for k, d in _events(p["log"]) if k == "obs" and d[:1] == ["switch"]], \
+        "the matrix never switches a scene"
+
+
+def test_a_cambox_health_read_of_the_old_process_is_never_healthy(rig):
+    env, p = rig
+    r = _matrix(dict(env, AV_MATRIX_KINDS="cambox", AV_MATRIX_REPEATS="1",
+                     FAKE_CAMBOX_SAME_INVOCATION="1", AV_MATRIX_HEALTHY_TIMEOUT_S="2"), "--run")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert _steps(p["run"])[-1]["outcome"] == "not_healthy"
+
+
+def test_the_restarted_cameras_strih_receiver_state_is_recorded(rig):
+    env, p = rig
+    r = _matrix(dict(env, AV_MATRIX_KINDS="cambox dantesync strih-obs", AV_MATRIX_REPEATS="1",
+                     FAKE_PARKED="cam1"), "--run")
+    assert r.returncode == 0, r.stdout + r.stderr
+    rec = {s["kind"]: s["receiver"] for s in _steps(p["run"])}
+    assert rec["cambox"] == "parked" and rec["dantesync"] == "parked"
+    assert rec["strih-obs"] == "n/a", "a strih OBS restart restarts the receiver itself"
+    assert "parked during 1/1" in r.stdout
+    texts = [d[1] for k, d in _events(p["log"]) if k == "ssh" and d[0] == STRIH]
+    assert any("obs-studio/logs" in t for t in texts), "read from the strih OBS log, before the restart"
+
+
+def test_an_unparked_receiver_reads_connected(rig):
+    env, p = rig
+    r = _matrix(dict(env, AV_MATRIX_KINDS="cambox", AV_MATRIX_REPEATS="1"), "--run")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _steps(p["run"])[-1]["receiver"] == "connected"
+
+
+def test_a_lost_lease_stops_before_the_next_restart_and_is_left_alone(rig):
+    env, p = rig
+    r = _matrix(dict(env, FAKE_SOAK_FOREIGN_LEASE_WINDOW="2"), "--run")
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert len(_restart_kinds(p["log"])) == 1
+    assert "no longer" in r.stdout + r.stderr
+    assert json.loads((p["lease"] / "holder.json").read_text())["run_id"] == "foreign-run", \
+        "a lease another run holds is never released"
+
+
+def test_a_soak_usage_error_on_the_baseline_is_a_refusal_not_an_abort(rig):
+    env, p = rig
+    r = _matrix(dict(env, FAKE_SOAK_RC_MAP="1:3"), "--run")
+    assert r.returncode == 4, r.stdout + r.stderr
+    assert _restart_kinds(p["log"]) == []
+    assert not p["lease"].exists()

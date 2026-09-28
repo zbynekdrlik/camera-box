@@ -97,8 +97,23 @@ def test_a_stuck_recording_under_the_callers_lease_keeps_it_and_stop_leftovers_n
 def test_every_slot_still_checks_the_lease_is_the_callers(rig):
     env, p = rig
     hold_lease(p)
+    # the lease moves to another run during setup (at the first burn turned on): the slot must
+    # refuse to record under a lease that is no longer the caller's, and leave that lease alone
+    burn = os.path.join(env["AV_SOAK_OBS_DIR"], "obs_burn_filter.py")
+    orig = burn + ".orig"
+    os.rename(burn, orig)
+    with open(burn, "w") as f:
+        f.write(
+            "#!/usr/bin/env python3\n"
+            "import json, os, subprocess, sys\n"
+            "if sys.argv[1:2] == ['add']:\n"
+            "    hp = os.path.join(os.environ['RIG_LEASE_DIR'], 'holder.json')\n"
+            "    h = json.load(open(hp)); h['run_id'] = 'foreign-run'; json.dump(h, open(hp, 'w'))\n"
+            f"sys.exit(subprocess.call([sys.executable, {orig!r}] + sys.argv[1:]))\n")
+    os.chmod(burn, 0o755)
     r = _soak(env, "--run", "--lease-run-id", CALLER)
-    assert r.returncode in (0, 1, 2), r.stdout + r.stderr
-    # the one slot ran (a StartRecord on both boxes) under the caller's lease
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert "no longer ours" in r.stdout + r.stderr
     starts = [c for c in _calls(p["log"], "obs") if c[:1] == ["record"] and "start" in c]
-    assert len(starts) == 2
+    assert starts == [], "nothing is recorded under a lease that is not the caller's"
+    assert holder(p) == "foreign-run", "the other run's lease is left alone"
