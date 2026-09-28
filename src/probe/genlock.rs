@@ -1429,6 +1429,10 @@ pub struct CadenceOutcome {
     pub late_hold: bool,
     /// This tick re-locked the cadence (stall/step recovery jump) — counts a relock event.
     pub relocked: bool,
+    /// Issue 1367 D1: an N>=2 tick presented the newest arrived frame BEFORE its grid target,
+    /// because the target had not arrived yet (the C `n2_early=` audit counter). Nothing
+    /// re-anchors; the next tick targets the grid again. Always false on an N==1 tick.
+    pub n2_early: bool,
 }
 
 /// #401 — per-source PHASE-LOCKED release cadence for the ts-align genlock FIFO.
@@ -1575,6 +1579,7 @@ impl ReleaseCadence {
             dropped: Vec::new(),
             late_hold: late,
             relocked: false,
+            n2_early: false,
         };
 
         let Some(boundary) = self.locked_next_boundary_ns else {
@@ -1610,6 +1615,7 @@ impl ReleaseCadence {
                 dropped,
                 late_hold: false,
                 relocked: false,
+                n2_early: false,
             };
         };
 
@@ -1678,6 +1684,7 @@ impl ReleaseCadence {
                     dropped,
                     late_hold: false,
                     relocked: true,
+                    n2_early: false,
                 };
             }
             // Deep queue but nothing aged past the reserve yet (a just-landed burst of
@@ -1747,6 +1754,7 @@ impl ReleaseCadence {
                     dropped,
                     late_hold: false,
                     relocked: false,
+                    n2_early: false,
                 };
             }
             // N==1: present the OLDEST matured frame — exactly one in steady state; a transient
@@ -1822,6 +1830,7 @@ impl ReleaseCadence {
                 dropped,
                 late_hold: false,
                 relocked: false,
+                n2_early: false,
             };
         }
 
@@ -1848,6 +1857,7 @@ impl ReleaseCadence {
                     dropped: Vec::new(),
                     late_hold: false,
                     relocked: false,
+                    n2_early: false,
                 };
             }
         }
@@ -4292,3 +4302,8 @@ mod n1_tests;
 #[cfg(test)]
 #[path = "genlock_stale_relock_tests.rs"]
 mod stale_relock_tests;
+
+// Issue 1367 slice D1 — the N>=2 grid-exact release (`ReleaseCadence::tick_n2_grid`), the same split.
+#[cfg(test)]
+#[path = "genlock_n2_tests.rs"]
+mod n2_tests;
