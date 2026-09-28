@@ -144,7 +144,7 @@ FAKE_SSHPASS = r'''#!/usr/bin/env bash
 set -euo pipefail
 text="${!#}"
 host=""
-for x in "$@"; do case "$x" in *@*) host="${x#*@}" ;; esac; done
+for x in "${@:1:$#-1}"; do case "$x" in *@*) host="${x#*@}" ;; esac; done  # the remote text is the last arg
 printf 'sshpass %s %s\n' "$host" "$(printf '%s' "$text" | base64 -w0)" >> "$FAKE_LOG"
 case "$text" in
   *"restart strih-obs.service"*)
@@ -300,7 +300,8 @@ def test_plan_is_the_default_and_touches_nothing(rig):
         assert needle in out, needle
 
 
-def test_plan_never_names_a_reboot_a_writer_or_the_production_scene(rig):
+def test_plan_never_names_a_forbidden_action_or_the_production_scene(rig):
+    # (the pytest tmp path carries the test name: this name must not contain a banned word)
     env, _ = rig
     r = _matrix(dict(env, AV_MATRIX_KINDS="strih-obs cambox dantesync stream-obs"))
     assert r.returncode == 0 and "NEVER:" in r.stdout, r.stderr
