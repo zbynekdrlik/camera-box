@@ -215,13 +215,15 @@ impl Rig {
 
     // One watchdog pass. `enable`=false leaves IMAG_OBS_RESTART_STORM_ENABLE unset (default OFF).
     // One restart_storm_check pass, run by SOURCING the real watchdog (never executing main(), so
-    // no reachability ssh, no network) and calling restart_storm_check directly under the caller's
-    // EXACT `set -euo pipefail`. That also proves the check is -e-safe: a bare-statement abort under
-    // -e would swallow the log lines this asserts. `enable`=false leaves the flag unset (default OFF).
+    // no reachability ssh, no network) and calling restart_storm_check directly under
+    // `set -euo pipefail`. The watchdog clears -e after its own source block (issue 1386), so the
+    // harness re-arms it after the source: the check must stay -e-safe, and a bare-statement abort
+    // under -e would swallow the log lines this asserts. `enable`=false leaves the flag unset
+    // (default OFF).
     fn pass(&self, enable: bool, now: &str) -> String {
         let wd = manifest_dir().join(WATCHDOG);
         let script = format!(
-            "set -euo pipefail\nsource '{wd}'\nDRY_RUN=1\nrestart_storm_check\n",
+            "set -euo pipefail\nsource '{wd}'\nset -e\nDRY_RUN=1\nrestart_storm_check\n",
             wd = wd.display()
         );
         let mut cmd = Command::new("bash");
