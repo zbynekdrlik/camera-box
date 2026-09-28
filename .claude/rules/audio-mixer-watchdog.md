@@ -78,11 +78,40 @@ arm + box throttle signature).
   while SKIP / UNKNOWN still hold. Pinned by the 3-day frozen-log replay (one false-live pass every
   day, python model + the real bash) and the STALLED -> STALE -> STALLED dry-run. Keep slack +
   `LOG_LIVE_S` below the 300 s timer period.
-- **A frozen log never grades its old counts.** When the log head is more than 180 s old (the stale
-  window, not the 60 s live bound, so a quiet but live log still grades) the mixer reads STALE even
-  when its last dump is fresh behind that head. Before this, a dead OBS whose last dump graded
-  BEHIND paged every hour for as long as it stayed dead. With the facet absent (an older gather)
-  grading is unchanged.
+- **A frozen log never grades its old counts.** When the log head is more than `LOG_FROZEN_S`
+  (180 s) old -- wider than the 60 s live bound, so a quiet but live log still grades -- the mixer
+  reads STALE even when its last dump is fresh behind that head. Before this, a dead OBS whose last
+  dump graded BEHIND paged every hour for as long as it stayed dead. With the facet absent (an older
+  gather) grading is unchanged. The bound is FIXED, not `AUDIO_MIXER_STALE_AFTER_S`: slack 10 s +
+  180 s stays below the 300 s pass, so a date-less log dead for days grades its last counts on one
+  pass a day at most (review round 2: an override past ~290 s would have let two passes page).
+- **Stated residual:** a hung OBS whose last dump was healthy now reads STALE, not HEALTHY, so the
+  hang no longer clears the arm's throttle; a restarted OBS that goes straight to BEHIND waits up to
+  the 12-pass throttle. UNKNOWN (a fresh start) already behaved this way.
+
+## The whole mixer arm rests on one clock premise -- guarded (issue 1385 review round 2)
+
+STALLED, the frozen-log STALE and therefore BEHIND / OVERLOADED all read `obs_log_head_age_s`,
+which assumes OBS's log stamps (`localtime` in `frontend/obs-main.cpp` `CurrentTimeString`) and
+the gather's `time.localtime()` share ONE time zone. Two processes on one box share the system zone
+unless one of them carries its own `TZ` (the Windows `BundleStateServer` task's environment is not
+in the repo). If they disagree, a LIVE log reads about k x 3600 s old on every pass, every mixer
+verdict reads STALE and resets the confirm: the arm is blind, silently.
+
+- **The guard (`classify_log_clock`, pure):** a frozen log's head ages WITH the wall clock between
+  two passes; a live log reads young. A head that reads older than `LOG_FROZEN_S` on both passes yet
+  aged less than half the pass gap is a log that ADVANCES with its stamps off the gather clock ->
+  MISMATCH. The zone offset cancels in the difference, so any offset is caught. A frozen log's daily
+  date wrap (a huge negative change) is OK; passes closer than 60 s or further than 1800 s apart are
+  UNKNOWN. The orchestrator keeps the previous head age + pass epoch per box in its state file
+  (`AUDIO_MIXER_NOW_EPOCH` is the Tier-0 seam for the pass time).
+- **MISMATCH pages ONCE** after the 2-pass confirm, `⚠️` with a STABLE key
+  `audio-mixer-clock-<box>` (a config fault, not an on-air one, so no time-bucketed re-ping); OK
+  clears it with a machine-channel RECOVERY line; UNKNOWN holds.
+- **Hard acceptance before the timer is enabled:** after the supervisor redeploys the gather, read
+  `obs_log_head_age_s` on strih-lx, stream and resolume (`curl -s http://<box>:8899/bundle-state.json`):
+  it must read 0-15 s on each. A reading near a whole number of hours is the zone mismatch -- fix the
+  service's environment before enabling the timer, never raise `LOG_LIVE_S` / `LOG_FROZEN_S`.
 - **STALLED is decided FIRST, from the age alone.** A stale dump's counts describe a minute long
   gone, so the old counts are not graded (a stale BEHIND dump reads STALLED). A tick length of an
   unknown sample rate does not hide it either.

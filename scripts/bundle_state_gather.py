@@ -1279,7 +1279,9 @@ def local_seconds_of_day(epoch=None):
 def obs_log_head_age_s_from_log(text, now_s):
     """issue 1385 -- whole seconds from the newest timestamped line of the TAIL to `now_s` (the
     box's local seconds of the day, taken right after the log read), or `""` when the tail has no
-    timestamped line (omit-when-empty -> the decision has no liveness proof)."""
+    timestamped line (omit-when-empty -> the decision has no liveness proof). Lines are split on
+    `\n` only, which is how OBS ends each stamped line; `timestamped_tail_lines` uses
+    `splitlines()`, and the two differ only for a bare `\r` followed by timestamp-like text."""
     t = text or ""
     sep = t.rfind(LOG_BOUNDED_READ_SEPARATOR)
     floor = sep + len(LOG_BOUNDED_READ_SEPARATOR) if sep >= 0 else 0

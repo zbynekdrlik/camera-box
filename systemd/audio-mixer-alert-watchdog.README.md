@@ -41,6 +41,9 @@ UNKNOWN.
 - **STALE** (an old dump with no proof the log is live NOW — OBS down or hung, or a gather without
   `obs_log_head_age_s`; or the pacer line stopped) is logged on the machine channel only, never
   paged. obs-liveness / bundle-state own a dead OBS.
+- **CLOCK (once, stable key):** the OBS log advances between passes, yet its head reads old -- the
+  OBS log stamps and the gather clock disagree (time zone), so the mixer arm is blind on that box.
+  One `⚠️` page per incident (`audio-mixer-clock-<box>`), recovery machine-channel only.
 - 2 confirmations before a page; a HEALTHY pass clears the arm, and on the mixer arm a STALE pass
   resets the pending confirmation (issue 1385: the date-less log of a dead OBS reads live ~70 s once
   a day, and a held confirm would pair two such days into a false STALLED). A frozen log (head
@@ -74,7 +77,9 @@ the new facets is deployed to the boxes.
 curl -s http://resolume.lan:8899/bundle-state.json | python3 -m json.tool | grep -E 'audio_mixer|vban_pacer|obs_log_head'
 curl -s http://10.77.9.204:8899/bundle-state.json | python3 -m json.tool | grep -E 'audio_mixer|obs_log_head'
 curl -s http://10.77.9.202:8899/bundle-state.json | python3 -m json.tool | grep -E 'audio_mixer|obs_log_head'
-#    issue 1385: `obs_log_head_age_s` must read a few seconds on each box (the STALLED proof).
+#    issue 1385 HARD ACCEPTANCE before step 2: `obs_log_head_age_s` must read 0-15 s on EACH box
+#    (the STALLED proof). Near a whole number of hours = OBS and the gather disagree on the time
+#    zone: fix the service environment first (the watchdog would page CLOCK and stay blind).
 
 # 1. Dry-run against the LIVE rig (read-only; no page):
 scripts/audio-mixer-alert-watchdog.sh --dry-run

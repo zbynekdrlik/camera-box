@@ -22,7 +22,7 @@ around the 02:00 UTC nightly date step with a real-time ticks=2813).
               the age alone: a dump that left the tail of a long session reports only its age.
   STALE       the same old dump WITHOUT that proof (OBS down or hung, the log frozen, an older
               gather without the facet): log-only -- obs-liveness / bundle-state own a dead OBS.
-              Also a FROZEN log: the log head more than STALE_AFTER_S old on the box clock, so its
+              Also a FROZEN log: the log head more than LOG_FROZEN_S (180 s, fixed) old, so its
               last counts are never graded (a dead OBS whose last dump was BEHIND would otherwise
               page every hour). The watchdog resets the mixer confirm on STALE.
   UNKNOWN     facet absent (a normal OBS start: one partial dump only) or a tick length that is no
@@ -31,6 +31,11 @@ around the 02:00 UTC nightly date step with a real-time ticks=2813).
               pages too: that is the mixer catching up in bursts.
   OVERLOADED  more than OVER_MAX ticks in the minute came late (gap > 1.5 ticks).
   HEALTHY     otherwise.
+LOG CLOCK (classify_log_clock, issue 1385) -- every mixer verdict above rests on the log head age,
+which assumes OBS's log stamps and the gather's clock share one time zone. A log whose head age
+barely changes between two passes is ADVANCING; if its head still reads older than the frozen
+bound, the two clocks disagree and the whole mixer arm reads STALE, blind. MISMATCH pages once
+(the orchestrator's stable-key CLOCK page); OK = consistent; UNKNOWN = not judgeable this pass.
 VBAN arm (classify_vban) -- the per-destination loss-counter increase inside the gather window:
   SKIP / UNKNOWN (no VBAN output on this box) as above; VBAN_LOSS when any loss counter moved
   (events > 0 or loss ms > 0, decided before staleness: loss in the window is real even if the
@@ -53,6 +58,13 @@ DEFAULT_VBAN_STALE_AFTER_S = 180    # 18 missed 10 s status lines
 # for one pass a day at most; the watchdog resets the mixer confirm on the STALE passes between, so
 # two such days never pair into a page.
 DEFAULT_LOG_LIVE_S = 60
+# issue 1385 -- a log head older than this is FROZEN (OBS down / hung): its last counts are not
+# graded. FIXED, not the stale override: slack (10 s) + this must stay below the 300 s dev1 pass, so
+# a date-less log dead for days grades its last counts on one pass a day at most.
+DEFAULT_LOG_FROZEN_S = 180
+# The log-clock check needs two passes a sane distance apart (a timer gap resets the judgement).
+LOG_CLOCK_MIN_GAP_S = 60
+LOG_CLOCK_MAX_GAP_S = 1800
 
 
 def expected_ticks_per_min(tick_ms):
@@ -90,9 +102,9 @@ def classify_mixer(ticks, ticks_over, window_ms, tick_ms, age_s, box_reachable,
     if ticks is None or ticks_over is None or expected is None:
         res["verdict"] = "UNKNOWN"
         return res
-    if log_head_age_s is not None and log_head_age_s > stale_after_s:
+    if log_head_age_s is not None and log_head_age_s > DEFAULT_LOG_FROZEN_S:
         # The log itself stopped (OBS down / hung): its last counts are frozen, not current. The
-        # bound is the stale window, not the live one, so a quiet but live log still grades.
+        # bound is wider than the live one, so a quiet but live log still grades.
         res["verdict"] = "STALE"
         return res
     res.update(rate_per_min=ticks, expected_per_min=expected, deviation_per_min=ticks - expected,
@@ -104,6 +116,26 @@ def classify_mixer(ticks, ticks_over, window_ms, tick_ms, age_s, box_reachable,
     else:
         res["verdict"] = "HEALTHY"
     return res
+
+
+def classify_log_clock(head_age_s, prev_head_age_s, gap_s, frozen_s=DEFAULT_LOG_FROZEN_S,
+                       min_gap_s=LOG_CLOCK_MIN_GAP_S, max_gap_s=LOG_CLOCK_MAX_GAP_S):
+    """issue 1385 -- do the OBS log clock and the gather clock agree? `head_age_s` now and
+    `prev_head_age_s` on the previous pass `gap_s` seconds earlier (the orchestrator's state).
+    A frozen log's head ages WITH the wall clock (by ~gap_s); a live log whose clocks agree reads
+    young. A head that reads older than `frozen_s` on both passes yet aged less than half the gap is
+    a log that advances with its stamps off the gather's clock -> MISMATCH. The time-zone offset
+    cancels in the difference, so this holds whatever the offset. A frozen log's daily date wrap
+    (a huge negative change) is OK, never a mismatch."""
+    if head_age_s is None or prev_head_age_s is None or gap_s is None:
+        return "UNKNOWN"
+    if not min_gap_s <= gap_s <= max_gap_s:
+        return "UNKNOWN"
+    if head_age_s <= frozen_s or prev_head_age_s <= frozen_s:
+        return "OK"
+    if abs(2 * (head_age_s - prev_head_age_s)) < gap_s:
+        return "MISMATCH"
+    return "OK"
 
 
 def classify_vban(events, loss_ms, age_s, box_reachable,
@@ -143,7 +175,8 @@ def _num(obj, key, cast):
 
 def analyze(bundle_json_text, box_reachable, tolerance=DEFAULT_TOLERANCE,
             over_max=DEFAULT_OVER_MAX, stale_after_s=DEFAULT_STALE_AFTER_S,
-            vban_stale_after_s=DEFAULT_VBAN_STALE_AFTER_S, log_live_s=DEFAULT_LOG_LIVE_S):
+            vban_stale_after_s=DEFAULT_VBAN_STALE_AFTER_S, log_live_s=DEFAULT_LOG_LIVE_S,
+            prev_log_head_age_s=None, pass_gap_s=None):
     """Fetch result -> both arms' verdicts + the readings. Unreachable -> SKIP without parsing."""
     obj = _loads_obj(bundle_json_text) if box_reachable == 1 else None
     ticks = _num(obj, "audio_mixer_ticks", int)
@@ -161,6 +194,8 @@ def analyze(bundle_json_text, box_reachable, tolerance=DEFAULT_TOLERANCE,
     return {
         "mixer_verdict": mixer["verdict"], "ticks": ticks, "ticks_over": over,
         "window_ms": window_ms, "tick_ms": tick_ms, "age_s": age_s, "log_head_age_s": head_age,
+        "log_clock": (classify_log_clock(head_age, prev_log_head_age_s, pass_gap_s)
+                      if box_reachable == 1 else "UNKNOWN"),
         "rate_per_min": mixer["rate_per_min"], "expected_per_min": mixer["expected_per_min"],
         "deviation_per_min": mixer["deviation_per_min"], "over_per_min": mixer["over_per_min"],
         "vban_verdict": classify_vban(events, loss_ms, vban_age, box_reachable,
@@ -191,14 +226,16 @@ def _main(argv):
     a.add_argument("--stale-after-s", type=int, default=DEFAULT_STALE_AFTER_S)
     a.add_argument("--vban-stale-after-s", type=int, default=DEFAULT_VBAN_STALE_AFTER_S)
     a.add_argument("--log-live-s", type=int, default=DEFAULT_LOG_LIVE_S)
+    a.add_argument("--prev-log-head-age-s", type=int, default=None)
+    a.add_argument("--pass-gap-s", type=int, default=None)
     ns = ap.parse_args(argv)
     # Tolerant read (the ndi_halving precedent): a strict read that raised would be swallowed by the
     # caller's 2>/dev/null and read as SKIP forever. box_reachable=0 needs no stdin.
     text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
     res = analyze(text, ns.box_reachable, ns.tolerance, ns.over_max, ns.stale_after_s,
-                  ns.vban_stale_after_s, ns.log_live_s)
+                  ns.vban_stale_after_s, ns.log_live_s, ns.prev_log_head_age_s, ns.pass_gap_s)
     for k in ("mixer_verdict", "ticks", "ticks_over", "window_ms", "tick_ms", "age_s",
-              "log_head_age_s",
+              "log_head_age_s", "log_clock",
               "rate_per_min", "expected_per_min", "deviation_per_min", "over_per_min",
               "vban_verdict", "vban_events", "vban_loss_ms", "vban_dest", "vban_age_s"):
         print(f"{k}={_fmt(k, res[k])}")

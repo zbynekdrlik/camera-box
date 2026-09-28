@@ -21,7 +21,9 @@
 # audio thread stopped while OBS keeps logging, silence on air on a box without VBAN outputs.
 # A normal OBS start reads UNKNOWN (one partial dump), never a page; STALE (the same old dump with
 # no proof the log is live: OBS down or hung, or a gather without the facet; or the VBAN status
-# line stopped) is logged, never paged -- obs-liveness / bundle-state own a dead OBS.
+# line stopped) is logged, never paged -- obs-liveness / bundle-state own a dead OBS. A CLOCK page
+# (once, stable key) says the pager is blind: the log advances between passes, yet its head reads
+# old, so OBS and the gather disagree on the time zone.
 #
 # PRODUCTION-CRITICAL class (issue 1308): a mixer off real time or a sender losing audio is audible
 # on air, so BOTH arms TIME-BUCKET their --dedup-key (watchdog_notify_key) and re-ping "dokolecka"
@@ -48,7 +50,7 @@ DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help | -h)
-    sed -n '5,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -174,6 +176,44 @@ reset_arm_confirm() {
   write_state_field "${2}_confirm_${1}" 0
 }
 
+# handle_log_clock <box> <ip> <verdict> <head_age> -- issue 1385: the OBS log clock vs the gather
+# clock. MISMATCH (the log advances, yet its head reads older than the frozen bound) blinds the whole
+# mixer arm (every pass STALE), so it pages ONCE per incident after the 2-pass confirm, with a
+# STABLE key -- a config fault, not an on-air one, so no time-bucketed re-ping. OK clears it
+# (machine-channel recovery); UNKNOWN holds.
+handle_log_clock() {
+  local box="$1" ip="$2" verdict="$3" head_age="$4"
+  local prev_confirm decision confirm act body
+  case "$verdict" in
+    MISMATCH)
+      prev_confirm="$(read_state_field "audio-mixer-clock_confirm_${box}" 0)"
+      decision="$(obs_watchdog_confirm "$prev_confirm" 1 "$CONFIRM_THRESHOLD")"
+      confirm="$(printf '%s\n' "$decision" | sed -n 's/^confirm=//p')"
+      act="$(printf '%s\n' "$decision" | sed -n 's/^act=//p')"
+      write_state_field "audio-mixer-clock_confirm_${box}" "${confirm:-0}"
+      log "$box log clock MISMATCH: the log advances but its head reads ${head_age}s old -- the OBS log stamps and the gather clock disagree (time zone?), so the mixer pager is BLIND on this box (confirm=$prev_confirm -> $confirm act=$act)"
+      [ "${act:-0}" = "1" ] || return 0
+      [ "$(read_state_field "audio-mixer-clock_alerted_${box}" 0)" = "1" ] && return 0
+      write_state_field "audio-mixer-clock_alerted_${box}" 1
+      body="⚠️ Zvukový mixér ($REPO_SLUG): **$box** ($ip) — strážca zvukového mixéra je na tomto boxe SLEPÝ: OBS log stále pribúda, ale jeho čas sa nezhoduje s hodinami bundle-state servera (log vyzerá ${head_age} s starý, pravdepodobne iné časové pásmo). Kým sa to neopraví, výpadok zvukového vlákna ani mixér mimo reálneho času sa z tohto boxu nenahlási."
+      if [ "$DRY_RUN" -eq 1 ]; then
+        log "[dry-run] WOULD alert (CLOCK): $box -- $body"
+        return 0
+      fi
+      log "ALERT: firing Discord notification for $box CLOCK"
+      python3 "$NOTIFY" notify --body "$body" --dedup-key "audio-mixer-clock-${box}" >/dev/null 2>&1 || log "ALERT: airuleset.py notify (CLOCK) failed (non-fatal)"
+      ;;
+    OK)
+      if [ "$(read_state_field "audio-mixer-clock_alerted_${box}" 0)" = "1" ]; then
+        log "RECOVERY: $box log clock agrees again -- machine-channel only (issue 1206: recovery is not a phone ping)"
+        write_state_field "audio-mixer-clock_alerted_${box}" 0
+      fi
+      write_state_field "audio-mixer-clock_confirm_${box}" 0
+      ;;
+    *) : ;;   # UNKNOWN: not judgeable this pass (no previous pass / a timer gap) -- hold
+  esac
+}
+
 # handle_healthy_arm <box> <prefix> -> clear this arm's confirm + throttle and log a machine-channel
 # recovery line once if it had paged. Recovery is NEVER a phone ping (issue 1206).
 handle_healthy_arm() {
@@ -192,17 +232,30 @@ field() { printf '%s\n' "$1" | sed -n "s/^$2=//p"; }
 
 # -- per-box decision --------------------------------------------------------------------------
 handle_box() {
-  local box="$1" ip="$2" body reachable out
+  local box="$1" ip="$2" body reachable out now_epoch prev_head prev_epoch log_clock
   local mverdict ticks over tick_ms age head_age expected dev window
+  local -a clock_args=()
   local vverdict events loss_ms dest vage loss_txt
 
   if body="$(fetch_bundle_json "$ip")"; then reachable=1; else reachable=0; body=""; fi
+  # issue 1385: the previous pass's log head age feeds the log-clock check (AUDIO_MIXER_NOW_EPOCH is
+  # the Tier-0 seam for the pass time).
+  now_epoch="${AUDIO_MIXER_NOW_EPOCH:-$(date +%s)}"
+  prev_head="$(read_state_field "audio-mixer-clock_prev_age_${box}" "")"
+  prev_epoch="$(read_state_field "audio-mixer-clock_prev_epoch_${box}" "")"
+  if [ -n "$prev_head" ] && [ -n "$prev_epoch" ]; then
+    clock_args=(--prev-log-head-age-s "$prev_head" --pass-gap-s "$(( now_epoch - prev_epoch ))")
+  fi
   out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" \
     --tolerance "$TOLERANCE" --over-max "$OVER_MAX" --stale-after-s "$STALE_AFTER_S" \
-    --vban-stale-after-s "$VBAN_STALE_AFTER_S" --log-live-s "$LOG_LIVE_S" 2>/dev/null)"
+    --vban-stale-after-s "$VBAN_STALE_AFTER_S" --log-live-s "$LOG_LIVE_S" \
+    ${clock_args[@]+"${clock_args[@]}"} 2>/dev/null)"
   mverdict="$(field "$out" mixer_verdict)"; ticks="$(field "$out" ticks)"
   over="$(field "$out" ticks_over)"; tick_ms="$(field "$out" tick_ms)"; age="$(field "$out" age_s)"
   head_age="$(field "$out" log_head_age_s)"
+  log_clock="$(field "$out" log_clock)"
+  write_state_field "audio-mixer-clock_prev_age_${box}" "$head_age"
+  write_state_field "audio-mixer-clock_prev_epoch_${box}" "$([ -n "$head_age" ] && printf '%s' "$now_epoch")"
   expected="$(field "$out" expected_per_min)"
   dev="$(field "$out" deviation_per_min)"; window="$(field "$out" window_ms)"
   vverdict="$(field "$out" vban_verdict)"; events="$(field "$out" vban_events)"
@@ -225,6 +278,8 @@ handle_box() {
       "🚨 Zvukový mixér ($REPO_SLUG): **$box** ($ip) — zvukové vlákno OBS nestíha: **${over} oneskorených tickov za minútu** (prah ${OVER_MAX}), tickov ${ticks}/min. Takto začal 27.9. o 06:00 výpadok zvuku na FOH. Treba zistiť príčinu (záťaž zvukového vlákna, dock) a rozhodnúť o reštarte OBS. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol." ;;
     *)       log "$box mixer: unexpected verdict '${mverdict:-<empty>}' -- holding, no page" ;;
   esac
+
+  handle_log_clock "$box" "$ip" "${log_clock:-UNKNOWN}" "$head_age"
 
   # VBAN arm (independent; disjoint state)
   case "$vverdict" in
