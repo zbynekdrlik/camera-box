@@ -15,6 +15,7 @@
 #include "util/util_uint64.h"
 #include "media-io/asrc-compensator.h"
 #include "obs-genlock-audio-buffering.h"
+#include "obs-genlock-mix-guard.h"
 
 #define AUDIO_OUTPUT_FRAMES 1024
 #define MAX_AUDIO_MIXES 6
@@ -142,7 +143,6 @@ struct obs_core_audio {
 	int max_buffering_ticks;
 	int floor_buffering_ticks;
 	bool fixed_buffer;
-	uint64_t genlock_mix_tick;
 };
 struct obs_core_data {
 	pthread_mutex_t audio_sources_mutex;

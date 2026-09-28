@@ -15,7 +15,8 @@
 //! - A C LIFT of the shipped `audio_callback` path, verbatim: the tail of the render-order build (the
 //!   membership mark + the catch-all loop), the render loop + `calc_min_ts`, the 1367 tick decision,
 //!   the mix + discard blocks, and every function they call (`push_audio_tree`,
-//!   `convert_time_to_frames`, `ignore_audio` .. `calc_min_ts` and the guard), substituted into
+//!   `convert_time_to_frames`, `ignore_audio` .. `calc_min_ts` and the guard; the pure helpers come
+//!   from `obs-genlock-mix-guard.h` by `#include`), substituted into
 //!   `tests/c/genlock_audio_mix_guard_1381_harness.c`. That stub libobs feeds sources the way
 //!   `source_output_audio_place` does (bytes only) and drives scenarios: hidden late sources, an
 //!   ingest-thread race, an audio reset, a mixed late source, cuts into the mix (a source, a program
@@ -43,11 +44,13 @@ fn squish(s: &str) -> String {
 const OBS_AUDIO: &str = "vendor/obs-studio/libobs/obs-audio.c";
 const OBS_INTERNAL: &str = "vendor/obs-studio/libobs/obs-internal.h";
 const AUDIO_IO_H: &str = "vendor/obs-studio/libobs/media-io/audio-io.h";
+const MIX_GUARD_H: &str = "vendor/obs-studio/libobs/obs-genlock-mix-guard.h";
 
 /// `(file, squished needle)` — the wiring both this test and the pwsh guard in both
 /// `windows-genlock*.yml` workflows require, each exactly once. ONE list, so the two copies cannot
 /// drift apart.
-const WIRING: [(&str, &str); 6] = [
+const WIRING: [(&str, &str); 8] = [
+    (OBS_AUDIO, "#include \"obs-genlock-mix-guard.h\""),
     (OBS_AUDIO, "genlock_mix_mark_members(audio);"),
     (
         OBS_AUDIO,
@@ -66,6 +69,10 @@ const WIRING: [(&str, &str); 6] = [
         "\"buffering-guard: '%s' %s: its audio ran %.1f ms behind the mix window; re-anchored (dropped %.1f ms%s) \"",
     ),
     (OBS_INTERNAL, "bool genlock_mix_entered;"),
+    (
+        MIX_GUARD_H,
+        "#define GENLOCK_MIX_GUARD_LOG_INTERVAL_NS (60ULL * 1000000000ULL)",
+    ),
 ];
 
 const WINDOWS_WORKFLOWS: [&str; 2] = [
@@ -77,6 +84,7 @@ fn pwsh_var(file: &str) -> &'static str {
     match file {
         OBS_AUDIO => "$audio1381",
         OBS_INTERNAL => "$internal1381",
+        MIX_GUARD_H => "$hdr1381",
         other => panic!("no pwsh variable for {other}"),
     }
 }
@@ -171,7 +179,11 @@ fn windows_workflows_guard_the_same_wiring_1381() {
                  from WIRING"
             );
         }
-        for (file, var) in [(OBS_AUDIO, "$audio1381"), (OBS_INTERNAL, "$internal1381")] {
+        for (file, var) in [
+            (OBS_AUDIO, "$audio1381"),
+            (OBS_INTERNAL, "$internal1381"),
+            (MIX_GUARD_H, "$hdr1381"),
+        ] {
             assert!(
                 text.contains(&format!(
                     "{var} = (Get-Content \"{file}\" -Raw) -replace '\\s+', ' '"
