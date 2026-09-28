@@ -19,9 +19,10 @@ meets the A/V and spread bounds within the settle time, 3/3 repeats. The matrix 
 | File | Role |
 |---|---|
 | `scripts/av-restart-matrix.sh` | orchestrator: `--plan` (DEFAULT, touches nothing), `--run`, `--report DIR`, `--stop-leftovers DIR` (the unit's ExecStopPost) |
-| `scripts/lib/av-restart-matrix.sh` | pure builders shared by plan AND run: every restart / health / leave-running remote text, the health predicate, the window argv, the stream supervisor step |
+| `scripts/lib/av-restart-matrix.sh` | pure builders shared by plan AND run: every restart / health / leave-running remote text, the health predicate, the receiver-state read, the window argv, the stream supervisor step |
 | `scripts/av_restart_matrix_decision.py` | pure decision: `record` (one matrix.tsv step), `grade-window` (one window, the baseline gate), `report` (kinds 3/3 + baseline; exit 0 PASS / 1 FAIL / 2 UNKNOWN / 3 input error) |
 | `scripts/av-soak.sh --lease-run-id` | the soak's one opt-in: a window under a lease its caller holds (verified every slot, never acquired or released; recording.state names no lease) |
+| `scripts/lib/av-soak.sh` `av_soak_rig_busy_settled` | the ONE retried rig-busy read the soak's slots/cleanup, its `--stop-leftovers` and the matrix share (with `av_soak_broadcast_of`) |
 
 ## The contract
 
@@ -36,25 +37,35 @@ meets the A/V and spread bounds within the settle time, 3/3 repeats. The matrix 
   issue-1383 keep-alive), and `expected_release_at` covers the whole run. The matrix does NOT run
   its own issue-281 rig heartbeat: each window runs it, and nested refreshers would share one
   pidfile. The burn-reconcile watchdog defers on the lease alone.
-- **Before every mutation** (the baseline window, each restart): `stray_session_check_assert` AND a
-  proven idle rig (`rig-busy-check` | `av_soak_rig_state.py broadcast` = idle, an unreadable read
-  retried `AV_SOAK_BROADCAST_READS` x `AV_SOAK_BROADCAST_RETRY_S`). Busy / live / unreadable ->
-  nothing is restarted (exit 4 before any change, 5 after).
+- **Before every mutation** (the baseline window, each restart):
+  - the lease is still this run's (lost -> exit 5, the other run's lease left alone; the heartbeat
+    is only ever bumped while the lease is ours);
+  - `stray_session_check_assert` AND a proven idle rig (`av_soak_rig_busy_settled` |
+    `av_soak_broadcast_of` = idle, an unreadable read retried `AV_SOAK_BROADCAST_READS` x
+    `AV_SOAK_BROADCAST_RETRY_S`). Busy / live / unreadable -> nothing is restarted (exit 4 before
+    any change, 5 after);
+  - TEST mode: the stream program is `Development` and the cam2 painter emits (the soak's own probe
+    builders). Out of TEST mode before any change = exit 4; after one, the run ends with its report
+    (the rig was handed back), like the soak.
 - **One service restart per step, never a reboot.**
   - `strih-obs` reuses `mv_reverify_obs_restart_linux_cmd`: the unit-installed guard and a
     BLOCKING restart, so the old OBS is gone before the health read. `MV_REVERIFY_NO_UNIT` means
     not performed.
   - `cambox` / `dantesync` run `systemctl restart <unit>` as root on one camera.
-  - Every text first echoes `AV_MATRIX_RESTART_AT=<the box's epoch>`. A restart counts only on its
-    positive marker; no marker (ssh/auth/timeout) = not performed.
+  - `cambox` / `dantesync` first echo `AV_MATRIX_INVOCATION_BEFORE=<the unit's InvocationID>`. A
+    restart counts only on its positive marker; no marker (ssh/auth/timeout) = not performed.
 - **Healthy** (bounded `--healthy-timeout-secs`, polled; time to healthy = dev1 restart instant ->
   first healthy read):
   - `strih-obs`: unit active AND the OBS WebSocket answers.
-  - `cambox`: active AND >= 1 `Streaming:` journal line since the box's OWN restart instant (box
-    clock, `--since @<epoch>`).
+  - `cambox`: active AND a NEW systemd invocation (not the one the restart replaced) AND >= 1 of
+    ITS `Streaming:` lines (`journalctl _SYSTEMD_INVOCATION_ID=`). A `--since <epoch>` read counted
+    the old process's last lines (a line every 5 s) and read healthy at once.
   - `dantesync`: `:8898/status` -> `dantesync_clock_decision.py analyze` = OK on the rig
     grandmaster (it must resolve, else `--run` refuses).
-  - `stream-obs`: the WebSocket answers.
+  - `stream-obs`: the WebSocket answers on the `Development` program scene. `--force` kills obs64,
+    which does not save on the way out, so the relaunch restores the last SAVED program scene;
+    another scene FAILS the repeat at once (no settle with it on air, no window) and the supervisor
+    is told to set it back. The matrix never switches a scene.
 - **The stream OBS kind is a SUPERVISOR step** (checked read-only 28.9.2026, win-stream-snv
   `Get-ScheduledTask`):
   - The canonical launch is `OBS Studio.lnk` -> `obs-guarded-launch.ps1` (the issue-786 gate).
@@ -75,10 +86,12 @@ meets the A/V and spread bounds within the settle time, 3/3 repeats. The matrix 
   - The bounds are read by `av_soak_decision.load_gate_bounds`. Missing evidence is UNKNOWN; a
     breach wins.
 - **Step outcomes:**
-  - `measured` -> the window's grade.
+  - `measured` -> the window's grade. A soak exit 0-2 is `measured` only with a CSV row.
   - `not_healthy` and `restart_failed` -> FAIL, and the run stops.
-  - `not_performed`, `window_refused` (soak exit 4) and `window_aborted` -> UNKNOWN; the run stops,
-    or aborts (exit 5) for an aborted window.
+  - `not_performed`, `window_stopped` (the soak ended the window without a measurement: it left
+    TEST mode, a low record volume), `window_refused` (soak exit 4) and `window_aborted` ->
+    UNKNOWN; the run stops, or aborts (exit 5) for an aborted window. A soak usage error before
+    any restart is exit 4.
   - A kind is PASS only 3/3. The matrix is FAIL on any FAIL (baseline included), PASS only when the
     baseline and every kind pass.
   - A baseline that is not PASS stops the run before any restart (`--keep-going` restarts anyway).
@@ -90,6 +103,23 @@ meets the A/V and spread bounds within the settle time, 3/3 repeats. The matrix 
   - Then the report, then the lease is released. It is KEPT while a window's `recording.state`
     still flags a recording: run `--stop-leftovers <run-dir>`, which runs `av-soak.sh
     --stop-leftovers` per such window and then releases the matrix's own lease, holder-checked.
+
+## The receiver confound (review round 1, reported, not solved here)
+
+Each window is a whole soak run, so its connect-on-show HOLD is taken at the window's start and
+restored at its end. The restart itself therefore happens with production roles: a hidden strih
+main input is PARKED (disconnected). A `cambox` / `dantesync` restart of a camera whose input was
+parked is not seen by a live receiver; the window's hold then connects it fresh, which the baseline
+window already covers. So a 3/3 PASS does not by itself prove a CONNECTED receiver survives a
+sender restart. The matrix records the restarted camera's receiver state right before each restart
+(`matrix.tsv` column `receiver`: parked / connected / unread / n/a, from the strih OBS log via
+`strih_log_remote_cmd` + `genlock_park_state_of`), and the report prints a NOTE with the parked
+count per kind. Read it before trusting a PASS for those two kinds.
+
+The alternative -- one hold for the WHOLE matrix (a second soak opt-in that verifies a caller-held
+hold and skips its own hold / restore / burn flip, the hold re-asserted after a strih OBS restart)
+-- measures the connected case but changes the soak's per-window setup; it is a decision for the
+main session, not taken in this slice.
 
 ## Known limits (this slice)
 
