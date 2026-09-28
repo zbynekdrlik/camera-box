@@ -1,6 +1,9 @@
 ---
 paths:
   - "vendor/av-sync-dock/src/sync-test-output.cpp"
+  - "vendor/av-sync-dock/src/sync-test-output-video.cpp"
+  - "vendor/av-sync-dock/src/sync-test-output-audio.cpp"
+  - "vendor/av-sync-dock/src/sync-test-output-internal.hpp"
   - "vendor/av-sync-dock/src/camera-box-decode-mailbox.hpp"
   - "vendor/av-sync-dock/src/camera-box-frame-copy.hpp"
   - "vendor/av-sync-dock/test/decode-mailbox-selftest.cpp"
@@ -110,7 +113,9 @@ pairs by frame_id, not by crossing time.
   - Any NEW mailbox guarantee needs a mutant that breaks it and a check that fails on that mutant.
     A timed run alone was blind to an oldest-wins mailbox and to a single shared buffer. The
     deterministic burst case (worker held inside a decode while frames 2..5 arrive) catches both.
-- **The dock source**: `sync-test-output.cpp` type-checks locally with `g++ -std=c++17
+- **The dock source**: each output TU (`sync-test-output.cpp`, `-video.cpp`, `-audio.cpp`; the
+  video path is in `-video.cpp`, the audio path in `-audio.cpp`, `struct sync_test_output` in
+  `sync-test-output-internal.hpp` since issue 1386) type-checks locally with `g++ -std=c++17
   -fsyntax-only -I<stub dir> -Ivendor/obs-studio/libobs -Ivendor/av-sync-dock/deps/quirc/lib`. The
   stub dir holds two generated files:
   - `plugin-macros.generated.h`, filled in from `src/plugin-macros.h.in`;
@@ -122,10 +127,14 @@ pairs by frame_id, not by crossing time.
   `signal_handler_signal(` in it. The pwsh step "Assert dock decode runs off the video-output
   thread" in BOTH windows-genlock workflows mirrors it; see `av-sync-dock-anchor-refactor-safety.md`
   for the three-place lock-step.
-  - The pwsh slice runs to the next ` static ` WITH comments left in. A comment inside
+  - The pwsh slice is the brace-balanced body (`Get-DockBody`, issue 1386) WITH comments left in.
+    A comment inside
     `st_raw_video` must therefore never spell a banned call with its parenthesis.
-  - The worker body's anchor is its full named signature. The forward declaration uses UNNAMED
-    parameters so that `find()` cannot land on it.
+  - The worker body's anchor is its full named signature. Its declaration (in
+    `sync-test-output-internal.hpp`) uses UNNAMED parameters so that `find()` cannot land on it.
+    Since issue 1386 `st_raw_video`, `st_video_decode_job_run` and the audio worker handlers
+    have external linkage, so their anchors carry no `static`
+    (`av-sync-dock-anchor-refactor-safety.md`).
 
 # No analysis on libobs's AUDIO thread either (issue 1381)
 

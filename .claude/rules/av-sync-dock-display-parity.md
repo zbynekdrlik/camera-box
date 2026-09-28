@@ -98,7 +98,7 @@ locked with SOME ring advance (a lock with ZERO hits across a full epoch is prov
 cluster window is 180 s and `locked` only flips on a push, which needs a decode); fires ONLY when
 the input is demonstrably alive (video_decoded AND preambles both advancing — EVENT mode / silence
 stay #1177's domain, never a reset loop). The fire (`cb_apply_pairing_recovery`,
-sync-test-output.cpp, audio thread) resets ALL in-dock pairing state — ring under the mutex, fresh
+sync-test-output-audio.cpp, audio thread) resets ALL in-dock pairing state — ring under the mutex, fresh
 cluster, offset history, fresh audit tracker, `ChannelMarkerPicker::reset_window()` (every
 channel's `StreamingMarkerDecoder::reset_window()` since issue 1367; the per-channel pick history is
 kept) (origin-continuous; cumulative stats PRESERVED so the diag counters stay monotonic and BOTH

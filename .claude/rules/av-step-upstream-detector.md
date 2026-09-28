@@ -22,7 +22,7 @@ OBS ts_lag flap.
 ## The signal — the dock's monitor-only SUGGESTED line carries the pin INLINE
 
 Stream OBS runs the dock monitor-only (DockLockCorrector is monitor-only by default, #942), so it
-logs the Suggest branch (`vendor/av-sync-dock/src/sync-test-output.cpp:~1485`, verified LIVE
+logs the Suggest branch (`vendor/av-sync-dock/src/sync-test-output-audio.cpp`, verified LIVE
 2026-09-02, ~2/min):
 
 ```
@@ -143,7 +143,7 @@ defects in the alarm's INPUT (never the rig — the stream `NDI 2ME PGM` FIFO wa
 The fix (all under this watchdog + its facet source):
 
 - **Quality facet.** `bundle_state_gather.av_offset_quality_from_log` parses the dock's OWN
-  `LOCKED/UPDATED offset= … matched=M mad=Dms` lines (sync-test-output.cpp:1378) into
+  `LOCKED/UPDATED offset= … matched=M mad=Dms` lines (sync-test-output-audio.cpp) into
   `av_offset_recent_mad_ms` (recent-window MEDIAN MAD) + `av_offset_recent_matched_min` (recent-window
   MIN matched). It is a SEPARATE parser from `av_offset_series_from_log` — the offset SERIES stays
   byte-identical (the Part-1 "raw UPDATED/LOCKED lines are NOT folded into the series" decision holds;
@@ -167,7 +167,7 @@ The fix (all under this watchdog + its facet source):
   then PREFERS `dock_offset_median_ms` over `residual_median_ms` (and STATES which key it used), so
   the ~120 ms recording-vs-dock frame bias cancels. The recording residual stays the E2E GATE's
   truth; only the ALARM's reference changes.
-- **Dock BIAS observability (vendored C++, CI-compile).** `sync-test-output.cpp` appends
+- **Dock BIAS observability (vendored C++, CI-compile).** `sync-test-output-audio.cpp` appends
   `lag_idx=%ld cands=%zu` to the UPDATED/LOCKED line (`lag_idx` = the display offset quantized into
   ±`CB_CLUSTER_TOL_MS` buckets, so a wrong-cluster pick jumps it; `cands` =
   `cb_offset_cluster.samples.size()`, the total pool the densest window was scored from, so
