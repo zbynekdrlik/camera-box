@@ -29,6 +29,10 @@ paths:
   - "tests/aux_sender_teardown_ordering_877.rs"
   - ".github/workflows/windows-genlock.yml"
   - ".github/workflows/windows-genlock-fast.yml"
+  - "vendor/obs-studio/libobs/obs-audio.c"
+  - "vendor/obs-studio/libobs/obs-genlock-mix-guard.h"
+  - "tests/genlock_audio_mix_guard_1381.rs"
+  - "tests/c/genlock_audio_mix_guard_1381_harness.c"
 ---
 
 # Changing the genlock C in `libobs` — CI is its first compile, so buy verification back (#1003)
@@ -589,3 +593,37 @@ libobs-opengl-only hot-swap.
   decision.** On a source at N ≥ 2 × the canvas rate the STEADY branch presents the newest matured
   frame; the head is (N − 1) source intervals older. The presented frame is `next_frame` at the
   present tail of `genlock_release_tick`, after every erase, drain and converge shed.
+
+## Driving a lifted `audio_callback` path through scenarios (issue 1381, the mix buffering guard)
+
+`tests/genlock_audio_mix_guard_1381.rs` lifts most of `audio_callback` verbatim (the blocks between
+its `/* ---- */` banners, each anchor asserted unique) into `tests/c/genlock_audio_mix_guard_1381_harness.c`
+and drives it tick by tick. Lessons from its two review rounds:
+- **Every scenario must be reachable in real libobs.** Check list membership and registration
+  before you model a source. Composites (scenes, transitions) are never in `first_audio_source`:
+  `is_audio_source` is `OBS_SOURCE_AUDIO` only, and obs-module.c refuses a composite audio source.
+  The first draft modelled an off-program scene in that list. It was the ONLY scenario that killed
+  two mutants, so the gate looked strong while the real code paths were untested.
+- **Split a lifted function at a banner to inject a concurrent event between its steps.** The
+  ingest thread holds only the source's `audio_buf_mutex`. A packet placed between the render loop
+  and `calc_min_ts` is the real job of the `find_min_ts` member filter. Lift those two steps as
+  separate blocks, with a harness hook between them.
+- **File-scope statics in the lifted code persist across scenarios in one harness process.** A
+  per-scenario `memset` of the stub core does not reset them. Write scenario comments and expected
+  numbers that hold under the carried-over value (the guard's mix tick is such a static on purpose:
+  an audio reset zeroes `struct obs_core_audio`).
+- **A literal you add can blind another test's single-occurrence anchor.**
+  `tests/audio_telemetry_800.rs` proves the #800 rate limit with
+  `src.contains("60000000000ULL")`. A second 60 s literal anywhere in obs-audio.c makes that check
+  pass even with the limit deleted. Grep the other gates' `contains(` literals for any constant you
+  add, and spell a new one differently (`(60ULL * 1000000000ULL)`).
+- **Compare a deliberate copy of an upstream function against the original on every probe.** The
+  guard's re-anchor copies `ignore_audio`, which stays byte-identical for rebases. The harness runs
+  both on the same probe source and must print `ignore_audio=same`.
+- **Behavioural RED against the committed C:** keep the stub struct a superset of the old and new
+  field sets for the RED commit, so the new test compiles against the old code and fails on
+  behaviour. Drop the retired stub fields in a later refactor commit.
+- **clang-format:** the local clang-format-17 cannot read `vendor/obs-studio/.clang-format`
+  (`SkipMacroDefinitionBody` is clang-18) or `libobs/.clang-format`. Copy the top-level file
+  without that key, run `clang-format-17 --style=file:<copy>` on a copy of the source, and apply
+  only the diff on your own lines. Upstream code is not brace-formatted to that style anyway.
