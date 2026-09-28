@@ -128,6 +128,9 @@ struct obs_source {
 	int64_t h_lag_ns;
 	uint64_t h_fed_until_ns;
 	uint64_t h_mixed;
+	/* the audio_ts its output buffer was last rendered from; a mix from any other front is stale */
+	uint64_t h_rendered_ts;
+	uint64_t h_stale;
 };
 struct obs_core_audio {
 	struct h_darray render_order;
@@ -218,6 +221,7 @@ static void obs_source_audio_render(obs_source_t *source, uint32_t mixers, size_
 		return;
 	}
 	source->audio_pending = false;
+	source->h_rendered_ts = source->audio_ts;
 }
 static inline void mix_audio(struct audio_output_data *mixes, obs_source_t *source, size_t channels,
 			     size_t sample_rate, struct ts_info *ts)
@@ -228,6 +232,8 @@ static inline void mix_audio(struct audio_output_data *mixes, obs_source_t *sour
 	if (source->audio_ts < ts->start || ts->end <= source->audio_ts)
 		return;
 	source->h_mixed++;
+	if (source->h_rendered_ts != source->audio_ts)
+		source->h_stale++;
 }
 static inline bool should_silence_monitored_source(obs_source_t *source, struct obs_core_audio *audio)
 {
@@ -401,11 +407,11 @@ static void h_step(bool other_mixed)
 static void h_summary(const char *scenario)
 {
 	printf("%s: waits=%d total_ms=%d mic_missed=%d '%s' events=%" PRIu64 " dropped_ms=%.1f mixed=%" PRIu64
-	       " guard_lines=%d above_lines=%d restart_lines=%d\n",
+	       " stale=%" PRIu64 " guard_lines=%d above_lines=%d restart_lines=%d\n",
 	       scenario, h_waits, (int)(h_obs.audio.total_buffering_ticks * AUDIO_OUTPUT_FRAMES * 1000 / H_RATE),
 	       h_mic_missed, h_other.h_name, h_other.genlock_mix_guard_events,
-	       (double)h_other.genlock_mix_guard_dropped_ns / 1e6, h_other.h_mixed, h_guard_lines, h_above_lines,
-	       h_restart_lines);
+	       (double)h_other.genlock_mix_guard_dropped_ns / 1e6, h_other.h_mixed, h_mic.h_stale + h_other.h_stale,
+	       h_guard_lines, h_above_lines, h_restart_lines);
 }
 
 static void h_begin(const char *scenario, const char *other, bool direct, int64_t lag_ns, bool timing_set)
@@ -415,6 +421,39 @@ static void h_begin(const char *scenario, const char *other, bool direct, int64_
 	h_waits = h_mic_missed = 0;
 	h_add(&h_mic, "Mic/Aux", true, 0, true);
 	h_add(&h_other, other, direct, lag_ns, timing_set);
+}
+
+/* One direct call of the guard on a hand-built source whose timeline starts `behind_ns` before a window
+ * at 5 s with `floats` samples buffered: its decision (not mixed, no entry) and, when it re-anchors,
+ * the result. `direct` calls the re-anchor even when the decision is none (the ingest moved the
+ * timeline between the unlocked check and the locked re-anchor). */
+static void h_probe(const char *what, uint64_t behind_ns, size_t floats, bool direct)
+{
+	static obs_source_t s;
+	const uint64_t start = 5000000000ULL;
+	memset(&s, 0, sizeof(s));
+	s.h_name = "probe";
+	for (size_t ch = 0; ch < MAX_AUDIO_CHANNELS; ch++)
+		s.audio_input_buf[ch].virt = true;
+	for (size_t ch = 0; ch < H_CH; ch++)
+		s.audio_input_buf[ch].size = floats * sizeof(float);
+	s.timing_set = true;
+	s.audio_ts = behind_ns ? start - behind_ns : 0;
+	const int reason = genlock_mix_guard_reason(false, false, false, s.audio_ts, start);
+	int sync = -1;
+	if (reason != GENLOCK_MIX_GUARD_NONE || direct)
+		sync = genlock_mix_guard_reanchor(&h_obs.audio, &s, H_CH, H_RATE, start,
+						  reason != GENLOCK_MIX_GUARD_NONE ? reason : GENLOCK_MIX_GUARD_NOT_MIXED)
+			       ? 1
+			       : 0;
+	char ts[48];
+	if (s.audio_ts)
+		snprintf(ts, sizeof(ts), "start%+" PRId64 "ns", (int64_t)(s.audio_ts - start));
+	else
+		snprintf(ts, sizeof(ts), "restarted");
+	printf("probe %s: reason=%d in_sync=%d ts=%s left=%zu pending=%d timing_set=%d events=%" PRIu64 "\n", what,
+	       reason, sync, ts, s.audio_input_buf[0].size / sizeof(float), s.audio_pending ? 1 : 0, s.timing_set ? 1 : 0,
+	       s.genlock_mix_guard_events);
 }
 
 int main(void)
@@ -499,5 +538,17 @@ int main(void)
 	for (int i = 0; i < 300; i++)
 		h_step(true);
 	h_summary("launch-late");
+
+	/* The guard's exact-sample edges and its locked re-check, called directly. */
+	printf("== probes\n");
+	h_launch();
+	h_now_ns = H_T0 + 60000000000ULL;
+	h_probe("1ns-behind-is-rounding", 1, 960, false);
+	h_probe("2ns-behind", 2, 960, false);
+	h_probe("10ms-exact", 10000000, 960, false);
+	h_probe("rounding-adjust", 20834, 960, false);
+	h_probe("exhausted", 30000000, 960, false);
+	h_probe("moved-on-before-the-lock", 1, 960, true);
+	h_probe("reset-before-the-lock", 0, 960, true);
 	return 0;
 }
