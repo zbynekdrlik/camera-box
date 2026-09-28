@@ -89,11 +89,10 @@ fail() {
                            # nftables OUTPUT-mangle rule (udp dport 123 -> dscp ef) + its boot oneshot
 
 # shellcheck source=scripts/lib/ndi-discovery.sh
-. "$HERE/lib/ndi-discovery.sh"  # ndi_discovery_sender_ips / ndi_discovery_write_config /
-                                # ndi_discovery_dropin_content (issue 1342) -- also sourced by
-                                # verify-device.sh's (an) check + setup-strih.sh, single source of
-                                # truth for the receiver-side NDI config (/etc/ndi/ndi-config.v1.json,
-                                # networks.ips = every managed sender)
+. "$HERE/lib/ndi-discovery.sh"  # ndi_discovery_cambox_plan / ndi_discovery_cambox_apply_plan
+                                # (issue 1389) -- also sourced by verify-device.sh's (an) check +
+                                # setup-strih.sh, single source of truth for the receiver-side NDI
+                                # config; a cambox carries NO networks.ips (ROZHODNUTÉ 5879261962)
 
 # shellcheck source=scripts/lib/ndi-provision.sh
 . "$HERE/lib/ndi-provision.sh"  # NDI_VERSION_PIN + ndi_bootstrap_peer_list / ndi_runtime_version_matches_pin
@@ -996,25 +995,35 @@ echo "  camera-box.service.d/free-capture-device.conf installed -- frees /dev/vi
 # names one); its code is gone and a re-provision DELETES the drop-in that used to enable it, so a
 # live box that still carries it converges (the env var is ignored by the new binary either way).
 rm -f /etc/systemd/system/camera-box.service.d/publish-30p.conf
-# issue 1342 -- the RECEIVER-side NDI config (scripts/lib/ndi-discovery.sh): the camera-box service
-# RECEIVES `STRIH-LX (interkom)` for the cameraman HDMI preview, so /etc/ndi/ndi-config.v1.json lists
-# every managed NDI sender IP in networks.ips (generated from camera-set.sh + obs-fleet.sh, never
-# hand-typed); libndi queries them directly IN ADDITION to mDNS. Senders never read the list, so this
-# box keeps announcing CAMn (usb) over mDNS exactly as before -- no gate needed. A drop-in points
-# libndi's NDI_CONFIG_DIR at /etc/ndi (camera-box runs as root with ProtectHome=yes, so /root/.ndi
-# would be invisible to it). Enable-only, effective on the next start. A renumbered sender is picked
-# up by re-running this script (verify-device (an) FAILs until then).
-NDI_IPS="$(ndi_discovery_sender_ips)" \
-    || fail "could not generate the managed NDI sender list (camera-set.sh + obs-fleet.sh ndi-sender facet, issue 1342)"
-ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_IPS" \
-    || fail "NDI receiver config write to ${NDI_DISCOVERY_SYSTEM_DIR} failed (issue 1342)"
-ndi_discovery_dropin_content > "$NDI_DISCOVERY_CAMBOX_DROPIN"
-echo "  NDI receiver config: ${NDI_DISCOVERY_SYSTEM_DIR}/${NDI_DISCOVERY_CONFIG_NAME} (networks.ips=${NDI_IPS}) + camera-box.service.d/ndi-discovery.conf (issue 1342)"
+# issue 1389 (ROZHODNUTÉ 5879261962) -- a cambox carries NO receiver-side networks.ips at all: the
+# camera-box service receives only `STRIH-LX (interkom)` for the cameraman HDMI preview, which mDNS finds
+# in milliseconds, and ANY listed host would give it a TCP discovery connection whose teardown (at every
+# strih / stream / resolume restart) can abort camera-box inside libndi 6.3.2. Issue 1342 wrote
+# /etc/ndi/ndi-config.v1.json + a camera-box.service.d NDI_CONFIG_DIR drop-in here; this step now takes
+# them OFF through the shared plan/apply pair in scripts/lib/ndi-discovery.sh (the same pair the live-box
+# `--cambox-apply` program embeds): networks.ips / networks.discovery stripped, any other key kept with
+# its drop-in, the config AND the drop-in removed when nothing else is left (this step's daemon-reload
+# below unloads it). A drop-in pointing NDI_CONFIG_DIR elsewhere is not this repo's: fail loud.
+# verify-device (an) FAILs a cambox that still lists any IP.
+NDI_PLAN="$(ndi_discovery_cambox_plan "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_DISCOVERY_CAMBOX_DROPIN")"
+case "$NDI_PLAN" in
+    none)
+        echo "  NDI receiver config: no networks.ips on this cambox -- mDNS only, nothing to change (issue 1389)"
+        ;;
+    refuse*)
+        fail "NDI receiver config: ${NDI_PLAN#refuse } (issue 1389)"
+        ;;
+    *)
+        ndi_discovery_cambox_apply_plan "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_DISCOVERY_CAMBOX_DROPIN" "$NDI_PLAN" \
+            || fail "NDI receiver config cleanup (${NDI_PLAN}) failed (issue 1389)"
+        echo "  NDI receiver config: ${NDI_PLAN} -- this cambox carries no networks.ips now, mDNS only (issue 1389)"
+        ;;
+esac
 
 systemctl daemon-reload
 systemctl enable camera-box
 echo "  Service created and enabled"
-echo "  Drop-ins: cpu-affinity.conf (CPUAffinity=3, isolcpus core) + genlock.conf (CAMERA_BOX_GENLOCK_FPS=${CAMERA_GENLOCK_FPS}) + ndi-discovery.conf (NDI_CONFIG_DIR=${NDI_DISCOVERY_SYSTEM_DIR})"
+echo "  Drop-ins: cpu-affinity.conf (CPUAffinity=3, isolcpus core) + genlock.conf (CAMERA_BOX_GENLOCK_FPS=${CAMERA_GENLOCK_FPS})"
 
 # =============================================================================
 # STEP 8: Configure auto-login on tty1

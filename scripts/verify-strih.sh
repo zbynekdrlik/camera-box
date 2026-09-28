@@ -899,9 +899,10 @@ else
 fi
 
 # 34) NDI discovery receiver config (issue 1342): networks.ips lists every PINNED managed NDI sender
-#     (the SAME scripts/lib/ndi-discovery.sh generator setup-strih.sh step 4b writes with -- every
-#     camera + strih-lx/stream; the traveling resolume hostname is best-effort, never required) and
-#     carries no networks.discovery, in BOTH readers' config -- the desktop user's ~/.ndi (OBS +
+#     (the SAME scripts/lib/ndi-discovery.sh generator setup-strih.sh step 4b writes with --
+#     strih-lx/stream; the traveling resolume hostname is best-effort, never required), lists NO cambox
+#     IP (issue 1389: this OBS's discovery connection into a cambox aborts camera-box when OBS exits)
+#     and carries no networks.discovery, in BOTH readers' config -- the desktop user's ~/.ndi (OBS +
 #     bkshading-service) and the system dir /etc/ndi (intercom-hub, whose ProtectHome hides ~/.ndi) --
 #     plus the intercom-hub NDI_CONFIG_DIR drop-in. Read-only; FAIL on any miss (a renumbered sender
 #     FAILs until the box is re-provisioned). Placed BEFORE item 32, which closes the list.
@@ -914,9 +915,9 @@ else
     _ndi_text="$(cat "${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}" 2>/dev/null || true)"
     _ndi_verdict="$(ndi_discovery_config_verdict "$_ndi_text" "$_ndi_required")"
     if [ "$_ndi_verdict" = ok ]; then
-      ok "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: networks.ips lists every managed sender"
+      ok "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: networks.ips lists every managed sender and no cambox"
     else
-      bad "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: $(printf '%s' "$_ndi_verdict" | tr '\n' ' ' | sed 's/FAIL: //g')-- re-run setup-strih.sh step 4b (issue 1342)"
+      bad "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: $(ndi_discovery_verdict_oneline "$_ndi_verdict") -- re-run setup-strih.sh step 4b (issue 1342)"
     fi
   done
   # A traveling sender (resolume.lan, DHCP) is never REQUIRED, but when it resolves NOW to an address

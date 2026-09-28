@@ -73,9 +73,10 @@ below..." instead of quoting the actual command in the same sentence).
 
 To bake a NEW env drop-in into provisioning AND prove it takes effect, follow the (e) genlock pattern
 (historical worked example: the retired (z) publish-30p check, `CAMERA_BOX_PUBLISH_30P=1`, removed with
-the 30p stream by issue 1342; the current drop-in + check pair is `ndi-discovery.conf` + `(an)` -- the
-receiver-side `networks.ips` list -- which grades a lib verdict over ONE gathered ssh block instead of a
-journal marker):
+the 30p stream by issue 1342; the live drop-in + check pair is `genlock.conf` + `(e)`. Issue 1342's
+`ndi-discovery.conf` drop-in was taken OFF the camboxes again by issue 1389 -- a cambox is an mDNS-only
+NDI receiver -- and its `(an)` check now grades that absence: a lib verdict over ONE gathered ssh block
+instead of a journal marker):
 
 - **`setup-device.sh` write**: put the `cat > .../<name>.conf` heredoc INSIDE STEP 7, right beside the
   `genlock.conf` write — it shares STEP 7's existing `mkdir` + `daemon-reload` + `enable camera-box`,

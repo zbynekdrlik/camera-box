@@ -1,6 +1,7 @@
 <#
 .SYNOPSIS
-  Make this Windows machine's NDI receivers query every camera-box rig sender by IP (issue 1342).
+  Make this Windows machine's NDI receivers query every camera-box rig OBS-box sender by IP (issue
+  1342) -- and never a cambox (issue 1389).
 
 .DESCRIPTION
   The rig's NDI source discovery is mDNS multicast, and on the venue network a laptop (or the stream /
@@ -8,21 +9,29 @@
   sender IPs directly, IN ADDITION to mDNS: the "extra IPs" of the finder, read from the machine-wide
   config file %ProgramData%\NDI\ndi-config.v1.json:
 
-      ndi.networks.ips = <every managed rig sender IP, comma separated>
+      ndi.networks.ips = <every managed rig OBS-box sender IP, comma separated>
 
   Senders never read that list, so this machine's own NDI outputs keep announcing over mDNS exactly as
   before. This script does NOT configure an NDI Discovery Server, and it removes the retired rig value
   10.77.9.200 if an earlier version of this script wrote it.
 
-  The default -Ips list is GENERATED from the repo's fleet lists (scripts/camera-set.sh +
-  scripts/lib/obs-fleet.sh) by `bash scripts/lib/ndi-discovery.sh --ips pinned`; a test pins this
-  default to that output. The traveling RESOLUME-SNV box has no fixed IP, so it is not in the default.
-  To include it, pass the list dev1 generates with the box home:
+  NEVER A CAMBOX (issue 1389): a finder with a cambox on its list holds a TCP discovery connection
+  into that cambox, and libndi 6.3.2 aborts camera-box when that connection closes (this machine's
+  OBS or SongPlayer exits or restarts). The camboxes are found by mDNS alone. So the script REMOVES
+  every -RemoveIps entry (default: every cambox IP) from the existing list, refuses an -Ips list that
+  names one, and fails its read-back if one survived.
+
+  The default -Ips and -RemoveIps lists are GENERATED from the repo's fleet lists
+  (scripts/lib/obs-fleet.sh + scripts/camera-set.sh) by `bash scripts/lib/ndi-discovery.sh --ips
+  pinned` and `--cambox-ips`; a test pins both defaults to that output. The traveling RESOLUME-SNV box
+  has no fixed IP, so it is not in the default. To include it, pass the list dev1 generates with the
+  box home:
       bash scripts/lib/ndi-discovery.sh --ips      (on dev1; resolves resolume.lan)
 
   Behaviour:
   - MERGES into an existing config: every other key is kept, and existing networks.ips entries are
-    kept too, with the rig IPs added (this machine may list other senders of its own).
+    kept too (minus every -RemoveIps entry), with the rig IPs added (this machine may list other
+    senders of its own).
   - Backs the old file up next to it (ndi-config.v1.json.bak-<timestamp>).
   - Writes UTF-8 WITHOUT a BOM (a BOM-prefixed JSON config is the dantesync incident class: the
     reader silently falls back to defaults), then reads the file back and verifies it.
@@ -33,8 +42,12 @@
   the same list through a GUI.
 
 .PARAMETER Ips
-  The comma-separated sender IP list to add. Default: the pinned rig list (every camera + strih-lx +
-  stream).
+  The comma-separated sender IP list to add. Default: the pinned rig list (strih-lx + stream). A list
+  that names a -RemoveIps entry is refused.
+
+.PARAMETER RemoveIps
+  The comma-separated IP list that must never be on networks.ips; every entry is removed from the
+  existing list. Default: every cambox IP (issue 1389).
 
 .PARAMETER DryRun
   Print the resulting JSON and change nothing.
@@ -45,7 +58,8 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$Ips = '10.77.9.61,10.77.9.62,10.77.9.63,10.77.9.64,10.77.9.65,10.77.9.66,10.77.9.67,10.77.9.202,10.77.9.204',
+  [string]$Ips = '10.77.9.202,10.77.9.204',
+  [string]$RemoveIps = '10.77.9.61,10.77.9.62,10.77.9.63,10.77.9.64,10.77.9.65,10.77.9.66,10.77.9.67',
   [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
@@ -79,6 +93,11 @@ $want = @(Split-IpList $Ips)
 if ($want.Count -eq 0) {
   throw "-Ips is empty -- nothing to add"
 }
+$drop = @(Split-IpList $RemoveIps)
+$bad = @($want | Where-Object { $drop -contains $_ })
+if ($bad.Count -gt 0) {
+  throw "-Ips lists $($bad -join ',') -- a cambox must never be on networks.ips (a remote finder's discovery connection aborts camera-box, issue 1389)"
+}
 
 $cfg = New-Object PSObject
 if (Test-Path -LiteralPath $path) {
@@ -97,12 +116,18 @@ $net = Get-OrAddMember $ndi 'networks' (New-Object PSObject)
 [void](Get-OrAddMember $net 'ips' '')
 $before = [string]$net.ips
 
-# Existing entries first (kept), then every rig IP not already listed.
+# Existing entries first (kept, minus every -RemoveIps entry), then every rig IP not already listed.
 $merged = New-Object System.Collections.Generic.List[string]
 foreach ($ip in (@(Split-IpList $before) + $want)) {
+  if ($drop -contains $ip) { continue }
   if (-not $merged.Contains($ip)) { $merged.Add($ip) }
 }
 $net.ips = ($merged -join ',')
+$removed = @(@(Split-IpList $before) | Where-Object { $drop -contains $_ })
+if ($removed.Count -gt 0) {
+  $verb = if ($DryRun) { 'would remove' } else { 'removed' }
+  Write-Output "$verb the cambox IP(s) $($removed -join ',') from networks.ips (issue 1389: a finder's discovery connection into a cambox aborts camera-box when it closes)"
+}
 
 if ($net.PSObject.Properties.Name -contains 'discovery') {
   # The earlier script accepted a comma list, so drop the key when EVERY entry is the retired server.
@@ -134,7 +159,7 @@ if (Test-Path -LiteralPath $path) {
 }
 [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
 
-# Read-back: no BOM, valid JSON, and every rig IP present.
+# Read-back: no BOM, valid JSON, every rig IP present and no cambox IP left.
 $bytes = [System.IO.File]::ReadAllBytes($path)
 if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
   throw "$path was written WITH a UTF-8 BOM -- refusing to leave it (the NDI reader may ignore it)"
@@ -144,6 +169,10 @@ $have = @(Split-IpList ([string]$check.ndi.networks.ips))
 $missing = @($want | Where-Object { $have -notcontains $_ })
 if ($missing.Count -gt 0) {
   throw "read-back mismatch: networks.ips='$($check.ndi.networks.ips)' lacks $($missing -join ',')"
+}
+$still = @($have | Where-Object { $drop -contains $_ })
+if ($still.Count -gt 0) {
+  throw "read-back mismatch: networks.ips='$($check.ndi.networks.ips)' still lists the cambox IP(s) $($still -join ',') (issue 1389)"
 }
 Write-Output "OK: $path networks.ips = $($check.ndi.networks.ips) (was '$before')."
 Write-Output "Restart OBS and any other NDI application so it re-reads the config."
