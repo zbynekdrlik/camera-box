@@ -29,6 +29,8 @@ E2E = SCRIPTS / "recording-e2e.sh"
 FIX = pathlib.Path(__file__).resolve().parent / "fixtures" / "win_baseline_1357"
 EXPANSION = '${WIN_BASELINE_GATE_ARGS[@]+"${WIN_BASELINE_GATE_ARGS[@]}"}'
 CALL = 'e2e_win_baseline_gather "$OUTDIR/win-baseline"'
+HERMETIC_GATE_ENV = {**os.environ, "VERSION_INTEGRITY_GATE_VENDOR_NEWEST": "0000000hermetictest",
+                     "VERSION_INTEGRITY_GATE_VENDOR_PENDING": ""}
 
 
 def _seam(tmp_path, mapping):
@@ -131,7 +133,7 @@ def test_traveling_box_away_is_skipped_and_gets_no_arg(tmp_path):
     _assert_caller_survived(r)
     assert re.search(r"^\s+box=resolume win_baseline=SKIPPED", r.stdout, re.M), r.stdout
     assert _verdict(r).split("baseline: ", 1)[1].startswith("OK"), r.stdout
-    assert _args(r) == ["--win-baseline", f"{'stream'}={tmp_path / 'out'}/stream.txt"], r.stdout
+    assert _args(r) == ["--win-baseline", f"stream={tmp_path / 'out'}/stream.txt"], r.stdout
     assert "1 box gather(s)" in _verdict(r)
 
 
@@ -146,17 +148,55 @@ def test_a_stale_gather_of_an_earlier_run_is_never_graded(tmp_path):
     assert all("resolume=" not in a for a in _args(r)), r.stdout
 
 
+def test_a_stale_gather_that_cannot_be_removed_is_never_graded_and_never_fatal(tmp_path):
+    # a directory where the old gather file was: rm -f cannot remove it, and under the caller's
+    # `set -e` an unguarded rm would abort the whole E2E
+    out = tmp_path / "out"
+    (out / "resolume.txt").mkdir(parents=True)
+    (out / "resolume.txt" / "keep").write_text("x")
+    seam = _seam(tmp_path, {"stream": FIX / "dup_high_performance_all_ok.txt"})
+    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream"})
+    _assert_caller_survived(r)
+    assert "old " + str(out / "resolume.txt") + " cannot be removed -- resolume is not graded" in r.stdout, r.stdout
+    assert _args(r) == ["--win-baseline", f"stream={out}/stream.txt"], r.stdout
+    assert _verdict(r).split("baseline: ", 1)[1].startswith("OK"), r.stdout
+
+
+def test_a_stale_regular_file_in_a_read_only_dir_is_never_graded(tmp_path):
+    # the old gather is a regular file, but its dir is read-only, so it cannot be removed (as root the
+    # rm succeeds instead -- the file is then gone, and the assertions below hold the same way)
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "resolume.txt").write_bytes((FIX / "resolume_balanced_all_drift.txt").read_bytes())
+    out.chmod(0o555)
+    try:
+        seam = _seam(tmp_path, {"stream": FIX / "dup_high_performance_all_ok.txt"})
+        r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream"})
+    finally:
+        out.chmod(0o755)
+    _assert_caller_survived(r)
+    assert all("resolume=" not in a for a in _args(r)), r.stdout
+
+
 def test_hung_gather_hits_the_bound_is_one_timeout_line_and_leaves_no_process(tmp_path):
     seam = _seam(tmp_path, {"stream": "hang"})
+    systmp = tmp_path / "systmp"
+    systmp.mkdir()
     r, elapsed = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream",
-                                    "E2E_WIN_BASELINE_TIMEOUT": "2"})
+                                    "E2E_WIN_BASELINE_TIMEOUT": "4", "TMPDIR": str(systmp)})
     _assert_caller_survived(r)
-    assert elapsed < 15, elapsed
+    assert elapsed < 20, elapsed
     v = _verdict(r)
-    assert v.split("baseline: ", 1)[1].startswith("TIMEOUT after 2 s"), v
+    assert v.split("baseline: ", 1)[1].startswith("TIMEOUT after 4 s"), v
+    # the TERM'd check still runs its EXIT trap (bash catches TERM when an EXIT trap is set), so its
+    # mktemp work dir is gone from the shared TMPDIR
+    assert not list(systmp.glob("win-baseline-check.*")), list(systmp.iterdir())
     # the box it was reading when the bound hit still goes to the gate (empty -> UNKNOWN there)
     assert _args(r) == ["--win-baseline", f"stream={tmp_path / 'out'}/stream.txt"], r.stdout
-    pid = int((tmp_path / "hang.pid").read_text().strip())
+    _assert_gone(int((tmp_path / "hang.pid").read_text().strip()))
+
+
+def _assert_gone(pid):
     time.sleep(0.5)
     try:
         os.kill(pid, 0)
@@ -206,6 +246,29 @@ def _timeout_s(env):
     return int(r.stdout.strip())
 
 
+def _source_default(path, pattern):
+    m = re.search(pattern, path.read_text())
+    assert m, (path, pattern)
+    return int(m.group(1))
+
+
+def test_timeout_defaults_are_the_checks_own_defaults():
+    # the bound must track the check's real per-box bounds: if one of those defaults is raised, this
+    # fails instead of the E2E silently reading a slow-but-answering box as TIMEOUT
+    ssh = _source_default(SCRIPTS / "win-baseline-check.sh",
+                          r'SSH_TIMEOUT="\$\{WIN_BASELINE_SSH_TIMEOUT:-(\d+)\}"')
+    fleet = SCRIPTS / "lib" / "obs-fleet.sh"
+    res = _source_default(fleet, r'timeout "\$\{OBS_FLEET_RESOLVE_TIMEOUT:-(\d+)\}" getent ahosts ')
+    stat = _source_default(fleet, r'timeout "\$\{OBS_FLEET_STATUS_TIMEOUT:-(\d+)\}" bash -c')
+    lib = LIB.read_text()
+    for var, val in (("WIN_BASELINE_SSH_TIMEOUT", ssh), ("OBS_FLEET_RESOLVE_TIMEOUT", res),
+                     ("OBS_FLEET_STATUS_TIMEOUT", stat)):
+        assert f'_e2e_wb_uint "${{{var}:-}}" {val})' in lib, (var, val)
+    clean = {k: "" for k in ("E2E_WIN_BASELINE_TIMEOUT", "WIN_BASELINE_SSH_TIMEOUT",
+                             "OBS_FLEET_RESOLVE_TIMEOUT", "OBS_FLEET_STATUS_TIMEOUT")}
+    assert _timeout_s(clean) == 2 * (2 * ssh + res + stat) + 10
+
+
 def test_timeout_is_sized_from_the_checks_own_per_box_bounds():
     clean = {k: "" for k in ("E2E_WIN_BASELINE_TIMEOUT", "WIN_BASELINE_SSH_TIMEOUT",
                              "OBS_FLEET_RESOLVE_TIMEOUT", "OBS_FLEET_STATUS_TIMEOUT")}
@@ -227,9 +290,11 @@ def test_the_helper_feeds_the_gate_and_never_changes_its_exit(tmp_path):
     state.write_text('{"obs_version":"32.2.0"}\n')
 
     def gate(extra):
+        # hermetic: seed the vendor-pin seams so the gate never runs a live `git fetch origin`
+        # (the same default tests/version_integrity_gate.rs sets for every gate subprocess)
         return subprocess.run(
             ["bash", str(SCRIPTS / "version-integrity-gate.sh"), "--win-state", f"stream={state}", *extra],
-            capture_output=True, text=True, cwd=REPO, timeout=120)
+            capture_output=True, text=True, cwd=REPO, timeout=120, env=HERMETIC_GATE_ENV)
 
     base, fed = gate([]), gate(_args(r))
     assert fed.returncode == base.returncode, (base.returncode, fed.returncode)

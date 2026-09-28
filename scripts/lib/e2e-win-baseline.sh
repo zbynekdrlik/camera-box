@@ -83,10 +83,15 @@ e2e_win_baseline_timeout_s() {
 # box whose gather file exists (a box the check read, or started to read before a timeout -- an empty
 # or partial file grades UNKNOWN in the gate, which is the honest reading). No file -> an empty array.
 # Stale gathers of an earlier run in a reused OUT_DIR are removed first, so a box SKIPPED now is never
-# graded from an old file. The full check output is kept in OUT_DIR/win-baseline-check.log.
+# graded from an old file; a stale path that cannot be removed (a directory, a read-only dir) keeps
+# that box out of the array for this run, named on one line. Only a regular file is ever handed on.
+# The full check output is kept in OUT_DIR/win-baseline-check.log. When the bound hits, `timeout`
+# TERMs its whole process group: the check (bash with an EXIT trap, so it catches TERM) removes its
+# own mktemp work dir and exits, and the fetch child it was waiting on dies with it; each inner
+# `timeout N scp/ssh` of the check runs in its own group and ends within its own N s.
 # Always returns 0: the baseline is report-only and never aborts the caller's `set -euo pipefail`.
 e2e_win_baseline_gather() {
-  local out_dir="${1:-}" check log bound boxes box rc=0 verdict graded=0
+  local out_dir="${1:-}" check log bound boxes box rc=0 verdict graded=0 unremovable=" "
   check="${E2E_WIN_BASELINE_CHECK:-$E2E_WIN_BASELINE_LIB_DIR/../win-baseline-check.sh}"
   WIN_BASELINE_GATE_ARGS=()
   if [ -z "$out_dir" ]; then
@@ -99,7 +104,11 @@ e2e_win_baseline_gather() {
   fi
   boxes="$(e2e_win_baseline_boxes)"
   for box in $boxes; do
-    rm -f "$out_dir/$box.txt"
+    rm -f -- "$out_dir/$box.txt" 2>/dev/null || true
+    if [ -e "$out_dir/$box.txt" ]; then
+      unremovable="$unremovable$box "
+      echo "    Windows OBS-box baseline (issue 1357): an old $out_dir/$box.txt cannot be removed -- $box is not graded this run"
+    fi
   done
   log="$out_dir/win-baseline-check.log"
   bound="$(e2e_win_baseline_timeout_s)"
@@ -114,7 +123,8 @@ e2e_win_baseline_gather() {
     *) verdict="FAILED (rc ${rc}) -- the check did not run to the end" ;;
   esac
   for box in $boxes; do
-    [ -e "$out_dir/$box.txt" ] || continue
+    case "$unremovable" in *" $box "*) continue ;; esac
+    [ -f "$out_dir/$box.txt" ] || continue
     WIN_BASELINE_GATE_ARGS+=(--win-baseline "$box=$out_dir/$box.txt")
     graded=$((graded + 1))
   done
