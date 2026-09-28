@@ -455,12 +455,13 @@ on the 5 s boundary vector); the live receive-path cure reproduces only live —
 fleet deploy (7 senders restarting within 45 s) after which every strih camera input's `received=`
 advances within 60 s with no WS heal and no OBS relaunch (the supervisor's post-deploy repro).
 
-## issue 1242 — the connect-on-show PARK is in-thread, never a hide-path thread stop
+## issue 1242 — no receiver ever parks (the connect-on-show park was REMOVED, 28.9.2026)
 
-A genlocked source flagged `genlock_connect_on_show` (the strih program-path role) PARKS while
-hidden: at the TOP of the receiver loop, before the reset block, it hands its receiver to the
-issue-1320 detached reaper and `continue`s; on show it re-arms `reset_ndi_receiver`. It never
-`break`s, never clears `s->running`, never empties `ndi_source_name`, and the forced behavior stays
-KEEP_ACTIVE — because libobs calls `info.hide` on the GRAPHICS thread, and the stock STOP_RESUME
-hide path would `pthread_join` the receiver thread there on every cut. Full mechanism, roles and
-consumer contract: `.claude/rules/strih-bandwidth-roles.md`.
+The strih low-bandwidth mechanism (the `genlock_connect_on_show` program-path role that PARKED a
+hidden genlocked input in-thread, the `genlock-park` log line, the always-connected `MV` monitor
+twins and the frontend multiview cell target) was removed on owner order 28.9.2026 ("cize vycistis
+strih obs aby tam neboli tie low bandwith sceny"): the strih-lx uplink cause is fixed in hardware
+(5 GbE, then 10 GbE). Every genlocked source keeps the issue-764 KEEP_ACTIVE keep-alive, always
+connected. Do not reintroduce a per-source connect-on-show or park path as a bandwidth workaround;
+if it is ever needed again, the removed in-thread design is in git history (never the stock
+STOP_RESUME hide path, which joins the receiver thread on the graphics thread).

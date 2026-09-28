@@ -34,9 +34,7 @@ align), so looping it would hide the drift. The soak only measures.
 Every rig action is an existing primitive: the issue-830 lease (own holder name
 `camera-box-av-soak`, expected release = the whole run, so a CI E2E fails fast), the issue-281
 heartbeat, `stray_session_check_assert` (at setup, before the setup mutations, before EVERY
-StartRecord), the issue-1242 connect-on-show HOLD the E2E uses (`connect_on_show_e2e_hold` /
-`_wait_live` / `_restore` in `scripts/lib/connect-on-show-hold.sh`, the strih-side 4 h marker
-re-asserted every slot), `obs_phase2.py record/switch/program-scene`, `obs_burn_filter.py
+StartRecord), `obs_phase2.py record/switch/program-scene`, `obs_burn_filter.py
 check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-verdict-on-strih-lx.sh`
 + `recording-verdict-on-stream.sh --execute` (parallel, each under `timeout`), `recording-verdict
 --merge-partials`.
@@ -52,7 +50,7 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   production scene name is never typed (the one declaration is `scripts/lib/stream-dev-scene.sh`).
 - **Reads before writes.** Setup does every read (guard, both program scenes, painter, every burn
   state) before the first mutation; a refusal there is exit 4 and nothing changed. After the first
-  mutation (the connect-on-show hold) every abort is exit 5 and cleanup restores.
+  mutation (a burn turned on) every abort is exit 5 and cleanup restores.
 - **Recording flags are conservative.** A box's "started" flag is set BEFORE `record --action start`
   (the start verifies the file grows AFTER StartRecord, so a failed or timed-out start can leave OBS
   recording); any start failure stops both boxes; a flag clears only when `record --action status`
@@ -75,7 +73,7 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   With nothing left it releases the soak's lease (holder-checked, exit 0). It refuses (exit 4)
   while the soak's own process (`<run-dir>/pid`) still runs.
 - **Cleanup cannot be cut short** (the issue-808 recipe, `.claude/rules/ci-testing-gotchas.md`):
-  `set +e; trap '' INT TERM HUP PIPE`, every OBS/burn/connect-on-show/ssh call in its own session
+  `set +e; trap '' INT TERM HUP PIPE`, every OBS/burn/ssh call in its own session
   (`setsid -w`), background sleeps/decodes killed. The second-SIGTERM and process-group Ctrl-C
   tests prove the `trap ''` half; `setsid -w` is defence in depth the fakes cannot isolate (GNU
   `timeout` already starts its child in its own process group).
@@ -85,7 +83,7 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   the strih program restore (strih's program feeds the stream box's program). Only a proven `idle`
   rig gets them; `live` or `unknown` leaves the recordings running (`NOT stopping`, exit 5, lease
   kept for `--stop-leftovers`) and the strih program on the last sweep scene (`strih program NOT
-  restored`). Burns and connect-on-show still go back: that returns production state.
+  restored`). The burns still go back: that returns production state.
 - **A broadcast mid-run aborts the soak** (exit 5), checked by the slot guard, before EVERY sweep
   cut, before the StopRecords and every ~60 s between slots -- never a cut while a box streams.
 - **A recording is started or stopped only on a PROVEN idle rig** (`broadcast_settled`: an
@@ -99,8 +97,8 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   `obs_phase2 record --action start` would stop an already-running recording first).
 - **Leaving TEST mode ends the run.** A stream program that reads another scene, or a painter
   service that reads `inactive` (`rig-mode.sh event` stops it), STOPS the run (like a low record
-  volume: full cleanup, exit = the report's verdict) -- it never holds the lease and the
-  connect-on-show hold (full bandwidth on every strih camera) through a production. An unreadable
+  volume: full cleanup, exit = the report's verdict) -- it never holds the lease through a
+  production. An unreadable
   read or a stalled marker log is a transient: a skipped row.
 - **A decode is stopped on the box too.** Killing the local `timeout` does not stop a remote
   `recording-verdict`: on a decode timeout, and in cleanup while a decode runs, the soak stops
@@ -135,8 +133,8 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
 - Window = ONE sweep over the soak cameras, `AV_SOAK_SEGMENT_SECS` (30, the E2E's calibrated
   `SEGMENT_SECS`) each: 7 cameras = 210 s. A per-camera A/V offset needs that camera on program and
   `av_window::MIN_AV_SAMPLES` (8) clustered markers, so a flat 60 s window cannot measure every camera.
-  The connect-on-show hold keeps every camera's main input connected, so each cut is warm, as in the
-  E2E (measuring cold cuts would be a separate decision).
+  Every strih camera's main input is always connected (no connect-on-show park since 28.9.2026),
+  so each cut is warm, as in the E2E (measuring cold cuts would be a separate decision).
 - `av_<cam>_ms` = the verdict's MEASURED `all_cambox_av_sync.<cam>.av_offset_ms` only (a `derived`
   or `unknown` value is never a sample); graded `|offset - expected_ms| <= tolerance`, inclusive.
 - Spreads -- three columns, the graded set is `--spread-columns` (default `av_spread_ms`, ROZHODNUTÉ 5860604301):
@@ -236,8 +234,8 @@ Exit 5 with `RECORDING MAY STILL BE RUNNING` in the log = check that box before 
 the soak kept the rig lease, and `bash scripts/av-soak.sh --stop-leftovers "$D"` (run again
 once the box is idle) stops what is provably the soak's and releases it.
 **What it holds:** the rig lease for the whole run (a CI full-path E2E fails fast with
-`OUTCOME=RIG_LEASE_HELD`; restreamer waits a bounded time), connect-on-show held off on strih (full
-bandwidth for every camera, as during an E2E), the strih program (swept), the burns it turned on,
+`OUTCOME=RIG_LEASE_HELD`; restreamer waits a bounded time), the strih program (swept), the burns
+it turned on,
 and a recording on strih + stream for ~4 min of every 10. Post the report (`$D/report.txt` +
 `report.json`) on issue 1367, then hand the owner `$D/cleanup-plan.txt` if the disk needs the space.
 
