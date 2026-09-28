@@ -14,7 +14,9 @@ least three watchdogs now lives once in `scripts/lib/watchdog-common.sh`, source
 `scripts/lib/obs-watchdog-decision.sh` (confirm / throttle / `watchdog_notify_key`):
 `read_state_field`, `write_state_field` (the read-first copy), `clear_throttle`,
 `clear_box_throttle`, `clear_source_throttle`, `source_key`, `netreach_box_alerted`,
-`fetch_bundle_json`. The criterion was applied to every function the watchdogs define.
+`fetch_bundle_json`. The criterion was applied to every function the watchdogs define. The one
+exception is the older `write_state_field` (12 identical copies): its code differs from the lib's
+copy of the same name, so it stays local (see the overrides below).
 
 ## Rules for a new or edited watchdog
 
