@@ -9,10 +9,11 @@
 //! `frame_id` counter. The soak started that recording while the strih program still showed the
 //! previous window's last sweep camera, so frames 150..=159 carry that input's counter
 //! (298341..=298350), and at frame 160 -- the first sweep cut, which opens schedule window 0 --
-//! the ids continue on Cam 1's counter (87926, 87927, ...). The frames before window 0 belong to no window, so the
-//! verdict charges the backward counter change there as one REAL DROP (by design: a crossing is
-//! excused only between two KNOWN windows). The fix is in the soak (`scripts/av-soak.sh` cuts to
-//! the first sweep scene before StartRecord, as the E2E's [4/8] does); the verdict stays strict.
+//! the ids continue on Cam 1's counter (87926, 87927, ...). The frames before window 0 belong to
+//! no window, so the verdict charges the backward counter change there as one REAL DROP (by
+//! design: a crossing is excused only between two KNOWN windows). The fix is in the soak
+//! (`scripts/av-soak.sh` cuts to the first sweep scene before StartRecord, as the E2E's [4/8]
+//! does); the verdict stays strict.
 //!
 //! What this file pins, all on the same real frames:
 //! - as recorded (another input before window 0): exactly one real drop, id 87926, frame 160;
@@ -110,8 +111,10 @@ fn step_back(mut p: RecordingPartial, frame_index: u64, by: u32) -> RecordingPar
     p
 }
 
-/// Merge `partial` as the stream partial with the window's own schedule, exactly as the soak's
-/// merge does (`scripts/lib/av-soak.sh` `av_soak_merge_argv`), and return `full_chain.loss.strih`.
+/// Merge `partial` as the stream partial with the window's own schedule and the soak's fps and
+/// painter arguments (`scripts/lib/av-soak.sh` `av_soak_merge_argv`, without the strih partial and
+/// `--offline-ack-cams`: the strih hop's loss is read from the stream recording), and return
+/// `full_chain.loss.strih`.
 fn strih_loss(tag: &str, partial: &RecordingPartial) -> serde_json::Value {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();

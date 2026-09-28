@@ -25,7 +25,7 @@ align), so looping it would hide the drift. The soak only measures.
 | File | Role |
 |---|---|
 | `scripts/av-soak.sh` | the orchestrator: `--plan` (DEFAULT, touches nothing), `--run`, `--report RUN_DIR`, `--stop-leftovers RUN_DIR` (the unit's `ExecStopPost` safety net) |
-| `scripts/lib/av-soak.sh` | pure builders shared by plan AND run (argv of the two extracts + the merge), the window arithmetic, the first sweep scene (`av_soak_first_sweep_scene`), the two read-only cam2 reads, the record-volume free-space read, the ONE retried rig-busy read (`av_soak_rig_busy_settled` / `av_soak_broadcast_of`, also used by `--stop-leftovers` and the restart matrix) |
+| `scripts/lib/av-soak.sh` | pure builders shared by plan AND run (argv of the two extracts + the merge), the window arithmetic, the two read-only cam2 reads, the record-volume free-space read, the ONE retried rig-busy read (`av_soak_rig_busy_settled` / `av_soak_broadcast_of`, also used by `--stop-leftovers` and the restart matrix) |
 | `scripts/av_soak_decision.py` | pure decision: `bounds`, `row` (one CSV row per window from the merged verdict JSON), `report` (1 h partial + full, exit 0 PASS / 1 FAIL / 2 UNKNOWN / 3 input error) |
 | `scripts/lib/av-soak-leftovers.sh` | the `--stop-leftovers` mode (`av_soak_stop_leftovers`): runs the `leftovers` plan, stops/clears, releases the soak's lease when nothing is left |
 | `scripts/av_soak_rig_state.py` | pure rig-state decisions over one `rig-busy-check` read: `broadcast` (live / unknown / idle -- may cleanup cut the strih program?) and `leftovers` (the `--stop-leftovers` plan: which flagged recording is provably the soak's) |
@@ -89,6 +89,10 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   restored`). Burns and connect-on-show still go back: that returns production state.
 - **A broadcast mid-run aborts the soak** (exit 5), checked by the slot guard, before EVERY sweep
   cut, before the StopRecords and every ~60 s between slots -- never a cut while a box streams.
+  The slot's first-scene cut before StartRecord has two gates: the settled idle read, then the
+  rig-busy guard (`the slot-k first-scene cut`). The guard also refuses a recording nobody streams
+  (the Companion orphan auto-record, a rehearsal), which the broadcast read does not see; a busy
+  rig there aborts with no cut and nothing to restore.
 - **A recording is started or stopped only on a PROVEN idle rig** (`broadcast_settled`: an
   unreadable read is retried `AV_SOAK_BROADCAST_READS` x `AV_SOAK_BROADCAST_RETRY_S`, default
   3 x 20 s, so one stream OBS restart neither ends an 8 h run nor keeps a recording running).
@@ -144,8 +148,9 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   window, and the verdict excuses a counter change only between two KNOWN windows (issue 708). So a
   recording that starts on another camera reads one strih `real_drop` at the first cut. The first
   8 h run had it in 24/25 windows, because the previous slot's last camera stays on program between
-  slots. Every slot therefore cuts the strih program to `FIRST_SCENE` right after the settled idle
-  read and before StartRecord. The E2E has this shape by construction: its [4/8] routes the strih
+  slots. Every slot therefore cuts the strih program to `FIRST_SCENE` (the first line of the ONE
+  sweep plan `SWEEP_PLAN`, read once at setup and walked by the sweep and the plan printout too)
+  after the settled idle read and the rig-busy guard, before StartRecord. The E2E has this shape by construction: its [4/8] routes the strih
   program to the camera under test, which is the first sweep pair. A failed cut is the row
   `skipped:first_scene_cut_failed`, with nothing started. Never "fix" this in the verdict: a
   backward jump on the SAME counter at window 0's start must stay a real drop
