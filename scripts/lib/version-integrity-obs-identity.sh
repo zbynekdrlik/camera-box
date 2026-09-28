@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# airuleset:script-ok source-only lib (pure verdict functions + three path pins, no other top-level statements) -- the sourcing gate owns strict mode; set -euo pipefail here would leak into the sourcing shell (ci-testing-gotchas)
+# airuleset:script-ok source-only lib (pure verdict functions + three path pins + the row function, no other top-level statements) -- the sourcing gate owns strict mode; set -euo pipefail here would leak into the sourcing shell (ci-testing-gotchas)
 # scripts/lib/version-integrity-obs-identity.sh -- the issue-826 strih OBS-identity verdict family of
 # scripts/version-integrity-gate.sh, moved out of the gate VERBATIM (issue 1377: the gate was over the
 # repo's 1000-line file budget). No behaviour change: the gate sources this lib BEFORE its
 # source-guard, exactly where these functions used to sit, so sourcing the gate (the unit tests in
-# tests/version_integrity_gate.rs) still defines every function, and the gate's main() still reads the
-# three DEFAULT_* pins below. The only additions to the moved text are the three
-# `shellcheck disable=SC2034` lines: the pins are read by the sourcing gate, not in this file.
-# The moved comments were written inside the gate: their "`main` below" is the gate's main(), and
-# the facet they call OPT-IN has since been ENFORCED there (issue 829; port4455_identity last, in
-# issue 1067) -- the gate's main() is the authority on how each verdict is wired.
+# tests/version_integrity_gate.rs) still defines every function. Issue 1384 moved the facet's ROW
+# block out of the gate's main() too (vig_row_obs_identity, at the end of this file), so the three
+# DEFAULT_* pins below are now read here.
+# The moved verdict comments were written inside the gate: their "`main` below" is the gate's main()
+# (its per-box loop now calls vig_row_obs_identity), and the facet they call OPT-IN has since been
+# ENFORCED (issue 829; port4455_identity last, in issue 1067) -- vig_row_obs_identity is the
+# authority on how each verdict is wired.
 
 # --- #826: strih OBS-identity machine-check facet — PURE verdict functions -------------------
 #
@@ -23,11 +24,9 @@
 # `genlock_build_sha`'s original #756 landing -- so every existing fixture and the live fleet keep
 # gating exactly as today until the supervisor redeploys bundle-state-server.py with this facet.
 
-# shellcheck disable=SC2034  # read by the sourcing gate's main(), not in this lib
+# The three pins vig_row_obs_identity (end of this file) grades each box against.
 DEFAULT_OBS_INSTALL_EXE='C:\Program Files\obs-studio\bin\64bit\obs64.exe'
-# shellcheck disable=SC2034  # read by the sourcing gate's main(), not in this lib
 DEFAULT_OBS_INSTALL_WORKDIR='C:\Program Files\obs-studio\bin\64bit'
-# shellcheck disable=SC2034  # read by the sourcing gate's main(), not in this lib
 DEFAULT_STARTUP_SHORTCUT='C:\ProgramData\Microsoft\Windows\Start Menu\Programs\OBS Studio.lnk'
 
 # obs_installs_verdict PINNED_EXE INSTALLS_CSV -> acceptance #1: exactly ONE launchable OBS install
@@ -141,5 +140,113 @@ startup_chain_verdict() {
     return 20
   fi
   printf '  %-22s OK       (NL_STARTUP.ahk app1 + Start Menu shortcut both resolve to the pinned install, workdir %s)\n' "startup_chain" "$pinned_workdir"
+  return 0
+}
+
+# vig_row_obs_identity NAME FILE README IS_STRIH_LINUX -> the issue-826 OBS-identity rows of one
+# --win-state box (obs_installs, port4455_identity, obs_process_count, and startup_chain on the
+# box named strih), each SKIPPED on a Linux strih (issue 1351). Moved verbatim out of the gate's
+# main() (issue 1384); it reads the DEFAULT_* pins above and the gate's state_json_value +
+# drift-guard's pinned_obs_version (both defined by the time main() runs).
+# It follows the vig_row_* contract in the header of scripts/lib/version-integrity-rows.sh.
+vig_row_obs_identity() {
+  local name="$1" file="$2" readme="$3" is_strih_linux="$4"
+  local engine_out=""
+  # #826 OBS-identity machine-check facet, ENFORCED fleet-wide (#829, the 758-style second step
+  # after the 756-style opt-in landing): the generic install + process-count checks run on EVERY
+  # box UNCONDITIONALLY -- an un-upgraded / absent box is a real gate-blocking UNKNOWN, no longer
+  # a silent skip. #1067: port4455_identity is now ALSO enforced (its former opt-in guard is
+  # removed below) -- the bundle-state-server gather context was fixed (WMI
+  # Win32_Process.ExecutablePath, readable from the non-elevated task where the OpenProcess-based
+  # Get-Process.Path was access-denied on the elevated OBS), so every box reports the :4455 owner
+  # path now; an unreported owner is a REAL gate-blocking UNKNOWN. This completes the 756 -> 758
+  # two-step for the last obs-identity facet.
+  local obs_installs_csv port4455_owner_path port4455_owner_ver obs_proc_count
+  obs_installs_csv="$(state_json_value "$file" obs_installs)"
+  port4455_owner_path="$(state_json_value "$file" port4455_owner_path)"
+  port4455_owner_ver="$(state_json_value "$file" port4455_owner_version)"
+  obs_proc_count="$(state_json_value "$file" obs_process_count)"
+  local frc=0
+
+  # issue 1351 follow-up: on a Linux strih (--strih-linux, box named "strih") every #826
+  # OBS-identity facet below is a Windows-only machine check (install-path scan, :4455 owner
+  # exe, process count via tasklist, NL_STARTUP.ahk) -- SKIP each one loudly (counted ok, never
+  # UNKNOWN) instead of running it. Windows strih/stream are byte-identical (unaffected).
+  if [ "$is_strih_linux" = 1 ]; then
+    printf '  %-22s SKIPPED  (strih is the Linux notebook -- #826 Windows OBS-identity facet not applicable, issue 1351)\n' "obs_installs"
+    ok=$((ok + 1))
+  else
+    engine_out="$(obs_installs_verdict "$DEFAULT_OBS_INSTALL_EXE" "$obs_installs_csv")" || frc=$?
+    printf '%s\n' "$engine_out" | sed 's/^/    /'
+    case "$frc" in
+      0)  ok=$((ok + 1)) ;;
+      20) bad=$((bad + 1)) ;;
+      11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:obs_installs") ;;
+    esac
+  fi
+
+  # port4455_identity: ENFORCED fleet-wide (#1067, the 758-style second step) -- runs
+  # UNCONDITIONALLY on every box now, exactly like obs_installs / obs_process_count above. Its
+  # former opt-in `if [ -n "$port4455_owner_path" ]` guard is gone: the gather context was fixed
+  # (WMI Win32_Process.ExecutablePath), so an EMPTY owner path is now a real gate-blocking UNKNOWN
+  # (the verdict function returns 11 for an empty owner), never a silent skip.
+  local pinned_obs_ver=""
+  pinned_obs_ver="$(pinned_obs_version "$readme" 2>/dev/null)" || pinned_obs_ver=""
+  frc=0
+  if [ "$is_strih_linux" = 1 ]; then
+    printf '  %-22s SKIPPED  (strih is the Linux notebook -- #826 Windows OBS-identity facet not applicable, issue 1351)\n' "port4455_identity"
+    ok=$((ok + 1))
+  else
+    engine_out="$(port_identity_verdict "$DEFAULT_OBS_INSTALL_EXE" "$pinned_obs_ver" "$port4455_owner_path" "$port4455_owner_ver")" || frc=$?
+    printf '%s\n' "$engine_out" | sed 's/^/    /'
+    case "$frc" in
+      0)  ok=$((ok + 1)) ;;
+      20) bad=$((bad + 1)) ;;
+      11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:port4455_identity") ;;
+    esac
+  fi
+
+  frc=0
+  if [ "$is_strih_linux" = 1 ]; then
+    printf '  %-22s SKIPPED  (strih is the Linux notebook -- #826 Windows OBS-identity facet not applicable, issue 1351)\n' "obs_process_count"
+    ok=$((ok + 1))
+  else
+    engine_out="$(obs_process_count_verdict "$obs_proc_count")" || frc=$?
+    printf '%s\n' "$engine_out" | sed 's/^/    /'
+    case "$frc" in
+      0)  ok=$((ok + 1)) ;;
+      20) bad=$((bad + 1)) ;;
+      11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:obs_process_count") ;;
+    esac
+  fi
+
+  # #826 — startup-chain facet, ENFORCED but strih-scoped (#829): strih MUST run NL_STARTUP.ahk,
+  # so it now runs UNCONDITIONALLY on strih -- an unreported chain is a gate-blocking UNKNOWN
+  # (unread), never a silent skip. Re-keyed from ahk-presence to the box identity so a strih box
+  # that stops reporting the ahk keys can no longer silently drop the check. stream runs no
+  # NL_STARTUP.ahk (per .claude/skills/obs-ops), so it NEVER engages here -- absent ahk on stream
+  # stays OK, not UNKNOWN.
+  if [ "$name" = "strih" ]; then
+    if [ "$is_strih_linux" = 1 ]; then
+      printf '  %-22s SKIPPED  (strih is the Linux notebook -- no NL_STARTUP.ahk startup chain, issue 1351)\n' "startup_chain"
+      ok=$((ok + 1))
+    else
+      local ahk_shortcut ahk_run ahk_dead shortcut_target shortcut_workdir
+      ahk_shortcut="$(state_json_value "$file" ahk_app1_shortcut_path)"
+      ahk_run="$(state_json_value "$file" ahk_app1_run)"
+      ahk_dead="$(state_json_value "$file" ahk_dead_config_present)"
+      shortcut_target="$(state_json_value "$file" shortcut_target_path)"
+      shortcut_workdir="$(state_json_value "$file" shortcut_workdir)"
+      local frc2=0
+      engine_out="$(startup_chain_verdict "$DEFAULT_OBS_INSTALL_EXE" "$DEFAULT_OBS_INSTALL_WORKDIR" "$DEFAULT_STARTUP_SHORTCUT" \
+        "$ahk_shortcut" "$ahk_run" "$ahk_dead" "$shortcut_target" "$shortcut_workdir")" || frc2=$?
+      printf '%s\n' "$engine_out" | sed 's/^/    /'
+      case "$frc2" in
+        0)  ok=$((ok + 1)) ;;
+        20) bad=$((bad + 1)) ;;
+        11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:startup_chain") ;;
+      esac
+    fi
+  fi
   return 0
 }
