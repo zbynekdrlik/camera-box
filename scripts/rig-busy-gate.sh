@@ -219,14 +219,19 @@ for ((i = 1; i <= MAX_ITERATIONS; i++)); do
     # scripts/rig-lease-release.sh) releases it later, on success, on a later step's failure, AND
     # on cancellation.
     RIG_LEASE_PROCEEDING=1
+    # issue 1383: keep the held lease visibly alive until the recording step's own heartbeat
+    # refresher takes over (the verdict-exe fetch step + the first preflight ran ~18 min unbeaten).
+    # Detached, all fds on /dev/null; it ends on release, a foreign holder or the hold ceiling.
+    rig_lease_keepalive_spawn "$RIG_LEASE_REPO" "$RIG_LEASE_RUN_ID"
     report_outcome "OUTCOME=RIG_FREE"
     exit 0
   fi
 
   # #830: keep our own lease heartbeat fresh across a long busy-wait (comfortably unnecessary at
   # the default budgets -- MAX_ITERATIONS*SLEEP_SECS <= RIG_LEASE_STALE_SECS -- but cheap and
-  # correct regardless of overrides).
-  rig_lease_heartbeat_touch
+  # correct regardless of overrides). issue 1383: through the one holder keep-alive, which never
+  # bumps a foreign holder's heartbeat and rolls the declared release time while we wait.
+  rig_lease_refresh_if_mine "$RIG_LEASE_REPO" "$RIG_LEASE_RUN_ID" >/dev/null || true
 
   # #649 item 3: surface obs_phase2.py's plain-English diagnostic hint (per-box streaming vs
   # recording state -> stray-test-recording-vs-real-broadcast) as its OWN log line, not just
