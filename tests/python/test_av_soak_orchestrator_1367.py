@@ -74,17 +74,23 @@ if cmd == "rig-busy-check":
                                            "recordTimecode": None}]}))
         sys.exit(3)
     busy = os.environ.get("FAKE_BUSY") == "1"
+    # a recording the soak did not start (the Companion orphan auto-record, a rehearsal): the real
+    # rig-busy-check reports busy on recording OR streaming, the soak's broadcast read only on streaming
+    foreign = reached("FAKE_FOREIGN_RECORDING_AFTER_PROGRAM_READS", count("stream-program"))
     diags = []
     for box in ("strih", "stream"):
         if os.environ.get("FAKE_BUSY_UNREADABLE") == box:
             continue
         streaming = busy or os.environ.get("FAKE_STREAMING_BOX") == box or (live and box == "stream")
         flag = os.path.join(state, "recording-" + box)
-        recording = os.path.exists(flag)
+        recording = os.path.exists(flag) or (foreign and box == "strih")
         tc = None
         if recording:
-            txt = open(flag).read().strip()
-            age = time.time() - float(txt) if txt else 0.0
+            if os.path.exists(flag):
+                txt = open(flag).read().strip()
+                age = time.time() - float(txt) if txt else 0.0
+            else:
+                age = 600.0  # the foreign recording: running for 10 min already
             age = float(os.environ.get("FAKE_RECORD_AGE_" + box, age))
             ms = int(round(age * 1000))
             tc = "%02d:%02d:%02d.%03d" % (ms // 3600000, ms // 60000 % 60, ms // 1000 % 60, ms % 1000)
@@ -93,7 +99,7 @@ if cmd == "rig-busy-check":
     if os.environ.get("FAKE_BUSY_UNREADABLE"):
         print(json.dumps({"busy": None, "reasons": ["unreachable"], "diagnostics": diags}))
         sys.exit(3)
-    print(json.dumps({"busy": busy or live, "diagnostics": diags}))
+    print(json.dumps({"busy": busy or live or foreign, "diagnostics": diags}))
 elif cmd == "stream-detail":
     pass
 elif cmd == "program-scene":
@@ -610,11 +616,14 @@ def test_every_slot_records_from_the_first_sweep_scene(rig):
         "each slot's recording starts on the first sweep scene, never the operator's program " \
         "or the previous slot's last camera"
     assert first_cut == ["Cam 1", "Cam 1"], "window 0 then opens on a same-input cut"
+    pre_cuts = 0
     for i, c in enumerate(obs):
         nxt = next((d for d in obs[i + 1:] if d[:1] in (["switch"], ["record"])), None)
         if c[:1] == ["switch"] and nxt is not None and nxt[:1] == ["record"] and "start" in nxt:
-            assert obs[i - 1][:1] == ["rig-busy-check"], \
-                "the cut before StartRecord directly follows the proven-idle broadcast read"
+            pre_cuts += 1
+            assert i > 0 and obs[i - 1][:1] == ["rig-busy-check"], \
+                "the cut before StartRecord directly follows a rig-busy read (the slot's guard)"
+    assert pre_cuts == 2, "one first-scene cut per slot"
     switches = [c for c in obs if c[:1] == ["switch"]]
     assert switches[-1][switches[-1].index("--program-scene") + 1] == "Grading"
     assert "--prod-floor" in switches[-1], "cleanup still restores the operator's program"
@@ -633,6 +642,35 @@ def test_a_failed_first_scene_cut_records_nothing_and_restores_the_program(rig):
     assert switches[-1][switches[-1].index("--program-scene") + 1] == "Grading"
     assert "--prod-floor" in switches[-1]
     _assert_rig_restored(p)
+
+
+def test_a_foreign_recording_at_a_slot_start_blocks_the_first_scene_cut(rig):
+    # a box records (not streams) when slot 0 starts: the broadcast read reads idle (nothing
+    # streams), but the rig-busy guard refuses on a recording too -- it runs before the first-scene
+    # cut, so the soak aborts without touching the strih program at all
+    env, p = rig
+    r = _soak(dict(env, FAKE_FOREIGN_RECORDING_AFTER_PROGRAM_READS="2"), "--run")
+    assert r.returncode == 5, r.stdout + r.stderr
+    obs = _calls(p["log"], "obs")
+    assert not [c for c in obs if c[:1] == ["switch"]], "no cut on a busy rig, and nothing to restore"
+    assert not [c for c in obs if c[:1] == ["record"] and "start" in c]
+    assert "first-scene cut" in r.stdout + r.stderr
+    _assert_rig_restored(p)
+
+
+def test_a_broadcast_right_after_the_first_scene_cut_starts_no_recording(rig):
+    # the stream box goes live right after the first-scene cut: the StartRecord guard refuses, no
+    # recording is started, and cleanup leaves the (now on-air) strih program alone
+    env, p = rig
+    r = _soak(dict(env, FAKE_LIVE_AFTER_SWITCHES="1"), "--run")
+    assert r.returncode == 5, r.stdout + r.stderr
+    obs = _calls(p["log"], "obs")
+    assert len([c for c in obs if c[:1] == ["switch"]]) == 1, "only the first-scene cut, no restore"
+    assert not [c for c in obs if c[:1] == ["record"] and "start" in c]
+    assert "strih program NOT restored" in r.stdout + r.stderr
+    assert not [f for f in os.listdir(p["state"]) if f.startswith("burn-")]
+    assert [c for c in obs if c[:1] == ["connect-on-show"] and "--restore" in c]
+    assert not p["lease"].exists()
 
 
 def test_plan_cuts_to_the_first_sweep_scene_before_startrecord(rig):
