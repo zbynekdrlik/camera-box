@@ -277,7 +277,15 @@ if [ -n "$LEASE_INHERITED" ]; then
   [ -n "${AV_SOAK_LEASE_REPO:-}" ] || die 3 "--lease-run-id needs --lease-repo (the caller's lease holder repo)"
   RIG_LEASE_OURS="$LEASE_INHERITED"
   REC_STATE_LEASE=""
-  if [ -n "$_CALLER_MAX_HOLD_S" ]; then RIG_LEASE_MAX_HOLD_SECS="$_CALLER_MAX_HOLD_S"; fi
+  # the caller's ceiling; none exported -> the lease lib's own default (never this window's own:
+  # it counts from the caller's acquired_at and would stop the beat of a long-held lease)
+  if [ -n "$_CALLER_MAX_HOLD_S" ]; then
+    RIG_LEASE_MAX_HOLD_SECS="$_CALLER_MAX_HOLD_S"
+    LEASE_CEILING_NOTE="the caller's hold ceiling ${RIG_LEASE_MAX_HOLD_SECS} s"
+  else
+    unset RIG_LEASE_MAX_HOLD_SECS
+    LEASE_CEILING_NOTE="the lease lib's default hold ceiling (the caller exported none)"
+  fi
 fi
 VERDICT_BIN="${PROBE_BIN_DIR:+$PROBE_BIN_DIR/recording-verdict}"
 
@@ -305,7 +313,7 @@ EOF
   echo "SETUP (once) -- reads first, nothing changes until step 6:"
   if [ -n "$LEASE_INHERITED" ]; then
     echo "  1. rig lease (issue 830): the caller's rig lease ${LEASE_INHERITED} (repo ${RIG_LEASE_REPO_NAME}) -- verified + refreshed with rig_lease_refresh_if_mine (else refuse, exit 4), never acquired or released here"
-    echo "     rig_heartbeat_start av-soak ${RIG_LEASE_REPO_NAME} ${RIG_LEASE_OURS} (issue 281; every beat refreshes the caller's lease under its hold ceiling ${RIG_LEASE_MAX_HOLD_SECS:-4500} s, issue 1383)"
+    echo "     rig_heartbeat_start av-soak ${RIG_LEASE_REPO_NAME} ${RIG_LEASE_OURS} (issue 281; every beat refreshes the caller's lease under ${LEASE_CEILING_NOTE}, issue 1383)"
   else
     echo "  1. rig lease (issue 830): rig_lease_acquire repo=${RIG_LEASE_REPO_NAME} run_id=${RIG_LEASE_OURS} job=av-soak expected_release_at=${LEASE_EXPECTED_AT}"
     echo "     a live foreign holder -> refuse (exit 4); rig_heartbeat_start av-soak ${RIG_LEASE_REPO_NAME} ${RIG_LEASE_OURS} (issue 281; every beat refreshes this lease, issue 1383)"
@@ -680,7 +688,7 @@ if [ -n "$LEASE_INHERITED" ]; then
   _lease_out="$(rig_lease_refresh_if_mine "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" 2>&1)" || _lease_rc=$?
   [ "$_lease_rc" = 0 ] \
     || die 4 "the rig lease is not held by the caller ${RIG_LEASE_REPO_NAME}#${LEASE_INHERITED} (${_lease_out#RIG_LEASE_REFRESH=}) -- --lease-run-id runs only under a lease its caller holds"
-  log "running under the caller's rig lease ${RIG_LEASE_REPO_NAME}#${LEASE_INHERITED} (verified; never acquired or released here)"
+  log "running under the caller's rig lease ${RIG_LEASE_REPO_NAME}#${LEASE_INHERITED} (verified; never acquired or released here; ${LEASE_CEILING_NOTE})"
 else
   set +e
   lease_out="$(rig_lease_acquire "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" "" av-soak "$LEASE_EXPECTED_AT")"

@@ -152,11 +152,15 @@ av_matrix_health_ok() {
 # main input (`NDI <cam>`) in a tail of the strih OBS log read right BEFORE the restart. `parked` =
 # its last genlock-park line says parked (connect-on-show: nothing showed it, no receiver was
 # connected, so the restart is not seen live -- the window's hold connects it fresh); `connected` =
-# not parked (a 5 s parked heartbeat would be in the tail); `unread` = the log read came back empty.
+# not parked while the tail DOES carry park lines (a parked input logs a heartbeat every 5 s, and
+# with the bandwidth roles active some hidden input always does); `unread` = the log read came back
+# empty, or the tail holds no genlock-park line for any input (absence then proves nothing).
 # Context for the report, never graded.
 av_matrix_receiver_state() {
   local cam="$1" text="${2:-}"
-  if [ -z "$text" ]; then
+  # a here-string, never `printf | grep -q`: grep -q exits at the first match and SIGPIPEs the
+  # printf, and under pipefail that failure would read as "no park line"
+  if [ -z "$text" ] || ! LC_ALL=C grep -aqF "genlock-park '" <<<"$text"; then
     printf 'unread\n'
     return 0
   fi

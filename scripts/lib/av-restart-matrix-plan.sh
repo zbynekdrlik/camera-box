@@ -41,7 +41,8 @@ SETUP:
      a live foreign holder -> refuse (exit 4); kept alive with rig_lease_refresh_if_mine (issue 1383) every <= ${KEEPALIVE_S} s
      for the whole run under RIG_LEASE_MAX_HOLD_SECS=${EXPECTED_S} (exported: every window's own keep-alive beats this lease under it)
   2. before EVERY mutation (the baseline window, each restart), read-only:
-     the lease still ours (rig_lease_read_holder_field run_id; lost -> exit 5, the other lease untouched)
+     the lease still ours: rig_lease_refresh_if_mine ${RIG_LEASE_REPO_NAME} ${RIG_LEASE_OURS} (1 not ours / 3 past the ceiling -> exit 5, the
+       other lease untouched; 2 a filesystem error -> retried at the next beat)
      the rig-busy guard: stray_session_check_assert ${OBS_DIR} ${STRIH_HOST} ${STREAM_HOST} '<step>'
      a proven idle rig (av_soak_rig_busy_settled: rig-busy-check | av_soak_rig_state.py broadcast = idle; unreadable retried ${BROADCAST_READS}x ${BROADCAST_RETRY_S} s apart)
        busy / live / unreadable -> nothing is restarted (exit 4 before any change, else 5)
