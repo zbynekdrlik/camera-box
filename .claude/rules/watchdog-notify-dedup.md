@@ -37,7 +37,8 @@ KEYLESS body into a ~5-min window). The doctrine (analyze-not-ping, airuleset #7
    again / reachable again" latch pings, "still down" repeats, and periodic OK/health lines go to
    the MACHINE channel only: keep (or add) a `log "RECOVERY: ... machine-channel only (#1206)"`
    journal line and DROP the `notify --body` call. The dry-run `[dry-run] WOULD send recovery ...`
-   decision log stays (tests pin it). Do NOT change the recovery DECISION logic (`*_recovery_decision`).
+   decision log stays (tests pin it). Do NOT change the recovery DECISION logic (`recovery_latch_fires` in
+   `scripts/lib/watchdog-common.sh`, or a watchdog's own `*_recovery_decision` lib function).
 
 The emoji is the discriminator in practice: **🚨/⚠️/🛟/🧹 = ALERT (keyed ping); ✅ = RECOVERY
 (machine-channel, no ping)**.
@@ -84,6 +85,7 @@ production without, invisible without a page:
 | `imag-obs-alert-watchdog.sh` | #882 | imag OBS down / latency-drift / restart-storm |
 | `measurement-audio-alert-watchdog.sh` | #1310 | mbc measurement-audio chain digital-silent (TEST-gated) |
 | `vban-rate-alert-watchdog.sh` | issue 1372 | a VBAN stream at strih-lx off its nominal rate or losing packets (on-air audio) |
+| `audio-mixer-alert-watchdog.sh` | issue 1381 | an OBS audio mixer off real time (BEHIND / OVERLOADED) or an obs-vban sender losing audio (VBAN_LOSS) -- audible on air |
 
 (`measurement-audio-alert-watchdog.sh` is EVENT-gated on `rig-mode-state.sh` like splitter-port #1290
 — the QPSK marker only sounds in TEST — but its FAULT is production-critical: a silent measurement
@@ -146,7 +148,8 @@ bash `\` line-continuations, so the `--dedup-key` may sit on its own continuatio
 ## Scope
 
 Delivery layer ONLY. Detection/confirm/throttle lives in `scripts/lib/obs-watchdog-decision.sh`
-(shared) + per-script `*_recovery_decision` — do not touch it for a notify change. NEVER edit
+(shared) + the recovery decision (`recovery_latch_fires` in `scripts/lib/watchdog-common.sh`, or a
+watchdog's own `*_recovery_decision` lib function) — do not touch it for a notify change. NEVER edit
 airuleset itself; `--dedup-key` is an existing airuleset `notify` flag ("same key sends once").
 
 ## A RAW-webhook emitter is INVISIBLE to this sweep — route the default through airuleset notify (#1207)

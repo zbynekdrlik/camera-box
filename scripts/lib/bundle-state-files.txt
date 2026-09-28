@@ -1,0 +1,18 @@
+# issue 1386 -- the ONE declared file set of the :8899 bundle-state server tree: every file below
+# comes from scripts/ and is installed side by side, flat (/opt/camera-box on strih-lx and imag,
+# C:\ProgramData\camera-box on the Windows OBS boxes, which also need run-bundle-state-server.ps1 +
+# the local obs-ws-password.txt). One name per line; `#` lines and blank lines are comments.
+# The bash twin scripts/lib/bundle-state-files.sh carries the same list for setup-strih.sh and
+# setup-imag.sh; tests/python/test_bundle_state_files_1386.py pins both against the server's real
+# module-level imports, so a module the server needs can never be left off a box.
+bundle-state-server.py
+bundle_state_gather.py
+bundle_state_log.py
+bundle_state_genlock.py
+bundle_state_audio.py
+bundle_state_vban.py
+bundle_state_av_offset.py
+bundle_state_host.py
+bundle_state_windows.py
+bundle_state_serverlog.py
+obs_phase2.py

@@ -22,6 +22,7 @@ _SPEC = importlib.util.spec_from_file_location(
 )
 bss = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(bss)  # __name__ != "__main__" -> main()/serve_forever() does NOT run
+import bundle_state_windows as bsw  # noqa: E402 -- the readers + caches (issue 1386 slice D)
 
 
 # The live-observed stream-box tasklist row (VBAudioMatrix_x64.exe PID 8144).
@@ -40,8 +41,8 @@ def test_process_list_uses_tasklist_not_powershell(monkeypatch):
         captured["cmd"] = cmd
         return types.SimpleNamespace(stdout=TASKLIST_CSV)
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
-    out = bss.vb_matrix_process_list()
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
+    out = bsw.vb_matrix_process_list()
     # returns the RAW csv (so bsg can parse the PID column)
     assert "VBAudioMatrix_x64.exe" in out
     assert bss.bsg.vb_matrix_process_from_listing(out) == ("VBAudioMatrix_x64", "8144")
@@ -52,22 +53,22 @@ def test_process_list_uses_tasklist_not_powershell(monkeypatch):
 
 def test_process_list_empty_on_subprocess_error(monkeypatch):
     def boom(cmd, **_kw):
-        raise bss.subprocess.SubprocessError("tasklist blew up")
+        raise bsw.subprocess.SubprocessError("tasklist blew up")
 
-    monkeypatch.setattr(bss.subprocess, "run", boom)
-    assert bss.vb_matrix_process_list() == ""
+    monkeypatch.setattr(bsw.subprocess, "run", boom)
+    assert bsw.vb_matrix_process_list() == ""
 
 
 # ---------------------------------------------------------------- vb_matrix_start_time
 def _reset_start_cache():
-    bss._vb_matrix_start_cache["pid"] = None
-    bss._vb_matrix_start_cache["start"] = ""
+    bsw._vb_matrix_start_cache["pid"] = None
+    bsw._vb_matrix_start_cache["start"] = ""
 
 
 def test_start_time_falsy_or_nonnumeric_pid_is_empty_no_query(monkeypatch):
     _reset_start_cache()
     calls = []
-    monkeypatch.setattr(bss.subprocess, "run",
+    monkeypatch.setattr(bsw.subprocess, "run",
                         lambda cmd, **_kw: calls.append(cmd) or types.SimpleNamespace(stdout="x"))
     assert bss.vb_matrix_start_time("") == ""
     assert bss.vb_matrix_start_time(None) == ""
@@ -84,7 +85,7 @@ def test_start_time_resolves_and_caches_by_pid(monkeypatch):
         calls.append(cmd)
         return types.SimpleNamespace(stdout="2026-09-02T14:01:40\n")
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
     first = bss.vb_matrix_start_time("8144")
     second = bss.vb_matrix_start_time("8144")
     assert first == "2026-09-02T14:01:40"
@@ -99,7 +100,7 @@ def test_start_time_resolves_and_caches_by_pid(monkeypatch):
 def test_start_time_re_resolves_when_pid_changes(monkeypatch):
     _reset_start_cache()
     responses = {"stdout": "2026-09-02T14:01:40\n"}
-    monkeypatch.setattr(bss.subprocess, "run",
+    monkeypatch.setattr(bsw.subprocess, "run",
                         lambda cmd, **_kw: types.SimpleNamespace(stdout=responses["stdout"]))
     assert bss.vb_matrix_start_time("8144") == "2026-09-02T14:01:40"
     responses["stdout"] = "2026-09-02T16:20:00\n"   # VB-Matrix restarted -> new pid
@@ -114,7 +115,7 @@ def test_start_time_does_not_cache_empty(monkeypatch):
         calls.append(cmd)
         return types.SimpleNamespace(stdout="")  # access-denied / flaky -> empty
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
     assert bss.vb_matrix_start_time("8144") == ""
     assert bss.vb_matrix_start_time("8144") == ""
     assert len(calls) == 2, "an empty resolve must NOT be cached -- keep retrying"
@@ -126,13 +127,13 @@ def test_start_time_clears_cache_on_failure(monkeypatch):
 
     def boom(cmd, **_kw):
         calls.append(cmd)
-        raise bss.subprocess.SubprocessError("powershell blew up")
+        raise bsw.subprocess.SubprocessError("powershell blew up")
 
-    monkeypatch.setattr(bss.subprocess, "run", boom)
+    monkeypatch.setattr(bsw.subprocess, "run", boom)
     assert bss.vb_matrix_start_time("8144") == ""
     assert bss.vb_matrix_start_time("8144") == ""
     assert len(calls) == 2, "a failed resolve must clear the cache -- keep retrying"
-    assert bss._vb_matrix_start_cache["pid"] is None
+    assert bsw._vb_matrix_start_cache["pid"] is None
 
 
 # ---------------------------------------------------------------- gather_vb_matrix_facet (wiring)

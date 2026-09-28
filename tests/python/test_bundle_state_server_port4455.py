@@ -59,6 +59,7 @@ _SPEC = importlib.util.spec_from_file_location(
 )
 bss = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(bss)  # __name__ != "__main__" -> main()/serve_forever() does NOT run
+import bundle_state_windows as bsw  # noqa: E402 -- the readers + caches (issue 1386 slice D)
 
 PINNED_EXE = r"C:\Program Files\obs-studio\bin\64bit\obs64.exe"
 
@@ -66,9 +67,9 @@ PINNED_EXE = r"C:\Program Files\obs-studio\bin\64bit\obs64.exe"
 def _reset_port4455_cache():
     # The #1222 cache is module-level (mirrors _State's own lock-guarded pattern in this file) --
     # reset it before every test so tests don't leak state into each other.
-    bss._port4455_cache["pid"] = None
-    bss._port4455_cache["path"] = ""
-    bss._port4455_cache["version"] = ""
+    bsw._port4455_cache["pid"] = None
+    bsw._port4455_cache["path"] = ""
+    bsw._port4455_cache["version"] = ""
 
 
 def _is_pid_probe(cmd):
@@ -96,7 +97,7 @@ def test_port4455_owner_resolves_path_via_wmi_executablepath(monkeypatch):
         captured["cmd"] = cmd
         return types.SimpleNamespace(stdout="")
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
     bss.port4455_owner()
     ps = " ".join(captured["cmd"])
     assert "Win32_Process" in ps, f"must resolve via WMI/CIM Win32_Process: {ps}"
@@ -112,7 +113,7 @@ def test_port4455_owner_returns_path_and_version_from_output(monkeypatch):
             return types.SimpleNamespace(stdout=_netstat_line("4321"))
         return types.SimpleNamespace(stdout=f"{PINNED_EXE}\n32.1.2\n")
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
     assert bss.port4455_owner() == (PINNED_EXE, "32.1.2")
 
 
@@ -126,7 +127,7 @@ def test_port4455_owner_empty_on_no_listener(monkeypatch):
         calls.append(cmd)
         return types.SimpleNamespace(stdout="")
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
     assert bss.port4455_owner() == ("", "")
     assert len(calls) == 1, "no listener -> must not pay for the expensive WMI resolution"
     assert _is_pid_probe(calls[0])
@@ -141,7 +142,7 @@ def test_port4455_owner_path_only_yields_empty_version(monkeypatch):
             return types.SimpleNamespace(stdout=_netstat_line("4321"))
         return types.SimpleNamespace(stdout=f"{PINNED_EXE}\n")
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
     assert bss.port4455_owner() == (PINNED_EXE, "")
 
 
@@ -151,9 +152,9 @@ def test_port4455_owner_empty_on_subprocess_error(monkeypatch):
     _reset_port4455_cache()
 
     def boom(cmd, **_kw):
-        raise bss.subprocess.SubprocessError("subprocess blew up")
+        raise bsw.subprocess.SubprocessError("subprocess blew up")
 
-    monkeypatch.setattr(bss.subprocess, "run", boom)
+    monkeypatch.setattr(bsw.subprocess, "run", boom)
     assert bss.port4455_owner() == ("", "")
 
 
@@ -173,7 +174,7 @@ def test_port4455_owner_reuses_cached_identity_when_pid_unchanged(monkeypatch):
         full_calls.append(cmd)
         return types.SimpleNamespace(stdout=f"{PINNED_EXE}\n32.1.2\n")
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
     first = bss.port4455_owner()
     second = bss.port4455_owner()
     assert first == (PINNED_EXE, "32.1.2")
@@ -194,7 +195,7 @@ def test_port4455_owner_re_resolves_when_pid_changes(monkeypatch):
         full_calls.append(cmd)
         return types.SimpleNamespace(stdout=f"{state['path']}\n{state['version']}\n")
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
     first = bss.port4455_owner()
     assert first == (PINNED_EXE, "32.1.2")
 
@@ -215,11 +216,11 @@ def test_port4455_owner_never_serves_a_stale_identity_when_listener_disappears(m
             return types.SimpleNamespace(stdout=_netstat_line("4321"))
         return types.SimpleNamespace(stdout=f"{PINNED_EXE}\n32.1.2\n")
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run_present)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run_present)
     assert bss.port4455_owner() == (PINNED_EXE, "32.1.2")
 
     # The listener disappears entirely (no PID at all) -> must NOT keep serving the old identity.
-    monkeypatch.setattr(bss.subprocess, "run", lambda cmd, **_kw: types.SimpleNamespace(stdout=""))
+    monkeypatch.setattr(bsw.subprocess, "run", lambda cmd, **_kw: types.SimpleNamespace(stdout=""))
     assert bss.port4455_owner() == ("", "")
 
 
@@ -232,18 +233,18 @@ def test_port4455_owning_pid_probe_never_queries_wmi(monkeypatch):
         captured["cmd"] = cmd
         return types.SimpleNamespace(stdout=_netstat_line("4321"))
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
-    assert bss._port4455_owning_pid() == "4321"
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
+    assert bsw._port4455_owning_pid() == "4321"
     ps = " ".join(captured["cmd"])
     assert "Win32_Process" not in ps
 
 
 def test_port4455_owning_pid_probe_empty_on_subprocess_error(monkeypatch):
     def boom(cmd, **_kw):
-        raise bss.subprocess.SubprocessError("subprocess blew up")
+        raise bsw.subprocess.SubprocessError("subprocess blew up")
 
-    monkeypatch.setattr(bss.subprocess, "run", boom)
-    assert bss._port4455_owning_pid() == ""
+    monkeypatch.setattr(bsw.subprocess, "run", boom)
+    assert bsw._port4455_owning_pid() == ""
 
 
 # ---------------------------------------------------------------------------------------------
@@ -264,7 +265,7 @@ def test_port4455_owner_does_not_cache_an_empty_path_result(monkeypatch):
         full_calls.append(cmd)
         return types.SimpleNamespace(stdout="")
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
     first = bss.port4455_owner()
     second = bss.port4455_owner()
     assert first == ("", "")
@@ -284,10 +285,10 @@ def test_port4455_owner_clears_cache_when_full_resolve_raises(monkeypatch):
         if _is_pid_probe(cmd):
             return types.SimpleNamespace(stdout=_netstat_line(state["pid"]))
         if state["mode"] == "boom":
-            raise bss.subprocess.SubprocessError("subprocess blew up")
+            raise bsw.subprocess.SubprocessError("subprocess blew up")
         return types.SimpleNamespace(stdout=f"{state['path']}\n{state['version']}\n")
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
     first = bss.port4455_owner()
     assert first == (PINNED_EXE, "32.1.2")
 
@@ -323,8 +324,8 @@ def test_port4455_owning_pid_probe_uses_netstat_not_powershell(monkeypatch):
         captured["cmd"] = cmd
         return types.SimpleNamespace(stdout=_netstat_line("9648"))
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
-    assert bss._port4455_owning_pid() == "9648"
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
+    assert bsw._port4455_owning_pid() == "9648"
     cmd = captured["cmd"]
     assert "netstat" in cmd, f"the cheap probe must use netstat, not PowerShell: {cmd}"
     assert "powershell" not in cmd, f"the cheap probe must never spawn PowerShell: {cmd}"
@@ -344,8 +345,8 @@ def test_port4455_owning_pid_probe_does_not_filter_out_ipv6(monkeypatch):
         captured["cmd"] = cmd
         return types.SimpleNamespace(stdout=_netstat_line("9648"))
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
-    bss._port4455_owning_pid()
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
+    bsw._port4455_owning_pid()
     cmd = captured["cmd"]
     assert cmd == ["netstat", "-ano"], (
         f"must not restrict the address family via a -p tcp filter, which would silently drop "
@@ -357,7 +358,7 @@ def test_parse_netstat_listening_pid_finds_an_ipv6_listener():
     # The parser itself already handles IPv6 correctly (bracket notation still ends with the
     # plain ":<port>" suffix) -- this locks that the INVOCATION change above does not regress it.
     text = "  TCP    [::]:4455              [::]:0                 LISTENING       9648\n"
-    assert bss._parse_netstat_listening_pid(text, port=4455) == "9648"
+    assert bsw._parse_netstat_listening_pid(text, port=4455) == "9648"
 
 
 NETSTAT_SAMPLE = """
@@ -374,36 +375,36 @@ Active Connections
 
 
 def test_parse_netstat_listening_pid_finds_the_correct_row():
-    assert bss._parse_netstat_listening_pid(NETSTAT_SAMPLE, port=4455) == "5678"
+    assert bsw._parse_netstat_listening_pid(NETSTAT_SAMPLE, port=4455) == "5678"
 
 
 def test_parse_netstat_listening_pid_ignores_foreign_address_match():
     # :4455 appears in the FOREIGN address column of an ESTABLISHED row on a totally different
     # local port -- must never be mistaken for the local :4455 LISTENING row.
     text = "  TCP    10.77.9.202:54321      10.77.9.10:4455        ESTABLISHED     8888\n"
-    assert bss._parse_netstat_listening_pid(text, port=4455) == ""
+    assert bsw._parse_netstat_listening_pid(text, port=4455) == ""
 
 
 def test_parse_netstat_listening_pid_ignores_a_port_suffix_collision():
     # :44551 must never satisfy an endswith(":4455") style check.
     text = "  TCP    0.0.0.0:44551          0.0.0.0:0              LISTENING       7777\n"
-    assert bss._parse_netstat_listening_pid(text, port=4455) == ""
+    assert bsw._parse_netstat_listening_pid(text, port=4455) == ""
 
 
 def test_parse_netstat_listening_pid_ignores_non_listening_state():
     text = "  TCP    0.0.0.0:4455           0.0.0.0:0              CLOSE_WAIT      7777\n"
-    assert bss._parse_netstat_listening_pid(text, port=4455) == ""
+    assert bsw._parse_netstat_listening_pid(text, port=4455) == ""
 
 
 def test_parse_netstat_listening_pid_ignores_udp_rows():
     text = "  UDP    0.0.0.0:4455           *:*                                    7777\n"
-    assert bss._parse_netstat_listening_pid(text, port=4455) == ""
+    assert bsw._parse_netstat_listening_pid(text, port=4455) == ""
 
 
 def test_parse_netstat_listening_pid_no_listener_is_empty():
-    assert bss._parse_netstat_listening_pid("", port=4455) == ""
+    assert bsw._parse_netstat_listening_pid("", port=4455) == ""
     banner_only = "Active Connections\n\n  Proto  Local Address  Foreign Address  State  PID\n"
-    assert bss._parse_netstat_listening_pid(banner_only, port=4455) == ""
+    assert bsw._parse_netstat_listening_pid(banner_only, port=4455) == ""
 
 
 def test_parse_netstat_listening_pid_picks_the_first_match(monkeypatch):
@@ -411,4 +412,4 @@ def test_parse_netstat_listening_pid_picks_the_first_match(monkeypatch):
         "  TCP    0.0.0.0:4455           0.0.0.0:0              LISTENING       111\n"
         "  TCP    10.77.9.202:4455       0.0.0.0:0              LISTENING       222\n"
     )
-    assert bss._parse_netstat_listening_pid(text, port=4455) == "111"
+    assert bsw._parse_netstat_listening_pid(text, port=4455) == "111"

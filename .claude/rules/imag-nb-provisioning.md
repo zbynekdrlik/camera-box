@@ -808,8 +808,8 @@ SKIPped it every pass (`:8899 not fetchable`) and an imag genlock LOCK loss was 
 28 closes that hole:
 
 - **What it installs.** The CANONICAL `scripts/bundle-state-server.py` runs on imag under
-  `systemd/imag-bundle-state-server.service` (a `--user` unit). Its three sibling files
-  (`bundle-state-server.py` + the `bundle_state_gather` / `obs_phase2` modules it imports) install
+  `systemd/imag-bundle-state-server.service` (a `--user` unit). The server and every sibling module
+  it imports (since issue 1386 the ONE declared list `scripts/lib/bundle-state-files.sh`) install
   TOGETHER under `/opt/camera-box` so the server's sibling imports resolve; the unit's ExecStart
   passes imag's flags: `--port 8899 --obs-host 127.0.0.1 --obs-log-dir %h/.config/obs-studio/logs
   --genlock-build-sha-file /opt/obs-genlock/GENLOCK_BUILD_SHA.txt` (imag's OBS-WS has NO password,

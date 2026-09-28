@@ -27,7 +27,7 @@ dantesync 1.8.20
 Confirmed live 2026-07-30 across cam1, imag-nb, dev1 (bare `dantesync --version`, on PATH) and
 strih/stream (the full quoted exe path over SSH — **OpenSSH-for-Windows runs the command via
 `cmd.exe` directly; no PowerShell wrapper is needed**, unlike several OTHER Windows facets this
-repo reads via `powershell -NoProfile -Command "..."`, e.g. `bundle-state-server.py`'s
+repo reads via `powershell -NoProfile -Command "..."`, e.g. `bundle_state_windows.py`'s
 `ndi_runtime_version`/`port4455_owner`). One uniform reader
 (`dantesync-version-gate.sh`'s `read_dantesync_version_output`) now covers every node kind — no
 journal parsing, no bundle-state coupling, no per-platform special-casing beyond the exe path

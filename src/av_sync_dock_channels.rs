@@ -2,7 +2,7 @@
 //!
 //! WHY. The stream box's `mbc` input is stereo and carries the same cam2 marker on L and R, with R
 //! 10.17 ms behind L. The dock used to average the channels before its one streaming decoder
-//! (`st_raw_audio_camera_box` in `vendor/av-sync-dock/src/sync-test-output.cpp`), and that mono sum
+//! (`st_raw_audio_camera_box`, now in `vendor/av-sync-dock/src/sync-test-output-audio.cpp`), and that mono sum
 //! comb-filters the two copies into an undecodable signal (the offline path measured cluster 2
 //! POLLUTED on the downmix, L 7 and R 8 alone, release E2E run 36317806422). So the live
 //! monitor-only LOCK-CORRECT suggestion saw the same broken signal the offline gate stopped using.
@@ -32,7 +32,8 @@
 //!   dropped. Without this, R's copy of the marker that tips the pick to R came back 10.17 ms after
 //!   L's copy of it (two of four markers on the committed 2 s fixture).
 //! - Each channel keeps at most [`DOCK_CHANNEL_PICK_MAX_MARKERS`] (the newest), so the O(n²)
-//!   cluster on the OBS audio thread stays bounded under a decode flood.
+//!   cluster on the dock's audio decode worker (the OBS audio thread until issue 1381) stays
+//!   bounded under a decode flood.
 
 use crate::av_sync_dock::{StreamingMarkerDecoder, DOCK_QPSK_THRESHOLD};
 use crate::qpsk_channel_select::pick_marker_channel;
@@ -47,7 +48,7 @@ use std::collections::VecDeque;
 pub const DOCK_CHANNEL_PICK_WINDOW_S: u64 = 25;
 
 /// The most markers one channel keeps in its pick window (the newest). The self-consistency
-/// cluster is O(n²) and runs on the OBS audio thread: a real chain puts ~8 markers in 25 s, but a
+/// cluster is O(n²) and runs on the dock's audio decode worker: a real chain puts ~8 markers in 25 s, but a
 /// decode flood can reach one per dedup gap (~1100 in 25 s, ~1.4 ms per recompute). 256 keeps a
 /// recompute near 0.1 ms and never touches a real chain. Mirrored by `CB_CHANNEL_PICK_MAX_MARKERS`.
 pub const DOCK_CHANNEL_PICK_MAX_MARKERS: usize = 256;

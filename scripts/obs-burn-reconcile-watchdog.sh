@@ -64,6 +64,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-burn-reconcile-decision.sh
 . "$HERE/lib/obs-burn-reconcile-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/rig-heartbeat.sh
 . "$HERE/lib/rig-heartbeat.sh"
 # shellcheck source=scripts/lib/rig-lease.sh
@@ -108,6 +110,7 @@ RIG_LEASE_STALE_SECS="${RIG_LEASE_STALE_SECS:-5400}"
 STATE_DIR="${OBS_BURN_RECONCILE_WATCHDOG_STATE_DIR:-$HOME/.camera-box}"
 # Its OWN state file (persists the per-box renderTotalFrames baseline + unresolved-burn flag),
 # distinct from #391's camera-box-obs-watchdog.state and #979's camera-box-obs-session-watchdog.state.
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${OBS_BURN_RECONCILE_WATCHDOG_STATE_FILE:-$STATE_DIR/camera-box-obs-burn-reconcile-watchdog.state}"
 
 # Exit code obs_burn_filter.py's sweep-* actions return when the ndi-input ENUMERATION itself
@@ -117,28 +120,9 @@ SWEEP_ENUM_FAILED=2
 log() { printf '%s [obs-burn-reconcile-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 # ── read / write per-box persisted renderTotalFrames baseline ─────────────────
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
-write_state_field() {
-  local key="$1" val="$2" tmp
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  # A FIXED temp path (never a fallback to STATE_FILE itself, #1060 review 🔵): the old
-  # `mktemp ... || echo "$STATE_FILE"` fallback truncated the real file via the `>` redirect before
-  # grep read it, dropping the SIBLING box's baseline whenever mktemp failed. On any write failure
-  # we leave the existing state untouched rather than corrupt it.
-  tmp="${STATE_FILE}.tmp.$$"
-  if { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
-       > "$tmp" 2>/dev/null; then
-    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
-  else
-    rm -f "$tmp" 2>/dev/null || true
-  fi
-}
+# read_state_field and write_state_field live in scripts/lib/watchdog-common.sh. The shared write
+# never renames a failed temp write over the state file, so the sibling box's baseline survives a
+# failed write (the guarantee this watchdog's own fixed-temp-path copy used to give).
 
 # ── coordination: is a live gate/TEST harness driving the rig right now? ──────
 # 0 (coordinating) if a FRESH #281 rig-active heartbeat exists (recording-e2e.sh / rig-mode.sh

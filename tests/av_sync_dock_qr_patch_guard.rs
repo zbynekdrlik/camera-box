@@ -15,7 +15,11 @@
 
 use std::path::PathBuf;
 
-const DOCK_OUTPUT: &str = "vendor/av-sync-dock/src/sync-test-output.cpp";
+#[allow(dead_code)]
+#[path = "support/av_sync_dock_output.rs"]
+mod av_sync_dock_output;
+
+const DOCK_OUTPUT: &str = av_sync_dock_output::LABEL;
 const DOCK_QR_HEADER: &str = "vendor/av-sync-dock/src/camera-box-qr.hpp";
 const DOCK_MAIN: &str = "vendor/av-sync-dock/src/sync-test-dock.cpp";
 
@@ -54,7 +58,7 @@ fn camera_box_qr_header_exists_and_matches_payload_rs() {
 
 #[test]
 fn sync_test_output_tries_camera_box_format_before_norihiros() {
-    let src = squish(&vendor_file(DOCK_OUTPUT));
+    let src = squish(&av_sync_dock_output::source());
     assert!(
         src.contains("#include \"camera-box-qr.hpp\""),
         "{DOCK_OUTPUT}: #398 — the camera-box-qr.hpp include is gone; the dock no longer knows \
@@ -75,7 +79,7 @@ fn sync_test_output_tries_camera_box_format_before_norihiros() {
 
 #[test]
 fn audio_decode_pairs_via_the_camera_box_video_ring() {
-    let src = squish(&vendor_file(DOCK_OUTPUT));
+    let src = squish(&av_sync_dock_output::source());
     // The direct index->video_ts lookup that makes LIVE pairing possible with no side channel
     // (the audio index IS the dual-QR frame_id's low byte — see frame_id_to_index in
     // src/qpsk_marker.rs). If this regresses, the dock silently stops showing a live offset for
@@ -103,7 +107,7 @@ fn audio_decode_pairs_via_the_camera_box_video_ring() {
 /// windows-genlock*.yml (the #269 lock-step pattern).
 #[test]
 fn on_sync_found_display_path_gate_conversion_is_wired_999() {
-    let out = squish(&vendor_file(DOCK_OUTPUT));
+    let out = squish(&av_sync_dock_output::source());
     assert_eq!(
         out.matches("si.gate_convention = true;").count(),
         2,
@@ -127,7 +131,7 @@ fn on_sync_found_display_path_gate_conversion_is_wired_999() {
 /// class of gap issue 999's own display-path fix taught this repo to guard against structurally.
 #[test]
 fn corrected_video_ts_garbage_clamp_fix_is_wired_1005() {
-    let out = squish(&vendor_file(DOCK_OUTPUT));
+    let out = squish(&av_sync_dock_output::source());
     assert_eq!(
         out.matches("camerabox::cb_corrected_video_ts_is_valid(corrected_video_ts)")
             .count(),

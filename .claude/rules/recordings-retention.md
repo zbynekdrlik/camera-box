@@ -6,6 +6,8 @@ paths:
   - "tests/recordings_retention.rs"
   - "tests/fixtures/recordings_retention_parity.tsv"
   - "tests/python/test_strih_lx_recordings_retention_1317.py"
+  - "scripts/lib/recordings-free-line.sh"
+  - "tests/python/test_recordings_free_line_1386.py"
 ---
 
 # E2E recordings retention — dry-run-first sweep (#1122)
@@ -76,8 +78,12 @@ free). Since **#1276** the WARN fires when the recordings VOLUME has at most `RE
   (`src/recordings_retention.rs`, `tests/recordings_retention.rs`) → `Ok` (free ≥ threshold) /
   `Warn` (free < threshold) / `Unknown` (`free_bytes` None — never a false low-space WARN). Decimal
   GB (1e9 B). Exactly `min_free_gb` free is `Ok` (no warn).
-- Python mirror the bash preflight calls: **`bundle_state_gather.recordings_free_verdict`** (same
-  spec, `tests/python/test_bundle_state_gather.py`).
+- Python mirror: **`bundle_state_gather.recordings_free_verdict`** (same spec,
+  `tests/python/test_bundle_state_gather.py`). The bash preflight reads it through the ONE line
+  reader `bundle_state_gather.recordings_free_line` (a non-object body or a null / non-numeric /
+  boolean `free_bytes` is `UNKNOWN -1`), called by `recordings_free_line_from_stats` in
+  `scripts/lib/recordings-free-line.sh` (issue 1386) -- the 8 h soak uses the same reader. Never put
+  an inline python copy back into `recording-e2e.sh` (`tests/python/test_recordings_free_line_1386.py`).
 - The volume's `free_bytes` is served by the box's `:8899 /record-dir-stats.json`
   (`bundle_state_gather.record_dir_stats` reads it via `shutil.disk_usage(record_dir).free` — the
   SAME local record-dir read it already does; no new transport; `None` on failure). The preflight is

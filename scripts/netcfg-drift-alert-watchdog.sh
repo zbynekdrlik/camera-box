@@ -30,6 +30,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -51,34 +53,13 @@ ALERT_THROTTLE_PASSES="${NETCFG_DRIFT_ALERT_THROTTLE_PASSES:-12}"
 STATE_DIR="${NETCFG_DRIFT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 _state_default="$STATE_DIR/camera-box-netcfg-drift-alert.state"
 [ "$DRY_RUN" -eq 1 ] && _state_default="$STATE_DIR/camera-box-netcfg-drift-alert-dryrun.state"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${NETCFG_DRIFT_STATE_FILE:-$_state_default}"
 
 log() { printf '%s [netcfg-drift-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
-read_state_field() {
-  local key="$1" default="$2" v
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
-write_state_field() {
-  local key="$1" val="$2" tmp existing=""
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  [ -f "$STATE_FILE" ] && existing="$(grep -v "^${key}=" "$STATE_FILE" 2>/dev/null)"
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || true)"
-  if [ -n "$tmp" ]; then
-    { [ -n "$existing" ] && printf '%s\n' "$existing"; printf '%s=%s\n' "$key" "$val"; } > "$tmp" 2>/dev/null || true
-    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-  else
-    { [ -n "$existing" ] && printf '%s\n' "$existing"; printf '%s=%s\n' "$key" "$val"; } > "$STATE_FILE" 2>/dev/null || true
-  fi
-}
-clear_throttle() {
-  write_state_field confirm 0
-  write_state_field alert_sig ""
-  write_state_field alert_passes 0
-}
-
+# write_state_field and clear_throttle live in scripts/lib/watchdog-common.sh. This read_state_field
+# stays here (a different local declaration) and overrides the lib's copy.
 main() {
   log "pass start (dry_run=$DRY_RUN, audit=$AUDIT)"
 

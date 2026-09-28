@@ -6,6 +6,7 @@ paths:
   - "scripts/imag_latency_enforce.py"
   - "scripts/latency-pins-baseline.json"
   - "scripts/bundle_state_gather.py"
+  - "scripts/bundle_state_host.py"
   - "tests/python/test_latency_pins_verify.py"
   - "tests/python/test_apply_latency_pins_1003.py"
   - "scripts/drift-guard.sh"

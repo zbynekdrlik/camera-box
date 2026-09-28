@@ -35,6 +35,15 @@ plus a summary line WITHOUT a quoted name: `audio-telemetry #800: total_bufferin
 - Wired into `bundle-state-server.gather_bundle_state` via `_parse_log_facets` (one `obs_log_parse`
   timing) + two `build_bundle_state` kwargs (`audio_ts_lag_ms`/`audio_ts_lag_src`, omit-when-empty).
 
+## A stopped audio THREAD is paged by the audio-mixer watchdog, not here (issue 1385)
+
+This watchdog's STALE (the freshest `#800` line far behind the log head) stays log-only. The `#800`
+per-source lines print only for a source with an audio timeline or buffered audio, so they can stop
+with a healthy audio thread; and when the thread does stop they stop together with the
+`audio-stall #1367` dump (same 60 s block of `obs-audio.c`), which the audio-mixer watchdog pages as
+STALLED once `obs_log_head_age_s` proves the log is live. Paging it here too would double-page one
+fault — see `.claude/rules/audio-mixer-watchdog.md`.
+
 ## The watchdog is DETECTION-ONLY — no auto-action, alert-only
 
 The observed cure was a **PC reboot of a live prod box** (a genuinely destructive owner-call,

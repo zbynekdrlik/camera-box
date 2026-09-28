@@ -12,7 +12,7 @@
 //! NaN prefix-sum poison is the one upstream latch class the dock can neutralize itself). The mono
 //! mixdown it also hardened was removed by issue 1367: every channel now has its own decoder.
 //!
-//! This file covers ONLY the OBS-glue half (`sync-test-output.cpp`, which pulls in libobs/quirc
+//! This file covers ONLY the OBS-glue half (`sync-test-output*.cpp`, which pulls in libobs/quirc
 //! and is NOT compiled by this repo's Linux CI) plus source-presence of the mirrored seams —
 //! the pure watchdog/kernel logic itself is covered by the `av_sync_dock`/`qpsk_marker` unit
 //! tests and the committed C++ self-test (`av_sync_dock_cpp_mirror_gate`). Source-presence
@@ -20,10 +20,16 @@
 
 use std::path::PathBuf;
 
-const DOCK_OUTPUT: &str = "vendor/av-sync-dock/src/sync-test-output.cpp";
+#[allow(dead_code)]
+#[path = "support/av_sync_dock_output.rs"]
+mod av_sync_dock_output;
+
+const DOCK_OUTPUT: &str = av_sync_dock_output::LABEL;
 const DOCK_AUDIO_HPP: &str = "vendor/av-sync-dock/src/camera-box-audio.hpp";
+// issue 1381 moved the decode kernel and the streaming decoder into their own files.
+const DOCK_SCAN_HPP: &str = "vendor/av-sync-dock/src/camera-box-marker-scan.hpp";
 const RUST_DOCK: &str = "src/av_sync_dock.rs";
-const RUST_KERNEL: &str = "src/qpsk_marker.rs";
+const RUST_KERNEL: &str = "src/qpsk_marker_scan.rs";
 
 fn repo_file(rel: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
@@ -36,7 +42,7 @@ fn squish(s: &str) -> String {
 
 #[test]
 fn pairing_watchdog_is_wired_into_the_diag_tick_and_resets_all_pairing_state() {
-    let src = squish(&repo_file(DOCK_OUTPUT));
+    let src = squish(&av_sync_dock_output::source());
     for marker in [
         // the watchdog instance + its observe at the diag tick
         "camerabox::CbDockPairingWatchdog cb_pairing_watchdog;",
@@ -74,7 +80,7 @@ fn a_poisoned_channel_cannot_touch_another_channel() {
         "camera-box-channel-pick.hpp: each channel must feed its OWN decoder (issue 1367) — a \
          shared sum would let a poisoned channel wipe a marker riding another (#1153)"
     );
-    let src = squish(&repo_file(DOCK_OUTPUT));
+    let src = squish(&av_sync_dock_output::source());
     assert!(
         !src.contains("acc += s;"),
         "{DOCK_OUTPUT}: a channel sum is back in the audio path (issue 1367)"
@@ -83,7 +89,7 @@ fn a_poisoned_channel_cannot_touch_another_channel() {
 
 #[test]
 fn cpp_mirror_carries_the_watchdog_and_the_kernel_sanitize() {
-    let src = squish(&repo_file(DOCK_AUDIO_HPP));
+    let src = squish(&(repo_file(DOCK_AUDIO_HPP) + &repo_file(DOCK_SCAN_HPP)));
     for marker in [
         "constexpr uint64_t CB_DOCK_PAIRING_DEAD_NS",
         "constexpr uint64_t CB_DOCK_PAIRING_MIN_RING_HITS",
@@ -93,7 +99,7 @@ fn cpp_mirror_carries_the_watchdog_and_the_kernel_sanitize() {
     ] {
         assert!(
             src.contains(marker),
-            "{DOCK_AUDIO_HPP}: #1153 marker `{marker}` is gone — the C++ mirror of the \
+            "{DOCK_AUDIO_HPP} + {DOCK_SCAN_HPP}: #1153 marker `{marker}` is gone — the C++ mirror of the \
              dead-pairing watchdog / decoder window reset / kernel non-finite sanitize regressed. \
              Re-apply in lockstep with src/av_sync_dock.rs + src/qpsk_marker.rs."
         );

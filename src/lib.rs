@@ -93,6 +93,11 @@ pub mod audio_marker_policy;
 // ALSA emitter (`probe::qpsk_emit`) and recording-verdict decode call into this. Supersedes the chirp.
 pub mod qpsk_marker;
 
+// issue 1381 — the QPSK marker demod kernel `scan_markers` (the ONE demod behind
+// `qpsk_marker::decode_markers_with_stats` and the live dock's streaming decoder), split out of
+// `qpsk_marker`. Pure Tier-0, default features.
+pub mod qpsk_marker_scan;
+
 // #1324 — the AUDIO-ONLY QPSK decodability probe decision (pure Tier-0, default features):
 // the [4b3/8] preflight's verdict from the demod's decoded markers + stats. No I/O, no probe deps
 // (like `qpsk_marker` / `colour_scale`), so it unit-tests on default features; the ffmpeg/WAV glue
@@ -111,7 +116,7 @@ pub mod qpsk_channel_select;
 // (rolling `decode_markers` window + dedup), the rolling densest-cluster offset estimator (robust to
 // the CRC-4 false-decode flood the offline path also fights), the live video-QR top-band decode
 // geometry, and the Otsu threshold — all with NO probe deps, so it compiles + unit-tests on DEFAULT
-// features. The dock's OBS/quirc GLUE stays in `sync-test-output.cpp`; every DECISION lives here.
+// features. The dock's OBS/quirc GLUE stays in `sync-test-output*.cpp`; every DECISION lives here.
 pub mod av_sync_dock;
 // Issue 1367 — the live dock's per-channel marker decode + channel pick: the Rust reference of
 // vendor/av-sync-dock/src/camera-box-channel-pick.hpp, compared push by push with the C++ by
@@ -441,10 +446,11 @@ mod genlock_wall_step_bench;
 // `tests/os_clock_discipline_parity_1372.rs`, which lifts it and runs it on a fake Win32 layer.
 pub mod os_clock_discipline;
 
-// Issue 1372 — the send pacing of the vendored obs-vban VBAN output: a jitter buffer of a
+// Issues 1372 + 1381 — the send pacing of the vendored obs-vban VBAN output: a jitter buffer of a
 // configurable target depth (default 64 ms) whose packets leave at `t0 + n × packet_duration` on the
-// disciplined OBS clock, every due packet per wake, underflows waited out and overflows dropped,
-// both counted. Crate-root + std-only (Tier-0 verifiable); the C twin
+// disciplined OBS clock, on a FIXED timeline: late audio leaves complete within a 100 ms grace,
+// past it silence on schedule is one counted discontinuity, and only counted drops remove audio.
+// Crate-root + std-only (Tier-0 verifiable); the C twin
 // `vendor/obs-vban/src/vban-pacing.h` is held identical by `tests/vban_pacing_parity_1372.rs`.
 pub mod vban_pacing;
 

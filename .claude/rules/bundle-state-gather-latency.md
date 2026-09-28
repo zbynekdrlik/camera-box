@@ -2,14 +2,97 @@
 paths:
   - "scripts/bundle-state-server.py"
   - "scripts/bundle_state_gather.py"
+  - "scripts/bundle_state_*.py"
+  - "scripts/lib/bundle-state-files.sh"
+  - "scripts/lib/bundle-state-files.txt"
+  - "scripts/run-bundle-state-server.ps1"
   - "tests/python/test_bundle_state_gather.py"
   - "tests/python/test_bundle_state_server_log.py"
   - "tests/python/test_bundle_state_server_port4455.py"
+  - "tests/python/test_bundle_state_split_1386.py"
+  - "tests/python/test_bundle_state_files_1386.py"
+  - "tests/python/test_bundle_state_windows_split_1386.py"
 ---
 
 # bundle-state gather latency + caching (#1222)
 
-The strih/stream `:8899` server (`scripts/bundle-state-server.py` + pure parsers/builders in
+## File layout + the ONE deployed file list (issue 1386)
+
+- **`bundle_state_gather` is the only import name.** The server, `scripts/lib/av-soak.sh`,
+  `recording-e2e.sh`'s free-space check and the tests import it. It holds `build_bundle_state` over
+  `BUNDLE_STATE_KEYS` (the served key order) and an explicit `__all__` that re-exports the facet
+  modules. It appends its own directory to `sys.path`, so a caller that loads it by file path still
+  resolves the siblings.
+- **The facet modules** (flat in `scripts/`, never imported directly):
+  - `bundle_state_log`: the bounded read, in-log time helpers, the timestamped tail, box clock +
+    log-head age.
+  - `bundle_state_genlock`: banner, fps, genlock markers, the `genlock_lock` facet, render + relock.
+  - `bundle_state_audio`: ts_lag, reference band, buffered_ms, the mixer.
+  - `bundle_state_vban`: the obs-vban pacer loss.
+  - `bundle_state_av_offset`: the dock offset trend, live age, quality.
+  - `bundle_state_host`: install scans, NDI latency CSV, tasklist / VB-Matrix, AHK, record dir,
+    build sha, byte sha256.
+- **The server-side modules** (flat in `scripts/`, imported by the server DIRECTLY, never through
+  the facade and never re-exported by it):
+  - `bundle_state_windows`: the Windows-only identity readers and their process-lifetime caches:
+    the :4455 owner (netstat PID probe + PID-keyed CIM resolve), the ONE tasklist read and its
+    OBS / VB-Matrix parsers, the VB-Matrix start time (PID-keyed CIM), the AHK text, and the
+    shortcut + NDI runtime (file-stat-keyed PowerShell). They spawn subprocesses and hold state,
+    which is why they are not facets.
+  - `bundle_state_serverlog`: the ONE timestamped stdout `log()` the server and those readers
+    share (the hyphenated server cannot be imported back by a sibling).
+  - The server keeps the orchestration (`_windows_*_facets`) and calls the readers through its OWN
+    globals, and re-exports every reader, parser and cache its tests reach as `bss.<name>`.
+  - **A `bss.<name>` patch reaches ONLY the calls the server itself makes:** the readers
+    `_windows_*_facets` calls, and the server's own `log` calls. A call made inside
+    `bundle_state_windows` resolves in that module, for example `port4455_owner` →
+    `_port4455_owning_pid` → `_parse_netstat_listening_pid`, `obs_process_list` → `tasklist_csv` +
+    `_parse_tasklist_obs_process_names`, `vb_matrix_process_list` → `tasklist_csv`, and every
+    reader's own `log` WARNING. Patch `bundle_state_windows.<name>` for those; a `bss.<name>` patch there is a
+    silent no-op.
+  - The caches are the same dict objects in both modules: reset them IN PLACE (item assignment or
+    `.update`), never rebind the name.
+  - Tests patch `bss.subprocess.run`: `subprocess` is one process-wide module object, so that
+    reaches every reader. That is why the server keeps `import subprocess`.
+- **A new facet goes into its family module and into `__all__`.** A new function in a module must
+  be called through a name the server reaches (`bsg.<name>`): the server tests monkeypatch
+  `bss.bsg.<name>`, which only reaches calls made through the facade.
+- **The server's `gather_bundle_state` only sequences named helpers** (`_parse_log_facets` over the
+  genlock / audio / A/V-offset families, `_gather_ndi_inputs_or_empty`, `_windows_identity_facets`
+  behind the ONE `IS_WINDOWS` gate). Each returns a dict of `build_bundle_state` keywords, so a new
+  facet never touches an order-sensitive tuple.
+- **The deployed server tree is declared ONCE:** `scripts/lib/bundle-state-files.txt`, with the bash
+  twin `BUNDLE_STATE_SERVER_FILES` in `scripts/lib/bundle-state-files.sh`.
+  - setup-strih.sh step 9 and setup-imag.sh step 28 iterate the array.
+  - The Windows runbook (`.claude/skills/genlock`) fetches the `.txt` and then each named file.
+  - A new module goes into BOTH lists: `test_bundle_state_files_1386.py` pins them against the
+    server's real module-level import closure, so a missing entry fails there.
+  - A box missing one module serves no `:8899` at all: the server exits on the ImportError, and the
+    Windows supervisor loop restarts it every 5 s. So redeploy the WHOLE list, never one changed file.
+  - Both setup scripts fetch the files from origin `dev` but take the list from the checkout, so
+    after the install they run `python3 -I -B -c '…; import bundle_state_gather,
+    bundle_state_windows'` against `/opt/camera-box` and `fail` on a partial tree. The facade
+    alone no longer proves the tree complete (the server-side modules are outside it), and
+    `test_bundle_state_files_1386.py` removes each listed module the check can load and
+    requires it to fail, so a module a later change adds must be reachable from that import. `-I`
+    keeps a caller's cwd (e.g. `scripts/`) off `sys.path`; `-B` keeps the root-run check from
+    leaving a root-owned `__pycache__` in the tree. `-I` also drops the user site-packages, so the
+    check imports only the stdlib-only modules (the gather and the server-side ones), never the
+    server itself (`obs_phase2` needs `websocket`, a `pip --user` install on some boxes).
+- **Proof of neutrality:** `test_bundle_state_split_1386.py` compares against a golden captured from
+  the pre-split code (`fixtures/bundle_state_split_1386/golden.json`). It covers every parser over the
+  recorded logs + one synthetic all-families log + their bounded reads, and the served JSON on both
+  gather paths (key order included). Refresh it (`--write-golden`) only for an intended output
+  change. The same file pins the file budgets: each module (the server-side ones too) at most 800
+  lines, each function at most 100 own lines. The server (orchestration + HTTP only since slice D)
+  is RATCHETED at its current size: a change that needs more room moves a responsibility out into
+  a `bundle_state_*` module (listed in both file lists) instead of growing the server.
+  `test_bundle_state_windows_split_1386.py` is slice D's proof: a golden captured from the pre-move
+  code that runs the REAL readers with only `subprocess.run` scripted. It pins each reader's return
+  value, subprocess argv + keyword arguments, log lines and the four caches over every cache and
+  failure path, plus the served JSON on both gather paths through the real readers.
+
+The strih/stream `:8899` server (`scripts/bundle-state-server.py` + pure parsers/builders behind
 `scripts/bundle_state_gather.py`) feeds `recording-e2e.sh`'s `[0/8]` version-integrity gate via
 `curl --max-time 30`. Two facets grow expensive with real-world session length and had to be
 bounded/cached — the SAME lesson applies to any future facet added here: **never let a per-request

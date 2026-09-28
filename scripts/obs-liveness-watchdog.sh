@@ -42,6 +42,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/obs-fleet.sh
 . "$HERE/lib/obs-fleet.sh"
 
@@ -77,6 +79,7 @@ NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${OBS_WATCHDOG_REPO:-zbynekdrlik/camera-box}"
 
 STATE_DIR="${OBS_WATCHDOG_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${OBS_WATCHDOG_STATE_FILE:-$STATE_DIR/camera-box-obs-watchdog.state}"
 
 log() { printf '%s [obs-liveness-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
@@ -143,36 +146,7 @@ parse_verdict_line() {
 #   <b>_confirm=<n>       — consecutive-wedge confirmation counter
 #   <b>_alert_sig=<str>   — fingerprint of the last-alerted condition (throttle dedup)
 #   <b>_alert_passes=<n>  — passes elapsed since the last alert for the same sig
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
-write_state_field() {
-  local key="$1" val="$2" tmp existing=""
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  # Read the OTHER keys into memory FIRST, before any file is opened for writing -- so even the
-  # mktemp-failure fallback (a direct rewrite of STATE_FILE) can never truncate-before-read and
-  # drop them (the previous `tmp=$STATE_FILE` fallback had exactly that latent state-loss bug;
-  # fixed here in-line at the issue-732 round integration, mirroring bundle-state-alert-watchdog).
-  [ -f "$STATE_FILE" ] && existing="$(grep -v "^${key}=" "$STATE_FILE" 2>/dev/null)"
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || true)"
-  if [ -n "$tmp" ]; then
-    { [ -n "$existing" ] && printf '%s
-' "$existing"; printf '%s=%s
-' "$key" "$val"; } \
-      > "$tmp" 2>/dev/null || true
-    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-  else
-    # mktemp unavailable: `existing` is already captured, so a direct (non-atomic) rewrite is safe.
-    { [ -n "$existing" ] && printf '%s
-' "$existing"; printf '%s=%s
-' "$key" "$val"; } \
-      > "$STATE_FILE" 2>/dev/null || true
-  fi
-}
+# read_state_field and write_state_field live in scripts/lib/watchdog-common.sh.
 
 # ── the recovery plan embedded in every alert (agent-driven — see header) ────
 # recovery_plan_for BOX LABEL -> the recovery guidance text embedded in the alert. #89: a

@@ -90,3 +90,12 @@ small; a `--check-imag` log is large.
   findings); source the script under `bash -c 'set -euo pipefail; . …; v="$(fps_from_log "$(cat big)")"; echo SENTINEL'`
   and confirm **141-before / 0-after** for each parser; `cargo fmt --all --check` proves the `.rs`
   parses + is formatted.
+
+## Layout note — the moving-pin git range helpers are wrappers (issue 1384)
+
+`imag_genlock_range_log` / `imag_genlock_ahead_log` / `imag_genlock_on_dev` (the #531/#1292
+genlock_build moving pin) are one-line wrappers over `scripts/lib/vendor-range.sh`, which
+drift-guard.sh sources beside its other pure libs. version-integrity-gate.sh's `vendor_pin_*` wrap the
+same three functions. Change the range logic there, once. The wrapper only picks drift-guard's own
+format (`--oneline`) and pathspec (`vendor/obs-studio vendor/distroav`). Rationale and traps:
+`.claude/rules/early-gate-pin-doctrine.md`.

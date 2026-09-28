@@ -1,9 +1,9 @@
 //! Issue 1367 — the live A/V-sync dock decodes the QPSK marker per channel, never on their average.
 //!
-//! `st_raw_audio_camera_box` in `vendor/av-sync-dock/src/sync-test-output.cpp` used to mix every
-//! channel to mono before its one streaming decoder. The stream box's `mbc` input is stereo with
-//! the marker on L and R 10.17 ms apart, and that sum is undecodable. The decode and the channel
-//! rule now live in `camera-box-channel-pick.hpp` (proven against the Rust reference by
+//! `st_raw_audio_camera_box` in `vendor/av-sync-dock/src/sync-test-output-audio.cpp` used to mix
+//! every channel to mono before its one streaming decoder. The stream box's `mbc` input is stereo
+//! with the marker on L and R 10.17 ms apart, and that sum is undecodable. The decode and the
+//! channel rule now live in `camera-box-channel-pick.hpp` (proven against the Rust reference by
 //! `tests/qpsk_channel_pick_parity_1367.rs`); these checks prove the OBS glue is WIRED to it:
 //! - the audio callback hands every channel's plane to the picker and pairs only what it returns;
 //! - no channel sum remains anywhere in the callback;
@@ -16,23 +16,19 @@
 //! "Assert dock decodes the marker per channel (issue 1367)" in BOTH windows-genlock workflows
 //! (`.claude/rules/av-sync-dock-anchor-refactor-safety.md`).
 
-use std::path::PathBuf;
-
 #[path = "support/cpp_source.rs"]
 mod cpp_source;
-use cpp_source::{body_of, squish, strip_cpp_comments};
+use cpp_source::{squish, strip_cpp_comments, unique_body_of};
+#[allow(dead_code)]
+#[path = "support/av_sync_dock_output.rs"]
+mod av_sync_dock_output;
 
-const DOCK_OUTPUT: &str = "vendor/av-sync-dock/src/sync-test-output.cpp";
+const DOCK_OUTPUT: &str = av_sync_dock_output::LABEL;
 const AUDIO_SIG: &str =
     "static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_data *frames)";
 
-fn vendor_file(rel: &str) -> String {
-    let p: PathBuf = [env!("CARGO_MANIFEST_DIR"), rel].iter().collect();
-    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
-}
-
 fn code() -> String {
-    squish(&strip_cpp_comments(&vendor_file(DOCK_OUTPUT)))
+    squish(&strip_cpp_comments(&av_sync_dock_output::source()))
 }
 
 #[test]
@@ -44,7 +40,7 @@ fn the_audio_callback_decodes_every_channel_through_the_picker() {
     ] {
         assert!(code.contains(needle), "{DOCK_OUTPUT}: `{needle}` is gone");
     }
-    let body = body_of(&code, AUDIO_SIG);
+    let body = unique_body_of(&code, AUDIO_SIG);
     for needle in [
         "const size_t nch = cb_ensure_audio_picker(st); if (nch == 0) return;",
         "planes[cix] = (const float *)frames->data[cix];",
@@ -59,7 +55,7 @@ fn the_audio_callback_decodes_every_channel_through_the_picker() {
     }
     // The picker lifecycle: one picker per channel layout, rebuilt (with a fresh sample count)
     // when the layout changes, built with the dock configuration.
-    let ensure = body_of(
+    let ensure = unique_body_of(
         &code,
         "static size_t cb_ensure_audio_picker(struct sync_test_output *st)",
     );
@@ -79,7 +75,7 @@ fn the_audio_callback_decodes_every_channel_through_the_picker() {
 #[test]
 fn no_channel_sum_remains_in_the_audio_callback() {
     let code = code();
-    let body = body_of(&code, AUDIO_SIG);
+    let body = unique_body_of(&code, AUDIO_SIG);
     for banned in [
         "acc +=",
         "/ (float)ch",
@@ -110,7 +106,7 @@ fn the_diag_line_appends_the_channel_pick_after_the_existing_tokens() {
          channel_clusters=%s channel_switches=%llu` (existing tokens unchanged, appended last)"
     );
     assert!(code.contains(
-        "(unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen, channel_clusters.c_str(), (unsigned long long)st->cb_switch_log.total);"
+        "(unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000), st->cb_audio_dec->chosen, channel_clusters.c_str(), (unsigned long long)st->cb_switch_log.total,"
     ));
     assert!(code.contains(
         "const std::string channel_clusters = camerabox::cb_channel_clusters_text(st->cb_audio_dec->clusters);"
@@ -127,7 +123,7 @@ fn a_channel_switch_is_logged_and_counted() {
     // the decision itself is the pure CbChannelSwitchLog (camera-box-channel-pick.hpp), pinned
     // against the Rust reference by tests/qpsk_channel_pick_parity_1367.rs
     assert!(code.contains("camerabox::CbChannelSwitchLog cb_switch_log;"));
-    let body = body_of(&code, AUDIO_SIG);
+    let body = unique_body_of(&code, AUDIO_SIG);
     for needle in [
         "const size_t prev_channel = st->cb_audio_dec->chosen; const uint64_t base = st->cb_audio_pushed;",
         "st->cb_audio_pushed += (uint64_t)nf; cb_note_channel_switch(st, prev_channel, frames);",
@@ -137,7 +133,7 @@ fn a_channel_switch_is_logged_and_counted() {
             "{DOCK_OUTPUT}: the audio callback no longer has `{needle}` (issue 1367)"
         );
     }
-    let note = body_of(
+    let note = unique_body_of(
         &code,
         "static void cb_note_channel_switch(struct sync_test_output *st, size_t prev, const struct audio_data *frames)",
     );

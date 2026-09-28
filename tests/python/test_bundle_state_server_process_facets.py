@@ -41,6 +41,7 @@ _SPEC = importlib.util.spec_from_file_location(
 )
 bss = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(bss)  # __name__ != "__main__" -> main()/serve_forever() does NOT run
+import bundle_state_windows as bsw  # noqa: E402 -- the readers + caches (issue 1386 slice D)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -92,8 +93,8 @@ def test_obs_process_list_uses_tasklist_not_powershell(monkeypatch):
         captured["cmd"] = cmd
         return types.SimpleNamespace(stdout=TASKLIST_CSV_SAMPLE)
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
-    result = bss.obs_process_list()
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
+    result = bsw.obs_process_list()
     assert result.splitlines() == ["obs64", "OBS32"]
     cmd = captured["cmd"]
     assert "tasklist" in cmd, f"must use tasklist, not PowerShell: {cmd}"
@@ -102,10 +103,10 @@ def test_obs_process_list_uses_tasklist_not_powershell(monkeypatch):
 
 def test_obs_process_list_empty_on_subprocess_error(monkeypatch):
     def boom(cmd, **_kw):
-        raise bss.subprocess.SubprocessError("tasklist blew up")
+        raise bsw.subprocess.SubprocessError("tasklist blew up")
 
-    monkeypatch.setattr(bss.subprocess, "run", boom)
-    assert bss.obs_process_list() == ""
+    monkeypatch.setattr(bsw.subprocess, "run", boom)
+    assert bsw.obs_process_list() == ""
 
 
 # ---------------------------------------------------------------------------------------------
@@ -113,10 +114,10 @@ def test_obs_process_list_empty_on_subprocess_error(monkeypatch):
 # ---------------------------------------------------------------------------------------------
 
 def _reset_shortcut_cache():
-    bss._shortcut_cache["path"] = None
-    bss._shortcut_cache["stat_key"] = None
-    bss._shortcut_cache["target"] = ""
-    bss._shortcut_cache["workdir"] = ""
+    bsw._shortcut_cache["path"] = None
+    bsw._shortcut_cache["stat_key"] = None
+    bsw._shortcut_cache["target"] = ""
+    bsw._shortcut_cache["workdir"] = ""
 
 
 def test_resolve_shortcut_reuses_cache_when_file_unchanged(tmp_path, monkeypatch):
@@ -129,7 +130,7 @@ def test_resolve_shortcut_reuses_cache_when_file_unchanged(tmp_path, monkeypatch
         calls.append(cmd)
         return types.SimpleNamespace(stdout="C:\\obs\\obs64.exe\nC:\\obs\n")
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
     first = bss.resolve_shortcut(str(lnk))
     second = bss.resolve_shortcut(str(lnk))
     assert first == ("C:\\obs\\obs64.exe", "C:\\obs")
@@ -146,7 +147,7 @@ def test_resolve_shortcut_re_resolves_when_file_changes(tmp_path, monkeypatch):
     def fake_run(cmd, **_kw):
         return types.SimpleNamespace(stdout=responses["stdout"])
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
     first = bss.resolve_shortcut(str(lnk))
     assert first == ("C:\\obs\\obs64.exe", "C:\\obs")
 
@@ -165,9 +166,9 @@ def test_resolve_shortcut_does_not_cache_a_failed_resolve(tmp_path, monkeypatch)
 
     def boom(cmd, **_kw):
         calls.append(cmd)
-        raise bss.subprocess.SubprocessError("powershell blew up")
+        raise bsw.subprocess.SubprocessError("powershell blew up")
 
-    monkeypatch.setattr(bss.subprocess, "run", boom)
+    monkeypatch.setattr(bsw.subprocess, "run", boom)
     first = bss.resolve_shortcut(str(lnk))
     second = bss.resolve_shortcut(str(lnk))
     assert first == ("", "")
@@ -185,7 +186,7 @@ def test_resolve_shortcut_does_not_cache_an_empty_result(tmp_path, monkeypatch):
         calls.append(cmd)
         return types.SimpleNamespace(stdout="")
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
     first = bss.resolve_shortcut(str(lnk))
     second = bss.resolve_shortcut(str(lnk))
     assert first == ("", "")
@@ -208,7 +209,7 @@ def test_resolve_shortcut_unstattable_path_is_never_cached(tmp_path, monkeypatch
         calls.append(cmd)
         return types.SimpleNamespace(stdout="C:\\obs\\obs64.exe\nC:\\obs\n")
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
     assert bss.resolve_shortcut(str(missing)) == ("C:\\obs\\obs64.exe", "C:\\obs")
     assert bss.resolve_shortcut(str(missing)) == ("C:\\obs\\obs64.exe", "C:\\obs")
     assert len(calls) == 2, "a shortcut path that cannot be stat'd must never be cached"
@@ -219,9 +220,9 @@ def test_resolve_shortcut_unstattable_path_is_never_cached(tmp_path, monkeypatch
 # ---------------------------------------------------------------------------------------------
 
 def _reset_ndi_runtime_cache():
-    bss._ndi_runtime_cache["path"] = None
-    bss._ndi_runtime_cache["stat_key"] = None
-    bss._ndi_runtime_cache["version"] = ""
+    bsw._ndi_runtime_cache["path"] = None
+    bsw._ndi_runtime_cache["stat_key"] = None
+    bsw._ndi_runtime_cache["version"] = ""
 
 
 def test_ndi_runtime_version_reuses_cache_when_file_unchanged(tmp_path, monkeypatch):
@@ -234,7 +235,7 @@ def test_ndi_runtime_version_reuses_cache_when_file_unchanged(tmp_path, monkeypa
         calls.append(cmd)
         return types.SimpleNamespace(stdout="6.2.1.0\n")
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
     first = bss.ndi_runtime_version(str(dll))
     second = bss.ndi_runtime_version(str(dll))
     assert first == "6.2.1.0"
@@ -251,7 +252,7 @@ def test_ndi_runtime_version_re_resolves_when_file_changes(tmp_path, monkeypatch
     def fake_run(cmd, **_kw):
         return types.SimpleNamespace(stdout=responses["stdout"])
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
     first = bss.ndi_runtime_version(str(dll))
     assert first == "6.2.1.0"
 
@@ -270,9 +271,9 @@ def test_ndi_runtime_version_does_not_cache_a_failed_resolve(tmp_path, monkeypat
 
     def boom(cmd, **_kw):
         calls.append(cmd)
-        raise bss.subprocess.SubprocessError("powershell blew up")
+        raise bsw.subprocess.SubprocessError("powershell blew up")
 
-    monkeypatch.setattr(bss.subprocess, "run", boom)
+    monkeypatch.setattr(bsw.subprocess, "run", boom)
     first = bss.ndi_runtime_version(str(dll))
     second = bss.ndi_runtime_version(str(dll))
     assert first == ""
@@ -290,7 +291,7 @@ def test_ndi_runtime_version_does_not_cache_an_empty_result(tmp_path, monkeypatc
         calls.append(cmd)
         return types.SimpleNamespace(stdout="")
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
     first = bss.ndi_runtime_version(str(dll))
     second = bss.ndi_runtime_version(str(dll))
     assert first == ""
@@ -305,7 +306,7 @@ def test_ndi_runtime_version_missing_dll_is_empty(monkeypatch):
         calls.append(cmd)
         return types.SimpleNamespace(stdout="6.2.1.0\n")
 
-    monkeypatch.setattr(bss.subprocess, "run", fake_run)
+    monkeypatch.setattr(bsw.subprocess, "run", fake_run)
     assert bss.ndi_runtime_version("/nonexistent/path/to.dll") == ""
     assert len(calls) == 0, "a missing DLL must never even attempt the PowerShell resolve"
 

@@ -1,0 +1,144 @@
+{
+ "all_cambox_continuity": {
+  "copies_gaps_tolerance": 2,
+  "copies_gaps_tolerance_gates_overall_pass": false,
+  "overall_pass": true,
+  "per_window_undecodable_floor": 4,
+  "run_wide_undecodable_within_floor": true,
+  "segment_singleton_allowance_gates_overall_pass": true,
+  "segment_singleton_copies_allowance": 1,
+  "segment_singleton_gaps_allowance": 1,
+  "segments": [
+   {
+    "cambox": "CAM1",
+    "copies": 0,
+    "copies_gaps_tolerance": 2,
+    "frames": 848,
+    "gaps": 0,
+    "pass": true,
+    "relaxed_pass": true,
+    "undecodable": 0
+   },
+   {
+    "cambox": "CAM2",
+    "copies": 235,
+    "copies_gaps_tolerance": 2,
+    "frames": 846,
+    "gaps": 247,
+    "multi_source": {
+     "blocking_checks": [
+      "node_burn_contiguity",
+      "node_burn_hold"
+     ],
+     "ceiling": 0.1,
+     "multi_path_suspect_fraction": 0.7884160756501182,
+     "report_only_checks": [
+      "copies_gaps",
+      "cadence",
+      "frozen_leg"
+     ],
+     "tag": "multi-source (report-only by #1367 decision)"
+    },
+    "pass": false,
+    "relaxed_pass": false,
+    "undecodable": 0
+   },
+   {
+    "cambox": "CAM3",
+    "copies": 0,
+    "copies_gaps_tolerance": 2,
+    "frames": 847,
+    "gaps": 0,
+    "pass": true,
+    "relaxed_pass": true,
+    "undecodable": 0
+   },
+   {
+    "cambox": "CAM4",
+    "copies": 0,
+    "copies_gaps_tolerance": 2,
+    "frames": 847,
+    "gaps": 0,
+    "pass": true,
+    "relaxed_pass": true,
+    "undecodable": 0
+   },
+   {
+    "cambox": "CAM5",
+    "copies": 0,
+    "copies_gaps_tolerance": 2,
+    "frames": 846,
+    "gaps": 0,
+    "pass": true,
+    "relaxed_pass": true,
+    "undecodable": 0
+   },
+   {
+    "cambox": "CAM6",
+    "copies": 0,
+    "copies_gaps_tolerance": 2,
+    "frames": 848,
+    "gaps": 0,
+    "pass": true,
+    "relaxed_pass": true,
+    "undecodable": 0
+   },
+   {
+    "cambox": "CAM7",
+    "copies": 0,
+    "copies_gaps_tolerance": 2,
+    "frames": 846,
+    "gaps": 0,
+    "pass": true,
+    "relaxed_pass": true,
+    "undecodable": 0
+   },
+   {
+    "cambox": "CAM1",
+    "copies": 0,
+    "copies_gaps_tolerance": 2,
+    "frames": 846,
+    "gaps": 0,
+    "pass": true,
+    "relaxed_pass": true,
+    "undecodable": 0
+   },
+   {
+    "cambox": "CAM2",
+    "copies": 308,
+    "copies_gaps_tolerance": 2,
+    "frames": 846,
+    "gaps": 323,
+    "multi_source": {
+     "blocking_checks": [
+      "node_burn_contiguity",
+      "node_burn_hold"
+     ],
+     "ceiling": 0.1,
+     "multi_path_suspect_fraction": 0.9468085106382979,
+     "report_only_checks": [
+      "copies_gaps",
+      "cadence",
+      "frozen_leg"
+     ],
+     "tag": "multi-source (report-only by #1367 decision)"
+    },
+    "pass": false,
+    "relaxed_pass": false,
+    "undecodable": 0
+   },
+   {
+    "cambox": "CAM3",
+    "copies": 0,
+    "copies_gaps_tolerance": 2,
+    "frames": 843,
+    "gaps": 0,
+    "pass": true,
+    "relaxed_pass": true,
+    "undecodable": 0
+   }
+  ],
+  "undecodable_floor_gates_overall_pass": true
+ },
+ "source": "recording-e2e verdict-1388204139.json, all_cambox_continuity trimmed"
+}

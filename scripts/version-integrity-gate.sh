@@ -122,16 +122,27 @@ genlock_build_sha_from_state() {
 
 # --- #826: strih OBS-identity machine-check facet — PURE verdict functions -------------------
 # The four acceptance verdicts (obs_installs / port4455_identity / obs_process_count /
-# startup_chain) + the DEFAULT_OBS_INSTALL_EXE / _WORKDIR / DEFAULT_STARTUP_SHORTCUT pins main()
-# reads live in their own lib (moved verbatim, issue 1377 -- the 1000-line file budget).
+# startup_chain) + the DEFAULT_OBS_INSTALL_EXE / _WORKDIR / DEFAULT_STARTUP_SHORTCUT pins live in
+# their own lib (moved verbatim, issue 1377 -- the 1000-line file budget), with the facet's row
+# function vig_row_obs_identity that main() calls per box (issue 1384).
 # shellcheck source=scripts/lib/version-integrity-obs-identity.sh
 . "$HERE/lib/version-integrity-obs-identity.sh"
 
 # --- genlock vendor-pin report-only ALARM (#1137, #1292) — PURE verdict + git range helpers ----
 # vendor_pin_range_log / vendor_pin_ahead_log / vendor_pin_on_dev + genlock_vendor_pin_verdict live
-# in their own lib (moved verbatim, issue 1377).
+# in their own lib (moved verbatim, issue 1377); the range helpers wrap the shared
+# scripts/lib/vendor-range.sh that drift-guard.sh uses too (issue 1384).
 # shellcheck source=scripts/lib/version-integrity-vendor-pin.sh
 . "$HERE/lib/version-integrity-vendor-pin.sh"
+
+# --- main()'s row functions (issue 1384) -------------------------------------------------------
+# Each per-facet row block of main() is a named vig_row_* function: vig_row_obs_identity (in the
+# obs-identity lib), vig_row_vendor_pin (in the vendor-pin lib), vig_row_genlock_parity (below the
+# source-guard, in this file), and the rows without a family of their own -- vig_row_box_engine,
+# vig_row_imag_bytes, vig_row_report_only_boxes -- in this lib, whose header states the contract
+# every row follows.
+# shellcheck source=scripts/lib/version-integrity-rows.sh
+. "$HERE/lib/version-integrity-rows.sh"
 
 # --- source-guard: when sourced (the unit tests), stop here --------------------------------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -198,6 +209,137 @@ imag_bytes_verdict() {
   fi
   [ "$drift" -gt 0 ] && return 20
   [ "$unknown" -gt 0 ] && return 11
+  return 0
+}
+
+# vig_row_genlock_parity IMAG_ACKED_OFFLINE STRIH_LINUX -> the cross-box genlock-build parity row
+# (issue 756/949), moved verbatim out of main() (issue 1384). It is defined HERE rather than in a
+# scripts/lib/ facet lib because tests/drift_guard.rs reads THIS file's text for the two
+# consumed-paths calls below that carry the --strih-linux flag (issue 1372 review), and because,
+# like imag_bytes_verdict above, it calls drift-guard functions. Besides the two arguments it
+# READS main()'s win_state and genlock_sha arrays and APPENDS one LABEL=SHA reading per box to
+# main()'s parity_args array (bash cannot pass two arrays in, so these three stay main()'s, by
+# dynamic scope); vig_row_vendor_pin then pins those readings.
+# It follows the vig_row_* contract in the header of scripts/lib/version-integrity-rows.sh.
+vig_row_genlock_parity() {
+  local imag_acked_offline="$1" strih_linux="$2"
+  local entry file
+  # #756 — CROSS-BOX genlock-build PARITY: every fleet box must run ONE deployed genlock build. This
+  # catches the stale-imag skew the per-box origin/main ref-compare (drift-guard --check-imag) misses
+  # during a long-lived dev train (#530/#756: imag ran a stale lineage, segfaulted, wedged the GPU).
+  # Gather each box's live GENLOCK_BUILD_SHA.txt: from every --win-state box's state JSON (served by
+  # its bundle-state-server) + every --genlock-sha LABEL=SHA supplied directly (imag, read over ssh
+  # by recording-e2e.sh). ENFORCED (#758): the parity engine is fail-closed (an unread box, OR fewer
+  # than 2 read peers, is UNKNOWN — a REAL gate-blocking condition, never a silent skip).
+  local ge gname gsha
+  for entry in "${win_state[@]}"; do
+    gname="${entry%%=*}"; file="${entry#*=}"
+    gsha=""
+    [ -n "$file" ] && [ -s "$file" ] && gsha="$(genlock_build_sha_from_state "$file")"
+    parity_args+=("${gname}=${gsha}")
+  done
+  for ge in "${genlock_sha[@]}"; do
+    # #1164 -- imag acked offline: drop its genlock-sha entry so the parity certifies the remaining
+    # fleet (strih+stream) instead of UNKNOWN-refusing on the physically-absent, acked box. Defense
+    # in depth -- the acked call site (recording-e2e.sh) already omits --genlock-sha imag=... entirely.
+    if [ -n "$imag_acked_offline" ] && [ "${ge%%=*}" = "imag" ]; then continue; fi
+    parity_args+=("$ge")
+  done
+  # #756/#758 — ENFORCED (no longer opt-in/dormant, per the user's explicit escalation after
+  # today's imag stale-build incident): the parity engine ALWAYS runs now, unconditionally — its
+  # OWN "fewer than 2 read peers" branch already returns UNKNOWN (11), which this case statement
+  # already treats as a gate-blocking condition exactly like every other facet's UNKNOWN. The old
+  # `nonempty -ge 2` gate existed ONLY to skip calling the engine at all while the fleet's
+  # bundle-state-servers were still being upgraded (#756 rollout) -- that rollout is complete
+  # (strih+stream+imag all report genlock_build_sha as of 2026-07-14 ~21:40), so a box that fails
+  # to report one now is itself a REAL, actionable gap (a stale/unread bundle-state-server), never
+  # a reason to silently skip the whole facet.
+  #
+  # #949 — a Windows-only vendor/av-sync-dock/** change advances strih/stream's deployed
+  # GENLOCK_BUILD_SHA.txt to a SHA imag's OWN build trigger (linux-genlock.yml, which deliberately
+  # excludes vendor/av-sync-dock/**) can never be built at -- even though imag's actual built
+  # bytes never changed. A raw-string mismatch is therefore NOT proof of a real skew by itself;
+  # before handing the raw LABEL=SHA readings to the (still string-comparing) engine, resolve every
+  # PAIR of boxes reporting a non-empty, DIFFERENT-string SHA into a real git content check, scoped
+  # to the INTERSECTION of the two boxes' own consumed vendor paths (genlock_parity_consumed_paths)
+  # -- an empty `git diff` there means the label mismatch is cosmetic, and an `EQUIV=labelA:labelB`
+  # marker is appended so the engine treats that ONE pair as in parity. A pair whose diff is
+  # NON-empty, or whose SHA cannot be resolved at all (fail-closed -- never a silent pass), gets NO
+  # marker and still DRIFTs exactly as before #949. Boxes already byte-identical need no git call
+  # at all (the engine's own fast path). Carries BOTH EQUIV= markers (pair proven content-
+  # identical) and DIFF= markers (pair genuinely differs -- names the actual paths so the DRIFT
+  # message stays actionable) -- genlock_build_parity_report tells them apart by prefix.
+  local -a equiv_args=()
+  local -a __ep_a=() __ep_b=()
+  local pi pj la sa lb sb
+  local any_mismatch=0
+  for ((pi = 0; pi < ${#parity_args[@]}; pi++)); do
+    for ((pj = pi + 1; pj < ${#parity_args[@]}; pj++)); do
+      sa="${parity_args[$pi]#*=}"
+      sb="${parity_args[$pj]#*=}"
+      if [ -n "$sa" ] && [ -n "$sb" ] && [ "$sa" != "$sb" ]; then
+        any_mismatch=1
+      fi
+    done
+  done
+  if [ "$any_mismatch" -eq 1 ]; then
+    local repo_root=""
+    repo_root="$(cd "$HERE/.." 2>/dev/null && pwd)" || repo_root=""
+    if [ -z "$repo_root" ]; then
+      echo "WARN: could not resolve version-integrity-gate.sh's own repo root -- skipping #949 genlock parity content-equivalence check (a label-only mismatch will DRIFT even if the content is identical)" >&2
+    else
+      timeout 15 git -C "$repo_root" fetch origin --quiet 2>/dev/null \
+        || echo "WARN: git fetch origin failed (or timed out) -- #949 genlock parity content-check may see a stale origin (a genuinely new SHA may fail to resolve and DRIFT)" >&2
+      local pth pb found_p
+      for ((pi = 0; pi < ${#parity_args[@]}; pi++)); do
+        for ((pj = pi + 1; pj < ${#parity_args[@]}; pj++)); do
+          la="${parity_args[$pi]%%=*}"; sa="${parity_args[$pi]#*=}"
+          lb="${parity_args[$pj]%%=*}"; sb="${parity_args[$pj]#*=}"
+          [ -z "$sa" ] || [ -z "$sb" ] && continue
+          [ "$sa" = "$sb" ] && continue
+          __ep_a=()
+          while IFS= read -r pth; do [ -n "$pth" ] && __ep_a+=("$pth"); done \
+            < <(genlock_parity_consumed_paths "$la" "$strih_linux")
+          __ep_b=()
+          while IFS= read -r pth; do [ -n "$pth" ] && __ep_b+=("$pth"); done \
+            < <(genlock_parity_consumed_paths "$lb" "$strih_linux")
+          local -a inter=()
+          for pth in "${__ep_a[@]}"; do
+            found_p=0
+            for pb in "${__ep_b[@]}"; do [ "$pb" = "$pth" ] && found_p=1 && break; done
+            [ "$found_p" -eq 1 ] && inter+=("$pth")
+          done
+          if [ "${#inter[@]}" -eq 0 ]; then
+            continue
+          fi
+          if genlock_parity_equivalent "$repo_root" "$sa" "$sb" "${inter[@]}"; then
+            equiv_args+=("EQUIV=${la}:${lb}")
+          else
+            # #949: not equivalent (a real diff, or an unresolvable sha). Try to name the ACTUAL
+            # differing paths so a genuine DRIFT is actionable, not just "two opaque SHAs differ" —
+            # empty output here (unresolvable sha) simply means no DIFF= marker is added, and the
+            # DRIFT message falls back to its pre-#949 wording.
+            local diff_paths=""
+            diff_paths="$(genlock_parity_diff_paths "$repo_root" "$sa" "$sb" "${inter[@]}" \
+              | paste -sd, - 2>/dev/null || true)"
+            if [ -n "$diff_paths" ]; then
+              equiv_args+=("DIFF=${la}:${lb}:${diff_paths}")
+            fi
+          fi
+        done
+      done
+    fi
+  fi
+  echo "  -- cross-box genlock parity (#756/#949, ENFORCED) --"
+  local prc=0 parity_out=""
+  parity_out="$(genlock_build_parity_report "${parity_args[@]}" "${equiv_args[@]}")" || prc=$?
+  printf '%s\n' "$parity_out" | sed 's/^/    /'
+  case "$prc" in
+    0)  ok=$((ok + 1)) ;;
+    20) bad=$((bad + 1)) ;;
+    11) unknown=$((unknown + 1)); unknown_boxes+=("genlock_parity") ;;
+    *)  echo "    !! genlock_build_parity_report exited ${prc} (engine error)" >&2; bad=$((bad + 1)) ;;
+  esac
   return 0
 }
 
@@ -333,8 +475,7 @@ main() {
   echo "== version-integrity-gate (#123): pre-rig-test — live strih+stream stack MUST match the pinned set =="
   echo "   pins from ${readme}; engine = drift-guard.sh --compare; a drifted/unverified box REFUSES the run"
 
-  local bad=0 unknown=0 ok=0 entry name file rc
-  local -a compare_args
+  local bad=0 unknown=0 ok=0 entry name file
   local -a unknown_boxes=()
   for entry in "${win_state[@]}"; do
     name="${entry%%=*}"; file="${entry#*=}"
@@ -348,402 +489,21 @@ main() {
       printf '  %-14s UNKNOWN  (no state file %s — win-* MCP fetch missing)\n' "$name" "${file:-<none>}"
       unknown=$((unknown + 1)); unknown_boxes+=("$name"); continue
     fi
-    echo "  -- ${name} (${file}) --"
-    # Build the drift-guard --compare arg vector from the box's observed state.
-    compare_args=(--compare "host=${name}" --readme "$readme")
-    local has_manifest=0 arg
-    while IFS= read -r arg; do
-      [ -z "$arg" ] && continue
-      [ "${arg%%=*}" = "manifest" ] && has_manifest=1
-      compare_args+=("$arg")
-    done < <(compare_args_from_state "$file")
-    # If a global --manifest was given and the box's state did not carry its own, apply it so the
-    # BUILD-SHA / whole-bundle facet runs on every box uniformly.
-    if [ "$has_manifest" -eq 0 ] && [ -n "$manifest" ]; then
-      compare_args+=("manifest=${manifest}")
-    fi
-    if [ "$has_manifest" -eq 0 ] && [ -n "$alt_manifest" ]; then
-      compare_args+=("alt_manifest=${alt_manifest}")
-    fi
-    # issue 1351 follow-up: tell drift-guard's engine to SKIP the Windows-only ndi_runtime +
-    # distroav_dll_paths mandatory facets for a Linux strih (loud SKIPPED, counted ok) while every
-    # other compare_observed facet (incl. the manifest-gated obs_dll_sha256/distroav_dll_sha256/
-    # genlock_capability byte facets) runs exactly as it would for any other box.
-    if [ "$is_strih_linux" = 1 ]; then
-      compare_args+=("strih_linux=1")
-    fi
-    rc=0
-    # Capture the engine's exit code DIRECTLY (no pipe between drift-guard and the status read), THEN
-    # indent the buffered output for display. The fail-closed property must NOT depend on `set -o
-    # pipefail` staying enabled: a piped `exit 20` to `sed` would otherwise yield pipeline status 0,
-    # the `||` would never fire, rc would stay 0, and a DRIFT would be miscounted as OK — a false pass.
-    local engine_out=""
-    engine_out="$("$DRIFT_GUARD" "${compare_args[@]}" 2>&1)" || rc=$?
-    printf '%s\n' "$engine_out" | sed 's/^/    /'
-    case "$rc" in
-      0)  ok=$((ok + 1)) ;;
-      20) bad=$((bad + 1)) ;;
-      11) unknown=$((unknown + 1)); unknown_boxes+=("$name") ;;
-      *)  echo "    !! drift-guard exited ${rc} for ${name} (engine/usage error)" >&2; bad=$((bad + 1)) ;;
-    esac
-
-    # #826 OBS-identity machine-check facet, ENFORCED fleet-wide (#829, the 758-style second step
-    # after the 756-style opt-in landing): the generic install + process-count checks run on EVERY
-    # box UNCONDITIONALLY -- an un-upgraded / absent box is a real gate-blocking UNKNOWN, no longer
-    # a silent skip. #1067: port4455_identity is now ALSO enforced (its former opt-in guard is
-    # removed below) -- the bundle-state-server gather context was fixed (WMI
-    # Win32_Process.ExecutablePath, readable from the non-elevated task where the OpenProcess-based
-    # Get-Process.Path was access-denied on the elevated OBS), so every box reports the :4455 owner
-    # path now; an unreported owner is a REAL gate-blocking UNKNOWN. This completes the 756 -> 758
-    # two-step for the last obs-identity facet.
-    local obs_installs_csv port4455_owner_path port4455_owner_ver obs_proc_count
-    obs_installs_csv="$(state_json_value "$file" obs_installs)"
-    port4455_owner_path="$(state_json_value "$file" port4455_owner_path)"
-    port4455_owner_ver="$(state_json_value "$file" port4455_owner_version)"
-    obs_proc_count="$(state_json_value "$file" obs_process_count)"
-    local frc=0
-
-    # issue 1351 follow-up: on a Linux strih (--strih-linux, box named "strih") every #826
-    # OBS-identity facet below is a Windows-only machine check (install-path scan, :4455 owner
-    # exe, process count via tasklist, NL_STARTUP.ahk) -- SKIP each one loudly (counted ok, never
-    # UNKNOWN) instead of running it. Windows strih/stream are byte-identical (unaffected).
-    if [ "$is_strih_linux" = 1 ]; then
-      printf '  %-22s SKIPPED  (strih is the Linux notebook -- #826 Windows OBS-identity facet not applicable, issue 1351)\n' "obs_installs"
-      ok=$((ok + 1))
-    else
-    engine_out="$(obs_installs_verdict "$DEFAULT_OBS_INSTALL_EXE" "$obs_installs_csv")" || frc=$?
-    printf '%s\n' "$engine_out" | sed 's/^/    /'
-    case "$frc" in
-      0)  ok=$((ok + 1)) ;;
-      20) bad=$((bad + 1)) ;;
-      11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:obs_installs") ;;
-    esac
-    fi
-
-    # port4455_identity: ENFORCED fleet-wide (#1067, the 758-style second step) -- runs
-    # UNCONDITIONALLY on every box now, exactly like obs_installs / obs_process_count above. Its
-    # former opt-in `if [ -n "$port4455_owner_path" ]` guard is gone: the gather context was fixed
-    # (WMI Win32_Process.ExecutablePath), so an EMPTY owner path is now a real gate-blocking UNKNOWN
-    # (the verdict function returns 11 for an empty owner), never a silent skip.
-    local pinned_obs_ver=""
-    pinned_obs_ver="$(pinned_obs_version "$readme" 2>/dev/null)" || pinned_obs_ver=""
-    frc=0
-    if [ "$is_strih_linux" = 1 ]; then
-      printf '  %-22s SKIPPED  (strih is the Linux notebook -- #826 Windows OBS-identity facet not applicable, issue 1351)\n' "port4455_identity"
-      ok=$((ok + 1))
-    else
-    engine_out="$(port_identity_verdict "$DEFAULT_OBS_INSTALL_EXE" "$pinned_obs_ver" "$port4455_owner_path" "$port4455_owner_ver")" || frc=$?
-    printf '%s\n' "$engine_out" | sed 's/^/    /'
-    case "$frc" in
-      0)  ok=$((ok + 1)) ;;
-      20) bad=$((bad + 1)) ;;
-      11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:port4455_identity") ;;
-    esac
-    fi
-
-    frc=0
-    if [ "$is_strih_linux" = 1 ]; then
-      printf '  %-22s SKIPPED  (strih is the Linux notebook -- #826 Windows OBS-identity facet not applicable, issue 1351)\n' "obs_process_count"
-      ok=$((ok + 1))
-    else
-    engine_out="$(obs_process_count_verdict "$obs_proc_count")" || frc=$?
-    printf '%s\n' "$engine_out" | sed 's/^/    /'
-    case "$frc" in
-      0)  ok=$((ok + 1)) ;;
-      20) bad=$((bad + 1)) ;;
-      11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:obs_process_count") ;;
-    esac
-    fi
-
-    # #826 — startup-chain facet, ENFORCED but strih-scoped (#829): strih MUST run NL_STARTUP.ahk,
-    # so it now runs UNCONDITIONALLY on strih -- an unreported chain is a gate-blocking UNKNOWN
-    # (unread), never a silent skip. Re-keyed from ahk-presence to the box identity so a strih box
-    # that stops reporting the ahk keys can no longer silently drop the check. stream runs no
-    # NL_STARTUP.ahk (per .claude/skills/obs-ops), so it NEVER engages here -- absent ahk on stream
-    # stays OK, not UNKNOWN.
-    if [ "$name" = "strih" ]; then
-      if [ "$is_strih_linux" = 1 ]; then
-        printf '  %-22s SKIPPED  (strih is the Linux notebook -- no NL_STARTUP.ahk startup chain, issue 1351)\n' "startup_chain"
-        ok=$((ok + 1))
-      else
-      local ahk_shortcut ahk_run ahk_dead shortcut_target shortcut_workdir
-      ahk_shortcut="$(state_json_value "$file" ahk_app1_shortcut_path)"
-      ahk_run="$(state_json_value "$file" ahk_app1_run)"
-      ahk_dead="$(state_json_value "$file" ahk_dead_config_present)"
-      shortcut_target="$(state_json_value "$file" shortcut_target_path)"
-      shortcut_workdir="$(state_json_value "$file" shortcut_workdir)"
-      local frc2=0
-      engine_out="$(startup_chain_verdict "$DEFAULT_OBS_INSTALL_EXE" "$DEFAULT_OBS_INSTALL_WORKDIR" "$DEFAULT_STARTUP_SHORTCUT" \
-        "$ahk_shortcut" "$ahk_run" "$ahk_dead" "$shortcut_target" "$shortcut_workdir")" || frc2=$?
-      printf '%s\n' "$engine_out" | sed 's/^/    /'
-      case "$frc2" in
-        0)  ok=$((ok + 1)) ;;
-        20) bad=$((bad + 1)) ;;
-        11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:startup_chain") ;;
-      esac
-      fi
-    fi
+    # The per-box rows (issue 1384: each a named function in its facet lib, same order, same
+    # output): the drift-guard engine compare, then the issue-826 OBS-identity rows.
+    vig_row_box_engine "$name" "$file" "$readme" "$manifest" "$alt_manifest" "$is_strih_linux"
+    vig_row_obs_identity "$name" "$file" "$readme" "$is_strih_linux"
   done
 
-  # #756 — CROSS-BOX genlock-build PARITY: every fleet box must run ONE deployed genlock build. This
-  # catches the stale-imag skew the per-box origin/main ref-compare (drift-guard --check-imag) misses
-  # during a long-lived dev train (#530/#756: imag ran a stale lineage, segfaulted, wedged the GPU).
-  # Gather each box's live GENLOCK_BUILD_SHA.txt: from every --win-state box's state JSON (served by
-  # its bundle-state-server) + every --genlock-sha LABEL=SHA supplied directly (imag, read over ssh
-  # by recording-e2e.sh). ENFORCED (#758): the parity engine is fail-closed (an unread box, OR fewer
-  # than 2 read peers, is UNKNOWN — a REAL gate-blocking condition, never a silent skip).
+  # The fleet rows, in the original order. parity_args (LABEL=SHA per box) is filled by the parity
+  # row and read by the vendor-pin alarm; the row functions update ok / bad / unknown /
+  # unknown_boxes above (see the vig_row_* contract in the file header of
+  # scripts/lib/version-integrity-rows.sh).
   local -a parity_args=()
-  local ge gname gsha
-  for entry in "${win_state[@]}"; do
-    gname="${entry%%=*}"; file="${entry#*=}"
-    gsha=""
-    [ -n "$file" ] && [ -s "$file" ] && gsha="$(genlock_build_sha_from_state "$file")"
-    parity_args+=("${gname}=${gsha}")
-  done
-  for ge in "${genlock_sha[@]}"; do
-    # #1164 -- imag acked offline: drop its genlock-sha entry so the parity certifies the remaining
-    # fleet (strih+stream) instead of UNKNOWN-refusing on the physically-absent, acked box. Defense
-    # in depth -- the acked call site (recording-e2e.sh) already omits --genlock-sha imag=... entirely.
-    if [ -n "$imag_acked_offline" ] && [ "${ge%%=*}" = "imag" ]; then continue; fi
-    parity_args+=("$ge")
-  done
-  # #756/#758 — ENFORCED (no longer opt-in/dormant, per the user's explicit escalation after
-  # today's imag stale-build incident): the parity engine ALWAYS runs now, unconditionally — its
-  # OWN "fewer than 2 read peers" branch already returns UNKNOWN (11), which this case statement
-  # already treats as a gate-blocking condition exactly like every other facet's UNKNOWN. The old
-  # `nonempty -ge 2` gate existed ONLY to skip calling the engine at all while the fleet's
-  # bundle-state-servers were still being upgraded (#756 rollout) -- that rollout is complete
-  # (strih+stream+imag all report genlock_build_sha as of 2026-07-14 ~21:40), so a box that fails
-  # to report one now is itself a REAL, actionable gap (a stale/unread bundle-state-server), never
-  # a reason to silently skip the whole facet.
-  #
-  # #949 — a Windows-only vendor/av-sync-dock/** change advances strih/stream's deployed
-  # GENLOCK_BUILD_SHA.txt to a SHA imag's OWN build trigger (linux-genlock.yml, which deliberately
-  # excludes vendor/av-sync-dock/**) can never be built at -- even though imag's actual built
-  # bytes never changed. A raw-string mismatch is therefore NOT proof of a real skew by itself;
-  # before handing the raw LABEL=SHA readings to the (still string-comparing) engine, resolve every
-  # PAIR of boxes reporting a non-empty, DIFFERENT-string SHA into a real git content check, scoped
-  # to the INTERSECTION of the two boxes' own consumed vendor paths (genlock_parity_consumed_paths)
-  # -- an empty `git diff` there means the label mismatch is cosmetic, and an `EQUIV=labelA:labelB`
-  # marker is appended so the engine treats that ONE pair as in parity. A pair whose diff is
-  # NON-empty, or whose SHA cannot be resolved at all (fail-closed -- never a silent pass), gets NO
-  # marker and still DRIFTs exactly as before #949. Boxes already byte-identical need no git call
-  # at all (the engine's own fast path). Carries BOTH EQUIV= markers (pair proven content-
-  # identical) and DIFF= markers (pair genuinely differs -- names the actual paths so the DRIFT
-  # message stays actionable) -- genlock_build_parity_report tells them apart by prefix.
-  local -a equiv_args=()
-  local -a __ep_a=() __ep_b=()
-  local pi pj la sa lb sb
-  local any_mismatch=0
-  for ((pi = 0; pi < ${#parity_args[@]}; pi++)); do
-    for ((pj = pi + 1; pj < ${#parity_args[@]}; pj++)); do
-      sa="${parity_args[$pi]#*=}"
-      sb="${parity_args[$pj]#*=}"
-      if [ -n "$sa" ] && [ -n "$sb" ] && [ "$sa" != "$sb" ]; then
-        any_mismatch=1
-      fi
-    done
-  done
-  if [ "$any_mismatch" -eq 1 ]; then
-    local repo_root=""
-    repo_root="$(cd "$HERE/.." 2>/dev/null && pwd)" || repo_root=""
-    if [ -z "$repo_root" ]; then
-      echo "WARN: could not resolve version-integrity-gate.sh's own repo root -- skipping #949 genlock parity content-equivalence check (a label-only mismatch will DRIFT even if the content is identical)" >&2
-    else
-      timeout 15 git -C "$repo_root" fetch origin --quiet 2>/dev/null \
-        || echo "WARN: git fetch origin failed (or timed out) -- #949 genlock parity content-check may see a stale origin (a genuinely new SHA may fail to resolve and DRIFT)" >&2
-      local pth pb found_p
-      for ((pi = 0; pi < ${#parity_args[@]}; pi++)); do
-        for ((pj = pi + 1; pj < ${#parity_args[@]}; pj++)); do
-          la="${parity_args[$pi]%%=*}"; sa="${parity_args[$pi]#*=}"
-          lb="${parity_args[$pj]%%=*}"; sb="${parity_args[$pj]#*=}"
-          [ -z "$sa" ] || [ -z "$sb" ] && continue
-          [ "$sa" = "$sb" ] && continue
-          __ep_a=()
-          while IFS= read -r pth; do [ -n "$pth" ] && __ep_a+=("$pth"); done \
-            < <(genlock_parity_consumed_paths "$la" "$strih_linux")
-          __ep_b=()
-          while IFS= read -r pth; do [ -n "$pth" ] && __ep_b+=("$pth"); done \
-            < <(genlock_parity_consumed_paths "$lb" "$strih_linux")
-          local -a inter=()
-          for pth in "${__ep_a[@]}"; do
-            found_p=0
-            for pb in "${__ep_b[@]}"; do [ "$pb" = "$pth" ] && found_p=1 && break; done
-            [ "$found_p" -eq 1 ] && inter+=("$pth")
-          done
-          if [ "${#inter[@]}" -eq 0 ]; then
-            continue
-          fi
-          if genlock_parity_equivalent "$repo_root" "$sa" "$sb" "${inter[@]}"; then
-            equiv_args+=("EQUIV=${la}:${lb}")
-          else
-            # #949: not equivalent (a real diff, or an unresolvable sha). Try to name the ACTUAL
-            # differing paths so a genuine DRIFT is actionable, not just "two opaque SHAs differ" —
-            # empty output here (unresolvable sha) simply means no DIFF= marker is added, and the
-            # DRIFT message falls back to its pre-#949 wording.
-            local diff_paths=""
-            diff_paths="$(genlock_parity_diff_paths "$repo_root" "$sa" "$sb" "${inter[@]}" \
-              | paste -sd, - 2>/dev/null || true)"
-            if [ -n "$diff_paths" ]; then
-              equiv_args+=("DIFF=${la}:${lb}:${diff_paths}")
-            fi
-          fi
-        done
-      done
-    fi
-  fi
-  echo "  -- cross-box genlock parity (#756/#949, ENFORCED) --"
-  local prc=0 parity_out=""
-  parity_out="$(genlock_build_parity_report "${parity_args[@]}" "${equiv_args[@]}")" || prc=$?
-  printf '%s\n' "$parity_out" | sed 's/^/    /'
-  case "$prc" in
-    0)  ok=$((ok + 1)) ;;
-    20) bad=$((bad + 1)) ;;
-    11) unknown=$((unknown + 1)); unknown_boxes+=("genlock_parity") ;;
-    *)  echo "    !! genlock_build_parity_report exited ${prc} (engine error)" >&2; bad=$((bad + 1)) ;;
-  esac
-
-  # #1082/#1100 -- imag (Linux) .so BYTE parity facet: compare imag's DEPLOYED libobs.so.30 /
-  # distroav.so / libobs-opengl.so.30 sha256s (--imag-bytes, gathered over ssh) against the
-  # CI-authoritative linux BUNDLE_MANIFEST for imag's build (--imag-manifest, auto-sourced per box by
-  # recording-e2e.sh). This closes the byte-parity gap #770 left for imag (its bytes had NO path into
-  # the gate -- only its marker). ENFORCED (#758-shape, #1100): the facet runs UNCONDITIONALLY and an
-  # absent gather/manifest is a gate-blocking UNKNOWN (11), never the old silent DORMANT skip -- the
-  # live imag gather is deployed + verified on the rig (imag_so_bytes OK on a green E2E). Same
-  # 756->758 second step #1067 applied to port4455_identity. (The WINDOWS obs.dll/distroav.dll byte
-  # enforcement -- removing recording-e2e.sh's manifest-autosource opt-in guard -- stays staged until
-  # the bundle-state-server byte gather is redeployed to strih+stream; see #1100.)
-  echo "  -- imag .so byte parity (#1082/#1100, enforced) --"
-  if [ -n "$imag_acked_offline" ]; then
-    # #1164 -- imag physically absent + operator-acked offline (rig-fleet.txt `imag:...`, issue 1013).
-    # SKIP the .so byte facet with a LOUD, greppable line instead of the #1100 UNKNOWN(11) refuse --
-    # counted ok (never unknown), never a silent pass (the whole imag leg is a NAMED partial this run,
-    # exactly like every other imag_leg_skip_note site). The #1100 fail-closed default is untouched:
-    # this branch runs ONLY when the operator explicitly acked imag offline.
-    printf '  %-22s SKIPPED  (imag acked offline: %s -- issue-1013 leg skip; facet not judged)\n' \
-      "imag_so_bytes" "$imag_acked_offline" | sed 's/^/    /'
-    ok=$((ok + 1))
-  else
-    local ib_label="imag" ib_csv=""
-    if [ -n "$imag_bytes" ]; then ib_label="${imag_bytes%%=*}"; ib_csv="${imag_bytes#*=}"; fi
-    local ib_out="" ibrc=0
-    ib_out="$(imag_bytes_verdict "${ib_label:-imag}" "$imag_manifest" "$ib_csv")" || ibrc=$?
-    printf '%s\n' "$ib_out" | sed 's/^/    /'
-    case "$ibrc" in
-      0)  ok=$((ok + 1)) ;;
-      20) bad=$((bad + 1)) ;;
-      11) unknown=$((unknown + 1)); unknown_boxes+=("imag:so_bytes") ;;
-      *)  echo "    !! imag_bytes_verdict exited ${ibrc} (unexpected)" >&2; bad=$((bad + 1)) ;;
-    esac
-  fi
-
-  # #1137 -- REPORT-ONLY vendor-pin ALARM. The cross-box parity above passes a UNIFORMLY-stale fleet
-  # (every box agrees on an OLD genlock build); this PINS the fleet-deployed genlock_build_sha to the
-  # NEWEST origin/main commit touching vendor/** and SCREAMS when it lags. It NEVER touches the gate's
-  # bad/unknown counters (report-only) -- the coordinated-restart bundle deploy makes a hard block on
-  # every E2E too blunt, so #1136's doctrine assigns this component an ALARM (see
-  # genlock_vendor_pin_verdict's header in scripts/lib/version-integrity-vendor-pin.sh for the
-  # two-step upgrade to a hard-gate). Reuses the deployed
-  # SHAs already gathered in parity_args (no new read). Fail-closed-LOUD on an unreadable pin. Fixture
-  # seams for the flow test: VERSION_INTEGRITY_GATE_VENDOR_NEWEST (override the newest vendor HEAD),
-  # VERSION_INTEGRITY_GATE_VENDOR_PENDING (override the pending list; set-but-empty = "current"), and
-  # (#1292) VERSION_INTEGRITY_GATE_VENDOR_AHEAD / VERSION_INTEGRITY_GATE_VENDOR_ON_DEV (override the
-  # ahead-list / on-dev-line facts -- read only once VENDOR_PENDING is set, same activation as the
-  # pending seam).
-  echo "  -- vendor-pin alarm (#1137, report-only) --"
-  local repo_root_vp=""
-  repo_root_vp="$(cd "$HERE/.." 2>/dev/null && pwd)" || repo_root_vp=""
-  local -a vp_shas=()
-  local vp_seen=" " pe psha
-  for pe in "${parity_args[@]}"; do
-    psha="${pe#*=}"
-    [ -z "$psha" ] && continue
-    case "$vp_seen" in *" $psha "*) continue ;; esac
-    vp_seen="${vp_seen}${psha} "
-    vp_shas+=("$psha")
-  done
-  local vp_newest=""
-  if [ -n "${VERSION_INTEGRITY_GATE_VENDOR_NEWEST:-}" ]; then
-    vp_newest="$VERSION_INTEGRITY_GATE_VENDOR_NEWEST"
-  elif [ -n "$repo_root_vp" ]; then
-    timeout 15 git -C "$repo_root_vp" fetch origin --quiet 2>/dev/null || true
-    vp_newest="$(git -C "$repo_root_vp" log -1 --format='%H' origin/main -- vendor/ 2>/dev/null || true)"
-  fi
-  if [ "${#vp_shas[@]}" -eq 0 ]; then
-    local vp_out=""; vp_out="$(genlock_vendor_pin_verdict "" "$vp_newest" "")" || true
-    printf '%s\n' "$vp_out" | sed 's/^/    /'
-    echo "!! VENDOR-PIN ALARM: no deployed genlock_build_sha to pin -- vendor currency UNVERIFIED (report-only, does NOT block this run)." >&2
-  else
-    local vp_sha vp_newest_eff vp_pending vp_ahead vp_on_dev vp_rc vp_out vprc
-    for vp_sha in "${vp_shas[@]}"; do
-      vp_newest_eff="$vp_newest"
-      vp_pending=""
-      vp_ahead=""
-      vp_on_dev=0
-      vp_rc=0
-      if [ -n "${VERSION_INTEGRITY_GATE_VENDOR_PENDING+x}" ]; then
-        vp_pending="$VERSION_INTEGRITY_GATE_VENDOR_PENDING"
-        vp_ahead="${VERSION_INTEGRITY_GATE_VENDOR_AHEAD:-}"
-        vp_on_dev="${VERSION_INTEGRITY_GATE_VENDOR_ON_DEV:-0}"
-      elif [ -n "$repo_root_vp" ] && [ -n "$vp_newest_eff" ]; then
-        if git -C "$repo_root_vp" cat-file -e "${vp_sha}^{commit}" 2>/dev/null; then
-          # #1292: merge-base-scoped LAG range (vendor_pin_range_log), never a plain ancestry range
-          # -- see its own header for why a plain range falsely reads a deployed SHA that is
-          # genuinely AHEAD of main on the dev candidate line as LAGGING. `|| vp_rc=$?` is
-          # load-bearing (mirrored from drift-guard.sh's own #1292 review finding W1): a failing
-          # ahead-log call must land on the SAME UNKNOWN path as a failing range-log call, never
-          # silently swallow into an empty vp_ahead that genlock_vendor_pin_verdict would read as
-          # "OK, current".
-          vp_pending="$(vendor_pin_range_log "$repo_root_vp" "$vp_sha")" || vp_rc=$?
-          if [ "$vp_rc" = "0" ] && [ -z "$vp_pending" ]; then
-            vp_ahead="$(vendor_pin_ahead_log "$repo_root_vp" "$vp_sha")" || vp_rc=$?
-            if [ "$vp_rc" = "0" ] && [ -n "$vp_ahead" ]; then
-              vendor_pin_on_dev "$repo_root_vp" "$vp_sha" && vp_on_dev=1 || vp_on_dev=0
-            fi
-          fi
-          if [ "$vp_rc" != "0" ]; then
-            # A merge-base/log git error -> fail-closed UNKNOWN (never a false "no pending" from an
-            # empty/partial read).
-            vp_newest_eff=""
-          fi
-        else
-          # The deployed SHA is unknown to local git -> rev-range would silently return "" and read
-          # as "none pending" (a FALSE OK). Force UNKNOWN (fail-closed) instead.
-          vp_newest_eff=""
-        fi
-      fi
-      vprc=0
-      vp_out="$(genlock_vendor_pin_verdict "$vp_sha" "$vp_newest_eff" "$vp_pending" "$vp_ahead" "$vp_on_dev")" || vprc=$?
-      printf '%s\n' "$vp_out" | sed 's/^/    /'
-      case "$vprc" in
-        30) echo "!! VENDOR-PIN ALARM: deployed genlock bundle ${vp_sha} is DRIFTED from origin/main vendor HEAD (LAGS, or an unrecognized ORPHAN build reachable from neither origin/main nor origin/dev) -- see the vendor_pin detail line above for the exact reason; redeploy the fleet (report-only, does NOT block this run)." >&2 ;;
-        31) echo "!! VENDOR-PIN ALARM: could not verify deployed genlock bundle ${vp_sha} against origin/main vendor HEAD (report-only)." >&2 ;;
-      esac
-    done
-  fi
-
-  # #1296 — REPORT-ONLY boxes (RESOLUME-SNV): surface each one's observed genlock build + OBS
-  # identity as an informational row, but NEVER touch bad/unknown/ok, so a report-only box can
-  # never block the run. This is deliberately OUTSIDE the [0/8] blocking set (targets.md: resolume
-  # is a traveling CG box, not a measured cam->strih->stream source). An unread/empty state file
-  # prints an "unread (report-only)" row and still never blocks.
-  if [ "${#win_state_report_only[@]}" -gt 0 ]; then
-    echo
-    echo "  -- report-only boxes (#1296: surfaced, NEVER gate the run) --"
-    local ro_entry ro_name ro_file ro_sha ro_obs ro_port4455
-    for ro_entry in "${win_state_report_only[@]}"; do
-      ro_name="${ro_entry%%=*}"; ro_file="${ro_entry#*=}"
-      if [ -z "$ro_file" ] || [ ! -s "$ro_file" ]; then
-        printf '  %-14s report-only  (unread — no state file %s; does NOT block)\n' "$ro_name" "${ro_file:-<none>}"
-        continue
-      fi
-      ro_sha="$(genlock_build_sha_from_state "$ro_file")"
-      ro_obs="$(state_json_value "$ro_file" obs_process_count)"
-      ro_port4455="$(state_json_value "$ro_file" port4455_owner_version)"
-      printf '  %-14s report-only  genlock_build_sha=%s obs64=%s obs_version=%s (does NOT block)\n' \
-        "$ro_name" "${ro_sha:-n/a}" "${ro_obs:-n/a}" "${ro_port4455:-n/a}"
-    done
-  fi
+  vig_row_genlock_parity "$imag_acked_offline" "$strih_linux"
+  vig_row_imag_bytes "$imag_acked_offline" "$imag_bytes" "$imag_manifest"
+  vig_row_vendor_pin "${parity_args[@]}"
+  vig_row_report_only_boxes "${win_state_report_only[@]}"
 
   # issue 1357 -- REPORT-ONLY Windows OBS-box baseline rows (the lib renders them; never counted).
   [ "${#win_baseline[@]}" -eq 0 ] || win_baseline_report_rows "${win_baseline[@]}"

@@ -9,7 +9,7 @@
 //! probe-gated modules that CI builds.
 //!
 //! Reverse-engineered from `vendor/av-sync-dock/tool/videogen.py` (encoder) and
-//! `vendor/av-sync-dock/src/sync-test-output.cpp` (decoder). The ENCODER stays
+//! `vendor/av-sync-dock/src/sync-test-output-audio.cpp` (decoder). The ENCODER stays
 //! byte-compatible with norihiro so the (custom) dock can decode what cam2 emits; the
 //! DECODER here is a self-consistent normalized-correlation demod used by
 //! recording-verdict for the phone-free A/V-sync verdict. Supersedes the scrapped
@@ -55,7 +55,7 @@ pub fn crc4(mut data: u32, size: u32) -> u32 {
 }
 
 /// CRC-4 residual check — matches `crc4_check()` in
-/// `vendor/av-sync-dock/src/sync-test-output.cpp`. Returns 0 for a valid word.
+/// `vendor/av-sync-dock/src/sync-test-output-audio.cpp`. Returns 0 for a valid word.
 pub fn crc4_check(mut data: u32, size: u32) -> u32 {
     let mut p = CRC4_POLY << (size - 5);
     let mut s = size;
@@ -217,27 +217,6 @@ pub fn to_stereo_i16(mono: &[f32], amplitude: f64) -> Vec<i16> {
     out
 }
 
-// Complex helpers (re, im) as f64 pairs — no external num-complex dep, Tier-0.
-#[inline]
-fn cadd(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
-    (a.0 + b.0, a.1 + b.1)
-}
-#[inline]
-fn cmag(a: (f64, f64)) -> f64 {
-    (a.0 * a.0 + a.1 * a.1).sqrt()
-}
-/// a / b for complex numbers.
-#[inline]
-fn cdiv(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
-    let d = b.0 * b.0 + b.1 * b.1 + 1e-12;
-    ((a.0 * b.0 + a.1 * b.1) / d, (a.1 * b.0 - a.0 * b.1) / d)
-}
-/// a * b for complex numbers.
-#[inline]
-fn cmul(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
-    (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0)
-}
-
 /// Diagnostic counters for one [`decode_markers_with_stats`] call — the #690 live-dock ask: tell a
 /// live session apart-and-not-guessing WHETHER the demod (a) sees no candidate onsets at all (bad
 /// audio routing/level — `preamble_screens_passed == 0`), (b) sees candidates that never decode a
@@ -245,7 +224,7 @@ fn cmul(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
 /// markers fine (`crc_ok > 0`) — in which case a still-empty live "Audio Index" points further
 /// downstream (the ring lookup / rolling-cluster lock gates in `av_sync_dock.rs`, not the demod
 /// itself). Pure counting, zero effect on [`decode_markers`]'s returned markers — mirrored
-/// byte-for-byte into `camera-box-audio.hpp`'s `CbDecodeStats`.
+/// byte-for-byte into `camera-box-marker-scan.hpp`'s `CbDecodeStats`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DecodeStats {
     /// Number of sample onsets whose 2-symbol preamble screen crossed `threshold` (a candidate the
@@ -262,7 +241,7 @@ pub struct DecodeStats {
 
 /// Detect QPSK markers in mono f32 audio → `(audio_ts_s at signal start, index)` per marker.
 ///
-/// The norihiro demod (`sync-test-output.cpp::st_raw_audio_decode_data`): IQ-demodulate each symbol
+/// The norihiro demod (`sync-test-output-audio.cpp::st_raw_audio_decode_data`): IQ-demodulate each symbol
 /// against the carrier (`Z = Σ signal·e^{-iθ}`, computed O(1) via prefix sums), derotate by the
 /// known preamble phasor (absorbs any carrier-phase / sub-sample-alignment error — the reason plain
 /// cross-correlation fails on a carrier), read the two bits per symbol from the derotated real/imag
@@ -279,121 +258,20 @@ pub fn decode_markers(samples: &[f32], p: &AudioParams, threshold: f64) -> Vec<(
 /// Same decode as [`decode_markers`], plus [`DecodeStats`] counting how many candidate onsets were
 /// screened, and of those, how many decoded a valid marker vs. failed the preamble/CRC check. See
 /// [`DecodeStats`] for why this exists (the #690 live-dock "audio index never locks" diagnosis).
+/// The whole-buffer [`crate::qpsk_marker_scan::scan_markers`] (issue 1381 moved the kernel there).
 pub fn decode_markers_with_stats(
     samples: &[f32],
     p: &AudioParams,
     threshold: f64,
 ) -> (Vec<(f64, u8)>, DecodeStats) {
-    let mut stats = DecodeStats::default();
     let ar = p.sample_rate as f64;
-    let f = p.carrier_hz as f64;
-    let c = p.c.max(1) as f64;
-    let sps = ar * c / f; // samples per symbol (fractional)
-    let sig_len = signal_len(p);
-    let n = samples.len();
-    if sig_len == 0 || n < sig_len || sps < 1.0 {
-        return (Vec::new(), stats);
-    }
-    // Prefix sums (f64): signal·cos, signal·sin, signal² — absolute carrier phase. Any window's
-    // IQ and energy are then O(1). Absolute-vs-relative phase differs only by a constant rotation,
-    // which the preamble derotation cancels.
-    let w = 2.0 * PI * f / ar;
-    let mut pc = vec![0f64; n + 1];
-    let mut ps = vec![0f64; n + 1];
-    let mut pe = vec![0f64; n + 1];
-    for m in 0..n {
-        let ph = m as f64 * w;
-        let x = samples[m] as f64;
-        // #1153: a non-finite input sample would otherwise contaminate every prefix sum after it,
-        // silently killing decode for the REST of the window; treat it as silence instead.
-        let x = if x.is_finite() { x } else { 0.0 };
-        pc[m + 1] = pc[m] + x * ph.cos();
-        ps[m + 1] = ps[m] + x * ph.sin();
-        pe[m + 1] = pe[m] + x * x;
-    }
-    // Z over [a,b): e^{-iθ} = cosθ - i·sinθ ⇒ (re = Σ signal·cos, im = -Σ signal·sin).
-    let z = |a: usize, b: usize| -> (f64, f64) {
-        let a = a.min(n);
-        let b = b.min(n);
-        (pc[b] - pc[a], -(ps[b] - ps[a]))
-    };
-    let sym_win = |base: usize, k: usize| -> (usize, usize) {
-        (
-            base + (k as f64 * sps).round() as usize,
-            base + ((k + 1) as f64 * sps).round() as usize,
-        )
-    };
-    let preamble = |base: usize| -> (f64, f64) {
-        let (a0, b0) = sym_win(base, 0);
-        let (a1, b1) = sym_win(base, 1);
-        cadd(z(a0, b0), z(a1, b1))
-    };
-    // Cauchy-Schwarz normaliser for the 2-symbol preamble window: |Z| ≤ e·√N.
-    let two_sym = (2.0 * sps).round() as usize;
-    let norm_at = |base: usize| -> f64 {
-        let e = (pe[(base + two_sym).min(n)] - pe[base.min(n)])
-            .max(0.0)
-            .sqrt();
-        e * (two_sym as f64).sqrt() + 1e-12
-    };
-
-    let mut out = Vec::new();
-    let mut i = 0usize;
-    while i + sig_len <= n {
-        let refph = preamble(i);
-        if cmag(refph) / norm_at(i) >= threshold {
-            stats.preamble_screens_passed += 1;
-            // The screen crosses threshold on the RISING edge, up to ~one symbol before the true
-            // onset. Search forward across the whole preamble span (+ a few back) for the max
-            // preamble magnitude — the true onset, where the 2-symbol window aligns with the 0xF
-            // preamble. A too-narrow refine locks onto a misaligned base that can still CRC-pass to
-            // a wrong index (observed: onset 65 samples early → 200 misread as 98).
-            let span = (2.0 * sps).ceil() as usize;
-            let lo = i.saturating_sub(4);
-            let mut base = i;
-            let mut bestm = cmag(refph);
-            for cand in lo..=(i + span) {
-                if cand + sig_len <= n {
-                    let m = cmag(preamble(cand));
-                    if m > bestm {
-                        bestm = m;
-                        base = cand;
-                    }
-                }
-            }
-            // Rotate the preamble reference by −45° (× (1,−1)) so the on-axis symbol constellation
-            // becomes diagonal (±0.5, ±0.5); then sign-of-real and sign-of-imag are each a robust
-            // bit, tolerant of the ~45° phasor rotation the single-cycle edge taper introduces at
-            // c=1 (norihiro `x *= (1,-1)` then quadrant sign test). Canonical after rotation:
-            // sym3→(+,+), sym0→(−,−), sym1→(+,−), sym2→(−,+); sym = 2·(im>0) | 1·(re>0).
-            let refp = cmul(preamble(base), (1.0, -1.0));
-            let mut word = 0u32;
-            for k in 0..N_SYMBOLS as usize {
-                let (a, b) = sym_win(base, k);
-                let (re, im) = cdiv(z(a, b), refp);
-                let sym = (if im > 0.0 { 2u32 } else { 0 }) | (if re > 0.0 { 1 } else { 0 });
-                word |= sym << (N_PAYLOAD_BITS - 2 - 2 * k as u32);
-            }
-            // #1153: the emitter ALWAYS sends the zero nibble (bits[15:12]) == 0, but only the
-            // preamble nibble + CRC-4 (8 bits) were ever checked — leaving the CRC-passing
-            // accept-space 16x too large (256 valid vs 3840 "poison" words a music mix decodes
-            // from noise). Enforcing the zero nibble reclaims those 4 bits of built-in
-            // redundancy and cuts the false-decode flood ~16x, with no real marker lost (a real
-            // marker's zero nibble is 0 and is already covered by the CRC).
-            if (word >> 16) & 0xF == PREAMBLE_NIBBLE
-                && (word >> 12) & 0xF == 0
-                && crc4_check(word, N_PAYLOAD_BITS) == 0
-            {
-                stats.crc_ok += 1;
-                out.push((base as f64 / ar, ((word >> 4) & 0xFF) as u8));
-                i = base + sig_len; // markers are far apart; skip past this one
-                continue;
-            }
-            stats.crc_fail += 1;
-        }
-        i += 1;
-    }
-    (out, stats)
+    let scan = crate::qpsk_marker_scan::scan_markers(samples, p, threshold, 0);
+    let markers = scan
+        .markers
+        .into_iter()
+        .map(|(base, idx)| (base as f64 / ar, idx))
+        .collect();
+    (markers, scan.stats)
 }
 
 /// The marker-log CSV header: a `#`-comment recording the emit `AudioParams` (the decoder MUST
@@ -791,7 +669,7 @@ pub fn frame_id_to_index(frame_id: u32) -> u8 {
 }
 
 /// Number of slots in the live camera-box video↔audio ring (`cb_video_ts_ns` in
-/// `vendor/av-sync-dock/src/sync-test-output.cpp`), keyed on `frame_id_to_index`.
+/// `vendor/av-sync-dock/src/sync-test-output-internal.hpp`), keyed on `frame_id_to_index`.
 pub const AV_SYNC_RING_SLOTS: u64 = 256;
 /// Fixed camera-box painter rate the ring's slot count is defined against — NOT the dock's own
 /// capture fps, which can differ (see the final-mixed-60-30 topology).
@@ -809,7 +687,7 @@ pub const AV_SYNC_RING_CYCLE_NS: u64 = AV_SYNC_RING_SLOTS * 1_000_000_000 / AV_S
 /// difference modulo `cycle_ns` into `(-cycle_ns/2, +cycle_ns/2]` recovers the true offset
 /// regardless of which side leads — no assumption about direction. Mirrors
 /// `resolve_ring_lap_offset_ns` (same name) in
-/// `vendor/av-sync-dock/src/sync-test-output.cpp::st_raw_audio_decode_data` — keep both in sync if
+/// `vendor/av-sync-dock/src/sync-test-output-audio.cpp` — keep both in sync if
 /// the ring size or source fps ever change.
 pub fn resolve_ring_lap_offset_ns(audio_ts_ns: u64, stored_video_ts_ns: u64, cycle_ns: u64) -> i64 {
     debug_assert!(cycle_ns > 0);
@@ -831,7 +709,7 @@ pub fn resolve_ring_lap_offset_ns(audio_ts_ns: u64, stored_video_ts_ns: u64, cyc
 /// Smooth by taking the MEDIAN of resolved offsets within `window_ns` of the latest sample
 /// (dropping older ones first) — a single false blip cannot move a multi-sample median far, while
 /// the real markers (sharing one near-constant pipeline delay) dominate. Mirrors
-/// `cb_smooth_offset_ns` in `vendor/av-sync-dock/src/sync-test-output.cpp` — keep both in sync.
+/// `cb_smooth_offset_ns` in `vendor/av-sync-dock/src/sync-test-output-audio.cpp` — keep both in sync.
 pub fn smoothed_offset_ns(
     history: &mut VecDeque<(u64, i64)>,
     sample_ts_ns: u64,

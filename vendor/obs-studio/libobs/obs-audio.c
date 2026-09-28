@@ -19,6 +19,7 @@
 #include "obs-internal.h"
 #include "util/util_uint64.h"
 #include "obs-genlock-audio-buffering.h" /* camera-box issue 1367: the audio-buffering floor */
+#include "obs-genlock-mix-guard.h"        /* camera-box issue 1381: only a mixed source grows it */
 
 struct ts_info {
 	uint64_t start;
@@ -497,12 +498,106 @@ static bool audio_buffer_insufficient(struct obs_source *source, size_t sample_r
 	return false;
 }
 
+/* camera-box issue 1381 (design 5862336131): the mix buffering GUARD -- only a source that is MIXED can
+ * move the mix window (the why, the rules and the known limit: obs-genlock-mix-guard.h). The pure
+ * decisions live in that header; the mixer's state, the mark, and the re-anchor live here. */
+
+/* The mixer tick, audio thread only. A file-scope static, never reset: obs_free_audio zeroes struct
+ * obs_core_audio on an audio reset while the sources keep their last tick, so a counter there would
+ * bring a stale member back when it reached that tick again. */
+static uint64_t genlock_mix_tick_now = 0;
+
+static inline bool genlock_mix_source_is_member(const struct obs_source *source)
+{
+	return genlock_mix_is_member(source->genlock_mix_tick, genlock_mix_tick_now);
+}
+
+/* audio_callback, right after the output mixes' active trees are in the render order and before the
+ * catch-all loop adds every other audio source: advance the mixer tick and mark that render order as
+ * the mix. */
+static void genlock_mix_mark_members(struct obs_core_audio *audio)
+{
+	const uint64_t tick = ++genlock_mix_tick_now;
+
+	for (size_t i = 0; i < audio->render_order.num; i++) {
+		obs_source_t *source = audio->render_order.array[i];
+		source->genlock_mix_entered = genlock_mix_joined(source->genlock_mix_tick, tick);
+		source->genlock_mix_tick = tick;
+	}
+}
+
+/* Re-anchor a source whose audio runs behind the mix window (reason NOT_MIXED or ENTERED) instead of
+ * letting it grow the whole mix's buffering: drop its samples behind the window; if none are left,
+ * restart its timeline (audio_pending, audio_ts = 0, timing_set = false), so its next packet is placed
+ * fresh -- at its arrival when its placement follows timing_adjust (obs-source.c reset_audio_timing).
+ * The drop, the rounding adjust and the restart MIRROR ignore_audio above (upstream's re-anchor at the
+ * maximum, left byte-identical for rebases); the lift test compares the two on every probe, so a
+ * rebase that changes ignore_audio must change this copy. Counted per source, logged as one
+ * `buffering-guard:` WARNING (every entry, else once per GENLOCK_MIX_GUARD_LOG_INTERVAL_NS). The caller
+ * holds audio_buf_mutex. Returns true when the source is back in sync (re-render it). */
+static bool genlock_mix_guard_reanchor(struct obs_core_audio *audio, obs_source_t *source, size_t channels,
+				       size_t sample_rate, uint64_t start_ts, int reason)
+{
+	/* The ingest thread may have moved the timeline since the unlocked check. */
+	if (!source->audio_ts || source->audio_ts + 1 >= start_ts)
+		return false;
+
+	const size_t num_floats = source->audio_input_buf[0].size / sizeof(float);
+	const uint64_t behind_ns = start_ts - source->audio_ts;
+	size_t drop = (size_t)util_mul_div64(behind_ns - 1, sample_rate, 1000000000ULL) + 1;
+
+	if (drop > num_floats)
+		drop = num_floats;
+	for (size_t ch = 0; ch < channels; ch++)
+		deque_pop_front(&source->audio_input_buf[ch], NULL, drop * sizeof(float));
+	source->last_audio_input_buf_size = 0;
+
+	const uint64_t dropped_ns = util_mul_div64(drop, 1000000000ULL, sample_rate);
+	source->audio_ts += dropped_ns;
+	/* rounding error, adjust (ignore_audio) */
+	if (source->audio_ts == start_ts - 1)
+		source->audio_ts = start_ts;
+
+	const bool in_sync = source->audio_ts >= start_ts;
+	if (!in_sync) {
+		source->audio_pending = true;
+		source->audio_ts = 0;
+		source->timing_set = false;
+	}
+
+	source->genlock_mix_guard_events++;
+	source->genlock_mix_guard_dropped_ns += dropped_ns;
+
+	const uint64_t now = os_gettime_ns();
+	if (genlock_mix_guard_log_due(reason, source->genlock_mix_guard_logged_events,
+				      source->genlock_mix_guard_last_log_ns, now)) {
+		blog(LOG_WARNING,
+		     "buffering-guard: '%s' %s: its audio ran %.1f ms behind the mix window; re-anchored (dropped %.1f ms%s) "
+		     "instead of adding %u ms to the whole mix's %d ms of audio buffering (issue 1381; events=%" PRIu64
+		     ", +%" PRIu64 " since the last line, dropped_total=%.1f ms)",
+		     obs_source_get_name(source),
+		     reason == GENLOCK_MIX_GUARD_ENTERED ? "entered the mix late" : "is not mixed",
+		     (double)behind_ns / 1e6, (double)dropped_ns / 1e6, in_sync ? "" : ", timeline restarted",
+		     genlock_mix_guard_would_add_ms(behind_ns, (uint32_t)sample_rate, AUDIO_OUTPUT_FRAMES,
+						    audio->total_buffering_ticks, audio->max_buffering_ticks),
+		     (int)((size_t)audio->total_buffering_ticks * AUDIO_OUTPUT_FRAMES * 1000 / sample_rate),
+		     source->genlock_mix_guard_events,
+		     source->genlock_mix_guard_events - source->genlock_mix_guard_logged_events,
+		     (double)source->genlock_mix_guard_dropped_ns / 1e6);
+		source->genlock_mix_guard_logged_events = source->genlock_mix_guard_events;
+		source->genlock_mix_guard_last_log_ns = now;
+	}
+	return in_sync;
+}
+
 static inline const char *find_min_ts(struct obs_core_data *data, uint64_t *min_ts)
 {
 	obs_source_t *buffering_source = NULL;
 	struct obs_source *source = data->first_audio_source;
 	while (source) {
-		if (!source->audio_pending && source->audio_ts && source->audio_ts < *min_ts) {
+		/* camera-box issue 1381: only a MIXED source moves the mix window. */
+		if (genlock_mix_source_is_member(source) && !source->audio_pending && source->audio_ts &&
+		    source->audio_ts < *min_ts) {
 			*min_ts = source->audio_ts;
 			buffering_source = source;
 		}
@@ -518,7 +613,9 @@ static inline bool mark_invalid_sources(struct obs_core_data *data, size_t sampl
 
 	struct obs_source *source = data->first_audio_source;
 	while (source) {
-		recalculate |= audio_buffer_insufficient(source, sample_rate, min_ts);
+		/* camera-box issue 1381: a source that is not mixed never forces a recalculation. */
+		if (genlock_mix_source_is_member(source))
+			recalculate |= audio_buffer_insufficient(source, sample_rate, min_ts);
 		source = (struct obs_source *)source->next_audio_source;
 	}
 
@@ -696,6 +793,11 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 	}
 	pthread_mutex_unlock(&obs->video.mixes_mutex);
 
+	/* camera-box issue 1381: the render order so far is the MIX -- every source an output mix's active
+	 * tree reached. Mark it before the loop below adds every other audio source (rendered for meters
+	 * and monitoring, never mixed). */
+	genlock_mix_mark_members(audio);
+
 	pthread_mutex_lock(&data->audio_sources_mutex);
 
 	source = data->first_audio_source;
@@ -715,6 +817,22 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 		obs_source_audio_render(source, mixers, channels, sample_rate, audio_size);
 		if (should_silence_monitored_source(source, audio))
 			clear_audio_output_buf(source, audio);
+
+		/* camera-box issue 1381: a source that is not mixed, or that joined the mix on this tick, and
+		 * runs behind the window is re-anchored to it instead of growing the whole mix's buffering
+		 * (genlock_mix_guard_reanchor); a source that stays mixed keeps upstream's path below. */
+		const int genlock_guard =
+			genlock_mix_guard_reason(genlock_mix_source_is_member(source), source->genlock_mix_entered,
+						 source->info.audio_render != NULL, source->audio_ts, ts.start);
+		if (genlock_guard != GENLOCK_MIX_GUARD_NONE) {
+			pthread_mutex_lock(&source->audio_buf_mutex);
+			const bool genlock_rerender = genlock_mix_guard_reanchor(audio, source, channels, sample_rate,
+										 ts.start, genlock_guard);
+			pthread_mutex_unlock(&source->audio_buf_mutex);
+			if (genlock_rerender)
+				obs_source_audio_render(source, mixers, channels, sample_rate, audio_size);
+			continue;
+		}
 
 		/* if a source has gone backward in time and we can no
 		 * longer buffer, drop some or all of its audio */

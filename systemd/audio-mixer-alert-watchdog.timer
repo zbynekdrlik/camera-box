@@ -1,0 +1,15 @@
+[Unit]
+# Fires the issue-1381 audio-mixer / VBAN-loss health-check every 5 min (dev1-side), in lockstep with
+# the render-freeze / audio-lag / network-reach / bundle-state alert timers. A mixer off real time or
+# a VBAN sender losing audio is paged within ~10 min (2-pass confirm).
+Description=Run the camera-box audio-mixer / VBAN-loss health-check every 5 min (issue 1381)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

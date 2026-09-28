@@ -12,7 +12,7 @@ Two proofs:
    still called).
 
 2. Static string-pins that the new Linux install path is wired: the systemd unit's ExecStart carries
-   the imag flags, and setup-imag.sh's step 28 installs the three sibling files + the unit ENABLE-ONLY
+   the imag flags, and setup-imag.sh's step 28 installs the declared server tree + the unit ENABLE-ONLY
    and bumps TOTAL_STEPS. Pure text reads (no box, no network) — a python sibling of the setup_imag_*
    static anchors, kept out of the Rust anchor file so it stays Tier-0-runnable via pytest.
 
@@ -22,6 +22,7 @@ test_bundle_state_server_*.py files in one pytest process.
 """
 import importlib.util
 import pathlib
+import subprocess
 import sys
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -224,10 +225,18 @@ def test_unit_file_exists_with_the_imag_execstart_flags():
 def test_setup_imag_step_28_installs_the_server_enable_only():
     assert "TOTAL_STEPS=28" in _SETUP, "setup-imag.sh must bump TOTAL_STEPS to 28 for the new step"
     assert 'step 28 "' in _SETUP, "setup-imag.sh must add a step 28 banner"
-    # the three sibling files land together in /opt/camera-box so the server's sibling imports resolve
+    # the server tree lands together in /opt/camera-box so the server's sibling imports resolve.
+    # Issue 1386: step 28 iterates the ONE declared list (scripts/lib/bundle-state-files.sh, pinned
+    # against the server's real imports by test_bundle_state_files_1386.py) instead of typing it.
     assert "/opt/camera-box" in _SETUP
+    assert 'for f in "${BUNDLE_STATE_SERVER_FILES[@]}"; do' in _SETUP
+    lib = _SCRIPTS / "lib" / "bundle-state-files.sh"
+    declared = subprocess.run(
+        ["/bin/bash", "-c", f'. "{lib}"; printf "%s\\n" "${{BUNDLE_STATE_SERVER_FILES[@]}}"'],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
     for f in ("bundle-state-server.py", "bundle_state_gather.py", "obs_phase2.py"):
-        assert f in _SETUP, f"step 28 must install {f} to the box"
+        assert f in declared, f"step 28 must install {f} to the box"
     assert "imag-bundle-state-server.service" in _SETUP
     # ENABLE-ONLY: never a live --now start from the provisioner
     assert "systemctl --user enable imag-bundle-state-server.service" in _SETUP

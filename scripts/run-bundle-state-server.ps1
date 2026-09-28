@@ -1,6 +1,7 @@
 # #650 - auto-restart supervisor loop for bundle-state-server.py on strih/stream.
 #
-# Deployed alongside bundle-state-server.py + bundle_state_gather.py under
+# Deployed alongside the server tree (every file named in scripts/lib/bundle-state-files.txt,
+# issue 1386 -- the server imports all of them, so a partial copy serves nothing) under
 # C:\ProgramData\camera-box\ and launched at boot by a Scheduled Task (ONSTART trigger, see the
 # #650 issue / .claude/skills/genlock playbook note for the exact TaskCreate invocation). A plain
 # Scheduled Task has no built-in "restart on crash" for a bare `python.exe` command, so THIS script

@@ -262,9 +262,13 @@ def test_deploy_program_sets_the_power_plan_before_any_obs_stop(box):
 def _gate(tmp_path, extra):
     state = tmp_path / "stream-state.json"
     state.write_text('{"obs_version":"32.2.0"}\n')
+    # hermetic: seed the vendor-pin seams so the gate never runs a live `git fetch origin` (the same
+    # default tests/version_integrity_gate.rs sets for every gate subprocess)
+    env = {**os.environ, "VERSION_INTEGRITY_GATE_VENDOR_NEWEST": "0000000hermetictest",
+           "VERSION_INTEGRITY_GATE_VENDOR_PENDING": ""}
     return subprocess.run(
         ["bash", str(SCRIPTS / "version-integrity-gate.sh"), "--win-state", f"stream={state}", *extra],
-        capture_output=True, text=True, cwd=REPO, timeout=120,
+        capture_output=True, text=True, cwd=REPO, timeout=120, env=env,
     )
 
 

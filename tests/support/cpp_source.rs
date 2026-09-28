@@ -39,6 +39,15 @@ pub fn strip_cpp_comments(s: &str) -> String {
     out
 }
 
+/// [`body_of`], after checking that `sig` occurs exactly once in `src` (issue 1386): an anchor that
+/// reads several files as one source must never silently pick one of two matches.
+#[allow(dead_code)] // not every includer reads a multi-file source
+pub fn unique_body_of<'a>(src: &'a str, sig: &str) -> &'a str {
+    let n = src.matches(sig).count();
+    assert_eq!(n, 1, "`{sig}` must occur exactly once, found {n}");
+    body_of(src, sig)
+}
+
 /// The balanced-brace body of the first function whose signature starts with `sig`.
 pub fn body_of<'a>(src: &'a str, sig: &str) -> &'a str {
     let start = src.find(sig).unwrap_or_else(|| panic!("`{sig}` not found"));

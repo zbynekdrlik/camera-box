@@ -409,6 +409,10 @@ IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # camera).
 # shellcheck source=scripts/lib/self-heal-attribution.sh
 . "$HERE/lib/self-heal-attribution.sh"
+# issue 1386: the recordings-volume free-space line comes from the one reader
+# bundle_state_gather.recordings_free_line (the soak uses the same reader).
+# shellcheck source=scripts/lib/recordings-free-line.sh
+. "$HERE/lib/recordings-free-line.sh"
 # #1134: the SOURCE-camera role (the "cam1 role") is no longer hard-pinned to cam1 -- it is the
 # first strih-routable member of CAMERA_ACTIVE_SET (camera_source_box, scripts/camera-set.sh), so
 # retiring cam1 from the active set (its USB grabber hw-faulted -- #1110 -EPROTO, owner order
@@ -1012,20 +1016,10 @@ check_recordings_free_space() {
     return 0
   }
   # Capture into a plain variable (never `read < <(...)`, whose EOF return would set-e-abort the run,
-  # the #1133 class): the python always prints exactly one "<VERDICT> <free_gb>" line and exits 0, so
-  # a pipeline failure here means python itself is broken -> the `|| { ...; return 0; }` skips cleanly.
-  out=$(printf '%s' "$stats" | PYTHONPATH="$HERE" python3 -c '
-import json, sys
-import bundle_state_gather as bsg
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    print("UNKNOWN -1")
-    sys.exit(0)
-fb = d.get("free_bytes")
-v = bsg.recordings_free_verdict(fb, float(sys.argv[1]))
-print(v, "-1" if fb is None else "%.1f" % (fb / 1e9))
-' "$RECORDINGS_FREE_MIN_GB" 2>/dev/null) || {
+  # the #1133 class): the one reader grades the body's free_bytes and always prints exactly one
+  # "<VERDICT> <free_gb>" line and exits 0, so a failure here means python itself is broken -> the
+  # `|| { ...; return 0; }` skips cleanly.
+  out=$(recordings_free_line_from_stats "$stats" "$RECORDINGS_FREE_MIN_GB" "$HERE") || {
     echo "    NOTE: could not parse $label recordings free-space stats — skipping free-space check" >&2
     return 0
   }
@@ -1127,6 +1121,15 @@ STRIH_LINUX_GATE_ARG=""
 if [ "$(strih_platform "$STRIH")" = "linux" ]; then
   STRIH_LINUX_GATE_ARG="1"
 fi
+# issue 1357: the Windows OBS-box baseline (power plan, sleep, hibernate, USB selective suspend, WER)
+# of the obs-fleet `win-baseline` boxes (stream, resolume -- resolume SKIPPED while away), gathered
+# ONCE here and handed to the gate below as REPORT-ONLY rows that never change its verdict. The
+# helper never fails the run: a drift, an unread box, a hung gather or a crashed check is one log
+# line. It fills WIN_BASELINE_GATE_ARGS (empty when nothing was read), expanded nounset-safe into
+# BOTH gate invocations. Tests: tests/python/test_e2e_win_baseline_1357.py.
+# shellcheck source=scripts/lib/e2e-win-baseline.sh
+. "$HERE/lib/e2e-win-baseline.sh"
+e2e_win_baseline_gather "$OUTDIR/win-baseline"
 # ALWAYS pass --win-state for strih AND stream (NOT conditional on the file existing): an absent file
 # is UNKNOWN -> the gate REFUSES, never a silent pass with a box's build unverified.
 # issue 1164: when imag is acked offline, invoke the gate WITHOUT the imag SHA / manifest / bytes
@@ -1140,6 +1143,7 @@ if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
     --win-state "strih=$VERSION_STRIH_STATE" \
     --win-state "stream=$VERSION_STREAM_STATE" \
     --imag-acked-offline "$IMAG_OFFLINE_ACK_REASON" \
+    ${WIN_BASELINE_GATE_ARGS[@]+"${WIN_BASELINE_GATE_ARGS[@]}"} \
     ${STRIH_LINUX_GATE_ARG:+--strih-linux}
 else
 "$HERE/version-integrity-gate.sh" \
@@ -1150,6 +1154,7 @@ else
   --genlock-sha "imag=$IMAG_GENLOCK_SHA" \
   ${AUTO_IMAG_MANIFEST:+--imag-manifest "$AUTO_IMAG_MANIFEST"} \
   ${IMAG_SO_CSV:+--imag-bytes "imag=$IMAG_SO_CSV"} \
+  ${WIN_BASELINE_GATE_ARGS[@]+"${WIN_BASELINE_GATE_ARGS[@]}"} \
   ${STRIH_LINUX_GATE_ARG:+--strih-linux}
 fi
 

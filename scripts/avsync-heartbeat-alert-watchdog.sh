@@ -25,12 +25,15 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/avsync-heartbeat.sh
 . "$HERE/lib/avsync-heartbeat.sh"
 # avsync-heartbeat.sh sets `-e` for ITS OWN sourcing safety; re-assert this script's own intended
 # options afterward so a stray non-zero return from a plain assignment never aborts a pass early
 # (this watchdog must survive a bad pass and keep polling on the next timer tick, see the header).
-set -uo pipefail
+# `set +e` is load-bearing: `set -uo pipefail` alone never clears the lib's -e (issue 1386).
+set +e -uo pipefail
 
 DRY_RUN=0
 case "${1:-}" in
@@ -73,6 +76,7 @@ DISCORD_ENV_FILE="${AVSYNC_DISCORD_ENV:-$HOME/.claude/channels/discord/.env}"
 DISCORD_THREAD_ID="${AVSYNC_DISCORD_THREAD_ID:-1373592666733940816}"   # alerts-snv thread
 
 STATE_DIR="${AVSYNC_HEARTBEAT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${AVSYNC_HEARTBEAT_STATE_FILE:-$STATE_DIR/camera-box-avsync-heartbeat.state}"
 
 # #1331 -- the VERIFIED-A/V session report (replaces the raw one-clip Discord forward).
@@ -104,21 +108,7 @@ measure() {
 }
 
 # ── read / write persisted state (same key=value shape as the #391/#882 siblings) ──────────────
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
-write_state_field() {
-  local key="$1" val="$2" tmp
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || echo "$STATE_FILE")"
-  { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
-    > "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-}
+# read_state_field and write_state_field live in scripts/lib/watchdog-common.sh.
 
 # ── Discord verdict-forward leg (dev1-side bot POST -- issue 968) ───────────────────────────────
 # Deliberately a per-key sed read (mirrors THIS file's own read_state_field convention) rather than

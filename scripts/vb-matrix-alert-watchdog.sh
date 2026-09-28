@@ -45,6 +45,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/obs-fleet.sh
 . "$HERE/lib/obs-fleet.sh"
 
@@ -69,7 +71,9 @@ esac
 # VB_MATRIX_BOXES env override still wins unchanged.
 BOXES="${VB_MATRIX_BOXES:-$(obs_fleet_boxes vb-matrix)}"
 BUNDLE_PORT="${VB_MATRIX_BUNDLE_PORT:-8899}"          # the bundle-state HTTP service (#650) carrying the facet
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 BUNDLE_PATH="${VB_MATRIX_BUNDLE_PATH:-/bundle-state.json}"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 CURL_TIMEOUT="${VB_MATRIX_CURL_TIMEOUT:-10}"          # :8899 HTTP fetch (s); server has answered ~6.6s
 
 # 2-pass confirm before paging (matches the sibling watchdogs): a single blipped reading must never
@@ -86,81 +90,33 @@ STATE_DIR="${VB_MATRIX_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 # or advances the live throttle counters of the real timer (an explicit override still wins).
 _state_default="$STATE_DIR/camera-box-vb-matrix-alert.state"
 [ "$DRY_RUN" -eq 1 ] && _state_default="$STATE_DIR/camera-box-vb-matrix-alert-dryrun.state"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${VB_MATRIX_ALERT_STATE_FILE:-$_state_default}"
 
 log() { printf '%s [vb-matrix-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 # -- I/O probe (dev1-local; NOT pure) -----------------------------------------------------------
-# fetch_bundle_json <ip> -> prints the JSON body to stdout and returns 0 iff a 200 with a body
-# that starts with `{` came back. A curl failure or a wedged-but-listening non-JSON answer returns
-# 1 (box_reachable=0 for this pass -> SKIP; deferred to #732/#1001). Overridable via
+# fetch_bundle_json <ip> VB_MATRIX_FETCH_CMD (scripts/lib/watchdog-common.sh) -> prints the JSON
+# body to stdout and returns 0 iff a 200 with a body that starts with `{` came back. A curl failure
+# or a wedged-but-listening non-JSON answer returns 1 (box_reachable=0 for this pass -> SKIP;
+# deferred to #732/#1001). Overridable via
 # VB_MATRIX_FETCH_CMD (run with <ip>, stdout = the bundle-state JSON body) for a --dry-run smoke
 # test or the Tier-0 harness -- same seam convention as asio-starve's ASIO_STARVE_PROBE_CMD.
-fetch_bundle_json() {
-  local ip="$1" body
-  if [ -n "${VB_MATRIX_FETCH_CMD:-}" ]; then
-    body="$($VB_MATRIX_FETCH_CMD "$ip" 2>/dev/null)" || return 1
-  else
-    body="$(curl -fsS --max-time "$CURL_TIMEOUT" "http://${ip}:${BUNDLE_PORT}${BUNDLE_PATH}" 2>/dev/null)" \
-      || return 1
-  fi
-  body="${body#"${body%%[![:space:]]*}"}"   # strip leading whitespace (a python-json body carries no
-                                            # BOM; a hypothetical BOM'd body fails the {* case -> SKIP,
-                                            # the safe direction — never a false page)
-  case "$body" in
-    \{*) printf '%s' "$body"; return 0 ;;
-    *) return 1 ;;
-  esac
-}
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
-write_state_field() {
-  local key="$1" val="$2" tmp existing=""
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  # Read the OTHER keys into memory FIRST, before any file is opened for writing -- so even the
-  # mktemp-failure fallback can never truncate-before-read and drop them.
-  [ -f "$STATE_FILE" ] && existing="$(grep -v "^${key}=" "$STATE_FILE" 2>/dev/null)"
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || true)"
-  if [ -n "$tmp" ]; then
-    { [ -n "$existing" ] && printf '%s\n' "$existing"; printf '%s=%s\n' "$key" "$val"; } \
-      > "$tmp" 2>/dev/null || true
-    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-  else
-    { [ -n "$existing" ] && printf '%s\n' "$existing"; printf '%s=%s\n' "$key" "$val"; } \
-      > "$STATE_FILE" 2>/dev/null || true
-  fi
-}
-
-# A RUNNING box is not an incident: clear its confirm counter AND its throttle sig so a genuinely NEW
-# outage later pages fresh instead of being dedup'd against a stale signature. Does NOT clear the
-# `alerted` flag -- that is the recovery-ping latch, handled separately.
-clear_box_throttle() {
-  local box="$1"
-  write_state_field "confirm_${box}" 0
-  write_state_field "alert_sig_${box}" ""
-  write_state_field "alert_passes_${box}" 0
-}
-
-# net_reach_recovery_decision_local <was_alerted> -> "1" iff a recovery latch should fire (was
-# alerted, now running). Kept trivially local (a RUNNING pass IS the "now up" side) so this watchdog
-# needs no extra lib; mirrors net_reach_recovery_decision's was_alerted-AND-up shape.
-net_reach_recovery_decision_local() {
-  [ "${1:-0}" = "1" ] && printf '1' || printf '0'
-}
+# read_state_field / write_state_field / clear_box_throttle / recovery_latch_fires live in
+# scripts/lib/watchdog-common.sh.
+# A RUNNING box is not an incident: clear_box_throttle clears its confirm counter AND its throttle
+# sig so a genuinely NEW outage later pages fresh instead of being dedup'd against a stale
+# signature. It does NOT clear the `alerted` flag -- that is the recovery-ping latch, handled
+# separately.
 
 # -- per-box decision --------------------------------------------------------------------------
 # handle_box <box> <ip>
 handle_box() {
   local box="$1" ip="$2" body reachable verdict running name pid start analyze_out
 
-  if body="$(fetch_bundle_json "$ip")"; then
+  if body="$(fetch_bundle_json "$ip" VB_MATRIX_FETCH_CMD)"; then
     reachable=1
   else
     reachable=0
@@ -187,7 +143,7 @@ handle_box() {
     RUNNING)
       local was_alerted recover
       was_alerted="$(read_state_field "alerted_${box}" 0)"
-      recover="$(net_reach_recovery_decision_local "$was_alerted")"
+      recover="$(recovery_latch_fires "$was_alerted")"
       if [ "$recover" = "1" ]; then
         if [ "$DRY_RUN" -eq 1 ]; then
           log "[dry-run] WOULD send recovery: $box VB-Matrix running again (${name} pid ${pid})"

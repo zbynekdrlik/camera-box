@@ -1,6 +1,6 @@
 //! #955 — extract the dock-lock Write/Suggest/RailWarn/Quiet decision into a pure, testable seam.
 //!
-//! `sync-test-output.cpp` (the OBS glue, compiled ONLY on the 150-min windows-genlock.yml, invisible
+//! `sync-test-output-audio.cpp` (the OBS glue, compiled ONLY on the 150-min windows-genlock.yml, invisible
 //! to normal PR CI) has always derived what to log/write from a `CbDockLockAction` inline, as an
 //! if/else-if/else chain: `act.apply && may_actuate` -> write; `act.apply && !may_actuate` ->
 //! monitor-only suggestion (#942); `!act.apply && offset_ms < 0 && pinned at a rail` -> a rail-pinned

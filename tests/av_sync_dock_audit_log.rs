@@ -12,7 +12,7 @@
 //! `CbLockAuditEvent` describing what (if anything) should be logged — a state transition
 //! (`Locked`/`Unlocked`) or a meaningfully-changed offset while still locked (`Updated`), each
 //! carrying the offset/matched/mad_ms that justify it (the "source of the value" #634 asks for).
-//! The OBS-facing glue (sync-test-output.cpp) just calls `push()` and `blog()`s the result — kept
+//! The OBS-facing glue (sync-test-output-audio.cpp) just calls `push()` and `blog()`s the result — kept
 //! trivial per this repo's CLAUDE.md rule (the OBS frontend/dock only compiles on the 150-min
 //! windows-genlock.yml, invisible to normal PR CI, so all non-trivial logic lives in this pure
 //! header and is unit-tested off-rig via the same twin-harness pattern as

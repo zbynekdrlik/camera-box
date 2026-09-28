@@ -47,6 +47,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/network-reach-health.sh
 . "$HERE/lib/network-reach-health.sh"
 # shellcheck source=scripts/lib/obs-fleet.sh
@@ -119,6 +121,7 @@ STATE_DIR="${NETWORK_REACH_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 # wins, for a test that deliberately wants to inspect a specific state).
 _state_default="$STATE_DIR/camera-box-network-reach-alert.state"
 [ "$DRY_RUN" -eq 1 ] && _state_default="$STATE_DIR/camera-box-network-reach-alert-dryrun.state"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${NETWORK_REACH_ALERT_STATE_FILE:-$_state_default}"
 
 log() { printf '%s [network-reach-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
@@ -149,47 +152,13 @@ probe_tcp() {
 }
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
-write_state_field() {
-  local key="$1" val="$2" tmp existing=""
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  # Read the OTHER keys into memory FIRST, before any file is opened for writing -- so even the
-  # mktemp-failure fallback (a direct rewrite of STATE_FILE) can never truncate-before-read and
-  # drop them (the previous `tmp=$STATE_FILE` fallback had exactly that latent state-loss bug;
-  # fixed here in-line at the issue-732 round integration, mirroring bundle-state-alert-watchdog).
-  [ -f "$STATE_FILE" ] && existing="$(grep -v "^${key}=" "$STATE_FILE" 2>/dev/null)"
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || true)"
-  if [ -n "$tmp" ]; then
-    { [ -n "$existing" ] && printf '%s
-' "$existing"; printf '%s=%s
-' "$key" "$val"; } \
-      > "$tmp" 2>/dev/null || true
-    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-  else
-    # mktemp unavailable: `existing` is already captured, so a direct (non-atomic) rewrite is safe.
-    { [ -n "$existing" ] && printf '%s
-' "$existing"; printf '%s=%s
-' "$key" "$val"; } \
-      > "$STATE_FILE" 2>/dev/null || true
-  fi
-}
+# read_state_field, write_state_field and clear_box_throttle live in
+# scripts/lib/watchdog-common.sh.
 
-# A REACHABLE box is not an incident: clear its confirm counter AND its throttle sig so a genuinely
-# NEW outage later pages fresh instead of being dedup'd against a stale signature (mirrors the sibling
-# reset discipline). Does NOT clear the `alerted` flag -- that is the recovery-ping latch, handled
-# separately so a box we paged for still emits a "reachable again" ping.
-clear_box_throttle() {
-  local box="$1"
-  write_state_field "confirm_${box}" 0
-  write_state_field "alert_sig_${box}" ""
-  write_state_field "alert_passes_${box}" 0
-}
+# A REACHABLE box is not an incident: clear_box_throttle clears its confirm counter AND its throttle
+# sig so a genuinely NEW outage later pages fresh instead of being dedup'd against a stale signature
+# (mirrors the sibling reset discipline). It does NOT clear the `alerted` flag -- that is the
+# recovery-ping latch, handled separately so a box we paged for still emits a "reachable again" ping.
 
 # -- per-box decision --------------------------------------------------------------------------
 # handle_box <box> <ip> <ping_ok> <ws_ok> <bundle_ok> — the probe results are gathered ONCE in main()

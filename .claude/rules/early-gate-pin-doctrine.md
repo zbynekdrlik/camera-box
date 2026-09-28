@@ -4,6 +4,7 @@ paths:
   - "scripts/dantesync-version-gate.sh"
   - "scripts/version-integrity-gate.sh"
   - "scripts/lib/version-integrity-vendor-pin.sh"
+  - "scripts/lib/vendor-range.sh"
   - "scripts/recording-e2e.sh"
   - "scripts/drift-guard.sh"
   - "tests/camera_box_version_gate.rs"
@@ -178,3 +179,12 @@ ORPHAN reason — report-only semantics unchanged); regression coverage against 
 two-branch repo: `tests/version_integrity_gate.rs`. Two independent gates sharing the exact same
 polarity trap is the tell that ANY new early gate comparing a moving `origin/<branch>` pin via a
 plain ancestry range should be audited for this bug up front, not discovered per-gate.
+
+**Since issue 1384 the two families share ONE implementation: `scripts/lib/vendor-range.sh`**
+(`vendor_range_lag_log` / `vendor_range_ahead_log` / `vendor_range_on_dev`, taking the git-log format
+and the pathspec as arguments). `imag_genlock_*` (drift-guard.sh: `--oneline`, `vendor/obs-studio
+vendor/distroav`) and `vendor_pin_*` (the vendor-pin lib: `--format='%h %s'`, `vendor/`) are thin
+wrappers, so each gate's output is byte-identical to its former copy and a fix to the range logic
+(the merge-base scoping, `--end-of-options`, the empty-SHA rc 128, the no-`--first-parent` rule)
+lands in both at once. A NEW early gate that pins a deployed SHA against a vendored tree calls these
+three helpers with its own format + paths; it never copies them again.

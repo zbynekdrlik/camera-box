@@ -3,7 +3,7 @@
 //! (`git show <953-commit> -- vendor/av-sync-dock/src/sync-test-dock.cpp` is empty): it still
 //! computes `ts = audio_ts - video_ts` in norihiro's ORIGINAL native convention, while #953 fixed
 //! the sign convention only at the separate OBS-log `blog()` call sites inside
-//! `st_raw_audio_camera_box` (`sync-test-output.cpp`), via `cb_dock_lock_display_offset_ms()`.
+//! `st_raw_audio_camera_box` (`sync-test-output-audio.cpp`), via `cb_dock_lock_display_offset_ms()`.
 //!
 //! Live evidence this explains (2026-08-06): operator screenshot showed `Latency -57.1ms "Audio
 //! early"` (dock-native, unconverted — close to issue 952's pre-#953 `dock ~= -gate - 55`

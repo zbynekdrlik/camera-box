@@ -48,12 +48,17 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/obs-session-visibility.sh
 . "$HERE/lib/obs-session-visibility.sh"
 # shellcheck source=scripts/lib/win-ssh-exec.sh
 . "$HERE/lib/win-ssh-exec.sh"
 # shellcheck source=scripts/lib/obs-fleet.sh
 . "$HERE/lib/obs-fleet.sh"
+# win-ssh-exec.sh runs `set -euo pipefail` at source time; clear the -e it leaves on (a later
+# `set -uo pipefail` would not) so a failing probe or assignment never ends the pass (issue 1386).
+set +e -uo pipefail
 
 DRY_RUN=0
 case "${1:-}" in
@@ -85,6 +90,7 @@ STATE_DIR="${OBS_SESSION_WATCHDOG_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 # A DIFFERENT default state file than #391's own obs-liveness-watchdog.sh -- both scripts key
 # per-box state on the SAME box names ("stream", "resolume", ...), so sharing one file would corrupt each
 # other's confirm/throttle counters.
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${OBS_SESSION_WATCHDOG_STATE_FILE:-$STATE_DIR/camera-box-obs-session-watchdog.state}"
 
 log() { printf '%s [obs-session-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
@@ -94,21 +100,7 @@ log() { printf '%s [obs-session-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"
 #   <b>_confirm=<n>       — consecutive-invisibility confirmation counter
 #   <b>_alert_sig=<str>   — fingerprint of the last-alerted condition (throttle dedup)
 #   <b>_alert_passes=<n>  — passes elapsed since the last alert for the same sig
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
-write_state_field() {
-  local key="$1" val="$2" tmp
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || echo "$STATE_FILE")"
-  { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
-    > "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-}
+# read_state_field and write_state_field live in scripts/lib/watchdog-common.sh.
 
 # ── process ONE box: measure -> decide -> (maybe) alert ─────────────────────────────────────────
 process_box() {

@@ -39,6 +39,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/cg-bridge-health.sh
 . "$HERE/lib/cg-bridge-health.sh"
 
@@ -70,6 +72,7 @@ NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${CG_BRIDGE_ALERT_REPO:-zbynekdrlik/camera-box}"
 
 STATE_DIR="${CG_BRIDGE_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${CG_BRIDGE_ALERT_STATE_FILE:-$STATE_DIR/camera-box-cg-bridge-alert.state}"
 
 log() { printf '%s [cg-bridge-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
@@ -86,30 +89,10 @@ measure() {
   PROBE_RC=$?
 }
 
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
-write_state_field() {
-  local key="$1" val="$2" tmp
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || echo "$STATE_FILE")"
-  { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
-    > "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-}
-
-clear_throttle() {
-  # A healthy / unknown pass is NOT an incident: clear the confirm counter AND the throttle sig so a
-  # genuinely NEW episode later pages fresh instead of being dedup'd against a stale signature
-  # (mirrors the optical-chain / imag-obs alert-watchdog reset discipline).
-  write_state_field confirm 0
-  write_state_field alert_sig ""
-  write_state_field alert_passes 0
-}
+# read_state_field, write_state_field and clear_throttle live in scripts/lib/watchdog-common.sh. A
+# healthy / unknown pass is NOT an incident: clear_throttle clears the confirm counter AND the
+# throttle sig so a genuinely NEW episode later pages fresh instead of being dedup'd against a stale
+# signature (mirrors the optical-chain / imag-obs alert-watchdog reset discipline).
 
 main() {
   log "pass start (dry_run=$DRY_RUN, strih=$STRIH, reference='$REFERENCE', subject='$SUBJECT')"

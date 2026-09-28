@@ -1046,6 +1046,15 @@ struct obs_source {
 	float balance;
 	/* audio_is_duplicated: tracks whether a source appears multiple times in the audio tree during this tick */
 	bool audio_is_duplicated;
+	/* camera-box issue 1381: the mix buffering guard (obs-audio.c), audio thread only. The last mixer
+	 * tick this source was in the mix (an output mix's active tree reached it) and whether it joined
+	 * the mix on that tick; the guard's re-anchor count, the audio it dropped, and its log throttle. */
+	uint64_t genlock_mix_tick;
+	bool genlock_mix_entered;
+	uint64_t genlock_mix_guard_events;
+	uint64_t genlock_mix_guard_dropped_ns;
+	uint64_t genlock_mix_guard_logged_events;
+	uint64_t genlock_mix_guard_last_log_ns;
 
 	/* async video data */
 	gs_texture_t *async_textures[MAX_AV_PLANES];

@@ -55,9 +55,11 @@ step). Run it when the box is home + its identity is CONFIRMED (`getent hosts re
 profile name, `.claude/rules/rig-state-inspection.md` §2 — it currently resolves to `10.77.9.201`,
 which collides with `bridge`):
 
-1. Deploy `C:\ProgramData\camera-box\{bundle-state-server.py, bundle_state_gather.py, obs_phase2.py,
-   run-bundle-state-server.ps1}` by having the box `Invoke-WebRequest` each raw file at a pinned
-   commit SHA (`https://raw.githubusercontent.com/zbynekdrlik/camera-box/<sha>/scripts/<file>`) — never
+1. Deploy the server tree to `C:\ProgramData\camera-box\` — EVERY file named in
+   `scripts/lib/bundle-state-files.txt` (issue 1386: the server imports all of them, a partial copy
+   serves no `:8899`) plus `run-bundle-state-server.ps1` — by having the box `Invoke-WebRequest` each
+   raw file at a pinned commit SHA (first `scripts/lib/bundle-state-files.txt`, then every non-`#`
+   line of it: `https://raw.githubusercontent.com/zbynekdrlik/camera-box/<sha>/scripts/<file>`) — never
    transfer file content through an agent's context. Keep `run-bundle-state-server.ps1` pure ASCII
    (`grep -nP '[^\x00-\x7F]'` before deploy — the em-dash parse trap).
 2. `FileWrite` the OBS-WS password to `C:\ProgramData\camera-box\obs-ws-password.txt` (one line, the

@@ -1,10 +1,18 @@
 ---
 paths:
   - "vendor/av-sync-dock/src/sync-test-output.cpp"
+  - "vendor/av-sync-dock/src/sync-test-output-video.cpp"
+  - "vendor/av-sync-dock/src/sync-test-output-audio.cpp"
+  - "vendor/av-sync-dock/src/sync-test-output-internal.hpp"
   - "vendor/av-sync-dock/src/camera-box-decode-mailbox.hpp"
   - "vendor/av-sync-dock/src/camera-box-frame-copy.hpp"
   - "vendor/av-sync-dock/test/decode-mailbox-selftest.cpp"
   - "tests/av_sync_dock_decode_mailbox_1367.rs"
+  - "vendor/av-sync-dock/src/camera-box-audio-worker.hpp"
+  - "vendor/av-sync-dock/test/audio-worker-selftest.cpp"
+  - "tests/av_sync_dock_audio_worker_1381.rs"
+  - "tests/c/av_sync_dock_demod_bench_1381.cpp"
+  - "vendor/av-sync-dock/src/sync-test-dock.cpp"
 ---
 
 # No analysis on libobs's video-output thread (issue 1367)
@@ -79,6 +87,9 @@ like a genlock problem and was not one.
 | `cb_video_frames_seen/decoded`, the mailbox's `dropped()` | worker / producer; the audio diag reads | atomics |
 | `cb_publish_max_ns` (publish_max_us) | video thread raises it (`cb_atomic_max_u64`); the audio diag reads and resets it (`exchange(0)`) | atomic |
 
+Since issue 1381 "the audio diag" and every other "audio thread" row above means the dock's AUDIO
+DECODE WORKER, not libobs's audio thread -- see the next section.
+
 Signals (`qrcode_found`, `video_marker_found`, `sync_found`) are now emitted from the worker. The
 dock UI copies each calldata and queues it to the Qt thread with `QMetaObject::invokeMethod`, so
 the emitting thread does not matter.
@@ -102,7 +113,9 @@ pairs by frame_id, not by crossing time.
   - Any NEW mailbox guarantee needs a mutant that breaks it and a check that fails on that mutant.
     A timed run alone was blind to an oldest-wins mailbox and to a single shared buffer. The
     deterministic burst case (worker held inside a decode while frames 2..5 arrive) catches both.
-- **The dock source**: `sync-test-output.cpp` type-checks locally with `g++ -std=c++17
+- **The dock source**: each output TU (`sync-test-output.cpp`, `-video.cpp`, `-audio.cpp`; the
+  video path is in `-video.cpp`, the audio path in `-audio.cpp`, `struct sync_test_output` in
+  `sync-test-output-internal.hpp` since issue 1386) type-checks locally with `g++ -std=c++17
   -fsyntax-only -I<stub dir> -Ivendor/obs-studio/libobs -Ivendor/av-sync-dock/deps/quirc/lib`. The
   stub dir holds two generated files:
   - `plugin-macros.generated.h`, filled in from `src/plugin-macros.h.in`;
@@ -114,7 +127,110 @@ pairs by frame_id, not by crossing time.
   `signal_handler_signal(` in it. The pwsh step "Assert dock decode runs off the video-output
   thread" in BOTH windows-genlock workflows mirrors it; see `av-sync-dock-anchor-refactor-safety.md`
   for the three-place lock-step.
-  - The pwsh slice runs to the next ` static ` WITH comments left in. A comment inside
+  - The pwsh slice is the brace-balanced body (`Get-DockBody`, issue 1386) WITH comments left in.
+    A comment inside
     `st_raw_video` must therefore never spell a banned call with its parenthesis.
-  - The worker body's anchor is its full named signature. The forward declaration uses UNNAMED
-    parameters so that `find()` cannot land on it.
+  - The worker body's anchor is its full named signature. Its declaration (in
+    `sync-test-output-internal.hpp`) uses UNNAMED parameters so that `find()` cannot land on it.
+    Since issue 1386 `st_raw_video`, `st_video_decode_job_run` and the audio worker handlers
+    have external linkage, so their anchors carry no `static`
+    (`av-sync-dock-anchor-refactor-safety.md`).
+
+# No analysis on libobs's AUDIO thread either (issue 1381)
+
+`raw_audio` (the dock's `st_raw_audio`) runs on libobs's audio thread: the thread that mixes every
+source for every output. Live 27.9.2026 on the resolume cg OBS:
+
+- the dock demodulated the whole program mix there, re-decoding its 3-marker window every push
+  (~223 preamble magnitudes per passing position);
+- camera-box mode had latched on ONE burn QR from a CG_CHAIN E2E run hours earlier and never
+  cleared;
+- with music on program the mixer ran 13-22 s behind real time and the FOH VBAN feed turned into
+  silence and dropped audio, until OBS exited.
+
+## The rule
+
+- **`raw_audio` runs the gate and a copy, nothing else** (`cb_audio_gate_and_publish`): no decode,
+  no log line, no source lookup, no signal. Its cost is on the diag line as `audio_publish_max_us=`.
+- **The gate** (`cb_audio_decode_gate`, `camera-box-audio-worker.hpp`) opens only while ALL hold:
+  - camera-box mode is on (`cb_mode_active`, still the latched "QR seen" flag for the video side);
+  - the box has the measurement source `mbc` (`CAMERA_BOX_MEASURE_SOURCE_NAME`, declared once in
+    `camera-box-audio.hpp`; the dock UI's `CAMERA_BOX_ASRC_SOURCE_NAME` is defined from it), looked
+    up on the VIDEO decode worker in `cb_refresh_measure_source`, at most every 5 s of frame time,
+    and read on the audio thread from an atomic -- `obs_get_source_by_name` takes the sources mutex
+    and never runs on the audio thread. Its first answer and every change are logged at INFO: "not
+    found" is the designed state on resolume and strih;
+  - a camera-box QR was decoded within `CAMERA_BOX_TEST_SIGNAL_FRESH_NS` (20 s).
+  On resolume and strih (no `mbc`) the audio decode never starts. The norihiro audio path stays
+  unreachable once camera-box mode latched, so a closed gate means NO audio work at all.
+- **A FIFO, not the video's latest-pending mailbox** (`CbAudioBlockFifo`, 64 reused slots, one
+  worker `avsync-audio` at normal priority). The marker decoder needs CONTIGUOUS samples, so a
+  latest-wins mailbox (which silently skips blocks) would stitch audio:
+  - a full FIFO drops the NEW block and counts it (`audio_dropped=`);
+  - the next block carries `CB_AUDIO_GAP_DROPPED`, and `st_audio_block_gap` resets every marker
+    decoder before it is decoded (`decode_resets=`), so a marker cut by the gap never decodes from
+    the stitched halves (the self-test proves both: no marker with the reset, marker 77 without);
+  - the first block of a session carries `CB_AUDIO_GAP_SESSION`: decoders reset, the staleness and
+    pairing watchdogs re-seeded, the lock forgotten, the dock shown LIVE again
+    (`cb_audio_session_begin`).
+- **A closed gate ends the session** (`st_audio_session_end`, after every block published before
+  it): decoders reset, the lock forgotten (`cb_audio_forget_lock`: tracker cleared +
+  `lock_state_changed(false)`), `sync_stale_changed(true)`, one `camera-box audio decode OFF --
+  <reason>` line. No diag lines while the gate is closed.
+  - **Every end is delivered** (review round 1): the pending ends are a ring of `(after, reason)`
+    entries, so a gate that closes, reopens and closes again while the worker is still behind gets
+    both ends, in order. A single "end pending" slot overwrote the first end and let the worker
+    decode the second session's blocks on the first session's lock.
+  - **Two ends with no accepted block between them are ONE end** (the second session's blocks were
+    all dropped, so the worker never saw it). That merge is what bounds the ring: pending ends have
+    distinct `after` values within [handled, accepted] blocks, at most `slots` blocks are unhandled,
+    so there are at most `slots + 1` ends. The `+ 1` is an end queued after the worker handled
+    every block and before it retakes the lock: a race, reached in most rounds of the self-test's
+    stress loop on dev1, and a ring of only `slots` entries corrupts ends there.
+    `end_session()` never allocates on the audio thread.
+  - `stop()` discards pending ends (an output stop / restart), which is why a session BEGIN forgets
+    the lock too.
+- **The worker runs `st_raw_audio_camera_box` unchanged** on an `audio_data` view of the copied
+  block (`st_audio_block_run`, the block's own timestamp), so everything that function and its
+  helpers touch (the picker, the cluster, the lock audit/corrector, the diag tick, the ring reads)
+  is owned by the audio worker. `decode_ms_max=` / `decode_ms_sum=` are its per-block handling time
+  since the previous diag line.
+- **Lifecycle** is the mailbox's: `st_start` stops a previous worker before rewriting the channel
+  layout and starts it before `obs_output_begin_data_capture` (slots pre-sized for
+  `AUDIO_OUTPUT_FRAMES`, so the audio thread never allocates); joined in `st_stop` (right after the
+  video mailbox), in `st_destroy`, and in `~sync_test_output` before `delete cb_audio_dec`.
+
+## Verifying (Tier-0)
+
+- `g++ -std=c++11 -O2 -Wall -Wextra -Werror -pthread vendor/av-sync-dock/test/audio-worker-selftest.cpp`
+  then run it; `-fsanitize=thread` under `setarch -R` for races (clean at issue 1381). Mutants it
+  kills: a single overwritten pending end, no merge over a dropped session, a merged end keeping
+  the first reason, an end due one block late, a ring of `slots` entries instead of `slots + 1`
+  (the stress loop), and the FIFO lock held across the handler (the latch waits are bounded, so
+  that deadlock FAILS the run instead of hanging CI; stdout is line-buffered so the FAIL lines
+  survive). The producer check is a paced publish loop judged on p95 (< 2 ms) + max (< 15 ms): an
+  unpaced loop only waits once for a lock-holding worker and its p95 cannot see it, and a single
+  worst-case 2 ms bound flakes on a loaded CI runner. No outcome rests on a sleep: a session end is
+  proven delivered by a block published after it being handled, the lifecycle test waits for a
+  flag the handler sets.
+  - Test-writing trap: `taken()` counts a block BEFORE the worker frees its slot, so right after
+    `wait_taken(n)` block n can still occupy one slot. A test that then publishes `slots` more
+    blocks can see the last one dropped: wait for the previous blocks first, and MODEL a drop the
+    race allows (the unseen session merges its end) instead of asserting it never happens.
+  - A state only a race reaches (the ring's `+ 1` end) needs a stress loop that checks every
+    delivered event; a correct FIFO can never fail it, and a mutant is caught in most rounds.
+    Measure the kill rate (the lane ran the correct FIFO 8x and the mutant 8x) before trusting it.
+- Shared dock constants go in `camera-box-audio.hpp` (both TUs include it). Do not include
+  `camera-box-audio-worker.hpp` in the Qt TU `sync-test-dock.cpp` just for a name: it uses
+  `std::min`, which a stray Windows `min` macro would break there.
+- The bench `tests/c/av_sync_dock_demod_bench_1381.cpp` (`-Ivendor/av-sync-dock/src
+  -Ivendor/av-sync-dock/test`, arg: the stereo mbc fixture) measures the worker decode and the
+  audio-thread share in THREAD CPU time (dev1 runs at load ~20; wall time there is scheduler noise)
+  and checks the decoder against a frozen copy of the pre-1381 kernel. Measured on the N100 (thread
+  CPU): gate + copy <= 0.1 ms per stereo push for every signal (mean ~0.01 ms); worker 0.18-0.24 ms
+  (music) / 0.56-0.7 ms (442 Hz tone), against 6.8 / 34.8 ms for the pre-1381 decoder.
+- Anchors: `tests/av_sync_dock_audio_worker_1381.rs` (comment-stripped) + the pwsh step "Assert
+  dock audio decode runs off the audio thread (issue 1381)" in both windows-genlock workflows
+  (comments kept). A comment inside `st_raw_audio` or `cb_audio_gate_and_publish` must never spell
+  a banned call with its parenthesis (`blog(`, `->push(`, `obs_get_source_by_name(`, ...), and no
+  comment may sit between the tokens of a multi-statement needle.

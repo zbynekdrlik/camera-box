@@ -37,8 +37,9 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 /* #926: the program-audio source ASRC (issues #803/#806/#912) lives on -- the SAME 'mbc' name
  * scripts/av_sync_measure.py's DEFAULT_OUTER_LOOP_SOURCE already uses. Hardcoded, no env var, per
- * this repo's hard-lock philosophy (issue 257: no forgettable/mysterious knobs). */
-#define CAMERA_BOX_ASRC_SOURCE_NAME "mbc"
+ * this repo's hard-lock philosophy (issue 257: no forgettable/mysterious knobs). It is the
+ * measurement source the audio decode gate looks for (camera-box-audio.hpp, issue 1381). */
+#define CAMERA_BOX_ASRC_SOURCE_NAME CAMERA_BOX_MEASURE_SOURCE_NAME
 
 /* #926: manual ppm-trim step per button click -- half the +/-10ppm outer-loop bias range's
  * granularity gives 20 clicks end-to-end, fine enough for a deliberate small nudge without being

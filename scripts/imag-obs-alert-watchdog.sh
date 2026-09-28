@@ -33,10 +33,16 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/imag-obs-reachability.sh
 . "$HERE/lib/imag-obs-reachability.sh"
 # shellcheck source=scripts/lib/imag-obs-restart-storm.sh
 . "$HERE/lib/imag-obs-restart-storm.sh"
+# imag-obs-reachability.sh and imag-obs-restart-storm.sh run `set -euo pipefail` at source time;
+# clear the -e they leave on (a later `set -uo pipefail` would not) so a failing probe or assignment
+# never ends the pass (issue 1386).
+set +e -uo pipefail
 
 DRY_RUN=0
 case "${1:-}" in
@@ -88,6 +94,7 @@ IMAG_OBS_WS_PASSWORD="${IMAG_OBS_WS_PASSWORD:-${IMAG_PW:-newlevel}}"
 LATENCY_ALERT_THROTTLE_PASSES="${IMAG_LATENCY_ALERT_THROTTLE_PASSES:-12}"   # ~1h at the 5-min cadence
 
 STATE_DIR="${IMAG_OBS_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${IMAG_OBS_ALERT_STATE_FILE:-$STATE_DIR/camera-box-imag-obs-alert.state}"
 
 log() { printf '%s [imag-obs-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
@@ -106,21 +113,7 @@ measure() {
 #   confirm=<n>       — consecutive-down confirmation counter
 #   alert_sig=<str>   — fingerprint of the last-alerted condition (throttle dedup)
 #   alert_passes=<n>  — passes elapsed since the last alert for the same sig
-read_state_field() {
-  local key="$1" default="$2"
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  local v
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
-write_state_field() {
-  local key="$1" val="$2" tmp
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || echo "$STATE_FILE")"
-  { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
-    > "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-}
+# read_state_field and write_state_field live in scripts/lib/watchdog-common.sh.
 
 # ── #1070 latency-pin verify-at-start (REPORT-ONLY) ─────────────────────────
 # Run ONLY on a HEALTHY (OBS-up) pass. Reads imag's live per-source genlock_latency_ms_src over WS
@@ -132,10 +125,11 @@ write_state_field() {
 # the 3ms floor, but a genuine re-tune is recorded by editing the baseline in a PR, never forced).
 latency_drift_check() {
   local out rc
-  # NB: the `|| rc=$?` capture is load-bearing under this script's `set -e` -- a bare
-  # `out="$(cmd)"; rc=$?` is itself a failing statement when cmd exits non-zero (drift = rc 1),
-  # which killed the whole pass with exit 1 before any report could fire (caught by CI's first
-  # execution of the issue-1070 harness; Tier-0 forbids running these tests locally).
+  # NB: keep the `|| rc=$?` capture. Until issue 1386 this script ran with the sourced libs' -e
+  # still on, and a bare `out="$(cmd)"; rc=$?` was itself a failing statement when cmd exited
+  # non-zero (drift = rc 1), which killed the whole pass with exit 1 before any report could fire
+  # (caught by CI's first execution of the issue-1070 harness). The script clears -e after its
+  # source block now; the capture stays so the rc is right under either option set.
   rc=0
   out="$(python3 "$LATENCY_VERIFY" --box imag --host "$IMAG_IP" --password "$IMAG_OBS_WS_PASSWORD" 2>&1)" || rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -296,7 +290,7 @@ main() {
   # -> failed. A fresh operator pause file is an explicit override. Fail-safe: anything we cannot
   # PROVE deliberate (ssh failure, unreadable unit, `failed`, `activating`, ...) falls through to
   # the existing alarm ("bez clean markera = pád -> alarm ako doteraz"). The `|| dd_rc=$?` capture
-  # keeps the second ssh from aborting this pass under the sourced libs' `set -e`.
+  # keeps the rc of the second ssh (it also kept the pass alive while the libs' -e leaked, issue 1386).
   case "$PROBE_OUT" in
     *OBS_PROCESS_ABSENT*)
       local dd_probe dd_rc dd_verdict dd_deliberate dd_reason

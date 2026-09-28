@@ -85,6 +85,13 @@ then set the window above that with headroom + the file's own `// #NNNN: widened
 widening itself; THIS entry is the reason the count sweep won't remind you to. Last measured 25.9.2026
 (issue 1367 pixel-proof step): 11535 of the 12000-byte window — the NEXT step added there must widen it.
 
+**The general check for ANY edit, not only that one window (issue 1386).** Resolve every fixed
+window a recording-e2e-reading test slices (`&s[v..(v + N)` / `v.saturating_sub(N)`) to the
+`.find("...")` literal that set `v`. Find that literal in the OLD text, and flag each window
+`[pos-back, pos+N)` that overlaps a changed line span (a line-based `difflib` on the two texts —
+character-level SequenceMatcher on this ~500 KB file runs for minutes). No overlap = no window can
+move. Do this alongside the count sweep, which only proves literal counts.
+
 ## Raising a shared formula constant (a `PHASE_SYNC_FLOOR_MS`-style floor/cap) breaks EVERY hardcoded literal test expectation that assumed the old value -- across BOTH languages (#707)
 
 Several "pure kernel" constants in this repo are deliberately duplicated across THREE places:
@@ -1213,6 +1220,10 @@ repeatedly this session (a worktree worker on issue 1317):
   An ordinary English WORD trips it too: a `python3 - <<'PY'` edit script whose comment said
   "ASCII digits" (d-i-**g-i-t**-s) was refused (issue 1360) — write such edit scripts with the `Write`
   tool and run `python3 /abs/script.py` as a plain call.
+- A `.github/workflows/...` PATH in a compound command trips it the same way (issue 1386: a
+  `diff <(sed … .github/workflows/a.yml) <(sed … b.yml)` was refused). Put the workflow reads in a
+  Python script file; a direct `pwsh` call is refused as well, so drive a portable pwsh from a
+  `bash /abs/script.sh` file (`av-sync-dock-anchor-refactor-safety.md`, the issue-1386 section).
 - A `python3 - <<'PY' … OUT="$OUT" …` where the program text is built from a shell VARIABLE is
   refused ("runs python with a program computed at runtime"), even with zero git in it.
 - Any two-command sequence joined with `&&`/`|`/`;` or a trailing `| tail`/`echo "${PIPESTATUS[0]}"`
@@ -1558,3 +1569,44 @@ the lookup predicate itself (`genlock_forced_table_is_program` vs `is_program_au
 give every key one vector name that matches that key ONLY. A name matching two keys (`VBAN
 cg-resolume` also hits `cg`) keeps a dropped key green. Prove it by dropping one key on one side in
 a scratch run and watching the test go RED.
+
+## A compiled-header parity gate with a STALE test binary reports a fake C-vs-Rust divergence (issue 1381)
+
+The parity gates that `#include` a shipped C header (`tests/vban_pacing_parity_1372.rs` and its
+siblings) compile the C driver at RUN time from the header on disk, but the Rust authority is
+baked in at COMPILE time. If the step that rebuilds the test binary did not run, the old binary
+compares the NEW C against the OLD Rust. A typical cause is a `rustfmt --check && rustc …` chain
+that stopped at the format check. The trace then diverges on exactly the lines the change
+touched, which reads like a real C/Rust mismatch. When a parity failure lists only the fields you
+just changed, rebuild the binary before you debug the C.
+
+The same split makes a scratch-tree mutation check cheap. Copy the few files the gate reads (the
+Rust module, its `#[path]` children, the test file, the header and the wiring-pinned sources and
+workflows) into a scratch dir, mutate there, and build with `CARGO_MANIFEST_DIR=<scratch>`. Run
+each mutant through one `rustc --test` and its binary. Also mutate C and Rust IDENTICALLY once:
+only the behavioural tests can kill that mutant, because the parity trace stays equal. A worked
+script (dev1-local, not committed): `~/.claude/work-products/issue-1381-vban-pacer-sim/mut_lane2.py`
+(44/44 killed).
+
+## Fake-harness traps from the soak and restart-matrix tests (issue 1367)
+
+- **`bash -c 'sleep 30' marker` is not a process whose command line names `marker`.** bash execs
+  the last simple command of a `-c` string, so the process becomes `sleep 30` and `$0` is gone.
+  A stand-in that a script finds by its `/proc/<pid>/cmdline` (a "the run still runs" check) needs
+  `bash -c 'sleep 30; true' <name>`. The first draft of such a test proved nothing: the check it
+  was meant to trip never saw the name.
+- **A fake that logs its argv with `printf ' %q'` backslash-escapes the spaces INSIDE one
+  argument.** A parser that splits the logged line on whitespace then takes `\` as the next token
+  (the soak's `powershell ... -EncodedCommand <b64>` single ssh argument). Unescape (`\ ` -> ` `)
+  before splitting, or log with a separator that cannot occur in an argument.
+- **A fake `sshpass`/`ssh` that takes the host from ANY argument containing `@` reads the remote
+  text as the host** once that text holds an `@` (`journalctl --since @<epoch>`, an email, a
+  `user@` in a nested command). The remote text is the LAST argument: scan `"${@:1:$#-1}"` only
+  (the restart-matrix fake, issue 1367 review round 1).
+- **pytest's `tmp_path` contains the test function's NAME.** A test that scans a `--plan`
+  printout for banned words (`reboot`, `shutdown`) fails on its own run dir when the test is
+  called `test_plan_never_names_a_reboot...`: name such a test without the banned words.
+- **A lease fixture with a fixed `acquired_at` date goes stale as the clock moves.** The issue-1383
+  keep-alive refuses a holder past `acquired_at + RIG_LEASE_MAX_HOLD_SECS`, so a fixture dated a
+  few hours back passes today and fails tomorrow. Stamp it at test time
+  (`time.gmtime(time.time() - age_s)`), as `tests/python/test_av_soak_lease_inherit_1367.py` does.

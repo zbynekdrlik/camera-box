@@ -39,6 +39,8 @@ configure_file(
 set(PLUGIN_SOURCES
 	src/plugin-main.c
 	src/sync-test-output.cpp
+	src/sync-test-output-video.cpp
+	src/sync-test-output-audio.cpp
 	src/sync-test-dock.cpp
 	src/sync-test-monitor.c
 	src/dock-compat.cpp

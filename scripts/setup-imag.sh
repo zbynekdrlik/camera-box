@@ -409,6 +409,8 @@ _RG_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_RG_HERE/lib/ndi-runtime.sh"   # issue 1317: shared NDI 6.3.2 runtime install recipe (with setup-strih.sh)
 # shellcheck source=scripts/lib/remoteos-mcp.sh
 . "$_RG_HERE/lib/remoteos-mcp.sh"   # issue 1361: the ONE remoteos-mcp venv install (step 23; with setup-strih.sh + setup-device.sh)
+# shellcheck source=scripts/lib/bundle-state-files.sh
+. "$_RG_HERE/lib/bundle-state-files.sh"   # issue 1386: the ONE declared :8899 server file set (step 28; with setup-strih.sh)
 RIG_GRANDMASTER_IP="$(rig_grandmaster_ip)" || {
   echo "FAIL: setup-imag: cannot resolve the PTP grandmaster host -- refusing to write an empty gm_allowlist (#1307)" >&2
   exit 1
@@ -1710,21 +1712,27 @@ step 28 "imag :8899 bundle-state server (issue 1299): install + ENABLE-ONLY so t
 # pass (":8899 not fetchable") and an imag genlock LOCK loss was never paged. This installs the
 # canonical scripts/bundle-state-server.py under a --user unit; its Windows-only identity gathers
 # degrade to absent facets on Linux (its IS_WINDOWS gate, issue 1299), so on imag it serves
-# genlock_lock, genlock_build_sha, obs_version, audio_ts_lag_* and record-dir-stats. The three
-# sibling files (the server + the bundle_state_gather / obs_phase2 modules it imports) install
-# together under /opt/camera-box so the server's sibling imports resolve.
+# genlock_lock, genlock_build_sha, obs_version, audio_ts_lag_* and record-dir-stats. The server and
+# every sibling module it imports install together under /opt/camera-box so its imports resolve;
+# issue 1386: the file set is the ONE declared list in scripts/lib/bundle-state-files.sh (the same
+# array setup-strih.sh step 9 installs), never a literal typed here.
 #
 # ENABLE-ONLY (never --now): this provisioner never live-starts the server -- the supervisor starts
 # it once after the fleet genlock deploy and runs the verify-imag.sh :8899 check (per
 # systemd/genlock-lock-alert-watchdog.README.md + .claude/rules/provisioning-scripts.md).
 mkdir -p /opt/camera-box
-for f in bundle-state-server.py bundle_state_gather.py obs_phase2.py; do
+for f in "${BUNDLE_STATE_SERVER_FILES[@]}"; do
     gh api -H "Accept: application/vnd.github.raw" \
         "repos/${GENLOCK_REPO}/contents/scripts/${f}?ref=dev" \
         > "/opt/camera-box/${f}" \
         || fail "issue 1299: could not fetch scripts/${f} from ${GENLOCK_REPO} (dev) via gh api"
 done
 chmod 0644 /opt/camera-box/*.py
+# issue 1386: the files come from origin dev, the list from this checkout -- prove the installed
+# tree is complete (the gather facade imports every facet module, bundle_state_windows the
+# server-side modules) before enabling the unit.
+python3 -I -B -c 'import sys; sys.path.insert(0, "/opt/camera-box"); import bundle_state_gather, bundle_state_windows' \
+    || fail "issue 1386: /opt/camera-box holds a partial bundle-state server tree -- re-run from a current checkout"
 
 sudo -u "$DESKTOP_USER" mkdir -p "$USER_HOME/.config/systemd/user"
 gh api -H "Accept: application/vnd.github.raw" \
