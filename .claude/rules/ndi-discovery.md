@@ -14,7 +14,7 @@ paths:
   - "tests/pwsh/run_ndi_discovery_laptop_1389.sh"
 ---
 
-# NDI discovery = a receiver-side list of the OBS-box senders, never a cambox + ONE output per cambox (issues 1342, 1389)
+# NDI discovery = a receiver-side list of the OBS-box senders, never a cambox; the camboxes carry no list + ONE output per cambox (issues 1342, 1389)
 
 ## What changed and why
 
@@ -25,15 +25,23 @@ paths:
   - Setup-device STEP 7 DELETES a leftover `camera-box.service.d/publish-30p.conf`, and the old
     verify check `(z)` is removed. Owner ruling 24.9.2026: "ak na nic tak prosim nech maju iba jeden
     spravny".
-- **Every managed RECEIVER queries the managed OBS-box SENDERS by IP, in addition to mDNS.** mDNS
+- **The OBS boxes and laptops query the managed OBS-box SENDERS by IP, in addition to mDNS.** mDNS
   multicast over the venue MikroTik chain missed the RESOLUME-SNV sources on the strih OBS, and fresh
   laptops listed only part of the sources.
-- **Issue 1389: the list NEVER names a cambox.** Until 28.9.2026 it also listed all 7 cambox IPs, and
-  that list made camera-box abort (next section).
+- **Issue 1389: the list NEVER names a cambox, and a cambox carries NO list at all.** Until 28.9.2026
+  every receiver, the camboxes included, listed all 7 cambox IPs, and that list made camera-box abort
+  (next section).
 
 ## Never a cambox (issue 1389)
 
 **Never list a cambox IP in `networks.ips`** -- not on a receiver, not on a laptop, not on a cambox.
+
+**A cambox carries NO `networks.ips` at all (ROZHODNUTÉ 5879261962, supervisor, 28.9.2026).** A
+cambox is an mDNS-only NDI receiver: camera-box's finder needs only the strih preview source
+`STRIH-LX (interkom)`, which mDNS finds in milliseconds. Any listed host would give it an OUTBOUND
+discovery connection whose teardown, at every strih / stream / resolume restart, is the same
+unmeasured abort risk. With no list there is no connection in either direction, so there is nothing
+to measure.
 
 **Why:**
 - **An extra-IP finder opens a TCP discovery connection to each listed sender's `:5960` listener.**
@@ -59,28 +67,29 @@ paths:
   sources: on 28.9 an mDNS-only finder saw all 26 sources in 0.02 s on dev1 and < 1 s on strih-lx,
   8/8 cold rounds.
 
-**How it is enforced (all in `scripts/lib/ndi-discovery.sh`, the ONE generator):**
-- `ndi_discovery_sender_ips` lists only the obs-fleet `ndi-sender` hosts.
+**How it is enforced (all in `scripts/lib/ndi-discovery.sh`):**
+- **The receiver list** (strih-lx, stream, resolume, laptops): `ndi_discovery_sender_ips` lists only
+  the obs-fleet `ndi-sender` hosts.
   - The `camera_resolve` walk (`ndi_discovery_camera_ips` / `ndi_discovery_cambox_ips`) stays as
     the FORBIDDEN set.
   - A fleet or resolved host that lands on a cambox IP is skipped and named on stderr.
   - The generator fails loud (no list) when it cannot derive the cambox set, or when no host is left.
-- `ndi_discovery_config_verdict` has a `cambox` facet. A config that lists a cambox IP FAILs: the
-  old issue-1342 list still on an un-migrated box, graded by verify-device `(an)` / verify-strih
-  item 34. It also FAILs when the default cambox set cannot be derived.
-- The Windows `.ps1` REMOVES every `-RemoveIps` entry (default: every cambox IP, test-pinned to
-  `--cambox-ips`), refuses an `-Ips` list naming one, and fails its read-back if one survived.
-- The cambox's OWN config holds the same fleet-only list (the main's decision for this slice). The
-  camera-box finder needs only the strih preview source `STRIH-LX (interkom)`, and never a peer
-  cambox: cambox ↔ cambox connections are gone too.
-- **Open question (the lane's review round 1, for the main).** The fix removes every INBOUND
-  discovery connection into a cambox. Each cambox still opens OUTBOUND ones to the ≤ 3 listed OBS
-  boxes, and those boxes' restarts are the very trigger. Whether an outbound teardown can abort
-  camera-box too is NOT measured. The design's evidence names the inbound threads only. The
-  19–20 `disc:recv` pairs match inbound (~13 finders) plus outbound (~7) as well.
-  - The runbook's acceptance restarts each OBS box one at a time and checks it.
-  - If an outbound teardown aborts, the cure is a cambox list of strih-lx only (the one source it
-    receives) or none (mDNS-only).
+  - `ndi_discovery_config_verdict` has a `cambox` facet: a strih-lx config that lists a cambox IP
+    FAILs verify-strih item 34, and so does an underivable cambox set.
+  - The Windows `.ps1` REMOVES every `-RemoveIps` entry (default: every cambox IP, test-pinned to
+    `--cambox-ips`), refuses an `-Ips` list naming one, and fails its read-back if one survived.
+- **The cambox itself** (setup-device STEP 7 and, on a live box, `--cambox-apply`): the plan/apply
+  pair `ndi_discovery_cambox_plan` + `ndi_discovery_cambox_apply_plan` takes the issue-1342 config off.
+  - It strips `networks.ips` and `networks.discovery`.
+  - When nothing else is left in `/etc/ndi/ndi-config.v1.json`, it removes the file AND the
+    camera-box `NDI_CONFIG_DIR` drop-in (then `daemon-reload`). camera-box then runs on libndi's
+    defaults: root, `ProtectHome=yes`, no readable `$HOME/.ndi`, so mDNS only.
+  - Any other key keeps the file and the drop-in: something else in it still matters.
+  - A drop-in pointing `NDI_CONFIG_DIR` anywhere else is not this repo's: STEP 7 fails loud, the
+    live program refuses and touches nothing.
+  - verify-device `(an)` grades it with `ndi_discovery_cambox_verdict`: no config is ok. A config
+    that lists ANY IP FAILs naming it, with or without the drop-in (a drop-in would load it again).
+    So do a `networks.discovery`, a config that is not JSON, and a foreign drop-in.
 
 ## The SDK contract (why this shape, and why NOT a Discovery Server)
 
@@ -117,7 +126,7 @@ verifiers FAIL on one.
 `scripts/lib/ndi-discovery.sh` `ndi_discovery_sender_ips` is the ONE generator. It lists, in fleet
 order, each IP once, every member of the obs-fleet `ndi-sender` facet (`scripts/lib/obs-fleet.sh`:
 strih-lx, stream, resolume). `retired` rows are excluded by `obs_fleet_boxes`. It never lists a
-cambox (above).
+cambox (above), and no cambox carries its output.
 
 The FORBIDDEN set walks every camera `camera_resolve` knows (`scripts/camera-set.sh`): `cam1`,
 `cam2`, ... to the first unknown name.
@@ -129,9 +138,9 @@ The FORBIDDEN set walks every camera `camera_resolve` knows (`scripts/camera-set
 
 The two modes:
 - **`pinned`**: every IPv4 fleet host (today `10.77.9.202,10.77.9.204`). It is deterministic, and it
-  is what the verifiers REQUIRE, what the checked-in file carries and what the `.ps1` default carries.
-- **`resolve`** (the provisioners' default): additionally every HOSTNAME fleet host (resolume.lan,
-  a traveling DHCP box) resolved to IPv4 with a bounded `getent ahostsv4`.
+  is what verify-strih REQUIRES, what the checked-in file carries and what the `.ps1` default carries.
+- **`resolve`** (setup-strih's default): additionally every HOSTNAME fleet host (resolume.lan, a
+  traveling DHCP box) resolved to IPv4 with a bounded `getent ahostsv4`.
   - An unresolvable or non-IPv4 answer is skipped and named on stderr. Those sources stay
     mDNS-only, as before.
   - A traveling box's lease is never REQUIRED, so a verify never flaps on it.
@@ -160,22 +169,23 @@ query come from the fleet list.
   the FORBIDDEN set reads `camera_resolve`. A Poprad cambox would need its own `camera_resolve` arm
   to be caught by the verdict's `cambox` facet, but the generator can never list one either way.
 
-A renumbered strih-lx / stream FAILS `verify-device (an)` / `verify-strih` item 34 until the box is
-re-provisioned. Re-provisioning is the fix; no hand edit is needed. Extra NON-cambox entries in a
-box's list (an old lease, a retired box) are harmless and do not fail: a finder just queries one more
-address. A cambox entry always FAILs.
+A renumbered strih-lx / stream FAILS `verify-strih` item 34 until the box is re-provisioned.
+Re-provisioning is the fix; no hand edit is needed. Extra NON-cambox entries in a box's list (an old
+lease, a retired box) are harmless and do not fail: a finder just queries one more address. A cambox
+entry always FAILs.
 
 The CLI, for boxes this repo does not provision and for the issue-1389 runbook:
 - `bash scripts/lib/ndi-discovery.sh --ips [resolve|pinned]`
 - `bash scripts/lib/ndi-discovery.sh --json [resolve|pinned]`
 - `bash scripts/lib/ndi-discovery.sh --cambox-ips` (the FORBIDDEN set)
-- `bash scripts/lib/ndi-discovery.sh --cambox-apply [resolve|pinned]` (the on-box cambox program, below)
+- `bash scripts/lib/ndi-discovery.sh --cambox-apply` (the on-box cambox program that strips the
+  list, below; it needs no fleet list)
 
 ## Where the config is written, per receiver
 
 | Receiver | Config path | Written by | Graded by |
 |---|---|---|---|
-| cambox camera-box.service (receives `STRIH-LX (interkom)` for the cameraman preview; root, `ProtectHome=yes`) | `/etc/ndi/ndi-config.v1.json` + `camera-box.service.d/ndi-discovery.conf` (`NDI_CONFIG_DIR=/etc/ndi`) | setup-device STEP 7; on a live box `--cambox-apply` | verify-device `(an)` |
+| cambox camera-box.service (receives `STRIH-LX (interkom)` for the cameraman preview; root, `ProtectHome=yes`) | NONE: mDNS only. The issue-1342 `/etc/ndi/ndi-config.v1.json` + `camera-box.service.d/ndi-discovery.conf` are removed | setup-device STEP 7 strips them; on a live box `--cambox-apply` | verify-device `(an)`: no `networks.ips` |
 | strih-lx OBS + bkshading-service (User=newlevel) | `~newlevel/.ndi/ndi-config.v1.json` | setup-strih step 4b | verify-strih item 34 |
 | strih-lx intercom-hub (`ProtectHome=true`) | `/etc/ndi/ndi-config.v1.json` + `intercom-hub.service.d/ndi-discovery.conf` | setup-strih step 4b | verify-strih item 34 |
 | Windows stream / resolume / any Windows laptop | `%ProgramData%\NDI\ndi-config.v1.json` | `scripts/ndi-discovery-laptop.ps1` (supervisor / owner) | the script's own read-back |
@@ -185,10 +195,11 @@ The CLI, for boxes this repo does not provision and for the issue-1389 runbook:
   Every strih-lx genlock deploy re-runs setup-strih, so strih-lx converges on its next deploy.
 - The Linux SDK reads `$HOME/.ndi/ndi-config.v1.json`, or `$NDI_CONFIG_DIR/ndi-config.v1.json` when
   that env var is set. A root system service without `User=` has no guaranteed `$HOME`, and
-  `ProtectHome` hides `/root` anyway, so root services get `/etc/ndi` plus the drop-in.
-- The managed-box writer MERGES into an existing file. It sets `networks.ips` EXACTLY to the
-  generated list (so it converges and drops the old cambox entries), drops `networks.discovery` and
-  keeps every other key.
+  `ProtectHome` hides `/root` anyway, so a root receiver that needs a list gets `/etc/ndi` plus a
+  drop-in (intercom-hub). camera-box needs none: without the drop-in it reads no config at all.
+- The managed-box writer (strih-lx) MERGES into an existing file. It sets `networks.ips` EXACTLY to
+  the generated list (so it converges and drops the old cambox entries), drops `networks.discovery`
+  and keeps every other key.
   - An unmergeable file (not JSON, or no python3 on the box) is backed up to `.bak-<stamp>` and
     replaced.
   - An EMPTY list is refused.
@@ -210,54 +221,57 @@ against this. That test wrote `/root/.ndi/`, which is invisible under camera-box
 `ProtectHome=yes`, and used the non-SDK shape `"rudp":{"recv":false}`. Prove the config took effect
 from the receiver's source list and its TCP connections instead (below).
 
-## The cambox writer on a live box: `--cambox-apply` (issue 1389)
+## Taking the list off a live cambox: `--cambox-apply` (issue 1389)
 
 Re-running setup-device.sh on a live cambox is a full re-provision. The smallest safe equivalent
-rewrites ONLY `/etc/ndi/ndi-config.v1.json`:
+touches ONLY `/etc/ndi/ndi-config.v1.json` and the camera-box `ndi-discovery.conf` drop-in:
 - `apply="$(mktemp)"; bash scripts/lib/ndi-discovery.sh --cambox-apply > "$apply"` generates ONE
-  program for every cambox. It embeds the SAME `ndi_discovery_write_config` STEP 7 calls (via
-  `declare -f`, never a copy) and the generated list. It refuses to exist for an empty list or one
-  naming a cambox.
+  program for every cambox. It embeds the SAME `ndi_discovery_cambox_plan` /
+  `ndi_discovery_cambox_apply_plan` pair STEP 7 calls (via `declare -f`, never a copy) and needs no
+  fleet list.
 - `sshpass -p "$DEVICE_ROOT_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
   -o ConnectTimeout=10 root@<cambox> bash -s < "$apply"` runs it on one box (the ssh options of
-  verify-device's `ssh_box`: a reflashed box has a new host key):
-  - a box whose camera-box `ndi-discovery.conf` drop-in does not point `NDI_CONFIG_DIR` at
-    `/etc/ndi` (read the way verify-device `(an)` reads it) never reads the file, so it is mDNS-only
-    already: the program says so and writes nothing;
-  - a file that is already right prints `unchanged` and writes nothing: no remount, no write to the
-    USB stick. With python3 on the box that is a file that parses as JSON whose `ndi.networks.ips`
-    equals the list with no `networks.discovery`, whatever other keys it has; without python3 only
-    the canonical rendering counts. A file that is not JSON is always rewritten, so the program
-    converges exactly what verify-device `(an)` FAILs;
-  - otherwise it reads the root mount (`findmnt`, `/proc/mounts` fallback) and, when read-only,
-    `mount -o remount,rw /`, writes the one file (temp file + atomic rename), `sync`, then
-    `mount -o remount,ro /` again (3 tries);
-  - a root it cannot put back read-only is a loud `ERROR ... read-WRITE` and a non-zero exit, and an
-    EXIT trap puts it back on any other failure;
-  - the drop-in and every other file stay untouched.
-- It is one ~100-byte file rewrite in the same rw window setup-device.sh and the dantesync upgrader
-  use. That is not a risky write to the stick. On a box without python3 the STEP 7 writer cannot
-  merge, so it also keeps the old file as `ndi-config.v1.json.bak-<stamp>`, exactly as STEP 7 does.
-  That backup holds the old issue-1342 list: never restore it.
-- Tier-0 tests run the real program with `findmnt` / `mount` / `sync` stubbed:
-  `CamboxApply1389` in `tests/python/test_ndi_discovery_1342.py`.
+  verify-device's `ssh_box`: a reflashed box has a new host key). The plan decides:
+  - **none**: no config, or one with no `networks.ips` / `networks.discovery`, and no stale drop-in.
+    It prints `this cambox carries no networks.ips already (mDNS only) -- nothing written`: no
+    remount, no write to the USB stick.
+  - **remove**: the config holds nothing but the list (the issue-1342 rendering) or nothing at all,
+    or only the drop-in is left. It deletes the config and the drop-in, then `systemctl
+    daemon-reload`.
+  - **remove-backup**: the config is not a JSON object, or python3 is missing on the box and the
+    file is not the lib's own rendering, so other keys cannot be told apart. It copies the file to
+    `ndi-config.v1.json.bak-<stamp>` first, then removes as above. That backup is inert (no drop-in
+    points at it); never restore one that lists IPs.
+  - **strip**: the config also holds other keys. It rewrites it without `networks.ips` /
+    `networks.discovery` (temp file + atomic rename) and keeps the drop-in, because the other keys
+    still matter.
+  - **refuse**: the drop-in points `NDI_CONFIG_DIR` somewhere else. It exits non-zero, `REFUSED:`
+    names the drop-in, and nothing is touched: a human looks at it.
+  - For any change, a read-only root is remounted rw first and put back ro after `sync` (3 tries).
+    A root it cannot put back is a loud `ERROR ... read-WRITE` and a non-zero exit, and an EXIT trap
+    puts it back on any other failure.
+- It removes one or two ~100-byte files in the same rw window setup-device.sh and the dantesync
+  upgrader use. That is not a risky write to the stick, and a clean box is never touched.
+- Tier-0 tests run the real program fed to `bash -s`, with `findmnt` / `mount` / `sync` /
+  `systemctl` stubbed: `CamboxApply1389` and `CamboxVerdict1389` in
+  `tests/python/test_ndi_discovery_1389.py`.
 
 ## Supervisor deploy runbook (issue 1389 -- code-only lane, nothing here was run live)
 
 Receiver config only, no gate. Run it when no E2E / soak holds the rig lease
 (`curl -s http://127.0.0.1:8890/rig-lease.json` on dev1) -- the no-cambox-touch-while-lease rule.
 
-**1. Write the new list on every receiver.** Any order, no restart yet. On dev1:
-`bash scripts/lib/ndi-discovery.sh --ips` prints the list including resolume's current IP (today
-`10.77.9.202,10.77.9.204,10.77.9.201`).
+**1. Write the new state on every receiver.** Any order, no restart yet. On dev1:
+`bash scripts/lib/ndi-discovery.sh --ips` prints the OBS-box list including resolume's current IP
+(today `10.77.9.202,10.77.9.204,10.77.9.201`).
 - **strih-lx** (OBS + bkshading-service read `~newlevel/.ndi`, intercom-hub reads `/etc/ndi`):
   `sudo ./scripts/setup-strih.sh --box strih-lx` (step 4b). The next genlock deploy runs it anyway.
   - Grade: `sudo ./scripts/verify-strih.sh --box strih-lx`, item 34 = 3 PASS, no `cambox` FAIL.
-- **cam1 … cam7** (each `camera_resolve` camera):
+- **cam1 … cam7** (each `camera_resolve` camera) -- the list comes OFF:
   - `apply="$(mktemp)"; bash scripts/lib/ndi-discovery.sh --cambox-apply > "$apply"` once;
   - then per box `sshpass -p "$DEVICE_ROOT_PW" ssh -o StrictHostKeyChecking=no
     -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 root@10.77.9.6N bash -s < "$apply"`
-    → `OK: ... rewritten` (or `unchanged`);
+    → `OK: remove done -- this cambox carries no networks.ips now (mDNS only)` (or `... already`);
   - `rm -f "$apply"` afterwards.
   - Never setup-device.sh on a live box for this, never a reboot (the never-remote-reboot-a-cambox rule).
 - **stream + resolume** (Windows, via the win-* MCP; never ssh for a GUI step):
@@ -270,7 +284,7 @@ Receiver config only, no gate. Run it when no E2E / soak holds the rig lease
 **2. Restart every NDI process, the remote receivers FIRST and the camboxes LAST.**
 - Each restart closes that process's old connections into the camboxes. That is the abort trigger,
   one last time per peer: a camera-box may abort more than once during this step (each peer still on
-  the old list can trigger it once), and each abort restarts it in ~3 s on the new file.
+  the old list can trigger it once), and each abort restarts it in ~3 s, now without the list.
 - **strih-lx:** `systemctl --user restart strih-obs.service` (as newlevel), then
   `sudo systemctl restart bkshading-service intercom-hub`.
 - **stream:** restart OBS the usual way (`.claude/skills/obs-ops`).
@@ -281,22 +295,20 @@ Receiver config only, no gate. Run it when no E2E / soak holds the rig lease
     read-back names Arena, ask the owner to restart it; never restart Arena or its AHK loop yourself.
 - **cam1 … cam7:** `systemctl restart camera-box` on each, one box at a time (the deploy's restart,
   never a reboot).
-  - This drops each box's own old outbound connections into the other camboxes.
-  - A peer that aborts once on that close comes back from systemd with the new file already written.
+  - The camera-box that starts now reads no config (the drop-in is gone), so it opens no discovery
+    connection to the OBS boxes or the other camboxes.
+  - A peer that aborts once on that close comes back from systemd already mDNS-only.
 
-**3. Read-back.** The acceptance is 0 inbound discovery connections into any camera-box.
+**3. Read-back.** The acceptance is 0 discovery connections into OR out of any camera-box.
 - **Per cambox** (over ssh):
-  - `ss -Htnp state established '( sport = :5960 )'` must print 0 lines: no remote finder holds a
-    discovery connection into camera-box.
+  - `ss -Htnp state established '( sport = :5960 or dport = :5960 )'` must print 0 lines: no remote
+    finder holds a discovery connection into camera-box, and camera-box holds none out.
   - The `disc:recv` threads: `pid=$(systemctl show -p MainPID --value camera-box)` then
-    `grep -cx 'disc:recv' /proc/$pid/task/*/comm | awk -F: '{s+=$2} END {print s}'`.
-    It must drop from 19–20. The `ss` line above is the authoritative inbound check. Whether this
-    box's OWN finder (its outbound connections to the ≤ 3 listed OBS boxes, `dport = :5960`) also
-    runs `disc:recv` threads is not yet measured: record the first box's count as the baseline.
-  - If either check reads more, list the peers with
-    `ss -Htnp state established '( sport = :5960 or dport = :5960 )'`.
-    A cambox peer IP means that box or process still runs the old list.
-  - `./scripts/verify-device.sh <CAMn>` `(an)` passes (no `cambox` FAIL).
+    `grep -cx 'disc:recv' /proc/$pid/task/*/comm | awk -F: '{s+=$2} END {print s}'`. It must drop
+    from 19–20, expected 0 with no connection. The `ss` line is the authoritative check; record the
+    first box's thread count.
+  - A remaining connection names its peer IP: that box or process still runs the old list.
+  - `./scripts/verify-device.sh <CAMn>` `(an)` passes: `no networks.ips on this cambox -- mDNS only`.
 - **strih-lx:** `ss -Htnp state established '( dport = :5960 )'` shows no peer from `--cambox-ips`.
 - **stream / resolume** (win-* MCP Shell):
   - `$c = '<--cambox-ips output>' -split ','; Get-NetTCPConnection -State Established -RemotePort 5960 |
@@ -304,20 +316,19 @@ Receiver config only, no gate. Run it when no E2E / soak holds the rig lease
     Select-Object RemoteAddress, OwningProcess, @{n='Name';e={(Get-Process -Id $_.OwningProcess).ProcessName}}`
     must print nothing (the `::ffff:` strip covers a dual-stack socket);
   - any row names the NDI app still holding a cambox connection: restart it (Arena: ask the owner).
-- **Acceptance (the design, plus the open outbound question above):**
-  - restart each OBS box's NDI processes one at a time -- the strih-lx OBS, the stream OBS,
-    SongPlayer, the cg OBS -- and before each restart note every cambox's OWN outbound connections
-    (`ss -Htnp state established '( dport = :5960 )'`). Each restart aborts no camera-box:
-    `journalctl -u camera-box --since '<t>' | grep -c 'status=6/ABRT'` = 0 on every box. An abort
-    whose box held an outbound connection to the restarted host answers the open question: report
-    it to the main (the cambox list then shrinks to strih-lx or to none);
+- **Acceptance (the design):**
+  - restart the strih-lx OBS, the stream OBS, SongPlayer and the cg OBS one at a time; each restart
+    aborts no camera-box: `journalctl -u camera-box --since '<t>' | grep -c 'status=6/ABRT'` = 0 on
+    every box;
   - 0 aborts on cam1/cam2/cam4 over 24 h;
+  - the cameraman HDMI preview on each cambox still shows `STRIH-LX (interkom)` after its
+    camera-box restart (the preview source now comes from mDNS alone);
   - after a strih OBS cold start, every `CAMn (usb)` source still lists within seconds (mDNS), and
     every other source too (the issue-1342 cold-start check below).
 
 ## Issue-1342 acceptance (still valid)
 
-- Every managed receiver lists every managed sender within 5 s of OBS start: 10/10 cold starts on
+- Every OBS-box receiver lists every managed sender within 5 s of OBS start: 10/10 cold starts on
   strih-lx and stream, plus one laptop that ran the `.ps1`.
   - The OBS-box senders come from the list, the camboxes from mDNS (issue 1389).
   - Resolume counts only when it was resolvable at the receiver's last provisioning run and its lease
@@ -337,20 +348,16 @@ Receiver config only, no gate. Run it when no E2E / soak holds the rig lease
 ## Rollback (back to mDNS-only discovery)
 
 There is no gate to flip, because the config is receiver-only. Never roll back to the issue-1342
-list that named the camboxes: it brings the camera-box aborts back. To remove the config from a box:
+list that named the camboxes, and never put a list back on a cambox: it brings the camera-box aborts
+back. The camboxes are already mDNS-only; to remove the config from the other boxes:
 
-- cambox: remove `/etc/ndi/ndi-config.v1.json` and
-  `/etc/systemd/system/camera-box.service.d/ndi-discovery.conf`, run `systemctl daemon-reload`,
-  then restart `camera-box.service`. The root fs is read-only, so do it in setup-device's rw window
-  or with a `mount -o remount,rw /` + remount ro.
 - strih-lx: remove `~newlevel/.ndi/ndi-config.v1.json`, `/etc/ndi/ndi-config.v1.json` and
   `/etc/systemd/system/intercom-hub.service.d/ndi-discovery.conf`, run `systemctl daemon-reload`,
   then restart `strih-obs.service` (user unit), `bkshading-service` and `intercom-hub`.
 - Windows boxes and laptops: restore the `ndi-config.v1.json.bak-<stamp>` the `.ps1` left next to
   the config (or delete the file), then restart OBS. A backup written before issue 1389 still lists
   the camboxes: delete the file instead of restoring that one.
-- A permanent rollback also removes the STEP 7 / step 4b writes, or the next provisioner run
-  re-writes them.
+- A permanent rollback also removes the step 4b write, or the next provisioner run re-writes it.
 
 ## Laptop quick steps (owner-facing)
 

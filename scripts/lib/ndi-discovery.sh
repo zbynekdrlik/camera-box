@@ -7,7 +7,8 @@
 #
 # scripts/lib/ndi-discovery.sh -- issue 1342: the ONE source of truth for the fleet's RECEIVER-side
 # NDI config (`ndi-config.v1.json`), which lists the managed OBS-box NDI senders by IP -- and, since
-# issue 1389, NEVER a cambox.
+# issue 1389, NEVER a cambox. A cambox itself carries NO list at all (ROZHODNUTÉ 5879261962): the
+# CAMBOX section near the end takes it off.
 #
 # WHY: NDI source discovery on this rig was pure mDNS (`_ndi._tcp` multicast via avahi). On the
 # venue MikroTik LAN that is unreliable: the strih OBS missed the RESOLUME-SNV sources, and a freshly
@@ -43,14 +44,15 @@
 # alone, as before 24.9.2026 (they were never among the missed sources). The camera walk below stays
 # only as the FORBIDDEN set: the generator drops a cambox IP by construction (and fails loud when it
 # cannot derive the set), the verdict FAILs a config that lists one, and the Windows .ps1 removes
-# them. The cambox's own list keeps its OUTBOUND connections to the listed OBS boxes; whether those
-# can abort it too is not measured yet (the rule's runbook acceptance checks it).
+# them. A cambox's OWN config carries no list either (ROZHODNUTÉ 5879261962): with any listed host it
+# would hold OUTBOUND discovery connections to the very boxes whose restarts trigger the abort.
 #
 # Config LOCATION: the Linux SDK reads `$HOME/.ndi/ndi-config.v1.json`, or
-# `$NDI_CONFIG_DIR/ndi-config.v1.json` when that env var is set. `camera-box.service` (the cameraman
-# HDMI preview receives `STRIH-LX (interkom)`) runs as root with `ProtectHome=yes` and no User=, so a
-# /root/.ndi file would be invisible to it -- the cambox config lives in the system dir /etc/ndi and a
-# camera-box.service.d drop-in points NDI_CONFIG_DIR at it. strih-lx's intercom-hub gets the same.
+# `$NDI_CONFIG_DIR/ndi-config.v1.json` when that env var is set. strih-lx's intercom-hub runs with
+# `ProtectHome=true`, so its config lives in the system dir /etc/ndi and an intercom-hub.service.d
+# drop-in points NDI_CONFIG_DIR at it. The camboxes used the same pair (/etc/ndi + a camera-box.service.d
+# drop-in) until issue 1389; the cambox writer below now removes both, so camera-box (root,
+# `ProtectHome=yes`, no readable $HOME/.ndi) runs on libndi's defaults: mDNS only.
 #
 # Rule + supervisor steps: .claude/rules/ndi-discovery.md.
 
@@ -69,9 +71,9 @@ fi
 NDI_DISCOVERY_CONFIG_NAME="ndi-config.v1.json"
 # System config dir for root / ProtectHome services (pointed at by NDI_CONFIG_DIR). Overridable for tests.
 NDI_DISCOVERY_SYSTEM_DIR="${NDI_DISCOVERY_SYSTEM_DIR:-/etc/ndi}"
-# The camera-box.service drop-in that points the appliance's libndi at NDI_DISCOVERY_SYSTEM_DIR.
-# Overridable for tests.
-# shellcheck disable=SC2034  # consumed cross-file by setup-device.sh (install) + verify-device.sh (an)
+# The camera-box.service drop-in that pointed the appliance's libndi at NDI_DISCOVERY_SYSTEM_DIR (issue
+# 1342); since issue 1389 the cambox writer removes it with the config. Overridable for tests.
+# shellcheck disable=SC2034  # consumed cross-file by setup-device.sh (removal) + verify-device.sh (an)
 NDI_DISCOVERY_CAMBOX_DROPIN="${NDI_DISCOVERY_CAMBOX_DROPIN:-/etc/systemd/system/camera-box.service.d/ndi-discovery.conf}"
 # The strih-lx intercom-hub drop-in (ProtectHome hides ~/.ndi from it). Overridable for tests.
 # shellcheck disable=SC2034  # consumed cross-file by setup-strih.sh (install) + verify-strih.sh (item 34)
@@ -287,8 +289,8 @@ ndi_discovery_list_common() {
 # failing facet. Always exits 0 (the caller branches on the printed verdict). REQUIRED defaults to the
 # PINNED list, FORBIDDEN to every cambox IP (ndi_discovery_cambox_ips). Facets:
 #   missing   -- TEXT empty (no config file on the box)
-#   JSON      -- TEXT is not valid JSON (checked only when python3 is available; verify-device runs
-#                this on dev1, verify-strih on strih-lx -- both have it)
+#   JSON      -- TEXT is not valid JSON (checked only when python3 is available; verify-strih runs
+#                this on strih-lx, which has it)
 #   discovery -- a networks.discovery is set (it would silence this box's senders on mDNS)
 #   ips       -- networks.ips is empty, or a REQUIRED IP is absent from it (a renumber / new
 #                sender: re-provision).
@@ -422,7 +424,8 @@ ndi_discovery_write_config() {
 }
 
 # ndi_discovery_gather_remote_snippet -> the on-box bash that prints the cambox config + drop-in
-# for verify-device's (an) check, between fixed markers (one ssh round trip, read-only).
+# for verify-device's (an) check, between fixed markers (one ssh round trip, read-only). Both are
+# expected ABSENT on a cambox since issue 1389 (ndi_discovery_cambox_verdict grades them).
 ndi_discovery_gather_remote_snippet() {
   printf 'echo "__NDI_CONF_BEGIN__"; cat %q 2>/dev/null; echo "__NDI_CONF_END__"; echo "__NDI_DROPIN_BEGIN__"; cat %q 2>/dev/null; echo "__NDI_DROPIN_END__"\n' \
     "$NDI_DISCOVERY_SYSTEM_DIR/$NDI_DISCOVERY_CONFIG_NAME" "$NDI_DISCOVERY_CAMBOX_DROPIN"
@@ -434,61 +437,202 @@ ndi_discovery_block_section() {
   printf '%s\n' "$1" | awk -v b="__${2}_BEGIN__" -v e="__${2}_END__" '$0==b{on=1;next} $0==e{on=0} on' || true
 }
 
-# ndi_discovery_cambox_apply_remote_snippet IPS -> the on-box bash program (fed to `bash -s` as root
-# over ssh, see the CLI below) that rewrites ONLY $NDI_DISCOVERY_SYSTEM_DIR/ndi-config.v1.json on a cambox with
-# networks.ips = IPS: issue 1389's smallest safe equivalent of re-running setup-device.sh STEP 7 on a
-# live box. It embeds the SAME ndi_discovery_write_config STEP 7 calls (declare -f, never a copy).
-# It writes nothing and never remounts when the box's camera-box drop-in does not point
-# NDI_CONFIG_DIR at the config dir (camera-box never reads the file, so the box is mDNS-only already;
-# read like verify-device (an) reads it), or when the file is already right: with python3 on the box,
-# a file that parses as JSON whose ndi.networks.ips equals IPS with no networks.discovery (whatever
-# other keys it carries); without python3, only the canonical rendering. A file that is not JSON is
-# always rewritten. Otherwise, on a read-only root it remounts rw, writes, syncs and remounts ro again
-# (retried 3x; a root it cannot put back is a loud non-zero, and the EXIT trap puts it back on any
-# failure). The drop-in and every other file stay untouched.
-# Non-zero (and no output) on an EMPTY IPS, on an IPS that names a cambox, or when the cambox set is
-# unknown.
+# --- the CAMBOX config: NO networks.ips at all (issue 1389, ROZHODNUTÉ 5879261962) ---------------
+# A cambox is an mDNS-only NDI receiver. camera-box's finder needs only the strih preview source
+# (`STRIH-LX (interkom)`), which mDNS finds in milliseconds, and any listed host would give the cambox
+# an OUTBOUND discovery connection whose teardown at every strih / stream / resolume restart is the
+# same abort risk as the inbound one. So setup-device STEP 7 and `--cambox-apply` take the list OFF a
+# cambox (the plan/apply pair below), and verify-device (an) FAILs a cambox that still lists any IP
+# (ndi_discovery_cambox_verdict). The receiver list above is for the OBS boxes and laptops only.
+
+# _ndi_discovery_stripped_json FILE -> FILE's JSON object with ndi.networks.ips and
+# ndi.networks.discovery removed, and any object that removal left empty dropped (2-space indent,
+# trailing newline; `{}` when nothing is left). Exit 1 without python3, exit 2 when FILE is not a JSON
+# object.
+_ndi_discovery_stripped_json() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  python3 -c '
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8-sig") as fh:
+        doc = json.load(fh)
+except Exception:
+    sys.exit(2)
+if not isinstance(doc, dict):
+    sys.exit(2)
+ndi = doc.get("ndi")
+if isinstance(ndi, dict):
+    net = ndi.get("networks")
+    if isinstance(net, dict):
+        net.pop("ips", None)
+        net.pop("discovery", None)
+        if not net:
+            ndi.pop("networks")
+    if not ndi:
+        doc.pop("ndi")
+sys.stdout.write(json.dumps(doc, indent=2) + "\n")
+' "$1"
+}
+
+# ndi_discovery_cambox_plan DIR DROPIN -> ONE line: what makes this cambox mDNS-only. DIR is the dir the
+# camera-box drop-in points libndi at ($NDI_DISCOVERY_SYSTEM_DIR), DROPIN that drop-in's path. Pure
+# read: never writes, always exits 0.
+#   none           -- nothing to do: no list, no discovery key, nothing stale to remove
+#   remove         -- delete DIR/ndi-config.v1.json (it holds only the list, or nothing) and the drop-in
+#   remove-backup  -- the same, the config backed up first: it is not a JSON object, or python3 is
+#                     missing and the file is not this lib's own rendering, so any other keys it holds
+#                     are kept in the backup only
+#   strip          -- rewrite the config without networks.ips / networks.discovery; its other keys
+#                     still matter, so the config and the drop-in stay
+#   refuse <why>   -- the drop-in exists but does not point NDI_CONFIG_DIR at DIR: not this repo's
+#                     file, left for a human
+ndi_discovery_cambox_plan() {
+  local dir="${1:?ndi_discovery_cambox_plan: DIR required}" dropin="${2:?ndi_discovery_cambox_plan: DROPIN required}"
+  local f have dropdir ips disc rest rc
+  f="$dir/$NDI_DISCOVERY_CONFIG_NAME"
+  if [ -e "$dropin" ]; then
+    dropdir="$(ndi_discovery_dropin_config_dir "$(cat "$dropin" 2>/dev/null || true)")"
+    if [ "$dropdir" != "$dir" ]; then
+      printf 'refuse %s points NDI_CONFIG_DIR at %s, not %s -- not this repo%ss drop-in; inspect it by hand\n' \
+        "$dropin" "${dropdir:-<nothing>}" "$dir" "'"
+      return 0
+    fi
+  fi
+  if [ ! -e "$f" ]; then
+    if [ -e "$dropin" ]; then echo remove; else echo none; fi
+    return 0
+  fi
+  have="$(cat "$f" 2>/dev/null || true)"
+  if [ -z "$(_ndi_discovery_norm_list "$have")" ]; then
+    echo remove
+    return 0
+  fi
+  rc=0
+  rest="$(_ndi_discovery_stripped_json "$f" 2>/dev/null)" || rc=$?
+  case "$rc" in
+    0)
+      ips="$(_ndi_discovery_norm_list "$(ndi_discovery_config_ips "$have")")"
+      disc="$(_ndi_discovery_norm_list "$(ndi_discovery_config_servers "$have")")"
+      if [ "$rest" = "{}" ]; then
+        echo remove
+      elif [ -z "$ips$disc" ]; then
+        echo none
+      else
+        echo strip
+      fi
+      ;;
+    1)
+      if [ "$have" = "$(ndi_discovery_config_json "$(ndi_discovery_config_ips "$have")")" ]; then
+        echo remove
+      else
+        echo remove-backup
+      fi
+      ;;
+    *) echo remove-backup ;;
+  esac
+}
+
+# ndi_discovery_cambox_apply_plan DIR DROPIN ACTION -> carry out ACTION (from ndi_discovery_cambox_plan)
+# on a WRITABLE root: strip rewrites the config through a temp file + atomic rename (0644); remove
+# deletes the config and the drop-in; remove-backup first copies the config to .bak-<stamp>. The caller
+# runs `systemctl daemon-reload` after a removed drop-in. Non-zero with a message on any failure, and on
+# none / refuse (nothing to carry out).
+ndi_discovery_cambox_apply_plan() {
+  local dir="${1:?ndi_discovery_cambox_apply_plan: DIR required}" dropin="${2:?ndi_discovery_cambox_apply_plan: DROPIN required}"
+  local action="${3:-}" f tmp
+  f="$dir/$NDI_DISCOVERY_CONFIG_NAME"
+  case "$action" in
+    strip)
+      tmp="$(mktemp "$dir/.${NDI_DISCOVERY_CONFIG_NAME}.XXXXXX")" \
+        || { echo "ndi-discovery: cannot write into $dir" >&2; return 1; }
+      if ! _ndi_discovery_stripped_json "$f" > "$tmp"; then
+        rm -f "$tmp"
+        echo "ndi-discovery: cannot strip networks.ips from $f" >&2
+        return 1
+      fi
+      chmod 0644 "$tmp"
+      mv -f "$tmp" "$f" || { rm -f "$tmp"; echo "ndi-discovery: rename into $dir failed" >&2; return 1; }
+      ;;
+    remove | remove-backup)
+      if [ "$action" = remove-backup ] && [ -e "$f" ]; then
+        cp -p "$f" "$f.bak-$(date +%Y%m%d-%H%M%S)" || { echo "ndi-discovery: cannot back up $f" >&2; return 1; }
+      fi
+      rm -f "$f" "$dropin" || { echo "ndi-discovery: cannot remove $f / $dropin" >&2; return 1; }
+      ;;
+    *)
+      echo "ndi-discovery: nothing to carry out for plan '${action}'" >&2
+      return 1
+      ;;
+  esac
+}
+
+# ndi_discovery_cambox_verdict CONF DROPIN -> "ok", or one `FAIL: <facet>` line per failing facet, for a
+# CAMBOX. CONF is the text of its $NDI_DISCOVERY_SYSTEM_DIR/ndi-config.v1.json ("" = absent), DROPIN
+# the text of its camera-box drop-in ("" = absent). Always exits 0. Facets:
+#   dropin    -- a drop-in that does not point NDI_CONFIG_DIR at the system dir (not this repo's)
+#   JSON      -- CONF is not valid JSON (checked only when python3 is there; verify-device runs on dev1)
+#   ips       -- CONF lists any IP, named; also without the drop-in, which would load it again
+#   discovery -- CONF sets a discovery server
+# No config, or one holding only other keys, is ok: the box is an mDNS-only receiver.
+ndi_discovery_cambox_verdict() {
+  local text="$1" dropin="${2-}" dropdir ips disc out=""
+  if [ -n "$(_ndi_discovery_norm_list "$dropin")" ]; then
+    dropdir="$(ndi_discovery_dropin_config_dir "$dropin")"
+    if [ "$dropdir" != "$NDI_DISCOVERY_SYSTEM_DIR" ]; then
+      out="${out}FAIL: camera-box.service.d/ndi-discovery.conf points NDI_CONFIG_DIR at '${dropdir:-<nothing>}', not ${NDI_DISCOVERY_SYSTEM_DIR} -- not this repo's drop-in, inspect it"$'\n'
+    fi
+  fi
+  if [ -n "$(_ndi_discovery_norm_list "$text")" ]; then
+    if command -v python3 >/dev/null 2>&1 \
+      && ! printf '%s' "$text" | python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1; then
+      out="${out}FAIL: not valid JSON (the NDI SDK ignores it; --cambox-apply removes it)"$'\n'
+    fi
+    ips="$(ndi_discovery_config_ips "$text")"
+    if [ -n "$(_ndi_discovery_norm_list "$ips")" ]; then
+      out="${out}FAIL: networks.ips lists ${ips} -- a cambox carries no networks.ips (mDNS only: a listed host's discovery connection can abort camera-box, issue 1389)"$'\n'
+    fi
+    disc="$(ndi_discovery_config_servers "$text")"
+    if [ -n "$(_ndi_discovery_norm_list "$disc")" ]; then
+      out="${out}FAIL: networks.discovery='${disc}' is set (a configured sender stops mDNS)"$'\n'
+    fi
+  fi
+  if [ -z "$out" ]; then
+    printf 'ok\n'
+  else
+    printf '%s' "$out"
+  fi
+}
+
+# ndi_discovery_cambox_apply_remote_snippet -> the on-box bash program (fed to `bash -s` as root over ssh,
+# see the CLI below) that makes a live cambox mDNS-only: issue 1389's smallest safe equivalent of
+# re-running setup-device.sh STEP 7. It embeds the SAME plan/apply pair STEP 7 calls (declare -f, never
+# a copy). A clean box (plan none) writes nothing and never remounts; a refused plan (a foreign drop-in)
+# exits non-zero with nothing touched. Otherwise, on a read-only root it remounts rw, carries out the
+# plan, syncs and remounts ro again (retried 3x; a root it cannot put back is a loud non-zero, and the
+# EXIT trap puts it back on any failure), then runs `systemctl daemon-reload` when it removed the
+# drop-in. It needs no fleet list, so the program is the same for every cambox.
 ndi_discovery_cambox_apply_remote_snippet() {
-  local ips="${1:-}" camboxes listed
-  if [ -z "$(_ndi_discovery_norm_list "$ips")" ]; then
-    echo "ndi-discovery: refusing an apply program with an EMPTY networks.ips" >&2
-    return 1
-  fi
-  camboxes="$(ndi_discovery_cambox_ips)" || return 1
-  listed="$(ndi_discovery_list_common "$ips" "$camboxes")"
-  if [ -n "$listed" ]; then
-    echo "ndi-discovery: refusing an apply program that lists the cambox IP(s) ${listed} (issue 1389)" >&2
-    return 1
-  fi
   printf 'set -eu\n'
   printf 'NDI_DISCOVERY_CONFIG_NAME=%q\n' "$NDI_DISCOVERY_CONFIG_NAME"
-  printf '_ndi_dir=%q\n_ndi_ips=%q\n_ndi_dropin=%q\n' "$NDI_DISCOVERY_SYSTEM_DIR" "$ips" "$NDI_DISCOVERY_CAMBOX_DROPIN"
+  printf '_ndi_dir=%q\n_ndi_dropin=%q\n' "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_DISCOVERY_CAMBOX_DROPIN"
   declare -f _ndi_discovery_json_string _ndi_discovery_networks_key ndi_discovery_config_ips \
     ndi_discovery_config_servers _ndi_discovery_norm_list ndi_discovery_dropin_config_dir \
-    ndi_discovery_config_json _ndi_discovery_merged_json ndi_discovery_write_config
+    ndi_discovery_config_json _ndi_discovery_stripped_json ndi_discovery_cambox_plan \
+    ndi_discovery_cambox_apply_plan
   cat <<'NDI_APPLY'
-_ndi_target="$_ndi_dir/$NDI_DISCOVERY_CONFIG_NAME"
-if [ "$(ndi_discovery_dropin_config_dir "$(cat "$_ndi_dropin" 2>/dev/null || true)")" != "$_ndi_dir" ]; then
-  echo "ndi-discovery: $_ndi_dropin does not point NDI_CONFIG_DIR at $_ndi_dir -- camera-box never reads $_ndi_target, so this box is mDNS-only already (the safe state); nothing written"
-  exit 0
-fi
-_ndi_have="$(cat "$_ndi_target" 2>/dev/null || true)"
-_ndi_same=0
-if [ -n "$_ndi_have" ]; then
-  if command -v python3 >/dev/null 2>&1 \
-    && printf '%s' "$_ndi_have" | python3 -c 'import json, sys; json.load(sys.stdin)' >/dev/null 2>&1; then
-    if [ "$(_ndi_discovery_norm_list "$(ndi_discovery_config_ips "$_ndi_have")")" = "$(_ndi_discovery_norm_list "$_ndi_ips")" ] \
-      && [ -z "$(_ndi_discovery_norm_list "$(ndi_discovery_config_servers "$_ndi_have")")" ]; then
-      _ndi_same=1
-    fi
-  elif [ "$_ndi_have" = "$(ndi_discovery_config_json "$_ndi_ips")" ]; then
-    _ndi_same=1
-  fi
-fi
-if [ "$_ndi_same" = 1 ]; then
-  echo "ndi-discovery: $_ndi_target unchanged (networks.ips=$_ndi_ips) -- nothing written"
-  exit 0
-fi
+_ndi_plan="$(ndi_discovery_cambox_plan "$_ndi_dir" "$_ndi_dropin")"
+case "$_ndi_plan" in
+  none)
+    echo "ndi-discovery: this cambox carries no networks.ips already (mDNS only) -- nothing written"
+    exit 0
+    ;;
+  refuse*)
+    echo "ndi-discovery: REFUSED: ${_ndi_plan#refuse } (issue 1389)" >&2
+    exit 1
+    ;;
+esac
+_ndi_had_dropin=0
+[ ! -e "$_ndi_dropin" ] || _ndi_had_dropin=1
 _ndi_ro=0
 _ndi_opts="$(findmnt -no OPTIONS / 2>/dev/null || awk '$2=="/"{print $4; exit}' /proc/mounts 2>/dev/null || true)"
 case "$_ndi_opts" in ro | ro,*) _ndi_ro=1 ;; esac
@@ -508,14 +652,17 @@ trap '_ndi_restore_ro || true' EXIT
 if [ "$_ndi_ro" = 1 ]; then
   mount -o remount,rw /
 fi
-ndi_discovery_write_config "$_ndi_dir" "$_ndi_ips"
+ndi_discovery_cambox_apply_plan "$_ndi_dir" "$_ndi_dropin" "$_ndi_plan"
 sync
 if ! _ndi_restore_ro; then
   trap - EXIT
   exit 1
 fi
 trap - EXIT
-echo "OK: $_ndi_target rewritten (networks.ips=$_ndi_ips); restart camera-box.service to load it"
+if [ "$_ndi_had_dropin" = 1 ] && [ ! -e "$_ndi_dropin" ]; then
+  systemctl daemon-reload
+fi
+echo "OK: ${_ndi_plan} done -- this cambox carries no networks.ips now (mDNS only); restart camera-box.service to load it"
 NDI_APPLY
 }
 
@@ -525,8 +672,8 @@ NDI_APPLY
 #   bash scripts/lib/ndi-discovery.sh --ips  [resolve|pinned]
 #   bash scripts/lib/ndi-discovery.sh --json [resolve|pinned]
 #   bash scripts/lib/ndi-discovery.sh --cambox-ips            (the FORBIDDEN set, issue 1389)
-#   bash scripts/lib/ndi-discovery.sh --cambox-apply [resolve|pinned] > apply.sh
-#        (the on-box cambox program, then: ssh root@<cambox> bash -s < apply.sh)
+#   bash scripts/lib/ndi-discovery.sh --cambox-apply > apply.sh
+#        (the on-box cambox program that strips the list, then: ssh root@<cambox> bash -s < apply.sh)
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   set -euo pipefail
   case "${1:-}" in
@@ -534,12 +681,11 @@ if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
     --json) _ndi_ips="$(ndi_discovery_sender_ips "${2:-resolve}")"; ndi_discovery_config_json "$_ndi_ips" ;;
     --cambox-ips) _ndi_cams="$(ndi_discovery_cambox_ips)"; printf '%s\n' "$_ndi_cams" ;;
     --cambox-apply)
-      _ndi_ips="$(ndi_discovery_sender_ips "${2:-resolve}")"
-      _ndi_prog="$(ndi_discovery_cambox_apply_remote_snippet "$_ndi_ips")"
+      _ndi_prog="$(ndi_discovery_cambox_apply_remote_snippet)"
       printf '%s\n' "$_ndi_prog"
       ;;
     *)
-      echo "usage: $0 --ips|--json [resolve|pinned] | --cambox-ips | --cambox-apply [resolve|pinned]" >&2
+      echo "usage: $0 --ips|--json [resolve|pinned] | --cambox-ips | --cambox-apply" >&2
       exit 2
       ;;
   esac
