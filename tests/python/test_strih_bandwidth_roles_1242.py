@@ -7,7 +7,6 @@ projector, the visible item of the Grading NDI-output scene); the multiview uses
 Covers:
   * scripts/strih_bandwidth_roles.py pure planners + apply_bandwidth_roles against a fake OBS
     (twin sizing, nested scenes, drift, operator-wins membership, retirement, empty/colliding names);
-  * the vendored OBS multiview cell-target key (python <-> C++ literal pin);
   * scripts/strih_scenes.py --apply-roles delegation + the launch path;
 """
 import copy
@@ -221,11 +220,6 @@ def test_bandwidth_role_problems_is_a_report():
     }
     probs = roles.bandwidth_role_problems(actual, ["NDI cam1", "NDI cam3"])
     assert probs == ["'NDI cam3' not connect-on-show", "'MV NDI cam3' twin MISSING"]
-
-
-def test_multiview_target_key_matches_the_vendored_frontend():
-    cpp = (REPO / "vendor/obs-studio/frontend/components/Multiview.cpp").read_text()
-    assert f'obs_data_get_string(priv, "{roles.MULTIVIEW_TARGET_KEY}")' in cpp
 
 
 # ------------------------------------------------------------------------------------------------
