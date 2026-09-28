@@ -180,7 +180,9 @@ elif act == "remove":
 
 FAKE_SSHPASS = r'''#!/usr/bin/env bash
 set -euo pipefail
-printf 'sshpass' >> "$FAKE_LOG"; printf ' %q' "$@" >> "$FAKE_LOG"; printf '\n' >> "$FAKE_LOG"
+# One append per line: the strih and stream decodes run concurrently, and three separate appends
+# interleave between the two processes on a slow runner (the line loses its arguments).
+line="$(printf 'sshpass'; printf ' %q' "$@")"; printf '%s\n' "$line" >> "$FAKE_LOG"
 case "$*" in
   *"systemctl is-active cam2-painter"*)
     n=$(( $(cat "$FAKE_STATE/count-probe" 2>/dev/null || echo 0) + 1 ))
@@ -207,7 +209,8 @@ printf '{"free_bytes": %s}\n' "${FAKE_FREE_BYTES:-500000000000}"
 
 FAKE_DECODE = r'''#!/usr/bin/env bash
 set -euo pipefail
-printf 'decode %s' "$(basename "$0")" >> "$FAKE_LOG"; printf ' %q' "$@" >> "$FAKE_LOG"; printf '\n' >> "$FAKE_LOG"
+# One append per line (see FAKE_SSHPASS): the two decodes run concurrently.
+line="$(printf 'decode %s' "$(basename "$0")"; printf ' %q' "$@")"; printf '%s\n' "$line" >> "$FAKE_LOG"
 ldir=""; out=""; prev=""
 for a in "$@"; do
   [ "$prev" = "--local-out-dir" ] && ldir="$a"
