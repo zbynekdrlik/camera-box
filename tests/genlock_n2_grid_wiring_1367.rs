@@ -6,9 +6,10 @@
 //! this pins where it is called from and what the release does with the pick: the ONE branch at
 //! the top of `genlock_release_tick` (an N>=2 source never reaches the boundary conveyor), the erase
 //! into `genlock_dropped_due`, the `n2_early=` counter, the boundary + consumed + last-frame writes,
-//! the video-delay tracker at the scheduled tick, and the late/benign hold split — and that the
-//! N>=2 boundary conveyor pieces (the #726 multi-consume, the #1161 ACQUIRE bracket) are gone.
-//! Mirrored in both `windows-genlock*.yml` pwsh anchor steps.
+//! the video-delay tracker at the scheduled tick, and the late/benign hold split — that the
+//! N>=2 boundary conveyor pieces (the #726 multi-consume, the #1161 ACQUIRE bracket) are gone, and
+//! that the FIFO drop-cap budgets the grid age of an N>=2 source. Mirrored in both
+//! `windows-genlock*.yml` pwsh anchor steps.
 
 use std::path::PathBuf;
 
@@ -180,4 +181,47 @@ fn n2_early_is_on_the_audit_line_and_the_source_1367() {
             "`n2_early=` collides with `{other}`"
         );
     }
+}
+
+/// Review finding (D1): the grid release keeps `50 ms + pin` of frames queued (rounded up to the
+/// source grid) plus one canvas interval of arrivals, so an N>=2 source's FIFO drop-cap must add
+/// that headroom to the pin's own frame budget — else a deep N>=2 pin (the stream `Zaloha kamera`
+/// at 1000 ms) sits on the cap and every push force-drains its whole delay line. The headroom
+/// itself is held by the parity gate; this pins that the cap adds it, only for a confirmed N>=2
+/// source, before the depth max.
+#[test]
+fn the_drop_cap_budgets_the_grid_age_of_an_n2_source_1367() {
+    let src = squish(&read(OBS_SOURCE));
+    let decl = "static inline uint32_t genlock_n2_drop_cap_extra_frames(uint32_t fps_num, uint32_t fps_den);";
+    assert_eq!(
+        src.matches(decl).count(),
+        1,
+        "{OBS_SOURCE}: issue 1367 D1 — genlock_source_drop_cap sits above the genlock_n2_* block, so \
+         the headroom helper needs its one forward declaration"
+    );
+    let cap = body_after(
+        &src,
+        "static size_t genlock_source_drop_cap(const obs_source_t *source) {",
+    );
+    let add = "if (source->genlock_last_known_n >= 2) { const uint32_t extra = \
+               genlock_n2_drop_cap_extra_frames(fps_num, fps_den); latency_frames = extra > \
+               UINT32_MAX - latency_frames ? UINT32_MAX : latency_frames + extra; }";
+    let at = cap.find(add).unwrap_or_else(|| {
+        panic!(
+            "{OBS_SOURCE}: issue 1367 D1 — genlock_source_drop_cap no longer adds the N>=2 grid-age \
+             headroom (saturating) to a confirmed N>=2 source's frame budget"
+        )
+    });
+    let max = cap
+        .find("if (latency_frames > depth) depth = latency_frames;")
+        .expect("the depth max of genlock_source_drop_cap");
+    assert!(
+        at < max,
+        "the headroom must be in the budget before the depth max"
+    );
+    assert!(
+        cap.find("if (canvas_frames > latency_frames) latency_frames = canvas_frames;")
+            .is_some_and(|c| c < at),
+        "the headroom is added after the canvas-rate budget, so it counts once"
+    );
 }

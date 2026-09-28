@@ -2,16 +2,16 @@
 //!
 //! `src/genlock_n2_grid.rs` is the Tier-0 authority; the contiguous `genlock_n2_*` block in
 //! `vendor/obs-studio/libobs/obs-source.c` is the production port. This gate lifts that block
-//! VERBATIM (from `struct genlock_n2_pick {` to the end of `genlock_n2_select`) plus its four
-//! `#define`s, compiles it standalone under `-Werror` against the REAL `obs-genlock-grid.h` and the
-//! minimal `obs_source_t` stub of the #1003 gate, runs it over a spread of vectors, and requires
-//! byte-identical results from the Rust authority — the tick instant, the target stamp, and the
-//! pick (index + kind). Same discipline as `tests/genlock_relock_selection_parity.rs`; it FAILS
+//! VERBATIM (from `struct genlock_n2_pick {` to the end of `genlock_n2_select`) plus the five
+//! `#define`s it reads, compiles it standalone under `-Werror` against the REAL `obs-genlock-grid.h`
+//! and the minimal `obs_source_t` stub of the #1003 gate, runs it over a spread of vectors, and
+//! requires byte-identical results from the Rust authority — the tick instant, the target stamp,
+//! the pick (index + kind) and the drop-cap headroom. Same discipline as `tests/genlock_relock_selection_parity.rs`; it FAILS
 //! LOUDLY rather than skipping when no C compiler is present.
 
 use camera_box::genlock_grid::{grid_advance_ns, per_second_floor, UNITS_100NS_PER_SECOND};
 use camera_box::genlock_n2_grid::{
-    n2_select, n2_source_interval_ns, n2_target_stamp_ns, n2_tick_ns,
+    n2_drop_cap_extra_frames, n2_select, n2_source_interval_ns, n2_target_stamp_ns, n2_tick_ns,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -54,6 +54,7 @@ fn prelude() -> String {
         "GENLOCK_N2_HOLD",
         "GENLOCK_N2_ON_TARGET",
         "GENLOCK_N2_EARLY",
+        "GENLOCK_MAX_SOURCE_FPS",
     ]
     .iter()
     .map(|name| lift_define(name))
@@ -268,5 +269,70 @@ fn c_n2_select_matches_the_rust_authority_1367() {
     assert!(
         kinds.iter().all(|&k| k > 5),
         "every kind must be exercised (hold, on target, early): {kinds:?}"
+    );
+}
+
+/// `(fps_num, fps_den)` of the canvas rates, the degenerate ones and the u32 edges.
+fn drop_cap_vectors() -> Vec<(u32, u32)> {
+    let mut v = vec![
+        (30, 1),
+        (30_000, 1001),
+        (25, 1),
+        (60, 1),
+        (24_000, 1001),
+        (60_000, 1001),
+        (50, 1),
+        (1, 1),
+        (0, 1),
+        (0, 0),
+        (30, 0),
+        (u32::MAX, 1),
+        (1, u32::MAX),
+        (u32::MAX, u32::MAX),
+    ];
+    for num in [7u32, 29, 31, 59, 61, 119, 120, 240] {
+        for den in [1u32, 2, 3, 1001] {
+            v.push((num, den));
+        }
+    }
+    v
+}
+
+#[test]
+fn c_n2_drop_cap_extra_matches_the_rust_authority_1367() {
+    let vs = drop_cap_vectors();
+    let mut c = prelude();
+    c.push_str(&lift_n2_block());
+    c.push_str("int main(void){\n");
+    for (num, den) in &vs {
+        c.push_str(&format!(
+            "    printf(\"%u\\n\", genlock_n2_drop_cap_extra_frames({num}u, {den}u));\n"
+        ));
+    }
+    c.push_str("    return 0;\n}\n");
+    let out = compile_and_run_c("genlock_n2_drop_cap_parity_1367", &c);
+    assert_eq!(out.len(), vs.len(), "the harness printed the wrong count");
+    let mut diffs = Vec::new();
+    let mut distinct = std::collections::BTreeSet::new();
+    for (i, ((num, den), got_c)) in vs.iter().zip(&out).enumerate() {
+        let want = n2_drop_cap_extra_frames(*num, *den);
+        distinct.insert(want);
+        if *got_c != want.to_string() {
+            diffs.push(format!(
+                "  vector {i}: fps {num}/{den} -> C `{got_c}`, Rust `{want}`"
+            ));
+        }
+    }
+    assert!(
+        diffs.is_empty(),
+        "issue 1367 D1: the vendored C N>=2 drop-cap headroom DIVERGED from the Tier-0 Rust \
+         authority on {} of {} vectors:\n{}",
+        diffs.len(),
+        vs.len(),
+        diffs.join("\n")
+    );
+    assert!(
+        distinct.len() > 8,
+        "the vectors must exercise many headroom values: {distinct:?}"
     );
 }

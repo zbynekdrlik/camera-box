@@ -149,6 +149,17 @@ pub fn n2_select(queue_stamps: &[u64], target_ns: u64, source_interval_ns: u64) 
     N2Pick { kind, index }
 }
 
+/// The arrival rate the FIFO drop-cap budgets at: every rig source feeds at most 60 fps. Mirror
+/// of the C `GENLOCK_MAX_SOURCE_FPS` (obs-source.c) and the probe `genlock::GENLOCK_MAX_SOURCE_FPS`.
+pub const N2_MAX_SOURCE_FPS: u32 = 60;
+
+/// The frames an N>=2 source's FIFO drop-cap (`genlock_source_drop_cap`, obs-source.c) adds on top
+/// of its pin's own frame budget, at the canvas rate `fps_num / fps_den`.
+pub fn n2_drop_cap_extra_frames(fps_num: u32, fps_den: u32) -> u32 {
+    let _ = (fps_num, fps_den);
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,6 +394,106 @@ mod tests {
         assert!(
             cases > 300,
             "the sweep must exercise the on-target case: {cases}"
+        );
+    }
+
+    /// The drop-cap headroom at the canvas rates: three 60 fps frames of the 50 ms age base, one
+    /// canvas interval of 60 fps arrivals (rounded up), and one frame for the pin budget's
+    /// round-to-nearest against the target's round-up.
+    #[test]
+    fn drop_cap_extra_frames_at_the_canvas_rates_1367() {
+        assert_eq!(
+            n2_drop_cap_extra_frames(30, 1),
+            6,
+            "the 30 fps strih/stream canvas"
+        );
+        assert_eq!(
+            n2_drop_cap_extra_frames(30_000, 1001),
+            7,
+            "29.97: one canvas interval is just over two 60 fps frames"
+        );
+        assert_eq!(n2_drop_cap_extra_frames(25, 1), 7);
+        assert_eq!(n2_drop_cap_extra_frames(60, 1), 5);
+        assert_eq!(
+            n2_drop_cap_extra_frames(0, 1),
+            0,
+            "no video info: nothing to budget"
+        );
+    }
+
+    /// The C `genlock_source_drop_cap` of a genlock source at `pin_ms` on the 30 fps canvas
+    /// (preload 1): the pin's frames at the 60 fps arrival rate or at the canvas rate, whichever is
+    /// more (both rounded to nearest), plus [`n2_drop_cap_extra_frames`] for an N>=2 source, plus
+    /// the 4-frame reserve; never below MAX_ASYNC_FRAMES (30), never above
+    /// GENLOCK_PRELOAD_MAX + reserve (132).
+    fn c_drop_cap(pin_ms: u64, n2: bool) -> u64 {
+        let arrival = (pin_ms * 60 + 500) / 1000;
+        let canvas = (pin_ms * 30 + 500) / 1000;
+        let mut latency = arrival.max(canvas);
+        if n2 {
+            latency += n2_drop_cap_extra_frames(30, 1) as u64;
+        }
+        (latency.max(1) + 4).clamp(30, 132)
+    }
+
+    /// The deepest the queue of a 60-into-30 source at `pin_ms` gets just before a frame is pushed
+    /// (the C overrun check is `async_frames.num >= cap` at the push). Zero arrival lag — each frame
+    /// arrives at its own stamp, the deepest any queue can be, since a lag only makes it shallower
+    /// — and a push lands before the tick of the same instant.
+    fn zero_lag_peak_before_push(pin_ms: u64) -> u64 {
+        let pin = pin_ms * 1_000_000;
+        let slots = (pin_ms + 1_100) * 60 / 1000;
+        let mut q: Vec<u64> = Vec::new();
+        let mut peak = 0u64;
+        for k in 0..slots {
+            let g = grid_advance_ns(S, k, I60);
+            peak = peak.max(q.len() as u64);
+            q.push(sender_stamp(g + 3));
+            if k % 2 == 0 {
+                let t = n2_tick_ns(g, g, I30, true);
+                assert_eq!(t, g, "slot {k} is a 30 fps canvas tick");
+                let pick = n2_select(&q, n2_target_stamp_ns(t, pin, I30, 2), I60);
+                if pick.kind != N2Kind::Hold {
+                    q.drain(..=pick.index);
+                }
+            }
+        }
+        peak
+    }
+
+    /// Review finding (D1): the grid release keeps `50 ms + pin` of frames queued, rounded up to the
+    /// source grid, plus one canvas interval of arrivals. At every pin up to the 2000 ms per-source
+    /// maximum, that zero-lag queue plus the 4-frame burst reserve must stay under the drop-cap —
+    /// the pin-only cap it replaces overruns every deep pin (the stream `Zaloha kamera`, 60 into
+    /// 30 at 1000 ms, would force-drain its whole delay line on every push).
+    #[test]
+    fn the_drop_cap_holds_the_grid_queue_and_its_burst_reserve_at_every_pin_1367() {
+        let mut old_overruns = 0;
+        for pin_ms in 3..=2000u64 {
+            let peak = zero_lag_peak_before_push(pin_ms);
+            let cap = c_drop_cap(pin_ms, true);
+            assert!(
+                peak + 4 < cap,
+                "pin {pin_ms} ms: a {peak}-frame queue plus the 4-frame reserve reaches the \
+                 N>=2 drop-cap {cap}"
+            );
+            if peak >= c_drop_cap(pin_ms, false) {
+                old_overruns += 1;
+            }
+        }
+        for pin_ms in [500u64, 987, 1000, 2000] {
+            let peak = zero_lag_peak_before_push(pin_ms);
+            assert!(
+                peak >= c_drop_cap(pin_ms, false),
+                "pin {pin_ms} ms: the pin-only cap {} must overrun the {peak}-frame grid queue \
+                 (the anti-tautology)",
+                c_drop_cap(pin_ms, false)
+            );
+        }
+        assert!(
+            old_overruns > 1400,
+            "the pin-only cap overruns every pin whose budget is over the 30-frame floor: \
+             {old_overruns}"
         );
     }
 
