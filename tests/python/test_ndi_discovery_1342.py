@@ -316,6 +316,24 @@ class ReceiverConfig(unittest.TestCase):
             self.assertTrue(r.stdout.startswith("FAIL:"), f"{text!r} must FAIL, got {r.stdout!r}")
             self.assertIn(facet, r.stdout, f"{text!r} verdict must name {facet!r}: {r.stdout!r}")
 
+    def test_verdict_oneline_joins_the_facets_1389(self):
+        # ONE helper turns a verdict into a check's single FAIL line, for verify-device (an) AND
+        # verify-strih item 34: facets joined by '; ', the `FAIL: ` prefix dropped, blank lines skipped.
+        r = _lib('ndi_discovery_verdict_oneline "$(printf \'FAIL: a b\\nFAIL: c; d\\n\\n\')"')
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, "a b; c; d")
+        self.assertEqual(_lib('ndi_discovery_verdict_oneline "FAIL: one"').stdout, "one")
+        self.assertEqual(_lib('ndi_discovery_verdict_oneline ""').stdout, "")
+
+    def test_verdict_fails_a_non_string_list_or_discovery_1389(self):
+        pinned = _pinned()
+        arr = json.dumps({"ndi": {"networks": {"ips": pinned.split(",")}}})
+        r = _lib(f"ndi_discovery_config_verdict '{arr}' '{pinned}' ''")
+        self.assertIn("FAIL", r.stdout, "a list must be the comma-separated string the SDK documents")
+        disc = json.dumps({"ndi": {"networks": {"ips": pinned, "discovery": False}}})
+        r = _lib(f"ndi_discovery_config_verdict '{disc}' '{pinned}' ''")
+        self.assertIn("networks.discovery", r.stdout, "a non-string discovery value is still set")
+
     def test_verdict_grades_against_an_explicit_required_list(self):
         text = json.dumps({"ndi": {"networks": {"ips": "10.0.0.1"}}})
         self.assertEqual(_lib(f"ndi_discovery_config_verdict '{text}' 10.0.0.1").stdout.strip(), "ok")
@@ -556,6 +574,7 @@ class VerifyDeviceAnBehaviour(unittest.TestCase):
                             f"[Service]\nEnvironment=NDI_CONFIG_DIR={dir_}\n")
             r = self._run(tmp)
             line = next(ln for ln in r.stdout.splitlines() if ln.startswith("FAIL NDI receiver config"))
+            self.assertIn("on this cambox: networks.ips lists 10.77.9.202 --", line)
             self.assertIn("issue 1389); networks.discovery=", line, "one '; ' between two facets")
             self.assertIn("is set (a configured sender stops mDNS) -- from dev1", line)
             self.assertNotIn("FAIL:", line)
@@ -695,6 +714,19 @@ class VerifyStrihItem34Behaviour(unittest.TestCase):
             r = self._run(tmp)
             self.assertIn("FAILS=2", r.stdout, r.stdout)
             self.assertIn(_expected_pinned_ips()[-1], r.stdout)
+
+    def test_the_fail_line_keeps_each_facet_apart_1389(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._configure(tmp)
+            with open(os.path.join(tmp, "home", ".ndi", "ndi-config.v1.json"), "w") as fh:
+                fh.write('{"ndi": {"networks": {"ips": "10.77.9.61", "discovery": "10.77.9.200"}}}\n')
+            r = self._run(tmp, pre='ndi_discovery_resolve_ipv4() { return 0; }\n')
+            line = next(ln for ln in r.stdout.splitlines() if ln.startswith("FAIL (ndi-discovery)"))
+            self.assertIn("ndi-config.v1.json: networks.discovery=", line)
+            self.assertIn("need only networks.ips); networks.ips lacks", line)
+            self.assertIn("re-provision); networks.ips lists the cambox", line)
+            self.assertIn("re-provision) -- re-run setup-strih.sh step 4b", line)
+            self.assertNotIn("FAIL:", line)
 
     def test_both_configs_still_listing_the_camboxes_fail_1389(self):
         with tempfile.TemporaryDirectory() as tmp:

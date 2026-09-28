@@ -462,6 +462,17 @@ class CamboxApply1389(unittest.TestCase):
             self.assertTrue(os.path.exists(dropin))
             self.assertIn("nothing written", r.stdout)
 
+    def test_without_python3_a_non_string_list_is_backed_up_and_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = json.dumps({"ndi": {"groups": {"recv": "Public"}, "networks": {"ips": ["10.77.9.61"]}}})
+            path, dropin = self._seed(tmp, conf)
+            r, calls, _ = self._run(tmp, extra_stubs="python3() { return 1; }\n")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"])
+            self.assertFalse(os.path.exists(path))
+            baks = [f for f in self._listing(path) if f.startswith("ndi-config.v1.json.bak-")]
+            self.assertEqual(len(baks), 1, self._listing(path))
+
     def test_a_rw_root_is_never_remounted(self):
         with tempfile.TemporaryDirectory() as tmp:
             path, _ = self._seed(tmp, self._canonical(tmp, ISSUE_1342_LIST))
