@@ -1237,6 +1237,9 @@ jobs:
           if ($src -notmatch [regex]::Escape('if (clamped > prev) source->genlock_locked_next_boundary_ns = 0;')) {
             Write-Error "obs-source.c: obs_source_set_genlock_latency_ms no longer forces an N==1 re-acquire on a pin RISE -- a raised N==1 pin can never move the presented frame deeper (#1161)"; exit 1
           }
+          if (([regex]::Matches($src, [regex]::Escape('static inline uint32_t genlock_n2_drop_cap_extra_frames(uint32_t fps_num, uint32_t fps_den);'))).Count -ne 1 -or $src -notmatch [regex]::Escape('if (source->genlock_last_known_n >= 2) { const uint32_t extra = genlock_n2_drop_cap_extra_frames(fps_num, fps_den); latency_frames = extra > UINT32_MAX - latency_frames ? UINT32_MAX : latency_frames + extra; }')) {
+            Write-Error "obs-source.c: genlock_source_drop_cap no longer budgets the N>=2 grid age (the forward-declared headroom helper, added saturating for a confirmed N>=2 source) -- a deep N>=2 pin sits on the cap and every burst force-drains its delay line (issue 1367 D1)"; exit 1
+          }
           if ($src -match [regex]::Escape('mature_deadline')) {
             Write-Error "obs-source.c: the dead N>=2 boundary multi-consume is back (issue 1367 D1)"; exit 1
           }

@@ -155,9 +155,23 @@ pub const N2_MAX_SOURCE_FPS: u32 = 60;
 
 /// The frames an N>=2 source's FIFO drop-cap (`genlock_source_drop_cap`, obs-source.c) adds on top
 /// of its pin's own frame budget, at the canvas rate `fps_num / fps_den`.
+///
+/// The cap budgets the pin as `round(pin × 60 / 1000)` frames. The grid release presents the frame
+/// `GENLOCK_N2_AGE_BASE_NS + pin` old ROUNDED UP to its source slot and keeps every newer arrived
+/// frame queued until the next tick, so at zero arrival lag the queue just before a push holds
+/// `ceil((50 ms + pin) / source interval) + 1` frames. The headroom covers that: the age base at the
+/// 60 fps arrival rate (3 frames), one canvas interval of 60 fps arrivals rounded up (2 at 30 fps)
+/// and one frame for the pin budget's round-to-nearest against the target's round-up — 6 at the
+/// 30 fps canvas, so the cap keeps its 4-frame burst reserve above the queue at every pin
+/// (`GENLOCK_DROP_CAP_RESERVE`). `fps_num == 0` (no video info) adds nothing; the sum saturates.
 pub fn n2_drop_cap_extra_frames(fps_num: u32, fps_den: u32) -> u32 {
-    let _ = (fps_num, fps_den);
-    0
+    if fps_num == 0 {
+        return 0;
+    }
+    let fps = N2_MAX_SOURCE_FPS as u64;
+    let base_frames = (GENLOCK_N2_AGE_BASE_NS * fps).div_ceil(1_000_000_000);
+    let tick_frames = (fps * fps_den as u64).div_ceil(fps_num as u64);
+    u32::try_from(base_frames + tick_frames + 1).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]

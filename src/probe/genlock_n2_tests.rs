@@ -200,3 +200,22 @@ fn n2_hold_is_benign_unlocked_and_late_when_locked_1367() {
     );
     assert_eq!(q.len(), 3, "a hold consumes nothing");
 }
+
+/// The N>=2 drop-cap headroom (`genlock_n2_grid::n2_drop_cap_extra_frames`) budgets at the SAME
+/// arrival rate as the probe drop-cap depth ([`genlock_latency_depth_frames`]): one 60 fps
+/// constant, mirrored three times (the C `GENLOCK_MAX_SOURCE_FPS`, here, the crate root).
+#[test]
+fn n2_drop_cap_headroom_budgets_at_the_probe_arrival_rate_1367() {
+    assert_eq!(
+        crate::genlock_n2_grid::N2_MAX_SOURCE_FPS,
+        GENLOCK_MAX_SOURCE_FPS
+    );
+    // A 60-into-30 source at the per-source maximum still fits under the absolute cap maximum.
+    let deepest = genlock_latency_depth_frames(GENLOCK_SOURCE_LATENCY_MS_MAX, 30, 1)
+        + crate::genlock_n2_grid::n2_drop_cap_extra_frames(30, 1);
+    assert_eq!(
+        genlock_drop_cap(true, deepest),
+        deepest + GENLOCK_DROP_CAP_RESERVE,
+        "the deepest N>=2 budget {deepest} must not be clamped by the absolute maximum"
+    );
+}

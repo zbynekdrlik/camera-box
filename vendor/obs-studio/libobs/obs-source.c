@@ -5281,6 +5281,10 @@ static bool genlock_video_fps(uint32_t *fps_num, uint32_t *fps_den)
 	return false;
 }
 
+/* camera-box issue 1367 D1: the N>=2 grid-age headroom, defined with the genlock_n2_* block below
+ * (it reads GENLOCK_N2_AGE_BASE_NS). */
+static inline uint32_t genlock_n2_drop_cap_extra_frames(uint32_t fps_num, uint32_t fps_den);
+
 /* Per-source async-FIFO drop-cap (#97). A NON-genlock source keeps libobs' fixed
  * MAX_ASYNC_FRAMES (those sources never deliberately buffer). A genlock source's cap
  * = max(MAX_ASYNC_FRAMES, preload + RESERVE), capped at GENLOCK_PRELOAD_MAX + RESERVE.
@@ -5331,6 +5335,17 @@ static size_t genlock_source_drop_cap(const obs_source_t *source)
 					   lat_den);
 			if (canvas_frames > latency_frames)
 				latency_frames = canvas_frames;
+			/* camera-box issue 1367 D1: an N>=2 source's grid release holds the frame
+			 * GENLOCK_N2_AGE_BASE_NS + pin old, rounded up to its source slot, and every newer
+			 * frame until the next tick -- budget that too, or a deep N>=2 pin (the stream
+			 * 'Zaloha kamera', 60 into 30 at 1000 ms) sits on the cap and every burst force-drains
+			 * its whole delay line. Only a CONFIRMED multiple (the sticky latch, written under this
+			 * same async_mutex by the release tick); an N==1 source keeps the historic cap. */
+			if (source->genlock_last_known_n >= 2) {
+				const uint32_t extra = genlock_n2_drop_cap_extra_frames(fps_num, fps_den);
+				latency_frames = extra > UINT32_MAX - latency_frames ? UINT32_MAX
+										     : latency_frames + extra;
+			}
 		}
 		if (latency_frames > depth)
 			depth = latency_frames;
@@ -6938,6 +6953,24 @@ static inline uint64_t genlock_n2_target_stamp_ns(uint64_t tick_ns, uint64_t pin
 	const uint64_t age = pin_ns > UINT64_MAX - GENLOCK_N2_AGE_BASE_NS ? UINT64_MAX : GENLOCK_N2_AGE_BASE_NS + pin_ns;
 	const uint64_t back = tick_ns > age ? tick_ns - age : 0;
 	return genlock_grid_floor_ns(back, genlock_n2_source_interval_ns(canvas_interval_ns, n));
+}
+
+/* The frames genlock_source_drop_cap adds for an N>=2 source on top of the pin's own
+ * round(pin x 60 / 1000) budget. The grid release keeps the target (GENLOCK_N2_AGE_BASE_NS + pin
+ * old, rounded UP to its source slot) and every newer frame queued until the next tick, so at zero
+ * arrival lag the queue before a push holds ceil((50 ms + pin) / source interval) + 1 frames: the
+ * age base at the 60 fps arrival rate (3), one canvas interval of 60 fps arrivals rounded up (2 at
+ * 30 fps) and one frame for the pin budget's round-to-nearest against the target's round-up -- 6 at
+ * 30 fps, so the cap keeps its GENLOCK_DROP_CAP_RESERVE burst reserve at every pin. fps_num == 0
+ * adds nothing; the sum saturates. */
+static inline uint32_t genlock_n2_drop_cap_extra_frames(uint32_t fps_num, uint32_t fps_den)
+{
+	if (fps_num == 0)
+		return 0;
+	const uint64_t base_frames = (GENLOCK_N2_AGE_BASE_NS * GENLOCK_MAX_SOURCE_FPS + 999999999ULL) / 1000000000ULL;
+	const uint64_t tick_frames = ((uint64_t)GENLOCK_MAX_SOURCE_FPS * fps_den + fps_num - 1) / fps_num;
+	const uint64_t extra = base_frames + tick_frames + 1;
+	return extra > UINT32_MAX ? UINT32_MAX : (uint32_t)extra;
 }
 
 /* The pick: the last frame of the leading queue run stamped at most half a source interval past the
