@@ -4,6 +4,7 @@ paths:
   - "scripts/audio_mixer_decision.py"
   - "systemd/audio-mixer-alert-watchdog.*"
   - "tests/python/test_audio_mixer_*_1381.py"
+  - "tests/python/test_audio_mixer_*_1385.py"
   - "tests/fixtures/audio_mixer_1381/**"
 ---
 
@@ -19,7 +20,7 @@ audio-lag (issue 1226): box facets on `:8899`, a pure python decision, a bash or
 
 | Facet group (gather) | Log line | Arm | Pages |
 |---|---|---|---|
-| `audio_mixer_ticks` / `_ticks_over` / `_tick_ms` / `_window_ms` / `_age_s` | `audio-stall #1367: ... ticks=N ticks_over=M tick_ms=21.3` (obs-audio.c, one per dump) | MIXER | BEHIND: `abs(ticks - 2812.5) > 5`; OVERLOADED: `ticks_over > 30` |
+| `audio_mixer_ticks` / `_ticks_over` / `_tick_ms` / `_window_ms` / `_age_s` + `obs_log_head_age_s` | `audio-stall #1367: ... ticks=N ticks_over=M tick_ms=21.3` (obs-audio.c, one per dump) | MIXER | BEHIND: `abs(ticks - 2812.5) > 5`; OVERLOADED: `ticks_over > 30`; STALLED: dump age > 180 s AND log head age <= 60 s (issue 1385) |
 | `vban_pacer_loss_events` / `_loss_ms` / `_loss_dest` / `vban_pacer_age_s` | `[obs-vban] obs-vban pacing: ...` (every 10 s per output) | VBAN | VBAN_LOSS: any loss counter moved in the window |
 
 Both are parsed from the TAIL of the #1222 bounded read, in the server's one `obs_log_parse`
@@ -42,11 +43,64 @@ its own rate and an unknown tick length is UNKNOWN).
   `tick_gap_max_ms=0.0`), so the facet needs TWO dumps in the tail. One dump → absent → UNKNOWN.
 - A genuine stall still moves the count: a stall across the dump boundary reads short in one window
   and a surplus in the next, both BEHIND. A surplus IS the mixer catching up (27.9: 3857 at 08:00).
-- **STALE** (newest dump > 180 s behind the log head: the audio thread stopped dumping while the log
-  advanced) is log-only, the audio-lag sibling's rule. On resolume a wedged mixer still pages
-  through VBAN_LOSS, because the pacer thread keeps logging. On a box without VBAN outputs a
-  stopped audio thread is not paged by this watchdog (nor by audio-lag, whose STALE is log-only
-  too); promoting it was reported to the supervisor as a follow-up candidate.
+- **A stopped audio thread pages STALLED (issue 1385); without proof OBS is still logging it stays
+  STALE, log-only.** See the next section.
+
+## STALLED = the dump is old AND the log head is live NOW (issue 1385)
+
+A stopped audio thread stops dumping while the rest of OBS keeps logging. On a box without an
+obs-vban output (stream, strih-lx) nothing else in this watchdog sees it, so STALLED pages it
+through the same arm as BEHIND (2-pass confirm, `watchdog_notify_key "audio-mixer-<box>"`, the
+arm + box throttle signature).
+
+- **The dump age alone is not enough.** `audio_mixer_age_s` is measured behind the LOG HEAD, like
+  every `*_age_s` facet on `:8899`. When OBS dies or hangs the log stops, and the ages freeze at
+  whatever they were, so a stale dump on a dead OBS would page forever. obs-liveness /
+  bundle-state own a dead OBS; this watchdog must not double-page it.
+- **The proof is `obs_log_head_age_s`** (`bundle_state_gather.obs_log_head_age_s_from_log`): the
+  box's own local wall clock minus the newest timestamped line of the tail. OBS stamps every line
+  with its local `HH:MM:SS.mmm`, and the gather runs on the same box, so it is one clock; the server
+  reads it right AFTER the log (`local_seconds_of_day`). A genlock OBS logs every ~5 s
+  (program-render-audit), so a live log head is a few seconds old. STALLED needs <= 60 s
+  (`AUDIO_MIXER_LOG_LIVE_S`).
+- **Facets that looked like proof but are not** (read live on 28.9, read-only):
+  `program_render_lagged_age_s` is the age of the WORST `lagged` window in the tail, not recency —
+  772 s on strih-lx and 1287 s on resolume, both healthy. `ndi_input_latency` (the one OBS-WS fact)
+  is absent on resolume, `obs_process_count` is Windows-only. Neither says the log advances.
+- **Date-less log.** "Now" is read after the log, so a head AHEAD of it can only be a wall-clock
+  step back: up to 10 s (`LOG_HEAD_CLOCK_SLACK_S`) it reads 0, further ahead it is a previous day's
+  line (+24 h, not live). A log dead for a whole number of days therefore reads live for about 70 s
+  once a day, shorter than one 300 s pass, so the 2-pass confirm never pages on it. Keep
+  slack + `LOG_LIVE_S` below the timer period.
+- **STALLED is decided FIRST, from the age alone.** A stale dump's counts describe a minute long
+  gone, so the old counts are not graded (a stale BEHIND dump reads STALLED). A tick length of an
+  unknown sample rate does not hide it either.
+- **A long session keeps paging.** A 5 MB tail spans about 35-80 min on these boxes (~5-9 MB/h), so
+  a thread dead longer than that would lose its last dumps from the tail and decay to UNKNOWN,
+  ending the time-bucketed re-ping. For a bounded read whose HEAD slice holds a dump (this build
+  dumps), a tail with fewer than two dumps reports only `audio_mixer_age_s`: the newest tail dump's
+  age, or the whole tail span when none is left. A whole-file log (a normal start) and a build
+  without the probe (no dump anywhere) stay absent.
+- **A normal OBS start never stalls.** Fewer than two dumps in a whole-file log = the whole facet
+  absent = UNKNOWN. An audio thread that dies before its second dump in a fresh log is therefore
+  not paged here (a stated residual: the start dump count is absent at a normal start too, so no
+  facet tells the two apart).
+- **The gather must be redeployed** to strih-lx, stream and resolume (the three-file bundle-state
+  server tree, same steps as issue 1381's facets). Until then `obs_log_head_age_s` is absent and the
+  verdict stays STALE, log-only — never a false page.
+
+### Why audio-lag keeps its STALE log-only
+
+`scripts/audio_lag_decision.py` gets the same payload, so the new facet is available to it, but it
+must not page a stopped thread too:
+
+- The `audio-telemetry #800 '<src>'` lines print only for a source with an audio timeline or
+  buffered audio (`obs-audio.c`, `if (tsrc->audio_ts || tsrc->audio_input_buf[0].size)`). Every
+  source going idle stops them with a HEALTHY audio thread, so their staleness is not proof of a
+  stopped thread.
+- When the thread does stop, the `#800` lines and the `audio-stall #1367` dump stop TOGETHER — they
+  are written by the same 60 s block of `audio_callback`. A second pager on it would double-page
+  one fault. This watchdog's STALLED is the one pager for a stopped audio thread.
 
 ## VBAN loss = counter increase inside a 660 s window, per destination
 
@@ -118,6 +172,15 @@ after 06:00:14 (≤ 06:10) and the mixer arm by 06:16 (the onset alternates 22/3
 per minute before 06:05, so a phase on the quiet minutes confirms later). The same replay also runs
 through the REAL bash watchdog `--dry-run` via `AUDIO_MIXER_FETCH_CMD`.
 
+`test_audio_mixer_stalled_1385.py` cuts the control window to a stopped thread: every
+`audio-stall` line after 03:30:00 removed while the pacer keeps logging (the resolume shape of a
+dead audio thread; the pacer thread is separate). The replay gives each pass the box clock = the
+pass time. Every pass phase reads STALLED from ~03:32:30 on and pages by the second pass after it;
+the real bash `--dry-run` fires exactly one `alert_now=1` STALLED in the window. The same cut with
+OBS dying at 03:45 reads STALE from 03:46 on, and a log with no other advancing line never pages.
+The quiet windows and the real onset (the mixer kept dumping while it fell behind) never read
+STALLED.
+
 The other boxes, read-only on 27.9/28.9: the stream box's current log (19:57–00:20, 263 full
 dumps) read ticks=2813 and ticks_over=0 in every dump and has no obs-vban line (VBAN arm UNKNOWN);
 strih-lx's current log (196 dumps, review round 1) read ticks=2813 with ticks_over <= 1.
@@ -153,7 +216,7 @@ strih-lx's current log (196 dumps, review round 1) read ticks=2813 with ticks_ov
 
 ## Tier-0 verify
 
-`python3 -m pytest tests/python/test_audio_mixer_*_1381.py tests/python/test_notify_dedup_key_sweep_1206.py`
+`python3 -m pytest tests/python/test_audio_mixer_*_1381.py tests/python/test_audio_mixer_*_1385.py tests/python/test_notify_dedup_key_sweep_1206.py`
 (gather, decision, replay incl. the bash dry-run, fleet wiring) + `bash -n` / `shellcheck -S warning`
 on the watchdog. No cargo involved. The obs-fleet Rust harness is std-only and runs with plain
 `rustc --test` (`tests/harness_obs_fleet_list_1296.rs`).
