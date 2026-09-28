@@ -121,6 +121,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/av-soak.sh"
 # shellcheck source=scripts/lib/av-restart-matrix.sh
 . "$HERE/lib/av-restart-matrix.sh"
+# shellcheck source=scripts/lib/av-restart-matrix-plan.sh
+. "$HERE/lib/av-restart-matrix-plan.sh"
 
 log() { printf '%s [av-restart-matrix] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
 die() { echo "av-restart-matrix: ERROR: $2" >&2; exit "$1"; }
@@ -324,8 +326,11 @@ STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_DIR="${AV_MATRIX_RUN_DIR:-$HOME/.camera-box/av-restart-matrix/$STAMP}"
 RIG_LEASE_REPO_NAME="${AV_MATRIX_LEASE_REPO:-camera-box-av-restart-matrix}"
 RIG_LEASE_OURS="av-matrix-${STAMP}-$$"
-# one window's upper bound: the soak's own slot (600 s) + its setup/cleanup (~300 s)
-EXPECTED_S="$(av_matrix_expected_duration_s "$N_STEPS" 900 "$SETTLE_S" "$HEALTHY_TIMEOUT_S" "$SUPERVISOR_TIMEOUT_S" "$N_STREAM")"
+# one window's upper bound: the soak's own slot (read from av-soak.sh, the single source, whatever
+# AV_MATRIX_SOAK points at) + 600 s for its setup and cleanup
+SOAK_SLOT_S="$(av_matrix_soak_slot_s "$HERE/av-soak.sh")" || die 3 "cannot read the soak's slot from $HERE/av-soak.sh"
+WINDOW_BOUND_S=$(( SOAK_SLOT_S + 600 ))
+EXPECTED_S="$(av_matrix_expected_duration_s "$N_STEPS" "$WINDOW_BOUND_S" "$SETTLE_S" "$HEALTHY_TIMEOUT_S" "$SUPERVISOR_TIMEOUT_S" "$N_STREAM")"
 LEASE_EXPECTED_AT="$(date -u -d "+${EXPECTED_S} seconds" +%Y-%m-%dT%H:%M:%SZ)"
 
 target_of() {
@@ -337,131 +342,7 @@ target_of() {
   esac
 }
 
-# --- --plan: print every step, touch nothing ---------------------------------------------------------
-
-plan_cmd() { printf '      '; printf '%q ' "$@"; printf '\n'; }
-plan_text() { sed 's/^/      /'; }
-
-print_plan() {
-  local k argv bounds_line
-  bounds_line="$(python3 "$SOAK_DECISION" bounds 2>&1)" || bounds_line="UNREADABLE: $bounds_line"
-  cat <<EOF
-===== av-restart-matrix PLAN (issue 1367) -- nothing below is executed; run with --run =====
-bounds (read from their single sources): ${bounds_line//$'\n'/; }; graded spread: ${AV_SOAK_SPREAD_COLUMNS:-av_spread_ms}
-kinds: ${KINDS} x ${REPEATS} repeats = ${N_RESTARTS} restarts + 1 baseline window (each kind PASS only ${REPEATS}/${REPEATS})
-settle after healthy: ${SETTLE_S} s; healthy bound: ${HEALTHY_TIMEOUT_S} s (polled every ${POLL_S} s); supervisor-step bound: ${SUPERVISOR_TIMEOUT_S} s
-targets:
-EOF
-  for k in $KINDS; do
-    case "$k" in
-      strih-obs) echo "  strih-obs = strih-lx ${STRIH_HOST} (strih-obs.service, the --user unit; $(strih_platform "$STRIH_HOST"))" ;;
-      cambox) echo "  cambox = ${CAMBOX} ${CAMBOX_IP} (camera-box.service)" ;;
-      dantesync) echo "  dantesync = ${DANTE_NODE} ${DANTE_IP} (dantesync.service)" ;;
-      stream-obs) echo "  stream-obs = stream ${STREAM_HOST} (SUPERVISOR step: no session-agnostic path launches the canonical stream OBS)" ;;
-    esac
-  done
-  cat <<EOF
-run dir: ${RUN_DIR}  (matrix.conf, matrix.tsv, w-NN-<kind>-rR/ = one soak run each, report.txt/json, restarted, lease, pid, STOP)
-
-SETUP:
-  1. rig lease (issue 830): rig_lease_acquire repo=${RIG_LEASE_REPO_NAME} run_id=${RIG_LEASE_OURS} job=av-restart-matrix expected_release_at=${LEASE_EXPECTED_AT}
-     a live foreign holder -> refuse (exit 4); the heartbeat is bumped every <= ${KEEPALIVE_S} s for the whole run, also while a window runs
-  2. before EVERY mutation (the baseline window, each restart), read-only:
-     the lease still ours (rig_lease_read_holder_field run_id; lost -> exit 5, the other lease untouched)
-     the rig-busy guard: stray_session_check_assert ${OBS_DIR} ${STRIH_HOST} ${STREAM_HOST} '<step>'
-     a proven idle rig (av_soak_rig_busy_settled: rig-busy-check | av_soak_rig_state.py broadcast = idle; unreadable retried ${BROADCAST_READS}x ${BROADCAST_RETRY_S} s apart)
-       busy / live / unreadable -> nothing is restarted (exit 4 before any change, else 5)
-     TEST mode: the stream program is '${STREAM_DEV_SCENE}' ($(printf '%q ' python3 "$OBS_DIR/obs_phase2.py" program-scene --host "$STREAM_HOST"))
-       AND the cam2 painter emits (ssh root@${PAINTER_IP}: $(av_soak_painter_probe_cmd "$MARKER_LOG"))
-       out of TEST mode -> refused before any change (exit 4), else the run ends with its report
-
-BASELINE -- ONE window = the soak's own one-window run under the matrix's lease:
-EOF
-  av_matrix_window_argv argv "$SOAK" "$(av_matrix_window_dir "$RUN_DIR" 0 baseline 0)" "$RIG_LEASE_OURS" \
-    "${PROBE_BIN_DIR:-}" "${WIN_VERDICT_EXE_LOCAL:-}"
-  plan_cmd "${argv[@]}"
-  cat <<EOF
-      (bash ${HERE}/av-soak.sh --plan --hours 0 prints every step of one window: TEST-mode reads, the
-      connect-on-show hold, the burns, ONE strih-program sweep recorded on strih + stream, the in-place
-      decodes, the merge, its cleanup)
-      graded: python3 ${DECISION} grade-window --window-dir <dir>
-      a baseline that is not PASS stops the matrix before any restart (--keep-going runs them anyway)
-
-PER RESTART, kind by kind, repeat r = 1..${REPEATS} (window dir w-NN-<kind>-rR):
-  a. <run-dir>/STOP? then the guard + the idle proof (2.)
-  b. for cambox / dantesync: the restarted camera's strih receiver, read-only, before the restart
-     (report context, never graded): ssh <STRIH_USER>@${STRIH_HOST}: $(strih_log_remote_cmd linux tail 2000)
-       | genlock_park_state_of 'NDI <cam>' -> parked | connected | unread
-     then restart ONE component:
-EOF
-  for k in $KINDS; do
-    case "$k" in
-      strih-obs)
-        echo "     strih-obs: ssh <STRIH_USER>@${STRIH_HOST}:"
-        av_matrix_restart_remote_cmd strih-obs | plan_text ;;
-      cambox)
-        echo "     cambox: ssh root@${CAMBOX_IP}:"
-        av_matrix_restart_remote_cmd cambox | plan_text ;;
-      dantesync)
-        echo "     dantesync: ssh root@${DANTE_IP}:"
-        av_matrix_restart_remote_cmd dantesync | plan_text ;;
-      stream-obs)
-        echo "     stream-obs: the SUPERVISOR step, written to <run-dir>/supervisor-step-stream-obs-rR.txt:"
-        av_matrix_stream_supervisor_step "$HERE" "$(av_matrix_confirm_path "$RUN_DIR" 1)" "$SUPERVISOR_TIMEOUT_S" | plan_text ;;
-    esac
-  done
-  echo "  c. healthy (bounded ${HEALTHY_TIMEOUT_S} s, polled every ${POLL_S} s; time to healthy is recorded):"
-  for k in $KINDS; do
-    case "$k" in
-      strih-obs)
-        echo "     strih-obs: ssh <STRIH_USER>@${STRIH_HOST}: $(av_matrix_health_remote_cmd strih-obs)"
-        echo "                AND the OBS WebSocket answers: $(printf '%q ' python3 "$OBS_DIR/obs_phase2.py" program-scene --host "$STRIH_HOST")" ;;
-      cambox)
-        echo "     cambox: ssh root@${CAMBOX_IP}:"
-        av_matrix_health_remote_cmd cambox | plan_text
-        echo "             active AND a NEW invocation (not the one the restart replaced) AND >= 1 of its Streaming: lines" ;;
-      dantesync)
-        echo "     dantesync: curl http://${DANTE_IP}:8898/status | python3 ${DANTE_DECISION} analyze --box-reachable 1 --grandmaster-ip <rig grandmaster> --now <now> -> verdict=OK" ;;
-      stream-obs)
-        echo "     stream-obs: the OBS WebSocket answers on '${STREAM_DEV_SCENE}': $(printf '%q ' python3 "$OBS_DIR/obs_phase2.py" program-scene --host "$STREAM_HOST")"
-        echo "                 another program scene -> the repeat FAILS at once, no settle, no window, never switched back" ;;
-    esac
-  done
-  cat <<EOF
-     never healthy -> the repeat FAILS and the matrix stops; a failed restart FAILS and stops; a
-     restart never performed (no unit, ssh unreachable, no supervisor confirmation) is UNKNOWN and stops
-  d. settle ${SETTLE_S} s (heartbeat kept), then ONE window exactly like the baseline; a window the soak
-     stops without a measurement (it left TEST mode, a low record volume) or refuses ends the run
-  e. one matrix.tsv row: $(printf '%q ' python3 "$DECISION" record --tsv "$RUN_DIR/matrix.tsv" --step '<N>' --kind '<kind>' --repeat '<r>' '...')
-
-CLEANUP (every exit; signals ignored): a running window gets SIGTERM and its own cleanup is waited for;
-  every restarted component is left running:
-EOF
-  for k in $KINDS; do
-    case "$k" in
-      stream-obs) echo "     stream-obs: read its WebSocket; not answering -> the supervisor relaunch step is printed" ;;
-      *) echo "     ${k}: $(av_matrix_ensure_running_remote_cmd "$k" | tr '\n' ' ')" ;;
-    esac
-  done
-  echo "  the report:"
-  plan_cmd python3 "$DECISION" report --dir "$RUN_DIR" --json "$RUN_DIR/report.json" "${SPREAD_ARGS[@]}"
-  echo "  rig_lease_release ${RIG_LEASE_OURS} -- KEPT while a window may have left a recording: bash $0 --stop-leftovers <run-dir>"
-  echo
-  echo "NEVER: a reboot (only ONE service restart per step), a latency pin, an audio sync offset, a correction, a scene switch."
-  local missing=()
-  [ -n "${CAM_PW:-}" ] || missing+=(CAM_PW)
-  [ -n "${STREAM_USER:-}" ] || missing+=(STREAM_USER)
-  [ -n "${STREAM_PW:-}" ] || missing+=(STREAM_PW)
-  [ -n "${STRIH_USER:-}" ] || missing+=(STRIH_USER)
-  [ -n "${STRIH_PW:-}" ] || missing+=(STRIH_PW)
-  [ -n "${PROBE_BIN_DIR:-}" ] && [ -x "$PROBE_BIN_DIR/recording-verdict" ] || missing+=("PROBE_BIN_DIR (recording-verdict)")
-  [ -n "${WIN_VERDICT_EXE_LOCAL:-}" ] && [ -f "$WIN_VERDICT_EXE_LOCAL" ] || missing+=("WIN_VERDICT_EXE_LOCAL")
-  if [ "${#missing[@]}" -gt 0 ]; then
-    echo "--run would need: ${missing[*]}"
-  else
-    echo "--run prerequisites present."
-  fi
-}
+# --- --plan: print every step, touch nothing (scripts/lib/av-restart-matrix-plan.sh) ----------------
 
 if [ "$MODE" = plan ]; then
   print_plan
@@ -494,7 +375,8 @@ done
 mkdir -p "$RUN_DIR"
 printf '%s\n' "$$" > "$RUN_DIR/pid"
 rm -f "$RUN_DIR/STOP"
-cat > "$RUN_DIR/matrix.conf" <<EOF
+write_conf() {
+  cat > "$RUN_DIR/matrix.conf" <<EOF
 kinds=${KINDS}
 repeats=${REPEATS}
 settle_s=${SETTLE_S}
@@ -510,6 +392,11 @@ stream_host=${STREAM_HOST}
 lease_run_id=${RIG_LEASE_OURS}
 started=${STAMP}
 EOF
+}
+write_conf
+# issue 1383: the lease's hold ceiling for the whole run -- the matrix's own keep-alive AND every
+# window's (the soak keeps its caller's exported ceiling under --lease-run-id)
+export RIG_LEASE_MAX_HOLD_SECS="$EXPECTED_S"
 
 SETUP_STARTED=0
 MUTATED=0
@@ -533,25 +420,51 @@ refuse() {  # REASON -> exit 4 while nothing was changed, else 5
 guard_ok() {
   ( stray_session_check_assert "$OBS_DIR" "$STRIH_HOST" "$STREAM_HOST" "$1" )
 }
-lease_ours() { [ "$(rig_lease_read_holder_field run_id)" = "$RIG_LEASE_OURS" ]; }
-# lease_keepalive -> bump the lease heartbeat, only while the lease is still this run's (never keep a
-# lease another run took looking alive)
+# lease_keepalive -> the ONE holder keep-alive (issue 1383, rig_lease_refresh_if_mine): bumps the
+# heartbeat and rolls expected_release_at, only while holder.json names this run. 0 refreshed (or a
+# filesystem error, retried next beat); 1 the lease is no longer ours or the run is past its
+# declared hold ceiling (ABORT_REASON set; the caller exits 5 and never touches the other lease).
 lease_keepalive() {
-  if lease_ours; then rig_lease_heartbeat_touch; fi
-  return 0
+  local out="" rc=0
+  out="$(rig_lease_refresh_if_mine "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" 2>&1)" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    2) log "WARNING: could not refresh the rig lease (${out#RIG_LEASE_REFRESH=}) -- next beat retries"; return 0 ;;
+    3) ABORT_REASON="the matrix ran past its declared lease window (${out#RIG_LEASE_REFRESH=})"; return 1 ;;
+    *) ABORT_REASON="the rig lease is no longer ours (${out#RIG_LEASE_REFRESH=})"; return 1 ;;
+  esac
 }
-# test_mode_why_not -> empty when the rig is in TEST mode (the stream program is the development
-# scene AND the permanent cam2 painter runs and emits), else the reason. Read-only.
-test_mode_why_not() {
-  local prog probe
-  prog="$(stream_program_scene_read "$OBS_DIR" "$STREAM_HOST" "")"
-  if [ "$prog" != "$STREAM_DEV_SCENE" ]; then
-    printf "the stream program is '%s', not '%s'\n" "${prog:-unreadable}" "$STREAM_DEV_SCENE"
-    return 0
-  fi
-  probe="$(remote root "$CAM_PW" "$PAINTER_IP" "$(av_soak_painter_probe_cmd "$MARKER_LOG")" 2>/dev/null || true)"
-  if ! av_soak_painter_ok "$(av_soak_kv active "$probe")" "$(av_soak_kv markers "$probe")" "$(av_soak_kv markers2 "$probe")"; then
-    printf 'the cam2 painter is not emitting (%s)\n' "${probe//$'\n'/ }"
+# test_mode_state -> `ok`, `left<TAB>reason` (a DEFINITE change: the stream program reads another
+# scene, the painter service reads inactive) or `unknown<TAB>reason` (unreadable / not emitting after
+# BROADCAST_READS reads, BROADCAST_RETRY_S apart -- one ssh blip is never a mode change). Read-only.
+test_mode_state() {
+  local i prog="" probe="" active=""
+  for ((i = 1; i <= BROADCAST_READS; i++)); do
+    prog="$(stream_program_scene_read "$OBS_DIR" "$STREAM_HOST" "")"
+    if [ -n "$prog" ] && [ "$prog" != "$STREAM_DEV_SCENE" ]; then
+      printf "left\tthe stream program is '%s', not '%s'\n" "$prog" "$STREAM_DEV_SCENE"
+      return 0
+    fi
+    if [ -n "$prog" ]; then
+      probe="$(remote root "$CAM_PW" "$PAINTER_IP" "$(av_soak_painter_probe_cmd "$MARKER_LOG")" 2>/dev/null || true)"
+      active="$(av_soak_kv active "$probe")"
+      if [ "$active" = inactive ]; then
+        printf 'left\tthe cam2 painter service is stopped\n'
+        return 0
+      fi
+      if av_soak_painter_ok "$active" "$(av_soak_kv markers "$probe")" "$(av_soak_kv markers2 "$probe")"; then
+        printf 'ok\n'
+        return 0
+      fi
+    fi
+    if [ "$i" -lt "$BROADCAST_READS" ]; then sleep "$BROADCAST_RETRY_S"; fi
+  done
+  if [ -z "$prog" ]; then
+    printf 'unknown\tthe stream program is unreadable\n'
+  elif [ -z "$active" ]; then
+    printf 'unknown\tthe cam2 painter probe is unreadable (no answer)\n'
+  else
+    printf 'unknown\tthe cam2 painter is not emitting (%s)\n' "${probe//$'\n'/ }"
   fi
   return 0
 }
@@ -560,10 +473,9 @@ test_mode_why_not() {
 # lease -> refuse (exit 4 before any change, else 5). Out of TEST mode -> exit 4 before any change,
 # else 1 with STOPPED=1 (the rig was handed back: the run ends with its report, like the soak).
 before_mutation() {
-  local why
-  if [ "$LEASE_HELD" = 1 ] && ! lease_ours; then
-    ABORT_REASON="the rig lease is no longer ours (before $1)"
-    log "STOP: $ABORT_REASON"
+  local st why
+  if [ "$LEASE_HELD" = 1 ] && ! lease_keepalive; then
+    log "STOP: $ABORT_REASON (before $1)"
     exit 5
   fi
   guard_ok "$1" || refuse "the rig is busy (a box records or streams) before $1"
@@ -573,12 +485,19 @@ before_mutation() {
     live) refuse "a broadcast is live before $1" ;;
     *) refuse "the rig state is unreadable before $1 -- nothing is restarted on a rig the matrix cannot observe" ;;
   esac
-  why="$(test_mode_why_not)"
-  [ -z "$why" ] && return 0
-  if [ "$MUTATED" = 0 ]; then
-    refuse "the rig is not in TEST mode: $why (run scripts/rig-mode.sh test first)"
-  fi
-  log "STOP: the rig left TEST mode before $1: $why"
+  st="$(test_mode_state)"
+  why="${st#*$'\t'}"
+  case "$st" in
+    ok) return 0 ;;
+    left*)
+      [ "$MUTATED" = 1 ] || refuse "the rig is not in TEST mode: $why (run scripts/rig-mode.sh test first)"
+      log "STOP: the rig left TEST mode before $1: $why"
+      ;;
+    *)
+      [ "$MUTATED" = 1 ] || refuse "TEST mode cannot be confirmed: $why"
+      log "STOP: TEST mode is unreadable before $1: $why -- nothing is restarted on a rig the matrix cannot observe"
+      ;;
+  esac
   STOPPED=1
   return 1
 }
@@ -590,7 +509,7 @@ keepalive_wait() {
     if stop_requested; then return 1; fi
     left=$(( end - $(date +%s) ))
     [ "$left" -gt 0 ] || return 0
-    lease_keepalive
+    lease_keepalive || exit 5
     isleep $(( left < KEEPALIVE_S ? left : KEEPALIVE_S ))
   done
 }
@@ -602,24 +521,9 @@ record_step() {
     --window-rc "$9" --outcome "${10}" --receiver "${11:-}" --note "${12:-}" \
     || log "WARNING: could not record step $1 ($2 r$3)"
 }
-step_recorded() {  # STEP -> 0 iff matrix.tsv already has that step's row
-  [ -f "$RUN_DIR/matrix.tsv" ] && awk -F'\t' -v s="$1" 'NR > 1 && $1 == s { f = 1 } END { exit !f }' "$RUN_DIR/matrix.tsv"
-}
-# window_outcome RC DIR -> the step outcome. A soak exit 0-2 is a measurement only with a CSV row:
-# the soak ends a window without one (exit 2) when the rig left TEST mode or a record volume is low.
-window_outcome() {
-  case "$1" in
-    0 | 1 | 2)
-      if [ "$(wc -l < "$2/soak.csv" 2>/dev/null || echo 0)" -ge 2 ]; then echo measured; else echo window_stopped; fi
-      ;;
-    4) echo window_refused ;;
-    5) echo window_aborted ;;
-    *) echo window_error ;;
-  esac
-}
-window_note() {  # WINDOW_DIR -> the soak's own last ERROR/STOP line (why it refused/stopped/aborted)
-  grep -E 'ERROR|STOP:|refus' "$1/soak.log" 2>/dev/null | tail -n 1 | cut -c1-300 || true
-}
+step_recorded() { av_matrix_step_recorded "$RUN_DIR/matrix.tsv" "$1"; }
+window_outcome() { av_matrix_window_outcome "$@"; }
+window_note() { av_matrix_window_note "$@"; }
 
 # run_window STEP KIND REPEAT TARGET RESTART_EPOCH HEALTHY_EPOCH HEALTHY RECEIVER -> WIN_DIR, WIN_RC,
 # and the step's matrix.tsv row. The window is the soak's own one-window run, in the background so
@@ -631,13 +535,14 @@ run_window() {
   WIN_WAITED=0
   WIN_DIR="$(av_matrix_window_dir "$RUN_DIR" "$1" "$2" "$3")"
   mkdir -p "$WIN_DIR"
-  av_matrix_window_argv argv "$SOAK" "$WIN_DIR" "$RIG_LEASE_OURS" "$PROBE_BIN_DIR" "$WIN_VERDICT_EXE_LOCAL"
+  av_matrix_window_argv argv "$SOAK" "$WIN_DIR" "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" "$PROBE_BIN_DIR" \
+    "$WIN_VERDICT_EXE_LOCAL"
   log "window $1 ($2${3:+ r$3}): ${argv[*]}  (log: $WIN_DIR/soak.log)"
   MUTATED=1
   "${argv[@]}" > "$WIN_DIR/soak.log" 2>&1 &
   SOAK_PID=$!
   while kill -0 "$SOAK_PID" 2>/dev/null; do
-    lease_keepalive
+    lease_keepalive || exit 5
     isleep "$KEEPALIVE_S"
   done
   WIN_RC=0
@@ -670,7 +575,9 @@ after_window() {
     window_aborted) ABORT_REASON="the window aborted ($(window_note "$WIN_DIR"))"; exit 5 ;;
     *)
       ABORT_REASON="the window failed to run (soak exit $WIN_RC: $(window_note "$WIN_DIR"))"
-      if [ ! -s "$RUN_DIR/restarted" ]; then log "STOP: $ABORT_REASON"; exit 4; fi
+      # only the soak's own usage/budget error (3, before it touches the rig) with nothing restarted
+      # yet is a refusal; anything else (a killed window) may have changed the rig
+      if [ "$WIN_RC" = 3 ] && [ ! -s "$RUN_DIR/restarted" ]; then log "STOP: $ABORT_REASON"; exit 4; fi
       exit 5
       ;;
   esac
@@ -728,7 +635,7 @@ wait_healthy() {
       HEALTH_NOTE="last read: ${HEALTH_PROBE//$'\n'/ }${HEALTH_SCENE:+ scene=$HEALTH_SCENE}"
       return 1
     fi
-    lease_keepalive
+    lease_keepalive || exit 5
     isleep "$POLL_S"
   done
 }
@@ -744,6 +651,29 @@ receiver_state() {
   esac
   log="$(remote "$STRIH_USER" "$STRIH_PW" "$STRIH_HOST" "$(strih_log_remote_cmd linux tail 2000)" 2>/dev/null || true)"
   av_matrix_receiver_state "$cam" "$log"
+}
+
+# pick_connected_cambox -> with no --cambox: restart a soak camera whose strih main input reads
+# connected (its restarts are seen live by the receiver), else keep the first and say so; with no
+# --dantesync-node the dantesync node follows. Read-only (the strih OBS log).
+pick_connected_cambox() {
+  local log pick
+  log="$(remote "$STRIH_USER" "$STRIH_PW" "$STRIH_HOST" "$(strih_log_remote_cmd linux tail 2000)" 2>/dev/null || true)"
+  pick="$(av_matrix_pick_connected_cam "$SOAK_CAMS" "$log")"
+  if [ -z "$log" ]; then
+    log "WARNING: the strih OBS log is unreadable -- restarting the first soak camera $CAMBOX (its receiver state unknown)"
+    return 0
+  fi
+  if [ -z "$pick" ]; then
+    log "no soak camera's strih input is connected -- restarting $CAMBOX (its restarts hit a parked receiver; the report says so)"
+    return 0
+  fi
+  CAMBOX="$pick"
+  camera_resolve "$CAMBOX" >/dev/null
+  CAMBOX_IP="$CAMERA_IP"
+  if [ -z "${AV_MATRIX_DANTESYNC_NODE:-}" ]; then DANTE_NODE="$CAMBOX"; DANTE_IP="$CAMBOX_IP"; fi
+  write_conf
+  log "cambox: $CAMBOX $CAMBOX_IP (its strih input is connected); dantesync node: $DANTE_NODE"
 }
 
 RESTART_OUTCOME=""
@@ -781,7 +711,7 @@ do_restart() {
           RESTART_NOTE="the supervisor did not confirm the stream OBS restart within ${SUPERVISOR_TIMEOUT_S} s"
           return 0
         fi
-        lease_keepalive
+        lease_keepalive || exit 5
         isleep "$POLL_S"
       done
       RESTART_OUTCOME=ok
@@ -832,6 +762,8 @@ cleanup() {
       CUR=()
       SOAK_PID=""
     fi
+    for k in $(jobs -p); do kill -TERM "$k" 2>/dev/null; done
+    wait 2>/dev/null
     if [ -s "$RUN_DIR/restarted" ]; then
       for k in $(sort -u "$RUN_DIR/restarted"); do ensure_running "$k" 2>/dev/null; done
     fi
@@ -876,6 +808,9 @@ log "$lease_out"
 [ "$lease_rc" -eq 0 ] || die 4 "the rig lease is held (${lease_out#RIG_LEASE_HELD_BY=}) -- rerun when it is free"
 LEASE_HELD=1
 SETUP_STARTED=1
+if [ -z "${AV_MATRIX_CAMBOX:-}" ] && { has_kind cambox || has_kind dantesync; }; then
+  pick_connected_cambox
+fi
 
 # ---- the baseline ----
 if before_mutation "the baseline window"; then

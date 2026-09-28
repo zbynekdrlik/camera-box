@@ -329,6 +329,16 @@ def evaluate(conf, steps, bounds, spread_columns=None):
         for g in k["repeats"]:
             if g["verdict"] != PASS:
                 rep["reasons"].append(f"{kind} r{g.get('repeat')}: {g['verdict']} -- {g.get('reason')}")
+    # a PASS whose restarts hit a parked (or unread) receiver never proved a CONNECTED strih
+    # receiver survives the restart: say so next to the verdict, not only under the kind
+    rep["caveats"] = []
+    for kind, k in rep["kinds"].items():
+        weak = [f"{st} {k['receivers'][st]}" for st in ("parked", "unread") if k["receivers"].get(st)]
+        if k["verdict"] == PASS and weak:
+            rep["caveats"].append(
+                f"{kind} PASS: the restarted camera's strih receiver was {', '.join(weak)} of "
+                f"{len(k['repeats'])} restart(s) -- a connected receiver surviving the restart is "
+                f"not proven")
     verdicts = [b["verdict"]] + [k["verdict"] for k in rep["kinds"].values()]
     if FAIL in verdicts:
         rep["verdict"] = FAIL
@@ -373,16 +383,22 @@ def render_text(rep):
         lines.append(f"  {kind:<12} {k['verdict']:<8} {k['passed']}/{len(k['repeats'])} PASS, "
                      f"max time to healthy {_tth(k['max_time_to_healthy_s'])}")
         parked = k["receivers"].get("parked", 0)
+        unread = k["receivers"].get("unread", 0)
         if parked:
             lines.append(f"    NOTE: the restarted camera's strih input was parked during "
                          f"{parked}/{len(k['repeats'])} restart(s) -- no connected receiver saw "
                          f"them; the window's connect-on-show hold connected it fresh")
+        if unread:
+            lines.append(f"    NOTE: the restarted camera's strih receiver state was unread during "
+                         f"{unread}/{len(k['repeats'])} restart(s)")
         for g in k["repeats"]:
             rcv = f", receiver {g['receiver']}" if g.get("receiver") not in ("", None) else ""
             lines.append(f"    r{g.get('repeat')}: {g['verdict']:<8} healthy after "
                          f"{_tth(g.get('time_to_healthy_s'))}{rcv}"
                          + (f" -- {g['reason']}" if g.get("reason") else ""))
     lines.append(f"  VERDICT: {rep['verdict']}")
+    for c in rep.get("caveats", []):
+        lines.append(f"  CAVEAT: {c}")
     for r in rep["reasons"]:
         lines.append(f"    - {r}")
     return "\n".join(lines)

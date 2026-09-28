@@ -192,14 +192,68 @@ av_matrix_window_dir() {
   fi
 }
 
-# av_matrix_window_argv OUTVAR SOAK_SCRIPT WINDOW_DIR LEASE_RUN_ID [PROBE_BIN_DIR] [WIN_EXE] ->
-# fills OUTVAR with ONE measurement window: the soak's own one-window run under the matrix's lease.
+# av_matrix_window_argv OUTVAR SOAK_SCRIPT WINDOW_DIR LEASE_REPO LEASE_RUN_ID [PROBE_BIN_DIR]
+#   [WIN_EXE] -> fills OUTVAR with ONE measurement window: the soak's own one-window run under the
+# matrix's lease (the holder identity repo + run id the soak's keep-alive refreshes).
 av_matrix_window_argv() {
   local -n _av_mw="$1"
-  local soak="$2" dir="$3" lease="$4" probe="${5:-}" exe="${6:-}"
-  _av_mw=(bash "$soak" --run --hours 0 --run-dir "$dir" --lease-run-id "$lease")
+  local soak="$2" dir="$3" repo="$4" lease="$5" probe="${6:-}" exe="${7:-}"
+  _av_mw=(bash "$soak" --run --hours 0 --run-dir "$dir" --lease-run-id "$lease" --lease-repo "$repo")
   if [ -n "$probe" ]; then _av_mw+=(--probe-bin-dir "$probe"); fi
   if [ -n "$exe" ]; then _av_mw+=(--win-verdict-exe "$exe"); fi
+}
+
+# av_matrix_soak_slot_s SOAK_SCRIPT -> the soak's slot in seconds, the one a matrix window lasts:
+# AV_SOAK_SLOT_SECS when set (a window inherits it), else the soak's own default read from its
+# `SLOT_S="${AV_SOAK_SLOT_SECS:-N}"` line (the single source, never retyped). rc 1 when unreadable.
+av_matrix_soak_slot_s() {
+  local v="${AV_SOAK_SLOT_SECS:-}"
+  case "$v" in
+    '' | *[!0-9]*) v="$(sed -n 's/^SLOT_S="\${AV_SOAK_SLOT_SECS:-\([0-9][0-9]*\)}"$/\1/p' "${1:-}" 2>/dev/null | head -n 1 || true)" ;;
+  esac
+  [ -n "$v" ] || return 1
+  printf '%s\n' "$v"
+}
+
+# av_matrix_pick_connected_cam CAMS LOG_TEXT -> the first camera of CAMS (never cam2) whose strih
+# main input reads `connected` in LOG_TEXT (a tail of the strih OBS log), empty when none does or the
+# log is empty. A restart of a connected camera is seen live by its strih receiver.
+av_matrix_pick_connected_cam() {
+  local c
+  [ -n "${2:-}" ] || { printf '\n'; return 0; }
+  for c in ${1:-}; do
+    [ "$c" = cam2 ] && continue
+    if [ "$(av_matrix_receiver_state "$c" "$2")" = connected ]; then
+      printf '%s\n' "$c"
+      return 0
+    fi
+  done
+  printf '\n'
+}
+
+# av_matrix_window_outcome RC WINDOW_DIR -> the step outcome of one soak window. A soak exit 0-2 is a
+# measurement only with a CSV row: the soak ends a window without one (exit 2) when the rig left
+# TEST mode or a record volume is low.
+av_matrix_window_outcome() {
+  case "${1:-}" in
+    0 | 1 | 2)
+      if [ -f "$2/soak.csv" ] && [ "$(wc -l < "$2/soak.csv")" -ge 2 ]; then echo measured; else echo window_stopped; fi
+      ;;
+    4) echo window_refused ;;
+    5) echo window_aborted ;;
+    *) echo window_error ;;
+  esac
+}
+
+# av_matrix_window_note WINDOW_DIR -> the soak's own last ERROR/STOP line (why it refused/stopped/
+# aborted), at most 300 characters. Always 0.
+av_matrix_window_note() {
+  grep -E 'ERROR|STOP:|refus' "$1/soak.log" 2>/dev/null | tail -n 1 | cut -c1-300 || true
+}
+
+# av_matrix_step_recorded TSV STEP -> 0 iff matrix.tsv already holds that step's row.
+av_matrix_step_recorded() {
+  [ -f "$1" ] && awk -F'\t' -v s="$2" 'NR > 1 && $1 == s { f = 1 } END { exit !f }' "$1"
 }
 
 # av_matrix_confirm_path RUN_DIR REPEAT -> the file the supervisor writes once the stream OBS
