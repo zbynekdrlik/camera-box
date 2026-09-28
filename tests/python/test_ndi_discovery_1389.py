@@ -105,7 +105,7 @@ class CamboxFreeList1389(unittest.TestCase):
         r = _lib(f"ndi_discovery_config_verdict '{text}'")
         self.assertTrue(r.stdout.startswith("FAIL:"), r.stdout)
         self.assertIn("cambox IP(s) 10.77.9.61", r.stdout)
-        self.assertEqual(_lib(f"ndi_discovery_config_ips '{text}'").stdout, _pinned() + ",10.77.9.61")
+        self.assertEqual(_lib(f"ndi_discovery_config_ips '{text}'").stdout, _pinned() + ",10.77.9.61\n")
 
     def test_verdict_fails_a_config_that_lists_a_cambox(self):
         text = json.dumps({"ndi": {"networks": {"ips": _pinned() + ",10.77.9.63"}}})
