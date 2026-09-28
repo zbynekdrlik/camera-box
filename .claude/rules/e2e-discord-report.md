@@ -104,7 +104,8 @@ blocking gate degrades to a generic FAIL rather than a hidden one — but attrib
 
 ## Per-camera totals come from the shared grouping (issue 1386)
 
-`_aggregate_segments` (the per-camera zero-loss lines, stream and imag) is a thin wrapper over
+`_aggregate_segments` (the per-camera lines of the IMAG path; the stream lines read
+`full_chain.loss`) is a thin wrapper over
 `scripts/cambox_segments.py` `per_camera`, the same grouping the 8 h soak's loss columns use.
 Never re-inline it. Its input rules are the soak's: a non-finite or non-numeric count counts 0,
 `pass` must be `True`, a malformed segment list never crashes the report.

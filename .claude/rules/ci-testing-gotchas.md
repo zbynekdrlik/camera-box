@@ -85,6 +85,13 @@ then set the window above that with headroom + the file's own `// #NNNN: widened
 widening itself; THIS entry is the reason the count sweep won't remind you to. Last measured 25.9.2026
 (issue 1367 pixel-proof step): 11535 of the 12000-byte window — the NEXT step added there must widen it.
 
+**The general check for ANY edit, not only that one window (issue 1386).** Resolve every fixed
+window a recording-e2e-reading test slices (`&s[v..(v + N)` / `v.saturating_sub(N)`) to the
+`.find("...")` literal that set `v`. Find that literal in the OLD text, and flag each window
+`[pos-back, pos+N)` that overlaps a changed line span (a line-based `difflib` on the two texts —
+character-level SequenceMatcher on this ~500 KB file runs for minutes). No overlap = no window can
+move. Do this alongside the count sweep, which only proves literal counts.
+
 ## Raising a shared formula constant (a `PHASE_SYNC_FLOOR_MS`-style floor/cap) breaks EVERY hardcoded literal test expectation that assumed the old value -- across BOTH languages (#707)
 
 Several "pure kernel" constants in this repo are deliberately duplicated across THREE places:
