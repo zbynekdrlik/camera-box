@@ -433,10 +433,11 @@ def test_the_split_files_and_functions_stay_inside_the_budget():
             assert n <= 100, f"{path.name}:{name} is {n} own lines (budget 100): cut it into helpers"
     # Slice D moved the Windows-only identity readers (+ their caches) into bundle_state_windows and
     # the logger into bundle_state_serverlog, so the server holds only the orchestration + HTTP. It
-    # is ratcheted at that size: a change that needs more room moves a responsibility out into a
-    # bundle_state_* module (listed in bundle-state-files) instead of growing the server again.
+    # has the same 800-line budget as every bundle_state_* module (issue 1386 decision 5866591291):
+    # a change that needs more room moves a responsibility out into a bundle_state_* module
+    # (listed in bundle-state-files) instead of growing the server.
     server = (_SCRIPTS / "bundle-state-server.py").read_text(encoding="utf-8").count("\n")
-    assert server <= 677, f"bundle-state-server.py grew to {server} lines (ratchet 677): split it"
+    assert server <= 800, f"bundle-state-server.py is {server} lines (budget 800): split it"
 
 
 if __name__ == "__main__" and sys.argv[1:] == ["--write-golden"]:

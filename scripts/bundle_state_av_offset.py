@@ -15,7 +15,8 @@ from bundle_state_log import LOG_BOUNDED_READ_SEPARATOR, _log_line_seconds, _rec
 
 # #1267 — the av-sync dock's measured-offset line, the UPSTREAM-audio-latency early-warning signal
 # (issue 1265 follow-up). The stream box's dock runs monitor-only, so it logs the Suggest branch
-# (vendor/av-sync-dock/src/sync-test-output.cpp:1484 -- verified LIVE 2026-09-02, ~2/min):
+# (vendor/av-sync-dock/src/sync-test-output-audio.cpp, its `LOCK-CORRECT SUGGESTED` blog --
+# verified LIVE 2026-09-02, ~2/min):
 #   av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src <pin> -> <new>ms (measured offset=<X>ms) [monitor-only ...]
 # It carries BOTH the CURRENT genlock pin (int) AND the measured A/V offset (float ms) on ONE line.
 # The `(?:SUGGESTED|requested)` alternation also matches a future actuation line; the OTHER
@@ -42,7 +43,7 @@ _AV_OFFSET_SUGGEST_RE = re.compile(
 _AV_OFFSET_DIAG_LOCKED_RE = re.compile(r"av-sync-dock: diag .*\blocked=yes\b")
 
 # #1319 Part 2 — the dock's own cluster-QUALITY line (`av-sync-dock: {LOCKED,UPDATED} offset=Xms
-# source=cluster matched=M mad=Dms`, sync-test-output.cpp:1378). It carries the estimator's
+# source=cluster matched=M mad=Dms`, vendor/av-sync-dock/src/sync-test-output-audio.cpp). It carries the estimator's
 # per-lock cluster SIZE (`matched`) and per-sample SCATTER (`mad`) — the two things the band alarm
 # needs to know a reading is trustworthy. The overnight 78-page false alarm judged a dock reading
 # whose MAD (9-31 ms) was as wide as the +-30 ms band against a recording-based reference; the dev1

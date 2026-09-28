@@ -57,17 +57,24 @@ _spec = importlib.util.spec_from_file_location("bundle_state_server_windows_spli
                                                _SCRIPTS / "bundle-state-server.py")
 bss = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(bss)
+import bundle_state_windows as bsw  # noqa: E402 -- the readers + caches (issue 1386 slice D)
 
 # Every name a test or the server's own orchestration reaches on the server module. Each must still
 # resolve there after the move (the re-export surface).
 _SERVER_SURFACE = (
     "log", "newest_obs_log_text", "gather_bundle_state", "gather_ndi_inputs", "IS_WINDOWS",
-    "subprocess", "bsg", "DEFAULT_VB_MATRIX_INSTALL_DIRS",
-    "ndi_runtime_version", "_ndi_runtime_cache",
-    "_parse_netstat_listening_pid", "_port4455_owning_pid", "port4455_owner", "_port4455_cache",
-    "_parse_tasklist_obs_process_names", "tasklist_csv", "obs_process_list",
-    "vb_matrix_process_list", "gather_vb_matrix_facet", "vb_matrix_start_time",
-    "_vb_matrix_start_cache", "read_ahk_text", "resolve_shortcut", "_shortcut_cache",
+    "bsg", "DEFAULT_VB_MATRIX_INSTALL_DIRS",
+    "ndi_runtime_version", "port4455_owner",
+    "_parse_tasklist_obs_process_names", "tasklist_csv",
+    "gather_vb_matrix_facet", "vb_matrix_start_time",
+    "read_ahk_text", "resolve_shortcut",
+)
+# Reached only on bundle_state_windows: the caches, the internal parsers and the legacy
+# process-list readers. The server no longer re-exports them for tests (issue 1386 supervisor
+# decision 5866591291), so a test resets / patches them on that module.
+_WINDOWS_ONLY = (
+    "_ndi_runtime_cache", "_parse_netstat_listening_pid", "_port4455_owning_pid", "_port4455_cache",
+    "obs_process_list", "vb_matrix_process_list", "_vb_matrix_start_cache", "_shortcut_cache",
 )
 _CACHES = ("_port4455_cache", "_ndi_runtime_cache", "_shortcut_cache", "_vb_matrix_start_cache")
 _CACHE_EMPTY = {
@@ -152,11 +159,11 @@ def _norm(obj, tmp):
 
 def _reset_caches():
     for name in _CACHES:
-        getattr(bss, name).update(_CACHE_EMPTY[name])
+        getattr(bsw, name).update(_CACHE_EMPTY[name])
 
 
 def _caches():
-    return {name: dict(getattr(bss, name)) for name in _CACHES}
+    return {name: dict(getattr(bsw, name)) for name in _CACHES}
 
 
 def _touch(path, data):
@@ -183,8 +190,8 @@ def _pure_steps():
                  "too-long-field": "x" * 200_000}
     out = {}
     for name, text in netstats.items():
-        out[f"netstat[{name}]"] = bss._parse_netstat_listening_pid(text)
-    out["netstat[4242,port=8899]"] = bss._parse_netstat_listening_pid(_NETSTAT_4242, port=8899)
+        out[f"netstat[{name}]"] = bsw._parse_netstat_listening_pid(text)
+    out["netstat[4242,port=8899]"] = bsw._parse_netstat_listening_pid(_NETSTAT_4242, port=8899)
     for name, text in tasklists.items():
         log = io.StringIO()
         with contextlib.redirect_stdout(log):
@@ -199,10 +206,10 @@ def _tasklist_steps(fake, tmp):
                           ("exit1", subprocess.CalledProcessError), ("missing", FileNotFoundError)):
         steps.append(_run_step(fake, tmp, f"tasklist_csv[{label}]", bss.tasklist_csv,
                                {"tasklist": answer}))
-        steps.append(_run_step(fake, tmp, f"obs_process_list[{label}]", bss.obs_process_list,
+        steps.append(_run_step(fake, tmp, f"obs_process_list[{label}]", bsw.obs_process_list,
                                {"tasklist": answer}))
         steps.append(_run_step(fake, tmp, f"vb_matrix_process_list[{label}]",
-                               bss.vb_matrix_process_list, {"tasklist": answer}))
+                               bsw.vb_matrix_process_list, {"tasklist": answer}))
     starts = []
 
     def start_fn(pid):
@@ -304,7 +311,7 @@ def _port4455_steps(fake, tmp):
              for label, ans in seq]
     for label, ans in (("ok", {"netstat": _NETSTAT_4242}), ("v6", {"netstat": _NETSTAT_5555}),
                        ("none", {"netstat": _NETSTAT_NONE}), ("timeout", {"netstat": subprocess.TimeoutExpired})):
-        steps.append(_run_step(fake, tmp, f"_port4455_owning_pid[{label}]", bss._port4455_owning_pid, ans))
+        steps.append(_run_step(fake, tmp, f"_port4455_owning_pid[{label}]", bsw._port4455_owning_pid, ans))
     return steps
 
 
@@ -440,16 +447,22 @@ def test_every_name_the_tests_and_the_orchestration_reach_still_resolves_on_the_
     assert missing == []
 
 
+def test_the_reader_internals_live_only_on_the_windows_module():
+    assert [n for n in _WINDOWS_ONLY if not hasattr(bsw, n)] == []
+    assert [n for n in _WINDOWS_ONLY if hasattr(bss, n)] == [], "a test-only re-export came back"
+    assert not hasattr(bss, "subprocess"), "the server imports subprocess only for tests again"
+
+
 # --- the moved layout (added with the move; the proof above ran unchanged before and after it) ---
 
 def test_the_server_reexports_the_moved_objects_not_copies():
-    # The reader tests reset the caches IN PLACE through the server module, and the server's
-    # orchestration calls the readers through its own globals: both only work while each server
-    # name is the very object the readers module holds. The logger is ONE function for both.
+    # The server's orchestration calls the readers through its own globals, so each server name
+    # must be the very object the readers module holds (a patch of `bss.<reader>` reaches the
+    # gather). The logger is ONE function for both.
     import bundle_state_serverlog
     import bundle_state_windows as bsw
     moved = [n for n in _SERVER_SURFACE if n in vars(bsw)]
-    assert {"port4455_owner", "_port4455_cache", "tasklist_csv", "vb_matrix_start_time",
+    assert {"port4455_owner", "tasklist_csv", "vb_matrix_start_time",
             "resolve_shortcut", "ndi_runtime_version", "read_ahk_text", "log"} <= set(moved)
     for name in moved:
         assert getattr(bss, name) is vars(bsw)[name], f"bss.{name} is a copy, not the moved object"

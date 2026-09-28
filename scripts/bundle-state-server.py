@@ -46,7 +46,6 @@ import argparse
 import glob
 import json
 import os
-import subprocess  # noqa: F401 -- the reader tests patch `bss.subprocess.run` (see the re-exports)
 import sys
 import threading
 import time
@@ -60,8 +59,9 @@ import bundle_state_gather as bsg  # noqa: E402
 # bundle_state_windows, and the timestamped logger they share with this server in
 # bundle_state_serverlog. The orchestration below calls the readers through THIS module's globals,
 # so a test that patches `bss.<reader>` reaches the gather. Such a patch reaches ONLY calls this
-# module makes: a call made inside bundle_state_windows (a reader's own helpers, its own log)
-# resolves there, so patch that module for it. Reset a cache in place, never rebind it.
+# module makes: a call made inside bundle_state_windows (a reader's own helpers, its own log,
+# its caches, subprocess) resolves there, so patch or reset that module for it -- a cache in place,
+# never rebound.
 from bundle_state_serverlog import log  # noqa: E402
 from bundle_state_windows import (  # noqa: E402
     _parse_tasklist_obs_process_names,
@@ -74,19 +74,6 @@ from bundle_state_windows import (  # noqa: E402
     vb_matrix_start_time,
 )
 
-# Re-exported for the reader tests, which call these as `bss.<name>` and reset the caches in place
-# (the SAME dict objects the readers use). `subprocess` stays imported above for the same reason:
-# those tests patch `bss.subprocess.run`, the one process-wide module object the readers call.
-from bundle_state_windows import (  # noqa: E402,F401
-    _ndi_runtime_cache,
-    _parse_netstat_listening_pid,
-    _port4455_cache,
-    _port4455_owning_pid,
-    _shortcut_cache,
-    _vb_matrix_start_cache,
-    obs_process_list,
-    vb_matrix_process_list,
-)
 
 try:
     from obs_phase2 import _conn, _rpc  # noqa: E402
