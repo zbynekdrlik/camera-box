@@ -371,7 +371,7 @@ def test_plan_is_the_default_and_touches_nothing(rig):
                    "record --host 10.77.9.202 --action start",
                    "switch --host 10.77.9.202 --program-scene Cam\\ 1",
                    "record --host 10.77.9.204 --action status", "--merge-partials",
-                   "av_soak_decision.py row", "--slot-s 600", "--extract-partial strih",
+                   "av_soak_decision.py row", "--slot-s 1200", "--extract-partial strih",
                    "--extract-partial stream", "av_tolerance_ms=", "slot budget:"):
         assert needle in out, needle
 
@@ -419,10 +419,11 @@ def test_production_scene_as_the_stream_program_is_refused(rig):
 
 def test_a_slot_budget_that_does_not_fit_is_refused(rig):
     env, _ = rig
-    r = _soak(dict(env, AV_SOAK_SEGMENT_SECS="200"), "--plan")
+    # the budget arithmetic at an explicit 600 s slot (the default moved to 1200 s)
+    r = _soak(dict(env, AV_SOAK_SLOT_SECS="600", AV_SOAK_SEGMENT_SECS="200"), "--plan")
     assert r.returncode == 3
     assert "slot budget does not fit" in r.stderr
-    r = _soak(dict(env, AV_SOAK_DECODE_TIMEOUT_S="590"), "--plan")
+    r = _soak(dict(env, AV_SOAK_SLOT_SECS="600", AV_SOAK_DECODE_TIMEOUT_S="590"), "--plan")
     assert r.returncode == 3
 
 
@@ -951,7 +952,7 @@ def test_the_cleanup_plan_names_the_on_box_verdict_artifacts(rig):
 
 def test_a_negative_decode_budget_names_the_slot_budget(rig):
     env, _ = rig
-    r = _soak(dict(env, AV_SOAK_SEGMENT_SECS="300"), "--plan")
+    r = _soak(dict(env, AV_SOAK_SLOT_SECS="600", AV_SOAK_SEGMENT_SECS="300"), "--plan")
     assert r.returncode == 3
     assert "slot budget does not fit" in r.stderr
 
