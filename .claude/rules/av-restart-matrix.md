@@ -20,7 +20,7 @@ meets the A/V and spread bounds within the settle time, 3/3 repeats. The matrix 
 | File | Role |
 |---|---|
 | `scripts/av-restart-matrix.sh` | orchestrator: `--plan` (DEFAULT, touches nothing), `--run`, `--report DIR`, `--stop-leftovers DIR` (the unit's ExecStopPost) |
-| `scripts/lib/av-restart-matrix.sh` | pure builders shared by plan AND run: every restart / health / leave-running remote text, the health predicate, the receiver-state read + the connected-camera pick, the window argv, the soak's slot, the window outcome/note, the stream supervisor step |
+| `scripts/lib/av-restart-matrix.sh` | pure builders shared by plan AND run: every restart / health / leave-running remote text, the health predicate, the default cambox (`av_matrix_default_cambox`), the window argv, the soak's slot, the window outcome/note, the stream supervisor step |
 | `scripts/lib/av-restart-matrix-plan.sh` | the `--plan` printout: a view of the orchestrator's resolved configuration (reads its globals), printed with the same builders `--run` executes |
 | `scripts/av_restart_matrix_decision.py` | pure decision: `record` (one matrix.tsv step), `grade-window` (one window, the baseline gate), `report` (kinds 3/3 + baseline; exit 0 PASS / 1 FAIL / 2 UNKNOWN / 3 input error) |
 | `scripts/av-soak.sh --lease-run-id` + `--lease-repo` | the soak's one opt-in: a window under a lease its caller holds -- verified and refreshed with the merged holder keep-alive (`rig_lease_refresh_if_mine`, the caller's repo + run id, the caller's exported `RIG_LEASE_MAX_HOLD_SECS`), never acquired or released; recording.state names no lease |

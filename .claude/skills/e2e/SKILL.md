@@ -1395,8 +1395,8 @@ mean luma ~5–7); a frozen NDI repeats identical PNG bytes → STATIC → FAIL.
 was written by #730/#508's Multiview decoupling (see the GOTCHA below) — a decoupled Multiview
 renders low-bandwidth `MV Cam N` TWIN clones, not these raw main inputs, so keeping it open no
 longer keeps `NDI cam4`/`NDI cam6` etc. rendering at all. The fix: before sampling EACH source,
-`frozen-camera-gate.py` now sets that input's wrapping strih `Cam N` scene (see
-`scripts/strih_mv_scenes.py`'s naming convention — `_scene_for_input('NDI cam5') == 'Cam 5'`) to
+`frozen-camera-gate.py` now sets that input's wrapping strih `Cam N` scene (the convention: scene
+`Cam N` wraps input `NDI camN` — `_scene_for_input('NDI cam5') == 'Cam 5'`) to
 PREVIEW (Studio Mode, always on on strih/stream) and settles `--warm-settle` seconds (default
 3.0, `FROZEN_CAM_WARM_SETTLE_S`) BEFORE taking that source's samples — this genuinely opens/
 refreshes the DistroAV receiver. Frozen = repeated identical hash WHILE ACTIVATED; a null/

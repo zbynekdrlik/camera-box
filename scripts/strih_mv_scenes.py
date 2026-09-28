@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """strih OBS helper: the sender-bounce RE-ATTACH of a camera input (#758 item 2) and an ad-hoc
-render-cost GetStats delta (#730).
+render-cost GetStats delta (#730). The file name is historical (it once seeded the strih `MV`
+multiview scenes); it is kept because the E2E harness and its static-anchor tests call it by name.
 
   strih_mv_scenes.py --host 10.77.9.202 --password PW --reattach N   # CLEAR-then-SET 'NDI camN'
   strih_mv_scenes.py --host 10.77.9.202 --password PW --stats 15     # GetStats render-cost delta

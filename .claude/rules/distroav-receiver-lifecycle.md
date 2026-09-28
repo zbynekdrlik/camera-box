@@ -465,3 +465,23 @@ strih obs aby tam neboli tie low bandwith sceny"): the strih-lx uplink cause is 
 connected. Do not reintroduce a per-source connect-on-show or park path as a bandwidth workaround;
 if it is ever needed again, the removed in-thread design is in git history (never the stock
 STOP_RESUME hide path, which joins the receiver thread on the graphics thread).
+
+**One-time live migration (SUPERVISOR, before the first E2E / soak / restart-matrix run on this
+code -- the E2E no longer holds connect-on-show, so an old box state must not survive it):**
+1. Read first (read-only WS on strih-lx): each `NDI camN` main's `genlock_connect_on_show`; the
+   `MV <scene>` twin scenes and their private `show_in_multiview` / `camera_box_multiview_target`;
+   the `MV NDI camN` inputs; the items of the custom `MULTIVIEW` grid scene. Back up
+   `~/.config/obs-studio/basic/scenes/*.json`.
+2. Retire the launch path FIRST, so no OBS relaunch re-applies the roles: install this code's
+   `strih-obs-start.sh` + `strih_scenes.py` (setup-strih step 6), `rm -f
+   /usr/local/bin/strih_bandwidth_roles.py ~/.camera-box/connect-on-show-e2e-hold` on strih-lx,
+   `rm -f ~/.camera-box/connect-on-show-hold.json` on dev1.
+3. Over WS: set `genlock_connect_on_show: false` on every `NDI camN` (the old DistroAV still parks
+   until step 6); in `MULTIVIEW`, add each original (`NDI camN` / `<scene>`) at the twin item's
+   transform and enabled state, THEN remove the twin item; set `show_in_multiview: true` on every
+   original scene a shown twin stood for.
+4. Remove the twin scenes (`MV Cam 1..7`, `MV Moderatori`, any other `MV <scene>` carrying
+   `camera_box_multiview_target`), then the `MV NDI cam1..7` inputs.
+5. Operator-view screenshot of the multiview (labels = program scenes, a cut lights the right cell,
+   a click selects the program scene).
+6. FULL-bundle deploy (vendored DistroAV + frontend), then the `foh1_video ether2` tx-drop delta.

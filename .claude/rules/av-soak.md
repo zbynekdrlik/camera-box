@@ -50,7 +50,8 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   production scene name is never typed (the one declaration is `scripts/lib/stream-dev-scene.sh`).
 - **Reads before writes.** Setup does every read (guard, both program scenes, painter, every burn
   state) before the first mutation; a refusal there is exit 4 and nothing changed. After the first
-  mutation (a burn turned on) every abort is exit 5 and cleanup restores.
+  mutation point (`MUTATED=1`, set right before the burns are turned on, even when none was off)
+  every abort is exit 5 and cleanup restores.
 - **Recording flags are conservative.** A box's "started" flag is set BEFORE `record --action start`
   (the start verifies the file grows AFTER StartRecord, so a failed or timed-out start can leave OBS
   recording); any start failure stops both boxes; a flag clears only when `record --action status`
@@ -253,8 +254,7 @@ kept), a failed start and a previous slot's leftover during a broadcast, `--stop
 touching a broadcast, an unreadable rig or a recording the soak cannot prove is its own, and
 retrying an unreadable read) and cleanup with
 fakes behind the seams `AV_SOAK_OBS_DIR`,
-`AV_SOAK_STRIH_DECODE`, `AV_SOAK_STREAM_DECODE`, `PROBE_BIN_DIR`, `CONNECT_ON_SHOW_MARKER_CMD`,
-`CONNECT_ON_SHOW_LOG_READ_CMD`, a fake `sshpass`/`curl` on PATH, and a tmp `RIG_LEASE_DIR` +
-`CAMERA_BOX_RIG_HEARTBEAT` + `CONNECT_ON_SHOW_HOLD_STATE` -- NEVER the real `/var/tmp/rig-lease`, an
+`AV_SOAK_STRIH_DECODE`, `AV_SOAK_STREAM_DECODE`, `PROBE_BIN_DIR`, a fake `sshpass`/`curl` on PATH,
+and a tmp `RIG_LEASE_DIR` + `CAMERA_BOX_RIG_HEARTBEAT` -- NEVER the real `/var/tmp/rig-lease`, an
 E2E may hold it), `bash -n`, `shellcheck -S warning scripts/av-soak.sh scripts/lib/av-soak.sh
 scripts/lib/av-soak-leftovers.sh` (never `-x`); the test rig sets `AV_SOAK_BROADCAST_RETRY_S=0`.

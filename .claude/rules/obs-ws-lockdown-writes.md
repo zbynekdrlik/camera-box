@@ -24,8 +24,8 @@ obs-websocket. Both were missed by the first design of the (since removed, 28.9.
 - For a `genlock_monitor` source it then forces `ndi_bw_mode` to LOWEST.
 - It writes into the SAVED settings, so a WS write of a forced key on a genlocked input silently
   comes back to the certified value. Only the whitelist is operator-settable: `ndi_source_name`,
-  `genlock_latency_ms_src`, `genlock_burn`, the `genlock_monitor` role flag, and `genlock_fifo`
-  itself.
+  `genlock_latency_ms_src`, `genlock_burn`, the `genlock_monitor` role flag, `ndi_audio` (issue
+  1295), and `genlock_fifo` itself.
 - To change a forced key, step OUTSIDE the lockdown in the same write (`genlock_fifo: false`), e.g.
   `{"genlock_fifo": false, "ndi_bw_mode": 2}` for audio-only; turning genlock back on puts the
   certified value back by itself.
