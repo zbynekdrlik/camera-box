@@ -653,6 +653,23 @@ jobs:
           if ($obsc1367 -match [regex]::Escape('oai->fixed_buffering ? "fixed" : "dynamically increasing"')) { Write-Error "vendor/obs-studio/libobs/obs.c: the upstream caller-controlled buffering is back (issue 1367) - the low-latency toggle would bypass the floor"; exit 1 }
           Write-Output "genlock audio-buffering floor present (issue 1367) -- OK"
 
+      # issue 1381 (design 5862336131): only a MIXED source can move the mix's audio buffering -- a hidden source
+      # whose audio runs late is re-anchored to the mix window instead of growing the whole mix (one hole in every
+      # output per step, 27.9.2026 on resolume). Mirror of tests/genlock_audio_mix_guard_1381.rs (WIRING); keep both
+      # in lock-step.
+      - name: Assert the mix buffering guard is present (issue 1381)
+        shell: pwsh
+        run: |
+          $audio1381 = (Get-Content "vendor/obs-studio/libobs/obs-audio.c" -Raw) -replace '\s+', ' '
+          $internal1381 = (Get-Content "vendor/obs-studio/libobs/obs-internal.h" -Raw) -replace '\s+', ' '
+          if ($audio1381 -notmatch [regex]::Escape('genlock_mix_mark_members(audio);')) { Write-Error "vendor/obs-studio/libobs/obs-audio.c: the mix buffering guard wiring is gone (issue 1381) - a hidden source would grow the whole mix buffering again"; exit 1 }
+          if ($audio1381 -notmatch [regex]::Escape('if (genlock_mix_source_is_member(source) && !source->audio_pending && source->audio_ts && source->audio_ts < *min_ts) {')) { Write-Error "vendor/obs-studio/libobs/obs-audio.c: the mix buffering guard wiring is gone (issue 1381) - a hidden source would grow the whole mix buffering again"; exit 1 }
+          if ($audio1381 -notmatch [regex]::Escape('if (genlock_mix_source_is_member(source)) recalculate |= audio_buffer_insufficient(source, sample_rate, min_ts);')) { Write-Error "vendor/obs-studio/libobs/obs-audio.c: the mix buffering guard wiring is gone (issue 1381) - a hidden source would grow the whole mix buffering again"; exit 1 }
+          if ($audio1381 -notmatch [regex]::Escape('const bool genlock_rerender = genlock_mix_guard_reanchor(audio, source, channels, sample_rate, ts.start, genlock_guard);')) { Write-Error "vendor/obs-studio/libobs/obs-audio.c: the mix buffering guard wiring is gone (issue 1381) - a hidden source would grow the whole mix buffering again"; exit 1 }
+          if ($audio1381 -notmatch [regex]::Escape('"buffering-guard: ''%s'' %s: its audio ran %.1f ms behind the mix window; re-anchored (dropped %.1f ms%s) "')) { Write-Error "vendor/obs-studio/libobs/obs-audio.c: the mix buffering guard wiring is gone (issue 1381) - a hidden source would grow the whole mix buffering again"; exit 1 }
+          if ($internal1381 -notmatch [regex]::Escape('bool genlock_mix_entered;')) { Write-Error "vendor/obs-studio/libobs/obs-internal.h: the mix buffering guard wiring is gone (issue 1381) - a hidden source would grow the whole mix buffering again"; exit 1 }
+          Write-Output "mix buffering guard present (issue 1381) -- OK"
+
       # #942: the A/V-sync dock's in-process lock corrector must be MONITOR-ONLY by build
       # default — the E2E gate (scripts/av_sync_calibrate.py --apply) is the only CONTINUOUS/
       # closed-loop writer of genlock_latency_ms_src (scripts/obs_phase2.py's own bounded

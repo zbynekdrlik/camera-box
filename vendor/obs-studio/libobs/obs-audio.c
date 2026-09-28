@@ -497,12 +497,180 @@ static bool audio_buffer_insufficient(struct obs_source *source, size_t sample_r
 	return false;
 }
 
+/* camera-box issue 1381 (design 5862336131): the mix buffering GUARD -- only a source that is MIXED can
+ * move the mix window. Stock OBS walked every audio source in find_min_ts / mark_invalid_sources, so a
+ * hidden input nobody hears grew the buffering of the WHOLE mix: 27.9.2026 on resolume the hidden
+ * "NDI test", whose timestamps ran later and later, took the cg mix +85/+42/+106/+128/+106/+490 ms to
+ * the 960 ms maximum, and every step was a hole in every output (audio_callback returns false while
+ * the added ticks drain).
+ *
+ * A source is IN THE MIX on a mixer tick when an output mix's active tree reached it: audio_callback
+ * marks the render order it has built from the mixes (genlock_mix_mark_members) before its catch-all
+ * loop adds every other audio source (rendered for meters and monitoring, never mixed). A source that
+ * is not mixed and runs behind the window, or one that JOINED the mix on this tick behind it (a cut to
+ * it), is re-anchored to the window instead (genlock_mix_guard_reanchor). A source that stays mixed
+ * keeps upstream's behaviour: the dynamic increase above the 1367 floor, ignore_audio at the maximum.
+ * That includes a source whose audio STARTS only after it joined the mix (a media start on program).
+ * Known limit: a source with DIRECT stamps (within MAX_TS_VAR of the OBS clock: ASIO/WASAPI capture,
+ * media) that stays late after the entry re-anchor is placed late again by its next packet, and one
+ * tick later it is a late mixed source (upstream growth). NDI timecode stamps are never direct, so
+ * the restart re-anchors them to their arrival. */
+
+/* The guard's reasons for one rendered source. */
+#define GENLOCK_MIX_GUARD_NONE 0
+#define GENLOCK_MIX_GUARD_NOT_MIXED 1
+#define GENLOCK_MIX_GUARD_ENTERED 2
+
+/* A re-anchored source logs its first event and every entry (a cut) at once, and later not-mixed
+ * events at most once per interval: a hidden direct-stamp source that stays late is re-anchored on
+ * nearly every mixer tick. */
+#define GENLOCK_MIX_GUARD_LOG_INTERVAL_NS 10000000000ULL
+
+/* Whether a source last marked on mixer tick `source_tick` is in the mix on tick `cur_tick` (>= 1 once
+ * audio_callback has marked the render order). */
+static inline bool genlock_mix_is_member(uint64_t source_tick, uint64_t cur_tick)
+{
+	return source_tick == cur_tick;
+}
+
+/* On marking a member for tick `cur_tick`: did it JOIN the mix on this tick (not in it on the previous
+ * one)? A source never marked has tick 0, so on the mixer's first tick (1) it reads as a member of tick
+ * 0: the sources present at launch ARE the mix, not an entry, and a source late at launch keeps
+ * upstream's behaviour (the 1367 floor, then the dynamic increase). */
+static inline bool genlock_mix_joined(uint64_t prev_source_tick, uint64_t cur_tick)
+{
+	return prev_source_tick + 1 != cur_tick;
+}
+
+/* The guard's decision for one rendered source: a timeline behind the window (by more than the 1 ns
+ * rounding discard_audio tolerates) of a source that is not mixed, or of one that joined the mix on
+ * this tick. A composite (scene, transition) takes its timestamp from its children and is never
+ * re-anchored itself; a source with no timeline has nothing to re-anchor. */
+static inline int genlock_mix_guard_reason(bool member, bool entered, bool composite, uint64_t audio_ts,
+					   uint64_t window_start)
+{
+	if (composite || !audio_ts || audio_ts + 1 >= window_start)
+		return GENLOCK_MIX_GUARD_NONE;
+	if (!member)
+		return GENLOCK_MIX_GUARD_NOT_MIXED;
+	return entered ? GENLOCK_MIX_GUARD_ENTERED : GENLOCK_MIX_GUARD_NONE;
+}
+
+/* What stock OBS would have added for a source `behind_ns` behind the window, ms: add_audio_buffering's
+ * own rounding (whole ticks, up) and its clamp at the maximum. 60 s or more behind reads as the
+ * maximum (the frame product stays inside 64 bits for any timeline). */
+static inline uint32_t genlock_mix_guard_would_add_ms(uint64_t behind_ns, uint32_t sample_rate, int total_ticks,
+						      int max_ticks)
+{
+	int ticks = max_ticks - total_ticks;
+
+	if (behind_ns < 60000000000ULL) {
+		const uint64_t frames = behind_ns * sample_rate / 1000000000ULL;
+		const uint64_t need = (frames + AUDIO_OUTPUT_FRAMES - 1) / AUDIO_OUTPUT_FRAMES;
+		if (need < (uint64_t)ticks)
+			ticks = (int)need;
+	}
+	return (uint32_t)((uint64_t)ticks * AUDIO_OUTPUT_FRAMES * 1000 / sample_rate);
+}
+
+/* Whether the guard logs this re-anchor: an entry (at most one per cut), the source's first one, or one
+ * GENLOCK_MIX_GUARD_LOG_INTERVAL_NS after its last line. */
+static inline bool genlock_mix_guard_log_due(int reason, uint64_t logged_events, uint64_t last_log_ns,
+					     uint64_t now_ns)
+{
+	return reason == GENLOCK_MIX_GUARD_ENTERED || logged_events == 0 ||
+	       now_ns - last_log_ns >= GENLOCK_MIX_GUARD_LOG_INTERVAL_NS;
+}
+
+static inline bool genlock_mix_source_is_member(const struct obs_source *source)
+{
+	return genlock_mix_is_member(source->genlock_mix_tick, obs->audio.genlock_mix_tick);
+}
+
+/* audio_callback, right after the output mixes' active trees are in the render order and before the
+ * catch-all loop adds every other audio source: advance the mixer tick and mark that render order as
+ * the mix. */
+static void genlock_mix_mark_members(struct obs_core_audio *audio)
+{
+	const uint64_t tick = ++audio->genlock_mix_tick;
+
+	for (size_t i = 0; i < audio->render_order.num; i++) {
+		obs_source_t *source = audio->render_order.array[i];
+		source->genlock_mix_entered = genlock_mix_joined(source->genlock_mix_tick, tick);
+		source->genlock_mix_tick = tick;
+	}
+}
+
+/* Re-anchor a source whose audio runs behind the mix window (reason NOT_MIXED or ENTERED) instead of
+ * letting it grow the whole mix's buffering: drop its samples behind the window (ignore_audio's
+ * rounding); if none are left, restart its timeline exactly like ignore_audio (audio_pending,
+ * audio_ts = 0, timing_set = false), so its next packet is placed fresh -- at its arrival for a stamp
+ * that is not direct (an NDI timecode, obs-source.c reset_audio_timing). Counted per source, logged as
+ * one `buffering-guard:` WARNING per source per GENLOCK_MIX_GUARD_LOG_INTERVAL_NS. The caller holds
+ * audio_buf_mutex. Returns true when the source is back in sync (re-render it). */
+static bool genlock_mix_guard_reanchor(struct obs_core_audio *audio, obs_source_t *source, size_t channels,
+				       size_t sample_rate, uint64_t start_ts, int reason)
+{
+	/* The ingest thread may have moved the timeline since the unlocked check. */
+	if (!source->audio_ts || source->audio_ts + 1 >= start_ts)
+		return false;
+
+	const size_t num_floats = source->audio_input_buf[0].size / sizeof(float);
+	const uint64_t behind_ns = start_ts - source->audio_ts;
+	size_t drop = (size_t)util_mul_div64(behind_ns - 1, sample_rate, 1000000000ULL) + 1;
+
+	if (drop > num_floats)
+		drop = num_floats;
+	for (size_t ch = 0; ch < channels; ch++)
+		deque_pop_front(&source->audio_input_buf[ch], NULL, drop * sizeof(float));
+	source->last_audio_input_buf_size = 0;
+
+	const uint64_t dropped_ns = util_mul_div64(drop, 1000000000ULL, sample_rate);
+	source->audio_ts += dropped_ns;
+	/* rounding error, adjust (ignore_audio) */
+	if (source->audio_ts == start_ts - 1)
+		source->audio_ts = start_ts;
+
+	const bool in_sync = source->audio_ts >= start_ts;
+	if (!in_sync) {
+		source->audio_pending = true;
+		source->audio_ts = 0;
+		source->timing_set = false;
+	}
+
+	source->genlock_mix_guard_events++;
+	source->genlock_mix_guard_dropped_ns += dropped_ns;
+
+	const uint64_t now = os_gettime_ns();
+	if (genlock_mix_guard_log_due(reason, source->genlock_mix_guard_logged_events,
+				      source->genlock_mix_guard_last_log_ns, now)) {
+		blog(LOG_WARNING,
+		     "buffering-guard: '%s' %s: its audio ran %.1f ms behind the mix window; re-anchored (dropped %.1f ms%s) "
+		     "instead of adding %u ms to the whole mix's %d ms of audio buffering (issue 1381; events=%" PRIu64
+		     ", +%" PRIu64 " since the last line, dropped_total=%.1f ms)",
+		     obs_source_get_name(source),
+		     reason == GENLOCK_MIX_GUARD_ENTERED ? "entered the mix late" : "is not mixed",
+		     (double)behind_ns / 1e6, (double)dropped_ns / 1e6, in_sync ? "" : ", timeline restarted",
+		     genlock_mix_guard_would_add_ms(behind_ns, (uint32_t)sample_rate, audio->total_buffering_ticks,
+						    audio->max_buffering_ticks),
+		     (int)((size_t)audio->total_buffering_ticks * AUDIO_OUTPUT_FRAMES * 1000 / sample_rate),
+		     source->genlock_mix_guard_events,
+		     source->genlock_mix_guard_events - source->genlock_mix_guard_logged_events,
+		     (double)source->genlock_mix_guard_dropped_ns / 1e6);
+		source->genlock_mix_guard_logged_events = source->genlock_mix_guard_events;
+		source->genlock_mix_guard_last_log_ns = now;
+	}
+	return in_sync;
+}
+
 static inline const char *find_min_ts(struct obs_core_data *data, uint64_t *min_ts)
 {
 	obs_source_t *buffering_source = NULL;
 	struct obs_source *source = data->first_audio_source;
 	while (source) {
-		if (!source->audio_pending && source->audio_ts && source->audio_ts < *min_ts) {
+		/* camera-box issue 1381: only a MIXED source moves the mix window. */
+		if (genlock_mix_source_is_member(source) && !source->audio_pending && source->audio_ts &&
+		    source->audio_ts < *min_ts) {
 			*min_ts = source->audio_ts;
 			buffering_source = source;
 		}
@@ -518,7 +686,9 @@ static inline bool mark_invalid_sources(struct obs_core_data *data, size_t sampl
 
 	struct obs_source *source = data->first_audio_source;
 	while (source) {
-		recalculate |= audio_buffer_insufficient(source, sample_rate, min_ts);
+		/* camera-box issue 1381: a source that is not mixed never forces a recalculation. */
+		if (genlock_mix_source_is_member(source))
+			recalculate |= audio_buffer_insufficient(source, sample_rate, min_ts);
 		source = (struct obs_source *)source->next_audio_source;
 	}
 
@@ -696,6 +866,11 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 	}
 	pthread_mutex_unlock(&obs->video.mixes_mutex);
 
+	/* camera-box issue 1381: the render order so far is the MIX -- every source an output mix's active
+	 * tree reached. Mark it before the loop below adds every other audio source (rendered for meters
+	 * and monitoring, never mixed). */
+	genlock_mix_mark_members(audio);
+
 	pthread_mutex_lock(&data->audio_sources_mutex);
 
 	source = data->first_audio_source;
@@ -715,6 +890,22 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 		obs_source_audio_render(source, mixers, channels, sample_rate, audio_size);
 		if (should_silence_monitored_source(source, audio))
 			clear_audio_output_buf(source, audio);
+
+		/* camera-box issue 1381: a source that is not mixed, or that joined the mix on this tick, and
+		 * runs behind the window is re-anchored to it instead of growing the whole mix's buffering
+		 * (genlock_mix_guard_reanchor); a source that stays mixed keeps upstream's path below. */
+		const int genlock_guard =
+			genlock_mix_guard_reason(genlock_mix_source_is_member(source), source->genlock_mix_entered,
+						 source->info.audio_render != NULL, source->audio_ts, ts.start);
+		if (genlock_guard != GENLOCK_MIX_GUARD_NONE) {
+			pthread_mutex_lock(&source->audio_buf_mutex);
+			const bool genlock_rerender = genlock_mix_guard_reanchor(audio, source, channels, sample_rate,
+										 ts.start, genlock_guard);
+			pthread_mutex_unlock(&source->audio_buf_mutex);
+			if (genlock_rerender)
+				obs_source_audio_render(source, mixers, channels, sample_rate, audio_size);
+			continue;
+		}
 
 		/* if a source has gone backward in time and we can no
 		 * longer buffer, drop some or all of its audio */
