@@ -106,7 +106,9 @@ pairs by frame_id, not by crossing time.
 
 - **The mailbox policy**: `g++ -std=c++11 -O2 -Wall -Wextra -Werror -pthread
   vendor/av-sync-dock/test/decode-mailbox-selftest.cpp`, then run the binary. It covers a 50 ms
-  fake decode (producer never blocked for more than 2 ms), latest wins, counted drops, no torn
+  fake decode (producer never blocked: publish p95 < 2 ms and none reaching 15 ms -- the same pair as
+  the audio-worker self-test, a single worst-case 2 ms bound flaked on a loaded CI runner at
+  2.119 ms on 28.9.2026), latest wins, counted drops, no torn
   frame, and stop/destroy joining an in-flight decode.
   - For a race check, rebuild with `-fsanitize=thread` and run it under `setarch -R`. dev1's ASLR
     layout makes TSAN abort with "unexpected memory mapping" otherwise.
