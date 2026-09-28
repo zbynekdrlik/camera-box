@@ -38,7 +38,8 @@ meets the A/V and spread bounds within the settle time, 3/3 repeats. The matrix 
   - Kept alive with the merged holder primitive `rig_lease_refresh_if_mine` (issue 1383) every <=
     `AV_MATRIX_KEEPALIVE_S` (10 s), also while a window runs: only a holder.json naming this repo +
     run id is refreshed; `expected_release_at` rolls forward. Not ours any more, or past the hold
-    ceiling -> exit 5; a filesystem error is retried at the next beat.
+    ceiling -> exit 5; a filesystem error is retried at the next beat. A hand-run soak window
+    under `--lease-run-id` whose caller exported no ceiling uses the lease lib's default, and logs it.
   - `RIG_LEASE_MAX_HOLD_SECS` = the whole run's estimate, EXPORTED: the ceiling counts from the
     matrix's `acquired_at`, so a window must beat under the matrix's ceiling, never its own
     (`slot + 30 min`), or the second window would stop beating the lease.
@@ -134,7 +135,8 @@ sender restart. Three things narrow it:
   program stays shown between windows, since each window's cleanup restores the strih program);
 - it records the restarted camera's receiver state right before each restart (`matrix.tsv` column
   `receiver`: parked / connected / unread / n/a, from the strih OBS log via `strih_log_remote_cmd`
-  + `genlock_park_state_of`);
+  + `genlock_park_state_of`; `connected` only when the tail carries a park line for SOME input --
+  with the bandwidth roles active a hidden input always logs one every 5 s -- else `unread`);
 - the report prints a NOTE per kind and a `CAVEAT:` under the verdict (and in `report.json`) when a
   PASS kind's restarts hit parked or unread receivers.
 
