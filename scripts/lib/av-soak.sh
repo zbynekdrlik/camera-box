@@ -10,7 +10,7 @@
 # Everything the soak DOES on the rig is an existing primitive (obs_phase2.py record/switch/
 # program-scene, obs_burn_filter.py, the issue-1271 rig-busy guard, the issue-830 lease, the
 # strih-lx + stream in-place decode wrappers, recording-verdict's merge). This file only holds:
-#   - the slot/window arithmetic and the scene of the sweep's first cut,
+#   - the slot/window arithmetic,
 #   - the remote TEXT of two READ-ONLY cam2 reads (the permanent painter's state + a tail of its
 #     QPSK marker log) -- cam2 is never written,
 #   - the argv builders of the two on-box extracts and the dev1 merge, used by BOTH the --plan
@@ -47,22 +47,6 @@ av_soak_marker_rows() {
   local w="${1:-0}"
   case "$w" in *[!0-9]* | "") w=0 ;; esac
   printf '%s\n' "$(( (w + 120) * 4 ))"
-}
-
-# av_soak_first_sweep_scene SWITCH_SCHEDULE_PY SWEEP SEGMENT_S WINDOW_S -> the strih scene of the
-# sweep's FIRST cut: the first line of `switch_schedule.py plan` (that script owns the
-# "Scene:LABEL" parsing -- scene names carry spaces). Every slot cuts the strih program to it
-# BEFORE StartRecord, so the recording starts on the input its first schedule window measures:
-# each strih camera input carries its OWN measurement-burn counter, the frames before the first
-# cut belong to no schedule window, and a recording that started on another camera read one
-# phantom strih real_drop at that cut (issue 1367, 28.9.2026). The E2E has the same shape by
-# construction ([4/8] routes the strih program to the camera under test = the first sweep pair).
-# Empty on a failed or empty plan. Always 0.
-av_soak_first_sweep_scene() {
-  local line
-  line="$(python3 "$1" plan --sweep "$2" --segment-secs "$3" --duration "$4" 2>/dev/null \
-    | sed -n 1p)" || line=""
-  printf '%s' "${line%%$'\t'*}"
 }
 
 # av_soak_painter_probe_cmd MARKER_LOG -> REMOTE (cam2, read-only) text printing three key=value

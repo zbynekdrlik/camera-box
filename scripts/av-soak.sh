@@ -244,10 +244,14 @@ SWEEP="$(CAMERA_ACTIVE_SET="$SOAK_CAMS" camera_active_sweep_pairs)"
 read -r -a _SOAK_CAM_ARR <<< "$SOAK_CAMS"
 N_CAMS="${#_SOAK_CAM_ARR[@]}"
 WINDOW_S=$(( N_CAMS * SEGMENT_S ))
-# the scene every slot cuts the strih program to BEFORE its StartRecord (issue 1367, see
-# av_soak_first_sweep_scene): the recording then starts on the input its first window measures
-FIRST_SCENE="$(av_soak_first_sweep_scene "$HERE/switch_schedule.py" "$SWEEP" "$SEGMENT_S" "$WINDOW_S")"
-[ -n "$FIRST_SCENE" ] || die 3 "the sweep plan for '$SWEEP' is empty or unreadable (switch_schedule.py plan)"
+# The sweep's cut plan ("scene<TAB>label" lines; switch_schedule.py owns the parsing, scene names
+# carry spaces), read ONCE: the plan printout, every slot's sweep and the cut to its FIRST scene
+# before each StartRecord (issue 1367) all walk this one list.
+mapfile -t SWEEP_PLAN < <(python3 "$HERE/switch_schedule.py" plan --sweep "$SWEEP" \
+  --segment-secs "$SEGMENT_S" --duration "$WINDOW_S")
+[ "${#SWEEP_PLAN[@]}" -gt 0 ] && [ -n "${SWEEP_PLAN[0]}" ] \
+  || die 3 "the sweep plan for '$SWEEP' is empty or unreadable (switch_schedule.py plan)"
+FIRST_SCENE="${SWEEP_PLAN[0]%%$'\t'*}"
 MIN_SECS="$(av_soak_min_secs "$WINDOW_S")"
 WINDOWS="$(av_soak_windows_count "$DURATION_S" "$SLOT_S")"
 MARKER_ROWS="$(av_soak_marker_rows "$WINDOW_S")"
@@ -345,6 +349,7 @@ EOF
   echo "  a. lease still ours; record volumes free >= ${RECORDINGS_FREE_MIN_GB} GB (curl http://<box>:${BUNDLE_STATE_PORT}/record-dir-stats.json -> bundle_state_gather.recordings_free_line; below = stop the soak)"
   echo "  b. read-only: stream program still '${STREAM_DEV_SCENE}' and the painter service active (else the rig left TEST mode: the run STOPS); an unreadable read or a stalled marker log = a skipped row"
   echo "  c. a proven idle rig (rig-busy-check, an unreadable read retried ${BROADCAST_READS}x ${BROADCAST_RETRY_S} s apart; still unreadable = a skipped row, nothing started),"
+  echo "     then the rig-busy guard: stray_session_check_assert ... 'the slot-k first-scene cut' (busy = abort, exit 5),"
   echo "     then the strih program to the FIRST sweep scene, so the recording starts on the input window 0 measures"
   echo "     (each strih camera input has its own burn counter; a failed cut = a skipped row, nothing started):"
   plan_cmd python3 "$OBS_DIR/obs_phase2.py" switch --host "$STRIH_HOST" --program-scene "$FIRST_SCENE"
@@ -355,11 +360,11 @@ EOF
   plan_cmd python3 "$OBS_DIR/obs_phase2.py" record --host "$STREAM_HOST" --action start
   echo "  e. the sweep -- strih program only (the stream program is never switched); a broadcast check (rig-busy-check) before every cut and before f: live = abort, exit 5, nothing stopped:"
   plan_cmd python3 "$HERE/switch_schedule.py" plan --sweep "$SWEEP" --segment-secs "$SEGMENT_S" --duration "$WINDOW_S"
-  while IFS= read -r seg; do
+  for seg in "${SWEEP_PLAN[@]}"; do
     [ -n "$seg" ] || continue
     scene="${seg%%$'\t'*}"; label="${seg##*$'\t'}"
     echo "      [$label] $(printf '%q ' python3 "$OBS_DIR/obs_phase2.py" switch --host "$STRIH_HOST" --program-scene "$scene"); sleep ${SEGMENT_S}"
-  done < <(python3 "$HERE/switch_schedule.py" plan --sweep "$SWEEP" --segment-secs "$SEGMENT_S" --duration "$WINDOW_S")
+  done
   plan_cmd python3 "$HERE/switch_schedule.py" build --sweep "$SWEEP" --segment-secs "$SEGMENT_S" --duration "$WINDOW_S" --start-ns "<first switch ns>" --boundaries "<later switches + stop ns>"
   echo "  f. StopRecord, verified (the flag clears only when 'record --action status' reads active=False):"
   plan_cmd python3 "$OBS_DIR/obs_phase2.py" record --host "$STRIH_HOST" --action stop
@@ -869,13 +874,11 @@ run_slot() {
       return 0
       ;;
   esac
-  # issue 1367: the recording starts on the sweep's FIRST scene, as the E2E's does (its [4/8] routes
-  # the strih program to the first sweep pair before [5/8] StartRecord). Every strih camera input
-  # carries its OWN measurement-burn counter and the frames before the first cut belong to no
-  # schedule window, so a recording started on another camera (the previous slot's last sweep
-  # scene, which stays on program between slots, or slot 0's snapshot) read one phantom strih
-  # real_drop at that cut. The settled idle read just above is this cut's broadcast proof; the
-  # sweep's own first cut is then a same-scene switch (skipped by obs_phase2, boundary still printed).
+  # issue 1367: record from the sweep's FIRST scene, as the E2E does -- each strih input has its own
+  # burn counter and pre-cut frames sit in no schedule window (.claude/rules/av-soak.md). The guard
+  # also refuses a foreign recording, which the broadcast read above does not see.
+  guard_ok "the slot-$k first-scene cut" \
+    || { ABORT_REASON="the rig is busy (recording or streaming) before the slot-$k first-scene cut"; exit 5; }
   STRIH_SWEPT=1
   if ! obs switch --host "$STRIH_HOST" --program-scene "$FIRST_SCENE" </dev/null >>"$sd/sweep.log" 2>&1; then
     log "slot $k skipped: the strih program could not be cut to '$FIRST_SCENE' before StartRecord (see $sd/sweep.log)"
@@ -897,7 +900,7 @@ run_slot() {
     return 0
   fi
   t_rec="$(date +%s)"
-  while IFS= read -r seg; do
+  for seg in "${SWEEP_PLAN[@]}"; do
     [ -n "$seg" ] || continue
     scene="${seg%%$'\t'*}"; label="${seg##*$'\t'}"
     if [ "$(broadcast_now </dev/null)" = live ]; then
@@ -912,7 +915,7 @@ run_slot() {
     fi
     if [ -z "$start_ns" ]; then start_ns="$ns"; else bounds+=("$ns"); fi
     isleep "$SEGMENT_S"
-  done < <(python3 "$HERE/switch_schedule.py" plan --sweep "$SWEEP" --segment-secs "$SEGMENT_S" --duration "$WINDOW_S")
+  done
   bounds+=("$(date +%s%N)")
   if [ "$outcome" = ok ] && ! python3 "$HERE/switch_schedule.py" build --sweep "$SWEEP" --segment-secs "$SEGMENT_S" \
       --duration "$WINDOW_S" --start-ns "$start_ns" --boundaries "$(IFS=,; echo "${bounds[*]}")" \
