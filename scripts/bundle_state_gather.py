@@ -25,1924 +25,319 @@ that are NOT opt-in behind a `manifest=`/`burn_env=`/`genlock_source_latency=` k
 by the engine when a `manifest=` is supplied, which the current CI invocation never does) so the
 bundle-state payload stays forward-compatible with the opt-in build-SHA facet without any schema
 change later.
+
+Issue 1386: this module is the ONE import name every consumer uses (bundle-state-server.py,
+scripts/lib/av-soak.sh, recording-e2e.sh's free-space check, the tests). It holds the payload
+builder -- `build_bundle_state` over the served key order `BUNDLE_STATE_KEYS` -- and re-exports
+(`__all__`) every facet parser from its flat sibling modules:
+
+  bundle_state_log        the #1222 bounded log read, the in-log time helpers, the timestamped
+                          tail, the box clock + log-head age
+  bundle_state_genlock    OBS / DistroAV banner, fps, genlock markers, the genlock LOCK facet,
+                          the PROGRAM-render freeze and relock-burst facets
+  bundle_state_audio      audio telemetry / ts_lag, the reference band, buffered_ms, audio mixer
+  bundle_state_vban       the obs-vban pacer loss facet
+  bundle_state_av_offset  the av-sync dock offset trend, live age, quality + quality age
+  bundle_state_host       install scans, the NDI latency CSV, tasklist / VB-Matrix, the AHK
+                          readers, record-dir stats + free-space verdict, build sha, byte sha256
+
+Every one of them ships with the server: the deployed tree is declared ONCE in
+scripts/lib/bundle-state-files.txt (bash twin scripts/lib/bundle-state-files.sh, iterated by
+setup-strih.sh / setup-imag.sh; the Windows runbook reads the .txt), and
+tests/python/test_bundle_state_files_1386.py pins that list against the server's real imports.
 """
 from __future__ import annotations
 
-import csv
-import hashlib
-import io
-import itertools
-import json
-import math
 import os
-import re
-import shutil
 import sys
-import time
 
-# The three OBS module scan paths that can each shadow-load a `distroav.dll` (#124, EPIC #125) —
-# mirrors `.claude/commands/drift-guard.md` step 1c EXACTLY (same three roots, same rationale: a
-# second copy in any of these can silently shadow the intended genlock build, #119).
-DISTROAV_SCAN_ROOTS = (
-    r"C:\Program Files\obs-studio\obs-plugins\64bit",
-    r"C:\ProgramData\obs-studio\plugins",
-    # %APPDATA% is resolved by the caller (this module stays free of env lookups so it is
-    # trivially testable against a tmp_path tree); see bundle-state-server.py's gather step.
+# The facet modules are flat siblings of this file (the deployed tree is flat: /opt/camera-box on
+# the Linux boxes, C:\ProgramData\camera-box on Windows). A caller that loads this file by path
+# (importlib, several tests) without its directory on sys.path still resolves them.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.append(_HERE)
+
+from bundle_state_audio import (  # noqa: E402 -- after the sibling path setup above
+    AUDIO_REF_BAND_DEFAULT_SRC,
+    AUDIO_REF_BAND_DUTY_MARGIN_MS,
+    AUDIO_REF_BAND_WINDOW_CAP,
+    AUDIO_TS_LAG_STALE_AFTER_S,
+    BUFFERED_MS_DEFAULT_SRC,
+    audio_mixer_from_log,
+    audio_ref_band_from_log,
+    audio_telemetry_from_log,
+    audio_ts_lag_ms_from_log,
+    buffered_ms_series_from_log,
+)
+from bundle_state_av_offset import (  # noqa: E402 -- after the sibling path setup above
+    AV_OFFSET_BASELINE_WINDOW_S,
+    AV_OFFSET_RECENT_WINDOW_S,
+    av_offset_dock_live_age_from_log,
+    av_offset_quality_age_from_log,
+    av_offset_quality_from_log,
+    av_offset_series_from_log,
+)
+from bundle_state_genlock import (  # noqa: E402 -- after the sibling path setup above
+    RELOCK_BURSTS_MIN_DEFAULT,
+    distroav_version_from_log,
+    genlock_capability_from_log,
+    genlock_lock_facet_from_log,
+    genlock_wall_clock_from_log,
+    obs_version_from_log,
+    output_fps_from_log,
+    _parse_relock_event,
+    program_render_lagged_from_log,
+    relock_bursts_from_log,
+    _summarize_relock_bursts,
+)
+from bundle_state_host import (  # noqa: E402 -- after the sibling path setup above
+    DISTROAV_SCAN_ROOTS,
+    OBS_LIVE_MIN_MEM_KB,
+    OBS_PROCESS_NAME_RE,
+    VB_MATRIX_EXE_RE,
+    VB_MATRIX_PROCESS_NAME_RE,
+    ahk_app1_run,
+    ahk_app1_shortcut_path,
+    ahk_dead_config_present,
+    component_sha256,
+    distroav_dll_paths,
+    genlock_build_sha_from_file,
+    ndi_input_latency_csv,
+    obs_installs_under,
+    obs_process_count_from_listing,
+    record_dir_stats,
+    recordings_free_line,
+    recordings_free_verdict,
+    tasklist_mem_kb,
+    tasklist_row_is_live_obs,
+    vb_matrix_install_present_under,
+    vb_matrix_process_from_listing,
+    vb_matrix_running_facet,
+)
+from bundle_state_log import (  # noqa: E402 -- after the sibling path setup above
+    LOG_BOUNDED_READ_SEPARATOR,
+    LOG_HEAD_BYTES,
+    LOG_HEAD_CLOCK_SLACK_S,
+    LOG_TAIL_BYTES,
+    local_seconds_of_day,
+    obs_log_head_age_s_from_log,
+    read_bounded_log_text,
+    timestamped_tail_lines,
+)
+from bundle_state_vban import (  # noqa: E402 -- after the sibling path setup above
+    VBAN_BASELINE_S,
+    VBAN_LEGACY_LOSS_EVENTS,
+    VBAN_LOSS_EVENTS,
+    VBAN_LOSS_MS,
+    VBAN_LOSS_WINDOW_S,
+    VBAN_MULTI_SENDER_GAP_S,
+    VBAN_PREDECESSOR_SCAN,
+    vban_pacer_loss_from_log,
 )
 
+__all__ = [
+    # this module
+    "BUNDLE_STATE_KEYS",
+    "build_bundle_state",
+    # bundle_state_audio
+    "AUDIO_REF_BAND_DEFAULT_SRC",
+    "AUDIO_REF_BAND_DUTY_MARGIN_MS",
+    "AUDIO_REF_BAND_WINDOW_CAP",
+    "AUDIO_TS_LAG_STALE_AFTER_S",
+    "BUFFERED_MS_DEFAULT_SRC",
+    "audio_mixer_from_log",
+    "audio_ref_band_from_log",
+    "audio_telemetry_from_log",
+    "audio_ts_lag_ms_from_log",
+    "buffered_ms_series_from_log",
+    # bundle_state_av_offset
+    "AV_OFFSET_BASELINE_WINDOW_S",
+    "AV_OFFSET_RECENT_WINDOW_S",
+    "av_offset_dock_live_age_from_log",
+    "av_offset_quality_age_from_log",
+    "av_offset_quality_from_log",
+    "av_offset_series_from_log",
+    # bundle_state_genlock
+    "RELOCK_BURSTS_MIN_DEFAULT",
+    "distroav_version_from_log",
+    "genlock_capability_from_log",
+    "genlock_lock_facet_from_log",
+    "genlock_wall_clock_from_log",
+    "obs_version_from_log",
+    "output_fps_from_log",
+    "_parse_relock_event",
+    "program_render_lagged_from_log",
+    "relock_bursts_from_log",
+    "_summarize_relock_bursts",
+    # bundle_state_host
+    "DISTROAV_SCAN_ROOTS",
+    "OBS_LIVE_MIN_MEM_KB",
+    "OBS_PROCESS_NAME_RE",
+    "VB_MATRIX_EXE_RE",
+    "VB_MATRIX_PROCESS_NAME_RE",
+    "ahk_app1_run",
+    "ahk_app1_shortcut_path",
+    "ahk_dead_config_present",
+    "component_sha256",
+    "distroav_dll_paths",
+    "genlock_build_sha_from_file",
+    "ndi_input_latency_csv",
+    "obs_installs_under",
+    "obs_process_count_from_listing",
+    "record_dir_stats",
+    "recordings_free_line",
+    "recordings_free_verdict",
+    "tasklist_mem_kb",
+    "tasklist_row_is_live_obs",
+    "vb_matrix_install_present_under",
+    "vb_matrix_process_from_listing",
+    "vb_matrix_running_facet",
+    # bundle_state_log
+    "LOG_BOUNDED_READ_SEPARATOR",
+    "LOG_HEAD_BYTES",
+    "LOG_HEAD_CLOCK_SLACK_S",
+    "LOG_TAIL_BYTES",
+    "local_seconds_of_day",
+    "obs_log_head_age_s_from_log",
+    "read_bounded_log_text",
+    "timestamped_tail_lines",
+    # bundle_state_vban
+    "VBAN_BASELINE_S",
+    "VBAN_LEGACY_LOSS_EVENTS",
+    "VBAN_LOSS_EVENTS",
+    "VBAN_LOSS_MS",
+    "VBAN_LOSS_WINDOW_S",
+    "VBAN_MULTI_SENDER_GAP_S",
+    "VBAN_PREDECESSOR_SCAN",
+    "vban_pacer_loss_from_log",
+]
 
-def obs_version_from_log(text):
-    """"OBS 32.1.2 (64-bit, windows)" -> "32.1.2". "" if the log never printed it (UNKNOWN, per
-    drift-guard's never-a-false-clean contract — the caller simply omits the key)."""
-    m = re.search(r"OBS (\d+\.\d+\.\d+)", text or "")
-    return m.group(1) if m else ""
-
-
-def distroav_version_from_log(text):
-    """"DistroAV (Version 6.2.1)" -> "6.2.1". "" if absent."""
-    m = re.search(r"DistroAV \(Version (\d+\.\d+\.\d+)\)", text or "")
-    return m.group(1) if m else ""
-
-
-def output_fps_from_log(text):
-    """The `fps:` line INSIDE the first "video settings reset:" block -> "30". "" if either the
-    reset block or its fps line is absent. Mirrors `.claude/commands/drift-guard.md` step 1's
-    PowerShell block-scoped scan line-for-line (first reset block only, first fps line inside it)."""
-    lines = (text or "").splitlines()
-    for i, line in enumerate(lines):
-        if "video settings reset:" in line:
-            for later in lines[i:]:
-                m = re.search(r"fps:\s+(\d+)/", later)
-                if m:
-                    return m.group(1)
-            break  # found the reset block but no fps line followed it — UNKNOWN, don't scan past it
-    return ""
-
-
-def genlock_wall_clock_from_log(text):
-    """"1" (render tick ENABLED), "0" (DISABLED), "" if the build never logged the marker at all
-    (a stock OBS, or OBS never launched — UNKNOWN, never guessed)."""
-    t = text or ""
-    if re.search(r"genlock:.*render tick ENABLED", t):
-        return "1"
-    if re.search(r"genlock:.*render tick DISABLED", t):
-        return "0"
-    return ""
-
-
-def genlock_capability_from_log(text):
-    """Every `genlock:` capability-marker line (render tick ENABLED / sub-frame jitter reserve /
-    timestamp-aligned release) joined with '\\n' — the #122 build-unique tell. "" if the build
-    emits none (a stock OBS). Gathered for forward-compat with the opt-in manifest/capability
-    facet in drift-guard.sh; harmless when no manifest= is supplied (the current CI invocation)."""
-    pattern = re.compile(r"genlock:.*(render tick ENABLED|sub-frame jitter reserve|timestamp-aligned release)")
-    matches = [line for line in (text or "").splitlines() if pattern.search(line)]
-    return "\n".join(matches)
-
-
-# #1299 — the fleet-visible genlock LOCK facet. The #1298 statusbar widget is the ONE place the
-# three genlock producers (per-source FIFO counters, the NDI output's wall-stamping flag, the
-# dantesync :8898 clock facet) are joined into one decided verdict; it emits that verdict as a
-# versioned `genlock-lock-json: {…} (#1299)` line (a heartbeat + on-change, so the #1222 bounded
-# TAIL always holds a fresh one). This parser reads the NEWEST such line and reshapes the widget's
-# payload into the nested `genlock_lock` facet the dev1 watchdog + rig-status read. Reusing the
-# SAME already-bounded log_text as every other facet (no second read, no subprocess -> no new
-# #1222 cache needed). "" / a stock OBS with no such line -> None (facet OMITTED downstream, never a
-# false UNLOCKED).
-_GENLOCK_LOCK_JSON_MARKER = "genlock-lock-json:"
-
-
-def genlock_lock_facet_from_log(text):
-    """The nested `genlock_lock` facet dict from the NEWEST `genlock-lock-json:` line in *text*, or
-    None when the line is absent / unparseable (a stock OBS, or no such line in the bounded window
-    yet — UNKNOWN downstream, NEVER a fabricated UNLOCKED).
-
-    Shape:
-      {state, reason, n_inputs, n_locked, n_absent, n_idle, latency_ms, recent_event, qpc_drift_ms,
-       qpc_drift_ppm, qpc_expected_ppm, qpc_step,
-       clock:{state}, output:{present, stamping_wallclock},
-       inputs:{<name>:{locked, connected, idle, latency_ms, underruns, relocks, late_holds, depth}},
-       [recent_event_inputs:[{name, events}]], [audio_unexpected_inputs:[{name}]],
-       [media_clock:{state, drift_us, window_s, ready, discipline}], source:"log"}
-
-    Issue 1372 part D (schema v7): `media_clock` is the audio (media) clock facet the widget decided
-    with -- `state` ok|drift|undisciplined, the wall-vs-media drift `drift_us` per `window_s` (the
-    time-weighted rate of the non-step pairs, scaled to the window),
-    whether that window has filled (`ready`), and the Windows discipline outcome (`discipline`:
-    active|disabled|read_failed|api_missing|unknown, or n/a on Linux). Omitted for a pre-v7 line or a
-    malformed object, never fabricated.
-
-    #1341 (schema v6): `n_idle` (connected-but-keep-alive-only input count) and per-input `idle`
-    distinguish an idle SongPlayer playlist input from a live one so the fleet indicator never
-    false-flaps DEGRADED/recent_event on it. Both degrade gracefully for a pre-v6 line
-    (`n_idle`->None, per-input `idle`->False).
-
-    #1299 (schema v5, Part 4): `qpc_drift_ppm` (measured windowed drift rate), `qpc_expected_ppm` (the
-    dantesync-reported slew) and `qpc_step` (a single-sample wall STEP tripped) are report-only
-    telemetry — the qpc_drift VERDICT (since #1357 the wall STEP only) is folded into `state` by the widget.
-    All three default to None for a v1-v4 line from an older build (the cumulative `qpc_drift_ms` stays).
-
-    #1299 (schema v3, Part 3): `recent_event_inputs` is the top recent-event offender (name+count),
-    present ONLY when the v3 line carries a non-empty list (a DEGRADED/recent_event page names it).
-    Omitted for a v1/v2 line from an older build, or an empty list, so an older line never fabricates
-    an attribution.
-
-    #1303 (schema v4): `audio_unexpected_inputs` is a silent-by-contract source found AUDIBLE (the
-    double-audio hazard), present ONLY when the v4 line carries a non-empty list. Omitted for a
-    v1/v2/v3 line, or an empty list.
-
-    #1299 (schema v2): `n_absent` (senderless input count) and per-input `connected` distinguish an
-    idle NDI input (no sender) from a connected-but-unlocked one so the fleet watchdog never
-    false-pages a legitimately-idle input. Both degrade gracefully for a v1 line from an older
-    build (`n_absent`->None, `connected`->True).
-
-    `state`/`reason` are the verdict the widget ALREADY decided (so the facet can never disagree
-    with the statusbar). The per-input array is keyed by name; a duplicate name keeps the last."""
-    t = text or ""
-    if _GENLOCK_LOCK_JSON_MARKER not in t:
-        return None
-    # Newest line wins (the widget heartbeats this, so the last occurrence is the current state).
-    newest = None
-    for line in t.splitlines():
-        if _GENLOCK_LOCK_JSON_MARKER in line:
-            newest = line
-    if newest is None:
-        return None
-    # The payload is a JSON object; slice from its first "{" to its last "}" so a leading log-time
-    # prefix and the trailing " (#1299)" tag are both ignored. A malformed line -> None.
-    start = newest.find("{")
-    end = newest.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        payload = json.loads(newest[start:end + 1])
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-
-    # Reshape the widget payload into the facet. Every field is tolerant of absence (a future
-    # widget that drops a field must degrade, never crash this gather).
-    clock_str = payload.get("clock")
-    output_str = payload.get("output")
-    inputs_map = {}
-    raw_inputs = payload.get("inputs")
-    if isinstance(raw_inputs, list):
-        for row in raw_inputs:
-            if not isinstance(row, dict):
-                continue
-            name = row.get("name")
-            if not isinstance(name, str) or not name:
-                continue
-            inputs_map[name] = {
-                "locked": bool(row.get("locked")),
-                # #1299 (schema v2): whether the DistroAV receiver has a live NDI connection. Default
-                # True for a v1 line from an older build (no `connected` key) so a senderless-but-
-                # unreported input reads connected, exactly as the pre-#1299 behaviour.
-                "connected": bool(row.get("connected", True)),
-                # #1341 (schema v6): whether this CONNECTED input is IDLE (keep-alive-only). Default
-                # False for a pre-v6 line (no `idle` key) so an older line reads exactly as pre-#1341.
-                "idle": bool(row.get("idle", False)),
-                "latency_ms": row.get("latency_ms"),
-                "underruns": row.get("underruns"),
-                "relocks": row.get("relocks"),
-                "late_holds": row.get("late_holds"),
-                "depth": row.get("depth"),
-            }
-
-    facet = {
-        "state": payload.get("state"),
-        "reason": payload.get("reason"),
-        "n_inputs": payload.get("n_inputs"),
-        "n_locked": payload.get("n_locked"),
-        # #1299 (schema v2): senderless (no-NDI-connection) input count. None for a v1 line from an
-        # older build -> the decision treats absent as 0, i.e. the pre-#1299 all-connected reading.
-        "n_absent": payload.get("n_absent"),
-        # #1341 (schema v6): CONNECTED-but-IDLE (keep-alive-only) input count. None for a pre-v6 line
-        # -> the decision treats idle as 0 (the pre-#1341 reading); the widget already decided `state`.
-        "n_idle": payload.get("n_idle"),
-        "latency_ms": payload.get("latency_ms"),
-        "recent_event": bool(payload.get("recent_event")),
-        "qpc_drift_ms": payload.get("qpc_drift_ms"),
-        # #1299 Part 4 (schema v5): windowed wall-vs-QPC drift telemetry (report-only). Since #1357 the
-        # qpc_drift VERDICT is the wall STEP only (`qpc_step`) — neither the rate (`qpc_drift_ppm`) nor
-        # the dantesync slew (`qpc_expected_ppm`) nor the cumulative `qpc_drift_ms` above gates.
-        # All three default to None for a v1-v4 line from an older build.
-        "qpc_drift_ppm": payload.get("qpc_drift_ppm"),
-        "qpc_expected_ppm": payload.get("qpc_expected_ppm"),
-        "qpc_step": payload.get("qpc_step"),
-        "clock": {"state": clock_str} if isinstance(clock_str, str) else {},
-        "output": {
-            "present": output_str != "absent",
-            "stamping_wallclock": output_str == "stamping",
-        } if isinstance(output_str, str) else {},
-        "inputs": inputs_map,
-        "source": "log",
-    }
-
-    # #1299 (schema v3, Part 3): the top recent-event offender(s) — [{name, events}] — so a
-    # DEGRADED/recent_event page can NAME the offending input (reason=recent_event:<name>). Omit the
-    # key entirely when absent (a v1/v2 line from an older build) or empty (no offender), so an older
-    # line never fabricates an attribution. Each entry is tolerant: a malformed row is skipped.
-    raw_rei = payload.get("recent_event_inputs")
-    if isinstance(raw_rei, list):
-        rei = []
-        for row in raw_rei:
-            if not isinstance(row, dict):
-                continue
-            name = row.get("name")
-            if not isinstance(name, str) or not name:
-                continue
-            rei.append({"name": name, "events": row.get("events")})
-        if rei:
-            facet["recent_event_inputs"] = rei
-
-    # #1303 (schema v4): the audio-unexpected offender(s) — [{name}] — a silent-by-contract source
-    # found AUDIBLE, so a DEGRADED/audio_unexpected page can NAME it (reason=audio_unexpected:<name>).
-    # Omit the key entirely when absent (a v1/v2/v3 line from an older build) or empty (no offender),
-    # so an older line never fabricates an attribution. Each entry is tolerant: a malformed row is
-    # skipped. Names-only (no events count — unlike recent_event, an unexpected-audio input is a
-    # binary condition, not a cumulative counter).
-    raw_aui = payload.get("audio_unexpected_inputs")
-    if isinstance(raw_aui, list):
-        aui = []
-        for row in raw_aui:
-            if not isinstance(row, dict):
-                continue
-            name = row.get("name")
-            if not isinstance(name, str) or not name:
-                continue
-            aui.append({"name": name})
-        if aui:
-            facet["audio_unexpected_inputs"] = aui
-
-    # Issue 1372 part D (schema v7): the media (audio) clock facet. Omit the key entirely for a pre-v7
-    # line or a malformed object (no string `state`), so an older build never reads as a verdict.
-    raw_mc = payload.get("media_clock")
-    if isinstance(raw_mc, dict) and isinstance(raw_mc.get("state"), str):
-        facet["media_clock"] = {
-            "state": raw_mc.get("state"),
-            "drift_us": raw_mc.get("drift_us"),
-            "window_s": raw_mc.get("window_s"),
-            "ready": bool(raw_mc.get("ready")),
-            "discipline": raw_mc.get("discipline"),
-        }
-
-    return facet
-
-
-# #1222 — the strih bundle-state gather's latency grew LINEARLY with the live OBS log size: a
-# ~13h session (75 MB log) made every *_from_log parser above re-scan the WHOLE file on EVERY
-# /bundle-state.json request (~0.25 s/MB measured, +19 s at 75 MB), pushing gather past
-# recording-e2e.sh's `curl --max-time 30` and refusing the [0/8] version-integrity gate. Every
-# fact these parsers need lives at the EDGES of the log, never the middle: the startup banner
-# (obs_version / distroav_version / the first "video settings reset:" fps line / the FIRST
-# genlock capability markers) is written once at process start, and the "current state" a caller
-# might care about (the newest genlock capability marker) is always in the most recent lines. So
-# bound the read to a HEAD slice (startup banner) + a TAIL slice (newest state), independent of
-# how large the file has grown.
-LOG_HEAD_BYTES = 2 * 1024 * 1024  # ~2 MB — a wide margin over the startup banner (#1222 measured
-                                   # it sitting in the first few KB of a real log in practice).
-LOG_TAIL_BYTES = 5 * 1024 * 1024  # ~5 MB — the newest state a caller might need (e.g. the latest
-                                   # genlock capability marker).
-# A separator that can never fake a real log line: no digits (so it can never satisfy a
-# `\d+\.\d+\.\d+` / `fps:\s+\d+/` style pattern above), no colon-prefixed keyword any parser
-# scans for ("OBS ", "DistroAV (Version", "video settings reset:", "genlock:"), and newline-padded
-# on both sides so a byte-cut mid-line on either side of the join can never merge into something a
-# parser could mistake for a real one.
-# #1222 review: verified digit-free by construction (a future unanchored `\d+`-style parser
-# would violate the claim above otherwise) -- keep it that way if this text ever changes.
-LOG_BOUNDED_READ_SEPARATOR = (
-    "\n\n===== bounded log read: middle omitted (head+tail only) =====\n\n"
+# The flat payload keys in their SERVED order (the JSON key order of /bundle-state.json), each
+# with why it exists. `build_bundle_state` accepts exactly these keywords and omits an empty one.
+BUNDLE_STATE_KEYS = (
+    "obs_version",
+    "distroav_version",
+    "ndi_runtime",
+    "output_fps",
+    "genlock_wall_clock",
+    "ndi_input_latency",
+    "distroav_dll_paths",
+    "genlock_capability",
+    "obs_dll_sha256",
+    "distroav_dll_sha256",
+    "obs_installs",
+    "port4455_owner_path",
+    "port4455_owner_version",
+    "obs_process_count",
+    "ahk_app1_shortcut_path",
+    "ahk_app1_run",
+    "ahk_dead_config_present",
+    "shortcut_target_path",
+    "shortcut_workdir",
+    "genlock_build_sha",
+    # #1226 — the audio-timeline-lag facet the dev1 audio-lag watchdog reads; same
+    # omit-when-empty rule (absent facet == UNKNOWN downstream, never a fake 0).
+    "audio_ts_lag_ms",
+    "audio_ts_lag_src",
+    # #1231 — the freshness age (in-log seconds the freshest #800 line sits behind the log head);
+    # present ("0" when fresh) whenever ANY #800 line exists, "" only when telemetry is absent.
+    # A large value -> the dev1 decision surfaces a STALE (stopped-while-log-advancing) state.
+    "audio_ts_lag_age_s",
+    # #1265 — the per-REFERENCE-source (mbc on stream) ts_lag BAND SHAPE (base/high/low/duty/n),
+    # from `audio_ref_band_from_log`. Same omit-when-empty rule; the dev1 audio-lag watchdog's
+    # BAND arm reads these to catch a tens-of-ms bimodal/creeping drift the 5000 ms MAX-facet is
+    # blind to, and recording-e2e.sh's #856 apply reads the derived verdict to HOLD when the run's
+    # audio timeline was unstable.
+    "audio_ref_lag_src",
+    "audio_ref_lag_base_ms",
+    "audio_ref_lag_high_ms",
+    "audio_ref_lag_low_ms",
+    "audio_ref_lag_duty_pct",
+    "audio_ref_lag_n",
+    # #1267 — the av-sync dock measured-offset trend the dev1 upstream-step watchdog reads: the
+    # RECENT-vs-BASELINE median offset (a sustained step = a physical upstream A/V shift), the
+    # CURRENT genlock pin + a pin-stability flag (a pin move -> the dev1 REPIN hold, never a
+    # false step), the in-log freshness age (-> STALE when the dock stops), and the per-window
+    # sample counts (too few -> UNKNOWN). Same omit-when-empty rule (absent == UNKNOWN, never 0).
+    "av_offset_recent_med_ms",
+    "av_offset_base_med_ms",
+    "av_offset_pin",
+    "av_offset_pin_stable",
+    "av_offset_age_s",
+    "av_offset_n_recent",
+    "av_offset_n_base",
+    # #1319 — the dock-LIVE freshness age (in-log seconds behind the log head of the freshest
+    # `av-sync-dock: diag ... locked=yes` heartbeat). Lets the dev1 band decision read
+    # IN_BAND_QUIET (dock LIVE, offset in the suggestion dead band) instead of a false STALE.
+    # Same omit-when-empty rule (absent == UNKNOWN downstream, never a fake 0).
+    "av_offset_dock_live_age_s",
+    # #1319 Part 2 — the dock estimator's recent-window measurement QUALITY (median MAD +
+    # min matched), from av_offset_quality_from_log. The dev1 band arm reads LOW_QUALITY
+    # (log-only, never a page) unless recent_mad_ms <= 15 AND recent_matched_min >= 30, so a
+    # noisy/biased dock reading no longer trips the +-30 ms band on its own scatter. Same
+    # omit-when-empty rule (absent == quality unjudgeable -> the band proceeds, never a fake 0).
+    "av_offset_recent_mad_ms",
+    "av_offset_recent_matched_min",
+    # #1325 — the in-log age (s) of the freshest dock QUALITY line. The dev1 band/step arms read
+    # LOW_QUALITY (no page) when the quality facet is ABSENT (mad None) AND this age is stale (the
+    # dock stopped decoding — the 3× false page of 16.9.2026), while an ABSENT age (older box, or
+    # a dock actively measuring) keeps the #1319 "absent -> proceed, never swallow a real drift"
+    # behaviour. Omit-when-empty (absent == no quality line at all -> UNKNOWN downstream).
+    "av_offset_quality_age_s",
+    # #1325 — the mbc buffered_ms DRIFT/STEP shape (slope ms/min + max positive refill step +
+    # n + freshness age) the dev1 audio-lag watchdog's buffered arm reads (REPORT-ONLY). Same
+    # omit-when-empty rule (absent == < 2 buffered readings for the ref source -> UNKNOWN).
+    "buffered_ms_slope_ms_per_min",
+    "buffered_ms_max_step_ms",
+    "buffered_ms_n",
+    "buffered_ms_age_s",
+    # #1227 — the VB-Matrix presence facet the dev1 VB-Matrix alert watchdog reads. Same
+    # omit-when-empty rule: running="0" (installed but the VBAudioMatrix* process is DEAD) is a
+    # truthy string and is KEPT (surfaces as DOWN); running="" (a box with no VB-Matrix install,
+    # e.g. imag) is dropped -> UNKNOWN downstream, never a false negative. name/pid/start are
+    # context only (pid free from the tasklist parse; start best-effort, PID-keyed-cached CIM).
+    "vb_matrix_running",
+    "vb_matrix_name",
+    "vb_matrix_pid",
+    "vb_matrix_start",
+    # #1320 — the strih PROGRAM-render freeze facet the dev1 render-freeze watchdog reads: the
+    # MAX `program-render-audit lagged` over the tail + the in-log age (s) of the most recent
+    # window achieving it. Same omit-when-empty rule: "0" (render telemetry live, no freeze) is
+    # a truthy string and is KEPT; "" (no program-render-audit line at all) is dropped ->
+    # UNKNOWN downstream, never a fabricated 0. From `program_render_lagged_from_log`.
+    "program_render_lagged",
+    "program_render_lagged_age_s",
+    # #1320 — the RELOCK-BURST facet the dev1 render-freeze watchdog's relock arm reads: the MAX
+    # per-input burst count (issue 1318 summarize_relock_bursts, >=8 relocks within 1 s) over the
+    # #1222 bounded TAIL + the in-log age (s) of the newest relock event. Same omit-when-empty
+    # rule: "0" (relock telemetry live, no storm) is truthy and KEPT; "" (NO relock line at all,
+    # the steady state) is dropped -> UNKNOWN downstream, never a fabricated 0.
+    "relock_bursts",
+    "relock_bursts_age_s",
+    # issue 1381 -- the audio MIXER real-time facet (the newest complete `audio-stall #1367`
+    # dump + its window + in-log age, `audio_mixer_from_log`) and the obs-vban PACER loss facet
+    # (per-destination loss-counter increase in the last window, `vban_pacer_loss_from_log`) the
+    # dev1 audio-mixer watchdog reads. Same omit-when-empty rule: "0" readings are KEPT, a box
+    # with no dump yet / no VBAN output omits them -> UNKNOWN downstream, never a fake 0.
+    "audio_mixer_ticks",
+    "audio_mixer_ticks_over",
+    "audio_mixer_window_ms",
+    "audio_mixer_tick_ms",
+    "audio_mixer_age_s",
+    "vban_pacer_loss_events",
+    "vban_pacer_loss_ms",
+    "vban_pacer_loss_dest",
+    "vban_pacer_age_s",
+    # issue 1385 -- the log head's age against the box's own clock (`obs_log_head_age_s_from_log`):
+    # the positive "OBS is still logging now" proof the dev1 audio-mixer STALLED verdict needs.
+    # "0" is a reading and is KEPT; no timestamped line omits it -> no proof downstream.
+    "obs_log_head_age_s",
 )
+_BUNDLE_STATE_KEY_SET = frozenset(BUNDLE_STATE_KEYS)
 
 
-def read_bounded_log_text(path, head_bytes=LOG_HEAD_BYTES, tail_bytes=LOG_TAIL_BYTES):
-    """#1222 — the raw text of *path*, bounded to at most `head_bytes + tail_bytes +
-    len(LOG_BOUNDED_READ_SEPARATOR)` characters, regardless of the file's actual size. A file no
-    larger than `head_bytes + tail_bytes` is returned WHOLE, byte-for-byte (no separator, no
-    truncation) — the common case for a freshly-started OBS session and for every existing test
-    fixture in this suite. A larger file returns its first `head_bytes` bytes joined to its last
-    `tail_bytes` bytes via LOG_BOUNDED_READ_SEPARATOR (see that constant's own doc comment for why
-    it can never be mistaken for a real log line by any parser above). Read in BINARY mode and
-    decoded with `errors="replace"` — a byte-boundary cut mid multi-byte UTF-8 character degrades
-    to a harmless U+FFFD, never a crash. Unlike the original whole-file text-mode read this
-    replaces, a Windows CRLF line ending is NOT translated to a bare `\n` here; every parser above
-    is CRLF-tolerant (`splitlines()` strips a trailing `\r`, and no regex here crosses a line
-    boundary), so this has no observed behavioral effect, but it is a real difference worth
-    knowing if a future parser is added.
-
-    "" if *path* is missing/unreadable — the same UNKNOWN-downstream contract as the whole-file
-    read this replaces (callers already treat an empty log text as every derived facet coming
-    back empty)."""
-    try:
-        size = os.path.getsize(path)
-        with open(path, "rb") as f:
-            if size <= head_bytes + tail_bytes:
-                return f.read().decode("utf-8", errors="replace")
-            head = f.read(head_bytes)
-            f.seek(size - tail_bytes)
-            tail = f.read(tail_bytes)
-    except OSError as e:
-        print(f"WARNING: read_bounded_log_text: could not read {path!r}: {e}", file=sys.stderr)
-        return ""
-    return (
-        head.decode("utf-8", errors="replace")
-        + LOG_BOUNDED_READ_SEPARATOR
-        + tail.decode("utf-8", errors="replace")
-    )
-
-
-# #1226 — the audio-timeline-lag telemetry line vendored OBS emits every 60 s per audio source
-# (vendor/obs-studio/libobs/obs-audio.c:698): `audio-telemetry #800 '<src>': ts_lag_ms=<int64> ...`.
-# The name is captured up to the next `'` (a rig source name — "ASIO Input Capture", "mbc",
-# "post video", "test-audio" — never contains an apostrophe; a hypothetical apostrophe-carrying name
-# simply fails to match and is skipped, never a fabricated reading). The trailing `: ts_lag_ms=`
-# anchor makes the summary line `audio-telemetry #800: total_buffering=...` (no quoted name) never
-# match. ts_lag_ms may be negative (-1 == audio_ts==0, i.e. no audio timeline yet).
-_AUDIO_TS_LAG_RE = re.compile(r"audio-telemetry #800 '([^']*)': ts_lag_ms=(-?\d+)")
-
-# camera-box #1325 — the `buffered_ms` field of the SAME #800 line (obs-audio.c:698). It is the
-# honest signal for the mbc (Dante/ASIO) source's audio-timeline drift against the OBS mix clock:
-# on the stream box `buffered_ms` drains ~1.1 ms/min (the ≈ −18 ppm Dante-GM-vs-UTC floor the ASRC
-# fails to hold out of the buffer) then JUMPS +20…+57 ms when OBS re-buffers — a sawtooth that
-# makes every dock/E2E A/V-offset reading wander ±30–50 ms. Captures (src, buffered_ms) so the
-# per-reference-source drift/step verdict can watch ONE named source (default mbc), never a
-# max-across-sources scalar (a per-source drift is invisible in a global max).
-_AUDIO_800_BUFFERED_RE = re.compile(
-    r"audio-telemetry #800 '([^']*)': ts_lag_ms=-?\d+ buffered_ms=(-?\d+)")
-BUFFERED_MS_DEFAULT_SRC = "mbc"
-
-# #1320 — the PROGRAM-render freeze signal. `program-render-audit:` (obs-video.c
-# obs_graphics_thread_loop, ~5 s) carries the PROGRAM output's render cadence; `lagged` ==
-# renderSkipped in that window, so a `lagged>0` window is a render-thread freeze.
-_PROGRAM_RENDER_LAGGED_RE = re.compile(r"program-render-audit:.*?\blagged=(\d+)\b")
-
-# #1231 — freshness/recency for the audio-lag facet (follow-up to the #1226 review finding W1). The
-# #1226 facet took the LAST reading PER source with NO age bound, so a source removed/renamed while
-# LAGGING kept its stale-high line winning the MAX until the log rotated (concern a), and a telemetry
-# tick that STOPPED while the OBS log kept advancing read as healthy (concern b). We add a purely
-# IN-LOG relative recency (the ndi_halving_decision.ts_to_seconds + midnight-wrap precedent, MIRRORED
-# here so the box's gather never imports a dev1-only decision module): each source's newest #800 line
-# is aged against the newest parseable timestamp of ANY line in the tail (the log's current write
-# head). No wall clock is injected, so this stays a pure fixture-testable parser and never
-# mis-compares a date-less OBS timestamp against a foreign clock (issue 1231 design Prístup 1).
-AUDIO_TS_LAG_STALE_AFTER_S = 180  # ~3x the 60 s emit period: a source silent this long is stale.
-
-# #1265 — the per-REFERENCE-source ts_lag BAND facet. The #1226/#1231 facet is a single
-# MAX-across-sources scalar graded at a 5000 ms page threshold, which is structurally blind to the
-# A/V-gate reference source (`mbc`) going BIMODAL (flat ~107 ms then flapping 107↔180 ms, high mode
-# creeping up) — a 23×-under-threshold drift that still shifts the measured A/V residual past the
-# ±90 gate (issue 1265). `audio_ref_band_from_log` reads the SAME #1222 bounded head+tail log ONCE
-# and, for the named reference source, computes the band SHAPE at tens-of-ms resolution; the dev1
-# `classify_band` decision thresholds it, ships DISABLED like every sibling watchdog.
-AUDIO_REF_BAND_DEFAULT_SRC = "mbc"     # the stream A/V-gate audio reference (cam2 HDMI -> hand1 mic)
-AUDIO_REF_BAND_DUTY_MARGIN_MS = 20     # a tail reading > baseline + this counts as "high mode"
-AUDIO_REF_BAND_WINDOW_CAP = 120        # bound the tail-window readings considered (recent state)
-
-_LOG_LINE_TS_RE = re.compile(r"^\s*(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?")
-
-
-def _log_line_seconds(line):
-    """The leading OBS-log `HH:MM:SS[.mmm]` prefix of *line* -> seconds-of-day float, or None when
-    the line does not begin with a real clock time (a continuation/blank line -> no timestamp, never
-    a guessed one). Mirror of ndi_halving_decision.ts_to_seconds, kept LOCAL so bundle_state_gather
-    (which runs on the box) never imports a dev1-only decision module (issue 1231)."""
-    m = _LOG_LINE_TS_RE.match(line)
-    if not m:
-        return None
-    h, mm, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
-    if h > 23 or mm > 59 or s >= 60:
-        return None
-    frac = float("0." + m.group(4)) if m.group(4) else 0.0
-    return h * 3600 + mm * 60 + s + frac
-
-
-def _recency_gap_s(newest_ref, ts):
-    """Seconds *ts* sits behind *newest_ref* (both seconds-of-day), midnight-wrap-corrected, or None
-    when either is missing. A negative raw gap means the tail straddled midnight (date-less log), so
-    +86400; an implausibly large result (a wrap artifact) is left for the caller to guard against."""
-    if newest_ref is None or ts is None:
-        return None
-    gap = newest_ref - ts
-    if gap < 0:
-        gap += 86400.0
-    return gap
-
-
-def audio_telemetry_from_log(text, stale_after_s=AUDIO_TS_LAG_STALE_AFTER_S):
-    """#1231 — the audio-timeline facet WITH a freshness dimension. Returns
-    `(max_fresh_lag_ms_str, src, age_s_str)`:
-
-    * `max_fresh_lag_ms_str`/`src` — the MAX per-source lag exactly as #1226, but EXCLUDING any
-      source whose newest #800 line sits more than `stale_after_s` behind the tail's newest line of
-      ANY kind (concern a: a removed/renamed lagging source no longer drives the reading). `("","")`
-      when no FRESH positive reading remains. `ts_lag_ms=-1` (no audio timeline yet) is still
-      excluded; the tie-break stays deterministic (alphabetically-first source) so the value never
-      flaps the watchdog dedup key.
-
-    * `age_s_str` — the whole-second in-log age of the freshest #800 line behind the tail's newest
-      line of any kind (concern b: telemetry that stopped while the log advanced). `""` ONLY when
-      there is NO #800 line at all (absent -> UNKNOWN downstream, never a fabricated age). A fresh
-      box reports `"0"`; a stalled tick reports a large value -> the dev1 decision surfaces STALE.
-
-    Why this facet (the 2026-08-30 incident, #1226): stream OBS's audio pipeline fell ~24 s/min
-    behind realtime under stream load; every audio source lagging EQUALLY = a global audio-tick/mix
-    pipeline behind realtime (mbc peaked at 1 672 741 ms / 27,9 min), which desynced the YouTube
-    stream's A/V for a whole service. This line SCREAMED it the whole hour but nothing read it.
-
-    Reads ONLY the TAIL slice of the #1222 bounded head+separator+tail read (a stale HIGH value that
-    survives only in the head is never reported; a small whole-file log is scanned entirely), in ONE
-    pass (no second log read)."""
-    t = text or ""
-    if LOG_BOUNDED_READ_SEPARATOR in t:
-        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
-    last_per_source = {}   # name -> (ts_or_None, lag_int) : the NEWEST #800 line per source
-    # The OBS log is APPEND-ONLY, so FILE ORDER IS TIME ORDER: the log's current write head is the
-    # LAST parseable line, and the freshest telemetry is the LAST #800 line — NOT the max
-    # seconds-of-day (which, across midnight, anchors to a pre-midnight line and reads a genuinely
-    # stale source as fresh; issue 1231 review W1). Overwriting as we iterate takes the file-order
-    # last; `_recency_gap_s` then corrects a single midnight wrap, so the gap is the TRUE elapsed
-    # time (mod 24h) — a real multi-minute/hour stall is reported honestly, never snapped to fresh.
-    log_newest_ts = None   # ts of the LAST parseable line in file order (the log write head)
-    last_800_ts = None     # ts of the LAST #800 line in file order (the freshest telemetry line)
-    for line in t.splitlines():
-        ts = _log_line_seconds(line)
-        if ts is not None:
-            log_newest_ts = ts
-        m = _AUDIO_TS_LAG_RE.search(line)
-        if m:
-            last_per_source[m.group(1)] = (ts, int(m.group(2)))
-            if ts is not None:
-                last_800_ts = ts
-    if not last_per_source:
-        return ("", "", "")   # no #800 line at all -> absent (UNKNOWN downstream)
-
-    # (concern b) age of the freshest #800 line behind the log head. `_recency_gap_s` is in [0,86400)
-    # by construction (a single +86400 wrap correction), so no upper clamp is needed or wanted — a
-    # >1h stall is a REAL fault to surface, never a "wrap artifact" to hide. "0" only when neither
-    # timestamp is parseable (a pathological prefix-less log), the conservative unmeasurable case.
-    gap = _recency_gap_s(log_newest_ts, last_800_ts)
-    age_s = "0" if gap is None else str(round(gap))
-
-    # (concern a) per-source staleness filter for the MAX: drop any source whose newest #800 line is
-    # more than stale_after_s behind the log head.
-    candidates = []
-    for name, (ts, lag) in last_per_source.items():
-        if lag < 0:
-            continue           # -1 == no audio timeline yet, never a lag
-        g = _recency_gap_s(log_newest_ts, ts)
-        if g is not None and g > stale_after_s:
-            continue           # this source went silent while the log advanced -> stale, drop it
-        candidates.append((lag, name))
-    if not candidates:
-        return ("", "", age_s)   # no FRESH positive reading; the age carries the staleness signal
-    # max lag; deterministic tie-break by source name (asc) so the reported src is stable.
-    candidates.sort(key=lambda kv: (-kv[0], kv[1]))
-    maxv, maxname = candidates[0]
-    return (str(maxv), maxname, age_s)
-
-
-def audio_ts_lag_ms_from_log(text):
-    """#1226 — the MAX per-source audio-timeline lag `(max_lag_ms_str, src)`, `("", "")` when none.
-    A thin wrapper over `audio_telemetry_from_log` (#1231) that drops the freshness age. Behaviour is
-    unchanged EXCEPT that a source gone stale in the tail (silent > a few emit periods while the log
-    advanced) is now excluded from the max (concern a). See `audio_telemetry_from_log` for the full
-    contract."""
-    lag, src, _age = audio_telemetry_from_log(text)
-    return (lag, src)
-
-
-def program_render_lagged_from_log(text):
-    """#1320 — the strih PROGRAM-render freeze signal `(max_lagged_str, age_s_str)`, `("", "")` when
-    no `program-render-audit:` line exists (absent -> UNKNOWN downstream, never a fabricated 0).
-
-    `program-render-audit:` (obs-video.c obs_graphics_thread_loop, ~5 s) reports the PROGRAM output's
-    render cadence; `lagged` == renderSkipped in that window, so a `lagged>0` window is a render-
-    thread freeze. Issue 1320: a scene-switch-coincident DistroAV reattach whose blocking
-    NDIlib_recv_destroy ran on the graphics thread froze the PROGRAM render ~7.5 s (lagged=228
-    avg_frame_ms=782) -> 2ME PGM starved -> stream FIFO underrun -> relock storm -> presented video
-    +2/+3 frames late ~40 min. This facet exposes the MAX `lagged` across the tail's
-    program-render-audit lines + the in-log age (whole seconds) of the MOST RECENT window achieving
-    that max, so the dev1 watchdog can page on a RECENT freeze (not one that scrolled out of the
-    tail). `"0"` (a healthy tail: render telemetry live, no freeze) is a truthy string and is KEPT;
-    `""` (no telemetry at all) is dropped by the omit-when-empty filter.
-
-    Reads ONLY the TAIL slice of the #1222 bounded head+separator+tail read (a freeze surviving only
-    in the head is never reported; a small whole-file log is scanned entirely), in ONE pass (no
-    second log read). File order is time order (append-only log), so `_recency_gap_s` corrects a
-    single midnight wrap on the date-less OBS timestamps."""
-    t = text or ""
-    if LOG_BOUNDED_READ_SEPARATOR in t:
-        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
-    log_newest_ts = None   # ts of the LAST parseable line in file order (the log write head)
-    max_lagged = None
-    max_ts = None          # ts of the most-recent line achieving max_lagged
-    for line in t.splitlines():
-        ts = _log_line_seconds(line)
-        if ts is not None:
-            log_newest_ts = ts
-        m = _PROGRAM_RENDER_LAGGED_RE.search(line)
-        if m:
-            lagged = int(m.group(1))
-            if max_lagged is None or lagged > max_lagged:
-                max_lagged = lagged
-                max_ts = ts
-            elif lagged == max_lagged and ts is not None:
-                max_ts = ts   # a LATER window at the same max -> report the fresher age
-    if max_lagged is None:
-        return ("", "")
-    gap = _recency_gap_s(log_newest_ts, max_ts)
-    age_s = "0" if gap is None else str(round(gap))
-    return (str(max_lagged), age_s)
-
-
-# #1320 — the RELOCK-BURST facet: a receiver FIFO overshoot STORM (the downstream consequence of a
-# sender PROGRAM render freeze). PORTS issue 1318's summarize_relock_bursts (src/jitter_audit.rs) to
-# Python so the dev1 render-freeze watchdog can page on it off :8899; the summarizer is NOT
-# re-implemented across languages beyond this one mirror (the ndi_halving_decision / #1199
-# python-mirror precedent) and a parity test pins it to the Rust test fixtures BYTE-for-byte.
-RELOCK_BURSTS_MIN_DEFAULT = 8  # N: >= this many relocks within 1 s on ONE input == a burst (issue 1318)
-_RELOCK_MARK = "genlock-relock '"
-
-
-def _parse_hhmmss_ms(tok):
-    """A `HH:MM:SS[.mmm]` (optional trailing `:`) token -> milliseconds-of-day, or None. Byte-faithful
-    mirror of src/jitter_audit.rs `parse_hhmmss_ms`: strips one trailing `:`, requires exactly 3
-    colon-parts, pads the fractional to 3 digits (`.205` -> 205 ms)."""
-    if tok.endswith(":"):
-        tok = tok[:-1]
-    parts = tok.split(":")
-    if len(parts) != 3:
-        return None
-    try:
-        hh = int(parts[0])
-        mm = int(parts[1])
-    except ValueError:
-        return None
-    sec_frac = parts[2]
-    if "." in sec_frac:
-        s, f = sec_frac.split(".", 1)
-        try:
-            ss = int(s)
-        except ValueError:
-            return None
-        fms = int((f + "000")[:3]) if f else 0
-        sub_ms = ss * 1000 + fms
-    else:
-        try:
-            sub_ms = int(sec_frac) * 1000
-        except ValueError:
-            return None
-    return hh * 3_600_000 + mm * 60_000 + sub_ms
-
-
-def _parse_relock_event(line):
-    """`(source, at_ms_int)` from a `genlock-relock '<src>':` line, or None. Byte-faithful mirror of
-    src/jitter_audit.rs parse_relock_line: needs the `genlock-relock '` marker (mutually non-substring
-    vs `genlock-fifo audit '`/`genlock-ndi-*`) AND a parseable clock time in the LAST whitespace token
-    before the marker (so a journald/SSH-wrapper-prefixed line still clusters, exactly like the Rust).
-    An event with no timeline position cannot be clustered -> None."""
-    i = line.find(_RELOCK_MARK)
-    if i < 0:
-        return None
-    after = line[i + len(_RELOCK_MARK):]
-    q = after.find("'")
-    if q < 0:
-        return None
-    source = after[:q]
-    before = line[:i].split()          # the token right before the marker carries the OBS timestamp
-    if not before:
-        return None
-    at_ms = _parse_hhmmss_ms(before[-1])
-    if at_ms is None:
-        return None
-    return (source, at_ms)
-
-
-def _peak_in_window(times, window_ms):
-    """Peak count of events within any `window_ms`-wide window over an ASCENDING slice (two-pointer,
-    inclusive `t[j] - t[i] <= window_ms`). Mirror of src/jitter_audit.rs peak_in_window."""
-    left = 0
-    peak = 0
-    for right in range(len(times)):
-        while times[right] - times[left] > window_ms:
-            left += 1
-        peak = max(peak, right - left + 1)
-    return peak
-
-
-def _summarize_one_source_bursts(source, times, min_burst_relocks, window_ms):
-    """Cluster ONE source's relock timestamps into burst episodes. A new cluster starts on a gap
-    greater than `window_ms` OR a backward time step (midnight wrap / a new log concatenated); a
-    cluster is a BURST when its densest `window_ms` window holds >= `min_burst_relocks` events.
-    Mirror of src/jitter_audit.rs summarize_one_source_bursts."""
-    summary = {
-        "source": source,
-        "total_relocks": len(times),
-        "bursts": 0,
-        "max_per_second": 0,
-        "first_at_ms": times[0] if times else 0,
-        "last_at_ms": times[-1] if times else 0,
-    }
-    cluster_start = 0
-    for i in range(len(times)):
-        boundary = i > cluster_start and (times[i] < times[i - 1] or times[i] - times[i - 1] > window_ms)
-        if boundary:
-            peak = _peak_in_window(times[cluster_start:i], window_ms)
-            summary["max_per_second"] = max(summary["max_per_second"], peak)
-            if peak >= min_burst_relocks:
-                summary["bursts"] += 1
-            cluster_start = i
-    if cluster_start < len(times):
-        peak = _peak_in_window(times[cluster_start:], window_ms)
-        summary["max_per_second"] = max(summary["max_per_second"], peak)
-        if peak >= min_burst_relocks:
-            summary["bursts"] += 1
-    return summary
-
-
-def _summarize_relock_bursts(events, min_burst_relocks, window_ms):
-    """Per-source relock-burst summaries (grouped in first-seen order, kept in log order). `events`
-    is a list of `(source, at_ms)` tuples. Mirror of src/jitter_audit.rs summarize_relock_bursts."""
-    order = []
-    groups = {}
-    for source, at_ms in events:
-        if source not in groups:
-            order.append(source)
-            groups[source] = []
-        groups[source].append(at_ms)
-    return [_summarize_one_source_bursts(name, groups[name], min_burst_relocks, window_ms)
-            for name in order]
-
-
-def relock_bursts_from_log(text):
-    """#1320 — the RELOCK-BURST facet `(max_bursts_str, age_s_str)`, `("", "")` when there is NO
-    `genlock-relock` line at all (steady state; absent -> UNKNOWN downstream, never a fabricated 0).
-
-    `max_bursts_str` is the MAX per-input burst count over the tail (>=8 relocks within 1 s ==
-    a FIFO overshoot storm, issue 1318); `age_s_str` is the whole-second in-log age of the NEWEST
-    relock event behind the tail's newest line of any kind, so the dev1 watchdog pages on a RECENT
-    storm (not one that scrolled into the tail). `"0"` (relock telemetry live, no storm) is a truthy
-    string and is KEPT; `""` is dropped by the omit-when-empty filter.
-
-    Reads ONLY the TAIL slice of the #1222 bounded head+separator+tail read, in ONE pass (no second
-    log read). File order is time order (append-only log), so `_recency_gap_s` corrects a single
-    midnight wrap on the date-less OBS timestamps."""
-    t = text or ""
-    if LOG_BOUNDED_READ_SEPARATOR in t:
-        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
-    log_newest_ts = None    # ts of the LAST parseable line in file order (the log write head)
-    newest_relock_ts = None  # seconds-of-day of the newest relock line (file order == time order)
-    events = []
-    for line in t.splitlines():
-        ts = _log_line_seconds(line)
-        if ts is not None:
-            log_newest_ts = ts
-        ev = _parse_relock_event(line)
-        if ev is not None:
-            events.append(ev)
-            if ts is not None:
-                newest_relock_ts = ts
-    if not events:
-        return ("", "")
-    summaries = _summarize_relock_bursts(events, RELOCK_BURSTS_MIN_DEFAULT, 1000)
-    max_bursts = max(s["bursts"] for s in summaries)
-    gap = _recency_gap_s(log_newest_ts, newest_relock_ts)
-    age_s = "0" if gap is None else str(round(gap))
-    return (str(max_bursts), age_s)
-
-
-def _median_int(values):
-    """Plain sorted median of a non-empty int list, rounded to int. (No numpy — small lists.)"""
-    s = sorted(values)
-    n = len(s)
-    mid = n // 2
-    return int(s[mid]) if n % 2 else int(round((s[mid - 1] + s[mid]) / 2.0))
-
-
-def _percentile_nearest_rank(sorted_vals, pct):
-    """Nearest-rank percentile of a NON-EMPTY sorted list; `pct` in [0,100]. index =
-    ceil(pct/100 * n) - 1, clamped to [0, n-1]. No interpolation. NOTE: for a small n the p90 index
-    IS the max (n<=9 -> ceil(0.9n)-1 == n-1), so this only ignores a lone top spike once the window
-    has enough samples — the dev1 decision's BAND_MIN_SAMPLES (10) is what guarantees p90!=max, not
-    this function alone (issue 1265 review finding 2)."""
-    n = len(sorted_vals)
-    k = max(0, min(n - 1, int(math.ceil(pct / 100.0 * n)) - 1))
-    return sorted_vals[k]
-
-
-def _ref_readings(text, ref_src):
-    """Every non-negative `ts_lag_ms` reading for `ref_src` in `text`, in FILE ORDER. A negative
-    reading (-1 == no audio timeline yet) never contributes (matching the #1226 max-side filter)."""
-    out = []
-    for line in (text or "").splitlines():
-        m = _AUDIO_TS_LAG_RE.search(line)
-        if m and m.group(1) == ref_src:
-            v = int(m.group(2))
-            if v >= 0:
-                out.append(v)
-    return out
-
-
-def audio_ref_band_from_log(text, ref_src=AUDIO_REF_BAND_DEFAULT_SRC,
-                            duty_margin_ms=AUDIO_REF_BAND_DUTY_MARGIN_MS,
-                            window_cap=AUDIO_REF_BAND_WINDOW_CAP):
-    """#1265 — the BAND SHAPE of one reference source's `ts_lag_ms` over the #1222 bounded log.
-    Returns `(src, base_ms, high_ms, low_ms, duty_pct, n)` as STRINGS (the omit-when-empty facet
-    contract), or `("", "", "", "", "", "")` when `ref_src` has no readings at all.
-
-    * `base_ms` — the flat-start baseline: median of `ref_src`'s readings in the HEAD (startup)
-      region of the bounded read (the log's own beginning — "the instance's own flat start", the
-      issue's wording). `""` when there is no separator (a small whole log with no distinct startup
-      region) or the head carried no `ref_src` reading — the dev1 decision then falls back to the
-      tail low as its deviation baseline, so a within-window bimodal flap is still caught.
-    * `high_ms`/`low_ms` — p90/p10 (nearest-rank) of the FRESH tail-window readings (the last
-      `window_cap`), the current high/low modes. p90 ignores a lone top spike only once the window
-      has >= ~10 samples; the dev1 decision's BAND_MIN_SAMPLES guards the small-n case (finding 2).
-    * `duty_pct` — % of the tail window sitting above `baseline + duty_margin_ms`, where
-      `baseline = min(base, low)` (the flat-start median AND the current low mode, whichever is
-      LOWER). Using the MIN matters when the head is ALSO in the high mode (a restart straight into
-      the bad state): a `base` that is itself elevated would mask the drift, so the tail low keeps
-      the duty honest (issue 1265 review finding 3). This separates a genuine bimodal flap (duty
-      ~50%) from a single transient spike (duty ~few %).
-    * `n` — the fresh tail-window sample count (too few -> the dev1 decision reads UNKNOWN, never a
-      false page).
-
-    Reads the SAME #1222 head+separator+tail bounded text in ONE pass — no second log read. When
-    the separator is present the region BEFORE it is the head (flat start) and the region AFTER it
-    is the tail (current window); the window is the TAIL only — if the tail carries no `ref_src`
-    reading (mbc telemetry stopped hours ago while the log advanced, the #1231 STALE case) the band
-    is all-empty (UNKNOWN downstream), never the hours-old head reported as the current window. A
-    small whole-file log (no separator) has no distinct head, so its whole content is the tail and
-    `base_ms` is empty."""
-    t = text or ""
-    if LOG_BOUNDED_READ_SEPARATOR in t:
-        head_text, tail_text = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)
-    else:
-        head_text, tail_text = "", t
-    head_vals = _ref_readings(head_text, ref_src)
-    tail_vals = _ref_readings(tail_text, ref_src)
-    window = tail_vals[-window_cap:]
-    if not window:
-        return ("", "", "", "", "", "")
-    sw = sorted(window)
-    n = len(window)
-    high = _percentile_nearest_rank(sw, 90)
-    low = _percentile_nearest_rank(sw, 10)
-    base = _median_int(head_vals) if head_vals else None
-    # baseline = the LOWER of the flat-start median and the current tail low (finding 3): a head
-    # that is itself elevated must never mask a drifting tail.
-    baseline = min(base, low) if base is not None else low
-    thresh = baseline + duty_margin_ms
-    high_count = sum(1 for v in window if v > thresh)
-    duty_pct = int(round(100.0 * high_count / n))
-    return (
-        ref_src,
-        str(base) if base is not None else "",
-        str(high),
-        str(low),
-        str(duty_pct),
-        str(n),
-    )
-
-
-# #1267 — the av-sync dock's measured-offset line, the UPSTREAM-audio-latency early-warning signal
-# (issue 1265 follow-up). The stream box's dock runs monitor-only, so it logs the Suggest branch
-# (vendor/av-sync-dock/src/sync-test-output.cpp:1484 -- verified LIVE 2026-09-02, ~2/min):
-#   av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src <pin> -> <new>ms (measured offset=<X>ms) [monitor-only ...]
-# It carries BOTH the CURRENT genlock pin (int) AND the measured A/V offset (float ms) on ONE line.
-# The `(?:SUGGESTED|requested)` alternation also matches a future actuation line; the OTHER
-# LOCK-CORRECT variants (apply-skipped / read-back mismatch / pinned / unavailable) lack the
-# `-> Nms (measured offset=` shape, so they never match. A sustained STEP in the median offset AT A
-# CONSTANT PIN is a physical A/V shift into the DVS `mbc` source -- the 2026-09-01 incident, flagged
-# ~3h before the first E2E A/V failure. The pin is a COVARIATE, NEVER subtracted: a live pin jump
-# 976->1024 left the raw offset ~unchanged, so `offset - pin` reads a phantom step -- instead a pin
-# change in the analyzed span sets pin_stable=0 and the dev1 decision HOLDs (REPIN, no page).
-_AV_OFFSET_SUGGEST_RE = re.compile(
-    r"av-sync-dock: LOCK-CORRECT (?:SUGGESTED|requested) genlock_latency_ms_src "
-    r"(\d+) -> \d+ms \(measured offset=(-?\d+(?:\.\d+)?)ms\)"
-)
-
-# #1319 — the dock's per-10s heartbeat line, emitted whenever the dock is LOCKED regardless of the
-# measured offset (`av-sync-dock: diag ... locked=yes state=LIVE`). NOTE (review F3): the diag line
-# prints `locked=%s state=%s` INDEPENDENTLY, and this regex keys on `locked=yes` — NOT the `state`
-# token. A dock that is `locked=no` (still acquiring) is therefore treated as non-live here, so the
-# thin-sample branch reads STALE rather than IN_BAND_QUIET — the SAFE direction (no page; a genuine
-# dock/lock loss is the genlock-lock/frozen-input watchdogs' job), and moot on the samples-present
-# OUT_OF_BAND path. Its freshness (av_offset_dock_live_age_from_log) lets the dev1 band decision
-# distinguish "dock LOCKED, offset in the suggestion dead band" (IN_BAND_QUIET, healthy) from "dock
-# silent" (STALE) — the false-STALE the SUGGESTED-only age read during a dead-band quiet window.
-_AV_OFFSET_DIAG_LOCKED_RE = re.compile(r"av-sync-dock: diag .*\blocked=yes\b")
-
-# #1319 Part 2 — the dock's own cluster-QUALITY line (`av-sync-dock: {LOCKED,UPDATED} offset=Xms
-# source=cluster matched=M mad=Dms`, sync-test-output.cpp:1378). It carries the estimator's
-# per-lock cluster SIZE (`matched`) and per-sample SCATTER (`mad`) — the two things the band alarm
-# needs to know a reading is trustworthy. The overnight 78-page false alarm judged a dock reading
-# whose MAD (9-31 ms) was as wide as the +-30 ms band against a recording-based reference; the dev1
-# band decision now reads LOW_QUALITY (log-only, never a page) unless the recent window's median MAD
-# is <= 15 ms AND its min matched is >= 30. This is a SEPARATE facet from the offset SERIES
-# (av_offset_series_from_log stays BYTE-IDENTICAL — the Part-1 decision that the raw UPDATED/LOCKED
-# lines are NOT folded into the series holds; only their matched/mad feed this quality facet).
-_AV_OFFSET_QUALITY_RE = re.compile(
-    r"av-sync-dock: (?:LOCKED|UPDATED) offset=-?\d+(?:\.\d+)?ms source=cluster "
-    r"matched=(\d+) mad=(\d+(?:\.\d+)?)ms"
-)
-
-# #1267 — rolling-window bounds, in-log seconds behind the log head. RECENT = the freshest 10 min;
-# BASELINE = the 10..40 min region behind it (a rolling reference that predates the recent window).
-# The BASELINE is bounded above by how far the #1222 bounded TAIL reaches (~50 min on a long
-# session), which also bounds the detection window: a rolling baseline ABSORBS a persistent step
-# after ~baseline_window_s, so a step is detectable only for a ~20-40 min window at onset (the
-# dev1 watchdog freezes the pre-step baseline at alert time so it never mis-reads that absorption
-# as a recovery -- av_step_decision.recovered_to_baseline).
-AV_OFFSET_RECENT_WINDOW_S = 600
-AV_OFFSET_BASELINE_WINDOW_S = 2400
-# The box-side parser reports the raw in-log freshness age; the STALE threshold is applied dev1-side
-# (av_step_decision.DEFAULT_STALE_THRESHOLD_S), so no box-side stale constant is needed here.
-
-
-def _median(values):
-    """Median of a list of floats (no numpy/statistics dependency). None for an empty list."""
-    n = len(values)
-    if n == 0:
-        return None
-    s = sorted(values)
-    mid = n // 2
-    if n % 2:
-        return s[mid]
-    return (s[mid - 1] + s[mid]) / 2.0
-
-
-def av_offset_series_from_log(text, recent_window_s=AV_OFFSET_RECENT_WINDOW_S,
-                              baseline_window_s=AV_OFFSET_BASELINE_WINDOW_S):
-    """#1267 — the av-sync dock measured-offset trend, summarized as SCALARS for the dev1
-    upstream-step watchdog. Returns
-    `(recent_med_str, base_med_str, pin_str, pin_stable_str, age_s_str, n_recent_str, n_base_str)`,
-    every field "" when absent (UNKNOWN downstream, never a fabricated reading):
-
-    * recent_med / base_med — median measured offset (ms, 1 decimal) over the RECENT window (freshest
-      recent_window_s of dock lines) and the BASELINE window (recent_window_s..baseline_window_s
-      behind the head). A sustained upstream shift = |recent - base| beyond the dev1 step threshold.
-    * pin — the CURRENT (freshest) genlock pin on a dock line.
-    * pin_stable — "1" iff every windowed sample (baseline UNION recent) carries the SAME pin, else
-      "0". A #856/operator/E2E pin move -> "0" -> the dev1 decision HOLDs (REPIN), never a false step
-      (the pin is NOT subtracted; see the regex comment for why the naive subtraction was falsified).
-    * age_s — in-log whole-second age of the freshest dock line behind the log's newest line of ANY
-      kind (#1231 recency: file order IS time order, a single midnight wrap corrected; NEVER
-      max(seconds-of-day)). "" only when there is NO dock line at all; a large value -> STALE.
-    * n_recent / n_base — windowed sample counts. The dev1 decision needs enough of each to judge;
-      too few -> UNKNOWN, never a false step.
-
-    Reads ONLY the TAIL slice of the #1222 bounded head+separator+tail read (a stale value surviving
-    only in the head is never reported; a small whole-file log is scanned entirely), in ONE pass over
-    the SAME log_text every other _from_log parser uses (no second log read)."""
-    t = text or ""
-    if LOG_BOUNDED_READ_SEPARATOR in t:
-        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
-    samples = []          # (ts_or_None, offset_ms_float, pin_int) in file order
-    log_newest_ts = None  # ts of the LAST parseable line in file order (the log write head)
-    last_dock_ts = None   # ts of the LAST dock line in file order (the freshest measured offset)
-    latest_pin = None     # pin on the freshest dock line
-    for line in t.splitlines():
-        ts = _log_line_seconds(line)
-        if ts is not None:
-            log_newest_ts = ts
-        m = _AV_OFFSET_SUGGEST_RE.search(line)
-        if m:
-            pin = int(m.group(1))
-            off = float(m.group(2))
-            samples.append((ts, off, pin))
-            latest_pin = pin
-            if ts is not None:
-                last_dock_ts = ts
-    if not samples:
-        return ("", "", "", "", "", "", "")
-
-    age_s = ""
-    gap = _recency_gap_s(log_newest_ts, last_dock_ts)
-    if gap is not None:
-        age_s = str(round(gap))
-
-    # Partition the aged samples into the recent / baseline windows by in-log age behind the head.
-    # A sample with no parseable ts cannot be aged, so it is dropped from the windows (it still fed
-    # latest_pin above). pin_stability is judged over the SAME windowed span the medians use.
-    recent_offs, base_offs, span_pins = [], [], []
-    for ts, off, pin in samples:
-        g = _recency_gap_s(log_newest_ts, ts)
-        if g is None:
-            continue
-        if g <= recent_window_s:
-            recent_offs.append(off)
-            span_pins.append(pin)
-        elif g <= baseline_window_s:
-            base_offs.append(off)
-            span_pins.append(pin)
-
-    recent_med = _median(recent_offs)
-    base_med = _median(base_offs)
-    # "1" only when the whole windowed span shares one pin; an empty span -> "0" (but the dev1
-    # decision reads UNKNOWN off the zero sample counts first, so pin_stable is moot there).
-    pin_stable = "1" if span_pins and len(set(span_pins)) == 1 else "0"
-    return (
-        "" if recent_med is None else f"{recent_med:.1f}",
-        "" if base_med is None else f"{base_med:.1f}",
-        "" if latest_pin is None else str(latest_pin),
-        pin_stable,
-        age_s,
-        str(len(recent_offs)),
-        str(len(base_offs)),
-    )
-
-
-def av_offset_dock_live_age_from_log(text):
-    """#1319 — the in-log whole-second age of the freshest `av-sync-dock: diag ... locked=yes` line
-    behind the log's newest parseable line of ANY kind. Returns "" when there is NO such line.
-
-    The dock emits this heartbeat (~every 10 s) whenever it is LIVE, INDEPENDENT of the measured
-    offset — so a FRESH age here while the SUGGESTED offset series is silent means "dock LIVE, offset
-    inside the suggestion dead band" (the dev1 band decision reads IN_BAND_QUIET, healthy), whereas a
-    STALE age means the dock itself stopped (STALE). This closes the false-STALE the SUGGESTED-only
-    `av_offset_age_s` read during a dead-band quiet window (the owner's 19:44-19:55 gap, 15.9.2026).
-
-    Same recency model as av_offset_series_from_log (`_recency_gap_s`, midnight-wrap corrected, file
-    order IS time order) over ONLY the #1222 bounded TAIL, one pass, no wall clock injected."""
-    t = text or ""
-    if LOG_BOUNDED_READ_SEPARATOR in t:
-        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
-    log_newest_ts = None
-    last_live_ts = None
-    for line in t.splitlines():
-        ts = _log_line_seconds(line)
-        if ts is not None:
-            log_newest_ts = ts
-        if ts is not None and _AV_OFFSET_DIAG_LOCKED_RE.search(line):
-            last_live_ts = ts
-    if last_live_ts is None:
-        return ""
-    gap = _recency_gap_s(log_newest_ts, last_live_ts)
-    return "" if gap is None else str(round(gap))
-
-
-def av_offset_quality_from_log(text, recent_window_s=AV_OFFSET_RECENT_WINDOW_S):
-    """#1319 Part 2 — the dock estimator's measurement QUALITY over the RECENT window, as SCALARS
-    for the dev1 band alarm. Returns `(recent_mad_str, recent_matched_min_str)`, both "" when there
-    is no `LOCKED/UPDATED offset= ... matched= mad=` line in the recent window (UNKNOWN downstream,
-    never fabricated):
-
-    * recent_mad — MEDIAN of the per-lock `mad=` scatter (ms, 1 decimal) over the freshest
-      recent_window_s of dock quality lines. The band arm requires this <= 15 ms.
-    * recent_matched_min — the MINIMUM `matched=` cluster size in that window (the worst-case
-      trust). The band arm requires this >= 30. Min (not median) so a single thin lock in the
-      window is enough to read LOW_QUALITY — the safe direction (never page off a thin cluster).
-
-    Reads ONLY the TAIL slice of the #1222 bounded read, same recency model (`_recency_gap_s`,
-    file order IS time order) as av_offset_series_from_log, one pass, no wall clock. This is a
-    SEPARATE parser from the offset series (which stays byte-identical): it consumes the same
-    LOCKED/UPDATED lines the series deliberately excludes, but ONLY for matched/mad — never their
-    offset (a different sign/bias from the SUGGESTED series, #952)."""
-    t = text or ""
-    if LOG_BOUNDED_READ_SEPARATOR in t:
-        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
-    samples = []          # (ts_or_None, matched_int, mad_float) in file order
-    log_newest_ts = None
-    for line in t.splitlines():
-        ts = _log_line_seconds(line)
-        if ts is not None:
-            log_newest_ts = ts
-        m = _AV_OFFSET_QUALITY_RE.search(line)
-        if m:
-            samples.append((ts, int(m.group(1)), float(m.group(2))))
-    recent_mads, recent_matched = [], []
-    for ts, matched, mad in samples:
-        g = _recency_gap_s(log_newest_ts, ts)
-        if g is None or g > recent_window_s:
-            continue
-        recent_mads.append(mad)
-        recent_matched.append(matched)
-    if not recent_mads:
-        return ("", "")
-    med = _median(recent_mads)
-    return (
-        "" if med is None else f"{med:.1f}",
-        str(min(recent_matched)),
-    )
-
-
-def av_offset_quality_age_from_log(text):
-    """camera-box #1325 — the in-log whole-second age of the freshest dock QUALITY line
-    (`av-sync-dock: {LOCKED,UPDATED} offset= … matched= mad=`, the _AV_OFFSET_QUALITY_RE lines)
-    behind the log's newest parseable line of ANY kind. Returns "" when there is NO such line at all.
-
-    Why (the 3× false page 16.9.2026): when the QPSK marker cadence dropped to 0.5 s the dock stopped
-    decoding, so it emitted NO more UPDATED/LOCKED quality lines, yet its SUGGESTED offset SERIES kept
-    producing (stale) offsets — so `av_offset_recent_mad_ms` read ABSENT (None) and the band arm's
-    `band_quality_ok(None) -> proceed` (#1319: "never swallow a real drift") paged on an untrustworthy
-    reading. This age lets the dev1 decision distinguish "dock actively measuring, just no cluster in
-    THIS recent window" (fresh age -> keep proceeding) from "dock stopped measuring entirely"
-    (stale/large age -> LOW_QUALITY, no page). Distinct from `av_offset_dock_live_age_s`, which ages
-    the `diag … locked=yes` heartbeat (the dock's MONITOR loop keeps beating even with a dead decoder,
-    so it stayed fresh through the incident and could not gate the estimator's own staleness).
-
-    Same recency model as av_offset_dock_live_age_from_log (`_recency_gap_s`, midnight-wrap corrected,
-    file order IS time order) over ONLY the #1222 bounded TAIL, one pass, no wall clock injected."""
-    t = text or ""
-    if LOG_BOUNDED_READ_SEPARATOR in t:
-        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
-    log_newest_ts = None
-    last_quality_ts = None
-    for line in t.splitlines():
-        ts = _log_line_seconds(line)
-        if ts is not None:
-            log_newest_ts = ts
-        if ts is not None and _AV_OFFSET_QUALITY_RE.search(line):
-            last_quality_ts = ts
-    if last_quality_ts is None:
-        return ""
-    gap = _recency_gap_s(log_newest_ts, last_quality_ts)
-    return "" if gap is None else str(round(gap))
-
-
-def buffered_ms_series_from_log(text, ref_src=BUFFERED_MS_DEFAULT_SRC,
-                                recent_window_s=AV_OFFSET_RECENT_WINDOW_S):
-    """camera-box #1325 — the `buffered_ms` DRIFT/STEP shape for ONE named #800 source (default mbc),
-    the honest signal for the audio-timeline drift the ASRC servo fails to hold out of the mix buffer.
-    Returns `(slope_ms_per_min_str, max_step_ms_str, n_str, age_s_str)`, all "" when the ref source
-    has < 2 buffered readings in the recent window (UNKNOWN downstream, never a fabricated 0):
-
-    * slope_ms_per_min — the linear DRIFT of buffered_ms over the recent window, in ms/min (1 dp).
-      Computed as (last − first) / span_minutes over the freshest recent_window_s of readings; a
-      steady drain reads a small NEGATIVE slope (tonight ≈ −1.1). It is deliberately the endpoint
-      slope over a long window (not a per-step delta) so the +20…+57 ms refill JUMPS do not swamp
-      the underlying drain trend (the STEP term below carries the jumps).
-    * max_step_ms — the LARGEST single SIGNED delta between consecutive readings in the window. A
-      large POSITIVE value is the OBS re-buffer refill step (tonight +21…+49) — the decision gates
-      STEP on `max_step_ms >= BUFFERED_STEP_MS`, so a pure drain (only negative deltas -> a negative
-      max) never trips STEP. A large value here = OBS is periodically re-buffering the source, the
-      sawtooth the dock/E2E inherit.
-    * n — buffered readings in the recent window; span guards the slope (see the decision module).
-
-    Reads ONLY the #1222 bounded TAIL, `_recency_gap_s` recency (file order IS time order), one pass,
-    no wall clock, no second log read. `ts_lag_ms=-1` lines (no audio timeline) still carry a real
-    buffered_ms and are kept — buffered_ms is a queue depth, valid regardless of the timeline state."""
-    t = text or ""
-    if LOG_BOUNDED_READ_SEPARATOR in t:
-        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
-    samples = []          # (ts_or_None, buffered_int) for the ref source, in file order
-    log_newest_ts = None
-    for line in t.splitlines():
-        ts = _log_line_seconds(line)
-        if ts is not None:
-            log_newest_ts = ts
-        m = _AUDIO_800_BUFFERED_RE.search(line)
-        if m and m.group(1) == ref_src:
-            samples.append((ts, int(m.group(2))))
-    # Keep only the freshest recent_window_s of readings (drop stale head-region readings the same
-    # way the quality/series parsers do — a settled steady state is what we judge, not startup).
-    recent = []
-    for ts, buffered in samples:
-        g = _recency_gap_s(log_newest_ts, ts)
-        if g is None or g > recent_window_s:
-            continue
-        recent.append((ts, buffered))
-    if len(recent) < 2:
-        return ("", "", "", "")
-    first_ts, first_buf = recent[0]
-    last_ts, last_buf = recent[-1]
-    # span in seconds between the oldest and newest recent reading (midnight-wrap corrected). The
-    # freshness age is the newest reading's own gap behind the log head.
-    span_s = _recency_gap_s(last_ts, first_ts)
-    slope_str = ""
-    if span_s is not None and span_s > 0:
-        slope_str = f"{(last_buf - first_buf) / (span_s / 60.0):.1f}"
-    max_step = None
-    prev = None
-    for _ts, buffered in recent:
-        if prev is not None:
-            step = buffered - prev
-            if max_step is None or step > max_step:
-                max_step = step
-        prev = buffered
-    age_gap = _recency_gap_s(log_newest_ts, last_ts)
-    age_s = "0" if age_gap is None else str(round(age_gap))
-    return (
-        slope_str,
-        "" if max_step is None else str(max_step),
-        str(len(recent)),
-        age_s,
-    )
-
-
-# issue 1381 -- the audio MIXER real-time facet + the obs-vban PACER loss facet. On 27.9.2026 the
-# resolume cg OBS mixer left real time from 06:00 and both VBAN outputs lost audio for over an hour
-# before FOH heard it; both signals were already in the log, read by nothing.
-#
-# `audio-stall #1367:` (obs-audio.c) is dumped from the audio callback once >= 60 s have passed on
-# the audio thread's clock, with that window's tick count, then reset. Real time at 48 kHz is
-# 2812.5 ticks/min; the first dump after an OBS start is partial (ticks=1), so a reading needs the
-# previous dump too (the window it closes).
-_AUDIO_STALL_RE = re.compile(
-    r"audio-stall #1367: tick_gap_max_ms=\S+ callback_max_ms=\S+ ticks=(\d+) ticks_over=(\d+) "
-    r"tick_ms=([\d.]+)")
-# `obs-vban pacing:` (vendor/obs-vban vban-output-thread.c, every 10 s per output). Two formats:
-# the shipped issue-1372 line (underflows / overflows / trims, NO destination -- two outputs print
-# identical-looking lines) and the issue-1381 fixed-timeline line (discontinuities / repays /
-# resyncs / silence_ms / discarded_ms + dest=ip:port). All counters are cumulative since the output
-# thread started. `pacing-config:` lines never match (the colon follows `pacing`).
-_VBAN_PACING_RE = re.compile(r"obs-vban pacing: (.*)$")
-_VBAN_KV_RE = re.compile(r"(\w+)=('[^']*'|\S+)")
-VBAN_LEGACY_LOSS_EVENTS = ("underflows", "overflows", "trims")
-VBAN_LOSS_EVENTS = ("discontinuities", "repays", "resyncs")
-VBAN_LOSS_MS = ("silence_ms", "discarded_ms")   # `late_sends` is late but COMPLETE audio: no loss
-# The loss window: two dev1 passes (5 min) + timer slack, so one burst survives the 2-pass confirm.
-VBAN_LOSS_WINDOW_S = 660
-# Each output logs once per >= 10 s (observed 10.0-10.2 s), so within TWO periods of a legacy
-# key's first line in the tail every output has shown its current counters, even with a line late
-# or a forward wall-clock step. Those lines only seed what is known.
-VBAN_BASELINE_S = 20.5
-VBAN_PREDECESSOR_SCAN = 64   # a loss is measured against the most recently seen tuples only
-# One sender logs every >= 10.0 s. Two lines of one destination+stream key closer than this come
-# from several senders (two hosts resolving to one receiver), so that key falls back to the
-# identity-less tuple method.
-VBAN_MULTI_SENDER_GAP_S = 8.0
-
-
-def _file_order_elapsed(ts_values):
-    """Seconds each timestamp sits AFTER the first, walking the list in FILE ORDER (the append-only
-    log's time order). A step back of more than 12 h is a date-less midnight wrap (+24 h); a smaller
-    step back is two threads logging out of order and counts as 0. Unlike a single head-vs-line
-    gap this stays right across several midnights in one tail."""
-    out = []
-    pos = 0.0
-    prev = None
-    for ts in ts_values:
-        if prev is not None:
-            d = ts - prev
-            if d < -43200.0:
-                d += 86400.0
-            elif d < 0.0:
-                d = 0.0
-            pos += d
-        out.append(pos)
-        prev = ts
-    return out
-
-
-def timestamped_tail_lines(text):
-    """The tail slice's lines that carry an OBS `HH:MM:SS.mmm` prefix, as `(pos_s, line)` in file
-    order, where pos_s is `_file_order_elapsed` of their timestamps; plus the log head's pos_s
-    (the LAST such line). `([], None)` when none. The server computes it ONCE per request and
-    hands it to `audio_mixer_from_log` and `vban_pacer_loss_from_log` (`tail=`), so the tail
-    is timestamp-parsed a single time."""
-    t = text or ""
-    if LOG_BOUNDED_READ_SEPARATOR in t:
-        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
-    stamped = []
-    for line in t.splitlines():
-        ts = _log_line_seconds(line)
-        if ts is not None:
-            stamped.append((ts, line))
-    if not stamped:
-        return ([], None)
-    pos = _file_order_elapsed([ts for ts, _ in stamped])
-    return (list(zip(pos, (ln for _, ln in stamped))), pos[-1])
-
-
-def audio_mixer_from_log(text, tail=None):
-    """issue 1381 -- `(ticks, ticks_over, window_ms, tick_ms, age_s)` of the NEWEST
-    `audio-stall #1367` dump in the tail, or five `""` when fewer than two dumps are there (the
-    first dump after an OBS start is partial, so a normal start reads absent -> UNKNOWN, never
-    BEHIND). The dump's own tick count is already the per-minute rate (its window is 60 s on the
-    audio thread's clock); `window_ms` is only the WALL-clock log interval since the previous dump,
-    reported as context and never used to rescale the count (dantesync steps the wall clock).
-    `age_s` is the newest dump's in-log age behind the log head (a stopped audio thread stops
-    dumping while the log advances). `tail` = a precomputed `timestamped_tail_lines(text)`.
-
-    issue 1385 -- a stopped thread in a LONG session: once the last dumps leave the 5 MB tail,
-    the count is gone but the age is not. A bounded read (the file is larger than head + tail, so
-    the session is far past its start) whose HEAD slice holds a dump proves this build dumps; a
-    tail with fewer than two dumps then reports ONLY `age_s`: the newest tail dump's age, or,
-    with none left, the whole tail span (the newest dump is at least that old). The dev1 decision
-    grades that age as STALE / STALLED, so a thread that stays dead keeps paging instead of
-    decaying to UNKNOWN. A whole-file log (a normal start) and a build without the probe (no dump
-    anywhere) stay absent."""
-    stamped, head = tail if tail is not None else timestamped_tail_lines(text)
-    prev = last = None
-    for pos, line in stamped:
-        if "audio-stall #1367" not in line:
-            continue
-        m = _AUDIO_STALL_RE.search(line)
-        if m:
-            prev, last = last, (pos, m.group(1), m.group(2), m.group(3))
-    if prev is None and head is not None and _audio_stall_dump_in_head(text):
-        newest = last[0] if last is not None else 0.0
-        return ("", "", "", "", str(round(head - newest)))
-    if prev is None or last is None or last[0] <= prev[0]:
-        return ("", "", "", "", "")
-    return (last[1], last[2], str(round((last[0] - prev[0]) * 1000.0)), last[3],
-            str(round(head - last[0])))
-
-
-def _audio_stall_dump_in_head(text):
-    """True only for a BOUNDED read whose head slice (the session's first 2 MB, before the
-    separator) holds a complete `audio-stall #1367` dump line: this build has the probe and its
-    audio thread dumped earlier in the session (issue 1385)."""
-    t = text or ""
-    if LOG_BOUNDED_READ_SEPARATOR not in t:
-        return False
-    head_slice = t.partition(LOG_BOUNDED_READ_SEPARATOR)[0]
-    return _AUDIO_STALL_RE.search(head_slice) is not None
-
-
-# issue 1385 -- the log head's age against the box's OWN wall clock: positive proof the OBS log is
-# being written NOW. Every other `*_age_s` facet is measured behind the log head, so a log that
-# stopped (OBS down, hung) keeps its old ages forever; the dev1 audio-mixer decision pages a
-# stopped audio thread (STALLED) only while this age is small. OBS stamps each log line with its
-# local HH:MM:SS.mmm and the gather runs on the same box, so the two clocks are one. The log has
-# no date: a head AHEAD of "now" (read right after the log) can only be a wall-clock step back
-# (dantesync steps ~50 ms) and reads 0 up to this slack; further ahead it is a previous day's line
-# (+24 h), which the decision reads as not live. A log dead for a whole number of days still reads
-# live for about 70 s once a day (this slack + the decision's 60 s), so at most one pass a day; the
-# dev1 watchdog resets the mixer confirm on every STALE pass in between, so two such days never pair
-# into a page (issue 1385 review).
-LOG_HEAD_CLOCK_SLACK_S = 10.0
-
-
-def local_seconds_of_day(epoch=None):
-    """The box's local wall clock as seconds of the day (the clock OBS stamps its log lines with),
-    at `epoch` (default: now)."""
-    e = time.time() if epoch is None else float(epoch)
-    lt = time.localtime(e)
-    return lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec + (e - math.floor(e))
-
-
-def obs_log_head_age_s_from_log(text, now_s):
-    """issue 1385 -- whole seconds from the newest timestamped line of the TAIL to `now_s` (the
-    box's local seconds of the day, taken right after the log read), or `""` when the tail has no
-    timestamped line (omit-when-empty -> the decision has no liveness proof). Lines are split on
-    `\n` only, which is how OBS ends each stamped line; `timestamped_tail_lines` uses
-    `splitlines()`, and the two differ only for a bare `\r` followed by timestamp-like text."""
-    t = text or ""
-    sep = t.rfind(LOG_BOUNDED_READ_SEPARATOR)
-    floor = sep + len(LOG_BOUNDED_READ_SEPARATOR) if sep >= 0 else 0
-    # Walk back line by line from the end (the head is in the last few lines): no copy of the tail.
-    end = len(t)
-    while end > floor:
-        start = max(t.rfind("\n", floor, end), floor - 1) + 1
-        ts = _log_line_seconds(t[start:end])
-        if ts is not None:
-            gap = float(now_s) - ts
-            if gap < 0.0:
-                gap = 0.0 if gap >= -LOG_HEAD_CLOCK_SLACK_S else gap + 86400.0
-            return str(round(gap))
-        end = start - 1
-    return ""
-
-
-def _vban_vector(fields):
-    """A pacing line's `(key, loss vector, n_event_counters, has_ms, one_output)` or None for a line
-    of neither format. The key is `<dest>/<stream>` on the fixed-timeline line (`one_output` True:
-    presumed one sender, checked by `_VbanKey`; a VBAN receiver port takes many streams, so the
-    destination alone is not a sender) or `stream=<name>` on the shipped line, which names no
-    destination. The vector is the event counters then the ms counters."""
-    stream = fields.get("stream", "").strip("'")
-    try:
-        if "discontinuities" in fields:
-            vec = tuple(int(fields[k]) for k in VBAN_LOSS_EVENTS) + tuple(
-                float(fields[k]) for k in VBAN_LOSS_MS)
-            dest = fields.get("dest")
-            key = f"{dest}/{stream}" if dest else f"stream={stream}"
-            return (key, vec, len(VBAN_LOSS_EVENTS), True, bool(dest))
-        if "underflows" in fields:
-            vec = tuple(int(fields[k]) for k in VBAN_LEGACY_LOSS_EVENTS)
-            return (f"stream={stream}", vec, len(VBAN_LEGACY_LOSS_EVENTS), False, False)
-    except (KeyError, ValueError):
-        return None
-    return None
-
-
-def _vban_growth(vec, old, n_events):
-    """`(events, ms)` by which `vec` exceeds `old` (the caller ensures every counter is >=)."""
-    return (sum(n - o for n, o in zip(vec[:n_events], old[:n_events])),
-            sum(n - o for n, o in zip(vec[n_events:], old[n_events:])))
-
-
-def _vban_increment(vec, seen, n_events):
-    """How much a NEW legacy counter tuple grew: against the nearest earlier tuple it dominates
-    (every counter >=), `(events, ms)`; None when it dominates none (an output restart reset its
-    counters, or a smaller tuple of another output). `seen` is in LAST-SEEN order (a repeated tuple
-    moves to the end), so each live output's own current tuple is among the newest
-    VBAN_PREDECESSOR_SCAN searched."""
-    best = None
-    for old in itertools.islice(reversed(seen), VBAN_PREDECESSOR_SCAN):
-        if len(old) != len(vec) or any(n < o for n, o in zip(vec, old)):
-            continue
-        inc = _vban_growth(vec, old, n_events)
-        if best is None or inc < best:
-            best = inc
-    return best
-
-
-class _VbanKey:
-    """The loss state of one pacer key."""
-    __slots__ = ("one_output", "has_ms", "first", "prev", "last_pos", "history", "seen", "events",
-                 "loss_ms")
-
-    def __init__(self, one_output, has_ms, pos):
-        self.one_output = one_output
-        self.has_ms = has_ms
-        self.first = pos
-        self.prev = None          # one-sender key: the previous line's vector
-        self.last_pos = None      # one-sender key: the previous line's position
-        self.history = []         # one-sender key: its lines, replayed if it proves multi-sender
-        self.seen = {}            # tuple method: distinct tuples in last-seen order (dict order)
-        self.events = 0
-        self.loss_ms = 0.0
-
-    def _add(self, inc):
-        self.events += inc[0]
-        self.loss_ms += inc[1]
-
-    def feed(self, vec, n_events, pos, counts):
-        """One status line; `counts` = it lies inside the loss window."""
-        if self.one_output:
-            if self.last_pos is not None and pos - self.last_pos < VBAN_MULTI_SENDER_GAP_S:
-                self._become_multi_sender()
-            else:
-                self._feed_one_sender(vec, n_events, pos, counts)
-                return
-        self._feed_tuple(vec, n_events, pos, counts)
-
-    def _feed_one_sender(self, vec, n_events, pos, counts):
-        """The plain delta against this sender's previous line. A counter that went DOWN is a sender
-        restart: the new thread started at 0, so its counts are losses since the restart."""
-        self.history.append((vec, n_events, pos, counts))
-        self.last_pos = pos
-        prev, self.prev = self.prev, vec
-        if prev is None or len(prev) != len(vec):
-            return
-        if any(n < o for n, o in zip(vec, prev)):
-            prev = tuple(0 for _ in vec)
-        if counts:
-            self._add(_vban_growth(vec, prev, n_events))
-
-    def _become_multi_sender(self):
-        """Two lines of this key closer than one logging period: several senders share it. Forget
-        the per-line deltas and replay the key's lines through the tuple method."""
-        self.one_output = False
-        self.events, self.loss_ms = 0, 0.0
-        history, self.history = self.history, []
-        for vec, n_events, pos, counts in history:
-            self._feed_tuple(vec, n_events, pos, counts)
-
-    def _feed_tuple(self, vec, n_events, pos, counts):
-        """The identity-less method: a loss is a tuple never seen before that dominates one seen
-        earlier; the key's first VBAN_BASELINE_S only seed."""
-        if vec in self.seen:
-            self.seen[vec] = self.seen.pop(vec)   # move to the end: last-seen order
-            return
-        if counts and pos - self.first > VBAN_BASELINE_S:
-            inc = _vban_increment(vec, list(self.seen), n_events)
-            if inc is not None:
-                self._add(inc)
-        self.seen[vec] = True
-
-
-def vban_pacer_loss_from_log(text, window_s=VBAN_LOSS_WINDOW_S, tail=None):
-    """issue 1381 -- `(loss_events, loss_ms, dest, age_s)` for the obs-vban pacer, or four `""` when
-    the tail has no `obs-vban pacing:` status line (no VBAN output on this box).
-
-    Per key, how much the loss counters grew over the last `window_s` of the log (legacy:
-    underflows + overflows + trims; fixed-timeline: discontinuities + repays + resyncs, and
-    silence_ms + discarded_ms as `loss_ms`). The worst key is reported (events first, then ms);
-    `loss_ms` is `""` when that key's line carries no ms counters (the shipped format).
-
-    - **A `dest=` line is keyed on destination + stream** (a VBAN receiver port takes many streams)
-      and presumed to be one sender: its loss is the plain delta against the key's previous line,
-      and a counter that went DOWN is a sender restart whose new counts (the thread starts at 0)
-      are losses since the restart. The premise is CHECKED: two lines of the key closer than
-      VBAN_MULTI_SENDER_GAP_S (one sender logs every >= 10 s) mean several senders share it (two
-      hosts resolving to one PC), and the key is replayed through the tuple method below. Never
-      an over-count; a loss hidden inside a restart (the old thread's last counts before it
-      stopped logging) may be missed.
-    - **The shipped line names no destination**, and the two resolume outputs print identical-looking
-      lines, so an output's identity cannot be recovered. The counters only grow on a loss, so a loss
-      is a tuple NEVER SEEN BEFORE for that key that dominates one seen earlier, counted by how much
-      it exceeds the nearest such tuple. A clean output repeats its own tuple and adds nothing; a
-      restarted output starts at 0 and dominates nothing it has not shown. The first VBAN_BASELINE_S
-      (two logging periods) of the key in the tail only seed the known tuples.
-      Residuals: a step that lands on a tuple already seen for the key (one output reaching the
-      other output's current counters) is not counted, and a step's size is taken from the nearest
-      dominated tuple, which may be the other output's. So the count can be LOWER than the true
-      growth: a sustained fault still pages, an isolated single step onto the other output's value
-      does not. The only over-count: a second output whose first line in the tail comes more than
-      two periods after the first reads its counter gap as a loss once (the same holds for a
-      multi-sender dest= key, which uses this method).
-    `age_s` is the newest status line's in-log age. `tail` = a precomputed
-    `timestamped_tail_lines(text)`."""
-    stamped, head = tail if tail is not None else timestamped_tail_lines(text)
-    keys = {}
-    newest = None
-    for pos, line in stamped:
-        if "obs-vban pacing:" not in line:
-            continue
-        m = _VBAN_PACING_RE.search(line)
-        if not m:
-            continue
-        parsed = _vban_vector(dict(_VBAN_KV_RE.findall(m.group(1))))
-        if parsed is None:
-            continue
-        key, vec, n_events, has_ms, one_output = parsed
-        newest = pos
-        state = keys.get(key)
-        if state is None:
-            state = keys[key] = _VbanKey(one_output, has_ms, pos)
-        state.feed(vec, n_events, pos, head - pos <= window_s)
-    if newest is None:
-        return ("", "", "", "")
-    worst = None
-    for key in sorted(keys):
-        st = keys[key]
-        if worst is None or (st.events, st.loss_ms) > (worst[1].events, worst[1].loss_ms):
-            worst = (key, st)
-    key, st = worst
-    return (str(st.events), f"{st.loss_ms:.1f}" if st.has_ms else "", key,
-            str(round(head - newest)))
-
-
-def distroav_dll_paths(scan_roots):
-    """Every `distroav.dll` found (case-insensitive) under *scan_roots* (each walked recursively),
-    comma-joined, in the order given. "" if none found anywhere (UNKNOWN — never a false clean;
-    drift_check_plugin_paths in drift-guard.sh already treats an empty observed set this way)."""
-    found = []
-    for root in scan_roots:
-        if not root or not os.path.isdir(root):
-            continue
-        for dirpath, _dirnames, filenames in os.walk(root):
-            for name in filenames:
-                if name.lower() == "distroav.dll":
-                    found.append(os.path.join(dirpath, name))
-    return ",".join(found)
-
-
-def ndi_input_latency_csv(ndi_inputs):
-    """*ndi_inputs* is `{name: {"settings": {...}, ...}}` (the exact shape
-    `~/.cache/obsprobe/obs_inputs.py` / `bundle-state-server.py`'s WS gather produces). Returns a
-    sorted `"name=latency,..."` CSV of every GENLOCKED BROADCAST-PATH input — i.e. every NDI input
-    whose settings carry `genlock_fifo: true` (the live marker for "this is a genlock-managed
-    program/camera-ingest input", proven on strih + stream 2026-07-10: it selects exactly the
-    camera ingests + program feed and excludes preview/CG/lyrics inputs, matching
-    `.claude/commands/drift-guard.md`'s documented "genlocked broadcast-path inputs only" scope
-    WITHOUT hardcoding scene/input names that would go stale as scenes are edited).
-    An input with `genlock_fifo=true` but no readable `latency` setting is skipped (never a
-    fabricated value) — drift_check_inputs then simply sees one fewer entry, not a wrong one.
-    "" if there are no genlocked inputs at all (UNKNOWN downstream, never a silent clean)."""
-    pairs = []
-    for name, info in (ndi_inputs or {}).items():
-        settings = (info or {}).get("settings") or {}
-        if settings.get("genlock_fifo") is not True:
-            continue
-        if "latency" not in settings:
-            continue
-        pairs.append((name, str(settings["latency"])))
-    pairs.sort(key=lambda kv: kv[0])
-    return ",".join(f"{name}={latency}" for name, latency in pairs)
-
-
-# #826 — filename pattern for a launchable OBS-shaped executable: `obs<digits>.exe` (obs64.exe,
-# obs32.exe, the pinned genlock build's own name) OR a legacy `<name>ME.exe`-style build (the
-# pre-genlock era's own naming, e.g. a literal "2ME.exe"). Case-insensitive — Windows filenames.
-_OBS_EXE_RE = re.compile(r"(?i)^(obs\d*\.exe|\S*me\.exe)$")
-
-
-def obs_installs_under(scan_roots):
-    """#826 — every launchable OBS-shaped executable found under *scan_roots* (each walked
-    recursively), sorted (case-insensitively) and comma-joined. Mirrors `distroav_dll_paths`'s
-    walk-and-collect shape exactly (same "PURE, fed real filesystem roots" pattern already
-    established in this module).
-
-    A folder renamed aside (e.g. `D:\\_APPS\\_RETIRED_1ME-obs_2026-07-27`) is STILL walked and its
-    exe is STILL reported — this is the whole point of the #826 acceptance: renaming a dormant
-    install out of the way is not the same as removing it, and it can still be launched by hand
-    (the exact 2026-07-27 incident: an agent ran a dead-variable-referenced `.lnk` and woke a
-    year-old OBS 31.1.2, which then squatted TCP :4455 before the pinned genlock build could).
-
-    "" when no *scan_roots* entry exists or none contains a match (never guessed)."""
-    found = []
-    for root in scan_roots:
-        if not root or not os.path.isdir(root):
-            continue
-        for dirpath, _dirnames, filenames in os.walk(root):
-            for name in filenames:
-                if _OBS_EXE_RE.match(name):
-                    found.append(os.path.join(dirpath, name))
-    return ",".join(sorted(found, key=str.lower))
-
-
-# #826 / #1222c — the ONE canonical "is this an OBS-shaped process name" pattern (obs64, obs32,
-# bare obs — case-insensitive), shared between obs_process_count_from_listing below and
-# bundle-state-server.py's _parse_tasklist_obs_process_names (a #1222c review finding: the two
-# used to carry independent copies of the identical regex, a DRY violation that could silently
-# drift apart on a future rename).
-OBS_PROCESS_NAME_RE = re.compile(r"(?i)^obs\d*$")
-
-
-def obs_process_count_from_listing(text):
-    """#826 — count of currently-running OBS-class processes, from a plain newline-separated list
-    of process NAMES (no `.exe` suffix — the shape `Get-Process | Select-Object -ExpandProperty
-    Name` produces on Windows). Matches `obs<digits>` case-insensitively (obs64, obs32, bare obs)
-    via the shared OBS_PROCESS_NAME_RE above.
-
-    "" (never "0") when *text* itself is empty/unread — an unreachable box must read UNKNOWN, not
-    a false "zero processes confirmed running" (the same never-a-false-clean discipline every
-    other facet in this module follows)."""
-    if not (text or "").strip():
-        return ""
-    count = 0
-    for line in text.splitlines():
-        if OBS_PROCESS_NAME_RE.match(line.strip()):
-            count += 1
-    return str(count)
-
-
-# #1295 — the minimum RAM (KB) an OBS process must report to count as a LIVE instance. A real OBS
-# sits in the hundreds of MB; a DEAD/mid-exit Get-Process/zombie handle reads ~0-45 KB (the live
-# 2026-09-12 RESOLUME-SNV pid-58560: WorkingSet64 ~45 KB, 0 threads). tasklist has NO HasExited /
-# thread column, so the honest liveness proxy available from a tasklist row is its Mem Usage; a row
-# at/below this floor is a zombie, never a live obs64. 1 MB is a wide, safe separator (a live OBS
-# never sits below ~45 MB; the zombie was 45 KB), and this limitation is documented because tasklist
-# cannot distinguish a truly-exited process from a live one any other way.
-OBS_LIVE_MIN_MEM_KB = 1024
-
-
-def tasklist_mem_kb(field):
-    """#1295 — parse a `tasklist /FO CSV /NH` Mem-Usage field ("512,000 K", "45 K", "N/A", "") to
-    an int of KB, or None when it carries no usable number (N/A / blank / unparseable). tasklist
-    prints memory in KB with a thousands separator and a trailing " K"."""
-    if not isinstance(field, str):
-        return None
-    s = field.strip().replace(" ", " ").rstrip("Kk").replace(",", "").replace(" ", "")
-    if not s or not s.lstrip("-").isdigit():
-        return None
-    return int(s)
-
-
-def tasklist_row_is_live_obs(mem_field, min_kb=OBS_LIVE_MIN_MEM_KB):
-    """#1295 — True iff a tasklist obs-row's Mem-Usage field proves a LIVE instance (>= min_kb KB).
-    An unparseable/absent Mem (None) reads NOT-live: a live OBS always reports a real Mem value, so
-    excluding an ambiguous row is the fail-safe that keeps a zombie handle from inflating the
-    'exactly one obs64' health signal (#1296). tasklist's limitation (no HasExited column, Mem is
-    the only liveness proxy) is documented at OBS_LIVE_MIN_MEM_KB."""
-    kb = tasklist_mem_kb(mem_field)
-    return kb is not None and kb >= min_kb
-
-
-# #1227 — VB-Audio Matrix presence, for the `vb_matrix_running` facet the dev1 VB-Matrix alert
-# watchdog reads. The process image name after its `.exe` is stripped (tasklist prints e.g.
-# `VBAudioMatrix_x64.exe`); the pattern enumerates the actual HOSTS — the stream build
-# `VBAudioMatrix_x64` and strih's `VBAudioMatrixCoconut_x64` (+ their non-x64 variants), NOT a
-# left-open `VBAudioMatrix_Setup` installer that shares the same folder (case-insensitive, anchored
-# at both ends so `NotVBAudioMatrix…` / `…_Setup` never match). The exe pattern is derived from the
-# SAME base so the two can never drift apart (a #1222c-style DRY finding).
-_VB_MATRIX_NAME_BASE = r"(?i)^VBAudioMatrix(Coconut)?(_x64)?"
-VB_MATRIX_PROCESS_NAME_RE = re.compile(_VB_MATRIX_NAME_BASE + r"$")
-VB_MATRIX_EXE_RE = re.compile(_VB_MATRIX_NAME_BASE + r"\.exe$")
-
-
-def vb_matrix_process_from_listing(text):
-    """#1227 — the running VB-Matrix process from `tasklist /FO CSV /NH` output *text* (each row
-    `"Image Name","PID","Session Name","Session#","Mem Usage"`). A `csv.reader` is REQUIRED — the
-    Mem Usage column carries a thousands separator INSIDE its quotes (`"18,236 K"`), so a naive
-    comma split would mis-column the PID. The image name has its `.exe` stripped before matching
-    `VB_MATRIX_PROCESS_NAME_RE`, so a returned `name` is e.g. `VBAudioMatrix_x64`.
-
-    THREE-state return so the caller never reads a FAILED read as a measured absence (issue 1227
-    review 🔴, the #833 / `obs_process_count_from_listing` class):
-      None       -- the listing is UNREADABLE (empty/whitespace text = a tasklist subprocess
-                    failure, since a live box always lists SOME processes; or a `csv.Error`). The
-                    caller must treat this as UNKNOWN (facet omitted), NEVER a DOWN.
-      ("", "")   -- a VALID listing with no VB-Matrix HOST row (genuinely absent -> the caller reads
-                    DOWN when the install is present on disk).
-      (name,pid) -- the first VB-Matrix host process found."""
-    if not (text or "").strip():
-        return None
-    try:
-        for row in csv.reader(io.StringIO(text)):
-            if not row:
-                continue
-            image_name = row[0]
-            base = image_name[:-4] if image_name.lower().endswith(".exe") else image_name
-            if VB_MATRIX_PROCESS_NAME_RE.match(base):
-                pid = row[1].strip() if len(row) > 1 else ""
-                return (base, pid)
-    except csv.Error:
-        return None
-    return ("", "")
-
-
-def vb_matrix_install_present_under(scan_dirs):
-    """#1227 — True iff any `VBAudioMatrix*.exe` exists (recursively) under any of *scan_dirs* — the
-    disk-install gate that distinguishes a box that HAS VB-Matrix but its process is dead (stream
-    after a reboot with no host -> the facet must read running="0", a real DOWN) from a box that
-    never had VB-Matrix at all (imag -> the facet is omitted, never a false negative). Mirrors
-    `obs_installs_under`'s walk-and-match shape. False for a missing/empty dir list (never guessed)."""
-    for root in scan_dirs or []:
-        if not root or not os.path.isdir(root):
-            continue
-        for _dirpath, _dirnames, filenames in os.walk(root):
-            for name in filenames:
-                if VB_MATRIX_EXE_RE.match(name):
-                    return True
-    return False
-
-
-def vb_matrix_running_facet(install_present, proc):
-    """#1227 — the 3-state `(running, name, pid)` facet composition from the disk-install gate + the
-    `vb_matrix_process_from_listing` result *proc* (None | ("", "") | (name, pid)):
-
-      install_present False        -> ("", "", "")     (no VB-Matrix box, e.g. imag: OMITTED
-                                                        downstream -> UNKNOWN, never a page)
-      proc is None                 -> ("", "", "")     (the tasklist read FAILED — UNKNOWN, NEVER a
-                                                        false DOWN off a failed read; issue 1227 🔴)
-      install_present, proc ("","")-> ("0", "", "")    (a good read, host genuinely absent -> present
-                                                        in JSON as running="0" -> DOWN -> page)
-      install_present, (name,pid)  -> ("1", name, pid) (RUNNING)
-
-    `"0"` is a truthy string, so `build_bundle_state`'s omit-when-empty filter KEEPS it (DOWN must
-    surface); only the not-installed / unread `""` is dropped."""
-    if not install_present:
-        return ("", "", "")
-    if proc is None:
-        return ("", "", "")
-    proc_name, proc_pid = proc
-    if proc_name:
-        return ("1", proc_name, proc_pid or "")
-    return ("0", "", "")
-
-
-# #826 — NL_STARTUP.ahk's own variable syntax (confirmed live on strih, issue #826 comments):
-#   app1_run  := 1
-#   app1_path := "C:\ProgramData\...\OBS Studio.lnk"
-#   app1_binarypath := "D:\_APPS\1ME-obs\1ME.lnk"     <- the dead leftover that caused the incident
-#   app2_run  := 0
-#   app2_path := "D:\_APPS\2ME-obs\2ME.lnk"
-def ahk_app1_shortcut_path(text):
-    """#826 — the `app1_path := "..."` shortcut NL_STARTUP.ahk launches. Only the FIRST match is
-    used (AHK assigns each variable once). "" when absent — this box has no NL_STARTUP.ahk at all
-    (only strih runs it; stream has none, per `.claude/skills/obs-ops`), or the text is unread."""
-    m = re.search(r'app1_path\s*:=\s*"([^"]*)"', text or "")
-    return m.group(1) if m else ""
-
-
-def ahk_app1_run(text):
-    """#826 — the `app1_run := N` flag: "1" enabled / "0" disabled / "" if the line is absent
-    (no NL_STARTUP.ahk on this box, or unread)."""
-    m = re.search(r"app1_run\s*:=\s*(\d+)", text or "")
-    return m.group(1) if m else ""
-
-
-def ahk_dead_config_present(text):
-    """#826 — "1" when NL_STARTUP.ahk still carries the dead `app1_binarypath` leftover (the exact
-    variable an agent mistook for the box's canonical launcher during the #826 incident) OR an
-    ENABLED `app2_run := 1` block (the issue's "config states one truth" cleanup requirement).
-    "0" when the text was read and neither leftover is present. "" (UNKNOWN, distinct from "read
-    and clean") when there is no AHK text to read at all — e.g. this box has no NL_STARTUP.ahk."""
-    t = text or ""
-    if not t.strip():
-        return ""
-    has_dead_binarypath = "app1_binarypath" in t
-    m = re.search(r"app2_run\s*:=\s*(\d+)", t)
-    app2_enabled = bool(m and m.group(1) == "1")
-    return "1" if (has_dead_binarypath or app2_enabled) else "0"
-
-
-def record_dir_stats(record_dir):
-    """#652: PURE, testable filesystem stats over the top-level files of *record_dir* (the OBS
-    record directory) — powers the `/record-dir-stats.json` endpoint (bundle-state-server.py),
-    which recording-e2e.sh's preflight curls to WARN (never fail) when a box's accumulated E2E
-    test recordings exceed a disk budget. The live incident this addresses: strih accumulated
-    ~500 GB / stream ~139 GB of forgotten test recordings (back to 2026-06-17), invisible until
-    the disk nearly filled (17 GB free).
-
-    Only the TOP-LEVEL files count (OBS records flat into this directory; a subdirectory is not
-    this harness's business). Never raises: an unreadable or missing directory (unmounted, wrong
-    path after a profile switch, permission error) returns the same zero result a genuinely empty
-    directory would — a bogus large number is worse than under-reporting, since the caller could
-    otherwise fire a false "over budget" WARN from a stat() crash it half-caught. Every degrade
-    path is logged (comprehensive-logging.md) rather than silently swallowed.
-    """
-    total_bytes = 0
-    file_count = 0
-    oldest_mtime = None
-    try:
-        with os.scandir(record_dir) as it:
-            for entry in it:
-                try:
-                    if not entry.is_file(follow_symlinks=False):
-                        continue
-                    st = entry.stat(follow_symlinks=False)
-                except OSError as e:
-                    # A single entry vanishing mid-scan (deleted while we're iterating, e.g. an
-                    # in-progress OBS write finishing) is expected and harmless — skip just that
-                    # entry, never abort the whole stats gather over one transient race.
-                    print(
-                        f"WARNING: record_dir_stats: skipping unreadable entry in "
-                        f"{record_dir!r}: {e}", file=sys.stderr,
-                    )
-                    continue
-                total_bytes += st.st_size
-                file_count += 1
-                if oldest_mtime is None or st.st_mtime < oldest_mtime:
-                    oldest_mtime = st.st_mtime
-    except OSError as e:
-        # Missing/unmounted/permission-denied directory (e.g. a stale path after a profile
-        # switch) — degrade to the same zero result an empty directory would report. A bogus
-        # large number from a half-caught crash would be worse than under-reporting here.
-        print(
-            f"WARNING: record_dir_stats: could not read directory {record_dir!r}: {e}",
-            file=sys.stderr,
-        )
-    # #1276: the volume's FREE space — the owner-ruled (14.9.2026) WARNING signal is "<= 50 GB of
-    # FREE space left on the recordings volume", not the sum of recording files. Read via
-    # shutil.disk_usage on the SAME local record dir already scanned above (no new transport;
-    # works on Windows and imag-Linux). Degrades to None (UNKNOWN downstream — never a false
-    # low-space WARN) on any read failure, mirroring the zero-degrade of the file scan above.
-    free_bytes = None
-    try:
-        free_bytes = shutil.disk_usage(record_dir).free
-    except OSError as e:
-        print(
-            f"WARNING: record_dir_stats: could not read free space of {record_dir!r}: {e}",
-            file=sys.stderr,
-        )
-    return {
-        "total_bytes": total_bytes,
-        "file_count": file_count,
-        "oldest_mtime": oldest_mtime,
-        "free_bytes": free_bytes,
-    }
-
-
-def recordings_free_verdict(free_bytes, min_free_gb):
-    """#1276 — the E2E recordings-retention free-space WARNING verdict, the python mirror of the
-    canonical Rust ``recordings_retention::free_space_verdict``. Owner ruling (14.9.2026, verbatim
-    "B varovanie ma byt ked 50gb uz len ostava miesta!!!"): warn when the recordings VOLUME has at
-    most ``min_free_gb`` of FREE space left, NOT when the sum of recording files exceeds a budget.
-
-    ``free_bytes`` is the volume's free space (from ``record_dir_stats``'s ``free_bytes``), or
-    ``None`` when it could not be read. Returns "WARN" iff the free space is STRICTLY below
-    ``min_free_gb`` (so exactly ``min_free_gb`` free is still "OK" — the spec's "free >= threshold
-    -> no warn"), "UNKNOWN" for ``None`` (never a false low-space WARN from an unreadable stat),
-    else "OK". Threshold + comparison in decimal GB (1e9 bytes), the same unit the existing warning
-    and the owner's "50gb" meant."""
-    if free_bytes is None:
-        return "UNKNOWN"
-    free_gb = free_bytes / 1e9
-    return "WARN" if free_gb < min_free_gb else "OK"
-
-
-def recordings_free_line(stats_json_text, min_free_gb):
-    """issue 1367 -- the ONE "<VERDICT> <free_gb>" line a bash caller prints from a box's
-    `/record-dir-stats.json` body: `recordings_free_verdict` on its `free_bytes`, the free space in
-    decimal GB with one decimal, or `-1` when unknown. An empty / non-JSON / non-object body is
-    "UNKNOWN -1" (never a false WARN). recording-e2e.sh keeps its inline copy of this shape (that
-    harness is a static-anchor minefield); scripts/lib/av-soak.sh calls this one."""
-    try:
-        d = json.loads(stats_json_text or "")
-    except ValueError:
-        return "UNKNOWN -1"
-    if not isinstance(d, dict):
-        return "UNKNOWN -1"
-    fb = d.get("free_bytes")
-    if not isinstance(fb, (int, float)) or isinstance(fb, bool):
-        fb = None
-    verdict = recordings_free_verdict(fb, float(min_free_gb))
-    return f"{verdict} {'-1' if fb is None else '%.1f' % (fb / 1e9)}"
-
-
-def genlock_build_sha_from_file(path):
-    """#756 — the box's DEPLOYED genlock build commit SHA, read from its `GENLOCK_BUILD_SHA.txt`
-    (imag: `/opt/obs-genlock/GENLOCK_BUILD_SHA.txt`; the Windows boxes: the SAME file in the
-    deployed genlock bundle). This is the value the #756 CROSS-BOX parity gate compares across the
-    fleet — a peer-parity assert (every box on ONE build) that catches the stale-imag skew the
-    origin/main ref-compare misses during a long-lived dev train (#530/#756).
-
-    Returns the stripped first non-empty line, or "" when the file is missing / unreadable / empty
-    (UNKNOWN downstream — never a guessed or fabricated SHA; the parity engine treats an unread box
-    as INCOMPLETE and refuses, per drift-guard's never-a-false-clean contract). Only the leading
-    token of the first non-blank line is kept, so a stray trailing comment/newline in the marker
-    file can never leak into the compared SHA."""
-    if not path:
-        return ""
-    try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            for line in fh:
-                line = line.strip()
-                if line:
-                    return line.split()[0]
-    except OSError as e:
-        print(
-            f"WARNING: genlock_build_sha_from_file: could not read {path!r}: {e}",
-            file=sys.stderr,
-        )
-    return ""
-
-
-def component_sha256(path):
-    """#770 — the lowercase 64-hex sha256 of the DEPLOYED file at *path* (a plugin/core binary such
-    as the live `distroav.dll` / `obs.dll`), read in binary in bounded chunks. This is the BYTE
-    identity the `[0/8]` version-integrity gate compares against the #120 BUNDLE_MANIFEST — the
-    truth the hand-written `GENLOCK_BUILD_SHA.txt` MARKER only POINTS at. It closes the wrong
-    direction of the #119/#767 stale-bytes hole: a marker advanced to build X while the DLL bytes
-    are an older build passes the marker-only cross-box parity, but its real sha256 will not match
-    build X's manifest.
-
-    Returns "" when *path* is empty/None, is not a regular file (missing, or a directory), or
-    cannot be read — UNKNOWN downstream, NEVER a fabricated/zero SHA that would let a missing plugin
-    read as "clean" (the same never-a-false-clean discipline every other facet in this module
-    follows). The read never raises: a transient I/O error degrades to "" with a WARNING, exactly
-    like `genlock_build_sha_from_file` above."""
-    if not path or not os.path.isfile(path):
-        return ""
-    try:
-        h = hashlib.sha256()
-        with open(path, "rb") as fh:
-            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
-                h.update(chunk)
-        return h.hexdigest()
-    except OSError as e:
-        print(
-            f"WARNING: component_sha256: could not read {path!r}: {e}",
-            file=sys.stderr,
-        )
-        return ""
-
-
-def build_bundle_state(
-    *,
-    obs_version="",
-    distroav_version="",
-    ndi_runtime="",
-    output_fps="",
-    genlock_wall_clock="",
-    ndi_input_latency="",
-    distroav_dll_paths="",
-    genlock_capability="",
-    obs_dll_sha256="",
-    distroav_dll_sha256="",
-    genlock_build_sha="",
-    obs_installs="",
-    port4455_owner_path="",
-    port4455_owner_version="",
-    obs_process_count="",
-    ahk_app1_shortcut_path="",
-    ahk_app1_run="",
-    ahk_dead_config_present="",
-    shortcut_target_path="",
-    shortcut_workdir="",
-    audio_ts_lag_ms="",
-    audio_ts_lag_src="",
-    audio_ts_lag_age_s="",
-    audio_ref_lag_src="",
-    audio_ref_lag_base_ms="",
-    audio_ref_lag_high_ms="",
-    audio_ref_lag_low_ms="",
-    audio_ref_lag_duty_pct="",
-    audio_ref_lag_n="",
-    av_offset_recent_med_ms="",
-    av_offset_base_med_ms="",
-    av_offset_pin="",
-    av_offset_pin_stable="",
-    av_offset_age_s="",
-    av_offset_n_recent="",
-    av_offset_n_base="",
-    av_offset_dock_live_age_s="",
-    av_offset_recent_mad_ms="",
-    av_offset_recent_matched_min="",
-    av_offset_quality_age_s="",
-    buffered_ms_slope_ms_per_min="",
-    buffered_ms_max_step_ms="",
-    buffered_ms_n="",
-    buffered_ms_age_s="",
-    vb_matrix_running="",
-    vb_matrix_name="",
-    vb_matrix_pid="",
-    vb_matrix_start="",
-    program_render_lagged="",
-    program_render_lagged_age_s="",
-    relock_bursts="",
-    relock_bursts_age_s="",
-    audio_mixer_ticks="",
-    audio_mixer_ticks_over="",
-    audio_mixer_window_ms="",
-    audio_mixer_tick_ms="",
-    audio_mixer_age_s="",
-    vban_pacer_loss_events="",
-    vban_pacer_loss_ms="",
-    vban_pacer_loss_dest="",
-    vban_pacer_age_s="",
-    obs_log_head_age_s="",
-):
+def build_bundle_state(**facets):
     """Assemble the flat bundle-state dict `version-integrity-gate.sh --win-state`'s
     `compare_args_from_state()` parses. Every value is a STRING (its regex requires a quoted JSON
     string — a bare number/bool would silently fail to match and read as UNKNOWN, the opposite of
@@ -1986,123 +381,7 @@ def build_bundle_state(
     the deployed strih/stream servers never picked up the new key (half-wired), and the gate now
     reads every node's dantesync version uniformly via `dantesync --version` over SSH instead
     (scripts/dantesync-version-gate.sh), with no bundle-state involvement at all."""
-    values = {
-        "obs_version": obs_version,
-        "distroav_version": distroav_version,
-        "ndi_runtime": ndi_runtime,
-        "output_fps": output_fps,
-        "genlock_wall_clock": genlock_wall_clock,
-        "ndi_input_latency": ndi_input_latency,
-        "distroav_dll_paths": distroav_dll_paths,
-        "genlock_capability": genlock_capability,
-        "obs_dll_sha256": obs_dll_sha256,
-        "distroav_dll_sha256": distroav_dll_sha256,
-        "obs_installs": obs_installs,
-        "port4455_owner_path": port4455_owner_path,
-        "port4455_owner_version": port4455_owner_version,
-        "obs_process_count": obs_process_count,
-        "ahk_app1_shortcut_path": ahk_app1_shortcut_path,
-        "ahk_app1_run": ahk_app1_run,
-        "ahk_dead_config_present": ahk_dead_config_present,
-        "shortcut_target_path": shortcut_target_path,
-        "shortcut_workdir": shortcut_workdir,
-        "genlock_build_sha": genlock_build_sha,
-        # #1226 — the audio-timeline-lag facet the dev1 audio-lag watchdog reads; same
-        # omit-when-empty rule (absent facet == UNKNOWN downstream, never a fake 0).
-        "audio_ts_lag_ms": audio_ts_lag_ms,
-        "audio_ts_lag_src": audio_ts_lag_src,
-        # #1231 — the freshness age (in-log seconds the freshest #800 line sits behind the log head);
-        # present ("0" when fresh) whenever ANY #800 line exists, "" only when telemetry is absent.
-        # A large value -> the dev1 decision surfaces a STALE (stopped-while-log-advancing) state.
-        "audio_ts_lag_age_s": audio_ts_lag_age_s,
-        # #1265 — the per-REFERENCE-source (mbc on stream) ts_lag BAND SHAPE (base/high/low/duty/n),
-        # from `audio_ref_band_from_log`. Same omit-when-empty rule; the dev1 audio-lag watchdog's
-        # BAND arm reads these to catch a tens-of-ms bimodal/creeping drift the 5000 ms MAX-facet is
-        # blind to, and recording-e2e.sh's #856 apply reads the derived verdict to HOLD when the run's
-        # audio timeline was unstable.
-        "audio_ref_lag_src": audio_ref_lag_src,
-        "audio_ref_lag_base_ms": audio_ref_lag_base_ms,
-        "audio_ref_lag_high_ms": audio_ref_lag_high_ms,
-        "audio_ref_lag_low_ms": audio_ref_lag_low_ms,
-        "audio_ref_lag_duty_pct": audio_ref_lag_duty_pct,
-        "audio_ref_lag_n": audio_ref_lag_n,
-        # #1267 — the av-sync dock measured-offset trend the dev1 upstream-step watchdog reads: the
-        # RECENT-vs-BASELINE median offset (a sustained step = a physical upstream A/V shift), the
-        # CURRENT genlock pin + a pin-stability flag (a pin move -> the dev1 REPIN hold, never a
-        # false step), the in-log freshness age (-> STALE when the dock stops), and the per-window
-        # sample counts (too few -> UNKNOWN). Same omit-when-empty rule (absent == UNKNOWN, never 0).
-        "av_offset_recent_med_ms": av_offset_recent_med_ms,
-        "av_offset_base_med_ms": av_offset_base_med_ms,
-        "av_offset_pin": av_offset_pin,
-        "av_offset_pin_stable": av_offset_pin_stable,
-        "av_offset_age_s": av_offset_age_s,
-        "av_offset_n_recent": av_offset_n_recent,
-        "av_offset_n_base": av_offset_n_base,
-        # #1319 — the dock-LIVE freshness age (in-log seconds behind the log head of the freshest
-        # `av-sync-dock: diag ... locked=yes` heartbeat). Lets the dev1 band decision read
-        # IN_BAND_QUIET (dock LIVE, offset in the suggestion dead band) instead of a false STALE.
-        # Same omit-when-empty rule (absent == UNKNOWN downstream, never a fake 0).
-        "av_offset_dock_live_age_s": av_offset_dock_live_age_s,
-        # #1319 Part 2 — the dock estimator's recent-window measurement QUALITY (median MAD +
-        # min matched), from av_offset_quality_from_log. The dev1 band arm reads LOW_QUALITY
-        # (log-only, never a page) unless recent_mad_ms <= 15 AND recent_matched_min >= 30, so a
-        # noisy/biased dock reading no longer trips the +-30 ms band on its own scatter. Same
-        # omit-when-empty rule (absent == quality unjudgeable -> the band proceeds, never a fake 0).
-        "av_offset_recent_mad_ms": av_offset_recent_mad_ms,
-        "av_offset_recent_matched_min": av_offset_recent_matched_min,
-        # #1325 — the in-log age (s) of the freshest dock QUALITY line. The dev1 band/step arms read
-        # LOW_QUALITY (no page) when the quality facet is ABSENT (mad None) AND this age is stale (the
-        # dock stopped decoding — the 3× false page of 16.9.2026), while an ABSENT age (older box, or
-        # a dock actively measuring) keeps the #1319 "absent -> proceed, never swallow a real drift"
-        # behaviour. Omit-when-empty (absent == no quality line at all -> UNKNOWN downstream).
-        "av_offset_quality_age_s": av_offset_quality_age_s,
-        # #1325 — the mbc buffered_ms DRIFT/STEP shape (slope ms/min + max positive refill step +
-        # n + freshness age) the dev1 audio-lag watchdog's buffered arm reads (REPORT-ONLY). Same
-        # omit-when-empty rule (absent == < 2 buffered readings for the ref source -> UNKNOWN).
-        "buffered_ms_slope_ms_per_min": buffered_ms_slope_ms_per_min,
-        "buffered_ms_max_step_ms": buffered_ms_max_step_ms,
-        "buffered_ms_n": buffered_ms_n,
-        "buffered_ms_age_s": buffered_ms_age_s,
-        # #1227 — the VB-Matrix presence facet the dev1 VB-Matrix alert watchdog reads. Same
-        # omit-when-empty rule: running="0" (installed but the VBAudioMatrix* process is DEAD) is a
-        # truthy string and is KEPT (surfaces as DOWN); running="" (a box with no VB-Matrix install,
-        # e.g. imag) is dropped -> UNKNOWN downstream, never a false negative. name/pid/start are
-        # context only (pid free from the tasklist parse; start best-effort, PID-keyed-cached CIM).
-        "vb_matrix_running": vb_matrix_running,
-        "vb_matrix_name": vb_matrix_name,
-        "vb_matrix_pid": vb_matrix_pid,
-        "vb_matrix_start": vb_matrix_start,
-        # #1320 — the strih PROGRAM-render freeze facet the dev1 render-freeze watchdog reads: the
-        # MAX `program-render-audit lagged` over the tail + the in-log age (s) of the most recent
-        # window achieving it. Same omit-when-empty rule: "0" (render telemetry live, no freeze) is
-        # a truthy string and is KEPT; "" (no program-render-audit line at all) is dropped ->
-        # UNKNOWN downstream, never a fabricated 0. From `program_render_lagged_from_log`.
-        "program_render_lagged": program_render_lagged,
-        "program_render_lagged_age_s": program_render_lagged_age_s,
-        # #1320 — the RELOCK-BURST facet the dev1 render-freeze watchdog's relock arm reads: the MAX
-        # per-input burst count (issue 1318 summarize_relock_bursts, >=8 relocks within 1 s) over the
-        # #1222 bounded TAIL + the in-log age (s) of the newest relock event. Same omit-when-empty
-        # rule: "0" (relock telemetry live, no storm) is truthy and KEPT; "" (NO relock line at all,
-        # the steady state) is dropped -> UNKNOWN downstream, never a fabricated 0.
-        "relock_bursts": relock_bursts,
-        "relock_bursts_age_s": relock_bursts_age_s,
-        # issue 1381 -- the audio MIXER real-time facet (the newest complete `audio-stall #1367`
-        # dump + its window + in-log age, `audio_mixer_from_log`) and the obs-vban PACER loss facet
-        # (per-destination loss-counter increase in the last window, `vban_pacer_loss_from_log`) the
-        # dev1 audio-mixer watchdog reads. Same omit-when-empty rule: "0" readings are KEPT, a box
-        # with no dump yet / no VBAN output omits them -> UNKNOWN downstream, never a fake 0.
-        "audio_mixer_ticks": audio_mixer_ticks,
-        "audio_mixer_ticks_over": audio_mixer_ticks_over,
-        "audio_mixer_window_ms": audio_mixer_window_ms,
-        "audio_mixer_tick_ms": audio_mixer_tick_ms,
-        "audio_mixer_age_s": audio_mixer_age_s,
-        "vban_pacer_loss_events": vban_pacer_loss_events,
-        "vban_pacer_loss_ms": vban_pacer_loss_ms,
-        "vban_pacer_loss_dest": vban_pacer_loss_dest,
-        "vban_pacer_age_s": vban_pacer_age_s,
-        # issue 1385 -- the log head's age against the box's own clock (`obs_log_head_age_s_from_log`):
-        # the positive "OBS is still logging now" proof the dev1 audio-mixer STALLED verdict needs.
-        # "0" is a reading and is KEPT; no timestamped line omits it -> no proof downstream.
-        "obs_log_head_age_s": obs_log_head_age_s,
-    }
-    return {k: v for k, v in values.items() if v}
+    unknown = [k for k in facets if k not in _BUNDLE_STATE_KEY_SET]
+    if unknown:
+        raise TypeError(f"build_bundle_state() got an unexpected keyword argument {unknown[0]!r}")
+    return {k: facets[k] for k in BUNDLE_STATE_KEYS if facets.get(k)}
