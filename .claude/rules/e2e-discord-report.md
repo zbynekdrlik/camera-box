@@ -1,6 +1,7 @@
 ---
 paths:
   - "scripts/e2e_discord_report.py"
+  - "scripts/cambox_segments.py"
   - "scripts/lib/e2e-discord-report.sh"
   - "tests/python/test_e2e_discord_report*.py"
 ---
@@ -100,6 +101,16 @@ lists the report-only ones for the `ℹ️` line.
 `_blocking_failures`; if report-only, add it to `_report_only_tripped`. The summary has a safety net
 (overall_pass=false with no matched blocking gate → a generic "pozri CI log" line) so a forgotten
 blocking gate degrades to a generic FAIL rather than a hidden one — but attribute it properly.
+
+## Per-camera totals come from the shared grouping (issue 1386)
+
+`_aggregate_segments` (the per-camera zero-loss lines, stream and imag) is a thin wrapper over
+`scripts/cambox_segments.py` `per_camera`, the same grouping the 8 h soak's loss columns use.
+Never re-inline it. Its input rules are the soak's: a non-finite or non-numeric count counts 0,
+`pass` must be `True`, a malformed segment list never crashes the report.
+`tests/python/test_cambox_segments_1386.py` pins the delegation and that both consumers agree on
+every fixture. The failure-reason line of the blocking section (which window is over its own
+tolerance) is a different rule and stays in this file.
 
 ## Fixtures
 

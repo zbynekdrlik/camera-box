@@ -3,6 +3,7 @@ paths:
   - "scripts/av-soak.sh"
   - "scripts/lib/av-soak.sh"
   - "scripts/av_soak_decision.py"
+  - "scripts/cambox_segments.py"
   - "scripts/av_soak_rig_state.py"
   - "scripts/lib/av-soak-leftovers.sh"
   - "tests/python/test_av_soak_decision_1367.py"
@@ -152,7 +153,9 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   looser term. The AND of `gate_window_term` equals the verdict's `overall_pass` on 25 real local
   verdicts, all within the run-wide floor (four trimmed into `tests/python/fixtures/av_soak/`).
   An older verdict without the flags falls back to `relaxed_pass`, then `pass`. The strict
-  `pass` and raw copies/gaps/undecodable are recorded.
+  `pass` and raw copies/gaps/undecodable are recorded. The per-camera grouping and those sums are
+  the shared `scripts/cambox_segments.py` `per_camera` (issue 1386, the Discord report's
+  per-camera lines use the same one); only the gate-term grade is the soak's own.
 - Continuity gate: the verdict's OWN `all_cambox_continuity.overall_pass` per window. It adds
   what the per-window term cannot see -- the run-wide undecodable sum over
   `RUN_UNDECODABLE_FLOOR` (`loss_run_wide_pass`, src/probe/recording_segments.rs) and an empty
