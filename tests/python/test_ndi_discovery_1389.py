@@ -198,6 +198,19 @@ class CamboxVerdict1389(unittest.TestCase):
         self.assertTrue(r.stdout.startswith("FAIL:"), r.stdout)
         self.assertIn("/somewhere/else", r.stdout)
 
+    def test_a_config_with_a_bom_is_json(self):
+        # The plan reads the file as utf-8-sig; the verdict must not call the same file broken.
+        conf = "\ufeff" + json.dumps({"ndi": {"groups": {"recv": "Public"}}})
+        self.assertEqual(self._verdict(conf, self.DROPIN).stdout.strip(), "ok")
+        listed = "\ufeff" + json.dumps({"ndi": {"networks": {"ips": _pinned()}}})
+        r = self._verdict(listed, self.DROPIN)
+        self.assertIn(_pinned(), r.stdout)
+        self.assertNotIn("JSON", r.stdout)
+
+    def test_a_blank_dropin_is_inert(self):
+        # The same blank drop-in the plan removes as stale (CamboxApply1389) grades as no drop-in.
+        self.assertEqual(self._verdict("", "  \n").stdout.strip(), "ok")
+
     def test_a_quoted_dropin_line_is_read_like_systemd_reads_it(self):
         dropin = '[Service]\nEnvironment="NDI_CONFIG_DIR=/etc/ndi"\n'
         self.assertEqual(_lib(f"ndi_discovery_dropin_config_dir {shlex.quote(dropin)}").stdout.strip(), "/etc/ndi")
@@ -314,6 +327,59 @@ class CamboxApply1389(unittest.TestCase):
             self.assertFalse(os.path.exists(dropin))
             self.assertEqual(sd, ["daemon-reload"])
 
+    def test_a_blank_dropin_is_stale_and_removed(self):
+        # verify-device (an) grades a blank drop-in as no drop-in; the writer must not refuse it.
+        with tempfile.TemporaryDirectory() as tmp:
+            path, dropin = self._seed(tmp, self._canonical(tmp, ISSUE_1342_LIST), dropin="  \n")
+            r, calls, sd = self._run(tmp)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertNotIn("REFUSED", r.stderr)
+            self.assertFalse(os.path.exists(path))
+            self.assertFalse(os.path.exists(dropin))
+            self.assertEqual(sd, ["daemon-reload"])
+
+    def test_a_lone_blank_dropin_is_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = self._env(tmp)
+            _, dropin = self._seed(tmp, None, dropin="\n")
+            self.assertEqual(
+                _lib('ndi_discovery_cambox_plan "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_DISCOVERY_CAMBOX_DROPIN"',
+                     env=env).stdout.strip(), "remove")
+            r, calls, sd = self._run(tmp)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertFalse(os.path.exists(dropin))
+            self.assertEqual(sd, ["daemon-reload"])
+
+    def test_a_leftover_list_without_the_dropin_is_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, _ = self._seed(tmp, self._canonical(tmp, _pinned()), dropin=False)
+            r, calls, sd = self._run(tmp)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"])
+            self.assertFalse(os.path.exists(path))
+            self.assertEqual(sd, [], "no drop-in was there, so nothing to unload")
+
+    def test_a_second_run_writes_nothing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, self._canonical(tmp, ISSUE_1342_LIST))
+            first, _, _ = self._run(tmp)
+            self.assertEqual(first.returncode, 0, first.stdout + first.stderr)
+            os.remove(os.path.join(tmp, "mount.log"))
+            os.remove(os.path.join(tmp, "systemctl.log"))
+            again, calls, sd = self._run(tmp)
+            self.assertEqual(again.returncode, 0, again.stderr)
+            self.assertEqual((calls, sd), ([], []), "the second run never remounts")
+            self.assertIn("nothing written", again.stdout)
+
+    def test_a_bom_config_with_the_list_is_stripped_keeping_other_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = "\ufeff" + json.dumps({"ndi": {"groups": {"recv": "Public"}, "networks": {"ips": _pinned()}}})
+            path, dropin = self._seed(tmp, conf)
+            r, _, _ = self._run(tmp)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(json.loads(_read(path)), {"ndi": {"groups": {"recv": "Public"}}})
+            self.assertTrue(os.path.exists(dropin))
+
     def test_a_quoted_dropin_line_is_ours(self):
         with tempfile.TemporaryDirectory() as tmp:
             env = self._env(tmp)
@@ -365,6 +431,19 @@ class CamboxApply1389(unittest.TestCase):
             baks = [f for f in self._listing(path) if f.startswith("ndi-config.v1.json.bak-")]
             self.assertEqual(len(baks), 1)
             self.assertEqual(_read(os.path.join(os.path.dirname(path), baks[0])), conf)
+
+    def test_without_python3_a_config_without_a_list_is_left_alone(self):
+        # No python3 on the box: other keys cannot be kept by a rewrite, but a config that lists
+        # nothing needs no change at all -- never delete it (the backup would be the only copy).
+        with tempfile.TemporaryDirectory() as tmp:
+            conf = json.dumps({"ndi": {"groups": {"recv": "Public"}}})
+            path, dropin = self._seed(tmp, conf)
+            r, calls, sd = self._run(tmp, extra_stubs="python3() { return 1; }\n")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual((calls, sd), ([], []))
+            self.assertEqual(_read(path), conf)
+            self.assertTrue(os.path.exists(dropin))
+            self.assertIn("nothing written", r.stdout)
 
     def test_a_rw_root_is_never_remounted(self):
         with tempfile.TemporaryDirectory() as tmp:

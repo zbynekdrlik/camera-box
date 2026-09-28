@@ -534,6 +534,35 @@ class VerifyDeviceAnBehaviour(unittest.TestCase):
             r = self._run(tmp)
             self.assertIn("FAIL NDI receiver config", r.stdout)
 
+    def _write_raw(self, tmp, conf, dropin):
+        os.makedirs(os.path.join(tmp, "etc-ndi"), exist_ok=True)
+        with open(os.path.join(tmp, "etc-ndi", "ndi-config.v1.json"), "w") as fh:
+            fh.write(conf)
+        with open(os.path.join(tmp, "camera-box-ndi-discovery.conf"), "w") as fh:
+            fh.write(dropin)
+
+    def test_files_without_a_trailing_newline_are_read_whole_1389(self):
+        # A hand-edited config / drop-in often lacks the final newline: the gathered section marker
+        # must still sit on its own line, or the config reads as broken JSON and the drop-in as foreign.
+        with tempfile.TemporaryDirectory() as tmp:
+            dir_ = os.path.join(tmp, "etc-ndi")
+            self._write_raw(tmp, '{"ndi": {"groups": {"recv": "Public"}}}',
+                            f"[Service]\nEnvironment=NDI_CONFIG_DIR={dir_}")
+            r = self._run(tmp)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertTrue(r.stdout.startswith("OK NDI receiver config"), r.stdout)
+
+    def test_a_list_without_a_trailing_newline_fails_on_the_list_alone_1389(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dir_ = os.path.join(tmp, "etc-ndi")
+            self._write_raw(tmp, '{"ndi": {"networks": {"ips": "%s"}}}' % _pinned(),
+                            f"[Service]\nEnvironment=NDI_CONFIG_DIR={dir_}")
+            r = self._run(tmp)
+            self.assertIn("FAIL NDI receiver config", r.stdout)
+            self.assertIn(_pinned(), r.stdout)
+            self.assertNotIn("JSON", r.stdout)
+            self.assertNotIn("points NDI_CONFIG_DIR", r.stdout)
+
 
 class StrihWiring(unittest.TestCase):
     def test_setup_strih_writes_both_configs_and_the_intercom_dropin_ungated(self):
