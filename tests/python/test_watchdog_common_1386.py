@@ -146,6 +146,70 @@ def test_mktemp_failure_fallback_keeps_the_other_keys(tmp_path):
              f'PATH="{fakebin}:$PATH"\nwrite_state_field other 9\ncat "$STATE_FILE"\n')
     assert r.returncode == 0, r.stderr
     assert sorted(r.stdout.split()) == ["keep=1", "other=9"]
+    # the fallback is not atomic, so it is reported (a journal line), never silent
+    assert "mktemp failed" in r.stderr and str(state) in r.stderr
+
+
+def _stub(fakebin, name, body):
+    fakebin.mkdir(exist_ok=True)
+    f = fakebin / name
+    f.write_text("#!/bin/sh\n" + body)
+    f.chmod(0o755)
+
+
+def test_a_failed_temp_write_never_replaces_the_state_file(tmp_path):
+    # The temp file exists but the write into it fails (a full disk: mktemp needs only an inode,
+    # the write needs a block). Renaming that temp file over the state file would drop every key --
+    # every alerted_ recovery latch and confirm counter. A symlink to /dev/full reproduces the
+    # failing write for any user, root included.
+    state = tmp_path / "w.state"
+    state.write_text("alerted_strih-lx=1\nconfirm_strih-lx=2\n")
+    fakebin = tmp_path / "bin"
+    _stub(fakebin, "mktemp", 't="${1%XXXXXX}full"; ln -sf /dev/full "$t"; printf "%s\\n" "$t"\n')
+    r = _run(tmp_path, f'STATE_FILE="{state}"\nPATH="{fakebin}:$PATH"\n'
+             'write_state_field confirm_strih-lx 3\necho "rc=$?"\n')
+    assert r.stdout.strip() == "rc=0", "a failed state write must never end the watchdog's pass"
+    assert state.is_file() and not state.is_symlink(), "the temp file was renamed over the state file"
+    assert state.read_text() == "alerted_strih-lx=1\nconfirm_strih-lx=2\n", "the old state must stay"
+    assert not list(tmp_path.glob("w.state.*")), "the failed temp file must be removed"
+    assert "state write failed" in r.stderr and "confirm_strih-lx" in r.stderr
+
+
+def test_an_unreadable_state_file_is_never_rewritten_from_nothing(tmp_path):
+    # grep exits 2 when it cannot read the file: the other keys are unknown, so rewriting the file
+    # would keep only the one key being written. The write is skipped and reported instead.
+    state = tmp_path / "u.state"
+    state.write_text("alerted_stream=1\nconfirm_stream=4\n")
+    fakebin = tmp_path / "bin"
+    _stub(fakebin, "grep", "exit 2\n")
+    r = _run(tmp_path, f'STATE_FILE="{state}"\nPATH="{fakebin}:$PATH"\n'
+             'write_state_field confirm_stream 5\necho "rc=$?"\n')
+    assert r.stdout.strip() == "rc=0"
+    assert state.read_text() == "alerted_stream=1\nconfirm_stream=4\n"
+    assert "state write failed" in r.stderr and "confirm_stream" in r.stderr
+
+
+def test_write_is_errexit_safe(tmp_path):
+    # Rewriting the only key in the file makes `grep -v` match nothing (exit 1); under a caller's
+    # `set -e` that exit must not end the script. Every other path must be -e safe too.
+    state = tmp_path / "e.state"
+    script = tmp_path / "errexit.sh"
+    script.write_text("set -euo pipefail\n" f'. "{_LIB}"\nSTATE_FILE="{state}"\n'
+                      "write_state_field only 1\nwrite_state_field only 2\n"
+                      "clear_throttle\nwrite_state_field alert_sig x\necho SURVIVED\n")
+    r = subprocess.run(["bash", str(script)], capture_output=True, text=True, timeout=30)
+    assert r.stdout.strip() == "SURVIVED", r.stderr
+    got = dict(l.split("=", 1) for l in state.read_text().split("\n") if l)
+    assert got == {"only": "2", "confirm": "0", "alert_passes": "0", "alert_sig": "x"}
+
+
+def test_a_successful_write_keeps_the_other_keys_in_order_and_is_silent(tmp_path):
+    state = tmp_path / "o.state"
+    state.write_text("a=1\nb=2\nc=3\n")
+    r = _run(tmp_path, f'STATE_FILE="{state}"\nwrite_state_field b 9\n')
+    assert r.returncode == 0 and r.stderr == ""
+    assert state.read_text() == "a=1\nc=3\nb=9\n"
+    assert not list(tmp_path.glob("o.state.*"))
 
 
 def test_throttle_clears_reset_the_confirm_sig_passes_triples(tmp_path):
