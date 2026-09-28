@@ -631,16 +631,39 @@ def test_log_clock_mismatch_is_a_log_that_advances_yet_reads_old():
     assert amd.classify_log_clock(1300, 1000, 300) == "OK"           # frozen: ages with the wall
     assert amd.classify_log_clock(4, 6, 300) == "OK"                 # live, clocks agree
     assert amd.classify_log_clock(250, 86350, 300) == "OK"           # a frozen log's date wrap
+    assert amd.classify_log_clock(7197, 7199, 300) == "MISMATCH"     # stamps a moment ahead
     assert amd.classify_log_clock(7203, 7201, 30) == "UNKNOWN"       # passes too close to judge
     assert amd.classify_log_clock(7203, 7201, 7200) == "UNKNOWN"     # a long timer gap
+    assert amd.classify_log_clock(7203, 7201, 900) == "UNKNOWN"      # past the 600 s bound
     assert amd.classify_log_clock(7203, None, 300) == "UNKNOWN"
     assert amd.classify_log_clock(None, 7201, 300) == "UNKNOWN"
     assert amd.classify_log_clock(7203, None, None) == "UNKNOWN"
 
 
 def test_log_clock_boundary_is_half_the_pass_gap():
-    assert amd.classify_log_clock(1149, 1000, 300) == "MISMATCH"     # aged 149 s of 300
-    assert amd.classify_log_clock(1150, 1000, 300) == "OK"           # aged half the gap
+    assert amd.classify_log_clock(7229, 7180, 100) == "MISMATCH"     # aged 49 s of 100
+    assert amd.classify_log_clock(7230, 7180, 100) == "OK"           # aged half the gap
+
+
+def test_a_log_head_that_is_not_a_zone_offset_is_never_a_mismatch():
+    # Review round 3: a hung OBS whose WebSocket thread still logs each :8899 connect (written
+    # AFTER the gather's log read) reads ~one pass gap old on every pass. That is on-air silence,
+    # not a time-zone fault, so the CLOCK page must not claim it. A zone offset is a multiple of
+    # 15 min, so a live log's head age sits within a minute of a quarter hour; 300 s never does.
+    assert amd.classify_log_clock(301, 299, 300) == "OK"
+    assert amd.classify_log_clock(302, 300, 305) == "OK"
+    assert amd.classify_log_clock(5000, 5001, 300) == "OK"           # 5000 s = 5 min past 1 h 15
+    assert amd.classify_log_clock(7261, 7259, 300) == "OK"           # 61 s past the quarter hour
+    assert amd.classify_log_clock(7260, 7259, 300) == "MISMATCH"     # 60 s: still a fresh line
+
+
+def test_watchdog_never_blames_the_clock_for_a_hung_obs_whose_websocket_still_logs(tmp_path):
+    state = tmp_path / "state"
+    for i, head in enumerate((301, 300, 302, 299, 301)):
+        log = _run_watchdog(tmp_path, _mixer_body(900, head), state,
+                            now=1_790_000_000 + i * 300)
+        assert "clock MISMATCH" not in log, log
+        assert "WOULD alert (CLOCK)" not in log, log
 
 
 def test_cli_grades_the_log_clock_from_the_previous_pass():
