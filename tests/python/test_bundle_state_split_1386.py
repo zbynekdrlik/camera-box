@@ -21,6 +21,7 @@ Refresh the golden ONLY for an intended output change, never to absorb a refacto
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import gzip
 import hashlib
@@ -334,6 +335,75 @@ def test_build_bundle_state_rejects_an_unknown_keyword_and_positionals():
         bsg.build_bundle_state(not_a_facet="x")
     with pytest.raises(TypeError):
         bsg.build_bundle_state("x")
+
+
+# --- the facade contract (added with the split) --------------------------------------------------
+
+_FAMILIES = ("bundle_state_log", "bundle_state_genlock", "bundle_state_audio", "bundle_state_vban",
+             "bundle_state_av_offset", "bundle_state_host")
+# private helpers the tests call through the facade (test_relock_bursts_gather_1320.py)
+_PRIVATE_REEXPORTS = ("_parse_relock_event", "_summarize_relock_bursts")
+
+
+def test_the_facade_reexports_through_an_explicit_list(golden):
+    names = list(vars(bsg).get("__all__", ()))
+    assert names, "bundle_state_gather must declare its re-exports in an explicit __all__"
+    assert len(names) == len(set(names)), "a duplicate __all__ entry"
+    assert set(golden["public_names"]) | set(_PRIVATE_REEXPORTS) <= set(names), (
+        "every name the pre-split module exposed (+ the tested private helpers) must stay importable "
+        "from bundle_state_gather")
+    for n in names:
+        assert hasattr(bsg, n), f"__all__ names {n!r} but the facade does not bind it"
+
+
+def test_every_reexport_is_the_family_object_not_a_copy():
+    for fam in _FAMILIES:
+        mod = importlib.import_module(fam)
+        for n in bsg.__all__:
+            if n in vars(mod):
+                assert getattr(bsg, n) is vars(mod)[n], f"{n} re-exported from {fam} is a copy"
+
+
+_DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+
+
+def _span(node):
+    return node.end_lineno - node.lineno + 1
+
+
+def _own_lines(fn):
+    """A function's own lines: its span minus its docstring and minus every def / class nested in
+    it (each is measured on its own), so a handler-class factory is not charged for its methods."""
+    n = _span(fn)
+    first = fn.body[0]
+    if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) \
+            and isinstance(first.value.value, str):
+        n -= _span(first)
+    stack = list(ast.iter_child_nodes(fn))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, _DEFS):
+            n -= _span(node)
+        else:
+            stack.extend(ast.iter_child_nodes(node))
+    return n
+
+
+def _functions(path):
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            yield node.name, _own_lines(node)
+
+
+def test_the_split_files_and_functions_stay_inside_the_budget():
+    files = [_SCRIPTS / "bundle_state_gather.py"] + [_SCRIPTS / f"{f}.py" for f in _FAMILIES]
+    for path in files:
+        n = path.read_text(encoding="utf-8").count("\n")
+        assert n <= 800, f"{path.name} is {n} lines (budget 800): split it by responsibility"
+    for path in files + [_SCRIPTS / "bundle-state-server.py"]:
+        for name, n in _functions(path):
+            assert n <= 100, f"{path.name}:{name} is {n} own lines (budget 100): cut it into helpers"
 
 
 if __name__ == "__main__" and sys.argv[1:] == ["--write-golden"]:
