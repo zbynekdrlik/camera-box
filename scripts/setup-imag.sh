@@ -1728,6 +1728,10 @@ for f in "${BUNDLE_STATE_SERVER_FILES[@]}"; do
         || fail "issue 1299: could not fetch scripts/${f} from ${GENLOCK_REPO} (dev) via gh api"
 done
 chmod 0644 /opt/camera-box/*.py
+# issue 1386: the files come from origin dev, the list from this checkout -- prove the installed
+# tree is complete (the gather facade imports every facet module) before enabling the unit.
+python3 -I -c 'import sys; sys.path.insert(0, "/opt/camera-box"); import bundle_state_gather' \
+    || fail "issue 1386: /opt/camera-box holds a partial bundle-state server tree -- re-run from a current checkout"
 
 sudo -u "$DESKTOP_USER" mkdir -p "$USER_HOME/.config/systemd/user"
 gh api -H "Accept: application/vnd.github.raw" \

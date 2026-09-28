@@ -18,7 +18,7 @@ import time
 
 
 # #1222 — the strih bundle-state gather's latency grew LINEARLY with the live OBS log size: a
-# ~13h session (75 MB log) made every *_from_log parser above re-scan the WHOLE file on EVERY
+# ~13h session (75 MB log) made every *_from_log parser re-scan the WHOLE file on EVERY
 # /bundle-state.json request (~0.25 s/MB measured, +19 s at 75 MB), pushing gather past
 # recording-e2e.sh's `curl --max-time 30` and refusing the [0/8] version-integrity gate. Every
 # fact these parsers need lives at the EDGES of the log, never the middle: the startup banner
@@ -32,7 +32,7 @@ LOG_HEAD_BYTES = 2 * 1024 * 1024  # ~2 MB — a wide margin over the startup ban
 LOG_TAIL_BYTES = 5 * 1024 * 1024  # ~5 MB — the newest state a caller might need (e.g. the latest
                                    # genlock capability marker).
 # A separator that can never fake a real log line: no digits (so it can never satisfy a
-# `\d+\.\d+\.\d+` / `fps:\s+\d+/` style pattern above), no colon-prefixed keyword any parser
+# `\d+\.\d+\.\d+` / `fps:\s+\d+/` style pattern in the facet modules), no colon-prefixed keyword any parser
 # scans for ("OBS ", "DistroAV (Version", "video settings reset:", "genlock:"), and newline-padded
 # on both sides so a byte-cut mid-line on either side of the join can never merge into something a
 # parser could mistake for a real one.
@@ -50,10 +50,10 @@ def read_bounded_log_text(path, head_bytes=LOG_HEAD_BYTES, tail_bytes=LOG_TAIL_B
     truncation) — the common case for a freshly-started OBS session and for every existing test
     fixture in this suite. A larger file returns its first `head_bytes` bytes joined to its last
     `tail_bytes` bytes via LOG_BOUNDED_READ_SEPARATOR (see that constant's own doc comment for why
-    it can never be mistaken for a real log line by any parser above). Read in BINARY mode and
+    it can never be mistaken for a real log line by any facet parser). Read in BINARY mode and
     decoded with `errors="replace"` — a byte-boundary cut mid multi-byte UTF-8 character degrades
     to a harmless U+FFFD, never a crash. Unlike the original whole-file text-mode read this
-    replaces, a Windows CRLF line ending is NOT translated to a bare `\n` here; every parser above
+    replaces, a Windows CRLF line ending is NOT translated to a bare `\n` here; every facet parser
     is CRLF-tolerant (`splitlines()` strips a trailing `\r`, and no regex here crosses a line
     boundary), so this has no observed behavioral effect, but it is a real difference worth
     knowing if a future parser is added.

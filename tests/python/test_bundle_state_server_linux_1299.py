@@ -22,6 +22,7 @@ test_bundle_state_server_*.py files in one pytest process.
 """
 import importlib.util
 import pathlib
+import subprocess
 import sys
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]
@@ -229,9 +230,13 @@ def test_setup_imag_step_28_installs_the_server_enable_only():
     # against the server's real imports by test_bundle_state_files_1386.py) instead of typing it.
     assert "/opt/camera-box" in _SETUP
     assert 'for f in "${BUNDLE_STATE_SERVER_FILES[@]}"; do' in _SETUP
-    declared = (_SCRIPTS / "lib" / "bundle-state-files.sh").read_text(encoding="utf-8")
+    lib = _SCRIPTS / "lib" / "bundle-state-files.sh"
+    declared = subprocess.run(
+        ["/bin/bash", "-c", f'. "{lib}"; printf "%s\\n" "${{BUNDLE_STATE_SERVER_FILES[@]}}"'],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
     for f in ("bundle-state-server.py", "bundle_state_gather.py", "obs_phase2.py"):
-        assert f"\n  {f}\n" in declared, f"step 28 must install {f} to the box"
+        assert f in declared, f"step 28 must install {f} to the box"
     assert "imag-bundle-state-server.service" in _SETUP
     # ENABLE-ONLY: never a live --now start from the provisioner
     assert "systemctl --user enable imag-bundle-state-server.service" in _SETUP

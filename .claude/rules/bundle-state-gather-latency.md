@@ -46,12 +46,19 @@ paths:
     server's real module-level import closure, so a missing entry fails there.
   - A box missing one module serves no `:8899` at all: the server exits on the ImportError, and the
     Windows supervisor loop restarts it every 5 s. So redeploy the WHOLE list, never one changed file.
+  - Both setup scripts fetch the files from origin `dev` but take the list from the checkout, so
+    after the install they run `python3 -I -c '…; import bundle_state_gather'` against
+    `/opt/camera-box` and `fail` on a partial tree. `-I` keeps a caller's cwd (e.g. `scripts/`) off
+    `sys.path`.
 - **Proof of neutrality:** `test_bundle_state_split_1386.py` compares against a golden captured from
   the pre-split code (`fixtures/bundle_state_split_1386/golden.json`). It covers every parser over the
   recorded logs + one synthetic all-families log + their bounded reads, and the served JSON on both
   gather paths (key order included). Refresh it (`--write-golden`) only for an intended output
   change. The same file pins the file budgets: each module at most 800 lines, each function at most
-  100 own lines.
+  100 own lines. The server itself is still over the ~1000-line budget and is RATCHETED at its
+  current size: a change that needs more room moves the Windows-only identity readers (port4455,
+  tasklist, VB-Matrix start, shortcut, AHK, NDI runtime + their caches) into a `bundle_state_*`
+  module first.
 
 The strih/stream `:8899` server (`scripts/bundle-state-server.py` + pure parsers/builders behind
 `scripts/bundle_state_gather.py`) feeds `recording-e2e.sh`'s `[0/8]` version-integrity gate via

@@ -281,11 +281,22 @@ def compute_golden(tmp_dir, keys=None):
             golden["timing_keys"][f"windows={windows}"] = timing
     golden["host"] = _host_facets(tmp_dir, host)
     if keys is None:
+        # A first capture: the pre-split code's keyword-only parameters, in signature order.
         keys = [p for p in inspect.signature(bsg.build_bundle_state).parameters]
     golden["build_bundle_state_keys"] = keys
     golden["build_bundle_state"] = _build_state_cases(keys)
     golden["public_names"] = _public_names()
     return golden
+
+
+def refresh_golden(tmp_dir):
+    """What `--write-golden` writes: the outputs recomputed over the SAME inputs. The keyword list
+    fed to build_bundle_state is an input (the historic signature order), so it is reused from the
+    committed golden; only a first capture (no golden yet) reads it from the signature."""
+    keys = None
+    if _GOLDEN.is_file():
+        keys = json.loads(_GOLDEN.read_text(encoding="utf-8"))["build_bundle_state_keys"]
+    return compute_golden(tmp_dir, keys=keys)
 
 
 # --- the proof -----------------------------------------------------------------------------------
@@ -328,6 +339,17 @@ def test_build_bundle_state_accepts_every_original_keyword_in_order(golden, actu
 def test_every_original_public_name_still_imports(golden):
     missing = [n for n in golden["public_names"] if not hasattr(bsg, n)]
     assert missing == []
+
+
+def test_the_golden_refresh_reproduces_the_committed_golden(tmp_path):
+    # `--write-golden` (refresh_golden) must reproduce every committed output, so the documented
+    # refresh command keeps working on the split code. The public-name list may only grow (the
+    # split adds BUNDLE_STATE_KEYS), never lose a name.
+    fresh = refresh_golden(str(tmp_path))
+    committed = json.loads(_GOLDEN.read_text(encoding="utf-8"))
+    assert set(committed["public_names"]) <= set(fresh.pop("public_names"))
+    committed.pop("public_names")
+    assert fresh == committed
 
 
 def test_build_bundle_state_rejects_an_unknown_keyword_and_positionals():
@@ -404,10 +426,16 @@ def test_the_split_files_and_functions_stay_inside_the_budget():
     for path in files + [_SCRIPTS / "bundle-state-server.py"]:
         for name, n in _functions(path):
             assert n <= 100, f"{path.name}:{name} is {n} own lines (budget 100): cut it into helpers"
+    # The server itself is still over the ~1000-line file budget (issue 1386 scoped its server work
+    # to cutting gather_bundle_state). It must not grow further: a change that needs more room moves
+    # the Windows-only identity readers (port4455 / tasklist / VB-Matrix start / shortcut / AHK /
+    # NDI runtime + their caches) into a bundle_state_* module and lists it in bundle-state-files.
+    server = (_SCRIPTS / "bundle-state-server.py").read_text(encoding="utf-8").count("\n")
+    assert server <= 1110, f"bundle-state-server.py grew to {server} lines (ratchet 1110): split it"
 
 
 if __name__ == "__main__" and sys.argv[1:] == ["--write-golden"]:
     with tempfile.TemporaryDirectory() as d:
-        data = compute_golden(d)
+        data = refresh_golden(d)
     _GOLDEN.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n", encoding="utf-8")
     print(f"wrote {_GOLDEN} ({len(data['cases'])} log cases)")

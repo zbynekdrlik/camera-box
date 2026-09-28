@@ -644,12 +644,7 @@ def _genlock_log_facets(log_text):
     """The OBS / genlock facets of the bounded log: the startup banner (OBS + DistroAV version, the
     reset block's fps), the genlock wall-clock + capability markers, and the #1320 PROGRAM-render
     freeze + relock-burst facets. A dict of `build_bundle_state` keywords."""
-    # #1320 — the strih PROGRAM-render freeze facet (max lagged + freshness age); the dev1
-    # render-freeze watchdog reads it.
     lagged, lagged_age_s = bsg.program_render_lagged_from_log(log_text)
-    # #1320 — the RELOCK-BURST facet (max per-input bursts + freshness age); the dev1 render-freeze
-    # watchdog's relock arm reads it. "" -> facet omitted (steady state, no relock line), never a
-    # fabricated 0.
     relock_bursts, relock_bursts_age_s = bsg.relock_bursts_from_log(log_text)
     return {
         "obs_version": bsg.obs_version_from_log(log_text),
@@ -667,13 +662,8 @@ def _genlock_log_facets(log_text):
 def _av_offset_log_facets(log_text):
     """The av-sync dock facets of the bounded log (#1267 / #1319 / #1325). A dict of
     `build_bundle_state` keywords; the dev1 av-step watchdog + the audio-lag band arm read them."""
-    # #1267 — the dock measured-offset trend (recent/base median + pin + pin_stable + age +
-    # per-window counts); the dev1 upstream-step watchdog reads these facets.
     (recent_med, base_med, pin, pin_stable, age_s, n_recent,
      n_base) = bsg.av_offset_series_from_log(log_text)
-    # #1319 Part 2 — the dock estimator's recent-window measurement QUALITY (median MAD + min
-    # matched); the dev1 band arm reads LOW_QUALITY off it so a noisy/biased dock reading no longer
-    # false-pages.
     recent_mad_ms, recent_matched_min = bsg.av_offset_quality_from_log(log_text)
     return {
         "av_offset_recent_med_ms": recent_med,
@@ -683,13 +673,9 @@ def _av_offset_log_facets(log_text):
         "av_offset_age_s": age_s,
         "av_offset_n_recent": n_recent,
         "av_offset_n_base": n_base,
-        # #1319 — the dock-LIVE heartbeat freshness age; the dev1 band decision reads it to tell
-        # "dock LIVE, offset in the dead band" (IN_BAND_QUIET) from "dock silent" (STALE).
         "av_offset_dock_live_age_s": bsg.av_offset_dock_live_age_from_log(log_text),
         "av_offset_recent_mad_ms": recent_mad_ms,
         "av_offset_recent_matched_min": recent_matched_min,
-        # #1325 — the in-log age of the freshest dock QUALITY line; the dev1 band/step arms gate
-        # LOW_QUALITY on it when the quality facet is absent AND this age is stale.
         "av_offset_quality_age_s": bsg.av_offset_quality_age_from_log(log_text),
     }
 
@@ -700,18 +686,11 @@ def _audio_log_facets(log_text, log_read_tod, ref_band_src):
     issue-1385 log-head age. A dict of `build_bundle_state` keywords."""
     # issue 1381: the timestamped tail is parsed ONCE and shared by the mixer + pacer facets below.
     stamped_tail = bsg.timestamped_tail_lines(log_text)
-    # #1226/#1231 — MAX per-source audio-timeline lag + freshness age (max_fresh_lag_str, src,
-    # age_s); the dev1 audio-lag watchdog reads these facets.
     ts_lag_ms, ts_lag_src, ts_lag_age_s = bsg.audio_telemetry_from_log(log_text)
-    # #1265 — the per-REFERENCE-source ts_lag BAND SHAPE (src, base, high, low, duty, n).
     (ref_src, ref_base, ref_high, ref_low, ref_duty,
      ref_n) = bsg.audio_ref_band_from_log(log_text, ref_src=ref_band_src)
-    # #1325 — the mbc buffered_ms DRIFT/STEP shape (slope, max_step, n, age); the dev1 audio-lag
-    # watchdog's REPORT-ONLY buffered arm reads it.
     (buf_slope, buf_max_step, buf_n,
      buf_age_s) = bsg.buffered_ms_series_from_log(log_text, ref_src=ref_band_src)
-    # issue 1381 -- the audio MIXER real-time facet (newest complete audio-stall dump) and the
-    # obs-vban PACER loss facet; the dev1 audio-mixer watchdog reads them.
     (mixer_ticks, mixer_ticks_over, mixer_window_ms, mixer_tick_ms,
      mixer_age_s) = bsg.audio_mixer_from_log(log_text, tail=stamped_tail)
     (vban_events, vban_ms, vban_dest,
@@ -739,8 +718,6 @@ def _audio_log_facets(log_text, log_read_tod, ref_band_src):
         "vban_pacer_loss_ms": vban_ms,
         "vban_pacer_loss_dest": vban_dest,
         "vban_pacer_age_s": vban_age_s,
-        # issue 1385 -- the log head's age against the box's own clock (the dev1 audio-mixer
-        # STALLED verdict's liveness proof).
         "obs_log_head_age_s": bsg.obs_log_head_age_s_from_log(log_text, log_read_tod),
     }
 
@@ -749,7 +726,9 @@ def _parse_log_facets(log_text, log_read_tod, ref_band_src):
     """Every log-derived facet from the SAME bounded log_text (no second read — one #1222
     `obs_log_parse` timing): `(facets, genlock_lock)`, where `facets` is a dict of
     `build_bundle_state` keywords and `genlock_lock` is the nested #1299 LOCK facet (None when the
-    log has no `genlock-lock-json:` line — a stock OBS / no line yet, never a false UNLOCKED)."""
+    log has no `genlock-lock-json:` line — a stock OBS / no line yet, never a false UNLOCKED).
+    Each key's purpose (and which dev1 watchdog reads it) is documented once, at its entry in
+    `bundle_state_gather.BUNDLE_STATE_KEYS`."""
     facets = {}
     facets.update(_genlock_log_facets(log_text))
     facets.update(_audio_log_facets(log_text, log_read_tod, ref_band_src))

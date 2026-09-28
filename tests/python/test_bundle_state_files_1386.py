@@ -20,6 +20,7 @@ from __future__ import annotations
 import ast
 import pathlib
 import subprocess
+import sys
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _SCRIPTS = _ROOT / "scripts"
@@ -134,12 +135,53 @@ def test_the_closure_reaches_every_facet_module():
     assert split <= closure, f"{sorted(split - closure)} exist but the server never reaches them"
 
 
+_SMOKE = "import sys; sys.path.insert(0, \"/opt/camera-box\"); import bundle_state_gather"
+
+
+def _smoke_rc(tree_dir, cwd):
+    # The setup scripts' own post-install check, pointed at *tree_dir* instead of /opt/camera-box.
+    prog = _SMOKE.replace("/opt/camera-box", str(tree_dir))
+    return subprocess.run([sys.executable, "-I", "-c", prog], cwd=cwd, capture_output=True,
+                          text=True, check=False).returncode
+
+
+def test_both_setup_scripts_smoke_import_the_installed_tree_before_enabling():
+    for script, loop, enable in (
+            ("setup-strih.sh", 'for _bss in "${BUNDLE_STATE_SERVER_FILES[@]}"; do',
+             "systemctl --user enable strih-bundle-state-server.service"),
+            ("setup-imag.sh", 'for f in "${BUNDLE_STATE_SERVER_FILES[@]}"; do',
+             "systemctl --user enable imag-bundle-state-server.service")):
+        text = (_SCRIPTS / script).read_text(encoding="utf-8")
+        smoke = f"python3 -I -c '{_SMOKE}'"
+        assert text.count(smoke) == 1, f"{script} must smoke-import the installed tree once"
+        assert text.index(loop) < text.index(smoke) < text.index(enable), (
+            f"{script}: install the tree, then smoke-import it, then enable the unit")
+
+
+def test_the_smoke_import_catches_a_partial_tree_even_from_the_scripts_dir(tmp_path):
+    # -I keeps the caller's cwd (e.g. a run from scripts/, where every module exists) off
+    # sys.path, so only the installed tree can satisfy the import.
+    full = tmp_path / "full"
+    part = tmp_path / "part"
+    for tree in (full, part):
+        tree.mkdir()
+        for name in _txt_list():
+            if tree is part and name == "bundle_state_vban.py":
+                continue
+            (tree / name).write_bytes((_SCRIPTS / name).read_bytes())
+    assert _smoke_rc(full, _SCRIPTS) == 0
+    assert _smoke_rc(part, _SCRIPTS) != 0
+
+
 def test_both_setup_scripts_iterate_the_declared_list():
+    # obs_phase2.py is also installed on its own (to /usr/local/bin, for the scene seeders), so
+    # only the files that exist solely for the server tree must never be named in setup code.
+    tree_only = [n for n in _txt_list() if n not in _SHARED_WITH_LAZY_IMPORTS]
     for script, loop in (("setup-strih.sh", 'for _bss in "${BUNDLE_STATE_SERVER_FILES[@]}"; do'),
                          ("setup-imag.sh", 'for f in "${BUNDLE_STATE_SERVER_FILES[@]}"; do')):
         text = (_SCRIPTS / script).read_text(encoding="utf-8")
         assert "lib/bundle-state-files.sh\"" in text, f"{script} must source the declared list"
         assert text.count(loop) == 1, f"{script} must install the tree by iterating the list"
         code = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
-        literal = [ln for ln in code if "bundle-state-server.py bundle_state_gather.py" in ln]
-        assert literal == [], f"{script} still carries a literal server file list: {literal}"
+        named = [(n, ln) for ln in code for n in tree_only if n in ln]
+        assert named == [], f"{script} names a server-tree file in code instead of the list: {named}"
