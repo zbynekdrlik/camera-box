@@ -28,7 +28,11 @@ recovery one-liner under three names, and the three fetches that only differed b
 - **Set the globals a helper reads before calling it** — `STATE_FILE`, `NETREACH_STATE_FILE` for
   `netreach_box_alerted`, `CURL_TIMEOUT` / `BUNDLE_PORT` / `BUNDLE_PATH` for `fetch_bundle_json`.
   They are read at call time. The lib runs nothing at source time and never touches shell options;
-  a global read only by the lib needs `# shellcheck disable=SC2034`.
+  a global read only by the lib needs the one-line `# shellcheck disable=SC2034` directive above
+  it (with the family's `# read by scripts/lib/watchdog-common.sh` note). CI's `shellcheck -S warning scripts/*.sh scripts/lib/*.sh` puts
+  the lib on the same command line and follows the `source=` directive, so it stays quiet without
+  the directive; a per-file run (every local recipe) warns. Add it whenever a move leaves a global
+  read only by the lib (slice C missed 20 of them, a review caught it).
 - **A Tier-0 fetch seam is an ARGUMENT, not a copy.** A watchdog that wants a `*_FETCH_CMD` replay
   seam calls `fetch_bundle_json "$ip" MY_FETCH_CMD` (the variable's NAME). A non-empty value then
   runs as `<cmd> <ip>` in place of curl: one executable file path runs whole (spaces allowed),
