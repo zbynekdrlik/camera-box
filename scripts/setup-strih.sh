@@ -376,6 +376,12 @@ fi
 [ -f "${HERE}/strih_scenes.py" ] || fail "scripts/strih_scenes.py not found next to this script (the strih-obs-start.sh --bootstrap seed target)"
 install -m 0755 "${HERE}/strih_scenes.py" /usr/local/bin/strih_scenes.py
 echo "  installed strih_scenes.py -> /usr/local/bin (input/scene/Studio-Mode seeder; strih-obs-start.sh runs --bootstrap on launch)"
+# issue 1242 (28.9.2026, owner order): the strih bandwidth-roles module is retired -- strih_scenes.py
+# no longer imports it; remove a leftover install.
+if [ -e /usr/local/bin/strih_bandwidth_roles.py ]; then
+  rm -f /usr/local/bin/strih_bandwidth_roles.py
+  echo "  removed the retired /usr/local/bin/strih_bandwidth_roles.py (issue 1242)"
+fi
 
 # ---------------------------------------------------------------------------------------------
 step 7 "OBS pre-seed: WebSocket :4455 no-auth + Studio Mode"

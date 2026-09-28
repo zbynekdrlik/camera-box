@@ -24,8 +24,8 @@ NOTE: why raw NDI inputs, not Multiview tiles?
   Repeated identical hashes while genuinely activated are a real freeze; a source with no
   known 'Cam N' scene (a non-canonical --sources override) is sampled cold, same as
   pre-#747 behaviour. The previous "keep the Multiview projector open" precondition is
-  obsolete: the decoupled built-in Multiview renders low-bandwidth "MV Cam N" twin clones
-  (#730), not these raw main inputs, so it no longer keeps them warm either way.
+  obsolete: the gate warms each source itself, whatever the Multiview renders (#730 once made it
+  render low-bandwidth twin clones; strih has no twins since issue 1242, 28.9.2026).
 
 Usage:
   python3 scripts/frozen-camera-gate.py --host 10.77.9.202 [options]

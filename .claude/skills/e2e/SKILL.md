@@ -1393,8 +1393,9 @@ mean luma ~5–7); a frozen NDI repeats identical PNG bytes → STATIC → FAIL.
 **Precondition — GONE since #747 (2026-07-13): the gate now WARMS each input itself.** The old
 "Multiview projector must be open" precondition (#276) was silently INVALIDATED the same day it
 was written by #730/#508's Multiview decoupling (see the GOTCHA below) — a decoupled Multiview
-renders low-bandwidth `MV Cam N` TWIN clones, not these raw main inputs, so keeping it open no
-longer keeps `NDI cam4`/`NDI cam6` etc. rendering at all. The fix: before sampling EACH source,
+rendered low-bandwidth `MV Cam N` TWIN clones, not these raw main inputs, so keeping it open no
+longer kept `NDI cam4`/`NDI cam6` etc. rendering at all (strih has no twins since issue 1242,
+28.9.2026; the gate's own warm-up below stays). The fix: before sampling EACH source,
 `frozen-camera-gate.py` now sets that input's wrapping strih `Cam N` scene (the convention: scene
 `Cam N` wraps input `NDI camN` — `_scene_for_input('NDI cam5') == 'Cam 5'`) to
 PREVIEW (Studio Mode, always on on strih/stream) and settles `--warm-settle` seconds (default

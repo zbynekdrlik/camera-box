@@ -565,8 +565,9 @@ def _section_mv_skew(verdict, meta):
     `meta["mv_skew"]` (optional -- this whole section is skipped, never fabricated, when absent) is
     that gatherer's JSON: {"cameras": {"camN": {"median_ms", "n_samples", "stdev_ms", "alarming",
     ...}}, "frame_ms": 16.67, "error"?: "..."}. A camera with no decodable QR is an honest N/A
-    (never a fabricated 0). Both strih and imag are shared-source (scene 'MV Cam N' draws the SAME
-    input as 'Cam N') so the expected skew is ~0 -- this is a REGRESSION GUARD: |median| > 1 frame
+    (never a fabricated 0). The measurement runs on imag, which is shared-source (scene 'MV Cam N'
+    draws the SAME input as 'Cam N'; strih has no 'MV' scenes since issue 1242), so the expected
+    skew is ~0 -- this is a REGRESSION GUARD: |median| > 1 frame
     means the multiview cell the operator sees presents at a different time than the program."""
     mv = meta.get("mv_skew")
     if not mv:

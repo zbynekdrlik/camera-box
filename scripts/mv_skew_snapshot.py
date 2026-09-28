@@ -25,9 +25,10 @@ with ~10ms stdev at 960x540 -- so the 1-frame (16.7ms @60fps) alarm threshold is
 resolvable. (Timestamping the RPC MIDPOINT instead of t_send was the original error source: it put
 the noise floor at 50-180ms because the asymmetric PNG-readback time leaked in uncancelled.)
 
-RESCOPE (#761 validation 2026-08-16): both strih and imag have converged to a SHARED-SOURCE
+RESCOPE (#761 validation 2026-08-16): imag (the box this runs against) uses a SHARED-SOURCE
 arrangement (scene "MV Cam N" references the SAME `NDI CAM{n}` input as "Cam N"; no separate low-bw
-clone input exists), so the expected skew is ~0 and this snapshot is a REGRESSION GUARD -- exactly
+clone input exists; strih has no "MV" scenes at all since issue 1242, 28.9.2026), so the expected
+skew is ~0 and this snapshot is a REGRESSION GUARD -- exactly
 the role the owner predefined for a shared-source box (comment 2026-07-15). It still measures a real
 lag if a separate low-bw clone is ever re-introduced (an imag experiment, or #763's derived stream).
 
