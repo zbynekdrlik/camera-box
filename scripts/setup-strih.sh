@@ -308,9 +308,10 @@ else
   warn "  ffmpeg install failed -- ffprobe (on-box E2E verdict) will be absent; fix the box's apt sources and re-run"
 fi
 # issue 1342: the RECEIVER-side NDI config (scripts/lib/ndi-discovery.sh, the SAME generator
-# setup-device.sh writes the camboxes with): networks.ips = every managed NDI sender (every camera
-# from camera-set.sh + the obs-fleet ndi-sender boxes; the traveling resolume hostname resolved now,
-# skipped when away). libndi queries those IPs directly IN ADDITION to mDNS; senders never read the
+# setup-device.sh writes the camboxes with): networks.ips = the obs-fleet ndi-sender boxes (the
+# traveling resolume hostname resolved now, skipped when away), NEVER a cambox -- issue 1389: a finder's
+# discovery connection into a cambox aborts camera-box when this OBS exits or restarts, so the camboxes
+# are found by mDNS alone. libndi queries those IPs directly IN ADDITION to mDNS; senders never read the
 # list, so strih-lx's own STRIH-LX outputs keep announcing over mDNS -- no gate. THREE receivers on
 # this box: OBS (strih-obs.service) and bkshading-service, both User=${DESKTOP_USER}, read the desktop
 # user's ~/.ndi; intercom-hub's ProtectHome hides ~/.ndi, so it reads the system dir /etc/ndi via its

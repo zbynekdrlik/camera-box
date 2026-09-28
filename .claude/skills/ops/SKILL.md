@@ -825,13 +825,17 @@ ffi_seam_tests` (append `# airuleset:build-ok` — the Tier-0 hook blocks `cargo
 **SCOPE LIMIT (do NOT overstate):** re-announce fixes the **boot-race / late-DHCP / link-flap**
 cases. It does **NOT** fix a STABLE box whose mDNS registration was simply lost/missed by OBS
 (stable network, no change → no trigger) — and the cam boxes have STATIC IPs, so a clean reboot may
-present a stable sig from process start. That persistent-flakiness case is covered by issue 1342's
-RECEIVER-side sender list: every managed receiver's `ndi-config.v1.json` `networks.ips` names every
-managed sender IP (generated from camera-set.sh + obs-fleet.sh), so the finder queries each one by
-unicast IN ADDITION to mDNS. The part-1 Discovery Server was dropped because a configured SENDER
+present a stable sig from process start. For the OBS-box senders that persistent-flakiness case is
+covered by issue 1342's RECEIVER-side sender list: every managed receiver's `ndi-config.v1.json`
+`networks.ips` names the OBS-box sender IPs (generated from obs-fleet.sh), so the finder queries each
+one by unicast IN ADDITION to mDNS. The camboxes are deliberately NOT on it (issue 1389: an extra-IP
+finder's discovery connection into a cambox aborts camera-box when it closes; on 28.9.2026 an
+mDNS-only finder listed every cambox source in < 1 s), so a missing `CAMn (usb)` is an mDNS question,
+never a reason to add a cambox IP. The part-1 Discovery Server was dropped because a configured SENDER
 stops mDNS; see `.claude/rules/ndi-discovery.md`. When diagnosing "camera missing from OBS dropdown", check WHICH case it is
-(boot-race/flap → re-announce should cure within ~2s; stable-lost-announce → check the receiver
-has the generated `networks.ips` list, `verify-device (an)` / `verify-strih` item 34).
+(boot-race/flap → re-announce should cure within ~2s; a stable cambox whose announce was lost → a
+`camera-box.service` restart re-registers it; a missing OBS-box source → check the receiver has the
+generated `networks.ips` list, `verify-device (an)` / `verify-strih` item 34).
 
 **Rig verify (supervisor):** reboot a box, confirm it reappears in the OBS NDI dropdown within
 seconds (and on a link flap). The unit tests prove the trigger logic only — discovery is a rig check.

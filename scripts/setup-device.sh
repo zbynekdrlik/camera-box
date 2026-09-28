@@ -93,7 +93,7 @@ fail() {
                                 # ndi_discovery_dropin_content (issue 1342) -- also sourced by
                                 # verify-device.sh's (an) check + setup-strih.sh, single source of
                                 # truth for the receiver-side NDI config (/etc/ndi/ndi-config.v1.json,
-                                # networks.ips = every managed sender)
+                                # networks.ips = the OBS-fleet NDI senders, never a cambox, issue 1389)
 
 # shellcheck source=scripts/lib/ndi-provision.sh
 . "$HERE/lib/ndi-provision.sh"  # NDI_VERSION_PIN + ndi_bootstrap_peer_list / ndi_runtime_version_matches_pin
@@ -998,9 +998,13 @@ echo "  camera-box.service.d/free-capture-device.conf installed -- frees /dev/vi
 rm -f /etc/systemd/system/camera-box.service.d/publish-30p.conf
 # issue 1342 -- the RECEIVER-side NDI config (scripts/lib/ndi-discovery.sh): the camera-box service
 # RECEIVES `STRIH-LX (interkom)` for the cameraman HDMI preview, so /etc/ndi/ndi-config.v1.json lists
-# every managed NDI sender IP in networks.ips (generated from camera-set.sh + obs-fleet.sh, never
-# hand-typed); libndi queries them directly IN ADDITION to mDNS. Senders never read the list, so this
-# box keeps announcing CAMn (usb) over mDNS exactly as before -- no gate needed. A drop-in points
+# the OBS-fleet NDI sender IPs in networks.ips (generated from obs-fleet.sh, never hand-typed); libndi
+# queries them directly IN ADDITION to mDNS. Issue 1389: the list NEVER names a cambox -- a remote
+# finder's discovery connection into a cambox aborts camera-box (libndi 6.3.2) when it closes, so the
+# camboxes (this one included) are found by mDNS alone; camera-set.sh is read only to exclude them.
+# Senders never read the list, so this box keeps announcing CAMn (usb) over mDNS exactly as before --
+# no gate needed. On a live box, `bash scripts/lib/ndi-discovery.sh --cambox-apply` rewrites only this
+# file (the rule's runbook), without a full re-provision. A drop-in points
 # libndi's NDI_CONFIG_DIR at /etc/ndi (camera-box runs as root with ProtectHome=yes, so /root/.ndi
 # would be invisible to it). Enable-only, effective on the next start. A renumbered sender is picked
 # up by re-running this script (verify-device (an) FAILs until then).

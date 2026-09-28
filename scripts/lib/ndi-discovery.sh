@@ -6,7 +6,8 @@
 # sourcing a `set -e`-carrying file would silently change the CALLER's shell options too.
 #
 # scripts/lib/ndi-discovery.sh -- issue 1342: the ONE source of truth for the fleet's RECEIVER-side
-# NDI config (`ndi-config.v1.json`), which lists every managed NDI sender by IP.
+# NDI config (`ndi-config.v1.json`), which lists the managed OBS-box NDI senders by IP -- and, since
+# issue 1389, NEVER a cambox.
 #
 # WHY: NDI source discovery on this rig was pure mDNS (`_ndi._tcp` multicast via avahi). On the
 # venue MikroTik LAN that is unreliable: the strih OBS missed the RESOLUME-SNV sources, and a freshly
@@ -26,16 +27,22 @@
 # managed-box writer below DELETES a stray `networks.discovery` for the same reason.
 #
 # The list is GENERATED, never hand-typed (a hand-kept list is what went stale on the old Windows
-# strih, dead 10.77.8.5x addresses):
-#   * every camera `camera_resolve` knows (scripts/camera-set.sh), walked cam1, cam2, ... to the first
-#     unknown name -- NOT CAMERA_ACTIVE_SET: a camera retired from MEASUREMENT is still a powered
-#     sender, and walking the resolver means a new `camN)` arm is picked up with no second roster;
-#   * every member of the obs-fleet `ndi-sender` facet (scripts/lib/obs-fleet.sh: strih-lx, stream,
-#     resolume; `retired` rows excluded by obs_fleet_boxes).
+# strih, dead 10.77.8.5x addresses): every member of the obs-fleet `ndi-sender` facet
+# (scripts/lib/obs-fleet.sh: strih-lx, stream, resolume; `retired` rows excluded by obs_fleet_boxes).
 # A fleet host that is a hostname (resolume.lan, a traveling DHCP box) is resolved to IPv4 at WRITE
 # time; unresolvable -> skipped with a log line, and its sources stay mDNS-only exactly as before.
 # The VERIFIERS require only the PINNED part (every IPv4 entry), so a traveling lease never makes a
-# verify flap, while a renumbered camera / strih-lx / stream still FAILS until re-provisioned.
+# verify flap, while a renumbered strih-lx / stream still FAILS until re-provisioned.
+#
+# NEVER A CAMBOX (issue 1389). A finder with extra IPs opens a TCP discovery connection to each
+# listed sender's :5960 listener (an mDNS-only finder opens none -- proven live), and on the cambox
+# libndi 6.3.2 serves each one on its own `disc:recv` thread. When the remote NDI process exits or
+# restarts (strih OBS, SongPlayer, an OBS relaunch), that thread's teardown intermittently throws an
+# uncaught std::system_error (EINVAL) inside libndi's static C++ runtime and ABORTS camera-box -- a
+# ~3 s camera outage and a V4L2 re-open. So the camboxes are found by mDNS alone, as before 24.9.2026
+# (they were never among the missed sources). The camera walk below stays only as the FORBIDDEN set:
+# the generator drops a cambox IP by construction (and fails loud when it cannot derive the set),
+# the verdict FAILs a config that lists one, and the Windows .ps1 removes them.
 #
 # Config LOCATION: the Linux SDK reads `$HOME/.ndi/ndi-config.v1.json`, or
 # `$NDI_CONFIG_DIR/ndi-config.v1.json` when that env var is set. `camera-box.service` (the cameraman
@@ -78,8 +85,10 @@ _ndi_discovery_is_ipv4() {
 }
 
 # ndi_discovery_camera_ips -> one IP per line for every camera camera_resolve knows, walked cam1,
-# cam2, ... until the first unknown name. Runs in a SUBSHELL so the caller's CAMERA_IP / CAMERA_NAME /
-# CAMERA_SOURCE (setup-device.sh's own box) are never clobbered.
+# cam2, ... until the first unknown name -- NOT CAMERA_ACTIVE_SET: a camera retired from MEASUREMENT is
+# still a powered NDI sender, and walking the resolver picks up a new `camN)` arm with no second
+# roster. Issue 1389: this is the FORBIDDEN set, never a list member. Runs in a SUBSHELL so the
+# caller's CAMERA_IP / CAMERA_NAME / CAMERA_SOURCE (setup-device.sh's own box) are never clobbered.
 ndi_discovery_camera_ips() {
   (
     n=1
@@ -88,6 +97,19 @@ ndi_discovery_camera_ips() {
       n=$((n + 1))
     done
   )
+}
+
+# ndi_discovery_cambox_ips -> the comma list of every cambox IP (ndi_discovery_camera_ips, in camera
+# order). Non-zero (and no output) when camera_resolve knows no camera: without the set nothing can
+# prove a list is cambox-free (issue 1389).
+ndi_discovery_cambox_ips() {
+  local ips
+  ips="$(ndi_discovery_camera_ips)"
+  if [ -z "$ips" ]; then
+    echo "ndi-discovery: camera_resolve knows no camera (cam1 unresolvable) -- the cambox IP set is unknown" >&2
+    return 1
+  fi
+  printf '%s' "${ips//$'\n'/,}"
 }
 
 # ndi_discovery_fleet_hosts -> one host per line for every ndi-sender facet member (IP or hostname).
@@ -106,16 +128,17 @@ ndi_discovery_resolve_ipv4() {
   obs_fleet_resolve_host_v4 "${1:-}"
 }
 
-# ndi_discovery_sender_ips [resolve|pinned] -> the comma-separated networks.ips list, in fleet order,
-# each IP once.
-#   pinned  -- the cameras + every IPv4 fleet host. Deterministic: what the verifiers REQUIRE and
-#              what the checked-in config / the laptop .ps1 default carry.
+# ndi_discovery_sender_ips [resolve|pinned] -> the comma-separated networks.ips list: the obs-fleet
+# ndi-sender hosts, in fleet order, each IP once, NEVER a cambox (issue 1389).
+#   pinned  -- every IPv4 fleet host. Deterministic: what the verifiers REQUIRE and what the
+#              checked-in config / the laptop .ps1 default carry.
 #   resolve -- (default, the provisioners) pinned + every HOSTNAME fleet host resolved to IPv4; an
 #              unresolvable or non-IPv4 answer is skipped and named on stderr.
-# Non-zero (and no output) when the fleet lookup fails or the camera walk finds no camera (a renamed
-# camera_resolve arm must never leave the writer AND the grader agreeing on a camera-less list).
+# A host (pinned or resolved) on a cambox IP is skipped and named on stderr. Non-zero (and no output)
+# when the fleet lookup fails, when the cambox set cannot be derived (a renamed camera_resolve arm
+# must never let a cambox through unnoticed), or when no host is left (an empty list is never written).
 ndi_discovery_sender_ips() {
-  local mode="${1:-resolve}" hosts cams cands c ip out="" seen=" "
+  local mode="${1:-resolve}" hosts camboxes c ip out="" seen=" "
   case "$mode" in
     resolve|pinned) ;;
     *) echo "ndi-discovery: unknown mode '${mode}' (expected resolve|pinned)" >&2; return 1 ;;
@@ -124,12 +147,10 @@ ndi_discovery_sender_ips() {
     echo "ndi-discovery: obs-fleet facet '${NDI_DISCOVERY_FLEET_FACET}' lookup failed -- no sender list" >&2
     return 1
   }
-  cams="$(ndi_discovery_camera_ips)"
-  if [ -z "$cams" ]; then
-    echo "ndi-discovery: camera_resolve knows no camera (cam1 unresolvable) -- no sender list" >&2
+  camboxes="$(ndi_discovery_cambox_ips)" || {
+    echo "ndi-discovery: cannot exclude the camboxes (issue 1389) -- no sender list" >&2
     return 1
-  fi
-  cands="$cams"$'\n'"$hosts"
+  }
   while IFS= read -r c; do
     [ -n "$c" ] || continue
     if _ndi_discovery_is_ipv4 "$c"; then
@@ -143,12 +164,22 @@ ndi_discovery_sender_ips() {
     else
       continue
     fi
+    case ",$camboxes," in
+      *",$ip,"*)
+        echo "ndi-discovery: sender '$c' is on the cambox IP $ip -- never listed (a remote finder's discovery connection aborts camera-box, issue 1389)" >&2
+        continue
+        ;;
+    esac
     case "$seen" in *" $ip "*) continue ;; esac
     seen="${seen}${ip} "
     out="${out:+$out,}$ip"
   done <<EOF
-$cands
+$hosts
 EOF
+  if [ -z "$out" ]; then
+    echo "ndi-discovery: no obs-fleet '${NDI_DISCOVERY_FLEET_FACET}' host left to list -- no sender list" >&2
+    return 1
+  fi
   printf '%s' "$out"
 }
 
@@ -205,21 +236,42 @@ ndi_discovery_list_minus() {
   printf '%s' "$out"
 }
 
-# ndi_discovery_config_verdict TEXT [REQUIRED] -> "ok", or one `FAIL: <facet>` line per failing facet.
-# Always exits 0 (the caller branches on the printed verdict). REQUIRED defaults to the PINNED list.
-# Facets:
+# ndi_discovery_list_common A B -> the comma list of A's entries that are also in B, in A's order
+# ("" when none). Spaces in either list are ignored; A is split with read, never glob-expanded (it may
+# be config text read off a box). Pure.
+ndi_discovery_list_common() {
+  local b ip out="" items=()
+  b=",$(_ndi_discovery_norm_list "$2"),"
+  IFS=', ' read -r -a items <<<"$1" || true
+  for ip in "${items[@]}"; do
+    [ -n "$ip" ] || continue
+    case "$b" in *",$ip,"*) out="${out:+$out,}$ip" ;; esac
+  done
+  printf '%s' "$out"
+}
+
+# ndi_discovery_config_verdict TEXT [REQUIRED [FORBIDDEN]] -> "ok", or one `FAIL: <facet>` line per
+# failing facet. Always exits 0 (the caller branches on the printed verdict). REQUIRED defaults to the
+# PINNED list, FORBIDDEN to every cambox IP (ndi_discovery_cambox_ips). Facets:
 #   missing   -- TEXT empty (no config file on the box)
 #   JSON      -- TEXT is not valid JSON (checked only when python3 is available; verify-device runs
 #                this on dev1, verify-strih on strih-lx -- both have it)
 #   discovery -- a networks.discovery is set (it would silence this box's senders on mDNS)
 #   ips       -- networks.ips is empty, or a REQUIRED IP is absent from it (a renumber / new
 #                sender: re-provision).
-#                Extra entries (a resolved traveling box, a stale lease) are fine: a finder just
-#                queries one more address.
+#                Extra non-cambox entries (a resolved traveling box, a stale lease) are fine: a finder
+#                just queries one more address.
+#   cambox    -- networks.ips lists a FORBIDDEN (cambox) IP (issue 1389: the remote finder's discovery
+#                connection into that cambox aborts camera-box when it closes), or the default cambox
+#                set cannot be derived (then nothing proves the list is cambox-free).
 ndi_discovery_config_verdict() {
-  local text="$1" req="${2-}" missing out="" disc
+  local text="$1" req="${2-}" forbid="${3-}" forbid_known=1 missing out="" disc listed
   if [ "$#" -lt 2 ]; then
     req="$(ndi_discovery_sender_ips pinned)" || req=""
+  fi
+  if [ "$#" -lt 3 ]; then
+    forbid="$(ndi_discovery_cambox_ips 2>/dev/null)" || forbid=""
+    [ -n "$forbid" ] || forbid_known=0
   fi
   if [ -z "$text" ]; then
     printf 'FAIL: config missing (no %s)\n' "$NDI_DISCOVERY_CONFIG_NAME"
@@ -239,6 +291,14 @@ ndi_discovery_config_verdict() {
   missing="$(ndi_discovery_missing_ips "$text" "$(_ndi_discovery_norm_list "$req")")"
   if [ -n "$missing" ]; then
     out="${out}FAIL: networks.ips lacks ${missing} (a renumbered or new sender -- re-provision)"$'\n'
+  fi
+  if [ "$forbid_known" = 0 ]; then
+    out="${out}FAIL: the cambox IP set is unavailable (camera_resolve knows no camera) -- cannot prove networks.ips names no cambox (issue 1389)"$'\n'
+  else
+    listed="$(ndi_discovery_list_common "$(ndi_discovery_config_ips "$text")" "$forbid")"
+    if [ -n "$listed" ]; then
+      out="${out}FAIL: networks.ips lists the cambox IP(s) ${listed} (a remote finder's discovery connection into a cambox aborts camera-box when it closes, issue 1389 -- re-provision)"$'\n'
+    fi
   fi
   if [ -z "$out" ]; then
     printf 'ok\n'
@@ -338,18 +398,88 @@ ndi_discovery_block_section() {
   printf '%s\n' "$1" | awk -v b="__${2}_BEGIN__" -v e="__${2}_END__" '$0==b{on=1;next} $0==e{on=0} on' || true
 }
 
+# ndi_discovery_cambox_apply_remote_snippet IPS -> the on-box bash program (fed to `bash -s` as root
+# over ssh, see the CLI below) that rewrites ONLY $NDI_DISCOVERY_SYSTEM_DIR/ndi-config.v1.json on a cambox with
+# networks.ips = IPS: issue 1389's smallest safe equivalent of re-running setup-device.sh STEP 7 on a
+# live box. It embeds the SAME ndi_discovery_write_config STEP 7 calls (declare -f, never a copy).
+# An identical config writes nothing and never remounts. Otherwise, on a read-only root it remounts rw,
+# writes, syncs and remounts ro again (retried 3x; a root it cannot put back is a loud non-zero, and
+# the EXIT trap puts it back on any failure). The drop-in and every other file stay untouched.
+# Non-zero (and no output) on an EMPTY IPS, on an IPS that names a cambox, or when the cambox set is
+# unknown.
+ndi_discovery_cambox_apply_remote_snippet() {
+  local ips="${1:-}" camboxes listed
+  if [ -z "$(_ndi_discovery_norm_list "$ips")" ]; then
+    echo "ndi-discovery: refusing an apply program with an EMPTY networks.ips" >&2
+    return 1
+  fi
+  camboxes="$(ndi_discovery_cambox_ips)" || return 1
+  listed="$(ndi_discovery_list_common "$ips" "$camboxes")"
+  if [ -n "$listed" ]; then
+    echo "ndi-discovery: refusing an apply program that lists the cambox IP(s) ${listed} (issue 1389)" >&2
+    return 1
+  fi
+  printf 'set -eu\n'
+  printf 'NDI_DISCOVERY_CONFIG_NAME=%q\n' "$NDI_DISCOVERY_CONFIG_NAME"
+  printf '_ndi_dir=%q\n_ndi_ips=%q\n' "$NDI_DISCOVERY_SYSTEM_DIR" "$ips"
+  declare -f ndi_discovery_config_json _ndi_discovery_merged_json ndi_discovery_write_config
+  cat <<'NDI_APPLY'
+_ndi_target="$_ndi_dir/$NDI_DISCOVERY_CONFIG_NAME"
+if [ -f "$_ndi_target" ] && [ "$(cat "$_ndi_target")" = "$(ndi_discovery_config_json "$_ndi_ips")" ]; then
+  echo "ndi-discovery: $_ndi_target unchanged (networks.ips=$_ndi_ips) -- nothing written"
+  exit 0
+fi
+_ndi_ro=0
+_ndi_opts="$(findmnt -no OPTIONS / 2>/dev/null || awk '$2=="/"{print $4; exit}' /proc/mounts 2>/dev/null || true)"
+case "$_ndi_opts" in ro | ro,*) _ndi_ro=1 ;; esac
+_ndi_restore_ro() {
+  [ "$_ndi_ro" = 1 ] || return 0
+  for _ndi_try in 1 2 3; do
+    if mount -o remount,ro /; then
+      _ndi_ro=0
+      return 0
+    fi
+    [ "$_ndi_try" = 3 ] || sleep 2
+  done
+  echo "ERROR: mount -o remount,ro / FAILED 3x -- the root stays read-WRITE; find the holder (lsof +L1; fuser -vm /) and run 'mount -o remount,ro /' by hand" >&2
+  return 1
+}
+trap '_ndi_restore_ro || true' EXIT
+if [ "$_ndi_ro" = 1 ]; then
+  mount -o remount,rw /
+fi
+ndi_discovery_write_config "$_ndi_dir" "$_ndi_ips"
+sync
+if ! _ndi_restore_ro; then
+  trap - EXIT
+  exit 1
+fi
+trap - EXIT
+echo "OK: $_ndi_target rewritten (networks.ips=$_ndi_ips); restart camera-box.service to load it"
+NDI_APPLY
+}
+
 # --- CLI (executed, not sourced): print the list / config for a box this repo does not provision ---
 # (stream, resolume, an owner laptop -- see the rule). `resolve` (default) resolves the traveling
 # hostname senders from THIS machine; `pinned` is the deterministic checked-in form.
 #   bash scripts/lib/ndi-discovery.sh --ips  [resolve|pinned]
 #   bash scripts/lib/ndi-discovery.sh --json [resolve|pinned]
+#   bash scripts/lib/ndi-discovery.sh --cambox-ips            (the FORBIDDEN set, issue 1389)
+#   bash scripts/lib/ndi-discovery.sh --cambox-apply [resolve|pinned] > apply.sh
+#        (the on-box cambox program, then: ssh root@<cambox> bash -s < apply.sh)
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   set -euo pipefail
   case "${1:-}" in
     --ips)  _ndi_ips="$(ndi_discovery_sender_ips "${2:-resolve}")"; printf '%s\n' "$_ndi_ips" ;;
     --json) _ndi_ips="$(ndi_discovery_sender_ips "${2:-resolve}")"; ndi_discovery_config_json "$_ndi_ips" ;;
+    --cambox-ips) _ndi_cams="$(ndi_discovery_cambox_ips)"; printf '%s\n' "$_ndi_cams" ;;
+    --cambox-apply)
+      _ndi_ips="$(ndi_discovery_sender_ips "${2:-resolve}")"
+      _ndi_prog="$(ndi_discovery_cambox_apply_remote_snippet "$_ndi_ips")"
+      printf '%s\n' "$_ndi_prog"
+      ;;
     *)
-      echo "usage: $0 --ips|--json [resolve|pinned]" >&2
+      echo "usage: $0 --ips|--json [resolve|pinned] | --cambox-ips | --cambox-apply [resolve|pinned]" >&2
       exit 2
       ;;
   esac
