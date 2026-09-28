@@ -1213,6 +1213,10 @@ repeatedly this session (a worktree worker on issue 1317):
   An ordinary English WORD trips it too: a `python3 - <<'PY'` edit script whose comment said
   "ASCII digits" (d-i-**g-i-t**-s) was refused (issue 1360) — write such edit scripts with the `Write`
   tool and run `python3 /abs/script.py` as a plain call.
+- A `.github/workflows/...` PATH in a compound command trips it the same way (issue 1386: a
+  `diff <(sed … .github/workflows/a.yml) <(sed … b.yml)` was refused). Put the workflow reads in a
+  Python script file; a direct `pwsh` call is refused as well, so drive a portable pwsh from a
+  `bash /abs/script.sh` file (`av-sync-dock-anchor-refactor-safety.md`, the issue-1386 section).
 - A `python3 - <<'PY' … OUT="$OUT" …` where the program text is built from a shell VARIABLE is
   refused ("runs python with a program computed at runtime"), even with zero git in it.
 - Any two-command sequence joined with `&&`/`|`/`;` or a trailing `| tail`/`echo "${PIPESTATUS[0]}"`
