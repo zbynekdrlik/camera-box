@@ -1545,27 +1545,14 @@ impl ReleaseCadence {
     /// deadline), so nearest == newest-due there; a SET deep anchor is where the phase differs,
     /// which the demonstrative tests below add. CI is the final arbiter of the probe-test pins.
     ///
-    /// TWO documented harness↔C divergences remain, both DELIBERATE. The first is the SEPARATE
-    /// #940 piece 3 axis in the note above: this sim keeps the RAW `genlock_present_ts_reserve()`
-    /// deadline where the C grid-quantizes it (`genlock_phase_pin_deadline` +
-    /// `GENLOCK_PHASE_PIN_HYSTERESIS_NS`). That deadline change is a distinct question (it re-pins a
-    /// different set of `due`-scan outcomes) and stays out of scope here;
-    /// `phase_pinned_deadline`/`phase_pinned_is_due` are already independently Tier-0 unit-tested
-    /// against the exact contract the C uses.
-    ///
-    /// The second is the #1161 Stage-2 ACQUIRE BRACKETING GATE
-    /// (`crate::genlock_backlog::relock_acquire_should_hold`, wired into the C ACQUIRE branch and
-    /// the `obs_source_set_genlock_latency_ms` pin-rise re-acquire). It is deliberately NOT mirrored
-    /// here, for the SAME reason as the divergence above and one more: the gate exists ONLY to close
-    /// the gap the #940 phase-pinned deadline opens — a frame up to one interval YOUNGER than the raw
-    /// reserve qualifying `due`. This sim uses the RAW deadline, on which `due > 0` already implies
-    /// `oldest_age >= reserve`, so `relock_acquire_should_hold` is STRUCTURALLY inert against a
-    /// raw-deadline acquire (it can never fire here) — mirroring it would be dead code that changes
-    /// no outcome. The gate's proof lives in the Tier-0 authority's own unit tests
-    /// (`src/genlock_backlog.rs`) + the executable C-vs-Rust parity gate
-    /// (`tests/genlock_relock_selection_parity.rs`) + the C-port static anchors
-    /// (`tests/genlock_release_cadence.rs` + both `windows-genlock*.yml`), which is where a
-    /// frame-mover that only bites the phase-pinned production path belongs.
+    /// ONE documented harness↔C divergence remains, DELIBERATE: the SEPARATE #940 piece 3 axis in
+    /// the note above. This sim keeps the RAW `genlock_present_ts_reserve()` deadline where the C
+    /// grid-quantizes it (`genlock_phase_pin_deadline` + `GENLOCK_PHASE_PIN_HYSTERESIS_NS`). That
+    /// deadline change is a distinct question (it re-pins a different set of `due`-scan outcomes)
+    /// and stays out of scope here; `phase_pinned_deadline`/`phase_pinned_is_due` are already
+    /// independently Tier-0 unit-tested against the exact contract the C uses. (The #1161 ACQUIRE
+    /// bracketing gate, the second divergence, was removed with the N>=2 boundary conveyor it
+    /// served — issue 1367 D1: an N>=2 tick takes [`Self::tick_n2_grid`], the grid-exact release.)
     pub fn tick(
         &mut self,
         wall_now_ns: u64,
@@ -1581,6 +1568,16 @@ impl ReleaseCadence {
             relocked: false,
             n2_early: false,
         };
+
+        // Issue 1367 D1: an N>=2 source (a 60 fps camera into the 30 fps canvas) leaves the
+        // boundary conveyor below for the GRID-EXACT release — the presented stamp is a pure
+        // function of the tick and the pin ([`Self::tick_n2_grid`]). The sticky multiple is read
+        // (and latched) first, exactly like the C top-of-function branch; an inconclusive first
+        // tick with no confirmed multiple still takes the ACQUIRE below.
+        let n = self.effective_source_multiple(queue, interval_ns);
+        if n >= 2 {
+            return self.tick_n2_grid(wall_now_ns, deadline, reserve_ms, interval_ns, n, queue);
+        }
 
         let Some(boundary) = self.locked_next_boundary_ns else {
             // ACQUIRE: first frame due by the wall deadline locks the cadence. Jump to the
@@ -1695,69 +1692,11 @@ impl ReleaseCadence {
         // STEADY (strict FIFO): release the frame(s) matured by the LOCKED boundary.
         let matured = queue.iter().take_while(|&&ts| ts <= boundary).count();
         if matured > 0 {
-            // camera-box #726: when the source runs at an integer multiple N>=2 of the canvas
-            // render-tick rate (a 60fps NDI source into a 30fps canvas), the present-OLDEST-matured
-            // path CRAWLS: the LOCKED boundary re-anchors to the presented stamp, and one canvas
-            // interval lands a HAIR under N source intervals (30fps interval 33_333_333 ns vs
-            // 2×60fps 33_333_334 ns), so the boundary matures only ONE frame per tick while N arrive
-            // — content plays at ~1/N speed and the per-source queue grows ~(N-1) frames/tick until
-            // the backlog storm above catches up with a multi-frame JUMP. That crawl-then-jump is the
-            // live-event "like 15fps" judder (#726). FIX: for a structural N>=2 source, mature the
-            // frames up to the boundary PLUS a half-interval slack (so the frame ~one canvas interval
-            // ahead — the hair-past-boundary one — is included, the #136 boundary-churn tolerance),
-            // present the NEWEST of them and retire the older matured one(s) into `dropped`. The
-            // boundary re-anchors to that presented stamp, so it advances ONE canvas interval (=
-            // N source frames) per tick — a uniform every-Nth-frame cadence that tracks real time.
-            // Keying on the phase-locked BOUNDARY (not the wall clock) keeps it slew-immune — the
-            // whole point of #401. Gated on the source being STRUCTURALLY at N>=2 (from the stamp
-            // grid, not arrival timing) so a TRANSIENT 1:1 double-maturation stays LOSSLESS via the
-            // present-oldest drain below — N==1 is byte-identical.
-            // #726 STICKY-N (win5/win6 residual): the gate is the STICKY effective multiple, not a
-            // per-tick front-2 re-derivation — an inconclusive tick (momentary num<2 / a
-            // non-monotonic clock-step seam) bridges with the last CONFIRMED N instead of crawling
-            // to present-oldest (which under-drained the queue into the backlog storm live). A fresh
-            // measurement still wins (a genuine 1:1 rate re-latches to 1), and the latch is cleared
-            // on acquire/relock/gap so a stale N cannot outlive its rate.
-            if self.effective_source_multiple(queue, interval_ns) >= 2 {
-                let mature_deadline = boundary + interval_ns / 2;
-                let matured_n = queue
-                    .iter()
-                    .take_while(|&&ts| ts <= mature_deadline)
-                    .count()
-                    .max(1);
-                let mut dropped = Vec::with_capacity(matured_n - 1);
-                for _ in 0..matured_n - 1 {
-                    dropped.push(queue.pop_front().expect("older matured"));
-                }
-                // #1049 PHASE CONVERGENCE: the N>=2 conveyor has NO depth-drain path and locks a
-                // persistent phase, so shed one extra frame (present one SOURCE interval fresher,
-                // re-anchoring the boundary to it below) when the boundary-implied age has drifted
-                // a shed quantum over configured. `should_converge_phase` reads the OLD boundary
-                // (not yet updated) and the shared throttle. On the N>=2 path the depth drain did
-                // not run, so this also maintains `ticks_since_last_drain`. Mirror of the C tail's
-                // converge block / the SimConveyor1049 shed.
-                if self.should_converge_phase(queue, reserve_ms, interval_ns, wall_now_ns)
-                    && queue.len() > 1
-                {
-                    dropped.push(queue.pop_front().expect("phase-converge shed"));
-                    self.ticks_since_last_drain = 0;
-                } else {
-                    self.ticks_since_last_drain = self.ticks_since_last_drain.saturating_add(1);
-                }
-                let presented = queue.pop_front().expect("newest matured");
-                self.locked_next_boundary_ns = Some(presented + interval_ns);
-                // #1003: a STEADY present — the conveyor. Remember its own on-air age so the
-                // next relock inherits this phase (the C present tail's shared `if (anchor_update)`).
-                self.set_phase_anchor(wall_now_ns, presented);
-                return CadenceOutcome {
-                    presented: Some(presented),
-                    dropped,
-                    late_hold: false,
-                    relocked: false,
-                    n2_early: false,
-                };
-            }
-            // N==1: present the OLDEST matured frame — exactly one in steady state; a transient
+            // Issue 1367 D1: an N>=2 source never reaches the boundary conveyor (it returned at the
+            // top through `tick_n2_grid`), so the #726 N>=2 multi-consume that used to sit here is
+            // gone; this is the N==1 release only.
+            //
+            // Present the OLDEST matured frame — exactly one in steady state; a transient
             // 2-frame maturation drains losslessly next tick (byte-identical to pre-#726).
             //
             // #859 follow-up: this is the ONE path the ticket's evidence found holds queue
@@ -1865,6 +1804,55 @@ impl ReleaseCadence {
         // HOLD: late if the wall says the boundary frame should already be here (it aged
         // past the reserve upstream and hasn't arrived), benign otherwise.
         hold(deadline >= boundary)
+    }
+
+    /// Issue 1367 D1 — one tick of an N>=2 source: the GRID-EXACT release. The tick instant is
+    /// `wall_now_ns` (this sim's ticks run on schedule, so the scheduled instant is the wall read),
+    /// snapped to its canvas grid point when on the grid, else floored
+    /// ([`crate::genlock_n2_grid::n2_tick_ns`]); the target is
+    /// [`crate::genlock_n2_grid::n2_target_stamp_ns`] and the pick
+    /// [`crate::genlock_n2_grid::n2_select`]. Every frame older than the pick is dropped; an early
+    /// pick is flagged, never re-anchored; a hold is late when the locked boundary (the last
+    /// present + one canvas interval) is at or behind the reserve deadline, as on the N==1 path.
+    /// The boundary is still written (presented + one canvas interval): the hold classification
+    /// and a later N==1 tick read it. No phase anchor, relock, drain or converge shed on this
+    /// path. Mirror of the C `genlock_release_tick_n2_grid` (obs-source.c).
+    fn tick_n2_grid(
+        &mut self,
+        wall_now_ns: u64,
+        deadline: u64,
+        reserve_ms: u32,
+        interval_ns: u64,
+        n: u32,
+        queue: &mut std::collections::VecDeque<u64>,
+    ) -> CadenceOutcome {
+        use crate::genlock_n2_grid::{
+            n2_select, n2_source_interval_ns, n2_target_stamp_ns, n2_tick_ns, N2Kind,
+        };
+        let on_grid = crate::genlock_n1_depth::n1_tick_is_on_grid(wall_now_ns, interval_ns);
+        let tick = n2_tick_ns(wall_now_ns, wall_now_ns, interval_ns, on_grid);
+        let target = n2_target_stamp_ns(tick, reserve_ms as u64 * 1_000_000, interval_ns, n);
+        let stamps: Vec<u64> = queue.iter().copied().collect();
+        let pick = n2_select(&stamps, target, n2_source_interval_ns(interval_ns, n));
+        if pick.kind == N2Kind::Hold {
+            return CadenceOutcome {
+                presented: None,
+                dropped: Vec::new(),
+                late_hold: self.locked_next_boundary_ns.is_some_and(|b| deadline >= b),
+                relocked: false,
+                n2_early: false,
+            };
+        }
+        let dropped: Vec<u64> = queue.drain(..pick.index).collect();
+        let presented = queue.pop_front().expect("the picked frame");
+        self.locked_next_boundary_ns = Some(presented + interval_ns);
+        CadenceOutcome {
+            presented: Some(presented),
+            dropped,
+            late_hold: false,
+            relocked: false,
+            n2_early: pick.kind == N2Kind::Early,
+        }
     }
 
     /// #859 — the MARGIN above the depth a source's own configured latency implies, before its
@@ -2394,65 +2382,9 @@ mod tests {
         assert_eq!(uniq.len(), 600);
     }
 
-    /// #726 REGRESSION LOCK — the live-event "like 15fps" judder at a 30fps canvas. A 60fps
-    /// NDI source feeding a 30fps canvas must present a UNIFORM every-2nd-frame cadence (each
-    /// presented frame is exactly 2 source frames past the previous, so presented content tracks
-    /// real time), NOT the pre-#726 crawl: STEADY presented the OLDEST matured frame and advanced
-    /// the boundary by one CANVAS interval, so content advanced only +1 SOURCE frame per tick
-    /// while real time advanced 2 → content fell progressively behind (playing ~half speed), the
-    /// per-source queue grew ~1 frame/tick until `genlock_backlog_relock_qdepth()` fired the backlog storm,
-    /// which JUMPED ~+7 frames (~5×/s). The crawl+jump nets to the right average (2.0/frame → the
-    /// loss gates stay clean, which is why every earlier gate was blind to it) but visibly halves
-    /// perceived motion. The fix: when the source is at an integer multiple N>=2 of the canvas
-    /// rate (derived from the stamp grid), STEADY presents the NEWEST matured frame and retires
-    /// the older matured one(s), collapsing the delta histogram to a clean Δ==2.
-    #[test]
-    fn cadence_60_into_30_presents_uniform_every_second_frame() {
-        const SRC_I: u64 = 16_666_667; // 60 Hz source (cam2 painter / camera emit)
-        const CANVAS_I: u64 = 33_333_333; // 30 Hz strih canvas render tick
-                                          // reserve 3ms = the production genlock floor; 20ms stamp→arrival skew = the measured live
-                                          // pipeline latency (same as the 1:1 sims).
-        let (presented, _dropped) = run_cadence_sim_ratio(3, SRC_I, CANVAS_I, 20_000_000, 400);
-        // Skip the ACQUIRE / cold-start window (matches the live win0 "cold-start noise on top"
-        // vs the clean win1/win2); read the steady-state cadence.
-        let steady: Vec<u64> = presented.iter().skip(15).copied().collect();
-        assert!(
-            steady.len() > 100,
-            "#726: expected a long steady presented window, got {}",
-            steady.len()
-        );
-        let deltas: Vec<i64> = steady
-            .windows(2)
-            .map(|w| w[1] as i64 - w[0] as i64)
-            .collect();
-        let mut hist = std::collections::BTreeMap::new();
-        for &d in &deltas {
-            *hist.entry(d).or_insert(0usize) += 1;
-        }
-        let uniform = deltas.iter().filter(|&&d| d == 2).count();
-        let frac = uniform as f64 / deltas.len() as f64;
-        assert!(
-            frac > 0.95,
-            "#726: a 60fps source into a 30fps canvas must present a UNIFORM every-2nd-frame \
-             cadence (Δ==2 source frames per presented frame); got {:.1}% uniform of {} deltas, \
-             histogram {:?} — the pre-#726 crawl (mostly Δ==1) then backlog jump (Δ==7) is the \
-             live-event 15fps-like judder",
-            frac * 100.0,
-            deltas.len(),
-            hist
-        );
-        // No net loss: mean delta ≈ 2 (every-other-frame, long-run real-time).
-        let mean: f64 = deltas.iter().map(|&d| d as f64).sum::<f64>() / deltas.len() as f64;
-        assert!(
-            (mean - 2.0).abs() < 0.1,
-            "#726: 60→30 mean presented-frame step must be ≈2 (got {mean:.3})"
-        );
-        // Cadence never runs backward.
-        assert!(
-            deltas.iter().all(|&d| d >= 1),
-            "#726: presentation order must be preserved"
-        );
-    }
+    // Issue 1367 D1: the #726 60-into-30 cadence lock now lives in `genlock_n2_tests.rs`
+    // (`n2_60_into_30_presents_every_second_frame_at_the_grid_age_1367`): an N>=2 source takes the
+    // grid-exact release, which presents every second frame AT the grid target.
 
     /// #726 — the fix must NOT change the 1:1 (source rate == canvas rate) path: a 30fps source
     /// into a 30fps canvas still presents EVERY frame exactly once with nothing dropped (the
@@ -2623,54 +2555,9 @@ mod tests {
         );
     }
 
-    /// #741 (#707 B2) RED→GREEN — a BACKLOG-STORM relock must NOT clear the sticky-N latch.
-    ///
-    /// A queue-depth relock (a burst catch-up) is NOT evidence the source RATE changed. Clearing
-    /// `last_known_n` there forced the very next INCONCLUSIVE tick to crawl at N==1, which under a
-    /// steady 60-into-30 backlog re-grew the queue and re-triggered the relock: a self-sustaining
-    /// crawl→relock loop (the #707 B2 crawl window). The latch must SURVIVE a relock; it is cleared
-    /// only on a genuine source-timeline discontinuity (acquire / gap resync / backward clock-step).
-    #[test]
-    fn backlog_relock_preserves_the_confirmed_multiple_741() {
-        use std::collections::VecDeque;
-        const SRC: u64 = 16_666_667; // 60 Hz source
-        const CANVAS: u64 = 33_333_333; // 30 Hz canvas
-        let mut cadence = ReleaseCadence::new();
-
-        // Confirm N==2 from a clean 60fps front pair → latches last_known_n = 2.
-        let clean: VecDeque<u64> =
-            [1_000_000_000, 1_000_000_000 + SRC, 1_000_000_000 + 2 * SRC].into();
-        assert_eq!(cadence.effective_source_multiple(&clean, CANVAS), 2);
-        assert_eq!(cadence.last_known_n, 2, "setup: N==2 must be latched");
-
-        // Lock the cadence, then feed a genuine BACKLOG STORM (> the backlog threshold in frames, all aged
-        // past the reserve so `due > 0`) — the relock branch.
-        //
-        // #940 piece 2: the threshold this queue must exceed is now
-        // steady_depth_frames(...) + QDEPTH_RELOCK_MARGIN * n (n=2 here, a confirmed
-        // 60-into-30 source) instead of the pre-#940 bare + QDEPTH_RELOCK_MARGIN — at this
-        // fixture's shallow reserve_ms=3, steady_depth_frames rounds to 0, so the threshold
-        // is QDEPTH_RELOCK_MARGIN * 2. `* 2 + 3` reliably exceeds it (was `+ 3` pre-#940,
-        // when the threshold was the bare QDEPTH_RELOCK_MARGIN).
-        cadence.locked_next_boundary_ns = Some(2_000_000_000);
-        let base = 3_000_000_000u64;
-        let mut queue: VecDeque<u64> = (0..(ReleaseCadence::QDEPTH_RELOCK_MARGIN as u64 * 2 + 3))
-            .map(|i| base + i * SRC)
-            .collect();
-        let wall_now = base + 100 * SRC; // every queued frame is due
-        let out = cadence.tick(wall_now, 3, CANVAS, &mut queue);
-
-        assert!(
-            out.relocked,
-            "#741 setup: the backlog storm must hit the relock branch (got {out:?})"
-        );
-        assert_eq!(
-            cadence.last_known_n, 2,
-            "#741 B2: a backlog-storm relock is a queue-depth event, NOT a rate change — it must \
-             PRESERVE the confirmed N (2); clearing it re-crawls on the next inconclusive tick and \
-             re-triggers the relock (the self-sustaining crawl the fix removes)"
-        );
-    }
+    // Issue 1367 D1: the #741 lock (a 60-into-30 backlog relock keeps the confirmed multiple) is
+    // `n2_burst_sheds_to_the_target_in_one_tick_1367` in `genlock_n2_tests.rs` now: an N>=2 source
+    // no longer relocks at all, the grid release sheds a burst in one tick and the latch stays.
 
     /// #1003 (issue 1037) RED→GREEN — a BACKLOG relock INHERITS the tracked phase anchor
     /// instead of jumping to the newest due frame.

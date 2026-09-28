@@ -58,8 +58,9 @@ fn audio_ingest(src: &str) -> &str {
 fn render_thread_tracks_the_presented_frame_at_the_scheduled_tick_1367() {
     let src = squished();
     // The sample is taken at the PRESENT TAIL of genlock_release_tick, on the frame this tick
-    // actually presents (after every erase / drain / converge shed): on an N >= 2 source the queue
-    // head is (N - 1) source intervals older than the presented frame.
+    // actually presents (after every erase / drain / converge shed). An N >= 2 source samples its
+    // grid target in genlock_release_tick_n2_grid instead (issue 1367 D1; its call is pinned by
+    // tests/genlock_n2_grid_wiring_1367.rs).
     let tick = src
         .find("static bool genlock_release_tick(")
         .expect("issue 1367: genlock_release_tick is gone");
@@ -82,11 +83,13 @@ fn render_thread_tracks_the_presented_frame_at_the_scheduled_tick_1367() {
         body.contains(SAMPLE),
         "issue 1367: the sample must be the PRESENTED frame's age at the scheduled tick (`{SAMPLE}`)"
     );
-    // the head-skew site (the processing wall, array[0]) must not feed the tracker.
+    // the head-skew site (the processing wall, array[0]) must not feed the tracker: the definition,
+    // the N==1 present tail and the N>=2 grid release (issue 1367 D1) are the only three.
     assert_eq!(
         src.matches("genlock_video_delay_track(").count(),
-        2,
-        "issue 1367: genlock_video_delay_track must have exactly its definition and ONE call site"
+        3,
+        "issue 1367: genlock_video_delay_track must have exactly its definition and the two present \
+         tails (N==1 conveyor, N>=2 grid release)"
     );
 }
 

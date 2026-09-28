@@ -4159,7 +4159,6 @@ static inline struct obs_source_frame *cache_video(struct obs_source *source, co
 		 * clear below. */
 		source->genlock_phase_anchor_ns = 0;
 		free_async_cache(source);
-		source->genlock_acquire_bracket_ticks = 0; /* #1161: the delay line is gone -> a new ACQUIRE episode; the bracket-hold counter must not carry a stale count into it (fail-open cap seam). */
 		source->last_frame_ts = 0;
 		/* camera-box #102: an overrun force-drained the FIFO to empty, so the
 		 * delay line is gone — re-enter the BUILD phase to rebuild the preload
@@ -4179,7 +4178,6 @@ static inline struct obs_source_frame *cache_video(struct obs_source *source, co
 		 * delay line with it -- the remembered age no longer describes anything. */
 		source->genlock_phase_anchor_ns = 0;
 		free_async_cache(source);
-		source->genlock_acquire_bracket_ticks = 0; /* #1161: the delay line is gone -> a new ACQUIRE episode; the bracket-hold counter must not carry a stale count into it (fail-open cap seam). */
 		source->async_cache_width = frame->width;
 		source->async_cache_height = frame->height;
 	}
@@ -4252,7 +4250,6 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 		 * its configured latency instead of inheriting a pre-flush one. */
 		source->genlock_phase_anchor_ns = 0;
 		free_async_cache(source);
-		source->genlock_acquire_bracket_ticks = 0; /* #1161: the delay line is gone -> a new ACQUIRE episode; the bracket-hold counter must not carry a stale count into it (fail-open cap seam). */
 		/* camera-box #1355: the source went inactive — its next stamp starts a new timeline
 		 * (never a bogus gap against the pre-flush stamp); the cumulative counters survive. */
 		source->genlock_rx_last_ts = 0;
@@ -5889,7 +5886,6 @@ static void genlock_backward_regime_end(obs_source_t *source, uint32_t latency_m
 	 * off by the whole clock step. Unset falls back to the CONFIGURED latency, which is
 	 * exactly this function's own stated contract (re-acquire the configured hold). */
 	source->genlock_phase_anchor_ns = 0;
-	source->genlock_acquire_bracket_ticks = 0; /* #1161: regime end zeroes the boundary -> a fresh ACQUIRE; reset the bracket-hold counter so the next re-acquire's fail-open cap counts from 0. */
 	blog(LOG_WARNING,
 	     "genlock-fifo backward-step regime ENDED '%s': reanchor_ticks=%llu — re-acquiring the "
 	     "configured hold (latency %u ms) from the wall deadline (#1009)",
@@ -6072,6 +6068,11 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	      * shed counts into converge_sheds=). After a restart it may fire once; in steady state it
 	      * must stay flat. Audit-line-only (not in obs_genlock_stats). */
 	     "n1_grows=%llu "
+	     /* camera-box issue 1367 slice D1: cumulative N>=2 EARLY presents -- a tick whose grid target
+	      * had not arrived presented the frame before it (genlock_release_tick_n2_grid). The budget:
+	      * at most 0.1 % of the ticks over an hour; a climbing rate means the camera arrival lag
+	      * exceeds GENLOCK_N2_AGE_BASE_NS + pin. Audit-line-only (not in obs_genlock_stats). */
+	     "n2_early=%llu "
 	     /* camera-box issue 1367 (ROZHODNUTÉ 5827497952): the SHALLOW per-lock depth + the audio slew.
 	      * shallow_depth= the latched D in frames (0 = none; a deep source latches its base + 1 too),
 	      * shallow_capped= the min-latency (imag) guard capped it, shallow_latches= cumulative latches
@@ -6138,6 +6139,7 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	     (unsigned long long)source->genlock_stamp_dups,
 	     (unsigned long long)source->genlock_stamp_gaps,
 	     (unsigned long long)source->genlock_n1_grows,
+	     (unsigned long long)source->genlock_n2_early,
 	     /* camera-box issue 1367: the shallow depth + the audio slew (audit-line-only). */
 	     (unsigned long long)source->genlock_shallow_target_frames, source->genlock_shallow_capped ? 1 : 0,
 	     source->genlock_shallow_latches, (long long)(source->genlock_audio_slew_remaining_ns / 1000000),
@@ -6882,6 +6884,85 @@ static inline bool genlock_n1_tick_is_on_grid(uint64_t tick_wall_ns, uint64_t in
 	return genlock_n1_tick_on_grid(tick_wall_ns, genlock_grid_floor_ns(shifted_ns, interval_ns));
 }
 
+/* camera-box issue 1367 slice D1: the GRID-EXACT N>=2 conveyor (design 5879332205). An N>=2 source
+ * (a 60 fps camera into the 30 fps strih canvas) presents, at render tick T, the frame stamped
+ *   S*(T) = grid_floor(T - GENLOCK_N2_AGE_BASE_NS - pin, canvas_interval / N)
+ * on the per-second SOURCE grid -- a pure function of the tick and the pin, so ACQUIRE, relock and
+ * gap all present the same stamp and every camera lands on the same frame after every restart (the
+ * boundary conveyor it replaces picked the parity of each 60 fps pair by ARRIVAL at every lock and
+ * relock: the per-restart 33 / 50 / 67 ms camera lottery). 50 ms covers the measured strih-lx camera
+ * arrival lag (stamp to receive, 35-50 ms, 28.9.2026); at the production pin 3 ms the presented age
+ * is 66.7 ms (four 60 fps frames) and one more source interval of pin is exactly one more frame.
+ * ONE fleet constant, never a per-box number. The block is PURE (stdint + the per-second grid +
+ * the queue) and CONTIGUOUS, from the struct to the end of genlock_n2_select: the parity gate
+ * (tests/genlock_relock_selection_parity.rs) lifts it verbatim against the Rust authority
+ * src/genlock_n2_grid.rs -- keep both in lock-step. */
+#define GENLOCK_N2_AGE_BASE_NS 50000000ULL /* 50 ms */
+#define GENLOCK_N2_HOLD 0
+#define GENLOCK_N2_ON_TARGET 1
+#define GENLOCK_N2_EARLY 2
+
+/* The pick of one N>=2 tick: kind (GENLOCK_N2_HOLD / _ON_TARGET / _EARLY) and, not on a hold, the
+ * queue index presented -- every older frame is erased, so it is also the erase count. */
+struct genlock_n2_pick {
+	size_t index;
+	int kind;
+};
+
+/* canvas_interval / n: 16_666_666 ns for a 60 fps source into a 30 fps canvas; n == 0 -> 0. */
+static inline uint64_t genlock_n2_source_interval_ns(uint64_t canvas_interval_ns, uint32_t n)
+{
+	return n == 0 ? 0 : canvas_interval_ns / (uint64_t)n;
+}
+
+/* The tick instant T. On the grid (the caller's genlock_n1_tick_is_on_grid), the canvas grid point
+ * the scheduled tick belongs to -- the tick instant is read microseconds early, so a bare floor
+ * would fall one slot back; off the grid (a wall step the render tick has not re-gridded yet), the
+ * canvas grid floor of the processing wall. */
+static inline uint64_t genlock_n2_tick_ns(uint64_t tick_wall_ns, uint64_t wall_now_ns, uint64_t canvas_interval_ns,
+					  bool on_grid)
+{
+	if (on_grid) {
+		const uint64_t half = canvas_interval_ns / 2;
+		const uint64_t nearest = tick_wall_ns > UINT64_MAX - half ? UINT64_MAX : tick_wall_ns + half;
+		return genlock_grid_floor_ns(nearest, canvas_interval_ns);
+	}
+	return genlock_grid_floor_ns(wall_now_ns, canvas_interval_ns);
+}
+
+/* S*(T): the per-second source grid point at least GENLOCK_N2_AGE_BASE_NS + pin before T,
+ * saturating at 0. */
+static inline uint64_t genlock_n2_target_stamp_ns(uint64_t tick_ns, uint64_t pin_ns, uint64_t canvas_interval_ns,
+						  uint32_t n)
+{
+	const uint64_t age = pin_ns > UINT64_MAX - GENLOCK_N2_AGE_BASE_NS ? UINT64_MAX : GENLOCK_N2_AGE_BASE_NS + pin_ns;
+	const uint64_t back = tick_ns > age ? tick_ns - age : 0;
+	return genlock_grid_floor_ns(back, genlock_n2_source_interval_ns(canvas_interval_ns, n));
+}
+
+/* The pick: the last frame of the leading queue run stamped at most half a source interval past the
+ * target (the slack covers sender stamp rounding: a 100 ns-unit stamp sits up to 99 ns BEFORE its
+ * receiver grid point). ON_TARGET when it is the target's own frame, EARLY when the target has not
+ * arrived and an older frame is the newest arrived one (presented for this tick only), HOLD with
+ * nothing at or before the target. A single NDI source delivers in stamp order. */
+static inline struct genlock_n2_pick genlock_n2_select(const obs_source_t *source, uint64_t target_ns,
+						       uint64_t source_interval_ns)
+{
+	const uint64_t half = source_interval_ns / 2;
+	const uint64_t limit = target_ns > UINT64_MAX - half ? UINT64_MAX : target_ns + half;
+	size_t count = 0;
+	while (count < source->async_frames.num && source->async_frames.array[count]->timestamp <= limit)
+		count++;
+	struct genlock_n2_pick pick = {0, GENLOCK_N2_HOLD};
+	if (count == 0)
+		return pick;
+	pick.index = count - 1;
+	const uint64_t ts = source->async_frames.array[pick.index]->timestamp;
+	const uint64_t reach = ts > UINT64_MAX - half ? UINT64_MAX : ts + half;
+	pick.kind = reach >= target_ns ? GENLOCK_N2_ON_TARGET : GENLOCK_N2_EARLY;
+	return pick;
+}
+
 /* camera-box #1049: the source-bound wrapper -- reads the live n (READ-ONLY, same as
  * genlock_should_drain_one), the locked boundary + shared throttle, and the FRESHEST queued frame
  * (async_frames.array[num-1], the achievable-floor reference), delegates the arithmetic to
@@ -7006,53 +7087,6 @@ static bool genlock_min_latency_box(void)
 	return cached == 1;
 }
 
-/* camera-box #1161: the fail-open MARGIN (ticks) the ACQUIRE bracketing gate
- * (genlock_relock_acquire_should_hold) adds on top of ceil(reserve/interval) before it
- * force-acquires regardless of queue depth. Mirror of src/genlock_backlog.rs
- * ACQUIRE_BRACKET_FAILOPEN_TICKS. */
-#define GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS 3ULL
-
-/* camera-box #1161: the STAGE-2 ACQUIRE BRACKETING GATE decision, PURE part. Self-contained
- * (only stdint scalars) so tests/genlock_relock_selection_parity.rs can lift it standalone and
- * prove it byte-identical to the Rust authority src/genlock_backlog.rs relock_acquire_should_hold.
- *
- * The floor-3 aligner raises a source's latency pin to move its presented frame DEEPER, but a
- * per-source pin INCREASE is structurally inert: obs_source_set_genlock_latency_ms re-arms the
- * ms-path-inert fill latch + clears the phase anchor but (pre-#1161) never zeroed the conveyor
- * boundary, so the ACQUIRE branch never re-ran; and genlock_phase_converge_due sheds DOWNWARD
- * only. The PRIMARY frame-mover is obs_source_set_genlock_latency_ms zeroing the boundary on a
- * pin RISE (forcing a re-acquire): that alone lets the ACQUIRE branch rebuild the FIFO to the
- * raised depth, moving the presented frame off the shallow old-depth toward the new reserve (it is
- * what closes the ticket's one-canvas-frame residual). THIS gate is the PRECISION half. Without
- * it a bare re-acquire acquires as soon as a frame is `due`; because genlock_phase_pin_deadline
- * FLOORS the deadline to the receiver grid, a `due` frame is at least
- * reserve - GENLOCK_PHASE_PIN_HYSTERESIS_NS (5 ms) old, so the bare acquire lands up to ~5 ms
- * BELOW the raised target (and genlock_relock_select_nearest could pick a slightly-younger
- * neighbour) -- a SUB-FRAME residual the downward-only shed can never raise back. This gate HOLDs
- * the acquire until the OLDEST queued frame has aged to the FULL reserve (the queue deepens ~one
- * interval/tick and brackets the target within ceil(reserve/interval) ticks), so a frame AT the
- * target depth exists for the selection to land on; the caller then runs the existing
- * genlock_relock_select_nearest byte-identical (phase re-anchored via history, never free-run).
- * The fail-open cap (ceil(reserve/interval) + GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS ticks)
- * degrades a pathological never-deepening queue (an overrun-capped delay line) to today's
- * acquire rather than freezing -- no new hold-collapse mode. INERT at the production 3 ms pin
- * (the ACQUIRE branch is only entered at cold start / a forced re-acquire, and the oldest queued
- * frame is essentially always older than 3 ms), and gated to N>=2 at the call site (the deep
- * N==1 source is already deterministic on cold acquire). Mirror of src/genlock_backlog.rs
- * relock_acquire_should_hold (Tier-0 unit-tested) -- keep both in lock-step. */
-static inline bool genlock_relock_acquire_should_hold(uint64_t oldest_queued_age_ns,
-						      uint64_t reserve_ns, uint64_t interval_ns,
-						      uint64_t ticks_held)
-{
-	if (interval_ns == 0)
-		return false;
-	if (oldest_queued_age_ns >= reserve_ns)
-		return false;
-	const uint64_t cap = (reserve_ns + interval_ns - 1) / interval_ns +
-			     GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS;
-	return ticks_held < cap;
-}
-
 /* camera-box issue 1367 (ROZHODNUTÉ 5827497952): the SHALLOW per-lock depth at the present tail of
  * genlock_release_tick. Samples the arrival floor (the newest queued frame's rounded age at the
  * scheduled instant tick_wall) while a window is open and LATCHES D = max(base, floor_max) + 1 when
@@ -7161,9 +7195,68 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 	     source->genlock_shallow_capped ? 1 : 0);
 }
 
+/* camera-box issue 1367 slice D1: one tick of an N>=2 source -- the GRID-EXACT release (the pure
+ * decision is the genlock_n2_* block above). T is the tick's SCHEDULED wall instant on the grid; the
+ * pick's older frames are erased into genlock_dropped_due, an EARLY pick counts n2_early= (nothing
+ * re-anchors: the next tick targets the grid again), and a HOLD is late when the locked boundary has
+ * aged past the reserve deadline (as on the N==1 path), benign while unlocked. The locked boundary is
+ * still written (presented + one canvas interval): the audit's locked=, a later N==1 tick and the
+ * hold classification read it. No phase anchor, backlog relock, drain, converge shed or ACQUIRE
+ * bracket on this path -- the per-tick erase down to the target bounds the queue. The present tail
+ * keeps the video-delay tracker (the audio follows the now-deterministic presented age) and the
+ * shallow latch call (an N>=2 tick clears the N==1 shallow state). Mirror of src/probe/genlock.rs
+ * ReleaseCadence::tick_n2_grid. */
+static bool genlock_release_tick_n2_grid(obs_source_t *source, uint64_t wall_now, uint64_t present_ts,
+					 uint64_t interval, uint32_t reserve_ms, uint32_t n, uint64_t now_ns)
+{
+	const uint64_t n2_tick_wall = genlock_n1_tick_wall_now(wall_now);
+	const bool n2_on_grid = genlock_n1_tick_is_on_grid(n2_tick_wall, interval);
+	const uint64_t n2_target = genlock_n2_target_stamp_ns(genlock_n2_tick_ns(n2_tick_wall, wall_now, interval, n2_on_grid),
+							      (uint64_t)reserve_ms * 1000000ULL, interval, n);
+	const struct genlock_n2_pick pick = genlock_n2_select(source, n2_target, genlock_n2_source_interval_ns(interval, n));
+	if (pick.kind == GENLOCK_N2_HOLD) {
+		if (source->genlock_locked_next_boundary_ns != 0 && present_ts >= source->genlock_locked_next_boundary_ns)
+			source->genlock_late_holds++;
+		else
+			source->genlock_holds++;
+		genlock_audit_log(source, now_ns);
+		return false;
+	}
+	if (pick.kind == GENLOCK_N2_EARLY)
+		source->genlock_n2_early++;
+	for (size_t erased = 0; erased < pick.index && source->async_frames.num > 1; erased++) {
+		struct obs_source_frame *stale = source->async_frames.array[0];
+		da_erase(source->async_frames, 0);
+		remove_async_frame(source, stale);
+		source->genlock_dropped_due++;
+	}
+	struct obs_source_frame *next_frame = source->async_frames.array[0];
+	source->genlock_locked_next_boundary_ns = next_frame->timestamp + interval;
+	source->genlock_frames_consumed++;
+	source->last_frame_ts = next_frame->timestamp;
+	if (n2_on_grid)
+		genlock_video_delay_track(&source->genlock_video_delay_smoothed_ns,
+					  &source->genlock_video_delay_applied_ms,
+					  &source->genlock_video_delay_settle_ticks,
+					  &source->genlock_video_delay_locked_ms,
+					  genlock_video_delay_lock_ms(source->genlock_shallow_target_frames,
+								      source->genlock_shallow_measuring, interval),
+					  genlock_video_delay_sample_ns(n2_tick_wall, next_frame->timestamp), interval);
+	genlock_shallow_latch(source, n2_tick_wall, wall_now, interval, reserve_ms, false);
+	genlock_audit_log(source, now_ns);
+	return true;
+}
+
 static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64_t present_ts,
 				 size_t due, uint64_t interval, uint32_t reserve_ms, uint64_t now_ns)
 {
+	/* camera-box issue 1367 slice D1: an N>=2 source (a 60 fps camera into the 30 fps canvas) takes the
+	 * GRID-EXACT release -- its presented stamp is a pure function of the tick and the pin. Only an
+	 * N==1 source (or an inconclusive first tick with no confirmed multiple) runs the boundary conveyor
+	 * below. The sticky multiple latches here, exactly as the STEADY branch used to. */
+	const uint32_t release_n = genlock_effective_source_multiple(source, interval);
+	if (release_n >= 2)
+		return genlock_release_tick_n2_grid(source, wall_now, present_ts, interval, reserve_ms, release_n, now_ns);
 	/* ---- camera-box #401: PHASE-LOCKED release cadence (v2) ---------
 	 * WHY: this release used to re-derive the deadline from the wall
 	 * clock EVERY tick (present_ts above) and present the NEWEST due
@@ -7213,12 +7306,12 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 	 * phase, it must never redefine it, or every episode re-mints one
 	 * and the whole fix is undone. */
 	bool anchor_update = false;
-	/* camera-box #1049: true ONLY on the two STEADY presents (N==1 and N>=2) -- the conveyor
-	 * paths that carry a persistent presentation phase and can shed one extra frame to converge
-	 * it toward the configured latency. NOT the GAP-RESYNC (it RE-DERIVES the phase from the
-	 * frame it puts on air, so there is nothing to converge) nor the relock paths. Sheds via the
-	 * genlock_should_converge_phase decision in the present tail, sharing the #859 drain throttle
-	 * (genlock_ticks_since_drain). */
+	/* camera-box #1049: true ONLY on the STEADY present -- the conveyor path that carries a
+	 * persistent presentation phase and can shed one extra frame to converge it toward the
+	 * configured latency (issue 1367 D1: N==1 only; an N>=2 source takes the grid release). NOT
+	 * the GAP-RESYNC (it RE-DERIVES the phase from the frame it puts on air, so there is nothing to
+	 * converge) nor the relock paths. Sheds via the genlock_should_converge_phase decision in the
+	 * present tail, sharing the #859 drain throttle (genlock_ticks_since_drain). */
 	bool converge_eligible = false;
 	/* camera-box issue 1367 (ROZHODNUTÉ 5827497952): an ACQUIRE (or a sender-restart GAP RESYNC below)
 	 * is a new LOCK -- the shallow depth re-measures its arrival floor at the present tail. */
@@ -7239,59 +7332,6 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 		/* #859 follow-up: a fresh lock starts the settle clock over —
 		 * nothing has overshot yet immediately after acquiring. */
 		source->genlock_ticks_since_drain = 0;
-		/* camera-box #1161: ACQUIRE BRACKETING GATE (N>=2 only) -- the PRECISION half of the
-		 * frame-mover (the primary half is obs_source_set_genlock_latency_ms zeroing the boundary
-		 * on a pin RISE, which forces THIS re-acquire and rebuilds the FIFO to the raised depth).
-		 * A bare re-acquire acquires as soon as a frame is `due`; because genlock_phase_pin_deadline
-		 * FLOORS the deadline, a `due` frame is only >= reserve - GENLOCK_PHASE_PIN_HYSTERESIS_NS
-		 * (5 ms) old, so it lands up to ~5 ms BELOW the raised target (and relock-select could pick
-		 * a slightly-younger neighbour) -- a sub-frame residual the downward-only #1049 shed can
-		 * never raise. HOLD until the oldest queued frame has aged to the FULL reserve, THEN fall
-		 * through to the existing genlock_relock_select_nearest below (phase re-anchored via
-		 * history, never free-run).
-		 * The fail-open cap degrades a queue that never deepens to today's acquire -- no new
-		 * hold-collapse mode. N>=2 ONLY: the deep N==1 source is already deterministic on cold
-		 * acquire, so leave it untouched. Mirror of src/genlock_backlog.rs
-		 * relock_acquire_should_hold (Tier-0 unit-tested) + the C-vs-Rust parity gate. */
-		if (genlock_effective_source_multiple(source, interval) >= 2) {
-			const uint64_t oldest_age =
-				wall_now > source->async_frames.array[0]->timestamp
-					? wall_now - source->async_frames.array[0]->timestamp
-					: 0;
-			const bool bracket_hold = genlock_relock_acquire_should_hold(oldest_age,
-							       (uint64_t)reserve_ms * 1000000ULL,
-							       interval,
-							       source->genlock_acquire_bracket_ticks);
-			/* camera-box #1161 OBSERVABILITY (debug direction 3): one line per ACQUIRE-branch
-			 * tick — a RARE, BOUNDED (re)acquire episode (cold start, a pin-RISE forced
-			 * re-acquire via obs_source_set_genlock_latency_ms, or a backward-regime-end), never
-			 * the STEADY path — exposing WHY a raised per-source pin did or did not deepen the
-			 * FIFO. The merged Stage-2 gate was SILENT here, so a live pin rise that stayed
-			 * HOLD-INERT (issue 1161) left no trace beyond the setter's own `(#245)` line. A pin
-			 * BELOW the source's arrival transport floor prints oldest_queued_age_ms >= reserve_ms
-			 * with decision=ACQUIRE -> the bracketing gate cannot engage and
-			 * genlock_relock_select_nearest re-locks at the UNCHANGED shallow phase (the FIFO
-			 * cannot present a frame fresher than the arrival edge; the floor-3 aligner must target
-			 * an above-floor pin). decision=HOLD with a climbing ticks_held is the gate deepening
-			 * the queue toward the raised reserve. Marker string mutually-non-substring vs
-			 * genlock-fifo audit / genlock-relock / genlock-ndi-output per the jitter-audit-parser
-			 * rule; NOT parsed by src/jitter_audit.rs (a one-shot diagnostic, no periodic metric to
-			 * add). */
-			blog(LOG_INFO,
-			     "genlock-acquire-bracket '%s': reserve_ms=%u oldest_queued_age_ms=%llu "
-			     "decision=%s ticks_held=%u depth=%zu (#1161)",
-			     source->context.name ? source->context.name : "?", reserve_ms,
-			     (unsigned long long)(oldest_age / 1000000ULL),
-			     bracket_hold ? "HOLD" : "ACQUIRE",
-			     source->genlock_acquire_bracket_ticks, source->async_frames.num);
-			if (bracket_hold) {
-				source->genlock_acquire_bracket_ticks++;
-				source->genlock_holds++;
-				genlock_audit_log(source, now_ns);
-				return false;
-			}
-		}
-		source->genlock_acquire_bracket_ticks = 0;
 		if (due == 0) {
 			/* #148: a BENIGN source-early HOLD (frames queued, none
 			 * yet due) -> genlock_holds, NOT a true-empty
@@ -7463,78 +7503,45 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 		   source->genlock_locked_next_boundary_ns) {
 		/* STEADY (strict FIFO): the queue head matured by the LOCKED
 		 * boundary. */
-		if (genlock_effective_source_multiple(source, interval) >= 2) {
-			/* camera-box #726: the source runs at an integer multiple
-			 * N>=2 of the canvas render-tick rate (a 60fps NDI source
-			 * into a 30fps canvas). The present-OLDEST path CRAWLS here:
-			 * one canvas interval lands a HAIR under N source intervals
-			 * (30fps 33_333_333 ns vs 2*60fps 33_333_334 ns), so the
-			 * boundary matures only ONE frame per tick while N arrive —
-			 * content plays at ~1/N speed and the queue grows until the
-			 * backlog storm above catches up with a JUMP (the live-event
-			 * "like 15fps" judder, #726). Instead mature every frame up
-			 * to the boundary PLUS a half-interval slack (so the frame
-			 * ~one canvas interval ahead — the hair-past-boundary one —
-			 * is included, the #136 boundary-churn tolerance), release
-			 * the NEWEST and retire the older matured one(s) into
-			 * genlock_dropped_due (the erase loop below). The boundary
-			 * re-anchors to the presented stamp, advancing ONE canvas
-			 * interval (= N source frames) per tick: a uniform
-			 * every-Nth-frame cadence tracking real time, slew-immune
-			 * (keys on the boundary, not the wall). Mirror of
-			 * src/probe/genlock.rs ReleaseCadence::tick N>=2 path. */
-			const uint64_t mature_deadline =
-				source->genlock_locked_next_boundary_ns +
-				interval / 2;
-			size_t matured_n = 0;
-			while (matured_n < source->async_frames.num &&
-			       source->async_frames.array[matured_n]->timestamp <=
-				       mature_deadline)
-				matured_n++;
-			release = matured_n > 0 ? matured_n : 1;
-			/* #1003: a STEADY present -- the conveyor. */
-			anchor_update = true;
-			/* #1049: the N>=2 conveyor has NO drain path and locks a
-			 * persistent phase -- eligible for the bounded phase shed. */
-			converge_eligible = true;
-		} else {
-			/* camera-box issue 1367: a DEEP N==1 conveyor still
-			 * shallower than its pin-derived depth (base + 1 frames)
-			 * HOLDS one tick first -- a deliberate repeat, the conveyor
-			 * one frame deeper next tick -- so every restart settles on
-			 * the same depth whatever its startup stall was. Shares the
-			 * #859 drain throttle; counted as n1_grows= on the audit
-			 * line, never as a benign/late hold. Mirror:
-			 * src/genlock_n1_depth.rs should_hold_n1_phase. */
-			if (genlock_should_hold_n1_phase(source, reserve_ms, interval, wall_now)) {
-				source->genlock_n1_grows++;
-				source->genlock_ticks_since_drain = 0;
-				genlock_audit_log(source, now_ns);
-				return false;
-			}
-			/* present the OLDEST matured frame, exactly one in steady
-			 * state at any arrival skew. Presenting oldest (v1 presented
-			 * the newest matured and dropped the rest) is what makes a
-			 * transient 2-frame maturation LOSSLESS: the extra frame
-			 * drains on the next tick (depth-bounded by the backlog
-			 * guard above). The boundary re-anchors to the presented
-			 * stamp below so small stamp jitter cannot accumulate.
-			 * N==1 is byte-identical to pre-#726. */
-			release = 1;
-			/* #859 follow-up: this is the ONE path the ticket's
-			 * evidence identified as holding depth CONSTANT forever
-			 * — eligible for the bounded settle-back drain below. */
-			drain_eligible = true;
-			/* camera-box issue 1367: not while a latched SHALLOW depth governs -- its own shed
-			 * covers depth > D, and this queue-length drain would fight D. */
-			if (genlock_n1_shallow_governs_now(source, reserve_ms, interval, wall_now))
-				drain_eligible = false;
-			/* #1003: a STEADY present -- the conveyor. */
-			anchor_update = true;
-			/* #1049: a residual N==1 phase (below the #859 depth
-			 * drain's 2-frame hysteresis) is eligible for the shed too. */
-			converge_eligible = true;
+		/* camera-box issue 1367 slice D1: only an N==1 source reaches this branch (an N>=2 source
+		 * returned at the top through genlock_release_tick_n2_grid), so the #726 N>=2 multi-consume
+		 * that used to sit here is gone. */
+		/* camera-box issue 1367: a DEEP N==1 conveyor still
+		 * shallower than its pin-derived depth (base + 1 frames)
+		 * HOLDS one tick first -- a deliberate repeat, the conveyor
+		 * one frame deeper next tick -- so every restart settles on
+		 * the same depth whatever its startup stall was. Shares the
+		 * #859 drain throttle; counted as n1_grows= on the audit
+		 * line, never as a benign/late hold. Mirror:
+		 * src/genlock_n1_depth.rs should_hold_n1_phase. */
+		if (genlock_should_hold_n1_phase(source, reserve_ms, interval, wall_now)) {
+			source->genlock_n1_grows++;
+			source->genlock_ticks_since_drain = 0;
+			genlock_audit_log(source, now_ns);
+			return false;
 		}
+		/* present the OLDEST matured frame, exactly one in steady
+		 * state at any arrival skew. Presenting oldest (v1 presented
+		 * the newest matured and dropped the rest) is what makes a
+		 * transient 2-frame maturation LOSSLESS: the extra frame
+		 * drains on the next tick (depth-bounded by the backlog
+		 * guard above). The boundary re-anchors to the presented
+		 * stamp below so small stamp jitter cannot accumulate.
+		 * N==1 is byte-identical to pre-#726. */
+		release = 1;
+		/* #859 follow-up: this is the ONE path the ticket's
+		 * evidence identified as holding depth CONSTANT forever
+		 * — eligible for the bounded settle-back drain below. */
+		drain_eligible = true;
+		/* camera-box issue 1367: not while a latched SHALLOW depth governs -- its own shed
+		 * covers depth > D, and this queue-length drain would fight D. */
+		if (genlock_n1_shallow_governs_now(source, reserve_ms, interval, wall_now))
+			drain_eligible = false;
+		/* #1003: a STEADY present -- the conveyor. */
+		anchor_update = true;
+		/* #1049: a residual N==1 phase (below the #859 depth
+		 * drain's 2-frame hysteresis) is eligible for the shed too. */
+		converge_eligible = true;
 	} else if (present_ts >= source->async_frames.array[0]->timestamp) {
 		/* GAP RESYNC: nothing matured, but the oldest queued frame is
 		 * BEYOND the boundary and has aged past the reserve —
@@ -7604,7 +7611,7 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 	 * oldest (array[0] — what would otherwise be presented this tick)
 	 * and presents the NEXT one instead (array[0] AFTER this erase) —
 	 * the same drop-older/present-newest idiom the ACQUIRE / backlog
-	 * relock / N>=2 paths above already use. This is NOT equivalent to
+	 * relock paths above already use. This is NOT equivalent to
 	 * keeping the same presented frame and dropping the one behind it:
 	 * that alternative desyncs the re-anchored boundary from the real
 	 * (evenly-spaced) frame timeline, so the VERY NEXT tick reads as a
@@ -7634,18 +7641,18 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 			source->genlock_ticks_since_drain++;
 		}
 	}
-	/* camera-box #1049: SLEW-LIMITED PHASE CONVERGENCE. On the two STEADY presents
-	 * (converge_eligible) the conveyor has a persistent presentation phase (the N>=2 path has NO
-	 * depth drain at all; the N==1 depth drain's 2-frame hysteresis swallows a 1-2 canvas-frame
-	 * phase error). Shed one extra frame with the SAME drop-older/present-fresher idiom the #859
-	 * drain uses -- drop the would-be-presented array[0] and present the next (on N>=2 that is one
-	 * SOURCE interval fresher; on N==1 byte-identical to the drain shed) -- re-anchoring the
-	 * boundary below to the fresher stamp, so the reduced phase STICKS. The throttle counter is
+	/* camera-box #1049: SLEW-LIMITED PHASE CONVERGENCE. On the STEADY present
+	 * (converge_eligible) the conveyor has a persistent presentation phase (the N==1 depth drain's
+	 * 2-frame hysteresis swallows a 1-2 canvas-frame phase error; issue 1367 D1: an N>=2 source
+	 * never reaches this tail, its grid release presents the target stamp directly). Shed one extra
+	 * frame with the SAME drop-older/present-fresher idiom the #859 drain uses -- drop the
+	 * would-be-presented array[0] and present the next (byte-identical to the drain shed) --
+	 * re-anchoring the boundary below to the fresher stamp, so the reduced phase STICKS. The throttle counter is
 	 * SHARED with the #859 drain: after a drain reset it to 0, genlock_should_converge_phase reads
 	 * ticks < GENLOCK_DRAIN_MIN_TICK_INTERVAL and returns false, so at most ONE extra frame ever
 	 * leaves the queue per tick (the drain and the converge can never both fire) and the drain's
-	 * own block above is left byte-identical. On the N>=2 path (!drain_eligible) this block also
-	 * maintains the shared counter (the drain block did not run). Mirror of
+	 * own block above is left byte-identical. When the drain block did not run (!drain_eligible:
+	 * a latched SHALLOW depth governs) this block also maintains the shared counter. Mirror of
 	 * src/genlock_backlog.rs should_converge_phase / the SimConveyor1049 shed. */
 	if (converge_eligible) {
 		if (genlock_should_converge_phase(source, reserve_ms, interval, wall_now) &&
@@ -7679,8 +7686,8 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 	source->genlock_frames_consumed++;
 	source->last_frame_ts = next_frame->timestamp;
 	/* camera-box issue 1367 (Option 3): track this source's REAL stamp->present delay for its audio
-	 * -- the age of the frame this tick PRESENTS (the queue head on a canvas-rate source, the newest
-	 * matured frame on an N >= 2 source, whose head is (N-1) source intervals older) at the tick's
+	 * -- the age of the frame this tick PRESENTS (the queue head; an N >= 2 source samples its grid
+	 * target in genlock_release_tick_n2_grid, issue 1367 D1) at the tick's
 	 * SCHEDULED instant (the head skew sampled in ready_async_frame is taken at the processing wall
 	 * and carries tick lateness). A tick off the per-second grid (a wall step slewing back) is not
 	 * sampled. EMA-smoothed and re-applied only on a half-frame move once settled; the audio ingest
@@ -9744,28 +9751,25 @@ void obs_source_set_genlock_latency_ms(obs_source_t *source, uint32_t ms)
 		 * set_reserve_ms (src/genlock_backlog.rs). */
 		source->genlock_phase_anchor_ns = 0;
 		/* camera-box #1161: force a bounded RE-ACQUIRE on a pin RISE. A per-source latency
-		 * INCREASE asks the conveyor to present an OLDER frame (hold DEEPER), but the phase-
-		 * locked boundary is a downward-only follower with no mechanism to ADD hold --
-		 * genlock_phase_converge_due sheds only toward max(reserve, floor), and clearing only
-		 * the anchor above leaves genlock_locked_next_boundary_ns locked at the OLD shallow
+		 * INCREASE asks the N==1 conveyor to present an OLDER frame (hold DEEPER), but the phase-
+		 * locked boundary is a downward-only follower with no mechanism to ADD hold, and clearing
+		 * only the anchor above leaves genlock_locked_next_boundary_ns locked at the OLD shallow
 		 * depth, so the raised pin never moves the presented frame (issue 1161). Zeroing the
-		 * locked boundary re-enters the ACQUIRE branch, where the #1161 bracketing gate holds
-		 * until the queue has deepened to the new reserve and the existing
-		 * genlock_relock_select_nearest then locks AT the raised depth. A DECREASE is
-		 * deliberately left to the existing anchor-clear + backlog relock shed above (a
-		 * re-acquire there would be needless churn -- the FIFO already holds MORE than the
-		 * lowered target and sheds it in one relock). genlock_acquire_bracket_ticks is reset
-		 * so the fail-open cap counts fresh for the new acquire episode.
+		 * locked boundary re-enters the ACQUIRE branch, where genlock_relock_select_nearest locks
+		 * AT the raised depth. A DECREASE is deliberately left to the existing anchor-clear +
+		 * backlog relock shed above (a re-acquire there would be needless churn -- the FIFO
+		 * already holds MORE than the lowered target and sheds it in one relock). An N>=2 source
+		 * needs none of this (issue 1367 D1): its target is a pure function of the pin, so the new
+		 * pin moves the presented frame on the next tick; the zeroed boundary only classifies its
+		 * holds as benign until that tick presents.
 		 * NB: `prev` is the RAW stored genlock_latency_ms. It is create-seeded to
 		 * GENLOCK_LATENCY_MS_MIN_INIT (3) and every set clamps to >= GENLOCK_LATENCY_MS_MIN (3),
 		 * so on this build it is never the 0 "unset -> follow global genlock_reserve_ms()"
 		 * sentinel -- `clamped > prev` is a true effective-hold RISE. If the global reserve is
 		 * ever re-enabled (GENLOCK_RESERVE_MS_DEFAULT != 0, a source left at 0), compare
 		 * effective reserves here (`prev > 0 ? prev : genlock_reserve_ms()`) instead. */
-		if (clamped > prev) {
+		if (clamped > prev)
 			source->genlock_locked_next_boundary_ns = 0;
-			source->genlock_acquire_bracket_ticks = 0;
-		}
 		/* camera-box issue 1367: a new pin is a new base -- an N==1 source's shallow depth re-measures
 		 * (its latched D is kept until the new window latches). */
 		if (source->genlock_last_known_n < 2)

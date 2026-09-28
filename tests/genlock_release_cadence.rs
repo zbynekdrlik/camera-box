@@ -250,21 +250,27 @@ fn steady_multi_consumes_at_an_integer_source_multiple_of_the_canvas() {
         "{OBS_SOURCE}: #726 STICKY-N — a fresh measurement no longer LATCHES into \
          genlock_last_known_n; the sticky bridge can't remember the confirmed multiple. Re-apply."
     );
+    // Issue 1367 D1: the #726 N>=2 multi-consume (mature to boundary + interval / 2, present the
+    // newest) is gone with the boundary conveyor for N>=2 sources — the STICKY multiple now picks
+    // the GRID-EXACT release at the top of genlock_release_tick, which presents every second frame
+    // at the grid target (the crawl cannot return: the target advances one canvas interval per
+    // tick by construction). Pinned in detail by tests/genlock_n2_grid_wiring_1367.rs.
     assert!(
-        src.contains("if (genlock_effective_source_multiple(source, interval) >= 2) {"),
-        "{OBS_SOURCE}: #726 — the STEADY release no longer branches on the STICKY \
-         genlock_effective_source_multiple(...) >= 2; the 60->30 multi-consume reverted to \
-         present-oldest (the crawl) or to the jitter-sensitive per-tick check. Re-apply."
+        src.contains(
+            "const uint32_t release_n = genlock_effective_source_multiple(source, interval); \
+             if (release_n >= 2) return genlock_release_tick_n2_grid("
+        ),
+        "{OBS_SOURCE}: #726 / issue 1367 D1 — the release no longer routes a STICKY N>=2 source to \
+         the grid-exact release; a 60->30 input would crawl on the N==1 present-oldest path."
     );
     assert!(
-        src.contains("mature_deadline")
-            && src.contains("source->genlock_locked_next_boundary_ns + interval / 2"),
-        "{OBS_SOURCE}: #726 — the STEADY N>=2 maturation slack (boundary + interval/2, so the \
-         frame ~one canvas interval ahead matures despite canvas_interval being a hair under \
-         N*src_interval) is gone; the multi-consume would mature only 1 frame and still crawl."
+        !src.contains("mature_deadline"),
+        "{OBS_SOURCE}: issue 1367 D1 — the N>=2 boundary multi-consume is dead code; an N>=2 \
+         source never reaches the STEADY branch."
     );
     // The latch MUST be cleared on every GENUINE source-timeline discontinuity so a stale N cannot
-    // outlive the rate it described. #741/#707 B2 changed the SET: the four sites are now
+    // outlive the rate it described (the N==1 ACQUIRE / GAP / backward-step / flush sites; the
+    // grid release never clears it — a fresh measurement re-latches every tick). #741/#707 B2 changed the SET: the four sites are now
     // acquire / gap resync / backward clock-step / flush-inactive reset — the BACKLOG-STORM relock
     // is DELIBERATELY excluded (a queue-depth event is not a rate change; see
     // sticky_n_latch_lifecycle_and_robust_measure_741 below).
@@ -441,9 +447,10 @@ fn raw_drain_erases_index_zero(raw: &str) -> bool {
     window.contains("da_erase(source->async_frames, 0);") && !window.contains("array[1]")
 }
 
-/// #1049 — the bounded PHASE CONVERGENCE on the steady conveyor must be present and WIRED. The
-/// N>=2 conveyor has no depth drain, so without this a per-camera acquire-phase error persisted
-/// forever (the strih 60-into-30 A/V-offset ladder). Mirror of src/genlock_backlog.rs
+/// #1049 — the bounded PHASE CONVERGENCE on the steady conveyor must be present and WIRED. It was
+/// built for the N>=2 conveyor (no depth drain there, the strih 60-into-30 A/V-offset ladder);
+/// issue 1367 D1 moved N>=2 sources to the grid-exact release, so the shed now serves the N==1
+/// STEADY branch only (its source wrapper routes an N==1 tick to the pin-derived depth). Mirror of src/genlock_backlog.rs
 /// should_converge_phase (Tier-0 tested) + the C-vs-Rust parity gate
 /// tests/genlock_relock_selection_parity.rs.
 #[test]
@@ -497,13 +504,13 @@ fn phase_convergence_present_and_wired_in_1049() {
         "{OBS_SOURCE}: #1049 — genlock_should_converge_phase is defined but no longer CALLED from \
          the release tail; the shed would be dead code and the phase would never converge."
     );
-    // Both STEADY presents (N==1 and N>=2) mark themselves converge_eligible — the N>=2 path is
-    // the one with no depth drain at all.
+    // Issue 1367 D1: the ONE STEADY branch left (N==1) marks itself converge_eligible; an N>=2
+    // source takes the grid release and never reaches this tail.
     assert_eq!(
         src.matches("converge_eligible = true;").count(),
-        2,
-        "{OBS_SOURCE}: #1049 — both STEADY branches (N==1 and N>=2) must set converge_eligible; \
-         the N>=2 conveyor has no other restoring force toward configured."
+        1,
+        "{OBS_SOURCE}: #1049 / issue 1367 D1 — the N==1 STEADY branch must set converge_eligible \
+         exactly once (the N>=2 STEADY branch is gone)."
     );
     // The shed drops the CURRENT would-be-presented frame (index 0) and presents the next — the
     // same drop-older/present-fresher idiom the #859 drain uses (never a snap-back no-op).
@@ -513,15 +520,14 @@ fn phase_convergence_present_and_wired_in_1049() {
          frame) and present the next; dropping the one BEHIND the presented frame is the \
          self-cancelling no-op the drain call-site comment documents."
     );
-    // On the N>=2 path the drain block did NOT run, so the converge block MUST maintain the shared
-    // throttle counter itself — without this increment the feature is silently DEAD on its primary
-    // target (the 60-into-30 ingests): the counter never reaches the interval and the shed never
-    // fires (review finding 🟡3).
+    // When the drain block did NOT run (a latched SHALLOW depth governs the N==1 conveyor), the
+    // converge block MUST maintain the shared throttle counter itself — without this increment the
+    // shallow shed never sees the counter reach the interval (review finding 🟡3 of #1049, which
+    // then guarded the N>=2 path).
     assert!(
         src.contains("} else if (!drain_eligible) { source->genlock_ticks_since_drain++;"),
-        "{OBS_SOURCE}: #1049 — the N>=2 converge branch no longer maintains the shared throttle \
-         counter (else if (!drain_eligible) ...++); the shed would never fire on a 60-into-30 \
-         source — the feature dead in exactly its primary target."
+        "{OBS_SOURCE}: #1049 — the converge block no longer maintains the shared throttle counter \
+         when the drain did not run (else if (!drain_eligible) ...++)."
     );
     // A converge shed increments a DISTINCT counter for the audit line — a converge shed is
     // otherwise indistinguishable from any other drop (the genlock-hold-collapse playbook lesson).
@@ -650,14 +656,15 @@ fn n1_pin_derived_depth_present_and_wired_1367() {
         );
     }
     // Both N==1 decisions read the depth at the SCHEDULED instant, never the processing wall, and
-    // so do the shallow GAP hold (design 5833339163) and the audio pairing's video-delay tracker at
-    // the present tail (issue 1367 Option 3): four readers.
+    // so do the shallow GAP hold (design 5833339163), the audio pairing's video-delay tracker at
+    // the present tail (issue 1367 Option 3) and the N>=2 grid release's tick instant (issue 1367
+    // D1): five readers.
     assert_eq!(
         src.matches("genlock_n1_tick_wall_now(wall_now)").count(),
-        4,
-        "{OBS_SOURCE}: issue 1367 (review round 2) — the SHED, the HOLD and the GAP-hold wrappers \
-         and the audio video-delay tracker must all read at the render tick's scheduled instant \
-         (genlock_n1_tick_wall_now(wall_now))."
+        5,
+        "{OBS_SOURCE}: issue 1367 (review round 2) — the SHED, the HOLD and the GAP-hold wrappers, \
+         the audio video-delay tracker and the N>=2 grid release must all read at the render \
+         tick's scheduled instant (genlock_n1_tick_wall_now(wall_now))."
     );
     assert_eq!(
         src.matches("const uint64_t genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now);")
@@ -681,8 +688,8 @@ fn n1_pin_derived_depth_present_and_wired_1367() {
     );
     // ORDER inside the N==1 STEADY branch: the hold decides BEFORE the branch marks itself
     // drain/converge-eligible, so a held tick neither drains nor sheds (one correction per tick).
-    // `drain_eligible = true;` is set ONLY on the N==1 STEADY branch, and the N>=2 STEADY branch
-    // (the first `converge_eligible = true;`) comes before it in the file.
+    // `drain_eligible = true;` and `converge_eligible = true;` are both set ONLY on the N==1 STEADY
+    // branch (issue 1367 D1 removed the N>=2 STEADY branch), after its hold and its release.
     let hold_at = src
         .find("if (genlock_should_hold_n1_phase(source, reserve_ms, interval, wall_now))")
         .expect("checked above");
@@ -692,11 +699,11 @@ fn n1_pin_derived_depth_present_and_wired_1367() {
         .find("release = 1;")
         .map(|i| hold_at + i)
         .expect("issue 1367: no release after the hold call");
-    let n2_branch = src.find("converge_eligible = true;").expect("#1049 anchor");
+    let n1_converge = src.find("converge_eligible = true;").expect("#1049 anchor");
     assert!(
-        n2_branch < hold_at && hold_at < n1_release && n1_release < n1_eligible,
+        hold_at < n1_release && n1_release < n1_eligible && n1_eligible < n1_converge,
         "{OBS_SOURCE}: issue 1367 — the N==1 hold must sit at the HEAD of the N==1 STEADY branch \
-         (after the N>=2 branch, before the N==1 release = 1 and its drain_eligible mark)."
+         (before its release = 1 and its drain/converge-eligible marks)."
     );
     // The pure helpers must stay CONTIGUOUS with genlock_phase_converge_due: the parity gate lifts
     // the whole run from genlock_n1_base_frames to the end of genlock_phase_converge_due.
@@ -1244,133 +1251,23 @@ fn release_cadence_extracted_into_genlock_release_tick_1038() {
     );
 }
 
+/// #1161 — the pin-RISE re-acquire survives for the N==1 conveyor: the setter zeroes the locked
+/// boundary on a latency INCREASE (the primary frame-mover). Issue 1367 D1 removed the #1161
+/// ACQUIRE BRACKETING GATE with the N>=2 conveyor it served (it gated on N>=2 only): an N>=2
+/// source's target is a pure function of the pin, so a new pin moves its presented frame on the
+/// next tick. Its helper, counter, clears and log marker are gone
+/// (tests/genlock_n2_grid_wiring_1367.rs pins their absence).
 #[test]
-fn acquire_bracketing_gate_1161() {
-    // #1161 — the Stage-2 ACQUIRE bracketing gate + the pin-rise re-acquire that triggers it.
-    // (a) the setter forces a re-acquire on a pin RISE by zeroing the conveyor boundary + the
-    // bracket counter; (b) the ACQUIRE branch (N>=2) holds via genlock_relock_acquire_should_hold
-    // until the queue deepens to the raised reserve; (c) the pure helper + its fail-open #define
-    // exist and are consumed. The behavioral RED->GREEN + the executable C-vs-Rust parity live in
-    // src/genlock_backlog.rs (Tier-0 unit-tested) + tests/genlock_relock_selection_parity.rs; this
-    // default-features guard pins the C PORT so a subtree-pull or edit can't silently revert it
-    // (the vendored C compiles only on CI). Mirror: src/genlock_backlog.rs relock_acquire_should_hold.
+fn pin_rise_forces_an_n1_reacquire_1161() {
     let src = squish(&vendor_file(OBS_SOURCE));
-    let internal = squish(&vendor_file(OBS_INTERNAL));
-
-    // (a) setter re-acquire on a pin RISE — the frame-mover's trigger (issue 1161 root cause).
     assert!(
-        src.contains(
-            "if (clamped > prev) { source->genlock_locked_next_boundary_ns = 0; \
-             source->genlock_acquire_bracket_ticks = 0; }"
-        ),
-        "{OBS_SOURCE}: #1161 — obs_source_set_genlock_latency_ms no longer zeroes the conveyor \
-         boundary on a pin RISE; a raised per-source pin can never re-acquire, so the presented \
-         frame never moves deeper (the #1161 residual). Re-apply."
-    );
-
-    // (b) the pure decision + its fail-open margin, mirrored from src/genlock_backlog.rs.
-    assert!(
-        src.contains("#define GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS 3ULL"),
-        "{OBS_SOURCE}: #1161 — the fail-open margin GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS is gone."
+        src.contains("if (clamped > prev) source->genlock_locked_next_boundary_ns = 0;"),
+        "{OBS_SOURCE}: #1161 — obs_source_set_genlock_latency_ms no longer zeroes the locked \
+         boundary on a pin RISE; a raised N==1 pin would never move the presented frame."
     );
     assert!(
-        src.contains("static inline bool genlock_relock_acquire_should_hold("),
-        "{OBS_SOURCE}: #1161 — the pure ACQUIRE bracketing gate helper \
-         genlock_relock_acquire_should_hold is gone; the frame-mover reverted. Mirror: \
-         src/genlock_backlog.rs relock_acquire_should_hold."
-    );
-    assert!(
-        src.contains(
-            "const uint64_t cap = (reserve_ns + interval_ns - 1) / interval_ns + \
-             GENLOCK_ACQUIRE_BRACKET_FAILOPEN_TICKS;"
-        ),
-        "{OBS_SOURCE}: #1161 — the fail-open cap ceil(reserve/interval)+margin is gone from the \
-         gate; a queue that never deepens could hold forever (a new hold-collapse mode). Re-apply."
-    );
-
-    // (c) the gate is WIRED into the ACQUIRE branch, N>=2 only, feeding + incrementing the counter.
-    assert!(
-        src.contains("genlock_relock_acquire_should_hold(oldest_age,")
-            && src.contains("source->genlock_acquire_bracket_ticks++;"),
-        "{OBS_SOURCE}: #1161 — the ACQUIRE branch no longer calls \
-         genlock_relock_acquire_should_hold (with oldest_age) / increments \
-         genlock_acquire_bracket_ticks; the bracketing hold is gone and a forced re-acquire would \
-         land one canvas frame below the raised target. Re-apply."
-    );
-
-    // The new remembered-state field must live on obs_source (bzalloc-zeroed with the counters).
-    assert!(
-        internal.contains("uint32_t genlock_acquire_bracket_ticks;"),
-        "{OBS_INTERNAL}: #1161 — the ACQUIRE bracket-tick counter field \
-         genlock_acquire_bracket_ticks is missing from obs_source; the fail-open cap has nowhere \
-         to count. Re-apply."
-    );
-
-    // (d) REMEMBERED-STATE SEAM completeness (vendored-libobs-change-safety.md "Adding REMEMBERED
-    // STATE"): genlock_acquire_bracket_ticks is a per-source field that survives across ACQUIRE
-    // ticks, so it MUST be zeroed at every boundary-invalidation seam that begins a fresh acquire
-    // episode — else a stale count undercuts the next re-acquire's fail-open cap (a shallow lock).
-    // The seams are the same ones that clear genlock_phase_anchor_ns (the #1003 seam guard above).
-    // (d.1) EVERY free_async_cache site (the delay line is gone → a fresh episode) must clear the
-    // counter — guarded RELATIONALLY like the #1003 seams==frees check, and placed AFTER
-    // free_async_cache so the #1003 `phase_anchor_ns = 0; free_async_cache(source);` adjacency stays
-    // intact.
-    let fac_counter_clears = src
-        .matches("free_async_cache(source); source->genlock_acquire_bracket_ticks = 0;")
-        .count();
-    let frees = src.matches("free_async_cache(source);").count();
-    assert_eq!(
-        fac_counter_clears, frees,
-        "{OBS_SOURCE}: #1161 — {frees} free_async_cache() site(s) but only {fac_counter_clears} \
-         clear genlock_acquire_bracket_ticks afterwards; a stale bracket count could survive a \
-         mid-episode delay-line drop and fail-open the next re-acquire early into a shallow lock."
-    );
-    // (d.2) genlock_backward_regime_end (zeroes the boundary → a fresh ACQUIRE) must clear it too —
-    // scoped to that function, never a byte window (same discipline as the #1003 anchor check above).
-    let regime_end_1161 = src
-        .split("static void genlock_backward_regime_end(")
-        .nth(1)
-        .expect("#1161: genlock_backward_regime_end must exist");
-    let regime_end_1161 = regime_end_1161
-        .find("static ")
-        .map_or(regime_end_1161, |i| &regime_end_1161[..i]);
-    assert!(
-        regime_end_1161.contains("source->genlock_acquire_bracket_ticks = 0;"),
-        "{OBS_SOURCE}: #1161 — genlock_backward_regime_end no longer clears \
-         genlock_acquire_bracket_ticks; a stale count from an interrupted re-acquire episode would \
-         undercut the post-regime re-acquire's fail-open cap."
-    );
-}
-
-/// #1161 — the ACQUIRE-bracket OBSERVABILITY marker (debug direction 3). The merged Stage-2 gate
-/// was silent about WHY a raised pin did or did not deepen the FIFO — a live pin-rise re-acquire
-/// left NO trace in the OBS log (the only line was the `#245` setter line), so a below-floor pin
-/// (reserve < the arrival transport floor) that cannot move the frame was indistinguishable from a
-/// working one. This one-per-ACQUIRE-tick marker exposes reserve_ms vs oldest_queued_age_ms and the
-/// HOLD/ACQUIRE decision, so the NEXT live run self-diagnoses a below-floor pin. Emitted in the
-/// N>=2 ACQUIRE branch only (a rare, bounded (re)acquire episode), never on the STEADY path. The
-/// marker string is mutually-non-substring vs the other genlock log families
-/// (`genlock-fifo audit` / `genlock-relock` / `genlock-ndi-*`) per the jitter-audit-parser rule.
-#[test]
-fn acquire_bracket_observability_marker_1161() {
-    let src = vendor_file(OBS_SOURCE);
-    assert!(
-        src.contains("genlock-acquire-bracket '%s':"),
-        "{OBS_SOURCE}: #1161 — the ACQUIRE-bracket observability marker (genlock-acquire-bracket) \
-         is missing; a live pin-rise re-acquire leaves no trace of reserve vs oldest_queued_age, so \
-         a below-floor (inert) pin cannot be diagnosed from the OBS log (debug direction 3)."
-    );
-    // The marker must report BOTH the decision and the two quantities that reveal a below-floor pin
-    // (oldest_queued_age_ms >= reserve_ms with decision=ACQUIRE == the frame will not move).
-    assert!(
-        src.contains("oldest_queued_age_ms=") && src.contains("decision="),
-        "{OBS_SOURCE}: #1161 — the genlock-acquire-bracket marker must carry oldest_queued_age_ms= \
-         and decision= so a below-floor pin (age >= reserve, decision=ACQUIRE) is legible."
-    );
-    // It is a HOLD/ACQUIRE decision on the bracketing gate — both verdicts must be printable.
-    assert!(
-        src.contains("\"HOLD\"") && src.contains("\"ACQUIRE\""),
-        "{OBS_SOURCE}: #1161 — the marker must distinguish decision=HOLD (queue deepening) from \
-         decision=ACQUIRE (locking now — inert if oldest_age already >= reserve)."
+        !src.contains("genlock-acquire-bracket '%s':"),
+        "{OBS_SOURCE}: issue 1367 D1 — the #1161 ACQUIRE-bracket log line belongs to the removed \
+         N>=2 bracket gate."
     );
 }
