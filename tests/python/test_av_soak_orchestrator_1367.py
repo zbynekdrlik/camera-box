@@ -14,6 +14,7 @@ Fakes on PATH / behind the documented seams:
 """
 import base64
 import json
+import re
 import os
 import signal
 import subprocess
@@ -375,6 +376,22 @@ def test_plan_is_the_default_and_touches_nothing(rig):
         assert needle in out, needle
 
 
+def test_the_default_slot_leaves_the_measured_strih_lx_decode_time(tmp_path):
+    # ROZHODNUTÉ 5861667625: strih-lx decodes at ~8.5 frames/s on its idle E-cores, so the
+    # defaults are a 20 min slot and 20 s camera segments, and the decode budget must cover a
+    # 7-camera window at that speed (with margin), not the 210 s the first design assumed.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("AV_SOAK_")}
+    r = subprocess.run(["bash", SOAK, "--plan", "--hours", "1"], env=env,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "one window every 1200 s" in r.stdout
+    assert "7 x 20 s = 140 s" in r.stdout
+    m = re.search(r"decode <= (\d+) s", r.stdout)
+    assert m, r.stdout
+    frames = 140 * 30
+    assert int(m.group(1)) >= frames / 8.5 * 1.5, "decode budget below 1.5x the measured strih-lx time"
+
+
 def test_plan_never_names_a_writer_or_the_production_scene(rig):
     env, _ = rig
     out = _soak(env, "--plan").stdout
@@ -433,7 +450,7 @@ def test_one_window_end_to_end(rig):
     rows = _csv_rows(p["run"])
     assert len(rows) == 1
     row = rows[0]
-    assert row["outcome"] == "ok" and row["painter_run_id"] == "4242" and row["slot_s"] == "600"
+    assert row["outcome"] == "ok" and row["painter_run_id"] == "4242" and row["slot_s"] == "1200"
     assert row["av_cam1_ms"] == "3.000" and row["av_cam3_ms"] == "4.000"
     assert row["av_spread_ms"] == "1.000"
     assert row["burn_stream_zero_loss"] == "true" and row["loss_cam1_pass"] == "true"
