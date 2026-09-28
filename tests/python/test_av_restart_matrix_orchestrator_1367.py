@@ -53,13 +53,16 @@ n = (int(open(cnt).read()) if os.path.exists(cnt) else 0) + 1
 open(cnt, "w").write(str(n))
 d = arg("--run-dir")
 lease = arg("--lease-run-id")
+repo = arg("--lease-repo")
 try:
-    holder = json.load(open(os.path.join(os.environ["RIG_LEASE_DIR"], "holder.json")))["run_id"]
+    h = json.load(open(os.path.join(os.environ["RIG_LEASE_DIR"], "holder.json")))
 except OSError:
-    holder = ""
-if not lease or holder != lease:
+    h = {}
+if not lease or h.get("run_id") != lease or h.get("repo") != repo:
     sys.stderr.write("fake soak: the caller's lease is not held\n")
     sys.exit(4)
+with open(log, "a") as f:
+    f.write("soak-env RIG_LEASE_MAX_HOLD_SECS=%s\n" % os.environ.get("RIG_LEASE_MAX_HOLD_SECS", ""))
 os.makedirs(d, exist_ok=True)
 open(os.path.join(d, "pid"), "w").write(str(os.getpid()))
 def on_term(*_):
@@ -194,14 +197,20 @@ case "$text" in
   *"is-active strih-obs.service"*)
     printf 'active=%s\n' "${FAKE_STRIH_ACTIVE:-active}" ;;
   *"systemctl is-active cam2-painter"*)
+    n=$(( $(cat "$FAKE_STATE/count-painter" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$FAKE_STATE/count-painter"
+    if [ -n "${FAKE_PAINTER_UNREADABLE_AFTER_WINDOWS:-}" ] && [ "$windows" -ge "$FAKE_PAINTER_UNREADABLE_AFTER_WINDOWS" ]; then
+      u=$(( $(cat "$FAKE_STATE/count-painter-unreadable" 2>/dev/null || echo 0) + 1 ))
+      echo "$u" > "$FAKE_STATE/count-painter-unreadable"
+      if [ -z "${FAKE_PAINTER_UNREADABLE_TIMES:-}" ] || [ "$u" -le "$FAKE_PAINTER_UNREADABLE_TIMES" ]; then exit 255; fi
+    fi
     active=active
     if [ -n "${FAKE_PAINTER_INACTIVE_AFTER_WINDOWS:-}" ] && [ "$windows" -ge "$FAKE_PAINTER_INACTIVE_AFTER_WINDOWS" ]; then active=inactive; fi
     printf 'active=%s\nrun_id=4242\nmarkers=10\nmarkers2=14\n' "$active" ;;
   *"obs-studio/logs"*)
     printf 'info: genlock-fifo audit something\n'
-    if [ -n "${FAKE_PARKED:-}" ]; then
-      printf "info: genlock-park 'NDI %s': state=parked parked_s=35 (hidden)\n" "${FAKE_PARKED}"
-    fi ;;
+    for c in ${FAKE_PARKED:-}; do
+      printf "info: genlock-park 'NDI %s': state=parked parked_s=35 (hidden)\n" "$c"
+    done ;;
   *) echo "fake sshpass: unexpected remote text" >&2; exit 3 ;;
 esac
 '''
@@ -785,7 +794,7 @@ def test_a_cambox_health_read_of_the_old_process_is_never_healthy(rig):
 def test_the_restarted_cameras_strih_receiver_state_is_recorded(rig):
     env, p = rig
     r = _matrix(dict(env, AV_MATRIX_KINDS="cambox dantesync strih-obs", AV_MATRIX_REPEATS="1",
-                     FAKE_PARKED="cam1"), "--run")
+                     FAKE_PARKED="cam1", AV_MATRIX_CAMBOX="cam1"), "--run")
     assert r.returncode == 0, r.stdout + r.stderr
     rec = {s["kind"]: s["receiver"] for s in _steps(p["run"])}
     assert rec["cambox"] == "parked" and rec["dantesync"] == "parked"
@@ -818,3 +827,85 @@ def test_a_soak_usage_error_on_the_baseline_is_a_refusal_not_an_abort(rig):
     assert r.returncode == 4, r.stdout + r.stderr
     assert _restart_kinds(p["log"]) == []
     assert not p["lease"].exists()
+
+
+# --- review round 2 ----------------------------------------------------------------------------------
+
+
+def test_every_window_runs_under_the_matrix_lease_identity_and_its_hold_ceiling(rig):
+    env, p = rig
+    r = _matrix(dict(env, AV_MATRIX_KINDS="cambox", AV_MATRIX_REPEATS="1"), "--run")
+    assert r.returncode == 0, r.stdout + r.stderr
+    for w in _windows(p["log"]):
+        assert w[w.index("--lease-repo") + 1] == "camera-box-av-restart-matrix"
+    ceilings = [int(line.split("=", 1)[1]) for line in p["log"].read_text().splitlines()
+                if line.startswith("soak-env RIG_LEASE_MAX_HOLD_SECS=")]
+    assert len(ceilings) == 2 and ceilings[0] == ceilings[1]
+    assert ceilings[0] > 1200 + 1800, "the whole matrix hold, longer than one window own (slot + 30 min)"
+
+
+def test_the_window_bound_follows_the_soaks_own_slot(rig):
+    env, _ = rig
+    lib = f'''. "{REPO}/scripts/lib/av-restart-matrix.sh"; av_matrix_soak_slot_s "{REPO}/scripts/av-soak.sh"'''
+    out = subprocess.run(["bash", "-c", lib], capture_output=True, text=True, timeout=30,
+                         env={k: v for k, v in env.items() if k != "AV_SOAK_SLOT_SECS"})
+    soak_text = open(os.path.join(REPO, "scripts", "av-soak.sh")).read()
+    default = re.search(r'^SLOT_S="\$\{AV_SOAK_SLOT_SECS:-([0-9]+)\}"$', soak_text, re.M).group(1)
+    assert out.stdout.strip() == default, (out.stdout, out.stderr)
+    out = subprocess.run(["bash", "-c", lib], capture_output=True, text=True, timeout=30,
+                         env=dict(env, AV_SOAK_SLOT_SECS="2400"))
+    assert out.stdout.strip() == "2400"
+    plan = _matrix(env).stdout
+    assert f"one window <= {int(default) + 600} s" in plan
+
+
+def test_the_default_cambox_is_a_soak_camera_whose_strih_receiver_is_connected(rig):
+    env, p = rig
+    # cam1 is parked on strih: the restarts go to cam3, whose input is connected
+    r = _matrix(dict(env, AV_MATRIX_KINDS="cambox dantesync", AV_MATRIX_REPEATS="1",
+                     FAKE_PARKED="cam1"), "--run")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _restart_kinds(p["log"]) == [("cambox", "10.77.9.63"), ("dantesync", "10.77.9.63")]
+    assert {s["receiver"] for s in _steps(p["run"]) if s["kind"] != "baseline"} == {"connected"}
+    assert "cambox=cam3" in (p["run"] / "matrix.conf").read_text()
+
+
+def test_every_soak_camera_parked_falls_back_to_the_first_and_says_so(rig):
+    env, p = rig
+    r = _matrix(dict(env, AV_MATRIX_KINDS="cambox", AV_MATRIX_REPEATS="1",
+                     FAKE_PARKED="cam1 cam3"), "--run")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _restart_kinds(p["log"]) == [("cambox", CAM1)]
+    assert "no soak camera's strih input is connected" in r.stdout
+    assert "CAVEAT" in r.stdout, "a PASS on a parked receiver says so under the verdict"
+
+
+def test_a_killed_baseline_window_is_an_abort_not_a_refusal(rig):
+    env, p = rig
+    r = _matrix(dict(env, FAKE_SOAK_RC_MAP="1:137"), "--run")
+    assert r.returncode == 5, r.stdout + r.stderr
+
+
+def test_a_window_the_soak_stopped_prints_no_shell_noise(rig):
+    env, p = rig
+    r = _matrix(dict(env, FAKE_SOAK_STOP_WINDOW="2"), "--run")
+    assert r.returncode == 2
+    assert "No such file" not in r.stdout + r.stderr
+
+
+def test_one_unreadable_painter_probe_is_retried_not_a_mode_change(rig):
+    env, p = rig
+    r = _matrix(dict(env, AV_MATRIX_KINDS="cambox", AV_MATRIX_REPEATS="1",
+                     FAKE_PAINTER_UNREADABLE_AFTER_WINDOWS="1", FAKE_PAINTER_UNREADABLE_TIMES="1"),
+                "--run")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _restart_kinds(p["log"]) == [("cambox", CAM1)]
+
+
+def test_a_painter_that_stays_unreadable_stops_the_run_as_unreadable(rig):
+    env, p = rig
+    r = _matrix(dict(env, AV_MATRIX_KINDS="cambox", AV_MATRIX_REPEATS="1",
+                     FAKE_PAINTER_UNREADABLE_AFTER_WINDOWS="1"), "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert _restart_kinds(p["log"]) == []
+    assert "unreadable" in r.stdout and "left TEST mode" not in r.stdout

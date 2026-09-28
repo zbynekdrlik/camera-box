@@ -390,3 +390,27 @@ def test_grade_window_cli_prints_the_verdict_for_the_orchestrator(tmp_path):
 @pytest.mark.parametrize("kind", ["strih-obs", "cambox", "dantesync", "stream-obs"])
 def test_the_four_restart_kinds_are_declared_once(kind):
     assert kind in m.KINDS
+
+
+def test_a_pass_on_parked_or_unread_receivers_carries_a_caveat_in_the_verdict_and_the_json(tmp_path):
+    d = make_matrix(tmp_path, extra={("cambox", 1): {"receiver": "parked"},
+                                     ("cambox", 2): {"receiver": "unread"},
+                                     ("cambox", 3): {"receiver": "connected"}})
+    rep = m.evaluate_dir(str(d), BOUNDS)
+    assert rep["verdict"] == m.PASS
+    assert len(rep["caveats"]) == 1 and "cambox" in rep["caveats"][0]
+    assert "parked 1" in rep["caveats"][0] and "unread 1" in rep["caveats"][0]
+    text = m.render_text(rep)
+    lines = text.splitlines()
+    v = next(i for i, line in enumerate(lines) if "VERDICT: PASS" in line)
+    assert "CAVEAT" in lines[v + 1], "the caveat sits right under the verdict"
+    r = report(d, "--json", str(d / "report.json"))
+    assert r.returncode == 0
+    assert json.loads((d / "report.json").read_text())["caveats"] == rep["caveats"]
+
+
+def test_connected_receivers_carry_no_caveat(tmp_path):
+    d = make_matrix(tmp_path, extra={("cambox", r): {"receiver": "connected"} for r in (1, 2, 3)})
+    rep = m.evaluate_dir(str(d), BOUNDS)
+    assert rep["caveats"] == []
+    assert "CAVEAT" not in m.render_text(rep)
