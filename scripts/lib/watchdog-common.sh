@@ -16,20 +16,15 @@
 # netreach_box_alerted, and CURL_TIMEOUT / BUNDLE_PORT / BUNDLE_PATH before fetch_bundle_json. All
 # are read at CALL time, never at source time.
 #
-# errexit: write_state_field is NOT `set -e` safe -- its `[ -f ] && existing="$(grep -v ...)"`
-# returns non-zero when the file holds only that one key, which `set -e` turns into an exit (the
-# helpers are moved verbatim). Every watchdog that calls this copy runs without -e. Three watchdogs
-# DO run with errexit on at call time, because a lib they source turns it on and `set -uo pipefail`
-# never clears it: avsync-heartbeat (lib/avsync-heartbeat.sh), imag-obs (imag-obs-reachability.sh,
-# imag-obs-restart-storm.sh) and obs-session (win-ssh-exec.sh). They call only read_state_field from
-# here, which is -e safe, and keep their own write_state_field -- never point them at this copy
-# before they clear -e or this copy is made -e safe.
+# errexit: every helper here is `set -e` safe (the watchdogs run without -e; a lib that turned it on
+# is cleared right after the source block, and tests/python/test_watchdog_errexit_1386.py pins that).
 #
 #   read_state_field <key> <default>   -> the LAST `<key>=` value in $STATE_FILE, else <default>
-#   write_state_field <key> <value>    -> replace <key>'s line in $STATE_FILE (one line per key);
-#                                         the other keys are read into memory BEFORE any file is
-#                                         opened for writing, so even the mktemp-failure fallback
-#                                         never drops them
+#   write_state_field <key> <value>    -> replace <key>'s line in $STATE_FILE (one line per key),
+#                                         the other keys kept in order. Always returns 0: a pass
+#                                         never ends on a state write. A failure is reported on
+#                                         stderr (the journal), never silent, and never costs the
+#                                         other keys -- see the function's own comment
 #   clear_throttle                     -> reset confirm / alert_sig / alert_passes
 #   clear_box_throttle <box>           -> the same three fields suffixed _<box>
 #   clear_source_throttle <key>        -> the same three fields suffixed _<key> (a source_key)
@@ -68,24 +63,48 @@ read_state_field() {
   printf '%s' "${v:-$default}"
 }
 write_state_field() {
-  local key="$1" val="$2" tmp existing=""
+  # The one state write of the dev1 watchdogs (issue 1386):
+  #   * the OTHER keys are read into memory BEFORE any file is opened for writing -- the older copy's
+  #     `tmp=$STATE_FILE` fallback truncated the file before grep read it and kept only this key;
+  #   * a state file grep cannot read (exit > 1) is left alone -- rewriting it would drop every key
+  #     we could not read;
+  #   * the new content goes to a mktemp file and is renamed over the state file only when the write
+  #     succeeded, so a full disk (mktemp needs an inode, the write a block) never replaces the state
+  #     with an empty or partial file;
+  #   * mktemp unavailable: rewrite the state file in place from the captured keys (not atomic, so it
+  #     is reported). Skipping the write instead would freeze every confirm counter, and the watchdog
+  #     could never page;
+  #   * every failure prints one ERROR line on stderr (the journal) and the call returns 0: a watchdog
+  #     pass never dies on a state write.
+  local key="$1" val="$2" tmp="" existing="" content why="" rc=0
   mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  # Read the OTHER keys into memory FIRST, before any file is opened for writing -- so even the
-  # mktemp-failure fallback (a direct rewrite of STATE_FILE) can never truncate-before-read and drop
-  # them (the older `tmp=$STATE_FILE` fallback has exactly that latent state-loss bug: a failed
-  # mktemp truncates STATE_FILE via the redirect before `grep` reads it, collapsing it to the one
-  # written key and losing every alerted_ latch).
-  [ -f "$STATE_FILE" ] && existing="$(grep -v "^${key}=" "$STATE_FILE" 2>/dev/null)"
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || true)"
-  if [ -n "$tmp" ]; then
-    { [ -n "$existing" ] && printf '%s\n' "$existing"; printf '%s=%s\n' "$key" "$val"; } \
-      > "$tmp" 2>/dev/null || true
-    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-  else
-    # mktemp unavailable: `existing` is already captured, so a direct (non-atomic) rewrite is safe.
-    { [ -n "$existing" ] && printf '%s\n' "$existing"; printf '%s=%s\n' "$key" "$val"; } \
-      > "$STATE_FILE" 2>/dev/null || true
+  if [ -f "$STATE_FILE" ]; then
+    existing="$(grep -v "^${key}=" "$STATE_FILE" 2>/dev/null)" || rc=$?
   fi
+  if [ "$rc" -gt 1 ]; then
+    why="could not read the other keys (grep exit $rc); the state file is left as it was"
+  else
+    content="${key}=${val}"
+    [ -z "$existing" ] || content="${existing}"$'\n'"${content}"
+    tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null)" || tmp=""
+    if [ -n "$tmp" ]; then
+      if ! { printf '%s\n' "$content" > "$tmp"; } 2>/dev/null || ! mv -f "$tmp" "$STATE_FILE" 2>/dev/null; then
+        rm -f "$tmp" 2>/dev/null || true
+        why="the temp write or rename failed; the state file is left as it was"
+      fi
+    else
+      printf '%s [%s] WARNING: mktemp failed next to %s -- rewriting it in place (not atomic)\n' \
+        "$(date '+%Y-%m-%dT%H:%M:%S%z')" "${0##*/}" "$STATE_FILE" >&2
+      if ! { printf '%s\n' "$content" > "$STATE_FILE"; } 2>/dev/null; then
+        why="mktemp failed and the in-place rewrite failed too"
+      fi
+    fi
+  fi
+  if [ -n "$why" ]; then
+    printf '%s [%s] ERROR: state write failed: %s in %s -- %s\n' \
+      "$(date '+%Y-%m-%dT%H:%M:%S%z')" "${0##*/}" "$key" "$STATE_FILE" "$why" >&2
+  fi
+  return 0
 }
 
 # The single-incident watchdogs keep one confirm / throttle triple; the per-box and per-source ones
