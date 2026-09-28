@@ -348,8 +348,11 @@ ndi_discovery_dropin_content() {
 }
 
 # ndi_discovery_dropin_config_dir TEXT -> the NDI_CONFIG_DIR value in a drop-in TEXT, "" if absent.
+# Reads both forms systemd accepts: `Environment=NDI_CONFIG_DIR=/etc/ndi` and the quoted
+# `Environment="NDI_CONFIG_DIR=/etc/ndi"` (a hand-edited drop-in; issue 1389 review round 3).
 ndi_discovery_dropin_config_dir() {
-  printf '%s\n' "$1" | grep -oE '^Environment=NDI_CONFIG_DIR=[^[:space:]]+' | tail -1 | cut -d= -f3- || true
+  printf '%s\n' "$1" | grep -oE '^Environment="?NDI_CONFIG_DIR=[^[:space:]"]+' | tail -1 \
+    | sed -E 's/^Environment="?NDI_CONFIG_DIR=//' || true
 }
 
 # _ndi_discovery_merged_json FILE IPS -> FILE's JSON with ndi.networks.ips = IPS, any
