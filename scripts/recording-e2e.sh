@@ -1121,6 +1121,15 @@ STRIH_LINUX_GATE_ARG=""
 if [ "$(strih_platform "$STRIH")" = "linux" ]; then
   STRIH_LINUX_GATE_ARG="1"
 fi
+# issue 1357: the Windows OBS-box baseline (power plan, sleep, hibernate, USB selective suspend, WER)
+# of the obs-fleet `win-baseline` boxes (stream, resolume -- resolume SKIPPED while away), gathered
+# ONCE here and handed to the gate below as REPORT-ONLY rows that never change its verdict. The
+# helper never fails the run: a drift, an unread box, a hung gather or a crashed check is one log
+# line. It fills WIN_BASELINE_GATE_ARGS (empty when nothing was read), expanded nounset-safe into
+# BOTH gate invocations. Tests: tests/python/test_e2e_win_baseline_1357.py.
+# shellcheck source=scripts/lib/e2e-win-baseline.sh
+. "$HERE/lib/e2e-win-baseline.sh"
+e2e_win_baseline_gather "$OUTDIR/win-baseline"
 # ALWAYS pass --win-state for strih AND stream (NOT conditional on the file existing): an absent file
 # is UNKNOWN -> the gate REFUSES, never a silent pass with a box's build unverified.
 # issue 1164: when imag is acked offline, invoke the gate WITHOUT the imag SHA / manifest / bytes
@@ -1134,6 +1143,7 @@ if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
     --win-state "strih=$VERSION_STRIH_STATE" \
     --win-state "stream=$VERSION_STREAM_STATE" \
     --imag-acked-offline "$IMAG_OFFLINE_ACK_REASON" \
+    ${WIN_BASELINE_GATE_ARGS[@]+"${WIN_BASELINE_GATE_ARGS[@]}"} \
     ${STRIH_LINUX_GATE_ARG:+--strih-linux}
 else
 "$HERE/version-integrity-gate.sh" \
@@ -1144,6 +1154,7 @@ else
   --genlock-sha "imag=$IMAG_GENLOCK_SHA" \
   ${AUTO_IMAG_MANIFEST:+--imag-manifest "$AUTO_IMAG_MANIFEST"} \
   ${IMAG_SO_CSV:+--imag-bytes "imag=$IMAG_SO_CSV"} \
+  ${WIN_BASELINE_GATE_ARGS[@]+"${WIN_BASELINE_GATE_ARGS[@]}"} \
   ${STRIH_LINUX_GATE_ARG:+--strih-linux}
 fi
 
