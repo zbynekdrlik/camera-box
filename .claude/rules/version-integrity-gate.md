@@ -3,6 +3,8 @@ paths:
   - "scripts/version-integrity-gate.sh"
   - "scripts/lib/version-integrity-obs-identity.sh"
   - "scripts/lib/version-integrity-vendor-pin.sh"
+  - "scripts/lib/version-integrity-rows.sh"
+  - "scripts/lib/vendor-range.sh"
   - "scripts/bundle_state_gather.py"
   - "scripts/bundle-state-server.py"
   - "tests/version_integrity_gate.rs"
@@ -29,12 +31,56 @@ and REFUSES the run on DRIFT (exit 20) or UNKNOWN (exit 11). Exit-code roll-up i
 `scripts/lib/version-integrity-vendor-pin.sh`. The gate sources both BEFORE its source-guard, so
 sourcing the gate (`run_sourced` in `tests/version_integrity_gate.rs`) still defines every function;
 a new pure facet family goes into its own `scripts/lib/version-integrity-*.sh` the same way, never
-back into the gate body. Proving such a move is behaviour-neutral with zero cargo (Tier-0): `git show
-origin/dev:<gate>` into a scratch `scripts/` copy (its sourced siblings copied alongside), source old
-and new under the tests' `set -uo pipefail; . gate; set +e` shape and diff `declare -f` of every moved
-function + fixture calls of every verdict branch; then execute the gate end-to-end from two scratch
-`scripts/` trees that differ ONLY in the moved files, with the hermetic
-`VERSION_INTEGRITY_GATE_VENDOR_NEWEST/_PENDING` seams, and `cmp` stdout+stderr+exit codes.
+back into the gate body.
+
+**main() = parsing + row calls + verdict (issue 1384, the ~300-line function budget; was ~500).**
+Every per-facet row block is a named `vig_row_*` function, called in the original order:
+per box `vig_row_box_engine` (the drift-guard `--compare` row) then `vig_row_obs_identity`; then
+`vig_row_genlock_parity`, `vig_row_imag_bytes`, `vig_row_vendor_pin`, `vig_row_report_only_boxes`,
+then the baseline rows and the verdict. The contract is written once in the header of
+`scripts/lib/version-integrity-rows.sh`: inputs as arguments where bash allows, and the COUNTED rows
+update main()'s `ok` / `bad` / `unknown` / `unknown_boxes` by bash dynamic scoping (those four names
+must NEVER be declared `local` in a row, or the increments vanish). Every row returns 0, and the
+report-only rows never touch the counters. Placement:
+- a facet's row lives in its family lib (`vig_row_obs_identity`, `vig_row_vendor_pin`);
+- rows without a family go to `version-integrity-rows.sh`;
+- `vig_row_genlock_parity` stays IN THE GATE FILE (below the source-guard, beside
+  `imag_bytes_verdict`), because `tests/drift_guard.rs` reads the gate's TEXT for its two
+  `genlock_parity_consumed_paths "$la"/"$lb" "$strih_linux"` calls. It also reads main()'s
+  `win_state` / `genlock_sha` arrays and appends to main()'s `parity_args`, which
+  `vig_row_vendor_pin` then receives as its arguments.
+
+A NEW facet adds its row as a `vig_row_*` function in its lib plus ONE call line in main(). The
+vendor-pin range helpers are wrappers over the ONE shared `scripts/lib/vendor-range.sh`, which
+drift-guard.sh's `imag_genlock_*` wrap too (`.claude/rules/early-gate-pin-doctrine.md`).
+
+**Proving such a move is behaviour-neutral with zero cargo (Tier-0).**
+- Export the pre-change `scripts/` + `vendor/README.md` (`git archive HEAD scripts vendor/README.md`)
+  into a scratch tree.
+- Source old and new under the tests' `set -uo pipefail; . gate; set +e` shape and diff `declare -f`
+  of every function. Only the intended ones may change.
+- For a row move, also source UNGUARDED copies (drop the source-guard and the trailing `main "$@"`),
+  replace each `vig_row_*` call line in the new `declare -f main` with that function's canonical body
+  (minus its argument/local prologue and `return 0`), and diff the result against the old
+  `declare -f main`. `declare -f` drops comments and normalizes indentation, so only moved local
+  declarations may differ.
+- Execute the gate end-to-end from two scratch trees that differ ONLY in the changed files, over a
+  fixture matrix that reaches every row branch (with the hermetic
+  `VERSION_INTEGRITY_GATE_VENDOR_NEWEST/_PENDING/_AHEAD/_ON_DEV` seams AND without them), and compare
+  stdout + stderr + exit code byte for byte.
+- For the real-git paths, make each scratch tree a `git clone --shared --no-checkout` of the repo.
+  Remove its remote, so the gate's `git fetch origin` fails the same way in both trees. Pin
+  `refs/remotes/origin/{main,dev}` with `update-ref` and extract the scripts into the clone.
+  drift-guard's `genlock_build_sha=` compare path needs `<root>/.git` to be a DIRECTORY, and a
+  worktree's `.git` is a file, so in a worktree that path reads rc 127 and never reaches the helpers.
+- Grep each branch's signature line in the new outputs, so the matrix is not trivially equal.
+- The run for issue 1384 (82 gate cases, 43 drift-guard cases, both helper families over a synthetic
+  two-branch repo and the real history) was byte-identical. The one caveat: a deliberately MISUSED
+  one-argument helper call prints bash's own `$2: unbound variable` with the function's LINE number,
+  which moves with the code, so normalize `line N:` for that stream only.
+- The two covering Rust files, `tests/version_integrity_gate.rs` and `tests/drift_guard.rs`, run
+  locally with plain `rustc --test` + a ~50-line `tempfile` stand-in rlib (`TempDir` / `tempdir()` /
+  `NamedTempFile`), one compile at a time. Recipe: `.claude/rules/ci-testing-gotchas.md`.
 
 ## Two-step facet rollout: opt-in (#756-shape) → ENFORCED (#758-shape)
 

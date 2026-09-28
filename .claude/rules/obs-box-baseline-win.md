@@ -116,9 +116,10 @@ owner sets it. That is an expected report-only row, not a bug.
 - No error message may contain the literal `powercfg /setactive`. The pytest counts the powercfg
   mutating verbs in the whole deploy program and expects exactly one.
 - `deploy-genlock-fleet.sh` is at 975 of its 1000-line budget (asserted in `deploy_genlock_fleet.rs`).
-- `version-integrity-gate.sh` was over its 1000-line budget before this facet (1013 lines). That is
-  why the facet's rendering lives in the lib and the gate only adds the wiring (1022 lines). A split
-  of the gate is a separate refactor for the supervisor to schedule, not part of this facet.
+- The facet's rendering lives in the lib (`win_baseline_report_rows`); the gate only adds the wiring
+  (one option + one call line in main()). The gate was since split (issues 1377 + 1384: facet libs,
+  `vig_row_*` row functions), so a gate row belongs in its lib, never back in main()
+  (`version-integrity-gate.md`).
 - **rig-health:** a reader rc outside 0/11/20 is a crashed reader and always emits a NOTE row,
   even after some box rows. An empty verdict is read as UNKNOWN, and the reader output is decoded
   with `errors="replace"` (OEM-codepage scheme names must not crash the audit).
