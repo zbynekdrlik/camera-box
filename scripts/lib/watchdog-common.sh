@@ -36,9 +36,11 @@
 #   netreach_box_alerted <box>         -> the network-reach watchdog's alerted_<box> field (1 = it
 #                                         has that box CONFIRMED unreachable and paged), 0 when
 #                                         absent -- the no-double-page guard (issue 1001)
-#   fetch_bundle_json <ip>             -> the box's :8899 bundle-state body on stdout, rc 0 only for
+#   fetch_bundle_json <ip> [SEAM_VAR]  -> the box's :8899 bundle-state body on stdout, rc 0 only for
 #                                         a `{`-body (a curl failure or a non-JSON answer is rc 1 =
-#                                         SKIP for that pass, never a false page)
+#                                         SKIP for that pass, never a false page). SEAM_VAR names the
+#                                         caller's own Tier-0 fetch seam (AUDIO_MIXER_FETCH_CMD, ...):
+#                                         when that variable is set, `<its value> <ip>` replaces curl
 #
 # write_state_field has NO local copy anywhere: the sixteen the watchdogs used to carry (the older
 # write-through-the-state-file-on-mktemp-failure copy, the literal-newline read-first variant, the
@@ -49,8 +51,8 @@
 # time, so the throttle helpers here call that copy too):
 #   * read_state_field in ndi-portmap, netcfg-drift, avsync-lineup and vban-rate (a different
 #     local declaration);
-#   * fetch_bundle_json in audio-mixer, genlock-lock and vb-matrix (each with its own *_FETCH_CMD
-#     test seam).
+#   (fetch_bundle_json's per-watchdog *_FETCH_CMD seams live in the lib copy since issue 1386: the
+#   caller passes its seam variable's NAME, so no watchdog keeps a copy of the fetch.)
 # The per-watchdog log() (its tag), the ssh/log probes, the alert send, the recovery decision and the
 # handle_* functions differ per script (by name or by code) and stay local as well.
 # tests/python/test_watchdog_common_1386.py pins the override list.
@@ -149,9 +151,33 @@ netreach_box_alerted() {
 }
 
 fetch_bundle_json() {
-  local ip="$1" body
-  body="$(curl -fsS --max-time "$CURL_TIMEOUT" "http://${ip}:${BUNDLE_PORT}${BUNDLE_PATH}" 2>/dev/null)" \
-    || return 1
+  # SEAM_VAR (optional, $2) is the NAME of the caller's own fetch seam variable, passed per call and
+  # never read from a shared global, so a variable exported for one watchdog can never redirect
+  # another's fetch. Its value runs as `<cmd> <ip>` and its stdout replaces curl: one executable
+  # file path is run as it is (a path may hold spaces), anything else is split into words without
+  # globbing (`bash <fixture>`). A seam exit != 0 reads as unreachable, like a curl failure.
+  local ip="$1" seam_var="${2:-}" seam="" body
+  local -a seam_argv=()
+  if [ -n "$seam_var" ]; then
+    if [[ ! "$seam_var" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+      printf 'fetch_bundle_json: ERROR: seam variable name %q is not a shell variable name\n' \
+        "$seam_var" >&2
+      return 1
+    fi
+    seam="${!seam_var:-}"
+  fi
+  if [ -n "$seam" ]; then
+    if [ -f "$seam" ] && [ -x "$seam" ]; then
+      seam_argv=("$seam")
+    else
+      read -r -a seam_argv <<< "$seam" || true
+    fi
+    [ "${#seam_argv[@]}" -gt 0 ] || return 1
+    body="$("${seam_argv[@]}" "$ip" 2>/dev/null)" || return 1
+  else
+    body="$(curl -fsS --max-time "$CURL_TIMEOUT" "http://${ip}:${BUNDLE_PORT}${BUNDLE_PATH}" 2>/dev/null)" \
+      || return 1
+  fi
   body="${body#"${body%%[![:space:]]*}"}"   # strip leading whitespace (a python-json body carries no
                                             # BOM; a hypothetical BOM'd body fails the {* case -> SKIP,
                                             # the safe direction — never a false page)

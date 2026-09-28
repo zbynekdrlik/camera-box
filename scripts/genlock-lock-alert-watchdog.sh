@@ -97,9 +97,10 @@ STATE_FILE="${GENLOCK_LOCK_ALERT_STATE_FILE:-$_state_default}"
 log() { printf '%s [genlock-lock-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 # -- I/O probe (dev1-local; NOT pure) -----------------------------------------------------------
-# fetch_bundle_json <ip> -> prints the JSON body to stdout and returns 0 iff a 200 with a body that
-# starts with `{` came back. A curl failure or a wedged-but-listening non-JSON answer returns 1
-# (box_reachable=0 for this pass -> SKIP; deferred to #732/#1001).
+# fetch_bundle_json <ip> GENLOCK_LOCK_FETCH_CMD (scripts/lib/watchdog-common.sh) -> prints the JSON
+# body to stdout and returns 0 iff a 200 with a body that starts with `{` came back. A curl failure
+# or a wedged-but-listening non-JSON answer returns 1 (box_reachable=0 for this pass -> SKIP;
+# deferred to #732/#1001).
 #
 # GENLOCK_LOCK_FETCH_CMD (Tier-0 seam): if set, it is an executable invoked as `<cmd> <ip>` whose
 # stdout REPLACES the curl fetch -- so a `--dry-run` against a CAPTURED bundle-state fixture needs no
@@ -107,20 +108,6 @@ log() { printf '%s [genlock-lock-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:
 # fixture"), and a glue harness can stub reachable/unreachable deterministically. The same
 # `<cmd> <ip>`-returns-the-body seam as ndi_halving's NDI_HALVING_PROBE_CMD / vb-matrix's
 # VB_MATRIX_FETCH_CMD. A non-zero exit (or a non-`{` body) still reads as unreachable -> SKIP.
-fetch_bundle_json() {
-  local ip="$1" body
-  if [ -n "${GENLOCK_LOCK_FETCH_CMD:-}" ]; then
-    body="$("$GENLOCK_LOCK_FETCH_CMD" "$ip" 2>/dev/null)" || return 1
-  else
-    body="$(curl -fsS --max-time "$CURL_TIMEOUT" "http://${ip}:${BUNDLE_PORT}${BUNDLE_PATH}" 2>/dev/null)" \
-      || return 1
-  fi
-  body="${body#"${body%%[![:space:]]*}"}"   # strip leading whitespace
-  case "$body" in
-    \{*) printf '%s' "$body"; return 0 ;;
-    *) return 1 ;;
-  esac
-}
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
 # read_state_field / write_state_field / clear_box_throttle / recovery_latch_fires live in
@@ -143,7 +130,7 @@ handle_box() {
     return 0
   fi
 
-  if body="$(fetch_bundle_json "$ip")"; then
+  if body="$(fetch_bundle_json "$ip" GENLOCK_LOCK_FETCH_CMD)"; then
     reachable=1
   else
     reachable=0

@@ -94,27 +94,12 @@ STATE_FILE="${VB_MATRIX_ALERT_STATE_FILE:-$_state_default}"
 log() { printf '%s [vb-matrix-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 # -- I/O probe (dev1-local; NOT pure) -----------------------------------------------------------
-# fetch_bundle_json <ip> -> prints the JSON body to stdout and returns 0 iff a 200 with a body
-# that starts with `{` came back. A curl failure or a wedged-but-listening non-JSON answer returns
-# 1 (box_reachable=0 for this pass -> SKIP; deferred to #732/#1001). Overridable via
+# fetch_bundle_json <ip> VB_MATRIX_FETCH_CMD (scripts/lib/watchdog-common.sh) -> prints the JSON
+# body to stdout and returns 0 iff a 200 with a body that starts with `{` came back. A curl failure
+# or a wedged-but-listening non-JSON answer returns 1 (box_reachable=0 for this pass -> SKIP;
+# deferred to #732/#1001). Overridable via
 # VB_MATRIX_FETCH_CMD (run with <ip>, stdout = the bundle-state JSON body) for a --dry-run smoke
 # test or the Tier-0 harness -- same seam convention as asio-starve's ASIO_STARVE_PROBE_CMD.
-fetch_bundle_json() {
-  local ip="$1" body
-  if [ -n "${VB_MATRIX_FETCH_CMD:-}" ]; then
-    body="$($VB_MATRIX_FETCH_CMD "$ip" 2>/dev/null)" || return 1
-  else
-    body="$(curl -fsS --max-time "$CURL_TIMEOUT" "http://${ip}:${BUNDLE_PORT}${BUNDLE_PATH}" 2>/dev/null)" \
-      || return 1
-  fi
-  body="${body#"${body%%[![:space:]]*}"}"   # strip leading whitespace (a python-json body carries no
-                                            # BOM; a hypothetical BOM'd body fails the {* case -> SKIP,
-                                            # the safe direction — never a false page)
-  case "$body" in
-    \{*) printf '%s' "$body"; return 0 ;;
-    *) return 1 ;;
-  esac
-}
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
 # read_state_field / write_state_field / clear_box_throttle / recovery_latch_fires live in
@@ -129,7 +114,7 @@ fetch_bundle_json() {
 handle_box() {
   local box="$1" ip="$2" body reachable verdict running name pid start analyze_out
 
-  if body="$(fetch_bundle_json "$ip")"; then
+  if body="$(fetch_bundle_json "$ip" VB_MATRIX_FETCH_CMD)"; then
     reachable=1
   else
     reachable=0

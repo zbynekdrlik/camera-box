@@ -39,9 +39,8 @@ ALLOWED_OVERRIDES = {
     # test_the_state_write_lives_only_in_the_lib)
     "read_state_field": {"ndi-portmap-alert-watchdog.sh", "netcfg-drift-alert-watchdog.sh",
                          "avsync-lineup-alert-watchdog.sh", "vban-rate-alert-watchdog.sh"},
-    # each with its own *_FETCH_CMD test seam
-    "fetch_bundle_json": {"audio-mixer-alert-watchdog.sh", "genlock-lock-alert-watchdog.sh",
-                          "vb-matrix-alert-watchdog.sh"},
+    # fetch_bundle_json has NO override: the *_FETCH_CMD seams of audio-mixer, genlock-lock and
+    # vb-matrix are the lib's SEAM_VAR argument (see the fetch seam tests below)
 }
 
 _DEF_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{\s*$")
@@ -317,6 +316,72 @@ def test_the_recovery_decision_lives_only_in_the_lib():
     callers = [p.name for p in _watchdogs() if "recovery_latch_fires" in p.read_text()]
     assert set(callers) >= {"audio-lag-alert-watchdog.sh", "vb-matrix-alert-watchdog.sh",
                             "genlock-lock-alert-watchdog.sh", "render-freeze-alert-watchdog.sh"}
+
+
+# -- fetch_bundle_json and the per-watchdog *_FETCH_CMD seam ------------------------------------
+
+def _fetch_env(tmp_path, curl_body='{"from":"curl"}'):
+    fakebin = tmp_path / "bin"
+    _stub(fakebin, "curl", f"printf '%s' '{curl_body}'\n")
+    return (f'PATH="{fakebin}:$PATH"\nCURL_TIMEOUT=5\nBUNDLE_PORT=8899\nBUNDLE_PATH=/bundle-state.json\n')
+
+
+def _fetch(tmp_path, body):
+    return _run(tmp_path, _fetch_env(tmp_path) + body)
+
+
+def test_fetch_without_a_seam_reads_the_box_with_curl(tmp_path):
+    r = _fetch(tmp_path, 'fetch_bundle_json 10.0.0.1; echo " rc=$?"\n')
+    assert r.stdout == '{"from":"curl"} rc=0\n', r.stderr
+
+
+def test_a_seam_is_used_only_when_the_caller_names_it(tmp_path):
+    # An exported seam variable of ANOTHER watchdog never redirects a fetch that does not name it.
+    _stub(tmp_path / "fx", "fetch", 'printf \'{"from":"seam","ip":"%s"}\' "$1"\n')
+    body = (f'export AUDIO_MIXER_FETCH_CMD="{tmp_path}/fx/fetch"\n'
+            'fetch_bundle_json 10.0.0.1; echo " rc=$?"\n'
+            'fetch_bundle_json 10.0.0.1 GENLOCK_LOCK_FETCH_CMD; echo " rc=$?"\n'
+            'fetch_bundle_json 10.0.0.2 AUDIO_MIXER_FETCH_CMD; echo " rc=$?"\n')
+    r = _fetch(tmp_path, body)
+    assert r.stdout.split("\n")[:3] == ['{"from":"curl"} rc=0', '{"from":"curl"} rc=0',
+                                        '{"from":"seam","ip":"10.0.0.2"} rc=0'], (r.stdout, r.stderr)
+
+
+def test_a_seam_value_is_one_executable_path_or_a_command_split_into_words(tmp_path):
+    spaced = tmp_path / "a dir"
+    _stub(spaced, "fetch me", 'printf \'{"whole":"%s"}\' "$1"\n')
+    script = tmp_path / "fixture.sh"
+    script.write_text('printf \'{"split":"%s"}\' "$1"\n')          # not executable: run via bash
+    body = (f'X_FETCH_CMD="{spaced}/fetch me"\nfetch_bundle_json 1.2.3.4 X_FETCH_CMD; echo " rc=$?"\n'
+            f'X_FETCH_CMD="bash {script}"\nfetch_bundle_json 1.2.3.5 X_FETCH_CMD; echo " rc=$?"\n')
+    r = _fetch(tmp_path, body)
+    assert r.stdout.split("\n")[:2] == ['{"whole":"1.2.3.4"} rc=0', '{"split":"1.2.3.5"} rc=0'], r.stderr
+
+
+def test_a_failing_or_non_json_seam_reads_as_unreachable_and_leading_space_is_stripped(tmp_path):
+    _stub(tmp_path / "fx", "fail", "printf '{\"x\":1}'; exit 3\n")
+    _stub(tmp_path / "fx", "html", "printf '<html>'\n")
+    _stub(tmp_path / "fx", "spaced", "printf '  \\n {\"ok\":1}'\n")
+    body = ''.join(f'X_FETCH_CMD="{tmp_path}/fx/{n}"\nfetch_bundle_json 1.1.1.1 X_FETCH_CMD; '
+                   'echo " rc=$?"\n' for n in ("fail", "html", "spaced"))
+    body += 'X_FETCH_CMD="   "\nfetch_bundle_json 1.1.1.1 X_FETCH_CMD; echo " rc=$?"\n'
+    r = _fetch(tmp_path, body)
+    assert r.stdout.split("\n")[:4] == [" rc=1", " rc=1", '{"ok":1} rc=0', " rc=1"], (r.stdout, r.stderr)
+
+
+def test_a_bad_seam_name_is_a_loud_skip(tmp_path):
+    r = _fetch(tmp_path, 'fetch_bundle_json 1.1.1.1 "X;rm"; echo " rc=$?"\n')
+    assert r.stdout.strip() == "rc=1" and "not a shell variable name" in r.stderr
+
+
+def test_the_seam_watchdogs_pass_their_own_seam_name():
+    for wd, var in (("audio-mixer-alert-watchdog.sh", "AUDIO_MIXER_FETCH_CMD"),
+                    ("genlock-lock-alert-watchdog.sh", "GENLOCK_LOCK_FETCH_CMD"),
+                    ("vb-matrix-alert-watchdog.sh", "VB_MATRIX_FETCH_CMD")):
+        text = (_SCRIPTS / wd).read_text()
+        assert "fetch_bundle_json" not in _function_blocks(text), f"{wd} keeps its own fetch copy"
+        calls = re.findall(r"fetch_bundle_json \"\$ip\"(?: (\w+))?\)", text)
+        assert calls and all(c == var for c in calls), (wd, calls)
 
 
 def test_every_caller_of_a_lib_helper_can_resolve_it():

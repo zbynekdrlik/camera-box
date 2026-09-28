@@ -85,25 +85,11 @@ STATE_FILE="${AUDIO_MIXER_ALERT_STATE_FILE:-$_state_default}"
 log() { printf '%s [audio-mixer-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 # -- I/O probe (dev1-local; NOT pure) -----------------------------------------------------------
-# fetch_bundle_json <ip> -> prints the JSON body + returns 0 iff a `{`-body came back.
-# AUDIO_MIXER_FETCH_CMD (Tier-0 seam): an executable invoked as `<cmd> <ip>` whose stdout REPLACES
-# the curl fetch, so a --dry-run can replay a captured bundle-state body with no live box (the
-# genlock-lock GENLOCK_LOCK_FETCH_CMD / vb-matrix VB_MATRIX_FETCH_CMD seam). A non-zero exit or a
-# non-`{` body still reads as unreachable -> SKIP.
-fetch_bundle_json() {
-  local ip="$1" body
-  if [ -n "${AUDIO_MIXER_FETCH_CMD:-}" ]; then
-    body="$("$AUDIO_MIXER_FETCH_CMD" "$ip" 2>/dev/null)" || return 1
-  else
-    body="$(curl -fsS --max-time "$CURL_TIMEOUT" "http://${ip}:${BUNDLE_PORT}${BUNDLE_PATH}" 2>/dev/null)" \
-      || return 1
-  fi
-  body="${body#"${body%%[![:space:]]*}"}"   # strip leading whitespace; a non-{ body -> SKIP (safe)
-  case "$body" in
-    \{*) printf '%s' "$body"; return 0 ;;
-    *) return 1 ;;
-  esac
-}
+# fetch_bundle_json <ip> AUDIO_MIXER_FETCH_CMD (scripts/lib/watchdog-common.sh) -> prints the JSON
+# body + returns 0 iff a `{`-body came back. AUDIO_MIXER_FETCH_CMD (Tier-0 seam): an executable
+# invoked as `<cmd> <ip>` whose stdout REPLACES the curl fetch, so a --dry-run can replay a captured
+# bundle-state body with no live box (the genlock-lock GENLOCK_LOCK_FETCH_CMD / vb-matrix
+# VB_MATRIX_FETCH_CMD seam). A non-zero exit or a non-`{` body still reads as unreachable -> SKIP.
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
 # read_state_field / write_state_field live in scripts/lib/watchdog-common.sh.
@@ -220,7 +206,7 @@ handle_box() {
   local -a clock_args=()
   local vverdict events loss_ms dest vage loss_txt
 
-  if body="$(fetch_bundle_json "$ip")"; then reachable=1; else reachable=0; body=""; fi
+  if body="$(fetch_bundle_json "$ip" AUDIO_MIXER_FETCH_CMD)"; then reachable=1; else reachable=0; body=""; fi
   # issue 1385: the previous pass's log head age feeds the log-clock check (AUDIO_MIXER_NOW_EPOCH is
   # the Tier-0 seam for the pass time).
   now_epoch="${AUDIO_MIXER_NOW_EPOCH:-$(date +%s)}"
