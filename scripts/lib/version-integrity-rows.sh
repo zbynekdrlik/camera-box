@@ -17,6 +17,10 @@
 #     through bash dynamic scoping: those four names are main()'s locals and are NEVER declared
 #     local in a row function, so the increments land in main(). A REPORT-ONLY row (the vendor-pin
 #     alarm, the report-only boxes) never touches them.
+#   - The one other shared output: vig_row_genlock_parity APPENDS one LABEL=SHA reading per box to
+#     main()'s parity_args array, which main() declares (`local -a parity_args=()`) right before the
+#     call, and then passes to vig_row_vendor_pin as its arguments. A row that needs it never
+#     declares it local either.
 #   - It prints its rows to stdout (and its SCREAM / engine-error lines to stderr) exactly as the
 #     inline block did, and always returns 0, so main()'s set -euo pipefail never stops on it.
 #   - It may call functions the gate defines after sourcing drift-guard.sh (below its source-guard):

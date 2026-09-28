@@ -497,7 +497,8 @@ main() {
 
   # The fleet rows, in the original order. parity_args (LABEL=SHA per box) is filled by the parity
   # row and read by the vendor-pin alarm; the row functions update ok / bad / unknown /
-  # unknown_boxes above (see vig_row_box_engine's header in scripts/lib/version-integrity-rows.sh).
+  # unknown_boxes above (see the vig_row_* contract in the file header of
+  # scripts/lib/version-integrity-rows.sh).
   local -a parity_args=()
   vig_row_genlock_parity "$imag_acked_offline" "$strih_linux"
   vig_row_imag_bytes "$imag_acked_offline" "$imag_bytes" "$imag_manifest"

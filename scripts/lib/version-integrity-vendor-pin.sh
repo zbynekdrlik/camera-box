@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# airuleset:script-ok source-only lib (functions + one lazy source of scripts/lib/vendor-range.sh, no other top-level statements) -- the sourcing gate owns strict mode; set -euo pipefail here would leak into the sourcing shell (ci-testing-gotchas)
+# airuleset:script-ok source-only lib (functions + one source of scripts/lib/vendor-range.sh, no other top-level statements) -- the sourcing gate owns strict mode; set -euo pipefail here would leak into the sourcing shell (ci-testing-gotchas)
 # scripts/lib/version-integrity-vendor-pin.sh -- the genlock vendor-pin report-only ALARM family of
 # scripts/version-integrity-gate.sh (issues 1137 + 1292), moved out of the gate VERBATIM (issue 1377:
 # the gate was over the repo's 1000-line file budget). No behaviour change: the gate sources this lib
@@ -15,10 +15,11 @@
 # into the gate's exit code). The moved comments were written inside the gate: "main()" there means
 # scripts/version-integrity-gate.sh's main(), whose vendor-pin block is now vig_row_vendor_pin.
 
-if ! command -v vendor_range_lag_log >/dev/null 2>&1; then
-  # shellcheck source=scripts/lib/vendor-range.sh
-  . "${BASH_SOURCE[0]%/*}/vendor-range.sh"
-fi
+# Sourced unconditionally, like drift-guard.sh does: it only defines the three helpers, so the second
+# definition when the gate later sources drift-guard.sh is harmless, and a partial earlier
+# definition can never leave one of them missing.
+# shellcheck source=scripts/lib/vendor-range.sh
+. "${BASH_SOURCE[0]%/*}/vendor-range.sh"
 
 # vendor_pin_range_log REPO_ROOT DEPLOYED_SHA -> prints one `<short-sha> <subject>` line per commit
 # touching vendor/ that origin/main carries and DEPLOYED_SHA's own lineage never received -- the
@@ -91,9 +92,8 @@ vendor_pin_on_dev() {
 # longer false-ALARMs at all. It prints its verdict to STDOUT (tests capture it); vig_row_vendor_pin
 # adds a stderr SCREAM banner on ALARM/UNKNOWN and NEVER folds it into the gate's bad/unknown
 # counters (that is what keeps it report-only). The documented two-step upgrade to a hard-gate is:
-# once the
-# vendored bundle is folded into an auto-deploy that advances with origin/main (the camera-box
-# orphan-PROOF shape), flip the ALARM rows into the gate's bad/unknown roll-up.
+# once the vendored bundle is folded into an auto-deploy that advances with origin/main (the
+# camera-box orphan-PROOF shape), flip the ALARM rows into the gate's bad/unknown roll-up.
 genlock_vendor_pin_verdict() {
   local deployed="$1" newest="$2" pending="$3" ahead="${4:-}" on_dev="${5:-0}"
   if [ -z "$deployed" ]; then
@@ -144,8 +144,8 @@ vig_row_vendor_pin() {
   # NEWEST origin/main commit touching vendor/** and SCREAMS when it lags. It NEVER touches the gate's
   # bad/unknown counters (report-only) -- the coordinated-restart bundle deploy makes a hard block on
   # every E2E too blunt, so #1136's doctrine assigns this component an ALARM (see
-  # genlock_vendor_pin_verdict's header in scripts/lib/version-integrity-vendor-pin.sh for the
-  # two-step upgrade to a hard-gate). Reuses the deployed
+  # genlock_vendor_pin_verdict's header above for the two-step upgrade to a hard-gate). Reuses the
+  # deployed
   # SHAs already gathered in parity_args (no new read). Fail-closed-LOUD on an unreadable pin. Fixture
   # seams for the flow test: VERSION_INTEGRITY_GATE_VENDOR_NEWEST (override the newest vendor HEAD),
   # VERSION_INTEGRITY_GATE_VENDOR_PENDING (override the pending list; set-but-empty = "current"), and

@@ -52,7 +52,8 @@
 #
 # LOG_FORMAT is ONE git-log formatting argument (`--oneline`, or `--format=%h %s` passed as a single
 # word); PATH... is the pathspec (at least one path -- an empty pathspec would silently widen the
-# range to the whole tree, so it is refused with rc 2).
+# range to the whole tree, so it is refused with rc 2). A call with too few arguments returns 2 from
+# every helper instead of dying on an unbound variable under the caller's `set -u`.
 
 # vendor_range_lag_log REPO_ROOT SHA LOG_FORMAT PATH... -> prints `git log LOG_FORMAT
 # $(git merge-base SHA origin/main)..origin/main -- PATH...` (one vendored commit per line that
@@ -84,6 +85,7 @@ vendor_range_ahead_log() {
 # dev candidate line, deployed ahead of main), non-zero otherwise (unreachable, or SHA itself
 # unresolvable); an empty SHA returns 128.
 vendor_range_on_dev() {
+  [ "$#" -ge 2 ] || return 2
   local repo_root="$1" sha="$2"
   [ -n "$sha" ] || return 128
   git -C "$repo_root" merge-base --is-ancestor --end-of-options "$sha" origin/dev 2>/dev/null
