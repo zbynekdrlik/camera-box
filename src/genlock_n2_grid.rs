@@ -242,6 +242,9 @@ mod tests {
         // Off the grid (a wall step): the canvas floor of the processing wall, not the tick read.
         let tw = g + 12_000_000;
         assert_eq!(n2_tick_ns(tw, tw + 1_000_000, I30, false), g);
+        // The processing wall decides, not the tick read: a read 5 ms before the grid point whose
+        // processing runs 1 ms after it floors to the point itself.
+        assert_eq!(n2_tick_ns(g - 5_000_000, g + 1_000_000, I30, false), g);
         assert_eq!(
             n2_tick_ns(g - 1, g - 1, I30, false),
             tick(10),

@@ -425,6 +425,12 @@ pub mod genlock_grid_bench;
 // its N>=2 ticks here.
 pub mod genlock_n2_grid;
 
+// Issue 1367 slice D1 — the 60-into-30 two-clock bench of the grid-exact N>=2 conveyor: seven
+// cameras with the arrival lag measured on strih-lx 28.9.2026, random receiver restarts; every
+// camera presents the same frame on every restart. Test-only.
+#[cfg(test)]
+mod genlock_n2_grid_bench;
+
 // Issue 1372 — the ONE wall-step detector of the genlock render tick: a coordinated dantesync fleet
 // DATE step (the wall moves, the media clock does not) re-grids the tick in ONE tick instead of the
 // 2 ms/tick slew-back that left the tick and the sender's floored stamps off phase. Crate-root +
