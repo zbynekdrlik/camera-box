@@ -163,18 +163,24 @@ out of each step's `foreach (... in @(...))`.
     union, whitespace collapsed, comments kept) and `Get-DockBody $output '<sig>'` (brace-balanced).
   - Both read `sync-test-output.cpp` plus every `sync-test-output-*.cpp` / `-*.hpp`, in ordinal
     file-name order. The public `sync-test-output.hpp` (the dock UI's interface) is not read.
-  - Both body extractors FAIL when a signature occurs more than once in the union, so a signature
-    in a declaration or a comment can never silently win over the definition.
+  - Both body extractors FAIL when a signature occurs more than once in the text they are given,
+    so a second spelling can never silently win over the definition. They count in different
+    text: `unique_body_of` in what the Rust test passes (the comment-stripped union for the tests
+    that strip comments), `Get-DockBody` in the union with comments KEPT. So the pwsh one is the
+    stricter: a named signature spelled in a comment fails only there. Declarations are safe in
+    both because they carry no parameter names.
   - A function MOVING between the output files therefore never breaks an anchor: the pwsh
     mutation run moved `cb_audio_forget_lock` to the video file and every step stayed green.
-- **Never read one output file on its own.** A new anchor uses the helpers. Never add a
-  `Get-Content "vendor/av-sync-dock/src/sync-test-output…"` or a Rust path literal to one output
-  file. `tests/av_sync_dock_output_sources_1386.rs` fails on both, and it also pins:
+- **Never read one output file on its own.** A new anchor uses the helpers. A workflow line
+  that names one output file (`sync-test-output.` or `sync-test-output-`, in any quote style or
+  API) and a Rust path literal to one output file both fail
+  `tests/av_sync_dock_output_sources_1386.rs`, which also pins:
   - the union's `.cpp` set equals the `src/sync-test-output*.cpp` entries of `PLUGIN_SOURCES` in
     `vendor/av-sync-dock/CMakeLists.txt`, so a new TU is compiled AND read;
   - every TU includes the internal header, then `plugin-macros.generated.h` (the `blog` wrapper),
     then opens the namespace;
-  - the pwsh twin keeps the same file rule.
+  - the pwsh twin's whole `Where-Object { … }` file filter, verbatim, next to the Rust
+    `is_output_file` table: a clause changed on one side only fails.
 - **Verify locally (Tier-0)**, since the first compile of this C++ is CI's "Compile-check
   av-sync-dock":
   - `g++ -std=c++17 -fsyntax-only -Wall -Wextra` each TU with the two stub headers
@@ -193,3 +199,8 @@ out of each step's `foreach (... in @(...))`.
     / `clippy-driver -D warnings`, and cover the others with a Python replica of their exact
     needles (the owner's limit on local test runs).
   The dock change is live only after a FULL-bundle Windows deploy (`rig-state-inspection.md`).
+- **Size budget.** At the split `sync-test-output-audio.cpp` is 1021 lines and
+  `st_raw_audio_camera_box` about 297 (their bodies unchanged). The next addition to the audio
+  path first moves norihiro's demod into its own TU: `operator-`, `int16_to_complex`,
+  `identify_audio_index_max`, `crc4_check`, `st_raw_audio_decode_data`,
+  `st_raw_audio_test_preamble` and the non-camera-box tail of `st_raw_audio`.

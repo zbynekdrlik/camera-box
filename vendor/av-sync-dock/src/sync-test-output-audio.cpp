@@ -28,12 +28,12 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 
 namespace av_sync_output {
 
-std::pair<int32_t, int32_t> operator-(std::pair<int32_t, int32_t> a, std::pair<int32_t, int32_t> b)
+static std::pair<int32_t, int32_t> operator-(std::pair<int32_t, int32_t> a, std::pair<int32_t, int32_t> b)
 {
 	return std::make_pair(a.first - b.first, a.second - b.second);
 }
 
-std::complex<float> int16_to_complex(std::pair<int32_t, int32_t> x)
+static std::complex<float> int16_to_complex(std::pair<int32_t, int32_t> x)
 {
 	return std::complex<float>((float)x.first / 32768.0f, (float)x.second / 32768.0f);
 }

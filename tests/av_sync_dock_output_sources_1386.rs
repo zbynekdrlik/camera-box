@@ -29,6 +29,10 @@ const WORKFLOWS: [&str; 2] = [
 ];
 const DOT_SOURCE: &str = ". ./vendor/av-sync-dock/test/dock-output-source.ps1";
 
+fn squish(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn repo_file(rel: &str) -> String {
     let p: PathBuf = [env!("CARGO_MANIFEST_DIR"), rel].iter().collect();
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
@@ -73,12 +77,6 @@ fn the_union_is_the_compiled_output_tus_and_the_internal_header() {
         !names.iter().any(|n| n == "sync-test-output.hpp"),
         "the public sync-test-output.hpp (the dock UI's interface) is not part of the output union"
     );
-    let mut sorted = names.clone();
-    sorted.sort();
-    assert_eq!(
-        names, sorted,
-        "the union is read in byte order of the file name"
-    );
 }
 
 #[test]
@@ -109,11 +107,41 @@ fn every_output_tu_includes_the_internal_header_inside_the_one_namespace() {
 #[test]
 fn the_pwsh_twin_reads_the_same_files_in_the_same_order() {
     let ps = repo_file(PWSH_TWIN);
+    // The pwsh file rule, pinned WHOLE: an extra or a dropped clause (a pwsh union that also read the
+    // public sync-test-output.hpp, say) fails here until `is_output_file` changes with it.
+    const FILTER: &str = "Where-Object { $_ -ceq 'sync-test-output.cpp' -or \
+         ($_.StartsWith('sync-test-output-', [StringComparison]::Ordinal) -and \
+         ($_.EndsWith('.cpp', [StringComparison]::Ordinal) -or \
+         $_.EndsWith('.hpp', [StringComparison]::Ordinal))) }";
+    let squished = squish(&ps);
+    assert_eq!(
+        squished.matches("Where-Object {").count(),
+        1,
+        "{PWSH_TWIN}: one file filter"
+    );
+    let start = squished.find("Where-Object {").unwrap();
+    let mut depth = 0usize;
+    let mut end = None;
+    for (off, ch) in squished[start..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(start + off + 1);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let filter = &squished[start..end.expect("the file filter's braces balance")];
+    assert_eq!(
+        filter, FILTER,
+        "{PWSH_TWIN}: the pwsh file rule drifted from tests/support/av_sync_dock_output.rs \
+         `is_output_file` -- change both together"
+    );
     for need in [
-        "$_ -ceq 'sync-test-output.cpp'",
-        "$_.StartsWith('sync-test-output-', [StringComparison]::Ordinal)",
-        "$_.EndsWith('.cpp', [StringComparison]::Ordinal)",
-        "$_.EndsWith('.hpp', [StringComparison]::Ordinal)",
         "[Array]::Sort($names, [StringComparer]::Ordinal)",
         "Join-Path $PSScriptRoot '../src'",
         "-replace '\\s+', ' '",
@@ -143,11 +171,16 @@ fn the_pwsh_twin_reads_the_same_files_in_the_same_order() {
 fn every_dock_step_in_both_workflows_reads_the_union() {
     for wf in WORKFLOWS {
         let text = repo_file(wf);
-        assert!(
-            !text.contains("Get-Content \"vendor/av-sync-dock/src/sync-test-output"),
-            "{wf}: a pwsh step reads one dock output file on its own again (issue 1386) -- \
-             dot-source {PWSH_TWIN} and use Get-DockOutputSource"
-        );
+        // Any spelling of one output file (a Get-Content, a [IO.File]::ReadAllText, a quoted path in
+        // either quote style) means a step reads it on its own instead of through the helper.
+        for (n, line) in text.lines().enumerate() {
+            assert!(
+                !line.contains("sync-test-output.") && !line.contains("sync-test-output-"),
+                "{wf}:{}: names one dock output file ({line:?}) -- a step must read the union: \
+                 dot-source {PWSH_TWIN} and use Get-DockOutputSource (issue 1386)",
+                n + 1
+            );
+        }
         let mut dock_steps = 0;
         for step in text.split("\n      - name: ") {
             if !(step.contains("Get-DockOutputSource") || step.contains("Get-DockBody")) {

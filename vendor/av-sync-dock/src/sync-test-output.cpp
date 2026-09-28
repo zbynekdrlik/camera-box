@@ -220,20 +220,18 @@ static void st_stop(void *data, uint64_t)
 
 } // namespace av_sync_output
 
-using namespace av_sync_output;
-
 extern "C" void register_sync_test_output()
 {
 	struct obs_output_info info = {};
 	info.id = OUTPUT_ID;
 	info.flags = OBS_OUTPUT_AV;
-	info.get_name = st_get_name;
-	info.create = st_create;
-	info.destroy = st_destroy;
-	info.start = st_start;
-	info.stop = st_stop;
-	info.raw_video = st_raw_video;
-	info.raw_audio = st_raw_audio;
+	info.get_name = av_sync_output::st_get_name;
+	info.create = av_sync_output::st_create;
+	info.destroy = av_sync_output::st_destroy;
+	info.start = av_sync_output::st_start;
+	info.stop = av_sync_output::st_stop;
+	info.raw_video = av_sync_output::st_raw_video;
+	info.raw_audio = av_sync_output::st_raw_audio;
 
 	obs_register_output(&info);
 }

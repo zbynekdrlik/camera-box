@@ -231,12 +231,12 @@ av-sync-dock: UNLOCKED last_offset=<ms>ms source=cluster
 dropped in commit `56079f033`** ("drop misleading idx from audit log... the audit-log push() runs
 on EVERY CRC-4-accepted marker candidate... the idx8 printed alongside a LOCKED/UPDATED line was
 not reliably 'the frame this lock belongs to'"). The three lines above are the CURRENT,
-authoritative format — verified against the live `sync-test-output.cpp` glue, not just the doc.
+authoritative format — verified against the live `sync-test-output-audio.cpp` glue, not just the doc.
 
 `camerabox::CbLockAuditTracker` (`vendor/av-sync-dock/src/camera-box-audio.hpp`, pure/OBS-free)
 owns the transition classification (Locked/Updated/Unlocked, with an "Updated" only firing when
 the offset moves beyond a stable tolerance so a healthy lock doesn't spam a line every marker);
-`sync-test-output.cpp`'s glue is a thin `push()` + `blog()` switch. TDD'd the SAME twin-harness way
+`sync-test-output-audio.cpp`'s glue is a thin `push()` + `blog()` switch. TDD'd the SAME twin-harness way
 as the cluster estimator itself: `tests/av_sync_dock_audit_log.rs` compiles+runs a tiny
 `c++ -std=c++17` program against the real header — reuse this pattern for any FUTURE dock logic
 that needs RED→GREEN proof without a rig.
@@ -551,7 +551,7 @@ display `-57.1 ms "Audio early"`, log offsets wandering +20..+47ms, lock/unlock 
 The `-57.1 ms "Audio early"` reading above turned out to be a REAL, provable bug, not (only)
 churn: `git show <953-commit> -- vendor/av-sync-dock/src/sync-test-dock.cpp` was EMPTY — #953's
 gate-convention negation (`cb_dock_lock_display_offset_ms()`) only ever got applied at the
-`blog()` call sites inside `st_raw_audio_camera_box` (`sync-test-output.cpp`'s LOCKED/UPDATED/
+`blog()` call sites inside `st_raw_audio_camera_box` (`sync-test-output-audio.cpp`'s LOCKED/UPDATED/
 UNLOCKED/SUGGESTED log lines). The dock's own on-screen "Latency" QLabel is a COMPLETELY SEPARATE
 code path (`SyncTestDock::on_sync_found` in `sync-test-dock.cpp`, driven by the `sync_index`
 calldata struct) that #953 never touched — it kept displaying the RAW, un-converted
