@@ -421,7 +421,7 @@ pub mod genlock_grid_bench;
 // 30 fps strih canvas) presents the stamp `grid_floor(T − 50 ms − pin, canvas / N)` at render tick
 // T — a pure function of the tick and the pin, so every camera lands on the same frame after every
 // restart. Crate-root + std-only (Tier-0); the C `genlock_n2_*` block in obs-source.c is held
-// identical by `tests/genlock_relock_selection_parity.rs`, and the probe `ReleaseCadence` delegates
+// identical by `tests/genlock_n2_grid_parity_1367.rs`, and the probe `ReleaseCadence` delegates
 // its N>=2 ticks here.
 pub mod genlock_n2_grid;
 

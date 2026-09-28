@@ -36,9 +36,13 @@
 //! never reach this module.
 //!
 //! The C port is the contiguous `genlock_n2_*` block in `vendor/obs-studio/libobs/obs-source.c`;
-//! `tests/genlock_relock_selection_parity.rs` lifts it verbatim and requires byte-identical
+//! `tests/genlock_n2_grid_parity_1367.rs` lifts it verbatim and requires byte-identical
 //! results from the functions here. The probe `ReleaseCadence` (src/probe/genlock.rs) delegates its
 //! N>=2 ticks here. Pure: only [`crate::genlock_grid`], so it is standalone-rustc Tier-0 testable.
+//!
+//! The FIFO drop-cap (`genlock_source_drop_cap`) budgets the grid age too
+//! ([`n2_drop_cap_extra_frames`]): the release keeps `50 ms + pin` of frames queued, rounded up,
+//! which a pin-only cap cannot hold from about 420 ms of pin on.
 
 use crate::genlock_grid::grid_floor_ns;
 

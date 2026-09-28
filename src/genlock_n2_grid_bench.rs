@@ -22,6 +22,16 @@
 //! - with the measured tails, a late target costs only that tick (early, hold or underrun) and the
 //!   next present is back on the grid; the per-camera `n2_early` rate is reported
 //!   (`measured_tails_cost_only_their_own_tick_1367`, run with `--nocapture` for the table).
+//!
+//! The tail rates are an UPPER BOUND, not a prediction. The histogram is sampled per TICK, so one
+//! real stall of several ticks shows as several tail samples; the bench draws every FRAME's lag
+//! independently from it and delivers in order, so every tail draw becomes a stall of its own that
+//! also holds the frames behind it. Its misses (early + holds + underruns) come out about 2-8x the
+//! measured share of tail samples (cam3: 1.9 % against 0.41 %). The expected live `n2_early` rate
+//! is at most the measured share of tail samples per camera (`CAMERA_LAG_PPM` bins 5..=8: cam1
+//! 0.089, cam2 0.126, cam3 0.405, cam4 0.153, cam5 0, cam6 0.050, cam7 0.025 %, pooled 0.097 %),
+//! since a missed target is presented early only when an older frame is still queued — during a
+//! stall the queue runs empty and the tick is an underrun instead.
 
 use crate::genlock_backlog::{
     phase_pinned_deadline, relock_anchor_age_ns, relock_select_nearest,
@@ -400,31 +410,39 @@ mod tests {
 
     /// With the measured tails, a late target costs only its own tick (an early present, a hold
     /// or an underrun — never an off-target grid present, so no phase sticks), and the per-camera
-    /// `n2_early` rate at 66.7 ms is reported (the D1 budget: at most 0.1 % of the ticks).
+    /// `n2_early` rate at 66.7 ms is reported (the D1 budget: at most 0.1 % of the ticks) next to
+    /// the measured share of tail samples. The bench rates are an upper bound (module doc): the
+    /// i.i.d. per-frame draw turns every tail sample into a stall of its own.
     #[test]
     fn measured_tails_cost_only_their_own_tick_1367() {
         let mut rng = Rng(0x0013_67D1_7A11_0928);
-        eprintln!("camera   ticks  on_target  n2_early (rate)  late_holds  underruns  legacy");
+        eprintln!(
+            "camera   ticks  on_target  n2_early (rate)  late_holds  underruns  legacy  \
+             misses (bench, upper bound)  tail samples (measured)"
+        );
         let mut total = CameraRun::default();
         for (name, ppm) in CAMERA_LAG_PPM {
             let lag = LagModel::measured(ppm);
             let restart = S0 + 10_000_000_000 + rng.below(1_000_000_000);
             let r = run_camera(&lag, rng.next(), restart, 54_000); // 30 min
+            let tail: u32 = ppm[4..].iter().sum();
+            let misses = r.early + r.late_holds + r.underruns;
             eprintln!(
-                "{name}   {:>6}  {:>9}  {:>5} ({:.3} %)  {:>10}  {:>9}  {:>6}",
+                "{name}   {:>6}  {:>9}  {:>5} ({:.3} %)  {:>10}  {:>9}  {:>6}  {:>6.3} %  {:>6.3} %",
                 r.ticks,
                 r.on_target,
                 r.early,
                 r.early as f64 * 100.0 / r.ticks as f64,
                 r.late_holds,
                 r.underruns,
-                r.legacy_presents
+                r.legacy_presents,
+                misses as f64 * 100.0 / r.ticks as f64,
+                tail as f64 / 10_000.0
             );
             assert_eq!(
                 r.off_target, 0,
                 "{name}: a late frame moved the phase: {r:?}"
             );
-            let tail: u32 = ppm[4..].iter().sum();
             if tail == 0 {
                 assert_eq!(
                     r.early + r.late_holds + r.underruns,

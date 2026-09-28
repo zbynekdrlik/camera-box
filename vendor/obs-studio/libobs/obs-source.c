@@ -6910,7 +6910,7 @@ static inline bool genlock_n1_tick_is_on_grid(uint64_t tick_wall_ns, uint64_t in
  * is 66.7 ms (four 60 fps frames) and one more source interval of pin is exactly one more frame.
  * ONE fleet constant, never a per-box number. The block is PURE (stdint + the per-second grid +
  * the queue) and CONTIGUOUS, from the struct to the end of genlock_n2_select: the parity gate
- * (tests/genlock_relock_selection_parity.rs) lifts it verbatim against the Rust authority
+ * (tests/genlock_n2_grid_parity_1367.rs) lifts it verbatim against the Rust authority
  * src/genlock_n2_grid.rs -- keep both in lock-step. */
 #define GENLOCK_N2_AGE_BASE_NS 50000000ULL /* 50 ms */
 #define GENLOCK_N2_HOLD 0

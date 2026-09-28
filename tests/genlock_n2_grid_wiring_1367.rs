@@ -165,22 +165,70 @@ fn n2_early_is_on_the_audit_line_and_the_source_1367() {
         internal.contains("uint64_t genlock_n2_early;"),
         "{OBS_INTERNAL}: the n2_early counter field is missing"
     );
-    // The new token must be mutually non-substring with every other audit token.
-    for other in [
+    // The keys of the REAL audit format string: `n2_early=` right after `n1_grows=`, exactly once,
+    // and mutually non-substring with every other key on the line (a `grep -o 'KEY=[0-9]*'` reader
+    // must never read one key for another).
+    let keys = audit_line_keys(&src);
+    assert!(
+        keys.len() > 40,
+        "the genlock-fifo audit format string was not found whole: {keys:?}"
+    );
+    let at: Vec<usize> = keys
+        .iter()
+        .enumerate()
+        .filter(|(_, k)| k.as_str() == "n2_early=")
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        at.len(),
+        1,
+        "n2_early= must be on the audit line once: {keys:?}"
+    );
+    assert_eq!(
+        keys[at[0] - 1],
         "n1_grows=",
-        "stamp_dup=",
-        "stamp_gap=",
-        "converge_sheds=",
-        "late_holds=",
-        "holds=",
-        "relocks=",
-        "dropped_due=",
-    ] {
+        "n2_early= must follow n1_grows= on the audit line"
+    );
+    for other in keys.iter().filter(|k| k.as_str() != "n2_early=") {
         assert!(
-            !"n2_early=".contains(other) && !other.contains("n2_early="),
-            "`n2_early=` collides with `{other}`"
+            !"n2_early=".contains(other.as_str()) && !other.contains("n2_early="),
+            "`n2_early=` collides with the audit key `{other}`"
         );
     }
+}
+
+/// The `key=` tokens of the `genlock-fifo audit` format string, in order: the adjacent string
+/// literals from `"genlock-fifo audit '%s':` to the trailing ticket list, comments dropped.
+fn audit_line_keys(src: &str) -> Vec<String> {
+    let start = src
+        .find("\"genlock-fifo audit '%s':")
+        .unwrap_or_else(|| panic!("{OBS_SOURCE}: the genlock-fifo audit format string is gone"));
+    let end = start
+        + src[start..]
+            .find("\"(#70/")
+            .expect("the audit format string's trailing ticket list");
+    let mut text = String::new();
+    let mut rest = &src[start..end];
+    while let Some(i) = rest.find(['"', '/']) {
+        let tail = &rest[i..];
+        if let Some(body) = tail.strip_prefix("/*") {
+            let close = body
+                .find("*/")
+                .expect("an unterminated comment in the format");
+            rest = &body[close + 2..];
+        } else if let Some(body) = tail.strip_prefix('"') {
+            let close = body
+                .find('"')
+                .expect("an unterminated literal in the format");
+            text.push_str(&body[..close]);
+            rest = &body[close + 1..];
+        } else {
+            rest = &tail[1..];
+        }
+    }
+    text.split_whitespace()
+        .filter_map(|w| w.find('=').map(|e| w[..=e].to_string()))
+        .collect()
 }
 
 /// Review finding (D1): the grid release keeps `50 ms + pin` of frames queued (rounded up to the

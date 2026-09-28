@@ -28,7 +28,7 @@ use std::collections::HashMap;
 /// Field names mirror the log's `key=value` tokens exactly (see [`parse_audit_line`]).
 /// The counters (`received`, `consumed`, `underruns`, `holds`, `overruns`,
 /// `backward_steps`, `backward_regime_ticks`, `dropped_due`, `relocks`, `late_holds`,
-/// `stamp_dup`, `stamp_gap`, `n1_grows`, `empty_run`) are CUMULATIVE
+/// `stamp_dup`, `stamp_gap`, `n1_grows`, `n2_early`, `empty_run`) are CUMULATIVE
 /// since the source was created — they only ever increase — so a per-run answer needs the
 /// DELTA between the first and last sample of a captured window ([`summarize`]), never the
 /// raw value alone. `ts_head_skew_ms` is an instantaneous per-tick value, not cumulative.
@@ -112,6 +112,12 @@ pub struct AuditSample {
     /// `converge_sheds=` on a shallow source is the known late-label residual of that hold. Absent
     /// on older logs — parses as 0.
     pub n1_grows: u64,
+    /// issue 1367 slice D1 — CUMULATIVE N>=2 EARLY presents (`n2_early=`): a tick of the grid-exact
+    /// N>=2 release (a strih camera, 60 into 30) whose target frame had not arrived presented the
+    /// frame before it, for that tick only. The budget: at most 0.1 % of the ticks over an hour; a
+    /// climbing rate means the camera's arrival lag exceeds 50 ms + the pin. Flat on an N==1 source.
+    /// Absent on older logs — parses as 0.
+    pub n2_early: u64,
 }
 
 /// Parse ONE `genlock-fifo audit` log line into an [`AuditSample`].
@@ -196,6 +202,7 @@ pub fn parse_audit_line(line: &str) -> Option<AuditSample> {
             "stamp_dup" => set!(stamp_dup),
             "stamp_gap" => set!(stamp_gap),
             "n1_grows" => set!(n1_grows),
+            "n2_early" => set!(n2_early),
             _ => {}
         }
     }
@@ -258,6 +265,9 @@ pub struct AuditSummary {
     /// issue 1367 — window delta of the N==1 depth holds (0 on older logs). A steady window must
     /// read 0; a non-zero value outside a restart settle is a misfiring depth rule.
     pub delta_n1_grows: u64,
+    /// issue 1367 slice D1 — window delta of the N>=2 early presents (0 on older logs and on N==1
+    /// sources). Divide by the window's ticks for the rate the 0.1 % budget is read against.
+    pub delta_n2_early: u64,
     /// Largest `|ts_head_skew_ms|` observed across the window — the worst-case arrival
     /// jitter this reserve had to absorb.
     pub max_abs_head_skew_ms: i64,
@@ -312,6 +322,7 @@ pub fn summarize(samples: &[AuditSample]) -> Option<AuditSummary> {
         delta_stamp_dup: last.stamp_dup.saturating_sub(first.stamp_dup),
         delta_stamp_gap: last.stamp_gap.saturating_sub(first.stamp_gap),
         delta_n1_grows: last.n1_grows.saturating_sub(first.n1_grows),
+        delta_n2_early: last.n2_early.saturating_sub(first.n2_early),
         max_abs_head_skew_ms,
         mean_abs_head_skew_ms,
         mean_head_skew_ms,
@@ -899,6 +910,28 @@ mod tests {
         );
     }
 
+    /// issue 1367 slice D1 — the N>=2 early-present counter: parsed from its token (printed right
+    /// after `n1_grows=` by the vendored audit line), 0 on an older line, window-delta'd.
+    #[test]
+    fn n2_early_parses_defaults_and_deltas_1367() {
+        let line = SAMPLE_LINE_CAM1.replace(
+            "wall_qpc_drift_ms=-252 ",
+            "wall_qpc_drift_ms=-252 stamp_dup=7 stamp_gap=9 n1_grows=2 n2_early=5 ",
+        );
+        let s = parse_audit_line(&line).expect("a D1 line parses");
+        assert_eq!((s.n1_grows, s.n2_early), (2, 5));
+        let old = parse_audit_line(SAMPLE_LINE_CAM1).expect("an older line still parses");
+        assert_eq!(old.n2_early, 0);
+        let later = parse_audit_line(&line.replace("n2_early=5", "n2_early=9")).unwrap();
+        let sum = summarize(&[s, later]).unwrap();
+        assert_eq!(sum.delta_n2_early, 4);
+        assert_eq!(
+            (sum.delta_n1_grows, sum.delta_holds),
+            (0, 0),
+            "an early present is neither an N==1 depth hold nor a benign hold"
+        );
+    }
+
     /// #1355 — the two new keys are mutually non-substring with every key the input-side parser
     /// already matches, so no existing token can be mis-read as one of them or vice versa.
     #[test]
@@ -933,8 +966,9 @@ mod tests {
             "audio_delay_ms",
             "audio_pairing_offset_ms",
         ];
-        // issue 1367 adds `n1_grows` — deliberately not `*_holds`, which would contain `holds`.
-        for new in ["stamp_dup", "stamp_gap", "n1_grows"] {
+        // issue 1367 adds `n1_grows` — deliberately not `*_holds`, which would contain `holds` —
+        // and slice D1 `n2_early`.
+        for new in ["stamp_dup", "stamp_gap", "n1_grows", "n2_early"] {
             for old in existing {
                 assert!(
                     !old.contains(new) && !new.contains(old),
