@@ -1509,17 +1509,23 @@ fails instead of passing.
 ## Emitted PowerShell can be RUN locally, not only read as text (issue 1372)
 
 Several libs emit Windows PowerShell as text (the dantesync upgrade/tray programs, genlock deploy
-programs). There is no pwsh on dev1, so their tests read that text. That misses logic bugs; live
-case: a first cut that raced a relaunched tray, and a lock violation called "untouched".
+programs). Their tests used to read that text only. That misses logic bugs; live case: a first
+cut that raced a relaunched tray, and a lock violation called "untouched".
 
 To run the text locally:
-- Unpack the `powershell-7.x-linux-x64` release tarball into the scratchpad.
+- dev1 has a portable pwsh 7 at `~/.local/pwsh74/pwsh` (not on PATH; the worktree guard refuses a
+  direct `pwsh` call, so drive it from a `bash /abs/script.sh` file). Elsewhere, unpack the
+  `powershell-7.x-linux-x64` release tarball into the scratchpad.
 - Dot-source the emitted program from a harness that defines `[CmdletBinding()]` stub FUNCTIONS
   for the cmdlets it calls. A function outranks the cmdlet.
 - Model the node's state in the stubs.
 - Parse the full program with `[System.Management.Automation.Language.Parser]::ParseFile`.
 - Worked example: `tests/pwsh/run_dantesync_tray_swap_1372.sh`. It needs `PWSH`, is not in CI,
   and exits 2 without pwsh; it never skips.
+- **It CAN run in CI (issue 1389).** The `python-tests` job runs on ubuntu-latest, which ships
+  pwsh. `LaptopScriptRun1389` in `tests/python/test_ndi_discovery_1389.py` runs
+  `tests/pwsh/run_ndi_discovery_laptop_1389.sh` with PWSH from env, PATH or `~/.local/pwsh74`, and
+  FAILS when none is found. Use that shape for a new runner.
 
 Limits:
 - pwsh 7 is not Windows PowerShell 5.1. In 5.1, `Get-FileHash` is a script FUNCTION: a read

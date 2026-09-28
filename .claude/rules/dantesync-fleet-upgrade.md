@@ -227,8 +227,9 @@ line 71, mid-paragraph. The header therefore documents `SSH_PASS` without its de
 - **Running the emitted PowerShell, not only reading it: `tests/pwsh/run_dantesync_tray_swap_1372.sh`.**
   The pytest reads the program as text. This runner RUNS it. It is not in CI, and it needs pwsh:
   `PWSH=/path/to/pwsh`, else `pwsh` on PATH. It fails with exit 2 without pwsh, never skips.
-  - dev1 has no pwsh. Unpack the `powershell-7.x-linux-x64.tar.gz` release into a scratch dir and
-    point `PWSH` at it.
+  - dev1 has a portable pwsh at `~/.local/pwsh74/pwsh`: point `PWSH` at it. Elsewhere, unpack the
+    `powershell-7.x-linux-x64.tar.gz` release into a scratch dir. ubuntu-latest ships pwsh, so a
+    pytest wrapper could run this in CI the way issue 1389's `LaptopScriptRun1389` does.
   - The runner emits `dantesync_windows_tray_only_ps` and dot-sources it from
     `tests/pwsh/dantesync_tray_swap_1372.ps1`.
     - That harness defines `[CmdletBinding()]` stub FUNCTIONS for every cmdlet the arm calls. A
