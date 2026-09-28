@@ -10,6 +10,7 @@ paths:
   - "scripts/setup-strih.sh"
   - "scripts/verify-strih.sh"
   - "tests/python/test_ndi_discovery_1342.py"
+  - "tests/python/test_ndi_discovery_1389.py"
   - "tests/pwsh/run_ndi_discovery_laptop_1389.sh"
 ---
 
