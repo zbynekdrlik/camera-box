@@ -536,6 +536,26 @@ def test_the_keepalive_ends_at_the_hold_ceiling(tmp_path, lease):
             os.kill(pid, 15)
 
 
+def test_the_keepalive_gives_up_after_repeated_errors(tmp_path, lease):
+    # rc 2 (a filesystem error, e.g. a vanished script or an unreadable holder.json) is retried, but
+    # never forever outside GitHub Actions: RIG_LEASE_KEEPALIVE_MAX_ERRORS consecutive errors end it
+    _write_holder(lease)
+    pid = _spawn_keepalive(tmp_path, lease, RIG_LEASE_KEEPALIVE_SEC="1",
+                           RIG_LEASE_KEEPALIVE_MAX_ERRORS="2")
+    try:
+        (lease / "holder.json").unlink()
+        (lease / "holder.json").mkdir()  # reading it is an OSError -> rc 2, also as root
+        assert _wait_for(lambda: not _pid_alive(pid), 6), "consecutive errors end the keep-alive"
+    finally:
+        if _pid_alive(pid):
+            os.kill(pid, 15)
+
+
+def test_the_soak_s_error_warning_carries_the_reason():
+    src = open(AV_SOAK).read()
+    assert 'rig_lease_refresh_if_mine "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" 2>&1' in src
+
+
 def test_the_keepalive_needs_an_identity(tmp_path, lease):
     _write_holder(lease)
     script = '. "$LEASE_LIB"\nrig_lease_keepalive_spawn "" ""\n'
