@@ -7,6 +7,8 @@ paths:
   - "scripts/rig-health-audit.py"
   - "tests/python/test_obs_box_baseline_win_1357.py"
   - "tests/python/fixtures/win_baseline_1357/**"
+  - "scripts/lib/e2e-win-baseline.sh"
+  - "tests/python/test_e2e_win_baseline_1357.py"
 ---
 
 # The ONE Windows OBS-box baseline (issue 1357)
@@ -87,9 +89,43 @@ owner sets it. That is an expected report-only row, not a bug.
   bare ssh-reachability probe unsafe to read as "this is resolume". `--out-dir DIR` keeps
   `DIR/<box>.txt`. The test seam is `WIN_BASELINE_FETCH_CMD <box> <host> <out>`.
 - **`version-integrity-gate.sh --win-baseline NAME=FILE`** prints report-only rows
-  (`win_baseline_report_rows`) and never touches bad/unknown/ok. `recording-e2e.sh` does NOT feed it
-  yet. Wiring the gather into `[0/8]` means an ssh + scp to stream on every run, plus the static-anchor
-  discipline for that file.
+  (`win_baseline_report_rows`) and never touches bad/unknown/ok.
+- **The full-path E2E feeds it in `[0/8]`** through `scripts/lib/e2e-win-baseline.sh`, right before
+  the version-integrity gate (the #675 sourced-helper pattern: the call + one array line per gate
+  invocation are the only `recording-e2e.sh` text).
+  - `e2e_win_baseline_gather "$OUTDIR/win-baseline"` runs `win-baseline-check.sh --out-dir` once.
+    It runs under `timeout --kill-after=5 <bound>`, with stdin `/dev/null`, and the output goes to
+    `$OUTDIR/win-baseline/win-baseline-check.log`.
+  - It prints the check's `box=… win_baseline=…` summary lines, then ONE verdict line:
+    `Windows OBS-box baseline: OK | DRIFT | UNKNOWN | TIMEOUT after N s | FAILED (rc N) … (report-only,
+    does NOT block the run …)`.
+  - It always returns 0, so the caller's `set -euo pipefail` never aborts on it.
+- **What it hands the gate:** `WIN_BASELINE_GATE_ARGS` holds `--win-baseline <box>=<dir>/<box>.txt`
+  for every facet box whose gather file exists, in facet order. The check creates a box's file BEFORE
+  its fetch, so an unread or timed-out box still goes to the gate and grades UNKNOWN there. A resolume
+  that is away is SKIPPED by the check and gets no arg. The helper deletes each box's old file first,
+  so a reused `OUTDIR` never grades a stale gather. Both gate invocations (imag acked offline / normal)
+  expand the array with `${WIN_BASELINE_GATE_ARGS[@]+"${WIN_BASELINE_GATE_ARGS[@]}"}`, which is safe
+  under nounset. The line sits BEFORE each invocation's `${STRIH_LINUX_GATE_ARG:+--strih-linux}`
+  tail, so the pinned `--win-state` / `--imag-acked-offline` / `--genlock-sha` sequences and the
+  `--strih-linux` count of 2 (`tests/harness_strih_platform_1351.rs`) are untouched.
+- **Where the rows appear in a run log:** first the helper's lines, just before the gate header; then
+  the gate's `-- Windows OBS-box baseline (issue 1357: report-only, NEVER gates the run) --` block
+  after its fleet rows and before `GATE PASS` / `GATE FAILED` / `GATE INCOMPLETE`.
+- **The bound is sized from the check's own per-box bounds**, never guessed:
+  boxes × (2 × `WIN_BASELINE_SSH_TIMEOUT` (scp + ssh, 20 s each) + `OBS_FLEET_RESOLVE_TIMEOUT` 2 s +
+  `OBS_FLEET_STATUS_TIMEOUT` 4 s) + 10 s = 102 s for stream + resolume. `E2E_WIN_BASELINE_TIMEOUT`
+  overrides it. Values are read base 10, so a leading zero is never read as octal: an octal error
+  inside `$(…)` would abort the caller. GNU `timeout` exits 124 after its TERM and 137 when the
+  `--kill-after` KILL was needed; both read as TIMEOUT. The outer `timeout` signals its whole process group, so the fetch seam and sshpass die
+  with it; each inner `timeout 20 scp/ssh` sits in its own group and ends within its own 20 s.
+- **Cost per run:** one scp + one ssh + one `powershell -File` per home box, a few seconds when the
+  boxes answer. The only write is the check's own gather file on the box
+  (`C:/camera-box-win-baseline-gather.ps1`, overwritten every run).
+- Tests: `tests/python/test_e2e_win_baseline_1357.py` (CI's `pytest tests/python`). Each outcome
+  runs under a `set -euo pipefail` caller, through the fetch seam, with a hung fetch whose process
+  must be gone. The REAL gate `if … fi` block text is run against a stub gate on both branches,
+  with the array set, unset and empty.
 - **`rig-health-audit.py`** `check_win_baseline` emits one NOTE row per read box, naming every
   non-OK item. NOTE rows are never counted.
 
