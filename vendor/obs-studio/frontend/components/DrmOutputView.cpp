@@ -83,7 +83,7 @@ void UpdateMenu()
 }
 
 /* Hold ONE built-in Multiview exactly while the output is active AND the view is MULTIVIEW: a
- * Program view (or no leased output) costs nothing — no extra Multiview, no shown twin scenes. */
+ * Program view (or no leased output) costs nothing — no extra Multiview render. */
 void SyncDrmMultiview()
 {
 	const bool want = obs_drm_output_active() && obs_drm_output_get_view() == OBS_DRM_OUTPUT_VIEW_MULTIVIEW;

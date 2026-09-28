@@ -468,9 +468,10 @@ STOP_RESUME hide path, which joins the receiver thread on the graphics thread).
 
 **One-time live migration (SUPERVISOR).** Steps 1-3 (at least clearing connect-on-show) run BEFORE
 this code lands in dev1's `~/devel/camera-box` checkout -- the enabled dev1 watchdog timers
-(frozen-strih-input / frozen-input / cadence / ndi-halving) run from that checkout and no longer
-SKIP a parked input, so a still-parking main would page as FROZEN -- or stop those four timers across
-the gap. All of it before the first E2E / soak / restart-matrix run on this code (the E2E no longer
+(frozen-strih-input / frozen-input / cadence / ndi-halving, and rig-status-update if enabled: its
+rig-health-audit no longer skips a parked camera's cadence / arrivals-low) run from that checkout and
+no longer SKIP a parked input, so a still-parking main would page -- or stop those timers across the
+gap. All of it before the first E2E / soak / restart-matrix run on this code (the E2E no longer
 holds connect-on-show):
 1. Read first (read-only WS on strih-lx): each `NDI camN` main's `genlock_connect_on_show`; every
    scene whose name starts `MV ` and its private `show_in_multiview` / `camera_box_multiview_target`
@@ -484,7 +485,7 @@ holds connect-on-show):
    ~/.camera-box/connect-on-show-e2e-hold` on strih-lx and `rm -f
    ~/.camera-box/connect-on-show-hold.json` on dev1.
 3. Over WS: set `genlock_connect_on_show: false` on every `NDI camN` (the old DistroAV still parks
-   until step 6); in every scene that references a twin, add each original (`NDI camN` / `<scene>`)
+   until runbook step 6, the FULL-bundle deploy); in every scene that references a twin, add each original (`NDI camN` / `<scene>`)
    at the twin item's transform and enabled state, THEN remove the twin item; set
    `show_in_multiview: true` on every original scene a shown twin stood for.
 4. Remove the twin scenes (`MV Cam 1..7`, `MV Moderatori`, every other `MV <scene>` carrying the
