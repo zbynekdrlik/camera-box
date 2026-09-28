@@ -92,7 +92,8 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   The slot's first-scene cut before StartRecord has two gates: the settled idle read, then the
   rig-busy guard (`the slot-k first-scene cut`). The guard also refuses a recording nobody streams
   (the Companion orphan auto-record, a rehearsal), which the broadcast read does not see; a busy
-  rig there aborts with no cut and nothing to restore.
+  rig there aborts before the cut. In slot 0 nothing is left to restore; in a later slot cleanup
+  still cuts the strih program back to the operator's snapshot (nothing streams).
 - **A recording is started or stopped only on a PROVEN idle rig** (`broadcast_settled`: an
   unreadable read is retried `AV_SOAK_BROADCAST_READS` x `AV_SOAK_BROADCAST_RETRY_S`, default
   3 x 20 s, so one stream OBS restart neither ends an 8 h run nor keeps a recording running).
@@ -150,8 +151,9 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   8 h run had it in 24/25 windows, because the previous slot's last camera stays on program between
   slots. Every slot therefore cuts the strih program to `FIRST_SCENE` (the first line of the ONE
   sweep plan `SWEEP_PLAN`, read once at setup and walked by the sweep and the plan printout too)
-  after the settled idle read and the rig-busy guard, before StartRecord. The E2E has this shape by construction: its [4/8] routes the strih
-  program to the camera under test, which is the first sweep pair. A failed cut is the row
+  after the settled idle read and the rig-busy guard, before StartRecord. The E2E has this shape
+  by construction: its [4/8] routes the strih program to the camera under test, which is the first
+  sweep pair. A failed cut is the row
   `skipped:first_scene_cut_failed`, with nothing started. Never "fix" this in the verdict: a
   backward jump on the SAME counter at window 0's start must stay a real drop
   (`tests/soak_first_cut_burn_domain_1367.rs`, a trimmed real fixture, probe-gated = CI).
