@@ -102,9 +102,20 @@ verdict reads STALE and resets the confirm: the arm is blind, silently.
   two passes; a live log reads young. A head that reads older than `LOG_FROZEN_S` on both passes yet
   aged less than half the pass gap is a log that ADVANCES with its stamps off the gather clock ->
   MISMATCH. The zone offset cancels in the difference, so any offset is caught. A frozen log's daily
-  date wrap (a huge negative change) is OK; passes closer than 60 s or further than 1800 s apart are
+  date wrap (a huge negative change) is OK; passes closer than 60 s or further than 600 s apart are
   UNKNOWN. The orchestrator keeps the previous head age + pass epoch per box in its state file
   (`AUDIO_MIXER_NOW_EPOCH` is the Tier-0 seam for the pass time).
+- **The observer effect (review round 3).** Every `:8899` request opens a local OBS WebSocket
+  connection AFTER the log read (`gather_ndi_inputs`), and obs-websocket logs it at INFO. So a hung
+  OBS whose render and audio threads are stuck but whose WebSocket thread runs reads about one pass
+  gap old on every pass -- the same "advances yet reads old" shape as a zone offset. MISMATCH
+  therefore also needs both heads within a minute of a whole quarter hour (zone offsets are whole
+  quarter hours, 86400 is one too), and the gap bound is 600 s, so a self-written head (at most one
+  gap old) can never sit near 900 s. Such a hang reads STALE and is obs-liveness territory.
+- **Accepted double page:** the same connect lines can also MAKE the STALLED proof. When another
+  `:8899` consumer fetched a few seconds before this pass, a hung OBS with a live WebSocket thread
+  reads live and pages STALLED while obs-liveness pages the hang. The audio really is silent, so
+  the page is true; two effects of one fault, as with BEHIND + VBAN_LOSS.
 - **MISMATCH pages ONCE** after the 2-pass confirm, `⚠️` with a STABLE key
   `audio-mixer-clock-<box>` (a config fault, not an on-air one, so no time-bucketed re-ping); OK
   clears it with a machine-channel RECOVERY line; UNKNOWN holds.

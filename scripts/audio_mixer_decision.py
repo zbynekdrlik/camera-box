@@ -62,9 +62,15 @@ DEFAULT_LOG_LIVE_S = 60
 # graded. FIXED, not the stale override: slack (10 s) + this must stay below the 300 s dev1 pass, so
 # a date-less log dead for days grades its last counts on one pass a day at most.
 DEFAULT_LOG_FROZEN_S = 180
-# The log-clock check needs two passes a sane distance apart (a timer gap resets the judgement).
+# The log-clock check needs two passes a sane distance apart (a timer gap resets the judgement). The
+# upper bound is below one quarter hour on purpose: each :8899 fetch makes OBS log a WebSocket
+# connect AFTER the log read, so a hung OBS whose WebSocket thread still runs reads at most one gap
+# old -- never within a minute of 900 s (review round 3).
 LOG_CLOCK_MIN_GAP_S = 60
-LOG_CLOCK_MAX_GAP_S = 1800
+LOG_CLOCK_MAX_GAP_S = 600
+# Time-zone offsets are whole quarter hours, and 86400 is one too, so a LIVE log stamped in another
+# zone reads (offset + a fresh few seconds) mod 900 on both sides of the date wrap.
+LOG_CLOCK_ZONE_STEP_S = 900
 
 
 def expected_ticks_per_min(tick_ms):
@@ -126,16 +132,27 @@ def classify_log_clock(head_age_s, prev_head_age_s, gap_s, frozen_s=DEFAULT_LOG_
     young. A head that reads older than `frozen_s` on both passes yet aged less than half the gap is
     a log that advances with its stamps off the gather's clock -> MISMATCH. The time-zone offset
     cancels in the difference, so this holds whatever the offset. A frozen log's daily date wrap
-    (a huge negative change) is OK, never a mismatch."""
+    (a huge negative change) is OK, never a mismatch. Both heads must also sit within
+    `DEFAULT_LOG_LIVE_S` of a whole quarter hour (a zone offset + a fresh line): a hung OBS whose
+    only log writer is the pager's own WebSocket connect reads ~one gap old on every pass, which is
+    silence on air, not a clock fault (review round 3)."""
     if head_age_s is None or prev_head_age_s is None or gap_s is None:
         return "UNKNOWN"
     if not min_gap_s <= gap_s <= max_gap_s:
         return "UNKNOWN"
     if head_age_s <= frozen_s or prev_head_age_s <= frozen_s:
         return "OK"
+    if not (_near_zone_step(head_age_s) and _near_zone_step(prev_head_age_s)):
+        return "OK"
     if abs(2 * (head_age_s - prev_head_age_s)) < gap_s:
         return "MISMATCH"
     return "OK"
+
+
+def _near_zone_step(age_s, near_s=DEFAULT_LOG_LIVE_S, step_s=LOG_CLOCK_ZONE_STEP_S):
+    """True when `age_s` is within `near_s` of a whole multiple of the zone step (either side)."""
+    r = age_s % step_s
+    return min(r, step_s - r) <= near_s
 
 
 def classify_vban(events, loss_ms, age_s, box_reachable,
