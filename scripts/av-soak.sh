@@ -123,6 +123,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/genlock-park.sh"
 # shellcheck source=scripts/lib/connect-on-show-hold.sh
 . "$HERE/lib/connect-on-show-hold.sh"
+# shellcheck source=scripts/lib/recordings-free-line.sh
+. "$HERE/lib/recordings-free-line.sh"
 # shellcheck source=scripts/lib/av-soak.sh
 . "$HERE/lib/av-soak.sh"
 # shellcheck source=scripts/lib/av-soak-leftovers.sh

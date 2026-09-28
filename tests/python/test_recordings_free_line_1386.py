@@ -109,3 +109,48 @@ def test_check_never_warns_on_an_unreadable_free_space(tmp_path, body):
 def test_check_skips_when_the_server_is_unreachable(tmp_path):
     r = _run_check(tmp_path, "", curl_ok=False)
     assert "could not fetch strih recordings-dir stats" in r.stderr and "RC=0" in r.stdout
+
+
+# -- the 8 h soak reads the same helper (issue 1386 slice C) ---------------------------------------
+_SOAK = _SCRIPTS / "av-soak.sh"
+_SOAK_LIB = _SCRIPTS / "lib" / "av-soak.sh"
+
+
+def _soak_fn():
+    s = _SOAK_LIB.read_text()
+    a = s.index("av_soak_free_space_verdict() {")
+    return s[a:s.index("\n}\n", a) + 3]
+
+
+def test_the_soak_sources_the_helper_and_keeps_no_inline_reader():
+    s = _SOAK.read_text()
+    src = '. "$HERE/lib/recordings-free-line.sh"'
+    assert s.count(src) == 1
+    assert s.index(src) < s.index('. "$HERE/lib/av-soak.sh"')
+    fn = _soak_fn()
+    assert 'recordings_free_line_from_stats "$stats" "$min_gb" "$here"' in fn
+    assert "python3" not in fn, "the inline reader copy is back in the soak -- use the helper"
+
+
+def _run_soak(tmp_path, body, min_gb="50", curl_ok=True):
+    (tmp_path / "body").write_text(body)
+    curl = tmp_path / "curl"
+    curl.write_text("#!/bin/sh\n" + (f'cat "{tmp_path}/body"\n' if curl_ok else "exit 7\n"))
+    curl.chmod(curl.stat().st_mode | stat.S_IXUSR)
+    return _bash(tmp_path, f'. "{_LIB}"\n. "{_SOAK_LIB}"\n'
+                 f'av_soak_free_space_verdict 10.0.0.1 8899 {min_gb} "{_SCRIPTS}"\necho "RC=$?"\n',
+                 path_prefix=str(tmp_path))
+
+
+@pytest.mark.parametrize("body", BODIES)
+def test_the_soak_verdict_is_the_readers_line_for_every_body(tmp_path, body):
+    r = _run_soak(tmp_path, body)
+    assert r.returncode == 0, r.stderr
+    lines = r.stdout.strip().split("\n")
+    assert lines == [bsg.recordings_free_line(body, 50), "RC=0"]
+
+
+def test_the_soak_verdict_is_unknown_when_the_box_or_the_reader_fails(tmp_path):
+    assert _run_soak(tmp_path, "", curl_ok=False).stdout.split() == ["UNKNOWN", "-1", "RC=0"]
+    body = json.dumps({"free_bytes": 40 * 10**9})
+    assert _run_soak(tmp_path, body, min_gb="abc").stdout.split() == ["UNKNOWN", "-1", "RC=0"]

@@ -16,8 +16,9 @@
 #   - the argv builders of the two on-box extracts and the dev1 merge, used by BOTH the --plan
 #     printout and the --run execution (plan == run by construction),
 #   - the record-volume free-space read: the SAME `:8899/record-dir-stats.json` fetch and the SAME
-#     reader, `bundle_state_gather.recordings_free_line`, that recording-e2e.sh's
-#     `check_recordings_free_space` uses (through scripts/lib/recordings-free-line.sh, issue 1386).
+#     helper, `recordings_free_line_from_stats` (scripts/lib/recordings-free-line.sh, over
+#     `bundle_state_gather.recordings_free_line`), that recording-e2e.sh's
+#     `check_recordings_free_space` uses (issue 1386).
 
 # av_soak_windows_count DURATION_S SLOT_S -> the number of windows: one at every slot start from 0
 # up to and including DURATION_S (so an 8 h run's last window starts at 8 h and the run's window
@@ -191,16 +192,15 @@ av_soak_merge_argv() {
 # av_soak_free_space_verdict HOST PORT MIN_FREE_GB SCRIPTS_DIR -> prints "<VERDICT> <free_gb>" for
 # the box's OBS record volume: OK / WARN (strictly below MIN_FREE_GB) / UNKNOWN (unreachable or
 # unreadable -- never a false WARN). The read is recording-e2e.sh check_recordings_free_space's
-# (:8899/record-dir-stats.json); the verdict line is bundle_state_gather.recordings_free_line.
-# Always returns 0.
+# (:8899/record-dir-stats.json); the verdict line is recordings_free_line_from_stats
+# (scripts/lib/recordings-free-line.sh, which the caller sources -- scripts/av-soak.sh does), the
+# same helper the E2E harness reads it through (issue 1386). Always returns 0.
 av_soak_free_space_verdict() {
   local host="$1" port="$2" min_gb="$3" here="$4" stats out
   stats="$(curl -fsS --max-time 30 "http://${host}:${port}/record-dir-stats.json" 2>/dev/null)" || {
     printf 'UNKNOWN -1\n'
     return 0
   }
-  out="$(printf '%s' "$stats" | PYTHONPATH="$here" python3 -c \
-    'import sys, bundle_state_gather as b; print(b.recordings_free_line(sys.stdin.read(), float(sys.argv[1])))' \
-    "$min_gb" 2>/dev/null)" || out="UNKNOWN -1"
+  out="$(recordings_free_line_from_stats "$stats" "$min_gb" "$here")" || out="UNKNOWN -1"
   printf '%s\n' "${out:-UNKNOWN -1}"
 }
