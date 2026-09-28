@@ -1,22 +1,29 @@
 #!/usr/bin/env bash
 # airuleset:script-ok source-only lib (helpers only, no top-level statements) -- deliberately NOT
-# `set -euo pipefail`: sourcing this into a caller must never leak `set -e` into it (the dev1 alert
-# watchdogs run `set -uo pipefail` so one failed probe never ends the pass); every caller owns its
-# own strictness.
+# `set -euo pipefail`: sourcing this into a caller must never change the caller's shell options;
+# every caller owns its own strictness.
 #
-# scripts/lib/watchdog-common.sh -- the state-file glue the dev1 alert watchdogs used to copy between
-# themselves (issue 1386). Sourced next to scripts/lib/obs-watchdog-decision.sh (the pure
-# confirm/throttle/dedup-key lib); nothing here decides or notifies, and no --dedup-key is built
-# here. ONLY code that was the same in at least three watchdogs lives here (the same code by bash
-# `declare -f`, which drops comments) -- a helper whose code differs even slightly stays in its
-# watchdog (see "Local copies" below).
+# scripts/lib/watchdog-common.sh -- the glue the dev1 alert watchdogs used to copy between themselves
+# (issue 1386): the key=value state-file helpers and the :8899 bundle-state fetch. Sourced next to
+# scripts/lib/obs-watchdog-decision.sh (the pure confirm/throttle/dedup-key lib); nothing here
+# decides or notifies, and no --dedup-key is built here. ONLY a helper whose code was the same (by
+# bash `declare -f`, which drops comments) in at least three watchdogs lives here; that criterion
+# was applied to every function the watchdogs define. A helper whose code differs even slightly
+# stays in its watchdog (see "Local copies" below).
 #
 # Caller contract: set STATE_FILE (the watchdog's own key=value state file) before calling the
-# state helpers, and NETREACH_STATE_FILE (the network-reach watchdog's state file) before
-# netreach_box_alerted. Both are read at CALL time, never at source time. Source it only into a
-# shell WITHOUT `set -e` (the watchdog family's `set -uo pipefail`): write_state_field's
-# `[ -f ] && existing="$(grep -v ...)"` returns non-zero when the file holds only that one key, which
-# `set -e` would turn into an exit (the helpers are moved verbatim; no current caller runs -e).
+# state helpers, NETREACH_STATE_FILE (the network-reach watchdog's state file) before
+# netreach_box_alerted, and CURL_TIMEOUT / BUNDLE_PORT / BUNDLE_PATH before fetch_bundle_json. All
+# are read at CALL time, never at source time.
+#
+# errexit: write_state_field is NOT `set -e` safe -- its `[ -f ] && existing="$(grep -v ...)"`
+# returns non-zero when the file holds only that one key, which `set -e` turns into an exit (the
+# helpers are moved verbatim). Every watchdog that calls this copy runs without -e. Three watchdogs
+# DO run with errexit on at call time, because a lib they source turns it on and `set -uo pipefail`
+# never clears it: avsync-heartbeat (lib/avsync-heartbeat.sh), imag-obs (imag-obs-reachability.sh,
+# imag-obs-restart-storm.sh) and obs-session (win-ssh-exec.sh). They call only read_state_field from
+# here, which is -e safe, and keep their own write_state_field -- never point them at this copy
+# before they clear -e or this copy is made -e safe.
 #
 #   read_state_field <key> <default>   -> the LAST `<key>=` value in $STATE_FILE, else <default>
 #   write_state_field <key> <value>    -> replace <key>'s line in $STATE_FILE (one line per key);
@@ -31,18 +38,27 @@
 #   netreach_box_alerted <box>         -> the network-reach watchdog's alerted_<box> field (1 = it
 #                                         has that box CONFIRMED unreachable and paged), 0 when
 #                                         absent -- the no-double-page guard (issue 1001)
+#   fetch_bundle_json <ip>             -> the box's :8899 bundle-state body on stdout, rc 0 only for
+#                                         a `{`-body (a curl failure or a non-JSON answer is rc 1 =
+#                                         SKIP for that pass, never a false page)
 #
-# Local copies (NOT moved, their code differs), each defined AFTER this lib is sourced, so the
-# watchdog's own copy is the one that runs (bash resolves a function at call time, so the throttle
-# helpers here call that copy too):
+# Local copies (NOT moved, their code differs). A watchdog that sources this lib defines its copy
+# AFTER the source line, so its own copy is the one that runs (bash resolves a function at call
+# time, so the throttle helpers here call that copy too):
 #   * an OLDER write_state_field that writes through the state file itself when mktemp fails --
 #     asio-starve, avsync-heartbeat, cadence, cg-bridge, frozen-input, grabber-stuck, imag-obs,
 #     imag-power-envelope, obs-session, optical-chain, splitter-port; network-reach and
-#     obs-liveness carry a third variant, obs-burn-reconcile a fourth. Converging them onto this
-#     copy changes the mktemp-failure path, so it is its own change, not a dedup;
-#   * read_state_field in ndi-portmap and netcfg-drift (a different local declaration).
-# The per-watchdog log() (its tag), fetch/probe, alert-send and handle_* functions differ per
-# script and stay local as well. tests/python/test_watchdog_common_1386.py pins this list.
+#     obs-liveness carry a variant with literal-newline printf formats, obs-burn-reconcile one with
+#     a fixed temp path. Converging them onto this copy changes the mktemp-failure path (and three
+#     of them run with errexit, above), so it is not part of this dedup;
+#   * read_state_field in ndi-portmap and netcfg-drift (a different local declaration);
+#   * fetch_bundle_json in audio-mixer, genlock-lock and vb-matrix (each with its own *_FETCH_CMD
+#     test seam).
+# Two watchdogs do not source this lib and keep variant copies of their own: avsync-lineup (the older
+# write_state_field and a read_state_field variant) and vban-rate (read and write variants).
+# The per-watchdog log() (its tag), the ssh/log probes, the alert send, the recovery decision and the
+# handle_* functions differ per script (by name or by code) and stay local as well.
+# tests/python/test_watchdog_common_1386.py pins the override list.
 
 read_state_field() {
   local key="$1" default="$2"
@@ -107,4 +123,17 @@ netreach_box_alerted() {
   local v
   v="$(sed -n "s/^alerted_${box}=//p" "$NETREACH_STATE_FILE" 2>/dev/null | tail -1)"
   printf '%s' "${v:-0}"
+}
+
+fetch_bundle_json() {
+  local ip="$1" body
+  body="$(curl -fsS --max-time "$CURL_TIMEOUT" "http://${ip}:${BUNDLE_PORT}${BUNDLE_PATH}" 2>/dev/null)" \
+    || return 1
+  body="${body#"${body%%[![:space:]]*}"}"   # strip leading whitespace (a python-json body carries no
+                                            # BOM; a hypothetical BOM'd body fails the {* case -> SKIP,
+                                            # the safe direction — never a false page)
+  case "$body" in
+    \{*) printf '%s' "$body"; return 0 ;;
+    *) return 1 ;;
+  esac
 }

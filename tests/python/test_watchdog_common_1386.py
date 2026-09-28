@@ -1,16 +1,17 @@
-"""issue 1386 item 3 -- the ONE shared state-file glue of the dev1 alert watchdogs.
+"""issue 1386 item 3 -- the ONE shared glue of the dev1 alert watchdogs.
 
-scripts/lib/watchdog-common.sh holds the helpers that were the same code in at least three
-watchdogs (read_state_field, write_state_field, clear_throttle, clear_box_throttle,
-clear_source_throttle, source_key, netreach_box_alerted). A helper whose code differed stayed
-local; where such a local copy shares a lib name it is defined AFTER the source line, so the local
-copy is the one that runs. This file pins:
+scripts/lib/watchdog-common.sh holds every helper that was the same code (bash `declare -f`) in at
+least three watchdogs: read_state_field, write_state_field, clear_throttle, clear_box_throttle,
+clear_source_throttle, source_key, netreach_box_alerted, fetch_bundle_json. A helper whose code
+differed stayed local; where such a local copy shares a lib name it is defined AFTER the source
+line, so the local copy is the one that runs. This file pins:
 
-  * the lib's shape: functions only, no strictness leaked into the caller, the exact name set;
-  * its behaviour under the callers' real strictness (`set -uo pipefail`, never -e);
+  * the lib's shape: functions only, no shell option changed, the exact name set;
+  * its behaviour under the callers' strictness (`set -uo pipefail`);
+  * no watchdog anywhere (sourcing the lib or not) carries the lib's code again (compared by
+    `declare -f`, so a reformatted copy is caught too);
   * the override list the lib header names -- a watchdog that sources the lib may keep a local copy
-    of a lib name ONLY if it is listed here, and its code must really differ (a byte-identical copy
-    means the dedup regressed: delete the copy, the lib already provides it);
+    of a lib name ONLY if it is listed here, defined after the source line;
   * no dangling call -- every watchdog that calls a lib helper either sources the lib or defines it.
 
 Tier-0: pure python + bash subprocesses (no cargo). The byte-identity of the move itself was proven
@@ -27,7 +28,7 @@ _SOURCE_LINE = '. "$HERE/lib/watchdog-common.sh"'
 
 LIB_FUNCS = {
     "read_state_field", "write_state_field", "clear_throttle", "clear_box_throttle",
-    "clear_source_throttle", "source_key", "netreach_box_alerted",
+    "clear_source_throttle", "source_key", "netreach_box_alerted", "fetch_bundle_json",
 }
 
 # The local copies the lib header documents: name -> watchdogs that keep their own (different) code.
@@ -46,6 +47,9 @@ ALLOWED_OVERRIDES = {
         "obs-burn-reconcile-watchdog.sh",
     },
     "read_state_field": {"ndi-portmap-alert-watchdog.sh", "netcfg-drift-alert-watchdog.sh"},
+    # each with its own *_FETCH_CMD test seam
+    "fetch_bundle_json": {"audio-mixer-alert-watchdog.sh", "genlock-lock-alert-watchdog.sh",
+                          "vb-matrix-alert-watchdog.sh"},
 }
 
 _DEF_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*\(\)\s*\{\s*$")
@@ -68,9 +72,14 @@ def _function_blocks(text):
     return out
 
 
-def _code_only(block):
-    """The block without full-line comments -- a copy that differs only by a comment is the SAME code."""
-    return "\n".join(l for l in block.split("\n") if not l.strip().startswith("#"))
+def _declare_f(block, name, tmp_path):
+    """bash's own normalized text of one function (comments dropped, one canonical layout)."""
+    f = tmp_path / f"fn_{name}.sh"
+    f.write_text(block + "\n")
+    r = subprocess.run(["bash", "-c", f'. "{f}"; declare -f {name}'], capture_output=True, text=True,
+                       timeout=30)
+    assert r.returncode == 0 and r.stdout, r.stderr
+    return r.stdout
 
 
 def _watchdogs():
@@ -170,8 +179,23 @@ def test_netreach_box_alerted_reads_the_network_reach_latch(tmp_path):
     assert r.stdout.split() == ["strih-lx=1", "stream=0", "resolume=0", "absent=0"]
 
 
-def test_a_sourcing_watchdog_keeps_only_documented_local_copies_and_they_really_differ():
+def test_no_watchdog_carries_the_lib_code_again(tmp_path):
+    # compared by `declare -f`, so a copy that differs only in comments or layout is caught too, in
+    # every watchdog -- also one that does not source the lib (it should source it instead)
     lib = _function_blocks(_LIB.read_text())
+    lib_norm = {n: _declare_f(b, n, tmp_path) for n, b in lib.items()}
+    checked = 0
+    for wd in _watchdogs():
+        for name, block in _function_blocks(wd.read_text()).items():
+            if name not in LIB_FUNCS:
+                continue
+            checked += 1
+            assert _declare_f(block, name, tmp_path) != lib_norm[name], (
+                f"{wd.name}'s {name}() is the lib's code again -- delete the copy and source the lib")
+    assert checked >= len(set().union(*ALLOWED_OVERRIDES.values()))
+
+
+def test_a_sourcing_watchdog_keeps_only_documented_local_copies():
     sourcing = []
     for wd in _watchdogs():
         text = wd.read_text()
@@ -186,8 +210,6 @@ def test_a_sourcing_watchdog_keeps_only_documented_local_copies_and_they_really_
                 f"{wd.name} keeps its own {name}() while sourcing the lib -- delete it (the lib "
                 f"provides it) or, if its code genuinely differs, list it in ALLOWED_OVERRIDES and "
                 f"the lib header")
-            assert _code_only(block) != _code_only(lib[name]), (
-                f"{wd.name}'s {name}() is the lib's code again -- delete the copy")
             assert text.index(block) > src_at, (
                 f"{wd.name} defines {name}() before sourcing the lib, so the lib copy would win")
     # every documented override is still a live local copy in a sourcing watchdog

@@ -59,7 +59,9 @@ esac
 # -- config (all env-overridable) ---------------------------------------------------------------
 BOXES="${RENDER_FREEZE_BOXES:-$(obs_fleet_boxes render-freeze)}"
 BUNDLE_PORT="${RENDER_FREEZE_BUNDLE_PORT:-8899}"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 BUNDLE_PATH="${RENDER_FREEZE_BUNDLE_PATH:-/bundle-state.json}"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 CURL_TIMEOUT="${RENDER_FREEZE_CURL_TIMEOUT:-10}"
 LAGGED_FLOOR="${RENDER_FREEZE_LAGGED_FLOOR:-30}"           # relaunch band 1/2/11 vs freeze 61/228
 RENDER_FRESH_AGE_S="${RENDER_FREEZE_FRESH_AGE_S:-600}"     # a freeze older than this is stale (no page)
@@ -81,17 +83,8 @@ STATE_FILE="${RENDER_FREEZE_ALERT_STATE_FILE:-$_state_default}"
 log() { printf '%s [render-freeze-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 # -- I/O probe (dev1-local; NOT pure) -----------------------------------------------------------
-# fetch_bundle_json <ip> -> prints the JSON body + returns 0 iff a 200 with a `{`-body came back.
-fetch_bundle_json() {
-  local ip="$1" body
-  body="$(curl -fsS --max-time "$CURL_TIMEOUT" "http://${ip}:${BUNDLE_PORT}${BUNDLE_PATH}" 2>/dev/null)" \
-    || return 1
-  body="${body#"${body%%[![:space:]]*}"}"   # strip leading whitespace; a non-{ body -> SKIP (safe)
-  case "$body" in
-    \{*) printf '%s' "$body"; return 0 ;;
-    *) return 1 ;;
-  esac
-}
+# fetch_bundle_json <ip> (scripts/lib/watchdog-common.sh, reads CURL_TIMEOUT / BUNDLE_PORT /
+# BUNDLE_PATH) -> prints the JSON body + returns 0 iff a 200 with a `{`-body came back.
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
 # read_state_field / write_state_field live in scripts/lib/watchdog-common.sh.

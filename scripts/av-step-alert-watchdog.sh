@@ -74,7 +74,9 @@ esac
 # byte-identical to the pre-#1296 literal. The AV_STEP_BOXES env override still wins unchanged.
 BOXES="${AV_STEP_BOXES:-$(obs_fleet_boxes av-step)}"
 BUNDLE_PORT="${AV_STEP_BUNDLE_PORT:-8899}"          # the bundle-state HTTP service (#650) carrying the facet
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 BUNDLE_PATH="${AV_STEP_BUNDLE_PATH:-/bundle-state.json}"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 CURL_TIMEOUT="${AV_STEP_CURL_TIMEOUT:-10}"          # :8899 HTTP fetch (s); server has answered ~6.6s
 
 # Step threshold: |recent_med - base_med| > this many ms = a sustained upstream A/V STEP. Normal
@@ -131,20 +133,10 @@ STATE_FILE="${AV_STEP_ALERT_STATE_FILE:-$_state_default}"
 log() { printf '%s [av-step-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 # -- I/O probe (dev1-local; NOT pure) -----------------------------------------------------------
-# fetch_bundle_json <ip> -> prints the JSON body to stdout and returns 0 iff a 200 with a body
-# that starts with `{` came back. A curl failure or a wedged-but-listening non-JSON answer returns 1
+# fetch_bundle_json <ip> (scripts/lib/watchdog-common.sh, reads CURL_TIMEOUT / BUNDLE_PORT /
+# BUNDLE_PATH) -> prints the JSON body to stdout and returns 0 iff a 200 with a body that starts
+# with `{` came back. A curl failure or a wedged-but-listening non-JSON answer returns 1
 # (box_reachable=0 for this pass -> SKIP; deferred to #732/#1001).
-fetch_bundle_json() {
-  local ip="$1" body
-  body="$(curl -fsS --max-time "$CURL_TIMEOUT" "http://${ip}:${BUNDLE_PORT}${BUNDLE_PATH}" 2>/dev/null)" \
-    || return 1
-  body="${body#"${body%%[![:space:]]*}"}"   # strip leading whitespace (a non-{ body -> SKIP, the
-                                            # safe direction, never a false page)
-  case "$body" in
-    \{*) printf '%s' "$body"; return 0 ;;
-    *) return 1 ;;
-  esac
-}
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
 # read_state_field / write_state_field / clear_box_throttle live in scripts/lib/watchdog-common.sh.
