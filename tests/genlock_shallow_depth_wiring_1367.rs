@@ -131,10 +131,13 @@ fn the_release_tick_locks_measures_and_keeps_the_drain_out_1367() {
         latch > track,
         "issue 1367: the shallow latch must sit after the tracker (it reuses the scheduled tick read)"
     );
+    // Two call sites: the N==1 present tail above, and the N>=2 grid release (issue 1367 D1), whose
+    // N>=2 tick clears the N==1 shallow state (pinned by tests/genlock_n2_grid_wiring_1367.rs).
     assert_eq!(
         src.matches("genlock_shallow_latch(source, ").count(),
-        1,
-        "issue 1367: the shallow latch has exactly one call site (the present tail)"
+        2,
+        "issue 1367: the shallow latch has exactly two call sites (the N==1 present tail and the \
+         N>=2 grid release)"
     );
     let helper = body(
         &src,

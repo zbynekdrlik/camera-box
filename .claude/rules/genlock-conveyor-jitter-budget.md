@@ -8,6 +8,16 @@ paths:
 
 # N>=2 genlock conveyor arrival-jitter budget + the audit-delta ladder recipe (#1354)
 
+> **Issue 1367 slice D1 (design 5879332205): an N>=2 source no longer runs the boundary conveyor
+> this rule was written for.** `genlock_release_tick` sends it to the grid-exact release first
+> (`genlock-n2-grid-conveyor.md`): it presents `grid_floor(T − 50 ms − pin, canvas / N)` every tick,
+> so the #1049 converge shed, the backlog relock and the ladder below cannot happen to a strih
+> camera any more. `should_converge_phase` / `genlock_phase_converge_due` keep their N>=2 arithmetic
+> (a post-erase re-measure on an N==1 tick can still reach it, and the parity gate still pins it),
+> and `GENLOCK_N2_JITTER_BUDGET_NS` keeps budgeting the SHALLOW N==1 latch. On an N>=2 input read
+> `n2_early=` (a late target presented one frame early for that tick) instead of `holds` /
+> `relocks` / `converge_sheds`, which stay flat there.
+
 ## The seam: `GENLOCK_N2_JITTER_BUDGET_NS` (single-sourced, 3 lock-stepped copies)
 
 The N>=2 phase shed (`should_converge_phase`) parks the conveyor `quantum + budget` above its
