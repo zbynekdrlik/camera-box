@@ -646,7 +646,8 @@ def test_a_broadcast_right_after_the_first_scene_cut_starts_no_recording(rig):
     assert not [c for c in obs if c[:1] == ["record"] and "start" in c]
     assert "strih program NOT restored" in r.stdout + r.stderr
     assert not [f for f in os.listdir(p["state"]) if f.startswith("burn-")]
-    assert [c for c in obs if c[:1] == ["connect-on-show"] and "--restore" in c]
+    # issue 1242: the connect-on-show hold is gone, so the soak never makes a hold call at all
+    assert not [c for c in obs if c[:1] == ["connect-on-show"]]
     assert not p["lease"].exists()
 
 
