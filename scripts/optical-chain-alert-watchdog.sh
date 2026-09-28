@@ -81,6 +81,7 @@ NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${OPTICAL_CHAIN_ALERT_REPO:-zbynekdrlik/camera-box}"
 
 STATE_DIR="${OPTICAL_CHAIN_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${OPTICAL_CHAIN_ALERT_STATE_FILE:-$STATE_DIR/camera-box-optical-chain-alert.state}"
 
 log() { printf '%s [optical-chain-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }

@@ -90,6 +90,7 @@ STATE_DIR="${OBS_SESSION_WATCHDOG_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 # A DIFFERENT default state file than #391's own obs-liveness-watchdog.sh -- both scripts key
 # per-box state on the SAME box names ("stream", "resolume", ...), so sharing one file would corrupt each
 # other's confirm/throttle counters.
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${OBS_SESSION_WATCHDOG_STATE_FILE:-$STATE_DIR/camera-box-obs-session-watchdog.state}"
 
 log() { printf '%s [obs-session-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }

@@ -79,6 +79,7 @@ NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${OBS_WATCHDOG_REPO:-zbynekdrlik/camera-box}"
 
 STATE_DIR="${OBS_WATCHDOG_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${OBS_WATCHDOG_STATE_FILE:-$STATE_DIR/camera-box-obs-watchdog.state}"
 
 log() { printf '%s [obs-liveness-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }

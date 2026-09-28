@@ -37,7 +37,8 @@ KEYLESS body into a ~5-min window). The doctrine (analyze-not-ping, airuleset #7
    again / reachable again" latch pings, "still down" repeats, and periodic OK/health lines go to
    the MACHINE channel only: keep (or add) a `log "RECOVERY: ... machine-channel only (#1206)"`
    journal line and DROP the `notify --body` call. The dry-run `[dry-run] WOULD send recovery ...`
-   decision log stays (tests pin it). Do NOT change the recovery DECISION logic (`*_recovery_decision`).
+   decision log stays (tests pin it). Do NOT change the recovery DECISION logic (`recovery_latch_fires` in
+   `scripts/lib/watchdog-common.sh`, or a watchdog's own `*_recovery_decision` lib function).
 
 The emoji is the discriminator in practice: **🚨/⚠️/🛟/🧹 = ALERT (keyed ping); ✅ = RECOVERY
 (machine-channel, no ping)**.
@@ -147,7 +148,8 @@ bash `\` line-continuations, so the `--dedup-key` may sit on its own continuatio
 ## Scope
 
 Delivery layer ONLY. Detection/confirm/throttle lives in `scripts/lib/obs-watchdog-decision.sh`
-(shared) + per-script `*_recovery_decision` — do not touch it for a notify change. NEVER edit
+(shared) + the recovery decision (`recovery_latch_fires` in `scripts/lib/watchdog-common.sh`, or a
+watchdog's own `*_recovery_decision` lib function) — do not touch it for a notify change. NEVER edit
 airuleset itself; `--dedup-key` is an existing airuleset `notify` flag ("same key sends once").
 
 ## A RAW-webhook emitter is INVISIBLE to this sweep — route the default through airuleset notify (#1207)

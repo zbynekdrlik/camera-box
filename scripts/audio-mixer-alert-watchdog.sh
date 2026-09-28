@@ -62,7 +62,9 @@ esac
 # -- config (all env-overridable) ---------------------------------------------------------------
 BOXES="${AUDIO_MIXER_BOXES:-$(obs_fleet_boxes audio-mixer)}"
 BUNDLE_PORT="${AUDIO_MIXER_BUNDLE_PORT:-8899}"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 BUNDLE_PATH="${AUDIO_MIXER_BUNDLE_PATH:-/bundle-state.json}"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 CURL_TIMEOUT="${AUDIO_MIXER_CURL_TIMEOUT:-10}"
 TOLERANCE="${AUDIO_MIXER_TICK_TOLERANCE:-5}"          # ticks/min off real time (2812.5 at 48 kHz)
 OVER_MAX="${AUDIO_MIXER_OVER_MAX:-30}"                # late ticks/min

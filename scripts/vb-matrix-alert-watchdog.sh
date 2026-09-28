@@ -71,7 +71,9 @@ esac
 # VB_MATRIX_BOXES env override still wins unchanged.
 BOXES="${VB_MATRIX_BOXES:-$(obs_fleet_boxes vb-matrix)}"
 BUNDLE_PORT="${VB_MATRIX_BUNDLE_PORT:-8899}"          # the bundle-state HTTP service (#650) carrying the facet
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 BUNDLE_PATH="${VB_MATRIX_BUNDLE_PATH:-/bundle-state.json}"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 CURL_TIMEOUT="${VB_MATRIX_CURL_TIMEOUT:-10}"          # :8899 HTTP fetch (s); server has answered ~6.6s
 
 # 2-pass confirm before paging (matches the sibling watchdogs): a single blipped reading must never

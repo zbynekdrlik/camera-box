@@ -11,8 +11,9 @@ cycles. Two consumers group them per camera:
 Both used to carry their own copy of the grouping. `per_camera` is it, once. Pure, std only.
 
 The same two consumers also judge ONE window against the gate's two per-window limits: the soak
-grades it with `gate_window_term`, the report names the camera behind a red continuity line.
-`over_copies_gaps_tolerance` and `over_window_floor` are those two limits, once (issue 1386).
+grades it with `gate_window_term`; the report's red continuity line names the camera over its
+tolerance and adds the optical-floor clause. `over_copies_gaps_tolerance` and `over_window_floor`
+are those two limits, once (issue 1386).
 
 Input rules (the recording-verdict JSON writes integer counts and boolean `pass`, so none of these
 bite on a real verdict; they keep a malformed file from crashing a report):

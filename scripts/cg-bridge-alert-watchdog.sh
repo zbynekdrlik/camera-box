@@ -72,6 +72,7 @@ NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${CG_BRIDGE_ALERT_REPO:-zbynekdrlik/camera-box}"
 
 STATE_DIR="${CG_BRIDGE_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${CG_BRIDGE_ALERT_STATE_FILE:-$STATE_DIR/camera-box-cg-bridge-alert.state}"
 
 log() { printf '%s [cg-bridge-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }

@@ -78,6 +78,7 @@ REPO_SLUG="${GRABBER_STUCK_WATCH_REPO:-zbynekdrlik/camera-box}"
 STATE_DIR="${GRABBER_STUCK_WATCH_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 _state_default="$STATE_DIR/camera-box-grabber-stuck-alert.state"
 [ "$DRY_RUN" -eq 1 ] && _state_default="$STATE_DIR/camera-box-grabber-stuck-alert-dryrun.state"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${GRABBER_STUCK_WATCH_STATE_FILE:-$_state_default}"
 
 log() { printf '%s [grabber-stuck-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }

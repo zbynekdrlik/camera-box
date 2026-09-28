@@ -4,8 +4,10 @@ scripts/lib/watchdog-common.sh holds every helper that was the same code (bash `
 least three watchdogs: read_state_field, write_state_field, clear_throttle, clear_box_throttle,
 clear_source_throttle, source_key, netreach_box_alerted, fetch_bundle_json. A helper whose code
 differed stayed local; where such a local copy shares a lib name it is defined AFTER the source
-line, so the local copy is the one that runs. write_state_field is the exception: its local copies
-were removed, so its one behaviour (never drop state, loud, -e safe) is the lib's. This file pins:
+line, so the local copy is the one that runs. The follow-up (slice C) removed the differing copies
+of three of them: the one write_state_field (never drops state, loud, -e safe), recovery_latch_fires
+(the recovery decision that lived under three names) and fetch_bundle_json with a per-call
+*_FETCH_CMD seam. Only read_state_field keeps local variants. This file pins:
 
   * the lib's shape: functions only, no shell option changed, the exact name set;
   * its behaviour under the callers' strictness (`set -uo pipefail`);
@@ -278,7 +280,8 @@ def test_a_sourcing_watchdog_keeps_only_documented_local_copies():
 
 def test_the_state_write_lives_only_in_the_lib():
     # one write behaviour for every watchdog (issue 1386): no script keeps its own copy of it
-    rx = re.compile(r"^write_state_field\s*\(\)", re.M)
+    # any definition form: column 0 or indented, `name()` or `function name` (a CALL does not match)
+    rx = re.compile(r"^\s*(?:function\s+write_state_field\b|write_state_field\s*\(\s*\))", re.M)
     owners = sorted(str(p.relative_to(_SCRIPTS)) for p in _SCRIPTS.rglob("*.sh") if rx.search(p.read_text()))
     assert owners == ["lib/watchdog-common.sh"], owners
 

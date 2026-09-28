@@ -4,12 +4,13 @@
 # every caller owns its own strictness.
 #
 # scripts/lib/watchdog-common.sh -- the glue the dev1 alert watchdogs used to copy between themselves
-# (issue 1386): the key=value state-file helpers and the :8899 bundle-state fetch. Sourced next to
-# scripts/lib/obs-watchdog-decision.sh (the pure confirm/throttle/dedup-key lib); nothing here
-# decides or notifies, and no --dedup-key is built here. ONLY a helper whose code was the same (by
-# bash `declare -f`, which drops comments) in at least three watchdogs lives here; that criterion
-# was applied to every function the watchdogs define. A helper whose code differs even slightly
-# stays in its watchdog (see "Local copies" below).
+# (issue 1386): the key=value state-file helpers, the recovery-latch decision and the :8899
+# bundle-state fetch. Sourced next to scripts/lib/obs-watchdog-decision.sh (the pure
+# confirm/throttle/dedup-key lib); nothing here notifies, and no --dedup-key is built here. The first
+# pass moved every helper whose code was the same (by bash `declare -f`, which drops comments) in at
+# least three watchdogs. The follow-up made this lib's state write, recovery decision and fetch (with
+# a per-call test seam) the one behaviour for every watchdog. A helper whose code still differs stays
+# in its watchdog (see "Local copies" below).
 #
 # Caller contract: set STATE_FILE (the watchdog's own key=value state file) before calling the
 # state helpers, NETREACH_STATE_FILE (the network-reach watchdog's state file) before
@@ -40,7 +41,9 @@
 #                                         a `{`-body (a curl failure or a non-JSON answer is rc 1 =
 #                                         SKIP for that pass, never a false page). SEAM_VAR names the
 #                                         caller's own Tier-0 fetch seam (AUDIO_MIXER_FETCH_CMD, ...):
-#                                         when that variable is set, `<its value> <ip>` replaces curl
+#                                         when that variable is non-empty, `<its value> <ip>` replaces
+#                                         curl (one executable path runs whole, anything else is
+#                                         split on whitespace with no quote handling)
 #
 # write_state_field has NO local copy anywhere: the sixteen the watchdogs used to carry (the older
 # write-through-the-state-file-on-mktemp-failure copy, the literal-newline read-first variant, the
@@ -48,13 +51,11 @@
 #
 # Local copies (NOT moved, their code differs). A watchdog that sources this lib defines its copy
 # AFTER the source line, so its own copy is the one that runs (bash resolves a function at call
-# time, so the throttle helpers here call that copy too):
-#   * read_state_field in ndi-portmap, netcfg-drift, avsync-lineup and vban-rate (a different
-#     local declaration);
-#   (fetch_bundle_json's per-watchdog *_FETCH_CMD seams live in the lib copy since issue 1386: the
-#   caller passes its seam variable's NAME, so no watchdog keeps a copy of the fetch.)
-# The per-watchdog log() (its tag), the ssh/log probes, the alert send, the recovery decision and the
-# handle_* functions differ per script (by name or by code) and stay local as well.
+# time): read_state_field in ndi-portmap, netcfg-drift, avsync-lineup and vban-rate (a different
+# local declaration). fetch_bundle_json's per-watchdog *_FETCH_CMD seams live in the lib copy since
+# issue 1386: the caller passes its seam variable's NAME, so no watchdog keeps a copy of the fetch.
+# The per-watchdog log() (its tag), the ssh/log probes, the alert send and the handle_* functions
+# differ per script (by name or by code) and stay local as well.
 # tests/python/test_watchdog_common_1386.py pins the override list.
 
 read_state_field() {
@@ -96,7 +97,7 @@ write_state_field() {
       fi
     else
       printf '%s [%s] WARNING: mktemp failed next to %s -- rewriting it in place (not atomic)\n' \
-        "$(date '+%Y-%m-%dT%H:%M:%S%z')" "${0##*/}" "$STATE_FILE" >&2
+        "$(date '+%Y-%m-%dT%H:%M:%S%z')" "${0##*/}" "$STATE_FILE" >&2 || true
       if ! { printf '%s\n' "$content" > "$STATE_FILE"; } 2>/dev/null; then
         why="mktemp failed and the in-place rewrite failed too"
       fi
@@ -104,7 +105,7 @@ write_state_field() {
   fi
   if [ -n "$why" ]; then
     printf '%s [%s] ERROR: state write failed: %s in %s -- %s\n' \
-      "$(date '+%Y-%m-%dT%H:%M:%S%z')" "${0##*/}" "$key" "$STATE_FILE" "$why" >&2
+      "$(date '+%Y-%m-%dT%H:%M:%S%z')" "${0##*/}" "$key" "$STATE_FILE" "$why" >&2 || true
   fi
   return 0
 }
@@ -153,9 +154,10 @@ netreach_box_alerted() {
 fetch_bundle_json() {
   # SEAM_VAR (optional, $2) is the NAME of the caller's own fetch seam variable, passed per call and
   # never read from a shared global, so a variable exported for one watchdog can never redirect
-  # another's fetch. Its value runs as `<cmd> <ip>` and its stdout replaces curl: one executable
-  # file path is run as it is (a path may hold spaces), anything else is split into words without
-  # globbing (`bash <fixture>`). A seam exit != 0 reads as unreachable, like a curl failure.
+  # another's fetch. A non-empty value runs as `<cmd> <ip>` and its stdout replaces curl: one
+  # executable file path is run as it is (a path may hold spaces), anything else is split on
+  # whitespace without globbing or quote handling (`bash <fixture>`; `bash "/a b/x"` would split
+  # inside the quotes). A seam exit != 0 reads as unreachable, like a curl failure.
   local ip="$1" seam_var="${2:-}" seam="" body
   local -a seam_argv=()
   if [ -n "$seam_var" ]; then

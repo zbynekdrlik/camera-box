@@ -118,6 +118,7 @@ RIG_MODE_PROBE_TIMEOUT="${RIG_MODE_PROBE_TIMEOUT:-20}"
 STATE_DIR="${SPLITTER_WATCH_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 _state_default="$STATE_DIR/camera-box-splitter-port-alert.state"
 [ "$DRY_RUN" -eq 1 ] && _state_default="$STATE_DIR/camera-box-splitter-port-alert-dryrun.state"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${SPLITTER_WATCH_STATE_FILE:-$_state_default}"
 
 log() { printf '%s [splitter-port-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }

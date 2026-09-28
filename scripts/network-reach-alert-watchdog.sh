@@ -121,6 +121,7 @@ STATE_DIR="${NETWORK_REACH_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 # wins, for a test that deliberately wants to inspect a specific state).
 _state_default="$STATE_DIR/camera-box-network-reach-alert.state"
 [ "$DRY_RUN" -eq 1 ] && _state_default="$STATE_DIR/camera-box-network-reach-alert-dryrun.state"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${NETWORK_REACH_ALERT_STATE_FILE:-$_state_default}"
 
 log() { printf '%s [network-reach-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }

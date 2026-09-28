@@ -94,6 +94,7 @@ IMAG_OBS_WS_PASSWORD="${IMAG_OBS_WS_PASSWORD:-${IMAG_PW:-newlevel}}"
 LATENCY_ALERT_THROTTLE_PASSES="${IMAG_LATENCY_ALERT_THROTTLE_PASSES:-12}"   # ~1h at the 5-min cadence
 
 STATE_DIR="${IMAG_OBS_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${IMAG_OBS_ALERT_STATE_FILE:-$STATE_DIR/camera-box-imag-obs-alert.state}"
 
 log() { printf '%s [imag-obs-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }

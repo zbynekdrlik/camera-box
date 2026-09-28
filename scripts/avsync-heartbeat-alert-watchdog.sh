@@ -76,6 +76,7 @@ DISCORD_ENV_FILE="${AVSYNC_DISCORD_ENV:-$HOME/.claude/channels/discord/.env}"
 DISCORD_THREAD_ID="${AVSYNC_DISCORD_THREAD_ID:-1373592666733940816}"   # alerts-snv thread
 
 STATE_DIR="${AVSYNC_HEARTBEAT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${AVSYNC_HEARTBEAT_STATE_FILE:-$STATE_DIR/camera-box-avsync-heartbeat.state}"
 
 # #1331 -- the VERIFIED-A/V session report (replaces the raw one-clip Discord forward).

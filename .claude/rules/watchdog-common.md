@@ -30,11 +30,12 @@ recovery one-liner under three names, and the three fetches that only differed b
   They are read at call time. The lib runs nothing at source time and never touches shell options;
   a global read only by the lib needs `# shellcheck disable=SC2034`.
 - **A Tier-0 fetch seam is an ARGUMENT, not a copy.** A watchdog that wants a `*_FETCH_CMD` replay
-  seam calls `fetch_bundle_json "$ip" MY_FETCH_CMD` (the variable's NAME). Its value then runs as
-  `<cmd> <ip>` in place of curl: one executable file path runs whole (spaces allowed), anything
-  else is split into words without globbing (`bash <fixture>`). The name is per call, never a
-  shared global, so a variable exported for one watchdog cannot redirect another's fetch.
-  audio-mixer, genlock-lock and vb-matrix pass theirs.
+  seam calls `fetch_bundle_json "$ip" MY_FETCH_CMD` (the variable's NAME). A non-empty value then
+  runs as `<cmd> <ip>` in place of curl: one executable file path runs whole (spaces allowed),
+  anything else is split on whitespace without globbing or quote handling (`bash <fixture>`, never
+  a quoted path with spaces). The name is per call, never a shared global, so a variable exported
+  for one watchdog cannot redirect another's fetch. audio-mixer, genlock-lock and vb-matrix pass
+  theirs.
 - **The one state write never drops state and never ends a pass.** `write_state_field` reads the
   other keys BEFORE opening any file for writing, leaves a file grep cannot read alone, renames its
   mktemp file over the state only after the write into it succeeded (a full disk no longer replaces
@@ -56,7 +57,7 @@ recovery one-liner under three names, and the three fetches that only differed b
   function at call time, so the local copy wins. The documented overrides (the pytest's
   `ALLOWED_OVERRIDES`, named in the lib header) are only `read_state_field` in ndi-portmap,
   netcfg-drift, avsync-lineup and vban-rate: it declares `v` in its first `local`, so its code is
-  not the lib's (the behaviour is the same — converging it is a candidate follow-up).
+  not the lib's (the behaviour is the same).
 - **What stays per-script:** `log()` (its tag), the ssh/log probes, the alert send, `handle_*`,
   every `--dedup-key` (notify discipline: `watchdog-notify-dedup.md`). The recovery DECISION is
   `recovery_latch_fires <was_alerted>`; what a recovery DOES (a machine-channel log line, clearing

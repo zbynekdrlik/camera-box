@@ -74,7 +74,9 @@ esac
 # GENLOCK_LOCK_BOXES env override still wins unchanged.
 BOXES="${GENLOCK_LOCK_BOXES:-$(obs_fleet_boxes genlock-lock)}"
 BUNDLE_PORT="${GENLOCK_LOCK_BUNDLE_PORT:-8899}"        # the bundle-state HTTP service carrying the facet
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 BUNDLE_PATH="${GENLOCK_LOCK_BUNDLE_PATH:-/bundle-state.json}"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 CURL_TIMEOUT="${GENLOCK_LOCK_CURL_TIMEOUT:-10}"        # :8899 HTTP fetch (s)
 
 # 2-pass confirm before paging (matches the sibling watchdogs): a single blipped reading (a reload,

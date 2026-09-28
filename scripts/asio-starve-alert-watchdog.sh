@@ -123,6 +123,7 @@ RECOVERY_PLAN="${ASIO_STARVE_RECOVERY_PLAN:-scripts/launch-obs-genlock.sh --box 
 STATE_DIR="${ASIO_STARVE_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 _state_default="$STATE_DIR/camera-box-asio-starve-alert.state"
 [ "$DRY_RUN" -eq 1 ] && _state_default="$STATE_DIR/camera-box-asio-starve-alert-dryrun.state"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${ASIO_STARVE_ALERT_STATE_FILE:-$_state_default}"
 # Issue-1001's OWN state file -- read (never written) for the no-double-page guard.
 # shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh

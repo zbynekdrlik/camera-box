@@ -123,6 +123,7 @@ REPO_SLUG="${CADENCE_ALERT_REPO:-zbynekdrlik/camera-box}"
 STATE_DIR="${CADENCE_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 _state_default="$STATE_DIR/camera-box-cadence-alert.state"
 [ "$DRY_RUN" -eq 1 ] && _state_default="$STATE_DIR/camera-box-cadence-alert-dryrun.state"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${CADENCE_ALERT_STATE_FILE:-$_state_default}"
 # Issue-1001's OWN state file -- read (never written) for the no-double-page guard.
 # shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh

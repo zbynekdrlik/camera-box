@@ -110,6 +110,7 @@ RIG_LEASE_STALE_SECS="${RIG_LEASE_STALE_SECS:-5400}"
 STATE_DIR="${OBS_BURN_RECONCILE_WATCHDOG_STATE_DIR:-$HOME/.camera-box}"
 # Its OWN state file (persists the per-box renderTotalFrames baseline + unresolved-burn flag),
 # distinct from #391's camera-box-obs-watchdog.state and #979's camera-box-obs-session-watchdog.state.
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${OBS_BURN_RECONCILE_WATCHDOG_STATE_FILE:-$STATE_DIR/camera-box-obs-burn-reconcile-watchdog.state}"
 
 # Exit code obs_burn_filter.py's sweep-* actions return when the ndi-input ENUMERATION itself

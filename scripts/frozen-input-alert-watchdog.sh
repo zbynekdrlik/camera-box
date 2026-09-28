@@ -136,6 +136,7 @@ REPO_SLUG="${FROZEN_INPUT_ALERT_REPO:-zbynekdrlik/camera-box}"
 STATE_DIR="${FROZEN_INPUT_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 _state_default="$STATE_DIR/camera-box-frozen-input-alert.state"
 [ "$DRY_RUN" -eq 1 ] && _state_default="$STATE_DIR/camera-box-frozen-input-alert-dryrun.state"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${FROZEN_INPUT_ALERT_STATE_FILE:-$_state_default}"
 # Issue-1001's OWN state file -- read (never written) for the no-double-page guard.
 # shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
