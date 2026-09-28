@@ -494,3 +494,15 @@ holds connect-on-show):
 5. Operator-view screenshot of the multiview (labels = program scenes, a cut lights the right cell,
    a click selects the program scene).
 6. FULL-bundle deploy (vendored DistroAV + frontend), then the `foh1_video ether2` tx-drop delta.
+
+## Tier-0 syntax check of `ndi-source.cpp` (no cargo, no CMake) — issue 1242
+
+CI is the first real compile, but a `g++ -fsyntax-only -std=c++17 -fPIC -Wall -Wextra` of
+`vendor/distroav/src/ndi-source.cpp` passes locally (clean, zero warnings, ~seconds) with ONE stub
+`obsconfig.h` (the libobs recipe of `obs-drm-output.md`) and these include dirs: the stub dir,
+`vendor/distroav/src`, `vendor/distroav/lib/ndi` (the vendored NDI SDK header), `vendor/obs-studio/libobs`,
+`vendor/obs-studio/frontend/api`, and `/usr/include/x86_64-linux-gnu/qt6` plus its `QtCore`, `QtGui`,
+`QtWidgets`, `QtNetwork` subdirs. Put the command in a scratch script FILE (the worktree guard refuses
+an inline include-array). A patch that is removed wholesale (no later commit touched the file) is
+cleanest as `git checkout <last pre-patch rev> -- <file>`, proven by an empty `git diff <rev>`,
+then this syntax check, then the pwsh mirrors in both windows-genlock*.yml and the Rust/python pins.
