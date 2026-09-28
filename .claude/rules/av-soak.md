@@ -26,7 +26,7 @@ align), so looping it would hide the drift. The soak only measures.
 | `scripts/av_soak_decision.py` | pure decision: `bounds`, `row` (one CSV row per window from the merged verdict JSON), `report` (1 h partial + full, exit 0 PASS / 1 FAIL / 2 UNKNOWN / 3 input error) |
 | `scripts/lib/av-soak-leftovers.sh` | the `--stop-leftovers` mode (`av_soak_stop_leftovers`): runs the `leftovers` plan, stops/clears, releases the soak's lease when nothing is left |
 | `scripts/av_soak_rig_state.py` | pure rig-state decisions over one `rig-busy-check` read: `broadcast` (live / unknown / idle -- may cleanup cut the strih program?) and `leftovers` (the `--stop-leftovers` plan: which flagged recording is provably the soak's) |
-| `bundle_state_gather.recordings_free_line` | the one "<VERDICT> <free_gb>" line the free-space read prints (recording-e2e.sh keeps its inline copy -- static-anchor minefield) |
+| `bundle_state_gather.recordings_free_line` | the one "<VERDICT> <free_gb>" line the free-space read prints; recording-e2e.sh's `check_recordings_free_space` reads it too, through `scripts/lib/recordings-free-line.sh` (issue 1386) |
 
 Every rig action is an existing primitive: the issue-830 lease (own holder name
 `camera-box-av-soak`, expected release = the whole run, so a CI E2E fails fast), the issue-281
