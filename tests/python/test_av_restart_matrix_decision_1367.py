@@ -69,11 +69,13 @@ def test_a_clean_window_passes():
 
 
 def test_the_av_bound_is_inclusive_and_read_from_its_source():
-    edge = m.grade_window(row(verdict({"cam1": TOL, "cam2": 0.0, "cam3": 0.0})), CAMS, BOUNDS)
+    # cam1 and cam3 move together, so the camera spread (cam2 excluded) stays within its bound
+    edge = m.grade_window(row(verdict({"cam1": TOL, "cam2": 0.0, "cam3": TOL})), CAMS, BOUNDS)
     assert edge["verdict"] == m.PASS, edge
-    over = m.grade_window(row(verdict({"cam1": TOL + 0.01, "cam2": 0.0, "cam3": 0.0})), CAMS, BOUNDS)
+    over = m.grade_window(row(verdict({"cam1": TOL + 0.01, "cam2": 0.0, "cam3": TOL})), CAMS, BOUNDS)
     assert over["verdict"] == m.FAIL
     assert any("av cam1" in r for r in over["reasons"])
+    assert not any("av cam3" in r for r in over["reasons"]), "exactly at the bound is inside"
 
 
 def test_the_av_residual_is_against_the_verdicts_expected_offset():
@@ -89,7 +91,10 @@ def test_a_camera_without_a_measured_offset_is_unknown_never_a_pass():
 
 
 def test_an_operator_excluded_camera_is_not_required():
-    g = m.grade_window(row(verdict(statuses={"cam3": "excluded"})), CAMS, BOUNDS)
+    # four cameras: with cam4 excluded, cam1 + cam3 still give the stream-output spread
+    cams = CAMS + ["cam4"]
+    v = verdict({"cam1": 3.0, "cam2": 4.0, "cam3": 5.0, "cam4": 0.0}, statuses={"cam4": "excluded"})
+    g = m.grade_window(row(v, cams=cams), cams, BOUNDS)
     assert g["verdict"] == m.PASS, g
 
 
