@@ -110,8 +110,11 @@ blocking gate degrades to a generic FAIL rather than a hidden one — but attrib
 Never re-inline it. Its input rules are the soak's: a non-finite or non-numeric count counts 0,
 `pass` must be `True`, a malformed segment list never crashes the report.
 `tests/python/test_cambox_segments_1386.py` pins the delegation and that both consumers agree on
-every fixture. The failure-reason line of the blocking section (which window is over its own
-tolerance) is a different rule and stays in this file.
+every fixture. The failure-reason line of the blocking section names the camera behind a red
+continuity with the gate's two per-window limits, `cambox_segments.over_copies_gaps_tolerance`
+(a multi-source window is never over) and `over_window_floor` -- the same two the soak's
+`gate_window_term` uses (issue 1386). Only the report's tolerance fallback for old verdicts (the
+window's own `copies_gaps_tolerance`, else the run-wide one, else 0) stays in this file.
 
 ## Fixtures
 

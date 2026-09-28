@@ -27,7 +27,7 @@ align), so looping it would hide the drift. The soak only measures.
 | `scripts/av_soak_decision.py` | pure decision: `bounds`, `row` (one CSV row per window from the merged verdict JSON), `report` (1 h partial + full, exit 0 PASS / 1 FAIL / 2 UNKNOWN / 3 input error) |
 | `scripts/lib/av-soak-leftovers.sh` | the `--stop-leftovers` mode (`av_soak_stop_leftovers`): runs the `leftovers` plan, stops/clears, releases the soak's lease when nothing is left |
 | `scripts/av_soak_rig_state.py` | pure rig-state decisions over one `rig-busy-check` read: `broadcast` (live / unknown / idle -- may cleanup cut the strih program?) and `leftovers` (the `--stop-leftovers` plan: which flagged recording is provably the soak's) |
-| `bundle_state_gather.recordings_free_line` | the one "<VERDICT> <free_gb>" line the free-space read prints; recording-e2e.sh's `check_recordings_free_space` reads it too, through `scripts/lib/recordings-free-line.sh` (issue 1386) |
+| `bundle_state_gather.recordings_free_line` | the one "<VERDICT> <free_gb>" line the free-space read prints; the soak's `av_soak_free_space_verdict` and recording-e2e.sh's `check_recordings_free_space` both read it through `scripts/lib/recordings-free-line.sh` (issue 1386), which `scripts/av-soak.sh` sources |
 
 Every rig action is an existing primitive: the issue-830 lease (own holder name
 `camera-box-av-soak`, expected release = the whole run, so a CI E2E fails fast), the issue-281
@@ -155,7 +155,9 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   An older verdict without the flags falls back to `relaxed_pass`, then `pass`. The strict
   `pass` and raw copies/gaps/undecodable are recorded. The per-camera grouping and those sums are
   the shared `scripts/cambox_segments.py` `per_camera` (issue 1386, the Discord report's
-  per-camera lines use the same one); only the gate-term grade is the soak's own.
+  per-camera lines use the same one); only the gate-term grade is the soak's own. Inside it, the
+  two per-window limits are `cambox_segments.over_copies_gaps_tolerance` / `over_window_floor`,
+  shared with the report's continuity failure line.
 - Continuity gate: the verdict's OWN `all_cambox_continuity.overall_pass` per window. It adds
   what the per-window term cannot see -- the run-wide undecodable sum over
   `RUN_UNDECODABLE_FLOOR` (`loss_run_wide_pass`, src/probe/recording_segments.rs) and an empty
