@@ -114,8 +114,26 @@ def test_drift_rc20_is_one_line_and_never_fatal(tmp_path):
     assert re.search(r"^\s+box=resolume win_baseline=DRIFT drift=power_scheme,", r.stdout, re.M), r.stdout
     assert re.search(r"^\s+box=stream win_baseline=DRIFT drift=wer_dontshowui$", r.stdout, re.M), r.stdout
     assert "ARGC=4" in r.stdout
-    # the live capture's own COMPUTERNAME (CRLF gather) is named per box
+    # the live capture's own COMPUTERNAME is named per box (the CR strip is pinned byte-level below:
+    # text=True turns \r\n into \n, so this line cannot see a stray CR)
     assert re.search(r"^\s+box=stream gathered from host=STREAM$", r.stdout, re.M), r.stdout
+
+
+def _gather_host_bytes(path):
+    r = subprocess.run(["bash", "-c", f'set -euo pipefail; . "{LIB}"; _e2e_wb_gather_host "{path}"'],
+                       capture_output=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    return r.stdout
+
+
+def test_gather_host_strips_the_crlf_of_a_windows_gather_and_never_fails(tmp_path):
+    raw = (FIX / "stream_live_2026-09-27.txt").read_bytes()
+    assert raw.startswith(b"==WINBASELINE-BEGIN== v1 host=STREAM\r\n")   # a real CRLF capture
+    assert _gather_host_bytes(FIX / "stream_live_2026-09-27.txt") == b"STREAM"
+    (tmp_path / "empty.txt").write_bytes(b"")
+    assert _gather_host_bytes(tmp_path / "empty.txt") == b"<none>"
+    assert _gather_host_bytes(tmp_path / "absent.txt") == b"<none>"
+    assert _gather_host_bytes(tmp_path) == b"<none>"   # a directory
 
 
 def test_the_run_log_names_the_machine_that_really_answered(tmp_path):
