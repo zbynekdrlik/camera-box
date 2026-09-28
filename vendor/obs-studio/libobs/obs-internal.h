@@ -574,9 +574,6 @@ struct obs_core_audio {
 	 * of every launch; OBS's dynamic increase stays active above it (obs-genlock-audio-buffering.h). */
 	int floor_buffering_ticks;
 	bool fixed_buffer;
-	/* camera-box issue 1381: the mixer tick counter of the mix buffering guard (obs-audio.c) -- a
-	 * source is in the mix on a tick when its genlock_mix_tick equals it. Audio thread only. */
-	uint64_t genlock_mix_tick;
 
 	pthread_mutex_t monitoring_mutex;
 	DARRAY(struct audio_monitor *) monitors;
