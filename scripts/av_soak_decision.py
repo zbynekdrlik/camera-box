@@ -5,7 +5,7 @@ Owner goal (24.9.2026, verbatim on the issue): on the stream OBS output the pict
 must be right, with no dropouts, and the sync must not drift apart for 8 hours; a real drift is
 already visible after about 1 h; and the cameras must stay in sync with each other.
 
-The orchestrator (scripts/av-soak.sh) records ONE short window per slot (default every 10 min),
+The orchestrator (scripts/av-soak.sh) records ONE short window per slot (default every 20 min),
 decodes it with the SAME recording-verdict the full-path E2E uses, and calls `row` here to append
 ONE CSV row per window. `report` grades the CSV. This module does NO rig I/O at all: it reads a
 verdict JSON / the CSV and two Rust source files, so it is exhaustively pytest-able under Tier-0
@@ -25,8 +25,8 @@ verdict JSON / the CSV and two Rust source files, so it is exhaustively pytest-a
     * `av_spread_ms` -- `max - min` of the measured per-camera A/V offsets, cam2 excluded (cam2's
       number pools the whole recording, whatever camera is on program). The audio reference is
       common, so this is the camera-to-camera alignment AT THE STREAM OUTPUT.
-  Which one the soak grades is an open design question on issue 1367 (comment 5858491691); the
-  default is the design as written (the gate's two spreads).
+  The passive soak grades `av_spread_ms` by default (ROZHODNUTÉ 5860604301); a run with capture
+  burns can pick the gate's two spreads.
 - **loss per camera** (`loss <cam>`): the term the gate itself folds for each of the camera's windows
   in `all_cambox_continuity.segments` (`gate_window_term`): src/window_gate.rs
   `decide_with_tolerance(...).overall_pass_term` with the issue-1367 multi-source scope
@@ -55,7 +55,7 @@ verdict JSON / the CSV and two Rust source files, so it is exhaustively pytest-a
   `|slope| - t*SE > 2 ms/h` (`SLOPE_BOUND_MS_PER_H`, the acceptance on issue 1367), PASS only when
   `|slope| + t*SE <= 2 ms/h`, UNKNOWN when the interval straddles the bound (per-window noise alone
   over 1 h cannot prove either). Needs >= 3 samples over >= 30 min.
-- **cadence**: the acceptance asks for a sample at least every slot (10 min), so every required
+- **cadence**: the acceptance asks for a sample at least every slot (20 min), so every required
   series must have no gap longer than the slot + 60 s start-jitter allowance (the slot is read from
   the CSV's `slot_s`; one missed slot is a 2-slot gap), counting the gap from the run's first window
   to the series' first sample and from its last sample to the last window.
@@ -107,8 +107,10 @@ _T95 = ((1, 12.706), (2, 4.303), (3, 3.182), (4, 2.776), (5, 2.571), (6, 2.447),
         (8, 2.306), (9, 2.262), (10, 2.228), (12, 2.179), (15, 2.131), (20, 2.086), (25, 2.060),
         (30, 2.042), (40, 2.021), (60, 2.000), (120, 1.980))
 _T95_INF = 1.960
-# "at least one every 10 min" on a fixed 10-min slot grid; the allowance absorbs the per-slot
-# pre-record steps' start jitter (never a missed slot, which is a 1200 s gap).
+# The orchestrator writes its slot into every row (`slot_s`; 1200 s by default since ROZHODNUTÉ
+# 5861667625: the strih-lx decode needs ~8 min per window). This is only the FALLBACK for a CSV
+# without it: the stricter 10-min grid. The allowance absorbs the per-slot pre-record steps' start
+# jitter (never a missed slot, which is a 2-slot gap).
 DEFAULT_SLOT_S = 600
 START_JITTER_ALLOWANCE_S = 60
 DEFAULT_MAX_GAP_S = DEFAULT_SLOT_S + START_JITTER_ALLOWANCE_S
@@ -597,7 +599,7 @@ def _state_series(name, points, run_start, run_end, max_gap_s, required, extra=N
 
 def max_gap_from_rows(rows):
     """The allowed sample gap for these rows: the largest `slot_s` written into the CSV + the start
-    jitter allowance; the 600 s default slot when the CSV carries none."""
+    jitter allowance; the 600 s fallback slot when the CSV carries none."""
     slots = [v for v in (_f(r.get("slot_s")) for r in rows) if v is not None and v > 0]
     return (max(slots) if slots else DEFAULT_SLOT_S) + START_JITTER_ALLOWANCE_S
 

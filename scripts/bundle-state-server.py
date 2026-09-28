@@ -663,6 +663,9 @@ def gather_bundle_state(
     t_total0 = time.perf_counter()
 
     log_text = _timed(timings, "obs_log_read", newest_obs_log_text, obs_log_dir)
+    # issue 1385 -- the box's local clock read right AFTER the log, so the log head's age against it
+    # (`obs_log_head_age_s`) proves the log is being written now; never re-read later in the gather.
+    log_read_tod = bsg.local_seconds_of_day()
 
     # #1265 — the reference source whose ts_lag BAND is watched (mbc on stream; env-overridable so a
     # future box with a different A/V reference can set it). A box that has no such source (strih)
@@ -723,13 +726,16 @@ def gather_bundle_state(
             # dev1 audio-mixer watchdog reads them. Appended at the END (order-sensitive unpack).
             bsg.audio_mixer_from_log(log_text, tail=stamped_tail),
             bsg.vban_pacer_loss_from_log(log_text, tail=stamped_tail),
+            # issue 1385 -- the log head's age against the box's own clock (the dev1 audio-mixer
+            # STALLED verdict's liveness proof). Appended at the END (order-sensitive unpack below).
+            bsg.obs_log_head_age_s_from_log(log_text, log_read_tod),
         )
 
     (obs_version, distroav_version, output_fps, genlock_wall_clock, genlock_capability,
      audio_ts_lag, audio_ref_band, av_offset, av_offset_dock_live_age_s_val, genlock_lock,
      program_render_lagged, av_offset_quality, relock_bursts,
-     av_offset_quality_age_s_val, buffered_ms_series, audio_mixer, vban_pacer) = _timed(
-        timings, "obs_log_parse", _parse_log_facets)
+     av_offset_quality_age_s_val, buffered_ms_series, audio_mixer, vban_pacer,
+     obs_log_head_age_s_val) = _timed(timings, "obs_log_parse", _parse_log_facets)
     (audio_mixer_ticks_val, audio_mixer_ticks_over_val, audio_mixer_window_ms_val,
      audio_mixer_tick_ms_val, audio_mixer_age_s_val) = audio_mixer
     (vban_pacer_loss_events_val, vban_pacer_loss_ms_val, vban_pacer_loss_dest_val,
@@ -921,6 +927,8 @@ def gather_bundle_state(
         vban_pacer_loss_ms=vban_pacer_loss_ms_val,
         vban_pacer_loss_dest=vban_pacer_loss_dest_val,
         vban_pacer_age_s=vban_pacer_age_s_val,
+        # issue 1385 -- the log head's age against the box's own clock (omit-when-empty).
+        obs_log_head_age_s=obs_log_head_age_s_val,
     )
 
     # #1299 — the genlock_lock facet is a NESTED object, not a flat string, so it is attached here

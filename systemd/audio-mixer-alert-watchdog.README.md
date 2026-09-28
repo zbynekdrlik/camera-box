@@ -13,6 +13,9 @@ It reads two facet groups `bundle_state_gather` exposes on each box's `:8899/bun
   thread's own clock, so `ticks` IS the per-minute rate (2812.5 = real time at 48 kHz).
   - **BEHIND** — `|ticks − 2812.5| > 5` (a surplus pages too: the mixer catching up in bursts).
   - **OVERLOADED** — `ticks_over > 30` (late ticks, gap > 1.5 ticks).
+  - **STALLED** (issue 1385) — the newest dump is > 180 s behind the log head AND the log head is at
+    most 60 s old on the box's own clock (`obs_log_head_age_s`): the audio thread stopped while OBS
+    keeps logging — silence on air on a box without VBAN outputs.
 - **`vban_pacer_*`** — per destination, how much the obs-vban pacer's loss counters grew inside the
   last 660 s of the log (two passes plus slack): underflows / overflows / trims on the shipped
   pacer, discontinuities / repays / resyncs + silence_ms / discarded_ms on the fixed-timeline
@@ -35,9 +38,16 @@ UNKNOWN.
   dantesync nightly date step (02:00 UTC) stretches that interval (60.193 s on 27.9) while the
   mixer is in real time.
 - `:8899` not fetchable → **SKIP** (the bundle-state / network-reach watchdogs own that page).
-- **STALE** (the dump or the pacer line stopped while the log advanced) is logged on the machine
-  channel only, never paged — the audio-lag sibling's rule.
-- 2 consecutive confirmations before a page; a HEALTHY pass clears the arm.
+- **STALE** (an old dump with no proof the log is live NOW — OBS down or hung, or a gather without
+  `obs_log_head_age_s`; or the pacer line stopped) is logged on the machine channel only, never
+  paged. obs-liveness / bundle-state own a dead OBS.
+- **CLOCK (once, stable key):** the OBS log advances between passes, yet its head reads old -- the
+  OBS log stamps and the gather clock disagree (time zone), so the mixer arm is blind on that box.
+  One `⚠️` page per incident (`audio-mixer-clock-<box>`), recovery machine-channel only.
+- 2 confirmations before a page; a HEALTHY pass clears the arm, and on the mixer arm a STALE pass
+  resets the pending confirmation (issue 1385: the date-less log of a dead OBS reads live ~70 s once
+  a day, and a held confirm would pair two such days into a false STALLED). A frozen log (head
+  older than 180 s) reads STALE and never grades its last counts.
 
 Replay proof (`tests/python/test_audio_mixer_replay_1381.py`, real 27.9 resolume log excerpts):
 03:00–04:15, a normal OBS start and the clean window after the 716 deploy never grade a paging
@@ -64,9 +74,12 @@ the new facets is deployed to the boxes.
 # 0. Deploy the bundle-state server files that carry the new facets to each box (the usual
 #    bundle-state-server.py + bundle_state_gather.py redeploy + BundleStateServer task / unit
 #    restart), then confirm the facets are served:
-curl -s http://resolume.lan:8899/bundle-state.json | python3 -m json.tool | grep -E 'audio_mixer|vban_pacer'
-curl -s http://10.77.9.204:8899/bundle-state.json | python3 -m json.tool | grep -E 'audio_mixer'
-curl -s http://10.77.9.202:8899/bundle-state.json | python3 -m json.tool | grep -E 'audio_mixer'
+curl -s http://resolume.lan:8899/bundle-state.json | python3 -m json.tool | grep -E 'audio_mixer|vban_pacer|obs_log_head'
+curl -s http://10.77.9.204:8899/bundle-state.json | python3 -m json.tool | grep -E 'audio_mixer|obs_log_head'
+curl -s http://10.77.9.202:8899/bundle-state.json | python3 -m json.tool | grep -E 'audio_mixer|obs_log_head'
+#    issue 1385 HARD ACCEPTANCE before step 2: `obs_log_head_age_s` must read 0-15 s on EACH box
+#    (the STALLED proof). Near a whole number of hours = OBS and the gather disagree on the time
+#    zone: fix the service environment first (the watchdog would page CLOCK and stay blind).
 
 # 1. Dry-run against the LIVE rig (read-only; no page):
 scripts/audio-mixer-alert-watchdog.sh --dry-run

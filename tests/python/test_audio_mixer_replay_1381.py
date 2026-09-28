@@ -76,9 +76,10 @@ def _replay(lines, phase_s):
             if v in PAGING[arm]:
                 confirm[arm] += 1
                 act = 1 if confirm[arm] >= 2 else 0
-            elif v == "HEALTHY":
+            elif v == "HEALTHY" or (arm == "mixer" and v == "STALE"):
                 confirm[arm] = 0
-            # SKIP / UNKNOWN / STALE hold the counter, exactly as the watchdog does.
+            # SKIP / UNKNOWN (and the VBAN arm's STALE) hold the counter, exactly as the watchdog
+            # does; the mixer arm's STALE resets it (issue 1385: a log that is not live).
             out[arm].append((t, v, confirm[arm], act))
         t += PASS_S
     return out

@@ -13,7 +13,8 @@ set -euo pipefail
 #   setup, once:
 #     - take the issue-830 rig lease under its OWN holder name (repo `camera-box-av-soak`) with an
 #       expected release = the whole run, so a CI E2E fails fast instead of waiting; refuse when a
-#       live foreign holder has it; start the issue-281 rig-active heartbeat
+#       live foreign holder has it; start the issue-281 rig-active heartbeat (its refresher also
+#       keeps this lease's heartbeat + release time fresh on every beat, issue 1383)
 #     - READ-ONLY checks first: the shared issue-1271 rig-busy guard; the stream program must
 #       ALREADY be the development scene (`Development`, issue 1380 -- TEST mode is a precondition,
 #       `scripts/rig-mode.sh test`); the strih program scene (snapshot, restored at cleanup); the
@@ -21,7 +22,7 @@ set -euo pipefail
 #     - the rig-busy guard again, then the mutations: the issue-1242 connect-on-show HOLD the E2E
 #       uses (connect-on-show-hold.sh -- a hidden program-path input would otherwise be cut in cold
 #       and parked), and the measurement burns ON (obs_burn_filter.py) only where they were OFF
-#   every slot (default every 600 s, on a fixed grid from the first slot):
+#   every slot (default every 1200 s, on a fixed grid from the first slot):
 #     - the lease still ours, both record volumes above RECORDINGS_FREE_MIN_GB (else the run STOPS),
 #       the stream program still the development scene and the painter service active (else the rig
 #       left TEST mode and the run STOPS; an unreadable read or a stalled marker log is a skipped
@@ -64,8 +65,8 @@ set -euo pipefail
 #
 # OPTIONS (env equivalent in brackets):
 #   --hours H          [AV_SOAK_HOURS, 8]        run length; the last window starts at H
-#   --slot-secs S      [AV_SOAK_SLOT_SECS, 600]  one window per slot (the acceptance: >= 1 per 10 min)
-#   --segment-secs S   [AV_SOAK_SEGMENT_SECS, 30] seconds each camera is on strih program per window
+#   --slot-secs S      [AV_SOAK_SLOT_SECS, 1200] one window per slot (>= 1 per 20 min; the strih-lx decode needs ~8 min)
+#   --segment-secs S   [AV_SOAK_SEGMENT_SECS, 20] seconds each camera is on strih program per window
 #   --run-dir D        [AV_SOAK_RUN_DIR, ~/.camera-box/av-soak/<UTC stamp>]
 #   --probe-bin-dir D  [PROBE_BIN_DIR]           dir holding the Linux recording-verdict
 #   --win-verdict-exe P [WIN_VERDICT_EXE_LOCAL]  the Windows recording-verdict.exe
@@ -74,6 +75,10 @@ set -euo pipefail
 #                      run id (the restart matrix, scripts/av-restart-matrix.sh, measures each window
 #                      with `--run --hours 0`): verified at setup and every slot, never acquired and
 #                      never released here (cleanup, --stop-leftovers); recording.state names no lease
+#   --lease-repo R     [AV_SOAK_LEASE_REPO, camera-box-av-soak]  the lease holder repo: with
+#                      --lease-run-id the CALLER's (required); the keep-alive refreshes only a
+#                      holder.json naming exactly this repo + run id, under the caller's exported
+#                      RIG_LEASE_MAX_HOLD_SECS
 # Other env: AV_SOAK_CAMS (default CAMERA_ACTIVE_SET; CAMBOX_OFFLINE_ACK/rig-fleet.txt acks are
 #   always removed), STRIH_HOST / STREAM_HOST (default from scripts/lib/obs-fleet.sh), PAINTER_IP
 #   (default cam2 from scripts/camera-set.sh), STRIH_CAPTURE_FPS / STREAM_CAPTURE_FPS (30, as
@@ -152,6 +157,7 @@ while [ "$#" -gt 0 ]; do
     --win-verdict-exe) need_value "$1" "$#"; WIN_VERDICT_EXE_LOCAL="$2"; shift ;;
     --spread-columns) need_value "$1" "$#"; AV_SOAK_SPREAD_COLUMNS="$2"; shift ;;
     --lease-run-id) need_value "$1" "$#"; AV_SOAK_LEASE_RUN_ID="$2"; shift ;;
+    --lease-repo) need_value "$1" "$#"; AV_SOAK_LEASE_REPO="$2"; shift ;;
     -h | --help) usage; exit 0 ;;
     *) die 3 "unknown argument '$1' (try --help)" ;;
   esac
@@ -161,8 +167,8 @@ done
 DECISION="$HERE/av_soak_decision.py"
 RIG_STATE="$HERE/av_soak_rig_state.py"
 HOURS="${AV_SOAK_HOURS:-8}"
-SLOT_S="${AV_SOAK_SLOT_SECS:-600}"
-SEGMENT_S="${AV_SOAK_SEGMENT_SECS:-30}"
+SLOT_S="${AV_SOAK_SLOT_SECS:-1200}"
+SEGMENT_S="${AV_SOAK_SEGMENT_SECS:-20}"
 MIN_SEGMENT_S="${AV_SOAK_MIN_SEGMENT_SECS:-10}"
 SPREAD_ARGS=()
 if [ -n "${AV_SOAK_SPREAD_COLUMNS+x}" ]; then SPREAD_ARGS=(--spread-columns "$AV_SOAK_SPREAD_COLUMNS"); fi
@@ -252,16 +258,27 @@ RUN_DIR="${AV_SOAK_RUN_DIR:-$HOME/.camera-box/av-soak/$STAMP}"
 CSV="$RUN_DIR/soak.csv"
 RIG_LEASE_REPO_NAME="${AV_SOAK_LEASE_REPO:-camera-box-av-soak}"
 RIG_LEASE_OURS="av-soak-${STAMP}-$$"
-# --lease-run-id: the caller (the restart matrix) holds the lease across its restarts; this run
-# verifies it and keeps its heartbeat fresh, but never acquires or releases it, and recording.state
-# names no lease (so --stop-leftovers of this run dir can never release the caller's lease).
+LEASE_HOLD_S=$(( DURATION_S + SLOT_S + 1800 ))
+LEASE_EXPECTED_AT="$(date -u -d "+${LEASE_HOLD_S} seconds" +%Y-%m-%dT%H:%M:%SZ)"
+_CALLER_MAX_HOLD_S="${RIG_LEASE_MAX_HOLD_SECS:-}"
+# issue 1383: the lease keep-alive stops beating past acquired_at + this ceiling (the declared run
+# window), so a stuck-but-alive soak still ages into the heartbeat-stale reclaim. Set before the
+# heartbeat refresher starts: its subshell inherits the value.
+RIG_LEASE_MAX_HOLD_SECS="$LEASE_HOLD_S"
+# --lease-run-id (+ --lease-repo): the caller (the restart matrix) holds the lease across its
+# restarts. This run verifies and refreshes it under the caller's OWN identity (repo + run id) and
+# the caller's hold ceiling (the RIG_LEASE_MAX_HOLD_SECS the caller exported -- the ceiling counts
+# from the caller's acquired_at, so this window's own would stop the beat early), but never acquires
+# or releases it; recording.state names no lease (so --stop-leftovers of this run dir can never
+# release the caller's lease).
 LEASE_INHERITED="${AV_SOAK_LEASE_RUN_ID:-}"
 REC_STATE_LEASE="$RIG_LEASE_OURS"
 if [ -n "$LEASE_INHERITED" ]; then
+  [ -n "${AV_SOAK_LEASE_REPO:-}" ] || die 3 "--lease-run-id needs --lease-repo (the caller's lease holder repo)"
   RIG_LEASE_OURS="$LEASE_INHERITED"
   REC_STATE_LEASE=""
+  if [ -n "$_CALLER_MAX_HOLD_S" ]; then RIG_LEASE_MAX_HOLD_SECS="$_CALLER_MAX_HOLD_S"; fi
 fi
-LEASE_EXPECTED_AT="$(date -u -d "+$(( DURATION_S + SLOT_S + 1800 )) seconds" +%Y-%m-%dT%H:%M:%SZ)"
 VERDICT_BIN="${PROBE_BIN_DIR:+$PROBE_BIN_DIR/recording-verdict}"
 
 # --- --plan: print every step, touch nothing ------------------------------------------------------
@@ -287,11 +304,11 @@ EOF
   echo
   echo "SETUP (once) -- reads first, nothing changes until step 6:"
   if [ -n "$LEASE_INHERITED" ]; then
-    echo "  1. rig lease (issue 830): the caller's rig lease ${LEASE_INHERITED} -- verified held (else refuse, exit 4), its heartbeat kept fresh, never acquired or released here"
-    echo "     rig_heartbeat_start av-soak (issue 281)"
+    echo "  1. rig lease (issue 830): the caller's rig lease ${LEASE_INHERITED} (repo ${RIG_LEASE_REPO_NAME}) -- verified + refreshed with rig_lease_refresh_if_mine (else refuse, exit 4), never acquired or released here"
+    echo "     rig_heartbeat_start av-soak ${RIG_LEASE_REPO_NAME} ${RIG_LEASE_OURS} (issue 281; every beat refreshes the caller's lease under its hold ceiling ${RIG_LEASE_MAX_HOLD_SECS:-4500} s, issue 1383)"
   else
     echo "  1. rig lease (issue 830): rig_lease_acquire repo=${RIG_LEASE_REPO_NAME} run_id=${RIG_LEASE_OURS} job=av-soak expected_release_at=${LEASE_EXPECTED_AT}"
-    echo "     a live foreign holder -> refuse (exit 4); rig_heartbeat_start av-soak (issue 281)"
+    echo "     a live foreign holder -> refuse (exit 4); rig_heartbeat_start av-soak ${RIG_LEASE_REPO_NAME} ${RIG_LEASE_OURS} (issue 281; every beat refreshes this lease, issue 1383)"
   fi
   echo "  2. rig-busy guard (issue 1271, read-only): stray_session_check_assert ${OBS_DIR} ${STRIH_HOST} ${STREAM_HOST} 'the av-soak setup'"
   echo "  3. read-only: stream program must be '${STREAM_DEV_SCENE}' (else refuse: run scripts/rig-mode.sh test first); strih program snapshot:"
@@ -657,11 +674,13 @@ trap 'ABORT_REASON="SIGHUP"; exit 5' HUP
 # ---- setup ----
 log "run dir $RUN_DIR; ${WINDOWS} window(s) of ${WINDOW_S} s every ${SLOT_S} s; cameras: $SOAK_CAMS"
 if [ -n "$LEASE_INHERITED" ]; then
-  _holder="$(rig_lease_read_holder_field run_id 2>/dev/null || true)"
-  [ "$_holder" = "$LEASE_INHERITED" ] \
-    || die 4 "the rig lease is not held by the caller's run id ${LEASE_INHERITED} (holder: '${_holder:-none}') -- --lease-run-id runs only under a lease its caller holds"
-  rig_lease_heartbeat_touch
-  log "running under the caller's rig lease ${LEASE_INHERITED} (verified; never acquired or released here)"
+  # the caller's lease, verified by the ONE holder keep-alive (issue 1383): only a holder.json naming
+  # exactly this repo + run id, under the caller's hold ceiling, is refreshed (rc 0)
+  _lease_rc=0
+  _lease_out="$(rig_lease_refresh_if_mine "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" 2>&1)" || _lease_rc=$?
+  [ "$_lease_rc" = 0 ] \
+    || die 4 "the rig lease is not held by the caller ${RIG_LEASE_REPO_NAME}#${LEASE_INHERITED} (${_lease_out#RIG_LEASE_REFRESH=}) -- --lease-run-id runs only under a lease its caller holds"
+  log "running under the caller's rig lease ${RIG_LEASE_REPO_NAME}#${LEASE_INHERITED} (verified; never acquired or released here)"
 else
   set +e
   lease_out="$(rig_lease_acquire "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" "" av-soak "$LEASE_EXPECTED_AT")"
@@ -671,7 +690,7 @@ else
   [ "$lease_rc" -eq 0 ] || die 4 "the rig lease is held (${lease_out#RIG_LEASE_HELD_BY=}) -- rerun when it is free"
   LEASE_HELD=1
 fi
-rig_heartbeat_start av-soak || log "WARNING: could not start the rig-active heartbeat"
+rig_heartbeat_start av-soak "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" || log "WARNING: could not start the rig-active heartbeat"
 SETUP_STARTED=1
 
 guard_ok "the av-soak setup reads" || refuse "the rig is busy (recording or streaming) at setup"
@@ -728,6 +747,29 @@ add_row() {  # K EPOCH OUTCOME [VERDICT_JSON] [RC] [RUN_ID]
     || log "WARNING: could not append the slot-$1 row"
 }
 
+# issue 1383: the soak's own lease keep-alive (slot start + the between-slot wait) on the one holder
+# helper. Not ours any more -> abort; past the declared window (the hold ceiling) -> abort with that
+# reason; a filesystem error -> log and carry on (the heartbeat refresher beats again within 30 s).
+soak_lease_keepalive() {
+  local out="" rc=0
+  out="$(rig_lease_refresh_if_mine "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" 2>&1)" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    2)
+      log "WARNING: could not refresh the rig lease (${out#RIG_LEASE_REFRESH=}) -- next beat retries"
+      return 0
+      ;;
+    3)
+      ABORT_REASON="the soak ran past its declared lease window (${out#RIG_LEASE_REFRESH=})"
+      return 1
+      ;;
+    *)
+      ABORT_REASON="the rig lease is no longer ours"
+      return 1
+      ;;
+  esac
+}
+
 run_slot() {
   local k="$1" sd pk probe rid seg scene label ns start_ns="" outcome=ok bounds=() rc box host fs sp tp
   local strih_path="" stream_path="" marker_win sched_win partial_win strih_argv stream_argv merge_argv
@@ -736,8 +778,7 @@ run_slot() {
   pk="$(printf '%03d' "$k")"
   sd="$RUN_DIR/slot-$pk"
   mkdir -p "$sd"
-  [ "$(rig_lease_read_holder_field run_id)" = "$RIG_LEASE_OURS" ] || { ABORT_REASON="the rig lease is no longer ours"; exit 5; }
-  rig_lease_heartbeat_touch
+  soak_lease_keepalive || exit 5
   for box in strih stream; do
     if [ "$box" = strih ]; then host="$STRIH_HOST"; else host="$STREAM_HOST"; fi
     fs="$(av_soak_free_space_verdict "$host" "$BUNDLE_STATE_PORT" "$RECORDINGS_FREE_MIN_GB" "$HERE")"
@@ -944,7 +985,7 @@ wait_until() {  # TARGET_EPOCH -> 0 when reached, 1 when STOP was requested; a b
     fi
     left=$(( target - now ))
     [ "$left" -gt 0 ] || break
-    rig_lease_heartbeat_touch
+    soak_lease_keepalive || exit 5
     isleep $(( left < 10 ? left : 10 ))
   done
   if [ "$left" -lt -60 ]; then log "slot starts $(( -left )) s late (the previous slot overran)"; fi
