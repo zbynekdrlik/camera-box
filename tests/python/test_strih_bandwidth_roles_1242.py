@@ -9,8 +9,6 @@ Covers:
     (twin sizing, nested scenes, drift, operator-wins membership, retirement, empty/colliding names);
   * the vendored OBS multiview cell-target key (python <-> C++ literal pin);
   * scripts/strih_scenes.py --apply-roles delegation + the launch path;
-  * scripts/obs_phase2.py hidden_by_design;
-  * scripts/set-ndi-mapping.py --verify-live never calls a parked input FROZEN.
 """
 import copy
 import importlib.util
@@ -35,8 +33,6 @@ def _load(name, path):
 
 ss = _load("strih_scenes_1242", SCRIPTS / "strih_scenes.py")
 roles = _load("strih_bandwidth_roles_1242", SCRIPTS / "strih_bandwidth_roles.py")
-op = _load("obs_phase2_1242", SCRIPTS / "obs_phase2.py")
-snm = _load("set_ndi_mapping_1242", SCRIPTS / "set-ndi-mapping.py")
 
 PLAN = ss.seed_inputs([
     {"sender": "CAM1 (usb)", "input": "NDI cam1", "scene": "Cam 1"},
@@ -501,35 +497,6 @@ def test_setup_strih_installs_the_roles_module_next_to_the_seeder():
 def test_strih_mv_scenes_shares_the_one_settable_transform_list():
     src = (SCRIPTS / "strih_mv_scenes.py").read_text()
     assert "from strih_bandwidth_roles import SETTABLE_TRANSFORM_FIELDS" in src
-
-
-# ------------------------------------------------------------------------------------------------
-# obs_phase2: hidden_by_design
-# ------------------------------------------------------------------------------------------------
-
-def test_hidden_by_design():
-    assert op.hidden_by_design({"genlock_fifo": True, "genlock_connect_on_show": True}, showing=False)
-    assert not op.hidden_by_design({"genlock_fifo": True, "genlock_connect_on_show": True}, showing=True)
-    assert not op.hidden_by_design({"genlock_fifo": True}, showing=False)  # issue-764 keep-alive role
-    assert not op.hidden_by_design({"genlock_fifo": True, "genlock_connect_on_show": True,
-                                    "genlock_monitor": True}, showing=False)  # a twin never parks
-    assert not op.hidden_by_design({"genlock_connect_on_show": True}, showing=False)  # not genlocked
-
-
-def test_verify_live_skips_a_hidden_by_design_input():
-    logs = []
-    want = [("NDI cam1", "CAM1 (usb)"), ("NDI cam2", "CAM2 (usb)")]
-    sampled = []
-
-    def sampler(ws, inp):
-        sampled.append(inp)
-        return op.LIVENESS_FROZEN, "held frame"
-
-    live, frozen, inc = snm.verify_live_mapping(op, None, want, sampler, logs.append,
-                                                hidden=lambda ws, inp: inp == "NDI cam2")
-    assert sampled == ["NDI cam1"], "a parked input is never screenshot-sampled"
-    assert (live, frozen, inc) == (0, 1, 0)
-    assert any("hidden by design" in m for m in logs)
 
 
 def test_e2e_hold_marker_with_a_future_mtime_still_expires(tmp_path):

@@ -3113,37 +3113,6 @@ def dev_scene(a):
     print(f"DEV_SCENE={a.scene} created={created} nested_added={added}")
 
 
-# --- issue 1242: strih connect-on-show (program-path inputs connect only while shown) ---------------
-# The vendored DistroAV receiver PARKS a genlocked input flagged `genlock_connect_on_show` (and not a
-# `genlock_monitor` twin) while nothing shows it: its NDI receiver is released, its received= counter
-# stops. The strih scene role lib (strih_scenes.py --apply-roles) sets the flag on the camera inputs.
-CONNECT_ON_SHOW_KEY = "genlock_connect_on_show"
-GENLOCK_MONITOR_KEY = "genlock_monitor"
-
-
-def hidden_by_design(settings, showing):
-    """PURE (no WebSocket): is this input hidden BY DESIGN right now? True iff it is a program-path
-    main PARKED by connect-on-show: genlocked, flagged connect-on-show, NOT a monitor twin, and not
-    showing anywhere. A consumer (e.g. a liveness verify) must then SKIP it -- its blank picture
-    (DistroAV deactivates the texture) is the design, never a wedge."""
-    s = settings or {}
-    return (bool(s.get("genlock_fifo")) and bool(s.get(CONNECT_ON_SHOW_KEY))
-            and not bool(s.get(GENLOCK_MONITOR_KEY)) and not showing)
-
-
-def input_hidden_by_design(ws, input_name):
-    """IMPURE wrapper: read the input's settings (+ GetSourceActive videoShowing for a connect-on-show
-    main) and apply hidden_by_design. A failed read -> False (never SKIP a check on a can't-confirm)."""
-    settings = (_rpc(ws, "GetInputSettings", {"inputName": input_name}, ignore_err=True)
-                or {}).get("inputSettings") or {}
-    if not settings.get(CONNECT_ON_SHOW_KEY):
-        return False
-    active = _rpc(ws, "GetSourceActive", {"sourceName": input_name}, ignore_err=True) or {}
-    if "videoShowing" not in active:
-        return False
-    return hidden_by_design(settings, bool(active.get("videoShowing")))
-
-
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
