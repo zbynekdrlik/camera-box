@@ -12,7 +12,7 @@
  *
  * The GEOMETRY (`cb_top_band_decode_plan`) and the Otsu threshold mirror `src/av_sync_dock.rs`
  * (Tier-0 tested); the box-downscale is a plain area filter. Dependency-free (STL + <cstdint>), so
- * the committed self-test cross-checks it standalone. The quirc driving stays in sync-test-output.cpp.
+ * the committed self-test cross-checks it standalone. The quirc driving stays in sync-test-output-video.cpp.
  */
 
 #include <cstdint>

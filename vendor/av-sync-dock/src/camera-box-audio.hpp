@@ -38,7 +38,7 @@
 #include "camera-box-marker-scan.hpp"
 
 /* The measurement source: the cam2 QPSK marker input on the stream box. The dock's audio decode gate
- * (sync-test-output.cpp, issue 1381) looks it up by this name, and its ASRC section
+ * (sync-test-output-video.cpp, issue 1381) looks it up by this name, and its ASRC section
  * (sync-test-dock.cpp's CAMERA_BOX_ASRC_SOURCE_NAME) is the same source. resolume and strih have no
  * such source. */
 #define CAMERA_BOX_MEASURE_SOURCE_NAME "mbc"
@@ -212,7 +212,7 @@ struct RollingOffsetCluster {
 	}
 };
 
-/* #1005 -- mirror of av_sync_dock::corrected_video_ts_is_valid. Whether a sync-test-output.cpp
+/* #1005 -- mirror of av_sync_dock::corrected_video_ts_is_valid. Whether a sync-test-output-audio.cpp
  * camera-box emit site's corrected video timestamp (audio_ts - smoothed_ns / audio_ts -
  * locked_ns, a SIGNED value) is usable at all. Both camera-box emit sites used to CLAMP a
  * negative result to 0 instead of dropping the event -- a video_ts of exactly 0 is not a
@@ -234,7 +234,7 @@ inline bool cb_corrected_video_ts_is_valid(int64_t corrected_video_ts)
  * and decides WHAT (if anything) is worth a log line: a lock acquired, a lock lost, or the
  * locked offset moving enough to matter — never a re-log of an unchanged, already-locked value
  * (that would spam a line per marker, ~once every few seconds while locked, for no new
- * information). The dock-side glue (sync-test-output.cpp) just `push()`es this every estimate
+ * information). The dock-side glue (sync-test-output-audio.cpp) just `push()`es this every estimate
  * and `blog()`s the returned event — kept deliberately trivial so it doesn't need the 150-min
  * windows-genlock.yml frontend build to verify; this class is unit-tested off-rig via the same
  * twin-harness pattern as tests/obs_titlebar_newlevel_parse.rs (see
@@ -369,7 +369,7 @@ static const double CB_DOCK_LOCK_MIN_MARGIN_MS = 1.0;
  * #257 (genlock env removal) and #912 (ASRC default-on) -- no env var, no WebSocket flag, no
  * per-source opt-in; flipping this back on is a deliberate future code change, never a config
  * value. Mirror of src/av_sync_dock.rs::DOCK_LOCK_ACTUATION_ENABLED / dock_lock_may_actuate() --
- * the caller (sync-test-output.cpp) MUST consult cb_dock_lock_may_actuate() before ever writing a
+ * the caller (sync-test-output-audio.cpp) MUST consult cb_dock_lock_may_actuate() before ever writing a
  * decide() Apply result to the live actuator; the corrector keeps MEASURING and its caller keeps
  * DISPLAYING the computed offset/margin/implied correction (a "SUGGESTED" log line), it simply
  * never applies it while this is false. */
@@ -466,7 +466,7 @@ private:
 	uint64_t last_applied_ns_;
 };
 
-/* #955 -- the log-level OUTCOME sync-test-output.cpp derives from a CbDockLockAction result:
+/* #955 -- the log-level OUTCOME sync-test-output-audio.cpp derives from a CbDockLockAction result:
  * whether to WRITE the actuator, DISPLAY a monitor-only suggestion, warn that a hardware rail is
  * pinned with the "audio never early" invariant still violated, or say nothing. Extracted as a
  * byte-identical pure function purely so this branch selection -- previously ONLY a source-text
@@ -544,7 +544,7 @@ struct CbLatencyDisplay {
 
 /* #999 -- SyncTestDock::on_sync_found (sync-test-dock.cpp) is a code path #953 NEVER touched (git
  * show <953-commit> -- sync-test-dock.cpp is empty). #953 fixed the sign convention only at the
- * OBS **log** call sites inside st_raw_audio_camera_box (sync-test-output.cpp's LOCKED/UPDATED/
+ * OBS **log** call sites inside st_raw_audio_camera_box (sync-test-output-audio.cpp's LOCKED/UPDATED/
  * UNLOCKED/SUGGESTED blog() lines, via cb_dock_lock_display_offset_ms()) -- a completely separate
  * mechanism from the dock's own sync_index/on_sync_found UI-update path, which computes
  * ts = audio_ts - video_ts directly and displays it in norihiro's ORIGINAL, un-gate-converted
@@ -651,7 +651,7 @@ enum class CbDockStaleTransition {
  * an explicit STALE / NO-SIGNAL state instead of holding the last locked offset forever.
  *
  * The dock's lock state + displayed offset are updated ONLY when a decoded audio marker is
- * ring-paired with a video QR (sync-test-output.cpp::st_raw_audio_camera_box). When the rig enters
+ * ring-paired with a video QR (sync-test-output-audio.cpp::st_raw_audio_camera_box). When the rig enters
  * EVENT mode the cam2 QPSK marker + dual-QR stop entirely, so no new marker is decoded, no
  * CbLockAuditTracker Unlocked ever fires, and the last locked offset (and `locked=yes`) is held
  * indefinitely -- an operator reads a frozen number as a live measurement. This watches the two

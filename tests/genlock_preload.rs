@@ -23,6 +23,11 @@ use camera_box::probe::genlock::{
     GENLOCK_REARM_EMPTY_TICKS, MAX_ASYNC_FRAMES,
 };
 
+// issue 1386: the dock output's split sources, read as one text.
+#[allow(dead_code)]
+#[path = "support/av_sync_dock_output.rs"]
+mod av_sync_dock_output;
+
 // ---- pure decision logic ---------------------------------------------------
 
 #[test]
@@ -1108,9 +1113,10 @@ mod vendored_source {
     pub const OBS_CORE_C: &str = "vendor/obs-studio/libobs/obs.c";
     pub const WINDOWS_GENLOCK_WF: &str = ".github/workflows/windows-genlock.yml";
     pub const WINDOWS_GENLOCK_FAST_WF: &str = ".github/workflows/windows-genlock-fast.yml";
-    // #942: the LIVE dock's pure decision header + its OBS glue caller.
+    // #942: the LIVE dock's pure decision header + its OBS glue caller (issue 1386: the glue is
+    // split over several files, read as one through `av_sync_dock_output::source()`).
     pub const AV_SYNC_DOCK_AUDIO: &str = "vendor/av-sync-dock/src/camera-box-audio.hpp";
-    pub const AV_SYNC_DOCK_OUTPUT: &str = "vendor/av-sync-dock/src/sync-test-output.cpp";
+    pub const AV_SYNC_DOCK_OUTPUT: &str = super::av_sync_dock_output::LABEL;
     // #803/#960: the per-source ASRC servo -- constants/struct live in the header, the
     // starvation guard's logic in the .c.
     pub const ASRC_COMPENSATOR_H: &str = "vendor/obs-studio/libobs/media-io/asrc-compensator.h";
@@ -3352,7 +3358,7 @@ mod vendored_source {
              missing; the caller has nothing to gate its actuator write on."
         );
 
-        let output = squish(&vendor_file(AV_SYNC_DOCK_OUTPUT));
+        let output = squish(&super::av_sync_dock_output::source());
         // #955: the Write/Suggest/RailWarn/Quiet decision is now a pure extracted function
         // (cb_dock_lock_outcome(), tests/av_sync_dock_outcome_955.rs proves its OWN behavior
         // byte-identically); this file only needs to prove the CALLER actually wires the real
@@ -3394,7 +3400,7 @@ mod vendored_source {
         // branch must NOT do -- a naive substring check on the raw text (with comments left in)
         // would find that prose and could mask a real regression, or misfire on an innocent
         // comment edit. See strip_cpp_comments()'s own doc comment for why.
-        let output_nc = squish(&strip_cpp_comments(&vendor_file(AV_SYNC_DOCK_OUTPUT)));
+        let output_nc = squish(&strip_cpp_comments(&super::av_sync_dock_output::source()));
         const SUGGEST_CASE_START: &str = "case camerabox::CbDockLockOutcome::Suggest: {";
         assert_eq!(
             output_nc.matches(SUGGEST_CASE_START).count(),

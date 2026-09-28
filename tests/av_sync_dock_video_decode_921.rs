@@ -2,7 +2,7 @@
 //!
 //! Issue 690 found the LIVE dock's video-QR decode rate collapsing to ~2% at steady state (from
 //! ~55.6% shortly after launch) even though `st_raw_video_camera_box_decode`
-//! (`vendor/av-sync-dock/src/sync-test-output.cpp`) already runs the #398 top-band, area-downscale,
+//! (`vendor/av-sync-dock/src/sync-test-output-video.cpp`) already runs the #398 top-band, area-downscale,
 //! Otsu-binarized-retry decode, not norihiro's crude whole-frame downscale. Per this repo's
 //! standing rule (`.claude/rules/pattern-change-needs-decode-fixture.md`, "Zmena vzoru => decode
 //! fixture test"), NO decode change lands without an offline test over REAL captured frames — this
@@ -90,7 +90,7 @@ static std::vector<uint8_t> read_fixture(const char *path, size_t expect)
     return buf;
 }
 
-/* Mirrors sync-test-output.cpp's st_raw_video_camera_box_decode() exactly, minus the OBS
+/* Mirrors sync-test-output-video.cpp's st_raw_video_camera_box_decode() exactly, minus the OBS
  * video_data/pixel-format plumbing -- each fixture is already a tight row-major 8bpp luma buffer
  * at stride==width. `cache` == nullptr reproduces TODAY's unconditional per-frame resize; a
  * non-null cache exercises the #921 fix. */

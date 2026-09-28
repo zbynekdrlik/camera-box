@@ -156,7 +156,7 @@ ruled the skew is not his to fix — the gate must be robust to it.
   stayed at cluster 2, below the floor of 4.
 
 ## The live dock applies the same rule per channel (issue 1367, design 5856569255)
-`st_raw_audio_camera_box` (`vendor/av-sync-dock/src/sync-test-output.cpp`) no longer averages the
+`st_raw_audio_camera_box` (`vendor/av-sync-dock/src/sync-test-output-audio.cpp`) no longer averages the
 channels. It hands every channel's plane to `camerabox::ChannelMarkerPicker`
 (`vendor/av-sync-dock/src/camera-box-channel-pick.hpp`, split out of the over-budget
 `camera-box-audio.hpp`) and pairs only the markers the picker returns.
@@ -223,7 +223,7 @@ channels. It hands every channel's plane to `camerabox::ChannelMarkerPicker`
   workflows, which checks the same list (including the two ADJACENCY needles that pin the
   `prev_channel` capture before the push and the switch note right after it), slicing the same three
   function bodies (the callback, `cb_ensure_audio_picker`, `cb_note_channel_switch`) with a
-  brace-matching `Get-Body` helper, so a slice never runs into the next function's comment. Replay the pwsh
+  brace-matching `Get-DockBody` helper (issue 1386: shared, in `vendor/av-sync-dock/test/dock-output-source.ps1`), so a slice never runs into the next function's comment. Replay the pwsh
   checks from the YAML text itself before pushing (a python `re.sub(r"\s+", " ", …)` + the literal
   lists), since pwsh only runs on the Windows runner. The pwsh slices keep comments, so a comment
   inside `st_raw_audio_camera_box` must never spell `acc +=`, `/ (float)ch`,
@@ -232,6 +232,6 @@ channels. It hands every channel's plane to `camerabox::ChannelMarkerPicker`
   `-A clippy::duplicate_mod` to its clippy-driver run, since two test files there share one
   `#[path]` module — in the real layout each test file is its own crate), each std-only anchor test
   also through `clippy-driver --test -D warnings` as its own crate, `g++ -std=c++11 -Wall -Wextra
-  -Werror` on both test programs, and `-fsyntax-only` of `sync-test-output.cpp` with the two
+  -Werror` on both test programs, and `-fsyntax-only` of each dock output TU (`sync-test-output{,-video,-audio}.cpp`) with the two
   stub headers (`.claude/rules/av-sync-dock-decode-worker.md`). The dock change is live only after a
   FULL-bundle Windows deploy (`.claude/rules/rig-state-inspection.md`).

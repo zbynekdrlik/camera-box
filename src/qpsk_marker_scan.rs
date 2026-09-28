@@ -146,7 +146,7 @@ impl RefineWindow {
 /// kernel behind [`crate::qpsk_marker::decode_markers_with_stats`], which scans from 0, and the live dock's
 /// [`crate::av_sync_dock::StreamingMarkerDecoder`], which scans only the positions not final yet).
 ///
-/// The norihiro demod (`sync-test-output.cpp::st_raw_audio_decode_data`): IQ-demodulate each symbol
+/// The norihiro demod (`sync-test-output-audio.cpp::st_raw_audio_decode_data`): IQ-demodulate each symbol
 /// against the carrier (`Z = Σ signal·e^{-iθ}`, computed O(1) via prefix sums), derotate by the
 /// known preamble phasor (absorbs any carrier-phase / sub-sample-alignment error — the reason plain
 /// cross-correlation fails on a carrier), read the two bits per symbol from the derotated real/imag
