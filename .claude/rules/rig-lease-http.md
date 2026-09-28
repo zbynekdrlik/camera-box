@@ -7,7 +7,10 @@ paths:
   - "tests/python/test_rig_lease_state_1277.py"
   - "tests/python/test_rig_lease_server_1277.py"
   - "scripts/lib/rig-heartbeat.sh"
+  - "scripts/rig_lease_refresh.py"
+  - "scripts/rig-busy-gate.sh"
   - "tests/python/test_rig_lease_refresh_1383.py"
+  - "tests/python/test_rig_lease_refresh_races_1383.py"
 ---
 
 # rig-lease HTTP exposure (#1277) — the read-only window onto the #830 lockdir for a foreign host
@@ -46,41 +49,61 @@ snapshot. Full mirror contract (which field is null under which condition) lives
 Found 27.9.2026 22:15 UTC: a healthy release E2E read as "hung" to a peer session (`ttl_s -273`,
 `heartbeat_age_s 2959`) — the lease heartbeat was touched only by `rig-busy-gate.sh` at acquire and
 `expected_release_at` stayed acquire + 45 min (`RIG_LEASE_HOLD_SECS`) for a ~60-70 min run. Since
-issue 1383 the holder keeps its own lease truthful for as long as it is alive:
+issue 1383 the holder keeps its own lease truthful from acquire to release:
 
-- **Who beats:** the issue-281 refresher (`scripts/lib/rig-heartbeat.sh` `rig_heartbeat_start`),
-  which already runs for the whole `recording-e2e.sh` run and the whole `av-soak.sh` run, calls
-  `rig_lease_refresh_if_mine <repo> <run_id>` (`scripts/lib/rig-lease.sh`) at start and on every beat
-  (`RIG_HEARTBEAT_REFRESH_SEC`, default 30 s) — AFTER its owner `kill -0` check, so a SIGKILLed run's
-  lease stops being beaten within one tick and still ages into the 90-min heartbeat-stale reclaim.
-  `recording-e2e.sh` is untouched (static-anchor minefield); the soak also keeps its slot-boundary
-  ownership check + wait-loop keep-alive on the SAME helper.
-- **What a beat does:** bump the lease `heartbeat` mtime and roll `expected_release_at` to
-  **max(current, now + `RIG_LEASE_LOOKAHEAD_SECS`)** (default 900 s = 15 min) — never backward, so a
-  holder that declared a longer run up front (the soak declares its whole run so a CI E2E fails fast)
-  keeps that declaration.
-- **How it knows the lease is its own:** the holder.json `repo` + `run_id` must equal the identity
-  the refresher was started with — explicit `rig_heartbeat_start <label> <repo> <run_id>` (the soak:
-  `camera-box-av-soak` + its `av-soak-<stamp>-<pid>`), else `RIG_LEASE_REPO`/`RIG_LEASE_RUN_ID`, else
-  `GITHUB_REPOSITORY`/`GITHUB_RUN_ID` — the SAME resolution `rig-busy-gate.sh` uses to name the holder
-  it acquires for, and the E2E step (`exec bash scripts/recording-e2e.sh`) carries the same GitHub
-  run id the gate step took the lease for. An empty identity (a local run) never touches the lease.
+- **One helper:** `rig_lease_refresh_if_mine <repo> <run_id>` (`scripts/lib/rig-lease.sh`, a thin
+  wrapper over `scripts/rig_lease_refresh.py`). A beat bumps the lease `heartbeat` mtime and rolls
+  `expected_release_at` to **max(current, now + `RIG_LEASE_LOOKAHEAD_SECS`)** (default 900 s) —
+  never backward, so a holder that declared a longer run up front (the soak declares its whole run
+  so a CI E2E fails fast) keeps that declaration. Return codes: 0 refreshed, 1 not ours, 2 an fs
+  error, 3 past the hold ceiling.
+- **Three beaters, so there is no unbeaten window:**
+  1. `rig-busy-gate.sh` — its busy-wait beats through the helper, and on its success path it starts
+     `rig_lease_keepalive_spawn`: a detached, lease-only loop (every `RIG_LEASE_KEEPALIVE_SEC`,
+     default 30 s, all fds on `/dev/null`) that lives until the lease is released or goes foreign or
+     the ceiling is reached; the runner's end-of-job orphan cleanup ends it at the latest. It covers
+     the ~18 min between the acquire and the E2E's own refresher (the verdict-exe fetch step and the
+     first preflight, measured on run 36351718907).
+  2. The issue-281 refresher (`scripts/lib/rig-heartbeat.sh` `rig_heartbeat_start`) of
+     `recording-e2e.sh` (unchanged — static-anchor minefield) and of `av-soak.sh`, at start and on
+     every beat (`RIG_HEARTBEAT_REFRESH_SEC`, 30 s), AFTER its owner `kill -0` check. Its start beat
+     prints one `[rig-heartbeat] lease keep-alive <repo>#<run_id>: RIG_LEASE_REFRESH=…` line on
+     stderr, so a mismatched identity is visible in the run log.
+  3. `av-soak.sh` itself at every slot start and in the between-slot wait (not ours → abort; past its
+     window → abort with that reason; an fs error → logged, carry on).
+- **The hold CEILING keeps the #830 "never a permanent deadlock" backstop:** no beat past
+  `acquired_at + RIG_LEASE_MAX_HOLD_SECS` (default 4500 s = `full-path-e2e.yml`'s `timeout-minutes:
+  75`, lock-stepped by a test; the soak sets its declared run window). An unparseable `acquired_at`
+  is refused. So "alive" means "within its declared hold", not merely "the process still exists": a
+  stuck-but-alive holder stops being beaten and ages into the `RIG_LEASE_STALE_SECS` reclaim.
+- **How a beater knows the lease is its own:** holder.json `repo` + `run_id` must equal the identity
+  it was started with — explicit arguments (the soak: `camera-box-av-soak` + its
+  `av-soak-<stamp>-<pid>`; the gate: its own `RIG_LEASE_REPO`/`RIG_LEASE_RUN_ID`), else for the
+  refresher the same env precedence the gate uses (`RIG_LEASE_REPO`/`RIG_LEASE_RUN_ID`, else
+  `GITHUB_REPOSITORY`/`GITHUB_RUN_ID` — the E2E step (`exec bash scripts/recording-e2e.sh`) carries
+  the run id the gate step took the lease for), but WITHOUT the gate's local fallback
+  (`camera-box-local`/`local-<pid>`): an empty identity never touches the lease.
 - **Safety of the write:** ONE python process anchored on a directory FD of the lease dir. A missing
   lease dir, a missing/corrupt `holder.json`, a foreign holder or an empty identity is a no-op that
   creates nothing (a foreign heartbeat never moves, a released lease is never re-created);
-  `holder.json` is replaced by temp + rename (the :8890 reader sees the old or the new complete file,
-  never a truncated one); a lease renamed aside by a concurrent release (#857) is written only in
-  its detached copy, never at the lease path, and a NEW holder's lockdir is a different directory
-  the FD never reaches; `holder.json` is re-read just before the rename and a changed owner wins.
+  `holder.json` is replaced by an O_EXCL temp + rename (the :8890 reader sees the old or the new
+  complete file); the heartbeat and the temp are opened O_NOFOLLOW. Just before the rename,
+  holder.json is re-read (a concurrent reclaim wins) and the lease path is checked to still name the
+  directory the FD was opened on (a concurrent release, #857, or a release + a peer's new acquire,
+  wins; the write only ever lands in the detached copy). The remaining window between those checks
+  and the rename is microseconds and unreachable while the holder beats (a reclaim needs a heartbeat
+  stale for 5400 s). Every guarantee has a mutation-checked test
+  (`tests/python/test_rig_lease_refresh_races_1383.py`, `…_1383.py`).
 
-**What a consumer reads during a live run:** `held=true`, `heartbeat_age_s` ≤ the refresh period
-(~30 s, plus the time one slow beat takes), `ttl_s` ≥ ~look-ahead − refresh period (a ROLLING
-look-ahead, NOT the run's end time — the run ends when `held` goes `false`). A held lease whose
-heartbeat is minutes old is therefore a genuinely dead/wedged holder (its refresher died with it),
-not a long step. Supervisor live check: during a release E2E, `curl -s
-http://127.0.0.1:8890/rig-lease.json` twice ~40 s apart past minute 30 of the run — the
-`heartbeat_age_s` stays < 60 and `ttl_s` stays positive (≈ 870-900) until cleanup, and
-`expected_release_at` moves forward between the two reads.
+**What a consumer reads during a live run:** `held=true`, `heartbeat_age_s` ≤ ~30 s (the beat
+period plus one slow beat), `ttl_s` ≥ ~870 s — a ROLLING look-ahead, NOT the run's end time (the
+run ends when `held` goes `false`). A held lease whose heartbeat is many minutes old is a dead holder
+or one past its hold ceiling — reclaimable once `stale` flips — not a long step. Supervisor live
+check: during a release E2E, read `curl -s http://127.0.0.1:8890/rig-lease.json` twice ~40 s apart,
+once during the verdict-exe fetch step and once past minute 45 of the run: `heartbeat_age_s` < 60,
+`ttl_s` > 0 (≈ 870-900) and `expected_release_at` moving forward between the reads; the E2E job log
+carries the gate's `RIG_LEASE_KEEPALIVE=started pid=…` line and the refresher's
+`lease keep-alive …: RIG_LEASE_REFRESH=refreshed …` line.
 
 ## Consumer contract for restreamer#349 (the OTHER repo's own implementation)
 
@@ -109,6 +132,8 @@ if ($lease.held -and -not $lease.stale) {
     # as 0, so the ?? below is defensive belt-and-braces, not strictly required.
     $waitSec = [Math]::Max(0, [Math]::Min((($lease.ttl_s ?? 0) + 60), 900))
     Start-Sleep -Seconds $waitSec
+    # NOTE (issue 1383): a live camera-box holder rolls ttl_s to ~900 s on every beat, so ttl_s no
+    # longer predicts the release; this wait simply hits the 900 s cap before the re-poll.
     # re-poll once more; if STILL held-and-fresh, proceed anyway logging the override rather than
     # blocking forever — camera-box's own gate is the hard backstop for the reverse direction.
 }
