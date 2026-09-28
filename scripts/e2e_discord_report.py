@@ -64,7 +64,7 @@ if _SCRIPTS not in sys.path:
     sys.path.insert(0, _SCRIPTS)
 import cambox_segments  # noqa: E402
 
-CAMERA_ORDER =["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"]
+CAMERA_ORDER = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"]
 
 # #757 (2026-07-15, binding user directive): imag's fixed floor -- mirrors
 # imag_latency_enforce.IMAG_FIXED_LATENCY_MS (kept as its own literal, not a cross-module
