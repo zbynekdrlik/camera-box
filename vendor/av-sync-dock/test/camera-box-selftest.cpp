@@ -501,7 +501,7 @@ int main()
 				w.observe(vdec, pre, crc, hits, lock_state, t, DEAD, MINH);
 			if (pr.fire && fired_at == 0) {
 				fired_at = t;
-				// the dock's reset (the sync-test-output.cpp mirror of it): fresh cluster,
+				// the dock's reset (the sync-test-output-audio.cpp mirror of it): fresh cluster,
 				// stale lock dropped.
 				c = RollingOffsetCluster::dock();
 				lock_state = false;

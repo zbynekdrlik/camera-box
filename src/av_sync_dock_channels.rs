@@ -2,7 +2,7 @@
 //!
 //! WHY. The stream box's `mbc` input is stereo and carries the same cam2 marker on L and R, with R
 //! 10.17 ms behind L. The dock used to average the channels before its one streaming decoder
-//! (`st_raw_audio_camera_box` in `vendor/av-sync-dock/src/sync-test-output.cpp`), and that mono sum
+//! (`st_raw_audio_camera_box`, now in `vendor/av-sync-dock/src/sync-test-output-audio.cpp`), and that mono sum
 //! comb-filters the two copies into an undecodable signal (the offline path measured cluster 2
 //! POLLUTED on the downmix, L 7 and R 8 alone, release E2E run 36317806422). So the live
 //! monitor-only LOCK-CORRECT suggestion saw the same broken signal the offline gate stopped using.

@@ -1,6 +1,6 @@
 //! #1005 — corrected_video_ts validity predicate in the C++ mirror.
 //!
-//! `RollingOffsetCluster`'s two camera-box emit sites in `sync-test-output.cpp` used to CLAMP a
+//! `RollingOffsetCluster`'s two camera-box emit sites in `sync-test-output-audio.cpp` used to CLAMP a
 //! negative corrected video timestamp to 0 instead of dropping the event, silently manufacturing
 //! a garbage whole-timeline-scale `sync_found` offset. `cb_corrected_video_ts_is_valid`
 //! (`camera-box-audio.hpp`) is the pure boundary predicate both call sites now consult — mirrors

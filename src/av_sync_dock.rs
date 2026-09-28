@@ -263,7 +263,7 @@ pub struct StreamingMarkerDecoder {
     /// issue 1381 — absolute index of the first position the next `push()` screens.
     next_scan: u64,
     /// #690 — cumulative [`DecodeStats`] across every `push()` call, for the live dock's periodic
-    /// audio diagnostic (`sync-test-output.cpp`'s rate-limited INFO log). Each screened position
+    /// audio diagnostic (`sync-test-output-audio.cpp`'s rate-limited INFO log). Each screened position
     /// counts once, and a position of the cut tail again when it is re-screened (at most one refine
     /// span per push) — so a real onset is counted a push or two, not once per distinct marker.
     /// That's fine for this counter's purpose: telling "zero vs nonzero" (does the demod see
@@ -446,7 +446,7 @@ impl RollingOffsetCluster {
     }
 }
 
-/// #1005 — whether a `sync-test-output.cpp` camera-box emit site's corrected video timestamp
+/// #1005 — whether a `sync-test-output-audio.cpp` camera-box emit site's corrected video timestamp
 /// (`audio_ts - smoothed_ns` / `audio_ts - locked_ns`, computed as a SIGNED `i64`) is usable at
 /// all. Both camera-box emit sites used to CLAMP a negative result to `0` before this fix
 /// (`corrected_video_ts > 0 ? (uint64_t)corrected_video_ts : 0`) instead of dropping the event —
@@ -544,7 +544,7 @@ pub enum DockLockAction {
 /// #926 — the LIVE, in-process A/V-sync dock corrector. Holds `genlock_latency_ms_src` (the SAME
 /// per-source video-delay knob the offline `av_sync_calibrate.py` path already uses) at a target
 /// where the measured dock-convention offset (`ts_ms = audio_ts - video_ts`, see
-/// `sync-test-output.cpp`) is NEVER negative ("audio early" — a forbidden steady state per the
+/// `sync-test-output-audio.cpp`) is NEVER negative ("audio early" — a forbidden steady state per the
 /// issue's own directive: sound is always physically slower than light, so a resting audio-ahead
 /// state can only be a rig defect) — landing at a deliberate, noise-scaled safety MARGIN above
 /// zero (see [`DOCK_LOCK_MIN_MARGIN_MS`]'s own doc comment for why exactly `[0, 1)` is a false
@@ -692,7 +692,7 @@ impl DockLockCorrector {
     }
 }
 
-/// #955 — the log-level OUTCOME `sync-test-output.cpp` derives from a [`DockLockCorrector::decide`]
+/// #955 — the log-level OUTCOME `sync-test-output-audio.cpp` derives from a [`DockLockCorrector::decide`]
 /// result: whether to WRITE the actuator, DISPLAY a monitor-only suggestion, warn that a hardware
 /// rail is pinned with the "audio never early" invariant still violated, or say nothing. Extracted
 /// as a byte-identical pure function purely so this branch selection — previously ONLY a
@@ -842,7 +842,7 @@ pub struct LatencyDisplay {
 /// #999 — `SyncTestDock::on_sync_found` (`sync-test-dock.cpp`) is a code path #953 NEVER touched:
 /// `git show <953-commit> -- vendor/av-sync-dock/src/sync-test-dock.cpp` is empty. #953 fixed the
 /// sign convention only at the OBS **log** call sites inside `st_raw_audio_camera_box`
-/// (`sync-test-output.cpp`'s `LOCKED`/`UPDATED`/`UNLOCKED`/`SUGGESTED` `blog()` lines, via
+/// (`sync-test-output-audio.cpp`'s `LOCKED`/`UPDATED`/`UNLOCKED`/`SUGGESTED` `blog()` lines, via
 /// [`dock_lock_display_offset_ms`]) — a completely separate mechanism from the dock's own
 /// `sync_index`/`on_sync_found` UI-update path, which computes `ts = audio_ts - video_ts` directly
 /// and displays it in norihiro's ORIGINAL, un-gate-converted native convention (`dock ~= -gate -
@@ -922,7 +922,7 @@ pub enum DockStaleTransition {
 /// explicit STALE / NO-SIGNAL state instead of holding the last locked offset forever.
 ///
 /// The dock's lock state + displayed offset are updated ONLY when a decoded audio marker is
-/// ring-paired with a video QR (see `sync-test-output.cpp::st_raw_audio_camera_box`). When the rig
+/// ring-paired with a video QR (see `sync-test-output-audio.cpp::st_raw_audio_camera_box`). When the rig
 /// enters EVENT mode the cam2 QPSK marker + dual-QR stop entirely, so NO new marker is decoded, NO
 /// `CbLockAuditTracker` `Unlocked` ever fires, and the last locked offset (and `locked=yes`) is held
 /// indefinitely — an operator reads a frozen number as a live A/V-sync measurement. This is the
@@ -1865,7 +1865,7 @@ mod tests {
         // The E2E gate (scripts/av_sync_calibrate.py --apply) is the SOLE writer of
         // genlock_latency_ms_src -- the corrector must never be permitted to actuate, by build
         // default, with no env/WebSocket/per-source escape hatch. This is the pure Tier-0 half of
-        // the #942 fix; the C++ caller (vendor/av-sync-dock/src/sync-test-output.cpp) gates its
+        // the #942 fix; the C++ caller (vendor/av-sync-dock/src/sync-test-output-audio.cpp) gates its
         // own actuator-write call site on the mirrored cb_dock_lock_may_actuate() and is pinned by
         // the vendored-source guard in tests/genlock_preload.rs.
         assert!(

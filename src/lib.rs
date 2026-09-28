@@ -116,7 +116,7 @@ pub mod qpsk_channel_select;
 // (rolling `decode_markers` window + dedup), the rolling densest-cluster offset estimator (robust to
 // the CRC-4 false-decode flood the offline path also fights), the live video-QR top-band decode
 // geometry, and the Otsu threshold — all with NO probe deps, so it compiles + unit-tests on DEFAULT
-// features. The dock's OBS/quirc GLUE stays in `sync-test-output.cpp`; every DECISION lives here.
+// features. The dock's OBS/quirc GLUE stays in `sync-test-output*.cpp`; every DECISION lives here.
 pub mod av_sync_dock;
 // Issue 1367 — the live dock's per-channel marker decode + channel pick: the Rust reference of
 // vendor/av-sync-dock/src/camera-box-channel-pick.hpp, compared push by push with the C++ by

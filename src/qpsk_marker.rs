@@ -9,7 +9,7 @@
 //! probe-gated modules that CI builds.
 //!
 //! Reverse-engineered from `vendor/av-sync-dock/tool/videogen.py` (encoder) and
-//! `vendor/av-sync-dock/src/sync-test-output.cpp` (decoder). The ENCODER stays
+//! `vendor/av-sync-dock/src/sync-test-output-audio.cpp` (decoder). The ENCODER stays
 //! byte-compatible with norihiro so the (custom) dock can decode what cam2 emits; the
 //! DECODER here is a self-consistent normalized-correlation demod used by
 //! recording-verdict for the phone-free A/V-sync verdict. Supersedes the scrapped
@@ -55,7 +55,7 @@ pub fn crc4(mut data: u32, size: u32) -> u32 {
 }
 
 /// CRC-4 residual check — matches `crc4_check()` in
-/// `vendor/av-sync-dock/src/sync-test-output.cpp`. Returns 0 for a valid word.
+/// `vendor/av-sync-dock/src/sync-test-output-audio.cpp`. Returns 0 for a valid word.
 pub fn crc4_check(mut data: u32, size: u32) -> u32 {
     let mut p = CRC4_POLY << (size - 5);
     let mut s = size;
@@ -241,7 +241,7 @@ pub struct DecodeStats {
 
 /// Detect QPSK markers in mono f32 audio → `(audio_ts_s at signal start, index)` per marker.
 ///
-/// The norihiro demod (`sync-test-output.cpp::st_raw_audio_decode_data`): IQ-demodulate each symbol
+/// The norihiro demod (`sync-test-output-audio.cpp::st_raw_audio_decode_data`): IQ-demodulate each symbol
 /// against the carrier (`Z = Σ signal·e^{-iθ}`, computed O(1) via prefix sums), derotate by the
 /// known preamble phasor (absorbs any carrier-phase / sub-sample-alignment error — the reason plain
 /// cross-correlation fails on a carrier), read the two bits per symbol from the derotated real/imag
@@ -669,7 +669,7 @@ pub fn frame_id_to_index(frame_id: u32) -> u8 {
 }
 
 /// Number of slots in the live camera-box video↔audio ring (`cb_video_ts_ns` in
-/// `vendor/av-sync-dock/src/sync-test-output.cpp`), keyed on `frame_id_to_index`.
+/// `vendor/av-sync-dock/src/sync-test-output-internal.hpp`), keyed on `frame_id_to_index`.
 pub const AV_SYNC_RING_SLOTS: u64 = 256;
 /// Fixed camera-box painter rate the ring's slot count is defined against — NOT the dock's own
 /// capture fps, which can differ (see the final-mixed-60-30 topology).
@@ -687,7 +687,7 @@ pub const AV_SYNC_RING_CYCLE_NS: u64 = AV_SYNC_RING_SLOTS * 1_000_000_000 / AV_S
 /// difference modulo `cycle_ns` into `(-cycle_ns/2, +cycle_ns/2]` recovers the true offset
 /// regardless of which side leads — no assumption about direction. Mirrors
 /// `resolve_ring_lap_offset_ns` (same name) in
-/// `vendor/av-sync-dock/src/sync-test-output.cpp::st_raw_audio_decode_data` — keep both in sync if
+/// `vendor/av-sync-dock/src/sync-test-output-audio.cpp` — keep both in sync if
 /// the ring size or source fps ever change.
 pub fn resolve_ring_lap_offset_ns(audio_ts_ns: u64, stored_video_ts_ns: u64, cycle_ns: u64) -> i64 {
     debug_assert!(cycle_ns > 0);
@@ -709,7 +709,7 @@ pub fn resolve_ring_lap_offset_ns(audio_ts_ns: u64, stored_video_ts_ns: u64, cyc
 /// Smooth by taking the MEDIAN of resolved offsets within `window_ns` of the latest sample
 /// (dropping older ones first) — a single false blip cannot move a multi-sample median far, while
 /// the real markers (sharing one near-constant pipeline delay) dominate. Mirrors
-/// `cb_smooth_offset_ns` in `vendor/av-sync-dock/src/sync-test-output.cpp` — keep both in sync.
+/// `cb_smooth_offset_ns` in `vendor/av-sync-dock/src/sync-test-output-audio.cpp` — keep both in sync.
 pub fn smoothed_offset_ns(
     history: &mut VecDeque<(u64, i64)>,
     sample_ts_ns: u64,
