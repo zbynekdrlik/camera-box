@@ -510,7 +510,7 @@ class CamboxApply1389(unittest.TestCase):
     /etc/ndi/ndi-config.v1.json with the SAME ndi_discovery_write_config STEP 7 calls, inside the
     read-only-root window, and restores ro (retried, loud). Run here with findmnt/mount/sync stubbed."""
 
-    def _run(self, tmp, root_opts="ro,relatime", ro_fails=0, ips=None):
+    def _run(self, tmp, root_opts="ro,relatime", ro_fails=0, ips=None, extra_stubs=""):
         log = os.path.join(tmp, "mount.log")
         env = {"NDI_DISCOVERY_SYSTEM_DIR": os.path.join(tmp, "etc-ndi")}
         lst = ips if ips is not None else _pinned()
@@ -521,9 +521,10 @@ class CamboxApply1389(unittest.TestCase):
             f'_ro_fails={ro_fails}\n'
             f'mount() {{ printf "%s\\n" "$*" >> "{log}"; '
             'if [ "$*" = "-o remount,ro /" ] && [ "$_ro_fails" -gt 0 ]; then _ro_fails=$((_ro_fails - 1)); return 32; fi; }\n'
-            'sync() { :; }\nsleep() { :; }\n'
+            'sync() { :; }\nsleep() { :; }\n' + extra_stubs
         )
-        r = subprocess.run(["bash", "-c", stubs + prog.stdout], capture_output=True, text=True, timeout=30)
+        # Fed on stdin to `bash -s`, exactly as the runbook's `ssh root@<cambox> bash -s < apply.sh` does.
+        r = subprocess.run(["bash", "-s"], input=stubs + prog.stdout, capture_output=True, text=True, timeout=30)
         calls = _read(log).splitlines() if os.path.exists(log) else []
         return r, calls, os.path.join(tmp, "etc-ndi", "ndi-config.v1.json")
 
@@ -541,6 +542,27 @@ class CamboxApply1389(unittest.TestCase):
             self.assertEqual(sorted(os.listdir(os.path.dirname(path))), ["ndi-config.v1.json"],
                              "only the config file, no temp / backup left on the stick")
             self.assertIn("OK", r.stdout)
+
+    def test_a_box_without_python3_keeps_the_step_7_backup(self):
+        # The STEP 7 writer cannot merge without python3: canonical file + a backup of the old list.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, ISSUE_1342_LIST)
+            r, calls, path = self._run(tmp, extra_stubs="python3() { return 1; }\n")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"])
+            self.assertEqual(_read(path), _lib("ndi_discovery_config_json").stdout)
+            baks = [f for f in os.listdir(os.path.dirname(path)) if f.startswith("ndi-config.v1.json.bak-")]
+            self.assertEqual(len(baks), 1, os.listdir(os.path.dirname(path)))
+            self.assertIn("10.77.9.61", _read(os.path.join(os.path.dirname(path), baks[0])))
+
+    def test_a_failed_write_still_puts_the_root_back_read_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, ISSUE_1342_LIST)
+            r, calls, path = self._run(tmp, extra_stubs="mktemp() { return 1; }\n")
+            self.assertNotEqual(r.returncode, 0)
+            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"], "the EXIT trap restores ro")
+            self.assertIn("10.77.9.61", _read(path), "the old file is left as it was")
+            self.assertNotIn("OK", r.stdout)
 
     def test_an_unchanged_config_writes_nothing_and_never_remounts(self):
         with tempfile.TemporaryDirectory() as tmp:
