@@ -1,6 +1,5 @@
 """issue 1242 — the strih BANDWIDTH ROLES: program-path cameras connect only while shown, the built-in
-multiview renders always-connected low-bandwidth `MV` twins (each standing for its program scene), and
-an E2E run holds every program-path input connected for the measurement.
+multiview renders always-connected low-bandwidth `MV` twins (each standing for its program scene).
 
 Owner ruling 24.9.2026: strih-lx pulls FULL bandwidth only for cameras that are shown (PVW, PGM, a
 projector, the visible item of the Grading NDI-output scene); the multiview uses `MV Cam N` twins.
@@ -10,11 +9,8 @@ Covers:
     (twin sizing, nested scenes, drift, operator-wins membership, retirement, empty/colliding names);
   * the vendored OBS multiview cell-target key (python <-> C++ literal pin);
   * scripts/strih_scenes.py --apply-roles delegation + the launch path;
-  * scripts/obs_phase2.py `connect-on-show` hold/restore (the E2E precondition) + hidden_by_design;
-  * scripts/set-ndi-mapping.py --verify-live never calls a parked input FROZEN;
-  * scripts/recording-e2e.sh + scripts/lib/connect-on-show-hold.sh wiring (a stable state path, a
-    guarded hold after the cleanup trap arms, a bounded wait for the held inputs to deliver, restore
-    inside cleanup).
+  * scripts/obs_phase2.py hidden_by_design;
+  * scripts/set-ndi-mapping.py --verify-live never calls a parked input FROZEN.
 """
 import copy
 import importlib.util
@@ -508,81 +504,8 @@ def test_strih_mv_scenes_shares_the_one_settable_transform_list():
 
 
 # ------------------------------------------------------------------------------------------------
-# obs_phase2: the E2E connect-on-show hold + hidden_by_design
+# obs_phase2: hidden_by_design
 # ------------------------------------------------------------------------------------------------
-
-class FakeWs:
-    pass
-
-
-def _fake_rpc(state):
-    def rpc(ws, rt, rdata=None, ignore_err=False, timeout_s=None):
-        rdata = rdata or {}
-        state["calls"].append((rt, rdata))
-        if rt == "GetInputList":
-            return {"inputs": [{"inputName": n, "inputKind": "ndi_source"} for n in state["inputs"]]}
-        if rt == "GetInputSettings":
-            return {"inputSettings": dict(state["inputs"][rdata["inputName"]])}
-        if rt == "GetInputDefaultSettings":
-            return {"defaultInputSettings": {"genlock_fifo": True, "ndi_bw_mode": 0}}
-        if rt == "SetInputSettings":
-            state["inputs"][rdata["inputName"]].update(rdata["inputSettings"])
-            return {}
-        if rt == "GetSourceActive":
-            return {"videoActive": False, "videoShowing": state["showing"].get(rdata["sourceName"], True)}
-        raise AssertionError(rt)
-    return rpc
-
-
-def test_connect_on_show_hold_and_restore(tmp_path, monkeypatch):
-    state = {"calls": [], "showing": {}, "inputs": {
-        "NDI cam1": {"genlock_connect_on_show": True},
-        "NDI cam3": {"genlock_connect_on_show": True},
-        "MV NDI cam3": {"genlock_monitor": True},
-        "NDI 2ME PVW": {},
-    }}
-    monkeypatch.setattr(op, "_rpc", _fake_rpc(state))
-    monkeypatch.setattr(op, "_settle_sleep", lambda dt: None)
-    sf = tmp_path / "sub" / "hold.json"  # the state dir is created on demand
-    held, twins, failed = op.connect_on_show_hold(FakeWs(), str(sf))
-    assert held == ["NDI cam1", "NDI cam3"] and twins == ["MV NDI cam3"] and failed == []
-    assert state["inputs"]["NDI cam1"]["genlock_connect_on_show"] is False
-    # the MV twin is taken off the wire for the run (tests/python/test_e2e_twin_hold_1242.py)
-    assert state["inputs"]["MV NDI cam3"]["genlock_fifo"] is False
-    assert json.loads(sf.read_text()) == {
-        "connect_on_show": ["NDI cam1", "NDI cam3"],
-        "twins": {"MV NDI cam3": {"genlock_fifo": True, "ndi_bw_mode": 1}}}
-    # a second hold (e.g. a crashed run left the state file) keeps the union -> restore catches all
-    held2, twins2, _ = op.connect_on_show_hold(FakeWs(), str(sf))
-    assert held2 == ["NDI cam1", "NDI cam3"] and twins2 == ["MV NDI cam3"]
-    restored, failed, held_back = op.connect_on_show_restore(FakeWs(), str(sf))
-    assert held_back == []
-    assert sorted(restored) == ["MV NDI cam3", "NDI cam1", "NDI cam3"] and failed == []
-    assert state["inputs"]["NDI cam3"]["genlock_connect_on_show"] is True
-    assert state["inputs"]["MV NDI cam3"]["genlock_fifo"] is True
-    assert not sf.exists(), "a clean restore removes the state file"
-    # restore with no state file is a no-op
-    assert op.connect_on_show_restore(FakeWs(), str(sf)) == ([], [], [])
-
-
-def test_connect_on_show_restore_treats_a_vanished_input_as_done(tmp_path, monkeypatch):
-    state = {"calls": [], "showing": {}, "inputs": {"NDI cam1": {"genlock_connect_on_show": False}}}
-    monkeypatch.setattr(op, "_rpc", _fake_rpc(state))
-    monkeypatch.setattr(op, "_settle_sleep", lambda dt: None)
-    sf = tmp_path / "hold.json"
-    sf.write_text(json.dumps(["NDI cam1", "NDI cam9"]))  # cam9 was deleted/renamed since the hold
-    restored, failed, _ = op.connect_on_show_restore(FakeWs(), str(sf))
-    assert restored == ["NDI cam1"] and failed == []
-    assert not sf.exists(), "a vanished input must never keep the state file (and its WARN) alive"
-
-
-def test_connect_on_show_subcommand_parses(monkeypatch):
-    got = {}
-    monkeypatch.setattr(op, "connect_on_show", lambda a: got.update(vars(a)))
-    monkeypatch.setattr(sys, "argv", ["obs_phase2.py", "connect-on-show", "--host", "H", "--hold", "/x"])
-    op.main()
-    assert got["host"] == "H" and got["hold"] == "/x" and got["restore"] is None
-
 
 def test_hidden_by_design():
     assert op.hidden_by_design({"genlock_fifo": True, "genlock_connect_on_show": True}, showing=False)
@@ -607,180 +530,6 @@ def test_verify_live_skips_a_hidden_by_design_input():
     assert sampled == ["NDI cam1"], "a parked input is never screenshot-sampled"
     assert (live, frozen, inc) == (0, 1, 0)
     assert any("hidden by design" in m for m in logs)
-
-
-# ------------------------------------------------------------------------------------------------
-# recording-e2e.sh wiring + the hold lib
-# ------------------------------------------------------------------------------------------------
-
-E2E = (SCRIPTS / "recording-e2e.sh").read_text()
-LIB = SCRIPTS / "lib" / "connect-on-show-hold.sh"
-PARK_LIB = SCRIPTS / "lib" / "genlock-park.sh"
-
-
-def test_e2e_holds_connect_on_show_after_the_trap_behind_a_rig_busy_guard():
-    trap = E2E.index("\ntrap cleanup EXIT HUP INT TERM\n")
-    hold = E2E.index('connect_on_show_e2e_hold "$HERE"')
-    guard = E2E.rindex('stray_session_check_assert "$HERE"', 0, hold)
-    wait = E2E.index('connect_on_show_e2e_wait_live "$HERE"')
-    first_deploy = E2E.index('echo "[2/8] $CAMERA_NAME')
-    assert trap < guard < hold < wait < first_deploy
-    assert '. "$HERE/lib/connect-on-show-hold.sh"' in E2E and '. "$HERE/lib/genlock-park.sh"' in E2E
-    line = [ln for ln in E2E.splitlines() if 'connect_on_show_e2e_hold "$HERE"' in ln][0]
-    assert "|| exit 1" in line, "a failed hold must abort the run (the measurement would be wrong)"
-
-
-def test_e2e_hold_state_path_is_stable_across_runs():
-    assert ('CONNECT_ON_SHOW_HOLD_STATE="${CONNECT_ON_SHOW_HOLD_STATE:-$HOME/.camera-box/'
-            'connect-on-show-hold.json}"') in E2E
-    assert 'CONNECT_ON_SHOW_HOLD_STATE="$OUTDIR' not in E2E
-
-
-def test_e2e_cleanup_restores_connect_on_show():
-    body = E2E[E2E.index("\ncleanup() {\n"):E2E.index("\ntrap cleanup EXIT HUP INT TERM\n")]
-    assert 'connect_on_show_e2e_restore "$HERE"' in body
-
-
-def _bash_lib(body, env=None, extra=""):
-    # bounded: a wait loop that never terminates must FAIL the test, never hang the suite
-    return subprocess.run(["bash", "-c", f"set -euo pipefail; . '{PARK_LIB}'; . '{LIB}'; {extra}{body}"],
-                          capture_output=True, text=True, check=False, timeout=60,
-                          env=env or {"PATH": "/usr/bin:/bin", "HOME": "/tmp"})
-
-
-def test_hold_lib_fails_loud_and_restore_never_aborts(tmp_path):
-    fake = tmp_path / "obs_phase2.py"
-    fake.write_text("import sys\nprint('ARGS', sys.argv[1:])\nsys.exit(int(__import__('os').environ.get('RC','0')))\n")
-    ok = _bash_lib(f"connect_on_show_e2e_hold '{tmp_path}' 10.0.0.1 /tmp/s.json")
-    assert ok.returncode == 0 and "--hold" in ok.stdout
-    bad = _bash_lib(f"connect_on_show_e2e_hold '{tmp_path}' 10.0.0.1 /tmp/s.json",
-                    env={"RC": "1", "PATH": "/usr/bin:/bin", "HOME": "/tmp"})
-    assert bad.returncode != 0
-    rest = _bash_lib(f"connect_on_show_e2e_restore '{tmp_path}' 10.0.0.1 /tmp/s.json; echo DONE",
-                     env={"RC": "1", "PATH": "/usr/bin:/bin", "HOME": "/tmp"})
-    assert rest.returncode == 0 and "DONE" in rest.stdout, "restore must never abort cleanup()"
-
-
-def _log_reader(tmp_path, script_body):
-    r = tmp_path / "reader.sh"
-    r.write_text("#!/usr/bin/env bash\n" + textwrap.dedent(script_body))
-    r.chmod(0o755)
-    return r
-
-
-def test_wait_live_returns_once_every_held_input_delivers(tmp_path):
-    state = tmp_path / "hold.json"
-    state.write_text(json.dumps(["NDI cam1", "NDI cam3"]))
-    cnt = tmp_path / "n"
-    # read 1: cam3 still parked (stuck); read 2+: both unparked + advancing
-    reader = _log_reader(tmp_path, f"""\
-        n=$(cat '{cnt}' 2>/dev/null || echo 0); n=$((n+1)); printf '%s' "$n" > '{cnt}'
-        printf "12:00:00.000: genlock-fifo audit 'NDI cam1': received=%s consumed=1\\n" "$((100 + n * 60))"
-        if [ "$n" -le 1 ]; then
-          printf "12:00:00.100: genlock-park 'NDI cam3': state=parked parked_s=9 (x)\\n"
-          printf "12:00:00.200: genlock-fifo audit 'NDI cam3': received=50 consumed=1\\n"
-        else
-          printf "12:00:00.100: genlock-park 'NDI cam3': state=unparked parked_s=9 (x)\\n"
-          printf "12:00:00.200: genlock-fifo audit 'NDI cam3': received=%s consumed=1\\n" "$((50 + n * 60))"
-        fi
-    """)
-    env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "CONNECT_ON_SHOW_LOG_READ_CMD": str(reader),
-           "CONNECT_ON_SHOW_LIVE_POLL_S": "0", "CONNECT_ON_SHOW_LIVE_WAIT_S": "10"}
-    out = _bash_lib(f"connect_on_show_e2e_wait_live /x 10.0.0.1 '{state}'; echo RC=$?", env=env)
-    assert out.returncode == 0 and "RC=0" in out.stdout, out.stderr
-    assert "every held input is delivering again" in out.stdout
-    assert "WARNING" not in out.stderr
-
-
-def test_wait_live_is_bounded_and_fail_open(tmp_path):
-    state = tmp_path / "hold.json"
-    state.write_text(json.dumps(["NDI cam3"]))
-    reader = _log_reader(tmp_path, """\
-        printf "12:00:00.100: genlock-park 'NDI cam3': state=parked parked_s=9 (x)\\n"
-    """)
-    env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "CONNECT_ON_SHOW_LOG_READ_CMD": str(reader),
-           "CONNECT_ON_SHOW_LIVE_POLL_S": "1", "CONNECT_ON_SHOW_LIVE_WAIT_S": "2"}
-    out = _bash_lib(f"connect_on_show_e2e_wait_live /x 10.0.0.1 '{state}'; echo RC=$?", env=env)
-    assert out.returncode == 0 and "RC=0" in out.stdout
-    assert "not yet delivering after 2s: NDI cam3" in out.stderr
-    # the budget is WALL time: a zero poll interval must still terminate
-    env.update({"CONNECT_ON_SHOW_LIVE_POLL_S": "0", "CONNECT_ON_SHOW_LIVE_WAIT_S": "1"})
-    out = _bash_lib(f"connect_on_show_e2e_wait_live /x 10.0.0.1 '{state}'; echo RC=$?", env=env)
-    assert "RC=0" in out.stdout and "not yet delivering" in out.stderr
-
-
-def test_wait_live_accepts_a_present_counter_when_the_first_read_had_none(tmp_path):
-    state = tmp_path / "hold.json"
-    state.write_text(json.dumps(["NDI cam3"]))
-    cnt = tmp_path / "n"
-    # read 1: no audit line at all for cam3 (out of the tail); read 2: unparked + a counter
-    reader = _log_reader(tmp_path, f"""\
-        n=$(cat '{cnt}' 2>/dev/null || echo 0); n=$((n+1)); printf '%s' "$n" > '{cnt}'
-        if [ "$n" -ge 2 ]; then
-          printf "12:00:00.200: genlock-fifo audit 'NDI cam3': received=77 consumed=1\\n"
-        fi
-    """)
-    env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "CONNECT_ON_SHOW_LOG_READ_CMD": str(reader),
-           "CONNECT_ON_SHOW_LIVE_POLL_S": "0", "CONNECT_ON_SHOW_LIVE_WAIT_S": "10"}
-    out = _bash_lib(f"connect_on_show_e2e_wait_live /x 10.0.0.1 '{state}'; echo RC=$?", env=env)
-    assert "every held input is delivering again" in out.stdout, out.stdout + out.stderr
-
-
-def test_hold_and_restore_set_and_clear_the_strih_side_marker(tmp_path):
-    fake = tmp_path / "obs_phase2.py"
-    fake.write_text("import sys\nprint('ARGS', sys.argv[1:])\n")
-    log = tmp_path / "marker.log"
-    marker_cmd = _log_reader(tmp_path, f"""\
-        echo "$@" >> '{log}'
-    """)
-    state = tmp_path / "hold.json"
-    state.write_text("[]")
-    env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "CONNECT_ON_SHOW_MARKER_CMD": str(marker_cmd)}
-    out = _bash_lib(f"connect_on_show_e2e_hold '{tmp_path}' 10.0.0.1 '{state}'; "
-                    f"connect_on_show_e2e_restore '{tmp_path}' 10.0.0.1 '{state}'; echo RC=$?", env=env)
-    assert "RC=0" in out.stdout, out.stderr
-    assert log.read_text().split("\n")[:2] == ["set 10.0.0.1", "clear 10.0.0.1"]
-
-
-def test_wait_live_without_a_state_file_is_a_no_op(tmp_path):
-    out = _bash_lib(f"connect_on_show_e2e_wait_live /x 10.0.0.1 '{tmp_path}/absent.json'; echo RC=$?")
-    assert out.returncode == 0 and "RC=0" in out.stdout
-
-
-def _argv_logging_stub(tmp_path, name, log):
-    """A PATH stub that appends its argv (one JSON list per call) to `log` and exits 0."""
-    d = tmp_path / "stubbin"
-    d.mkdir(exist_ok=True)
-    stub = d / name
-    stub.write_text("#!/usr/bin/env python3\nimport json, sys\n"
-                    f"open({str(log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n")
-    stub.chmod(0o755)
-    return d
-
-
-def test_strih_marker_ssh_branch_writes_the_marker_the_role_apply_reads(tmp_path):
-    """The bash hold lib writes the marker over ssh at the SAME home-relative path the python role
-    apply checks (E2E_HOLD_MARKER), through the shared strih transport shape (sshpass outermost so a
-    stub is never bypassed, timeout inside it, LogLevel=ERROR), and on the Linux strih only."""
-    log = tmp_path / "sshpass.log"
-    stubdir = _argv_logging_stub(tmp_path, "sshpass", log)
-    env = {"PATH": f"{stubdir}:/usr/bin:/bin", "HOME": "/tmp"}
-    out = _bash_lib("connect_on_show_strih_marker set 10.0.0.1; "
-                    "connect_on_show_strih_marker clear 10.0.0.1; echo RC=$?",
-                    env=env, extra="strih_platform() { echo linux; }; ")
-    assert "RC=0" in out.stdout, out.stderr
-    calls = [json.loads(line) for line in log.read_text().splitlines()]
-    assert len(calls) == 2, calls
-    rel = pathlib.Path(roles.E2E_HOLD_MARKER).relative_to(pathlib.Path("~").expanduser())
-    for call, verb in zip(calls, ("touch", "rm -f")):
-        assert call[0] == "-p" and call[2] == "timeout" and call[4] == "ssh", call
-        assert "LogLevel=ERROR" in call and call[-2] == "newlevel@10.0.0.1", call
-        assert verb in call[-1] and f'"$HOME/{rel}"' in call[-1], call[-1]
-    # a Windows strih never runs the role apply: nothing is sent
-    log.unlink()
-    out = _bash_lib("connect_on_show_strih_marker set 10.0.0.1; echo RC=$?",
-                    env=env, extra="strih_platform() { echo windows; }; ")
-    assert "RC=0" in out.stdout and not log.exists()
 
 
 def test_e2e_hold_marker_with_a_future_mtime_still_expires(tmp_path):

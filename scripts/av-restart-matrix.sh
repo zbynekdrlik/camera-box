@@ -23,9 +23,9 @@ set -euo pipefail
 #       measure ONE window -> one matrix.tsv row (time to healthy, the window);
 #     every window is the SOAK ITSELF: `scripts/av-soak.sh --run --hours 0 --lease-run-id <this
 #     run's lease>` -- its own reads-before-writes setup (TEST mode, the Development stream program,
-#     the painter, the burns), the connect-on-show hold, ONE strih-program sweep recorded on strih +
-#     stream and decoded in place, and its cleanup that a signal cannot cut short. Never a copy of
-#     that step. It writes no latency pin, no audio offset, no correction, and never switches the
+#     the painter, the burns), ONE strih-program sweep recorded on strih + stream and decoded in
+#     place, and its cleanup that a signal cannot cut short. Never a copy of that step. It writes
+#     no latency pin, no audio offset, no correction, and never switches the
 #     stream program (the stream program must stay `Development`; each window re-reads it);
 #   - grades every window POINTWISE (scripts/av_restart_matrix_decision.py): A/V per camera within
 #     AV_OFFSET_GATE_TOLERANCE_MS, the camera spread within SPREAD_THRESHOLD_MS, the gate's own loss

@@ -57,8 +57,8 @@ EOF
   plan_cmd "${argv[@]}"
   cat <<EOF
       (bash ${HERE}/av-soak.sh --plan --hours 0 prints every step of one window: TEST-mode reads, the
-      connect-on-show hold, the burns, ONE strih-program sweep recorded on strih + stream, the in-place
-      decodes, the merge, its cleanup)
+      burns, ONE strih-program sweep recorded on strih + stream, the in-place decodes, the merge, its
+      cleanup)
       graded: python3 ${DECISION} grade-window --window-dir <dir>
       a baseline that is not PASS stops the matrix before any restart (--keep-going runs them anyway)
 

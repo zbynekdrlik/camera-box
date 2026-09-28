@@ -3,14 +3,13 @@
 
 Fakes on PATH / behind the documented seams:
   - obs_phase2.py + obs_burn_filter.py in AV_SOAK_OBS_DIR (log every call; answer rig-busy-check,
-    program-scene, record start/stop/status, switch, connect-on-show, burn check/add/remove),
+    program-scene, record start/stop/status, switch, burn check/add/remove),
   - sshpass (cam2 painter probe + marker-log tail, the stream-box New-Item/scp/Stop-Process) and
     curl (the record-volume free space) on PATH,
   - AV_SOAK_STRIH_DECODE / AV_SOAK_STREAM_DECODE (write the partial the wrappers would pull back),
   - PROBE_BIN_DIR/recording-verdict (writes a merged verdict JSON, exits 1 like a failing gate),
-  - RIG_LEASE_DIR + CAMERA_BOX_RIG_HEARTBEAT + CONNECT_ON_SHOW_HOLD_STATE in a tmp dir and the
-    CONNECT_ON_SHOW_MARKER_CMD / CONNECT_ON_SHOW_LOG_READ_CMD seams -- the REAL dev1 lease, heartbeat
-    and hold state are never touched (an E2E may hold the real lease while this runs).
+  - RIG_LEASE_DIR + CAMERA_BOX_RIG_HEARTBEAT in a tmp dir -- the REAL dev1 lease and heartbeat are
+    never touched (an E2E may hold the real lease while this runs).
 """
 import base64
 import json
@@ -148,12 +147,6 @@ elif cmd == "switch":
     if os.environ.get("FAKE_RESTORE_FAIL") and "--prod-floor" in a:
         sys.exit("fake: the restored scene is dim (non-black check)")
     print(time.time_ns())
-elif cmd == "connect-on-show":
-    if "--hold" in a:
-        json.dump(["NDI cam1", "NDI cam3"], open(arg("--hold"), "w"))
-        print("issue 1242 connect-on-show held (connect-on-show OFF for the run): NDI cam1, NDI cam3")
-    else:
-        print("issue 1242 connect-on-show restored (connect-on-show ON): NDI cam1, NDI cam3")
 else:
     sys.exit(f"fake obs_phase2: unexpected {a}")
 '''
@@ -245,11 +238,6 @@ json.dump(v, open(out, "w"))
 sys.exit(1)
 '''
 
-FAKE_MARKER = r'''#!/usr/bin/env bash
-printf 'marker %s\n' "$*" >> "$FAKE_LOG"
-'''
-
-
 def _write(path, text, mode=0o755):
     with open(path, "w") as f:
         f.write(text)
@@ -271,7 +259,6 @@ def rig(tmp_path):
     _write(bin_dir / "curl", FAKE_CURL)
     _write(tmp_path / "strih-decode.sh", FAKE_DECODE)
     _write(tmp_path / "stream-decode.sh", FAKE_DECODE)
-    _write(tmp_path / "marker.sh", FAKE_MARKER)
     _write(probe / "recording-verdict", FAKE_VERDICT)
     exe = tmp_path / "recording-verdict.exe"
     exe.write_text("MZ")
@@ -292,10 +279,6 @@ def rig(tmp_path):
         "AV_SOAK_HOURS": "0", "AV_SOAK_RUN_DIR": str(tmp_path / "run"),
         "RIG_LEASE_DIR": str(tmp_path / "lease"),
         "CAMERA_BOX_RIG_HEARTBEAT": str(tmp_path / "heartbeat"),
-        "CONNECT_ON_SHOW_HOLD_STATE": str(tmp_path / "hold.json"),
-        "CONNECT_ON_SHOW_MARKER_CMD": str(tmp_path / "marker.sh"),
-        "CONNECT_ON_SHOW_LOG_READ_CMD": "true",
-        "CONNECT_ON_SHOW_LIVE_WAIT_S": "0",
         "RIG_FLEET_ACK_FILE": str(tmp_path / "no-acks.txt"),
         "CAM_PW": "x", "STREAM_USER": "u", "STREAM_PW": "y", "STRIH_USER": "su", "STRIH_PW": "sp",
         "STRIH_HOST": STRIH, "STREAM_HOST": STREAM,
@@ -303,7 +286,7 @@ def rig(tmp_path):
         "AV_SOAK_BROADCAST_RETRY_S": "0",
     })
     return env, {"log": log, "run": tmp_path / "run", "lease": tmp_path / "lease",
-                 "hb": tmp_path / "heartbeat", "state": state, "hold": tmp_path / "hold.json"}
+                 "hb": tmp_path / "heartbeat", "state": state}
 
 
 def _soak(env, *args, timeout=120):
@@ -365,9 +348,8 @@ def test_plan_is_the_default_and_touches_nothing(rig):
     assert r.returncode == 0, r.stderr
     assert p["log"].read_text() == "", "plan mode must not call OBS, ssh, curl or a decode"
     assert not p["lease"].exists() and not p["hb"].exists() and not p["run"].exists()
-    assert not p["hold"].exists()
     out = r.stdout
-    for needle in ("rig_lease_acquire", "stray_session_check_assert", "connect_on_show_e2e_hold",
+    for needle in ("rig_lease_acquire", "stray_session_check_assert",
                    "record --host 10.77.9.202 --action start",
                    "switch --host 10.77.9.202 --program-scene Cam\\ 1",
                    "record --host 10.77.9.204 --action status", "--merge-partials",
@@ -473,12 +455,7 @@ def test_one_window_end_to_end(rig):
     assert not any("PRO" in c for c in obs)
     kinds = [c[0] for c in obs]
     assert kinds.count("rig-busy-check") >= 3, "setup reads, setup mutations, the slot"
-    assert kinds.index("rig-busy-check") < kinds.index("connect-on-show") < kinds.index("record")
-    cos = [c for c in obs if c[0] == "connect-on-show"]
-    assert "--hold" in cos[0] and "--restore" in cos[-1], "the connect-on-show hold is restored"
-    markers = [line for line in p["log"].read_text().splitlines() if line.startswith("marker ")]
-    assert markers[0] == f"marker set {STRIH}" and markers[-1] == f"marker clear {STRIH}"
-    assert len([m for m in markers if m.startswith("marker set")]) >= 2, "re-asserted per slot"
+    assert kinds.index("rig-busy-check") < kinds.index("record")
 
     burns = _calls(p["log"], "burn")
     added = {c[c.index("--input") + 1] for c in burns if c[0] == "add"}
@@ -571,8 +548,6 @@ def test_sigterm_mid_slot_restores_everything(rig):
     stops = [c for c in _calls(p["log"], "obs") if c[:1] == ["record"] and "stop" in c]
     assert {_host(c) for c in stops} == {STRIH, STREAM}
     _assert_rig_restored(p)
-    cos = [c for c in _calls(p["log"], "obs") if c[0] == "connect-on-show"]
-    assert "--restore" in cos[-1]
 
 
 def test_a_second_ctrl_c_to_the_process_group_cannot_cut_the_restore_short(rig):
@@ -787,8 +762,8 @@ def test_an_unpinned_painter_run_id_is_a_warning(rig):
 
 def test_a_broadcast_that_starts_mid_run_leaves_the_strih_program_alone(rig):
     # the stream box goes live right after slot 0's StopRecord: the wait for slot 1 sees it and
-    # stops the soak, and its cleanup must not cut the (on-air) strih program; burns +
-    # connect-on-show still go back to production
+    # stops the soak, and its cleanup must not cut the (on-air) strih program; the burns still go
+    # back to production
     env, p = rig
     r = _soak(dict(env, FAKE_LIVE_AFTER_STOPS="1", **QUICK_TWO_WINDOWS), "--run")
     assert r.returncode == 5, r.stdout + r.stderr
@@ -796,7 +771,6 @@ def test_a_broadcast_that_starts_mid_run_leaves_the_strih_program_alone(rig):
     assert "a broadcast is live" in out
     assert not [c for c in _calls(p["log"], "obs") if c[:1] == ["switch"] and "--prod-floor" in c]
     assert "strih program NOT restored" in out
-    assert [c for c in _calls(p["log"], "obs") if c[:1] == ["connect-on-show"] and "--restore" in c]
     assert not [f for f in os.listdir(p["state"]) if f.startswith("burn-")]
     assert not p["lease"].exists()
 
@@ -830,7 +804,7 @@ def test_a_broadcast_that_goes_live_mid_sweep_keeps_the_recordings_running(rig):
 
 def test_the_rig_leaving_test_mode_stops_the_run(rig):
     # slot 1 reads another stream program: the rig was handed to production, the soak ends (it
-    # never runs on skipping slots while holding the lease and the connect-on-show hold)
+    # never runs on skipping slots while holding the lease)
     env, p = rig
     r = _soak(dict(env, FAKE_STREAM_PROGRAM_DRIFT_AFTER="2", **QUICK_TWO_WINDOWS), "--run")
     assert r.returncode == 2, r.stdout + r.stderr
@@ -894,7 +868,6 @@ def test_an_unreadable_rig_at_setup_is_refused(rig):
     r = _soak(dict(env, FAKE_BUSY_UNREADABLE="stream"), "--run")
     assert r.returncode == 4, r.stdout + r.stderr
     assert "unreadable" in r.stdout + r.stderr
-    assert not [c for c in _calls(p["log"], "obs") if c[:1] == ["connect-on-show"]]
     assert not [c for c in _calls(p["log"], "burn") if c[0] == "add"]
     assert not p["lease"].exists()
 
@@ -1035,7 +1008,7 @@ def test_not_in_test_mode_is_refused_before_any_mutation(rig):
     r = _soak(dict(env, FAKE_STREAM_PROGRAM="PRO"), "--run")
     assert r.returncode == 4, r.stdout + r.stderr
     obs = _calls(p["log"], "obs")
-    assert not [c for c in obs if c[0] in ("record", "switch", "connect-on-show")]
+    assert not [c for c in obs if c[0] in ("record", "switch")]
     assert not [c for c in _calls(p["log"], "burn") if c[0] == "add"]
     assert not p["lease"].exists()
 
@@ -1045,7 +1018,7 @@ def test_a_busy_rig_is_refused_before_any_mutation(rig):
     r = _soak(dict(env, FAKE_BUSY="1"), "--run")
     assert r.returncode == 4, r.stdout + r.stderr
     obs = _calls(p["log"], "obs")
-    assert not [c for c in obs if c[0] in ("record", "switch", "program-scene", "connect-on-show")]
+    assert not [c for c in obs if c[0] in ("record", "switch", "program-scene")]
     assert not _calls(p["log"], "burn")
     assert not p["lease"].exists()
 
@@ -1054,7 +1027,7 @@ def test_a_dead_painter_is_refused(rig):
     env, p = rig
     r = _soak(dict(env, FAKE_PAINTER_ACTIVE="inactive"), "--run")
     assert r.returncode == 4, r.stdout + r.stderr
-    assert not [c for c in _calls(p["log"], "obs") if c[0] in ("record", "connect-on-show")]
+    assert not [c for c in _calls(p["log"], "obs") if c[0] == "record"]
 
 
 def test_run_without_credentials_is_refused_before_the_lease(rig):
