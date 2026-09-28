@@ -323,6 +323,9 @@ class ReceiverConfig(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout, "a b; c; d")
         self.assertEqual(_lib('ndi_discovery_verdict_oneline "FAIL: one"').stdout, "one")
+        # Blank lines INSIDE the verdict (a $(...) strips only trailing ones) are skipped too.
+        self.assertEqual(_lib("ndi_discovery_verdict_oneline $'FAIL: a\\n\\nFAIL: b'").stdout, "a; b")
+        self.assertEqual(_lib("ndi_discovery_verdict_oneline $'\\nFAIL: a'").stdout, "a")
         self.assertEqual(_lib('ndi_discovery_verdict_oneline ""').stdout, "")
 
     def test_verdict_fails_a_non_string_list_or_discovery_1389(self):
@@ -330,6 +333,8 @@ class ReceiverConfig(unittest.TestCase):
         arr = json.dumps({"ndi": {"networks": {"ips": pinned.split(",")}}})
         r = _lib(f"ndi_discovery_config_verdict '{arr}' '{pinned}' ''")
         self.assertIn("FAIL", r.stdout, "a list must be the comma-separated string the SDK documents")
+        self.assertIn("lacks", r.stdout, "the array is read as the wrong list, not as an absent one")
+        self.assertNotIn("is empty", r.stdout)
         disc = json.dumps({"ndi": {"networks": {"ips": pinned, "discovery": False}}})
         r = _lib(f"ndi_discovery_config_verdict '{disc}' '{pinned}' ''")
         self.assertIn("networks.discovery", r.stdout, "a non-string discovery value is still set")

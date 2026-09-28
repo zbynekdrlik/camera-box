@@ -472,6 +472,7 @@ class CamboxApply1389(unittest.TestCase):
             self.assertFalse(os.path.exists(path))
             baks = [f for f in self._listing(path) if f.startswith("ndi-config.v1.json.bak-")]
             self.assertEqual(len(baks), 1, self._listing(path))
+            self.assertEqual(_read(os.path.join(os.path.dirname(path), baks[0])), conf)
 
     def test_a_rw_root_is_never_remounted(self):
         with tempfile.TemporaryDirectory() as tmp:
