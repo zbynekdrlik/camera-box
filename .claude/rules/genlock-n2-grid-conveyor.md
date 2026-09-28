@@ -36,10 +36,13 @@ restart, every relock lands on the same frame.
 | target stamp | `n2_target_stamp_ns(T, pin_ns, canvas, n)` | `genlock_n2_target_stamp_ns` |
 | the pick | `n2_select(queue, target, source_interval)` → `N2Pick { kind, index }` | `genlock_n2_select(source, target, si)` → `struct genlock_n2_pick` |
 | the release | probe `ReleaseCadence::tick_n2_grid` | `genlock_release_tick_n2_grid`, called at the TOP of `genlock_release_tick` when `genlock_effective_source_multiple >= 2` |
+| drop-cap headroom | `n2_drop_cap_extra_frames(fps_num, fps_den)` + `N2_MAX_SOURCE_FPS` 60 | `genlock_n2_drop_cap_extra_frames`, added in `genlock_source_drop_cap` for `genlock_last_known_n >= 2` |
 
 The C block from `struct genlock_n2_pick {` to the end of `genlock_n2_select` is CONTIGUOUS and
-pure; `tests/genlock_n2_grid_parity_1367.rs` lifts it verbatim (+ its four `#define`s) against the
-real `obs-genlock-grid.h`.
+pure; `tests/genlock_n2_grid_parity_1367.rs` lifts it verbatim (+ the five `#define`s it reads,
+`GENLOCK_MAX_SOURCE_FPS` included) against the real `obs-genlock-grid.h`. The drop-cap helper sits
+inside that block, so `genlock_source_drop_cap` (far above it) reaches it through ONE forward
+declaration.
 
 ## The rules the release follows (do not undo)
 
@@ -88,6 +91,15 @@ Presented age (N = 2, 30 fps canvas) = 16.667 ms × ceil((50 + pin) / 16.667):
 | 1 … 16 (production 3) | 66.7 ms (4 source frames) |
 | 17 … 33 | 83.3 ms |
 | 34 … 50 | 100 ms |
+| 1000 (the stream `Zaloha kamera`, 60 into 30) | 1050 ms |
+
+**A deep N>=2 pin moves by the 50 ms base.** The old conveyor held about the pin plus its
+arrival phase; the grid presents 50 ms + pin, rounded up. The stream `Zaloha kamera` (pin 1000, a
+60 fps feed into the 30 fps stream canvas; live 29.9.2026 01:33: `video_delay_ms=1017`, depth 59,
+peak 63, cap 64) goes from 1017 to 1050 ms, +33 ms. Aligning it back is a pin move by the
+supervisor — any pin in 951..966 ms presents 1016.7 ms (61 source frames; 960 is the middle) —
+recorded as a deploy step. The Design-question on the ticket asks the main to confirm that, rather
+than scoping the base to shallow pins.
 
 One source interval of pin is exactly one frame (the target moves at pin = 16.67 k); a pin inside
 the same band keeps the frame. `scripts/qr_align_pins.py` adds a measured present-age delta to the
@@ -102,15 +114,43 @@ hold over ~8 ms reads over the 94 ms ceiling → BUDGET_BOUND soft-release inste
 The newest queued frame's age at the audit tick (`head_skew − (depth + erased − 1) × 16.7 ms`,
 30 793 samples of the seven program inputs, `2026-09-28 1*.txt`) brackets the arrival lag within
 one slot: p50 49-50 ms on cam1/2/3/5/6/7, 33.7 ms on cam4; p99 52-67 ms; p99.9 67-200 ms (the
-stall bursts). A target 66.7 ms old is missed only when the lag exceeds it: 0.024 % of samples in
-the 75-95 ms band, 0.039 % in stalls ≥ 95 ms. The bench (`src/genlock_n2_grid_bench.rs`) replays
-the per-camera histograms: n2_early 0.089 / 0.143 / 0.417 / 0.143 / 0 / 0.041 / 0.030 % (cam1..7),
-0.123 % overall — over the 0.1 % budget on cam2/3/4, driven by the stall tail. Reported, NOT tuned:
+stall bursts). A target 66.7 ms old is missed only when the lag exceeds it — the share of tail
+samples per camera: cam1 0.089, cam2 0.126, cam3 0.405, cam4 0.153, cam5 0, cam6 0.050, cam7
+0.025 %, pooled 0.097 % (0.024 % in the 75-95 ms band, 0.039 % in stalls ≥ 95 ms). That share is
+the expected CEILING of the live `n2_early` rate: a missed target is presented early only while an
+older frame is still queued, and during a stall the queue runs empty, so most of those ticks are
+underruns instead. cam3 (0.405 %) can exceed the 0.1 % budget; reported, NOT tuned —
 `GENLOCK_N2_AGE_BASE_NS` is one fleet constant and changing it is the main's call.
 
-The expected common-mode shift: the old mean presented age per camera (instantaneous, same
-samples) was cam1 55.8, cam2 53.4, cam3 58.7, cam4 52.7, cam5 57.7, cam6 57.4, cam7 58.0 ms → all
-66.7 ms: every camera's video +8.0…+14.0 ms later (mean +10.4, cam2 +13.3), once.
+The bench (`src/genlock_n2_grid_bench.rs`) replays the per-camera histograms, but its tail rates are
+an UPPER BOUND, not a prediction: it draws every FRAME's lag independently from a histogram that was
+sampled per TICK, and delivers in order, so each tail draw becomes a stall of its own. Its misses
+(early + holds + underruns) come out 2-8x the measured tail share (cam3: 1.94 % against 0.41 %;
+its `n2_early` column 0.089 / 0.143 / 0.417 / 0.143 / 0 / 0.041 / 0.030 %). What the bench does
+prove is structural: every restart lands on the target, and a late target costs only its own tick.
+
+The expected common-mode shift, for the strih cameras (all at pin 3): the old mean presented age
+per camera (instantaneous, same samples) was cam1 55.8, cam2 53.4, cam3 58.7, cam4 52.7, cam5 57.7,
+cam6 57.4, cam7 58.0 ms → all 66.7 ms: every camera's video +8.0…+14.0 ms later (mean +10.4, cam2
++13.3), once. A camera at another pin presents the table age above instead (a pin of 17-33 ms:
+83.3 ms).
+
+## The FIFO drop-cap budgets the grid age (review finding, do not undo)
+
+The grid release keeps the target (50 ms + pin old, rounded UP to its source slot) and every newer
+frame queued until the next tick: at zero arrival lag the queue before a push holds
+`ceil((50 + pin) / 16.667) + 1` frames. The drop-cap budgeted only `round(pin × 60 / 1000)`, so from
+about 420 ms of pin the queue reached the cap and every push force-drained the whole delay line
+(`Zaloha kamera` at 1000 ms: queue 64, cap 64). `genlock_source_drop_cap` now adds
+`genlock_n2_drop_cap_extra_frames` for a CONFIRMED N>=2 source (the sticky latch, written by the
+release tick under the same `async_mutex`): the age base at 60 fps (3), one canvas interval of 60
+fps arrivals rounded up (2 at 30 fps) and one frame for the pin's round-to-nearest against the
+target's round-up — 6 at 30 fps, saturating. The zero-lag queue now sits 5-6 frames under the cap
+at every pin 3..2000 ms (`the_drop_cap_holds_the_grid_queue_and_its_burst_reserve_at_every_pin_1367`
+simulates each pin and models the C cap), keeping the 4-frame burst reserve; the deepest N>=2
+budget (2000 ms: 130) stays under the absolute 132. N==1 sources keep the historic cap. A
+confirmed-N reset (a backward-step regime end) drops the cap back for at most one tick until the
+next release re-latches N — the queue can overrun only if it sat within 6 frames of it, at zero lag.
 
 ## Verification (Tier-0, no cargo)
 
@@ -125,8 +165,10 @@ samples) was cam1 55.8, cam2 53.4, cam3 58.7, cam4 52.7, cam5 57.7, cam6 57.4, c
   `CARGO_MANIFEST_DIR` + `CARGO_TARGET_TMPDIR` at compile time. Mutation proof: a scratch tree with
   a mutated `obs-source.c` + a copy of `obs-genlock-grid.h` + the test and `tests/genlock_n1_lift/`,
   recompiled per mutant (9/9 RED at landing: slack, kind compare, pick index, age base, snap,
-  off-grid wall, canvas grid, saturation, pin). Rust mutants of `genlock_n2_grid.rs` 10/10 RED on the
-  module + bench + probe tests.
+  off-grid wall, canvas grid, saturation, pin; then 6/6 for the drop-cap helper: tick round-up,
+  rounding frame, saturation, age base, the fps_num 0 guard, the arrival rate). Rust mutants of
+  `genlock_n2_grid.rs` 10/10 RED on the module + bench + probe tests. The `+ 999999999` round-up of
+  the age base is an equivalent mutant today (50 ms × 60 fps is exactly 3 frames).
 - The whole `obs-source.c` `gcc -fsyntax-only` (the `vendored-libobs-change-safety.md` recipe) and
   every std-only reader of it (`genlock_release_cadence`, `genlock_n2_grid_wiring_1367`,
   `genlock_shallow_depth_wiring_1367`, `genlock_audio_timecode_placement_1367`, …).
@@ -139,14 +181,20 @@ Count anchors this slice moved (update them together): `genlock_n1_tick_wall_now
 
 ## Live acceptance (supervisor)
 
-Full-bundle genlock deploy on strih-lx (libobs changed). Then:
+Full-bundle genlock deploy on strih-lx AND the stream box (libobs changed; the stream box's
+`Zaloha kamera` is an N>=2 input too). Then:
 1. Every strih camera's `genlock-fifo audit` line: `video_delay_ms=67` (66.7 ms), `n2_early=`
-   present, `relocks=` and `converge_sheds=` flat, `dropped_due` +1 per tick (the erased pair frame).
+   present, `relocks=` and `converge_sheds=` flat, `dropped_due` +1 per tick (the erased pair frame),
+   `overruns=` flat. On the stream box `Zaloha kamera` reads `video_delay_ms` ≈ 1050 and
+   `overruns=` flat (its `cap=` 70 on the audit line, was 64 against a live peak of 63).
 2. Three strih OBS restarts: every camera back on 67 each time; the stream A/V level inside one
    level across the restarts (spread < 5 ms at a constant cambox state); the restart matrix
    strih-obs kind 3/3 PASS.
-3. One hour: `n2_early` delta / ticks ≤ 0.1 % per camera — expect cam3 to exceed it from the stall
-   tail (bench 0.42 %); report, do not widen the base.
+3. One hour: `n2_early` delta / ticks ≤ 0.1 % per camera (`src/jitter_audit.rs` reads it as
+   `delta_n2_early`) — cam3's measured tail share is 0.405 %, so it may exceed it; report, do not
+   widen the base.
 4. Re-read the stream A/V level (expected video ≈ +10 ms later in common mode) and move the stream
    `NDI 2ME PGM` pin by the measured common mode as a recorded step (an N==1 deep source quantizes
    its depth in 33.3 ms steps, so a sub-frame shift may not be realizable through that pin).
+5. Once the main confirms the deep-pin shift: move `Zaloha kamera` 1000 → 960 ms (1016.7 ms, its
+   pre-deploy `video_delay_ms` 1017), a recorded step, and re-read its audit line.
