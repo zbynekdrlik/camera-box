@@ -172,9 +172,10 @@ fn every_dock_step_in_both_workflows_reads_the_union() {
     for wf in WORKFLOWS {
         let text = repo_file(wf);
         // Any spelling of one output file outside a comment (a Get-Content, a
-        // [IO.File]::ReadAllText, a quoted path in either quote style) means a step reads it on its
-        // own instead of through the helper. The file names are judged by the union's own rule, so
-        // the public sync-test-output.hpp and a comment pointer stay allowed.
+        // [IO.File]::ReadAllText, a quoted path in either quote style), or a glob over the output
+        // files (`sync-test-output-*.cpp`), means a step reads them on its own instead of through the
+        // helper. The file names are judged by the union's own rule, so the public
+        // sync-test-output.hpp and a comment pointer stay allowed.
         for (n, line) in text.lines().enumerate() {
             if line.trim_start().starts_with('#') {
                 continue;
@@ -184,12 +185,14 @@ fn every_dock_step_in_both_workflows_reads_the_union() {
                     .chars()
                     .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
                     .collect();
+                let glob = line[at + name.len()..].starts_with(['*', '?', '[']);
                 assert!(
-                    !av_sync_dock_output::is_output_file(&name),
-                    "{wf}:{}: reads the dock output file {name} on its own ({line:?}) -- a step \
-                     must read the union: dot-source {PWSH_TWIN} and use Get-DockOutputSource \
-                     (issue 1386)",
-                    n + 1
+                    !av_sync_dock_output::is_output_file(&name) && !glob,
+                    "{wf}:{}: reads the dock output file(s) `{name}{}` on its own ({line:?}) -- a \
+                     step must read the union: dot-source {PWSH_TWIN} and use \
+                     Get-DockOutputSource (issue 1386)",
+                    n + 1,
+                    if glob { "…" } else { "" }
                 );
             }
         }
