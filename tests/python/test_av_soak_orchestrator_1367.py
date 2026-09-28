@@ -106,7 +106,7 @@ elif cmd == "program-scene":
             sys.exit("fake: program-scene read failed")
         print("Other scene" if drifted else os.environ.get("FAKE_STREAM_PROGRAM", "Development"))
     else:
-        print("Cam 1")
+        print(os.environ.get("FAKE_STRIH_PROGRAM", "Cam 1"))
 elif cmd == "record":
     act = arg("--action")
     box = "stream" if host == os.environ["FAKE_STREAM_HOST"] else "strih"
@@ -348,6 +348,39 @@ QUICK_TWO_WINDOWS = {"AV_SOAK_SLOT_SECS": "12", "AV_SOAK_HOURS": "0.0033334",
                      "AV_SOAK_DECODE_TIMEOUT_S": "3", "AV_SOAK_MIN_DECODE_S": "0"}
 
 
+def _wait_for_sweep(p, timeout=60):
+    """True once the slot's sweep has started: its first cut AFTER StartRecord. The first strih
+    `switch` of a slot is the cut to the first sweep scene BEFORE StartRecord (issue 1367), so a
+    signal sent on that one could land before any recording exists."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        seen_start = False
+        for line in p["log"].read_text().splitlines():
+            if line.startswith("obs ") and '"record"' in line and '"start"' in line:
+                seen_start = True
+            elif seen_start and line.startswith("obs ") and '"switch"' in line:
+                return True
+        time.sleep(0.2)
+    return False
+
+
+def _strih_program_at_strih_starts(obs, snapshot):
+    """Replay the call log: the strih program scene at every strih StartRecord (the last strih
+    cut before it, else the setup snapshot) and the scene of the first strih cut after each."""
+    program, at_start, first_cut, started = snapshot, [], [], False
+    for c in obs:
+        if c[:1] == ["switch"] and _host(c) == STRIH:
+            scene = c[c.index("--program-scene") + 1]
+            if started:
+                first_cut.append(scene)
+                started = False
+            program = scene
+        elif c[:1] == ["record"] and "start" in c and _host(c) == STRIH:
+            at_start.append(program)
+            started = True
+    return at_start, first_cut
+
+
 def _assert_rig_restored(p):
     """Nothing the soak changed is left changed."""
     assert not [f for f in os.listdir(p["state"]) if f.startswith(("recording-", "burn-"))], \
@@ -467,8 +500,8 @@ def test_one_window_end_to_end(rig):
     assert {_host(c) for c in stops} == {STRIH, STREAM}
     switches = [c for c in obs if c[:1] == ["switch"]]
     assert all(_host(c) == STRIH for c in switches), "the stream program is never switched"
-    assert [c[c.index("--program-scene") + 1] for c in switches] == ["Cam 1", "Cam 3", "Cam 1"], \
-        "the sweep, then the strih program restored to its snapshot"
+    assert [c[c.index("--program-scene") + 1] for c in switches] == ["Cam 1", "Cam 1", "Cam 3", "Cam 1"], \
+        "the first sweep scene before StartRecord, the sweep, then the strih program restored"
     assert "--prod-floor" in switches[-1]
     assert not any("PRO" in c for c in obs)
     kinds = [c[0] for c in obs]
@@ -556,14 +589,66 @@ def test_a_failed_switch_still_restores_the_strih_program(rig):
     _assert_rig_restored(p)
 
 
+# --- issue 1367: every recording starts on the FIRST sweep scene -----------------------------------
+# Every strih NDI camera input carries its OWN measurement-burn counter (one burn filter per input,
+# vendor/distroav/src/ndi-burn-filter.cpp), and the frames recorded before the sweep's first cut
+# belong to no schedule window. A recording that started on another camera (slot 0: the operator's
+# program; later slots: the previous slot's LAST sweep scene, which stays on program between slots)
+# therefore read one phantom strih real_drop at the first cut, in 24 of 25 windows of the 8 h run of
+# 28.9.2026. The E2E never has it: its [4/8] routes the strih program to the camera under test, which
+# is the first sweep scene, before [5/8] StartRecord.
+
+
+def test_every_slot_records_from_the_first_sweep_scene(rig):
+    env, p = rig
+    r = _soak(dict(env, FAKE_STRIH_PROGRAM="Grading", **QUICK_TWO_WINDOWS), "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert [row["outcome"] for row in _csv_rows(p["run"])] == ["ok", "ok"]
+    obs = _calls(p["log"], "obs")
+    at_start, first_cut = _strih_program_at_strih_starts(obs, "Grading")
+    assert at_start == ["Cam 1", "Cam 1"], \
+        "each slot's recording starts on the first sweep scene, never the operator's program " \
+        "or the previous slot's last camera"
+    assert first_cut == ["Cam 1", "Cam 1"], "window 0 then opens on a same-input cut"
+    for i, c in enumerate(obs):
+        nxt = next((d for d in obs[i + 1:] if d[:1] in (["switch"], ["record"])), None)
+        if c[:1] == ["switch"] and nxt is not None and nxt[:1] == ["record"] and "start" in nxt:
+            assert obs[i - 1][:1] == ["rig-busy-check"], \
+                "the cut before StartRecord directly follows the proven-idle broadcast read"
+    switches = [c for c in obs if c[:1] == ["switch"]]
+    assert switches[-1][switches[-1].index("--program-scene") + 1] == "Grading"
+    assert "--prod-floor" in switches[-1], "cleanup still restores the operator's program"
+    _assert_rig_restored(p)
+
+
+def test_a_failed_first_scene_cut_records_nothing_and_restores_the_program(rig):
+    # the first sweep scene renders black (the switch's own non-black check fails): no recording is
+    # started on the wrong camera, the slot is a skipped row, cleanup still restores the program
+    env, p = rig
+    r = _soak(dict(env, FAKE_STRIH_PROGRAM="Grading", FAKE_SWITCH_FAIL="Cam 1"), "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert _csv_rows(p["run"])[0]["outcome"] == "skipped:first_scene_cut_failed"
+    assert not [c for c in _calls(p["log"], "obs") if c[:1] == ["record"]]
+    switches = [c for c in _calls(p["log"], "obs") if c[:1] == ["switch"]]
+    assert switches[-1][switches[-1].index("--program-scene") + 1] == "Grading"
+    assert "--prod-floor" in switches[-1]
+    _assert_rig_restored(p)
+
+
+def test_plan_cuts_to_the_first_sweep_scene_before_startrecord(rig):
+    env, _ = rig
+    out = _soak(env, "--plan").stdout
+    cut = out.find("switch --host 10.77.9.202 --program-scene Cam\\ 1")
+    start = out.find("record --host 10.77.9.202 --action start")
+    assert cut != -1 and start != -1, out
+    assert cut < start, "the plan shows the first-scene cut before the strih StartRecord"
+
+
 def test_sigterm_mid_slot_restores_everything(rig):
     env, p = rig
     proc = subprocess.Popen(["bash", SOAK, "--run"], env=dict(env, AV_SOAK_SEGMENT_SECS="20"),
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    deadline = time.time() + 60
-    while time.time() < deadline and '"switch"' not in p["log"].read_text():
-        time.sleep(0.2)
-    assert '"switch"' in p["log"].read_text(), "the sweep never started"
+    assert _wait_for_sweep(p), "the sweep never started"
     proc.send_signal(signal.SIGTERM)
     out, err = proc.communicate(timeout=60)
     assert proc.returncode == 5, out + err
@@ -581,9 +666,7 @@ def test_a_second_ctrl_c_to_the_process_group_cannot_cut_the_restore_short(rig):
                             env=dict(env, AV_SOAK_SEGMENT_SECS="20", FAKE_RESTORE_DELAY="3"),
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                             start_new_session=True)
-    deadline = time.time() + 60
-    while time.time() < deadline and '"switch"' not in p["log"].read_text():
-        time.sleep(0.2)
+    assert _wait_for_sweep(p), "the sweep never started"
     os.killpg(proc.pid, signal.SIGINT)  # Ctrl-C at the terminal: the whole foreground group
     deadline = time.time() + 60
     while time.time() < deadline and "--prod-floor" not in p["log"].read_text():
@@ -816,12 +899,14 @@ def test_a_broadcast_that_goes_live_mid_sweep_keeps_the_recordings_running(rig):
     # its own file may already be the show's recording (Companion's StartRecord is a no-op on a
     # box that already records) -- nothing is stopped, the lease is kept for --stop-leftovers
     env, p = rig
-    r = _soak(dict(env, FAKE_LIVE_AFTER_SWITCHES="1"), "--run")
+    # (issue 1367: the slot's first strih cut is the one to the first sweep scene BEFORE
+    # StartRecord, so the broadcast starts after the sweep's own first cut = the second switch)
+    r = _soak(dict(env, FAKE_LIVE_AFTER_SWITCHES="2"), "--run")
     assert r.returncode == 5, r.stdout + r.stderr
     out = r.stdout + r.stderr
     assert "a broadcast went live" in out
     switches = [c for c in _calls(p["log"], "obs") if c[:1] == ["switch"]]
-    assert len(switches) == 1, "no cut after the broadcast started, and no restore cut"
+    assert len(switches) == 2, "no cut after the broadcast started, and no restore cut"
     assert not [c for c in _calls(p["log"], "obs") if c[:1] == ["record"] and "stop" in c]
     assert "NOT stopping" in out and "RECORDING MAY STILL BE RUNNING" in out
     assert (p["state"] / "recording-strih").exists() and (p["state"] / "recording-stream").exists()
@@ -848,10 +933,11 @@ def test_an_unreadable_stream_program_is_a_skipped_row(rig):
 
 
 def test_an_unreadable_rig_before_stoprecord_keeps_the_recordings(rig):
-    # the stream box stops answering after the last cut: the retried reads never prove an idle
-    # rig, so neither the slot nor cleanup stops a recording that may be a show's
+    # the stream box stops answering after the last cut (switch 3 = the first-scene cut before
+    # StartRecord + the two sweep cuts): the retried reads never prove an idle rig, so neither
+    # the slot nor cleanup stops a recording that may be a show's
     env, p = rig
-    r = _soak(dict(env, FAKE_UNREADABLE_AFTER_SWITCHES="2"), "--run")
+    r = _soak(dict(env, FAKE_UNREADABLE_AFTER_SWITCHES="3"), "--run")
     assert r.returncode == 5, r.stdout + r.stderr
     out = r.stdout + r.stderr
     assert not [c for c in _calls(p["log"], "obs") if c[:1] == ["record"] and "stop" in c]
@@ -863,7 +949,7 @@ def test_cleanup_retries_an_unreadable_read_and_stops_the_recordings(rig):
     # the three reads before the StopRecords are unreadable (the slot aborts); cleanup's first
     # read is unreadable too, its retry reads an idle rig: cleanup stops both recordings
     env, p = rig
-    r = _soak(dict(env, FAKE_UNREADABLE_AFTER_SWITCHES="2", FAKE_UNREADABLE_TIMES="4"), "--run")
+    r = _soak(dict(env, FAKE_UNREADABLE_AFTER_SWITCHES="3", FAKE_UNREADABLE_TIMES="4"), "--run")
     assert r.returncode == 5, r.stdout + r.stderr
     stops = [c for c in _calls(p["log"], "obs") if c[:1] == ["record"] and "stop" in c]
     assert {_host(c) for c in stops} == {STRIH, STREAM}
@@ -873,7 +959,7 @@ def test_cleanup_retries_an_unreadable_read_and_stops_the_recordings(rig):
 
 def test_one_unreadable_read_before_stoprecord_is_retried(rig):
     env, p = rig
-    r = _soak(dict(env, FAKE_UNREADABLE_AFTER_SWITCHES="2", FAKE_UNREADABLE_TIMES="1"), "--run")
+    r = _soak(dict(env, FAKE_UNREADABLE_AFTER_SWITCHES="3", FAKE_UNREADABLE_TIMES="1"), "--run")
     assert r.returncode == 2, r.stdout + r.stderr
     assert _csv_rows(p["run"])[0]["outcome"] == "ok"
     _assert_rig_restored(p)
@@ -886,6 +972,8 @@ def test_an_unreadable_rig_at_a_slot_start_records_nothing(rig):
     assert r.returncode == 2, r.stdout + r.stderr
     assert _csv_rows(p["run"])[0]["outcome"] == "skipped:rig_state_unreadable"
     assert not [c for c in _calls(p["log"], "obs") if c[:1] == ["record"]]
+    assert not [c for c in _calls(p["log"], "obs") if c[:1] == ["switch"]], \
+        "no strih cut either (the first-scene cut needs the same proven idle rig)"
     _assert_rig_restored(p)
 
 
