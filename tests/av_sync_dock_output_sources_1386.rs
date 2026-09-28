@@ -171,15 +171,27 @@ fn the_pwsh_twin_reads_the_same_files_in_the_same_order() {
 fn every_dock_step_in_both_workflows_reads_the_union() {
     for wf in WORKFLOWS {
         let text = repo_file(wf);
-        // Any spelling of one output file (a Get-Content, a [IO.File]::ReadAllText, a quoted path in
-        // either quote style) means a step reads it on its own instead of through the helper.
+        // Any spelling of one output file outside a comment (a Get-Content, a
+        // [IO.File]::ReadAllText, a quoted path in either quote style) means a step reads it on its
+        // own instead of through the helper. The file names are judged by the union's own rule, so
+        // the public sync-test-output.hpp and a comment pointer stay allowed.
         for (n, line) in text.lines().enumerate() {
-            assert!(
-                !line.contains("sync-test-output.") && !line.contains("sync-test-output-"),
-                "{wf}:{}: names one dock output file ({line:?}) -- a step must read the union: \
-                 dot-source {PWSH_TWIN} and use Get-DockOutputSource (issue 1386)",
-                n + 1
-            );
+            if line.trim_start().starts_with('#') {
+                continue;
+            }
+            for (at, _) in line.match_indices("sync-test-output") {
+                let name: String = line[at..]
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+                    .collect();
+                assert!(
+                    !av_sync_dock_output::is_output_file(&name),
+                    "{wf}:{}: reads the dock output file {name} on its own ({line:?}) -- a step \
+                     must read the union: dot-source {PWSH_TWIN} and use Get-DockOutputSource \
+                     (issue 1386)",
+                    n + 1
+                );
+            }
         }
         let mut dock_steps = 0;
         for step in text.split("\n      - name: ") {

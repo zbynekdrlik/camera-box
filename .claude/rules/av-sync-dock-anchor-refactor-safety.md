@@ -171,9 +171,10 @@ out of each step's `foreach (... in @(...))`.
     both because they carry no parameter names.
   - A function MOVING between the output files therefore never breaks an anchor: the pwsh
     mutation run moved `cb_audio_forget_lock` to the video file and every step stayed green.
-- **Never read one output file on its own.** A new anchor uses the helpers. A workflow line
-  that names one output file (`sync-test-output.` or `sync-test-output-`, in any quote style or
-  API) and a Rust path literal to one output file both fail
+- **Never read one output file on its own.** A new anchor uses the helpers. A non-comment
+  workflow line naming one output file (judged by the union's own file rule, in any quote style
+  or API; a `#` comment pointer or the public `sync-test-output.hpp` stays allowed) and a Rust
+  path literal to one output file both fail
   `tests/av_sync_dock_output_sources_1386.rs`, which also pins:
   - the union's `.cpp` set equals the `src/sync-test-output*.cpp` entries of `PLUGIN_SOURCES` in
     `vendor/av-sync-dock/CMakeLists.txt`, so a new TU is compiled AND read;
