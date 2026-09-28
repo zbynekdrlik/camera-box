@@ -640,6 +640,212 @@ def _timed(timings, key, fn, *args, **kwargs):
         timings[key] = time.perf_counter() - t0
 
 
+def _genlock_log_facets(log_text):
+    """The OBS / genlock facets of the bounded log: the startup banner (OBS + DistroAV version, the
+    reset block's fps), the genlock wall-clock + capability markers, and the #1320 PROGRAM-render
+    freeze + relock-burst facets. A dict of `build_bundle_state` keywords."""
+    lagged, lagged_age_s = bsg.program_render_lagged_from_log(log_text)
+    relock_bursts, relock_bursts_age_s = bsg.relock_bursts_from_log(log_text)
+    return {
+        "obs_version": bsg.obs_version_from_log(log_text),
+        "distroav_version": bsg.distroav_version_from_log(log_text),
+        "output_fps": bsg.output_fps_from_log(log_text),
+        "genlock_wall_clock": bsg.genlock_wall_clock_from_log(log_text),
+        "genlock_capability": bsg.genlock_capability_from_log(log_text),
+        "program_render_lagged": lagged,
+        "program_render_lagged_age_s": lagged_age_s,
+        "relock_bursts": relock_bursts,
+        "relock_bursts_age_s": relock_bursts_age_s,
+    }
+
+
+def _av_offset_log_facets(log_text):
+    """The av-sync dock facets of the bounded log (#1267 / #1319 / #1325). A dict of
+    `build_bundle_state` keywords; the dev1 av-step watchdog + the audio-lag band arm read them."""
+    (recent_med, base_med, pin, pin_stable, age_s, n_recent,
+     n_base) = bsg.av_offset_series_from_log(log_text)
+    recent_mad_ms, recent_matched_min = bsg.av_offset_quality_from_log(log_text)
+    return {
+        "av_offset_recent_med_ms": recent_med,
+        "av_offset_base_med_ms": base_med,
+        "av_offset_pin": pin,
+        "av_offset_pin_stable": pin_stable,
+        "av_offset_age_s": age_s,
+        "av_offset_n_recent": n_recent,
+        "av_offset_n_base": n_base,
+        "av_offset_dock_live_age_s": bsg.av_offset_dock_live_age_from_log(log_text),
+        "av_offset_recent_mad_ms": recent_mad_ms,
+        "av_offset_recent_matched_min": recent_matched_min,
+        "av_offset_quality_age_s": bsg.av_offset_quality_age_from_log(log_text),
+    }
+
+
+def _audio_log_facets(log_text, log_read_tod, ref_band_src):
+    """The OBS audio facets of the bounded log: the #1226/#1231 ts_lag max + freshness, the #1265
+    reference band, the #1325 buffered_ms shape, the issue-1381 mixer + obs-vban pacer loss, and the
+    issue-1385 log-head age. A dict of `build_bundle_state` keywords."""
+    # issue 1381: the timestamped tail is parsed ONCE and shared by the mixer + pacer facets below.
+    stamped_tail = bsg.timestamped_tail_lines(log_text)
+    ts_lag_ms, ts_lag_src, ts_lag_age_s = bsg.audio_telemetry_from_log(log_text)
+    (ref_src, ref_base, ref_high, ref_low, ref_duty,
+     ref_n) = bsg.audio_ref_band_from_log(log_text, ref_src=ref_band_src)
+    (buf_slope, buf_max_step, buf_n,
+     buf_age_s) = bsg.buffered_ms_series_from_log(log_text, ref_src=ref_band_src)
+    (mixer_ticks, mixer_ticks_over, mixer_window_ms, mixer_tick_ms,
+     mixer_age_s) = bsg.audio_mixer_from_log(log_text, tail=stamped_tail)
+    (vban_events, vban_ms, vban_dest,
+     vban_age_s) = bsg.vban_pacer_loss_from_log(log_text, tail=stamped_tail)
+    return {
+        "audio_ts_lag_ms": ts_lag_ms,
+        "audio_ts_lag_src": ts_lag_src,
+        "audio_ts_lag_age_s": ts_lag_age_s,
+        "audio_ref_lag_src": ref_src,
+        "audio_ref_lag_base_ms": ref_base,
+        "audio_ref_lag_high_ms": ref_high,
+        "audio_ref_lag_low_ms": ref_low,
+        "audio_ref_lag_duty_pct": ref_duty,
+        "audio_ref_lag_n": ref_n,
+        "buffered_ms_slope_ms_per_min": buf_slope,
+        "buffered_ms_max_step_ms": buf_max_step,
+        "buffered_ms_n": buf_n,
+        "buffered_ms_age_s": buf_age_s,
+        "audio_mixer_ticks": mixer_ticks,
+        "audio_mixer_ticks_over": mixer_ticks_over,
+        "audio_mixer_window_ms": mixer_window_ms,
+        "audio_mixer_tick_ms": mixer_tick_ms,
+        "audio_mixer_age_s": mixer_age_s,
+        "vban_pacer_loss_events": vban_events,
+        "vban_pacer_loss_ms": vban_ms,
+        "vban_pacer_loss_dest": vban_dest,
+        "vban_pacer_age_s": vban_age_s,
+        "obs_log_head_age_s": bsg.obs_log_head_age_s_from_log(log_text, log_read_tod),
+    }
+
+
+def _parse_log_facets(log_text, log_read_tod, ref_band_src):
+    """Every log-derived facet from the SAME bounded log_text (no second read — one #1222
+    `obs_log_parse` timing): `(facets, genlock_lock)`, where `facets` is a dict of
+    `build_bundle_state` keywords and `genlock_lock` is the nested #1299 LOCK facet (None when the
+    log has no `genlock-lock-json:` line — a stock OBS / no line yet, never a false UNLOCKED).
+    Each key's purpose (and which dev1 watchdog reads it) is documented once, at its entry in
+    `bundle_state_gather.BUNDLE_STATE_KEYS`."""
+    facets = {}
+    facets.update(_genlock_log_facets(log_text))
+    facets.update(_audio_log_facets(log_text, log_read_tod, ref_band_src))
+    facets.update(_av_offset_log_facets(log_text))
+    return facets, bsg.genlock_lock_facet_from_log(log_text)
+
+
+def _gather_ndi_inputs_or_empty(obs_host, password):
+    """The OBS-WS NDI inputs, or {} when OBS-WS is unreachable — any WS/RPC failure must not crash
+    the whole response (the log-derived facets still read fine); logged, never guessed."""
+    try:
+        return gather_ndi_inputs(obs_host, password)
+    except Exception as e:  # noqa: BLE001 - any WS/RPC failure must not crash the whole response
+        log(f"WARNING: could not gather NDI input latency over obs-websocket: {e}")
+        return {}
+
+
+def _windows_startup_facets(timings, ahk_path, startup_shortcut):
+    """#826 — the strih OBS-identity machine-check facet (each gather independent, same
+    never-let-one-failure-blank-the-rest discipline as every other facet here): who owns :4455,
+    the NL_STARTUP.ahk launcher facts, and the Start-Menu shortcut's own resolution."""
+    port_owner_path, port_owner_version = _timed(timings, "port4455_owner", port4455_owner)
+    ahk_text = _timed(timings, "ahk_text", read_ahk_text, ahk_path)
+    shortcut_target, shortcut_workdir = _timed(
+        timings, "shortcut", resolve_shortcut, startup_shortcut
+    )
+    return {
+        "port4455_owner_path": port_owner_path,
+        "port4455_owner_version": port_owner_version,
+        "ahk_app1_shortcut_path": bsg.ahk_app1_shortcut_path(ahk_text),
+        "ahk_app1_run": bsg.ahk_app1_run(ahk_text),
+        "ahk_dead_config_present": bsg.ahk_dead_config_present(ahk_text),
+        "shortcut_target_path": shortcut_target,
+        "shortcut_workdir": shortcut_workdir,
+    }
+
+
+def _windows_install_facets(timings, distroav_scan_roots, obs_install_scan_roots, obs_dll_path,
+                            ndi_runtime_dll):
+    """#770 — the DEPLOYED plugin/core byte identity the [0/8] version-integrity gate compares
+    against the #120 BUNDLE_MANIFEST, plus the #826 install scan and the NDI runtime version.
+    distroav.dll: hash the FIRST located copy (scan order: Program Files, then ProgramData, then
+    %APPDATA% — the primary genlock plugin), so a single observed distroav_dll_sha256 pairs with the
+    manifest's by-basename distroav.dll sha. A shadowing duplicate is a SEPARATE #124 concern
+    (distroav_dll_paths reports the whole set). #1115: under Option A the deploy
+    (deploy-genlock-fleet.sh FULL) ships the canonical genlock distroav.dll TO this ProgramData load
+    path, so the FIRST-located copy IS the deployed canonical build (Program Files stays
+    /XF-excluded => no shadow ahead of it) — hashing it here is exactly the byte the
+    version-integrity gate compares by basename. Each hash degrades to "" (UNKNOWN downstream, never
+    a guessed/zero SHA) when the file is missing/unreadable — the opt-in landing (#756-shape): a box
+    with no genlock DLL is skipped."""
+    distroav_paths_csv = _timed(
+        timings, "distroav_dll_paths", bsg.distroav_dll_paths, distroav_scan_roots
+    )
+    first_distroav = distroav_paths_csv.split(",")[0] if distroav_paths_csv else ""
+    obs_installs_val = _timed(
+        timings, "obs_installs", bsg.obs_installs_under, obs_install_scan_roots
+    )
+    obs_dll_sha256_val = _timed(timings, "obs_dll_sha256", bsg.component_sha256, obs_dll_path)
+    distroav_dll_sha256_val = _timed(
+        timings, "distroav_dll_sha256", bsg.component_sha256, first_distroav
+    )
+    ndi_runtime_val = _timed(timings, "ndi_runtime", ndi_runtime_version, ndi_runtime_dll)
+    return {
+        "distroav_dll_paths": distroav_paths_csv,
+        "obs_installs": obs_installs_val,
+        "obs_dll_sha256": obs_dll_sha256_val,
+        "distroav_dll_sha256": distroav_dll_sha256_val,
+        "ndi_runtime": ndi_runtime_val,
+    }
+
+
+def _windows_process_facets(timings):
+    """The OBS process count and the #1227 VB-Matrix presence facet, from ONE native tasklist per
+    request (#1227 review 🟡 — never two spawns)."""
+    tasklist_text = _timed(timings, "tasklist", tasklist_csv)
+    obs_process_count_val = _timed(
+        timings,
+        "obs_process_count",
+        lambda: bsg.obs_process_count_from_listing(_parse_tasklist_obs_process_names(tasklist_text)),
+    )
+    # #1227 — the VB-Matrix presence facet (the dev1 VB-Matrix alert watchdog reads it). The disk
+    # install gate + the shared tasklist parse compose the 3-state running facet; the start time is
+    # a best-effort PID-keyed-cached CIM read gathered via start_fn (a falsy pid = no subprocess, so
+    # imag / a DOWN box never pays a CIM query). A FAILED tasklist read is UNKNOWN, never a false DOWN.
+    (vb_matrix_running_val, vb_matrix_name_val, vb_matrix_pid_val, vb_matrix_start_val) = _timed(
+        timings, "vb_matrix",
+        lambda: gather_vb_matrix_facet(
+            bsg.vb_matrix_install_present_under(DEFAULT_VB_MATRIX_INSTALL_DIRS),
+            tasklist_text, vb_matrix_start_time,
+        ),
+    )
+    return {
+        "obs_process_count": obs_process_count_val,
+        "vb_matrix_running": vb_matrix_running_val,
+        "vb_matrix_name": vb_matrix_name_val,
+        "vb_matrix_pid": vb_matrix_pid_val,
+        "vb_matrix_start": vb_matrix_start_val,
+    }
+
+
+def _windows_identity_facets(timings, *, ahk_path, startup_shortcut, distroav_scan_roots,
+                             obs_install_scan_roots, obs_dll_path, ndi_runtime_dll):
+    """#1299 — the OBS-box IDENTITY facets, ALL Windows-specific (native tasklist/netstat/CIM
+    process reads, ProgramData core/plugin DLL byte hashes, the .lnk/AHK Start-Menu paths +
+    PowerShell NDI-runtime read). On a Linux OBS box (imag) they do not apply, so the caller skips
+    this whole gather at ONE os.name gate (not scattered per-facet try/excepts): every one of these
+    keys stays absent, so build_bundle_state OMITS it (absent == UNKNOWN downstream, never a false
+    0/False), with no Windows-only subprocess spawned and no per-request WARNING. The timing keys
+    are recorded in the order the gathers run."""
+    facets = _windows_startup_facets(timings, ahk_path, startup_shortcut)
+    facets.update(_windows_install_facets(timings, distroav_scan_roots, obs_install_scan_roots,
+                                          obs_dll_path, ndi_runtime_dll))
+    facets.update(_windows_process_facets(timings))
+    return facets
+
+
 def gather_bundle_state(
     obs_host, password, obs_log_dir, ndi_runtime_dll, distroav_scan_roots,
     genlock_build_sha_file=DEFAULT_GENLOCK_BUILD_SHA_FILE,
@@ -658,7 +864,11 @@ def gather_bundle_state(
     so the normal request path pays only a cheap perf_counter() call per facet. This gives the
     NEXT session real per-facet data to attack the remaining ~18.7s cold-log baseline (measured
     2026-08-29 AFTER a fresh-log restart, so it is NOT the log-size problem this ticket's bounded
-    read already fixes) instead of guessing which facet is slow."""
+    read already fixes) instead of guessing which facet is slow.
+
+    Issue 1386: the facet families are gathered by the named helpers above (log: genlock / audio /
+    A/V offset; OBS-WS NDI inputs; the Windows identity group); this function only sequences them
+    and assembles the payload, so the served JSON (key order included) is unchanged."""
     timings = {}
     t_total0 = time.perf_counter()
 
@@ -672,93 +882,10 @@ def gather_bundle_state(
     # simply reports the band facets empty -> omitted, never a false band.
     ref_band_src = os.environ.get("AUDIO_REF_BAND_SRC", bsg.AUDIO_REF_BAND_DEFAULT_SRC)
 
-    def _parse_log_facets():
-        # issue 1381: the timestamped tail is parsed ONCE and shared by the two facets below.
-        stamped_tail = bsg.timestamped_tail_lines(log_text)
-        return (
-            bsg.obs_version_from_log(log_text),
-            bsg.distroav_version_from_log(log_text),
-            bsg.output_fps_from_log(log_text),
-            bsg.genlock_wall_clock_from_log(log_text),
-            bsg.genlock_capability_from_log(log_text),
-            # #1226/#1231 — MAX per-source audio-timeline lag + freshness age
-            # (max_fresh_lag_str, src, age_s) from the SAME bounded log_text (no second read); the
-            # dev1 audio-lag watchdog reads these facets.
-            bsg.audio_telemetry_from_log(log_text),
-            # #1265 — the per-REFERENCE-source ts_lag BAND SHAPE (src, base, high, low, duty, n) from
-            # the SAME bounded log_text (still ONE obs_log_parse timing, no second read).
-            bsg.audio_ref_band_from_log(log_text, ref_src=ref_band_src),
-            # #1267 — the av-sync dock measured-offset trend (recent/base median + pin + pin_stable +
-            # age + per-window counts) from the SAME bounded log_text (no second read); the dev1
-            # upstream-step watchdog reads these facets.
-            bsg.av_offset_series_from_log(log_text),
-            # #1319 — the dock-LIVE heartbeat freshness age (a single string) from the SAME bounded
-            # log_text (no second read); the dev1 band decision reads it to tell "dock LIVE, offset
-            # in the dead band" (IN_BAND_QUIET) from "dock silent" (STALE).
-            bsg.av_offset_dock_live_age_from_log(log_text),
-            # #1299 — the fleet-visible genlock LOCK facet (the decided state the #1298 statusbar
-            # emits on its genlock-lock-json: line) from the SAME bounded log_text (no second read);
-            # the dev1 genlock-lock watchdog + rig-status read it. None -> facet omitted (a stock OBS
-            # / no line yet), never a false UNLOCKED.
-            bsg.genlock_lock_facet_from_log(log_text),
-            # #1320 — the strih PROGRAM-render freeze facet (max lagged + freshness age) from the
-            # SAME bounded log_text (no second read); the dev1 render-freeze watchdog reads it.
-            bsg.program_render_lagged_from_log(log_text),
-            # #1319 Part 2 — the dock estimator's recent-window measurement QUALITY (median MAD +
-            # min matched) from the SAME bounded log_text (no second read); the dev1 band arm reads
-            # LOW_QUALITY off it so a noisy/biased dock reading no longer false-pages.
-            bsg.av_offset_quality_from_log(log_text),
-            # #1320 — the RELOCK-BURST facet (max per-input bursts + freshness age) from the SAME
-            # bounded log_text (no second read); the dev1 render-freeze watchdog's relock arm reads
-            # it. Appended at the END of the tuple (order-sensitive unpack below). "" -> facet
-            # omitted (steady state, no relock line), never a fabricated 0.
-            bsg.relock_bursts_from_log(log_text),
-            # #1325 — the in-log age of the freshest dock QUALITY line (a single string) from the
-            # SAME bounded log_text (no second read); the dev1 band/step arms gate LOW_QUALITY on it
-            # when the quality facet is absent AND this age is stale. Appended at the END.
-            bsg.av_offset_quality_age_from_log(log_text),
-            # #1325 — the mbc buffered_ms DRIFT/STEP shape (slope, max_step, n, age) from the SAME
-            # bounded log_text (no second read); the dev1 audio-lag watchdog's REPORT-ONLY buffered
-            # arm reads it. Appended at the END (order-sensitive unpack below).
-            bsg.buffered_ms_series_from_log(log_text, ref_src=ref_band_src),
-            # issue 1381 -- the audio MIXER real-time facet (newest complete audio-stall dump) and
-            # the obs-vban PACER loss facet from the SAME bounded log_text (no second read); the
-            # dev1 audio-mixer watchdog reads them. Appended at the END (order-sensitive unpack).
-            bsg.audio_mixer_from_log(log_text, tail=stamped_tail),
-            bsg.vban_pacer_loss_from_log(log_text, tail=stamped_tail),
-            # issue 1385 -- the log head's age against the box's own clock (the dev1 audio-mixer
-            # STALLED verdict's liveness proof). Appended at the END (order-sensitive unpack below).
-            bsg.obs_log_head_age_s_from_log(log_text, log_read_tod),
-        )
-
-    (obs_version, distroav_version, output_fps, genlock_wall_clock, genlock_capability,
-     audio_ts_lag, audio_ref_band, av_offset, av_offset_dock_live_age_s_val, genlock_lock,
-     program_render_lagged, av_offset_quality, relock_bursts,
-     av_offset_quality_age_s_val, buffered_ms_series, audio_mixer, vban_pacer,
-     obs_log_head_age_s_val) = _timed(timings, "obs_log_parse", _parse_log_facets)
-    (audio_mixer_ticks_val, audio_mixer_ticks_over_val, audio_mixer_window_ms_val,
-     audio_mixer_tick_ms_val, audio_mixer_age_s_val) = audio_mixer
-    (vban_pacer_loss_events_val, vban_pacer_loss_ms_val, vban_pacer_loss_dest_val,
-     vban_pacer_age_s_val) = vban_pacer
-    av_offset_recent_mad_ms_val, av_offset_recent_matched_min_val = av_offset_quality
-    relock_bursts_val, relock_bursts_age_s_val = relock_bursts
-    (buffered_ms_slope_val, buffered_ms_max_step_val, buffered_ms_n_val,
-     buffered_ms_age_s_val) = buffered_ms_series
-    audio_ts_lag_ms_val, audio_ts_lag_src_val, audio_ts_lag_age_s_val = audio_ts_lag
-    program_render_lagged_val, program_render_lagged_age_s_val = program_render_lagged
-    (audio_ref_lag_src_val, audio_ref_lag_base_ms_val, audio_ref_lag_high_ms_val,
-     audio_ref_lag_low_ms_val, audio_ref_lag_duty_pct_val, audio_ref_lag_n_val) = audio_ref_band
-    (av_offset_recent_med_val, av_offset_base_med_val, av_offset_pin_val, av_offset_pin_stable_val,
-     av_offset_age_s_val, av_offset_n_recent_val, av_offset_n_base_val) = av_offset
-
-    def _gather_ndi():
-        try:
-            return gather_ndi_inputs(obs_host, password)
-        except Exception as e:  # noqa: BLE001 - any WS/RPC failure must not crash the whole response
-            log(f"WARNING: could not gather NDI input latency over obs-websocket: {e}")
-            return {}
-
-    ndi_inputs = _timed(timings, "ndi_inputs", _gather_ndi)
+    log_facets, genlock_lock = _timed(
+        timings, "obs_log_parse", _parse_log_facets, log_text, log_read_tod, ref_band_src
+    )
+    ndi_inputs = _timed(timings, "ndi_inputs", _gather_ndi_inputs_or_empty, obs_host, password)
 
     # #1299 — the DEPLOYED genlock build SHA is a plain CROSS-PLATFORM file read (imag serves it from
     # /opt/obs-genlock/GENLOCK_BUILD_SHA.txt; the Windows boxes from the deployed bundle path), so it
@@ -769,166 +896,26 @@ def gather_bundle_state(
         timings, "genlock_build_sha", bsg.genlock_build_sha_from_file, genlock_build_sha_file
     )
 
-    # #1299 — the OBS-box IDENTITY facets below are ALL Windows-specific (native tasklist/netstat/CIM
-    # process reads, ProgramData core/plugin DLL byte hashes, the .lnk/AHK Start-Menu paths +
-    # PowerShell NDI-runtime read). On a Linux OBS box (imag) they do not apply, so they are SKIPPED
-    # at the gather boundary — ONE os.name gate, not scattered per-facet try/excepts — leaving each
-    # value "" so build_bundle_state OMITS it (absent == UNKNOWN downstream, never a false 0/False),
-    # with no Windows-only subprocess spawned and no per-request WARNING. On Windows the gate is a
-    # no-op, so the served payload stays byte-identical to before.
+    # #1299 — ONE os.name gate for the Windows-only identity group (see _windows_identity_facets).
+    # On Windows the gate is a no-op, so the served payload stays byte-identical to before.
+    identity = {}
     if IS_WINDOWS:
-        # #826 — the strih OBS-identity machine-check facet (each gather independent, same
-        # never-let-one-failure-blank-the-rest discipline as every other facet here).
-        port_owner_path, port_owner_version = _timed(timings, "port4455_owner", port4455_owner)
-        ahk_text = _timed(timings, "ahk_text", read_ahk_text, ahk_path)
-        shortcut_target, shortcut_workdir = _timed(
-            timings, "shortcut", resolve_shortcut, startup_shortcut
-        )
-
-        # #770 — the DEPLOYED plugin/core byte identity the [0/8] version-integrity gate compares
-        # against the #120 BUNDLE_MANIFEST. distroav.dll: hash the FIRST located copy (scan order:
-        # Program Files, then ProgramData, then %APPDATA% — the primary genlock plugin), so a single
-        # observed distroav_dll_sha256 pairs with the manifest's by-basename distroav.dll sha. A
-        # shadowing duplicate is a SEPARATE #124 concern (distroav_dll_paths reports the whole set).
-        # #1115: under Option A the deploy (deploy-genlock-fleet.sh FULL) ships the canonical
-        # genlock distroav.dll TO this ProgramData load path, so the FIRST-located copy IS the
-        # deployed canonical build (Program Files stays /XF-excluded => no shadow ahead of it) —
-        # hashing it here is exactly the byte the version-integrity gate compares by basename.
-        # Each hash degrades to "" (UNKNOWN downstream, never a guessed/zero SHA) when the file is
-        # missing/unreadable — the opt-in landing (#756-shape): a box with no genlock DLL is skipped.
-        distroav_paths_csv = _timed(
-            timings, "distroav_dll_paths", bsg.distroav_dll_paths, distroav_scan_roots
-        )
-        first_distroav = distroav_paths_csv.split(",")[0] if distroav_paths_csv else ""
-
-        obs_installs_val = _timed(
-            timings, "obs_installs", bsg.obs_installs_under, obs_install_scan_roots
-        )
-        obs_dll_sha256_val = _timed(timings, "obs_dll_sha256", bsg.component_sha256, obs_dll_path)
-        distroav_dll_sha256_val = _timed(
-            timings, "distroav_dll_sha256", bsg.component_sha256, first_distroav
-        )
-        ndi_runtime_val = _timed(timings, "ndi_runtime", ndi_runtime_version, ndi_runtime_dll)
-        # #1227 review 🟡 — ONE native tasklist per request feeds BOTH the obs process-count facet and
-        # the VB-Matrix presence facet (never two spawns).
-        tasklist_text = _timed(timings, "tasklist", tasklist_csv)
-        obs_process_count_val = _timed(
+        identity = _windows_identity_facets(
             timings,
-            "obs_process_count",
-            lambda: bsg.obs_process_count_from_listing(_parse_tasklist_obs_process_names(tasklist_text)),
+            ahk_path=ahk_path,
+            startup_shortcut=startup_shortcut,
+            distroav_scan_roots=distroav_scan_roots,
+            obs_install_scan_roots=obs_install_scan_roots,
+            obs_dll_path=obs_dll_path,
+            ndi_runtime_dll=ndi_runtime_dll,
         )
-
-        # #1227 — the VB-Matrix presence facet (the dev1 VB-Matrix alert watchdog reads it). The disk
-        # install gate + the shared tasklist parse compose the 3-state running facet; the start time is
-        # a best-effort PID-keyed-cached CIM read gathered via start_fn (a falsy pid = no subprocess, so
-        # imag / a DOWN box never pays a CIM query). A FAILED tasklist read is UNKNOWN, never a false DOWN.
-        (vb_matrix_running_val, vb_matrix_name_val, vb_matrix_pid_val, vb_matrix_start_val) = _timed(
-            timings, "vb_matrix",
-            lambda: gather_vb_matrix_facet(
-                bsg.vb_matrix_install_present_under(DEFAULT_VB_MATRIX_INSTALL_DIRS),
-                tasklist_text, vb_matrix_start_time,
-            ),
-        )
-    else:
-        # #1299 — Linux (imag): every Windows-only identity facet is left empty so build_bundle_state
-        # omits it. No native tasklist/netstat/CIM/PowerShell/DLL-scan is attempted at all.
-        port_owner_path = port_owner_version = ""
-        ahk_text = ""
-        shortcut_target = shortcut_workdir = ""
-        distroav_paths_csv = ""
-        obs_installs_val = ""
-        obs_dll_sha256_val = ""
-        distroav_dll_sha256_val = ""
-        ndi_runtime_val = ""
-        obs_process_count_val = ""
-        vb_matrix_running_val = vb_matrix_name_val = vb_matrix_pid_val = vb_matrix_start_val = ""
 
     result = bsg.build_bundle_state(
-        obs_version=obs_version,
-        distroav_version=distroav_version,
-        ndi_runtime=ndi_runtime_val,
-        output_fps=output_fps,
-        genlock_wall_clock=genlock_wall_clock,
         ndi_input_latency=bsg.ndi_input_latency_csv(ndi_inputs),
-        distroav_dll_paths=distroav_paths_csv,
-        genlock_capability=genlock_capability,
-        # #770 — deployed core/plugin byte sha256 (the truth the marker only POINTS at).
-        obs_dll_sha256=obs_dll_sha256_val,
-        distroav_dll_sha256=distroav_dll_sha256_val,
         # #756 — the deployed genlock build SHA for the cross-box parity gate.
         genlock_build_sha=genlock_build_sha_val,
-        # #826 — the strih OBS-identity machine-check facet.
-        obs_installs=obs_installs_val,
-        port4455_owner_path=port_owner_path,
-        port4455_owner_version=port_owner_version,
-        obs_process_count=obs_process_count_val,
-        ahk_app1_shortcut_path=bsg.ahk_app1_shortcut_path(ahk_text),
-        ahk_app1_run=bsg.ahk_app1_run(ahk_text),
-        ahk_dead_config_present=bsg.ahk_dead_config_present(ahk_text),
-        shortcut_target_path=shortcut_target,
-        shortcut_workdir=shortcut_workdir,
-        # #1226 — the audio-timeline-lag facet (omit-when-empty; absent == UNKNOWN downstream).
-        audio_ts_lag_ms=audio_ts_lag_ms_val,
-        audio_ts_lag_src=audio_ts_lag_src_val,
-        # #1231 — the freshness age of that facet (in-log seconds behind the log head); a large value
-        # -> the dev1 decision surfaces STALE (telemetry stopped while the log advanced).
-        audio_ts_lag_age_s=audio_ts_lag_age_s_val,
-        # #1265 — the per-REFERENCE-source ts_lag BAND SHAPE (omit-when-empty; a box with no such
-        # source reports them empty). The dev1 audio-lag watchdog's BAND arm + recording-e2e.sh's
-        # #856 apply-guard read these.
-        audio_ref_lag_src=audio_ref_lag_src_val,
-        audio_ref_lag_base_ms=audio_ref_lag_base_ms_val,
-        audio_ref_lag_high_ms=audio_ref_lag_high_ms_val,
-        audio_ref_lag_low_ms=audio_ref_lag_low_ms_val,
-        audio_ref_lag_duty_pct=audio_ref_lag_duty_pct_val,
-        audio_ref_lag_n=audio_ref_lag_n_val,
-        # #1267 — the av-sync dock measured-offset trend the dev1 upstream-step watchdog reads
-        # (omit-when-empty; absent == UNKNOWN downstream).
-        av_offset_recent_med_ms=av_offset_recent_med_val,
-        av_offset_base_med_ms=av_offset_base_med_val,
-        av_offset_pin=av_offset_pin_val,
-        av_offset_pin_stable=av_offset_pin_stable_val,
-        av_offset_age_s=av_offset_age_s_val,
-        av_offset_n_recent=av_offset_n_recent_val,
-        av_offset_n_base=av_offset_n_base_val,
-        # #1319 — the dock-LIVE heartbeat freshness age (omit-when-empty; IN_BAND_QUIET vs STALE).
-        av_offset_dock_live_age_s=av_offset_dock_live_age_s_val,
-        # #1319 Part 2 — the dock estimator's recent-window measurement QUALITY (omit-when-empty;
-        # LOW_QUALITY unless recent_mad_ms <= 15 AND recent_matched_min >= 30).
-        av_offset_recent_mad_ms=av_offset_recent_mad_ms_val,
-        av_offset_recent_matched_min=av_offset_recent_matched_min_val,
-        # #1325 — the freshest dock-quality-line age (LOW_QUALITY gate when quality absent + stale)
-        # and the mbc buffered_ms drift/step shape (REPORT-ONLY buffered arm). Omit-when-empty.
-        av_offset_quality_age_s=av_offset_quality_age_s_val,
-        buffered_ms_slope_ms_per_min=buffered_ms_slope_val,
-        buffered_ms_max_step_ms=buffered_ms_max_step_val,
-        buffered_ms_n=buffered_ms_n_val,
-        buffered_ms_age_s=buffered_ms_age_s_val,
-        # #1227 — VB-Matrix presence (omit-when-empty; running="0" installed-but-dead surfaces as
-        # DOWN, running="" not-installed is dropped -> UNKNOWN downstream, never a false negative).
-        vb_matrix_running=vb_matrix_running_val,
-        vb_matrix_name=vb_matrix_name_val,
-        vb_matrix_pid=vb_matrix_pid_val,
-        vb_matrix_start=vb_matrix_start_val,
-        # #1320 — the PROGRAM-render freeze facet the dev1 render-freeze watchdog reads (omit-when-
-        # empty; "0" = render telemetry live/no freeze is KEPT, "" = no program-render-audit line is
-        # dropped -> UNKNOWN downstream, never a fabricated 0).
-        program_render_lagged=program_render_lagged_val,
-        program_render_lagged_age_s=program_render_lagged_age_s_val,
-        relock_bursts=relock_bursts_val,
-        relock_bursts_age_s=relock_bursts_age_s_val,
-        # issue 1381 -- the audio-mixer real-time + obs-vban pacer loss facets (omit-when-empty).
-        audio_mixer_ticks=audio_mixer_ticks_val,
-        audio_mixer_ticks_over=audio_mixer_ticks_over_val,
-        audio_mixer_window_ms=audio_mixer_window_ms_val,
-        audio_mixer_tick_ms=audio_mixer_tick_ms_val,
-        audio_mixer_age_s=audio_mixer_age_s_val,
-        vban_pacer_loss_events=vban_pacer_loss_events_val,
-        vban_pacer_loss_ms=vban_pacer_loss_ms_val,
-        vban_pacer_loss_dest=vban_pacer_loss_dest_val,
-        vban_pacer_age_s=vban_pacer_age_s_val,
-        # issue 1385 -- the log head's age against the box's own clock (omit-when-empty).
-        obs_log_head_age_s=obs_log_head_age_s_val,
+        **log_facets,
+        **identity,
     )
 
     # #1299 — the genlock_lock facet is a NESTED object, not a flat string, so it is attached here

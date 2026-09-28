@@ -16,7 +16,7 @@ Wants=graphical-session.target
 
 [Service]
 Type=simple
-# The three sibling files (bundle-state-server.py + its bundle_state_gather / obs_phase2 imports)
+# bundle-state-server.py + its sibling modules (the ONE declared list, scripts/lib/bundle-state-files.sh)
 # are installed together under /opt/camera-box by setup-imag.sh step 28 so the server's sibling
 # imports resolve. imag's OBS-WS has NO password, so OBS_PASSWORD is left unset -> "".
 # %h expands to the user home (/home/newlevel) so the OBS log dir path is home-relative.

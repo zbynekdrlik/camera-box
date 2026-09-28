@@ -72,8 +72,9 @@ the new facets is deployed to the boxes.
 
 ```bash
 # 0. Deploy the bundle-state server files that carry the new facets to each box (the usual
-#    bundle-state-server.py + bundle_state_gather.py redeploy + BundleStateServer task / unit
-#    restart), then confirm the facets are served:
+#    redeploy of EVERY file in scripts/lib/bundle-state-files.txt -- issue 1386: the server
+#    imports all of them -- + BundleStateServer task / unit restart), then confirm the facets
+#    are served:
 curl -s http://resolume.lan:8899/bundle-state.json | python3 -m json.tool | grep -E 'audio_mixer|vban_pacer|obs_log_head'
 curl -s http://10.77.9.204:8899/bundle-state.json | python3 -m json.tool | grep -E 'audio_mixer|obs_log_head'
 curl -s http://10.77.9.202:8899/bundle-state.json | python3 -m json.tool | grep -E 'audio_mixer|obs_log_head'

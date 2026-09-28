@@ -392,7 +392,9 @@ whole `genlock_build_sha` key MISSING even though `bundle_state_gather.py`'s com
 NOT a scheduled-task-health problem (the task was `Running`, `LastTaskResult=0`) — it's a plain
 **deploy drift**: nothing automatically pushes a new commit's `scripts/bundle-state-server.py` /
 `scripts/bundle_state_gather.py` to the boxes; a code change to these files needs an EXPLICIT
-redeploy (`FileWrite` the current committed content to `C:\ProgramData\camera-box\`) + a restart
+redeploy (`FileWrite` the current committed content to `C:\ProgramData\camera-box\` — since issue
+1386 EVERY file named in `scripts/lib/bundle-state-files.txt`, never only the one you changed: the
+gather is split into `bundle_state_*` modules the server imports together) + a restart
 of the running `python.exe` (killing the stale PID is enough — the `run-bundle-state-server.ps1`
 supervisor loop relaunches it within ~5s, picking up the new file) before its payload reflects the
 new schema. **Whenever you add/change a field these two files gather, always confirm live** (`curl
