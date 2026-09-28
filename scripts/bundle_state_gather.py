@@ -1805,8 +1805,9 @@ def recordings_free_line(stats_json_text, min_free_gb):
     """issue 1367 -- the ONE "<VERDICT> <free_gb>" line a bash caller prints from a box's
     `/record-dir-stats.json` body: `recordings_free_verdict` on its `free_bytes`, the free space in
     decimal GB with one decimal, or `-1` when unknown. An empty / non-JSON / non-object body is
-    "UNKNOWN -1" (never a false WARN). recording-e2e.sh keeps its inline copy of this shape (that
-    harness is a static-anchor minefield); scripts/lib/av-soak.sh calls this one."""
+    "UNKNOWN -1" (never a false WARN), and so is a non-numeric / boolean free_bytes. Its callers:
+    recording-e2e.sh through scripts/lib/recordings-free-line.sh (issue 1386) and
+    scripts/lib/av-soak.sh."""
     try:
         d = json.loads(stats_json_text or "")
     except ValueError:

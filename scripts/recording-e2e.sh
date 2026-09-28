@@ -409,6 +409,10 @@ IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # camera).
 # shellcheck source=scripts/lib/self-heal-attribution.sh
 . "$HERE/lib/self-heal-attribution.sh"
+# issue 1386: the recordings-volume free-space line comes from the one reader
+# bundle_state_gather.recordings_free_line (the soak uses the same reader).
+# shellcheck source=scripts/lib/recordings-free-line.sh
+. "$HERE/lib/recordings-free-line.sh"
 # #1134: the SOURCE-camera role (the "cam1 role") is no longer hard-pinned to cam1 -- it is the
 # first strih-routable member of CAMERA_ACTIVE_SET (camera_source_box, scripts/camera-set.sh), so
 # retiring cam1 from the active set (its USB grabber hw-faulted -- #1110 -EPROTO, owner order
@@ -1012,20 +1016,10 @@ check_recordings_free_space() {
     return 0
   }
   # Capture into a plain variable (never `read < <(...)`, whose EOF return would set-e-abort the run,
-  # the #1133 class): the python always prints exactly one "<VERDICT> <free_gb>" line and exits 0, so
-  # a pipeline failure here means python itself is broken -> the `|| { ...; return 0; }` skips cleanly.
-  out=$(printf '%s' "$stats" | PYTHONPATH="$HERE" python3 -c '
-import json, sys
-import bundle_state_gather as bsg
-try:
-    d = json.load(sys.stdin)
-except Exception:
-    print("UNKNOWN -1")
-    sys.exit(0)
-fb = d.get("free_bytes")
-v = bsg.recordings_free_verdict(fb, float(sys.argv[1]))
-print(v, "-1" if fb is None else "%.1f" % (fb / 1e9))
-' "$RECORDINGS_FREE_MIN_GB" 2>/dev/null) || {
+  # the #1133 class): the one reader grades the body's free_bytes and always prints exactly one
+  # "<VERDICT> <free_gb>" line and exits 0, so a failure here means python itself is broken -> the
+  # `|| { ...; return 0; }` skips cleanly.
+  out=$(recordings_free_line_from_stats "$stats" "$RECORDINGS_FREE_MIN_GB" "$HERE") || {
     echo "    NOTE: could not parse $label recordings free-space stats — skipping free-space check" >&2
     return 0
   }

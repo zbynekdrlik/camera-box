@@ -15,10 +15,9 @@
 #     QPSK marker log) -- cam2 is never written,
 #   - the argv builders of the two on-box extracts and the dev1 merge, used by BOTH the --plan
 #     printout and the --run execution (plan == run by construction),
-#   - the record-volume free-space read: the SAME `:8899/record-dir-stats.json` +
-#     `bundle_state_gather.recordings_free_verdict` call shape recording-e2e.sh's own
-#     `check_recordings_free_space` makes (that function lives inline in recording-e2e.sh, the
-#     static-anchor minefield, so its call shape is copied here rather than the file edited).
+#   - the record-volume free-space read: the SAME `:8899/record-dir-stats.json` fetch and the SAME
+#     reader, `bundle_state_gather.recordings_free_line`, that recording-e2e.sh's
+#     `check_recordings_free_space` uses (through scripts/lib/recordings-free-line.sh, issue 1386).
 
 # av_soak_windows_count DURATION_S SLOT_S -> the number of windows: one at every slot start from 0
 # up to and including DURATION_S (so an 8 h run's last window starts at 8 h and the run's window
