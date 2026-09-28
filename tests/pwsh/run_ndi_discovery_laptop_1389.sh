@@ -14,16 +14,17 @@ set -euo pipefail
 # The expected lists come from the ONE generator (scripts/lib/ndi-discovery.sh --ips pinned /
 # --cambox-ips), never retyped here.
 #
-# Needs pwsh: $PWSH, else `pwsh` on PATH. dev1 has none; unpack the powershell-7.x-linux-x64
-# release tarball into a scratch dir and point PWSH at it. A missing pwsh FAILS, never skips.
-# Exit 0 = every case ok, 1 = a case failed, 2 = no pwsh. Not in CI (no pwsh on the runner).
+# Needs pwsh: $PWSH, else `pwsh` on PATH. ubuntu-latest ships it; dev1 has a portable one at
+# ~/.local/pwsh74/pwsh. A missing pwsh FAILS, never skips. Exit 0 = every case ok, 1 = a case
+# failed, 2 = no pwsh. CI runs it through tests/python/test_ndi_discovery_1389.py
+# (LaptopScriptRun1389, which also finds the dev1 copy).
 NDI_TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NDI_TEST_ROOT="$(cd "$NDI_TEST_DIR/../.." && pwd)"
 PS1="$NDI_TEST_ROOT/scripts/ndi-discovery-laptop.ps1"
 LIB="$NDI_TEST_ROOT/scripts/lib/ndi-discovery.sh"
 PWSH="${PWSH:-$(command -v pwsh || true)}"
 if [ -z "$PWSH" ] || [ ! -x "$PWSH" ]; then
-  echo "FAIL: no pwsh (set PWSH=/path/to/pwsh; dev1 has none -- unpack the powershell-7.x-linux-x64 release tarball)" >&2
+  echo "FAIL: no pwsh (set PWSH=/path/to/pwsh; dev1 has ~/.local/pwsh74/pwsh, else unpack the powershell-7.x-linux-x64 release tarball)" >&2
   exit 2
 fi
 
@@ -69,7 +70,8 @@ before="$(cat "$WORK/c2/NDI/ndi-config.v1.json")"
 rc=0; run_ps1 "$WORK/c2" -Ips "$FLEET,${CAMBOXES%%,*}" || rc=$?
 check "2: refused" "$([ "$rc" -ne 0 ] && echo yes || echo no)" yes
 check "2: file untouched" "$(cat "$WORK/c2/NDI/ndi-config.v1.json")" "$before"
-check "2: names issue 1389" "$(grep -c 'issue 1389' "$WORK/out" || true)" 1
+# (the error view may also echo the throw's source line, so count presence, not lines)
+check "2: names issue 1389" "$(grep -q 'issue 1389' "$WORK/out" && echo yes || echo no)" yes
 
 # 3. -DryRun writes nothing and announces the removal
 seed "$WORK/c3" "$CAMBOXES,$FLEET"

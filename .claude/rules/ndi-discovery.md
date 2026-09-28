@@ -70,9 +70,17 @@ paths:
   item 34. It also FAILs when the default cambox set cannot be derived.
 - The Windows `.ps1` REMOVES every `-RemoveIps` entry (default: every cambox IP, test-pinned to
   `--cambox-ips`), refuses an `-Ips` list naming one, and fails its read-back if one survived.
-- The cambox's OWN config holds the same fleet-only list. The camera-box finder needs only the strih
-  preview source `STRIH-LX (interkom)`, and never a peer cambox: cambox ↔ cambox connections are gone
-  too.
+- The cambox's OWN config holds the same fleet-only list (the main's decision for this slice). The
+  camera-box finder needs only the strih preview source `STRIH-LX (interkom)`, and never a peer
+  cambox: cambox ↔ cambox connections are gone too.
+- **Open question (the lane's review round 1, for the main).** The fix removes every INBOUND
+  discovery connection into a cambox. Each cambox still opens OUTBOUND ones to the ≤ 3 listed OBS
+  boxes, and those boxes' restarts are the very trigger. Whether an outbound teardown can abort
+  camera-box too is NOT measured. The design's evidence names the inbound threads only. The
+  19–20 `disc:recv` pairs match inbound (~13 finders) plus outbound (~7) as well.
+  - The runbook's acceptance restarts each OBS box one at a time and checks it.
+  - If an outbound teardown aborts, the cure is a cambox list of strih-lx only (the one source it
+    receives) or none (mDNS-only).
 
 ## The SDK contract (why this shape, and why NOT a Discovery Server)
 
@@ -192,7 +200,10 @@ The CLI, for boxes this repo does not provision and for the issue-1389 runbook:
   renumber, regenerate them: `bash scripts/lib/ndi-discovery.sh --json pinned >
   scripts/ndi-discovery/ndi-config.v1.json`, plus the two `.ps1` default lines.
 - `tests/pwsh/run_ndi_discovery_laptop_1389.sh` RUNS the real `.ps1` against scratch `%ProgramData%`
-  dirs (needs `PWSH=`; dev1 has a portable one under `~/.local/pwsh74`; not in CI).
+  dirs. CI runs it through `LaptopScriptRun1389` in `tests/python/test_ndi_discovery_1389.py`:
+  ubuntu-latest ships pwsh, and dev1 has a portable one at `~/.local/pwsh74/pwsh`. A missing pwsh
+  FAILS the test, never skips it. pwsh 7 is not Windows PowerShell 5.1, so keep the `.ps1` to 5.1
+  syntax: the run proves the logic.
 
 The genlock skill's old "libndi ignores ndi-config.v1.json" finding (issue 797) is not evidence
 against this. That test wrote `/root/.ndi/`, which is invisible under camera-box's
@@ -203,11 +214,18 @@ from the receiver's source list and its TCP connections instead (below).
 
 Re-running setup-device.sh on a live cambox is a full re-provision. The smallest safe equivalent
 rewrites ONLY `/etc/ndi/ndi-config.v1.json`:
-- `bash scripts/lib/ndi-discovery.sh --cambox-apply > /tmp/ndi-apply-1389.sh` generates ONE program
-  for every cambox. It embeds the SAME `ndi_discovery_write_config` STEP 7 calls (via `declare -f`,
-  never a copy) and the generated list. It refuses to exist for an empty list or one naming a cambox.
-- `sshpass -p "$DEVICE_ROOT_PW" ssh root@<cambox> bash -s < /tmp/ndi-apply-1389.sh` runs it on one box:
-  - an identical config prints `unchanged` and writes nothing: no remount, no write to the USB stick;
+- `apply="$(mktemp)"; bash scripts/lib/ndi-discovery.sh --cambox-apply > "$apply"` generates ONE
+  program for every cambox. It embeds the SAME `ndi_discovery_write_config` STEP 7 calls (via
+  `declare -f`, never a copy) and the generated list. It refuses to exist for an empty list or one
+  naming a cambox.
+- `sshpass -p "$DEVICE_ROOT_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
+  -o ConnectTimeout=10 root@<cambox> bash -s < "$apply"` runs it on one box (the ssh options of
+  verify-device's `ssh_box`: a reflashed box has a new host key):
+  - a box without the camera-box `ndi-discovery.conf` drop-in never reads the file, so it is
+    mDNS-only already: the program says so and writes nothing;
+  - when `ndi.networks.ips` already equals the list and no `networks.discovery` is set (whatever
+    other keys the file has), it prints `unchanged` and writes nothing: no remount, no write to the
+    USB stick;
   - otherwise it reads the root mount (`findmnt`, `/proc/mounts` fallback) and, when read-only,
     `mount -o remount,rw /`, writes the one file (temp file + atomic rename), `sync`, then
     `mount -o remount,ro /` again (3 tries);
@@ -233,9 +251,11 @@ Receiver config only, no gate. Run it when no E2E / soak holds the rig lease
   `sudo ./scripts/setup-strih.sh --box strih-lx` (step 4b). The next genlock deploy runs it anyway.
   - Grade: `sudo ./scripts/verify-strih.sh --box strih-lx`, item 34 = 3 PASS, no `cambox` FAIL.
 - **cam1 … cam7** (each `camera_resolve` camera):
-  - `bash scripts/lib/ndi-discovery.sh --cambox-apply > /tmp/ndi-apply-1389.sh` once;
-  - then per box `sshpass -p "$DEVICE_ROOT_PW" ssh root@10.77.9.6N bash -s < /tmp/ndi-apply-1389.sh`
-    → `OK: ... rewritten` (or `unchanged`).
+  - `apply="$(mktemp)"; bash scripts/lib/ndi-discovery.sh --cambox-apply > "$apply"` once;
+  - then per box `sshpass -p "$DEVICE_ROOT_PW" ssh -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 root@10.77.9.6N bash -s < "$apply"`
+    → `OK: ... rewritten` (or `unchanged`);
+  - `rm -f "$apply"` afterwards.
   - Never setup-device.sh on a live box for this, never a reboot (the never-remote-reboot-a-cambox rule).
 - **stream + resolume** (Windows, via the win-* MCP; never ssh for a GUI step):
   - copy `scripts/ndi-discovery-laptop.ps1` to the box;
@@ -246,7 +266,8 @@ Receiver config only, no gate. Run it when no E2E / soak holds the rig lease
 
 **2. Restart every NDI process, the remote receivers FIRST and the camboxes LAST.**
 - Each restart closes that process's old connections into the camboxes. That is the abort trigger,
-  one last time: a camera-box may abort once here, and systemd restarts it in ~3 s with the new file.
+  one last time per peer: a camera-box may abort more than once during this step (each peer still on
+  the old list can trigger it once), and each abort restarts it in ~3 s on the new file.
 - **strih-lx:** `systemctl --user restart strih-obs.service` (as newlevel), then
   `sudo systemctl restart bkshading-service intercom-hub`.
 - **stream:** restart OBS the usual way (`.claude/skills/obs-ops`).
@@ -276,13 +297,17 @@ Receiver config only, no gate. Run it when no E2E / soak holds the rig lease
 - **strih-lx:** `ss -Htnp state established '( dport = :5960 )'` shows no peer from `--cambox-ips`.
 - **stream / resolume** (win-* MCP Shell):
   - `$c = '<--cambox-ips output>' -split ','; Get-NetTCPConnection -State Established -RemotePort 5960 |
-    Where-Object { $c -contains $_.RemoteAddress } |
+    Where-Object { $c -contains ($_.RemoteAddress -replace '^::ffff:', '') } |
     Select-Object RemoteAddress, OwningProcess, @{n='Name';e={(Get-Process -Id $_.OwningProcess).ProcessName}}`
-    must print nothing;
+    must print nothing (the `::ffff:` strip covers a dual-stack socket);
   - any row names the NDI app still holding a cambox connection: restart it (Arena: ask the owner).
-- **Acceptance (the design):**
-  - a strih OBS restart and a SongPlayer restart abort no camera-box:
-    `journalctl -u camera-box --since '<t>' | grep -c 'status=6/ABRT'` = 0 on every box;
+- **Acceptance (the design, plus the open outbound question above):**
+  - restart each OBS box's NDI processes one at a time -- the strih-lx OBS, the stream OBS,
+    SongPlayer, the cg OBS -- and before each restart note every cambox's OWN outbound connections
+    (`ss -Htnp state established '( dport = :5960 )'`). Each restart aborts no camera-box:
+    `journalctl -u camera-box --since '<t>' | grep -c 'status=6/ABRT'` = 0 on every box. An abort
+    whose box held an outbound connection to the restarted host answers the open question: report
+    it to the main (the cambox list then shrinks to strih-lx or to none);
   - 0 aborts on cam1/cam2/cam4 over 24 h;
   - after a strih OBS cold start, every `CAMn (usb)` source still lists within seconds (mDNS), and
     every other source too (the issue-1342 cold-start check below).

@@ -35,14 +35,16 @@
 # verify flap, while a renumbered strih-lx / stream still FAILS until re-provisioned.
 #
 # NEVER A CAMBOX (issue 1389). A finder with extra IPs opens a TCP discovery connection to each
-# listed sender's :5960 listener (an mDNS-only finder opens none -- proven live), and on the cambox
-# libndi 6.3.2 serves each one on its own `disc:recv` thread. When the remote NDI process exits or
-# restarts (strih OBS, SongPlayer, an OBS relaunch), that thread's teardown intermittently throws an
-# uncaught std::system_error (EINVAL) inside libndi's static C++ runtime and ABORTS camera-box -- a
-# ~3 s camera outage and a V4L2 re-open. So the camboxes are found by mDNS alone, as before 24.9.2026
-# (they were never among the missed sources). The camera walk below stays only as the FORBIDDEN set:
-# the generator drops a cambox IP by construction (and fails loud when it cannot derive the set),
-# the verdict FAILs a config that lists one, and the Windows .ps1 removes them.
+# listed sender's :5960 listener (an mDNS-only finder opens none -- proven live), and camera-box
+# serves each such INBOUND connection on a libndi 6.3.2 `disc:recv` thread. When the remote NDI
+# process exits or restarts (strih OBS, SongPlayer, an OBS relaunch), that thread's teardown
+# intermittently throws an uncaught std::system_error (EINVAL) inside libndi's static C++ runtime and
+# ABORTS camera-box -- a ~3 s camera outage and a V4L2 re-open. So the camboxes are found by mDNS
+# alone, as before 24.9.2026 (they were never among the missed sources). The camera walk below stays
+# only as the FORBIDDEN set: the generator drops a cambox IP by construction (and fails loud when it
+# cannot derive the set), the verdict FAILs a config that lists one, and the Windows .ps1 removes
+# them. The cambox's own list keeps its OUTBOUND connections to the listed OBS boxes; whether those
+# can abort it too is not measured yet (the rule's runbook acceptance checks it).
 #
 # Config LOCATION: the Linux SDK reads `$HOME/.ndi/ndi-config.v1.json`, or
 # `$NDI_CONFIG_DIR/ndi-config.v1.json` when that env var is set. `camera-box.service` (the cameraman
@@ -204,12 +206,36 @@ _ndi_discovery_json_string() {
     | sed -E 's/.*:[[:space:]]*"([^"]*)"$/\1/' || true
 }
 
-# ndi_discovery_config_ips TEXT -> the `networks.ips` value in TEXT, "" if absent.
-ndi_discovery_config_ips() { _ndi_discovery_json_string ips "$1"; }
+# _ndi_discovery_networks_key KEY TEXT -> the string value of ndi.networks.KEY in TEXT, "" if absent.
+# With python3 (dev1, strih-lx, the tests) it reads that exact JSON path, so an unrelated `"KEY"`
+# elsewhere in the file never stands in for it (issue 1389). Without python3 (a cambox), or when TEXT
+# is not JSON, it falls back to the grep reader above. Never errors.
+_ndi_discovery_networks_key() {
+  local v
+  if command -v python3 >/dev/null 2>&1 \
+    && v="$(printf '%s' "$2" | NDI_DISCOVERY_KEY="$1" python3 -c '
+import json, os, sys
+try:
+    node = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+for part in ("ndi", "networks", os.environ["NDI_DISCOVERY_KEY"]):
+    node = node.get(part) if isinstance(node, dict) else None
+sys.stdout.write(node if isinstance(node, str) else "")
+' 2>/dev/null)"; then
+    # Same output shape as the grep reader: the value plus a newline, nothing when absent.
+    [ -z "$v" ] || printf '%s\n' "$v"
+    return 0
+  fi
+  _ndi_discovery_json_string "$1" "$2"
+}
 
-# ndi_discovery_config_servers TEXT -> a `networks.discovery` value in TEXT, "" if absent (graded
-# only to catch a stray one: a managed box must never carry it).
-ndi_discovery_config_servers() { _ndi_discovery_json_string discovery "$1"; }
+# ndi_discovery_config_ips TEXT -> the `ndi.networks.ips` value in TEXT, "" if absent.
+ndi_discovery_config_ips() { _ndi_discovery_networks_key ips "$1"; }
+
+# ndi_discovery_config_servers TEXT -> the `ndi.networks.discovery` value in TEXT, "" if absent
+# (graded only to catch a stray one: a managed box must never carry it).
+ndi_discovery_config_servers() { _ndi_discovery_networks_key discovery "$1"; }
 
 # _ndi_discovery_norm_list LIST -> LIST with every space removed ("a, b" == "a,b").
 _ndi_discovery_norm_list() { printf '%s' "$1" | tr -d '[:space:]'; }
@@ -237,15 +263,16 @@ ndi_discovery_list_minus() {
 }
 
 # ndi_discovery_list_common A B -> the comma list of A's entries that are also in B, in A's order
-# ("" when none). Spaces in either list are ignored; A is split with read, never glob-expanded (it may
-# be config text read off a box). Pure.
+# ("" when none). An A entry with a port (`10.77.9.61:5960`) matches its bare address in B and is
+# named as listed. Spaces in either list are ignored; A is split with read, never glob-expanded (it
+# may be config text read off a box). Pure.
 ndi_discovery_list_common() {
   local b ip out="" items=()
   b=",$(_ndi_discovery_norm_list "$2"),"
   IFS=', ' read -r -a items <<<"$1" || true
   for ip in "${items[@]}"; do
     [ -n "$ip" ] || continue
-    case "$b" in *",$ip,"*) out="${out:+$out,}$ip" ;; esac
+    case "$b" in *",$ip,"* | *",${ip%%:*},"*) out="${out:+$out,}$ip" ;; esac
   done
   printf '%s' "$out"
 }
@@ -402,9 +429,12 @@ ndi_discovery_block_section() {
 # over ssh, see the CLI below) that rewrites ONLY $NDI_DISCOVERY_SYSTEM_DIR/ndi-config.v1.json on a cambox with
 # networks.ips = IPS: issue 1389's smallest safe equivalent of re-running setup-device.sh STEP 7 on a
 # live box. It embeds the SAME ndi_discovery_write_config STEP 7 calls (declare -f, never a copy).
-# An identical config writes nothing and never remounts. Otherwise, on a read-only root it remounts rw,
-# writes, syncs and remounts ro again (retried 3x; a root it cannot put back is a loud non-zero, and
-# the EXIT trap puts it back on any failure). The drop-in and every other file stay untouched.
+# It writes nothing and never remounts when the box has no camera-box NDI_CONFIG_DIR drop-in
+# (camera-box never reads the file, so the box is mDNS-only already) or when ndi.networks.ips already
+# equals IPS with no networks.discovery (whatever other keys the file carries). Otherwise, on a
+# read-only root it remounts rw, writes, syncs and remounts ro again (retried 3x; a root it cannot
+# put back is a loud non-zero, and the EXIT trap puts it back on any failure). The drop-in and every
+# other file stay untouched.
 # Non-zero (and no output) on an EMPTY IPS, on an IPS that names a cambox, or when the cambox set is
 # unknown.
 ndi_discovery_cambox_apply_remote_snippet() {
@@ -421,11 +451,20 @@ ndi_discovery_cambox_apply_remote_snippet() {
   fi
   printf 'set -eu\n'
   printf 'NDI_DISCOVERY_CONFIG_NAME=%q\n' "$NDI_DISCOVERY_CONFIG_NAME"
-  printf '_ndi_dir=%q\n_ndi_ips=%q\n' "$NDI_DISCOVERY_SYSTEM_DIR" "$ips"
-  declare -f ndi_discovery_config_json _ndi_discovery_merged_json ndi_discovery_write_config
+  printf '_ndi_dir=%q\n_ndi_ips=%q\n_ndi_dropin=%q\n' "$NDI_DISCOVERY_SYSTEM_DIR" "$ips" "$NDI_DISCOVERY_CAMBOX_DROPIN"
+  declare -f _ndi_discovery_json_string _ndi_discovery_networks_key ndi_discovery_config_ips \
+    ndi_discovery_config_servers _ndi_discovery_norm_list \
+    ndi_discovery_config_json _ndi_discovery_merged_json ndi_discovery_write_config
   cat <<'NDI_APPLY'
 _ndi_target="$_ndi_dir/$NDI_DISCOVERY_CONFIG_NAME"
-if [ -f "$_ndi_target" ] && [ "$(cat "$_ndi_target")" = "$(ndi_discovery_config_json "$_ndi_ips")" ]; then
+if [ ! -f "$_ndi_dropin" ]; then
+  echo "ndi-discovery: no $_ndi_dropin -- camera-box never reads $_ndi_target, so this box is mDNS-only already (the safe state); nothing written"
+  exit 0
+fi
+_ndi_have="$(cat "$_ndi_target" 2>/dev/null || true)"
+if [ -n "$_ndi_have" ] \
+  && [ "$(_ndi_discovery_norm_list "$(ndi_discovery_config_ips "$_ndi_have")")" = "$(_ndi_discovery_norm_list "$_ndi_ips")" ] \
+  && [ -z "$(_ndi_discovery_norm_list "$(ndi_discovery_config_servers "$_ndi_have")")" ]; then
   echo "ndi-discovery: $_ndi_target unchanged (networks.ips=$_ndi_ips) -- nothing written"
   exit 0
 fi
