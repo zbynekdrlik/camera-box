@@ -39,6 +39,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/imag-obs-reachability.sh"
 # shellcheck source=scripts/lib/imag-obs-restart-storm.sh
 . "$HERE/lib/imag-obs-restart-storm.sh"
+# imag-obs-reachability.sh and imag-obs-restart-storm.sh run `set -euo pipefail` at source time;
+# clear the -e they leave on (a later `set -uo pipefail` would not) so a failing probe or assignment
+# never ends the pass (issue 1386).
+set +e -uo pipefail
 
 DRY_RUN=0
 case "${1:-}" in
@@ -129,10 +133,11 @@ write_state_field() {
 # the 3ms floor, but a genuine re-tune is recorded by editing the baseline in a PR, never forced).
 latency_drift_check() {
   local out rc
-  # NB: the `|| rc=$?` capture is load-bearing under this script's `set -e` -- a bare
-  # `out="$(cmd)"; rc=$?` is itself a failing statement when cmd exits non-zero (drift = rc 1),
-  # which killed the whole pass with exit 1 before any report could fire (caught by CI's first
-  # execution of the issue-1070 harness; Tier-0 forbids running these tests locally).
+  # NB: keep the `|| rc=$?` capture. Until issue 1386 this script ran with the sourced libs' -e
+  # still on, and a bare `out="$(cmd)"; rc=$?` was itself a failing statement when cmd exited
+  # non-zero (drift = rc 1), which killed the whole pass with exit 1 before any report could fire
+  # (caught by CI's first execution of the issue-1070 harness). The script clears -e after its
+  # source block now; the capture stays so the rc is right under either option set.
   rc=0
   out="$(python3 "$LATENCY_VERIFY" --box imag --host "$IMAG_IP" --password "$IMAG_OBS_WS_PASSWORD" 2>&1)" || rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -293,7 +298,7 @@ main() {
   # -> failed. A fresh operator pause file is an explicit override. Fail-safe: anything we cannot
   # PROVE deliberate (ssh failure, unreadable unit, `failed`, `activating`, ...) falls through to
   # the existing alarm ("bez clean markera = pád -> alarm ako doteraz"). The `|| dd_rc=$?` capture
-  # keeps the second ssh from aborting this pass under the sourced libs' `set -e`.
+  # keeps the rc of the second ssh (it also kept the pass alive while the libs' -e leaked, issue 1386).
   case "$PROBE_OUT" in
     *OBS_PROCESS_ABSENT*)
       local dd_probe dd_rc dd_verdict dd_deliberate dd_reason

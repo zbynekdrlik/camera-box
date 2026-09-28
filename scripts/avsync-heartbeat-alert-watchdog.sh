@@ -32,7 +32,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # avsync-heartbeat.sh sets `-e` for ITS OWN sourcing safety; re-assert this script's own intended
 # options afterward so a stray non-zero return from a plain assignment never aborts a pass early
 # (this watchdog must survive a bad pass and keep polling on the next timer tick, see the header).
-set -uo pipefail
+# `set +e` is load-bearing: `set -uo pipefail` alone never clears the lib's -e (issue 1386).
+set +e -uo pipefail
 
 DRY_RUN=0
 case "${1:-}" in

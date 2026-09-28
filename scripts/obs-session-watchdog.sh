@@ -56,6 +56,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/win-ssh-exec.sh"
 # shellcheck source=scripts/lib/obs-fleet.sh
 . "$HERE/lib/obs-fleet.sh"
+# win-ssh-exec.sh runs `set -euo pipefail` at source time; clear the -e it leaves on (a later
+# `set -uo pipefail` would not) so a failing probe or assignment never ends the pass (issue 1386).
+set +e -uo pipefail
 
 DRY_RUN=0
 case "${1:-}" in
