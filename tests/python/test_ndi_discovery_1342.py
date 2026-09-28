@@ -813,10 +813,10 @@ class VerifyStrihItem34Behaviour(unittest.TestCase):
     def test_both_configs_still_listing_the_camboxes_fail_1389(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._configure(tmp, ips=ISSUE_1342_LIST)
-            r = self._run(tmp)
+            r = self._run(tmp, pre="ndi_discovery_resolve_ipv4() { return 0; }\n")
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("FAILS=2", r.stdout, r.stdout)
-            fails = [l for l in r.stdout.splitlines() if l.startswith("FAIL")]
+            fails = [l for l in r.stdout.splitlines() if l.startswith("FAIL ")]
             self.assertEqual(len(fails), 2, r.stdout)
             for line in fails:
                 self.assertIn("cambox", line)
