@@ -16,8 +16,9 @@ and no cadence here (the soak's `evaluate` needs a series) -- with the SAME rule
 bounds the soak uses:
 
 - **A/V per camera**: the MEASURED `av_<cam>_ms` only; `|offset - av_expected_ms| <=
-  AV_OFFSET_GATE_TOLERANCE_MS` (inclusive). A camera the verdict did not measure is UNKNOWN; an
-  operator-excluded camera is not required.
+  AV_OFFSET_GATE_TOLERANCE_MS` (inclusive). A camera the verdict did not measure is UNKNOWN. An
+  operator-excluded camera is not REQUIRED (no A/V, no loss sample needed), but a measured loss or
+  camera-burn `false` still fails -- the soak's own rule.
 - **spread**: every graded spread column (default `av_spread_ms`, the camera alignment at the stream
   output, ROZHODNUTÉ 5860604301) `<= SPREAD_THRESHOLD_MS`; never measured = UNKNOWN.
 - **loss per camera**: the gate's own per-window term the soak recorded (`loss_<cam>_pass`: `false`
@@ -34,8 +35,15 @@ retyped). The matrix verdict:
   grade; `not_healthy` (the component did not report healthy within the bound) and `restart_failed`
   (the restart command itself failed: the unit did not start again) -> FAIL; `not_performed` (the
   restart was never done: no unit, ssh unreachable, the supervisor never confirmed the stream OBS
-  step), `window_refused` / `window_aborted` / `window_error` -> UNKNOWN, with the reason.
-  time-to-healthy = healthy_epoch - restart_epoch.
+  step), `window_stopped` (the soak ended the window without a measurement: the rig left TEST
+  mode, a record volume ran low), `window_refused` / `window_aborted` / `window_error` -> UNKNOWN,
+  with the reason. time-to-healthy = healthy_epoch - restart_epoch.
+- the **receiver** column (context, NEVER graded): the restarted camera's strih main input, read
+  from the strih OBS log right before a cambox / dantesync restart -- `parked` (connect-on-show:
+  the input was not connected, so the restart was not seen by a live receiver; the window's own
+  connect-on-show hold then connects it fresh), `connected`, `unread`, or `n/a` (the strih OBS /
+  stream OBS kinds). The report counts it per kind, so a 3/3 PASS whose restarts all hit a parked
+  receiver says so.
 - a **kind**: FAIL when any repeat fails, PASS when every required repeat (`repeats`, default 3)
   passed, else UNKNOWN (`k/3 repeats passed`).
 - the **matrix**: FAIL when the baseline or any kind fails; PASS only when the baseline and every
@@ -65,14 +73,16 @@ BASELINE = "baseline"
 DEFAULT_REPEATS = 3
 
 STEP_FIELDS = ("step", "kind", "repeat", "target", "restart_epoch", "healthy_epoch", "healthy",
-               "window_dir", "window_rc", "outcome", "note")
+               "window_dir", "window_rc", "outcome", "receiver", "note")
 MEASURED = "measured"
-OUTCOMES = (MEASURED, "not_healthy", "restart_failed", "not_performed", "window_refused",
-            "window_aborted", "window_error")
+OUTCOMES = (MEASURED, "not_healthy", "restart_failed", "not_performed", "window_stopped",
+            "window_refused", "window_aborted", "window_error")
+RECEIVER_STATES = ("parked", "connected", "unread", "n/a", "")
 _OUTCOME_FAIL = {"not_healthy", "restart_failed"}
 _OUTCOME_TEXT = {
     "restart_failed": "the restart command failed (the unit did not start again)",
     "not_performed": "the restart was not performed",
+    "window_stopped": "the soak ended the window without a measurement",
     "window_refused": "the window was refused before it touched the rig (soak exit 4)",
     "window_aborted": "the window was aborted (soak exit 5)",
     "window_error": "the window failed to run",
@@ -114,10 +124,11 @@ def grade_window(row, cams, bounds, spread_columns=soak.DEFAULT_SPREAD_COLUMNS):
     judged = 0
     for c in cams:
         status = row.get(f"av_{c}_status") or "absent"
-        if status == "excluded":
-            continue
+        excluded = status == "excluded"
         v = soak._f(row.get(f"av_{c}_ms"))
-        if status != "measured" or v is None:
+        if excluded:
+            pass  # operator-excluded: no A/V sample required (a measured loss/burn still counts)
+        elif status != "measured" or v is None:
             unknowns.append(f"av {c}: {status} (no measured A/V offset)")
         elif expected is None:
             unknowns.append(f"av {c}: {v:+.1f} ms but the verdict carries no expected offset")
@@ -131,7 +142,7 @@ def grade_window(row, cams, bounds, spread_columns=soak.DEFAULT_SPREAD_COLUMNS):
             fails.append(f"loss {c}: a loss window (copies={row.get(f'loss_{c}_copies') or '-'} "
                          f"gaps={row.get(f'loss_{c}_gaps') or '-'} "
                          f"undecodable={row.get(f'loss_{c}_undecodable') or '-'})")
-        elif loss not in soak._LOSS_SAMPLE:
+        elif loss not in soak._LOSS_SAMPLE and not excluded:
             unknowns.append(f"loss {c}: not measured")
         if row.get(f"burn_{c}_zero_loss") == "false":
             fails.append(f"burn {c}: the camera burn lost frames "
@@ -181,6 +192,9 @@ def append_step(tsv_path, step):
     outcome = step.get("outcome")
     if outcome not in OUTCOMES:
         raise ValueError(f"unknown step outcome {outcome!r} (expected one of {OUTCOMES})")
+    if (step.get("receiver") or "") not in RECEIVER_STATES:
+        raise ValueError(f"unknown receiver state {step.get('receiver')!r} "
+                         f"(expected one of {RECEIVER_STATES[:-1]})")
     exists = os.path.exists(tsv_path) and os.path.getsize(tsv_path) > 0
     with open(tsv_path, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter="\t", lineterminator="\n")
@@ -227,17 +241,13 @@ def read_conf(path):
 # --- the matrix ----------------------------------------------------------------------------------
 
 
-def _num(s):
-    v = soak._f(s)
-    return None if v is None else v
-
-
 def grade_step(step, bounds, spread_columns, healthy_timeout_s=None):
     """One step row -> {"verdict", "reason", "time_to_healthy_s", "window"}."""
     out = {"step": step.get("step"), "kind": step.get("kind"), "repeat": step.get("repeat"),
            "target": step.get("target"), "outcome": step.get("outcome"),
-           "window_dir": step.get("window_dir"), "time_to_healthy_s": None, "window": None}
-    r0, h = _num(step.get("restart_epoch")), _num(step.get("healthy_epoch"))
+           "window_dir": step.get("window_dir"), "receiver": step.get("receiver") or "",
+           "time_to_healthy_s": None, "window": None}
+    r0, h = soak._f(step.get("restart_epoch")), soak._f(step.get("healthy_epoch"))
     if r0 is not None and h is not None:
         out["time_to_healthy_s"] = int(round(h - r0))
     outcome = step.get("outcome")
@@ -294,11 +304,15 @@ def evaluate(conf, steps, bounds, spread_columns=None):
                 g = grade_step(by_rep[r], bounds, spread_columns, healthy_timeout_s)
             else:
                 g = {"repeat": str(r), "verdict": UNKNOWN, "reason": "not run",
-                     "time_to_healthy_s": None, "window": None}
+                     "receiver": "", "time_to_healthy_s": None, "window": None}
             graded.append(g)
         passed = sum(1 for g in graded if g["verdict"] == PASS)
         tth = [g["time_to_healthy_s"] for g in graded if g.get("time_to_healthy_s") is not None]
-        k = {"verdict": UNKNOWN, "passed": passed, "repeats": graded,
+        receivers = {}
+        for g in graded:
+            if g.get("receiver") not in ("", "n/a", None):
+                receivers[g["receiver"]] = receivers.get(g["receiver"], 0) + 1
+        k = {"verdict": UNKNOWN, "passed": passed, "repeats": graded, "receivers": receivers,
              "max_time_to_healthy_s": max(tth) if tth else None, "reason": ""}
         if any(g["verdict"] == FAIL for g in graded):
             k["verdict"] = FAIL
@@ -358,9 +372,15 @@ def render_text(rep):
     for kind, k in rep["kinds"].items():
         lines.append(f"  {kind:<12} {k['verdict']:<8} {k['passed']}/{len(k['repeats'])} PASS, "
                      f"max time to healthy {_tth(k['max_time_to_healthy_s'])}")
+        parked = k["receivers"].get("parked", 0)
+        if parked:
+            lines.append(f"    NOTE: the restarted camera's strih input was parked during "
+                         f"{parked}/{len(k['repeats'])} restart(s) -- no connected receiver saw "
+                         f"them; the window's connect-on-show hold connected it fresh")
         for g in k["repeats"]:
+            rcv = f", receiver {g['receiver']}" if g.get("receiver") not in ("", None) else ""
             lines.append(f"    r{g.get('repeat')}: {g['verdict']:<8} healthy after "
-                         f"{_tth(g.get('time_to_healthy_s'))}"
+                         f"{_tth(g.get('time_to_healthy_s'))}{rcv}"
                          + (f" -- {g['reason']}" if g.get("reason") else ""))
     lines.append(f"  VERDICT: {rep['verdict']}")
     for r in rep["reasons"]:
@@ -375,7 +395,7 @@ def _cmd_record(a):
     append_step(a.tsv, {"step": a.step, "kind": a.kind, "repeat": a.repeat, "target": a.target,
                         "restart_epoch": a.restart_epoch, "healthy_epoch": a.healthy_epoch,
                         "healthy": a.healthy, "window_dir": a.window_dir, "window_rc": a.window_rc,
-                        "outcome": a.outcome, "note": a.note})
+                        "outcome": a.outcome, "receiver": a.receiver, "note": a.note})
     return 0
 
 
@@ -415,6 +435,7 @@ def main(argv=None):
     r.add_argument("--window-dir", default="")
     r.add_argument("--window-rc", default="")
     r.add_argument("--outcome", required=True)
+    r.add_argument("--receiver", default="")
     r.add_argument("--note", default="")
     g = sub.add_parser("grade-window", help="grade ONE soak window dir (prints verdict=...)")
     g.add_argument("--window-dir", required=True)

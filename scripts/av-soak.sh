@@ -537,24 +537,18 @@ rec_stop() {  # K BOX HOST LOG -> REC_PATH; the flag clears only when the status
   note_recording "$1" "$2" "$REC_PATH"
 }
 
-# broadcast_now -> live | unknown | idle (the pure av_soak_rig_state.py decision over one rig-busy read)
+# broadcast_now -> live | unknown | idle (the pure av_soak_rig_state.py decision over one rig-busy read;
+# in cleanup the read runs in its own session)
 broadcast_now() {
-  local out
-  out="$(obs rig-busy-check --strih-host "$STRIH_HOST" --stream-host "$STREAM_HOST" \
-    --password "${OBS_PASSWORD:-}" 2>/dev/null || true)"
-  printf '%s' "$out" | python3 "$RIG_STATE" broadcast 2>/dev/null || echo unknown
+  av_soak_broadcast_of "$RIG_STATE" \
+    "$(av_soak_rig_busy_read "$OBS_DIR" "$STRIH_HOST" "$STREAM_HOST" "$OBS_TIMEOUT_S" "$IN_CLEANUP")"
 }
 # broadcast_settled -> live | unknown | idle, an unreadable read retried (BROADCAST_READS reads,
 # BROADCAST_RETRY_S apart) before it counts: one stream OBS restart must neither end an 8 h run nor
 # keep a recording running. Used wherever a recording is started or stopped.
 broadcast_settled() {
-  local i b=unknown
-  for ((i = 1; i <= BROADCAST_READS; i++)); do
-    b="$(broadcast_now)"
-    if [ "$b" != unknown ]; then break; fi
-    if [ "$i" -lt "$BROADCAST_READS" ]; then sleep "$BROADCAST_RETRY_S"; fi
-  done
-  printf '%s\n' "$b"
+  av_soak_broadcast_of "$RIG_STATE" "$(av_soak_rig_busy_settled "$OBS_DIR" "$STRIH_HOST" "$STREAM_HOST" \
+    "$OBS_TIMEOUT_S" "$RIG_STATE" "$BROADCAST_READS" "$BROADCAST_RETRY_S" "$IN_CLEANUP")"
 }
 
 cleanup() {

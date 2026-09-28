@@ -23,7 +23,8 @@
 # never touched), 5 something kept (the lease stays held), 4 the soak's own process still runs,
 # 3 the plan could not be made.
 #
-# Needs scripts/lib/rig-lease.sh sourced by the caller (rig_lease_release). Source-only: sourcing
+# Needs scripts/lib/rig-lease.sh (rig_lease_release) and scripts/lib/av-soak.sh
+# (av_soak_rig_busy_settled) sourced by the caller. Source-only: sourcing
 # defines the function and runs nothing.
 
 _av_soak_leftovers_log() { printf '%s [av-soak] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
@@ -31,7 +32,7 @@ _av_soak_leftovers_log() { printf '%s [av-soak] %s\n' "$(date -u +%Y-%m-%dT%H:%M
 # av_soak_stop_leftovers RUN_DIR OBS_DIR STRIH_HOST STREAM_HOST OBS_TIMEOUT_S RIG_STATE_PY
 av_soak_stop_leftovers() {
   local run_dir="$1" obs_dir="$2" strih_host="$3" stream_host="$4" obs_timeout="$5" rig_state="$6"
-  local state="$run_dir/recording.state" pid busy plan rc=0 box action reason host lease i
+  local state="$run_dir/recording.state" pid busy plan rc=0 box action reason host lease
   local reads="${AV_SOAK_BROADCAST_READS:-3}" gap="${AV_SOAK_BROADCAST_RETRY_S:-20}"
   if [ ! -f "$state" ]; then
     _av_soak_leftovers_log "stop-leftovers: no $state -- nothing to do"
@@ -49,14 +50,8 @@ av_soak_stop_leftovers() {
   esac
   # an unreadable read is retried (AV_SOAK_BROADCAST_READS x AV_SOAK_BROADCAST_RETRY_S) before the
   # plan keeps everything for it -- a stream OBS restart must not leave the leftover running
-  for ((i = 1; i <= reads; i++)); do
-    busy="$(timeout "$obs_timeout" python3 "$obs_dir/obs_phase2.py" rig-busy-check --strih-host "$strih_host" \
-      --stream-host "$stream_host" --password "${OBS_PASSWORD:-}" 2>/dev/null || true)"
-    if [ "$(printf '%s' "$busy" | python3 "$rig_state" broadcast 2>/dev/null || echo unknown)" != unknown ]; then
-      break
-    fi
-    if [ "$i" -lt "$reads" ]; then sleep "$gap"; fi
-  done
+  busy="$(av_soak_rig_busy_settled "$obs_dir" "$strih_host" "$stream_host" "$obs_timeout" "$rig_state" \
+    "$reads" "$gap")"
   if ! plan="$(printf '%s' "$busy" | python3 "$rig_state" leftovers --state "$state" --now "$(date +%s)" \
       --start-window-s "$((obs_timeout + 30))")"; then
     echo "av-soak: ERROR: the stop-leftovers plan could not be made from $state" >&2

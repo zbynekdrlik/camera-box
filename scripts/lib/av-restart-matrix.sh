@@ -12,7 +12,8 @@
 #   - the REMOTE text of each restart, each health read and each "leave it running" step -- plain
 #     `systemctl restart` of ONE service (never a reboot: a remote cambox reboot is banned, a warm
 #     reboot can leave a box down until someone is at the rig),
-#   - the pure "is it healthy" predicate over those reads,
+#   - the pure "is it healthy" predicate over those reads, and the restarted camera's strih
+#     receiver state (parked / connected) read from the strih OBS log before the restart,
 #   - the argv of ONE measurement window = the soak itself (`av-soak.sh --run --hours 0
 #     --lease-run-id <the matrix's lease>`), never a copy of its record/sweep/decode/merge step,
 #   - the stream OBS SUPERVISOR step (no session-agnostic path launches the canonical stream OBS).
@@ -20,6 +21,9 @@
 # Each remote text is sent WHOLE as one ssh command, never spliced into a larger string, so the
 # newline-strip gotcha of a `$(...)`-embedded helper (CLAUDE.md) cannot glue it to anything; the
 # single-statement lines still end with `;`.
+#
+# Needs scripts/lib/mv-reverify-escalate.sh (the strih-lx restart) and scripts/lib/genlock-park.sh
+# (the park-state parser) sourced by the caller.
 
 # The restart kinds, in run order (the same four as av_restart_matrix_decision.KINDS).
 AV_MATRIX_KINDS_ALL="strih-obs cambox dantesync stream-obs"
@@ -41,29 +45,25 @@ av_matrix_default_cambox() {
   printf '\n'
 }
 
-# av_matrix_restart_remote_cmd KIND -> the REMOTE bash text that restarts ONE service and says so:
-# `AV_MATRIX_RESTART_AT=<the box's own epoch>` first (the health read counts log lines from THAT
-# instant, on the box's own clock), then the outcome marker.
+# av_matrix_restart_remote_cmd KIND -> the REMOTE bash text that restarts ONE service and says so.
 #   strih-obs  -- the strih-lx `strih-obs.service` --user unit, through the ONE existing headless
 #                 restart (mv_reverify_obs_restart_linux_cmd, scripts/lib/mv-reverify-escalate.sh:
 #                 unit-installed guard, reset-failed, a BLOCKING restart so the old OBS is gone
 #                 before the health read; markers MV_REVERIFY_OBS_RESTART / _NO_UNIT / _FAILED).
-#   cambox     -- `systemctl restart camera-box` on the camera (root).
-#   dantesync  -- `systemctl restart dantesync` on the camera (root).
+#   cambox     -- `systemctl restart camera-box` on the camera (root);
+#   dantesync  -- `systemctl restart dantesync` on the camera (root); both first echo
+#                 `AV_MATRIX_INVOCATION_BEFORE=<the unit's systemd InvocationID>` so the health read
+#                 can require a NEW process, then the outcome marker.
 # The stream OBS has no remote text: it is a supervisor step (av_matrix_stream_supervisor_step).
 av_matrix_restart_remote_cmd() {
   local unit
   case "${1:-}" in
-    strih-obs)
-      printf '%s\n' "printf 'AV_MATRIX_RESTART_AT=%s\\n' \"\$(date +%s)\";"
-      mv_reverify_obs_restart_linux_cmd
-      return 0
-      ;;
+    strih-obs) mv_reverify_obs_restart_linux_cmd; return 0 ;;
     cambox) unit=camera-box ;;
     dantesync) unit=dantesync ;;
     *) echo "av-restart-matrix: no remote restart for kind '${1:-}'" >&2; return 1 ;;
   esac
-  printf '%s\n' "printf 'AV_MATRIX_RESTART_AT=%s\\n' \"\$(date +%s)\";"
+  printf '%s\n' "printf 'AV_MATRIX_INVOCATION_BEFORE=%s\\n' \"\$(systemctl show -p InvocationID --value ${unit} 2>/dev/null || true)\";"
   printf '%s\n' "if systemctl restart ${unit}; then echo AV_MATRIX_RESTART_OK; else echo AV_MATRIX_RESTART_FAILED; exit 1; fi;"
 }
 
@@ -92,56 +92,79 @@ av_matrix_restart_outcome() {
   esac
 }
 
-# av_matrix_restart_at OUTPUT -> the box's own restart epoch from the restart output (empty when
-# absent or not a number).
-av_matrix_restart_at() {
-  local v
-  v="$(printf '%s\n' "${1:-}" | sed -n 's/^AV_MATRIX_RESTART_AT=\([0-9][0-9]*\)$/\1/p' | head -n 1 || true)"
-  printf '%s\n' "$v"
+# av_matrix_invocation_before OUTPUT -> the unit's InvocationID the restart replaced (empty when
+# absent).
+av_matrix_invocation_before() {
+  printf '%s\n' "${1:-}" | sed -n 's/^AV_MATRIX_INVOCATION_BEFORE=\([0-9a-zA-Z-]*\)$/\1/p' | head -n 1 || true
 }
 
-# av_matrix_health_remote_cmd KIND [SINCE_EPOCH] -> the REMOTE (read-only) text of the kind's
-# health read, `key=value` lines:
+# av_matrix_health_remote_cmd KIND -> the REMOTE (read-only) text of the kind's health read,
+# `key=value` lines:
 #   strih-obs -- `active=` of the strih-obs.service --user unit (the WebSocket half is read from dev1)
-#   cambox    -- `active=` of camera-box + `streaming=` the count of its `Streaming:` journal lines
-#                since SINCE_EPOCH (the box's own restart instant): the capture loop is emitting again
+#   cambox    -- `active=` of camera-box, `invocation=` its current systemd InvocationID, and
+#                `streaming=` the count of `Streaming:` journal lines of THAT invocation only (the
+#                capture loop of the NEW process emits again; the old process's last lines never
+#                count, whatever the clocks say). No invocation -> an empty count (never healthy).
 # dantesync and stream-obs are read from dev1 (:8898/status, the OBS WebSocket) -- no remote text.
 av_matrix_health_remote_cmd() {
-  local since="${2:-}"
-  case "$since" in '' | *[!0-9]*) since=0 ;; esac
   case "${1:-}" in
     strih-obs)
       printf '%s\n' "printf 'active=%s\\n' \"\$(systemctl --user is-active strih-obs.service 2>/dev/null || true)\";"
       ;;
     cambox)
       printf '%s\n' "printf 'active=%s\\n' \"\$(systemctl is-active camera-box 2>/dev/null || true)\";"
-      printf '%s\n' "printf 'streaming=%s\\n' \"\$(journalctl -u camera-box --since @${since} -o cat --no-pager 2>/dev/null | grep -c 'Streaming: ' || true)\";"
+      printf '%s\n' "inv=\"\$(systemctl show -p InvocationID --value camera-box 2>/dev/null || true)\"; printf 'invocation=%s\\n' \"\$inv\";"
+      printf '%s\n' "printf 'streaming=%s\\n' \"\$({ [ -n \"\$inv\" ] && journalctl _SYSTEMD_INVOCATION_ID=\"\$inv\" -o cat --no-pager 2>/dev/null | grep -c 'Streaming: '; } || true)\";"
       ;;
     *) echo "av-restart-matrix: no remote health read for kind '${1:-}'" >&2; return 1 ;;
   esac
 }
 
-# av_matrix_health_ok KIND PROBE [SCENE] -> 0 iff the kind reports healthy:
+# av_matrix_health_ok KIND PROBE [SCENE] [EXTRA] -> 0 iff the kind reports healthy:
 #   strih-obs  -- PROBE `active=active` AND the OBS WebSocket answered (SCENE, the program scene
 #                 read from dev1, non-empty)
-#   cambox     -- PROBE `active=active` AND `streaming=` >= 1
+#   cambox     -- PROBE `active=active`, `streaming=` >= 1, and a NEW process: `invocation=` set and
+#                 not EXTRA (the InvocationID the restart replaced, when known)
 #   dantesync  -- PROBE (dantesync_clock_decision.py analyze output) `verdict=OK`: locked, on the
 #                 rig grandmaster, no step storm, a fresh /status
-#   stream-obs -- the OBS WebSocket answered (SCENE non-empty)
+#   stream-obs -- the OBS WebSocket answered on the program scene EXTRA (the development scene; any
+#                 other scene is never healthy -- the caller stops on it at once)
 av_matrix_health_ok() {
-  local kind="$1" probe="${2:-}" scene="${3:-}" v n
+  local kind="$1" probe="${2:-}" scene="${3:-}" extra="${4:-}" v n inv
   v="$(printf '%s\n' "$probe" | sed -n 's/^active=//p' | head -n 1 || true)"
   case "$kind" in
     strih-obs) [ "$v" = active ] && [ -n "$scene" ] ;;
     cambox)
       n="$(printf '%s\n' "$probe" | sed -n 's/^streaming=//p' | head -n 1 || true)"
+      inv="$(printf '%s\n' "$probe" | sed -n 's/^invocation=//p' | head -n 1 || true)"
       case "$n" in '' | *[!0-9]*) return 1 ;; esac
-      [ "$v" = active ] && [ "$n" -ge 1 ]
+      [ "$v" = active ] && [ "$n" -ge 1 ] && [ -n "$inv" ] && [ "$inv" != "$extra" ]
       ;;
     dantesync) [ "$(printf '%s\n' "$probe" | sed -n 's/^verdict=//p' | head -n 1 || true)" = OK ] ;;
-    stream-obs) [ -n "$scene" ] ;;
+    stream-obs)
+      if [ -n "$extra" ]; then [ "$scene" = "$extra" ]; else [ -n "$scene" ]; fi
+      ;;
     *) return 1 ;;
   esac
+}
+
+# av_matrix_receiver_state CAM LOG_TEXT -> parked | connected | unread: the restarted camera's strih
+# main input (`NDI <cam>`) in a tail of the strih OBS log read right BEFORE the restart. `parked` =
+# its last genlock-park line says parked (connect-on-show: nothing showed it, no receiver was
+# connected, so the restart is not seen live -- the window's hold connects it fresh); `connected` =
+# not parked (a 5 s parked heartbeat would be in the tail); `unread` = the log read came back empty.
+# Context for the report, never graded.
+av_matrix_receiver_state() {
+  local cam="$1" text="${2:-}"
+  if [ -z "$text" ]; then
+    printf 'unread\n'
+    return 0
+  fi
+  if [ "$(printf '%s\n' "$text" | genlock_park_state_of "NDI $cam")" = parked ]; then
+    printf 'parked\n'
+  else
+    printf 'connected\n'
+  fi
 }
 
 # av_matrix_ensure_running_remote_cmd KIND -> the REMOTE text of cleanup's "leave it running":
@@ -203,13 +226,15 @@ av_matrix_stream_supervisor_step() {
   local here="$1" confirm="$2" timeout="$3"
   cat <<EOF
 SUPERVISOR STEP -- restart the stream OBS through its canonical launch path (no session-agnostic
-path launches it; never over ssh):
+path launches it; never over ssh). This kind measures a kill + relaunch: --force kills obs64, which
+does not save on the way out, so the relaunched OBS restores the last SAVED program scene.
   1. bash ${here}/launch-obs-genlock.sh --box stream --force
      and paste the printed PowerShell program into the win-stream-snv MCP Shell; it must verify
      (genlock render tick ENABLED + DistroAV loaded). Do NOT change the program scene.
   2. then confirm with the epoch you ran it:  date +%s > ${confirm}
-The matrix waits up to ${timeout} s for that file, then waits for the stream OBS WebSocket, the
-settle time, and measures the window.
+The matrix waits up to ${timeout} s for that file, then for the stream OBS WebSocket on the
+development program scene (another scene fails the repeat at once and stops the run -- set it back
+by hand, never to PRO), the settle time, and measures the window.
 EOF
 }
 
