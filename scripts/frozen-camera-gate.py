@@ -18,8 +18,8 @@ NOTE: why raw NDI inputs, not Multiview tiles?
   Post-#730/#508 Multiview decoupling, a raw NDI input that is not currently SHOWING on
   any surface does not render at all (GetSourceScreenshot returns null / repeats stale
   bytes forever — indistinguishable from a genuine freeze). Before sampling each source,
-  its wrapping strih 'Cam N' scene (the per-camera scene convention — see
-  scripts/strih_mv_scenes.py) is set to PREVIEW (Studio Mode) and given a short settle,
+  its wrapping strih 'Cam N' scene (the per-camera scene convention — scene 'Cam N'
+  wraps input 'NDI camN') is set to PREVIEW (Studio Mode) and given a short settle,
   which opens/refreshes that camera's DistroAV receiver; only THEN are the samples taken.
   Repeated identical hashes while genuinely activated are a real freeze; a source with no
   known 'Cam N' scene (a non-canonical --sources override) is sampled cold, same as
@@ -64,8 +64,8 @@ except ImportError:
 
 # ─── pure helpers (unit-testable without OBS) ────────────────────────────────
 
-# #747: strih's per-camera scenes follow the SAME "Cam N" convention documented in
-# scripts/strih_mv_scenes.py (is_cam_scene/cam_input_name), which maps 'Cam N' -> 'NDI camN'.
+# #747: strih's per-camera scenes follow the "Cam N" convention: scene 'Cam N' wraps input
+# 'NDI camN'.
 # This is the REVERSE direction: given the raw input name this gate checks, find the scene
 # that wraps it, so it can be put on PREVIEW to warm the receiver before sampling.
 _INPUT_SCENE_RE = re.compile(r"^NDI cam(\d+)$")
