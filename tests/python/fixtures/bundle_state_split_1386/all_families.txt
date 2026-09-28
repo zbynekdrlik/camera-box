@@ -1,0 +1,1135 @@
+synthetic OBS log for the issue 1386 golden (every bundle_state_gather line family)
+23:40:00.001: Portable mode: false
+23:40:00.100: OBS 32.1.2 (64-bit, windows)
+23:40:00.200: [obs-websocket] Server started successfully on 0.0.0.0:4455
+23:40:00.300: DistroAV (Version 6.2.1)
+23:40:00.400: video settings reset:
+23:40:00.401: 	base resolution:   1920x1080
+23:40:00.402: 	fps:               60/1
+23:40:00.500: genlock: wall-clock-slaved render tick ENABLED
+23:40:00.501: genlock: sub-frame jitter reserve engaged
+23:40:00.502: genlock: timestamp-aligned release armed
+23:40:04.000: [obs-vban] obs-vban pacing-config: target_ms=64 packet_samples=239 rate=48000 counters=reset stream='cg'
+23:40:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:40:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:40:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:40:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:40:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:40:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:40:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:40:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:40:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:40:30.000: genlock-lock-json: {"v":1,"state":"LOCKED","reason":"none","n_inputs":2,"n_locked":2,"latency_ms":3,"clock":"locked","output":"stamping","recent_event":false,"qpc_drift_ms":0,"inputs":[{"name":"NDI cam1","locked":true,"latency_ms":3,"underruns":0,"relocks":1,"late_holds":0,"depth":2}]} (#1299)
+23:40:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:40:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:40:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:40:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:40:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:40:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:40:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:40:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:40:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:41:00.000: genlock-lock-json: {this is not valid json (#1299)
+23:41:00.585: audio-telemetry #800 'mbc': ts_lag_ms=180 buffered_ms=76 pending=0 timing_adjust_ms=0
+23:41:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4000 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:41:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:41:00.885: audio-telemetry #800: total_buffering=85 ms
+23:41:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:41:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:41:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:41:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-40.0ms) [monitor-only, no write]
+23:41:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:41:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:41:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:41:16.000: av-sync-dock: LOCKED offset=-40.0ms source=cluster matched=30 mad=8.0ms
+23:41:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:41:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:41:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:41:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:41:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:41:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:41:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:41:40.000: program-render-audit: render_fps=30.0 target_fps=30.0 avg_frame_ms=17.9 lagged=0 total=151
+23:41:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:41:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:41:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:41:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:41:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:41:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:42:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=74 pending=0 timing_adjust_ms=0
+23:42:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4001 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:42:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:42:00.885: audio-telemetry #800: total_buffering=85 ms
+23:42:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:42:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:42:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:42:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.5ms) [monitor-only, no write]
+23:42:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:42:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:42:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:42:16.000: av-sync-dock: UPDATED offset=-39.5ms source=cluster matched=31 mad=9.5ms
+23:42:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:42:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:42:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:42:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:42:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:42:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:42:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:42:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:42:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:42:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:42:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:42:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:42:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:43:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=72 pending=0 timing_adjust_ms=0
+23:43:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4002 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:43:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:43:00.885: audio-telemetry #800: total_buffering=85 ms
+23:43:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:43:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:43:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:43:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.0ms) [monitor-only, no write]
+23:43:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:43:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:43:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:43:16.000: av-sync-dock: UPDATED offset=-39.0ms source=cluster matched=32 mad=11.0ms
+23:43:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:43:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:43:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:43:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:43:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:43:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:43:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:43:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:43:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:43:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:43:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:43:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:43:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:44:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=70 pending=0 timing_adjust_ms=0
+23:44:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4003 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:44:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:44:00.885: audio-telemetry #800: total_buffering=85 ms
+23:44:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:44:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:44:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:44:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-40.0ms) [monitor-only, no write]
+23:44:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:44:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:44:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:44:16.000: av-sync-dock: UPDATED offset=-40.0ms source=cluster matched=33 mad=12.5ms
+23:44:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:44:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:44:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:44:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:44:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:44:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:44:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:44:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:44:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:44:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:44:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:44:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:44:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:45:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=1 ticks_over=0 tick_ms=21.3
+23:45:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=68 pending=0 timing_adjust_ms=0
+23:45:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4004 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:45:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:45:00.885: audio-telemetry #800: total_buffering=85 ms
+23:45:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:45:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:45:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:45:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.5ms) [monitor-only, no write]
+23:45:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:45:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:45:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:45:16.000: av-sync-dock: UPDATED offset=-39.5ms source=cluster matched=34 mad=8.0ms
+23:45:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:45:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:45:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:45:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:45:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:45:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:45:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:45:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:45:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:45:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:45:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:45:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:45:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:46:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2811 ticks_over=1 tick_ms=21.3
+23:46:00.585: audio-telemetry #800 'mbc': ts_lag_ms=180 buffered_ms=66 pending=0 timing_adjust_ms=0
+23:46:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4005 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:46:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:46:00.885: audio-telemetry #800: total_buffering=85 ms
+23:46:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:46:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:46:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:46:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.0ms) [monitor-only, no write]
+23:46:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:46:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:46:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:46:16.000: av-sync-dock: UPDATED offset=-39.0ms source=cluster matched=35 mad=9.5ms
+23:46:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:46:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:46:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:46:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:46:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:46:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:46:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:46:40.000: program-render-audit: render_fps=30.0 target_fps=30.0 avg_frame_ms=17.9 lagged=0 total=151
+23:46:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:46:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:46:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:46:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:46:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:46:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:47:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2810 ticks_over=2 tick_ms=21.3
+23:47:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=64 pending=0 timing_adjust_ms=0
+23:47:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4006 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:47:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:47:00.885: audio-telemetry #800: total_buffering=85 ms
+23:47:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:47:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:47:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:47:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-40.0ms) [monitor-only, no write]
+23:47:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:47:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:47:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:47:16.000: av-sync-dock: UPDATED offset=-40.0ms source=cluster matched=36 mad=11.0ms
+23:47:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:47:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:47:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:47:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:47:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:47:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:47:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:47:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:47:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:47:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:47:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:47:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:47:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:48:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2812 ticks_over=3 tick_ms=21.3
+23:48:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=62 pending=0 timing_adjust_ms=0
+23:48:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4007 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:48:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:48:00.885: audio-telemetry #800: total_buffering=85 ms
+23:48:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:48:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:48:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:48:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.5ms) [monitor-only, no write]
+23:48:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:48:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:48:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:48:16.000: av-sync-dock: LOCKED offset=-39.5ms source=cluster matched=37 mad=12.5ms
+23:48:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=0 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:48:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:48:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:48:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:48:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:48:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:48:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:48:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:48:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:48:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:48:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:48:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:48:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:49:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2811 ticks_over=0 tick_ms=21.3
+23:49:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=60 pending=0 timing_adjust_ms=0
+23:49:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4008 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:49:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:49:00.885: audio-telemetry #800: total_buffering=85 ms
+23:49:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:49:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:49:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:49:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.0ms) [monitor-only, no write]
+23:49:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:49:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:49:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:49:16.000: av-sync-dock: UPDATED offset=-39.0ms source=cluster matched=38 mad=8.0ms
+23:49:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:49:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:49:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:49:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:49:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:49:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:49:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:49:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:49:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:49:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:49:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:49:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:49:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:50:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2810 ticks_over=1 tick_ms=21.3
+23:50:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=106 pending=0 timing_adjust_ms=0
+23:50:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4009 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:50:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:50:00.885: audio-telemetry #800: total_buffering=85 ms
+23:50:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:50:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:50:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:50:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-40.0ms) [monitor-only, no write]
+23:50:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:50:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:50:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:50:16.000: av-sync-dock: UPDATED offset=-40.0ms source=cluster matched=39 mad=9.5ms
+23:50:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:50:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:50:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:50:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:50:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:50:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:50:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:50:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:50:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:50:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:50:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:50:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:50:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:51:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2812 ticks_over=2 tick_ms=21.3
+23:51:00.585: audio-telemetry #800 'mbc': ts_lag_ms=180 buffered_ms=74 pending=0 timing_adjust_ms=0
+23:51:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4010 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:51:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:51:00.885: audio-telemetry #800: total_buffering=85 ms
+23:51:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:51:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:51:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:51:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.5ms) [monitor-only, no write]
+23:51:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:51:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:51:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:51:16.000: av-sync-dock: UPDATED offset=-39.5ms source=cluster matched=40 mad=11.0ms
+23:51:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:51:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:51:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:51:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:51:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:51:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:51:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:51:40.000: program-render-audit: render_fps=30.0 target_fps=30.0 avg_frame_ms=17.9 lagged=61 total=151
+23:51:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:51:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:51:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:51:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:51:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:51:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:52:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2811 ticks_over=3 tick_ms=21.3
+23:52:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=72 pending=0 timing_adjust_ms=0
+23:52:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4011 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:52:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:52:00.885: audio-telemetry #800: total_buffering=85 ms
+23:52:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:52:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:52:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:52:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.0ms) [monitor-only, no write]
+23:52:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:52:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:52:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:52:16.000: av-sync-dock: UPDATED offset=-39.0ms source=cluster matched=30 mad=12.5ms
+23:52:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:52:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:52:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:52:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:52:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:52:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:52:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:52:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:52:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:52:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:52:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:52:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:52:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:53:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2810 ticks_over=0 tick_ms=21.3
+23:53:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=70 pending=0 timing_adjust_ms=0
+23:53:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4012 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:53:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:53:00.885: audio-telemetry #800: total_buffering=85 ms
+23:53:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:53:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:53:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:53:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-40.0ms) [monitor-only, no write]
+23:53:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:53:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:53:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:53:16.000: av-sync-dock: UPDATED offset=-40.0ms source=cluster matched=31 mad=8.0ms
+23:53:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:53:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:53:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:53:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:53:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:53:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:53:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:53:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:53:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:53:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:53:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:53:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:53:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:54:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2812 ticks_over=1 tick_ms=21.3
+23:54:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=68 pending=0 timing_adjust_ms=0
+23:54:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4013 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:54:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:54:00.885: audio-telemetry #800: total_buffering=85 ms
+23:54:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:54:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:54:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:54:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.5ms) [monitor-only, no write]
+23:54:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:54:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:54:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:54:16.000: av-sync-dock: UPDATED offset=-39.5ms source=cluster matched=32 mad=9.5ms
+23:54:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:54:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:54:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:54:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:54:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:54:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:54:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:54:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:54:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:54:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:54:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:54:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:54:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:55:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2811 ticks_over=2 tick_ms=21.3
+23:55:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=66 pending=0 timing_adjust_ms=0
+23:55:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4014 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:55:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:55:00.885: audio-telemetry #800: total_buffering=85 ms
+23:55:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:55:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:55:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:55:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.0ms) [monitor-only, no write]
+23:55:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:55:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:55:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:55:16.000: av-sync-dock: LOCKED offset=-39.0ms source=cluster matched=33 mad=11.0ms
+23:55:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:55:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:55:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:55:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:55:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:55:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:55:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:55:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:55:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:55:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:55:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:55:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:55:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:56:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2810 ticks_over=3 tick_ms=21.3
+23:56:00.585: audio-telemetry #800 'mbc': ts_lag_ms=180 buffered_ms=64 pending=0 timing_adjust_ms=0
+23:56:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4015 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:56:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:56:00.885: audio-telemetry #800: total_buffering=85 ms
+23:56:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:56:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:56:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:56:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-40.0ms) [monitor-only, no write]
+23:56:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:56:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:56:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:56:16.000: av-sync-dock: UPDATED offset=-40.0ms source=cluster matched=34 mad=12.5ms
+23:56:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:56:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:56:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:56:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:56:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:56:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:56:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=1 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:56:40.000: program-render-audit: render_fps=30.0 target_fps=30.0 avg_frame_ms=17.9 lagged=0 total=151
+23:56:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:56:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:56:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:56:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:56:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:56:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:57:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2812 ticks_over=0 tick_ms=21.3
+23:57:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=62 pending=0 timing_adjust_ms=0
+23:57:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4016 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:57:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:57:00.885: audio-telemetry #800: total_buffering=85 ms
+23:57:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:57:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:57:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:57:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.5ms) [monitor-only, no write]
+23:57:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:57:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:57:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:57:16.000: av-sync-dock: UPDATED offset=-39.5ms source=cluster matched=35 mad=8.0ms
+23:57:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:57:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:57:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:57:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:57:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:57:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:57:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:57:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:57:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:57:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:57:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:57:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:57:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:58:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2811 ticks_over=1 tick_ms=21.3
+23:58:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=60 pending=0 timing_adjust_ms=0
+23:58:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4017 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:58:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:58:00.885: audio-telemetry #800: total_buffering=85 ms
+23:58:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:58:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:58:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:58:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.0ms) [monitor-only, no write]
+23:58:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:58:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:58:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:58:16.000: av-sync-dock: UPDATED offset=-39.0ms source=cluster matched=36 mad=9.5ms
+23:58:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:58:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:58:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:58:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:58:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:58:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:58:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:58:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:58:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:58:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:58:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:58:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:58:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:59:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2810 ticks_over=2 tick_ms=21.3
+23:59:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=106 pending=0 timing_adjust_ms=0
+23:59:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4018 buffered_ms=40 pending=0 timing_adjust_ms=0
+23:59:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+23:59:00.885: audio-telemetry #800: total_buffering=85 ms
+23:59:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:59:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:59:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:59:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-40.0ms) [monitor-only, no write]
+23:59:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+23:59:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:59:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:59:16.000: av-sync-dock: UPDATED offset=-40.0ms source=cluster matched=37 mad=11.0ms
+23:59:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:59:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:59:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:59:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:59:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:59:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:59:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:59:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:59:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:59:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+23:59:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+23:59:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+23:59:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:00:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2812 ticks_over=3 tick_ms=21.3
+00:00:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=74 pending=0 timing_adjust_ms=0
+00:00:00.685: audio-telemetry #800 'ASIO Input Capture': ts_lag_ms=4019 buffered_ms=40 pending=0 timing_adjust_ms=0
+00:00:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:00:00.885: audio-telemetry #800: total_buffering=85 ms
+00:00:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:00:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:00:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:00:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.5ms) [monitor-only, no write]
+00:00:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:00:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:00:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:00:16.000: av-sync-dock: UPDATED offset=-39.5ms source=cluster matched=38 mad=12.5ms
+00:00:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:00:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:00:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:00:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:00:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:00:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:00:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:00:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:00:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:00:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:00:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:00:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:00:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:01:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2811 ticks_over=0 tick_ms=21.3
+00:01:00.585: audio-telemetry #800 'mbc': ts_lag_ms=180 buffered_ms=72 pending=0 timing_adjust_ms=0
+00:01:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:01:00.885: audio-telemetry #800: total_buffering=85 ms
+00:01:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:01:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:01:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:01:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.0ms) [monitor-only, no write]
+00:01:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:01:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:01:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:01:16.000: av-sync-dock: UPDATED offset=-39.0ms source=cluster matched=39 mad=8.0ms
+00:01:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:01:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:01:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:01:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:01:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:01:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:01:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:01:40.000: program-render-audit: render_fps=30.0 target_fps=30.0 avg_frame_ms=17.9 lagged=3 total=151
+00:01:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:01:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:01:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:01:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:01:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:01:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:02:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2810 ticks_over=1 tick_ms=21.3
+00:02:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=70 pending=0 timing_adjust_ms=0
+00:02:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:02:00.885: audio-telemetry #800: total_buffering=85 ms
+00:02:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:02:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:02:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:02:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-40.0ms) [monitor-only, no write]
+00:02:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:02:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:02:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:02:16.000: av-sync-dock: LOCKED offset=-40.0ms source=cluster matched=40 mad=9.5ms
+00:02:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:02:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:02:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:02:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:02:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:02:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:02:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:02:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:02:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:02:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:02:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:02:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:02:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:03:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2812 ticks_over=2 tick_ms=21.3
+00:03:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=68 pending=0 timing_adjust_ms=0
+00:03:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:03:00.885: audio-telemetry #800: total_buffering=85 ms
+00:03:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:03:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:03:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:03:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.5ms) [monitor-only, no write]
+00:03:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:03:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:03:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:03:16.000: av-sync-dock: UPDATED offset=-39.5ms source=cluster matched=30 mad=11.0ms
+00:03:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:03:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:03:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:03:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:03:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:03:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:03:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:03:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:03:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:03:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:03:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:03:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:03:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:04:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2811 ticks_over=3 tick_ms=21.3
+00:04:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=66 pending=0 timing_adjust_ms=0
+00:04:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:04:00.885: audio-telemetry #800: total_buffering=85 ms
+00:04:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:04:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:04:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:04:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.0ms) [monitor-only, no write]
+00:04:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:04:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:04:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:04:16.000: av-sync-dock: UPDATED offset=-39.0ms source=cluster matched=31 mad=12.5ms
+00:04:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:04:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:04:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:04:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:04:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:04:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:04:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:04:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:04:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:04:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:04:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:04:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:04:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=2 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:05:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2810 ticks_over=0 tick_ms=21.3
+00:05:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=64 pending=0 timing_adjust_ms=0
+00:05:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:05:00.885: audio-telemetry #800: total_buffering=85 ms
+00:05:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:05:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:05:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:05:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-40.0ms) [monitor-only, no write]
+00:05:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:05:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:05:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:05:16.000: av-sync-dock: UPDATED offset=-40.0ms source=cluster matched=32 mad=8.0ms
+00:05:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:05:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:05:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:05:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:05:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:05:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:05:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:05:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:05:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:05:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:05:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:05:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:05:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:06:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2812 ticks_over=1 tick_ms=21.3
+00:06:00.585: audio-telemetry #800 'mbc': ts_lag_ms=180 buffered_ms=62 pending=0 timing_adjust_ms=0
+00:06:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:06:00.885: audio-telemetry #800: total_buffering=85 ms
+00:06:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:06:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:06:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:06:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.5ms) [monitor-only, no write]
+00:06:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:06:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:06:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:06:16.000: av-sync-dock: UPDATED offset=-39.5ms source=cluster matched=33 mad=9.5ms
+00:06:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:06:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:06:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:06:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:06:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:06:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:06:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:06:40.000: program-render-audit: render_fps=30.0 target_fps=30.0 avg_frame_ms=17.9 lagged=61 total=151
+00:06:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:06:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:06:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:06:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:06:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:06:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:07:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2811 ticks_over=2 tick_ms=21.3
+00:07:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=60 pending=0 timing_adjust_ms=0
+00:07:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:07:00.885: audio-telemetry #800: total_buffering=85 ms
+00:07:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:07:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:07:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:07:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.0ms) [monitor-only, no write]
+00:07:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:07:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:07:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:07:16.000: av-sync-dock: UPDATED offset=-39.0ms source=cluster matched=34 mad=11.0ms
+00:07:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:07:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:07:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:07:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:07:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:07:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:07:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:07:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:07:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:07:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:07:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:07:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:07:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:08:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2810 ticks_over=3 tick_ms=21.3
+00:08:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=106 pending=0 timing_adjust_ms=0
+00:08:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:08:00.885: audio-telemetry #800: total_buffering=85 ms
+00:08:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:08:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:08:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:08:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-40.0ms) [monitor-only, no write]
+00:08:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:08:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:08:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:08:16.000: av-sync-dock: UPDATED offset=-40.0ms source=cluster matched=35 mad=12.5ms
+00:08:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:08:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:08:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:08:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:08:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:08:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:08:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:08:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:08:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:08:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:08:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:08:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:08:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:09:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2812 ticks_over=0 tick_ms=21.3
+00:09:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=74 pending=0 timing_adjust_ms=0
+00:09:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:09:00.885: audio-telemetry #800: total_buffering=85 ms
+00:09:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:09:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:09:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:09:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.5ms) [monitor-only, no write]
+00:09:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:09:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:09:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:09:16.000: av-sync-dock: LOCKED offset=-39.5ms source=cluster matched=36 mad=8.0ms
+00:09:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:09:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:09:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:09:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:09:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:09:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:09:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:09:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:09:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:09:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:09:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:09:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:09:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:10:00.000: genlock-relock 'NDI 2ME PGM': depth=41 steady_depth_frames=28 due=1 erased=0
+00:10:00.090: genlock-relock 'NDI 2ME PGM': depth=41 steady_depth_frames=28 due=1 erased=0
+00:10:00.180: genlock-relock 'NDI 2ME PGM': depth=41 steady_depth_frames=28 due=1 erased=0
+00:10:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2811 ticks_over=1 tick_ms=21.3
+00:10:00.270: genlock-relock 'NDI 2ME PGM': depth=41 steady_depth_frames=28 due=1 erased=0
+00:10:00.360: genlock-relock 'NDI 2ME PGM': depth=41 steady_depth_frames=28 due=1 erased=0
+00:10:00.450: genlock-relock 'NDI 2ME PGM': depth=41 steady_depth_frames=28 due=1 erased=0
+00:10:00.540: genlock-relock 'NDI 2ME PGM': depth=41 steady_depth_frames=28 due=1 erased=0
+00:10:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=72 pending=0 timing_adjust_ms=0
+00:10:00.630: genlock-relock 'NDI 2ME PGM': depth=41 steady_depth_frames=28 due=1 erased=0
+00:10:00.720: genlock-relock 'NDI 2ME PGM': depth=41 steady_depth_frames=28 due=1 erased=0
+00:10:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:10:00.810: genlock-relock 'NDI 2ME PGM': depth=41 steady_depth_frames=28 due=1 erased=0
+00:10:00.885: audio-telemetry #800: total_buffering=85 ms
+00:10:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:10:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:10:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:10:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-39.0ms) [monitor-only, no write]
+00:10:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:10:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:10:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:10:16.000: av-sync-dock: UPDATED offset=-39.0ms source=cluster matched=37 mad=9.5ms
+00:10:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:10:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:10:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:10:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:10:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:10:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:10:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:10:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:10:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:10:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:10:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:10:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:10:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:11:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2810 ticks_over=2 tick_ms=21.3
+00:11:00.585: audio-telemetry #800 'mbc': ts_lag_ms=180 buffered_ms=70 pending=0 timing_adjust_ms=0
+00:11:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:11:00.885: audio-telemetry #800: total_buffering=85 ms
+00:11:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:11:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:11:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:11:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-40.0ms) [monitor-only, no write]
+00:11:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:11:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:11:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:11:16.000: av-sync-dock: UPDATED offset=-40.0ms source=cluster matched=38 mad=11.0ms
+00:11:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:11:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:11:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:11:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:11:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:11:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:11:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:11:40.000: program-render-audit: render_fps=30.0 target_fps=30.0 avg_frame_ms=17.9 lagged=0 total=151
+00:11:40.000: genlock-relock 'NDI cam1': depth=3 steady_depth_frames=2 due=1 erased=0
+00:11:45.000: genlock-relock 'NDI cam1': depth=3 steady_depth_frames=2 due=1 erased=0
+00:11:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:11:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:11:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:11:50.000: genlock-relock 'NDI cam1': depth=3 steady_depth_frames=2 due=1 erased=0
+00:11:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:11:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:11:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:12:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2812 ticks_over=3 tick_ms=21.3
+00:12:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=68 pending=0 timing_adjust_ms=0
+00:12:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:12:00.885: audio-telemetry #800: total_buffering=85 ms
+00:12:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:12:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:12:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:12:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-52.0ms) [monitor-only, no write]
+00:12:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:12:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:12:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:12:16.000: av-sync-dock: UPDATED offset=-52.0ms source=cluster matched=39 mad=12.5ms
+00:12:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:12:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:12:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:12:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:12:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:12:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:12:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:12:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:12:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:12:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:12:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:12:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:12:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:13:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2811 ticks_over=0 tick_ms=21.3
+00:13:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=66 pending=0 timing_adjust_ms=0
+00:13:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:13:00.885: audio-telemetry #800: total_buffering=85 ms
+00:13:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:13:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:13:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:13:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-51.5ms) [monitor-only, no write]
+00:13:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:13:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=3 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:13:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:13:16.000: av-sync-dock: UPDATED offset=-51.5ms source=cluster matched=40 mad=8.0ms
+00:13:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=3 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:13:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:13:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:13:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:13:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:13:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:13:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:13:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:13:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:13:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:13:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:13:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:13:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:14:00.250: audio-stall #1367: tick_gap_max_ms=25.0 callback_max_ms=18.0 ticks=2810 ticks_over=1 tick_ms=21.3
+00:14:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=64 pending=0 timing_adjust_ms=0
+00:14:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:14:00.885: audio-telemetry #800: total_buffering=85 ms
+00:14:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:14:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:14:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:14:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-52.5ms) [monitor-only, no write]
+00:14:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:14:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:14:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:14:16.000: av-sync-dock: UPDATED offset=-52.5ms source=cluster matched=30 mad=9.5ms
+00:14:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:14:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:14:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:14:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:14:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:14:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:14:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:14:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:14:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:14:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:14:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:14:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:14:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:15:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=62 pending=0 timing_adjust_ms=0
+00:15:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:15:00.885: audio-telemetry #800: total_buffering=85 ms
+00:15:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:15:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:15:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:15:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-52.0ms) [monitor-only, no write]
+00:15:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:15:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:15:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:15:16.000: av-sync-dock: UPDATED offset=-52.0ms source=cluster matched=31 mad=11.0ms
+00:15:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:15:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:15:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:15:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:15:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:15:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:15:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:15:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:15:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:15:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:15:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:15:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:15:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:16:00.585: audio-telemetry #800 'mbc': ts_lag_ms=180 buffered_ms=60 pending=0 timing_adjust_ms=0
+00:16:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:16:00.885: audio-telemetry #800: total_buffering=85 ms
+00:16:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:16:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:16:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:16:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 976 -> 996ms (measured offset=-51.5ms) [monitor-only, no write]
+00:16:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:16:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:16:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:16:16.000: av-sync-dock: LOCKED offset=-51.5ms source=cluster matched=32 mad=12.5ms
+00:16:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:16:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:16:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:16:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:16:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:16:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:16:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:16:40.000: program-render-audit: render_fps=30.0 target_fps=30.0 avg_frame_ms=17.9 lagged=0 total=151
+00:16:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:16:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:16:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:16:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:16:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:16:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:17:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=106 pending=0 timing_adjust_ms=0
+00:17:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:17:00.885: audio-telemetry #800: total_buffering=85 ms
+00:17:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:17:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:17:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:17:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 1024 -> 1044ms (measured offset=-52.5ms) [monitor-only, no write]
+00:17:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:17:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:17:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:17:16.000: av-sync-dock: UPDATED offset=-52.5ms source=cluster matched=33 mad=8.0ms
+00:17:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:17:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:17:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:17:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:17:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:17:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:17:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:17:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:17:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:17:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:17:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:17:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:17:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:18:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=74 pending=0 timing_adjust_ms=0
+00:18:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:18:00.885: audio-telemetry #800: total_buffering=85 ms
+00:18:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:18:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:18:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:18:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 1024 -> 1044ms (measured offset=-52.0ms) [monitor-only, no write]
+00:18:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:18:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:18:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:18:16.000: av-sync-dock: UPDATED offset=-52.0ms source=cluster matched=34 mad=9.5ms
+00:18:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:18:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:18:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:18:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:18:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:18:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:18:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:18:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:18:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:18:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:18:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:18:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:18:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:19:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=72 pending=0 timing_adjust_ms=0
+00:19:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:19:00.885: audio-telemetry #800: total_buffering=85 ms
+00:19:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:19:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:19:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:19:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 1024 -> 1044ms (measured offset=-51.5ms) [monitor-only, no write]
+00:19:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:19:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:19:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:19:16.000: av-sync-dock: UPDATED offset=-51.5ms source=cluster matched=35 mad=11.0ms
+00:19:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:19:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:19:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:19:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:19:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:19:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:19:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:19:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:19:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:19:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:19:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:19:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:19:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=0 repays=0 silence_ms=0.0 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:20:00.000: genlock-lock-json: {"v":7,"state":"DEGRADED","reason":"recent_event","n_inputs":4,"n_locked":3,"n_absent":1,"n_idle":1,"latency_ms":3,"clock":"locked","output":"absent","recent_event":true,"recent_event_inputs":[{"name":"cg","events":25},{"name":""},7],"audio_unexpected_inputs":[{"name":"CAM1 (usb)"},"x"],"qpc_drift_ms":67,"inputs":[{"name":"cg","locked":true,"connected":true,"idle":false,"latency_ms":3,"underruns":543,"relocks":25,"late_holds":1,"depth":2},{"name":"NDI cam2","locked":false,"connected":false,"latency_ms":3,"underruns":0,"relocks":0,"late_holds":0,"depth":0},{"name":""},"junk",{"name":"SongPlayer","locked":true,"idle":true}],"qpc_drift_ppm":13.500,"qpc_expected_ppm":13.000,"qpc_step":false,"media_clock":{"state":"drift","drift_us":8100,"window_s":600,"ready":true,"discipline":"active"}} (#1299)
+00:20:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=70 pending=0 timing_adjust_ms=0
+00:20:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:20:00.885: audio-telemetry #800: total_buffering=85 ms
+00:20:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:20:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:20:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:20:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 1024 -> 1044ms (measured offset=-52.5ms) [monitor-only, no write]
+00:20:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:20:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:20:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:20:16.000: av-sync-dock: UPDATED offset=-52.5ms source=cluster matched=36 mad=12.5ms
+00:20:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:20:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:20:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:20:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:20:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:20:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:20:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:20:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:20:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:20:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:20:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:20:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:20:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:21:00.585: audio-telemetry #800 'mbc': ts_lag_ms=180 buffered_ms=68 pending=0 timing_adjust_ms=0
+00:21:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:21:00.885: audio-telemetry #800: total_buffering=85 ms
+00:21:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:21:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:21:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:21:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 1024 -> 1044ms (measured offset=-52.0ms) [monitor-only, no write]
+00:21:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:21:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:21:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:21:16.000: av-sync-dock: UPDATED offset=-52.0ms source=cluster matched=37 mad=8.0ms
+00:21:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:21:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:21:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:21:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:21:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:21:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:21:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=4 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:21:40.000: program-render-audit: render_fps=30.0 target_fps=30.0 avg_frame_ms=17.9 lagged=0 total=151
+00:21:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:21:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:21:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=5 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:21:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:21:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:21:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=5 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:22:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=66 pending=0 timing_adjust_ms=0
+00:22:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:22:00.885: audio-telemetry #800: total_buffering=85 ms
+00:22:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:22:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:22:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=5 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:22:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 1024 -> 1044ms (measured offset=-51.5ms) [monitor-only, no write]
+00:22:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:22:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:22:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:22:16.000: av-sync-dock: UPDATED offset=-51.5ms source=cluster matched=38 mad=9.5ms
+00:22:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=5 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:22:25.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:22:25.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:22:27.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=5 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:22:35.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:22:35.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:22:37.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=5 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:22:45.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:22:45.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:22:47.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=5 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:22:55.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:22:55.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:22:57.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=5 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:23:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=64 pending=0 timing_adjust_ms=0
+00:23:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:23:00.885: audio-telemetry #800: total_buffering=85 ms
+00:23:05.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:23:05.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:23:07.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=5 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:23:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 1024 -> 1044ms (measured offset=-52.5ms) [monitor-only, no write]
+00:23:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:23:15.000: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=6 overflows=0 late_max_ms=3.000 trims=0 target_ms=64 stream='cg'
+00:23:15.050: [obs-vban] obs-vban pacing: depth_ms=65.5 underflows=0 overflows=0 late_max_ms=3.000 trims=1 target_ms=64 stream='cg'
+00:23:16.000: av-sync-dock: LOCKED offset=-52.5ms source=cluster matched=39 mad=11.0ms
+00:23:17.000: [obs-vban] obs-vban pacing: depth_ms=64.0 late_sends=5 discontinuities=1 repays=0 silence_ms=21.3 discarded_ms=0.0 resyncs=0 late_max_ms=3.000 target_ms=64 dest=10.77.9.120:6980 stream='foh'
+00:24:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=62 pending=0 timing_adjust_ms=0
+00:24:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:24:00.885: audio-telemetry #800: total_buffering=85 ms
+00:24:10.000: av-sync-dock: LOCK-CORRECT SUGGESTED genlock_latency_ms_src 1024 -> 1044ms (measured offset=-52.0ms) [monitor-only, no write]
+00:24:15.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=yes state=LIVE
+00:24:16.000: av-sync-dock: UPDATED offset=-52.0ms source=cluster matched=40 mad=12.5ms
+00:25:00.000: av-sync-dock: diag lock_ms=33 err_ms=2 locked=no state=ACQUIRE
+00:25:00.585: audio-telemetry #800 'mbc': ts_lag_ms=107 buffered_ms=60 pending=0 timing_adjust_ms=0
+00:25:00.785: audio-telemetry #800 'test-audio': ts_lag_ms=-1 buffered_ms=0 pending=0 timing_adjust_ms=0
+00:25:00.885: audio-telemetry #800: total_buffering=85 ms

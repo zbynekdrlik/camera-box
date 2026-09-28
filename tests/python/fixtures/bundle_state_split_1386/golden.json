@@ -1,0 +1,2252 @@
+{
+ "build_bundle_state": {
+  "empty": "{}",
+  "full": "{\"obs_version\": \"v0\", \"distroav_version\": \"v1\", \"ndi_runtime\": \"v2\", \"output_fps\": \"v3\", \"genlock_wall_clock\": \"v4\", \"ndi_input_latency\": \"v5\", \"distroav_dll_paths\": \"v6\", \"genlock_capability\": \"v7\", \"obs_dll_sha256\": \"v8\", \"distroav_dll_sha256\": \"v9\", \"obs_installs\": \"v11\", \"port4455_owner_path\": \"v12\", \"port4455_owner_version\": \"v13\", \"obs_process_count\": \"v14\", \"ahk_app1_shortcut_path\": \"v15\", \"ahk_app1_run\": \"v16\", \"ahk_dead_config_present\": \"v17\", \"shortcut_target_path\": \"v18\", \"shortcut_workdir\": \"v19\", \"genlock_build_sha\": \"v10\", \"audio_ts_lag_ms\": \"v20\", \"audio_ts_lag_src\": \"v21\", \"audio_ts_lag_age_s\": \"v22\", \"audio_ref_lag_src\": \"v23\", \"audio_ref_lag_base_ms\": \"v24\", \"audio_ref_lag_high_ms\": \"v25\", \"audio_ref_lag_low_ms\": \"v26\", \"audio_ref_lag_duty_pct\": \"v27\", \"audio_ref_lag_n\": \"v28\", \"av_offset_recent_med_ms\": \"v29\", \"av_offset_base_med_ms\": \"v30\", \"av_offset_pin\": \"v31\", \"av_offset_pin_stable\": \"v32\", \"av_offset_age_s\": \"v33\", \"av_offset_n_recent\": \"v34\", \"av_offset_n_base\": \"v35\", \"av_offset_dock_live_age_s\": \"v36\", \"av_offset_recent_mad_ms\": \"v37\", \"av_offset_recent_matched_min\": \"v38\", \"av_offset_quality_age_s\": \"v39\", \"buffered_ms_slope_ms_per_min\": \"v40\", \"buffered_ms_max_step_ms\": \"v41\", \"buffered_ms_n\": \"v42\", \"buffered_ms_age_s\": \"v43\", \"vb_matrix_running\": \"v44\", \"vb_matrix_name\": \"v45\", \"vb_matrix_pid\": \"v46\", \"vb_matrix_start\": \"v47\", \"program_render_lagged\": \"v48\", \"program_render_lagged_age_s\": \"v49\", \"relock_bursts\": \"v50\", \"relock_bursts_age_s\": \"v51\", \"audio_mixer_ticks\": \"v52\", \"audio_mixer_ticks_over\": \"v53\", \"audio_mixer_window_ms\": \"v54\", \"audio_mixer_tick_ms\": \"v55\", \"audio_mixer_age_s\": \"v56\", \"vban_pacer_loss_events\": \"v57\", \"vban_pacer_loss_ms\": \"v58\", \"vban_pacer_loss_dest\": \"v59\", \"vban_pacer_age_s\": \"v60\", \"obs_log_head_age_s\": \"v61\"}",
+  "half": "{\"obs_version\": \"0\", \"ndi_runtime\": \"0\", \"genlock_wall_clock\": \"0\", \"distroav_dll_paths\": \"0\", \"obs_dll_sha256\": \"0\", \"port4455_owner_path\": \"0\", \"obs_process_count\": \"0\", \"ahk_app1_run\": \"0\", \"shortcut_target_path\": \"0\", \"genlock_build_sha\": \"0\", \"audio_ts_lag_ms\": \"0\", \"audio_ts_lag_age_s\": \"0\", \"audio_ref_lag_base_ms\": \"0\", \"audio_ref_lag_low_ms\": \"0\", \"audio_ref_lag_n\": \"0\", \"av_offset_base_med_ms\": \"0\", \"av_offset_pin_stable\": \"0\", \"av_offset_n_recent\": \"0\", \"av_offset_dock_live_age_s\": \"0\", \"av_offset_recent_matched_min\": \"0\", \"buffered_ms_slope_ms_per_min\": \"0\", \"buffered_ms_n\": \"0\", \"vb_matrix_running\": \"0\", \"vb_matrix_pid\": \"0\", \"program_render_lagged\": \"0\", \"relock_bursts\": \"0\", \"audio_mixer_ticks\": \"0\", \"audio_mixer_window_ms\": \"0\", \"audio_mixer_age_s\": \"0\", \"vban_pacer_loss_ms\": \"0\", \"vban_pacer_age_s\": \"0\"}"
+ },
+ "build_bundle_state_keys": [
+  "obs_version",
+  "distroav_version",
+  "ndi_runtime",
+  "output_fps",
+  "genlock_wall_clock",
+  "ndi_input_latency",
+  "distroav_dll_paths",
+  "genlock_capability",
+  "obs_dll_sha256",
+  "distroav_dll_sha256",
+  "genlock_build_sha",
+  "obs_installs",
+  "port4455_owner_path",
+  "port4455_owner_version",
+  "obs_process_count",
+  "ahk_app1_shortcut_path",
+  "ahk_app1_run",
+  "ahk_dead_config_present",
+  "shortcut_target_path",
+  "shortcut_workdir",
+  "audio_ts_lag_ms",
+  "audio_ts_lag_src",
+  "audio_ts_lag_age_s",
+  "audio_ref_lag_src",
+  "audio_ref_lag_base_ms",
+  "audio_ref_lag_high_ms",
+  "audio_ref_lag_low_ms",
+  "audio_ref_lag_duty_pct",
+  "audio_ref_lag_n",
+  "av_offset_recent_med_ms",
+  "av_offset_base_med_ms",
+  "av_offset_pin",
+  "av_offset_pin_stable",
+  "av_offset_age_s",
+  "av_offset_n_recent",
+  "av_offset_n_base",
+  "av_offset_dock_live_age_s",
+  "av_offset_recent_mad_ms",
+  "av_offset_recent_matched_min",
+  "av_offset_quality_age_s",
+  "buffered_ms_slope_ms_per_min",
+  "buffered_ms_max_step_ms",
+  "buffered_ms_n",
+  "buffered_ms_age_s",
+  "vb_matrix_running",
+  "vb_matrix_name",
+  "vb_matrix_pid",
+  "vb_matrix_start",
+  "program_render_lagged",
+  "program_render_lagged_age_s",
+  "relock_bursts",
+  "relock_bursts_age_s",
+  "audio_mixer_ticks",
+  "audio_mixer_ticks_over",
+  "audio_mixer_window_ms",
+  "audio_mixer_tick_ms",
+  "audio_mixer_age_s",
+  "vban_pacer_loss_events",
+  "vban_pacer_loss_ms",
+  "vban_pacer_loss_dest",
+  "vban_pacer_age_s",
+  "obs_log_head_age_s"
+ ],
+ "cases": {
+  "all_families.txt": {
+   "audio_mixer_from_log": [
+    "2810",
+    "1",
+    "60000",
+    "21.3",
+    "661"
+   ],
+   "audio_mixer_from_log[tail]": [
+    "2810",
+    "1",
+    "60000",
+    "21.3",
+    "661"
+   ],
+   "audio_ref_band_from_log": [
+    "mbc",
+    "",
+    "180",
+    "107",
+    "20",
+    "45"
+   ],
+   "audio_ref_band_from_log[ASIO]": [
+    "ASIO Input Capture",
+    "",
+    "4017",
+    "4001",
+    "0",
+    "20"
+   ],
+   "audio_telemetry_from_log": [
+    "107",
+    "mbc",
+    "0"
+   ],
+   "audio_ts_lag_ms_from_log": [
+    "107",
+    "mbc"
+   ],
+   "av_offset_dock_live_age_from_log": "46",
+   "av_offset_quality_age_from_log": "45",
+   "av_offset_quality_from_log": [
+    "11.0",
+    "31"
+   ],
+   "av_offset_series_from_log": [
+    "-52.0",
+    "-39.5",
+    "1024",
+    "0",
+    "51",
+    "10",
+    "30"
+   ],
+   "buffered_ms_series_from_log": [
+    "0.0",
+    "46",
+    "10",
+    "0"
+   ],
+   "buffered_ms_series_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "distroav_version_from_log": "6.2.1",
+   "genlock_capability_from_log": "23:40:00.500: genlock: wall-clock-slaved render tick ENABLED\n23:40:00.501: genlock: sub-frame jitter reserve engaged\n23:40:00.502: genlock: timestamp-aligned release armed",
+   "genlock_lock_facet_from_log": {
+    "audio_unexpected_inputs": [
+     {
+      "name": "CAM1 (usb)"
+     }
+    ],
+    "clock": {
+     "state": "locked"
+    },
+    "inputs": {
+     "NDI cam2": {
+      "connected": false,
+      "depth": 0,
+      "idle": false,
+      "late_holds": 0,
+      "latency_ms": 3,
+      "locked": false,
+      "relocks": 0,
+      "underruns": 0
+     },
+     "SongPlayer": {
+      "connected": true,
+      "depth": null,
+      "idle": true,
+      "late_holds": null,
+      "latency_ms": null,
+      "locked": true,
+      "relocks": null,
+      "underruns": null
+     },
+     "cg": {
+      "connected": true,
+      "depth": 2,
+      "idle": false,
+      "late_holds": 1,
+      "latency_ms": 3,
+      "locked": true,
+      "relocks": 25,
+      "underruns": 543
+     }
+    },
+    "latency_ms": 3,
+    "media_clock": {
+     "discipline": "active",
+     "drift_us": 8100,
+     "ready": true,
+     "state": "drift",
+     "window_s": 600
+    },
+    "n_absent": 1,
+    "n_idle": 1,
+    "n_inputs": 4,
+    "n_locked": 3,
+    "output": {
+     "present": false,
+     "stamping_wallclock": false
+    },
+    "qpc_drift_ms": 67,
+    "qpc_drift_ppm": 13.5,
+    "qpc_expected_ppm": 13.0,
+    "qpc_step": false,
+    "reason": "recent_event",
+    "recent_event": true,
+    "recent_event_inputs": [
+     {
+      "events": 25,
+      "name": "cg"
+     }
+    ],
+    "source": "log",
+    "state": "DEGRADED"
+   },
+   "genlock_wall_clock_from_log": "1",
+   "obs_log_head_age_s_from_log[0.0]": "84899",
+   "obs_log_head_age_s_from_log[43200.0]": "41699",
+   "obs_log_head_age_s_from_log[86399.5]": "84899",
+   "obs_version_from_log": "32.1.2",
+   "output_fps_from_log": "60",
+   "program_render_lagged_from_log": [
+    "61",
+    "1101"
+   ],
+   "relock_bursts_from_log": [
+    "1",
+    "791"
+   ],
+   "text_sha256": "7f344b3376c3e9babf28d5554c1eda01890fcd83c454609271dd9067ed4d0598",
+   "timestamped_tail_lines": [
+    1134,
+    2700.883999999996,
+    "3414f5a94e066cb5c30c999d0d542b21e019772b0c48d3f397551c6bc833cdb0"
+   ],
+   "vban_pacer_loss_from_log": [
+    "1",
+    "21.3",
+    "10.77.9.120:6980/foh",
+    "104"
+   ],
+   "vban_pacer_loss_from_log[tail]": [
+    "1",
+    "21.3",
+    "10.77.9.120:6980/foh",
+    "104"
+   ]
+  },
+  "audio_ref_band_mbc_1265.txt": {
+   "audio_mixer_from_log": [
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_mixer_from_log[tail]": [
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_ref_band_from_log": [
+    "mbc",
+    "107",
+    "181",
+    "107",
+    "50",
+    "14"
+   ],
+   "audio_ref_band_from_log[ASIO]": [
+    "ASIO Input Capture",
+    "107",
+    "133",
+    "133",
+    "100",
+    "1"
+   ],
+   "audio_telemetry_from_log": [
+    "108",
+    "mbc",
+    "0"
+   ],
+   "audio_ts_lag_ms_from_log": [
+    "108",
+    "mbc"
+   ],
+   "av_offset_dock_live_age_from_log": "",
+   "av_offset_quality_age_from_log": "",
+   "av_offset_quality_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_series_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log": [
+    "0.0",
+    "0",
+    "11",
+    "0"
+   ],
+   "buffered_ms_series_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "distroav_version_from_log": "",
+   "genlock_capability_from_log": "",
+   "genlock_lock_facet_from_log": null,
+   "genlock_wall_clock_from_log": "",
+   "obs_log_head_age_s_from_log[0.0]": "10020",
+   "obs_log_head_age_s_from_log[43200.0]": "53220",
+   "obs_log_head_age_s_from_log[86399.5]": "10020",
+   "obs_version_from_log": "",
+   "output_fps_from_log": "",
+   "program_render_lagged_from_log": [
+    "",
+    ""
+   ],
+   "relock_bursts_from_log": [
+    "",
+    ""
+   ],
+   "text_sha256": "e5781d3b356e3aabfd61955a826298607f12dd31a5fe9f957cd7ba17a47787b3",
+   "timestamped_tail_lines": [
+    16,
+    780.0,
+    "72d5a769cfb6055072dd59b6cdc50b75c32880511be50dbfeb658d45f6890037"
+   ],
+   "vban_pacer_loss_from_log": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "vban_pacer_loss_from_log[tail]": [
+    "",
+    "",
+    "",
+    ""
+   ]
+  },
+  "bounded:all_families.txt": {
+   "audio_mixer_from_log": [
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_mixer_from_log[tail]": [
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_ref_band_from_log": [
+    "mbc",
+    "180",
+    "180",
+    "107",
+    "18",
+    "11"
+   ],
+   "audio_ref_band_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_telemetry_from_log": [
+    "107",
+    "mbc",
+    "0"
+   ],
+   "audio_ts_lag_ms_from_log": [
+    "107",
+    "mbc"
+   ],
+   "av_offset_dock_live_age_from_log": "46",
+   "av_offset_quality_age_from_log": "45",
+   "av_offset_quality_from_log": [
+    "11.0",
+    "31"
+   ],
+   "av_offset_series_from_log": [
+    "-52.0",
+    "",
+    "1024",
+    "0",
+    "51",
+    "10",
+    "0"
+   ],
+   "buffered_ms_series_from_log": [
+    "0.0",
+    "46",
+    "10",
+    "0"
+   ],
+   "buffered_ms_series_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "distroav_version_from_log": "6.2.1",
+   "genlock_capability_from_log": "23:40:00.500: genlock: wall-clock-slaved render tick ENABLED\n23:40:00.501: genlock: sub-frame jitter reserve engaged\n23:40:00.502: genlock: timestamp-aligned release armed",
+   "genlock_lock_facet_from_log": {
+    "audio_unexpected_inputs": [
+     {
+      "name": "CAM1 (usb)"
+     }
+    ],
+    "clock": {
+     "state": "locked"
+    },
+    "inputs": {
+     "NDI cam2": {
+      "connected": false,
+      "depth": 0,
+      "idle": false,
+      "late_holds": 0,
+      "latency_ms": 3,
+      "locked": false,
+      "relocks": 0,
+      "underruns": 0
+     },
+     "SongPlayer": {
+      "connected": true,
+      "depth": null,
+      "idle": true,
+      "late_holds": null,
+      "latency_ms": null,
+      "locked": true,
+      "relocks": null,
+      "underruns": null
+     },
+     "cg": {
+      "connected": true,
+      "depth": 2,
+      "idle": false,
+      "late_holds": 1,
+      "latency_ms": 3,
+      "locked": true,
+      "relocks": 25,
+      "underruns": 543
+     }
+    },
+    "latency_ms": 3,
+    "media_clock": {
+     "discipline": "active",
+     "drift_us": 8100,
+     "ready": true,
+     "state": "drift",
+     "window_s": 600
+    },
+    "n_absent": 1,
+    "n_idle": 1,
+    "n_inputs": 4,
+    "n_locked": 3,
+    "output": {
+     "present": false,
+     "stamping_wallclock": false
+    },
+    "qpc_drift_ms": 67,
+    "qpc_drift_ppm": 13.5,
+    "qpc_expected_ppm": 13.0,
+    "qpc_step": false,
+    "reason": "recent_event",
+    "recent_event": true,
+    "recent_event_inputs": [
+     {
+      "events": 25,
+      "name": "cg"
+     }
+    ],
+    "source": "log",
+    "state": "DEGRADED"
+   },
+   "genlock_wall_clock_from_log": "1",
+   "obs_log_head_age_s_from_log[0.0]": "84899",
+   "obs_log_head_age_s_from_log[43200.0]": "41699",
+   "obs_log_head_age_s_from_log[86399.5]": "84899",
+   "obs_version_from_log": "32.1.2",
+   "output_fps_from_log": "60",
+   "program_render_lagged_from_log": [
+    "0",
+    "201"
+   ],
+   "relock_bursts_from_log": [
+    "",
+    ""
+   ],
+   "text_sha256": "c7d980a03b7ff3b88c24da0e479a69324da54f13a7f57a50121bf0ff9ff55e2e",
+   "timestamped_tail_lines": [
+    232,
+    645.835,
+    "f3deb16ae4278c0599057a7ef36778df953de469e8da9842b5fd31efeeb83a0c"
+   ],
+   "vban_pacer_loss_from_log": [
+    "1",
+    "21.3",
+    "10.77.9.120:6980/foh",
+    "104"
+   ],
+   "vban_pacer_loss_from_log[tail]": [
+    "1",
+    "21.3",
+    "10.77.9.120:6980/foh",
+    "104"
+   ]
+  },
+  "bounded:concat": {
+   "audio_mixer_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "646"
+   ],
+   "audio_mixer_from_log[tail]": [
+    "",
+    "",
+    "",
+    "",
+    "646"
+   ],
+   "audio_ref_band_from_log": [
+    "mbc",
+    "",
+    "180",
+    "107",
+    "18",
+    "11"
+   ],
+   "audio_ref_band_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_telemetry_from_log": [
+    "107",
+    "mbc",
+    "0"
+   ],
+   "audio_ts_lag_ms_from_log": [
+    "107",
+    "mbc"
+   ],
+   "av_offset_dock_live_age_from_log": "46",
+   "av_offset_quality_age_from_log": "45",
+   "av_offset_quality_from_log": [
+    "11.0",
+    "31"
+   ],
+   "av_offset_series_from_log": [
+    "-52.0",
+    "",
+    "1024",
+    "0",
+    "51",
+    "10",
+    "0"
+   ],
+   "buffered_ms_series_from_log": [
+    "0.0",
+    "46",
+    "10",
+    "0"
+   ],
+   "buffered_ms_series_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "distroav_version_from_log": "",
+   "genlock_capability_from_log": "",
+   "genlock_lock_facet_from_log": {
+    "audio_unexpected_inputs": [
+     {
+      "name": "CAM1 (usb)"
+     }
+    ],
+    "clock": {
+     "state": "locked"
+    },
+    "inputs": {
+     "NDI cam2": {
+      "connected": false,
+      "depth": 0,
+      "idle": false,
+      "late_holds": 0,
+      "latency_ms": 3,
+      "locked": false,
+      "relocks": 0,
+      "underruns": 0
+     },
+     "SongPlayer": {
+      "connected": true,
+      "depth": null,
+      "idle": true,
+      "late_holds": null,
+      "latency_ms": null,
+      "locked": true,
+      "relocks": null,
+      "underruns": null
+     },
+     "cg": {
+      "connected": true,
+      "depth": 2,
+      "idle": false,
+      "late_holds": 1,
+      "latency_ms": 3,
+      "locked": true,
+      "relocks": 25,
+      "underruns": 543
+     }
+    },
+    "latency_ms": 3,
+    "media_clock": {
+     "discipline": "active",
+     "drift_us": 8100,
+     "ready": true,
+     "state": "drift",
+     "window_s": 600
+    },
+    "n_absent": 1,
+    "n_idle": 1,
+    "n_inputs": 4,
+    "n_locked": 3,
+    "output": {
+     "present": false,
+     "stamping_wallclock": false
+    },
+    "qpc_drift_ms": 67,
+    "qpc_drift_ppm": 13.5,
+    "qpc_expected_ppm": 13.0,
+    "qpc_step": false,
+    "reason": "recent_event",
+    "recent_event": true,
+    "recent_event_inputs": [
+     {
+      "events": 25,
+      "name": "cg"
+     }
+    ],
+    "source": "log",
+    "state": "DEGRADED"
+   },
+   "genlock_wall_clock_from_log": "",
+   "obs_log_head_age_s_from_log[0.0]": "84899",
+   "obs_log_head_age_s_from_log[43200.0]": "41699",
+   "obs_log_head_age_s_from_log[86399.5]": "84899",
+   "obs_version_from_log": "",
+   "output_fps_from_log": "",
+   "program_render_lagged_from_log": [
+    "0",
+    "201"
+   ],
+   "relock_bursts_from_log": [
+    "",
+    ""
+   ],
+   "text_sha256": "e0c6b877a85178e139e3ed26a9012e721cdb45625c01a67e487aaa96188aba60",
+   "timestamped_tail_lines": [
+    232,
+    645.835,
+    "f3deb16ae4278c0599057a7ef36778df953de469e8da9842b5fd31efeeb83a0c"
+   ],
+   "vban_pacer_loss_from_log": [
+    "1",
+    "21.3",
+    "10.77.9.120:6980/foh",
+    "104"
+   ],
+   "vban_pacer_loss_from_log[tail]": [
+    "1",
+    "21.3",
+    "10.77.9.120:6980/foh",
+    "104"
+   ]
+  },
+  "bounded:resolume-clean-2000-2045.txt.gz": {
+   "audio_mixer_from_log": [
+    "2813",
+    "1",
+    "60006",
+    "21.3",
+    "44"
+   ],
+   "audio_mixer_from_log[tail]": [
+    "2813",
+    "1",
+    "60006",
+    "21.3",
+    "44"
+   ],
+   "audio_ref_band_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_ref_band_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_telemetry_from_log": [
+    "",
+    "",
+    ""
+   ],
+   "audio_ts_lag_ms_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_dock_live_age_from_log": "",
+   "av_offset_quality_age_from_log": "",
+   "av_offset_quality_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_series_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "distroav_version_from_log": "",
+   "genlock_capability_from_log": "",
+   "genlock_lock_facet_from_log": null,
+   "genlock_wall_clock_from_log": "",
+   "obs_log_head_age_s_from_log[0.0]": "11705",
+   "obs_log_head_age_s_from_log[43200.0]": "54905",
+   "obs_log_head_age_s_from_log[86399.5]": "11705",
+   "obs_version_from_log": "",
+   "output_fps_from_log": "",
+   "program_render_lagged_from_log": [
+    "",
+    ""
+   ],
+   "relock_bursts_from_log": [
+    "",
+    ""
+   ],
+   "text_sha256": "925f33bb5d8cf970cc0b8239e87554185a873170c4a21f95eafb468cb835912f",
+   "timestamped_tail_lines": [
+    249,
+    1140.363000000012,
+    "a19ef0812926941726d56d148659b55ac7a09e3be8caffd5e3f32842ef3ea573"
+   ],
+   "vban_pacer_loss_from_log": [
+    "0",
+    "",
+    "stream=cg",
+    "0"
+   ],
+   "vban_pacer_loss_from_log[tail]": [
+    "0",
+    "",
+    "stream=cg",
+    "0"
+   ]
+  },
+  "bounded:resolume-control-0300-0415.txt.gz": {
+   "audio_mixer_from_log": [
+    "2813",
+    "0",
+    "60005",
+    "21.3",
+    "39"
+   ],
+   "audio_mixer_from_log[tail]": [
+    "2813",
+    "0",
+    "60005",
+    "21.3",
+    "39"
+   ],
+   "audio_ref_band_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_ref_band_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_telemetry_from_log": [
+    "",
+    "",
+    ""
+   ],
+   "audio_ts_lag_ms_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_dock_live_age_from_log": "",
+   "av_offset_quality_age_from_log": "",
+   "av_offset_quality_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_series_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "distroav_version_from_log": "",
+   "genlock_capability_from_log": "",
+   "genlock_lock_facet_from_log": null,
+   "genlock_wall_clock_from_log": "",
+   "obs_log_head_age_s_from_log[0.0]": "71107",
+   "obs_log_head_age_s_from_log[43200.0]": "27907",
+   "obs_log_head_age_s_from_log[86399.5]": "71106",
+   "obs_version_from_log": "",
+   "output_fps_from_log": "",
+   "program_render_lagged_from_log": [
+    "",
+    ""
+   ],
+   "relock_bursts_from_log": [
+    "",
+    ""
+   ],
+   "text_sha256": "a42f04f5dd6b98b4d4b80edf38408ca21935b41d51a266dd0cd6ea582b8f96de",
+   "timestamped_tail_lines": [
+    249,
+    1140.5750000000007,
+    "21d7839ab77c5d21b7bba9d727ad712b5e176592bd99465e25534d745d14cc64"
+   ],
+   "vban_pacer_loss_from_log": [
+    "0",
+    "",
+    "stream=cg",
+    "0"
+   ],
+   "vban_pacer_loss_from_log[tail]": [
+    "0",
+    "",
+    "stream=cg",
+    "0"
+   ]
+  },
+  "bounded:resolume-onset-0540-0630.txt.gz": {
+   "audio_mixer_from_log": [
+    "2813",
+    "406",
+    "60002",
+    "21.3",
+    "40"
+   ],
+   "audio_mixer_from_log[tail]": [
+    "2813",
+    "406",
+    "60002",
+    "21.3",
+    "40"
+   ],
+   "audio_ref_band_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_ref_band_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_telemetry_from_log": [
+    "",
+    "",
+    ""
+   ],
+   "audio_ts_lag_ms_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_dock_live_age_from_log": "",
+   "av_offset_quality_age_from_log": "",
+   "av_offset_quality_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_series_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "distroav_version_from_log": "",
+   "genlock_capability_from_log": "",
+   "genlock_lock_facet_from_log": null,
+   "genlock_wall_clock_from_log": "",
+   "obs_log_head_age_s_from_log[0.0]": "63004",
+   "obs_log_head_age_s_from_log[43200.0]": "19804",
+   "obs_log_head_age_s_from_log[86399.5]": "63004",
+   "obs_version_from_log": "",
+   "output_fps_from_log": "",
+   "program_render_lagged_from_log": [
+    "",
+    ""
+   ],
+   "relock_bursts_from_log": [
+    "",
+    ""
+   ],
+   "text_sha256": "40000ea9143649a3517c1e20c2fbe33a454d69085492c5dc8c43ca03b47131ac",
+   "timestamped_tail_lines": [
+    238,
+    1090.4599999999991,
+    "bf8334f987797ecaa3b146f10c12078195ab74a6e4841bfe2c4929bb0fe404eb"
+   ],
+   "vban_pacer_loss_from_log": [
+    "1029",
+    "",
+    "stream=cg",
+    "0"
+   ],
+   "vban_pacer_loss_from_log[tail]": [
+    "1029",
+    "",
+    "stream=cg",
+    "0"
+   ]
+  },
+  "concat": {
+   "audio_mixer_from_log": [
+    "2810",
+    "1",
+    "60000",
+    "21.3",
+    "661"
+   ],
+   "audio_mixer_from_log[tail]": [
+    "2810",
+    "1",
+    "60000",
+    "21.3",
+    "661"
+   ],
+   "audio_ref_band_from_log": [
+    "mbc",
+    "107",
+    "180",
+    "107",
+    "27",
+    "59"
+   ],
+   "audio_ref_band_from_log[ASIO]": [
+    "ASIO Input Capture",
+    "107",
+    "4017",
+    "4001",
+    "100",
+    "21"
+   ],
+   "audio_telemetry_from_log": [
+    "107",
+    "mbc",
+    "0"
+   ],
+   "audio_ts_lag_ms_from_log": [
+    "107",
+    "mbc"
+   ],
+   "av_offset_dock_live_age_from_log": "46",
+   "av_offset_quality_age_from_log": "45",
+   "av_offset_quality_from_log": [
+    "11.0",
+    "31"
+   ],
+   "av_offset_series_from_log": [
+    "-52.0",
+    "-39.5",
+    "1024",
+    "0",
+    "51",
+    "10",
+    "30"
+   ],
+   "buffered_ms_series_from_log": [
+    "0.0",
+    "46",
+    "10",
+    "0"
+   ],
+   "buffered_ms_series_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "distroav_version_from_log": "6.2.1",
+   "genlock_capability_from_log": "23:40:00.500: genlock: wall-clock-slaved render tick ENABLED\n23:40:00.501: genlock: sub-frame jitter reserve engaged\n23:40:00.502: genlock: timestamp-aligned release armed",
+   "genlock_lock_facet_from_log": {
+    "audio_unexpected_inputs": [
+     {
+      "name": "CAM1 (usb)"
+     }
+    ],
+    "clock": {
+     "state": "locked"
+    },
+    "inputs": {
+     "NDI cam2": {
+      "connected": false,
+      "depth": 0,
+      "idle": false,
+      "late_holds": 0,
+      "latency_ms": 3,
+      "locked": false,
+      "relocks": 0,
+      "underruns": 0
+     },
+     "SongPlayer": {
+      "connected": true,
+      "depth": null,
+      "idle": true,
+      "late_holds": null,
+      "latency_ms": null,
+      "locked": true,
+      "relocks": null,
+      "underruns": null
+     },
+     "cg": {
+      "connected": true,
+      "depth": 2,
+      "idle": false,
+      "late_holds": 1,
+      "latency_ms": 3,
+      "locked": true,
+      "relocks": 25,
+      "underruns": 543
+     }
+    },
+    "latency_ms": 3,
+    "media_clock": {
+     "discipline": "active",
+     "drift_us": 8100,
+     "ready": true,
+     "state": "drift",
+     "window_s": 600
+    },
+    "n_absent": 1,
+    "n_idle": 1,
+    "n_inputs": 4,
+    "n_locked": 3,
+    "output": {
+     "present": false,
+     "stamping_wallclock": false
+    },
+    "qpc_drift_ms": 67,
+    "qpc_drift_ppm": 13.5,
+    "qpc_expected_ppm": 13.0,
+    "qpc_step": false,
+    "reason": "recent_event",
+    "recent_event": true,
+    "recent_event_inputs": [
+     {
+      "events": 25,
+      "name": "cg"
+     }
+    ],
+    "source": "log",
+    "state": "DEGRADED"
+   },
+   "genlock_wall_clock_from_log": "1",
+   "obs_log_head_age_s_from_log[0.0]": "84899",
+   "obs_log_head_age_s_from_log[43200.0]": "41699",
+   "obs_log_head_age_s_from_log[86399.5]": "84899",
+   "obs_version_from_log": "32.1.2",
+   "output_fps_from_log": "60",
+   "program_render_lagged_from_log": [
+    "61",
+    "1101"
+   ],
+   "relock_bursts_from_log": [
+    "1",
+    "791"
+   ],
+   "text_sha256": "7c86787278a325384ef8ec64ae15a09c6405753af32a505f5aae899a9345694d",
+   "timestamped_tail_lines": [
+    1371,
+    69692.79600000037,
+    "4591789f72682a92405edc34c7e3263fb57ace26826dfdd1fc5130e06485bfe9"
+   ],
+   "vban_pacer_loss_from_log": [
+    "1",
+    "21.3",
+    "10.77.9.120:6980/foh",
+    "104"
+   ],
+   "vban_pacer_loss_from_log[tail]": [
+    "1",
+    "21.3",
+    "10.77.9.120:6980/foh",
+    "104"
+   ]
+  },
+  "qr-align-strih-1363366080.log": {
+   "audio_mixer_from_log": [
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_mixer_from_log[tail]": [
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_ref_band_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_ref_band_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_telemetry_from_log": [
+    "",
+    "",
+    ""
+   ],
+   "audio_ts_lag_ms_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_dock_live_age_from_log": "",
+   "av_offset_quality_age_from_log": "",
+   "av_offset_quality_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_series_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "distroav_version_from_log": "",
+   "genlock_capability_from_log": "",
+   "genlock_lock_facet_from_log": null,
+   "genlock_wall_clock_from_log": "",
+   "obs_log_head_age_s_from_log[0.0]": "67380",
+   "obs_log_head_age_s_from_log[43200.0]": "24180",
+   "obs_log_head_age_s_from_log[86399.5]": "67379",
+   "obs_version_from_log": "",
+   "output_fps_from_log": "",
+   "program_render_lagged_from_log": [
+    "0",
+    "0"
+   ],
+   "relock_bursts_from_log": [
+    "",
+    ""
+   ],
+   "text_sha256": "9397e45712fb1abdcadea5dd7989a5d6006584ef40d04798508d5a6ec76ecc00",
+   "timestamped_tail_lines": [
+    112,
+    14.531000000002678,
+    "22990c4231b1ad755190baf15453551ad42bd520cf41b1baea82dc31430ba7d2"
+   ],
+   "vban_pacer_loss_from_log": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "vban_pacer_loss_from_log[tail]": [
+    "",
+    "",
+    "",
+    ""
+   ]
+  },
+  "qr-align-strih-659887078.log": {
+   "audio_mixer_from_log": [
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_mixer_from_log[tail]": [
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_ref_band_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_ref_band_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_telemetry_from_log": [
+    "",
+    "",
+    ""
+   ],
+   "audio_ts_lag_ms_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_dock_live_age_from_log": "",
+   "av_offset_quality_age_from_log": "",
+   "av_offset_quality_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_series_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "distroav_version_from_log": "",
+   "genlock_capability_from_log": "",
+   "genlock_lock_facet_from_log": null,
+   "genlock_wall_clock_from_log": "",
+   "obs_log_head_age_s_from_log[0.0]": "40872",
+   "obs_log_head_age_s_from_log[43200.0]": "84072",
+   "obs_log_head_age_s_from_log[86399.5]": "40871",
+   "obs_version_from_log": "",
+   "output_fps_from_log": "",
+   "program_render_lagged_from_log": [
+    "0",
+    "4"
+   ],
+   "relock_bursts_from_log": [
+    "",
+    ""
+   ],
+   "text_sha256": "8bbeebba4d506c1a2a6146a3fb76fcc3415e988aea94c7aa0bcdbe235e96fce9",
+   "timestamped_tail_lines": [
+    109,
+    17.762000000002445,
+    "ff15a42356c1c8adba8338af0a82bea37bdca4fafa1dcc7ea37d70724dd421cf"
+   ],
+   "vban_pacer_loss_from_log": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "vban_pacer_loss_from_log[tail]": [
+    "",
+    "",
+    "",
+    ""
+   ]
+  },
+  "resolume-clean-2000-2045.txt.gz": {
+   "audio_mixer_from_log": [
+    "2813",
+    "1",
+    "60006",
+    "21.3",
+    "44"
+   ],
+   "audio_mixer_from_log[tail]": [
+    "2813",
+    "1",
+    "60006",
+    "21.3",
+    "44"
+   ],
+   "audio_ref_band_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_ref_band_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_telemetry_from_log": [
+    "",
+    "",
+    ""
+   ],
+   "audio_ts_lag_ms_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_dock_live_age_from_log": "",
+   "av_offset_quality_age_from_log": "",
+   "av_offset_quality_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_series_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "distroav_version_from_log": "",
+   "genlock_capability_from_log": "",
+   "genlock_lock_facet_from_log": null,
+   "genlock_wall_clock_from_log": "",
+   "obs_log_head_age_s_from_log[0.0]": "11705",
+   "obs_log_head_age_s_from_log[43200.0]": "54905",
+   "obs_log_head_age_s_from_log[86399.5]": "11705",
+   "obs_version_from_log": "",
+   "output_fps_from_log": "",
+   "program_render_lagged_from_log": [
+    "",
+    ""
+   ],
+   "relock_bursts_from_log": [
+    "",
+    ""
+   ],
+   "text_sha256": "29784d9c403077e09b6a521199ad8a217614829bdaad81d750ac769b99824f3f",
+   "timestamped_tail_lines": [
+    585,
+    2690.846000000005,
+    "701e0fc721f7b16481a8d3bf5bf125256ec1d38c933d2ad2dbc7e4bcd53418a3"
+   ],
+   "vban_pacer_loss_from_log": [
+    "0",
+    "",
+    "stream=cg",
+    "0"
+   ],
+   "vban_pacer_loss_from_log[tail]": [
+    "0",
+    "",
+    "stream=cg",
+    "0"
+   ]
+  },
+  "resolume-control-0300-0415.txt.gz": {
+   "audio_mixer_from_log": [
+    "2813",
+    "0",
+    "60005",
+    "21.3",
+    "39"
+   ],
+   "audio_mixer_from_log[tail]": [
+    "2813",
+    "0",
+    "60005",
+    "21.3",
+    "39"
+   ],
+   "audio_ref_band_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_ref_band_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_telemetry_from_log": [
+    "",
+    "",
+    ""
+   ],
+   "audio_ts_lag_ms_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_dock_live_age_from_log": "",
+   "av_offset_quality_age_from_log": "",
+   "av_offset_quality_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_series_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "distroav_version_from_log": "",
+   "genlock_capability_from_log": "",
+   "genlock_lock_facet_from_log": null,
+   "genlock_wall_clock_from_log": "",
+   "obs_log_head_age_s_from_log[0.0]": "71107",
+   "obs_log_head_age_s_from_log[43200.0]": "27907",
+   "obs_log_head_age_s_from_log[86399.5]": "71106",
+   "obs_version_from_log": "",
+   "output_fps_from_log": "",
+   "program_render_lagged_from_log": [
+    "",
+    ""
+   ],
+   "relock_bursts_from_log": [
+    "",
+    ""
+   ],
+   "text_sha256": "ffbe6e060cf2a8d6bd9b4064d4dfc6656e74c375afbb904758dd7a1810ee9c98",
+   "timestamped_tail_lines": [
+    975,
+    4491.639000000001,
+    "2a8aa76caf3ff68ef9bbf85c46e2a1c1570c4953a18765f45655f376e2f2dde8"
+   ],
+   "vban_pacer_loss_from_log": [
+    "0",
+    "",
+    "stream=cg",
+    "0"
+   ],
+   "vban_pacer_loss_from_log[tail]": [
+    "0",
+    "",
+    "stream=cg",
+    "0"
+   ]
+  },
+  "resolume-onset-0540-0630.txt.gz": {
+   "audio_mixer_from_log": [
+    "2813",
+    "406",
+    "60002",
+    "21.3",
+    "40"
+   ],
+   "audio_mixer_from_log[tail]": [
+    "2813",
+    "406",
+    "60002",
+    "21.3",
+    "40"
+   ],
+   "audio_ref_band_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_ref_band_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_telemetry_from_log": [
+    "",
+    "",
+    ""
+   ],
+   "audio_ts_lag_ms_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_dock_live_age_from_log": "",
+   "av_offset_quality_age_from_log": "",
+   "av_offset_quality_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_series_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "distroav_version_from_log": "",
+   "genlock_capability_from_log": "",
+   "genlock_lock_facet_from_log": null,
+   "genlock_wall_clock_from_log": "",
+   "obs_log_head_age_s_from_log[0.0]": "63004",
+   "obs_log_head_age_s_from_log[43200.0]": "19804",
+   "obs_log_head_age_s_from_log[86399.5]": "63004",
+   "obs_version_from_log": "",
+   "output_fps_from_log": "",
+   "program_render_lagged_from_log": [
+    "",
+    ""
+   ],
+   "relock_bursts_from_log": [
+    "",
+    ""
+   ],
+   "text_sha256": "7b867cded140ee35a03b01fcee8b069308418e2f5cbd87823375cb857e8bde1d",
+   "timestamped_tail_lines": [
+    650,
+    2991.084999999999,
+    "9d8c1872b5f47e3b423d0e7a9960ba5288beca3e60e6667719eb5ea317dd7d84"
+   ],
+   "vban_pacer_loss_from_log": [
+    "1029",
+    "",
+    "stream=cg",
+    "0"
+   ],
+   "vban_pacer_loss_from_log[tail]": [
+    "1029",
+    "",
+    "stream=cg",
+    "0"
+   ]
+  },
+  "resolume-start-1949-1957.txt.gz": {
+   "audio_mixer_from_log": [
+    "2813",
+    "0",
+    "60016",
+    "21.3",
+    "44"
+   ],
+   "audio_mixer_from_log[tail]": [
+    "2813",
+    "0",
+    "60016",
+    "21.3",
+    "44"
+   ],
+   "audio_ref_band_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_ref_band_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_telemetry_from_log": [
+    "",
+    "",
+    ""
+   ],
+   "audio_ts_lag_ms_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_dock_live_age_from_log": "",
+   "av_offset_quality_age_from_log": "",
+   "av_offset_quality_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_series_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "distroav_version_from_log": "",
+   "genlock_capability_from_log": "",
+   "genlock_lock_facet_from_log": null,
+   "genlock_wall_clock_from_log": "",
+   "obs_log_head_age_s_from_log[0.0]": "14586",
+   "obs_log_head_age_s_from_log[43200.0]": "57786",
+   "obs_log_head_age_s_from_log[86399.5]": "14586",
+   "obs_version_from_log": "",
+   "output_fps_from_log": "",
+   "program_render_lagged_from_log": [
+    "",
+    ""
+   ],
+   "relock_bursts_from_log": [
+    "",
+    ""
+   ],
+   "text_sha256": "fa916c01a2bc21545e904fd8aaa662fa333860081595698203666e74ec08b6cb",
+   "timestamped_tail_lines": [
+    102,
+    463.6620000000112,
+    "c44a0f4a33946b40e6e9224b71e6b4b302c56594373ae8c1237ebfc369ca01cd"
+   ],
+   "vban_pacer_loss_from_log": [
+    "0",
+    "",
+    "stream=cg",
+    "0"
+   ],
+   "vban_pacer_loss_from_log[tail]": [
+    "0",
+    "",
+    "stream=cg",
+    "0"
+   ]
+  },
+  "stream-repin-window.txt": {
+   "audio_mixer_from_log": [
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_mixer_from_log[tail]": [
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_ref_band_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_ref_band_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_telemetry_from_log": [
+    "",
+    "",
+    ""
+   ],
+   "audio_ts_lag_ms_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_dock_live_age_from_log": "",
+   "av_offset_quality_age_from_log": "",
+   "av_offset_quality_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_series_from_log": [
+    "8.0",
+    "54.0",
+    "1024",
+    "0",
+    "64",
+    "18",
+    "18"
+   ],
+   "buffered_ms_series_from_log": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "distroav_version_from_log": "",
+   "genlock_capability_from_log": "",
+   "genlock_lock_facet_from_log": null,
+   "genlock_wall_clock_from_log": "",
+   "obs_log_head_age_s_from_log[0.0]": "21000",
+   "obs_log_head_age_s_from_log[43200.0]": "64200",
+   "obs_log_head_age_s_from_log[86399.5]": "21000",
+   "obs_version_from_log": "",
+   "output_fps_from_log": "",
+   "program_render_lagged_from_log": [
+    "",
+    ""
+   ],
+   "relock_bursts_from_log": [
+    "",
+    ""
+   ],
+   "text_sha256": "3e94021f48aef7a7f20c42b43849db798ff953541c8da10230a074514b9548d6",
+   "timestamped_tail_lines": [
+    39,
+    2160.0,
+    "05fa2f4a6c7671036f0b2c674a0d8a442f1f1dd5b54c91b52835258fa7c1e818"
+   ],
+   "vban_pacer_loss_from_log": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "vban_pacer_loss_from_log[tail]": [
+    "",
+    "",
+    "",
+    ""
+   ]
+  },
+  "stream-step-constant-pin.txt": {
+   "audio_mixer_from_log": [
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_mixer_from_log[tail]": [
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_ref_band_from_log": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_ref_band_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "audio_telemetry_from_log": [
+    "",
+    "",
+    ""
+   ],
+   "audio_ts_lag_ms_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_dock_live_age_from_log": "",
+   "av_offset_quality_age_from_log": "",
+   "av_offset_quality_from_log": [
+    "",
+    ""
+   ],
+   "av_offset_series_from_log": [
+    "8.0",
+    "68.0",
+    "926",
+    "1",
+    "64",
+    "18",
+    "18"
+   ],
+   "buffered_ms_series_from_log": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "buffered_ms_series_from_log[ASIO]": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "distroav_version_from_log": "",
+   "genlock_capability_from_log": "",
+   "genlock_lock_facet_from_log": null,
+   "genlock_wall_clock_from_log": "",
+   "obs_log_head_age_s_from_log[0.0]": "21000",
+   "obs_log_head_age_s_from_log[43200.0]": "64200",
+   "obs_log_head_age_s_from_log[86399.5]": "21000",
+   "obs_version_from_log": "",
+   "output_fps_from_log": "",
+   "program_render_lagged_from_log": [
+    "",
+    ""
+   ],
+   "relock_bursts_from_log": [
+    "",
+    ""
+   ],
+   "text_sha256": "49100191b2111052f9cbf1dacddbd85226991eff89f2995a5ea4be9ca9cfa174",
+   "timestamped_tail_lines": [
+    49,
+    2160.0,
+    "fba26e426a8a32a9ab1dc2d80c176e640c57e7e9ba203d134cb77ac821200b85"
+   ],
+   "vban_pacer_loss_from_log": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "vban_pacer_loss_from_log[tail]": [
+    "",
+    "",
+    "",
+    ""
+   ]
+  }
+ },
+ "host": {
+  "ahk": [
+   "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\OBS Studio.lnk",
+   "",
+   "",
+   "",
+   "1",
+   "",
+   "",
+   "0",
+   "1",
+   "",
+   "1",
+   "0"
+  ],
+  "component_sha256": [
+   "0d8434134e4c153f2fe36c3fef62adf4e3ce150d9f3f47a582df6c988cde3efe",
+   "",
+   "",
+   "",
+   ""
+  ],
+  "distroav_dll_paths": "<TMP>/host/plugins/obs-plugins/64bit/distroav.dll",
+  "genlock_build_sha_from_file": [
+   "abc1234def",
+   "",
+   "",
+   ""
+  ],
+  "ndi_input_latency_csv": "NDI 2ME PGM=963,NDI cam1=3",
+  "ndi_input_latency_csv[none]": "",
+  "obs_installs_under": "<TMP>/host/apps/_RETIRED_1ME-obs/1ME.exe,<TMP>/host/apps/obs64.exe",
+  "obs_process_count_from_listing": [
+   "3",
+   "",
+   ""
+  ],
+  "recordings_free_line": [
+   "WARN 12.3",
+   "OK 60.0",
+   "UNKNOWN -1",
+   "UNKNOWN -1",
+   "UNKNOWN -1",
+   "UNKNOWN -1",
+   "UNKNOWN -1"
+  ],
+  "recordings_free_verdict": [
+   "UNKNOWN",
+   "WARN",
+   "OK",
+   "OK"
+  ],
+  "tasklist_mem_kb": [
+   512000,
+   45,
+   null,
+   null,
+   null,
+   1024,
+   -5
+  ],
+  "tasklist_row_is_live_obs": [
+   true,
+   false,
+   true,
+   false
+  ],
+  "vb_matrix_install_present_under": [
+   true,
+   false,
+   false
+  ],
+  "vb_matrix_process_from_listing": [
+   [
+    "VBAudioMatrix_x64",
+    "9001"
+   ],
+   null,
+   [
+    "",
+    ""
+   ],
+   [
+    "",
+    ""
+   ]
+  ],
+  "vb_matrix_running_facet": [
+   [
+    "",
+    "",
+    ""
+   ],
+   [
+    "0",
+    "",
+    ""
+   ],
+   [
+    "1",
+    "VBAudioMatrix_x64",
+    "9001"
+   ],
+   [
+    "",
+    "",
+    ""
+   ],
+   [
+    "",
+    "",
+    ""
+   ],
+   [
+    "",
+    "",
+    ""
+   ]
+  ]
+ },
+ "public_names": [
+  "AUDIO_REF_BAND_DEFAULT_SRC",
+  "AUDIO_REF_BAND_DUTY_MARGIN_MS",
+  "AUDIO_REF_BAND_WINDOW_CAP",
+  "AUDIO_TS_LAG_STALE_AFTER_S",
+  "AV_OFFSET_BASELINE_WINDOW_S",
+  "AV_OFFSET_RECENT_WINDOW_S",
+  "BUFFERED_MS_DEFAULT_SRC",
+  "DISTROAV_SCAN_ROOTS",
+  "LOG_BOUNDED_READ_SEPARATOR",
+  "LOG_HEAD_BYTES",
+  "LOG_HEAD_CLOCK_SLACK_S",
+  "LOG_TAIL_BYTES",
+  "OBS_LIVE_MIN_MEM_KB",
+  "OBS_PROCESS_NAME_RE",
+  "RELOCK_BURSTS_MIN_DEFAULT",
+  "VBAN_BASELINE_S",
+  "VBAN_LEGACY_LOSS_EVENTS",
+  "VBAN_LOSS_EVENTS",
+  "VBAN_LOSS_MS",
+  "VBAN_LOSS_WINDOW_S",
+  "VBAN_MULTI_SENDER_GAP_S",
+  "VBAN_PREDECESSOR_SCAN",
+  "VB_MATRIX_EXE_RE",
+  "VB_MATRIX_PROCESS_NAME_RE",
+  "ahk_app1_run",
+  "ahk_app1_shortcut_path",
+  "ahk_dead_config_present",
+  "audio_mixer_from_log",
+  "audio_ref_band_from_log",
+  "audio_telemetry_from_log",
+  "audio_ts_lag_ms_from_log",
+  "av_offset_dock_live_age_from_log",
+  "av_offset_quality_age_from_log",
+  "av_offset_quality_from_log",
+  "av_offset_series_from_log",
+  "buffered_ms_series_from_log",
+  "build_bundle_state",
+  "component_sha256",
+  "distroav_dll_paths",
+  "distroav_version_from_log",
+  "genlock_build_sha_from_file",
+  "genlock_capability_from_log",
+  "genlock_lock_facet_from_log",
+  "genlock_wall_clock_from_log",
+  "local_seconds_of_day",
+  "ndi_input_latency_csv",
+  "obs_installs_under",
+  "obs_log_head_age_s_from_log",
+  "obs_process_count_from_listing",
+  "obs_version_from_log",
+  "output_fps_from_log",
+  "program_render_lagged_from_log",
+  "read_bounded_log_text",
+  "record_dir_stats",
+  "recordings_free_line",
+  "recordings_free_verdict",
+  "relock_bursts_from_log",
+  "tasklist_mem_kb",
+  "tasklist_row_is_live_obs",
+  "timestamped_tail_lines",
+  "vb_matrix_install_present_under",
+  "vb_matrix_process_from_listing",
+  "vb_matrix_running_facet",
+  "vban_pacer_loss_from_log"
+ ],
+ "server": {
+  "all_families.txt|windows=False": "{\"obs_version\": \"32.1.2\", \"distroav_version\": \"6.2.1\", \"output_fps\": \"60\", \"genlock_wall_clock\": \"1\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"genlock_capability\": \"23:40:00.500: genlock: wall-clock-slaved render tick ENABLED\\n23:40:00.501: genlock: sub-frame jitter reserve engaged\\n23:40:00.502: genlock: timestamp-aligned release armed\", \"genlock_build_sha\": \"abc1234def\", \"audio_ts_lag_ms\": \"107\", \"audio_ts_lag_src\": \"mbc\", \"audio_ts_lag_age_s\": \"0\", \"audio_ref_lag_src\": \"mbc\", \"audio_ref_lag_high_ms\": \"180\", \"audio_ref_lag_low_ms\": \"107\", \"audio_ref_lag_duty_pct\": \"20\", \"audio_ref_lag_n\": \"45\", \"av_offset_recent_med_ms\": \"-52.0\", \"av_offset_base_med_ms\": \"-39.5\", \"av_offset_pin\": \"1024\", \"av_offset_pin_stable\": \"0\", \"av_offset_age_s\": \"51\", \"av_offset_n_recent\": \"10\", \"av_offset_n_base\": \"30\", \"av_offset_dock_live_age_s\": \"46\", \"av_offset_recent_mad_ms\": \"11.0\", \"av_offset_recent_matched_min\": \"31\", \"av_offset_quality_age_s\": \"45\", \"buffered_ms_slope_ms_per_min\": \"0.0\", \"buffered_ms_max_step_ms\": \"46\", \"buffered_ms_n\": \"10\", \"buffered_ms_age_s\": \"0\", \"program_render_lagged\": \"61\", \"program_render_lagged_age_s\": \"1101\", \"relock_bursts\": \"1\", \"relock_bursts_age_s\": \"791\", \"audio_mixer_ticks\": \"2810\", \"audio_mixer_ticks_over\": \"1\", \"audio_mixer_window_ms\": \"60000\", \"audio_mixer_tick_ms\": \"21.3\", \"audio_mixer_age_s\": \"661\", \"vban_pacer_loss_events\": \"1\", \"vban_pacer_loss_ms\": \"21.3\", \"vban_pacer_loss_dest\": \"10.77.9.120:6980/foh\", \"vban_pacer_age_s\": \"104\", \"obs_log_head_age_s\": \"41699\", \"genlock_lock\": {\"state\": \"DEGRADED\", \"reason\": \"recent_event\", \"n_inputs\": 4, \"n_locked\": 3, \"n_absent\": 1, \"n_idle\": 1, \"latency_ms\": 3, \"recent_event\": true, \"qpc_drift_ms\": 67, \"qpc_drift_ppm\": 13.5, \"qpc_expected_ppm\": 13.0, \"qpc_step\": false, \"clock\": {\"state\": \"locked\"}, \"output\": {\"present\": false, \"stamping_wallclock\": false}, \"inputs\": {\"cg\": {\"locked\": true, \"connected\": true, \"idle\": false, \"latency_ms\": 3, \"underruns\": 543, \"relocks\": 25, \"late_holds\": 1, \"depth\": 2}, \"NDI cam2\": {\"locked\": false, \"connected\": false, \"idle\": false, \"latency_ms\": 3, \"underruns\": 0, \"relocks\": 0, \"late_holds\": 0, \"depth\": 0}, \"SongPlayer\": {\"locked\": true, \"connected\": true, \"idle\": true, \"latency_ms\": null, \"underruns\": null, \"relocks\": null, \"late_holds\": null, \"depth\": null}}, \"source\": \"log\", \"recent_event_inputs\": [{\"name\": \"cg\", \"events\": 25}], \"audio_unexpected_inputs\": [{\"name\": \"CAM1 (usb)\"}], \"media_clock\": {\"state\": \"drift\", \"drift_us\": 8100, \"window_s\": 600, \"ready\": true, \"discipline\": \"active\"}}}",
+  "all_families.txt|windows=True": "{\"obs_version\": \"32.1.2\", \"distroav_version\": \"6.2.1\", \"ndi_runtime\": \"6.2.1.0\", \"output_fps\": \"60\", \"genlock_wall_clock\": \"1\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"distroav_dll_paths\": \"<TMP>/host/plugins/obs-plugins/64bit/distroav.dll\", \"genlock_capability\": \"23:40:00.500: genlock: wall-clock-slaved render tick ENABLED\\n23:40:00.501: genlock: sub-frame jitter reserve engaged\\n23:40:00.502: genlock: timestamp-aligned release armed\", \"obs_dll_sha256\": \"0d8434134e4c153f2fe36c3fef62adf4e3ce150d9f3f47a582df6c988cde3efe\", \"distroav_dll_sha256\": \"ffbe878da917f5a18717dbb88a10e5f9e58035316e1262b681247150ff171524\", \"obs_installs\": \"<TMP>/host/apps/_RETIRED_1ME-obs/1ME.exe,<TMP>/host/apps/obs64.exe\", \"port4455_owner_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"port4455_owner_version\": \"32.1.2\", \"obs_process_count\": \"1\", \"ahk_app1_shortcut_path\": \"C:\\\\ProgramData\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\OBS Studio.lnk\", \"ahk_app1_run\": \"1\", \"ahk_dead_config_present\": \"1\", \"shortcut_target_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"shortcut_workdir\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\", \"genlock_build_sha\": \"abc1234def\", \"audio_ts_lag_ms\": \"107\", \"audio_ts_lag_src\": \"mbc\", \"audio_ts_lag_age_s\": \"0\", \"audio_ref_lag_src\": \"mbc\", \"audio_ref_lag_high_ms\": \"180\", \"audio_ref_lag_low_ms\": \"107\", \"audio_ref_lag_duty_pct\": \"20\", \"audio_ref_lag_n\": \"45\", \"av_offset_recent_med_ms\": \"-52.0\", \"av_offset_base_med_ms\": \"-39.5\", \"av_offset_pin\": \"1024\", \"av_offset_pin_stable\": \"0\", \"av_offset_age_s\": \"51\", \"av_offset_n_recent\": \"10\", \"av_offset_n_base\": \"30\", \"av_offset_dock_live_age_s\": \"46\", \"av_offset_recent_mad_ms\": \"11.0\", \"av_offset_recent_matched_min\": \"31\", \"av_offset_quality_age_s\": \"45\", \"buffered_ms_slope_ms_per_min\": \"0.0\", \"buffered_ms_max_step_ms\": \"46\", \"buffered_ms_n\": \"10\", \"buffered_ms_age_s\": \"0\", \"vb_matrix_running\": \"1\", \"vb_matrix_name\": \"VBAudioMatrix_x64\", \"vb_matrix_pid\": \"9001\", \"vb_matrix_start\": \"2026-09-28T01:02:03\", \"program_render_lagged\": \"61\", \"program_render_lagged_age_s\": \"1101\", \"relock_bursts\": \"1\", \"relock_bursts_age_s\": \"791\", \"audio_mixer_ticks\": \"2810\", \"audio_mixer_ticks_over\": \"1\", \"audio_mixer_window_ms\": \"60000\", \"audio_mixer_tick_ms\": \"21.3\", \"audio_mixer_age_s\": \"661\", \"vban_pacer_loss_events\": \"1\", \"vban_pacer_loss_ms\": \"21.3\", \"vban_pacer_loss_dest\": \"10.77.9.120:6980/foh\", \"vban_pacer_age_s\": \"104\", \"obs_log_head_age_s\": \"41699\", \"genlock_lock\": {\"state\": \"DEGRADED\", \"reason\": \"recent_event\", \"n_inputs\": 4, \"n_locked\": 3, \"n_absent\": 1, \"n_idle\": 1, \"latency_ms\": 3, \"recent_event\": true, \"qpc_drift_ms\": 67, \"qpc_drift_ppm\": 13.5, \"qpc_expected_ppm\": 13.0, \"qpc_step\": false, \"clock\": {\"state\": \"locked\"}, \"output\": {\"present\": false, \"stamping_wallclock\": false}, \"inputs\": {\"cg\": {\"locked\": true, \"connected\": true, \"idle\": false, \"latency_ms\": 3, \"underruns\": 543, \"relocks\": 25, \"late_holds\": 1, \"depth\": 2}, \"NDI cam2\": {\"locked\": false, \"connected\": false, \"idle\": false, \"latency_ms\": 3, \"underruns\": 0, \"relocks\": 0, \"late_holds\": 0, \"depth\": 0}, \"SongPlayer\": {\"locked\": true, \"connected\": true, \"idle\": true, \"latency_ms\": null, \"underruns\": null, \"relocks\": null, \"late_holds\": null, \"depth\": null}}, \"source\": \"log\", \"recent_event_inputs\": [{\"name\": \"cg\", \"events\": 25}], \"audio_unexpected_inputs\": [{\"name\": \"CAM1 (usb)\"}], \"media_clock\": {\"state\": \"drift\", \"drift_us\": 8100, \"window_s\": 600, \"ready\": true, \"discipline\": \"active\"}}}",
+  "audio_ref_band_mbc_1265.txt|windows=False": "{\"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"genlock_build_sha\": \"abc1234def\", \"audio_ts_lag_ms\": \"108\", \"audio_ts_lag_src\": \"mbc\", \"audio_ts_lag_age_s\": \"0\", \"audio_ref_lag_src\": \"mbc\", \"audio_ref_lag_base_ms\": \"107\", \"audio_ref_lag_high_ms\": \"181\", \"audio_ref_lag_low_ms\": \"107\", \"audio_ref_lag_duty_pct\": \"50\", \"audio_ref_lag_n\": \"14\", \"buffered_ms_slope_ms_per_min\": \"0.0\", \"buffered_ms_max_step_ms\": \"0\", \"buffered_ms_n\": \"11\", \"buffered_ms_age_s\": \"0\", \"obs_log_head_age_s\": \"53220\"}",
+  "audio_ref_band_mbc_1265.txt|windows=True": "{\"ndi_runtime\": \"6.2.1.0\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"distroav_dll_paths\": \"<TMP>/host/plugins/obs-plugins/64bit/distroav.dll\", \"obs_dll_sha256\": \"0d8434134e4c153f2fe36c3fef62adf4e3ce150d9f3f47a582df6c988cde3efe\", \"distroav_dll_sha256\": \"ffbe878da917f5a18717dbb88a10e5f9e58035316e1262b681247150ff171524\", \"obs_installs\": \"<TMP>/host/apps/_RETIRED_1ME-obs/1ME.exe,<TMP>/host/apps/obs64.exe\", \"port4455_owner_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"port4455_owner_version\": \"32.1.2\", \"obs_process_count\": \"1\", \"ahk_app1_shortcut_path\": \"C:\\\\ProgramData\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\OBS Studio.lnk\", \"ahk_app1_run\": \"1\", \"ahk_dead_config_present\": \"1\", \"shortcut_target_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"shortcut_workdir\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\", \"genlock_build_sha\": \"abc1234def\", \"audio_ts_lag_ms\": \"108\", \"audio_ts_lag_src\": \"mbc\", \"audio_ts_lag_age_s\": \"0\", \"audio_ref_lag_src\": \"mbc\", \"audio_ref_lag_base_ms\": \"107\", \"audio_ref_lag_high_ms\": \"181\", \"audio_ref_lag_low_ms\": \"107\", \"audio_ref_lag_duty_pct\": \"50\", \"audio_ref_lag_n\": \"14\", \"buffered_ms_slope_ms_per_min\": \"0.0\", \"buffered_ms_max_step_ms\": \"0\", \"buffered_ms_n\": \"11\", \"buffered_ms_age_s\": \"0\", \"vb_matrix_running\": \"1\", \"vb_matrix_name\": \"VBAudioMatrix_x64\", \"vb_matrix_pid\": \"9001\", \"vb_matrix_start\": \"2026-09-28T01:02:03\", \"obs_log_head_age_s\": \"53220\"}",
+  "bounded:all_families.txt|windows=False": "{\"obs_version\": \"32.1.2\", \"distroav_version\": \"6.2.1\", \"output_fps\": \"60\", \"genlock_wall_clock\": \"1\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"genlock_capability\": \"23:40:00.500: genlock: wall-clock-slaved render tick ENABLED\\n23:40:00.501: genlock: sub-frame jitter reserve engaged\\n23:40:00.502: genlock: timestamp-aligned release armed\", \"genlock_build_sha\": \"abc1234def\", \"audio_ts_lag_ms\": \"107\", \"audio_ts_lag_src\": \"mbc\", \"audio_ts_lag_age_s\": \"0\", \"audio_ref_lag_src\": \"mbc\", \"audio_ref_lag_base_ms\": \"180\", \"audio_ref_lag_high_ms\": \"180\", \"audio_ref_lag_low_ms\": \"107\", \"audio_ref_lag_duty_pct\": \"18\", \"audio_ref_lag_n\": \"11\", \"av_offset_recent_med_ms\": \"-52.0\", \"av_offset_pin\": \"1024\", \"av_offset_pin_stable\": \"0\", \"av_offset_age_s\": \"51\", \"av_offset_n_recent\": \"10\", \"av_offset_n_base\": \"0\", \"av_offset_dock_live_age_s\": \"46\", \"av_offset_recent_mad_ms\": \"11.0\", \"av_offset_recent_matched_min\": \"31\", \"av_offset_quality_age_s\": \"45\", \"buffered_ms_slope_ms_per_min\": \"0.0\", \"buffered_ms_max_step_ms\": \"46\", \"buffered_ms_n\": \"10\", \"buffered_ms_age_s\": \"0\", \"program_render_lagged\": \"0\", \"program_render_lagged_age_s\": \"201\", \"vban_pacer_loss_events\": \"1\", \"vban_pacer_loss_ms\": \"21.3\", \"vban_pacer_loss_dest\": \"10.77.9.120:6980/foh\", \"vban_pacer_age_s\": \"104\", \"obs_log_head_age_s\": \"41699\", \"genlock_lock\": {\"state\": \"DEGRADED\", \"reason\": \"recent_event\", \"n_inputs\": 4, \"n_locked\": 3, \"n_absent\": 1, \"n_idle\": 1, \"latency_ms\": 3, \"recent_event\": true, \"qpc_drift_ms\": 67, \"qpc_drift_ppm\": 13.5, \"qpc_expected_ppm\": 13.0, \"qpc_step\": false, \"clock\": {\"state\": \"locked\"}, \"output\": {\"present\": false, \"stamping_wallclock\": false}, \"inputs\": {\"cg\": {\"locked\": true, \"connected\": true, \"idle\": false, \"latency_ms\": 3, \"underruns\": 543, \"relocks\": 25, \"late_holds\": 1, \"depth\": 2}, \"NDI cam2\": {\"locked\": false, \"connected\": false, \"idle\": false, \"latency_ms\": 3, \"underruns\": 0, \"relocks\": 0, \"late_holds\": 0, \"depth\": 0}, \"SongPlayer\": {\"locked\": true, \"connected\": true, \"idle\": true, \"latency_ms\": null, \"underruns\": null, \"relocks\": null, \"late_holds\": null, \"depth\": null}}, \"source\": \"log\", \"recent_event_inputs\": [{\"name\": \"cg\", \"events\": 25}], \"audio_unexpected_inputs\": [{\"name\": \"CAM1 (usb)\"}], \"media_clock\": {\"state\": \"drift\", \"drift_us\": 8100, \"window_s\": 600, \"ready\": true, \"discipline\": \"active\"}}}",
+  "bounded:all_families.txt|windows=True": "{\"obs_version\": \"32.1.2\", \"distroav_version\": \"6.2.1\", \"ndi_runtime\": \"6.2.1.0\", \"output_fps\": \"60\", \"genlock_wall_clock\": \"1\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"distroav_dll_paths\": \"<TMP>/host/plugins/obs-plugins/64bit/distroav.dll\", \"genlock_capability\": \"23:40:00.500: genlock: wall-clock-slaved render tick ENABLED\\n23:40:00.501: genlock: sub-frame jitter reserve engaged\\n23:40:00.502: genlock: timestamp-aligned release armed\", \"obs_dll_sha256\": \"0d8434134e4c153f2fe36c3fef62adf4e3ce150d9f3f47a582df6c988cde3efe\", \"distroav_dll_sha256\": \"ffbe878da917f5a18717dbb88a10e5f9e58035316e1262b681247150ff171524\", \"obs_installs\": \"<TMP>/host/apps/_RETIRED_1ME-obs/1ME.exe,<TMP>/host/apps/obs64.exe\", \"port4455_owner_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"port4455_owner_version\": \"32.1.2\", \"obs_process_count\": \"1\", \"ahk_app1_shortcut_path\": \"C:\\\\ProgramData\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\OBS Studio.lnk\", \"ahk_app1_run\": \"1\", \"ahk_dead_config_present\": \"1\", \"shortcut_target_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"shortcut_workdir\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\", \"genlock_build_sha\": \"abc1234def\", \"audio_ts_lag_ms\": \"107\", \"audio_ts_lag_src\": \"mbc\", \"audio_ts_lag_age_s\": \"0\", \"audio_ref_lag_src\": \"mbc\", \"audio_ref_lag_base_ms\": \"180\", \"audio_ref_lag_high_ms\": \"180\", \"audio_ref_lag_low_ms\": \"107\", \"audio_ref_lag_duty_pct\": \"18\", \"audio_ref_lag_n\": \"11\", \"av_offset_recent_med_ms\": \"-52.0\", \"av_offset_pin\": \"1024\", \"av_offset_pin_stable\": \"0\", \"av_offset_age_s\": \"51\", \"av_offset_n_recent\": \"10\", \"av_offset_n_base\": \"0\", \"av_offset_dock_live_age_s\": \"46\", \"av_offset_recent_mad_ms\": \"11.0\", \"av_offset_recent_matched_min\": \"31\", \"av_offset_quality_age_s\": \"45\", \"buffered_ms_slope_ms_per_min\": \"0.0\", \"buffered_ms_max_step_ms\": \"46\", \"buffered_ms_n\": \"10\", \"buffered_ms_age_s\": \"0\", \"vb_matrix_running\": \"1\", \"vb_matrix_name\": \"VBAudioMatrix_x64\", \"vb_matrix_pid\": \"9001\", \"vb_matrix_start\": \"2026-09-28T01:02:03\", \"program_render_lagged\": \"0\", \"program_render_lagged_age_s\": \"201\", \"vban_pacer_loss_events\": \"1\", \"vban_pacer_loss_ms\": \"21.3\", \"vban_pacer_loss_dest\": \"10.77.9.120:6980/foh\", \"vban_pacer_age_s\": \"104\", \"obs_log_head_age_s\": \"41699\", \"genlock_lock\": {\"state\": \"DEGRADED\", \"reason\": \"recent_event\", \"n_inputs\": 4, \"n_locked\": 3, \"n_absent\": 1, \"n_idle\": 1, \"latency_ms\": 3, \"recent_event\": true, \"qpc_drift_ms\": 67, \"qpc_drift_ppm\": 13.5, \"qpc_expected_ppm\": 13.0, \"qpc_step\": false, \"clock\": {\"state\": \"locked\"}, \"output\": {\"present\": false, \"stamping_wallclock\": false}, \"inputs\": {\"cg\": {\"locked\": true, \"connected\": true, \"idle\": false, \"latency_ms\": 3, \"underruns\": 543, \"relocks\": 25, \"late_holds\": 1, \"depth\": 2}, \"NDI cam2\": {\"locked\": false, \"connected\": false, \"idle\": false, \"latency_ms\": 3, \"underruns\": 0, \"relocks\": 0, \"late_holds\": 0, \"depth\": 0}, \"SongPlayer\": {\"locked\": true, \"connected\": true, \"idle\": true, \"latency_ms\": null, \"underruns\": null, \"relocks\": null, \"late_holds\": null, \"depth\": null}}, \"source\": \"log\", \"recent_event_inputs\": [{\"name\": \"cg\", \"events\": 25}], \"audio_unexpected_inputs\": [{\"name\": \"CAM1 (usb)\"}], \"media_clock\": {\"state\": \"drift\", \"drift_us\": 8100, \"window_s\": 600, \"ready\": true, \"discipline\": \"active\"}}}",
+  "bounded:concat|windows=False": "{\"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"genlock_build_sha\": \"abc1234def\", \"audio_ts_lag_ms\": \"107\", \"audio_ts_lag_src\": \"mbc\", \"audio_ts_lag_age_s\": \"0\", \"audio_ref_lag_src\": \"mbc\", \"audio_ref_lag_high_ms\": \"180\", \"audio_ref_lag_low_ms\": \"107\", \"audio_ref_lag_duty_pct\": \"18\", \"audio_ref_lag_n\": \"11\", \"av_offset_recent_med_ms\": \"-52.0\", \"av_offset_pin\": \"1024\", \"av_offset_pin_stable\": \"0\", \"av_offset_age_s\": \"51\", \"av_offset_n_recent\": \"10\", \"av_offset_n_base\": \"0\", \"av_offset_dock_live_age_s\": \"46\", \"av_offset_recent_mad_ms\": \"11.0\", \"av_offset_recent_matched_min\": \"31\", \"av_offset_quality_age_s\": \"45\", \"buffered_ms_slope_ms_per_min\": \"0.0\", \"buffered_ms_max_step_ms\": \"46\", \"buffered_ms_n\": \"10\", \"buffered_ms_age_s\": \"0\", \"program_render_lagged\": \"0\", \"program_render_lagged_age_s\": \"201\", \"audio_mixer_age_s\": \"646\", \"vban_pacer_loss_events\": \"1\", \"vban_pacer_loss_ms\": \"21.3\", \"vban_pacer_loss_dest\": \"10.77.9.120:6980/foh\", \"vban_pacer_age_s\": \"104\", \"obs_log_head_age_s\": \"41699\", \"genlock_lock\": {\"state\": \"DEGRADED\", \"reason\": \"recent_event\", \"n_inputs\": 4, \"n_locked\": 3, \"n_absent\": 1, \"n_idle\": 1, \"latency_ms\": 3, \"recent_event\": true, \"qpc_drift_ms\": 67, \"qpc_drift_ppm\": 13.5, \"qpc_expected_ppm\": 13.0, \"qpc_step\": false, \"clock\": {\"state\": \"locked\"}, \"output\": {\"present\": false, \"stamping_wallclock\": false}, \"inputs\": {\"cg\": {\"locked\": true, \"connected\": true, \"idle\": false, \"latency_ms\": 3, \"underruns\": 543, \"relocks\": 25, \"late_holds\": 1, \"depth\": 2}, \"NDI cam2\": {\"locked\": false, \"connected\": false, \"idle\": false, \"latency_ms\": 3, \"underruns\": 0, \"relocks\": 0, \"late_holds\": 0, \"depth\": 0}, \"SongPlayer\": {\"locked\": true, \"connected\": true, \"idle\": true, \"latency_ms\": null, \"underruns\": null, \"relocks\": null, \"late_holds\": null, \"depth\": null}}, \"source\": \"log\", \"recent_event_inputs\": [{\"name\": \"cg\", \"events\": 25}], \"audio_unexpected_inputs\": [{\"name\": \"CAM1 (usb)\"}], \"media_clock\": {\"state\": \"drift\", \"drift_us\": 8100, \"window_s\": 600, \"ready\": true, \"discipline\": \"active\"}}}",
+  "bounded:concat|windows=True": "{\"ndi_runtime\": \"6.2.1.0\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"distroav_dll_paths\": \"<TMP>/host/plugins/obs-plugins/64bit/distroav.dll\", \"obs_dll_sha256\": \"0d8434134e4c153f2fe36c3fef62adf4e3ce150d9f3f47a582df6c988cde3efe\", \"distroav_dll_sha256\": \"ffbe878da917f5a18717dbb88a10e5f9e58035316e1262b681247150ff171524\", \"obs_installs\": \"<TMP>/host/apps/_RETIRED_1ME-obs/1ME.exe,<TMP>/host/apps/obs64.exe\", \"port4455_owner_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"port4455_owner_version\": \"32.1.2\", \"obs_process_count\": \"1\", \"ahk_app1_shortcut_path\": \"C:\\\\ProgramData\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\OBS Studio.lnk\", \"ahk_app1_run\": \"1\", \"ahk_dead_config_present\": \"1\", \"shortcut_target_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"shortcut_workdir\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\", \"genlock_build_sha\": \"abc1234def\", \"audio_ts_lag_ms\": \"107\", \"audio_ts_lag_src\": \"mbc\", \"audio_ts_lag_age_s\": \"0\", \"audio_ref_lag_src\": \"mbc\", \"audio_ref_lag_high_ms\": \"180\", \"audio_ref_lag_low_ms\": \"107\", \"audio_ref_lag_duty_pct\": \"18\", \"audio_ref_lag_n\": \"11\", \"av_offset_recent_med_ms\": \"-52.0\", \"av_offset_pin\": \"1024\", \"av_offset_pin_stable\": \"0\", \"av_offset_age_s\": \"51\", \"av_offset_n_recent\": \"10\", \"av_offset_n_base\": \"0\", \"av_offset_dock_live_age_s\": \"46\", \"av_offset_recent_mad_ms\": \"11.0\", \"av_offset_recent_matched_min\": \"31\", \"av_offset_quality_age_s\": \"45\", \"buffered_ms_slope_ms_per_min\": \"0.0\", \"buffered_ms_max_step_ms\": \"46\", \"buffered_ms_n\": \"10\", \"buffered_ms_age_s\": \"0\", \"vb_matrix_running\": \"1\", \"vb_matrix_name\": \"VBAudioMatrix_x64\", \"vb_matrix_pid\": \"9001\", \"vb_matrix_start\": \"2026-09-28T01:02:03\", \"program_render_lagged\": \"0\", \"program_render_lagged_age_s\": \"201\", \"audio_mixer_age_s\": \"646\", \"vban_pacer_loss_events\": \"1\", \"vban_pacer_loss_ms\": \"21.3\", \"vban_pacer_loss_dest\": \"10.77.9.120:6980/foh\", \"vban_pacer_age_s\": \"104\", \"obs_log_head_age_s\": \"41699\", \"genlock_lock\": {\"state\": \"DEGRADED\", \"reason\": \"recent_event\", \"n_inputs\": 4, \"n_locked\": 3, \"n_absent\": 1, \"n_idle\": 1, \"latency_ms\": 3, \"recent_event\": true, \"qpc_drift_ms\": 67, \"qpc_drift_ppm\": 13.5, \"qpc_expected_ppm\": 13.0, \"qpc_step\": false, \"clock\": {\"state\": \"locked\"}, \"output\": {\"present\": false, \"stamping_wallclock\": false}, \"inputs\": {\"cg\": {\"locked\": true, \"connected\": true, \"idle\": false, \"latency_ms\": 3, \"underruns\": 543, \"relocks\": 25, \"late_holds\": 1, \"depth\": 2}, \"NDI cam2\": {\"locked\": false, \"connected\": false, \"idle\": false, \"latency_ms\": 3, \"underruns\": 0, \"relocks\": 0, \"late_holds\": 0, \"depth\": 0}, \"SongPlayer\": {\"locked\": true, \"connected\": true, \"idle\": true, \"latency_ms\": null, \"underruns\": null, \"relocks\": null, \"late_holds\": null, \"depth\": null}}, \"source\": \"log\", \"recent_event_inputs\": [{\"name\": \"cg\", \"events\": 25}], \"audio_unexpected_inputs\": [{\"name\": \"CAM1 (usb)\"}], \"media_clock\": {\"state\": \"drift\", \"drift_us\": 8100, \"window_s\": 600, \"ready\": true, \"discipline\": \"active\"}}}",
+  "bounded:resolume-clean-2000-2045.txt.gz|windows=False": "{\"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"genlock_build_sha\": \"abc1234def\", \"audio_mixer_ticks\": \"2813\", \"audio_mixer_ticks_over\": \"1\", \"audio_mixer_window_ms\": \"60006\", \"audio_mixer_tick_ms\": \"21.3\", \"audio_mixer_age_s\": \"44\", \"vban_pacer_loss_events\": \"0\", \"vban_pacer_loss_dest\": \"stream=cg\", \"vban_pacer_age_s\": \"0\", \"obs_log_head_age_s\": \"54905\"}",
+  "bounded:resolume-clean-2000-2045.txt.gz|windows=True": "{\"ndi_runtime\": \"6.2.1.0\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"distroav_dll_paths\": \"<TMP>/host/plugins/obs-plugins/64bit/distroav.dll\", \"obs_dll_sha256\": \"0d8434134e4c153f2fe36c3fef62adf4e3ce150d9f3f47a582df6c988cde3efe\", \"distroav_dll_sha256\": \"ffbe878da917f5a18717dbb88a10e5f9e58035316e1262b681247150ff171524\", \"obs_installs\": \"<TMP>/host/apps/_RETIRED_1ME-obs/1ME.exe,<TMP>/host/apps/obs64.exe\", \"port4455_owner_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"port4455_owner_version\": \"32.1.2\", \"obs_process_count\": \"1\", \"ahk_app1_shortcut_path\": \"C:\\\\ProgramData\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\OBS Studio.lnk\", \"ahk_app1_run\": \"1\", \"ahk_dead_config_present\": \"1\", \"shortcut_target_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"shortcut_workdir\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\", \"genlock_build_sha\": \"abc1234def\", \"vb_matrix_running\": \"1\", \"vb_matrix_name\": \"VBAudioMatrix_x64\", \"vb_matrix_pid\": \"9001\", \"vb_matrix_start\": \"2026-09-28T01:02:03\", \"audio_mixer_ticks\": \"2813\", \"audio_mixer_ticks_over\": \"1\", \"audio_mixer_window_ms\": \"60006\", \"audio_mixer_tick_ms\": \"21.3\", \"audio_mixer_age_s\": \"44\", \"vban_pacer_loss_events\": \"0\", \"vban_pacer_loss_dest\": \"stream=cg\", \"vban_pacer_age_s\": \"0\", \"obs_log_head_age_s\": \"54905\"}",
+  "bounded:resolume-control-0300-0415.txt.gz|windows=False": "{\"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"genlock_build_sha\": \"abc1234def\", \"audio_mixer_ticks\": \"2813\", \"audio_mixer_ticks_over\": \"0\", \"audio_mixer_window_ms\": \"60005\", \"audio_mixer_tick_ms\": \"21.3\", \"audio_mixer_age_s\": \"39\", \"vban_pacer_loss_events\": \"0\", \"vban_pacer_loss_dest\": \"stream=cg\", \"vban_pacer_age_s\": \"0\", \"obs_log_head_age_s\": \"27907\"}",
+  "bounded:resolume-control-0300-0415.txt.gz|windows=True": "{\"ndi_runtime\": \"6.2.1.0\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"distroav_dll_paths\": \"<TMP>/host/plugins/obs-plugins/64bit/distroav.dll\", \"obs_dll_sha256\": \"0d8434134e4c153f2fe36c3fef62adf4e3ce150d9f3f47a582df6c988cde3efe\", \"distroav_dll_sha256\": \"ffbe878da917f5a18717dbb88a10e5f9e58035316e1262b681247150ff171524\", \"obs_installs\": \"<TMP>/host/apps/_RETIRED_1ME-obs/1ME.exe,<TMP>/host/apps/obs64.exe\", \"port4455_owner_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"port4455_owner_version\": \"32.1.2\", \"obs_process_count\": \"1\", \"ahk_app1_shortcut_path\": \"C:\\\\ProgramData\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\OBS Studio.lnk\", \"ahk_app1_run\": \"1\", \"ahk_dead_config_present\": \"1\", \"shortcut_target_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"shortcut_workdir\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\", \"genlock_build_sha\": \"abc1234def\", \"vb_matrix_running\": \"1\", \"vb_matrix_name\": \"VBAudioMatrix_x64\", \"vb_matrix_pid\": \"9001\", \"vb_matrix_start\": \"2026-09-28T01:02:03\", \"audio_mixer_ticks\": \"2813\", \"audio_mixer_ticks_over\": \"0\", \"audio_mixer_window_ms\": \"60005\", \"audio_mixer_tick_ms\": \"21.3\", \"audio_mixer_age_s\": \"39\", \"vban_pacer_loss_events\": \"0\", \"vban_pacer_loss_dest\": \"stream=cg\", \"vban_pacer_age_s\": \"0\", \"obs_log_head_age_s\": \"27907\"}",
+  "bounded:resolume-onset-0540-0630.txt.gz|windows=False": "{\"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"genlock_build_sha\": \"abc1234def\", \"audio_mixer_ticks\": \"2813\", \"audio_mixer_ticks_over\": \"406\", \"audio_mixer_window_ms\": \"60002\", \"audio_mixer_tick_ms\": \"21.3\", \"audio_mixer_age_s\": \"40\", \"vban_pacer_loss_events\": \"1029\", \"vban_pacer_loss_dest\": \"stream=cg\", \"vban_pacer_age_s\": \"0\", \"obs_log_head_age_s\": \"19804\"}",
+  "bounded:resolume-onset-0540-0630.txt.gz|windows=True": "{\"ndi_runtime\": \"6.2.1.0\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"distroav_dll_paths\": \"<TMP>/host/plugins/obs-plugins/64bit/distroav.dll\", \"obs_dll_sha256\": \"0d8434134e4c153f2fe36c3fef62adf4e3ce150d9f3f47a582df6c988cde3efe\", \"distroav_dll_sha256\": \"ffbe878da917f5a18717dbb88a10e5f9e58035316e1262b681247150ff171524\", \"obs_installs\": \"<TMP>/host/apps/_RETIRED_1ME-obs/1ME.exe,<TMP>/host/apps/obs64.exe\", \"port4455_owner_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"port4455_owner_version\": \"32.1.2\", \"obs_process_count\": \"1\", \"ahk_app1_shortcut_path\": \"C:\\\\ProgramData\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\OBS Studio.lnk\", \"ahk_app1_run\": \"1\", \"ahk_dead_config_present\": \"1\", \"shortcut_target_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"shortcut_workdir\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\", \"genlock_build_sha\": \"abc1234def\", \"vb_matrix_running\": \"1\", \"vb_matrix_name\": \"VBAudioMatrix_x64\", \"vb_matrix_pid\": \"9001\", \"vb_matrix_start\": \"2026-09-28T01:02:03\", \"audio_mixer_ticks\": \"2813\", \"audio_mixer_ticks_over\": \"406\", \"audio_mixer_window_ms\": \"60002\", \"audio_mixer_tick_ms\": \"21.3\", \"audio_mixer_age_s\": \"40\", \"vban_pacer_loss_events\": \"1029\", \"vban_pacer_loss_dest\": \"stream=cg\", \"vban_pacer_age_s\": \"0\", \"obs_log_head_age_s\": \"19804\"}",
+  "concat|windows=False": "{\"obs_version\": \"32.1.2\", \"distroav_version\": \"6.2.1\", \"output_fps\": \"60\", \"genlock_wall_clock\": \"1\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"genlock_capability\": \"23:40:00.500: genlock: wall-clock-slaved render tick ENABLED\\n23:40:00.501: genlock: sub-frame jitter reserve engaged\\n23:40:00.502: genlock: timestamp-aligned release armed\", \"genlock_build_sha\": \"abc1234def\", \"audio_ts_lag_ms\": \"107\", \"audio_ts_lag_src\": \"mbc\", \"audio_ts_lag_age_s\": \"0\", \"audio_ref_lag_src\": \"mbc\", \"audio_ref_lag_base_ms\": \"107\", \"audio_ref_lag_high_ms\": \"180\", \"audio_ref_lag_low_ms\": \"107\", \"audio_ref_lag_duty_pct\": \"27\", \"audio_ref_lag_n\": \"59\", \"av_offset_recent_med_ms\": \"-52.0\", \"av_offset_base_med_ms\": \"-39.5\", \"av_offset_pin\": \"1024\", \"av_offset_pin_stable\": \"0\", \"av_offset_age_s\": \"51\", \"av_offset_n_recent\": \"10\", \"av_offset_n_base\": \"30\", \"av_offset_dock_live_age_s\": \"46\", \"av_offset_recent_mad_ms\": \"11.0\", \"av_offset_recent_matched_min\": \"31\", \"av_offset_quality_age_s\": \"45\", \"buffered_ms_slope_ms_per_min\": \"0.0\", \"buffered_ms_max_step_ms\": \"46\", \"buffered_ms_n\": \"10\", \"buffered_ms_age_s\": \"0\", \"program_render_lagged\": \"61\", \"program_render_lagged_age_s\": \"1101\", \"relock_bursts\": \"1\", \"relock_bursts_age_s\": \"791\", \"audio_mixer_ticks\": \"2810\", \"audio_mixer_ticks_over\": \"1\", \"audio_mixer_window_ms\": \"60000\", \"audio_mixer_tick_ms\": \"21.3\", \"audio_mixer_age_s\": \"661\", \"vban_pacer_loss_events\": \"1\", \"vban_pacer_loss_ms\": \"21.3\", \"vban_pacer_loss_dest\": \"10.77.9.120:6980/foh\", \"vban_pacer_age_s\": \"104\", \"obs_log_head_age_s\": \"41699\", \"genlock_lock\": {\"state\": \"DEGRADED\", \"reason\": \"recent_event\", \"n_inputs\": 4, \"n_locked\": 3, \"n_absent\": 1, \"n_idle\": 1, \"latency_ms\": 3, \"recent_event\": true, \"qpc_drift_ms\": 67, \"qpc_drift_ppm\": 13.5, \"qpc_expected_ppm\": 13.0, \"qpc_step\": false, \"clock\": {\"state\": \"locked\"}, \"output\": {\"present\": false, \"stamping_wallclock\": false}, \"inputs\": {\"cg\": {\"locked\": true, \"connected\": true, \"idle\": false, \"latency_ms\": 3, \"underruns\": 543, \"relocks\": 25, \"late_holds\": 1, \"depth\": 2}, \"NDI cam2\": {\"locked\": false, \"connected\": false, \"idle\": false, \"latency_ms\": 3, \"underruns\": 0, \"relocks\": 0, \"late_holds\": 0, \"depth\": 0}, \"SongPlayer\": {\"locked\": true, \"connected\": true, \"idle\": true, \"latency_ms\": null, \"underruns\": null, \"relocks\": null, \"late_holds\": null, \"depth\": null}}, \"source\": \"log\", \"recent_event_inputs\": [{\"name\": \"cg\", \"events\": 25}], \"audio_unexpected_inputs\": [{\"name\": \"CAM1 (usb)\"}], \"media_clock\": {\"state\": \"drift\", \"drift_us\": 8100, \"window_s\": 600, \"ready\": true, \"discipline\": \"active\"}}}",
+  "concat|windows=True": "{\"obs_version\": \"32.1.2\", \"distroav_version\": \"6.2.1\", \"ndi_runtime\": \"6.2.1.0\", \"output_fps\": \"60\", \"genlock_wall_clock\": \"1\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"distroav_dll_paths\": \"<TMP>/host/plugins/obs-plugins/64bit/distroav.dll\", \"genlock_capability\": \"23:40:00.500: genlock: wall-clock-slaved render tick ENABLED\\n23:40:00.501: genlock: sub-frame jitter reserve engaged\\n23:40:00.502: genlock: timestamp-aligned release armed\", \"obs_dll_sha256\": \"0d8434134e4c153f2fe36c3fef62adf4e3ce150d9f3f47a582df6c988cde3efe\", \"distroav_dll_sha256\": \"ffbe878da917f5a18717dbb88a10e5f9e58035316e1262b681247150ff171524\", \"obs_installs\": \"<TMP>/host/apps/_RETIRED_1ME-obs/1ME.exe,<TMP>/host/apps/obs64.exe\", \"port4455_owner_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"port4455_owner_version\": \"32.1.2\", \"obs_process_count\": \"1\", \"ahk_app1_shortcut_path\": \"C:\\\\ProgramData\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\OBS Studio.lnk\", \"ahk_app1_run\": \"1\", \"ahk_dead_config_present\": \"1\", \"shortcut_target_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"shortcut_workdir\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\", \"genlock_build_sha\": \"abc1234def\", \"audio_ts_lag_ms\": \"107\", \"audio_ts_lag_src\": \"mbc\", \"audio_ts_lag_age_s\": \"0\", \"audio_ref_lag_src\": \"mbc\", \"audio_ref_lag_base_ms\": \"107\", \"audio_ref_lag_high_ms\": \"180\", \"audio_ref_lag_low_ms\": \"107\", \"audio_ref_lag_duty_pct\": \"27\", \"audio_ref_lag_n\": \"59\", \"av_offset_recent_med_ms\": \"-52.0\", \"av_offset_base_med_ms\": \"-39.5\", \"av_offset_pin\": \"1024\", \"av_offset_pin_stable\": \"0\", \"av_offset_age_s\": \"51\", \"av_offset_n_recent\": \"10\", \"av_offset_n_base\": \"30\", \"av_offset_dock_live_age_s\": \"46\", \"av_offset_recent_mad_ms\": \"11.0\", \"av_offset_recent_matched_min\": \"31\", \"av_offset_quality_age_s\": \"45\", \"buffered_ms_slope_ms_per_min\": \"0.0\", \"buffered_ms_max_step_ms\": \"46\", \"buffered_ms_n\": \"10\", \"buffered_ms_age_s\": \"0\", \"vb_matrix_running\": \"1\", \"vb_matrix_name\": \"VBAudioMatrix_x64\", \"vb_matrix_pid\": \"9001\", \"vb_matrix_start\": \"2026-09-28T01:02:03\", \"program_render_lagged\": \"61\", \"program_render_lagged_age_s\": \"1101\", \"relock_bursts\": \"1\", \"relock_bursts_age_s\": \"791\", \"audio_mixer_ticks\": \"2810\", \"audio_mixer_ticks_over\": \"1\", \"audio_mixer_window_ms\": \"60000\", \"audio_mixer_tick_ms\": \"21.3\", \"audio_mixer_age_s\": \"661\", \"vban_pacer_loss_events\": \"1\", \"vban_pacer_loss_ms\": \"21.3\", \"vban_pacer_loss_dest\": \"10.77.9.120:6980/foh\", \"vban_pacer_age_s\": \"104\", \"obs_log_head_age_s\": \"41699\", \"genlock_lock\": {\"state\": \"DEGRADED\", \"reason\": \"recent_event\", \"n_inputs\": 4, \"n_locked\": 3, \"n_absent\": 1, \"n_idle\": 1, \"latency_ms\": 3, \"recent_event\": true, \"qpc_drift_ms\": 67, \"qpc_drift_ppm\": 13.5, \"qpc_expected_ppm\": 13.0, \"qpc_step\": false, \"clock\": {\"state\": \"locked\"}, \"output\": {\"present\": false, \"stamping_wallclock\": false}, \"inputs\": {\"cg\": {\"locked\": true, \"connected\": true, \"idle\": false, \"latency_ms\": 3, \"underruns\": 543, \"relocks\": 25, \"late_holds\": 1, \"depth\": 2}, \"NDI cam2\": {\"locked\": false, \"connected\": false, \"idle\": false, \"latency_ms\": 3, \"underruns\": 0, \"relocks\": 0, \"late_holds\": 0, \"depth\": 0}, \"SongPlayer\": {\"locked\": true, \"connected\": true, \"idle\": true, \"latency_ms\": null, \"underruns\": null, \"relocks\": null, \"late_holds\": null, \"depth\": null}}, \"source\": \"log\", \"recent_event_inputs\": [{\"name\": \"cg\", \"events\": 25}], \"audio_unexpected_inputs\": [{\"name\": \"CAM1 (usb)\"}], \"media_clock\": {\"state\": \"drift\", \"drift_us\": 8100, \"window_s\": 600, \"ready\": true, \"discipline\": \"active\"}}}",
+  "qr-align-strih-1363366080.log|windows=False": "{\"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"genlock_build_sha\": \"abc1234def\", \"program_render_lagged\": \"0\", \"program_render_lagged_age_s\": \"0\", \"obs_log_head_age_s\": \"24180\"}",
+  "qr-align-strih-1363366080.log|windows=True": "{\"ndi_runtime\": \"6.2.1.0\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"distroav_dll_paths\": \"<TMP>/host/plugins/obs-plugins/64bit/distroav.dll\", \"obs_dll_sha256\": \"0d8434134e4c153f2fe36c3fef62adf4e3ce150d9f3f47a582df6c988cde3efe\", \"distroav_dll_sha256\": \"ffbe878da917f5a18717dbb88a10e5f9e58035316e1262b681247150ff171524\", \"obs_installs\": \"<TMP>/host/apps/_RETIRED_1ME-obs/1ME.exe,<TMP>/host/apps/obs64.exe\", \"port4455_owner_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"port4455_owner_version\": \"32.1.2\", \"obs_process_count\": \"1\", \"ahk_app1_shortcut_path\": \"C:\\\\ProgramData\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\OBS Studio.lnk\", \"ahk_app1_run\": \"1\", \"ahk_dead_config_present\": \"1\", \"shortcut_target_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"shortcut_workdir\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\", \"genlock_build_sha\": \"abc1234def\", \"vb_matrix_running\": \"1\", \"vb_matrix_name\": \"VBAudioMatrix_x64\", \"vb_matrix_pid\": \"9001\", \"vb_matrix_start\": \"2026-09-28T01:02:03\", \"program_render_lagged\": \"0\", \"program_render_lagged_age_s\": \"0\", \"obs_log_head_age_s\": \"24180\"}",
+  "qr-align-strih-659887078.log|windows=False": "{\"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"genlock_build_sha\": \"abc1234def\", \"program_render_lagged\": \"0\", \"program_render_lagged_age_s\": \"4\", \"obs_log_head_age_s\": \"84072\"}",
+  "qr-align-strih-659887078.log|windows=True": "{\"ndi_runtime\": \"6.2.1.0\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"distroav_dll_paths\": \"<TMP>/host/plugins/obs-plugins/64bit/distroav.dll\", \"obs_dll_sha256\": \"0d8434134e4c153f2fe36c3fef62adf4e3ce150d9f3f47a582df6c988cde3efe\", \"distroav_dll_sha256\": \"ffbe878da917f5a18717dbb88a10e5f9e58035316e1262b681247150ff171524\", \"obs_installs\": \"<TMP>/host/apps/_RETIRED_1ME-obs/1ME.exe,<TMP>/host/apps/obs64.exe\", \"port4455_owner_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"port4455_owner_version\": \"32.1.2\", \"obs_process_count\": \"1\", \"ahk_app1_shortcut_path\": \"C:\\\\ProgramData\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\OBS Studio.lnk\", \"ahk_app1_run\": \"1\", \"ahk_dead_config_present\": \"1\", \"shortcut_target_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"shortcut_workdir\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\", \"genlock_build_sha\": \"abc1234def\", \"vb_matrix_running\": \"1\", \"vb_matrix_name\": \"VBAudioMatrix_x64\", \"vb_matrix_pid\": \"9001\", \"vb_matrix_start\": \"2026-09-28T01:02:03\", \"program_render_lagged\": \"0\", \"program_render_lagged_age_s\": \"4\", \"obs_log_head_age_s\": \"84072\"}",
+  "resolume-clean-2000-2045.txt.gz|windows=False": "{\"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"genlock_build_sha\": \"abc1234def\", \"audio_mixer_ticks\": \"2813\", \"audio_mixer_ticks_over\": \"1\", \"audio_mixer_window_ms\": \"60006\", \"audio_mixer_tick_ms\": \"21.3\", \"audio_mixer_age_s\": \"44\", \"vban_pacer_loss_events\": \"0\", \"vban_pacer_loss_dest\": \"stream=cg\", \"vban_pacer_age_s\": \"0\", \"obs_log_head_age_s\": \"54905\"}",
+  "resolume-clean-2000-2045.txt.gz|windows=True": "{\"ndi_runtime\": \"6.2.1.0\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"distroav_dll_paths\": \"<TMP>/host/plugins/obs-plugins/64bit/distroav.dll\", \"obs_dll_sha256\": \"0d8434134e4c153f2fe36c3fef62adf4e3ce150d9f3f47a582df6c988cde3efe\", \"distroav_dll_sha256\": \"ffbe878da917f5a18717dbb88a10e5f9e58035316e1262b681247150ff171524\", \"obs_installs\": \"<TMP>/host/apps/_RETIRED_1ME-obs/1ME.exe,<TMP>/host/apps/obs64.exe\", \"port4455_owner_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"port4455_owner_version\": \"32.1.2\", \"obs_process_count\": \"1\", \"ahk_app1_shortcut_path\": \"C:\\\\ProgramData\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\OBS Studio.lnk\", \"ahk_app1_run\": \"1\", \"ahk_dead_config_present\": \"1\", \"shortcut_target_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"shortcut_workdir\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\", \"genlock_build_sha\": \"abc1234def\", \"vb_matrix_running\": \"1\", \"vb_matrix_name\": \"VBAudioMatrix_x64\", \"vb_matrix_pid\": \"9001\", \"vb_matrix_start\": \"2026-09-28T01:02:03\", \"audio_mixer_ticks\": \"2813\", \"audio_mixer_ticks_over\": \"1\", \"audio_mixer_window_ms\": \"60006\", \"audio_mixer_tick_ms\": \"21.3\", \"audio_mixer_age_s\": \"44\", \"vban_pacer_loss_events\": \"0\", \"vban_pacer_loss_dest\": \"stream=cg\", \"vban_pacer_age_s\": \"0\", \"obs_log_head_age_s\": \"54905\"}",
+  "resolume-control-0300-0415.txt.gz|windows=False": "{\"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"genlock_build_sha\": \"abc1234def\", \"audio_mixer_ticks\": \"2813\", \"audio_mixer_ticks_over\": \"0\", \"audio_mixer_window_ms\": \"60005\", \"audio_mixer_tick_ms\": \"21.3\", \"audio_mixer_age_s\": \"39\", \"vban_pacer_loss_events\": \"0\", \"vban_pacer_loss_dest\": \"stream=cg\", \"vban_pacer_age_s\": \"0\", \"obs_log_head_age_s\": \"27907\"}",
+  "resolume-control-0300-0415.txt.gz|windows=True": "{\"ndi_runtime\": \"6.2.1.0\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"distroav_dll_paths\": \"<TMP>/host/plugins/obs-plugins/64bit/distroav.dll\", \"obs_dll_sha256\": \"0d8434134e4c153f2fe36c3fef62adf4e3ce150d9f3f47a582df6c988cde3efe\", \"distroav_dll_sha256\": \"ffbe878da917f5a18717dbb88a10e5f9e58035316e1262b681247150ff171524\", \"obs_installs\": \"<TMP>/host/apps/_RETIRED_1ME-obs/1ME.exe,<TMP>/host/apps/obs64.exe\", \"port4455_owner_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"port4455_owner_version\": \"32.1.2\", \"obs_process_count\": \"1\", \"ahk_app1_shortcut_path\": \"C:\\\\ProgramData\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\OBS Studio.lnk\", \"ahk_app1_run\": \"1\", \"ahk_dead_config_present\": \"1\", \"shortcut_target_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"shortcut_workdir\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\", \"genlock_build_sha\": \"abc1234def\", \"vb_matrix_running\": \"1\", \"vb_matrix_name\": \"VBAudioMatrix_x64\", \"vb_matrix_pid\": \"9001\", \"vb_matrix_start\": \"2026-09-28T01:02:03\", \"audio_mixer_ticks\": \"2813\", \"audio_mixer_ticks_over\": \"0\", \"audio_mixer_window_ms\": \"60005\", \"audio_mixer_tick_ms\": \"21.3\", \"audio_mixer_age_s\": \"39\", \"vban_pacer_loss_events\": \"0\", \"vban_pacer_loss_dest\": \"stream=cg\", \"vban_pacer_age_s\": \"0\", \"obs_log_head_age_s\": \"27907\"}",
+  "resolume-onset-0540-0630.txt.gz|windows=False": "{\"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"genlock_build_sha\": \"abc1234def\", \"audio_mixer_ticks\": \"2813\", \"audio_mixer_ticks_over\": \"406\", \"audio_mixer_window_ms\": \"60002\", \"audio_mixer_tick_ms\": \"21.3\", \"audio_mixer_age_s\": \"40\", \"vban_pacer_loss_events\": \"1029\", \"vban_pacer_loss_dest\": \"stream=cg\", \"vban_pacer_age_s\": \"0\", \"obs_log_head_age_s\": \"19804\"}",
+  "resolume-onset-0540-0630.txt.gz|windows=True": "{\"ndi_runtime\": \"6.2.1.0\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"distroav_dll_paths\": \"<TMP>/host/plugins/obs-plugins/64bit/distroav.dll\", \"obs_dll_sha256\": \"0d8434134e4c153f2fe36c3fef62adf4e3ce150d9f3f47a582df6c988cde3efe\", \"distroav_dll_sha256\": \"ffbe878da917f5a18717dbb88a10e5f9e58035316e1262b681247150ff171524\", \"obs_installs\": \"<TMP>/host/apps/_RETIRED_1ME-obs/1ME.exe,<TMP>/host/apps/obs64.exe\", \"port4455_owner_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"port4455_owner_version\": \"32.1.2\", \"obs_process_count\": \"1\", \"ahk_app1_shortcut_path\": \"C:\\\\ProgramData\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\OBS Studio.lnk\", \"ahk_app1_run\": \"1\", \"ahk_dead_config_present\": \"1\", \"shortcut_target_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"shortcut_workdir\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\", \"genlock_build_sha\": \"abc1234def\", \"vb_matrix_running\": \"1\", \"vb_matrix_name\": \"VBAudioMatrix_x64\", \"vb_matrix_pid\": \"9001\", \"vb_matrix_start\": \"2026-09-28T01:02:03\", \"audio_mixer_ticks\": \"2813\", \"audio_mixer_ticks_over\": \"406\", \"audio_mixer_window_ms\": \"60002\", \"audio_mixer_tick_ms\": \"21.3\", \"audio_mixer_age_s\": \"40\", \"vban_pacer_loss_events\": \"1029\", \"vban_pacer_loss_dest\": \"stream=cg\", \"vban_pacer_age_s\": \"0\", \"obs_log_head_age_s\": \"19804\"}",
+  "resolume-start-1949-1957.txt.gz|windows=False": "{\"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"genlock_build_sha\": \"abc1234def\", \"audio_mixer_ticks\": \"2813\", \"audio_mixer_ticks_over\": \"0\", \"audio_mixer_window_ms\": \"60016\", \"audio_mixer_tick_ms\": \"21.3\", \"audio_mixer_age_s\": \"44\", \"vban_pacer_loss_events\": \"0\", \"vban_pacer_loss_dest\": \"stream=cg\", \"vban_pacer_age_s\": \"0\", \"obs_log_head_age_s\": \"57786\"}",
+  "resolume-start-1949-1957.txt.gz|windows=True": "{\"ndi_runtime\": \"6.2.1.0\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"distroav_dll_paths\": \"<TMP>/host/plugins/obs-plugins/64bit/distroav.dll\", \"obs_dll_sha256\": \"0d8434134e4c153f2fe36c3fef62adf4e3ce150d9f3f47a582df6c988cde3efe\", \"distroav_dll_sha256\": \"ffbe878da917f5a18717dbb88a10e5f9e58035316e1262b681247150ff171524\", \"obs_installs\": \"<TMP>/host/apps/_RETIRED_1ME-obs/1ME.exe,<TMP>/host/apps/obs64.exe\", \"port4455_owner_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"port4455_owner_version\": \"32.1.2\", \"obs_process_count\": \"1\", \"ahk_app1_shortcut_path\": \"C:\\\\ProgramData\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\OBS Studio.lnk\", \"ahk_app1_run\": \"1\", \"ahk_dead_config_present\": \"1\", \"shortcut_target_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"shortcut_workdir\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\", \"genlock_build_sha\": \"abc1234def\", \"vb_matrix_running\": \"1\", \"vb_matrix_name\": \"VBAudioMatrix_x64\", \"vb_matrix_pid\": \"9001\", \"vb_matrix_start\": \"2026-09-28T01:02:03\", \"audio_mixer_ticks\": \"2813\", \"audio_mixer_ticks_over\": \"0\", \"audio_mixer_window_ms\": \"60016\", \"audio_mixer_tick_ms\": \"21.3\", \"audio_mixer_age_s\": \"44\", \"vban_pacer_loss_events\": \"0\", \"vban_pacer_loss_dest\": \"stream=cg\", \"vban_pacer_age_s\": \"0\", \"obs_log_head_age_s\": \"57786\"}",
+  "stream-repin-window.txt|windows=False": "{\"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"genlock_build_sha\": \"abc1234def\", \"av_offset_recent_med_ms\": \"8.0\", \"av_offset_base_med_ms\": \"54.0\", \"av_offset_pin\": \"1024\", \"av_offset_pin_stable\": \"0\", \"av_offset_age_s\": \"64\", \"av_offset_n_recent\": \"18\", \"av_offset_n_base\": \"18\", \"obs_log_head_age_s\": \"64200\"}",
+  "stream-repin-window.txt|windows=True": "{\"ndi_runtime\": \"6.2.1.0\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"distroav_dll_paths\": \"<TMP>/host/plugins/obs-plugins/64bit/distroav.dll\", \"obs_dll_sha256\": \"0d8434134e4c153f2fe36c3fef62adf4e3ce150d9f3f47a582df6c988cde3efe\", \"distroav_dll_sha256\": \"ffbe878da917f5a18717dbb88a10e5f9e58035316e1262b681247150ff171524\", \"obs_installs\": \"<TMP>/host/apps/_RETIRED_1ME-obs/1ME.exe,<TMP>/host/apps/obs64.exe\", \"port4455_owner_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"port4455_owner_version\": \"32.1.2\", \"obs_process_count\": \"1\", \"ahk_app1_shortcut_path\": \"C:\\\\ProgramData\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\OBS Studio.lnk\", \"ahk_app1_run\": \"1\", \"ahk_dead_config_present\": \"1\", \"shortcut_target_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"shortcut_workdir\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\", \"genlock_build_sha\": \"abc1234def\", \"av_offset_recent_med_ms\": \"8.0\", \"av_offset_base_med_ms\": \"54.0\", \"av_offset_pin\": \"1024\", \"av_offset_pin_stable\": \"0\", \"av_offset_age_s\": \"64\", \"av_offset_n_recent\": \"18\", \"av_offset_n_base\": \"18\", \"vb_matrix_running\": \"1\", \"vb_matrix_name\": \"VBAudioMatrix_x64\", \"vb_matrix_pid\": \"9001\", \"vb_matrix_start\": \"2026-09-28T01:02:03\", \"obs_log_head_age_s\": \"64200\"}",
+  "stream-step-constant-pin.txt|windows=False": "{\"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"genlock_build_sha\": \"abc1234def\", \"av_offset_recent_med_ms\": \"8.0\", \"av_offset_base_med_ms\": \"68.0\", \"av_offset_pin\": \"926\", \"av_offset_pin_stable\": \"1\", \"av_offset_age_s\": \"64\", \"av_offset_n_recent\": \"18\", \"av_offset_n_base\": \"18\", \"obs_log_head_age_s\": \"64200\"}",
+  "stream-step-constant-pin.txt|windows=True": "{\"ndi_runtime\": \"6.2.1.0\", \"ndi_input_latency\": \"NDI 2ME PGM=963,NDI cam1=3\", \"distroav_dll_paths\": \"<TMP>/host/plugins/obs-plugins/64bit/distroav.dll\", \"obs_dll_sha256\": \"0d8434134e4c153f2fe36c3fef62adf4e3ce150d9f3f47a582df6c988cde3efe\", \"distroav_dll_sha256\": \"ffbe878da917f5a18717dbb88a10e5f9e58035316e1262b681247150ff171524\", \"obs_installs\": \"<TMP>/host/apps/_RETIRED_1ME-obs/1ME.exe,<TMP>/host/apps/obs64.exe\", \"port4455_owner_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"port4455_owner_version\": \"32.1.2\", \"obs_process_count\": \"1\", \"ahk_app1_shortcut_path\": \"C:\\\\ProgramData\\\\Microsoft\\\\Windows\\\\Start Menu\\\\Programs\\\\OBS Studio.lnk\", \"ahk_app1_run\": \"1\", \"ahk_dead_config_present\": \"1\", \"shortcut_target_path\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\\\\obs64.exe\", \"shortcut_workdir\": \"C:\\\\Program Files\\\\obs-studio\\\\bin\\\\64bit\", \"genlock_build_sha\": \"abc1234def\", \"av_offset_recent_med_ms\": \"8.0\", \"av_offset_base_med_ms\": \"68.0\", \"av_offset_pin\": \"926\", \"av_offset_pin_stable\": \"1\", \"av_offset_age_s\": \"64\", \"av_offset_n_recent\": \"18\", \"av_offset_n_base\": \"18\", \"vb_matrix_running\": \"1\", \"vb_matrix_name\": \"VBAudioMatrix_x64\", \"vb_matrix_pid\": \"9001\", \"vb_matrix_start\": \"2026-09-28T01:02:03\", \"obs_log_head_age_s\": \"64200\"}"
+ },
+ "timing_keys": {
+  "windows=False": [
+   "obs_log_read",
+   "obs_log_parse",
+   "ndi_inputs",
+   "genlock_build_sha",
+   "total"
+  ],
+  "windows=True": [
+   "obs_log_read",
+   "obs_log_parse",
+   "ndi_inputs",
+   "genlock_build_sha",
+   "port4455_owner",
+   "ahk_text",
+   "shortcut",
+   "distroav_dll_paths",
+   "obs_installs",
+   "obs_dll_sha256",
+   "distroav_dll_sha256",
+   "ndi_runtime",
+   "tasklist",
+   "obs_process_count",
+   "vb_matrix",
+   "total"
+  ]
+ }
+}
