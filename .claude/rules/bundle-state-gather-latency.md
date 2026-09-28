@@ -45,9 +45,10 @@ paths:
     globals, and re-exports every reader, parser and cache its tests reach as `bss.<name>`.
   - **A `bss.<name>` patch reaches ONLY the calls the server itself makes:** the readers
     `_windows_*_facets` calls, and the server's own `log` calls. A call made inside
-    `bundle_state_windows` resolves in that module: `port4455_owner` → `_port4455_owning_pid` →
-    `_parse_netstat_listening_pid`, `obs_process_list` → `tasklist_csv`, and every reader's own
-    `log` WARNING. Patch `bundle_state_windows.<name>` for those; a `bss.<name>` patch there is a
+    `bundle_state_windows` resolves in that module, for example `port4455_owner` →
+    `_port4455_owning_pid` → `_parse_netstat_listening_pid`, `obs_process_list` → `tasklist_csv` +
+    `_parse_tasklist_obs_process_names`, `vb_matrix_process_list` → `tasklist_csv`, and every
+    reader's own `log` WARNING. Patch `bundle_state_windows.<name>` for those; a `bss.<name>` patch there is a
     silent no-op.
   - The caches are the same dict objects in both modules: reset them IN PLACE (item assignment or
     `.update`), never rebind the name.
