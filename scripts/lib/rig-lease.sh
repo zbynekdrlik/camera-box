@@ -68,6 +68,8 @@
 #                              full-path-e2e.yml's timeout-minutes 75; the av-soak sets its own
 #                              declared run window, issue 1383)
 #   RIG_LEASE_KEEPALIVE_SEC    the gate keep-alive's beat period (default 30, issue 1383)
+#   RIG_LEASE_KEEPALIVE_MAX_ERRORS  consecutive filesystem errors that end the gate keep-alive
+#                              (default 10, issue 1383)
 
 rig_lease_dir() {
   printf '%s\n' "${RIG_LEASE_DIR:-/var/tmp/rig-lease}"
@@ -288,27 +290,38 @@ rig_lease_refresh_if_mine() {
 # on its success path: it bridges the gap between the acquire and the E2E's own heartbeat refresher
 # (the verdict-exe fetch step and the first preflight ran ~18 min unbeaten on 27.9.2026) and keeps
 # beating until the lease is released or goes foreign (rc 1) or the hold ceiling is reached (rc 3);
-# a filesystem error (rc 2) is retried on the next tick. Every fd is on /dev/null, so a GitHub
-# Actions step or a test's captured pipes are never held open; the runner's end-of-job orphan
-# cleanup ends it at the latest. Prints `RIG_LEASE_KEEPALIVE=started pid=<pid> every=<s>s for
-# <repo>#<run_id>`; without an identity it starts nothing.
+# a filesystem error (rc 2) is retried, but RIG_LEASE_KEEPALIVE_MAX_ERRORS (default 10) of them in a
+# row end it too (a vanished script or an unreadable lease never beats forever outside Actions).
+# Every fd is on /dev/null, so a GitHub Actions step or a test's captured pipes are never held
+# open; the runner's end-of-job orphan cleanup ends it at the latest. Prints
+# `RIG_LEASE_KEEPALIVE=started pid=<pid> every=<s>s for <repo>#<run_id>`; without an identity it
+# starts nothing.
 rig_lease_keepalive_spawn() {
   local repo="${1:-}" run_id="${2:-}"
   local interval="${RIG_LEASE_KEEPALIVE_SEC:-30}"
+  local max_errors="${RIG_LEASE_KEEPALIVE_MAX_ERRORS:-10}"
   if [ -z "$repo" ] || [ -z "$run_id" ]; then
     return 0
   fi
   case "$interval" in
     "" | 0 | *[!0-9]*) interval=30 ;;
   esac
+  case "$max_errors" in
+    "" | 0 | *[!0-9]*) max_errors=10 ;;
+  esac
   (
     trap - EXIT
     set +e
+    errors=0
     while :; do
       sleep "$interval" || exit 0
       rig_lease_refresh_if_mine "$repo" "$run_id" >/dev/null 2>&1
       case "$?" in
-        0 | 2) ;;
+        0) errors=0 ;;
+        2)
+          errors=$((errors + 1))
+          [ "$errors" -lt "$max_errors" ] || exit 0
+          ;;
         *) exit 0 ;;
       esac
     done

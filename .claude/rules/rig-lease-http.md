@@ -61,7 +61,8 @@ issue 1383 the holder keeps its own lease truthful from acquire to release:
   1. `rig-busy-gate.sh` — its busy-wait beats through the helper, and on its success path it starts
      `rig_lease_keepalive_spawn`: a detached, lease-only loop (every `RIG_LEASE_KEEPALIVE_SEC`,
      default 30 s, all fds on `/dev/null`) that lives until the lease is released or goes foreign or
-     the ceiling is reached; the runner's end-of-job orphan cleanup ends it at the latest. It covers
+     the ceiling is reached, or after `RIG_LEASE_KEEPALIVE_MAX_ERRORS` (10) filesystem errors in a
+     row; the runner's end-of-job orphan cleanup ends it at the latest. It covers
      the ~18 min between the acquire and the E2E's own refresher (the verdict-exe fetch step and the
      first preflight, measured on run 36351718907).
   2. The issue-281 refresher (`scripts/lib/rig-heartbeat.sh` `rig_heartbeat_start`) of
@@ -92,18 +93,24 @@ issue 1383 the holder keeps its own lease truthful from acquire to release:
   directory the FD was opened on (a concurrent release, #857, or a release + a peer's new acquire,
   wins; the write only ever lands in the detached copy). The remaining window between those checks
   and the rename is microseconds and unreachable while the holder beats (a reclaim needs a heartbeat
-  stale for 5400 s). Every guarantee has a mutation-checked test
-  (`tests/python/test_rig_lease_refresh_races_1383.py`, `…_1383.py`).
+  stale for 5400 s). The re-read guard, the same-directory check, the ceiling, the never-backward
+  roll, the O_NOFOLLOW heartbeat and the keep-alive exits have tests that a scratch-copy mutation
+  run kills (`tests/python/test_rig_lease_refresh_races_1383.py`, `…_1383.py`); O_EXCL/O_NOFOLLOW on
+  the temp are defence in depth only (the same-name unlink just before the open masks them in a
+  test).
 
-**What a consumer reads during a live run:** `held=true`, `heartbeat_age_s` ≤ ~30 s (the beat
-period plus one slow beat), `ttl_s` ≥ ~870 s — a ROLLING look-ahead, NOT the run's end time (the
-run ends when `held` goes `false`). A held lease whose heartbeat is many minutes old is a dead holder
-or one past its hold ceiling — reclaimable once `stale` flips — not a long step. Supervisor live
-check: during a release E2E, read `curl -s http://127.0.0.1:8890/rig-lease.json` twice ~40 s apart,
-once during the verdict-exe fetch step and once past minute 45 of the run: `heartbeat_age_s` < 60,
-`ttl_s` > 0 (≈ 870-900) and `expected_release_at` moving forward between the reads; the E2E job log
-carries the gate's `RIG_LEASE_KEEPALIVE=started pid=…` line and the refresher's
-`lease keep-alive …: RIG_LEASE_REFRESH=refreshed …` line.
+**What a consumer reads during a live run:** `held=true` and `heartbeat_age_s` ≤ ~30 s once the
+gate's keep-alive or the E2E refresher beats (≤ ~60 s while the gate is still in its busy-wait,
+which beats once per poll, `RIG_BUSY_GATE_SLEEP_SECS` 60 s). `ttl_s` is the larger of the declared
+release and the rolling look-ahead: ≈ 1980-2700 s in the first ~30 min of a CI run (acquire +
+45 min still wins the max), ≈ 870-900 s after that — NOT the run's end time (the run ends when
+`held` goes `false`). A held lease whose heartbeat is many minutes old is a dead holder or one past
+its hold ceiling — reclaimable once `stale` flips — not a long step. Supervisor live check: during a
+release E2E, read `curl -s http://127.0.0.1:8890/rig-lease.json` twice ~40 s apart, once during the
+verdict-exe fetch step and once past minute 45 of the run: `heartbeat_age_s` < 60 and `ttl_s` > 0
+both times, and past minute 45 `ttl_s` ≈ 870-900 with `expected_release_at` moving forward between
+the two reads; the E2E job log carries the gate's `RIG_LEASE_KEEPALIVE=started pid=…` line and the
+refresher's `lease keep-alive …: RIG_LEASE_REFRESH=refreshed …` line.
 
 ## Consumer contract for restreamer#349 (the OTHER repo's own implementation)
 

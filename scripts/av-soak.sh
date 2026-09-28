@@ -707,7 +707,7 @@ add_row() {  # K EPOCH OUTCOME [VERDICT_JSON] [RC] [RUN_ID]
 # reason; a filesystem error -> log and carry on (the heartbeat refresher beats again within 30 s).
 soak_lease_keepalive() {
   local out="" rc=0
-  out="$(rig_lease_refresh_if_mine "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS")" || rc=$?
+  out="$(rig_lease_refresh_if_mine "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" 2>&1)" || rc=$?
   case "$rc" in
     0) return 0 ;;
     2)
