@@ -50,6 +50,8 @@ paths:
     after the install they run `python3 -I -B -c '…; import bundle_state_gather'` against
     `/opt/camera-box` and `fail` on a partial tree. `-I` keeps a caller's cwd (e.g. `scripts/`) off
     `sys.path`; `-B` keeps the root-run check from leaving a root-owned `__pycache__` in the tree.
+    `-I` also drops the user site-packages, so the check imports only the stdlib-only gather, never
+    the server itself (`obs_phase2` needs `websocket`, a `pip --user` install on some boxes).
 - **Proof of neutrality:** `test_bundle_state_split_1386.py` compares against a golden captured from
   the pre-split code (`fixtures/bundle_state_split_1386/golden.json`). It covers every parser over the
   recorded logs + one synthetic all-families log + their bounded reads, and the served JSON on both
