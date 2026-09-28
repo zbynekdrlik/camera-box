@@ -208,9 +208,10 @@ _ndi_discovery_json_string() {
     | sed -E 's/.*:[[:space:]]*"([^"]*)"$/\1/' || true
 }
 
-# _ndi_discovery_networks_key KEY TEXT -> the value of ndi.networks.KEY in TEXT: a string as-is, any
-# other non-null value (a hand-edited array, a number, true/false) as its compact JSON, "" when absent
-# or null.
+# _ndi_discovery_networks_key KEY TEXT -> the value of ndi.networks.KEY in TEXT: a string as-is, "" when
+# absent or null. With python3, any other non-null value (a hand-edited array, a number, true/false)
+# comes back as its compact JSON; the grep fallback reads strings only (the cambox plan counts the rest
+# itself, see its no-python3 branch).
 # With python3 (dev1, strih-lx, the camboxes, the tests) it reads that exact JSON path, so an unrelated
 # `"KEY"` elsewhere in the file never stands in for it (issue 1389). Without python3 (a stripped-down
 # box), or when TEXT is not JSON, it falls back to the grep reader above. Never errors.
@@ -557,7 +558,9 @@ ndi_discovery_cambox_plan() {
     1)
       # No python3: the grep reader finds a string list; a non-string ips / discovery value (an array,
       # a number, true/false -- anything but a string or null) it cannot read is counted here, so the
-      # file goes with a backup like any list. A config that sets neither needs no change.
+      # file goes with a backup like any list. A config that sets neither needs no change. A heuristic
+      # fallback (every cambox has python3): it sees a value only on the key's own line, and a key of
+      # that name anywhere in the file.
       nonstr="$(printf '%s\n' "$have" | grep -cE '"(ips|discovery)"[[:space:]]*:[[:space:]]*[^"[:space:]n]' || true)"
       if [ -z "$ips$disc" ] && [ "$nonstr" = 0 ]; then
         echo none

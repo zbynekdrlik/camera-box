@@ -93,10 +93,12 @@ to measure.
     that lists ANY IP FAILs naming it, with or without the drop-in (a drop-in would load it again).
     So do a `networks.discovery`, a config that is not JSON, and a foreign drop-in. Any non-string,
     non-null `ips` / `discovery` value (e.g. a hand-edited `"ips": [...]`) is still set: the reader
-    returns its compact JSON, so the verdict FAILs it and the plan takes it off (strip, or remove when
-    nothing else is left; without python3, remove with a backup). The strih verdict FAILs it too.
-  - Every FAIL line of `(an)` and verify-strih item 34 goes through `ndi_discovery_verdict_oneline`:
-    the facets joined by `; `, then ` -- ` and the fix.
+    returns its compact JSON (with python3), so the verdict FAILs it and the plan takes it off (strip,
+    or remove when nothing else is left). Without python3 the plan's single-line heuristic removes such
+    a file with a backup. The strih verdict FAILs it too.
+  - Every VERDICT FAIL line of `(an)` and verify-strih item 34 goes through
+    `ndi_discovery_verdict_oneline`: the facets joined by `; `, then ` -- ` and the fix. (Their ssh-read,
+    generator and intercom drop-in FAIL lines are single messages of their own.)
   - With python3 (every cambox has it; the lib falls back to a grep reader without it) the plan and
     the verdict read the same file the same way, and a leading UTF-8 BOM is valid JSON for both. The
     `(an)` gather puts a newline after each file, so a hand edit without a final newline never glues
