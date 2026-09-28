@@ -8,9 +8,9 @@ measures every source's delivery; this script turns that into the per-source lat
 the Discord report (scripts/e2e_discord_report.py, _section_latency_pins) surfaces every run.
 
 Gathers, over OBS WebSocket -- LIVE, never hardcoded -- the CURRENTLY-CONFIGURED
-genlock_latency_ms_src for every strih 'NDI cam<N>' + 'MV NDI cam<N>' and imag 'NDI CAM<N>' +
-'MV CAM<N>', for N in CAMERA_ACTIVE_SET (#893 -- env var, default cam1/cam2/cam4 (#898:
-cam3 retired 2026-07-31, grabber card destroyed); NEVER a literal N=1..7 range, see
+genlock_latency_ms_src for every strih 'NDI cam<N>' (strih has no multiview twin input, issue
+1242) and imag 'NDI CAM<N>' + 'MV CAM<N>', for N in CAMERA_ACTIVE_SET (#893 -- env var, default
+cam1/cam2/cam4 (#898: cam3 retired 2026-07-31, grabber card destroyed); NEVER a literal N=1..7 range, see
 .claude/rules/camera-active-set.md -- a retired camera's stale pin must never be swept/reported
 as if it meant anything), the stream 'NDI 2ME PGM' hold, reads
 ~/.camera-box/av-sync-last.json for the source-of-truth applied hold, and computes a RECOMMENDED
@@ -102,12 +102,13 @@ def read_pin(ws, source_name: str) -> "int | None":
     return int(v) if isinstance(v, (int, float)) else None
 
 
-def snapshot_box_pins(host: str, password: str, main_fmt: str, mv_fmt: str) -> dict:
-    """Connect to `host`, read main+MV pins for every camera in `active_camera_numbers()` (#893
-    -- CAMERA_ACTIVE_SET, never a literal cam1..7 range) using the given name templates (e.g.
-    "NDI cam{n}" / "MV NDI cam{n}" for strih, "NDI CAM{n}" / "MV CAM{n}" for imag). Returns
-    {"cam<n>": {"main_ms": v_or_None, "mv_ms": v_or_None}, ...}, or {} on a connect failure --
-    never a half-filled table that looks more complete than what was actually read."""
+def snapshot_box_pins(host: str, password: str, main_fmt: str, mv_fmt: "str | None" = None) -> dict:
+    """Connect to `host`, read the main (and, with `mv_fmt`, the MV clone) pin for every camera in
+    `active_camera_numbers()` (#893 -- CAMERA_ACTIVE_SET, never a literal cam1..7 range) using the
+    given name templates ("NDI cam{n}" alone for strih -- issue 1242: strih has no multiview twin
+    input; "NDI CAM{n}" / "MV CAM{n}" for imag). Returns {"cam<n>": {"main_ms": v_or_None}, ...}
+    plus "mv_ms" per camera when `mv_fmt` is given, or {} on a connect failure -- never a
+    half-filled table that looks more complete than what was actually read."""
     out = {}
     try:
         ws = _conn(host, password)
@@ -116,9 +117,10 @@ def snapshot_box_pins(host: str, password: str, main_fmt: str, mv_fmt: str) -> d
         return out
     try:
         for n in active_camera_numbers():
-            main = read_pin(ws, main_fmt.format(n=n))
-            mv = read_pin(ws, mv_fmt.format(n=n))
-            out[f"cam{n}"] = {"main_ms": main, "mv_ms": mv}
+            row = {"main_ms": read_pin(ws, main_fmt.format(n=n))}
+            if mv_fmt:
+                row["mv_ms"] = read_pin(ws, mv_fmt.format(n=n))
+            out[f"cam{n}"] = row
     finally:
         ws.close()
     return out
@@ -179,7 +181,7 @@ def main(argv=None):
 
     result: dict = {}
     if args.strih_host:
-        result["strih"] = snapshot_box_pins(args.strih_host, args.password, "NDI cam{n}", "MV NDI cam{n}")
+        result["strih"] = snapshot_box_pins(args.strih_host, args.password, "NDI cam{n}")
     if args.imag_host:
         result["imag"] = snapshot_box_pins(args.imag_host, args.password, "NDI CAM{n}", "MV CAM{n}")
     if args.stream_host:

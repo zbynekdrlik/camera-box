@@ -302,7 +302,6 @@ fn wall_step_markers_are_mutually_non_substring_1372() {
         "genlock-acquire-bracket '%s':",
         "genlock-shallow-lock",
         "genlock-shallow-remeasure",
-        "genlock-park '",
         "multiview-audit:",
         "program-render-audit:",
         "recv-timing #797 '",

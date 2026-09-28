@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """#747 — pre-recording camera-scene warm-up.
 
-Cycles EVERY strih "Cam N" scene (the per-camera scene convention — see
-scripts/strih_mv_scenes.py) onto PREVIEW briefly, right before [5/8] StartRecord, so
+Cycles EVERY strih "Cam N" scene (the per-camera scene convention — scene "Cam N" wraps
+input "NDI camN") onto PREVIEW briefly, right before [5/8] StartRecord, so
 DistroAV's raw NDI receivers for cameras not otherwise shown are already connected when
 [6/8]'s ALL_CAMBOX sweep makes its very first program cut to each camera — avoiding a cold
 receiver connect eating into that segment's first few frames.

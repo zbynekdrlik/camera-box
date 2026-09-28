@@ -1384,6 +1384,13 @@ bad segment from the verdict JSON, converted its epoch range to CEST, and found 
 
 ## #730 — strih's own #501-pattern low-bandwidth multiview twins (`scripts/strih_mv_scenes.py`)
 
+**RETIRED 28.9.2026 (issue 1242, owner order "cize vycistis strih obs aby tam neboli tie low
+bandwith sceny"):** strih has no low-bandwidth twins any more. `strih_mv_scenes.py` lost its
+no-flag seed and the Multiview-scene rewire -- only `--reattach N` (the sender-bounce CLEAR-then-SET
+of `NDI camN`) and `--stats SECONDS` remain; a bare run is a usage error. The strih-lx bandwidth
+roles that re-used these twins (connect-on-show parking, `MV <scene>` twin scenes, the E2E twin
+hold) were removed in the same slice. The history below is kept for context only.
+
 strih never had imag-nb's `#501` "MV Cam N" twin-scene optimization — the built-in Multiview
 projector AND strih's own hand-built "Multiview" SCENE (a plain scene whose items are references
 to the real "Cam N" scenes, used to feed a physical camera-operator monitor) both rendered every

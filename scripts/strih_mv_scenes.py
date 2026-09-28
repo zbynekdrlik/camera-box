@@ -1,60 +1,26 @@
 #!/usr/bin/env python3
-"""strih OBS per-camera low-bandwidth multiview twin scenes (#730).
+"""strih OBS helper: the sender-bounce RE-ATTACH of a camera input (#758 item 2) and an ad-hoc
+render-cost GetStats delta (#730). The file name is historical (it once seeded the strih `MV`
+multiview scenes); it is kept because the E2E harness and its static-anchor tests call it by name.
 
-**Repeatedly requested by the user**: strih never got the optimized per-camera multiview scenes
-imag-nb already has ("MV Cam N" — dedicated low-cost thumbnail scenes feeding the multiview,
-instead of the full program-grade sources rendering in the multiview grid, #501). This script
-replicates that pattern on strih over OBS WebSocket.
+  strih_mv_scenes.py --host 10.77.9.202 --password PW --reattach N   # CLEAR-then-SET 'NDI camN'
+  strih_mv_scenes.py --host 10.77.9.202 --password PW --stats 15     # GetStats render-cost delta
 
-strih already has 7 full-bandwidth camera scenes "Cam 1".."Cam 7" (#753, 2026-07-14: cam7 is a
-NEW, direct/non-inverted pin — its scene/input share the same "7"), each wrapping ONE NDI input
-"NDI cam<n>" bound to a real fleet NDI source (#753 1:1 mapping since 2026-07-14: "NDI cam<n>"
-carries "CAM<n> (usb)" for every n — the pre-2026-07-14 INVERTED offset, e.g. "NDI cam1"→"CAM3
-(usb)", is HISTORY; the canonical fact table is set-ndi-mapping.py's FULL_MAP). This script
-NEVER hardcodes that mapping: it reads each existing input's LIVE `ndi_source_name` over WS and
-wraps that EXACT same value in a new "MV Cam <n>" twin input, `genlock_monitor=true` (the #501
-pattern — the vendored DistroAV genlock lockdown forces LOW-bandwidth NDI receive, ~9x cheaper,
-for a source flagged this way). The real "Cam N" inputs/scenes are never modified.
-
-Two independent render-cost sinks get wired to the cheap twins (both cost full-bandwidth decode
-for every tile today, live-verified via GetStats before/after — see the genlock skill #730 note):
-
-  1. The BUILT-IN OBS Multiview PROJECTOR (the one the #276/#278/#293 render-budget decouple
-     hardened) — via the per-scene `show_in_multiview` private setting (mirrors OBSBasic_Scenes
-     .cpp's "ShowInMultiview" context-menu action): real "Cam N" -> hidden, "MV Cam N" -> shown.
-  2. strih's own hand-built "Multiview" SCENE (a plain scene whose scene items are references to
-     other scenes — NOT the built-in projector) — its items that reference a real "Cam N" scene
-     are swapped for the matching "MV Cam N" twin, preserving the EXACT scene-item transform
-     (position/scale/bounds) so the operator's layout never visibly changes.
-
-Respects decouple-dont-rebuild (#508): this only re-points OBS's OWN existing scene/source
-mechanisms at cheaper feeds — no custom renderer, no new multiview mechanism.
-
-issue 1242 (24.9.2026, owner ruling): on the Linux strih (strih-lx) the multiview-twin ROLE is
-applied on every OBS launch by `strih_scenes.py --apply-roles` (the on-box launch seeder), together
-with the program-path `genlock_connect_on_show` flag on the camera inputs -- a full camera input now
-pulls bandwidth only while it is shown, and the multiview must render these always-connected twins
-(reversing the issue-761 same-source multiview for strih). This Windows-era seeder stays for its
-`--reattach` / `--stats` modes; `reattach()` keeps targeting the MAIN input, which an E2E run holds
-connected (scripts/lib/connect-on-show-hold.sh).
-
-Usage:
-  strih_mv_scenes.py --host 10.77.9.202 --password PW               # seed the twins + rewire
-  strih_mv_scenes.py --host 10.77.9.202 --password PW --stats 15    # ad-hoc GetStats before/after
-                                                                      # render-cost delta (no seed)
+issue 1242 (28.9.2026, owner order "cize vycistis strih obs aby tam neboli tie low bandwith sceny"):
+strih has no low-bandwidth multiview twins any more -- the Windows-era seed of per-camera twin
+scenes over their own low-bandwidth monitor inputs (#730, the #501 pattern) and the
+custom-multiview rewire are removed. Every strih camera input stays connected at full bandwidth
+and the built-in multiview renders the program scenes themselves. imag keeps its own multiview
+scenes (scripts/imag_scenes.py) -- a different box.
 """
 
 import argparse
 import os
-import re
 import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import obs_phase2 as op  # reuse the repo's ONE obs-websocket client (_conn/_rpc) — never a 4th one
-
-CAMS = range(1, 8)  # #753 (2026-07-14): fleet growth 6->7, cam7 is real + provisioned now
-_CAM_SCENE_RE = re.compile(r"^Cam (\d+)$")
 
 # #795/#759 — reattach() sentinel: the input HAS a bound ndi_source_name to re-apply, but that name
 # was NOT present in the DistroAV finder list after the bounded wait (an empty list, or a non-empty
@@ -65,63 +31,8 @@ _CAM_SCENE_RE = re.compile(r"^Cam (\d+)$")
 # "skipped to avoid mangling" from "no name to re-apply".
 NDI_SOURCE_NOT_DISCOVERABLE = object()
 
-# obs-websocket v5 SceneItemTransform: only these fields are SETTABLE via SetSceneItemTransform.
-# GetSceneItemList also returns read-only computed fields (width/height/sourceWidth/sourceHeight)
-# that must be stripped before echoing a transform back, or the request can be rejected/ignored.
-# issue 1242: the ONE owner of this list is strih_bandwidth_roles.py (the strih-lx role module).
-from strih_bandwidth_roles import SETTABLE_TRANSFORM_FIELDS as _SETTABLE_TRANSFORM_FIELDS  # noqa: E402
-
 
 # --- PURE functions (no network — unit-tested from tests/python/test_strih_mv_scenes.py) --------
-
-def is_cam_scene(name: str) -> bool:
-    """True for strih's real per-camera scene names ('Cam 1'..'Cam N'), false for anything else
-    (utility/overlay scenes like 'Control', 'Multiview' itself, 'PHASE2-PROBE', ...)."""
-    return bool(_CAM_SCENE_RE.match(name))
-
-
-def mv_scene_name(cam_scene_name: str) -> str:
-    """'Cam 5' -> 'MV Cam 5'. Raises on a non-'Cam N' input — callers must filter with
-    is_cam_scene() first; silently mangling an unrelated scene name is worse than failing loud."""
-    if not is_cam_scene(cam_scene_name):
-        raise ValueError(f"not a 'Cam N' scene name: {cam_scene_name!r}")
-    return f"MV {cam_scene_name}"
-
-
-def cam_input_name(cam_scene_name: str) -> str:
-    """'Cam 5' -> 'NDI cam5' — strih's existing per-camera input-naming convention."""
-    m = _CAM_SCENE_RE.match(cam_scene_name)
-    if not m:
-        raise ValueError(f"not a 'Cam N' scene name: {cam_scene_name!r}")
-    return f"NDI cam{m.group(1)}"
-
-
-def settable_transform_fields(transform: dict) -> dict:
-    """Strip a GetSceneItemList-returned sceneItemTransform down to the fields
-    SetSceneItemTransform actually accepts (drops read-only computed fields like width/height)."""
-    return {k: v for k, v in (transform or {}).items() if k in _SETTABLE_TRANSFORM_FIELDS}
-
-
-def mv_replacement_plan(scene_items: list) -> list:
-    """Given the custom 'Multiview' scene's GetSceneItemList sceneItems, return the plan of which
-    items to swap: every item that is itself a real 'Cam N' scene reference gets paired with its
-    low-bandwidth twin name + a settable-only copy of its current transform + its sceneItemId (so
-    the caller can add the new item at the same spot, then remove the old one). Any item that is
-    NOT a 'Cam N' scene (an overlay, a utility source, anything the operator added by hand) is left
-    OUT of the plan untouched — this script only ever touches the camera tiles it owns."""
-    plan = []
-    for item in scene_items:
-        name = item.get("sourceName", "")
-        if not is_cam_scene(name):
-            continue
-        plan.append({
-            "old_name": name,
-            "new_name": mv_scene_name(name),
-            "old_item_id": item["sceneItemId"],
-            "transform": settable_transform_fields(item.get("sceneItemTransform", {})),
-        })
-    return plan
-
 
 def stats_delta(before: dict, after: dict) -> dict:
     """Pure GetStats before/after -> a render-cost delta report. renderSkippedFrames/
@@ -143,95 +54,6 @@ def stats_delta(before: dict, after: dict) -> dict:
 
 
 # --- live (WS) functions --------------------------------------------------------------------
-
-def seed(obs) -> tuple:
-    """Create/refresh the 'MV Cam N' twin input+scene for every real 'Cam N' scene strih actually
-    has, wrapping each twin around the SAME live ndi_source_name the real input already uses.
-    Idempotent — CreateScene/CreateInput 'already exists' errors are ignored, settings are
-    re-applied every run (self-healing, same philosophy as the genlock lockdown)."""
-    video = op._rpc(obs, "GetVideoSettings")
-    cw, ch = video["baseWidth"], video["baseHeight"]
-    scenes = [s["sceneName"] for s in op._rpc(obs, "GetSceneList")["scenes"]]
-
-    created, skipped = [], []
-    for n in CAMS:
-        cam_scene = f"Cam {n}"
-        if cam_scene not in scenes:
-            skipped.append(cam_scene)
-            continue
-        cam_input = cam_input_name(cam_scene)
-        settings = op._rpc(obs, "GetInputSettings", {"inputName": cam_input}, ignore_err=True)
-        ndi_name = (settings or {}).get("inputSettings", {}).get("ndi_source_name")
-        if not ndi_name:
-            skipped.append(cam_scene)
-            continue
-
-        mv_scene = mv_scene_name(cam_scene)
-        mv_input = f"MV {cam_input}"
-        op._rpc(obs, "CreateScene", {"sceneName": mv_scene}, ignore_err=True)
-        twin_settings = {"ndi_source_name": ndi_name, "latency": 1, "genlock_monitor": True}
-        op._rpc(obs, "CreateInput", {
-            "sceneName": mv_scene, "inputName": mv_input, "inputKind": "ndi_source",
-            "inputSettings": twin_settings,
-        }, ignore_err=True)
-        # re-apply every run (self-healing) — mirrors imag_scenes.py's own convention.
-        op._rpc(obs, "SetInputSettings",
-                {"inputName": mv_input, "inputSettings": twin_settings}, ignore_err=True)
-        op._rpc(obs, "SetInputMute", {"inputName": mv_input, "inputMuted": True}, ignore_err=True)
-        item = op._rpc(obs, "GetSceneItemId",
-                        {"sceneName": mv_scene, "sourceName": mv_input}, ignore_err=True)
-        if item.get("sceneItemId") is not None:
-            op._rpc(obs, "SetSceneItemTransform", {
-                "sceneName": mv_scene, "sceneItemId": item["sceneItemId"],
-                "sceneItemTransform": {
-                    "boundsType": "OBS_BOUNDS_SCALE_INNER", "boundsAlignment": 0,
-                    "boundsWidth": cw, "boundsHeight": ch, "positionX": 0, "positionY": 0,
-                },
-            }, ignore_err=True)
-
-        # #501 built-in-multiview membership: hide the full-bw real scene, show the cheap twin.
-        op._rpc(obs, "SetSourcePrivateSettings", {
-            "sourceName": cam_scene, "sourceSettings": {"show_in_multiview": False},
-        }, ignore_err=True)
-        op._rpc(obs, "SetSourcePrivateSettings", {
-            "sourceName": mv_scene, "sourceSettings": {"show_in_multiview": True},
-        }, ignore_err=True)
-        created.append(mv_scene)
-
-    return created, skipped
-
-
-def rewire_multiview_scene(obs, multiview_scene: str = "Multiview") -> list:
-    """Swap the custom 'Multiview' scene's 'Cam N' item references for their 'MV Cam N' twins,
-    preserving each item's exact transform. Adds the new item BEFORE removing the old one, so the
-    live production output never drops to fewer tiles than before mid-operation (hot-apply, no OBS
-    restart — strih is production). No-op if the box has no such scene."""
-    scenes = [s["sceneName"] for s in op._rpc(obs, "GetSceneList")["scenes"]]
-    if multiview_scene not in scenes:
-        return []
-    items = op._rpc(obs, "GetSceneItemList", {"sceneName": multiview_scene})["sceneItems"]
-    plan = mv_replacement_plan(items)
-
-    rewired = []
-    for entry in plan:
-        op._rpc(obs, "CreateSceneItem", {
-            "sceneName": multiview_scene, "sourceName": entry["new_name"],
-            "sceneItemEnabled": True,
-        }, ignore_err=True)
-        new_item = op._rpc(obs, "GetSceneItemId", {
-            "sceneName": multiview_scene, "sourceName": entry["new_name"],
-        }, ignore_err=True)
-        if new_item.get("sceneItemId") is not None and entry["transform"]:
-            op._rpc(obs, "SetSceneItemTransform", {
-                "sceneName": multiview_scene, "sceneItemId": new_item["sceneItemId"],
-                "sceneItemTransform": entry["transform"],
-            }, ignore_err=True)
-        op._rpc(obs, "RemoveSceneItem", {
-            "sceneName": multiview_scene, "sceneItemId": entry["old_item_id"],
-        }, ignore_err=True)
-        rewired.append(entry["new_name"])
-    return rewired
-
 
 def measure_stats(obs, seconds: float) -> dict:
     """Live wrapper around stats_delta(): sample GetStats now, wait `seconds`, sample again."""
@@ -284,16 +106,10 @@ def reattach(obs, cam_n: int, *, finder_retries: int = 6, finder_wait_s: float =
     obs_phase2._quiesce_probe_input uses, and the targeted per-input equivalent of the issue-1093
     OBS force-kill — without killing the operator's whole OBS.
 
-    #761 (2026-07-15, user-directed, KEPT): strih's "MV Cam N" scenes were switched to
-    SAME-SOURCE — they now render the MAIN "NDI camN" input, and the old "MV NDI camN"
-    low-bandwidth clone items are DISABLED in those scenes. The sender-bounce liveness probe
-    this function backs (recording-e2e.sh's preflight_mv_reverify) was switched to match — it
-    now checks the MAIN "NDI camN" input's liveness, so this reattach must target the SAME
-    input the probe actually checks (re-attaching the now-unused, disabled clone would fix
-    nothing the probe cares about). Targets `f"NDI cam{cam_n}"` — the main, always-rendered
-    input (per #761's own reasoning: it's continuously shown via the built-in OBS Multiview
-    grid projector, so a stuck receiver here is a genuine sender-bounce symptom, same as it
-    always was for the clone).
+    #761: targets `f"NDI cam{cam_n}"` — the MAIN camera input, the SAME input the sender-bounce
+    liveness probe this function backs (recording-e2e.sh's preflight_mv_reverify) checks. It is
+    always connected and rendered (the built-in OBS Multiview shows its program scene), so a stuck
+    receiver here is a genuine sender-bounce symptom.
 
     #795/#759 (event review 2026-07-18): re-applying ndi_source_name via SetInputSettings MANGLES
     the value whenever the target name is absent from OBS's DistroAV finder list — an empty list, OR
@@ -392,14 +208,14 @@ def main() -> None:
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", required=True)
     ap.add_argument("--password", default="")
-    ap.add_argument("--multiview-scene", default="Multiview",
-                     help="name of strih's custom multiview-grid scene to rewire (default: Multiview)")
     ap.add_argument("--stats", type=float, default=None, metavar="SECONDS",
-                     help="print a GetStats render-cost delta over SECONDS and exit — no seeding")
+                     help="print a GetStats render-cost delta over SECONDS and exit")
     ap.add_argument("--reattach", type=int, default=None, metavar="CAM_N",
-                     help="#758 item 2: re-apply 'MV NDI cam<CAM_N>'s OWN current ndi_source_name "
-                          "(forces an NDI receive reconnect) and exit — no seeding")
+                     help="#758 item 2: re-apply 'NDI cam<CAM_N>'s OWN current ndi_source_name "
+                          "(forces an NDI receive reconnect) and exit")
     args = ap.parse_args()
+    if args.reattach is None and args.stats is None:
+        ap.error("specify a mode: --reattach CAM_N or --stats SECONDS")
 
     obs = op._conn(args.host, args.password)
     try:
@@ -410,36 +226,24 @@ def main() -> None:
                 # list — SKIPPED the set to avoid mangling it. Distinct exit code (2) from the
                 # no-name-to-reattach case (1); the preflight_mv_reverify caller swallows both with
                 # `|| true` and lets the pixel re-sample decide, so this is informational only.
-                print(f"REATTACH SKIPPED: MV NDI cam{args.reattach}'s bound source is not in the "
+                print(f"REATTACH SKIPPED: NDI cam{args.reattach}'s bound source is not in the "
                       f"DistroAV finder list — NOT re-applying ndi_source_name (would mangle it); "
                       f"left bound as-is")
                 sys.exit(2)
             elif ndi_name:
-                print(f"reattached MV NDI cam{args.reattach} -> ndi_source_name={ndi_name!r}")
+                print(f"reattached NDI cam{args.reattach} -> ndi_source_name={ndi_name!r}")
             else:
-                print(f"REATTACH FAILED: MV NDI cam{args.reattach} has no ndi_source_name to "
+                print(f"REATTACH FAILED: NDI cam{args.reattach} has no ndi_source_name to "
                       f"re-apply (input missing or never seeded)")
                 sys.exit(1)
             return
 
-        if args.stats is not None:
-            d = measure_stats(obs, args.stats)
-            print(f"render-cost over {args.stats:.0f}s: activeFps={d['activeFps']} "
-                  f"avgRenderMs={d['averageFrameRenderTime']:.2f} "
-                  f"renderSkipped={d['renderSkipped_delta']}/{d['renderTotal_delta']} "
-                  f"({d['renderSkip_pct']}%) "
-                  f"outputSkipped={d['outputSkipped_delta']}/{d['outputTotal_delta']}")
-            return
-
-        created, skipped = seed(obs)
-        print(f"MV twin scenes: {len(created)}/{len(list(CAMS))} created/refreshed "
-              f"({created})" + (f" — SKIPPED (no live 'Cam N'/NDI source): {skipped}" if skipped else ""))
-        rewired = rewire_multiview_scene(obs, args.multiview_scene)
-        if rewired:
-            print(f"'{args.multiview_scene}' scene: rewired {len(rewired)} tile(s) -> {rewired}")
-        else:
-            print(f"'{args.multiview_scene}' scene: nothing to rewire (scene absent, or no "
-                  f"'Cam N' items in it)")
+        d = measure_stats(obs, args.stats)
+        print(f"render-cost over {args.stats:.0f}s: activeFps={d['activeFps']} "
+              f"avgRenderMs={d['averageFrameRenderTime']:.2f} "
+              f"renderSkipped={d['renderSkipped_delta']}/{d['renderTotal_delta']} "
+              f"({d['renderSkip_pct']}%) "
+              f"outputSkipped={d['outputSkipped_delta']}/{d['outputTotal_delta']}")
     finally:
         obs.close()
 

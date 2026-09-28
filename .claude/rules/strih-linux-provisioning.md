@@ -359,8 +359,9 @@ lease; strih-lx has run Xorg + openbox since 23.9.
 - **The Multiview is the stock one:** one extra `Multiview` instance, held only while the output is
   active AND the view is multiview, configured from the same `BasicWindow` `Multiview*` settings the
   projectors use, refreshed from `OBSProjector::UpdateMultiviewProjectors`, cleared with the
-  projectors in `ClearSceneData`. With issue 1242 it renders the low-bandwidth `MV` twin scenes, like
-  every other built-in Multiview. The operator's LAPTOP projector stays (SaveProjectors=true + the
+  projectors in `ClearSceneData`. It renders the program scenes themselves, like every other
+  built-in Multiview (the issue-1242 low-bandwidth `MV` twins were removed 28.9.2026). The operator's
+  LAPTOP projector stays (SaveProjectors=true + the
   ProjectorAlwaysOnTop=false pre-seed in step 7 are kept for it).
 - **verify-strih item 4c** (`strih_drm_output_verdict`): SKIP (`skip-no-hdmi`) with no HDMI monitor;
   NOTE `hdmi-unplugged` when armed but unplugged; FAIL `classify-failed` (the strih_scenes import

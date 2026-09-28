@@ -38,12 +38,6 @@ retyped). The matrix verdict:
   step), `window_stopped` (the soak ended the window without a measurement: the rig left TEST
   mode, a record volume ran low), `window_refused` / `window_aborted` / `window_error` -> UNKNOWN,
   with the reason. time-to-healthy = healthy_epoch - restart_epoch.
-- the **receiver** column (context, NEVER graded): the restarted camera's strih main input, read
-  from the strih OBS log right before a cambox / dantesync restart -- `parked` (connect-on-show:
-  the input was not connected, so the restart was not seen by a live receiver; the window's own
-  connect-on-show hold then connects it fresh), `connected`, `unread`, or `n/a` (the strih OBS /
-  stream OBS kinds). The report counts it per kind, so a 3/3 PASS whose restarts all hit a parked
-  receiver says so.
 - a **kind**: FAIL when any repeat fails, PASS when every required repeat (`repeats`, default 3)
   passed, else UNKNOWN (`k/3 repeats passed`).
 - the **matrix**: FAIL when the baseline or any kind fails; PASS only when the baseline and every
@@ -73,11 +67,10 @@ BASELINE = "baseline"
 DEFAULT_REPEATS = 3
 
 STEP_FIELDS = ("step", "kind", "repeat", "target", "restart_epoch", "healthy_epoch", "healthy",
-               "window_dir", "window_rc", "outcome", "receiver", "note")
+               "window_dir", "window_rc", "outcome", "note")
 MEASURED = "measured"
 OUTCOMES = (MEASURED, "not_healthy", "restart_failed", "not_performed", "window_stopped",
             "window_refused", "window_aborted", "window_error")
-RECEIVER_STATES = ("parked", "connected", "unread", "n/a", "")
 _OUTCOME_FAIL = {"not_healthy", "restart_failed"}
 _OUTCOME_TEXT = {
     "restart_failed": "the restart command failed (the unit did not start again)",
@@ -192,9 +185,6 @@ def append_step(tsv_path, step):
     outcome = step.get("outcome")
     if outcome not in OUTCOMES:
         raise ValueError(f"unknown step outcome {outcome!r} (expected one of {OUTCOMES})")
-    if (step.get("receiver") or "") not in RECEIVER_STATES:
-        raise ValueError(f"unknown receiver state {step.get('receiver')!r} "
-                         f"(expected one of {RECEIVER_STATES[:-1]})")
     exists = os.path.exists(tsv_path) and os.path.getsize(tsv_path) > 0
     with open(tsv_path, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter="\t", lineterminator="\n")
@@ -245,8 +235,7 @@ def grade_step(step, bounds, spread_columns, healthy_timeout_s=None):
     """One step row -> {"verdict", "reason", "time_to_healthy_s", "window"}."""
     out = {"step": step.get("step"), "kind": step.get("kind"), "repeat": step.get("repeat"),
            "target": step.get("target"), "outcome": step.get("outcome"),
-           "window_dir": step.get("window_dir"), "receiver": step.get("receiver") or "",
-           "time_to_healthy_s": None, "window": None}
+           "window_dir": step.get("window_dir"), "time_to_healthy_s": None, "window": None}
     r0, h = soak._f(step.get("restart_epoch")), soak._f(step.get("healthy_epoch"))
     if r0 is not None and h is not None:
         out["time_to_healthy_s"] = int(round(h - r0))
@@ -304,15 +293,11 @@ def evaluate(conf, steps, bounds, spread_columns=None):
                 g = grade_step(by_rep[r], bounds, spread_columns, healthy_timeout_s)
             else:
                 g = {"repeat": str(r), "verdict": UNKNOWN, "reason": "not run",
-                     "receiver": "", "time_to_healthy_s": None, "window": None}
+                     "time_to_healthy_s": None, "window": None}
             graded.append(g)
         passed = sum(1 for g in graded if g["verdict"] == PASS)
         tth = [g["time_to_healthy_s"] for g in graded if g.get("time_to_healthy_s") is not None]
-        receivers = {}
-        for g in graded:
-            if g.get("receiver") not in ("", "n/a", None):
-                receivers[g["receiver"]] = receivers.get(g["receiver"], 0) + 1
-        k = {"verdict": UNKNOWN, "passed": passed, "repeats": graded, "receivers": receivers,
+        k = {"verdict": UNKNOWN, "passed": passed, "repeats": graded,
              "max_time_to_healthy_s": max(tth) if tth else None, "reason": ""}
         if any(g["verdict"] == FAIL for g in graded):
             k["verdict"] = FAIL
@@ -329,16 +314,6 @@ def evaluate(conf, steps, bounds, spread_columns=None):
         for g in k["repeats"]:
             if g["verdict"] != PASS:
                 rep["reasons"].append(f"{kind} r{g.get('repeat')}: {g['verdict']} -- {g.get('reason')}")
-    # a PASS whose restarts hit a parked (or unread) receiver never proved a CONNECTED strih
-    # receiver survives the restart: say so next to the verdict, not only under the kind
-    rep["caveats"] = []
-    for kind, k in rep["kinds"].items():
-        weak = [f"{st} {k['receivers'][st]}" for st in ("parked", "unread") if k["receivers"].get(st)]
-        if k["verdict"] == PASS and weak:
-            rep["caveats"].append(
-                f"{kind} PASS: the restarted camera's strih receiver was {', '.join(weak)} of "
-                f"{len(k['repeats'])} restart(s) -- a connected receiver surviving the restart is "
-                f"not proven")
     verdicts = [b["verdict"]] + [k["verdict"] for k in rep["kinds"].values()]
     if FAIL in verdicts:
         rep["verdict"] = FAIL
@@ -382,23 +357,11 @@ def render_text(rep):
     for kind, k in rep["kinds"].items():
         lines.append(f"  {kind:<12} {k['verdict']:<8} {k['passed']}/{len(k['repeats'])} PASS, "
                      f"max time to healthy {_tth(k['max_time_to_healthy_s'])}")
-        parked = k["receivers"].get("parked", 0)
-        unread = k["receivers"].get("unread", 0)
-        if parked:
-            lines.append(f"    NOTE: the restarted camera's strih input was parked during "
-                         f"{parked}/{len(k['repeats'])} restart(s) -- no connected receiver saw "
-                         f"them; the window's connect-on-show hold connected it fresh")
-        if unread:
-            lines.append(f"    NOTE: the restarted camera's strih receiver state was unread during "
-                         f"{unread}/{len(k['repeats'])} restart(s)")
         for g in k["repeats"]:
-            rcv = f", receiver {g['receiver']}" if g.get("receiver") not in ("", None) else ""
             lines.append(f"    r{g.get('repeat')}: {g['verdict']:<8} healthy after "
-                         f"{_tth(g.get('time_to_healthy_s'))}{rcv}"
+                         f"{_tth(g.get('time_to_healthy_s'))}"
                          + (f" -- {g['reason']}" if g.get("reason") else ""))
     lines.append(f"  VERDICT: {rep['verdict']}")
-    for c in rep.get("caveats", []):
-        lines.append(f"  CAVEAT: {c}")
     for r in rep["reasons"]:
         lines.append(f"    - {r}")
     return "\n".join(lines)
@@ -411,7 +374,7 @@ def _cmd_record(a):
     append_step(a.tsv, {"step": a.step, "kind": a.kind, "repeat": a.repeat, "target": a.target,
                         "restart_epoch": a.restart_epoch, "healthy_epoch": a.healthy_epoch,
                         "healthy": a.healthy, "window_dir": a.window_dir, "window_rc": a.window_rc,
-                        "outcome": a.outcome, "receiver": a.receiver, "note": a.note})
+                        "outcome": a.outcome, "note": a.note})
     return 0
 
 
@@ -451,7 +414,6 @@ def main(argv=None):
     r.add_argument("--window-dir", default="")
     r.add_argument("--window-rc", default="")
     r.add_argument("--outcome", required=True)
-    r.add_argument("--receiver", default="")
     r.add_argument("--note", default="")
     g = sub.add_parser("grade-window", help="grade ONE soak window dir (prints verdict=...)")
     g.add_argument("--window-dir", required=True)

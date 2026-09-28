@@ -1,5 +1,5 @@
 //! #758 item 3 — `scripts/lib/live-freeze-watch.sh`: the in-run freeze watch. Polls the SAME
-//! "MV NDI camN" + frozen-camera-gate.py mechanism the [0/8]/[1/8] preflight and [2/8]/[2b/8]
+//! main "NDI camN" + frozen-camera-gate.py mechanism the [0/8]/[1/8] preflight and [2/8]/[2b/8]
 //! sender-bounce re-verify already use, in a BACKGROUND loop during the recording window, and
 //! writes a poison-file line per frozen verdict. Proven for real: starts the actual background
 //! loop against a FAKE `python3` on PATH (controllable exit code), waits a bounded amount of
@@ -51,7 +51,7 @@ impl Harness {
         let path_env = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap());
         let harness = format!(
             "set -uo pipefail\nHERE={:?}\n. {:?}\nlive_freeze_watch_start {:?} {:?} strih-host \
-             'MV NDI cam1,MV NDI cam2' /probe-bin-dir {poll_interval_s}",
+             'NDI cam1,NDI cam2' /probe-bin-dir {poll_interval_s}",
             self.tmp.path(),
             script(),
             self.pid_file,
@@ -112,7 +112,7 @@ fn a_healthy_run_never_writes_a_poison_line() {
 #[test]
 fn a_frozen_camera_writes_a_named_poison_line_within_one_poll_cycle() {
     // Fake frozen-camera-gate.py always reports FAIL (exit 1) naming a frozen camera.
-    let h = Harness::new("echo 'MV NDI cam5' >&2; exit 1");
+    let h = Harness::new("echo 'NDI cam5' >&2; exit 1");
     h.start("0.2");
     sleep(Duration::from_millis(500)); // several poll cycles well past detection
     h.stop();
@@ -122,7 +122,7 @@ fn a_frozen_camera_writes_a_named_poison_line_within_one_poll_cycle() {
         "verdict={verdict:?}"
     );
     assert!(
-        verdict.contains("MV NDI cam5"),
+        verdict.contains("NDI cam5"),
         "poison line must name the frozen camera: {verdict:?}"
     );
 }
