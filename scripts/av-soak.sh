@@ -71,6 +71,14 @@ set -euo pipefail
 #   --probe-bin-dir D  [PROBE_BIN_DIR]           dir holding the Linux recording-verdict
 #   --win-verdict-exe P [WIN_VERDICT_EXE_LOCAL]  the Windows recording-verdict.exe
 #   --spread-columns C [AV_SOAK_SPREAD_COLUMNS]  graded spread columns (see av_soak_decision.py)
+#   --lease-run-id ID  [AV_SOAK_LEASE_RUN_ID]    run under a rig lease the CALLER already holds with this
+#                      run id (the restart matrix, scripts/av-restart-matrix.sh, measures each window
+#                      with `--run --hours 0`): verified at setup and every slot, never acquired and
+#                      never released here (cleanup, --stop-leftovers); recording.state names no lease
+#   --lease-repo R     [AV_SOAK_LEASE_REPO, camera-box-av-soak]  the lease holder repo: with
+#                      --lease-run-id the CALLER's (required); the keep-alive refreshes only a
+#                      holder.json naming exactly this repo + run id, under the caller's exported
+#                      RIG_LEASE_MAX_HOLD_SECS
 # Other env: AV_SOAK_CAMS (default CAMERA_ACTIVE_SET; CAMBOX_OFFLINE_ACK/rig-fleet.txt acks are
 #   always removed), STRIH_HOST / STREAM_HOST (default from scripts/lib/obs-fleet.sh), PAINTER_IP
 #   (default cam2 from scripts/camera-set.sh), STRIH_CAPTURE_FPS / STREAM_CAPTURE_FPS (30, as
@@ -150,6 +158,8 @@ while [ "$#" -gt 0 ]; do
     --probe-bin-dir) need_value "$1" "$#"; PROBE_BIN_DIR="$2"; shift ;;
     --win-verdict-exe) need_value "$1" "$#"; WIN_VERDICT_EXE_LOCAL="$2"; shift ;;
     --spread-columns) need_value "$1" "$#"; AV_SOAK_SPREAD_COLUMNS="$2"; shift ;;
+    --lease-run-id) need_value "$1" "$#"; AV_SOAK_LEASE_RUN_ID="$2"; shift ;;
+    --lease-repo) need_value "$1" "$#"; AV_SOAK_LEASE_REPO="$2"; shift ;;
     -h | --help) usage; exit 0 ;;
     *) die 3 "unknown argument '$1' (try --help)" ;;
   esac
@@ -252,10 +262,33 @@ RIG_LEASE_REPO_NAME="${AV_SOAK_LEASE_REPO:-camera-box-av-soak}"
 RIG_LEASE_OURS="av-soak-${STAMP}-$$"
 LEASE_HOLD_S=$(( DURATION_S + SLOT_S + 1800 ))
 LEASE_EXPECTED_AT="$(date -u -d "+${LEASE_HOLD_S} seconds" +%Y-%m-%dT%H:%M:%SZ)"
+_CALLER_MAX_HOLD_S="${RIG_LEASE_MAX_HOLD_SECS:-}"
 # issue 1383: the lease keep-alive stops beating past acquired_at + this ceiling (the declared run
 # window), so a stuck-but-alive soak still ages into the heartbeat-stale reclaim. Set before the
 # heartbeat refresher starts: its subshell inherits the value.
 RIG_LEASE_MAX_HOLD_SECS="$LEASE_HOLD_S"
+# --lease-run-id (+ --lease-repo): the caller (the restart matrix) holds the lease across its
+# restarts. This run verifies and refreshes it under the caller's OWN identity (repo + run id) and
+# the caller's hold ceiling (the RIG_LEASE_MAX_HOLD_SECS the caller exported -- the ceiling counts
+# from the caller's acquired_at, so this window's own would stop the beat early), but never acquires
+# or releases it; recording.state names no lease (so --stop-leftovers of this run dir can never
+# release the caller's lease).
+LEASE_INHERITED="${AV_SOAK_LEASE_RUN_ID:-}"
+REC_STATE_LEASE="$RIG_LEASE_OURS"
+if [ -n "$LEASE_INHERITED" ]; then
+  [ -n "${AV_SOAK_LEASE_REPO:-}" ] || die 3 "--lease-run-id needs --lease-repo (the caller's lease holder repo)"
+  RIG_LEASE_OURS="$LEASE_INHERITED"
+  REC_STATE_LEASE=""
+  # the caller's ceiling; none exported -> the lease lib's own default (never this window's own:
+  # it counts from the caller's acquired_at and would stop the beat of a long-held lease)
+  if [ -n "$_CALLER_MAX_HOLD_S" ]; then
+    RIG_LEASE_MAX_HOLD_SECS="$_CALLER_MAX_HOLD_S"
+    LEASE_CEILING_NOTE="the caller's hold ceiling ${RIG_LEASE_MAX_HOLD_SECS} s"
+  else
+    unset RIG_LEASE_MAX_HOLD_SECS
+    LEASE_CEILING_NOTE="the lease lib's default hold ceiling (the caller exported none)"
+  fi
+fi
 VERDICT_BIN="${PROBE_BIN_DIR:+$PROBE_BIN_DIR/recording-verdict}"
 
 # --- --plan: print every step, touch nothing ------------------------------------------------------
@@ -280,8 +313,13 @@ EOF
   fi
   echo
   echo "SETUP (once) -- reads first, nothing changes until step 6:"
-  echo "  1. rig lease (issue 830): rig_lease_acquire repo=${RIG_LEASE_REPO_NAME} run_id=${RIG_LEASE_OURS} job=av-soak expected_release_at=${LEASE_EXPECTED_AT}"
-  echo "     a live foreign holder -> refuse (exit 4); rig_heartbeat_start av-soak ${RIG_LEASE_REPO_NAME} ${RIG_LEASE_OURS} (issue 281; every beat refreshes this lease, issue 1383)"
+  if [ -n "$LEASE_INHERITED" ]; then
+    echo "  1. rig lease (issue 830): the caller's rig lease ${LEASE_INHERITED} (repo ${RIG_LEASE_REPO_NAME}) -- verified + refreshed with rig_lease_refresh_if_mine (else refuse, exit 4), never acquired or released here"
+    echo "     rig_heartbeat_start av-soak ${RIG_LEASE_REPO_NAME} ${RIG_LEASE_OURS} (issue 281; every beat refreshes the caller's lease under ${LEASE_CEILING_NOTE}, issue 1383)"
+  else
+    echo "  1. rig lease (issue 830): rig_lease_acquire repo=${RIG_LEASE_REPO_NAME} run_id=${RIG_LEASE_OURS} job=av-soak expected_release_at=${LEASE_EXPECTED_AT}"
+    echo "     a live foreign holder -> refuse (exit 4); rig_heartbeat_start av-soak ${RIG_LEASE_REPO_NAME} ${RIG_LEASE_OURS} (issue 281; every beat refreshes this lease, issue 1383)"
+  fi
   echo "  2. rig-busy guard (issue 1271, read-only): stray_session_check_assert ${OBS_DIR} ${STRIH_HOST} ${STREAM_HOST} 'the av-soak setup'"
   echo "  3. read-only: stream program must be '${STREAM_DEV_SCENE}' (else refuse: run scripts/rig-mode.sh test first); strih program snapshot:"
   plan_cmd python3 "$OBS_DIR/obs_phase2.py" program-scene --host "$STREAM_HOST"
@@ -491,7 +529,7 @@ note_recording() {  # K BOX PATH -> recordings.tsv + the exact-path removal plan
 write_rec_state() {
   printf 'strih=%s\nstrih_since=%s\nstream=%s\nstream_since=%s\nlease=%s\nstart_window_s=%s\n' \
     "$STRIH_REC_STARTED" "$STRIH_REC_SINCE" "$STREAM_REC_STARTED" "$STREAM_REC_SINCE" \
-    "$RIG_LEASE_OURS" "$((OBS_TIMEOUT_S + 30))" > "$RUN_DIR/recording.state"
+    "$REC_STATE_LEASE" "$((OBS_TIMEOUT_S + 30))" > "$RUN_DIR/recording.state"
 }
 set_rec_flag() {  # BOX 0|1
   if [ "$1" = strih ]; then
@@ -526,24 +564,18 @@ rec_stop() {  # K BOX HOST LOG -> REC_PATH; the flag clears only when the status
   note_recording "$1" "$2" "$REC_PATH"
 }
 
-# broadcast_now -> live | unknown | idle (the pure av_soak_rig_state.py decision over one rig-busy read)
+# broadcast_now -> live | unknown | idle (the pure av_soak_rig_state.py decision over one rig-busy read;
+# in cleanup the read runs in its own session)
 broadcast_now() {
-  local out
-  out="$(obs rig-busy-check --strih-host "$STRIH_HOST" --stream-host "$STREAM_HOST" \
-    --password "${OBS_PASSWORD:-}" 2>/dev/null || true)"
-  printf '%s' "$out" | python3 "$RIG_STATE" broadcast 2>/dev/null || echo unknown
+  av_soak_broadcast_of "$RIG_STATE" \
+    "$(av_soak_rig_busy_read "$OBS_DIR" "$STRIH_HOST" "$STREAM_HOST" "$OBS_TIMEOUT_S" "$IN_CLEANUP")"
 }
 # broadcast_settled -> live | unknown | idle, an unreadable read retried (BROADCAST_READS reads,
 # BROADCAST_RETRY_S apart) before it counts: one stream OBS restart must neither end an 8 h run nor
 # keep a recording running. Used wherever a recording is started or stopped.
 broadcast_settled() {
-  local i b=unknown
-  for ((i = 1; i <= BROADCAST_READS; i++)); do
-    b="$(broadcast_now)"
-    if [ "$b" != unknown ]; then break; fi
-    if [ "$i" -lt "$BROADCAST_READS" ]; then sleep "$BROADCAST_RETRY_S"; fi
-  done
-  printf '%s\n' "$b"
+  av_soak_broadcast_of "$RIG_STATE" "$(av_soak_rig_busy_settled "$OBS_DIR" "$STRIH_HOST" "$STREAM_HOST" \
+    "$OBS_TIMEOUT_S" "$RIG_STATE" "$BROADCAST_READS" "$BROADCAST_RETRY_S" "$IN_CLEANUP")"
 }
 
 cleanup() {
@@ -629,6 +661,8 @@ cleanup() {
     done
     if [ "$LEASE_HELD" = 1 ]; then
       log "rig lease KEPT ($RIG_LEASE_OURS) -- no E2E may start over a recording the soak may have left; --stop-leftovers releases it once nothing is left" 2>/dev/null
+    elif [ -n "$LEASE_INHERITED" ]; then
+      log "the caller's rig lease ($LEASE_INHERITED) stays held -- its holder releases it once nothing is left" 2>/dev/null
     fi
     exit 5
   fi
@@ -649,13 +683,23 @@ trap 'ABORT_REASON="SIGHUP"; exit 5' HUP
 
 # ---- setup ----
 log "run dir $RUN_DIR; ${WINDOWS} window(s) of ${WINDOW_S} s every ${SLOT_S} s; cameras: $SOAK_CAMS"
-set +e
-lease_out="$(rig_lease_acquire "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" "" av-soak "$LEASE_EXPECTED_AT")"
-lease_rc=$?
-set -e
-log "$lease_out"
-[ "$lease_rc" -eq 0 ] || die 4 "the rig lease is held (${lease_out#RIG_LEASE_HELD_BY=}) -- rerun when it is free"
-LEASE_HELD=1
+if [ -n "$LEASE_INHERITED" ]; then
+  # the caller's lease, verified by the ONE holder keep-alive (issue 1383): only a holder.json naming
+  # exactly this repo + run id, under the caller's hold ceiling, is refreshed (rc 0)
+  _lease_rc=0
+  _lease_out="$(rig_lease_refresh_if_mine "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" 2>&1)" || _lease_rc=$?
+  [ "$_lease_rc" = 0 ] \
+    || die 4 "the rig lease is not held by the caller ${RIG_LEASE_REPO_NAME}#${LEASE_INHERITED} (${_lease_out#RIG_LEASE_REFRESH=}) -- --lease-run-id runs only under a lease its caller holds"
+  log "running under the caller's rig lease ${RIG_LEASE_REPO_NAME}#${LEASE_INHERITED} (verified; never acquired or released here; ${LEASE_CEILING_NOTE})"
+else
+  set +e
+  lease_out="$(rig_lease_acquire "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" "" av-soak "$LEASE_EXPECTED_AT")"
+  lease_rc=$?
+  set -e
+  log "$lease_out"
+  [ "$lease_rc" -eq 0 ] || die 4 "the rig lease is held (${lease_out#RIG_LEASE_HELD_BY=}) -- rerun when it is free"
+  LEASE_HELD=1
+fi
 rig_heartbeat_start av-soak "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" || log "WARNING: could not start the rig-active heartbeat"
 SETUP_STARTED=1
 

@@ -1584,7 +1584,7 @@ only the behavioural tests can kill that mutant, because the parity trace stays 
 script (dev1-local, not committed): `~/.claude/work-products/issue-1381-vban-pacer-sim/mut_lane2.py`
 (44/44 killed).
 
-## Two fake-harness traps from the soak orchestrator tests (issue 1367)
+## Fake-harness traps from the soak and restart-matrix tests (issue 1367)
 
 - **`bash -c 'sleep 30' marker` is not a process whose command line names `marker`.** bash execs
   the last simple command of a `-c` string, so the process becomes `sleep 30` and `$0` is gone.
@@ -1595,3 +1595,14 @@ script (dev1-local, not committed): `~/.claude/work-products/issue-1381-vban-pac
   argument.** A parser that splits the logged line on whitespace then takes `\` as the next token
   (the soak's `powershell ... -EncodedCommand <b64>` single ssh argument). Unescape (`\ ` -> ` `)
   before splitting, or log with a separator that cannot occur in an argument.
+- **A fake `sshpass`/`ssh` that takes the host from ANY argument containing `@` reads the remote
+  text as the host** once that text holds an `@` (`journalctl --since @<epoch>`, an email, a
+  `user@` in a nested command). The remote text is the LAST argument: scan `"${@:1:$#-1}"` only
+  (the restart-matrix fake, issue 1367 review round 1).
+- **pytest's `tmp_path` contains the test function's NAME.** A test that scans a `--plan`
+  printout for banned words (`reboot`, `shutdown`) fails on its own run dir when the test is
+  called `test_plan_never_names_a_reboot...`: name such a test without the banned words.
+- **A lease fixture with a fixed `acquired_at` date goes stale as the clock moves.** The issue-1383
+  keep-alive refuses a holder past `acquired_at + RIG_LEASE_MAX_HOLD_SECS`, so a fixture dated a
+  few hours back passes today and fails tomorrow. Stamp it at test time
+  (`time.gmtime(time.time() - age_s)`), as `tests/python/test_av_soak_lease_inherit_1367.py` does.

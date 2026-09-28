@@ -15,6 +15,8 @@
 #     QPSK marker log) -- cam2 is never written,
 #   - the argv builders of the two on-box extracts and the dev1 merge, used by BOTH the --plan
 #     printout and the --run execution (plan == run by construction),
+#   - the ONE retried rig-busy read (av_soak_rig_busy_settled) the soak, its --stop-leftovers and
+#     the restart matrix (scripts/av-restart-matrix.sh) share,
 #   - the record-volume free-space read: the SAME `:8899/record-dir-stats.json` fetch and the SAME
 #     helper, `recordings_free_line_from_stats` (scripts/lib/recordings-free-line.sh, over
 #     `bundle_state_gather.recordings_free_line`), that recording-e2e.sh's
@@ -187,6 +189,38 @@ av_soak_merge_argv() {
   if [ -n "$expected" ]; then
     _av_mg+=(--av-expected-ms "$expected")
   fi
+}
+
+# av_soak_rig_busy_read OBS_DIR STRIH STREAM TIMEOUT_S [OWN_SESSION] -> the raw one-line JSON of ONE
+# bounded `obs_phase2.py rig-busy-check` (empty on any failure). OWN_SESSION=1 runs it under
+# `setsid -w` (a caller's cleanup: a second Ctrl-C at the terminal must not kill the read). Always 0.
+av_soak_rig_busy_read() {
+  local pre=()
+  if [ "${5:-0}" = 1 ]; then pre=(setsid -w); fi
+  "${pre[@]}" timeout "$4" python3 "$1/obs_phase2.py" rig-busy-check --strih-host "$2" \
+    --stream-host "$3" --password "${OBS_PASSWORD:-}" 2>/dev/null || true
+}
+
+# av_soak_broadcast_of RIG_STATE_PY RAW -> live | unknown | idle: the pure av_soak_rig_state.py
+# decision over one rig-busy read (a failed decision is unknown). Always 0.
+av_soak_broadcast_of() {
+  printf '%s' "${2:-}" | python3 "$1" broadcast 2>/dev/null || echo unknown
+}
+
+# av_soak_rig_busy_settled OBS_DIR STRIH STREAM TIMEOUT_S RIG_STATE_PY READS GAP_S [OWN_SESSION] ->
+# the raw JSON of the first READABLE rig-busy read (the last read when none is): an unreadable read
+# is retried READS times, GAP_S apart, before it counts -- one OBS restart must neither end a run nor
+# keep a recording running. The ONE copy of the retried read the soak's slots and cleanup, its
+# --stop-leftovers and the restart matrix all use. Always 0.
+av_soak_rig_busy_settled() {
+  local obs_dir="$1" strih="$2" stream="$3" tmo="$4" rig_state="$5" reads="$6" gap="$7" own="${8:-0}"
+  local i out=""
+  for ((i = 1; i <= reads; i++)); do
+    out="$(av_soak_rig_busy_read "$obs_dir" "$strih" "$stream" "$tmo" "$own")"
+    if [ "$(av_soak_broadcast_of "$rig_state" "$out")" != unknown ]; then break; fi
+    if [ "$i" -lt "$reads" ]; then sleep "$gap"; fi
+  done
+  printf '%s' "$out"
 }
 
 # av_soak_free_space_verdict HOST PORT MIN_FREE_GB SCRIPTS_DIR -> prints "<VERDICT> <free_gb>" for

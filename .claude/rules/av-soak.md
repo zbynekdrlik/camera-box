@@ -9,6 +9,7 @@ paths:
   - "tests/python/test_av_soak_decision_1367.py"
   - "tests/python/test_av_soak_rig_state_1367.py"
   - "tests/python/test_av_soak_orchestrator_1367.py"
+  - "tests/python/test_av_soak_lease_inherit_1367.py"
 ---
 
 # The 8 h stream-output A/V soak (issue 1367) -- measure-only harness + runbook
@@ -23,10 +24,11 @@ align), so looping it would hide the drift. The soak only measures.
 | File | Role |
 |---|---|
 | `scripts/av-soak.sh` | the orchestrator: `--plan` (DEFAULT, touches nothing), `--run`, `--report RUN_DIR`, `--stop-leftovers RUN_DIR` (the unit's `ExecStopPost` safety net) |
-| `scripts/lib/av-soak.sh` | pure builders shared by plan AND run (argv of the two extracts + the merge), the window arithmetic, the two read-only cam2 reads, the record-volume free-space read |
+| `scripts/lib/av-soak.sh` | pure builders shared by plan AND run (argv of the two extracts + the merge), the window arithmetic, the two read-only cam2 reads, the record-volume free-space read, the ONE retried rig-busy read (`av_soak_rig_busy_settled` / `av_soak_broadcast_of`, also used by `--stop-leftovers` and the restart matrix) |
 | `scripts/av_soak_decision.py` | pure decision: `bounds`, `row` (one CSV row per window from the merged verdict JSON), `report` (1 h partial + full, exit 0 PASS / 1 FAIL / 2 UNKNOWN / 3 input error) |
 | `scripts/lib/av-soak-leftovers.sh` | the `--stop-leftovers` mode (`av_soak_stop_leftovers`): runs the `leftovers` plan, stops/clears, releases the soak's lease when nothing is left |
 | `scripts/av_soak_rig_state.py` | pure rig-state decisions over one `rig-busy-check` read: `broadcast` (live / unknown / idle -- may cleanup cut the strih program?) and `leftovers` (the `--stop-leftovers` plan: which flagged recording is provably the soak's) |
+| `--lease-run-id RUN_ID` + `--lease-repo R` | the restart matrix's opt-in (`.claude/rules/av-restart-matrix.md`): run one window under a lease the CALLER holds -- verified and refreshed by `rig_lease_refresh_if_mine` under the caller's repo + run id and the caller's exported `RIG_LEASE_MAX_HOLD_SECS` (the ceiling counts from the caller's acquired_at), never acquired or released (cleanup, `--stop-leftovers`); `recording.state` names no lease. Default behaviour unchanged |
 | `bundle_state_gather.recordings_free_line` | the one "<VERDICT> <free_gb>" line the free-space read prints; the soak's `av_soak_free_space_verdict` and recording-e2e.sh's `check_recordings_free_space` both read it through `scripts/lib/recordings-free-line.sh` (issue 1386), which `scripts/av-soak.sh` sources |
 
 Every rig action is an existing primitive: the issue-830 lease (own holder name
