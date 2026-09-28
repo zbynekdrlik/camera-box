@@ -142,11 +142,15 @@ _SMOKE = ("import sys; sys.path.insert(0, \"/opt/camera-box\"); "
 _NOT_SMOKE_IMPORTABLE = {_SERVER, "obs_phase2.py"}
 
 
-def _smoke_rc(tree_dir, cwd):
+def _smoke(tree_dir, cwd):
     # The setup scripts' own post-install check, pointed at *tree_dir* instead of /opt/camera-box.
     prog = _SMOKE.replace("/opt/camera-box", str(tree_dir))
     return subprocess.run([sys.executable, "-I", "-B", "-c", prog], cwd=cwd, capture_output=True,
-                          text=True, check=False).returncode
+                          text=True, check=False)
+
+
+def _smoke_rc(tree_dir, cwd):
+    return _smoke(tree_dir, cwd).returncode
 
 
 def test_both_setup_scripts_smoke_import_the_installed_tree_before_enabling():
@@ -190,8 +194,11 @@ def test_the_smoke_import_catches_every_missing_module_it_can_load(tmp_path):
         for name in names:
             if name != missing:
                 (tree / name).write_bytes((_SCRIPTS / name).read_bytes())
-        assert _smoke_rc(tree, _SCRIPTS) != 0, (
-            f"a tree without {missing} passes the post-install smoke import -- extend the import")
+        run = _smoke(tree, _SCRIPTS)
+        # The failure must be the missing module itself, never an unrelated error in a copied one.
+        assert run.returncode != 0 and f"No module named '{missing[:-3]}'" in run.stderr, (
+            f"a tree without {missing} passes the post-install smoke import -- extend the import "
+            f"(rc {run.returncode}, stderr {run.stderr[-300:]!r})")
 
 
 def test_both_setup_scripts_iterate_the_declared_list():

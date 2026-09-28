@@ -304,8 +304,9 @@ def tasklist_csv():
     obs process-count facet (via `_parse_tasklist_obs_process_names`) AND the VB-Matrix presence
     facet (via `bsg.vb_matrix_process_from_listing`, which needs the raw PID column) — gather it once
     per request (the server's `_windows_process_facets`) and pass the text to both, never two
-    native tasklist spawns (issue 1227 review 🟡). "" on any failure — a live box always lists SOME processes, so an empty
-    result means the subprocess failed (both consumers treat "" as UNKNOWN, never a guessed count)."""
+    native tasklist spawns (issue 1227 review 🟡). "" on any failure — a live box always lists SOME
+    processes, so an empty result means the subprocess failed (both consumers treat "" as UNKNOWN,
+    never a guessed count)."""
     try:
         out = subprocess.run(
             ["tasklist", "/FO", "CSV", "/NH"],

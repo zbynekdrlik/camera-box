@@ -2,6 +2,7 @@
 paths:
   - "scripts/vb-matrix-alert-watchdog.sh"
   - "scripts/vb_matrix_decision.py"
+  - "scripts/bundle_state_windows.py"
   - "systemd/vb-matrix-alert-watchdog.*"
   - "tests/python/test_vb_matrix_*.py"
   - "tests/harness_vb_matrix_*.rs"

@@ -59,7 +59,9 @@ import bundle_state_gather as bsg  # noqa: E402
 # Issue 1386 slice D: the Windows-only identity readers and their caches live in
 # bundle_state_windows, and the timestamped logger they share with this server in
 # bundle_state_serverlog. The orchestration below calls the readers through THIS module's globals,
-# so a test that patches `bss.<reader>` still reaches the gather.
+# so a test that patches `bss.<reader>` reaches the gather. Such a patch reaches ONLY calls this
+# module makes: a call made inside bundle_state_windows (a reader's own helpers, its own log)
+# resolves there, so patch that module for it. Reset a cache in place, never rebind it.
 from bundle_state_serverlog import log  # noqa: E402
 from bundle_state_windows import (  # noqa: E402
     _parse_tasklist_obs_process_names,

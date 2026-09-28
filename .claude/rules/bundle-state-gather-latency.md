@@ -42,11 +42,17 @@ paths:
   - `bundle_state_serverlog`: the ONE timestamped stdout `log()` the server and those readers
     share (the hyphenated server cannot be imported back by a sibling).
   - The server keeps the orchestration (`_windows_*_facets`) and calls the readers through its OWN
-    globals, and re-exports every reader, parser and cache its tests reach as `bss.<name>`. The
-    caches are the same dict objects, so a test resets them in place through the server. Tests
-    patch `bss.subprocess.run`, the one process-wide module the readers call, so the server keeps
-    `import subprocess`. A test that patches `bss.<reader>` reaches the gather; a patch of
-    `bss.log` does NOT reach a reader's own WARNING (the reader calls `bundle_state_serverlog.log`).
+    globals, and re-exports every reader, parser and cache its tests reach as `bss.<name>`.
+  - **A `bss.<name>` patch reaches ONLY the calls the server itself makes:** the readers
+    `_windows_*_facets` calls, and the server's own `log` calls. A call made inside
+    `bundle_state_windows` resolves in that module: `port4455_owner` → `_port4455_owning_pid` →
+    `_parse_netstat_listening_pid`, `obs_process_list` → `tasklist_csv`, and every reader's own
+    `log` WARNING. Patch `bundle_state_windows.<name>` for those; a `bss.<name>` patch there is a
+    silent no-op.
+  - The caches are the same dict objects in both modules: reset them IN PLACE (item assignment or
+    `.update`), never rebind the name.
+  - Tests patch `bss.subprocess.run`: `subprocess` is one process-wide module object, so that
+    reaches every reader. That is why the server keeps `import subprocess`.
 - **A new facet goes into its family module and into `__all__`.** A new function in a module must
   be called through a name the server reaches (`bsg.<name>`): the server tests monkeypatch
   `bss.bsg.<name>`, which only reaches calls made through the facade.
