@@ -47,9 +47,9 @@ paths:
   - A box missing one module serves no `:8899` at all: the server exits on the ImportError, and the
     Windows supervisor loop restarts it every 5 s. So redeploy the WHOLE list, never one changed file.
   - Both setup scripts fetch the files from origin `dev` but take the list from the checkout, so
-    after the install they run `python3 -I -c '…; import bundle_state_gather'` against
+    after the install they run `python3 -I -B -c '…; import bundle_state_gather'` against
     `/opt/camera-box` and `fail` on a partial tree. `-I` keeps a caller's cwd (e.g. `scripts/`) off
-    `sys.path`.
+    `sys.path`; `-B` keeps the root-run check from leaving a root-owned `__pycache__` in the tree.
 - **Proof of neutrality:** `test_bundle_state_split_1386.py` compares against a golden captured from
   the pre-split code (`fixtures/bundle_state_split_1386/golden.json`). It covers every parser over the
   recorded logs + one synthetic all-families log + their bounded reads, and the served JSON on both

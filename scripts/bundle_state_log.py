@@ -32,10 +32,10 @@ LOG_HEAD_BYTES = 2 * 1024 * 1024  # ~2 MB — a wide margin over the startup ban
 LOG_TAIL_BYTES = 5 * 1024 * 1024  # ~5 MB — the newest state a caller might need (e.g. the latest
                                    # genlock capability marker).
 # A separator that can never fake a real log line: no digits (so it can never satisfy a
-# `\d+\.\d+\.\d+` / `fps:\s+\d+/` style pattern in the facet modules), no colon-prefixed keyword any parser
-# scans for ("OBS ", "DistroAV (Version", "video settings reset:", "genlock:"), and newline-padded
-# on both sides so a byte-cut mid-line on either side of the join can never merge into something a
-# parser could mistake for a real one.
+# `\d+\.\d+\.\d+` / `fps:\s+\d+/` style pattern in the facet modules), no colon-prefixed keyword
+# any parser scans for ("OBS ", "DistroAV (Version", "video settings reset:", "genlock:"), and
+# newline-padded on both sides so a byte-cut mid-line on either side of the join can never merge
+# into something a parser could mistake for a real one.
 # #1222 review: verified digit-free by construction (a future unanchored `\d+`-style parser
 # would violate the claim above otherwise) -- keep it that way if this text ever changes.
 LOG_BOUNDED_READ_SEPARATOR = (

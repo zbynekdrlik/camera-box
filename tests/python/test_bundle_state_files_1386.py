@@ -141,7 +141,7 @@ _SMOKE = "import sys; sys.path.insert(0, \"/opt/camera-box\"); import bundle_sta
 def _smoke_rc(tree_dir, cwd):
     # The setup scripts' own post-install check, pointed at *tree_dir* instead of /opt/camera-box.
     prog = _SMOKE.replace("/opt/camera-box", str(tree_dir))
-    return subprocess.run([sys.executable, "-I", "-c", prog], cwd=cwd, capture_output=True,
+    return subprocess.run([sys.executable, "-I", "-B", "-c", prog], cwd=cwd, capture_output=True,
                           text=True, check=False).returncode
 
 
@@ -152,7 +152,7 @@ def test_both_setup_scripts_smoke_import_the_installed_tree_before_enabling():
             ("setup-imag.sh", 'for f in "${BUNDLE_STATE_SERVER_FILES[@]}"; do',
              "systemctl --user enable imag-bundle-state-server.service")):
         text = (_SCRIPTS / script).read_text(encoding="utf-8")
-        smoke = f"python3 -I -c '{_SMOKE}'"
+        smoke = f"python3 -I -B -c '{_SMOKE}'"
         assert text.count(smoke) == 1, f"{script} must smoke-import the installed tree once"
         assert text.index(loop) < text.index(smoke) < text.index(enable), (
             f"{script}: install the tree, then smoke-import it, then enable the unit")
