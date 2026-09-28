@@ -21,7 +21,7 @@ set -euo pipefail
 #     - the rig-busy guard again, then the mutations: the issue-1242 connect-on-show HOLD the E2E
 #       uses (connect-on-show-hold.sh -- a hidden program-path input would otherwise be cut in cold
 #       and parked), and the measurement burns ON (obs_burn_filter.py) only where they were OFF
-#   every slot (default every 600 s, on a fixed grid from the first slot):
+#   every slot (default every 1200 s, on a fixed grid from the first slot):
 #     - the lease still ours, both record volumes above RECORDINGS_FREE_MIN_GB (else the run STOPS),
 #       the stream program still the development scene and the painter service active (else the rig
 #       left TEST mode and the run STOPS; an unreadable read or a stalled marker log is a skipped
@@ -64,8 +64,8 @@ set -euo pipefail
 #
 # OPTIONS (env equivalent in brackets):
 #   --hours H          [AV_SOAK_HOURS, 8]        run length; the last window starts at H
-#   --slot-secs S      [AV_SOAK_SLOT_SECS, 600]  one window per slot (the acceptance: >= 1 per 10 min)
-#   --segment-secs S   [AV_SOAK_SEGMENT_SECS, 30] seconds each camera is on strih program per window
+#   --slot-secs S      [AV_SOAK_SLOT_SECS, 1200] one window per slot (>= 1 per 20 min; the strih-lx decode needs ~8 min)
+#   --segment-secs S   [AV_SOAK_SEGMENT_SECS, 20] seconds each camera is on strih program per window
 #   --run-dir D        [AV_SOAK_RUN_DIR, ~/.camera-box/av-soak/<UTC stamp>]
 #   --probe-bin-dir D  [PROBE_BIN_DIR]           dir holding the Linux recording-verdict
 #   --win-verdict-exe P [WIN_VERDICT_EXE_LOCAL]  the Windows recording-verdict.exe
@@ -156,8 +156,8 @@ done
 DECISION="$HERE/av_soak_decision.py"
 RIG_STATE="$HERE/av_soak_rig_state.py"
 HOURS="${AV_SOAK_HOURS:-8}"
-SLOT_S="${AV_SOAK_SLOT_SECS:-600}"
-SEGMENT_S="${AV_SOAK_SEGMENT_SECS:-30}"
+SLOT_S="${AV_SOAK_SLOT_SECS:-1200}"
+SEGMENT_S="${AV_SOAK_SEGMENT_SECS:-20}"
 MIN_SEGMENT_S="${AV_SOAK_MIN_SEGMENT_SECS:-10}"
 SPREAD_ARGS=()
 if [ -n "${AV_SOAK_SPREAD_COLUMNS+x}" ]; then SPREAD_ARGS=(--spread-columns "$AV_SOAK_SPREAD_COLUMNS"); fi

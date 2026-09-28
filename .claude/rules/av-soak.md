@@ -116,7 +116,7 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   Before every slot a record volume below `RECORDINGS_FREE_MIN_GB` (50) STOPS the run cleanly
   (UNKNOWN, never a false pass).
 - **The slot budget is checked up front:** window + decode + merge + overhead (90 s) must fit the
-  slot; the decode bound defaults to what the slot leaves (210 s for 7 x 30 s in 600 s), merge 90 s,
+  slot; the decode bound defaults to what the slot leaves (880 s for 7 x 20 s in 1200 s -- strih-lx decodes ~8.5 frames/s at idle priority, ROZHODNUTÉ 5861667625), merge 90 s,
   and a decode bound under 60 s refuses the run (exit 3, the message names the budget that does not
   fit). Every slot writes a `timing.tsv` line -- read it after the 1 h run before trusting the
   budget.
