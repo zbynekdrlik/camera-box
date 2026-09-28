@@ -8,7 +8,7 @@ paths:
   - "tests/genlock_audio_buffering_wiring_1367.rs"
   - "tests/genlock_audio_mix_guard_1381.rs"
   - "tests/c/genlock_audio_mix_guard_1381_harness.c"
-  - "vendor/obs-studio/libobs/obs-internal.h"
+  - "vendor/obs-studio/libobs/obs-genlock-mix-guard.h"
   - "scripts/obs-guarded-launch.ps1"
   - "scripts/rig-health-audit.py"
   - "scripts/launch-obs-genlock.sh"
@@ -177,93 +177,118 @@ hears from causing it.
   buffering by the time it was cut in.
 - The only per-source re-anchor upstream has is `ignore_audio`, and only at the MAXIMUM: drop the
   samples behind the window; with none left set `audio_pending`, `audio_ts = 0`,
-  `timing_set = false`. The next packet then maps a stamp that is NOT direct (farther than
-  `MAX_TS_VAR` = 2 s from the OBS clock: NDI's 100 ns epoch timecode) to its arrival
-  (`reset_audio_timing`); a direct stamp (ASIO/WASAPI capture, media) keeps its own time.
+  `timing_set = false`. The next packet then maps the source's stamp to its arrival
+  (`reset_audio_timing`) -- but only when its placement FOLLOWS `timing_adjust`:
+  - a stamp within `MAX_TS_VAR` (2 s) of the OBS clock is "direct" (ASIO/WASAPI capture, media):
+    `timing_adjust` is forced to 0, the source keeps its own time;
+  - a genlock source in the TIMECODE hold is placed at its timecode + the measured video delay
+    through the live wall-vs-mono offset, a term that CANCELS `timing_adjust`
+    (`genlock_audio_place_term_ns`), so the restart does not move it either;
+  - an NDI source with genlock off, or on the latency hold, follows `timing_adjust` (NDI stamps
+    are 100 ns epoch timecodes, never direct): the restart puts it at its arrival.
 - A hidden late source's buffer is never discarded (`discard_audio` returns at "can't discard"), so
   under a filter alone it would pile up to `MAX_BUF_SIZE` (~21 s) and push the mix to the maximum
   at the cut. The non-mixed path therefore keeps the source at the window every tick.
+- Composites (scenes, transitions) are never in `first_audio_source`: `is_audio_source` is
+  `OBS_SOURCE_AUDIO` only and obs-module.c refuses a composite audio source. A scene reaches the
+  render order only through a view's active tree, i.e. as a member.
+- The frontend starts the audio thread (`ResetAudio`) before it loads the scene collection, so the
+  program sources JOIN the mix on some later tick -- a launch is a series of entries.
 
-**What ships (obs-audio.c, one block before `find_min_ts`).**
+**What ships.**
 
-| Piece | C |
+| Piece | Where |
 |---|---|
-| mix membership | `genlock_mix_mark_members(audio)` right after the output mixes' active trees are in the render order, BEFORE the catch-all loop: a mixer-tick counter (`obs_core_audio.genlock_mix_tick`) stamped on each member (`obs_source.genlock_mix_tick`) + `genlock_mix_entered` (not a member on the previous tick); `genlock_mix_is_member` / `genlock_mix_joined` |
-| min_ts | `find_min_ts` and `mark_invalid_sources` count members only (`genlock_mix_source_is_member`) |
-| decision | `genlock_mix_guard_reason(member, entered, composite, audio_ts, window_start)`: NOT_MIXED / ENTERED / NONE |
-| re-anchor | `genlock_mix_guard_reanchor`, called under `audio_buf_mutex` in the render loop before upstream's maxed block (then `continue`) |
-| log | `genlock_mix_guard_would_add_ms` (add_audio_buffering's own rounding + clamp) and `genlock_mix_guard_log_due` |
+| the pure decisions: membership (`genlock_mix_is_member`), the entry rule (`genlock_mix_joined`: a never-marked source joins on its first membership, a marked one when it was not a member on the previous tick), the reason (`genlock_mix_guard_reason`: NOT_MIXED / ENTERED / NONE), what stock OBS would have added (`genlock_mix_guard_would_add_ms`: add_audio_buffering's rounding + clamp), the log cadence (`genlock_mix_guard_log_due`) | `obs-genlock-mix-guard.h` (stdint/stdbool only) |
+| the mixer tick: `genlock_mix_tick_now`, a FILE-SCOPE static in obs-audio.c, never reset (obs_free_audio zeroes `struct obs_core_audio` on an audio reset while the sources keep their last tick; a counter there brought a stale member back) | obs-audio.c |
+| the mark: `genlock_mix_mark_members(audio)` right after the output mixes' active trees are in the render order, BEFORE the catch-all loop; stamps `obs_source.genlock_mix_tick` + `genlock_mix_entered` | obs-audio.c, obs-internal.h |
+| min_ts: `find_min_ts` and `mark_invalid_sources` count members only (`genlock_mix_source_is_member`) | obs-audio.c |
+| the re-anchor: `genlock_mix_guard_reanchor`, under `audio_buf_mutex` in the render loop before upstream's maxed block (then `continue`) | obs-audio.c |
 
 - **Membership = any output mix's active tree** (every `obs->video.mixes` view, the design's words);
-  a source active in a non-audio canvas stays upstream (conservative).
+  a source active in a non-audio canvas stays upstream (conservative). Every root node, including
+  `push_audio_tree2`'s duplicates, is a member.
 - **Not mixed + behind the window** (by more than discard_audio's 1 ns rounding): re-anchored every
-  tick, at any buffering level.
-- **Entered the mix this tick + behind**: re-anchored once instead of growing the buffering. The
-  sources present on the mixer's FIRST tick are the mix, not an entry (a never-marked source has tick
-  0, so tick 1 reads it as a member of tick 0): a source late at launch keeps the floor-then-dynamic
-  behaviour above (the stream ASIO startup race).
+  tick, at any buffering level. It never reaches min_ts even when the ingest thread re-places it
+  late between the render loop and `calc_min_ts` (the find_min_ts filter's real job).
+- **Entered the mix this tick + behind**: re-anchored once instead of growing the buffering -- a
+  cut to it, or a program source joining after the scene collection loads.
 - **Mixed and not entering**: upstream, byte-identical: the dynamic increase above the floor,
   `ignore_audio` at the maximum. That includes a source whose audio STARTS only after it joined the
   mix (a media start on program, a receiver that connects on show): no timeline at the entry tick,
   so it is a mixed source starting late.
-- **Composites** (scenes, transitions) take their timestamp from their children and are never
-  re-anchored themselves; an off-program scene reporting its late child simply does not count for
-  min_ts any more (it used to move the window too).
-- **The re-anchor** is `ignore_audio`'s semantics: drop `ceil(behind)` samples (the `- 1 ... + 1`
-  rounding, and the `audio_ts == start - 1` adjust); nothing left = restart (pending, `audio_ts = 0`,
-  `timing_set = false`). It re-checks the timeline under the lock (the ingest thread may have moved
-  or reset it since the unlocked decision) and re-renders the source when it is back in sync, so the
-  mix never uses an output buffer peeked from the dropped front.
+- **Composites** are never re-anchored themselves (their timestamp is their children's).
+- **The re-anchor MIRRORS `ignore_audio`** (drop `ceil(behind)` samples with the `- 1 ... + 1`
+  rounding, the `audio_ts == start - 1` adjust, nothing left = restart). `ignore_audio` itself stays
+  byte-identical for rebases; the lift test compares the two on every probe, so a rebase that
+  changes `ignore_audio` fails until the copy follows. It re-checks the timeline under the lock (the
+  ingest thread may have moved or reset it since the unlocked decision) and re-renders a source
+  that is back in sync, so the mix never uses an output buffer peeked from the dropped front.
 - **The line**: `buffering-guard: '<src>' is not mixed|entered the mix late: its audio ran X ms
   behind the mix window; re-anchored (dropped Y ms[, timeline restarted]) instead of adding Z ms to
   the whole mix's T ms of audio buffering (issue 1381; events=N, +K since the last line,
   dropped_total=D ms)` -- LOG_WARNING; every entry and a source's first event log at once, later
-  not-mixed events at most once per 10 s per source (a hidden direct-stamp source that stays late is
-  re-anchored on nearly every tick). It never carries the #786 `is now` text, so no launch gate reads
-  it as a buffering draw; the marker is not a substring of `audio-stall #1367:` / `audio-telemetry
-  #800` / `genlock audio buffering`.
+  not-mixed events at most once a MINUTE per source (the #800 cadence; a hidden source that keeps a
+  late stamp is re-anchored on nearly every tick). It never carries the #786 `is now` text, so no
+  launch gate reads it as a buffering draw; the marker is not a substring of `audio-stall #1367:` /
+  `audio-telemetry #800` / `genlock audio buffering`. Both 60 s bounds are spelled
+  `(60ULL * 1000000000ULL)`: `tests/audio_telemetry_800.rs` pins the #800 rate limit by the literal
+  `60000000000ULL`, which obs-audio.c must keep exactly once.
 
-**Known limit (reported, not a different shape).** A DIRECT-stamp source that stays late after the
-entry re-anchor is placed late again by its next packet; one or two ticks later it is a late MIXED
-source and upstream grows the mix (one hole). Removing that needs a persistent per-source placement
-offset in `source_output_audio_data`, which moves that source's audio off its own stamps -- a
-separate design call. The NDI class of the 27.9 incident is covered by the timing restart. The
-`cut-in-direct-limit` scenario pins the limit so a change to it is visible.
+**Known limit (reported to the supervisor, not a different shape).** The entry re-anchor's timing
+restart moves only a source whose placement follows `timing_adjust`. A source that KEEPS its stamp
+-- a direct stamp, or a genlock TIMECODE hold -- and stays late after the entry drop is placed late
+again by its next packet; a tick or two later (the restarted source is pending for a tick while it
+refills) it is a late MIXED source and upstream grows the mix (one hole). The hidden path covers
+every kind (the 27.9 incident class). Removing the limit needs a persistent per-source placement
+offset in `source_output_audio_data` (it moves that source's audio off its own stamps) or a fix of
+whatever made a genlock source's audio late against its measured video delay -- a separate design
+call. `cut-in-kept-stamp-limit` pins the limit so a change to it is visible. A launch is the same
+shape: a direct source late when it joins (the stream ASIO startup race) is re-anchored once and
+then reaches the same upstream increase as before (`launch-late`: 128 ms).
 
 **Tests and Tier-0** (`tests/genlock_audio_mix_guard_1381.rs`, std-only):
-- Wiring anchors (6, `WIRING`) + the SAME list in a pwsh step of both `windows-genlock*.yml`.
+- Wiring anchors (8, `WIRING`: obs-audio.c, obs-internal.h, obs-genlock-mix-guard.h) + the SAME
+  list in a pwsh step of both `windows-genlock*.yml`.
 - A C LIFT of the shipped `audio_callback` path, verbatim: the render-order tail (mark + catch-all
-  loop), the render loop + `calc_min_ts`, the 1367 tick decision, mix + discard, and every function
+  loop), the render loop, `calc_min_ts`, the 1367 tick decision, mix + discard, and every function
   they call (`push_audio_tree`, `convert_time_to_frames`, `ignore_audio` .. `calc_min_ts` incl. the
-  guard, `audio_frames_to_ns` / `ns_to_audio_frames` from audio-io.h). They are substituted into
-  `tests/c/genlock_audio_mix_guard_1381_harness.c` (five at-sign markers, each checked to occur
-  once): a stub libobs with a real timestamp deque, byte-only input buffers, a render stub with
-  process_audio_source_tick's pending rule, a mix stub with mix_audio's window test, and a model of
-  source_output_audio_place + the timing restart (non-direct re-anchors to arrival).
-- Scenarios, the printed trace is the truth table: hidden NDI jumping later 4x (the last past the
-  maximum, so would-add is clamped), hidden direct-stamp late for good (rate-limited lines), an
-  off-program scene, a mixed source going late (upstream), a cut with a 300 ms receiver backlog, a
-  cut with a timeline jump, the direct-stamp limit, a source late at launch (upstream), plus direct
-  probes at the exact-sample edges and the locked re-check.
-- RED against the pre-fix mixer (the committed RED): the hidden NDI / off-program scene take the mix
-  to 960 ms (41 hole ticks), the cuts cut 10-12 hole ticks; the upstream cases already hold.
-- Mutation proof (23 C mutants of obs-audio.c, scratch tree, the test compiled once with
-  `CARGO_MANIFEST_DIR=<scratch>` because the files are read at run time): 21 fail by behaviour, the
-  mark_invalid_sources filter fails only the wiring anchor (behaviourally equivalent: it only sets
-  `pending` on a source that is never mixed), the `continue` after a re-anchor is equivalent by
-  construction (the timeline is then 0 or at/after the window start).
+  guard, `audio_frames_to_ns` / `ns_to_audio_frames` from audio-io.h), each lift anchor unique. They
+  are substituted into `tests/c/genlock_audio_mix_guard_1381_harness.c` (six at-sign markers, each
+  checked to occur once), which `#include`s the header: a stub libobs with a real timestamp deque,
+  byte-only input buffers, a render stub with process_audio_source_tick's pending rule, a mix stub
+  with mix_audio's window test plus a stale-output check, and a model of source_output_audio_place
+  + the timing restart (`h_keeps_stamp` for the class the restart cannot move).
+- Scenarios, the printed trace is the truth table: hidden NDI jumping later 4x a minute apart (the
+  last past the maximum, so would-add is clamped), a hidden kept-stamp source late for good (a line
+  a minute), the ingest-thread race, an audio reset (a stale tick colliding with a backlog), a
+  mixed source going late (upstream), a cut with a 300 ms receiver backlog, a cut with a timeline
+  jump, a program scene cut in, the kept-stamp limit, a launch in the frontend's order; plus direct
+  probes at the exact-sample edges, the locked re-check, the `ignore_audio` parity and the entry
+  rule.
+- RED against the pre-fix mixer (the first RED commit): the hidden NDI source took the mix to
+  960 ms (41 hole ticks), the cuts cut 10-12 hole ticks; the upstream cases already held. The
+  review-round RED against the first GREEN: the audio-reset collision grew the mix by 213 ms.
+- Mutation proof (27 C mutants of the header + obs-audio.c, scratch tree, the test compiled once
+  with `CARGO_MANIFEST_DIR=<scratch>` because the files are read at run time): 25 fail by behaviour;
+  the mark_invalid_sources filter fails only the wiring anchor (behaviourally equivalent: it only
+  ever sets `pending` on a source that is never mixed); the `continue` after a re-anchor is
+  equivalent by construction (the timeline is then 0 or at/after the window start, and upstream's
+  maxed branch needs a non-zero stamp before it).
 - Local: `CARGO_MANIFEST_DIR=<wt> rustc --edition 2021 --test tests/genlock_audio_mix_guard_1381.rs`
   + `clippy-driver ... -D warnings`; the real obs-audio.c type-checks with
   `gcc -fsyntax-only -Wall -Wextra -Wformat=2 -Werror` against the real libobs headers plus a
-  scratch `obsconfig.h` (the obs-drm-output.md recipe, `-Ivendor/obs-studio/deps/libcaption`).
+  scratch `obsconfig.h` (the obs-drm-output.md recipe, `-Ivendor/obs-studio/deps/libcaption`); the
+  header through a one-line TU under `-Wconversion -Wsign-conversion`.
 - The 1367 floor lift (`tests/genlock_audio_buffering_wiring_1367.rs`) lifts `audio_buffering_maxed`
-  .. `audio_buffer_insufficient`: keep the guard block AFTER `audio_buffer_insufficient` or that
-  lift has to stub it.
+  .. `audio_buffer_insufficient`: keep the guard's obs-audio.c block AFTER `audio_buffer_insufficient`
+  or that lift has to stub it.
 
 **Live acceptance (supervisor, FULL-bundle deploy -- obs.dll/libobs).** On resolume with a hidden
-late NDI source (e.g. a test NDI input in a scene that is not on program): 0 `ABOVE the floor` /
+late NDI source (a test NDI input in a scene that is not on program): 0 `ABOVE the floor` /
 `adding N milliseconds` lines from it, a `buffering-guard: '<name>' is not mixed` line instead, the
-#800 `total_buffering=` stays at the floor, the `audio-stall #1367` `ticks` stay at ~2812/min. A
-cut to it: at most one `entered the mix late` line, no ABOVE line for an NDI source, the obs-vban
-pacer shows no underflow / discontinuity at the cut. A media start on program still logs its ABOVE
-line (upstream).
+#800 `total_buffering=` stays at the floor, the `audio-stall #1367` `ticks` stay at ~2812/min. A cut
+to it: one `entered the mix late` line; for an NDI source with genlock off or on the latency hold no
+ABOVE line and no obs-vban underflow / discontinuity at the cut; a genlock TIMECODE-hold source that
+stays late may still log one ABOVE line a tick or two later (the known limit). A media start on
+program still logs its ABOVE line (upstream).
