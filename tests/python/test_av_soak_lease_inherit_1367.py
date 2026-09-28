@@ -158,3 +158,15 @@ def test_the_window_runs_under_the_callers_hold_ceiling_not_its_own(rig):
     r = _soak(env2, "--run", *INHERIT)
     assert r.returncode == 4, r.stdout + r.stderr
     assert p["log"].read_text() == ""
+
+
+def test_without_the_callers_ceiling_the_lease_lib_default_applies_never_the_windows_own(rig):
+    # a caller 60 min into its hold that exported no ceiling: the window's own (slot + 30 min, 50 min
+    # today) would refuse it; the lease lib's default (75 min) applies, and the run says which
+    env, p = rig
+    hold_lease(p, age_s=3600)
+    e = {k: v for k, v in env.items() if k != "RIG_LEASE_MAX_HOLD_SECS"}
+    r = _soak(e, "--run", *INHERIT)
+    assert r.returncode in (0, 1, 2), r.stdout + r.stderr
+    assert holder(p) == CALLER
+    assert "the lease lib's default hold ceiling" in r.stdout + r.stderr

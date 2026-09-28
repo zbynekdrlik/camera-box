@@ -208,6 +208,10 @@ case "$text" in
     printf 'active=%s\nrun_id=4242\nmarkers=10\nmarkers2=14\n' "$active" ;;
   *"obs-studio/logs"*)
     printf 'info: genlock-fifo audit something\n'
+    # the roles are active on strih-lx: some hidden input always logs its park heartbeat
+    if [ -z "${FAKE_NO_PARK_LINES:-}" ]; then
+      printf "info: genlock-park 'NDI cam4': state=parked parked_s=900 (hidden)\n"
+    fi
     for c in ${FAKE_PARKED:-}; do
       printf "info: genlock-park 'NDI %s': state=parked parked_s=35 (hidden)\n" "$c"
     done ;;
@@ -909,3 +913,25 @@ def test_a_painter_that_stays_unreadable_stops_the_run_as_unreadable(rig):
     assert r.returncode == 2, r.stdout + r.stderr
     assert _restart_kinds(p["log"]) == []
     assert "unreadable" in r.stdout and "left TEST mode" not in r.stdout
+
+
+# --- review round 3 ----------------------------------------------------------------------------------
+
+
+def test_a_strih_log_without_any_park_line_reads_unread_never_connected(rig):
+    # no genlock-park line for ANY input: the tail cannot tell parked from connected -- the receiver
+    # is unread, the default pick falls back to the first camera, and a PASS carries the caveat
+    env, p = rig
+    r = _matrix(dict(env, AV_MATRIX_KINDS="cambox", AV_MATRIX_REPEATS="1", FAKE_NO_PARK_LINES="1"),
+                "--run")
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert _steps(p["run"])[-1]["receiver"] == "unread"
+    assert _restart_kinds(p["log"]) == [("cambox", CAM1)]
+    assert "CAVEAT" in r.stdout
+
+
+def test_the_plan_names_the_lease_keepalive_the_run_uses(rig):
+    env, _ = rig
+    out = _matrix(env).stdout
+    assert "rig_lease_refresh_if_mine" in out
+    assert "rig_lease_read_holder_field" not in out
