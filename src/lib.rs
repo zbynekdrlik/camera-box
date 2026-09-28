@@ -417,6 +417,14 @@ pub mod genlock_render_tick_pin;
 // per-second grid removes it. Crate-root + default features (Tier-0), no OBS.
 pub mod genlock_grid_bench;
 
+// Issue 1367 slice D1 — the GRID-EXACT N>=2 conveyor: an N>=2 source (a 60 fps camera into the
+// 30 fps strih canvas) presents the stamp `grid_floor(T − 50 ms − pin, canvas / N)` at render tick
+// T — a pure function of the tick and the pin, so every camera lands on the same frame after every
+// restart. Crate-root + std-only (Tier-0); the C `genlock_n2_*` block in obs-source.c is held
+// identical by `tests/genlock_relock_selection_parity.rs`, and the probe `ReleaseCadence` delegates
+// its N>=2 ticks here.
+pub mod genlock_n2_grid;
+
 // Issue 1372 — the ONE wall-step detector of the genlock render tick: a coordinated dantesync fleet
 // DATE step (the wall moves, the media clock does not) re-grids the tick in ONE tick instead of the
 // 2 ms/tick slew-back that left the tick and the sender's floored stamps off phase. Crate-root +
