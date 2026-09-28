@@ -1008,7 +1008,7 @@ rm -f /etc/systemd/system/camera-box.service.d/publish-30p.conf
 NDI_PLAN="$(ndi_discovery_cambox_plan "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_DISCOVERY_CAMBOX_DROPIN")"
 case "$NDI_PLAN" in
     none)
-        echo "  NDI receiver config: none on this cambox -- mDNS only (issue 1389)"
+        echo "  NDI receiver config: no networks.ips on this cambox -- mDNS only, nothing to change (issue 1389)"
         ;;
     refuse*)
         fail "NDI receiver config: ${NDI_PLAN#refuse } (issue 1389)"

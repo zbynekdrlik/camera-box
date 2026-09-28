@@ -86,10 +86,14 @@ to measure.
     defaults: root, `ProtectHome=yes`, no readable `$HOME/.ndi`, so mDNS only.
   - Any other key keeps the file and the drop-in: something else in it still matters.
   - A drop-in pointing `NDI_CONFIG_DIR` anywhere else is not this repo's: STEP 7 fails loud, the
-    live program refuses and touches nothing.
+    live program refuses and touches nothing. A BLANK drop-in is inert: the plan removes it as stale
+    and the verdict grades it as none.
   - verify-device `(an)` grades it with `ndi_discovery_cambox_verdict`: no config is ok. A config
     that lists ANY IP FAILs naming it, with or without the drop-in (a drop-in would load it again).
     So do a `networks.discovery`, a config that is not JSON, and a foreign drop-in.
+  - The plan and the verdict read the same file the same way. A leading UTF-8 BOM is valid JSON for
+    both. The `(an)` gather puts a newline after each file, so a hand edit without a final newline
+    never glues onto the section marker.
 
 ## The SDK contract (why this shape, and why NOT a Discovery Server)
 
@@ -232,29 +236,35 @@ touches ONLY `/etc/ndi/ndi-config.v1.json` and the camera-box `ndi-discovery.con
 - `sshpass -p "$DEVICE_ROOT_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
   -o ConnectTimeout=10 root@<cambox> bash -s < "$apply"` runs it on one box (the ssh options of
   verify-device's `ssh_box`: a reflashed box has a new host key). The plan decides:
-  - **none**: no config, or one with no `networks.ips` / `networks.discovery`, and no stale drop-in.
+  - **none**: no config, or one with no `networks.ips` / `networks.discovery` (also without python3
+    on the box), and no stale drop-in.
     It prints `this cambox carries no networks.ips already (mDNS only) -- nothing written`: no
     remount, no write to the USB stick.
   - **remove**: the config holds nothing but the list (the issue-1342 rendering) or nothing at all,
     or only the drop-in is left. It deletes the config and the drop-in, then `systemctl
     daemon-reload`.
   - **remove-backup**: the config is not a JSON object, or python3 is missing on the box and the
-    file is not the lib's own rendering, so other keys cannot be told apart. It copies the file to
+    file lists something but is not the lib's own rendering, so other keys cannot be told apart. It
+    copies the file to
     `ndi-config.v1.json.bak-<stamp>` first, then removes as above. That backup is inert (no drop-in
     points at it); never restore one that lists IPs.
   - **strip**: the config also holds other keys. It rewrites it without `networks.ips` /
     `networks.discovery` (temp file + atomic rename) and keeps the drop-in, because the other keys
     still matter.
-  - **refuse**: the drop-in points `NDI_CONFIG_DIR` somewhere else. It exits non-zero, `REFUSED:`
-    names the drop-in, and nothing is touched: a human looks at it.
+  - **refuse**: the drop-in has content that points `NDI_CONFIG_DIR` somewhere else (a blank
+    drop-in is stale and removed instead). It exits non-zero, `REFUSED:` names the drop-in, and
+    nothing is touched: a human looks at it.
   - For any change, a read-only root is remounted rw first and put back ro after `sync` (3 tries).
     A root it cannot put back is a loud `ERROR ... read-WRITE` and a non-zero exit, and an EXIT trap
     puts it back on any other failure.
 - It removes one or two ~100-byte files in the same rw window setup-device.sh and the dantesync
   upgrader use. That is not a risky write to the stick, and a clean box is never touched.
-- Tier-0 tests run the real program fed to `bash -s`, with `findmnt` / `mount` / `sync` /
-  `systemctl` stubbed: `CamboxApply1389` and `CamboxVerdict1389` in
-  `tests/python/test_ndi_discovery_1389.py`.
+- Tier-0 tests, all without a box:
+  - `CamboxApply1389` (`tests/python/test_ndi_discovery_1389.py`) runs the real program fed to
+    `bash -s`, with `findmnt` / `mount` / `sync` / `systemctl` stubbed.
+  - `CamboxVerdict1389` (same file) grades `ndi_discovery_cambox_verdict` directly.
+  - `VerifyDeviceAnBehaviour` (`tests/python/test_ndi_discovery_1342.py`) runs the real `(an)` block
+    sliced from verify-device.sh, gather snippet included, against temp files.
 
 ## Supervisor deploy runbook (issue 1389 -- code-only lane, nothing here was run live)
 
@@ -305,8 +315,9 @@ Receiver config only, no gate. Run it when no E2E / soak holds the rig lease
     finder holds a discovery connection into camera-box, and camera-box holds none out.
   - The `disc:recv` threads: `pid=$(systemctl show -p MainPID --value camera-box)` then
     `grep -cx 'disc:recv' /proc/$pid/task/*/comm | awk -F: '{s+=$2} END {print s}'`. It must drop
-    from 19–20, expected 0 with no connection. The `ss` line is the authoritative check; record the
-    first box's thread count.
+    from 19–20. Its value with no connection is not measured yet (libndi may keep a thread per
+    listener), so record the first box's count as the baseline. The `ss` line is the authoritative
+    check.
   - A remaining connection names its peer IP: that box or process still runs the old list.
   - `./scripts/verify-device.sh <CAMn>` `(an)` passes: `no networks.ips on this cambox -- mDNS only`.
 - **strih-lx:** `ss -Htnp state established '( dport = :5960 )'` shows no peer from `--cambox-ips`.

@@ -218,7 +218,7 @@ _ndi_discovery_networks_key() {
     && v="$(printf '%s' "$2" | NDI_DISCOVERY_KEY="$1" python3 -c '
 import json, os, sys
 try:
-    node = json.load(sys.stdin)
+    node = json.loads(sys.stdin.buffer.read().decode("utf-8-sig"))
 except Exception:
     sys.exit(1)
 for part in ("ndi", "networks", os.environ["NDI_DISCOVERY_KEY"]):
@@ -425,9 +425,11 @@ ndi_discovery_write_config() {
 
 # ndi_discovery_gather_remote_snippet -> the on-box bash that prints the cambox config + drop-in
 # for verify-device's (an) check, between fixed markers (one ssh round trip, read-only). Both are
-# expected ABSENT on a cambox since issue 1389 (ndi_discovery_cambox_verdict grades them).
+# expected ABSENT on a cambox since issue 1389 (ndi_discovery_cambox_verdict grades them). The `echo`
+# after each `cat` keeps a file without a final newline (a hand edit) off the END marker's line; the
+# extra blank line is dropped by the caller's $(...).
 ndi_discovery_gather_remote_snippet() {
-  printf 'echo "__NDI_CONF_BEGIN__"; cat %q 2>/dev/null; echo "__NDI_CONF_END__"; echo "__NDI_DROPIN_BEGIN__"; cat %q 2>/dev/null; echo "__NDI_DROPIN_END__"\n' \
+  printf 'echo "__NDI_CONF_BEGIN__"; cat %q 2>/dev/null; echo; echo "__NDI_CONF_END__"; echo "__NDI_DROPIN_BEGIN__"; cat %q 2>/dev/null; echo; echo "__NDI_DROPIN_END__"\n' \
     "$NDI_DISCOVERY_SYSTEM_DIR/$NDI_DISCOVERY_CONFIG_NAME" "$NDI_DISCOVERY_CAMBOX_DROPIN"
 }
 
@@ -480,18 +482,21 @@ sys.stdout.write(json.dumps(doc, indent=2) + "\n")
 #   none           -- nothing to do: no list, no discovery key, nothing stale to remove
 #   remove         -- delete DIR/ndi-config.v1.json (it holds only the list, or nothing) and the drop-in
 #   remove-backup  -- the same, the config backed up first: it is not a JSON object, or python3 is
-#                     missing and the file is not this lib's own rendering, so any other keys it holds
-#                     are kept in the backup only
+#                     missing and the file lists something but is not this lib's own rendering, so any
+#                     other keys it holds are kept in the backup only
 #   strip          -- rewrite the config without networks.ips / networks.discovery; its other keys
 #                     still matter, so the config and the drop-in stay
-#   refuse <why>   -- the drop-in exists but does not point NDI_CONFIG_DIR at DIR: not this repo's
-#                     file, left for a human
+#   refuse <why>   -- the drop-in has content that does not point NDI_CONFIG_DIR at DIR: not this
+#                     repo's file, left for a human. A BLANK drop-in is inert (verify-device grades it
+#                     as none) and is removed as stale, never refused.
 ndi_discovery_cambox_plan() {
   local dir="${1:?ndi_discovery_cambox_plan: DIR required}" dropin="${2:?ndi_discovery_cambox_plan: DROPIN required}"
-  local f have dropdir ips disc rest rc
+  local f have droptext dropdir ips disc rest rc
   f="$dir/$NDI_DISCOVERY_CONFIG_NAME"
-  if [ -e "$dropin" ]; then
-    dropdir="$(ndi_discovery_dropin_config_dir "$(cat "$dropin" 2>/dev/null || true)")"
+  droptext=""
+  [ ! -e "$dropin" ] || droptext="$(cat "$dropin" 2>/dev/null || true)"
+  if [ -n "$(_ndi_discovery_norm_list "$droptext")" ]; then
+    dropdir="$(ndi_discovery_dropin_config_dir "$droptext")"
     if [ "$dropdir" != "$dir" ]; then
       printf 'refuse %s points NDI_CONFIG_DIR at %s, not %s -- not this repo%ss drop-in; inspect it by hand\n' \
         "$dropin" "${dropdir:-<nothing>}" "$dir" "'"
@@ -507,12 +512,12 @@ ndi_discovery_cambox_plan() {
     echo remove
     return 0
   fi
+  ips="$(_ndi_discovery_norm_list "$(ndi_discovery_config_ips "$have")")"
+  disc="$(_ndi_discovery_norm_list "$(ndi_discovery_config_servers "$have")")"
   rc=0
   rest="$(_ndi_discovery_stripped_json "$f" 2>/dev/null)" || rc=$?
   case "$rc" in
     0)
-      ips="$(_ndi_discovery_norm_list "$(ndi_discovery_config_ips "$have")")"
-      disc="$(_ndi_discovery_norm_list "$(ndi_discovery_config_servers "$have")")"
       if [ "$rest" = "{}" ]; then
         echo remove
       elif [ -z "$ips$disc" ]; then
@@ -522,7 +527,10 @@ ndi_discovery_cambox_plan() {
       fi
       ;;
     1)
-      if [ "$have" = "$(ndi_discovery_config_json "$(ndi_discovery_config_ips "$have")")" ]; then
+      # No python3: the grep reader still finds a list; a config that lists nothing needs no change.
+      if [ -z "$ips$disc" ]; then
+        echo none
+      elif [ "$have" = "$(ndi_discovery_config_json "$(ndi_discovery_config_ips "$have")")" ]; then
         echo remove
       else
         echo remove-backup
@@ -583,8 +591,10 @@ ndi_discovery_cambox_verdict() {
     fi
   fi
   if [ -n "$(_ndi_discovery_norm_list "$text")" ]; then
+    # utf-8-sig: a leading BOM is valid here exactly as it is for the plan's reader.
     if command -v python3 >/dev/null 2>&1 \
-      && ! printf '%s' "$text" | python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1; then
+      && ! printf '%s' "$text" \
+        | python3 -c 'import json,sys; json.loads(sys.stdin.buffer.read().decode("utf-8-sig"))' >/dev/null 2>&1; then
       out="${out}FAIL: not valid JSON (the NDI SDK ignores it; --cambox-apply removes it)"$'\n'
     fi
     ips="$(ndi_discovery_config_ips "$text")"
