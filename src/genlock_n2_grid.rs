@@ -87,8 +87,10 @@ pub struct N2Pick {
 /// source into a 30 fps canvas). `n == 0` → 0 (never divide by zero; the caller only reaches
 /// here with `n >= 2`).
 pub fn n2_source_interval_ns(canvas_interval_ns: u64, n: u32) -> u64 {
-    let _ = (canvas_interval_ns, n);
-    0
+    if n == 0 {
+        return 0;
+    }
+    canvas_interval_ns / n as u64
 }
 
 /// The tick instant `T` the target is derived from. `on_grid` is the caller's
@@ -102,27 +104,49 @@ pub fn n2_tick_ns(
     canvas_interval_ns: u64,
     on_grid: bool,
 ) -> u64 {
-    let _ = (tick_wall_ns, wall_now_ns, canvas_interval_ns, on_grid);
-    0
+    if on_grid {
+        // The nearest canvas grid point: within the 2 ms on-grid window that is the scheduled
+        // slot itself, whichever side of it the read landed.
+        grid_floor_ns(
+            tick_wall_ns.saturating_add(canvas_interval_ns / 2),
+            canvas_interval_ns,
+        )
+    } else {
+        grid_floor_ns(wall_now_ns, canvas_interval_ns)
+    }
 }
 
 /// The stamp an N>=2 source presents at tick `tick_ns`:
 /// `grid_floor(tick − GENLOCK_N2_AGE_BASE_NS − pin, canvas_interval / n)` on the per-second
 /// source grid, saturating at 0.
 pub fn n2_target_stamp_ns(tick_ns: u64, pin_ns: u64, canvas_interval_ns: u64, n: u32) -> u64 {
-    let _ = (tick_ns, pin_ns, canvas_interval_ns, n);
-    0
+    let age = GENLOCK_N2_AGE_BASE_NS.saturating_add(pin_ns);
+    grid_floor_ns(
+        tick_ns.saturating_sub(age),
+        n2_source_interval_ns(canvas_interval_ns, n),
+    )
 }
 
 /// Pick the frame to present from `queue_stamps` (arrival order, oldest first; a single NDI source
 /// delivers in stamp order): the last frame of the leading run stamped at most half a source
 /// interval after `target_ns`. See [`N2Kind`] for the three outcomes.
 pub fn n2_select(queue_stamps: &[u64], target_ns: u64, source_interval_ns: u64) -> N2Pick {
-    let _ = (queue_stamps, target_ns, source_interval_ns);
-    N2Pick {
-        kind: N2Kind::Hold,
-        index: 0,
+    let half = source_interval_ns / 2;
+    let limit = target_ns.saturating_add(half);
+    let count = queue_stamps.iter().take_while(|&&ts| ts <= limit).count();
+    if count == 0 {
+        return N2Pick {
+            kind: N2Kind::Hold,
+            index: 0,
+        };
     }
+    let index = count - 1;
+    let kind = if queue_stamps[index].saturating_add(half) >= target_ns {
+        N2Kind::OnTarget
+    } else {
+        N2Kind::Early
+    };
+    N2Pick { kind, index }
 }
 
 #[cfg(test)]
@@ -335,7 +359,7 @@ mod tests {
                     .filter(|&s| s + lag >= start && s + lag <= t)
                     .collect();
                 let pick = n2_select(&q, target, I60);
-                if q.iter().any(|&s| s == want) {
+                if q.contains(&want) {
                     assert_eq!(
                         pick.kind,
                         N2Kind::OnTarget,
