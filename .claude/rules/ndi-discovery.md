@@ -86,14 +86,19 @@ to measure.
     defaults: root, `ProtectHome=yes`, no readable `$HOME/.ndi`, so mDNS only.
   - Any other key keeps the file and the drop-in: something else in it still matters.
   - A drop-in pointing `NDI_CONFIG_DIR` anywhere else is not this repo's: STEP 7 fails loud, the
-    live program refuses and touches nothing. A BLANK drop-in is inert: the plan removes it as stale
-    and the verdict grades it as none.
+    live program refuses and touches nothing. A BLANK drop-in is inert: the plan never refuses it (it
+    goes with the config, or alone when no config is left) and the verdict grades it as none. Both
+    use the ONE test `_ndi_discovery_dropin_foreign`.
   - verify-device `(an)` grades it with `ndi_discovery_cambox_verdict`: no config is ok. A config
     that lists ANY IP FAILs naming it, with or without the drop-in (a drop-in would load it again).
     So do a `networks.discovery`, a config that is not JSON, and a foreign drop-in.
-  - The plan and the verdict read the same file the same way. A leading UTF-8 BOM is valid JSON for
-    both. The `(an)` gather puts a newline after each file, so a hand edit without a final newline
-    never glues onto the section marker.
+  - With python3 (every cambox has it; the lib falls back to a grep reader without it) the plan and
+    the verdict read the same file the same way, and a leading UTF-8 BOM is valid JSON for both. The
+    `(an)` gather puts a newline after each file, so a hand edit without a final newline never glues
+    onto the section marker.
+  - A FAILing `(an)` names the fix: from dev1 pipe `bash scripts/lib/ndi-discovery.sh --cambox-apply`
+    into `ssh root@<box> bash -s` (the runbook below), or re-run setup-device.sh. Running
+    `--cambox-apply` ON a cambox only prints the program.
 
 ## The SDK contract (why this shape, and why NOT a Discovery Server)
 
@@ -252,8 +257,8 @@ touches ONLY `/etc/ndi/ndi-config.v1.json` and the camera-box `ndi-discovery.con
     `networks.discovery` (temp file + atomic rename) and keeps the drop-in, because the other keys
     still matter.
   - **refuse**: the drop-in has content that points `NDI_CONFIG_DIR` somewhere else (a blank
-    drop-in is stale and removed instead). It exits non-zero, `REFUSED:` names the drop-in, and
-    nothing is touched: a human looks at it.
+    drop-in is never refused). It exits non-zero, `REFUSED:` names the drop-in, and nothing is
+    touched: a human looks at it.
   - For any change, a read-only root is remounted rw first and put back ro after `sync` (3 tries).
     A root it cannot put back is a loud `ERROR ... read-WRITE` and a non-zero exit, and an EXIT trap
     puts it back on any other failure.

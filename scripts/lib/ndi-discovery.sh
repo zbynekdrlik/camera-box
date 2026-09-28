@@ -209,9 +209,9 @@ _ndi_discovery_json_string() {
 }
 
 # _ndi_discovery_networks_key KEY TEXT -> the string value of ndi.networks.KEY in TEXT, "" if absent.
-# With python3 (dev1, strih-lx, the tests) it reads that exact JSON path, so an unrelated `"KEY"`
-# elsewhere in the file never stands in for it (issue 1389). Without python3 (a cambox), or when TEXT
-# is not JSON, it falls back to the grep reader above. Never errors.
+# With python3 (dev1, strih-lx, the camboxes, the tests) it reads that exact JSON path, so an unrelated
+# `"KEY"` elsewhere in the file never stands in for it (issue 1389). Without python3 (a stripped-down
+# box), or when TEXT is not JSON, it falls back to the grep reader above. Never errors.
 _ndi_discovery_networks_key() {
   local v
   if command -v python3 >/dev/null 2>&1 \
@@ -312,6 +312,9 @@ ndi_discovery_config_verdict() {
     printf 'FAIL: config missing (no %s)\n' "$NDI_DISCOVERY_CONFIG_NAME"
     return 0
   fi
+  # Strict JSON (a leading BOM FAILs): this config must reach the SDK, and every writer of it (this lib,
+  # the .ps1) writes it without a BOM. The cambox verdict below reads utf-8-sig instead, because there
+  # the only question is whether a list is left, and the cambox plan rewrites or removes the file.
   if command -v python3 >/dev/null 2>&1 \
     && ! printf '%s' "$text" | python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1; then
     out="${out}FAIL: not valid JSON (the NDI SDK ignores an unparseable config)"$'\n'
@@ -355,6 +358,18 @@ ndi_discovery_dropin_content() {
 ndi_discovery_dropin_config_dir() {
   printf '%s\n' "$1" | grep -oE '^Environment="?NDI_CONFIG_DIR=[^[:space:]"]+' | tail -1 \
     | sed -E 's/^Environment="?NDI_CONFIG_DIR=//' || true
+}
+
+# _ndi_discovery_dropin_foreign TEXT DIR -> exit 0 and print the dir drop-in TEXT points NDI_CONFIG_DIR
+# at ("" when none) when TEXT has content that does not point it at DIR: not this repo's drop-in. Exit 1
+# (nothing printed) when TEXT is blank -- an inert file -- or points at DIR. The ONE test the cambox
+# plan (refuse) and the cambox verdict (FAIL) share, so they cannot drift apart (issue 1389).
+_ndi_discovery_dropin_foreign() {
+  local dropdir
+  [ -n "$(_ndi_discovery_norm_list "$1")" ] || return 1
+  dropdir="$(ndi_discovery_dropin_config_dir "$1")"
+  [ "$dropdir" != "$2" ] || return 1
+  printf '%s\n' "$dropdir"
 }
 
 # _ndi_discovery_merged_json FILE IPS -> FILE's JSON with ndi.networks.ips = IPS, any
@@ -488,20 +503,18 @@ sys.stdout.write(json.dumps(doc, indent=2) + "\n")
 #                     still matter, so the config and the drop-in stay
 #   refuse <why>   -- the drop-in has content that does not point NDI_CONFIG_DIR at DIR: not this
 #                     repo's file, left for a human. A BLANK drop-in is inert (verify-device grades it
-#                     as none) and is removed as stale, never refused.
+#                     as none) and is never refused: it goes with the config on remove / remove-backup,
+#                     alone when no config is left, and stays (still inert) on none / strip.
 ndi_discovery_cambox_plan() {
   local dir="${1:?ndi_discovery_cambox_plan: DIR required}" dropin="${2:?ndi_discovery_cambox_plan: DROPIN required}"
   local f have droptext dropdir ips disc rest rc
   f="$dir/$NDI_DISCOVERY_CONFIG_NAME"
   droptext=""
   [ ! -e "$dropin" ] || droptext="$(cat "$dropin" 2>/dev/null || true)"
-  if [ -n "$(_ndi_discovery_norm_list "$droptext")" ]; then
-    dropdir="$(ndi_discovery_dropin_config_dir "$droptext")"
-    if [ "$dropdir" != "$dir" ]; then
-      printf 'refuse %s points NDI_CONFIG_DIR at %s, not %s -- not this repo%ss drop-in; inspect it by hand\n' \
-        "$dropin" "${dropdir:-<nothing>}" "$dir" "'"
-      return 0
-    fi
+  if dropdir="$(_ndi_discovery_dropin_foreign "$droptext" "$dir")"; then
+    printf 'refuse %s points NDI_CONFIG_DIR at %s, not %s -- not this repo%ss drop-in; inspect it by hand\n' \
+      "$dropin" "${dropdir:-<nothing>}" "$dir" "'"
+    return 0
   fi
   if [ ! -e "$f" ]; then
     if [ -e "$dropin" ]; then echo remove; else echo none; fi
@@ -584,11 +597,8 @@ ndi_discovery_cambox_apply_plan() {
 # No config, or one holding only other keys, is ok: the box is an mDNS-only receiver.
 ndi_discovery_cambox_verdict() {
   local text="$1" dropin="${2-}" dropdir ips disc out=""
-  if [ -n "$(_ndi_discovery_norm_list "$dropin")" ]; then
-    dropdir="$(ndi_discovery_dropin_config_dir "$dropin")"
-    if [ "$dropdir" != "$NDI_DISCOVERY_SYSTEM_DIR" ]; then
-      out="${out}FAIL: camera-box.service.d/ndi-discovery.conf points NDI_CONFIG_DIR at '${dropdir:-<nothing>}', not ${NDI_DISCOVERY_SYSTEM_DIR} -- not this repo's drop-in, inspect it"$'\n'
-    fi
+  if dropdir="$(_ndi_discovery_dropin_foreign "$dropin" "$NDI_DISCOVERY_SYSTEM_DIR")"; then
+    out="${out}FAIL: camera-box.service.d/ndi-discovery.conf points NDI_CONFIG_DIR at '${dropdir:-<nothing>}', not ${NDI_DISCOVERY_SYSTEM_DIR} -- not this repo's drop-in, inspect it"$'\n'
   fi
   if [ -n "$(_ndi_discovery_norm_list "$text")" ]; then
     # utf-8-sig: a leading BOM is valid here exactly as it is for the plan's reader.
@@ -627,7 +637,7 @@ ndi_discovery_cambox_apply_remote_snippet() {
   printf '_ndi_dir=%q\n_ndi_dropin=%q\n' "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_DISCOVERY_CAMBOX_DROPIN"
   declare -f _ndi_discovery_json_string _ndi_discovery_networks_key ndi_discovery_config_ips \
     ndi_discovery_config_servers _ndi_discovery_norm_list ndi_discovery_dropin_config_dir \
-    ndi_discovery_config_json _ndi_discovery_stripped_json ndi_discovery_cambox_plan \
+    _ndi_discovery_dropin_foreign ndi_discovery_config_json _ndi_discovery_stripped_json ndi_discovery_cambox_plan \
     ndi_discovery_cambox_apply_plan
   cat <<'NDI_APPLY'
 _ndi_plan="$(ndi_discovery_cambox_plan "$_ndi_dir" "$_ndi_dropin")"

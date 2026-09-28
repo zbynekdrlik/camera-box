@@ -1862,7 +1862,7 @@ NDI_DISC_VERDICT="$(ndi_discovery_cambox_verdict "$NDI_DISC_CONF" "$NDI_DISC_DRO
 if [ "$anrc" -ne 0 ]; then
   fail "could not read the NDI receiver config over SSH (rc=$anrc, issue 1342)"
 elif [ "$NDI_DISC_VERDICT" != "ok" ]; then
-  fail "NDI receiver config on this cambox: $(printf '%s' "$NDI_DISC_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')-- run scripts/lib/ndi-discovery.sh --cambox-apply on the box, or re-run setup-device.sh (issue 1389)"
+  fail "NDI receiver config on this cambox: $(printf '%s' "$NDI_DISC_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')-- from dev1 pipe 'bash scripts/lib/ndi-discovery.sh --cambox-apply' into 'ssh root@<box> bash -s' (runbook: .claude/rules/ndi-discovery.md), or re-run setup-device.sh (issue 1389)"
 else
   ok "NDI receiver config: no networks.ips on this cambox -- mDNS only (issue 1389)"
 fi
