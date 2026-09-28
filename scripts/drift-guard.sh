@@ -79,6 +79,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # --check-imag projector-vsync facet below runs the IDENTICAL verdict against ONE marker string.
 # shellcheck source=scripts/lib/obs-projector-vsync.sh
 . "$HERE/lib/obs-projector-vsync.sh"
+# scripts/lib/vendor-range.sh is sourced ONLY for its pure git range helpers (issue 1384) -- the
+# ONE merge-base-scoped vendored-genlock range implementation, SHARED with
+# version-integrity-gate.sh's vendor-pin alarm; imag_genlock_range_log / _ahead_log / _on_dev below
+# are drift-guard's wrappers over it.
+# shellcheck source=scripts/lib/vendor-range.sh
+. "$HERE/lib/vendor-range.sh"
 
 DEFAULT_README="vendor/README.md"
 
@@ -1149,90 +1155,46 @@ check_imag_report() {
 
 # imag_genlock_range_log REPO_ROOT BOX_SHA -> prints `git log --oneline
 # $(git merge-base BOX_SHA origin/main)..origin/main -- vendor/obs-studio vendor/distroav` (one
-# genlock-touching commit per line origin/main carries that BOX_SHA's own lineage never received —
+# genlock-touching commit per line origin/main carries that BOX_SHA's own lineage never received --
 # i.e. BOX_SHA is genuinely STALE relative to it); exit status mirrors the FIRST failing git call
-# (the merge-base resolve, then the log). #531 review: BOX_SHA comes from a file READ OVER SSH from
-# imag-nb (`GENLOCK_BUILD_SHA.txt`) and is used UNVALIDATED — normally a clean 40-hex commit SHA,
-# but a truncated/corrupted write (a crash mid-write, disk corruption, a future setup-imag.sh bug)
-# could leave it shaped like a git long-option, e.g. `--grep=x`. WITHOUT `--end-of-options`, git
-# would silently CONSUME such a value as a real FLAG instead of a revision, exiting 0 with EMPTY
-# output — the exact "box is current, OK" verdict in imag_build_drift_report, i.e. a FALSE OK,
-# precisely the failure mode this whole #531 check exists to eliminate. `--end-of-options` (git >=
-# 2.24, well within this repo's toolchain) marks the end of git's own option parsing so any value
-# here is ALWAYS treated as a revision, never a flag — a malformed value now fails LOUD (non-zero
-# exit from the merge-base resolve) instead of silently succeeding empty.
-#
-# #1292: this used to be a plain ANCESTRY range (`BOX_SHA..origin/main`), which reads FALSELY STALE
-# for a box that is genuinely AHEAD of main on the dev candidate line — a release-candidate build
-# deployed before its own content merged to main (e.g. box=3ffe2fbc5, a dev descendant that already
-# CONTAINS cfdbdb003+e5b46ab60's whole vendor content, still read "2 genlock-commit(s) behind
-# origin/main [cfdbdb003,e5b46ab60]" — those two are MERGE commits on main, not reachable from box's
-# own dev-side ancestry at all, per this repo's two-branch model where dev never pulls main's own
-# merge commits back in (top-level CLAUDE.md GOTCHA), even though their vendor CONTENT is already a
-# subset of what box has). Scoping the range to start at `git merge-base BOX_SHA origin/main` (the
-# real common ancestor, not box_sha's own straight ancestry) fixes this: for a box that is a content
-# superset of main, the merge-base already sits at the point past which main gained nothing box
-# doesn't already have, so the range reads correctly EMPTY. A genuinely stale box (its own
-# merge-base is far behind) still shows every real missing vendor commit — this change removes ONLY
-# the false positive on the AHEAD direction, it never hides a real stale box. Empirically verified
-# against this repo's own real history AND a synthetic two-branch repo isolating the exact DAG shape
-# (tests/drift_guard.rs).
-#
-# Review finding S1 — the MECHANISM, precisely: the empty range is not merely "merge-base sits at
-# the right point" in the abstract — it depends on git's own default HISTORY SIMPLIFICATION for a
-# `log -- <pathspec>` walk (git 2.43 `revision.c`: a merge whose diff for the given paths is
-# TREESAME to one parent collapses onto that parent's line; the OTHER (non-treesame) parent's
-# commits are what `git log` actually lists). Concretely, `git log --first-parent
-# $(git merge-base BOX_SHA origin/main)..origin/main -- <paths>` on this exact bug's own commits
-# DOES list the "missing" merge commits — the plain (non-`--first-parent`) form above is what
-# collapses them away. NEVER add `--first-parent` or `--full-history` to the `git log` call below —
-# either would silently reintroduce the false-STALE bug this whole function exists to fix (and
-# would turn the merge-base-scoped RED test in tests/drift_guard.rs red again).
-#
-# Isolated into its own function (rather than inlined in gather_and_check_imag) so it is
-# independently testable against THIS repo's own local checkout — no live SSH to imag-nb needed
-# (tests/drift_guard.rs). See imag_genlock_ahead_log (the AHEAD-direction counterpart) and
-# imag_genlock_on_dev (the orphan-build guard) immediately below.
+# (the merge-base resolve, then the log). The #531 dynamic moving-pin range of the genlock_build
+# facet, merge-base-scoped since #1292. A wrapper over the shared vendor_range_lag_log
+# (scripts/lib/vendor-range.sh, issue 1384 -- one implementation with version-integrity-gate.sh's
+# vendor-pin alarm): its header holds the full rationale -- `--end-of-options` because BOX_SHA is
+# read UNVALIDATED over ssh from imag-nb's GENLOCK_BUILD_SHA.txt (an option-shaped value must fail
+# LOUD, never a false OK), the merge-base scoping that stops a box AHEAD of main on the dev
+# candidate line from reading falsely STALE (#1292), and why --first-parent / --full-history must
+# never be added (review finding S1). drift-guard's own parameters: `--oneline`, and exactly the two
+# vendored paths imag's genlock build consumes (vendor/obs-studio + vendor/distroav). Tested against
+# a synthetic two-branch repo and this repo's own checkout (tests/drift_guard.rs). See
+# imag_genlock_ahead_log (the AHEAD-direction counterpart) and imag_genlock_on_dev (the orphan-build
+# guard) immediately below.
 imag_genlock_range_log() {
-  local repo_root="$1" box_sha="$2" base
-  base="$(git -C "$repo_root" merge-base --end-of-options "$box_sha" origin/main 2>/dev/null)" \
-    || return $?
-  git -C "$repo_root" log --oneline --end-of-options "${base}..origin/main" \
-    -- vendor/obs-studio vendor/distroav 2>/dev/null
+  vendor_range_lag_log "$1" "$2" --oneline vendor/obs-studio vendor/distroav
 }
 
 # imag_genlock_ahead_log REPO_ROOT BOX_SHA -> prints `git log --oneline origin/main..BOX_SHA --
 # vendor/obs-studio vendor/distroav` (one genlock-touching commit per line BOX_SHA carries that
 # origin/main does not); exit status mirrors that `git log` call. #1292: the AHEAD-direction
-# counterpart to imag_genlock_range_log's (now merge-base-scoped) STALE range — this is how
+# counterpart to imag_genlock_range_log's (merge-base-scoped) STALE range -- this is how
 # genlock_build_drift_report tells "box carries vendored-genlock commits main hasn't merged yet" (a
-# release-candidate build on the dev line) apart from "box is current" (both ranges empty). Same
-# `--end-of-options` defense as imag_genlock_range_log, identical rationale (an unvalidated box_sha
-# read over SSH must never be silently consumed as a git option). Review finding S3: an EMPTY
-# box_sha would otherwise silently resolve `origin/main..` as `origin/main..HEAD` (git's own "empty
-# right side means HEAD" range convention) instead of failing — the explicit `-n` guard below fails
-# LOUD (rc 128) instead, matching imag_genlock_range_log's own fail-closed-on-empty behavior (its
-# `git merge-base` call already rejects an empty box_sha).
+# release-candidate build on the dev line) apart from "box is current" (both ranges empty). An EMPTY
+# box_sha fails LOUD (rc 128, review finding S3) instead of resolving `origin/main..` as HEAD. A
+# wrapper over the shared vendor_range_ahead_log (scripts/lib/vendor-range.sh, issue 1384).
 imag_genlock_ahead_log() {
-  local repo_root="$1" box_sha="$2"
-  [ -n "$box_sha" ] || return 128
-  git -C "$repo_root" log --oneline --end-of-options "origin/main..${box_sha}" \
-    -- vendor/obs-studio vendor/distroav 2>/dev/null
+  vendor_range_ahead_log "$1" "$2" --oneline vendor/obs-studio vendor/distroav
 }
 
 # imag_genlock_on_dev REPO_ROOT BOX_SHA -> exit 0 when BOX_SHA is reachable from origin/dev (an
-# expected build on the dev candidate line — a release-candidate bundle deployed ahead of main),
-# non-zero otherwise (unreachable, or box_sha itself unresolvable) — fail CLOSED, never a silent
-# "yes" on an unresolvable check. #1292: the orphan-build guard genlock_build_drift_report's AHEAD
-# branch consults — a box that carries vendored-genlock commits reachable from NEITHER origin/main
-# NOR origin/dev is an unrecognized/orphan build (early-gate-pin doctrine: "an orphan release must
-# SCREAM"), never a quiet OK just because it happens to be a content superset of main. Review
-# finding S3: the explicit `-n` guard keeps an EMPTY box_sha consistent with its two siblings above
-# (fail LOUD, rc 128, never treated as a resolvable revision).
+# expected build on the dev candidate line -- a release-candidate bundle deployed ahead of main),
+# non-zero otherwise (unreachable, or box_sha itself unresolvable; empty = rc 128) -- fail CLOSED,
+# never a silent "yes" on an unresolvable check. #1292: the orphan-build guard
+# genlock_build_drift_report's AHEAD branch consults -- a box that carries vendored-genlock commits
+# reachable from NEITHER origin/main NOR origin/dev is an unrecognized/orphan build (early-gate-pin
+# doctrine: "an orphan release must SCREAM"). A wrapper over the shared vendor_range_on_dev
+# (scripts/lib/vendor-range.sh, issue 1384).
 imag_genlock_on_dev() {
-  local repo_root="$1" box_sha="$2"
-  [ -n "$box_sha" ] || return 128
-  git -C "$repo_root" merge-base --is-ancestor --end-of-options "$box_sha" origin/dev 2>/dev/null
+  vendor_range_on_dev "$1" "$2"
 }
 
 # drift_guard_imag_obs_log_gather_snippet -> the REMOTE shell command (a string) gather_and_check_imag

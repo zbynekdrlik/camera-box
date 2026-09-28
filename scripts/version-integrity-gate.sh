@@ -130,7 +130,8 @@ genlock_build_sha_from_state() {
 
 # --- genlock vendor-pin report-only ALARM (#1137, #1292) — PURE verdict + git range helpers ----
 # vendor_pin_range_log / vendor_pin_ahead_log / vendor_pin_on_dev + genlock_vendor_pin_verdict live
-# in their own lib (moved verbatim, issue 1377).
+# in their own lib (moved verbatim, issue 1377); the range helpers wrap the shared
+# scripts/lib/vendor-range.sh that drift-guard.sh uses too (issue 1384).
 # shellcheck source=scripts/lib/version-integrity-vendor-pin.sh
 . "$HERE/lib/version-integrity-vendor-pin.sh"
 

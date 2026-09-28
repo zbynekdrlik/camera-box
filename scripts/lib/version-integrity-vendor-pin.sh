@@ -1,74 +1,55 @@
 #!/usr/bin/env bash
-# airuleset:script-ok source-only lib (pure functions only, no top-level statements) -- the sourcing gate owns strict mode; set -euo pipefail here would leak into the sourcing shell (ci-testing-gotchas)
+# airuleset:script-ok source-only lib (functions + one lazy source of scripts/lib/vendor-range.sh, no other top-level statements) -- the sourcing gate owns strict mode; set -euo pipefail here would leak into the sourcing shell (ci-testing-gotchas)
 # scripts/lib/version-integrity-vendor-pin.sh -- the genlock vendor-pin report-only ALARM family of
 # scripts/version-integrity-gate.sh (issues 1137 + 1292), moved out of the gate VERBATIM (issue 1377:
 # the gate was over the repo's 1000-line file budget). No behaviour change: the gate sources this lib
 # BEFORE its source-guard, exactly where these functions used to sit, so sourcing the gate (the unit
-# tests in tests/version_integrity_gate.rs) still defines every function. The three git range helpers
-# mirror drift-guard.sh's imag_genlock_range_log / imag_genlock_ahead_log / imag_genlock_on_dev;
-# genlock_vendor_pin_verdict is the pure verdict vig_row_vendor_pin prints (report-only, never folded
-# into the gate's exit code); issue 1384 moved the alarm's ROW block out of the gate's main() into
-# vig_row_vendor_pin (end of file). The moved comments were written inside the gate: "this file's
-# own pre-existing `--format=` style elsewhere" and "main()" mean scripts/version-integrity-gate.sh.
-
-# vendor_pin_range_log REPO_ROOT DEPLOYED_SHA -> #1292 review follow-up: prints `git log
-# --format='%h %s' $(git merge-base DEPLOYED_SHA origin/main)..origin/main -- vendor/` (one
-# vendor-touching commit per line origin/main carries that DEPLOYED_SHA's own lineage never
-# received -- i.e. DEPLOYED_SHA is genuinely LAGGING relative to it); exit status mirrors the FIRST
-# failing git call (the merge-base resolve, then the log). Mirrors drift-guard.sh's
-# imag_genlock_range_log's LOGIC exactly (same #1292 merge-base fix, same `--end-of-options` defense
-# against an unvalidated SHA value shaped like a git flag) -- two deliberate differences: `--format=
-# '%h %s'` instead of `--oneline` (identical output shape, consistent with this file's own
-# pre-existing `--format=` style elsewhere), and scoped to the WHOLE `vendor/` tree instead of
-# just `vendor/obs-studio vendor/distroav`, because this facet covers every deployed box (strih,
-# stream, imag), not only imag's own consumed paths (see genlock_parity_consumed_paths for that
-# per-box distinction, which this facet deliberately does NOT apply -- it PINS every box's deployed
-# SHA against the single newest vendor/** commit on origin/main, regardless of which sub-paths that
-# box's own build actually consumes).
+# tests in tests/version_integrity_gate.rs) still defines every function.
 #
-# #1292 root cause this exists to fix: the caller used to compute PENDING_LIST via a PLAIN ancestry
-# range (`DEPLOYED_SHA..origin/main`), which reads LAGGING for a deployed SHA that is genuinely AHEAD
-# of main on the dev candidate line -- this repo's two-branch workflow never merges main's own merge
-# commits back into dev (top-level CLAUDE.md GOTCHA), so a deployed SHA's dev-side lineage is never a
-# git-ancestor of main's merge commits even when it is a CONTENT superset of them. Scoping the range
-# to the common ancestor (git merge-base) removes ONLY that false positive -- see
-# vendor_pin_ahead_log/vendor_pin_on_dev immediately below for the AHEAD-direction classification,
-# and genlock_vendor_pin_verdict for how the three combine into the report-only verdict. Isolated so
-# it is independently testable against a throwaway synthetic repo (tests/version_integrity_gate.rs)
-# -- no live git fetch needed.
+# Issue 1384 (no behaviour change either):
+#   - The three git range helpers are thin wrappers over the ONE shared implementation in
+#     scripts/lib/vendor-range.sh, which scripts/drift-guard.sh's imag_genlock_* helpers use too.
+#     This family keeps its own two parameters: `--format='%h %s'` and the WHOLE `vendor/` tree.
+#   - The alarm's ROW block moved out of the gate's main() into vig_row_vendor_pin (end of file).
+# genlock_vendor_pin_verdict is the pure verdict vig_row_vendor_pin prints (report-only, never folded
+# into the gate's exit code). The moved comments were written inside the gate: "main()" there means
+# scripts/version-integrity-gate.sh's main(), whose vendor-pin block is now vig_row_vendor_pin.
+
+if ! command -v vendor_range_lag_log >/dev/null 2>&1; then
+  # shellcheck source=scripts/lib/vendor-range.sh
+  . "${BASH_SOURCE[0]%/*}/vendor-range.sh"
+fi
+
+# vendor_pin_range_log REPO_ROOT DEPLOYED_SHA -> prints one `<short-sha> <subject>` line per commit
+# touching vendor/ that origin/main carries and DEPLOYED_SHA's own lineage never received -- the
+# merge-base-scoped LAG range (issue-1292 review follow-up), i.e. `git log --format='%h %s'
+# $(git merge-base DEPLOYED_SHA origin/main)..origin/main -- vendor/`; exit status mirrors the FIRST
+# failing git call (the merge-base resolve, then the log). A wrapper over vendor_range_lag_log
+# (scripts/lib/vendor-range.sh holds why the range is merge-base-scoped, why `--end-of-options`,
+# and why no --first-parent). Two deliberate differences from drift-guard.sh's
+# imag_genlock_range_log: `--format='%h %s'` instead of `--oneline` (the same shape, this family's
+# own style), and the WHOLE `vendor/` tree instead of just `vendor/obs-studio vendor/distroav`,
+# because this facet covers every deployed box (strih, stream, imag), not only imag's own consumed
+# paths (see genlock_parity_consumed_paths for that per-box distinction, which this facet
+# deliberately does NOT apply -- it PINS every box's deployed SHA against the single newest
+# vendor/** commit on origin/main, regardless of which sub-paths that box's own build consumes).
 vendor_pin_range_log() {
-  local repo_root="$1" deployed="$2" base
-  base="$(git -C "$repo_root" merge-base --end-of-options "$deployed" origin/main 2>/dev/null)" \
-    || return $?
-  git -C "$repo_root" log --format='%h %s' --end-of-options "${base}..origin/main" \
-    -- vendor/ 2>/dev/null
+  vendor_range_lag_log "$1" "$2" '--format=%h %s' vendor/
 }
 
-# vendor_pin_ahead_log REPO_ROOT DEPLOYED_SHA -> #1292 review follow-up: the AHEAD-direction
-# counterpart to vendor_pin_range_log -- prints `git log --format='%h %s'
-# origin/main..DEPLOYED_SHA -- vendor/` (one vendor-touching commit per line DEPLOYED_SHA carries
-# that origin/main does not). Mirrors drift-guard.sh's imag_genlock_ahead_log's logic (same
-# `--end-of-options` defense, same explicit `-n` empty-SHA guard so an empty DEPLOYED_SHA fails LOUD
-# instead of silently resolving `origin/main..` as `origin/main..HEAD`; same `--format=` vs
-# `--oneline` style difference as vendor_pin_range_log above).
+# vendor_pin_ahead_log REPO_ROOT DEPLOYED_SHA -> the AHEAD-direction counterpart (issue-1292 review
+# follow-up): one `<short-sha> <subject>` line per vendor/ commit DEPLOYED_SHA carries that
+# origin/main does not (`git log --format='%h %s' origin/main..DEPLOYED_SHA -- vendor/`); an empty
+# DEPLOYED_SHA fails LOUD (rc 128). A wrapper over vendor_range_ahead_log.
 vendor_pin_ahead_log() {
-  local repo_root="$1" deployed="$2"
-  [ -n "$deployed" ] || return 128
-  git -C "$repo_root" log --format='%h %s' --end-of-options "origin/main..${deployed}" \
-    -- vendor/ 2>/dev/null
+  vendor_range_ahead_log "$1" "$2" '--format=%h %s' vendor/
 }
 
-# vendor_pin_on_dev REPO_ROOT DEPLOYED_SHA -> #1292 review follow-up: exit 0 when DEPLOYED_SHA is
-# reachable from origin/dev (a recognized release-candidate bundle deployed ahead of main),
-# non-zero otherwise (unreachable, or DEPLOYED_SHA itself unresolvable) -- fail CLOSED, never a
-# silent "yes" on an unresolvable check. Mirrors drift-guard.sh's imag_genlock_on_dev exactly. A
-# deployed SHA that carries vendor commits reachable from NEITHER origin/main NOR origin/dev is an
-# unrecognized/orphan build (early-gate-pin doctrine: "an orphan release must SCREAM"), never a
-# quiet OK just because it happens to be a content superset of main.
+# vendor_pin_on_dev REPO_ROOT DEPLOYED_SHA -> exit 0 when DEPLOYED_SHA is reachable from origin/dev
+# (a recognized release-candidate bundle deployed ahead of main), non-zero otherwise -- fail CLOSED
+# (issue-1292 review follow-up). A wrapper over vendor_range_on_dev.
 vendor_pin_on_dev() {
-  local repo_root="$1" deployed="$2"
-  [ -n "$deployed" ] || return 128
-  git -C "$repo_root" merge-base --is-ancestor --end-of-options "$deployed" origin/dev 2>/dev/null
+  vendor_range_on_dev "$1" "$2"
 }
 
 # genlock_vendor_pin_verdict DEPLOYED_SHA NEWEST_VENDOR_SHA PENDING_LIST [AHEAD_LIST] [ON_DEV] ->
