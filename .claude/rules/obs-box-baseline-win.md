@@ -114,6 +114,11 @@ owner sets it. That is an expected report-only row, not a bug.
   - That line sits BEFORE each invocation's `${STRIH_LINUX_GATE_ARG:+--strih-linux}` tail. The pinned
     `--win-state` / `--imag-acked-offline` / `--genlock-sha` sequences and the `--strih-linux` count of
     2 (`tests/harness_strih_platform_1351.rs`) are untouched.
+- **Which machine answered:** per graded box the helper prints `box=<b> gathered from host=<name>`,
+  the COMPUTERNAME on the gather's `==WINBASELINE-BEGIN==` line (`<none>` for an empty gather). Live
+  names: `STREAM`, `RESOLUME-SNV`. `resolume.lan` can resolve to the .201 address `bridge` also holds
+  (`obs-fleet-list.md`); when that PC answers :4455 the check reads it as resolume. The check does
+  not compare the name yet, so read this line before trusting a resolume row.
 - **Where the rows appear in a run log:** first the helper's lines, just before the gate header; then
   the gate's `-- Windows OBS-box baseline (issue 1357: report-only, NEVER gates the run) --` block
   after its fleet rows and before `GATE PASS` / `GATE FAILED` / `GATE INCOMPLETE`.

@@ -46,6 +46,15 @@ _e2e_wb_uint() {
   esac
 }
 
+# _e2e_wb_gather_host FILE -> the COMPUTERNAME on the gather's `==WINBASELINE-BEGIN== v1 host=<name>`
+# line (CRLF tolerated), or `<none>` when the file has no such line (an empty / failed gather).
+_e2e_wb_gather_host() {
+  local host
+  host="$(awk '/^==WINBASELINE-BEGIN== / { gsub(/\r/, ""); for (i = 1; i <= NF; i++)
+            if ($i ~ /^host=/) { sub(/^host=/, "", $i); print $i; exit } }' "$1" 2>/dev/null || true)"
+  printf '%s' "${host:-<none>}"
+}
+
 # e2e_win_baseline_boxes -> the facet members (space-separated), empty when the roster is unreadable.
 e2e_win_baseline_boxes() {
   obs_fleet_facet_members win-baseline 2>/dev/null || true
@@ -127,6 +136,9 @@ e2e_win_baseline_gather() {
     [ -f "$out_dir/$box.txt" ] || continue
     WIN_BASELINE_GATE_ARGS+=(--win-baseline "$box=$out_dir/$box.txt")
     graded=$((graded + 1))
+    # Which machine really answered: resolume.lan can resolve to an address another PC also holds
+    # (.claude/rules/obs-fleet-list.md), so the run log names the gather's own COMPUTERNAME.
+    echo "      box=$box gathered from host=$(_e2e_wb_gather_host "$out_dir/$box.txt")"
   done
   echo "    Windows OBS-box baseline: ${verdict} (report-only, does NOT block the run; ${graded} box gather(s) to the gate; log ${log})"
   return 0

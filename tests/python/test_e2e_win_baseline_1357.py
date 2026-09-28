@@ -114,6 +114,20 @@ def test_drift_rc20_is_one_line_and_never_fatal(tmp_path):
     assert re.search(r"^\s+box=resolume win_baseline=DRIFT drift=power_scheme,", r.stdout, re.M), r.stdout
     assert re.search(r"^\s+box=stream win_baseline=DRIFT drift=wer_dontshowui$", r.stdout, re.M), r.stdout
     assert "ARGC=4" in r.stdout
+    # the live capture's own COMPUTERNAME (CRLF gather) is named per box
+    assert re.search(r"^\s+box=stream gathered from host=STREAM$", r.stdout, re.M), r.stdout
+
+
+def test_the_run_log_names_the_machine_that_really_answered(tmp_path):
+    # resolume.lan can resolve to an address another PC also holds; the log must show whose gather it is
+    other = tmp_path / "other.txt"
+    other.write_bytes((FIX / "resolume_gather_program_live_2026-09-27.txt").read_bytes()
+                      .replace(b"host=RESOLUME-SNV", b"host=BRIDGE-PC"))
+    seam = _seam(tmp_path, {"stream": FIX / "stream_live_2026-09-27.txt", "resolume": other})
+    r, _ = _gather(tmp_path, {"WIN_BASELINE_FETCH_CMD": seam, "OBS_FLEET_HOME": "stream resolume"})
+    _assert_caller_survived(r)
+    assert re.search(r"^\s+box=resolume gathered from host=BRIDGE-PC$", r.stdout, re.M), r.stdout
+    assert re.search(r"^\s+box=stream gathered from host=STREAM$", r.stdout, re.M), r.stdout
 
 
 def test_unread_box_rc11_is_unknown_and_its_empty_gather_still_goes_to_the_gate(tmp_path):
@@ -125,6 +139,7 @@ def test_unread_box_rc11_is_unknown_and_its_empty_gather_still_goes_to_the_gate(
     # the check leaves an empty file for a box it tried to read; the gate grades it UNKNOWN per item
     assert _args(r) == ["--win-baseline", f"stream={out}/stream.txt"], r.stdout
     assert (out / "stream.txt").read_bytes() == b""
+    assert re.search(r"^\s+box=stream gathered from host=<none>$", r.stdout, re.M), r.stdout
 
 
 def test_traveling_box_away_is_skipped_and_gets_no_arg(tmp_path):
