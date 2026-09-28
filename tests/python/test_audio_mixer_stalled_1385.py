@@ -527,7 +527,7 @@ def test_replay_a_stopped_thread_on_a_box_without_vban_pages_stalled():
 # ---------------------------------------------------------------------------------------------
 # the real bash orchestrator over the stopped-thread replay: one page, STALLED, time-bucketed arm
 # ---------------------------------------------------------------------------------------------
-def _run_watchdog(tmp_path, body, state_file):
+def _run_watchdog(tmp_path, body, state_file, now=None):
     body_file = tmp_path / "body.json"
     body_file.write_text(body, encoding="utf-8")
     fetch = tmp_path / "fetch.sh"
@@ -540,6 +540,8 @@ def _run_watchdog(tmp_path, body, state_file):
         "AUDIO_MIXER_ALERT_STATE_FILE": str(state_file),
         "AIRULESET_NOTIFY": "/nonexistent/airuleset.py",
     })
+    if now is not None:
+        env["AUDIO_MIXER_NOW_EPOCH"] = str(int(now))
     r = subprocess.run(["bash", str(_SCRIPTS / "audio-mixer-alert-watchdog.sh"), "--dry-run"],
                        capture_output=True, text=True, env=env, timeout=60)
     assert r.returncode == 0, r.stderr
@@ -589,7 +591,7 @@ def test_watchdog_dry_run_never_pages_a_log_frozen_for_days(tmp_path):
     assert sum(1 for _t, _b, v in seq if v == "STALLED") >= 2
     state = tmp_path / "state"
     for t, body, v in seq:
-        log = _run_watchdog(tmp_path, body, state)
+        log = _run_watchdog(tmp_path, body, state, now=1_790_000_000 + t)
         assert "WOULD alert" not in log, f"day {int(t // 86400)} {v}: {log}"
 
 
@@ -616,6 +618,95 @@ def test_watchdog_dry_run_logs_stale_without_a_page_when_the_log_stopped(tmp_pat
         log = _run_watchdog(tmp_path, body, state)
         assert "WOULD alert" not in log
     assert "mixer=STALE" in log
+
+
+# ---------------------------------------------------------------------------------------------
+# a clock mismatch (OBS and the gather disagree on the time zone) must not blind the pager silently
+# ---------------------------------------------------------------------------------------------
+def test_log_clock_mismatch_is_a_log_that_advances_yet_reads_old():
+    # A live log whose stamps are 2 h off the gather's clock: the head age stays ~7200 between
+    # passes. A frozen log ages by the pass gap; a live one with matching clocks reads young.
+    assert amd.classify_log_clock(7203, 7201, 300) == "MISMATCH"
+    assert amd.classify_log_clock(79199, 79203, 305) == "MISMATCH"   # OBS ahead of the gather
+    assert amd.classify_log_clock(1300, 1000, 300) == "OK"           # frozen: ages with the wall
+    assert amd.classify_log_clock(4, 6, 300) == "OK"                 # live, clocks agree
+    assert amd.classify_log_clock(250, 86350, 300) == "OK"           # a frozen log's date wrap
+    assert amd.classify_log_clock(7203, 7201, 30) == "UNKNOWN"       # passes too close to judge
+    assert amd.classify_log_clock(7203, 7201, 7200) == "UNKNOWN"     # a long timer gap
+    assert amd.classify_log_clock(7203, None, 300) == "UNKNOWN"
+    assert amd.classify_log_clock(None, 7201, 300) == "UNKNOWN"
+    assert amd.classify_log_clock(7203, None, None) == "UNKNOWN"
+
+
+def test_log_clock_boundary_is_half_the_pass_gap():
+    assert amd.classify_log_clock(1149, 1000, 300) == "MISMATCH"     # aged 149 s of 300
+    assert amd.classify_log_clock(1150, 1000, 300) == "OK"           # aged half the gap
+
+
+def test_cli_grades_the_log_clock_from_the_previous_pass():
+    body = json.dumps({"audio_mixer_ticks": "2813", "audio_mixer_ticks_over": "0",
+                       "audio_mixer_window_ms": "60011", "audio_mixer_tick_ms": "21.3",
+                       "audio_mixer_age_s": "30", "obs_log_head_age_s": "7203"})
+    cli = [sys.executable, str(_SCRIPTS / "audio_mixer_decision.py"), "analyze",
+           "--box-reachable", "1"]
+    out = subprocess.run(cli + ["--prev-log-head-age-s", "7201", "--pass-gap-s", "300"],
+                         input=body, capture_output=True, text=True, check=True).stdout
+    assert "mixer_verdict=STALE" in out
+    assert "log_clock=MISMATCH" in out
+    out = subprocess.run(cli, input=body, capture_output=True, text=True, check=True).stdout
+    assert "log_clock=UNKNOWN" in out
+
+
+def test_watchdog_pages_once_when_the_log_clock_disagrees(tmp_path):
+    state = tmp_path / "state"
+    live_offset = _mixer_body(30, 7203)       # a fresh dump, a live log stamped 2 h off
+    logs = [_run_watchdog(tmp_path, live_offset, state, now=1_790_000_000 + i * 300)
+            for i in range(5)]
+    fired = [ln for lg in logs for ln in lg.splitlines() if "WOULD alert" in ln]
+    assert len(fired) == 1 and "CLOCK" in fired[0], fired
+    assert "WOULD alert" not in logs[0] + logs[1]      # no previous pass, then one: confirming
+    # the clocks agree again -> the guard clears on the machine channel only
+    log = _run_watchdog(tmp_path, _mixer_body(30, 4), state, now=1_790_000_000 + 5 * 300)
+    assert "WOULD alert" not in log
+    assert "RECOVERY" in log and "clock" in log
+
+
+def test_watchdog_never_flags_a_frozen_log_as_a_clock_mismatch(tmp_path):
+    state = tmp_path / "state"
+    for i in range(6):
+        body = _mixer_body(420, 900 + i * 300)   # OBS dead: the head ages with the wall clock
+        log = _run_watchdog(tmp_path, body, state, now=1_790_000_000 + i * 300)
+        assert "WOULD alert" not in log, log
+        assert "clock MISMATCH" not in log, log
+
+
+def test_replay_a_live_log_on_an_offset_box_clock_pages_the_blind_pager_once(tmp_path):
+    # The stream-shaped real replay, but the gather's clock runs 2 h ahead of the OBS stamps: every
+    # mixer verdict reads STALE (blind), and the clock guard pages that exactly once.
+    full = _lines("control-0300-0415")
+    lines = _stream_shaped(full, cut=_tod(5, 0, 0))   # the audio thread never stops here
+    state = tmp_path / "state"
+    start, end = _sec(full[0]), _sec(full[-1])
+    t = start + 60
+    fired = []
+    verdicts = set()
+    while t <= end:
+        text = "".join(ln for ln in lines if _sec(ln) <= t)
+        body = json.loads(_bundle_at(lines, t))
+        body["obs_log_head_age_s"] = bsg.obs_log_head_age_s_from_log(text, (t + 7200) % 86400)
+        verdicts.add(amd.analyze(json.dumps(body), 1)["mixer_verdict"])
+        log = _run_watchdog(tmp_path, json.dumps(body), state, now=1_790_000_000 + t)
+        fired += [ln for ln in log.splitlines() if "WOULD alert" in ln]
+        t += PASS_S
+    assert "STALE" in verdicts and verdicts <= {"STALE", "UNKNOWN"}, verdicts
+    assert len(fired) == 1 and "CLOCK" in fired[0], fired
+
+
+def test_the_frozen_bound_does_not_follow_the_stale_override():
+    # AUDIO_MIXER_STALE_AFTER_S widens the dump window only; the frozen-log bound stays fixed, so a
+    # dead OBS's last counts are still graded on at most one pass a day.
+    assert _mixer(30, 181, ticks=2760, over=797, stale_after_s=600) == "STALE"
+    assert _mixer(30, 180, ticks=2760, over=797, stale_after_s=600) == "BEHIND"
 
 
 def test_watchdog_source_pages_stalled_through_the_time_bucketed_mixer_arm():
