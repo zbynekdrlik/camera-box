@@ -88,6 +88,13 @@ class CamboxFreeList1389(unittest.TestCase):
         self.assertEqual(r.stdout, "10.0.0.1,10.0.0.3")
         self.assertEqual(_lib('ndi_discovery_list_common "10.0.0.1" "10.0.0.2"').stdout, "")
 
+    def test_list_common_sees_a_mapped_address_and_ignores_bare_colon_forms(self):
+        r = _lib('ndi_discovery_list_common "::ffff:10.0.0.1,10.0.0.2" "10.0.0.1"')
+        self.assertEqual(r.stdout, "::ffff:10.0.0.1")
+        # An entry that is only a port (or an IPv6 literal) never matches an EMPTY forbidden list.
+        self.assertEqual(_lib('ndi_discovery_list_common ":5960,::1" ""').stdout, "")
+        self.assertEqual(_lib('ndi_discovery_list_common "::1,fe80::1:5960" "10.0.0.1"').stdout, "")
+
     def test_list_common_sees_an_entry_with_a_port(self):
         r = _lib('ndi_discovery_list_common "10.0.0.1:5960, 10.0.0.2" "10.0.0.1"')
         self.assertEqual(r.stdout, "10.0.0.1:5960", "the entry is named as listed")
@@ -191,6 +198,49 @@ class CamboxApply1389(unittest.TestCase):
             r, calls, _ = self._run(tmp)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertEqual(calls, [], "the right list needs no write, whatever other keys the file has")
+            self.assertIn("unchanged", r.stdout)
+
+    def test_a_dropin_pointing_elsewhere_is_left_alone(self):
+        # The gate reads the drop-in's NDI_CONFIG_DIR, as verify-device (an) does, never mere existence.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, ISSUE_1342_LIST)
+            env = self._env(tmp)
+            with open(env["NDI_DISCOVERY_CAMBOX_DROPIN"], "w") as fh:
+                fh.write("[Service]\nEnvironment=NDI_CONFIG_DIR=/somewhere/else\n")
+            before = _read(os.path.join(tmp, "etc-ndi", "ndi-config.v1.json"))
+            r, calls, path = self._run(tmp)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(calls, [])
+            self.assertEqual(_read(path), before)
+            self.assertIn("mDNS-only", r.stdout)
+
+    def test_a_broken_json_file_with_the_right_list_is_rewritten(self):
+        # verify-device (an) FAILs such a file as "not valid JSON" and names --cambox-apply: it must converge.
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, _pinned())
+            path = os.path.join(tmp, "etc-ndi", "ndi-config.v1.json")
+            with open(path, "w") as fh:
+                fh.write('{"ndi": {"networks": {"ips": "' + _pinned() + '"}}')  # a brace short
+            r, calls, _ = self._run(tmp)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"])
+            self.assertEqual(_read(path), _lib("ndi_discovery_config_json").stdout)
+            self.assertNotIn("unchanged", r.stdout)
+
+    def test_without_python3_only_the_canonical_file_counts_as_unchanged(self):
+        # No JSON parser on the box: a cambox in ndi.networks.ips must never hide behind a later "ips".
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, _pinned())
+            path = os.path.join(tmp, "etc-ndi", "ndi-config.v1.json")
+            with open(path, "w") as fh:
+                json.dump({"ndi": {"networks": {"ips": _pinned() + ",10.77.9.61"}}, "other": {"ips": _pinned()}}, fh)
+            r, calls, _ = self._run(tmp, extra_stubs="python3() { return 1; }\n")
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"])
+            self.assertEqual(_read(path), _lib("ndi_discovery_config_json").stdout)
+            # ... and the canonical file itself stays a no-op without python3 too.
+            r, calls, _ = self._run(tmp, extra_stubs="python3() { return 1; }\n")
+            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"], "calls accumulate in the log")
             self.assertIn("unchanged", r.stdout)
 
     def test_a_stray_discovery_key_is_still_rewritten(self):
