@@ -263,16 +263,22 @@ ndi_discovery_list_minus() {
 }
 
 # ndi_discovery_list_common A B -> the comma list of A's entries that are also in B, in A's order
-# ("" when none). An A entry with a port (`10.77.9.61:5960`) matches its bare address in B and is
-# named as listed. Spaces in either list are ignored; A is split with read, never glob-expanded (it
-# may be config text read off a box). Pure.
+# ("" when none). An A entry is also matched by its bare IPv4 address: a leading `::ffff:` (an
+# IPv4-mapped address) and a single `:port` are stripped for the comparison, and the entry is named
+# as listed. Any other form with a colon (an IPv6 literal) is compared as written. Spaces in either
+# list are ignored; A is split with read, never glob-expanded (it may be config text read off a
+# box). Pure.
 ndi_discovery_list_common() {
-  local b ip out="" items=()
+  local b ip bare out="" items=()
   b=",$(_ndi_discovery_norm_list "$2"),"
   IFS=', ' read -r -a items <<<"$1" || true
   for ip in "${items[@]}"; do
     [ -n "$ip" ] || continue
-    case "$b" in *",$ip,"* | *",${ip%%:*},"*) out="${out:+$out,}$ip" ;; esac
+    bare="${ip#::ffff:}"
+    case "$bare" in *:*:*) ;; *:*) bare="${bare%%:*}" ;; esac
+    if [ -n "$bare" ]; then
+      case "$b" in *",$bare,"*) out="${out:+$out,}$ip" ;; esac
+    fi
   done
   printf '%s' "$out"
 }
@@ -337,7 +343,7 @@ ndi_discovery_config_verdict() {
 # ndi_discovery_dropin_content -> the systemd drop-in that points a root/ProtectHome NDI receiver at
 # NDI_DISCOVERY_SYSTEM_DIR.
 ndi_discovery_dropin_content() {
-  printf '[Service]\n# issue 1342: libndi reads $NDI_CONFIG_DIR/%s (networks.ips = every managed NDI sender).\n# ProtectHome hides /root/.ndi, so the config lives in the system dir.\nEnvironment=NDI_CONFIG_DIR=%s\n' \
+  printf '[Service]\n# issue 1342: libndi reads $NDI_CONFIG_DIR/%s (networks.ips = the OBS-fleet NDI senders, never a cambox: issue 1389).\n# ProtectHome hides /root/.ndi, so the config lives in the system dir.\nEnvironment=NDI_CONFIG_DIR=%s\n' \
     "$NDI_DISCOVERY_CONFIG_NAME" "$NDI_DISCOVERY_SYSTEM_DIR"
 }
 
@@ -429,12 +435,14 @@ ndi_discovery_block_section() {
 # over ssh, see the CLI below) that rewrites ONLY $NDI_DISCOVERY_SYSTEM_DIR/ndi-config.v1.json on a cambox with
 # networks.ips = IPS: issue 1389's smallest safe equivalent of re-running setup-device.sh STEP 7 on a
 # live box. It embeds the SAME ndi_discovery_write_config STEP 7 calls (declare -f, never a copy).
-# It writes nothing and never remounts when the box has no camera-box NDI_CONFIG_DIR drop-in
-# (camera-box never reads the file, so the box is mDNS-only already) or when ndi.networks.ips already
-# equals IPS with no networks.discovery (whatever other keys the file carries). Otherwise, on a
-# read-only root it remounts rw, writes, syncs and remounts ro again (retried 3x; a root it cannot
-# put back is a loud non-zero, and the EXIT trap puts it back on any failure). The drop-in and every
-# other file stay untouched.
+# It writes nothing and never remounts when the box's camera-box drop-in does not point
+# NDI_CONFIG_DIR at the config dir (camera-box never reads the file, so the box is mDNS-only already;
+# read like verify-device (an) reads it), or when the file is already right: with python3 on the box,
+# a file that parses as JSON whose ndi.networks.ips equals IPS with no networks.discovery (whatever
+# other keys it carries); without python3, only the canonical rendering. A file that is not JSON is
+# always rewritten. Otherwise, on a read-only root it remounts rw, writes, syncs and remounts ro again
+# (retried 3x; a root it cannot put back is a loud non-zero, and the EXIT trap puts it back on any
+# failure). The drop-in and every other file stay untouched.
 # Non-zero (and no output) on an EMPTY IPS, on an IPS that names a cambox, or when the cambox set is
 # unknown.
 ndi_discovery_cambox_apply_remote_snippet() {
@@ -453,18 +461,28 @@ ndi_discovery_cambox_apply_remote_snippet() {
   printf 'NDI_DISCOVERY_CONFIG_NAME=%q\n' "$NDI_DISCOVERY_CONFIG_NAME"
   printf '_ndi_dir=%q\n_ndi_ips=%q\n_ndi_dropin=%q\n' "$NDI_DISCOVERY_SYSTEM_DIR" "$ips" "$NDI_DISCOVERY_CAMBOX_DROPIN"
   declare -f _ndi_discovery_json_string _ndi_discovery_networks_key ndi_discovery_config_ips \
-    ndi_discovery_config_servers _ndi_discovery_norm_list \
+    ndi_discovery_config_servers _ndi_discovery_norm_list ndi_discovery_dropin_config_dir \
     ndi_discovery_config_json _ndi_discovery_merged_json ndi_discovery_write_config
   cat <<'NDI_APPLY'
 _ndi_target="$_ndi_dir/$NDI_DISCOVERY_CONFIG_NAME"
-if [ ! -f "$_ndi_dropin" ]; then
-  echo "ndi-discovery: no $_ndi_dropin -- camera-box never reads $_ndi_target, so this box is mDNS-only already (the safe state); nothing written"
+if [ "$(ndi_discovery_dropin_config_dir "$(cat "$_ndi_dropin" 2>/dev/null || true)")" != "$_ndi_dir" ]; then
+  echo "ndi-discovery: $_ndi_dropin does not point NDI_CONFIG_DIR at $_ndi_dir -- camera-box never reads $_ndi_target, so this box is mDNS-only already (the safe state); nothing written"
   exit 0
 fi
 _ndi_have="$(cat "$_ndi_target" 2>/dev/null || true)"
-if [ -n "$_ndi_have" ] \
-  && [ "$(_ndi_discovery_norm_list "$(ndi_discovery_config_ips "$_ndi_have")")" = "$(_ndi_discovery_norm_list "$_ndi_ips")" ] \
-  && [ -z "$(_ndi_discovery_norm_list "$(ndi_discovery_config_servers "$_ndi_have")")" ]; then
+_ndi_same=0
+if [ -n "$_ndi_have" ]; then
+  if command -v python3 >/dev/null 2>&1 \
+    && printf '%s' "$_ndi_have" | python3 -c 'import json, sys; json.load(sys.stdin)' >/dev/null 2>&1; then
+    if [ "$(_ndi_discovery_norm_list "$(ndi_discovery_config_ips "$_ndi_have")")" = "$(_ndi_discovery_norm_list "$_ndi_ips")" ] \
+      && [ -z "$(_ndi_discovery_norm_list "$(ndi_discovery_config_servers "$_ndi_have")")" ]; then
+      _ndi_same=1
+    fi
+  elif [ "$_ndi_have" = "$(ndi_discovery_config_json "$_ndi_ips")" ]; then
+    _ndi_same=1
+  fi
+fi
+if [ "$_ndi_same" = 1 ]; then
   echo "ndi-discovery: $_ndi_target unchanged (networks.ips=$_ndi_ips) -- nothing written"
   exit 0
 fi

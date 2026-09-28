@@ -221,11 +221,14 @@ rewrites ONLY `/etc/ndi/ndi-config.v1.json`:
 - `sshpass -p "$DEVICE_ROOT_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
   -o ConnectTimeout=10 root@<cambox> bash -s < "$apply"` runs it on one box (the ssh options of
   verify-device's `ssh_box`: a reflashed box has a new host key):
-  - a box without the camera-box `ndi-discovery.conf` drop-in never reads the file, so it is
-    mDNS-only already: the program says so and writes nothing;
-  - when `ndi.networks.ips` already equals the list and no `networks.discovery` is set (whatever
-    other keys the file has), it prints `unchanged` and writes nothing: no remount, no write to the
-    USB stick;
+  - a box whose camera-box `ndi-discovery.conf` drop-in does not point `NDI_CONFIG_DIR` at
+    `/etc/ndi` (read the way verify-device `(an)` reads it) never reads the file, so it is mDNS-only
+    already: the program says so and writes nothing;
+  - a file that is already right prints `unchanged` and writes nothing: no remount, no write to the
+    USB stick. With python3 on the box that is a file that parses as JSON whose `ndi.networks.ips`
+    equals the list with no `networks.discovery`, whatever other keys it has; without python3 only
+    the canonical rendering counts. A file that is not JSON is always rewritten, so the program
+    converges exactly what verify-device `(an)` FAILs;
   - otherwise it reads the root mount (`findmnt`, `/proc/mounts` fallback) and, when read-only,
     `mount -o remount,rw /`, writes the one file (temp file + atomic rename), `sync`, then
     `mount -o remount,ro /` again (3 tries);
