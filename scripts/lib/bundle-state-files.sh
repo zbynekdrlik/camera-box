@@ -7,8 +7,9 @@
 # scripts/lib/bundle-state-files.sh -- issue 1386: the ONE declared file set of the :8899
 # bundle-state server tree, so setup-strih.sh (step 9) and setup-imag.sh (step 28) install the same
 # files instead of each typing a literal list. The server imports bundle_state_gather, which
-# resolves its flat facet-family siblings, plus obs_phase2 -- a box missing any of them serves no
-# :8899 at all (the server exits on the ImportError and its supervisor restarts it in a loop).
+# resolves its flat facet-family siblings, its Windows identity readers (bundle_state_windows) and
+# its logger (bundle_state_serverlog), plus obs_phase2 -- a box missing any of them serves no :8899
+# at all (the server exits on the ImportError and its supervisor restarts it in a loop).
 #
 # The plain-text twin scripts/lib/bundle-state-files.txt carries the same names for the Windows
 # runbook (the boxes fetch it at the pinned commit, then each file). tests/python/
@@ -26,5 +27,7 @@ BUNDLE_STATE_SERVER_FILES=(
   bundle_state_vban.py
   bundle_state_av_offset.py
   bundle_state_host.py
+  bundle_state_windows.py
+  bundle_state_serverlog.py
   obs_phase2.py
 )

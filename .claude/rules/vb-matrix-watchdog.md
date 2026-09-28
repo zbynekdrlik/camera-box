@@ -2,6 +2,7 @@
 paths:
   - "scripts/vb-matrix-alert-watchdog.sh"
   - "scripts/vb_matrix_decision.py"
+  - "scripts/bundle_state_windows.py"
   - "systemd/vb-matrix-alert-watchdog.*"
   - "tests/python/test_vb_matrix_*.py"
   - "tests/harness_vb_matrix_*.rs"
@@ -48,6 +49,8 @@ clear-on-failure). Call it UNCONDITIONALLY with the pid — a falsy/non-numeric 
 and returns "" with NO subprocess, so imag / a DOWN box never pays a CIM query AND a same-pid
 DOWN→UP restart never serves a stale start (a review 🔵). ONE native `tasklist_csv()` feeds BOTH the
 obs process-count facet and this — never two spawns (latency, `bundle-state-gather-latency.md`).
+Since issue 1386 these readers and the cache live in `scripts/bundle_state_windows.py`; the server's
+`_windows_process_facets` calls them and re-exports them for the tests.
 
 ## The dev1 watchdog is DETECTION-ONLY — the cure is an owner step
 

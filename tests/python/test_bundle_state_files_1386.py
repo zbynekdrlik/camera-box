@@ -135,14 +135,22 @@ def test_the_closure_reaches_every_facet_module():
     assert split <= closure, f"{sorted(split - closure)} exist but the server never reaches them"
 
 
-_SMOKE = "import sys; sys.path.insert(0, \"/opt/camera-box\"); import bundle_state_gather"
+_SMOKE = ("import sys; sys.path.insert(0, \"/opt/camera-box\"); "
+          "import bundle_state_gather, bundle_state_windows")
+# The two tree files the smoke import cannot load: the server itself and obs_phase2 need the
+# websocket-client package, which `-I` (no user site-packages) hides on some boxes.
+_NOT_SMOKE_IMPORTABLE = {_SERVER, "obs_phase2.py"}
 
 
-def _smoke_rc(tree_dir, cwd):
+def _smoke(tree_dir, cwd):
     # The setup scripts' own post-install check, pointed at *tree_dir* instead of /opt/camera-box.
     prog = _SMOKE.replace("/opt/camera-box", str(tree_dir))
     return subprocess.run([sys.executable, "-I", "-B", "-c", prog], cwd=cwd, capture_output=True,
-                          text=True, check=False).returncode
+                          text=True, check=False)
+
+
+def _smoke_rc(tree_dir, cwd):
+    return _smoke(tree_dir, cwd).returncode
 
 
 def test_both_setup_scripts_smoke_import_the_installed_tree_before_enabling():
@@ -171,6 +179,26 @@ def test_the_smoke_import_catches_a_partial_tree_even_from_the_scripts_dir(tmp_p
             (tree / name).write_bytes((_SCRIPTS / name).read_bytes())
     assert _smoke_rc(full, _SCRIPTS) == 0
     assert _smoke_rc(part, _SCRIPTS) != 0
+
+
+def test_the_smoke_import_catches_every_missing_module_it_can_load(tmp_path):
+    # Slice D added server-side modules outside the gather facade, so importing the facade alone no
+    # longer proves the tree complete. Every listed module the smoke import can load at all must
+    # make it fail when absent -- including one a later change adds to the list.
+    names = _txt_list()
+    for missing in names:
+        if missing in _NOT_SMOKE_IMPORTABLE:
+            continue
+        tree = tmp_path / missing.replace(".", "_")
+        tree.mkdir()
+        for name in names:
+            if name != missing:
+                (tree / name).write_bytes((_SCRIPTS / name).read_bytes())
+        run = _smoke(tree, _SCRIPTS)
+        # The failure must be the missing module itself, never an unrelated error in a copied one.
+        assert run.returncode != 0 and f"No module named '{missing[:-3]}'" in run.stderr, (
+            f"a tree without {missing} passes the post-install smoke import -- extend the import "
+            f"(rc {run.returncode}, stderr {run.stderr[-300:]!r})")
 
 
 def test_both_setup_scripts_iterate_the_declared_list():

@@ -741,7 +741,7 @@ full-path-e2e run always saw both boxes UNKNOWN (exit 11) and refused. Fixed by 
   `genlock_fifo`). If a future scene edit needs a DIFFERENT input excluded from the pin, that input
   must not get `genlock_fifo=true` set — don't hand-maintain a name list here.
 - **Deploy**: `C:\ProgramData\camera-box\` on each box holds the server tree — EVERY file named in
-  `scripts/lib/bundle-state-files.txt` (issue 1386: the server, its `bundle_state_*` facet modules
+  `scripts/lib/bundle-state-files.txt` (issue 1386: the server, its `bundle_state_*` modules
   and `obs_phase2.py`; the server imports all of them, so a partial copy serves no `:8899`) — plus
   `run-bundle-state-server.ps1` and `obs-ws-password.txt`, launched by a
   Scheduled Task `BundleStateServer` (ONSTART trigger, InteractiveToken as `newlevel` — mirrors the
