@@ -504,12 +504,14 @@ class TestLatencyPinsSection:
 
     def test_a_strih_row_is_the_main_pin_only(self):
         # issue 1242: strih has no multiview twin input any more, so a strih row carries only the
-        # main pin -- no MV clone column, no main-vs-MV parity flag.
+        # main pin -- no MV clone column, no main-vs-MV parity flag -- even when an older snapshot
+        # still carries a (different) strih mv_ms.
         verdict = self._verdict_with_delivery({"cam1": 71.0})
-        pins = {"strih": {"cam1": {"main_ms": 3}}}
+        pins = {"strih": {"cam1": {"main_ms": 3, "mv_ms": 8}}}
         report = edr.compose_report(verdict, {"run_id": "x", "pins": pins})
-        assert "cam1: strih=3ms, p50 tento beh=71ms" in report
-        assert "MV" not in report.split("Nastavené latencie", 1)[1].split("Stream 'NDI 2ME PGM'", 1)[0]
+        assert "  • cam1: strih=3ms, p50 tento beh=71ms" in report
+        section = report.split("Nastavené latencie", 1)[1].split("Stream 'NDI 2ME PGM'", 1)[0]
+        assert "MV" not in section and "PARITA" not in section and "⚠️" not in section
 
     def test_imag_shown_as_one_fixed_summary_line_when_all_compliant(self):
         # #757 (2026-07-15, binding directive): imag is fixed-3ms-always, never a per-camera
