@@ -88,20 +88,10 @@ measure() {
   PROBE_RC=$?
 }
 
-# read_state_field and clear_throttle live in scripts/lib/watchdog-common.sh. A healthy / unknown
-# pass is NOT an incident: clear_throttle clears the confirm counter AND the throttle sig so a
-# genuinely NEW episode later pages fresh instead of being dedup'd against a stale signature
-# (mirrors the optical-chain / imag-obs alert-watchdog reset discipline). This older
-# write_state_field stays here on purpose and overrides the lib's copy (it writes through the state
-# file itself when mktemp fails).
-write_state_field() {
-  local key="$1" val="$2" tmp
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || echo "$STATE_FILE")"
-  { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
-    > "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-}
+# read_state_field, write_state_field and clear_throttle live in scripts/lib/watchdog-common.sh. A
+# healthy / unknown pass is NOT an incident: clear_throttle clears the confirm counter AND the
+# throttle sig so a genuinely NEW episode later pages fresh instead of being dedup'd against a stale
+# signature (mirrors the optical-chain / imag-obs alert-watchdog reset discipline).
 
 main() {
   log "pass start (dry_run=$DRY_RUN, strih=$STRIH, reference='$REFERENCE', subject='$SUBJECT')"

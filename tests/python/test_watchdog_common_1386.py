@@ -4,7 +4,8 @@ scripts/lib/watchdog-common.sh holds every helper that was the same code (bash `
 least three watchdogs: read_state_field, write_state_field, clear_throttle, clear_box_throttle,
 clear_source_throttle, source_key, netreach_box_alerted, fetch_bundle_json. A helper whose code
 differed stayed local; where such a local copy shares a lib name it is defined AFTER the source
-line, so the local copy is the one that runs. This file pins:
+line, so the local copy is the one that runs. write_state_field is the exception: its local copies
+were removed, so its one behaviour (never drop state, loud, -e safe) is the lib's. This file pins:
 
   * the lib's shape: functions only, no shell option changed, the exact name set;
   * its behaviour under the callers' strictness (`set -uo pipefail`);
@@ -33,20 +34,10 @@ LIB_FUNCS = {
 
 # The local copies the lib header documents: name -> watchdogs that keep their own (different) code.
 ALLOWED_OVERRIDES = {
-    "write_state_field": {
-        # the older copy that writes through the state file itself when mktemp fails
-        "asio-starve-alert-watchdog.sh", "avsync-heartbeat-alert-watchdog.sh",
-        "cadence-alert-watchdog.sh", "cg-bridge-alert-watchdog.sh",
-        "frozen-input-alert-watchdog.sh", "grabber-stuck-alert-watchdog.sh",
-        "imag-obs-alert-watchdog.sh", "imag-power-envelope-alert-watchdog.sh",
-        "obs-session-watchdog.sh", "optical-chain-alert-watchdog.sh",
-        "splitter-port-alert-watchdog.sh",
-        # read-first like the lib, but printf formats with a literal newline
-        "network-reach-alert-watchdog.sh", "obs-liveness-watchdog.sh",
-        # a fixed temp path
-        "obs-burn-reconcile-watchdog.sh",
-    },
-    "read_state_field": {"ndi-portmap-alert-watchdog.sh", "netcfg-drift-alert-watchdog.sh"},
+    # write_state_field has NO override: every watchdog uses the lib's one write (see
+    # test_the_state_write_lives_only_in_the_lib)
+    "read_state_field": {"ndi-portmap-alert-watchdog.sh", "netcfg-drift-alert-watchdog.sh",
+                         "avsync-lineup-alert-watchdog.sh", "vban-rate-alert-watchdog.sh"},
     # each with its own *_FETCH_CMD test seam
     "fetch_bundle_json": {"audio-mixer-alert-watchdog.sh", "genlock-lock-alert-watchdog.sh",
                           "vb-matrix-alert-watchdog.sh"},
@@ -283,6 +274,13 @@ def test_a_sourcing_watchdog_keeps_only_documented_local_copies():
             assert name in _function_blocks((_SCRIPTS / wd).read_text()), (
                 f"{wd} no longer defines {name}() -- drop it from ALLOWED_OVERRIDES and the lib header")
     assert len(sourcing) >= 20
+
+
+def test_the_state_write_lives_only_in_the_lib():
+    # one write behaviour for every watchdog (issue 1386): no script keeps its own copy of it
+    rx = re.compile(r"^write_state_field\s*\(\)", re.M)
+    owners = sorted(str(p.relative_to(_SCRIPTS)) for p in _SCRIPTS.rglob("*.sh") if rx.search(p.read_text()))
+    assert owners == ["lib/watchdog-common.sh"], owners
 
 
 def test_every_caller_of_a_lib_helper_can_resolve_it():

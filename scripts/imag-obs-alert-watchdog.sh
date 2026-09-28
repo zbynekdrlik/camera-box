@@ -112,16 +112,7 @@ measure() {
 #   confirm=<n>       — consecutive-down confirmation counter
 #   alert_sig=<str>   — fingerprint of the last-alerted condition (throttle dedup)
 #   alert_passes=<n>  — passes elapsed since the last alert for the same sig
-# read_state_field lives in scripts/lib/watchdog-common.sh. This older write_state_field stays here
-# on purpose and overrides the lib's copy (it writes through the state file itself when mktemp fails).
-write_state_field() {
-  local key="$1" val="$2" tmp
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || echo "$STATE_FILE")"
-  { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
-    > "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-}
+# read_state_field and write_state_field live in scripts/lib/watchdog-common.sh.
 
 # ── #1070 latency-pin verify-at-start (REPORT-ONLY) ─────────────────────────
 # Run ONLY on a HEALTHY (OBS-up) pass. Reads imag's live per-source genlock_latency_ms_src over WS

@@ -37,20 +37,17 @@
 #                                         a `{`-body (a curl failure or a non-JSON answer is rc 1 =
 #                                         SKIP for that pass, never a false page)
 #
+# write_state_field has NO local copy anywhere: the sixteen the watchdogs used to carry (the older
+# write-through-the-state-file-on-mktemp-failure copy, the literal-newline read-first variant, the
+# fixed-temp-path one) were removed, so this is the one state write every watchdog runs.
+#
 # Local copies (NOT moved, their code differs). A watchdog that sources this lib defines its copy
 # AFTER the source line, so its own copy is the one that runs (bash resolves a function at call
 # time, so the throttle helpers here call that copy too):
-#   * an OLDER write_state_field that writes through the state file itself when mktemp fails --
-#     asio-starve, avsync-heartbeat, cadence, cg-bridge, frozen-input, grabber-stuck, imag-obs,
-#     imag-power-envelope, obs-session, optical-chain, splitter-port; network-reach and
-#     obs-liveness carry a variant with literal-newline printf formats, obs-burn-reconcile one with
-#     a fixed temp path. Converging them onto this copy changes the mktemp-failure path (and three
-#     of them run with errexit, above), so it is not part of this dedup;
-#   * read_state_field in ndi-portmap and netcfg-drift (a different local declaration);
+#   * read_state_field in ndi-portmap, netcfg-drift, avsync-lineup and vban-rate (a different
+#     local declaration);
 #   * fetch_bundle_json in audio-mixer, genlock-lock and vb-matrix (each with its own *_FETCH_CMD
 #     test seam).
-# Two watchdogs do not source this lib and keep variant copies of their own: avsync-lineup (the older
-# write_state_field and a read_state_field variant) and vban-rate (read and write variants).
 # The per-watchdog log() (its tag), the ssh/log probes, the alert send, the recovery decision and the
 # handle_* functions differ per script (by name or by code) and stay local as well.
 # tests/python/test_watchdog_common_1386.py pins the override list.

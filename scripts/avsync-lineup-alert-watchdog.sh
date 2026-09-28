@@ -33,6 +33,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
+# shellcheck source=scripts/lib/watchdog-common.sh
+. "$HERE/lib/watchdog-common.sh"
 # shellcheck source=scripts/lib/avsync-heartbeat.sh
 . "$HERE/lib/avsync-heartbeat.sh"
 # avsync-heartbeat.sh sets `-e` for ITS OWN sourcing safety, and that `-e` LEAKS into this caller
@@ -175,19 +177,13 @@ epoch_json() {
 }
 
 # ── state (same key=value shape as the #391/#812 siblings) ───────────────────
+# write_state_field lives in scripts/lib/watchdog-common.sh. This read_state_field stays here and
+# overrides the lib's copy (it declares `v` in its first `local`, so its code is not the lib's).
 read_state_field() {
   local key="$1" default="$2" v
   [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
   v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
   printf '%s' "${v:-$default}"
-}
-write_state_field() {
-  local key="$1" val="$2" tmp
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || echo "$STATE_FILE")"
-  { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
-    > "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
 }
 
 # ── Discord test-ping for --assert (returns the HTTP code on stdout) ─────────

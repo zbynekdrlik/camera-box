@@ -107,16 +107,7 @@ measure() {
 }
 
 # ── read / write persisted state (same key=value shape as the #391/#882 siblings) ──────────────
-# read_state_field lives in scripts/lib/watchdog-common.sh. This older write_state_field stays here
-# on purpose and overrides the lib's copy (it writes through the state file itself when mktemp fails).
-write_state_field() {
-  local key="$1" val="$2" tmp
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || echo "$STATE_FILE")"
-  { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
-    > "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-}
+# read_state_field and write_state_field live in scripts/lib/watchdog-common.sh.
 
 # ── Discord verdict-forward leg (dev1-side bot POST -- issue 968) ───────────────────────────────
 # Deliberately a per-key sed read (mirrors THIS file's own read_state_field convention) rather than

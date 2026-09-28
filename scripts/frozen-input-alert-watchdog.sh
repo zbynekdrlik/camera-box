@@ -239,21 +239,12 @@ probe_enumerate() {
 # the box is reachable) -- the probe itself still fails-safe to UNKNOWN if the box is genuinely down.
 
 # -- persisted per-source state (key=value lines) -----------------------------------------------
-# read_state_field, source_key and clear_source_throttle live in scripts/lib/watchdog-common.sh.
+# read_state_field, write_state_field, source_key and clear_source_throttle live in
+# scripts/lib/watchdog-common.sh.
 # source_key appends a short cksum of the RAW source name, so two names that sanitize identically
 # (e.g. "NDI 2ME PGM" vs "NDI-2ME-PGM") never silently share `recv_/confirm_/alerted_` state. An
 # ADVANCING source is not an incident: clear_source_throttle clears its confirm counter + throttle
-# sig so a genuinely NEW freeze later pages fresh; the `alerted` recovery-ping latch stays. This
-# older write_state_field stays here on purpose and overrides the lib's copy (it writes through the
-# state file itself when mktemp fails).
-write_state_field() {
-  local key="$1" val="$2" tmp
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || echo "$STATE_FILE")"
-  { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
-    > "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-}
+# sig so a genuinely NEW freeze later pages fresh; the `alerted` recovery-ping latch stays.
 
 # -- per-source decision ------------------------------------------------------------------------
 handle_source() {

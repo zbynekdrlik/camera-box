@@ -119,23 +119,9 @@ SWEEP_ENUM_FAILED=2
 log() { printf '%s [obs-burn-reconcile-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 # ── read / write per-box persisted renderTotalFrames baseline ─────────────────
-# read_state_field lives in scripts/lib/watchdog-common.sh. This write_state_field stays here (its
-# fixed temp path differs) and overrides the lib's copy.
-write_state_field() {
-  local key="$1" val="$2" tmp
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  # A FIXED temp path (never a fallback to STATE_FILE itself, #1060 review 🔵): the old
-  # `mktemp ... || echo "$STATE_FILE"` fallback truncated the real file via the `>` redirect before
-  # grep read it, dropping the SIBLING box's baseline whenever mktemp failed. On any write failure
-  # we leave the existing state untouched rather than corrupt it.
-  tmp="${STATE_FILE}.tmp.$$"
-  if { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
-       > "$tmp" 2>/dev/null; then
-    mv -f "$tmp" "$STATE_FILE" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
-  else
-    rm -f "$tmp" 2>/dev/null || true
-  fi
-}
+# read_state_field and write_state_field live in scripts/lib/watchdog-common.sh. The shared write
+# never renames a failed temp write over the state file, so the sibling box's baseline survives a
+# failed write (the guarantee this watchdog's own fixed-temp-path copy used to give).
 
 # ── coordination: is a live gate/TEST harness driving the rig right now? ──────
 # 0 (coordinating) if a FRESH #281 rig-active heartbeat exists (recording-e2e.sh / rig-mode.sh

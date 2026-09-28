@@ -156,17 +156,8 @@ rig_mode_probe() {
 }
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
-# read_state_field and clear_box_throttle live in scripts/lib/watchdog-common.sh. This older
-# write_state_field stays here on purpose and overrides the lib's copy (it writes through the state
-# file itself when mktemp fails).
-write_state_field() {
-  local key="$1" val="$2" tmp
-  mkdir -p "$(dirname "$STATE_FILE")" 2>/dev/null || true
-  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null || echo "$STATE_FILE")"
-  { [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE"; printf '%s=%s\n' "$key" "$val"; } \
-    > "$tmp" 2>/dev/null || true
-  mv -f "$tmp" "$STATE_FILE" 2>/dev/null || true
-}
+# read_state_field, write_state_field and clear_box_throttle live in
+# scripts/lib/watchdog-common.sh.
 
 # A non-DEAD_PORT pass (OK / SOURCE_WIDE / NODATA) is not a confirmed per-port fault:
 # clear_box_throttle clears this box's confirm counter AND its throttle sig so a genuinely NEW port
