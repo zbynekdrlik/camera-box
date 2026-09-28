@@ -144,8 +144,9 @@ verdict reads STALE and resets the confirm: the arm is blind, silently.
   absent = UNKNOWN. An audio thread that dies before its second dump in a fresh log is therefore
   not paged here (a stated residual: the start dump count is absent at a normal start too, so no
   facet tells the two apart).
-- **The gather must be redeployed** to strih-lx, stream and resolume (the three-file bundle-state
-  server tree, same steps as issue 1381's facets). Until then `obs_log_head_age_s` is absent and the
+- **The gather must be redeployed** to strih-lx, stream and resolume (the bundle-state server tree,
+  every file in `scripts/lib/bundle-state-files.txt` since issue 1386, same steps as issue 1381's
+  facets). Until then `obs_log_head_age_s` is absent and the
   verdict stays STALE, log-only — never a false page.
 
 ### Why audio-lag keeps its STALE log-only
@@ -285,7 +286,7 @@ on the watchdog. No cargo involved. The obs-fleet Rust harness is std-only and r
 
 ## File size
 
-`bundle_state_gather.py` is past 1900 lines. It is a flat set of independent pure parsers, and a
-split has to update every installer that ships the fixed three-file server tree together
-(setup-imag.sh, setup-strih.sh, the Windows raw-fetch runbook). The split was reported to the
-supervisor as a follow-up candidate.
+Issue 1386 split `bundle_state_gather.py` into facet-family modules: the mixer parser lives in
+`bundle_state_audio.py`, the pacer in `bundle_state_vban.py`, and both are still imported as
+`bundle_state_gather.<name>`. Every installer ships the server tree from ONE declared list,
+`scripts/lib/bundle-state-files.sh` + `.txt` (see `bundle-state-gather-latency.md`).

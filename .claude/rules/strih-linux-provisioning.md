@@ -481,8 +481,9 @@ fresh box reaches a green baseline like imag-nb from a single `setup-strih.sh` r
    (`Permission denied`). It is now `install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER"`, and step 7
    chowns `$OBS_CFG` to the desktop user (catches an earlier root-seeded run).
 5. **bundle-state :8899 server tree (step 9).** step 9 installed only the unit and WARNed the server
-   tree was absent. It now installs `bundle-state-server.py` + `bundle_state_gather.py` +
-   `obs_phase2.py` under `/opt/camera-box` (the setup-imag step-28 pattern, via `curl`+`GH_TOKEN`)
+   tree was absent. It now installs the server tree (since issue 1386 every file in the ONE declared
+   list `scripts/lib/bundle-state-files.sh`) under `/opt/camera-box` (the setup-imag step-28
+   pattern, via `curl`+`GH_TOKEN`)
    BEFORE enabling `strih-bundle-state-server.service`, so the unit's `ExecStart` imports resolve.
 6. **verify-strih.sh two false FAILs.** (a) item 6 read `/etc/dantesync/config.json` — a
    Windows/imag artifact a flag-based Linux client never creates; it now asserts the dantesync UNIT

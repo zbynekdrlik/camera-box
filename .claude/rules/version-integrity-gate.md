@@ -6,6 +6,7 @@ paths:
   - "scripts/lib/version-integrity-rows.sh"
   - "scripts/lib/vendor-range.sh"
   - "scripts/bundle_state_gather.py"
+  - "scripts/bundle_state_host.py"
   - "scripts/bundle-state-server.py"
   - "tests/version_integrity_gate.rs"
   - "tests/python/test_bundle_state_gather.py"

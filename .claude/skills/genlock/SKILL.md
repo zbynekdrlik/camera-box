@@ -740,12 +740,15 @@ full-path-e2e run always saw both boxes UNKNOWN (exit 11) and refused. Fixed by 
   program feed) on both boxes and nothing else (preview/CG/lyrics inputs never carry
   `genlock_fifo`). If a future scene edit needs a DIFFERENT input excluded from the pin, that input
   must not get `genlock_fifo=true` set — don't hand-maintain a name list here.
-- **Deploy**: `C:\ProgramData\camera-box\{bundle-state-server.py,bundle_state_gather.py,
-  obs_phase2.py,run-bundle-state-server.ps1,obs-ws-password.txt}` on each box, launched by a
+- **Deploy**: `C:\ProgramData\camera-box\` on each box holds the server tree — EVERY file named in
+  `scripts/lib/bundle-state-files.txt` (issue 1386: the server, its `bundle_state_*` facet modules
+  and `obs_phase2.py`; the server imports all of them, so a partial copy serves no `:8899`) — plus
+  `run-bundle-state-server.ps1` and `obs-ws-password.txt`, launched by a
   Scheduled Task `BundleStateServer` (ONSTART trigger, InteractiveToken as `newlevel` — mirrors the
   existing `StartOBS` task). **Both boxes have internet (GitHub) reachability** — deploy/redeploy by
   having the box itself `Invoke-WebRequest` the raw file at a pinned commit SHA
-  (`https://raw.githubusercontent.com/zbynekdrlik/camera-box/<sha>/scripts/<file>`) rather than
+  (`https://raw.githubusercontent.com/zbynekdrlik/camera-box/<sha>/scripts/<file>`: first
+  `scripts/lib/bundle-state-files.txt`, then every non-`#` line of it) rather than
   transferring file content through an agent's own context (avoids reading a 90KB+ file like
   `obs_phase2.py` into a session just to push it via FileWrite). The OBS-WS password file is the
   ONE thing written directly (FileWrite) — never fetched from GitHub, never committed.
