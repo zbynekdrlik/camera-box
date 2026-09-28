@@ -10,6 +10,7 @@ paths:
   - "tests/python/test_av_soak_rig_state_1367.py"
   - "tests/python/test_av_soak_orchestrator_1367.py"
   - "tests/python/test_av_soak_lease_inherit_1367.py"
+  - "tests/soak_first_cut_burn_domain_1367.rs"
 ---
 
 # The 8 h stream-output A/V soak (issue 1367) -- measure-only harness + runbook
@@ -24,7 +25,7 @@ align), so looping it would hide the drift. The soak only measures.
 | File | Role |
 |---|---|
 | `scripts/av-soak.sh` | the orchestrator: `--plan` (DEFAULT, touches nothing), `--run`, `--report RUN_DIR`, `--stop-leftovers RUN_DIR` (the unit's `ExecStopPost` safety net) |
-| `scripts/lib/av-soak.sh` | pure builders shared by plan AND run (argv of the two extracts + the merge), the window arithmetic, the two read-only cam2 reads, the record-volume free-space read, the ONE retried rig-busy read (`av_soak_rig_busy_settled` / `av_soak_broadcast_of`, also used by `--stop-leftovers` and the restart matrix) |
+| `scripts/lib/av-soak.sh` | pure builders shared by plan AND run (argv of the two extracts + the merge), the window arithmetic, the first sweep scene (`av_soak_first_sweep_scene`), the two read-only cam2 reads, the record-volume free-space read, the ONE retried rig-busy read (`av_soak_rig_busy_settled` / `av_soak_broadcast_of`, also used by `--stop-leftovers` and the restart matrix) |
 | `scripts/av_soak_decision.py` | pure decision: `bounds`, `row` (one CSV row per window from the merged verdict JSON), `report` (1 h partial + full, exit 0 PASS / 1 FAIL / 2 UNKNOWN / 3 input error) |
 | `scripts/lib/av-soak-leftovers.sh` | the `--stop-leftovers` mode (`av_soak_stop_leftovers`): runs the `leftovers` plan, stops/clears, releases the soak's lease when nothing is left |
 | `scripts/av_soak_rig_state.py` | pure rig-state decisions over one `rig-busy-check` read: `broadcast` (live / unknown / idle -- may cleanup cut the strih program?) and `leftovers` (the `--stop-leftovers` plan: which flagged recording is provably the soak's) |
@@ -137,6 +138,18 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   `av_window::MIN_AV_SAMPLES` (8) clustered markers, so a flat 60 s window cannot measure every camera.
   The connect-on-show hold keeps every camera's main input connected, so each cut is warm, as in the
   E2E (measuring cold cuts would be a separate decision).
+- **The recording starts on the FIRST sweep scene** (28.9.2026). Every strih camera input has its
+  own measurement-burn counter: one `ndi-burn-filter.cpp` instance per input, advanced only on ticks
+  where that input is drawn. The frames recorded before the first sweep cut belong to no schedule
+  window, and the verdict excuses a counter change only between two KNOWN windows (issue 708). So a
+  recording that starts on another camera reads one strih `real_drop` at the first cut. The first
+  8 h run had it in 24/25 windows, because the previous slot's last camera stays on program between
+  slots. Every slot therefore cuts the strih program to `FIRST_SCENE` right after the settled idle
+  read and before StartRecord. The E2E has this shape by construction: its [4/8] routes the strih
+  program to the camera under test, which is the first sweep pair. A failed cut is the row
+  `skipped:first_scene_cut_failed`, with nothing started. Never "fix" this in the verdict: a
+  backward jump on the SAME counter at window 0's start must stay a real drop
+  (`tests/soak_first_cut_burn_domain_1367.rs`, a trimmed real fixture, probe-gated = CI).
 - `av_<cam>_ms` = the verdict's MEASURED `all_cambox_av_sync.<cam>.av_offset_ms` only (a `derived`
   or `unknown` value is never a sample); graded `|offset - expected_ms| <= tolerance`, inclusive.
 - Spreads -- three columns, the graded set is `--spread-columns` (default `av_spread_ms`, ROZHODNUTÉ 5860604301):
@@ -260,3 +273,12 @@ fakes behind the seams `AV_SOAK_OBS_DIR`,
 `CAMERA_BOX_RIG_HEARTBEAT` + `CONNECT_ON_SHOW_HOLD_STATE` -- NEVER the real `/var/tmp/rig-lease`, an
 E2E may hold it), `bash -n`, `shellcheck -S warning scripts/av-soak.sh scripts/lib/av-soak.sh
 scripts/lib/av-soak-leftovers.sh` (never `-x`); the test rig sets `AV_SOAK_BROADCAST_RETRY_S=0`.
+The harness's fake `program-scene` reads `FAKE_STRIH_PROGRAM` for the strih snapshot, and the
+program at each StartRecord is replayed from the call log (`_strih_program_at_strih_starts`). A
+test that sends a signal once the sweep runs waits for a cut AFTER a StartRecord
+(`_wait_for_sweep`), because the slot's first cut now comes before the recording. The switch-count
+knobs (`FAKE_LIVE_AFTER_SWITCHES`, `FAKE_UNREADABLE_AFTER_SWITCHES`) count that cut too.
+The probe-gated contract test `tests/soak_first_cut_burn_domain_1367.rs` runs only on CI. Its
+assertions can be re-run on dev1 against the CI `recording-verdict` of any run: apply the same
+fixture transforms, then `--merge-partials stream=<partial> --min-secs 0 --capture-fps 30
+--strih-emit-fps 30 --stream-capture-fps 30 --cam2-run-id 1790548508 --switch-schedule <fixture>`.
