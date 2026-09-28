@@ -27,7 +27,9 @@ set -euo pipefail
 #       the stream program still the development scene and the painter service active (else the rig
 #       left TEST mode and the run STOPS; an unreadable read or a stalled marker log is a skipped
 #       row), the rig-busy guard, the strih-side hold marker re-asserted (its TTL is 4 h)
-#     - StartRecord strih + stream (obs_phase2.py record), ONE sweep that cuts each soak camera into
+#     - the strih program cut to the sweep's FIRST scene (so the recording starts on the input its
+#       first window measures, as in the E2E -- each strih camera input has its own burn counter),
+#       StartRecord strih + stream (obs_phase2.py record), ONE sweep that cuts each soak camera into
 #       strih program for AV_SOAK_SEGMENT_SECS (obs_phase2.py switch, switch_schedule.py plan/build
 #       -- the E2E all-cambox sweep), StopRecord (verified by a status read)
 #     - a live broadcast (a box streams) aborts the soak, exit 5: checked by the slot guard, before
@@ -242,6 +244,10 @@ SWEEP="$(CAMERA_ACTIVE_SET="$SOAK_CAMS" camera_active_sweep_pairs)"
 read -r -a _SOAK_CAM_ARR <<< "$SOAK_CAMS"
 N_CAMS="${#_SOAK_CAM_ARR[@]}"
 WINDOW_S=$(( N_CAMS * SEGMENT_S ))
+# the scene every slot cuts the strih program to BEFORE its StartRecord (issue 1367, see
+# av_soak_first_sweep_scene): the recording then starts on the input its first window measures
+FIRST_SCENE="$(av_soak_first_sweep_scene "$HERE/switch_schedule.py" "$SWEEP" "$SEGMENT_S" "$WINDOW_S")"
+[ -n "$FIRST_SCENE" ] || die 3 "the sweep plan for '$SWEEP' is empty or unreadable (switch_schedule.py plan)"
 MIN_SECS="$(av_soak_min_secs "$WINDOW_S")"
 WINDOWS="$(av_soak_windows_count "$DURATION_S" "$SLOT_S")"
 MARKER_ROWS="$(av_soak_marker_rows "$WINDOW_S")"
@@ -339,6 +345,9 @@ EOF
   echo "  a. lease still ours; record volumes free >= ${RECORDINGS_FREE_MIN_GB} GB (curl http://<box>:${BUNDLE_STATE_PORT}/record-dir-stats.json -> bundle_state_gather.recordings_free_line; below = stop the soak)"
   echo "  b. read-only: stream program still '${STREAM_DEV_SCENE}' and the painter service active (else the rig left TEST mode: the run STOPS); an unreadable read or a stalled marker log = a skipped row"
   echo "  c. a proven idle rig (rig-busy-check, an unreadable read retried ${BROADCAST_READS}x ${BROADCAST_RETRY_S} s apart; still unreadable = a skipped row, nothing started),"
+  echo "     then the strih program to the FIRST sweep scene, so the recording starts on the input window 0 measures"
+  echo "     (each strih camera input has its own burn counter; a failed cut = a skipped row, nothing started):"
+  plan_cmd python3 "$OBS_DIR/obs_phase2.py" switch --host "$STRIH_HOST" --program-scene "$FIRST_SCENE"
   echo "     then the rig-busy guard: stray_session_check_assert ... 'the slot-k StartRecord' (a live broadcast aborts the soak, exit 5)"
   echo "     connect_on_show_strih_marker set ${STRIH_HOST} (re-asserts the 4 h hold marker)"
   echo "  d. StartRecord (the started flag is set BEFORE the call; any start failure stops both boxes):"
@@ -860,6 +869,19 @@ run_slot() {
       return 0
       ;;
   esac
+  # issue 1367: the recording starts on the sweep's FIRST scene, as the E2E's does (its [4/8] routes
+  # the strih program to the first sweep pair before [5/8] StartRecord). Every strih camera input
+  # carries its OWN measurement-burn counter and the frames before the first cut belong to no
+  # schedule window, so a recording started on another camera (the previous slot's last sweep
+  # scene, which stays on program between slots, or slot 0's snapshot) read one phantom strih
+  # real_drop at that cut. The settled idle read just above is this cut's broadcast proof; the
+  # sweep's own first cut is then a same-scene switch (skipped by obs_phase2, boundary still printed).
+  STRIH_SWEPT=1
+  if ! obs switch --host "$STRIH_HOST" --program-scene "$FIRST_SCENE" </dev/null >>"$sd/sweep.log" 2>&1; then
+    log "slot $k skipped: the strih program could not be cut to '$FIRST_SCENE' before StartRecord (see $sd/sweep.log)"
+    add_row "$k" "$(date +%s)" "skipped:first_scene_cut_failed" "" "" "$rid"
+    return 0
+  fi
   connect_on_show_strih_marker set "$STRIH_HOST"
   guard_ok "the slot-$k StartRecord" || { ABORT_REASON="a broadcast is live (slot $k)"; exit 5; }
   if ! rec_start strih "$STRIH_HOST" "$sd/record-start.log" \
