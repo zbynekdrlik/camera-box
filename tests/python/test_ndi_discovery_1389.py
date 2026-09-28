@@ -214,6 +214,21 @@ class CamboxApply1389(unittest.TestCase):
             self.assertEqual(_read(path), before)
             self.assertIn("mDNS-only", r.stdout)
 
+    def test_a_quoted_dropin_line_is_read_like_systemd_reads_it(self):
+        # systemd accepts Environment="NDI_CONFIG_DIR=/etc/ndi": camera-box DOES read /etc/ndi there.
+        text = '[Service]\nEnvironment="NDI_CONFIG_DIR=/etc/ndi"'
+        r = _lib(f"ndi_discovery_dropin_config_dir '{text}'")
+        self.assertEqual(r.stdout.strip(), "/etc/ndi")
+        with tempfile.TemporaryDirectory() as tmp:
+            self._seed(tmp, ISSUE_1342_LIST)
+            env = self._env(tmp)
+            with open(env["NDI_DISCOVERY_CAMBOX_DROPIN"], "w") as fh:
+                fh.write(f'[Service]\nEnvironment="NDI_CONFIG_DIR={env["NDI_DISCOVERY_SYSTEM_DIR"]}"\n')
+            r, calls, path = self._run(tmp)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(calls, ["-o remount,rw /", "-o remount,ro /"])
+            self.assertEqual(_read(path), _lib("ndi_discovery_config_json").stdout)
+
     def test_a_broken_json_file_with_the_right_list_is_rewritten(self):
         # verify-device (an) FAILs such a file as "not valid JSON" and names --cambox-apply: it must converge.
         with tempfile.TemporaryDirectory() as tmp:
