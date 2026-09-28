@@ -58,10 +58,11 @@ recovery one-liner under three names, and the three fetches that only differed b
   (the family convention, `genlock-lock-facet.md`). A test that wants to prove a function is
   -e safe re-arms `set -e` after sourcing the watchdog (`harness_imag_obs_restart_storm_1156.rs`).
 - **A helper whose code differs stays local, defined AFTER the source line.** Bash resolves a
-  function at call time, so the local copy wins. The documented overrides (the pytest's
-  `ALLOWED_OVERRIDES`, named in the lib header) are only `read_state_field` in ndi-portmap,
-  netcfg-drift, avsync-lineup and vban-rate: it declares `v` in its first `local`, so its code is
-  not the lib's (the behaviour is the same).
+  function at call time, so the local copy wins. Today there are NONE: the pytest's
+  `ALLOWED_OVERRIDES` is empty since the last four `read_state_field` copies (ndi-portmap,
+  netcfg-drift, avsync-lineup, vban-rate -- `v` declared in the first `local`, same behaviour) were
+  deleted in favour of the lib's (issue 1386). A new override must be listed there AND in the lib
+  header.
 - **What stays per-script:** `log()` (its tag), the ssh/log probes, the alert send, `handle_*`,
   every `--dedup-key` (notify discipline: `watchdog-notify-dedup.md`). The recovery DECISION is
   `recovery_latch_fires <was_alerted>`; what a recovery DOES (a machine-channel log line, clearing

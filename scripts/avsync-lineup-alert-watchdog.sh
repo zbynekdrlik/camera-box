@@ -110,6 +110,7 @@ DISCORD_ENV_FILE="${AVSYNC_DISCORD_ENV:-$HOME/.claude/channels/discord/.env}"
 DISCORD_THREAD_ID="${AVSYNC_DISCORD_THREAD_ID:-1373592666733940816}"   # alerts-snv thread
 
 STATE_DIR="${AVSYNC_LINEUP_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${AVSYNC_LINEUP_STATE_FILE:-$STATE_DIR/camera-box-avsync-lineup.state}"
 
 log() { printf '%s [avsync-lineup-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
@@ -179,13 +180,6 @@ epoch_json() {
 # ── state (same key=value shape as the #391/#812 siblings) ───────────────────
 # write_state_field lives in scripts/lib/watchdog-common.sh. This read_state_field stays here and
 # overrides the lib's copy (it declares `v` in its first `local`, so its code is not the lib's).
-read_state_field() {
-  local key="$1" default="$2" v
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
-
 # ── Discord test-ping for --assert (returns the HTTP code on stdout) ─────────
 read_discord_env_field() {
   local key="$1"

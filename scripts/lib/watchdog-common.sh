@@ -49,11 +49,12 @@
 # write-through-the-state-file-on-mktemp-failure copy, the literal-newline read-first variant, the
 # fixed-temp-path one) were removed, so this is the one state write every watchdog runs.
 #
-# Local copies (NOT moved, their code differs). A watchdog that sources this lib defines its copy
-# AFTER the source line, so its own copy is the one that runs (bash resolves a function at call
-# time): read_state_field in ndi-portmap, netcfg-drift, avsync-lineup and vban-rate (a different
-# local declaration). fetch_bundle_json's per-watchdog *_FETCH_CMD seams live in the lib copy since
-# issue 1386: the caller passes its seam variable's NAME, so no watchdog keeps a copy of the fetch.
+# No lib name keeps a local copy: the last four (read_state_field in ndi-portmap, netcfg-drift,
+# avsync-lineup and vban-rate, which differed only in where `local v` was declared) were removed
+# too (issue 1386). A copy whose code genuinely differs would be defined AFTER the source line (bash
+# resolves a function at call time) and listed in the pytest's ALLOWED_OVERRIDES.
+# fetch_bundle_json's per-watchdog *_FETCH_CMD seams live in the lib copy since issue 1386: the
+# caller passes its seam variable's NAME, so no watchdog keeps a copy of the fetch.
 # The per-watchdog log() (its tag), the ssh/log probes, the alert send and the handle_* functions
 # differ per script (by name or by code) and stay local as well.
 # tests/python/test_watchdog_common_1386.py pins the override list.

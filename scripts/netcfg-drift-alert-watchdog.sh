@@ -53,19 +53,13 @@ ALERT_THROTTLE_PASSES="${NETCFG_DRIFT_ALERT_THROTTLE_PASSES:-12}"
 STATE_DIR="${NETCFG_DRIFT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 _state_default="$STATE_DIR/camera-box-netcfg-drift-alert.state"
 [ "$DRY_RUN" -eq 1 ] && _state_default="$STATE_DIR/camera-box-netcfg-drift-alert-dryrun.state"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${NETCFG_DRIFT_STATE_FILE:-$_state_default}"
 
 log() { printf '%s [netcfg-drift-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 # write_state_field and clear_throttle live in scripts/lib/watchdog-common.sh. This read_state_field
 # stays here (a different local declaration) and overrides the lib's copy.
-read_state_field() {
-  local key="$1" default="$2" v
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
-
 main() {
   log "pass start (dry_run=$DRY_RUN, audit=$AUDIT)"
 

@@ -7,7 +7,8 @@ differed stayed local; where such a local copy shares a lib name it is defined A
 line, so the local copy is the one that runs. The follow-up (slice C) removed the differing copies
 of three of them: the one write_state_field (never drops state, loud, -e safe), recovery_latch_fires
 (the recovery decision that lived under three names) and fetch_bundle_json with a per-call
-*_FETCH_CMD seam. Only read_state_field keeps local variants. This file pins:
+*_FETCH_CMD seam. The last local read_state_field variants were removed as well, so no lib name
+keeps a local copy today. This file pins:
 
   * the lib's shape: functions only, no shell option changed, the exact name set;
   * its behaviour under the callers' strictness (`set -uo pipefail`);
@@ -39,8 +40,8 @@ LIB_FUNCS = {
 ALLOWED_OVERRIDES = {
     # write_state_field has NO override: every watchdog uses the lib's one write (see
     # test_the_state_write_lives_only_in_the_lib)
-    "read_state_field": {"ndi-portmap-alert-watchdog.sh", "netcfg-drift-alert-watchdog.sh",
-                         "avsync-lineup-alert-watchdog.sh", "vban-rate-alert-watchdog.sh"},
+    # read_state_field has NO override: the four copies that only declared `v` differently were
+    # removed in favour of the lib's (issue 1386)
     # fetch_bundle_json has NO override: the *_FETCH_CMD seams of audio-mixer, genlock-lock and
     # vb-matrix are the lib's SEAM_VAR argument (see the fetch seam tests below)
 }

@@ -97,6 +97,7 @@ REPO_SLUG="${VBAN_RATE_ALERT_REPO:-zbynekdrlik/camera-box}"
 STATE_DIR="${VBAN_RATE_ALERT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 _state_default="$STATE_DIR/camera-box-vban-rate-alert.state"
 [ "$DRY_RUN" -eq 1 ] && _state_default="$STATE_DIR/camera-box-vban-rate-alert-dryrun.state"
+# shellcheck disable=SC2034  # read by scripts/lib/watchdog-common.sh
 STATE_FILE="${VBAN_RATE_ALERT_STATE_FILE:-$_state_default}"
 
 log() { printf '%s [vban-rate-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
@@ -104,13 +105,6 @@ log() { printf '%s [vban-rate-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%
 # -- persisted per-key state (key=value lines) -- the dantesync-clock sibling's shape --------------
 # write_state_field lives in scripts/lib/watchdog-common.sh. This read_state_field stays here and
 # overrides the lib's copy (it declares `v` in its first `local`, so its code is not the lib's).
-read_state_field() {
-  local key="$1" default="$2" v
-  [ -f "$STATE_FILE" ] || { printf '%s' "$default"; return 0; }
-  v="$(sed -n "s/^${key}=//p" "$STATE_FILE" 2>/dev/null | tail -1)"
-  printf '%s' "${v:-$default}"
-}
-
 # state_key <stream key> -> a key safe for the key=value state file and the dedup key.
 state_key() { printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_'; }
 
