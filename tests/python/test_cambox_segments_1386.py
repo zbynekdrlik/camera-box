@@ -101,3 +101,55 @@ def test_the_two_consumers_agree_on_every_real_fixture():
                 assert soak[cam]["strict"] == disc[cam]["pass"], (f, cam)
                 checked += 1
     assert checked > 0
+
+
+# -- the two per-window limits (issue 1386 slice C): the soak's gate term and the report's
+#    continuity line judge a window with the same predicates ------------------------------------
+
+def test_over_copies_gaps_tolerance_compares_copies_and_gaps_with_the_window_tolerance():
+    assert cs.over_copies_gaps_tolerance(_seg("CAM1", copies=6), 5) is True
+    assert cs.over_copies_gaps_tolerance(_seg("CAM1", gaps=6), 5) is True
+    assert cs.over_copies_gaps_tolerance(_seg("CAM1", copies=5, gaps=5), 5) is False
+    assert cs.over_copies_gaps_tolerance(_seg("CAM1", copies=1), 0) is True
+    # a count that is not a finite number counts 0, a float is truncated (the per_camera rule)
+    assert cs.over_copies_gaps_tolerance(_seg("CAM1", copies=None, gaps="9"), 0) is False
+    assert cs.over_copies_gaps_tolerance(_seg("CAM1", copies=5.9), 5) is False
+
+
+def test_a_multi_source_window_is_never_over_its_tolerance():
+    ms = {"tag": "multi-source", "multi_path_suspect_fraction": 0.4}
+    assert cs.over_copies_gaps_tolerance(_seg("CAM2", copies=40, gaps=40, multi_source=ms), 5) is False
+    assert cs.over_copies_gaps_tolerance(_seg("CAM2", copies=40, multi_source=None), 5) is True
+
+
+def test_over_window_floor_needs_frames_and_more_undecodable_than_the_floor():
+    assert cs.over_window_floor(_seg("CAM1", undecodable=5), 4) is True
+    assert cs.over_window_floor(_seg("CAM1", undecodable=4), 4) is False
+    assert cs.over_window_floor(_seg("CAM1", undecodable=9, frames=0), 4) is False
+    assert cs.over_window_floor(_seg("CAM1", undecodable=9, frames=None), 4) is False
+
+
+def test_both_consumers_judge_a_window_with_the_shared_limits(monkeypatch):
+    calls = []
+    real_tol, real_floor = cs.over_copies_gaps_tolerance, cs.over_window_floor
+
+    def spy_tol(seg, tol):
+        calls.append(("tol", tol))
+        return real_tol(seg, tol)
+
+    def spy_floor(seg, floor):
+        calls.append(("floor", floor))
+        return real_floor(seg, floor)
+
+    monkeypatch.setattr(cs, "over_copies_gaps_tolerance", spy_tol)
+    monkeypatch.setattr(cs, "over_window_floor", spy_floor)
+    cont = {"copies_gaps_tolerance_gates_overall_pass": True, "undecodable_floor_gates_overall_pass": True,
+            "per_window_undecodable_floor": 6, "copies_gaps_tolerance": 5}
+    assert asd.gate_window_term(_seg("CAM1", copies=6), cont) is False
+    assert calls == [("floor", 6), ("tol", 5)]
+    calls.clear()
+    v = {"overall_pass": False, "all_cambox_continuity": dict(cont, overall_pass=False,
+                                                              segments=[_seg("CAM3", gaps=7)])}
+    labels = [lbl for lbl, _ in edr._blocking_failures(v) if "kontinuita" in lbl.lower()]
+    assert labels and "CAM3" in labels[0]
+    assert ("tol", 5) in calls and ("floor", 6) in calls

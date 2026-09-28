@@ -973,17 +973,16 @@ def _blocking_failures(verdict):
         for s in segs:
             if not isinstance(s, dict):
                 continue
-            # Issue 1367: a multi-source window's copies/gaps are report-only (it is judged by its
-            # node burn), so it is never named as the continuity blocker.
-            if isinstance(s.get("multi_source"), dict):
-                continue
             # #1251: each window is judged against ITS OWN applied tolerance (a per-cambox override
             # like CAM2 -> 25 while its grabber HW is sick, issue 1249). Fall back to the run-wide
             # default for verdicts predating the per-segment field, so old runs classify unchanged.
             seg_tol = s.get("copies_gaps_tolerance", tol)
             if seg_tol is None:
                 seg_tol = tol
-            if (s.get("copies", 0) or 0) > seg_tol or (s.get("gaps", 0) or 0) > seg_tol:
+            # The gate's own per-window limit, shared with the soak (cambox_segments, issue 1386).
+            # Issue 1367: a multi-source window's copies/gaps are report-only (it is judged by its
+            # node burn), so the predicate never names it as the continuity blocker.
+            if cambox_segments.over_copies_gaps_tolerance(s, seg_tol):
                 cb = str(s.get("cambox", "")).strip()
                 if cb and cb not in over:
                     over.append(cb)
@@ -1000,9 +999,7 @@ def _blocking_failures(verdict):
         if pw_floor is None:
             pw_floor = 4
         per_window_over = any(
-            isinstance(s, dict) and (s.get("frames", 0) or 0) > 0
-            and (s.get("undecodable", 0) or 0) > pw_floor
-            for s in segs
+            isinstance(s, dict) and cambox_segments.over_window_floor(s, pw_floor) for s in segs
         )
         parts = []
         if over:

@@ -10,6 +10,10 @@ cycles. Two consumers group them per camera:
 
 Both used to carry their own copy of the grouping. `per_camera` is it, once. Pure, std only.
 
+The same two consumers also judge ONE window against the gate's two per-window limits: the soak
+grades it with `gate_window_term`, the report names the camera behind a red continuity line.
+`over_copies_gaps_tolerance` and `over_window_floor` are those two limits, once (issue 1386).
+
 Input rules (the recording-verdict JSON writes integer counts and boolean `pass`, so none of these
 bite on a real verdict; they keep a malformed file from crashing a report):
   * `segments` that is not a list -> no cameras; a segment that is not a dict is skipped;
@@ -57,3 +61,20 @@ def per_camera(segments, cams=None, flags=(), key="cambox"):
             a[f] = a[f] or bool(seg.get(f))
         a["segments"].append(seg)
     return agg
+
+
+def over_copies_gaps_tolerance(seg, tol):
+    """True iff the window's copies or gaps exceed `tol` -- the copies/gaps half of the gate's
+    per-window term (src/window_gate.rs, with the per-cambox tolerance a window carries). A
+    multi-source window (issue 1367, a truthy `multi_source` tag) is never over: its copies/gaps are
+    report-only, it is judged by its node burn. `tol` must be a number."""
+    if seg.get("multi_source"):
+        return False
+    return _count(seg.get("copies")) > tol or _count(seg.get("gaps")) > tol
+
+
+def over_window_floor(seg, floor):
+    """True iff a window that recorded frames has more undecodable frames than the per-window
+    optical floor -- the floor half of the gate's per-window term (issue 905 item 3). A window
+    with no frames is not over the floor (the gate fails it for its frame count instead)."""
+    return _count(seg.get("frames")) > 0 and _count(seg.get("undecodable")) > floor

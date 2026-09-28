@@ -353,15 +353,16 @@ def gate_window_term(seg, cont):
     if not all(k in cont for k in _GATE_TERM_KEYS):
         return None
     frames = _int(seg.get("frames"))
-    undecodable = _int(seg.get("undecodable"))
     copies, gaps = _int(seg.get("copies")), _int(seg.get("gaps"))
     if seg.get("multi_source"):
         copies = gaps = 0
+    # The two per-window limits are the shared cambox_segments predicates (the Discord report's
+    # continuity line names its camera with the same two); a frameless window fails the term below.
     floor_ok = (cont["undecodable_floor_gates_overall_pass"] is not True
-                or (frames > 0 and undecodable <= _int(cont["per_window_undecodable_floor"])))
+                or not cambox_segments.over_window_floor(seg, _int(cont["per_window_undecodable_floor"])))
     if cont["copies_gaps_tolerance_gates_overall_pass"] is True:
         tol = seg.get("copies_gaps_tolerance", cont.get("copies_gaps_tolerance"))
-        copies_gaps_ok = _num(tol) and copies <= tol and gaps <= tol
+        copies_gaps_ok = _num(tol) and not cambox_segments.over_copies_gaps_tolerance(seg, tol)
     elif cont.get("segment_singleton_allowance_gates_overall_pass") is True:
         copies_gaps_ok = (copies <= _int(cont.get("segment_singleton_copies_allowance"))
                           and gaps <= _int(cont.get("segment_singleton_gaps_allowance")))
