@@ -56,7 +56,15 @@ import os
 import re
 import sys
 
-CAMERA_ORDER = ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"]
+# issue 1386: the per-camera segment grouping is shared with the soak (av_soak_decision.py). A pure,
+# std-only sibling module, so this stays a dependency-free formatter; the insert resolves it when
+# run as a script and when imported from a test.
+_SCRIPTS = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPTS not in sys.path:
+    sys.path.insert(0, _SCRIPTS)
+import cambox_segments  # noqa: E402
+
+CAMERA_ORDER =["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7"]
 
 # #757 (2026-07-15, binding user directive): imag's fixed floor -- mirrors
 # imag_latency_enforce.IMAG_FIXED_LATENCY_MS (kept as its own literal, not a cross-module
@@ -136,33 +144,25 @@ def _section_header(verdict, meta):
 
 def _aggregate_segments(segments, cambox_key="cambox"):
     """Aggregate a `[{cambox, pass, copies, gaps, undecodable, frames}, ...]` segment list into
-    per-camera totals (a cambox may appear in several cycled segments)."""
-    agg = {}
-    for seg in segments or []:
-        cam = str(seg.get(cambox_key, "")).lower()
-        if cam not in agg:
-            agg[cam] = {
-                "pass": True,
-                "copies": 0,
-                "gaps": 0,
-                "undecodable": 0,
-                "frames": 0,
-                # issue 1144 -- a per-cam flag: did any of this cam's segments carry a switch-in
-                # transient (a raw content FAIL that the imag content gate excuses / attributes to
-                # cold-cut)? The raw `pass` glyph stays honest; the imag rendering annotates it so an
-                # excused ❌ on the detailed view is explained (report-only, matches overall_pass).
-                "switch_in_transient": False,
-            }
-        a = agg[cam]
-        a["pass"] = a["pass"] and bool(seg.get("pass"))
-        a["copies"] += seg.get("copies", 0) or 0
-        a["gaps"] += seg.get("gaps", 0) or 0
-        a["undecodable"] += seg.get("undecodable", 0) or 0
-        a["frames"] += seg.get("frames", 0) or 0
-        a["switch_in_transient"] = a["switch_in_transient"] or bool(
-            seg.get("switch_in_transient")
-        )
-    return agg
+    per-camera totals (a cambox may appear in several cycled segments). The grouping is the shared
+    `cambox_segments.per_camera` (the soak's loss columns use the same one)."""
+    # issue 1144 -- `switch_in_transient` is a per-cam flag: did any of this cam's segments carry a
+    # switch-in transient (a raw content FAIL that the imag content gate excuses / attributes to
+    # cold-cut)? The raw `pass` glyph stays honest; the imag rendering annotates it so an excused ❌
+    # on the detailed view is explained (report-only, matches overall_pass).
+    return {
+        cam: {
+            "pass": a["pass"],
+            "copies": a["copies"],
+            "gaps": a["gaps"],
+            "undecodable": a["undecodable"],
+            "frames": a["frames"],
+            "switch_in_transient": a["switch_in_transient"],
+        }
+        for cam, a in cambox_segments.per_camera(
+            segments, flags=("switch_in_transient",), key=cambox_key
+        ).items()
+    }
 
 
 def _section_zero_loss(verdict):

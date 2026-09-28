@@ -90,6 +90,13 @@ import re
 import sys
 import time
 
+# issue 1386: the per-camera segment grouping is shared with e2e_discord_report.py. The insert makes
+# the sibling import resolve when run as a script AND when a test exec's this file via importlib.
+_SCRIPTS = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPTS not in sys.path:
+    sys.path.insert(0, _SCRIPTS)
+import cambox_segments  # noqa: E402
+
 PASS, FAIL, UNKNOWN = "PASS", "FAIL", "UNKNOWN"
 EXCLUDED, REPORTED, NOT_MEASURED = "EXCLUDED", "REPORTED", "NOT_MEASURED"
 _EXIT = {PASS: 0, FAIL: 1, UNKNOWN: 2}
@@ -396,29 +403,22 @@ def _loss_by_camera(segments, cams, cont=None):
     cycled segments). `graded` = the AND of the gate's own per-window term (`gate_window_term`) over
     the camera's segments; on an older verdict without the seam flags, the AND of `relaxed_pass`
     (else `pass`) over its non-multi-source segments, None when every segment was multi-source.
-    `strict` = the AND of the strict `pass` (reported only). Unlike the Discord report's strict
-    aggregation, this grades the gate's own per-window term."""
+    `strict` = the AND of the strict `pass` (reported only). The grouping and the counter sums are
+    the shared `cambox_segments.per_camera` (also behind the Discord report's strict per-camera
+    lines); only the gate-term grade is the soak's own."""
     agg = {}
-    for seg in segments if isinstance(segments, list) else []:
-        if not isinstance(seg, dict):
-            continue
-        cam = str(seg.get("cambox", "")).lower()
-        if cam not in cams:
-            continue
-        a = agg.setdefault(cam, {"frames": 0, "copies": 0, "gaps": 0, "undecodable": 0,
-                                 "strict": True, "graded": None, "multi": False})
-        for k in ("frames", "copies", "gaps", "undecodable"):
-            v = seg.get(k)
-            a[k] += int(v) if _num(v) else 0
-        a["strict"] = a["strict"] and seg.get("pass") is True
-        if seg.get("multi_source"):
-            a["multi"] = True
-        term = gate_window_term(seg, cont)
-        if term is None:
-            if seg.get("multi_source"):
-                continue
-            term = seg.get("relaxed_pass") if "relaxed_pass" in seg else seg.get("pass")
-        a["graded"] = (True if a["graded"] is None else a["graded"]) and term is True
+    for cam, grp in cambox_segments.per_camera(segments, cams, flags=("multi_source",)).items():
+        graded = None
+        for seg in grp["segments"]:
+            term = gate_window_term(seg, cont)
+            if term is None:
+                if seg.get("multi_source"):
+                    continue
+                term = seg.get("relaxed_pass") if "relaxed_pass" in seg else seg.get("pass")
+            graded = (True if graded is None else graded) and term is True
+        agg[cam] = {"frames": grp["frames"], "copies": grp["copies"], "gaps": grp["gaps"],
+                    "undecodable": grp["undecodable"], "strict": grp["pass"], "graded": graded,
+                    "multi": grp["multi_source"]}
     return agg
 
 
