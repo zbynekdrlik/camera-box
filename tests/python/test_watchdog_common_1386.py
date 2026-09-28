@@ -30,6 +30,7 @@ _SOURCE_LINE = '. "$HERE/lib/watchdog-common.sh"'
 LIB_FUNCS = {
     "read_state_field", "write_state_field", "clear_throttle", "clear_box_throttle",
     "clear_source_throttle", "source_key", "netreach_box_alerted", "fetch_bundle_json",
+    "recovery_latch_fires",
 }
 
 # The local copies the lib header documents: name -> watchdogs that keep their own (different) code.
@@ -281,6 +282,41 @@ def test_the_state_write_lives_only_in_the_lib():
     rx = re.compile(r"^write_state_field\s*\(\)", re.M)
     owners = sorted(str(p.relative_to(_SCRIPTS)) for p in _SCRIPTS.rglob("*.sh") if rx.search(p.read_text()))
     assert owners == ["lib/watchdog-common.sh"], owners
+
+
+# The recovery decision the watchdogs used to carry under three names (net_reach_recovery_decision_local
+# in audio-lag and vb-matrix, genlock_lock_recovery_decision, render-freeze's recovery_now).
+_OLD_RECOVERY = "[ \"${1:-0}\" = \"1\" ] && printf '1' || printf '0'"
+_OLD_RECOVERY_NAMES = ("net_reach_recovery_decision_local", "genlock_lock_recovery_decision", "recovery_now")
+
+
+def test_recovery_latch_fires_answers_exactly_like_the_old_copies(tmp_path):
+    inputs = ["1", "0", "", "2", "01", " 1", "1 ", "yes", "true"]
+    body = "old_recovery() { " + _OLD_RECOVERY + "; }\n"
+    for arg in inputs:
+        body += f'printf "%s|%s|%s\\n" {arg!r} "$(old_recovery {arg!r})" "$(recovery_latch_fires {arg!r})"\n'
+    body += 'printf "noarg|%s|%s\\n" "$(old_recovery)" "$(recovery_latch_fires)"\n'
+    r = _run(tmp_path, body)
+    assert r.returncode == 0, r.stderr
+    rows = [l.split("|") for l in r.stdout.strip().split("\n")]
+    assert len(rows) == len(inputs) + 1
+    for arg, old_out, new_out in rows:
+        assert old_out == new_out, (arg, old_out, new_out)
+    assert [row[2] for row in rows] == ["1"] + ["0"] * len(inputs)
+
+
+def test_the_recovery_decision_lives_only_in_the_lib():
+    for p in sorted(_SCRIPTS.rglob("*.sh")):
+        if p == _LIB:
+            continue
+        text = p.read_text()
+        assert _OLD_RECOVERY not in text, f"{p.name} carries its own copy of the recovery decision"
+        for name in _OLD_RECOVERY_NAMES:
+            assert not re.search(r"(?<![A-Za-z0-9_])" + name + r"(?![A-Za-z0-9_])", text), (
+                f"{p.name} still names {name} -- call recovery_latch_fires from the lib")
+    callers = [p.name for p in _watchdogs() if "recovery_latch_fires" in p.read_text()]
+    assert set(callers) >= {"audio-lag-alert-watchdog.sh", "vb-matrix-alert-watchdog.sh",
+                            "genlock-lock-alert-watchdog.sh", "render-freeze-alert-watchdog.sh"}
 
 
 def test_every_caller_of_a_lib_helper_can_resolve_it():

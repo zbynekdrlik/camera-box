@@ -30,6 +30,9 @@
 #   clear_source_throttle <key>        -> the same three fields suffixed _<key> (a source_key)
 #   source_key <raw source name>       -> a state-field-safe key: sanitized name + cksum of the raw
 #                                         name, so two names that sanitize alike never share state
+#   recovery_latch_fires <was_alerted> -> "1" iff a box/source that was alerted is healthy again this
+#                                         pass (the caller only asks on a healthy pass), else "0" --
+#                                         the machine-channel recovery line, never a phone ping
 #   netreach_box_alerted <box>         -> the network-reach watchdog's alerted_<box> field (1 = it
 #                                         has that box CONFIRMED unreachable and paged), 0 when
 #                                         absent -- the no-double-page guard (issue 1001)
@@ -131,6 +134,10 @@ source_key() {
   san="$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '_')"
   sum="$(printf '%s' "$1" | cksum | cut -d' ' -f1)"
   printf '%s_%s' "$san" "$sum"
+}
+
+recovery_latch_fires() {
+  [ "${1:-0}" = "1" ] && printf '1' || printf '0'
 }
 
 netreach_box_alerted() {

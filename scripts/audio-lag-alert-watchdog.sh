@@ -137,7 +137,8 @@ log() { printf '%s [audio-lag-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%
 # returns 1 (box_reachable=0 for this pass -> SKIP; deferred to #732/#1001).
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
-# read_state_field / write_state_field / clear_box_throttle live in scripts/lib/watchdog-common.sh.
+# read_state_field / write_state_field / clear_box_throttle / recovery_latch_fires live in
+# scripts/lib/watchdog-common.sh.
 # A HEALTHY box is not an incident: clear_box_throttle clears its confirm counter AND its throttle
 # sig so a genuinely NEW desync later pages fresh instead of being dedup'd against a stale
 # signature. It does NOT clear the `alerted` flag -- that is the recovery-ping latch, handled
@@ -198,7 +199,7 @@ handle_box() {
     HEALTHY)
       local was_alerted recover
       was_alerted="$(read_state_field "alerted_${box}" 0)"
-      recover="$(net_reach_recovery_decision_local "$was_alerted")"
+      recover="$(recovery_latch_fires "$was_alerted")"
       if [ "$recover" = "1" ]; then
         if [ "$DRY_RUN" -eq 1 ]; then
           log "[dry-run] WOULD send recovery: $box audio lag back to normal (${lag}ms)"
@@ -295,7 +296,7 @@ handle_box_band() {
     HEALTHY)
       local was_alerted recover
       was_alerted="$(read_state_field "band_alerted_${box}" 0)"
-      recover="$(net_reach_recovery_decision_local "$was_alerted")"
+      recover="$(recovery_latch_fires "$was_alerted")"
       if [ "$recover" = "1" ]; then
         if [ "$DRY_RUN" -eq 1 ]; then
           log "[dry-run] WOULD send band recovery: $box '${src}' ts_lag band back to baseline (high=${high}ms base=${base}ms)"
@@ -354,13 +355,6 @@ handle_box_band() {
   else
     log "ALERT: band alert suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES}) -- still drifting"
   fi
-}
-
-# net_reach_recovery_decision_local <was_alerted> -> "1" iff a recovery latch should fire (was
-# alerted, now healthy). Kept trivially local (a HEALTHY pass IS the "now up" side) so this watchdog
-# needs no extra lib; mirrors net_reach_recovery_decision's was_alerted-AND-up shape.
-net_reach_recovery_decision_local() {
-  [ "${1:-0}" = "1" ] && printf '1' || printf '0'
 }
 
 # require_tools -> exit non-zero (loud) if a REQUIRED external tool OR the decision module is

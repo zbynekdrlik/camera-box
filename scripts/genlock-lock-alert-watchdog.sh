@@ -123,18 +123,12 @@ fetch_bundle_json() {
 }
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
-# read_state_field / write_state_field / clear_box_throttle live in scripts/lib/watchdog-common.sh.
+# read_state_field / write_state_field / clear_box_throttle / recovery_latch_fires live in
+# scripts/lib/watchdog-common.sh.
 # A LOCKED box is not an incident: clear_box_throttle clears its confirm counter AND its throttle
 # sig so a genuinely NEW unlock later pages fresh instead of being dedup'd against a stale
 # signature. It does NOT clear the `alerted` flag -- that is the recovery-ping latch, handled
 # separately.
-
-# genlock_lock_recovery_decision <was_alerted> -> "1" iff a recovery latch should fire (was
-# alerted, now healthy). Kept trivially local (a HEALTHY pass IS the "now locked" side); mirrors the
-# audio-lag sibling's was_alerted-AND-up shape.
-genlock_lock_recovery_decision() {
-  [ "${1:-0}" = "1" ] && printf '1' || printf '0'
-}
 
 # -- per-box decision --------------------------------------------------------------------------
 # handle_box <box> <ip>
@@ -187,7 +181,7 @@ handle_box() {
     HEALTHY)
       local was_alerted recover
       was_alerted="$(read_state_field "alerted_${box}" 0)"
-      recover="$(genlock_lock_recovery_decision "$was_alerted")"
+      recover="$(recovery_latch_fires "$was_alerted")"
       if [ "$recover" = "1" ]; then
         if [ "$DRY_RUN" -eq 1 ]; then
           log "[dry-run] WOULD send recovery: $box genlock back to LOCKED"

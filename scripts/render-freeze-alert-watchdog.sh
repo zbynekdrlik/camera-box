@@ -87,10 +87,7 @@ log() { printf '%s [render-freeze-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M
 # BUNDLE_PATH) -> prints the JSON body + returns 0 iff a 200 with a `{`-body came back.
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
-# read_state_field / write_state_field live in scripts/lib/watchdog-common.sh.
-
-# recovery_now <was_alerted> -> "1" iff a recovery latch should fire (was alerted, now healthy).
-recovery_now() { [ "${1:-0}" = "1" ] && printf '1' || printf '0'; }
+# read_state_field / write_state_field / recovery_latch_fires live in scripts/lib/watchdog-common.sh.
 
 # -- one arm's confirm + throttled, time-bucketed alert -----------------------------------------
 # handle_arm <box> <arm-tag> <state-prefix> <dedup-base> <body-text>
@@ -142,7 +139,7 @@ handle_arm() {
 handle_healthy_arm() {
   local box="$1" prefix="$2" was_alerted
   was_alerted="$(read_state_field "${prefix}_alerted_${box}" 0)"
-  if [ "$(recovery_now "$was_alerted")" = "1" ]; then
+  if [ "$(recovery_latch_fires "$was_alerted")" = "1" ]; then
     log "RECOVERY: $box $prefix back to normal -- machine-channel only (#1206: recovery is not a phone ping)"
     write_state_field "${prefix}_alerted_${box}" 0
   fi

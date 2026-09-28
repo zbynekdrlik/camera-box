@@ -117,18 +117,12 @@ fetch_bundle_json() {
 }
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
-# read_state_field / write_state_field / clear_box_throttle live in scripts/lib/watchdog-common.sh.
+# read_state_field / write_state_field / clear_box_throttle / recovery_latch_fires live in
+# scripts/lib/watchdog-common.sh.
 # A RUNNING box is not an incident: clear_box_throttle clears its confirm counter AND its throttle
 # sig so a genuinely NEW outage later pages fresh instead of being dedup'd against a stale
 # signature. It does NOT clear the `alerted` flag -- that is the recovery-ping latch, handled
 # separately.
-
-# net_reach_recovery_decision_local <was_alerted> -> "1" iff a recovery latch should fire (was
-# alerted, now running). Kept trivially local (a RUNNING pass IS the "now up" side) so this watchdog
-# needs no extra lib; mirrors net_reach_recovery_decision's was_alerted-AND-up shape.
-net_reach_recovery_decision_local() {
-  [ "${1:-0}" = "1" ] && printf '1' || printf '0'
-}
 
 # -- per-box decision --------------------------------------------------------------------------
 # handle_box <box> <ip>
@@ -162,7 +156,7 @@ handle_box() {
     RUNNING)
       local was_alerted recover
       was_alerted="$(read_state_field "alerted_${box}" 0)"
-      recover="$(net_reach_recovery_decision_local "$was_alerted")"
+      recover="$(recovery_latch_fires "$was_alerted")"
       if [ "$recover" = "1" ]; then
         if [ "$DRY_RUN" -eq 1 ]; then
           log "[dry-run] WOULD send recovery: $box VB-Matrix running again (${name} pid ${pid})"
