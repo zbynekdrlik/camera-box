@@ -145,13 +145,12 @@ vig_row_vendor_pin() {
   # bad/unknown counters (report-only) -- the coordinated-restart bundle deploy makes a hard block on
   # every E2E too blunt, so #1136's doctrine assigns this component an ALARM (see
   # genlock_vendor_pin_verdict's header above for the two-step upgrade to a hard-gate). Reuses the
-  # deployed
-  # SHAs already gathered in parity_args (no new read). Fail-closed-LOUD on an unreadable pin. Fixture
-  # seams for the flow test: VERSION_INTEGRITY_GATE_VENDOR_NEWEST (override the newest vendor HEAD),
-  # VERSION_INTEGRITY_GATE_VENDOR_PENDING (override the pending list; set-but-empty = "current"), and
-  # (#1292) VERSION_INTEGRITY_GATE_VENDOR_AHEAD / VERSION_INTEGRITY_GATE_VENDOR_ON_DEV (override the
-  # ahead-list / on-dev-line facts -- read only once VENDOR_PENDING is set, same activation as the
-  # pending seam).
+  # deployed SHAs already gathered in parity_args (no new read). Fail-closed-LOUD on an unreadable
+  # pin. Fixture seams for the flow test: VERSION_INTEGRITY_GATE_VENDOR_NEWEST (override the newest
+  # vendor HEAD), VERSION_INTEGRITY_GATE_VENDOR_PENDING (override the pending list; set-but-empty =
+  # "current"), and (#1292) VERSION_INTEGRITY_GATE_VENDOR_AHEAD / VERSION_INTEGRITY_GATE_VENDOR_ON_DEV
+  # (override the ahead-list / on-dev-line facts -- read only once VENDOR_PENDING is set, same
+  # activation as the pending seam).
   echo "  -- vendor-pin alarm (#1137, report-only) --"
   local repo_root_vp=""
   repo_root_vp="$(cd "$HERE/.." 2>/dev/null && pwd)" || repo_root_vp=""
