@@ -115,8 +115,8 @@ legitimately owns :4455 at the pinned path (an ELEVATED `win-strih` MCP `Get-Net
 NOT show `port4455_owner_path`). So `port4455_identity` stayed opt-in behind its own
 `if [ -n "$port4455_owner_path" ]` guard — the last obs-identity facet not yet enforced.
 
-**Fix (#1067):** `port4455_owner()` now resolves the path via `Get-CimInstance Win32_Process -Filter
-"ProcessId=$id"`.ExecutablePath — the WMI/CIM provider returns ExecutablePath for an elevated
+**Fix (#1067):** `port4455_owner()` (in `scripts/bundle_state_windows.py` since issue 1386) now
+resolves the path via `Get-CimInstance Win32_Process -Filter "ProcessId=$id"`.ExecutablePath — the WMI/CIM provider returns ExecutablePath for an elevated
 process from a NON-elevated caller where the OpenProcess-based `Get-Process.Path` is denied — with
 `Get-Process.Path` kept as a fallback. Then the opt-in guard was REMOVED from
 `version-integrity-gate.sh` main(): `port_identity_verdict` now runs UNCONDITIONALLY like
