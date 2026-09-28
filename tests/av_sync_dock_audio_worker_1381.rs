@@ -26,9 +26,12 @@ use std::process::Command;
 
 #[path = "support/cpp_source.rs"]
 mod cpp_source;
-use cpp_source::{body_of, squish, strip_cpp_comments};
+use cpp_source::{squish, strip_cpp_comments, unique_body_of};
+#[allow(dead_code)]
+#[path = "support/av_sync_dock_output.rs"]
+mod av_sync_dock_output;
 
-const DOCK_OUTPUT: &str = "vendor/av-sync-dock/src/sync-test-output.cpp";
+const DOCK_OUTPUT: &str = av_sync_dock_output::LABEL;
 const SELFTEST: &str = "vendor/av-sync-dock/test/audio-worker-selftest.cpp";
 const AUDIO_HEADER: &str = "vendor/av-sync-dock/src/camera-box-audio.hpp";
 const DOCK_UI: &str = "vendor/av-sync-dock/src/sync-test-dock.cpp";
@@ -38,10 +41,7 @@ fn manifest(rel: &str) -> PathBuf {
 }
 
 fn code() -> String {
-    let p = manifest(DOCK_OUTPUT);
-    let src =
-        std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()));
-    squish(&strip_cpp_comments(&src))
+    squish(&strip_cpp_comments(&av_sync_dock_output::source()))
 }
 
 #[test]
@@ -100,9 +100,9 @@ fn the_audio_callback_only_gates_and_copies() {
     let src = code();
     assert!(src.contains("#include \"camera-box-audio-worker.hpp\""));
     assert!(src.contains("camerabox::CbAudioBlockFifo cb_audio_fifo;"));
-    let cb = body_of(
+    let cb = unique_body_of(
         &src,
-        "static void st_raw_audio(void *data, struct audio_data *frames)",
+        "void st_raw_audio(void *data, struct audio_data *frames)",
     );
     assert!(
         cb.contains(
@@ -111,7 +111,7 @@ fn the_audio_callback_only_gates_and_copies() {
         ),
         "{DOCK_OUTPUT}: st_raw_audio must hand camera-box mode to the gate + FIFO copy and return"
     );
-    let publish = body_of(
+    let publish = unique_body_of(
         &src,
         "static void cb_audio_gate_and_publish(struct sync_test_output *st, const struct audio_data *frames, uint64_t last_qr_ns)",
     );
@@ -151,9 +151,9 @@ fn the_audio_callback_only_gates_and_copies() {
 #[test]
 fn the_audio_worker_decodes_the_copy_and_resets_on_a_gap() {
     let src = code();
-    let run = body_of(
+    let run = unique_body_of(
         &src,
-        "static void st_audio_block_run(struct sync_test_output *st, const camerabox::CbAudioBlock &block)",
+        "void st_audio_block_run(struct sync_test_output *st, const camerabox::CbAudioBlock &block)",
     );
     for need in [
         "frames.data[c] = (uint8_t *)block.planes[c].data();",
@@ -165,9 +165,9 @@ fn the_audio_worker_decodes_the_copy_and_resets_on_a_gap() {
             "{DOCK_OUTPUT}: st_audio_block_run no longer has `{need}` (issue 1381)"
         );
     }
-    let gap = body_of(
+    let gap = unique_body_of(
         &src,
-        "static void st_audio_block_gap(struct sync_test_output *st, const camerabox::CbAudioBlock &block)",
+        "void st_audio_block_gap(struct sync_test_output *st, const camerabox::CbAudioBlock &block)",
     );
     for need in [
         "if (st->cb_audio_dec) st->cb_audio_dec->reset_window();",
@@ -179,7 +179,7 @@ fn the_audio_worker_decodes_the_copy_and_resets_on_a_gap() {
              stitch two stretches of audio into a false marker"
         );
     }
-    let forget = body_of(
+    let forget = unique_body_of(
         &src,
         "static void cb_audio_forget_lock(struct sync_test_output *st)",
     );
@@ -192,7 +192,7 @@ fn the_audio_worker_decodes_the_copy_and_resets_on_a_gap() {
             "{DOCK_OUTPUT}: cb_audio_forget_lock no longer has `{need}` (issue 1381)"
         );
     }
-    let recovery = body_of(
+    let recovery = unique_body_of(
         &src,
         "static void cb_apply_pairing_recovery(struct sync_test_output *st, const camerabox::CbDockPairingRecovery &rec)",
     );
@@ -200,9 +200,9 @@ fn the_audio_worker_decodes_the_copy_and_resets_on_a_gap() {
         recovery.contains("cb_audio_forget_lock(st);"),
         "{DOCK_OUTPUT}: the dead-pairing recovery forgets the lock through the one helper (issue 1381)"
     );
-    let end = body_of(
+    let end = unique_body_of(
         &src,
-        "static void st_audio_session_end(struct sync_test_output *st, unsigned reason)",
+        "void st_audio_session_end(struct sync_test_output *st, unsigned reason)",
     );
     for need in [
         "if (st->cb_audio_dec) st->cb_audio_dec->reset_window();",
@@ -215,7 +215,7 @@ fn the_audio_worker_decodes_the_copy_and_resets_on_a_gap() {
             "{DOCK_OUTPUT}: st_audio_session_end no longer has `{need}` (issue 1381)"
         );
     }
-    let begin = body_of(
+    let begin = unique_body_of(
         &src,
         "static void cb_audio_session_begin(struct sync_test_output *st)",
     );
@@ -237,7 +237,7 @@ fn the_audio_worker_decodes_the_copy_and_resets_on_a_gap() {
 #[test]
 fn audio_worker_lifecycle_follows_the_output() {
     let src = code();
-    let start = body_of(&src, "static bool st_start(void *data)");
+    let start = unique_body_of(&src, "static bool st_start(void *data)");
     let stop_first = start
         .find("st->cb_audio_fifo.stop();")
         .expect("st_start joins a previous audio worker");
@@ -257,20 +257,20 @@ fn audio_worker_lifecycle_follows_the_output() {
         "the audio worker must run before the first raw_audio can arrive"
     );
     assert!(start.contains("st_audio_worker_thread_setup;"));
-    let stop = body_of(&src, "static void st_stop(void *data, uint64_t)");
+    let stop = unique_body_of(&src, "static void st_stop(void *data, uint64_t)");
     assert!(
         stop.contains(
             "obs_output_end_data_capture(st->context); st->cb_decode_mailbox.stop(); st->cb_audio_fifo.stop();"
         ),
         "st_stop must join the audio worker after ending data capture"
     );
-    let destroy = body_of(&src, "static void st_destroy(void *data)");
+    let destroy = unique_body_of(&src, "static void st_destroy(void *data)");
     let d_stop = destroy
         .find("st->cb_audio_fifo.stop();")
         .expect("destroy joins");
     let d_del = destroy.find("delete st;").expect("delete");
     assert!(d_stop < d_del);
-    let dtor = body_of(&src, "~sync_test_output()");
+    let dtor = unique_body_of(&src, "~sync_test_output()");
     let t_stop = dtor.find("cb_audio_fifo.stop();").expect("dtor joins");
     let t_del = dtor.find("delete cb_audio_dec;").expect("dtor frees");
     assert!(
@@ -305,7 +305,7 @@ fn measurement_source_presence_is_read_off_the_audio_thread() {
         "{DOCK_OUTPUT}: the measurement source name has one declaration, in {AUDIO_HEADER}"
     );
     assert!(src.contains("std::atomic<bool> cb_measure_source_present{false};"));
-    let record = body_of(
+    let record = unique_body_of(
         &src,
         "static void cb_video_qr_record(struct sync_test_output *st, uint32_t frame_id, uint64_t video_ts)",
     );
@@ -313,7 +313,7 @@ fn measurement_source_presence_is_read_off_the_audio_thread() {
         record.contains("cb_refresh_measure_source(st, video_ts);"),
         "{DOCK_OUTPUT}: the QR record (decode worker) must refresh the measurement-source check"
     );
-    let refresh = body_of(
+    let refresh = unique_body_of(
         &src,
         "static void cb_refresh_measure_source(struct sync_test_output *st, uint64_t video_ts)",
     );

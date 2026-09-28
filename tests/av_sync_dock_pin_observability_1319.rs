@@ -1,4 +1,4 @@
-//! #1319 Part 2 — dock BIAS observability in `vendor/av-sync-dock/src/sync-test-output.cpp`.
+//! #1319 Part 2 — dock BIAS observability in `vendor/av-sync-dock/src/sync-test-output-audio.cpp`.
 //!
 //! The overnight A/V BAND false alarm (issue 1319) was caused by the dock estimator carrying a
 //! non-constant bias vs the recording-based verdict (a wrong-cluster QPSK-marker lag pick, most
@@ -9,14 +9,9 @@
 //! mirrored by a pwsh presence check in BOTH windows-genlock workflows (the two-language double
 //! coverage `.claude/rules/av-sync-dock-anchor-refactor-safety.md` mandates for a source anchor).
 
-use std::path::PathBuf;
-
-const DOCK_OUTPUT: &str = "vendor/av-sync-dock/src/sync-test-output.cpp";
-
-fn vendor_file(rel: &str) -> String {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
-    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
-}
+#[allow(dead_code)]
+#[path = "support/av_sync_dock_output.rs"]
+mod av_sync_dock_output;
 
 /// Collapse every run of ASCII whitespace to a single space so the assertions survive reformatting
 /// (mirrors the pwsh `-replace '\s+', ' '` the workflow gate uses on the same source).
@@ -26,7 +21,7 @@ fn squish(s: &str) -> String {
 
 #[test]
 fn updated_locked_line_appends_lag_idx_and_cands() {
-    let src = squish(&vendor_file(DOCK_OUTPUT));
+    let src = squish(&av_sync_dock_output::source());
     // The LOCKED/UPDATED cluster line must carry the chosen cluster's lag bucket + candidate-pool
     // size at the END, so a wrong-cluster pick (matched << cands, lag_idx jumps) is visible.
     assert!(
@@ -51,7 +46,7 @@ fn updated_locked_line_appends_lag_idx_and_cands() {
 
 #[test]
 fn pin_change_is_observed() {
-    let src = squish(&vendor_file(DOCK_OUTPUT));
+    let src = squish(&av_sync_dock_output::source());
     // The pin-change marker + its backing state field must both exist.
     assert!(
         src.contains("av-sync-dock: pin-change observed %d -> %d"),

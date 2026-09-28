@@ -17,9 +17,9 @@
 //! blocks the producer for more than 2 ms, the latest frame wins, dropped frames are counted, and
 //! stop/destroy join an in-flight decode.
 //!
-//! The source-anchor checks prove `sync-test-output.cpp` is WIRED to it: the callback only
-//! publishes, the worker starts on output start and is stopped on stop/destroy, and the diag line
-//! reports `decode_dropped`. The dock compiles ONLY on the Windows runner, so these are ALSO
+//! The source-anchor checks prove the output (`sync-test-output*.cpp`) is WIRED to it: the callback
+//! only publishes, the worker starts on output start and is stopped on stop/destroy, and the diag
+//! line reports `decode_dropped`. The dock compiles ONLY on the Windows runner, so these are ALSO
 //! mirrored by the pwsh step "Assert dock decode runs off the video-output thread" in BOTH
 //! windows-genlock workflows (`.claude/rules/av-sync-dock-anchor-refactor-safety.md`).
 
@@ -28,22 +28,20 @@ use std::process::Command;
 
 #[path = "support/cpp_source.rs"]
 mod cpp_source;
-use cpp_source::{body_of, squish, strip_cpp_comments};
+use cpp_source::{squish, strip_cpp_comments, unique_body_of};
+#[allow(dead_code)]
+#[path = "support/av_sync_dock_output.rs"]
+mod av_sync_dock_output;
 
-const DOCK_OUTPUT: &str = "vendor/av-sync-dock/src/sync-test-output.cpp";
+const DOCK_OUTPUT: &str = av_sync_dock_output::LABEL;
 
 fn manifest(rel: &str) -> PathBuf {
     [env!("CARGO_MANIFEST_DIR"), rel].iter().collect()
 }
 
-fn vendor_file(rel: &str) -> String {
-    let p = manifest(rel);
-    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
-}
-
-/// The comment-stripped, whitespace-squished source.
+/// The comment-stripped, whitespace-squished source of every output file (issue 1386).
 fn code() -> String {
-    squish(&strip_cpp_comments(&vendor_file(DOCK_OUTPUT)))
+    squish(&strip_cpp_comments(&av_sync_dock_output::source()))
 }
 
 #[test]
@@ -100,7 +98,7 @@ fn raw_video_callback_only_publishes_the_copy() {
     let src = code();
     assert!(
         src.contains("#include \"camera-box-decode-mailbox.hpp\""),
-        "issue 1367: sync-test-output.cpp must include camera-box-decode-mailbox.hpp"
+        "issue 1367: {DOCK_OUTPUT} must include camera-box-decode-mailbox.hpp"
     );
     assert!(
         src.contains("camerabox::CbDecodeMailbox<st_video_decode_job> cb_decode_mailbox;"),
@@ -110,9 +108,9 @@ fn raw_video_callback_only_publishes_the_copy() {
         src.contains("#include \"camera-box-frame-copy.hpp\""),
         "issue 1367: the frame copies must come from the self-tested camera-box-frame-copy.hpp"
     );
-    let body = body_of(
+    let body = unique_body_of(
         &src,
-        "static void st_raw_video(void *data, struct video_data *frame)",
+        "void st_raw_video(void *data, struct video_data *frame)",
     );
     assert!(
         body.contains("st->cb_decode_mailbox.publish("),
@@ -149,9 +147,9 @@ fn raw_video_callback_only_publishes_the_copy() {
 #[test]
 fn worker_runs_the_unchanged_decoders_on_the_copy() {
     let src = code();
-    let body = body_of(
+    let body = unique_body_of(
         &src,
-        "static void st_video_decode_job_run(struct sync_test_output *st, st_video_decode_job &job)",
+        "void st_video_decode_job_run(struct sync_test_output *st, st_video_decode_job &job)",
     );
     for call in [
         "st_raw_video_camera_box_decode(st, job.band.data(), job.timestamp)",
@@ -169,7 +167,7 @@ fn worker_runs_the_unchanged_decoders_on_the_copy() {
 #[test]
 fn worker_lifecycle_follows_the_output() {
     let src = code();
-    let start = body_of(&src, "static bool st_start(void *data)");
+    let start = unique_body_of(&src, "static bool st_start(void *data)");
     let restop_at = start
         .find("st->cb_decode_mailbox.stop();")
         .expect("issue 1367: st_start must first stop a worker left from a previous start");
@@ -195,13 +193,13 @@ fn worker_lifecycle_follows_the_output() {
         "issue 1367: the decode worker must be running before the video callbacks start"
     );
 
-    let stop = body_of(&src, "static void st_stop(void *data, uint64_t)");
+    let stop = unique_body_of(&src, "static void st_stop(void *data, uint64_t)");
     assert!(
         stop.contains("obs_output_end_data_capture(st->context); st->cb_decode_mailbox.stop();"),
         "issue 1367: st_stop must stop + join the decode worker after ending data capture"
     );
 
-    let destroy = body_of(&src, "static void st_destroy(void *data)");
+    let destroy = unique_body_of(&src, "static void st_destroy(void *data)");
     let stop_at = destroy
         .find("st->cb_decode_mailbox.stop();")
         .expect("issue 1367: st_destroy must stop + join the decode worker");
@@ -213,7 +211,7 @@ fn worker_lifecycle_follows_the_output() {
         "issue 1367: the worker must be joined before the output (its quirc contexts) is freed"
     );
 
-    let dtor = body_of(&src, "~sync_test_output()");
+    let dtor = unique_body_of(&src, "~sync_test_output()");
     let dstop = dtor
         .find("cb_decode_mailbox.stop();")
         .expect("issue 1367: ~sync_test_output must join the worker first");
