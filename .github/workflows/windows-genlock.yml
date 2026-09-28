@@ -1150,7 +1150,7 @@ jobs:
             Write-Error "obs-source.c: the N==1 pin-derived depth helpers are gone — a strih OBS restart lands the stream 2ME PGM on a random depth again (issue 1367)"; exit 1
           }
           if ($src -notmatch [regex]::Escape('genlock_n1_shed_due(tick_wall,') -or $src -notmatch [regex]::Escape('genlock_n1_hold_due(tick_wall,') -or $src -notmatch [regex]::Escape('if (n < 2 && source->genlock_last_known_n >= 2) return false;')) {
-            Write-Error "obs-source.c: the N==1 shed routing (or its N>=2-branch guard) is gone from genlock_should_converge_phase (issue 1367)"; exit 1
+            Write-Error "obs-source.c: the N==1 shed routing (or its defensive N>=2 guard) is gone from genlock_should_converge_phase (issue 1367)"; exit 1
           }
           if ($src -notmatch [regex]::Escape('static inline uint64_t genlock_n1_tick_wall_now(uint64_t wall_now_ns)') -or $src -notmatch [regex]::Escape('return genlock_n1_tick_wall_ns(wall_now_ns, os_gettime_ns(), obs->video.video_time);')) {
             Write-Error "obs-source.c: the N==1 depth is no longer read at the render tick's SCHEDULED instant — a late tick that video_sleep catches up would misfire a shed (issue 1367)"; exit 1

@@ -640,8 +640,9 @@ fn n1_pin_derived_depth_present_and_wired_1367() {
         ("\"n1_grows=%llu \"", "the n1_grows= audit field"),
         (
             "if (n < 2 && source->genlock_last_known_n >= 2) return false;",
-            "the guard that keeps a tick of the N>=2 STEADY branch out of the N==1 shed when the \
-             post-erase re-measure reads below 2 (N>=2 byte-identical at the source level)",
+            "the guard that keeps an N>=2 source (latch >= 2) out of the N==1 shed when a \
+             post-erase re-measure reads below 2 -- defensive since issue 1367 slice D1 routes N>=2 \
+             away at the top of the tick, kept so the N==1 path stays unchanged",
         ),
         (
             "(unsigned long long)source->genlock_stamp_gaps, \

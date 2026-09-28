@@ -7011,11 +7011,13 @@ static bool genlock_should_converge_phase(const obs_source_t *source, uint32_t r
 	/* camera-box issue 1367: an N==1 tick converges to its PIN-DERIVED depth (genlock_n1_shed_due,
 	 * read at the tick's scheduled instant, only while that is on the grid) instead of the #1049
 	 * reserve-aimed shed, which stays
-	 * inert for n < 2 below. That belongs to a tick of the N==1 STEADY branch only (review round 1):
-	 * on the N>=2 branch genlock_effective_source_multiple latched genlock_last_known_n >= 2, so a
-	 * post-erase re-measure that reads a conclusive n == 1 (a pair straddling a dropped 60 fps frame)
-	 * stays inert, exactly as before the N==1 rule. Mirror: src/probe/genlock.rs
-	 * ReleaseCadence::should_converge_phase. */
+	 * inert for n < 2 below. That belongs to a tick of an N==1 source only (review round 1): a latch
+	 * of genlock_last_known_n >= 2 marks an N>=2 source, and a post-erase re-measure that reads a
+	 * conclusive n == 1 on it (a pair straddling a dropped 60 fps frame) must stay inert. Since
+	 * issue 1367 slice D1 an N>=2 source leaves genlock_release_tick at its top branch, so on every
+	 * tick that reaches here the latch is below 2 and this guard is DEFENSIVE only -- kept so the
+	 * N==1 path stays byte-identical and cannot shed an N>=2 source if the routing ever changes.
+	 * Mirror: src/probe/genlock.rs ReleaseCadence::should_converge_phase. */
 	if (n < 2 && source->genlock_last_known_n >= 2)
 		return false;
 	const uint64_t newest_stamp =
@@ -7193,7 +7195,8 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 	if (!latched)
 		return;
 	source->genlock_shallow_latches++;
-	/* Marker mutually-non-substring vs genlock-fifo audit / genlock-relock / genlock-acquire-bracket.
+	/* Marker mutually-non-substring vs genlock-fifo audit / genlock-relock (and the retired
+	 * genlock-acquire-bracket family older logs still carry).
 	 * wanted_frames = the depth the p90 floor asked for (0 applied when the imag guard capped it, the
 	 * clamp base + 3 when the design-5830750134 clamp did); latch_floor_frames = that p90 floor;
 	 * spread_frames = the window's p90 - p10 spread in frames. */

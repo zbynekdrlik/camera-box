@@ -74,7 +74,9 @@ declaration.
   `genlock_acquire_bracket_ticks` + its five clears, the log line, the Rust `relock_acquire_should_hold`,
   its tests, pin-rise sim and parity test). The setter's pin-RISE boundary zeroing stays (the N==1
   conveyor needs it). `genlock_phase_converge_due` stays: an N==1 tick whose post-erase re-measure
-  reads n ≥ 2 can still reach it.
+  reads n ≥ 2 can still reach it. The `n < 2 && genlock_last_known_n >= 2` guards in
+  `genlock_should_converge_phase` / `genlock_should_hold_n1_gap` are DEFENSIVE now (every tick that
+  reaches them has a latch below 2); they stay so the N==1 path is unchanged.
 - **The ACQUIRE path stays for an inconclusive first tick** (one queued frame, no confirmed
   multiple): the N==1 conveyor presents one or two young frames, then the next tick measures N = 2
   and the grid takes over (a hold, then the target). The bench bounds the start-up at 2 ticks.
@@ -149,8 +151,9 @@ target's round-up — 6 at 30 fps, saturating. The zero-lag queue now sits 5-6 f
 at every pin 3..2000 ms (`the_drop_cap_holds_the_grid_queue_and_its_burst_reserve_at_every_pin_1367`
 simulates each pin and models the C cap), keeping the 4-frame burst reserve; the deepest N>=2
 budget (2000 ms: 130) stays under the absolute 132. N==1 sources keep the historic cap. A
-confirmed-N reset (a backward-step regime end) drops the cap back for at most one tick until the
-next release re-latches N — the queue can overrun only if it sat within 6 frames of it, at zero lag.
+backward-step regime clears the latch on every regime tick and returns before the release, so a
+deep N>=2 source keeps the pin-only cap for the whole regime (and one tick after it, until the
+release re-latches N) — not a regression: that regime drained deep sources before D1 too.
 
 ## Verification (Tier-0, no cargo)
 
@@ -198,3 +201,9 @@ Full-bundle genlock deploy on strih-lx AND the stream box (libobs changed; the s
    its depth in 33.3 ms steps, so a sub-frame shift may not be realizable through that pin).
 5. Once the main confirms the deep-pin shift: move `Zaloha kamera` 1000 → 960 ms (1016.7 ms, its
    pre-deploy `video_delay_ms` 1017), a recorded step, and re-read its audit line.
+6. The target is keyed on the RECEIVER wall clock (by design): a dantesync date step that reaches
+   strih-lx before or after the cameras costs about 2 held or early ticks per N>=2 camera. Read
+   `late_holds=` / `n2_early=` across the nightly step (02:00 UTC) once after the deploy.
+7. The fleet parity gate deploys the same libobs to imag and resolume: confirm neither has an N>=2
+   input (`received` ≈ 2 × `consumed` on its audit line; imag is 60 into 60, the cg feeds 30 into
+   30 — all N==1 today).

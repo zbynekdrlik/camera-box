@@ -601,7 +601,9 @@ pub fn genlock_drop_cap(genlock_fifo: bool, preload: u32) -> u32 {
 /// The depth is therefore budgeted at the WORST-CASE arrival rate
 /// ([`GENLOCK_MAX_SOURCE_FPS`]) — and the canvas rate too, should a future canvas ever run
 /// faster — flooring at [`GENLOCK_AUTO_PRELOAD_MIN`]. Mirror of the C
-/// `genlock_source_drop_cap` depth budget in `vendor/obs-studio/libobs/obs-source.c`.
+/// `genlock_source_drop_cap` depth budget in `vendor/obs-studio/libobs/obs-source.c`; for a
+/// confirmed N>=2 source the C also adds the grid-age headroom
+/// `crate::genlock_n2_grid::n2_drop_cap_extra_frames` (issue 1367 slice D1).
 pub fn genlock_latency_depth_frames(
     latency_ms: u32,
     canvas_fps_num: u32,
@@ -1983,11 +1985,13 @@ impl ReleaseCadence {
         let n = self.read_only_source_multiple(queue, interval_ns);
         // issue 1367: an N==1 tick converges to its PIN-DERIVED depth
         // (`genlock_n1_depth::n1_shed_due`) instead of the #1049 reserve-aimed shed, which stays
-        // inert for n < 2. That belongs to a tick of the N==1 STEADY branch only (review round 1):
-        // on the N>=2 branch (`last_known_n` latched >= 2) a post-erase re-measure reading n == 1
-        // stays inert, exactly as before. Mirror of the C `genlock_should_converge_phase` (this
-        // sim ticks on schedule, so the scheduled instant is `wall_now_ns`), including its
-        // defer-while-off-the-grid condition.
+        // inert for n < 2. That belongs to a tick of an N==1 source only (review round 1): a
+        // `last_known_n` latched >= 2 marks an N>=2 source, whose post-erase re-measure reading
+        // n == 1 must stay inert. Since issue 1367 slice D1 `tick` sends an N>=2 source to
+        // `tick_n2_grid` first, so this guard is DEFENSIVE only (kept so the N==1 path stays
+        // unchanged). Mirror of the C `genlock_should_converge_phase` (this sim ticks on schedule,
+        // so the scheduled instant is `wall_now_ns`), including its defer-while-off-the-grid
+        // condition.
         if n < 2 && self.last_known_n >= 2 {
             return false;
         }
