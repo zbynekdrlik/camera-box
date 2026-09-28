@@ -20,6 +20,7 @@ The replays cut the REAL 27.9 resolume log (tests/fixtures/audio_mixer_1381/) re
 control window with every `audio-stall` line after 03:30:00 removed is a thread that stopped while
 the obs-vban pacer thread kept logging. Tier-0 pytest (no cargo).
 """
+import calendar
 import gzip
 import importlib.util
 import json
@@ -93,6 +94,15 @@ def test_an_age_only_facet_grades_staleness():
 def test_a_normal_obs_start_never_stalls():
     # First minute after a start: fewer than two dumps -> the whole mixer facet is absent.
     assert _mixer(None, 1, ticks=None, over=None, tick_ms=None) == "UNKNOWN"
+
+
+def test_a_frozen_log_never_grades_its_old_counts():
+    # OBS died with a BEHIND dump as its last word: the dump is fresh behind the frozen head, but
+    # the head itself stopped. Grading those counts would page a dead OBS every hour.
+    assert _mixer(30, 400, ticks=2760, over=797) == "STALE"
+    assert _mixer(30, 181, ticks=2813, over=0) == "STALE"
+    assert _mixer(30, 180, ticks=2760, over=797) == "BEHIND"   # a quiet but live log still grades
+    assert _mixer(30, None, ticks=2760, over=797) == "BEHIND"  # an older gather: unchanged
 
 
 def test_unreachable_box_is_skip_even_with_stale_facets():
@@ -186,10 +196,15 @@ def test_log_head_age_absent_without_a_timestamped_line():
 
 
 def test_local_seconds_of_day_reads_the_local_clock(monkeypatch):
-    monkeypatch.setenv("TZ", "UTC")
+    # The rig's zone (CET/CEST): OBS stamps local time, so the box clock must be LOCAL too. In UTC
+    # localtime == gmtime and a gmtime slip would stay green; here it reads 1-2 h off.
+    monkeypatch.setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3")
     time.tzset()
     try:
-        assert bsg.local_seconds_of_day(86400 * 3 + 3723.25) == pytest.approx(3723.25)
+        winter = calendar.timegm((2026, 1, 15, 12, 0, 0)) + 0.25
+        summer = calendar.timegm((2026, 7, 15, 12, 0, 0)) + 0.25
+        assert bsg.local_seconds_of_day(winter) == pytest.approx(13 * 3600 + 0.25)
+        assert bsg.local_seconds_of_day(summer) == pytest.approx(14 * 3600 + 0.25)
     finally:
         monkeypatch.undo()
         time.tzset()
@@ -327,14 +342,22 @@ def _replay(lines, phase_s, start, end):
     while t <= end:
         v = amd.analyze(_bundle_at(lines, t), 1)["mixer_verdict"]
         act = 0
-        if v in PAGING:
-            confirm += 1
-            act = 1 if confirm >= 2 else 0
-        elif v == "HEALTHY":
-            confirm = 0
+        confirm, act = _confirm_step(confirm, v)
         out.append((t, v, act))
         t += PASS_S
     return out
+
+
+def _confirm_step(confirm, verdict):
+    """The watchdog's mixer-arm confirm: a paging verdict counts, HEALTHY and STALE reset (STALE =
+    the log is not live, and its once-a-day date-less false-live pass must never pair with the next
+    day's), SKIP / UNKNOWN hold."""
+    if verdict in PAGING:
+        confirm += 1
+        return confirm, 1 if confirm >= 2 else 0
+    if verdict in ("HEALTHY", "STALE"):
+        return 0, 0
+    return confirm, 0
 
 
 def _hms(sec):
@@ -401,6 +424,107 @@ def test_replay_the_real_onset_pages_behind_never_stalled():
 
 
 # ---------------------------------------------------------------------------------------------
+# a log that stopped for DAYS: the date-less head reads live once a day, never twice in a row
+# ---------------------------------------------------------------------------------------------
+def _frozen_log_passes(lines, dies, days=3):
+    """Pass bodies of a box whose OBS died at `dies` and whose :8899 keeps serving the frozen log,
+    every 300 s for `days` days, phased so one pass a day lands 30 s after the head's time of day
+    (inside the date-less false-live window)."""
+    frozen = [ln for ln in lines if _sec(ln) <= dies]
+    text = "".join(frozen)
+    head = _sec(frozen[-1])
+    mixer = bsg.audio_mixer_from_log(text)
+    vban = bsg.vban_pacer_loss_from_log(text)
+    out = []
+    t = head + 30.0
+    while t <= head + 30.0 + days * 86400:
+        now = t % 86400
+        st = bsg.build_bundle_state(
+            audio_mixer_ticks=mixer[0], audio_mixer_ticks_over=mixer[1],
+            audio_mixer_window_ms=mixer[2], audio_mixer_tick_ms=mixer[3],
+            audio_mixer_age_s=mixer[4], vban_pacer_loss_events=vban[0],
+            vban_pacer_loss_ms=vban[1], vban_pacer_loss_dest=vban[2], vban_pacer_age_s=vban[3],
+            obs_log_head_age_s=bsg.obs_log_head_age_s_from_log(text, now))
+        out.append((t, json.dumps(st)))
+        t += PASS_S
+    return out
+
+
+def _verdicts(passes):
+    return [(t, body, amd.analyze(body, 1)["mixer_verdict"]) for t, body in passes]
+
+
+def _compress(seq, keep=2):
+    """Runs of one verdict cut to `keep` passes: the watchdog state machine is idempotent after the
+    second identical pass, so the real bash sees every transition without 864 invocations."""
+    out = []
+    run = 0
+    for i, item in enumerate(seq):
+        run = run + 1 if i and item[2] == seq[i - 1][2] else 1
+        if run <= keep:
+            out.append(item)
+    return out
+
+
+def test_a_log_frozen_for_days_after_a_stop_never_pages_stalled():
+    full = _lines("control-0300-0415")
+    seq = _verdicts(_frozen_log_passes(_stopped_thread(full), dies=_tod(3, 45, 0)))
+    stalled = [t for t, _b, v in seq if v == "STALLED"]
+    assert len(stalled) >= 3, "the once-a-day false-live window was never exercised"
+    confirm = 0
+    for t, _b, v in seq:
+        confirm, act = _confirm_step(confirm, v)
+        assert not act, f"a dead OBS paged {v} on day {int(t // 86400)}"
+
+
+def test_a_log_frozen_for_days_on_a_behind_dump_never_pages():
+    # OBS died at 06:20 on 27.9 while the mixer was off real time: its last dump grades BEHIND /
+    # OVERLOADED. Graded on a frozen log that paged every hour for as long as OBS stayed dead.
+    full = _lines("onset-0540-0630")
+    dies = _tod(6, 20, 0)
+    passes = _frozen_log_passes(full, dies=dies)
+    shape = json.loads(passes[0][1])
+    shape.pop("obs_log_head_age_s", None)
+    assert amd.analyze(json.dumps(shape), 1)["mixer_verdict"] in PAGING, "fixture shape changed"
+    confirm = 0
+    for t, _b, v in _verdicts(passes):
+        confirm, act = _confirm_step(confirm, v)
+        assert not act, f"a dead OBS paged {v} at +{int(t - dies)} s"
+
+
+def _stream_shaped(lines, cut=CUT):
+    """The stream / strih-lx shape: no obs-vban output. The real audio-stall lines of the control
+    window up to `cut`, and a program-render-audit line every 5 s (the render thread keeps logging),
+    CRLF as on the box."""
+    stalls = [ln for ln in lines if "audio-stall #1367" in ln and _sec(ln) <= cut]
+    start, end = _sec(lines[0]), _sec(lines[-1])
+    render = []
+    t = start
+    while t <= end:
+        h, rem = divmod(t, 3600)
+        m, s = divmod(rem, 60)
+        render.append(f"{int(h):02d}:{int(m):02d}:{s:06.3f}: program-render-audit: "
+                      "render_fps=30.0 target_fps=30.0 avg_frame_ms=17.9 lagged=0 total=150\r\n")
+        t += 5.0
+    return sorted(stalls + render, key=_sec)
+
+
+def test_replay_a_stopped_thread_on_a_box_without_vban_pages_stalled():
+    full = _lines("control-0300-0415")
+    lines = _stream_shaped(full)
+    assert not any("obs-vban" in ln for ln in lines)
+    start, end = _sec(full[0]), _sec(full[-1])
+    for phase in range(0, PASS_S, 20):
+        res = _replay(lines, phase, start, end)
+        before = [(_hms(t), v) for t, v, _a in res if t < CUT and v in PAGING]
+        assert not before, f"phase {phase}s: paged before the stop: {before}"
+        first = next((t for t, _v, a in res if a), None)
+        assert first is not None, f"phase {phase}s: never paged"
+        assert first <= LAST_DUMP + 181 + HEAD_LAG_S + 2 * PASS_S, \
+            f"phase {phase}s: paged at {_hms(first)}"
+
+
+# ---------------------------------------------------------------------------------------------
 # the real bash orchestrator over the stopped-thread replay: one page, STALLED, time-bucketed arm
 # ---------------------------------------------------------------------------------------------
 def _run_watchdog(tmp_path, body, state_file):
@@ -443,6 +567,46 @@ def test_watchdog_dry_run_pages_a_stopped_thread_once(tmp_path):
     assert any("log_head_age=" in lg for lg in logs)
 
 
+def _mixer_body(age_s, head_age_s):
+    return json.dumps({"audio_mixer_ticks": "2813", "audio_mixer_ticks_over": "0",
+                       "audio_mixer_window_ms": "60011", "audio_mixer_tick_ms": "21.3",
+                       "audio_mixer_age_s": str(age_s), "obs_log_head_age_s": str(head_age_s)})
+
+
+def test_watchdog_stale_between_two_stalled_passes_resets_the_confirm(tmp_path):
+    state = tmp_path / "state"
+    stalled, stale = _mixer_body(420, 4), _mixer_body(420, 900)
+    for body in (stalled, stale, stalled):
+        log = _run_watchdog(tmp_path, body, state)
+        assert "WOULD alert" not in log, log
+    log = _run_watchdog(tmp_path, stalled, state)   # two in a row: now it pages
+    assert "WOULD alert (STALLED)" in log, log
+
+
+def test_watchdog_dry_run_never_pages_a_log_frozen_for_days(tmp_path):
+    full = _lines("control-0300-0415")
+    seq = _compress(_verdicts(_frozen_log_passes(_stopped_thread(full), dies=_tod(3, 45, 0))))
+    assert sum(1 for _t, _b, v in seq if v == "STALLED") >= 2
+    state = tmp_path / "state"
+    for t, body, v in seq:
+        log = _run_watchdog(tmp_path, body, state)
+        assert "WOULD alert" not in log, f"day {int(t // 86400)} {v}: {log}"
+
+
+def test_watchdog_dry_run_pages_a_stopped_thread_on_a_box_without_vban_once(tmp_path):
+    full = _lines("control-0300-0415")
+    lines = _stream_shaped(full)
+    state = tmp_path / "state"
+    start, end = _sec(full[0]), _sec(full[-1])
+    t = start + 60
+    fired = []
+    while t <= end:
+        log = _run_watchdog(tmp_path, _bundle_at(lines, t), state)
+        fired += [ln for ln in log.splitlines() if "WOULD alert" in ln and "alert_now=1" in ln]
+        t += PASS_S
+    assert len(fired) == 1 and "STALLED" in fired[0] and "stream" in fired[0], fired
+
+
 def test_watchdog_dry_run_logs_stale_without_a_page_when_the_log_stopped(tmp_path):
     body = json.dumps({"audio_mixer_ticks": "2813", "audio_mixer_ticks_over": "0",
                        "audio_mixer_window_ms": "60011", "audio_mixer_tick_ms": "21.3",
@@ -459,3 +623,5 @@ def test_watchdog_source_pages_stalled_through_the_time_bucketed_mixer_arm():
     assert 'STALLED) handle_arm "$box" "STALLED" "audio-mixer" "audio-mixer"' in src
     assert '--log-live-s "$LOG_LIVE_S"' in src
     assert 'LOG_LIVE_S="${AUDIO_MIXER_LOG_LIVE_S:-60}"' in src
+    # the dump age is a lower bound once the last dumps left the tail
+    assert "aspoň **${age} s**" in src
