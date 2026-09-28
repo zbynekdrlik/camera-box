@@ -16,8 +16,12 @@
 #     time, a surplus too) or OVERLOADED (more than 30 late ticks in the minute).
 #   * vban_pacer_* -- the per-destination obs-vban pacer loss-counter increase inside the last
 #     660 s of the log. The VBAN arm pages VBAN_LOSS when any loss counter moved.
-# A normal OBS start reads UNKNOWN (one partial dump), never a page; STALE (the dump or the status
-# line stopped while the log advanced) is logged, never paged -- the audio-lag sibling's rule.
+# The MIXER arm also pages STALLED (issue 1385): the newest dump is > 180 s behind the log head
+# while the log head itself is live on the box's own clock (`obs_log_head_age_s` <= 60 s) -- the
+# audio thread stopped while OBS keeps logging, silence on air on a box without VBAN outputs.
+# A normal OBS start reads UNKNOWN (one partial dump), never a page; STALE (the same old dump with
+# no proof the log is live: OBS down or hung, or a gather without the facet; or the VBAN status
+# line stopped) is logged, never paged -- obs-liveness / bundle-state own a dead OBS.
 #
 # PRODUCTION-CRITICAL class (issue 1308): a mixer off real time or a sender losing audio is audible
 # on air, so BOTH arms TIME-BUCKET their --dedup-key (watchdog_notify_key) and re-ping "dokolecka"
@@ -44,7 +48,7 @@ DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help | -h)
-    sed -n '5,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,38p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -58,7 +62,8 @@ BUNDLE_PATH="${AUDIO_MIXER_BUNDLE_PATH:-/bundle-state.json}"
 CURL_TIMEOUT="${AUDIO_MIXER_CURL_TIMEOUT:-10}"
 TOLERANCE="${AUDIO_MIXER_TICK_TOLERANCE:-5}"          # ticks/min off real time (2812.5 at 48 kHz)
 OVER_MAX="${AUDIO_MIXER_OVER_MAX:-30}"                # late ticks/min
-STALE_AFTER_S="${AUDIO_MIXER_STALE_AFTER_S:-180}"     # a dump older than this: STALE, log-only
+STALE_AFTER_S="${AUDIO_MIXER_STALE_AFTER_S:-180}"     # a dump older than this: STALLED or STALE
+LOG_LIVE_S="${AUDIO_MIXER_LOG_LIVE_S:-60}"            # log head this fresh = OBS still logging (1385)
 VBAN_STALE_AFTER_S="${AUDIO_MIXER_VBAN_STALE_AFTER_S:-180}"
 CONFIRM_THRESHOLD="${AUDIO_MIXER_CONFIRM_THRESHOLD:-2}"  # 2-pass confirm; one odd pass never fires
 ALERT_THROTTLE_PASSES="${AUDIO_MIXER_ALERT_THROTTLE_PASSES:-12}"  # ~1h at the 5-min cadence (render-freeze's)
@@ -180,27 +185,30 @@ field() { printf '%s\n' "$1" | sed -n "s/^$2=//p"; }
 # -- per-box decision --------------------------------------------------------------------------
 handle_box() {
   local box="$1" ip="$2" body reachable out
-  local mverdict ticks over tick_ms age expected dev window
+  local mverdict ticks over tick_ms age head_age expected dev window
   local vverdict events loss_ms dest vage loss_txt
 
   if body="$(fetch_bundle_json "$ip")"; then reachable=1; else reachable=0; body=""; fi
   out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" \
     --tolerance "$TOLERANCE" --over-max "$OVER_MAX" --stale-after-s "$STALE_AFTER_S" \
-    --vban-stale-after-s "$VBAN_STALE_AFTER_S" 2>/dev/null)"
+    --vban-stale-after-s "$VBAN_STALE_AFTER_S" --log-live-s "$LOG_LIVE_S" 2>/dev/null)"
   mverdict="$(field "$out" mixer_verdict)"; ticks="$(field "$out" ticks)"
   over="$(field "$out" ticks_over)"; tick_ms="$(field "$out" tick_ms)"; age="$(field "$out" age_s)"
+  head_age="$(field "$out" log_head_age_s)"
   expected="$(field "$out" expected_per_min)"
   dev="$(field "$out" deviation_per_min)"; window="$(field "$out" window_ms)"
   vverdict="$(field "$out" vban_verdict)"; events="$(field "$out" vban_events)"
   loss_ms="$(field "$out" vban_loss_ms)"; dest="$(field "$out" vban_dest)"
   vage="$(field "$out" vban_age_s)"
-  log "$box ($ip): reachable=$reachable mixer=${mverdict:-<none>} ticks=${ticks} over=${over} tick_ms=${tick_ms} window_ms=${window} age=${age} dev=${dev} | vban=${vverdict:-<none>} events=${events} loss_ms=${loss_ms} dest=${dest} age=${vage}"
+  log "$box ($ip): reachable=$reachable mixer=${mverdict:-<none>} ticks=${ticks} over=${over} tick_ms=${tick_ms} window_ms=${window} age=${age} log_head_age=${head_age} dev=${dev} | vban=${vverdict:-<none>} events=${events} loss_ms=${loss_ms} dest=${dest} age=${vage}"
 
   # MIXER arm
   case "$mverdict" in
     SKIP)    log "$box mixer: :$BUNDLE_PORT not fetchable -- bundle-state / reach watchdog territory; holding, no page" ;;
     UNKNOWN) log "$box mixer: no complete audio-stall dump (fresh OBS start / older build) -- holding, no page" ;;
-    STALE)   log "$box mixer: STALE -- newest audio-stall dump ${age}s behind the log head (audio thread stopped dumping?) -- machine channel only, no page" ;;
+    STALE)   log "$box mixer: STALE -- newest audio-stall dump ${age}s behind the log head, but the log head is not live (${head_age:-no}s old: OBS down / hung / older gather) -- obs-liveness territory, machine channel only, no page" ;;
+    STALLED) handle_arm "$box" "STALLED" "audio-mixer" "audio-mixer" \
+      "🚨 Zvukový mixér ($REPO_SLUG): **$box** ($ip) — zvukové vlákno OBS stojí: posledný zvukový záznam je **${age} s** starý, hoci OBS stále zapisuje log (pred ${head_age} s). Z tohto OBS nejde zvuk (ticho vo vysielaní). Treba zistiť príčinu a rozhodnúť o reštarte OBS. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol." ;;
     HEALTHY) handle_healthy_arm "$box" "audio-mixer" ;;
     BEHIND)  handle_arm "$box" "BEHIND" "audio-mixer" "audio-mixer" \
       "🚨 Zvukový mixér ($REPO_SLUG): **$box** ($ip) — OBS mixér nebeží v reálnom čase: **${ticks} tickov za minútu** (reálny čas ${expected}, odchýlka ${dev}), oneskorených tickov ${over}/min. Zvuk z tohto OBS sa trhá alebo dobieha (27.9.: FOH výpadky celú hodinu). Treba zistiť príčinu (záťaž zvukového vlákna, dock) a rozhodnúť o reštarte OBS. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol." ;;

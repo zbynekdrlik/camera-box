@@ -15,10 +15,15 @@ IS the per-minute rate. It is graded as dumped and never rescaled by the interva
 lines: those timestamps are the wall clock, which dantesync steps (the real 27.9 log reads 60.193 s
 around the 02:00 UTC nightly date step with a real-time ticks=2813).
   SKIP        box not fetched (:8899 / box down) -- deferred to the bundle-state / reach watchdogs.
+  STALLED     (issue 1385) the newest dump is more than STALE_AFTER_S behind the log head AND the
+              log head itself is at most LOG_LIVE_S old on the box's own clock (the
+              `obs_log_head_age_s` facet): OBS is still logging NOW while its audio thread stopped
+              dumping -- silence on air on a box without VBAN outputs. PAGES. Decided first, from
+              the age alone: a dump that left the tail of a long session reports only its age.
+  STALE       the same old dump WITHOUT that proof (OBS down or hung, the log frozen, an older
+              gather without the facet): log-only -- obs-liveness / bundle-state own a dead OBS.
   UNKNOWN     facet absent (a normal OBS start: one partial dump only) or a tick length that is no
               known sample rate.
-  STALE       the newest dump is more than STALE_AFTER_S behind the log head: the audio thread
-              stopped dumping while the log advanced. Log-only (the audio-lag sibling's rule).
   BEHIND      ticks in the minute more than TOLERANCE off real time (2812.5 at 48 kHz). A SURPLUS
               pages too: that is the mixer catching up in bursts.
   OVERLOADED  more than OVER_MAX ticks in the minute came late (gap > 1.5 ticks).
@@ -40,6 +45,10 @@ DEFAULT_TOLERANCE = 5.0             # ticks/min off real time (the design thresh
 DEFAULT_OVER_MAX = 30.0             # late ticks/min
 DEFAULT_STALE_AFTER_S = 180         # 3x the 60 s dump period (the audio-lag sibling's bound)
 DEFAULT_VBAN_STALE_AFTER_S = 180    # 18 missed 10 s status lines
+# issue 1385 -- the log head counts as live while it is at most this old on the box's own clock. A
+# genlock OBS logs every ~5 s (program-render-audit); it stays below the 300 s dev1 pass, so a
+# date-less log dead for whole days never reads live on two passes in a row.
+DEFAULT_LOG_LIVE_S = 60
 
 
 def expected_ticks_per_min(tick_ms):
@@ -57,21 +66,25 @@ def expected_ticks_per_min(tick_ms):
 
 def classify_mixer(ticks, ticks_over, window_ms, tick_ms, age_s, box_reachable,
                    tolerance=DEFAULT_TOLERANCE, over_max=DEFAULT_OVER_MAX,
-                   stale_after_s=DEFAULT_STALE_AFTER_S):
+                   stale_after_s=DEFAULT_STALE_AFTER_S, log_head_age_s=None,
+                   log_live_s=DEFAULT_LOG_LIVE_S):
     """One box's MIXER verdict + the per-minute rates it graded (None when not graded).
     `window_ms` (the log interval since the previous dump) is context only -- see the module doc for
-    why the count is never rescaled by it."""
+    why the count is never rescaled by it. `log_head_age_s` (issue 1385) is the log head's age on the
+    box's own clock; None = no proof the log is live."""
     del window_ms   # context for the caller's log line, never graded
     res = {"verdict": "SKIP", "rate_per_min": None, "expected_per_min": None,
            "deviation_per_min": None, "over_per_min": None}
     if box_reachable != 1:
         return res
+    if age_s is not None and age_s > stale_after_s:
+        # A stale dump's counts describe a minute long gone; the stop is the current fault.
+        live = log_head_age_s is not None and log_head_age_s <= log_live_s
+        res["verdict"] = "STALLED" if live else "STALE"
+        return res
     expected = expected_ticks_per_min(tick_ms)
     if ticks is None or ticks_over is None or expected is None:
         res["verdict"] = "UNKNOWN"
-        return res
-    if age_s is not None and age_s > stale_after_s:
-        res["verdict"] = "STALE"
         return res
     res.update(rate_per_min=ticks, expected_per_min=expected, deviation_per_min=ticks - expected,
                over_per_min=ticks_over)
@@ -121,7 +134,7 @@ def _num(obj, key, cast):
 
 def analyze(bundle_json_text, box_reachable, tolerance=DEFAULT_TOLERANCE,
             over_max=DEFAULT_OVER_MAX, stale_after_s=DEFAULT_STALE_AFTER_S,
-            vban_stale_after_s=DEFAULT_VBAN_STALE_AFTER_S):
+            vban_stale_after_s=DEFAULT_VBAN_STALE_AFTER_S, log_live_s=DEFAULT_LOG_LIVE_S):
     """Fetch result -> both arms' verdicts + the readings. Unreachable -> SKIP without parsing."""
     obj = _loads_obj(bundle_json_text) if box_reachable == 1 else None
     ticks = _num(obj, "audio_mixer_ticks", int)
@@ -129,14 +142,16 @@ def analyze(bundle_json_text, box_reachable, tolerance=DEFAULT_TOLERANCE,
     window_ms = _num(obj, "audio_mixer_window_ms", int)
     tick_ms = obj.get("audio_mixer_tick_ms") if isinstance(obj, dict) else None
     age_s = _num(obj, "audio_mixer_age_s", int)
+    head_age = _num(obj, "obs_log_head_age_s", int)
     mixer = classify_mixer(ticks, over, window_ms, tick_ms, age_s, box_reachable, tolerance,
-                           over_max, stale_after_s)
+                           over_max, stale_after_s, log_head_age_s=head_age,
+                           log_live_s=log_live_s)
     events = _num(obj, "vban_pacer_loss_events", int)
     loss_ms = _num(obj, "vban_pacer_loss_ms", float)
     vban_age = _num(obj, "vban_pacer_age_s", int)
     return {
         "mixer_verdict": mixer["verdict"], "ticks": ticks, "ticks_over": over,
-        "window_ms": window_ms, "tick_ms": tick_ms, "age_s": age_s,
+        "window_ms": window_ms, "tick_ms": tick_ms, "age_s": age_s, "log_head_age_s": head_age,
         "rate_per_min": mixer["rate_per_min"], "expected_per_min": mixer["expected_per_min"],
         "deviation_per_min": mixer["deviation_per_min"], "over_per_min": mixer["over_per_min"],
         "vban_verdict": classify_vban(events, loss_ms, vban_age, box_reachable,
@@ -166,13 +181,15 @@ def _main(argv):
     a.add_argument("--over-max", type=float, default=DEFAULT_OVER_MAX)
     a.add_argument("--stale-after-s", type=int, default=DEFAULT_STALE_AFTER_S)
     a.add_argument("--vban-stale-after-s", type=int, default=DEFAULT_VBAN_STALE_AFTER_S)
+    a.add_argument("--log-live-s", type=int, default=DEFAULT_LOG_LIVE_S)
     ns = ap.parse_args(argv)
     # Tolerant read (the ndi_halving precedent): a strict read that raised would be swallowed by the
     # caller's 2>/dev/null and read as SKIP forever. box_reachable=0 needs no stdin.
     text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
     res = analyze(text, ns.box_reachable, ns.tolerance, ns.over_max, ns.stale_after_s,
-                  ns.vban_stale_after_s)
+                  ns.vban_stale_after_s, ns.log_live_s)
     for k in ("mixer_verdict", "ticks", "ticks_over", "window_ms", "tick_ms", "age_s",
+              "log_head_age_s",
               "rate_per_min", "expected_per_min", "deviation_per_min", "over_per_min",
               "vban_verdict", "vban_events", "vban_loss_ms", "vban_dest", "vban_age_s"):
         print(f"{k}={_fmt(k, res[k])}")

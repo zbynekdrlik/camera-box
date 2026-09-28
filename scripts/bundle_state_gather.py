@@ -38,6 +38,7 @@ import os
 import re
 import shutil
 import sys
+import time
 
 # The three OBS module scan paths that can each shadow-load a `distroav.dll` (#124, EPIC #125) —
 # mirrors `.claude/commands/drift-guard.md` step 1c EXACTLY (same three roots, same rationale: a
@@ -1215,7 +1216,16 @@ def audio_mixer_from_log(text, tail=None):
     audio thread's clock); `window_ms` is only the WALL-clock log interval since the previous dump,
     reported as context and never used to rescale the count (dantesync steps the wall clock).
     `age_s` is the newest dump's in-log age behind the log head (a stopped audio thread stops
-    dumping while the log advances). `tail` = a precomputed `timestamped_tail_lines(text)`."""
+    dumping while the log advances). `tail` = a precomputed `timestamped_tail_lines(text)`.
+
+    issue 1385 -- a stopped thread in a LONG session: once the last dumps leave the 5 MB tail,
+    the count is gone but the age is not. A bounded read (the file is larger than head + tail, so
+    the session is far past its start) whose HEAD slice holds a dump proves this build dumps; a
+    tail with fewer than two dumps then reports ONLY `age_s`: the newest tail dump's age, or,
+    with none left, the whole tail span (the newest dump is at least that old). The dev1 decision
+    grades that age as STALE / STALLED, so a thread that stays dead keeps paging instead of
+    decaying to UNKNOWN. A whole-file log (a normal start) and a build without the probe (no dump
+    anywhere) stay absent."""
     stamped, head = tail if tail is not None else timestamped_tail_lines(text)
     prev = last = None
     for pos, line in stamped:
@@ -1224,10 +1234,63 @@ def audio_mixer_from_log(text, tail=None):
         m = _AUDIO_STALL_RE.search(line)
         if m:
             prev, last = last, (pos, m.group(1), m.group(2), m.group(3))
+    if prev is None and head is not None and _audio_stall_dump_in_head(text):
+        newest = last[0] if last is not None else 0.0
+        return ("", "", "", "", str(round(head - newest)))
     if prev is None or last is None or last[0] <= prev[0]:
         return ("", "", "", "", "")
     return (last[1], last[2], str(round((last[0] - prev[0]) * 1000.0)), last[3],
             str(round(head - last[0])))
+
+
+def _audio_stall_dump_in_head(text):
+    """True only for a BOUNDED read whose head slice (the session's first 2 MB, before the
+    separator) holds a complete `audio-stall #1367` dump line: this build has the probe and its
+    audio thread dumped earlier in the session (issue 1385)."""
+    t = text or ""
+    if LOG_BOUNDED_READ_SEPARATOR not in t:
+        return False
+    head_slice = t.partition(LOG_BOUNDED_READ_SEPARATOR)[0]
+    return _AUDIO_STALL_RE.search(head_slice) is not None
+
+
+# issue 1385 -- the log head's age against the box's OWN wall clock: positive proof the OBS log is
+# being written NOW. Every other `*_age_s` facet is measured behind the log head, so a log that
+# stopped (OBS down, hung) keeps its old ages forever; the dev1 audio-mixer decision pages a
+# stopped audio thread (STALLED) only while this age is small. OBS stamps each log line with its
+# local HH:MM:SS.mmm and the gather runs on the same box, so the two clocks are one. The log has
+# no date: a head AHEAD of "now" (read right after the log) can only be a wall-clock step back
+# (dantesync steps ~50 ms) and reads 0 up to this slack; further ahead it is a previous day's line
+# (+24 h), which the decision reads as not live. A log dead for a whole number of days reads live
+# for about 70 s once a day (this slack + the decision's 60 s) -- shorter than one 300 s dev1 pass,
+# so the 2-pass confirm never pages on it.
+LOG_HEAD_CLOCK_SLACK_S = 10.0
+
+
+def local_seconds_of_day(epoch=None):
+    """The box's local wall clock as seconds of the day (the clock OBS stamps its log lines with),
+    at `epoch` (default: now)."""
+    e = time.time() if epoch is None else float(epoch)
+    lt = time.localtime(e)
+    return lt.tm_hour * 3600 + lt.tm_min * 60 + lt.tm_sec + (e - math.floor(e))
+
+
+def obs_log_head_age_s_from_log(text, now_s):
+    """issue 1385 -- whole seconds from the newest timestamped line of the TAIL to `now_s` (the
+    box's local seconds of the day, taken right after the log read), or `""` when the tail has no
+    timestamped line (omit-when-empty -> the decision has no liveness proof)."""
+    t = text or ""
+    if LOG_BOUNDED_READ_SEPARATOR in t:
+        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
+    for line in reversed(t.splitlines()):
+        ts = _log_line_seconds(line)
+        if ts is None:
+            continue
+        gap = float(now_s) - ts
+        if gap < 0.0:
+            gap = 0.0 if gap >= -LOG_HEAD_CLOCK_SLACK_S else gap + 86400.0
+        return str(round(gap))
+    return ""
 
 
 def _vban_vector(fields):
@@ -1872,6 +1935,7 @@ def build_bundle_state(
     vban_pacer_loss_ms="",
     vban_pacer_loss_dest="",
     vban_pacer_age_s="",
+    obs_log_head_age_s="",
 ):
     """Assemble the flat bundle-state dict `version-integrity-gate.sh --win-state`'s
     `compare_args_from_state()` parses. Every value is a STRING (its regex requires a quoted JSON
@@ -2030,5 +2094,9 @@ def build_bundle_state(
         "vban_pacer_loss_ms": vban_pacer_loss_ms,
         "vban_pacer_loss_dest": vban_pacer_loss_dest,
         "vban_pacer_age_s": vban_pacer_age_s,
+        # issue 1385 -- the log head's age against the box's own clock (`obs_log_head_age_s_from_log`):
+        # the positive "OBS is still logging now" proof the dev1 audio-mixer STALLED verdict needs.
+        # "0" is a reading and is KEPT; no timestamped line omits it -> no proof downstream.
+        "obs_log_head_age_s": obs_log_head_age_s,
     }
     return {k: v for k, v in values.items() if v}
