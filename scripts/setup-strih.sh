@@ -66,6 +66,8 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 . "${HERE}/lib/remoteos-mcp.sh"   # issue 1361: the ONE remoteos-mcp venv install (with setup-imag.sh + setup-device.sh)
 # shellcheck source=scripts/lib/obs-downstream-keyer.sh
 . "${HERE}/lib/obs-downstream-keyer.sh"   # issue 1361: the pinned Downstream Keyer OBS plugin (step 4c)
+# shellcheck source=scripts/lib/bundle-state-files.sh
+. "${HERE}/lib/bundle-state-files.sh"   # issue 1386: the ONE declared :8899 server file set (step 9; with setup-imag.sh)
 
 # --- issue 1361: select + load the box facts BEFORE the source-guard, so a sourced setup (the unit
 # tests) sees exactly the facts the real run uses. Any invalid / TODO_OWNER fact refuses here.
@@ -527,22 +529,23 @@ install -m 0644 "${HERE}/../systemd/strih-bundle-state-server.service" "${USER_H
 chown -R "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/systemd/user" 2>/dev/null || true
 echo "  strih-bundle-state-server.service installed (serves /bundle-state.json for the dev1 genlock-lock watchdog)"
 # issue 1317: install the server tree the unit's ExecStart references BEFORE enabling (the
-# setup-imag.sh step-28 pattern) -- bundle-state-server.py + its bundle_state_gather / obs_phase2
-# sibling imports install together under /opt/camera-box so the server's imports resolve.
+# setup-imag.sh step-28 pattern) -- bundle-state-server.py + every sibling module it imports
+# install together under /opt/camera-box so the server's imports resolve. Issue 1386: the file set
+# is the ONE declared list in scripts/lib/bundle-state-files.sh, never a literal typed here.
 install -d -m 755 /opt/camera-box
 if [ -n "${GH_TOKEN:-}" ]; then
-  for _bss in bundle-state-server.py bundle_state_gather.py obs_phase2.py; do
+  for _bss in "${BUNDLE_STATE_SERVER_FILES[@]}"; do
     curl -fsSL -H "Authorization: token ${GH_TOKEN}" -H 'Accept: application/vnd.github.raw' \
       "https://api.github.com/repos/${GENLOCK_REPO}/contents/scripts/${_bss}?ref=dev" \
       -o "/opt/camera-box/${_bss}" 2>/dev/null \
       || fail "issue 1317: could not fetch scripts/${_bss} (GH_TOKEN scope?) -- required for the :8899 bundle-state server"
   done
   chmod 0644 /opt/camera-box/*.py
-  echo "  installed bundle-state server tree -> /opt/camera-box (bundle-state-server.py + bundle_state_gather.py + obs_phase2.py)"
+  echo "  installed bundle-state server tree -> /opt/camera-box (${BUNDLE_STATE_SERVER_FILES[*]})"
   sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user enable strih-bundle-state-server.service 2>/dev/null \
     || warn "  enable strih-bundle-state-server.service by hand once the user session bus is up"
 else
-  warn "  GH_TOKEN unset -- install bundle-state-server.py + bundle_state_gather.py + obs_phase2.py under /opt/camera-box, then enable strih-bundle-state-server.service"
+  warn "  GH_TOKEN unset -- install ${BUNDLE_STATE_SERVER_FILES[*]} (scripts/lib/bundle-state-files.txt) under /opt/camera-box, then enable strih-bundle-state-server.service"
 fi
 
 # ---------------------------------------------------------------------------------------------
