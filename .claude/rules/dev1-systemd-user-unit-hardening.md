@@ -33,3 +33,17 @@ namespace — engages normally regardless of userns policy) and `StartLimitInter
 kernel.apparmor_restrict_unprivileged_userns`, `systemd --version`), re-verify this live before
 trusting any existing `--user` unit's hardening comments — the finding is a property of the BOX's
 current configuration, not of systemd's design, and could silently start (or stop) being true.
+
+## An in-checkout ExecStart script must be committed 100755 — and "enabled" is not "running" (issue 1381)
+
+A dev1 unit whose `ExecStart=%h/devel/camera-box/scripts/<x>.sh` runs the script DIRECTLY needs git
+mode 100755. `audio-mixer-alert-watchdog.sh` was committed 100644: from its install (28.9.2026) every
+pass failed `status=203/EXEC`, and the production-critical FOH-audio alert never ran once. The timer
+read `enabled` the whole time, so nobody noticed. Guarded now by
+`tests/python/test_systemd_exec_scripts_executable_1381.py`, which walks every `systemd/*.service`.
+A new script: `git add` it, then `git update-index --chmod=+x <path>` before committing.
+
+**After enabling ANY dev1 watchdog, read its first pass:**
+`journalctl --user -u <unit>.service --since -10min` must show the script's own `pass end` line and
+`Finished`, never `status=203/EXEC` or `Failed with result`. A quick sweep over every timer's service:
+`journalctl --user -u <svc> --since -3h | grep -c 'Failed with result'`.
