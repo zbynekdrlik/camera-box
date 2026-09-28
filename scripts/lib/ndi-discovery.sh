@@ -208,7 +208,9 @@ _ndi_discovery_json_string() {
     | sed -E 's/.*:[[:space:]]*"([^"]*)"$/\1/' || true
 }
 
-# _ndi_discovery_networks_key KEY TEXT -> the string value of ndi.networks.KEY in TEXT, "" if absent.
+# _ndi_discovery_networks_key KEY TEXT -> the value of ndi.networks.KEY in TEXT: a string as-is, any
+# other non-null value (a hand-edited array, a number, true/false) as its compact JSON, "" when absent
+# or null.
 # With python3 (dev1, strih-lx, the camboxes, the tests) it reads that exact JSON path, so an unrelated
 # `"KEY"` elsewhere in the file never stands in for it (issue 1389). Without python3 (a stripped-down
 # box), or when TEXT is not JSON, it falls back to the grep reader above. Never errors.
@@ -349,6 +351,13 @@ ndi_discovery_config_verdict() {
   else
     printf '%s' "$out"
   fi
+}
+
+# ndi_discovery_verdict_oneline VERDICT -> a verdict's `FAIL: <facet>` lines (either verdict above or
+# below) as ONE line for a check's FAIL message: the prefix dropped, facets joined by '; ', blank lines
+# skipped. verify-device (an) and verify-strih item 34 both print through it. Never errors.
+ndi_discovery_verdict_oneline() {
+  printf '%s\n' "$1" | awk 'NF { if (n++) printf "; "; sub(/^FAIL: /, ""); printf "%s", $0 }' || true
 }
 
 # ndi_discovery_dropin_content -> the systemd drop-in that points a root/ProtectHome NDI receiver at
@@ -513,7 +522,7 @@ sys.stdout.write(json.dumps(doc, indent=2) + "\n")
 #                     alone when no config is left, and stays (still inert) on none / strip.
 ndi_discovery_cambox_plan() {
   local dir="${1:?ndi_discovery_cambox_plan: DIR required}" dropin="${2:?ndi_discovery_cambox_plan: DROPIN required}"
-  local f have droptext dropdir ips disc rest rc
+  local f have droptext dropdir ips disc rest rc nonstr
   f="$dir/$NDI_DISCOVERY_CONFIG_NAME"
   droptext=""
   [ ! -e "$dropin" ] || droptext="$(cat "$dropin" 2>/dev/null || true)"
@@ -546,8 +555,11 @@ ndi_discovery_cambox_plan() {
       fi
       ;;
     1)
-      # No python3: the grep reader still finds a list; a config that lists nothing needs no change.
-      if [ -z "$ips$disc" ]; then
+      # No python3: the grep reader finds a string list; a non-string ips / discovery value (an array,
+      # a number, true/false -- anything but a string or null) it cannot read is counted here, so the
+      # file goes with a backup like any list. A config that sets neither needs no change.
+      nonstr="$(printf '%s\n' "$have" | grep -cE '"(ips|discovery)"[[:space:]]*:[[:space:]]*[^"[:space:]n]' || true)"
+      if [ -z "$ips$disc" ] && [ "$nonstr" = 0 ]; then
         echo none
       elif [ "$have" = "$(ndi_discovery_config_json "$(ndi_discovery_config_ips "$have")")" ]; then
         echo remove

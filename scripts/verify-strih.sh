@@ -917,7 +917,7 @@ else
     if [ "$_ndi_verdict" = ok ]; then
       ok "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: networks.ips lists every managed sender and no cambox"
     else
-      bad "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: $(printf '%s' "$_ndi_verdict" | tr '\n' ' ' | sed 's/FAIL: //g')-- re-run setup-strih.sh step 4b (issue 1342)"
+      bad "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: $(ndi_discovery_verdict_oneline "$_ndi_verdict") -- re-run setup-strih.sh step 4b (issue 1342)"
     fi
   done
   # A traveling sender (resolume.lan, DHCP) is never REQUIRED, but when it resolves NOW to an address
