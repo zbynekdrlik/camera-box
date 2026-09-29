@@ -1275,16 +1275,12 @@ async fn run_capture_loop(
                 // Issue 1367 slice D2 — while the capture phase tracker drives this stream the stamp
                 // instant is the middle of its tracked slot (the SMOOTHED capture phase with slot
                 // hysteresis), so the floor below lands on exactly the slot the gate decided on.
-                let capture_realtime_100ns = match phase_slot_ns {
-                    Some(slot_ns) => camera_box::capture_phase::slot_mid_realtime_100ns(
-                        slot_ns,
-                        out_interval_ns,
-                    ),
-                    None => camera_box::genlock_stamp::capture_realtime_100ns(
-                        info.capture_monotonic_100ns,
-                        mono_to_real_offset_100ns,
-                    ),
-                };
+                let capture_realtime_100ns = camera_box::capture_phase::stamp_instant_100ns(
+                    phase_slot_ns,
+                    out_interval_ns,
+                    info.capture_monotonic_100ns,
+                    mono_to_real_offset_100ns,
+                );
 
                 // #105 node 2 — tee the EMITTED (original, unburned) frame to the cam1 grab
                 // recording at the emit instant. A broken grab stream stops recording but NEVER

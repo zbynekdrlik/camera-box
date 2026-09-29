@@ -159,8 +159,13 @@ pub struct DecimationGate {
     /// re-latches its boundary (that boundary sits a dequeue latency behind the poll instant).
     stamp_driven: bool,
     /// (issue 1367 D2) The stamp-driven decision of the most recent poll (`None` on the poll-time
-    /// path), for the capture loop's diagnostics and the bench.
+    /// path), read by the tests and the bench.
     last_stamp_action: Option<StampSlotAction>,
+    /// (issue 1367 D2) The slots the most recent poll's return from the stamp path moved the
+    /// boundary by for the dequeue latency alone (capture slot -> poll slot), folded into
+    /// [`last_poll_intentional_extra_advance`](Self::last_poll_intentional_extra_advance) so the
+    /// domain change never reads as a #707 SKIP. `0` on every other poll.
+    last_poll_relatch_extra: u64,
 }
 
 impl DecimationGate {
@@ -181,8 +186,12 @@ impl DecimationGate {
     /// [`crate::genlock_pacing::boundary_skip_count`] before recording, so an intentional fast-drain
     /// is never miscounted as an un-emitted-content boundary SKIP (the sick-leg / clock-step signal
     /// `leg-health-guard.sh` hard-fails on). Read it right after `poll`, alongside `next_boundary_ns`.
+    /// (issue 1367 D2) Also carries the starvation repeats (filled slots) and the latency part of a
+    /// return from the stamp path.
     pub fn last_poll_intentional_extra_advance(&self) -> u64 {
-        self.last_poll_fast_drain_extra + self.last_poll_starvation_repeats
+        self.last_poll_fast_drain_extra
+            + self.last_poll_starvation_repeats
+            + self.last_poll_relatch_extra
     }
 
     /// (#1167 v4) How many STARVATION last-frame repeats the MOST RECENT [`poll`](Self::poll) asks
@@ -514,11 +523,26 @@ impl DecimationGate {
             return self.poll_on_stamp(slot_ns, interval_ns, content_hash, capture_mono_ns);
         }
         self.last_stamp_action = None;
+        self.last_poll_relatch_extra = 0;
         if core::mem::take(&mut self.stamp_driven) {
             // Back from the stamp-driven path: its boundary sits on the CAPTURE-time grid, a dequeue
             // latency behind this poll instant. Re-latch on this poll's own slot so the frame emits on
-            // time instead of reading as a stale (lag >= 1) boundary that would fill a repeat.
-            self.next_boundary_ns = crate::genlock_grid::grid_floor_ns(now_ns, interval_ns);
+            // time instead of reading as a stale (lag >= 1) boundary that would fill a repeat. The
+            // slots between this frame's own capture slot (the poll instant minus its queue
+            // residence) and the poll slot are that latency, not missing content: count them as
+            // intentional so the #707 diagnostic reports only real missing slots.
+            let relatched = crate::genlock_grid::grid_floor_ns(now_ns, interval_ns);
+            let capture_ns = if capture_mono_ns != 0 && now_mono_ns >= capture_mono_ns {
+                now_ns.saturating_sub(now_mono_ns - capture_mono_ns)
+            } else {
+                now_ns
+            };
+            self.last_poll_relatch_extra = crate::genlock_grid::grid_steps_between(
+                crate::genlock_grid::grid_floor_ns(capture_ns, interval_ns),
+                relatched,
+                interval_ns,
+            );
+            self.next_boundary_ns = relatched;
         }
         // (#1145 v2.1) reset the per-poll intentional-extra-advance accounting; only the FastDrain
         // arm sets it (see the field doc — it keeps a fast-drain out of the #707 skip diagnostic).
@@ -880,6 +904,7 @@ impl DecimationGate {
     ) -> bool {
         self.last_poll_fast_drain_extra = 0;
         self.last_poll_starvation_repeats = 0;
+        self.last_poll_relatch_extra = 0;
         self.note_capture_takt(capture_mono_ns);
         self.prev_hash = Some(content_hash);
         self.pending_luma = None;

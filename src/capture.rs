@@ -35,9 +35,10 @@ pub struct FrameInfo {
     /// NDI send side, on the capture side instead.
     pub dequeue_duration_ms: f64,
     /// Issue 1367 slice D2 — this buffer's V4L2 `sequence` number. uvcvideo increments it once per
-    /// frame the device started, whether or not a buffer was free, so a gap is a lost frame. The
-    /// capture phase tracker ([`crate::capture_phase`]) fits the camera period over it. `0` where no
-    /// real V4L2 metadata is available (the static getter, test fixtures).
+    /// frame the DEVICE sent, whether or not a buffer was free, so a gap is a frame the host lost;
+    /// a frame the device itself skipped leaves no gap (the tracker spots that one from the
+    /// timestamps). The capture phase tracker ([`crate::capture_phase`]) fits the camera period over
+    /// it. `0` where no real V4L2 metadata is available (the static getter, test fixtures).
     pub sequence: u32,
 }
 
