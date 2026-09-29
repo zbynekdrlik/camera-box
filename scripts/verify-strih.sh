@@ -797,25 +797,25 @@ case "$DS_ROLE_VERDICT" in
 esac
 
 # 6c) dantesync UNIT content (issue 1372), read-only: the installed unit is byte-identical to the one
-#     setup-strih step 2 emits for the role, loaded, no drop-in (strih_dantesync_unit_verdict). Step 2
-#     restarts only on a change (a date-master restart steps the whole fleet date), so drift is caught
-#     HERE, never by a blind restart on a deploy. A kept-running daemon on a matching unit passes.
+#     setup-strih step 2 emits for the role, no drop-in overrides it, and the running process runs its
+#     ExecStart (strih_dantesync_unit_verdict). Step 2 restarts only on a change (a date-master restart
+#     steps the whole fleet date), so drift is caught HERE, never by a blind restart on a deploy.
 DS_UNIT_PATH_V="/etc/systemd/system/dantesync.service"
 DS_ARGS_V="$(strih_lx_dantesync_args 2>/dev/null)" || DS_ARGS_V=""
-DS_UNIT_RELOAD_V="$(systemctl show -p NeedDaemonReload --value dantesync 2>/dev/null || true)"
+DS_UNIT_ARGV_V="$(strih_dantesync_running_argv 2>/dev/null || true)"
 if DS_UNIT_WANT="$(strih_dantesync_unit_text "$DS_ROLE_V" "$DS_ARGS_V" 2>/dev/null)"; then
-  DS_UNIT_V="$(strih_dantesync_unit_verdict "$DS_UNIT_WANT" "$DS_UNIT_PATH_V" "${DS_UNIT_PATH_V}.d" "$DS_UNIT_RELOAD_V" || true)"
+  DS_UNIT_V="$(strih_dantesync_unit_verdict "$DS_UNIT_WANT" "$DS_UNIT_PATH_V" "${DS_UNIT_PATH_V}.d" "$DS_UNIT_ARGV_V" || true)"
 else
   DS_UNIT_V=no-unit
 fi
 DS_UNIT_FIX="re-run setup-strih.sh in the nightly window (step 2 then restarts dantesync; a date-master restart steps the fleet date)"
 case "$DS_UNIT_V" in
-  ok)         ok "(dantesync-unit) unit matches the provisioned ${DS_ROLE_V} unit, loaded, no drop-in" ;;
-  differs)    bad "(dantesync-unit) ${DS_UNIT_PATH_V} is missing or differs from the provisioned ${DS_ROLE_V} unit -- ${DS_UNIT_FIX}" ;;
-  dropin)     bad "(dantesync-unit) a ${DS_UNIT_PATH_V}.d/*.conf drop-in overrides the provisioned unit -- ${DS_UNIT_FIX}" ;;
-  not-loaded) bad "(dantesync-unit) the unit on disk is not loaded (a daemon-reload is pending) -- ${DS_UNIT_FIX}" ;;
-  no-unit)    bad "(dantesync-unit) the box facts give no valid dantesync unit (role '${DS_ROLE_V}') -- fix scripts/strih-boxes/$(strih_lx_hostname).env" ;;
-  *)          bad "(dantesync-unit) cannot read ${DS_UNIT_PATH_V} (verdict '${DS_UNIT_V}')" ;;
+  ok)          ok "(dantesync-unit) unit matches the provisioned ${DS_ROLE_V} unit, no drop-in, the process runs it" ;;
+  differs)     bad "(dantesync-unit) ${DS_UNIT_PATH_V} is missing or differs from the provisioned ${DS_ROLE_V} unit -- ${DS_UNIT_FIX}" ;;
+  dropin)      bad "(dantesync-unit) a ${DS_UNIT_PATH_V}.d/*.conf drop-in overrides the provisioned unit -- ${DS_UNIT_FIX}" ;;
+  not-applied) bad "(dantesync-unit) the running dantesync (${DS_UNIT_ARGV_V}) is not the unit's ExecStart -- restart it in the nightly window (a date-master restart steps the fleet date)" ;;
+  no-unit)     bad "(dantesync-unit) the box facts give no valid dantesync unit (role '${DS_ROLE_V}') -- fix scripts/strih-boxes/$(strih_lx_hostname).env" ;;
+  *)           bad "(dantesync-unit) cannot read ${DS_UNIT_PATH_V} (verdict '${DS_UNIT_V}')" ;;
 esac
 
 # 30) ffmpeg/ffprobe present (issue 1317): the on-box recording-verdict E2E spawns ffprobe to demux

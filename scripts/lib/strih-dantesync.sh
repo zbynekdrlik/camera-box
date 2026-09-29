@@ -15,33 +15,40 @@
 # genlock deploy runs setup-strih -- so a deploy stepped the whole rig's date mid-day (29.9.2026
 # 00:35Z: a 0.67 s fleet step, cg OBS program audio broken until a relaunch).
 #
-# Pure helpers (tests/python/test_strih_dantesync_keep_running_1372.py):
+# Helpers (tests/python/test_strih_dantesync_keep_running_1372.py):
 #   strih_dantesync_unit_matches UNIT_TEXT PATH   0 identical | 1 differs or missing | 2 unreadable
 #   strih_dantesync_dropins_present DIR           0 iff DIR holds a *.conf drop-in
-#   strih_dantesync_unit_verdict WANT PATH DIR NEED_RELOAD
-#                                                 ok | differs | dropin | not-loaded | unreadable
+#   strih_dantesync_exec_start UNIT_TEXT          the unit's (last) ExecStart= value
+#   strih_dantesync_running_argv                  the running dantesync's command line, or rc 1
+#   strih_dantesync_unit_verdict WANT PATH DIR RUNNING_ARGV
+#                                                 ok | differs | dropin | not-applied | unreadable
 #
 # Provisioning ACTION (root, setup-strih.sh step 2; uses the caller's warn):
 #   strih_dantesync_install UNIT_TEXT [ROLE]
-#     * a change = the unit text differs from the installed file, a stale *.conf drop-in existed and
-#       was removed, or systemd has not loaded the unit on disk (NeedDaemonReload=yes: a daemon-reload
-#       that failed, or a run killed after the write). Only then is the unit written (temp + rename)
-#       and daemon-reloaded;
-#     * strih_dantesync_restart_decision picks restart | start | keep | absent from that change,
-#       binary_changed, `systemctl is-active` and the binary's presence; the restart runs on the
+#     * a change = the unit text differs from the installed file, a stale *.conf drop-in existed (it
+#       is removed), or the RUNNING process does not run the unit's ExecStart (a run killed after
+#       the write or after the reload). Only a text change writes the unit (temp + rename);
+#     * a change, or a pending manager reload (NeedDaemonReload=yes), runs `daemon-reload`.
+#       NeedDaemonReload is MANAGER-WIDE in systemd (any enable/disable/mask of any unit, or a
+#       touched identical file, reads yes), so on its own it only reloads -- it never restarts;
+#     * strih_dantesync_restart_decision picks restart | start | keep | absent from the change,
+#       binary_changed, `systemctl is-active` and the binary's presence; a restart runs on the
 #       RELOADED unit;
-#     * fail closed: an unreadable unit or a missing decision helper touches nothing, never a restart;
+#     * fail closed: an unreadable unit or a missing decision helper touches nothing; an unreadable
+#       command line keeps the daemon running (a WARN). Never towards a restart;
+#     * an operator-masked unit (a /dev/null symlink) is left alone: never unmasked or started;
 #     * keep has no side effects: `systemctl enable` (which reloads the manager) runs only when the
 #       unit is not enabled yet;
 #     * the lock is removed ONLY on `start` and only when no process holds it (`flock -n`). It is an
 #       flock: a stale file never blocks a start, and removing the file of a RUNNING dantesync (one
 #       outside the unit) would let a second instance lock a new inode;
+#     * a temp unit a killed run left behind (.dantesync.service.XXXXXX) is swept;
 #     * one log line names the decision.
 #   binary_changed is always 0: setup-strih never installs the binary and the box keeps no checksum
 #   marker -- a new binary arrives only through dantesync-fleet-upgrade.sh, which restarts the daemon
 #   itself (the deliberate, canaried path).
-#   The STRIH_DANTESYNC_* paths are test seams (the pytest runs this against a temp root with a fake
-#   systemctl on PATH); they default to the real box paths.
+#   The STRIH_DANTESYNC_UNIT / _DROPIN_DIR / _LOCK / _BIN / _PROC paths are test seams (the pytest
+#   runs this against a temp root with a fake systemctl on PATH); they default to the real box paths.
 
 # strih_dantesync_unit_matches UNIT_TEXT PATH -> 0 iff PATH holds exactly UNIT_TEXT plus its one
 # trailing newline -- the bytes step 2 writes (`printf '%s\n' "$UNIT_TEXT"`, UNIT_TEXT being
@@ -63,15 +70,42 @@ strih_dantesync_dropins_present() {
   compgen -G "${dir}/*.conf" >/dev/null
 }
 
-# strih_dantesync_unit_verdict WANT_TEXT UNIT_PATH DROPIN_DIR NEED_RELOAD -> ONE token, rc 0 only on
-# ok. NEED_RELOAD = `systemctl show -p NeedDaemonReload --value dantesync` (an unread value is no fault).
-#   unreadable  the unit could not be read -- never reported as a difference
-#   differs     the unit is missing or differs from WANT_TEXT
-#   dropin      a *.conf drop-in overrides it
-#   not-loaded  it matches on disk but systemd has not loaded it (a daemon-reload is pending)
-#   ok          matches, no drop-in, loaded
+# strih_dantesync_exec_start UNIT_TEXT -> the value of the unit's LAST `ExecStart=` line (systemd's
+# own reading for a Type=simple unit; an empty `ExecStart=` resets). Pure, no pipe.
+strih_dantesync_exec_start() {
+  local line v=""
+  while IFS= read -r line; do
+    case "$line" in ExecStart=*) v="${line#ExecStart=}" ;; esac
+  done <<<"${1-}"
+  printf '%s\n' "$v"
+}
+
+# strih_dantesync_running_argv -> the running dantesync's command line (its /proc/<MainPID>/cmdline,
+# arguments joined by one space), or nothing and rc 1 when no process runs or it cannot be read.
+# dantesync execs in place (no fork, no argv rewrite), so this is the ExecStart it was started with.
+strih_dantesync_running_argv() {
+  local proc="${STRIH_DANTESYNC_PROC:-/proc}" pid argv
+  pid="$(systemctl show -p MainPID --value dantesync 2>/dev/null || true)"
+  case "$pid" in '' | 0 | *[!0-9]*) return 1 ;; esac
+  [ -r "$proc/$pid/cmdline" ] || return 1
+  argv="$(tr '\0' ' ' < "$proc/$pid/cmdline")" || return 1
+  argv="${argv%"${argv##*[! ]}"}"   # drop the trailing separator(s)
+  [ -n "$argv" ] || return 1
+  printf '%s\n' "$argv"
+}
+
+# strih_dantesync_unit_verdict WANT_TEXT UNIT_PATH DROPIN_DIR RUNNING_ARGV -> ONE token, rc 0 only on
+# ok. RUNNING_ARGV = strih_dantesync_running_argv (empty = no readable process, not graded here:
+# verify-strih items 6/6b grade that dantesync runs).
+#   unreadable   the unit could not be read -- never reported as a difference
+#   differs      the unit is missing or differs from WANT_TEXT
+#   dropin       a *.conf drop-in overrides it
+#   not-applied  the running process does not run the unit's ExecStart (it was never restarted on it)
+#   ok           matches, no drop-in, and the running process runs it
+# NeedDaemonReload is deliberately NOT graded: it is manager-wide, so it would blame this unit for
+# any other unit's pending change.
 strih_dantesync_unit_verdict() {
-  local want="${1-}" path="${2-}" dir="${3-}" need="${4-}" rc=0
+  local want="${1-}" path="${2-}" dir="${3-}" argv="${4-}" rc=0
   strih_dantesync_unit_matches "$want" "$path" || rc=$?
   case "$rc" in
     0) ;;
@@ -79,7 +113,10 @@ strih_dantesync_unit_verdict() {
     *) printf 'unreadable'; return 1 ;;
   esac
   if strih_dantesync_dropins_present "$dir"; then printf 'dropin'; return 1; fi
-  if [ "$need" = yes ]; then printf 'not-loaded'; return 1; fi
+  if [ -n "$argv" ] && [ "$argv" != "$(strih_dantesync_exec_start "$want")" ]; then
+    printf 'not-applied'
+    return 1
+  fi
   printf 'ok'
 }
 
@@ -89,15 +126,23 @@ strih_dantesync_install() {
   local dropin_dir="${STRIH_DANTESYNC_DROPIN_DIR:-${unit}.d}"
   local lock="${STRIH_DANTESYNC_LOCK:-/var/run/dantesync.lock}"
   local bin="${STRIH_DANTESYNC_BIN:-/usr/local/bin/dantesync}"
-  local text_changed=0 dropin_removed=0 unit_changed=0 binary_changed=0 active=0 present=0
-  local decision reason="" tail need_reload rc=0 tmp
+  local text_changed=0 dropin_found=0 not_applied=0 unit_changed=0 binary_changed=0 active=0 present=0
+  local decision reason="" tail need_reload rc=0 tmp argv udir
   [ -n "$unit_text" ] || { echo "strih_dantesync_install: empty unit text" >&2; return 1; }
   declare -F strih_dantesync_restart_decision >/dev/null || {
     echo "strih_dantesync_install: strih_dantesync_restart_decision is not loaded (scripts/lib/strih-provision.sh) -- nothing touched" >&2
     return 1
   }
+  udir="$(dirname "$unit")"
+  # An operator mask is a deliberate state: never replace the /dev/null link, enable or start it.
+  if [ -L "$unit" ] && [ "$(readlink -f "$unit" 2>/dev/null)" = /dev/null ]; then
+    warn "  dantesync.service is masked by an operator (${unit} -> /dev/null) -- nothing touched"
+    return 0
+  fi
+  # A temp unit a killed run left behind (this lib's own name pattern only; systemd ignores it).
+  rm -f -- "$udir"/.dantesync.service.?????? 2>/dev/null || true
 
-  # Read BEFORE any write (after our own write it would read yes for that reason alone).
+  # --- read everything first ---------------------------------------------------------------------
   need_reload="$(systemctl show -p NeedDaemonReload --value dantesync 2>/dev/null || true)"
   strih_dantesync_unit_matches "$unit_text" "$unit" || rc=$?
   case "$rc" in
@@ -111,18 +156,36 @@ strih_dantesync_install() {
       return 1
       ;;
   esac
-  if [ "$text_changed" = 0 ] && [ "$need_reload" = yes ]; then reason="unit not loaded"; fi
   # A stale drop-in (the live box had a hand 10-ntp-master.conf resetting ExecStart) would hide the
-  # role that is now IN the unit -- remove it; that is a change only when a drop-in actually existed.
+  # role that is now IN the unit; that is a change only when a drop-in actually exists.
   if strih_dantesync_dropins_present "$dropin_dir"; then
-    rm -f "$dropin_dir"/*.conf || { echo "cannot remove the dantesync drop-ins in $dropin_dir" >&2; return 1; }
-    dropin_removed=1
+    dropin_found=1
     reason="${reason:+$reason + }drop-in removed"
+  fi
+  if systemctl is-active --quiet dantesync; then active=1; fi
+  if [ -x "$bin" ]; then present=1; fi
+  # The unit on disk may match while the process still runs an OLD ExecStart (a run killed after the
+  # write or the reload). Only the process tells; an unreadable one is kept, never guessed.
+  if [ "$active" = 1 ] && [ "$text_changed" = 0 ] && [ "$dropin_found" = 0 ]; then
+    if argv="$(strih_dantesync_running_argv)"; then
+      if [ "$argv" != "$(strih_dantesync_exec_start "$unit_text")" ]; then
+        not_applied=1
+        reason="running '${argv}' is not the unit's ExecStart"
+      fi
+    else
+      warn "  could not read the running dantesync's command line -- kept running, not compared with the unit's ExecStart"
+    fi
+  fi
+  if [ "$text_changed" = 1 ] || [ "$dropin_found" = 1 ] || [ "$not_applied" = 1 ]; then unit_changed=1; fi
+
+  # --- act ---------------------------------------------------------------------------------------
+  if [ "$dropin_found" = 1 ]; then
+    rm -f "$dropin_dir"/*.conf || { echo "cannot remove the dantesync drop-ins in $dropin_dir" >&2; return 1; }
   fi
   rmdir "$dropin_dir" 2>/dev/null || true
   if [ "$text_changed" = 1 ]; then
     # temp + rename in the unit's own dir: systemd never reads a half-written unit.
-    tmp="$(mktemp "$(dirname "$unit")/.dantesync.service.XXXXXX")" \
+    tmp="$(mktemp "$udir/.dantesync.service.XXXXXX")" \
       || { echo "cannot create a temp file next to $unit" >&2; return 1; }
     if ! { printf '%s\n' "$unit_text" > "$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" "$unit"; }; then
       rm -f "$tmp"
@@ -130,17 +193,15 @@ strih_dantesync_install() {
       return 1
     fi
   fi
-  if [ "$text_changed" = 1 ] || [ "$dropin_removed" = 1 ] || [ "$need_reload" = yes ]; then
-    unit_changed=1
+  if [ "$unit_changed" = 1 ] || [ "$need_reload" = yes ]; then
     systemctl daemon-reload || {
-      echo "systemctl daemon-reload failed -- the unit on disk is not loaded; the next run reloads and restarts on it" >&2
+      echo "systemctl daemon-reload failed -- the unit on disk is not loaded; the next run reloads it" >&2
       return 1
     }
+    [ "$unit_changed" = 1 ] || echo "  systemd daemon-reload (a unit-file change was pending in the manager) -- no restart"
   fi
   # `systemctl enable` reloads the manager: only when not enabled yet, so keep has no side effects.
   systemctl is-enabled -q dantesync 2>/dev/null || systemctl enable dantesync 2>/dev/null || true
-  if systemctl is-active --quiet dantesync; then active=1; fi
-  if [ -x "$bin" ]; then present=1; fi
   decision="$(strih_dantesync_restart_decision "$unit_changed" "$binary_changed" "$active" "$present")" \
     || { echo "strih_dantesync_restart_decision refused its inputs" >&2; return 1; }
 
