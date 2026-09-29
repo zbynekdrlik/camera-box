@@ -19,6 +19,14 @@ The `recv-timing #797` cap_avg is the transport arrival CADENCE; when it is UNIF
 upstream excess is attributable to the CAMBOX GRABBER -- corroborated (never replaced) by the cambox
 burn-log Streaming/#707 health. The strih genlock pin is already at latency_ms=3 for most inputs.
 
+ISSUE 1367 SLICE D1b. Since D1 an N>=2 camera presents the grid age of its pin exactly (66.7 ms at
+pin 3) and the audit head sits one source frame older than that target, so latency + skew no longer
+is its present age. The run's own strih audit log names the D1 grid inputs (every line carries
+`n2_early=` and received ~= N x consumed, N >= 2 -- scripts/genlock_n2_grid.py); for those rows the
+floor is the twin's present age of the pin, the excess is a pin difference only, and skew_ms is the
+labelled arrival-lag diagnostic (marked `*` in the table). A pre-D1 run decomposes byte-for-byte as
+before.
+
 STAGE SOURCES (all standard E2E artefacts, REUSING the existing derivations -- no new skew regex):
   (a) grabber   <- cam*-cbox-burn-<RUN>.log  `Streaming:` + `#707 ... DEQUEUE STALL` lines
   (b) transport <- qr-align-strih-<RUN>.log   `recv-timing #797` via ndi_halving_decision.parse_recv_timing
@@ -40,6 +48,7 @@ _HERE = pathlib.Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+from genlock_n2_grid import grid_inputs_from_audit  # noqa: E402  -- issue 1367 D1b grid inputs
 from ndi_halving_decision import parse_recv_timing  # noqa: E402  -- stage (b) reuse
 from qr_align_pins import arrival_floors_from_jitter  # noqa: E402  -- stage (c) total-floor reuse
 
@@ -130,12 +139,18 @@ def cap_avg_by_source(strih_text, sources):
 
 
 # --------------------------------------------------------------- stage (c): skew + FIFO pin --------
-def floors_and_fields(jitter_json, sources):
+def floors_and_fields(jitter_json, sources, grid_inputs=None):
     """{src: {floor_ms, latency_ms, mean_head_skew_ms, samples}} for the sources present in the
     jitter JSON. floor_ms REUSES qr_align_pins.arrival_floors_from_jitter (the canonical
     latency_ms + mean_head_skew_ms derivation WITH the #1253 samples-guard), so a phantom floor is
-    dropped here exactly as the aligner drops it -- never re-derived."""
-    floors = arrival_floors_from_jitter(jitter_json, sources)
+    dropped here exactly as the aligner drops it -- never re-derived.
+
+    Issue 1367 slice D1b: a source in `grid_inputs` ({src: source_interval_ns}, the confirmed D1
+    grid inputs of the strih audit log) gets the grid twin's present age of its pin as floor_ms
+    (the same arrival_floors_from_jitter call), plus `n2_grid: True` and its `source_interval_ns`;
+    its mean_head_skew_ms stays in the row as the ARRIVAL-LAG DIAGNOSTIC only (on the grid the
+    audit head sits one source frame older than the target). Other rows are unchanged."""
+    floors = arrival_floors_from_jitter(jitter_json, sources, grid_inputs=grid_inputs)
     out = {}
     for s in sources:
         if s not in floors:
@@ -147,6 +162,9 @@ def floors_and_fields(jitter_json, sources):
             "mean_head_skew_ms": entry.get("mean_head_skew_ms"),
             "samples": entry.get("samples"),
         }
+        if grid_inputs and s in grid_inputs:
+            out[s]["n2_grid"] = True
+            out[s]["source_interval_ns"] = grid_inputs[s]
     return out
 
 
@@ -163,6 +181,29 @@ def _grabber_note(grabber):
     if grabber.get("max_capture_dropped"):
         bits.append("capture-dropped %d" % grabber["max_capture_dropped"])
     return (" [%s]" % "; ".join(bits)) if bits else " [grabber log clean -- steady per-box floor]"
+
+
+def _attribute_grid(is_anchor, excess, d_lat, d_skew, row_grid, anchor_grid):
+    """Issue 1367 slice D1b: the owner of a row when it or the anchor is a D1 grid input. On the
+    grid the present age is set by the pin alone (the twin), so an excess is a strih-config pin
+    difference; the head-skew difference is the arrival-lag DIAGNOSTIC, named but never an owner of
+    the present age. A grid row against a head-skew anchor (or the reverse) is a mixed-model pair:
+    the excess = Δlatency + Δskew identity does not hold there, so it is only labelled."""
+    if is_anchor:
+        return "anchor (fastest)"
+    if row_grid != anchor_grid:
+        return "mixed present-age models (%s row vs %s anchor) %+.1fms" % (
+            "N>=2 grid" if row_grid else "head-skew", "N>=2 grid" if anchor_grid else "head-skew",
+            excess)
+    lag = ""
+    if d_skew is not None and abs(d_skew) > EXCESS_NOISE_MS:
+        lag = ("; arrival lag %+.0fms vs anchor (diagnostic only -- the N>=2 grid present age is "
+               "set by the pin)" % d_skew)
+    if excess <= EXCESS_NOISE_MS:
+        return "within-noise" + lag
+    if d_lat is not None and d_lat > STRIH_CONFIG_MIN_MS:
+        return "strih-config +%.0fms latency pin (N>=2 grid present age +%.1fms)" % (d_lat, excess) + lag
+    return "N>=2 grid present age +%.1fms" % excess + lag
 
 
 def _attribute(is_anchor, excess, d_lat, d_skew, transport_uniform, grabber):
@@ -187,14 +228,18 @@ def _attribute(is_anchor, excess, d_lat, d_skew, transport_uniform, grabber):
     return "mixed sub-threshold +%.1fms" % excess
 
 
-def decompose(jitter_json, cap_avgs, grabber_by_src, sources):
+def decompose(jitter_json, cap_avgs, grabber_by_src, sources, grid_inputs=None):
     """Decompose each present camera's arrival floor into strih-config (Delta latency) + upstream
     (Delta skew), attribute the upstream term to grabber/transport via cap_avg uniformity, and
     return {rows, anchor_src, summary}. `sources` names the cameras to consider; a source absent or
-    #1253-dropped from the jitter JSON is OMITTED from rows and listed in summary.omitted_sources."""
+    #1253-dropped from the jitter JSON is OMITTED from rows and listed in summary.omitted_sources.
+
+    Issue 1367 slice D1b: `grid_inputs` (the confirmed D1 grid inputs of the strih audit log) put
+    those rows on the grid twin (floors_and_fields) and their owner on `_attribute_grid`; the summary
+    then names them in `n2_grid_sources`. None / {} = byte-for-byte the pre-D1 decomposition."""
     cap_avgs = cap_avgs or {}
     grabber_by_src = grabber_by_src or {}
-    floors = floors_and_fields(jitter_json, sources)
+    floors = floors_and_fields(jitter_json, sources, grid_inputs)
     present = list(floors.keys())
     omitted = [s for s in sources if s not in floors]
 
@@ -233,7 +278,11 @@ def decompose(jitter_json, cap_avgs, grabber_by_src, sources):
         d_lat = (lat - a_lat) if (lat is not None and a_lat is not None) else None
         d_skew = (skew - a_skew) if (skew is not None and a_skew is not None) else None
         grab = grabber_by_src.get(s) or {}
-        owner = _attribute(s == anchor_src, excess, d_lat, d_skew, transport_uniform, grab)
+        row_grid, anchor_grid = bool(f.get("n2_grid")), bool(a.get("n2_grid"))
+        if row_grid or anchor_grid:
+            owner = _attribute_grid(s == anchor_src, excess, d_lat, d_skew, row_grid, anchor_grid)
+        else:
+            owner = _attribute(s == anchor_src, excess, d_lat, d_skew, transport_uniform, grab)
         rows.append({
             "src": s,
             "floor_ms": f["floor_ms"],
@@ -247,6 +296,9 @@ def decompose(jitter_json, cap_avgs, grabber_by_src, sources):
             "owner": owner,
             "grabber": grab,
         })
+        if row_grid:
+            rows[-1]["n2_grid"] = True
+            rows[-1]["source_interval_ns"] = f["source_interval_ns"]
 
     slowest = max(rows, key=lambda r: r["floor_ms"])
     summary = {
@@ -261,6 +313,9 @@ def decompose(jitter_json, cap_avgs, grabber_by_src, sources):
         "transport_uniform": transport_uniform,
         "omitted_sources": omitted,
     }
+    grid_rows = [r["src"] for r in rows if r.get("n2_grid")]
+    if grid_rows:
+        summary["n2_grid_sources"] = sorted(grid_rows)
     return {"rows": rows, "anchor_src": anchor_src, "summary": summary}
 
 
@@ -398,6 +453,9 @@ def _decompose_artefacts(jitter_json, strih_path, burns, cameras=None):
         sources = _sources_from_jitter(jitter_json, SOURCE_TEMPLATE)
     strih_text = _read(strih_path)
     cap_avgs = cap_avg_by_source(strih_text, sources) if strih_text else {}
+    # issue 1367 D1b: the SAME strih audit window tells which inputs run the D1 grid (n2_early= on
+    # every line + N >= 2); a pre-D1 window confirms none, so its decomposition is unchanged.
+    grid_inputs = grid_inputs_from_audit(strih_text) if strih_text else {}
     grabber_by_src = {}
     for s in sources:
         m = re.search(r"(\d+)$", s)
@@ -407,7 +465,7 @@ def _decompose_artefacts(jitter_json, strih_path, burns, cameras=None):
         btext = _read(burn) if burn else None
         if btext:
             grabber_by_src[s] = grabber_health(btext)
-    return decompose(jitter_json, cap_avgs, grabber_by_src, sources)
+    return decompose(jitter_json, cap_avgs, grabber_by_src, sources, grid_inputs=grid_inputs)
 
 
 def mine_run_dir(run_dir, cameras=None):
@@ -441,7 +499,7 @@ def _render_table(result):
     lines.append(hdr)
     lines.append("-" * len(hdr))
     for r in rows:
-        cam = r["src"].replace("NDI ", "")
+        cam = r["src"].replace("NDI ", "") + ("*" if r.get("n2_grid") else "")
         lines.append("%-9s %8s %8s %9s %8s %9s %9s  %s" % (
             cam, _fmt(r["floor_ms"]), _fmt(r["latency_ms"], "%d"),
             _fmt(r["mean_head_skew_ms"]), _fmt(r["cap_avg_ms"], "%.2f"),
@@ -457,6 +515,10 @@ def _render_table(result):
     lines.append("  slowest camera owner: %s" % s["slowest_owner"])
     if s["omitted_sources"]:
         lines.append("  omitted (absent or #1253 phantom floor): %s" % ", ".join(s["omitted_sources"]))
+    if s.get("n2_grid_sources"):
+        lines.append("  * N>=2 grid input (issue 1367 D1): floor = the grid present age of the pin "
+                     "(src/genlock_n2_grid.rs twin); skew_ms = the arrival-lag diagnostic -- the "
+                     "audit head is one source frame older than the target")
     return "\n".join(lines)
 
 

@@ -36,6 +36,12 @@ the EXISTING #286 `compute_phase_sync_offsets` kernel (via `phase_sync_calibrate
 touched here) produces the SAME slowest-anchored relative pin set a full recording-based
 measurement would -- without needing one.
 
+**Issue 1367 slice D1b:** since D1 an N>=2 strih camera presents the grid age of its pin exactly
+(66.7 ms at pin 3), and the audit head sits one source frame older than that target, so latency +
+skew over-reads by about a frame. With `--strih-log` (the raw audit window the jitter JSON was made
+from) every camera that log confirms as a D1 grid input is measured at
+`scripts/genlock_n2_grid.py`'s present age of its pin instead; a pre-D1 log keeps latency + skew.
+
 **Jitter headroom margin (#757, 2026-07-15 live regression):** a camera pinned with ZERO
 headroom above its own measured transit sits exactly at the ts-align release deadline, so
 ordinary jitter flips individual frames across the slot boundary -- observed live as a uniform
@@ -51,7 +57,7 @@ thin CLI wrapper (`main`) just wires argv/files to them; the actual OBS-WS apply
 
 Usage:
     prerecord_phase_calibrate.py --jitter-json jitter.json --out strih-measured.json \
-        --margin-out margin.txt [--margin-floor-ms 10]
+        --margin-out margin.txt [--margin-floor-ms 10] [--strih-log calib-strih.log]
 """
 from __future__ import annotations
 
@@ -67,17 +73,26 @@ _STRIH_SOURCE_RE = re.compile(r"^NDI cam(\d+)$")
 DEFAULT_MARGIN_FLOOR_MS = 10.0
 
 
-def measured_by_camera(jitter_json: dict) -> dict:
+def measured_by_camera(jitter_json: dict, grid_inputs: dict | None = None) -> dict:
     """From `genlock-jitter-report --json` output (keyed by STRIH source name
     ``"NDI cam<N>"``), reconstruct each camera's measured absolute cam->strih transit latency:
     ``latency_ms`` (the EFFECTIVE pin active during the sampled window) plus
     ``mean_head_skew_ms`` (the SIGNED mean deviation of the actual arrival from that pin's own
     release schedule -- #757). Keyed by camera NUMBER (not source name).
 
+    Issue 1367 slice D1b: a source in ``grid_inputs`` (``{source: source_interval_ns}``, the
+    CONFIRMED D1 grid inputs from ``genlock_n2_grid.grid_inputs_from_audit`` over the audit log this
+    JSON was made from) presents exactly the grid age of its pin, so its value is
+    ``genlock_n2_grid.present_age_ms(latency_ms, source_interval_ns)`` (66.7 at pin 3). Its
+    ``mean_head_skew_ms`` is then only the arrival-lag diagnostic: the audit head sits one source
+    frame older than the target, so latency + skew over-reads by about a frame. Without
+    ``grid_inputs`` (or for a source outside it) the value is latency + skew, byte-for-byte as before.
+
     A source whose name does not match strih's ``"NDI cam<N>"`` pattern, or whose
     ``latency_ms`` / ``mean_head_skew_ms`` is missing, non-numeric, or the value itself isn't a
     dict, is SKIPPED -- never a fabricated/guessed value. Returns ``{}`` for empty/malformed
-    input (never raises -- the caller decides whether an empty result is fatal)."""
+    input (never raises -- the caller decides whether an empty result is fatal); a grid input only
+    raises ``genlock_n2_grid.N2GridConstantError`` when the Rust age constant cannot be read."""
     out: dict = {}
     if not isinstance(jitter_json, dict):
         return out
@@ -90,6 +105,10 @@ def measured_by_camera(jitter_json: dict) -> dict:
         if not isinstance(latency_ms, (int, float)) or isinstance(latency_ms, bool):
             continue
         if not isinstance(skew_ms, (int, float)) or isinstance(skew_ms, bool):
+            continue
+        if grid_inputs and name in grid_inputs:
+            import genlock_n2_grid  # lazy: the head-skew path never reads the Rust constant
+            out[int(m.group(1))] = genlock_n2_grid.present_age_ms(latency_ms, grid_inputs[name])
             continue
         out[int(m.group(1))] = float(latency_ms) + float(skew_ms)
     return out
@@ -149,12 +168,32 @@ def main(argv=None):
         "--margin-floor-ms", type=float, default=DEFAULT_MARGIN_FLOOR_MS,
         help=f"minimum margin regardless of measured jitter (default {DEFAULT_MARGIN_FLOOR_MS})",
     )
+    ap.add_argument(
+        "--strih-log", default=None,
+        help="issue 1367 D1b: the raw strih audit log --jitter-json was made from; a camera it "
+             "confirms as a D1 grid input (n2_early= on every line + N >= 2) is measured at the "
+             "grid twin's present age of its pin. Absent/unreadable -> latency + skew for all.",
+    )
     args = ap.parse_args(argv)
 
     with open(args.jitter_json, encoding="utf-8") as f:
         jitter_json = json.load(f)
 
-    by_cam = measured_by_camera(jitter_json)
+    grid_inputs = None
+    if args.strih_log:
+        import genlock_n2_grid
+        try:
+            grid_inputs = genlock_n2_grid.read_grid_inputs(args.strih_log)
+        except OSError as exc:
+            print(f"WARNING: prerecord_phase_calibrate: could not read --strih-log "
+                  f"{args.strih_log} ({exc}) -- every camera keeps latency + skew",
+                  file=sys.stderr)
+        if grid_inputs:
+            print("prerecord_phase_calibrate: issue 1367 N>=2 grid inputs "
+                  f"{sorted(grid_inputs)} -> the grid present age of the pin "
+                  "(src/genlock_n2_grid.rs); mean_head_skew_ms is only the arrival-lag diagnostic")
+
+    by_cam = measured_by_camera(jitter_json, grid_inputs)
     if not by_cam:
         print(
             f"WARNING: prerecord_phase_calibrate: no usable 'NDI cam<N>' entries in "

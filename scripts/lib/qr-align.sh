@@ -71,6 +71,11 @@ qr_align_run() {
   # Override with QR_ALIGN_JITTER_JSON (an explicit pre-computed path) for a manual run or a test;
   # QR_ALIGN_RESET_SETTLE_S (shed) / QR_ALIGN_AUDIT_WINDOW_S (clean-sample accrual) tune the waits.
   local jitter_json="${QR_ALIGN_JITTER_JSON:-}"
+  # issue 1367 slice D1b: the raw audit window the jitter JSON was made from rides next to it
+  # (--strih-log), so qr_align_pins.py can confirm which inputs run the D1 grid (n2_early= on every
+  # line + received ~= N x consumed) and read their present age from the grid twin. An explicit
+  # QR_ALIGN_JITTER_JSON takes only an explicit QR_ALIGN_STRIH_LOG (never a stale window of ours).
+  local strih_log="${QR_ALIGN_STRIH_LOG:-}"
   if [ -z "$jitter_json" ] && [ -n "${STRIH_USER:-}" ] && [ -n "${PROBE_BIN_DIR:-}" ] \
       && [ -n "${OUTDIR:-}" ] && command -v strih_log_line_count >/dev/null 2>&1; then
     local _log="$OUTDIR/qr-align-strih-${RUN_ID:-$$}.log"
@@ -112,6 +117,7 @@ qr_align_run() {
                 && "$PROBE_BIN_DIR/genlock-jitter-report" --file "$_log" --json > "$_jj" 2>/dev/null \
                 && [ -s "$_jj" ]; then
               jitter_json="$_jj"
+              strih_log="$_log"
               # Re-fetch ONCE more if a floor is still missing/phantom (read-only sufficiency check).
               # Bounded (<=2), so an unreadable/invalid jitter-json (--floor-samples-ok exit 2) simply
               # spends the one extra window before the same floor+delta fallback -- harmless.
@@ -136,6 +142,7 @@ qr_align_run() {
 
   local -a args=(--host "$host" --password "$password" --sources "$sources" --execute)
   [ -n "$jitter_json" ] && args+=(--jitter-json "$jitter_json")
+  [ -n "$jitter_json" ] && [ -n "$strih_log" ] && args+=(--strih-log "$strih_log")
   # #1209: persist any UNDECODABLE align screenshot's PNG into the run dir, so a reproducible
   # [4i/8align] abort (e.g. cam3 mostly undecodable) can be root-caused from the actual pixels.
   # OUTDIR is recording-e2e's run dir; absent for a standalone/manual call, where persistence is

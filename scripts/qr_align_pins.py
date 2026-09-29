@@ -494,7 +494,7 @@ def within_aligned_quantum(deltas, quantum_ms=DEFAULT_ALIGNED_QUANTUM_MS):
 #   (gen_ts CLOCK_REALTIME on the painter box, t_send dev1 CLOCK_MONOTONIC -- cross-clock, RELATIVE
 #   deltas only); it comes from the strih genlock audit `latency_ms + mean_head_skew_ms` (the pin's
 #   own DanteSync-synced OBS clock), reconstructed by the SAME prerecord_phase_calibrate helper.
-def arrival_floors_from_jitter(jitter_json, sources, min_samples=MIN_FLOOR_SAMPLES):
+def arrival_floors_from_jitter(jitter_json, sources, min_samples=MIN_FLOOR_SAMPLES, grid_inputs=None):
     """{src: arrival_floor_ms} for the given strih sources, from a `genlock-jitter-report --json`
     dict. arrival_floor = latency_ms + mean_head_skew_ms (the effective pin during the sampled
     window plus the SIGNED mean deviation of actual arrival from that pin's own schedule = the actual
@@ -503,13 +503,20 @@ def arrival_floors_from_jitter(jitter_json, sources, min_samples=MIN_FLOOR_SAMPL
     malformed in the jitter JSON is simply OMITTED -- never a fabricated floor; the caller FAILs loud
     (or falls back to floor3) if a FASTER camera lacks one.
 
+    Issue 1367 slice D1b: a source in `grid_inputs` ({src: source_interval_ns}, the CONFIRMED D1
+    grid inputs of the audit log the JSON was made from) presents the grid age of its pin exactly,
+    so its floor is scripts/genlock_n2_grid.py's present age at `latency_ms` (66.7 at pin 3; the
+    head skew is only the arrival-lag diagnostic -- the audit head sits one source frame older than
+    the target). No `grid_inputs` -> latency + skew for every source, byte-for-byte as before.
+
     #1253 -- the samples=2 PHANTOM FLOOR is dropped at the source: a floor derived from fewer than
     `min_samples` audit samples is one source-frame off (run 1899055119's cam3 read 84 = 67 + 16.7
     from samples=2, a phantom "slowest"). A source whose EXPLICIT `samples` is below `min_samples` is
     OMITTED (same "omit, never fabricate" honesty as a malformed entry); a MISSING samples count (an
-    older / partial report) is TRUSTED -- only an explicit low count is the known phantom."""
+    older / partial report) is TRUSTED -- only an explicit low count is the known phantom. The same
+    drop applies to a grid input (one window's drop semantics, whatever the present-age model)."""
     from prerecord_phase_calibrate import measured_by_camera, source_names_by_template
-    by_cam = measured_by_camera(jitter_json)                    # {cam_num: latency_ms + mean_head_skew}
+    by_cam = measured_by_camera(jitter_json, grid_inputs)       # {cam_num: present age (ms)}
     by_src = source_names_by_template(by_cam, "NDI cam{n}")     # {"NDI cam<N>": arrival_floor_ms}
     out = {}
     for s in sources:
@@ -675,8 +682,26 @@ def baseline_strih_block(applied_pins, sources, floor_ms=DEFAULT_FLOOR_MS):
     return {s: int(applied_pins.get(s, floor_ms)) for s in sources}
 
 
+def _grid_hold_plan(hold, cur, floor_ms, source_interval_ns):
+    """Issue 1367 slice D1b: the additive plan for a CONFIRMED D1 grid input. The grid moves a source
+    only in whole source frames (a relative pin step of one source interval = one frame), and a
+    non-whole `current_pin + hold` moves a pin-position-dependent number of them (pin 3 + 13 ms moves
+    none, pin 16 + 1 ms a whole frame). So the hold is rounded to the nearest whole source frame k
+    and the pin is `genlock_n2_grid.pin_for_frames(cur, k)` (checked through the twin). Returns
+    (pin, base_age_ms, grid_hold_ms, resulting_age_ms): the twin's present age at the current pin, the
+    hold the grid will really add (k frames) and the RESULTING present age at the planned pin -- so
+    `base + hold = resulting` holds exactly for the over-budget arithmetic."""
+    import genlock_n2_grid as n2
+    frames = n2.frames_for_hold(hold, source_interval_ns)
+    pin = max(floor_ms, n2.pin_for_frames(cur, frames, source_interval_ns))
+    base_age = n2.present_age_ms(cur, source_interval_ns)
+    resulting = n2.present_age_ms(pin, source_interval_ns)
+    return pin, base_age, resulting - base_age, resulting
+
+
 def floor_aware_partition(arrival_floors, deltas, floor_ms=DEFAULT_FLOOR_MS,
-                          max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS, current_pins=None):
+                          max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS, current_pins=None,
+                          grid_inputs=None):
     """The PURE core of the ADDITIVE plan (#1161 mechanism, #1253 additive fix) that PARTITIONS
     instead of raising -- returns ``(plan, over_budget, missing)`` so a caller can either HARD-FAIL
     (floor_aware_pins, below) or SOFT-RELEASE the BUDGET_BOUND case (align(), issue 1168's re-tighten
@@ -694,7 +719,15 @@ def floor_aware_partition(arrival_floors, deltas, floor_ms=DEFAULT_FLOOR_MS,
     ``current_pins`` supplies the additive base (a source's current pin); a source unread defaults to
     ``floor_ms`` (the execute path resets to the floor first). ``floor_aware_pins`` wraps this and
     RAISES on ``missing``/``over_budget`` (the HARD-FAIL direction); ``align`` uses it directly to
-    soft-release the budget-bound case."""
+    soft-release the budget-bound case.
+
+    Issue 1367 slice D1b: a younger source in ``grid_inputs`` ({src: source_interval_ns}, the
+    CONFIRMED D1 grid inputs) is planned on the grid (``_grid_hold_plan``): its hold rounds to whole
+    source frames through the twin, and the budget tests the RESULTING present age at the planned pin
+    (``genlock_n2_grid.present_age_ms``), not ``arrival_floor + hold`` -- on the grid the audit
+    head reads one source frame older than the target, which over-read ~86 ms at pin 3. Its
+    over_budget tuple is (src, the twin's age at the current pin, the grid hold, the resulting age).
+    Every other source keeps the arithmetic below byte-for-byte."""
     plan = {}
     over_budget = []
     missing = []
@@ -720,6 +753,16 @@ def floor_aware_partition(arrival_floors, deltas, floor_ms=DEFAULT_FLOOR_MS,
         if floor_i is None:
             missing.append(src)          # a younger camera with no arrival floor -> the budget is unknowable
             continue
+        if grid_inputs and src in grid_inputs:
+            # issue 1367 D1b: a confirmed grid input -- whole source frames, the twin's resulting age.
+            pin, base_age, grid_hold, resulting = _grid_hold_plan(
+                hold, cur, floor_ms, grid_inputs[src])
+            if resulting > max_abs_latency_ms:
+                over_budget.append((src, base_age, grid_hold, resulting))
+                plan[src] = max(floor_ms, int(round(cur)))
+                continue
+            plan[src] = pin
+            continue
         # The RESULTING present age under the additive FIFO (current present age arrival_floor_i + the
         # added hold). This is what the budget ceiling bounds -- NOT the pin value (a within-sanity
         # spread keeps the pin itself well under 94; the concern is aligning UP to a too-old present age).
@@ -737,7 +780,8 @@ def floor_aware_partition(arrival_floors, deltas, floor_ms=DEFAULT_FLOOR_MS,
 
 
 def floor_aware_pins(arrival_floors, deltas, floor_ms=DEFAULT_FLOOR_MS,
-                     max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS, current_pins=None):
+                     max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS, current_pins=None,
+                     grid_inputs=None):
     """The ADDITIVE pin plan (#1161 mechanism, #1253 additive fix). `deltas`: {src: ms >= 0} the PURE
     cross-camera present-age gap (the hold to add to bring each camera UP to the oldest present age;
     the oldest anchors to ~0 -- from round_deltas over ZERO pins, so the cross-clock offset still
@@ -757,11 +801,12 @@ def floor_aware_pins(arrival_floors, deltas, floor_ms=DEFAULT_FLOOR_MS,
     silently deep-pins, NEVER widens the bound. Also FAILs if a younger camera has no arrival-floor
     measurement (the budget is unknowable). The over-budget/missing DETECTION is shared with align()'s
     BUDGET_BOUND soft-release via floor_aware_partition (same computation, one copy); this wrapper is
-    the HARD-FAIL direction."""
+    the HARD-FAIL direction. `grid_inputs` (issue 1367 D1b): the confirmed D1 grid inputs, planned
+    and budgeted on the grid twin exactly as floor_aware_partition documents."""
     if not deltas:
         return {}
     plan, over_budget, missing = floor_aware_partition(
-        arrival_floors, deltas, floor_ms, max_abs_latency_ms, current_pins)
+        arrival_floors, deltas, floor_ms, max_abs_latency_ms, current_pins, grid_inputs)
     if missing:
         raise AlignmentImpossible(
             "[qr-align] #1253 cannot budget-check the additive plan for "
@@ -1510,7 +1555,7 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
           measure_budget_s, max_measure_rounds, settle_s,
           stable_outlier_tol_ids=DEFAULT_STABLE_OUTLIER_TOL_IDS,
           jitter_json=None, max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS,
-          retighten_budget_ms=DEFAULT_ALIGN_RETIGHTEN_BUDGET_MS, saver=None):
+          retighten_budget_ms=DEFAULT_ALIGN_RETIGHTEN_BUDGET_MS, saver=None, grid_inputs=None):
     """The full per-run alignment: measure to a STABLE TAIL (#1160) -> (already aligned? PASS) ->
     FLOOR-AWARE plan from the tail (#1161) -> sanity -> apply (execute) -> settle -> RE-MEASURE to a
     stable tail -> PASS iff parity holds. The verdict is always computed from the stabilized tail,
@@ -1524,7 +1569,13 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
     FAILing loud if that exceeds `max_abs_latency_ms`. Without it the plan falls back to the floor3
     plan (floor + delta -- under the additive FIFO this aligns on the reset path, but does NO budget
     check) with a loud warning. Returns a result dict; raises AlignmentImpossible on an un-measurable
-    / never-stabilizing / un-sane / un-alignable / still-misaligned rig."""
+    / never-stabilizing / un-sane / un-alignable / still-misaligned rig.
+
+    Issue 1367 slice D1b: `grid_inputs` ({src: source_interval_ns}, the confirmed D1 grid inputs of
+    the audit log `jitter_json` was made from -- main's `--strih-log`) puts those sources' arrival
+    floors and plan on the grid twin (scripts/genlock_n2_grid.py): the floor is the grid present age
+    of the pin, a hold becomes whole source frames and the budget tests the RESULTING present age.
+    None / {} = the head-skew arithmetic for every source, byte-for-byte."""
     import time
     from apply_latency_pins import apply_pins
 
@@ -1602,7 +1653,8 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
     # hold to add). A PARTIAL audit (a FASTER camera missing its floor) degrades GRACEFULLY to the
     # budget-unchecked floor+delta fallback (loud warning; the verify re-measure still FAILs a genuine
     # misalignment) -- a partial fetch must never be strictly worse than no fetch (#1161 review).
-    arrival_floors = arrival_floors_from_jitter(jitter_json, sources) if jitter_json else {}
+    arrival_floors = (arrival_floors_from_jitter(jitter_json, sources, grid_inputs=grid_inputs)
+                      if jitter_json else {})
     pure_deltas = None
     if arrival_floors:
         pure_deltas, _pdn = robust_deltas(tail, {s: 0 for s in sources}, min_valid_rounds)
@@ -1616,6 +1668,19 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
                 "the budget-unchecked floor+delta plan rather than aborting the run.\n")
             arrival_floors, pure_deltas = {}, None
     result["arrival_floors_ms"] = {s: round(v, 1) for s, v in arrival_floors.items()}
+    grid_used = sorted(s for s in arrival_floors if grid_inputs and s in grid_inputs)
+    if grid_used:
+        # issue 1367 D1b: name the model the floors below come from (and keep the head skew visible
+        # only as the labelled arrival-lag diagnostic -- the audit head is one frame older than the
+        # grid target, so latency + skew would over-read ~86 ms at pin 3).
+        result["n2_grid_inputs"] = grid_used
+        result["n2_grid_head_skew_ms"] = {
+            s: round(float(jitter_json[s]["mean_head_skew_ms"]), 1) for s in grid_used}
+        sys.stderr.write(
+            f"[qr-align] issue 1367 D1: N>=2 grid inputs {grid_used} -> arrival floor = the grid "
+            "present age of the pin (src/genlock_n2_grid.rs twin), holds in whole source frames, "
+            "budget on the RESULTING present age; mean_head_skew_ms is only the arrival-lag "
+            "diagnostic (the audit head is one source frame older than the target).\n")
     # issue 1168 task 3 (REPORT-ONLY): surface the JITTER-FLOOR cross-camera spread + the re-tighten
     # verdict alongside the painter-QR residual, on every floor-aware path. Report-only here (NO
     # abort) -- the hard-fail arm lives in the --equalization-plan diagnostic + a future env arm,
@@ -1678,7 +1743,8 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
     if arrival_floors:
         result["present_age_deltas_ms"] = {s: round(v, 2) for s, v in pure_deltas.items()}
         plan, over_budget, missing = floor_aware_partition(
-            arrival_floors, pure_deltas, floor_ms, max_abs_latency_ms, current_pins=current_pins)
+            arrival_floors, pure_deltas, floor_ms, max_abs_latency_ms, current_pins=current_pins,
+            grid_inputs=grid_inputs)
         if missing:  # pragma: no cover -- unreachable unless the faster_missing invariant breaks
             # `missing` is provably empty here: the faster_missing pre-check above already cleared
             # arrival_floors (-> the floor3 fallback) for the IDENTICAL "a faster camera lacks a
@@ -1825,6 +1891,29 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
         raise
 
 
+def _grid_inputs_from_cli(strih_log):
+    """Issue 1367 slice D1b: the confirmed D1 grid inputs of `--strih-log` ({src:
+    source_interval_ns}), or None. An unreadable log WARNS and keeps the head-skew arithmetic (the
+    pre-D1 behaviour, never an abort). A log with grid inputs reads GENLOCK_N2_AGE_BASE_NS from the
+    Rust source right away, so a missing constant fails CLOSED before any measurement or pin write."""
+    if not strih_log:
+        return None
+    import genlock_n2_grid
+    try:
+        grid = genlock_n2_grid.read_grid_inputs(strih_log)
+    except OSError as exc:
+        sys.stderr.write(
+            f"WARNING: [qr-align] issue 1367 could not read --strih-log {strih_log!r} ({exc}) -- "
+            "every source keeps the latency + head-skew arrival floor.\n")
+        return None
+    if grid:
+        try:
+            genlock_n2_grid.load_age_base_ns()
+        except genlock_n2_grid.N2GridConstantError as exc:
+            raise SystemExit(f"[qr-align] issue 1367 N>=2 grid twin: {exc}") from exc
+    return grid
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1858,6 +1947,12 @@ def main(argv=None):
     ap.add_argument("--jitter-json", default=None,
                     help="genlock-jitter-report --json file (strih audit) -> per-source arrival "
                          "floor for the #1253 additive plan's budget check; without it, budget-unchecked")
+    # issue 1367 slice D1b: the raw strih audit window --jitter-json was made from. The inputs it
+    # confirms as D1 grid inputs (n2_early= on every line + N >= 2) read the grid twin's present age.
+    ap.add_argument("--strih-log", default=None,
+                    help="issue 1367 D1b: the raw strih audit log --jitter-json was made from; its "
+                         "confirmed N>=2 grid inputs use the grid present age of the pin (whole-frame "
+                         "holds, budget on the resulting age). Absent/unreadable -> latency + skew.")
     ap.add_argument("--max-abs-latency-ms", type=float, default=DEFAULT_MAX_ABS_LATENCY_MS,
                     help="#1161 absolute achievable-latency ceiling; a target above it FAILs loud "
                          "(transport floor too high) rather than deep-pinning (default 94)")
@@ -1909,6 +2004,7 @@ def main(argv=None):
     sources = [s.strip() for s in a.sources.split(",") if s.strip()]
     if not sources:
         raise SystemExit("[qr-align] --sources is empty")
+    grid_inputs = _grid_inputs_from_cli(a.strih_log)
 
     # issue 1168 review 🔵: a re-tighten budget >= the spread sanity DISARMS the hard-fail (the 66 ms
     # sanity gate aborts first, so the budget-bound hard-fail branch is unreachable). Warn LOUD rather
@@ -1976,7 +2072,7 @@ def main(argv=None):
             print(f"[qr-align] #1168 --equalization-plan: could not read --jitter-json "
                   f"{a.jitter_json!r} ({exc})", file=sys.stderr)
             return 2
-        floors = arrival_floors_from_jitter(jj, sources)
+        floors = arrival_floors_from_jitter(jj, sources, grid_inputs=grid_inputs)
         plan, meta = floor_equalization_plan(
             floors, a.floor_ms, max_abs_latency_ms=a.max_abs_latency_ms, sanity_ms=a.max_delta_ms)
         spread = cross_camera_floor_spread(floors)
@@ -2015,7 +2111,8 @@ def main(argv=None):
             width=a.width, height=a.height, measure_budget_s=a.measure_budget_s,
             max_measure_rounds=a.max_measure_rounds, settle_s=a.settle_s,
             jitter_json=jitter_json, max_abs_latency_ms=a.max_abs_latency_ms,
-            retighten_budget_ms=a.align_retighten_budget_ms, saver=saver)
+            retighten_budget_ms=a.align_retighten_budget_ms, saver=saver,
+            grid_inputs=grid_inputs)
     finally:
         # #1209: surface the persisted-screenshot summary on BOTH the success and the
         # AlignmentImpossible abort paths (near the 'decoded per camera:' diagnostics), so the run

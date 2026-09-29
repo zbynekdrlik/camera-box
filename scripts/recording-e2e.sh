@@ -4289,6 +4289,7 @@ if [ "$PRERECORD_PHASE_CALIBRATE" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
       CALIB_STRIH_MEASURED="$OUTDIR/prerecord-calib-strih-measured-${RUN_ID}.json"
       CALIB_MARGIN_FILE="$OUTDIR/prerecord-calib-margin-${RUN_ID}.txt"
       if python3 "$HERE/prerecord_phase_calibrate.py" --jitter-json "$CALIB_JITTER_JSON" \
+           --strih-log "$CALIB_LOG" \
            --out "$CALIB_STRIH_MEASURED" --margin-out "$CALIB_MARGIN_FILE"; then
         CALIB_MARGIN_MS="$(cat "$CALIB_MARGIN_FILE" 2>/dev/null | tr -d '[:space:]')"
         case "$CALIB_MARGIN_MS" in ''|*[!0-9.]*) CALIB_MARGIN_MS=10 ;; esac
