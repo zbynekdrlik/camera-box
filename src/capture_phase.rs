@@ -12,7 +12,7 @@
 //! host time of the first USB packet (~0.1-0.3 ms of jitter) and the dequeue adds its own jitter,
 //! so for 15-20 s around each edge the frames land on either side at random: every flip is a shed
 //! plus a repeat, one unique frame lost and the next one shown twice (live CAM5 29.9.2026: 36 sheds
-//! + 35 repeats in one burst). The physical truth is ONE extra or ONE missing frame per crossing.
+//! and 35 repeats in one burst). The physical truth is ONE extra or ONE missing frame per crossing.
 //!
 //! ## What it does
 //!
