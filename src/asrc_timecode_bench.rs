@@ -485,7 +485,9 @@ impl Obs {
             audio_step_residual_ns(self.step_hold.held_off_ns, off_live),
             dur,
         ) {
+            // issue 1381 (review round 2): a step placement lands at the packet's raw-stamp landing
             push_back = false;
+            in_ts = intended;
         } else if self.backstop_on()
             && !self.step_hold.active
             && self.c.timecode()
@@ -499,6 +501,7 @@ impl Obs {
             );
             if self.c.place_beyond_cap(err_ms, self.raw_cur_s * 1000.0) {
                 push_back = false;
+                in_ts = intended;
                 self.backstops += 1;
             }
         }

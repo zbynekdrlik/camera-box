@@ -34,7 +34,7 @@ const STEP_HOLD_WIRING: [&str; 17] = [
     "&source->genlock_audio_step_step_ns, timecode, off_live_ns, raw_ts_ns, packet_ns, now_ns, timeline_reset, GENLOCK_WALL_STEP_MIN_NS, off_out);",
     "genlock_audio_place_term_ns(genlock_hold_mode, genlock_hold_ms, genlock_off_ns, genlock_timing_adjust);",
     "genlock_audio_place_term_ns( prev_genlock_audio_hold_mode, prev_genlock_audio_delay_ms, genlock_off_ns, genlock_timing_adjust);",
-    "if (genlock_audio_step_places(source, genlock_step_release, genlock_off_live_ns, genlock_step_packet_ns, genlock_asrc_tc, push_back, sample_rate, in.timestamp, genlock_intended_ns)) push_back = false;",
+    "if (genlock_audio_step_places(source, genlock_step_release, genlock_off_live_ns, genlock_step_packet_ns, genlock_asrc_tc, push_back, sample_rate, in.timestamp, genlock_intended_ns)) { push_back = false; in.timestamp = genlock_intended_ns; }",
     "if (genlock_audio_step_release_places( release, genlock_audio_step_residual_ns(source->genlock_audio_step_held_off_ns, off_live_ns), packet_ns)) return true; if (!asrc_tc || source->genlock_audio_step_active || !push_back || !source->audio_ts) return false;",
     "return asrc_compensator_place_beyond_cap( &source->asrc, genlock_audio_asrc_error_ms(genlock_audio_place_error_ns(append_ns, intended_ns), source->genlock_audio_slew_remaining_ns), source->asrc_tc_raw_s * 1000.0);",
     "if (genlock_asrc_tc && genlock_asrc_measured && !source->genlock_audio_step_active) asrc_timecode_ingest(source, genlock_audio_stamp_mono_ns(data->timestamp, genlock_off_ns), genlock_asrc_err_ms, genlock_asrc_appended); else if (source->genlock_audio_step_active) source->asrc_tc_have_prev = false;",
@@ -44,7 +44,7 @@ const STEP_HOLD_WIRING: [&str; 17] = [
     "if (n2_on_grid && !genlock_audio_step_video_frozen(source)) genlock_video_delay_track(",
     "const uint64_t genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now); if (genlock_n1_tick_is_on_grid(genlock_delay_tick_wall, interval) && !genlock_audio_step_video_frozen(source)) genlock_video_delay_track(&source->genlock_video_delay_smoothed_ns,",
     "if (source->genlock_audio_step_relock_pending) relock = true; source->genlock_audio_step_relock_pending = false;",
-    "static bool genlock_audio_step_video_frozen(const obs_source_t *source) { return genlock_audio_step_freezes_video(source->genlock_audio_step_active, source->genlock_audio_step_start_ns, os_gettime_ns()); }",
+    "static bool genlock_audio_step_video_frozen(const obs_source_t *source) { return source->genlock_audio_step_active && genlock_audio_step_freezes_video(true, source->genlock_audio_step_start_ns, os_gettime_ns()); }",
     "source->context.name ? source->context.name : \"?\", (double)source->genlock_audio_step_step_ns / 1e6,",
 ];
 
@@ -204,6 +204,7 @@ fn the_source_carries_the_hold_state_1381() {
         "uint64_t genlock_audio_step_prev_packet_ns;",
         "int64_t genlock_audio_step_nominal_age_ns;",
         "uint64_t genlock_audio_step_nominal_dev_since_ns;",
+        "uint32_t genlock_audio_step_nominal_warm;",
         "int64_t genlock_audio_step_held_off_ns;",
         "uint64_t genlock_audio_step_start_ns;",
         "int64_t genlock_audio_step_step_ns;",
@@ -288,7 +289,7 @@ fn the_render_thread_freeze_is_bounded_and_replays_a_relock_1381() {
     // a latch relock that lands inside the hold is replayed on the first tick after it, never lost.
     let src = squish(&read(OBS_SOURCE));
     assert!(
-        src.contains("static bool genlock_audio_step_video_frozen(const obs_source_t *source) { return genlock_audio_step_freezes_video(source->genlock_audio_step_active, source->genlock_audio_step_start_ns, os_gettime_ns()); }"),
+        src.contains("static bool genlock_audio_step_video_frozen(const obs_source_t *source) { return source->genlock_audio_step_active && genlock_audio_step_freezes_video(true, source->genlock_audio_step_start_ns, os_gettime_ns()); }"),
         "issue 1381: the render thread must read the hold through the bounded helper"
     );
     assert_eq!(

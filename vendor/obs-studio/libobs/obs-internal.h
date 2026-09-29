@@ -1219,6 +1219,7 @@ struct obs_source {
 	uint64_t genlock_audio_step_prev_packet_ns; /* the previous packet's duration (0 = none) */
 	int64_t genlock_audio_step_nominal_age_ns;  /* the stamp age while sender and receiver walls agree */
 	uint64_t genlock_audio_step_nominal_dev_since_ns; /* when the age left the nominal band (0 = in band) */
+	uint32_t genlock_audio_step_nominal_warm;   /* warm-up packets left after the seed */
 	int64_t genlock_audio_step_held_off_ns;     /* the pre-step offset, moved by the stamps' own jumps */
 	uint64_t genlock_audio_step_start_ns;       /* when the hold started (OBS monotonic) */
 	int64_t genlock_audio_step_step_ns;         /* the wall step that started it (+ = wall forward) */

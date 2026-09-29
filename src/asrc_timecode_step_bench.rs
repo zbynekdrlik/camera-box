@@ -450,10 +450,15 @@ fn a_sender_that_stepped_first_costs_one_placement_at_the_receiver_step_1381() {
                 connect_backlog: 0,
             };
             let r = run_step(case, Variant::Production);
+            // the receiver-step packet is released at once -- or, when OBS resets its own timeline on
+            // that packet (a backward sender step over 2 s left every packet in the window 2.5 s
+            // late, so OBS reset on each), placed by that reset: never held either way
             assert!(
-                r.releases.len() == 1
-                    && r.releases[0].1 == AudioStepRelease::Followed
-                    && r.releases[0].0 < 0.1
+                r.releases.len() <= 1
+                    && r.releases
+                        .iter()
+                        .all(|x| x.1 == AudioStepRelease::Followed && x.0 < 0.1)
+                    && (r.releases.len() == 1 || wall_ns < -2 * NS_PER_S as i64)
                     && !r.holding_at_end
                     && r.events() <= 1
                     && r.jumps == 0

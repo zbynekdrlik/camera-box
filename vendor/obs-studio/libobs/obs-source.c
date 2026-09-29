@@ -2002,6 +2002,8 @@ static inline double genlock_audio_stamp_interval_s(uint64_t prev_ns, uint64_t n
 #define GENLOCK_AUDIO_STEP_HOLD_MAX_NS 10000000000ULL
 #define GENLOCK_AUDIO_STEP_NOMINAL_GAIN_DIV 1024
 #define GENLOCK_AUDIO_STEP_NOMINAL_REANCHOR_NS 600000000000ULL
+#define GENLOCK_AUDIO_STEP_NOMINAL_WARM_PACKETS 30u
+#define GENLOCK_AUDIO_STEP_NOMINAL_WARM_DIV 4
 #define GENLOCK_AUDIO_STEP_NONE 0
 #define GENLOCK_AUDIO_STEP_FOLLOWED 1
 #define GENLOCK_AUDIO_STEP_TIMEOUT 2
@@ -2027,14 +2029,21 @@ static inline uint64_t genlock_audio_step_mag_ns(int64_t v)
 {
 	return v >= 0 ? (uint64_t)v : 0ULL - (uint64_t)v;
 }
-/* review round 1: one packet outside a hold moves the NOMINAL stamp age -- in band (within one packet) it
- * follows by 1/GENLOCK_AUDIO_STEP_NOMINAL_GAIN_DIV, out of band it is left alone, and after
- * GENLOCK_AUDIO_STEP_NOMINAL_REANCHOR_NS out of band the age becomes the nominal */
+/* review round 1: one packet outside a hold moves the NOMINAL stamp age -- in the warm-up after the seed by
+ * 1/GENLOCK_AUDIO_STEP_NOMINAL_WARM_DIV, in band or not (review round 2: a connect backlog); after it, in
+ * band (within one packet) by 1/GENLOCK_AUDIO_STEP_NOMINAL_GAIN_DIV, out of band it is left alone, and
+ * after GENLOCK_AUDIO_STEP_NOMINAL_REANCHOR_NS out of band the age becomes the nominal */
 static inline void genlock_audio_step_track_nominal(int64_t *nominal_age_ns, uint64_t *nominal_dev_since_ns,
-						    int64_t age_ns, uint64_t packet_ns, uint64_t now_ns)
+						    uint32_t *nominal_warm, int64_t age_ns, uint64_t packet_ns,
+						    uint64_t now_ns)
 {
 	const int64_t dev_ns = (int64_t)((uint64_t)age_ns - (uint64_t)*nominal_age_ns);
-	if (genlock_audio_step_mag_ns(dev_ns) <= packet_ns) {
+	if (*nominal_warm > 0) {
+		/* the timer is still 0 here: the seed that started the warm-up cleared it */
+		*nominal_warm -= 1;
+		*nominal_age_ns =
+			(int64_t)((uint64_t)*nominal_age_ns + (uint64_t)(dev_ns / GENLOCK_AUDIO_STEP_NOMINAL_WARM_DIV));
+	} else if (genlock_audio_step_mag_ns(dev_ns) <= packet_ns) {
 		*nominal_age_ns =
 			(int64_t)((uint64_t)*nominal_age_ns + (uint64_t)(dev_ns / GENLOCK_AUDIO_STEP_NOMINAL_GAIN_DIV));
 		*nominal_dev_since_ns = 0;
@@ -2048,13 +2057,14 @@ static inline void genlock_audio_step_track_nominal(int64_t *nominal_age_ns, uin
 /* one timecode packet (timecode false clears the state); returns the release (GENLOCK_AUDIO_STEP_*) and
  * writes the offset this packet maps through to *off_out. held_off / start / step are kept after a
  * release for the log line. A step that brings the stamps back to their nominal age (the sender's box
- * stepped first) is a zero-length hold, released FOLLOWED on its own packet (review round 1). */
+ * stepped first) is a zero-length hold, released FOLLOWED on its own packet (review round 1). A timeline
+ * reset keeps the nominal and never starts a hold (review round 2). */
 static inline int genlock_audio_step_hold(bool *active, int64_t *prev_off_ns, uint64_t *prev_raw_ns,
 					  uint64_t *prev_packet_ns, int64_t *nominal_age_ns,
-					  uint64_t *nominal_dev_since_ns, int64_t *held_off_ns, uint64_t *start_ns,
-					  int64_t *step_ns, bool timecode, int64_t off_live_ns, uint64_t raw_ts_ns,
-					  uint64_t packet_ns, uint64_t now_ns, bool timeline_reset, int64_t step_min_ns,
-					  int64_t *off_out)
+					  uint64_t *nominal_dev_since_ns, uint32_t *nominal_warm, int64_t *held_off_ns,
+					  uint64_t *start_ns, int64_t *step_ns, bool timecode, int64_t off_live_ns,
+					  uint64_t raw_ts_ns, uint64_t packet_ns, uint64_t now_ns, bool timeline_reset,
+					  int64_t step_min_ns, int64_t *off_out)
 {
 	*off_out = off_live_ns;
 	if (!timecode) {
@@ -2076,20 +2086,21 @@ static inline int genlock_audio_step_hold(bool *active, int64_t *prev_off_ns, ui
 	const bool off_nominal =
 		genlock_audio_step_mag_ns((int64_t)((uint64_t)age_ns - (uint64_t)*nominal_age_ns)) <= packet_ns;
 	if (!*active) {
-		if (!had_prev || timeline_reset) {
+		if (!had_prev) {
 			*nominal_age_ns = age_ns;
 			*nominal_dev_since_ns = 0;
+			*nominal_warm = GENLOCK_AUDIO_STEP_NOMINAL_WARM_PACKETS;
 			return GENLOCK_AUDIO_STEP_NONE;
 		}
-		if (genlock_audio_step_mag_ns(jump_ns) > min) {
+		if (!timeline_reset && genlock_audio_step_mag_ns(jump_ns) > min) {
 			const int64_t held = (int64_t)((uint64_t)prev_off - (uint64_t)followed);
 			if (genlock_audio_step_mag_ns((int64_t)((uint64_t)off_live_ns - (uint64_t)held)) > packet_ns) {
 				*held_off_ns = held;
 				*start_ns = now_ns;
 				*step_ns = (int64_t)(0ULL - (uint64_t)jump_ns);
 				if (off_nominal) {
-					genlock_audio_step_track_nominal(nominal_age_ns, nominal_dev_since_ns, age_ns,
-									 packet_ns, now_ns);
+					genlock_audio_step_track_nominal(nominal_age_ns, nominal_dev_since_ns,
+									 nominal_warm, age_ns, packet_ns, now_ns);
 					return GENLOCK_AUDIO_STEP_FOLLOWED;
 				}
 				*active = true;
@@ -2097,13 +2108,12 @@ static inline int genlock_audio_step_hold(bool *active, int64_t *prev_off_ns, ui
 				return GENLOCK_AUDIO_STEP_NONE;
 			}
 		}
-		genlock_audio_step_track_nominal(nominal_age_ns, nominal_dev_since_ns, age_ns, packet_ns, now_ns);
+		genlock_audio_step_track_nominal(nominal_age_ns, nominal_dev_since_ns, nominal_warm, age_ns, packet_ns,
+						 now_ns);
 		return GENLOCK_AUDIO_STEP_NONE;
 	}
 	if (timeline_reset) {
 		*active = false;
-		*nominal_age_ns = age_ns;
-		*nominal_dev_since_ns = 0;
 		return GENLOCK_AUDIO_STEP_RESET;
 	}
 	*held_off_ns = (int64_t)((uint64_t)*held_off_ns - (uint64_t)followed);
@@ -2189,7 +2199,7 @@ static int genlock_audio_step_hold_source(obs_source_t *source, bool timecode, i
 	return genlock_audio_step_hold(&source->genlock_audio_step_active, &source->genlock_audio_step_prev_off_ns,
 				       &source->genlock_audio_step_prev_raw_ns, &source->genlock_audio_step_prev_packet_ns,
 				       &source->genlock_audio_step_nominal_age_ns,
-				       &source->genlock_audio_step_nominal_dev_since_ns,
+				       &source->genlock_audio_step_nominal_dev_since_ns, &source->genlock_audio_step_nominal_warm,
 				       &source->genlock_audio_step_held_off_ns, &source->genlock_audio_step_start_ns,
 				       &source->genlock_audio_step_step_ns, timecode, off_live_ns, raw_ts_ns, packet_ns,
 				       now_ns, timeline_reset, GENLOCK_WALL_STEP_MIN_NS, off_out);
@@ -2198,11 +2208,12 @@ static int genlock_audio_step_hold_source(obs_source_t *source, bool timecode, i
 /* camera-box issue 1381 (review round 1): the RENDER thread's view of this source's skew hold -- its
  * shallow latch and both video-delay tracker calls stay frozen while the hold runs, bounded by
  * GENLOCK_AUDIO_STEP_HOLD_MAX_NS on the render thread's own clock. Benign cross-thread reads of the audio
- * thread's bool and 64-bit start (aligned, x86-64 / arm64); a torn pair costs one tick. */
+ * thread's bool and 64-bit start (aligned, x86-64 / arm64); a torn pair costs one tick. The flag is
+ * tested first, so a source that holds nothing costs no clock read (review round 2). */
 static bool genlock_audio_step_video_frozen(const obs_source_t *source)
 {
-	return genlock_audio_step_freezes_video(source->genlock_audio_step_active, source->genlock_audio_step_start_ns,
-						os_gettime_ns());
+	return source->genlock_audio_step_active &&
+	       genlock_audio_step_freezes_video(true, source->genlock_audio_step_start_ns, os_gettime_ns());
 }
 
 /* camera-box issue 1381 (design 5882391108): whether this packet is PLACED instead of appended. A hold
@@ -2463,10 +2474,14 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 		source->last_sync_offset = sync_offset;
 	}
 
-	/* camera-box issue 1381: a hold release beyond one packet, or the beyond-cap backstop, places. */
+	/* camera-box issue 1381: a hold release beyond one packet, or the beyond-cap backstop, places the
+	 * packet at its raw-stamp landing (review round 2: the 70 ms smoothing may have snapped a sub-70 ms
+	 * stamp jump onto the continuous timeline, and the smoothed timestamp would land the step early). */
 	if (genlock_audio_step_places(source, genlock_step_release, genlock_off_live_ns, genlock_step_packet_ns,
-				      genlock_asrc_tc, push_back, sample_rate, in.timestamp, genlock_intended_ns))
+				      genlock_asrc_tc, push_back, sample_rate, in.timestamp, genlock_intended_ns)) {
 		push_back = false;
+		in.timestamp = genlock_intended_ns;
+	}
 
 	/* issue 1367 (review round 1): the placement is decided only here (a sync-offset change or a
 	 * missing audio_ts forces a placement after the hold action was taken). A placement lands at the
@@ -7393,7 +7408,7 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 	 * step -- its frames are stamped on the old wall until the sender follows, so the floors read the
 	 * whole step (the 29.9.2026 682 ms step re-measured `rise` at 21 frames and re-latched sp-* at 4,
 	 * capped). Nothing is sampled or watched; a backlog relock in that window is absorbed above, and a
-	 * lock (ACQUIRE / GAP RESYNC / pin change) that lands in it is replayed on the first tick after it. */
+	 * latch lock (ACQUIRE / GAP RESYNC) that lands in it is replayed on the first tick after it. */
 	if (genlock_audio_step_video_frozen(source)) {
 		if (relock)
 			source->genlock_audio_step_relock_pending = true;

@@ -275,27 +275,28 @@ fn a_sender_that_stepped_first_is_never_held_1381() {
     // released at once with the whole step as its residual (the ingest places it: the window before
     // left the audio a step off its stamps), and nothing is held after it.
     for step in [682_474_000_i64, -682_474_000, 89_703_000] {
-        // (a) the sender's stamps jump by the step, the receiver steps 2 s later
+        // (a) the sender's stamps jump by the step (past the nominal's warm-up), the receiver steps
+        // 2 s later
         let mut s = AudioStepHold::default();
-        for k in 0..10 {
+        for k in 0..40 {
             feed(&mut s, k, 0, 0);
         }
-        for k in 10..70 {
+        for k in 40..100 {
             assert_eq!(feed(&mut s, k, 0, step), (OFF, AudioStepRelease::None));
         }
         assert_eq!(
-            feed(&mut s, 70, step, step),
+            feed(&mut s, 100, step, step),
             (OFF - step, AudioStepRelease::Followed),
             "issue 1381: step {step}: the receiver's step is released on its own packet"
         );
-        assert!(!s.active && s.step_ns == step && s.start_ns == 1_000_000_000_000 + 70 * PACKET);
+        assert!(!s.active && s.step_ns == step && s.start_ns == 1_000_000_000_000 + 100 * PACKET);
         let residual = audio_step_residual_ns(s.held_off_ns, OFF - step);
         assert!(
             residual == -step
                 && audio_step_release_places(AudioStepRelease::Followed, residual, PACKET),
             "issue 1381: step {step}: the zero-length release places the whole step once"
         );
-        for k in 71..400 {
+        for k in 101..400 {
             let r = feed(&mut s, k, step, step);
             assert_eq!(
                 r,
@@ -310,7 +311,7 @@ fn a_sender_that_stepped_first_is_never_held_1381() {
         let mut s = AudioStepHold::default();
         let (mut now, mut k) = (1_000_000_000_000_u64, 0_u64);
         audio_step_hold(&mut s, true, OFF, WALL, PACKET, now, false, MIN);
-        for _ in 0..9 {
+        for _ in 0..39 {
             burst(&mut s, &mut now, &mut k, PACKET, OFF);
         }
         if step > 0 {
@@ -357,27 +358,47 @@ fn the_nominal_age_follows_in_band_and_reanchors_out_of_band_1381() {
     let mut s = AudioStepHold::default();
     audio_step_hold(&mut s, true, OFF, WALL, PACKET, base, false, MIN);
     let seed = audio_stamp_age_ns(base, WALL, OFF);
-    assert_eq!((s.nominal_age_ns, s.nominal_dev_since_ns), (seed, 0));
+    assert_eq!(
+        (s.nominal_age_ns, s.nominal_dev_since_ns, s.nominal_warm),
+        (seed, 0, AUDIO_STEP_NOMINAL_WARM_PACKETS)
+    );
+    // the warm-up: steady packets, the nominal stays on the seed
+    let w = u64::from(AUDIO_STEP_NOMINAL_WARM_PACKETS);
+    for k in 1..=w {
+        audio_step_hold(
+            &mut s,
+            true,
+            OFF,
+            WALL + k * PACKET,
+            PACKET,
+            base + k * PACKET,
+            false,
+            MIN,
+        );
+    }
+    assert_eq!((s.nominal_age_ns, s.nominal_warm), (seed, 0));
     // an arrival 3.000001 ms late / 5.000003 ms early: +2929 / -4885 ns (1/1024 of the
     // difference, truncated toward zero)
+    let k = w + 1;
     audio_step_hold(
         &mut s,
         true,
         OFF,
-        WALL + PACKET,
+        WALL + k * PACKET,
         PACKET,
-        base + PACKET + 3_000_001,
+        base + k * PACKET + 3_000_001,
         false,
         MIN,
     );
     assert_eq!(s.nominal_age_ns, seed + 2_929);
+    let k = w + 2;
     audio_step_hold(
         &mut s,
         true,
         OFF,
-        WALL + 2 * PACKET,
+        WALL + k * PACKET,
         PACKET,
-        base + 2 * PACKET - 5_000_003,
+        base + k * PACKET - 5_000_003,
         false,
         MIN,
     );
@@ -385,9 +406,10 @@ fn the_nominal_age_follows_in_band_and_reanchors_out_of_band_1381() {
     // stamps 100 ms ahead of the receiver's wall (the sender moved alone): out of band, the timer runs
     let nominal = s.nominal_age_ns;
     let far = 100_000_000_000_u64;
-    let t0 = base + 3 * PACKET;
+    let k = w + 3;
+    let t0 = base + k * PACKET;
     for n in 0..6_u64 {
-        let raw = WALL + 3 * PACKET + n * far + 100_000_000;
+        let raw = WALL + k * PACKET + n * far + 100_000_000;
         let r = audio_step_hold(&mut s, true, OFF, raw, PACKET, t0 + n * far, false, MIN);
         assert_eq!(r, (OFF, AudioStepRelease::None));
         assert_eq!(
@@ -397,7 +419,7 @@ fn the_nominal_age_follows_in_band_and_reanchors_out_of_band_1381() {
         );
     }
     // exactly ten minutes out of band: the age is the nominal from now on
-    let raw = WALL + 3 * PACKET + 6 * far + 100_000_000;
+    let raw = WALL + k * PACKET + 6 * far + 100_000_000;
     audio_step_hold(&mut s, true, OFF, raw, PACKET, t0 + 6 * far, false, MIN);
     assert_eq!(
         (s.nominal_age_ns, s.nominal_dev_since_ns),
@@ -407,11 +429,11 @@ fn the_nominal_age_follows_in_band_and_reanchors_out_of_band_1381() {
     assert_eq!(AUDIO_STEP_NOMINAL_REANCHOR_NS, 6 * far);
     // inside a hold the nominal is frozen
     let mut s = AudioStepHold::default();
-    for k in 0..10 {
+    for k in 0..40 {
         feed(&mut s, k, 0, 0);
     }
     let frozen = s.nominal_age_ns;
-    for k in 10..40 {
+    for k in 40..70 {
         feed(&mut s, k, 682_474_000, 0);
         assert!(s.active && s.nominal_age_ns == frozen && s.nominal_dev_since_ns == 0);
     }
@@ -431,4 +453,54 @@ fn the_render_thread_freeze_is_bounded_by_the_hold_bound_1381() {
         "issue 1381: a hold whose audio stopped never freezes the video side past the bound"
     );
     assert!(!audio_step_freezes_video(false, start, start));
+}
+
+#[test]
+fn the_nominal_warms_up_past_a_connect_backlog_and_survives_a_timeline_reset_1381() {
+    // review round 2: the first packet arrives two slots late (a backlog queued at connect); the
+    // warm-up (every packet, 1/4 of the difference) brings the nominal onto the steady age within the
+    // first second instead of keeping the old seed for ten minutes.
+    let base = 1_000_000_000_000_u64;
+    let late = 2 * PACKET;
+    let mut s = AudioStepHold::default();
+    audio_step_hold(&mut s, true, OFF, WALL, PACKET, base + late, false, MIN);
+    let steady = audio_stamp_age_ns(base, WALL, OFF);
+    assert_eq!(s.nominal_age_ns, steady + late as i64);
+    for k in 1..=u64::from(AUDIO_STEP_NOMINAL_WARM_PACKETS) {
+        let now = base + k * PACKET + if k == 1 { PACKET } else { 0 };
+        audio_step_hold(
+            &mut s,
+            true,
+            OFF,
+            WALL + k * PACKET,
+            PACKET,
+            now,
+            false,
+            MIN,
+        );
+    }
+    assert!(
+        s.nominal_age_ns.abs_diff(steady) < 100_000 && s.nominal_warm == 0,
+        "issue 1381: the warm-up must converge onto the steady age: nominal {} steady {steady}",
+        s.nominal_age_ns
+    );
+    // a timeline reset keeps the nominal (a sender whose stamps jumped past OBS's 2 s limit stepped
+    // first; its age comes back with the receiver's own step) and never starts a hold
+    let nominal = s.nominal_age_ns;
+    let k = u64::from(AUDIO_STEP_NOMINAL_WARM_PACKETS) + 1;
+    let r = audio_step_hold(
+        &mut s,
+        true,
+        OFF,
+        WALL + k * PACKET + 2_500_000_000,
+        PACKET,
+        base + k * PACKET,
+        true,
+        MIN,
+    );
+    assert_eq!(r, (OFF, AudioStepRelease::None));
+    assert!(
+        !s.active && s.nominal_age_ns == nominal && s.nominal_dev_since_ns == base + k * PACKET,
+        "issue 1381: a timeline reset must keep the nominal (its skewed age only starts the timer)"
+    );
 }

@@ -20,7 +20,7 @@
 use camera_box::genlock_audio_pairing::{
     audio_stamp_age_ns, audio_step_freezes_video, audio_step_hold, audio_step_release_places,
     audio_step_residual_ns, AudioStepHold, AudioStepRelease, AUDIO_STEP_HOLD_MAX_NS,
-    AUDIO_STEP_NOMINAL_REANCHOR_NS,
+    AUDIO_STEP_NOMINAL_REANCHOR_NS, AUDIO_STEP_NOMINAL_WARM_PACKETS,
 };
 use camera_box::genlock_wall_step::WALL_STEP_MIN_NS;
 
@@ -82,8 +82,8 @@ fn sequence() -> Vec<Pkt> {
     }
     clear(&mut v);
     // review round 1: the sender stepped FIRST -- its stamps jumped, the receiver steps 2 s later (a
-    // zero-length hold, released on the receiver's own packet)
-    for _ in 0..3 {
+    // zero-length hold, released on the receiver's own packet), past the nominal's warm-up
+    for _ in 0..WARM {
         push(&mut v, &mut k, OFF, 0, 0, false);
     }
     for _ in 0..60 {
@@ -95,11 +95,15 @@ fn sequence() -> Vec<Pkt> {
     clear(&mut v);
     // ... or it caught up first (a 4x burst), then the receiver's step
     let mut t = MONO + k * PACKET;
-    for i in 0..45_u64 {
-        let off = if i < 41 { OFF } else { OFF - 682_474_000 };
+    for i in 0..(WARM + 42) {
+        let off = if i < WARM + 38 {
+            OFF
+        } else {
+            OFF - 682_474_000
+        };
         v.push((true, off, WALL + k * PACKET, PACKET, t, false));
         k += 1;
-        t += if (3..31).contains(&i) {
+        t += if (WARM..WARM + 28).contains(&i) {
             PACKET / 4
         } else {
             PACKET
@@ -112,7 +116,7 @@ fn sequence() -> Vec<Pkt> {
     // are off the re-anchored nominal)
     let mut t = MONO + k * PACKET;
     let jitter: [i64; 5] = [0, 3_000_001, -5_000_003, 1_234_567, -2_000_000];
-    for i in 0..20_usize {
+    for i in 0..(WARM as usize + 20) {
         let now = (t as i64 + jitter[i % 5]) as u64;
         v.push((true, OFF, WALL + k * PACKET, PACKET, now, false));
         k += 1;
@@ -197,8 +201,10 @@ fn sequence() -> Vec<Pkt> {
     push_at(&mut v, 6, 1_000_000, OFF + WALL_STEP_MIN_NS + d, -d);
     clear(&mut v);
     // arithmetic edges: an out-of-band packet at now = 0 still starts the timer (a 0 would read as
-    // in band), then the two's-complement extremes
-    v.push((true, OFF, WALL, PACKET, 0, false));
+    // in band) -- the warm-up spent at now = 0 too -- then the two's-complement extremes
+    for j in 0..=WARM {
+        v.push((true, OFF, WALL + j * PACKET, PACKET, 0, false));
+    }
     v.push((true, OFF, WALL + PACKET + 10_000_000_000, PACKET, 0, false));
     v.push((
         true,
@@ -215,6 +221,9 @@ fn sequence() -> Vec<Pkt> {
     v.push((true, i64::MIN, u64::MAX, 1, 0, false));
     v
 }
+
+/// Packets that warm the nominal age up after a seed (plus the seed itself).
+const WARM: u64 = AUDIO_STEP_NOMINAL_WARM_PACKETS as u64 + 1;
 
 /// One timecode packet of the sequence (see [`sequence`]).
 fn push(v: &mut Vec<Pkt>, k: &mut u64, off: i64, follow: i64, early: u64, reset: bool) {
@@ -242,13 +251,14 @@ fn clear(v: &mut Vec<Pkt>) {
 
 fn state_line(off: i64, rel: u8, s: &AudioStepHold) -> String {
     format!(
-        "{off} {rel} {} {} {} {} {} {} {} {} {}",
+        "{off} {rel} {} {} {} {} {} {} {} {} {} {}",
         u8::from(s.active),
         s.prev_off_ns,
         s.prev_raw_ns,
         s.prev_packet_ns,
         s.nominal_age_ns,
         s.nominal_dev_since_ns,
+        s.nominal_warm,
         s.held_off_ns,
         s.start_ns,
         s.step_ns
@@ -275,15 +285,16 @@ fn c_audio_step_hold_matches_the_rust_authority_1381() {
     bool active = false;
     int64_t prev_off = 0, nominal = 0, held = 0, step = 0;
     uint64_t prev_raw = 0, prev_pkt = 0, dev_since = 0, start = 0;
+    uint32_t warm = 0;
     for (size_t i = 0; i < sizeof(tc) / sizeof(tc[0]); i++) {{
         int64_t use = 0;
         const int rel = genlock_audio_step_hold(&active, &prev_off, &prev_raw, &prev_pkt, &nominal, &dev_since,
-                                                &held, &start, &step, tc[i] != 0, off[i], raw[i], pkt[i],
+                                                &warm, &held, &start, &step, tc[i] != 0, off[i], raw[i], pkt[i],
                                                 now[i], rst[i] != 0, {min}ll, &use);
-        printf("%lld %d %d %lld %llu %llu %lld %llu %lld %llu %lld\n", (long long)use, rel, active ? 1 : 0,
+        printf("%lld %d %d %lld %llu %llu %lld %llu %u %lld %llu %lld\n", (long long)use, rel, active ? 1 : 0,
                (long long)prev_off, (unsigned long long)prev_raw, (unsigned long long)prev_pkt,
-               (long long)nominal, (unsigned long long)dev_since, (long long)held, (unsigned long long)start,
-               (long long)step);
+               (long long)nominal, (unsigned long long)dev_since, warm, (long long)held,
+               (unsigned long long)start, (long long)step);
     }}
 "#,
         tcs.join(", "),

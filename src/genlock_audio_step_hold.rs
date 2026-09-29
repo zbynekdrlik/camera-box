@@ -22,6 +22,17 @@ pub const AUDIO_STEP_NOMINAL_GAIN_DIV: i64 = 1024;
 /// of `GENLOCK_AUDIO_STEP_NOMINAL_REANCHOR_NS`.
 pub const AUDIO_STEP_NOMINAL_REANCHOR_NS: u64 = 600_000_000_000;
 
+/// Issue 1381 (review round 2) — after the seed (a source's first timecode packet) the nominal age
+/// WARMS UP for this many packets (about 1 s): every packet, in band or not, moves it by
+/// 1/[`AUDIO_STEP_NOMINAL_WARM_DIV`] of its difference, so a backlog queued at connect (the first
+/// packets read several slots old) never stays the reference. Mirror of
+/// `GENLOCK_AUDIO_STEP_NOMINAL_WARM_PACKETS`.
+pub const AUDIO_STEP_NOMINAL_WARM_PACKETS: u32 = 30;
+
+/// Issue 1381 (review round 2) — the warm-up gain divisor. Mirror of
+/// `GENLOCK_AUDIO_STEP_NOMINAL_WARM_DIV`.
+pub const AUDIO_STEP_NOMINAL_WARM_DIV: i64 = 4;
+
 /// Issue 1381 — why a skew hold ended on this packet (0 = it did not). Discriminants match the C
 /// `GENLOCK_AUDIO_STEP_*` defines and the log line's `released=` token.
 #[repr(u8)]
@@ -63,12 +74,16 @@ pub struct AudioStepHold {
     /// The previous packet's duration (0 = no previous packet).
     pub prev_packet_ns: u64,
     /// The source's NOMINAL stamp age on the live wall ([`audio_stamp_age_ns`]): the age while the
-    /// sender's wall and the receiver's agree. Seeded by the first packet (and a timeline reset),
-    /// followed slowly by every in-band packet outside a hold, frozen inside one.
+    /// sender's wall and the receiver's agree. Seeded by the first packet and warmed up over the next
+    /// [`AUDIO_STEP_NOMINAL_WARM_PACKETS`], then followed slowly by every in-band packet outside a
+    /// hold, frozen inside one. A timeline reset keeps it (a sender whose stamps jumped past OBS's 2 s
+    /// limit has stepped first: the receiver's own step brings its age back).
     pub nominal_age_ns: i64,
     /// When the age left the nominal band (OBS monotonic, 0 = it is in band); after
     /// [`AUDIO_STEP_NOMINAL_REANCHOR_NS`] out of band without a hold the nominal re-anchors.
     pub nominal_dev_since_ns: u64,
+    /// Warm-up packets left after the seed (0 = the slow in-band track).
+    pub nominal_warm: u32,
     /// The offset a held packet maps through: the pre-step offset, moved by every stamp jump the
     /// source made since (a follow in pieces never opens a hole). Kept after a release (the log's
     /// `residual_ms=`).
@@ -100,7 +115,7 @@ pub fn audio_stamp_age_ns(now_ns: u64, raw_ts_ns: u64, off_live_ns: i64) -> i64 
 /// - **Start.** Between two timecode packets the live offset moved by more than `step_min_ns` (the
 ///   render tick's `GENLOCK_WALL_STEP_MIN_NS`), and this packet has NOT followed it (see Release):
 ///   its stamp is still over one packet off the live wall. A step up to one packet, a timeline reset,
-///   or a first packet never starts one. A step that brings the stamps BACK to their nominal age
+///   a first packet, or a timeline-reset packet never starts one. A step that brings the stamps BACK to their nominal age
 ///   (the sender's box stepped first: its stamps jumped, or it caught up, and the receiver's own
 ///   step puts them on its wall again) is a zero-length hold, `Followed` on its own packet with the
 ///   whole step as its residual, so the ingest places it once (review round 1).
@@ -166,12 +181,13 @@ pub fn audio_step_hold(
     };
     let off_nominal = age_ns.wrapping_sub(s.nominal_age_ns).unsigned_abs() <= packet_ns;
     if !s.active {
-        if !had_prev || timeline_reset {
+        if !had_prev {
             s.nominal_age_ns = age_ns;
             s.nominal_dev_since_ns = 0;
+            s.nominal_warm = AUDIO_STEP_NOMINAL_WARM_PACKETS;
             return (off_live_ns, AudioStepRelease::None);
         }
-        if jump_ns.unsigned_abs() > min {
+        if !timeline_reset && jump_ns.unsigned_abs() > min {
             let held_ns = prev_off_ns.wrapping_sub(followed);
             if off_live_ns.wrapping_sub(held_ns).unsigned_abs() > packet_ns {
                 s.held_off_ns = held_ns;
@@ -191,8 +207,6 @@ pub fn audio_step_hold(
     }
     if timeline_reset {
         s.active = false;
-        s.nominal_age_ns = age_ns;
-        s.nominal_dev_since_ns = 0;
         return (off_live_ns, AudioStepRelease::Reset);
     }
     s.held_off_ns = s.held_off_ns.wrapping_sub(followed);
@@ -207,13 +221,20 @@ pub fn audio_step_hold(
     (s.held_off_ns, AudioStepRelease::None)
 }
 
-/// Issue 1381 (review round 1) — one packet outside a hold moves the nominal age: in band (within one
-/// packet) it follows by 1/[`AUDIO_STEP_NOMINAL_GAIN_DIV`]; out of band it is left alone, and after
-/// [`AUDIO_STEP_NOMINAL_REANCHOR_NS`] out of band the age becomes the nominal. Mirror of
-/// `genlock_audio_step_track_nominal`.
+/// Issue 1381 (review round 1) — one packet outside a hold moves the nominal age. In the warm-up after
+/// the seed it follows by 1/[`AUDIO_STEP_NOMINAL_WARM_DIV`], in band or not (review round 2). After
+/// it: in band (within one packet) by 1/[`AUDIO_STEP_NOMINAL_GAIN_DIV`]; out of band it is left
+/// alone, and after [`AUDIO_STEP_NOMINAL_REANCHOR_NS`] out of band the age becomes the nominal.
+/// Mirror of `genlock_audio_step_track_nominal`.
 fn audio_step_track_nominal(s: &mut AudioStepHold, age_ns: i64, packet_ns: u64, now_ns: u64) {
     let dev_ns = age_ns.wrapping_sub(s.nominal_age_ns);
-    if dev_ns.unsigned_abs() <= packet_ns {
+    if s.nominal_warm > 0 {
+        // the timer is still 0 here: the seed that started the warm-up cleared it
+        s.nominal_warm -= 1;
+        s.nominal_age_ns = s
+            .nominal_age_ns
+            .wrapping_add(dev_ns / AUDIO_STEP_NOMINAL_WARM_DIV);
+    } else if dev_ns.unsigned_abs() <= packet_ns {
         s.nominal_age_ns = s
             .nominal_age_ns
             .wrapping_add(dev_ns / AUDIO_STEP_NOMINAL_GAIN_DIV);
