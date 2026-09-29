@@ -119,9 +119,12 @@ or 1 ns more),
 `target_stamp_ns` on a port of the grid helpers, `frames_for_hold` (nearest frame) + `pin_for_frames`
 (`round(current + k × interval)`, checked through the twin), and `grid_inputs_from_audit` — an input
 runs the grid iff EVERY one of its audit lines carries `n2_early=` (only a D1 build prints it) and
-`Δreceived / Δconsumed` is within 0.25 of an integer N ≥ 2 (one line: its cumulative ratio, trusted
-only past 30 consumed ticks). `classify_audit_inputs` also gives `n2_early_rate` = Δn2_early /
-(Δconsumed + Δholds + Δlate_holds): the share of ticks presented one frame OLDER than the twin says. It never retypes the age base: `load_age_base_ns()` reads
+received frames per render tick is within 0.25 of an integer N ≥ 2. Every tick is one of consumed /
+holds / late_holds / underruns (an empty queue, counted in `get_closest_frame`), so the ratio is
+`Δreceived / Δ(all four)`: a camera with held or empty ticks keeps reading 2. One line: its
+cumulative ratio, trusted only past 30 ticks. `classify_audit_inputs` also gives `n2_early_rate` =
+Δn2_early / Δticks: the share of ticks presented one frame OLDER than the twin says (the 0.1 %
+budget base). It never retypes the age base: `load_age_base_ns()` reads
 `GENLOCK_N2_AGE_BASE_NS` from this file at run time and fails closed. **Changing the constant or the
 target:** `tests/fixtures/genlock_n2_present_age_1367.tsv` is read by BOTH
 `present_age_table_shared_with_the_python_twin_1367` (here, every canvas tick of one second at each
