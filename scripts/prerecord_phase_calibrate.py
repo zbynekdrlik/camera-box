@@ -41,6 +41,10 @@ measurement would -- without needing one.
 skew over-reads by about a frame. With `--strih-log` (the raw audit window the jitter JSON was made
 from) every camera that log confirms as a D1 grid input is measured at
 `scripts/genlock_n2_grid.py`'s present age of its pin instead; a pre-D1 log keeps latency + skew.
+Precondition (unchanged by D1b, stated because the grid makes it exact): the value includes the
+camera's own pin, while the phase-sync kernel reads it as a pin-independent transit. The window is
+therefore only meaningful with every calibrated camera on ONE pin (the floor, as after the
+[4i/8align] reset); cameras on different pins make the kernel hold the lower-pinned ones back.
 
 **Jitter headroom margin (#757, 2026-07-15 live regression):** a camera pinned with ZERO
 headroom above its own measured transit sits exactly at the ts-align release deadline, so
@@ -179,9 +183,10 @@ def main(argv=None):
     with open(args.jitter_json, encoding="utf-8") as f:
         jitter_json = json.load(f)
 
+    import genlock_n2_grid  # the dev1 twin (issue 1367 D1b); pure, reads the Rust constant lazily
+
     grid_inputs = None
     if args.strih_log:
-        import genlock_n2_grid
         try:
             grid_inputs = genlock_n2_grid.read_grid_inputs(args.strih_log)
         except OSError as exc:
@@ -193,7 +198,13 @@ def main(argv=None):
                   f"{sorted(grid_inputs)} -> the grid present age of the pin "
                   "(src/genlock_n2_grid.rs); mean_head_skew_ms is only the arrival-lag diagnostic")
 
-    by_cam = measured_by_camera(jitter_json, grid_inputs)
+    try:
+        by_cam = measured_by_camera(jitter_json, grid_inputs)
+    except genlock_n2_grid.N2GridConstantError as exc:
+        print(f"ERROR: prerecord_phase_calibrate: the N>=2 grid twin cannot read "
+              f"GENLOCK_N2_AGE_BASE_NS from src/genlock_n2_grid.rs ({exc}) -- writing nothing",
+              file=sys.stderr)
+        return 1
     if not by_cam:
         print(
             f"WARNING: prerecord_phase_calibrate: no usable 'NDI cam<N>' entries in "

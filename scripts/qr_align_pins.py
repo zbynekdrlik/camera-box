@@ -513,8 +513,10 @@ def arrival_floors_from_jitter(jitter_json, sources, min_samples=MIN_FLOOR_SAMPL
     `min_samples` audit samples is one source-frame off (run 1899055119's cam3 read 84 = 67 + 16.7
     from samples=2, a phantom "slowest"). A source whose EXPLICIT `samples` is below `min_samples` is
     OMITTED (same "omit, never fabricate" honesty as a malformed entry); a MISSING samples count (an
-    older / partial report) is TRUSTED -- only an explicit low count is the known phantom. The same
-    drop applies to a grid input (one window's drop semantics, whatever the present-age model)."""
+    older / partial report) is TRUSTED -- only an explicit low count is the known phantom. A grid
+    input is NOT dropped (D1b review): the phantom is a HEAD-SKEW artefact, while the twin's age comes
+    from the pin alone, which one audit line already states exactly -- dropping a faster grid camera
+    would push align() onto the budget-unchecked, non-whole-frame floor3 fallback."""
     from prerecord_phase_calibrate import measured_by_camera, source_names_by_template
     by_cam = measured_by_camera(jitter_json, grid_inputs)       # {cam_num: present age (ms)}
     by_src = source_names_by_template(by_cam, "NDI cam{n}")     # {"NDI cam<N>": arrival_floor_ms}
@@ -525,13 +527,13 @@ def arrival_floors_from_jitter(jitter_json, sources, min_samples=MIN_FLOOR_SAMPL
         entry = jitter_json.get(s) if isinstance(jitter_json, dict) else None
         samples = entry.get("samples") if isinstance(entry, dict) else None
         if (isinstance(samples, (int, float)) and not isinstance(samples, bool)
-                and samples < min_samples):
-            continue                                           # #1253 phantom-floor guard
+                and samples < min_samples and not (grid_inputs and s in grid_inputs)):
+            continue                                           # #1253 phantom-floor guard (head-skew only)
         out[s] = by_src[s]
     return out
 
 
-def floor_samples_sufficient(jitter_json, sources, min_samples=MIN_FLOOR_SAMPLES):
+def floor_samples_sufficient(jitter_json, sources, min_samples=MIN_FLOOR_SAMPLES, grid_inputs=None):
     """#1168: True iff EVERY source in `sources` has an arrival floor in `jitter_json` that
     arrival_floors_from_jitter would KEEP -- i.e. present, well-formed, and NOT dropped as a phantom
     (explicit `samples < min_samples`). When it returns False the budget check WILL be skipped for a
@@ -539,8 +541,9 @@ def floor_samples_sufficient(jitter_json, sources, min_samples=MIN_FLOOR_SAMPLES
     align() fall back to the budget-unchecked plan (a transient thin window -- run 34973535496's cam4
     samples=2 -- must not be mistaken for a genuinely-unobtainable floor). Reuses
     arrival_floors_from_jitter's OWN drop semantics (no second copy): a MISSING samples count is
-    trusted (kept), only an explicit low count is the known phantom."""
-    floors = arrival_floors_from_jitter(jitter_json, sources, min_samples)
+    trusted (kept), only an explicit low count is the known phantom. `grid_inputs` (issue 1367 D1b):
+    a confirmed D1 grid input keeps its floor at any sample count, exactly as the floors do."""
+    floors = arrival_floors_from_jitter(jitter_json, sources, min_samples, grid_inputs=grid_inputs)
     return all(s in floors for s in sources)
 
 
@@ -2052,7 +2055,7 @@ def main(argv=None):
             print(f"[qr-align] #1168 --floor-samples-ok: could not read --jitter-json "
                   f"{a.jitter_json!r} ({exc})", file=sys.stderr)
             return 2
-        ok = floor_samples_sufficient(jj, sources)
+        ok = floor_samples_sufficient(jj, sources, grid_inputs=grid_inputs)
         print(f"[qr-align] #1168 arrival-floor audit samples "
               f"{'SUFFICIENT' if ok else 'INSUFFICIENT (>=1 align source missing a well-sampled floor)'} "
               f"for {sources}", file=sys.stderr)

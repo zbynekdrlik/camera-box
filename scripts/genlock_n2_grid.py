@@ -23,10 +23,11 @@ tests/fixtures/genlock_n2_present_age_1367.tsv is the ONE present-age table read
 test in src/genlock_n2_grid.rs and tests/python/test_genlock_n2_grid_twin_1367.py.
 
 CONFIRMED grid input (`grid_inputs_from_audit`): every `genlock-fifo audit` line of the input carries
-the `n2_early=` token (only a D1 build prints it) AND its rate multiple rounds to N >= 2 -- the design's
-`received` ~= N x `consumed` on the audit line, over the window (the last line's cumulative ratio when
-the window holds one line). A pre-D1 log, an N==1 input, or no log at all is never a grid input, so
-those consumers keep their arithmetic byte-for-byte.
+the `n2_early=` token (only a D1 build prints it) AND its rate multiple is within 0.25 of an integer
+N >= 2 -- the design's `received` ~= N x `consumed` on the audit line, over the window (the last
+line's cumulative ratio when the window holds one line with at least a second of ticks). A pre-D1
+log, an N==1 input, or no log at all is never a grid input, so those consumers keep their arithmetic
+byte-for-byte.
 
 Pure: no I/O except the one read of the Rust source (cached per repo root). Tier-0 via pytest.
 """
@@ -49,6 +50,12 @@ NS_PER_SECOND = 1_000_000_000
 AGE_BASE_SOURCE = ("src/genlock_n2_grid.rs", "GENLOCK_N2_AGE_BASE_NS")
 
 _FPS_RE = re.compile(r"@\s*([0-9]+(?:\.[0-9]+)?)\s*fps")
+# A rate ratio further than this from its nearest integer is inconclusive, never a guessed multiple
+# (a clean 60-into-30 window reads 2.0; holds and late holds, which consume nothing, lift it a little).
+RATE_RATIO_TOLERANCE = 0.25
+# The cumulative ratio of ONE line is trusted only past a second of presented ticks (a just-restarted
+# source reads received=3 consumed=2).
+MIN_CUMULATIVE_CONSUMED = 30
 _AGE_BASE_CACHE: dict = {}
 
 
@@ -241,11 +248,18 @@ def canvas_interval_from_fps(fps):
 
 
 def classify_audit_inputs(log_text):
-    """{source: {"lines", "n2_marker", "n", "canvas_interval_ns", "source_interval_ns", "grid"}} from
-    the `genlock-fifo audit` lines in `log_text`, first-seen order. `n2_marker` = every line of the
-    input carries `n2_early=`; `n` = round(Δreceived / Δconsumed) over the window's first..last line
-    (the last line's cumulative received / consumed when the window has one line or Δconsumed <= 0;
-    None when neither is measurable); `grid` = n2_marker and n >= 2 and a known canvas rate."""
+    """{source: {"lines", "n2_marker", "n", "canvas_interval_ns", "source_interval_ns", "grid",
+    "n2_early_rate"}} from the `genlock-fifo audit` lines in `log_text`, first-seen order.
+
+    - `n2_marker`: every line of the input carries `n2_early=`.
+    - `n`: the nearest integer to Δreceived / Δconsumed over the window's first..last line, or to the
+      last line's cumulative received / consumed when the window has one line or Δconsumed <= 0 (and
+      that line has presented at least MIN_CUMULATIVE_CONSUMED ticks). None when neither is
+      measurable, or when the ratio is more than RATE_RATIO_TOLERANCE from an integer.
+    - `grid`: n2_marker and n >= 2 and a known canvas rate.
+    - `n2_early_rate`: Δn2_early / Δticks over the window (ticks = consumed + holds + late holds, the
+      design's 0.1 % budget base), None with one line or no ticks. An early tick presents one frame
+      OLDER than the twin's age, so this is the share of ticks the twin over-states."""
     per = {}
     for line in (log_text or "").splitlines():
         parsed = parse_audit_line(line)
@@ -266,11 +280,20 @@ def classify_audit_inputs(log_text):
         d_con = last.get("consumed", 0) - first.get("consumed", 0)
         if len(rows) >= 2 and d_con > 0 and d_rec >= 0:
             ratio = d_rec / d_con
-        elif last.get("consumed", 0) > 0:
+        elif last.get("consumed", 0) >= MIN_CUMULATIVE_CONSUMED:
             ratio = last.get("received", 0) / last["consumed"]
-        n = max(1, int(math.floor(ratio + 0.5))) if ratio is not None else None
+        n = None
+        if ratio is not None:
+            nearest = max(1, int(math.floor(ratio + 0.5)))
+            if abs(ratio - nearest) <= RATE_RATIO_TOLERANCE:
+                n = nearest
         canvas = canvas_interval_from_fps(rows[-1][1])
         grid = bool(marker and n is not None and n >= 2 and canvas)
+        early_rate = None
+        if len(rows) >= 2 and marker:
+            ticks = d_con + sum(last.get(k, 0) - first.get(k, 0) for k in ("holds", "late_holds"))
+            if ticks > 0:
+                early_rate = max(0, last.get("n2_early", 0) - first.get("n2_early", 0)) / ticks
         out[name] = {
             "lines": len(rows),
             "n2_marker": marker,
@@ -278,6 +301,7 @@ def classify_audit_inputs(log_text):
             "canvas_interval_ns": canvas,
             "source_interval_ns": source_interval_ns(canvas, n) if (canvas and n) else None,
             "grid": grid,
+            "n2_early_rate": early_rate,
         }
     return out
 

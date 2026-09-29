@@ -48,7 +48,7 @@ _HERE = pathlib.Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from genlock_n2_grid import grid_inputs_from_audit  # noqa: E402  -- issue 1367 D1b grid inputs
+from genlock_n2_grid import classify_audit_inputs  # noqa: E402  -- issue 1367 D1b grid inputs
 from ndi_halving_decision import parse_recv_timing  # noqa: E402  -- stage (b) reuse
 from qr_align_pins import arrival_floors_from_jitter  # noqa: E402  -- stage (c) total-floor reuse
 
@@ -56,6 +56,9 @@ from qr_align_pins import arrival_floors_from_jitter  # noqa: E402  -- stage (c)
 TRANSPORT_UNIFORM_SPREAD_MS = 3.0  # cross-camera cap_avg spread at/below this => transport uniform
 EXCESS_NOISE_MS = 2.0              # per-camera floor excess at/below this => within-noise / anchor
 STRIH_CONFIG_MIN_MS = 1.0         # Delta latency_ms above this => a real strih-config pin difference
+# issue 1367 D1b: the n2_early budget of the grid conveyor (genlock-n2-grid-conveyor.md, live
+# acceptance item 3): at most 0.1 % of an N>=2 camera's ticks may present one frame early.
+N2_EARLY_BUDGET_FRAC = 0.001
 SOURCE_TEMPLATE = "NDI cam{n}"
 
 # ---- multi-run aggregation (#1168 task 2) ----
@@ -228,7 +231,8 @@ def _attribute(is_anchor, excess, d_lat, d_skew, transport_uniform, grabber):
     return "mixed sub-threshold +%.1fms" % excess
 
 
-def decompose(jitter_json, cap_avgs, grabber_by_src, sources, grid_inputs=None):
+def decompose(jitter_json, cap_avgs, grabber_by_src, sources, grid_inputs=None,
+              n2_early_rates=None):
     """Decompose each present camera's arrival floor into strih-config (Delta latency) + upstream
     (Delta skew), attribute the upstream term to grabber/transport via cap_avg uniformity, and
     return {rows, anchor_src, summary}. `sources` names the cameras to consider; a source absent or
@@ -236,7 +240,9 @@ def decompose(jitter_json, cap_avgs, grabber_by_src, sources, grid_inputs=None):
 
     Issue 1367 slice D1b: `grid_inputs` (the confirmed D1 grid inputs of the strih audit log) put
     those rows on the grid twin (floors_and_fields) and their owner on `_attribute_grid`; the summary
-    then names them in `n2_grid_sources`. None / {} = byte-for-byte the pre-D1 decomposition."""
+    then names them in `n2_grid_sources`. `n2_early_rates` ({src: rate or None}) adds each grid
+    row's `n2_early_rate` and names a rate over N2_EARLY_BUDGET_FRAC in its owner: an early tick
+    presents one frame older than the twin's age. None / {} = byte-for-byte the pre-D1 decomposition."""
     cap_avgs = cap_avgs or {}
     grabber_by_src = grabber_by_src or {}
     floors = floors_and_fields(jitter_json, sources, grid_inputs)
@@ -299,6 +305,13 @@ def decompose(jitter_json, cap_avgs, grabber_by_src, sources, grid_inputs=None):
         if row_grid:
             rows[-1]["n2_grid"] = True
             rows[-1]["source_interval_ns"] = f["source_interval_ns"]
+            rate = (n2_early_rates or {}).get(s)
+            rows[-1]["n2_early_rate"] = rate
+            if rate is not None and rate > N2_EARLY_BUDGET_FRAC:
+                rows[-1]["owner"] = owner + (
+                    "; n2_early %.2f%% of ticks (over the %.1f%% budget: the arrival lag outgrows "
+                    "50 ms + the pin, those ticks present one frame older)"
+                    % (100.0 * rate, 100.0 * N2_EARLY_BUDGET_FRAC))
 
     slowest = max(rows, key=lambda r: r["floor_ms"])
     summary = {
@@ -454,8 +467,11 @@ def _decompose_artefacts(jitter_json, strih_path, burns, cameras=None):
     strih_text = _read(strih_path)
     cap_avgs = cap_avg_by_source(strih_text, sources) if strih_text else {}
     # issue 1367 D1b: the SAME strih audit window tells which inputs run the D1 grid (n2_early= on
-    # every line + N >= 2); a pre-D1 window confirms none, so its decomposition is unchanged.
-    grid_inputs = grid_inputs_from_audit(strih_text) if strih_text else {}
+    # every line + N >= 2) and how often each presented a frame early; a pre-D1 window confirms
+    # none, so its decomposition is unchanged.
+    classes = classify_audit_inputs(strih_text) if strih_text else {}
+    grid_inputs = {n: c["source_interval_ns"] for n, c in classes.items() if c["grid"]}
+    n2_early_rates = {n: c["n2_early_rate"] for n, c in classes.items() if c["grid"]}
     grabber_by_src = {}
     for s in sources:
         m = re.search(r"(\d+)$", s)
@@ -465,7 +481,8 @@ def _decompose_artefacts(jitter_json, strih_path, burns, cameras=None):
         btext = _read(burn) if burn else None
         if btext:
             grabber_by_src[s] = grabber_health(btext)
-    return decompose(jitter_json, cap_avgs, grabber_by_src, sources, grid_inputs=grid_inputs)
+    return decompose(jitter_json, cap_avgs, grabber_by_src, sources, grid_inputs=grid_inputs,
+                     n2_early_rates=n2_early_rates)
 
 
 def mine_run_dir(run_dir, cameras=None):
