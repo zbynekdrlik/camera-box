@@ -14,6 +14,9 @@ paths:
   - "tests/genlock_audio_step_hold_parity_1381.rs"
   - "tests/genlock_audio_step_hold_wiring_1381.rs"
   - "tests/genlock_audio_pairing_lift/mod.rs"
+  - "tests/genlock_audio_relabel_ingest_1381.rs"
+  - "tests/c/genlock_audio_relabel_ingest_1381_harness.c"
+  - "src/genlock_audio_pairing_step_tests.rs"
 ---
 
 # Receiver-side AUDIO genlock parity (#1303)
@@ -409,7 +412,8 @@ over a minute.
   it is kept in `genlock_audio_step_relock_pending` and replayed on the first tick after the hold. A
   pin change re-arms the latch window itself.
 - **The log:** one `genlock-audio-step-hold '<src>': step_ms= held_ms= released=followed|timeout|reset
-  residual_ms= holds= (issue 1381)` line per released hold, NULL-safe on the source name. It is
+  residual_ms= holds= relabels= (issue 1381)` line per released hold (and per relabel, the section
+  below), NULL-safe on the source name. It is
   mutually non-substring vs every other `genlock-*` family. `held_ms=0.0` with a step-sized
   `residual_ms=` is the sender-first case. A one-packet hold with `residual_ms` near 0 is a clock-read
   glitch: the thread was preempted between the two reads of the live offset for more than a packet.
@@ -444,6 +448,71 @@ over a minute.
   - the SongPlayer A/V gate stays green after the step.
 - **The compensator half (piece 1 re-seed, piece 3 backstop) and the two-clock bench:**
   `asrc-bench-harness.md`, the issue-1381 section.
+
+### Issue 1381 — a sender that RELABELS at the step is APPENDED (design 5900385541)
+
+The sender contract (sections 5 and 6, SongPlayer #224) asks a sender to RELABEL at a date step of S:
+its stamps jump N = floor(S / slot) slots within one interval, and its samples stay continuous. The
+live offset jumps by −S on the same packet, so the intended landing moves only by −r
+(r = S − N·slot, under one block). Stock OBS still lost audio on that packet:
+- a stamp jump of 70 ms or more failed `TS_SMOOTHING_THRESHOLD` in both domains, so the packet was
+  PLACED r early, and r ms of queued audio were overwritten;
+- a jump over 2 s ran `handle_ts_jump`, which dropped the whole queued buffer, and the second
+  `MAX_TS_VAR` branch ran `reset_audio_timing`.
+
+The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append decision.
+
+- **The decision.** `audio_relabel(stamp_jump, off_jump, packet, step_min)` in
+  `src/genlock_audio_step_hold.rs`, beside `audio_step_hold`. It is true when BOTH jumps exceed
+  `GENLOCK_WALL_STEP_MIN_NS` and they cancel to strictly under one packet. Without the threshold,
+  every steady packet (both jumps about 0) would be a "relabel". A stamp leap has no offset jump, and
+  a catch-up or a pause has no stamp jump, so neither is a relabel.
+- **The two jumps.** `audio_step_relabel_jumps` reads them from the skew-hold state BEFORE the hold
+  takes the packet: the stamp against the previous packet's end, and the live offset against the
+  offset the previous packet was MAPPED through (the held one while a hold runs). Against the
+  previous LIVE offset, the split shape the contract names would never be recognised: the step
+  packet still carries the old stamp and starts the hold, and the relabelled stamps come on the next
+  packet. Their sum is exactly the hold's release residual, so a relabel releases a running hold
+  `followed` with |residual| < one packet (never placed by the hold), or never starts one.
+- **The ingest.** The hold mode, the hold and the live offset are now decided at the TOP of
+  `source_output_audio_data`: the same values, and the live offset is still read once per packet.
+  Then `genlock_audio_relabel_source` runs, and on a relabel:
+  - `next_audio_ts_min` is rebased onto the relabelled stamp, so the smoothing sees no jump (no
+    70 ms re-placement, no `handle_ts_jump`), and the raw timeline continues from the new stamp
+    also under 70 ms;
+  - inside `audio_buf_mutex`, `next_audio_sys_ts_min` is rebased onto `in.timestamp`, so the stock
+    equality check appends and the second reset is never reached.
+  The timecode ASRC books the −r as ordinary placement error. Every other packet takes the stock
+  path byte for byte.
+- **The log.** `relabels=` is appended to the `genlock-audio-step-hold` line (after `holds=`). A
+  relabel that releases a hold prints that release's line (`released=followed`, residual −r). A
+  joint relabel (no hold) prints `released=none held_ms=0.0`, with its own wall step and landing
+  move. The counter is `genlock_audio_relabels` in `obs-internal.h`.
+- **Finding (ticket comment 5900705310): the remainder is repaid at 1000 ppm only at or over half a
+  packet.** The timecode ASRC books a jump only at or over its band, max(half a packet, 10 ms) =
+  16.7 ms for 1600-sample blocks. A smaller r is left to the level loop alone. Bench: r = 15.8 ms
+  (the 682 ms step) is back within 2 ms only at +725 s, and r = 26.7 ms (the +260 ms step) at +24.6 s.
+  No audio is lost either way. A sub-band r stays under half a frame, but the design's "under 33 s"
+  holds only from 16.7 ms up; how to repay it faster is a follow-up decision.
+- **Tests.**
+  - The pure unit tests in `src/genlock_audio_pairing_step_tests.rs`.
+  - `tests/genlock_audio_step_hold_parity_1381.rs::c_audio_relabel_matches_the_rust_authority_1381`:
+    the scalar vectors, plus relabels in both shapes on top of the hold script.
+  - `tests/genlock_audio_relabel_ingest_1381.rs`: a lift-and-compile of the shipped place-vs-append
+    branch (relabel, smoothing, `handle_ts_jump`, the system check) through
+    `tests/c/genlock_audio_relabel_ingest_1381_harness.c`, against a truth table: joint 40 ms /
+    260 ms / 682 ms / −1.5 s / 2.5 s, split 682 ms, catch-up, stamp leap and restart, plus a count of
+    the stock debug lines.
+  - The `RELABEL_WIRING` needles in the wiring test and both pwsh gates.
+  - The step bench (`asrc-bench-harness.md`).
+  - Mutation proof: 11/11 C / wiring mutants killed by the Rust gates, and every wiring mutant also
+    by the real pwsh lines of both ymls (run with the portable pwsh).
+- **Deploy + live acceptance (supervisor).** A FULL bundle, because the change is in libobs. Run a
+  controlled date step with SongPlayer #224 deployed, and read on resolume:
+  - the cg OBS program audio has no hole larger than r;
+  - `relocks` stays flat;
+  - `genlock-audio-step-hold ... released=followed ... relabels=1` (or a `released=none` line for a
+    joint relabel).
 
 ## LOCK-indicator audio DEGRADE term — audible-but-expected-silent (#1303 part 3b/c — DONE)
 
