@@ -435,8 +435,9 @@ def test_record_start_burn_calls_use_the_short_burn_budget_not_the_record_timeou
         'if cg_chain_record_start "$HOST" "$PY" 90; then echo STARTED; fi',
         env={"FAKE_SP_BURN_ON": "true"})
     assert rc == 0, err
-    assert (tmp_path / "timeout.log").read_text().split() == ["90", "10", "10", "10", "90"], (
-        "cut + StartRecord keep the record timeout; the cg program read-back (issue 1302 slice 3) "
+    assert (tmp_path / "timeout.log").read_text().split() == ["90", "90", "10", "10", "10", "90"], (
+        "the cut, the SongPlayer facade press (issue 1302 slice 3: a re-kick, SongPlayer's program "
+        "is already on the scene) and StartRecord keep the record timeout; the cg program read-back "
         "and the burn add + check run under CG_CHAIN_BURN_OBS_TIMEOUT (default 10)"
     )
 

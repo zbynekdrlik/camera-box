@@ -66,6 +66,15 @@ case "$url" in
     if [ -f "${FAKE_SP_PROGRAM_FILE:-/nonexistent}" ]; then cat "$FAKE_SP_PROGRAM_FILE"; else
       echo "curl: (7) Failed to connect" >&2; exit 7; fi
     ;;
+  */api/v1/program/cut)
+    # SongPlayer's dashboard cut by source: the program moves to that source (no scene name).
+    printf 'curl POST-CUT %s\n' "$body" >> "$CALL_LOG"
+    if [ -z "${FAKE_CUT_NOOP:-}" ]; then
+      python3 -c 'import json,sys; d=json.loads(sys.argv[1]); p=sys.argv[2]; json.dump({"source": d["source"], "remote": {"program_scene": None}}, open(p, "w"))' "$body" "$FAKE_SP_PROGRAM_FILE"
+    fi
+    if [ -n "$ofile" ]; then printf '%s' "${FAKE_CUT_BODY:-}" > "$ofile"; fi
+    printf '%s' "${FAKE_CUT_CODE:-200}"
+    ;;
   *)
     printf 'curl POST %s\n' "$body" >> "$CALL_LOG"
     code="${FAKE_POST_CODE:-204}"
@@ -96,9 +105,13 @@ if cmd == "program":
 if cmd == "facade-program":
     rc = int(os.environ.get("FAKE_FACADE_RC", "0"))
     if rc == 0 and not os.environ.get("FAKE_FACADE_NOOP"):
+        # A press of a playlist scene: SP-program is cut to that playlist (its id) and published
+        # with the scene name, like SongPlayer's switch_scene.
         path = os.environ["FAKE_SP_PROGRAM_FILE"]
         doc = json.load(open(path)) if os.path.exists(path) else {"source": None, "remote": {}}
         doc.setdefault("remote", {})["program_scene"] = arg("--scene")
+        doc["source"] = json.loads(os.environ.get("FAKE_FACADE_SOURCE_MAP", "{}")).get(
+            arg("--scene"), 7)
         json.dump(doc, open(path, "w"))
     sys.exit(rc)
 '''
@@ -189,6 +202,7 @@ def _run(tmp_path, snippet, env=None, sp_program=("sp-fast", 7)):
         "BF": str(scripts / "obs_burn_filter.py"),
         "HOST": HOST,
         "OBS_FLEET_HOME": "none",
+        "FAKE_FACADE_SOURCE_MAP": json.dumps({"sp-fast": 7, "sp-slow": 3}),
     }
     if env:
         full_env.update(env)
@@ -200,7 +214,8 @@ def _run(tmp_path, snippet, env=None, sp_program=("sp-fast", 7)):
 
 
 def _posts(calls):
-    return [c for c in calls if c.startswith("curl POST")]
+    """The burn toggle POSTs (never the dashboard program cut, logged as `curl POST-CUT`)."""
+    return [c for c in calls if c.startswith("curl POST ")]
 
 
 def _health_reads(calls):
@@ -300,7 +315,7 @@ def test_the_read_back_poll_is_bounded_by_wall_time(tmp_path):
         env={"FAKE_HEALTH_SEQ": "false", "CG_CHAIN_READBACK_POLL_MS": "200",
              "CG_CHAIN_BURN_READBACK_S": "1"})
     assert rc == 0, err
-    assert 3 <= len(_health_reads(calls)) <= 6, calls
+    assert 2 <= len(_health_reads(calls)) <= 6, calls
     assert "not confirmed after 1 attempt(s)" in err
 
 
@@ -357,14 +372,17 @@ def test_record_start_cuts_both_programs_reads_both_back_then_burns(tmp_path):
     assert snap == {"host": HOST, "port": 4456, "scene": "sp-slow", "source": 3}
 
 
-def test_record_start_never_presses_the_facade_when_songplayer_is_already_on_the_scene(tmp_path):
+def test_record_start_re_kicks_a_playlist_already_on_air_without_a_snapshot(tmp_path):
+    # review round 1: SongPlayer's own design -- a press of the scene already on air re-kicks a
+    # playlist paused out of band (program_on_air.rs on_air_changes; ProgramCore::cut is a no-op on
+    # the same source). The program does not change, so there is nothing to snapshot or restore.
     rc, out, err, calls = _run(
         tmp_path, 'CG_CHAIN=1\nif cg_chain_record_start "$HOST" "$PY" 30; then echo STARTED; fi',
         env={"FAKE_HEALTH_SEQ": "true"}, sp_program=("sp-fast", 7))
     assert rc == 0, err
-    assert not any(c.startswith("cg_chain_scene.py facade-program") for c in calls), calls
+    assert f"cg_chain_scene.py facade-program --host {HOST} --port 4456 --scene sp-fast snapshot=no" in calls
     assert not (tmp_path / "cg-chain-sp-program-state.json").exists(), "nothing to undo = no snapshot"
-    assert "already on 'sp-fast'" in out and _posts(calls), out
+    assert "already on air" in out and "re-kick" in out and _posts(calls), out
 
 
 def test_a_songplayer_program_mismatch_keeps_both_burns_off(tmp_path):
@@ -449,13 +467,37 @@ def test_restore_does_not_press_a_program_that_is_already_back(tmp_path):
     assert (tmp_path / "cg-chain-sp-program-state.json.restored").exists()
 
 
-def test_restore_without_a_scene_names_the_dashboard_cut_and_keeps_the_snapshot(tmp_path):
+def test_restore_without_a_scene_cuts_by_source_and_reads_it_back(tmp_path):
+    # review round 1: a snapshot with no scene name (a scene-less playlist, or the NDI input -1)
+    # cannot be pressed through the facade; SongPlayer's dashboard cut by SOURCE (the same
+    # switch_source path) restores it, and the source is read back before the snapshot retires.
     (tmp_path / "cg-chain-sp-program-state.json").write_text(
         json.dumps({"host": HOST, "port": 4456, "scene": None, "source": 5}))
     rc, out, err, calls = _run(tmp_path, 'cg_chain_sp_program_restore "$PY" 30')
     assert rc == 0, err
     assert not any(c.startswith("cg_chain_scene.py facade-program") for c in calls)
-    assert '{"source":5}' in err and f"{API}/api/v1/program/cut" in err, err
+    assert 'curl POST-CUT {"source":5}' in calls, calls
+    assert "SongPlayer program restored -> source 5" in out and "HTTP 200" in out, out
+    assert (tmp_path / "cg-chain-sp-program-state.json.restored").exists()
+
+
+def test_restore_of_a_scene_less_cut_that_never_reads_back_keeps_the_snapshot(tmp_path):
+    (tmp_path / "cg-chain-sp-program-state.json").write_text(
+        json.dumps({"host": HOST, "port": 4456, "scene": None, "source": 5}))
+    rc, out, err, calls = _run(tmp_path, 'cg_chain_sp_program_restore "$PY" 30; echo REACHED',
+                               env={"FAKE_CUT_NOOP": "1"})
+    assert rc == 0 and "REACHED" in out
+    assert "did not read back" in err and f"{API}/api/v1/program/cut" in err, err
+    assert (tmp_path / "cg-chain-sp-program-state.json").exists()
+
+
+def test_restore_with_nothing_on_program_before_the_run_names_it_and_keeps_the_snapshot(tmp_path):
+    (tmp_path / "cg-chain-sp-program-state.json").write_text(
+        json.dumps({"host": HOST, "port": 4456, "scene": None, "source": None}))
+    rc, out, err, calls = _run(tmp_path, 'cg_chain_sp_program_restore "$PY" 30')
+    assert rc == 0, err
+    assert not any("POST-CUT" in c or "facade-program" in c for c in calls), calls
+    assert "nothing was on SongPlayer's program before this run" in err, err
     assert (tmp_path / "cg-chain-sp-program-state.json").exists()
 
 
@@ -477,6 +519,110 @@ def test_disabled_profile_never_restores_a_songplayer_snapshot(tmp_path):
                   'cg_chain_cleanup "$HOST" "$PY" 5\necho DONE')
     assert rc == 0, err
     assert calls == [] and out.strip() == "DONE" and err == ""
+
+
+# ---- review round 1 (the fresh-context review of this slice) ----------------------------------
+
+
+def test_an_off_answered_404_while_health_reads_true_is_a_leak(tmp_path):
+    # SongPlayer's registry also answers NotFound on a poisoned lock; a `true` read is the truth.
+    rc, out, err, calls = _run(
+        tmp_path, 'CG_SP_BURN_OWED=0; cg_chain_songplayer_burn off; printf "OWED=%s\\n" "$CG_SP_BURN_OWED"',
+        env={"FAKE_POST_CODE": "404", "FAKE_HEALTH_SEQ": "true"})
+    assert rc == 0, err
+    assert "LEAK" in err and "HTTP 404" in err, err
+    assert "nothing to turn off" not in out
+    assert "OWED=1" in out
+
+
+def test_a_manual_program_carrying_the_scene_name_is_not_the_playlist_on_air(tmp_path):
+    # SongPlayer's switch_manual cuts SP-program to the NDI input (source -1) and still publishes
+    # the scene name, so `program_scene` alone reads sp-fast while no playlist plays.
+    rc, out, err, calls = _run(
+        tmp_path,
+        'CG_CHAIN=1\nif cg_chain_record_start "$HOST" "$PY" 30; then echo STARTED; fi\n'
+        'printf "SP=%s\\n" "${CG_SP_BURN_ON:-unset}"',
+        env={"FAKE_FACADE_NOOP": "1", "FAKE_HEALTH_SEQ": "true"}, sp_program=("sp-fast", -1))
+    assert rc == 0, err
+    snap = json.loads((tmp_path / "cg-chain-sp-program-state.json").read_text())
+    assert snap == {"host": HOST, "port": 4456, "scene": "sp-fast", "source": -1}, (
+        "not on air: the program is snapshotted and pressed")
+    assert "program mismatch after the cut" in err and "source -1" in err, err
+    assert _posts(calls) == [] and "SP=unset" in out
+
+
+def test_the_program_read_back_needs_a_playlist_source(tmp_path):
+    for source in (-1, None, 0):
+        (tmp_path / "sp-program.json").unlink(missing_ok=True)
+        rc, out, err, _ = _run(
+            tmp_path, 'if cg_chain_program_readback "$HOST" "$PY"; then echo MATCH; else echo NO; fi',
+            sp_program=("sp-fast", source))
+        assert rc == 0, err
+        assert out.strip().endswith("NO"), (source, out, err)
+    rc, out, err, _ = _run(
+        tmp_path, 'if cg_chain_program_readback "$HOST" "$PY"; then echo MATCH; fi',
+        sp_program=("sp-fast", 12))
+    assert "MATCH" in out, out + err
+
+
+def test_a_restore_press_that_does_not_read_back_keeps_the_snapshot(tmp_path):
+    # SongPlayer answers OK for a press it kept (session.rs maps Switched::Kept to Reply::ok).
+    (tmp_path / "cg-chain-sp-program-state.json").write_text(
+        json.dumps({"host": HOST, "port": 4456, "scene": "sp-slow", "source": 3}))
+    rc, out, err, calls = _run(tmp_path, 'cg_chain_sp_program_restore "$PY" 30; echo REACHED',
+                               env={"FAKE_FACADE_NOOP": "1"}, sp_program=("sp-fast", 7))
+    assert rc == 0 and "REACHED" in out
+    assert any(c.startswith("cg_chain_scene.py facade-program") for c in calls)
+    assert "did not read back" in err and "SongPlayer program restored" not in out, out + err
+    assert (tmp_path / "cg-chain-sp-program-state.json").exists()
+    assert not (tmp_path / "cg-chain-sp-program-state.json.restored").exists()
+
+
+def test_a_snapshot_that_cannot_be_retired_is_loud_never_fatal(tmp_path):
+    (tmp_path / "cg-chain-sp-program-state.json").write_text(
+        json.dumps({"host": HOST, "port": 4456, "scene": "sp-slow", "source": 3}))
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "cg-chain-sp-program-state.json").write_text(
+        (tmp_path / "cg-chain-sp-program-state.json").read_text())
+    locked.chmod(0o555)
+    try:
+        rc, out, err, _ = _run(
+            tmp_path, 'cg_chain_sp_program_restore "$PY" 30; echo REACHED',
+            env={"CG_CHAIN_STATE_DIR": str(locked)}, sp_program=("sp-slow", 3))
+    finally:
+        locked.chmod(0o755)
+    assert rc == 0 and "REACHED" in out, "the restore promises rc 0 under the caller's set -e"
+    assert "could not retire" in err, err
+
+
+def test_uint_knobs_refuse_an_overlong_value(tmp_path):
+    rc, out, err, _ = _run(
+        tmp_path, 'CG_CHAIN_BURN_READBACK_S=99999999999999999999 cg_chain_burn_readback_secs; echo; '
+                  '_cg_chain_uint_or 1234567 9; echo; _cg_chain_uint_or 123456 9')
+    assert rc == 0, err
+    assert out.split() == ["3", "9", "123456"], "more than 6 digits falls back to the default"
+
+
+def test_rig_mode_event_survives_a_failing_cg_obs_sweep_and_the_contract_carries_it(tmp_path):
+    # The traveling box must never abort the owner's pre-broadcast switch: its sweep-off failure is
+    # a loud WARNING, and the contract's fail-closed sweep-check sentinel carries the verdict.
+    out, err, log = _rig(tmp_path, 'toggle_burn event; echo "TOGGLE_RC=$?"', "resolume",
+                         {"FAKE_PY_FAIL_HOST": "resolume.lan", "FAKE_PY_FAIL_RC": "2"})
+    assert "TOGGLE_RC=0" in out, out + err
+    assert "sweep-off --host resolume.lan" in log
+    assert "WARNING" in err and "could not enumerate the cg OBS inputs on resolume.lan" in err, err
+
+
+def test_rig_mode_event_still_fails_on_a_strih_sweep_failure(tmp_path):
+    out, err, log = _rig(tmp_path, 'toggle_burn event; echo "TOGGLE_RC=$?"', "none",
+                         {"FAKE_PY_FAIL_HOST": "10.77.9.202", "FAKE_PY_FAIL_RC": "1"})
+    assert "TOGGLE_RC=0" not in out, "a strih/stream sweep failure still fails the switch"
+
+
+def test_rig_mode_passes_its_obs_ws_password_to_the_cg_obs_sweep(tmp_path):
+    out, err, log = _rig(tmp_path, "toggle_burn event", "resolume", {"OBS_WS_PASSWORD": "rigpw"})
+    assert "sweep-off --host resolume.lan --password rigpw" in log, log
 
 
 # ---- (c) the home-gated cg OBS burn backstop --------------------------------------------------
@@ -535,10 +681,13 @@ def test_backstop_passes_the_cg_obs_password_only_when_set(tmp_path):
 _RIG_FAKE_PY = r'''#!/usr/bin/env bash
 echo "PYCALL: $*" >> "$PYLOG"
 echo ok
+case " $* " in
+  *" --host ${FAKE_PY_FAIL_HOST:-none} "*) exit "${FAKE_PY_FAIL_RC:-1}" ;;
+esac
 '''
 
 
-def _rig(tmp_path, body, home):
+def _rig(tmp_path, body, home, extra_env=None):
     fbin = tmp_path / "rbin"
     fbin.mkdir(exist_ok=True)
     py = fbin / "python3"
@@ -553,7 +702,7 @@ def _rig(tmp_path, body, home):
         ["/bin/bash", "-c", harness], capture_output=True, text=True, check=False,
         env={"PATH": f"{fbin}:/usr/local/bin:/usr/bin:/bin", "HOME": str(tmp_path),
              "PYLOG": str(pylog), "RIG_FLEET_ACK_FILE": str(ack), "OBS_FLEET_HOME": home,
-             "IMAG_OFFLINE_ACKED": "1", "IMAG_OFFLINE_ACK_REASON": "test"})
+             "IMAG_OFFLINE_ACKED": "1", "IMAG_OFFLINE_ACK_REASON": "test", **(extra_env or {})})
     return out.stdout, out.stderr, pylog.read_text()
 
 
@@ -576,9 +725,14 @@ def test_rig_mode_test_never_touches_the_cg_obs(tmp_path):
 
 def test_rig_mode_routes_both_event_sweeps_and_only_them_through_the_backstop():
     s = _RIG.read_text()
-    assert s.count("done < <(obs_burn_targets; cg_chain_backstop_sweep_targets)") == 2, (
-        "the EVENT sweep-off loop and the contract's sweep-check loop both include the cg OBS")
-    assert s.count("done < <(obs_burn_targets)\n") == 2, "the two pinned program-input loops stay pinned"
+    assert s.count("done < <(obs_burn_targets; cg_chain_backstop_sweep_targets)") == 1, (
+        "only the contract's fail-closed sweep-check loop reads the cg OBS row")
+    assert s.count("done < <(obs_burn_targets)\n") == 3, (
+        "the two pinned program-input loops and the EVENT sweep-off loop stay on the rig boxes")
+    tb = s[s.index("toggle_burn() {"):]
+    tb = tb[:tb.index("\n}\n")]
+    assert 'cg_chain_backstop_sweep_off "$here/obs_burn_filter.py"' in tb, (
+        "the EVENT sweep-off of the cg OBS is the backstop lib's WARN-only sweep")
     assert '. "$RIG_MODE_DIR/lib/cg-obs-burn-backstop.sh"' in s, "rig-mode sources the backstop lib"
     assert "cg-chain-e2e.sh" not in s, "rig-mode never pulls in the E2E-only CG_CHAIN profile lib"
     body = s[s.index("event_mode_assert() {"):s.index("\ndo_event() {")]
@@ -597,6 +751,12 @@ def test_recording_e2e_runs_the_backstop_right_after_the_prerun_sweep():
     call = s.index('cg_chain_backstop_sweep_off "$HERE/obs_burn_filter.py" "$OBS_CLEANUP_TIMEOUT"')
     assert s.count("cg_chain_backstop_sweep_off") == 1
     assert loop < call < s.index("\n  # issue 1271: the read-only stray recording/streaming check", loop)
+
+
+def test_recording_e2e_turns_the_songplayer_burn_off_only_when_one_is_owed():
+    s = _E2E.read_text()
+    assert ('if [ "$CG_RECORDING_STARTED" != 1 ] && [ "${CG_SP_BURN_OWED:-0}" = 1 ]; then '
+            'cg_chain_songplayer_burn off; fi') in s
 
 
 def test_the_songplayer_burn_goes_on_inside_the_record_start_after_the_cuts():

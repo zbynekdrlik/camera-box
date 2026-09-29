@@ -594,8 +594,13 @@ fn recording_e2e_ends_the_cg_leg_right_after_stoprecord() {
 fn recording_e2e_turns_the_burn_off_when_the_cg_recording_never_started() {
     let s = recording_e2e_text();
     let start = s.find("cg_chain_record_start").expect("the cg StartRecord");
+    // Issue 1302 slice 3 review round 1: the OFF is sent only when this run owes one (the burn ON
+    // now lives inside the record start, after the program cuts).
     let off = s
-        .find("if [ \"$CG_RECORDING_STARTED\" != 1 ]; then cg_chain_songplayer_burn off; fi")
+        .find(
+            "if [ \"$CG_RECORDING_STARTED\" != 1 ] && [ \"${CG_SP_BURN_OWED:-0}\" = 1 ]; then \
+             cg_chain_songplayer_burn off; fi",
+        )
         .expect("#1302: a burn with no cg recording is turned straight back off");
     let next = s
         .find("# [5b/8] #707 B1")
