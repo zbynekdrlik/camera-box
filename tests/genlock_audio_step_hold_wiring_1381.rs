@@ -28,7 +28,7 @@ const WINDOWS_WORKFLOWS: [&str; 2] = [
 ];
 
 /// The `obs-source.c` wiring (squished). The pwsh gate in both Windows workflows requires each one.
-const STEP_HOLD_WIRING: [&str; 14] = [
+const STEP_HOLD_WIRING: [&str; 17] = [
     "#include \"obs-genlock-wall-step.h\"",
     "int64_t genlock_off_ns = genlock_off_live_ns; const int genlock_step_release = genlock_audio_step_hold_source( source, genlock_hold_mode == GENLOCK_AUDIO_HOLD_TIMECODE, genlock_off_live_ns, data->timestamp, genlock_step_packet_ns, os_time, genlock_timeline_reset, &genlock_off_ns);",
     "&source->genlock_audio_step_step_ns, timecode, off_live_ns, raw_ts_ns, packet_ns, now_ns, timeline_reset, GENLOCK_WALL_STEP_MIN_NS, off_out);",
@@ -40,9 +40,12 @@ const STEP_HOLD_WIRING: [&str; 14] = [
     "if (genlock_asrc_tc && genlock_asrc_measured && !source->genlock_audio_step_active) asrc_timecode_ingest(source, genlock_audio_stamp_mono_ns(data->timestamp, genlock_off_ns), genlock_asrc_err_ms, genlock_asrc_appended); else if (source->genlock_audio_step_active) source->asrc_tc_have_prev = false;",
     "genlock_audio_step_log(source, genlock_step_release, genlock_off_live_ns, os_time);",
     "step_ms=%+.3f held_ms=%.1f released=%s residual_ms=%+.1f",
-    "if (source->genlock_audio_step_active) return;",
-    "if (n2_on_grid && !source->genlock_audio_step_active) genlock_video_delay_track(",
-    "const uint64_t genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now); if (genlock_n1_tick_is_on_grid(genlock_delay_tick_wall, interval) && !source->genlock_audio_step_active) genlock_video_delay_track(&source->genlock_video_delay_smoothed_ns,",
+    "if (genlock_audio_step_video_frozen(source)) { if (relock) source->genlock_audio_step_relock_pending = true; return; }",
+    "if (n2_on_grid && !genlock_audio_step_video_frozen(source)) genlock_video_delay_track(",
+    "const uint64_t genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now); if (genlock_n1_tick_is_on_grid(genlock_delay_tick_wall, interval) && !genlock_audio_step_video_frozen(source)) genlock_video_delay_track(&source->genlock_video_delay_smoothed_ns,",
+    "if (source->genlock_audio_step_relock_pending) relock = true; source->genlock_audio_step_relock_pending = false;",
+    "static bool genlock_audio_step_video_frozen(const obs_source_t *source) { return genlock_audio_step_freezes_video(source->genlock_audio_step_active, source->genlock_audio_step_start_ns, os_gettime_ns()); }",
+    "source->context.name ? source->context.name : \"?\", (double)source->genlock_audio_step_step_ns / 1e6,",
 ];
 
 /// Shapes that must be GONE: the live offset feeding the timecode ASRC's stamp or the placement term
@@ -183,7 +186,7 @@ fn the_render_thread_freezes_the_latch_and_both_trackers_1381() {
         "issue 1381: the definition and the two present tails only"
     );
     assert_eq!(
-        src.matches("!source->genlock_audio_step_active) genlock_video_delay_track(")
+        src.matches("!genlock_audio_step_video_frozen(source)) genlock_video_delay_track(")
             .count(),
         2,
         "issue 1381: BOTH present-tail video-delay tracker calls (N==1 conveyor, N>=2 grid release) \
@@ -199,8 +202,8 @@ fn the_source_carries_the_hold_state_1381() {
         "int64_t genlock_audio_step_prev_off_ns;",
         "uint64_t genlock_audio_step_prev_raw_ns;",
         "uint64_t genlock_audio_step_prev_packet_ns;",
-        "int64_t genlock_audio_step_prev_age_ns;",
-        "int64_t genlock_audio_step_base_age_ns;",
+        "int64_t genlock_audio_step_nominal_age_ns;",
+        "uint64_t genlock_audio_step_nominal_dev_since_ns;",
         "int64_t genlock_audio_step_held_off_ns;",
         "uint64_t genlock_audio_step_start_ns;",
         "int64_t genlock_audio_step_step_ns;",

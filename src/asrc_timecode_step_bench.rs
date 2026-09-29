@@ -65,6 +65,8 @@ struct StepCase {
     /// Review round 1: > 0 = the SENDER steps first, at the step time, and the receiver this long
     /// after it (`lag_ns` is then unused). Everything is measured from the receiver's step.
     sender_first_ns: u64,
+    /// Review round 1: extra arrival jitter, uniform 0..this (0 = the default 2-5 ms delivery only).
+    burst_jitter_ns: u64,
 }
 
 /// When the receiver's own wall steps.
@@ -116,7 +118,12 @@ fn step_sender_packets(case: StepCase) -> Vec<Packet> {
                 (emit, WALL0 + emit, leap)
             }
         };
-        let arrival_ns = (emit + 2_000_000 + rng.ns(0, 3_000_000)).max(prev_arrival);
+        let extra = if case.burst_jitter_ns > 0 {
+            rng.ns(0, case.burst_jitter_ns)
+        } else {
+            0
+        };
+        let arrival_ns = (emit + 2_000_000 + rng.ns(0, 3_000_000) + extra).max(prev_arrival);
         prev_arrival = arrival_ns;
         out.push(Packet {
             slot: k,
@@ -234,6 +241,7 @@ fn jump(wall_ns: i64, lag_ns: u64) -> StepCase {
         lag_ns,
         follow: Follow::Jump,
         sender_first_ns: 0,
+        burst_jitter_ns: 0,
     }
 }
 
@@ -271,6 +279,7 @@ fn the_89_7_ms_step_costs_at_most_one_event_and_is_never_late_1381() {
                 lag_ns: lag,
                 follow,
                 sender_first_ns: 0,
+                burst_jitter_ns: 0,
             };
             let r = run_step(case, Variant::Production);
             let released_s = r.releases.first().map_or(0.0, |x| x.0);
@@ -318,6 +327,7 @@ fn a_sender_that_catches_up_is_released_at_once_and_one_that_never_follows_at_th
                 lag_ns: lag,
                 follow: Follow::Burst,
                 sender_first_ns: 0,
+                burst_jitter_ns: 0,
             };
             let r = run_step(case, Variant::Production);
             let caught_up_s = (lag as f64 + wall_ns.min(0).unsigned_abs() as f64) / 1e9;
@@ -346,6 +356,7 @@ fn a_sender_that_catches_up_is_released_at_once_and_one_that_never_follows_at_th
         lag_ns: 0,
         follow: Follow::Never,
         sender_first_ns: 0,
+        burst_jitter_ns: 0,
     };
     let r = run_step(never, Variant::Production);
     assert!(
@@ -368,6 +379,7 @@ fn steady_state_and_a_small_step_never_hold_1381() {
             lag_ns: 0,
             follow: Follow::NoStep,
             sender_first_ns: 0,
+            burst_jitter_ns: 0,
         },
         Variant::Production,
     );
@@ -398,6 +410,7 @@ fn a_sender_that_stepped_first_costs_one_placement_at_the_receiver_step_1381() {
                 lag_ns: 0,
                 follow,
                 sender_first_ns: 2 * NS_PER_S,
+                burst_jitter_ns: 0,
             };
             let r = run_step(case, Variant::Production);
             assert!(
@@ -414,4 +427,59 @@ fn a_sender_that_stepped_first_costs_one_placement_at_the_receiver_step_1381() {
             );
         }
     }
+}
+
+#[test]
+fn heavy_arrival_jitter_bounds_a_small_step_to_two_events_1381() {
+    // review round 1: the age test reads one packet's age against the smoothed nominal. Under 20 ms
+    // of extra arrival jitter a step under ~55 ms can read as followed early: the release places it,
+    // and a sender whose stamps then JUMP has that jump booked and paid at 1000 ppm -- two events,
+    // settled within the step's own payment time. A catch-up sender, a 60 ms step and the 682 ms one
+    // keep at most one event; a steady feed never holds.
+    for (wall_ns, follow) in [
+        (40_000_000_i64, Follow::Jump),
+        (40_000_000, Follow::Burst),
+        (60_000_000, Follow::Jump),
+        (60_000_000, Follow::Burst),
+        (-50_000_000, Follow::Jump),
+        (STEP_682_NS, Follow::Jump),
+    ] {
+        let case = StepCase {
+            wall_ns,
+            lag_ns: LAG_MIN_NS,
+            follow,
+            sender_first_ns: 0,
+            burst_jitter_ns: 20_000_000,
+        };
+        let r = run_step(case, Variant::Production);
+        let pay_s = wall_ns.unsigned_abs() as f64 / 1e6;
+        let max_events = if follow == Follow::Jump && wall_ns.unsigned_abs() < 55_000_000 {
+            2
+        } else {
+            1
+        };
+        assert!(
+            r.events() <= max_events
+                && r.releases.len() == 1
+                && !r.holding_at_end
+                && r.av_settle_s <= LAG_MIN_NS as f64 / 1e9 + pay_s + 5.0
+                && r.av_tail_ms <= AV_BOUND_MS,
+            "issue 1381: {case:?}: under 20 ms arrival jitter a step costs at most {max_events} \
+             event(s) and settles within its own payment time: {r:?}"
+        );
+    }
+    let steady = run_step(
+        StepCase {
+            wall_ns: 0,
+            lag_ns: 0,
+            follow: Follow::NoStep,
+            sender_first_ns: 0,
+            burst_jitter_ns: 20_000_000,
+        },
+        Variant::Production,
+    );
+    assert!(
+        steady.events() == 0 && steady.releases.is_empty(),
+        "issue 1381: a steady feed under 20 ms arrival jitter never holds: {steady:?}"
+    );
 }

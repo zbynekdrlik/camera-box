@@ -75,7 +75,9 @@ pub fn lift_block() -> String {
         "genlock_audio_step_release_token(",
         "genlock_audio_stamp_age_ns(",
         "genlock_audio_step_mag_ns(",
+        "genlock_audio_step_track_nominal(",
         "genlock_audio_step_hold(",
+        "genlock_audio_step_freezes_video(",
         "genlock_audio_step_residual_ns(",
         "genlock_audio_step_release_places(",
     ] {

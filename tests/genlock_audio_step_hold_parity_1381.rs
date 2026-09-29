@@ -8,15 +8,19 @@
 //! -Wconversion -Wformat=2 -Werror`, drives the C over one scripted packet sequence from arrays and
 //! requires every packet's offset, release and state to equal the Rust authority driven the same way.
 //! The sequence covers every path: a step the stamps follow by a jump, a follow in pieces, a catch-up
-//! with continuous stamps, the 10 s bound (and, with 20 ms packets, its exact edge), a timeline reset,
+//! with continuous stamps (a 4x burst), a sender that stepped FIRST (its stamps jumped, or it caught
+//! up: a zero-length hold released on the receiver's own packet), the nominal age's in-band track
+//! (both signs), its out-of-band timer and the exact re-anchor edge, the 10 s bound (and, with 20 ms
+//! packets, its exact edge), a timeline reset,
 //! leaving timecode mode in a hold, stamp jitter inside a hold, a step within one packet, the joint
 //! step, the 2 ms boundary (with 1 ms packets, where a 2 ms jump is more than a packet) and the
 //! one-packet boundary, and the two's-complement extremes. It FAILS LOUDLY when no C compiler is
 //! present.
 
 use camera_box::genlock_audio_pairing::{
-    audio_stamp_age_ns, audio_step_hold, audio_step_release_places, audio_step_residual_ns,
-    AudioStepHold, AudioStepRelease, AUDIO_STEP_HOLD_MAX_NS,
+    audio_stamp_age_ns, audio_step_freezes_video, audio_step_hold, audio_step_release_places,
+    audio_step_residual_ns, AudioStepHold, AudioStepRelease, AUDIO_STEP_HOLD_MAX_NS,
+    AUDIO_STEP_NOMINAL_REANCHOR_NS,
 };
 use camera_box::genlock_wall_step::WALL_STEP_MIN_NS;
 
@@ -68,14 +72,70 @@ fn sequence() -> Vec<Pkt> {
         );
     }
     clear(&mut v);
-    // a catch-up: the stamps stay continuous, 40 packets later they arrive the step early
+    // a catch-up: the stamps stay continuous, 40 packets later a 4x burst catches the step up
+    let mut t = MONO + k * PACKET;
+    for i in 0..83_u64 {
+        let off = if i < 3 { OFF } else { OFF - 682_474_000 };
+        v.push((true, off, WALL + k * PACKET, PACKET, t, false));
+        k += 1;
+        t += if i < 43 { PACKET } else { PACKET / 4 };
+    }
+    clear(&mut v);
+    // review round 1: the sender stepped FIRST -- its stamps jumped, the receiver steps 2 s later (a
+    // zero-length hold, released on the receiver's own packet)
     for _ in 0..3 {
         push(&mut v, &mut k, OFF, 0, 0, false);
     }
-    for i in 0..60_u64 {
-        let early = if i >= 40 { 682_474_000 } else { 0 };
-        push(&mut v, &mut k, OFF - 682_474_000, 0, early, false);
+    for _ in 0..60 {
+        push(&mut v, &mut k, OFF, 682_474_000, 0, false);
     }
+    for _ in 0..4 {
+        push(&mut v, &mut k, OFF - 682_474_000, 682_474_000, 0, false);
+    }
+    clear(&mut v);
+    // ... or it caught up first (a 4x burst), then the receiver's step
+    let mut t = MONO + k * PACKET;
+    for i in 0..45_u64 {
+        let off = if i < 41 { OFF } else { OFF - 682_474_000 };
+        v.push((true, off, WALL + k * PACKET, PACKET, t, false));
+        k += 1;
+        t += if (3..31).contains(&i) {
+            PACKET / 4
+        } else {
+            PACKET
+        };
+    }
+    clear(&mut v);
+    // the nominal age: jittered arrivals move it in band (both signs, a remainder the division
+    // truncates toward zero); stamps 100 ms ahead leave the band and start the timer; packets 100 s
+    // apart reach the re-anchor at exactly 600 s; the receiver's later step then HOLDS (the stamps
+    // are off the re-anchored nominal)
+    let mut t = MONO + k * PACKET;
+    let jitter: [i64; 5] = [0, 3_000_001, -5_000_003, 1_234_567, -2_000_000];
+    for i in 0..20_usize {
+        let now = (t as i64 + jitter[i % 5]) as u64;
+        v.push((true, OFF, WALL + k * PACKET, PACKET, now, false));
+        k += 1;
+        t += PACKET;
+    }
+    let far = 100_000_000_000_u64;
+    for n in 0..8_u64 {
+        let raw = (WALL + k * PACKET + n * far).wrapping_add(100_000_000);
+        v.push((true, OFF, raw, PACKET, t + n * far, false));
+    }
+    let t_end = t + 7 * far;
+    let raw_end = WALL + k * PACKET + 7 * far + 100_000_000;
+    for j in 1..4_u64 {
+        v.push((
+            true,
+            OFF - 100_000_000,
+            raw_end + j * PACKET,
+            PACKET,
+            t_end + j * PACKET,
+            false,
+        ));
+    }
+    k = (t_end - MONO) / PACKET + 4;
     clear(&mut v);
     // the 10 s bound, up to one packet past its exact edge
     for _ in 0..3 {
@@ -136,7 +196,19 @@ fn sequence() -> Vec<Pkt> {
     push_at(&mut v, 5, 1_000_000, OFF + WALL_STEP_MIN_NS + d, 0);
     push_at(&mut v, 6, 1_000_000, OFF + WALL_STEP_MIN_NS + d, -d);
     clear(&mut v);
-    // two's-complement extremes
+    // arithmetic edges: an out-of-band packet at now = 0 still starts the timer (a 0 would read as
+    // in band), then the two's-complement extremes
+    v.push((true, OFF, WALL, PACKET, 0, false));
+    v.push((true, OFF, WALL + PACKET + 10_000_000_000, PACKET, 0, false));
+    v.push((
+        true,
+        OFF,
+        WALL + 2 * PACKET + 10_000_000_000,
+        PACKET,
+        PACKET,
+        false,
+    ));
+    clear(&mut v);
     v.push((true, i64::MAX, u64::MAX, 2, 5, false));
     v.push((true, i64::MIN, 1, 2, 6, false));
     v.push((true, 0, 0, u64::MAX, u64::MAX, false));
@@ -175,8 +247,8 @@ fn state_line(off: i64, rel: u8, s: &AudioStepHold) -> String {
         s.prev_off_ns,
         s.prev_raw_ns,
         s.prev_packet_ns,
-        s.prev_age_ns,
-        s.base_age_ns,
+        s.nominal_age_ns,
+        s.nominal_dev_since_ns,
         s.held_off_ns,
         s.start_ns,
         s.step_ns
@@ -201,16 +273,16 @@ fn c_audio_step_hold_matches_the_rust_authority_1381() {
     static const uint64_t now[] = {{ {} }};
     static const int rst[] = {{ {} }};
     bool active = false;
-    int64_t prev_off = 0, prev_age = 0, base_age = 0, held = 0, step = 0;
-    uint64_t prev_raw = 0, prev_pkt = 0, start = 0;
+    int64_t prev_off = 0, nominal = 0, held = 0, step = 0;
+    uint64_t prev_raw = 0, prev_pkt = 0, dev_since = 0, start = 0;
     for (size_t i = 0; i < sizeof(tc) / sizeof(tc[0]); i++) {{
         int64_t use = 0;
-        const int rel = genlock_audio_step_hold(&active, &prev_off, &prev_raw, &prev_pkt, &prev_age, &base_age,
+        const int rel = genlock_audio_step_hold(&active, &prev_off, &prev_raw, &prev_pkt, &nominal, &dev_since,
                                                 &held, &start, &step, tc[i] != 0, off[i], raw[i], pkt[i],
                                                 now[i], rst[i] != 0, {min}ll, &use);
-        printf("%lld %d %d %lld %llu %llu %lld %lld %lld %llu %lld\n", (long long)use, rel, active ? 1 : 0,
+        printf("%lld %d %d %lld %llu %llu %lld %llu %lld %llu %lld\n", (long long)use, rel, active ? 1 : 0,
                (long long)prev_off, (unsigned long long)prev_raw, (unsigned long long)prev_pkt,
-               (long long)prev_age, (long long)base_age, (long long)held, (unsigned long long)start,
+               (long long)nominal, (unsigned long long)dev_since, (long long)held, (unsigned long long)start,
                (long long)step);
     }}
 "#,
@@ -257,6 +329,62 @@ fn c_audio_step_hold_matches_the_rust_authority_1381() {
             > 300,
         "issue 1381: the sequence must hold for the whole 10 s bound"
     );
+    // review round 1: a zero-length hold (released Followed on a packet that never held), the
+    // re-anchor (a nominal that jumps while no hold runs) and the out-of-band timer at now = 0
+    let mut zero_length = false;
+    let mut reanchor = false;
+    for w in want.windows(2) {
+        let (a, b) = (&w[0], &w[1]);
+        if field(a, 2).as_deref() == Some("0")
+            && field(b, 1) == Some((AudioStepRelease::Followed as u8).to_string())
+        {
+            zero_length = true;
+        }
+        let (na, nb) = (field(a, 6), field(b, 6));
+        let parse = |x: Option<String>| x.and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        if field(b, 2).as_deref() == Some("0")
+            && (parse(nb) - parse(na)).unsigned_abs() >= 100_000_000
+            && field(a, 7).as_deref() != Some("0")
+            && field(b, 7).as_deref() == Some("0")
+        {
+            reanchor = true;
+        }
+    }
+    assert!(
+        zero_length && reanchor && want.iter().any(|l| field(l, 7).as_deref() == Some("1")),
+        "issue 1381: the sequence must reach a zero-length hold, a re-anchor and the now = 0 timer"
+    );
+    assert_eq!(AUDIO_STEP_NOMINAL_REANCHOR_NS, 6 * 100_000_000_000);
+}
+
+#[test]
+fn c_audio_step_freezes_video_matches_the_rust_authority_1381() {
+    let m = AUDIO_STEP_HOLD_MAX_NS;
+    let vectors: [(bool, u64, u64); 6] = [
+        (true, 100, 100),
+        (true, 100, 100 + m - 1),
+        (true, 100, 100 + m),
+        (false, 0, 5),
+        (true, u64::MAX, 3),
+        (true, 5, 3),
+    ];
+    let mut body = String::new();
+    for (a, st, now) in &vectors {
+        body.push_str(&format!(
+            "    printf(\"%d\\n\", genlock_audio_step_freezes_video({}, {st}ull, {now}ull) ? 1 : 0);\n",
+            u8::from(*a)
+        ));
+    }
+    let out = run_c(&body, "step_freeze_1381");
+    let want: Vec<String> = vectors
+        .iter()
+        .map(|&(a, st, now)| u8::from(audio_step_freezes_video(a, st, now)).to_string())
+        .collect();
+    assert_eq!(
+        out, want,
+        "issue 1381: genlock_audio_step_freezes_video diverged from the Rust authority"
+    );
+    assert_eq!(want, ["1", "1", "0", "0", "1", "0"]);
 }
 
 #[test]

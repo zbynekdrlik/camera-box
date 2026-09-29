@@ -26,7 +26,7 @@ use std::fs;
 use std::path::PathBuf;
 
 const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
-const TRACK: &str = "const uint64_t genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now); if (genlock_n1_tick_is_on_grid(genlock_delay_tick_wall, interval) && !source->genlock_audio_step_active) genlock_video_delay_track(&source->genlock_video_delay_smoothed_ns,";
+const TRACK: &str = "const uint64_t genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now); if (genlock_n1_tick_is_on_grid(genlock_delay_tick_wall, interval) && !genlock_audio_step_video_frozen(source)) genlock_video_delay_track(&source->genlock_video_delay_smoothed_ns,";
 const SAMPLE: &str =
     "genlock_video_delay_sample_ns(genlock_delay_tick_wall, next_frame->timestamp), interval);";
 

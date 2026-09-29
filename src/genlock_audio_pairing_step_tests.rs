@@ -347,3 +347,88 @@ fn a_sender_that_stepped_first_is_never_held_1381() {
         }
     }
 }
+
+#[test]
+fn the_nominal_age_follows_in_band_and_reanchors_out_of_band_1381() {
+    // review round 1: the reference both age tests use. Seeded by the first packet, moved by 1/1024
+    // of an in-band difference (truncated toward zero, both signs), left alone out of band, and
+    // re-anchored after ten minutes out of band without a hold.
+    let base = 1_000_000_000_000_u64;
+    let mut s = AudioStepHold::default();
+    audio_step_hold(&mut s, true, OFF, WALL, PACKET, base, false, MIN);
+    let seed = audio_stamp_age_ns(base, WALL, OFF);
+    assert_eq!((s.nominal_age_ns, s.nominal_dev_since_ns), (seed, 0));
+    // an arrival 3.000001 ms late / 5.000003 ms early: +2929 / -4885 ns (1/1024 of the
+    // difference, truncated toward zero)
+    audio_step_hold(
+        &mut s,
+        true,
+        OFF,
+        WALL + PACKET,
+        PACKET,
+        base + PACKET + 3_000_001,
+        false,
+        MIN,
+    );
+    assert_eq!(s.nominal_age_ns, seed + 2_929);
+    audio_step_hold(
+        &mut s,
+        true,
+        OFF,
+        WALL + 2 * PACKET,
+        PACKET,
+        base + 2 * PACKET - 5_000_003,
+        false,
+        MIN,
+    );
+    assert_eq!(s.nominal_age_ns, seed + 2_929 - 4_885);
+    // stamps 100 ms ahead of the receiver's wall (the sender moved alone): out of band, the timer runs
+    let nominal = s.nominal_age_ns;
+    let far = 100_000_000_000_u64;
+    let t0 = base + 3 * PACKET;
+    for n in 0..6_u64 {
+        let raw = WALL + 3 * PACKET + n * far + 100_000_000;
+        let r = audio_step_hold(&mut s, true, OFF, raw, PACKET, t0 + n * far, false, MIN);
+        assert_eq!(r, (OFF, AudioStepRelease::None));
+        assert_eq!(
+            (s.nominal_age_ns, s.nominal_dev_since_ns),
+            (nominal, t0),
+            "packet {n}"
+        );
+    }
+    // exactly ten minutes out of band: the age is the nominal from now on
+    let raw = WALL + 3 * PACKET + 6 * far + 100_000_000;
+    audio_step_hold(&mut s, true, OFF, raw, PACKET, t0 + 6 * far, false, MIN);
+    assert_eq!(
+        (s.nominal_age_ns, s.nominal_dev_since_ns),
+        (audio_stamp_age_ns(t0 + 6 * far, raw, OFF), 0),
+        "issue 1381: an age out of band for AUDIO_STEP_NOMINAL_REANCHOR_NS re-anchors"
+    );
+    assert_eq!(AUDIO_STEP_NOMINAL_REANCHOR_NS, 6 * far);
+    // inside a hold the nominal is frozen
+    let mut s = AudioStepHold::default();
+    for k in 0..10 {
+        feed(&mut s, k, 0, 0);
+    }
+    let frozen = s.nominal_age_ns;
+    for k in 10..40 {
+        feed(&mut s, k, 682_474_000, 0);
+        assert!(s.active && s.nominal_age_ns == frozen && s.nominal_dev_since_ns == 0);
+    }
+}
+
+#[test]
+fn the_render_thread_freeze_is_bounded_by_the_hold_bound_1381() {
+    let start = 5_000_000_000_u64;
+    assert!(audio_step_freezes_video(true, start, start));
+    assert!(audio_step_freezes_video(
+        true,
+        start,
+        start + AUDIO_STEP_HOLD_MAX_NS - 1
+    ));
+    assert!(
+        !audio_step_freezes_video(true, start, start + AUDIO_STEP_HOLD_MAX_NS),
+        "issue 1381: a hold whose audio stopped never freezes the video side past the bound"
+    );
+    assert!(!audio_step_freezes_video(false, start, start));
+}
