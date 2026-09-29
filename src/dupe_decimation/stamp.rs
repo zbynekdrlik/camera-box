@@ -42,16 +42,26 @@ pub fn stamp_slot_action(
     interval_ns: u64,
     repeat_budget: u64,
 ) -> StampSlotAction {
-    // RED stub (issue 1367 D2): every frame reads as a plain advance.
-    let _ = (
-        last_emitted_slot_ns,
-        slot_ns,
-        repeat_budget,
-        grid_steps_between(0, 0, interval_ns),
-        GENLOCK_MAX_CATCHUP_INTERVALS,
-        STARVATION_REPEAT_MAX,
-    );
-    StampSlotAction::Advance
+    if last_emitted_slot_ns == 0 {
+        return StampSlotAction::Latch;
+    }
+    if slot_ns == last_emitted_slot_ns {
+        return StampSlotAction::Duplicate;
+    }
+    if slot_ns < last_emitted_slot_ns {
+        return StampSlotAction::Resync { skipped: 0 };
+    }
+    let missing = grid_steps_between(last_emitted_slot_ns, slot_ns, interval_ns).saturating_sub(1);
+    if missing == 0 {
+        StampSlotAction::Advance
+    } else if missing <= GENLOCK_MAX_CATCHUP_INTERVALS {
+        StampSlotAction::Gap {
+            missing,
+            repeats: missing.min(repeat_budget.min(STARVATION_REPEAT_MAX)),
+        }
+    } else {
+        StampSlotAction::Resync { skipped: missing }
+    }
 }
 
 #[cfg(test)]

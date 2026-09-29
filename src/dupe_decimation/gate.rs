@@ -155,6 +155,9 @@ pub struct DecimationGate {
     /// (issue 1367 D2) The grid slot of the most recently EMITTED frame's stamp (`0` = none yet),
     /// kept on both paths so the stamp-driven path continues from the poll-time one.
     last_emitted_stamp_slot_ns: u64,
+    /// (issue 1367 D2) Did the previous poll decide on a stamp slot? A poll-time poll after one
+    /// re-latches its boundary (that boundary sits a dequeue latency behind the poll instant).
+    stamp_driven: bool,
     /// (issue 1367 D2) The stamp-driven decision of the most recent poll (`None` on the poll-time
     /// path), for the capture loop's diagnostics and the bench.
     last_stamp_action: Option<StampSlotAction>,
@@ -502,7 +505,20 @@ impl DecimationGate {
         capture_mono_ns: u64,
     ) -> bool {
         if interval_ns == 0 {
+            self.pending_stamp_slot_ns = None;
             return true;
+        }
+        // (issue 1367 D2) a staged stamp slot: the capture phase tracker drives this stream, so the
+        // decision is the slot's alone — the poll wall clock and the queue signals are not read.
+        if let Some(slot_ns) = self.pending_stamp_slot_ns.take() {
+            return self.poll_on_stamp(slot_ns, interval_ns, content_hash, capture_mono_ns);
+        }
+        self.last_stamp_action = None;
+        if core::mem::take(&mut self.stamp_driven) {
+            // Back from the stamp-driven path: its boundary sits on the CAPTURE-time grid, a dequeue
+            // latency behind this poll instant. Re-latch on this poll's own slot so the frame emits on
+            // time instead of reading as a stale (lag >= 1) boundary that would fill a repeat.
+            self.next_boundary_ns = crate::genlock_grid::grid_floor_ns(now_ns, interval_ns);
         }
         // (#1145 v2.1) reset the per-poll intentional-extra-advance accounting; only the FastDrain
         // arm sets it (see the field doc — it keeps a fast-drain out of the #707 skip diagnostic).
@@ -822,7 +838,14 @@ impl DecimationGate {
         self.shed_log.take_starvation_repeats()
     }
 
-    /// (issue 1367 D2) RED stub: stages the slot, but `poll` does not decide on it yet.
+    /// (issue 1367 D2) Stage this frame's STAMP SLOT (a grid point, from
+    /// `crate::capture_phase::CapturePhase::stamp_frame`) for the NEXT [`poll`](Self::poll) to
+    /// decide on — call it immediately before `poll`, like
+    /// [`note_frame_luma`](Self::note_frame_luma). `poll` then compares the slot with the last
+    /// EMITTED frame's slot ([`stamp_slot_action`]): a one-slot advance emits, the same slot drops (a
+    /// real duplicate), a gap within the catch-up bound emits after the existing starvation repeats
+    /// fill the missing slots, a bigger jump or a backward move re-latches. Not calling it keeps
+    /// today's poll-time gate, byte-identical.
     pub fn note_stamp_slot(&mut self, slot_ns: u64) {
         self.pending_stamp_slot_ns = Some(slot_ns);
     }
@@ -840,5 +863,59 @@ impl DecimationGate {
     /// when it decided on the poll wall clock.
     pub fn last_stamp_action(&self) -> Option<StampSlotAction> {
         self.last_stamp_action
+    }
+
+    /// (issue 1367 D2) The stamp-driven poll. Keeps the takt EMA and the content-hash state warm for
+    /// a later poll-time poll, clears the poll-time transients (a deferral, a drain-hold streak, the
+    /// convergence latch, the corrupted make-up — a corrupted drop is a sequence gap here, which the
+    /// gap fill already covers) and never touches the unique-rate windows (a 1:1 stream sheds no
+    /// dupes). The #707 skip diagnostic keeps working: the boundary is set to the slot after the
+    /// emitted one, and the fill is folded into the intentional extra advance.
+    fn poll_on_stamp(
+        &mut self,
+        slot_ns: u64,
+        interval_ns: u64,
+        content_hash: u64,
+        capture_mono_ns: u64,
+    ) -> bool {
+        self.last_poll_fast_drain_extra = 0;
+        self.last_poll_starvation_repeats = 0;
+        self.note_capture_takt(capture_mono_ns);
+        self.prev_hash = Some(content_hash);
+        self.pending_luma = None;
+        self.prev_luma = None;
+        self.prev_was_noisy_dupe = false;
+        self.deferred_this_boundary = false;
+        self.consecutive_drain_holds = 0;
+        self.converging_deep_backlog = false;
+        self.corrupted_makeup_deficit = 0;
+        self.stamp_driven = true;
+        let budget = STARVATION_REPEAT_MAX.saturating_sub(self.consecutive_starvation_repeats);
+        let action = stamp_slot_action(
+            self.last_emitted_stamp_slot_ns,
+            slot_ns,
+            interval_ns,
+            budget,
+        );
+        self.last_stamp_action = Some(action);
+        match action {
+            StampSlotAction::Duplicate => {
+                self.shed_log.record_shed(false);
+                return false;
+            }
+            StampSlotAction::Latch | StampSlotAction::Advance => {
+                self.consecutive_starvation_repeats = 0;
+            }
+            StampSlotAction::Gap { repeats, .. } if repeats > 0 => {
+                self.consecutive_starvation_repeats += repeats;
+                self.last_poll_starvation_repeats = repeats;
+                self.shed_log.record_starvation_repeats(repeats);
+            }
+            StampSlotAction::Gap { .. } | StampSlotAction::Resync { .. } => {}
+        }
+        self.last_emitted_stamp_slot_ns = slot_ns;
+        self.next_boundary_ns =
+            crate::genlock_pacing::genlock_advance_boundary(slot_ns, 1, interval_ns);
+        true
     }
 }

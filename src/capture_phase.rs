@@ -112,6 +112,32 @@ impl FitSums {
         self.sxy += dx * dy;
         self.syy += dy * dy;
     }
+
+    /// Move the origin by `(ddx, ddy)`: every `dx` becomes `dx - ddx`, every `dy` becomes
+    /// `dy - ddy`. Exact.
+    fn shift(&mut self, ddx: i128, ddy: i128) {
+        let (n, sx, sy) = (self.n, self.sx, self.sy);
+        self.sxx += n * ddx * ddx - 2 * ddx * sx;
+        self.sxy += n * ddx * ddy - ddx * sy - ddy * sx;
+        self.syy += n * ddy * ddy - 2 * ddy * sy;
+        self.sx -= n * ddx;
+        self.sy -= n * ddy;
+    }
+
+    /// `n * Sxx - Sx^2` (n^2 x the variance of x). `> 0` once two distinct samples exist.
+    fn d(&self) -> i128 {
+        self.n * self.sxx - self.sx * self.sx
+    }
+
+    /// `n * Sxy - Sx * Sy`: the slope is `nb / d`.
+    fn nb(&self) -> i128 {
+        self.n * self.sxy - self.sx * self.sy
+    }
+}
+
+/// Round `num / den` to the nearest integer, `den > 0`.
+fn div_round(num: i128, den: i128) -> i128 {
+    (2 * num + den).div_euclid(2 * den)
 }
 
 /// One observed frame.
@@ -141,39 +167,138 @@ impl CapturePhaseTracker {
         Self::default()
     }
 
-    /// RED stub (issue 1367 D2): the fit does not exist yet, so nothing ever locks.
+    /// Fold one delivered frame (its V4L2 `sequence` and `CLOCK_MONOTONIC` capture time in ns).
+    /// `capture_mono_ns == 0` (no V4L2 timestamp) changes nothing and returns no estimate.
     pub fn observe(&mut self, seq: u32, capture_mono_ns: u64) -> PhaseObservation {
-        let _ = (
-            seq,
-            capture_mono_ns,
-            &self.window,
-            &self.sums,
-            self.outlier_run,
-        );
-        PhaseObservation {
+        let none = |seq_advance| PhaseObservation {
             smoothed_mono_ns: None,
-            seq_advance: 0,
+            seq_advance,
+        };
+        if capture_mono_ns == 0 {
+            return none(0);
+        }
+        let Some(prev) = self.last_seq else {
+            self.seed(seq, capture_mono_ns);
+            return none(0);
+        };
+        let delta = seq.wrapping_sub(prev) as i32;
+        if delta <= 0 || delta as u32 > MAX_SEQ_ADVANCE {
+            // Backward / stalled / huge sequence step: a device re-open or a long hiccup.
+            self.reseed(seq, capture_mono_ns);
+            return none(0);
+        }
+        let seq_advance = delta as u32;
+        let x = self.last_x + i64::from(delta);
+        self.last_seq = Some(seq);
+        self.last_x = x;
+        if self.window.len() >= LOCK_MIN_FRAMES {
+            if let Some(rms) = self.jitter_rms_ns() {
+                let pred = self.predict_ns(x);
+                let resid = i128::from(capture_mono_ns) - i128::from(pred);
+                let bound = (RESEED_JITTER_MULTIPLE as f64 * rms).max(RESEED_FLOOR_NS as f64);
+                if resid.unsigned_abs() as f64 > bound {
+                    self.outlier_run += 1;
+                    if self.outlier_run >= RESEED_CONSECUTIVE_OUTLIERS {
+                        self.reseed(seq, capture_mono_ns);
+                        return none(0);
+                    }
+                    // One late/early timestamp: never folded, stamped from the prediction.
+                    return PhaseObservation {
+                        smoothed_mono_ns: self.locked().then_some(pred),
+                        seq_advance,
+                    };
+                }
+            }
+        }
+        self.outlier_run = 0;
+        self.push(x, capture_mono_ns);
+        PhaseObservation {
+            smoothed_mono_ns: self.locked().then(|| self.predict_ns(x)),
+            seq_advance,
         }
     }
 
-    /// RED stub.
+    /// True once the fit holds [`LOCK_MIN_FRAMES`] samples with an RMS residual at most
+    /// [`LOCK_MAX_JITTER_NS`].
     pub fn locked(&self) -> bool {
-        false
+        self.window.len() >= LOCK_MIN_FRAMES
+            && self
+                .jitter_rms_ns()
+                .is_some_and(|rms| rms <= LOCK_MAX_JITTER_NS as f64)
     }
 
-    /// RED stub.
+    /// The fitted frame period (ns), once three samples exist.
     pub fn period_ns(&self) -> Option<f64> {
-        None
+        let d = self.sums.d();
+        (self.window.len() >= 3 && d > 0).then(|| self.sums.nb() as f64 / d as f64)
     }
 
-    /// RED stub.
+    /// The RMS residual of the fit (ns): the raw timestamp jitter, once three samples exist.
     pub fn jitter_rms_ns(&self) -> Option<f64> {
-        None
+        let s = &self.sums;
+        let d = s.d();
+        if self.window.len() < 3 || d <= 0 {
+            return None;
+        }
+        // n * SSE = (n*Syy - Sy^2) - nb^2 / d, exact up to the one integer division.
+        let a = s.n * s.syy - s.sy * s.sy;
+        let nb = s.nb();
+        let sse_n = (a - nb * nb / d).max(0);
+        Some((sse_n as f64 / (s.n * s.n) as f64).sqrt())
     }
 
     /// How many times the fit re-seeded after its first seed.
     pub fn reseeds(&self) -> u64 {
         self.reseeds
+    }
+
+    fn seed(&mut self, seq: u32, t: u64) {
+        self.window.clear();
+        self.sums = FitSums::default();
+        self.outlier_run = 0;
+        self.last_seq = Some(seq);
+        self.last_x = 0;
+        self.push(0, t);
+    }
+
+    fn reseed(&mut self, seq: u32, t: u64) {
+        self.reseeds += 1;
+        self.seed(seq, t);
+    }
+
+    fn push(&mut self, x: i64, t: u64) {
+        let (x0, t0) = self.window.front().copied().unwrap_or((x, t));
+        self.window.push_back((x, t));
+        self.sums.add(
+            i128::from(x) - i128::from(x0),
+            i128::from(t) - i128::from(t0),
+        );
+        if self.window.len() > FIT_WINDOW_FRAMES {
+            // The oldest sample is the origin (dx = dy = 0): drop it, then move the origin to
+            // the new oldest sample.
+            self.window.pop_front();
+            self.sums.n -= 1;
+            if let Some(&(x1, t1)) = self.window.front() {
+                self.sums.shift(
+                    i128::from(x1) - i128::from(x0),
+                    i128::from(t1) - i128::from(t0),
+                );
+            }
+        }
+    }
+
+    /// The fitted capture time at sequence position `x` (the caller guarantees `d() > 0`).
+    fn predict_ns(&self, x: i64) -> u64 {
+        let s = &self.sums;
+        let (x0, t0) = self.window.front().copied().unwrap_or((x, 0));
+        let d = s.d();
+        if d <= 0 {
+            return t0;
+        }
+        let dx = i128::from(x) - i128::from(x0);
+        let num = s.sy * d + s.nb() * (s.n * dx - s.sx);
+        let dy = div_round(num, s.n * d);
+        (i128::from(t0) + dy).clamp(0, i128::from(u64::MAX)) as u64
     }
 }
 
@@ -202,13 +327,33 @@ impl SlotHysteresis {
     /// Place the frame whose smoothed realtime instant is `t_ns` and whose sequence advanced
     /// `seq_advance` since the previous chosen frame. Returns the grid point of its slot.
     pub fn choose(&mut self, t_ns: u64, seq_advance: u32, interval_ns: u64) -> (u64, SlotEvent) {
-        // RED stub (issue 1367 D2): the plain floor, no hysteresis.
-        let _ = (
-            seq_advance,
-            SLOT_HYSTERESIS_NS,
-            grid_advance_ns(0, 0, interval_ns),
-        );
-        let placed = (grid_floor_ns(t_ns, interval_ns), SlotEvent::Start);
+        let raw = grid_floor_ns(t_ns, interval_ns);
+        let h = SLOT_HYSTERESIS_NS.min(interval_ns / 4);
+        let placed = match self.last_slot_ns {
+            None => (raw, SlotEvent::Start),
+            Some(last) => {
+                let expected = grid_advance_ns(last, u64::from(seq_advance), interval_ns);
+                if raw == expected {
+                    (expected, SlotEvent::OnTime)
+                } else if expected > 0 && raw == grid_floor_ns(expected - 1, interval_ns) {
+                    // One slot early: the camera phase crossed the edge from above.
+                    if t_ns.saturating_add(h) < expected {
+                        (raw, SlotEvent::Crossing)
+                    } else {
+                        (expected, SlotEvent::Held)
+                    }
+                } else if raw == grid_advance_ns(expected, 1, interval_ns) {
+                    // One slot late: the camera phase crossed the edge from below.
+                    if t_ns >= raw.saturating_add(h) {
+                        (raw, SlotEvent::Crossing)
+                    } else {
+                        (expected, SlotEvent::Held)
+                    }
+                } else {
+                    (raw, SlotEvent::Jump)
+                }
+            }
+        };
         self.last_slot_ns = Some(placed.0);
         placed
     }
@@ -274,16 +419,36 @@ impl CapturePhase {
         mono_to_real_offset_ns: i64,
         interval_ns: u64,
     ) -> Option<u64> {
-        // RED stub (issue 1367 D2): the tracker never drives the stamp.
-        let _ = (
-            mono_to_real_offset_ns,
-            interval_ns,
-            &mut self.slots,
-            &mut self.crossings,
-        );
-        self.tracker.observe(seq, capture_mono_ns);
-        self.mode = PhaseMode::Seed;
-        None
+        let obs = self.tracker.observe(seq, capture_mono_ns);
+        let smoothed = match obs.smoothed_mono_ns {
+            Some(t) if interval_ns > 0 => t,
+            _ => {
+                self.mode = if self.tracker.locked() {
+                    PhaseMode::Band
+                } else {
+                    PhaseMode::Seed
+                };
+                self.slots.reset();
+                return None;
+            }
+        };
+        let t_real = i128::from(smoothed) + i128::from(mono_to_real_offset_ns);
+        let in_band = self
+            .rate_ppm(interval_ns)
+            .is_some_and(|ppm| ppm.abs() <= STAMP_MODE_MAX_RATE_PPM as f64);
+        if !in_band || t_real <= 0 || t_real > i128::from(u64::MAX) {
+            self.mode = PhaseMode::Band;
+            self.slots.reset();
+            return None;
+        }
+        self.mode = PhaseMode::Stamp;
+        let (slot, event) = self
+            .slots
+            .choose(t_real as u64, obs.seq_advance, interval_ns);
+        if event == SlotEvent::Crossing {
+            self.crossings += 1;
+        }
+        Some(slot)
     }
 
     /// The path the most recent frame took.
