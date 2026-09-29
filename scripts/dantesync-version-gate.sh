@@ -100,7 +100,11 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # a night, 02:00 UTC; the 1.11 micro-steps starved the stream box's Dante Virtual Soundcard. camera-box
 # grades a daily-mode master on its nightly schedule + the 3000 ms daily bound, issue 1372). The fleet
 # rolls to it with this pin (dantesync-fleet-upgrade.sh --target); until then the gate names every 1.11.1 node.
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.12.0}"
+# Bumped 2026-09-29: fleet rolled to v1.13.0 (dantesync PR 124, issue 112 -- a node that stops hearing
+# PTP re-joins the multicast on its own after 10 s instead of needing a service restart, and /status
+# reports NTP-only + is_locked=false while PTP is stale instead of a frozen LOCK; the strih-lx USB NIC
+# replugs of 29.9 left the fleet date master on NTP until a restart stepped the whole fleet).
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.13.0}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 
