@@ -1038,11 +1038,8 @@ async fn run_capture_loop(
         // grabber's own internal-buffer repeat is preferentially shed over the genuine unique
         // tick next to it. See `camera_box::dupe_decimation`'s module doc for the full mechanism.
         let mut decimation_gate = camera_box::dupe_decimation::DecimationGate::new();
-        // Issue 1367 slice D2 — the capture PHASE tracker: fits the camera period + phase from the
-        // V4L2 sequence number and capture time, so a free-running camera crossing a slot edge (~17
-        // min on the Cam Links) costs ONE duplicate or ONE missing slot instead of a 15-20 s burst of
-        // random flips. While it is locked and the camera is 1:1 with the emit rate, the stamp AND
-        // the gate decide on its slot; otherwise both stay today's. See `camera_box::capture_phase`.
+        // Issue 1367 D2 — the capture phase tracker (`camera_box::capture_phase`): a slot-edge
+        // crossing costs one duplicate or one missing slot, never a burst of random flips.
         let mut capture_phase = camera_box::capture_phase::CapturePhase::new();
         // #1242 — how long the PREVIOUS emitted iteration slept for its send stagger (ms). The
         // sleep shortens the next V4L2 dequeue wait, so the #1131 buffered-queue signal adds it
@@ -1093,9 +1090,8 @@ async fn run_capture_loop(
                     mono_to_real_offset_100ns = sample_mono_to_real_offset_100ns();
                     frames_since_offset_sample = 0;
                 }
-                // Issue 1367 slice D2 — track EVERY good frame (its sequence + capture time) and
-                // get its stamp slot while the tracker drives this stream (`None` = today's raw
-                // stamp and poll-time gate: seeding, a re-seed, a non-1:1 grabber, genlock off).
+                // Issue 1367 D2 — track every good frame; `Some` = the tracker drives this frame's
+                // stamp and gate decision, `None` = today's raw stamp and poll-time gate.
                 let phase_slot_ns = capture_phase.stamp_frame(
                     info.sequence,
                     (info.capture_monotonic_100ns.max(0) as u64) * 100,
@@ -1216,9 +1212,7 @@ async fn run_capture_loop(
                     // compare (armed only under sustained over-rate, never two consecutive frames).
                     // Called immediately before poll, mirroring the hash for this same frame.
                     decimation_gate.note_frame_luma(content_luma);
-                    // Issue 1367 slice D2 — while the capture phase tracker drives this stream, the
-                    // gate decides on this frame's STAMP slot (emit a one-slot advance, drop a real
-                    // duplicate slot, fill a real missing slot), never on the poll wall clock below.
+                    // Issue 1367 D2 — the gate decides on the stamp slot, not the poll wall clock.
                     if let Some(slot_ns) = phase_slot_ns {
                         decimation_gate.note_stamp_slot(slot_ns);
                     }
@@ -1272,9 +1266,7 @@ async fn run_capture_loop(
                 // photon->dequeue latency can no longer leak into the stamp. `emit_wall_ns`
                 // is retained unchanged for the burn's own `gen_ts_ns` + grab-record tee
                 // (see genlock_stamp's module doc — those stay arrival-based on purpose).
-                // Issue 1367 slice D2 — while the capture phase tracker drives this stream the stamp
-                // instant is the middle of its tracked slot (the SMOOTHED capture phase with slot
-                // hysteresis), so the floor below lands on exactly the slot the gate decided on.
+                // Issue 1367 D2 — while driven, the middle of the tracked slot the gate decided on.
                 let capture_realtime_100ns = camera_box::capture_phase::stamp_instant_100ns(
                     phase_slot_ns,
                     out_interval_ns,
@@ -1404,8 +1396,7 @@ async fn run_capture_loop(
                     emit_wall_ns / 100,
                     send_fps as i64,
                 );
-                // Issue 1367 slice D2 — the gate keeps the last EMITTED stamp slot on both paths so
-                // the stamp-driven path continues from the poll-time one without a false gap.
+                // Issue 1367 D2 — the last emitted stamp, on both paths (no false gap on a switch).
                 if out_interval_ns > 0 {
                     decimation_gate
                         .note_emitted_stamp_100ns(capture_timecode_100ns, out_interval_ns);
@@ -1666,10 +1657,7 @@ async fn run_capture_loop(
                         // average so a sub-5s emit pause (the #707 freeze) is visible in the log
                         // even when it averaged out of the fps line above. Buckets are oldest-first,
                         // one per completed 1-second window.
-                        // Issue 1367 slice D2 — the capture phase tracker's state rides this line
-                        // (appended after the buckets, so every existing parser keeps matching):
-                        // phase_lock=seed|band|stamp, the camera rate offset in ppm, the fit's RMS
-                        // jitter, and the cumulative crossings / re-seeds since the start.
+                        // Issue 1367 D2 — the tracker's tokens, appended after the buckets.
                         tracing::info!(
                             "#707 emit-1s: {:?} cap-1s: {:?} (1-second buckets, oldest first){}",
                             emit_ring.emit_buckets(),

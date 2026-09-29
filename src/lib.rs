@@ -446,10 +446,10 @@ pub mod capture_phase;
 mod capture_phase_bench;
 
 // A stamp-driven stream must never read as over-rate to the gate: the fastest 1:1 period the
-// tracker accepts stays above the gate's over-rate takt threshold (60.3 fps).
+// tracker keeps (the band's exit edge) stays above the gate's over-rate takt threshold (60.3 fps).
 #[cfg(target_os = "linux")]
 const _: () = assert!(
-    (1_000_000_000u64 / 60) * (1_000_000 - capture_phase::STAMP_MODE_MAX_RATE_PPM) / 1_000_000
+    (1_000_000_000u64 / 60) * (1_000_000 - capture_phase::STAMP_MODE_EXIT_RATE_PPM) / 1_000_000
         > dupe_decimation::RETIRE_MIN_TAKT_INTERVAL_NS
 );
 

@@ -28,18 +28,20 @@
 //!   under half a period it is stamped from the prediction, and [`RESEED_CONSECUTIVE_OUTLIERS`] of
 //!   them in a row re-seed; half a period or more re-seeds at once (a real discontinuity, never a
 //!   stamp from the old phase). A backward or huge sequence step (a device re-open), a timestamp
-//!   that does not advance, or a gap longer than [`MAX_FRAME_PERIOD_NS`] per frame re-seed too; the
-//!   last one also bounds the window's time span, which keeps every `i128` sum in range. The fit is
-//!   LOCKED once it holds [`LOCK_MIN_FRAMES`] samples, its RMS residual is at most
-//!   [`LOCK_MAX_JITTER_NS`] and its residuals are white (no quarter of the window sits off the line:
-//!   a step folded while seeding would otherwise lock a tilted fit).
+//!   that does not advance, or a gap longer than (sequence step + 1) x [`MAX_FRAME_PERIOD_NS`]
+//!   re-seed too; the last one also bounds the window's time span. The fit is LOCKED once it holds
+//!   [`LOCK_MIN_FRAMES`] samples, its RMS residual is at most [`LOCK_MAX_JITTER_NS`] and its
+//!   residuals are white (no quarter of the window sits off the line: a step folded while seeding
+//!   would otherwise lock a tilted fit); it lets go only above [`LOCK_EXIT_JITTER_NS`].
 //! - [`SlotHysteresis`] turns the smoothed realtime instant into a grid slot that advances by
 //!   exactly the sequence advance. A slot one earlier or one later than that is accepted only when
 //!   the smoothed instant is more than [`SLOT_HYSTERESIS_NS`] past the edge, so a crossing costs
 //!   exactly one duplicate slot (camera faster than the grid) or one missing slot (slower).
 //! - [`CapturePhase`] combines both. It drives the stamp only while the fit is locked AND the camera
 //!   runs within [`STAMP_MODE_MAX_RATE_PPM`] of the emit rate (the 1:1 regime, where a crossing is a
-//!   single event). Anything else (seeding, a re-seed, an over-rate or under-rate grabber whose
+//!   single event; once in, it stays up to [`STAMP_MODE_EXIT_RATE_PPM`]). A realtime clock step
+//!   (the mono-to-real offset moving by [`CLOCK_STEP_NS`] or more) re-anchors the slot chooser on
+//!   the new floor and is never counted as a crossing. Anything else (seeding, a re-seed, an over-rate or under-rate grabber whose
 //!   surplus the `dupe_decimation` machinery absorbs) returns `None`, and the caller keeps today's
 //!   raw stamp and poll-time gate: the fail-safe is the current behaviour.
 //!
@@ -63,9 +65,13 @@ pub const FIT_WINDOW_FRAMES: usize = 256;
 /// Samples the fit needs before it may lock (2 s at 60 fps).
 pub const LOCK_MIN_FRAMES: usize = 120;
 
-/// The largest RMS residual a locked fit may carry. A stream noisier than this never drives the
-/// stamp (its hysteresis could not be trusted).
+/// The largest RMS residual a fit may carry to TAKE the lock. A stream noisier than this never
+/// starts driving the stamp (its hysteresis could not be trusted).
 pub const LOCK_MAX_JITTER_NS: u64 = 1_000_000;
+
+/// A locked fit lets go only above this RMS residual (the lock's hysteresis: a stream near
+/// [`LOCK_MAX_JITTER_NS`] does not switch paths back and forth).
+pub const LOCK_EXIT_JITTER_NS: u64 = 2_000_000;
 
 /// From this many samples on the fit checks every new sample against its prediction (outliers,
 /// frames the device skipped, discontinuities). Below it the slope is too loose to judge by.
@@ -87,9 +93,11 @@ pub const RESEED_CONSECUTIVE_OUTLIERS: u32 = 3;
 /// sum far inside its range. A frame the device skipped counts toward it too.
 pub const MAX_SEQ_ADVANCE: u32 = 8;
 
-/// The longest time a delivered frame may take per sequence step (10 fps). A longer gap is a device
-/// pause, not a frame, and re-seeds at any sample count — this is also what bounds the window's time
-/// span, and so the `i128` sums, while the fit is still seeding.
+/// The longest time a delivered frame may take per sequence step (10 fps). A gap longer than
+/// (sequence step + 1) x this is a device pause, not a frame, and re-seeds at any sample count
+/// (the `+ 1` is the slack for a slow stream's own jitter). This is also what bounds the window's
+/// time span while the fit is still seeding. A shorter pause folded while seeding only delays the
+/// lock: the fit is not quiet until that sample leaves the window.
 pub const MAX_FRAME_PERIOD_NS: u64 = 100_000_000;
 
 /// A quarter of the window whose mean residual is more than this many standard errors off the line
@@ -115,15 +123,31 @@ pub const SLOT_HYSTERESIS_NS: u64 = 500_000;
 /// ~4975 ppm, pinned in `lib.rs`), so a stamp-driven stream never reads as over-rate.
 pub const STAMP_MODE_MAX_RATE_PPM: u64 = 2_000;
 
+/// A stream already stamp-driven leaves the 1:1 regime only beyond this rate offset (the band's
+/// hysteresis). Still below the gate's over-rate takt threshold (pinned in `lib.rs`).
+pub const STAMP_MODE_EXIT_RATE_PPM: u64 = 2_500;
+
+/// A move of the mono-to-real offset between two frames of at least this much is a realtime CLOCK
+/// STEP, not the camera drifting. The capture loop re-samples the offset every 100 frames (~1.7 s
+/// at 60 fps), and a slewing clock (at most 500 ppm) moves it by at most ~0.83 ms in that time.
+pub const CLOCK_STEP_NS: u64 = 1_000_000;
+
 const _: () = assert!(LOCK_MIN_FRAMES >= 3 && LOCK_MIN_FRAMES <= FIT_WINDOW_FRAMES);
 const _: () = assert!(OUTLIER_MIN_FRAMES >= 3 && OUTLIER_MIN_FRAMES <= LOCK_MIN_FRAMES);
 const _: () = assert!(RESEED_CONSECUTIVE_OUTLIERS >= 2);
 const _: () = assert!(MAX_SEQ_ADVANCE >= 2);
+const _: () = assert!(LOCK_EXIT_JITTER_NS >= LOCK_MAX_JITTER_NS);
+const _: () = assert!(STAMP_MODE_EXIT_RATE_PPM >= STAMP_MODE_MAX_RATE_PPM);
 
 /// Exact least-squares sums over the window, relative to the OLDEST sample (`dx = x - x0`,
-/// `dy = t - t0`). With `n <= 256`, a sequence span `<= 256 * MAX_SEQ_ADVANCE` and a time span
-/// `<= 256 * (MAX_SEQ_ADVANCE + 1) * MAX_FRAME_PERIOD_NS`, the largest product (`nb^2`) stays
-/// below ~1e38, inside `i128`.
+/// `dy = t - t0`).
+///
+/// Range: two unfolded outliers may sit between pushed samples, each observed frame advancing at
+/// most [`MAX_SEQ_ADVANCE`], so the window's sequence span `X <= 256 * 3 * 8 = 6144`; each
+/// observed frame takes at most `(delta + 1) * MAX_FRAME_PERIOD_NS <= 2 * delta * 100 ms`, so its
+/// time span `T <= 2 * X * 100 ms ~ 1.2e12` ns. Then `|nb| <= n^2 * X * T / 4 ~ 1.2e20` and
+/// `d <= n^2 * X^2 / 4 ~ 6.2e11`: every product this module forms stays below ~1e32, EXCEPT
+/// `nb^2` (~1.5e40), which [`nb_sq_over_d`] never forms.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct FitSums {
     n: i128,
@@ -166,6 +190,14 @@ impl FitSums {
     }
 }
 
+/// `floor(nb^2 / d)`, `d > 0`, exactly, without forming `nb^2` (which can exceed `i128`, see
+/// [`FitSums`]): with `nb = q * d + r` (`r` has the sign of `nb`), `nb^2 / d = q * nb + r * nb / d`,
+/// both terms non-negative, `q * nb` an integer.
+fn nb_sq_over_d(nb: i128, d: i128) -> i128 {
+    let (q, r) = (nb / d, nb % d);
+    q * nb + (r * nb) / d
+}
+
 /// Round `num / den` to the nearest integer, `den > 0`.
 fn div_round(num: i128, den: i128) -> i128 {
     (2 * num + den).div_euclid(2 * den)
@@ -194,7 +226,7 @@ pub struct CapturePhaseTracker {
     last_t: u64,
     outlier_run: u32,
     /// Sticky: set once the fit passes the lock checks (whiteness included), cleared by a re-seed
-    /// or by the jitter leaving [`LOCK_MAX_JITTER_NS`].
+    /// or by the jitter leaving [`LOCK_EXIT_JITTER_NS`].
     locked: bool,
     /// Frames until the next whiteness check while unlocked (`0` = check now).
     white_check_countdown: u32,
@@ -250,7 +282,10 @@ impl CapturePhaseTracker {
                         && seq_advance as f64 + skipped <= MAX_SEQ_ADVANCE as f64
                     {
                         // The device skipped frames the sequence does not show: the residual is a
-                        // whole number of periods. Re-index; the gate fills the missing slots.
+                        // whole number of periods. Re-index; the gate fills the missing slots. A
+                        // lone timestamp a whole period LATE reads the same; the next frame's
+                        // residual of minus that then re-seeds (accepted: one repeat and ~2 s on
+                        // today's raw path, pinned in the tests).
                         let k = skipped as u32;
                         seq_advance += k;
                         x += i64::from(k);
@@ -287,7 +322,8 @@ impl CapturePhaseTracker {
     }
 
     /// True once the fit holds [`LOCK_MIN_FRAMES`] samples, its RMS residual is at most
-    /// [`LOCK_MAX_JITTER_NS`] and its residuals are white.
+    /// [`LOCK_MAX_JITTER_NS`] and its residuals are white; stays true up to
+    /// [`LOCK_EXIT_JITTER_NS`].
     pub fn locked(&self) -> bool {
         self.locked
     }
@@ -307,8 +343,7 @@ impl CapturePhaseTracker {
         }
         // n * SSE = (n*Syy - Sy^2) - nb^2 / d, exact up to the one integer division.
         let a = s.n * s.syy - s.sy * s.sy;
-        let nb = s.nb();
-        let sse_n = (a - nb * nb / d).max(0);
+        let sse_n = (a - nb_sq_over_d(s.nb(), d)).max(0);
         Some((sse_n as f64 / (s.n * s.n) as f64).sqrt())
     }
 
@@ -360,15 +395,18 @@ impl CapturePhaseTracker {
         }
     }
 
-    /// Lock once the fit is long enough, quiet enough and white; unlock when the jitter leaves the
-    /// bound. The whiteness check is O(window): it runs only while unlocked, and after a failed
-    /// check only every [`WHITENESS_CHECK_EVERY`] frames (a stream that stays non-white, a wandering
-    /// grabber, never pays it per frame).
+    /// Lock once the fit is long enough, quiet enough ([`LOCK_MAX_JITTER_NS`]) and white; unlock
+    /// only above [`LOCK_EXIT_JITTER_NS`]. The whiteness check is O(window): it runs only while
+    /// unlocked, and after a failed check only every [`WHITENESS_CHECK_EVERY`] frames (a stream that
+    /// stays non-white, a wandering grabber, never pays it per frame).
     fn update_lock(&mut self) {
+        let bound = if self.locked {
+            LOCK_EXIT_JITTER_NS
+        } else {
+            LOCK_MAX_JITTER_NS
+        };
         let quiet = self.window.len() >= LOCK_MIN_FRAMES
-            && self
-                .jitter_rms_ns()
-                .is_some_and(|rms| rms <= LOCK_MAX_JITTER_NS as f64);
+            && self.jitter_rms_ns().is_some_and(|rms| rms <= bound as f64);
         if !quiet {
             self.locked = false;
         } else if !self.locked {
@@ -529,6 +567,8 @@ pub struct CapturePhase {
     slots: SlotHysteresis,
     crossings: u64,
     mode: PhaseMode,
+    /// The mono-to-real offset of the previous stamp-driven frame (the clock-step check).
+    last_offset_ns: Option<i64>,
 }
 
 impl CapturePhase {
@@ -539,7 +579,9 @@ impl CapturePhase {
     /// Track one delivered frame and return the grid point of its stamp slot while the tracker
     /// drives the stamp (locked + 1:1), else `None` (use today's raw stamp and poll-time gate).
     /// `mono_to_real_offset_ns` maps `CLOCK_MONOTONIC` to the `CLOCK_REALTIME` grid (the capture
-    /// loop's periodically re-sampled offset); `interval_ns == 0` (genlock off) never drives.
+    /// loop's periodically re-sampled offset); `interval_ns == 0` (genlock off) never drives. An
+    /// offset move of [`CLOCK_STEP_NS`] or more re-anchors the slot chooser on the new floor: the
+    /// gate sees the step as a jump (filled or skipped like the poll-time gate), not a crossing.
     pub fn stamp_frame(
         &mut self,
         seq: u32,
@@ -558,19 +600,31 @@ impl CapturePhase {
                 } else {
                     PhaseMode::Seed
                 };
-                self.slots.reset();
+                self.stop_driving();
                 return None;
             }
         };
         let t_real = i128::from(smoothed) + i128::from(mono_to_real_offset_ns);
+        let band_ppm = if self.mode == PhaseMode::Stamp {
+            STAMP_MODE_EXIT_RATE_PPM
+        } else {
+            STAMP_MODE_MAX_RATE_PPM
+        };
         let in_band = self
             .rate_ppm(interval_ns)
-            .is_some_and(|ppm| ppm.abs() <= STAMP_MODE_MAX_RATE_PPM as f64);
+            .is_some_and(|ppm| ppm.abs() <= band_ppm as f64);
         if !in_band || t_real <= 0 || t_real > i128::from(u64::MAX) {
             self.mode = PhaseMode::Band;
-            self.slots.reset();
+            self.stop_driving();
             return None;
         }
+        let stepped = self
+            .last_offset_ns
+            .is_some_and(|o| o.abs_diff(mono_to_real_offset_ns) >= CLOCK_STEP_NS);
+        if stepped {
+            self.slots.reset();
+        }
+        self.last_offset_ns = Some(mono_to_real_offset_ns);
         self.mode = PhaseMode::Stamp;
         let (slot, event) = self
             .slots
@@ -579,6 +633,12 @@ impl CapturePhase {
             self.crossings += 1;
         }
         Some(slot)
+    }
+
+    /// The stream stopped driving the stamp: the next stamp-driven frame starts afresh.
+    fn stop_driving(&mut self) {
+        self.slots.reset();
+        self.last_offset_ns = None;
     }
 
     /// The path the most recent frame took.
@@ -623,10 +683,12 @@ impl CapturePhase {
             .jitter_rms_us()
             .map_or_else(|| "na".to_string(), |v| format!("{v:.0}"));
         format!(
-            " phase_lock={} phase_ppm={ppm} jitter_us={jitter} crossings={} reseeds={}",
+            " phase_lock={} phase_ppm={ppm} jitter_us={jitter} crossings={} reseeds={} \
+             hidden_drops={}",
             self.mode.token(),
             self.crossings,
-            self.reseeds()
+            self.reseeds(),
+            self.hidden_drops()
         )
     }
 }

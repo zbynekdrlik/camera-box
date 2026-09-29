@@ -155,8 +155,9 @@ pub struct DecimationGate {
     /// (issue 1367 D2) The grid slot of the most recently EMITTED frame's stamp (`0` = none yet),
     /// kept on both paths so the stamp-driven path continues from the poll-time one.
     last_emitted_stamp_slot_ns: u64,
-    /// (issue 1367 D2) Did the previous poll decide on a stamp slot? A poll-time poll after one
-    /// re-latches its boundary (that boundary sits a dequeue latency behind the poll instant).
+    /// (issue 1367 D2) Set by a stamp-driven poll; cleared when a later poll-time poll re-latches
+    /// the boundary onto its own slot, at the first frame from an empty queue
+    /// ([`relatch_after_stamp_path`](Self::relatch_after_stamp_path)).
     stamp_driven: bool,
     /// (issue 1367 D2) The stamp-driven decision of the most recent poll (`None` on the poll-time
     /// path), read by the tests and the bench.
@@ -523,27 +524,13 @@ impl DecimationGate {
             return self.poll_on_stamp(slot_ns, interval_ns, content_hash, capture_mono_ns);
         }
         self.last_stamp_action = None;
-        self.last_poll_relatch_extra = 0;
-        if core::mem::take(&mut self.stamp_driven) {
-            // Back from the stamp-driven path: its boundary sits on the CAPTURE-time grid, a dequeue
-            // latency behind this poll instant. Re-latch on this poll's own slot so the frame emits on
-            // time instead of reading as a stale (lag >= 1) boundary that would fill a repeat. The
-            // slots between this frame's own capture slot (the poll instant minus its queue
-            // residence) and the poll slot are that latency, not missing content: count them as
-            // intentional so the #707 diagnostic reports only real missing slots.
-            let relatched = crate::genlock_grid::grid_floor_ns(now_ns, interval_ns);
-            let capture_ns = if capture_mono_ns != 0 && now_mono_ns >= capture_mono_ns {
-                now_ns.saturating_sub(now_mono_ns - capture_mono_ns)
-            } else {
-                now_ns
-            };
-            self.last_poll_relatch_extra = crate::genlock_grid::grid_steps_between(
-                crate::genlock_grid::grid_floor_ns(capture_ns, interval_ns),
-                relatched,
-                interval_ns,
-            );
-            self.next_boundary_ns = relatched;
-        }
+        self.relatch_after_stamp_path(
+            now_ns,
+            now_mono_ns,
+            capture_mono_ns,
+            interval_ns,
+            queue_had_frame,
+        );
         // (#1145 v2.1) reset the per-poll intentional-extra-advance accounting; only the FastDrain
         // arm sets it (see the field doc — it keeps a fast-drain out of the #707 skip diagnostic).
         self.last_poll_fast_drain_extra = 0;
@@ -585,27 +572,7 @@ impl DecimationGate {
             self.converging_deep_backlog = false;
         }
 
-        // (#1145 review 🔵) A BACKWARD DanteSync clock step (#131) leaves the window's pre-step
-        // timestamps "in the future" (`> now_ns`), which would block pruning for the step's duration
-        // and inflate the count in the aggressive (retire-forcing) direction. Clear the window so a
-        // capture after a backward step re-latches from scratch — mirrors `genlock_emit_gate`'s own
-        // backward re-latch.
-        // (#1145 v3 review 🔵 F3) clear BOTH windows when EITHER holds a future-timestamped entry, so
-        // a backward step can never leave `unique_capture_times` populated while `all_capture_times`
-        // was cleared (which would read a >100% occupancy ratio from mixed clock epochs). Symmetric
-        // by construction.
-        let backward_step = self
-            .unique_capture_times
-            .back()
-            .is_some_and(|&back| back > now_ns)
-            || self
-                .all_capture_times
-                .back()
-                .is_some_and(|&back| back > now_ns);
-        if backward_step {
-            self.unique_capture_times.clear();
-            self.all_capture_times.clear();
-        }
+        self.clear_rate_windows_after_backward_step(now_ns);
 
         let exact_dupe = self.prev_hash == Some(content_hash);
         self.prev_hash = Some(content_hash);
@@ -887,6 +854,66 @@ impl DecimationGate {
     /// when it decided on the poll wall clock.
     pub fn last_stamp_action(&self) -> Option<StampSlotAction> {
         self.last_stamp_action
+    }
+
+    /// (#1145 review 🔵) A BACKWARD DanteSync clock step (#131) leaves the window's pre-step
+    /// timestamps "in the future" (`> now_ns`), which would block pruning for the step's duration
+    /// and inflate the count in the aggressive (retire-forcing) direction. Clear the window so a
+    /// capture after a backward step re-latches from scratch — mirrors `genlock_emit_gate`'s own
+    /// backward re-latch.
+    /// (#1145 v3 review 🔵 F3) clear BOTH windows when EITHER holds a future-timestamped entry, so
+    /// a backward step can never leave `unique_capture_times` populated while `all_capture_times`
+    /// was cleared (which would read a >100% occupancy ratio from mixed clock epochs). Symmetric
+    /// by construction. (Moved out of `poll` unchanged for the #414 length budget, issue 1367 D2.)
+    fn clear_rate_windows_after_backward_step(&mut self, now_ns: u64) {
+        let backward_step = self
+            .unique_capture_times
+            .back()
+            .is_some_and(|&back| back > now_ns)
+            || self
+                .all_capture_times
+                .back()
+                .is_some_and(|&back| back > now_ns);
+        if backward_step {
+            self.unique_capture_times.clear();
+            self.all_capture_times.clear();
+        }
+    }
+
+    /// (issue 1367 D2) The first poll-time poll after the stamp-driven path. That path's boundary
+    /// sits on the CAPTURE-time grid, a dequeue latency behind the poll instant. While the V4L2 queue
+    /// still holds frames (a re-seed that came with a loop stall) the boundary stays there, so the
+    /// #1131 catch-up emits every buffered frame, one slot each. At the first frame the loop waited
+    /// for, re-latch on the poll's own slot so it emits on time instead of reading as a stale
+    /// boundary (lag of one or more) that would fill a repeat. The slots between that frame's own
+    /// capture slot (the poll instant minus its queue residence) and the poll slot are that
+    /// latency, not missing content: they count as intentional, so the #707 diagnostic reports only
+    /// real missing slots.
+    fn relatch_after_stamp_path(
+        &mut self,
+        now_ns: u64,
+        now_mono_ns: u64,
+        capture_mono_ns: u64,
+        interval_ns: u64,
+        queue_had_frame: bool,
+    ) {
+        self.last_poll_relatch_extra = 0;
+        if !self.stamp_driven || queue_had_frame {
+            return;
+        }
+        self.stamp_driven = false;
+        let relatched = crate::genlock_grid::grid_floor_ns(now_ns, interval_ns);
+        let capture_ns = if capture_mono_ns != 0 && now_mono_ns >= capture_mono_ns {
+            now_ns.saturating_sub(now_mono_ns - capture_mono_ns)
+        } else {
+            now_ns
+        };
+        self.last_poll_relatch_extra = crate::genlock_grid::grid_steps_between(
+            crate::genlock_grid::grid_floor_ns(capture_ns, interval_ns),
+            relatched,
+            interval_ns,
+        );
+        self.next_boundary_ns = relatched;
     }
 
     /// (issue 1367 D2) The stamp-driven poll. Keeps the takt EMA and the content-hash state warm for
