@@ -38,14 +38,14 @@ const STEP_HOLD_WIRING: [&str; 17] = [
     "if (genlock_audio_step_release_places( release, genlock_audio_step_residual_ns(source->genlock_audio_step_held_off_ns, off_live_ns), packet_ns)) return true; if (!asrc_tc || source->genlock_audio_step_active || !push_back || !source->audio_ts) return false;",
     "return asrc_compensator_place_beyond_cap( &source->asrc, genlock_audio_asrc_error_ms(genlock_audio_place_error_ns(append_ns, intended_ns), source->genlock_audio_slew_remaining_ns), source->asrc_tc_raw_s * 1000.0);",
     "if (genlock_asrc_tc && genlock_asrc_measured && !source->genlock_audio_step_active) asrc_timecode_ingest(source, genlock_audio_stamp_mono_ns(data->timestamp, genlock_off_ns), genlock_asrc_err_ms, genlock_asrc_appended); else if (source->genlock_audio_step_active) source->asrc_tc_have_prev = false;",
-    "genlock_audio_step_log(source, genlock_step_release, genlock_off_live_ns, os_time);",
+    "genlock_audio_step_log(source, genlock_step_release, genlock_relabel, genlock_relabel_off_jump_ns, genlock_relabel_move_ns, genlock_off_live_ns, os_time);",
     "step_ms=%+.3f held_ms=%.1f released=%s residual_ms=%+.1f",
     "if (genlock_audio_step_video_frozen(source)) { if (relock) source->genlock_audio_step_relock_pending = true; return; }",
     "if (n2_on_grid && !genlock_audio_step_video_frozen(source)) genlock_video_delay_track(",
     "const uint64_t genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now); if (genlock_n1_tick_is_on_grid(genlock_delay_tick_wall, interval) && !genlock_audio_step_video_frozen(source)) genlock_video_delay_track(&source->genlock_video_delay_smoothed_ns,",
     "if (source->genlock_audio_step_relock_pending) relock = true; source->genlock_audio_step_relock_pending = false;",
     "static bool genlock_audio_step_video_frozen(const obs_source_t *source) { return source->genlock_audio_step_active && genlock_audio_step_freezes_video(true, source->genlock_audio_step_start_ns, os_gettime_ns()); }",
-    "source->context.name ? source->context.name : \"?\", (double)source->genlock_audio_step_step_ns / 1e6,",
+    "source->context.name ? source->context.name : \"?\", (double)step_ns / 1e6, (double)held_ns / 1e6,",
 ];
 
 /// Shapes that must be GONE: the live offset feeding the timecode ASRC's stamp or the placement term
@@ -53,6 +53,19 @@ const STEP_HOLD_WIRING: [&str; 17] = [
 const STEP_HOLD_ABSENT: [&str; 2] = [
     "genlock_audio_stamp_mono_ns(data->timestamp, genlock_off_live_ns)",
     "genlock_audio_place_term_ns(genlock_hold_mode, genlock_hold_ms, genlock_off_live_ns,",
+];
+
+/// Issue 1381 (design 5900385541) — the RELABEL wiring (squished): a packet whose stamps jumped WITH
+/// the wall step continues the source's timeline before the smoothing and in the system-domain check,
+/// so it APPENDS (no 70 ms re-placement, no > 2 s reset), and the step-hold line counts it. The pwsh
+/// gate in both Windows workflows requires each one.
+const RELABEL_WIRING: [&str; 6] = [
+    "const bool genlock_relabel = source->timing_set && source->next_audio_ts_min != 0 && genlock_audio_relabel_source(source, genlock_hold_mode == GENLOCK_AUDIO_HOLD_TIMECODE, genlock_off_live_ns, data->timestamp, genlock_step_packet_ns, &genlock_relabel_off_jump_ns, &genlock_relabel_move_ns);",
+    "if (genlock_relabel) { source->next_audio_ts_min = data->timestamp; source->genlock_audio_relabels++; }",
+    "if (genlock_relabel && source->next_audio_sys_ts_min) source->next_audio_sys_ts_min = in.timestamp; if (source->next_audio_sys_ts_min == in.timestamp) { push_back = true;",
+    "if (!genlock_audio_step_relabel_jumps(source->genlock_audio_step_active, source->genlock_audio_step_prev_off_ns, source->genlock_audio_step_prev_raw_ns, source->genlock_audio_step_prev_packet_ns, source->genlock_audio_step_held_off_ns, timecode, off_live_ns, raw_ts_ns, &stamp_jump_ns, &off_jump_ns) || !genlock_audio_relabel(stamp_jump_ns, off_jump_ns, packet_ns, GENLOCK_WALL_STEP_MIN_NS)) return false;",
+    "const uint64_t genlock_step_packet_ns = conv_frames_to_time(sample_rate, in.frames);",
+    "\"holds=%u relabels=%u (issue 1381)\"",
 ];
 
 /// The step-hold log marker and every other `genlock-*` OBS-log family a parser keys on.
@@ -156,9 +169,76 @@ fn the_ingest_holds_the_pre_step_offset_1381() {
     }
     assert!(
         src.contains(
-            "if (release == GENLOCK_AUDIO_STEP_NONE) return; source->genlock_audio_step_holds++;"
+            "if (!released && !relabel) return; if (released) source->genlock_audio_step_holds++;"
         ),
-        "issue 1381: one log line per released hold, counted"
+        "issue 1381: one log line per released hold (counted) and per relabel"
+    );
+}
+
+#[test]
+fn a_relabel_appends_through_the_smoothing_and_the_system_check_1381() {
+    // design 5900385541: a packet whose stamps jumped WITH the wall step continues the source's
+    // timeline -- the raw-domain smoothing sees no jump (no 70 ms re-placement, no handle_ts_jump
+    // past 2 s) and the system-domain check appends (never the second MAX_TS_VAR reset)
+    let src = squish(&read(OBS_SOURCE));
+    for needle in RELABEL_WIRING {
+        assert_eq!(
+            src.matches(needle).count(),
+            1,
+            "issue 1381: obs-source.c must carry `{needle}` exactly once -- a relabelled packet would \
+             be placed r early (r ms overwritten) or reset the whole buffer past 2 s again"
+        );
+    }
+    let ingest = audio_ingest(&src);
+    // the relabel is decided on the live offset and the skew hold's state BEFORE the hold takes the
+    // packet, and rebases the raw-domain timeline before the smoothing reads it
+    let live = at(ingest, "const int64_t genlock_off_live_ns =");
+    let packet = at(ingest, RELABEL_WIRING[4]);
+    let decide = at(ingest, RELABEL_WIRING[0]);
+    let rebase = at(ingest, RELABEL_WIRING[1]);
+    let direct = at(
+        ingest,
+        "if (uint64_diff(in.timestamp, os_time) < MAX_TS_VAR) {",
+    );
+    let smooth = at(
+        ingest,
+        "diff = uint64_diff(source->next_audio_ts_min, in.timestamp);",
+    );
+    let jump = at(
+        ingest,
+        "handle_ts_jump(source, source->next_audio_ts_min, in.timestamp, diff, os_time);",
+    );
+    let lock = at(ingest, "pthread_mutex_lock(&source->audio_buf_mutex);");
+    let sys = at(ingest, RELABEL_WIRING[2]);
+    let second = at(
+        ingest,
+        "reset_audio_timing(source, data->timestamp, os_time);",
+    );
+    let hold = at(ingest, STEP_HOLD_WIRING[1]);
+    assert!(
+        live < packet
+            && packet < decide
+            && decide < rebase
+            && rebase < direct
+            && direct < smooth
+            && smooth < jump
+            && jump < lock
+            && lock < sys
+            && sys < second
+            && second < hold,
+        "issue 1381: the relabel must be decided before the smoothing, rebase the raw timeline \
+         before it and the system timeline inside the buffer lock before its check, and read the \
+         skew hold's state before the hold takes the packet"
+    );
+    // the live offset is read ONCE per packet (the relabel and the placement share it)
+    assert_eq!(
+        ingest.matches("genlock_audio_wall_to_mono_ns(").count(),
+        1,
+        "issue 1381: the ingest reads the live wall->mono offset once per packet"
+    );
+    assert!(
+        squish(&read(OBS_INTERNAL)).contains("uint32_t genlock_audio_relabels;"),
+        "issue 1381: obs-internal.h lost the relabel counter"
     );
 }
 
@@ -259,7 +339,7 @@ fn the_log_marker_is_its_own_family_1381() {
 fn windows_workflows_guard_the_same_wiring_1381() {
     for wf in WINDOWS_WORKFLOWS {
         let text = read(wf);
-        for needle in STEP_HOLD_WIRING {
+        for needle in STEP_HOLD_WIRING.iter().chain(RELABEL_WIRING.iter()) {
             let want = format!(
                 "$src -notmatch [regex]::Escape('{}')",
                 needle.replace('\'', "''")
