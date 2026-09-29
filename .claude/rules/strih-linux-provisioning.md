@@ -157,7 +157,7 @@ BINARY_CHANGED ACTIVE BINARY_PRESENT` (pure, `scripts/lib/strih-provision.sh`) p
 |---|---|---|
 | `absent` | no `/usr/local/bin/dantesync` | the unit is written + reloaded if it changed, no (re)start (a running daemon is never touched), WARN |
 | `start` | not active | removes the stale lock when no process holds it, then `systemctl start` |
-| `restart` | active AND the unit changed (its text, a removed drop-in, or a unit systemd had not loaded) or the binary changed | `systemctl restart` on the reloaded unit, logged `RESTARTED (<why>)` |
+| `restart` | active AND the unit changed (its text, a removed drop-in, or the running process does not run its ExecStart) or the binary changed | `systemctl restart` on the reloaded unit, logged `RESTARTED (<why>)` |
 | `keep` | active, nothing changed (the redeploy default) | nothing; logs `dantesync.service: kept running (unit unchanged) -- no restart, the fleet date is untouched` |
 
 Anything but four 0/1 values prints nothing and returns 2: a caller that could not read a state never
@@ -165,8 +165,8 @@ guesses a restart of the date master.
 
 **The action** is `strih_dantesync_install UNIT_TEXT [ROLE]` in its own lib
 `scripts/lib/strih-dantesync.sh` (the strih-drm-output.sh precedent: setup-strih.sh stays under its
-1000-line budget). The lib also holds the byte-exact matcher, the drop-in probe and verify item 6c's
-verdict; setup-strih AND verify-strih source it. Step 2 emits
+1000-line budget). The lib also holds the byte-exact matcher, the drop-in probe, the ExecStart and
+running-command readers and verify item 6c's verdict; setup-strih AND verify-strih source it. Step 2 emits
 `DS_UNIT_TEXT="$(strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS")"` and hands it over; nothing else in
 setup-strih writes, reloads or restarts dantesync.
 - `unit_changed` is any of:
@@ -174,15 +174,28 @@ setup-strih writes, reloads or restarts dantesync.
     must hold exactly `printf '%s\n' "$UNIT_TEXT"`);
   - a `dantesync.service.d/*.conf` drop-in existed and was removed (`strih_dantesync_dropins_present`;
     an empty drop-in dir is not a change);
-  - systemd has not loaded the unit on disk (`systemctl show -p NeedDaemonReload --value dantesync`
-    = `yes`, read BEFORE any write). That is a daemon-reload that failed, or a run killed after the
-    write; without this the next run would read the file as unchanged and keep the old config.
+  - the RUNNING process does not run the unit's ExecStart: `strih_dantesync_running_argv` reads
+    `/proc/<MainPID>/cmdline` (dantesync execs in place, no fork, no argv rewrite) and compares it
+    with `strih_dantesync_exec_start` (the unit's last `ExecStart=`). This catches a run killed after
+    the write or after the reload, which the file alone reads as unchanged. It is read only when the
+    daemon is active and the text and drop-ins did not already change.
 
-  Only then is the unit written (temp + rename in its own dir) and `daemon-reload`ed, and a restart
-  runs on the reloaded unit.
+  A text change writes the unit (temp + rename in its own dir). A change runs `daemon-reload`, and a
+  restart runs on the reloaded unit.
+- **`NeedDaemonReload` only reloads, it never restarts.** systemd keeps it MANAGER-WIDE
+  (`unit_need_daemon_reload()` returns the manager's `unit_file_state_outdated`, set by any
+  enable/disable/mask of ANY unit; a touched identical file also reads yes). Review round 2
+  reproduced a restart of an unchanged, running master from exactly that, which is the incident's
+  shape. So a pending manager reload runs `daemon-reload` alone (logged `no restart`), and verify
+  never grades it.
+- **An operator-masked unit** (a `/dev/null` symlink) is left alone: never replaced, enabled or
+  started (a rename would silently unmask it).
+- A temp unit a killed run left behind (`.dantesync.service.XXXXXX`) is swept; nothing else in the
+  unit dir is touched.
 - **Fail closed.** A matcher read error (cmp rc 2) or a missing `strih_dantesync_restart_decision`
-  touches nothing and returns 1 (setup-strih then FAILs step 2). An unreadable state is never read as
-  a change, because a change means a restart of the date master.
+  touches nothing and returns 1 (setup-strih then FAILs step 2). An unreadable running command line
+  keeps the daemon running with a WARN. An unreadable state is never read as a change, because a
+  change means a restart of the date master.
 - **keep touches nothing.** `systemctl enable` reloads the whole manager, so it runs only when
   `systemctl is-enabled -q dantesync` says the unit is not enabled yet.
 - `binary_changed` is always 0: setup-strih never installs the binary and the box keeps no checksum
@@ -195,11 +208,13 @@ setup-strih writes, reloads or restarts dantesync.
 - The `STRIH_DANTESYNC_UNIT` / `_DROPIN_DIR` / `_LOCK` / `_BIN` paths are test seams that default to
   the real box paths; `tests/python/test_strih_dantesync_keep_running_1372.py` runs the real action
   against a temp root with a fake `systemctl` on PATH (it logs argv, answers `is-active` / `is-enabled`
-  / `show`, and snapshots the unit at `daemon-reload`, which pins write -> reload -> restart).
+  / `show -p NeedDaemonReload|MainPID`, and snapshots the unit at `daemon-reload`, which pins
+  write -> reload -> restart) and a fake `/proc` through the `STRIH_DANTESYNC_PROC` seam.
 
-**Known limit:** a run killed after the `daemon-reload` but before the restart leaves the old process
-running on a loaded, matching unit, and nothing on the box marks it. Restart dantesync by hand in the
-nightly window if that happened.
+**Known limit:** the running-process check sees only the command line. A run killed between the
+write/reload and the restart of a change to ANOTHER unit field (`RestartSec=`, `After=` ...) leaves the
+process on the old settings; those fields only matter at its next (re)start. Checked read-only on
+dev1's own dantesync: MainPID cmdline = unit ExecStart = `/usr/local/bin/dantesync`.
 
 **A unit change still restarts it, and still steps the date.** That is rare and deliberate, and the
 restart line names it. **Schedule any dantesync unit change (a role change, an ExecStart edit, a
@@ -207,9 +222,9 @@ removed hand drop-in) for the nightly window**, never a daytime deploy. The foll
 keeping the fleet line across a master restart) is a dantesync ticket, not this repo's.
 
 **verify-strih item 6c `(dantesync-unit)`** grades, read-only, through `strih_dantesync_unit_verdict`
-(`ok` | `differs` | `dropin` | `not-loaded` | `unreadable`): `/etc/systemd/system/dantesync.service` is
-byte-identical to the provisioned unit for the box's role, systemd has loaded it, and no drop-in
-overrides it. A drift is caught THERE, never by a blind restart on the next deploy; a kept-running daemon
+(`ok` | `differs` | `dropin` | `not-applied` | `unreadable`): `/etc/systemd/system/dantesync.service` is
+byte-identical to the provisioned unit for the box's role, no drop-in overrides it, and the running
+process runs its ExecStart (no readable process = not graded there; items 6/6b grade liveness). A drift is caught THERE, never by a blind restart on the next deploy; a kept-running daemon
 on a matching unit passes (items 6/6b grade that it runs). The pytest runs the item's real text under
 `set -euo pipefail` with only its unit path moved. verify-strih.sh is at ~996 of its 1000-line budget,
 so the next item there needs a lib. Live acceptance on the next strih-lx genlock deploy: `ActiveEnterTimestamp`

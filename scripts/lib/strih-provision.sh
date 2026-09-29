@@ -898,8 +898,8 @@ EOF
 #   absent   no dantesync binary -- nothing to (re)start (a running daemon is never touched)
 #   start    the daemon is not active -- start it; the ONLY case that clears a stale lock (the lock
 #            is an flock: removing the file of a RUNNING daemon lets a second instance lock a new inode)
-#   restart  it runs AND its unit (a drop-in, or a unit systemd had not loaded) or binary changed --
-#            the one deliberate date-moving case
+#   restart  it runs AND its unit changed (its text, a removed drop-in, or the running process does
+#            not run its ExecStart) or its binary changed -- the one deliberate date-moving case
 #   keep     it runs and nothing changed -- the redeploy default: no restart, the fleet date untouched
 # Every argument must be exactly 0 or 1 (four of them); anything else prints nothing and returns 2 --
 # a caller that could not read a state must never guess a restart of the fleet date master.
