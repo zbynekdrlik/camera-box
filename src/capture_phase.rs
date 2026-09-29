@@ -1,0 +1,358 @@
+//! Issue 1367 slice D2 — the per-stream capture PHASE tracker: the camera's frame period and phase
+//! fitted from the V4L2 sequence number + the `CLOCK_MONOTONIC` capture timestamp, so the genlock
+//! stamp and the emit gate decide on a SMOOTHED capture instant instead of each frame's own jittery
+//! timestamp.
+//!
+//! ## Why this module exists
+//!
+//! A cambox stamps each frame on the per-second genlock grid at the floor of its own V4L2 capture
+//! time (`genlock_stamp::genlock_emit_timecode_100ns`), and the emit gate decides on the poll wall
+//! clock after the dequeue (`main.rs`). The camera free-runs against that grid (the Cam Link boxes
+//! read ~16 ppm), so its phase slides through a slot edge once every ~17 min. uvcvideo stamps the
+//! host time of the first USB packet (~0.1-0.3 ms of jitter) and the dequeue adds its own jitter,
+//! so for 15-20 s around each edge the frames land on either side at random: every flip is a shed
+//! plus a repeat, one unique frame lost and the next one shown twice (live CAM5 29.9.2026: 36 sheds
+//! + 35 repeats in one burst). The physical truth is ONE extra or ONE missing frame per crossing.
+//!
+//! ## What it does
+//!
+//! - [`CapturePhaseTracker`] fits `t = a + P * seq` over the last [`FIT_WINDOW_FRAMES`] frames by
+//!   least squares, with EXACT `i128` running sums re-anchored on the oldest sample (no float drift,
+//!   so the same timestamps always give the same fit). A dropped USB frame is a sequence gap and
+//!   costs nothing: the fit is over the sequence number, not the arrival order. A sample farther
+//!   than [`RESEED_JITTER_MULTIPLE`] x the fit's own jitter (at least [`RESEED_FLOOR_NS`]) is not
+//!   folded (its stamp is the prediction); [`RESEED_CONSECUTIVE_OUTLIERS`] of them in a row is a
+//!   real phase step and re-seeds the fit, and so does a backward or huge sequence step (a device
+//!   re-open). The fit is LOCKED once it holds [`LOCK_MIN_FRAMES`] samples with an RMS residual at
+//!   most [`LOCK_MAX_JITTER_NS`].
+//! - [`SlotHysteresis`] turns the smoothed realtime instant into a grid slot that advances by
+//!   exactly the sequence advance. A slot one earlier or one later than that is accepted only when
+//!   the smoothed instant is more than [`SLOT_HYSTERESIS_NS`] past the edge, so a crossing costs
+//!   exactly one duplicate slot (camera faster than the grid) or one missing slot (slower).
+//! - [`CapturePhase`] combines both. It drives the stamp only while the fit is locked AND the camera
+//!   runs within [`STAMP_MODE_MAX_RATE_PPM`] of the emit rate (the 1:1 regime, where a crossing is a
+//!   single event). Anything else (seeding, a re-seed, an over-rate or under-rate grabber whose
+//!   surplus the `dupe_decimation` machinery absorbs) returns `None`, and the caller keeps today's
+//!   raw stamp and poll-time gate: the fail-safe is the current behaviour.
+//!
+//! The emit gate side (`dupe_decimation::DecimationGate::note_stamp_slot`) decides on this slot:
+//! emit on a one-slot advance, drop a real duplicate slot, fill a real missing slot with the
+//! existing starvation repeat. The receiver sees clean stamps.
+//!
+//! Pure `std` + [`crate::genlock_grid`], no I/O — Tier-0 testable. The two-clock bench is
+//! `crate::capture_phase_bench`.
+
+use crate::genlock_grid::{
+    grid_advance_ns, grid_floor_ns, integer_fps, per_second_floor, NS_PER_SECOND,
+    UNITS_100NS_PER_SECOND,
+};
+use std::collections::VecDeque;
+
+/// Frames in the least-squares window: ~4.3 s at 60 fps. The prediction error at the newest frame
+/// is `2 * sigma / sqrt(n)`, 1/8 of the raw timestamp jitter at a full window.
+pub const FIT_WINDOW_FRAMES: usize = 256;
+
+/// Samples the fit needs before it may lock (2 s at 60 fps).
+pub const LOCK_MIN_FRAMES: usize = 120;
+
+/// The largest RMS residual a locked fit may carry. A stream noisier than this never drives the
+/// stamp (its hysteresis could not be trusted).
+pub const LOCK_MAX_JITTER_NS: u64 = 1_000_000;
+
+/// A sample farther than this multiple of the fit's RMS residual from the prediction is an
+/// outlier: not folded, stamped from the prediction.
+pub const RESEED_JITTER_MULTIPLE: u64 = 8;
+
+/// The outlier bound never falls below this, so a very clean stream does not re-seed on a
+/// sub-millisecond interrupt hiccup.
+pub const RESEED_FLOOR_NS: u64 = 1_000_000;
+
+/// This many outliers in a row is a real phase step (a grabber re-lock): re-seed.
+pub const RESEED_CONSECUTIVE_OUTLIERS: u32 = 3;
+
+/// A forward sequence step above this (more than 8 frames lost at once) re-seeds: that is a device
+/// hiccup, not a dropped frame. It also bounds the window's sequence span, which keeps every `i128`
+/// sum far inside its range.
+pub const MAX_SEQ_ADVANCE: u32 = 8;
+
+/// How far past a slot edge the smoothed instant must be before the slot sequence breaks from the
+/// sequence advance. Far above the locked prediction noise (tens of us), and the stamp moves by at
+/// most this much (sub-ms). Clamped to a quarter of the interval for fast rates.
+pub const SLOT_HYSTERESIS_NS: u64 = 500_000;
+
+/// The 1:1 regime: the tracked frame rate within this many ppm of the emit rate. Covers a free-
+/// running camera (tens of ppm) and 59.94 into 60 (-1000 ppm); excludes the over-rate grabbers
+/// (61+ fps, ~17 000 ppm) and stays below the gate's over-rate takt threshold (60.3 fps,
+/// ~4975 ppm, pinned in `lib.rs`), so a stamp-driven stream never reads as over-rate.
+pub const STAMP_MODE_MAX_RATE_PPM: u64 = 2_000;
+
+const _: () = assert!(LOCK_MIN_FRAMES >= 3 && LOCK_MIN_FRAMES <= FIT_WINDOW_FRAMES);
+const _: () = assert!(RESEED_CONSECUTIVE_OUTLIERS >= 2);
+const _: () = assert!(MAX_SEQ_ADVANCE >= 2);
+
+/// Exact least-squares sums over the window, relative to the OLDEST sample (`dx = x - x0`,
+/// `dy = t - t0`). With `n <= 256` and a sequence span `<= 256 * MAX_SEQ_ADVANCE`, every product
+/// below stays under ~1e37, inside `i128`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct FitSums {
+    n: i128,
+    sx: i128,
+    sy: i128,
+    sxx: i128,
+    sxy: i128,
+    syy: i128,
+}
+
+impl FitSums {
+    fn add(&mut self, dx: i128, dy: i128) {
+        self.n += 1;
+        self.sx += dx;
+        self.sy += dy;
+        self.sxx += dx * dx;
+        self.sxy += dx * dy;
+        self.syy += dy * dy;
+    }
+}
+
+/// One observed frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhaseObservation {
+    /// The smoothed `CLOCK_MONOTONIC` capture instant (ns), `Some` only while the fit is locked.
+    pub smoothed_mono_ns: Option<u64>,
+    /// Sequence numbers advanced since the previous observed frame (`2` = one dropped frame);
+    /// `0` for the first frame of a (re-)seed or a frame without a timestamp.
+    pub seq_advance: u32,
+}
+
+/// The least-squares capture-phase fit of ONE stream. See the module doc.
+#[derive(Debug, Clone, Default)]
+pub struct CapturePhaseTracker {
+    /// `(x, t)`: the unwrapped sequence position and the monotonic capture time, oldest first.
+    window: VecDeque<(i64, u64)>,
+    sums: FitSums,
+    last_seq: Option<u32>,
+    last_x: i64,
+    outlier_run: u32,
+    reseeds: u64,
+}
+
+impl CapturePhaseTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// RED stub (issue 1367 D2): the fit does not exist yet, so nothing ever locks.
+    pub fn observe(&mut self, seq: u32, capture_mono_ns: u64) -> PhaseObservation {
+        let _ = (
+            seq,
+            capture_mono_ns,
+            &self.window,
+            &self.sums,
+            self.outlier_run,
+        );
+        PhaseObservation {
+            smoothed_mono_ns: None,
+            seq_advance: 0,
+        }
+    }
+
+    /// RED stub.
+    pub fn locked(&self) -> bool {
+        false
+    }
+
+    /// RED stub.
+    pub fn period_ns(&self) -> Option<f64> {
+        None
+    }
+
+    /// RED stub.
+    pub fn jitter_rms_ns(&self) -> Option<f64> {
+        None
+    }
+
+    /// How many times the fit re-seeded after its first seed.
+    pub fn reseeds(&self) -> u64 {
+        self.reseeds
+    }
+}
+
+/// How [`SlotHysteresis::choose`] placed a frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotEvent {
+    /// The first frame after a (re)start: the plain grid floor.
+    Start,
+    /// The slot the sequence advance predicts.
+    OnTime,
+    /// The instant sat within the hysteresis of an edge: kept on the predicted slot.
+    Held,
+    /// A real crossing: one slot earlier (camera faster) or later (slower) than predicted.
+    Crossing,
+    /// More than one slot off the prediction: a clock step or a re-seed, not a crossing.
+    Jump,
+}
+
+/// The slot chooser with edge hysteresis. See the module doc.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SlotHysteresis {
+    last_slot_ns: Option<u64>,
+}
+
+impl SlotHysteresis {
+    /// Place the frame whose smoothed realtime instant is `t_ns` and whose sequence advanced
+    /// `seq_advance` since the previous chosen frame. Returns the grid point of its slot.
+    pub fn choose(&mut self, t_ns: u64, seq_advance: u32, interval_ns: u64) -> (u64, SlotEvent) {
+        // RED stub (issue 1367 D2): the plain floor, no hysteresis.
+        let _ = (
+            seq_advance,
+            SLOT_HYSTERESIS_NS,
+            grid_advance_ns(0, 0, interval_ns),
+        );
+        let placed = (grid_floor_ns(t_ns, interval_ns), SlotEvent::Start);
+        self.last_slot_ns = Some(placed.0);
+        placed
+    }
+
+    /// Forget the previous slot (the stream stopped driving the stamp).
+    pub fn reset(&mut self) {
+        self.last_slot_ns = None;
+    }
+}
+
+/// Which path the stream is on, for the `phase_lock=` log token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PhaseMode {
+    /// The fit is (re-)seeding: raw stamp + poll-time gate (today).
+    #[default]
+    Seed,
+    /// Locked, but outside the 1:1 regime (an over/under-rate grabber): raw stamp + poll-time gate.
+    Band,
+    /// Locked and 1:1: the stamp and the gate are driven by the tracked slot.
+    Stamp,
+}
+
+impl PhaseMode {
+    pub fn token(self) -> &'static str {
+        match self {
+            PhaseMode::Seed => "seed",
+            PhaseMode::Band => "band",
+            PhaseMode::Stamp => "stamp",
+        }
+    }
+}
+
+/// The exact nominal frame period of `interval_ns` (`1e9 / fps` for an integer rate).
+fn nominal_period_ns(interval_ns: u64) -> f64 {
+    match integer_fps(interval_ns) {
+        Some(fps) => NS_PER_SECOND as f64 / fps as f64,
+        None => interval_ns as f64,
+    }
+}
+
+/// The tracker + slot chooser of one capture stream, as the capture loop uses it.
+#[derive(Debug, Clone, Default)]
+pub struct CapturePhase {
+    tracker: CapturePhaseTracker,
+    slots: SlotHysteresis,
+    crossings: u64,
+    mode: PhaseMode,
+}
+
+impl CapturePhase {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Track one delivered frame and return the grid point of its stamp slot while the tracker
+    /// drives the stamp (locked + 1:1), else `None` (use today's raw stamp and poll-time gate).
+    /// `mono_to_real_offset_ns` maps `CLOCK_MONOTONIC` to the `CLOCK_REALTIME` grid (the capture
+    /// loop's periodically re-sampled offset); `interval_ns == 0` (genlock off) never drives.
+    pub fn stamp_frame(
+        &mut self,
+        seq: u32,
+        capture_mono_ns: u64,
+        mono_to_real_offset_ns: i64,
+        interval_ns: u64,
+    ) -> Option<u64> {
+        // RED stub (issue 1367 D2): the tracker never drives the stamp.
+        let _ = (
+            mono_to_real_offset_ns,
+            interval_ns,
+            &mut self.slots,
+            &mut self.crossings,
+        );
+        self.tracker.observe(seq, capture_mono_ns);
+        self.mode = PhaseMode::Seed;
+        None
+    }
+
+    /// The path the most recent frame took.
+    pub fn mode(&self) -> PhaseMode {
+        self.mode
+    }
+
+    /// The camera frame RATE offset from the emit rate in ppm (positive = the camera runs faster
+    /// than the grid, so its crossings drop a duplicate slot).
+    pub fn rate_ppm(&self, interval_ns: u64) -> Option<f64> {
+        let p = self.tracker.period_ns()?;
+        (interval_ns > 0 && p > 0.0).then(|| (nominal_period_ns(interval_ns) / p - 1.0) * 1e6)
+    }
+
+    /// The fit's RMS residual in microseconds.
+    pub fn jitter_rms_us(&self) -> Option<f64> {
+        self.tracker.jitter_rms_ns().map(|ns| ns / 1000.0)
+    }
+
+    /// Crossings the slot chooser has placed since the start (one per camera-edge crossing).
+    pub fn crossings(&self) -> u64 {
+        self.crossings
+    }
+
+    /// Re-seeds of the fit since the start.
+    pub fn reseeds(&self) -> u64 {
+        self.tracker.reseeds()
+    }
+
+    /// The tokens the 5 s `#707 emit-1s/cap-1s` line appends (leading space). Every key is
+    /// mutually non-substring with every other token on that line.
+    pub fn status_tokens(&self, interval_ns: u64) -> String {
+        let ppm = self
+            .rate_ppm(interval_ns)
+            .map_or_else(|| "na".to_string(), |v| format!("{v:+.1}"));
+        let jitter = self
+            .jitter_rms_us()
+            .map_or_else(|| "na".to_string(), |v| format!("{v:.0}"));
+        format!(
+            " phase_lock={} phase_ppm={ppm} jitter_us={jitter} crossings={} reseeds={}",
+            self.mode.token(),
+            self.crossings,
+            self.reseeds()
+        )
+    }
+}
+
+/// The realtime instant (100 ns units) in the middle of the grid slot `slot_ns`: fed to
+/// `genlock_stamp::genlock_emit_timecode_100ns` it floors to exactly that slot's sender stamp
+/// (a sender stamp sits at most 99 ns before its slot's ns grid point, see `genlock_grid`).
+pub fn slot_mid_realtime_100ns(slot_ns: u64, interval_ns: u64) -> i64 {
+    (slot_ns.saturating_add(interval_ns / 2) / 100) as i64
+}
+
+/// The grid point (ns) of the slot a sender stamp (100 ns units) belongs to.
+pub fn stamp_slot_ns(stamp_100ns: i64, interval_ns: u64) -> u64 {
+    let stamp_ns = (stamp_100ns.max(0) as u64).saturating_mul(100);
+    grid_floor_ns(stamp_ns.saturating_add(interval_ns / 2), interval_ns)
+}
+
+/// The sender stamp (100 ns units) of the grid slot `slot_ns` at `fps` — what the NDI send
+/// carries for a frame placed in that slot.
+pub fn slot_stamp_100ns(slot_ns: u64, interval_ns: u64, fps: u64) -> i64 {
+    per_second_floor(
+        slot_mid_realtime_100ns(slot_ns, interval_ns) as u64,
+        fps,
+        UNITS_100NS_PER_SECOND,
+    ) as i64
+}
+
+#[cfg(test)]
+mod tests;

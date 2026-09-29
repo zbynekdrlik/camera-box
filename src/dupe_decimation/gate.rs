@@ -148,6 +148,16 @@ pub struct DecimationGate {
     /// [`STARVATION_REPEAT_MAX`]); a FROZEN source (dupes) is excluded by the `!copy` gate. So the cap
     /// is the fail-SAFE that bounds a burst + keeps a genuinely dead/frozen camera looking down.
     consecutive_starvation_repeats: u64,
+    /// (issue 1367 D2) The stamp slot staged by [`note_stamp_slot`](Self::note_stamp_slot) for the
+    /// next [`poll`](Self::poll): `Some` = decide on it (the capture phase tracker drives), `None` =
+    /// today's poll-time gate.
+    pending_stamp_slot_ns: Option<u64>,
+    /// (issue 1367 D2) The grid slot of the most recently EMITTED frame's stamp (`0` = none yet),
+    /// kept on both paths so the stamp-driven path continues from the poll-time one.
+    last_emitted_stamp_slot_ns: u64,
+    /// (issue 1367 D2) The stamp-driven decision of the most recent poll (`None` on the poll-time
+    /// path), for the capture loop's diagnostics and the bench.
+    last_stamp_action: Option<StampSlotAction>,
 }
 
 impl DecimationGate {
@@ -810,5 +820,25 @@ impl DecimationGate {
     /// [`take_shed_counts`](Self::take_shed_counts) so its byte-frozen 6-tuple is unchanged.
     pub fn take_starvation_repeats(&mut self) -> u64 {
         self.shed_log.take_starvation_repeats()
+    }
+
+    /// (issue 1367 D2) RED stub: stages the slot, but `poll` does not decide on it yet.
+    pub fn note_stamp_slot(&mut self, slot_ns: u64) {
+        self.pending_stamp_slot_ns = Some(slot_ns);
+    }
+
+    /// (issue 1367 D2) Record the sender stamp (100 ns units) of the frame the capture loop just
+    /// EMITTED, on either path, so the stamp-driven path continues from the poll-time one.
+    pub fn note_emitted_stamp_100ns(&mut self, stamp_100ns: i64, interval_ns: u64) {
+        if interval_ns > 0 && stamp_100ns > 0 {
+            self.last_emitted_stamp_slot_ns =
+                crate::capture_phase::stamp_slot_ns(stamp_100ns, interval_ns);
+        }
+    }
+
+    /// (issue 1367 D2) The stamp-driven decision of the most recent [`poll`](Self::poll), or `None`
+    /// when it decided on the poll wall clock.
+    pub fn last_stamp_action(&self) -> Option<StampSlotAction> {
+        self.last_stamp_action
     }
 }

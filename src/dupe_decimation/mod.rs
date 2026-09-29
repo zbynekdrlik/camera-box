@@ -57,17 +57,21 @@
 // submodules carry byte-identical logic. Dependency direction (acyclic): `signature` (pure
 // hash/sig) and `shed` (shed-decision logic + constants) are independent leaves — neither has a
 // code dependency on the other or on `gate`; `gate` (the DecimationGate state machine) depends on
-// both via `use super::*`. Issue 1367 slice D2 moved `shed_log` (DupeShedLog + its summary line)
-// out of `gate` unchanged for the same budget. See `.claude/rules/genlock-emit-gate-pacing.md`.
+// both via `use super::*`. Issue 1367 slice D2 added two more: `stamp` (the pure STAMP-DRIVEN emit
+// decision, a leaf on `shed`'s repeat cap) and `shed_log` (DupeShedLog + its summary line, moved
+// out of `gate` unchanged for the same budget). See `.claude/rules/genlock-emit-gate-pacing.md` and
+// `.claude/rules/capture-phase-tracker.md`.
 mod gate;
 mod shed;
 mod shed_log;
 mod signature;
+mod stamp;
 
 pub use gate::*;
 pub use shed::*;
 pub use shed_log::*;
 pub use signature::*;
+pub use stamp::*;
 
 #[cfg(test)]
 mod tests;

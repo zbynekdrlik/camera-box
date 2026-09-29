@@ -431,6 +431,28 @@ pub mod genlock_n2_grid;
 #[cfg(test)]
 mod genlock_n2_grid_bench;
 
+// Issue 1367 slice D2 — the per-stream capture PHASE tracker: a least-squares fit of the camera
+// period + phase over the V4L2 sequence number and capture time, with slot hysteresis, so a
+// free-running camera crossing a slot edge (~17 min) costs ONE duplicate or ONE missing slot
+// instead of a 15-20 s burst of random flips. `main.rs` stamps the NDI timecode and drives the
+// emit gate (`dupe_decimation::DecimationGate::note_stamp_slot`) from it while it is locked and
+// 1:1. Crate-root + std-only (Tier-0).
+pub mod capture_phase;
+
+// Issue 1367 slice D2 — the two-clock bench of the capture phase tracker: a +-16 ppm camera with
+// the measured crossing-burst jitter through the REAL poll-time gate (today) and the stamp-driven
+// gate (the tracker). Test-only; Linux-gated with `dupe_decimation`.
+#[cfg(all(test, target_os = "linux"))]
+mod capture_phase_bench;
+
+// A stamp-driven stream must never read as over-rate to the gate: the fastest 1:1 period the
+// tracker accepts stays above the gate's over-rate takt threshold (60.3 fps).
+#[cfg(target_os = "linux")]
+const _: () = assert!(
+    (1_000_000_000u64 / 60) * (1_000_000 - capture_phase::STAMP_MODE_MAX_RATE_PPM) / 1_000_000
+        > dupe_decimation::RETIRE_MIN_TAKT_INTERVAL_NS
+);
+
 // Issue 1372 — the ONE wall-step detector of the genlock render tick: a coordinated dantesync fleet
 // DATE step (the wall moves, the media clock does not) re-grids the tick in ONE tick instead of the
 // 2 ms/tick slew-back that left the tick and the sender's floored stamps off phase. Crate-root +
