@@ -742,6 +742,77 @@ def test_rig_mode_routes_both_event_sweeps_and_only_them_through_the_backstop():
         "the contract's fail-closed sweep-check reads the cg OBS row too")
 
 
+# The contract's sweep-check loop, cut out of event_mode_assert and run for real: a fake `timeout`
+# logs its bound and execs the rest, a fake python3 answers per host (the strih row clean, the cg
+# OBS row by $FAKE_CG_SWEEP: `clean`, `burn`, or an exit code with no output).
+_SWEEP_FAKE_TIMEOUT = r'''#!/usr/bin/env bash
+echo "TIMEOUT $1 $*" >> "$PYLOG"
+shift
+exec "$@"
+'''
+
+_SWEEP_FAKE_PY = r'''#!/usr/bin/env bash
+case " $* " in
+  *" --host 10.77.9.202 "*) echo '[{"input": "NDI cam1", "burn_on": false}]' ;;
+  *" --host resolume.lan "*)
+    case "$FAKE_CG_SWEEP" in
+      clean) echo '[{"input": "sp-fast_video", "burn_on": false}]' ;;
+      burn) echo '[{"input": "sp-fast_video", "burn_on": true}]'; exit 1 ;;
+      *) exit "$FAKE_CG_SWEEP" ;;
+    esac ;;
+esac
+'''
+
+
+def _contract_sweep(tmp_path, cg_sweep):
+    body = _RIG.read_text()
+    body = body[body.index("event_mode_assert() {"):body.index("\ndo_event() {")]
+    start = body.index("  local _asbip _asbbox sweep_arr sweep_rc\n")
+    end = body.index("\n", body.index("done < <(obs_burn_targets; cg_chain_backstop_sweep_targets)"))
+    fbin = tmp_path / "sbin"
+    fbin.mkdir()
+    for name, text in (("timeout", _SWEEP_FAKE_TIMEOUT), ("python3", _SWEEP_FAKE_PY)):
+        (fbin / name).write_text(text)
+        (fbin / name).chmod(0o755)
+    pylog = tmp_path / "py.log"
+    pylog.touch()
+    backstop = _ROOT / "scripts" / "lib" / "cg-obs-burn-backstop.sh"
+    harness = (f'set -euo pipefail\n. "{backstop}"\nhere=/nonexistent\nOBS_WS_PASSWORD=""\n'
+               "obs_burn_targets() { printf '10.77.9.202|NDI cam1|strih\\n'; }\n"
+               f'contract() {{\n  local burn_json="{{}}"\n{body[start:end]}\n'
+               '  echo "BURN=$(printf \'%s\' "$burn_json" | jq -c .)"\n}\ncontract\n')
+    out = subprocess.run(
+        ["/bin/bash", "-c", harness], capture_output=True, text=True, check=False,
+        env={"PATH": f"{fbin}:/usr/local/bin:/usr/bin:/bin", "HOME": str(tmp_path),
+             "PYLOG": str(pylog), "OBS_FLEET_HOME": "resolume", "FAKE_CG_SWEEP": cg_sweep})
+    assert out.returncode == 0, out.stderr
+    line = [ln for ln in out.stdout.splitlines() if ln.startswith("BURN=")][-1]
+    return json.loads(line[len("BURN="):]), pylog.read_text()
+
+
+def test_contract_sweep_check_is_bounded_on_every_row(tmp_path):
+    burns, log = _contract_sweep(tmp_path, "clean")
+    assert "TIMEOUT 60 " in log and "--host 10.77.9.202" in log, log
+    cg = [ln for ln in log.splitlines() if "--host resolume.lan" in ln]
+    assert cg and cg[0].startswith("TIMEOUT 60 "), "a hung traveling box must not hang the contract"
+    assert burns == {"strih:NDI cam1": False, "resolume:sp-fast_video": False}, burns
+
+
+def test_contract_sweep_check_carries_a_cg_obs_burn(tmp_path):
+    burns, _ = _contract_sweep(tmp_path, "burn")
+    assert burns["resolume:sp-fast_video"] is True, burns
+
+
+def test_contract_sweep_check_fails_closed_when_the_cg_obs_cannot_be_read(tmp_path):
+    # rc 2 = the enumeration failed; rc 124 = the 60 s bound expired (no output either way).
+    for rc in ("2", "124"):
+        run_dir = tmp_path / rc
+        run_dir.mkdir()
+        burns, _ = _contract_sweep(run_dir, rc)
+        assert burns.get("resolume:__sweep_unreachable__") is True, (rc, burns)
+        assert burns["strih:NDI cam1"] is False
+
+
 # ---- recording-e2e.sh wiring (static reads) ---------------------------------------------------
 
 
