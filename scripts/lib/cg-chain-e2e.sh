@@ -16,13 +16,15 @@
 # the CG_CHAIN-guarded call lines are added AFTER existing anchored lines, never editing one.
 #
 # What the profile does when CG_CHAIN=1 (ALL best-effort + loud, never a camera-chain abort):
-#   - at [5/8]: turn the SongPlayer output burn ON through the SHIPPED API (POST
-#     {base}/api/v1/ndi/burn {"output":"SP-fast","on":true}) and READ IT BACK from
-#     {base}/api/v1/ndi/health (`burn_on` of that output), cut cg OBS program to the scene carrying
-#     that output (`sp-fast`, under the Cut transition), turn the cg OBS's OWN hop burn (run 911015)
-#     ON on the input carrying that output (`sp-fast_video`, obs_burn_filter.py add + check — only
-#     after a verified SongPlayer burn and a successful cut), and StartRecord cg OBS over OBS-WS. No
-#     cg recording started ⇒ both burns go straight back OFF.
+#   - at [5/8]: cut cg OBS program to the scene carrying the SongPlayer output (`sp-fast`, under the
+#     Cut transition), put SongPlayer's OWN program on it through SongPlayer's obs-websocket facade
+#     (:4456, its previous program snapshotted first), read BOTH programs back, then turn the
+#     SongPlayer output burn ON through the SHIPPED API (POST {base}/api/v1/ndi/burn
+#     {"output":"SP-fast","on":true}, every answer logged with its HTTP code) and POLL it back on
+#     {base}/api/v1/ndi/health (`burn_on` of that output), turn the cg OBS's OWN hop burn (run
+#     911015) ON on the input carrying that output (`sp-fast_video`, obs_burn_filter.py add + check —
+#     only after a verified SongPlayer burn and both programs read back), and StartRecord cg OBS over
+#     OBS-WS. No cg recording started ⇒ both burns go straight back OFF.
 #   - after the camera sweep/hold, BEFORE [7/8] StopRecord: ONE tail CG window — strih program is
 #     HARD-CUT (Cut transition, never a blend) to the scene carrying the `CG-obs` input (only that
 #     item shown), so the strih + stream recordings carry the CG chain. It is a TAIL window on
@@ -32,8 +34,8 @@
 #     no-tick run after the last optical read); the first live CG_CHAIN=1 run is what confirms it.
 #   - right after [7/8] StopRecord (after the genlock-audit AFTER snapshot): StopRecord cg OBS
 #     (keeping the StopRecord host path for the on-box decode), both burns OFF, strih's scene +
-#     program + transition AND cg OBS's program + transition restored — so nothing CG runs during
-#     the on-box decodes.
+#     program + transition, SongPlayer's program (through the facade) AND cg OBS's program +
+#     transition restored — so nothing CG runs during the on-box decodes.
 #   - at [8/8] (issue 1302): recording-verdict-on-resolume.sh decodes that exact cg file IN PLACE on
 #     RESOLUME-SNV (`--extract-partial cg`), in the background next to the strih/stream extracts, and
 #     pulls back only the small partial; the merge takes it as `--merge-partials cg=<json>` and emits
@@ -48,14 +50,24 @@
 #     background OFF for each burn this run owes an OFF (a cancelled job is SIGKILLed seconds later);
 #     later the SongPlayer burn OFF (verified on /health) and the cg OBS hop burn OFF when this run
 #     turned it on (verified by `check`), each retried with a SHORT per-request timeout and a loud
-#     LEAK line if it never reads off, StopRecord cg OBS, every scene snapshot of this run restored,
-#     and an in-flight background cg extract stopped, even on an early abort.
+#     LEAK line if it never reads off, StopRecord cg OBS, every scene / program snapshot of this run
+#     restored, and an in-flight background cg extract stopped, even on an early abort.
+#   - on EVERY run (not only CG_CHAIN=1), section (e): rig-mode EVENT and the E2E pre-run normalize
+#     also sweep the cg OBS burns while the traveling box is home — the backstop for a cg hop burn a
+#     killed earlier run left on.
 
 # win_ssh_scp_source_path (the backslash-to-slash scp source fix) lives in win-ssh-exec.sh, which
 # recording-e2e.sh sources earlier; source it here too when a caller (a test) did not.
 if ! declare -F win_ssh_scp_source_path >/dev/null 2>&1; then
   # shellcheck source=scripts/lib/win-ssh-exec.sh
   . "$(dirname "${BASH_SOURCE[0]}")/win-ssh-exec.sh"
+fi
+# The cg OBS burn backstop (section (e)) asks the ONE obs-fleet list whether the traveling cg OBS box
+# is home. Lazy-sourced (the e2e-win-baseline.sh idiom), so a caller that already has it is not
+# re-sourced.
+if ! declare -F obs_fleet_is_home >/dev/null 2>&1; then
+  # shellcheck source=scripts/lib/obs-fleet.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-fleet.sh"
 fi
 
 # True iff the CG_CHAIN profile is enabled for this run. Pure, no side effects.
@@ -131,14 +143,128 @@ cg_chain_songplayer_burn_state() {
   return 0
 }
 
+# ---- bounded polls (issue 1302 slice 3) ----------------------------------------------------------
+#
+# SongPlayer confirms a burn toggle on /health "within 1 s", and its obs-websocket facade mirrors a
+# program cut to cg OBS asynchronously, so one read right after a request misses a state that is
+# only late. Every read-back here is a POLL bounded by wall time, never a fixed number of reads.
+
+# A non-negative integer env value $1, else the default $2. Pure.
+_cg_chain_uint_or() {
+  case "${1:-}" in
+    '' | *[!0-9]*) printf '%s' "$2" ;;
+    *) printf '%s' "$((10#$1))" ;;
+  esac
+}
+
+# The burn read-back budget in seconds after an accepted toggle (env CG_CHAIN_BURN_READBACK_S,
+# default 3 = three times SongPlayer's own "within 1 s"; 0 = one read). Pure.
+cg_chain_burn_readback_secs() {
+  _cg_chain_uint_or "${CG_CHAIN_BURN_READBACK_S:-}" 3
+}
+
+# The program read-back budget in seconds after a program cut (env CG_CHAIN_PROGRAM_READBACK_S,
+# default 5: the facade's mirror to cg OBS is not awaited by SongPlayer; 0 = one read). Pure.
+cg_chain_program_readback_secs() {
+  _cg_chain_uint_or "${CG_CHAIN_PROGRAM_READBACK_S:-}" 5
+}
+
+# The interval of both polls in ms (env CG_CHAIN_READBACK_POLL_MS, default 500; 0 or garbage = 500).
+# Pure.
+cg_chain_readback_poll_ms() {
+  local ms
+  ms="$(_cg_chain_uint_or "${CG_CHAIN_READBACK_POLL_MS:-}" 500)"
+  if [ "$ms" = 0 ]; then ms=500; fi
+  printf '%s' "$ms"
+}
+
+# The wall clock in ms. Pure (reads the clock).
+_cg_chain_now_ms() {
+  date +%s%3N
+}
+
+# One more poll round fits the budget: returns 0 after sleeping the interval when the next read,
+# $3 ms from now, still lands within $2 seconds of the start $1 (ms); returns 1 (no sleep) when it
+# would not. Callers loop `read; match && break; _cg_chain_poll_next ... || break`.
+_cg_chain_poll_next() {
+  local start="$1" budget_s="$2" poll_ms="$3" now
+  now="$(_cg_chain_now_ms)"
+  [ $((now - start + poll_ms)) -le $((budget_s * 1000)) ] || return 1
+  sleep "$((poll_ms / 1000)).$(printf '%03d' $((poll_ms % 1000)))"
+  return 0
+}
+
+# Poll the configured output's `burn_on` until it reads $1 (true|false) or the burn read-back
+# budget runs out. At least one read. Prints the last state read. ALWAYS returns 0.
+cg_chain_songplayer_burn_poll() {
+  local want="$1" budget poll start state
+  budget="$(cg_chain_burn_readback_secs)"
+  poll="$(cg_chain_readback_poll_ms)"
+  start="$(_cg_chain_now_ms)"
+  while :; do
+    state="$(cg_chain_songplayer_burn_state)"
+    [ "$state" != "$want" ] || break
+    _cg_chain_poll_next "$start" "$budget" "$poll" || break
+  done
+  printf '%s' "$state"
+  return 0
+}
+
+# The response body on STDIN as ONE log line: CR/LF folded to spaces, at most 200 characters. Pure.
+cg_chain_http_body_line() {
+  local s
+  s="$(tr '\r\n' '  ')"
+  printf '%s' "${s:0:200}"
+}
+
+# POST the burn toggle body $1 to $2 and print `<http code><TAB><body line>`. The code is `000`
+# when no HTTP answer came back, and the body line then carries curl's own error. The body is kept
+# for every code (no `-f`): a 404 / 409 says why. ALWAYS returns 0.
+cg_chain_songplayer_burn_post() {
+  local body="$1" url="$2" tmp code line
+  if ! tmp="$(mktemp "${TMPDIR:-/tmp}/cg-sp-burn.XXXXXX")"; then
+    printf '000\tcould not create a temp file for the answer'
+    return 0
+  fi
+  code="$(curl -sS -o "$tmp" -w '%{http_code}' -m "${CG_CHAIN_BURN_TIMEOUT:-10}" -X POST \
+    -H 'Content-Type: application/json' -d "$body" "$url" 2>"$tmp.err")" || true
+  case "$code" in [0-9][0-9][0-9]) ;; *) code=000 ;; esac
+  if [ "$code" = 000 ]; then
+    line="$(cg_chain_http_body_line <"$tmp.err")"
+  else
+    line="$(cg_chain_http_body_line <"$tmp")"
+  fi
+  rm -f -- "$tmp" "$tmp.err"
+  printf '%s\t%s' "$code" "$line"
+  return 0
+}
+
+# The named reason of a burn toggle SongPlayer refused (HTTP $1), or nothing for any other code.
+# 404 / 409 are final answers, never retried (SongPlayer's burn registry: 404 = no pipeline has that
+# NDI output, 409 = the output is not paced, and a burn is painted only on the paced path). Pure.
+cg_chain_burn_refusal_reason() {
+  local out
+  out="$(cg_chain_songplayer_output)"
+  case "$1" in
+    404) printf "HTTP 404: SongPlayer has no output '%s'" "$out" ;;
+    409) printf "HTTP 409: pacing is disabled on '%s' (SongPlayer paints the burn only on the paced path)" "$out" ;;
+  esac
+  return 0
+}
+
 # Toggle the SongPlayer output burn $1 (on|off) and VERIFY it on the health endpoint. Up to
-# CG_CHAIN_BURN_ATTEMPTS (default 3) POST + read-back rounds, CG_CHAIN_BURN_RETRY_SLEEP seconds
-# apart (default 1). A verified toggle prints one VERIFIED line. An ON that never reads back true is
-# a loud WARNING (the cg_chain section then proves nothing). An OFF that never reads back false is a
-# loud LEAK line naming the manual off command — the burn must NEVER stay on the LED wall. ALWAYS
-# returns 0 (never aborts the run or cleanup()).
+# CG_CHAIN_BURN_ATTEMPTS (default 3) POST rounds, CG_CHAIN_BURN_RETRY_SLEEP seconds apart (default
+# 1). Every POST prints its own line: `[cg_chain] SongPlayer burn <on|off> attempt k: HTTP <code>
+# <body>`. After a 2xx the health endpoint is POLLED (cg_chain_songplayer_burn_poll) until it reads
+# the wanted state; after any other code one read decides (the state is authoritative over the
+# answer); after no answer (000) nothing is read. A 404 / 409 is a named failure and is not retried.
+# A verified toggle prints one VERIFIED line. An ON that never reads back true is a loud WARNING
+# (the cg_chain section then proves nothing). An OFF that never reads back false is a loud LEAK line
+# naming the manual off command — the burn must NEVER stay on the LED wall; an OFF answered 404
+# owes nothing (no pipeline has that output, so no burn is painted anywhere). ALWAYS returns 0
+# (never aborts the run or cleanup()).
 cg_chain_songplayer_burn() {
-  local action="$1" url body want attempts i state=unknown
+  local action="$1" url body want attempts i tries=0 state=unknown resp code line reason=""
   url="$(cg_chain_songplayer_burn_url)"
   if ! body="$(cg_chain_songplayer_burn_body "$action")"; then
     echo "[cg_chain] WARNING: SongPlayer burn action '$action' is not on|off — nothing sent" >&2
@@ -158,21 +284,37 @@ cg_chain_songplayer_burn() {
   attempts="${CG_CHAIN_BURN_ATTEMPTS:-3}"
   case "$attempts" in '' | *[!0-9]* | 0) attempts=3 ;; esac
   for ((i = 1; i <= attempts; i++)); do
-    curl -fsS -m "${CG_CHAIN_BURN_TIMEOUT:-10}" -X POST -H 'Content-Type: application/json' \
-      -d "$body" "$url" >/dev/null 2>&1 || true
-    state="$(cg_chain_songplayer_burn_state)"
+    tries="$i"
+    resp="$(cg_chain_songplayer_burn_post "$body" "$url")"
+    code="${resp%%$'\t'*}"
+    line="${resp#*$'\t'}"
+    echo "[cg_chain] SongPlayer burn $action attempt $i: HTTP $code${line:+ $line}"
+    reason="$(cg_chain_burn_refusal_reason "$code")"
+    case "$code" in
+      2??) state="$(cg_chain_songplayer_burn_poll "$want")" ;;
+      000) state=unknown ;;
+      *) state="$(cg_chain_songplayer_burn_state)" ;;
+    esac
     if [ "$state" = "$want" ]; then
       if [ "$action" = on ]; then CG_SP_BURN_ON=1; else CG_SP_BURN_OWED=0; fi
       echo "[cg_chain] SongPlayer burn $action VERIFIED (burn_on=$state on $(cg_chain_songplayer_output), $(cg_chain_songplayer_health_url))"
       return 0
     fi
+    if [ -n "$reason" ]; then break; fi
     if [ "$i" -lt "$attempts" ]; then sleep "${CG_CHAIN_BURN_RETRY_SLEEP:-1}"; fi
   done
   if [ "$action" = on ]; then
-    echo "[cg_chain] WARNING: SongPlayer burn ON not confirmed after $attempts attempt(s) (burn_on=$state on $(cg_chain_songplayer_output)) — the cg_chain section will prove nothing this run" >&2
+    if [ -n "$reason" ]; then
+      echo "[cg_chain] WARNING: SongPlayer refused the burn ON — $reason; not retried (burn_on=$state) — the cg_chain section will prove nothing this run" >&2
+    else
+      echo "[cg_chain] WARNING: SongPlayer burn ON not confirmed after $tries attempt(s) (burn_on=$state on $(cg_chain_songplayer_output)) — the cg_chain section will prove nothing this run" >&2
+    fi
+  elif [ "$code" = 404 ]; then
+    CG_SP_BURN_OWED=0
+    echo "[cg_chain] SongPlayer burn off: nothing to turn off — $reason, so no burn is painted on it"
   else
     CG_SP_BURN_OWED=1
-    echo "[cg_chain] LEAK: SongPlayer burn still not OFF after $attempts attempt(s) (burn_on=$state on $(cg_chain_songplayer_output)) — the burn may still be on the LED wall; turn it off: curl -X POST -H 'Content-Type: application/json' -d '$body' $url" >&2
+    echo "[cg_chain] LEAK: SongPlayer burn still not OFF after $tries attempt(s)${reason:+ ($reason; not retried)} (burn_on=$state on $(cg_chain_songplayer_output)) — the burn may still be on the LED wall; turn it off: curl -X POST -H 'Content-Type: application/json' -d '$body' $url" >&2
   fi
   return 0
 }
@@ -345,18 +487,200 @@ cg_chain_cg_program_select() {
   return 1
 }
 
-# Cut cg OBS program to the SongPlayer scene, turn the cg OBS hop burn ON, then StartRecord cg OBS
-# over OBS-WS (obs_phase2.py record --host <ip> --action start). The hop burn goes ON only when the
-# SongPlayer burn was VERIFIED on (CG_SP_BURN_ON=1) and the program cut succeeded — otherwise there is
-# nothing for the cg hop to carry — and BEFORE StartRecord, so the cg recording carries it from its
-# first frame. A failed StartRecord turns it straight back OFF (nothing will judge it). The burn calls
-# run under cg_chain_burn_obs_timeout, never the record timeout. Args: $1=host-ip
-# $2=path-to-obs_phase2.py $3=timeout-secs. Returns 0 on a started recording (caller then sets
-# CG_RECORDING_STARTED=1 so cleanup() StopRecords this box), 1 on failure. MUST be called from an
-# `if` (the nonzero return is the failure signal, not an abort — never call it bare under set -e).
+# ---- (b2) SongPlayer's OWN program, cut through its obs-websocket facade (issue 1302 slice 3) ----
+#
+# Since SongPlayer 221 L4b (live 29.9.2026) SongPlayer plays what is on ITS OWN program: a cg OBS
+# program cut over :4455 no longer starts or pauses anything in SongPlayer. Its obs-websocket FACADE
+# (:4456, the same `SetCurrentProgramScene` Companion presses) is the way in: SongPlayer cuts
+# SP-program to that playlist FIRST, then mirrors the same scene to cg OBS (queued, not awaited). So
+# the record start cuts cg OBS over :4455 first (the hard cut + its own snapshot, unchanged), then
+# presses the facade, then reads BOTH programs back; the cleanup restores SongPlayer's program
+# through the facade before the cg OBS :4455 restore puts cg OBS back exactly as it was.
+
+# SongPlayer's program API: GET = `source` (the playlist id on SP-program) + `remote.program_scene`
+# (the scene name the facade answers with). Pure.
+cg_chain_songplayer_program_url() {
+  printf '%s/api/v1/program' "$(cg_chain_songplayer_api_base)"
+}
+
+# The facade port (env CG_CHAIN_SP_FACADE_PORT, default 4456). Pure.
+cg_chain_sp_facade_port() {
+  local p
+  p="$(_cg_chain_uint_or "${CG_CHAIN_SP_FACADE_PORT:-}" 4456)"
+  if [ "$p" = 0 ]; then p=4456; fi
+  printf '%s' "$p"
+}
+
+# Read a GET /api/v1/program document on STDIN and print `<scene><TAB><source>`: the
+# `remote.program_scene` ('' when null / absent) and the `source` ('' when null / absent). A
+# document that does not parse as a JSON object prints nothing and returns 1. Pure.
+cg_chain_program_fields() {
+  python3 -c '
+import json, sys
+try:
+    doc = json.load(sys.stdin)
+except Exception:
+    sys.exit(1)
+if not isinstance(doc, dict):
+    sys.exit(1)
+remote = doc.get("remote") if isinstance(doc.get("remote"), dict) else {}
+scene = remote.get("program_scene")
+source = doc.get("source")
+scene = scene if isinstance(scene, str) else ""
+source = str(source) if isinstance(source, int) and not isinstance(source, bool) else ""
+print(scene + "\t" + source, end="")
+' 2>/dev/null
+}
+
+# SongPlayer's live program as `<scene><TAB><source>`; returns 1 (prints nothing) when the program
+# API is unreachable or answers something unreadable. MUST be called from an `if`.
+cg_chain_songplayer_program_read() {
+  local doc
+  doc="$(curl -fsS -m "${CG_CHAIN_BURN_TIMEOUT:-10}" "$(cg_chain_songplayer_program_url)" 2>/dev/null)" || return 1
+  printf '%s' "$doc" | cg_chain_program_fields
+}
+
+# The facade session's password is CG_CHAIN_SP_FACADE_PASSWORD, read from the environment by the
+# scene helper itself (never on an argv).
+
+# Put SongPlayer's program on the cg scene through the facade. SongPlayer's program is read FIRST
+# and snapshotted (cg_chain_state_file sp-program: host, port, scene, source) before the press; an
+# unreadable program = no press (a mutation is never made without a snapshot to undo it); a program
+# already on the scene = no press and no snapshot (nothing to undo). $1=cg-host $2=obs_phase2.py
+# $3=timeout-secs. Returns 0 when SongPlayer's program is on (or was pressed to) the scene, 1 with a
+# WARNING otherwise. MUST be called from an `if`.
+cg_chain_sp_program_select() {
+  local host="$1" py="$2" tmo="${3:-30}" scene port state prog prev_scene prev_source
+  scene="$(cg_chain_cg_scene)"
+  port="$(cg_chain_sp_facade_port)"
+  state="$(cg_chain_state_file sp-program)"
+  if ! prog="$(cg_chain_songplayer_program_read)"; then
+    echo "[cg_chain] WARNING: could not read SongPlayer's program ($(cg_chain_songplayer_program_url)) — not cut through its facade (no snapshot to restore from)" >&2
+    return 1
+  fi
+  prev_scene="${prog%%$'\t'*}"
+  prev_source="${prog#*$'\t'}"
+  if [ "$prev_scene" = "$scene" ]; then
+    echo "[cg_chain] SongPlayer program already on '$scene' (source ${prev_source:-none}) — no facade cut"
+    return 0
+  fi
+  if ! python3 -c '
+import json, sys
+host, port, scene, source, path = sys.argv[1:6]
+state = {"host": host, "port": int(port), "scene": scene or None,
+         "source": int(source) if source else None}
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(state, f)
+import os
+os.replace(tmp, path)
+' "$host" "$port" "$prev_scene" "$prev_source" "$state"; then
+    echo "[cg_chain] WARNING: could not write the SongPlayer program snapshot ($state) — not cut through its facade" >&2
+    return 1
+  fi
+  if timeout "$tmo" python3 "$(cg_chain_scene_py "$py")" facade-program --host "$host" --port "$port" \
+    --scene "$scene" >/dev/null; then
+    echo "[cg_chain] SongPlayer facade ($host:$port) program -> '$scene' OK (was '${prev_scene:-none}', source ${prev_source:-none})"
+    return 0
+  fi
+  echo "[cg_chain] WARNING: SongPlayer facade ($host:$port) cut to '$scene' failed — SongPlayer may not play '$scene' in the cg recording" >&2
+  return 1
+}
+
+# Read BOTH programs back after the cuts until they agree with the cg scene: SongPlayer's
+# `remote.program_scene` (GET /api/v1/program) and cg OBS's program scene over :4455
+# (obs_phase2.py program-scene, each call under cg_chain_burn_obs_timeout). Polled every
+# cg_chain_readback_poll_ms for up to cg_chain_program_readback_secs (the facade's mirror to cg OBS
+# is not awaited by SongPlayer). $1=cg-host $2=obs_phase2.py. Returns 0 on a match; 1 with a loud
+# WARNING naming both reads otherwise — the caller keeps the cg burn OFF. MUST be called from an `if`.
+cg_chain_program_readback() {
+  local host="$1" py="$2" scene budget poll start prog sp cg pw=()
+  scene="$(cg_chain_cg_scene)"
+  budget="$(cg_chain_program_readback_secs)"
+  poll="$(cg_chain_readback_poll_ms)"
+  if [ -n "${CG_CHAIN_OBS_PASSWORD:-}" ]; then pw=(--password "$CG_CHAIN_OBS_PASSWORD"); fi
+  start="$(_cg_chain_now_ms)"
+  while :; do
+    sp=""
+    if prog="$(cg_chain_songplayer_program_read)"; then sp="${prog%%$'\t'*}"; fi
+    cg="$(timeout "$(cg_chain_burn_obs_timeout)" python3 "$py" program-scene --host "$host" \
+      ${pw[@]+"${pw[@]}"} 2>/dev/null | tail -n 1)" || cg=""
+    if [ "$sp" = "$scene" ] && [ "$cg" = "$scene" ]; then
+      echo "[cg_chain] programs read back: SongPlayer '$sp' + cg OBS ($host) '$cg'"
+      return 0
+    fi
+    _cg_chain_poll_next "$start" "$budget" "$poll" || break
+  done
+  echo "[cg_chain] WARNING: program mismatch after the cut — SongPlayer program '${sp:-unreadable}', cg OBS program '${cg:-unreadable}', want '$scene' — the cg burn stays OFF this run" >&2
+  return 1
+}
+
+# Restore SongPlayer's program from this run's snapshot through the facade and retire the snapshot
+# (renamed `.restored`, so the cleanup() second pass is a no-op). No snapshot = nothing to do; a
+# program already back on the snapshotted scene is not pressed again. A snapshot with no scene
+# (nothing on SP-program, or a playlist whose catalog names no scene) cannot be pressed through the
+# facade: a WARNING naming the dashboard cut that restores it, snapshot kept. A failed press keeps
+# the snapshot and names the manual command. $1=obs_phase2.py $2=timeout-secs. ALWAYS returns 0.
+cg_chain_sp_program_restore() {
+  local py="$1" tmo="${2:-30}" state fields host port scene source prog
+  state="$(cg_chain_state_file sp-program)"
+  [ -f "$state" ] || return 0
+  if ! fields="$(python3 -c '
+import json, sys
+d = json.load(open(sys.argv[1], encoding="utf-8"))
+src = d.get("source")
+print("\x1f".join([str(d["host"]), str(d["port"]), d.get("scene") or "", "" if src is None else str(src)]), end="")
+' "$state" 2>/dev/null)"; then
+    echo "[cg_chain] WARNING: SongPlayer program snapshot $state is unreadable — SongPlayer's program NOT restored; check it at $(cg_chain_songplayer_program_url)" >&2
+    return 0
+  fi
+  # A unit separator, never a tab: a tab is IFS whitespace, so an empty scene would collapse.
+  IFS=$'\x1f' read -r host port scene source <<<"$fields"
+  if [ -z "$scene" ]; then
+    echo "[cg_chain] WARNING: SongPlayer had no scene on its program before this run (source ${source:-none}) — the facade cannot put it back; restore it from the dashboard: curl -X POST -H 'Content-Type: application/json' -d '{\"source\":${source:-<playlist id>}}' $(cg_chain_songplayer_api_base)/api/v1/program/cut (snapshot kept at $state)" >&2
+    return 0
+  fi
+  if prog="$(cg_chain_songplayer_program_read)" && [ "${prog%%$'\t'*}" = "$scene" ]; then
+    mv -f -- "$state" "$state.restored"
+    echo "[cg_chain] SongPlayer program already back on '$scene'"
+    return 0
+  fi
+  if timeout "$tmo" python3 "$(cg_chain_scene_py "$py")" facade-program --host "$host" --port "$port" \
+    --scene "$scene" >/dev/null; then
+    mv -f -- "$state" "$state.restored"
+    echo "[cg_chain] SongPlayer program restored -> '$scene' (facade $host:$port)"
+  else
+    echo "[cg_chain] WARNING: SongPlayer program restore through the facade failed — snapshot kept at $state (restore by hand: python3 $(cg_chain_scene_py "$py") facade-program --host $host --port $port --scene '$scene')" >&2
+  fi
+  return 0
+}
+
+# Cut cg OBS program to the SongPlayer scene (over :4455, the hard cut), put SongPlayer's own program
+# on it through the facade, read BOTH programs back, and only then turn the SongPlayer burn ON:
+# SongPlayer registers a playlist's burn OFF whenever its pipeline spawns (the flag is never
+# persisted), and a cut can spawn it, so a burn turned on before the cut is not a burn on the cg
+# recording. Then the cg OBS hop burn goes ON — only when the SongPlayer burn was VERIFIED on
+# (CG_SP_BURN_ON=1) AND both programs read back on the scene, otherwise there is nothing for the cg
+# hop to carry — and BEFORE StartRecord, so the cg recording carries it from its first frame; then
+# StartRecord cg OBS over OBS-WS (obs_phase2.py record --host <ip> --action start). A failed
+# StartRecord turns the cg burn straight back OFF (nothing will judge it); the caller turns the
+# SongPlayer burn off. The burn and read-back calls run under cg_chain_burn_obs_timeout, never the
+# record timeout. Args: $1=host-ip $2=path-to-obs_phase2.py $3=timeout-secs. Returns 0 on a started
+# recording (caller then sets CG_RECORDING_STARTED=1 so cleanup() StopRecords this box), 1 on
+# failure. MUST be called from an `if` (the nonzero return is the failure signal, not an abort —
+# never call it bare under set -e).
 cg_chain_record_start() {
   local host="$1" py="$2" tmo="${3:-30}" cut_ok=0
-  if cg_chain_cg_program_select "$host" "$py" "$tmo"; then cut_ok=1; fi
+  if cg_chain_cg_program_select "$host" "$py" "$tmo" \
+    && cg_chain_sp_program_select "$host" "$py" "$tmo" \
+    && cg_chain_program_readback "$host" "$py"; then
+    cut_ok=1
+  fi
+  if [ "$cut_ok" = 1 ]; then
+    cg_chain_songplayer_burn on
+  else
+    echo "[cg_chain] WARNING: SongPlayer burn not turned on — the program cut did not read back on '$(cg_chain_cg_scene)'" >&2
+  fi
   if [ "${CG_SP_BURN_ON:-0}" = 1 ] && [ "$cut_ok" = 1 ]; then
     cg_chain_cg_burn on "$host" "$py"
   else
@@ -713,8 +1037,9 @@ cg_chain_restore_snapshot() {
 # End the CG leg right after [7/8] StopRecord: StopRecord cg OBS (keeping the host path for the
 # on-box decode), the SongPlayer burn OFF and the cg OBS hop burn OFF (each verified; the hop burn
 # only when this run turned it on, CG_BURN_ON=1), strih's CG-window scene + program + transition
-# restored, and cg OBS's program + transition restored — so neither the cg recording nor a burn nor
-# either CG program change runs through the long on-box decodes.
+# restored, SongPlayer's program restored through its facade, then cg OBS's program + transition
+# restored over :4455 (last, so cg OBS ends exactly as its snapshot recorded it) — so neither the cg
+# recording nor a burn nor any CG program change runs through the long on-box decodes.
 # cleanup() repeats every step (each is idempotent). $1=cg-host-ip-or-empty $2=path-to-obs_phase2.py
 # $3=timeout-secs. A pure no-op unless CG_CHAIN=1; ALWAYS return 0.
 cg_chain_after_stoprecord() {
@@ -726,6 +1051,7 @@ cg_chain_after_stoprecord() {
   cg_chain_songplayer_burn off
   if [ "${CG_BURN_ON:-0}" = 1 ]; then cg_chain_cg_burn off "$host" "$py"; fi
   cg_chain_restore_snapshot strih-scene "$py" "$tmo"
+  cg_chain_sp_program_restore "$py" "$tmo"
   cg_chain_restore_snapshot cg-program "$py" "$tmo"
   return 0
 }
@@ -762,8 +1088,8 @@ cg_chain_cleanup_burns_first() {
 }
 
 # cleanup() leak-guard: the SongPlayer burn OFF and the cg OBS hop burn OFF (each verified; the hop
-# burn only when CG_BURN_ON=1), StopRecord cg OBS, and every scene snapshot of this run restored,
-# even on an early abort. The burn requests use a SHORT per-request timeout
+# burn only when CG_BURN_ON=1), StopRecord cg OBS, and every scene / program snapshot of this run
+# restored (strih, SongPlayer through its facade, then cg OBS), even on an early abort. The burn requests use a SHORT per-request timeout
 # (CG_CHAIN_CLEANUP_BURN_TIMEOUT, default 3 s), so an unreachable SongPlayer or cg OBS costs ~20 s
 # each, never a minute in front of the stream/strih teardowns that follow. A pure no-op when CG_CHAIN
 # is not enabled (so it is safe to call unconditionally from cleanup()). Args: $1=cg-host-ip-or-empty
@@ -790,6 +1116,65 @@ cg_chain_cleanup() {
     cg_chain_record_stop "$host" "$py" "$tmo"
   fi
   cg_chain_restore_snapshot strih-scene "$py" "$tmo"
+  cg_chain_sp_program_restore "$py" "$tmo"
   cg_chain_restore_snapshot cg-program "$py" "$tmo"
+  return 0
+}
+
+# ---- (e) the home-gated cg OBS burn backstop (issue 1302 slice 3) -------------------------------
+#
+# The cg OBS hop burn (911015) is saved in the cg OBS scene collection, so it survives an OBS / AHK
+# respawn, and only the run that turned it on turns it off (after the recording, in cleanup(), and
+# cleanup()'s first pass). A runner SIGKILLed before even that first pass leaves it on. So the
+# sweeps that already clear every other box -- rig-mode EVENT (sweep-off, then the contract's
+# sweep-check) and the E2E pre-run normalize (sweep-off) -- sweep the cg OBS too, through the same
+# obs_burn_filter.py sweep-* enumerator, whenever the traveling box is HOME (obs_fleet_is_home:
+# resolves + OBS-WS :4455 answers). Away = SKIP, never a failure. These run on EVERY run, not only
+# under CG_CHAIN=1: the burn they clear was left by an EARLIER run.
+
+# The obs-fleet name of the cg OBS box (env CG_CHAIN_BACKSTOP_BOX, default resolume). Pure.
+cg_chain_backstop_box() {
+  printf '%s' "${CG_CHAIN_BACKSTOP_BOX:-resolume}"
+}
+
+# The cg OBS burn-sweep target in the rig-mode obs_burn_targets row shape `ip|source|box` -- the
+# box's fleet host, `-` (the sweeps enumerate every input, the source field is unused) and the box
+# name -- when the box is home; otherwise NOTHING on stdout and one SKIP line on stderr. ALWAYS
+# returns 0 (it feeds a `done < <(...)`).
+cg_chain_backstop_sweep_targets() {
+  local box host
+  box="$(cg_chain_backstop_box)"
+  if obs_fleet_is_home "$box" && host="$(obs_fleet_host "$box")"; then
+    printf '%s|-|%s\n' "$host" "$box"
+  else
+    echo "    [$box burn-sweep] SKIP: the cg OBS box '$box' is away (obs-fleet home check) -- not swept" >&2
+  fi
+  return 0
+}
+
+# The E2E pre-run cg OBS sweep: clear genlock_burn on EVERY ndi input of the cg OBS while it is home
+# (obs_burn_filter.py sweep-off). $1=obs_burn_filter.py $2=per-call timeout (s). Loud, never fatal:
+# the camera-chain E2E never aborts on the report-only cg leg, so a sweep that fails is a WARNING
+# naming the manual command -- exit 2 = the input enumeration failed (a leaked burn stays
+# UNVERIFIED, the fail-closed wording of the burn-enumeration rule), anything else = a burn still
+# renders, the connection failed, or the call timed out. CG_CHAIN_OBS_PASSWORD is passed when set.
+# ALWAYS returns 0.
+cg_chain_backstop_sweep_off() {
+  local bf="$1" tmo="${2:-30}" host box out rc pw=()
+  if [ -n "${CG_CHAIN_OBS_PASSWORD:-}" ]; then pw=(--password "$CG_CHAIN_OBS_PASSWORD"); fi
+  while IFS='|' read -r host _ box; do
+    [ -n "$host" ] || continue
+    out="$(timeout "$tmo" python3 "$bf" sweep-off --host "$host" ${pw[@]+"${pw[@]}"} 2>&1)" && rc=0 || rc=$?
+    if [ -n "$out" ]; then printf '%s\n' "$out" | sed "s/^/    [$box burn-sweep] /"; fi
+    case "$rc" in
+      0) ;;
+      2)
+        echo "[cg_chain] WARNING: could not enumerate the cg OBS inputs on $host -- a cg hop burn an earlier run left on stays UNVERIFIED; clear it: python3 $bf sweep-off --host $host" >&2
+        ;;
+      *)
+        echo "[cg_chain] WARNING: the cg OBS burn sweep on $host failed (rc=$rc) -- a cg hop burn may still be ON; clear it: python3 $bf sweep-off --host $host" >&2
+        ;;
+    esac
+  done < <(cg_chain_backstop_sweep_targets)
   return 0
 }

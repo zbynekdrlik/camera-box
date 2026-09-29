@@ -217,6 +217,13 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/stream-dev-scene.sh
 . "$RIG_MODE_DIR/lib/stream-dev-scene.sh"
 
+# issue 1302 slice 3: the home-gated cg OBS burn backstop -- cg_chain_backstop_sweep_targets adds the
+# traveling cg OBS box (RESOLUME-SNV) to the EVENT burn sweep-off and to the contract's sweep-check
+# while it is home (away = one SKIP line, never a failure). Source-only lib (win-ssh-exec.sh above is
+# already sourced, obs-fleet.sh is lazy-sourced by it), no side effects at source time.
+# shellcheck source=scripts/lib/cg-chain-e2e.sh
+. "$RIG_MODE_DIR/lib/cg-chain-e2e.sh"
+
 # --- pinned constants (overridable via env, but DEFAULTS are the single source of truth) -----------
 CAM_PW="${CAM_PW:-newlevel}"                 # dev-rig LAN root pw (same as the sibling e2e scripts)
 PAINTER_IP="${PAINTER_IP:-10.77.9.62}"       # cam2 — has /dev/fb0 + the monitor the broadcast cam films
@@ -937,7 +944,9 @@ toggle_burn() {
   # /'NDI cam3', stream 'phase2-probe-src') is invisible to the pinned list and leaks past the
   # switch (the 2026-08-07 pre-broadcast incident; guard class issue 246/844). Route it through the
   # shared exhaustive enumerator (obs_burn_filter.py sweep-off — GetInputList over WS, never a
-  # static/CAMERA_ACTIVE_SET-derived list). ON (TEST) stays pinned-only by design.
+  # static/CAMERA_ACTIVE_SET-derived list). ON (TEST) stays pinned-only by design. issue 1302: the
+  # sweep also covers the cg OBS (RESOLUME-SNV) while it is home -- a cg hop burn a killed CG_CHAIN
+  # run left on survives in its scene collection (cg_chain_backstop_sweep_targets, the cg-chain lib).
   if [ "$mode" = "event" ]; then
     local _sbip _sbbox
     while IFS='|' read -r _sbip _ _sbbox; do
@@ -949,7 +958,7 @@ toggle_burn() {
       fi
       python3 "$here/obs_burn_filter.py" sweep-off --host "$_sbip" --password "$OBS_WS_PASSWORD" \
         2>&1 | sed "s/^/    [${_sbbox} burn-sweep] /" || rc=$?
-    done < <(obs_burn_targets)
+    done < <(obs_burn_targets; cg_chain_backstop_sweep_targets)
   fi
   return $rc
 }
@@ -1521,7 +1530,8 @@ event_mode_assert() {
   # inputs while an un-enumerable box hides an out-of-set burn (the #1011 fail-open the review
   # caught). A successful sweep re-emits the pinned "box:NDI cam1" key too; its raw reading
   # deliberately SUPERSEDES the pinned check's fail-closed value — the sweep genuinely re-read the
-  # input, and a real burn still reads true in both, so nothing is masked.
+  # input, and a real burn still reads true in both, so nothing is masked. issue 1302: the cg OBS
+  # (RESOLUME-SNV) joins this sweep while it is home, with the same fail-closed sentinel; away = SKIP.
   local _asbip _asbbox sweep_arr sweep_rc
   while IFS='|' read -r _asbip _ _asbbox; do
     [ -n "$_asbip" ] || continue
@@ -1539,7 +1549,7 @@ event_mode_assert() {
     burn_json="$(printf '%s' "$sweep_arr" | jq --argjson j "$burn_json" --arg box "$_asbbox" \
       'reduce .[] as $i ($j; . + {("\($box):\($i.input)"): ($i.burn_on)})' 2>/dev/null \
       || jq --argjson j "$burn_json" --arg k "${_asbbox}:__sweep_parse_error__" -n '$j + {($k): true}')"
-  done < <(obs_burn_targets)
+  done < <(obs_burn_targets; cg_chain_backstop_sweep_targets)
   echo "    [burns] $burn_json"
 
   # --- item 4: no active recordings/streams on strih+stream -----------------------------------

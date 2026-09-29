@@ -1494,6 +1494,10 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_burn_filter.py" sweep-off --host "$_nsip" 2>&1 \
       | sed "s/^/    [normalize sweep] /" || true
   done
+  # issue 1302: the same sweep on the cg OBS (RESOLUME-SNV) while it is home, on EVERY run -- a cg hop
+  # burn an earlier, killed CG_CHAIN run left on survives in its scene collection. Away = one SKIP
+  # line; a failed sweep is a loud WARNING, never an abort of the camera-chain run (cg-chain lib).
+  cg_chain_backstop_sweep_off "$HERE/obs_burn_filter.py" "$OBS_CLEANUP_TIMEOUT"
   # issue 1271: the read-only stray recording/streaming check that USED to live here now runs as the
   # FIRST [0/8] step (stray_session_check_assert, right after the reachability preflight), BEFORE the
   # cambox/frame-probe parity auto-align mutations — a broadcast that started after the job-start
@@ -4545,12 +4549,12 @@ CAPTURE_RATE_WINDOW_START_EPOCH="$(date +%s)"
 # #1301: CG_CHAIN=1 — turn the SongPlayer output burn ON + StartRecord cg OBS (RESOLUME-SNV) for
 # the run. ALL best-effort (the burn is read back from SongPlayer's health endpoint) — a failure is
 # loud but NEVER aborts the camera-chain run; the SongPlayer burn OFF + cg OBS StopRecord run in
-# cleanup() (the #246/#844 leak-guard class). Pure no-op unless CG_CHAIN=1. The cg OBS hop burn
-# (911015) is turned on inside the lib's record start, after a verified SongPlayer burn + the cg
-# program cut, and off again with the SongPlayer burn.
+# cleanup() (the #246/#844 leak-guard class). Pure no-op unless CG_CHAIN=1. The lib's record start
+# does it in order (issue 1302 slice 3): the cg OBS program cut, SongPlayer's own program through
+# its facade, both read back, THEN the SongPlayer burn ON (SongPlayer registers a burn OFF when a
+# playlist pipeline spawns), then the cg OBS hop burn (911015) after a verified SongPlayer burn.
 if cg_chain_enabled; then
   echo "[5/8] #1301 CG_CHAIN=1 — SongPlayer burn ON (verified on its health endpoint) + cg OBS program + StartRecord"
-  cg_chain_songplayer_burn on
   if CG_HOST_IP="$(cg_chain_resolve_host)" \
     && cg_chain_record_start "$CG_HOST_IP" "$HERE/obs_phase2.py" "${CG_CHAIN_RECORD_TIMEOUT:-${OBS_CLEANUP_TIMEOUT:-30}}"; then
     CG_RECORDING_STARTED=1

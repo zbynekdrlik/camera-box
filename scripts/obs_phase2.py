@@ -1062,11 +1062,14 @@ def _save_state(state):
     os.replace(tmp, STATE)
 
 
-def _conn(host, password=""):
+def _conn(host, password="", port=None):
+    """Open + identify an obs-websocket 5 session to *host* on *port* (default PORT, 4455). issue
+    1302 slice 3: the port is an argument so SongPlayer's obs-websocket facade (:4456) is reached
+    through this same client (and so through `_rpc`'s production-scene guard), never a second one."""
     import base64
     import hashlib
 
-    ws = create_connection(f"ws://{host}:{PORT}", timeout=10)
+    ws = create_connection(f"ws://{host}:{PORT if port is None else int(port)}", timeout=10)
     hello = json.loads(ws.recv())
     # #331: subscribe to ZERO obs-websocket events. This client is pure request/response (op-6 ->
     # op-7 in _rpc); it consumes no events. Omitting eventSubscriptions defaults the session to
