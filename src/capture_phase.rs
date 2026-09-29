@@ -128,8 +128,11 @@ pub const STAMP_MODE_MAX_RATE_PPM: u64 = 2_000;
 pub const STAMP_MODE_EXIT_RATE_PPM: u64 = 2_500;
 
 /// A move of the mono-to-real offset between two frames of at least this much is a realtime CLOCK
-/// STEP, not the camera drifting. The capture loop re-samples the offset every 100 frames (~1.7 s
-/// at 60 fps), and a slewing clock (at most 500 ppm) moves it by at most ~0.83 ms in that time.
+/// STEP, not the camera drifting. The capture loop re-samples the offset every 100 captured frames
+/// (~1.7 s at 60 fps), and a slewing clock (at most 500 ppm) moves it by at most ~0.83 ms in that
+/// time. At 30 fps (3.3 s per re-sample) a full-rate slew, or a preempted offset read, can reach
+/// it too; that costs only a re-anchor on the current floor (no crossing counted), which is one
+/// duplicate or missing slot at most when the instant sits within the hysteresis of an edge.
 pub const CLOCK_STEP_NS: u64 = 1_000_000;
 
 const _: () = assert!(LOCK_MIN_FRAMES >= 3 && LOCK_MIN_FRAMES <= FIT_WINDOW_FRAMES);
@@ -284,8 +287,8 @@ impl CapturePhaseTracker {
                         // The device skipped frames the sequence does not show: the residual is a
                         // whole number of periods. Re-index; the gate fills the missing slots. A
                         // lone timestamp a whole period LATE reads the same; the next frame's
-                        // residual of minus that then re-seeds (accepted: one repeat and ~2 s on
-                        // today's raw path, pinned in the tests).
+                        // residual of minus that then re-seeds (accepted: one repeat, one
+                        // duplicate stamp on the wire and ~2 s on today's raw path).
                         let k = skipped as u32;
                         seq_advance += k;
                         x += i64::from(k);

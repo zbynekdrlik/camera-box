@@ -37,8 +37,9 @@ ONE missing frame per crossing.
     exactly what today's poll gate does (review round 1, the bench's hidden-skip case). Before
     that fix the two frames after such a skip were stamped one slot early from the old prediction.
     A lone timestamp a whole period LATE (a USB completion delayed by a frame) reads the same; the
-    next on-time frame's residual of minus one period then re-seeds. Accepted cost: one repeat and
-    ~2 s on today's raw path (pinned by
+    next on-time frame's residual of minus one period then re-seeds. Accepted cost: one repeat, one
+    duplicate stamp on the wire (the re-seed frame goes out on the raw path into the slot the late
+    frame took: strih `stamp_dup` +1) and ~2 s on today's raw path (pinned by
     `a_single_timestamp_one_period_late_costs_one_hidden_drop_then_one_reseed`); `hidden_drops=`
     on the status line makes it visible.
   - From `OUTLIER_MIN_FRAMES` (30) samples on, a sample more than `RESEED_JITTER_MULTIPLE` (8) x the
@@ -58,9 +59,9 @@ ONE missing frame per crossing.
     below ~1e32 (the `FitSums` doc has the arithmetic,
     `a_slow_stream_with_outlier_runs_never_overflows_the_fit` reproduces the overflow).
   - LOCKED (sticky) at `LOCK_MIN_FRAMES` (120) samples with an RMS residual at most
-    `LOCK_MAX_JITTER_NS` (1 ms) AND white residuals; it lets go only above `LOCK_EXIT_JITTER_NS`
-    (2 ms), so a stream near the bound does not switch paths back and forth: no quarter of the window may sit more than
-    `WHITENESS_SIGMAS` (5) standard errors off the line (floor 20 us). The standard error uses the
+    `LOCK_MAX_JITTER_NS` (1 ms) AND white residuals. It lets go only above `LOCK_EXIT_JITTER_NS`
+    (2 ms), so a stream near the bound does not switch paths back and forth. White: no quarter of
+    the window may sit more than `WHITENESS_SIGMAS` (5) standard errors off the line (floor 20 us). The standard error uses the
     LOCAL jitter (RMS of consecutive residual differences over sqrt 2), because a phase step folded
     while seeding inflates the fit RMS and would widen its own bound. The O(window) check runs only
     while unlocked, every `WHITENESS_CHECK_EVERY` (16) frames after a failure. The prediction
@@ -76,14 +77,19 @@ ONE missing frame per crossing.
   within `STAMP_MODE_MAX_RATE_PPM` (2000) of the emit rate; once stamp-driven it stays up to
   `STAMP_MODE_EXIT_RATE_PPM` (2500), the band's hysteresis. `None` otherwise, and the capture loop
   keeps today's raw stamp + poll-time gate byte-identically. That is the fail-safe.
-  - **A realtime clock step is not a crossing (review round 2).** When the mono->real offset moves
-    by `CLOCK_STEP_NS` (1 ms) or more between two stamp-driven frames, the slot chooser re-anchors
-    on the new floor (a `Start`), so `crossings=` counts only the camera drift. The offset is
-    re-sampled every 100 frames (~1.7 s) and a slewing clock (at most 500 ppm) moves it by at most
-    ~0.83 ms in that time, so a slew never reads as a step. The gate still sees the step as a slot
-    jump and fills or skips it like the poll-time gate.
   `capture_phase::stamp_instant_100ns` is the ONE helper main.rs floors into the timecode (the
   slot middle while driven, else today's raw capture instant).
+  - **A realtime clock step is not a crossing (review round 2).** When the mono->real offset moves
+    by `CLOCK_STEP_NS` (1 ms) or more between two stamp-driven frames, the slot chooser re-anchors
+    on the new floor (a `Start`), so `crossings=` counts only the camera drift, and a step that
+    lands the phase just past an edge never leaves the stamp one slot behind the realtime floor
+    (`a_realtime_step_landing_inside_the_hysteresis_follows_the_new_floor`, review round 3). The
+    offset is re-sampled every 100 captured frames: at 60 fps (~1.7 s) a slewing clock (at most
+    500 ppm) moves it by at most ~0.83 ms, so a slew never reads as a step. At 30 fps (3.3 s) a
+    full-rate slew, or a preempted offset read, can reach 1 ms; that costs only a re-anchor on the
+    current floor, i.e. one duplicate or missing slot at most when the instant sits within the
+    hysteresis of an edge. The gate still sees a real step as a slot jump and fills or skips it
+    like the poll-time gate.
 - **The gate** (`DecimationGate::note_stamp_slot` before the unchanged `poll` call) decides on the
   slot alone via the pure `dupe_decimation::stamp_slot_action`:
 
@@ -207,7 +213,7 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
   modules `capture_phase/tests.rs` and `dupe_decimation/stamp/tests.rs` resolve normally). Add a
   stub `ndi.rs` holding the real `floor_boundary_100ns` (awk it out of `src/ndi.rs`) and copy the
   `lib.rs` const-assert. Then `rustc --edition 2021 --test -D warnings lib.rs` and run it, and
-  `clippy-driver --edition 2021 --test -D warnings lib.rs`. The whole replica runs 157 tests in
+  `clippy-driver --edition 2021 --test -D warnings lib.rs`. The whole replica runs 158 tests in
   ~1 s. Put the steps in a script file: the worktree guard refuses variable-driven one-liners.
 - `tests/harness_send_stagger_1242.rs` reads main.rs text only: build it with plain `rustc
   --test` and run it from the worktree root with `CARGO_MANIFEST_DIR` set (again from a script).
