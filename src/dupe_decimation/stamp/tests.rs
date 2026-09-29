@@ -274,3 +274,50 @@ fn the_stamp_path_continues_from_the_poll_time_path_and_back() {
         "every emitted stamp is one slot after the previous, across both transitions"
     );
 }
+
+/// Leaving the stamp path while frames sit buffered in the V4L2 queue (a re-seed that came with a
+/// loop stall): every buffered frame must still emit (issue 1131: never shed a captured frame while
+/// the queue holds it), and the gate re-latches onto the poll-time grid only at the first frame
+/// the loop waited for, without a fill or a #707 SKIP.
+#[test]
+fn buffered_frames_after_the_stamp_path_all_emit() {
+    let mut gate = DecimationGate::new();
+    for k in 30..60u64 {
+        gate.note_stamp_slot(slot(k));
+        let now = slot(k) + 19_000_000;
+        assert!(gate.poll(now, I60, k, false, now, slot(k)));
+        gate.note_emitted_stamp_100ns(
+            crate::capture_phase::slot_stamp_100ns(slot(k), I60, 60),
+            I60,
+        );
+    }
+    // Frames 60..63 were captured on time but the loop stalled: all three dequeue instantly
+    // inside slot 63.
+    let mut emitted = Vec::new();
+    for (i, k) in (60..63u64).enumerate() {
+        let cap = slot(k) + 8_000_000;
+        let now = slot(63) + 1_000_000 + i as u64 * 200_000;
+        let prev = gate.next_boundary_ns();
+        let emit = gate.poll(now, I60, k, true, now, cap);
+        assert!(emit, "buffered frame {k} must emit");
+        assert_eq!(gate.last_poll_starvation_repeats(), 0, "frame {k}");
+        assert_eq!(skip_of(&gate, prev), 0, "frame {k}");
+        emitted.push(grid_floor_ns(cap, I60));
+    }
+    // Back to the normal cadence: captured 8 ms into its slot, polled 11 ms later.
+    for k in 63..90u64 {
+        let cap = slot(k) + 8_000_000;
+        let now = cap + 11_000_000;
+        let prev = gate.next_boundary_ns();
+        assert!(gate.poll(now, I60, k, false, now, cap), "frame {k}");
+        assert_eq!(gate.last_poll_starvation_repeats(), 0, "frame {k}");
+        assert_eq!(skip_of(&gate, prev), 0, "frame {k}");
+        emitted.push(grid_floor_ns(cap, I60));
+    }
+    assert!(
+        emitted
+            .windows(2)
+            .all(|w| grid_advance_ns(w[0], 1, I60) == w[1]),
+        "every captured frame reached the wire, one slot apart"
+    );
+}

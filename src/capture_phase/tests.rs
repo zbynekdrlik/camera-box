@@ -426,7 +426,7 @@ fn status_tokens_parse_and_their_keys_are_mutually_non_substring() {
     let mut p = CapturePhase::new();
     assert_eq!(
         p.status_tokens(I60),
-        " phase_lock=seed phase_ppm=na jitter_us=na crossings=0 reseeds=0"
+        " phase_lock=seed phase_ppm=na jitter_us=na crossings=0 reseeds=0 hidden_drops=0"
     );
     for f in &frames {
         p.stamp_frame(f.seq, f.ts, offset, I60);
@@ -441,7 +441,8 @@ fn status_tokens_parse_and_their_keys_are_mutually_non_substring() {
             "phase_ppm=",
             "jitter_us=",
             "crossings=",
-            "reseeds="
+            "reseeds=",
+            "hidden_drops="
         ]
     );
     assert_eq!(pairs[0].1, "stamp");
@@ -449,7 +450,14 @@ fn status_tokens_parse_and_their_keys_are_mutually_non_substring() {
     assert!((ppm - 15.9).abs() < 12.0, "{emitted}");
     let jitter: f64 = pairs[2].1.parse().expect("jitter_us is a number");
     assert!((40.0..80.0).contains(&jitter), "{emitted}");
-    assert_eq!((pairs[3].1.as_str(), pairs[4].1.as_str()), ("0", "0"));
+    assert_eq!(
+        (
+            pairs[3].1.as_str(),
+            pairs[4].1.as_str(),
+            pairs[5].1.as_str()
+        ),
+        ("0", "0", "0")
+    );
     // The emitted keys and the line's existing ones are mutually non-substring.
     let mut all: Vec<&str> = vec!["emit-1s:", "cap-1s:"];
     all.extend(keys.iter().copied());
@@ -627,4 +635,213 @@ fn the_capture_loop_timecode_of_a_tracked_slot_is_the_slot_stamp() {
         );
         assert_eq!(tc, slot_stamp_100ns(slot, I60, 60));
     }
+}
+
+// ── review round 2 (issue 1367 D2) ───────────────────────────────────────────
+
+/// A slow stream (8 sequence steps per frame, 100 ms per step) with two unfolded outliers between
+/// every pushed sample: the window's sequence span reaches 256 x 24, three times the span the fit
+/// was first sized for. The fit must stay exact and never overflow its `i128` arithmetic (a debug
+/// build panics on overflow, a release build would wrap silently).
+#[test]
+fn a_slow_stream_with_outlier_runs_never_overflows_the_fit() {
+    const STEP: u32 = MAX_SEQ_ADVANCE;
+    const PER_STEP_NS: u64 = MAX_FRAME_PERIOD_NS;
+    let mut t = CapturePhaseTracker::new();
+    let mut seq = 1000u32;
+    let mut x = 0u64;
+    let at = |x: u64| MONO0 + x * PER_STEP_NS;
+    // A clean full window first (its jitter is 0, so the outlier bound is the 1 ms floor).
+    for _ in 0..FIT_WINDOW_FRAMES {
+        t.observe(seq, at(x));
+        seq += STEP;
+        x += u64::from(STEP);
+    }
+    // Then: two samples 30 ms late (outliers under half a period, not folded, a run of two
+    // never re-seeds), one clean sample (folded, run reset) — until the window holds only
+    // samples 24 steps apart.
+    for _ in 0..FIT_WINDOW_FRAMES {
+        for late in [30_000_000u64, 30_000_000, 0] {
+            t.observe(seq, at(x) + late);
+            seq += STEP;
+            x += u64::from(STEP);
+        }
+    }
+    assert_eq!(t.reseeds(), 0);
+    let span = t.window.back().unwrap().0 - t.window.front().unwrap().0;
+    assert!(
+        span > FIT_WINDOW_FRAMES as i64 * i64::from(MAX_SEQ_ADVANCE),
+        "the scenario must exceed the naive span bound: {span}"
+    );
+    assert_eq!(
+        t.jitter_rms_ns(),
+        Some(0.0),
+        "the clean samples fit exactly"
+    );
+    let period = t.period_ns().unwrap();
+    assert!((period - PER_STEP_NS as f64).abs() < 1e-6, "{period}");
+}
+
+/// One timestamp a whole period late (a USB completion delayed by a frame) with the next frame on
+/// time reads like a frame the device skipped: the stamp is one slot ahead once, then the next
+/// frame's residual of minus one period re-seeds. The accepted cost (recorded in the rule): one
+/// starvation repeat and ~2 s on today's raw path. This test pins it.
+#[test]
+fn a_single_timestamp_one_period_late_costs_one_hidden_drop_then_one_reseed() {
+    let mut frames = camera(400, 15.9, 60_000.0, 7_000_000.0, 0x1367_d221);
+    frames[300].ts += NOMINAL_60.round() as u64;
+    let mut t = CapturePhaseTracker::new();
+    for (k, f) in frames.iter().enumerate() {
+        let obs = t.observe(f.seq, f.ts);
+        if k == 300 {
+            assert_eq!(obs.seq_advance, 2, "read as a device skip");
+        }
+        if k == 301 {
+            assert_eq!(obs.smoothed_mono_ns, None, "the contradiction re-seeds");
+        }
+    }
+    assert_eq!(t.hidden_drops(), 1);
+    assert_eq!(t.reseeds(), 1);
+}
+
+/// A CLOCK_REALTIME step (the mono-to-real offset moves) shifts the slot the instant maps to, but
+/// it is no camera-edge crossing: `crossings=` must count only the camera drift. After the step
+/// the slot follows the new realtime floor.
+#[test]
+fn a_realtime_step_is_never_counted_as_a_crossing() {
+    // Mid-slot phase (8 ms into a slot), 15.9 ppm: no real crossing within 1000 frames.
+    let frames = camera(1_000, 15.9, 20_000.0, 8_000_000.0, 0x1367_d222);
+    let base = (SEC_2309 * NS_PER_SECOND - MONO0) as i64;
+    let steps: [(usize, i64); 3] = [(400, 19_700_000), (600, 50_000_000), (800, -14_000_000)];
+    let mut p = CapturePhase::new();
+    let mut offset = base;
+    for (k, f) in frames.iter().enumerate() {
+        if let Some(&(_, d)) = steps.iter().find(|s| s.0 == k) {
+            offset += d;
+        }
+        let slot = p.stamp_frame(f.seq, f.ts, offset, I60);
+        if steps.iter().any(|s| s.0 == k) {
+            let truth_real = (f.truth as i64 + offset) as u64;
+            assert_eq!(
+                slot,
+                Some(grid_floor_ns(truth_real, I60)),
+                "frame {k}: the slot follows the new realtime floor"
+            );
+        }
+    }
+    assert_eq!(p.reseeds(), 0);
+    assert_eq!(p.crossings(), 0, "clock steps are not crossings");
+}
+
+/// Frames whose residuals alternate +-a, `a` ramping slowly (so no sample is an outlier).
+fn alternating_jitter(amplitudes: &[f64], seed: u64) -> Vec<Frame> {
+    let mut frames = camera(amplitudes.len(), 15.9, 0.0, 7_000_000.0, seed);
+    for (k, f) in frames.iter_mut().enumerate() {
+        let sign = if k % 2 == 0 { 1.0 } else { -1.0 };
+        f.ts = (f.truth + sign * amplitudes[k]).round() as u64;
+    }
+    frames
+}
+
+fn ramp(from: f64, to: f64, n: usize) -> Vec<f64> {
+    (0..n)
+        .map(|k| from + (to - from) * k as f64 / n as f64)
+        .collect()
+}
+
+/// The lock has hysteresis: it is taken at `LOCK_MAX_JITTER_NS` and dropped only above
+/// `LOCK_EXIT_JITTER_NS`, so a stream near the bound does not switch paths back and forth.
+#[test]
+fn a_locked_fit_stays_locked_between_the_lock_and_the_unlock_bound() {
+    let mut amps = vec![100_000.0; 400];
+    amps.extend(ramp(100_000.0, 1_500_000.0, 1_000));
+    amps.extend(vec![1_500_000.0; 600]);
+    let frames = alternating_jitter(&amps, 0x1367_d223);
+    let mut t = CapturePhaseTracker::new();
+    let mut unlocked_after_lock = 0;
+    for (k, f) in frames.iter().enumerate() {
+        let obs = t.observe(f.seq, f.ts);
+        if k >= LOCK_MIN_FRAMES && obs.smoothed_mono_ns.is_none() {
+            unlocked_after_lock += 1;
+        }
+    }
+    assert!(
+        t.jitter_rms_ns().unwrap() > LOCK_MAX_JITTER_NS as f64,
+        "the hold is above the lock bound"
+    );
+    assert_eq!(
+        unlocked_after_lock, 0,
+        "1.5 ms of jitter keeps an existing lock"
+    );
+    assert_eq!(t.reseeds(), 0);
+
+    // Above the unlock bound the fit lets go.
+    let mut amps2 = amps.clone();
+    amps2.extend(ramp(1_500_000.0, 3_000_000.0, 1_000));
+    amps2.extend(vec![3_000_000.0; 600]);
+    let frames = alternating_jitter(&amps2, 0x1367_d223);
+    let mut t = CapturePhaseTracker::new();
+    for f in &frames {
+        t.observe(f.seq, f.ts);
+    }
+    assert!(!t.locked(), "3 ms of jitter unlocks");
+}
+
+/// A camera whose rate drifts from 1900 ppm towards 2700 ppm and back: the 1:1 band has
+/// hysteresis, entered at `STAMP_MODE_MAX_RATE_PPM`, left only above `STAMP_MODE_EXIT_RATE_PPM`.
+#[test]
+fn the_stamp_band_has_hysteresis_at_its_edge() {
+    // Phases of (ppm from, ppm to, frames).
+    let phases: [(f64, f64, usize); 8] = [
+        (1_900.0, 1_900.0, 400),
+        (1_900.0, 2_300.0, 2_400),
+        (2_300.0, 2_300.0, 400),
+        (2_300.0, 2_700.0, 2_400),
+        (2_700.0, 2_700.0, 400),
+        (2_700.0, 2_300.0, 2_400),
+        (2_300.0, 2_300.0, 400),
+        (2_300.0, 1_900.0, 2_400),
+    ];
+    let mut rng = Rng(0x1367_d224);
+    let offset = (SEC_2309 * NS_PER_SECOND - MONO0) as i64;
+    let mut p = CapturePhase::new();
+    let mut truth = MONO0 as f64 + 7_000_000.0;
+    let mut seq = 1000u32;
+    let mut modes = Vec::new();
+    for (from, to, n) in phases {
+        let mut phase_modes = Vec::new();
+        for k in 0..n {
+            let ppm = from + (to - from) * k as f64 / n as f64;
+            truth += NOMINAL_60 / (1.0 + ppm * 1e-6);
+            let ts = (truth + 10_000.0 * rng.gauss()).round() as u64;
+            p.stamp_frame(seq, ts, offset, I60);
+            seq += 1;
+            phase_modes.push(p.mode());
+        }
+        modes.push(phase_modes);
+    }
+    let after_first_lock = &modes[0][LOCK_MIN_FRAMES..];
+    assert!(after_first_lock.iter().all(|&m| m == PhaseMode::Stamp));
+    for (i, phase) in modes[1..3].iter().enumerate() {
+        assert!(
+            phase.iter().all(|&m| m == PhaseMode::Stamp),
+            "phase {}: 2300 ppm keeps an existing stamp mode",
+            i + 1
+        );
+    }
+    assert_eq!(
+        *modes[4].last().unwrap(),
+        PhaseMode::Band,
+        "2700 ppm leaves it"
+    );
+    assert!(
+        modes[6].iter().all(|&m| m == PhaseMode::Band),
+        "2300 ppm does not re-enter it"
+    );
+    assert_eq!(
+        *modes[7].last().unwrap(),
+        PhaseMode::Stamp,
+        "1900 ppm re-enters it"
+    );
+    assert_eq!(p.reseeds(), 0);
 }
