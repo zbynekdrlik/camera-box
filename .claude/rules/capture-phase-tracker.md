@@ -222,6 +222,14 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
   `use super::*` to keep them trips `unused_imports` (doc links do not count as uses; checked with
   rustc 1.97). Add link reference definitions instead (`/// [`X`]: crate::path::X`), as
   `dupe_decimation/shed_log.rs` does.
+- **A NEW test against the OLD code** (proving a test would have caught a bug after the fix already
+  landed): never check out another commit in the worktree. Copy the current `src/` pieces into a
+  scratch tree, overwrite only the files under test with `git -C <worktree> show <old-sha>:<path>`
+  (plus the old `lib.rs`, whose const-assert names the old constants), and point the replica
+  script at that tree. Round 3 proved the clock-step-inside-the-hysteresis test this way.
+- A debug replica (`rustc --test`, no `-O`) has overflow checks on, so an `i128` product that
+  would wrap silently in the release binary panics there: build the worst-case window in a test
+  (`a_slow_stream_with_outlier_runs_never_overflows_the_fit`) instead of trusting a bound comment.
 - `main.rs` compiles first on CI.
 
 ## Live acceptance (supervisor)
