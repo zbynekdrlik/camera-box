@@ -11,13 +11,15 @@ What this pins:
   * the pure decision `strih_dantesync_restart_decision UNIT_CHANGED BINARY_CHANGED ACTIVE PRESENT`
     (scripts/lib/strih-provision.sh): restart | start | keep | absent, fail-closed on a bad input;
   * the byte-exact unit comparison + drop-in probe shared by setup-strih and verify-strih;
-  * the setup-strih caller `strih_dantesync_install`, run against a temp root through its path seams
-    with a fake `systemctl` on PATH that logs its argv: a second run on an unchanged unit issues no
-    restart and removes no lock; a changed unit restarts exactly once; a stopped daemon is started and
-    only then is the stale lock cleared.
+  * the setup-strih step-2 caller `strih_dantesync_install` (scripts/lib/strih-dantesync.sh, its own
+    lib so setup-strih.sh stays under its 1000-line budget), run against a temp root through its path
+    seams with a fake `systemctl` on PATH that logs its argv: a second run on an unchanged unit issues
+    no restart and removes no lock; a changed unit restarts exactly once; a stopped daemon is started
+    and only then is the stale lock cleared.
 
-Tier-0: bash + pytest only (no cargo, no root, no rig). The caller is run by SOURCING setup-strih.sh,
-whose source-guard stops before the provisioning flow, so the tests exercise the real function.
+Tier-0: bash + pytest only (no cargo, no root, no rig). The caller is run by SOURCING setup-strih.sh
+(which sources the lib), whose source-guard stops before the provisioning flow, so the tests
+exercise the real function through the real wiring.
 """
 import os
 import re
@@ -31,6 +33,7 @@ SCRIPTS = REPO / "scripts"
 LIB = SCRIPTS / "lib" / "strih-provision.sh"
 SETUP = SCRIPTS / "setup-strih.sh"
 VERIFY = SCRIPTS / "verify-strih.sh"
+DS_LIB = SCRIPTS / "lib" / "strih-dantesync.sh"
 
 KEEP_LINE = "dantesync.service: kept running (unit unchanged) -- no restart, the fleet date is untouched"
 
@@ -300,19 +303,21 @@ def _function_body(text, name):
 
 def test_setup_strih_step2_goes_through_the_caller():
     s = SETUP.read_text()
+    lib = DS_LIB.read_text()
+    src = s.index('. "${HERE}/lib/strih-dantesync.sh"')
+    guard = s.index('if [ "${BASH_SOURCE[0]}" != "${0}" ]; then')
     emit = s.index('DS_UNIT_TEXT="$(strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS")"')
     call = s.index('strih_dantesync_install "$DS_UNIT_TEXT" "$DS_ROLE"')
-    guard = s.index('if [ "${BASH_SOURCE[0]}" != "${0}" ]; then')
-    assert emit < call, "step 2 emits the unit text, then hands it to the caller"
-    assert s.index("strih_dantesync_install() {") < guard, \
-        "the caller is defined before the source-guard, so a sourced setup (the tests) runs the real one"
-    body = _function_body(s, "strih_dantesync_install")
+    assert src < guard, "the lib is sourced before the source-guard, so a sourced setup (the tests) has it"
+    assert guard < emit < call, "step 2 emits the unit text, then hands it to the caller"
+    body = _function_body(lib, "strih_dantesync_install")
     assert "strih_dantesync_restart_decision" in body
-    # exactly one restart statement in the whole script, and it is the caller's `restart` arm
-    assert s.count("systemctl restart dantesync") == 1, "the only restart is the decision's restart arm"
+    # setup-strih itself never restarts dantesync; the ONE restart statement is the caller's `restart` arm
+    assert "systemctl restart dantesync" not in s, "setup-strih.sh must not restart dantesync itself"
+    assert lib.count("systemctl restart dantesync") == 1, "the only restart is the decision's restart arm"
     assert "systemctl restart dantesync" in body
-    assert "rm -f /var/run/dantesync.lock" not in s, "the unconditional lock removal is gone"
-    assert s.count('rm -f "$lock"') == 1 and 'rm -f "$lock"' in body
+    assert "rm -f /var/run/dantesync.lock" not in s + lib, "the unconditional lock removal is gone"
+    assert lib.count('rm -f "$lock"') == 1 and 'rm -f "$lock"' in body
 
 
 def test_verify_strih_grades_the_unit_content_read_only():

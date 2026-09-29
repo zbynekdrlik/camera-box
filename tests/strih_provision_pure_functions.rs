@@ -861,16 +861,23 @@ fn dantesync_status_role_verdict_grades_reachable_locked_and_server_listener() {
 /// it via `strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS"` into /etc/systemd/system/dantesync.service),
 /// default the role to `server` (the post-M4 NTP master), remove any stale dantesync.service.d/*.conf
 /// drop-in, and this must precede the OBS unit enable (step 8). Issue 1372: the write, the reload and
-/// the (re)start happen only on a real change, through the caller strih_dantesync_install.
+/// the (re)start happen only on a real change, through strih_dantesync_install, which lives in its
+/// own lib scripts/lib/strih-dantesync.sh (setup-strih.sh stays under its 1000-line budget).
 #[test]
 fn setup_strih_installs_the_dantesync_unit_in_step_2() {
     let s = read_script("scripts/setup-strih.sh");
+    let lib = read_script("scripts/lib/strih-dantesync.sh");
     let emit = s
         .find("strih_dantesync_unit_text \"$DS_ROLE\" \"$DS_ARGS\"")
         .expect("setup-strih step 2 must emit the dantesync unit via strih_dantesync_unit_text ROLE ARGS");
     assert!(
-        s.contains("/etc/systemd/system/dantesync.service"),
-        "setup-strih must write the dantesync unit to /etc/systemd/system/dantesync.service"
+        s.contains(". \"${HERE}/lib/strih-dantesync.sh\"")
+            && s.contains("strih_dantesync_install \"$DS_UNIT_TEXT\" \"$DS_ROLE\""),
+        "setup-strih step 2 must hand the unit text to strih_dantesync_install (its own lib)"
+    );
+    assert!(
+        lib.contains("STRIH_DANTESYNC_UNIT:-/etc/systemd/system/dantesync.service"),
+        "the dantesync install must write the unit to /etc/systemd/system/dantesync.service"
     );
     // issue 1361: the role is a FACT of the selected box (strih-lx.env: server, the post-M4 NTP
     // master), no longer a per-run STRIH_LX_DANTESYNC_ROLE env knob.
@@ -886,21 +893,22 @@ fn setup_strih_installs_the_dantesync_unit_in_step_2() {
         s.contains("strih_lx_dantesync_role_ok \"$DS_ROLE\" \"$DS_ARGS\""),
         "setup-strih step 2 must guard the role+args via strih_lx_dantesync_role_ok"
     );
-    // issue 1372: the paths are seams of the caller strih_dantesync_install (the pytest runs it
-    // against a temp root); the drop-in dir follows the unit path.
+    // issue 1372: the paths are seams of strih_dantesync_install (the pytest runs it against a
+    // temp root); the drop-in dir follows the unit path.
     assert!(
-        s.contains("rm -f \"$dropin_dir\"/*.conf"),
+        lib.contains("rm -f \"$dropin_dir\"/*.conf"),
         "setup-strih step 2 must remove any stale dantesync.service.d/*.conf drop-in (role now in the unit)"
     );
     // issue 1372: the lock of a RUNNING daemon is never removed. It is cleared only on the `start`
     // decision (the daemon is not active); the unconditional removal is gone. The behaviour is
     // pinned by tests/python/test_strih_dantesync_keep_running_1372.py.
     assert!(
-        s.contains("STRIH_DANTESYNC_LOCK:-/var/run/dantesync.lock"),
-        "setup-strih must know /var/run/dantesync.lock to clear a stale lock before a start"
+        lib.contains("STRIH_DANTESYNC_LOCK:-/var/run/dantesync.lock"),
+        "the dantesync install must know /var/run/dantesync.lock to clear a stale lock before a start"
     );
     assert!(
-        !s.contains("rm -f /var/run/dantesync.lock"),
+        !s.contains("rm -f /var/run/dantesync.lock")
+            && !lib.contains("rm -f /var/run/dantesync.lock"),
         "setup-strih must never clear the dantesync lock unconditionally (issue 1372)"
     );
     let enable = s
