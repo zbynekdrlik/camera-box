@@ -890,14 +890,16 @@ EOF
 # against NTP and is stepped only in the nightly 02:00Z window. A restart re-derives the date AT ONCE
 # and every follower joins, so the whole rig steps mid-day (29.9.2026 00:35Z: a genlock deploy's
 # setup-strih run restarted it, a 0.67 s fleet step, cg OBS program audio broken until a relaunch).
-# setup-strih step 2 (strih_dantesync_install) therefore rewrites the unit only when it differs and
-# (re)starts the daemon only per the decision below; verify-strih item 6c grades the unit content.
+# setup-strih step 2 (strih_dantesync_install, scripts/lib/strih-dantesync.sh, with the unit matcher
+# and verify-strih item 6c's verdict) rewrites the unit only when it differs and (re)starts the daemon
+# only per the decision below.
 
 # strih_dantesync_restart_decision UNIT_CHANGED BINARY_CHANGED ACTIVE BINARY_PRESENT -> ONE token:
 #   absent   no dantesync binary -- nothing to (re)start (a running daemon is never touched)
 #   start    the daemon is not active -- start it; the ONLY case that clears a stale lock (the lock
 #            is an flock: removing the file of a RUNNING daemon lets a second instance lock a new inode)
-#   restart  it runs AND its unit (or a drop-in) or binary changed -- the one deliberate date-moving case
+#   restart  it runs AND its unit (a drop-in, or a unit systemd had not loaded) or binary changed --
+#            the one deliberate date-moving case
 #   keep     it runs and nothing changed -- the redeploy default: no restart, the fleet date untouched
 # Every argument must be exactly 0 or 1 (four of them); anything else prints nothing and returns 2 --
 # a caller that could not read a state must never guess a restart of the fleet date master.
@@ -916,25 +918,6 @@ strih_dantesync_restart_decision() {
   else
     printf 'keep'
   fi
-}
-
-# strih_dantesync_unit_matches UNIT_TEXT PATH -> return 0 iff PATH holds exactly UNIT_TEXT plus its
-# one trailing newline -- the bytes setup-strih writes (`printf '%s\n' "$UNIT_TEXT"`, UNIT_TEXT being
-# strih_dantesync_unit_text captured by `$(...)`, which strips that newline). Byte for byte, so a
-# missing/extra trailing newline or any edited line is a difference. A missing PATH never matches.
-strih_dantesync_unit_matches() {
-  local text="${1-}" path="${2-}"
-  [ -n "$path" ] && [ -f "$path" ] || return 1
-  # process substitution, not a pipe: the writer's status never reaches a caller's pipefail.
-  cmp -s <(printf '%s\n' "$text") "$path"
-}
-
-# strih_dantesync_dropins_present DIR -> return 0 iff DIR holds at least one `*.conf` drop-in (the
-# only files systemd reads from a unit's `.d` dir). A missing or empty DIR, or other files, is 1.
-strih_dantesync_dropins_present() {
-  local dir="${1-}"
-  [ -n "$dir" ] || return 1
-  compgen -G "${dir}/*.conf" >/dev/null
 }
 
 # --- issue 1317 (this lane): scene-collection hygiene (REPORT-ONLY) + RustDesk install --------------
