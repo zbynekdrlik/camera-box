@@ -68,6 +68,8 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 . "${HERE}/lib/obs-downstream-keyer.sh"   # issue 1361: the pinned Downstream Keyer OBS plugin (step 4c)
 # shellcheck source=scripts/lib/bundle-state-files.sh
 . "${HERE}/lib/bundle-state-files.sh"   # issue 1386: the ONE declared :8899 server file set (step 9; with setup-imag.sh)
+# shellcheck source=scripts/lib/strih-dantesync.sh
+. "${HERE}/lib/strih-dantesync.sh"   # issue 1372: step 2 restarts dantesync only on a real change
 
 # --- issue 1361: select + load the box facts BEFORE the source-guard, so a sourced setup (the unit
 # tests) sees exactly the facts the real run uses. Any invalid / TODO_OWNER fact refuses here.
@@ -123,25 +125,15 @@ strih_lx_dantesync_role_ok "$DS_ROLE" "$DS_ARGS" \
 echo "  dantesync role: ${DS_ROLE}  (args: '${DS_ARGS:-<bare NTP master>}')"
 # issue 1317: install dantesync as a systemd SERVICE, role folded INTO the unit (the EXACT cambox
 # shape: Type=simple, Restart=always). strih_dantesync_unit_text fail-closes on an ambiguous shape.
-strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS" > /etc/systemd/system/dantesync.service \
+# The live box had a hand dantesync.service.d/10-ntp-master.conf resetting ExecStart; the role is now
+# IN the unit, so strih_dantesync_install removes any stale drop-in (two files describing one role).
+# issue 1372: the unit is rewritten, reloaded and the daemon (re)started ONLY on a real change
+# (strih_dantesync_install, scripts/lib/strih-dantesync.sh) -- restarting the fleet date master steps
+# the whole rig's date, so a redeploy on an unchanged unit keeps it running.
+DS_UNIT_TEXT="$(strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS")" \
   || fail "strih_dantesync_unit_text refused to emit a unit for role '$DS_ROLE' args '$DS_ARGS'"
-# Remove any stale dantesync.service.d/*.conf drop-in: the live box had a hand 10-ntp-master.conf
-# resetting ExecStart to the bare NTP-master daemon. The role is now IN the unit, so a lingering
-# drop-in would hide the provisioned role (two files describing one role -- the exact undocumented
-# state this bake-in eliminates).
-rm -f /etc/systemd/system/dantesync.service.d/*.conf 2>/dev/null || true
-rmdir /etc/systemd/system/dantesync.service.d 2>/dev/null || true
-systemctl daemon-reload
-# Clear a stale lock a previously-crashed dantesync may have left, or the fresh daemon refuses to start.
-rm -f /var/run/dantesync.lock 2>/dev/null || true
-systemctl enable dantesync 2>/dev/null || true
-if [ -x /usr/local/bin/dantesync ]; then
-  systemctl restart dantesync 2>/dev/null \
-    || warn "  dantesync.service failed to (re)start -- check journalctl -u dantesync"
-  echo "  dantesync.service installed + enabled + started (role: ${DS_ROLE})"
-else
-  warn "  dantesync.service installed + enabled but NOT started (binary absent) -- install /usr/local/bin/dantesync then: systemctl restart dantesync"
-fi
+strih_dantesync_install "$DS_UNIT_TEXT" "$DS_ROLE" \
+  || fail "dantesync.service install failed (role '${DS_ROLE}') -- see the line above"
 
 # ---------------------------------------------------------------------------------------------
 REC_ENC="$(strih_lx_profile_facts | grep '^rec_encoder=' | cut -d= -f2)"

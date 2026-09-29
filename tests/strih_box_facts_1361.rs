@@ -670,6 +670,7 @@ fn no_strih_lx_identity_literal_remains_outside_the_fact_file() {
         "scripts/setup-strih.sh",
         "scripts/verify-strih.sh",
         "scripts/lib/strih-provision.sh",
+        "scripts/lib/strih-dantesync.sh",
         "scripts/lib/strih-box-facts.sh",
     ] {
         let text = std::fs::read_to_string(root().join(f)).unwrap();

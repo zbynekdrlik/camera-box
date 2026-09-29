@@ -859,6 +859,13 @@ line that is supposed to hold a Rust/bash `\t` escape sequence — a hit means t
 wrote a raw byte instead of the two-char escape, exactly this bug. `cargo fmt --all --check`
 alone is NOT sufficient proof the generated Rust text is correct; it only catches shape 1 above.
 
+**A patch script's OWN variables do not exist in the test it writes** (issue 1372). A patch script
+that builds test source around its own constant (`SERVER_EXEC = ...` in the script, then
+`% SERVER_EXEC` inside the inserted test text) writes a test that fails with `NameError`. That RED
+looks right but fails for the wrong reason. Read each RED failure's actual `E` line before
+committing: a `NameError`/`command not found` naming something other than the code under test is a
+broken test, not a RED.
+
 ## `$GITHUB_SHA` on a `pull_request`-triggered job is the SYNTHETIC merge commit, never the PR's head — any commit-scoped `gh run list --commit` resolution wired into a `pull_request` workflow needs `github.event.pull_request.head.sha` instead (issue 1244 review catch)
 
 Any script that resolves a CI artifact "for THIS run's own commit" via `gh run list --commit
