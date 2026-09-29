@@ -216,9 +216,14 @@ confirms as a D1 grid input (`scripts/genlock_n2_grid.py`: `n2_early=` on every 
 - the budget tests the RESULTING present age at the planned pin: one frame at pin 3 → pin 20, 83.3
   ≤ 94, planned; two frames → 100 > 94, BUDGET_BOUND with the honest `66.7 + 33.3 = 100` arithmetic;
 - the result names `n2_grid_inputs` and keeps the head skew as `n2_grid_head_skew_ms` (the labelled
-  arrival-lag diagnostic). `qr-align.sh` passes its `qr-align-strih-<RUN>.log`; an explicit
+  arrival-lag diagnostic). `qr-align.sh` passes its `qr-align-strih-<RUN>.log` (to the plan AND to
+  `--floor-samples-ok`); each fetch try writes `.part` files and promotes the log + JSON together, so
+  a failed re-fetch never leaves a JSON paired with a truncated window. An explicit
   `QR_ALIGN_JITTER_JSON` takes only `QR_ALIGN_STRIH_LOG`. No log / a pre-D1 log (no `n2_early=`) /
-  an N==1 input = the old arithmetic byte-for-byte (golden outputs of both real pre-D1 fixtures).
+  an N==1 input = the old arithmetic byte-for-byte (golden outputs of both real pre-D1 fixtures);
+- the issue-1253 `samples < 3` phantom guard is a HEAD-SKEW guard: a grid input keeps its twin
+  floor in a thin window (its age is the pin's, exact from one line). Dropping a faster grid camera
+  sent `align()` to the budget-unchecked floor3 plan (`3 + 33 = 36` → 100 ms, over the ceiling).
 
 **What it does NOT change at pin 3 (a finding for the main, 5881164769):** the 94 ms ceiling leaves
 room for exactly ONE extra frame, and in the full `align()` flow the #1252 quantum gate runs first —

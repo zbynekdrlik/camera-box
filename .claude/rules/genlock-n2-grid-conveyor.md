@@ -114,15 +114,18 @@ number of frames (pin 3 + 13 ms moves none, pin 16 + 1 ms a whole one).
 ## The dev1 twin and its consumers (slice D1b, design 5881031249)
 
 `scripts/genlock_n2_grid.py` is the Python twin: `present_age_ns(pin_ms, source_interval_ns)` (the
-per-second-grid floor of `ceil((base + pin) × fps) / fps`; the Rust per-tick age is it or 1 ns more),
+per-second-grid floor of `ceil((base + pin) × fps / 1 s) × 1 s / fps`; the Rust per-tick age is it
+or 1 ns more),
 `target_stamp_ns` on a port of the grid helpers, `frames_for_hold` (nearest frame) + `pin_for_frames`
 (`round(current + k × interval)`, checked through the twin), and `grid_inputs_from_audit` — an input
 runs the grid iff EVERY one of its audit lines carries `n2_early=` (only a D1 build prints it) and
-`round(Δreceived / Δconsumed) ≥ 2`. It never retypes the age base: `load_age_base_ns()` reads
+`Δreceived / Δconsumed` is within 0.25 of an integer N ≥ 2 (one line: its cumulative ratio, trusted
+only past 30 consumed ticks). `classify_audit_inputs` also gives `n2_early_rate` = Δn2_early /
+(Δconsumed + Δholds + Δlate_holds): the share of ticks presented one frame OLDER than the twin says. It never retypes the age base: `load_age_base_ns()` reads
 `GENLOCK_N2_AGE_BASE_NS` from this file at run time and fails closed. **Changing the constant or the
 target:** `tests/fixtures/genlock_n2_present_age_1367.tsv` is read by BOTH
-`present_age_table_shared_with_the_python_twin_1367` (here, every 30 fps tick of a second) and the
-twin's pytest — update the table, both sides follow or fail.
+`present_age_table_shared_with_the_python_twin_1367` (here, every canvas tick of one second at each
+row's own canvas rate) and the twin's pytest — update the table, both sides follow or fail.
 
 The consumers (`qr_align_pins.py` floors + planner, `prerecord_phase_calibrate.measured_by_camera`,
 `arrival_floor_decompose.py`) read the twin for a confirmed grid input; the raw audit window rides next

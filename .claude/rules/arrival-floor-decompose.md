@@ -87,7 +87,11 @@ run's own `qr-align-strih-<RUN>.log` names the grid inputs (`scripts/genlock_n2_
 excess is a pin difference only, and `mean_head_skew_ms` / `d_skew` stay as the labelled ARRIVAL-LAG
 DIAGNOSTIC (`_attribute_grid`: `within-noise; arrival lag +12ms vs anchor (diagnostic only …)`). A grid
 row against a head-skew anchor is labelled a mixed-model pair (the identity above does not hold there).
-A pre-D1 run (no `n2_early=`) is byte-for-byte the old output: golden text + JSON of both real fixtures
+Each grid row also carries `n2_early_rate` (Δn2_early over the window's ticks); a rate over
+`N2_EARLY_BUDGET_FRAC` (0.1 %) is named in its owner (`; n2_early 0.67% of ticks (over the 0.1%
+budget …)`) — those ticks present one frame older than the twin's age, the one place the arrival
+lag still reaches the present age. A pre-D1 run (no `n2_early=`) is byte-for-byte the old output:
+golden text + JSON of both real fixtures
 in `tests/fixtures/genlock_n2_d1_audit_1367/pre_d1_golden/`, the D1-shaped window in
 `…/recording-e2e-1367901/` (`tests/python/test_n2_grid_consumers_1367.py`). On D1 data the per-box
 arrival lag no longer moves the present age while it stays inside the 50 ms base; watch `n2_early=`
