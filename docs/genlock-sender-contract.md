@@ -169,8 +169,20 @@ so the slot a frame is paced for and the slot it is stamped into drift apart wit
   leave a hole and never emit two frames inside one interval.
 - **SHOULD**, when its emit is paced by a MONOTONIC clock mapped onto the wall grid (the OBS render
   tick), re-grid onto a stepped wall clock in ONE interval — never slew back a few ms per interval,
-  which paces and stamps frames off the grid for several intervals (a dantesync fleet date step is
-  ~50 ms, about every 1.8 h).
+  which paces and stamps frames off the grid for several intervals.
+- **SHOULD** treat a wall-clock STEP as a relabel, never as lateness to catch up. At a step of S the
+  stamps jump N = floor(S / interval) slots within one interval (N rounds toward −∞, re-floored
+  against the stepped wall at emit, never future-dated), the content stays continuous, and the next
+  emit re-phases by the remainder. A catch-up burst after a forward step (the ≤ 8-interval rule read
+  as lateness) arrives on top of the queued frames and makes a shallow-pinned receiver relock (its
+  backlog branch fires on more than 6 queued frames with a due head). A step between −1 slot and 0
+  can stamp one boundary twice; the receiver presents both frames in arrival order (counted
+  `stamp_dup`, no relock), so that is allowed.
+
+Date steps are not rare or small. Since dantesync 1.12.0 the fleet date master steps the date
+once a night (02:00 UTC), by hundreds of ms up to seconds (camera-box grades it up to 3000 ms), and
+at once whenever the date master restarts during the day (29.9.2026: +260 ms at 20:58 UTC). Past
+dantesync's 5 s emergency cap it steps at once.
 
 *Reference for the SHOULD (issue 1372):* the OBS render tick `genlock_next_deadline`
 (`vendor/obs-studio/libobs/obs-video.c`) with the wall-step detector
@@ -202,9 +214,14 @@ a boundary **MUST** be submitted BEFORE that boundary's video frame. The audio `
 **MUST** be the raw wall clock at submission (in 100 ns units, with no boundary snap), with one
 exception: a sender that paces its audio as exactly ONE block per boundary (each block carries the
 samples of one boundary interval of the §3 grid) **MAY** stamp each block with that block's
-boundary, the same floor-boundary value §4 gives the boundary's video frame. The receiver ASRC
-paces audio by arrival rate either way, and a boundary stamp is steadier than a submission-instant
-stamp, which carries the sender's scheduling jitter. A sender whose chunks do not line up with
+boundary, the same floor-boundary value §4 gives the boundary's video frame. The stamp is
+load-bearing: a genlock receiver input runs its ASRC in TIMECODE mode (camera-box issue 1367) and
+places each packet at its stamp, and a boundary stamp is steadier than a submission-instant stamp,
+which carries the sender's scheduling jitter. At a wall-clock step (§5) such a sender relabels its
+audio stamps with the video (the same N slots) while the samples stay continuous; the receiver's
+audio hold then releases `followed` with a residual under one block. Closing that residual, and the
+whole-buffer reset stock OBS applies to a jump over 2 s, is the receiver's job (camera-box issue
+1381). A sender whose chunks do not line up with
 boundaries **MUST** keep the raw submission wall clock (SongPlayer 0.69.0-dev.10 / its issue 224
 stamps its paced blocks on their boundary, camera-box issue 1294). Samples
 **MUST** be delivered at real-time rate (`samples_per_boundary = 48000 · interval_seconds`); a

@@ -345,7 +345,8 @@ never dropped). Full rule: `genlock-audio-buffering-floor.md`.
 A dantesync date step (29.9.2026: +682 ms at 02:36 CEST, +89.7 ms at 04:00) moves the receiver's live
 wall→mono offset at once, while the sender's stamps follow later. SongPlayer
 (`sp-server/src/playback/audio_emitter.rs`) never jumps its grid stamps under 1 s: it re-anchors only
-when more than 1 s late. A forward step becomes a catch-up burst, a backward step a pause, and its
+when more than 1 s late. SongPlayer #224 replaces that with a relabel (the stamps jump N slots within
+one interval, `docs/genlock-sender-contract.md` §5); until it is deployed, read the old behaviour below. A forward step becomes a catch-up burst, a backward step a pause, and its
 WallClock follows after 2 confirming resamples (3.3–6.7 s). Until then the old code read the step
 as PLACEMENT ERROR. The 682 ms step then booked the capped 100 ms owed amount over and over, and the
 excess leaked into the smoothed error. The result was restore=1, ~151 ppm applied, and a 70 ms
