@@ -268,6 +268,8 @@ struct Obs {
     tick: u64,
     /// Issue 1381: the per-source skew hold (the `genlock_audio_step_*` members of `obs_source`).
     step_hold: AudioStepHold,
+    /// Issue 1381: packets the backstop placed (`place_beyond_cap` counts each as a placement jump).
+    backstops: u32,
 }
 
 impl Obs {
@@ -296,6 +298,7 @@ impl Obs {
             prev_raw_s: 0.0,
             tick: 0,
             step_hold: AudioStepHold::default(),
+            backstops: 0,
         }
     }
 
@@ -496,6 +499,7 @@ impl Obs {
             );
             if self.c.place_beyond_cap(err_ms, self.raw_cur_s * 1000.0) {
                 push_back = false;
+                self.backstops += 1;
             }
         }
         let fold = audio_placed_slew_fold_ns(

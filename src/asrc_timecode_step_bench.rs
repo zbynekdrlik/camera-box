@@ -141,7 +141,8 @@ fn step_receiver_wall(t_ns: u64, case: StepCase) -> u64 {
 struct StepRun {
     /// Landings that departed from the continuation after the step: (s after the step, ms).
     discs: Vec<(f64, f64)>,
-    /// Booked placement jumps after the step.
+    /// Booked placement jumps after the step (a backstop placement is counted once, as its
+    /// discontinuity, not here).
     jumps: u32,
     /// Skips of at least [`SKIP_MS`] after the step, and the span from the first to the last (s).
     skips: usize,
@@ -170,6 +171,7 @@ fn run_step(case: StepCase, variant: Variant) -> StepRun {
     let mut obs = Obs::new(variant);
     let mut r = StepRun::default();
     let mut jumps_at_step = None;
+    let mut backstops_at_step = 0;
     let mut continuation: Option<u64> = None;
     let mut first_skip = None;
     let measure_at = recv_step_at(case);
@@ -178,6 +180,13 @@ fn run_step(case: StepCase, variant: Variant) -> StepRun {
         obs.mix_until(mono_now);
         let dur = obs.asrc_process(mono_now);
         let wall = step_receiver_wall(pkt.arrival_ns, case);
+        if pkt.arrival_ns >= measure_at {
+            // taken BEFORE the first measured packet, so a booking on the step packet itself counts
+            if jumps_at_step.is_none() {
+                jumps_at_step = Some(obs.c.place_jump_count());
+                backstops_at_step = obs.backstops;
+            }
+        }
         let landed = obs.ingest(&pkt, mono_now, wall, HOLD_MS, dur);
         let t = pkt.arrival_ns;
         let truth =
@@ -185,7 +194,6 @@ fn run_step(case: StepCase, variant: Variant) -> StepRun {
         let av_ms = landed.actual.wrapping_sub(truth) as i64 as f64 / 1e6;
         if t >= measure_at {
             let after_s = (t - measure_at) as f64 / 1e9;
-            jumps_at_step.get_or_insert(obs.c.place_jump_count());
             if let Some(cont) = continuation {
                 let disc = landed.actual.wrapping_sub(cont) as i64;
                 if disc.unsigned_abs() > EVENT_DISC_NS {
@@ -214,7 +222,8 @@ fn run_step(case: StepCase, variant: Variant) -> StepRun {
         }
         continuation = Some(landed.actual + dur);
     }
-    r.jumps = obs.c.place_jump_count() - jumps_at_step.unwrap_or(0);
+    r.jumps =
+        obs.c.place_jump_count() - jumps_at_step.unwrap_or(0) - (obs.backstops - backstops_at_step);
     r.holding_at_end = obs.step_hold.active;
     r
 }
@@ -378,8 +387,10 @@ fn steady_state_and_a_small_step_never_hold_1381() {
 fn a_sender_that_stepped_first_costs_one_placement_at_the_receiver_step_1381() {
     // review round 1: a cross-box sender whose box steps 2 s BEFORE the receiver's. Its stamps (a
     // jump, or a caught-up burst / pause) are already on the new wall when the receiver's step lands,
-    // so the receiver's step puts them back on its wall: no hold, the step placed once, the audio on
-    // its true landing within 0.2 s of the receiver's step.
+    // so the receiver's step puts them back on its wall: nothing held, the receiver-step packet
+    // released at once and placed (one event, nothing booked), the audio on its true landing within
+    // 0.2 s of the receiver's step -- for a step under the owed cap too (appended, it would be booked
+    // and paid over ~90 s with a 70 ms TS-smoothing re-placement on the way).
     for follow in [Follow::Jump, Follow::Burst] {
         for wall_ns in [STEP_682_NS, -STEP_682_NS, STEP_90_NS] {
             let case = StepCase {
@@ -390,7 +401,9 @@ fn a_sender_that_stepped_first_costs_one_placement_at_the_receiver_step_1381() {
             };
             let r = run_step(case, Variant::Production);
             assert!(
-                r.releases.is_empty()
+                r.releases.len() == 1
+                    && r.releases[0].1 == AudioStepRelease::Followed
+                    && r.releases[0].0 < 0.1
                     && !r.holding_at_end
                     && r.events() <= 1
                     && r.jumps == 0

@@ -271,7 +271,9 @@ fn a_sender_that_stepped_first_is_never_held_1381() {
     // review round 1: the SENDER's box stepped first (a cross-box timecode source whose sender is the
     // date master). Its stamps are already on the new wall when the receiver's own step lands, so the
     // receiver's step brings them BACK onto its wall: holding the pre-step offset would put the
-    // audio a whole step off for the full 10 s bound.
+    // audio a whole step off for the full 10 s bound. The receiver-step packet is a zero-length hold,
+    // released at once with the whole step as its residual (the ingest places it: the window before
+    // left the audio a step off its stamps), and nothing is held after it.
     for step in [682_474_000_i64, -682_474_000, 89_703_000] {
         // (a) the sender's stamps jump by the step, the receiver steps 2 s later
         let mut s = AudioStepHold::default();
@@ -281,7 +283,19 @@ fn a_sender_that_stepped_first_is_never_held_1381() {
         for k in 10..70 {
             assert_eq!(feed(&mut s, k, 0, step), (OFF, AudioStepRelease::None));
         }
-        for k in 70..400 {
+        assert_eq!(
+            feed(&mut s, 70, step, step),
+            (OFF - step, AudioStepRelease::Followed),
+            "issue 1381: step {step}: the receiver's step is released on its own packet"
+        );
+        assert!(!s.active && s.step_ns == step && s.start_ns == 1_000_000_000_000 + 70 * PACKET);
+        let residual = audio_step_residual_ns(s.held_off_ns, OFF - step);
+        assert!(
+            residual == -step
+                && audio_step_release_places(AudioStepRelease::Followed, residual, PACKET),
+            "issue 1381: step {step}: the zero-length release places the whole step once"
+        );
+        for k in 71..400 {
             let r = feed(&mut s, k, step, step);
             assert_eq!(
                 r,
@@ -314,6 +328,13 @@ fn a_sender_that_stepped_first_is_never_held_1381() {
             let r = burst(&mut s, &mut now, &mut k, PACKET, OFF);
             assert_eq!(r, (OFF, AudioStepRelease::None));
         }
+        let (off, release) = burst(&mut s, &mut now, &mut k, PACKET, OFF - step);
+        assert_eq!((off, release), (OFF - step, AudioStepRelease::Followed));
+        assert!(audio_step_release_places(
+            release,
+            audio_step_residual_ns(s.held_off_ns, off),
+            PACKET
+        ));
         for _ in 0..300 {
             let r = burst(&mut s, &mut now, &mut k, PACKET, OFF - step);
             assert_eq!(
