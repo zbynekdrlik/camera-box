@@ -232,6 +232,40 @@ class TestGridInputsFromAudit:
         assert g.classify_audit_inputs(self._cam1_lines([(120, 60)]))["NDI cam1"][
             "n2_early_rate"] is None                         # one line: no window, no rate
 
+    @staticmethod
+    def _cam1_counted(rows):
+        """cam1's D1 audit line with the given counters overridden, one line per dict."""
+        import re
+        line = [ln for ln in D1_LOG.read_text(encoding="utf-8").splitlines()
+                if "audit 'NDI cam1'" in ln][0]
+        out = []
+        for counters in rows:
+            ln = line
+            for key, val in counters.items():
+                ln = re.sub(r"(?<![a-z_])" + key + r"=\d+", f"{key}={val}", ln)
+            out.append(ln)
+        return "\n".join(out)
+
+    def test_underrun_ticks_count_in_the_n2_early_rate(self):
+        # review round 2: an empty-queue tick (underruns=) is a tick too; leaving it out overstated
+        # the rate in a stall window against the "0.1 % of the ticks" budget
+        text = self._cam1_counted([
+            {"received": 1000, "consumed": 500, "underruns": 0, "n2_early": 0},
+            {"received": 1300, "consumed": 640, "underruns": 10, "n2_early": 1}])
+        assert g.classify_audit_inputs(text)["NDI cam1"]["n2_early_rate"] == pytest.approx(1 / 150)
+
+    def test_a_stalling_camera_keeps_its_rate_multiple(self):
+        # review round 2: held ticks present nothing, so received / consumed read 2.31 on a real
+        # 60-into-30 camera with 13 % holds and dropped it to the head-skew model. Every tick
+        # (consumed + holds + late holds + underruns) takes two 60 fps frames: 300 / 150 = 2.
+        window = self._cam1_counted([
+            {"received": 1000, "consumed": 500, "holds": 0, "late_holds": 0},
+            {"received": 1300, "consumed": 630, "holds": 12, "late_holds": 8}])
+        assert g.grid_inputs_from_audit(window) == {"NDI cam1": I60}
+        one_line = self._cam1_counted([
+            {"received": 240, "consumed": 100, "holds": 15, "late_holds": 0, "underruns": 5}])
+        assert g.grid_inputs_from_audit(one_line) == {"NDI cam1": I60}
+
     def test_the_d1_jitter_json_is_what_genlock_jitter_report_makes_of_the_log(self):
         # the fixture JSON is hand-derived from its log; keep it honest: samples = line count,
         # latency_ms = the last line's, mean_head_skew_ms = the mean of ts_head_skew_ms
