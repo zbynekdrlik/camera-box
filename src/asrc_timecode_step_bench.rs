@@ -62,12 +62,24 @@ struct StepCase {
     wall_ns: i64,
     lag_ns: u64,
     follow: Follow,
+    /// Review round 1: > 0 = the SENDER steps first, at the step time, and the receiver this long
+    /// after it (`lag_ns` is then unused). Everything is measured from the receiver's step.
+    sender_first_ns: u64,
+}
+
+/// When the receiver's own wall steps.
+fn recv_step_at(case: StepCase) -> u64 {
+    STEP_AT_NS + case.sender_first_ns
 }
 
 /// The sender's packets for one case; `leap_ns` carries the TRUE landing's move (two's complement).
 fn step_sender_packets(case: StepCase) -> Vec<Packet> {
     let mut rng = Lcg(0x1381_5882);
-    let follow_at = STEP_AT_NS + case.lag_ns;
+    let follow_at = if case.sender_first_ns > 0 {
+        STEP_AT_NS
+    } else {
+        STEP_AT_NS + case.lag_ns
+    };
     let wall = case.wall_ns as u64;
     let mut out = Vec::new();
     let mut prev_arrival = 0_u64;
@@ -118,7 +130,7 @@ fn step_sender_packets(case: StepCase) -> Vec<Packet> {
 }
 
 fn step_receiver_wall(t_ns: u64, case: StepCase) -> u64 {
-    if case.follow != Follow::NoStep && t_ns >= STEP_AT_NS {
+    if case.follow != Follow::NoStep && t_ns >= recv_step_at(case) {
         (WALL0 + t_ns).wrapping_add(case.wall_ns as u64)
     } else {
         WALL0 + t_ns
@@ -160,6 +172,7 @@ fn run_step(case: StepCase, variant: Variant) -> StepRun {
     let mut jumps_at_step = None;
     let mut continuation: Option<u64> = None;
     let mut first_skip = None;
+    let measure_at = recv_step_at(case);
     for pkt in step_sender_packets(case) {
         let mono_now = MONO0 + pkt.arrival_ns;
         obs.mix_until(mono_now);
@@ -170,8 +183,8 @@ fn run_step(case: StepCase, variant: Variant) -> StepRun {
         let truth =
             (MONO0 + slot_ns(pkt.slot) + genlock_audio_delay_ns(HOLD_MS)).wrapping_add(pkt.leap_ns);
         let av_ms = landed.actual.wrapping_sub(truth) as i64 as f64 / 1e6;
-        if t >= STEP_AT_NS {
-            let after_s = (t - STEP_AT_NS) as f64 / 1e9;
+        if t >= measure_at {
+            let after_s = (t - measure_at) as f64 / 1e9;
             jumps_at_step.get_or_insert(obs.c.place_jump_count());
             if let Some(cont) = continuation {
                 let disc = landed.actual.wrapping_sub(cont) as i64;
@@ -211,6 +224,7 @@ fn jump(wall_ns: i64, lag_ns: u64) -> StepCase {
         wall_ns,
         lag_ns,
         follow: Follow::Jump,
+        sender_first_ns: 0,
     }
 }
 
@@ -247,6 +261,7 @@ fn the_89_7_ms_step_costs_at_most_one_event_and_is_never_late_1381() {
                 wall_ns: STEP_90_NS,
                 lag_ns: lag,
                 follow,
+                sender_first_ns: 0,
             };
             let r = run_step(case, Variant::Production);
             let released_s = r.releases.first().map_or(0.0, |x| x.0);
@@ -293,6 +308,7 @@ fn a_sender_that_catches_up_is_released_at_once_and_one_that_never_follows_at_th
                 wall_ns,
                 lag_ns: lag,
                 follow: Follow::Burst,
+                sender_first_ns: 0,
             };
             let r = run_step(case, Variant::Production);
             let caught_up_s = (lag as f64 + wall_ns.min(0).unsigned_abs() as f64) / 1e9;
@@ -320,6 +336,7 @@ fn a_sender_that_catches_up_is_released_at_once_and_one_that_never_follows_at_th
         wall_ns: STEP_682_NS,
         lag_ns: 0,
         follow: Follow::Never,
+        sender_first_ns: 0,
     };
     let r = run_step(never, Variant::Production);
     assert!(
@@ -341,6 +358,7 @@ fn steady_state_and_a_small_step_never_hold_1381() {
             wall_ns: 0,
             lag_ns: 0,
             follow: Follow::NoStep,
+            sender_first_ns: 0,
         },
         Variant::Production,
     );
@@ -354,4 +372,33 @@ fn steady_state_and_a_small_step_never_hold_1381() {
         small.releases.is_empty(),
         "issue 1381: a step within one packet never starts a hold: {small:?}"
     );
+}
+
+#[test]
+fn a_sender_that_stepped_first_costs_one_placement_at_the_receiver_step_1381() {
+    // review round 1: a cross-box sender whose box steps 2 s BEFORE the receiver's. Its stamps (a
+    // jump, or a caught-up burst / pause) are already on the new wall when the receiver's step lands,
+    // so the receiver's step puts them back on its wall: no hold, the step placed once, the audio on
+    // its true landing within 0.2 s of the receiver's step.
+    for follow in [Follow::Jump, Follow::Burst] {
+        for wall_ns in [STEP_682_NS, -STEP_682_NS, STEP_90_NS] {
+            let case = StepCase {
+                wall_ns,
+                lag_ns: 0,
+                follow,
+                sender_first_ns: 2 * NS_PER_S,
+            };
+            let r = run_step(case, Variant::Production);
+            assert!(
+                r.releases.is_empty()
+                    && !r.holding_at_end
+                    && r.events() <= 1
+                    && r.jumps == 0
+                    && r.av_settle_s <= 0.2
+                    && r.av_tail_ms <= AV_BOUND_MS,
+                "issue 1381: {case:?}: a sender that stepped first must never be held -- the \
+                 receiver's step puts its stamps back on the receiver's wall: {r:?}"
+            );
+        }
+    }
 }

@@ -155,8 +155,9 @@ fn no_hold_on_jitter_a_small_step_a_first_packet_or_a_joint_step_1381() {
     // offset jitter within the 2 ms threshold
     let mut s = AudioStepHold::default();
     for k in 0..50 {
-        let (off, release) = feed(&mut s, k, if k % 2 == 0 { 1_900_000 } else { 0 }, 0);
-        assert!(!s.active && release == AudioStepRelease::None && off != 0);
+        let step = if k % 2 == 0 { 1_900_000 } else { 0 };
+        let (off, release) = feed(&mut s, k, step, 0);
+        assert!(!s.active && release == AudioStepRelease::None && off == OFF - step);
     }
     // a step within one packet: nothing held (the booking band handles it as before)
     let mut s = AudioStepHold::default();
@@ -205,48 +206,55 @@ fn the_hold_arithmetic_wraps_like_c_1381() {
         prev_packet_ns: 2,
         ..AudioStepHold::default()
     };
-    // offset wraps from i64::MAX to i64::MIN (a -1 step in two's complement): within the threshold
+    // offset wraps from i64::MAX to i64::MIN (a +1 jump in two's complement): within the threshold
     let (off, release) = audio_step_hold(&mut s, true, i64::MIN, 1, 2, 5, false, MIN);
     assert_eq!((off, release), (i64::MIN, AudioStepRelease::None));
     assert!(!s.active);
 }
 
+/// One packet of a feed whose arrivals are spaced by `gap_ns` (a catch-up burst compresses them):
+/// advances the receiver's monotonic `now` by the gap and the sender's grid stamp by one packet.
+fn burst(
+    s: &mut AudioStepHold,
+    now: &mut u64,
+    k: &mut u64,
+    gap_ns: u64,
+    off: i64,
+) -> (i64, AudioStepRelease) {
+    *now += gap_ns;
+    *k += 1;
+    audio_step_hold(s, true, off, WALL + *k * PACKET, PACKET, *now, false, MIN)
+}
+
 #[test]
 fn a_sender_that_catches_up_without_jumping_its_stamps_is_released_at_once_1381() {
     // SongPlayer's audio emitter: grid stamps never jump under 1 s; after a forward step it emits the
-    // missed slots at once, so its stamps arrive a whole step EARLIER on the monotonic clock.
+    // missed slots as a burst, so its continuous stamps arrive faster than real time until the step
+    // is caught up (modelled here at 4x: each packet a quarter slot after the previous one).
     let mut s = AudioStepHold::default();
     let step = 682_474_000_i64;
-    let now = |k: u64, early: u64| 1_000_000_000_000 + k * PACKET - early;
-    let raw = |k: u64| WALL + k * PACKET;
-    for k in 0..10 {
-        audio_step_hold(&mut s, true, OFF, raw(k), PACKET, now(k, 0), false, MIN);
+    let (mut now, mut k) = (1_000_000_000_000_u64, 0_u64);
+    audio_step_hold(&mut s, true, OFF, WALL, PACKET, now, false, MIN);
+    for _ in 0..9 {
+        burst(&mut s, &mut now, &mut k, PACKET, OFF);
     }
-    for k in 10..160 {
-        let (off, release) = audio_step_hold(
-            &mut s,
-            true,
-            OFF - step,
-            raw(k),
-            PACKET,
-            now(k, 0),
-            false,
-            MIN,
-        );
-        assert_eq!((off, release), (OFF, AudioStepRelease::None), "packet {k}");
+    for _ in 0..140 {
+        let r = burst(&mut s, &mut now, &mut k, PACKET, OFF - step);
+        assert_eq!(r, (OFF, AudioStepRelease::None), "packet {k}");
     }
     assert!(s.active && s.step_ns == step);
-    // the catch-up burst: slot 160 arrives the step earlier than its schedule
-    let (off, release) = audio_step_hold(
-        &mut s,
-        true,
-        OFF - step,
-        raw(160),
-        PACKET,
-        now(160, step as u64),
-        false,
-        MIN,
-    );
+    // the burst: the stamps' age falls by three quarters of a slot per packet; held until it is back
+    // within one packet of the pre-step age, then released once
+    let mut released = None;
+    for _ in 0..40 {
+        let (off, release) = burst(&mut s, &mut now, &mut k, PACKET / 4, OFF - step);
+        if release != AudioStepRelease::None {
+            released = Some((off, release));
+            break;
+        }
+        assert_eq!(off, OFF, "still held at packet {k}");
+    }
+    let (off, release) = released.expect("issue 1381: the catch-up must release the hold");
     assert_eq!((off, release), (OFF - step, AudioStepRelease::Followed));
     let residual = audio_step_residual_ns(s.held_off_ns, off);
     assert_eq!(
@@ -254,20 +262,67 @@ fn a_sender_that_catches_up_without_jumping_its_stamps_is_released_at_once_1381(
         "issue 1381: the release applies the whole step"
     );
     assert!(audio_step_release_places(release, residual, PACKET));
-    // a stamp that is already back on the live wall never starts a hold
-    let mut s = AudioStepHold::default();
-    audio_step_hold(&mut s, true, OFF, raw(0), PACKET, now(0, 0), false, MIN);
-    let (_, release) = audio_step_hold(
-        &mut s,
-        true,
-        OFF - step,
-        raw(1),
-        PACKET,
-        now(1, step as u64),
-        false,
-        MIN,
-    );
-    assert!(!s.active && release == AudioStepRelease::None);
     assert_eq!(audio_stamp_age_ns(10, 3, 4), 3);
     assert_eq!(audio_stamp_age_ns(0, 1, 0), -1, "wraps like C");
+}
+
+#[test]
+fn a_sender_that_stepped_first_is_never_held_1381() {
+    // review round 1: the SENDER's box stepped first (a cross-box timecode source whose sender is the
+    // date master). Its stamps are already on the new wall when the receiver's own step lands, so the
+    // receiver's step brings them BACK onto its wall: holding the pre-step offset would put the
+    // audio a whole step off for the full 10 s bound.
+    for step in [682_474_000_i64, -682_474_000, 89_703_000] {
+        // (a) the sender's stamps jump by the step, the receiver steps 2 s later
+        let mut s = AudioStepHold::default();
+        for k in 0..10 {
+            feed(&mut s, k, 0, 0);
+        }
+        for k in 10..70 {
+            assert_eq!(feed(&mut s, k, 0, step), (OFF, AudioStepRelease::None));
+        }
+        for k in 70..400 {
+            let r = feed(&mut s, k, step, step);
+            assert_eq!(
+                r,
+                (OFF - step, AudioStepRelease::None),
+                "issue 1381: step {step}: packet {k} after the receiver's own step must map \
+                 through the live offset, never a hold"
+            );
+            assert!(!s.active);
+        }
+        // (b) the sender caught up with continuous stamps (a burst forward, a pause backward), the
+        // receiver steps 2 s after the catch-up
+        let mut s = AudioStepHold::default();
+        let (mut now, mut k) = (1_000_000_000_000_u64, 0_u64);
+        audio_step_hold(&mut s, true, OFF, WALL, PACKET, now, false, MIN);
+        for _ in 0..9 {
+            burst(&mut s, &mut now, &mut k, PACKET, OFF);
+        }
+        if step > 0 {
+            // forward: 4x arrivals until the stamps are the step ahead of the receiver's wall
+            let mut caught = 0_u64;
+            while caught < step as u64 {
+                burst(&mut s, &mut now, &mut k, PACKET / 4, OFF);
+                caught += PACKET - PACKET / 4;
+            }
+        } else {
+            // backward: the sender pauses for the step
+            burst(&mut s, &mut now, &mut k, PACKET + step.unsigned_abs(), OFF);
+        }
+        for _ in 0..60 {
+            let r = burst(&mut s, &mut now, &mut k, PACKET, OFF);
+            assert_eq!(r, (OFF, AudioStepRelease::None));
+        }
+        for _ in 0..300 {
+            let r = burst(&mut s, &mut now, &mut k, PACKET, OFF - step);
+            assert_eq!(
+                r,
+                (OFF - step, AudioStepRelease::None),
+                "issue 1381: step {step}: after a caught-up sender the receiver's step must not \
+                 hold (packet {k})"
+            );
+            assert!(!s.active);
+        }
+    }
 }

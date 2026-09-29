@@ -277,3 +277,56 @@ fn windows_workflows_guard_the_same_wiring_1381() {
         }
     }
 }
+
+#[test]
+fn the_render_thread_freeze_is_bounded_and_replays_a_relock_1381() {
+    // review round 1: the render thread's view of the hold is bounded by the same 10 s on its own
+    // clock (a source whose audio stops inside a hold never freezes its video side for longer), and
+    // a latch relock that lands inside the hold is replayed on the first tick after it, never lost.
+    let src = squish(&read(OBS_SOURCE));
+    assert!(
+        src.contains("static bool genlock_audio_step_video_frozen(const obs_source_t *source) { return genlock_audio_step_freezes_video(source->genlock_audio_step_active, source->genlock_audio_step_start_ns, os_gettime_ns()); }"),
+        "issue 1381: the render thread must read the hold through the bounded helper"
+    );
+    assert_eq!(
+        src.matches("genlock_audio_step_video_frozen(source)")
+            .count(),
+        3,
+        "issue 1381: the shallow latch and both video-delay tracker calls read the bounded helper"
+    );
+    assert!(
+        !src.contains("if (source->genlock_audio_step_active) return;")
+            && !src.contains("!source->genlock_audio_step_active) genlock_video_delay_track("),
+        "issue 1381: an unbounded render-thread read of the hold flag is back"
+    );
+    let latch = at(&src, "static void genlock_shallow_latch(");
+    let body = &src[latch..];
+    let body = &body[..body.find(" static ").unwrap_or(body.len())];
+    for needle in [
+        "if (genlock_audio_step_video_frozen(source)) { if (relock) source->genlock_audio_step_relock_pending = true; return; }",
+        "if (source->genlock_audio_step_relock_pending) relock = true; source->genlock_audio_step_relock_pending = false;",
+    ] {
+        assert!(
+            body.contains(needle),
+            "issue 1381: the shallow latch lost `{needle}` -- a relock inside the hold is dropped"
+        );
+    }
+    assert!(
+        squish(&read(OBS_INTERNAL)).contains("bool genlock_audio_step_relock_pending;"),
+        "issue 1381: obs-internal.h lost the pending relock"
+    );
+}
+
+#[test]
+fn the_step_hold_log_line_is_null_safe_1381() {
+    // review round 1: obs_source_get_name() can return NULL into %s
+    let src = squish(&read(OBS_SOURCE));
+    let log = at(&src, "static void genlock_audio_step_log(");
+    let body = &src[log..];
+    let body = &body[..body.find(" static ").unwrap_or(body.len())];
+    assert!(
+        body.contains("source->context.name ? source->context.name : \"?\"")
+            && !body.contains("obs_source_get_name(source)"),
+        "issue 1381: the step-hold log line must not pass a NULL name to %s"
+    );
+}
