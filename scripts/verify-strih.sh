@@ -794,6 +794,24 @@ case "$DS_ROLE_VERDICT" in
   *)               bad "(dantesync-role) unknown verdict '${DS_ROLE_VERDICT}'" ;;
 esac
 
+# 6c) dantesync UNIT content (issue 1372): the installed /etc/systemd/system/dantesync.service is
+#     byte-identical to the unit setup-strih step 2 emits for the box's role, and no
+#     dantesync.service.d/*.conf drop-in overrides it. setup-strih rewrites and restarts the daemon
+#     ONLY on a change (a restart of the fleet DATE MASTER steps the whole rig's date), so a drifted
+#     unit is caught HERE, read-only -- never by a blind restart on the next deploy. A kept-running
+#     daemon on a matching unit passes; items 6/6b grade that it runs.
+DS_UNIT_PATH_V="/etc/systemd/system/dantesync.service"
+DS_ARGS_V="$(strih_lx_dantesync_args 2>/dev/null)" || DS_ARGS_V=""
+if ! DS_UNIT_WANT="$(strih_dantesync_unit_text "$DS_ROLE_V" "$DS_ARGS_V" 2>/dev/null)"; then
+  bad "(dantesync-unit) the box facts give no valid dantesync unit (role '${DS_ROLE_V}') -- fix scripts/strih-boxes/$(strih_lx_hostname).env"
+elif ! strih_dantesync_unit_matches "$DS_UNIT_WANT" "$DS_UNIT_PATH_V"; then
+  bad "(dantesync-unit) ${DS_UNIT_PATH_V} is missing or differs from the provisioned ${DS_ROLE_V} unit -- re-run setup-strih.sh in the nightly window (its step 2 then restarts dantesync, and a date-master restart steps the whole fleet date)"
+elif strih_dantesync_dropins_present "${DS_UNIT_PATH_V}.d"; then
+  bad "(dantesync-unit) a ${DS_UNIT_PATH_V}.d/*.conf drop-in overrides the provisioned ${DS_ROLE_V} unit -- re-run setup-strih.sh in the nightly window (its step 2 removes it and restarts dantesync)"
+else
+  ok "(dantesync-unit) unit matches the provisioned ${DS_ROLE_V} unit, no drop-in"
+fi
+
 # 30) ffmpeg/ffprobe present (issue 1317): the on-box recording-verdict E2E spawns ffprobe to demux
 #     the strih recording; without ffmpeg the [8/8] on-box verdict fails. FAIL loud (release gate).
 FFMPEG_MISSING=""
