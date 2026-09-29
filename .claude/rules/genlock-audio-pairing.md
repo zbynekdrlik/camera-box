@@ -360,16 +360,25 @@ over a minute.
   timecode ASRC's stamp all map through `genlock_off_ns`. A step within one packet, a first packet,
   a timeline reset or a joint step (the stamps jump in the same packet) never holds.
 - **The reference is the NOMINAL stamp age** (review round 1): the stamp's live-wall age while the
-  two walls agree. It is seeded by the first packet and after a timeline reset. Outside a hold every
-  in-band packet (within one packet) moves it by 1/1024 of the difference, about a 34 s time constant.
-  An out-of-band age leaves it alone, and one that stays out of band for 10 min
-  (`AUDIO_STEP_NOMINAL_REANCHOR_NS`, a re-buffered sender) re-anchors it. A hold freezes it.
+  two walls agree. It is seeded by the source's first timecode packet, then WARMS UP for 30 packets:
+  every packet moves it by 1/4 of the difference, in band or not, so a backlog queued at connect
+  never stays the reference (review round 2). After that, every in-band packet (within one packet)
+  outside a hold moves it by 1/1024 of the difference, about a 34 s time constant. An out-of-band
+  age leaves it alone, and one that stays out of band for 10 min (`AUDIO_STEP_NOMINAL_REANCHOR_NS`,
+  a re-buffered sender) re-anchors it. A hold freezes it. A timeline reset KEEPS it and never starts
+  a hold: a sender whose stamps jumped past OBS's 2 s limit stepped first, and the receiver's own
+  step brings its age back (review round 2). The known cost: a sender that restarts with a
+  different transport lag keeps the old nominal until the re-anchor. A step within that window can
+  hold until the 10 s bound (one placement), and a wall step inside the first second after a
+  connect is followed by the warm-up.
 - **A sender that stepped FIRST is never held** (review round 1). Example: a cross-box source
   whose sender is the date master. Its stamps (a jump, or a caught-up burst or pause) are already on
   the new wall when the receiver steps, so the receiver's step brings their age back to nominal. That
   packet is a zero-length hold, released `followed` with the whole step as its residual, so it is
   placed once. The window before left the audio a step off its stamps, and that placement repairs it.
-  Appended instead, a step under the owed cap would be booked and paid over about 90 s.
+  Appended instead, a step under the owed cap would be booked and paid over about 90 s. A backward
+  sender step over 2 s leaves every packet in the window 2.5 s late, so OBS resets its own timeline
+  on each; the receiver-step packet is then placed by that reset, with no release line.
 - **Release.** The hold ends as `followed` when the held offset (moved by every stamp jump over
   2 ms) is back within one packet of the live one, OR when the stamps' age is back within one packet
   of the nominal age (a sender that CAUGHT UP with continuous stamps). It ends as `timeout` at
@@ -377,15 +386,20 @@ over a minute.
   timecode mode.
 - **A release whose residual exceeds one packet PLACES that packet** (`audio_step_release_places`).
   This covers the catch-up, the timeout and the zero-length release: the new offset lands ONCE,
-  never as a W-second payment.
+  never as a W-second payment. The placement lands at the packet's RAW-stamp landing
+  (`in.timestamp = genlock_intended_ns`), and so does a backstop placement (review round 2). OBS's
+  70 ms smoothing may have snapped a sub-70 ms stamp jump onto the continuous timeline, and at the
+  smoothed timestamp a sender-first 35-65 ms step landed early and was booked again (up to 63 ms off
+  for about a minute).
 - **Frozen while holding.** The ASRC is not fed (`asrc_tc_have_prev = false`, so the first packet
   after the hold starts a fresh stamp pair). The render thread leaves the shallow latch and BOTH
   video-delay tracker calls alone through `genlock_audio_step_video_frozen`, which reads the audio
   thread's flag and start (benign aligned reads) and is bounded by the same 10 s on the render
   thread's own clock. So a source whose audio stops inside a hold never freezes its video side for
-  longer. A backlog relock inside the hold is absorbed. A latch lock (ACQUIRE / GAP RESYNC / pin
-  change) that lands inside it is kept in `genlock_audio_step_relock_pending` and replayed on the
-  first tick after the hold.
+  longer. The helper tests the flag first, so a source that holds nothing costs no clock read. A
+  backlog relock inside the hold is absorbed. A latch lock (ACQUIRE / GAP RESYNC) that lands inside
+  it is kept in `genlock_audio_step_relock_pending` and replayed on the first tick after the hold. A
+  pin change re-arms the latch window itself.
 - **The log:** one `genlock-audio-step-hold '<src>': step_ms= held_ms= released=followed|timeout|reset
   residual_ms= holds= (issue 1381)` line per released hold, NULL-safe on the source name. It is
   mutually non-substring vs every other `genlock-*` family. `held_ms=0.0` with a step-sized
@@ -401,12 +415,15 @@ over a minute.
 - **Tier-0 proof:** `tests/genlock_audio_step_hold_parity_1381.rs` drives the verbatim C and the
   Rust authority through one packet script. The script covers the exact 10 s edge (20 ms packets),
   the exact 2 ms jump (1 ms packets), sub-threshold stamp jitter inside a hold, a 4x catch-up burst,
-  both sender-first shapes, the nominal track (both signs), its timer at now = 0 and the exact 600 s
-  re-anchor. It also checks the bounded render-thread predicate.
+  both sender-first shapes, the nominal warm-up (steps inside it too), the slow track (both signs),
+  its timer at now = 0 and the exact 600 s re-anchor. It also checks the bounded render-thread
+  predicate.
   `tests/genlock_audio_step_hold_wiring_1381.rs` holds ONE needle list for the ingest, the helpers,
   the render-thread freezes and the relock replay; both `windows-genlock*.yml` pwsh gates require
-  the same list. 31/31 C mutants (compensator 10, hold 21) and 18/18 wiring mutants are killed by
-  the Rust gate AND the real pwsh lines. The shared lift helpers live in
+  the same list. 36/36 C mutants (compensator 10, hold 26) and 20/20 wiring mutants are killed by
+  the Rust gate AND the real pwsh lines. A mutant that only removes a write the code path already
+  guarantees (the seeded flag at a placement, the out-of-band timer in the warm-up) was an equivalent
+  mutant; those writes were removed rather than tested. The shared lift helpers live in
   `tests/genlock_audio_pairing_lift/mod.rs`.
 - **Deploy + live acceptance (supervisor).** The change is in libobs (`obs.dll` / `libobs.so.30`)
   plus the shared header, so it ships as a FULL-bundle deploy on every genlock box

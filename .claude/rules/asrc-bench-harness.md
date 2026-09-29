@@ -903,6 +903,12 @@ re-booked a phantom jump against that stale error: `place_jumps` 0 → 180 → 4
     placement, on the true landing at once. With 20 ms extra arrival jitter (`burst_jitter_ns`) a
     40 ms step with a jumping sender costs two events (an early age release, then the booked jump)
     and settles in about 41 s. 50/60/682 ms steps and a catch-up sender keep at most one event.
+  - Review round 2: sender first by 2 s at 35/50/65/-50/-65 ms (under OBS's 70 ms smoothing),
+    placed at the smoothed timestamp: up to 63 ms off for about a minute. Placed at the raw-stamp
+    landing: one ~2 ms event, |A/V| <= 0.8 ms, nothing booked. Sender first by +-2.5 s (over the
+    2 s timestamp-jump limit): one placement at the receiver's step (was a 10 s hold when the reset
+    re-seeded the nominal). A two-packet backlog at connect (`connect_backlog`): a receiver-first
+    50 / 682 ms step behaves exactly as without it (was read as sender-first at 50 ms).
   - Bench accounting: a backstop placement is one event, its discontinuity. `place_beyond_cap`
     also counts it as a placement jump, so the booking count subtracts it. The count's baseline is
     taken before the first measured packet.
