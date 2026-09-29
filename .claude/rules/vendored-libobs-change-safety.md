@@ -257,8 +257,9 @@ Two habits that keep the anchors honest:
 And whatever you anchor in `tests/genlock_release_cadence.rs`, mirror it into **both**
 `windows-genlock.yml` and `windows-genlock-fast.yml` (the issue-912 lesson). Their pwsh squishes
 whitespace the same way (`-replace '\s+', ' '` vs Rust's `split_whitespace().join(" ")`), so the
-same literal works in both — verify each one against the real squished C before committing,
-since `pwsh` is not installed on dev1 and a wrong literal fails only on a Windows runner.
+same literal works in both — verify each one against the real squished C before committing: a
+wrong literal fails only on a Windows runner. `pwsh` is not on dev1's PATH, but a portable pwsh 7 is
+(`~/.local/pwsh74/pwsh`), so the gate lines themselves can be run (the issue-1381 recipe below).
 
 ### Adding a SIBLING shed to the N==1 STEADY converge path: a SEPARATE `if (converge_eligible)` block, never an OR into the existing condition (#1355)
 
@@ -485,7 +486,7 @@ byte-identically in a pure-std `src/<mod>.rs` (Tier-0, run it via the recipe abo
 `key=value` token-scan parser + a `*-gate` bin as the consumer; (4) lock-step anchors in
 `tests/genlock_preload.rs` (probe-gated, CI-only) AND BOTH `windows-genlock*.yml` pwsh steps —
 verify every pwsh anchor OFFLINE against the real `re.sub(r'\s+',' ',text)`-squished file with a
-throwaway python script (pwsh is not on dev1), plus a std-only `tests/<mod>_emit.rs` anchor for
+throwaway python script (or run the lines with the portable pwsh), plus a std-only `tests/<mod>_emit.rs` anchor for
 local RED→GREEN. Lift-compile the new `blog()` format string into a `printf` harness under
 `-Wformat=2` before pushing.
 
@@ -646,3 +647,27 @@ and drives it tick by tick. Lessons from its two review rounds:
   (`SkipMacroDefinitionBody` is clang-18) or `libobs/.clang-format`. Copy the top-level file
   without that key, run `clang-format-17 --style=file:<copy>` on a copy of the source, and apply
   only the diff on your own lines. Upstream code is not brace-formatted to that style anyway.
+
+## Issue 1381 — one needle list for the Rust gate and both pwsh gates, and run the pwsh lines
+
+- **Keep ONE needle list.** Put it in a std-only Rust wiring test (`tests/genlock_audio_step_hold_wiring_1381.rs`
+  `STEP_HOLD_WIRING` / `STEP_HOLD_ABSENT`). Generate the pwsh condition in both `windows-genlock*.yml`
+  from it with a small script: parse the const array, wrap each needle as
+  `$src -notmatch [regex]::Escape('<needle>')` with `'` doubled, `-match` for an absent shape, and
+  join with `-or`. The Rust test asserts that each yml contains exactly those strings, so the three
+  copies cannot drift.
+- **Keep C comments out of needles.** A needle that spans a comment breaks on a reword. Put the
+  explanation above the `if`, not inside the block.
+- **Run the generated lines for real.** Extract each `if ($src -notmatch ...)` line (or its
+  three-line block) from both ymls. Define a `Write-Error` function that counts, drop `; exit 1`, and
+  run it with `~/.local/pwsh74/pwsh -File` against the real `obs-source.c` and against mutated scratch
+  copies. Run pwsh from a `bash /abs/script.sh`; the worktree guard refuses a direct call. A wiring
+  mutant counts as killed only when BOTH the Rust gate and the pwsh lines go RED. In the first
+  round, 4 of 18 mutants were caught by Rust alone, until their needles joined the list.
+- **Equivalent mutants.** A mutant that only removes a write the code path already guarantees
+  survives every test. Examples: the seeded flag at a placement (the capture already seeded it), and
+  the out-of-band timer inside the warm-up (the seed already cleared it). Delete the redundant write
+  on both sides rather than writing a test that cannot exist.
+- **Patch scripts vs `cargo fmt`.** rustfmt re-wraps long calls into one argument per line. A python
+  patch whose needle was written against the pre-format text then matches nothing (`count 0`).
+  Copy needles from the file as it is now, after formatting.
