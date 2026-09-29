@@ -478,7 +478,7 @@ fn a_frame_the_device_skipped_is_re_indexed_not_stamped_one_slot_early() {
     let mut t = CapturePhaseTracker::new();
     for (k, f) in frames.iter().enumerate() {
         let obs = t.observe(f.seq, f.ts);
-        if k >= 300 && k < 305 {
+        if (300..305).contains(&k) {
             assert_eq!(obs.seq_advance, if k == 300 { 2 } else { 1 }, "frame {k}");
             let est = obs.smoothed_mono_ns.expect("still locked") as f64;
             assert!(
