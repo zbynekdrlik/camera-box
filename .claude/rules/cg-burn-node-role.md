@@ -155,16 +155,38 @@ renders only while that input's `genlock_burn` is true, toggled by the existing
   after the cg program cut and BEFORE StartRecord (the cg recording carries it from its first frame),
   only when `CG_SP_BURN_ON=1` AND the cut succeeded (`cg_chain_cg_program_select` now returns 1 on a
   failed cut) — otherwise a loud "cg OBS burn stays OFF" WARNING and nothing is sent. A failed
-  StartRecord turns it straight back OFF.
-- **`CG_BURN_ON` = "this run owes an OFF":** 1 after a verified ON, 0 after a verified OFF, and 1
-  again after an OFF that could not be verified (so the next OFF retries). An ON that never verifies
-  is a WARNING and is **rolled straight back OFF** — the `add` may have reached OBS, a half-known burn
-  never stays on. Initialised `CG_BURN_ON=0` in recording-e2e.sh's state block before the trap.
+  StartRecord turns it straight back OFF. `add` also ATTACHES (and re-enables) the DistroAV burn
+  filter on the owner's cg input and leaves it there — it passes frames through while
+  `genlock_burn` is false, the same as on strih/stream.
+- **Per-call budget:** every obs_burn_filter.py call at `[5/8]` and after `[7/8]` runs under
+  `CG_CHAIN_BURN_OBS_TIMEOUT` (default 10 s), NEVER the record timeout: recording-e2e.sh passes up to
+  90 s, and 3 ON rounds + 3 rollback rounds under that would hold `[5/8]` ~18 min while strih + stream
+  already record (review finding). `CG_CHAIN_OBS_PASSWORD` (the scene helper's) is passed as
+  `--password` only when set.
+- **`CG_BURN_ON` = "this run owes an OFF":** set to 1 just BEFORE the first `add` is sent (a signal
+  can land between the add and its read-back), 0 only after a verified OFF, and 1 again after an OFF
+  that could not be verified (so the next OFF retries). An ON that never verifies is a WARNING and is
+  **rolled straight back OFF** — the `add` may have reached OBS, a half-known burn never stays on.
+  Initialised `CG_BURN_ON=0` (with `CG_SP_BURN_ON=0`, `CG_EARLY_BURNS_PID=""`) in recording-e2e.sh's
+  state block before the trap.
 - **OFF** in `cg_chain_after_stoprecord` (after the cg StopRecord, next to the SongPlayer OFF) and in
   `cg_chain_cleanup` — both ONLY when `CG_BURN_ON=1` (the #649 harness-started-only rule: a burn this
   run never turned on is never touched), cleanup with the SHORT `CG_CHAIN_CLEANUP_BURN_TIMEOUT` (3 s)
   per python call like the SongPlayer burn's. An OFF that never reads `off` prints a `LEAK` line with
   the exact `obs_burn_filter.py remove` command. Everything returns 0 (loud, never fatal).
+- **cleanup()'s FIRST pass (`cg_chain_cleanup_burns_first`, review finding):** `cg_chain_cleanup`
+  sits AFTER the camera restores, but a cancelled job gets SIGINT and a SIGKILL seconds later (the
+  #649 grace window). So right after the StopRecord-first block cleanup() sends ONE quick OFF for each
+  burn known to be on (the SongPlayer burn when `CG_SP_BURN_ON=1`, the cg burn when `CG_BURN_ON=1`),
+  3 s per call, in the BACKGROUND (`CG_EARLY_BURNS_PID`) so it never delays the camera device
+  restores (#713); `cg_chain_cleanup` waits for it, then retries both (the authoritative report). It
+  sends nothing on a run whose `[7/8]` OFF already ran or that aborted before `[5/8]`.
+- **Residual — no sweep covers the cg OBS.** `genlock_burn` is saved in the cg OBS scene collection
+  (it survives an OBS/AHK respawn), and the `[0/8]` / cleanup `sweep-off`, rig-mode EVENT's burn
+  sweep and the burn-reconcile watchdog cover strih/stream/imag only (resolume is home-gated and
+  excluded on purpose). A SIGKILL before even the first pass lands leaves 911015 on until the next
+  CG_CHAIN run's OFF — clear it by hand with the LEAK line's command. A home-gated resolume backstop
+  sweep is a candidate follow-up, not part of this slice.
 - **Why leak-guarded like the SongPlayer burn:** the cg OBS program feeds strih and, through Arena,
   possibly FOH/LED — the #246/#844 class. Approach 2 (always ON in TEST mode) was rejected for that.
 - Tier-0: `tests/python/test_cg_chain_cg_burn_1302.py` (fake `obs_burn_filter.py` / `obs_phase2.py` /

@@ -34,13 +34,17 @@ action = sys.argv[1]
 state_file = os.environ["BURN_STATE_FILE"]
 mode = os.environ.get("FAKE_CHECK_MODE", "follow")
 if action == "add":
+    if os.environ.get("FLAG_SEEN_LOG"):
+        with open(os.environ["FLAG_SEEN_LOG"], "a") as f:
+            f.write(os.environ.get("CG_BURN_ON", "unset") + "\n")
     if os.environ.get("FAKE_ADD_RC", "0") != "0":
         sys.exit("[burn] FAIL: genlock_burn did not turn on")
     open(state_file, "w").write("on")
     print("[burn] ON  genlock_burn=true")
 elif action == "remove":
-    if os.environ.get("FAKE_REMOVE_RC", "0") != "0":
-        sys.exit("[burn] FAIL: genlock_burn did not turn off")
+    if os.environ.get("FAKE_REMOVE_SLEEP"):
+        import time
+        time.sleep(float(os.environ["FAKE_REMOVE_SLEEP"]))
     open(state_file, "w").write("off")
     print("[burn] OFF genlock_burn=false")
 elif action == "check":
@@ -305,6 +309,62 @@ def test_a_typo_action_sends_nothing(tmp_path):
     assert "not on|off" in err
 
 
+def test_the_flag_is_raised_before_the_add_is_sent(tmp_path):
+    # A signal can land between the `add` and its read-back; cleanup() must already owe the OFF.
+    seen = tmp_path / "flag-seen.log"
+    rc, _, err, _ = _run(
+        tmp_path,
+        'export CG_BURN_ON=0\nCG_CHAIN=1 cg_chain_cg_burn on "$HOST" "$PY" 7',
+        env={"FLAG_SEEN_LOG": str(seen)})
+    assert rc == 0, err
+    assert seen.read_text().split() == ["1"]
+
+
+def test_the_check_is_authoritative_over_the_add_exit_code(tmp_path):
+    # The add fails (e.g. the filter re-enable raced) but the burn already renders: a verified ON.
+    (tmp_path / "burn.state").write_text("on")
+    rc, out, err, calls = _run(
+        tmp_path,
+        'CG_CHAIN=1 cg_chain_cg_burn on "$HOST" "$PY" 7; printf "FLAG=%s\\n" "$CG_BURN_ON"',
+        env={"FAKE_ADD_RC": "1"})
+    assert rc == 0, err
+    assert [c.split()[1] for c in _burn_calls(calls)] == ["add", "check"]
+    assert "VERIFIED" in out and "FLAG=1" in out
+
+
+def test_the_input_override_reaches_every_call(tmp_path):
+    rc, _, err, calls = _run(
+        tmp_path,
+        'CG_CHAIN=1 CG_CHAIN_CG_BURN_INPUT="SP program" cg_chain_cg_burn on "$HOST" "$PY" 7')
+    assert rc == 0, err
+    assert _burn_calls(calls) == [
+        f"obs_burn_filter.py add --host {HOST} --input SP program",
+        f"obs_burn_filter.py check --host {HOST} --input SP program",
+    ]
+
+
+def test_the_cg_obs_password_is_passed_only_when_set(tmp_path):
+    rc, _, err, calls = _run(
+        tmp_path, 'CG_CHAIN=1 CG_CHAIN_OBS_PASSWORD=s3cret cg_chain_cg_burn on "$HOST" "$PY" 7')
+    assert rc == 0, err
+    assert _burn_calls(calls) == [
+        f"obs_burn_filter.py add --host {HOST} --input sp-fast_video --password s3cret",
+        f"obs_burn_filter.py check --host {HOST} --input sp-fast_video --password s3cret",
+    ]
+    assert "s3cret" not in err
+
+
+def test_burn_obs_timeout_defaults_and_rejects_garbage(tmp_path):
+    _, d, _, _ = _run(tmp_path, "unset CG_CHAIN_BURN_OBS_TIMEOUT; cg_chain_burn_obs_timeout")
+    assert d == "10"
+    _, o, _, _ = _run(tmp_path, "CG_CHAIN_BURN_OBS_TIMEOUT=4 cg_chain_burn_obs_timeout")
+    assert o == "4"
+    _, g, _, _ = _run(tmp_path, "CG_CHAIN_BURN_OBS_TIMEOUT=abc cg_chain_burn_obs_timeout")
+    assert g == "10"
+    _, z, _, _ = _run(tmp_path, "CG_CHAIN_BURN_OBS_TIMEOUT=0 cg_chain_burn_obs_timeout")
+    assert z == "10"
+
+
 # ---- [5/8]: ON only after a verified SongPlayer burn ON + the cg program cut ------------------
 
 
@@ -344,6 +404,21 @@ def test_record_start_turns_the_cg_burn_on_between_the_cut_and_start_record(tmp_
     assert cut < add < start, (
         "the cg burn goes ON after the program cut and BEFORE StartRecord, so the cg recording "
         f"carries it from its first frame: {order}"
+    )
+
+
+def test_record_start_burn_calls_use_the_short_burn_budget_not_the_record_timeout(tmp_path):
+    # recording-e2e.sh passes the record timeout (up to 90 s) to record_start; six burn calls under
+    # it could hold [5/8] for many minutes while strih + stream already record.
+    rc, _, err, _ = _run(
+        tmp_path,
+        'CG_CHAIN=1; cg_chain_songplayer_burn on\n'
+        'if cg_chain_record_start "$HOST" "$PY" 90; then echo STARTED; fi',
+        env={"FAKE_SP_BURN_ON": "true"})
+    assert rc == 0, err
+    assert (tmp_path / "timeout.log").read_text().split() == ["90", "10", "10", "90"], (
+        "cut + StartRecord keep the record timeout; the burn add + check run under "
+        "CG_CHAIN_BURN_OBS_TIMEOUT (default 10)"
     )
 
 
@@ -453,6 +528,78 @@ def test_cleanup_sends_nothing_when_the_burn_never_turned_on(tmp_path):
     assert _burn_calls(calls) == [], "no ON this run = no cg OBS call from cleanup()"
 
 
+# ---- cleanup()'s first pass: one quick background OFF right after the StopRecord-first block ----
+
+
+def test_first_pass_sends_nothing_when_no_burn_is_on(tmp_path):
+    rc, out, err, calls = _run(
+        tmp_path,
+        'CG_CHAIN=1 CG_SP_BURN_ON=0 CG_BURN_ON=0\n'
+        'cg_chain_cleanup_burns_first "$HOST" "$PY"\n'
+        'printf "PID=%s\\n" "${CG_EARLY_BURNS_PID:-none}"')
+    assert rc == 0, err
+    assert calls == [] and "PID=none" in out
+
+
+def test_first_pass_is_inert_without_the_profile(tmp_path):
+    rc, out, err, calls = _run(
+        tmp_path,
+        'unset CG_CHAIN; CG_SP_BURN_ON=1 CG_BURN_ON=1\n'
+        'cg_chain_cleanup_burns_first "$HOST" "$PY"\n'
+        'printf "PID=%s\\n" "${CG_EARLY_BURNS_PID:-none}"')
+    assert rc == 0, err
+    assert calls == [] and "PID=none" in out and err == ""
+
+
+def test_first_pass_turns_both_burns_off_once_in_the_background(tmp_path):
+    (tmp_path / "burn.state").write_text("on")
+    rc, out, err, calls = _run(
+        tmp_path,
+        'CG_CHAIN=1 CG_SP_BURN_ON=1 CG_BURN_ON=1\n'
+        'cg_chain_cleanup_burns_first "$HOST" "$PY"\n'
+        'if kill -0 "$CG_EARLY_BURNS_PID" 2>/dev/null; then echo RUNNING; fi\n'
+        'wait "$CG_EARLY_BURNS_PID"; echo JOINED',
+        env={"FAKE_REMOVE_SLEEP": "1", "FAKE_CHECK_MODE": "stuck-on"})
+    assert rc == 0, err
+    assert "RUNNING" in out and "JOINED" in out, (
+        "the first pass returns at once and runs next to the camera restores, never before them"
+    )
+    assert any(c.startswith("curl POST") and c.endswith("/api/v1/ndi/burn") for c in calls), \
+        "the SongPlayer burn gets its quick OFF too"
+    assert [c.split()[1] for c in _burn_calls(calls)] == ["remove", "check"], (
+        "ONE attempt only, even when the read-back fails — cg_chain_cleanup owns the retries"
+    )
+    assert (tmp_path / "timeout.log").read_text().split() == ["3", "3"], \
+        "every call runs under the SHORT cleanup budget"
+
+
+def test_first_pass_skips_a_burn_this_run_never_turned_on(tmp_path):
+    rc, _, err, calls = _run(
+        tmp_path,
+        'CG_CHAIN=1 CG_SP_BURN_ON=1 CG_BURN_ON=0\n'
+        'cg_chain_cleanup_burns_first "$HOST" "$PY"\nwait "$CG_EARLY_BURNS_PID"',
+        env={"FAKE_SP_BURN_ON": "false"})
+    assert rc == 0, err
+    assert _burn_calls(calls) == [], "no cg burn ON this run = no cg OBS call"
+    assert any(c.startswith("curl POST") for c in calls)
+
+
+def test_cleanup_waits_for_the_first_pass_before_its_retries(tmp_path):
+    # The first pass's remove is slow (1 s). Without the wait, cleanup's own remove would run while
+    # the first pass is still inside its remove: [remove, remove, check, check].
+    (tmp_path / "burn.state").write_text("on")
+    rc, out, err, calls = _run(
+        tmp_path,
+        'CG_CHAIN=1 CG_RECORDING_STARTED=0 CG_SP_BURN_ON=0 CG_BURN_ON=1\n'
+        'cg_chain_cleanup_burns_first "$HOST" "$PY"\n'
+        'cg_chain_cleanup "$HOST" "$PY" 30\n'
+        'printf "FLAG=%s PID=%s\\n" "$CG_BURN_ON" "${CG_EARLY_BURNS_PID:-none}"',
+        env={"FAKE_REMOVE_SLEEP": "1"})
+    assert rc == 0, err
+    assert [c.split()[1] for c in _burn_calls(calls)] == ["remove", "check", "remove", "check"]
+    assert "FLAG=0 PID=none" in out, out
+
+
 def test_disabled_profile_never_touches_the_cg_burn(tmp_path):
     # Even with a stale CG_BURN_ON=1 in the environment, CG_CHAIN unset is byte-for-byte inert.
     rc, out, err, calls = _run(
@@ -472,6 +619,20 @@ def test_recording_e2e_initialises_the_flag_before_the_trap():
     init = s.index("\nCG_BURN_ON=0\n")
     trap = s.index("\ntrap cleanup EXIT HUP INT TERM")
     assert init < trap, "cleanup()'s cg burn OFF must read an initialised flag on an early abort"
+
+
+def test_recording_e2e_cleanup_sends_the_first_pass_right_after_stoprecord_first():
+    s = _E2E.read_text()
+    body = s[s.index("\ncleanup() {"):s.index("\ntrap cleanup EXIT HUP INT TERM")]
+    imag_stop = body.index('record --host "$IMAG_IP" --action stop')
+    first = body.index('cg_chain_cleanup_burns_first "${CG_HOST_IP:-}" "$HERE/obs_phase2.py"')
+    heartbeat = body.index("rig_heartbeat_stop")
+    device_free = body.index("rm -f /tmp/camera-box-burn-*")
+    late = body.index('cg_chain_cleanup "${CG_HOST_IP:-}"')
+    assert imag_stop < first < heartbeat < device_free < late, (
+        "the quick burn OFF follows the StopRecord-first block, ahead of everything slower, and "
+        "the retrying cg_chain_cleanup stays after the camera restores"
+    )
 
 
 def test_recording_e2e_starts_the_cg_leg_only_inside_the_profile_gate():
