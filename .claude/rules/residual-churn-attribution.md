@@ -54,7 +54,8 @@ crossing a slot edge used to show a 15-20 s burst of paired blind sheds + starva
 tracker driving (`phase_lock=stamp` on the `#707 emit-1s` line, `crossings=` +1), a crossing is ONE
 blind shed (fast camera) or ONE starvation repeat (slow). So a `SOURCE-STARVATION` burst at a
 crossing on such a box means the tracker was NOT driving then (`phase_lock=seed|band`, or a
-`reseeds=` step). Read the phase tokens before attributing it. See
+`reseeds=` step). A single starvation repeat with `hidden_drops=` +1 and no `crossings=` change is a
+frame the device skipped. Read the phase tokens before attributing it. See
 `.claude/rules/capture-phase-tracker.md`.
 
 **Reading a `SOURCE-STARVATION` verdict: the churn is the BOX EMIT PATH (the issue 889 capture→emit

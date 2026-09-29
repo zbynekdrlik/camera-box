@@ -13,7 +13,8 @@ a stamp jump of more than 8 slots past the last emitted one (a real CLOCK_REALTI
 42-slot line for 700 ms, or a device hole), the rest of a 5..8-slot gap beyond the 4 starvation
 repeats, or any gap once the consecutive repeat budget is spent (a half-rate leg). A backward step
 re-latches with no line; a forward clock step of 2..8 slots is filled with repeats, like the
-poll-time gate. A slot-edge crossing never skips: it is one blind shed or one starvation repeat.
+poll-time gate. A lone starvation repeat with `hidden_drops=` +1 and no `crossings=` change is a
+frame the device skipped, not a crossing. A slot-edge crossing never skips: it is one blind shed or one starvation repeat.
 The triage below still applies to `phase_lock=seed|band` streams (seeding, over-rate grabbers),
 which keep the poll-time gate.
 

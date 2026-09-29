@@ -617,6 +617,8 @@ frame's tracked stamp slot (`note_stamp_slot`) and `poll` decides on it alone th
 starvation repeats (consecutive cap kept), anything else re-latches. None of the pieces above run on
 that path (no poll time, no residence, no retire/drain, no dupe preference: a 1:1 stream sheds no
 content dupes), and it clears their transients so a return to the poll-time path starts clean.
+On that return the boundary stays on the capture grid until the queue is empty (every buffered
+frame emits, issue 1131), then re-latches on the poll slot without a phantom SKIP.
 Over-rate grabbers (the ShadowCasts) never reach it: the 2000 ppm band keeps them on everything
 above. Full detail: `.claude/rules/capture-phase-tracker.md`. `DupeShedLog` + the summary line now
 live in `dupe_decimation/shed_log.rs` (moved unchanged for the file budget).

@@ -36,17 +36,30 @@ ONE missing frame per crossing.
     `k`, `hidden_drops()` counts it, and the gate fills the missing slot with one starvation repeat,
     exactly what today's poll gate does (review round 1, the bench's hidden-skip case). Before
     that fix the two frames after such a skip were stamped one slot early from the old prediction.
+    A lone timestamp a whole period LATE (a USB completion delayed by a frame) reads the same; the
+    next on-time frame's residual of minus one period then re-seeds. Accepted cost: one repeat and
+    ~2 s on today's raw path (pinned by
+    `a_single_timestamp_one_period_late_costs_one_hidden_drop_then_one_reseed`); `hidden_drops=`
+    on the status line makes it visible.
   - From `OUTLIER_MIN_FRAMES` (30) samples on, a sample more than `RESEED_JITTER_MULTIPLE` (8) x the
     fit RMS off, and at least `RESEED_FLOOR_NS` (1 ms), is not folded. Under half a period it is
     stamped from the prediction and `RESEED_CONSECUTIVE_OUTLIERS` (3) in a row re-seed; half a
     period or more re-seeds at once (never a stamp from the old phase).
   - A backward/stalled sequence (a device re-open), a step above `MAX_SEQ_ADVANCE` (8, hidden
     frames included), a timestamp that does not advance, or a gap longer than
-    `MAX_FRAME_PERIOD_NS` (100 ms) per sequence step re-seeds at any sample count. The last check
-    also bounds the window's time span, which is what keeps `nb^2` (the largest i128 product,
-    ~6e37 worst case) in range while seeding.
+    (sequence step + 1) x `MAX_FRAME_PERIOD_NS` (100 ms) re-seeds at any sample count (the `+ 1`
+    is slack for a slow stream's own jitter; a shorter pause folded while seeding only delays the
+    lock until that sample leaves the window).
+  - **The `i128` range (review round 2).** Two unfolded outliers may sit between pushed samples,
+    so the window's sequence span reaches 256 x 3 x 8 = 6144 and its time span ~1.2e12 ns. Then
+    `nb^2` can reach ~1.5e40, past `i128::MAX` (~1.7e38): a debug build panicked, a release build
+    would have wrapped silently. `nb_sq_over_d` computes `floor(nb^2 / d)` exactly as
+    `q * nb + r * nb / d` (`nb = q * d + r`) and never forms `nb^2`; every other product stays
+    below ~1e32 (the `FitSums` doc has the arithmetic,
+    `a_slow_stream_with_outlier_runs_never_overflows_the_fit` reproduces the overflow).
   - LOCKED (sticky) at `LOCK_MIN_FRAMES` (120) samples with an RMS residual at most
-    `LOCK_MAX_JITTER_NS` (1 ms) AND white residuals: no quarter of the window may sit more than
+    `LOCK_MAX_JITTER_NS` (1 ms) AND white residuals; it lets go only above `LOCK_EXIT_JITTER_NS`
+    (2 ms), so a stream near the bound does not switch paths back and forth: no quarter of the window may sit more than
     `WHITENESS_SIGMAS` (5) standard errors off the line (floor 20 us). The standard error uses the
     LOCAL jitter (RMS of consecutive residual differences over sqrt 2), because a phase step folded
     while seeding inflates the fit RMS and would widen its own bound. The O(window) check runs only
@@ -60,8 +73,15 @@ ONE missing frame per crossing.
   its USB transfer and be dequeued before it is sent (the bench models 11 ms), so the stamp stays
   at or before the send instant, as the sender contract §4 requires.
 - **`CapturePhase::stamp_frame`** returns the slot only while the fit is locked AND the camera runs
-  within `STAMP_MODE_MAX_RATE_PPM` (2000) of the emit rate. `None` otherwise, and the capture loop
+  within `STAMP_MODE_MAX_RATE_PPM` (2000) of the emit rate; once stamp-driven it stays up to
+  `STAMP_MODE_EXIT_RATE_PPM` (2500), the band's hysteresis. `None` otherwise, and the capture loop
   keeps today's raw stamp + poll-time gate byte-identically. That is the fail-safe.
+  - **A realtime clock step is not a crossing (review round 2).** When the mono->real offset moves
+    by `CLOCK_STEP_NS` (1 ms) or more between two stamp-driven frames, the slot chooser re-anchors
+    on the new floor (a `Start`), so `crossings=` counts only the camera drift. The offset is
+    re-sampled every 100 frames (~1.7 s) and a slewing clock (at most 500 ppm) moves it by at most
+    ~0.83 ms in that time, so a slew never reads as a step. The gate still sees the step as a slot
+    jump and fills or skips it like the poll-time gate.
   `capture_phase::stamp_instant_100ns` is the ONE helper main.rs floors into the timecode (the
   slot middle while driven, else today's raw capture instant).
 - **The gate** (`DecimationGate::note_stamp_slot` before the unchanged `poll` call) decides on the
@@ -77,35 +97,45 @@ ONE missing frame per crossing.
 
   The poll wall clock, the queue signals and the unique-rate windows are not read.
   `note_emitted_stamp_100ns` records every emitted stamp on BOTH paths, so the stamp path
-  continues from the poll-time one without a false gap. A poll-time poll after the stamp path
-  re-latches on its own slot (its boundary sat a dequeue latency behind); the slots between the
-  frame's own capture slot (the poll instant minus its queue residence) and the poll slot are
-  counted as intentional (`last_poll_relatch_extra`), so leaving the stamp path never logs a
-  phantom `#707 SKIPPED` (review round 1).
+  continues from the poll-time one without a false gap. Back on the poll-time gate
+  (`relatch_after_stamp_path`), the boundary stays on the capture grid while the queue still
+  holds frames, so the issue-1131 catch-up emits every buffered frame one slot each (review round
+  2: re-latching at once on the poll slot blind-shed the rest of the backlog). At the first frame
+  the loop waited for, it re-latches on that poll's own slot; the slots between the frame's own
+  capture slot (the poll instant minus its queue residence) and the poll slot are counted as
+  intentional (`last_poll_relatch_extra`), so leaving the stamp path never logs a phantom
+  `#707 SKIPPED` (review round 1).
   - **When a stamp-driven stream logs `#707 SKIPPED`:** only for missing slots nothing filled. That
     is a forward jump past 8 slots (a clock step, a device hole: all of it), the rest of a 5..8-slot
     gap beyond the 4 repeats, or any gap once the consecutive repeat budget is spent (a half-rate
     leg). A forward clock step of 2..8 slots is filled with repeats, as today's gate does.
+  - **The gap fill matches today's gate, not only "one slot".** The design says "fill only a real
+    one-slot gap"; the stamp path fills gaps of 1..8 missing slots with up to 4 repeats, exactly
+    the poll-time starvation fill it replaces, so a device hole costs the same on both paths. A
+    crossing itself is always a one-slot gap. Recorded on issue 1367 with the band decision.
 
 ## Why the 1:1 band (over-rate grabbers keep today's gate)
 
-This limit is an implementation decision within the design's fail-safe, recorded on issue
-1367 (the D2 band comment). Extending the stamp-driven gate to the over-rate regime is a separate
-design question, left for the main session.
+This limit is an implementation decision within the design's fail-safe; the reasons are recorded
+on issue 1367 (comment 5882620373). D2 does not extend the stamp-driven gate to the over-rate
+regime.
 
 The burst is a near-1:1 phenomenon: its length is the jitter width over the phase drift per frame.
 A 61.5 fps ShadowCast drifts 0.4 ms per frame, so a flip touches at most one frame. Its surplus and
 its send-bound queue residence are what the `dupe_decimation` #1145/#1167 machinery absorbs
 (retire, depth drain, fast drain, starvation fill), tuned against the poll time on those boxes.
 A stamp-driven drain there would turn every residence drop into a gap fill (an extra send on a
-send-bound loop). The band (2000 ppm) covers a free-running camera and 59.94-into-60 (-1000 ppm)
-and stays below the gate's over-rate takt threshold (60.3 fps, ~4975 ppm). The `lib.rs`
-const-assert pins that, so a stamp-driven stream never reads as over-rate.
+send-bound loop). The band (2000 ppm to enter, 2500 to leave) covers a free-running camera and
+59.94-into-60 (-1000 ppm) and stays below the gate's over-rate takt threshold (60.3 fps, ~4975
+ppm). The `lib.rs` const-assert pins the exit edge, so a stamp-driven stream never reads as
+over-rate.
 
 ## Unchanged (keep it that way)
 
 - The issue-1131 rule: on the stamp path a frame drained late from a backlogged queue still emits
   (its slot is new). A re-latch needs a stamp jump beyond 8 slots, which is not buffered content.
+  On the way back to the poll-time gate the boundary waits on the capture grid until the queue is
+  empty (`buffered_frames_after_the_stamp_path_all_emit`).
 - The #1242 send stagger (it sleeps after the timecode and after the gate), the buffered-queue
   signal, `emit_one`, and the starvation-repeat timecodes (`starvation_repeat_timecode_100ns`).
 - Every self-heal trigger and its byte-anchored log text.
@@ -113,14 +143,15 @@ const-assert pins that, so a stamp-driven stream never reads as over-rate.
   the emitted one and folds the fill into the intentional extra advance, so a forward step logs
   one SKIP (the bench: a +700 ms step = 42 slots, one line).
 - The mono->real offset re-sample every 100 frames. The tracker is MONOTONIC, so a realtime step
-  never re-seeds it; the step shows as one stamp jump at the next re-sample.
+  never re-seeds it; the step shows as one stamp jump at the next re-sample (the slot chooser
+  re-anchors, no crossing is counted).
 - `harness_send_stagger_1242.rs` pins `let emit = decimation_gate.poll(` and friends as UNIQUE
   text in main.rs. That is why the slot is STAGED (`note_stamp_slot`) instead of a second poll call.
 
 ## Observability
 
 The 5 s `#707 emit-1s: [..] cap-1s: [..] (1-second buckets, oldest first)` line appends
-` phase_lock=seed|band|stamp phase_ppm=+15.9 jitter_us=41 crossings=2 reseeds=0`:
+` phase_lock=seed|band|stamp phase_ppm=+15.9 jitter_us=41 crossings=2 reseeds=0 hidden_drops=0`:
 
 - `phase_lock`: `seed` = seeding (raw path), `band` = locked but outside the 1:1 band (raw path),
   `stamp` = stamp-driven, `off` = genlock off (no emit grid).
@@ -128,10 +159,14 @@ The 5 s `#707 emit-1s: [..] cap-1s: [..] (1-second buckets, oldest first)` line 
   drop a duplicate slot). The LS slope noise is ~3 ppm (1 sigma) at 60 us jitter, so read a trend,
   not one line.
 - `jitter_us`: the fit RMS (the raw V4L2 timestamp jitter).
-- `crossings` / `reseeds`: cumulative since the process start.
+- `crossings` / `reseeds` / `hidden_drops`: cumulative since the process start. `crossings` counts
+  camera-edge crossings only (a realtime clock step re-anchors, uncounted); `hidden_drops` counts
+  frames the device skipped without a sequence step (each costs one starvation repeat), so a lone
+  repeat with no `crossings` increase is attributable.
 
 All keys are mutually non-substring with each other and with `emit-1s:` / `cap-1s:`
-(`status_tokens_parse_and_their_keys_are_mutually_non_substring` parses the EMITTED line). The existing parsers match the prefix:
+(`status_tokens_parse_and_their_keys_are_mutually_non_substring` parses the EMITTED line). The
+existing parsers match the prefix:
 `residual_churn_attribution._B707_RE` (pinned by
 `test_b707_line_with_the_capture_phase_tokens_still_parses_1367`) and the leg-health
 `cap-1s: \[..\]` grep (`cap1s_band_warn_reads_the_line_with_the_capture_phase_tokens_1367`).
@@ -172,7 +207,7 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
   modules `capture_phase/tests.rs` and `dupe_decimation/stamp/tests.rs` resolve normally). Add a
   stub `ndi.rs` holding the real `floor_boundary_100ns` (awk it out of `src/ndi.rs`) and copy the
   `lib.rs` const-assert. Then `rustc --edition 2021 --test -D warnings lib.rs` and run it, and
-  `clippy-driver --edition 2021 --test -D warnings lib.rs`. The whole replica runs 141 tests in
+  `clippy-driver --edition 2021 --test -D warnings lib.rs`. The whole replica runs 157 tests in
   ~1 s. Put the steps in a script file: the worktree guard refuses variable-driven one-liners.
 - `tests/harness_send_stagger_1242.rs` reads main.rs text only: build it with plain `rustc
   --test` and run it from the worktree root with `CARGO_MANIFEST_DIR` set (again from a script).
@@ -186,7 +221,7 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
 
 1. Deploy the camera-box binary to cam5 first (a Cam Link, 1:1). Read its `#707 emit-1s` line:
    `phase_lock=stamp` within ~2 s of start, `phase_ppm` ~ the camera's drift, `jitter_us` in the
-   tens, `reseeds=0`.
+   tens, `reseeds=0`, `hidden_drops=0` (a rise with a starvation repeat is a device skip).
 2. Watch at least 2 crossings (~35 min). Per crossing: `crossings=` +1; the `(#889)` line shows ONE
    blind-pacing shed (fast camera) or ONE starvation repeat (slow) instead of a 15-20 s burst
    (success: sheds + repeats <= 2 per crossing). strih `genlock-fifo audit 'NDI cam5'`
