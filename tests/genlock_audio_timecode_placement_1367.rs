@@ -26,7 +26,7 @@ use std::fs;
 use std::path::PathBuf;
 
 const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
-const TRACK: &str = "const uint64_t genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now); if (genlock_n1_tick_is_on_grid(genlock_delay_tick_wall, interval)) genlock_video_delay_track(&source->genlock_video_delay_smoothed_ns,";
+const TRACK: &str = "const uint64_t genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now); if (genlock_n1_tick_is_on_grid(genlock_delay_tick_wall, interval) && !genlock_audio_step_video_frozen(source)) genlock_video_delay_track(&source->genlock_video_delay_smoothed_ns,";
 const SAMPLE: &str =
     "genlock_video_delay_sample_ns(genlock_delay_tick_wall, next_frame->timestamp), interval);";
 
@@ -111,7 +111,7 @@ fn audio_ingest_places_on_the_live_offset_and_replaces_on_a_change_1367() {
             "the ingest must follow the render thread's applied video delay",
         ),
         (
-            "genlock_audio_place_term_ns(genlock_hold_mode, genlock_hold_ms, genlock_off_live_ns, genlock_timing_adjust);",
+            "genlock_audio_place_term_ns(genlock_hold_mode, genlock_hold_ms, genlock_off_ns, genlock_timing_adjust);",
             "the placement term is no longer computed",
         ),
         ("in.timestamp += (uint64_t)genlock_term_ns;", "the placement term is no longer applied"),
@@ -352,7 +352,7 @@ fn the_timecode_asrc_reads_the_raw_stamp_placement_not_arrival_1367() {
             "the ASRC's error is the placement error with the owed placement slew excluded",
         ),
         (
-            "if (genlock_asrc_tc && genlock_asrc_measured) asrc_timecode_ingest(source, genlock_audio_stamp_mono_ns(data->timestamp, genlock_off_live_ns), genlock_asrc_err_ms, genlock_asrc_appended);",
+            "if (genlock_asrc_tc && genlock_asrc_measured && !source->genlock_audio_step_active) asrc_timecode_ingest(source, genlock_audio_stamp_mono_ns(data->timestamp, genlock_off_ns), genlock_asrc_err_ms, genlock_asrc_appended);",
             "the timecode ASRC must be fed each measured packet's stamp and placement",
         ),
     ] {

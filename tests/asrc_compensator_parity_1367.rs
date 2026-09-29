@@ -35,6 +35,13 @@
 //!   mutants of the mode diverge. `tce` (review round 1): the timecode edges, open loop -- no
 //!   unreachable fallback in the mode, and a jump at the owed cap counted once. The three
 //!   scenarios above never enter the mode, so they stay byte-identical to the pre-1367 trace.
+//! - `tcs` (issue 1381, design 5882391108): 12 s of a 682 ms wall step read as placement error (the
+//!   owed cap re-booked, the smoothed error and the restore armed), the follow PLACED at its stamp
+//!   (piece 1: the level loop starts afresh), a placement a whole slot off its stamp (booked against
+//!   the fresh setpoint), and the piece-3 backstop query (bookable / beyond the cap / beyond it only
+//!   with what is owed / sub-band / outside the mode, unlocked and locked). `tcw`: 5 s of skew, the
+//!   placement, then 8 s of a 15 ms error — the sustained restore arm counts afresh from the
+//!   placement and never arms.
 //!
 //! Per the project's test-strictness rule it FAILS LOUDLY rather than skipping when the C
 //! toolchain is missing — a parity test that silently passes without running is worse than none.
@@ -260,6 +267,74 @@ static void tc_edges_scenario(void)
 	tcline("tcecap", 30, &c, 0.0);
 }
 
+/* camera-box issue 1381 (design 5882391108): a wall step read as placement error, then the placement.
+ * A locked servo appends 360 packets (12 s) +682 ms off its stamps (the booking hits the owed cap and
+ * re-books every payment, the smoothed error and the sustained arm fill), then the sender's follow is
+ * PLACED at its stamp (error 0.4 ms): piece 1 drops what is owed and starts the level loop afresh. Then
+ * a placed packet a whole slot off its stamp (books its own error against the fresh setpoint) and the
+ * piece-3 backstop query: bookable, beyond the cap, beyond the cap only with what is owed, sub-band,
+ * and inert outside the mode. */
+static void tc_step_scenario(void)
+{
+	const double packet_s = 1600.0 / 48000.0;
+	const double packet_ms = packet_s * 1000.0;
+	struct asrc_compensator c;
+	asrc_compensator_init(&c);
+	asrc_compensator_set_level_absolute(&c, false);
+	asrc_compensator_set_timecode(&c, true);
+	double applied = 0.0;
+	double recp = 0.0;
+	for (long k = 0; k < 9000; k++) {
+		double err = k >= 3600 && k < 3960 ? 682.0 : 0.4;
+		if (k >= 3960)
+			err = 0.4 + (double)(k % 3) * 0.1;
+		const bool placed = k == 3960 || k == 6000;
+		if (k == 6000)
+			err = -packet_ms;
+		asrc_compensator_observe_placement(&c, err, packet_ms, placed);
+		if (!placed)
+			asrc_compensator_compensate(&c, packet_s, packet_s, err, &applied);
+		recp = asrc_compensator_take_step_recover_ppm(&c);
+		if (k % 900 == 899 || (k >= 3598 && k <= 3603) || (k >= 3955 && k <= 3966) || (k >= 5998 && k <= 6004))
+			tcline("tcs", k, &c, recp);
+	}
+	const double probes[5] = {-60.0, -682.0, 682.0, -5.0, -20.0};
+	for (int i = 0; i < 5; i++) {
+		const bool due = asrc_compensator_place_beyond_cap(&c, probes[i], packet_ms);
+		printf("tcs cap=%.1f due=%d jumps=%u lastj=%.9f rec=%.9f\n", probes[i], due ? 1 : 0, c.place_jump_count,
+		       c.last_place_jump_ms, c.step_recover_ms);
+	}
+	asrc_compensator_observe_placement(&c, -90.0, packet_ms, false);
+	const bool owed_due = asrc_compensator_place_beyond_cap(&c, -120.0, packet_ms);
+	printf("tcs owed=%.9f due=%d jumps=%u\n", c.step_recover_ms, owed_due ? 1 : 0, c.place_jump_count);
+	struct asrc_compensator arrival;
+	asrc_compensator_init(&arrival);
+	printf("tcs arrival_due=%d\n", asrc_compensator_place_beyond_cap(&arrival, -682.0, packet_ms) ? 1 : 0);
+	/* a LOCKED, captured arrival-mode servo: the backstop is timecode-only */
+	for (long k = 0; k < 2400; k++)
+		asrc_compensator_compensate(&arrival, packet_s, packet_s, 50.0, &applied);
+	printf("tcs arrival_locked_due=%d tgt=%.9f\n",
+	       asrc_compensator_place_beyond_cap(&arrival, -682.0, packet_ms) ? 1 : 0, arrival.level_target_ms);
+	/* the sustained count starts afresh at a placement: 5 s of skew (the count at 5, the restore not yet
+	 * armed), the placement, then 8 s of a 15 ms error arm nothing (a carried count would arm at ~5 s) */
+	struct asrc_compensator w;
+	asrc_compensator_init(&w);
+	asrc_compensator_set_level_absolute(&w, false);
+	asrc_compensator_set_timecode(&w, true);
+	for (long k = 0; k < 4890; k++) {
+		double err = k >= 4500 && k < 4650 ? 682.0 : 0.4;
+		if (k > 4650)
+			err = 15.0;
+		const bool placed = k == 4650;
+		asrc_compensator_observe_placement(&w, err, packet_ms, placed);
+		if (!placed)
+			asrc_compensator_compensate(&w, packet_s, packet_s, err, &applied);
+		recp = asrc_compensator_take_step_recover_ppm(&w);
+		if ((k >= 4620 && k % 30 == 0) || k == 4889)
+			tcline("tcw", k, &w, recp);
+	}
+}
+
 int main(void)
 {
 	tick_scenario();
@@ -267,6 +342,7 @@ int main(void)
 	step_scenario();
 	tc_scenario();
 	tc_edges_scenario();
+	tc_step_scenario();
 	return 0;
 }
 "##;
@@ -509,6 +585,94 @@ fn rust_trace() -> Vec<String> {
         }
         out.push(tcline("tcecap", 30, &c, 0.0));
     }
+    // tcs (issue 1381): the wall step, the placement re-seed and the backstop, mirrored statement for
+    // statement
+    {
+        let packet_s = 1600.0 / 48000.0;
+        let packet_ms = packet_s * 1000.0;
+        let mut c = RealtimeAsrcCompensator::new();
+        c.set_level_absolute(false);
+        c.set_timecode(true);
+        for k in 0..9000_i64 {
+            let mut err = if (3600..3960).contains(&k) {
+                682.0
+            } else {
+                0.4
+            };
+            if k >= 3960 {
+                err = 0.4 + (k % 3) as f64 * 0.1;
+            }
+            let placed = k == 3960 || k == 6000;
+            if k == 6000 {
+                err = -packet_ms;
+            }
+            c.observe_placement(err, packet_ms, placed);
+            if !placed {
+                c.compensate_with_level(packet_s, packet_s, err);
+            }
+            let recp = c.take_step_recover_ppm();
+            if k % 900 == 899
+                || (3598..=3603).contains(&k)
+                || (3955..=3966).contains(&k)
+                || (5998..=6004).contains(&k)
+            {
+                out.push(tcline("tcs", k, &c, recp));
+            }
+        }
+        for probe in [-60.0, -682.0, 682.0, -5.0, -20.0] {
+            let due = c.place_beyond_cap(probe, packet_ms);
+            out.push(format!(
+                "tcs cap={probe:.1} due={} jumps={} lastj={:.9} rec={:.9}",
+                u8::from(due),
+                c.place_jump_count(),
+                c.last_place_jump_ms(),
+                c.step_recover_ms()
+            ));
+        }
+        c.observe_placement(-90.0, packet_ms, false);
+        let owed_due = c.place_beyond_cap(-120.0, packet_ms);
+        out.push(format!(
+            "tcs owed={:.9} due={} jumps={}",
+            c.step_recover_ms(),
+            u8::from(owed_due),
+            c.place_jump_count()
+        ));
+        let mut arrival = RealtimeAsrcCompensator::new();
+        out.push(format!(
+            "tcs arrival_due={}",
+            u8::from(arrival.place_beyond_cap(-682.0, packet_ms))
+        ));
+        for _ in 0..2400 {
+            arrival.compensate_with_level(packet_s, packet_s, 50.0);
+        }
+        out.push(format!(
+            "tcs arrival_locked_due={} tgt={:.9}",
+            u8::from(arrival.place_beyond_cap(-682.0, packet_ms)),
+            arrival.level_target_ms()
+        ));
+        let mut w = RealtimeAsrcCompensator::new();
+        w.set_level_absolute(false);
+        w.set_timecode(true);
+        for k in 0..4890_i64 {
+            let mut err = if (4500..4650).contains(&k) {
+                682.0
+            } else {
+                0.4
+            };
+            if k > 4650 {
+                err = 15.0;
+            }
+            let placed = k == 4650;
+            w.observe_placement(err, packet_ms, placed);
+            if !placed {
+                w.compensate_with_level(packet_s, packet_s, err);
+            }
+            let recp = w.take_step_recover_ppm();
+            if (k >= 4620 && k % 30 == 0) || k == 4889 {
+                out.push(tcline("tcw", k, &w, recp));
+            }
+        }
+    }
     out
 }
 
@@ -628,7 +792,27 @@ fn c_asrc_compensator_matches_the_rust_authority_1367() {
             // review round 1: no unreachable fallback in timecode mode (the setpoint stays 0) ...
             && r.iter().any(|l| l == "tce fallbacks=0 target=0.000000000")
             // ... and a jump at the owed cap counts once (two jumps, then 30 packets beyond the cap).
-            && r.iter().any(|l| l.starts_with("tcecap k=30 ") && l.contains(" jumps=2 ")),
+            && r.iter().any(|l| l.starts_with("tcecap k=30 ") && l.contains(" jumps=2 "))
+            // issue 1381: the step fills the smoothed error and arms the restore before the placement ...
+            && r.iter().any(|l| l.starts_with("tcs k=3955 ") && l.contains(" rst=1 "))
+            // ... the placement re-seeds it (restore off, the EMA at the packet's own error, nothing owed)
+            && r.iter().any(|l| {
+                l.starts_with("tcs k=3960 ")
+                    && l.contains(" rst=0 ")
+                    && l.contains(" ema=0.400000000 ")
+                    && l.contains(" rec=0.000000000 ")
+            })
+            // ... and the backstop places a jump beyond the cap and leaves a bookable one alone.
+            && r.iter().any(|l| l.starts_with("tcs cap=-682.0 due=1 "))
+            && r.iter().any(|l| l.starts_with("tcs cap=-60.0 due=0 "))
+            && r.iter().any(|l| l.starts_with("tcs owed=") && l.contains(" due=1 "))
+            && r.iter().any(|l| l == "tcs arrival_due=0")
+            // ... inert on a locked, captured arrival-mode servo too ...
+            && r.iter().any(|l| l.starts_with("tcs arrival_locked_due=0 tgt=100.0"))
+            // ... and the sustained arm counts afresh from the placement (armed before it? no; after
+            // 8 s of a 15 ms error? still no).
+            && r.iter().any(|l| l.starts_with("tcw k=4620 ") && l.contains(" rst=0 "))
+            && r.iter().any(|l| l.starts_with("tcw k=4889 ") && l.contains(" rst=0 ")),
         "#1367: the parity scenarios no longer exercise the restore burst and a step re-base \
          ({} lines) — the gate would pass on a trace that skips the paths it guards",
         r.len()

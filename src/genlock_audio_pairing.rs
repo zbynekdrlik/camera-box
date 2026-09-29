@@ -666,6 +666,17 @@ pub fn audio_stamp_interval_s(prev_ns: u64, now_ns: u64) -> f64 {
     now_ns.wrapping_sub(prev_ns) as i64 as f64 / 1e9
 }
 
+// Issue 1381 (design 5882391108) — the per-source audio SKEW HOLD across a wall step lives in its
+// own path child (this module passed the ~1000-line budget); re-exported, so every path stays.
+#[path = "genlock_audio_step_hold.rs"]
+mod step_hold;
+pub use step_hold::{
+    audio_stamp_age_ns, audio_step_freezes_video, audio_step_hold, audio_step_release_places,
+    audio_step_residual_ns, AudioStepHold, AudioStepRelease, AUDIO_STEP_HOLD_MAX_NS,
+    AUDIO_STEP_NOMINAL_GAIN_DIV, AUDIO_STEP_NOMINAL_REANCHOR_NS, AUDIO_STEP_NOMINAL_WARM_DIV,
+    AUDIO_STEP_NOMINAL_WARM_PACKETS,
+};
+
 /// The audio-parity health of one genlocked source — the reason the LOCK indicator DEGRADES on the
 /// audio axis (mirrors the video-side `LockReason` discriminant model). Discriminants match the C
 /// `genlock_audio_health` enum and are compared as `u8` by the parity gate.
@@ -742,3 +753,7 @@ mod bench;
 #[cfg(test)]
 #[path = "genlock_audio_pairing_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "genlock_audio_pairing_step_tests.rs"]
+mod step_tests;

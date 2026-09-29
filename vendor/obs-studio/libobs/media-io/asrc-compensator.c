@@ -648,17 +648,21 @@ static void asrc_step_recover_set(struct asrc_compensator *c, double owed_ms)
 	c->step_recover_ms = owed_ms;
 }
 
-void asrc_compensator_observe_placement(struct asrc_compensator *c, double place_err_ms, double packet_ms,
-					bool placed)
+/* camera-box issue 1367: the booking band of one packet, ms: max(half the packet,
+ * ASRC_PLACE_JUMP_MIN_MS). Mirror of RealtimeAsrcCompensator::place_jump_band_ms. */
+static double asrc_place_jump_band_ms(double packet_ms)
 {
-	if (!c->timecode || !c->level_captured)
-		return;
-	if (placed)
-		asrc_step_recover_set(c, 0.0);
-	const double jump_ms = place_err_ms - (c->level_target_ms + c->level_err_ema_ms);
 	const double half_packet_ms = 0.5 * packet_ms;
-	const double band_ms = half_packet_ms > ASRC_PLACE_JUMP_MIN_MS ? half_packet_ms : ASRC_PLACE_JUMP_MIN_MS;
-	if (fabs(jump_ms) < band_ms)
+	return half_packet_ms > ASRC_PLACE_JUMP_MIN_MS ? half_packet_ms : ASRC_PLACE_JUMP_MIN_MS;
+}
+
+/* camera-box issue 1367: book the jump of place_err_ms against the servo's expectation (setpoint +
+ * smoothed error), with its own sign, capped at +/-ASRC_STEP_RECOVER_MAX_MS owed. Mirror of
+ * RealtimeAsrcCompensator::book_placement_jump. */
+static void asrc_book_placement_jump(struct asrc_compensator *c, double place_err_ms, double packet_ms)
+{
+	const double jump_ms = place_err_ms - (c->level_target_ms + c->level_err_ema_ms);
+	if (fabs(jump_ms) < asrc_place_jump_band_ms(packet_ms))
 		return;
 	const double owed_ms =
 		asrc_clamp(c->step_recover_ms - jump_ms, -ASRC_STEP_RECOVER_MAX_MS, ASRC_STEP_RECOVER_MAX_MS);
@@ -669,6 +673,45 @@ void asrc_compensator_observe_placement(struct asrc_compensator *c, double place
 	if (c->place_jump_count < UINT32_MAX)
 		c->place_jump_count++;
 	c->last_place_jump_ms = jump_ms;
+}
+
+void asrc_compensator_observe_placement(struct asrc_compensator *c, double place_err_ms, double packet_ms,
+					bool placed)
+{
+	if (!c->timecode || !c->level_captured)
+		return;
+	if (!placed) {
+		asrc_book_placement_jump(c, place_err_ms, packet_ms);
+		return;
+	}
+	/* camera-box issue 1381 (design 5882391108, piece 1): a placement puts the samples on their stamp,
+	 * so the smoothed history is stale by construction -- drop what is owed and start the level loop
+	 * afresh, then book this packet's own jump against the fresh setpoint and re-seed the smoothed
+	 * error to its error against the resulting setpoint. */
+	asrc_step_recover_set(c, 0.0);
+	c->level_err_ema_ms = 0.0;
+	c->level_restore = false;
+	c->level_err_windows = 0;
+	c->window_level_sum_ms = 0.0;
+	c->window_level_count = 0;
+	asrc_book_placement_jump(c, place_err_ms, packet_ms);
+	/* the EMA is already seeded here: observe_placement only acts on a captured setpoint, and the
+	 * capture seeds it in the same window (both are cleared together) */
+	c->level_err_ema_ms = place_err_ms - c->level_target_ms;
+}
+
+bool asrc_compensator_place_beyond_cap(struct asrc_compensator *c, double place_err_ms, double packet_ms)
+{
+	if (!c->timecode || !c->level_captured)
+		return false;
+	const double jump_ms = place_err_ms - (c->level_target_ms + c->level_err_ema_ms);
+	if (fabs(jump_ms) < asrc_place_jump_band_ms(packet_ms) ||
+	    fabs(c->step_recover_ms - jump_ms) <= ASRC_STEP_RECOVER_MAX_MS)
+		return false;
+	if (c->place_jump_count < UINT32_MAX)
+		c->place_jump_count++;
+	c->last_place_jump_ms = jump_ms;
+	return true;
 }
 
 double asrc_compensator_take_step_recover_ppm(struct asrc_compensator *c)
