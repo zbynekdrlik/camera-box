@@ -22,8 +22,9 @@ fi
 # sweeps that already clear every other box -- rig-mode EVENT (sweep-off, then the contract's
 # sweep-check) and the E2E pre-run normalize (sweep-off) -- sweep the cg OBS too, through the same
 # obs_burn_filter.py sweep-* enumerator, whenever the traveling box is HOME (obs_fleet_is_home:
-# resolves + OBS-WS :4455 answers). Away = SKIP, never a failure. These run on EVERY run, not only
-# under CG_CHAIN=1: the burn they clear was left by an EARLIER run.
+# resolves + OBS-WS :4455 answers). Away = SKIP, never a failure. Neither is gated on CG_CHAIN=1:
+# the burn they clear was left by an EARLIER run. rig-mode sweeps on every EVENT switch; the E2E
+# sweeps wherever its pre-run normalize sweep runs (the ALL_CAMBOX gate).
 
 # The obs-fleet name of the cg OBS box (env CG_CHAIN_BACKSTOP_BOX, default resolume). Pure.
 cg_chain_backstop_box() {

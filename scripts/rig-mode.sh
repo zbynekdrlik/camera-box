@@ -1543,7 +1543,7 @@ event_mode_assert() {
       echo "    [imag burn-sweep] SKIP: imag acknowledged offline (issue 1013: ${IMAG_OFFLINE_ACK_REASON}) -- not swept in the burns-off contract"
       continue
     fi
-    if sweep_arr="$(python3 "$here/obs_burn_filter.py" sweep-check --host "$_asbip" --password "$OBS_WS_PASSWORD" 2>/dev/null)"; then sweep_rc=0; else sweep_rc=$?; fi
+    if sweep_arr="$(timeout 60 python3 "$here/obs_burn_filter.py" sweep-check --host "$_asbip" --password "$OBS_WS_PASSWORD" 2>/dev/null)"; then sweep_rc=0; else sweep_rc=$?; fi
     if [ "$sweep_rc" -eq 2 ] || [ -z "$sweep_arr" ]; then
       burn_json="$(jq --argjson j "$burn_json" --arg k "${_asbbox}:__sweep_unreachable__" -n '$j + {($k): true}')"
       continue
