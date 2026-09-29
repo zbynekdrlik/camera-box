@@ -168,6 +168,10 @@ def test_unit_verdict_grades_content_dropin_and_the_running_command(tmp_path):
     assert _verdict(want, unit, dropin, "/usr/local/bin/dantesync") == ("dropin", "rc=1")
     unit.write_text(_unit_text().replace("RestartSec=5", "RestartSec=6"))
     assert _verdict(want, unit, dropin, "x") == ("differs", "rc=1"), "content is graded first"
+    masked = tmp_path / "masked.service"
+    masked.symlink_to("/dev/null")
+    assert _verdict(want, masked, tmp_path / "masked.service.d", "") == ("masked", "rc=1"), \
+        "an operator mask is named, not graded as a difference setup would fix"
     r = _bash(DS_LIB, 'cmp() { return 2; }\nrc=0; strih_dantesync_unit_verdict "$W" "$U" "$D" "" || rc=$?; '
               'echo; echo "rc=$rc"', env={"W": want, "U": str(unit), "D": str(dropin)})
     assert r.stdout.splitlines()[0].strip() == "unreadable", r.stdout
@@ -444,10 +448,27 @@ def test_a_temp_unit_left_by_a_killed_run_is_swept(tmp_path):
     left.write_text("half")
     other = box.unit.parent / "other.service"
     other.write_text("x")
+    near = [box.unit.parent / n for n in (".dantesync.service.swp", ".dantesync.service.1234567",
+                                          ".dantesync.serviceXAb12Cd", ".dantesync.conf")]
+    for n in near:
+        n.write_text("keep")
     r = box.run()
     assert r.returncode == 0, r.stdout + r.stderr
     assert not left.exists(), "the killed run's temp unit is removed"
     assert other.exists(), "nothing else in the unit dir is touched"
+    for n in near:
+        assert n.exists(), "only the exact mktemp pattern is swept: %s" % n.name
+
+
+def test_an_unreadable_unit_leaves_even_a_leftover_temp_alone(tmp_path):
+    # Fail closed means NOTHING is touched when the unit cannot be read -- the sweep is an act.
+    box = Box(tmp_path).with_binary().set_active(True)
+    box.unit.write_text(_unit_text())
+    left = box.unit.parent / ".dantesync.service.Ab12Cd"
+    left.write_text("half")
+    r = box.run(pre='cmp() { return 2; }\n')
+    assert r.returncode != 0, r.stdout
+    assert left.exists(), "an unreadable unit touches nothing, not even the sweep"
 
 
 def test_an_unreadable_unit_fails_closed_never_towards_a_restart(tmp_path):
@@ -604,6 +625,10 @@ def test_verify_item_6c_runs_under_set_e_and_grades_each_state(tmp_path):
     assert _verify_item(tmp_path, unit, runs).startswith("PASS (dantesync-unit)"), "a kept daemon passes"
     assert _verify_item(tmp_path, unit, None).startswith("PASS (dantesync-unit)"), "items 6/6b grade liveness"
     assert "not the unit's ExecStart" in _verify_item(tmp_path, unit, runs + ["--ntp-server", "strih.lan"])
+    masked = tmp_path / "masked" / "dantesync.service"
+    masked.parent.mkdir()
+    masked.symlink_to("/dev/null")
+    assert "masked by an operator" in _verify_item(tmp_path, masked, None)
     (tmp_path / "dantesync.service.d").mkdir()
     (tmp_path / "dantesync.service.d" / "10-x.conf").write_text("[Service]\n")
     assert "drop-in" in _verify_item(tmp_path, unit, runs)
