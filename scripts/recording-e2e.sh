@@ -1965,9 +1965,9 @@ cleanup() {
       && echo "    [cleanup] imag: StopRecord ok" \
       || echo "    WARNING #649: imag StopRecord failed/timed out in cleanup — recording may still be ON; check GetRecordStatus and stop it manually" >&2
   fi
-  # #1302: CG_CHAIN burns known to be on get ONE quick OFF now, in the background, for the same
-  # SIGKILL-grace reason (a cg OBS burn survives in its scene collection); cg_chain_cleanup below
-  # waits for it and retries. A no-op unless CG_CHAIN=1 and a burn is on.
+  # #1302: every CG_CHAIN burn this run owes an OFF gets ONE quick OFF now, in the background, for
+  # the same SIGKILL-grace reason (a cg OBS burn survives in its scene collection); cg_chain_cleanup
+  # below waits for those jobs and retries. A no-op unless CG_CHAIN=1 and a burn is owed.
   cg_chain_cleanup_burns_first "${CG_HOST_IP:-}" "$HERE/obs_phase2.py"
   # #281 Fix#3: clear the rig-active heartbeat + stop its refresher — before the cam/OBS
   # restores (which may hang). Once the heartbeat lapses, the rig-restore watchdog is free to
@@ -2437,11 +2437,12 @@ CG_RECORDING_STARTED=0
 CG_EXTRACT_PID=""
 # #1302: CG_BURN_ON=1 while this run owes the cg OBS hop burn (911015) an OFF — set by the lib just
 # before its ON is sent — so cleanup() turns it OFF even on an early abort and never touches a burn
-# this run did not turn on. CG_SP_BURN_ON=1 while the SongPlayer burn reads back ON;
-# CG_EARLY_BURNS_PID is cleanup()'s background first-pass OFF.
+# this run did not turn on. CG_SP_BURN_ON=1 while the SongPlayer burn reads back ON, CG_SP_BURN_OWED=1
+# while this run owes it an OFF; CG_EARLY_BURNS_PIDS are cleanup()'s background first-pass OFFs.
 CG_BURN_ON=0
 CG_SP_BURN_ON=0
-CG_EARLY_BURNS_PID=""
+CG_SP_BURN_OWED=0
+CG_EARLY_BURNS_PIDS=""
 # #1302: the cg OBS / strih scene snapshots the CG profile restores in cleanup() live in this run's
 # OUTDIR; CG_HOST_RECORDING_PATH is the cg OBS StopRecord host path the on-box decode reads.
 CG_CHAIN_STATE_DIR="$OUTDIR"

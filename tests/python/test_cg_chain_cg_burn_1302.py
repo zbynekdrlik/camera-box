@@ -91,7 +91,9 @@ for a in "$@"; do case "$a" in http*) url="$a" ;; esac; done
 case "$url" in
   */api/v1/ndi/health)
     printf '[{"ndi_name":"SP-fast","burn_on":%s}]' "${FAKE_SP_BURN_ON:-false}" ;;
-  *) printf 'curl POST %s\n' "$url" >> "$CALL_LOG" ;;
+  *)
+    if [ -n "${FAKE_CURL_POST_SLEEP:-}" ]; then sleep "$FAKE_CURL_POST_SLEEP"; fi
+    printf 'curl POST %s\n' "$url" >> "$CALL_LOG" ;;
 esac
 '''
 
@@ -530,37 +532,54 @@ def test_cleanup_sends_nothing_when_the_burn_never_turned_on(tmp_path):
 
 # ---- cleanup()'s first pass: one quick background OFF right after the StopRecord-first block ----
 
+_WAIT_ALL = 'for p in $CG_EARLY_BURNS_PIDS; do wait "$p"; done\n'
 
-def test_first_pass_sends_nothing_when_no_burn_is_on(tmp_path):
+
+def test_songplayer_owed_flag_follows_what_was_sent(tmp_path):
+    # OWED = 1 from the moment an ON is sent, 0 only after a verified OFF, 1 again after an OFF that
+    # never verified — so a [7/8] OFF that ends in a LEAK still gets cleanup()'s first pass.
+    rc, out, err, _ = _run(
+        tmp_path,
+        'CG_SP_BURN_OWED=0; FAKE_SP_BURN_ON=false CG_CHAIN_BURN_ATTEMPTS=1 cg_chain_songplayer_burn on\n'
+        'printf "A=%s\\n" "$CG_SP_BURN_OWED"\n'
+        'FAKE_SP_BURN_ON=false cg_chain_songplayer_burn off; printf "B=%s\\n" "$CG_SP_BURN_OWED"\n'
+        'FAKE_SP_BURN_ON=true CG_CHAIN_BURN_ATTEMPTS=1 cg_chain_songplayer_burn off\n'
+        'printf "C=%s\\n" "$CG_SP_BURN_OWED"')
+    assert rc == 0, err
+    assert [ln for ln in out.splitlines() if ln[:2] in ("A=", "B=", "C=")] == ["A=1", "B=0", "C=1"]
+
+
+def test_first_pass_sends_nothing_when_no_burn_is_owed(tmp_path):
     rc, out, err, calls = _run(
         tmp_path,
-        'CG_CHAIN=1 CG_SP_BURN_ON=0 CG_BURN_ON=0\n'
+        'CG_CHAIN=1 CG_SP_BURN_OWED=0 CG_BURN_ON=0\n'
         'cg_chain_cleanup_burns_first "$HOST" "$PY"\n'
-        'printf "PID=%s\\n" "${CG_EARLY_BURNS_PID:-none}"')
+        'printf "PIDS=%s\\n" "${CG_EARLY_BURNS_PIDS:-none}"')
     assert rc == 0, err
-    assert calls == [] and "PID=none" in out
+    assert calls == [] and "PIDS=none" in out and "first pass" not in out
 
 
 def test_first_pass_is_inert_without_the_profile(tmp_path):
     rc, out, err, calls = _run(
         tmp_path,
-        'unset CG_CHAIN; CG_SP_BURN_ON=1 CG_BURN_ON=1\n'
+        'unset CG_CHAIN; CG_SP_BURN_OWED=1 CG_BURN_ON=1\n'
         'cg_chain_cleanup_burns_first "$HOST" "$PY"\n'
-        'printf "PID=%s\\n" "${CG_EARLY_BURNS_PID:-none}"')
+        'printf "PIDS=%s\\n" "${CG_EARLY_BURNS_PIDS:-none}"')
     assert rc == 0, err
-    assert calls == [] and "PID=none" in out and err == ""
+    assert calls == [] and "PIDS=none" in out and err == ""
 
 
-def test_first_pass_turns_both_burns_off_once_in_the_background(tmp_path):
+def test_first_pass_turns_both_burns_off_once_in_two_background_jobs(tmp_path):
     (tmp_path / "burn.state").write_text("on")
     rc, out, err, calls = _run(
         tmp_path,
-        'CG_CHAIN=1 CG_SP_BURN_ON=1 CG_BURN_ON=1\n'
+        'CG_CHAIN=1 CG_SP_BURN_OWED=1 CG_BURN_ON=1\n'
         'cg_chain_cleanup_burns_first "$HOST" "$PY"\n'
-        'if kill -0 "$CG_EARLY_BURNS_PID" 2>/dev/null; then echo RUNNING; fi\n'
-        'wait "$CG_EARLY_BURNS_PID"; echo JOINED',
+        'set -- $CG_EARLY_BURNS_PIDS; printf "JOBS=%s\\n" "$#"\n'
+        'if kill -0 "$1" 2>/dev/null; then echo RUNNING; fi\n' + _WAIT_ALL + 'echo JOINED',
         env={"FAKE_REMOVE_SLEEP": "1", "FAKE_CHECK_MODE": "stuck-on"})
     assert rc == 0, err
+    assert "JOBS=2" in out, "the cg OFF and the SongPlayer OFF are separate jobs"
     assert "RUNNING" in out and "JOINED" in out, (
         "the first pass returns at once and runs next to the camera restores, never before them"
     )
@@ -571,13 +590,32 @@ def test_first_pass_turns_both_burns_off_once_in_the_background(tmp_path):
     )
     assert (tmp_path / "timeout.log").read_text().split() == ["3", "3"], \
         "every call runs under the SHORT cleanup budget"
+    tagged = [ln for ln in out.splitlines() if "LEAK" in ln]
+    assert tagged and all("cleanup first pass" in ln for ln in tagged), (
+        f"a one-try LEAK from the first pass is tagged as such, never read as the verdict: {out}"
+    )
+
+
+def test_first_pass_cg_off_never_waits_for_a_slow_songplayer(tmp_path):
+    # SongPlayer answers slowly: the cg OFF (the burn that survives an OBS restart) must not queue
+    # behind it inside the SIGKILL grace window.
+    (tmp_path / "burn.state").write_text("on")
+    rc, _, err, calls = _run(
+        tmp_path,
+        'CG_CHAIN=1 CG_SP_BURN_OWED=1 CG_BURN_ON=1\n'
+        'cg_chain_cleanup_burns_first "$HOST" "$PY"\n' + _WAIT_ALL,
+        env={"FAKE_CURL_POST_SLEEP": "3"})
+    assert rc == 0, err
+    remove = calls.index(f"obs_burn_filter.py remove --host {HOST} --input sp-fast_video")
+    post = next(i for i, c in enumerate(calls) if c.startswith("curl POST"))
+    assert remove < post, f"the cg remove ran while the SongPlayer POST was still pending: {calls}"
 
 
 def test_first_pass_skips_a_burn_this_run_never_turned_on(tmp_path):
     rc, _, err, calls = _run(
         tmp_path,
-        'CG_CHAIN=1 CG_SP_BURN_ON=1 CG_BURN_ON=0\n'
-        'cg_chain_cleanup_burns_first "$HOST" "$PY"\nwait "$CG_EARLY_BURNS_PID"',
+        'CG_CHAIN=1 CG_SP_BURN_OWED=1 CG_BURN_ON=0\n'
+        'cg_chain_cleanup_burns_first "$HOST" "$PY"\n' + _WAIT_ALL,
         env={"FAKE_SP_BURN_ON": "false"})
     assert rc == 0, err
     assert _burn_calls(calls) == [], "no cg burn ON this run = no cg OBS call"
@@ -590,14 +628,14 @@ def test_cleanup_waits_for_the_first_pass_before_its_retries(tmp_path):
     (tmp_path / "burn.state").write_text("on")
     rc, out, err, calls = _run(
         tmp_path,
-        'CG_CHAIN=1 CG_RECORDING_STARTED=0 CG_SP_BURN_ON=0 CG_BURN_ON=1\n'
+        'CG_CHAIN=1 CG_RECORDING_STARTED=0 CG_SP_BURN_OWED=0 CG_BURN_ON=1\n'
         'cg_chain_cleanup_burns_first "$HOST" "$PY"\n'
         'cg_chain_cleanup "$HOST" "$PY" 30\n'
-        'printf "FLAG=%s PID=%s\\n" "$CG_BURN_ON" "${CG_EARLY_BURNS_PID:-none}"',
+        'printf "FLAG=%s PIDS=%s\\n" "$CG_BURN_ON" "${CG_EARLY_BURNS_PIDS:-none}"',
         env={"FAKE_REMOVE_SLEEP": "1"})
     assert rc == 0, err
     assert [c.split()[1] for c in _burn_calls(calls)] == ["remove", "check", "remove", "check"]
-    assert "FLAG=0 PID=none" in out, out
+    assert "FLAG=0 PIDS=none" in out, out
 
 
 def test_disabled_profile_never_touches_the_cg_burn(tmp_path):

@@ -45,7 +45,7 @@
 #     this run's `--cg-window`, so the strih/stream hops are judged inside the CG window at the
 #     60->30 decimation step.
 #   - in cleanup(): the #246/#844 leak-guard — right after the StopRecord-first block, ONE quick
-#     background OFF for each burn known to be on (a cancelled job is SIGKILLed seconds later);
+#     background OFF for each burn this run owes an OFF (a cancelled job is SIGKILLed seconds later);
 #     later the SongPlayer burn OFF (verified on /health) and the cg OBS hop burn OFF when this run
 #     turned it on (verified by `check`), each retried with a SHORT per-request timeout and a loud
 #     LEAK line if it never reads off, StopRecord cg OBS, every scene snapshot of this run restored,
@@ -145,9 +145,16 @@ cg_chain_songplayer_burn() {
     return 0
   fi
   # CG_SP_BURN_ON = 1 only after a VERIFIED ON (cg_chain_record_start turns the cg OBS hop burn on
-  # only then); every other outcome of a sent toggle leaves it 0.
+  # only then); every other outcome of a sent toggle leaves it 0. CG_SP_BURN_OWED = "this run owes the
+  # SongPlayer burn an OFF" (cleanup()'s first pass keys on it): 1 from the moment an ON is sent,
+  # cleared only by a verified OFF, set again by an OFF that never verified.
   CG_SP_BURN_ON=0
-  if [ "$action" = on ]; then want=true; else want=false; fi
+  if [ "$action" = on ]; then
+    CG_SP_BURN_OWED=1
+    want=true
+  else
+    want=false
+  fi
   attempts="${CG_CHAIN_BURN_ATTEMPTS:-3}"
   case "$attempts" in '' | *[!0-9]* | 0) attempts=3 ;; esac
   for ((i = 1; i <= attempts; i++)); do
@@ -155,7 +162,7 @@ cg_chain_songplayer_burn() {
       -d "$body" "$url" >/dev/null 2>&1 || true
     state="$(cg_chain_songplayer_burn_state)"
     if [ "$state" = "$want" ]; then
-      if [ "$action" = on ]; then CG_SP_BURN_ON=1; fi
+      if [ "$action" = on ]; then CG_SP_BURN_ON=1; else CG_SP_BURN_OWED=0; fi
       echo "[cg_chain] SongPlayer burn $action VERIFIED (burn_on=$state on $(cg_chain_songplayer_output), $(cg_chain_songplayer_health_url))"
       return 0
     fi
@@ -164,6 +171,7 @@ cg_chain_songplayer_burn() {
   if [ "$action" = on ]; then
     echo "[cg_chain] WARNING: SongPlayer burn ON not confirmed after $attempts attempt(s) (burn_on=$state on $(cg_chain_songplayer_output)) — the cg_chain section will prove nothing this run" >&2
   else
+    CG_SP_BURN_OWED=1
     echo "[cg_chain] LEAK: SongPlayer burn still not OFF after $attempts attempt(s) (burn_on=$state on $(cg_chain_songplayer_output)) — the burn may still be on the LED wall; turn it off: curl -X POST -H 'Content-Type: application/json' -d '$body' $url" >&2
   fi
   return 0
@@ -725,26 +733,31 @@ cg_chain_after_stoprecord() {
 # cleanup()'s FIRST pass, called right after the StopRecord-first block: a cancelled job gets a
 # SIGINT and a SIGKILL a few seconds later, long before cleanup() reaches cg_chain_cleanup (after the
 # camera restores), and a cg OBS burn left on survives in its scene collection. So this sends ONE
-# quick OFF for each burn known to be on — the SongPlayer burn when CG_SP_BURN_ON=1, the cg OBS hop
-# burn when CG_BURN_ON=1 — each call under CG_CHAIN_CLEANUP_BURN_TIMEOUT (default 3 s). It runs in the
-# BACKGROUND (CG_EARLY_BURNS_PID) so it never delays the camera device restores that follow;
-# cg_chain_cleanup waits for it, then repeats both OFFs with retries (the authoritative report). Sends
-# nothing when no burn is on (every run that reached the [7/8] OFF, every abort before [5/8]).
-# $1=cg-host-ip-or-empty $2=path-to-obs_phase2.py. A pure no-op unless CG_CHAIN=1; ALWAYS returns 0.
+# quick OFF for each burn this run owes an OFF — the cg OBS hop burn when CG_BURN_ON=1, the SongPlayer
+# burn when CG_SP_BURN_OWED=1 — each call under CG_CHAIN_CLEANUP_BURN_TIMEOUT (default 3 s). Each OFF
+# is its OWN background job (CG_EARLY_BURNS_PIDS), the cg one launched first, so neither waits for the
+# other and neither delays the camera device restores that follow. Their lines carry a "first pass"
+# tag: a one-try LEAK here is not the verdict — cg_chain_cleanup waits for both jobs, then repeats
+# both OFFs with retries (the authoritative report). Sends nothing when no burn is owed (every run
+# whose [7/8] OFFs verified, every abort before [5/8]). $1=cg-host-ip-or-empty
+# $2=path-to-obs_phase2.py. A pure no-op unless CG_CHAIN=1; ALWAYS returns 0.
 cg_chain_cleanup_burns_first() {
   cg_chain_enabled || return 0
-  if [ "${CG_SP_BURN_ON:-0}" != 1 ] && [ "${CG_BURN_ON:-0}" != 1 ]; then return 0; fi
   local host="$1" py="$2" t="${CG_CHAIN_CLEANUP_BURN_TIMEOUT:-3}"
-  {
-    if [ "${CG_SP_BURN_ON:-0}" = 1 ]; then
-      CG_CHAIN_BURN_ATTEMPTS=1 CG_CHAIN_BURN_TIMEOUT="$t" cg_chain_songplayer_burn off
-    fi
-    if [ "${CG_BURN_ON:-0}" = 1 ]; then
-      CG_CHAIN_BURN_ATTEMPTS=1 cg_chain_cg_burn off "$host" "$py" "$t"
-    fi
-  } &
-  CG_EARLY_BURNS_PID=$!
-  echo "[cg_chain] cleanup first pass: burns OFF sent in the background (pid $CG_EARLY_BURNS_PID; cg_chain_cleanup retries them)"
+  local tag='    [cg_chain cleanup first pass: one try, cg_chain_cleanup retries] '
+  CG_EARLY_BURNS_PIDS=""
+  if [ "${CG_BURN_ON:-0}" = 1 ]; then
+    { CG_CHAIN_BURN_ATTEMPTS=1 cg_chain_cg_burn off "$host" "$py" "$t"; } 2>&1 | sed -u "s/^/$tag/" &
+    CG_EARLY_BURNS_PIDS="$!"
+  fi
+  if [ "${CG_SP_BURN_OWED:-0}" = 1 ]; then
+    { CG_CHAIN_BURN_ATTEMPTS=1 CG_CHAIN_BURN_TIMEOUT="$t" cg_chain_songplayer_burn off; } 2>&1 \
+      | sed -u "s/^/$tag/" &
+    CG_EARLY_BURNS_PIDS="${CG_EARLY_BURNS_PIDS:+$CG_EARLY_BURNS_PIDS }$!"
+  fi
+  if [ -n "$CG_EARLY_BURNS_PIDS" ]; then
+    echo "[cg_chain] cleanup first pass: burn OFFs sent in the background (pids $CG_EARLY_BURNS_PIDS)"
+  fi
   return 0
 }
 
@@ -759,11 +772,12 @@ cg_chain_cleanup() {
   cg_chain_enabled || return 0
   local host="$1" py="$2" tmo="${3:-30}"
   # The first pass (cg_chain_cleanup_burns_first) is bounded by its own per-call timeouts; wait for
-  # it so its OFFs and the retries below never interleave.
-  if [ -n "${CG_EARLY_BURNS_PID:-}" ]; then
-    wait "$CG_EARLY_BURNS_PID" 2>/dev/null || true
-    CG_EARLY_BURNS_PID=""
-  fi
+  # its jobs so their OFFs and the retries below never interleave.
+  local p
+  for p in ${CG_EARLY_BURNS_PIDS:-}; do
+    wait "$p" 2>/dev/null || true
+  done
+  CG_EARLY_BURNS_PIDS=""
   # Issue 1302: an aborted run must not leave the background cg extract running.
   cg_chain_extract_stop
   CG_CHAIN_BURN_TIMEOUT="${CG_CHAIN_CLEANUP_BURN_TIMEOUT:-3}" cg_chain_songplayer_burn off
