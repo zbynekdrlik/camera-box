@@ -199,7 +199,14 @@ Seeding and over-rate cameras keep the poll-time path.
 
 Audio **MUST** be sent on the same sender. It **MUST** be 48 kHz, planar float. The chunk(s) for
 a boundary **MUST** be submitted BEFORE that boundary's video frame. The audio `timecode`
-**MUST** be the raw wall clock at submission (in 100 ns units, with no boundary snap). Samples
+**MUST** be the raw wall clock at submission (in 100 ns units, with no boundary snap), with one
+exception: a sender that paces its audio as exactly ONE block per boundary (each block carries the
+samples of one boundary interval of the §3 grid) **MAY** stamp each block with that block's
+boundary, the same floor-boundary value §4 gives the boundary's video frame. The receiver ASRC
+paces audio by arrival rate either way, and a boundary stamp is steadier than a submission-instant
+stamp, which carries the sender's scheduling jitter. A sender whose chunks do not line up with
+boundaries **MUST** keep the raw submission wall clock (SongPlayer 0.69.0-dev.10 / its issue 224
+stamps its paced blocks on their boundary, camera-box issue 1294). Samples
 **MUST** be delivered at real-time rate (`samples_per_boundary = 48000 · interval_seconds`); a
 sustained file-clock vs wall-clock residual greater than **±50 ppm MUST** be resampled on the
 sender (the receiver ASRC absorbs less).
