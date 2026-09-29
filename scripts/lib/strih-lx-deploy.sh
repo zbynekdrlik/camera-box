@@ -23,8 +23,9 @@
 #                 IPv4 (the fleet row is one; a hostname / flag-shaped override is refused up front);
 #     download -- the strih FULL artifact, REFUSED unless its GENLOCK_BUILD_SHA.txt is the canonical
 #                 SHA and its BUNDLE_MANIFEST.json carries the libobs.so.30 sha256 the read-back uses;
-#     tree     -- the COMMITTED scripts/ systemd/ intercom/ of this checkout (an archive of HEAD) + the
-#                 generated run-setup.sh, checked for the box's fact file scripts/strih-boxes/strih-lx.env
+#     tree     -- the COMMITTED scripts/ systemd/ intercom/ + vendor/realtek-r8152 (the rig NIC driver
+#                 source setup-strih step 1b builds through DKMS, issue 1391) of this checkout (an archive
+#                 of HEAD) + the generated run-setup.sh, checked for the box's fact file scripts/strih-boxes/strih-lx.env
 #                 and the intercom routing file it names; the GH token (STRIH_LX_GH_TOKEN, else
 #                 `gh auth token`). setup-strih.sh runs as `setup-strih.sh --box strih-lx` (issue 1361).
 #   strih_lx_apply (exit 4 on failure, every message names its step)
@@ -381,15 +382,15 @@ strih_lx_prepare() {
 
   tree_rev="$(git -C "$repo" rev-parse --short HEAD 2>/dev/null)" || tree_rev=""
   [ -n "$tree_rev" ] || { _strih_lx_fail tree 1 3 "$repo is not a git checkout"; return; }
-  git -C "$repo" archive --format=tar HEAD scripts systemd intercom | tar -x -C "$w/repo"; rc=$?
-  [ "$rc" = 0 ] || { _strih_lx_fail tree "$rc" 3 "archiving scripts/ systemd/ intercom/ at $tree_rev failed"; return; }
+  git -C "$repo" archive --format=tar HEAD scripts systemd intercom vendor/realtek-r8152 | tar -x -C "$w/repo"; rc=$?
+  [ "$rc" = 0 ] || { _strih_lx_fail tree "$rc" 3 "archiving scripts/ systemd/ intercom/ vendor/realtek-r8152 at $tree_rev failed"; return; }
   STRIH_LX_PREP_HOSTNAME="$(strih_lx_tree_check "$w/repo" strih-lx)" \
     || { _strih_lx_fail tree 1 3 "the provisioning tree at $tree_rev is incomplete (above)"; return; }
   strih_lx_setup_runner "$STRIH_LX_PREP_STAGE" strih-lx > "$w/repo/run-setup.sh" || { _strih_lx_fail tree 1 3 "cannot write run-setup.sh"; return; }
   STRIH_LX_PREP_TOKEN="${STRIH_LX_GH_TOKEN:-}"
   [ -n "$STRIH_LX_PREP_TOKEN" ] || STRIH_LX_PREP_TOKEN="$(gh auth token 2>/dev/null)" || STRIH_LX_PREP_TOKEN=""
   [ -n "$STRIH_LX_PREP_TOKEN" ] || { _strih_lx_fail tree 1 3 "no GH token (STRIH_LX_GH_TOKEN / gh auth token) -- setup-strih.sh needs GH_TOKEN for the bundle-state + bkshading fetch"; return; }
-  echo "# strih-lx: provisioning tree = the committed scripts/ systemd/ intercom/ at $tree_rev; target ${STRIH_LX_PREP_USER}@${STRIH_LX_PREP_HOST}:$STRIH_LX_PREP_STAGE"
+  echo "# strih-lx: provisioning tree = the committed scripts/ systemd/ intercom/ vendor/realtek-r8152 at $tree_rev; target ${STRIH_LX_PREP_USER}@${STRIH_LX_PREP_HOST}:$STRIH_LX_PREP_STAGE"
 }
 
 # strih_lx_apply SHA -> the box steps, after strih_lx_prepare (and every other box's resolution)
@@ -562,7 +563,7 @@ strih_lx_plan_steps() {
 # STEP 0 (resolve): the linux-genlock.yml run at ${sha}; download its '${art}'
 #          artifact to ${lstage}/bundle -- REFUSED unless its GENLOCK_BUILD_SHA.txt is ${sha} and its
 #          BUNDLE_MANIFEST.json carries lib/x86_64-linux-gnu/libobs.so.30.
-# STEP 1 (tree): the committed scripts/ systemd/ intercom/ of this checkout (archive of HEAD) + the
+# STEP 1 (tree): the committed scripts/ systemd/ intercom/ vendor/realtek-r8152 of this checkout (archive of HEAD) + the
 #          generated run-setup.sh -> ${lstage}/repo.
 # STEP 2 (preflight): the box must be the fact file's host ('$(strih_lx_remote_identity_cmd)' == STRIH_HOSTNAME),
 #          and no previous install may run:  $(strih_lx_remote_installer_cmd)
