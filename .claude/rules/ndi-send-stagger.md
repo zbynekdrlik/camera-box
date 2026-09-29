@@ -91,7 +91,9 @@ costs 2–5 cameras ~380 ms of video at once: strih `recv-timing` n≈277, genlo
 - **The timecode never moves.** It is computed BEFORE the sleep, and `src/ndi.rs` does not know about
   the stagger (`tests/harness_send_stagger_1242.rs` pins both).
 - **The emit grid never moves.** `decimation_gate.poll(wall_clock_ns(), …)` runs before the anchor,
-  and the next boundary never derives from the send instant.
+  and the next boundary never derives from the send instant. On a stamp-driven stream (issue 1367
+  D2, `note_stamp_slot` staged before that same call) the gate decides on the tracked capture slot,
+  which never reads a clock at all.
 - **What DOES move is the arrival at strih:** up to 7.2 ms for CAM7. The per-run `[4i/8align]`
   (relative, floor-3 pins) re-equalises presentation. Until it has, the offset counts against the
   blocking delivery-spread budget (`SPREAD_THRESHOLD_MS`, 24 ms).

@@ -3,7 +3,20 @@ paths:
   - "src/genlock_pacing.rs"
   - "src/capture_stall.rs"
   - "src/dupe_decimation/**"
+  - "src/capture_phase.rs"
 ---
+
+**Issue 1367 slice D2 — on a stamp-driven stream** (`phase_lock=stamp` on the `#707 emit-1s`
+line, `.claude/rules/capture-phase-tracker.md`) the gate decides on the frame's tracked stamp slot,
+not the poll wall clock. There a `#707 SKIPPED` line counts only missing slots nothing filled:
+a stamp jump of more than 8 slots past the last emitted one (a real CLOCK_REALTIME step, e.g. one
+42-slot line for 700 ms, or a device hole), the rest of a 5..8-slot gap beyond the 4 starvation
+repeats, or any gap once the consecutive repeat budget is spent (a half-rate leg). A backward step
+re-latches with no line; a forward clock step of 2..8 slots is filled with repeats, like the
+poll-time gate. A lone starvation repeat with `hidden_drops=` +1 and no `crossings=` change is a
+frame the device skipped, not a crossing. A slot-edge crossing never skips: it is one blind shed or one starvation repeat.
+The triage below still applies to `phase_lock=seed|band` streams (seeding, over-rate grabbers),
+which keep the poll-time gate.
 
 # Classifying a `#707 genlock emit-gate SKIPPED` event as LOSSY vs BENIGN (issue 1131)
 

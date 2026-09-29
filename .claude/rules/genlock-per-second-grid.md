@@ -63,7 +63,11 @@ gate grid IS the stamp grid — but the gate still DECIDES on the poll instant (
 after the dequeue) while the stamp floors the CAPTURE instant, so a capture within the dequeue
 latency before a boundary is still stamped one slot early (the free-running grabber's stamp
 dup + gap per beat cycle). Step 3 removes the date-walking offset only; deciding on the capture
-instant is the open Design-question on #1355 (review round 1 🔴). Now:
+instant is the open Design-question on #1355 (review round 1 🔴). **Issue 1367 slice D2 closes it
+for a 1:1 camera:** while the capture phase tracker is locked (`phase_lock=stamp`), the stamp is the
+tracked slot and the gate decides on that slot, never on the poll instant
+(`.claude/rules/capture-phase-tracker.md`); seeding and over-rate streams keep the poll-time gate
+described here. Now:
 
 - **Latch / #131 re-latch / #707 resync** = `grid_next_boundary_ns`; the re-latch test is
   `next > grid_next(now)` (the exact per-second form of the old `next > now + interval`).
@@ -99,7 +103,9 @@ instant is the open Design-question on #1355 (review round 1 🔴). Now:
   cambox's `Streaming:` / `#707` lines stay 299–301 with no new SKIP burst, and the strih
   `genlock-fifo audit` `stamp_dup=` / `stamp_gap=` rate on the camera inputs against its own
   pre-deploy baseline: it must NOT rise; do not expect it to fall to zero — the poll-vs-capture
-  latency beat above still produces a dup + gap pair per grabber beat cycle.
+  latency beat above still produces a dup + gap pair per grabber beat cycle. (Since issue 1367 D2 a
+  stamp-driven 1:1 camera drops to at most one per ~17 min crossing; the beat remains on
+  `phase_lock=band` over-rate grabbers.)
 - **frame-probe's synth-ndi sender** (`src/bin/frame-probe.rs`, probe-gated) sleeps to
   `genlock_grid::grid_next_boundary_ns` too — it was the last `now % interval` pacer.
 

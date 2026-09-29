@@ -2,6 +2,7 @@
 paths:
   - "src/genlock_stamp.rs"
   - "src/genlock_pacing.rs"
+  - "src/capture_phase.rs"
   - "src/ndi.rs"
   - "vendor/distroav/src/ndi-output.cpp"
   - "vendor/distroav/src/ndi-source.cpp"
@@ -29,6 +30,11 @@ The load-bearing invariants the contract pins to this code (keep them honest):
   (`src/genlock_grid.rs` ↔ `obs-genlock-grid.h`); `src/ndi.rs` tests pin `floor_boundary_100ns`
   == `genlock_grid::per_second_floor` over a day. A sender stamping `k · interval_100ns` from 1970 walks 1 µs/s at 30 fps (4 µs/s at 60 — a
   whole frame in ~0.4 days); check SongPlayer + the cg OBS against contract §4.
+- **A locked 1:1 camera stamps + paces its TRACKED slot** (issue 1367 slice D2,
+  `src/capture_phase.rs`, `.claude/rules/capture-phase-tracker.md`): the floor of the slot middle
+  from the smoothed capture phase, up to 500 us after the smoothed capture instant and still before
+  the emit instant, and the gate decides on that same slot (contract §4 + §5 say so). Seeding and
+  over-rate cameras keep the raw capture stamp + poll-time gate.
 - **Sender create `clock_video=false, clock_audio=false`** (`src/ndi.rs`) — the app owns cadence,
   never the NDI SDK's free-running clock.
 - **Pacing on the SAME per-second grid as the stamps** (#1355 step 3 — before it the emit gate

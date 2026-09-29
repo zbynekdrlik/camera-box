@@ -148,6 +148,25 @@ pub struct DecimationGate {
     /// [`STARVATION_REPEAT_MAX`]); a FROZEN source (dupes) is excluded by the `!copy` gate. So the cap
     /// is the fail-SAFE that bounds a burst + keeps a genuinely dead/frozen camera looking down.
     consecutive_starvation_repeats: u64,
+    /// (issue 1367 D2) The stamp slot staged by [`note_stamp_slot`](Self::note_stamp_slot) for the
+    /// next [`poll`](Self::poll): `Some` = decide on it (the capture phase tracker drives), `None` =
+    /// today's poll-time gate.
+    pending_stamp_slot_ns: Option<u64>,
+    /// (issue 1367 D2) The grid slot of the most recently EMITTED frame's stamp (`0` = none yet),
+    /// kept on both paths so the stamp-driven path continues from the poll-time one.
+    last_emitted_stamp_slot_ns: u64,
+    /// (issue 1367 D2) Set by a stamp-driven poll; cleared when a later poll-time poll re-latches
+    /// the boundary onto its own slot, at the first frame from an empty queue
+    /// ([`relatch_after_stamp_path`](Self::relatch_after_stamp_path)).
+    stamp_driven: bool,
+    /// (issue 1367 D2) The stamp-driven decision of the most recent poll (`None` on the poll-time
+    /// path), read by the tests and the bench.
+    last_stamp_action: Option<StampSlotAction>,
+    /// (issue 1367 D2) The slots the most recent poll's return from the stamp path moved the
+    /// boundary by for the dequeue latency alone (capture slot -> poll slot), folded into
+    /// [`last_poll_intentional_extra_advance`](Self::last_poll_intentional_extra_advance) so the
+    /// domain change never reads as a #707 SKIP. `0` on every other poll.
+    last_poll_relatch_extra: u64,
 }
 
 impl DecimationGate {
@@ -168,8 +187,12 @@ impl DecimationGate {
     /// [`crate::genlock_pacing::boundary_skip_count`] before recording, so an intentional fast-drain
     /// is never miscounted as an un-emitted-content boundary SKIP (the sick-leg / clock-step signal
     /// `leg-health-guard.sh` hard-fails on). Read it right after `poll`, alongside `next_boundary_ns`.
+    /// (issue 1367 D2) Also carries the starvation repeats (filled slots) and the latency part of a
+    /// return from the stamp path.
     pub fn last_poll_intentional_extra_advance(&self) -> u64 {
-        self.last_poll_fast_drain_extra + self.last_poll_starvation_repeats
+        self.last_poll_fast_drain_extra
+            + self.last_poll_starvation_repeats
+            + self.last_poll_relatch_extra
     }
 
     /// (#1167 v4) How many STARVATION last-frame repeats the MOST RECENT [`poll`](Self::poll) asks
@@ -492,8 +515,22 @@ impl DecimationGate {
         capture_mono_ns: u64,
     ) -> bool {
         if interval_ns == 0 {
+            self.pending_stamp_slot_ns = None;
             return true;
         }
+        // (issue 1367 D2) a staged stamp slot: the capture phase tracker drives this stream, so the
+        // decision is the slot's alone — the poll wall clock and the queue signals are not read.
+        if let Some(slot_ns) = self.pending_stamp_slot_ns.take() {
+            return self.poll_on_stamp(slot_ns, interval_ns, content_hash, capture_mono_ns);
+        }
+        self.last_stamp_action = None;
+        self.relatch_after_stamp_path(
+            now_ns,
+            now_mono_ns,
+            capture_mono_ns,
+            interval_ns,
+            queue_had_frame,
+        );
         // (#1145 v2.1) reset the per-poll intentional-extra-advance accounting; only the FastDrain
         // arm sets it (see the field doc — it keeps a fast-drain out of the #707 skip diagnostic).
         self.last_poll_fast_drain_extra = 0;
@@ -535,27 +572,7 @@ impl DecimationGate {
             self.converging_deep_backlog = false;
         }
 
-        // (#1145 review 🔵) A BACKWARD DanteSync clock step (#131) leaves the window's pre-step
-        // timestamps "in the future" (`> now_ns`), which would block pruning for the step's duration
-        // and inflate the count in the aggressive (retire-forcing) direction. Clear the window so a
-        // capture after a backward step re-latches from scratch — mirrors `genlock_emit_gate`'s own
-        // backward re-latch.
-        // (#1145 v3 review 🔵 F3) clear BOTH windows when EITHER holds a future-timestamped entry, so
-        // a backward step can never leave `unique_capture_times` populated while `all_capture_times`
-        // was cleared (which would read a >100% occupancy ratio from mixed clock epochs). Symmetric
-        // by construction.
-        let backward_step = self
-            .unique_capture_times
-            .back()
-            .is_some_and(|&back| back > now_ns)
-            || self
-                .all_capture_times
-                .back()
-                .is_some_and(|&back| back > now_ns);
-        if backward_step {
-            self.unique_capture_times.clear();
-            self.all_capture_times.clear();
-        }
+        self.clear_rate_windows_after_backward_step(now_ns);
 
         let exact_dupe = self.prev_hash == Some(content_hash);
         self.prev_hash = Some(content_hash);
@@ -811,151 +828,146 @@ impl DecimationGate {
     pub fn take_starvation_repeats(&mut self) -> u64 {
         self.shed_log.take_starvation_repeats()
     }
-}
 
-// ── (#889) mechanism-visibility log (comprehensive-logging) ──────────────────
-
-/// Per-run accumulator proving the mechanism is live on a real box: counts how many captured
-/// frames were shed because they were the preferred-dupe victim vs the pre-fix blind pacing
-/// drop, PLUS (#1111) how many content-dupes were EMITTED as the late-dupe release valve (a copy
-/// passed downstream), drained on the SAME 5s Streaming-report cadence as
-/// [`crate::emit_skip_log::EmitGateSkipLog`].
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct DupeShedLog {
-    dupe_shed: u64,
-    blind_shed: u64,
-    dupe_emitted: u64,
-    retired: u64,
-    drained: u64,
-    fast_drained: u64,
-    /// (#1167 v4) How many STARVATION last-frame repeats were emitted (empty-queue 60fps slots
-    /// filled by re-emitting the current good frame). Drained SEPARATELY via
-    /// [`take_starvation_repeats`](Self::take_starvation_repeats) so the byte-frozen 6-tuple
-    /// [`take`](Self::take) / `take_shed_counts` signature (main.rs destructure + external greps)
-    /// is unchanged; surfaced as an APPENDED segment on the (#889) summary line.
-    starvation_repeats: u64,
-}
-
-impl DupeShedLog {
-    pub fn new() -> Self {
-        Self::default()
+    /// (issue 1367 D2) Stage this frame's STAMP SLOT (a grid point, from
+    /// `crate::capture_phase::CapturePhase::stamp_frame`) for the NEXT [`poll`](Self::poll) to
+    /// decide on — call it immediately before `poll`, like
+    /// [`note_frame_luma`](Self::note_frame_luma). `poll` then compares the slot with the last
+    /// EMITTED frame's slot ([`stamp_slot_action`]): a one-slot advance emits, the same slot drops (a
+    /// real duplicate), a gap within the catch-up bound emits after the existing starvation repeats
+    /// fill the missing slots, a bigger jump or a backward move re-latches. Not calling it keeps
+    /// today's poll-time gate, byte-identical.
+    pub fn note_stamp_slot(&mut self, slot_ns: u64) {
+        self.pending_stamp_slot_ns = Some(slot_ns);
     }
 
-    /// Record ONE captured frame that was shed (never emitted) this poll: `dupe` when it was
-    /// preferred as a content-duplicate victim (the #889 on-time deferral), otherwise the ORIGINAL
-    /// blind pacing drop (between boundaries).
-    pub fn record_shed(&mut self, dupe: bool) {
-        if dupe {
-            self.dupe_shed = self.dupe_shed.saturating_add(1);
-        } else {
-            self.blind_shed = self.blind_shed.saturating_add(1);
+    /// (issue 1367 D2) Record the sender stamp (100 ns units) of the frame the capture loop just
+    /// EMITTED, on either path, so the stamp-driven path continues from the poll-time one.
+    pub fn note_emitted_stamp_100ns(&mut self, stamp_100ns: i64, interval_ns: u64) {
+        if interval_ns > 0 && stamp_100ns > 0 {
+            self.last_emitted_stamp_slot_ns =
+                crate::capture_phase::stamp_slot_ns(stamp_100ns, interval_ns);
         }
     }
 
-    /// (#1111) Record ONE frame EMITTED as a copy rather than shed. TWO contributors land here:
-    /// the #1111 late-dupe valve (a genuine sub-60 starvation deficit — the historical meaning) AND
-    /// (#1167) a corrupted-slot MAKE-UP (a would-be-skipped over-rate Retire/Drain converted to a
-    /// copy of the nearest good frame to reclaim a slot a corrupted-buffer drop vacated). Attribute
-    /// the two via the `corrupted` count on the same 5s Streaming line (make-ups ≈ the corrupted
-    /// rate; a healthy over-rate box with no corruption shows ~0 here). See [`DecimationGate::poll`].
-    pub fn record_dupe_emitted(&mut self) {
-        self.dupe_emitted = self.dupe_emitted.saturating_add(1);
+    /// (issue 1367 D2) The stamp-driven decision of the most recent [`poll`](Self::poll), or `None`
+    /// when it decided on the poll wall clock.
+    pub fn last_stamp_action(&self) -> Option<StampSlotAction> {
+        self.last_stamp_action
     }
 
-    /// (#1145) Record ONE over-rate content-dupe RETIRED (shed while advancing the already-stale
-    /// boundary, emitting nothing). (#1167 v3) On the over-rate box this is now a LEGITIMATE small
-    /// nonzero in STEADY state — `poll`'s steady shallow-lag TRICKLE (once lag ≥
-    /// [`SHALLOW_DRAIN_LAG_MIN`]) takes a PACED retire skip (≤1 per [`CONVERGE_SKIP_MIN_GAP_INTERVALS`])
-    /// to bleed the grid-lag creep off before it bursts, so expect `retired ≈ 1 per gap`, NOT ~0 (do
-    /// not misread that as a regression). Below the trickle threshold, or when paced-out, a steady
-    /// shallow-lag dupe still FILLS the slot (counted as a copy in
-    /// [`record_dupe_emitted`](Self::record_dupe_emitted)); the CONVERGING tail also records here (its
-    /// paced retire). See [`DecimationGate::poll`].
-    pub fn record_retired(&mut self) {
-        self.retired = self.retired.saturating_add(1);
+    /// (#1145 review 🔵) A BACKWARD DanteSync clock step (#131) leaves the window's pre-step
+    /// timestamps "in the future" (`> now_ns`), which would block pruning for the step's duration
+    /// and inflate the count in the aggressive (retire-forcing) direction. Clear the window so a
+    /// capture after a backward step re-latches from scratch — mirrors `genlock_emit_gate`'s own
+    /// backward re-latch.
+    /// (#1145 v3 review 🔵 F3) clear BOTH windows when EITHER holds a future-timestamped entry, so
+    /// a backward step can never leave `unique_capture_times` populated while `all_capture_times`
+    /// was cleared (which would read a >100% occupancy ratio from mixed clock epochs). Symmetric
+    /// by construction. (Moved out of `poll` unchanged for the #414 length budget, issue 1367 D2.)
+    fn clear_rate_windows_after_backward_step(&mut self, now_ns: u64) {
+        let backward_step = self
+            .unique_capture_times
+            .back()
+            .is_some_and(|&back| back > now_ns)
+            || self
+                .all_capture_times
+                .back()
+                .is_some_and(|&back| back > now_ns);
+        if backward_step {
+            self.unique_capture_times.clear();
+            self.all_capture_times.clear();
+        }
     }
 
-    /// (#1145 v2 + #1167) Record ONE frame SHED by the queue-depth drain (dropped the oldest to bound
-    /// residence). #1145 v2 advanced the boundary on the shed; (#1167) in STEADY over-rate it now
-    /// HOLDS the boundary (the next fresher frame fills the slot) — still a shed, still counted here —
-    /// and advances only while CONVERGING a deep backlog. NOT counted on the panic-floor copy-fill
-    /// (that EMITS, so it lands in [`record_dupe_emitted`](Self::record_dupe_emitted), never here).
-    /// See [`DecimationGate::poll`].
-    pub fn record_drained(&mut self) {
-        self.drained = self.drained.saturating_add(1);
-    }
-
-    /// (#1145 v2.1) Record ONE deep-backlog FAST-drain (a content-dupe shed while advancing TWO
-    /// stale boundaries, under sustained over-rate at lag > `RETIRE_MAX_LAG_INTERVALS`) — the
-    /// mechanism that converges a deep delivery-latency backlog in single-digit seconds instead of
-    /// the send-slack-limited ~35 s. See [`DecimationGate::poll`] / [`ShedAction::FastDrain`].
-    pub fn record_fast_drained(&mut self) {
-        self.fast_drained = self.fast_drained.saturating_add(1);
-    }
-
-    /// (#1167 v4) Record `n` STARVATION last-frame repeats emitted this poll — empty-queue 60fps
-    /// slots filled by re-emitting the current good frame (see [`DecimationGate::poll`]). Accumulated
-    /// separately from the byte-frozen 6-tuple and drained by
-    /// [`take_starvation_repeats`](Self::take_starvation_repeats).
-    pub fn record_starvation_repeats(&mut self, n: u64) {
-        self.starvation_repeats = self.starvation_repeats.saturating_add(n);
-    }
-
-    /// (#1167 v4) Drain + reset the accumulated starvation-repeat count. Separate from
-    /// [`take`](Self::take) so the byte-frozen 6-tuple signature (main.rs + external greps) is
-    /// unchanged; main.rs calls both each 5s window.
-    pub fn take_starvation_repeats(&mut self) -> u64 {
-        let out = self.starvation_repeats;
-        self.starvation_repeats = 0;
-        out
-    }
-
-    /// Drain the accumulated `(dupe_shed, blind_shed, dupe_emitted, retired, drained, fast_drained)`
-    /// counts and RESET.
-    pub fn take(&mut self) -> (u64, u64, u64, u64, u64, u64) {
-        let out = (
-            self.dupe_shed,
-            self.blind_shed,
-            self.dupe_emitted,
-            self.retired,
-            self.drained,
-            self.fast_drained,
+    /// (issue 1367 D2) The first poll-time poll after the stamp-driven path. That path's boundary
+    /// sits on the CAPTURE-time grid, a dequeue latency behind the poll instant. While the V4L2 queue
+    /// still holds frames (a re-seed that came with a loop stall) the boundary stays there, so the
+    /// #1131 catch-up emits every buffered frame, one slot each. At the first frame the loop waited
+    /// for, re-latch on the poll's own slot so it emits on time instead of reading as a stale
+    /// boundary (lag of one or more) that would fill a repeat. The slots between that frame's own
+    /// capture slot (the poll instant minus its queue residence) and the poll slot are that
+    /// latency, not missing content: they count as intentional, so the #707 diagnostic reports only
+    /// real missing slots.
+    fn relatch_after_stamp_path(
+        &mut self,
+        now_ns: u64,
+        now_mono_ns: u64,
+        capture_mono_ns: u64,
+        interval_ns: u64,
+        queue_had_frame: bool,
+    ) {
+        self.last_poll_relatch_extra = 0;
+        if !self.stamp_driven || queue_had_frame {
+            return;
+        }
+        self.stamp_driven = false;
+        let relatched = crate::genlock_grid::grid_floor_ns(now_ns, interval_ns);
+        let capture_ns = if capture_mono_ns != 0 && now_mono_ns >= capture_mono_ns {
+            now_ns.saturating_sub(now_mono_ns - capture_mono_ns)
+        } else {
+            now_ns
+        };
+        self.last_poll_relatch_extra = crate::genlock_grid::grid_steps_between(
+            crate::genlock_grid::grid_floor_ns(capture_ns, interval_ns),
+            relatched,
+            interval_ns,
         );
-        self.dupe_shed = 0;
-        self.blind_shed = 0;
-        self.dupe_emitted = 0;
-        self.retired = 0;
-        self.drained = 0;
-        self.fast_drained = 0;
-        out
+        self.next_boundary_ns = relatched;
     }
-}
 
-/// The periodic INFO line proving the mechanism is live: printed on every 5s Streaming-report
-/// window (while genlock decimation is active) so a live box shows the mechanism working —
-/// never suppressed on an all-zero window (a healthy card legitimately shows 0/0, which is the
-/// self-neutralizing behavior by design, not the mechanism being off).
-// A flat per-window counter-summary formatter — a params struct would add churn at every
-// call site (incl. the rustc scratch replicas) for zero clarity gain on plain u64 counters.
-#[allow(clippy::too_many_arguments)]
-pub fn dupe_shed_summary(
-    dupe_shed: u64,
-    blind_shed: u64,
-    dupe_emitted: u64,
-    retired: u64,
-    drained: u64,
-    fast_drained: u64,
-    starvation_repeats: u64,
-    window_secs: u64,
-) -> String {
-    // (#1167 v4) The `starvation_repeats` segment is APPENDED — every substring before it is
-    // byte-frozen (main.rs + external journal greps read them), so a new counter is additive only.
-    format!(
-        "(#889) dupe-preferring decimation: {dupe_shed} dupe-victim shed / {blind_shed} \
-         blind-pacing shed / {dupe_emitted} late-dupe copies emitted (#1111 grid-lock valve) / \
-         {retired} boundaries retired (#1145 over-rate absorption) / {drained} depth-drained \
-         (#1145 v2 over-rate absorption) / {fast_drained} fast-drained (#1145 v2.1 deep-backlog \
-         convergence) / {starvation_repeats} starvation last-frame repeats (#1167 v4 empty-queue \
-         slot-fill) over the last ~{window_secs}s"
-    )
+    /// (issue 1367 D2) The stamp-driven poll. Keeps the takt EMA and the content-hash state warm for
+    /// a later poll-time poll, clears the poll-time transients (a deferral, a drain-hold streak, the
+    /// convergence latch, the corrupted make-up — a corrupted drop is a sequence gap here, which the
+    /// gap fill already covers) and never touches the unique-rate windows (a 1:1 stream sheds no
+    /// dupes). The #707 skip diagnostic keeps working: the boundary is set to the slot after the
+    /// emitted one, and the fill is folded into the intentional extra advance.
+    fn poll_on_stamp(
+        &mut self,
+        slot_ns: u64,
+        interval_ns: u64,
+        content_hash: u64,
+        capture_mono_ns: u64,
+    ) -> bool {
+        self.last_poll_fast_drain_extra = 0;
+        self.last_poll_starvation_repeats = 0;
+        self.last_poll_relatch_extra = 0;
+        self.note_capture_takt(capture_mono_ns);
+        self.prev_hash = Some(content_hash);
+        self.pending_luma = None;
+        self.prev_luma = None;
+        self.prev_was_noisy_dupe = false;
+        self.deferred_this_boundary = false;
+        self.consecutive_drain_holds = 0;
+        self.converging_deep_backlog = false;
+        self.corrupted_makeup_deficit = 0;
+        self.stamp_driven = true;
+        let budget = STARVATION_REPEAT_MAX.saturating_sub(self.consecutive_starvation_repeats);
+        let action = stamp_slot_action(
+            self.last_emitted_stamp_slot_ns,
+            slot_ns,
+            interval_ns,
+            budget,
+        );
+        self.last_stamp_action = Some(action);
+        match action {
+            StampSlotAction::Duplicate => {
+                self.shed_log.record_shed(false);
+                return false;
+            }
+            StampSlotAction::Latch | StampSlotAction::Advance => {
+                self.consecutive_starvation_repeats = 0;
+            }
+            StampSlotAction::Gap { repeats, .. } if repeats > 0 => {
+                self.consecutive_starvation_repeats += repeats;
+                self.last_poll_starvation_repeats = repeats;
+                self.shed_log.record_starvation_repeats(repeats);
+            }
+            StampSlotAction::Gap { .. } | StampSlotAction::Resync { .. } => {}
+        }
+        self.last_emitted_stamp_slot_ns = slot_ns;
+        self.next_boundary_ns =
+            crate::genlock_pacing::genlock_advance_boundary(slot_ns, 1, interval_ns);
+        true
+    }
 }

@@ -147,7 +147,11 @@ FLOOR-never-ceil doctrine is documented at `src/ndi.rs:62-78`), applied in
 `genlock_emit_timecode_100ns` (`src/genlock_stamp.rs:52`) and stamped on the outgoing frame at
 `src/ndi.rs:1079`. OBS-as-sender does the identical floor: `vendor/distroav/src/ndi-output.cpp`
 stamps `video_frame.timecode = genlock_emit_timecode_100ns(...)` at `:613` (doctrine block
-`:34-60`).
+`:34-60`). Since issue 1367 slice D2 a 1:1 camera whose capture phase tracker is locked floors the
+middle of its TRACKED slot instead of the raw capture instant (`capture_phase::stamp_instant_100ns`):
+the smoothed capture phase with a 500 µs edge hysteresis, so the stamp can sit up to 500 µs after
+the smoothed capture instant. It stays before the emit instant (the frame still has to finish its
+USB transfer and dequeue), so the floor-at-or-before-emit rule above holds.
 
 ### 5. Pacing
 
@@ -181,10 +185,15 @@ the gate paced on `now % interval` from 1970); catch-up bound `GENLOCK_MAX_CATCH
 with the new boundary timecode (`starvation_repeat_timecode_100ns` `:262`). Tolerance of the
 reference: a repeat is stamped `base − k · floor(10⁷ / fps)` (100 ns units), at most `k` units
 above the exact per-second point of its slot — inside the slot, so it floors to the right one.
-The camera gate decides on its POLL instant while the stamp floors the CAPTURE instant, so a
-frame captured within the dequeue latency before a boundary is paced for that boundary but stamped
-into the previous slot (a free-running grabber's stamp duplicate + gap per beat cycle); an
-external sender that stamps the instant it paces on has no such offset.
+On the poll-time path the camera gate decides on its POLL instant while the stamp floors the
+CAPTURE instant, so a frame captured within the dequeue latency before a boundary is paced for that
+boundary but stamped into the previous slot (a free-running grabber's stamp duplicate + gap per
+beat cycle); an external sender that stamps the instant it paces on has no such offset. Since issue
+1367 slice D2 a 1:1 camera whose capture phase tracker is locked paces on the SAME tracked slot it
+stamps (`DecimationGate::note_stamp_slot`, `dupe_decimation::stamp_slot_action`): one slot per
+frame, a real duplicate slot dropped, a real missing slot filled by the starvation repeat above,
+so each ~17 min camera-edge crossing costs one duplicate or one missing slot and never a burst.
+Seeding and over-rate cameras keep the poll-time path.
 
 ### 6. Audio
 
