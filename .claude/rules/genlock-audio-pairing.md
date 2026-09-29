@@ -492,10 +492,11 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
 - **Ordering limit (review round 1).** A relabel is recognised only when the receiver's own step
   is seen on the same packet as the relabelled stamps or before them, while the skew hold runs
   (at most 10 s). A sender on the receiver's box shares its clock, so this always holds for
-  SongPlayer on resolume. A sender whose box steps FIRST reads as a stamp jump with no offset jump.
-  Stock OBS places it N slots late (a zero-filled gap), and the receiver's later step is placed
-  once by the hold's sender-first release, overwriting queued audio. This is unchanged by this
-  slice and is a follow-up.
+  SongPlayer on resolume. A sender whose box steps FIRST reads as a stamp jump with no offset jump,
+  which takes the stock path: appended under 70 ms, placed N slots late (a zero-filled gap) from
+  70 ms to 2 s, `handle_ts_jump` (the whole queued buffer dropped) over 2 s. The receiver's later
+  step is then placed once by the hold's sender-first release, overwriting queued audio. This is
+  unchanged by this slice and is a follow-up.
 - **Finding (ticket comment 5900705310): the remainder is repaid at 1000 ppm only at or over half a
   packet.** The timecode ASRC books a jump only at or over its band, max(half a packet, 10 ms) =
   16.7 ms for 1600-sample blocks. A smaller r is left to the level loop alone. Bench: r = 15.8 ms

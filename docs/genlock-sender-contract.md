@@ -226,10 +226,11 @@ max(half a block, 10 ms) up, by its level loop below that; camera-box issue 1381
 `genlock_audio_relabel` in `vendor/obs-studio/libobs/obs-source.c`). The receiver recognises a
 relabel only when its own step is seen on the same packet as the relabelled stamps or before them
 (while its skew hold runs, at most 10 s). That is always the case for a sender on the receiver's own
-box, which shares its clock. A sender whose box steps FIRST is not recognised: stock OBS places its
-stamp jump N slots late (a zero-filled gap), and the receiver's later step is then placed once by the
-skew hold, which overwrites queued audio. That case is a known gap, reported as a follow-up on issue
-1381. A sender whose chunks do not line up with
+box, which shares its clock. A sender whose box steps FIRST is not recognised: its stamp jump takes
+the stock OBS path (appended under 70 ms, placed N slots late with a zero-filled gap from 70 ms to
+2 s, the whole queued buffer dropped over 2 s), and the receiver's later step is then placed once by
+the skew hold, which overwrites queued audio. That case is a known gap, reported as a follow-up on
+issue 1381. A sender whose chunks do not line up with
 boundaries **MUST** keep the raw submission wall clock (SongPlayer 0.69.0-dev.10 / its issue 224
 stamps its paced blocks on their boundary, camera-box issue 1294). Samples
 **MUST** be delivered at real-time rate (`samples_per_boundary = 48000 · interval_seconds`); a
