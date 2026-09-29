@@ -99,11 +99,19 @@ impl RealtimeAsrcCompensator {
         if !self.timecode || !self.level_captured {
             return;
         }
-        // RED stub (issue 1381): a placement only drops what is owed, as before.
-        if placed {
-            self.step_recover_set(0.0);
+        if !placed {
+            self.book_placement_jump(place_err_ms, packet_ms);
+            return;
         }
+        self.step_recover_set(0.0);
+        self.level_err_ema_ms = 0.0;
+        self.level_restore = false;
+        self.level_err_windows = 0;
+        self.window_level_sum_ms = 0.0;
+        self.window_level_count = 0;
         self.book_placement_jump(place_err_ms, packet_ms);
+        self.level_err_ema_ms = place_err_ms - self.level_target_ms;
+        self.level_err_ema_seeded = true;
     }
 
     /// Issue 1367: the booking band of one packet, ms: max(half the packet, [`PLACE_JUMP_MIN_MS`]).
@@ -144,9 +152,18 @@ impl RealtimeAsrcCompensator {
     /// mode and before the capture (like the booking). The ingest never asks while a skew hold runs.
     /// Mirror of the C `asrc_compensator_place_beyond_cap`.
     pub fn place_beyond_cap(&mut self, place_err_ms: f64, packet_ms: f64) -> bool {
-        // RED stub (issue 1381): no backstop yet.
-        let _ = (place_err_ms, packet_ms);
-        false
+        if !self.timecode || !self.level_captured {
+            return false;
+        }
+        let jump_ms = place_err_ms - (self.level_target_ms + self.level_err_ema_ms);
+        if jump_ms.abs() < Self::place_jump_band_ms(packet_ms)
+            || (self.step_recover_ms - jump_ms).abs() <= STEP_RECOVER_MAX_MS
+        {
+            return false;
+        }
+        self.place_jump_count = self.place_jump_count.saturating_add(1);
+        self.last_place_jump_ms = jump_ms;
+        true
     }
 
     /// Issue 1367: read and clear the recovery rate the last accepted call paid (servo sign). In

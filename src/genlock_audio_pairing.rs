@@ -771,18 +771,74 @@ pub fn audio_step_hold(
     timeline_reset: bool,
     step_min_ns: i64,
 ) -> (i64, AudioStepRelease) {
-    // RED stub (issue 1381): the skew hold is not implemented yet -- every packet maps through the
-    // live offset, as before.
-    let _ = (
-        s,
-        timecode,
-        raw_ts_ns,
-        packet_ns,
-        now_ns,
-        timeline_reset,
-        step_min_ns,
-    );
-    (off_live_ns, AudioStepRelease::None)
+    if !timecode {
+        let was = s.active;
+        s.active = false;
+        s.prev_packet_ns = 0;
+        let release = if was {
+            AudioStepRelease::Reset
+        } else {
+            AudioStepRelease::None
+        };
+        return (off_live_ns, release);
+    }
+    let had_prev = s.prev_packet_ns != 0;
+    let dev_ns = if had_prev {
+        raw_ts_ns.wrapping_sub(s.prev_raw_ns.wrapping_add(s.prev_packet_ns)) as i64
+    } else {
+        0
+    };
+    let jump_ns = if had_prev {
+        off_live_ns.wrapping_sub(s.prev_off_ns)
+    } else {
+        0
+    };
+    let age_ns = audio_stamp_age_ns(now_ns, raw_ts_ns, off_live_ns);
+    let prev_off_ns = s.prev_off_ns;
+    let prev_age_ns = s.prev_age_ns;
+    s.prev_off_ns = off_live_ns;
+    s.prev_raw_ns = raw_ts_ns;
+    s.prev_packet_ns = packet_ns;
+    s.prev_age_ns = age_ns;
+    let min = step_min_ns.unsigned_abs();
+    let followed = if dev_ns.unsigned_abs() > min {
+        dev_ns
+    } else {
+        0
+    };
+    if !s.active {
+        if !had_prev || timeline_reset || jump_ns.unsigned_abs() <= min {
+            return (off_live_ns, AudioStepRelease::None);
+        }
+        let held_ns = prev_off_ns.wrapping_sub(followed);
+        if off_live_ns.wrapping_sub(held_ns).unsigned_abs() <= packet_ns
+            || age_ns.wrapping_sub(prev_age_ns).unsigned_abs() <= packet_ns
+        {
+            return (off_live_ns, AudioStepRelease::None);
+        }
+        s.active = true;
+        s.held_off_ns = held_ns;
+        s.base_age_ns = prev_age_ns;
+        s.start_ns = now_ns;
+        s.step_ns = 0_i64.wrapping_sub(jump_ns);
+        return (held_ns, AudioStepRelease::None);
+    }
+    if timeline_reset {
+        s.active = false;
+        return (off_live_ns, AudioStepRelease::Reset);
+    }
+    s.held_off_ns = s.held_off_ns.wrapping_sub(followed);
+    if off_live_ns.wrapping_sub(s.held_off_ns).unsigned_abs() <= packet_ns
+        || age_ns.wrapping_sub(s.base_age_ns).unsigned_abs() <= packet_ns
+    {
+        s.active = false;
+        return (off_live_ns, AudioStepRelease::Followed);
+    }
+    if now_ns.wrapping_sub(s.start_ns) >= AUDIO_STEP_HOLD_MAX_NS {
+        s.active = false;
+        return (off_live_ns, AudioStepRelease::Timeout);
+    }
+    (s.held_off_ns, AudioStepRelease::None)
 }
 
 /// Issue 1381 — the placement move a release applies, ns: the live offset minus the held one (the
