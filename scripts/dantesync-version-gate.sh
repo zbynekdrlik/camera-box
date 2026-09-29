@@ -104,7 +104,11 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # PTP re-joins the multicast on its own after 10 s instead of needing a service restart, and /status
 # reports NTP-only + is_locked=false while PTP is stale instead of a frozen LOCK; the strih-lx USB NIC
 # replugs of 29.9 left the fleet date master on NTP until a restart stepped the whole fleet).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.13.0}"
+# Bumped 2026-09-29: fleet rolled to v1.14.0 (dantesync PR 125 -- a grandmaster FREQUENCY step, e.g. a
+# Dante leader re-election (~25 ppm), is detected and fed forward into the phase-lock integrator: the
+# learned frequency settles in <= ~22 s instead of the ~8-12 min PI slew that pulled every OBS media
+# clock off the Dante tick for minutes, camera-box issue 1372).
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.14.0}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 
