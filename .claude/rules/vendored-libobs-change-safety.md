@@ -671,3 +671,15 @@ and drives it tick by tick. Lessons from its two review rounds:
 - **Patch scripts vs `cargo fmt`.** rustfmt re-wraps long calls into one argument per line. A python
   patch whose needle was written against the pre-format text then matches nothing (`count 0`).
   Copy needles from the file as it is now, after formatting.
+- **A log line that the live acceptance reads needs its own value test (the relabel slice, review
+  round 1).** Wiring needles pin the format string. Parity gates pin the decision. Neither pins
+  the numbers the line prints, and three log mutants survived both (a flipped step sign,
+  stamp − offset, a zero residual).
+  - The fix: lift the log helper verbatim into the tests/c harness.
+  - Give the harness a `blog` stub carrying `__attribute__((format(printf, 2, 3)))` that
+    `vsnprintf`s the LOG_INFO line into a buffer. The attribute keeps `-Wformat=2` quiet about the
+    non-literal format.
+  - Count LOG_DEBUG lines separately. A count of the stock debug lines (the "exceeded
+    TS_SMOOTHING_THRESHOLD" / "jumped" lines) also proves that no packet reached the stock path.
+  - Put the exact expected line in the truth table.
+  - Worked example: `tests/genlock_audio_relabel_ingest_1381.rs`.
