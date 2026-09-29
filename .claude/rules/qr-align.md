@@ -5,6 +5,7 @@ paths:
   - "tests/python/test_qr_align_pins_1003.py"
   - "tests/python/test_qr_align_tail_1160.py"
   - "tests/harness_qr_align_step_1003.rs"
+  - "tests/python/test_n2_grid_consumers_1367.py"
 ---
 
 # Floor-3 per-run camera auto-align (`qr_align_pins.py`, the [4i/8align] E2E step) — #1003
@@ -204,10 +205,33 @@ This is NOT a settle-time issue and NOT fixable by the rejected wall-clock frame
 source presents `grid_floor(T − 50 ms − pin, canvas / N)`: the presented age is a pure function of the
 pin (66.7 ms at pins 1-16, +16.7 ms per source interval of pin), independent of the arrival lag while
 it stays inside the budget. The #1161 ACQUIRE bracket below was removed as dead code with the N>=2
-boundary conveyor. The additive plan (`current_pin + hold`) still moves exactly one frame per
-~16.7 ms of hold, but the budget check's `arrival_floor + hold` model is stale on the grid: the audit
-head is always one source frame older than the target, every camera reads ~86 ms, and a hold over
-~8 ms reads over the 94 ms ceiling (BUDGET_BOUND soft-release). A follow-up for the main to decide.
+boundary conveyor. **FIXED by slice D1b (design 5881031249)** — the `arrival_floor + hold` model
+was stale on the grid (the audit head is always one source frame older than the target, every camera
+read ~86 ms, a one-frame hold read 103 > 94 = BUDGET_BOUND). Now, for an input `--strih-log`
+confirms as a D1 grid input (`scripts/genlock_n2_grid.py`: `n2_early=` on every audit line + N ≥ 2):
+- its arrival floor is the grid twin's present age of the pin (66.7 at pin 3), not latency + skew;
+- the hold is rounded to the NEAREST whole source frame k and the pin is `pin_for_frames(current, k)`
+  (a relative step of one source interval = one frame, checked through the twin) — a raw
+  `current + hold` moves a pin-position-dependent number of frames (pin 3 + 13 ms moves none);
+- the budget tests the RESULTING present age at the planned pin: one frame at pin 3 → pin 20, 83.3
+  ≤ 94, planned; two frames → 100 > 94, BUDGET_BOUND with the honest `66.7 + 33.3 = 100` arithmetic;
+- the result names `n2_grid_inputs` and keeps the head skew as `n2_grid_head_skew_ms` (the labelled
+  arrival-lag diagnostic). `qr-align.sh` passes its `qr-align-strih-<RUN>.log` (to the plan AND to
+  `--floor-samples-ok`); each fetch try writes `.part` files and promotes the log + JSON together, so
+  a failed re-fetch never leaves a JSON paired with a truncated window. An explicit
+  `QR_ALIGN_JITTER_JSON` takes only `QR_ALIGN_STRIH_LOG`. No log / a pre-D1 log (no `n2_early=`) /
+  an N==1 input = the old arithmetic byte-for-byte (golden outputs of both real pre-D1 fixtures);
+- the issue-1253 `samples < 3` phantom guard is a HEAD-SKEW guard: a grid input keeps its twin
+  floor in a thin window (its age is the pin's, exact from one line). Dropping a faster grid camera
+  sent `align()` to the budget-unchecked floor3 plan (`3 + 33 = 36` → 100 ms, over the ceiling).
+
+**What it does NOT change at pin 3 (a finding for the main, 5881164769):** the 94 ms ceiling leaves
+room for exactly ONE extra frame, and in the full `align()` flow the #1252 quantum gate runs first —
+a spread under 25 ms (one frame) is `already-aligned-quantum`, a spread of 25 ms or more rounds to ≥ 2
+frames = 100 ms = BUDGET_BOUND. So the planner plans the one-frame case (pinned at
+`floor_aware_partition`, `tests/python/test_n2_grid_consumers_1367.py`), but the flow never applies a
+pin at pin 3 until the quantum gate or the ceiling is revisited for the grid (pre-D1 it was
+budget-bound for every spread of 25 ms or more too).
 
 (Historical, pre-D1.) **The frame-mover LANDED (sibling genlock-C, `genlock_relock_acquire_should_hold` in
 `src/genlock_backlog.rs` + `vendor/obs-studio/libobs/obs-source.c`):** on a pin RISE the setter zeroes

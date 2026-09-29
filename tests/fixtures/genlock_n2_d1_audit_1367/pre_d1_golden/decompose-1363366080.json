@@ -1,0 +1,108 @@
+{
+  "anchor_src": "NDI cam3",
+  "rows": [
+    {
+      "cap_avg_ms": 15.96,
+      "d_latency_ms": 0,
+      "d_skew_ms": 0.0,
+      "excess_ms": 0.0,
+      "floor_ms": 70.66666666666667,
+      "grabber": {},
+      "latency_ms": 3,
+      "mean_head_skew_ms": 67.66666666666667,
+      "owner": "anchor (fastest)",
+      "samples": 3,
+      "src": "NDI cam3"
+    },
+    {
+      "cap_avg_ms": 16.0,
+      "d_latency_ms": 0,
+      "d_skew_ms": 0.6666666666666572,
+      "excess_ms": 0.6666666666666572,
+      "floor_ms": 71.33333333333333,
+      "grabber": {},
+      "latency_ms": 3,
+      "mean_head_skew_ms": 68.33333333333333,
+      "owner": "within-noise",
+      "samples": 3,
+      "src": "NDI cam4"
+    },
+    {
+      "cap_avg_ms": 15.923333333333332,
+      "d_latency_ms": 0,
+      "d_skew_ms": 0.6666666666666572,
+      "excess_ms": 0.6666666666666572,
+      "floor_ms": 71.33333333333333,
+      "grabber": {},
+      "latency_ms": 3,
+      "mean_head_skew_ms": 68.33333333333333,
+      "owner": "within-noise",
+      "samples": 3,
+      "src": "NDI cam5"
+    },
+    {
+      "cap_avg_ms": 15.88,
+      "d_latency_ms": 3,
+      "d_skew_ms": -0.6666666666666714,
+      "excess_ms": 2.3333333333333286,
+      "floor_ms": 73.0,
+      "grabber": {},
+      "latency_ms": 6,
+      "mean_head_skew_ms": 67.0,
+      "owner": "strih-config +3ms latency pin",
+      "samples": 3,
+      "src": "NDI cam2"
+    },
+    {
+      "cap_avg_ms": 15.906666666666666,
+      "d_latency_ms": 0,
+      "d_skew_ms": 6.0,
+      "excess_ms": 6.0,
+      "floor_ms": 76.66666666666667,
+      "grabber": {},
+      "latency_ms": 3,
+      "mean_head_skew_ms": 73.66666666666667,
+      "owner": "grabber/cambox +6ms",
+      "samples": 3,
+      "src": "NDI cam6"
+    },
+    {
+      "cap_avg_ms": 15.9,
+      "d_latency_ms": 0,
+      "d_skew_ms": 12.0,
+      "excess_ms": 12.0,
+      "floor_ms": 82.66666666666667,
+      "grabber": {},
+      "latency_ms": 3,
+      "mean_head_skew_ms": 79.66666666666667,
+      "owner": "grabber/cambox +12ms",
+      "samples": 3,
+      "src": "NDI cam7"
+    },
+    {
+      "cap_avg_ms": 15.94,
+      "d_latency_ms": 0,
+      "d_skew_ms": 18.33333333333333,
+      "excess_ms": 18.33333333333333,
+      "floor_ms": 89.0,
+      "grabber": {},
+      "latency_ms": 3,
+      "mean_head_skew_ms": 86.0,
+      "owner": "grabber/cambox +18ms",
+      "samples": 3,
+      "src": "NDI cam1"
+    }
+  ],
+  "summary": {
+    "anchor_floor_ms": 70.66666666666667,
+    "anchor_src": "NDI cam3",
+    "floor_spread_ms": 18.33333333333333,
+    "omitted_sources": [],
+    "slowest_excess_ms": 18.33333333333333,
+    "slowest_floor_ms": 89.0,
+    "slowest_owner": "grabber/cambox +18ms",
+    "slowest_src": "NDI cam1",
+    "transport_cap_avg_spread_ms": 0.11999999999999922,
+    "transport_uniform": true
+  }
+}

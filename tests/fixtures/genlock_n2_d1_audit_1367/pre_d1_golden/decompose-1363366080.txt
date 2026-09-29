@@ -1,0 +1,13 @@
+camera       floor   lat_ms   skew_ms  cap_avg     d_lat    d_skew  owner
+-------------------------------------------------------------------------
+cam3          70.7        3      67.7    15.96       0.0       0.0  anchor (fastest)
+cam4          71.3        3      68.3    16.00       0.0       0.7  within-noise
+cam5          71.3        3      68.3    15.92       0.0       0.7  within-noise
+cam2          73.0        6      67.0    15.88       3.0      -0.7  strih-config +3ms latency pin
+cam6          76.7        3      73.7    15.91       0.0       6.0  grabber/cambox +6ms
+cam7          82.7        3      79.7    15.90       0.0      12.0  grabber/cambox +12ms
+cam1          89.0        3      86.0    15.94       0.0      18.3  grabber/cambox +18ms
+
+SUMMARY: cross-camera floor spread = 18.3 ms  (anchor NDI cam3 @ 70.7 ms -> slowest NDI cam1 @ 89.0 ms)
+  transport cap_avg spread = 0.1 ms -> transport_uniform=True  (uniform => NDI transport is NOT the per-camera differentiator)
+  slowest camera owner: grabber/cambox +18ms

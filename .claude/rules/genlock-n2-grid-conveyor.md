@@ -6,6 +6,9 @@ paths:
   - "tests/genlock_n2_grid_parity_1367.rs"
   - "tests/genlock_n2_grid_wiring_1367.rs"
   - "vendor/obs-studio/libobs/obs-source.c"
+  - "scripts/genlock_n2_grid.py"
+  - "tests/python/test_genlock_n2_grid_twin_1367.py"
+  - "tests/fixtures/genlock_n2_present_age_1367.tsv"
 ---
 
 # The grid-exact N>=2 conveyor (issue 1367 slice D1, design 5879332205)
@@ -100,16 +103,38 @@ arrival phase; the grid presents 50 ms + pin, rounded up. The stream `Zaloha kam
 60 fps feed into the 30 fps stream canvas; live 29.9.2026 01:33: `video_delay_ms=1017`, depth 59,
 peak 63, cap 64) goes from 1017 to 1050 ms, +33 ms. Aligning it back is a pin move by the
 supervisor — any pin in 951..966 ms presents 1016.7 ms (61 source frames; 960 is the middle) —
-recorded as a deploy step. The Design-question on the ticket asks the main to confirm that, rather
-than scoping the base to shallow pins.
+recorded as a deploy step. ROZHODNUTÉ 5881023948 confirmed it: the one fleet constant stays, the
+supervisor re-pins `Zaloha kamera` 1000 → 960 right after the stream-box deploy (read back, and
+`latency-pins-baseline.json` updated in the same change); scoping the base to shallow pins is rejected.
 
 One source interval of pin is exactly one frame (the target moves at pin = 16.67 k); a pin inside
-the same band keeps the frame. `scripts/qr_align_pins.py` adds a measured present-age delta to the
-current pin, so a one-frame delta (≥ 13.7 ms from pin 3) moves exactly one frame. KNOWN GAP (for
-the main to decide, not changed in D1): its budget check models the resulting present age as
-`arrival_floor + hold` with `arrival_floor = latency + mean head skew`, and on the grid conveyor
-the head is always one source frame older than the target, so every camera reads ~86 ms and any
-hold over ~8 ms reads over the 94 ms ceiling → BUDGET_BOUND soft-release instead of a pin.
+the same band keeps the frame, so a NON-whole hold added to the pin moves a pin-position-dependent
+number of frames (pin 3 + 13 ms moves none, pin 16 + 1 ms a whole one).
+
+## The dev1 twin and its consumers (slice D1b, design 5881031249)
+
+`scripts/genlock_n2_grid.py` is the Python twin: `present_age_ns(pin_ms, source_interval_ns)` (the
+per-second-grid floor of `ceil((base + pin) × fps / 1 s) × 1 s / fps`; the Rust per-tick age is it
+or 1 ns more),
+`target_stamp_ns` on a port of the grid helpers, `frames_for_hold` (nearest frame) + `pin_for_frames`
+(`round(current + k × interval)`, checked through the twin), and `grid_inputs_from_audit` — an input
+runs the grid iff EVERY one of its audit lines carries `n2_early=` (only a D1 build prints it) and
+received frames per render tick is within 0.25 of an integer N ≥ 2. Every tick is one of consumed /
+holds / late_holds / underruns (an empty queue, counted in `get_closest_frame`), so the ratio is
+`Δreceived / Δ(all four)`: a camera with held or empty ticks keeps reading 2. One line: its
+cumulative ratio, trusted only past 30 ticks. `classify_audit_inputs` also gives `n2_early_rate` =
+Δn2_early / Δticks: the share of ticks presented one frame OLDER than the twin says (the 0.1 %
+budget base). It never retypes the age base: `load_age_base_ns()` reads
+`GENLOCK_N2_AGE_BASE_NS` from this file at run time and fails closed. **Changing the constant or the
+target:** `tests/fixtures/genlock_n2_present_age_1367.tsv` is read by BOTH
+`present_age_table_shared_with_the_python_twin_1367` (here, every canvas tick of one second at each
+row's own canvas rate) and the twin's pytest — update the table, both sides follow or fail.
+
+The consumers (`qr_align_pins.py` floors + planner, `prerecord_phase_calibrate.measured_by_camera`,
+`arrival_floor_decompose.py`) read the twin for a confirmed grid input; the raw audit window rides next
+to the jitter JSON (`--strih-log`, passed by `scripts/lib/qr-align.sh` and the [4g/8] step). See
+`qr-align.md` for the planner and its one gap at pin 3 (the 94 ms ceiling allows exactly one extra
+frame, and the issue-1252 quantum gate takes a one-frame spread first).
 
 ## The budget: arrival lag vs 66.7 ms (measured 28.9.2026)
 
@@ -199,7 +224,7 @@ Full-bundle genlock deploy on strih-lx AND the stream box (libobs changed; the s
 4. Re-read the stream A/V level (expected video ≈ +10 ms later in common mode) and move the stream
    `NDI 2ME PGM` pin by the measured common mode as a recorded step (an N==1 deep source quantizes
    its depth in 33.3 ms steps, so a sub-frame shift may not be realizable through that pin).
-5. Once the main confirms the deep-pin shift: move `Zaloha kamera` 1000 → 960 ms (1016.7 ms, its
+5. The deep-pin shift is confirmed (ROZHODNUTÉ 5881023948): move `Zaloha kamera` 1000 → 960 ms (1016.7 ms, its
    pre-deploy `video_delay_ms` 1017), a recorded step, and re-read its audit line.
 6. The target is keyed on the RECEIVER wall clock (by design): a dantesync date step that reaches
    strih-lx before or after the cameras costs about 2 held or early ticks per N>=2 camera. Read

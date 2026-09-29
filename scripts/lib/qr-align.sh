@@ -71,6 +71,11 @@ qr_align_run() {
   # Override with QR_ALIGN_JITTER_JSON (an explicit pre-computed path) for a manual run or a test;
   # QR_ALIGN_RESET_SETTLE_S (shed) / QR_ALIGN_AUDIT_WINDOW_S (clean-sample accrual) tune the waits.
   local jitter_json="${QR_ALIGN_JITTER_JSON:-}"
+  # issue 1367 slice D1b: the raw audit window the jitter JSON was made from rides next to it
+  # (--strih-log), so qr_align_pins.py can confirm which inputs run the D1 grid (n2_early= on every
+  # line + received ~= N x consumed) and read their present age from the grid twin. An explicit
+  # QR_ALIGN_JITTER_JSON takes only an explicit QR_ALIGN_STRIH_LOG (never a stale window of ours).
+  local strih_log="${QR_ALIGN_STRIH_LOG:-}"
   if [ -z "$jitter_json" ] && [ -n "${STRIH_USER:-}" ] && [ -n "${PROBE_BIN_DIR:-}" ] \
       && [ -n "${OUTDIR:-}" ] && command -v strih_log_line_count >/dev/null 2>&1; then
     local _log="$OUTDIR/qr-align-strih-${RUN_ID:-$$}.log"
@@ -105,24 +110,29 @@ qr_align_run() {
           # and re-fetch from the SAME post-reset $_start (now with more accrued lines) BEFORE letting
           # that fallback fire, so a transient thin window is not mistaken for a genuinely-missing
           # floor. Best-effort throughout: any hiccup keeps whatever fetch succeeded.
+          # issue 1367 D1b: each try writes its window + report to .part files and promotes BOTH only
+          # when both are good, so a failed re-fetch never truncates the window the JSON was made from
+          # (--jitter-json and --strih-log always name one matching pair).
           local _try
           for _try in 1 2; do
             if strih_log_since_line "$host" "$STRIH_USER" "$password" "$_start" 120 \
-                > "$_log" 2>/dev/null && [ -s "$_log" ] \
-                && "$PROBE_BIN_DIR/genlock-jitter-report" --file "$_log" --json > "$_jj" 2>/dev/null \
-                && [ -s "$_jj" ]; then
+                > "$_log.part" 2>/dev/null && [ -s "$_log.part" ] \
+                && "$PROBE_BIN_DIR/genlock-jitter-report" --file "$_log.part" --json > "$_jj.part" 2>/dev/null \
+                && [ -s "$_jj.part" ] && mv -f "$_log.part" "$_log" && mv -f "$_jj.part" "$_jj"; then
               jitter_json="$_jj"
+              strih_log="$_log"
               # Re-fetch ONCE more if a floor is still missing/phantom (read-only sufficiency check).
               # Bounded (<=2), so an unreadable/invalid jitter-json (--floor-samples-ok exit 2) simply
               # spends the one extra window before the same floor+delta fallback -- harmless.
               if [ "$_try" -lt 2 ] && ! python3 "$here/qr_align_pins.py" --floor-samples-ok \
-                  --host "$host" --sources "$sources" --jitter-json "$_jj"; then
+                  --host "$host" --sources "$sources" --jitter-json "$_jj" --strih-log "$_log"; then
                 echo "[qr-align] #1168 arrival-floor audit short on samples for >=1 align source; re-fetching once more (+${_window}s) before the budget-unchecked fallback" >&2
                 sleep "$_window"
                 continue
               fi
               echo "[qr-align] #1161 post-reset arrival-floor audit fetched -> $_jj (floor-aware plan enabled)" >&2
             else
+              rm -f "$_log.part" "$_jj.part"
               echo "WARNING: [qr-align] #1161 could not fetch the post-reset strih genlock audit; the plan falls back to the inert-prone floor+delta — see qr_align_pins.py's own warning." >&2
             fi
             break
@@ -136,6 +146,7 @@ qr_align_run() {
 
   local -a args=(--host "$host" --password "$password" --sources "$sources" --execute)
   [ -n "$jitter_json" ] && args+=(--jitter-json "$jitter_json")
+  [ -n "$jitter_json" ] && [ -n "$strih_log" ] && args+=(--strih-log "$strih_log")
   # #1209: persist any UNDECODABLE align screenshot's PNG into the run dir, so a reproducible
   # [4i/8align] abort (e.g. cam3 mostly undecodable) can be root-caused from the actual pixels.
   # OUTDIR is recording-e2e's run dir; absent for a standalone/manual call, where persistence is
