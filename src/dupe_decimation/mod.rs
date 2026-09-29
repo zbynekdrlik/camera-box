@@ -56,15 +56,17 @@
 // keeps its public path `camera_box::dupe_decimation::X` via the glob re-exports, and the
 // submodules carry byte-identical logic. Dependency direction (acyclic): `signature` (pure
 // hash/sig) and `shed` (shed-decision logic + constants) are independent leaves — neither has a
-// code dependency on the other or on `gate`; `gate` (the DecimationGate state machine +
-// DupeShedLog + summary) depends on both via `use super::*`. See
-// `.claude/rules/genlock-emit-gate-pacing.md`.
+// code dependency on the other or on `gate`; `gate` (the DecimationGate state machine) depends on
+// both via `use super::*`. Issue 1367 slice D2 moved `shed_log` (DupeShedLog + its summary line)
+// out of `gate` unchanged for the same budget. See `.claude/rules/genlock-emit-gate-pacing.md`.
 mod gate;
 mod shed;
+mod shed_log;
 mod signature;
 
 pub use gate::*;
 pub use shed::*;
+pub use shed_log::*;
 pub use signature::*;
 
 #[cfg(test)]
