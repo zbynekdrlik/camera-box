@@ -247,9 +247,10 @@ pub fn audio_relabel(
     packet_ns: u64,
     step_min_ns: i64,
 ) -> bool {
-    // RED stub (issue 1381, design 5900385541): the relabel is not recognised yet
-    let _ = (stamp_jump_ns, off_jump_ns, packet_ns, step_min_ns);
-    false
+    let min = step_min_ns.unsigned_abs();
+    stamp_jump_ns.unsigned_abs() > min
+        && off_jump_ns.unsigned_abs() > min
+        && stamp_jump_ns.wrapping_add(off_jump_ns).unsigned_abs() < packet_ns
 }
 
 /// Issue 1381 (design 5900385541) — the two jumps [`audio_relabel`] reads, from the skew-hold state
@@ -269,9 +270,16 @@ pub fn audio_step_relabel_jumps(
     off_live_ns: i64,
     raw_ts_ns: u64,
 ) -> Option<(i64, i64)> {
-    // RED stub (issue 1381, design 5900385541): no jumps are read yet
-    let _ = (s, timecode, off_live_ns, raw_ts_ns);
-    None
+    if !timecode || s.prev_packet_ns == 0 {
+        return None;
+    }
+    let stamp_jump_ns = raw_ts_ns.wrapping_sub(s.prev_raw_ns.wrapping_add(s.prev_packet_ns)) as i64;
+    let mapped_ns = if s.active {
+        s.held_off_ns
+    } else {
+        s.prev_off_ns
+    };
+    Some((stamp_jump_ns, off_live_ns.wrapping_sub(mapped_ns)))
 }
 
 /// Issue 1381 (review round 1) — one packet outside a hold moves the nominal age. In the warm-up after
