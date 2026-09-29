@@ -1031,16 +1031,22 @@ module to `/lib/modules/<kernel>/updates/r8152.ko`, which the next kernel would 
 - **setup-strih step `1b`** (`strih_nic_driver_apply` in `scripts/lib/strih-nic-driver.sh`) runs the
   PURE planner `strih_nic_driver_plan` over `dkms status`, `modinfo -k <kernel> -F version r8152` and the
   plain-copy versions: `NOOP` (installed in DKMS for the running kernel, modinfo reads 2.21.4, no plain
-  copy left) / `UPGRADE` (a plain copy or another DKMS version is there) / `INSTALL` / `SKIP` (`none`).
+  copy left) / `UPGRADE` (a plain copy, or another DKMS version installed for the running kernel) /
+  `INSTALL` / `SKIP` (`none`).
   A non-NOOP plan: verify `SHA256SUMS`, copy to `/usr/src/realtek-r8152-2.21.4`, `dkms add`, `dkms build`,
   move the plain copy aside to `/var/lib/camera-box/strih-nic-driver/<kernel>/`, `dkms install`,
   `depmod -a`. A failed move or install puts every moved copy back (+ depmod). It also installs for every
   OTHER installed kernel that has headers (`/lib/modules/<k>/build/Makefile`): DKMS `AUTOINSTALL` covers
-  only kernels installed after the add. Only when EVERY kernel's install succeeded is another DKMS
-  version of the package removed (`dkms remove --all`): DKMS deletes a version's module files only on a
-  kernel where that version is ACTIVE, and the install has made the vendored one active there, so the
-  remove just unbuilds the old one. A failed install keeps the old version on disk, and a kernel that
-  cannot be installed never ends up with only the in-tree driver. Then the udev rule (taken only from a
+  only kernels installed after the add (a kernel WITHOUT headers is skipped; installing its headers runs
+  the DKMS headers hook). After the installs, another DKMS version of the package is removed PER KERNEL
+  (`dkms remove -v <old> -k <k>`) and only where the vendored one is now installed: DKMS deletes a
+  version's module files only on a kernel where that version is ACTIVE, so there the remove just
+  unbuilds the old one. On a kernel the vendored one is not installed on (no headers), the old version
+  is KEPT with a WARNING naming the kernel (a `--all` would delete the only driver that kernel has);
+  that does not change the running kernel's plan. A failed install stops before any removal. As
+  `dkms install` copies over the active old module before its own depmod, and DKMS uninstalls the new
+  one when that depmod fails, a failed install re-installs the previously active version (still built)
+  and reads the version back. Then the udev rule (taken only from a
   tree that verifies, installed when it differs, `udevadm control --reload-rules`, never a `trigger`),
   and a re-plan that must read NOOP. Missing `dkms` / headers are apt-installed first (via
   `obs_box_apt_update`); headers still missing after that stop the step before any DKMS call.

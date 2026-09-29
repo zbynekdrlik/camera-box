@@ -18,9 +18,9 @@
 #   * strih_nic_driver_plan (PURE) -- the installed state vs the box fact -> SKIP | NOOP | INSTALL | UPGRADE.
 #   * strih_nic_driver_apply -- setup-strih step 1b: the vendored source -> /usr/src, dkms add/build/install
 #     for the running kernel and every other installed kernel with headers, the hand-copied plain module
-#     moved aside, another DKMS version removed only once every install succeeded, the udev rule. It
-#     NEVER reloads the module live (`modprobe -r r8152` drops the rig NIC, the ssh session running this
-#     and dantesync's PTP): the DKMS module loads at the next boot.
+#     moved aside, another DKMS version removed per kernel once the vendored one is installed there, the
+#     udev rule. It NEVER reloads the module live (`modprobe -r r8152` drops the rig NIC, the ssh session
+#     running this and dantesync's PTP): the DKMS module loads at the next boot.
 #   * strih_nic_grade_rows / strih_nic_grade_report -- verify-strih item 36: the loaded module version, DKMS
 #     for the running kernel, the USB device speed, the Ethernet link speed and the NetworkManager profile
 #     pinned to the rig NIC, each graded against the box facts. An unreadable value is never a pass.
@@ -142,6 +142,18 @@ strih_nic_dkms_other_versions() {
   done < <(strih_nic_dkms_rows "$pkg")
 }
 
+# strih_nic_dkms_other_active PACKAGE VERSION KERNEL  (stdin: `dkms status`) -> the OTHER version of
+# PACKAGE that is installed (= active, DKMS keeps one per kernel) for KERNEL, or nothing.
+strih_nic_dkms_other_active() {
+  local pkg="${1:?package required}" ver="${2:?version required}" kern="${3:?kernel required}" v k s
+  while IFS='|' read -r v k s; do
+    [ -n "$v" ] && [ "$v" != "$ver" ] && [ "$k" = "$kern" ] && [ "$s" = installed ] || continue
+    printf '%s' "$v"
+    return 0
+  done < <(strih_nic_dkms_rows "$pkg")
+  return 0
+}
+
 # --- the planner (PURE) ----------------------------------------------------------------------------
 
 # strih_nic_driver_plan SPEC KERNEL MODINFO_VERSION PLAIN_VERSIONS  (stdin: `dkms status`) -> ONE token:
@@ -149,8 +161,10 @@ strih_nic_dkms_other_versions() {
 #   NOOP     SPEC's package is installed in DKMS for KERNEL, the module KERNEL would load (MODINFO_VERSION,
 #            `modinfo -k KERNEL -F version <module>`) is SPEC's version, and no hand-copied plain module is
 #            left in /lib/modules/KERNEL/updates (PLAIN_VERSIONS empty).
-#   UPGRADE  an earlier install has to be replaced: DKMS knows another version of the package, or a plain
-#            copy is present (PLAIN_VERSIONS = the version of each one, `unknown` when unreadable).
+#   UPGRADE  an earlier install has to be replaced on KERNEL: another version of the package is the one
+#            DKMS has installed for KERNEL, or a plain copy is present (PLAIN_VERSIONS = the version of
+#            each one, `unknown` when unreadable). Another version left on OTHER kernels only (one without
+#            headers keeps it, see _strih_nic_driver_remove_other_versions) does not change KERNEL's plan.
 #   INSTALL  anything else: nothing yet, or SPEC only partly in place.
 # rc 1, nothing on stdout, one stderr line: an empty KERNEL or a SPEC this tree does not vendor.
 strih_nic_driver_plan() {
@@ -166,7 +180,7 @@ strih_nic_driver_plan() {
   fi
   status="$(cat)"
   state="$(strih_nic_dkms_state "$STRIH_NIC_DRV_PACKAGE" "$STRIH_NIC_DRV_VERSION" "$kern" <<<"$status")"
-  others="$(strih_nic_dkms_other_versions "$STRIH_NIC_DRV_PACKAGE" "$STRIH_NIC_DRV_VERSION" <<<"$status")"
+  others="$(strih_nic_dkms_other_active "$STRIH_NIC_DRV_PACKAGE" "$STRIH_NIC_DRV_VERSION" "$kern" <<<"$status")"
   mv="$(strih_nic_driver_version_norm "$mi" || true)"
   plain="${plain//[[:space:]]/}"
   if [ "$state" = installed ] && [ "$mv" = "$STRIH_NIC_DRV_VERSION" ] && [ -z "$plain" ]; then
@@ -283,9 +297,11 @@ _strih_nic_driver_restore_plain() {
 # a plain copy of ANOTHER version refuses before anything changes; the module is built; the known plain
 # copy is moved to the backup dir; `dkms install` (over an older DKMS version, which stays until the
 # caller removes it once every kernel is installed); a failed move or install puts every moved copy
-# back (+ depmod). On the path from the hand install this never leaves the kernel without a driver on disk.
+# back (+ depmod). `dkms install` copies the new module over the active old one before its own depmod,
+# and on a depmod failure DKMS uninstalls the new one, so the old one is gone from disk: a failed install
+# therefore re-installs the previously active version (still built) and reads it back.
 _strih_nic_driver_install_kernel() {
-  local k="$1" state f pv
+  local k="$1" state f pv prev now
   local -a from=() to=()
   while IFS= read -r f; do
     [ -n "$f" ] || continue
@@ -296,6 +312,7 @@ _strih_nic_driver_install_kernel() {
     fi
   done < <(strih_nic_driver_plain_copies "$k")
   state="$(strih_nic_driver_dkms_status | strih_nic_dkms_state "$STRIH_NIC_DRV_PACKAGE" "$STRIH_NIC_DRV_VERSION" "$k")"
+  prev="$(strih_nic_driver_dkms_status | strih_nic_dkms_other_active "$STRIH_NIC_DRV_PACKAGE" "$STRIH_NIC_DRV_VERSION" "$k")"
   if [ "$state" != installed ] && [ "$state" != built ]; then
     echo "  dkms build ${STRIH_NIC_DRV_PACKAGE}/${STRIH_NIC_DRV_VERSION} for ${k}"
     dkms build -m "$STRIH_NIC_DRV_PACKAGE" -v "$STRIH_NIC_DRV_VERSION" -k "$k" || {
@@ -315,29 +332,54 @@ _strih_nic_driver_install_kernel() {
     echo "  dkms install ${STRIH_NIC_DRV_PACKAGE}/${STRIH_NIC_DRV_VERSION} for ${k}"
     if ! dkms install -m "$STRIH_NIC_DRV_PACKAGE" -v "$STRIH_NIC_DRV_VERSION" -k "$k"; then
       _strih_nic_driver_restore_plain "$k" "${from[@]}" -- "${to[@]}"
-      echo "strih-nic-driver: dkms install for ${k} failed -- any hand-copied module is back in place, an older DKMS version is kept" >&2
+      if [ -n "$prev" ] && [ "$(strih_nic_driver_dkms_status | strih_nic_dkms_state "$STRIH_NIC_DRV_PACKAGE" "$prev" "$k")" != installed ]; then
+        dkms install -m "$STRIH_NIC_DRV_PACKAGE" -v "$prev" -k "$k" >&2 || true
+        now="$(strih_nic_driver_version_norm "$(modinfo -k "$k" -F version "$STRIH_NIC_DRV_MODULE" 2>/dev/null || true)" || true)"
+        echo "strih-nic-driver: dkms install for ${k} failed -- re-installed the previous ${STRIH_NIC_DRV_PACKAGE}/${prev}, ${k} now loads version '${now:-none}'" >&2
+      else
+        echo "strih-nic-driver: dkms install for ${k} failed -- any hand-copied module is back in place${prev:+, the previous ${prev} is still installed}" >&2
+      fi
       return 1
     fi
   fi
   depmod -a "$k" || { echo "strih-nic-driver: depmod -a ${k} failed" >&2; return 1; }
 }
 
-# _strih_nic_driver_remove_other_versions -> `dkms remove --all` of every OTHER version of the package,
-# called only after every kernel's install succeeded. DKMS deletes a version's module files only on a
-# kernel where that version is ACTIVE, and `dkms install` has made the vendored version the active one,
-# so this only unbuilds the old version. A failed install before this point keeps the old version.
+# _strih_nic_driver_remove_other_versions -> every OTHER version of the package removed PER KERNEL, run
+# after the installs: `dkms remove -m <pkg> -v <old> -k <kernel>` only on a kernel where the vendored
+# version is now installed (the old one is no longer active there, so DKMS only unbuilds it; the version
+# goes away with its last kernel). On a kernel the vendored version is NOT installed on (no headers, so
+# nothing built it), the old version is kept -- a `--all` would delete the only driver that kernel has --
+# with a WARNING naming it. A version DKMS knows only as `added` (never built) is removed with --all.
 _strih_nic_driver_remove_other_versions() {
-  local old
+  local status old v k s built
+  status="$(strih_nic_driver_dkms_status)"
   while IFS= read -r old; do
     [ -n "$old" ] || continue
-    echo "  dkms remove ${STRIH_NIC_DRV_PACKAGE}/${old} (replaced by ${STRIH_NIC_DRV_VERSION} on every kernel)"
-    dkms remove -m "$STRIH_NIC_DRV_PACKAGE" -v "$old" --all || {
-      echo "strih-nic-driver: dkms remove of ${STRIH_NIC_DRV_PACKAGE}/${old} failed" >&2; return 1; }
-  done < <(strih_nic_driver_dkms_status | strih_nic_dkms_other_versions "$STRIH_NIC_DRV_PACKAGE" "$STRIH_NIC_DRV_VERSION")
+    built=0
+    while IFS='|' read -r v k s; do
+      [ "$v" = "$old" ] && [ -n "$k" ] || continue
+      built=1
+      if [ "$(strih_nic_dkms_state "$STRIH_NIC_DRV_PACKAGE" "$STRIH_NIC_DRV_VERSION" "$k" <<<"$status")" = installed ]; then
+        echo "  dkms remove ${STRIH_NIC_DRV_PACKAGE}/${old} for ${k} (${STRIH_NIC_DRV_VERSION} is installed there)"
+        dkms remove -m "$STRIH_NIC_DRV_PACKAGE" -v "$old" -k "$k" || {
+          echo "strih-nic-driver: dkms remove of ${STRIH_NIC_DRV_PACKAGE}/${old} for ${k} failed" >&2; return 1; }
+      else
+        echo "  WARNING: ${STRIH_NIC_DRV_PACKAGE}/${old} is kept for ${k} (${s}): ${STRIH_NIC_DRV_VERSION} is not installed there -- install linux-headers-${k} (DKMS then builds it) or remove that kernel, then re-run" >&2
+      fi
+    done < <(strih_nic_dkms_rows "$STRIH_NIC_DRV_PACKAGE" <<<"$status")
+    if [ "$built" = 0 ]; then
+      echo "  dkms remove ${STRIH_NIC_DRV_PACKAGE}/${old} (added, never built)"
+      dkms remove -m "$STRIH_NIC_DRV_PACKAGE" -v "$old" --all || {
+        echo "strih-nic-driver: dkms remove of ${STRIH_NIC_DRV_PACKAGE}/${old} failed" >&2; return 1; }
+    fi
+  done < <(strih_nic_dkms_other_versions "$STRIH_NIC_DRV_PACKAGE" "$STRIH_NIC_DRV_VERSION" <<<"$status")
 }
 
 # _strih_nic_driver_other_kernels RUNNING -> every other installed kernel whose headers are present (DKMS
-# AUTOINSTALL only covers kernels installed AFTER the package was added), one per line.
+# AUTOINSTALL only covers kernels installed AFTER the package was added), one per line. A kernel without
+# headers is skipped: nothing can build for it until its headers are installed, and then the DKMS headers
+# hook builds this package for it.
 _strih_nic_driver_other_kernels() {
   local run="$1" d k
   for d in "$(strih_nic_driver_modules_root)"/*/; do
