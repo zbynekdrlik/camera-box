@@ -42,6 +42,7 @@ SETUP = SCRIPTS / "setup-strih.sh"
 VERIFY = SCRIPTS / "verify-strih.sh"
 DS_LIB = SCRIPTS / "lib" / "strih-dantesync.sh"
 
+SERVER_EXEC = "/usr/local/bin/dantesync"  # the server role's ExecStart
 KEEP_LINE = "dantesync.service: kept running (unit unchanged) -- no restart, the fleet date is untouched"
 
 
