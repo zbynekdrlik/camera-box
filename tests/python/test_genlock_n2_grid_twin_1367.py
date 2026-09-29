@@ -195,6 +195,43 @@ class TestGridInputsFromAudit:
         assert g.grid_inputs_from_audit("") == {}
         assert g.grid_inputs_from_audit(None) == {}
 
+    @staticmethod
+    def _cam1_lines(pairs):
+        """cam1's D1 audit line re-counted: one line per (received, consumed) pair."""
+        import re
+        line = [ln for ln in D1_LOG.read_text(encoding="utf-8").splitlines()
+                if "audit 'NDI cam1'" in ln][0]
+        out = []
+        for rec, con in pairs:
+            ln = re.sub(r"received=\d+", f"received={rec}", line)
+            out.append(re.sub(r"consumed=\d+", f"consumed={con}", ln))
+        return "\n".join(out)
+
+    def test_a_non_integral_rate_ratio_is_not_confirmed(self):
+        # review finding (D1b): round-half-up turned a 1.5 ratio into N = 2. A ratio more than a
+        # quarter away from an integer is inconclusive, never a guessed multiple.
+        assert g.grid_inputs_from_audit(self._cam1_lines([(1000, 1000), (1300, 1200)])) == {}
+        c = g.classify_audit_inputs(self._cam1_lines([(1000, 1000), (1300, 1200)]))
+        assert c["NDI cam1"]["n"] is None
+        # a few holds keep a real 60-into-30 pair near 2 (2.2 here): still confirmed
+        assert g.grid_inputs_from_audit(self._cam1_lines([(1000, 500), (1330, 650)])) == {
+            "NDI cam1": I60}
+
+    def test_a_just_restarted_cumulative_count_is_inconclusive(self):
+        # one line with received=3 consumed=2 (1.5 -> 2 under plain rounding) and one with too few
+        # consumed ticks to trust: neither confirms a grid input
+        assert g.grid_inputs_from_audit(self._cam1_lines([(3, 2)])) == {}
+        assert g.grid_inputs_from_audit(self._cam1_lines([(40, 20)])) == {}
+        assert g.grid_inputs_from_audit(self._cam1_lines([(120, 60)])) == {"NDI cam1": I60}
+
+    def test_the_n2_early_rate_over_the_window_ticks(self):
+        # the design budget: n2_early delta / ticks <= 0.1 %; ticks = consumed + holds + late holds
+        c = g.classify_audit_inputs(D1_LOG.read_text(encoding="utf-8"))
+        assert c["NDI cam3"]["n2_early_rate"] == pytest.approx(2 / 300)
+        assert c["NDI cam1"]["n2_early_rate"] == 0.0
+        assert g.classify_audit_inputs(self._cam1_lines([(120, 60)]))["NDI cam1"][
+            "n2_early_rate"] is None                         # one line: no window, no rate
+
     def test_the_d1_jitter_json_is_what_genlock_jitter_report_makes_of_the_log(self):
         # the fixture JSON is hand-derived from its log; keep it honest: samples = line count,
         # latency_ms = the last line's, mean_head_skew_ms = the mean of ts_head_skew_ms

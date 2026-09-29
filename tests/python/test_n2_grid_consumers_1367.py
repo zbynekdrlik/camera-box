@@ -73,11 +73,32 @@ class TestQrAlignArrivalFloors:
         floors = qa.arrival_floors_from_jitter(_d1_json(), CAMS7)
         assert all(85.0 < v < 88.0 for v in floors.values())
 
-    def test_a_grid_input_below_min_samples_is_still_dropped(self):
+    def test_a_grid_input_keeps_its_twin_floor_below_min_samples(self):
+        # review finding (D1b): the issue-1253 samples guard exists because a HEAD-SKEW floor from 2
+        # samples is one frame off; the twin's age comes from the pin alone, so a thin window must
+        # not drop a grid input (dropping a faster one pushed align() onto the budget-unchecked,
+        # non-whole-frame floor3 fallback). A head-skew source keeps the guard.
         jj = _d1_json()
         jj["NDI cam4"]["samples"] = 2
         floors = qa.arrival_floors_from_jitter(jj, CAMS7, grid_inputs=_d1_grid())
-        assert "NDI cam4" not in floors and len(floors) == 6
+        assert floors["NDI cam4"] == pytest.approx(66.667, abs=1e-3) and len(floors) == 7
+        assert "NDI cam4" not in qa.arrival_floors_from_jitter(jj, CAMS7)
+
+    def test_floor_samples_sufficient_follows_the_same_rule(self):
+        jj = _d1_json()
+        jj["NDI cam4"]["samples"] = 2
+        assert qa.floor_samples_sufficient(jj, CAMS7, grid_inputs=_d1_grid()) is True
+        assert qa.floor_samples_sufficient(jj, CAMS7) is False
+
+    def test_the_floor_samples_cli_reads_the_audit_log(self, tmp_path):
+        jj = _d1_json()
+        jj["NDI cam4"]["samples"] = 2
+        p = tmp_path / "jitter.json"
+        p.write_text(json.dumps(jj), encoding="utf-8")
+        base = [_SCRIPTS / "qr_align_pins.py", "--floor-samples-ok", "--host", "x",
+                "--sources", ",".join(CAMS7), "--jitter-json", p]
+        assert _run(base + ["--strih-log", D1_LOG]).returncode == 0
+        assert _run(base).returncode == 1
 
 
 class TestQrAlignPlanOnTheGrid:
@@ -177,12 +198,13 @@ class _GridBarrier:
         return shot
 
 
-def _main_json(monkeypatch, capsys, lag, extra):
+def _main_json(monkeypatch, capsys, lag, extra, jitter_path=D1_JSON):
     pins = {s: 3 for s in SRC}
     monkeypatch.setattr(qa, "barrier_screenshot", _GridBarrier(lag, pins))
     monkeypatch.setattr(qa, "read_current_pins", lambda s, h, p: dict(pins))
     monkeypatch.setattr("time.sleep", lambda s: None)
-    rc = qa.main(["--host", "h", "--sources", ",".join(SRC), "--jitter-json", str(D1_JSON)] + extra)
+    rc = qa.main(["--host", "h", "--sources", ",".join(SRC), "--jitter-json", str(jitter_path)]
+                 + extra)
     out = capsys.readouterr()
     assert rc == 0, out.err
     return json.loads(out.out.strip().splitlines()[-1]), out.err
@@ -213,6 +235,20 @@ class TestAlignFlowOnD1:
                                {"NDI cam1": 1, "NDI cam2": 0, "NDI cam3": 0, "NDI cam4": 0},
                                ["--strih-log", str(D1_LOG)])
         assert res["status"] == "already-aligned-quantum"
+
+    def test_a_thin_grid_window_stays_on_the_grid_plan(self, monkeypatch, capsys, tmp_path):
+        # review finding (D1b): a FASTER grid camera with samples=2 used to be dropped, and the run
+        # fell back to the budget-unchecked floor3 plan (pin 3 + 33 = 36 = 100 ms, over the ceiling)
+        jj = _d1_json()
+        jj["NDI cam2"]["samples"] = 2
+        p = tmp_path / "jitter.json"
+        p.write_text(json.dumps(jj), encoding="utf-8")
+        res, err = _main_json(monkeypatch, capsys,
+                              {"NDI cam1": 2, "NDI cam2": 0, "NDI cam3": 0, "NDI cam4": 0},
+                              ["--strih-log", str(D1_LOG)], jitter_path=p)
+        assert "partial arrival-floor audit" not in err
+        assert res["status"] == "budget-bound"
+        assert {o["target_ms"] for o in res["over_budget"]} == {100.0}
 
     def test_an_unreadable_log_warns_and_keeps_the_old_arithmetic(self, monkeypatch, capsys, tmp_path):
         res, err = _main_json(monkeypatch, capsys,
@@ -271,6 +307,19 @@ class TestPrerecordMeasuredByCamera:
         assert r.returncode == 0, r.stderr
         assert out.read_text() == (GOLDEN / f"prerecord-measured-{run}.json").read_text()
 
+    def test_a_missing_age_constant_is_a_named_failure(self, monkeypatch, tmp_path, capsys):
+        # review finding (D1b): a traceback here read as "no usable per-camera measurement" in the
+        # [4g/8] step; the failure must name the constant and its Rust source
+        def _boom(repo_root=None):
+            raise g.N2GridConstantError("GENLOCK_N2_AGE_BASE_NS not found in src/genlock_n2_grid.rs")
+        monkeypatch.setattr(g, "load_age_base_ns", _boom)
+        rc = ppc.main(["--jitter-json", str(D1_JSON), "--strih-log", str(D1_LOG),
+                       "--out", str(tmp_path / "m.json")])
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "GENLOCK_N2_AGE_BASE_NS" in err and "src/genlock_n2_grid.rs" in err
+        assert not (tmp_path / "m.json").exists()
+
     def test_the_4g8_step_passes_its_calibration_log(self):
         e2e = (_SCRIPTS / "recording-e2e.sh").read_text(encoding="utf-8")
         start = e2e.index('if python3 "$HERE/prerecord_phase_calibrate.py"')
@@ -319,6 +368,19 @@ class TestDecompose:
         assert row["owner"].startswith("within-noise")
         assert "arrival lag +12ms" in row["owner"] and "diagnostic" in row["owner"]
 
+    def test_the_n2_early_rate_is_surfaced_on_grid_rows(self):
+        # review finding (D1b): the twin assumes every tick presents on target; an early tick
+        # presents one frame older. cam3's n2_early rises 2 over 300 ticks (0.67 %, over the 0.1 %
+        # budget of genlock-n2-grid-conveyor.md) -- named on its row, the others read 0 and stay quiet
+        res = afd.mine_run_dir(str(D1_DIR))
+        rows = {r["src"]: r for r in res["rows"]}
+        assert rows["NDI cam3"]["n2_early_rate"] == pytest.approx(2 / 300)
+        assert "n2_early 0.67% of ticks" in rows["NDI cam3"]["owner"]
+        assert "over the 0.1% budget" in rows["NDI cam3"]["owner"]
+        for s in CAMS7:
+            if s != "NDI cam3":
+                assert rows[s]["n2_early_rate"] == 0.0 and "n2_early" not in rows[s]["owner"]
+
     def test_a_grid_camera_with_a_deeper_pin_is_strih_config(self):
         jj = _d1_json()
         jj["NDI cam2"]["latency_ms"] = 20                     # one frame deeper on the grid
@@ -336,6 +398,7 @@ mkdir -p "$T/bin" "$T/probe" "$T/out"
 cat > "$T/bin/python3" <<'STUB'
 #!/usr/bin/env bash
 printf 'PY:%s\n' "$*" >> "$STUB_LOG"
+case "$*" in *--floor-samples-ok*) [ -n "${FLOOR_SHORT:-}" ] && exit 1;; esac
 exit 0
 STUB
 chmod +x "$T/bin/python3"
@@ -344,7 +407,13 @@ chmod +x "$T/probe/genlock-jitter-report"
 export PATH="$T/bin:$PATH" STUB_LOG="$T/stub.log"
 : > "$STUB_LOG"
 strih_log_line_count() { echo 5; }
-strih_log_since_line() { echo "12:00:00.000: genlock-fifo audit 'NDI cam1': received=2 consumed=1 n2_early=0"; }
+strih_log_since_line() {
+  local n
+  n=$(( $(cat "$T/fetch.n" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" > "$T/fetch.n"
+  if [ -n "${FETCH_FAILS_AFTER:-}" ] && [ "$n" -gt "$FETCH_FAILS_AFTER" ]; then return 1; fi
+  echo "12:00:00.000: genlock-fifo audit 'NDI cam1': received=2 consumed=1 n2_early=0 try=$n"
+}
 export STRIH_USER=newlevel PROBE_BIN_DIR="$T/probe" OUTDIR="$T/out" RUN_ID=t1367 \
   QR_ALIGN_SOURCES='NDI cam1' QR_ALIGN_RESET_SETTLE_S=0 QR_ALIGN_AUDIT_WINDOW_S=0
 . "$R/scripts/lib/qr-align.sh"
@@ -370,6 +439,17 @@ class TestQrAlignShPassesTheAuditLog:
         log = f"{tmp_path}/out/qr-align-strih-t1367.log"
         assert f"--jitter-json {tmp_path}/out/qr-align-jitter-t1367.json" in calls[0]
         assert f"--strih-log {log}" in calls[0]
+
+    def test_a_failed_refetch_keeps_the_first_window_paired(self, tmp_path):
+        # review finding (D1b): the bounded re-fetch used to write straight into the run's log, so a
+        # second fetch that failed at the ssh step truncated the log while --jitter-json still named
+        # the first window's JSON -- the pair no longer matched and the grid detection read nothing
+        calls = self._run(tmp_path, {"FLOOR_SHORT": "1", "FETCH_FAILS_AFTER": "1"})
+        log = tmp_path / "out" / "qr-align-strih-t1367.log"
+        assert f"--jitter-json {tmp_path}/out/qr-align-jitter-t1367.json" in calls[0]
+        assert f"--strih-log {log}" in calls[0]
+        assert "try=1" in log.read_text()
+        assert not list((tmp_path / "out").glob("*.part"))
 
     def test_an_override_json_takes_the_override_log_only(self, tmp_path):
         jj = tmp_path / "given.json"
