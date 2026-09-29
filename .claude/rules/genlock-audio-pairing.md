@@ -367,17 +367,24 @@ over a minute.
   age leaves it alone, and one that stays out of band for 10 min (`AUDIO_STEP_NOMINAL_REANCHOR_NS`,
   a re-buffered sender) re-anchors it. A hold freezes it. A timeline reset KEEPS it and never starts
   a hold: a sender whose stamps jumped past OBS's 2 s limit stepped first, and the receiver's own
-  step brings its age back (review round 2). The known cost: a sender that restarts with a
-  different transport lag keeps the old nominal until the re-anchor. A step within that window can
-  hold until the 10 s bound (one placement), and a wall step inside the first second after a
-  connect is followed by the warm-up.
+  step brings its age back (review round 2). The known costs:
+  - A sender that restarts (a timeline reset) with a DIFFERENT transport lag keeps the old nominal
+    until the 10 min re-anchor. In that window an ordinary receiver-first step can hold until the
+    10 s bound and then place once. A step of about minus the lag change (within a packet) brings
+    the age back onto the stale nominal and is misread as sender-first: the stale stamps are placed
+    at once, and a stamp-jumping sender's later follow is booked on top. Review bench, lag +60 ms
+    after a restart, a -60 ms step 200 s later: a stamp-jumping sender was 60 ms off for about 62 s
+    (one placement, one booking); a catch-up sender 60 ms off for about 3.3 s. A restart with the
+    same lag behaves exactly as with none. Accepted for the over-2 s sender-first case above.
+  - A wall step inside the first second after a connect is followed by the warm-up.
 - **A sender that stepped FIRST is never held** (review round 1). Example: a cross-box source
   whose sender is the date master. Its stamps (a jump, or a caught-up burst or pause) are already on
   the new wall when the receiver steps, so the receiver's step brings their age back to nominal. That
   packet is a zero-length hold, released `followed` with the whole step as its residual, so it is
   placed once. The window before left the audio a step off its stamps, and that placement repairs it.
-  Appended instead, a step under the owed cap would be booked and paid over about 90 s. A backward
-  sender step over 2 s leaves every packet in the window 2.5 s late, so OBS resets its own timeline
+  Appended instead, a step over OBS's 70 ms smoothing but under the owed cap would be booked and
+  paid over about 90 s (under 70 ms the append would have un-booked it). A backward sender step
+  over 2 s leaves every packet in the window a step late, so OBS resets its own timeline
   on each; the receiver-step packet is then placed by that reset, with no release line.
 - **Release.** The hold ends as `followed` when the held offset (moved by every stamp jump over
   2 ms) is back within one packet of the live one, OR when the stamps' age is back within one packet
