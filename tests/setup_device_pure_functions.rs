@@ -320,9 +320,10 @@ fn bak_cruft_cleanup_is_wired_into_ndi_and_dropin_provisioning_steps() {
 // ---------------------------------------------------------------------------------------------
 // issue 1342 — the unconsumed issue-792 "CAMn (30p)" stream is removed. STEP 7 no longer WRITES the
 // publish-30p.conf drop-in and instead DELETES a leftover one, so a re-provisioned live box converges
-// to the single `CAMn (usb)` output. The same STEP 7 writes the receiver-side NDI config
-// (/etc/ndi/ndi-config.v1.json, networks.ips = every managed sender) + the camera-box NDI_CONFIG_DIR
-// drop-in (scripts/lib/ndi-discovery.sh).
+// to the single `CAMn (usb)` output. Issue 1389 (ROZHODNUTÉ 5879261962): a cambox carries NO
+// networks.ips -- the same STEP 7 now REMOVES the receiver-side NDI config it used to write (strips
+// the list, keeps any other key, and drops the camera-box NDI_CONFIG_DIR drop-in with the file when
+// nothing else is left), through the shared plan/apply pair in scripts/lib/ndi-discovery.sh.
 // ---------------------------------------------------------------------------------------------
 
 #[test]
@@ -343,23 +344,38 @@ fn publish_30p_dropin_is_removed_not_written_in_step_7_1342() {
 }
 
 #[test]
-fn ndi_discovery_config_and_dropin_written_in_step_7_1342() {
+fn step_7_strips_the_cambox_ndi_config_never_writes_it_1389() {
     let body = std::fs::read_to_string(script()).unwrap();
     let guard_pos = body
         .find("stop here -- never run the destructive")
         .expect("source-guard comment must still be present");
     let live_flow = &body[guard_pos..];
-    let write = live_flow
-        .find("ndi_discovery_write_config \"$NDI_DISCOVERY_SYSTEM_DIR\"")
-        .expect("STEP 7 must write /etc/ndi/ndi-config.v1.json (issue 1342)");
-    let dropin = live_flow
-        .find("ndi_discovery_dropin_content > \"$NDI_DISCOVERY_CAMBOX_DROPIN\"")
-        .expect("STEP 7 must write the camera-box NDI_CONFIG_DIR drop-in (issue 1342)");
+    let plan = live_flow
+        .find("ndi_discovery_cambox_plan \"$NDI_DISCOVERY_SYSTEM_DIR\" \"$NDI_DISCOVERY_CAMBOX_DROPIN\"")
+        .expect("STEP 7 must plan the cambox NDI config cleanup (issue 1389)");
+    let apply = live_flow
+        .find("ndi_discovery_cambox_apply_plan \"$NDI_DISCOVERY_SYSTEM_DIR\" \"$NDI_DISCOVERY_CAMBOX_DROPIN\"")
+        .expect("STEP 7 must apply that plan (issue 1389)");
     let step8 = live_flow.find("STEP 8").expect("STEP 8 banner");
     assert!(
-        write < step8 && dropin < step8,
-        "both writes belong to STEP 7"
+        plan < apply && apply < step8,
+        "the cleanup belongs to STEP 7"
     );
+    let code: String = live_flow
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for banned in [
+        "ndi_discovery_write_config",
+        "ndi_discovery_dropin_content",
+        "ndi_discovery_sender_ips",
+    ] {
+        assert!(
+            !code.contains(banned),
+            "a cambox carries no networks.ips: setup-device must not call {banned} (issue 1389)"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

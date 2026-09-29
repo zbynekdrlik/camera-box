@@ -18,6 +18,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${HERE}/lib/strih-box-facts.sh"   # issue 1361: the ONE per-box fact loader (--box <name>)
 # shellcheck source=scripts/lib/strih-provision.sh
 . "${HERE}/lib/strih-provision.sh"
+# shellcheck source=scripts/lib/strih-dantesync.sh
+. "${HERE}/lib/strih-dantesync.sh"   # issue 1372: item 6c grades the dantesync unit
 # shellcheck source=scripts/lib/strih-drm-output.sh
 . "${HERE}/lib/strih-drm-output.sh"   # issue 1346: item 4c grades the DRM-lease HDMI output
 # shellcheck source=scripts/lib/ndi-discovery.sh
@@ -794,6 +796,29 @@ case "$DS_ROLE_VERDICT" in
   *)               bad "(dantesync-role) unknown verdict '${DS_ROLE_VERDICT}'" ;;
 esac
 
+# 6c) dantesync UNIT content (issue 1372), read-only: the installed unit is byte-identical to the one
+#     setup-strih step 2 emits for the role, no drop-in overrides it, and the running process runs its
+#     ExecStart (strih_dantesync_unit_verdict). Step 2 restarts only on a change (a date-master restart
+#     steps the whole fleet date), so drift is caught HERE, never by a blind restart on a deploy.
+DS_UNIT_PATH_V="/etc/systemd/system/dantesync.service"
+DS_ARGS_V="$(strih_lx_dantesync_args 2>/dev/null)" || DS_ARGS_V=""
+DS_UNIT_ARGV_V="$(strih_dantesync_running_argv 2>/dev/null || true)"
+if DS_UNIT_WANT="$(strih_dantesync_unit_text "$DS_ROLE_V" "$DS_ARGS_V" 2>/dev/null)"; then
+  DS_UNIT_V="$(strih_dantesync_unit_verdict "$DS_UNIT_WANT" "$DS_UNIT_PATH_V" "${DS_UNIT_PATH_V}.d" "$DS_UNIT_ARGV_V" || true)"
+else
+  DS_UNIT_V=no-unit
+fi
+DS_UNIT_FIX="re-run setup-strih.sh in the nightly window (step 2 then restarts dantesync; a date-master restart steps the fleet date)"
+case "$DS_UNIT_V" in
+  ok)          ok "(dantesync-unit) unit matches the provisioned ${DS_ROLE_V} unit, no drop-in, the process runs it" ;;
+  masked)      bad "(dantesync-unit) ${DS_UNIT_PATH_V} is masked by an operator (-> /dev/null) -- setup-strih leaves a mask alone; unmask it deliberately" ;;
+  differs)     bad "(dantesync-unit) ${DS_UNIT_PATH_V} is missing or differs from the provisioned ${DS_ROLE_V} unit -- ${DS_UNIT_FIX}" ;;
+  dropin)      bad "(dantesync-unit) a ${DS_UNIT_PATH_V}.d/*.conf drop-in overrides the provisioned unit -- ${DS_UNIT_FIX}" ;;
+  not-applied) bad "(dantesync-unit) the running dantesync (${DS_UNIT_ARGV_V}) is not the unit's ExecStart -- restart it in the nightly window (a date-master restart steps the fleet date)" ;;
+  no-unit)     bad "(dantesync-unit) the box facts give no valid dantesync unit (role '${DS_ROLE_V}') -- fix scripts/strih-boxes/$(strih_lx_hostname).env" ;;
+  *)           bad "(dantesync-unit) cannot read ${DS_UNIT_PATH_V} (verdict '${DS_UNIT_V}')" ;;
+esac
+
 # 30) ffmpeg/ffprobe present (issue 1317): the on-box recording-verdict E2E spawns ffprobe to demux
 #     the strih recording; without ffmpeg the [8/8] on-box verdict fails. FAIL loud (release gate).
 FFMPEG_MISSING=""
@@ -899,9 +924,10 @@ else
 fi
 
 # 34) NDI discovery receiver config (issue 1342): networks.ips lists every PINNED managed NDI sender
-#     (the SAME scripts/lib/ndi-discovery.sh generator setup-strih.sh step 4b writes with -- every
-#     camera + strih-lx/stream; the traveling resolume hostname is best-effort, never required) and
-#     carries no networks.discovery, in BOTH readers' config -- the desktop user's ~/.ndi (OBS +
+#     (the SAME scripts/lib/ndi-discovery.sh generator setup-strih.sh step 4b writes with --
+#     strih-lx/stream; the traveling resolume hostname is best-effort, never required), lists NO cambox
+#     IP (issue 1389: this OBS's discovery connection into a cambox aborts camera-box when OBS exits)
+#     and carries no networks.discovery, in BOTH readers' config -- the desktop user's ~/.ndi (OBS +
 #     bkshading-service) and the system dir /etc/ndi (intercom-hub, whose ProtectHome hides ~/.ndi) --
 #     plus the intercom-hub NDI_CONFIG_DIR drop-in. Read-only; FAIL on any miss (a renumbered sender
 #     FAILs until the box is re-provisioned). Placed BEFORE item 32, which closes the list.
@@ -914,9 +940,9 @@ else
     _ndi_text="$(cat "${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}" 2>/dev/null || true)"
     _ndi_verdict="$(ndi_discovery_config_verdict "$_ndi_text" "$_ndi_required")"
     if [ "$_ndi_verdict" = ok ]; then
-      ok "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: networks.ips lists every managed sender"
+      ok "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: networks.ips lists every managed sender and no cambox"
     else
-      bad "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: $(printf '%s' "$_ndi_verdict" | tr '\n' ' ' | sed 's/FAIL: //g')-- re-run setup-strih.sh step 4b (issue 1342)"
+      bad "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: $(ndi_discovery_verdict_oneline "$_ndi_verdict") -- re-run setup-strih.sh step 4b (issue 1342)"
     fi
   done
   # A traveling sender (resolume.lan, DHCP) is never REQUIRED, but when it resolves NOW to an address

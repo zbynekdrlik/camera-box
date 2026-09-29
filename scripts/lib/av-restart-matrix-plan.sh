@@ -28,7 +28,7 @@ EOF
   for k in $KINDS; do
     case "$k" in
       strih-obs) echo "  strih-obs = strih-lx ${STRIH_HOST} (strih-obs.service, the --user unit; $(strih_platform "$STRIH_HOST"))" ;;
-      cambox) echo "  cambox = ${CAMBOX} ${CAMBOX_IP} (camera-box.service; with no --cambox, --run restarts the first soak camera whose strih input reads connected, else this one)" ;;
+      cambox) echo "  cambox = ${CAMBOX} ${CAMBOX_IP} (camera-box.service)" ;;
       dantesync) echo "  dantesync = ${DANTE_NODE} ${DANTE_IP} (dantesync.service; with no --dantesync-node it follows the cambox)" ;;
       stream-obs) echo "  stream-obs = stream ${STREAM_HOST} (SUPERVISOR step: no session-agnostic path launches the canonical stream OBS)" ;;
     esac
@@ -57,17 +57,14 @@ EOF
   plan_cmd "${argv[@]}"
   cat <<EOF
       (bash ${HERE}/av-soak.sh --plan --hours 0 prints every step of one window: TEST-mode reads, the
-      connect-on-show hold, the burns, ONE strih-program sweep recorded on strih + stream, the in-place
-      decodes, the merge, its cleanup)
+      burns, ONE strih-program sweep recorded on strih + stream, the in-place decodes, the merge, its
+      cleanup)
       graded: python3 ${DECISION} grade-window --window-dir <dir>
       a baseline that is not PASS stops the matrix before any restart (--keep-going runs them anyway)
 
 PER RESTART, kind by kind, repeat r = 1..${REPEATS} (window dir w-NN-<kind>-rR):
   a. <run-dir>/STOP? then the guard + the idle proof (2.)
-  b. for cambox / dantesync: the restarted camera's strih receiver, read-only, before the restart
-     (report context, never graded): ssh <STRIH_USER>@${STRIH_HOST}: $(strih_log_remote_cmd linux tail 2000)
-       | genlock_park_state_of 'NDI <cam>' -> parked | connected | unread
-     then restart ONE component:
+  b. restart ONE component:
 EOF
   for k in $KINDS; do
     case "$k" in

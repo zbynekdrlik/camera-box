@@ -455,12 +455,54 @@ on the 5 s boundary vector); the live receive-path cure reproduces only live —
 fleet deploy (7 senders restarting within 45 s) after which every strih camera input's `received=`
 advances within 60 s with no WS heal and no OBS relaunch (the supervisor's post-deploy repro).
 
-## issue 1242 — the connect-on-show PARK is in-thread, never a hide-path thread stop
+## issue 1242 — no receiver ever parks (the connect-on-show park was REMOVED, 28.9.2026)
 
-A genlocked source flagged `genlock_connect_on_show` (the strih program-path role) PARKS while
-hidden: at the TOP of the receiver loop, before the reset block, it hands its receiver to the
-issue-1320 detached reaper and `continue`s; on show it re-arms `reset_ndi_receiver`. It never
-`break`s, never clears `s->running`, never empties `ndi_source_name`, and the forced behavior stays
-KEEP_ACTIVE — because libobs calls `info.hide` on the GRAPHICS thread, and the stock STOP_RESUME
-hide path would `pthread_join` the receiver thread there on every cut. Full mechanism, roles and
-consumer contract: `.claude/rules/strih-bandwidth-roles.md`.
+The strih low-bandwidth mechanism (the `genlock_connect_on_show` program-path role that PARKED a
+hidden genlocked input in-thread, the `genlock-park` log line, the always-connected `MV` monitor
+twins and the frontend multiview cell target) was removed on owner order 28.9.2026 ("cize vycistis
+strih obs aby tam neboli tie low bandwith sceny"): the strih-lx uplink cause is fixed in hardware
+(5 GbE, then 10 GbE). Every genlocked source keeps the issue-764 KEEP_ACTIVE keep-alive, always
+connected. Do not reintroduce a per-source connect-on-show or park path as a bandwidth workaround;
+if it is ever needed again, the removed in-thread design is in git history (never the stock
+STOP_RESUME hide path, which joins the receiver thread on the graphics thread).
+
+**One-time live migration (SUPERVISOR).** Steps 1-3 (at least clearing connect-on-show) run BEFORE
+this code lands in dev1's `~/devel/camera-box` checkout -- the enabled dev1 watchdog timers
+(frozen-strih-input / frozen-input / cadence / ndi-halving, and rig-status-update if enabled: its
+rig-health-audit no longer skips a parked camera's cadence / arrivals-low) run from that checkout and
+no longer SKIP a parked input, so a still-parking main would page -- or stop those timers across the
+gap. All of it before the first E2E / soak / restart-matrix run on this code (the E2E no longer
+holds connect-on-show):
+1. Read first (read-only WS on strih-lx): each `NDI camN` main's `genlock_connect_on_show`; every
+   scene whose name starts `MV ` and its private `show_in_multiview` / `camera_box_multiview_target`
+   (a retired twin keeps the key EMPTY), any leftover `__camera-box multiview refresh (issue 1242)`
+   scratch scene; the `MV NDI camN` inputs; and EVERY scene's items that reference a twin scene or a
+   twin input (the custom `MULTIVIEW` grid is the known one). Back up
+   `~/.config/obs-studio/basic/scenes/*.json`.
+2. Retire the launch path FIRST, so no OBS relaunch re-applies the roles: install this code's
+   `strih_scenes.py` (setup-strih step 6) and `strih-obs-start.sh` (step 8) -- step 6 also removes a
+   leftover `/usr/local/bin/strih_bandwidth_roles.py` -- then `rm -f
+   ~/.camera-box/connect-on-show-e2e-hold` on strih-lx and `rm -f
+   ~/.camera-box/connect-on-show-hold.json` on dev1.
+3. Over WS: set `genlock_connect_on_show: false` on every `NDI camN` (the old DistroAV still parks
+   until runbook step 6, the FULL-bundle deploy); in every scene that references a twin, add each original (`NDI camN` / `<scene>`)
+   at the twin item's transform and enabled state, THEN remove the twin item; set
+   `show_in_multiview: true` on every original scene a shown twin stood for.
+4. Remove the twin scenes (`MV Cam 1..7`, `MV Moderatori`, every other `MV <scene>` carrying the
+   `camera_box_multiview_target` key, empty or not, and a leftover refresh scratch scene), then the
+   `MV NDI cam1..7` inputs.
+5. Operator-view screenshot of the multiview (labels = program scenes, a cut lights the right cell,
+   a click selects the program scene).
+6. FULL-bundle deploy (vendored DistroAV + frontend), then the `foh1_video ether2` tx-drop delta.
+
+## Tier-0 syntax check of `ndi-source.cpp` (no cargo, no CMake) — issue 1242
+
+CI is the first real compile, but a `g++ -fsyntax-only -std=c++17 -fPIC -Wall -Wextra` of
+`vendor/distroav/src/ndi-source.cpp` passes locally (clean, zero warnings, ~seconds) with ONE stub
+`obsconfig.h` (the libobs recipe of `obs-drm-output.md`) and these include dirs: the stub dir,
+`vendor/distroav/src`, `vendor/distroav/lib/ndi` (the vendored NDI SDK header), `vendor/obs-studio/libobs`,
+`vendor/obs-studio/frontend/api`, and `/usr/include/x86_64-linux-gnu/qt6` plus its `QtCore`, `QtGui`,
+`QtWidgets`, `QtNetwork` subdirs. Put the command in a scratch script FILE (the worktree guard refuses
+an inline include-array). A patch that is removed wholesale (no later commit touched the file) is
+cleanest as `git checkout <last pre-patch rev> -- <file>`, proven by an empty `git diff <rev>`,
+then this syntax check, then the pwsh mirrors in both windows-genlock*.yml and the Rust/python pins.

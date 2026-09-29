@@ -20,7 +20,7 @@ meets the A/V and spread bounds within the settle time, 3/3 repeats. The matrix 
 | File | Role |
 |---|---|
 | `scripts/av-restart-matrix.sh` | orchestrator: `--plan` (DEFAULT, touches nothing), `--run`, `--report DIR`, `--stop-leftovers DIR` (the unit's ExecStopPost) |
-| `scripts/lib/av-restart-matrix.sh` | pure builders shared by plan AND run: every restart / health / leave-running remote text, the health predicate, the receiver-state read + the connected-camera pick, the window argv, the soak's slot, the window outcome/note, the stream supervisor step |
+| `scripts/lib/av-restart-matrix.sh` | pure builders shared by plan AND run: every restart / health / leave-running remote text, the health predicate, the default cambox (`av_matrix_default_cambox`), the window argv, the soak's slot, the window outcome/note, the stream supervisor step |
 | `scripts/lib/av-restart-matrix-plan.sh` | the `--plan` printout: a view of the orchestrator's resolved configuration (reads its globals), printed with the same builders `--run` executes |
 | `scripts/av_restart_matrix_decision.py` | pure decision: `record` (one matrix.tsv step), `grade-window` (one window, the baseline gate), `report` (kinds 3/3 + baseline; exit 0 PASS / 1 FAIL / 2 UNKNOWN / 3 input error) |
 | `scripts/av-soak.sh --lease-run-id` + `--lease-repo` | the soak's one opt-in: a window under a lease its caller holds -- verified and refreshed with the merged holder keep-alive (`rig_lease_refresh_if_mine`, the caller's repo + run id, the caller's exported `RIG_LEASE_MAX_HOLD_SECS`), never acquired or released; recording.state names no lease |
@@ -29,7 +29,7 @@ meets the A/V and spread bounds within the settle time, 3/3 repeats. The matrix 
 ## The contract
 
 - **Every window IS the soak** (`av-soak.sh --run --hours 0 --lease-run-id <matrix lease>`): its
-  reads-before-writes setup, the connect-on-show hold, ONE strih-program sweep recorded on strih +
+  reads-before-writes setup, ONE strih-program sweep recorded on strih +
   stream, the in-place decodes, the merge, its cleanup that a signal cannot cut short. Never extract
   or copy that step: `run_slot` is bound to the soak's setup/cleanup state. All soak rules apply to
   each window (`.claude/rules/av-soak.md`): TEST mode and the `Development` stream program are
@@ -49,9 +49,10 @@ meets the A/V and spread bounds within the settle time, 3/3 repeats. The matrix 
 - **One window lasts the soak's own slot** (`av_matrix_soak_slot_s`: `AV_SOAK_SLOT_SECS`, else the
   default read from the `SLOT_S=` line of `scripts/av-soak.sh`, the single source) + 600 s setup and
   cleanup. The ceiling and the plan's numbers follow it; no window length is typed in the matrix.
-- **The default cambox is a CONNECTED one.** With no `--cambox`, `--run` reads the strih OBS log once
-  and restarts the first soak camera (never cam2) whose strih main input is not parked; none -> the
-  first, logged. The dantesync node follows unless `--dantesync-node` names one.
+- **The default cambox** is the first soak camera that is not cam2 (`av_matrix_default_cambox`);
+  the dantesync node follows unless `--dantesync-node` names one. Every strih camera input is
+  always connected (the connect-on-show park was removed 28.9.2026), so a cambox restart is always
+  seen live by its strih receiver -- no receiver state is read or recorded.
 - **Before every mutation** (the baseline window, each restart):
   - the lease is still this run's (lost -> exit 5, the other run's lease left alone; the heartbeat
     is only ever bumped while the lease is ours);
@@ -110,8 +111,7 @@ meets the A/V and spread bounds within the settle time, 3/3 repeats. The matrix 
     UNKNOWN; the run stops, or aborts (exit 5) for an aborted window. Only the soak's own usage
     error (exit 3) before any restart is a refusal (4); any other window failure (a kill) is 5.
   - A kind is PASS only 3/3. The matrix is FAIL on any FAIL (baseline included), PASS only when the
-    baseline and every kind pass. A PASS kind whose restarts hit parked or unread receivers carries
-    a `CAVEAT:` line right under `VERDICT:` and in `report.json` (`caveats`).
+    baseline and every kind pass.
   - A baseline that is not PASS stops the run before any restart (`--keep-going` restarts anyway).
 - **Cleanup** (signals ignored):
   - A running window gets SIGTERM and its own cleanup is waited for (it is recorded as
@@ -123,32 +123,8 @@ meets the A/V and spread bounds within the settle time, 3/3 repeats. The matrix 
     still flags a recording: run `--stop-leftovers <run-dir>`, which runs `av-soak.sh
     --stop-leftovers` per such window and then releases the matrix's own lease, holder-checked.
 
-## The receiver confound (review round 1, reported, not solved here)
-
-Each window is a whole soak run, so its connect-on-show HOLD is taken at the window's start and
-restored at its end. The restart itself therefore happens with production roles: a hidden strih
-main input is PARKED (disconnected). A `cambox` / `dantesync` restart of a camera whose input was
-parked is not seen by a live receiver; the window's hold then connects it fresh, which the baseline
-window already covers. So a 3/3 PASS does not by itself prove a CONNECTED receiver survives a
-sender restart. Three things narrow it:
-- by default the matrix restarts a camera whose strih input reads CONNECTED (the camera on the strih
-  program stays shown between windows, since each window's cleanup restores the strih program);
-- it records the restarted camera's receiver state right before each restart (`matrix.tsv` column
-  `receiver`: parked / connected / unread / n/a, from the strih OBS log via `strih_log_remote_cmd`
-  + `genlock_park_state_of`; `connected` only when the tail carries a park line for SOME input --
-  with the bandwidth roles active a hidden input always logs one every 5 s -- else `unread`);
-- the report prints a NOTE per kind and a `CAVEAT:` under the verdict (and in `report.json`) when a
-  PASS kind's restarts hit parked or unread receivers.
-
-The alternative -- one hold for the WHOLE matrix (a second soak opt-in that verifies a caller-held
-hold and skips its own hold / restore / burn flip, the hold re-asserted after a strih OBS restart)
--- measures the connected case but changes the soak's per-window setup; it is a decision for the
-main session, not taken in this slice.
-
 ## Known limits (this slice)
 
-- The receiver confound above (the one-hold-for-the-whole-matrix variant is the main session's call,
-  on issue 1367).
 - The owner's "power cycle of any box" is not a kind: a remote cambox reboot is banned, so a power
   cycle is a physical step at the rig.
 - `dantesync` restarts only a CAMERA node (root ssh, the camera credential).
@@ -214,8 +190,8 @@ The fakes:
   + repo), logs the hold ceiling it inherited, and honours SIGTERM (its cleanup takes time);
 - `obs_phase2.py` (`AV_SOAK_OBS_DIR`), `sshpass` + `curl` on PATH -- the fake `sshpass` refuses a
   call without `-e` / `SSHPASS` or with the password in argv, and RUNS nothing: it answers each remote
-  text by its content (restart, health by invocation, painter probe, strih log tail with
-  `FAKE_PARKED` park lines);
+  text by its content (restart, health by invocation, painter probe) and fails any other text, so a
+  strih OBS log read would fail the run;
 - a tmp `RIG_LEASE_DIR`, never the real `/var/tmp/rig-lease`.
 
 The lease-inherit tests reuse the soak's own `rig` fixture; their lease helper stamps `acquired_at`

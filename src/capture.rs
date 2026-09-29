@@ -34,6 +34,12 @@ pub struct FrameInfo {
     /// module's doc for why this closes the SAME observability gap `send_stall` closed for the
     /// NDI send side, on the capture side instead.
     pub dequeue_duration_ms: f64,
+    /// Issue 1367 slice D2 — this buffer's V4L2 `sequence` number. uvcvideo increments it once per
+    /// frame the DEVICE sent, whether or not a buffer was free, so a gap is a frame the host lost;
+    /// a frame the device itself skipped leaves no gap (the tracker spots that one from the
+    /// timestamps). The capture phase tracker ([`crate::capture_phase`]) fits the camera period over
+    /// it. `0` where no real V4L2 metadata is available (the static getter, test fixtures).
+    pub sequence: u32,
 }
 
 /// Video frame data with metadata (for compatibility, still used for owned data)
@@ -1225,6 +1231,7 @@ impl VideoCapture {
             stride: self.stride,
             capture_monotonic_100ns,
             dequeue_duration_ms,
+            sequence: seq,
         };
 
         // Zero-copy: pass buffer slice directly to callback
@@ -1251,6 +1258,7 @@ impl VideoCapture {
             // the doc on `FrameInfo::capture_monotonic_100ns`.
             capture_monotonic_100ns: 0,
             dequeue_duration_ms: 0.0,
+            sequence: 0,
         }
     }
 
@@ -1356,6 +1364,7 @@ mod tests {
             stride: 3840,
             capture_monotonic_100ns: 0,
             dequeue_duration_ms: 0.0,
+            sequence: 0,
         };
         // Test Copy trait
         let copied = info;
@@ -1373,6 +1382,7 @@ mod tests {
             stride: 2560,
             capture_monotonic_100ns: 0,
             dequeue_duration_ms: 0.0,
+            sequence: 0,
         };
         assert_eq!(info.width, 1280);
         assert_eq!(info.height, 720);

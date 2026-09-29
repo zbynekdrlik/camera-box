@@ -294,17 +294,6 @@ def test_a_window_the_soak_stopped_is_unknown(tmp_path):
     assert "TEST mode" in rep["kinds"]["cambox"]["repeats"][1]["reason"]
 
 
-def test_the_restarted_cameras_receiver_state_is_reported_never_graded(tmp_path):
-    d = make_matrix(tmp_path, extra={("cambox", r): {"receiver": "parked"} for r in (1, 2, 3)})
-    rep = m.evaluate_dir(str(d), BOUNDS)
-    assert rep["kinds"]["cambox"]["verdict"] == m.PASS, "the receiver state is context, not a gate"
-    assert [x["receiver"] for x in rep["kinds"]["cambox"]["repeats"]] == ["parked"] * 3
-    assert rep["kinds"]["cambox"]["receivers"] == {"parked": 3}
-    text = m.render_text(rep)
-    assert "receiver parked" in text
-    assert "parked during 3/3" in text
-
-
 def test_a_missing_repeat_is_unknown_never_a_pass(tmp_path):
     d = make_matrix(tmp_path, skip={("cambox", 3)})
     rep = m.evaluate_dir(str(d), BOUNDS)
@@ -392,25 +381,3 @@ def test_the_four_restart_kinds_are_declared_once(kind):
     assert kind in m.KINDS
 
 
-def test_a_pass_on_parked_or_unread_receivers_carries_a_caveat_in_the_verdict_and_the_json(tmp_path):
-    d = make_matrix(tmp_path, extra={("cambox", 1): {"receiver": "parked"},
-                                     ("cambox", 2): {"receiver": "unread"},
-                                     ("cambox", 3): {"receiver": "connected"}})
-    rep = m.evaluate_dir(str(d), BOUNDS)
-    assert rep["verdict"] == m.PASS
-    assert len(rep["caveats"]) == 1 and "cambox" in rep["caveats"][0]
-    assert "parked 1" in rep["caveats"][0] and "unread 1" in rep["caveats"][0]
-    text = m.render_text(rep)
-    lines = text.splitlines()
-    v = next(i for i, line in enumerate(lines) if "VERDICT: PASS" in line)
-    assert "CAVEAT" in lines[v + 1], "the caveat sits right under the verdict"
-    r = report(d, "--json", str(d / "report.json"))
-    assert r.returncode == 0
-    assert json.loads((d / "report.json").read_text())["caveats"] == rep["caveats"]
-
-
-def test_connected_receivers_carry_no_caveat(tmp_path):
-    d = make_matrix(tmp_path, extra={("cambox", r): {"receiver": "connected"} for r in (1, 2, 3)})
-    rep = m.evaluate_dir(str(d), BOUNDS)
-    assert rep["caveats"] == []
-    assert "CAVEAT" not in m.render_text(rep)

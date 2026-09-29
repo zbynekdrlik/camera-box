@@ -68,6 +68,8 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 . "${HERE}/lib/obs-downstream-keyer.sh"   # issue 1361: the pinned Downstream Keyer OBS plugin (step 4c)
 # shellcheck source=scripts/lib/bundle-state-files.sh
 . "${HERE}/lib/bundle-state-files.sh"   # issue 1386: the ONE declared :8899 server file set (step 9; with setup-imag.sh)
+# shellcheck source=scripts/lib/strih-dantesync.sh
+. "${HERE}/lib/strih-dantesync.sh"   # issue 1372: step 2 restarts dantesync only on a real change
 
 # --- issue 1361: select + load the box facts BEFORE the source-guard, so a sourced setup (the unit
 # tests) sees exactly the facts the real run uses. Any invalid / TODO_OWNER fact refuses here.
@@ -123,25 +125,15 @@ strih_lx_dantesync_role_ok "$DS_ROLE" "$DS_ARGS" \
 echo "  dantesync role: ${DS_ROLE}  (args: '${DS_ARGS:-<bare NTP master>}')"
 # issue 1317: install dantesync as a systemd SERVICE, role folded INTO the unit (the EXACT cambox
 # shape: Type=simple, Restart=always). strih_dantesync_unit_text fail-closes on an ambiguous shape.
-strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS" > /etc/systemd/system/dantesync.service \
+# The live box had a hand dantesync.service.d/10-ntp-master.conf resetting ExecStart; the role is now
+# IN the unit, so strih_dantesync_install removes any stale drop-in (two files describing one role).
+# issue 1372: the unit is rewritten, reloaded and the daemon (re)started ONLY on a real change
+# (strih_dantesync_install, scripts/lib/strih-dantesync.sh) -- restarting the fleet date master steps
+# the whole rig's date, so a redeploy on an unchanged unit keeps it running.
+DS_UNIT_TEXT="$(strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS")" \
   || fail "strih_dantesync_unit_text refused to emit a unit for role '$DS_ROLE' args '$DS_ARGS'"
-# Remove any stale dantesync.service.d/*.conf drop-in: the live box had a hand 10-ntp-master.conf
-# resetting ExecStart to the bare NTP-master daemon. The role is now IN the unit, so a lingering
-# drop-in would hide the provisioned role (two files describing one role -- the exact undocumented
-# state this bake-in eliminates).
-rm -f /etc/systemd/system/dantesync.service.d/*.conf 2>/dev/null || true
-rmdir /etc/systemd/system/dantesync.service.d 2>/dev/null || true
-systemctl daemon-reload
-# Clear a stale lock a previously-crashed dantesync may have left, or the fresh daemon refuses to start.
-rm -f /var/run/dantesync.lock 2>/dev/null || true
-systemctl enable dantesync 2>/dev/null || true
-if [ -x /usr/local/bin/dantesync ]; then
-  systemctl restart dantesync 2>/dev/null \
-    || warn "  dantesync.service failed to (re)start -- check journalctl -u dantesync"
-  echo "  dantesync.service installed + enabled + started (role: ${DS_ROLE})"
-else
-  warn "  dantesync.service installed + enabled but NOT started (binary absent) -- install /usr/local/bin/dantesync then: systemctl restart dantesync"
-fi
+strih_dantesync_install "$DS_UNIT_TEXT" "$DS_ROLE" \
+  || fail "dantesync.service install failed (role '${DS_ROLE}') -- see the line above"
 
 # ---------------------------------------------------------------------------------------------
 REC_ENC="$(strih_lx_profile_facts | grep '^rec_encoder=' | cut -d= -f2)"
@@ -308,9 +300,10 @@ else
   warn "  ffmpeg install failed -- ffprobe (on-box E2E verdict) will be absent; fix the box's apt sources and re-run"
 fi
 # issue 1342: the RECEIVER-side NDI config (scripts/lib/ndi-discovery.sh, the SAME generator
-# setup-device.sh writes the camboxes with): networks.ips = every managed NDI sender (every camera
-# from camera-set.sh + the obs-fleet ndi-sender boxes; the traveling resolume hostname resolved now,
-# skipped when away). libndi queries those IPs directly IN ADDITION to mDNS; senders never read the
+# setup-device.sh writes the camboxes with): networks.ips = the obs-fleet ndi-sender boxes (the
+# traveling resolume hostname resolved now, skipped when away), NEVER a cambox -- issue 1389: a finder's
+# discovery connection into a cambox aborts camera-box when this OBS exits or restarts, so the camboxes
+# are found by mDNS alone. libndi queries those IPs directly IN ADDITION to mDNS; senders never read the
 # list, so strih-lx's own STRIH-LX outputs keep announcing over mDNS -- no gate. THREE receivers on
 # this box: OBS (strih-obs.service) and bkshading-service, both User=${DESKTOP_USER}, read the desktop
 # user's ~/.ndi; intercom-hub's ProtectHome hides ~/.ndi, so it reads the system dir /etc/ndi via its
@@ -376,12 +369,12 @@ fi
 [ -f "${HERE}/strih_scenes.py" ] || fail "scripts/strih_scenes.py not found next to this script (the strih-obs-start.sh --bootstrap seed target)"
 install -m 0755 "${HERE}/strih_scenes.py" /usr/local/bin/strih_scenes.py
 echo "  installed strih_scenes.py -> /usr/local/bin (input/scene/Studio-Mode seeder; strih-obs-start.sh runs --bootstrap on launch)"
-# issue 1242: the strih BANDWIDTH ROLES module (program-path cameras connect only while shown, the
-# multiview renders low-bandwidth MV twins). strih_scenes.py --apply-roles imports it from its own
-# directory, so it installs next to it; strih-obs-start.sh applies the roles on every launch.
-[ -f "${HERE}/strih_bandwidth_roles.py" ] || fail "scripts/strih_bandwidth_roles.py not found next to this script (the strih_scenes.py --apply-roles module)"
-install -m 0755 "${HERE}/strih_bandwidth_roles.py" /usr/local/bin/strih_bandwidth_roles.py
-echo "  installed strih_bandwidth_roles.py -> /usr/local/bin (bandwidth roles; strih-obs-start.sh runs strih_scenes.py --apply-roles on launch)"
+# issue 1242 (28.9.2026, owner order): the strih bandwidth-roles module is retired -- strih_scenes.py
+# no longer imports it; remove a leftover install.
+if [ -e /usr/local/bin/strih_bandwidth_roles.py ]; then
+  rm -f /usr/local/bin/strih_bandwidth_roles.py
+  echo "  removed the retired /usr/local/bin/strih_bandwidth_roles.py (issue 1242)"
+fi
 
 # ---------------------------------------------------------------------------------------------
 step 7 "OBS pre-seed: WebSocket :4455 no-auth + Studio Mode"

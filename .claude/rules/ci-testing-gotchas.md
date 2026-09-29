@@ -859,6 +859,13 @@ line that is supposed to hold a Rust/bash `\t` escape sequence — a hit means t
 wrote a raw byte instead of the two-char escape, exactly this bug. `cargo fmt --all --check`
 alone is NOT sufficient proof the generated Rust text is correct; it only catches shape 1 above.
 
+**A patch script's OWN variables do not exist in the test it writes** (issue 1372). A patch script
+that builds test source around its own constant (`SERVER_EXEC = ...` in the script, then
+`% SERVER_EXEC` inside the inserted test text) writes a test that fails with `NameError`. That RED
+looks right but fails for the wrong reason. Read each RED failure's actual `E` line before
+committing: a `NameError`/`command not found` naming something other than the code under test is a
+broken test, not a RED.
+
 ## `$GITHUB_SHA` on a `pull_request`-triggered job is the SYNTHETIC merge commit, never the PR's head — any commit-scoped `gh run list --commit` resolution wired into a `pull_request` workflow needs `github.event.pull_request.head.sha` instead (issue 1244 review catch)
 
 Any script that resolves a CI artifact "for THIS run's own commit" via `gh run list --commit
@@ -950,8 +957,11 @@ prose, so this class surfaces only in CI's Lint job — and it blocked the whole
 paragraph that WRAPS so a line begins with `+ exactly ONE aux mark …` — clippy reads `+ ` as a
 Markdown bullet and every following unindented line as a "list item without indentation". Fix by
 rewording (`plus …`), never by indenting prose that is not a list. Pre-push local net (cheap,
-run over every touched `.rs`): `grep -nE '^\s*//[/!]\s*([-+*]|[0-9]+\.) ' <files>` and check that
-each hit is a REAL list item whose continuation lines are indented by 2+ spaces.
+run over every touched `.rs`): `grep -nE '^\s*//[/!]\s*([-+*>]|[0-9]+\.) ' <files>` and check that
+each hit is a REAL list item whose continuation lines are indented by 2+ spaces. A wrapped line
+that starts with `>` (e.g. `(lag` / `>= 1)`) is a Markdown BLOCKQUOTE and trips the same lint on the
+next line (issue 1367 D2 caught it before push); reword (`one or more`). The plain-rustc replica +
+`clippy-driver --test -D warnings` of a pure crate-root module runs these doc lints locally.
 
 ## Inserting a NEW line right after an existing `# shellcheck disable=SC2XXX` directive silently REBINDS it to the wrong statement (issue 1260)
 
@@ -1509,17 +1519,23 @@ fails instead of passing.
 ## Emitted PowerShell can be RUN locally, not only read as text (issue 1372)
 
 Several libs emit Windows PowerShell as text (the dantesync upgrade/tray programs, genlock deploy
-programs). There is no pwsh on dev1, so their tests read that text. That misses logic bugs; live
-case: a first cut that raced a relaunched tray, and a lock violation called "untouched".
+programs). Their tests used to read that text only. That misses logic bugs; live case: a first
+cut that raced a relaunched tray, and a lock violation called "untouched".
 
 To run the text locally:
-- Unpack the `powershell-7.x-linux-x64` release tarball into the scratchpad.
+- dev1 has a portable pwsh 7 at `~/.local/pwsh74/pwsh` (not on PATH; the worktree guard refuses a
+  direct `pwsh` call, so drive it from a `bash /abs/script.sh` file). Elsewhere, unpack the
+  `powershell-7.x-linux-x64` release tarball into the scratchpad.
 - Dot-source the emitted program from a harness that defines `[CmdletBinding()]` stub FUNCTIONS
   for the cmdlets it calls. A function outranks the cmdlet.
 - Model the node's state in the stubs.
 - Parse the full program with `[System.Management.Automation.Language.Parser]::ParseFile`.
 - Worked example: `tests/pwsh/run_dantesync_tray_swap_1372.sh`. It needs `PWSH`, is not in CI,
   and exits 2 without pwsh; it never skips.
+- **It CAN run in CI (issue 1389).** The `python-tests` job runs on ubuntu-latest, which ships
+  pwsh. `LaptopScriptRun1389` in `tests/python/test_ndi_discovery_1389.py` runs
+  `tests/pwsh/run_ndi_discovery_laptop_1389.sh` with PWSH from env, PATH or `~/.local/pwsh74`, and
+  FAILS when none is found. Use that shape for a new runner.
 
 Limits:
 - pwsh 7 is not Windows PowerShell 5.1. In 5.1, `Get-FileHash` is a script FUNCTION: a read

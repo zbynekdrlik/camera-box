@@ -491,8 +491,8 @@ class TestLatencyPinsSection:
         verdict = self._verdict_with_delivery({"cam1": 71.2, "cam2": 68.0})
         pins = {
             "strih": {
-                "cam1": {"main_ms": 3, "mv_ms": 3},
-                "cam2": {"main_ms": 14, "mv_ms": 14},
+                "cam1": {"main_ms": 3},
+                "cam2": {"main_ms": 14},
             },
         }
         report = edr.compose_report(verdict, {"run_id": "x", "pins": pins})
@@ -502,18 +502,16 @@ class TestLatencyPinsSection:
         assert "strih=14ms" in report
         assert "p50 tento beh=68ms" in report
 
-    def test_main_vs_mv_mismatch_is_flagged_loudly(self):
+    def test_a_strih_row_is_the_main_pin_only(self):
+        # issue 1242: strih has no multiview twin input any more, so a strih row carries only the
+        # main pin -- no MV clone column, no main-vs-MV parity flag -- even when an older snapshot
+        # still carries a (different) strih mv_ms.
         verdict = self._verdict_with_delivery({"cam1": 71.0})
         pins = {"strih": {"cam1": {"main_ms": 3, "mv_ms": 8}}}
         report = edr.compose_report(verdict, {"run_id": "x", "pins": pins})
-        assert "PARITA main≠MV" in report
-        assert "main≠MV klon nesie inú latenciu" in report
-
-    def test_no_mismatch_when_main_and_mv_agree(self):
-        verdict = self._verdict_with_delivery({"cam1": 71.0})
-        pins = {"strih": {"cam1": {"main_ms": 3, "mv_ms": 3}}}
-        report = edr.compose_report(verdict, {"run_id": "x", "pins": pins})
-        assert "PARITA main≠MV" not in report
+        assert "  • cam1: strih=3ms, p50 tento beh=71ms" in report
+        section = report.split("Nastavené latencie", 1)[1].split("Stream 'NDI 2ME PGM'", 1)[0]
+        assert "MV" not in section and "PARITA" not in section and "⚠️" not in section
 
     def test_imag_shown_as_one_fixed_summary_line_when_all_compliant(self):
         # #757 (2026-07-15, binding directive): imag is fixed-3ms-always, never a per-camera
@@ -521,8 +519,8 @@ class TestLatencyPinsSection:
         verdict = self._verdict_with_delivery({"cam1": 71.0, "cam2": 68.0})
         pins = {
             "strih": {
-                "cam1": {"main_ms": 3, "mv_ms": 3},
-                "cam2": {"main_ms": 14, "mv_ms": 14},
+                "cam1": {"main_ms": 3},
+                "cam2": {"main_ms": 14},
             },
             "imag": {
                 "cam1": {"main_ms": 3, "mv_ms": 3},
@@ -537,8 +535,8 @@ class TestLatencyPinsSection:
         verdict = self._verdict_with_delivery({"cam1": 71.0, "cam2": 68.0})
         pins = {
             "strih": {
-                "cam1": {"main_ms": 3, "mv_ms": 3},
-                "cam2": {"main_ms": 14, "mv_ms": 14},
+                "cam1": {"main_ms": 3},
+                "cam2": {"main_ms": 14},
             },
             "imag": {
                 "cam1": {"main_ms": 3, "mv_ms": 3},
@@ -552,7 +550,7 @@ class TestLatencyPinsSection:
 
     def test_missing_camera_in_pins_reports_na_not_silently_omitted(self):
         verdict = self._verdict_with_delivery({"cam1": 71.0, "cam2": 68.0})
-        pins = {"strih": {"cam1": {"main_ms": 3, "mv_ms": 3}}}  # cam2 missing on purpose
+        pins = {"strih": {"cam1": {"main_ms": 3}}}  # cam2 missing on purpose
         report = edr.compose_report(verdict, {"run_id": "x", "pins": pins})
         assert "cam2: strih=N/A" in report
 
@@ -560,8 +558,8 @@ class TestLatencyPinsSection:
         verdict = self._verdict_with_delivery({"cam1": 100.0, "cam2": 90.0})
         pins = {
             "strih": {
-                "cam1": {"main_ms": 3, "mv_ms": 3},
-                "cam2": {"main_ms": 3, "mv_ms": 3},
+                "cam1": {"main_ms": 3},
+                "cam2": {"main_ms": 3},
             },
             "recommended_pins_ms": {"cam1": 3, "cam2": 13},
         }
@@ -572,7 +570,7 @@ class TestLatencyPinsSection:
     def test_stream_hold_shows_live_and_source_of_truth(self):
         verdict = self._verdict_with_delivery({"cam1": 71.0})
         pins = {
-            "strih": {"cam1": {"main_ms": 3, "mv_ms": 3}},
+            "strih": {"cam1": {"main_ms": 3}},
             "stream_hold_active_ms": 952,
             "av_sync_last": {"applied_latency_ms": 952, "source": "NDI 2ME PGM"},
         }
@@ -584,7 +582,7 @@ class TestLatencyPinsSection:
     def test_stream_hold_mismatch_between_live_and_source_of_truth_is_flagged(self):
         verdict = self._verdict_with_delivery({"cam1": 71.0})
         pins = {
-            "strih": {"cam1": {"main_ms": 3, "mv_ms": 3}},
+            "strih": {"cam1": {"main_ms": 3}},
             "stream_hold_active_ms": 925,  # box is running an OLDER hold than what's recorded
             "av_sync_last": {"applied_latency_ms": 952, "source": "NDI 2ME PGM"},
         }
@@ -593,7 +591,7 @@ class TestLatencyPinsSection:
 
     def test_cam7_is_included(self):
         verdict = self._verdict_with_delivery({"cam7": 80.0})
-        pins = {"strih": {"cam7": {"main_ms": 36, "mv_ms": 36}}}
+        pins = {"strih": {"cam7": {"main_ms": 36}}}
         report = edr.compose_report(verdict, {"run_id": "x", "pins": pins})
         assert "cam7: strih=36ms" in report
 

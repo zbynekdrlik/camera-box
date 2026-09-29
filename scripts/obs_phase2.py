@@ -3113,153 +3113,6 @@ def dev_scene(a):
     print(f"DEV_SCENE={a.scene} created={created} nested_added={added}")
 
 
-# --- issue 1242: strih connect-on-show (program-path inputs connect only while shown) ---------------
-# The vendored DistroAV receiver PARKS a genlocked input flagged `genlock_connect_on_show` (and not a
-# `genlock_monitor` twin) while nothing shows it: its NDI receiver is released, its received= counter
-# stops. The strih scene role lib (strih_scenes.py --apply-roles) sets the flag on the camera inputs.
-# An E2E run needs every program-path input full-bandwidth and connected for the whole measurement, so
-# recording-e2e.sh HOLDS the flag off for the run (connect_on_show_hold) and cleanup() restores it
-# (connect_on_show_restore). The SAME hold takes every always-connected `MV NDI camN` monitor twin OFF
-# THE WIRE for the run (strih_bandwidth_roles.E2E_TWIN_HOLD: genlock off + audio-only; ~58 Mbps each at
-# NDI lowest, so the run measures the program path at the pre-roles strih-lx uplink load). The hold /
-# restore / settle protocol and its STABLE state file (~/.camera-box/connect-on-show-hold.json,
-# recording-e2e.sh) live in the sibling scripts/e2e_bandwidth_hold.py; the wrappers below pass it this
-# module's `_rpc` and settle seams at call time. A leftover hold is fail-SAFE (the mains stay connected,
-# the twins' multiview cells stay blank) and the next strih OBS launch without a fresh hold marker
-# re-applies the roles anyway.
-CONNECT_ON_SHOW_KEY = "genlock_connect_on_show"
-GENLOCK_MONITOR_KEY = "genlock_monitor"
-
-# The hold/restore read-back SETTLE poll. OBS applies an input's settings UPDATE (ndi_source_update, and
-# with it DistroAV's #150 genlock lockdown that forces a genlocked monitor twin back to LOWEST) on the
-# next VIDEO TICK after the WS overlay lands, so an immediate GetInputSettings reads the overlay back
-# even when the update is about to revert it. Every read-back therefore starts _SETTLE_MIN_S (several
-# render ticks at 30/60 fps) after the writes and needs two consecutive matching reads; an input fails
-# only once _SETTLE_BUDGET_S has passed AND it had two complete sweeps (a slow WebSocket never fails a
-# write it never re-read). _settle_sleep/_settle_clock are module seams so the pytest drives a fake
-# clock; e2e_bandwidth_hold.await_settled implements the poll.
-_SETTLE_MIN_S = 0.25
-_SETTLE_POLL_S = 0.1
-_SETTLE_BUDGET_S = 5.0
-_settle_sleep = time.sleep
-_settle_clock = time.monotonic
-
-
-def _bandwidth_roles():
-    """Lazy import of the sibling strih_bandwidth_roles.py -- the ONE owner of the monitor-twin role and
-    its E2E hold values (E2E_TWIN_HOLD, twin_is_held). SAME lazy + own sys.path insert pattern as
-    _measurement_pins_module(): never imported at module load (obs_phase2.py is installed alone on some
-    boxes, and tests load it via importlib without scripts/ on sys.path)."""
-    here = os.path.dirname(os.path.abspath(__file__))
-    if here not in sys.path:
-        sys.path.insert(0, here)
-    import strih_bandwidth_roles  # noqa: E402 -- sibling module
-    return strih_bandwidth_roles
-
-
-def _twin_held(settings):
-    """strih_bandwidth_roles.twin_is_held -- False where the sibling module is not installed (a
-    can't-confirm never SKIPs a check)."""
-    try:
-        roles = _bandwidth_roles()
-    except ImportError:
-        return False
-    return roles.twin_is_held(settings)
-
-
-def hidden_by_design(settings, showing):
-    """PURE given the sibling strih_bandwidth_roles.py (no WebSocket): is this input hidden BY DESIGN
-    right now? True iff it is either
-      - a program-path main PARKED by connect-on-show: genlocked, flagged connect-on-show, NOT a
-        monitor twin, and not showing anywhere; or
-      - a monitor twin the E2E hold took OFF THE WIRE (strih_bandwidth_roles.twin_is_held), showing
-        or not -- the multiview shows its blank cell by design.
-    A consumer (e.g. a liveness verify) must then SKIP it -- its blank picture (DistroAV deactivates
-    the texture) is the design, never a wedge."""
-    s = settings or {}
-    if _twin_held(s):
-        return True
-    return (bool(s.get("genlock_fifo")) and bool(s.get(CONNECT_ON_SHOW_KEY))
-            and not bool(s.get(GENLOCK_MONITOR_KEY)) and not showing)
-
-
-def input_hidden_by_design(ws, input_name):
-    """IMPURE wrapper: read the input's settings (+ GetSourceActive videoShowing for a connect-on-show
-    main) and apply hidden_by_design. A failed read -> False (never SKIP a check on a can't-confirm)."""
-    settings = (_rpc(ws, "GetInputSettings", {"inputName": input_name}, ignore_err=True)
-                or {}).get("inputSettings") or {}
-    if _twin_held(settings):
-        return True
-    if not settings.get(CONNECT_ON_SHOW_KEY):
-        return False
-    active = _rpc(ws, "GetSourceActive", {"sourceName": input_name}, ignore_err=True) or {}
-    if "videoShowing" not in active:
-        return False
-    return hidden_by_design(settings, bool(active.get("videoShowing")))
-
-
-def _hold_module():
-    """Lazy import of the sibling scripts/e2e_bandwidth_hold.py (the E2E hold / restore / settle
-    protocol) -- the SAME lazy + own sys.path insert pattern as _measurement_pins_module()."""
-    here = os.path.dirname(os.path.abspath(__file__))
-    if here not in sys.path:
-        sys.path.insert(0, here)
-    import e2e_bandwidth_hold  # noqa: E402 -- sibling module
-    return e2e_bandwidth_hold
-
-
-def _settle():
-    """The settle timing + seams, read at CALL time so a test's monkeypatch of this module applies."""
-    return _hold_module().Settle(_SETTLE_MIN_S, _SETTLE_POLL_S, _SETTLE_BUDGET_S, _settle_sleep,
-                                 _settle_clock)
-
-
-def _read_hold_state(path):
-    """(held_mains, twin_originals) from the hold state file (e2e_bandwidth_hold.read_state)."""
-    return _hold_module().read_state(path)
-
-
-def connect_on_show_hold(ws, state_path):
-    """HOLD for an E2E run (e2e_bandwidth_hold.hold over this module's `_rpc`): the connect-on-show mains
-    stay connected, the monitor twins go off the wire. Returns (held_mains, held_twins, failed)."""
-    return _hold_module().hold(_rpc, ws, state_path, _settle())
-
-
-def connect_on_show_restore(ws, state_path):
-    """RESTORE the hold (e2e_bandwidth_hold.restore over this module's `_rpc`), twins first. Returns
-    (restored_names, failed_names, held_back_mains)."""
-    return _hold_module().restore(_rpc, ws, state_path, _settle())
-
-
-def connect_on_show(a):
-    """CLI: `connect-on-show --host H (--hold FILE | --restore FILE)`. Exit 1 when any input failed
-    (the caller decides: the E2E hold aborts the run, the cleanup restore only warns)."""
-    ws = _conn(a.host, a.password)
-    try:
-        if a.hold:
-            mains, twins, failed = connect_on_show_hold(ws, a.hold)
-            held = [n for n in mains if n not in failed]
-            off = [n for n in twins if n not in failed]
-            msg = (f"issue 1242 connect-on-show held (connect-on-show OFF for the run): "
-                   f"{', '.join(held) if held else '(none)'}; monitor twins off the wire "
-                   f"(genlock off, audio-only): {', '.join(off) if off else '(none)'}")
-            err = (f"ERROR issue 1242: connect-on-show HOLD failed (unreadable, or no read-back after "
-                   f"the input update) on: {', '.join(failed)}")
-        else:
-            names, failed, held_back = connect_on_show_restore(ws, a.restore)
-            msg = (f"issue 1242 connect-on-show restored (connect-on-show ON, monitor twins back on the "
-                   f"wire): {', '.join(names) if names else '(none)'}")
-            err = (f"ERROR issue 1242: connect-on-show RESTORE failed (no read-back after the input "
-                   f"update) on: {', '.join(failed)}; kept held because their MV twin did not "
-                   f"restore: {', '.join(held_back) if held_back else '(none)'}")
-    finally:
-        ws.close()
-    print(msg)
-    if failed:
-        print(err, file=sys.stderr)
-        sys.exit(1)
-
-
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -3422,13 +3275,6 @@ def main():
     rbc.add_argument("--strih-host", default=os.environ.get("STRIH_HOST", "10.77.9.202"))
     rbc.add_argument("--stream-host", default=os.environ.get("STREAM_HOST", "10.77.9.204"))
     rbc.add_argument("--password", default=os.environ.get("OBS_PASSWORD", ""))
-    # issue 1242: the E2E connect-on-show hold/restore (exactly one of --hold / --restore).
-    cos = sub.add_parser("connect-on-show")
-    cos.add_argument("--host", required=True)
-    cos.add_argument("--password", default="")
-    cos_mode = cos.add_mutually_exclusive_group(required=True)
-    cos_mode.add_argument("--hold", default=None, metavar="STATE_FILE")
-    cos_mode.add_argument("--restore", default=None, metavar="STATE_FILE")
     a = ap.parse_args()
     handler = {"setup": setup, "teardown": teardown, "record": record,
      "prod-scene": prod_scene, "switch": switch,
@@ -3445,8 +3291,7 @@ def main():
      "republish-black-check": republish_black_check,
      "idle-receiver": idle_receiver,
      "apply-measurement-pins": apply_measurement_pins,
-     "verify-measurement-pins": verify_measurement_pins,
-     "connect-on-show": connect_on_show}[a.cmd]
+     "verify-measurement-pins": verify_measurement_pins}[a.cmd]
     try:
         handler(a)
     except ForbiddenSceneError as e:

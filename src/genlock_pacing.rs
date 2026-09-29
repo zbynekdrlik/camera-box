@@ -41,7 +41,10 @@
 //! within that dequeue latency before a boundary crosses it at poll time but is stamped into the
 //! previous slot, so a free-running grabber still beats one stamp duplicate + one stamp gap per
 //! beat cycle against the grid. Only the date-walking grid offset is gone; deciding on the capture
-//! instant is a separate design step (#1355 Design-question).
+//! instant is a separate design step (#1355 Design-question). Issue 1367 slice D2 takes it for a
+//! 1:1 camera: while [`crate::capture_phase::CapturePhase`] is locked, the stamp is the tracked
+//! slot and `DecimationGate` decides on that slot instead of this module's poll-time gate
+//! (`crate::dupe_decimation::stamp_slot_action`); seeding and over-rate streams still come here.
 //!
 //! `cfg(target_os = "linux")` in lock-step with `crate::ndi`. Pure logic — Tier-0 testable on the
 //! Linux `test` CI job (default features): the sibling-module precedent of `genlock_stamp` /

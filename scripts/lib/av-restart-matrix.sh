@@ -12,8 +12,7 @@
 #   - the REMOTE text of each restart, each health read and each "leave it running" step -- plain
 #     `systemctl restart` of ONE service (never a reboot: a remote cambox reboot is banned, a warm
 #     reboot can leave a box down until someone is at the rig),
-#   - the pure "is it healthy" predicate over those reads, and the restarted camera's strih
-#     receiver state (parked / connected) read from the strih OBS log before the restart,
+#   - the pure "is it healthy" predicate over those reads,
 #   - the argv of ONE measurement window = the soak itself (`av-soak.sh --run --hours 0
 #     --lease-run-id <the matrix's lease>`), never a copy of its record/sweep/decode/merge step,
 #   - the stream OBS SUPERVISOR step (no session-agnostic path launches the canonical stream OBS).
@@ -22,8 +21,7 @@
 # newline-strip gotcha of a `$(...)`-embedded helper (CLAUDE.md) cannot glue it to anything; the
 # single-statement lines still end with `;`.
 #
-# Needs scripts/lib/mv-reverify-escalate.sh (the strih-lx restart) and scripts/lib/genlock-park.sh
-# (the park-state parser) sourced by the caller.
+# Needs scripts/lib/mv-reverify-escalate.sh (the strih-lx restart) sourced by the caller.
 
 # The restart kinds, in run order (the same four as av_restart_matrix_decision.KINDS).
 AV_MATRIX_KINDS_ALL="strih-obs cambox dantesync stream-obs"
@@ -148,29 +146,6 @@ av_matrix_health_ok() {
   esac
 }
 
-# av_matrix_receiver_state CAM LOG_TEXT -> parked | connected | unread: the restarted camera's strih
-# main input (`NDI <cam>`) in a tail of the strih OBS log read right BEFORE the restart. `parked` =
-# its last genlock-park line says parked (connect-on-show: nothing showed it, no receiver was
-# connected, so the restart is not seen live -- the window's hold connects it fresh); `connected` =
-# not parked while the tail DOES carry park lines (a parked input logs a heartbeat every 5 s, and
-# with the bandwidth roles active some hidden input always does); `unread` = the log read came back
-# empty, or the tail holds no genlock-park line for any input (absence then proves nothing).
-# Context for the report, never graded.
-av_matrix_receiver_state() {
-  local cam="$1" text="${2:-}"
-  # a here-string, never `printf | grep -q`: grep -q exits at the first match and SIGPIPEs the
-  # printf, and under pipefail that failure would read as "no park line"
-  if [ -z "$text" ] || ! LC_ALL=C grep -aqF "genlock-park '" <<<"$text"; then
-    printf 'unread\n'
-    return 0
-  fi
-  if [ "$(printf '%s\n' "$text" | genlock_park_state_of "NDI $cam")" = parked ]; then
-    printf 'parked\n'
-  else
-    printf 'connected\n'
-  fi
-}
-
 # av_matrix_ensure_running_remote_cmd KIND -> the REMOTE text of cleanup's "leave it running":
 # start the service only when it is not active (a no-op on a running one), then report `active=`.
 av_matrix_ensure_running_remote_cmd() {
@@ -217,22 +192,6 @@ av_matrix_soak_slot_s() {
   esac
   [ -n "$v" ] || return 1
   printf '%s\n' "$v"
-}
-
-# av_matrix_pick_connected_cam CAMS LOG_TEXT -> the first camera of CAMS (never cam2) whose strih
-# main input reads `connected` in LOG_TEXT (a tail of the strih OBS log), empty when none does or the
-# log is empty. A restart of a connected camera is seen live by its strih receiver.
-av_matrix_pick_connected_cam() {
-  local c
-  [ -n "${2:-}" ] || { printf '\n'; return 0; }
-  for c in ${1:-}; do
-    [ "$c" = cam2 ] && continue
-    if [ "$(av_matrix_receiver_state "$c" "$2")" = connected ]; then
-      printf '%s\n' "$c"
-      return 0
-    fi
-  done
-  printf '\n'
 }
 
 # av_matrix_window_outcome RC WINDOW_DIR -> the step outcome of one soak window. A soak exit 0-2 is a

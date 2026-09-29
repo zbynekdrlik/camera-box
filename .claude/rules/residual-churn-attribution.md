@@ -48,6 +48,16 @@ The attribution is `SOURCE-DEFICIT` / `SOURCE-STARVATION` / `DOWNSTREAM` / `UNKN
   a steady 20/5 s starvation background is a COVARIATE (median 20, event 20 is not ABOVE it → not a
   burst), exactly the rule this playbook mandates (pinned by `steady_starvation_background_is_not_a_burst`).
 
+**The ~17 min crossing burst is gone on stamp-driven streams (issue 1367 slice D2).** A 1:1 camera
+crossing a slot edge used to show a 15-20 s burst of paired blind sheds + starvation repeats on the
+`(#889)` line (live CAM5 29.9.2026: 36 + 35) and 34-68 `stamp_gap` on strih. With the capture phase
+tracker driving (`phase_lock=stamp` on the `#707 emit-1s` line, `crossings=` +1), a crossing is ONE
+blind shed (fast camera) or ONE starvation repeat (slow). So a `SOURCE-STARVATION` burst at a
+crossing on such a box means the tracker was NOT driving then (`phase_lock=seed|band`, or a
+`reseeds=` step). A single starvation repeat with `hidden_drops=` +1 and no `crossings=` change is a
+frame the device skipped. Read the phase tokens before attributing it. See
+`.claude/rules/capture-phase-tracker.md`.
+
 **Reading a `SOURCE-STARVATION` verdict: the churn is the BOX EMIT PATH (the issue 889 capture→emit
 valve), NEVER the genlock FIFO on strih.** This is the signal the capture-deficit discriminator is
 BLIND to — a starvation burst can coincide with a perfectly clean 60/60 capture cadence. The CAM4 6/4

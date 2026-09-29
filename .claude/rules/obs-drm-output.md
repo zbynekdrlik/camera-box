@@ -281,8 +281,8 @@ The output scans out one of two views, chosen by `"view"` in the same config (`p
 absent = program, so imag is byte-for-byte unchanged in behaviour):
 
 - **PROGRAM** = the M2 path above, unchanged.
-- **MULTIVIEW** = the frontend's BUILT-IN `Multiview` (labels, PVW/PGM tally, the issue-1242 twin
-  cells), never a custom scene. The frontend registers a renderer with
+- **MULTIVIEW** = the frontend's BUILT-IN `Multiview` (labels, PVW/PGM tally), never a custom
+  scene. The frontend registers a renderer with
   `obs_drm_output_set_view_renderer` (the setter takes the graphics context, so after it returns no
   render is in flight); on a multiview tick the view TU (`obs-drm-output-view.c`) renders it into an
   sRGB-capable `GS_BGRA` texrender at the connector mode size, then claims a mailbox buffer through

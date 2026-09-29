@@ -10,6 +10,7 @@ paths:
   - "tests/python/test_av_soak_rig_state_1367.py"
   - "tests/python/test_av_soak_orchestrator_1367.py"
   - "tests/python/test_av_soak_lease_inherit_1367.py"
+  - "tests/soak_first_cut_burn_domain_1367.rs"
 ---
 
 # The 8 h stream-output A/V soak (issue 1367) -- measure-only harness + runbook
@@ -34,9 +35,7 @@ align), so looping it would hide the drift. The soak only measures.
 Every rig action is an existing primitive: the issue-830 lease (own holder name
 `camera-box-av-soak`, expected release = the whole run, so a CI E2E fails fast), the issue-281
 heartbeat, `stray_session_check_assert` (at setup, before the setup mutations, before EVERY
-StartRecord), the issue-1242 connect-on-show HOLD the E2E uses (`connect_on_show_e2e_hold` /
-`_wait_live` / `_restore` in `scripts/lib/connect-on-show-hold.sh`, the strih-side 4 h marker
-re-asserted every slot), `obs_phase2.py record/switch/program-scene`, `obs_burn_filter.py
+StartRecord), `obs_phase2.py record/switch/program-scene`, `obs_burn_filter.py
 check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-verdict-on-strih-lx.sh`
 + `recording-verdict-on-stream.sh --execute` (parallel, each under `timeout`), `recording-verdict
 --merge-partials`.
@@ -52,7 +51,8 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   production scene name is never typed (the one declaration is `scripts/lib/stream-dev-scene.sh`).
 - **Reads before writes.** Setup does every read (guard, both program scenes, painter, every burn
   state) before the first mutation; a refusal there is exit 4 and nothing changed. After the first
-  mutation (the connect-on-show hold) every abort is exit 5 and cleanup restores.
+  mutation point (`MUTATED=1`, set right before the burns are turned on, even when none was off)
+  every abort is exit 5 and cleanup restores.
 - **Recording flags are conservative.** A box's "started" flag is set BEFORE `record --action start`
   (the start verifies the file grows AFTER StartRecord, so a failed or timed-out start can leave OBS
   recording); any start failure stops both boxes; a flag clears only when `record --action status`
@@ -75,7 +75,7 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   With nothing left it releases the soak's lease (holder-checked, exit 0). It refuses (exit 4)
   while the soak's own process (`<run-dir>/pid`) still runs.
 - **Cleanup cannot be cut short** (the issue-808 recipe, `.claude/rules/ci-testing-gotchas.md`):
-  `set +e; trap '' INT TERM HUP PIPE`, every OBS/burn/connect-on-show/ssh call in its own session
+  `set +e; trap '' INT TERM HUP PIPE`, every OBS/burn/ssh call in its own session
   (`setsid -w`), background sleeps/decodes killed. The second-SIGTERM and process-group Ctrl-C
   tests prove the `trap ''` half; `setsid -w` is defence in depth the fakes cannot isolate (GNU
   `timeout` already starts its child in its own process group).
@@ -85,9 +85,14 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   the strih program restore (strih's program feeds the stream box's program). Only a proven `idle`
   rig gets them; `live` or `unknown` leaves the recordings running (`NOT stopping`, exit 5, lease
   kept for `--stop-leftovers`) and the strih program on the last sweep scene (`strih program NOT
-  restored`). Burns and connect-on-show still go back: that returns production state.
+  restored`). The burns still go back: that returns production state.
 - **A broadcast mid-run aborts the soak** (exit 5), checked by the slot guard, before EVERY sweep
   cut, before the StopRecords and every ~60 s between slots -- never a cut while a box streams.
+  The slot's first-scene cut before StartRecord has two gates: the settled idle read, then the
+  rig-busy guard (`the slot-k first-scene cut`). The guard also refuses a recording nobody streams
+  (the Companion orphan auto-record, a rehearsal), which the broadcast read does not see; a busy
+  rig there aborts before the cut. In slot 0 nothing is left to restore; in a later slot cleanup
+  still cuts the strih program back to the operator's snapshot (nothing streams).
 - **A recording is started or stopped only on a PROVEN idle rig** (`broadcast_settled`: an
   unreadable read is retried `AV_SOAK_BROADCAST_READS` x `AV_SOAK_BROADCAST_RETRY_S`, default
   3 x 20 s, so one stream OBS restart neither ends an 8 h run nor keeps a recording running).
@@ -99,8 +104,8 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
   `obs_phase2 record --action start` would stop an already-running recording first).
 - **Leaving TEST mode ends the run.** A stream program that reads another scene, or a painter
   service that reads `inactive` (`rig-mode.sh event` stops it), STOPS the run (like a low record
-  volume: full cleanup, exit = the report's verdict) -- it never holds the lease and the
-  connect-on-show hold (full bandwidth on every strih camera) through a production. An unreadable
+  volume: full cleanup, exit = the report's verdict) -- it never holds the lease through a
+  production. An unreadable
   read or a stalled marker log is a transient: a skipped row.
 - **A decode is stopped on the box too.** Killing the local `timeout` does not stop a remote
   `recording-verdict`: on a decode timeout, and in cleanup while a decode runs, the soak stops
@@ -135,8 +140,22 @@ check/add/remove`, the E2E sweep (`switch_schedule.py plan/build`), `recording-v
 - Window = ONE sweep over the soak cameras, `AV_SOAK_SEGMENT_SECS` (30, the E2E's calibrated
   `SEGMENT_SECS`) each: 7 cameras = 210 s. A per-camera A/V offset needs that camera on program and
   `av_window::MIN_AV_SAMPLES` (8) clustered markers, so a flat 60 s window cannot measure every camera.
-  The connect-on-show hold keeps every camera's main input connected, so each cut is warm, as in the
-  E2E (measuring cold cuts would be a separate decision).
+  Every strih camera's main input is always connected (no connect-on-show park since 28.9.2026),
+  so each cut is warm, as in the E2E (measuring cold cuts would be a separate decision).
+- **The recording starts on the FIRST sweep scene** (28.9.2026). Every strih camera input has its
+  own measurement-burn counter: one `ndi-burn-filter.cpp` instance per input, advanced only on ticks
+  where that input is drawn. The frames recorded before the first sweep cut belong to no schedule
+  window, and the verdict excuses a counter change only between two KNOWN windows (issue 708). So a
+  recording that starts on another camera reads one strih `real_drop` at the first cut. The first
+  8 h run had it in 24/25 windows, because the previous slot's last camera stays on program between
+  slots. Every slot therefore cuts the strih program to `FIRST_SCENE` (the first line of the ONE
+  sweep plan `SWEEP_PLAN`, read once at setup and walked by the sweep and the plan printout too)
+  after the settled idle read and the rig-busy guard, before StartRecord. The E2E has this shape
+  by construction: its [4/8] routes the strih program to the camera under test, which is the first
+  sweep pair. A failed cut is the row
+  `skipped:first_scene_cut_failed`, with nothing started. Never "fix" this in the verdict: a
+  backward jump on the SAME counter at window 0's start must stay a real drop
+  (`tests/soak_first_cut_burn_domain_1367.rs`, a trimmed real fixture, probe-gated = CI).
 - `av_<cam>_ms` = the verdict's MEASURED `all_cambox_av_sync.<cam>.av_offset_ms` only (a `derived`
   or `unknown` value is never a sample); graded `|offset - expected_ms| <= tolerance`, inclusive.
 - Spreads -- three columns, the graded set is `--spread-columns` (default `av_spread_ms`, ROZHODNUTÉ 5860604301):
@@ -236,8 +255,8 @@ Exit 5 with `RECORDING MAY STILL BE RUNNING` in the log = check that box before 
 the soak kept the rig lease, and `bash scripts/av-soak.sh --stop-leftovers "$D"` (run again
 once the box is idle) stops what is provably the soak's and releases it.
 **What it holds:** the rig lease for the whole run (a CI full-path E2E fails fast with
-`OUTCOME=RIG_LEASE_HELD`; restreamer waits a bounded time), connect-on-show held off on strih (full
-bandwidth for every camera, as during an E2E), the strih program (swept), the burns it turned on,
+`OUTCOME=RIG_LEASE_HELD`; restreamer waits a bounded time), the strih program (swept), the burns
+it turned on,
 and a recording on strih + stream for ~4 min of every 10. Post the report (`$D/report.txt` +
 `report.json`) on issue 1367, then hand the owner `$D/cleanup-plan.txt` if the disk needs the space.
 
@@ -255,8 +274,16 @@ kept), a failed start and a previous slot's leftover during a broadcast, `--stop
 touching a broadcast, an unreadable rig or a recording the soak cannot prove is its own, and
 retrying an unreadable read) and cleanup with
 fakes behind the seams `AV_SOAK_OBS_DIR`,
-`AV_SOAK_STRIH_DECODE`, `AV_SOAK_STREAM_DECODE`, `PROBE_BIN_DIR`, `CONNECT_ON_SHOW_MARKER_CMD`,
-`CONNECT_ON_SHOW_LOG_READ_CMD`, a fake `sshpass`/`curl` on PATH, and a tmp `RIG_LEASE_DIR` +
-`CAMERA_BOX_RIG_HEARTBEAT` + `CONNECT_ON_SHOW_HOLD_STATE` -- NEVER the real `/var/tmp/rig-lease`, an
+`AV_SOAK_STRIH_DECODE`, `AV_SOAK_STREAM_DECODE`, `PROBE_BIN_DIR`, a fake `sshpass`/`curl` on PATH,
+and a tmp `RIG_LEASE_DIR` + `CAMERA_BOX_RIG_HEARTBEAT` -- NEVER the real `/var/tmp/rig-lease`, an
 E2E may hold it), `bash -n`, `shellcheck -S warning scripts/av-soak.sh scripts/lib/av-soak.sh
 scripts/lib/av-soak-leftovers.sh` (never `-x`); the test rig sets `AV_SOAK_BROADCAST_RETRY_S=0`.
+The harness's fake `program-scene` reads `FAKE_STRIH_PROGRAM` for the strih snapshot, and the
+program at each StartRecord is replayed from the call log (`_strih_program_at_strih_starts`). A
+test that sends a signal once the sweep runs waits for a cut AFTER a StartRecord
+(`_wait_for_sweep`), because the slot's first cut now comes before the recording. The switch-count
+knobs (`FAKE_LIVE_AFTER_SWITCHES`, `FAKE_UNREADABLE_AFTER_SWITCHES`) count that cut too.
+The probe-gated contract test `tests/soak_first_cut_burn_domain_1367.rs` runs only on CI. Its
+assertions can be re-run on dev1 against the CI `recording-verdict` of any run: apply the same
+fixture transforms, then `--merge-partials stream=<partial> --min-secs 0 --capture-fps 30
+--strih-emit-fps 30 --stream-capture-fps 30 --cam2-run-id 1790548508 --switch-schedule <fixture>`.

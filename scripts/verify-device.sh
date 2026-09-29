@@ -164,12 +164,12 @@
 #        relay: TasksMax <= 512 (fork/thread runaway can't starve the box pid space) AND a running
 #        relay logs at info (zero journal lines while active = an old binary predating info-by-
 #        default logging). A box without the relay = `na`; a disabled/inactive relay skips logging.
-#   (an) NDI discovery receiver config (issue 1342) -- HARD FAIL: /etc/ndi/ndi-config.v1.json lists
-#        every PINNED managed NDI sender IP in networks.ips (the SAME generator setup-device.sh writes
-#        with, scripts/lib/ndi-discovery.sh: every camera + strih-lx/stream; a renumber FAILs until
-#        re-provisioned) and carries NO networks.discovery, AND the camera-box.service.d/
-#        ndi-discovery.conf drop-in points NDI_CONFIG_DIR at /etc/ndi (camera-box runs as root with
-#        ProtectHome=yes, so /root/.ndi is invisible).
+#   (an) NDI discovery receiver config (issues 1342, 1389) -- HARD FAIL: a cambox carries NO
+#        networks.ips at all (ROZHODNUTÉ 5879261962: an mDNS-only receiver, so no discovery connection
+#        in or out that libndi could abort camera-box on). /etc/ndi/ndi-config.v1.json, when present,
+#        lists no IP (each listed one is named) and no networks.discovery and parses as JSON; a
+#        camera-box.service.d/ndi-discovery.conf drop-in, when present, points NDI_CONFIG_DIR at /etc/ndi
+#        (setup-device.sh STEP 7 and `ndi-discovery.sh --cambox-apply` remove both).
 #   (ao) bkshading relay provisioned (issue 808) -- HARD FAIL: the relay binary is executable, the
 #        installed bkshading-relay.service BYTE-matches the repo unit, /etc/bkshading/relay.env carries
 #        CAMERA_BOX_CAPTURE_FPS=<int>, gphoto2 is installed, AND the unit's enable-state matches the rig
@@ -242,9 +242,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
                                  # off-box kernel(netconsole)+journal(upload) forensics check (#1311;
                                  # SAME source of truth as setup-device.sh / create-usb-linux.sh)
 # shellcheck source=scripts/lib/ndi-discovery.sh
-. "$HERE/lib/ndi-discovery.sh"   # ndi_discovery_sender_ips/ndi_discovery_config_verdict/
-                                 # ndi_discovery_dropin_config_dir -- the (an) NDI discovery receiver
-                                 # config check (issue 1342; SAME generator as setup-device.sh)
+. "$HERE/lib/ndi-discovery.sh"   # ndi_discovery_cambox_verdict + the gather/section helpers --
+                                 # the (an) check: a cambox carries no networks.ips (issue 1389; the
+                                 # SAME lib setup-device.sh STEP 7 strips the config with)
 # shellcheck source=scripts/lib/bkshading-relay-provision.sh
 . "$HERE/lib/bkshading-relay-provision.sh"  # the (ao) relay verdict + expected enable-state + gather
                                             # snippet (issue 808; SAME lib setup-device.sh installs with)
@@ -868,8 +868,9 @@ Checks:
       not leading / mangled (VenHw) or stale path / efibootmgr or ESP PARTUUID unreadable (test-strictness)
   (am) bkshading-relay blast-radius + info logging (#1309): TasksMax <= 512 AND a running relay
       logs at info (zero journal lines while active FAILs); relay not provisioned = n/a
-  (an) NDI discovery receiver config (issue 1342): /etc/ndi/ndi-config.v1.json networks.ips lists
-      every pinned managed sender, no networks.discovery + the camera-box NDI_CONFIG_DIR drop-in
+  (an) NDI discovery receiver config (issues 1342, 1389): a cambox carries NO networks.ips (mDNS
+      only) -- /etc/ndi/ndi-config.v1.json lists no IP and no networks.discovery, and a camera-box
+      NDI_CONFIG_DIR drop-in, if left, points at /etc/ndi
   (ao) bkshading relay provisioned (issue 808): binary + byte-matching unit + env + gphoto2, and the
       unit enable-state matches the rig mode (TEST: source box + cam2 disabled; CAMERA_BOX_RIG_MODE=test|event,
       else read from cam2's painter state)
@@ -1844,31 +1845,26 @@ else
 fi
 
 # (an) NDI discovery receiver config (issue 1342) -- HARD FAIL -------------------------------------
-# The camera-box service RECEIVES `STRIH-LX (interkom)` (the cameraman preview). setup-device.sh STEP 7
-# writes /etc/ndi/ndi-config.v1.json (networks.ips = every managed NDI sender, generated from
-# camera-set.sh + obs-fleet.sh) and a camera-box.service.d drop-in pointing libndi's NDI_CONFIG_DIR at
-# /etc/ndi. This grades BOTH, read-only, in one ssh round trip, against the SAME generator's PINNED
-# list (the traveling resolume hostname is best-effort at write time, never required here), so a
-# renumbered sender FAILs until the box is re-provisioned. A stray networks.discovery also FAILs (a
-# configured sender stops mDNS). Inserted BEFORE (q) per .claude/rules/provisioning-scripts.md (the
-# (q)-last invariant); fail() only, never a warn.
+# issue 1389 (ROZHODNUTÉ 5879261962): a cambox carries NO networks.ips at all. The camera-box service
+# receives only `STRIH-LX (interkom)` (the cameraman preview), which mDNS finds; any listed host would
+# give it a TCP discovery connection whose teardown can abort camera-box inside libndi 6.3.2.
+# setup-device.sh STEP 7 (and, on a live box, `scripts/lib/ndi-discovery.sh --cambox-apply`) removes
+# the issue-1342 /etc/ndi/ndi-config.v1.json and its camera-box.service.d NDI_CONFIG_DIR drop-in. This
+# grades both, read-only, in one ssh round trip: no config is ok; a config that lists ANY IP FAILs
+# naming it (with or without the drop-in, which would load it again), as does a networks.discovery, a
+# config that is not JSON, or a drop-in pointing NDI_CONFIG_DIR anywhere but /etc/ndi. Inserted BEFORE
+# (q) per .claude/rules/provisioning-scripts.md (the (q)-last invariant); fail() only, never a warn.
 anrc=0
 NDI_DISC_BLOCK="$(ssh_box "$(ndi_discovery_gather_remote_snippet)")" || anrc=$?
 NDI_DISC_CONF="$(ndi_discovery_block_section "$NDI_DISC_BLOCK" NDI_CONF)"
 NDI_DISC_DROPIN="$(ndi_discovery_block_section "$NDI_DISC_BLOCK" NDI_DROPIN)"
-NDI_DISC_REQUIRED="$(ndi_discovery_sender_ips pinned)" || NDI_DISC_REQUIRED=""
-NDI_DISC_VERDICT="$(ndi_discovery_config_verdict "$NDI_DISC_CONF" "$NDI_DISC_REQUIRED")"
-NDI_DISC_DIR="$(ndi_discovery_dropin_config_dir "$NDI_DISC_DROPIN")"
+NDI_DISC_VERDICT="$(ndi_discovery_cambox_verdict "$NDI_DISC_CONF" "$NDI_DISC_DROPIN")"
 if [ "$anrc" -ne 0 ]; then
   fail "could not read the NDI receiver config over SSH (rc=$anrc, issue 1342)"
-elif [ -z "$NDI_DISC_REQUIRED" ]; then
-  fail "could not generate the managed NDI sender list (scripts/camera-set.sh + scripts/lib/obs-fleet.sh ndi-sender facet, issue 1342)"
 elif [ "$NDI_DISC_VERDICT" != "ok" ]; then
-  fail "NDI receiver config ${NDI_DISCOVERY_SYSTEM_DIR}/${NDI_DISCOVERY_CONFIG_NAME}: $(printf '%s' "$NDI_DISC_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')-- re-run setup-device.sh (issue 1342)"
-elif [ "$NDI_DISC_DIR" != "$NDI_DISCOVERY_SYSTEM_DIR" ]; then
-  fail "camera-box.service.d/ndi-discovery.conf missing or NDI_CONFIG_DIR='${NDI_DISC_DIR:-<none>}' (want ${NDI_DISCOVERY_SYSTEM_DIR}) -- libndi would never read the receiver config (issue 1342)"
+  fail "NDI receiver config on this cambox: $(ndi_discovery_verdict_oneline "$NDI_DISC_VERDICT") -- from dev1 pipe 'bash scripts/lib/ndi-discovery.sh --cambox-apply' into 'ssh root@<box> bash -s' (runbook: .claude/rules/ndi-discovery.md), or re-run setup-device.sh (issue 1389)"
 else
-  ok "NDI receiver config: networks.ips lists every managed sender (${NDI_DISC_REQUIRED}) + NDI_CONFIG_DIR=${NDI_DISCOVERY_SYSTEM_DIR} drop-in (issue 1342)"
+  ok "NDI receiver config: no networks.ips on this cambox -- mDNS only (issue 1389)"
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------

@@ -609,6 +609,20 @@ empty-queue fill fires in BOTH wander directions (`src/dupe_decimation/gate.rs`,
   repeats` > 0, the strih `NDI cam1` `recv-timing #797` cap_max drops toward the cam2/3/4 ~20 ms
   band, converge_sheds stop climbing, and `[4i/8align]` cam1 holds ±1.
 
+## Issue 1367 D2 — the STAMP-DRIVEN path (the FIFTEENTH piece)
+
+For a 1:1 camera whose capture phase tracker is locked (`phase_lock=stamp`), `main.rs` stages the
+frame's tracked stamp slot (`note_stamp_slot`) and `poll` decides on it alone through the pure
+`stamp::stamp_slot_action`: +1 emits, the same slot drops, +2..+9 fills the missing slots with the
+starvation repeats (consecutive cap kept), anything else re-latches. None of the pieces above run on
+that path (no poll time, no residence, no retire/drain, no dupe preference: a 1:1 stream sheds no
+content dupes), and it clears their transients so a return to the poll-time path starts clean.
+On that return the boundary stays on the capture grid until the queue is empty (every buffered
+frame emits, issue 1131), then re-latches on the poll slot without a phantom SKIP.
+Over-rate grabbers (the ShadowCasts) never reach it: the 2000 ppm band keeps them on everything
+above. Full detail: `.claude/rules/capture-phase-tracker.md`. `DupeShedLog` + the summary line now
+live in `dupe_decimation/shed_log.rs` (moved unchanged for the file budget).
+
 ## GOTCHA — verify pacing changes against the REAL modules, never a hand-simplified re-model (#1145)
 
 The rule below ("faithful Python port") is right that a port reproduces the live behavior — but a

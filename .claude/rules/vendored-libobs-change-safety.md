@@ -179,6 +179,24 @@ present in BOTH — a line-only field has nothing in the API to disagree with, s
 `OBS_GENLOCK_STATS_VERSION` bump and touches none of the struct's consumers. (`converge_sheds`
 IS in the struct because the LOCK indicator reads it; `sustain_sheds` is not.)
 
+## A release change that holds frames LONGER than the pin must re-budget the FIFO drop-cap (issue 1367 D1)
+
+`genlock_source_drop_cap` sizes the async FIFO from the pin alone: `round(pin × 60 / 1000)` frames
+at the 60 fps arrival rate, plus 4 of reserve, floored at 30. The overrun check at the push
+(`async_frames.num >= cap`) force-drains the WHOLE queue. So any release change that presents a
+frame OLDER than the pin also raises the queue depth, and on a deep pin that depth reaches the cap.
+Examples: an added base age, a round-up to a grid, or holding one more canvas interval of arrivals.
+The first D1 cut presented `50 ms + pin` rounded up on N>=2 sources. That put the stream
+`Zaloha kamera` (pin 1000, 60 into 30) at queue 64 against cap 64. Only a fresh-context review
+caught it; the live audit line already read `peak=63 cap=64`.
+
+Before changing what a release holds, work out the worst depth. Simulate the release at ZERO arrival
+lag, where a frame arrives at its stamp: that is the deepest any queue gets. Sweep EVERY pin up to
+the 2000 ms maximum, and assert the depth before a push plus the 4-frame reserve stays under a model
+of the C cap. See `the_drop_cap_holds_the_grid_queue_and_its_burst_reserve_at_every_pin_1367` in
+`src/genlock_n2_grid.rs`. Its anti-tautology asserts that the old cap overruns the deep pins. Then
+read `depth=` / `peak=` / `cap=` on a live deep input's audit line.
+
 ## Adding REMEMBERED STATE: enumerate the invalidation seams before writing the tests
 
 A per-source field that survives across ticks (`genlock_phase_anchor_ns`,
@@ -206,7 +224,8 @@ anchor-clears against `free_async_cache()` call sites, so a fourth seam cannot b
 `free_async_cache(source);`, never between it and `genlock_phase_anchor_ns = 0;` (#1161).** The
 #1003 seam guard above counts the exact squished adjacency
 `source->genlock_phase_anchor_ns = 0; free_async_cache(source);` and asserts it equals the
-`free_async_cache(source);` count. A second field (e.g. `genlock_acquire_bracket_ticks`, #1161)
+`free_async_cache(source);` count. A second field (e.g. `genlock_acquire_bracket_ticks`, #1161 —
+removed with the N>=2 boundary conveyor by issue 1367 slice D1, the pattern below still holds)
 must clear at the identical three sites, but inserting `source->genlock_new_field = 0;` BETWEEN the
 anchor-clear and the `free_async_cache` call SPLITS that adjacency → the #1003 count drops to 0 and
 its `seams == frees` test fails (cost one live break here). Place the new clear on the line

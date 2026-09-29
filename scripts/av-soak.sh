@@ -19,15 +19,16 @@ set -euo pipefail
 #       ALREADY be the development scene (`Development`, issue 1380 -- TEST mode is a precondition,
 #       `scripts/rig-mode.sh test`); the strih program scene (snapshot, restored at cleanup); the
 #       permanent cam2 painter active with a growing QPSK marker log; every burn state readable
-#     - the rig-busy guard again, then the mutations: the issue-1242 connect-on-show HOLD the E2E
-#       uses (connect-on-show-hold.sh -- a hidden program-path input would otherwise be cut in cold
-#       and parked), and the measurement burns ON (obs_burn_filter.py) only where they were OFF
+#     - the rig-busy guard again, then the mutation: the measurement burns ON (obs_burn_filter.py)
+#       only where they were OFF
 #   every slot (default every 1200 s, on a fixed grid from the first slot):
 #     - the lease still ours, both record volumes above RECORDINGS_FREE_MIN_GB (else the run STOPS),
 #       the stream program still the development scene and the painter service active (else the rig
 #       left TEST mode and the run STOPS; an unreadable read or a stalled marker log is a skipped
-#       row), the rig-busy guard, the strih-side hold marker re-asserted (its TTL is 4 h)
-#     - StartRecord strih + stream (obs_phase2.py record), ONE sweep that cuts each soak camera into
+#       row), the rig-busy guard
+#     - the strih program cut to the sweep's FIRST scene (so the recording starts on the input its
+#       first window measures, as in the E2E -- each strih camera input has its own burn counter),
+#       StartRecord strih + stream (obs_phase2.py record), ONE sweep that cuts each soak camera into
 #       strih program for AV_SOAK_SEGMENT_SECS (obs_phase2.py switch, switch_schedule.py plan/build
 #       -- the E2E all-cambox sweep), StopRecord (verified by a status read)
 #     - a live broadcast (a box streams) aborts the soak, exit 5: checked by the slot guard, before
@@ -45,9 +46,9 @@ set -euo pipefail
 #   cleanup, on EVERY exit (signals ignored, remote calls in their own session): stop this run's
 #   remote decodes; ONLY on a proven idle rig (no box streams, both readable) StopRecord what is
 #   still recording and restore the strih program scene when swept -- never while a broadcast is
-#   live; restore connect-on-show, turn off the burns this run turned on (both are production
-#   state), stop the heartbeat, write + print the report; release the lease -- unless a recording
-#   the soak started may still run: then exit 5 with the lease KEPT for --stop-leftovers.
+#   live; turn off the burns this run turned on (production state), stop the heartbeat, write +
+#   print the report; release the lease -- unless a recording the soak started may still run: then
+#   exit 5 with the lease KEPT for --stop-leftovers.
 #
 # MODES:
 #   --plan  (DEFAULT) print every step with the exact commands; touches NOTHING (no lease, no ssh,
@@ -86,11 +87,9 @@ set -euo pipefail
 #   AV_SOAK_MERGE_TIMEOUT_S (90), AV_SOAK_OVERHEAD_S (90, the per-slot pre/stop/upload budget),
 #   AV_SOAK_DECODE_TIMEOUT_S (default: what the slot leaves = slot - window - merge - overhead),
 #   AV_SOAK_OBS_TIMEOUT_S (30), AV_SOAK_BROADCAST_READS (3) / AV_SOAK_BROADCAST_RETRY_S (20, the
-#   retried broadcast read), RECORDINGS_FREE_MIN_GB (50), CONNECT_ON_SHOW_HOLD_STATE (the E2E's
-#   ~/.camera-box/connect-on-show-hold.json). Test seams: AV_SOAK_OBS_DIR (dir of obs_phase2.py +
-#   obs_burn_filter.py), AV_SOAK_STRIH_DECODE, AV_SOAK_STREAM_DECODE, AV_SOAK_MIN_SEGMENT_SECS (10),
-#   AV_SOAK_MIN_DECODE_S (60),
-#   RIG_LEASE_DIR, CAMERA_BOX_RIG_HEARTBEAT, CONNECT_ON_SHOW_MARKER_CMD, CONNECT_ON_SHOW_LOG_READ_CMD.
+#   retried broadcast read), RECORDINGS_FREE_MIN_GB (50). Test seams: AV_SOAK_OBS_DIR (dir of
+#   obs_phase2.py + obs_burn_filter.py), AV_SOAK_STRIH_DECODE, AV_SOAK_STREAM_DECODE,
+#   AV_SOAK_MIN_SEGMENT_SECS (10), AV_SOAK_MIN_DECODE_S (60), RIG_LEASE_DIR, CAMERA_BOX_RIG_HEARTBEAT.
 #
 # STOP: `touch <run-dir>/STOP` (stops at the next wait/slot boundary, full cleanup + report), or
 # `kill -TERM $(cat <run-dir>/pid)` (cleanup runs from the trap; a SIGTERM that lands during a
@@ -125,12 +124,6 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/cambox-offline-ack.sh"
 # shellcheck source=scripts/lib/stream-dev-scene.sh
 . "$HERE/lib/stream-dev-scene.sh"
-# shellcheck source=scripts/lib/mv-reverify-escalate.sh
-. "$HERE/lib/mv-reverify-escalate.sh"
-# shellcheck source=scripts/lib/genlock-park.sh
-. "$HERE/lib/genlock-park.sh"
-# shellcheck source=scripts/lib/connect-on-show-hold.sh
-. "$HERE/lib/connect-on-show-hold.sh"
 # shellcheck source=scripts/lib/recordings-free-line.sh
 . "$HERE/lib/recordings-free-line.sh"
 # shellcheck source=scripts/lib/av-soak.sh
@@ -225,7 +218,6 @@ MERGE_TIMEOUT_S="${AV_SOAK_MERGE_TIMEOUT_S:-90}"
 OVERHEAD_S="${AV_SOAK_OVERHEAD_S:-90}"
 RECORDINGS_FREE_MIN_GB="${RECORDINGS_FREE_MIN_GB:-50}"
 BUNDLE_STATE_PORT="${WIN_BUNDLE_STATE_PORT:-8899}"
-HOLD_STATE="${CONNECT_ON_SHOW_HOLD_STATE:-$HOME/.camera-box/connect-on-show-hold.json}"
 STRIH_DECODE="${AV_SOAK_STRIH_DECODE:-$HERE/recording-verdict-on-strih-lx.sh}"
 STREAM_DECODE="${AV_SOAK_STREAM_DECODE:-$HERE/recording-verdict-on-stream.sh}"
 # relative to the strih-lx login home: the same dir recording-verdict-on-strih-lx.sh defaults to
@@ -242,6 +234,14 @@ SWEEP="$(CAMERA_ACTIVE_SET="$SOAK_CAMS" camera_active_sweep_pairs)"
 read -r -a _SOAK_CAM_ARR <<< "$SOAK_CAMS"
 N_CAMS="${#_SOAK_CAM_ARR[@]}"
 WINDOW_S=$(( N_CAMS * SEGMENT_S ))
+# The sweep's cut plan ("scene<TAB>label" lines; switch_schedule.py owns the parsing, scene names
+# carry spaces), read ONCE: the plan printout, every slot's sweep and the cut to its FIRST scene
+# before each StartRecord (issue 1367) all walk this one list.
+mapfile -t SWEEP_PLAN < <(python3 "$HERE/switch_schedule.py" plan --sweep "$SWEEP" \
+  --segment-secs "$SEGMENT_S" --duration "$WINDOW_S")
+[ "${#SWEEP_PLAN[@]}" -gt 0 ] && [ -n "${SWEEP_PLAN[0]}" ] \
+  || die 3 "the sweep plan for '$SWEEP' is empty or unreadable (switch_schedule.py plan)"
+FIRST_SCENE="${SWEEP_PLAN[0]%%$'\t'*}"
 MIN_SECS="$(av_soak_min_secs "$WINDOW_S")"
 WINDOWS="$(av_soak_windows_count "$DURATION_S" "$SLOT_S")"
 MARKER_ROWS="$(av_soak_marker_rows "$WINDOW_S")"
@@ -331,26 +331,27 @@ EOF
     plan_cmd python3 "$OBS_DIR/obs_burn_filter.py" check --host "$STRIH_HOST" --input "NDI $c"
   done
   plan_cmd python3 "$OBS_DIR/obs_burn_filter.py" check --host "$STREAM_HOST" --input "$STREAM_PROG_SOURCE"
-  echo "  6. the rig-busy guard again, then: connect-on-show HOLD (issue 1242, the E2E's own helper, state ${HOLD_STATE}):"
-  echo "      connect_on_show_e2e_hold ${OBS_DIR} ${STRIH_HOST} ${HOLD_STATE}; connect_on_show_e2e_wait_live (bounded)"
-  echo "  7. obs_burn_filter.py add --host <ip> --input <input> for each burn that was OFF, then check it again"
+  echo "  6. the rig-busy guard again, then: obs_burn_filter.py add --host <ip> --input <input> for each burn that was OFF, then check it again"
   echo
   echo "EVERY SLOT k (slot start = run start + k x ${SLOT_S} s; files under ${RUN_DIR}/slot-NNN):"
   echo "  a. lease still ours; record volumes free >= ${RECORDINGS_FREE_MIN_GB} GB (curl http://<box>:${BUNDLE_STATE_PORT}/record-dir-stats.json -> bundle_state_gather.recordings_free_line; below = stop the soak)"
   echo "  b. read-only: stream program still '${STREAM_DEV_SCENE}' and the painter service active (else the rig left TEST mode: the run STOPS); an unreadable read or a stalled marker log = a skipped row"
   echo "  c. a proven idle rig (rig-busy-check, an unreadable read retried ${BROADCAST_READS}x ${BROADCAST_RETRY_S} s apart; still unreadable = a skipped row, nothing started),"
+  echo "     then the rig-busy guard: stray_session_check_assert ... 'the slot-k first-scene cut' (busy = abort, exit 5),"
+  echo "     then the strih program to the FIRST sweep scene, so the recording starts on the input window 0 measures"
+  echo "     (each strih camera input has its own burn counter; a failed cut = a skipped row, nothing started):"
+  plan_cmd python3 "$OBS_DIR/obs_phase2.py" switch --host "$STRIH_HOST" --program-scene "$FIRST_SCENE"
   echo "     then the rig-busy guard: stray_session_check_assert ... 'the slot-k StartRecord' (a live broadcast aborts the soak, exit 5)"
-  echo "     connect_on_show_strih_marker set ${STRIH_HOST} (re-asserts the 4 h hold marker)"
   echo "  d. StartRecord (the started flag is set BEFORE the call; any start failure stops both boxes):"
   plan_cmd python3 "$OBS_DIR/obs_phase2.py" record --host "$STRIH_HOST" --action start
   plan_cmd python3 "$OBS_DIR/obs_phase2.py" record --host "$STREAM_HOST" --action start
   echo "  e. the sweep -- strih program only (the stream program is never switched); a broadcast check (rig-busy-check) before every cut and before f: live = abort, exit 5, nothing stopped:"
   plan_cmd python3 "$HERE/switch_schedule.py" plan --sweep "$SWEEP" --segment-secs "$SEGMENT_S" --duration "$WINDOW_S"
-  while IFS= read -r seg; do
+  for seg in "${SWEEP_PLAN[@]}"; do
     [ -n "$seg" ] || continue
     scene="${seg%%$'\t'*}"; label="${seg##*$'\t'}"
     echo "      [$label] $(printf '%q ' python3 "$OBS_DIR/obs_phase2.py" switch --host "$STRIH_HOST" --program-scene "$scene"); sleep ${SEGMENT_S}"
-  done < <(python3 "$HERE/switch_schedule.py" plan --sweep "$SWEEP" --segment-secs "$SEGMENT_S" --duration "$WINDOW_S")
+  done
   plan_cmd python3 "$HERE/switch_schedule.py" build --sweep "$SWEEP" --segment-secs "$SEGMENT_S" --duration "$WINDOW_S" --start-ns "<first switch ns>" --boundaries "<later switches + stop ns>"
   echo "  f. StopRecord, verified (the flag clears only when 'record --action status' reads active=False):"
   plan_cmd python3 "$OBS_DIR/obs_phase2.py" record --host "$STRIH_HOST" --action stop
@@ -386,7 +387,7 @@ EOF
   echo "CLEANUP (every exit; signals ignored; remote calls under setsid -w): stop this run's remote decodes still running;"
   echo "  on a proven idle rig only (never while a broadcast is live): StopRecord what is still recording and the strih program back"
   echo "  to the snapshot (switch --prod-floor) when swept; a recording that may still run = exit 5 and the lease is KEPT for --stop-leftovers;"
-  echo "  connect_on_show_e2e_restore; obs_burn_filter.py remove on the burns this run turned on; rig_heartbeat_stop;"
+  echo "  obs_burn_filter.py remove on the burns this run turned on; rig_heartbeat_stop;"
   echo "  rig_lease_release ${RIG_LEASE_OURS}; the final report:"
   plan_cmd python3 "$DECISION" report --csv "$CSV" --min-duration-h "$HOURS" --json "$RUN_DIR/report.json" "${SPREAD_ARGS[@]}"
   echo "  recordings are NOT deleted (owner-only): ${RUN_DIR}/cleanup-plan.txt lists the exact-path removal lines."
@@ -438,7 +439,6 @@ rm -f "$RUN_DIR/STOP"
 SETUP_STARTED=0
 MUTATED=0
 LEASE_HELD=0
-HOLD_ATTEMPTED=0
 LOOP_DONE=0
 STOPPED=0
 IN_CLEANUP=0
@@ -622,13 +622,6 @@ cleanup() {
         fi
       fi
     fi
-    if [ "$HOLD_ATTEMPTED" = 1 ]; then
-      # shellcheck disable=SC2016  # expanded by the child bash
-      setsid -w bash -c '. "$1"; . "$2"; shift 2; connect_on_show_e2e_restore "$@"' _ \
-        "$HERE/lib/strih-platform.sh" "$HERE/lib/connect-on-show-hold.sh" "$OBS_DIR" "$STRIH_HOST" "$HOLD_STATE" \
-        >> "$RUN_DIR/cleanup.log" 2>&1
-      log "connect-on-show restored (see cleanup.log)" 2>/dev/null
-    fi
     for t in "${BURNS_TURNED_ON[@]}"; do
       if burn remove --host "${t%%|*}" --input "${t#*|}" >> "$RUN_DIR/cleanup.log" 2>&1; then
         log "burn OFF again on ${t%%|*} '${t#*|}' (it was off before the soak)" 2>/dev/null
@@ -737,9 +730,6 @@ case "$(broadcast_settled)" in
 esac
 guard_ok "the av-soak setup mutations" || refuse "the rig became busy before the setup mutations"
 MUTATED=1
-HOLD_ATTEMPTED=1
-connect_on_show_e2e_hold "$OBS_DIR" "$STRIH_HOST" "$HOLD_STATE" || refuse "the connect-on-show hold failed"
-connect_on_show_e2e_wait_live "$OBS_DIR" "$STRIH_HOST" "$HOLD_STATE"
 for _t in "${BURNS_OFF[@]}"; do
   BURNS_TURNED_ON+=("$_t")
   burn add --host "${_t%%|*}" --input "${_t#*|}" >/dev/null 2>&1 || true
@@ -810,8 +800,8 @@ run_slot() {
     return 0
   fi
   if [ "$prog" != "$STREAM_DEV_SCENE" ]; then
-    # the rig was handed to production (rig-mode.sh event): end the run, never keep the lease and
-    # the connect-on-show hold for hours of skipped slots
+    # the rig was handed to production (rig-mode.sh event): end the run, never keep the lease for
+    # hours of skipped slots
     ABORT_REASON="the rig left TEST mode: the stream program is '$prog', not '$STREAM_DEV_SCENE'"
     log "STOP: $ABORT_REASON"
     STOPPED=1
@@ -860,7 +850,17 @@ run_slot() {
       return 0
       ;;
   esac
-  connect_on_show_strih_marker set "$STRIH_HOST"
+  # issue 1367: record from the sweep's FIRST scene, as the E2E does -- each strih input has its own
+  # burn counter and pre-cut frames sit in no schedule window (.claude/rules/av-soak.md). The guard
+  # also refuses a foreign recording, which the broadcast read above does not see.
+  guard_ok "the slot-$k first-scene cut" \
+    || { ABORT_REASON="the rig is busy (recording or streaming) before the slot-$k first-scene cut"; exit 5; }
+  STRIH_SWEPT=1
+  if ! obs switch --host "$STRIH_HOST" --program-scene "$FIRST_SCENE" </dev/null >>"$sd/sweep.log" 2>&1; then
+    log "slot $k skipped: the strih program could not be cut to '$FIRST_SCENE' before StartRecord (see $sd/sweep.log)"
+    add_row "$k" "$(date +%s)" "skipped:first_scene_cut_failed" "" "" "$rid"
+    return 0
+  fi
   guard_ok "the slot-$k StartRecord" || { ABORT_REASON="a broadcast is live (slot $k)"; exit 5; }
   if ! rec_start strih "$STRIH_HOST" "$sd/record-start.log" \
      || ! rec_start stream "$STREAM_HOST" "$sd/record-start.log"; then
@@ -875,7 +875,7 @@ run_slot() {
     return 0
   fi
   t_rec="$(date +%s)"
-  while IFS= read -r seg; do
+  for seg in "${SWEEP_PLAN[@]}"; do
     [ -n "$seg" ] || continue
     scene="${seg%%$'\t'*}"; label="${seg##*$'\t'}"
     if [ "$(broadcast_now </dev/null)" = live ]; then
@@ -890,7 +890,7 @@ run_slot() {
     fi
     if [ -z "$start_ns" ]; then start_ns="$ns"; else bounds+=("$ns"); fi
     isleep "$SEGMENT_S"
-  done < <(python3 "$HERE/switch_schedule.py" plan --sweep "$SWEEP" --segment-secs "$SEGMENT_S" --duration "$WINDOW_S")
+  done
   bounds+=("$(date +%s%N)")
   if [ "$outcome" = ok ] && ! python3 "$HERE/switch_schedule.py" build --sweep "$SWEEP" --segment-secs "$SEGMENT_S" \
       --duration "$WINDOW_S" --start-ns "$start_ns" --boundaries "$(IFS=,; echo "${bounds[*]}")" \

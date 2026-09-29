@@ -688,8 +688,8 @@ CPUAffinity=3'
 // ---------------------------------------------------------------------------------------------
 // issue 1342 -- the camboxes publish ONE NDI output (`CAMn (usb)`); the unconsumed issue-792
 // `CAMn (30p)` blend stream, its publish-30p.conf drop-in and the old (z) check are removed. The
-// (an) NDI-discovery check (the receiver-side networks.ips list, graded by
-// scripts/lib/ndi-discovery.sh) replaces it.
+// (an) NDI receiver-config check replaces it; since issue 1389 it grades that a cambox carries NO
+// networks.ips at all (ndi_discovery_cambox_verdict in scripts/lib/ndi-discovery.sh).
 // ---------------------------------------------------------------------------------------------
 
 #[test]
@@ -711,12 +711,17 @@ fn check_an_ndi_discovery_is_wired_into_the_live_flow_1342() {
         .expect("source-guard comment must still be present");
     let live_flow = &body[guard_pos..];
     assert!(
-        live_flow.contains("ndi_discovery_config_verdict \"$NDI_DISC_CONF\""),
-        "(an) must CALL the shared verdict on the box's /etc/ndi/ndi-config.v1.json (issue 1342)"
+        live_flow.contains("ndi_discovery_cambox_verdict \"$NDI_DISC_CONF\" \"$NDI_DISC_DROPIN\""),
+        "(an) must CALL the cambox verdict on /etc/ndi/ndi-config.v1.json + the drop-in (issue 1389)"
     );
+    let code: String = live_flow
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        live_flow.contains("ndi_discovery_dropin_config_dir \"$NDI_DISC_DROPIN\""),
-        "(an) must CALL the drop-in parser on camera-box.service.d/ndi-discovery.conf (issue 1342)"
+        !code.contains("ndi_discovery_sender_ips") && !code.contains("ndi_discovery_config_verdict"),
+        "a cambox carries no networks.ips: (an) never grades it against the receiver list (issue 1389)"
     );
     let an = live_flow
         .find("# (an) NDI discovery")

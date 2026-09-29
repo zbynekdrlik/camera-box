@@ -8,9 +8,9 @@ Covers, with NO live OBS/network:
      silently-defaulted floor value.
   c. active_camera_numbers() (#893) -- derives the camera numbers to sweep from
      CAMERA_ACTIVE_SET, never a literal N=1..7 range.
-  d. snapshot_box_pins() -- reads main+MV for every camera in the ACTIVE set (#893 -- was a
-     literal cam1..7 sweep) via the given name templates; returns {} (never a half-filled
-     table) on a connect failure.
+  d. snapshot_box_pins() -- reads main (+ MV where the box has a clone: imag; strih has none since
+     issue 1242) for every camera in the ACTIVE set (#893 -- was a literal cam1..7 sweep) via the
+     given name templates; returns {} (never a half-filled table) on a connect failure.
   e. load_av_sync_last() -- reads the source-of-truth JSON; {} when absent/malformed.
 """
 import json
@@ -125,11 +125,45 @@ class TestActiveCameraNumbers:
 
 
 # ---------------------------------------------------------------------------
-# snapshot_box_pins -- main+MV for every camera in the ACTIVE set (#893), honest {} on connect
-# failure
+# snapshot_box_pins -- main (+ MV where the box has a clone: imag) for every camera in the ACTIVE
+# set (#893), honest {} on connect failure
 # ---------------------------------------------------------------------------
 
 class TestSnapshotBoxPins:
+    def test_strih_reads_the_main_pin_only(self, monkeypatch):
+        # issue 1242: strih has no multiview twin input any more -- its snapshot reads 'NDI camN'
+        # alone and a row carries no mv_ms (never a read of an input that no longer exists).
+        monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam3")
+        monkeypatch.setattr(lps, "_conn", lambda host, password: FakeWS())
+        read = []
+
+        def fake_read_pin(ws, name):
+            read.append(name)
+            return int("".join(ch for ch in name if ch.isdigit()))
+
+        monkeypatch.setattr(lps, "read_pin", fake_read_pin)
+        result = lps.snapshot_box_pins("10.77.9.202", "", "NDI cam{n}")
+        assert result == {"cam1": {"main_ms": 1}, "cam3": {"main_ms": 3}}
+        assert read == ["NDI cam1", "NDI cam3"]
+
+    def test_main_asks_strih_for_the_main_pin_only_and_imag_for_main_plus_mv(self, monkeypatch, tmp_path):
+        # issue 1242: the real call site -- main() must never hand strih an MV template.
+        calls = {}
+
+        def fake_snapshot(host, password, main_fmt, mv_fmt=None):
+            calls[host] = (main_fmt, mv_fmt)
+            return {}
+
+        monkeypatch.setattr(lps, "snapshot_box_pins", fake_snapshot)
+        monkeypatch.setattr(lps, "av_sync_last_path", lambda: tmp_path / "absent.json")
+        vj = tmp_path / "verdict.json"
+        vj.write_text("{}")
+        out = tmp_path / "pins.json"
+        lps.main(["--strih-host", "10.77.9.202", "--imag-host", "10.77.9.182",
+                  "--verdict-json", str(vj), "--out", str(out)])
+        assert calls["10.77.9.202"] == ("NDI cam{n}", None)
+        assert calls["10.77.9.182"] == ("NDI CAM{n}", "MV CAM{n}")
+
     def test_reads_main_and_mv_for_each_camera_in_the_default_active_set(self, monkeypatch):
         # issue 1198 (2026-08-27, owner ruling): cam1 + cam2 RESTORED. issue 1216 (2026-08-28): a
         # bigger splitter is fitted and cam5/cam6/cam7 are back too. issue 1217 (same day): cam5
@@ -140,12 +174,12 @@ class TestSnapshotBoxPins:
         monkeypatch.setattr(lps, "_conn", lambda host, password: FakeWS())
 
         def fake_read_pin(ws, name):
-            # "NDI cam3" -> main=3, "MV NDI cam3" -> mv=103 (deterministic per-name stub)
+            # "NDI CAM3" -> main=3, "MV CAM3" -> mv=103 (deterministic per-name stub)
             n = int("".join(ch for ch in name if ch.isdigit()))
             return n if "MV" not in name else 100 + n
 
         monkeypatch.setattr(lps, "read_pin", fake_read_pin)
-        result = lps.snapshot_box_pins("10.77.9.202", "", "NDI cam{n}", "MV NDI cam{n}")
+        result = lps.snapshot_box_pins("10.77.9.182", "", "NDI CAM{n}", "MV CAM{n}")
         assert len(result) == 7
         assert set(result.keys()) == {
             "cam1",
@@ -177,7 +211,7 @@ class TestSnapshotBoxPins:
             return n if "MV" not in name else 100 + n
 
         monkeypatch.setattr(lps, "read_pin", fake_read_pin)
-        result = lps.snapshot_box_pins("10.77.9.202", "", "NDI cam{n}", "MV NDI cam{n}")
+        result = lps.snapshot_box_pins("10.77.9.182", "", "NDI CAM{n}", "MV CAM{n}")
         assert set(result.keys()) == {"cam1", "cam3"}
 
     def test_camera_active_set_env_override_widens_the_sweep_to_a_retired_camera(self, monkeypatch):
@@ -192,7 +226,7 @@ class TestSnapshotBoxPins:
             return n if "MV" not in name else 100 + n
 
         monkeypatch.setattr(lps, "read_pin", fake_read_pin)
-        result = lps.snapshot_box_pins("10.77.9.202", "", "NDI cam{n}", "MV NDI cam{n}")
+        result = lps.snapshot_box_pins("10.77.9.182", "", "NDI CAM{n}", "MV CAM{n}")
         assert "cam4" in result
         assert "cam5" not in result
 
@@ -201,7 +235,7 @@ class TestSnapshotBoxPins:
             raise ConnectionRefusedError("no route to host")
 
         monkeypatch.setattr(lps, "_conn", raising_conn)
-        assert lps.snapshot_box_pins("10.77.9.202", "", "NDI cam{n}", "MV NDI cam{n}") == {}
+        assert lps.snapshot_box_pins("10.77.9.182", "", "NDI CAM{n}", "MV CAM{n}") == {}
 
     def test_closes_the_websocket_even_if_a_read_raises(self, monkeypatch):
         ws = FakeWS()
@@ -217,7 +251,7 @@ class TestSnapshotBoxPins:
 
         monkeypatch.setattr(lps, "read_pin", failing_read_pin)
         with pytest.raises(RuntimeError, match="boom"):
-            lps.snapshot_box_pins("10.77.9.202", "", "NDI cam{n}", "MV NDI cam{n}")
+            lps.snapshot_box_pins("10.77.9.182", "", "NDI CAM{n}", "MV CAM{n}")
         assert ws.closed is True
 
 

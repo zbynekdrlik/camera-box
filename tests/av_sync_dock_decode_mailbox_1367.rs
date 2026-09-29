@@ -14,7 +14,8 @@
 //!
 //! Two gates here. `mailbox_policy_selftest_passes` compiles and runs the dependency-free g++
 //! self-test (`vendor/av-sync-dock/test/decode-mailbox-selftest.cpp`): a 50 ms fake decode never
-//! blocks the producer for more than 2 ms, the latest frame wins, dropped frames are counted, and
+//! blocks the producer (publish p95 under 2 ms, none reaching 15 ms), the latest frame wins,
+//! dropped frames are counted, and
 //! stop/destroy join an in-flight decode.
 //!
 //! The source-anchor checks prove the output (`sync-test-output*.cpp`) is WIRED to it: the callback
@@ -87,7 +88,8 @@ fn mailbox_policy_selftest_passes() {
     assert!(
         run.status.success() && stdout.contains("ALL PASS"),
         "issue 1367: the decode mailbox must keep the video thread free of the decode (a 50 ms \
-         decode never blocks the producer > 2 ms), let the latest frame win and count drops. \
+         decode never blocks the producer: publish p95 < 2 ms, none >= 15 ms), let the latest \
+         frame win and count drops. \
          Output:\n{stdout}{}",
         String::from_utf8_lossy(&run.stderr)
     );

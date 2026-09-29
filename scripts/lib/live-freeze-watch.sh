@@ -9,7 +9,7 @@
 # forensics: nothing stopped a genuinely dead cam7 early, nothing flagged the degradation loudly
 # until [8/8] decode).
 #
-# Reuses the SAME "MV NDI camN" low-bandwidth-clone + frozen-camera-gate.py mechanism the [0/8]/
+# Reuses the SAME frozen-camera-gate.py mechanism over the main "NDI camN" inputs that the [0/8]/
 # [1/8] preflight and the [2/8]/[2b/8] sender-bounce re-verify already use (one mechanism, three
 # call sites) — never a parallel screenshot-diff implementation.
 #
@@ -21,7 +21,7 @@
 
 # live_freeze_watch_start PID_FILE POISON_FILE STRIH SOURCES PROBE_BIN_DIR [POLL_INTERVAL_S]
 # -> backgrounds a polling loop, writes its PID to PID_FILE. SOURCES is a comma-separated
-# "MV NDI camN,..." list (mirrors frozen-camera-gate.py's own --sources shape). POLL_INTERVAL_S
+# "NDI camN,..." list (mirrors frozen-camera-gate.py's own --sources shape). POLL_INTERVAL_S
 # defaults to 10 (override for a tighter test loop).
 live_freeze_watch_start() {
   local pid_file="$1" poison_file="$2" strih="$3" sources="$4" probe_bin_dir="$5"

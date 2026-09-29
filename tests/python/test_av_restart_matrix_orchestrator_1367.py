@@ -206,15 +206,6 @@ case "$text" in
     active=active
     if [ -n "${FAKE_PAINTER_INACTIVE_AFTER_WINDOWS:-}" ] && [ "$windows" -ge "$FAKE_PAINTER_INACTIVE_AFTER_WINDOWS" ]; then active=inactive; fi
     printf 'active=%s\nrun_id=4242\nmarkers=10\nmarkers2=14\n' "$active" ;;
-  *"obs-studio/logs"*)
-    printf 'info: genlock-fifo audit something\n'
-    # the roles are active on strih-lx: some hidden input always logs its park heartbeat
-    if [ -z "${FAKE_NO_PARK_LINES:-}" ]; then
-      printf "info: genlock-park 'NDI cam4': state=parked parked_s=900 (hidden)\n"
-    fi
-    for c in ${FAKE_PARKED:-}; do
-      printf "info: genlock-park 'NDI %s': state=parked parked_s=35 (hidden)\n" "$c"
-    done ;;
   *) echo "fake sshpass: unexpected remote text" >&2; exit 3 ;;
 esac
 '''
@@ -731,7 +722,7 @@ def test_the_new_scripts_set_strict_mode_early_and_parse():
     assert re.search(r"^# airuleset:script-ok", open(LIB).read(), re.M)
 
 
-# --- review round 1: stop conditions, the receiver state, the lease ---------------------------------
+# --- review round 1: stop conditions, the lease ------------------------------------------------------
 
 
 def test_a_rig_not_in_test_mode_is_refused_before_anything_changes(rig):
@@ -795,26 +786,6 @@ def test_a_cambox_health_read_of_the_old_process_is_never_healthy(rig):
     assert _steps(p["run"])[-1]["outcome"] == "not_healthy"
 
 
-def test_the_restarted_cameras_strih_receiver_state_is_recorded(rig):
-    env, p = rig
-    r = _matrix(dict(env, AV_MATRIX_KINDS="cambox dantesync strih-obs", AV_MATRIX_REPEATS="1",
-                     FAKE_PARKED="cam1", AV_MATRIX_CAMBOX="cam1"), "--run")
-    assert r.returncode == 0, r.stdout + r.stderr
-    rec = {s["kind"]: s["receiver"] for s in _steps(p["run"])}
-    assert rec["cambox"] == "parked" and rec["dantesync"] == "parked"
-    assert rec["strih-obs"] == "n/a", "a strih OBS restart restarts the receiver itself"
-    assert "parked during 1/1" in r.stdout
-    texts = [d[1] for k, d in _events(p["log"]) if k == "ssh" and d[0] == STRIH]
-    assert any("obs-studio/logs" in t for t in texts), "read from the strih OBS log, before the restart"
-
-
-def test_an_unparked_receiver_reads_connected(rig):
-    env, p = rig
-    r = _matrix(dict(env, AV_MATRIX_KINDS="cambox", AV_MATRIX_REPEATS="1"), "--run")
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert _steps(p["run"])[-1]["receiver"] == "connected"
-
-
 def test_a_lost_lease_stops_before_the_next_restart_and_is_left_alone(rig):
     env, p = rig
     r = _matrix(dict(env, FAKE_SOAK_FOREIGN_LEASE_WINDOW="2"), "--run")
@@ -863,25 +834,18 @@ def test_the_window_bound_follows_the_soaks_own_slot(rig):
     assert f"one window <= {int(default) + 600} s" in plan
 
 
-def test_the_default_cambox_is_a_soak_camera_whose_strih_receiver_is_connected(rig):
+def test_the_default_cambox_is_the_first_soak_camera_and_the_strih_log_is_never_read(rig):
+    # issue 1242 (the low-bandwidth mechanism removed): every strih camera input is always
+    # connected, so the matrix restarts the first soak camera that is not cam2 and reads no strih
+    # OBS log for a receiver state (the fake sshpass fails any strih log read as unexpected)
     env, p = rig
-    # cam1 is parked on strih: the restarts go to cam3, whose input is connected
-    r = _matrix(dict(env, AV_MATRIX_KINDS="cambox dantesync", AV_MATRIX_REPEATS="1",
-                     FAKE_PARKED="cam1"), "--run")
+    r = _matrix(dict(env, AV_MATRIX_KINDS="cambox dantesync", AV_MATRIX_REPEATS="1"), "--run")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert _restart_kinds(p["log"]) == [("cambox", "10.77.9.63"), ("dantesync", "10.77.9.63")]
-    assert {s["receiver"] for s in _steps(p["run"]) if s["kind"] != "baseline"} == {"connected"}
-    assert "cambox=cam3" in (p["run"] / "matrix.conf").read_text()
-
-
-def test_every_soak_camera_parked_falls_back_to_the_first_and_says_so(rig):
-    env, p = rig
-    r = _matrix(dict(env, AV_MATRIX_KINDS="cambox", AV_MATRIX_REPEATS="1",
-                     FAKE_PARKED="cam1 cam3"), "--run")
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert _restart_kinds(p["log"]) == [("cambox", CAM1)]
-    assert "no soak camera's strih input is connected" in r.stdout
-    assert "CAVEAT" in r.stdout, "a PASS on a parked receiver says so under the verdict"
+    assert _restart_kinds(p["log"]) == [("cambox", CAM1), ("dantesync", CAM1)]
+    assert "cambox=cam1" in (p["run"] / "matrix.conf").read_text()
+    texts = [d[1] for k, d in _events(p["log"]) if k == "ssh" and d[0] == STRIH]
+    assert not any("obs-studio/logs" in t for t in texts)
+    assert "receiver" not in (p["run"] / "matrix.tsv").read_text().splitlines()[0].split("\t")
 
 
 def test_a_killed_baseline_window_is_an_abort_not_a_refusal(rig):
@@ -916,18 +880,6 @@ def test_a_painter_that_stays_unreadable_stops_the_run_as_unreadable(rig):
 
 
 # --- review round 3 ----------------------------------------------------------------------------------
-
-
-def test_a_strih_log_without_any_park_line_reads_unread_never_connected(rig):
-    # no genlock-park line for ANY input: the tail cannot tell parked from connected -- the receiver
-    # is unread, the default pick falls back to the first camera, and a PASS carries the caveat
-    env, p = rig
-    r = _matrix(dict(env, AV_MATRIX_KINDS="cambox", AV_MATRIX_REPEATS="1", FAKE_NO_PARK_LINES="1"),
-                "--run")
-    assert r.returncode == 0, r.stdout + r.stderr
-    assert _steps(p["run"])[-1]["receiver"] == "unread"
-    assert _restart_kinds(p["log"]) == [("cambox", CAM1)]
-    assert "CAVEAT" in r.stdout
 
 
 def test_the_plan_names_the_lease_keepalive_the_run_uses(rig):

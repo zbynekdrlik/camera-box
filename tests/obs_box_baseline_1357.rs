@@ -1476,6 +1476,8 @@ fn no_bare_apt_get_update_on_the_obs_box_provisioning_paths() {
         // issue 1361: the shared remoteos-mcp install + the Downstream Keyer plugin libs
         "scripts/lib/remoteos-mcp.sh",
         "scripts/lib/obs-downstream-keyer.sh",
+        // issue 1372: the dantesync step-2 action (setup-strih.sh + verify-strih.sh)
+        "scripts/lib/strih-dantesync.sh",
         // sourced one level down (strih-box-facts.sh / ndi-discovery.sh)
         "scripts/lib/obs-fleet.sh",
         "scripts/camera-set.sh",

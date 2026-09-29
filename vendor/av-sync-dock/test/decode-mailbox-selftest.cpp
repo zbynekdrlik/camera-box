@@ -8,7 +8,8 @@
  * until `sync-test-output` was stopped.
  *
  * This self-test pins the mailbox POLICY the fix rests on, with a fake 50 ms decode:
- *   1. the producer (the video thread) is never blocked for more than 2 ms by a decode;
+ *   1. the producer (the video thread) is never blocked by a decode: 95 % of its publishes take
+ *      under 2 ms and none takes 15 ms (a 50 ms decode holding the lock would stretch most of them);
  *   2. the latest frame wins — the decoder never sees an older frame after a newer one, and the
  *      last published frame is always decoded;
  *   3. every frame replaced before the worker took it is counted as dropped, and
@@ -28,6 +29,7 @@
 #include "../src/camera-box-decode-mailbox.hpp"
 #include "../src/camera-box-frame-copy.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -56,7 +58,11 @@ struct FakeJob {
 
 static const size_t PAYLOAD_BYTES = 64 * 1024;
 static const int DECODE_MS = 50;
-static const double PRODUCER_BUDGET_MS = 2.0;
+/* A scheduler hiccup on a loaded CI runner can stretch one publish past 2 ms (2.119 ms seen on
+ * 28.9.2026); a lock held across the 50 ms decode stretches most of them. So the check is the
+ * audio-worker self-test's pair: p95 under 2 ms AND no publish reaching 15 ms. */
+static const double PRODUCER_P95_MS = 2.0;
+static const double PRODUCER_MAX_MS = 15.0;
 
 static double ms_since(steady::time_point t0)
 {
@@ -140,19 +146,20 @@ int main()
 		CHECK(mb.running(), "running() after start()");
 
 		const uint64_t published = 30;
-		double worst_ms = 0.0;
+		std::vector<double> publish_ms;
 		for (uint64_t id = 1; id <= published; id++) {
 			steady::time_point t0 = steady::now();
 			const bool ok = mb.publish([&](FakeJob &job) { fill_job(job, id); });
-			const double dt = ms_since(t0);
-			if (dt > worst_ms)
-				worst_ms = dt;
+			publish_ms.push_back(ms_since(t0));
 			CHECK(ok, "publish() while running returns true");
 			std::this_thread::sleep_for(std::chrono::milliseconds(33));
 		}
-		std::printf("producer worst publish = %.3f ms (budget %.1f ms, decode %d ms)\n", worst_ms,
-			    PRODUCER_BUDGET_MS, DECODE_MS);
-		CHECK(worst_ms <= PRODUCER_BUDGET_MS, "a 50 ms decode never blocks the producer for more than 2 ms");
+		std::sort(publish_ms.begin(), publish_ms.end());
+		const double p95_ms = publish_ms[publish_ms.size() * 95 / 100], worst_ms = publish_ms.back();
+		std::printf("producer publish p95 = %.3f ms, worst = %.3f ms (p95 < %.1f ms, worst < %.1f ms, decode %d ms)\n",
+			    p95_ms, worst_ms, PRODUCER_P95_MS, PRODUCER_MAX_MS, DECODE_MS);
+		CHECK(p95_ms < PRODUCER_P95_MS, "95 % of publishes take under 2 ms while a 50 ms decode runs");
+		CHECK(worst_ms < PRODUCER_MAX_MS, "no publish waits for the 50 ms decode (none reaches 15 ms)");
 
 		const bool last_seen = wait_for(
 			[&]() {

@@ -478,7 +478,7 @@ def _section_latency_pins(verdict, meta):
     this function stays a PURE formatter, no network/subprocess I/O, matching compose_report's
     own contract):
         {
-          "strih": {"cam1": {"main_ms": 3, "mv_ms": 3}, ...},   # live GetInputSettings reads
+          "strih": {"cam1": {"main_ms": 3}, ...},               # live GetInputSettings reads
           "imag":  {"cam1": {"main_ms": 3, "mv_ms": 3}, ...},   # (both optional per-box)
           "stream_hold_active_ms": 952,                          # live 'NDI 2ME PGM' pin
           "av_sync_last": {"applied_latency_ms": 952, "offset_ms": -7.24, "source": "NDI 2ME PGM",
@@ -509,28 +509,13 @@ def _section_latency_pins(verdict, meta):
     recommended = pins.get("recommended_pins_ms") or {}
 
     lines = ["**Nastavené latencie per kamera (živé z WS, nie napevno) + odporúčanie**"]
-    any_mismatch = False
     for cam in cams:
-        s = strih_pins.get(cam) or {}
-        s_main, s_mv = s.get("main_ms"), s.get("mv_ms")
+        s_main = (strih_pins.get(cam) or {}).get("main_ms")
         p50 = _g(delivery, cam, "p50_ms")
         rec = recommended.get(cam)
-
-        mismatch = False
-        if s_main is not None and s_mv is not None and s_main != s_mv:
-            mismatch = True
-        any_mismatch = any_mismatch or mismatch
-
         strih_str = f"strih={_pin_or_na(s_main)}" if s_main is not None else "strih=N/A"
-        if s_mv is not None and s_mv != s_main:
-            strih_str += f"(MV={_pin_or_na(s_mv)}!)"
-
-        flag = " ⚠️ PARITA main≠MV" if mismatch else ""
         rec_str = f", odporúčané={_pin_or_na(rec)}" if rec is not None else ""
-        lines.append(
-            f"  {'⚠️' if mismatch else '•'} {cam}: {strih_str}, "
-            f"p50 tento beh={_pin_or_na(p50)}{rec_str}{flag}"
-        )
+        lines.append(f"  • {cam}: {strih_str}, p50 tento beh={_pin_or_na(p50)}{rec_str}")
 
     if imag_pins:
         drifted = [
@@ -570,11 +555,6 @@ def _section_latency_pins(verdict, meta):
             else ""
         )
     )
-    if any_mismatch:
-        lines.append(
-            "  ⚠️ main≠MV klon nesie inú latenciu ako hlavný zdroj tej istej kamery — "
-            "monitorovací obraz (multiview) potom sedí inak ako program (parity violation)"
-        )
     return "\n".join(lines)
 
 
@@ -585,8 +565,9 @@ def _section_mv_skew(verdict, meta):
     `meta["mv_skew"]` (optional -- this whole section is skipped, never fabricated, when absent) is
     that gatherer's JSON: {"cameras": {"camN": {"median_ms", "n_samples", "stdev_ms", "alarming",
     ...}}, "frame_ms": 16.67, "error"?: "..."}. A camera with no decodable QR is an honest N/A
-    (never a fabricated 0). Both strih and imag are shared-source (scene 'MV Cam N' draws the SAME
-    input as 'Cam N') so the expected skew is ~0 -- this is a REGRESSION GUARD: |median| > 1 frame
+    (never a fabricated 0). The measurement runs on imag, which is shared-source (scene 'MV Cam N'
+    draws the SAME input as 'Cam N'; strih has no 'MV' scenes since issue 1242), so the expected
+    skew is ~0 -- this is a REGRESSION GUARD: |median| > 1 frame
     means the multiview cell the operator sees presents at a different time than the program."""
     mv = meta.get("mv_skew")
     if not mv:

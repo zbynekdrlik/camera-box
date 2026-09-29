@@ -43,6 +43,35 @@ _DELTA_FIELDS = ("holds", "relocks", "converge_sheds", "dropped_due")
 _AUDIT_MARK = "genlock-fifo audit '"
 
 
+def parse_audit_line(line: str):
+    """Pure: ``(input_name, {key: int})`` for ONE `genlock-fifo audit '<name>':` line, or None when
+    the line is not an audit line (no marker, or no closing quote). Every whitespace ``key=value``
+    token whose value is an integer is kept (the SAME shape genlock-settle.sh's awk uses);
+    decoration tokens (@fps, (=N ms), names) carry a non-integer value and are skipped. The ONE
+    tokenizer shared by parse_audit_counters and scripts/genlock_n2_grid.py (issue 1367 D1b)."""
+    pos = line.find(_AUDIT_MARK)
+    if pos < 0:
+        return None
+    rest = line[pos + len(_AUDIT_MARK):]
+    end = rest.find("'")
+    if end < 0:
+        return None
+    name = rest[:end]
+    counters: dict[str, int] = {}
+    for tok in line.split():
+        eq = tok.find("=")
+        if eq <= 0:
+            continue
+        key = tok[:eq]
+        val = tok[eq + 1:]
+        try:
+            counters[key] = int(val)
+        except ValueError:
+            # decoration tokens (@fps, (=N ms), names) carry a non-integer value -- skip.
+            continue
+    return name, counters
+
+
 def parse_audit_counters(log_text: str) -> dict[str, dict[str, int]]:
     """Pure: return {input_name: {counter: int}} for the LAST `genlock-fifo audit '<name>':` line
     of each input in `log_text`. Counters are parsed by a whitespace key=value scan (the SAME shape
@@ -54,26 +83,10 @@ def parse_audit_counters(log_text: str) -> dict[str, dict[str, int]]:
     if not log_text:
         return out
     for line in log_text.splitlines():
-        pos = line.find(_AUDIT_MARK)
-        if pos < 0:
+        parsed = parse_audit_line(line)
+        if parsed is None:
             continue
-        rest = line[pos + len(_AUDIT_MARK):]
-        end = rest.find("'")
-        if end < 0:
-            continue
-        name = rest[:end]
-        counters: dict[str, int] = {}
-        for tok in line.split():
-            eq = tok.find("=")
-            if eq <= 0:
-                continue
-            key = tok[:eq]
-            val = tok[eq + 1:]
-            try:
-                counters[key] = int(val)
-            except ValueError:
-                # decoration tokens (@fps, (=N ms), names) carry a non-integer value -- skip.
-                continue
+        name, counters = parsed
         if counters:
             out[name] = counters
     return out
