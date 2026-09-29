@@ -102,8 +102,9 @@ run (songplayer 151 is deployed since 25.9.2026; a supervisor/rig-ops step), per
 
 ## The E2E profile is opt-in + leak-guarded (`scripts/lib/cg-chain-e2e.sh`)
 
-`CG_CHAIN=1` turns the SongPlayer burn ON + cuts cg OBS program to the SP scene + StartRecords cg
-OBS at `[5/8]` (no cg recording started ⇒ the burn goes straight back OFF), runs ONE tail CG window
+`CG_CHAIN=1` turns the SongPlayer burn ON + cuts cg OBS program to the SP scene + turns the cg OBS
+hop burn (911015) ON + StartRecords cg OBS at `[5/8]` (no cg recording started ⇒ both burns go
+straight back OFF), runs ONE tail CG window
 on strih before `[7/8]`, ends the CG leg after the `[7/8]` StopRecord
 (`cg_chain_after_stoprecord`, placed AFTER the issue-1354 genlock-audit AFTER snapshot and the
 post-record stomp re-check so it never skews their "exactly the recording" window: cg StopRecord
@@ -130,7 +131,47 @@ unattended.
   or a missing `burn_on` = `unknown`, never read as off.
 - `cg_chain_songplayer_burn` POSTs + reads back up to `CG_CHAIN_BURN_ATTEMPTS` (3) times. An ON that
   never reads true is a WARNING (the cg_chain section then proves nothing); an OFF that never reads
-  false prints a `LEAK` line with the exact manual-off curl. Both always return 0.
+  false prints a `LEAK` line with the exact manual-off curl. Both always return 0. `CG_SP_BURN_ON`
+  is 1 only after a VERIFIED ON (every other toggle outcome resets it to 0) — the cg hop burn below
+  keys on it.
+
+### The cg OBS hop burn toggle (911015, issue 1302)
+
+Before this the profile toggled only the SongPlayer burn, so the cg recording of run 36291465574
+carried 911014 (10172/10177) and **no 911015 at all** — the cg hop was never measured. The cg burn is
+the DistroAV burn filter on the cg OBS INPUT that carries the SongPlayer output; like strih/stream it
+renders only while that input's `genlock_burn` is true, toggled by the existing
+`scripts/obs_burn_filter.py add|remove` and read back by its `check` (no new tool).
+
+- **Input:** `cg_chain_cg_burn_input` = `CG_CHAIN_CG_BURN_INPUT`, default `<cg scene>_video`
+  (`cg_chain_cg_scene` → the live `sp-fast_video`; the cg OBS inputs are `sp-*_video`). If the cg OBS
+  composition changes (songplayer's plan retires the per-song `sp-*` senders for `SP-program`),
+  repoint this default — the burn must sit on the input that carries the SongPlayer output.
+- **Read-back:** `cg_chain_cg_burn_check_state` classifies the `check` line by WHOLE tokens: `on` =
+  `burn_on=True` AND `filter_enabled=True`; `off` = `burn_on=False` and NOT `genlock_burn=True` (a
+  disabled filter still holding `genlock_burn=True` is `unknown`: one filter re-enable would bring the
+  burn back); a traceback / no answer = `unknown`.
+- **ON** (`cg_chain_cg_burn on`, a no-op unless `CG_CHAIN=1`) runs INSIDE `cg_chain_record_start`,
+  after the cg program cut and BEFORE StartRecord (the cg recording carries it from its first frame),
+  only when `CG_SP_BURN_ON=1` AND the cut succeeded (`cg_chain_cg_program_select` now returns 1 on a
+  failed cut) — otherwise a loud "cg OBS burn stays OFF" WARNING and nothing is sent. A failed
+  StartRecord turns it straight back OFF.
+- **`CG_BURN_ON` = "this run owes an OFF":** 1 after a verified ON, 0 after a verified OFF, and 1
+  again after an OFF that could not be verified (so the next OFF retries). An ON that never verifies
+  is a WARNING and is **rolled straight back OFF** — the `add` may have reached OBS, a half-known burn
+  never stays on. Initialised `CG_BURN_ON=0` in recording-e2e.sh's state block before the trap.
+- **OFF** in `cg_chain_after_stoprecord` (after the cg StopRecord, next to the SongPlayer OFF) and in
+  `cg_chain_cleanup` — both ONLY when `CG_BURN_ON=1` (the #649 harness-started-only rule: a burn this
+  run never turned on is never touched), cleanup with the SHORT `CG_CHAIN_CLEANUP_BURN_TIMEOUT` (3 s)
+  per python call like the SongPlayer burn's. An OFF that never reads `off` prints a `LEAK` line with
+  the exact `obs_burn_filter.py remove` command. Everything returns 0 (loud, never fatal).
+- **Why leak-guarded like the SongPlayer burn:** the cg OBS program feeds strih and, through Arena,
+  possibly FOH/LED — the #246/#844 class. Approach 2 (always ON in TEST mode) was rejected for that.
+- Tier-0: `tests/python/test_cg_chain_cg_burn_1302.py` (fake `obs_burn_filter.py` / `obs_phase2.py` /
+  `cg_chain_scene.py` run by the real python3, a fake SongPlayer `curl`, a pass-through `timeout`
+  logging the per-call budget). Verdict side needs nothing new: `--cg-chain-burns` and
+  `src/cg_chain_gate.rs` already expect 911015. The live proof is the next supervisor CG_CHAIN=1 run
+  (911015 present on the cg recording and, inside the CG window, on strih/stream).
 
 ### The cg recording is decoded IN PLACE on RESOLUME-SNV (issue 1302, the job-budget slice)
 

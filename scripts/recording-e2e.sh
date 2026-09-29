@@ -2431,6 +2431,9 @@ IMAG_RECORDING_STARTED=0
 CG_HOST_IP=""
 CG_RECORDING_STARTED=0
 CG_EXTRACT_PID=""
+# #1302: 1 once the cg OBS hop burn (911015) is on — set by the lib only after a verified ON, so
+# cleanup() turns it OFF even on an early abort and never touches a burn this run did not turn on.
+CG_BURN_ON=0
 # #1302: the cg OBS / strih scene snapshots the CG profile restores in cleanup() live in this run's
 # OUTDIR; CG_HOST_RECORDING_PATH is the cg OBS StopRecord host path the on-box decode reads.
 CG_CHAIN_STATE_DIR="$OUTDIR"
@@ -4533,7 +4536,9 @@ CAPTURE_RATE_WINDOW_START_EPOCH="$(date +%s)"
 # #1301: CG_CHAIN=1 — turn the SongPlayer output burn ON + StartRecord cg OBS (RESOLUME-SNV) for
 # the run. ALL best-effort (the burn is read back from SongPlayer's health endpoint) — a failure is
 # loud but NEVER aborts the camera-chain run; the SongPlayer burn OFF + cg OBS StopRecord run in
-# cleanup() (the #246/#844 leak-guard class). Pure no-op unless CG_CHAIN=1.
+# cleanup() (the #246/#844 leak-guard class). Pure no-op unless CG_CHAIN=1. The cg OBS hop burn
+# (911015) is turned on inside the lib's record start, after a verified SongPlayer burn + the cg
+# program cut, and off again with the SongPlayer burn.
 if cg_chain_enabled; then
   echo "[5/8] #1301 CG_CHAIN=1 — SongPlayer burn ON (verified on its health endpoint) + cg OBS program + StartRecord"
   cg_chain_songplayer_burn on

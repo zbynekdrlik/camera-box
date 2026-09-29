@@ -19,8 +19,10 @@
 #   - at [5/8]: turn the SongPlayer output burn ON through the SHIPPED API (POST
 #     {base}/api/v1/ndi/burn {"output":"SP-fast","on":true}) and READ IT BACK from
 #     {base}/api/v1/ndi/health (`burn_on` of that output), cut cg OBS program to the scene carrying
-#     that output (`sp-fast`, under the Cut transition), and StartRecord cg OBS over OBS-WS. No cg
-#     recording started ⇒ the burn goes straight back OFF.
+#     that output (`sp-fast`, under the Cut transition), turn the cg OBS's OWN hop burn (run 911015)
+#     ON on the input carrying that output (`sp-fast_video`, obs_burn_filter.py add + check — only
+#     after a verified SongPlayer burn and a successful cut), and StartRecord cg OBS over OBS-WS. No
+#     cg recording started ⇒ both burns go straight back OFF.
 #   - after the camera sweep/hold, BEFORE [7/8] StopRecord: ONE tail CG window — strih program is
 #     HARD-CUT (Cut transition, never a blend) to the scene carrying the `CG-obs` input (only that
 #     item shown), so the strih + stream recordings carry the CG chain. It is a TAIL window on
@@ -29,9 +31,9 @@
 #     hard cut are DESIGNED to keep the camera-chain verdict out of it (the CG frames are a trailing
 #     no-tick run after the last optical read); the first live CG_CHAIN=1 run is what confirms it.
 #   - right after [7/8] StopRecord (after the genlock-audit AFTER snapshot): StopRecord cg OBS
-#     (keeping the StopRecord host path for the on-box decode), burn OFF, strih's scene + program +
-#     transition AND cg OBS's program + transition restored — so nothing CG runs during the on-box
-#     decodes.
+#     (keeping the StopRecord host path for the on-box decode), both burns OFF, strih's scene +
+#     program + transition AND cg OBS's program + transition restored — so nothing CG runs during
+#     the on-box decodes.
 #   - at [8/8] (issue 1302): recording-verdict-on-resolume.sh decodes that exact cg file IN PLACE on
 #     RESOLUME-SNV (`--extract-partial cg`), in the background next to the strih/stream extracts, and
 #     pulls back only the small partial; the merge takes it as `--merge-partials cg=<json>` and emits
@@ -42,8 +44,9 @@
 #     `--cg-chain-burns` (the SongPlayer + cg ids join their expected-burn sets), and the merge gets
 #     this run's `--cg-window`, so the strih/stream hops are judged inside the CG window at the
 #     60->30 decimation step.
-#   - in cleanup(): the #246/#844 leak-guard — burn OFF (verified on /health, retried with a SHORT
-#     per-request timeout, a loud LEAK line if it never reads false), StopRecord cg OBS, every scene
+#   - in cleanup(): the #246/#844 leak-guard — the SongPlayer burn OFF (verified on /health) and the
+#     cg OBS hop burn OFF when this run turned it on (verified by `check`), each retried with a SHORT
+#     per-request timeout and a loud LEAK line if it never reads off, StopRecord cg OBS, every scene
 #     snapshot of this run restored, and an in-flight background cg extract stopped, even on an
 #     early abort.
 
@@ -140,6 +143,9 @@ cg_chain_songplayer_burn() {
     echo "[cg_chain] WARNING: SongPlayer burn action '$action' is not on|off — nothing sent" >&2
     return 0
   fi
+  # CG_SP_BURN_ON = 1 only after a VERIFIED ON (cg_chain_record_start turns the cg OBS hop burn on
+  # only then); any other outcome of any toggle leaves it 0.
+  CG_SP_BURN_ON=0
   if [ "$action" = on ]; then want=true; else want=false; fi
   attempts="${CG_CHAIN_BURN_ATTEMPTS:-3}"
   case "$attempts" in '' | *[!0-9]* | 0) attempts=3 ;; esac
@@ -148,6 +154,7 @@ cg_chain_songplayer_burn() {
       -d "$body" "$url" >/dev/null 2>&1 || true
     state="$(cg_chain_songplayer_burn_state)"
     if [ "$state" = "$want" ]; then
+      if [ "$action" = on ]; then CG_SP_BURN_ON=1; fi
       echo "[cg_chain] SongPlayer burn $action VERIFIED (burn_on=$state on $(cg_chain_songplayer_output), $(cg_chain_songplayer_health_url))"
       return 0
     fi
@@ -197,36 +204,140 @@ cg_chain_scene_py() {
   printf '%s/cg_chain_scene.py' "$(dirname "$1")"
 }
 
+# ---- the cg OBS hop burn (911015) ---------------------------------------------------------------
+#
+# The cg OBS paints its OWN hop burn (run 911015, BottomCenterRight) with the DistroAV burn filter on
+# the input that carries the SongPlayer output. Like strih/stream it renders only while that input's
+# `genlock_burn` is true — toggled over OBS-WS by obs_burn_filter.py `add` / `remove` and read back by
+# its `check`. It is ON only for the cg recording: the cg OBS program feeds strih and, through Arena,
+# possibly FOH/LED, so a burn left on is the #246/#844 leak class. CG_BURN_ON=1 means "this run owes
+# an OFF": set after a verified ON (and after an OFF that could not be verified); a verified OFF
+# clears it; after_stoprecord and cleanup() turn the burn OFF only when it is set.
+
+# The cg OBS input carrying the SongPlayer output (env CG_CHAIN_CG_BURN_INPUT, default
+# `<cg scene>_video` — the live `sp-fast_video`). Pure.
+cg_chain_cg_burn_input() {
+  printf '%s' "${CG_CHAIN_CG_BURN_INPUT:-$(cg_chain_cg_scene)_video}"
+}
+
+# The burn toggle that sits next to obs_phase2.py ($1 = the obs_phase2.py path). Pure.
+cg_chain_burn_filter_py() {
+  printf '%s/obs_burn_filter.py' "$(dirname "$1")"
+}
+
+# Classify an `obs_burn_filter.py check` answer ($1, any number of lines):
+#   on       burn_on=True AND filter_enabled=True — the burn renders;
+#   off      burn_on=False and genlock_burn is not True — nothing renders, and no filter re-enable
+#            can bring it back;
+#   unknown  anything else (no answer, a traceback, a disabled filter holding genlock_burn=True).
+# Tokens are matched whole (space-delimited). Pure; ALWAYS returns 0.
+cg_chain_cg_burn_check_state() {
+  local ans=" ${1//$'\n'/ } "
+  if [[ "$ans" == *" burn_on=True "* && "$ans" == *" filter_enabled=True "* ]]; then
+    printf 'on'
+  elif [[ "$ans" == *" burn_on=False "* && "$ans" != *" genlock_burn=True "* ]]; then
+    printf 'off'
+  else
+    printf 'unknown'
+  fi
+  return 0
+}
+
+# Turn the cg OBS hop burn $1 (on|off) on cg_chain_cg_burn_input and VERIFY it with `check`.
+# $2=cg-host-ip $3=path-to-obs_phase2.py $4=per-call timeout secs (every python call runs under it).
+# Up to CG_CHAIN_BURN_ATTEMPTS (default 3) toggle + read-back rounds, CG_CHAIN_BURN_RETRY_SLEEP
+# seconds apart (default 1).
+#   - ON is a no-op unless CG_CHAIN=1 (only the profile turns a burn on).
+#   - A verified ON sets CG_BURN_ON=1. An ON that never verifies is a loud WARNING and is rolled
+#     straight back OFF: the `add` may have reached OBS, and a half-known burn never stays on.
+#   - A verified OFF sets CG_BURN_ON=0. An OFF that never verifies is a loud LEAK line naming the
+#     manual off command, and CG_BURN_ON=1 so the next OFF (cleanup()) tries again.
+# BEST-EFFORT; ALWAYS returns 0 (never aborts the run or cleanup()).
+cg_chain_cg_burn() {
+  local action="$1" host="${2:-}" py="${3:-}" tmo="${4:-30}" verb input bf attempts i chk last
+  local state=unknown
+  case "$action" in
+    on) verb=add ;;
+    off) verb=remove ;;
+    *)
+      echo "[cg_chain] WARNING: cg OBS burn action '$action' is not on|off — nothing sent" >&2
+      return 0
+      ;;
+  esac
+  if [ "$action" = on ] && ! cg_chain_enabled; then return 0; fi
+  input="$(cg_chain_cg_burn_input)"
+  bf="$(cg_chain_burn_filter_py "$py")"
+  if [ -z "$host" ]; then
+    if [ "$action" = off ]; then
+      echo "[cg_chain] LEAK: no cg OBS host known — the cg OBS burn on '$input' was not turned off; turn it off: python3 $bf remove --host <cg OBS> --input '$input'" >&2
+    else
+      echo "[cg_chain] WARNING: no cg OBS host — the cg OBS burn was not turned on" >&2
+    fi
+    return 0
+  fi
+  attempts="${CG_CHAIN_BURN_ATTEMPTS:-3}"
+  case "$attempts" in '' | *[!0-9]* | 0) attempts=3 ;; esac
+  for ((i = 1; i <= attempts; i++)); do
+    timeout "$tmo" python3 "$bf" "$verb" --host "$host" --input "$input" >/dev/null 2>&1 || true
+    chk="$(timeout "$tmo" python3 "$bf" check --host "$host" --input "$input" 2>&1 || true)"
+    state="$(cg_chain_cg_burn_check_state "$chk")"
+    if [ "$state" = "$action" ]; then
+      if [ "$action" = on ]; then CG_BURN_ON=1; else CG_BURN_ON=0; fi
+      echo "[cg_chain] cg OBS burn $action VERIFIED (run 911015 on '$input', $host)"
+      return 0
+    fi
+    if [ "$i" -lt "$attempts" ]; then sleep "${CG_CHAIN_BURN_RETRY_SLEEP:-1}"; fi
+  done
+  last="${chk##*$'\n'}"
+  if [ "$action" = on ]; then
+    echo "[cg_chain] WARNING: cg OBS burn ON not confirmed after $attempts attempt(s) on '$input' ($host; last check: ${last:-no answer}) — rolling it back OFF; the cg hop is not measured this run" >&2
+    cg_chain_cg_burn off "$host" "$py" "$tmo"
+  else
+    CG_BURN_ON=1
+    echo "[cg_chain] LEAK: cg OBS burn still not OFF after $attempts attempt(s) on '$input' ($host; last check: ${last:-no answer}) — it may still be on the cg OBS output (strih, FOH/LED); turn it off: python3 $bf remove --host $host --input '$input'" >&2
+  fi
+  return 0
+}
+
 # ---- cg OBS record leg ---------------------------------------------------------------------------
 
 # Cut cg OBS program to the scene carrying the SongPlayer output, snapshotting the previous program
 # first (restored in cleanup()). $1=host-ip $2=path-to-obs_phase2.py $3=timeout-secs. BEST-EFFORT +
-# loud; ALWAYS return 0.
+# loud: returns 0 on a successful cut, 1 on a failed one (a WARNING). MUST be called from an `if`.
 cg_chain_cg_program_select() {
   local host="$1" py="$2" tmo="${3:-30}" scene
   scene="$(cg_chain_cg_scene)"
   if timeout "$tmo" python3 "$(cg_chain_scene_py "$py")" program --host "$host" --scene "$scene" \
     --state-file "$(cg_chain_state_file cg-program)" >/dev/null; then
     echo "[cg_chain] cg OBS ($host) program -> '$scene' OK"
-  else
-    echo "[cg_chain] WARNING: cg OBS ($host) program cut to '$scene' failed — the cg recording may not carry the SongPlayer burn" >&2
+    return 0
   fi
-  return 0
+  echo "[cg_chain] WARNING: cg OBS ($host) program cut to '$scene' failed — the cg recording may not carry the SongPlayer burn" >&2
+  return 1
 }
 
-# Cut cg OBS program to the SongPlayer scene, then StartRecord cg OBS over OBS-WS
-# (obs_phase2.py record --host <ip> --action start). Args: $1=host-ip $2=path-to-obs_phase2.py
-# $3=timeout-secs. Returns 0 on a started recording (caller then sets CG_RECORDING_STARTED=1 so
-# cleanup() StopRecords this box), 1 on failure. MUST be called from an `if` (the nonzero return is
-# the failure signal, not an abort — never call it bare under set -e).
+# Cut cg OBS program to the SongPlayer scene, turn the cg OBS hop burn ON, then StartRecord cg OBS
+# over OBS-WS (obs_phase2.py record --host <ip> --action start). The hop burn goes ON only when the
+# SongPlayer burn was VERIFIED on (CG_SP_BURN_ON=1) and the program cut succeeded — otherwise there is
+# nothing for the cg hop to carry — and BEFORE StartRecord, so the cg recording carries it from its
+# first frame. A failed StartRecord turns it straight back OFF (nothing will judge it). Args:
+# $1=host-ip $2=path-to-obs_phase2.py $3=timeout-secs. Returns 0 on a started recording (caller then
+# sets CG_RECORDING_STARTED=1 so cleanup() StopRecords this box), 1 on failure. MUST be called from an
+# `if` (the nonzero return is the failure signal, not an abort — never call it bare under set -e).
 cg_chain_record_start() {
-  local host="$1" py="$2" tmo="${3:-30}"
-  cg_chain_cg_program_select "$host" "$py" "$tmo"
+  local host="$1" py="$2" tmo="${3:-30}" cut_ok=0
+  if cg_chain_cg_program_select "$host" "$py" "$tmo"; then cut_ok=1; fi
+  if [ "${CG_SP_BURN_ON:-0}" = 1 ] && [ "$cut_ok" = 1 ]; then
+    cg_chain_cg_burn on "$host" "$py" "$tmo"
+  else
+    echo "[cg_chain] WARNING: cg OBS burn stays OFF (SongPlayer burn verified=${CG_SP_BURN_ON:-0}, cg program cut ok=$cut_ok) — the cg hop is not measured this run" >&2
+  fi
   if timeout "$tmo" python3 "$py" record --host "$host" --action start >/dev/null 2>&1; then
     echo "[cg_chain] cg OBS ($host) StartRecord OK"
     return 0
   fi
   echo "[cg_chain] WARNING: cg OBS ($host) StartRecord failed — the cg_chain section will be omitted this run" >&2
+  if [ "${CG_BURN_ON:-0}" = 1 ]; then cg_chain_cg_burn off "$host" "$py" "$tmo"; fi
   return 1
 }
 
@@ -570,9 +681,10 @@ cg_chain_restore_snapshot() {
 }
 
 # End the CG leg right after [7/8] StopRecord: StopRecord cg OBS (keeping the host path for the
-# on-box decode), burn OFF (verified), strih's CG-window scene + program + transition restored, and cg
-# OBS's program + transition restored — so neither the cg recording nor the burn nor either CG
-# program change runs through the long on-box decodes.
+# on-box decode), the SongPlayer burn OFF and the cg OBS hop burn OFF (each verified; the hop burn
+# only when this run turned it on, CG_BURN_ON=1), strih's CG-window scene + program + transition
+# restored, and cg OBS's program + transition restored — so neither the cg recording nor a burn nor
+# either CG program change runs through the long on-box decodes.
 # cleanup() repeats every step (each is idempotent). $1=cg-host-ip-or-empty $2=path-to-obs_phase2.py
 # $3=timeout-secs. A pure no-op unless CG_CHAIN=1; ALWAYS return 0.
 cg_chain_after_stoprecord() {
@@ -582,16 +694,18 @@ cg_chain_after_stoprecord() {
     cg_chain_record_stop "$host" "$py" "$tmo"
   fi
   cg_chain_songplayer_burn off
+  if [ "${CG_BURN_ON:-0}" = 1 ]; then cg_chain_cg_burn off "$host" "$py" "$tmo"; fi
   cg_chain_restore_snapshot strih-scene "$py" "$tmo"
   cg_chain_restore_snapshot cg-program "$py" "$tmo"
   return 0
 }
 
-# cleanup() leak-guard: burn OFF (verified), StopRecord cg OBS, and every scene snapshot of this run
-# restored, even on an early abort. The burn requests use a SHORT per-request timeout
-# (CG_CHAIN_CLEANUP_BURN_TIMEOUT, default 3 s), so an unreachable SongPlayer costs ~20 s, never a
-# minute in front of the stream/strih teardowns that follow. A pure no-op when CG_CHAIN is not
-# enabled (so it is safe to call unconditionally from cleanup()). Args: $1=cg-host-ip-or-empty
+# cleanup() leak-guard: the SongPlayer burn OFF and the cg OBS hop burn OFF (each verified; the hop
+# burn only when CG_BURN_ON=1), StopRecord cg OBS, and every scene snapshot of this run restored,
+# even on an early abort. The burn requests use a SHORT per-request timeout
+# (CG_CHAIN_CLEANUP_BURN_TIMEOUT, default 3 s), so an unreachable SongPlayer or cg OBS costs ~20 s
+# each, never a minute in front of the stream/strih teardowns that follow. A pure no-op when CG_CHAIN
+# is not enabled (so it is safe to call unconditionally from cleanup()). Args: $1=cg-host-ip-or-empty
 # $2=path-to-obs_phase2.py $3=timeout-secs. ALWAYS return 0.
 cg_chain_cleanup() {
   cg_chain_enabled || return 0
@@ -599,6 +713,9 @@ cg_chain_cleanup() {
   # Issue 1302: an aborted run must not leave the background cg extract running.
   cg_chain_extract_stop
   CG_CHAIN_BURN_TIMEOUT="${CG_CHAIN_CLEANUP_BURN_TIMEOUT:-3}" cg_chain_songplayer_burn off
+  if [ "${CG_BURN_ON:-0}" = 1 ]; then
+    cg_chain_cg_burn off "$host" "$py" "${CG_CHAIN_CLEANUP_BURN_TIMEOUT:-3}"
+  fi
   # Only a cg recording THIS run started (the #649 harness-started-boxes-only rule): CG_HOST_IP is
   # set as soon as the host resolves, before StartRecord.
   if [ "${CG_RECORDING_STARTED:-0}" = 1 ] && [ -n "$host" ]; then
