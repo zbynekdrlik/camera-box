@@ -13,6 +13,12 @@ Two scene changes let the SongPlayer-originated content reach every hop the verd
   restore     put everything a snapshot recorded back (program scene first, then each item's
               enabled state, then the previous transition) and retire the snapshot, so a second
               cleanup() pass is a no-op.
+  facade-program
+              issue 1302 slice 3: put a scene on SongPlayer's OWN program through its obs-websocket
+              facade (``--port``, default 4456; the same ``SetCurrentProgramScene`` Companion
+              sends). SongPlayer cuts SP-program to that playlist and mirrors cg OBS to it. The
+              snapshot / read-back / restore of SongPlayer's program live in
+              scripts/lib/cg-chain-e2e.sh (SongPlayer's REST program API); this is only the press.
 
 Every program cut runs under the box's CUT transition (switched to it, the previous one
 snapshotted and restored last): a Fade would blend the old program into the new one, and the
@@ -211,6 +217,16 @@ def program_select(rpc, host, scene, state_path):
     _cut_program(rpc, scene, prev_transition, cut)
 
 
+def facade_program(rpc, scene):
+    """issue 1302 slice 3: press ``scene`` on SongPlayer's obs-websocket facade -- the ONE
+    ``SetCurrentProgramScene`` Companion sends (SongPlayer cuts SP-program to that scene's playlist,
+    then mirrors the scene to cg OBS). The facade serves no transition list, so there is no
+    transition dance here: the caller has already hard-cut cg OBS to the same scene over :4455, so
+    the mirror is a no-op cut. Refused for the production scene before anything is sent."""
+    _refuse_program_target(scene)
+    rpc("SetCurrentProgramScene", {"sceneName": scene})
+
+
 def restore(rpc_for_host, state_path):
     """Undo a snapshot, then retire it (renamed ``.restored``). Returns False when there is no
     snapshot (already restored / never taken) — a second cleanup() pass changes nothing."""
@@ -249,6 +265,11 @@ def build_parser():
     prog.add_argument("--state-file", required=True)
     rest = sub.add_parser("restore", help="undo a snapshot written by strih-solo / program")
     rest.add_argument("--state-file", required=True)
+    fac = sub.add_parser("facade-program",
+                         help="put a scene on SongPlayer's program through its obs-websocket facade")
+    fac.add_argument("--host", required=True)
+    fac.add_argument("--port", type=int, default=4456)
+    fac.add_argument("--scene", required=True)
     return ap
 
 
@@ -266,6 +287,15 @@ def _ws_session(host):
     without auth). The caller closes ``ws``."""
     o = _obs_phase2()
     ws = o._conn(host, os.environ.get("CG_CHAIN_OBS_PASSWORD", ""))
+    return ws, (lambda rtype, rdata=None: o._rpc(ws, rtype, rdata))
+
+
+def _facade_session(host, port):
+    """(ws, rpc) to SongPlayer's obs-websocket facade over obs_phase2's own bounded WS client (a
+    port argument, never a second client). The facade's password, when SongPlayer has one set, is
+    CG_CHAIN_SP_FACADE_PASSWORD. The caller closes ``ws``."""
+    o = _obs_phase2()
+    ws = o._conn(host, os.environ.get("CG_CHAIN_SP_FACADE_PASSWORD", ""), port=port)
     return ws, (lambda rtype, rdata=None: o._rpc(ws, rtype, rdata))
 
 
@@ -302,6 +332,13 @@ def main(argv=None):
             print(f"{time.time_ns()}\t{scene}")
         elif a.cmd == "program":
             program_select(session(a.host)[1], a.host, a.scene, a.state_file)
+            print(a.scene)
+        elif a.cmd == "facade-program":
+            # The guard runs BEFORE the connection: a refused target never dials SongPlayer.
+            _refuse_program_target(a.scene)
+            ws, rpc = _facade_session(a.host, a.port)
+            opened.append(ws)
+            facade_program(rpc, a.scene)
             print(a.scene)
         else:
             if restore(lambda host: session(host)[1], a.state_file):

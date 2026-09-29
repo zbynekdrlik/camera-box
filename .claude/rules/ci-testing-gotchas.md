@@ -1635,3 +1635,18 @@ extractor (bounded at 10 s) to see whether the script it runs hides a compile. W
 than silently allowing". The blocked command was a harmless `python3 sweep.py old.sh new.sh`
 anchor sweep. Keep `.sh` paths out of such commands: hard-code them inside the script (written with
 the Write tool) and run `python3 /abs/sweep.py` with no arguments.
+
+## Running ONE loop cut out of a rig-mode.sh function, for real (issue 1302)
+
+A static anchor proves a loop's text, not what it does on a failed or hung row. To run the loop
+itself (the EVENT contract's sweep-check in `event_mode_assert`), a pytest slices it out between two
+count-1 anchors and runs it under the caller's `set -euo pipefail`. Put fake `timeout` / `python3`
+stubs on PATH and define the loop's input functions (`obs_burn_targets`) in the harness. Two traps:
+- the slice starts with `local ...`, and `local` outside a function is an error, so wrap the slice
+  in a harness function (`contract() { local burn_json="{}"; <slice>; ...; }`);
+- the loop builds its JSON with plain `jq`, which prints it over many lines. Print it with
+  `jq -c .` before a test parses one `BURN=` line.
+Worked example: `_contract_sweep` in `tests/python/test_cg_chain_measure_1302.py`.
+
+On a loaded dev1, one pytest run over every file that reads rig-mode.sh / the cg-chain libs took
+more than the 600 s Bash cap. Split it into chunks (`files[n::4]`, one script run per chunk).

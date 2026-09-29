@@ -72,3 +72,19 @@ def test_conn_identify_subscribes_to_zero_events(monkeypatch):
         "_conn Identify must set eventSubscriptions=0 (else the session defaults to "
         "EventSubscription::All and a cold NDI reactivation floods op-5 events → #328 hang)"
     )
+
+
+def test_conn_dials_4455_by_default_and_the_given_port_otherwise(monkeypatch):
+    # issue 1302 slice 3: SongPlayer's obs-websocket facade (:4456) is reached through this SAME
+    # client (and so through _rpc's production-scene guard), never a second one.
+    urls = []
+
+    def fake_create_connection(url, **_kw):
+        urls.append(url)
+        return _FakeWS()
+
+    monkeypatch.setattr(obs_phase2, "create_connection", fake_create_connection)
+    obs_phase2._conn("10.77.9.201")
+    obs_phase2._conn("10.77.9.201", "", port=4456)
+    obs_phase2._conn("10.77.9.201", "", 4457)
+    assert urls == ["ws://10.77.9.201:4455", "ws://10.77.9.201:4456", "ws://10.77.9.201:4457"]

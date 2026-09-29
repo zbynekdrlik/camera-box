@@ -16,13 +16,15 @@
 # the CG_CHAIN-guarded call lines are added AFTER existing anchored lines, never editing one.
 #
 # What the profile does when CG_CHAIN=1 (ALL best-effort + loud, never a camera-chain abort):
-#   - at [5/8]: turn the SongPlayer output burn ON through the SHIPPED API (POST
-#     {base}/api/v1/ndi/burn {"output":"SP-fast","on":true}) and READ IT BACK from
-#     {base}/api/v1/ndi/health (`burn_on` of that output), cut cg OBS program to the scene carrying
-#     that output (`sp-fast`, under the Cut transition), turn the cg OBS's OWN hop burn (run 911015)
-#     ON on the input carrying that output (`sp-fast_video`, obs_burn_filter.py add + check — only
-#     after a verified SongPlayer burn and a successful cut), and StartRecord cg OBS over OBS-WS. No
-#     cg recording started ⇒ both burns go straight back OFF.
+#   - at [5/8]: cut cg OBS program to the scene carrying the SongPlayer output (`sp-fast`, under the
+#     Cut transition), put SongPlayer's OWN program on it through SongPlayer's obs-websocket facade
+#     (:4456, its previous program snapshotted first), read BOTH programs back, then turn the
+#     SongPlayer output burn ON through the SHIPPED API (POST {base}/api/v1/ndi/burn
+#     {"output":"SP-fast","on":true}, every answer logged with its HTTP code) and POLL it back on
+#     {base}/api/v1/ndi/health (`burn_on` of that output), turn the cg OBS's OWN hop burn (run
+#     911015) ON on the input carrying that output (`sp-fast_video`, obs_burn_filter.py add + check —
+#     only after a verified SongPlayer burn and both programs read back), and StartRecord cg OBS over
+#     OBS-WS. No cg recording started ⇒ both burns go straight back OFF.
 #   - after the camera sweep/hold, BEFORE [7/8] StopRecord: ONE tail CG window — strih program is
 #     HARD-CUT (Cut transition, never a blend) to the scene carrying the `CG-obs` input (only that
 #     item shown), so the strih + stream recordings carry the CG chain. It is a TAIL window on
@@ -32,8 +34,8 @@
 #     no-tick run after the last optical read); the first live CG_CHAIN=1 run is what confirms it.
 #   - right after [7/8] StopRecord (after the genlock-audit AFTER snapshot): StopRecord cg OBS
 #     (keeping the StopRecord host path for the on-box decode), both burns OFF, strih's scene +
-#     program + transition AND cg OBS's program + transition restored — so nothing CG runs during
-#     the on-box decodes.
+#     program + transition, SongPlayer's program (through the facade) AND cg OBS's program +
+#     transition restored — so nothing CG runs during the on-box decodes.
 #   - at [8/8] (issue 1302): recording-verdict-on-resolume.sh decodes that exact cg file IN PLACE on
 #     RESOLUME-SNV (`--extract-partial cg`), in the background next to the strih/stream extracts, and
 #     pulls back only the small partial; the merge takes it as `--merge-partials cg=<json>` and emits
@@ -48,8 +50,11 @@
 #     background OFF for each burn this run owes an OFF (a cancelled job is SIGKILLed seconds later);
 #     later the SongPlayer burn OFF (verified on /health) and the cg OBS hop burn OFF when this run
 #     turned it on (verified by `check`), each retried with a SHORT per-request timeout and a loud
-#     LEAK line if it never reads off, StopRecord cg OBS, every scene snapshot of this run restored,
-#     and an in-flight background cg extract stopped, even on an early abort.
+#     LEAK line if it never reads off, StopRecord cg OBS, every scene / program snapshot of this run
+#     restored, and an in-flight background cg extract stopped, even on an early abort.
+#   - not gated on CG_CHAIN (scripts/lib/cg-obs-burn-backstop.sh): rig-mode EVENT and the E2E
+#     pre-run normalize also sweep the cg OBS burns while the traveling box is home — the backstop for
+#     a cg hop burn a killed earlier run left on.
 
 # win_ssh_scp_source_path (the backslash-to-slash scp source fix) lives in win-ssh-exec.sh, which
 # recording-e2e.sh sources earlier; source it here too when a caller (a test) did not.
@@ -57,124 +62,19 @@ if ! declare -F win_ssh_scp_source_path >/dev/null 2>&1; then
   # shellcheck source=scripts/lib/win-ssh-exec.sh
   . "$(dirname "${BASH_SOURCE[0]}")/win-ssh-exec.sh"
 fi
+# The SongPlayer API + SongPlayer's own program through its facade (cg-chain-songplayer.sh) and the
+# home-gated cg OBS burn backstop (cg-obs-burn-backstop.sh, which rig-mode.sh sources on its own)
+# live in their own files; both are source-only, no side effects at source time.
+# shellcheck source=scripts/lib/cg-chain-songplayer.sh
+. "$(dirname "${BASH_SOURCE[0]}")/cg-chain-songplayer.sh"
+if ! declare -F cg_chain_backstop_sweep_targets >/dev/null 2>&1; then
+  # shellcheck source=scripts/lib/cg-obs-burn-backstop.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/cg-obs-burn-backstop.sh"
+fi
 
 # True iff the CG_CHAIN profile is enabled for this run. Pure, no side effects.
 cg_chain_enabled() {
   [ "${CG_CHAIN:-0}" = "1" ]
-}
-
-# ---- (a) the SongPlayer burn API ---------------------------------------------------------------
-
-# The SongPlayer API base (env CG_CHAIN_SONGPLAYER_API, default http://resolume.lan:8920 — the
-# SongPlayer app on RESOLUME-SNV), with any trailing slash dropped. Pure.
-cg_chain_songplayer_api_base() {
-  local base="${CG_CHAIN_SONGPLAYER_API:-http://resolume.lan:8920}"
-  printf '%s' "${base%/}"
-}
-
-# The SongPlayer output whose burn this run toggles (env CG_CHAIN_SONGPLAYER_OUTPUT). Pure.
-cg_chain_songplayer_output() {
-  printf '%s' "${CG_CHAIN_SONGPLAYER_OUTPUT:-SP-fast}"
-}
-
-# The burn-toggle URL. on/off travels in the JSON body, never the URL. Pure.
-cg_chain_songplayer_burn_url() {
-  printf '%s/api/v1/ndi/burn' "$(cg_chain_songplayer_api_base)"
-}
-
-# The health URL whose per-output `burn_on` confirms a toggle. Pure.
-cg_chain_songplayer_health_url() {
-  printf '%s/api/v1/ndi/health' "$(cg_chain_songplayer_api_base)"
-}
-
-# The burn-toggle JSON body for $1 (on|off): {"output":"<out>","on":true|false}. Returns 1 (and
-# prints nothing) on any other action, so a typo can never POST. Pure (python json.dumps escapes the
-# output name correctly).
-cg_chain_songplayer_burn_body() {
-  case "$1" in
-    on | off) ;;
-    *) return 1 ;;
-  esac
-  python3 -c 'import json,sys; print(json.dumps({"output": sys.argv[1], "on": sys.argv[2] == "on"}, separators=(",", ":")))' \
-    "$(cg_chain_songplayer_output)" "$1"
-}
-
-# Read a /api/v1/ndi/health JSON document on STDIN and print the `burn_on` of output $1:
-# `true` / `false`, or `unknown` when the JSON does not parse, the output is absent, or its
-# `burn_on` is missing / not a boolean. Never fails the caller (ALWAYS returns 0).
-cg_chain_health_burn_on() {
-  python3 -c '
-import json, sys
-out = sys.argv[1]
-try:
-    doc = json.load(sys.stdin)
-except Exception:
-    print("unknown", end="")
-    sys.exit(0)
-rows = doc if isinstance(doc, list) else []
-for row in rows:
-    if isinstance(row, dict) and row.get("ndi_name") == out:
-        v = row.get("burn_on")
-        print("true" if v is True else "false" if v is False else "unknown", end="")
-        sys.exit(0)
-print("unknown", end="")
-' "$1" 2>/dev/null || printf 'unknown'
-  return 0
-}
-
-# The CURRENT `burn_on` of the configured output, read live from the health endpoint:
-# `true` / `false` / `unknown` (an unreachable endpoint reads `unknown`). ALWAYS returns 0.
-cg_chain_songplayer_burn_state() {
-  local body
-  body="$(curl -fsS -m "${CG_CHAIN_BURN_TIMEOUT:-10}" "$(cg_chain_songplayer_health_url)" 2>/dev/null || true)"
-  printf '%s' "$body" | cg_chain_health_burn_on "$(cg_chain_songplayer_output)"
-  return 0
-}
-
-# Toggle the SongPlayer output burn $1 (on|off) and VERIFY it on the health endpoint. Up to
-# CG_CHAIN_BURN_ATTEMPTS (default 3) POST + read-back rounds, CG_CHAIN_BURN_RETRY_SLEEP seconds
-# apart (default 1). A verified toggle prints one VERIFIED line. An ON that never reads back true is
-# a loud WARNING (the cg_chain section then proves nothing). An OFF that never reads back false is a
-# loud LEAK line naming the manual off command — the burn must NEVER stay on the LED wall. ALWAYS
-# returns 0 (never aborts the run or cleanup()).
-cg_chain_songplayer_burn() {
-  local action="$1" url body want attempts i state=unknown
-  url="$(cg_chain_songplayer_burn_url)"
-  if ! body="$(cg_chain_songplayer_burn_body "$action")"; then
-    echo "[cg_chain] WARNING: SongPlayer burn action '$action' is not on|off — nothing sent" >&2
-    return 0
-  fi
-  # CG_SP_BURN_ON = 1 only after a VERIFIED ON (cg_chain_record_start turns the cg OBS hop burn on
-  # only then); every other outcome of a sent toggle leaves it 0. CG_SP_BURN_OWED = "this run owes the
-  # SongPlayer burn an OFF" (cleanup()'s first pass keys on it): 1 from the moment an ON is sent,
-  # cleared only by a verified OFF, set again by an OFF that never verified.
-  CG_SP_BURN_ON=0
-  if [ "$action" = on ]; then
-    CG_SP_BURN_OWED=1
-    want=true
-  else
-    want=false
-  fi
-  attempts="${CG_CHAIN_BURN_ATTEMPTS:-3}"
-  case "$attempts" in '' | *[!0-9]* | 0) attempts=3 ;; esac
-  for ((i = 1; i <= attempts; i++)); do
-    curl -fsS -m "${CG_CHAIN_BURN_TIMEOUT:-10}" -X POST -H 'Content-Type: application/json' \
-      -d "$body" "$url" >/dev/null 2>&1 || true
-    state="$(cg_chain_songplayer_burn_state)"
-    if [ "$state" = "$want" ]; then
-      if [ "$action" = on ]; then CG_SP_BURN_ON=1; else CG_SP_BURN_OWED=0; fi
-      echo "[cg_chain] SongPlayer burn $action VERIFIED (burn_on=$state on $(cg_chain_songplayer_output), $(cg_chain_songplayer_health_url))"
-      return 0
-    fi
-    if [ "$i" -lt "$attempts" ]; then sleep "${CG_CHAIN_BURN_RETRY_SLEEP:-1}"; fi
-  done
-  if [ "$action" = on ]; then
-    echo "[cg_chain] WARNING: SongPlayer burn ON not confirmed after $attempts attempt(s) (burn_on=$state on $(cg_chain_songplayer_output)) — the cg_chain section will prove nothing this run" >&2
-  else
-    CG_SP_BURN_OWED=1
-    echo "[cg_chain] LEAK: SongPlayer burn still not OFF after $attempts attempt(s) (burn_on=$state on $(cg_chain_songplayer_output)) — the burn may still be on the LED wall; turn it off: curl -X POST -H 'Content-Type: application/json' -d '$body' $url" >&2
-  fi
-  return 0
 }
 
 # ---- hosts, scenes, state files ----------------------------------------------------------------
@@ -345,18 +245,33 @@ cg_chain_cg_program_select() {
   return 1
 }
 
-# Cut cg OBS program to the SongPlayer scene, turn the cg OBS hop burn ON, then StartRecord cg OBS
-# over OBS-WS (obs_phase2.py record --host <ip> --action start). The hop burn goes ON only when the
-# SongPlayer burn was VERIFIED on (CG_SP_BURN_ON=1) and the program cut succeeded — otherwise there is
-# nothing for the cg hop to carry — and BEFORE StartRecord, so the cg recording carries it from its
-# first frame. A failed StartRecord turns it straight back OFF (nothing will judge it). The burn calls
-# run under cg_chain_burn_obs_timeout, never the record timeout. Args: $1=host-ip
-# $2=path-to-obs_phase2.py $3=timeout-secs. Returns 0 on a started recording (caller then sets
-# CG_RECORDING_STARTED=1 so cleanup() StopRecords this box), 1 on failure. MUST be called from an
-# `if` (the nonzero return is the failure signal, not an abort — never call it bare under set -e).
+# Cut cg OBS program to the SongPlayer scene (over :4455, the hard cut), put SongPlayer's own program
+# on it through the facade, read BOTH programs back, and only then turn the SongPlayer burn ON, as
+# the last SongPlayer step before the cg recording: SongPlayer registers a playlist's burn OFF
+# whenever its pipeline (re)spawns (the flag is never persisted; it pre-creates one pipeline per
+# active playlist at startup, a cut does not spawn one), and a burn with no playlist verified on
+# program has nothing to mark. Then the cg OBS hop burn goes ON — only when the SongPlayer burn was
+# VERIFIED on (CG_SP_BURN_ON=1) AND both programs read back on the scene, otherwise there is nothing
+# for the cg hop to carry — and BEFORE StartRecord, so the cg recording carries it from its first
+# frame; then StartRecord cg OBS over OBS-WS (obs_phase2.py record --host <ip> --action start). A
+# failed StartRecord turns the cg burn straight back OFF (nothing will judge it); the caller turns
+# the SongPlayer burn off. The burn and read-back calls run under cg_chain_burn_obs_timeout, never the
+# record timeout. Args: $1=host-ip $2=path-to-obs_phase2.py $3=timeout-secs. Returns 0 on a started
+# recording (caller then sets CG_RECORDING_STARTED=1 so cleanup() StopRecords this box), 1 on
+# failure. MUST be called from an `if` (the nonzero return is the failure signal, not an abort —
+# never call it bare under set -e).
 cg_chain_record_start() {
   local host="$1" py="$2" tmo="${3:-30}" cut_ok=0
-  if cg_chain_cg_program_select "$host" "$py" "$tmo"; then cut_ok=1; fi
+  if cg_chain_cg_program_select "$host" "$py" "$tmo" \
+    && cg_chain_sp_program_select "$host" "$py" "$tmo" \
+    && cg_chain_program_readback "$host" "$py"; then
+    cut_ok=1
+  fi
+  if [ "$cut_ok" = 1 ]; then
+    cg_chain_songplayer_burn on
+  else
+    echo "[cg_chain] WARNING: SongPlayer burn not turned on — the program cut did not read back on '$(cg_chain_cg_scene)'" >&2
+  fi
   if [ "${CG_SP_BURN_ON:-0}" = 1 ] && [ "$cut_ok" = 1 ]; then
     cg_chain_cg_burn on "$host" "$py"
   else
@@ -713,8 +628,9 @@ cg_chain_restore_snapshot() {
 # End the CG leg right after [7/8] StopRecord: StopRecord cg OBS (keeping the host path for the
 # on-box decode), the SongPlayer burn OFF and the cg OBS hop burn OFF (each verified; the hop burn
 # only when this run turned it on, CG_BURN_ON=1), strih's CG-window scene + program + transition
-# restored, and cg OBS's program + transition restored — so neither the cg recording nor a burn nor
-# either CG program change runs through the long on-box decodes.
+# restored, SongPlayer's program restored through its facade, then cg OBS's program + transition
+# restored over :4455 (last, so cg OBS ends exactly as its snapshot recorded it) — so neither the cg
+# recording nor a burn nor any CG program change runs through the long on-box decodes.
 # cleanup() repeats every step (each is idempotent). $1=cg-host-ip-or-empty $2=path-to-obs_phase2.py
 # $3=timeout-secs. A pure no-op unless CG_CHAIN=1; ALWAYS return 0.
 cg_chain_after_stoprecord() {
@@ -726,6 +642,7 @@ cg_chain_after_stoprecord() {
   cg_chain_songplayer_burn off
   if [ "${CG_BURN_ON:-0}" = 1 ]; then cg_chain_cg_burn off "$host" "$py"; fi
   cg_chain_restore_snapshot strih-scene "$py" "$tmo"
+  cg_chain_sp_program_restore "$py" "$tmo"
   cg_chain_restore_snapshot cg-program "$py" "$tmo"
   return 0
 }
@@ -762,8 +679,8 @@ cg_chain_cleanup_burns_first() {
 }
 
 # cleanup() leak-guard: the SongPlayer burn OFF and the cg OBS hop burn OFF (each verified; the hop
-# burn only when CG_BURN_ON=1), StopRecord cg OBS, and every scene snapshot of this run restored,
-# even on an early abort. The burn requests use a SHORT per-request timeout
+# burn only when CG_BURN_ON=1), StopRecord cg OBS, and every scene / program snapshot of this run
+# restored (strih, SongPlayer through its facade, then cg OBS), even on an early abort. The burn requests use a SHORT per-request timeout
 # (CG_CHAIN_CLEANUP_BURN_TIMEOUT, default 3 s), so an unreachable SongPlayer or cg OBS costs ~20 s
 # each, never a minute in front of the stream/strih teardowns that follow. A pure no-op when CG_CHAIN
 # is not enabled (so it is safe to call unconditionally from cleanup()). Args: $1=cg-host-ip-or-empty
@@ -790,6 +707,7 @@ cg_chain_cleanup() {
     cg_chain_record_stop "$host" "$py" "$tmo"
   fi
   cg_chain_restore_snapshot strih-scene "$py" "$tmo"
+  cg_chain_sp_program_restore "$py" "$tmo"
   cg_chain_restore_snapshot cg-program "$py" "$tmo"
   return 0
 }

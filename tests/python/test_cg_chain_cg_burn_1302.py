@@ -69,6 +69,8 @@ _FAKE_OBS_PHASE2 = r'''
 import os, sys
 with open(os.environ["CALL_LOG"], "a") as f:
     f.write("obs_phase2.py " + " ".join(sys.argv[1:]) + "\n")
+if sys.argv[1] == "program-scene":
+    print("sp-fast")  # issue 1302 slice 3: the cg OBS program read back after the cut
 if "start" in sys.argv:
     sys.exit(int(os.environ.get("FAKE_START_RC", "0")))
 if "stop" in sys.argv:
@@ -83,17 +85,27 @@ if sys.argv[1] == "program":
     sys.exit(int(os.environ.get("FAKE_CUT_RC", "0")))
 '''
 
-# Fake curl: a GET of the SongPlayer health URL answers SP-fast burn_on=$FAKE_SP_BURN_ON; the burn
-# POST is logged and answers nothing.
+# Fake curl: a GET of the SongPlayer health URL answers SP-fast burn_on=$FAKE_SP_BURN_ON; a GET of
+# its program URL answers SP-program already on `sp-fast` (issue 1302 slice 3: so the record start
+# presses no facade); the burn POST is logged and answers like curl `-o <file> -w '%{http_code}'`
+# does, an empty body + 204 (slice 3 reads the code, the answer is no longer discarded).
 _FAKE_CURL = r'''#!/usr/bin/env bash
-url=""
-for a in "$@"; do case "$a" in http*) url="$a" ;; esac; done
+url=""; ofile=""; prev=""
+for a in "$@"; do
+  case "$prev" in -o) ofile="$a" ;; esac
+  case "$a" in http*) url="$a" ;; esac
+  prev="$a"
+done
 case "$url" in
   */api/v1/ndi/health)
     printf '[{"ndi_name":"SP-fast","burn_on":%s}]' "${FAKE_SP_BURN_ON:-false}" ;;
+  */api/v1/program)
+    printf '{"source":7,"remote":{"program_scene":"sp-fast"}}' ;;
   *)
     if [ -n "${FAKE_CURL_POST_SLEEP:-}" ]; then sleep "$FAKE_CURL_POST_SLEEP"; fi
-    printf 'curl POST %s\n' "$url" >> "$CALL_LOG" ;;
+    printf 'curl POST %s\n' "$url" >> "$CALL_LOG"
+    if [ -n "$ofile" ]; then : > "$ofile"; fi
+    printf '204' ;;
 esac
 '''
 
@@ -131,6 +143,10 @@ def _run(tmp_path, snippet, env=None):
         "TIMEOUT_LOG": str(tmp_path / "timeout.log"),
         "BURN_STATE_FILE": str(tmp_path / "burn.state"),
         "CG_CHAIN_BURN_RETRY_SLEEP": "0",
+        # issue 1302 slice 3: one read per read-back (the bounded polls have their own tests in
+        # test_cg_chain_measure_1302.py), so an unconfirmed toggle costs no poll budget here.
+        "CG_CHAIN_BURN_READBACK_S": "0",
+        "CG_CHAIN_PROGRAM_READBACK_S": "0",
         "CG_CHAIN_STATE_DIR": str(tmp_path),
         "PY": str(scripts / "obs_phase2.py"),
         "HOST": HOST,
@@ -390,9 +406,10 @@ def test_songplayer_burn_off_clears_the_sp_flag(tmp_path):
 
 
 def test_record_start_turns_the_cg_burn_on_between_the_cut_and_start_record(tmp_path):
+    # issue 1302 slice 3: the record start itself turns the SongPlayer burn on, after the cuts.
     rc, out, err, calls = _run(
         tmp_path,
-        'CG_CHAIN=1; cg_chain_songplayer_burn on\n'
+        'CG_CHAIN=1\n'
         'if cg_chain_record_start "$HOST" "$PY" 5; then echo STARTED; fi\n'
         'printf "FLAG=%s\\n" "${CG_BURN_ON:-unset}"',
         env={"FAKE_SP_BURN_ON": "true"})
@@ -414,20 +431,21 @@ def test_record_start_burn_calls_use_the_short_burn_budget_not_the_record_timeou
     # it could hold [5/8] for many minutes while strih + stream already record.
     rc, _, err, _ = _run(
         tmp_path,
-        'CG_CHAIN=1; cg_chain_songplayer_burn on\n'
+        'CG_CHAIN=1\n'
         'if cg_chain_record_start "$HOST" "$PY" 90; then echo STARTED; fi',
         env={"FAKE_SP_BURN_ON": "true"})
     assert rc == 0, err
-    assert (tmp_path / "timeout.log").read_text().split() == ["90", "10", "10", "90"], (
-        "cut + StartRecord keep the record timeout; the burn add + check run under "
-        "CG_CHAIN_BURN_OBS_TIMEOUT (default 10)"
+    assert (tmp_path / "timeout.log").read_text().split() == ["90", "90", "10", "10", "10", "90"], (
+        "the cut, the SongPlayer facade press (issue 1302 slice 3: a re-kick, SongPlayer's program "
+        "is already on the scene) and StartRecord keep the record timeout; the cg program read-back "
+        "and the burn add + check run under CG_CHAIN_BURN_OBS_TIMEOUT (default 10)"
     )
 
 
 def test_record_start_keeps_the_burn_off_without_a_verified_songplayer_burn(tmp_path):
     rc, out, err, calls = _run(
         tmp_path,
-        'CG_CHAIN=1 CG_CHAIN_BURN_ATTEMPTS=1; cg_chain_songplayer_burn on\n'
+        'CG_CHAIN=1 CG_CHAIN_BURN_ATTEMPTS=1\n'
         'if cg_chain_record_start "$HOST" "$PY" 5; then echo STARTED; fi\n'
         'printf "FLAG=%s\\n" "${CG_BURN_ON:-unset}"',
         env={"FAKE_SP_BURN_ON": "false"})
@@ -441,7 +459,7 @@ def test_record_start_keeps_the_burn_off_without_a_verified_songplayer_burn(tmp_
 def test_record_start_keeps_the_burn_off_when_the_program_cut_failed(tmp_path):
     rc, out, err, calls = _run(
         tmp_path,
-        'CG_CHAIN=1; cg_chain_songplayer_burn on\n'
+        'CG_CHAIN=1\n'
         'if cg_chain_record_start "$HOST" "$PY" 5; then echo STARTED; fi\n'
         'printf "FLAG=%s\\n" "${CG_BURN_ON:-unset}"',
         env={"FAKE_SP_BURN_ON": "true", "FAKE_CUT_RC": "3"})
@@ -454,7 +472,7 @@ def test_record_start_keeps_the_burn_off_when_the_program_cut_failed(tmp_path):
 def test_record_start_failure_turns_the_cg_burn_straight_back_off(tmp_path):
     rc, out, err, calls = _run(
         tmp_path,
-        'CG_CHAIN=1; cg_chain_songplayer_burn on\n'
+        'CG_CHAIN=1\n'
         'if cg_chain_record_start "$HOST" "$PY" 5; then echo STARTED; else echo NOT-STARTED; fi\n'
         'printf "FLAG=%s\\n" "$CG_BURN_ON"',
         env={"FAKE_SP_BURN_ON": "true", "FAKE_START_RC": "1"})

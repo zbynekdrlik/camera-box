@@ -70,11 +70,14 @@ fn run_with_fakes(body: &str, env: &[(&str, &str)], ping_rc: Option<&str>) -> (S
     let ack_file = dir.path().join("rig-fleet.txt");
     fs::write(&ack_file, "# empty (hermetic test ack file)\n").expect("write empty ack file");
     let mut cmd = Command::new("bash");
+    // Hermetic cg OBS backstop (issue 1302): no box is "home" for the obs-fleet home check, so the
+    // EVENT sweeps never probe the live traveling box (resolve + TCP :4455) from a unit test.
     cmd.arg("-c")
         .arg(&harness)
         .env("SCRIPT", script())
         .env("PATH", path)
-        .env("RIG_FLEET_ACK_FILE", &ack_file);
+        .env("RIG_FLEET_ACK_FILE", &ack_file)
+        .env("OBS_FLEET_HOME", "none");
     for (k, v) in env {
         cmd.env(k, v);
     }
