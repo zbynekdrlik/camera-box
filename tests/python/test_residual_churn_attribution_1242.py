@@ -97,7 +97,7 @@ def test_b707_line_with_the_capture_phase_tokens_still_parses_1367():
     """Issue 1367 D2 appends the capture phase tracker's tokens after the #707 buckets; the bucket
     parse must read the same buckets as on the plain line."""
     plain = _b707("2026-09-29T01:25:55.706551", [60, 60, 58, 61], [60, 60, 59, 61])
-    tokens = " phase_lock=stamp phase_ppm=+15.9 jitter_us=41 crossings=2 reseeds=0"
+    tokens = " phase_lock=stamp phase_ppm=+15.9 jitter_us=41 crossings=2 reseeds=0 hidden_drops=1"
     assert (
         rca.parse_burn_timeline(plain + tokens)["sec"]
         == rca.parse_burn_timeline(plain)["sec"]
