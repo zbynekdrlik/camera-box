@@ -897,6 +897,15 @@ re-booked a phantom jump against that stale error: `place_jumps` 0 → 180 → 4
   - After: 682 ms followed = 0 events, |A/V| ≤ 0.5 ms. Burst = ONE placement at the 5 s release.
     89.7 ms = 0 events (followed) or one (burst). Never followed = one placement at the 10 s
     timeout. Steady state and a small step never hold.
+  - Review round 1: a sender that stepped FIRST, the receiver 2 s later (`sender_first_ns`), in
+    both shapes, for 682, -682 and 89.7 ms. Before: a hold that never saw a follow, 683 ms off for
+    10 s, then a placement at the bound. After: one zero-length release at the receiver's step, one
+    placement, on the true landing at once. With 20 ms extra arrival jitter (`burst_jitter_ns`) a
+    40 ms step with a jumping sender costs two events (an early age release, then the booked jump)
+    and settles in about 41 s. 50/60/682 ms steps and a catch-up sender keep at most one event.
+  - Bench accounting: a backstop placement is one event, its discontinuity. `place_beyond_cap`
+    also counts it as a placement jump, so the booking count subtracts it. The count's baseline is
+    taken before the first measured packet.
 - **Parity** (`tests/asrc_compensator_parity_1367.rs`): `tcs` = the skew, the placement, the
   backstop probes (also on a LOCKED arrival-mode servo). `tcw` = 5 s of skew, the placement, then
   8 s of a 15 ms error that must NOT arm the restore, which proves the sustained count restarts at

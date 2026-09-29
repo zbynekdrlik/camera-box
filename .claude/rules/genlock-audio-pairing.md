@@ -10,6 +10,7 @@ paths:
   - "src/genlock_forced_table_audit.rs"
   - "scripts/lib/genlock-forced-table-audit.sh"
   - "tests/genlock_forced_table_audit_1303.rs"
+  - "src/genlock_audio_step_hold.rs"
   - "tests/genlock_audio_step_hold_parity_1381.rs"
   - "tests/genlock_audio_step_hold_wiring_1381.rs"
   - "tests/genlock_audio_pairing_lift/mod.rs"
@@ -351,37 +352,71 @@ excess leaked into the smoothed error. The result was restore=1, ~151 ppm applie
 TS-smoothing re-placement every ~80 s for minutes. The 89.7 ms step kept the audio +81…87 ms off for
 over a minute.
 
-- **The hold** (`audio_step_hold` in `src/genlock_audio_pairing.rs`, C port
-  `genlock_audio_step_hold` in the contiguous pairing block, wrapper
+- **The hold** (`audio_step_hold` in `src/genlock_audio_step_hold.rs`, a path child re-exported by
+  `genlock_audio_pairing`; C port `genlock_audio_step_hold` in the contiguous pairing block, wrapper
   `genlock_audio_step_hold_source`). A timecode packet whose live offset jumps by more than
   `GENLOCK_WALL_STEP_MIN_NS` (2 ms, the render tick's own threshold, from
   `obs-genlock-wall-step.h`) keeps the PRE-step offset. The term, the previous term and the
   timecode ASRC's stamp all map through `genlock_off_ns`. A step within one packet, a first packet,
   a timeline reset or a joint step (the stamps jump in the same packet) never holds.
+- **The reference is the NOMINAL stamp age** (review round 1): the stamp's live-wall age while the
+  two walls agree. It is seeded by the first packet and after a timeline reset. Outside a hold every
+  in-band packet (within one packet) moves it by 1/1024 of the difference, about a 34 s time constant.
+  An out-of-band age leaves it alone, and one that stays out of band for 10 min
+  (`AUDIO_STEP_NOMINAL_REANCHOR_NS`, a re-buffered sender) re-anchors it. A hold freezes it.
+- **A sender that stepped FIRST is never held** (review round 1). Example: a cross-box source
+  whose sender is the date master. Its stamps (a jump, or a caught-up burst or pause) are already on
+  the new wall when the receiver steps, so the receiver's step brings their age back to nominal. That
+  packet is a zero-length hold, released `followed` with the whole step as its residual, so it is
+  placed once. The window before left the audio a step off its stamps, and that placement repairs it.
+  Appended instead, a step under the owed cap would be booked and paid over about 90 s.
 - **Release.** The hold ends as `followed` when the held offset (moved by every stamp jump over
-  2 ms) is back within one packet of the live one, OR when the stamps' live-wall age is back within
-  one packet of the pre-step age (a sender that CAUGHT UP with continuous stamps). It ends as
-  `timeout` at `GENLOCK_AUDIO_STEP_HOLD_MAX_NS` (10 s), and as `reset` on a timeline reset or on
-  leaving timecode mode.
+  2 ms) is back within one packet of the live one, OR when the stamps' age is back within one packet
+  of the nominal age (a sender that CAUGHT UP with continuous stamps). It ends as `timeout` at
+  `GENLOCK_AUDIO_STEP_HOLD_MAX_NS` (10 s), and as `reset` on a timeline reset or on leaving
+  timecode mode.
 - **A release whose residual exceeds one packet PLACES that packet** (`audio_step_release_places`).
-  This covers the catch-up and the timeout: the new offset lands ONCE, never as a W-second payment.
-- **Frozen while holding:** the ASRC is not fed (`asrc_tc_have_prev = false`, so the first packet
-  after it starts a fresh stamp pair), and the render thread (a benign cross-thread bool read of
-  `genlock_audio_step_active`) leaves the shallow latch and BOTH video-delay tracker calls alone.
-  A backlog relock inside the hold is absorbed; the rise/fell watch re-measures if the depth really
-  moved.
+  This covers the catch-up, the timeout and the zero-length release: the new offset lands ONCE,
+  never as a W-second payment.
+- **Frozen while holding.** The ASRC is not fed (`asrc_tc_have_prev = false`, so the first packet
+  after the hold starts a fresh stamp pair). The render thread leaves the shallow latch and BOTH
+  video-delay tracker calls alone through `genlock_audio_step_video_frozen`, which reads the audio
+  thread's flag and start (benign aligned reads) and is bounded by the same 10 s on the render
+  thread's own clock. So a source whose audio stops inside a hold never freezes its video side for
+  longer. A backlog relock inside the hold is absorbed. A latch lock (ACQUIRE / GAP RESYNC / pin
+  change) that lands inside it is kept in `genlock_audio_step_relock_pending` and replayed on the
+  first tick after the hold.
 - **The log:** one `genlock-audio-step-hold '<src>': step_ms= held_ms= released=followed|timeout|reset
-  residual_ms= holds= (issue 1381)` line per released hold. It is mutually non-substring vs every
-  other `genlock-*` family.
-- **Known limit, not fixed:** a 33–55 ms step (one to two packets) with ±2 ms arrival jitter can
-  release early through the age test and place once. The cost is one short event, never a leak.
+  residual_ms= holds= (issue 1381)` line per released hold, NULL-safe on the source name. It is
+  mutually non-substring vs every other `genlock-*` family. `held_ms=0.0` with a step-sized
+  `residual_ms=` is the sender-first case. A one-packet hold with `residual_ms` near 0 is a clock-read
+  glitch: the thread was preempted between the two reads of the live offset for more than a packet.
+  The hold kept the pre-glitch offset for that packet, so it is harmless.
+- **Known limit, not fixed.** The age test reads ONE packet's age against the smoothed nominal, so
+  arrival jitter can release a small step early. With 2-5 ms jitter that reaches steps up to about
+  37 ms; with about 20 ms bursts, up to about 55 ms. For a sender that then JUMPS its stamps the cost
+  is two events: the early placement, then the jump booked and paid at 1000 ppm, about S seconds for
+  S ms. A catch-up sender keeps one event. The bench pins this bound
+  (`heavy_arrival_jitter_bounds_a_small_step_to_two_events_1381`).
 - **Tier-0 proof:** `tests/genlock_audio_step_hold_parity_1381.rs` drives the verbatim C and the
-  Rust authority through one packet script. It covers the exact 10 s edge (20 ms packets), the
-  exact 2 ms jump (1 ms packets) and sub-threshold stamp jitter inside a hold.
-  `tests/genlock_audio_step_hold_wiring_1381.rs` holds ONE needle list for the ingest, the helpers
-  and the render-thread freezes; both `windows-genlock*.yml` pwsh gates require the same list.
-  23/23 C mutants and 13/13 wiring mutants are killed. The shared lift helpers moved to
+  Rust authority through one packet script. The script covers the exact 10 s edge (20 ms packets),
+  the exact 2 ms jump (1 ms packets), sub-threshold stamp jitter inside a hold, a 4x catch-up burst,
+  both sender-first shapes, the nominal track (both signs), its timer at now = 0 and the exact 600 s
+  re-anchor. It also checks the bounded render-thread predicate.
+  `tests/genlock_audio_step_hold_wiring_1381.rs` holds ONE needle list for the ingest, the helpers,
+  the render-thread freezes and the relock replay; both `windows-genlock*.yml` pwsh gates require
+  the same list. 31/31 C mutants (compensator 10, hold 21) and 18/18 wiring mutants are killed by
+  the Rust gate AND the real pwsh lines. The shared lift helpers live in
   `tests/genlock_audio_pairing_lift/mod.rs`.
+- **Deploy + live acceptance (supervisor).** The change is in libobs (`obs.dll` / `libobs.so.30`)
+  plus the shared header, so it ships as a FULL-bundle deploy on every genlock box
+  (`rig-state-inspection.md`). At the next nightly dantesync date step, read the cg OBS log on
+  resolume:
+  - `place_jumps` on the `sp-*` `asrc:` lines rises by at most 2;
+  - `restore=0` again within 10 s;
+  - one `genlock-audio-step-hold` line per timecode source, `released=followed` normally;
+  - `obs-vban pacing:` shows 0 new `discontinuities`;
+  - the SongPlayer A/V gate stays green after the step.
 - **The compensator half (piece 1 re-seed, piece 3 backstop) and the two-clock bench:**
   `asrc-bench-harness.md`, the issue-1381 section.
 
