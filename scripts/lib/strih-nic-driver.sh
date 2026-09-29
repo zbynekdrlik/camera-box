@@ -301,7 +301,7 @@ _strih_nic_driver_restore_plain() {
 # and on a depmod failure DKMS uninstalls the new one, so the old one is gone from disk: a failed install
 # therefore re-installs the previously active version (still built) and reads it back.
 _strih_nic_driver_install_kernel() {
-  local k="$1" state f pv prev now
+  local k="$1" state f pv prev now rc
   local -a from=() to=()
   while IFS= read -r f; do
     [ -n "$f" ] || continue
@@ -333,9 +333,14 @@ _strih_nic_driver_install_kernel() {
     if ! dkms install -m "$STRIH_NIC_DRV_PACKAGE" -v "$STRIH_NIC_DRV_VERSION" -k "$k"; then
       _strih_nic_driver_restore_plain "$k" "${from[@]}" -- "${to[@]}"
       if [ -n "$prev" ] && [ "$(strih_nic_driver_dkms_status | strih_nic_dkms_state "$STRIH_NIC_DRV_PACKAGE" "$prev" "$k")" != installed ]; then
-        dkms install -m "$STRIH_NIC_DRV_PACKAGE" -v "$prev" -k "$k" >&2 || true
+        rc=0
+        dkms install -m "$STRIH_NIC_DRV_PACKAGE" -v "$prev" -k "$k" >&2 || rc=$?
         now="$(strih_nic_driver_version_norm "$(modinfo -k "$k" -F version "$STRIH_NIC_DRV_MODULE" 2>/dev/null || true)" || true)"
-        echo "strih-nic-driver: dkms install for ${k} failed -- re-installed the previous ${STRIH_NIC_DRV_PACKAGE}/${prev}, ${k} now loads version '${now:-none}'" >&2
+        if [ "$rc" = 0 ]; then
+          echo "strih-nic-driver: dkms install for ${k} failed -- re-installed the previous ${STRIH_NIC_DRV_PACKAGE}/${prev}, ${k} now loads version '${now:-none}'" >&2
+        else
+          echo "strih-nic-driver: dkms install for ${k} failed, and the re-install of the previous ${STRIH_NIC_DRV_PACKAGE}/${prev} failed too (rc ${rc}) -- ${k} now loads version '${now:-none}'; do not boot ${k} before fixing it" >&2
+        fi
       else
         echo "strih-nic-driver: dkms install for ${k} failed -- any hand-copied module is back in place${prev:+, the previous ${prev} is still installed}" >&2
       fi

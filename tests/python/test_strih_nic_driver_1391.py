@@ -337,6 +337,7 @@ FAKE_DKMS = r'''#!/bin/bash
 # `remove -k K` removes the version from that kernel only (the version goes with its last kernel);
 # `remove --all` from every kernel. FAKE_DKMS_INSTALL_FAIL_AFTER_COPY=<ver> models DKMS's own depmod
 # failing after the copy: the active module of that kernel is deleted and the install exits 6.
+# FAKE_DKMS_INSTALL_FAIL_VERSION=<ver> fails every install of that version before anything changes.
 set -euo pipefail
 echo "dkms $*" >> "$FAKE/calls.log"
 db="$FAKE/dkms.db"; touch "$db"
@@ -365,6 +366,7 @@ case "$cmd" in
   install)
     [ "${FAKE_DKMS_INSTALL_FAIL:-0}" = 0 ] || exit 6
     [ "${FAKE_DKMS_INSTALL_FAIL_KERNEL:-}" != "$k" ] || exit 6
+    [ "${FAKE_DKMS_INSTALL_FAIL_VERSION:-}" != "$v" ] || exit 6
     if [ "${FAKE_DKMS_INSTALL_FAIL_AFTER_COPY:-}" = "$v" ]; then
       rm -f "$STRIH_NIC_DRV_MODULES_ROOT/$k/updates/dkms/r8152.ko.zst"
       sed -i "s/^\($m|[^|]*|$k|\)installed$/\1built/" "$db"
@@ -697,6 +699,17 @@ def test_a_failed_install_after_dkms_copied_reinstalls_the_previous_version(tmp_
     assert _on_disk(box, KERNEL) == "v2.21.3"
     assert "re-installed the previous realtek-r8152/2.21.3, %s now loads version '2.21.3'" % KERNEL in r.stderr
     assert not [c for c in calls if c.startswith("dkms remove")], calls
+
+
+def test_a_failed_reinstall_of_the_previous_version_is_reported_as_failed(tmp_path):
+    box = Box(tmp_path, plain=None)
+    _old_version(box, (KERNEL,))
+    r = box.apply(FAKE_DKMS_INSTALL_FAIL_AFTER_COPY="2.21.4", FAKE_DKMS_INSTALL_FAIL_VERSION="2.21.3")
+    assert r.returncode != 0
+    assert "re-installed" not in r.stderr, r.stderr
+    assert ("the re-install of the previous realtek-r8152/2.21.3 failed too (rc 6) -- %s now loads version 'none'"
+            % KERNEL) in r.stderr, r.stderr
+    assert not [c for c in box.calls() if c.startswith("dkms remove")], box.calls()
 
 
 def test_missing_headers_are_installed_first_and_a_failed_install_stops_the_step(tmp_path):
