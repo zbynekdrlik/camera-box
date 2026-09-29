@@ -84,7 +84,7 @@ reuses the ONE guard: `obs_phase2._refuse_forbidden_scene` + `NEVER_PROGRAM_SCEN
 | `glk_wire.py` | its `_rpc`, plus its `SCENE` target checked before connecting | `sys.exit`, nothing written |
 | `frozen-camera-gate.py` | its `_rpc` | exit **2** (its ERROR code), never 1 (its FROZEN code) |
 | `imag_scenes.py` | `Obs.req`, before sending, also with `ignore_err` | `sys.exit("FAIL: …")` |
-| `cg_chain_scene.py` | `program` / `strih-solo` check the target before the snapshot and any write; its transport is `obs_phase2._rpc` | exit 2 |
+| `cg_chain_scene.py` | `program` / `strih-solo` check the target before the snapshot and any write; `facade-program` (issue 1302, SongPlayer's `:4456` obs-websocket facade) checks it before dialing; its transport is `obs_phase2._rpc` (`_conn` with a port argument) | exit 2 |
 | `warm_cam_scenes.py` | its transport is `obs_phase2._rpc` | (raises) |
 
 - **A restore of a recorded state never re-selects `PRO`.** It skips that one request with a named
