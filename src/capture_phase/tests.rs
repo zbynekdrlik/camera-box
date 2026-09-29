@@ -685,7 +685,9 @@ fn a_slow_stream_with_outlier_runs_never_overflows_the_fit() {
 /// One timestamp a whole period late (a USB completion delayed by a frame) with the next frame on
 /// time reads like a frame the device skipped: the stamp is one slot ahead once, then the next
 /// frame's residual of minus one period re-seeds. The accepted cost (recorded in the rule): one
-/// starvation repeat and ~2 s on today's raw path. This test pins it.
+/// starvation repeat, one duplicate stamp on the wire (the re-seed frame goes out on the raw path
+/// into the slot the late frame took) and ~2 s on today's raw path. This test pins the tracker
+/// side of it.
 #[test]
 fn a_single_timestamp_one_period_late_costs_one_hidden_drop_then_one_reseed() {
     let mut frames = camera(400, 15.9, 60_000.0, 7_000_000.0, 0x1367_d221);
@@ -731,6 +733,34 @@ fn a_realtime_step_is_never_counted_as_a_crossing() {
     }
     assert_eq!(p.reseeds(), 0);
     assert_eq!(p.crossings(), 0, "clock steps are not crossings");
+}
+
+/// A realtime step that lands the phase just past a slot edge (inside the hysteresis): the slot
+/// chooser must re-anchor on the new floor, not keep the pre-step slot sequence and hold the
+/// stamp one slot behind the realtime floor until the camera drifts back over the edge (~11 s at
+/// 15.9 ppm). Review round 3: the mid-slot steps above cannot see this.
+#[test]
+fn a_realtime_step_landing_inside_the_hysteresis_follows_the_new_floor() {
+    let frames = camera(700, 15.9, 20_000.0, 8_000_000.0, 0x1367_d225);
+    let base = (SEC_2309 * NS_PER_SECOND - MONO0) as i64;
+    // The step at frame 400 moves the phase to 180 us past the next edge.
+    let before = (frames[400].truth as i64 + base) as u64;
+    let edge = grid_advance_ns(grid_floor_ns(before, I60), 1, I60);
+    let step = (edge + 180_000 - before) as i64;
+    let mut p = CapturePhase::new();
+    for (k, f) in frames.iter().enumerate() {
+        let offset = if k >= 400 { base + step } else { base };
+        let slot = p.stamp_frame(f.seq, f.ts, offset, I60);
+        if (400..460).contains(&k) {
+            let truth_real = (f.truth as i64 + offset) as u64;
+            assert_eq!(
+                slot,
+                Some(grid_floor_ns(truth_real, I60)),
+                "frame {k}: the stamp follows the new realtime floor"
+            );
+        }
+    }
+    assert_eq!(p.crossings(), 0);
 }
 
 /// Frames whose residuals alternate +-a, `a` ramping slowly (so no sample is an outlier).
