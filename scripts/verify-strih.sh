@@ -811,6 +811,7 @@ fi
 DS_UNIT_FIX="re-run setup-strih.sh in the nightly window (step 2 then restarts dantesync; a date-master restart steps the fleet date)"
 case "$DS_UNIT_V" in
   ok)          ok "(dantesync-unit) unit matches the provisioned ${DS_ROLE_V} unit, no drop-in, the process runs it" ;;
+  masked)      bad "(dantesync-unit) ${DS_UNIT_PATH_V} is masked by an operator (-> /dev/null) -- setup-strih leaves a mask alone; unmask it deliberately" ;;
   differs)     bad "(dantesync-unit) ${DS_UNIT_PATH_V} is missing or differs from the provisioned ${DS_ROLE_V} unit -- ${DS_UNIT_FIX}" ;;
   dropin)      bad "(dantesync-unit) a ${DS_UNIT_PATH_V}.d/*.conf drop-in overrides the provisioned unit -- ${DS_UNIT_FIX}" ;;
   not-applied) bad "(dantesync-unit) the running dantesync (${DS_UNIT_ARGV_V}) is not the unit's ExecStart -- restart it in the nightly window (a date-master restart steps the fleet date)" ;;

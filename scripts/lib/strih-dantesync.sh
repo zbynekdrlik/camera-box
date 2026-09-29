@@ -20,8 +20,9 @@
 #   strih_dantesync_dropins_present DIR           0 iff DIR holds a *.conf drop-in
 #   strih_dantesync_exec_start UNIT_TEXT          the unit's (last) ExecStart= value
 #   strih_dantesync_running_argv                  the running dantesync's command line, or rc 1
+#   strih_dantesync_unit_masked PATH              0 iff PATH is an operator mask (a /dev/null link)
 #   strih_dantesync_unit_verdict WANT PATH DIR RUNNING_ARGV
-#                                                 ok | differs | dropin | not-applied | unreadable
+#                                                 ok | masked | differs | dropin | not-applied | unreadable
 #
 # Provisioning ACTION (root, setup-strih.sh step 2; uses the caller's warn):
 #   strih_dantesync_install UNIT_TEXT [ROLE]
@@ -29,13 +30,14 @@
 #       is removed), or the RUNNING process does not run the unit's ExecStart (a run killed after
 #       the write or after the reload). Only a text change writes the unit (temp + rename);
 #     * a change, or a pending manager reload (NeedDaemonReload=yes), runs `daemon-reload`.
-#       NeedDaemonReload is MANAGER-WIDE in systemd (any enable/disable/mask of any unit, or a
-#       touched identical file, reads yes), so on its own it only reloads -- it never restarts;
+#       NeedDaemonReload is MANAGER-WIDE in systemd (a unit-file change of ANY unit left without a
+#       reload, or a touched identical file, reads yes), so on its own it only reloads, never restarts;
 #     * strih_dantesync_restart_decision picks restart | start | keep | absent from the change,
 #       binary_changed, `systemctl is-active` and the binary's presence; a restart runs on the
 #       RELOADED unit;
-#     * fail closed: an unreadable unit or a missing decision helper touches nothing; an unreadable
-#       command line keeps the daemon running (a WARN). Never towards a restart;
+#     * fail closed: an unreadable unit or a missing decision helper touches nothing (not even the
+#       temp-unit sweep); an unreadable command line keeps the daemon running (a WARN). Never towards
+#       a restart;
 #     * an operator-masked unit (a /dev/null symlink) is left alone: never unmasked or started;
 #     * keep has no side effects: `systemctl enable` (which reloads the manager) runs only when the
 #       unit is not enabled yet;
@@ -71,7 +73,9 @@ strih_dantesync_dropins_present() {
 }
 
 # strih_dantesync_exec_start UNIT_TEXT -> the value of the unit's LAST `ExecStart=` line (systemd's
-# own reading for a Type=simple unit; an empty `ExecStart=` resets). Pure, no pipe.
+# own reading for a Type=simple unit; an empty `ExecStart=` resets). Pure, no pipe. The value is taken
+# verbatim: systemd strips quotes before exec, so a quoted argument would never equal the running
+# command line -- strih_dantesync_unit_text never emits one (the upstream host fact is quote-free).
 strih_dantesync_exec_start() {
   local line v=""
   while IFS= read -r line; do
@@ -94,9 +98,17 @@ strih_dantesync_running_argv() {
   printf '%s\n' "$argv"
 }
 
+# strih_dantesync_unit_masked PATH -> 0 iff PATH is an operator mask: a symlink to /dev/null
+# (`systemctl mask`). Step 2 never replaces, enables or starts a masked unit.
+strih_dantesync_unit_masked() {
+  local path="${1-}"
+  [ -n "$path" ] && [ -L "$path" ] && [ "$(readlink -f "$path" 2>/dev/null)" = /dev/null ]
+}
+
 # strih_dantesync_unit_verdict WANT_TEXT UNIT_PATH DROPIN_DIR RUNNING_ARGV -> ONE token, rc 0 only on
 # ok. RUNNING_ARGV = strih_dantesync_running_argv (empty = no readable process, not graded here:
 # verify-strih items 6/6b grade that dantesync runs).
+#   masked       an operator masked it (a /dev/null link) -- setup leaves that alone, unmask deliberately
 #   unreadable   the unit could not be read -- never reported as a difference
 #   differs      the unit is missing or differs from WANT_TEXT
 #   dropin       a *.conf drop-in overrides it
@@ -106,6 +118,7 @@ strih_dantesync_running_argv() {
 # any other unit's pending change.
 strih_dantesync_unit_verdict() {
   local want="${1-}" path="${2-}" dir="${3-}" argv="${4-}" rc=0
+  if strih_dantesync_unit_masked "$path"; then printf 'masked'; return 1; fi
   strih_dantesync_unit_matches "$want" "$path" || rc=$?
   case "$rc" in
     0) ;;
@@ -135,12 +148,10 @@ strih_dantesync_install() {
   }
   udir="$(dirname "$unit")"
   # An operator mask is a deliberate state: never replace the /dev/null link, enable or start it.
-  if [ -L "$unit" ] && [ "$(readlink -f "$unit" 2>/dev/null)" = /dev/null ]; then
+  if strih_dantesync_unit_masked "$unit"; then
     warn "  dantesync.service is masked by an operator (${unit} -> /dev/null) -- nothing touched"
     return 0
   fi
-  # A temp unit a killed run left behind (this lib's own name pattern only; systemd ignores it).
-  rm -f -- "$udir"/.dantesync.service.?????? 2>/dev/null || true
 
   # --- read everything first ---------------------------------------------------------------------
   need_reload="$(systemctl show -p NeedDaemonReload --value dantesync 2>/dev/null || true)"
@@ -179,6 +190,8 @@ strih_dantesync_install() {
   if [ "$text_changed" = 1 ] || [ "$dropin_found" = 1 ] || [ "$not_applied" = 1 ]; then unit_changed=1; fi
 
   # --- act ---------------------------------------------------------------------------------------
+  # A temp unit a killed run left behind (the exact mktemp pattern below only; systemd ignores it).
+  rm -f -- "$udir"/.dantesync.service.?????? 2>/dev/null || true
   if [ "$dropin_found" = 1 ]; then
     rm -f "$dropin_dir"/*.conf || { echo "cannot remove the dantesync drop-ins in $dropin_dir" >&2; return 1; }
   fi
