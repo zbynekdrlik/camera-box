@@ -156,7 +156,7 @@ fn a_clock_step_on_stamp_slots_is_one_resync_and_one_skip_line() {
     assert_eq!(
         out.iter().map(|o| o.1).sum::<u64>(),
         0,
-        "a clock step is never filled"
+        "a clock step past the catch-up bound is never filled"
     );
     let skips: Vec<u64> = out.iter().map(|o| o.2).filter(|&s| s > 0).collect();
     assert_eq!(
@@ -186,6 +186,21 @@ fn a_clock_step_on_stamp_slots_is_one_resync_and_one_skip_line() {
     assert_eq!(resyncs, 1);
 }
 
+/// A gap wider than the repeat cap but inside the catch-up bound: the cap is filled, the rest is
+/// one #707 SKIP of the unfilled slots (the rule's "SKIP on a stamp-driven stream" cases).
+#[test]
+fn a_gap_past_the_repeat_cap_logs_the_unfilled_rest_as_one_skip() {
+    let mut ks: Vec<u64> = (0..20).collect();
+    ks.extend(25..40); // slot 25 after 19: 5 missing
+    let slots: Vec<u64> = ks.iter().map(|&k| slot(k)).collect();
+    let mut gate = DecimationGate::new();
+    let out = drive(&mut gate, &slots, 12_000_000);
+    assert!(out.iter().all(|o| o.0));
+    assert_eq!(out[20].1, STARVATION_REPEAT_MAX);
+    let skips: Vec<u64> = out.iter().map(|o| o.2).filter(|&s| s > 0).collect();
+    assert_eq!(skips, vec![5 - STARVATION_REPEAT_MAX]);
+}
+
 #[test]
 fn a_half_rate_leg_on_stamp_slots_stops_being_filled_after_the_repeat_cap() {
     // Every other slot missing (a dying leg): the consecutive repeat cap must stop the fill so
@@ -197,6 +212,13 @@ fn a_half_rate_leg_on_stamp_slots_stops_being_filled_after_the_repeat_cap() {
     assert_eq!(repeats, STARVATION_REPEAT_MAX);
 }
 
+/// The #707 skip the capture loop would log for one poll (`main.rs`: the boundary leap minus the
+/// intentional extra advance).
+fn skip_of(gate: &DecimationGate, prev: u64) -> u64 {
+    boundary_skip_count(prev, gate.next_boundary_ns(), I60)
+        .saturating_sub(gate.last_poll_intentional_extra_advance())
+}
+
 #[test]
 fn the_stamp_path_continues_from_the_poll_time_path_and_back() {
     let mut gate = DecimationGate::new();
@@ -206,32 +228,39 @@ fn the_stamp_path_continues_from_the_poll_time_path_and_back() {
     for k in 0..30u64 {
         let cap = slot(k) + 8_000_000;
         let now = cap + 11_000_000;
+        let prev = gate.next_boundary_ns();
         if gate.poll(now, I60, k, false, now, cap) {
             last_stamp = crate::capture_phase::slot_stamp_100ns(grid_floor_ns(cap, I60), I60, 60);
             gate.note_emitted_stamp_100ns(last_stamp, I60);
             emitted_slots.push(grid_floor_ns(cap, I60));
         }
         assert_eq!(gate.last_stamp_action(), None);
+        assert_eq!(skip_of(&gate, prev), 0, "frame {k}");
     }
     assert!(last_stamp > 0);
     // The tracker locks: the next frame's slot is one after the last emitted one.
     for k in 30..60u64 {
+        let prev = gate.next_boundary_ns();
         gate.note_stamp_slot(slot(k));
         let now = slot(k) + 19_000_000;
         assert!(gate.poll(now, I60, k, true, now, slot(k)), "frame {k}");
         assert_eq!(gate.last_poll_starvation_repeats(), 0, "frame {k}");
+        assert_eq!(skip_of(&gate, prev), 0, "frame {k}");
         gate.note_emitted_stamp_100ns(
             crate::capture_phase::slot_stamp_100ns(slot(k), I60, 60),
             I60,
         );
         emitted_slots.push(slot(k));
     }
-    // The tracker re-seeds: back on the poll-time gate, the first poll emits on time (no fill).
+    // The tracker re-seeds: back on the poll-time gate, the first poll emits on time (no fill)
+    // and the re-latch onto the poll instant logs no phantom #707 SKIP.
     for k in 60..90u64 {
         let cap = slot(k) + 8_000_000;
         let now = cap + 11_000_000;
+        let prev = gate.next_boundary_ns();
         assert!(gate.poll(now, I60, k, false, now, cap), "frame {k}");
         assert_eq!(gate.last_poll_starvation_repeats(), 0, "frame {k}");
+        assert_eq!(skip_of(&gate, prev), 0, "frame {k}");
         gate.note_emitted_stamp_100ns(
             crate::capture_phase::slot_stamp_100ns(grid_floor_ns(cap, I60), I60, 60),
             I60,

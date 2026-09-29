@@ -63,12 +63,12 @@ impl Rng {
         (0..12).map(|_| self.unit()).sum::<f64>() - 6.0
     }
 
-    /// One draw of the bench's jitter model (ns).
-    fn jitter(&mut self) -> f64 {
-        let sigma = if self.unit() < TAIL_FRACTION {
-            TAIL_SIGMA_NS
-        } else {
-            CORE_SIGMA_NS
+    /// One draw of the bench's jitter model (ns), or of an i.i.d. Gaussian of `sigma_ns`.
+    fn jitter(&mut self, sigma_ns: Option<f64>) -> f64 {
+        let sigma = match sigma_ns {
+            Some(s) => s,
+            None if self.unit() < TAIL_FRACTION => TAIL_SIGMA_NS,
+            None => CORE_SIGMA_NS,
         };
         sigma * self.gauss()
     }
@@ -89,6 +89,11 @@ struct Scenario {
     /// A device re-open at this second: no frames for `gap_s`, then the sequence restarts at 0
     /// and the capture phase moves by `shift_ns`.
     reopen: Option<(f64, f64, f64)>,
+    /// The DEVICE skips frames the sequence does not show: `(at_s, secs)` — no frames for `secs`,
+    /// and the next one carries the next sequence number (a one-frame skip is `secs` = 1/60).
+    hidden_skip: Option<(f64, f64)>,
+    /// An i.i.d. Gaussian V4L2 timestamp jitter (ns) instead of the measured model.
+    ts_sigma_ns: Option<f64>,
     seed: u64,
 }
 
@@ -101,6 +106,8 @@ impl Scenario {
             drop_at_s: None,
             realtime_step: None,
             reopen: None,
+            hidden_skip: None,
+            ts_sigma_ns: None,
             seed: 0x1367_d2be,
         }
     }
@@ -129,6 +136,7 @@ fn frames(sc: &Scenario) -> Vec<Frame> {
     let mut reopened = false;
     let mut reopen_k = 0u64;
     let mut extra_ns = 0.0;
+    let mut hidden = 0u64;
     for k in 0..n {
         let mut truth_rel = sc.start_phase_ns + k as f64 * period + extra_ns;
         if let Some((at, gap, shift)) = sc.reopen {
@@ -141,9 +149,16 @@ fn frames(sc: &Scenario) -> Vec<Frame> {
             }
         }
         let t_s = truth_rel / 1e9;
-        let ts_noise = ts_rng.jitter();
-        let poll_noise = poll_rng.jitter().abs();
+        let ts_noise = ts_rng.jitter(sc.ts_sigma_ns);
+        let poll_noise = poll_rng.jitter(None).abs();
         if sc.drop_at_s.is_some_and(|d| k == (d * FPS as f64) as u64) {
+            continue;
+        }
+        if sc
+            .hidden_skip
+            .is_some_and(|(at, secs)| t_s >= at && t_s < at + secs)
+        {
+            hidden += 1;
             continue;
         }
         let truth = MONO0 as f64 + truth_rel;
@@ -159,7 +174,7 @@ fn frames(sc: &Scenario) -> Vec<Frame> {
         let seq = if reopened {
             (k - reopen_k) as u32
         } else {
-            1000 + k as u32
+            (1000 + k - hidden) as u32
         };
         let poll_mono = (truth + POLL_LATENCY_NS + poll_noise).round() as u64;
         out.push(Frame {
@@ -392,7 +407,11 @@ fn a_700ms_date_step_gives_one_resync_1367() {
             u64::from(step > 0),
             "step {step}: a forward step logs one #707 SKIP, a backward one none"
         );
-        assert_eq!((t.sheds, t.repeats), (0, 0), "a clock step is never filled");
+        assert_eq!(
+            (t.sheds, t.repeats),
+            (0, 0),
+            "a 700 ms step (past the catch-up bound) is never filled"
+        );
         assert_eq!(
             (t.crossings, t.reseeds),
             (0, 0),
@@ -427,4 +446,76 @@ fn same_timestamps_give_the_same_stamps_1367() {
     assert_eq!(a.stamps, b.stamps);
     assert_eq!(a.box_events, b.box_events);
     assert_eq!(a.crossings, 1);
+}
+
+/// Review round 1: a frame the DEVICE skipped (the sequence does not show it) must cost what it
+/// costs today — one starvation repeat — never stamps from a stale prediction or a re-seed.
+#[test]
+fn a_frame_the_device_skipped_costs_one_repeat_like_today_1367() {
+    let mut sc = Scenario::new(16.0, 120.0);
+    sc.hidden_skip = Some((60.0, 1.0 / 60.0));
+    let raw = run(&sc, false);
+    let t = run(&sc, true);
+    eprintln!(
+        "hidden skip: raw sheds {} repeats {} rx {}/{}; tracked sheds {} repeats {} rx {}/{} \
+         reseeds {} skips {}",
+        raw.sheds,
+        raw.repeats,
+        raw.rx.dups,
+        raw.rx.gaps,
+        t.sheds,
+        t.repeats,
+        t.rx.dups,
+        t.rx.gaps,
+        t.reseeds,
+        t.skip_events
+    );
+    assert_eq!(
+        (raw.sheds, raw.repeats),
+        (0, 1),
+        "today: one starvation repeat"
+    );
+    assert_eq!((t.sheds, t.repeats), (0, 1));
+    assert_eq!((t.rx.dups, t.rx.gaps), (0, 0));
+    assert_eq!((t.reseeds, t.skip_events, t.crossings), (0, 0, 0));
+}
+
+/// Review round 1: a 1.5 s device pause the sequence does not show is one re-seed and one SKIP
+/// line, and no stamp lands in the past of the stream.
+#[test]
+fn a_pause_the_sequence_does_not_show_gives_one_reseed_1367() {
+    let mut sc = Scenario::new(16.0, 120.0);
+    sc.hidden_skip = Some((60.0, 1.5));
+    let t = run(&sc, true);
+    eprintln!(
+        "hidden pause: reseeds {} skips {} sheds {} repeats {} rx {}/{}",
+        t.reseeds, t.skip_events, t.sheds, t.repeats, t.rx.dups, t.rx.gaps
+    );
+    assert_eq!(t.reseeds, 1);
+    assert_eq!(t.skip_events, 1);
+    assert_eq!((t.sheds, t.repeats), (0, 0));
+    assert_eq!((t.rx.dups, t.rx.gaps), (0, 0));
+    assert!(
+        t.stamps.windows(2).all(|w| w[1] > w[0]),
+        "every emitted stamp is later than the previous one"
+    );
+}
+
+/// Review round 1: one event per crossing also at the design's stated raw jitter (0.3 ms i.i.d.
+/// Gaussian on the V4L2 timestamp), not only at the calibrated burst model.
+#[test]
+fn the_tracker_gives_one_per_crossing_at_the_design_jitter_1367() {
+    for ppm in [16.0f64, -16.0] {
+        let mut sc = Scenario::new(ppm, 2_300.0);
+        sc.ts_sigma_ns = Some(300_000.0);
+        let t = run(&sc, true);
+        eprintln!(
+            "ppm {ppm:+} sigma 300 us: tracked sheds {} repeats {} rx {}/{} crossings {} reseeds {}",
+            t.sheds, t.repeats, t.rx.dups, t.rx.gaps, t.crossings, t.reseeds
+        );
+        assert_eq!(t.crossings, 2, "ppm {ppm}");
+        assert_eq!(t.sheds + t.repeats, 2, "ppm {ppm}: one event per crossing");
+        assert_eq!((t.rx.dups, t.rx.gaps), (0, 0), "ppm {ppm}");
+        assert_eq!(t.reseeds, 0, "ppm {ppm}");
+    }
 }

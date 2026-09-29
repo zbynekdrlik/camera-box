@@ -400,12 +400,27 @@ fn genlock_off_never_drives_the_stamp() {
     for f in &frames {
         assert_eq!(p.stamp_frame(f.seq, f.ts, 0, 0), None);
     }
-    assert_eq!(p.mode(), PhaseMode::Band, "locked, but nothing to drive");
-    assert!(p.status_tokens(0).contains(" phase_ppm=na "));
+    assert_eq!(p.mode(), PhaseMode::Off, "genlock off: nothing to drive");
+    let tokens = p.status_tokens(0);
+    assert!(tokens.starts_with(" phase_lock=off "), "{tokens}");
+    assert!(tokens.contains(" phase_ppm=na "), "{tokens}");
+}
+
+/// The `key=value` pairs of an emitted status string, in order.
+fn token_pairs(tokens: &str) -> Vec<(String, String)> {
+    tokens
+        .split_whitespace()
+        .map(|kv| {
+            let (k, v) = kv
+                .split_once('=')
+                .unwrap_or_else(|| panic!("no '=' in {kv:?}"));
+            (format!("{k}="), v.to_string())
+        })
+        .collect()
 }
 
 #[test]
-fn status_tokens_are_parseable_and_mutually_non_substring() {
+fn status_tokens_parse_and_their_keys_are_mutually_non_substring() {
     let frames = camera(300, 15.9, 60_000.0, 8_000_000.0, 0x1367_d20c);
     let offset = (SEC_2309 * NS_PER_SECOND - MONO0) as i64;
     let mut p = CapturePhase::new();
@@ -416,26 +431,154 @@ fn status_tokens_are_parseable_and_mutually_non_substring() {
     for f in &frames {
         p.stamp_frame(f.seq, f.ts, offset, I60);
     }
-    let line = p.status_tokens(I60);
-    assert!(line.starts_with(" phase_lock=stamp phase_ppm=+"), "{line}");
-    assert!(line.ends_with(" crossings=0 reseeds=0"), "{line}");
-    // Every key on the `#707 emit-1s/cap-1s` line, old and new, is mutually non-substring.
-    let keys = [
-        "emit-1s:",
-        "cap-1s:",
-        "phase_lock=",
-        "phase_ppm=",
-        "jitter_us=",
-        "crossings=",
-        "reseeds=",
-    ];
-    for a in keys {
-        for b in keys {
+    let emitted = p.status_tokens(I60);
+    let pairs = token_pairs(&emitted);
+    let keys: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(
+        keys,
+        [
+            "phase_lock=",
+            "phase_ppm=",
+            "jitter_us=",
+            "crossings=",
+            "reseeds="
+        ]
+    );
+    assert_eq!(pairs[0].1, "stamp");
+    let ppm: f64 = pairs[1].1.parse().expect("phase_ppm is a signed number");
+    assert!((ppm - 15.9).abs() < 12.0, "{emitted}");
+    let jitter: f64 = pairs[2].1.parse().expect("jitter_us is a number");
+    assert!((40.0..80.0).contains(&jitter), "{emitted}");
+    assert_eq!((pairs[3].1.as_str(), pairs[4].1.as_str()), ("0", "0"));
+    // The emitted keys and the line's existing ones are mutually non-substring.
+    let mut all: Vec<&str> = vec!["emit-1s:", "cap-1s:"];
+    all.extend(keys.iter().copied());
+    for a in &all {
+        for b in &all {
             if a != b {
                 assert!(!b.contains(a), "{a} is a substring of {b}");
             }
         }
     }
+}
+
+// ── review round 1 (issue 1367 D2) ───────────────────────────────────────────
+
+/// A frame the DEVICE itself skipped (an HDMI hiccup): uvcvideo only counts frames the device
+/// sent, so the next one arrives with a sequence step of 1 but two periods later. It must be
+/// re-indexed as a two-frame advance (stamped on its true slot, the gap filled by the gate), never
+/// stamped from the stale prediction one slot early.
+#[test]
+fn a_frame_the_device_skipped_is_re_indexed_not_stamped_one_slot_early() {
+    let mut frames = camera(400, 15.9, 60_000.0, 7_000_000.0, 0x1367_d211);
+    frames.remove(300);
+    for f in frames.iter_mut().skip(300) {
+        f.seq -= 1; // the sequence never showed the skipped frame
+    }
+    let mut t = CapturePhaseTracker::new();
+    for (k, f) in frames.iter().enumerate() {
+        let obs = t.observe(f.seq, f.ts);
+        if k >= 300 && k < 305 {
+            assert_eq!(obs.seq_advance, if k == 300 { 2 } else { 1 }, "frame {k}");
+            let est = obs.smoothed_mono_ns.expect("still locked") as f64;
+            assert!(
+                (est - f.truth).abs() < 30_000.0,
+                "frame {k}: stamped {:.0} us off its true capture",
+                (est - f.truth) / 1000.0
+            );
+        }
+    }
+    assert_eq!(t.reseeds(), 0);
+    assert_eq!(t.hidden_drops(), 1);
+}
+
+/// A device pause the sequence does not show (seconds of nothing, then the next sequence
+/// number): a real discontinuity, never stamped from the prediction — re-seed at once.
+#[test]
+fn a_pause_the_sequence_does_not_show_reseeds_at_once() {
+    let frames = camera(300, 15.9, 60_000.0, 7_000_000.0, 0x1367_d212);
+    let mut t = CapturePhaseTracker::new();
+    for f in &frames {
+        t.observe(f.seq, f.ts);
+    }
+    let last = frames.last().unwrap();
+    let obs = t.observe(last.seq + 1, last.ts + 1_500_000_000);
+    assert_eq!(obs.smoothed_mono_ns, None);
+    assert_eq!(t.reseeds(), 1);
+}
+
+/// A residual of half a frame or more is no timestamp jitter: re-seed at once instead of
+/// stamping two frames from the old phase.
+#[test]
+fn a_half_frame_phase_step_reseeds_at_once() {
+    let mut frames = camera(400, 15.9, 60_000.0, 7_000_000.0, 0x1367_d213);
+    for f in frames.iter_mut().skip(300) {
+        f.ts += 9_000_000;
+    }
+    let mut t = CapturePhaseTracker::new();
+    for (k, f) in frames.iter().enumerate() {
+        let obs = t.observe(f.seq, f.ts);
+        if k == 300 {
+            assert_eq!(obs.smoothed_mono_ns, None, "no stamp from the old phase");
+            assert_eq!(t.reseeds(), 1);
+        }
+    }
+    assert_eq!(t.reseeds(), 1);
+}
+
+/// A stall while seeding (before any outlier gate) re-seeds, which also keeps the window's time
+/// span, and so every i128 sum, bounded.
+#[test]
+fn a_stall_while_seeding_reseeds() {
+    let frames = camera(20, 15.9, 60_000.0, 7_000_000.0, 0x1367_d214);
+    let mut t = CapturePhaseTracker::new();
+    for f in &frames {
+        t.observe(f.seq, f.ts);
+    }
+    let last = frames.last().unwrap();
+    t.observe(last.seq + 1, last.ts + 60 * NS_PER_SECOND);
+    assert_eq!(t.reseeds(), 1);
+    assert_eq!(t.window.len(), 1, "the stalled sample starts a new seed");
+}
+
+/// A sub-millisecond phase step folded while seeding must not lock a tilted fit: every stamp the
+/// tracker hands out stays on the camera's true phase.
+#[test]
+fn a_step_folded_while_seeding_never_locks_a_tilted_fit() {
+    let mut frames = camera(700, 15.9, 60_000.0, 7_000_000.0, 0x1367_d215);
+    for f in frames.iter_mut().skip(60) {
+        f.ts += 800_000;
+        f.truth += 800_000.0;
+    }
+    let mut t = CapturePhaseTracker::new();
+    let mut locked_frames = 0;
+    for (k, f) in frames.iter().enumerate() {
+        if let Some(est) = t.observe(f.seq, f.ts).smoothed_mono_ns {
+            locked_frames += 1;
+            assert!(
+                (est as f64 - f.truth).abs() < 100_000.0,
+                "frame {k}: a tilted fit stamped {:.0} us off",
+                (est as f64 - f.truth) / 1000.0
+            );
+        }
+    }
+    assert!(
+        locked_frames > 200,
+        "it locks once the step left the window"
+    );
+}
+
+/// The capture loop's stamp instant (fed to `genlock_emit_timecode_100ns`): the slot middle while
+/// the tracker drives, else today's raw capture instant in the realtime domain.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_stamp_instant_is_the_slot_middle_when_driven_else_the_raw_capture() {
+    let slot = grid_floor_ns(SEC_2309 * NS_PER_SECOND + 123_456_789, I60);
+    assert_eq!(
+        stamp_instant_100ns(Some(slot), I60, 5_000, 70),
+        slot_mid_realtime_100ns(slot, I60)
+    );
+    assert_eq!(stamp_instant_100ns(None, I60, 5_000, 70), 5_070);
 }
 
 #[test]

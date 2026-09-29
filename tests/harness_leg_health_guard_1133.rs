@@ -573,6 +573,19 @@ fn cap1s_sustained_over_rate_warns_report_only() {
 }
 
 #[test]
+fn cap1s_band_warn_reads_the_line_with_the_capture_phase_tokens_1367() {
+    // Issue 1367 D2 appends the capture phase tracker's tokens after the buckets; the report-only
+    // band read must see the same buckets.
+    let text = "#707 emit-1s: [60, 60, 60, 60, 60] cap-1s: [62, 63, 62, 63, 62] (1-second buckets, oldest first) phase_lock=band phase_ppm=+24600.0 jitter_us=41 crossings=0 reseeds=0";
+    let (out, ok) = run_sourced_status(&format!("leg_health_cap1s_band_warn cam1 '{text}'"));
+    assert!(ok);
+    assert!(
+        out.contains("WARNING #1133") && out.contains("5/5"),
+        "the extended line must read all 5 buckets: {out:?}"
+    );
+}
+
+#[test]
 fn cap1s_chronic_wobble_and_in_band_are_silent() {
     // the live chronic ShadowCast wobble (1/5 out of band) must NOT warn.
     let wobble = "#707 emit-1s: [60,60,60,60,60] cap-1s: [60, 62, 61, 60, 61] (1-second buckets, oldest first)";

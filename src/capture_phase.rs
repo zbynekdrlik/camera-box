@@ -252,6 +252,11 @@ impl CapturePhaseTracker {
         self.reseeds
     }
 
+    /// RED stub (review round 1): frames the device skipped are not detected yet.
+    pub fn hidden_drops(&self) -> u64 {
+        0
+    }
+
     fn seed(&mut self, seq: u32, t: u64) {
         self.window.clear();
         self.sums = FitSums::default();
@@ -374,6 +379,8 @@ pub enum PhaseMode {
     Band,
     /// Locked and 1:1: the stamp and the gate are driven by the tracked slot.
     Stamp,
+    /// Genlock is off: there is no emit grid to drive.
+    Off,
 }
 
 impl PhaseMode {
@@ -382,6 +389,7 @@ impl PhaseMode {
             PhaseMode::Seed => "seed",
             PhaseMode::Band => "band",
             PhaseMode::Stamp => "stamp",
+            PhaseMode::Off => "off",
         }
     }
 }
@@ -494,6 +502,18 @@ impl CapturePhase {
             self.reseeds()
         )
     }
+}
+
+/// RED stub (review round 1): always today's raw capture instant.
+#[cfg(target_os = "linux")]
+pub fn stamp_instant_100ns(
+    phase_slot_ns: Option<u64>,
+    interval_ns: u64,
+    capture_monotonic_100ns: i64,
+    mono_to_real_offset_100ns: i64,
+) -> i64 {
+    let _ = (phase_slot_ns, interval_ns);
+    crate::genlock_stamp::capture_realtime_100ns(capture_monotonic_100ns, mono_to_real_offset_100ns)
 }
 
 /// The realtime instant (100 ns units) in the middle of the grid slot `slot_ns`: fed to
