@@ -940,3 +940,7 @@ mod bench;
 #[cfg(test)]
 #[path = "genlock_audio_pairing_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "genlock_audio_pairing_step_tests.rs"]
+mod step_tests;
