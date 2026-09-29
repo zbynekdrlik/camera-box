@@ -111,10 +111,18 @@ fn recording_e2e_sources_the_cg_chain_lib() {
 #[test]
 fn recording_e2e_wires_the_cg_chain_start_cleanup_and_merge_arg() {
     let s = recording_e2e_text();
-    // [5/8] start: burn ON + cg OBS StartRecord, guarded by cg_chain_enabled.
+    // [5/8] start: burn ON + cg OBS StartRecord, guarded by cg_chain_enabled. Issue 1302 slice 3:
+    // the SongPlayer burn ON lives INSIDE the lib's record start (after both program cuts read
+    // back), so it is pinned there.
+    let lib = fs::read_to_string(lib_script()).expect("read the cg-chain lib");
+    let start = lib
+        .find("cg_chain_record_start() {")
+        .expect("the lib's record start");
+    let body = &lib[start..];
+    let body = &body[..body.find("\n}\n").unwrap_or(body.len())];
     assert!(
-        s.contains("cg_chain_songplayer_burn on"),
-        "#1301: the [5/8] block must turn the SongPlayer burn ON"
+        body.contains("cg_chain_songplayer_burn on"),
+        "#1301: the [5/8] record start must turn the SongPlayer burn ON"
     );
     assert!(
         s.contains("cg_chain_record_start"),

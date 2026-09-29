@@ -274,6 +274,68 @@ def test_cli_parses_the_three_subcommands():
     assert (a.cmd, a.state_file) == ("restore", "s")
 
 
+# ---- issue 1302 slice 3: SongPlayer's obs-websocket facade (:4456) -------------------------------
+
+
+def test_cli_parses_facade_program_with_the_default_facade_port():
+    ap = cg_chain_scene.build_parser()
+    a = ap.parse_args(["facade-program", "--host", "h", "--scene", "sp-fast"])
+    assert (a.cmd, a.host, a.port, a.scene) == ("facade-program", "h", 4456, "sp-fast")
+    a = ap.parse_args(["facade-program", "--host", "h", "--port", "4457", "--scene", "sp-slow"])
+    assert (a.port, a.scene) == (4457, "sp-slow")
+
+
+def test_facade_program_is_the_one_request_companion_sends():
+    calls = []
+    cg_chain_scene.facade_program(lambda rtype, rdata=None: calls.append((rtype, rdata)), "sp-fast")
+    assert calls == [("SetCurrentProgramScene", {"sceneName": "sp-fast"})], (
+        "the facade serves no transition list: one press, nothing else")
+
+
+def test_main_facade_program_dials_the_facade_port_and_closes_the_session(monkeypatch):
+    sessions, closed, calls = [], [], []
+
+    class FakeWs:
+        def close(self):
+            closed.append(True)
+
+    def fake_facade_session(host, port):
+        sessions.append((host, port))
+        return FakeWs(), (lambda rtype, rdata=None: calls.append((rtype, rdata)))
+
+    monkeypatch.setattr(cg_chain_scene, "_facade_session", fake_facade_session)
+    monkeypatch.setattr(cg_chain_scene, "_ws_session",
+                        lambda host: pytest.fail("the facade press must not use the :4455 session"))
+    rc = cg_chain_scene.main(["facade-program", "--host", "10.77.9.201", "--scene", "sp-fast"])
+    assert rc == 0
+    assert sessions == [("10.77.9.201", 4456)]
+    assert calls == [("SetCurrentProgramScene", {"sceneName": "sp-fast"})]
+    assert closed == [True]
+
+
+def test_facade_session_rides_obs_phase2_conn_with_the_port_and_the_facade_password(monkeypatch):
+    seen = {}
+
+    class FakeO:
+        ForbiddenSceneError = RuntimeError
+
+        @staticmethod
+        def _conn(host, password="", port=None):
+            seen.update(host=host, password=password, port=port)
+            return "ws"
+
+        @staticmethod
+        def _rpc(ws, rtype, rdata=None):
+            return {"ws": ws, "rtype": rtype}
+
+    monkeypatch.setattr(cg_chain_scene, "_obs_phase2", lambda: FakeO)
+    monkeypatch.setenv("CG_CHAIN_SP_FACADE_PASSWORD", "fpw")
+    monkeypatch.setenv("CG_CHAIN_OBS_PASSWORD", "not-this-one")
+    ws, rpc = cg_chain_scene._facade_session("10.77.9.201", 4456)
+    assert ws == "ws" and seen == {"host": "10.77.9.201", "password": "fpw", "port": 4456}
+    assert rpc("GetVersion") == {"ws": "ws", "rtype": "GetVersion"}
+
+
 def test_main_closes_every_ws_session_it_opens(tmp_path, monkeypatch):
     obs = FakeObs({"sp-slow": [], "sp-fast": []}, "sp-slow")
     closed = []
