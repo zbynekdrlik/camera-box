@@ -666,6 +666,148 @@ pub fn audio_stamp_interval_s(prev_ns: u64, now_ns: u64) -> f64 {
     now_ns.wrapping_sub(prev_ns) as i64 as f64 / 1e9
 }
 
+/// Issue 1381 (design 5882391108) — the longest a source holds its pre-step offset across a wall
+/// step before it takes the live one anyway (the sender never followed). Mirror of the C
+/// `GENLOCK_AUDIO_STEP_HOLD_MAX_NS`.
+pub const AUDIO_STEP_HOLD_MAX_NS: u64 = 10_000_000_000;
+
+/// Issue 1381 — why a skew hold ended on this packet (0 = it did not). Discriminants match the C
+/// `GENLOCK_AUDIO_STEP_*` defines and the log line's `released=` token.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioStepRelease {
+    /// No hold ended on this packet (none running, or it still holds).
+    None = 0,
+    /// The source's own stamps followed the step to within one packet.
+    Followed = 1,
+    /// [`AUDIO_STEP_HOLD_MAX_NS`] passed without the stamps following.
+    Timeout = 2,
+    /// The ingest reset the source's timeline in this packet, or the source left timecode mode.
+    Reset = 3,
+}
+
+impl AudioStepRelease {
+    /// The log line's `released=` value. Mirror of `genlock_audio_step_release_token`.
+    pub fn token(self) -> &'static str {
+        match self {
+            AudioStepRelease::None => "none",
+            AudioStepRelease::Followed => "followed",
+            AudioStepRelease::Timeout => "timeout",
+            AudioStepRelease::Reset => "reset",
+        }
+    }
+}
+
+/// Issue 1381 — one source's skew-hold state, field for field the `genlock_audio_step_*` members of
+/// `obs_source`. Zeroed = no previous packet, no hold.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AudioStepHold {
+    /// A hold is running: this source maps its stamps through `held_off_ns`, its timecode ASRC is not
+    /// fed and the render thread leaves its shallow latch and video-delay tracker alone.
+    pub active: bool,
+    /// The live wall→mono offset of the previous timecode packet.
+    pub prev_off_ns: i64,
+    /// The previous packet's raw stamp.
+    pub prev_raw_ns: u64,
+    /// The previous packet's duration (0 = no previous packet).
+    pub prev_packet_ns: u64,
+    /// The previous packet's stamp AGE on the live wall at its arrival ([`audio_stamp_age_ns`]).
+    pub prev_age_ns: i64,
+    /// The pre-step age a hold waits for the stamps to return to (the previous packet's age when
+    /// the hold started).
+    pub base_age_ns: i64,
+    /// The offset a held packet maps through: the pre-step offset, moved by every stamp jump the
+    /// source made since (a follow in pieces never opens a hole). Kept after a release (the log's
+    /// `residual_ms=`).
+    pub held_off_ns: i64,
+    /// When the hold started (OBS monotonic). Kept after a release (the log's `held_ms=`).
+    pub start_ns: u64,
+    /// The wall step that started it (wall − mono, + = the wall jumped forward, the sign of the
+    /// render tick's `genlock-regrid` line). Kept after a release.
+    pub step_ns: i64,
+}
+
+/// Issue 1381 — how old a packet's stamp is on the live wall when it arrives, ns: `now − (raw +
+/// off)` on the OBS monotonic clock (`off` = the live wall→mono offset). Steady on a sender whose
+/// stamps are its wall at emit (the arrival lag); a wall step the sender has not followed moves it by
+/// the whole step. Mirror of `genlock_audio_stamp_age_ns`.
+pub fn audio_stamp_age_ns(now_ns: u64, raw_ts_ns: u64, off_live_ns: i64) -> i64 {
+    now_ns.wrapping_sub(raw_ts_ns.wrapping_add(off_live_ns as u64)) as i64
+}
+
+/// Issue 1381 (design 5882391108, piece 2) — the per-source SKEW HOLD of the genlock timecode audio
+/// across a wall step, for one packet. Returns the wall→mono offset this packet is mapped through
+/// (the live one unless a hold runs) and why a hold ended on it.
+///
+/// A fleet date step moves the receiver's wall clock at once; the sender (SongPlayer on resolume)
+/// follows only seconds later, so for that long every packet's stamp is on the OLD wall while the
+/// live offset is on the NEW one. Placed through the live offset, each packet reads the whole step as
+/// its placement error: the booking and the level loop act on a skew that is no error of the audio.
+///
+/// - **Start.** Between two timecode packets the live offset moved by more than `step_min_ns` (the
+///   render tick's `GENLOCK_WALL_STEP_MIN_NS`), and this packet has NOT followed it (see Release):
+///   its stamp is still over one packet off the live wall. A step up to one packet, a timeline reset,
+///   or a first packet never starts one.
+/// - **Hold.** Every stamp jump over `step_min_ns` against the source's own sample count moves the
+///   held offset by the jump, so the landing stays continuous however the sender follows.
+/// - **Release.** `Followed` once the stamps are back on the live wall, either way a sender can get
+///   there: the held offset is within one packet of the live one (the stamps JUMPED by the step), or
+///   the stamp's live-wall age ([`audio_stamp_age_ns`]) is within one packet of its pre-step age (a
+///   sender whose grid stamps stay continuous and CATCH UP instead -- SongPlayer's audio emitter
+///   re-anchors only past 1 s, a forward step is a burst of the missed slots, a backward one a
+///   pause). `Timeout` after [`AUDIO_STEP_HOLD_MAX_NS`], `Reset` on a timeline reset or when the
+///   source leaves timecode mode (`timecode` false clears the state). A released packet maps through
+///   the live offset; what that moves is [`audio_step_residual_ns`].
+///
+/// Every arithmetic wraps in two's complement, like the C mirror `genlock_audio_step_hold`.
+#[allow(clippy::too_many_arguments)]
+pub fn audio_step_hold(
+    s: &mut AudioStepHold,
+    timecode: bool,
+    off_live_ns: i64,
+    raw_ts_ns: u64,
+    packet_ns: u64,
+    now_ns: u64,
+    timeline_reset: bool,
+    step_min_ns: i64,
+) -> (i64, AudioStepRelease) {
+    // RED stub (issue 1381): the skew hold is not implemented yet -- every packet maps through the
+    // live offset, as before.
+    let _ = (
+        s,
+        timecode,
+        raw_ts_ns,
+        packet_ns,
+        now_ns,
+        timeline_reset,
+        step_min_ns,
+    );
+    (off_live_ns, AudioStepRelease::None)
+}
+
+/// Issue 1381 — the placement move a release applies, ns: the live offset minus the held one (the
+/// log's `residual_ms=`; negative = the packets land earlier from here on). Mirror of
+/// `genlock_audio_step_residual_ns`.
+pub fn audio_step_residual_ns(held_off_ns: i64, off_live_ns: i64) -> i64 {
+    off_live_ns.wrapping_sub(held_off_ns)
+}
+
+/// Issue 1381 — does this packet's release PLACE it (apply the new offset once) instead of
+/// appending? When the move it applies is over one packet: a `Timeout`, or a `Followed` sender that
+/// caught up without jumping its stamps. A jumped follow (within one packet) appends or books as
+/// usual, and a `Reset` packet is placed by the ingest's own timeline reset. Never a W-second payment
+/// at 1000 ppm for a step. Mirror of `genlock_audio_step_release_places`.
+pub fn audio_step_release_places(
+    release: AudioStepRelease,
+    residual_ns: i64,
+    packet_ns: u64,
+) -> bool {
+    matches!(
+        release,
+        AudioStepRelease::Followed | AudioStepRelease::Timeout
+    ) && residual_ns.unsigned_abs() > packet_ns
+}
+
 /// The audio-parity health of one genlocked source — the reason the LOCK indicator DEGRADES on the
 /// audio axis (mirrors the video-side `LockReason` discriminant model). Discriminants match the C
 /// `genlock_audio_health` enum and are compared as `u8` by the parity gate.

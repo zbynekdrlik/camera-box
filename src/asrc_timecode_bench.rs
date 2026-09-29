@@ -46,9 +46,11 @@ use crate::genlock_audio_pairing::{
     audio_actual_place_ns, audio_asrc_error_ms, audio_asrc_timecode, audio_hold_action,
     audio_intended_raw_ns, audio_level_shift_ns, audio_place_error_ns, audio_place_term_ns,
     audio_placed_slew_fold_ns, audio_push_back_allowed, audio_slew_book_ts_ns, audio_slew_ppm,
-    audio_slew_step_ns, audio_stamp_interval_s, audio_stamp_mono_ns, audio_wall_to_mono_ns,
-    genlock_audio_delay_ns, AudioHoldAction, AudioHoldMode,
+    audio_slew_step_ns, audio_stamp_interval_s, audio_stamp_mono_ns, audio_step_hold,
+    audio_step_release_places, audio_step_residual_ns, audio_wall_to_mono_ns,
+    genlock_audio_delay_ns, AudioHoldAction, AudioHoldMode, AudioStepHold, AudioStepRelease,
 };
+use crate::genlock_wall_step::WALL_STEP_MIN_NS;
 
 const RATE: u64 = 48_000;
 const PACKET_FRAMES: u64 = 1600;
@@ -136,6 +138,24 @@ enum Variant {
     Production,
     Legacy,
     NoBooking,
+    /// Issue 1381 (anti-tautology): the production path without the per-source skew hold (the
+    /// placement re-seed and the beyond-cap backstop stay): a wall step is read as a placement error
+    /// until the sender follows.
+    NoStepHold,
+}
+
+/// Issue 1381: what one `source_output_audio_data` call did with its packet.
+#[derive(Debug, Clone, Copy)]
+struct Landed {
+    /// Where its first sample landed (OBS monotonic).
+    actual: u64,
+    /// Appended at the buffer end (false = PLACED at its timestamp).
+    appended: bool,
+    /// The timecode ASRC's error input for this packet, ms (actual − raw-stamp intended + the owed
+    /// slew), whether or not the servo was fed it.
+    err_ms: f64,
+    /// A skew hold ended on this packet.
+    release: AudioStepRelease,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -246,6 +266,8 @@ struct Obs {
     prev_stamp_mono: u64,
     prev_raw_s: f64,
     tick: u64,
+    /// Issue 1381: the per-source skew hold (the `genlock_audio_step_*` members of `obs_source`).
+    step_hold: AudioStepHold,
 }
 
 impl Obs {
@@ -273,6 +295,7 @@ impl Obs {
             prev_stamp_mono: 0,
             prev_raw_s: 0.0,
             tick: 0,
+            step_hold: AudioStepHold::default(),
         }
     }
 
@@ -302,6 +325,16 @@ impl Obs {
 
     fn timecode_path(&self) -> bool {
         self.variant != Variant::Legacy
+    }
+
+    /// Issue 1381: the skew hold and the backstop are production pieces (off for the anti-tautology
+    /// variants; `NoStepHold` keeps the backstop).
+    fn step_hold_on(&self) -> bool {
+        self.variant == Variant::Production
+    }
+
+    fn backstop_on(&self) -> bool {
+        matches!(self.variant, Variant::Production | Variant::NoStepHold)
     }
 
     /// `asrc_process_audio`: returns this packet's output duration.
@@ -338,7 +371,7 @@ impl Obs {
         frames_ns(frames as u64)
     }
 
-    /// `source_output_audio_data` for one packet; returns where its first sample landed.
+    /// `source_output_audio_data` for one packet; returns where its first sample landed and how.
     fn ingest(
         &mut self,
         pkt: &Packet,
@@ -346,7 +379,7 @@ impl Obs {
         wall_now: u64,
         hold_ms: u32,
         dur: u64,
-    ) -> u64 {
+    ) -> Landed {
         let ts = pkt.stamp;
         let mut in_ts = ts;
         let mut timeline_reset = false;
@@ -388,14 +421,23 @@ impl Obs {
         }
         let mode = AudioHoldMode::Timecode;
         let off_live = audio_wall_to_mono_ns(mono_now, wall_now);
-        let term = audio_place_term_ns(mode, hold_ms, off_live, self.timing_adjust);
-        in_ts = in_ts.wrapping_add(term as u64);
-        let prev_term = audio_place_term_ns(
-            self.prev_mode,
-            self.prev_hold_ms,
+        // issue 1381: the per-source skew hold -- a wall step keeps this source on its pre-step offset
+        // until its own stamps follow (genlock_audio_step_hold in the ingest).
+        let hold_timecode = self.step_hold_on() && mode == AudioHoldMode::Timecode;
+        let (off, release) = audio_step_hold(
+            &mut self.step_hold,
+            hold_timecode,
             off_live,
-            self.timing_adjust,
+            ts,
+            dur,
+            mono_now,
+            timeline_reset,
+            WALL_STEP_MIN_NS,
         );
+        let term = audio_place_term_ns(mode, hold_ms, off, self.timing_adjust);
+        in_ts = in_ts.wrapping_add(term as u64);
+        let prev_term =
+            audio_place_term_ns(self.prev_mode, self.prev_hold_ms, off, self.timing_adjust);
         push_back = audio_push_back_allowed(push_back, timeline_reset, mode);
         let action = audio_hold_action(
             self.prev_mode,
@@ -432,6 +474,30 @@ impl Obs {
         self.prev_mode = mode;
         self.prev_hold_ms = hold_ms;
         self.next_sys_min = self.next_ts_min.wrapping_add(self.timing_adjust);
+        let intended = audio_intended_raw_ns(ts, self.timing_adjust, 0, 0, term);
+        // issue 1381: a TIMEOUT release applies the new offset once (a placement); outside a hold a
+        // jump the owed cap cannot hold is placed, never partially booked (the backstop).
+        if audio_step_release_places(
+            release,
+            audio_step_residual_ns(self.step_hold.held_off_ns, off_live),
+            dur,
+        ) {
+            push_back = false;
+        } else if self.backstop_on()
+            && !self.step_hold.active
+            && self.c.timecode()
+            && push_back
+            && self.audio_ts != 0
+        {
+            let would = audio_actual_place_ns(true, self.audio_ts, self.buffered_ns(), in_ts);
+            let err_ms = audio_asrc_error_ms(
+                audio_place_error_ns(would, intended),
+                self.slew_remaining_ns,
+            );
+            if self.c.place_beyond_cap(err_ms, self.raw_cur_s * 1000.0) {
+                push_back = false;
+            }
+        }
         let fold = audio_placed_slew_fold_ns(
             action,
             !(push_back && self.audio_ts != 0),
@@ -442,7 +508,6 @@ impl Obs {
             self.slew_remaining_ns = 0;
         }
 
-        let intended = audio_intended_raw_ns(ts, self.timing_adjust, 0, 0, term);
         let appended = push_back && self.audio_ts != 0;
         let actual = audio_actual_place_ns(appended, self.audio_ts, self.buffered_ns(), in_ts);
         let place_err_ns = audio_place_error_ns(actual, intended);
@@ -454,18 +519,25 @@ impl Obs {
             self.end = in_ts + dur;
             self.next_sys_min = in_ts;
         } else {
-            self.end = self.end.max(in_ts + dur);
+            // source_output_audio_place: deque_place, then deque_pop_back of everything past the
+            // placed packet -- a placement inside the buffer TRUNCATES it there (issue 1381: the
+            // release of a catch-up burst drops its excess), one past the end zero-fills the gap.
+            self.end = in_ts + dur;
         }
 
-        // asrc_timecode_ingest, for a source the servo judges in timecode mode
-        if self.c.timecode() {
-            let err_ms = audio_asrc_error_ms(place_err_ns, self.slew_remaining_ns);
+        let err_ms = audio_asrc_error_ms(place_err_ns, self.slew_remaining_ns);
+        // asrc_timecode_ingest, for a source the servo judges in timecode mode -- never while a skew
+        // hold runs (issue 1381: the booking, the level windows and the rate points are frozen, and
+        // the first packet after it starts a fresh stamp pair)
+        if self.step_hold.active {
+            self.have_prev = false;
+        } else if self.c.timecode() {
             self.c.set_step_recover_hold(self.slew_remaining_ns != 0);
             if self.variant != Variant::NoBooking {
                 self.c
                     .observe_placement(err_ms, self.raw_cur_s * 1000.0, !appended);
             }
-            let stamp_mono = audio_stamp_mono_ns(ts, off_live);
+            let stamp_mono = audio_stamp_mono_ns(ts, off);
             if appended && self.have_prev {
                 let master_s = audio_stamp_interval_s(self.prev_stamp_mono, stamp_mono);
                 if master_s > 0.0 {
@@ -477,7 +549,12 @@ impl Obs {
             self.prev_raw_s = self.raw_cur_s;
             self.have_prev = true;
         }
-        actual
+        Landed {
+            actual,
+            appended,
+            err_ms,
+            release,
+        }
     }
 }
 
@@ -509,7 +586,7 @@ fn run(event: Event, variant: Variant, settle_ns: u64) -> Run {
         obs.mix_until(mono_now);
         let dur = obs.asrc_process(mono_now);
         let wall = receiver_wall(pkt.arrival_ns, event);
-        let actual = obs.ingest(&pkt, mono_now, wall, hold_ms, dur);
+        let actual = obs.ingest(&pkt, mono_now, wall, hold_ms, dur).actual;
         let truth = MONO0 + slot_ns(pkt.slot) + pkt.leap_ns + genlock_audio_delay_ns(hold_ms);
         let av_ms = actual.wrapping_sub(truth) as i64 as f64 / 1e6;
         let t = pkt.arrival_ns;
@@ -649,3 +726,8 @@ fn without_the_jump_booking_a_skipped_slot_is_still_off_after_60_s_1367() {
         );
     }
 }
+
+// Issue 1381 (design 5882391108): the WALL-STEP scenarios of the same ingest replay (the live
+// 682 ms / 89.7 ms steps of 29.9.2026, the skew hold, the placement re-seed, the backstop).
+#[path = "asrc_timecode_step_bench.rs"]
+mod step;

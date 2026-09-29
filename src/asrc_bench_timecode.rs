@@ -86,21 +86,42 @@ impl RealtimeAsrcCompensator {
     /// with its own sign — an early packet is owed as a loss (stretch), a late one as a duplicate
     /// (compress) — and paid at `STEP_RECOVER_PPM` by the next accepted calls. Inert outside timecode
     /// mode and before the setpoint is captured. Mirror of the C `asrc_compensator_observe_placement`.
+    ///
+    /// Issue 1381 (design 5882391108, piece 1): a PLACED packet also starts the level loop afresh.
+    /// The placement put its samples on their stamp, so the smoothed history (`level_err_ema_ms`,
+    /// the restore, the sustained-arm count, the open window's readings) was measured on a timeline
+    /// that no longer exists. Before this, the stale EMA of a 682 ms wall step was read as a phantom
+    /// jump against every later placement (capped at 100 ms and re-booked), a limit cycle of ~65 ms
+    /// skips every ~80 s for 18 min on the cg OBS. The placed packet's own jump is measured against
+    /// the fresh setpoint (a placement that still lands off its raw stamp books that), and the EMA
+    /// is re-seeded to its error against the resulting setpoint.
     pub fn observe_placement(&mut self, place_err_ms: f64, packet_ms: f64, placed: bool) {
         if !self.timecode || !self.level_captured {
             return;
         }
+        // RED stub (issue 1381): a placement only drops what is owed, as before.
         if placed {
             self.step_recover_set(0.0);
         }
-        let jump_ms = place_err_ms - (self.level_target_ms + self.level_err_ema_ms);
+        self.book_placement_jump(place_err_ms, packet_ms);
+    }
+
+    /// Issue 1367: the booking band of one packet, ms: max(half the packet, [`PLACE_JUMP_MIN_MS`]).
+    fn place_jump_band_ms(packet_ms: f64) -> f64 {
         let half_packet_ms = 0.5 * packet_ms;
-        let band_ms = if half_packet_ms > PLACE_JUMP_MIN_MS {
+        if half_packet_ms > PLACE_JUMP_MIN_MS {
             half_packet_ms
         } else {
             PLACE_JUMP_MIN_MS
-        };
-        if jump_ms.abs() < band_ms {
+        }
+    }
+
+    /// Issue 1367: book the jump of `place_err_ms` against the servo's expectation (setpoint +
+    /// smoothed error), with its own sign, capped at ±[`STEP_RECOVER_MAX_MS`] owed. Mirror of the C
+    /// `asrc_book_placement_jump`.
+    fn book_placement_jump(&mut self, place_err_ms: f64, packet_ms: f64) {
+        let jump_ms = place_err_ms - (self.level_target_ms + self.level_err_ema_ms);
+        if jump_ms.abs() < Self::place_jump_band_ms(packet_ms) {
             return;
         }
         let owed_ms =
@@ -112,6 +133,20 @@ impl RealtimeAsrcCompensator {
         self.step_recover_set(owed_ms);
         self.place_jump_count = self.place_jump_count.saturating_add(1);
         self.last_place_jump_ms = jump_ms;
+    }
+
+    /// Issue 1381 (design 5882391108, piece 3) — the BACKSTOP, asked by the ingest BEFORE a timecode
+    /// packet lands: would appending it (placement error `place_err_ms`, owed slew included) book a
+    /// jump the owed cap cannot hold (|owed − jump| > [`STEP_RECOVER_MAX_MS`])? Then the ingest PLACES
+    /// it at its stamp instead, ONE counted placement (`place_jumps=`), and its
+    /// [`Self::observe_placement`] (placed) drops what is owed and re-seeds the level loop. Without
+    /// it the cap booked 100 ms and the excess leaked into the smoothed error. Inert outside timecode
+    /// mode and before the capture (like the booking). The ingest never asks while a skew hold runs.
+    /// Mirror of the C `asrc_compensator_place_beyond_cap`.
+    pub fn place_beyond_cap(&mut self, place_err_ms: f64, packet_ms: f64) -> bool {
+        // RED stub (issue 1381): no backstop yet.
+        let _ = (place_err_ms, packet_ms);
+        false
     }
 
     /// Issue 1367: read and clear the recovery rate the last accepted call paid (servo sign). In
@@ -329,5 +364,123 @@ mod tests {
         assert_eq!(a.applied_ppm().to_bits(), b.applied_ppm().to_bits());
         assert_eq!(a.level_target_ms().to_bits(), b.level_target_ms().to_bits());
         assert_eq!(b.place_jump_count(), 0);
+    }
+
+    /// Issue 1381: a locked servo that read a skew as its level for `seconds` (every packet appended
+    /// `err_ms` off its stamp, the jump booked at the owed cap on the first one).
+    fn skewed_for(seconds: f64, err_ms: f64) -> RealtimeAsrcCompensator {
+        let mut c = locked_timecode();
+        for _ in 0..(seconds / PACKET_S) as usize {
+            c.observe_placement(err_ms, PACKET_MS, false);
+            c.compensate_with_level(PACKET_S, PACKET_S, err_ms);
+            c.take_step_recover_ppm();
+        }
+        c
+    }
+
+    #[test]
+    fn a_placement_starts_the_level_loop_afresh_1381() {
+        // the live 682 ms step: 5 s of +682 readings before the sender followed and the packet was
+        // placed back on its stamp (error ~0).
+        let mut c = skewed_for(5.0, 682.0);
+        assert!(
+            c.level_err_ema_ms() > 100.0 && c.level_err_windows > 0,
+            "the skew filled the smoothed error: ema {} windows {}",
+            c.level_err_ema_ms(),
+            c.level_err_windows
+        );
+        let jumps = c.place_jump_count();
+        c.observe_placement(0.4, PACKET_MS, true);
+        assert!(
+            (c.level_err_ema_ms() - 0.4).abs() < 1e-9
+                && c.level_err_ema_seeded
+                && !c.level_restore()
+                && c.level_err_windows == 0
+                && c.window_level_count == 0
+                && c.window_level_sum_ms == 0.0
+                && c.step_recover_ms() == 0.0
+                && c.level_target_ms().abs() < 1e-9
+                && c.place_jump_count() == jumps,
+            "issue 1381: a placement drops the owed amount AND the stale history (EMA re-seeded to \
+             the placed packet's own error, restore off, sustained count and window readings \
+             cleared), and books no phantom: ema {} restore {} windows {} owed {} target {} \
+             jumps {} -> {}",
+            c.level_err_ema_ms(),
+            c.level_restore(),
+            c.level_err_windows,
+            c.step_recover_ms(),
+            c.level_target_ms(),
+            jumps,
+            c.place_jump_count()
+        );
+        // the next packets land on their stamps: nothing is re-booked (the live sawtooth re-booked
+        // the stale EMA as a -111 / -89 / -78 ms phantom after every placement)
+        for _ in 0..(120.0 / PACKET_S) as usize {
+            c.observe_placement(0.4, PACKET_MS, false);
+            c.compensate_with_level(PACKET_S, PACKET_S, 0.4);
+            c.take_step_recover_ppm();
+        }
+        assert!(
+            c.place_jump_count() == jumps && c.step_recover_ms() == 0.0,
+            "issue 1381: no phantom jump after the placement: jumps {jumps} -> {} owed {}",
+            c.place_jump_count(),
+            c.step_recover_ms()
+        );
+    }
+
+    #[test]
+    fn a_placement_off_its_stamp_still_books_its_own_error_1381() {
+        // a placement that lands a whole slot off its raw stamp (a snapped slot forced to place)
+        let mut c = skewed_for(3.0, 60.0);
+        let jumps = c.place_jump_count();
+        c.observe_placement(-PACKET_MS, PACKET_MS, true);
+        assert!(
+            (c.step_recover_ms() - PACKET_MS).abs() < 1e-9
+                && c.place_jump_count() == jumps + 1
+                && (c.last_place_jump_ms() + PACKET_MS).abs() < 1e-9
+                && c.level_err_ema_ms().abs() < 1e-9,
+            "issue 1381: the placed packet's own error is booked against the fresh setpoint (not \
+             the stale EMA) and the EMA is re-seeded against the booked setpoint: owed {} jumps {} \
+             last {} ema {}",
+            c.step_recover_ms(),
+            c.place_jump_count(),
+            c.last_place_jump_ms(),
+            c.level_err_ema_ms()
+        );
+    }
+
+    #[test]
+    fn the_backstop_places_a_jump_beyond_the_owed_cap_once_1381() {
+        let mut c = locked_timecode();
+        // a bookable jump is left to the booking
+        assert!(!c.place_beyond_cap(-60.0, PACKET_MS));
+        assert_eq!(c.place_jump_count(), 0);
+        // beyond the cap: placed, counted once, nothing booked here (the placement drops what is owed)
+        assert!(c.place_beyond_cap(-682.0, PACKET_MS));
+        assert!(
+            c.place_jump_count() == 1
+                && c.last_place_jump_ms() == -682.0
+                && c.step_recover_ms() == 0.0
+                && c.level_target_ms() == 0.0,
+            "issue 1381: one counted placement, no partial booking: jumps {} last {} owed {} \
+             target {}",
+            c.place_jump_count(),
+            c.last_place_jump_ms(),
+            c.step_recover_ms(),
+            c.level_target_ms()
+        );
+        // with 60 ms already owed, another 60 ms loss would owe 120: placed, not booked to the cap
+        c.observe_placement(-60.0, PACKET_MS, false);
+        assert_eq!(c.step_recover_ms(), 60.0);
+        assert!(c.place_beyond_cap(-60.0 - 60.0, PACKET_MS));
+        // sub-band jitter never places
+        assert!(!c.place_beyond_cap(-60.0 - 5.0, PACKET_MS));
+        // inert outside timecode mode and before the capture
+        let mut arrival = RealtimeAsrcCompensator::new();
+        assert!(!arrival.place_beyond_cap(-682.0, PACKET_MS));
+        let mut fresh = RealtimeAsrcCompensator::new();
+        fresh.set_timecode(true);
+        assert!(!fresh.place_beyond_cap(-682.0, PACKET_MS));
+        assert_eq!(fresh.place_jump_count(), 0);
     }
 }
