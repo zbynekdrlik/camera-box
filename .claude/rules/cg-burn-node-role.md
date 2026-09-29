@@ -12,6 +12,8 @@ paths:
   - "tests/harness_cg_chain_onbox_1302.rs"
   - "tests/python/test_cg_chain_cg_burn_1302.py"
   - "tests/python/test_cg_chain_measure_1302.py"
+  - "scripts/lib/cg-chain-songplayer.sh"
+  - "scripts/lib/cg-obs-burn-backstop.sh"
 ---
 
 # CG-path burn-id node role — SongPlayer (911014 ORIGIN) / cg OBS (911015 HOP), REPORT-ONLY (#1301)
@@ -153,11 +155,16 @@ unattended.
     NDI output, 409 = the output is not paced (the burn is painted only on the paced path, and a 409
     never flips the flag). Both are NAMED (`cg_chain_burn_refusal_reason`) and never retried. An OFF
     answered 404 owes nothing (no pipeline, no burn anywhere, and `/health` has no row for it, so it
-    would read `unknown` forever); an OFF answered 409 is confirmed by its one read.
-- **The flag is registered OFF when a playlist pipeline spawns, never persisted** (`ndi_burn.rs`
-  `register`; pipelines are created per playlist on first use). So the burn ON must come AFTER any
-  program cut that could spawn it: slice 3 moved the SongPlayer burn ON from the `[5/8]` block in
-  recording-e2e.sh INTO `cg_chain_record_start`, after both program cuts read back.
+    would read `unknown` forever) UNLESS its one read still says `true` (the registry also answers
+    NotFound on a poisoned lock): that is a LEAK. An OFF answered 409 is confirmed by its one read.
+  - The POST helper `cg_chain_songplayer_post` is shared with the dashboard program cut below.
+- **The burn goes ON last, inside `cg_chain_record_start`, after both program cuts read back.**
+  SongPlayer registers the flag OFF whenever a pipeline (re)spawns and never persists it
+  (`ndi_burn.rs` `register`). It pre-creates one pipeline per active playlist at startup, and a cut
+  does NOT spawn one (review round 1 corrected the first claim). The reasons for the order are
+  narrower: a burn with no playlist verified on program has nothing to mark, and turning it on as
+  the last step before the cg recording leaves the shortest window for a respawn to clear it.
+  recording-e2e.sh's fallback OFF after a failed cg start is sent only when `CG_SP_BURN_OWED=1`.
 
 ### The cg OBS hop burn toggle (911015, issue 1302)
 
@@ -211,25 +218,33 @@ renders only while that input's `genlock_burn` is true, toggled by the existing
   not read as the verdict; `cg_chain_cleanup` waits for both jobs, then retries both (the
   authoritative report). It sends nothing on a run whose `[7/8]` OFFs verified or that aborted
   before `[5/8]`.
-- **The home-gated backstop (issue 1302 slice 3).** `genlock_burn` is saved in the cg OBS scene
-  collection (it survives an OBS/AHK respawn), and a SIGKILL before even cleanup()'s first pass
-  leaves 911015 on. So section (e) of the lib, `cg_chain_backstop_sweep_targets`, prints the cg OBS
-  box as ONE `obs_burn_targets`-shaped row (`<fleet host>|-|resolume`, by its fleet HOSTNAME
-  `resolume.lan`, never a pinned IP) while `obs_fleet_is_home resolume` (resolves + OBS-WS :4455
-  answers), else nothing + one `[resolume burn-sweep] SKIP` line on stderr. Consumers:
-  - rig-mode EVENT's `sweep-off` loop and `event_mode_assert`'s fail-closed `sweep-check` loop read
-    `done < <(obs_burn_targets; cg_chain_backstop_sweep_targets)` — the SAME loop bodies, so the cg
-    OBS gets the same rc propagation and the same `__sweep_unreachable__` / `__sweep_parse_error__`
-    sentinel as the other boxes (a home box whose enumeration fails FAILS the EVENT contract; an
-    away box is never read). The two PINNED program-input loops stay `obs_burn_targets` only (TEST
-    = burn ON stays pinned). rig-mode sources the cg-chain lib (after win-ssh-exec.sh), which
-    lazy-sources obs-fleet.sh.
+- **The home-gated backstop (issue 1302 slice 3, `scripts/lib/cg-obs-burn-backstop.sh`).**
+  `genlock_burn` is saved in the cg OBS scene collection (it survives an OBS/AHK respawn), and a
+  SIGKILL before even cleanup()'s first pass leaves 911015 on. `cg_chain_backstop_sweep_targets`
+  prints the cg OBS box as ONE `obs_burn_targets`-shaped row (`<fleet host>|-|resolume`, by its fleet
+  HOSTNAME `resolume.lan`, never a pinned IP) while `obs_fleet_is_home resolume` (resolves + OBS-WS
+  :4455 answers), else nothing + one `[resolume burn-sweep] SKIP` line on stderr.
+  `cg_chain_backstop_sweep_off <obs_burn_filter.py> <timeout> [password]` sweeps that row: loud,
+  never fatal — exit 2 = enumeration failed (the burn stays UNVERIFIED), any other rc = still on /
+  connection failed / timed out, each a WARNING naming the manual `sweep-off` command. The lib is
+  its own file so rig-mode.sh (the production EVENT switch) sources only it, never the E2E profile;
+  cg-chain-e2e.sh sources it too. Consumers:
+  - rig-mode EVENT `toggle_burn`: the rig-box `sweep-off` loop stays `obs_burn_targets` only (its
+    `|| rc=$?` fails the switch for strih/stream/imag), and the cg OBS goes through
+    `cg_chain_backstop_sweep_off "$here/obs_burn_filter.py" 60 "$OBS_WS_PASSWORD"` after it. Review
+    round 1 (must-fix): the first cut put the cg OBS row INTO that loop, so a failing sweep of the
+    traveling box (auth, the .201 collision, a stuck burn) aborted `do_event` under `set -e` before
+    the NDI mapping, the EVENT contract and the Discord confirmation.
+  - rig-mode `event_mode_assert`: the fail-closed `sweep-check` loop reads
+    `done < <(obs_burn_targets; cg_chain_backstop_sweep_targets)`, the SAME loop body, so a home cg
+    OBS whose enumeration fails gets the `resolume:__sweep_unreachable__` sentinel and FAILS the
+    EVENT contract (reported in the Discord confirmation), and an away box is never read. The
+    `if sweep_arr=...` / jq `||` shape never aborts. Both sweeps use rig-mode's `OBS_WS_PASSWORD`.
   - the E2E pre-run normalize calls `cg_chain_backstop_sweep_off "$HERE/obs_burn_filter.py"
-    "$OBS_CLEANUP_TIMEOUT"` right after the strih/stream/imag sweep loop, on EVERY run (the leak it
-    clears was left by an EARLIER run, so it is not gated on CG_CHAIN). Loud, never fatal: exit 2 =
-    enumeration failed (the burn stays UNVERIFIED), any other rc = still on / connection failed /
-    timed out — each a WARNING naming the manual `sweep-off` command, never an abort of the
-    camera-chain run (the cg leg is report-only).
+    "$OBS_CLEANUP_TIMEOUT"` right after the strih/stream/imag sweep loop. That region is the
+    ALL_CAMBOX block, so it runs on every gate run, CG_CHAIN or not (the leak it clears was left by
+    an EARLIER run); the password is `CG_CHAIN_OBS_PASSWORD`. Never an abort of the camera-chain
+    run (the cg leg is report-only).
   - the burn-reconcile watchdog still covers strih/stream only (unchanged).
   - Collision caveat (`obs-fleet-list.md`): `resolume.lan` resolves to .201, the address `bridge`
     also used. A false "home" there only sweeps `genlock_burn=false` onto another OBS's inputs
@@ -259,35 +274,56 @@ same scene to cg OBS, queued and NOT awaited.
   whatever transition cg OBS has).
 - **`cg_chain_sp_program_select`:** reads `GET {api}/api/v1/program` (`source` = the playlist id,
   `remote.program_scene` = the scene name the facade answers with; parsed by the pure
-  `cg_chain_program_fields`). Unreadable = NO press (never a mutation without a snapshot); already on
-  the scene = no press and no snapshot; otherwise it writes the `sp-program` snapshot
-  (`{"host","port","scene","source"}`, RUN_ID-keyed) and presses `cg_chain_scene.py facade-program
-  --host <cg host> --port <CG_CHAIN_SP_FACADE_PORT, 4456> --scene <scene>`.
+  `cg_chain_program_fields`). Unreadable = NO press (never a mutation without a snapshot).
+  "On air" is `cg_chain_sp_program_is_playlist`: the scene name AND a POSITIVE playlist source
+  (review round 1). SongPlayer's manual path (`switch_manual`) publishes the scene name with
+  source -1 ("OBS manuál"), so the name alone is never proof a playlist plays.
+  - On air: pressed anyway with NO snapshot. This is SongPlayer's re-kick
+    (`program_on_air.rs` `on_air_changes`: a press of the scene on air plays a playlist paused out of
+    band; `ProgramCore::cut` returns early on the same source), so nothing changes that a restore
+    would undo. A failed re-kick is a WARNING and returns 0 (the program IS on the scene).
+  - Otherwise it writes the `sp-program` snapshot (`{"host","port","scene","source"}`, RUN_ID-keyed)
+    and presses `cg_chain_scene.py facade-program --host <cg host> --port <CG_CHAIN_SP_FACADE_PORT,
+    4456> --scene <scene>`.
 - **The press rides obs_phase2's own client:** `_conn(host, password, port=None)` gained a port
   argument, and `facade-program` uses `_facade_session` → `_conn(..., port)` + `_rpc`, so the
   production-scene guard runs on the facade press too (checked in `main` BEFORE dialing). The facade
   answers the plain obs-websocket 5 JSON handshake `_conn` speaks (no subprotocol = JSON, its
   `negotiate_subprotocol`). Its password, when SongPlayer has one set, is
   `CG_CHAIN_SP_FACADE_PASSWORD` (read by the helper from the environment, never an argv).
-- **Read-back:** BOTH SongPlayer's `remote.program_scene` and cg OBS's program over `:4455`
-  (`obs_phase2.py program-scene`, under `cg_chain_burn_obs_timeout`) must read the cg scene, polled
-  for `CG_CHAIN_PROGRAM_READBACK_S` (5). A mismatch is one loud WARNING naming both reads, and NO
-  burn goes on (the SongPlayer burn is not even sent); the cg recording still starts.
+- **Read-back:** SongPlayer's program must be a playlist on the cg scene
+  (`cg_chain_sp_program_is_playlist`) AND cg OBS's program over `:4455` (`obs_phase2.py
+  program-scene`, under `cg_chain_burn_obs_timeout`) must read the cg scene, polled for
+  `CG_CHAIN_PROGRAM_READBACK_S` (5). A mismatch is one loud WARNING naming both reads and
+  SongPlayer's source, and NO burn goes on (the SongPlayer burn is not even sent); the cg recording
+  still starts.
 - **Restore:** `cg_chain_sp_program_restore` runs in `cg_chain_after_stoprecord` and
   `cg_chain_cleanup` AFTER the strih restore and BEFORE the cg OBS `:4455` restore (so cg OBS ends
-  exactly as its own snapshot recorded it, even when SongPlayer's queued mirror lands first). No
-  snapshot = nothing; SongPlayer already back on the snapshotted scene = no press; success retires the
-  snapshot (`.restored`, the cleanup pass is a no-op); a failed press keeps it and names the manual
-  `facade-program` command; a snapshot with NO scene (nothing on SP-program, or a playlist whose
-  catalog names no scene) cannot be pressed through the facade: a WARNING naming the dashboard cut
-  (`POST {api}/api/v1/program/cut {"source":N}`), snapshot kept.
+  exactly as its own snapshot recorded it, even when SongPlayer's queued mirror lands first).
+  - The snapshot retires (`.restored`, the cleanup pass is a no-op) ONLY once the program READS BACK
+    on it (`_cg_chain_sp_program_back`: the scene when recorded, the source when recorded, polled).
+    Review round 1: the facade answers OK even for a press it kept (its session maps
+    `Switched::Kept` to an OK reply), so the answer alone proves nothing.
+  - No snapshot = nothing; already back = no press, retired.
+  - A snapshot WITH a scene: pressed through the facade, then read back.
+  - A snapshot with no scene but a source (a scene-less playlist, or the NDI input -1): SongPlayer's
+    dashboard cut by source, `POST {api}/api/v1/program/cut {"source":N}` (the same `switch_source`
+    path; its HTTP code logged through `cg_chain_songplayer_post`), then read back on the source.
+  - Nothing on SP-program before the run (no scene, no source): nothing can put that back, a named
+    WARNING, snapshot kept.
+  - Any failed or unconfirmed restore keeps the snapshot and names the manual command. A snapshot
+    that cannot be renamed is a WARNING (`_cg_chain_retire_snapshot`), never a `set -e` abort.
 - **Residual:** if cg OBS and SongPlayer showed DIFFERENT scenes before the run (a manual cg scene
   while SongPlayer's program was a playlist), the final cg OBS program is whichever of the queued
   facade mirror and the `:4455` restore lands last. Normally the mirror (queued at once) lands first.
+- Code layout (review round 1 split the 1180-line lib): `scripts/lib/cg-chain-songplayer.sh` holds
+  the SongPlayer burn API, the polls and this facade section; `scripts/lib/cg-obs-burn-backstop.sh`
+  the backstop; `scripts/lib/cg-chain-e2e.sh` (the rest) sources both. The uint knobs refuse more
+  than 6 digits (a longer value wraps bash's arithmetic).
 - Tier-0: `tests/python/test_cg_chain_measure_1302.py` (fake curl serving the burn/health/program
-  APIs, fake `cg_chain_scene.py` that moves SongPlayer's program on a press, fake
-  `obs_phase2.py program-scene`, the real lib under `set -euo pipefail`; also the burn poll, the
-  backstop and the rig-mode EVENT sweeps with a fake `python3`); the helper's `facade-program` in
+  APIs and the dashboard cut, fake `cg_chain_scene.py` that moves SongPlayer's program on a press,
+  fake `obs_phase2.py program-scene`, the real lib under `set -euo pipefail`; also the burn poll, the
+  backstop and the rig-mode EVENT sweeps with a fake `python3` that can fail one host); the helper's `facade-program` in
   `tests/python/test_cg_chain_scene_1302.py`; the facade press's production-scene refusal in
   `tests/python/test_scene_select_guard_clients_1380.py`; the `_conn` port in
   `tests/python/test_obs_phase2_conn_event_subscriptions.py`.
