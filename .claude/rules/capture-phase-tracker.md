@@ -83,13 +83,14 @@ ONE missing frame per crossing.
     by `CLOCK_STEP_NS` (1 ms) or more between two stamp-driven frames, the slot chooser re-anchors
     on the new floor (a `Start`), so `crossings=` counts only the camera drift, and a step that
     lands the phase just past an edge never leaves the stamp one slot behind the realtime floor
-    (`a_realtime_step_landing_inside_the_hysteresis_follows_the_new_floor`, review round 3). The
-    offset is re-sampled every 100 captured frames: at 60 fps (~1.7 s) a slewing clock (at most
-    500 ppm) moves it by at most ~0.83 ms, so a slew never reads as a step. At 30 fps (3.3 s) a
-    full-rate slew, or a preempted offset read, can reach 1 ms; that costs only a re-anchor on the
-    current floor, i.e. one duplicate or missing slot at most when the instant sits within the
-    hysteresis of an edge. The gate still sees a real step as a slot jump and fills or skips it
-    like the poll-time gate.
+    (`a_realtime_step_landing_inside_the_hysteresis_follows_the_new_floor`, review round 3). A
+    slewing clock never trips it: dantesync's `adjtimex` frequency and offset slews move
+    `CLOCK_MONOTONIC` and `CLOCK_REALTIME` together, so the offset (re-sampled every 100 captured
+    frames, `main.rs` `sample_mono_to_real_offset_100ns`) moves only on a step or when one of its
+    two clock reads is preempted. A preempted read of 1 ms or more re-anchors twice (the spike, and
+    its return at the next re-sample), each at most one duplicate or missing slot when the instant
+    sits within the hysteresis of an edge, never counted as a crossing (review round 4). The gate
+    still sees a real step as a slot jump and fills or skips it like the poll-time gate.
 - **The gate** (`DecimationGate::note_stamp_slot` before the unchanged `poll` call) decides on the
   slot alone via the pure `dupe_decimation::stamp_slot_action`:
 
