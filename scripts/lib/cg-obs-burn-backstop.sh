@@ -45,16 +45,19 @@ cg_chain_backstop_sweep_targets() {
   return 0
 }
 
-# The E2E pre-run cg OBS sweep: clear genlock_burn on EVERY ndi input of the cg OBS while it is home
-# (obs_burn_filter.py sweep-off). $1=obs_burn_filter.py $2=per-call timeout (s). Loud, never fatal:
-# the camera-chain E2E never aborts on the report-only cg leg, so a sweep that fails is a WARNING
-# naming the manual command -- exit 2 = the input enumeration failed (a leaked burn stays
-# UNVERIFIED, the fail-closed wording of the burn-enumeration rule), anything else = a burn still
-# renders, the connection failed, or the call timed out. CG_CHAIN_OBS_PASSWORD is passed when set.
-# ALWAYS returns 0.
+# The cg OBS sweep-off: clear genlock_burn on EVERY ndi input of the cg OBS while it is home
+# (obs_burn_filter.py sweep-off). $1=obs_burn_filter.py $2=per-call timeout (s) $3=the OBS-WS
+# password (optional; default CG_CHAIN_OBS_PASSWORD -- rig-mode passes its own OBS_WS_PASSWORD, the
+# one its fail-closed sweep-check of the same box uses; passed only when non-empty). Loud, never
+# fatal, for BOTH callers: the E2E pre-run normalize never aborts the camera-chain run on the
+# report-only cg leg, and rig-mode EVENT never lets the traveling box abort the owner's
+# pre-broadcast switch (its contract's fail-closed sweep-check carries the verdict instead). So a
+# sweep that fails is a WARNING naming the manual command -- exit 2 = the input enumeration failed
+# (a leaked burn stays UNVERIFIED, the fail-closed wording of the burn-enumeration rule), anything
+# else = a burn still renders, the connection failed, or the call timed out. ALWAYS returns 0.
 cg_chain_backstop_sweep_off() {
-  local bf="$1" tmo="${2:-30}" host box out rc pw=()
-  if [ -n "${CG_CHAIN_OBS_PASSWORD:-}" ]; then pw=(--password "$CG_CHAIN_OBS_PASSWORD"); fi
+  local bf="$1" tmo="${2:-30}" pass="${3:-${CG_CHAIN_OBS_PASSWORD:-}}" host box out rc pw=()
+  if [ -n "$pass" ]; then pw=(--password "$pass"); fi
   while IFS='|' read -r host _ box; do
     [ -n "$host" ] || continue
     out="$(timeout "$tmo" python3 "$bf" sweep-off --host "$host" ${pw[@]+"${pw[@]}"} 2>&1)" && rc=0 || rc=$?

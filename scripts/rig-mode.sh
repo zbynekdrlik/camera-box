@@ -945,8 +945,9 @@ toggle_burn() {
   # switch (the 2026-08-07 pre-broadcast incident; guard class issue 246/844). Route it through the
   # shared exhaustive enumerator (obs_burn_filter.py sweep-off — GetInputList over WS, never a
   # static/CAMERA_ACTIVE_SET-derived list). ON (TEST) stays pinned-only by design. issue 1302: the
-  # sweep also covers the cg OBS (RESOLUME-SNV) while it is home -- a cg hop burn a killed CG_CHAIN
-  # run left on survives in its scene collection (cg_chain_backstop_sweep_targets, the cg-chain lib).
+  # cg OBS (RESOLUME-SNV) is swept too while it is home -- a cg hop burn a killed CG_CHAIN run left
+  # on survives in its scene collection -- through the backstop lib's WARN-only sweep, so the
+  # traveling box never aborts this switch; the EVENT contract's sweep-check carries its verdict.
   if [ "$mode" = "event" ]; then
     local _sbip _sbbox
     while IFS='|' read -r _sbip _ _sbbox; do
@@ -958,7 +959,8 @@ toggle_burn() {
       fi
       python3 "$here/obs_burn_filter.py" sweep-off --host "$_sbip" --password "$OBS_WS_PASSWORD" \
         2>&1 | sed "s/^/    [${_sbbox} burn-sweep] /" || rc=$?
-    done < <(obs_burn_targets; cg_chain_backstop_sweep_targets)
+    done < <(obs_burn_targets)
+    cg_chain_backstop_sweep_off "$here/obs_burn_filter.py" 60 "$OBS_WS_PASSWORD"
   fi
   return $rc
 }

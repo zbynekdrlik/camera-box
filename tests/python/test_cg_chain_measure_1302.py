@@ -425,7 +425,7 @@ def test_the_program_read_back_polls_until_the_mirror_lands(tmp_path):
         tmp_path, 'if cg_chain_program_readback "$HOST" "$PY"; then echo MATCH; fi',
         env={"CG_CHAIN_PROGRAM_READBACK_S": "2", "FAKE_CG_LAG_FILE": str(tmp_path / "lag")})
     assert rc == 0, err
-    assert "MATCH" in out and "programs read back: SongPlayer 'sp-fast' + cg OBS" in out, out + err
+    assert "MATCH" in out and "programs read back: SongPlayer 'sp-fast' (source 7) + cg OBS" in out, out + err
     assert sum(c.startswith("obs_phase2.py program-scene") for c in calls) == 2, calls
 
 

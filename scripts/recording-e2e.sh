@@ -1494,9 +1494,10 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/obs_burn_filter.py" sweep-off --host "$_nsip" 2>&1 \
       | sed "s/^/    [normalize sweep] /" || true
   done
-  # issue 1302: the same sweep on the cg OBS (RESOLUME-SNV) while it is home, on EVERY run -- a cg hop
-  # burn an earlier, killed CG_CHAIN run left on survives in its scene collection. Away = one SKIP
-  # line; a failed sweep is a loud WARNING, never an abort of the camera-chain run (cg-chain lib).
+  # issue 1302: the same sweep on the cg OBS (RESOLUME-SNV) while it is home, on every run of this
+  # sweep (the ALL_CAMBOX gate), CG_CHAIN or not -- a cg hop burn an earlier, killed CG_CHAIN run left
+  # on survives in its scene collection. Away = one SKIP line; a failed sweep is a loud WARNING, never
+  # an abort of the camera-chain run (scripts/lib/cg-obs-burn-backstop.sh).
   cg_chain_backstop_sweep_off "$HERE/obs_burn_filter.py" "$OBS_CLEANUP_TIMEOUT"
   # issue 1271: the read-only stray recording/streaming check that USED to live here now runs as the
   # FIRST [0/8] step (stray_session_check_assert, right after the reachability preflight), BEFORE the
@@ -4554,13 +4555,14 @@ CAPTURE_RATE_WINDOW_START_EPOCH="$(date +%s)"
 # its facade, both read back, THEN the SongPlayer burn ON (SongPlayer registers a burn OFF when a
 # playlist pipeline spawns), then the cg OBS hop burn (911015) after a verified SongPlayer burn.
 if cg_chain_enabled; then
-  echo "[5/8] #1301 CG_CHAIN=1 — SongPlayer burn ON (verified on its health endpoint) + cg OBS program + StartRecord"
+  echo "[5/8] #1301 CG_CHAIN=1 — cg OBS + SongPlayer program cut (both read back) + SongPlayer burn ON (verified on its health endpoint) + StartRecord"
   if CG_HOST_IP="$(cg_chain_resolve_host)" \
     && cg_chain_record_start "$CG_HOST_IP" "$HERE/obs_phase2.py" "${CG_CHAIN_RECORD_TIMEOUT:-${OBS_CLEANUP_TIMEOUT:-30}}"; then
     CG_RECORDING_STARTED=1
   fi
-  # #1302: no cg recording = nothing will judge the burn, so it must not stay on the LED wall.
-  if [ "$CG_RECORDING_STARTED" != 1 ]; then cg_chain_songplayer_burn off; fi
+  # #1302: no cg recording = nothing will judge the burn, so it must not stay on the LED wall. Sent
+  # only when this run owes one: the burn ON is inside the record start, after the program cuts.
+  if [ "$CG_RECORDING_STARTED" != 1 ] && [ "${CG_SP_BURN_OWED:-0}" = 1 ]; then cg_chain_songplayer_burn off; fi
 fi
 
 # [5b/8] #707 B1 (freeze+jump discriminator, SECOND prong) — arm a lightweight per-cambox TCP-to-

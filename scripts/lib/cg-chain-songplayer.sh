@@ -89,10 +89,11 @@ cg_chain_songplayer_burn_state() {
 # program cut to cg OBS asynchronously, so one read right after a request misses a state that is
 # only late. Every read-back here is a POLL bounded by wall time, never a fixed number of reads.
 
-# A non-negative integer env value $1, else the default $2. Pure.
+# A non-negative integer env value $1 of at most 6 digits (a leading zero is never octal), else the
+# default $2 -- a longer value would wrap bash's 64-bit arithmetic in the budget math. Pure.
 _cg_chain_uint_or() {
   case "${1:-}" in
-    '' | *[!0-9]*) printf '%s' "$2" ;;
+    '' | *[!0-9]* | ???????*) printf '%s' "$2" ;;
     *) printf '%s' "$((10#$1))" ;;
   esac
 }
@@ -157,12 +158,13 @@ cg_chain_http_body_line() {
   printf '%s' "${s:0:200}"
 }
 
-# POST the burn toggle body $1 to $2 and print `<http code><TAB><body line>`. The code is `000`
-# when no HTTP answer came back, and the body line then carries curl's own error. The body is kept
-# for every code (no `-f`): a 404 / 409 says why. ALWAYS returns 0.
-cg_chain_songplayer_burn_post() {
+# POST the JSON body $1 to SongPlayer's $2 (the burn toggle, the dashboard program cut) and print
+# `<http code><TAB><body line>`. The code is `000` when no HTTP answer came back, and the body line
+# then carries curl's own error. The body is kept for every code (no `-f`): a 404 / 409 says why.
+# ALWAYS returns 0.
+cg_chain_songplayer_post() {
   local body="$1" url="$2" tmp code line
-  if ! tmp="$(mktemp "${TMPDIR:-/tmp}/cg-sp-burn.XXXXXX")"; then
+  if ! tmp="$(mktemp "${TMPDIR:-/tmp}/cg-sp-post.XXXXXX")"; then
     printf '000\tcould not create a temp file for the answer'
     return 0
   fi
@@ -201,7 +203,9 @@ cg_chain_burn_refusal_reason() {
 # A verified toggle prints one VERIFIED line. An ON that never reads back true is a loud WARNING
 # (the cg_chain section then proves nothing). An OFF that never reads back false is a loud LEAK line
 # naming the manual off command — the burn must NEVER stay on the LED wall; an OFF answered 404
-# owes nothing (no pipeline has that output, so no burn is painted anywhere). ALWAYS returns 0
+# owes nothing (no pipeline has that output, so no burn is painted anywhere) unless its one /health
+# read still says `true` (SongPlayer's registry also answers NotFound on a poisoned lock): that is
+# a LEAK. ALWAYS returns 0
 # (never aborts the run or cleanup()).
 cg_chain_songplayer_burn() {
   local action="$1" url body want attempts i tries=0 state=unknown resp code line reason=""
@@ -225,7 +229,7 @@ cg_chain_songplayer_burn() {
   case "$attempts" in '' | *[!0-9]* | 0) attempts=3 ;; esac
   for ((i = 1; i <= attempts; i++)); do
     tries="$i"
-    resp="$(cg_chain_songplayer_burn_post "$body" "$url")"
+    resp="$(cg_chain_songplayer_post "$body" "$url")"
     code="${resp%%$'\t'*}"
     line="${resp#*$'\t'}"
     echo "[cg_chain] SongPlayer burn $action attempt $i: HTTP $code${line:+ $line}"
@@ -249,7 +253,7 @@ cg_chain_songplayer_burn() {
     else
       echo "[cg_chain] WARNING: SongPlayer burn ON not confirmed after $tries attempt(s) (burn_on=$state on $(cg_chain_songplayer_output)) — the cg_chain section will prove nothing this run" >&2
     fi
-  elif [ "$code" = 404 ]; then
+  elif [ "$code" = 404 ] && [ "$state" != true ]; then
     CG_SP_BURN_OWED=0
     echo "[cg_chain] SongPlayer burn off: nothing to turn off — $reason, so no burn is painted on it"
   else
@@ -315,12 +319,44 @@ cg_chain_songplayer_program_read() {
 # The facade session's password is CG_CHAIN_SP_FACADE_PASSWORD, read from the environment by the
 # scene helper itself (never on an argv).
 
+# True iff $1 is a SongPlayer PLAYLIST id: a positive integer. `source` is empty when nothing is
+# selected and -1 for SongPlayer's NDI input "OBS manuál" (PROGRAM_INPUT_ID). Pure.
+cg_chain_is_playlist_source() {
+  [[ "${1:-}" =~ ^[1-9][0-9]{0,17}$ ]]
+}
+
+# True iff SongPlayer's program read $1 (`<scene><TAB><source>`) is a playlist ON AIR in scene $2:
+# the scene name AND a playlist source. SongPlayer's manual path (program_switch switch_manual)
+# publishes the scene name with source -1, so the name alone is never proof a playlist plays. Pure.
+cg_chain_sp_program_is_playlist() {
+  local prog="$1" scene="$2"
+  [ "${prog%%$'\t'*}" = "$scene" ] && cg_chain_is_playlist_source "${prog#*$'\t'}"
+}
+
+# Retire a restored snapshot $1 (renamed `.restored`, so a second cleanup pass is a no-op). A rename
+# that fails is a loud WARNING, never an abort under the caller's `set -e`. ALWAYS returns 0.
+_cg_chain_retire_snapshot() {
+  mv -f -- "$1" "$1.restored" 2>/dev/null \
+    || echo "[cg_chain] WARNING: could not retire the snapshot $1 (the next cleanup pass checks the restore again)" >&2
+  return 0
+}
+
+# The facade press of scene $3 on cg host $1 port $2 (cg_chain_scene.py facade-program via
+# obs_phase2.py path $4, under timeout $5). Returns the helper's status. MUST be called from an `if`.
+_cg_chain_facade_press() {
+  timeout "$5" python3 "$(cg_chain_scene_py "$4")" facade-program --host "$1" --port "$2" \
+    --scene "$3" >/dev/null
+}
+
 # Put SongPlayer's program on the cg scene through the facade. SongPlayer's program is read FIRST
 # and snapshotted (cg_chain_state_file sp-program: host, port, scene, source) before the press; an
-# unreadable program = no press (a mutation is never made without a snapshot to undo it); a program
-# already on the scene = no press and no snapshot (nothing to undo). $1=cg-host $2=obs_phase2.py
-# $3=timeout-secs. Returns 0 when SongPlayer's program is on (or was pressed to) the scene, 1 with a
-# WARNING otherwise. MUST be called from an `if`.
+# unreadable program = no press (a mutation is never made without a snapshot to undo it). A
+# playlist ALREADY on air in the scene (cg_chain_sp_program_is_playlist) is pressed anyway with NO
+# snapshot: SongPlayer's re-kick (program_on_air on_air_changes: a press of the scene on air plays a
+# playlist paused out of band; ProgramCore::cut returns early on the same source), so nothing changes
+# that a restore would undo. $1=cg-host $2=obs_phase2.py $3=timeout-secs. Returns 0 when the press
+# was sent (or a re-kick failed on a program already on the scene, with a WARNING), 1 with a WARNING
+# otherwise. MUST be called from an `if`.
 cg_chain_sp_program_select() {
   local host="$1" py="$2" tmo="${3:-30}" scene port state prog prev_scene prev_source
   scene="$(cg_chain_cg_scene)"
@@ -332,8 +368,12 @@ cg_chain_sp_program_select() {
   fi
   prev_scene="${prog%%$'\t'*}"
   prev_source="${prog#*$'\t'}"
-  if [ "$prev_scene" = "$scene" ]; then
-    echo "[cg_chain] SongPlayer program already on '$scene' (source ${prev_source:-none}) — no facade cut"
+  if cg_chain_sp_program_is_playlist "$prog" "$scene"; then
+    if _cg_chain_facade_press "$host" "$port" "$scene" "$py" "$tmo"; then
+      echo "[cg_chain] SongPlayer program already on air on '$scene' (source $prev_source) — facade re-kick, no snapshot"
+    else
+      echo "[cg_chain] WARNING: SongPlayer facade re-kick of '$scene' failed ($host:$port) — its program is on the scene, but a playlist paused out of band stays paused" >&2
+    fi
     return 0
   fi
   if ! python3 -c '
@@ -350,8 +390,7 @@ os.replace(tmp, path)
     echo "[cg_chain] WARNING: could not write the SongPlayer program snapshot ($state) — not cut through its facade" >&2
     return 1
   fi
-  if timeout "$tmo" python3 "$(cg_chain_scene_py "$py")" facade-program --host "$host" --port "$port" \
-    --scene "$scene" >/dev/null; then
+  if _cg_chain_facade_press "$host" "$port" "$scene" "$py" "$tmo"; then
     echo "[cg_chain] SongPlayer facade ($host:$port) program -> '$scene' OK (was '${prev_scene:-none}', source ${prev_source:-none})"
     return 0
   fi
@@ -359,42 +398,71 @@ os.replace(tmp, path)
   return 1
 }
 
-# Read BOTH programs back after the cuts until they agree with the cg scene: SongPlayer's
-# `remote.program_scene` (GET /api/v1/program) and cg OBS's program scene over :4455
+# Read BOTH programs back after the cuts until they agree with the cg scene: SongPlayer's program
+# (GET /api/v1/program: `remote.program_scene` on the scene AND `source` a playlist id,
+# cg_chain_sp_program_is_playlist) and cg OBS's program scene over :4455
 # (obs_phase2.py program-scene, each call under cg_chain_burn_obs_timeout). Polled every
 # cg_chain_readback_poll_ms for up to cg_chain_program_readback_secs (the facade's mirror to cg OBS
 # is not awaited by SongPlayer). $1=cg-host $2=obs_phase2.py. Returns 0 on a match; 1 with a loud
 # WARNING naming both reads otherwise — the caller keeps the cg burn OFF. MUST be called from an `if`.
 cg_chain_program_readback() {
-  local host="$1" py="$2" scene budget poll start prog sp cg pw=()
+  local host="$1" py="$2" scene budget poll start prog sp spsrc cg pw=()
   scene="$(cg_chain_cg_scene)"
   budget="$(cg_chain_program_readback_secs)"
   poll="$(cg_chain_readback_poll_ms)"
   if [ -n "${CG_CHAIN_OBS_PASSWORD:-}" ]; then pw=(--password "$CG_CHAIN_OBS_PASSWORD"); fi
   start="$(_cg_chain_now_ms)"
   while :; do
-    sp=""
-    if prog="$(cg_chain_songplayer_program_read)"; then sp="${prog%%$'\t'*}"; fi
+    prog="" sp="" spsrc=""
+    if prog="$(cg_chain_songplayer_program_read)"; then
+      sp="${prog%%$'\t'*}"
+      spsrc="${prog#*$'\t'}"
+    fi
     cg="$(timeout "$(cg_chain_burn_obs_timeout)" python3 "$py" program-scene --host "$host" \
       ${pw[@]+"${pw[@]}"} 2>/dev/null | tail -n 1)" || cg=""
-    if [ "$sp" = "$scene" ] && [ "$cg" = "$scene" ]; then
-      echo "[cg_chain] programs read back: SongPlayer '$sp' + cg OBS ($host) '$cg'"
+    if cg_chain_sp_program_is_playlist "$prog" "$scene" && [ "$cg" = "$scene" ]; then
+      echo "[cg_chain] programs read back: SongPlayer '$sp' (source $spsrc) + cg OBS ($host) '$cg'"
       return 0
     fi
     _cg_chain_poll_next "$start" "$budget" "$poll" || break
   done
-  echo "[cg_chain] WARNING: program mismatch after the cut — SongPlayer program '${sp:-unreadable}', cg OBS program '${cg:-unreadable}', want '$scene' — the cg burn stays OFF this run" >&2
+  echo "[cg_chain] WARNING: program mismatch after the cut — SongPlayer program '${sp:-unreadable}' (source ${spsrc:-none}), cg OBS program '${cg:-unreadable}', want '$scene' on a playlist — the cg burn stays OFF this run" >&2
   return 1
 }
 
-# Restore SongPlayer's program from this run's snapshot through the facade and retire the snapshot
-# (renamed `.restored`, so the cleanup() second pass is a no-op). No snapshot = nothing to do; a
-# program already back on the snapshotted scene is not pressed again. A snapshot with no scene
-# (nothing on SP-program, or a playlist whose catalog names no scene) cannot be pressed through the
-# facade: a WARNING naming the dashboard cut that restores it, snapshot kept. A failed press keeps
-# the snapshot and names the manual command. $1=obs_phase2.py $2=timeout-secs. ALWAYS returns 0.
+# True iff SongPlayer's live program is back on the snapshot: scene $1 (when set) and source $2 (when
+# set), polled like the other read-backs (cg_chain_program_readback_secs). Returns 1 when it never
+# reads back. MUST be called from an `if`.
+_cg_chain_sp_program_back() {
+  local scene="$1" source="$2" budget poll start prog
+  budget="$(cg_chain_program_readback_secs)"
+  poll="$(cg_chain_readback_poll_ms)"
+  start="$(_cg_chain_now_ms)"
+  while :; do
+    if prog="$(cg_chain_songplayer_program_read)" \
+      && { [ -z "$scene" ] || [ "${prog%%$'\t'*}" = "$scene" ]; } \
+      && { [ -z "$source" ] || [ "${prog#*$'\t'}" = "$source" ]; }; then
+      return 0
+    fi
+    _cg_chain_poll_next "$start" "$budget" "$poll" || return 1
+  done
+}
+
+# Restore SongPlayer's program from this run's snapshot and retire the snapshot (renamed `.restored`,
+# so the cleanup() second pass is a no-op) only once the program READS BACK on it: the facade answers
+# OK even for a press it kept (its session maps Switched::Kept to an OK reply). No snapshot = nothing
+# to do; a program already back is not pressed again.
+#   - a snapshot with a scene name: pressed through the facade (like the cut), read back on the scene
+#     and, when recorded, the source;
+#   - a snapshot with no scene name but a source (a playlist whose catalog names no scene, or the
+#     NDI input -1): SongPlayer's dashboard cut by source, POST {api}/api/v1/program/cut
+#     {"source":N} (the same switch_source path), its HTTP code logged, read back on the source;
+#   - nothing on SP-program before the run (no scene, no source): nothing can put that back, a
+#     WARNING, snapshot kept.
+# Any restore that fails or never reads back keeps the snapshot and names the manual command.
+# $1=obs_phase2.py $2=timeout-secs. ALWAYS returns 0.
 cg_chain_sp_program_restore() {
-  local py="$1" tmo="${2:-30}" state fields host port scene source prog
+  local py="$1" tmo="${2:-30}" state fields host port scene source cut resp code line
   state="$(cg_chain_state_file sp-program)"
   [ -f "$state" ] || return 0
   if ! fields="$(python3 -c '
@@ -408,21 +476,40 @@ print("\x1f".join([str(d["host"]), str(d["port"]), d.get("scene") or "", "" if s
   fi
   # A unit separator, never a tab: a tab is IFS whitespace, so an empty scene would collapse.
   IFS=$'\x1f' read -r host port scene source <<<"$fields"
+  if [ -z "$scene" ] && [ -z "$source" ]; then
+    echo "[cg_chain] WARNING: nothing was on SongPlayer's program before this run — nothing can put that back, it stays as it is now (snapshot kept at $state)" >&2
+    return 0
+  fi
+  if CG_CHAIN_PROGRAM_READBACK_S=0 _cg_chain_sp_program_back "$scene" "$source"; then
+    _cg_chain_retire_snapshot "$state"
+    echo "[cg_chain] SongPlayer program already back on '${scene:-source $source}'"
+    return 0
+  fi
   if [ -z "$scene" ]; then
-    echo "[cg_chain] WARNING: SongPlayer had no scene on its program before this run (source ${source:-none}) — the facade cannot put it back; restore it from the dashboard: curl -X POST -H 'Content-Type: application/json' -d '{\"source\":${source:-<playlist id>}}' $(cg_chain_songplayer_api_base)/api/v1/program/cut (snapshot kept at $state)" >&2
+    cut="$(cg_chain_songplayer_api_base)/api/v1/program/cut"
+    if ! [[ "$source" =~ ^-?[0-9]{1,18}$ ]]; then
+      echo "[cg_chain] WARNING: SongPlayer program snapshot $state holds no usable source ('$source') — SongPlayer's program NOT restored; check it at $(cg_chain_songplayer_program_url)" >&2
+      return 0
+    fi
+    resp="$(cg_chain_songplayer_post "{\"source\":$source}" "$cut")"
+    code="${resp%%$'\t'*}"
+    line="${resp#*$'\t'}"
+    echo "[cg_chain] SongPlayer program cut -> source $source: HTTP $code${line:+ $line}"
+    if _cg_chain_sp_program_back "" "$source"; then
+      _cg_chain_retire_snapshot "$state"
+      echo "[cg_chain] SongPlayer program restored -> source $source (dashboard cut, HTTP $code)"
+    else
+      echo "[cg_chain] WARNING: SongPlayer program restore by source did not read back (HTTP $code) — snapshot kept at $state (restore by hand: curl -X POST -H 'Content-Type: application/json' -d '{\"source\":$source}' $cut)" >&2
+    fi
     return 0
   fi
-  if prog="$(cg_chain_songplayer_program_read)" && [ "${prog%%$'\t'*}" = "$scene" ]; then
-    mv -f -- "$state" "$state.restored"
-    echo "[cg_chain] SongPlayer program already back on '$scene'"
-    return 0
-  fi
-  if timeout "$tmo" python3 "$(cg_chain_scene_py "$py")" facade-program --host "$host" --port "$port" \
-    --scene "$scene" >/dev/null; then
-    mv -f -- "$state" "$state.restored"
+  if ! _cg_chain_facade_press "$host" "$port" "$scene" "$py" "$tmo"; then
+    echo "[cg_chain] WARNING: SongPlayer program restore through the facade failed — snapshot kept at $state (restore by hand: python3 $(cg_chain_scene_py "$py") facade-program --host $host --port $port --scene '$scene')" >&2
+  elif _cg_chain_sp_program_back "$scene" "$source"; then
+    _cg_chain_retire_snapshot "$state"
     echo "[cg_chain] SongPlayer program restored -> '$scene' (facade $host:$port)"
   else
-    echo "[cg_chain] WARNING: SongPlayer program restore through the facade failed — snapshot kept at $state (restore by hand: python3 $(cg_chain_scene_py "$py") facade-program --host $host --port $port --scene '$scene')" >&2
+    echo "[cg_chain] WARNING: SongPlayer program restore through the facade did not read back on '$scene' (source ${source:-any}) — SongPlayer answered but kept its program; snapshot kept at $state (restore by hand: python3 $(cg_chain_scene_py "$py") facade-program --host $host --port $port --scene '$scene')" >&2
   fi
   return 0
 }

@@ -246,15 +246,16 @@ cg_chain_cg_program_select() {
 }
 
 # Cut cg OBS program to the SongPlayer scene (over :4455, the hard cut), put SongPlayer's own program
-# on it through the facade, read BOTH programs back, and only then turn the SongPlayer burn ON:
-# SongPlayer registers a playlist's burn OFF whenever its pipeline spawns (the flag is never
-# persisted), and a cut can spawn it, so a burn turned on before the cut is not a burn on the cg
-# recording. Then the cg OBS hop burn goes ON — only when the SongPlayer burn was VERIFIED on
-# (CG_SP_BURN_ON=1) AND both programs read back on the scene, otherwise there is nothing for the cg
-# hop to carry — and BEFORE StartRecord, so the cg recording carries it from its first frame; then
-# StartRecord cg OBS over OBS-WS (obs_phase2.py record --host <ip> --action start). A failed
-# StartRecord turns the cg burn straight back OFF (nothing will judge it); the caller turns the
-# SongPlayer burn off. The burn and read-back calls run under cg_chain_burn_obs_timeout, never the
+# on it through the facade, read BOTH programs back, and only then turn the SongPlayer burn ON, as
+# the last SongPlayer step before the cg recording: SongPlayer registers a playlist's burn OFF
+# whenever its pipeline (re)spawns (the flag is never persisted; it pre-creates one pipeline per
+# active playlist at startup, a cut does not spawn one), and a burn with no playlist verified on
+# program has nothing to mark. Then the cg OBS hop burn goes ON — only when the SongPlayer burn was
+# VERIFIED on (CG_SP_BURN_ON=1) AND both programs read back on the scene, otherwise there is nothing
+# for the cg hop to carry — and BEFORE StartRecord, so the cg recording carries it from its first
+# frame; then StartRecord cg OBS over OBS-WS (obs_phase2.py record --host <ip> --action start). A
+# failed StartRecord turns the cg burn straight back OFF (nothing will judge it); the caller turns
+# the SongPlayer burn off. The burn and read-back calls run under cg_chain_burn_obs_timeout, never the
 # record timeout. Args: $1=host-ip $2=path-to-obs_phase2.py $3=timeout-secs. Returns 0 on a started
 # recording (caller then sets CG_RECORDING_STARTED=1 so cleanup() StopRecords this box), 1 on
 # failure. MUST be called from an `if` (the nonzero return is the failure signal, not an abort —
