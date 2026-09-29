@@ -15,7 +15,9 @@
 //! relabel wrappers and the whole pure audio-pairing block) into `tests/c/`'s stub harness, compiles
 //! it under `-Wall -Wextra -Wformat=2 -Werror`, drives relabels (joint and split, +260 ms, +682 ms,
 //! -1.5 s, +2.5 s), a catch-up sender, a stamp leap and a sender restart, and compares the trace with
-//! its truth table. It FAILS LOUDLY when no C compiler is present.
+//! its truth table. The `genlock-audio-step-hold` line each relabel prints is lifted too and checked
+//! value for value (review round 1: the live acceptance reads its step, residual and counters). It
+//! FAILS LOUDLY when no C compiler is present.
 
 use std::fs;
 use std::path::PathBuf;
@@ -88,6 +90,7 @@ fn c_harness() -> String {
         lift_fn(&src, "static inline uint64_t uint64_diff("),
         lift_fn(&src, "static int genlock_audio_step_hold_source("),
         lift_fn(&src, "static bool genlock_audio_relabel_source("),
+        lift_fn(&src, "static void genlock_audio_step_log("),
     ]
     .join("\n");
     let branch = slice_between(
@@ -194,27 +197,43 @@ fn line(what: &str, f: [u8; 8]) -> String {
     )
 }
 
+/// The `genlock-audio-step-hold` line a packet printed.
+fn log(src: &str, fields: &str) -> String {
+    format!("log genlock-audio-step-hold '{src}': {fields} (issue 1381)")
+}
+
 /// The decided behaviour, packet by packet.
 fn truth_table() -> Vec<String> {
     let mut t = Vec::new();
     // a relabel on the receiver's step packet: appended, the timeline continued from the relabelled
-    // stamp (also under the 70 ms smoothing: joint_40ms, one slot), no reset, no hold
-    for name in [
-        "joint_40ms",
-        "joint_260ms",
-        "joint_682ms",
-        "joint_back_1500ms",
-        "joint_2500ms",
+    // stamp (also under the 70 ms smoothing: joint_40ms, one slot), no reset, no hold. Its line
+    // carries the wall step and the landing move -r = N slots - S (released=none, nothing held).
+    for (name, step, residual) in [
+        ("joint_40ms", "+40.000", "-6.7"),
+        ("joint_260ms", "+260.000", "-26.7"),
+        ("joint_682ms", "+682.474", "-15.8"),
+        ("joint_back_1500ms", "-1500.000", "+0.0"),
+        ("joint_2500ms", "+2500.000", "+0.0"),
     ] {
         t.push(format!("== {name}"));
         t.push(line("relabel", [1, 1, 0, 0, 1, 0, 0, 1]));
+        t.push(log(
+            name,
+            &format!(
+                "step_ms={step} held_ms=0.0 released=none residual_ms={residual} holds=0 relabels=1"
+            ),
+        ));
         t.push(line("after", [0, 1, 0, 0, 1, 0, 0, 1]));
     }
     // the split shape: the hold starts on the step packet, the relabel appends and releases it
-    // FOLLOWED (1)
+    // FOLLOWED (1) after one packet, with the landing move -r as its residual
     t.push("== split_682ms".to_string());
     t.push(line("step", [0, 1, 0, 0, 1, 0, 1, 0]));
     t.push(line("relabel", [1, 1, 0, 0, 1, 1, 0, 1]));
+    t.push(log(
+        "split_682ms",
+        "step_ms=+682.474 held_ms=33.3 released=followed residual_ms=-15.8 holds=1 relabels=1",
+    ));
     t.push(line("after", [0, 1, 0, 0, 1, 0, 0, 1]));
     // a catch-up sender: today's path (continuous stamps snap and append, the hold runs)
     t.push("== catchup_682ms".to_string());

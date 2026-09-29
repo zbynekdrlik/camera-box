@@ -37,12 +37,22 @@ static inline void deque_pop_front(struct deque *dq, void *out, size_t n)
 	dq->size -= n;
 }
 
+/* blog: the LOG_DEBUG lines are counted (the stock "exceeded TS_SMOOTHING_THRESHOLD" / "jumped" lines),
+ * the LOG_INFO line of the packet is kept (the genlock-audio-step-hold line under test) */
 static int h_debug_lines;
+static char h_info[512];
+static bool h_info_set;
 __attribute__((format(printf, 2, 3))) static void blog(int level, const char *fmt, ...)
 {
-	(void)level;
-	(void)fmt;
-	h_debug_lines++;
+	if (level == LOG_DEBUG) {
+		h_debug_lines++;
+		return;
+	}
+	va_list ap;
+	va_start(ap, fmt);
+	vsnprintf(h_info, sizeof(h_info), fmt, ap);
+	va_end(ap);
+	h_info_set = true;
 }
 
 struct audio_data {
@@ -90,6 +100,7 @@ struct obs_source {
 	int64_t genlock_audio_step_held_off_ns;
 	uint64_t genlock_audio_step_start_ns;
 	int64_t genlock_audio_step_step_ns;
+	uint32_t genlock_audio_step_holds;
 };
 
 @LIFTED_BLOCK@
@@ -106,6 +117,8 @@ struct h_out {
 	/* the raw-domain timeline continues from THIS packet's own stamp (not a snapped old one) */
 	bool on_raw;
 	int release;
+	/* the packet logged a genlock-audio-step-hold line (kept in h_info) */
+	bool logged;
 };
 
 static struct h_out h_ingest(obs_source_t *source, const struct audio_data *data, int genlock_hold_mode,
@@ -118,6 +131,7 @@ static struct h_out h_ingest(obs_source_t *source, const struct audio_data *data
 	bool push_back = false;
 	bool genlock_timeline_reset = false;
 	const size_t buf_before = source->audio_input_buf[0].size;
+	h_info_set = false;
 	const uint64_t genlock_step_packet_ns = conv_frames_to_time(sample_rate, in.frames);
 @INGEST_BRANCH@
 	struct h_out out = {genlock_relabel,
@@ -125,11 +139,15 @@ static struct h_out h_ingest(obs_source_t *source, const struct audio_data *data
 			    genlock_timeline_reset,
 			    source->audio_input_buf[0].size < buf_before,
 			    source->next_audio_ts_min == data->timestamp + genlock_step_packet_ns,
-			    0};
+			    0,
+			    false};
 	int64_t genlock_off_ns = genlock_off_live_ns;
 	out.release = genlock_audio_step_hold_source(source, genlock_hold_mode == GENLOCK_AUDIO_HOLD_TIMECODE,
 						     genlock_off_live_ns, data->timestamp, genlock_step_packet_ns,
 						     os_time, genlock_timeline_reset, &genlock_off_ns);
+	genlock_audio_step_log(source, out.release, genlock_relabel, genlock_relabel_off_jump_ns, genlock_relabel_move_ns,
+			       genlock_off_live_ns, os_time);
+	out.logged = h_info_set;
 	source->next_audio_sys_ts_min = source->next_audio_ts_min + source->timing_adjust;
 	if (push_back && source->audio_ts) {
 		for (size_t i = 0; i < MAX_AUDIO_CHANNELS; i++)
@@ -186,6 +204,8 @@ static void h_print(const char *what, struct h_out o)
 	printf("%s relabel=%d push=%d reset=%d dropped=%d on_raw=%d release=%d active=%d relabels=%u\n", what,
 	       o.relabel ? 1 : 0, o.push_back ? 1 : 0, o.reset ? 1 : 0, o.dropped ? 1 : 0, o.on_raw ? 1 : 0,
 	       o.release, h_src.genlock_audio_step_active ? 1 : 0, h_src.genlock_audio_relabels);
+	if (o.logged)
+		printf("log %s\n", h_info);
 }
 
 /* steady packets; each must append (the source's very first packet places, as in OBS) */
@@ -194,7 +214,7 @@ static void h_steady(int n)
 	for (int i = 0; i < n; i++) {
 		const bool first = h_k == 0;
 		struct h_out o = h_packet();
-		if (o.relabel || o.reset || o.dropped || !o.on_raw || o.release || o.push_back == first)
+		if (o.relabel || o.reset || o.dropped || !o.on_raw || o.release || o.logged || o.push_back == first)
 			h_print("STEADY-BROKEN", o);
 	}
 }

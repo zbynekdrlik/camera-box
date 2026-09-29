@@ -694,6 +694,12 @@ fn a_relabelling_sender_is_appended_and_its_remainder_repaid_1381() {
                  back within ±{AV_BOUND_MS} ms of its true landing within {settle_s:.1} s (booked: \
                  {booked}): {r:?}"
             );
+            // review round 1: a joint relabel's one short stamp advance (dur − r) never reads as a
+            // rate -- the timecode ASRC's estimate stays on the correct sender's 0 ppm
+            assert!(
+                r.est_max_ppm <= RATE_BOUND_PPM,
+                "issue 1381: {case:?}: the relabel must not move the rate estimate: {r:?}"
+            );
         }
     }
 }
@@ -729,8 +735,10 @@ fn without_the_relabel_the_step_splices_or_resets_the_buffer_1381() {
 #[test]
 fn a_sender_that_catches_up_or_pauses_takes_todays_path_byte_for_byte_1381() {
     // the relabel is recognised only when the stamps jumped WITH the wall: a catch-up burst after a
-    // forward step, a pause after a backward one, a sender that never follows and a steady feed run
-    // exactly the path before it -- every landing, every append/placement, every servo input.
+    // forward step, a pause after a backward one, a sender that never follows and a steady feed are
+    // never read as one, so the bench's ingest runs exactly its path without the relabel -- every
+    // landing, every append/placement, every servo input. (This proves no false relabel on the
+    // model; the shipped C branch is pinned by the lift harness tests/genlock_audio_relabel_ingest_1381.rs.)
     let mut cases = vec![StepCase {
         wall_ns: 0,
         lag_ns: 0,
