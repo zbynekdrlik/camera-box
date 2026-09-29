@@ -615,9 +615,24 @@ EXPORT void asrc_compensator_set_timecode(struct asrc_compensator *c, bool timec
  * packet is owed as a loss = stretch, a late one as a duplicate = compress), capped at
  * +/-ASRC_STEP_RECOVER_MAX_MS, the setpoint moving with it, and paid at ASRC_STEP_RECOVER_PPM by the
  * next compensate calls. Inert outside timecode mode and before the setpoint is captured. Mirror of
- * src/asrc_bench.rs RealtimeAsrcCompensator::observe_placement. */
+ * src/asrc_bench.rs RealtimeAsrcCompensator::observe_placement.
+ * camera-box issue 1381 (design 5882391108, piece 1): a PLACED packet also starts the level loop
+ * afresh -- the smoothed error, the restore, the sustained-arm count and the open window's readings
+ * were measured on a timeline the placement replaced; its own jump is measured against the fresh
+ * setpoint and the smoothed error is re-seeded to its error against the resulting setpoint. The stale
+ * EMA of a 682 ms wall step was otherwise re-booked as a phantom after every placement (the 29.9.2026
+ * cg OBS sawtooth). */
 EXPORT void asrc_compensator_observe_placement(struct asrc_compensator *c, double place_err_ms, double packet_ms,
 					       bool placed);
+
+/* camera-box issue 1381 (design 5882391108, piece 3): the BACKSTOP, asked by the ingest BEFORE a
+ * timecode packet lands: would appending it (placement error place_err_ms, the owed slew included)
+ * book a jump the owed cap cannot hold (|owed - jump| > ASRC_STEP_RECOVER_MAX_MS)? Then the ingest
+ * PLACES it at its stamp instead -- ONE placement, counted in place_jump_count -- and its
+ * asrc_compensator_observe_placement(placed) drops what is owed and re-seeds the level loop, never a
+ * partial booking whose excess leaks into the smoothed error. Inert outside timecode mode and before the
+ * capture. Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::place_beyond_cap. */
+EXPORT bool asrc_compensator_place_beyond_cap(struct asrc_compensator *c, double place_err_ms, double packet_ms);
 
 /* camera-box issue 1367: read and clear the recovery rate (ppm, servo sign) the last compensate call
  * paid. In timecode mode the servo runs in the ingest AFTER the packet was resampled, so the NEXT

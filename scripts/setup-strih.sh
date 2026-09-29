@@ -70,6 +70,8 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 . "${HERE}/lib/bundle-state-files.sh"   # issue 1386: the ONE declared :8899 server file set (step 9; with setup-imag.sh)
 # shellcheck source=scripts/lib/strih-dantesync.sh
 . "${HERE}/lib/strih-dantesync.sh"   # issue 1372: step 2 restarts dantesync only on a real change
+# shellcheck source=scripts/lib/strih-nic-driver.sh
+. "${HERE}/lib/strih-nic-driver.sh"   # issue 1391: step 1b, the rig NIC's out-of-tree driver via DKMS
 
 # --- issue 1361: select + load the box facts BEFORE the source-guard, so a sourced setup (the unit
 # tests) sees exactly the facts the real run uses. Any invalid / TODO_OWNER fact refuses here.
@@ -97,8 +99,23 @@ echo -e "${GREEN}=== ${BOX_NAME} setup (issue 1317 / 1361): Linux strih cutter, 
 # ---------------------------------------------------------------------------------------------
 step 1 "Static IP (NetworkManager) + hostname $(strih_lx_hostname)"
 command -v nmcli >/dev/null 2>&1 || fail "nmcli required (desktop Ubuntu NetworkManager)"
-echo "  (operator: assign ${STATIC_IP}/23 to the rig NIC via nmcli; recorded here as the target)"
+echo "  (operator: assign ${STATIC_IP}/23 to the rig NIC via nmcli, pin the profile with connection.interface-name <rig NIC> and set ethtool.ring-rx 4096 -- recorded here as the target; verify-strih item 36 grades the pinning)"
 hostnamectl set-hostname "$(strih_lx_hostname)" 2>/dev/null || warn "  could not set hostname (non-fatal)"
+
+# ---------------------------------------------------------------------------------------------
+# issue 1391: the rig NIC's out-of-tree driver (the 5 GbE RTL8157 has no in-tree driver on the 7.0 kernels)
+# from the pinned vendor/ source through DKMS, so every kernel gets it (scripts/lib/strih-nic-driver.sh).
+# Idempotent (a NOOP plan changes nothing); it never reloads the module live -- that would drop the rig
+# NIC, this ssh session and dantesync's PTP -- the DKMS module loads at the next boot.
+# A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
+NIC_OOT="$(strih_lx_nic_oot_driver)"
+step "1b" "Rig NIC out-of-tree driver (${NIC_OOT}) via DKMS -- no live reload"
+if [ "$NIC_OOT" = none ]; then
+  echo "  the box declares no out-of-tree NIC driver (STRIH_NIC_OOT_DRIVER=none)"
+else
+  strih_nic_driver_apply "${HERE}/.." "$NIC_OOT" "$(strih_lx_nic_driver)" \
+    || fail "rig NIC driver ${NIC_OOT}: the DKMS provisioning failed (above) -- the loaded module is untouched"
+fi
 
 # ---------------------------------------------------------------------------------------------
 # issue 1317 (post-M4, 20.9.2026): the strih notebook IS the fleet's ONE NTP master (`strih.lan` ->

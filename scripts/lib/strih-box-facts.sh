@@ -7,9 +7,9 @@
 # scripts/lib/strih-box-facts.sh -- issue 1361: the ONE loader for the per-box strih FACT files
 # (`scripts/strih-boxes/<box>.env`). setup-strih.sh / verify-strih.sh select a box with `--box <name>`
 # (default: STRIH_BOX_DEFAULT) and every box/venue identity value (hostname, IP, NDI prefix, dantesync
-# role + upstream, intercom config, NIC rule, OBS profile/collection, NDI-runtime peer, Companion
-# controller, CG sender, cameras) is read from the loaded file -- one script for every strih box,
-# never a per-box copy (the unified-design ruling, umbrella issue 1357).
+# role + upstream, intercom config, NIC rule + its out-of-tree driver and speeds, OBS profile/collection,
+# NDI-runtime peer, Companion controller, CG sender, cameras) is read from the loaded file -- one script
+# for every strih box, never a per-box copy (the unified-design ruling, umbrella issue 1357).
 #
 # The fact file is PARSED, never sourced/executed: each non-comment line must be `KEY=value`, the value
 # is taken literally and may not carry a shell metacharacter. Loading REFUSES (rc 1, one stderr line per
@@ -33,6 +33,7 @@ strih_box_fact_keys() {
     STRIH_HOSTNAME STRIH_IP STRIH_NDI_PREFIX \
     STRIH_DANTESYNC_ROLE STRIH_DANTESYNC_UPSTREAM \
     STRIH_INTERCOM_CONFIG STRIH_NIC_DRIVER \
+    STRIH_NIC_OOT_DRIVER STRIH_NIC_MIN_USB_MBPS STRIH_NIC_MIN_LINK_MBPS \
     STRIH_OBS_PROFILE STRIH_OBS_COLLECTION \
     STRIH_NDI_RUNTIME_PEER STRIH_COMPANION_HOST STRIH_CG_SENDER STRIH_CAMERAS \
     STRIH_HDMI_OUTPUT_BACKEND
@@ -161,6 +162,15 @@ strih_box_validate() {
   fi
   [[ "${f[STRIH_NIC_DRIVER]}" =~ ^[a-z0-9_]+$ ]] \
     || { echo "strih-box ${name}: STRIH_NIC_DRIVER '${f[STRIH_NIC_DRIVER]}' is not a kernel driver name" >&2; bad=1; }
+  # issue 1391: the rig NIC's out-of-tree driver (`none`, or <package>-<version> vendored under vendor/ and
+  # built through DKMS by setup-strih step 1b) + the lowest USB device / Ethernet link speed verify-strih
+  # item 36 accepts (Mb/s; the USB one is `none` for a NIC that is not a USB device).
+  [[ "${f[STRIH_NIC_OOT_DRIVER]}" =~ ^(none|[a-z0-9][a-z0-9_-]*-[0-9]+(\.[0-9]+)+)$ ]] \
+    || { echo "strih-box ${name}: STRIH_NIC_OOT_DRIVER '${f[STRIH_NIC_OOT_DRIVER]}' must be none or <package>-<version> (a driver vendored under vendor/)" >&2; bad=1; }
+  [[ "${f[STRIH_NIC_MIN_USB_MBPS]}" =~ ^(none|[1-9][0-9]*)$ ]] \
+    || { echo "strih-box ${name}: STRIH_NIC_MIN_USB_MBPS '${f[STRIH_NIC_MIN_USB_MBPS]}' must be a speed in Mb/s (e.g. 10000 = USB 3.2 Gen 2) or none" >&2; bad=1; }
+  [[ "${f[STRIH_NIC_MIN_LINK_MBPS]}" =~ ^[1-9][0-9]*$ ]] \
+    || { echo "strih-box ${name}: STRIH_NIC_MIN_LINK_MBPS '${f[STRIH_NIC_MIN_LINK_MBPS]}' must be a speed in Mb/s (e.g. 5000)" >&2; bad=1; }
   for k in STRIH_OBS_PROFILE STRIH_OBS_COLLECTION; do
     [[ "${f[$k]}" =~ ^[A-Za-z0-9._\ -]+$ ]] \
       || { echo "strih-box ${name}: ${k} '${f[$k]}' may only carry letters, digits, space, . _ -" >&2; bad=1; }
@@ -364,6 +374,16 @@ strih_lx_intercom_config() { strih_box_fact STRIH_INTERCOM_CONFIG; }
 # strih_lx_nic_driver -> the kernel driver of the ONE rig NDI NIC (fact STRIH_NIC_DRIVER, the NIC
 # selection rule shared by the baseline tuning, the boot IRQ oneshot and verify-strih).
 strih_lx_nic_driver() { strih_box_fact STRIH_NIC_DRIVER; }
+
+# strih_lx_nic_oot_driver -> the rig NIC's out-of-tree driver `<package>-<version>` that setup-strih step 1b
+# builds through DKMS from vendor/ (fact STRIH_NIC_OOT_DRIVER), or `none` (issue 1391).
+strih_lx_nic_oot_driver() { strih_box_fact STRIH_NIC_OOT_DRIVER; }
+
+# strih_lx_nic_min_usb_mbps / strih_lx_nic_min_link_mbps -> the lowest rig-NIC USB device speed (`none` for
+# a non-USB NIC) / Ethernet link speed in Mb/s verify-strih item 36 accepts (facts STRIH_NIC_MIN_USB_MBPS /
+# STRIH_NIC_MIN_LINK_MBPS, issue 1391).
+strih_lx_nic_min_usb_mbps() { strih_box_fact STRIH_NIC_MIN_USB_MBPS; }
+strih_lx_nic_min_link_mbps() { strih_box_fact STRIH_NIC_MIN_LINK_MBPS; }
 
 # strih_lx_ndi_runtime_peer -> the cam box the NDI runtime is copied from (fact STRIH_NDI_RUNTIME_PEER).
 strih_lx_ndi_runtime_peer() { strih_box_fact STRIH_NDI_RUNTIME_PEER; }

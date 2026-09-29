@@ -24,6 +24,9 @@ paths:
   - "scripts/lib/obs-downstream-keyer.sh"
   - "tests/fresh_install_gaps_1361.rs"
   - "tests/remoteos_mcp_1361.rs"
+  - "scripts/lib/strih-nic-driver.sh"
+  - "vendor/realtek-r8152/*"
+  - "tests/python/test_strih_nic_driver_1391.py"
 ---
 
 # strih-lx — the Linux notebook replacing the Windows strih PC (issue 1317)
@@ -54,7 +57,8 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   to every output), `STRIH_DANTESYNC_ROLE` (`server` = NTP master, no upstream / `client` + a
   non-empty `STRIH_DANTESYNC_UPSTREAM`), `STRIH_INTERCOM_CONFIG` (`intercom/<file>.toml`),
   `STRIH_NIC_DRIVER` (the rig-NIC selection rule; the IP match is the fallback, `STRIH_NIC_IFACE`
-  stays the run-time override), `STRIH_OBS_PROFILE` / `STRIH_OBS_COLLECTION`,
+  stays the run-time override), `STRIH_NIC_OOT_DRIVER` / `STRIH_NIC_MIN_USB_MBPS` /
+  `STRIH_NIC_MIN_LINK_MBPS` (issue 1391, the section below), `STRIH_OBS_PROFILE` / `STRIH_OBS_COLLECTION`,
   `STRIH_NDI_RUNTIME_PEER`, `STRIH_COMPANION_HOST`, `STRIH_CG_SENDER` (`none` = no CG inputs),
   `STRIH_CAMERAS` (space-separated numbers). **Run-time facts stay derived on the box** — PL1 watts,
   the CPU plan, the NIC interface name.
@@ -110,7 +114,8 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   `STRIH_LX_IP=10.77.9.202`. Any intentional change to one of those outputs must regenerate the golden
   in the SAME commit and say why — a drift there is a behaviour change on the live strih.
 - **Owner questions for strih PP** = the `TODO_OWNER` lines in `strih-pp.env`. `STRIH_NIC_DRIVER` is
-  read off the notebook on arrival (`readlink /sys/class/net/<if>/device/driver`), not asked.
+  read off the notebook on arrival (`readlink /sys/class/net/<if>/device/driver`), not asked; so are
+  the three NIC facts of issue 1391 (`lsusb` for the adapter, the switch port for the link speed).
 
 ## The parallel-run contract (why the namespacing + the client-clock matter)
 
@@ -228,7 +233,8 @@ is byte-identical to the provisioned unit for the box's role, no drop-in overrid
 process runs its ExecStart (no readable process = not graded there; items 6/6b grade liveness). A drift
 is caught THERE, never by a blind restart on the next deploy; a kept-running daemon on a matching unit
 passes. The pytest runs the item's real text under `set -euo pipefail` with only its unit path moved.
-verify-strih.sh is at ~997 of its 1000-line budget, so the next item there needs a lib.
+verify-strih.sh is at 1002 lines, just over its ~1000-line budget (item 36, issue 1391, is a
+two-line call into its lib), so the next item there needs a split of the file, not only a lib.
 
 **Before the first strih-lx deploy of this change, read the master's command line** (read-only, on the
 box): `tr '\0' ' ' < /proc/$(systemctl show -p MainPID --value dantesync)/cmdline | sed 's/ *$//'` must
@@ -1002,6 +1008,88 @@ remains only as a fall-back, and any unresolved step still fails LOUD (a diagnos
 never a silent wrong placement). `STRIH_NIC_IFACE` still overrides everything. UNVERIFIED until the
 first live boot on strih-lx: re-confirm the oneshot resolved cleanly (the supervisor's live apply +
 `verify-strih.sh` item 16).
+
+## The rig NIC's out-of-tree driver via DKMS + verify item 36 (issue 1391)
+
+Since 29.9.2026 the strih-lx rig NIC is a Ubiquiti UACC-Adapter-RJ45-USBC-5GE = **Realtek RTL8157**
+(USB `0bda:8157`) into a MikroTik S+RJ10 (5GBASE-T, issue 1242). The in-tree `r8152` of the 7.0 kernels
+has no `0bda:8157` id (checked with `modinfo r8152` on dev1 7.0.0-30: aliases stop at 8156, and it has
+no version field), so the Realtek out-of-tree driver is required. It was first copied by hand as a plain
+module to `/lib/modules/<kernel>/updates/r8152.ko`, which the next kernel would have booted without.
+
+- **The source** is vendored at `vendor/realtek-r8152/`: the six Realtek files of v2.21.4 (2025/10/28),
+  byte-identical to the release, no dev1 build artifact, plus camera-box's own `dkms.conf`
+  (`realtek-r8152` / `2.21.4` / module `r8152` / `/updates/dkms` / `AUTOINSTALL=yes`, DKMS's default
+  make command, so the Realtek Makefile's own rmmod+modprobe install target never runs) and a
+  `SHA256SUMS` over all seven. The genlock deploy archives this directory with `scripts/ systemd/
+  intercom/` (`scripts/lib/strih-lx-deploy.sh`), so setup-strih finds it on the box.
+- **Box facts** (loader-validated): `STRIH_NIC_OOT_DRIVER` = `<package>-<version>` of a driver vendored
+  under `vendor/`, or `none`; `STRIH_NIC_MIN_USB_MBPS` = the lowest USB device speed (Mb/s, `none` for a
+  non-USB NIC); `STRIH_NIC_MIN_LINK_MBPS` = the lowest Ethernet link speed. strih-lx:
+  `realtek-r8152-2.21.4` / `10000` / `5000`; strih-pp: `TODO_OWNER`. The lib refuses a fact version
+  the tree does not vendor, and a `STRIH_NIC_DRIVER` that is not the vendored module.
+- **setup-strih step `1b`** (`strih_nic_driver_apply` in `scripts/lib/strih-nic-driver.sh`) runs the
+  PURE planner `strih_nic_driver_plan` over `dkms status`, `modinfo -k <kernel> -F version r8152` and the
+  plain-copy versions: `NOOP` (installed in DKMS for the running kernel, modinfo reads 2.21.4, no plain
+  copy left) / `UPGRADE` (a plain copy, or another DKMS version installed for the running kernel) /
+  `INSTALL` / `SKIP` (`none`).
+  A non-NOOP plan: verify `SHA256SUMS`, copy to `/usr/src/realtek-r8152-2.21.4`, `dkms add`, `dkms build`,
+  move the plain copy aside to `/var/lib/camera-box/strih-nic-driver/<kernel>/`, `dkms install`,
+  `depmod -a`. A failed move or install puts every moved copy back (+ depmod). It also installs for every
+  OTHER installed kernel that has headers (`/lib/modules/<k>/build/Makefile`): DKMS `AUTOINSTALL` covers
+  only kernels installed after the add (a kernel WITHOUT headers is skipped; installing its headers runs
+  the DKMS headers hook). After the installs, another DKMS version of the package is removed PER KERNEL
+  (`dkms remove -v <old> -k <k>`) and only where the vendored one is now installed: DKMS deletes a
+  version's module files only on a kernel where that version is ACTIVE, so there the remove just
+  unbuilds the old one. On a kernel the vendored one is not installed on (no headers), the old version
+  is KEPT with a WARNING naming the kernel (a `--all` would delete the only driver that kernel has);
+  that does not change the running kernel's plan. A failed install stops before any removal. As
+  `dkms install` copies over the active old module before its own depmod, and DKMS uninstalls the new
+  one when that depmod fails, a failed install re-installs the previously active version (still built)
+  and reads the version back. Then the udev rule (taken only from a
+  tree that verifies, installed when it differs, `udevadm control --reload-rules`, never a `trigger`),
+  and a re-plan that must read NOOP. Missing `dkms` / headers are apt-installed first (via
+  `obs_box_apt_update`); headers still missing after that stop the step before any DKMS call.
+- **Why move the plain copy BEFORE `dkms install`:** DKMS 3.x `check_version_sanity` compares the new
+  module with the FIRST same-named module `find` returns in the kernel's module tree (it reads one line,
+  so its "multiple modules" skip never fires). A same-version hand copy found first makes `dkms install`
+  refuse ("already installed at version ..." then "Installation aborted"). And `do_install` moves the
+  module it replaces (`extra/`, `updates/`, the dest dir, else the single in-tree copy) into its own
+  `original_module/` store, restored on a later `dkms remove`, so the hand copy could come back. A plain
+  copy of any OTHER version refuses before anything is built (an unknown hand install is named, never
+  guessed).
+- **No live reload, ever.** `modprobe -r r8152` drops the rig NIC, the ssh session running setup and
+  dantesync's PTP (dantesync#112). The step prints `reload pending: next boot` with the loaded version,
+  like the NVIDIA DKMS path of baseline step 11. No initramfs regeneration: dev1's MODULES=most
+  initramfs does carry the in-tree `r8152`, but that copy has no 8157 id and never binds the adapter;
+  `cdc_ncm` may bind first in the initramfs, then the rootfs udev rule selects configuration 1 and the
+  DKMS `r8152` binds.
+- **The USB-C orientation finding (29.9.2026).** The laptop has ONE USB-C port, sold as 10 Gb/s.
+  Plugged one way round the adapter trained at **Gen 1 (5000)**, and at the 5 GbE link it lost ~240
+  packets/s (`rx_missed`, 0.23 %) and every strih camera underran ~3 frames/s. Flipped 180 degrees it
+  trained at **10000** and lost none over 20 s at 123 k packets/s. A USB-A port is 5 Gb/s only.
+- **verify-strih item 36** (`strih_nic_grade_report` / `strih_nic_grade_rows`, placed before item 35):
+  the loaded version from `/sys/module/r8152/version`; `dkms status` installed for the running kernel;
+  the rig NIC (resolved by `strih_lx_rig_nic`) USB DEVICE `speed` found through
+  `/sys/class/net/<nic>/device/..` (never a hard-coded `2-3`) >= `STRIH_NIC_MIN_USB_MBPS`, whose FAIL
+  names the fix ("flip it 180 degrees / use the USB-C port, USB-A is 5 Gb/s"); the Ethernet speed
+  `/sys/class/net/<nic>/speed` at least `STRIH_NIC_MIN_LINK_MBPS`; and the NetworkManager connection carrying `STRIH_IP` pinned with
+  `connection.interface-name` = the rig NIC. An unreadable speed (`-1` on a down link, empty, missing)
+  FAILs, never passes. A connection carrying the IP that is unpinned, or pinned to another PRESENT
+  interface, FAILs; one pinned to an absent interface (the replaced 2.5 GbE adapter) is dormant and
+  ignored. `nmcli -g` is called once per property, so no value is split on a separator. A grader that
+  prints no row is a FAIL.
+- **NM stays operator-recorded.** Step 1 never mutates NetworkManager over the ssh link it runs on:
+  the pinning and `ethtool.ring-rx 4096` are in its operator note, and item 36 grades the pinning.
+  `ring-rx` is recorded only, not graded (no evidence yet that it matters at Gen 2).
+- **Tests** (`tests/python/test_strih_nic_driver_1391.py`, Tier-0 pytest): the vendored tree, the facts,
+  the planner table over both `dkms status` shapes, the apply run through the path seams
+  (`STRIH_NIC_DRV_KERNEL` / `_MODULES_ROOT` / `_SRC_ROOT` / `_UDEV_DIR` / `_BACKUP_DIR` / `_SYSROOT`) with a
+  fake `dkms` state machine on PATH and a `modprobe`/`rmmod` that log FORBIDDEN, and item 36 over a fake
+  sysfs tree + fake `nmcli`/`dkms`.
+- **Live apply (supervisor, after merge):** run setup-strih on strih-lx (the plan reads UPGRADE), then
+  `verify-strih.sh` (item 36 passes before the reboot: the loaded plain copy is 2.21.4). After the next
+  boot, read `/sys/module/r8152/version` + `modinfo -n r8152` (must be under `updates/dkms`).
 
 ## Follow-ups (not done in the preparation lane)
 

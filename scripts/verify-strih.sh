@@ -20,6 +20,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${HERE}/lib/strih-provision.sh"
 # shellcheck source=scripts/lib/strih-dantesync.sh
 . "${HERE}/lib/strih-dantesync.sh"   # issue 1372: item 6c grades the dantesync unit
+# shellcheck source=scripts/lib/strih-nic-driver.sh
+. "${HERE}/lib/strih-nic-driver.sh"   # issue 1391: item 36 grades the rig NIC driver + its links
 # shellcheck source=scripts/lib/strih-drm-output.sh
 . "${HERE}/lib/strih-drm-output.sh"   # issue 1346: item 4c grades the DRM-lease HDMI output
 # shellcheck source=scripts/lib/ndi-discovery.sh
@@ -906,6 +908,9 @@ else
     bad "NIC xhci IRQ affinity FAILED (iface ${IRQ_IFACE}, irqs ${IRQ_NUMS}): each must be a single cpu >= first cpu_atom (${ATOM_FIRST}) AND advancing over 2 s"
   fi
 fi
+
+# 36) rig NIC driver version, USB Gen 2 link, 5G link, NM pinning vs the box facts (issue 1391, strih-nic-driver.sh).
+strih_nic_grade_report /sys "$(ip -o -4 addr show 2>/dev/null || true)" || bad "(nic) the rig-NIC grader printed no row"
 
 # 35) Downstream Keyer OBS plugin (issue 1361): setup-strih.sh step 4c installs the pinned upstream
 #     plugin into the /usr prefix OBS loads; FAIL unless the installed .so has the pinned sha256 (the
