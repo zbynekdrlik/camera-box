@@ -487,7 +487,15 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
 - **The log.** `relabels=` is appended to the `genlock-audio-step-hold` line (after `holds=`). A
   relabel that releases a hold prints that release's line (`released=followed`, residual −r). A
   joint relabel (no hold) prints `released=none held_ms=0.0`, with its own wall step and landing
-  move. The counter is `genlock_audio_relabels` in `obs-internal.h`.
+  move. The counter is `genlock_audio_relabels` in `obs-internal.h` (relabels RECOGNISED: one that
+  still ends up placed — a sync-offset change, `audio_ts == 0`, the backstop — is counted too).
+- **Ordering limit (review round 1).** A relabel is recognised only when the receiver's own step
+  is seen on the same packet as the relabelled stamps or before them, while the skew hold runs
+  (at most 10 s). A sender on the receiver's box shares its clock, so this always holds for
+  SongPlayer on resolume. A sender whose box steps FIRST reads as a stamp jump with no offset jump.
+  Stock OBS places it N slots late (a zero-filled gap), and the receiver's later step is placed
+  once by the hold's sender-first release, overwriting queued audio. This is unchanged by this
+  slice and is a follow-up.
 - **Finding (ticket comment 5900705310): the remainder is repaid at 1000 ppm only at or over half a
   packet.** The timecode ASRC books a jump only at or over its band, max(half a packet, 10 ms) =
   16.7 ms for 1600-sample blocks. A smaller r is left to the level loop alone. Bench: r = 15.8 ms
@@ -496,6 +504,8 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
   holds only from 16.7 ms up; how to repay it faster is a follow-up decision.
 - **Tests.**
   - The pure unit tests in `src/genlock_audio_pairing_step_tests.rs`.
+  - The relabel lines of `genlock-audio-step-hold`, checked value for value in the lift harness
+    (step, held, released, residual, holds, relabels); a sign flip or a zero residual fails.
   - `tests/genlock_audio_step_hold_parity_1381.rs::c_audio_relabel_matches_the_rust_authority_1381`:
     the scalar vectors, plus relabels in both shapes on top of the hold script.
   - `tests/genlock_audio_relabel_ingest_1381.rs`: a lift-and-compile of the shipped place-vs-append
@@ -512,7 +522,11 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
   - the cg OBS program audio has no hole larger than r;
   - `relocks` stays flat;
   - `genlock-audio-step-hold ... released=followed ... relabels=1` (or a `released=none` line for a
-    joint relabel).
+    joint relabel), with `residual_ms` = −r (the harness pins the exact values);
+  - after a booked r (16.7 ms or more), the audit line's `audio_health=` may read
+    PairingOffsetExceeded for about r − 16.7 seconds, while the 1000 ppm repayment brings the
+    measured placement error under half a frame. The LOCK widget (33 ms bound) is not affected.
+    This is expected, not a regression.
 
 ## LOCK-indicator audio DEGRADE term — audible-but-expected-silent (#1303 part 3b/c — DONE)
 

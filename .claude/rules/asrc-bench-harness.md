@@ -927,8 +927,10 @@ re-booked a phantom jump against that stale error: `place_jumps` 0 → 180 → 4
     - NoRelabel places r early (exactly r overwritten, a −r departure). At +2.5 s it drops
       165–175 ms of queued audio and zero-fills 96 ms.
     - A catch-up / pausing sender, one that never follows, and a steady feed give a BYTE-IDENTICAL
-      per-packet trace (landing, append, servo input, release) with and without the relabel.
-    - The rate estimate stays ≈ 0 through a joint relabel's one short block.
+      per-packet trace (landing, append, servo input, release) with and without the relabel. That
+      proves no false relabel on the model; the shipped C branch is pinned by the lift harness.
+    - The rate estimate stays within ±5 ppm through a joint relabel's one short block (asserted;
+      0.000 ppm measured).
 - **Parity** (`tests/asrc_compensator_parity_1367.rs`): `tcs` = the skew, the placement, the
   backstop probes (also on a LOCKED arrival-mode servo). `tcw` = 5 s of skew, the placement, then
   8 s of a 15 ms error that must NOT arm the restore, which proves the sustained count restarts at
