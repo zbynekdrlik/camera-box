@@ -579,7 +579,8 @@ def test_rig_mode_routes_both_event_sweeps_and_only_them_through_the_backstop():
     assert s.count("done < <(obs_burn_targets; cg_chain_backstop_sweep_targets)") == 2, (
         "the EVENT sweep-off loop and the contract's sweep-check loop both include the cg OBS")
     assert s.count("done < <(obs_burn_targets)\n") == 2, "the two pinned program-input loops stay pinned"
-    assert s.index('. "$RIG_MODE_DIR/lib/win-ssh-exec.sh"') < s.index('. "$RIG_MODE_DIR/lib/cg-chain-e2e.sh"')
+    assert '. "$RIG_MODE_DIR/lib/cg-obs-burn-backstop.sh"' in s, "rig-mode sources the backstop lib"
+    assert "cg-chain-e2e.sh" not in s, "rig-mode never pulls in the E2E-only CG_CHAIN profile lib"
     body = s[s.index("event_mode_assert() {"):s.index("\ndo_event() {")]
     check = body.index('obs_burn_filter.py" sweep-check --host "$_asbip"')
     loop_end = body.index("done < <(", check)

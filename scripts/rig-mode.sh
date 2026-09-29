@@ -217,12 +217,12 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/stream-dev-scene.sh
 . "$RIG_MODE_DIR/lib/stream-dev-scene.sh"
 
-# issue 1302 slice 3: the home-gated cg OBS burn backstop -- cg_chain_backstop_sweep_targets adds the
-# traveling cg OBS box (RESOLUME-SNV) to the EVENT burn sweep-off and to the contract's sweep-check
-# while it is home (away = one SKIP line, never a failure). Source-only lib (win-ssh-exec.sh above is
-# already sourced, obs-fleet.sh is lazy-sourced by it), no side effects at source time.
-# shellcheck source=scripts/lib/cg-chain-e2e.sh
-. "$RIG_MODE_DIR/lib/cg-chain-e2e.sh"
+# issue 1302 slice 3: the home-gated cg OBS burn backstop -- the traveling cg OBS box (RESOLUME-SNV)
+# joins the EVENT burn sweep-off and the contract's sweep-check while it is home (away = one SKIP
+# line, never a failure). Source-only lib (it lazy-sources obs-fleet.sh), no side effects at source
+# time; the rest of the CG_CHAIN profile is E2E-only and is not sourced here.
+# shellcheck source=scripts/lib/cg-obs-burn-backstop.sh
+. "$RIG_MODE_DIR/lib/cg-obs-burn-backstop.sh"
 
 # --- pinned constants (overridable via env, but DEFAULTS are the single source of truth) -----------
 CAM_PW="${CAM_PW:-newlevel}"                 # dev-rig LAN root pw (same as the sibling e2e scripts)
