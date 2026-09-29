@@ -50,7 +50,8 @@ use crate::genlock_grid::grid_floor_ns;
 /// measured strih-lx camera arrival lag (stamp to receive, 35–50 ms at p50, 28.9.2026) with a
 /// margin; at the production pin 3 ms the presented age is 66.7 ms = four 60 fps frames. ONE fleet
 /// constant, never a per-box number; the pin stays the one knob. Mirror of the C
-/// `GENLOCK_N2_AGE_BASE_NS` (obs-source.c).
+/// `GENLOCK_N2_AGE_BASE_NS` (obs-source.c). The dev1 Python twin (`scripts/genlock_n2_grid.py`)
+/// reads this line at run time, never a retyped copy (issue 1367 slice D1b).
 pub const GENLOCK_N2_AGE_BASE_NS: u64 = 50_000_000;
 
 /// What an N>=2 tick does ([`n2_select`]). The C mirror encodes it as `GENLOCK_N2_HOLD` 0 /
@@ -513,6 +514,43 @@ mod tests {
             "the pin-only cap overruns every pin whose budget is over the 30-frame floor: \
              {old_overruns}"
         );
+    }
+
+    /// Issue 1367 slice D1b: the ONE present-age table `tests/fixtures/genlock_n2_present_age_1367.tsv`
+    /// is read here AND by the dev1 Python twin (`scripts/genlock_n2_grid.py`,
+    /// `tests/python/test_genlock_n2_grid_twin_1367.py`), so the twin cannot drift from this
+    /// authority silently. Every canvas tick of one second must present the row's age or ONE ns more
+    /// (the per-second grid alternates its slot lengths); a fractional canvas rate ticks on the
+    /// 1970 grid.
+    #[test]
+    fn present_age_table_shared_with_the_python_twin_1367() {
+        use crate::genlock_grid::{integer_fps, NS_PER_SECOND};
+        const TABLE: &str = include_str!("../tests/fixtures/genlock_n2_present_age_1367.tsv");
+        let mut rows = 0;
+        for line in TABLE.lines() {
+            if line.trim().is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let f: Vec<u64> = line
+                .split('\t')
+                .take(4)
+                .map(|v| v.parse().unwrap_or_else(|_| panic!("bad row {line:?}")))
+                .collect();
+            let (pin_ns, canvas, n, age) = (f[0], f[1], f[2] as u32, f[3]);
+            let ticks: Vec<u64> = match integer_fps(canvas) {
+                Some(fps) => (0..fps).map(|j| S + j * NS_PER_SECOND / fps).collect(),
+                None => (0..30).map(|j| (S / canvas + j) * canvas).collect(),
+            };
+            for t in ticks {
+                let got = t - n2_target_stamp_ns(t, pin_ns, canvas, n);
+                assert!(
+                    got == age || got == age + 1,
+                    "row {line:?}: tick {t} presents {got} ns, the table says {age} (+1)"
+                );
+            }
+            rows += 1;
+        }
+        assert!(rows >= 20, "the shared table lost rows: {rows}");
     }
 
     /// The saturation edges: a tick younger than the age targets 0 (never wraps), and a target near

@@ -1,0 +1,108 @@
+{
+  "anchor_src": "NDI cam4",
+  "rows": [
+    {
+      "cap_avg_ms": 15.805,
+      "d_latency_ms": 0,
+      "d_skew_ms": 0.0,
+      "excess_ms": 0.0,
+      "floor_ms": 71.33333333333333,
+      "grabber": {},
+      "latency_ms": 3,
+      "mean_head_skew_ms": 68.33333333333333,
+      "owner": "anchor (fastest)",
+      "samples": 3,
+      "src": "NDI cam4"
+    },
+    {
+      "cap_avg_ms": 15.855,
+      "d_latency_ms": 0,
+      "d_skew_ms": 0.6666666666666714,
+      "excess_ms": 0.6666666666666714,
+      "floor_ms": 72.0,
+      "grabber": {},
+      "latency_ms": 3,
+      "mean_head_skew_ms": 69.0,
+      "owner": "within-noise",
+      "samples": 3,
+      "src": "NDI cam1"
+    },
+    {
+      "cap_avg_ms": 15.803333333333333,
+      "d_latency_ms": 0,
+      "d_skew_ms": 11.0,
+      "excess_ms": 11.0,
+      "floor_ms": 82.33333333333333,
+      "grabber": {},
+      "latency_ms": 3,
+      "mean_head_skew_ms": 79.33333333333333,
+      "owner": "grabber/cambox +11ms",
+      "samples": 3,
+      "src": "NDI cam3"
+    },
+    {
+      "cap_avg_ms": 15.78,
+      "d_latency_ms": 0,
+      "d_skew_ms": 11.0,
+      "excess_ms": 11.0,
+      "floor_ms": 82.33333333333333,
+      "grabber": {},
+      "latency_ms": 3,
+      "mean_head_skew_ms": 79.33333333333333,
+      "owner": "grabber/cambox +11ms",
+      "samples": 3,
+      "src": "NDI cam5"
+    },
+    {
+      "cap_avg_ms": 15.7625,
+      "d_latency_ms": 0,
+      "d_skew_ms": 16.66666666666667,
+      "excess_ms": 16.66666666666667,
+      "floor_ms": 88.0,
+      "grabber": {},
+      "latency_ms": 3,
+      "mean_head_skew_ms": 85.0,
+      "owner": "grabber/cambox +17ms",
+      "samples": 3,
+      "src": "NDI cam6"
+    },
+    {
+      "cap_avg_ms": 15.806666666666667,
+      "d_latency_ms": 0,
+      "d_skew_ms": 16.66666666666667,
+      "excess_ms": 16.66666666666667,
+      "floor_ms": 88.0,
+      "grabber": {},
+      "latency_ms": 3,
+      "mean_head_skew_ms": 85.0,
+      "owner": "grabber/cambox +17ms",
+      "samples": 3,
+      "src": "NDI cam7"
+    },
+    {
+      "cap_avg_ms": 15.7525,
+      "d_latency_ms": 3,
+      "d_skew_ms": 22.333333333333343,
+      "excess_ms": 25.333333333333343,
+      "floor_ms": 96.66666666666667,
+      "grabber": {},
+      "latency_ms": 6,
+      "mean_head_skew_ms": 90.66666666666667,
+      "owner": "strih-config +3ms latency pin; grabber/cambox +22ms",
+      "samples": 3,
+      "src": "NDI cam2"
+    }
+  ],
+  "summary": {
+    "anchor_floor_ms": 71.33333333333333,
+    "anchor_src": "NDI cam4",
+    "floor_spread_ms": 25.333333333333343,
+    "omitted_sources": [],
+    "slowest_excess_ms": 25.333333333333343,
+    "slowest_floor_ms": 96.66666666666667,
+    "slowest_owner": "strih-config +3ms latency pin; grabber/cambox +22ms",
+    "slowest_src": "NDI cam2",
+    "transport_cap_avg_spread_ms": 0.10250000000000092,
+    "transport_uniform": true
+  }
+}

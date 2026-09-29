@@ -1,0 +1,31 @@
+# issue 1367 slice D1b -- the ONE present-age table of the grid-exact N>=2 conveyor.
+#
+# Read by BOTH the Rust authority test (src/genlock_n2_grid.rs,
+# present_age_table_shared_with_the_python_twin_1367: every canvas tick of one second must present
+# `tick - n2_target_stamp_ns(tick, pin_ns, canvas, n)` equal to present_age_ns or ONE ns more -- the
+# per-second grid alternates its slot lengths) and the dev1 Python twin
+# (tests/python/test_genlock_n2_grid_twin_1367.py: scripts/genlock_n2_grid.py present_age_ns_for_pin_ns
+# must return present_age_ns exactly, and its own grid port must agree per tick).
+# present_age_ns = floor(ceil((GENLOCK_N2_AGE_BASE_NS + pin) x fps / 1 s) x 1 s / fps) for an integer
+# source rate; the 1970-grid ceil((base + pin) / interval) x interval for a fractional one.
+# Columns (tab-separated): pin_ns  canvas_interval_ns  n  present_age_ns  note
+1000000	33333333	2	66666666	pin 1 ms: 4 source frames (pins 1..16 share the frame)
+3000000	33333333	2	66666666	production pin 3 ms: 66.7 ms
+16000000	33333333	2	66666666	pin 16 ms: still 4 frames
+17000000	33333333	2	83333333	pin 17 ms: one frame deeper
+33000000	33333333	2	83333333	pin 33 ms: top of the 5-frame band
+34000000	33333333	2	100000000	pin 34 ms: 6 frames
+50000000	33333333	2	100000000	pin 50 ms: 50+50 = 6 frames exactly
+51000000	33333333	2	116666666	pin 51 ms: 7 frames
+951000000	33333333	2	1016666666	Zaloha kamera re-pin band low edge (ROZHODNUTE 5881023948)
+960000000	33333333	2	1016666666	Zaloha kamera re-pin 960 ms = the pre-D1 1017
+966000000	33333333	2	1016666666	Zaloha kamera re-pin band high edge
+967000000	33333333	2	1033333333	one ms past the band: one frame deeper
+1000000000	33333333	2	1050000000	Zaloha kamera at 1000 ms: 1050 ms
+2000000000	33333333	2	2050000000	the 2000 ms per-source maximum
+19666667	33333333	2	83333333	pin 3 ms + one source interval (16_666_667 ns): exactly one frame
+36333334	33333333	2	100000000	pin 3 ms + two source intervals: exactly two frames
+653000013	33333333	2	716666666	pin 3 ms + 39 source intervals: exactly 39 frames
+3000000	40000000	2	60000000	25 fps canvas, 50 fps source: 3 frames
+3000000	33333333	3	55555555	n = 3 (90 fps into 30): 5 frames
+3000000	33366666	2	66733332	29.97 canvas: fractional rate, 1970-grid fallback
