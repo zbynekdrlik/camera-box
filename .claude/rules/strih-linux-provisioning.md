@@ -3,6 +3,8 @@ paths:
   - "scripts/setup-strih.sh"
   - "scripts/verify-strih.sh"
   - "scripts/lib/strih-provision.sh"
+  - "scripts/lib/strih-dantesync.sh"
+  - "tests/python/test_strih_dantesync_keep_running_1372.py"
   - "scripts/lib/ndi-runtime.sh"
   - "scripts/genlock-runtime-packages.sh"
   - "systemd/strih-obs.service"
@@ -137,6 +139,60 @@ While both boxes run, TWO strih senders coexist on the NDI wire and must never c
 
   The NDI-output `STRIH-LX (...)` namespacing above is a SEPARATE matter (issue 1347 owns the rename
   back to non-namespaced production names now the Windows strih is retired); it is untouched here.
+
+## dantesync on the fleet DATE MASTER: restart only on a real change (issue 1372)
+
+**The hazard.** strih-lx is the fleet's dantesync **date master** in daily mode (`date_authority=master`,
+`date_correction_mode=daily`). Its fleet line drifts ~0.7 s a day against NTP (the Dante GM runs ~8 ppm
+off UTC) and is meant to be stepped only in the nightly 02:00Z window. **A restart of the master
+re-derives the date AT ONCE, every follower joins, and the whole rig steps mid-day.** Every strih-lx
+genlock deploy runs setup-strih, and step 2 used to rewrite the unit, remove `/var/run/dantesync.lock`
+and `systemctl restart dantesync` on EVERY run. On 29.9.2026 00:35Z that took the fleet through a
+0.67 s date step, and cg OBS program audio stayed broken until a relaunch (finding 5881495922).
+
+**The decision (design 5881503623, Approach 1).** `strih_dantesync_restart_decision UNIT_CHANGED
+BINARY_CHANGED ACTIVE BINARY_PRESENT` (pure, `scripts/lib/strih-provision.sh`) prints ONE token:
+
+| Token | When | Step 2 does |
+|---|---|---|
+| `absent` | no `/usr/local/bin/dantesync` | nothing (a running daemon is never touched), WARN |
+| `start` | not active | removes the stale lock, then `systemctl start` |
+| `restart` | active AND the unit (or a drop-in) or the binary changed | `systemctl restart`, logged `RESTARTED (<why>)` |
+| `keep` | active, nothing changed (the redeploy default) | nothing; logs `dantesync.service: kept running (unit unchanged) -- no restart, the fleet date is untouched` |
+
+Anything but four 0/1 values prints nothing and returns 2: a caller that could not read a state never
+guesses a restart of the date master.
+
+**The action** is `strih_dantesync_install UNIT_TEXT [ROLE]` in its own lib
+`scripts/lib/strih-dantesync.sh` (the strih-drm-output.sh precedent: setup-strih.sh stays under its
+1000-line budget). Step 2 emits `DS_UNIT_TEXT="$(strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS")"` and
+hands it over; nothing else in setup-strih writes, reloads or restarts dantesync.
+- `unit_changed` = the text differs from the installed file (`strih_dantesync_unit_matches`, byte-exact:
+  the file must hold exactly `printf '%s\n' "$UNIT_TEXT"`), OR a `dantesync.service.d/*.conf` drop-in
+  existed and was removed (`strih_dantesync_dropins_present`). An empty drop-in dir is not a change.
+  The unit is rewritten and `daemon-reload`ed only then.
+- `binary_changed` is always 0: setup-strih never installs the binary and the box keeps no checksum
+  marker. A new binary arrives only through `dantesync-fleet-upgrade.sh`, which restarts the daemon
+  itself (the deliberate, canaried path, `.claude/rules/dantesync-fleet-upgrade.md`).
+- The lock is an `flock` (dantesync `acquire_singleton_lock`): a stale file never blocks a fresh
+  daemon, and removing the file of a RUNNING daemon lets a second instance lock a new inode. So it is
+  cleared on `start` only.
+- `systemctl enable dantesync` still runs every time (it never restarts anything).
+- The `STRIH_DANTESYNC_UNIT` / `_DROPIN_DIR` / `_LOCK` / `_BIN` paths are test seams that default to
+  the real box paths; `tests/python/test_strih_dantesync_keep_running_1372.py` runs the real action
+  twice against a temp root with a fake `systemctl` on PATH.
+
+**A unit change still restarts it, and still steps the date.** That is rare and deliberate, and the
+restart line names it. **Schedule any dantesync unit change (a role change, an ExecStart edit, a
+removed hand drop-in) for the nightly window**, never a daytime deploy. The follower side (dantesync
+keeping the fleet line across a master restart) is a dantesync ticket, not this repo's.
+
+**verify-strih item 6c `(dantesync-unit)`** grades, read-only, that `/etc/systemd/system/dantesync.service`
+is byte-identical to the provisioned unit for the box's role and that no drop-in overrides it. A drift is
+caught THERE, never by a blind restart on the next deploy; a kept-running daemon on a matching unit passes
+(items 6/6b grade that it runs). Live acceptance on the next strih-lx genlock deploy: `ActiveEnterTimestamp`
+of dantesync on strih-lx unchanged, the master's `last_date_step_ts` unchanged, and the deploy log shows the
+`kept running` line.
 
 ## Ubuntu 26.04 (owner ROZHODNUTÉ 18.9.2026)
 
@@ -458,7 +514,8 @@ fresh box reaches a green baseline like imag-nb from a single `setup-strih.sh` r
    `strih_dantesync_unit_text` (the EXACT cambox shape: `Type=simple`, `Restart=always`,
    `RestartSec=5`, `ExecStart=/usr/local/bin/dantesync --ntp-server strih.lan`,
    `WantedBy=multi-user.target`), `daemon-reload`, clears a stale `/var/run/dantesync.lock`, enables
-   and (if the binary is present) restarts it. `strih_dantesync_unit_text` **fail-closes** on a
+   and (if the binary is present) restarts it. **Issue 1372 changed this:** the write, the reload, the
+   lock removal and the (re)start now happen only on a real change -- see the date-master section above. `strih_dantesync_unit_text` **fail-closes** on a
    server/master invocation (never a 2nd NTP master while parallel); `--service` is a run mode, NOT
    an installer flag, so it never appears in the unit.
 2. **The NDI 6.3.2 runtime (new step 4b).** `setup-strih.sh` had NO NDI-runtime step, so DistroAV
@@ -978,7 +1035,7 @@ The five hand-patches that survived ONLY on the live box (a re-flash would rever
 | (B) prune `decklink*.so`/`obs-qsv11.so`/`obs-vst.so` from both plugin dirs | step 4 tail | item 27 (FAIL) | `strih_lx_obs_plugin_prune_list` + `strih_lx_obs_plugin_dirs` |
 | (C) collection hygiene (never rewrites) | — | item 28 (REPORT-ONLY) | `strih_collection_hygiene_verdict` |
 | (D) RustDesk pinned .deb + sha256 + enable --now + 0600-file password | step 16b (gated on the pw file) | item 29 (FAIL / NOTE) | `strih_rustdesk_version`/`_deb_url`/`_deb_sha256`/`_install_cmds` |
-| (G) dantesync ROLE (`server` default post-M4) | step 2 | item 6b (FAIL) | `strih_dantesync_unit_text ROLE`, `strih_lx_dantesync_role_ok`, `strih_lx_dantesync_status_role_verdict` |
+| (G) dantesync ROLE (`server` default post-M4) | step 2 | items 6b + 6c (FAIL) | `strih_dantesync_unit_text ROLE`, `strih_lx_dantesync_role_ok`, `strih_lx_dantesync_status_role_verdict`, issue 1372: `strih_dantesync_restart_decision`, `strih_dantesync_unit_matches`, `strih_dantesync_dropins_present` + the action `strih_dantesync_install` |
 | (H) ffmpeg/ffprobe for the on-box E2E verdict | step 4b | item 30 (FAIL) | (apt install, no pure helper) |
 | (I) **SUPERSEDED by issue 1357** — the rtprio grant is REMOVED (rtprio stays OFF; setup-strih self-heals a leftover, verify item 33 FAILs while one exists) and the crash-popup masks are the shared baseline item (verify item 32). Historical row: genlock render-tick rtprio grant + no crash popups (23.9.2026, imag parity) | step 11c (retired) | items 32 (FAIL / NOTE) + 33 (FAIL / NOTE) | `strih_rtprio_limits_path`/`_text`/`_grant_ok`/`strih_rtprio_session_verdict`, `strih_crash_popup_units`/`_unit_ok`/`_template_ok`/`_member_ok`/`_verdict`, `strih_crash_reports_count` |
 
