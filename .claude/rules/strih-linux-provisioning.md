@@ -231,8 +231,8 @@ passes. The pytest runs the item's real text under `set -euo pipefail` with only
 verify-strih.sh is at ~997 of its 1000-line budget, so the next item there needs a lib.
 
 **Before the first strih-lx deploy of this change, read the master's command line** (read-only, on the
-box): `tr '\0' ' ' < /proc/$(systemctl show -p MainPID --value dantesync)/cmdline` must read
-`/usr/local/bin/dantesync` (the server unit's ExecStart), or run verify-strih item 6c. A mismatch is now
+box): `tr '\0' ' ' < /proc/$(systemctl show -p MainPID --value dantesync)/cmdline | sed 's/ *$//'` must
+read `/usr/local/bin/dantesync` (the server unit's ExecStart), or run verify-strih item 6c. A mismatch is now
 a restart trigger by design, so a `not-applied` master is deployed in the nightly window only.
 
 **Live acceptance on the next strih-lx genlock deploy:** `ActiveEnterTimestamp` of dantesync on strih-lx
