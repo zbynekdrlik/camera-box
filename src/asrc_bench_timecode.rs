@@ -110,8 +110,9 @@ impl RealtimeAsrcCompensator {
         self.window_level_sum_ms = 0.0;
         self.window_level_count = 0;
         self.book_placement_jump(place_err_ms, packet_ms);
+        // the EMA is already seeded here: a placement is observed only on a captured setpoint, and
+        // the capture seeds it in the same window (both are cleared together)
         self.level_err_ema_ms = place_err_ms - self.level_target_ms;
-        self.level_err_ema_seeded = true;
     }
 
     /// Issue 1367: the booking band of one packet, ms: max(half the packet, [`PLACE_JUMP_MIN_MS`]).

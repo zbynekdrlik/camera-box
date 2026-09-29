@@ -1207,6 +1207,21 @@ struct obs_source {
 	uint32_t genlock_audio_slews;               /* cumulative slews started (audit audio_slews=) */
 	uint32_t genlock_audio_steps;               /* cumulative STEP re-placements while playing (no resampler; audit audio_steps=) */
 	uint64_t genlock_audio_withheld;            /* cumulative withheld packets (audit audio_withheld=) */
+	/* camera-box issue 1381 (design 5882391108): the per-source SKEW HOLD across a wall step
+	 * (genlock_audio_step_hold in obs-source.c; decision + authority: src/genlock_audio_pairing.rs
+	 * audio_step_hold / AudioStepHold). Audio thread; genlock_audio_step_active is ALSO read by the
+	 * render thread (a benign single-word read, like genlock_audio_hold_mode) to freeze this source's
+	 * shallow latch and video-delay tracker while it holds. Zeroed at create (bzalloc). */
+	bool genlock_audio_step_active;             /* a hold runs: the packets map through genlock_audio_step_held_off_ns */
+	int64_t genlock_audio_step_prev_off_ns;     /* the previous timecode packet's live wall->mono offset */
+	uint64_t genlock_audio_step_prev_raw_ns;    /* the previous packet's raw stamp */
+	uint64_t genlock_audio_step_prev_packet_ns; /* the previous packet's duration (0 = none) */
+	int64_t genlock_audio_step_prev_age_ns;     /* the previous packet's stamp age on the live wall */
+	int64_t genlock_audio_step_base_age_ns;     /* the pre-step age a hold waits for */
+	int64_t genlock_audio_step_held_off_ns;     /* the pre-step offset, moved by the stamps' own jumps */
+	uint64_t genlock_audio_step_start_ns;       /* when the hold started (OBS monotonic) */
+	int64_t genlock_audio_step_step_ns;         /* the wall step that started it (+ = wall forward) */
+	uint32_t genlock_audio_step_holds;          /* cumulative holds released (log `genlock-audio-step-hold`) */
 	struct obs_source_frame *async_preload_frame;
 	DARRAY(struct async_frame) async_cache;
 	DARRAY(struct obs_source_frame *) async_frames;
