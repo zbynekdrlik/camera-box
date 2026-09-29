@@ -10,6 +10,9 @@ paths:
   - "src/genlock_forced_table_audit.rs"
   - "scripts/lib/genlock-forced-table-audit.sh"
   - "tests/genlock_forced_table_audit_1303.rs"
+  - "tests/genlock_audio_step_hold_parity_1381.rs"
+  - "tests/genlock_audio_step_hold_wiring_1381.rs"
+  - "tests/genlock_audio_pairing_lift/mod.rs"
 ---
 
 # Receiver-side AUDIO genlock parity (#1303)
@@ -335,6 +338,52 @@ window 85 ms behind real time (4 ticks at 48 kHz, `obs-genlock-audio-buffering.h
 dynamic increase stays active above it. The genlock audio holds above ride on top of that, so a cg
 feed's audio on resolume still grows the buffering on a media start (a loud `ABOVE the floor` line,
 never dropped). Full rule: `genlock-audio-buffering-floor.md`.
+
+## Issue 1381 — the timecode audio across a WALL STEP: a per-source skew hold (design 5882391108)
+
+A dantesync date step (29.9.2026: +682 ms at 02:36 CEST, +89.7 ms at 04:00) moves the receiver's live
+wall→mono offset at once, while the sender's stamps follow later. SongPlayer
+(`sp-server/src/playback/audio_emitter.rs`) never jumps its grid stamps under 1 s: it re-anchors only
+when more than 1 s late. A forward step becomes a catch-up burst, a backward step a pause, and its
+WallClock follows after 2 confirming resamples (3.3–6.7 s). Until then the old code read the step
+as PLACEMENT ERROR. The 682 ms step then booked the capped 100 ms owed amount over and over, and the
+excess leaked into the smoothed error. The result was restore=1, ~151 ppm applied, and a 70 ms
+TS-smoothing re-placement every ~80 s for minutes. The 89.7 ms step kept the audio +81…87 ms off for
+over a minute.
+
+- **The hold** (`audio_step_hold` in `src/genlock_audio_pairing.rs`, C port
+  `genlock_audio_step_hold` in the contiguous pairing block, wrapper
+  `genlock_audio_step_hold_source`). A timecode packet whose live offset jumps by more than
+  `GENLOCK_WALL_STEP_MIN_NS` (2 ms, the render tick's own threshold, from
+  `obs-genlock-wall-step.h`) keeps the PRE-step offset. The term, the previous term and the
+  timecode ASRC's stamp all map through `genlock_off_ns`. A step within one packet, a first packet,
+  a timeline reset or a joint step (the stamps jump in the same packet) never holds.
+- **Release.** The hold ends as `followed` when the held offset (moved by every stamp jump over
+  2 ms) is back within one packet of the live one, OR when the stamps' live-wall age is back within
+  one packet of the pre-step age (a sender that CAUGHT UP with continuous stamps). It ends as
+  `timeout` at `GENLOCK_AUDIO_STEP_HOLD_MAX_NS` (10 s), and as `reset` on a timeline reset or on
+  leaving timecode mode.
+- **A release whose residual exceeds one packet PLACES that packet** (`audio_step_release_places`).
+  This covers the catch-up and the timeout: the new offset lands ONCE, never as a W-second payment.
+- **Frozen while holding:** the ASRC is not fed (`asrc_tc_have_prev = false`, so the first packet
+  after it starts a fresh stamp pair), and the render thread (a benign cross-thread bool read of
+  `genlock_audio_step_active`) leaves the shallow latch and BOTH video-delay tracker calls alone.
+  A backlog relock inside the hold is absorbed; the rise/fell watch re-measures if the depth really
+  moved.
+- **The log:** one `genlock-audio-step-hold '<src>': step_ms= held_ms= released=followed|timeout|reset
+  residual_ms= holds= (issue 1381)` line per released hold. It is mutually non-substring vs every
+  other `genlock-*` family.
+- **Known limit, not fixed:** a 33–55 ms step (one to two packets) with ±2 ms arrival jitter can
+  release early through the age test and place once. The cost is one short event, never a leak.
+- **Tier-0 proof:** `tests/genlock_audio_step_hold_parity_1381.rs` drives the verbatim C and the
+  Rust authority through one packet script. It covers the exact 10 s edge (20 ms packets), the
+  exact 2 ms jump (1 ms packets) and sub-threshold stamp jitter inside a hold.
+  `tests/genlock_audio_step_hold_wiring_1381.rs` holds ONE needle list for the ingest, the helpers
+  and the render-thread freezes; both `windows-genlock*.yml` pwsh gates require the same list.
+  23/23 C mutants and 13/13 wiring mutants are killed. The shared lift helpers moved to
+  `tests/genlock_audio_pairing_lift/mod.rs`.
+- **The compensator half (piece 1 re-seed, piece 3 backstop) and the two-clock bench:**
+  `asrc-bench-harness.md`, the issue-1381 section.
 
 ## LOCK-indicator audio DEGRADE term — audible-but-expected-silent (#1303 part 3b/c — DONE)
 

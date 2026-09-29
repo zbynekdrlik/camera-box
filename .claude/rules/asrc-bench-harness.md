@@ -869,3 +869,35 @@ on a correct sender, NOT the arrival pacing), `steps=` counts rate re-bases and 
 booked placement jumps. A `place_jumps=` rising with no `stamp_gap=` on the video audit points at
 the audio stamps alone; pairs of opposite `last_jump_ms` around a date step are the sender/receiver
 step skew and net to ~0.
+
+## Issue 1381 — a PLACEMENT restarts the timecode level loop; a jump beyond the owed cap is PLACED
+
+The 100 ms owed cap (`STEP_RECOVER_MAX_MS`) is right for a real sample loss. A wall step read as
+placement error is different (682 ms on 29.9.2026, see `genlock-audio-pairing.md`, issue 1381). It
+overflowed the cap, and the excess went into the 10 s smoothed error. Each later placement then
+re-booked a phantom jump against that stale error: `place_jumps` 0 → 180 → 468, the target walked
+−100/−44/−56/−68, restore=1 armed. Two compensator pieces, mirrored C ↔ Rust (`asrc-compensator.c`
+↔ `src/asrc_bench_timecode.rs`):
+
+- **Piece 1, re-seed.** `observe_placement(placed = true)` drops what is owed, clears the restore,
+  the sustained-arm count and the open window's level sum, and books the placed packet's own error
+  against the fresh setpoint. It then re-seeds `level_err_ema_ms` to that error (minus the target).
+  No `level_err_ema_seeded = true` is written: a placement is observed only on a captured setpoint,
+  and the capture already seeded the EMA.
+- **Piece 3, backstop.** `asrc_compensator_place_beyond_cap` (Rust `place_beyond_cap`) is inert
+  outside timecode mode or before capture. It returns true when a packet's jump clears the band and
+  `|owed − jump|` would pass the cap. The ingest then PLACES that packet (one counted placement)
+  instead of appending it and booking only part of it. It runs only outside a skew hold.
+- **The two-clock bench** `src/asrc_timecode_step_bench.rs` (a `#[path]` child of
+  `asrc_timecode_bench.rs`) replays the step with a sender that follows by a jump, a catch-up burst,
+  or never.
+  - Before (today's code): 682 ms followed at 3.3 s = 396 re-bookings and three −70 ms re-placements
+    at 83/166/248 s, still 4.5 ms off at 20 min. As a burst: a −612 ms skip, then −70 ms every
+    ~82 s, never settled in 20 min. 89.7 ms as a burst: 84.8 ms off, settled at +70 s.
+  - After: 682 ms followed = 0 events, |A/V| ≤ 0.5 ms. Burst = ONE placement at the 5 s release.
+    89.7 ms = 0 events (followed) or one (burst). Never followed = one placement at the 10 s
+    timeout. Steady state and a small step never hold.
+- **Parity** (`tests/asrc_compensator_parity_1367.rs`): `tcs` = the skew, the placement, the
+  backstop probes (also on a LOCKED arrival-mode servo). `tcw` = 5 s of skew, the placement, then
+  8 s of a 15 ms error that must NOT arm the restore, which proves the sustained count restarts at
+  the placement.
