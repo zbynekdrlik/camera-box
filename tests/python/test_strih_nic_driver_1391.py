@@ -327,7 +327,9 @@ def test_spec_check_ties_the_driver_fact_to_the_vendored_module():
 # --- the apply step, with a fake dkms state machine ------------------------------------------------
 
 FAKE_DKMS = r'''#!/bin/bash
-# fake dkms: a state db of `pkg|ver|kernel|state` records; logs every call.
+# fake dkms: a state db of `pkg|ver|kernel|state` records; logs every call. Like real DKMS 3.x, a kernel
+# has ONE active version (state `installed`): `install` makes the new version active and leaves the old
+# one `built`, and `remove` deletes module files only on a kernel where the removed version is ACTIVE.
 set -euo pipefail
 echo "dkms $*" >> "$FAKE/calls.log"
 db="$FAKE/dkms.db"; touch "$db"
@@ -355,16 +357,20 @@ case "$cmd" in
     setrec "$m" "$v" "$k" built ;;
   install)
     [ "${FAKE_DKMS_INSTALL_FAIL:-0}" = 0 ] || exit 6
+    [ "${FAKE_DKMS_INSTALL_FAIL_KERNEL:-}" != "$k" ] || exit 6
     grep -q "^$m|$v|$k|installed$" "$db" && { echo "already installed" >&2; exit 5; }
     mkdir -p "$STRIH_NIC_DRV_MODULES_ROOT/$k/updates/dkms"
     printf 'v%s (2025/10/28)\n' "$v" > "$STRIH_NIC_DRV_MODULES_ROOT/$k/updates/dkms/r8152.ko.zst"
     grep -v "^$m|$v||added$" "$db" > "$db.tmp" || true; mv "$db.tmp" "$db"
+    # the previously active version of this kernel stays built, no longer active
+    sed -i "s/^\($m|[^|]*|$k|\)installed$/\1built/" "$db"
     setrec "$m" "$v" "$k" installed ;;
   remove)
+    while IFS='|' read -r rm_ rv rk rs; do
+      [ "$rm_" = "$m" ] && [ "$rv" = "$v" ] && [ "$rs" = installed ] || continue
+      rm -f "$STRIH_NIC_DRV_MODULES_ROOT/$rk/updates/dkms/r8152.ko.zst"
+    done < "$db"
     grep -v "^$m|$v|" "$db" > "$db.tmp" || true; mv "$db.tmp" "$db"
-    for f in "$STRIH_NIC_DRV_MODULES_ROOT"/*/updates/dkms/r8152.ko.zst; do
-      [ -f "$f" ] && grep -q "v$v " "$f" && rm -f "$f"
-    done
     true ;;
   *) echo "fake dkms: unknown $cmd" >&2; exit 64 ;;
 esac
@@ -509,7 +515,7 @@ def test_a_failed_install_puts_the_hand_copy_back(tmp_path):
     box = Box(tmp_path)
     r = box.apply(FAKE_DKMS_INSTALL_FAIL="1")
     assert r.returncode != 0
-    assert "the hand-copied module is back in place" in r.stderr
+    assert "dkms install for %s failed -- any hand-copied module is back in place" % KERNEL in r.stderr
     assert (box.mods / KERNEL / "updates/r8152.ko").read_text().strip() == LOADED
     calls = box.calls()
     install = _index(calls, "dkms install")
@@ -525,6 +531,38 @@ def test_a_failed_build_changes_no_file(tmp_path):
     assert (box.mods / KERNEL / "updates/r8152.ko").exists()
     assert not box.backup.exists()
     assert not [c for c in box.calls() if c.startswith("dkms install")]
+
+
+def test_a_failed_move_aside_puts_the_moved_copies_back(tmp_path):
+    box = Box(tmp_path)
+    (box.mods / KERNEL / "updates/r8152.ko.zst").write_text(LOADED + "\n")
+    # the second copy cannot be moved: a directory already sits at its backup path
+    blocker = box.backup / KERNEL / "r8152.ko.zst"
+    blocker.mkdir(parents=True)
+    (blocker / "keep").write_text("x")
+    r = box.apply()
+    assert r.returncode != 0
+    assert "every moved copy is back in place" in r.stderr, r.stderr
+    assert (box.mods / KERNEL / "updates/r8152.ko").read_text().strip() == LOADED
+    assert (box.mods / KERNEL / "updates/r8152.ko.zst").exists()
+    assert not [c for c in box.calls() if c.startswith("dkms install")], box.calls()
+    assert "depmod -a %s" % KERNEL in box.calls()
+
+
+def test_a_changed_udev_rule_is_never_installed_on_a_noop_run(tmp_path):
+    box = Box(tmp_path)
+    assert box.apply().returncode == 0
+    (box.udev / "50-usb-realtek-net.rules").unlink()
+    tree = tmp_path / "tree"
+    vend = tree / "vendor" / "realtek-r8152"
+    vend.mkdir(parents=True)
+    for p in VENDOR.iterdir():
+        (vend / p.name).write_bytes(p.read_bytes())
+    (vend / "50-usb-realtek-net.rules").write_text("# tampered\n")
+    r = box.apply(repo=tree)
+    assert r.returncode != 0
+    assert "does not match its SHA256SUMS" in r.stderr, r.stderr
+    assert not (box.udev / "50-usb-realtek-net.rules").exists()
 
 
 def test_an_unknown_hand_installed_module_refuses_before_anything_is_built(tmp_path):
@@ -553,23 +591,67 @@ def test_a_kernel_without_headers_is_left_to_dkms_autoinstall(tmp_path):
     assert box.db() == ["realtek-r8152|2.21.4|%s|installed" % KERNEL]
 
 
-def test_an_older_dkms_version_is_removed_before_the_install(tmp_path):
-    box = Box(tmp_path, plain=None)
-    (box.fake / "dkms.db").write_text("realtek-r8152|2.21.3|%s|installed\n" % KERNEL)
-    (box.mods / KERNEL / "updates/dkms").mkdir(parents=True)
-    (box.mods / KERNEL / "updates/dkms/r8152.ko.zst").write_text("v2.21.3 (2025/01/01)\n")
+def _old_version(box, kernels):
+    rows = []
+    for k in kernels:
+        rows.append("realtek-r8152|2.21.3|%s|installed" % k)
+        (box.mods / k / "updates/dkms").mkdir(parents=True, exist_ok=True)
+        (box.mods / k / "updates/dkms/r8152.ko.zst").write_text("v2.21.3 (2025/01/01)\n")
+    (box.fake / "dkms.db").write_text("\n".join(rows) + "\n")
+
+
+def _on_disk(box, k):
+    f = box.mods / k / "updates/dkms/r8152.ko.zst"
+    return f.read_text().split()[0] if f.exists() else None
+
+
+def test_an_older_dkms_version_is_removed_only_after_every_install(tmp_path):
+    other = "7.0.0-34-generic"
+    box = Box(tmp_path, plain=None, other_kernels=(other,))
+    _old_version(box, (KERNEL, other))
     r = box.apply()
     assert r.returncode == 0, r.stdout + r.stderr
     calls = box.calls()
-    assert _index(calls, "dkms remove -m realtek-r8152 -v 2.21.3 --all") < _index(calls, "dkms install"), calls
-    assert box.db() == ["realtek-r8152|2.21.4|%s|installed" % KERNEL]
+    remove = _index(calls, "dkms remove -m realtek-r8152 -v 2.21.3 --all")
+    installs = [i for i, c in enumerate(calls) if c.startswith("dkms install")]
+    assert len(installs) == 2 and max(installs) < remove, calls
+    assert box.db() == sorted(["realtek-r8152|2.21.4|%s|installed" % KERNEL,
+                               "realtek-r8152|2.21.4|%s|installed" % other])
+    # the remove of the no-longer-active old version deleted no module file
+    assert _on_disk(box, KERNEL) == "v2.21.4" and _on_disk(box, other) == "v2.21.4"
 
 
-def test_missing_headers_are_installed_first(tmp_path):
+def test_a_failed_install_keeps_the_older_dkms_version_on_disk(tmp_path):
+    box = Box(tmp_path, plain=None)
+    _old_version(box, (KERNEL,))
+    r = box.apply(FAKE_DKMS_INSTALL_FAIL="1")
+    assert r.returncode != 0
+    assert not [c for c in box.calls() if c.startswith("dkms remove")], box.calls()
+    assert _on_disk(box, KERNEL) == "v2.21.3"
+    assert "realtek-r8152|2.21.3|%s|installed" % KERNEL in box.db()
+
+
+def test_a_failed_install_on_another_kernel_keeps_the_older_version_there(tmp_path):
+    other = "7.0.0-34-generic"
+    box = Box(tmp_path, plain=None, other_kernels=(other,))
+    _old_version(box, (KERNEL, other))
+    r = box.apply(FAKE_DKMS_INSTALL_FAIL_KERNEL=other)
+    assert r.returncode != 0
+    assert not [c for c in box.calls() if c.startswith("dkms remove")], box.calls()
+    # the next boot into the other kernel still finds a driver that binds the RTL8157
+    assert _on_disk(box, other) == "v2.21.3"
+    assert _on_disk(box, KERNEL) == "v2.21.4"
+
+
+def test_missing_headers_are_installed_first_and_a_failed_install_stops_the_step(tmp_path):
     box = Box(tmp_path, headers=False)
     r = box.apply()
-    # the fake apt-get installs nothing, so the step still fails later -- but it asked for the headers
+    # it asked apt for the headers; the fake apt-get installs nothing, so the step stops before DKMS
     assert "apt-get install -y linux-headers-%s" % KERNEL in box.calls(), box.calls()
+    assert r.returncode != 0
+    assert "headers of %s are still missing" % KERNEL in r.stderr, r.stderr
+    assert not [c for c in box.calls() if c.startswith("dkms")], box.calls()
+    assert (box.mods / KERNEL / "updates/r8152.ko").exists()
 
 
 @pytest.mark.parametrize("spec,nicdrv,msg", [

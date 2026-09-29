@@ -18,8 +18,9 @@
 #   * strih_nic_driver_plan (PURE) -- the installed state vs the box fact -> SKIP | NOOP | INSTALL | UPGRADE.
 #   * strih_nic_driver_apply -- setup-strih step 1b: the vendored source -> /usr/src, dkms add/build/install
 #     for the running kernel and every other installed kernel with headers, the hand-copied plain module
-#     moved aside, the udev rule. It NEVER reloads the module live (`modprobe -r r8152` drops the rig
-#     NIC, the ssh session running this and dantesync's PTP): the DKMS module loads at the next boot.
+#     moved aside, another DKMS version removed only once every install succeeded, the udev rule. It
+#     NEVER reloads the module live (`modprobe -r r8152` drops the rig NIC, the ssh session running this
+#     and dantesync's PTP): the DKMS module loads at the next boot.
 #   * strih_nic_grade_rows / strih_nic_grade_report -- verify-strih item 36: the loaded module version, DKMS
 #     for the running kernel, the USB device speed, the Ethernet link speed and the NetworkManager profile
 #     pinned to the rig NIC, each graded against the box facts. An unreadable value is never a pass.
@@ -226,6 +227,20 @@ _strih_nic_driver_prereqs() {
   DEBIAN_FRONTEND=noninteractive apt-get install -y $pkgs || {
     echo "strih-nic-driver: apt-get install ${pkgs} failed" >&2; return 1; }
   command -v dkms >/dev/null 2>&1 || { echo "strih-nic-driver: dkms still missing after the install" >&2; return 1; }
+  [ -e "$(strih_nic_driver_modules_root)/${k}/build/Makefile" ] || {
+    echo "strih-nic-driver: the headers of ${k} are still missing after the install -- DKMS cannot build" >&2; return 1; }
+}
+
+# _strih_nic_driver_verify_vendored VENDOR_DIR -> rc 0 iff the staged vendored tree matches its SHA256SUMS;
+# else one stderr line (not staged / changed), rc 1. Nothing from the tree is used before this passes.
+_strih_nic_driver_verify_vendored() {
+  local vdir="$1"
+  if [ ! -f "${vdir}/SHA256SUMS" ]; then
+    echo "strih-nic-driver: ${vdir} is not staged -- run setup-strih.sh from a tree that carries ${STRIH_NIC_DRV_VENDOR_DIR} (the genlock deploy archives it)" >&2
+    return 1
+  fi
+  (cd "$vdir" && sha256sum --quiet --strict -c SHA256SUMS) || {
+    echo "strih-nic-driver: ${vdir} does not match its SHA256SUMS -- refusing a changed driver source" >&2; return 1; }
 }
 
 # _strih_nic_driver_sync_source REPO_ROOT -> the vendored tree verified against its SHA256SUMS and copied
@@ -233,12 +248,7 @@ _strih_nic_driver_prereqs() {
 _strih_nic_driver_sync_source() {
   local vdir="${1%/}/${STRIH_NIC_DRV_VENDOR_DIR}" dst sum f
   dst="$(strih_nic_driver_src_dir)"
-  if [ ! -f "${vdir}/SHA256SUMS" ]; then
-    echo "strih-nic-driver: ${vdir} is not staged -- run setup-strih.sh from a tree that carries ${STRIH_NIC_DRV_VENDOR_DIR} (the genlock deploy archives it)" >&2
-    return 1
-  fi
-  (cd "$vdir" && sha256sum --quiet --strict -c SHA256SUMS) || {
-    echo "strih-nic-driver: ${vdir} does not match its SHA256SUMS -- refusing to build a changed driver source" >&2; return 1; }
+  _strih_nic_driver_verify_vendored "$vdir" || return 1
   if [ -f "${dst}/SHA256SUMS" ] && cmp -s "${vdir}/SHA256SUMS" "${dst}/SHA256SUMS" \
     && (cd "$dst" && sha256sum --quiet --strict -c SHA256SUMS >/dev/null 2>&1); then
     return 0
@@ -254,13 +264,28 @@ _strih_nic_driver_sync_source() {
   echo "  driver source ${STRIH_NIC_DRV_PACKAGE} ${STRIH_NIC_DRV_VERSION} -> ${dst} (SHA256SUMS verified)"
 }
 
+# _strih_nic_driver_restore_plain KERNEL FROM... -- TO... : put moved-aside plain copies back + depmod.
+_strih_nic_driver_restore_plain() {
+  local k="$1" i
+  shift
+  local -a from=() to=()
+  while [ "$#" -gt 0 ] && [ "$1" != -- ]; do from+=("$1"); shift; done
+  [ "$#" -gt 0 ] && shift
+  to=("$@")
+  for i in "${!from[@]}"; do mv -f "${to[$i]}" "${from[$i]}" || true; done
+  depmod -a "$k" || true
+}
+
 # _strih_nic_driver_install_kernel KERNEL -> the vendored version built + installed in DKMS for KERNEL.
-# Order (DKMS 3.x `do_install` moves a same-named module it finds into its own original_module/ store): a
-# plain copy of ANOTHER version refuses before anything changes; the module is built; another DKMS
-# version of the package is removed; the known plain copy is moved to the backup dir; `dkms install`;
-# a failed install puts the plain copy back (+ depmod), so the box never ends up with no driver on disk.
+# Why the order: DKMS 3.x `dkms install` compares the new module with the FIRST same-named module `find`
+# returns in the kernel's module tree (a same-version hand copy makes it refuse "already installed"), and
+# moves the one it replaces into its own original_module/ store, restored on a later `dkms remove`. So:
+# a plain copy of ANOTHER version refuses before anything changes; the module is built; the known plain
+# copy is moved to the backup dir; `dkms install` (over an older DKMS version, which stays until the
+# caller removes it once every kernel is installed); a failed move or install puts every moved copy
+# back (+ depmod). On the path from the hand install this never leaves the kernel without a driver on disk.
 _strih_nic_driver_install_kernel() {
-  local k="$1" state f pv old i
+  local k="$1" state f pv
   local -a from=() to=()
   while IFS= read -r f; do
     [ -n "$f" ] || continue
@@ -276,29 +301,39 @@ _strih_nic_driver_install_kernel() {
     dkms build -m "$STRIH_NIC_DRV_PACKAGE" -v "$STRIH_NIC_DRV_VERSION" -k "$k" || {
       echo "strih-nic-driver: dkms build for ${k} failed (the running module and the files on disk are unchanged)" >&2; return 1; }
   fi
-  while IFS= read -r old; do
-    [ -n "$old" ] || continue
-    echo "  dkms remove ${STRIH_NIC_DRV_PACKAGE}/${old} (replaced by ${STRIH_NIC_DRV_VERSION})"
-    dkms remove -m "$STRIH_NIC_DRV_PACKAGE" -v "$old" --all || {
-      echo "strih-nic-driver: dkms remove of ${STRIH_NIC_DRV_PACKAGE}/${old} failed" >&2; return 1; }
-  done < <(strih_nic_driver_dkms_status | strih_nic_dkms_other_versions "$STRIH_NIC_DRV_PACKAGE" "$STRIH_NIC_DRV_VERSION")
   while IFS= read -r f; do
     [ -n "$f" ] || continue
-    mkdir -p "$(strih_nic_driver_backup_dir)/${k}" || return 1
-    mv -f "$f" "$(strih_nic_driver_backup_dir)/${k}/" || return 1
+    if ! mkdir -p "$(strih_nic_driver_backup_dir)/${k}" || ! mv -f "$f" "$(strih_nic_driver_backup_dir)/${k}/"; then
+      _strih_nic_driver_restore_plain "$k" "${from[@]}" -- "${to[@]}"
+      echo "strih-nic-driver: could not move ${f} aside -- every moved copy is back in place" >&2
+      return 1
+    fi
     from+=("$f"); to+=("$(strih_nic_driver_backup_dir)/${k}/${f##*/}")
     echo "  moved the hand-copied ${f} aside -> ${to[-1]}"
   done < <(strih_nic_driver_plain_copies "$k")
   if [ "$state" != installed ]; then
     echo "  dkms install ${STRIH_NIC_DRV_PACKAGE}/${STRIH_NIC_DRV_VERSION} for ${k}"
     if ! dkms install -m "$STRIH_NIC_DRV_PACKAGE" -v "$STRIH_NIC_DRV_VERSION" -k "$k"; then
-      for i in "${!from[@]}"; do mv -f "${to[$i]}" "${from[$i]}" || true; done
-      depmod -a "$k" || true
-      echo "strih-nic-driver: dkms install for ${k} failed -- the hand-copied module is back in place" >&2
+      _strih_nic_driver_restore_plain "$k" "${from[@]}" -- "${to[@]}"
+      echo "strih-nic-driver: dkms install for ${k} failed -- any hand-copied module is back in place, an older DKMS version is kept" >&2
       return 1
     fi
   fi
   depmod -a "$k" || { echo "strih-nic-driver: depmod -a ${k} failed" >&2; return 1; }
+}
+
+# _strih_nic_driver_remove_other_versions -> `dkms remove --all` of every OTHER version of the package,
+# called only after every kernel's install succeeded. DKMS deletes a version's module files only on a
+# kernel where that version is ACTIVE, and `dkms install` has made the vendored version the active one,
+# so this only unbuilds the old version. A failed install before this point keeps the old version.
+_strih_nic_driver_remove_other_versions() {
+  local old
+  while IFS= read -r old; do
+    [ -n "$old" ] || continue
+    echo "  dkms remove ${STRIH_NIC_DRV_PACKAGE}/${old} (replaced by ${STRIH_NIC_DRV_VERSION} on every kernel)"
+    dkms remove -m "$STRIH_NIC_DRV_PACKAGE" -v "$old" --all || {
+      echo "strih-nic-driver: dkms remove of ${STRIH_NIC_DRV_PACKAGE}/${old} failed" >&2; return 1; }
+  done < <(strih_nic_driver_dkms_status | strih_nic_dkms_other_versions "$STRIH_NIC_DRV_PACKAGE" "$STRIH_NIC_DRV_VERSION")
 }
 
 # _strih_nic_driver_other_kernels RUNNING -> every other installed kernel whose headers are present (DKMS
@@ -323,6 +358,7 @@ _strih_nic_driver_udev_rule() {
     echo "strih-nic-driver: neither ${src} nor ${dst} exists" >&2
     return 1
   fi
+  _strih_nic_driver_verify_vendored "${1%/}/${STRIH_NIC_DRV_VENDOR_DIR}" || return 1
   if cmp -s "$src" "$dst"; then
     echo "  udev rule ${dst} current"
     return 0
@@ -359,6 +395,7 @@ strih_nic_driver_apply() {
     _strih_nic_driver_sync_source "$repo" || return 1
     _strih_nic_driver_install_kernel "$ok_k" || return 1
   done < <(_strih_nic_driver_other_kernels "$k")
+  _strih_nic_driver_remove_other_versions || return 1
   _strih_nic_driver_udev_rule "$repo" || return 1
   plan="$(strih_nic_driver_live_plan "$spec" "$k")" || return 1
   if [ "$plan" != NOOP ]; then

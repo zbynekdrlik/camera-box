@@ -233,7 +233,8 @@ is byte-identical to the provisioned unit for the box's role, no drop-in overrid
 process runs its ExecStart (no readable process = not graded there; items 6/6b grade liveness). A drift
 is caught THERE, never by a blind restart on the next deploy; a kept-running daemon on a matching unit
 passes. The pytest runs the item's real text under `set -euo pipefail` with only its unit path moved.
-verify-strih.sh is at ~997 of its 1000-line budget, so the next item there needs a lib.
+verify-strih.sh is at 1002 lines, just over its ~1000-line budget (item 36, issue 1391, is a
+two-line call into its lib), so the next item there needs a split of the file, not only a lib.
 
 **Before the first strih-lx deploy of this change, read the master's command line** (read-only, on the
 box): `tr '\0' ' ' < /proc/$(systemctl show -p MainPID --value dantesync)/cmdline | sed 's/ *$//'` must
@@ -1032,18 +1033,25 @@ module to `/lib/modules/<kernel>/updates/r8152.ko`, which the next kernel would 
   plain-copy versions: `NOOP` (installed in DKMS for the running kernel, modinfo reads 2.21.4, no plain
   copy left) / `UPGRADE` (a plain copy or another DKMS version is there) / `INSTALL` / `SKIP` (`none`).
   A non-NOOP plan: verify `SHA256SUMS`, copy to `/usr/src/realtek-r8152-2.21.4`, `dkms add`, `dkms build`,
-  `dkms remove` another version, then move the plain copy aside to
-  `/var/lib/camera-box/strih-nic-driver/<kernel>/`, `dkms install`, `depmod -a`. If the install fails, the
-  plain copy is put back (+ depmod), so the box never has no driver on disk. It also installs for every
+  move the plain copy aside to `/var/lib/camera-box/strih-nic-driver/<kernel>/`, `dkms install`,
+  `depmod -a`. A failed move or install puts every moved copy back (+ depmod). It also installs for every
   OTHER installed kernel that has headers (`/lib/modules/<k>/build/Makefile`): DKMS `AUTOINSTALL` covers
-  only kernels installed after the add. Then the udev rule (installed when it differs, `udevadm control
-  --reload-rules`, never a `trigger`), and a re-plan that must read NOOP.
-- **Why move the plain copy BEFORE `dkms install`:** DKMS 3.x `do_install` moves a same-named module
-  it finds (`extra/`, `updates/`, the dest dir, else the single in-tree copy) into its own
-  `original_module/` store, and puts it back on `dkms remove`. With the hand copy still in `updates/`
-  there are two `r8152` modules, the version check is skipped, and the hand copy would become the
-  "original" that a later remove restores. A plain copy of any OTHER version refuses before anything
-  is built (an unknown hand install is named, never guessed).
+  only kernels installed after the add. Only when EVERY kernel's install succeeded is another DKMS
+  version of the package removed (`dkms remove --all`): DKMS deletes a version's module files only on a
+  kernel where that version is ACTIVE, and the install has made the vendored one active there, so the
+  remove just unbuilds the old one. A failed install keeps the old version on disk, and a kernel that
+  cannot be installed never ends up with only the in-tree driver. Then the udev rule (taken only from a
+  tree that verifies, installed when it differs, `udevadm control --reload-rules`, never a `trigger`),
+  and a re-plan that must read NOOP. Missing `dkms` / headers are apt-installed first (via
+  `obs_box_apt_update`); headers still missing after that stop the step before any DKMS call.
+- **Why move the plain copy BEFORE `dkms install`:** DKMS 3.x `check_version_sanity` compares the new
+  module with the FIRST same-named module `find` returns in the kernel's module tree (it reads one line,
+  so its "multiple modules" skip never fires). A same-version hand copy found first makes `dkms install`
+  refuse ("already installed at version ..." then "Installation aborted"). And `do_install` moves the
+  module it replaces (`extra/`, `updates/`, the dest dir, else the single in-tree copy) into its own
+  `original_module/` store, restored on a later `dkms remove`, so the hand copy could come back. A plain
+  copy of any OTHER version refuses before anything is built (an unknown hand install is named, never
+  guessed).
 - **No live reload, ever.** `modprobe -r r8152` drops the rig NIC, the ssh session running setup and
   dantesync's PTP (dantesync#112). The step prints `reload pending: next boot` with the loaded version,
   like the NVIDIA DKMS path of baseline step 11. No initramfs regeneration: dev1's MODULES=most

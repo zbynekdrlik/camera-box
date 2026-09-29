@@ -80,8 +80,9 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
    IPv4 (`strih_lx_is_ipv4`; the fleet row is one, `strih-lx.lan` does not resolve on dev1, a
    flag-shaped / mistyped override is refused). The box's OWN address is not the dial host: since
    issue 1361 setup-strih.sh reads it from the box's fact file, so the runner exports no STRIH_LX_IP.
-   The provisioning tree is the COMMITTED `scripts/ systemd/ intercom/` of the checkout (the archive
-   of HEAD — uncommitted edits never ship) + a generated `run-setup.sh`, and it must carry
+   The provisioning tree is the COMMITTED `scripts/ systemd/ intercom/` + `vendor/realtek-r8152` (the
+   rig NIC driver source setup-strih step 1b builds through DKMS, issue 1391) of the checkout (the
+   archive of HEAD — uncommitted edits never ship) + a generated `run-setup.sh`, and it must carry
    `scripts/strih-boxes/strih-lx.env` plus the intercom routing file that fact file's
    `STRIH_INTERCOM_CONFIG` names (read with sed, never sourced on dev1); it is the checkout's tree,
    not the bundle's SHA (a scripts-only fix never triggers a genlock build; setup-strih.sh is box
