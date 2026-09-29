@@ -240,6 +240,10 @@ renders only while that input's `genlock_burn` is true, toggled by the existing
     OBS whose enumeration fails gets the `resolume:__sweep_unreachable__` sentinel and FAILS the
     EVENT contract (reported in the Discord confirmation), and an away box is never read. The
     `if sweep_arr=...` / jq `||` shape never aborts. Both sweeps use rig-mode's `OBS_WS_PASSWORD`.
+    Review round 2: every row's sweep-check runs under `timeout 60`. A traveling box that answers
+    but whose OBS hangs would otherwise hang the owner's EVENT switch. An expired bound (rc 124, no
+    output) becomes the same sentinel. The test runs this loop for real, cut out of the function
+    (`test_contract_sweep_check_*`).
   - the E2E pre-run normalize calls `cg_chain_backstop_sweep_off "$HERE/obs_burn_filter.py"
     "$OBS_CLEANUP_TIMEOUT"` right after the strih/stream/imag sweep loop. That region is the
     ALL_CAMBOX block, so it runs on every gate run, CG_CHAIN or not (the leak it clears was left by
@@ -282,6 +286,9 @@ same scene to cg OBS, queued and NOT awaited.
     (`program_on_air.rs` `on_air_changes`: a press of the scene on air plays a playlist paused out of
     band; `ProgramCore::cut` returns early on the same source), so nothing changes that a restore
     would undo. A failed re-kick is a WARNING and returns 0 (the program IS on the scene).
+    Known residual (review round 2, accepted): a playlist the operator PAUSED out of band is left
+    PLAYING after the run. The program read shows only the scene and source, not the play state, so
+    there is nothing to snapshot. The run needs a moving chain to measure, so the re-kick stays.
   - Otherwise it writes the `sp-program` snapshot (`{"host","port","scene","source"}`, RUN_ID-keyed)
     and presses `cg_chain_scene.py facade-program --host <cg host> --port <CG_CHAIN_SP_FACADE_PORT,
     4456> --scene <scene>`.
