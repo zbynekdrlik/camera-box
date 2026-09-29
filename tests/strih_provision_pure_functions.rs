@@ -860,7 +860,8 @@ fn dantesync_status_role_verdict_grades_reachable_locked_and_server_listener() {
 /// issue 1317: `setup-strih.sh` step 2 must INSTALL the dantesync unit with the ROLE folded in (write
 /// it via `strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS"` into /etc/systemd/system/dantesync.service),
 /// default the role to `server` (the post-M4 NTP master), remove any stale dantesync.service.d/*.conf
-/// drop-in, and this must precede the OBS unit enable (step 8).
+/// drop-in, and this must precede the OBS unit enable (step 8). Issue 1372: the write, the reload and
+/// the (re)start happen only on a real change, through the caller strih_dantesync_install.
 #[test]
 fn setup_strih_installs_the_dantesync_unit_in_step_2() {
     let s = read_script("scripts/setup-strih.sh");
@@ -885,13 +886,22 @@ fn setup_strih_installs_the_dantesync_unit_in_step_2() {
         s.contains("strih_lx_dantesync_role_ok \"$DS_ROLE\" \"$DS_ARGS\""),
         "setup-strih step 2 must guard the role+args via strih_lx_dantesync_role_ok"
     );
+    // issue 1372: the paths are seams of the caller strih_dantesync_install (the pytest runs it
+    // against a temp root); the drop-in dir follows the unit path.
     assert!(
-        s.contains("rm -f /etc/systemd/system/dantesync.service.d/*.conf"),
+        s.contains("rm -f \"$dropin_dir\"/*.conf"),
         "setup-strih step 2 must remove any stale dantesync.service.d/*.conf drop-in (role now in the unit)"
     );
+    // issue 1372: the lock of a RUNNING daemon is never removed. It is cleared only on the `start`
+    // decision (the daemon is not active); the unconditional removal is gone. The behaviour is
+    // pinned by tests/python/test_strih_dantesync_keep_running_1372.py.
     assert!(
-        s.contains("rm -f /var/run/dantesync.lock"),
-        "setup-strih must clear a stale /var/run/dantesync.lock before (re)start"
+        s.contains("STRIH_DANTESYNC_LOCK:-/var/run/dantesync.lock"),
+        "setup-strih must know /var/run/dantesync.lock to clear a stale lock before a start"
+    );
+    assert!(
+        !s.contains("rm -f /var/run/dantesync.lock"),
+        "setup-strih must never clear the dantesync lock unconditionally (issue 1372)"
     );
     let enable = s
         .find("systemctl --user enable strih-obs.service")
