@@ -18,14 +18,15 @@
 //! present.
 
 use camera_box::genlock_audio_pairing::{
-    audio_stamp_age_ns, audio_step_freezes_video, audio_step_hold, audio_step_release_places,
-    audio_step_residual_ns, AudioStepHold, AudioStepRelease, AUDIO_STEP_HOLD_MAX_NS,
-    AUDIO_STEP_NOMINAL_REANCHOR_NS, AUDIO_STEP_NOMINAL_WARM_PACKETS,
+    audio_relabel, audio_stamp_age_ns, audio_step_freezes_video, audio_step_hold,
+    audio_step_relabel_jumps, audio_step_release_places, audio_step_residual_ns, AudioStepHold,
+    AudioStepRelease, AUDIO_STEP_HOLD_MAX_NS, AUDIO_STEP_NOMINAL_REANCHOR_NS,
+    AUDIO_STEP_NOMINAL_WARM_PACKETS,
 };
 use camera_box::genlock_wall_step::WALL_STEP_MIN_NS;
 
 mod genlock_audio_pairing_lift;
-use genlock_audio_pairing_lift::{i64_lit, run_c};
+use genlock_audio_pairing_lift::{compile, i64_lit, lift_block, run_c, run_lines};
 
 const PACKET: u64 = 33_333_333;
 const WALL: u64 = 1_790_000_000_123_456_789;
@@ -473,5 +474,187 @@ fn c_audio_step_scalars_match_the_rust_authority_1381() {
     assert_eq!(
         out, want,
         "issue 1381: a C skew-hold scalar helper diverged from the Rust authority"
+    );
+}
+
+// Issue 1381 (design 5900385541) — the RELABEL decision (`audio_relabel` / `genlock_audio_relabel`)
+// and its two jumps read from the skew-hold state (`audio_step_relabel_jumps` /
+// `genlock_audio_step_relabel_jumps`).
+
+/// A relabelling sender's stamp jump at a wall step: N = floor(S / slot) slots, toward −∞.
+fn relabel_stamp_jump(step_ns: i64) -> i64 {
+    let n = (i128::from(step_ns) * 30).div_euclid(1_000_000_000) as i64;
+    n * 1_000_000_000 / 30
+}
+
+/// Relabels in both shapes on top of the hold script: at each step the stamps jump N slots on the
+/// receiver's step packet (joint) or one packet after it (split: the hold starts on the step packet).
+fn relabel_sequence() -> Vec<Pkt> {
+    let mut v = sequence();
+    clear(&mut v);
+    let mut k: u64 = 1_000_000;
+    let mut off = OFF;
+    let mut shift = 0_i64;
+    let take = |v: &mut Vec<Pkt>, k: &mut u64, off: i64, shift: i64| {
+        let now = MONO + *k * PACKET;
+        let raw = (WALL + *k * PACKET).wrapping_add(shift as u64);
+        v.push((true, off, raw, PACKET, now, false));
+        *k += 1;
+    };
+    for _ in 0..WARM + 5 {
+        take(&mut v, &mut k, off, shift);
+    }
+    for split in [false, true] {
+        for step in [
+            260_000_000_i64,
+            682_474_000,
+            -1_500_000_000,
+            2_500_000_000,
+            -20_000_000,
+            89_703_000,
+            -682_474_000,
+        ] {
+            off -= step;
+            if split {
+                take(&mut v, &mut k, off, shift);
+            }
+            shift += relabel_stamp_jump(step);
+            for _ in 0..5 {
+                take(&mut v, &mut k, off, shift);
+            }
+        }
+    }
+    v
+}
+
+#[test]
+fn c_audio_relabel_matches_the_rust_authority_1381() {
+    let block = lift_block();
+    for helper in [
+        "static inline bool genlock_audio_relabel(",
+        "static inline bool genlock_audio_step_relabel_jumps(",
+    ] {
+        assert!(
+            block.contains(helper),
+            "issue 1381: `{helper}` is no longer inside the contiguous audio-pairing block"
+        );
+    }
+    let p = PACKET as i64;
+    let m = WALL_STEP_MIN_NS;
+    let scalars: Vec<(i64, i64, u64, i64)> = vec![
+        (233_333_333, -260_000_000, PACKET, m),
+        (666_666_666, -682_474_000, PACKET, m),
+        (-1_500_000_000, 1_500_000_000, PACKET, m),
+        (2_500_000_000, -2_500_000_000, PACKET, m),
+        (-33_333_333, 20_000_000, PACKET, m),
+        (0, -682_474_000, PACKET, m),
+        (80_000_000, 0, PACKET, m),
+        (m, -m, PACKET, m),
+        (m + 1, -m - 1, PACKET, m),
+        (m + 1, -m, PACKET, m),
+        (66_666_667, -66_666_667 - p, PACKET, m),
+        (66_666_667, -66_666_667 - p + 1, PACKET, m),
+        (66_666_667, -66_666_667 + p, PACKET, m),
+        (i64::MIN, i64::MIN, u64::MAX, m),
+        (i64::MIN, i64::MAX, 2, 0),
+        (i64::MAX, 1, u64::MAX, i64::MIN),
+        (5, -5, 1, -3),
+    ];
+    let seq = relabel_sequence();
+    let b = |v: bool| u8::from(v);
+    let mut body = String::new();
+    for (sj, oj, pkt, min) in &scalars {
+        body.push_str(&format!(
+            "    printf(\"%d\\n\", genlock_audio_relabel({}, {}, {pkt}ull, {}) ? 1 : 0);\n",
+            i64_lit(*sj),
+            i64_lit(*oj),
+            i64_lit(*min)
+        ));
+    }
+    let tcs: Vec<String> = seq.iter().map(|p| b(p.0).to_string()).collect();
+    let offs: Vec<String> = seq.iter().map(|p| i64_lit(p.1)).collect();
+    let raws: Vec<String> = seq.iter().map(|p| format!("{}ull", p.2)).collect();
+    let pkts: Vec<String> = seq.iter().map(|p| format!("{}ull", p.3)).collect();
+    let nows: Vec<String> = seq.iter().map(|p| format!("{}ull", p.4)).collect();
+    let resets: Vec<String> = seq.iter().map(|p| b(p.5).to_string()).collect();
+    body.push_str(&format!(
+        r#"    static const int tc[] = {{ {} }};
+    static const int64_t off[] = {{ {} }};
+    static const uint64_t raw[] = {{ {} }};
+    static const uint64_t pkt[] = {{ {} }};
+    static const uint64_t now[] = {{ {} }};
+    static const int rst[] = {{ {} }};
+    bool active = false;
+    int64_t prev_off = 0, nominal = 0, held = 0, step = 0;
+    uint64_t prev_raw = 0, prev_pkt = 0, dev_since = 0, start = 0;
+    uint32_t warm = 0;
+    for (size_t i = 0; i < sizeof(tc) / sizeof(tc[0]); i++) {{
+        int64_t sj = 0, oj = 0, use = 0;
+        const bool have = genlock_audio_step_relabel_jumps(active, prev_off, prev_raw, prev_pkt, held, tc[i] != 0,
+                                                           off[i], raw[i], &sj, &oj);
+        const bool rel = have && genlock_audio_relabel(sj, oj, pkt[i], {min}ll);
+        const int release = genlock_audio_step_hold(&active, &prev_off, &prev_raw, &prev_pkt, &nominal, &dev_since,
+                                                    &warm, &held, &start, &step, tc[i] != 0, off[i], raw[i], pkt[i],
+                                                    now[i], rst[i] != 0, {min}ll, &use);
+        printf("%d %lld %lld %d %d %lld\n", have ? 1 : 0, (long long)sj, (long long)oj, rel ? 1 : 0, release,
+               (long long)use);
+    }}
+"#,
+        tcs.join(", "),
+        offs.join(", "),
+        raws.join(", "),
+        pkts.join(", "),
+        nows.join(", "),
+        resets.join(", "),
+        min = WALL_STEP_MIN_NS
+    ));
+    let out = run_lines(&compile(&block, &body, "relabel_1381"));
+    let mut want: Vec<String> = scalars
+        .iter()
+        .map(|&(sj, oj, pkt, min)| u8::from(audio_relabel(sj, oj, pkt, min)).to_string())
+        .collect();
+    let mut s = AudioStepHold::default();
+    let mut relabels = 0;
+    let mut released_by_relabel = 0;
+    for &(tc, off, raw, pkt, now, reset) in &seq {
+        let jumps = audio_step_relabel_jumps(&s, tc, off, raw);
+        let (sj, oj) = jumps.unwrap_or((0, 0));
+        let rel = jumps.is_some() && audio_relabel(sj, oj, pkt, WALL_STEP_MIN_NS);
+        let was_active = s.active;
+        let (use_off, release) =
+            audio_step_hold(&mut s, tc, off, raw, pkt, now, reset, WALL_STEP_MIN_NS);
+        if rel {
+            relabels += 1;
+            // a relabel never starts a hold, and one that ends a running hold ends it FOLLOWED
+            // without a placement
+            assert!(!s.active, "issue 1381: a relabel packet started a hold");
+            if was_active {
+                assert_eq!(release, AudioStepRelease::Followed);
+                assert!(!audio_step_release_places(
+                    release,
+                    audio_step_residual_ns(s.held_off_ns, off),
+                    pkt
+                ));
+                released_by_relabel += 1;
+            }
+        }
+        want.push(format!(
+            "{} {sj} {oj} {} {} {use_off}",
+            u8::from(jumps.is_some()),
+            u8::from(rel),
+            release as u8
+        ));
+    }
+    assert_eq!(out.len(), want.len(), "issue 1381: line count");
+    for (i, (c, r)) in out.iter().zip(&want).enumerate() {
+        assert_eq!(
+            c, r,
+            "issue 1381: the C relabel diverged from the Rust authority at line {i}"
+        );
+    }
+    // the script must reach relabels in both shapes, or the gate proves less than it says
+    assert!(
+        relabels >= 12 && released_by_relabel >= 5,
+        "issue 1381: the script reaches {relabels} relabels, {released_by_relabel} ending a hold"
     );
 }

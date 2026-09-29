@@ -55,6 +55,19 @@ enum Follow {
     Never,
     /// No step at all (steady state).
     NoStep,
+    /// Issue 1381 (design 5900385541): the genlock sender contract's RELABEL (sections 5 and 6,
+    /// SongPlayer #224): one block per boundary, stamped on its boundary; at the step content k is
+    /// stamped on boundary k + N (N = floor(S / slot)) and emitted when the stepped wall reaches that
+    /// boundary -- the samples continuous, the emit re-phased by the remainder r = S − N·slot. The
+    /// video is relabelled the same way, so the TRUE landing moves r earlier.
+    Relabel,
+}
+
+/// Issue 1381 (design 5900385541): the slots a relabelling sender moves its stamps by at a wall step
+/// of `wall_ns`: N = floor(S / slot), toward −∞ (the contract's floor).
+fn relabel_slots(wall_ns: i64) -> i64 {
+    (i128::from(wall_ns) * i128::from(RATE))
+        .div_euclid(i128::from(PACKET_FRAMES) * i128::from(NS_PER_S)) as i64
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -120,6 +133,16 @@ fn step_sender_packets(case: StepCase) -> Vec<Packet> {
                 };
                 (emit, WALL0 + emit, leap)
             }
+            Follow::Relabel => {
+                if nominal < follow_at {
+                    (nominal + jitter, WALL0 + nominal, 0)
+                } else {
+                    let boundary = slot_ns(k.wrapping_add(relabel_slots(case.wall_ns) as u64));
+                    let due = boundary.wrapping_sub(wall).max(follow_at);
+                    let leap = boundary.wrapping_sub(nominal).wrapping_sub(wall);
+                    (due + jitter, WALL0 + boundary, leap)
+                }
+            }
         };
         let extra = if case.burst_jitter_ns > 0 {
             rng.ns(0, case.burst_jitter_ns)
@@ -175,7 +198,20 @@ struct StepRun {
     releases: Vec<(f64, AudioStepRelease)>,
     /// A hold still running at the end.
     holding_at_end: bool,
+    /// Issue 1381 (design 5900385541): packets appended as a relabel after the step.
+    relabels: u32,
+    /// Queued audio overwritten by a placement inside the buffer, dropped by a buffer reset, and the
+    /// zero-filled gap a placement past the end opened -- after the step, ms.
+    overwritten_ms: f64,
+    dropped_ms: f64,
+    gap_ms: f64,
+    /// max |estimated| of the servo after the step (ppm).
+    est_max_ppm: f64,
 }
+
+/// Issue 1381: every packet from the step on -- (landing, appended, the servo's error input bits,
+/// release) -- for a byte-for-byte comparison of two variants.
+type StepTrace = Vec<(u64, bool, u64, u8)>;
 
 impl StepRun {
     fn events(&self) -> usize {
@@ -184,10 +220,17 @@ impl StepRun {
 }
 
 fn run_step(case: StepCase, variant: Variant) -> StepRun {
+    run_step_traced(case, variant).0
+}
+
+fn run_step_traced(case: StepCase, variant: Variant) -> (StepRun, StepTrace) {
     let mut obs = Obs::new(variant);
     let mut r = StepRun::default();
+    let mut trace = StepTrace::new();
     let mut jumps_at_step = None;
     let mut backstops_at_step = 0;
+    // (relabels, overwritten, dropped, gap) at the step
+    let mut losses_at_step = (0_u32, 0_u64, 0_u64, 0_u64);
     let mut continuation: Option<u64> = None;
     let mut first_skip = None;
     let measure_at = recv_step_at(case);
@@ -201,6 +244,7 @@ fn run_step(case: StepCase, variant: Variant) -> StepRun {
             if jumps_at_step.is_none() {
                 jumps_at_step = Some(obs.c.place_jump_count());
                 backstops_at_step = obs.backstops;
+                losses_at_step = (obs.relabels, obs.overwritten_ns, obs.dropped_ns, obs.gap_ns);
             }
         }
         let landed = obs.ingest(&pkt, mono_now, wall, HOLD_MS, dur);
@@ -235,13 +279,24 @@ fn run_step(case: StepCase, variant: Variant) -> StepRun {
             if t + 60 * NS_PER_S >= STEP_RUN_NS {
                 r.av_tail_ms = r.av_tail_ms.max(av_ms.abs());
             }
+            r.est_max_ppm = r.est_max_ppm.max(obs.c.estimated_ppm().abs());
+            trace.push((
+                landed.actual,
+                landed.appended,
+                landed.err_ms.to_bits(),
+                landed.release as u8,
+            ));
         }
         continuation = Some(landed.actual + dur);
     }
     r.jumps =
         obs.c.place_jump_count() - jumps_at_step.unwrap_or(0) - (obs.backstops - backstops_at_step);
     r.holding_at_end = obs.step_hold.active;
-    r
+    r.relabels = obs.relabels - losses_at_step.0;
+    r.overwritten_ms = (obs.overwritten_ns - losses_at_step.1) as f64 / 1e6;
+    r.dropped_ms = (obs.dropped_ns - losses_at_step.2) as f64 / 1e6;
+    r.gap_ms = (obs.gap_ns - losses_at_step.3) as f64 / 1e6;
+    (r, trace)
 }
 
 fn jump(wall_ns: i64, lag_ns: u64) -> StepCase {
@@ -559,6 +614,166 @@ fn a_connect_backlog_never_misreads_a_receiver_step_1381() {
                 && r.jumps == 0
                 && r.av_tail_ms <= AV_BOUND_MS,
             "issue 1381: {case:?}: a connect backlog must not bias the nominal age: {r:?}"
+        );
+    }
+}
+
+// Issue 1381 (design 5900385541) — a sender that RELABELS its stamps at the step (the contract,
+// SongPlayer #224): the receiver appends, never splices or resets.
+
+/// The design's scripted steps: the live +260 ms (29.9 20:58 UTC) and +682 ms, and one past each
+/// OBS limit the relabel must survive (-1.5 s, +2.5 s over the 2 s timestamp-jump reset).
+const RELABEL_STEPS: [i64; 4] = [260_000_000, STEP_682_NS, -1_500_000_000, 2_500_000_000];
+/// The sender relabels within one interval: at once (the stamps and the offset jump on the same
+/// packet) or 20 ms later (the receiver's step packet still carries the old stamp and starts the
+/// hold, the next one releases it -- the split shape the contract's section 6 names).
+const RELABEL_LAGS: [u64; 2] = [0, 20_000_000];
+/// A relabel remainder under the timecode ASRC's booking band (half a packet, 16.7 ms) is never
+/// booked: the level loop alone repays it, measured here at ~725 s for the 15.8 ms of the 682 ms
+/// step (finding on the ticket: the design's "repaid at 1000 ppm in under 33 s" holds only at or
+/// over the band). Pinned so a slower loop fails.
+const SUB_BAND_SETTLE_S: f64 = 900.0;
+
+fn relabel_case(wall_ns: i64, lag_ns: u64) -> StepCase {
+    StepCase {
+        wall_ns,
+        lag_ns,
+        follow: Follow::Relabel,
+        sender_first_ns: 0,
+        burst_jitter_ns: 0,
+        connect_backlog: 0,
+    }
+}
+
+/// The remainder r = S − N·slot of a relabel, ms (0 ≤ r < one slot): how much earlier the true
+/// landing moves than the appended continuation.
+fn remainder_ms(wall_ns: i64) -> f64 {
+    let slot_ns = PACKET_FRAMES as f64 * NS_PER_S as f64 / RATE as f64;
+    (wall_ns as f64 - relabel_slots(wall_ns) as f64 * slot_ns) / 1e6
+}
+
+#[test]
+fn a_relabelling_sender_is_appended_and_its_remainder_repaid_1381() {
+    for wall_ns in RELABEL_STEPS {
+        for lag in RELABEL_LAGS {
+            let case = relabel_case(wall_ns, lag);
+            let r = run_step(case, Variant::Production);
+            let rem = remainder_ms(wall_ns);
+            // zero samples overwritten, dropped or zero-filled: every packet appended back to back
+            assert!(
+                r.relabels == 1
+                    && r.overwritten_ms == 0.0
+                    && r.dropped_ms == 0.0
+                    && r.gap_ms == 0.0
+                    && r.discs.is_empty(),
+                "issue 1381: {case:?}: a relabelled packet must be appended -- never placed r early \
+                 (the live 29.9 splice) and never reset past 2 s: {r:?}"
+            );
+            // the hold never starts on a joint relabel; on the split shape it releases FOLLOWED on
+            // the relabel packet, once
+            assert!(
+                r.releases.len() == usize::from(lag > 0)
+                    && r.releases
+                        .iter()
+                        .all(|x| x.1 == AudioStepRelease::Followed && x.0 < 0.1)
+                    && !r.holding_at_end,
+                "issue 1381: {case:?}: the skew hold must release followed on the relabel packet \
+                 (or never start): {r:?}"
+            );
+            // the placement error is at most r, and the timecode ASRC repays it: a remainder at or
+            // over its booking band (half a packet) is booked and paid at 1000 ppm (r s); one under
+            // it is left to the level loop alone, which the bench pins at its measured pace
+            let booked = rem >= 0.5 * frames_ns(PACKET_FRAMES) as f64 / 1e6;
+            let settle_s = if booked { rem + 5.0 } else { SUB_BAND_SETTLE_S };
+            assert!(
+                r.av_max_ms <= rem + AV_BOUND_MS
+                    && r.jumps == u32::from(booked)
+                    && r.av_settle_s <= settle_s
+                    && r.av_tail_ms <= AV_BOUND_MS,
+                "issue 1381: {case:?}: the audio may trail by at most r = {rem:.1} ms and must be \
+                 back within ±{AV_BOUND_MS} ms of its true landing within {settle_s:.1} s (booked: \
+                 {booked}): {r:?}"
+            );
+            // review round 1: a joint relabel's one short stamp advance (dur − r) never reads as a
+            // rate -- the timecode ASRC's estimate stays on the correct sender's 0 ppm
+            assert!(
+                r.est_max_ppm <= RATE_BOUND_PPM,
+                "issue 1381: {case:?}: the relabel must not move the rate estimate: {r:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn without_the_relabel_the_step_splices_or_resets_the_buffer_1381() {
+    // anti-tautology: the same senders on the path before the relabel append. A stamp jump of 70 ms
+    // or more is placed at its raw landing, r early (r ms of queued audio overwritten, a departure
+    // from the continuation); one over 2 s runs handle_ts_jump and drops the whole queued buffer.
+    for lag in RELABEL_LAGS {
+        for wall_ns in [260_000_000, STEP_682_NS] {
+            let case = relabel_case(wall_ns, lag);
+            let r = run_step(case, Variant::NoRelabel);
+            let rem = remainder_ms(wall_ns);
+            assert!(
+                r.relabels == 0
+                    && (r.overwritten_ms - rem).abs() < 1.0
+                    && r.discs.iter().any(|d| (d.1 + rem).abs() < 1.0),
+                "issue 1381: {case:?}: before the relabel append the packet is placed r = \
+                 {rem:.1} ms early, or the bench proves nothing: {r:?}"
+            );
+        }
+        let over = relabel_case(2_500_000_000, lag);
+        let r = run_step(over, Variant::NoRelabel);
+        assert!(
+            r.dropped_ms > 50.0,
+            "issue 1381: {over:?}: before the relabel append a jump over 2 s resets the whole \
+             queued buffer, or the bench proves nothing: {r:?}"
+        );
+    }
+}
+
+#[test]
+fn a_sender_that_catches_up_or_pauses_takes_todays_path_byte_for_byte_1381() {
+    // the relabel is recognised only when the stamps jumped WITH the wall: a catch-up burst after a
+    // forward step, a pause after a backward one, a sender that never follows and a steady feed are
+    // never read as one, so the bench's ingest runs exactly its path without the relabel -- every
+    // landing, every append/placement, every servo input. (This proves no false relabel on the
+    // model; the shipped C branch is pinned by the lift harness tests/genlock_audio_relabel_ingest_1381.rs.)
+    let mut cases = vec![StepCase {
+        wall_ns: 0,
+        lag_ns: 0,
+        follow: Follow::NoStep,
+        sender_first_ns: 0,
+        burst_jitter_ns: 0,
+        connect_backlog: 0,
+    }];
+    for wall_ns in [STEP_682_NS, -STEP_682_NS, STEP_90_NS, 2_500_000_000] {
+        for lag in [LAG_MIN_NS, LAG_MAX_NS] {
+            cases.push(StepCase {
+                wall_ns,
+                lag_ns: lag,
+                follow: Follow::Burst,
+                sender_first_ns: 0,
+                burst_jitter_ns: 0,
+                connect_backlog: 0,
+            });
+        }
+    }
+    cases.push(StepCase {
+        wall_ns: STEP_682_NS,
+        lag_ns: 0,
+        follow: Follow::Never,
+        sender_first_ns: 0,
+        burst_jitter_ns: 0,
+        connect_backlog: 0,
+    });
+    for case in cases {
+        let (prod, prod_trace) = run_step_traced(case, Variant::Production);
+        let (before, before_trace) = run_step_traced(case, Variant::NoRelabel);
+        assert!(
+            prod.relabels == 0 && prod_trace.len() > 1000 && prod_trace == before_trace,
+            "issue 1381: {case:?}: a sender whose stamps never jumped with the wall must take \
+             today's path byte for byte: {prod:?} vs {before:?}"
         );
     }
 }

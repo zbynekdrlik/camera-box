@@ -221,6 +221,67 @@ pub fn audio_step_hold(
     (s.held_off_ns, AudioStepRelease::None)
 }
 
+/// Issue 1381 (design 5900385541) — is this timecode packet a RELABEL: did the sender's stamps jump
+/// WITH a wall step, so that its landing moved by less than one packet?
+///
+/// At a date step of S a sender that follows the genlock sender contract (sections 5 and 6) relabels
+/// its stamps by N = floor(S / slot) slots within one interval while its samples stay continuous. The
+/// live wall→mono offset jumps by −S at the same time, so the packet's intended landing moves only by
+/// −r (r = S − N·slot, under one slot = one block). Stock OBS still turns that into a loss: a stamp
+/// jump of 70 ms or more is PLACED r early (r ms of queued audio overwritten), one over 2 s resets the
+/// whole buffer. A relabel is instead APPENDED, and the timecode ASRC books the −r as ordinary
+/// placement error.
+///
+/// - `stamp_jump_ns`: the raw stamp against the continuous timeline (the previous packet's stamp plus
+///   its duration);
+/// - `off_jump_ns`: the live offset against the offset the previous packet was mapped through
+///   ([`audio_step_relabel_jumps`]).
+///
+/// True when BOTH moved by more than `step_min_ns` (the render tick's `GENLOCK_WALL_STEP_MIN_NS`: a
+/// steady packet has neither, a sender whose stamps leap without a wall step has no offset jump, a
+/// catch-up or a pause has no stamp jump) and they cancel to strictly under one packet. Every
+/// arithmetic wraps in two's complement, like the C mirror `genlock_audio_relabel`.
+pub fn audio_relabel(
+    stamp_jump_ns: i64,
+    off_jump_ns: i64,
+    packet_ns: u64,
+    step_min_ns: i64,
+) -> bool {
+    let min = step_min_ns.unsigned_abs();
+    stamp_jump_ns.unsigned_abs() > min
+        && off_jump_ns.unsigned_abs() > min
+        && stamp_jump_ns.wrapping_add(off_jump_ns).unsigned_abs() < packet_ns
+}
+
+/// Issue 1381 (design 5900385541) — the two jumps [`audio_relabel`] reads, from the skew-hold state
+/// BEFORE [`audio_step_hold`] takes this packet: `(stamp_jump_ns, off_jump_ns)`.
+///
+/// - the stamp jump is the raw stamp against the previous packet's stamp plus its duration;
+/// - the offset jump is the live offset against the offset the previous packet was MAPPED through:
+///   the held one while a hold runs, the previous live one otherwise.
+///
+/// A relabel that arrives one packet after the receiver's step (the hold started on the packet before,
+/// whose stamp had not moved yet: the split shape the contract names) therefore reads the whole step,
+/// and the sum of the two is exactly the residual the hold releases that packet with. `None` outside
+/// timecode mode or with no previous timecode packet. Mirror of `genlock_audio_step_relabel_jumps`.
+pub fn audio_step_relabel_jumps(
+    s: &AudioStepHold,
+    timecode: bool,
+    off_live_ns: i64,
+    raw_ts_ns: u64,
+) -> Option<(i64, i64)> {
+    if !timecode || s.prev_packet_ns == 0 {
+        return None;
+    }
+    let stamp_jump_ns = raw_ts_ns.wrapping_sub(s.prev_raw_ns.wrapping_add(s.prev_packet_ns)) as i64;
+    let mapped_ns = if s.active {
+        s.held_off_ns
+    } else {
+        s.prev_off_ns
+    };
+    Some((stamp_jump_ns, off_live_ns.wrapping_sub(mapped_ns)))
+}
+
 /// Issue 1381 (review round 1) — one packet outside a hold moves the nominal age. In the warm-up after
 /// the seed it follows by 1/[`AUDIO_STEP_NOMINAL_WARM_DIV`], in band or not (review round 2). After
 /// it: in band (within one packet) by 1/[`AUDIO_STEP_NOMINAL_GAIN_DIV`]; out of band it is left

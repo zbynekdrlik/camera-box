@@ -219,9 +219,18 @@ load-bearing: a genlock receiver input runs its ASRC in TIMECODE mode (camera-bo
 places each packet at its stamp, and a boundary stamp is steadier than a submission-instant stamp,
 which carries the sender's scheduling jitter. At a wall-clock step (§5) such a sender relabels its
 audio stamps with the video (the same N slots) while the samples stay continuous; the receiver's
-audio hold then releases `followed` with a residual under one block. Closing that residual, and the
-whole-buffer reset stock OBS applies to a jump over 2 s, is the receiver's job (camera-box issue
-1381). A sender whose chunks do not line up with
+audio hold then releases `followed` with a residual under one block. The receiver APPENDS such a
+packet: a relabel continues the source's timeline, so neither stock OBS's 70 ms re-placement nor its
+whole-buffer reset past 2 s fires, and its timecode ASRC repays the residual (booked at 1000 ppm from
+max(half a block, 10 ms) up, by its level loop below that; camera-box issue 1381,
+`genlock_audio_relabel` in `vendor/obs-studio/libobs/obs-source.c`). The receiver recognises a
+relabel only when its own step is seen on the same packet as the relabelled stamps or before them
+(while its skew hold runs, at most 10 s). That is always the case for a sender on the receiver's own
+box, which shares its clock. A sender whose box steps FIRST is not recognised: its stamp jump takes
+the stock OBS path (appended under 70 ms, placed N slots late with a zero-filled gap from 70 ms to
+2 s, the whole queued buffer dropped over 2 s), and the receiver's later step is then placed once by
+the skew hold, which overwrites queued audio. That case is a known gap, reported as a follow-up on
+issue 1381. A sender whose chunks do not line up with
 boundaries **MUST** keep the raw submission wall clock (SongPlayer 0.69.0-dev.10 / its issue 224
 stamps its paced blocks on their boundary, camera-box issue 1294). Samples
 **MUST** be delivered at real-time rate (`samples_per_boundary = 48000 · interval_seconds`); a

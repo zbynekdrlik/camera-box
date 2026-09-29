@@ -671,10 +671,10 @@ pub fn audio_stamp_interval_s(prev_ns: u64, now_ns: u64) -> f64 {
 #[path = "genlock_audio_step_hold.rs"]
 mod step_hold;
 pub use step_hold::{
-    audio_stamp_age_ns, audio_step_freezes_video, audio_step_hold, audio_step_release_places,
-    audio_step_residual_ns, AudioStepHold, AudioStepRelease, AUDIO_STEP_HOLD_MAX_NS,
-    AUDIO_STEP_NOMINAL_GAIN_DIV, AUDIO_STEP_NOMINAL_REANCHOR_NS, AUDIO_STEP_NOMINAL_WARM_DIV,
-    AUDIO_STEP_NOMINAL_WARM_PACKETS,
+    audio_relabel, audio_stamp_age_ns, audio_step_freezes_video, audio_step_hold,
+    audio_step_relabel_jumps, audio_step_release_places, audio_step_residual_ns, AudioStepHold,
+    AudioStepRelease, AUDIO_STEP_HOLD_MAX_NS, AUDIO_STEP_NOMINAL_GAIN_DIV,
+    AUDIO_STEP_NOMINAL_REANCHOR_NS, AUDIO_STEP_NOMINAL_WARM_DIV, AUDIO_STEP_NOMINAL_WARM_PACKETS,
 };
 
 /// The audio-parity health of one genlocked source — the reason the LOCK indicator DEGRADES on the
