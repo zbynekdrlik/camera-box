@@ -16,9 +16,11 @@ What this pins:
     lib so setup-strih.sh stays under its 1000-line budget), run against a temp root through its path
     seams with a fake `systemctl` on PATH that logs its argv: a second run on an unchanged unit issues
     no restart and removes no lock; a changed unit restarts exactly once, AFTER the reload of the
-    written unit; a unit on disk that systemd has not loaded counts as a change; a stopped daemon is
-    started and only then is the stale lock cleared, and never while a process holds it; an unreadable
-    unit or a missing helper fails closed, never towards a restart.
+    written unit; a pending manager reload (NeedDaemonReload, manager-wide) reloads but never restarts;
+    a running process whose command line is not the unit's ExecStart is restarted on the reloaded unit;
+    a stopped daemon is started and only then is the stale lock cleared, and never while a process
+    holds it; an unreadable unit, an unreadable command line or a missing helper fails closed, never
+    towards a restart; an operator-masked unit is left alone.
 
 Tier-0: bash + pytest only (no cargo, no root, no rig). The caller is run by SOURCING setup-strih.sh
 (which sources the lib), whose source-guard stops before the provisioning flow, so the tests
@@ -26,6 +28,7 @@ exercise the real function through the real wiring.
 """
 import os
 import re
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -142,30 +145,60 @@ def test_dropins_present_only_counts_conf_files(tmp_path):
     assert _bash(DS_LIB, body, env).returncode == 0, "a *.conf file is a drop-in"
 
 
-def _verdict(want, unit, dropin, need_reload):
+def _verdict(want, unit, dropin, argv):
     r = _bash(DS_LIB, 'rc=0; strih_dantesync_unit_verdict "$W" "$U" "$D" "$N" || rc=$?; echo; echo "rc=$rc"',
-              env={"W": want, "U": str(unit), "D": str(dropin), "N": need_reload})
+              env={"W": want, "U": str(unit), "D": str(dropin), "N": argv})
     lines = r.stdout.splitlines()
     return lines[0].strip() if lines else "", lines[-1] if lines else ""
 
 
-def test_unit_verdict_grades_content_dropin_and_loaded_state(tmp_path):
+def test_unit_verdict_grades_content_dropin_and_the_running_command(tmp_path):
     want = _unit_text().rstrip("\n")
     unit = tmp_path / "dantesync.service"
     dropin = tmp_path / "dantesync.service.d"
-    assert _verdict(want, unit, dropin, "no") == ("differs", "rc=1"), "a missing unit differs"
+    assert _verdict(want, unit, dropin, "/usr/local/bin/dantesync") == ("differs", "rc=1"), "a missing unit differs"
     unit.write_text(_unit_text())
-    assert _verdict(want, unit, dropin, "no") == ("ok", "rc=0")
-    assert _verdict(want, unit, dropin, "") == ("ok", "rc=0"), "an unread NeedDaemonReload is not a fault"
-    assert _verdict(want, unit, dropin, "yes") == ("not-loaded", "rc=1"), "a pending daemon-reload"
+    assert _verdict(want, unit, dropin, "/usr/local/bin/dantesync") == ("ok", "rc=0")
+    assert _verdict(want, unit, dropin, "") == ("ok", "rc=0"), "no readable process = not graded here"
+    assert _verdict(want, unit, dropin, "/usr/local/bin/dantesync --ntp-server strih.lan") == ("not-applied", "rc=1"), \
+        "a process that does not run the unit's ExecStart"
     dropin.mkdir()
     (dropin / "10-x.conf").write_text("[Service]\n")
-    assert _verdict(want, unit, dropin, "no") == ("dropin", "rc=1")
+    assert _verdict(want, unit, dropin, "/usr/local/bin/dantesync") == ("dropin", "rc=1")
     unit.write_text(_unit_text().replace("RestartSec=5", "RestartSec=6"))
-    assert _verdict(want, unit, dropin, "yes") == ("differs", "rc=1"), "content is graded first"
-    r = _bash(DS_LIB, 'cmp() { return 2; }\nrc=0; strih_dantesync_unit_verdict "$W" "$U" "$D" no || rc=$?; '
+    assert _verdict(want, unit, dropin, "x") == ("differs", "rc=1"), "content is graded first"
+    r = _bash(DS_LIB, 'cmp() { return 2; }\nrc=0; strih_dantesync_unit_verdict "$W" "$U" "$D" "" || rc=$?; '
               'echo; echo "rc=$rc"', env={"W": want, "U": str(unit), "D": str(dropin)})
     assert r.stdout.splitlines()[0].strip() == "unreadable", r.stdout
+
+
+def test_exec_start_reads_the_units_last_execstart():
+    r = _bash(LIB, '. "$DSL"\nstrih_dantesync_exec_start "$(strih_dantesync_unit_text client "--ntp-server strih.lan")"',
+              env={"DSL": str(DS_LIB)})
+    assert r.stdout.strip() == "%s --ntp-server strih.lan" % SERVER_EXEC, r.stdout + r.stderr
+    r = _bash(DS_LIB, 'strih_dantesync_exec_start "$(printf "ExecStart=\\nExecStart=/a b\\n")"')
+    assert r.stdout.strip() == "/a b", r.stdout
+
+
+def test_running_argv_reads_the_main_pid_cmdline(tmp_path):
+    proc = tmp_path / "proc" / "4242"
+    proc.mkdir(parents=True)
+    (proc / "cmdline").write_bytes(b"/usr/local/bin/dantesync\x00--ntp-server\x00strih.lan\x00")
+    fake = tmp_path / "fakebin"
+    fake.mkdir()
+    sc = fake / "systemctl"
+    sc.write_text('#!/usr/bin/env bash\n[ "$3" = MainPID ] && cat "$PIDF"\nexit 0\n')
+    sc.chmod(0o755)
+    pidf = tmp_path / "pid"
+    env = {"PATH": "%s:%s" % (fake, os.environ.get("PATH", "")), "PIDF": str(pidf),
+           "STRIH_DANTESYNC_PROC": str(tmp_path / "proc")}
+    pidf.write_text("4242\n")
+    r = _bash(DS_LIB, 'strih_dantesync_running_argv; echo "rc=$?"', env=env)
+    assert r.stdout.splitlines()[0] == "/usr/local/bin/dantesync --ntp-server strih.lan", r.stdout
+    for pid in ("0\n", "", "abc\n", "999\n"):  # not running, unread, garbage, no such process
+        pidf.write_text(pid)
+        r = _bash(DS_LIB, 'out="$(strih_dantesync_running_argv)" || echo FAIL; echo "[$out]"', env=env)
+        assert "FAIL" in r.stdout and "[]" in r.stdout, (pid, r.stdout)
 
 
 # --- the setup-strih caller, against a temp root + a fake systemctl --------------------------
@@ -184,6 +217,8 @@ class Box:
         self.enabled = tmp_path / "systemctl.enabled"
         self.snap = tmp_path / "unit-at-daemon-reload"
         self.need_reload = tmp_path / "systemctl.need-reload"
+        self.mainpid = tmp_path / "systemctl.mainpid"
+        self.proc = tmp_path / "proc"
         fake_dir = tmp_path / "fakebin"
         for p in (self.unit.parent, self.lock.parent, self.bin.parent, fake_dir):
             p.mkdir(parents=True, exist_ok=True)
@@ -197,7 +232,10 @@ class Box:
             '  enable) : > "$FAKE_SC_ENABLED" ;;\n'
             '  start|restart) echo active > "$FAKE_SC_STATE" ;;\n'
             '  daemon-reload) cp "$FAKE_SC_UNIT" "$FAKE_SC_SNAP" 2>/dev/null; rm -f "$FAKE_SC_NEED_RELOAD" ;;\n'
-            '  show) cat "$FAKE_SC_NEED_RELOAD" 2>/dev/null ;;\n'
+            '  show) case "$3" in\n'
+            '          NeedDaemonReload) cat "$FAKE_SC_NEED_RELOAD" 2>/dev/null ;;\n'
+            '          MainPID) cat "$FAKE_SC_MAINPID" 2>/dev/null ;;\n'
+            '        esac ;;\n'
             "esac\n"
             "exit 0\n")
         sc.chmod(0o755)
@@ -208,10 +246,22 @@ class Box:
         self.bin.chmod(0o755)
         return self
 
-    def set_active(self, active):
+    def set_active(self, active, argv=("/usr/local/bin/dantesync",)):
         self.state.write_text("active\n" if active else "inactive\n")
         if active:
             self.enabled.write_text("")  # a running provisioned daemon is enabled too
+            self.set_running(argv)
+        return self
+
+    def set_running(self, argv):
+        """The running daemon's MainPID + /proc/<pid>/cmdline (argv None = no readable process)."""
+        if argv is None:
+            if self.mainpid.exists():
+                self.mainpid.unlink()
+            return self
+        (self.proc / "4242").mkdir(parents=True, exist_ok=True)
+        (self.proc / "4242" / "cmdline").write_bytes(b"".join(a.encode() + b"\x00" for a in argv))
+        self.mainpid.write_text("4242\n")
         return self
 
     def set_need_reload(self):
@@ -234,6 +284,8 @@ class Box:
             "FAKE_SC_UNIT": str(self.unit),
             "FAKE_SC_SNAP": str(self.snap),
             "FAKE_SC_NEED_RELOAD": str(self.need_reload),
+            "FAKE_SC_MAINPID": str(self.mainpid),
+            "STRIH_DANTESYNC_PROC": str(self.proc),
             "STRIH_DANTESYNC_UNIT": str(self.unit),
             "STRIH_DANTESYNC_DROPIN_DIR": str(self.dropin),
             "STRIH_DANTESYNC_LOCK": str(self.lock),
@@ -333,9 +385,9 @@ def test_an_empty_dropin_dir_is_not_a_change(tmp_path):
     assert KEEP_LINE in r.stdout, r.stdout
 
 
-def test_a_unit_systemd_has_not_loaded_counts_as_a_change(tmp_path):
-    # A run killed (or a daemon-reload that failed) after the write leaves the new unit on disk but
-    # not loaded; the next run must not read that as "unchanged" and keep the old config running.
+def test_a_pending_manager_reload_reloads_but_never_restarts(tmp_path):
+    # NeedDaemonReload is manager-wide: an unrelated unit left un-reloaded, or a touched identical
+    # dantesync unit, reads yes. The master runs the unit's ExecStart, so it must NOT be restarted.
     box = Box(tmp_path).with_binary().set_active(True).set_need_reload()
     box.unit.write_text(_unit_text())
     mtime = box.unit.stat().st_mtime_ns
@@ -343,10 +395,58 @@ def test_a_unit_systemd_has_not_loaded_counts_as_a_change(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     calls = box.calls()
     assert _count(calls, "daemon-reload") == 1, calls
+    assert not any(c.startswith(("restart", "start")) for c in calls), calls
+    assert box.unit.stat().st_mtime_ns == mtime, "the matching unit on disk is not rewritten"
+    assert KEEP_LINE in r.stdout, r.stdout
+
+
+def test_a_process_not_running_the_units_execstart_is_restarted_on_the_reloaded_unit(tmp_path):
+    # A run killed after the write (or after the reload) left the daemon on its OLD command line:
+    # the unit on disk matches, yet the process does not run it.
+    box = Box(tmp_path).with_binary().set_active(True, argv=("/usr/local/bin/dantesync", "--ntp-server",
+                                                              "strih.lan"))
+    box.unit.write_text(_unit_text())
+    r = box.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    calls = box.calls()
+    assert _count(calls, "daemon-reload") == 1, calls
     assert _count(calls, "restart dantesync") == 1, calls
     assert calls.index("daemon-reload") < calls.index("restart dantesync"), calls
-    assert box.unit.stat().st_mtime_ns == mtime, "the matching unit on disk is not rewritten"
-    assert "unit not loaded" in r.stdout, r.stdout
+    assert "not the unit's ExecStart" in r.stdout, r.stdout
+
+
+def test_an_unreadable_running_command_line_keeps_it_running(tmp_path):
+    box = Box(tmp_path).with_binary().set_active(True, argv=None)
+    box.unit.write_text(_unit_text())
+    r = box.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not any(c.startswith(("restart", "start", "daemon-reload")) for c in box.calls()), box.calls()
+    assert "could not read the running dantesync" in r.stdout + r.stderr, r.stdout + r.stderr
+    assert KEEP_LINE in r.stdout, r.stdout
+
+
+def test_an_operator_masked_unit_is_left_alone(tmp_path):
+    box = Box(tmp_path).with_binary().set_active(False)
+    box.unit.symlink_to("/dev/null")
+    r = box.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not any(c.startswith(("restart", "start", "daemon-reload", "enable")) for c in box.calls()), \
+        box.calls()
+    assert box.unit.is_symlink() and os.readlink(box.unit) == "/dev/null", "the mask stays"
+    assert "masked" in r.stdout + r.stderr, r.stdout + r.stderr
+
+
+def test_a_temp_unit_left_by_a_killed_run_is_swept(tmp_path):
+    box = Box(tmp_path).with_binary().set_active(True)
+    box.unit.write_text(_unit_text())
+    left = box.unit.parent / ".dantesync.service.Ab12Cd"
+    left.write_text("half")
+    other = box.unit.parent / "other.service"
+    other.write_text("x")
+    r = box.run()
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not left.exists(), "the killed run's temp unit is removed"
+    assert other.exists(), "nothing else in the unit dir is touched"
 
 
 def test_an_unreadable_unit_fails_closed_never_towards_a_restart(tmp_path):
@@ -375,7 +475,7 @@ def test_a_lock_a_process_still_holds_is_never_removed(tmp_path):
     box = Box(tmp_path).with_binary().set_active(False)
     box.unit.write_text(_unit_text())
     box.lock.write_text("")
-    holder = subprocess.Popen(["flock", str(box.lock), "sleep", "30"])
+    holder = subprocess.Popen(["flock", str(box.lock), "sleep", "30"], start_new_session=True)
     try:
         deadline = time.time() + 5
         while time.time() < deadline:
@@ -385,7 +485,7 @@ def test_a_lock_a_process_still_holds_is_never_removed(tmp_path):
             time.sleep(0.05)
         r = box.run()
     finally:
-        holder.kill()
+        os.killpg(holder.pid, signal.SIGKILL)  # flock AND its sleep child, which holds the lock fd
         holder.wait()
     assert r.returncode == 0, r.stdout + r.stderr
     assert box.lock.exists(), "a held lock is kept"
@@ -407,7 +507,8 @@ def test_no_binary_installs_the_unit_but_starts_nothing(tmp_path):
 
 def test_the_client_role_follows_the_same_rule(tmp_path):
     args = "--ntp-server strih.lan"
-    box = Box(tmp_path).with_binary().set_active(True)
+    box = Box(tmp_path).with_binary().set_active(True, argv=("/usr/local/bin/dantesync", "--ntp-server",
+                                                              "strih.lan"))
     box.unit.write_text(_unit_text("client", args))
     r = box.run("client", args)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -441,7 +542,7 @@ def test_setup_strih_step2_goes_through_the_caller():
     assert "rm -f /var/run/dantesync.lock" not in s + lib, "the unconditional lock removal is gone"
     assert lib.count('rm -f "$lock"') == 1 and 'rm -f "$lock"' in body
     assert 'flock -n "$lock"' in body, "the lock is removed only when no process holds it"
-    assert "NeedDaemonReload" in body
+    assert "NeedDaemonReload" in body and "strih_dantesync_running_argv" in body
 
 
 def test_verify_strih_sources_the_dantesync_lib_before_its_guard():
@@ -456,15 +557,17 @@ def test_verify_strih_grades_the_unit_content_read_only():
     start = v.index("# 6c) dantesync UNIT content")
     item = v[start:v.index("# 30)", start)]
     assert "strih_dantesync_unit_verdict" in item
-    assert "NeedDaemonReload" in item
+    assert "strih_dantesync_running_argv" in item
+    assert "NeedDaemonReload" not in item, "a manager-wide flag never grades THIS unit"
     assert "(dantesync-unit)" in item
     assert not re.search(r"systemctl\s+(restart|start|stop|daemon-reload)", item), \
         "the acceptance gate is read-only: it never restarts the date master"
 
 
-def _verify_item(tmp_path, unit, need_reload):
+def _verify_item(tmp_path, unit, argv):
     """Run verify-strih item 6c's REAL text (only its unit path moved to UNIT) under the caller's
-    set -euo pipefail, with a fake systemctl answering `show`. Returns the PASS/FAIL line."""
+    set -euo pipefail, with a fake systemctl answering `show -p MainPID` and a fake /proc holding the
+    running command line ARGV (a list; None = no process). Returns the PASS/FAIL line."""
     v = VERIFY.read_text()
     start = v.index("# 6c) dantesync UNIT content")
     block = v[start:v.index("# 30)", start)]
@@ -474,13 +577,19 @@ def _verify_item(tmp_path, unit, need_reload):
     fake = tmp_path / "fakebin"
     fake.mkdir(exist_ok=True)
     sc = fake / "systemctl"
-    sc.write_text('#!/usr/bin/env bash\n[ "$1" = show ] && printf "%%s\\n" "%s"\nexit 0\n' % need_reload)
+    proc = tmp_path / "proc"
+    pid = ""
+    if argv is not None:
+        (proc / "77").mkdir(parents=True, exist_ok=True)
+        (proc / "77" / "cmdline").write_bytes(b"".join(a.encode() + b"\x00" for a in argv))
+        pid = "77"
+    sc.write_text('#!/usr/bin/env bash\n[ "$3" = MainPID ] && echo "%s"\nexit 0\n' % pid)
     sc.chmod(0o755)
     harness = ('set -euo pipefail\n. "$LIBP"\n. "$DSLIB"\n'
                'ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nDS_ROLE_V=server\n'
                + block + '\necho END\n')
     r = subprocess.run(["bash", "-c", harness], capture_output=True, text=True, cwd=str(REPO), timeout=60,
-                       env=dict(os.environ, LIBP=str(LIB), DSLIB=str(DS_LIB),
+                       env=dict(os.environ, LIBP=str(LIB), DSLIB=str(DS_LIB), STRIH_DANTESYNC_PROC=str(proc),
                                 PATH="%s:%s" % (fake, os.environ.get("PATH", "/usr/bin:/bin"))))
     assert r.returncode == 0 and r.stdout.strip().endswith("END"), r.stdout + r.stderr
     return r.stdout.strip().splitlines()[0]
@@ -488,10 +597,12 @@ def _verify_item(tmp_path, unit, need_reload):
 
 def test_verify_item_6c_runs_under_set_e_and_grades_each_state(tmp_path):
     unit = tmp_path / "dantesync.service"
-    assert _verify_item(tmp_path, unit, "no").startswith("FAIL (dantesync-unit)"), "missing"
+    runs = ["/usr/local/bin/dantesync"]
+    assert _verify_item(tmp_path, unit, runs).startswith("FAIL (dantesync-unit)"), "missing"
     unit.write_text(_unit_text())
-    assert _verify_item(tmp_path, unit, "no").startswith("PASS (dantesync-unit)"), "a kept daemon passes"
-    assert "not loaded" in _verify_item(tmp_path, unit, "yes")
+    assert _verify_item(tmp_path, unit, runs).startswith("PASS (dantesync-unit)"), "a kept daemon passes"
+    assert _verify_item(tmp_path, unit, None).startswith("PASS (dantesync-unit)"), "items 6/6b grade liveness"
+    assert "not the unit's ExecStart" in _verify_item(tmp_path, unit, runs + ["--ntp-server", "strih.lan"])
     (tmp_path / "dantesync.service.d").mkdir()
     (tmp_path / "dantesync.service.d" / "10-x.conf").write_text("[Service]\n")
-    assert "drop-in" in _verify_item(tmp_path, unit, "no")
+    assert "drop-in" in _verify_item(tmp_path, unit, runs)
