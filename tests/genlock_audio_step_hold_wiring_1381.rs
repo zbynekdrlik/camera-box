@@ -333,3 +333,20 @@ fn the_step_hold_log_line_is_null_safe_1381() {
         "issue 1381: the step-hold log line must not pass a NULL name to %s"
     );
 }
+
+#[test]
+fn a_step_placement_lands_on_the_raw_stamp_and_the_render_check_is_cheap_1381() {
+    // review round 2: a step placement lands at the packet's raw-stamp landing (genlock_intended_ns);
+    // at the smoothed timestamp a sub-70 ms step whose stamp jump OBS snapped landed the step early.
+    // And the render thread reads the clock only while a hold runs (up to three calls per source per
+    // tick otherwise).
+    let src = squish(&read(OBS_SOURCE));
+    assert!(
+        src.contains("genlock_asrc_tc, push_back, sample_rate, in.timestamp, genlock_intended_ns)) { push_back = false; in.timestamp = genlock_intended_ns; }"),
+        "issue 1381: a step placement must land at genlock_intended_ns"
+    );
+    assert!(
+        src.contains("static bool genlock_audio_step_video_frozen(const obs_source_t *source) { return source->genlock_audio_step_active && genlock_audio_step_freezes_video(true, source->genlock_audio_step_start_ns, os_gettime_ns()); }"),
+        "issue 1381: the render-thread helper must test the flag before it reads the clock"
+    );
+}

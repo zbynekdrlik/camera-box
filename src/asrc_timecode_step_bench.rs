@@ -67,6 +67,9 @@ struct StepCase {
     sender_first_ns: u64,
     /// Review round 1: extra arrival jitter, uniform 0..this (0 = the default 2-5 ms delivery only).
     burst_jitter_ns: u64,
+    /// Review round 2: this many packets were queued when the receiver connected (they arrive together
+    /// with the next one, so the first packets read older than the steady transport lag).
+    connect_backlog: usize,
 }
 
 /// When the receiver's own wall steps.
@@ -132,6 +135,12 @@ fn step_sender_packets(case: StepCase) -> Vec<Packet> {
             arrival_ns,
         });
         k += 1;
+    }
+    if case.connect_backlog > 0 && case.connect_backlog < out.len() {
+        let at = out[case.connect_backlog].arrival_ns;
+        for p in out.iter_mut().take(case.connect_backlog) {
+            p.arrival_ns = at;
+        }
     }
     out
 }
@@ -242,6 +251,7 @@ fn jump(wall_ns: i64, lag_ns: u64) -> StepCase {
         follow: Follow::Jump,
         sender_first_ns: 0,
         burst_jitter_ns: 0,
+        connect_backlog: 0,
     }
 }
 
@@ -280,6 +290,7 @@ fn the_89_7_ms_step_costs_at_most_one_event_and_is_never_late_1381() {
                 follow,
                 sender_first_ns: 0,
                 burst_jitter_ns: 0,
+                connect_backlog: 0,
             };
             let r = run_step(case, Variant::Production);
             let released_s = r.releases.first().map_or(0.0, |x| x.0);
@@ -328,6 +339,7 @@ fn a_sender_that_catches_up_is_released_at_once_and_one_that_never_follows_at_th
                 follow: Follow::Burst,
                 sender_first_ns: 0,
                 burst_jitter_ns: 0,
+                connect_backlog: 0,
             };
             let r = run_step(case, Variant::Production);
             let caught_up_s = (lag as f64 + wall_ns.min(0).unsigned_abs() as f64) / 1e9;
@@ -357,6 +369,7 @@ fn a_sender_that_catches_up_is_released_at_once_and_one_that_never_follows_at_th
         follow: Follow::Never,
         sender_first_ns: 0,
         burst_jitter_ns: 0,
+        connect_backlog: 0,
     };
     let r = run_step(never, Variant::Production);
     assert!(
@@ -380,6 +393,7 @@ fn steady_state_and_a_small_step_never_hold_1381() {
             follow: Follow::NoStep,
             sender_first_ns: 0,
             burst_jitter_ns: 0,
+            connect_backlog: 0,
         },
         Variant::Production,
     );
@@ -402,15 +416,38 @@ fn a_sender_that_stepped_first_costs_one_placement_at_the_receiver_step_1381() {
     // so the receiver's step puts them back on its wall: nothing held, the receiver-step packet
     // released at once and placed (one event, nothing booked), the audio on its true landing within
     // 0.2 s of the receiver's step -- for a step under the owed cap too (appended, it would be booked
-    // and paid over ~90 s with a 70 ms TS-smoothing re-placement on the way).
-    for follow in [Follow::Jump, Follow::Burst] {
-        for wall_ns in [STEP_682_NS, -STEP_682_NS, STEP_90_NS] {
+    // and paid over ~90 s with a 70 ms TS-smoothing re-placement on the way). Review round 2: a step
+    // between one packet and the 70 ms TS-smoothing threshold, whose stamp jump OBS snapped onto the
+    // continuous timeline, must be placed at the packet's raw-stamp landing (at the smoothed timestamp
+    // it landed the step early and booked it again); and a step over OBS's 2 s timestamp-jump limit
+    // (dantesync's daily bound allows 3 s) must not re-seed the nominal at the timeline reset.
+    let sub_70 = [
+        35_000_000_i64,
+        50_000_000,
+        65_000_000,
+        -50_000_000,
+        -65_000_000,
+    ];
+    let over_2s = [2_500_000_000_i64, -2_500_000_000];
+    let cases = [STEP_682_NS, -STEP_682_NS, STEP_90_NS]
+        .iter()
+        .chain(sub_70.iter())
+        .chain(over_2s.iter())
+        .map(|&w| (Follow::Jump, w))
+        .chain(
+            [STEP_682_NS, -STEP_682_NS, STEP_90_NS, 50_000_000]
+                .iter()
+                .map(|&w| (Follow::Burst, w)),
+        );
+    for (follow, wall_ns) in cases {
+        {
             let case = StepCase {
                 wall_ns,
                 lag_ns: 0,
                 follow,
                 sender_first_ns: 2 * NS_PER_S,
                 burst_jitter_ns: 0,
+                connect_backlog: 0,
             };
             let r = run_step(case, Variant::Production);
             assert!(
@@ -450,6 +487,7 @@ fn heavy_arrival_jitter_bounds_a_small_step_to_two_events_1381() {
             follow,
             sender_first_ns: 0,
             burst_jitter_ns: 20_000_000,
+            connect_backlog: 0,
         };
         let r = run_step(case, Variant::Production);
         let pay_s = wall_ns.unsigned_abs() as f64 / 1e6;
@@ -475,6 +513,7 @@ fn heavy_arrival_jitter_bounds_a_small_step_to_two_events_1381() {
             follow: Follow::NoStep,
             sender_first_ns: 0,
             burst_jitter_ns: 20_000_000,
+            connect_backlog: 0,
         },
         Variant::Production,
     );
@@ -482,4 +521,39 @@ fn heavy_arrival_jitter_bounds_a_small_step_to_two_events_1381() {
         steady.events() == 0 && steady.releases.is_empty(),
         "issue 1381: a steady feed under 20 ms arrival jitter never holds: {steady:?}"
     );
+}
+
+#[test]
+fn a_connect_backlog_never_misreads_a_receiver_step_1381() {
+    // review round 2: two packets queued at connect make the first packets read ~2 slots older than
+    // the steady transport lag. The nominal age must not keep that seed: a receiver-first step 300 s
+    // later is held until the stamps follow (a jumping sender: no event), or released at the catch-up
+    // (a bursting sender: one placement) -- never read as a sender that stepped first.
+    for (wall_ns, follow) in [
+        (50_000_000_i64, Follow::Jump),
+        (STEP_682_NS, Follow::Jump),
+        (50_000_000, Follow::Burst),
+        (STEP_682_NS, Follow::Burst),
+    ] {
+        let case = StepCase {
+            wall_ns,
+            lag_ns: LAG_MIN_NS,
+            follow,
+            sender_first_ns: 0,
+            burst_jitter_ns: 0,
+            connect_backlog: 2,
+        };
+        let r = run_step(case, Variant::Production);
+        let lag_s = LAG_MIN_NS as f64 / 1e9;
+        let events = if follow == Follow::Jump { 0 } else { 1 };
+        assert!(
+            r.releases.len() == 1
+                && r.releases[0].1 == AudioStepRelease::Followed
+                && (r.releases[0].0 - lag_s).abs() < 0.1
+                && r.events() == events
+                && r.jumps == 0
+                && r.av_tail_ms <= AV_BOUND_MS,
+            "issue 1381: {case:?}: a connect backlog must not bias the nominal age: {r:?}"
+        );
+    }
 }
