@@ -990,6 +990,8 @@ re-booked a phantom jump against that stale error: `place_jumps` 0 → 180 → 4
       the + 34 ns positions, booked by the timecode ASRC on the − 66 ns one.
     - **Byte for byte.** A skipped block, a duplicated block, and N = −1 at −10 / −20 / −30 ms each
       give 0 pendings and a trace identical to `NoRelabel`.
+    - **A late follow never starts a pending** (review rounds 1-2): this box steps 50–66 / 260 ms
+      first, the sender relabels 12 / 20 s later: one `timeout`, 0 pendings, no gap under 67 ms.
 - **Parity** (`tests/asrc_compensator_parity_1367.rs`): `tcs` = the skew, the placement, the
   backstop probes (also on a LOCKED arrival-mode servo). `tcw` = 5 s of skew, the placement, then
   8 s of a 15 ms error that must NOT arm the restore, which proves the sustained count restarts at
