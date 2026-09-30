@@ -708,12 +708,15 @@ fn run_in_sourced_create_usb(source_args: &str, snippet: &str) -> std::process::
         .expect("bash available")
 }
 
-/// The three sibling files create-usb-linux.sh copies into the target — every one MUST exist
+/// The four sibling files create-usb-linux.sh copies into the target — every one MUST exist
 /// before the first destructive disk op or the install breaks mid-way (the cam6 failure).
-const REQUIRED_SIBLINGS: [&str; 3] = [
+/// `lib/grub-fast-boot.sh` (#1394) is checked LAST, so the fixture in 17a (only
+/// install-grub-efi.sh present) still names camera-box-grow-root.sh as the first missing file.
+const REQUIRED_SIBLINGS: [&str; 4] = [
     "lib/install-grub-efi.sh",
     "lib/camera-box-grow-root.sh",
     "../systemd/camera-box-grow-root.service",
+    "lib/grub-fast-boot.sh",
 ];
 
 /// 17a. Behavioural: with a SCRIPT_DIR whose `lib/camera-box-grow-root.sh` is MISSING (the exact
@@ -756,12 +759,12 @@ fn create_usb_dep_check_fails_loud_on_missing_sibling() {
     );
 }
 
-/// 17b. Behavioural: with the REAL scripts dir (all three siblings present), check_required_files
+/// 17b. Behavioural: with the REAL scripts dir (all four siblings present), check_required_files
 ///      must succeed (exit 0). Proves the guard does not spuriously block a correct checkout.
 #[test]
 fn create_usb_dep_check_passes_when_all_siblings_present() {
     let scripts = manifest_dir().join("scripts");
-    // Sanity: the real repo genuinely has all three siblings.
+    // Sanity: the real repo genuinely has all four siblings.
     for rel in REQUIRED_SIBLINGS {
         let p = scripts.join(rel);
         assert!(
@@ -788,7 +791,7 @@ fn create_usb_dep_check_passes_when_all_siblings_present() {
 fn create_usb_dep_check_runs_before_partitioning() {
     let body = read("scripts/create-usb-linux.sh");
 
-    // The check function exists, names all three siblings, and fails loud (error).
+    // The check function exists, names all four siblings, and fails loud (error).
     let func = extract_shell_function(&body, "check_required_files")
         .expect("create-usb-linux.sh must define a check_required_files function (#448)");
     for rel in REQUIRED_SIBLINGS {

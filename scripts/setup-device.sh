@@ -112,6 +112,10 @@ fail() {
 . "$HERE/lib/efi-boot-entry.sh"  # EFI_CAM_BOX_LABEL/_LOADER + efi_cam_box_bootnums / efi_cam_box_leads /
                                  # efi_boot_order_lead (#1066 D6) -- shared with create-usb-linux.sh +
                                  # verify-device.sh (al) for the named cam-box UEFI entry on the box
+# shellcheck source=scripts/lib/grub-fast-boot.sh
+. "$HERE/lib/grub-fast-boot.sh"  # grub_fast_boot_apply (#1394) -- the ONE declaration of the no-menu,
+                                 # no-countdown GRUB settings STEP 10 applies; shared with
+                                 # create-usb-linux.sh / build-image.sh and verify-device.sh (aq)
 
 # shellcheck source=scripts/dantesync-version-gate.sh
 . "$HERE/dantesync-version-gate.sh"  # DANTESYNC_VERSION_PIN (#1066, source-safe: its source-guard
@@ -1072,10 +1076,9 @@ fi
 # =============================================================================
 echo ""
 echo -e "${GREEN}[10/${TOTAL_STEPS}] Configuring GRUB (fast + safe boot)...${NC}"
-sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' /etc/default/grub
-sed -i 's/GRUB_TIMEOUT_STYLE=.*/GRUB_TIMEOUT_STYLE=hidden/' /etc/default/grub
-grep -q "GRUB_TIMEOUT_STYLE" /etc/default/grub || echo "GRUB_TIMEOUT_STYLE=hidden" >> /etc/default/grub
-grep -q "GRUB_RECORDFAIL_TIMEOUT" /etc/default/grub || echo "GRUB_RECORDFAIL_TIMEOUT=0" >> /etc/default/grub
+# #1394: no GRUB menu and no countdown -- timeout 0, style hidden, recordfail timeout 0, from the ONE
+# declaration (scripts/lib/grub-fast-boot.sh, the same lib create-usb-linux.sh bakes into the image).
+grub_fast_boot_apply /etc/default/grub
 # #295: pin the default to the explicitly-saved known-good kernel, never "newest".
 if grep -q '^GRUB_DEFAULT=' /etc/default/grub; then
     sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub

@@ -193,6 +193,11 @@
 #       the AMI USB auto-entry (which failed on cam2 after a warm reboot). setup-device.sh STEP 17d
 #       creates it on the box; this proves it took effect post-reboot. FAILs (test-strictness) if the
 #       entry is absent, not leading, or efibootmgr is unreadable/absent (a non-EFI box).
+#   (aq) no GRUB menu and no countdown (#1394) -- HARD FAIL: the box's generated /boot/grub/grub.cfg
+#        hides the menu (timeout_style=hidden) with timeout 0, AND its recordfail branch (the one every
+#        boot after the first takes: only the masked grub-common clears the flag) sets timeout 0 --
+#        graded by grub_fast_boot_cfg_verdict from the ONE lib scripts/lib/grub-fast-boot.sh that
+#        create-usb-linux.sh / setup-device.sh STEP 10 apply. An unreadable or empty grub.cfg FAILs.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -268,6 +273,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/efi-boot-entry.sh
 . "$HERE/lib/efi-boot-entry.sh"  # efi_entry_verdict -- the (al) named cam-box UEFI entry check
                                  # (#1066 D6; SAME source of truth as setup-device.sh / create-usb-linux.sh)
+# shellcheck source=scripts/lib/grub-fast-boot.sh
+. "$HERE/lib/grub-fast-boot.sh"  # grub_fast_boot_cfg_verdict -- the (aq) no-menu, no-countdown GRUB check
+                                 # (#1394; SAME lib create-usb-linux.sh / setup-device.sh STEP 10 apply)
 
 SSH_USER="${SSH_USER:-root}"
 CAM_PW="${CAM_PW:-newlevel}"
@@ -892,6 +900,9 @@ Checks:
   (ao) bkshading relay provisioned (issue 808): binary + byte-matching unit + env + gphoto2, and the
       unit enable-state matches the rig mode (TEST: source box + cam2 disabled; CAMERA_BOX_RIG_MODE=test|event,
       else read from cam2's painter state)
+  (aq) no GRUB menu and no countdown (#1394): the generated /boot/grub/grub.cfg hides the menu with
+      timeout 0 AND its recordfail branch (every boot after the first) sets timeout 0 -- an unreadable
+      or empty grub.cfg FAILs
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      CAMERA_BOX_RIG_MODE (test|event for the (ao) relay enable-state; unset = read cam2's painter state),
@@ -1841,6 +1852,30 @@ else
     FAIL:*) fail "bkshading-relay: ${RELAY_VERDICT#FAIL: }" ;;
     *) fail "could not grade bkshading-relay state (verdict='${RELAY_VERDICT}', present='${R_PRESENT}')" ;;
   esac
+fi
+
+# (aq) no GRUB menu and no countdown (#1394) -- HARD FAIL ----------------------------------------
+# A cambox boots straight to Linux (owner ROZHODNUTÉ issuecomment-5913502328: cam6 sat in the GRUB
+# menu with a 30 s recordfail countdown). Reads the box's GENERATED /boot/grub/grub.cfg -- what the
+# firmware really boots -- and grades it with the pure grub_fast_boot_cfg_verdict: the menu hidden
+# with timeout 0, and the recordfail branch (every menuentry saves the flag on every boot and only
+# grub-common, masked on the appliance, clears it -- so every boot after the first takes this branch)
+# also at timeout 0. An unreadable or empty
+# grub.cfg is a FAIL (test-strictness). Inserted after the relay blast-radius check and before the
+# relay provisioning check, per .claude/rules/provisioning-scripts.md: the .bak cruft check stays
+# last, and pytest executes the slices from the relay provisioning check onwards, so no new block
+# may sit inside them.
+aqrc=0
+GRUB_CFG_TEXT="$(ssh_box "cat /boot/grub/grub.cfg")" || aqrc=$?
+if [ "$aqrc" -ne 0 ] || [ -z "$GRUB_CFG_TEXT" ]; then
+  fail "could not read /boot/grub/grub.cfg over SSH (rc=$aqrc, empty=$([ -z "$GRUB_CFG_TEXT" ] && echo yes || echo no)) -- cannot certify the box boots with no GRUB menu or countdown (#1394)"
+else
+  GRUB_AQ_VERDICT="$(grub_fast_boot_cfg_verdict "$GRUB_CFG_TEXT")"
+  if [ "$GRUB_AQ_VERDICT" = "ok" ]; then
+    ok "GRUB boots straight to Linux: menu hidden with timeout 0 and the recordfail timeout 0 (the branch every later boot takes) -- no menu, no countdown (#1394)"
+  else
+    fail "GRUB fast boot: ${GRUB_AQ_VERDICT#FAIL: }"
+  fi
 fi
 
 # (ao) bkshading relay provisioned + enable-state matches the rig mode (issue 808) -- HARD FAIL -----
