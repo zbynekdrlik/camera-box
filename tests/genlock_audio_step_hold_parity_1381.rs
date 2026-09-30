@@ -256,7 +256,7 @@ fn clear(v: &mut Vec<Pkt>) {
 
 fn state_line(off: i64, rel: u8, s: &AudioStepHold) -> String {
     format!(
-        "{off} {rel} {} {} {} {} {} {} {} {} {} {} {} {}",
+        "{off} {rel} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
         u8::from(s.active),
         s.prev_off_ns,
         s.prev_raw_ns,
@@ -268,7 +268,9 @@ fn state_line(off: i64, rel: u8, s: &AudioStepHold) -> String {
         s.start_ns,
         s.step_ns,
         s.prev_arrival_ns,
-        u8::from(s.relabel_pending)
+        u8::from(s.relabel_pending),
+        s.unmatched_ns,
+        s.unmatched_at_ns
     )
 }
 
@@ -293,15 +295,19 @@ fn c_audio_step_hold_matches_the_rust_authority_1381() {
     int64_t prev_off = 0, nominal = 0, held = 0, step = 0;
     uint64_t prev_raw = 0, prev_pkt = 0, dev_since = 0, start = 0, prev_arrival = 0;
     uint32_t warm = 0;
+    int64_t unmatched = 0;
+    uint64_t unmatched_at = 0;
     for (size_t i = 0; i < sizeof(tc) / sizeof(tc[0]); i++) {{
         int64_t use = 0;
         const int rel = genlock_audio_step_hold(&active, &prev_off, &prev_raw, &prev_pkt, &nominal, &dev_since,
-                                                &warm, &held, &start, &step, &prev_arrival, &pending, tc[i] != 0,
-                                                off[i], raw[i], pkt[i], now[i], rst[i] != 0, {min}ll, &use);
-        printf("%lld %d %d %lld %llu %llu %lld %llu %u %lld %llu %lld %llu %d\n", (long long)use, rel,
+                                                &warm, &held, &start, &step, &prev_arrival, &pending, &unmatched,
+                                                &unmatched_at, tc[i] != 0, off[i], raw[i], pkt[i], now[i],
+                                                rst[i] != 0, {min}ll, &use);
+        printf("%lld %d %d %lld %llu %llu %lld %llu %u %lld %llu %lld %llu %d %lld %llu\n", (long long)use, rel,
                active ? 1 : 0, (long long)prev_off, (unsigned long long)prev_raw, (unsigned long long)prev_pkt,
                (long long)nominal, (unsigned long long)dev_since, warm, (long long)held,
-               (unsigned long long)start, (long long)step, (unsigned long long)prev_arrival, pending ? 1 : 0);
+               (unsigned long long)start, (long long)step, (unsigned long long)prev_arrival, pending ? 1 : 0,
+               (long long)unmatched, (unsigned long long)unmatched_at);
     }}
 "#,
         tcs.join(", "),
@@ -373,6 +379,11 @@ fn c_audio_step_hold_matches_the_rust_authority_1381() {
         zero_length && reanchor && want.iter().any(|l| field(l, 7).as_deref() == Some("1")),
         "issue 1381: the sequence must reach a zero-length hold, a re-anchor and the now = 0 timer"
     );
+    // ROZHODNUTÉ 5903945145: a hold that ended without the stamps jumping remembers its step
+    assert!(
+        want.iter().any(|l| field(l, 14).as_deref() != Some("0")),
+        "issue 1381: the sequence must reach a remembered unmatched step"
+    );
     assert_eq!(AUDIO_STEP_NOMINAL_REANCHOR_NS, 6 * 100_000_000_000);
 }
 
@@ -421,7 +432,7 @@ fn c_audio_step_scalars_match_the_rust_authority_1381() {
         (i64::MIN, i64::MAX),
         (i64::MAX, i64::MIN),
     ];
-    let places: [(u8, i64, u64); 12] = [
+    let places: [(u8, i64, u64); 15] = [
         (0, -682_474_000, PACKET),
         (1, -682_474_000, PACKET),
         (1, PACKET as i64, PACKET),
@@ -429,6 +440,10 @@ fn c_audio_step_scalars_match_the_rust_authority_1381() {
         (1, -(PACKET as i64) - 1, PACKET),
         (2, 89_703_000, PACKET),
         (2, 1, PACKET),
+        // ROZHODNUTÉ 5903945145 point 2: a timeout applies any move once, one packet − 66 ns too
+        (2, PACKET as i64 - 66, PACKET),
+        (2, -(PACKET as i64 - 66), PACKET),
+        (2, 0, PACKET),
         (3, -682_474_000, PACKET),
         (1, i64::MIN, u64::MAX),
         (2, i64::MIN, u64::MAX - 1),
@@ -598,14 +613,17 @@ fn c_audio_relabel_matches_the_rust_authority_1381() {
     int64_t prev_off = 0, nominal = 0, held = 0, step = 0;
     uint64_t prev_raw = 0, prev_pkt = 0, dev_since = 0, start = 0, prev_arrival = 0;
     uint32_t warm = 0;
+    int64_t unmatched = 0;
+    uint64_t unmatched_at = 0;
     for (size_t i = 0; i < sizeof(tc) / sizeof(tc[0]); i++) {{
         int64_t sj = 0, oj = 0, use = 0;
         const bool have = genlock_audio_step_relabel_jumps(active, prev_off, prev_raw, prev_pkt, held, tc[i] != 0,
                                                            off[i], raw[i], &sj, &oj);
         const bool rel = have && genlock_audio_relabel(sj, oj, pkt[i], {min}ll);
         const int release = genlock_audio_step_hold(&active, &prev_off, &prev_raw, &prev_pkt, &nominal, &dev_since,
-                                                    &warm, &held, &start, &step, &prev_arrival, &pending, tc[i] != 0,
-                                                    off[i], raw[i], pkt[i], now[i], rst[i] != 0, {min}ll, &use);
+                                                    &warm, &held, &start, &step, &prev_arrival, &pending,
+                                                    &unmatched, &unmatched_at, tc[i] != 0, off[i], raw[i], pkt[i],
+                                                    now[i], rst[i] != 0, {min}ll, &use);
         printf("%d %lld %lld %d %d %lld\n", have ? 1 : 0, (long long)sj, (long long)oj, rel ? 1 : 0, release,
                (long long)use);
     }}

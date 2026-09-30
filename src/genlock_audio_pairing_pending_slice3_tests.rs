@@ -738,3 +738,184 @@ fn a_genuine_sender_first_step_still_starts_and_resolves_1381() {
         }
     }
 }
+
+#[test]
+fn an_early_age_release_remembers_the_unmatched_step_and_its_follow_clears_it_1381() {
+    // ROZHODNUTÉ 5903945145: this box steps +34 ms first; the next packet arrives 2 ms early, so its
+    // age is back within one packet of the nominal and the skew hold releases on the age test. That
+    // step (−34 ms in offset terms) is remembered, with the release packet's arrival. 60 s of packets
+    // alternating 2 ms / 0 ms early later, the sender's one-slot relabel (one packet − 66 ns) is its
+    // follow: no pending start, and the memory is cleared.
+    let mut f = Feed::new();
+    f.early = 10_000_000;
+    f.steady(WARM);
+    f.off = OFF - 34_000_000;
+    assert_eq!(
+        f.take(),
+        (OFF, AudioStepRelease::None),
+        "the step starts a hold"
+    );
+    f.early = 12_000_000;
+    let at = f.now();
+    let (off, rel) = f.take();
+    assert_eq!((off, rel), (OFF - 34_000_000, AudioStepRelease::Followed));
+    assert_eq!(
+        (f.s.unmatched_ns, f.s.unmatched_at_ns),
+        (-34_000_000, at),
+        "issue 1381: the step the stamps never matched is remembered"
+    );
+    for i in 0..1800 {
+        f.early = if i % 2 == 0 { 10_000_000 } else { 12_000_000 };
+        assert_eq!(f.take().1, AudioStepRelease::None);
+    }
+    assert_eq!(f.s.unmatched_ns, -34_000_000, "nothing else clears it");
+    f.early = 10_000_000;
+    f.shift = PACKET as i64 - 66;
+    assert!(
+        !f.starts(),
+        "issue 1381: the remembered step's follow never starts a pending relabel"
+    );
+    f.take();
+    assert!(!f.s.active, "no hold of any kind");
+    assert_eq!(
+        f.s.unmatched_ns, 0,
+        "issue 1381: the follow clears the remembered step"
+    );
+}
+
+#[test]
+fn only_a_hold_that_ended_unmatched_is_remembered_1381() {
+    // ROZHODNUTÉ 5903945145: the timeout of a skew hold (this box's step, the stamps never followed)
+    // is remembered; a follow the stamps made (released within one packet), a pending relabel's
+    // timeout (the SENDER's step: its counterpart is this box's own offset jump) and a reset are not.
+    let packets_to_bound = AUDIO_STEP_HOLD_MAX_NS.div_ceil(PACKET) as usize + 2;
+    // a skew hold's timeout
+    let mut f = Feed::new();
+    f.steady(WARM);
+    f.off = OFF - 60_000_000;
+    let mut released = None;
+    for _ in 0..packets_to_bound {
+        let now = f.now();
+        let (_, rel) = f.take();
+        if rel != AudioStepRelease::None {
+            released = Some((rel, now));
+            break;
+        }
+    }
+    let (rel, at) = released.expect("the hold ends");
+    assert_eq!(rel, AudioStepRelease::Timeout);
+    assert_eq!((f.s.unmatched_ns, f.s.unmatched_at_ns), (-60_000_000, at));
+    // the stamps follow: released within one packet, nothing remembered
+    let mut f = Feed::new();
+    f.steady(WARM);
+    f.off = OFF - 60_000_000;
+    f.take();
+    f.shift = 60_000_000;
+    assert_eq!(f.take().1, AudioStepRelease::Followed);
+    assert_eq!(f.s.unmatched_ns, 0, "a matched step is never remembered");
+    // the stamps follow to EXACTLY one packet short: released (within one packet), not remembered
+    let mut f = Feed::new();
+    f.steady(WARM);
+    f.off = OFF - 60_000_000;
+    f.take();
+    f.shift = 60_000_000 - PACKET as i64;
+    let (off, rel) = f.take();
+    assert_eq!(
+        (rel, audio_step_residual_ns(f.s.held_off_ns, off)),
+        (AudioStepRelease::Followed, -(PACKET as i64))
+    );
+    assert_eq!(
+        f.s.unmatched_ns, 0,
+        "a move of exactly one packet is not remembered"
+    );
+    // a stamp move of the follow's size and sign that is no whole slot (continuous arrival, 20 ms)
+    // keeps the memory: only a relabel-shaped follow clears it
+    let mut f = Feed::new();
+    f.steady(WARM);
+    f.off = OFF - 60_000_000;
+    for _ in 0..packets_to_bound {
+        f.take();
+    }
+    assert_eq!(f.s.unmatched_ns, -60_000_000);
+    f.shift = 20_000_000;
+    f.take();
+    assert_eq!(
+        f.s.unmatched_ns, -60_000_000,
+        "a sub-slot stamp move keeps the memory"
+    );
+    // a pending relabel's timeout
+    let mut f = Feed::new();
+    f.steady(WARM);
+    f.shift = relabel_jump(682_474_000);
+    let mut timed_out = false;
+    for _ in 0..packets_to_bound {
+        timed_out |= f.take().1 == AudioStepRelease::Timeout;
+    }
+    assert!(timed_out);
+    assert_eq!(
+        f.s.unmatched_ns, 0,
+        "a pending relabel's timeout is not remembered"
+    );
+    // a timeline reset inside a hold
+    let mut f = Feed::new();
+    f.steady(WARM);
+    f.off = OFF - 60_000_000;
+    f.take();
+    assert_eq!(f.take_with(true, true).1, AudioStepRelease::Reset);
+    assert_eq!(f.s.unmatched_ns, 0, "a reset is not remembered");
+}
+
+#[test]
+fn the_remembered_step_holds_for_the_window_and_timecode_off_forgets_it_1381() {
+    // ROZHODNUTÉ 5903945145: the follow window is the re-anchor window (600 s), strictly; a stamp jump
+    // of the same direction as the memory (the wrong way) or outside one packet + the budget of its
+    // size is no follow; leaving timecode mode forgets it.
+    let at = 5_000_000_000_u64;
+    let s = AudioStepHold {
+        unmatched_ns: -34_000_000,
+        unmatched_at_ns: at,
+        ..AudioStepHold::default()
+    };
+    let p = PACKET as i64;
+    let w = AUDIO_STEP_NOMINAL_REANCHOR_NS;
+    let far = (PACKET + AUDIO_RELABEL_ARRIVAL_JITTER_NS) as i64;
+    for (jump, now, follows) in [
+        (p - 66, at + w - 1, true),
+        (p - 66, at + w, false),
+        (-(p - 66), at + 1, false),
+        (34_000_000 + far, at + 1, true),
+        (34_000_000 + far + 1, at + 1, false),
+        (0, at + 1, false),
+        // the wrong direction even where the size would fit
+        (-10_000_000, at + 1, false),
+    ] {
+        assert_eq!(
+            audio_step_unmatched_follow(&s, jump, PACKET, now),
+            follows,
+            "issue 1381: jump {jump} at {} ns after the memory",
+            now - at
+        );
+    }
+    // a zero stamp move never follows, also a memory of the other sign (a backward wall step)
+    let back = AudioStepHold {
+        unmatched_ns: 36_000_000,
+        unmatched_at_ns: at,
+        ..AudioStepHold::default()
+    };
+    assert!(audio_step_unmatched_follow(
+        &back,
+        -66_666_667,
+        PACKET,
+        at + 1
+    ));
+    assert!(!audio_step_unmatched_follow(&back, 0, PACKET, at + 1));
+    let mut f = Feed::new();
+    f.steady(WARM);
+    f.s.unmatched_ns = -34_000_000;
+    f.s.unmatched_at_ns = at;
+    f.take_with(false, false);
+    assert_eq!(
+        f.s.unmatched_ns, 0,
+        "issue 1381: timecode off forgets the step"
+    );
+}
