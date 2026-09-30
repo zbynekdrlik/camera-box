@@ -114,6 +114,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/dantesync-fleet.sh"      # issue 1372: the --fleet node set + a node's own credential by name
 # shellcheck source=scripts/lib/dantesync-tray-upgrade.sh
 . "$HERE/lib/dantesync-tray-upgrade.sh"  # issue 1372: the tray arm of the Windows program + its outcome
+# shellcheck source=scripts/lib/dantesync-rollback.sh
+. "$HERE/lib/dantesync-rollback.sh"   # the VERIFY-failure rollback programs (issue 1372: their own lib)
 
 # The GitHub release download base for the (Claude-stewarded) dantesync repo. Releases are
 # ALL-OR-NOTHING (dantesync #56): a published tag always carries BOTH the Linux and Windows
@@ -248,33 +250,6 @@ dantesync --version
 EOF
 }
 
-# dantesync_linux_rollback_cmd -> restore the pre-upgrade binary from its .bak and restart. Only
-# ever invoked by the orchestrator on the VERIFY-failure path (the swap provably completed).
-dantesync_linux_rollback_cmd() {
-  cat <<EOF
-set -e
-if [ ! -f "$DANTESYNC_LINUX_BAK" ]; then
-  echo "no $DANTESYNC_LINUX_BAK to roll back to" >&2
-  exit 1
-fi
-# Same read-only-root handling as the upgrade cmd (cam boxes) — restore ro on ANY exit. #1077
-# defect (3): read the real mount state (findmnt, /proc/mounts fallback), never a write probe —
-# mirrors setup-device.sh's ensure_root_writable() (#599); 'ro' as the FIRST comma-token.
-ro_root=0
-opts="\$(findmnt -no OPTIONS / 2>/dev/null || awk '\$2=="/"{print \$4; exit}' /proc/mounts 2>/dev/null)"
-case "\$opts" in ro | ro,*) ro_root=1 ;; esac
-if [ "\$ro_root" = 1 ]; then mount -o remount,rw /; fi
-_dantesync_remount_ro() {
-  if [ "\$ro_root" = 1 ]; then mount -o remount,ro / 2>/dev/null || true; fi
-}
-trap '_dantesync_remount_ro' EXIT
-systemctl stop dantesync
-cp -a "$DANTESYNC_LINUX_BAK" $DANTESYNC_LINUX_BIN
-systemctl restart dantesync
-dantesync --version
-EOF
-}
-
 # dantesync_windows_purge_dead_task_cmd -> the idempotent forced delete of the dead DanteSyncUpdate
 # relic scheduled task (the #18-rename orphan). Standalone-usable; also embedded in the upgrade ps.
 dantesync_windows_purge_dead_task_cmd() {
@@ -350,22 +325,6 @@ $(dantesync_windows_wait_service_exit_ps)
 # a failed upgrade).
 cmd /c "schtasks /Delete /TN \"$DANTESYNC_DEAD_TASK\" /F >nul 2>&1"
 $(dantesync_windows_tray_swap_ps)
-& \$exe --version
-EOF
-}
-
-# dantesync_windows_rollback_ps -> the CONTENT of a .ps1 that restores the pre-upgrade exe from
-# its .bak and starts the service. Orchestrator-invoked only on the VERIFY-failure path.
-dantesync_windows_rollback_ps() {
-  cat <<EOF
-\$ErrorActionPreference = 'Stop'
-\$exe = '$DANTESYNC_WIN_EXE'
-\$bak = '$DANTESYNC_WIN_BAK'
-if (-not (Test-Path \$bak)) { throw 'no dantesync.exe.bak to roll back to' }
-Stop-Service dantesync
-$(dantesync_windows_wait_service_exit_ps)
-Copy-Item -Force \$bak \$exe
-Start-Service dantesync
 & \$exe --version
 EOF
 }
