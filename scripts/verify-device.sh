@@ -127,10 +127,13 @@
 #       nftables, the rule, or the oneshot FAILs (never a silent pass).
 #   (ap) NDI egress pacing (issue 1242) -- HARD FAIL: the default-route interface's ROOT qdisc is
 #       `fq` with maxrate / flow_limit / limit equal to scripts/lib/cambox-egress-pacing.sh's one
-#       declaration (400mbit / 2000 / 20000), AND cambox-egress-pacing.service is enabled (reboot
-#       survival) and not failed (its boot retry gave up). A hand-applied runtime qdisc alone FAILs:
-#       that is exactly the non-permanent state issue 1242 fixes. `active` is not required
-#       (setup-device.sh is enable-only and a cambox is never rebooted remotely).
+#       declaration (400mbit / 2000 / 20000), AND what setup-device installed will run at the next
+#       boot: the boot script is executable and byte-equal to what the lib generates, the unit is
+#       byte-equal to the checked-in systemd/ one, enabled (reboot survival) and not failed. A
+#       hand-applied runtime qdisc alone FAILs: that is exactly the non-permanent state issue 1242
+#       fixes. `active` is not required (setup-device.sh is enable-only and a cambox is never
+#       rebooted remotely). Each FAIL names the fix that matches it (start / restart the unit, a
+#       network problem, or a re-provision).
 #   (af) v4l2-ctl (v4l-utils) is installed AND runnable (`v4l2-ctl --version`) -- issue 1213: the
 #       tool is already in setup-device.sh STEP 16's apt-get line, but that line is guarded by
 #       `2>/dev/null || true`, which silently swallows a per-box apt failure. cam3/cam4 were found
@@ -858,8 +861,9 @@ Checks:
       DSCP EF, applied at boot by the enabled+active dantesync-dscp.service oneshot (rsntp cannot
       setsockopt(IP_TOS) on Linux, so this provisioning rule is the request-half fix)
   (ap) NDI egress pacing (issue 1242): the default-route interface's root qdisc is fq with the
-      declared maxrate/flow_limit/limit (scripts/lib/cambox-egress-pacing.sh), and
-      cambox-egress-pacing.service is enabled and not failed -- a hand-applied qdisc alone FAILs
+      declared maxrate/flow_limit/limit (scripts/lib/cambox-egress-pacing.sh), the installed boot
+      script + unit match what setup-device installs, and cambox-egress-pacing.service is enabled
+      and not failed -- a hand-applied qdisc alone FAILs
   (af) v4l2-ctl (v4l-utils) installed and runnable (\`v4l2-ctl --version\`) -- already listed in
       setup-device.sh STEP 16's apt-get line, but that line silently swallows a per-box apt
       failure; cam3/cam4 were found live missing it despite the script listing it (issue 1213)
@@ -1585,19 +1589,22 @@ fi
 # reach strih-lx together (its USB NIC answers with PAUSE storms). setup-device.sh's
 # [egress-pacing] sub-step installs cambox-egress-pacing.service, which paces the default-route
 # interface at boot with the ONE declaration in scripts/lib/cambox-egress-pacing.sh. This reads
-# the live root qdisc + the unit in one read-only ssh round trip. It FAILs a missing/drifted qdisc,
-# a unit that is not enabled (a hand-applied qdisc does not survive a reboot) or a failed unit.
-# Placed right after (ae) and BEFORE (q): pytest executes the (ao)..(an) and (an)..(q) slices of
-# this file, so a block there would break them. fail() only, never a warn.
+# the live root qdisc, the unit state and what setup-device installed (the boot script's
+# executable bit + sha256, the unit's sha256) in one read-only ssh round trip. It FAILs a
+# missing/drifted qdisc, a missing / non-executable / stale boot script, a unit that differs from
+# the checked-in systemd/ one, a unit that is not enabled (a hand-applied qdisc does not survive a
+# reboot) or a failed unit -- each named with the fix that matches it. Placed right after (ae) and
+# BEFORE (q): pytest executes the (ao)..(an) and (an)..(q) slices of this file, so a block there
+# would break them. fail() only, never a warn.
 aprc=0
 PACING_BLOCK="$(ssh_box "$(cambox_egress_pacing_gather_remote_snippet)")" || aprc=$?
 PACING_VERDICT="$(cambox_egress_pacing_provision_verdict "$PACING_BLOCK")"
 if [ "$aprc" -ne 0 ]; then
   fail "could not reach the box to read the NDI egress pacing qdisc + ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service state (ssh rc=$aprc, issue 1242)"
 elif [ "$PACING_VERDICT" != "ok" ]; then
-  fail "NDI egress pacing not provisioned: $(printf '%s' "$PACING_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')-- re-run setup-device.sh (issue 1242)"
+  fail "NDI egress pacing: $(cambox_egress_pacing_verdict_oneline "$PACING_VERDICT") (issue 1242)"
 else
-  ok "NDI egress pacing live: $(cambox_egress_pacing_block_field "$PACING_BLOCK" PACING_IFACE) root $(cambox_egress_pacing_verdict "$(cambox_egress_pacing_block_field "$PACING_BLOCK" PACING_QDISC)" | sed 's/^OK //') + ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service enabled (issue 1242)"
+  ok "NDI egress pacing live: $(cambox_egress_pacing_block_field "$PACING_BLOCK" PACING_IFACE) root $(cambox_egress_pacing_verdict "$(cambox_egress_pacing_block_field "$PACING_BLOCK" PACING_QDISC)" | sed 's/^OK //') + ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service installed + enabled (issue 1242)"
 fi
 
 # (af) v4l2-ctl installed AND runnable (v4l-utils runtime dependency, issue 1213) ------------------

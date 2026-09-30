@@ -8,12 +8,15 @@
 # ExecStart runs the script setup-device.sh GENERATES from scripts/lib/cambox-egress-pacing.sh (the
 # ONE declaration of the rate and limits -- the appliance has no checkout of this repo). It resolves
 # the default-route interface at run time and retries for ~60 s when the route comes up late, then
-# fails LOUD (the unit reads `failed`, verify-device.sh (ap) names it). Installed + ENABLED by
-# setup-device.sh, never started by it; verify-device.sh (ap) proves it after the reboot.
+# fails LOUD. A box that boots before its switch port has carrier fails that whole round, so the
+# unit restarts on failure and never gives up: the pacing lands once the default route appears.
+# Installed + ENABLED by setup-device.sh, never started by it; verify-device.sh (ap) proves it after
+# the reboot.
 Description=camera-box: pace the NDI egress (fq maxrate) on the default-route interface (issue 1242)
 Documentation=https://github.com/zbynekdrlik/camera-box/issues/1242
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
@@ -21,6 +24,8 @@ RemainAfterExit=yes
 ExecStart=/usr/local/sbin/cambox-egress-pacing
 # Above the script's own ~60 s retry, so the loud FAILED line is the script's, never a kill.
 TimeoutStartSec=120
+Restart=on-failure
+RestartSec=30
 
 [Install]
 WantedBy=multi-user.target
