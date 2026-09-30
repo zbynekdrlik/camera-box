@@ -92,9 +92,11 @@ grub_fast_boot_is_applied() {
 # grub_fast_boot_apply <file> -> make <file> (an /etc/default/grub) carry the three settings:
 # every active line of a key is rewritten to the wanted value in place, a missing key is appended.
 # Every other line is kept as is. An already-correct file is NOT rewritten (byte-identical, same
-# mtime). The new content is written to a temp file first and only then copied over <file> (`cat >`),
-# so a failed write never truncates <file> and its inode and mode stay. rc 1 + a stderr line when
-# <file> is missing, unreadable, or cannot be written (it is then left unchanged).
+# mtime). The new content is staged in a temp file NEXT TO <file> (never the caller's TMPDIR, which
+# a chroot may not have) and only then copied over it (`cat >`), so the inode and mode stay. Any
+# failure before that copy leaves <file> untouched; a failed copy (an I/O error after the open) can
+# leave <file> partial, and the error names the temp that still holds the intended content. rc 1 +
+# a stderr line when <file> is missing, unreadable, or cannot be written.
 grub_fast_boot_apply() {
     local IFS=$' \t\n' file="${1:-}" line key wanted k out="" seen=" " tmp
     if [ -z "$file" ] || [ ! -f "$file" ]; then
@@ -121,7 +123,7 @@ grub_fast_boot_apply() {
             *) out="${out}$(_grub_fast_boot_wanted "$k")"$'\n' ;;
         esac
     done
-    if ! tmp="$(mktemp)"; then
+    if ! tmp="$(mktemp -p "$(dirname -- "$file")")"; then
         printf 'grub_fast_boot_apply: no temp file for %s -- left unchanged (#1394)\n' "$file" >&2
         return 1
     fi
