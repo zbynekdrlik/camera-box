@@ -17,8 +17,9 @@
 //! and by leaving timecode, the 10 s bound, and a late follow. Slice 3 (design 5902870861,
 //! ROZHODNUTÉ 5902983227) adds the one-slot sender-first steps (a stamp jump of one packet − 66 ns
 //! and + 34 ns, the two N = +1 jumps on the sender's 100 ns grid), a start only the half-packet age
-//! band admits, a skipped slot at the − 66 ns position, and scalars at the one-packet − 100 ns
-//! forward bound. It FAILS LOUDLY when no C compiler is present.
+//! band admits, the band's exact edge (and 5 ms inside it, and one ns past it), a skipped slot at
+//! the − 66 ns position, and scalars at the one-packet − 100 ns forward bound. It FAILS LOUDLY when
+//! no C compiler is present.
 
 use camera_box::genlock_audio_pairing::{
     audio_relabel_book_ns, audio_relabel_pending, audio_step_hold,
@@ -220,6 +221,29 @@ fn pending_sequence() -> Vec<Pkt> {
     k += 1;
     shift -= 66;
     for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    // the half-packet age band's edge: a backward jump of one packet + 1 ms arriving early, its age
+    // exactly half a packet (strict: no start), 5 ms inside the band (no start), one ns past it
+    // (starts). `edge` is the arrival shift that puts the age on half a packet (p / 2 truncates)
+    let jump = -p - 1_000_000;
+    let edge = p / 2 - p - 1_000_000;
+    for late in [edge, edge - 5_000_000, edge + 1] {
+        clear(&mut v);
+        for _ in 0..WARM + 5 {
+            take(&mut v, &mut k, off, shift, early, false);
+        }
+        shift += jump;
+        let raw = (WALL + k * PACKET).wrapping_add(shift as u64);
+        let now = ((MONO + k * PACKET - early) as i64 + late) as u64;
+        v.push((true, off, raw, PACKET, now, false));
+        k += 1;
+        for _ in 0..3 {
+            take(&mut v, &mut k, off, shift, early, false);
+        }
+    }
+    clear(&mut v);
+    for _ in 0..WARM + 5 {
         take(&mut v, &mut k, off, shift, early, false);
     }
     // a duplicated slot (the same stamp 3 ms later), a pause, a stamp leap: never pending
