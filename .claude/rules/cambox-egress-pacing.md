@@ -38,7 +38,9 @@ storms (issue 1242 finding 5902816575).
     lowest-metric route). An enp name, or an enx after a rename, both work.
   - The retry is 30 attempts x 2 s for a late default route. It is an attempt COUNT, never a
     wall-clock deadline: the rig's dantesync date master can step the date while a box boots.
-  - After the last attempt the script prints a loud `FAILED ... UNPACED` line and exits 1.
+  - After the last attempt the script prints a loud `FAILED ... UNPACED` line and exits 1. Only the
+    first and the last attempt of a round log their reason (`no default route yet`, a tc failure),
+    so a route-less box does not flood the journal.
   - `Restart=on-failure` + `RestartSec=30` + `StartLimitIntervalSec=0` then start a new round every
     ~90 s, forever. A box that boots before its switch port has carrier (a rig cold start, a box
     moved while running) is paced as soon as the default route appears, never left unpaced for its
@@ -56,9 +58,14 @@ storms (issue 1242 finding 5902816575).
 - **verify-device.sh `(ap)`** is a HARD gate. One read-only ssh round trip reads the live root qdisc,
   the unit state, and what setup-device installed. `cambox_egress_pacing_provision_verdict` grades:
   - INSTALL facets (the fix is a re-provision):
-    - the boot script is executable and byte-equal (sha256) to what the lib generates. A stale copy
-      (the rate changed in the lib, the box was never re-provisioned) FAILs now, not at the next reboot;
-    - the installed unit is byte-equal to the checked-in `systemd/` one;
+    - the boot script is executable, starts with `#!/bin/bash`, and equals what the lib generates. A
+      stale copy (the rate changed in the lib, the box was never re-provisioned) FAILs now, not at
+      the next reboot;
+    - the installed unit equals the checked-in `systemd/` one;
+    - both are compared as a sha256 of their FUNCTIONAL lines (`cambox_egress_pacing_functional_lines`
+      drops comment and blank lines; the gather embeds the same function with `declare -f`). A
+      comment-only edit in this repo therefore keeps every box current, while a functional edit (a
+      rate, an ExecStart, RestartSec) makes every box stale until it is re-provisioned;
     - the unit is `enabled`. A hand-applied runtime qdisc alone FAILs: that is exactly the
       non-permanent state this ticket fixes.
   - RUNTIME facets (the fix matches the state):
@@ -71,7 +78,10 @@ storms (issue 1242 finding 5902816575).
     - install fine + unit `inactive`: it never ran since the install, `systemctl start` (or the next
       reboot);
     - install fine + unit `active`: the qdisc changed after it ran, `systemctl restart`;
-    - unit `activating`: it is still retrying.
+    - unit `activating`: a DRIFT read proves a default route exists, so the unit is failing to apply
+      the qdisc (tc refusing it, e.g. a kernel without `sch_fq`) or is between rounds; the hint
+      names the failed-round count (`NRestarts`) and the unit journal. With restart-forever the unit
+      is `activating`, not `failed`, while this goes on.
   - `active` is NOT required. setup-device is enable-only and a cambox is never rebooted remotely,
     so a freshly provisioned box stays `inactive` until a physical reboot while its runtime qdisc is
     live.
@@ -103,10 +113,12 @@ Run it when no E2E / soak holds the rig lease (`curl -s http://127.0.0.1:8890/ri
      `fix: ... systemctl start cambox-egress-pacing`: start it (step 2), never re-provision for that.
    - **Changing the rate or a limit** later: edit the lib, then re-run setup-device on every box.
      Until then `(ap)` names each box's boot script as stale.
-4. **Rollback:** on the box, `tc qdisc del dev <if> root` (back to the default qdisc at once, as
-   before 30.9.2026). Then `systemctl disable cambox-egress-pacing` inside a
-   `mount -o remount,rw /` ... `mount -o remount,ro /` window: the root is read-only and `disable`
-   removes a symlink under `/etc`.
+4. **Rollback**, on the box, in this order:
+   - `systemctl stop cambox-egress-pacing` FIRST: a unit inside its restart loop would otherwise
+     re-apply the qdisc;
+   - `tc qdisc del dev <if> root`: back to the default qdisc at once, as before 30.9.2026;
+   - `systemctl disable cambox-egress-pacing` inside a `mount -o remount,rw /` ...
+     `mount -o remount,ro /` window: the root is read-only and `disable` removes a symlink under `/etc`.
 
 ## Test notes
 
