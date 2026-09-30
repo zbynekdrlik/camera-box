@@ -90,7 +90,7 @@ set -euo pipefail
 # Env: SSH_PASS (default: the rig's shared ssh password, never printed here; also the sudo password fed to sudo -S on non-root Linux nodes),
 #      DANTESYNC_GATE_BOUND_US (offset bound, passed to the gate),
 #      GATE_WAIT_TRIES/GATE_WAIT_SECS (post-restart settle poll for a SLAVE node's verification gate),
-#      NTP_MASTER (the master node name, default from DANTESYNC_NTP_MASTER_NAME / strih),
+#      NTP_MASTER (the master node name; default DANTESYNC_NTP_MASTER_NAME, else the fleet ntp-master role),
 #      MASTER_GATE_WAIT_TRIES/MASTER_GATE_WAIT_SECS (#1077: the LONGER bounded settle window the
 #      master node gets so verifying it right after its own restart waits out the fleet sawtooth).
 # Linux privilege (#1077): a root@ node runs the generated script directly; a non-root node
@@ -504,6 +504,20 @@ dantesync_skip_away_traveling() {
   return 0
 }
 
+# dantesync_upgrade_default_master GIVEN -> the master verified master-aware: GIVEN, else the fleet's
+# ntp-master role (strih-lx), else "strih". Issue 1372: "strih" without --fleet graded the date master
+# as a SLAVE and rolled a healthy swap back twice (29.9.2026).
+dantesync_upgrade_default_master() {
+  local given="${1:-}" m
+  if [ -n "$given" ]; then
+    printf '%s' "$given"
+    return 0
+  fi
+  m="$(dantesync_fleet_names role=ntp-master 2>/dev/null || true)"
+  m="${m%% *}"
+  printf '%s' "${m:-strih}"
+}
+
 # --- source-guard: when sourced (the unit tests), stop here ----------------------------------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0
@@ -532,9 +546,10 @@ GATE_WAIT_SECS="${GATE_WAIT_SECS:-6}"
 # HEALTHY swap (rc=20 twice, live v1.8.43 roll). So the master node gets (a) --ntp-master <self> (the
 # gate's master-aware median+freshness grade, #1014, not the strict single-node offset bound) and
 # (b) a LONGER bounded settle window (retry to steady state, clear PASS/FAIL, no silent sleep-and-
-# hope). NTP_MASTER defaults to the SAME name dantesync-gate.sh uses (single source of truth).
+# hope). NTP_MASTER defaults to the declared fleet's ntp-master role in every mode
+# (dantesync_upgrade_default_master, issue 1372); an explicit NTP_MASTER / DANTESYNC_NTP_MASTER_NAME wins.
 _NTP_MASTER_GIVEN="${NTP_MASTER:-${DANTESYNC_NTP_MASTER_NAME:-}}"
-NTP_MASTER="${NTP_MASTER:-${DANTESYNC_NTP_MASTER_NAME:-strih}}"
+NTP_MASTER="$(dantesync_upgrade_default_master "$_NTP_MASTER_GIVEN")"
 MASTER_GATE_WAIT_TRIES="${MASTER_GATE_WAIT_TRIES:-20}"
 MASTER_GATE_WAIT_SECS="${MASTER_GATE_WAIT_SECS:-15}"
 
@@ -863,12 +878,6 @@ log "== dantesync-fleet-upgrade (#876): target v${TARGET} =="
 # issue 1372: --fleet appends every declared dantesync node not already named explicitly.
 if [ "$USE_FLEET" -eq 1 ]; then
   dantesync_fleet_load_credentials
-  # the fleet names its NTP master by ROLE (strih-lx today) -- verify it with the master-aware grade
-  # unless NTP_MASTER / DANTESYNC_NTP_MASTER_NAME was given explicitly.
-  if [ -z "$_NTP_MASTER_GIVEN" ]; then
-    _fleet_master="$(dantesync_fleet_names role=ntp-master)"
-    [ -n "$_fleet_master" ] && NTP_MASTER="${_fleet_master%% *}"
-  fi
   _fleet_user="${DANTESYNC_FLEET_UPGRADE_USER:-${WIN_SSH_USER:-newlevel}}"
   _named=" $(for e in $LINUX_SPEC $WIN_SPEC; do printf '%s ' "${e%%=*}"; done)$LOCAL_SPEC "
   for e in $(dantesync_fleet_spec linux "$_fleet_user"); do

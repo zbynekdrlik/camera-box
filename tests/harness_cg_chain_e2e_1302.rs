@@ -53,33 +53,39 @@ health_json() {
 "#;
 
 /// Fake `curl` on PATH: a GET of a URL ending in /api/v1/ndi/health prints $FAKE_HEALTH_FILE and
-/// logs `GET m=<timeout>` to $FAKE_GETLOG; any other call (the burn POST) appends its URL, `-d`
-/// body, `-X` method, `-H` header and `-m` timeout to $FAKE_LOG.
+/// logs `GET m=<timeout>` to $FAKE_GETLOG; a GET of /api/v1/program answers SongPlayer's program
+/// already on `sp-fast` (issue 1302 slice 3: no facade press); any other call (the burn POST)
+/// appends its URL, `-d` body, `-X` method, `-H` header and `-m` timeout to $FAKE_LOG and answers
+/// like curl `-o <file> -w '%{http_code}'`: an empty body and 204 (slice 3 reads the code).
 const FAKE_CURL: &str = r#"
 FAKE_DIR="$(mktemp -d)"
 trap 'rm -rf "$FAKE_DIR"' EXIT
 export FAKE_LOG="$FAKE_DIR/curl.log" FAKE_HEALTH_FILE="$FAKE_DIR/health.json" FAKE_GETLOG="$FAKE_DIR/get.log"
 cat > "$FAKE_DIR/curl" <<'SH'
 #!/usr/bin/env bash
-body=""; url=""; prev=""; method=""; hdr=""; tmo=""
+body=""; url=""; prev=""; method=""; hdr=""; tmo=""; ofile=""
 for a in "$@"; do
   case "$prev" in
     -d|--data|--data-raw) body="$a" ;;
     -X) method="$a" ;;
     -H) hdr="$a" ;;
     -m) tmo="$a" ;;
+    -o) ofile="$a" ;;
   esac
   case "$a" in http*) url="$a" ;; esac
   prev="$a"
 done
 case "$url" in
   */api/v1/ndi/health) printf 'GET m=%s\n' "$tmo" >> "$FAKE_GETLOG"; cat "$FAKE_HEALTH_FILE" ;;
-  *) printf 'POST %s %s METHOD=%s HDR=%s m=%s\n' "$url" "$body" "$method" "$hdr" "$tmo" >> "$FAKE_LOG" ;;
+  */api/v1/program) printf '{"source":7,"remote":{"program_scene":"sp-fast"}}' ;;
+  *) printf 'POST %s %s METHOD=%s HDR=%s m=%s\n' "$url" "$body" "$method" "$hdr" "$tmo" >> "$FAKE_LOG"
+     if [ -n "$ofile" ]; then : > "$ofile"; fi
+     printf '204' ;;
 esac
 SH
 chmod +x "$FAKE_DIR/curl"
 export PATH="$FAKE_DIR:$PATH"
-export CG_CHAIN_BURN_RETRY_SLEEP=0
+export CG_CHAIN_BURN_RETRY_SLEEP=0 CG_CHAIN_BURN_READBACK_S=0 CG_CHAIN_PROGRAM_READBACK_S=0
 "#;
 
 /// Fake `python3` on PATH that stands in for the two OBS-WS helpers and passes every other call to
@@ -87,6 +93,8 @@ export CG_CHAIN_BURN_RETRY_SLEEP=0
 ///   - `cg_chain_scene.py strih-solo` prints $FAKE_SOLO_OUT (default `100<TAB>CG bridge`) and exits
 ///     $FAKE_SOLO_RC (default 0);
 ///   - `obs_phase2.py record --action stop` prints $FAKE_STOP_OUT;
+///   - `obs_phase2.py program-scene` (issue 1302 slice 3, the cg program read-back, not logged)
+///     prints $FAKE_CG_PROGRAM (default `sp-fast`);
 ///   - any other `cg_chain_scene.py` / `obs_phase2.py` call exits 0.
 const FAKE_PY: &str = r#"
 PY_DIR="$(mktemp -d)"
@@ -102,6 +110,8 @@ case "$*" in
     exit "${FAKE_SOLO_RC:-0}" ;;
   *cg_chain_scene.py*|*obs_phase2.py*record*start*)
     printf '%s\n' "$*" >> "$PY_LOG"; exit 0 ;;
+  *obs_phase2.py*program-scene*)
+    printf '%s\n' "${FAKE_CG_PROGRAM:-sp-fast}"; exit 0 ;;
   *obs_phase2.py*record*stop*)
     printf '%s\n' "$*" >> "$PY_LOG"; printf '%s\n' "${FAKE_STOP_OUT:-}"; exit 0 ;;
   *) exec "$REAL_PY" "$@" ;;
@@ -417,8 +427,11 @@ fn window_with_a_failing_cut_returns_zero_and_writes_nothing() {
 
 #[test]
 fn record_start_cuts_cg_program_before_start_record() {
+    // Issue 1302 slice 3: the record start also reads SongPlayer's program and turns its burn on,
+    // so the fake curl keeps it off the network.
     let snippet = format!(
-        "{FAKE_PY}\n\
+        "{HEALTH_FN}{FAKE_CURL}{FAKE_PY}\n\
+         health_json true > \"$FAKE_HEALTH_FILE\"\n\
          OUT=\"$(mktemp -d)\"\n\
          if CG_CHAIN_STATE_DIR=\"$OUT\" cg_chain_record_start 10.77.9.201 /x/obs_phase2.py 5; then echo STARTED; fi\n\
          cat \"$PY_LOG\"\n\
@@ -581,8 +594,13 @@ fn recording_e2e_ends_the_cg_leg_right_after_stoprecord() {
 fn recording_e2e_turns_the_burn_off_when_the_cg_recording_never_started() {
     let s = recording_e2e_text();
     let start = s.find("cg_chain_record_start").expect("the cg StartRecord");
+    // Issue 1302 slice 3 review round 1: the OFF is sent only when this run owes one (the burn ON
+    // now lives inside the record start, after the program cuts).
     let off = s
-        .find("if [ \"$CG_RECORDING_STARTED\" != 1 ]; then cg_chain_songplayer_burn off; fi")
+        .find(
+            "if [ \"$CG_RECORDING_STARTED\" != 1 ] && [ \"${CG_SP_BURN_OWED:-0}\" = 1 ]; then \
+             cg_chain_songplayer_burn off; fi",
+        )
         .expect("#1302: a burn with no cg recording is turned straight back off");
     let next = s
         .find("# [5b/8] #707 B1")

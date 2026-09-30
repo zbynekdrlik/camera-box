@@ -14,6 +14,12 @@ paths:
   - "tests/genlock_audio_step_hold_parity_1381.rs"
   - "tests/genlock_audio_step_hold_wiring_1381.rs"
   - "tests/genlock_audio_pairing_lift/mod.rs"
+  - "tests/genlock_audio_relabel_ingest_1381.rs"
+  - "tests/c/genlock_audio_relabel_ingest_1381_harness.c"
+  - "src/genlock_audio_pairing_step_tests.rs"
+  - "src/genlock_audio_pairing_pending_tests.rs"
+  - "src/asrc_timecode_pending_bench.rs"
+  - "tests/genlock_audio_relabel_pending_parity_1381.rs"
 ---
 
 # Receiver-side AUDIO genlock parity (#1303)
@@ -345,7 +351,8 @@ never dropped). Full rule: `genlock-audio-buffering-floor.md`.
 A dantesync date step (29.9.2026: +682 ms at 02:36 CEST, +89.7 ms at 04:00) moves the receiver's live
 wall→mono offset at once, while the sender's stamps follow later. SongPlayer
 (`sp-server/src/playback/audio_emitter.rs`) never jumps its grid stamps under 1 s: it re-anchors only
-when more than 1 s late. A forward step becomes a catch-up burst, a backward step a pause, and its
+when more than 1 s late. SongPlayer #224 replaces that with a relabel (the stamps jump N slots within
+one interval, `docs/genlock-sender-contract.md` §5); until it is deployed, read the old behaviour below. A forward step becomes a catch-up burst, a backward step a pause, and its
 WallClock follows after 2 confirming resamples (3.3–6.7 s). Until then the old code read the step
 as PLACEMENT ERROR. The 682 ms step then booked the capped 100 ms owed amount over and over, and the
 excess leaked into the smoothed error. The result was restore=1, ~151 ppm applied, and a 70 ms
@@ -407,8 +414,10 @@ over a minute.
   backlog relock inside the hold is absorbed. A latch lock (ACQUIRE / GAP RESYNC) that lands inside
   it is kept in `genlock_audio_step_relock_pending` and replayed on the first tick after the hold. A
   pin change re-arms the latch window itself.
-- **The log:** one `genlock-audio-step-hold '<src>': step_ms= held_ms= released=followed|timeout|reset
-  residual_ms= holds= (issue 1381)` line per released hold, NULL-safe on the source name. It is
+- **The log:** one `genlock-audio-step-hold '<src>': step_ms= held_ms=
+  released=followed|timeout|reset|relabel-pending residual_ms= holds= relabels= (issue 1381)` line
+  per released hold (and per relabel and pending relabel, the sections below), NULL-safe on the
+  source name. It is
   mutually non-substring vs every other `genlock-*` family. `held_ms=0.0` with a step-sized
   `residual_ms=` is the sender-first case. A one-packet hold with `residual_ms` near 0 is a clock-read
   glitch: the thread was preempted between the two reads of the live offset for more than a packet.
@@ -441,8 +450,371 @@ over a minute.
   - one `genlock-audio-step-hold` line per timecode source, `released=followed` normally;
   - `obs-vban pacing:` shows 0 new `discontinuities`;
   - the SongPlayer A/V gate stays green after the step.
-- **The compensator half (piece 1 re-seed, piece 3 backstop) and the two-clock bench:**
-  `asrc-bench-harness.md`, the issue-1381 section.
+- **The compensator half (piece 1 re-seed, piece 3 backstop):** `asrc-bench-harness.md`, the
+  issue-1381 section. The two-clock bench: `asrc-timecode-step-bench.md`.
+
+### Issue 1381 — a sender that RELABELS at the step is APPENDED (design 5900385541)
+
+The sender contract (sections 5 and 6, SongPlayer #224) asks a sender to RELABEL at a date step of S:
+its stamps jump N = floor(S / slot) slots within one interval, and its samples stay continuous. The
+live offset jumps by −S on the same packet, so the intended landing moves only by −r
+(r = S − N·slot, under one block). Stock OBS still lost audio on that packet:
+- a stamp jump of 70 ms or more failed `TS_SMOOTHING_THRESHOLD` in both domains, so the packet was
+  PLACED r early, and r ms of queued audio were overwritten;
+- a jump over 2 s ran `handle_ts_jump`, which dropped the whole queued buffer, and the second
+  `MAX_TS_VAR` branch ran `reset_audio_timing`.
+
+The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append decision.
+
+- **The decision.** `audio_relabel(stamp_jump, off_jump, packet, step_min)` in
+  `src/genlock_audio_step_hold.rs`, beside `audio_step_hold`. It is true when BOTH jumps exceed
+  `GENLOCK_WALL_STEP_MIN_NS` and they cancel to strictly under one packet. Without the threshold,
+  every steady packet (both jumps about 0) would be a "relabel". A stamp leap has no offset jump, and
+  a catch-up or a pause has no stamp jump, so neither is a relabel.
+- **The two jumps.** `audio_step_relabel_jumps` reads them from the skew-hold state BEFORE the hold
+  takes the packet: the stamp against the previous packet's end, and the live offset against the
+  offset the previous packet was MAPPED through (the held one while a hold runs). Against the
+  previous LIVE offset, the split shape the contract names would never be recognised: the step
+  packet still carries the old stamp and starts the hold, and the relabelled stamps come on the next
+  packet. Their sum is exactly the hold's release residual, so a relabel releases a running hold
+  `followed` with |residual| < one packet (never placed by the hold), or never starts one.
+- **The ingest.** The hold mode, the hold and the live offset are now decided at the TOP of
+  `source_output_audio_data`: the same values, and the live offset is still read once per packet.
+  Then `genlock_audio_relabel_source` runs, and on a relabel:
+  - `next_audio_ts_min` is rebased onto the relabelled stamp, so the smoothing sees no jump (no
+    70 ms re-placement, no `handle_ts_jump`), and the raw timeline continues from the new stamp
+    also under 70 ms;
+  - inside `audio_buf_mutex`, `next_audio_sys_ts_min` is rebased onto `in.timestamp`, so the stock
+    equality check appends and the second reset is never reached.
+  The −r is repaid on the placement slew (slice 2 below; slice 1 left it to the timecode ASRC's
+  booking band). Every other packet takes the stock path byte for byte.
+- **The log.** `relabels=` is appended to the `genlock-audio-step-hold` line (after `holds=`). A
+  relabel that releases a hold prints that release's line (`released=followed`, residual −r). A
+  joint relabel (no hold) prints `released=none held_ms=0.0`, with its own wall step and landing
+  move. The counter is `genlock_audio_relabels` in `obs-internal.h` (relabels RECOGNISED: one that
+  still ends up placed — a sync-offset change, `audio_ts == 0`, the backstop — is counted too).
+- **Ordering limit (review round 1), resolved by slice 2 below.** A relabel is recognised only when
+  the receiver's own step is seen on the same packet as the relabelled stamps or before them, while
+  the skew hold runs (at most 10 s). A sender on the receiver's box shares its clock, so this always
+  holds for SongPlayer on resolume. A sender whose box steps FIRST reads as a stamp jump with no
+  offset jump; slice 1 left it on the stock path (appended under 70 ms, placed N slots late from
+  70 ms to 2 s, `handle_ts_jump` over 2 s, then placed a second time at the receiver's step). Slice 2
+  makes such a jump (over one packet) a PENDING relabel.
+- **Finding (ticket comment 5900705310), resolved by slice 2 below.** The timecode ASRC books a jump
+  only at or over its band, max(half a packet, 10 ms) = 16.7 ms for 1600-sample blocks, so slice 1
+  left a smaller remainder to the level loop alone (r = 15.8 ms of the 682 ms step: back within 2 ms
+  only at +725 s). The ROZHODNUTÉ on that finding: every remainder is repaid at 1000 ppm on the
+  placement slew.
+- **Tests.**
+  - The pure unit tests in `src/genlock_audio_pairing_step_tests.rs`.
+  - The relabel lines of `genlock-audio-step-hold`, checked value for value in the lift harness
+    (step, held, released, residual, holds, relabels); a sign flip or a zero residual fails.
+  - `tests/genlock_audio_step_hold_parity_1381.rs::c_audio_relabel_matches_the_rust_authority_1381`:
+    the scalar vectors, plus relabels in both shapes on top of the hold script.
+  - `tests/genlock_audio_relabel_ingest_1381.rs`: a lift-and-compile of the shipped place-vs-append
+    branch (relabel, smoothing, `handle_ts_jump`, the system check) through
+    `tests/c/genlock_audio_relabel_ingest_1381_harness.c`, against a truth table: joint 40 ms /
+    260 ms / 682 ms / −1.5 s / 2.5 s, split 682 ms, catch-up, stamp leap and restart, plus a count of
+    the stock debug lines.
+  - The `RELABEL_WIRING` needles in the wiring test and both pwsh gates.
+  - The step bench (`asrc-timecode-step-bench.md`).
+  - Mutation proof: 11/11 C / wiring mutants killed by the Rust gates, and every wiring mutant also
+    by the real pwsh lines of both ymls (run with the portable pwsh).
+- **Deploy + live acceptance (supervisor).** A FULL bundle, because the change is in libobs. Run a
+  controlled date step with SongPlayer #224 deployed, and read on resolume:
+  - the cg OBS program audio has no hole larger than r;
+  - `relocks` stays flat;
+  - `genlock-audio-step-hold ... released=followed ... relabels=1` (or a `released=none` line for a
+    joint relabel), with `residual_ms` = −r (the harness pins the exact values);
+  - after a relabel whose r is over half a frame (16.7 ms), the audit line's `audio_health=` may read
+    PairingOffsetExceeded for about r − 16.7 seconds, while the 1000 ppm repayment brings the
+    measured placement error under half a frame. The LOCK widget (33 ms bound) is not affected.
+    This is expected, not a regression.
+
+### Issue 1381 slice 2 — every remainder on the slew, and a sender that stepped FIRST is a PENDING relabel (design 5901213031)
+
+- **(a) The remainder is booked on the placement slew.** `audio_relabel_book_ns(move, relabel,
+  appended, asrc_tc)` (C `genlock_audio_relabel_book_ns`) returns the landing move (−r) for a
+  relabel that APPENDS on the timecode ASRC path, else 0. A relabel is the slice-1 joint or split
+  one (move = stamp jump + offset jump) or a `relabel-pending` release (move = its release residual).
+  - **Where it runs.** The ingest adds the move to `genlock_audio_slew_remaining_ns` after the
+    sync-offset branch and BEFORE the step placement / backstop and the ASRC error input.
+  - **Why nothing books it.** Both of those read err + owed, so the ASRC sees its expectation and
+    books nothing.
+  - **How it is paid.** The existing slew machinery pays it at `GENLOCK_AUDIO_SLEW_PPM` and books
+    each consumed step out of the smoothing timeline. In timecode mode `shift_level_target` is a
+    no-op, because the placement error moves by itself. So r ms is repaid in r seconds, under the
+    16.7 ms band too.
+  - **A placed relabel** lands on its raw stamp, so there is nothing to book.
+- **(b) The pending relabel is a hold of its own kind.** It uses the same state (`AudioStepHold` +
+  `relabel_pending` + `prev_arrival_ns`; C: `genlock_audio_step_relabel_pending` /
+  `genlock_audio_step_prev_arrival_ns`), so it gets the hold's ASRC freeze, render-thread freeze and
+  10 s bound.
+  - **Start** (`audio_step_relabel_pending_starts`, asked by the ingest before the smoothing and by
+    the hold on the same state, so both agree). All of these must hold:
+    - outside a hold, in timecode mode, with a previous packet;
+    - this box's live offset did not move (at most 2 ms);
+    - the stamps jumped AWAY from this box's wall: their age leaves the nominal band (one packet in
+      slice 2). Since slice 3 that means more than one packet + the 15 ms arrival budget off, or
+      more than HALF a packet off AND further off than the previous packet's age;
+    - `audio_relabel_pending(J, arrival_gap, packet, 2 ms)` holds: |J| over 2 ms AND a whole slot
+      (since slice 3: forward at least one packet − 100 ns, backward over one packet; slice 2 needed
+      over one packet both ways), and the gap at most one packet + `AUDIO_RELABEL_ARRIVAL_JITTER_NS`
+      (15 ms, the measured arrival jitter budget).
+  - **What the start does.** The ingest continues both timelines from the jumped stamp, so there is
+    no 70 ms placement and no 2 s reset. The hold maps the stamps through the pre-jump offset minus J,
+    so the landing stays continuous.
+  - **Release.** `RelabelPending` (4, `relabel-pending`) when this box's offset jumps over 2 ms on
+    one packet and lands STRICTLY within one packet of the held offset. The residual is −r, it is
+    never placed, and it is booked per (a). `relabels=` counts it in `genlock_audio_step_log`.
+  - **Otherwise.** `Timeout` at the bound (residual J, placed once by `release_places`), or `Reset`.
+    The ordinary follow and age releases do not apply to a pending relabel.
+  - **What moves the held offset while a pending runs** (review rounds 1 and 2). The skew hold
+    folds every stamp jump over 2 ms into its held offset. A pending folds:
+    - a move UNDER one slot exactly like the skew hold (round 2; since slice 3 a forward slot starts
+      at one packet − 100 ns, a backward one at one packet). A raw-clock sender (its stamps
+      its submission wall, the contract's default) whose step-carrying packet goes out L late
+      (up to the 15 ms arrival budget) starts the pending on S + L, and the next on-time packet's
+      −L comes back. Kept in the held offset (the round-1 rule), the release residual was +L,
+      booked on the slew and then left under the ASRC band: 8 ms late in the bench = 8.8 ms off
+      until +761 s. The pending START still re-anchors OBS's raw-domain smoothing timeline on the
+      late stamp, so later packets sit L off their raw stamps until the next timeline reset and use
+      L of the 70 ms snap headroom on one side. Placement, the ASRC error and the pairing offset
+      read the raw stamp, so the audio is not affected (a slice-1 relabel of a jittered stamp does
+      the same).
+    - a move of a slot or more only when `audio_relabel_pending` accepts it (continuous
+      arrival). A pause, a duplicated slot or a skipped slot inside the window keeps the held
+      offset. OBS then takes its stock path for that packet, and this box's own step still
+      resolves the pending. Folded (round 0), a 500 ms pause 5 packets into a +682 ms pending
+      moved the held offset by the pause: the receiver's step missed it, and the pending ran to the
+      bound and placed 484 ms.
+  - **A second relabel-shaped jump inside the window** (the sender's box stepped again) IS folded,
+    and one step of this box by both steps resolves the pending (residual −(r1 + r2)). The ingest
+    continues its timelines only at a pending's START, so the stock system-domain check sees that
+    second raw jump: the one packet is PLACED, at its continuous landing through the folded offset
+    (harness `pending_twice_682ms`, and the stock "exceeded TS_SMOOTHING_THRESHOLD" debug line).
+    A second jump over 2 s is not continued either: OBS's `handle_ts_jump` drops the buffer and
+    the hold releases `reset`. Two fleet date steps within 10 s do not happen in practice.
+  - **`relabel_pending` stays set after a release** (the C field
+    `genlock_audio_step_relabel_pending`). It is cleared when the next hold starts. The log reads it
+    for `pending=`. A running pending is `active && relabel_pending`.
+- **Why the thresholds are stricter than "|J| ≥ 2 ms + continuous arrival"** (anchors comment
+  5901361587). Each one keeps an existing path out of a pending relabel:
+  - Under a slot: a DUPLICATED slot (the 1367 bench resends the same stamp 2–5 ms later, a jump of
+    exactly one packet BACK) or a raw-clock sender's submission jitter would freeze the ASRC for
+    10 s. So a backward jump needs more than one packet, and a forward one at least one packet −
+    100 ns (slice 3, below). A skipped slot jumps one packet FORWARD and is kept out by its arrival
+    gap.
+  - A pause or restart shows the gap its stamps jumped by, so the arrival bound excludes it. So does
+    the 1367 stamp leap (a missing slot + 47 ms: 80 ms after a 2-packet gap).
+  - The age test: after a receiver-first step whose hold released early (heavy arrival jitter, or
+    the timeout), the sender's LATE stamp jump brings the age BACK to the nominal. That is a follow,
+    not a sender step, so it keeps today's path (the `heavy_arrival_jitter` bench case, and a
+    mutation that drops the age test fails it).
+  - **A sender-first step of ONE slot (|N| = 1).** Slice 2 did not reliably catch it (review
+    round 1, finding 1). **N = +1 is fixed by slice 3 (the section below). N = −1 stays a known
+    limit.** Its stamps repeat exactly one packet back on the sender's 100 ns grid, byte-identical to
+    a duplicated slot, so no bound can tell them apart. It keeps the slice-1 path: nothing
+    overwritten, the offset repaid by the level loop (bench probe: −10 ms stays 23.3 ms off until
+    +748 s, −20 ms is booked and settles in 11 s, −30 ms in 1 s).
+- **Tests.**
+  - The unit tests are in `src/genlock_audio_pairing_pending_tests.rs`.
+  - The parity test is `c_audio_relabel_pending_matches_the_rust_authority_1381` in its own file,
+    `tests/genlock_audio_relabel_pending_parity_1381.rs` (split out of the skew-hold parity file at
+    review round 1, which was near 1000 lines). It runs scalar vectors plus a pending script
+    (start, 4 resolutions, a miss then a resolve, a pause / dup / skipped slot INSIDE a pending,
+    a second relabel-shaped jump inside a pending, a dup / pause / leap that never starts one,
+    reset, timecode off, the bound, a late follow).
+  - The ingest lift harness now lifts the booking slice verbatim (`@BOOK_SLICE@`, the `book=`
+    column). It covers pending +682 ms / −1.5 s / +2.5 s resolved, one pending that times out, a
+    pause inside a pending (resolved at the receiver's step), a second relabel-shaped jump inside
+    a pending followed by a joint relabel (its line must read `pending=0`), a pause and a dup. Its
+    log lines carry `pending=`.
+  - The harness's stamp leap and restart now carry their real arrival gap. With continuous arrival
+    a stamp jump IS a pending relabel.
+  - The `PENDING_WIRING` needles are in the wiring test and both pwsh gates.
+  - The bench is `src/asrc_timecode_pending_bench.rs` (`asrc-timecode-step-bench.md`).
+- **The log (review round 1).** `pending=` is appended after `relabels=` on the
+  `genlock-audio-step-hold` line. It is 1 on the release line of a pending relabel, whether it
+  resolved (`released=relabel-pending`), ran out (`released=timeout`) or was reset
+  (`released=reset`), and 0 on every other line.
+  A pending timeout used to print exactly like a skew-hold timeout, although its `step_ms` is the
+  sender's stamp jump, not this box's wall step. A `pending=1 released=timeout` line is the main
+  residual risk of this slice: a stamp leap with continuous arrival that was not a sender step, its
+  audio J off its video for 10 s before the stock placement.
+- **Deploy + live acceptance (supervisor).** A FULL bundle. At the next date step where a cross-box
+  sender's box steps first, read on the receiving box:
+  - one `genlock-audio-step-hold ... released=relabel-pending ... relabels=... pending=1` line,
+    with `residual_ms` = −r and `step_ms` = the sender's stamp jump;
+  - no hole in the program audio;
+  - `place_jumps` flat (the remainder is slewed, not booked);
+  - `audio_health` back within half a frame after r seconds;
+  - the real lag between the sender's and the receiver's step, read from the two boxes' dantesync
+    logs, against the 10 s bound. The bench assumes it stays inside the bound; nothing live has
+    measured it yet.
+
+### Issue 1381 slice 3 — a sender-first step of ONE slot (N = +1) is a pending relabel (design 5902870861, ROZHODNUTÉ 5902983227 + 5903945145)
+
+- **The stamp domain is 100 ns, not ns.** Every NDI stamp the receiver reads is a multiple of
+  100 ns (DistroAV multiplies the timecode by 100; the contract's per-second grid is in 100 ns
+  units). At 30 fps the sender's slots are 33 333 300 / 33 333 300 / 33 333 400 ns, and the
+  1600-sample packet is 33 333 333 ns. So an N = +1 relabel's stamp jump (two slots minus one
+  packet) depends on the grid position of its first relabelled block:
+  - one packet + 34 ns on two positions of three;
+  - one packet − 66 ns on the third;
+  - at 60 fps (800-sample blocks) the two are − 32 ns and + 68 ns.
+- **Slice 2 missed the − 66 ns position.** It needed more than one packet, so the jump was
+  appended and this box's later step PLACED the packet (+40 ms: 7.2 / 9.7 ms overwritten). The
+  design comment's premise (slots of 33 333 333 / 334 ns, a `>= packet − 1 ns` bound) was the
+  receiver's ns grid. The lane measured it (design question 5902976714): that bound decided
+  exactly like slice 2, 20/30 bench cases. The ROZHODNUTÉ set one NDI unit (100 ns): 30/30.
+- **The decision** (Rust `src/genlock_audio_step_hold.rs` ↔ C `obs-source.c`, parity-gated):
+  - `audio_relabel_pending` / `genlock_audio_relabel_pending`: FORWARD at least one packet −
+    `AUDIO_RELABEL_FORWARD_TOLERANCE_NS` (100, `GENLOCK_AUDIO_RELABEL_FORWARD_TOLERANCE_NS` inside
+    the lifted block), BACKWARD more than one packet (unchanged). The arrival bound is unchanged.
+  - `audio_step_relabel_pending_starts` / `genlock_audio_step_relabel_pending_starts`: the age
+    band is HALF a packet. A one-slot step's age sits about one slot off, so a late packet (up to
+    the 15 ms budget) no longer decides it. It is the only age test on the pending path; the
+    resolve itself (within one packet of the held offset) is unchanged.
+  - **The age must move AWAY (review rounds 1-2).** Up to one packet + the 15 ms arrival budget
+    off the nominal, the age must also be STRICTLY further off than the previous packet's. A
+    LATE FOLLOW brings the age back toward the nominal: this box stepped first by S, its hold timed
+    out (J placed at 10 s), and the sender relabels N slots only after that. Its first relabelled
+    block lands r = S − N·slot off (under one slot), plus that block's arrival lateness (at most the
+    budget).
+    - Read by the band alone, that block started a false pending. Bench: S = 50–66 ms, a second
+      10 s hold, then 33.3 ms placed, 66 ms overwritten.
+    - Slice 2's "over one packet is away" had the same hole wherever r plus the lateness passed one
+      packet (S = 66 ms: r = 32.7 ms + 1 ms of arrival jitter). The bound is the budget, because
+      that is how far past one packet a late follow can land.
+    - Kept: a sender that steps AGAIN, toward this box's wall, while the age sits hundreds of ms
+      off (a timed-out pending). It lands over the bound, so it still starts.
+    - **The guard alone cannot see every late follow (review round 2, Design-question
+      5903897499).** It reads the age against the nominal, and the nominal MOVES. A step just over
+      one slot (|S| = 34–38 ms) can release the skew hold EARLY on the age test under ±1–5 ms of
+      arrival jitter, and the in-band nominal then tracks the unmatched step. The sender's late
+      follow then started a false pending (a 10 s hold, then one slot placed at the timeout):
+      backward (N = −2 overshoots the nominal), a hole slice 2 already had; forward, with the
+      follow 60 s or more late, new in slice 3. Fixed by the remembered step below.
+  - **The remembered unmatched step (ROZHODNUTÉ 5903945145).** A skew hold that ends WITHOUT the
+    stamps jumping remembers what they never matched: the residual `off_live − held` when it is
+    over one packet, and when. Two per-source fields: `AudioStepHold::unmatched_ns` /
+    `unmatched_at_ns` ↔ `obs_source` `genlock_audio_step_unmatched_ns` / `_at_ns`.
+    - Recorded at the age release (Followed with the residual still over one packet), the
+      zero-length release and a skew-hold timeout. Not recorded: a matched follow (within one
+      packet), a pending relabel's timeout (that is the SENDER's step, and its counterpart is this
+      box's own offset jump, which never starts a pending), RelabelPending, a reset.
+    - `audio_step_unmatched_follow` / `genlock_audio_step_unmatched_follow`: a stamp jump is that
+      step's follow when it is non-zero, of the OPPOSITE sign (the residual is `off_live − held`,
+      the stamps move against it), within one packet + the 15 ms arrival budget of the remembered
+      size, inside the 600 s re-anchor window (`AUDIO_STEP_NOMINAL_REANCHOR_NS`, strict).
+    - A follow VETOES the pending start (the last term of the starts predicate). A relabel-shaped
+      follow (`audio_relabel_pending`) CLEARS the memory in the hold, so a second jump is judged
+      afresh; a sub-slot stamp move of the same sign keeps it. Timecode off forgets it.
+    - "Resolved like a matched relabel" means: never a pending, and the memory is gone. The follow
+      packet itself takes the stock path (appended under 70 ms, placed at 70 ms or more). A jump of
+      half a packet or more is then booked by the timecode ASRC at 1000 ppm, the same rate as a
+      relabel's placement slew: a scratch probe that put the follow on the slew gave the same
+      numbers over the 36 bench cases (review round 3).
+    - The follow is NOT free (review round 3 corrected round 2's "never paid twice"). The early age
+      release PLACES the step before the follow (the skew hold's slice-1 limit, unchanged): |S|
+      overwritten for a forward step, a |S| gap for a backward one (34–38 ms in the bench), and the
+      audio |S| off its video until the follow. At the follow the error becomes the relabel's own
+      landing move, one slot forward or two slots backward (N = −2 overshoots), booked back at
+      1 ms per second: 33.3 ms settled in 31 s, 66.7 ms in 65 s. No audio is lost from the follow on.
+      Placing the follow instead would zero the A/V at once but overwrite up to 66.7 ms or open a
+      33.3 ms gap (probe). The bench pins the booked cost.
+    - One step is remembered: a later unmatched step replaces it, so a second step inside the first
+      one's lag leaves the first step's late follow to the away guard alone (a step storm; review
+      round 3 probe). A sender-first pending that timed out followed by this box's own late step
+      records a memory although the stamps already moved: harmless, since a later stamp jump would
+      need the opposite sign and a matching size.
+    - A raw-clock sender (its stamps are its wall at emit) whose step packet goes out late
+      (`Follow::JumpLate`, +8 ms) leaves that lateness to the level loop around ANY receiver-first
+      skew hold it follows: ~7 ms off, back within 2 ms only after ~740 s. Review round 4 measured
+      it on a clean in-hold `followed` release too (lag 5 s, jitter 0, any S and sign; no ring
+      without a hold; identical on the slice-3 base). So it is independent of the early release, of
+      the memory and of the follow's treatment: the receiver-first twin of the slice-2 round-2
+      JumpLate fix (`a_raw_clock_senders_late_step_packet_leaves_no_residual_1381`, sender-first
+      only). A follow-up candidate, not this slice's.
+    - Wiring: the two fields in `obs-internal.h`, both wrappers pass them
+      (`genlock_audio_step_hold_source`, `genlock_audio_relabel_pending_source`), the wiring test's
+      needles and both pwsh gates.
+  - **The fold's slot is the pending bound's (review round 1).** Inside a pending, a move under one
+    slot folds like the skew hold's, and a slot or more folds only when relabel-shaped. Forward, a
+    slot starts at one packet − 100 ns (`genlock_audio_relabel_forward_slot_ns`); backward, at one
+    packet. Split at exactly one packet, a skipped slot at the − 66 ns position was folded as a
+    sub-packet move. The held offset moved by the slot, and this box's step resolved with p − r
+    instead of −r (+26.7 ms at +40 ms).
+  - No state, field, wiring, log or pwsh change: the helper bodies are covered by the parity gates,
+    not by needles.
+- **What keeps its slice-2 path, byte for byte.** The new start adds only a forward jump in one
+  packet − 100 ns ..= one packet and an age in (half a packet, one packet]. It drops only a slice-2
+  start that is a late follow (unit test `the_slice_3_start_adds_only_…`, against a verbatim slice-2
+  reference). None of these is a start, and none falls in either new region, so each keeps its
+  trace:
+  - a skipped slot: the same forward jump, but an arrival gap of one packet;
+  - a duplicated slot: exactly one packet back;
+  - an N = −1 relabel: byte-identical to a duplicated slot;
+  - a pause, a restart, a catch-up sender.
+  The bench and the ingest lift pin those traces on every grid position.
+- **A one-slot pending this box never follows** runs to the 10 s bound and releases `timeout` with
+  J as its residual, and `audio_step_release_places` PLACES the packet on EVERY grid position: a
+  zero-filled gap of J, nothing overwritten or dropped (ROZHODNUTÉ 5903945145 point 2: the stamps
+  win). A timeout places a move of ONE SLOT or more (forward from one packet − 100 ns, either sign);
+  a Followed release still places only over one packet. Slice 3 first booked the − 66 ns position
+  (J within one packet) at 1000 ppm through the timecode ASRC. A relabel-shaped jump inside a
+  pending folds, so a folded pending can time out with a sub-slot move; that stays booked (review
+  round 3: round 2 had widened the rule to any non-zero move, e.g. −966 ns after a one packet +
+  1 µs step back). A skew hold's own timeout is over one packet by construction (the follow test
+  runs first on the same packet).
+- **Tests.**
+  - Unit (`src/genlock_audio_pairing_pending_slice3_tests.rs`, a `#[path]` child of the pending
+    tests): the bound at − 66 / + 34 / − 100 / − 101 ns
+    and exactly one packet; the arrival gap of a skipped slot; backward one packet;
+    +35 / 40 / 50 / 60 / 66 ms at both grid jumps, resolved by this box's step with −r; the age
+    band's exact edge; the start's widenings and its late-follow narrowing against slice 2; late
+    follows of 50–66 / 682 ms (the first block up to 15 ms late); a toward jump still 382 ms off
+    that starts; the away guard's strict edge; a skipped slot inside a pending on every grid
+    position; a backward move inside a pending (− p keeps, − (p − 50 ns) folds). Round 2: the away
+    guard's far bound (a timed-out +100 ms pending, then the stamps at far / far + 1) and its edge
+    with a ±1 ms offset move; a never-followed pending placed on every grid position; the start
+    sweep's late-follow oracle (the scenario's own step, never the code under test); the two-box
+    jittered driver (14 400 runs: fps, step, lag, jitter, seed) with zero false pendings; the
+    memory (remembered, cleared, kept by a sub-slot move, not remembered for a matched follow, a
+    pending timeout or a reset, the window's strict edge, the wrong sign, a zero jump, timecode
+    off). Round 3: the timeout's one-slot edge (± one packet − 100 ns places, one ns under does
+    not) and the folded pending that times out with −966 ns (booked).
+  - Bench (`src/asrc_timecode_pending_bench.rs`, `asrc-timecode-step-bench.md`): the grid premise,
+    the one-slot steps on all three positions, the never-follows case (placed on every position), a
+    skipped block, a duplicated block and N = −1 steps byte for byte, a late follow (50–66 /
+    260 ms, 12 / 20 s after this box's step, on every position) that never starts a pending, and
+    the jittered late follow (S = ±34 / 36 / 38 ms, 12 / 60 / 120 s, 3 / 5 ms jitter): 0 pendings,
+    0 ms overwritten, dropped or zero-filled from the follow on (17 of 36 failed before), and the
+    A/V cost pinned from the follow on (`StepRun.follow_av_max_ms` / `follow_av_settle_s`: at most
+    N slots, settled within N slots' worth of seconds; both bounds tight).
+  - Parity (`tests/genlock_audio_relabel_pending_parity_1381.rs`): scalars at the bound, both jumps,
+    an age-band-only start, the band's edge (on it, 5 ms inside, 1 ns past), a skipped slot at
+    − 66 ns outside and inside a pending, the late follows (on time; 5 ms late at − 66 ns), the toward
+    jump 382 ms off, the away guard's edge (computed from the replayed Rust state) and a backward
+    move of p − 50 ns inside a pending. Round 2: the jittered 34 ms late follow, the far bound, a
+    follow exactly one packet short (never remembered), a 20 ms sub-slot move (keeps the memory),
+    scalar vectors of `audio_step_unmatched_follow` (window edges, both signs, saturation) and both
+    drivers printing the two memory fields; the step-hold parity replays a sequence that reaches a
+    remembered step, and (round 3) the timeout's one-slot edge and a folded −966 ns residual.
+  - Ingest lift: pending at +40 / +60 ms, one never followed, a skipped slot and an N = −1 relabel
+    on the stock path, a skipped slot inside a pending (resolved with −6.7 ms), and the late follows
+    at 60 ms and at 66 ms with a 5 ms late block (no second hold), and the jittered late follow of
+    34 ms (one step-hold line, `released=followed residual_ms=-34.0`, no pending).
+  - Mutation: C 45/45, Rust 43/44 (the away guard's constants, the memory's window, sign, zero
+    jump, budget, record threshold, clear shape, each record site, and the timeout's one-slot rule:
+    the old over-one-packet rule, always, any non-zero move, strict, one packet). The survivor,
+    `stamp_jump_ns > 0` as `>= 0`, is equivalent: a zero jump never passes `jump > step_min`.
+- **Live acceptance (supervisor).** Ships in the same FULL bundle. At a date step where a cross-box
+  sender's box steps first by one slot (+33.3 … +66.7 ms): one `genlock-audio-step-hold …
+  released=relabel-pending … pending=1` line with `step_ms=+33.333` and `residual_ms` = −r; no
+  hole; `place_jumps` flat. A date step that small is rare (the nightly steps are hundreds of ms),
+  so this may only be seen on a daytime restart step.
 
 ## LOCK-indicator audio DEGRADE term — audible-but-expected-silent (#1303 part 3b/c — DONE)
 

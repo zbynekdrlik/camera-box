@@ -421,6 +421,22 @@ def test_cg_strih_solo_refuses_a_production_scene_before_any_write(tmp_path):
     assert not state.exists()
 
 
+def test_cg_facade_press_refuses_the_production_scene_before_it_dials(monkeypatch, capsys):
+    # issue 1302 slice 3: the SongPlayer facade press (obs_phase2._conn on :4456 + _rpc) is refused
+    # before any connection is opened, and facade_program itself refuses before any request.
+    cg = _cg()
+    monkeypatch.setattr(cg, "_facade_session",
+                        lambda host, port: pytest.fail("a refused press must never dial the facade"))
+    rc = cg.main(["facade-program", "--host", "10.77.9.201", "--scene", "PRO"])
+    assert rc == 2
+    assert "PRO" in capsys.readouterr().err
+    calls = []
+    with pytest.raises(RuntimeError) as exc:
+        cg.facade_program(lambda rtype, rdata=None: calls.append(rtype), "PRO")
+    assert _is_refusal(exc.value)
+    assert calls == []
+
+
 def test_cg_cli_refusal_exits_2_and_closes_its_session(monkeypatch, tmp_path, capsys):
     cg = _cg()
     rpc = CgRpc({"PRO": []})

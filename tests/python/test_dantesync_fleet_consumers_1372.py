@@ -189,6 +189,21 @@ def test_upgrade_verify_env_fails_loudly_when_the_audio_grandmaster_does_not_res
     assert "gate_env_for" in _UPGRADE.read_text() and 'genv="$(dantesync_gate_env_for "$name")" || {' in _UPGRADE.read_text()
 
 
+def test_upgrade_names_the_fleet_ntp_master_without_the_fleet_flag(tmp_path):
+    """29.9.2026: without --fleet the upgrader defaulted NTP_MASTER to the retired Windows strih's
+    name 'strih', so an explicit `--linux "strih-lx=..."` roll verified the fleet DATE master as a
+    SLAVE (the ~2 ms single-node bound against its by-design daily date error of 30+ ms) and rolled a
+    healthy v1.14.0 back twice. The default master is the declared fleet's ntp-master role in every
+    mode; an explicit NTP_MASTER / DANTESYNC_NTP_MASTER_NAME still wins."""
+    r = _source_upgrade(tmp_path, 'echo "D=[$(dantesync_upgrade_default_master "")]";'
+                                  ' echo "G=[$(dantesync_upgrade_default_master other)]"')
+    assert "D=[strih-lx]" in r.stdout, r.stdout + r.stderr
+    assert "G=[other]" in r.stdout, r.stdout + r.stderr
+    src = _UPGRADE.read_text()
+    assert 'NTP_MASTER="$(dantesync_upgrade_default_master "$_NTP_MASTER_GIVEN")"' in src
+    assert 'NTP_MASTER="${NTP_MASTER:-${DANTESYNC_NTP_MASTER_NAME:-strih}}"' not in src
+
+
 def test_upgrade_without_nodes_names_the_fleet_flag(tmp_path):
     bindir, _ = _stub_bin(tmp_path, {})
     r = subprocess.run(["bash", str(_UPGRADE), "--dry-run"], capture_output=True, text=True,

@@ -14,18 +14,21 @@
 //! packets, its exact edge), a timeline reset,
 //! leaving timecode mode in a hold, stamp jitter inside a hold, a step within one packet, the joint
 //! step, the 2 ms boundary (with 1 ms packets, where a 2 ms jump is more than a packet) and the
-//! one-packet boundary, and the two's-complement extremes. It FAILS LOUDLY when no C compiler is
+//! one-packet boundary, and the two's-complement extremes. The PENDING relabel of design 5901213031
+//! (the sender's box stepped first) and the relabel remainder booking have their own gate,
+//! `tests/genlock_audio_relabel_pending_parity_1381.rs`. It FAILS LOUDLY when no C compiler is
 //! present.
 
 use camera_box::genlock_audio_pairing::{
-    audio_stamp_age_ns, audio_step_freezes_video, audio_step_hold, audio_step_release_places,
-    audio_step_residual_ns, AudioStepHold, AudioStepRelease, AUDIO_STEP_HOLD_MAX_NS,
-    AUDIO_STEP_NOMINAL_REANCHOR_NS, AUDIO_STEP_NOMINAL_WARM_PACKETS,
+    audio_relabel, audio_stamp_age_ns, audio_step_freezes_video, audio_step_hold,
+    audio_step_relabel_jumps, audio_step_release_places, audio_step_residual_ns, AudioStepHold,
+    AudioStepRelease, AUDIO_STEP_HOLD_MAX_NS, AUDIO_STEP_NOMINAL_REANCHOR_NS,
+    AUDIO_STEP_NOMINAL_WARM_PACKETS,
 };
 use camera_box::genlock_wall_step::WALL_STEP_MIN_NS;
 
 mod genlock_audio_pairing_lift;
-use genlock_audio_pairing_lift::{i64_lit, run_c};
+use genlock_audio_pairing_lift::{compile, i64_lit, lift_block, run_c, run_lines};
 
 const PACKET: u64 = 33_333_333;
 const WALL: u64 = 1_790_000_000_123_456_789;
@@ -81,8 +84,9 @@ fn sequence() -> Vec<Pkt> {
         t += if i < 43 { PACKET } else { PACKET / 4 };
     }
     clear(&mut v);
-    // review round 1: the sender stepped FIRST -- its stamps jumped, the receiver steps 2 s later (a
-    // zero-length hold, released on the receiver's own packet), past the nominal's warm-up
+    // review round 1: the sender stepped FIRST -- its stamps jumped, the receiver steps 2 s later,
+    // past the nominal's warm-up (design 5901213031: a pending relabel from the stamp jump on,
+    // resolved by the receiver's own packet)
     for _ in 0..WARM {
         push(&mut v, &mut k, OFF, 0, 0, false);
     }
@@ -111,9 +115,10 @@ fn sequence() -> Vec<Pkt> {
     }
     clear(&mut v);
     // the nominal age: jittered arrivals move it in band (both signs, a remainder the division
-    // truncates toward zero); stamps 100 ms ahead leave the band and start the timer; packets 100 s
-    // apart reach the re-anchor at exactly 600 s; the receiver's later step then HOLDS (the stamps
-    // are off the re-anchored nominal)
+    // truncates toward zero); stamps 100 ms ahead (after a 100 s pause: with continuous arrival the
+    // jump would be a pending relabel, design 5901213031) leave the band and start the timer; packets
+    // 100 s apart reach the re-anchor at exactly 600 s; the receiver's later step then HOLDS (the
+    // stamps are off the re-anchored nominal)
     let mut t = MONO + k * PACKET;
     let jitter: [i64; 5] = [0, 3_000_001, -5_000_003, 1_234_567, -2_000_000];
     for i in 0..(WARM as usize + 20) {
@@ -123,12 +128,12 @@ fn sequence() -> Vec<Pkt> {
         t += PACKET;
     }
     let far = 100_000_000_000_u64;
-    for n in 0..8_u64 {
+    for n in 1..9_u64 {
         let raw = (WALL + k * PACKET + n * far).wrapping_add(100_000_000);
         v.push((true, OFF, raw, PACKET, t + n * far, false));
     }
-    let t_end = t + 7 * far;
-    let raw_end = WALL + k * PACKET + 7 * far + 100_000_000;
+    let t_end = t + 8 * far;
+    let raw_end = WALL + k * PACKET + 8 * far + 100_000_000;
     for j in 1..4_u64 {
         v.push((
             true,
@@ -251,7 +256,7 @@ fn clear(v: &mut Vec<Pkt>) {
 
 fn state_line(off: i64, rel: u8, s: &AudioStepHold) -> String {
     format!(
-        "{off} {rel} {} {} {} {} {} {} {} {} {} {}",
+        "{off} {rel} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
         u8::from(s.active),
         s.prev_off_ns,
         s.prev_raw_ns,
@@ -261,7 +266,11 @@ fn state_line(off: i64, rel: u8, s: &AudioStepHold) -> String {
         s.nominal_warm,
         s.held_off_ns,
         s.start_ns,
-        s.step_ns
+        s.step_ns,
+        s.prev_arrival_ns,
+        u8::from(s.relabel_pending),
+        s.unmatched_ns,
+        s.unmatched_at_ns
     )
 }
 
@@ -282,19 +291,23 @@ fn c_audio_step_hold_matches_the_rust_authority_1381() {
     static const uint64_t pkt[] = {{ {} }};
     static const uint64_t now[] = {{ {} }};
     static const int rst[] = {{ {} }};
-    bool active = false;
+    bool active = false, pending = false;
     int64_t prev_off = 0, nominal = 0, held = 0, step = 0;
-    uint64_t prev_raw = 0, prev_pkt = 0, dev_since = 0, start = 0;
+    uint64_t prev_raw = 0, prev_pkt = 0, dev_since = 0, start = 0, prev_arrival = 0;
     uint32_t warm = 0;
+    int64_t unmatched = 0;
+    uint64_t unmatched_at = 0;
     for (size_t i = 0; i < sizeof(tc) / sizeof(tc[0]); i++) {{
         int64_t use = 0;
         const int rel = genlock_audio_step_hold(&active, &prev_off, &prev_raw, &prev_pkt, &nominal, &dev_since,
-                                                &warm, &held, &start, &step, tc[i] != 0, off[i], raw[i], pkt[i],
-                                                now[i], rst[i] != 0, {min}ll, &use);
-        printf("%lld %d %d %lld %llu %llu %lld %llu %u %lld %llu %lld\n", (long long)use, rel, active ? 1 : 0,
-               (long long)prev_off, (unsigned long long)prev_raw, (unsigned long long)prev_pkt,
+                                                &warm, &held, &start, &step, &prev_arrival, &pending, &unmatched,
+                                                &unmatched_at, tc[i] != 0, off[i], raw[i], pkt[i], now[i],
+                                                rst[i] != 0, {min}ll, &use);
+        printf("%lld %d %d %lld %llu %llu %lld %llu %u %lld %llu %lld %llu %d %lld %llu\n", (long long)use, rel,
+               active ? 1 : 0, (long long)prev_off, (unsigned long long)prev_raw, (unsigned long long)prev_pkt,
                (long long)nominal, (unsigned long long)dev_since, warm, (long long)held,
-               (unsigned long long)start, (long long)step);
+               (unsigned long long)start, (long long)step, (unsigned long long)prev_arrival, pending ? 1 : 0,
+               (long long)unmatched, (unsigned long long)unmatched_at);
     }}
 "#,
         tcs.join(", "),
@@ -326,6 +339,7 @@ fn c_audio_step_hold_matches_the_rust_authority_1381() {
         AudioStepRelease::Followed,
         AudioStepRelease::Timeout,
         AudioStepRelease::Reset,
+        AudioStepRelease::RelabelPending,
     ] {
         assert!(
             want.iter()
@@ -364,6 +378,11 @@ fn c_audio_step_hold_matches_the_rust_authority_1381() {
     assert!(
         zero_length && reanchor && want.iter().any(|l| field(l, 7).as_deref() == Some("1")),
         "issue 1381: the sequence must reach a zero-length hold, a re-anchor and the now = 0 timer"
+    );
+    // ROZHODNUTÉ 5903945145: a hold that ended without the stamps jumping remembers its step
+    assert!(
+        want.iter().any(|l| field(l, 14).as_deref() != Some("0")),
+        "issue 1381: the sequence must reach a remembered unmatched step"
     );
     assert_eq!(AUDIO_STEP_NOMINAL_REANCHOR_NS, 6 * 100_000_000_000);
 }
@@ -413,7 +432,7 @@ fn c_audio_step_scalars_match_the_rust_authority_1381() {
         (i64::MIN, i64::MAX),
         (i64::MAX, i64::MIN),
     ];
-    let places: [(u8, i64, u64); 10] = [
+    let places: [(u8, i64, u64); 20] = [
         (0, -682_474_000, PACKET),
         (1, -682_474_000, PACKET),
         (1, PACKET as i64, PACKET),
@@ -421,14 +440,29 @@ fn c_audio_step_scalars_match_the_rust_authority_1381() {
         (1, -(PACKET as i64) - 1, PACKET),
         (2, 89_703_000, PACKET),
         (2, 1, PACKET),
+        // ROZHODNUTÉ 5903945145 point 2: a timeout applies a move of one slot or more once, one
+        // packet − 66 ns too
+        (2, PACKET as i64 - 66, PACKET),
+        (2, -(PACKET as i64 - 66), PACKET),
+        (2, 0, PACKET),
+        // review round 3: one slot (one packet − 100 ns) is the edge; a folded pending's sub-slot
+        // residual is booked
+        (2, PACKET as i64 - 100, PACKET),
+        (2, PACKET as i64 - 101, PACKET),
+        (2, -(PACKET as i64 - 100), PACKET),
+        (2, -(PACKET as i64 - 101), PACKET),
+        (2, -966, PACKET),
         (3, -682_474_000, PACKET),
         (1, i64::MIN, u64::MAX),
         (2, i64::MIN, u64::MAX - 1),
+        (4, -15_807_333, PACKET),
+        (4, PACKET as i64 + 1, PACKET),
     ];
     let rel_of = |c: u8| match c {
         1 => AudioStepRelease::Followed,
         2 => AudioStepRelease::Timeout,
         3 => AudioStepRelease::Reset,
+        4 => AudioStepRelease::RelabelPending,
         _ => AudioStepRelease::None,
     };
     let mut body = String::new();
@@ -451,7 +485,7 @@ fn c_audio_step_scalars_match_the_rust_authority_1381() {
             i64_lit(*res)
         ));
     }
-    for rel in 0..5_u8 {
+    for rel in 0..6_u8 {
         body.push_str(&format!(
             "    printf(\"%s\\n\", genlock_audio_step_release_token({rel}));\n"
         ));
@@ -467,11 +501,196 @@ fn c_audio_step_scalars_match_the_rust_authority_1381() {
     for (rel, res, pkt) in &places {
         want.push(u8::from(audio_step_release_places(rel_of(*rel), *res, *pkt)).to_string());
     }
-    for rel in 0..5_u8 {
+    for rel in 0..6_u8 {
         want.push(rel_of(rel).token().to_string());
     }
     assert_eq!(
         out, want,
         "issue 1381: a C skew-hold scalar helper diverged from the Rust authority"
+    );
+}
+
+// Issue 1381 (design 5900385541) — the RELABEL decision (`audio_relabel` / `genlock_audio_relabel`)
+// and its two jumps read from the skew-hold state (`audio_step_relabel_jumps` /
+// `genlock_audio_step_relabel_jumps`).
+
+/// A relabelling sender's stamp jump at a wall step: N = floor(S / slot) slots, toward −∞.
+fn relabel_stamp_jump(step_ns: i64) -> i64 {
+    let n = (i128::from(step_ns) * 30).div_euclid(1_000_000_000) as i64;
+    n * 1_000_000_000 / 30
+}
+
+/// Relabels in both shapes on top of the hold script: at each step the stamps jump N slots on the
+/// receiver's step packet (joint) or one packet after it (split: the hold starts on the step packet).
+fn relabel_sequence() -> Vec<Pkt> {
+    let mut v = sequence();
+    clear(&mut v);
+    let mut k: u64 = 1_000_000;
+    let mut off = OFF;
+    let mut shift = 0_i64;
+    let take = |v: &mut Vec<Pkt>, k: &mut u64, off: i64, shift: i64| {
+        let now = MONO + *k * PACKET;
+        let raw = (WALL + *k * PACKET).wrapping_add(shift as u64);
+        v.push((true, off, raw, PACKET, now, false));
+        *k += 1;
+    };
+    for _ in 0..WARM + 5 {
+        take(&mut v, &mut k, off, shift);
+    }
+    for split in [false, true] {
+        for step in [
+            260_000_000_i64,
+            682_474_000,
+            -1_500_000_000,
+            2_500_000_000,
+            -20_000_000,
+            89_703_000,
+            -682_474_000,
+        ] {
+            off -= step;
+            if split {
+                take(&mut v, &mut k, off, shift);
+            }
+            shift += relabel_stamp_jump(step);
+            for _ in 0..5 {
+                take(&mut v, &mut k, off, shift);
+            }
+        }
+    }
+    v
+}
+
+#[test]
+fn c_audio_relabel_matches_the_rust_authority_1381() {
+    let block = lift_block();
+    for helper in [
+        "static inline bool genlock_audio_relabel(",
+        "static inline bool genlock_audio_step_relabel_jumps(",
+    ] {
+        assert!(
+            block.contains(helper),
+            "issue 1381: `{helper}` is no longer inside the contiguous audio-pairing block"
+        );
+    }
+    let p = PACKET as i64;
+    let m = WALL_STEP_MIN_NS;
+    let scalars: Vec<(i64, i64, u64, i64)> = vec![
+        (233_333_333, -260_000_000, PACKET, m),
+        (666_666_666, -682_474_000, PACKET, m),
+        (-1_500_000_000, 1_500_000_000, PACKET, m),
+        (2_500_000_000, -2_500_000_000, PACKET, m),
+        (-33_333_333, 20_000_000, PACKET, m),
+        (0, -682_474_000, PACKET, m),
+        (80_000_000, 0, PACKET, m),
+        (m, -m, PACKET, m),
+        (m + 1, -m - 1, PACKET, m),
+        (m + 1, -m, PACKET, m),
+        (66_666_667, -66_666_667 - p, PACKET, m),
+        (66_666_667, -66_666_667 - p + 1, PACKET, m),
+        (66_666_667, -66_666_667 + p, PACKET, m),
+        (i64::MIN, i64::MIN, u64::MAX, m),
+        (i64::MIN, i64::MAX, 2, 0),
+        (i64::MAX, 1, u64::MAX, i64::MIN),
+        (5, -5, 1, -3),
+    ];
+    let seq = relabel_sequence();
+    let b = |v: bool| u8::from(v);
+    let mut body = String::new();
+    for (sj, oj, pkt, min) in &scalars {
+        body.push_str(&format!(
+            "    printf(\"%d\\n\", genlock_audio_relabel({}, {}, {pkt}ull, {}) ? 1 : 0);\n",
+            i64_lit(*sj),
+            i64_lit(*oj),
+            i64_lit(*min)
+        ));
+    }
+    let tcs: Vec<String> = seq.iter().map(|p| b(p.0).to_string()).collect();
+    let offs: Vec<String> = seq.iter().map(|p| i64_lit(p.1)).collect();
+    let raws: Vec<String> = seq.iter().map(|p| format!("{}ull", p.2)).collect();
+    let pkts: Vec<String> = seq.iter().map(|p| format!("{}ull", p.3)).collect();
+    let nows: Vec<String> = seq.iter().map(|p| format!("{}ull", p.4)).collect();
+    let resets: Vec<String> = seq.iter().map(|p| b(p.5).to_string()).collect();
+    body.push_str(&format!(
+        r#"    static const int tc[] = {{ {} }};
+    static const int64_t off[] = {{ {} }};
+    static const uint64_t raw[] = {{ {} }};
+    static const uint64_t pkt[] = {{ {} }};
+    static const uint64_t now[] = {{ {} }};
+    static const int rst[] = {{ {} }};
+    bool active = false, pending = false;
+    int64_t prev_off = 0, nominal = 0, held = 0, step = 0;
+    uint64_t prev_raw = 0, prev_pkt = 0, dev_since = 0, start = 0, prev_arrival = 0;
+    uint32_t warm = 0;
+    int64_t unmatched = 0;
+    uint64_t unmatched_at = 0;
+    for (size_t i = 0; i < sizeof(tc) / sizeof(tc[0]); i++) {{
+        int64_t sj = 0, oj = 0, use = 0;
+        const bool have = genlock_audio_step_relabel_jumps(active, prev_off, prev_raw, prev_pkt, held, tc[i] != 0,
+                                                           off[i], raw[i], &sj, &oj);
+        const bool rel = have && genlock_audio_relabel(sj, oj, pkt[i], {min}ll);
+        const int release = genlock_audio_step_hold(&active, &prev_off, &prev_raw, &prev_pkt, &nominal, &dev_since,
+                                                    &warm, &held, &start, &step, &prev_arrival, &pending,
+                                                    &unmatched, &unmatched_at, tc[i] != 0, off[i], raw[i], pkt[i],
+                                                    now[i], rst[i] != 0, {min}ll, &use);
+        printf("%d %lld %lld %d %d %lld\n", have ? 1 : 0, (long long)sj, (long long)oj, rel ? 1 : 0, release,
+               (long long)use);
+    }}
+"#,
+        tcs.join(", "),
+        offs.join(", "),
+        raws.join(", "),
+        pkts.join(", "),
+        nows.join(", "),
+        resets.join(", "),
+        min = WALL_STEP_MIN_NS
+    ));
+    let out = run_lines(&compile(&block, &body, "relabel_1381"));
+    let mut want: Vec<String> = scalars
+        .iter()
+        .map(|&(sj, oj, pkt, min)| u8::from(audio_relabel(sj, oj, pkt, min)).to_string())
+        .collect();
+    let mut s = AudioStepHold::default();
+    let mut relabels = 0;
+    let mut released_by_relabel = 0;
+    for &(tc, off, raw, pkt, now, reset) in &seq {
+        let jumps = audio_step_relabel_jumps(&s, tc, off, raw);
+        let (sj, oj) = jumps.unwrap_or((0, 0));
+        let rel = jumps.is_some() && audio_relabel(sj, oj, pkt, WALL_STEP_MIN_NS);
+        let was_active = s.active;
+        let (use_off, release) =
+            audio_step_hold(&mut s, tc, off, raw, pkt, now, reset, WALL_STEP_MIN_NS);
+        if rel {
+            relabels += 1;
+            // a relabel never starts a hold, and one that ends a running hold ends it FOLLOWED
+            // without a placement
+            assert!(!s.active, "issue 1381: a relabel packet started a hold");
+            if was_active {
+                assert_eq!(release, AudioStepRelease::Followed);
+                assert!(!audio_step_release_places(
+                    release,
+                    audio_step_residual_ns(s.held_off_ns, off),
+                    pkt
+                ));
+                released_by_relabel += 1;
+            }
+        }
+        want.push(format!(
+            "{} {sj} {oj} {} {} {use_off}",
+            u8::from(jumps.is_some()),
+            u8::from(rel),
+            release as u8
+        ));
+    }
+    assert_eq!(out.len(), want.len(), "issue 1381: line count");
+    for (i, (c, r)) in out.iter().zip(&want).enumerate() {
+        assert_eq!(
+            c, r,
+            "issue 1381: the C relabel diverged from the Rust authority at line {i}"
+        );
+    }
+    // the script must reach relabels in both shapes, or the gate proves less than it says
+    assert!(
+        relabels >= 12 && released_by_relabel >= 5,
+        "issue 1381: the script reaches {relabels} relabels, {released_by_relabel} ending a hold"
     );
 }

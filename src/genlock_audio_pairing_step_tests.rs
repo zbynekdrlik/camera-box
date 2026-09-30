@@ -267,34 +267,44 @@ fn a_sender_that_catches_up_without_jumping_its_stamps_is_released_at_once_1381(
 }
 
 #[test]
-fn a_sender_that_stepped_first_is_never_held_1381() {
+fn a_sender_that_stepped_first_is_never_held_by_the_receiver_step_1381() {
     // review round 1: the SENDER's box stepped first (a cross-box timecode source whose sender is the
     // date master). Its stamps are already on the new wall when the receiver's own step lands, so the
     // receiver's step brings them BACK onto its wall: holding the pre-step offset would put the
-    // audio a whole step off for the full 10 s bound. The receiver-step packet is a zero-length hold,
-    // released at once with the whole step as its residual (the ingest places it: the window before
-    // left the audio a step off its stamps), and nothing is held after it.
+    // audio a whole step off for the full 10 s bound. Nothing is held after the receiver's step.
     for step in [682_474_000_i64, -682_474_000, 89_703_000] {
         // (a) the sender's stamps jump by the step (past the nominal's warm-up), the receiver steps
-        // 2 s later
+        // 2 s later. Design 5901213031: the stamp jump (over one packet, continuous arrival) is a
+        // PENDING relabel -- the packets keep appending on their continuous timeline (the stamps read
+        // shifted by -J) -- and the receiver's own step releases it within one packet, never placed
+        // (a raw-clock sender: the remainder is 0)
         let mut s = AudioStepHold::default();
         for k in 0..40 {
             feed(&mut s, k, 0, 0);
         }
         for k in 40..100 {
-            assert_eq!(feed(&mut s, k, 0, step), (OFF, AudioStepRelease::None));
+            assert_eq!(
+                feed(&mut s, k, 0, step),
+                (OFF - step, AudioStepRelease::None)
+            );
+            assert!(s.active && s.relabel_pending, "step {step}: pending at {k}");
         }
         assert_eq!(
             feed(&mut s, 100, step, step),
-            (OFF - step, AudioStepRelease::Followed),
-            "issue 1381: step {step}: the receiver's step is released on its own packet"
+            (OFF - step, AudioStepRelease::RelabelPending),
+            "issue 1381: step {step}: the receiver's step resolves the pending relabel"
         );
-        assert!(!s.active && s.step_ns == step && s.start_ns == 1_000_000_000_000 + 100 * PACKET);
+        assert!(
+            !s.active
+                && s.relabel_pending
+                && s.step_ns == step
+                && s.start_ns == 1_000_000_000_000 + 40 * PACKET
+        );
         let residual = audio_step_residual_ns(s.held_off_ns, OFF - step);
         assert!(
-            residual == -step
-                && audio_step_release_places(AudioStepRelease::Followed, residual, PACKET),
-            "issue 1381: step {step}: the zero-length release places the whole step once"
+            residual == 0
+                && !audio_step_release_places(AudioStepRelease::RelabelPending, residual, PACKET),
+            "issue 1381: step {step}: the receiver's step moves the landing by nothing"
         );
         for k in 101..400 {
             let r = feed(&mut s, k, step, step);
@@ -403,13 +413,15 @@ fn the_nominal_age_follows_in_band_and_reanchors_out_of_band_1381() {
         MIN,
     );
     assert_eq!(s.nominal_age_ns, seed + 2_929 - 4_885);
-    // stamps 100 ms ahead of the receiver's wall (the sender moved alone): out of band, the timer runs
+    // stamps 100 ms ahead of the receiver's wall (the sender moved alone, after a pause -- a jump
+    // with continuous arrival would be a pending relabel, design 5901213031): out of band, the timer
+    // runs
     let nominal = s.nominal_age_ns;
     let far = 100_000_000_000_u64;
     let k = w + 3;
-    let t0 = base + k * PACKET;
+    let t0 = base + k * PACKET + far;
     for n in 0..6_u64 {
-        let raw = WALL + k * PACKET + n * far + 100_000_000;
+        let raw = WALL + k * PACKET + (n + 1) * far + 100_000_000;
         let r = audio_step_hold(&mut s, true, OFF, raw, PACKET, t0 + n * far, false, MIN);
         assert_eq!(r, (OFF, AudioStepRelease::None));
         assert_eq!(
@@ -419,7 +431,7 @@ fn the_nominal_age_follows_in_band_and_reanchors_out_of_band_1381() {
         );
     }
     // exactly ten minutes out of band: the age is the nominal from now on
-    let raw = WALL + k * PACKET + 6 * far + 100_000_000;
+    let raw = WALL + k * PACKET + 7 * far + 100_000_000;
     audio_step_hold(&mut s, true, OFF, raw, PACKET, t0 + 6 * far, false, MIN);
     assert_eq!(
         (s.nominal_age_ns, s.nominal_dev_since_ns),
@@ -503,4 +515,208 @@ fn the_nominal_warms_up_past_a_connect_backlog_and_survives_a_timeline_reset_138
         !s.active && s.nominal_age_ns == nominal && s.nominal_dev_since_ns == base + k * PACKET,
         "issue 1381: a timeline reset must keep the nominal (its skewed age only starts the timer)"
     );
+}
+
+// Issue 1381 (design 5900385541) — the RELABEL: a sender whose stamps jump WITH the wall step.
+
+/// One slot of a 30 fps sender (1600 samples at 48 kHz) on the per-second grid.
+fn slot_ns(k: i64) -> i64 {
+    k * 1_000_000_000 / 30
+}
+
+/// What a relabelling sender does at a wall step of `step_ns`: its stamps jump N = floor(S / slot)
+/// slots (the contract's floor, toward −∞). Returns the stamp jump against the continuous timeline
+/// and the live offset's jump (−S).
+fn relabel(step_ns: i64) -> (i64, i64) {
+    let n = (i128::from(step_ns) * 30).div_euclid(1_000_000_000) as i64;
+    (slot_ns(n), -step_ns)
+}
+
+#[test]
+fn a_relabel_cancels_the_wall_step_to_under_one_packet_1381() {
+    let p = PACKET;
+    // the live and scripted steps: +260 ms (r 26.7), +682 ms (r 15.8), -1.5 s (r 0), +2.5 s (r 0),
+    // +2.51 s (r 10), a step between -1 slot and 0 (N = -1, r 13.3)
+    for step in [
+        260_000_000_i64,
+        682_474_000,
+        89_703_000,
+        -682_474_000,
+        -1_500_000_000,
+        2_500_000_000,
+        2_510_000_000,
+        -20_000_000,
+    ] {
+        let (stamp, off) = relabel(step);
+        let r = stamp + off;
+        assert!(
+            (-(p as i64)..=0).contains(&r),
+            "the floor puts the landing r earlier, under one slot: step {step} r {r}"
+        );
+        assert!(
+            audio_relabel(stamp, off, p, MIN),
+            "issue 1381: a {} ms step relabelled by N slots must read as a relabel (r = {} ms)",
+            step as f64 / 1e6,
+            r as f64 / 1e6
+        );
+    }
+    // exactly one packet apart is NOT a relabel (strict), one ns less is
+    let s = 66_666_667_i64;
+    assert!(!audio_relabel(s, -s - p as i64, p, MIN));
+    assert!(!audio_relabel(s, -s + p as i64, p, MIN));
+    assert!(audio_relabel(s, -s - p as i64 + 1, p, MIN));
+    assert!(audio_relabel(s, -s + p as i64 - 1, p, MIN));
+}
+
+#[test]
+fn only_a_joint_stamp_and_offset_step_is_a_relabel_1381() {
+    let p = PACKET;
+    // a catch-up sender (stamps continuous) after a forward step, a paused sender after a backward
+    // one: the stamps never jumped -- today's path (the hold's catch-up release places once)
+    assert!(!audio_relabel(0, -682_474_000, p, MIN));
+    assert!(!audio_relabel(0, 682_474_000, p, MIN));
+    assert!(!audio_relabel(1_000_000, -20_000_000, p, MIN));
+    // a stamp leap, a skipped or duplicated slot, a sender that stepped first: no receiver step
+    for stamp in [
+        80_000_000_i64,
+        33_333_333,
+        -33_333_333,
+        682_474_000,
+        3_000_000_000,
+    ] {
+        assert!(!audio_relabel(stamp, 0, p, MIN));
+        assert!(!audio_relabel(stamp, 1_999_999, p, MIN));
+    }
+    // steady jitter: neither moved past the 2 ms threshold (a small stamp step within one packet
+    // must never read as a relabel on its own)
+    assert!(!audio_relabel(900_000, -900_000, p, MIN));
+    assert!(!audio_relabel(MIN, -MIN, p, MIN));
+    assert!(audio_relabel(MIN + 1, -MIN - 1, p, MIN));
+    assert!(!audio_relabel(MIN + 1, -MIN, p, MIN));
+    assert!(!audio_relabel(MIN, -MIN - 1, p, MIN));
+    // a step the stamps did not cancel (a raw-wall sender that followed by 100 ms of a 682 ms step)
+    assert!(!audio_relabel(100_000_000, -682_474_000, p, MIN));
+    // two's-complement extremes never panic (the sum wraps exactly like the C mirror's)
+    assert!(audio_relabel(i64::MIN, i64::MIN, u64::MAX, MIN));
+    assert!(audio_relabel(i64::MIN, i64::MAX, 2, 0));
+    assert!(!audio_relabel(i64::MAX, 1, u64::MAX, i64::MIN));
+}
+
+#[test]
+fn the_jumps_read_the_offset_the_previous_packet_was_mapped_through_1381() {
+    let base = 1_000_000_000_000_u64;
+    let mut s = AudioStepHold::default();
+    assert_eq!(
+        audio_step_relabel_jumps(&s, true, OFF, WALL),
+        None,
+        "no previous timecode packet"
+    );
+    for k in 0..40 {
+        audio_step_hold(
+            &mut s,
+            true,
+            OFF,
+            WALL + k * PACKET,
+            PACKET,
+            base + k * PACKET,
+            false,
+            MIN,
+        );
+    }
+    assert_eq!(audio_step_relabel_jumps(&s, false, OFF, WALL), None);
+    // outside a hold: against the previous live offset
+    assert_eq!(
+        audio_step_relabel_jumps(&s, true, OFF - 7, WALL + 40 * PACKET + 11),
+        Some((11, -7))
+    );
+    // the receiver steps +260 ms on a packet whose stamp has not moved: the hold starts
+    let step = 260_000_000_i64;
+    let r = audio_step_hold(
+        &mut s,
+        true,
+        OFF - step,
+        WALL + 40 * PACKET,
+        PACKET,
+        base + 40 * PACKET,
+        false,
+        MIN,
+    );
+    assert_eq!(r, (OFF, AudioStepRelease::None));
+    assert!(s.active);
+    // inside the hold: against the HELD offset, so the next packet's relabel reads the whole step
+    let (stamp, off) = relabel(step);
+    let raw = (WALL + 41 * PACKET).wrapping_add(stamp as u64);
+    assert_eq!(
+        audio_step_relabel_jumps(&s, true, OFF - step, raw),
+        Some((stamp, off))
+    );
+}
+
+#[test]
+fn a_relabel_releases_a_running_hold_followed_and_is_never_placed_by_it_1381() {
+    // the split shape (the contract's section 6): the receiver's step lands on a packet whose stamp
+    // has not moved (the hold starts), the relabelled stamps on the next one. The relabel reads the
+    // whole step, the hold releases FOLLOWED on that packet with the landing move -r as its residual,
+    // and never places it (|r| < one packet). The joint shape (both on the same packet) never starts
+    // a hold. Either way the packet maps through the live offset.
+    let base = 1_000_000_000_000_u64;
+    for step in [
+        260_000_000_i64,
+        682_474_000,
+        -1_500_000_000,
+        2_500_000_000,
+        -20_000_000,
+    ] {
+        for split in [true, false] {
+            let mut s = AudioStepHold::default();
+            let mut k = 0_u64;
+            let take = |s: &mut AudioStepHold, k: u64, off: i64, follow: i64| {
+                let raw = (WALL + k * PACKET).wrapping_add(follow as u64);
+                audio_step_hold(s, true, off, raw, PACKET, base + k * PACKET, false, MIN)
+            };
+            for _ in 0..40 {
+                take(&mut s, k, OFF, 0);
+                k += 1;
+            }
+            let live = OFF - step;
+            if split {
+                let (_, rel) = take(&mut s, k, live, 0);
+                assert_eq!(rel, AudioStepRelease::None);
+                assert_eq!(s.active, step.unsigned_abs() > PACKET, "step {step}");
+                if !s.active {
+                    // a step within one packet starts no hold: its offset jump was appended on its
+                    // own packet, and the later stamp jump alone is the existing under-70 ms path
+                    continue;
+                }
+                k += 1;
+            }
+            let (stamp, _) = relabel(step);
+            let raw = (WALL + k * PACKET).wrapping_add(stamp as u64);
+            let (sj, oj) =
+                audio_step_relabel_jumps(&s, true, live, raw).expect("a previous packet");
+            assert!(
+                audio_relabel(sj, oj, PACKET, MIN),
+                "issue 1381: step {step} split {split}: the relabelled packet must read as a relabel"
+            );
+            let was_active = s.active;
+            let (use_off, rel) = take(&mut s, k, live, stamp);
+            assert_eq!(
+                use_off, live,
+                "step {step} split {split}: mapped through the live offset"
+            );
+            if was_active {
+                let residual = audio_step_residual_ns(s.held_off_ns, live);
+                assert_eq!(rel, AudioStepRelease::Followed, "step {step}");
+                assert_eq!(
+                    residual,
+                    sj.wrapping_add(oj),
+                    "the residual IS the landing move"
+                );
+                assert!(!audio_step_release_places(rel, residual, PACKET));
+            } else {
+                assert_eq!(rel, AudioStepRelease::None, "step {step} split {split}");
+                assert!(!s.active, "a joint relabel never starts a hold");
+            }
+        }
+    }
 }
