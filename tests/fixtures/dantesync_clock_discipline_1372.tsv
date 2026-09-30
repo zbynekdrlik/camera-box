@@ -147,3 +147,14 @@ mode_not_a_string	{"date_authority":"master","date_correction_mode":1,"date_offs
 mode_daily_on_a_follower	{"date_authority":"follower","date_correction_mode":"daily","date_daily_next_utc":null}	UNKNOWN	none	no	step:51000
 daily_schedule_before_1970	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"1969-12-31T00:00:00Z","date_daily_last_step_ts":1790474400,"date_daily_last_step_ms":-1523.4}	UNKNOWN	unknown	no	daily-unknown
 daily_last_step_negative_zero	{"date_authority":"master","date_correction_mode":"daily","date_offset_error_ms":1500.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false,"date_daily_next_utc":"2026-09-28T02:00:00Z","date_daily_last_step_ts":-0,"date_daily_last_step_ms":null}	UNKNOWN	out	no	daily-out
+# dantesync 1.15.0 (dantesync issue 126): a follower whose master went silent reports
+# date_authority "holding" (it keeps the adopted D and seq, takes no NTP step, re-joins with no step)
+# and date_authority_hold_age_s; after system.date_offset.authority_hold_s (900 s) it reads "local".
+# It is a FOLLOWER: never the date master, never an error -- date_verdict none, journal_grade
+# step:<us>, whatever master-looking date fields it carries. The @ file is SYNTHESIZED from the 1.12.0
+# slave capture plus the four 1.15.0 fields in dantesync src/status.rs order (date_authority
+# "holding", date_offset_restored false, date_authority_hold_age_s 42, date_step_trigger_last ""),
+# until a live capture replaces it.
+live_slave_holding_1_15_0	@tests/fixtures/dantesync_status_1372/stream-slave-holding-1.15.0.json	PTP_PHASE_LOCK	none	no	step:51000
+holding_with_master_date_fields	{"date_authority":"holding","date_authority_hold_age_s":42,"date_correction_mode":"daily","date_offset_error_ms":4000.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":true,"date_micro_paused":true,"date_daily_next_utc":null,"date_daily_last_step_ts":"x"}	UNKNOWN	none	no	step:51000
+holding_age_null	{"date_authority":"holding","date_authority_hold_age_s":null}	UNKNOWN	none	no	step:51000

@@ -255,6 +255,84 @@ line 71, mid-paragraph. The header therefore documents `SSH_PASS` without its de
   - In the runner, name every variable so the sourced `dantesync-fleet-upgrade.sh` cannot overwrite
     it: it sets `HERE`, which first pointed the harness path at `scripts/`.
 
+## dantesync 1.15.0: the master's saved date on a rollback, and `holding` (issue 1372)
+
+dantesync 1.15.0 (dantesync issue 126) persists the NTP master's fleet date offset in
+`date-offset.json` beside `config.json` (`/etc/dantesync/`, `C:\ProgramData\DanteSync\`) and restores
+it at start, so a master restart keeps the fleet date.
+
+**The rule (a rollback or a forced downgrade).** A master taken back to an older build must delete
+that file in the same step. Otherwise a 1.15 reinstalled within a day (dantesync restores a record
+up to 24 h old on the same grandmaster) restores the session from before, a stale D, and the whole
+fleet steps to it.
+- `dantesync_rollback_clears_date_state ROLE RESTORED` decides it: 0 only for ROLE `ntp-master`
+  with a restored version below 1.15.0. The versions are ordered by the script's own
+  `dantesync_upgrade_status` (1.9.0 is below 1.15.0), never a second semver.
+- `rollback_node` gets RESTORED from `upgrade_node`'s pre-swap read (`cur`). The ROLE comes from
+  `dantesync_date_role NAME "$NTP_MASTER"`: `ntp-master` the way `verify_node` names the master,
+  else `slave`.
+- **A forced DOWNGRADE is a rollback in all but path** (supervisor ROZHODNUTÉ, issue 1372
+  comment 5910080606). `upgrade_node`'s OLDER + `--force` branch runs the UPGRADE program, so
+  `run_upgrade` hands the same role to `dantesync_linux_upgrade_cmd VERSION [ROLE]` /
+  `dantesync_windows_upgrade_ps VERSION [ROLE]`, and the same rule decides on (role, TARGET): the
+  master taken below 1.15.0 deletes the file too. `upgrade_node` relays that program's line to
+  the roll log, next to the tray note.
+- **Where the delete runs.** Always after the service stop: the 1.15 master rewrites the file on
+  its loop, so a delete before the stop would be undone.
+  - The ROLLBACK programs: after the `.bak` restore and before the start (Linux inside the
+    ro-root rw window, Windows after the process-exit wait).
+  - The DOWNGRADE programs: after the downgraded service STARTED (issue 1372 comment
+    5910147397). Linux: the last step, after the version read, still inside the rw window.
+    Windows: right after the service try/catch, whose catch rethrows. The upgrade programs
+    self-heal to the `.bak` on a failed start, and in a downgrade the `.bak` IS the 1.15 binary:
+    a delete before the start would bring it back without its saved date, and it would boot-step
+    the fleet during the day. After a good start the old build runs, which never reads or writes
+    the file.
+- **The Windows delete.** `Remove-Item -Force -ErrorAction SilentlyContinue` sits in a try/catch.
+  Under `$ErrorActionPreference = 'Stop'` some failures still THROW: pwsh 7 in a non-interactive
+  session throws on a path it would prompt for. A throw there would skip the rest of the program
+  (a rollback's `Start-Service`).
+- **ONE line per program:**
+  - `date-offset.json removed (rollback below 1.15.0, dantesync issue 126)`;
+  - `... absent, nothing to remove ...`, never claimed removed;
+  - a `WARNING: ... could NOT be removed` line when the file survives. The master still starts.
+- `dantesync_rollback_date_state_note` relays that line to the roll log, from `rollback_node` and
+  from `upgrade_node`. A successful program's output is otherwise never printed.
+- **What never deletes.** A slave, and any restore or target of 1.15.0 or newer (that file is
+  valid there; deleting it would boot-step the fleet during the day). Such programs are
+  byte-identical to the no-role text (checked by md5 and by a test).
+- **Where the code lives.** The rule, `dantesync_date_role`, both delete blocks and both rollback
+  programs are in `scripts/lib/dantesync-rollback.sh`, which keeps the upgrade script under its
+  pinned 1000-line budget. With no role every program emits byte-identical text, so the Rust
+  `run_sourced` anchors in `tests/dantesync_fleet_upgrade.rs` hold.
+
+**`holding` is a follower.** A 1.15.0 follower whose master went silent reports
+`date_authority: "holding"`. It keeps the adopted D and seq, takes no NTP step, and turns `local`
+after 900 s. It also reports `date_authority_hold_age_s`.
+- Every grader branches on `== "master"` only, so `holding` grades as a follower (date verdict
+  `none`, journal grade `step:<us>`). The graders are `date_master_verdict` /
+  `journal_date_grade_from_step`, their python twins, and `dantesync_clock_decision.py`, which
+  does not read the field.
+- It is pinned by rows in `tests/fixtures/dantesync_clock_discipline_1372.tsv`, including a holding
+  status with master-looking date fields, and by a synthesized 1.15.0 fixture.
+- Never special-case `holding` into the master branch.
+
+**Tier-0:**
+- `pytest tests/python/test_dantesync_date_state_1372.py` (its own file; the `_source` / `_roll`
+  helpers it shares with the tray tests live in `tests/python/dantesync_upgrade_harness_1372.py`):
+  - the decision table;
+  - the emitted Linux rollback RUN with PATH stubs for systemctl / mount / findmnt / dantesync,
+    each logging whether the file exists when it runs;
+  - the `.ps1` RUN under pwsh with stub service cmdlets. A missing pwsh fails the test, never skips
+    it. A non-empty directory stands in for a file that cannot be removed.
+  - an orchestrator canary rollback of a master and of a slave;
+  - both DOWNGRADE programs RUN the same way (Linux with a real staged binary + sha, the .ps1
+    with a real release file + hash), including a failed start that self-heals to the 1.15
+    binary with the file intact, and end-to-end forced downgrades: the master below 1.15.0
+    deletes, a slave and the master 1.16.0 -> 1.15.1 never do. The sshpass stub keeps every
+    upload in order (`upload-N.ps1`).
+- `pytest tests/python/test_clock_discipline_1372.py` covers `holding`.
+
 ## Testing (Tier-0)
 
 Heavy `cargo test` is CI-only here (#477) — no `# airuleset:build-ok` bypass. Verify the bash logic

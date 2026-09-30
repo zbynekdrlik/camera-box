@@ -1130,3 +1130,58 @@ def test_provisioning_writes_the_1_9_0_discipline_not_phase_slew(script):
     block = body[start:body.index("\nDANTECFGEOF\n", start)]
     assert '"clock_discipline": "ptp_phase_lock"' in block
     assert "phase_slew" not in block
+
+
+# ---------------------------------------------------------------------------------------------
+# dantesync 1.15.0 (dantesync issue 126): `holding` is a FOLLOWER. A follower whose master went
+# silent keeps the adopted fleet date and reports date_authority "holding" +
+# date_authority_hold_age_s. Every grader branches on == "master" only, so it already reads as a
+# follower (main's design, issue comment 5908602207); these pin it, so a later edit can never make
+# it a master or an error. The table rows above drive both twins; the tests below cover the
+# consumers that do not read the table.
+# ---------------------------------------------------------------------------------------------
+
+_HOLDING_1_15 = _STATUS / "stream-slave-holding-1.15.0.json"
+
+
+def test_the_holding_fixture_is_the_1_12_follower_plus_the_1_15_fields():
+    holding = json.loads(_HOLDING_1_15.read_text())
+    follower = json.loads(_LIVE_SLAVE_1_12.read_text())
+    assert holding["date_authority"] == "holding" and holding["date_authority_hold_age_s"] == 42
+    assert holding["date_offset_restored"] is False and holding["date_step_trigger_last"] == ""
+    new = {"date_authority", "date_authority_hold_age_s", "date_offset_restored", "date_step_trigger_last"}
+    assert {k: v for k, v in holding.items() if k not in new} == \
+        {k: v for k, v in follower.items() if k != "date_authority"}
+    rows = {case: (status, date_verdict, journal_grade)
+            for case, status, _, date_verdict, _, journal_grade in _table()}
+    status, date_verdict, journal_grade = rows["live_slave_holding_1_15_0"]
+    assert json.loads(status)["date_authority"] == "holding"
+    assert (date_verdict, journal_grade) == ("none", "step:51000")
+
+
+def test_date_master_check_and_bound_treat_a_holding_follower_as_a_follower(tmp_path):
+    (tmp_path / "s.json").write_text(_HOLDING_1_15.read_text())
+    r = _sourced(tmp_path, f'date_master_check stream "$(cat "{tmp_path / "s.json"}")" 1000; echo "rc=$?"')
+    assert r.stdout.strip() == "rc=0", r.stdout
+    assert _bash_call(tmp_path, "date_authority_from_pipe_json", _HOLDING_1_15.read_text()) == "holding"
+    assert _bash_call(tmp_path, "date_master_effective_bound_us", _HOLDING_1_15.read_text(), 2000, 1000) == "2000"
+
+
+def test_gate_passes_the_1_15_0_holding_follower(tmp_path):
+    p = _fresh(tmp_path, "stream", _HOLDING_1_15)
+    code, out, err = _gate(_STREAM_ONLY, DANTESYNC_GATE_WIN_HTTP_STREAM=str(p))
+    assert code == 0, out + err
+    assert "CLOCK PTP-PHASE-LOCK" in out and "GATE PASS" in out
+    assert "DATE MASTER" not in out, out
+
+
+def test_the_clock_alert_decision_grades_a_holding_follower_like_a_follower():
+    spec = importlib.util.spec_from_file_location("dantesync_clock_decision",
+                                                  _ROOT / "scripts" / "dantesync_clock_decision.py")
+    dcd = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dcd)
+    follower = _LIVE_SLAVE_1_12.read_text()
+    now = json.loads(follower)["updated_ts"]
+    got = dcd.analyze(_HOLDING_1_15.read_text(), 1, _LIVE_GM, now=now, freshness_s=60)
+    assert got == dcd.analyze(follower, 1, _LIVE_GM, now=now, freshness_s=60)
+    assert got["verdict"] == dcd.V_OK, got
