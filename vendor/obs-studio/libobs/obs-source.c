@@ -2307,11 +2307,13 @@ static inline int64_t genlock_audio_step_residual_ns(int64_t held_off_ns, int64_
 {
 	return (int64_t)((uint64_t)off_live_ns - (uint64_t)held_off_ns);
 }
-/* does the release PLACE its packet (a move over one packet: a timeout or a catch-up)? */
+/* does the release PLACE its packet? A timeout of one slot or more (forward from one packet - 100 ns,
+ * either sign: a hold's, or a never-followed pending's jump J on every grid position -- ROZHODNUTE
+ * 5903945145 point 2; a folded pending's sub-slot move is booked), or a catch-up over one packet */
 static inline bool genlock_audio_step_release_places(int release, int64_t residual_ns, uint64_t packet_ns)
 {
 	if (release == GENLOCK_AUDIO_STEP_TIMEOUT)
-		return residual_ns != 0;
+		return genlock_audio_step_mag_ns(residual_ns) >= genlock_audio_relabel_forward_slot_ns(packet_ns);
 	return release == GENLOCK_AUDIO_STEP_FOLLOWED && genlock_audio_step_mag_ns(residual_ns) > packet_ns;
 }
 /* camera-box issue 1381 (design 5900385541): a RELABEL -- the sender's stamps jumped WITH a wall step
@@ -2465,7 +2467,8 @@ static bool genlock_audio_step_video_frozen(const obs_source_t *source)
 
 /* camera-box issue 1381 (design 5882391108): whether this packet is PLACED instead of appended. A hold
  * release that moves the placement by more than one packet (a sender that caught up without jumping its
- * stamps, or the timeout) applies the new offset ONCE -- the packet is placed, never a W-second payment.
+ * stamps), or a timeout of one slot or more (ROZHODNUTE 5903945145 point 2), applies the new offset
+ * ONCE -- the packet is placed, never a W-second payment.
  * Outside a hold, the BACKSTOP (piece 3): a timecode packet whose append would book a jump the owed cap
  * cannot hold is placed at its stamp instead, ONE counted placement, never a partial booking whose excess
  * leaks into the smoothed error. Under audio_buf_mutex (audio_ts and the buffer size are the mixer's

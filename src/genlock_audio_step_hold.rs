@@ -124,7 +124,9 @@ pub struct AudioStepHold {
     /// source's stamps never matched -- the residual (`off_live − held`) of a skew hold that ended
     /// without the stamps jumping: the age release, the zero-length release or the timeout. 0 = none.
     /// A stamp move that FOLLOWS it within [`AUDIO_STEP_NOMINAL_REANCHOR_NS`] is never a pending
-    /// relabel ([`audio_step_unmatched_follow`]), and it clears it.
+    /// relabel ([`audio_step_unmatched_follow`]); a relabel-shaped follow ([`audio_relabel_pending`])
+    /// clears it, a sub-slot move keeps it. One step is remembered: a later unmatched step replaces
+    /// it.
     pub unmatched_ns: i64,
     /// When `unmatched_ns` was remembered (OBS monotonic).
     pub unmatched_at_ns: u64,
@@ -616,21 +618,26 @@ pub fn audio_step_residual_ns(held_off_ns: i64, off_live_ns: i64) -> i64 {
 }
 
 /// Issue 1381 — does this packet's release PLACE it (apply the new offset once) instead of
-/// appending? A `Timeout` always applies its move once: a hold's is over one packet by construction,
-/// a pending relabel's is its stamp jump J -- on every grid position, also J = one packet − 66 ns
-/// (ROZHODNUTÉ 5903945145 point 2: the boxes really disagree about the date, the stamps win). A
-/// `Followed` places when its move is over one packet (a sender that caught up without jumping its
-/// stamps); a jumped follow (within one packet) appends or books as usual, a `RelabelPending` release
-/// is within one packet by construction (its remainder is slewed, [`audio_relabel_book_ns`]), and a
-/// `Reset` packet is placed by the ingest's own timeline reset. Never a W-second payment at 1000 ppm
-/// for a step. Mirror of `genlock_audio_step_release_places`.
+/// appending? A `Timeout` places a move of ONE SLOT or more (forward from one packet − 100 ns, the
+/// pending bound's slot, either sign): a hold's timeout is over one packet by construction (the
+/// follow test runs first on the same packet), a never-followed pending's is its stamp jump J -- one
+/// slot on every grid position, also J = one packet − 66 ns (ROZHODNUTÉ 5903945145 point 2: the boxes
+/// really disagree about the date, the stamps win). A relabel-shaped jump inside a pending folds, so a
+/// pending's timeout move can also be under one slot (review round 3); that is booked like any
+/// sub-slot move. A `Followed` places when its move is over one packet (a sender that caught up
+/// without jumping its stamps); a jumped follow (within one packet) appends or books as usual, a
+/// `RelabelPending` release is within one packet by construction (its remainder is slewed,
+/// [`audio_relabel_book_ns`]), and a `Reset` packet is placed by the ingest's own timeline reset.
+/// Never a W-second payment at 1000 ppm for a step. Mirror of `genlock_audio_step_release_places`.
 pub fn audio_step_release_places(
     release: AudioStepRelease,
     residual_ns: i64,
     packet_ns: u64,
 ) -> bool {
     match release {
-        AudioStepRelease::Timeout => residual_ns != 0,
+        AudioStepRelease::Timeout => {
+            residual_ns.unsigned_abs() >= audio_relabel_forward_slot_ns(packet_ns)
+        }
         AudioStepRelease::Followed => residual_ns.unsigned_abs() > packet_ns,
         _ => false,
     }

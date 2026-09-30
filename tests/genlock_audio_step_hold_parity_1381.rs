@@ -440,7 +440,8 @@ fn c_audio_step_scalars_match_the_rust_authority_1381() {
         (1, -(PACKET as i64) - 1, PACKET),
         (2, 89_703_000, PACKET),
         (2, 1, PACKET),
-        // ROZHODNUTÉ 5903945145 point 2: a timeout applies any move once, one packet − 66 ns too
+        // ROZHODNUTÉ 5903945145 point 2: a timeout applies a move of one slot or more once, one
+        // packet − 66 ns too
         (2, PACKET as i64 - 66, PACKET),
         (2, -(PACKET as i64 - 66), PACKET),
         (2, 0, PACKET),
