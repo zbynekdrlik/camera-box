@@ -25,6 +25,7 @@ The main-authored design (5905959484) pinned here:
 
 Offline (no box, no cargo): fake `ip` / `tc` / `systemctl` / `sshpass` on PATH.
 """
+import hashlib
 import os
 import pathlib
 import re
@@ -294,9 +295,55 @@ def test_gather_names_a_missing_default_route(tmp_path):
     assert _argv(tmp_path, "tc") == []
 
 
-def _block(qdisc=CAM7_PACED + "|", enabled="enabled", active="active", iface="enp3s0"):
+def test_gather_reads_the_installed_script_and_unit(tmp_path):
+    # Review round 1: (ap) must prove the unit can RUN, so the gather also reads the installed boot
+    # script's executable bit + sha256 and the installed unit's sha256.
+    fk = _fakes(tmp_path)
+    script = tmp_path / "installed-script"
+    script.write_text("#!/bin/bash\necho paced\n")
+    script.chmod(0o755)
+    unit = tmp_path / "installed.service"
+    unit.write_text("[Service]\nType=oneshot\n")
+    pre = (f'CAMBOX_EGRESS_PACING_SCRIPT_PATH="{script}"\n'
+           f'CAMBOX_EGRESS_PACING_SERVICE_PATH="{unit}"\n')
+    env = {**fk, "FAKE_IP_ROUTE": ROUTE_ENP2, "FAKE_TC_SHOW": CAM7_PACED}
+    lines = _lib(pre + 'bash -c "$(cambox_egress_pacing_gather_remote_snippet)"', env=env).stdout.splitlines()
+    assert "PACING_SCRIPT_EXEC=yes" in lines, lines
+    assert f"PACING_SCRIPT_SHA={hashlib.sha256(script.read_bytes()).hexdigest()}" in lines, lines
+    assert f"PACING_UNIT_SHA={hashlib.sha256(unit.read_bytes()).hexdigest()}" in lines, lines
+    script.chmod(0o644)
+    unit.unlink()
+    lines = _lib(pre + 'bash -c "$(cambox_egress_pacing_gather_remote_snippet)"', env=env).stdout.splitlines()
+    assert "PACING_SCRIPT_EXEC=no" in lines and "PACING_UNIT_SHA=" in lines, lines
+
+
+_EXPECTED = {}
+
+
+def _expected():
+    """The hashes setup-device's install would leave on a box: the generated boot script and the
+    checked-in unit (computed by the lib's own helpers, cached)."""
+    if not _EXPECTED:
+        _EXPECTED["script"] = _lib("cambox_egress_pacing_expected_script_sha").stdout.strip()
+        _EXPECTED["unit"] = _lib("cambox_egress_pacing_expected_unit_sha").stdout.strip()
+    return _EXPECTED
+
+
+def _block(qdisc=CAM7_PACED + "|", enabled="enabled", active="active", iface="enp3s0",
+           script_exec="yes", script_sha=None, unit_sha=None):
+    e = _expected()
+    script_sha = e["script"] if script_sha is None else script_sha
+    unit_sha = e["unit"] if unit_sha is None else unit_sha
     return (f"PACING_IFACE={iface}\nPACING_QDISC={qdisc}\n"
-            f"PACING_SVC_ENABLED={enabled}\nPACING_SVC_ACTIVE={active}\n")
+            f"PACING_SVC_ENABLED={enabled}\nPACING_SVC_ACTIVE={active}\n"
+            f"PACING_SCRIPT_EXEC={script_exec}\nPACING_SCRIPT_SHA={script_sha}\n"
+            f"PACING_UNIT_SHA={unit_sha}\n")
+
+
+def test_expected_hashes_are_the_bytes_setup_device_installs():
+    boot = _lib("cambox_egress_pacing_boot_script").stdout
+    assert _expected()["script"] == hashlib.sha256(boot.encode()).hexdigest()
+    assert _expected()["unit"] == hashlib.sha256(UNIT.read_bytes()).hexdigest()
 
 
 def _prov(block):
@@ -321,6 +368,41 @@ def test_provision_verdict_fails_each_facet():
     assert "UNKNOWN" in _prov("")
     for bad in (_block(qdisc=CAM7_UNPACED + "|"), _block(enabled="disabled"), ""):
         assert all(ln.startswith("FAIL: ") for ln in _prov(bad).splitlines()), _prov(bad)
+
+
+def test_provision_verdict_fails_a_box_whose_unit_cannot_run():
+    # Review round 1: enabled + not failed is not enough -- a missing, non-executable or stale boot
+    # script (the rate changed in the lib, the box never re-provisioned) or a wrong unit would only
+    # fail at the next reboot. Each is a FAIL now, pointing at setup-device.
+    v = _prov(_block(script_exec="no"))
+    assert "missing or not executable" in v and "setup-device" in v, v
+    v = _prov(_block(script_sha="0" * 64))
+    assert "stale" in v and "setup-device" in v, v
+    v = _prov(_block(unit_sha="0" * 64))
+    assert "unit" in v and "differs" in v and "setup-device" in v, v
+    v = _prov(_block(unit_sha=""))
+    assert "unit" in v and "setup-device" in v, v
+    # The expected values come from the caller when given (the E2E computes them once per run).
+    ok_block = _block(script_sha="a" * 64, unit_sha="b" * 64)
+    r = _lib('cambox_egress_pacing_provision_verdict "$B" "$WS" "$WU"',
+             env={"B": ok_block, "WS": "a" * 64, "WU": "b" * 64})
+    assert r.stdout.strip() == "ok", r.stdout + r.stderr
+
+
+def test_provision_verdict_gives_the_fix_that_matches_the_state():
+    # Review round 1: never a blanket "re-run setup-device" when the install is fine.
+    # Installed + enabled, never run since install, the runtime qdisc lost: start it.
+    v = _prov(_block(qdisc=CAM7_UNPACED + "|", active="inactive"))
+    assert "systemctl start cambox-egress-pacing" in v and "setup-device" not in v, v
+    # It ran, then something changed the qdisc: restart re-applies it.
+    v = _prov(_block(qdisc=CAM7_UNPACED + "|", active="active"))
+    assert "systemctl restart cambox-egress-pacing" in v and "setup-device" not in v, v
+    # No default route (the unit keeps retrying): a network problem, not provisioning.
+    v = _prov(_block(qdisc="__NO_DEFAULT_ROUTE__", active="activating"))
+    assert "network" in v and "setup-device" not in v, v
+    # A failed unit points at its own journal; a missing tc at iproute2.
+    assert "journalctl -u cambox-egress-pacing" in _prov(_block(qdisc=CAM7_UNPACED + "|", active="failed"))
+    assert "iproute2" in _prov(_block(qdisc="__TC_ABSENT__"))
 
 
 # =================================================================================================
@@ -390,6 +472,18 @@ def test_the_checked_in_unit_runs_the_generated_script_at_boot():
     assert UNIT.name == f"{name}.service"
     src = _lib('echo "$CAMBOX_EGRESS_PACING_UNIT_SRC"').stdout.strip()
     assert pathlib.Path(src).resolve() == UNIT.resolve()
+
+
+def test_the_unit_keeps_retrying_after_a_late_link():
+    # Review round 1: a box that boots before its switch port has carrier fails the whole ~60 s
+    # retry; without a restart it would stay unpaced for its whole uptime.
+    text = _read(UNIT)
+    unit_section = text.split("[Service]")[0]
+    service_section = text.split("[Service]")[1].split("[Install]")[0]
+    assert re.search(r"(?m)^StartLimitIntervalSec=0$", unit_section), "never give up restarting"
+    assert re.search(r"(?m)^Restart=on-failure$", service_section)
+    rs = re.search(r"(?m)^RestartSec=(\d+)$", service_section)
+    assert rs and int(rs.group(1)) > 0, "a pause between the retry rounds"
 
 
 # =================================================================================================
@@ -500,6 +594,17 @@ def test_verify_device_ap_runs(tmp_path):
     assert r.stdout.startswith("FAIL ") and "rc=255" in r.stdout, r.stdout
 
 
+def test_verify_device_ap_names_the_fix_for_a_box_that_only_needs_a_start(tmp_path):
+    # Review round 1: enabled + installed, never run since install, runtime qdisc gone. Re-running
+    # setup-device (apt, GRUB, an rw remount) would change nothing: `systemctl start` is the fix.
+    r = _run_ap(tmp_path, _block(qdisc=CAM7_UNPACED + "|", active="inactive"))
+    assert r.stdout.startswith("FAIL "), r.stdout
+    assert "systemctl start cambox-egress-pacing" in r.stdout, r.stdout
+    assert "setup-device" not in r.stdout, r.stdout
+    r = _run_ap(tmp_path, _block(script_sha="0" * 64))
+    assert r.stdout.startswith("FAIL ") and "stale" in r.stdout and "setup-device" in r.stdout, r.stdout
+
+
 # =================================================================================================
 # The E2E [0/8] row: report-only, one line per vetted cambox, never aborts
 # =================================================================================================
@@ -522,6 +627,10 @@ def test_e2e_report_reads_every_target_and_never_aborts(tmp_path):
     assert re.search(r"(?m)^    WARNING: cam3 .*pfifo_fast", out), out
     assert re.search(r"(?m)^    WARNING: cam7 .*UNKNOWN", out), out
     assert "1 ok, 2 warning" in out
+    # Review round 1: the row names the matching fix (cam3's unit ran, the qdisc changed after),
+    # never a blanket "not permanent".
+    assert re.search(r"(?m)^    WARNING: cam3 .*systemctl restart cambox-egress-pacing", out), out
+    assert "not permanent" not in out, out
 
 
 def test_e2e_report_skips_an_acked_box(tmp_path):
