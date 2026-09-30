@@ -76,7 +76,8 @@ class FakeGh:
     arts: {run id: [name | (name, expired)]}.
     """
 
-    def __init__(self, tmp, head, listings, commit_runs, arts, head_error=None, commit_error=None):
+    def __init__(self, tmp, head, listings, commit_runs, arts, head_error=None, commit_error=None,
+                 listing_error=None):
         self.tmp = tmp
         self.log = os.path.join(tmp, "gh.log")
         self.path = os.path.join(tmp, "gh")
@@ -129,6 +130,7 @@ if [ "$1 $2" = "run list" ]; then
     jq --arg c "$c" '[.[] | select(.headSha == $c)]' "$f" > "$T/commit.view.json"
     f="$T/commit.view.json"
   else
+    if [ -f "$T/listing_error" ]; then cat "$T/listing_error" >&2; exit 1; fi
     f="$(snap listing)"
   fi
   if [ -n "$q" ]; then jq -r "$q" "$f"; else cat "$f"; fi
@@ -144,6 +146,9 @@ echo "fake gh: unexpected $*" >&2; exit 1
         if commit_error:
             with open(os.path.join(tmp, "commit_error"), "w", encoding="utf-8") as f:
                 f.write(commit_error + "\n")
+        if listing_error:
+            with open(os.path.join(tmp, "listing_error"), "w", encoding="utf-8") as f:
+                f.write(listing_error + "\n")
         self.sleep = os.path.join(tmp, "fake-sleep")
         _write_exec(self.sleep, '#!/usr/bin/env bash\nprintf "SLEEP %s\\n" "$*" >> "' + tmp + '/sleep.log"\n')
 
@@ -320,6 +325,31 @@ def test_gh_error_on_the_head_run_lookup_fails_loud():
         assert r.returncode == 1 and r.stdout.strip() == "", r.stdout + r.stderr
         assert "HTTP 500: boom" in r.stderr, r.stderr
         assert "artifacts" not in fake.calls(), "never a fallback walk:\n" + fake.calls()
+
+
+def test_a_listing_error_never_refuses_a_known_good_head_run():
+    # The head lookup already has the head's successful run carrying the artifact: the branch
+    # listing is not needed, so a listing hiccup must not turn a known-good pick into a refusal.
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = FakeGh(tmp, HEAD, [STALE_LISTING], [[HEAD_RUN]], LIVE_ARTS,
+                      listing_error="HTTP 502: Bad Gateway (listing)")
+        r = _resolve(fake)
+        assert r.returncode == 0 and r.stdout.strip() == "36687519583", r.stdout + r.stderr
+        assert "head-anchored" in r.stderr, r.stderr
+        assert "--branch main" not in fake.calls(), "the listing is read only when needed:\n" + fake.calls()
+
+
+def test_a_listing_error_on_the_fallback_path_fails_loud():
+    # The head's run is in flight, so the fallback needs the listing; a gh error there is a loud
+    # refusal, never a guess.
+    with tempfile.TemporaryDirectory() as tmp:
+        run = {"databaseId": 900, "createdAt": "2026-09-30T11:00:00Z", "status": "in_progress",
+               "conclusion": "", "headSha": HEAD_B}
+        fake = FakeGh(tmp, HEAD_B, [[run, OLDER]], [[run, OLDER]], {800: [ART]},
+                      listing_error="HTTP 502: Bad Gateway (listing)")
+        r = _resolve(fake)
+        assert r.returncode == 1 and r.stdout.strip() == "", r.stdout + r.stderr
+        assert "HTTP 502: Bad Gateway (listing)" in r.stderr and "pass --run <id>" in r.stderr, r.stderr
 
 
 def test_an_unreadable_head_artifact_list_stops_the_resolver():
