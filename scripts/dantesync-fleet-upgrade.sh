@@ -52,6 +52,11 @@ set -euo pipefail
 #     named WARNING in the roll summary ("dantesync-tray was NOT refreshed on ..."), never a
 #     service rollback and never a non-zero exit: the tray is UI, the service is the clock.
 #
+#   * THE MASTER'S SAVED DATE (issue 1372, dantesync 1.15.0): a VERIFY-failure rollback that puts
+#     the NTP master back below 1.15.0 also deletes its date-offset.json -- a 1.15 reinstalled later
+#     would restore that stale session. Never on a slave, a 1.15.x restore, or an upgrade
+#     (scripts/lib/dantesync-rollback.sh, which holds both rollback programs).
+#
 # REUSE, NEVER REINVENT: sources dantesync-version-gate.sh for the version PARSER
 # (dantesync_version_from_version_output) + the PIN; uses dantesync-gate.sh (→ clock-offset-guard.sh
 # pure parsers) as the per-canary verification gate; uses scripts/lib/cambox-offline-ack.sh +
@@ -725,24 +730,27 @@ run_upgrade() {
   return "$rc"
 }
 
-# rollback_node NAME KIND ADDR -> restore the pre-upgrade binary/exe and restart. ONLY called on
-# the VERIFY-failure path (the swap provably completed). A rollback that itself fails is logged
-# loudly but never masks the original failure.
+# rollback_node NAME KIND ADDR RESTORED -> restore the pre-upgrade binary/exe and restart. ONLY called
+# on the VERIFY-failure path (the swap provably completed). A rollback that itself fails is logged
+# loudly but never masks the original failure. RESTORED is the version the node ran before the swap
+# (upgrade_node's read): the NTP master restored below 1.15.0 also drops its saved fleet date
+# (issue 1372, dantesync_rollback_clears_date_state), and that program line reaches the roll log.
 rollback_node() {
-  local name="$1" kind="$2" addr="$3" rb_rc=0 out="" local_ps local_sh user runcmd
+  local name="$1" kind="$2" addr="$3" restored="${4:-}" role=slave rb_rc=0 out="" local_ps local_sh user runcmd
+  if dantesync_is_ntp_master "$name" "$NTP_MASTER"; then role=ntp-master; fi
   case "$kind" in
     local)
       # #1077: the rollback also does root-only ops (remount, install, systemctl) -> run by FILE with
       # sudo escalation, same as the upgrade path. No staging (it restores from the on-box .bak).
       local_sh="$(mktemp)"
-      dantesync_linux_rollback_cmd >"$local_sh"
+      dantesync_linux_rollback_cmd "$role" "$restored" >"$local_sh"
       runcmd="$(dantesync_linux_run_script_cmd "$(id -un)" "$local_sh" "$SSH_PASS")"
       out="$(bash -c "$runcmd" 2>&1)" || rb_rc=$?
       rm -f "$local_sh" ;;
     linux)
       user="${addr%%@*}"
       local_sh="$(mktemp)"
-      dantesync_linux_rollback_cmd >"$local_sh"
+      dantesync_linux_rollback_cmd "$role" "$restored" >"$local_sh"
       if scp_node "$local_sh" "$addr:$DANTESYNC_LINUX_SH_REMOTE" >/dev/null 2>&1; then
         runcmd="$(dantesync_linux_run_script_cmd "$user" "$DANTESYNC_LINUX_SH_REMOTE" "$SSH_PASS")"
         out="$(ssh_node "$addr" "$runcmd" 2>&1)" || rb_rc=$?
@@ -752,7 +760,7 @@ rollback_node() {
       rm -f "$local_sh" ;;
     win)
       local_ps="$(mktemp)"
-      dantesync_windows_rollback_ps >"$local_ps"
+      dantesync_windows_rollback_ps "$role" "$restored" >"$local_ps"
       if scp_node "$local_ps" "$addr:$DANTESYNC_WIN_PS_REMOTE" >/dev/null 2>&1; then
         out="$(ssh_node "$addr" "$(dantesync_windows_run_ps_file_cmd "$DANTESYNC_WIN_PS_REMOTE")" 2>&1)" || rb_rc=$?
       else
@@ -765,6 +773,7 @@ rollback_node() {
     [ -n "$out" ] && err "[$name] rollback output: $out"
   else
     log "[$name] rolled back to the previous binary"
+    dantesync_rollback_date_state_note "$name" "$out"
   fi
 }
 
@@ -805,7 +814,7 @@ upgrade_node() {
     return 0
   fi
   err "[$name] verification failed after upgrade — rolling back the completed swap"
-  rollback_node "$name" "$kind" "$addr"
+  rollback_node "$name" "$kind" "$addr" "$cur"
   return 1
 }
 
