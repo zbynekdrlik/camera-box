@@ -671,11 +671,26 @@ def test_windows_rollback_keeps_the_date_state_otherwise_and_is_the_plain_progra
     assert ps == _emit(tmp_path, "dantesync_windows_rollback_ps")
 
 
-@pytest.mark.parametrize("fn", ["dantesync_linux_upgrade_cmd", "dantesync_windows_upgrade_ps",
-                                "dantesync_windows_tray_only_ps"])
+@pytest.mark.parametrize("fn", ["dantesync_linux_upgrade_cmd", "dantesync_windows_upgrade_ps"])
+@pytest.mark.parametrize("version,role", [
+    ("1.14.0", None), ("1.15.0", None),              # no role given: the plain program
+    ("1.14.0", "slave"), ("1.16.0", "slave"),         # a non-master downgrade or upgrade
+    ("1.15.0", "ntp-master"), ("1.15.1", "ntp-master"), ("1.16.0", "ntp-master"),  # the master to >= 1.15.0
+])
+def test_an_upgrade_to_1_15_or_newer_or_a_non_master_roll_never_deletes_the_date_state(tmp_path, fn, version,
+                                                                                         role):
+    """Narrowed by the supervisor decision (issue comment 5910080606): the old claim "an upgrade
+    never deletes", for target 1.14.0 on the master, WAS the defect -- a forced downgrade of the date
+    master below 1.15.0 must delete like a rollback. What stays true is pinned here: an upgrade to
+    1.15.0 or newer, and any non-master node, emit exactly the plain program."""
+    text = _emit(tmp_path, fn, version, *(() if role is None else (role,)))
+    assert "date-offset" not in text, text
+    assert text == _emit(tmp_path, fn, version)
+
+
 @pytest.mark.parametrize("version", ["1.14.0", "1.15.0"])
-def test_an_upgrade_never_deletes_the_date_state(tmp_path, fn, version):
-    assert "date-offset" not in _emit(tmp_path, fn, version)
+def test_the_tray_only_program_never_deletes_the_date_state(tmp_path, version):
+    assert "date-offset" not in _emit(tmp_path, "dantesync_windows_tray_only_ps", version)
 
 
 def _run_linux_rollback(tmp_path, role, version, state="file", ro=False):
