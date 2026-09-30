@@ -122,6 +122,45 @@ ci_run_gh_lines() {
   printf '%s\n' "$out"
 }
 
+# ci_run_head_rows SHA TEXT... -> stdout: every well-formed `<id> <createdAt> <status> <conclusion>
+#   <sha>` row of commit SHA found in the TEXT arguments, each run once, newest first. Rows of any
+#   other sha, or with a non-numeric id, are dropped.
+ci_run_head_rows() {
+  local sha="$1"
+  shift
+  printf '%s\n' "$@" | awk -v h="$sha" 'NF == 5 && $1 ~ /^[0-9]+$/ && $5 == h && !seen[$1]++' |
+    sort -s -t ' ' -k2,2r
+}
+
+# ci_run_pick_head_run ROWS -> 0 = a successful head run carrying the artifact was picked (logged
+#   `head-anchored`, its id left in `picked`), 1 = none of ROWS qualifies, 2 = an artifact list was
+#   UNREADABLE (the caller stops). ROWS are ci_run_head_rows lines. Called by ci_run_latest_success
+#   ONLY: it reads repo/branch/workflow/art and updates tried/head_state/picked in the caller's scope
+#   (bash dynamic scope), so it must never run in a subshell.
+ci_run_pick_head_run() {
+  local id when status concl sha rc
+  while read -r id when status concl sha; do
+    [ "$concl" = success ] || continue
+    case "$tried" in *" $id "*) continue ;; esac
+    tried="$tried$id "
+    rc=0
+    ci_run_has_artifact "$repo" "$id" "$art" || rc=$?
+    case "$rc" in
+      0)
+        echo "ci-run-resolve: head-anchored: $workflow run $id of the $branch head carries $art (created ${when:-?}, sha ${sha:0:9})" >&2
+        picked="$id"
+        return 0
+        ;;
+      1) [ -n "$head_state" ] || head_state="run $id succeeded but carries no non-expired $art artifact" ;;
+      *)
+        echo "ci-run-resolve: the artifact list of the head's run $id is UNREADABLE (gh/api failure) -- refusing to fall back to an older run" >&2
+        return 2
+        ;;
+    esac
+  done <<<"$1"
+  return 1
+}
+
 # ci_run_latest_success REPO BRANCH WORKFLOW ARTIFACT [LIMIT]
 #   -> stdout: the id of the WORKFLOW run to deploy from BRANCH -- the branch head's own successful
 #      run carrying ARTIFACT, else (the head's run in flight, failed or without the artifact) the
@@ -129,29 +168,34 @@ ci_run_gh_lines() {
 #      sha) and, on a fallback, the head's state. Returns 1 with empty stdout when no run qualifies,
 #      the listing stays stale, or gh fails -- the caller fails loud. LIMIT (default 100) bounds how
 #      far back the branch listing looks; it is not status-filtered, so it must cover a streak of
-#      failed runs.
+#      failed runs. The branch listing is read only when the head lookup has no run for the head
+#      (the stale check) or the head's run is not usable (the fallback), so a listing hiccup never
+#      refuses a head run that is already known good.
 ci_run_latest_success() {
   local repo="$1" branch="$2" workflow="$3" art="$4" limit="${5:-100}" gh="${CI_RUN_RESOLVE_GH:-gh}"
   local retries="${CI_RUN_RESOLVE_RETRIES:-3}" wait_s="${CI_RUN_RESOLVE_RETRY_S:-10}"
   local sleeper="${CI_RUN_RESOLVE_SLEEP:-sleep}"
-  local head head_rows listing head_all reads=1 kind id when status concl sha rc head_state="" tried=" "
+  local head head_rows="" listing="" listing_read=0 head_all="" reads=1 rc
+  local kind id when status concl sha head_state="" tried=" " picked=""
   case "$retries" in '' | *[!0-9]*) retries=3 ;; esac
   case "$wait_s" in '' | *[!0-9]*) wait_s=10 ;; esac
   head="$(ci_run_branch_head "$repo" "$branch")" || return 1
+
+  # Find at least one run of the head: its own lookup first, the branch listing only when that is
+  # empty. Neither has one = a STALE listing -> bounded re-reads, then a loud refusal.
   while :; do
     head_rows="$(ci_run_gh_lines "gh run list (the $workflow runs of the $branch head ${head:0:9})" \
       "$gh" run list --repo "$repo" --commit "$head" --workflow "$workflow" \
       --json databaseId,createdAt,conclusion,status,headSha \
       --jq "$(ci_run_rows_of_sha_filter "$head")")" || return 1
+    head_all="$(ci_run_head_rows "$head" "$head_rows")"
+    [ -n "$head_all" ] && break
     listing="$(ci_run_gh_lines "gh run list ($workflow on $branch in $repo)" \
       "$gh" run list --repo "$repo" --branch "$branch" --workflow "$workflow" \
       --limit "$limit" --json databaseId,createdAt,conclusion,status,headSha \
       --jq "$(ci_run_listing_filter "$head")")" || return 1
-    # Every run of the head either read saw, once, newest first; only well-formed rows of THIS sha.
-    head_all="$({
-      printf '%s\n' "$head_rows"
-      printf '%s\n' "$listing" | sed -n 's/^H //p'
-    } | awk -v h="$head" 'NF == 5 && $1 ~ /^[0-9]+$/ && $5 == h && !seen[$1]++' | sort -s -t ' ' -k2,2r)"
+    listing_read=1
+    head_all="$(ci_run_head_rows "$head" "$(printf '%s\n' "$listing" | sed -n 's/^H //p')")"
     [ -n "$head_all" ] && break
     if [ "$reads" -gt "$retries" ]; then
       echo "ci-run-resolve: no $workflow run for the $branch head $head in the runs listing after $reads reads -- stale GitHub listing, refusing to pick an older run; pass --run <id>" >&2
@@ -163,26 +207,26 @@ ci_run_latest_success() {
   done
 
   # The head's own successful run carrying the artifact is THE pick.
-  while read -r id when status concl sha; do
-    [ "$concl" = success ] || continue
+  rc=0
+  ci_run_pick_head_run "$head_all" || rc=$?
+  case "$rc" in
+    0) printf '%s\n' "$picked" && return 0 ;;
+    2) return 1 ;;
+  esac
+  # Not usable: the fallback needs the branch listing, which may also know more runs of the head.
+  if [ "$listing_read" -eq 0 ]; then
+    listing="$(ci_run_gh_lines "gh run list ($workflow on $branch in $repo)" \
+      "$gh" run list --repo "$repo" --branch "$branch" --workflow "$workflow" \
+      --limit "$limit" --json databaseId,createdAt,conclusion,status,headSha \
+      --jq "$(ci_run_listing_filter "$head")")" || return 1
+    head_all="$(ci_run_head_rows "$head" "$head_all" "$(printf '%s\n' "$listing" | sed -n 's/^H //p')")"
     rc=0
-    ci_run_has_artifact "$repo" "$id" "$art" || rc=$?
+    ci_run_pick_head_run "$head_all" || rc=$?
     case "$rc" in
-      0)
-        echo "ci-run-resolve: head-anchored: $workflow run $id of the $branch head carries $art (created ${when:-?}, sha ${sha:0:9})" >&2
-        printf '%s\n' "$id"
-        return 0
-        ;;
-      1)
-        tried="$tried$id "
-        [ -n "$head_state" ] || head_state="run $id succeeded but carries no non-expired $art artifact"
-        ;;
-      *)
-        echo "ci-run-resolve: the artifact list of the head's run $id is UNREADABLE (gh/api failure) -- refusing to fall back to an older run" >&2
-        return 1
-        ;;
+      0) printf '%s\n' "$picked" && return 0 ;;
+      2) return 1 ;;
     esac
-  done <<<"$head_all"
+  fi
   if [ -z "$head_state" ]; then
     read -r id when status concl sha <<<"$head_all"
     head_state="run $id is $status"
@@ -194,7 +238,6 @@ ci_run_latest_success() {
     [ "$kind" = S ] || continue
     case "$id" in '' | *[!0-9]*) continue ;; esac
     [ "$sha" != "$head" ] || continue
-    case "$tried" in *" $id "*) continue ;; esac
     rc=0
     ci_run_has_artifact "$repo" "$id" "$art" || rc=$?
     case "$rc" in
