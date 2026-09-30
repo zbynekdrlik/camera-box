@@ -161,10 +161,12 @@ pub fn audio_stamp_age_ns(now_ns: u64, raw_ts_ns: u64, off_live_ns: i64) -> i64 
 /// `RelabelPending` on the packet whose live offset jumps (over `step_min_ns`) to within one packet of
 /// the held offset: this box's own step followed, the landing moved by the remainder only. Otherwise
 /// `Timeout` after [`AUDIO_STEP_HOLD_MAX_NS`] (J applied once), or `Reset`. The ordinary follow and
-/// age releases do not apply to it, and only a relabel-shaped stamp jump
-/// ([`audio_relabel_pending`]: over one packet, continuous arrival) moves its held offset -- a pause,
-/// a duplicated or a skipped slot keeps it, so this box's own step still resolves the pending
-/// (review round 1: folded, a 500 ms pause left it to the bound and placed 484 ms).
+/// age releases do not apply to it. A stamp move under one packet folds into its held offset like
+/// the skew hold's (review round 2: a raw-clock sender's late step packet comes back on the next
+/// one); a move of one packet or more only when it is relabel-shaped ([`audio_relabel_pending`]:
+/// continuous arrival) -- a pause, a duplicated or a skipped slot keeps it, so this box's own step
+/// still resolves the pending (review round 1: folded, a 500 ms pause left it to the bound and
+/// placed 484 ms).
 ///
 /// Every arithmetic wraps in two's complement, like the C mirror `genlock_audio_step_hold`.
 #[allow(clippy::too_many_arguments)]
@@ -265,8 +267,10 @@ pub fn audio_step_hold(
         s.active = false;
         return (off_live_ns, AudioStepRelease::Reset);
     }
-    // review round 1: inside a pending relabel only a relabel-shaped stamp jump moves the held offset
-    let fold_ns = if !s.relabel_pending {
+    // inside a pending relabel a move under one packet folds like the skew hold's (review round 2: a
+    // raw-clock sender's late stamp comes back on the next packet); a move of one packet or more only
+    // when it is relabel-shaped (review round 1: a pause, a duplicated or a skipped slot keeps it)
+    let fold_ns = if !s.relabel_pending || dev_ns.unsigned_abs() < packet_ns {
         followed
     } else if audio_relabel_pending(dev_ns, arrival_gap_ns, packet_ns, step_min_ns) {
         dev_ns

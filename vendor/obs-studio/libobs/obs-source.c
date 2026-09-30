@@ -2107,9 +2107,11 @@ static inline bool genlock_audio_step_relabel_pending_starts(bool active, int64_
  * (genlock_audio_step_relabel_pending_starts) starts a PENDING relabel -- a hold on the pre-jump offset
  * minus the jump, released RELABEL_PENDING when this box's offset jumps (over step_min) to within one
  * packet of it, else at the bound (TIMEOUT) or on a reset; the ordinary follow and age releases do not
- * apply to it, and only a relabel-shaped stamp jump (genlock_audio_relabel_pending) moves its held offset
- * (review round 1: a pause, a duplicated or a skipped slot keeps it). *relabel_pending is set when a hold
- * starts and kept after its release (the log's pending=). */
+ * apply to it. A stamp move under one packet folds into its held offset like the skew hold's (review round
+ * 2: a raw-clock sender's late step packet comes back on the next one); a move of one packet or more only
+ * when it is relabel-shaped (genlock_audio_relabel_pending; review round 1: a pause, a duplicated or a
+ * skipped slot keeps it). *relabel_pending is set when a hold starts and kept after its release (the log's
+ * pending=). */
 static inline int genlock_audio_step_hold(bool *active, int64_t *prev_off_ns, uint64_t *prev_raw_ns,
 					  uint64_t *prev_packet_ns, int64_t *nominal_age_ns,
 					  uint64_t *nominal_dev_since_ns, uint32_t *nominal_warm, int64_t *held_off_ns,
@@ -2188,9 +2190,11 @@ static inline int genlock_audio_step_hold(bool *active, int64_t *prev_off_ns, ui
 		*active = false;
 		return GENLOCK_AUDIO_STEP_RESET;
 	}
-	/* review round 1: inside a pending relabel only a relabel-shaped stamp jump moves the held offset */
+	/* inside a pending relabel a move under one packet folds like the skew hold's (review round 2: a
+	 * raw-clock sender's late stamp comes back on the next packet); a move of one packet or more only
+	 * when it is relabel-shaped (review round 1: a pause, a duplicated or a skipped slot keeps it) */
 	int64_t fold_ns = followed;
-	if (*relabel_pending)
+	if (*relabel_pending && genlock_audio_step_mag_ns(dev_ns) >= packet_ns)
 		fold_ns = genlock_audio_relabel_pending(dev_ns, arrival_gap_ns, packet_ns, step_min_ns) ? dev_ns : 0;
 	*held_off_ns = (int64_t)((uint64_t)*held_off_ns - (uint64_t)fold_ns);
 	if (*relabel_pending) {
