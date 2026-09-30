@@ -318,7 +318,8 @@ after 900 s. It also reports `date_authority_hold_age_s`.
 - Never special-case `holding` into the master branch.
 
 **Tier-0:**
-- `pytest tests/python/test_dantesync_fleet_upgrade_tray_1372.py`, the section at the end:
+- `pytest tests/python/test_dantesync_date_state_1372.py` (its own file; the `_source` / `_roll`
+  helpers it shares with the tray tests live in `tests/python/dantesync_upgrade_harness_1372.py`):
   - the decision table;
   - the emitted Linux rollback RUN with PATH stubs for systemctl / mount / findmnt / dantesync,
     each logging whether the file exists when it runs;
