@@ -125,6 +125,12 @@
 #       active. dantesync's rsntp Linux client cannot setsockopt(IP_TOS) on its own request socket,
 #       so this provisioning rule is the ONLY thing marking the request direction; a box missing
 #       nftables, the rule, or the oneshot FAILs (never a silent pass).
+#   (ap) NDI egress pacing (issue 1242) -- HARD FAIL: the default-route interface's ROOT qdisc is
+#       `fq` with maxrate / flow_limit / limit equal to scripts/lib/cambox-egress-pacing.sh's one
+#       declaration (400mbit / 2000 / 20000), AND cambox-egress-pacing.service is enabled (reboot
+#       survival) and not failed (its boot retry gave up). A hand-applied runtime qdisc alone FAILs:
+#       that is exactly the non-permanent state issue 1242 fixes. `active` is not required
+#       (setup-device.sh is enable-only and a cambox is never rebooted remotely).
 #   (af) v4l2-ctl (v4l-utils) is installed AND runnable (`v4l2-ctl --version`) -- issue 1213: the
 #       tool is already in setup-device.sh STEP 16's apt-get line, but that line is guarded by
 #       `2>/dev/null || true`, which silently swallows a per-box apt failure. cam3/cam4 were found
@@ -237,6 +243,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
                                  # dscp_nft_verdict -- the (ae) NTP-client DSCP nftables rule check
                                  # (dantesync issue 52; SAME source of truth as setup-device.sh /
                                  # create-usb-linux.sh)
+# shellcheck source=scripts/lib/cambox-egress-pacing.sh
+. "$HERE/lib/cambox-egress-pacing.sh"  # cambox_egress_pacing_gather_remote_snippet /
+                                       # _provision_verdict -- the (ap) NDI egress pacing check
+                                       # (issue 1242; SAME lib setup-device.sh installs it from)
 # shellcheck source=scripts/lib/remote-logging.sh
 . "$HERE/lib/remote-logging.sh"  # remote_log_gather_remote_snippet/remote_log_verdict -- the (ak)
                                  # off-box kernel(netconsole)+journal(upload) forensics check (#1311;
@@ -847,6 +857,9 @@ Checks:
       \`table ip dantesync_dscp\` OUTPUT-mangle rule marks outgoing NTP requests (udp dport 123) with
       DSCP EF, applied at boot by the enabled+active dantesync-dscp.service oneshot (rsntp cannot
       setsockopt(IP_TOS) on Linux, so this provisioning rule is the request-half fix)
+  (ap) NDI egress pacing (issue 1242): the default-route interface's root qdisc is fq with the
+      declared maxrate/flow_limit/limit (scripts/lib/cambox-egress-pacing.sh), and
+      cambox-egress-pacing.service is enabled and not failed -- a hand-applied qdisc alone FAILs
   (af) v4l2-ctl (v4l-utils) installed and runnable (\`v4l2-ctl --version\`) -- already listed in
       setup-device.sh STEP 16's apt-get line, but that line silently swallows a per-box apt
       failure; cam3/cam4 were found live missing it despite the script listing it (issue 1213)
@@ -1565,6 +1578,26 @@ elif [ "$DSCP_VERDICT" != "ok" ]; then
   fail "NTP-client DSCP marking not provisioned: $(printf '%s' "$DSCP_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')"
 else
   ok "NTP-client DSCP marking live: dantesync_dscp nftables rule present + dantesync-dscp.service enabled+active (dantesync issue 52)"
+fi
+
+# (ap) NDI egress pacing: fq maxrate root qdisc live + boot unit enabled (issue 1242) -- HARD FAIL --
+# All seven cameras hand their frame to NDI on the same grid instant, so their line-rate bursts
+# reach strih-lx together (its USB NIC answers with PAUSE storms). setup-device.sh's
+# [egress-pacing] sub-step installs cambox-egress-pacing.service, which paces the default-route
+# interface at boot with the ONE declaration in scripts/lib/cambox-egress-pacing.sh. This reads
+# the live root qdisc + the unit in one read-only ssh round trip. It FAILs a missing/drifted qdisc,
+# a unit that is not enabled (a hand-applied qdisc does not survive a reboot) or a failed unit.
+# Placed right after (ae) and BEFORE (q): pytest executes the (ao)..(an) and (an)..(q) slices of
+# this file, so a block there would break them. fail() only, never a warn.
+aprc=0
+PACING_BLOCK="$(ssh_box "$(cambox_egress_pacing_gather_remote_snippet)")" || aprc=$?
+PACING_VERDICT="$(cambox_egress_pacing_provision_verdict "$PACING_BLOCK")"
+if [ "$aprc" -ne 0 ]; then
+  fail "could not reach the box to read the NDI egress pacing qdisc + ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service state (ssh rc=$aprc, issue 1242)"
+elif [ "$PACING_VERDICT" != "ok" ]; then
+  fail "NDI egress pacing not provisioned: $(printf '%s' "$PACING_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')-- re-run setup-device.sh (issue 1242)"
+else
+  ok "NDI egress pacing live: $(cambox_egress_pacing_block_field "$PACING_BLOCK" PACING_IFACE) root $(cambox_egress_pacing_verdict "$(cambox_egress_pacing_block_field "$PACING_BLOCK" PACING_QDISC)" | sed 's/^OK //') + ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service enabled (issue 1242)"
 fi
 
 # (af) v4l2-ctl installed AND runnable (v4l-utils runtime dependency, issue 1213) ------------------
