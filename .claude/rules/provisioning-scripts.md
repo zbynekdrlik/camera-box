@@ -3,6 +3,8 @@ paths:
   - "scripts/setup-device.sh"
   - "scripts/create-usb-linux.sh"
   - "scripts/verify-device.sh"
+  - "scripts/build-image.sh"
+  - "scripts/lib/grub-fast-boot.sh"
   - "tests/setup_device_pure_functions.rs"
   - "tests/verify_device_pure_functions.rs"
 ---
@@ -156,7 +158,8 @@ under `set -euo pipefail` with stubbed `ok`/`fail`/`ssh_box`. Both also assert `
 block. A new check inserted anywhere between `(ao)` and `(q)` therefore breaks them: its lib function
 is undefined in their harness, and a `warn` trips the assertion. Insert a new check earlier (the
 issue-1242 `(ap)` sits right after `(ae)`), and grep `tests/python` for `find("\n# (` slices before
-picking the spot. The next free letter after `(ap)` is `(aq)`.
+picking the spot. `(aq)` (#1394, GRUB fast boot) now sits after `(am)`, before `(ao)`; the next free
+letter is `(ar)`.
 
 ## Two-char check-letter scheme is now at (ac) (#899)
 
@@ -397,3 +400,39 @@ ro-root-safe config, would pass a box whose service can never actually run).
   `tests/python/test_ndi_discovery_1342.py` slices the `(an)` block up to `(q)` and EXECUTES it
   with only the ndi-discovery lib sourced, so any new block there runs inside that test and fails
   it (`command not found` / an unbound variable). `(ao)` sits after `(am)`, before `(an)`.
+
+## A cambox boots straight to Linux: no GRUB menu and no countdown, in ANY image (#1394)
+
+Owner ruling issuecomment-5913502328: cam6 sat in the GRUB menu with a 30 s countdown during a
+reflash. The three settings (`GRUB_TIMEOUT=0`, `GRUB_TIMEOUT_STYLE=hidden`,
+`GRUB_RECORDFAIL_TIMEOUT=0`) live in ONE lib, `scripts/lib/grub-fast-boot.sh`. Never retype them in
+a script.
+
+- **The recordfail timeout is the one that bites.** Ubuntu's `/etc/grub.d/00_header` renders
+  `set timeout=${GRUB_RECORDFAIL_TIMEOUT:-30}` in the `if [ "${recordfail}" = 1 ]` branch. GRUB sets
+  `recordfail` on every boot, and only a completed boot clears it, through `grub-common`, which every
+  cambox image MASKS. So after one cut boot or power-off, every later boot takes that branch. A
+  `GRUB_TIMEOUT=0` alone never helps there. The branch sets only the timeout, and timeout 0 boots the
+  default at once.
+- **Every image builder applies the lib to its `/etc/default/grub` before `update-grub`:**
+  - `create-usb-linux.sh` copies the lib into the chroot (like `install-grub-efi.sh`), sources it
+    and runs `grub_fast_boot_apply`. Its chroot verification grades the generated grub.cfg with
+    `grub_fast_boot_cfg_verdict`, and a slow cfg fails the build.
+  - `build-image.sh` does the same host-side, `error` on a slow cfg.
+  - setup-device STEP 10 calls `grub_fast_boot_apply /etc/default/grub`.
+  - The lib is the LAST entry of `check_required_files`: the issue-448 behavioural test builds a
+    fixture with only `install-grub-efi.sh` present and expects the error to name
+    `camera-box-grow-root.sh` first.
+- **`grub_fast_boot_apply` is set-or-append.** Every active `KEY=` line (leading blanks / `export`
+  allowed, comments never) is rewritten, and a missing key is appended. An already-correct file is
+  not written at all (same bytes, same mtime), and a rewrite keeps the inode and mode.
+- **verify-device `(aq)` grades the GENERATED `/boot/grub/grub.cfg`, never `/etc/default/grub`.** A
+  box whose `update-grub` never ran after an edit would lie. It FAILs if:
+  - the recordfail branch is missing or not 0;
+  - any other `set timeout=` is not 0 (this also catches the `recordfail_broken` EFI block);
+  - any `set timeout_style=` is not `hidden`;
+  - the cfg is empty or unreadable.
+- **Fixtures** (`tests/fixtures/grub_fast_boot_1394/`): cam1's live cfg, and the timeout blocks
+  Ubuntu's own `make_timeout` renders. Render a new shape by extracting `make_timeout` from dev1's
+  `/etc/grub.d/00_header` and calling it with `verbose=` and `quick_boot=1` set. Never hand-type a
+  grub.cfg shape.
