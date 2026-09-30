@@ -413,11 +413,10 @@ fn a_one_slot_sender_first_step_is_appended_and_repaid_on_every_grid_position_13
 #[test]
 fn a_one_slot_sender_first_step_the_receiver_never_follows_applies_the_jump_once_1381() {
     // no receiver step within the run: the pending runs to the 10 s bound and releases `timeout`
-    // with the whole jump J as its residual, applied ONCE. Over one packet (J = packet + 34 ns) the
-    // release places the packet (a zero-filled gap of J, the skew hold's rule); within one packet
-    // (J = packet − 66 ns) it appends and the timecode ASRC books J. Nothing is overwritten or
-    // dropped either way.
-    let packet = frames_ns(PACKET_FRAMES) as i64;
+    // with the whole jump J as its residual, applied ONCE -- PLACED on every grid position
+    // (ROZHODNUTÉ 5903945145 point 2: a zero-filled gap of J, whether J is one packet + 34 ns or
+    // one packet − 66 ns; slice 3 booked the − 66 ns one at 1000 ppm instead). Nothing is
+    // overwritten or dropped.
     let bound_s = AUDIO_STEP_HOLD_MAX_NS as f64 / 1e9;
     for s_ms in [40_i64, 60] {
         for position in 0..3 {
@@ -439,15 +438,9 @@ fn a_one_slot_sender_first_step_the_receiver_never_follows_applies_the_jump_once
                 "issue 1381: {case:?}: a one-slot pending no receiver step follows is released \
                  once at the bound: {r:?}"
             );
-            let once = if jump > packet {
-                r.discs.len() == 1 && r.jumps == 0
-            } else {
-                r.discs.is_empty() && r.jumps == 1 && r.gap_ms == 0.0
-            };
             assert!(
-                once,
-                "issue 1381: {case:?}: J = {jump} ns applied exactly once (placed over one packet, \
-                 booked within it): {r:?}"
+                r.discs.len() == 1 && r.jumps == 0 && (r.gap_ms - jump as f64 / 1e6).abs() < 1.0,
+                "issue 1381: {case:?}: J = {jump} ns applied exactly once, placed: {r:?}"
             );
         }
     }
@@ -543,4 +536,52 @@ fn a_late_relabel_after_a_timed_out_hold_never_starts_a_pending_1381() {
             }
         }
     }
+}
+
+#[test]
+fn a_jittered_late_follow_costs_nothing_from_the_follow_on_1381() {
+    // review round 2 (ROZHODNUTÉ 5903945145): this box's wall steps first by |S| = 34–38 ms, just
+    // over one slot, and the arrival jitter releases its skew hold EARLY on the age test (the step is
+    // placed there -- the skew hold's known limit, outside this check). The in-band nominal then
+    // tracks the step the stamps never matched, and the sender relabels 12 / 60 / 120 s later: the
+    // away guard alone read that late follow as a sender-first step, held it 10 s and placed one slot
+    // (a 33.3 ms gap forward, 66.7 ms overwritten backward). From the follow on nothing may be lost,
+    // and no pending relabel may start.
+    let mut failures = Vec::new();
+    for s_ms in [-38_i64, -36, -34, 34, 36, 38] {
+        for lag_s in [12_u64, 60, 120] {
+            for jitter_ms in [3_u64, 5] {
+                let case = StepCase {
+                    wall_ns: s_ms * 1_000_000,
+                    lag_ns: lag_s * NS_PER_S,
+                    follow: Follow::Relabel,
+                    sender_first_ns: 0,
+                    burst_jitter_ns: jitter_ms * 1_000_000,
+                    connect_backlog: 0,
+                    step_offset_ns: 0,
+                };
+                let r = run_step(case, Variant::Production);
+                if r.pendings != 0
+                    || r.follow_overwritten_ms != 0.0
+                    || r.follow_dropped_ms != 0.0
+                    || r.follow_gap_ms != 0.0
+                {
+                    failures.push(format!(
+                        "S {s_ms} ms lag {lag_s} s jitter {jitter_ms} ms: pendings {} lost from the \
+                         follow {:.1} / {:.1} / {:.1} ms (overwritten / dropped / gap), releases {:?}",
+                        r.pendings,
+                        r.follow_overwritten_ms,
+                        r.follow_dropped_ms,
+                        r.follow_gap_ms,
+                        r.releases
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "issue 1381: a jittered late follow started a pending or lost audio:\n{}",
+        failures.join("\n")
+    );
 }

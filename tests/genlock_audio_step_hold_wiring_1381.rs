@@ -31,7 +31,7 @@ const WINDOWS_WORKFLOWS: [&str; 2] = [
 const STEP_HOLD_WIRING: [&str; 17] = [
     "#include \"obs-genlock-wall-step.h\"",
     "int64_t genlock_off_ns = genlock_off_live_ns; const int genlock_step_release = genlock_audio_step_hold_source( source, genlock_hold_mode == GENLOCK_AUDIO_HOLD_TIMECODE, genlock_off_live_ns, data->timestamp, genlock_step_packet_ns, os_time, genlock_timeline_reset, &genlock_off_ns);",
-    "&source->genlock_audio_step_step_ns, &source->genlock_audio_step_prev_arrival_ns, &source->genlock_audio_step_relabel_pending, timecode, off_live_ns, raw_ts_ns, packet_ns, now_ns, timeline_reset, GENLOCK_WALL_STEP_MIN_NS, off_out);",
+    "&source->genlock_audio_step_step_ns, &source->genlock_audio_step_prev_arrival_ns, &source->genlock_audio_step_relabel_pending, &source->genlock_audio_step_unmatched_ns, &source->genlock_audio_step_unmatched_at_ns, timecode, off_live_ns, raw_ts_ns, packet_ns, now_ns, timeline_reset, GENLOCK_WALL_STEP_MIN_NS, off_out);",
     "genlock_audio_place_term_ns(genlock_hold_mode, genlock_hold_ms, genlock_off_ns, genlock_timing_adjust);",
     "genlock_audio_place_term_ns( prev_genlock_audio_hold_mode, prev_genlock_audio_delay_ms, genlock_off_ns, genlock_timing_adjust);",
     "if (genlock_audio_step_places(source, genlock_step_release, genlock_off_live_ns, genlock_step_packet_ns, genlock_asrc_tc, push_back, sample_rate, in.timestamp, genlock_intended_ns)) { push_back = false; in.timestamp = genlock_intended_ns; }",
@@ -78,7 +78,7 @@ const PENDING_WIRING: [&str; 5] = [
     "const bool genlock_relabel_pending = source->timing_set && source->next_audio_ts_min != 0 && genlock_audio_relabel_pending_source(source, genlock_hold_mode == GENLOCK_AUDIO_HOLD_TIMECODE, genlock_off_live_ns, data->timestamp, genlock_step_packet_ns, os_time);",
     "if (genlock_relabel_pending) source->next_audio_ts_min = data->timestamp;",
     "source->genlock_audio_slew_remaining_ns += genlock_audio_relabel_book_ns( genlock_relabel ? genlock_relabel_move_ns : genlock_audio_step_residual_ns(source->genlock_audio_step_held_off_ns, genlock_off_live_ns), genlock_relabel || genlock_step_release == GENLOCK_AUDIO_STEP_RELABEL_PENDING, push_back && source->audio_ts, genlock_asrc_tc);",
-    "return genlock_audio_step_relabel_pending_starts( source->genlock_audio_step_active, source->genlock_audio_step_prev_off_ns, source->genlock_audio_step_prev_raw_ns, source->genlock_audio_step_prev_packet_ns, source->genlock_audio_step_prev_arrival_ns, source->genlock_audio_step_nominal_age_ns, timecode, off_live_ns, raw_ts_ns, packet_ns, now_ns, GENLOCK_WALL_STEP_MIN_NS);",
+    "return genlock_audio_step_relabel_pending_starts( source->genlock_audio_step_active, source->genlock_audio_step_prev_off_ns, source->genlock_audio_step_prev_raw_ns, source->genlock_audio_step_prev_packet_ns, source->genlock_audio_step_prev_arrival_ns, source->genlock_audio_step_nominal_age_ns, source->genlock_audio_step_unmatched_ns, source->genlock_audio_step_unmatched_at_ns, timecode, off_live_ns, raw_ts_ns, packet_ns, now_ns, GENLOCK_WALL_STEP_MIN_NS);",
     "if (release == GENLOCK_AUDIO_STEP_RELABEL_PENDING) source->genlock_audio_relabels++;",
 ];
 
@@ -376,6 +376,9 @@ fn the_source_carries_the_hold_state_1381() {
         "uint64_t genlock_audio_step_start_ns;",
         "int64_t genlock_audio_step_step_ns;",
         "uint32_t genlock_audio_step_holds;",
+        // ROZHODNUTÉ 5903945145: the step the stamps never matched, and when it was remembered
+        "int64_t genlock_audio_step_unmatched_ns;",
+        "uint64_t genlock_audio_step_unmatched_at_ns;",
     ] {
         assert!(
             h.contains(field),

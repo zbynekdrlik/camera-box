@@ -32,7 +32,9 @@
 //! and a skipped slot and an N = −1 relabel (a duplicated slot's stamps) that keep the slice-2 path.
 //! Slice-3 review rounds 1-2: a skipped slot at − 66 ns INSIDE a pending keeps the held offset (this
 //! box's step resolves it with −r), and a late one-slot follow after a timed-out hold -- on time, and
-//! with its first block 5 ms late (an age just over one packet) -- never starts a pending.
+//! with its first block 5 ms late (an age just over one packet) -- never starts a pending. Round 2
+//! (ROZHODNUTÉ 5903945145): a 34 ms step whose hold the arrival jitter released early is remembered,
+//! and the sender's one-slot follow 60 s later is never a pending relabel.
 //! It FAILS LOUDLY when no C compiler is present.
 
 use std::fs;
@@ -457,6 +459,20 @@ fn truth_table() -> Vec<String> {
         ));
         t.push(line("follow", [0, 0, 1, 0, 0, 0, 0, 0, 0], "+0.0"));
     }
+    // ROZHODNUTÉ 5903945145 (slice-3 review round 2): this box steps first by 34 ms and the arrival
+    // jitter (0 / 2 ms early, alternating) releases its skew hold EARLY on the age test -- placed, the
+    // step the stamps never matched remembered. 60 s later the sender's one-slot relabel at the − 66 ns
+    // grid position is that step's follow: snapped and appended, never a pending relabel (no
+    // FALSE-PENDING line; the committed C of the round-1 fix started one, then placed a slot at 10 s)
+    t.push("== late_follow_34ms_jittered".to_string());
+    t.push(line("step", [0, 0, 1, 0, 0, 1, 0, 1, 0], "+0.0"));
+    t.push(line("early", [0, 0, 1, 0, 0, 1, 1, 0, 0], "+0.0"));
+    t.push(log(
+        "late_follow_34ms_jittered",
+        "step_ms=+34.000 held_ms=31.3 released=followed residual_ms=-34.0 holds=1 relabels=0 \
+         pending=0",
+    ));
+    t.push(line("follow", [0, 0, 1, 0, 0, 0, 0, 0, 0], "+0.0"));
     // the stock "exceeded TS_SMOOTHING_THRESHOLD" and "jumped" debug lines: the leap, the restart, the
     // two pauses and the second jump inside a pending only -- no relabel and no pending relabel's
     // start reached the stock >= 70 ms or > 2 s path

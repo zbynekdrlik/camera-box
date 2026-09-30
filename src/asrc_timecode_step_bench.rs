@@ -128,6 +128,15 @@ fn recv_step_at(case: StepCase) -> u64 {
     step_at(case) + case.sender_first_ns
 }
 
+/// When the sender follows: at the step time when it steps first, else `lag_ns` after the receiver.
+fn follow_at(case: StepCase) -> u64 {
+    if case.sender_first_ns > 0 {
+        step_at(case)
+    } else {
+        step_at(case) + case.lag_ns
+    }
+}
+
 /// Issue 1381 (design 5901213031): a `sender_first_ns` this large means the receiver never steps
 /// within the run.
 const RECEIVER_NEVER_NS: u64 = STEP_RUN_NS;
@@ -153,11 +162,7 @@ fn measure_at(case: StepCase) -> u64 {
 /// The sender's packets for one case; `leap_ns` carries the TRUE landing's move (two's complement).
 fn step_sender_packets(case: StepCase) -> Vec<Packet> {
     let mut rng = Lcg(0x1381_5882);
-    let follow_at = if case.sender_first_ns > 0 {
-        step_at(case)
-    } else {
-        step_at(case) + case.lag_ns
-    };
+    let follow_at = follow_at(case);
     let wall = case.wall_ns as u64;
     let mut out = Vec::new();
     let mut prev_arrival = 0_u64;
@@ -312,6 +317,11 @@ struct StepRun {
     overwritten_ms: f64,
     dropped_ms: f64,
     gap_ms: f64,
+    /// Review round 2 (ROZHODNUTÉ 5903945145): the same three losses from the sender's FOLLOW on
+    /// (a receiver-first step's late follow must cost nothing), ms.
+    follow_overwritten_ms: f64,
+    follow_dropped_ms: f64,
+    follow_gap_ms: f64,
     /// max |estimated| of the servo after the step (ppm).
     est_max_ppm: f64,
 }
@@ -338,6 +348,7 @@ fn run_step_traced(case: StepCase, variant: Variant) -> (StepRun, StepTrace) {
     let mut backstops_at_step = 0;
     // (relabels, overwritten, dropped, gap, pendings) at the FIRST step (either box's)
     let mut losses_at_step: Option<(u32, u64, u64, u64, u32)> = None;
+    let mut losses_at_follow: Option<(u64, u64, u64)> = None;
     let mut continuation: Option<u64> = None;
     let mut first_skip = None;
     let measure_at = measure_at(case);
@@ -354,6 +365,9 @@ fn run_step_traced(case: StepCase, variant: Variant) -> (StepRun, StepTrace) {
                 obs.gap_ns,
                 obs.pendings,
             ));
+        }
+        if pkt.arrival_ns >= follow_at(case) && losses_at_follow.is_none() {
+            losses_at_follow = Some((obs.overwritten_ns, obs.dropped_ns, obs.gap_ns));
         }
         if pkt.arrival_ns >= measure_at {
             // taken BEFORE the first measured packet, so a booking on the step packet itself counts
@@ -416,6 +430,10 @@ fn run_step_traced(case: StepCase, variant: Variant) -> (StepRun, StepTrace) {
     r.dropped_ms = (obs.dropped_ns - at.2) as f64 / 1e6;
     r.gap_ms = (obs.gap_ns - at.3) as f64 / 1e6;
     r.pendings = obs.pendings - at.4;
+    let at = losses_at_follow.unwrap_or((obs.overwritten_ns, obs.dropped_ns, obs.gap_ns));
+    r.follow_overwritten_ms = (obs.overwritten_ns - at.0) as f64 / 1e6;
+    r.follow_dropped_ms = (obs.dropped_ns - at.1) as f64 / 1e6;
+    r.follow_gap_ms = (obs.gap_ns - at.2) as f64 / 1e6;
     (r, trace)
 }
 

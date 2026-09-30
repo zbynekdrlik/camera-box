@@ -95,6 +95,8 @@ struct obs_source {
 	uint32_t genlock_audio_relabels;
 	bool genlock_audio_step_relabel_pending;
 	uint64_t genlock_audio_step_prev_arrival_ns;
+	int64_t genlock_audio_step_unmatched_ns;
+	uint64_t genlock_audio_step_unmatched_at_ns;
 	bool genlock_audio_step_active;
 	int64_t genlock_audio_step_prev_off_ns;
 	uint64_t genlock_audio_step_prev_raw_ns;
@@ -577,6 +579,36 @@ int main(void)
 	}
 	h_late += 5000000 + 32666733 - 33333333;
 	for (int i = 0; i < 400; i++) {
+		const struct h_out o = h_packet();
+		if (o.pending || o.release || o.relabel) {
+			h_print("FALSE-PENDING", o);
+			break;
+		}
+	}
+	/* ROZHODNUTE 5903945145 (slice-3 review round 2): this box steps first by 34 ms, one slot + 0.7 ms.
+	 * Its packets alternate 0 / 2 ms early (arrival jitter), so the skew hold releases EARLY on the age
+	 * test (placed: the skew hold's known limit) and the in-band nominal tracks the unmatched step for
+	 * 60 s. The sender's late one-slot relabel (the - 66 ns grid position) then brings the age back
+	 * toward the pre-step nominal: the remembered step's follow, never a pending relabel */
+	h_reset("late_follow_34ms_jittered");
+	h_steady(40);
+	h_off -= 34000000;
+	h_print("step", h_packet());
+	h_late = 2000000;
+	h_print("early", h_packet());
+	for (int i = 0; i < 1800; i++) {
+		h_late = (i % 2) ? 2000000u : 0u;
+		const struct h_out o = h_packet();
+		if (o.pending || o.release || o.relabel) {
+			h_print("UNEXPECTED", o);
+			break;
+		}
+	}
+	h_late = 0;
+	h_shift += 33333267;
+	h_print("follow", h_packet());
+	for (int i = 0; i < 400; i++) {
+		h_late = (i % 2) ? 0u : 2000000u;
 		const struct h_out o = h_packet();
 		if (o.pending || o.release || o.relabel) {
 			h_print("FALSE-PENDING", o);
