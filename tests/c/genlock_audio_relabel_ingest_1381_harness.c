@@ -95,6 +95,8 @@ struct obs_source {
 	uint32_t genlock_audio_relabels;
 	bool genlock_audio_step_relabel_pending;
 	uint64_t genlock_audio_step_prev_arrival_ns;
+	int64_t genlock_audio_step_unmatched_ns;
+	uint64_t genlock_audio_step_unmatched_at_ns;
 	bool genlock_audio_step_active;
 	int64_t genlock_audio_step_prev_off_ns;
 	uint64_t genlock_audio_step_prev_raw_ns;
@@ -426,6 +428,193 @@ int main(void)
 	}
 	if (!h_released)
 		printf("NO-RELEASE within 400 packets\n");
+	/* slice 3 (design 5902870861, ROZHODNUTE 5902983227): the sender's box steps first by ONE slot. On its
+	 * 100 ns grid the stamps jump one packet - 66 ns (the grid position slice 2 missed) or one packet
+	 * + 34 ns, with continuous arrival: a pending relabel, resolved by this box's own step of -(one slot
+	 * + r) 15 packets later */
+	static const struct {
+		const char *name;
+		int64_t step_ns;
+		int64_t jump_ns;
+	} one_slot[] = {
+		{"pending_one_slot_40ms", 40000000, 33333267},
+		{"pending_one_slot_60ms", 60000000, 33333367},
+	};
+	for (size_t j = 0; j < sizeof(one_slot) / sizeof(one_slot[0]); j++) {
+		h_reset(one_slot[j].name);
+		h_steady(40);
+		h_shift += one_slot[j].jump_ns;
+		h_late += (uint64_t)(one_slot[j].step_ns - one_slot[j].jump_ns);
+		h_print("start", h_packet());
+		for (int i = 0; i < 15; i++) {
+			const struct h_out o = h_packet();
+			if (o.relabel || o.pending || !o.push_back || o.release || o.logged || o.book_ns)
+				h_print("PENDING-BROKEN", o);
+		}
+		h_off -= one_slot[j].step_ns;
+		h_print("resolve", h_packet());
+		h_print("after", h_packet());
+		h_steady(5);
+	}
+	/* a one-slot pending relabel this box never follows: released at the 10 s bound, its residual J within
+	 * one packet (the release does not place it; the timecode ASRC books it, outside this branch) */
+	h_reset("pending_one_slot_timeout");
+	h_steady(40);
+	h_shift += 33333267;
+	h_late += 6666733;
+	h_print("start", h_packet());
+	h_released = false;
+	for (int i = 0; i < 400 && !h_released; i++) {
+		const struct h_out o = h_packet();
+		if (o.release) {
+			h_print("timeout", o);
+			h_released = true;
+		}
+	}
+	if (!h_released)
+		printf("NO-RELEASE within 400 packets\n");
+	/* a skipped slot on the same grid position: the stamps jump one packet - 66 ns like an N = +1 relabel,
+	 * but the arrival gaps one packet -- the stock path, as in slice 2 (never a pending relabel) */
+	h_reset("skip_slot_one_slot");
+	h_steady(40);
+	h_k++;
+	h_shift -= 66;
+	h_print("skip", h_packet());
+	h_print("after", h_packet());
+	/* an N = -1 relabel (the sender's box steps back 10 ms first): its stamps repeat one packet, exactly a
+	 * duplicated slot, with continuous arrival (the emit re-phased r = 23.3 ms earlier) -- the stock path,
+	 * as in slice 2; this box's own step 15 packets later starts no hold (10 ms, under one packet) */
+	h_reset("n_minus_one_10ms");
+	h_steady(40);
+	h_shift -= (int64_t)H_PACKET_NS;
+	h_late += 23333333;
+	h_print("start", h_packet());
+	for (int i = 0; i < 15; i++) {
+		const struct h_out o = h_packet();
+		if (o.relabel || o.pending || !o.push_back || o.release || o.logged || o.book_ns)
+			h_print("N-MINUS-ONE-BROKEN", o);
+	}
+	h_off += 10000000;
+	h_print("step", h_packet());
+	h_print("after", h_packet());
+	/* slice 3 review round 1: a skipped slot at the - 66 ns grid position INSIDE a one-slot pending (its
+	 * arrival one packet late): the stock path for that packet, the held offset kept, so this box's own step
+	 * still resolves the pending with -r */
+	h_reset("pending_skip_one_slot_40ms");
+	h_steady(40);
+	h_shift += 33333267;
+	h_late += 6666733;
+	h_print("start", h_packet());
+	for (int i = 0; i < 5; i++) {
+		const struct h_out o = h_packet();
+		if (o.relabel || o.pending || !o.push_back || o.release || o.logged || o.book_ns)
+			h_print("PENDING-BROKEN", o);
+	}
+	h_k++;
+	h_shift -= 66;
+	h_print("skip", h_packet());
+	for (int i = 0; i < 5; i++) {
+		const struct h_out o = h_packet();
+		if (o.relabel || o.pending || !o.push_back || o.release || o.logged || o.book_ns)
+			h_print("PENDING-BROKEN", o);
+	}
+	h_off -= 40000000;
+	h_print("resolve", h_packet());
+	h_print("after", h_packet());
+	/* slice 3 review round 1: this box steps first by 60 ms and its hold times out; the sender relabels one
+	 * slot only after that (its first relabelled block not re-phased yet, r = 26.7 ms): a late follow, never
+	 * a pending relabel -- nothing starts, nothing is released again */
+	h_reset("late_follow_one_slot_60ms");
+	h_steady(40);
+	h_off -= 60000000;
+	h_print("step", h_packet());
+	h_released = false;
+	for (int i = 0; i < 400 && !h_released; i++) {
+		const struct h_out o = h_packet();
+		if (o.release) {
+			h_print("timeout", o);
+			h_released = true;
+		}
+	}
+	if (!h_released)
+		printf("NO-RELEASE within 400 packets\n");
+	h_shift += H_SLOT(1);
+	h_print("follow", h_packet());
+	h_late += 26666667;
+	for (int i = 0; i < 400; i++) {
+		const struct h_out o = h_packet();
+		if (o.pending || o.release || o.relabel) {
+			h_print("FALSE-PENDING", o);
+			break;
+		}
+	}
+	/* slice 3 review round 2: the same late follow, 66 ms at the - 66 ns grid position, its first relabelled
+	 * block 5 ms late (every packet before it 5 ms early): r + 5 ms passes one packet, which slice 2 read as
+	 * away -- still a follow, never a pending relabel */
+	h_reset("late_follow_one_slot_66ms_late_block");
+	h_late = 5000000;
+	h_steady(40);
+	h_off -= 66000000;
+	h_print("step", h_packet());
+	h_released = false;
+	for (int i = 0; i < 400 && !h_released; i++) {
+		const struct h_out o = h_packet();
+		if (o.release) {
+			h_print("timeout", o);
+			h_released = true;
+		}
+	}
+	if (!h_released)
+		printf("NO-RELEASE within 400 packets\n");
+	h_shift += 33333267;
+	h_late -= 5000000;
+	h_print("follow", h_packet());
+	/* the sender re-phases its emit r = 32.67 ms earlier; the next block, emitted 0.67 ms after the late one,
+	 * arrives in order right behind it (an arrival gap of 0), the rest on the re-phased schedule */
+	h_late += 33333333;
+	{
+		const struct h_out o = h_packet();
+		if (o.pending || o.release || o.relabel)
+			h_print("FALSE-PENDING", o);
+	}
+	h_late += 5000000 + 32666733 - 33333333;
+	for (int i = 0; i < 400; i++) {
+		const struct h_out o = h_packet();
+		if (o.pending || o.release || o.relabel) {
+			h_print("FALSE-PENDING", o);
+			break;
+		}
+	}
+	/* ROZHODNUTE 5903945145 (slice-3 review round 2): this box steps first by 34 ms, one slot + 0.7 ms.
+	 * Its packets alternate 0 / 2 ms early (arrival jitter), so the skew hold releases EARLY on the age
+	 * test (placed: the skew hold's known limit) and the in-band nominal tracks the unmatched step for
+	 * 60 s. The sender's late one-slot relabel (the - 66 ns grid position) then brings the age back
+	 * toward the pre-step nominal: the remembered step's follow, never a pending relabel */
+	h_reset("late_follow_34ms_jittered");
+	h_steady(40);
+	h_off -= 34000000;
+	h_print("step", h_packet());
+	h_late = 2000000;
+	h_print("early", h_packet());
+	for (int i = 0; i < 1800; i++) {
+		h_late = (i % 2) ? 2000000u : 0u;
+		const struct h_out o = h_packet();
+		if (o.pending || o.release || o.relabel) {
+			h_print("UNEXPECTED", o);
+			break;
+		}
+	}
+	h_late = 0;
+	h_shift += 33333267;
+	h_print("follow", h_packet());
+	for (int i = 0; i < 400; i++) {
+		h_late = (i % 2) ? 0u : 2000000u;
+		const struct h_out o = h_packet();
+		if (o.pending || o.release || o.relabel) {
+			h_print("FALSE-PENDING", o);
+			break;
+		}
+	}
 	printf("debug_lines=%d\n", h_debug_lines);
 	return 0;
 }

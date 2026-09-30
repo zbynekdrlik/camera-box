@@ -127,11 +127,10 @@ fn a_stamp_only_jump_of_more_than_one_packet_with_continuous_arrival_is_a_pendin
     // the arrival bound: one packet plus the jitter budget, inclusive
     assert!(audio_relabel_pending(666_666_666, p + j, p, MIN));
     assert!(!audio_relabel_pending(666_666_666, p + j + 1, p, MIN));
-    // one packet or less is a skipped / duplicated slot (a dup resends the same stamp a few ms
-    // later) or a raw-clock sender's submission jitter: the timecode ASRC books those, as today
+    // under one packet, or one packet BACK, is a duplicated slot (a dup resends the same stamp a few
+    // ms later) or a raw-clock sender's submission jitter: the timecode ASRC books those, as today
     for (jump, gap) in [
         (-(p as i64), 3_000_000),
-        (p as i64, p),
         (3_000_000, p),
         (-10_000_000, p),
         (MIN + 1, p),
@@ -141,6 +140,9 @@ fn a_stamp_only_jump_of_more_than_one_packet_with_continuous_arrival_is_a_pendin
             "issue 1381: jump {jump} gap {gap} must keep today's path"
         );
     }
+    // ROZHODNUTÉ 5902983227 (slice 3) reverses slice 2 here: a FORWARD jump of exactly one packet
+    // with continuous arrival is a one-slot sender-first step (N = +1), a pending relabel
+    assert!(audio_relabel_pending(p as i64, p, p, MIN));
     assert!(audio_relabel_pending(p as i64 + 1, p, p, MIN));
     assert!(audio_relabel_pending(-(p as i64) - 1, 0, p, MIN));
     // a pause, a restart and the 1367 stamp leap (a missing slot + 47 ms): the arrival gap shows it
@@ -650,3 +652,7 @@ fn the_pending_release_has_its_own_token_and_never_places_1381() {
     }
     assert_eq!(AUDIO_RELABEL_ARRIVAL_JITTER_NS, 15_000_000);
 }
+
+/// Slice 3 (design 5902870861, ROZHODNUTÉ 5902983227): a sender-first step of ONE slot (N = +1).
+#[path = "genlock_audio_pairing_pending_slice3_tests.rs"]
+mod slice3;

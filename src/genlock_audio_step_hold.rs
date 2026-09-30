@@ -40,6 +40,13 @@ pub const AUDIO_STEP_NOMINAL_WARM_DIV: i64 = 4;
 /// `GENLOCK_AUDIO_RELABEL_ARRIVAL_JITTER_NS`.
 pub const AUDIO_RELABEL_ARRIVAL_JITTER_NS: u64 = 15_000_000;
 
+/// Issue 1381 (design 5902870861, ROZHODNUTÉ 5902983227) — how far under one packet a FORWARD
+/// pending relabel's stamp jump may be: one NDI timecode unit. A sender stamps in 100 ns units, so
+/// its 30 fps slots are 33 333 300 / 33 333 300 / 33 333 400 ns, and a one-slot relabel (N = +1)
+/// jumps one packet − 66 ns or one packet + 34 ns depending on its grid position (at 60 fps, one
+/// packet − 32 ns or + 68 ns). Mirror of `GENLOCK_AUDIO_RELABEL_FORWARD_TOLERANCE_NS`.
+pub const AUDIO_RELABEL_FORWARD_TOLERANCE_NS: u64 = 100;
+
 /// Issue 1381 — why a skew hold ended on this packet (0 = it did not). Discriminants match the C
 /// `GENLOCK_AUDIO_STEP_*` defines and the log line's `released=` token.
 #[repr(u8)]
@@ -113,6 +120,16 @@ pub struct AudioStepHold {
     /// Design 5901213031: the previous timecode packet's arrival (OBS monotonic), for the arrival
     /// gap [`audio_relabel_pending`] reads.
     pub prev_arrival_ns: u64,
+    /// ROZHODNUTÉ 5903945145 (slice-3 review round 2): the part of this box's last wall step the
+    /// source's stamps never matched -- the residual (`off_live − held`) of a skew hold that ended
+    /// without the stamps jumping: the age release, the zero-length release or the timeout. 0 = none.
+    /// A stamp move that FOLLOWS it within [`AUDIO_STEP_NOMINAL_REANCHOR_NS`] is never a pending
+    /// relabel ([`audio_step_unmatched_follow`]); a relabel-shaped follow ([`audio_relabel_pending`])
+    /// clears it, a sub-slot move keeps it. One step is remembered: a later unmatched step replaces
+    /// it.
+    pub unmatched_ns: i64,
+    /// When `unmatched_ns` was remembered (OBS monotonic).
+    pub unmatched_at_ns: u64,
 }
 
 /// Issue 1381 — how old a packet's stamp is on the live wall when it arrives, ns: `now − (raw +
@@ -161,12 +178,20 @@ pub fn audio_stamp_age_ns(now_ns: u64, raw_ts_ns: u64, off_live_ns: i64) -> i64 
 /// `RelabelPending` on the packet whose live offset jumps (over `step_min_ns`) to within one packet of
 /// the held offset: this box's own step followed, the landing moved by the remainder only. Otherwise
 /// `Timeout` after [`AUDIO_STEP_HOLD_MAX_NS`] (J applied once), or `Reset`. The ordinary follow and
-/// age releases do not apply to it. A stamp move under one packet folds into its held offset like
+/// age releases do not apply to it. A stamp move under one slot folds into its held offset like
 /// the skew hold's (review round 2: a raw-clock sender's late step packet comes back on the next
-/// one); a move of one packet or more only when it is relabel-shaped ([`audio_relabel_pending`]:
-/// continuous arrival) -- a pause, a duplicated or a skipped slot keeps it, so this box's own step
+/// one); a move of a slot or more -- forward from one packet − 100 ns, backward from one packet
+/// (slice 3) -- only when it is relabel-shaped ([`audio_relabel_pending`]: continuous arrival). A
+/// pause, a duplicated or a skipped slot keeps it on every grid position, so this box's own step
 /// still resolves the pending (review round 1: folded, a 500 ms pause left it to the bound and
 /// placed 484 ms).
+///
+/// **The unmatched step (ROZHODNUTÉ 5903945145).** A skew hold that ends without the stamps jumping
+/// -- the age release, the zero-length release, the timeout -- remembers what they never matched
+/// ([`AudioStepHold::unmatched_ns`], when over one packet). A relabel-shaped stamp jump that follows
+/// it ([`audio_step_unmatched_follow`]) clears it and never starts a pending relabel; `timecode` false
+/// forgets it. A pending relabel's timeout (the SENDER's step, unmatched) is not remembered: its
+/// counterpart is this box's own offset jump, which never starts a pending.
 ///
 /// Every arithmetic wraps in two's complement, like the C mirror `genlock_audio_step_hold`.
 #[allow(clippy::too_many_arguments)]
@@ -184,6 +209,7 @@ pub fn audio_step_hold(
         let was = s.active;
         s.active = false;
         s.prev_packet_ns = 0;
+        s.unmatched_ns = 0;
         let release = if was {
             AudioStepRelease::Reset
         } else {
@@ -215,6 +241,13 @@ pub fn audio_step_hold(
     };
     let age_ns = audio_stamp_age_ns(now_ns, raw_ts_ns, off_live_ns);
     let arrival_gap_ns = now_ns.wrapping_sub(s.prev_arrival_ns);
+    // ROZHODNUTÉ 5903945145: the remembered step's follow has come (never a pending: see the start)
+    if had_prev
+        && audio_relabel_pending(dev_ns, arrival_gap_ns, packet_ns, step_min_ns)
+        && audio_step_unmatched_follow(s, dev_ns, packet_ns, now_ns)
+    {
+        s.unmatched_ns = 0;
+    }
     let prev_off_ns = s.prev_off_ns;
     s.prev_off_ns = off_live_ns;
     s.prev_raw_ns = raw_ts_ns;
@@ -243,6 +276,12 @@ pub fn audio_step_hold(
                 s.relabel_pending = false;
                 if off_nominal {
                     // the stamps got there first: a zero-length hold, released on its own packet
+                    audio_step_remember_unmatched(
+                        s,
+                        off_live_ns.wrapping_sub(held_ns),
+                        packet_ns,
+                        now_ns,
+                    );
                     audio_step_track_nominal(s, age_ns, packet_ns, now_ns);
                     return (off_live_ns, AudioStepRelease::Followed);
                 }
@@ -267,10 +306,17 @@ pub fn audio_step_hold(
         s.active = false;
         return (off_live_ns, AudioStepRelease::Reset);
     }
-    // inside a pending relabel a move under one packet folds like the skew hold's (review round 2: a
-    // raw-clock sender's late stamp comes back on the next packet); a move of one packet or more only
-    // when it is relabel-shaped (review round 1: a pause, a duplicated or a skipped slot keeps it)
-    let fold_ns = if !s.relabel_pending || dev_ns.unsigned_abs() < packet_ns {
+    // inside a pending relabel a move under one slot folds like the skew hold's (review round 2: a
+    // raw-clock sender's late stamp comes back on the next packet); a move of a slot or more only
+    // when it is relabel-shaped (review round 1: a pause, a duplicated or a skipped slot keeps it).
+    // Slice 3 (review round 1): forward, a slot starts one NDI unit under one packet, like the pending
+    // bound -- a skipped slot at the − 66 ns grid position is a slot, not a sub-packet move
+    let under_slot = if dev_ns > 0 {
+        dev_ns.unsigned_abs() < audio_relabel_forward_slot_ns(packet_ns)
+    } else {
+        dev_ns.unsigned_abs() < packet_ns
+    };
+    let fold_ns = if !s.relabel_pending || under_slot {
         followed
     } else if audio_relabel_pending(dev_ns, arrival_gap_ns, packet_ns, step_min_ns) {
         dev_ns
@@ -287,10 +333,24 @@ pub fn audio_step_hold(
         }
     } else if off_live_ns.wrapping_sub(s.held_off_ns).unsigned_abs() <= packet_ns || off_nominal {
         s.active = false;
+        audio_step_remember_unmatched(
+            s,
+            off_live_ns.wrapping_sub(s.held_off_ns),
+            packet_ns,
+            now_ns,
+        );
         return (off_live_ns, AudioStepRelease::Followed);
     }
     if now_ns.wrapping_sub(s.start_ns) >= AUDIO_STEP_HOLD_MAX_NS {
         s.active = false;
+        if !s.relabel_pending {
+            audio_step_remember_unmatched(
+                s,
+                off_live_ns.wrapping_sub(s.held_off_ns),
+                packet_ns,
+                now_ns,
+            );
+        }
         return (off_live_ns, AudioStepRelease::Timeout);
     }
     (s.held_off_ns, AudioStepRelease::None)
@@ -357,18 +417,34 @@ pub fn audio_step_relabel_jumps(
     Some((stamp_jump_ns, off_live_ns.wrapping_sub(mapped_ns)))
 }
 
+/// Issue 1381 (design 5902870861, ROZHODNUTÉ 5902983227) — the smallest FORWARD stamp jump that is a
+/// whole slot: one packet minus [`AUDIO_RELABEL_FORWARD_TOLERANCE_NS`] (saturating). The pending
+/// bound ([`audio_relabel_pending`]) and the fold rule inside a pending ([`audio_step_hold`]) both
+/// read it. Mirror of `genlock_audio_relabel_forward_slot_ns`.
+fn audio_relabel_forward_slot_ns(packet_ns: u64) -> u64 {
+    packet_ns.saturating_sub(AUDIO_RELABEL_FORWARD_TOLERANCE_NS)
+}
+
 /// Issue 1381 (design 5901213031) — is a STAMP-ONLY jump a pending relabel: did the sender's wall step
 /// while this box's has not yet?
 ///
 /// - `stamp_jump_ns`: the raw stamp against the continuous timeline (J);
 /// - `arrival_gap_ns`: this packet's arrival minus the previous packet's (OBS monotonic).
 ///
-/// True when the stamps jumped by more than `step_min_ns` AND by more than one packet (a relabel moves
-/// them N whole slots; a stamp move of one packet or less is a skipped or duplicated sender slot, or
-/// the jitter of a sender that stamps its raw submission clock -- the paths the timecode ASRC already
-/// books), and the packet arrived within one packet plus [`AUDIO_RELABEL_ARRIVAL_JITTER_NS`] of the
-/// previous one: a relabelling sender re-phases its emit earlier, never later, while a pause or a
-/// restart shows the gap its stamps jumped by. Mirror of `genlock_audio_relabel_pending`.
+/// True when the stamps jumped by more than `step_min_ns` AND by a whole slot or more, and the packet
+/// arrived within one packet plus [`AUDIO_RELABEL_ARRIVAL_JITTER_NS`] of the previous one: a
+/// relabelling sender re-phases its emit earlier, never later, while a pause, a restart or a skipped
+/// slot shows the gap its stamps jumped by.
+///
+/// The slot size is asymmetric (design 5902870861, ROZHODNUTÉ 5902983227):
+/// - **forward**, at least one packet minus [`AUDIO_RELABEL_FORWARD_TOLERANCE_NS`] (one NDI timecode
+///   unit): a one-slot relabel (N = +1) jumps one packet − 66 ns .. + 34 ns on the sender's 100 ns
+///   grid. A skipped slot jumps the same, and is kept out by its arrival gap;
+/// - **backward**, MORE than one packet: exactly one packet back is a duplicated slot (the same stamp
+///   resent a few ms later), which an N = −1 relabel is byte-identical to (a documented limit), and
+///   under that is a raw-clock sender's submission jitter -- the paths the timecode ASRC books.
+///
+/// Mirror of `genlock_audio_relabel_pending`.
 pub fn audio_relabel_pending(
     stamp_jump_ns: i64,
     arrival_gap_ns: u64,
@@ -376,8 +452,13 @@ pub fn audio_relabel_pending(
     step_min_ns: i64,
 ) -> bool {
     let jump = stamp_jump_ns.unsigned_abs();
+    let whole_slot = if stamp_jump_ns > 0 {
+        jump >= audio_relabel_forward_slot_ns(packet_ns)
+    } else {
+        jump > packet_ns
+    };
     jump > step_min_ns.unsigned_abs()
-        && jump > packet_ns
+        && whole_slot
         && arrival_gap_ns <= packet_ns.saturating_add(AUDIO_RELABEL_ARRIVAL_JITTER_NS)
 }
 
@@ -387,10 +468,25 @@ pub fn audio_relabel_pending(
 ///
 /// Outside a hold, in timecode mode, with a previous timecode packet: this box's live offset moved by
 /// at most `step_min_ns` (no receiver step on this packet -- that is the skew hold or a joint relabel),
-/// the stamps jumped AWAY from this box's wall (their live-wall age leaves the one-packet band around
-/// the nominal age; a jump that brings the age back is a late follow after an early age release,
-/// today's path) and [`audio_relabel_pending`] holds for the stamp jump and the arrival gap. Mirror of
-/// `genlock_audio_step_relabel_pending_starts`.
+/// the stamps jumped AWAY from this box's wall and [`audio_relabel_pending`] holds for the stamp jump
+/// and the arrival gap.
+///
+/// "Away" is the stamps' live-wall age against the nominal age:
+/// - over one packet plus [`AUDIO_RELABEL_ARRIVAL_JITTER_NS`] off: away;
+/// - over HALF a packet off (design 5902870861: a one-slot step's age sits about one slot off, so the
+///   packet's arrival jitter must not decide it) AND further off than the previous packet's age
+///   (slice-3 review round 1). A jump that brings the age back is a late follow -- after an early age
+///   release, or after a timed-out hold whose sender relabels later, which lands r off (r = S − N·slot,
+///   under one slot) on its first relabelled block, plus that block's arrival lateness (at most the
+///   budget) -- and keeps today's path. Slice 2 read every age over one packet as away, so a late
+///   follow whose r sat within the arrival budget of a slot started a false pending too.
+///
+/// The age reads against a nominal that MOVES: after an early age release (arrival jitter on a step
+/// just over one slot) the in-band nominal tracks the step the stamps never matched, and a late
+/// follow then reads as away. So a jump that follows the REMEMBERED unmatched step
+/// ([`audio_step_unmatched_follow`], ROZHODNUTÉ 5903945145) never starts one either.
+///
+/// Mirror of `genlock_audio_step_relabel_pending_starts`.
 pub fn audio_step_relabel_pending_starts(
     s: &AudioStepHold,
     timecode: bool,
@@ -406,14 +502,62 @@ pub fn audio_step_relabel_pending_starts(
     let stamp_jump_ns = raw_ts_ns.wrapping_sub(s.prev_raw_ns.wrapping_add(s.prev_packet_ns)) as i64;
     let age_dev_ns =
         audio_stamp_age_ns(now_ns, raw_ts_ns, off_live_ns).wrapping_sub(s.nominal_age_ns);
+    let prev_age_dev_ns = audio_stamp_age_ns(s.prev_arrival_ns, s.prev_raw_ns, s.prev_off_ns)
+        .wrapping_sub(s.nominal_age_ns);
+    let away = age_dev_ns.unsigned_abs();
     off_live_ns.wrapping_sub(s.prev_off_ns).unsigned_abs() <= step_min_ns.unsigned_abs()
-        && age_dev_ns.unsigned_abs() > packet_ns
+        && away > packet_ns / 2
+        && (away > packet_ns.saturating_add(AUDIO_RELABEL_ARRIVAL_JITTER_NS)
+            || away > prev_age_dev_ns.unsigned_abs())
         && audio_relabel_pending(
             stamp_jump_ns,
             now_ns.wrapping_sub(s.prev_arrival_ns),
             packet_ns,
             step_min_ns,
         )
+        && !audio_step_unmatched_follow(s, stamp_jump_ns, packet_ns, now_ns)
+}
+
+/// ROZHODNUTÉ 5903945145 (slice-3 review round 2) — is this stamp jump the FOLLOW of the step this
+/// box made that the stamps never matched ([`AudioStepHold::unmatched_ns`])? Remembered for
+/// [`AUDIO_STEP_NOMINAL_REANCHOR_NS`] (by then the nominal has re-anchored to the unmatched step
+/// anyway): a stamp jump of the opposite sign to the remembered offset move (the same direction as
+/// the wall step), within one packet plus [`AUDIO_RELABEL_ARRIVAL_JITTER_NS`] of its size. Such a
+/// jump is the late counterpart of that step, never a new pending relabel.
+///
+/// Why it is needed: under a few ms of arrival jitter a step just over one slot releases the skew
+/// hold EARLY on the age test, and the in-band nominal then tracks the unmatched step, so the away
+/// guard alone read the sender's late relabel as a sender-first step -- backward (N = −2 overshoots
+/// the nominal) and forward with a lag of 60 s or more (review round 2).
+///
+/// Mirror of `genlock_audio_step_unmatched_follow`.
+pub fn audio_step_unmatched_follow(
+    s: &AudioStepHold,
+    stamp_jump_ns: i64,
+    packet_ns: u64,
+    now_ns: u64,
+) -> bool {
+    s.unmatched_ns != 0
+        && now_ns.wrapping_sub(s.unmatched_at_ns) < AUDIO_STEP_NOMINAL_REANCHOR_NS
+        && stamp_jump_ns != 0
+        && (stamp_jump_ns > 0) == (s.unmatched_ns < 0)
+        && stamp_jump_ns.wrapping_add(s.unmatched_ns).unsigned_abs()
+            <= packet_ns.saturating_add(AUDIO_RELABEL_ARRIVAL_JITTER_NS)
+}
+
+/// ROZHODNUTÉ 5903945145 — a skew hold ended without the stamps matching its step (the age
+/// release, the zero-length release, the timeout): remember what they never matched, when it is
+/// over one packet. Mirror of `genlock_audio_step_remember_unmatched`.
+fn audio_step_remember_unmatched(
+    s: &mut AudioStepHold,
+    residual_ns: i64,
+    packet_ns: u64,
+    now_ns: u64,
+) {
+    if residual_ns.unsigned_abs() > packet_ns {
+        s.unmatched_ns = residual_ns;
+        s.unmatched_at_ns = now_ns;
+    }
 }
 
 /// Issue 1381 (design 5901213031, ROZHODNUTÉ on finding 5900705310) — what a relabel adds to the
@@ -474,19 +618,27 @@ pub fn audio_step_residual_ns(held_off_ns: i64, off_live_ns: i64) -> i64 {
 }
 
 /// Issue 1381 — does this packet's release PLACE it (apply the new offset once) instead of
-/// appending? When the move it applies is over one packet: a `Timeout` (of a hold, or of a pending
-/// relabel: J applied once), or a `Followed` sender that caught up without jumping its stamps. A
-/// jumped follow (within one packet) appends or books as usual, a `RelabelPending` release is within
-/// one packet by construction (its remainder is slewed, [`audio_relabel_book_ns`]), and a `Reset`
-/// packet is placed by the ingest's own timeline reset. Never a W-second payment at 1000 ppm for a
-/// step. Mirror of `genlock_audio_step_release_places`.
+/// appending? A `Timeout` places a move of ONE SLOT or more (forward from one packet − 100 ns, the
+/// pending bound's slot, either sign): a hold's timeout is over one packet by construction (the
+/// follow test runs first on the same packet), a never-followed pending's is its stamp jump J -- one
+/// slot on every grid position, also J = one packet − 66 ns (ROZHODNUTÉ 5903945145 point 2: the boxes
+/// really disagree about the date, the stamps win). A relabel-shaped jump inside a pending folds, so a
+/// pending's timeout move can also be under one slot (review round 3); that is booked like any
+/// sub-slot move. A `Followed` places when its move is over one packet (a sender that caught up
+/// without jumping its stamps); a jumped follow (within one packet) appends or books as usual, a
+/// `RelabelPending` release is within one packet by construction (its remainder is slewed,
+/// [`audio_relabel_book_ns`]), and a `Reset` packet is placed by the ingest's own timeline reset.
+/// Never a W-second payment at 1000 ppm for a step. Mirror of `genlock_audio_step_release_places`.
 pub fn audio_step_release_places(
     release: AudioStepRelease,
     residual_ns: i64,
     packet_ns: u64,
 ) -> bool {
-    matches!(
-        release,
-        AudioStepRelease::Followed | AudioStepRelease::Timeout
-    ) && residual_ns.unsigned_abs() > packet_ns
+    match release {
+        AudioStepRelease::Timeout => {
+            residual_ns.unsigned_abs() >= audio_relabel_forward_slot_ns(packet_ns)
+        }
+        AudioStepRelease::Followed => residual_ns.unsigned_abs() > packet_ns,
+        _ => false,
+    }
 }

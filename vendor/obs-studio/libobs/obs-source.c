@@ -2013,6 +2013,10 @@ static inline double genlock_audio_stamp_interval_s(uint64_t prev_ns, uint64_t n
 /* design 5901213031: the arrival jitter a pending relabel's packet may add to one packet duration (the
  * measured 15 ms arrival jitter budget, ROZHODNUTE 5842640404). Mirror of AUDIO_RELABEL_ARRIVAL_JITTER_NS. */
 #define GENLOCK_AUDIO_RELABEL_ARRIVAL_JITTER_NS 15000000ULL
+/* design 5902870861 (ROZHODNUTE 5902983227): how far under one packet a FORWARD pending relabel's stamp jump
+ * may be -- one NDI timecode unit (a one-slot relabel jumps one packet - 66 ns .. + 34 ns on the sender's
+ * 100 ns grid). Mirror of AUDIO_RELABEL_FORWARD_TOLERANCE_NS. */
+#define GENLOCK_AUDIO_RELABEL_FORWARD_TOLERANCE_NS 100ULL
 /* the log line's released= value */
 static inline const char *genlock_audio_step_release_token(int release)
 {
@@ -2061,12 +2065,23 @@ static inline void genlock_audio_step_track_nominal(int64_t *nominal_age_ns, uin
 		*nominal_dev_since_ns = 0;
 	}
 }
+/* design 5902870861 (ROZHODNUTE 5902983227): the smallest FORWARD stamp jump that is a whole slot -- one packet
+ * minus GENLOCK_AUDIO_RELABEL_FORWARD_TOLERANCE_NS, saturating. The pending bound and the fold rule inside a
+ * pending both read it. Mirror of audio_relabel_forward_slot_ns. */
+static inline uint64_t genlock_audio_relabel_forward_slot_ns(uint64_t packet_ns)
+{
+	return packet_ns > GENLOCK_AUDIO_RELABEL_FORWARD_TOLERANCE_NS
+		       ? packet_ns - GENLOCK_AUDIO_RELABEL_FORWARD_TOLERANCE_NS
+		       : 0;
+}
 /* camera-box issue 1381 (design 5901213031): is a STAMP-ONLY jump a PENDING relabel -- did the sender's
- * wall step while this box's has not yet? The stamps jumped by more than step_min AND by more than one
- * packet (a relabel moves them N whole slots; one packet or less is a skipped / duplicated sender slot or
- * a raw-clock sender's submission jitter, the paths the timecode ASRC books), and the packet arrived
- * within one packet + GENLOCK_AUDIO_RELABEL_ARRIVAL_JITTER_NS of the previous one (a relabelling sender
- * re-phases its emit earlier; a pause or a restart shows the gap its stamps jumped by). Mirror of
+ * wall step while this box's has not yet? The stamps jumped by more than step_min AND by a whole slot or
+ * more, and the packet arrived within one packet + GENLOCK_AUDIO_RELABEL_ARRIVAL_JITTER_NS of the previous
+ * one (a relabelling sender re-phases its emit earlier; a pause, a restart or a skipped slot shows the gap
+ * its stamps jumped by). Design 5902870861 (ROZHODNUTE 5902983227): the slot is asymmetric -- FORWARD at
+ * least one packet - GENLOCK_AUDIO_RELABEL_FORWARD_TOLERANCE_NS (a one-slot relabel, N = +1, on the
+ * sender's 100 ns grid), BACKWARD more than one packet (one packet back is a duplicated slot, which an
+ * N = -1 relabel is byte-identical to; less is a raw-clock sender's submission jitter). Mirror of
  * src/genlock_audio_pairing.rs audio_relabel_pending. */
 static inline bool genlock_audio_relabel_pending(int64_t stamp_jump_ns, uint64_t arrival_gap_ns, uint64_t packet_ns,
 						 int64_t step_min_ns)
@@ -2075,17 +2090,52 @@ static inline bool genlock_audio_relabel_pending(int64_t stamp_jump_ns, uint64_t
 	const uint64_t bound = packet_ns > UINT64_MAX - GENLOCK_AUDIO_RELABEL_ARRIVAL_JITTER_NS
 				       ? UINT64_MAX
 				       : packet_ns + GENLOCK_AUDIO_RELABEL_ARRIVAL_JITTER_NS;
-	return jump > genlock_audio_step_mag_ns(step_min_ns) && jump > packet_ns && arrival_gap_ns <= bound;
+	const bool whole_slot = stamp_jump_ns > 0 ? jump >= genlock_audio_relabel_forward_slot_ns(packet_ns)
+						  : jump > packet_ns;
+	return jump > genlock_audio_step_mag_ns(step_min_ns) && whole_slot && arrival_gap_ns <= bound;
+}
+/* ROZHODNUTE 5903945145 (slice-3 review round 2): is this stamp jump the FOLLOW of the step this box made that
+ * the stamps never matched (unmatched_ns, 0 = none)? Remembered for GENLOCK_AUDIO_STEP_NOMINAL_REANCHOR_NS (by
+ * then the nominal has re-anchored to it anyway): a jump of the opposite sign to the remembered offset move
+ * (the wall step's direction), within one packet + GENLOCK_AUDIO_RELABEL_ARRIVAL_JITTER_NS of its size -- the
+ * step's late counterpart, never a new pending relabel. Mirror of audio_step_unmatched_follow. */
+static inline bool genlock_audio_step_unmatched_follow(int64_t unmatched_ns, uint64_t unmatched_at_ns,
+						       int64_t stamp_jump_ns, uint64_t packet_ns, uint64_t now_ns)
+{
+	const uint64_t window_ns = packet_ns > UINT64_MAX - GENLOCK_AUDIO_RELABEL_ARRIVAL_JITTER_NS
+					   ? UINT64_MAX
+					   : packet_ns + GENLOCK_AUDIO_RELABEL_ARRIVAL_JITTER_NS;
+	return unmatched_ns != 0 && now_ns - unmatched_at_ns < GENLOCK_AUDIO_STEP_NOMINAL_REANCHOR_NS &&
+	       stamp_jump_ns != 0 && (stamp_jump_ns > 0) == (unmatched_ns < 0) &&
+	       genlock_audio_step_mag_ns((int64_t)((uint64_t)stamp_jump_ns + (uint64_t)unmatched_ns)) <= window_ns;
+}
+/* ROZHODNUTE 5903945145: a skew hold ended without the stamps matching its step (the age release, the
+ * zero-length release, the timeout) -- remember what they never matched, when it is over one packet. Mirror of
+ * audio_step_remember_unmatched. */
+static inline void genlock_audio_step_remember_unmatched(int64_t *unmatched_ns, uint64_t *unmatched_at_ns,
+							 int64_t residual_ns, uint64_t packet_ns, uint64_t now_ns)
+{
+	if (genlock_audio_step_mag_ns(residual_ns) > packet_ns) {
+		*unmatched_ns = residual_ns;
+		*unmatched_at_ns = now_ns;
+	}
 }
 /* does this packet START a pending relabel, read on the skew-hold state BEFORE genlock_audio_step_hold
  * takes it (the ingest continues the timelines on it, the hold starts the pending on the same predicate)?
  * Outside a hold, in timecode mode, with a previous timecode packet: this box's live offset moved by at
- * most step_min, the stamps jumped AWAY from this box's wall (their age leaves the one-packet band around
- * the nominal age; a jump that brings it back is a late follow, today's path) and
- * genlock_audio_relabel_pending holds. Mirror of audio_step_relabel_pending_starts. */
+ * most step_min, the stamps jumped AWAY from this box's wall and genlock_audio_relabel_pending holds.
+ * "Away": the stamps' age more than one packet + GENLOCK_AUDIO_RELABEL_ARRIVAL_JITTER_NS off the nominal, or
+ * more than HALF a packet off AND further off than the previous packet's age (design 5902870861 + slice-3
+ * review round 1: a one-slot step's age sits about one slot off; a jump that brings the age back is a late
+ * follow -- after an early age release, or after a timed-out hold whose sender relabels later, r (under one
+ * slot) plus its block's arrival lateness off -- today's path). The nominal MOVES (an early age release lets
+ * it track the step the stamps never matched), so a jump that follows the REMEMBERED unmatched step
+ * (genlock_audio_step_unmatched_follow, ROZHODNUTE 5903945145) never starts one either. Mirror of
+ * audio_step_relabel_pending_starts. */
 static inline bool genlock_audio_step_relabel_pending_starts(bool active, int64_t prev_off_ns, uint64_t prev_raw_ns,
 							     uint64_t prev_packet_ns, uint64_t prev_arrival_ns,
-							     int64_t nominal_age_ns, bool timecode, int64_t off_live_ns,
+							     int64_t nominal_age_ns, int64_t unmatched_ns,
+							     uint64_t unmatched_at_ns, bool timecode, int64_t off_live_ns,
 							     uint64_t raw_ts_ns, uint64_t packet_ns, uint64_t now_ns,
 							     int64_t step_min_ns)
 {
@@ -2094,10 +2144,18 @@ static inline bool genlock_audio_step_relabel_pending_starts(bool active, int64_
 	const int64_t stamp_jump_ns = (int64_t)(raw_ts_ns - (prev_raw_ns + prev_packet_ns));
 	const int64_t age_dev_ns =
 		(int64_t)((uint64_t)genlock_audio_stamp_age_ns(now_ns, raw_ts_ns, off_live_ns) - (uint64_t)nominal_age_ns);
+	const int64_t prev_age_dev_ns =
+		(int64_t)((uint64_t)genlock_audio_stamp_age_ns(prev_arrival_ns, prev_raw_ns, prev_off_ns) -
+			  (uint64_t)nominal_age_ns);
+	const uint64_t away = genlock_audio_step_mag_ns(age_dev_ns);
+	const uint64_t far_ns = packet_ns > UINT64_MAX - GENLOCK_AUDIO_RELABEL_ARRIVAL_JITTER_NS
+					? UINT64_MAX
+					: packet_ns + GENLOCK_AUDIO_RELABEL_ARRIVAL_JITTER_NS;
 	return genlock_audio_step_mag_ns((int64_t)((uint64_t)off_live_ns - (uint64_t)prev_off_ns)) <=
 		       genlock_audio_step_mag_ns(step_min_ns) &&
-	       genlock_audio_step_mag_ns(age_dev_ns) > packet_ns &&
-	       genlock_audio_relabel_pending(stamp_jump_ns, now_ns - prev_arrival_ns, packet_ns, step_min_ns);
+	       away > packet_ns / 2 && (away > far_ns || away > genlock_audio_step_mag_ns(prev_age_dev_ns)) &&
+	       genlock_audio_relabel_pending(stamp_jump_ns, now_ns - prev_arrival_ns, packet_ns, step_min_ns) &&
+	       !genlock_audio_step_unmatched_follow(unmatched_ns, unmatched_at_ns, stamp_jump_ns, packet_ns, now_ns);
 }
 /* one timecode packet (timecode false clears the state); returns the release (GENLOCK_AUDIO_STEP_*) and
  * writes the offset this packet maps through to *off_out. held_off / start / step are kept after a
@@ -2107,37 +2165,47 @@ static inline bool genlock_audio_step_relabel_pending_starts(bool active, int64_
  * (genlock_audio_step_relabel_pending_starts) starts a PENDING relabel -- a hold on the pre-jump offset
  * minus the jump, released RELABEL_PENDING when this box's offset jumps (over step_min) to within one
  * packet of it, else at the bound (TIMEOUT) or on a reset; the ordinary follow and age releases do not
- * apply to it. A stamp move under one packet folds into its held offset like the skew hold's (review round
- * 2: a raw-clock sender's late step packet comes back on the next one); a move of one packet or more only
- * when it is relabel-shaped (genlock_audio_relabel_pending; review round 1: a pause, a duplicated or a
- * skipped slot keeps it). *relabel_pending is set when a hold starts and kept after its release (the log's
- * pending=). */
+ * apply to it. A stamp move under one slot folds into its held offset like the skew hold's (review round
+ * 2: a raw-clock sender's late step packet comes back on the next one); a move of a slot or more (forward
+ * from one packet - GENLOCK_AUDIO_RELABEL_FORWARD_TOLERANCE_NS, backward from one packet) only when it is
+ * relabel-shaped (genlock_audio_relabel_pending; review round 1: a pause, a duplicated or a skipped slot
+ * keeps it). *relabel_pending is set when a hold starts and kept after its release (the log's
+ * pending=). ROZHODNUTE 5903945145: a skew hold that ends without the stamps jumping (the age release, the
+ * zero-length release, the timeout) remembers what they never matched in *unmatched_ns (when over one
+ * packet); a relabel-shaped stamp jump that follows it clears it (and never starts a pending), timecode
+ * false forgets it. A pending relabel's timeout is not remembered (its counterpart is this box's own offset
+ * jump). */
 static inline int genlock_audio_step_hold(bool *active, int64_t *prev_off_ns, uint64_t *prev_raw_ns,
 					  uint64_t *prev_packet_ns, int64_t *nominal_age_ns,
 					  uint64_t *nominal_dev_since_ns, uint32_t *nominal_warm, int64_t *held_off_ns,
 					  uint64_t *start_ns, int64_t *step_ns, uint64_t *prev_arrival_ns,
-					  bool *relabel_pending, bool timecode, int64_t off_live_ns, uint64_t raw_ts_ns,
-					  uint64_t packet_ns, uint64_t now_ns, bool timeline_reset, int64_t step_min_ns,
-					  int64_t *off_out)
+					  bool *relabel_pending, int64_t *unmatched_ns, uint64_t *unmatched_at_ns,
+					  bool timecode, int64_t off_live_ns, uint64_t raw_ts_ns, uint64_t packet_ns,
+					  uint64_t now_ns, bool timeline_reset, int64_t step_min_ns, int64_t *off_out)
 {
 	*off_out = off_live_ns;
 	if (!timecode) {
 		const bool was = *active;
 		*active = false;
 		*prev_packet_ns = 0;
+		*unmatched_ns = 0;
 		return was ? GENLOCK_AUDIO_STEP_RESET : GENLOCK_AUDIO_STEP_NONE;
 	}
 	/* design 5901213031: decided on the state BEFORE this packet moves it (the ingest asks the same) */
 	const bool pending_starts =
-		!timeline_reset && genlock_audio_step_relabel_pending_starts(*active, *prev_off_ns, *prev_raw_ns,
-									     *prev_packet_ns, *prev_arrival_ns,
-									     *nominal_age_ns, true, off_live_ns, raw_ts_ns,
-									     packet_ns, now_ns, step_min_ns);
+		!timeline_reset && genlock_audio_step_relabel_pending_starts(
+					   *active, *prev_off_ns, *prev_raw_ns, *prev_packet_ns, *prev_arrival_ns,
+					   *nominal_age_ns, *unmatched_ns, *unmatched_at_ns, true, off_live_ns,
+					   raw_ts_ns, packet_ns, now_ns, step_min_ns);
 	const bool had_prev = *prev_packet_ns != 0;
 	const int64_t dev_ns = had_prev ? (int64_t)(raw_ts_ns - (*prev_raw_ns + *prev_packet_ns)) : 0;
 	const int64_t jump_ns = had_prev ? (int64_t)((uint64_t)off_live_ns - (uint64_t)*prev_off_ns) : 0;
 	const int64_t age_ns = genlock_audio_stamp_age_ns(now_ns, raw_ts_ns, off_live_ns);
 	const uint64_t arrival_gap_ns = now_ns - *prev_arrival_ns;
+	/* ROZHODNUTE 5903945145: the remembered step's follow has come (never a pending: see the start) */
+	if (had_prev && genlock_audio_relabel_pending(dev_ns, arrival_gap_ns, packet_ns, step_min_ns) &&
+	    genlock_audio_step_unmatched_follow(*unmatched_ns, *unmatched_at_ns, dev_ns, packet_ns, now_ns))
+		*unmatched_ns = 0;
 	const int64_t prev_off = *prev_off_ns;
 	*prev_off_ns = off_live_ns;
 	*prev_raw_ns = raw_ts_ns;
@@ -2162,6 +2230,9 @@ static inline int genlock_audio_step_hold(bool *active, int64_t *prev_off_ns, ui
 				*step_ns = (int64_t)(0ULL - (uint64_t)jump_ns);
 				*relabel_pending = false;
 				if (off_nominal) {
+					genlock_audio_step_remember_unmatched(
+						unmatched_ns, unmatched_at_ns,
+						(int64_t)((uint64_t)off_live_ns - (uint64_t)held), packet_ns, now_ns);
 					genlock_audio_step_track_nominal(nominal_age_ns, nominal_dev_since_ns,
 									 nominal_warm, age_ns, packet_ns, now_ns);
 					return GENLOCK_AUDIO_STEP_FOLLOWED;
@@ -2190,11 +2261,14 @@ static inline int genlock_audio_step_hold(bool *active, int64_t *prev_off_ns, ui
 		*active = false;
 		return GENLOCK_AUDIO_STEP_RESET;
 	}
-	/* inside a pending relabel a move under one packet folds like the skew hold's (review round 2: a
-	 * raw-clock sender's late stamp comes back on the next packet); a move of one packet or more only
-	 * when it is relabel-shaped (review round 1: a pause, a duplicated or a skipped slot keeps it) */
+	/* inside a pending relabel a move under one slot folds like the skew hold's (review round 2: a
+	 * raw-clock sender's late stamp comes back on the next packet); a move of a slot or more only
+	 * when it is relabel-shaped (review round 1: a pause, a duplicated or a skipped slot keeps it).
+	 * Slice 3 (review round 1): forward, a slot starts one NDI unit under one packet, like the pending
+	 * bound -- a skipped slot at the - 66 ns grid position is a slot, not a sub-packet move */
+	const uint64_t slot_ns = dev_ns > 0 ? genlock_audio_relabel_forward_slot_ns(packet_ns) : packet_ns;
 	int64_t fold_ns = followed;
-	if (*relabel_pending && genlock_audio_step_mag_ns(dev_ns) >= packet_ns)
+	if (*relabel_pending && genlock_audio_step_mag_ns(dev_ns) >= slot_ns)
 		fold_ns = genlock_audio_relabel_pending(dev_ns, arrival_gap_ns, packet_ns, step_min_ns) ? dev_ns : 0;
 	*held_off_ns = (int64_t)((uint64_t)*held_off_ns - (uint64_t)fold_ns);
 	if (*relabel_pending) {
@@ -2206,10 +2280,17 @@ static inline int genlock_audio_step_hold(bool *active, int64_t *prev_off_ns, ui
 	} else if (genlock_audio_step_mag_ns((int64_t)((uint64_t)off_live_ns - (uint64_t)*held_off_ns)) <= packet_ns ||
 		   off_nominal) {
 		*active = false;
+		genlock_audio_step_remember_unmatched(unmatched_ns, unmatched_at_ns,
+						      (int64_t)((uint64_t)off_live_ns - (uint64_t)*held_off_ns), packet_ns,
+						      now_ns);
 		return GENLOCK_AUDIO_STEP_FOLLOWED;
 	}
 	if (now_ns - *start_ns >= GENLOCK_AUDIO_STEP_HOLD_MAX_NS) {
 		*active = false;
+		if (!*relabel_pending)
+			genlock_audio_step_remember_unmatched(unmatched_ns, unmatched_at_ns,
+							      (int64_t)((uint64_t)off_live_ns - (uint64_t)*held_off_ns),
+							      packet_ns, now_ns);
 		return GENLOCK_AUDIO_STEP_TIMEOUT;
 	}
 	*off_out = *held_off_ns;
@@ -2226,11 +2307,14 @@ static inline int64_t genlock_audio_step_residual_ns(int64_t held_off_ns, int64_
 {
 	return (int64_t)((uint64_t)off_live_ns - (uint64_t)held_off_ns);
 }
-/* does the release PLACE its packet (a move over one packet: a timeout or a catch-up)? */
+/* does the release PLACE its packet? A timeout of one slot or more (forward from one packet - 100 ns,
+ * either sign: a hold's, or a never-followed pending's jump J on every grid position -- ROZHODNUTE
+ * 5903945145 point 2; a folded pending's sub-slot move is booked), or a catch-up over one packet */
 static inline bool genlock_audio_step_release_places(int release, int64_t residual_ns, uint64_t packet_ns)
 {
-	return (release == GENLOCK_AUDIO_STEP_FOLLOWED || release == GENLOCK_AUDIO_STEP_TIMEOUT) &&
-	       genlock_audio_step_mag_ns(residual_ns) > packet_ns;
+	if (release == GENLOCK_AUDIO_STEP_TIMEOUT)
+		return genlock_audio_step_mag_ns(residual_ns) >= genlock_audio_relabel_forward_slot_ns(packet_ns);
+	return release == GENLOCK_AUDIO_STEP_FOLLOWED && genlock_audio_step_mag_ns(residual_ns) > packet_ns;
 }
 /* camera-box issue 1381 (design 5900385541): a RELABEL -- the sender's stamps jumped WITH a wall step
  * (the genlock sender contract: N = floor(S / slot) slots within one interval, the samples continuous),
@@ -2327,7 +2411,8 @@ static int genlock_audio_step_hold_source(obs_source_t *source, bool timecode, i
 				       &source->genlock_audio_step_nominal_dev_since_ns, &source->genlock_audio_step_nominal_warm,
 				       &source->genlock_audio_step_held_off_ns, &source->genlock_audio_step_start_ns,
 				       &source->genlock_audio_step_step_ns, &source->genlock_audio_step_prev_arrival_ns,
-				       &source->genlock_audio_step_relabel_pending, timecode, off_live_ns, raw_ts_ns,
+				       &source->genlock_audio_step_relabel_pending, &source->genlock_audio_step_unmatched_ns,
+				       &source->genlock_audio_step_unmatched_at_ns, timecode, off_live_ns, raw_ts_ns,
 				       packet_ns, now_ns, timeline_reset, GENLOCK_WALL_STEP_MIN_NS, off_out);
 }
 
@@ -2364,7 +2449,8 @@ static bool genlock_audio_relabel_pending_source(const obs_source_t *source, boo
 	return genlock_audio_step_relabel_pending_starts(
 		source->genlock_audio_step_active, source->genlock_audio_step_prev_off_ns,
 		source->genlock_audio_step_prev_raw_ns, source->genlock_audio_step_prev_packet_ns,
-		source->genlock_audio_step_prev_arrival_ns, source->genlock_audio_step_nominal_age_ns, timecode,
+		source->genlock_audio_step_prev_arrival_ns, source->genlock_audio_step_nominal_age_ns,
+		source->genlock_audio_step_unmatched_ns, source->genlock_audio_step_unmatched_at_ns, timecode,
 		off_live_ns, raw_ts_ns, packet_ns, now_ns, GENLOCK_WALL_STEP_MIN_NS);
 }
 
@@ -2381,7 +2467,8 @@ static bool genlock_audio_step_video_frozen(const obs_source_t *source)
 
 /* camera-box issue 1381 (design 5882391108): whether this packet is PLACED instead of appended. A hold
  * release that moves the placement by more than one packet (a sender that caught up without jumping its
- * stamps, or the timeout) applies the new offset ONCE -- the packet is placed, never a W-second payment.
+ * stamps), or a timeout of one slot or more (ROZHODNUTE 5903945145 point 2), applies the new offset
+ * ONCE -- the packet is placed, never a W-second payment.
  * Outside a hold, the BACKSTOP (piece 3): a timecode packet whose append would book a jump the owed cap
  * cannot hold is placed at its stamp instead, ONE counted placement, never a partial booking whose excess
  * leaks into the smoothed error. Under audio_buf_mutex (audio_ts and the buffer size are the mixer's
