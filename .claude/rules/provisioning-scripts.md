@@ -148,6 +148,16 @@ adding ANY new check that can `warn` (a report-only / informational check) befor
 test file for slices bounded by `# (q)` / `.bak cruft drift` and confirm your new WARN lines don't
 fall inside a `!...contains("warn \"")` window; narrow the offending slice to its own check block.
 
+## "Before (q)" is not enough: pytest EXECUTES two slices of verify-device.sh (issue 1242)
+
+`tests/python/test_bkshading_relay_gaps_808.py` runs the `(ao)..(an)` slice, and
+`tests/python/test_ndi_discovery_1342.py` runs the `(an)..(q)` slice, each sourcing ONLY its own lib
+under `set -euo pipefail` with stubbed `ok`/`fail`/`ssh_box`. Both also assert `'warn "' not in` their
+block. A new check inserted anywhere between `(ao)` and `(q)` therefore breaks them: its lib function
+is undefined in their harness, and a `warn` trips the assertion. Insert a new check earlier (the
+issue-1242 `(ap)` sits right after `(ae)`), and grep `tests/python` for `find("\n# (` slices before
+picking the spot. The next free letter after `(ap)` is `(aq)`.
+
 ## Two-char check-letter scheme is now at (ac) (#899)
 
 The single letters (a)-(z) are exhausted; the two-char scheme continues (aa) interkom (#782),

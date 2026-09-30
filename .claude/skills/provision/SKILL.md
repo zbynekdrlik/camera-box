@@ -101,6 +101,11 @@ with no capture/display grabber (cam4) are unaffected.
 sudo ./setup-device.sh CAM5        # case-insensitive: cam5 / Cam5 / CAM5 all resolve identically
 ```
 
+**Stage the repo's `scripts/` AND `systemd/` dirs together** (`git archive HEAD scripts systemd`).
+Since issue 1242 setup-device installs the checked-in `systemd/cambox-egress-pacing.service` (the NDI
+egress pacing), and a run that finds only `scripts/` refuses right after the confirm prompt, before
+any write.
+
 **Single positional argument — NAME only** (#450 rework). `setup-device.sh` sources
 `scripts/camera-set.sh` and resolves `NAME -> DEVICE_IP / VBAN_STREAM / CAMERA_GENLOCK_FPS` itself
 — there is no more free-text 3-positional-arg form (`setup-device.sh CAM5 10.77.9.65 cam5` is

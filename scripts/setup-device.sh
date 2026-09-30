@@ -88,6 +88,12 @@ fail() {
                            # create-usb-linux.sh, single source of truth for the NTP-client DSCP
                            # nftables OUTPUT-mangle rule (udp dport 123 -> dscp ef) + its boot oneshot
 
+# shellcheck source=scripts/lib/cambox-egress-pacing.sh
+. "$HERE/lib/cambox-egress-pacing.sh"  # issue 1242: the ONE declaration of the NDI egress pacing
+                                       # (fq maxrate) + the generated boot script the
+                                       # [egress-pacing] sub-step installs -- also sourced by
+                                       # verify-device.sh's (ap) check + the E2E [0/8] row
+
 # shellcheck source=scripts/lib/ndi-discovery.sh
 . "$HERE/lib/ndi-discovery.sh"  # ndi_discovery_cambox_plan / ndi_discovery_cambox_apply_plan
                                 # (issue 1389) -- also sourced by verify-device.sh's (an) check +
@@ -541,6 +547,12 @@ if ! confirm_setup "$ASSUME_YES"; then
     echo "Aborted."
     exit 1
 fi
+
+# issue 1242: the [egress-pacing] sub-step installs the checked-in systemd/ unit next to this
+# scripts/ dir. Refuse HERE, before the rw remount and the first write, when only scripts/ was
+# staged on the box -- never a half-provisioned box that dies at that sub-step.
+[ -f "$CAMBOX_EGRESS_PACING_UNIT_SRC" ] \
+    || fail "missing $CAMBOX_EGRESS_PACING_UNIT_SRC -- stage the repo's scripts/ AND systemd/ dirs together before running setup-device.sh (issue 1242)"
 
 # =============================================================================
 # #1289: ensure root is writable BEFORE the first filesystem write of any kind -- a no-op on a
@@ -1674,6 +1686,34 @@ dscp_nft_service_unit_content > "$DSCP_NFT_SERVICE_PATH"
 systemctl daemon-reload
 systemctl enable "$DSCP_NFT_SERVICE_NAME"   # fail-loud (set -e) like the sibling avahi enable -- a freshly-written+reloaded unit must enable cleanly (review 5B2)
 echo "  Installed: $DSCP_NFT_RULESET_PATH (udp dport 123 -> dscp ${DSCP_NFT_CLASS}) + ${DSCP_NFT_SERVICE_NAME}.service (enabled; applies at next boot)"
+
+# =============================================================================
+# [egress-pacing]: pace this box's NDI egress at boot (issue 1242, unnumbered sub-step, ENABLE-only)
+# =============================================================================
+# All seven cameras hand their frame to NDI on the same genlock grid instant, so their line-rate
+# bursts reach strih-lx together and its USB NIC answers with PAUSE storms. An fq root qdisc with a
+# per-flow maxrate (the ONE declaration in scripts/lib/cambox-egress-pacing.sh) spreads each frame
+# over ~7 ms while dantesync's PTP/NTP and the intercom stay their own flows. It ran by hand on
+# cam1-cam7 from 30.9.2026 and was lost on every reboot; this makes it permanent. The appliance has
+# no checkout of this repo, so the boot unit runs a script GENERATED from the lib, written here; the
+# unit is the checked-in systemd/ file (the pre-flight above refused a run without it). Enable-only
+# (never a live start or a live tc apply, .claude/rules/provisioning-scripts.md), in the rw window
+# before STEP 18's read-only flip; verify-device.sh (ap) grades the live qdisc + the unit after the
+# reboot.
+echo ""
+echo -e "${GREEN}[egress-pacing] Installing the NDI egress pacing boot unit (fq maxrate ${CAMBOX_EGRESS_PACING_RATE}, issue 1242)...${NC}"
+command -v tc >/dev/null 2>&1 \
+    || fail "tc (iproute2) is not installed -- the NDI egress pacing qdisc cannot be applied at boot (issue 1242)"
+mkdir -p "$(dirname "$CAMBOX_EGRESS_PACING_SCRIPT_PATH")" "$(dirname "$CAMBOX_EGRESS_PACING_SERVICE_PATH")"
+cambox_egress_pacing_boot_script > "$CAMBOX_EGRESS_PACING_SCRIPT_PATH"
+chmod 0755 "$CAMBOX_EGRESS_PACING_SCRIPT_PATH"
+install -m 0644 "$CAMBOX_EGRESS_PACING_UNIT_SRC" "$CAMBOX_EGRESS_PACING_SERVICE_PATH"
+systemctl daemon-reload
+systemctl enable "$CAMBOX_EGRESS_PACING_SERVICE_NAME"   # fail-loud (set -e) -- a freshly-written+reloaded unit must enable cleanly
+EGRESS_PACING_ENABLED_STATE="$(systemctl is-enabled "$CAMBOX_EGRESS_PACING_SERVICE_NAME" 2>/dev/null || true)"
+[ "$EGRESS_PACING_ENABLED_STATE" = "enabled" ] \
+    || fail "${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service is not enabled (is-enabled='${EGRESS_PACING_ENABLED_STATE:-<none>}') after install -- the NDI egress would be UNPACED after the next reboot (issue 1242)"
+echo "  Installed: $CAMBOX_EGRESS_PACING_SCRIPT_PATH + ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service (enabled; paces the default-route interface at next boot, fq maxrate ${CAMBOX_EGRESS_PACING_RATE} flow_limit ${CAMBOX_EGRESS_PACING_FLOW_LIMIT} limit ${CAMBOX_EGRESS_PACING_LIMIT})"
 
 
 # =============================================================================

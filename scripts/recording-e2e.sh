@@ -90,6 +90,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Consumed by the new fail-fast step further below (see its own banner).
 # shellcheck source=scripts/lib/leg-health-guard.sh
 . "$HERE/lib/leg-health-guard.sh"
+# issue 1242: the ONE declaration of the cambox NDI egress pacing (fq maxrate) + its REPORT-ONLY
+# [0/8] row over the vetted camboxes (one call line below, after the capture-leg loop).
+# shellcheck source=scripts/lib/cambox-egress-pacing.sh
+. "$HERE/lib/cambox-egress-pacing.sh"
 # #1141: the head-end OPTICAL blur/shutter fail-fast — reads the source box's rough= capture
 # telemetry (the #216 slow-shutter class the capture-RATE gate above is blind to). Sourced-lib
 # invoked with ONE call line below (the #675 pattern), pinned to src/optical_preflight.rs by
@@ -1774,6 +1778,9 @@ for _lht in $LEG_HEALTH_TARGETS; do
   leg_health_dequeue_stall_report "$_lhbox" "$_lhstall"
   echo "    ok: $_lhbox capture leg healthy (loss-ok skip=$_lhskip eproto=$_lheproto steady ($_lheproto_adj restart-adjacent ignored), stall=$_lhstall report-only in-window)"
 done
+# issue 1242: REPORT-ONLY -- each vetted cambox's NDI egress pacing (the fq maxrate root qdisc +
+# its boot unit) over the same box=ip list; a missing or non-permanent pacing is a named WARNING.
+cambox_egress_pacing_e2e_report "$LEG_HEALTH_TARGETS" "$CAM_PW"
 # #1141: head-end OPTICAL blur/shutter fail-fast. The capture-RATE gate above (#656) proves the
 # source camera captures at the right RATE, but is BLIND to a camera capturing at that rate yet
 # BLURRED (slow shutter 1/60 / anti-flicker — the #216 class: 16.7 ms exposure smears the moving
