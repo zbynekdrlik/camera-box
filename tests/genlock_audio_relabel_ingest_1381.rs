@@ -345,9 +345,12 @@ fn truth_table() -> Vec<String> {
     // review round 2: a raw-clock sender steps first and submits the step-carrying packet 8 ms late
     // (stamp and arrival). The pending starts on S + 8 ms; the next on-time packet's -8 ms move folds
     // back into the held offset, so this box's step resolves it with NO residual and books nothing
-    // (unfolded: residual +8.0 booked on the slew, then left under the ASRC band). The raw-domain
-    // timeline was continued from the late stamp, so the on-time packets snap onto it (on_raw 0), as
-    // OBS's 70 ms smoothing does for any stamp jitter
+    // (unfolded: residual +8.0 booked on the slew, then left under the ASRC band). The pending start
+    // re-anchors the raw-domain smoothing timeline ON the late stamp (stock OBS would snap a jittered
+    // packet onto the timeline it already has), so every later on-time packet sits 8 ms off its raw
+    // stamp until the next timeline reset (on_raw 0) and uses 8 ms of the 70 ms snap headroom on one
+    // side. Harmless for the audio: placement, the ASRC error and the pairing offset read the raw
+    // stamp, and the appends stay continuous. A slice-1 relabel of a jittered stamp does the same
     t.push("== pending_late_682ms".to_string());
     t.push(line("start", [0, 1, 1, 0, 0, 1, 0, 1, 0], "+0.0"));
     t.push(line("resolve", [0, 0, 1, 0, 0, 0, 4, 0, 1], "+0.0"));

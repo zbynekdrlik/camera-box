@@ -573,7 +573,11 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
       (up to the 15 ms arrival budget) starts the pending on S + L, and the next on-time packet's
       −L comes back. Kept in the held offset (the round-1 rule), the release residual was +L,
       booked on the slew and then left under the ASRC band: 8 ms late in the bench = 8.8 ms off
-      until +761 s.
+      until +761 s. The pending START still re-anchors OBS's raw-domain smoothing timeline on the
+      late stamp, so later packets sit L off their raw stamps until the next timeline reset and use
+      L of the 70 ms snap headroom on one side. Placement, the ASRC error and the pairing offset
+      read the raw stamp, so the audio is not affected (a slice-1 relabel of a jittered stamp does
+      the same).
     - a move of one packet or more only when `audio_relabel_pending` accepts it (continuous
       arrival). A pause, a duplicated slot or a skipped slot inside the window keeps the held
       offset. OBS then takes its stock path for that packet, and this box's own step still
