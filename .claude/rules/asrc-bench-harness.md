@@ -961,6 +961,10 @@ re-booked a phantom jump against that stale error: `place_jumps` 0 → 180 → 4
       one `RelabelPending` release at the receiver's step, nothing overwritten or dropped, and a
       zero-filled gap no longer than the sender's own pause. Before the fix, the held offset
       absorbed the pause and the pending ran to the bound.
+    - Review round 2: `Follow::JumpLate` is the raw-clock `Jump` sender whose step-carrying packet
+      goes out 8 ms late (its stamp and its arrival). +682 / −682 / +90 ms, the receiver 0.5 s
+      and 3 s later: one `RelabelPending` release, no loss, |A/V| back under 2 ms within 1 s of the receiver's step. With the
+      round-1 fold rule the +8 ms stayed in the held offset: 8.8 ms off until +761 s.
     - Loss anti-tautology (review round 1): `Variant::NoStepHold` on the same sender-first relabels
       loses audio from the sender's step on (+260 / +682 ms: a 233 / 667 ms zero-filled gap, −1.5 s
       dropped, +2.5 s reset). `NoRelabel` is not such a check: it keeps the pure hold, and the

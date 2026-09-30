@@ -566,18 +566,27 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
     never placed, and it is booked per (a). `relabels=` counts it in `genlock_audio_step_log`.
   - **Otherwise.** `Timeout` at the bound (residual J, placed once by `release_places`), or `Reset`.
     The ordinary follow and age releases do not apply to a pending relabel.
-  - **Only a relabel-shaped jump moves the held offset while a pending runs** (review round 1). The
-    skew hold folds every stamp jump over 2 ms into its held offset. A pending folds only a jump
-    that `audio_relabel_pending` accepts (over one packet, continuous arrival). A pause, a
-    duplicated slot or a skipped slot inside the window keeps the held offset. OBS then takes its
-    stock path for that packet, and this box's own step still resolves the pending. Folded, a
-    500 ms pause 5 packets into a +682 ms pending moved the held offset by the pause: the
-    receiver's step missed it, and the pending ran to the bound and placed 484 ms.
+  - **What moves the held offset while a pending runs** (review rounds 1 and 2). The skew hold
+    folds every stamp jump over 2 ms into its held offset. A pending folds:
+    - a move UNDER one packet exactly like the skew hold (round 2). A raw-clock sender (its stamps
+      its submission wall, the contract's default) whose step-carrying packet goes out L late
+      (up to the 15 ms arrival budget) starts the pending on S + L, and the next on-time packet's
+      −L comes back. Kept in the held offset (the round-1 rule), the release residual was +L,
+      booked on the slew and then left under the ASRC band: 8 ms late in the bench = 8.8 ms off
+      until +761 s.
+    - a move of one packet or more only when `audio_relabel_pending` accepts it (continuous
+      arrival). A pause, a duplicated slot or a skipped slot inside the window keeps the held
+      offset. OBS then takes its stock path for that packet, and this box's own step still
+      resolves the pending. Folded (round 0), a 500 ms pause 5 packets into a +682 ms pending
+      moved the held offset by the pause: the receiver's step missed it, and the pending ran to the
+      bound and placed 484 ms.
   - **A second relabel-shaped jump inside the window** (the sender's box stepped again) IS folded,
     and one step of this box by both steps resolves the pending (residual −(r1 + r2)). The ingest
     continues its timelines only at a pending's START, so the stock system-domain check sees that
     second raw jump: the one packet is PLACED, at its continuous landing through the folded offset
     (harness `pending_twice_682ms`, and the stock "exceeded TS_SMOOTHING_THRESHOLD" debug line).
+    A second jump over 2 s is not continued either: OBS's `handle_ts_jump` drops the buffer and
+    the hold releases `reset`. Two fleet date steps within 10 s do not happen in practice.
   - **`relabel_pending` stays set after a release** (the C field
     `genlock_audio_step_relabel_pending`). It is cleared when the next hold starts. The log reads it
     for `pending=`. A running pending is `active && relabel_pending`.
@@ -595,8 +604,8 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
   - **Known limit: a sender-first step of ONE slot (|N| = 1) is not reliably caught** (review
     round 1, finding 1; a follow-up candidate for the main, not decided in this slice). Its stamp jump is
     one packet give or take 1 ns: the per-second grid's slots are 33 333 333 or 33 333 334 ns,
-    and the packet is 33 333 333 ns. The age test (one packet) is a coin flip on the arrival
-    jitter too.
+    and the packet is 33 333 333 ns. For a step just over one slot the age test (one packet) is
+    a coin flip on the arrival jitter too.
     - **N = +1 (S from +33.3 to +66.7 ms).** Caught in a bench probe (not a pinned test: +40 /
       +50 / +66 ms, receiver 0.5 s and 3 s later: zero loss, remainder slewed, back within 2 ms at
       r − 2 s). Not caught
@@ -604,9 +613,10 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
       jump appends and the timecode ASRC books it. The receiver's later step is then a
       zero-length `followed` release with residual −S that is PLACED, overwriting about r of
       queued audio.
-    - **N = −1 (S from −33.3 to 0 ms).** The stamps repeat one slot, exactly like a duplicated
-      slot, so this is never a pending relabel. It stays on the slice-1 path, which this slice
-      does not change. Bench probe: −10 ms stays 23.3 ms off until +748 s (the level loop repays it).
+    - **N = −1 (S from −33.3 to 0 ms).** The stamps repeat one slot, like a duplicated slot. A
+      33 333 334 ns slot even passes the "more than one packet" bound; what keeps it from a
+      pending is the age test: |S| is under one packet, so the stamps' age never leaves the
+      one-packet band. It stays on the slice-1 path, which this slice does not change. Bench probe: −10 ms stays 23.3 ms off until +748 s (the level loop repays it).
       −20 ms is booked and settles in 11 s. −30 ms settles in 1 s.
     - **One option for the main:** an asymmetric pending bound (forward jump at least one packet,
       backward over one packet, the age band at half a packet). Duplicated slots are backward, and

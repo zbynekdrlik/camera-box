@@ -699,6 +699,10 @@ and drives it tick by tick. Lessons from its two review rounds:
     after a pending's release. A flag that outlives its event needs a test where it is still set
     but must not be read (here a joint relabel after a resolved pending, which must print
     `pending=0`).
+  - Review round 2 (a move under one packet inside a pending folds like the skew hold's): 34/34,
+    the two new mutants (the sub-packet arm dropped; `>` for `>=`) killed by the pending parity
+    script's late step packet and its duplicated slot inside a pending. The Rust authority's own
+    19 mutants (the unit tests and benches through the plain-rustc stub crate) are all killed.
   - Keeping that flag also silently weakened older tests. Every assertion that read the flag as
     "still pending" passed after a release too, and a Rust mutant that resolves a pending without
     an offset step survived behind it. When a flag starts to outlive its event, grep every test
