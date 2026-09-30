@@ -168,10 +168,11 @@ pub fn audio_stamp_age_ns(now_ns: u64, raw_ts_ns: u64, off_live_ns: i64) -> i64 
 /// `RelabelPending` on the packet whose live offset jumps (over `step_min_ns`) to within one packet of
 /// the held offset: this box's own step followed, the landing moved by the remainder only. Otherwise
 /// `Timeout` after [`AUDIO_STEP_HOLD_MAX_NS`] (J applied once), or `Reset`. The ordinary follow and
-/// age releases do not apply to it. A stamp move under one packet folds into its held offset like
+/// age releases do not apply to it. A stamp move under one slot folds into its held offset like
 /// the skew hold's (review round 2: a raw-clock sender's late step packet comes back on the next
-/// one); a move of one packet or more only when it is relabel-shaped ([`audio_relabel_pending`]:
-/// continuous arrival) -- a pause, a duplicated or a skipped slot keeps it, so this box's own step
+/// one); a move of a slot or more -- forward from one packet − 100 ns, backward from one packet
+/// (slice 3) -- only when it is relabel-shaped ([`audio_relabel_pending`]: continuous arrival). A
+/// pause, a duplicated or a skipped slot keeps it on every grid position, so this box's own step
 /// still resolves the pending (review round 1: folded, a 500 ms pause left it to the bound and
 /// placed 484 ms).
 ///
@@ -274,10 +275,17 @@ pub fn audio_step_hold(
         s.active = false;
         return (off_live_ns, AudioStepRelease::Reset);
     }
-    // inside a pending relabel a move under one packet folds like the skew hold's (review round 2: a
-    // raw-clock sender's late stamp comes back on the next packet); a move of one packet or more only
-    // when it is relabel-shaped (review round 1: a pause, a duplicated or a skipped slot keeps it)
-    let fold_ns = if !s.relabel_pending || dev_ns.unsigned_abs() < packet_ns {
+    // inside a pending relabel a move under one slot folds like the skew hold's (review round 2: a
+    // raw-clock sender's late stamp comes back on the next packet); a move of a slot or more only
+    // when it is relabel-shaped (review round 1: a pause, a duplicated or a skipped slot keeps it).
+    // Slice 3 (review round 1): forward, a slot starts one NDI unit under one packet, like the pending
+    // bound -- a skipped slot at the − 66 ns grid position is a slot, not a sub-packet move
+    let under_slot = if dev_ns > 0 {
+        dev_ns.unsigned_abs() < audio_relabel_forward_slot_ns(packet_ns)
+    } else {
+        dev_ns.unsigned_abs() < packet_ns
+    };
+    let fold_ns = if !s.relabel_pending || under_slot {
         followed
     } else if audio_relabel_pending(dev_ns, arrival_gap_ns, packet_ns, step_min_ns) {
         dev_ns
@@ -364,6 +372,14 @@ pub fn audio_step_relabel_jumps(
     Some((stamp_jump_ns, off_live_ns.wrapping_sub(mapped_ns)))
 }
 
+/// Issue 1381 (design 5902870861, ROZHODNUTÉ 5902983227) — the smallest FORWARD stamp jump that is a
+/// whole slot: one packet minus [`AUDIO_RELABEL_FORWARD_TOLERANCE_NS`] (saturating). The pending
+/// bound ([`audio_relabel_pending`]) and the fold rule inside a pending ([`audio_step_hold`]) both
+/// read it. Mirror of `genlock_audio_relabel_forward_slot_ns`.
+fn audio_relabel_forward_slot_ns(packet_ns: u64) -> u64 {
+    packet_ns.saturating_sub(AUDIO_RELABEL_FORWARD_TOLERANCE_NS)
+}
+
 /// Issue 1381 (design 5901213031) — is a STAMP-ONLY jump a pending relabel: did the sender's wall step
 /// while this box's has not yet?
 ///
@@ -392,7 +408,7 @@ pub fn audio_relabel_pending(
 ) -> bool {
     let jump = stamp_jump_ns.unsigned_abs();
     let whole_slot = if stamp_jump_ns > 0 {
-        jump >= packet_ns.saturating_sub(AUDIO_RELABEL_FORWARD_TOLERANCE_NS)
+        jump >= audio_relabel_forward_slot_ns(packet_ns)
     } else {
         jump > packet_ns
     };
@@ -407,11 +423,20 @@ pub fn audio_relabel_pending(
 ///
 /// Outside a hold, in timecode mode, with a previous timecode packet: this box's live offset moved by
 /// at most `step_min_ns` (no receiver step on this packet -- that is the skew hold or a joint relabel),
-/// the stamps jumped AWAY from this box's wall (their live-wall age leaves the HALF-packet band around
-/// the nominal age, design 5902870861: a one-slot step's age sits about one slot off, so the packet's
-/// arrival jitter must not decide it; a jump that brings the age back is a late follow after an early
-/// age release, today's path) and [`audio_relabel_pending`] holds for the stamp jump and the arrival
-/// gap. Mirror of `genlock_audio_step_relabel_pending_starts`.
+/// the stamps jumped AWAY from this box's wall and [`audio_relabel_pending`] holds for the stamp jump
+/// and the arrival gap.
+///
+/// "Away" is the stamps' live-wall age against the nominal age:
+/// - over one packet plus [`AUDIO_RELABEL_ARRIVAL_JITTER_NS`] off: away;
+/// - over HALF a packet off (design 5902870861: a one-slot step's age sits about one slot off, so the
+///   packet's arrival jitter must not decide it) AND further off than the previous packet's age
+///   (slice-3 review round 1). A jump that brings the age back is a late follow -- after an early age
+///   release, or after a timed-out hold whose sender relabels later, which lands r off (r = S − N·slot,
+///   under one slot) on its first relabelled block, plus that block's arrival lateness (at most the
+///   budget) -- and keeps today's path. Slice 2 read every age over one packet as away, so a late
+///   follow whose r sat within the arrival budget of a slot started a false pending too.
+///
+/// Mirror of `genlock_audio_step_relabel_pending_starts`.
 pub fn audio_step_relabel_pending_starts(
     s: &AudioStepHold,
     timecode: bool,
@@ -427,8 +452,13 @@ pub fn audio_step_relabel_pending_starts(
     let stamp_jump_ns = raw_ts_ns.wrapping_sub(s.prev_raw_ns.wrapping_add(s.prev_packet_ns)) as i64;
     let age_dev_ns =
         audio_stamp_age_ns(now_ns, raw_ts_ns, off_live_ns).wrapping_sub(s.nominal_age_ns);
+    let prev_age_dev_ns = audio_stamp_age_ns(s.prev_arrival_ns, s.prev_raw_ns, s.prev_off_ns)
+        .wrapping_sub(s.nominal_age_ns);
+    let away = age_dev_ns.unsigned_abs();
     off_live_ns.wrapping_sub(s.prev_off_ns).unsigned_abs() <= step_min_ns.unsigned_abs()
-        && age_dev_ns.unsigned_abs() > packet_ns / 2
+        && away > packet_ns / 2
+        && (away > packet_ns.saturating_add(AUDIO_RELABEL_ARRIVAL_JITTER_NS)
+            || away > prev_age_dev_ns.unsigned_abs())
         && audio_relabel_pending(
             stamp_jump_ns,
             now_ns.wrapping_sub(s.prev_arrival_ns),
