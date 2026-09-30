@@ -65,7 +65,15 @@ enum Follow {
     /// step time (those slots are never sent, their samples lost) and resumes on its real-time grid:
     /// its stamps jump by the pause and so does its arrival (a pause or a restart).
     Pause,
+    /// Issue 1381 (design 5901213031, review round 1): the `Relabel` sender, plus a
+    /// [`RELABEL_PAUSE_NS`] pause starting [`RELABEL_PAUSE_AFTER_SLOTS`] slots after its own step --
+    /// inside a pending relabel's window when the sender stepped first.
+    RelabelPause,
 }
+
+/// Issue 1381 (review round 1): the pause of [`Follow::RelabelPause`] (15 slots) and where it starts.
+const RELABEL_PAUSE_NS: u64 = 500_000_000;
+const RELABEL_PAUSE_AFTER_SLOTS: u64 = 5;
 
 /// Issue 1381 (design 5900385541): the slots a relabelling sender moves its stamps by at a wall step
 /// of `wall_ns`: N = floor(S / slot), toward −∞ (the contract's floor).
@@ -156,7 +164,14 @@ fn step_sender_packets(case: StepCase) -> Vec<Packet> {
                 };
                 (emit, WALL0 + emit, leap)
             }
-            Follow::Relabel => {
+            Follow::Relabel | Follow::RelabelPause => {
+                let pause_at = follow_at + slot_ns(RELABEL_PAUSE_AFTER_SLOTS);
+                if case.follow == Follow::RelabelPause
+                    && (pause_at..pause_at + RELABEL_PAUSE_NS).contains(&nominal)
+                {
+                    k += 1;
+                    continue;
+                }
                 if nominal < follow_at {
                     (nominal + jitter, WALL0 + nominal, 0)
                 } else {

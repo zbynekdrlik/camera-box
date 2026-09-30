@@ -219,9 +219,10 @@ fn a_sender_first_relabel_appends_continuously_until_the_receiver_step_releases_
             assert!(
                 residual == -r
                     && !f.s.active
-                    && !f.s.relabel_pending
+                    && f.s.relabel_pending
                     && !audio_step_release_places(rel, residual, PACKET),
-                "issue 1381: step {step}: released with the landing move -r, never placed"
+                "issue 1381: step {step}: released with the landing move -r, never placed (the \
+                 pending flag kept for the log's pending=)"
             );
             // from then on the live offset, and the age is back on its nominal: no hold ever again
             f.steady(300);
@@ -258,7 +259,10 @@ fn a_pending_relabel_the_receiver_never_follows_times_out_and_applies_the_jump_o
                 residual == jump && audio_step_release_places(rel, residual, PACKET),
                 "issue 1381: the timeout applies J once (a placement), like the hold's timeout"
             );
-            assert!(!f.s.active && !f.s.relabel_pending);
+            assert!(
+                !f.s.active && f.s.relabel_pending,
+                "kept for the log's pending="
+            );
             timed_out = true;
         }
     }
@@ -309,6 +313,101 @@ fn only_a_receiver_step_that_follows_the_jump_within_one_packet_resolves_it_1381
 }
 
 #[test]
+fn a_pause_a_dup_or_a_skipped_slot_inside_a_pending_never_moves_its_held_offset_1381() {
+    // review round 1: the pending reused the skew hold's fold, so every stamp jump over 2 ms moved the
+    // held offset -- a 500 ms pause inside the pending window was folded away, the receiver's step then
+    // missed the held offset by the pause and the pending ran to the bound (484 ms placed). Only a
+    // relabel-shaped jump (over one packet, continuous arrival) moves it now: a pause (its arrival
+    // gap), a duplicated slot (one packet back, 3 ms later) or a skipped slot (one packet on, after a
+    // gap) keep it, and this box's own step still resolves the pending within one packet.
+    let step = 682_474_000_i64;
+    let jump = relabel_jump(step);
+    let r = step - jump;
+    for event in ["pause 500 ms", "dup", "skipped slot"] {
+        let mut f = Feed::new();
+        f.steady(WARM);
+        f.shift = jump;
+        f.early = r as u64;
+        f.take();
+        for _ in 0..5 {
+            f.take();
+        }
+        let held = f.s.held_off_ns;
+        match event {
+            "pause 500 ms" => f.k += 15,
+            "skipped slot" => f.k += 1,
+            _ => {
+                // the previous slot's stamp again, 3 ms after it
+                let raw = (WALL + (f.k - 1) * PACKET).wrapping_add(f.shift as u64);
+                let now = BASE + (f.k - 1) * PACKET - f.early + 3_000_000;
+                let (off, rel) =
+                    audio_step_hold(&mut f.s, true, f.off, raw, PACKET, now, false, MIN);
+                assert_eq!((off, rel), (held, AudioStepRelease::None), "{event}");
+            }
+        }
+        for _ in 0..5 {
+            let (off, rel) = f.take();
+            assert_eq!((off, rel), (held, AudioStepRelease::None), "{event}");
+        }
+        assert!(
+            f.s.active && f.s.relabel_pending && f.s.held_off_ns == held,
+            "issue 1381: {event} inside a pending relabel must keep its held offset: {:?}",
+            f.s
+        );
+        f.off = OFF - step;
+        let (off, rel) = f.take();
+        assert_eq!(
+            (off, rel),
+            (OFF - step, AudioStepRelease::RelabelPending),
+            "issue 1381: {event}: this box's own step must still resolve the pending"
+        );
+        assert_eq!(audio_step_residual_ns(f.s.held_off_ns, off), -r, "{event}");
+    }
+    // a second relabel-shaped jump inside the pending (the sender stepped again) does move it
+    let mut f = Feed::new();
+    f.steady(WARM);
+    f.shift = jump;
+    f.take();
+    f.shift += jump;
+    let (off, _) = f.take();
+    assert_eq!(
+        off,
+        OFF - 2 * jump,
+        "issue 1381: a relabel-shaped jump moves the held offset"
+    );
+}
+
+#[test]
+fn a_skew_hold_after_a_pending_relabel_takes_the_ordinary_releases_1381() {
+    // the kept pending flag is cleared when the next hold starts: a receiver-first step after a
+    // resolved pending relabel is an ordinary skew hold, released followed when the stamps jump
+    let jump = relabel_jump(682_474_000);
+    let mut f = Feed::new();
+    f.steady(WARM);
+    f.shift = jump;
+    f.take();
+    f.off = OFF - 682_474_000;
+    assert_eq!(f.take().1, AudioStepRelease::RelabelPending);
+    f.steady(40);
+    f.off -= 89_703_000;
+    let (off, rel) = f.take();
+    assert_eq!(rel, AudioStepRelease::None);
+    assert!(
+        f.s.active && !f.s.relabel_pending,
+        "an ordinary skew hold: {:?}",
+        f.s
+    );
+    assert_eq!(off, OFF - 682_474_000);
+    f.shift += 89_703_000;
+    let (off, rel) = f.take();
+    assert_eq!(
+        (off, rel),
+        (f.off, AudioStepRelease::Followed),
+        "issue 1381: the ordinary follow release applies again"
+    );
+}
+
+#[test]
 fn a_pending_relabel_ends_on_a_timeline_reset_or_outside_timecode_1381() {
     let jump = relabel_jump(682_474_000);
     let mut f = Feed::new();
@@ -317,14 +416,20 @@ fn a_pending_relabel_ends_on_a_timeline_reset_or_outside_timecode_1381() {
     f.take();
     let r = f.take_with(true, true);
     assert_eq!(r, (OFF, AudioStepRelease::Reset));
-    assert!(!f.s.active && !f.s.relabel_pending);
+    assert!(
+        !f.s.active && f.s.relabel_pending,
+        "kept for the log's pending="
+    );
     let mut f = Feed::new();
     f.steady(WARM);
     f.shift = jump;
     f.take();
     let r = f.take_with(false, false);
     assert_eq!(r, (OFF, AudioStepRelease::Reset));
-    assert!(!f.s.active && !f.s.relabel_pending);
+    assert!(
+        !f.s.active && f.s.relabel_pending,
+        "kept for the log's pending="
+    );
     // and a timeline-reset packet never starts one
     let mut f = Feed::new();
     f.steady(WARM);

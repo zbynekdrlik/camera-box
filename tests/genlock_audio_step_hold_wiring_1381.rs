@@ -65,7 +65,7 @@ const RELABEL_WIRING: [&str; 6] = [
     "if ((genlock_relabel || genlock_relabel_pending) && source->next_audio_sys_ts_min) source->next_audio_sys_ts_min = in.timestamp; if (source->next_audio_sys_ts_min == in.timestamp) { push_back = true;",
     "if (!genlock_audio_step_relabel_jumps(source->genlock_audio_step_active, source->genlock_audio_step_prev_off_ns, source->genlock_audio_step_prev_raw_ns, source->genlock_audio_step_prev_packet_ns, source->genlock_audio_step_held_off_ns, timecode, off_live_ns, raw_ts_ns, &stamp_jump_ns, &off_jump_ns) || !genlock_audio_relabel(stamp_jump_ns, off_jump_ns, packet_ns, GENLOCK_WALL_STEP_MIN_NS)) return false;",
     "const uint64_t genlock_step_packet_ns = conv_frames_to_time(sample_rate, in.frames);",
-    "\"holds=%u relabels=%u (issue 1381)\"",
+    "\"holds=%u relabels=%u pending=%d (issue 1381)\"",
 ];
 
 /// Issue 1381 (design 5901213031) — the PENDING relabel and the relabel remainder booking (squished):

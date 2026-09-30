@@ -510,7 +510,8 @@ impl Obs {
         }
         // issue 1381: the per-source skew hold -- a wall step keeps this source on its pre-step offset
         // until its own stamps follow (genlock_audio_step_hold in the ingest).
-        let was_pending = self.step_hold.relabel_pending;
+        // the flag is kept after a release (the log's pending=): a running pending needs `active`
+        let was_pending = self.step_hold.active && self.step_hold.relabel_pending;
         let (off, release) = audio_step_hold(
             &mut self.step_hold,
             hold_timecode,
@@ -521,7 +522,7 @@ impl Obs {
             timeline_reset,
             WALL_STEP_MIN_NS,
         );
-        if self.step_hold.relabel_pending && release == AudioStepRelease::None && !was_pending {
+        if self.step_hold.active && self.step_hold.relabel_pending && !was_pending {
             self.pendings += 1;
         }
         // design 5901213031: a pending relabel this box's own step resolved is a relabel

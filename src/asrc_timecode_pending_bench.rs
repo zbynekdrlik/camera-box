@@ -198,3 +198,66 @@ fn without_the_slew_booking_a_sub_band_remainder_takes_minutes_1381() {
          jump: {over:?}"
     );
 }
+
+#[test]
+fn a_pause_inside_the_pending_window_keeps_the_pending_resolvable_1381() {
+    // review round 1: the pending reused the skew hold's fold, so a 500 ms pause inside the pending
+    // window moved the held offset by the pause; this box's step then missed it and the pending ran
+    // to the bound, placing ~484 ms. Now only a relabel-shaped jump moves it: the pause takes the
+    // stock path (placed at its stamp: the sender's own 500 ms of silence, the queued audio runs out
+    // and the rest is a zero-filled gap -- which also proves the losses are counted from the sender's
+    // step on), and this box's own step still resolves the pending with the remainder slewed.
+    let pause_ms = RELABEL_PAUSE_NS as f64 / 1e6;
+    for wall_ns in [STEP_682_NS, 260_000_000] {
+        let case = StepCase {
+            wall_ns,
+            lag_ns: 0,
+            follow: Follow::RelabelPause,
+            sender_first_ns: RECEIVER_LAGS[1],
+            burst_jitter_ns: 0,
+            connect_backlog: 0,
+        };
+        let r = run_step(case, Variant::Production);
+        let rem = remainder_ms(wall_ns);
+        assert!(
+            r.pendings == 1
+                && r.relabels == 1
+                && r.releases == [(r.releases[0].0, AudioStepRelease::RelabelPending)]
+                && r.releases[0].0 < 0.1
+                && !r.holding_at_end
+                && r.overwritten_ms == 0.0
+                && r.dropped_ms == 0.0
+                && r.gap_ms > 0.0
+                && r.gap_ms <= pause_ms
+                && r.jumps == 0
+                && r.av_max_all_ms <= rem + AV_BOUND_MS
+                && r.av_settle_s <= rem + REPAY_MARGIN_S
+                && r.av_tail_ms <= AV_BOUND_MS,
+            "issue 1381: {case:?}: a pause inside the pending window must keep the pending \
+             resolvable at the receiver's step (only the sender's own {pause_ms} ms of silence): \
+             {r:?}"
+        );
+    }
+}
+
+#[test]
+fn without_the_hold_a_sender_first_relabel_loses_audio_at_the_sender_step_1381() {
+    // anti-tautology (review round 1): the zero-loss assertions above count from the SENDER's step
+    // on, so the same relabels without the hold (and so without the pending relabel it starts) must
+    // show a loss there -- placed N slots late (+260 / +682 ms: 233 / 667 ms zero-filled), dropped
+    // (-1.5 s) or reset (+2.5 s). `NoRelabel` is no such check: it keeps the pure hold, whose pending
+    // start alone keeps a jump under 2 s appended (only the +2.5 s timeline reset loses there).
+    for wall_ns in RELABEL_STEPS {
+        let case = sender_first(wall_ns, RECEIVER_LAGS[0], 0);
+        let without = run_step(case, Variant::NoStepHold);
+        let with = run_step(case, Variant::Production);
+        let lost = without.overwritten_ms + without.dropped_ms + without.gap_ms;
+        assert!(
+            without.pendings == 0
+                && lost > 100.0
+                && with.overwritten_ms + with.dropped_ms + with.gap_ms == 0.0,
+            "issue 1381: {case:?}: without the hold a sender-first relabel must lose audio from the \
+             sender's step on (the bench would otherwise prove nothing): {without:?} vs {with:?}"
+        );
+    }
+}

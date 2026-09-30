@@ -248,7 +248,8 @@ fn truth_table() -> Vec<String> {
         t.push(log(
             name,
             &format!(
-                "step_ms={step} held_ms=0.0 released=none residual_ms={residual} holds=0 relabels=1"
+                "step_ms={step} held_ms=0.0 released=none residual_ms={residual} holds=0 relabels=1 \
+                 pending=0"
             ),
         ));
         t.push(after(1));
@@ -260,7 +261,8 @@ fn truth_table() -> Vec<String> {
     t.push(line("relabel", [1, 0, 1, 0, 0, 1, 1, 0, 1], "-15.8"));
     t.push(log(
         "split_682ms",
-        "step_ms=+682.474 held_ms=33.3 released=followed residual_ms=-15.8 holds=1 relabels=1",
+        "step_ms=+682.474 held_ms=33.3 released=followed residual_ms=-15.8 holds=1 relabels=1 \
+         pending=0",
     ));
     t.push(after(1));
     // a catch-up sender: today's path (continuous stamps snap and append, the hold runs)
@@ -299,11 +301,24 @@ fn truth_table() -> Vec<String> {
             name,
             &format!(
                 "step_ms={jump} held_ms=533.3 released=relabel-pending residual_ms={residual} \
-                 holds=1 relabels=1"
+                 holds=1 relabels=1 pending=1"
             ),
         ));
         t.push(after(1));
     }
+    // review round 1: a 500 ms pause inside the pending window is placed at its stamp (push 0), as
+    // today, and keeps the held offset: this box's own step 27 packets after the start still
+    // resolves the pending
+    t.push("== pending_pause_682ms".to_string());
+    t.push(line("start", [0, 1, 1, 0, 0, 1, 0, 1, 0], "+0.0"));
+    t.push(line("pause", [0, 0, 0, 0, 0, 1, 0, 1, 0], "+0.0"));
+    t.push(line("resolve", [0, 0, 1, 0, 0, 1, 4, 0, 1], "-15.8"));
+    t.push(log(
+        "pending_pause_682ms",
+        "step_ms=+666.667 held_ms=900.0 released=relabel-pending residual_ms=-15.8 holds=1 \
+         relabels=1 pending=1",
+    ));
+    t.push(after(1));
     // a pending relabel this box never follows: released at the 10 s bound (2 = timeout), its
     // residual the whole jump (the ingest's step placement applies it once), no relabel counted
     t.push("== pending_timeout_682ms".to_string());
@@ -311,11 +326,12 @@ fn truth_table() -> Vec<String> {
     t.push(line("timeout", [0, 0, 1, 0, 0, 1, 2, 0, 0], "+0.0"));
     t.push(log(
         "pending_timeout_682ms",
-        "step_ms=+666.667 held_ms=10033.3 released=timeout residual_ms=+666.7 holds=1 relabels=0",
+        "step_ms=+666.667 held_ms=10033.3 released=timeout residual_ms=+666.7 holds=1 relabels=0 \
+         pending=1",
     ));
     // the stock "exceeded TS_SMOOTHING_THRESHOLD" and "jumped" debug lines: the leap, the restart and
-    // the pause only -- no relabel and no pending relabel reached the stock >= 70 ms or > 2 s path
-    t.push("debug_lines=3".to_string());
+    // the two pauses only -- no relabel and no pending relabel reached the stock >= 70 ms or > 2 s path
+    t.push("debug_lines=4".to_string());
     t
 }
 

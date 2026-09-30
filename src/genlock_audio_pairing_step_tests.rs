@@ -296,7 +296,7 @@ fn a_sender_that_stepped_first_is_never_held_by_the_receiver_step_1381() {
         );
         assert!(
             !s.active
-                && !s.relabel_pending
+                && s.relabel_pending
                 && s.step_ns == step
                 && s.start_ns == 1_000_000_000_000 + 40 * PACKET
         );

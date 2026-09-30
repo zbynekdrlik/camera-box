@@ -336,6 +336,29 @@ int main(void)
 		h_print("after", h_packet());
 		h_steady(5);
 	}
+	/* review round 1: a 500 ms pause INSIDE the pending window (its arrival gap with the jump) takes the
+	 * stock path (placed at its stamp) and never moves the held offset, so this box's own step still
+	 * resolves the pending */
+	h_reset("pending_pause_682ms");
+	h_steady(40);
+	h_shift += H_SLOT(20);
+	h_late += (uint64_t)(682474000 - H_SLOT(20));
+	h_print("start", h_packet());
+	for (int i = 0; i < 5; i++) {
+		const struct h_out o = h_packet();
+		if (o.relabel || o.pending || !o.push_back || o.release || o.logged || o.book_ns)
+			h_print("PENDING-BROKEN", o);
+	}
+	h_k += 15;
+	h_print("pause", h_packet());
+	for (int i = 0; i < 5; i++) {
+		const struct h_out o = h_packet();
+		if (o.relabel || o.pending || !o.push_back || o.release || o.logged || o.book_ns)
+			h_print("PENDING-BROKEN", o);
+	}
+	h_off -= 682474000;
+	h_print("resolve", h_packet());
+	h_print("after", h_packet());
 	/* a pending relabel this box never follows: released at the 10 s bound (J applied once by the ingest's
 	 * step placement, outside this branch) */
 	h_reset("pending_timeout_682ms");
