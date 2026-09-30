@@ -502,3 +502,45 @@ fn a_skipped_or_duplicated_block_and_a_one_slot_backward_step_keep_their_path_by
         );
     }
 }
+
+#[test]
+fn a_late_relabel_after_a_timed_out_hold_never_starts_a_pending_1381() {
+    // review round 1 (slice 3): this box steps first and the relabelling sender follows only after
+    // the skew hold's 10 s bound. Its late relabel moves the stamps' age back TOWARD the nominal (r
+    // off on its first relabelled block); with r between half a packet and one packet the half-packet
+    // band alone started a false pending there -- a second 10 s hold, then J applied once (a 33.3 ms
+    // zero-filled gap at +50 … +66 ms). The one timeout of the receiver's own step is all there is.
+    for s_ms in [50_i64, 55, 60, 66, 260] {
+        for position in 0..3 {
+            for lag in [12 * NS_PER_S, 20 * NS_PER_S] {
+                let case = on_grid_position(
+                    StepCase {
+                        wall_ns: s_ms * 1_000_000,
+                        lag_ns: lag,
+                        follow: Follow::Relabel,
+                        sender_first_ns: 0,
+                        burst_jitter_ns: 0,
+                        connect_backlog: 0,
+                        step_offset_ns: 0,
+                    },
+                    position,
+                );
+                let r = run_step(case, Variant::Production);
+                assert!(
+                    r.pendings == 0
+                        && r.releases.len() == 1
+                        && r.releases[0].1 == AudioStepRelease::Timeout
+                        && !r.holding_at_end,
+                    "issue 1381: {case:?}: a late relabel after a timed-out hold is a follow, never \
+                     a pending: {r:?}"
+                );
+                if s_ms < 67 {
+                    assert!(
+                        r.gap_ms == 0.0 && r.dropped_ms == 0.0,
+                        "issue 1381: {case:?}: a one-slot late follow opens no gap: {r:?}"
+                    );
+                }
+            }
+        }
+    }
+}

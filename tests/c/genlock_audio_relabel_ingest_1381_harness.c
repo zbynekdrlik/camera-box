@@ -495,6 +495,94 @@ int main(void)
 	h_off += 10000000;
 	h_print("step", h_packet());
 	h_print("after", h_packet());
+	/* slice 3 review round 1: a skipped slot at the - 66 ns grid position INSIDE a one-slot pending (its
+	 * arrival one packet late): the stock path for that packet, the held offset kept, so this box's own step
+	 * still resolves the pending with -r */
+	h_reset("pending_skip_one_slot_40ms");
+	h_steady(40);
+	h_shift += 33333267;
+	h_late += 6666733;
+	h_print("start", h_packet());
+	for (int i = 0; i < 5; i++) {
+		const struct h_out o = h_packet();
+		if (o.relabel || o.pending || !o.push_back || o.release || o.logged || o.book_ns)
+			h_print("PENDING-BROKEN", o);
+	}
+	h_k++;
+	h_shift -= 66;
+	h_print("skip", h_packet());
+	for (int i = 0; i < 5; i++) {
+		const struct h_out o = h_packet();
+		if (o.relabel || o.pending || !o.push_back || o.release || o.logged || o.book_ns)
+			h_print("PENDING-BROKEN", o);
+	}
+	h_off -= 40000000;
+	h_print("resolve", h_packet());
+	h_print("after", h_packet());
+	/* slice 3 review round 1: this box steps first by 60 ms and its hold times out; the sender relabels one
+	 * slot only after that (its first relabelled block not re-phased yet, r = 26.7 ms): a late follow, never
+	 * a pending relabel -- nothing starts, nothing is released again */
+	h_reset("late_follow_one_slot_60ms");
+	h_steady(40);
+	h_off -= 60000000;
+	h_print("step", h_packet());
+	h_released = false;
+	for (int i = 0; i < 400 && !h_released; i++) {
+		const struct h_out o = h_packet();
+		if (o.release) {
+			h_print("timeout", o);
+			h_released = true;
+		}
+	}
+	if (!h_released)
+		printf("NO-RELEASE within 400 packets\n");
+	h_shift += H_SLOT(1);
+	h_print("follow", h_packet());
+	h_late += 26666667;
+	for (int i = 0; i < 400; i++) {
+		const struct h_out o = h_packet();
+		if (o.pending || o.release || o.relabel) {
+			h_print("FALSE-PENDING", o);
+			break;
+		}
+	}
+	/* slice 3 review round 2: the same late follow, 66 ms at the - 66 ns grid position, its first relabelled
+	 * block 5 ms late (every packet before it 5 ms early): r + 5 ms passes one packet, which slice 2 read as
+	 * away -- still a follow, never a pending relabel */
+	h_reset("late_follow_one_slot_66ms_late_block");
+	h_late = 5000000;
+	h_steady(40);
+	h_off -= 66000000;
+	h_print("step", h_packet());
+	h_released = false;
+	for (int i = 0; i < 400 && !h_released; i++) {
+		const struct h_out o = h_packet();
+		if (o.release) {
+			h_print("timeout", o);
+			h_released = true;
+		}
+	}
+	if (!h_released)
+		printf("NO-RELEASE within 400 packets\n");
+	h_shift += 33333267;
+	h_late -= 5000000;
+	h_print("follow", h_packet());
+	/* the sender re-phases its emit r = 32.67 ms earlier; the next block, emitted 0.67 ms after the late one,
+	 * arrives in order right behind it (an arrival gap of 0), the rest on the re-phased schedule */
+	h_late += 33333333;
+	{
+		const struct h_out o = h_packet();
+		if (o.pending || o.release || o.relabel)
+			h_print("FALSE-PENDING", o);
+	}
+	h_late += 5000000 + 32666733 - 33333333;
+	for (int i = 0; i < 400; i++) {
+		const struct h_out o = h_packet();
+		if (o.pending || o.release || o.relabel) {
+			h_print("FALSE-PENDING", o);
+			break;
+		}
+	}
 	printf("debug_lines=%d\n", h_debug_lines);
 	return 0;
 }

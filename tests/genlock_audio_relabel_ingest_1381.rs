@@ -30,6 +30,9 @@
 //! relabel too -- its stamp jump on the sender's 100 ns grid is one packet − 66 ns or + 34 ns, and
 //! the forward bound is one packet − 100 ns. Resolved at +40 / +60 ms, one this box never follows,
 //! and a skipped slot and an N = −1 relabel (a duplicated slot's stamps) that keep the slice-2 path.
+//! Slice-3 review rounds 1-2: a skipped slot at − 66 ns INSIDE a pending keeps the held offset (this
+//! box's step resolves it with −r), and a late one-slot follow after a timed-out hold -- on time, and
+//! with its first block 5 ms late (an age just over one packet) -- never starts a pending.
 //! It FAILS LOUDLY when no C compiler is present.
 
 use std::fs;
@@ -419,6 +422,41 @@ fn truth_table() -> Vec<String> {
     t.push(stock("start"));
     t.push(stock("step"));
     t.push(stock("after"));
+    // slice-3 review round 1: a skipped slot at the − 66 ns grid position inside a one-slot pending
+    // (+40 ms) takes the stock path for that packet (snapped, appended) and keeps the held offset, so
+    // this box's own step resolves the pending with −r = −6.7 ms (folded as a sub-packet move, the
+    // held offset would have moved by the slot: +26.7 ms)
+    t.push("== pending_skip_one_slot_40ms".to_string());
+    t.push(line("start", [0, 1, 1, 0, 0, 1, 0, 1, 0], "+0.0"));
+    t.push(line("skip", [0, 0, 1, 0, 0, 0, 0, 1, 0], "+0.0"));
+    t.push(line("resolve", [0, 0, 1, 0, 0, 0, 4, 0, 1], "-6.7"));
+    t.push(log(
+        "pending_skip_one_slot_40ms",
+        "step_ms=+33.333 held_ms=433.3 released=relabel-pending residual_ms=-6.7 holds=1 relabels=1 \
+         pending=1",
+    ));
+    t.push(line("after", [0, 0, 1, 0, 0, 0, 0, 0, 1], "+0.0"));
+    // slice-3 review rounds 1-2: this box steps first, its hold times out (placed at the bound), and
+    // the sender relabels one slot only after that -- a late follow, never a pending start. At 60 ms
+    // on time (r = 26.7 ms, inside the half-packet band), and at 66 ms on the − 66 ns grid position
+    // with the first relabelled block 5 ms late (r + 5 ms = 37.7 ms, over one packet): no
+    // FALSE-PENDING line in either
+    for (name, step, residual) in [
+        ("late_follow_one_slot_60ms", "+60.000", "-60.0"),
+        ("late_follow_one_slot_66ms_late_block", "+66.000", "-66.0"),
+    ] {
+        t.push(format!("== {name}"));
+        t.push(line("step", [0, 0, 1, 0, 0, 1, 0, 1, 0], "+0.0"));
+        t.push(line("timeout", [0, 0, 1, 0, 0, 1, 2, 0, 0], "+0.0"));
+        t.push(log(
+            name,
+            &format!(
+                "step_ms={step} held_ms=10033.3 released=timeout residual_ms={residual} holds=1 \
+                 relabels=0 pending=0"
+            ),
+        ));
+        t.push(line("follow", [0, 0, 1, 0, 0, 0, 0, 0, 0], "+0.0"));
+    }
     // the stock "exceeded TS_SMOOTHING_THRESHOLD" and "jumped" debug lines: the leap, the restart, the
     // two pauses and the second jump inside a pending only -- no relabel and no pending relabel's
     // start reached the stock >= 70 ms or > 2 s path

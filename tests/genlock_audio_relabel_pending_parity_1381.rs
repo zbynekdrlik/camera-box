@@ -18,11 +18,17 @@
 //! ROZHODNUTÉ 5902983227) adds the one-slot sender-first steps (a stamp jump of one packet − 66 ns
 //! and + 34 ns, the two N = +1 jumps on the sender's 100 ns grid), a start only the half-packet age
 //! band admits, the band's exact edge (and 5 ms inside it, and one ns past it), a skipped slot at
-//! the − 66 ns position, and scalars at the one-packet − 100 ns forward bound. It FAILS LOUDLY when
-//! no C compiler is present.
+//! the − 66 ns position, and scalars at the one-packet − 100 ns forward bound. Slice-3 review round
+//! 1 adds a late one-slot relabel after a timed-out hold (a follow, never a start), a skipped slot
+//! at − 66 ns INSIDE a pending (the held offset stays) and a jump back toward this box's wall that
+//! still leaves the age over one packet off (the slice-2 start stays); round 2 adds the late
+//! one-slot follow at − 66 ns with its first block 5 ms late (an age just over one packet, which
+//! slice 2 read as away), the away guard's exact edge (as far off as the previous packet: no start;
+//! 1 ns further: a start) and a backward move of one packet − 50 ns inside a pending (folded: backward
+//! a slot starts at one packet). It FAILS LOUDLY when no C compiler is present.
 
 use camera_box::genlock_audio_pairing::{
-    audio_relabel_book_ns, audio_relabel_pending, audio_step_hold,
+    audio_relabel_book_ns, audio_relabel_pending, audio_stamp_age_ns, audio_step_hold,
     audio_step_relabel_pending_starts, AudioStepHold, AudioStepRelease, AUDIO_STEP_HOLD_MAX_NS,
     AUDIO_STEP_NOMINAL_WARM_PACKETS,
 };
@@ -45,6 +51,15 @@ const WARM: u64 = AUDIO_STEP_NOMINAL_WARM_PACKETS as u64 + 1;
 /// A packet outside timecode mode: clears the state.
 fn clear(v: &mut Vec<Pkt>) {
     v.push((false, 7, WALL, PACKET, MONO, false));
+}
+
+/// The Rust hold's state after the packets so far (a row that needs an exact edge computes it here).
+fn state_after(v: &[Pkt]) -> AudioStepHold {
+    let mut s = AudioStepHold::default();
+    for &(tc, off, raw, pkt, now, rst) in v {
+        audio_step_hold(&mut s, tc, off, raw, pkt, now, rst, WALL_STEP_MIN_NS);
+    }
+    s
 }
 
 /// A relabelling sender's stamp jump at a wall step: N = floor(S / slot) slots, toward −∞.
@@ -241,6 +256,126 @@ fn pending_sequence() -> Vec<Pkt> {
         for _ in 0..3 {
             take(&mut v, &mut k, off, shift, early, false);
         }
+    }
+    clear(&mut v);
+    for _ in 0..WARM + 5 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    // review round 1 (slice 3): this box steps first by 60 ms and its hold times out; the sender's
+    // late one-slot relabel then moves the age back TOWARD the nominal, 26.7 ms off on its first block
+    // (inside one packet, over half a packet): never a pending start
+    off -= 60_000_000;
+    for _ in 0..AUDIO_STEP_HOLD_MAX_NS.div_ceil(PACKET) + 3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    let jump = relabel_stamp_jump(60_000_000);
+    shift += jump;
+    take(&mut v, &mut k, off, shift, early, false);
+    early += (60_000_000 - jump) as u64;
+    for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    clear(&mut v);
+    for _ in 0..WARM + 5 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    // a skipped slot at the − 66 ns grid position INSIDE a pending (its arrival one packet late):
+    // the held offset stays, and this box's step resolves the pending with −r
+    let jump = relabel_stamp_jump(682_474_000);
+    shift += jump;
+    early += (682_474_000 - jump) as u64;
+    for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    k += 1;
+    shift -= 66;
+    for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    off -= 682_474_000;
+    for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    // a pending this box never follows (timed out, the age −682 ms off); the sender's box then steps
+    // back 300 ms first: its jump TOWARD this box's wall still leaves the age over one packet off,
+    // so the slice-2 pending start stays
+    clear(&mut v);
+    for _ in 0..WARM + 5 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    let jump = relabel_stamp_jump(682_474_000);
+    shift += jump;
+    early += (682_474_000 - jump) as u64;
+    for _ in 0..AUDIO_STEP_HOLD_MAX_NS.div_ceil(PACKET) + 3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    shift += relabel_stamp_jump(-300_000_000);
+    for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    clear(&mut v);
+    for _ in 0..WARM + 5 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    // review round 2 (slice 3): the same late follow, 66 ms at the − 66 ns grid position, its first
+    // block 5 ms late: r + 5 ms passes one packet, which slice 2 read as away -- still never a start
+    off -= 66_000_000;
+    for _ in 0..AUDIO_STEP_HOLD_MAX_NS.div_ceil(PACKET) + 3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    shift += PACKET as i64 - 66;
+    take(&mut v, &mut k, off, shift, early - 5_000_000, false);
+    early += (66_000_000 - (PACKET as i64 - 66)) as u64;
+    for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    clear(&mut v);
+    for _ in 0..WARM + 5 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    // review round 2 (slice 3): the away guard's exact edge. A packet 20 ms late (its age +20 ms, no
+    // stamp jump), then a 40 ms forward stamp jump whose age lands EXACTLY as far off on the other
+    // side: not further off, never a start; on a second try 1 ns further, a start
+    for further in [0_u64, 1] {
+        take(&mut v, &mut k, off, shift, early - 20_000_000, false);
+        let s = state_after(&v);
+        let prev_dev = audio_stamp_age_ns(s.prev_arrival_ns, s.prev_raw_ns, s.prev_off_ns)
+            .wrapping_sub(s.nominal_age_ns);
+        shift += 40_000_000;
+        let raw = (WALL + k * PACKET).wrapping_add(shift as u64);
+        let now = raw
+            .wrapping_add(off as u64)
+            .wrapping_add(s.nominal_age_ns as u64)
+            .wrapping_sub(prev_dev as u64)
+            .wrapping_sub(further);
+        assert_eq!(
+            audio_step_relabel_pending_starts(&s, true, off, raw, PACKET, now, WALL_STEP_MIN_NS),
+            further == 1,
+            "the edge row must sit on the away guard's edge"
+        );
+        v.push((true, off, raw, PACKET, now, false));
+        k += 1;
+        clear(&mut v);
+        for _ in 0..WARM + 5 {
+            take(&mut v, &mut k, off, shift, early, false);
+        }
+    }
+    // review round 2 (slice 3): inside a pending a BACKWARD stamp move just under one packet (one
+    // packet − 50 ns) folds like the skew hold's -- backward a slot starts at one packet (a duplicated
+    // slot) -- so this box's step then misses the held offset by exactly that fold
+    let jump = relabel_stamp_jump(682_474_000);
+    shift += jump;
+    early += (682_474_000 - jump) as u64;
+    for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    shift -= PACKET as i64 - 50;
+    for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    off -= 682_474_000;
+    for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
     }
     clear(&mut v);
     for _ in 0..WARM + 5 {
