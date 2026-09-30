@@ -52,10 +52,10 @@ set -euo pipefail
 #     named WARNING in the roll summary ("dantesync-tray was NOT refreshed on ..."), never a
 #     service rollback and never a non-zero exit: the tray is UI, the service is the clock.
 #
-#   * THE MASTER'S SAVED DATE (issue 1372, dantesync 1.15.0): a VERIFY-failure rollback that puts
-#     the NTP master back below 1.15.0 also deletes its date-offset.json -- a 1.15 reinstalled later
-#     would restore that stale session. Never on a slave, a 1.15.x restore, or an upgrade
-#     (scripts/lib/dantesync-rollback.sh, which holds both rollback programs).
+#   * THE MASTER'S SAVED DATE (issue 1372, dantesync 1.15.0): a VERIFY-failure rollback or a
+#     --force downgrade that puts the NTP master below 1.15.0 also deletes its date-offset.json -- a
+#     1.15 reinstalled later would restore that stale session. Never on a slave, never to 1.15.0 or
+#     newer (scripts/lib/dantesync-rollback.sh: the rule + both rollback programs).
 #
 # REUSE, NEVER REINVENT: sources dantesync-version-gate.sh for the version PARSER
 # (dantesync_version_from_version_output) + the PIN; uses dantesync-gate.sh (→ clock-offset-guard.sh
@@ -180,11 +180,13 @@ dantesync_release_url_windows_tray() {
   echo "${DANTESYNC_RELEASE_BASE}/v${1}/dantesync-tray-windows-amd64.exe"
 }
 
-# dantesync_linux_upgrade_cmd VERSION -> the remote bash text to upgrade a Linux node to VERSION.
+# dantesync_linux_upgrade_cmd VERSION [ROLE] -> the remote bash text to upgrade a Linux node to VERSION.
 # Safety order: download + sha256-verify FIRST (a bad download never stops the daemon), THEN back
 # up the current binary, THEN arm a restore-on-error trap (self-heal), THEN stop/swap/restart.
 # Any failure PAST the backup point restores the previous binary and restarts before returning
-# non-zero; a failure BEFORE it leaves the running clock master untouched.
+# non-zero; a failure BEFORE it leaves the running clock master untouched. ROLE (issue 1372): a
+# forced downgrade of the ntp-master below 1.15.0 also deletes its saved fleet date, as the LAST
+# step -- after the start, so a failed start self-heals to the 1.15 binary WITH that file.
 dantesync_linux_upgrade_cmd() {
   local version="$1" url
   url="$(dantesync_release_url_linux "$version")"
@@ -253,6 +255,7 @@ trap 'rm -rf "\$tmp"; _dantesync_remount_ro' EXIT   # success — disarm the res
 # 5. read the new version back
 dantesync --version
 EOF
+  _dantesync_linux_date_state_rm_sh "${2:-}" "$version"
 }
 
 # dantesync_windows_purge_dead_task_cmd -> the idempotent forced delete of the dead DanteSyncUpdate
@@ -285,7 +288,7 @@ dantesync_windows_wait_service_exit_ps() {
 EOF
 }
 
-# dantesync_windows_upgrade_ps VERSION -> the CONTENT of a PowerShell .ps1 that upgrades a Windows
+# dantesync_windows_upgrade_ps VERSION [ROLE] -> the CONTENT of a PowerShell .ps1 that upgrades a Windows
 # node to VERSION. Sent as a FILE (scp -O) and run with `-File` — never a nested
 # `powershell -Command "..."` over ssh (which fails SILENTLY, .claude/rules/rig-state-inspection.md
 # §2). Same safety order as Linux: download + Get-FileHash-verify FIRST, back up the exe, then a
@@ -293,7 +296,8 @@ EOF
 # Issue 1372: the tray rides the same program -- fetched + verified with the service binary before any
 # stop (dantesync_windows_tray_fetch_ps), swapped after the service is back
 # (dantesync_windows_tray_swap_ps); a tray failure prints TRAY-WARNING and never throws, so it can
-# never roll back or block the service.
+# never roll back or block the service. ROLE (issue 1372): a forced downgrade of the ntp-master
+# below 1.15.0 deletes its saved fleet date right after the service try/catch, whose catch rethrows.
 dantesync_windows_upgrade_ps() {
   local version="$1" url
   url="$(dantesync_release_url_windows "$version")"
@@ -323,6 +327,9 @@ $(dantesync_windows_wait_service_exit_ps)
     Start-Service dantesync -ErrorAction SilentlyContinue
     throw
 }
+EOF
+  _dantesync_windows_date_state_rm_ps "${2:-}" "$version"
+  cat <<EOF
 # 4. purge the dead DanteSyncUpdate relic task -- genuinely idempotent: routed through cmd /c
 # with full redirection, because a bare schtasks on an ALREADY-ABSENT task writes to stderr and
 # \$ErrorActionPreference=Stop turns that into a terminating NativeCommandError AFTER the swap
@@ -689,7 +696,8 @@ verify_node() {
 REMOTE_OUT=""
 
 run_upgrade() {
-  local name="$1" kind="$2" addr="$3" rc=0 local_ps local_sh user runcmd
+  local name="$1" kind="$2" addr="$3" rc=0 local_ps local_sh user runcmd role
+  role="$(dantesync_date_role "$name" "$NTP_MASTER")"   # issue 1372: a forced master downgrade
   case "$kind" in
     local)
       # #1077: dev1 runs as newlevel (non-root). Stage the verified binary, then run the upgrade
@@ -697,7 +705,7 @@ run_upgrade() {
       if ! ensure_linux_binary_staged "$TARGET"; then REMOTE_OUT="dev1-side staging failed"; return 1; fi
       if ! stage_linux_binary_to local ""; then REMOTE_OUT="could not place the staged binary on dev1"; return 1; fi
       local_sh="$(mktemp)"
-      dantesync_linux_upgrade_cmd "$TARGET" >"$local_sh"
+      dantesync_linux_upgrade_cmd "$TARGET" "$role" >"$local_sh"
       runcmd="$(dantesync_linux_run_script_cmd "$(id -un)" "$local_sh" "$SSH_PASS")"
       REMOTE_OUT="$(bash -c "$runcmd" 2>&1)" || rc=$?
       rm -f "$local_sh" ;;
@@ -708,7 +716,7 @@ run_upgrade() {
       if ! ensure_linux_binary_staged "$TARGET"; then REMOTE_OUT="dev1-side staging failed"; return 1; fi
       user="${addr%%@*}"
       local_sh="$(mktemp)"
-      dantesync_linux_upgrade_cmd "$TARGET" >"$local_sh"
+      dantesync_linux_upgrade_cmd "$TARGET" "$role" >"$local_sh"
       if ! REMOTE_OUT="$( { stage_linux_binary_to linux "$addr" \
             && scp_node "$local_sh" "$addr:$DANTESYNC_LINUX_SH_REMOTE"; } 2>&1)"; then
         rm -f "$local_sh"
@@ -719,7 +727,7 @@ run_upgrade() {
       REMOTE_OUT="$(ssh_node "$addr" "$runcmd" 2>&1)" || rc=$? ;;
     win)
       local_ps="$(mktemp)"
-      dantesync_windows_upgrade_ps "$TARGET" >"$local_ps"
+      dantesync_windows_upgrade_ps "$TARGET" "$role" >"$local_ps"
       if ! REMOTE_OUT="$(scp_node "$local_ps" "$addr:$DANTESYNC_WIN_PS_REMOTE" 2>&1)"; then
         rm -f "$local_ps"
         return 1
@@ -736,8 +744,8 @@ run_upgrade() {
 # (upgrade_node's read): the NTP master restored below 1.15.0 also drops its saved fleet date
 # (issue 1372, dantesync_rollback_clears_date_state), and that program line reaches the roll log.
 rollback_node() {
-  local name="$1" kind="$2" addr="$3" restored="${4:-}" role=slave rb_rc=0 out="" local_ps local_sh user runcmd
-  if dantesync_is_ntp_master "$name" "$NTP_MASTER"; then role=ntp-master; fi
+  local name="$1" kind="$2" addr="$3" restored="${4:-}" role rb_rc=0 out="" local_ps local_sh user runcmd
+  role="$(dantesync_date_role "$name" "$NTP_MASTER")"
   case "$kind" in
     local)
       # #1077: the rollback also does root-only ops (remount, install, systemctl) -> run by FILE with
@@ -809,6 +817,7 @@ upgrade_node() {
   fi
   # issue 1372: the tray rode the same program; its outcome is reported, never rolled back.
   if [ "$kind" = win ]; then dantesync_tray_note "$name" "$REMOTE_OUT"; fi
+  dantesync_rollback_date_state_note "$name" "$REMOTE_OUT"   # issue 1372: a forced master downgrade
 
   if verify_node "$name" "$kind" "$addr"; then
     return 0

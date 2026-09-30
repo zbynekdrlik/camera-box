@@ -16,12 +16,17 @@
 # in the same step: the old build neither reads nor updates it, and a 1.15 reinstalled within a day
 # would restore the session from before the rollback (a stale D). So a rollback that restores a
 # version below 1.15.0 on the fleet's ntp-master deletes it (dantesync_rollback_clears_date_state).
-# It never happens on a slave (followers keep no file), on a rollback to 1.15.x (the file is valid
-# for it; deleting it would boot-step the fleet during the day), or on an upgrade.
+# A forced DOWNGRADE of the master below 1.15.0 (upgrade_node's OLDER + --force) is a rollback in all
+# but path, so the upgrade programs apply the same rule on (role, target) -- supervisor decision,
+# issue 1372 comment 5910080606. It never happens on a slave (followers keep no file), or to 1.15.0
+# or newer (the file is valid there; deleting it would boot-step the fleet during the day).
+# WHERE: the rollback programs delete after the stop + restore and before the start; the downgrade
+# programs delete after the START, because they self-heal to the `.bak` -- in a downgrade the 1.15
+# binary -- on a failed start, and it must come back with its saved date (issue comment 5910147397).
 #
 # DEPENDS (resolved at CALL time, all from dantesync-fleet-upgrade.sh): DANTESYNC_LINUX_BIN /
 # DANTESYNC_LINUX_BAK, DANTESYNC_WIN_EXE / DANTESYNC_WIN_BAK, dantesync_windows_wait_service_exit_ps,
-# dantesync_upgrade_status (the script's one version ordering).
+# dantesync_upgrade_status (the script's one version ordering), dantesync_is_ntp_master.
 
 # The first dantesync release that persists the master's fleet date offset (dantesync issue 126).
 DANTESYNC_DATE_STATE_FIRST_VERSION='1.15.0'
@@ -33,16 +38,24 @@ DANTESYNC_WIN_DATE_STATE='C:\ProgramData\DanteSync\date-offset.json'
 # persisted date state: ROLE is the fleet's `ntp-master` (the date master, the dantesync-fleet.sh
 # role name) AND RESTORED_VERSION -- the version the rollback puts back -- is older than 1.15.0 by the
 # script's own dantesync_upgrade_status (numeric, so 1.9.0 is older). 1 otherwise, including an empty
-# or unread RESTORED_VERSION (never a guess either way).
+# or unread RESTORED_VERSION (never a guess either way). A forced downgrade passes its TARGET here.
 dantesync_rollback_clears_date_state() {
   [ "${1:-}" = ntp-master ] || return 1
   [ "$(dantesync_upgrade_status "${2:-}" "$DANTESYNC_DATE_STATE_FIRST_VERSION")" = NEWER ]
 }
 
-# _dantesync_linux_date_state_rm_sh ROLE RESTORED_VERSION -> the remote bash lines that delete the
-# persisted date state, or nothing when the rule says no. They run after the service stop (the 1.15
-# master rewrites the file on its loop) and inside the read-only-root rw window. A file that cannot be
-# removed is a named WARNING, never an exit: the clock master is never left stopped over it.
+# dantesync_date_role NAME MASTER_NAME -> `ntp-master` when NAME is the roll's NTP master, named the
+# way verify_node names it (dantesync_is_ntp_master against NTP_MASTER), else `slave`: the ROLE both
+# the rollback and the upgrade (downgrade) programs hand to the rule above.
+dantesync_date_role() {
+  if dantesync_is_ntp_master "${1:-}" "${2:-}"; then printf 'ntp-master'; else printf 'slave'; fi
+}
+
+# _dantesync_linux_date_state_rm_sh ROLE VERSION -> the remote bash lines that delete the persisted
+# date state, or nothing when the rule says no (VERSION = the restored one, or a downgrade's target).
+# The caller places them after the service stop (the 1.15 master rewrites the file on its loop) and
+# inside the read-only-root rw window. A file that cannot be removed is a named WARNING, never an
+# exit: the clock master is never left stopped over it.
 _dantesync_linux_date_state_rm_sh() {
   local f="$DANTESYNC_LINUX_DATE_STATE" why
   dantesync_rollback_clears_date_state "${1:-}" "${2:-}" || return 0
@@ -62,11 +75,11 @@ fi
 EOF
 }
 
-# _dantesync_windows_date_state_rm_ps ROLE RESTORED_VERSION -> the .ps1 lines that delete the
+# _dantesync_windows_date_state_rm_ps ROLE VERSION -> the .ps1 lines that delete the
 # persisted date state, or nothing when the rule says no. Remove-Item runs with -ErrorAction
 # SilentlyContinue inside a try/catch: under the program's $ErrorActionPreference = 'Stop' some
-# failures still THROW (a prompt in a non-interactive session), and a throw here would skip
-# Start-Service. The result is read back with Test-Path and named.
+# failures still THROW (a prompt in a non-interactive session), and a throw here would skip the rest
+# of the program (a rollback's Start-Service). The result is read back with Test-Path and named.
 _dantesync_windows_date_state_rm_ps() {
   local why
   dantesync_rollback_clears_date_state "${1:-}" "${2:-}" || return 0
