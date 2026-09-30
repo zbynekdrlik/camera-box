@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/lib/ci-run-resolve.sh -- the ONE "newest successful CI run" resolver (issue 808, #1394).
+# scripts/lib/ci-run-resolve.sh -- the ONE head-anchored "which CI run to deploy" resolver (issue 808, #1394).
 # airuleset:script-ok source-only lib -- set -euo pipefail would leak into the sourcing shell (ci-testing-gotchas)
 #
 # WHY: scripts/deploy-fleet.sh and scripts/bkshading-deploy-relay.sh each carried their own inline
@@ -252,7 +252,7 @@ ci_run_latest_success() {
       break
     fi
     seen=""
-    [ -z "$head_all" ] || seen=" (the head lookup has $(ci_run_head_state "$head_all"))"
+    [ -z "$head_all" ] || seen=" (the head lookup shows: $(ci_run_head_state "$head_all"))"
     if [ "$reads" -gt "$retries" ]; then
       echo "ci-run-resolve: no $workflow run for the $branch head $head in the runs listing after $reads reads$seen -- stale GitHub listing, refusing to pick an older run; pass --run <id>" >&2
       return 1
