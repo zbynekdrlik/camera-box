@@ -11,14 +11,16 @@
 #
 # Per deploy-from-clean-tree.md the deploy source is ALWAYS a CI artifact from a committed,
 # pushed ref — never a locally built binary. This script downloads from a GitHub Actions run
-# (default: the latest successful ci.yml run on `main`) or accepts a pre-downloaded binary path.
+# (default: the ci.yml run of the `main` head, via the shared head-anchored resolver
+# scripts/lib/ci-run-resolve.sh -- a loud fallback while the head's run is in flight or failed, a
+# refusal on a stale runs listing) or accepts a pre-downloaded binary path.
 #
 # Per approval-scope.md the deploy + the camera-box service restart it performs are the
 # standing-approved WORK — this script does NOT ask permission and does NOT gate on "is it
 # off-air / is there a live event". The operator who runs it guards live timing.
 #
 # Usage:
-#   scripts/deploy-fleet.sh                       # deploy latest successful main ci.yml artifact to cam1-6
+#   scripts/deploy-fleet.sh                       # deploy the main head's ci.yml artifact to cam1-6
 #   scripts/deploy-fleet.sh --run <run-id>        # pin a specific GitHub Actions run id
 #   scripts/deploy-fleet.sh --binary ./dist/camera-box   # deploy an already-downloaded CI binary
 #   scripts/deploy-fleet.sh --frame-probe ./dist-probe/frame-probe   # ALSO deploy the cam2-painter
@@ -29,7 +31,7 @@
 # Env:
 #   SSH_PASS   camera root password (default: newlevel)
 #   REPO       GitHub repo (default: zbynekdrlik/camera-box)
-#   BRANCH     branch whose latest successful ci.yml run is used when --run/--binary omitted (default: main)
+#   BRANCH     branch whose head ci.yml run is used when --run/--binary omitted (default: main)
 #   ARTIFACT   CI artifact name (default: camera-box-linux-amd64)
 #
 # Exit status: 0 only if EVERY camera in the set ends on the new version AND emits the genlock
@@ -48,7 +50,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/frame-probe-deploy.sh
 . "$HERE/lib/frame-probe-deploy.sh"   # frame_probe_restore_enable_decision() — the #1138 #892 enable-state-preserving painter deploy decision
 # shellcheck source=scripts/lib/ci-run-resolve.sh
-. "$HERE/lib/ci-run-resolve.sh"   # ci_run_latest_success() -- the ONE newest-successful-run resolver, shared with bkshading-deploy-relay.sh (issue 808)
+. "$HERE/lib/ci-run-resolve.sh"   # ci_run_latest_success() -- the ONE head-anchored CI run resolver, shared with bkshading-deploy-relay.sh (issue 808, #1394)
 # shellcheck source=scripts/lib/cam2-painter-deadman.sh
 . "$HERE/lib/cam2-painter-deadman.sh"  # cam2_painter_deadman_arm_cmds() — the #1351 re-arm of the TRANSIENT deadman timer (a stopped systemd-run unit is GC'd, so `systemctl start` cannot revive it)
 # The deadman re-fire window used when RESTORING a prior-armed deadman after the swap (#1351). The
@@ -240,11 +242,12 @@ if [ -n "$BINARY" ]; then
 else
   command -v gh >/dev/null 2>&1 || { err "gh CLI is required to download the artifact"; exit 1; }
   if [ -z "$RUN_ID" ]; then
-    info "Finding the newest successful ci.yml run on '$BRANCH' that carries '$ARTIFACT'..."
-    # issue 808: the ONE shared resolver (client-side newest SUCCESS by createdAt that carries the
-    # artifact, logged) -- never the server-side `--status success --limit 1` pick that went stale.
+    info "Resolving the ci.yml run of the '$BRANCH' head that carries '$ARTIFACT'..."
+    # issue 808 + #1394: the ONE shared resolver -- the branch head's own run, else a loud fallback
+    # to the newest older success carrying the artifact, else a loud refusal (a stale runs listing,
+    # a gh error). Never the server-side `--status success --limit 1` pick that went stale.
     RUN_ID="$(ci_run_latest_success "$REPO" "$BRANCH" ci.yml "$ARTIFACT")" || RUN_ID=""
-    [ -n "$RUN_ID" ] || { err "no successful ci.yml run on '$BRANCH' carries '$ARTIFACT'"; exit 1; }
+    [ -n "$RUN_ID" ] || { err "no usable ci.yml run on '$BRANCH' carries '$ARTIFACT' (the ci-run-resolve line above names why)"; exit 1; }
   fi
   RUN_SHA="$(gh run view "$RUN_ID" --repo "$REPO" --json headSha -q .headSha)"
   info "Downloading artifact '$ARTIFACT' from run $RUN_ID (sha ${RUN_SHA:0:9})..."

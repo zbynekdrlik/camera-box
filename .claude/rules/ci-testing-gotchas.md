@@ -1650,3 +1650,13 @@ Worked example: `_contract_sweep` in `tests/python/test_cg_chain_measure_1302.py
 
 On a loaded dev1, one pytest run over every file that reads rig-mode.sh / the cg-chain libs took
 more than the 600 s Bash cap. Split it into chunks (`files[n::4]`, one script run per chunk).
+
+## A test fixture holding a real 40-hex commit sha is blocked as a "secret" at `git add` AND `git commit` (#1394)
+
+`block-sensitive-staging.sh` reads any 40+ char hex blob in staged content as a possible key. A
+test that replays a live incident with the real run shas (`HEAD = "1f7e6569b78c..."`) is refused at
+`git add`, and again at the `git commit` of the staged file. A public commit sha is not a secret:
+append `# airuleset:secret-ok <reason: public commit shas of this repo, the live replay fixture>`
+to every `git add` / `git commit` call that stages that file. Never "hide" the sha by building it
+at runtime or splitting the literal. A synthetic sha the test only needs to be well-formed can be
+`"b" * 40`, which the scan never sees.

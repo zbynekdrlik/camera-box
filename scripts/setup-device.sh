@@ -66,6 +66,10 @@ fail() {
                                             # body, shared with bkshading-provision-relay.sh; it sources the
                                             # relay CI artifact names + the ONE run resolver itself.
                                             # verify-device.sh (ao) grades the result.
+# shellcheck source=scripts/lib/ci-run-resolve.sh
+. "$HERE/lib/ci-run-resolve.sh"  # ci_run_latest_success -- the ONE head-anchored CI run resolver (#1394),
+                                 # shared with deploy-fleet.sh / bkshading-deploy-relay.sh; STEP 3 and
+                                 # STEP 3b resolve their default camera-box / probe-tools run through it.
 # shellcheck source=scripts/lib/udev-camera-box.sh
 . "$HERE/lib/udev-camera-box.sh"  # udev_camera_box_rules_content/udev_camera_box_helper_script_content
                                    # (#894) -- also sourced (unmodified) by verify-device.sh's (w)
@@ -489,7 +493,7 @@ while [ $# -gt 0 ]; do
             ;;
         --run)
             # #1066: pin the CI artifact to an EXPLICIT ci.yml run id (mirrors deploy-fleet.sh's
-            # --run), bypassing the default `gh run list` latest-successful lookup -- for a
+            # --run), bypassing the default ci_run_latest_success lookup (#1394) -- for a
             # deliberate bisect/rollback or to match the fleet to one exact run.
             CI_RUN_ID_ARG="${2:?--run needs a ci.yml run id}"
             shift 2
@@ -654,7 +658,9 @@ echo -e "${GREEN}[3/${TOTAL_STEPS}] Installing camera-box binary...${NC}"
 #   3. --run <id>                              - gh run download that EXACT ci.yml run's artifact
 #   4. default                                 - gh run download the latest successful ci.yml
 #      artifact on $CI_BRANCH (=main), mirroring scripts/deploy-fleet.sh's own mechanism, so a
-#      fresh box matches the fleet's pin with no manual copy.
+#      fresh box matches the fleet's pin with no manual copy. #1394: the run comes from the ONE
+#      shared resolver (scripts/lib/ci-run-resolve.sh) -- the branch head's own run, or a loud
+#      fallback / refusal -- never an inline listing query, which GitHub sometimes serves STALE.
 BINARY_SRC="${BINARY_ARG:-${CAMERA_BOX_BINARY_URL:-}}"
 if [ -n "$BINARY_SRC" ] && [ -f "$BINARY_SRC" ]; then
     echo "  Using local binary: $BINARY_SRC"
@@ -689,9 +695,8 @@ elif command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
         RUN_ID="$CI_RUN_ID_ARG"
     else
         echo "  Fetching latest CI artifact (branch: $CI_BRANCH = the fleet's production pin)..."
-        RUN_ID="$(gh run list --repo "$GITHUB_REPO" --branch "$CI_BRANCH" --workflow ci.yml \
-            --status success --limit 1 --json databaseId -q '.[0].databaseId // empty' 2>/dev/null || true)"
-        [ -n "$RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' -- install manually, or re-run with --binary <url|path> / --run <id> / CAMERA_BOX_BINARY_URL"
+        RUN_ID="$(ci_run_latest_success "$GITHUB_REPO" "$CI_BRANCH" ci.yml camera-box-linux-amd64)" || RUN_ID=""
+        [ -n "$RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' (the ci-run-resolve line above names why) -- install manually, or re-run with --binary <url|path> / --run <id> / CAMERA_BOX_BINARY_URL"
     fi
     DIST_DIR="$(mktemp -d)"
     if gh run download "$RUN_ID" --repo "$GITHUB_REPO" -n camera-box-linux-amd64 --dir "$DIST_DIR" 2>/dev/null \
@@ -754,9 +759,8 @@ if cam2_is_painter_box "$DEVICE_NAME"; then
           PROBE_RUN_ID="$CI_RUN_ID_ARG"
         else
         echo "  Fetching probe-tools-linux-amd64 CI artifact (branch: $CI_BRANCH)..."
-        PROBE_RUN_ID="$(gh run list --repo "$GITHUB_REPO" --branch "$CI_BRANCH" --workflow ci.yml \
-            --status success --limit 1 --json databaseId -q '.[0].databaseId // empty' 2>/dev/null || true)"
-        [ -n "$PROBE_RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' -- cannot fetch frame-probe (#863). STAGE IT FROM dev1: gh run download <ci.yml run> -n probe-tools-linux-amd64 --dir /tmp && scp /tmp/frame-probe root@<box>:/tmp/ , then re-run: setup-device.sh --probe-binary /tmp/frame-probe <BOX> (FRAME_PROBE_BINARY_URL=<url|path> also works)."
+        PROBE_RUN_ID="$(ci_run_latest_success "$GITHUB_REPO" "$CI_BRANCH" ci.yml probe-tools-linux-amd64)" || PROBE_RUN_ID=""
+        [ -n "$PROBE_RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' (the ci-run-resolve line above names why) -- cannot fetch frame-probe (#863). STAGE IT FROM dev1: gh run download <ci.yml run> -n probe-tools-linux-amd64 --dir /tmp && scp /tmp/frame-probe root@<box>:/tmp/ , then re-run: setup-device.sh --probe-binary /tmp/frame-probe <BOX> (FRAME_PROBE_BINARY_URL=<url|path> also works)."
         fi
         PROBE_DIST_DIR="$(mktemp -d)"
         if gh run download "$PROBE_RUN_ID" --repo "$GITHUB_REPO" -n probe-tools-linux-amd64 --dir "$PROBE_DIST_DIR" 2>/dev/null \
