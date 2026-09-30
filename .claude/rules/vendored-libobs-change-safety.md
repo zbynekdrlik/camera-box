@@ -692,6 +692,17 @@ and drives it tick by tick. Lessons from its two review rounds:
     passed every value test.
   - Mutation run: 29/29 C and wiring mutants killed, and all 12 wiring mutants were also rejected by
     the real pwsh lines of both workflows.
+  - Review round 1 (the pending's fold rule, its flag kept after a release for `pending=`): 32/32,
+    the same 12 wiring mutants rejected by pwsh. The first round-1 run left two survivors. One was a
+    fold that never moves the held offset: no script had a relabel-shaped jump INSIDE a pending.
+    The other printed `pending=` off the kept flag on a non-release line: no scenario logged a line
+    after a pending's release. A flag that outlives its event needs a test where it is still set
+    but must not be read (here a joint relabel after a resolved pending, which must print
+    `pending=0`).
+  - Keeping that flag also silently weakened older tests. Every assertion that read the flag as
+    "still pending" passed after a release too, and a Rust mutant that resolves a pending without
+    an offset step survived behind it. When a flag starts to outlive its event, grep every test
+    that reads it and make "running" read `active && flag`.
 - **A harness scenario must carry the ARRIVAL shape of the event it models.** After slice 2, a stamp
   jump of more than one packet with continuous arrival IS a pending relabel. The slice-1 harness
   modelled the 1367 stamp leap and a sender restart as stamp jumps with continuous arrival, which

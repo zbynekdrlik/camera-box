@@ -956,6 +956,16 @@ re-booked a phantom jump against that stale error: `place_jumps` 0 → 180 → 4
       sender-first settles only at +725 s, and +260 ms books one placement jump.
     - The 1367 sender events never start a pending (`no_sender_event_starts_a_pending_relabel_1367`,
       the `Run.pendings` counter).
+    - Review round 1: `Follow::RelabelPause` is the relabel sender plus a 500 ms pause 5 slots
+      after its own step, inside the pending window. +682 ms and +260 ms, the receiver 3 s later:
+      one `RelabelPending` release at the receiver's step, nothing overwritten or dropped, and a
+      zero-filled gap no longer than the sender's own pause. Before the fix, the held offset
+      absorbed the pause and the pending ran to the bound.
+    - Loss anti-tautology (review round 1): `Variant::NoStepHold` on the same sender-first relabels
+      loses audio from the sender's step on (+260 / +682 ms: a 233 / 667 ms zero-filled gap, −1.5 s
+      dropped, +2.5 s reset). `NoRelabel` is not such a check: it keeps the pure hold, and the
+      pending start alone keeps a jump under 2 s appended there. Only the +2.5 s timeline reset
+      loses.
 - **Parity** (`tests/asrc_compensator_parity_1367.rs`): `tcs` = the skew, the placement, the
   backstop probes (also on a LOCKED arrival-mode servo). `tcw` = 5 s of skew, the placement, then
   8 s of a 15 ms error that must NOT arm the restore, which proves the sustained count restarts at

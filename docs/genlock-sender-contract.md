@@ -230,9 +230,13 @@ receiver's own box, which shares its clock. A sender whose box steps FIRST (a cr
 caught as a PENDING relabel when its stamps jump by more than one block while its packets keep
 arriving about one block apart: the receiver keeps appending on the continuous timeline until its own
 step follows to within one block (the residual is then repaid the same way), and applies the jump
-once after 10 s if it never does. A sender-first stamp jump of one block or less looks the same as a
-skipped or duplicated block and keeps the stock path (appended under 70 ms, booked by the timecode
-ASRC). A sender whose chunks do not line up with
+once after 10 s if it never does. A sender-first stamp jump of about one block (a step of one slot,
+N = ±1) is not reliably caught. Backward it is exactly a duplicated block and keeps the stock path:
+the level loop may take minutes to repay the remainder (−10 ms: 23.3 ms off for 748 s in the
+bench). Forward, a jump of exactly one block is appended and booked by the timecode ASRC; the
+receiver's own later step then places the packet once and overwrites about r of queued audio.
+Whether a forward one-slot jump counts as a pending relabel depends on 1 ns of the grid and on the
+arrival jitter (camera-box issue 1381, a known limit). A sender whose chunks do not line up with
 boundaries **MUST** keep the raw submission wall clock (SongPlayer 0.69.0-dev.10 / its issue 224
 stamps its paced blocks on their boundary, camera-box issue 1294). Samples
 **MUST** be delivered at real-time rate (`samples_per_boundary = 48000 · interval_seconds`); a
