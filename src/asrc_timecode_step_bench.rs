@@ -322,6 +322,10 @@ struct StepRun {
     follow_overwritten_ms: f64,
     follow_dropped_ms: f64,
     follow_gap_ms: f64,
+    /// Review round 3: max |A/V| from the sender's follow on, and the last time from the follow on
+    /// that |A/V| was over the bound (s after the follow, 0 = never), ms / s.
+    follow_av_max_ms: f64,
+    follow_av_settle_s: f64,
     /// max |estimated| of the servo after the step (ppm).
     est_max_ppm: f64,
 }
@@ -383,6 +387,12 @@ fn run_step_traced(case: StepCase, variant: Variant) -> (StepRun, StepTrace) {
         let av_ms = landed.actual.wrapping_sub(truth) as i64 as f64 / 1e6;
         if t >= step_at(case) {
             r.av_max_all_ms = r.av_max_all_ms.max(av_ms.abs());
+        }
+        if t >= follow_at(case) {
+            r.follow_av_max_ms = r.follow_av_max_ms.max(av_ms.abs());
+            if av_ms.abs() > AV_BOUND_MS {
+                r.follow_av_settle_s = (t - follow_at(case)) as f64 / 1e9;
+            }
         }
         if t >= measure_at {
             let after_s = (t - measure_at) as f64 / 1e9;

@@ -539,14 +539,22 @@ fn a_late_relabel_after_a_timed_out_hold_never_starts_a_pending_1381() {
 }
 
 #[test]
-fn a_jittered_late_follow_costs_nothing_from_the_follow_on_1381() {
+fn a_jittered_late_follow_loses_no_audio_from_the_follow_on_1381() {
     // review round 2 (ROZHODNUTÉ 5903945145): this box's wall steps first by |S| = 34–38 ms, just
     // over one slot, and the arrival jitter releases its skew hold EARLY on the age test (the step is
     // placed there -- the skew hold's known limit, outside this check). The in-band nominal then
     // tracks the step the stamps never matched, and the sender relabels 12 / 60 / 120 s later: the
     // away guard alone read that late follow as a sender-first step, held it 10 s and placed one slot
-    // (a 33.3 ms gap forward, 66.7 ms overwritten backward). From the follow on nothing may be lost,
+    // (a 33.3 ms gap forward, 66.7 ms overwritten backward). From the follow on no audio may be lost,
     // and no pending relabel may start.
+    //
+    // Review round 3: the follow is not free. The early release left the audio |S| off its video;
+    // at the follow the error becomes the relabel's own landing move (one slot forward, two slots
+    // backward: N = −2 overshoots), booked at 1000 ppm (1 ms per second). Pinned here so the cost
+    // stays visible: at most N slots off from the follow, back within the bound N slots' worth of
+    // seconds later. Placing the follow instead zeroes the A/V at once but overwrites up to 66.7 ms
+    // or opens a 33.3 ms gap (measured in a scratch probe, review round 3).
+    let slot_ms = PACKET_FRAMES as f64 * 1e3 / RATE as f64;
     let mut failures = Vec::new();
     for s_ms in [-38_i64, -36, -34, 34, 36, 38] {
         for lag_s in [12_u64, 60, 120] {
@@ -561,18 +569,24 @@ fn a_jittered_late_follow_costs_nothing_from_the_follow_on_1381() {
                     step_offset_ns: 0,
                 };
                 let r = run_step(case, Variant::Production);
+                let slots = if s_ms > 0 { 1.0 } else { 2.0 };
                 if r.pendings != 0
                     || r.follow_overwritten_ms != 0.0
                     || r.follow_dropped_ms != 0.0
                     || r.follow_gap_ms != 0.0
+                    || r.follow_av_max_ms > slots * slot_ms + 0.5
+                    || r.follow_av_settle_s > slots * slot_ms + 1.0
                 {
                     failures.push(format!(
                         "S {s_ms} ms lag {lag_s} s jitter {jitter_ms} ms: pendings {} lost from the \
-                         follow {:.1} / {:.1} / {:.1} ms (overwritten / dropped / gap), releases {:?}",
+                         follow {:.1} / {:.1} / {:.1} ms (overwritten / dropped / gap), A/V from the \
+                         follow max {:.1} ms settled {:.1} s, releases {:?}",
                         r.pendings,
                         r.follow_overwritten_ms,
                         r.follow_dropped_ms,
                         r.follow_gap_ms,
+                        r.follow_av_max_ms,
+                        r.follow_av_settle_s,
                         r.releases
                     ));
                 }

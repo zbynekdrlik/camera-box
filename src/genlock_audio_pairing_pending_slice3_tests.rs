@@ -501,7 +501,10 @@ fn a_timeout_places_one_slot_or_more_and_books_a_sub_slot_move_1381() {
         }
     }
     let (rel, residual) = released.expect("the pending ends");
-    assert_eq!((rel, residual), (AudioStepRelease::Timeout, jump - p - 1_000));
+    assert_eq!(
+        (rel, residual),
+        (AudioStepRelease::Timeout, jump - p - 1_000)
+    );
     assert!(
         !audio_step_release_places(rel, residual, PACKET),
         "issue 1381: a folded pending's sub-slot timeout residual is booked, not placed"
