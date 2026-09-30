@@ -117,10 +117,21 @@ or never.
     give 0 pendings and a trace identical to `NoRelabel`.
   - **A late follow starts no pending** (review rounds 1-2): this box steps 50–66 / 260 ms first
     and the sender relabels 12 / 20 s later: one `timeout`, 0 pendings, no gap under 67 ms.
-  - **A jittered late follow loses nothing from the follow on** (review round 2, ROZHODNUTÉ
+  - **A jittered late follow loses no audio from the follow on** (review round 2, ROZHODNUTÉ
     5903945145). S = ±34 / 36 / 38 ms, the sender 12 / 60 / 120 s late, `burst_jitter_ns` 3 / 5 ms:
     the jitter releases the skew hold early on the age test (the step is placed there -- the skew
-    hold's known limit), and the sender's follow is the remembered step's follow: 0 pendings and 0 ms
+    hold's known limit: |S| overwritten forward, a |S| gap backward, the audio |S| off its video
+    until the follow), and the sender's follow is the remembered step's follow: 0 pendings and 0 ms
     overwritten, dropped or zero-filled from the follow on (`StepRun.follow_*_ms`, counted from
     `follow_at`). Before the remembered step, 17 of the 36 cases started a pending: 66.7 ms
     overwritten (backward) or a 33.3 ms gap (forward, 60 s or more late).
+  - **The follow still costs A/V** (review round 3, pinned by the same test through
+    `StepRun.follow_av_max_ms` / `follow_av_settle_s`). At the follow the error becomes the
+    relabel's landing move, one slot forward or two backward, booked back at 1 ms per second:
+    33.3 ms settled in 31.4 s, 66.7 ms in 64.7 s. The bounds are tight (1 ms / 3 s tighter fails).
+    A scratch probe over the same 36 cases: the follow on the placement slew instead gives the same
+    numbers; placing it zeroes the A/V but overwrites up to 66.7 ms or opens a 33.3 ms gap.
+  - **A raw-clock sender's late step rings** (`Follow::JumpLate`, probe only, review round 3): its
+    first stepped packet arrives late, so it is no relabel shape, and after an early age release the
+    level loop rings about 13 min at ~7 ms. The same under all three follow treatments, so it is not
+    the memory's; a follow-up candidate.

@@ -712,11 +712,27 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
       follow (`audio_relabel_pending`) CLEARS the memory in the hold, so a second jump is judged
       afresh; a sub-slot stamp move of the same sign keeps it. Timecode off forgets it.
     - "Resolved like a matched relabel" means: never a pending, and the memory is gone. The follow
-      packet itself takes the stock path (appended under 70 ms and booked by the timecode ASRC,
-      placed at 70 ms or more), so a step is never paid twice.
-    - Known limit, unchanged: the early age release PLACES the step before the follow (the skew
-      hold's slice-1 limit). For a forward step that placement overwrites up to one slot; the
-      bench's "zero audio overwritten" is counted from the follow on.
+      packet itself takes the stock path (appended under 70 ms, placed at 70 ms or more). A jump of
+      half a packet or more is then booked by the timecode ASRC at 1000 ppm, the same rate as a
+      relabel's placement slew: a scratch probe that put the follow on the slew gave the same
+      numbers over the 36 bench cases (review round 3).
+    - The follow is NOT free (review round 3 corrected round 2's "never paid twice"). The early age
+      release PLACES the step before the follow (the skew hold's slice-1 limit, unchanged): |S|
+      overwritten for a forward step, a |S| gap for a backward one (34–38 ms in the bench), and the
+      audio |S| off its video until the follow. At the follow the error becomes the relabel's own
+      landing move, one slot forward or two slots backward (N = −2 overshoots), booked back at
+      1 ms per second: 33.3 ms settled in 31 s, 66.7 ms in 65 s. No audio is lost from the follow on.
+      Placing the follow instead would zero the A/V at once but overwrite up to 66.7 ms or open a
+      33.3 ms gap (probe). The bench pins the booked cost.
+    - One step is remembered: a later unmatched step replaces it, so a second step inside the first
+      one's lag leaves the first step's late follow to the away guard alone (a step storm; review
+      round 3 probe). A sender-first pending that timed out followed by this box's own late step
+      records a memory although the stamps already moved: harmless, since a later stamp jump would
+      need the opposite sign and a matching size.
+    - A raw-clock sender (its stamps are its wall at emit) whose first stepped packet also arrives
+      late is not a relabel shape and takes the stock path; after an early age release the level
+      loop then rings about 13 min at ~7 ms. The same with or without the memory, on the slew or
+      placed (probe): not this slice's, a follow-up candidate.
     - Wiring: the two fields in `obs-internal.h`, both wrappers pass them
       (`genlock_audio_step_hold_source`, `genlock_audio_relabel_pending_source`), the wiring test's
       needles and both pwsh gates.
@@ -741,8 +757,13 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
 - **A one-slot pending this box never follows** runs to the 10 s bound and releases `timeout` with
   J as its residual, and `audio_step_release_places` PLACES the packet on EVERY grid position: a
   zero-filled gap of J, nothing overwritten or dropped (ROZHODNUTÉ 5903945145 point 2: the stamps
-  win). `Timeout => residual != 0`; a Followed release still places only over one packet. Slice 3
-  first booked the − 66 ns position (J within one packet) at 1000 ppm through the timecode ASRC.
+  win). A timeout places a move of ONE SLOT or more (forward from one packet − 100 ns, either sign);
+  a Followed release still places only over one packet. Slice 3 first booked the − 66 ns position
+  (J within one packet) at 1000 ppm through the timecode ASRC. A relabel-shaped jump inside a
+  pending folds, so a folded pending can time out with a sub-slot move; that stays booked (review
+  round 3: round 2 had widened the rule to any non-zero move, e.g. −966 ns after a one packet +
+  1 µs step back). A skew hold's own timeout is over one packet by construction (the follow test
+  runs first on the same packet).
 - **Tests.**
   - Unit (`src/genlock_audio_pairing_pending_slice3_tests.rs`, a `#[path]` child of the pending
     tests): the bound at − 66 / + 34 / − 100 / − 101 ns
@@ -758,13 +779,16 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
     jittered driver (14 400 runs: fps, step, lag, jitter, seed) with zero false pendings; the
     memory (remembered, cleared, kept by a sub-slot move, not remembered for a matched follow, a
     pending timeout or a reset, the window's strict edge, the wrong sign, a zero jump, timecode
-    off).
+    off). Round 3: the timeout's one-slot edge (± one packet − 100 ns places, one ns under does
+    not) and the folded pending that times out with −966 ns (booked).
   - Bench (`src/asrc_timecode_pending_bench.rs`, `asrc-timecode-step-bench.md`): the grid premise,
     the one-slot steps on all three positions, the never-follows case (placed on every position), a
     skipped block, a duplicated block and N = −1 steps byte for byte, a late follow (50–66 /
     260 ms, 12 / 20 s after this box's step, on every position) that never starts a pending, and
     the jittered late follow (S = ±34 / 36 / 38 ms, 12 / 60 / 120 s, 3 / 5 ms jitter): 0 pendings,
-    0 ms overwritten, dropped or zero-filled from the follow on (17 of 36 failed before).
+    0 ms overwritten, dropped or zero-filled from the follow on (17 of 36 failed before), and the
+    A/V cost pinned from the follow on (`StepRun.follow_av_max_ms` / `follow_av_settle_s`: at most
+    N slots, settled within N slots' worth of seconds; both bounds tight).
   - Parity (`tests/genlock_audio_relabel_pending_parity_1381.rs`): scalars at the bound, both jumps,
     an age-band-only start, the band's edge (on it, 5 ms inside, 1 ns past), a skipped slot at
     − 66 ns outside and inside a pending, the late follows (on time; 5 ms late at − 66 ns), the toward
@@ -773,15 +797,15 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
     follow exactly one packet short (never remembered), a 20 ms sub-slot move (keeps the memory),
     scalar vectors of `audio_step_unmatched_follow` (window edges, both signs, saturation) and both
     drivers printing the two memory fields; the step-hold parity replays a sequence that reaches a
-    remembered step.
+    remembered step, and (round 3) the timeout's one-slot edge and a folded −966 ns residual.
   - Ingest lift: pending at +40 / +60 ms, one never followed, a skipped slot and an N = −1 relabel
     on the stock path, a skipped slot inside a pending (resolved with −6.7 ms), and the late follows
     at 60 ms and at 66 ms with a 5 ms late block (no second hold), and the jittered late follow of
     34 ms (one step-hold line, `released=followed residual_ms=-34.0`, no pending).
-  - Mutation: C 42/42, Rust 40/41 (the away guard's constants, the memory's window, sign, zero
-    jump, budget, record threshold, clear shape, each record site, and the timeout placement). The
-    survivor, `stamp_jump_ns > 0` as `>= 0`, is equivalent: a zero jump never passes
-    `jump > step_min`.
+  - Mutation: C 45/45, Rust 43/44 (the away guard's constants, the memory's window, sign, zero
+    jump, budget, record threshold, clear shape, each record site, and the timeout's one-slot rule:
+    the old over-one-packet rule, always, any non-zero move, strict, one packet). The survivor,
+    `stamp_jump_ns > 0` as `>= 0`, is equivalent: a zero jump never passes `jump > step_min`.
 - **Live acceptance (supervisor).** Ships in the same FULL bundle. At a date step where a cross-box
   sender's box steps first by one slot (+33.3 … +66.7 ms): one `genlock-audio-step-hold …
   released=relabel-pending … pending=1` line with `step_ms=+33.333` and `residual_ms` = −r; no
