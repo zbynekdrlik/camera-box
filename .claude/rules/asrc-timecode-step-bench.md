@@ -131,7 +131,13 @@ or never.
     33.3 ms settled in 31.4 s, 66.7 ms in 64.7 s. The bounds are tight (1 ms / 3 s tighter fails).
     A scratch probe over the same 36 cases: the follow on the placement slew instead gives the same
     numbers; placing it zeroes the A/V but overwrites up to 66.7 ms or opens a 33.3 ms gap.
-  - **A raw-clock sender's late step rings** (`Follow::JumpLate`, probe only, review round 3): its
-    first stepped packet arrives late, so it is no relabel shape, and after an early age release the
-    level loop rings about 13 min at ~7 ms. The same under all three follow treatments, so it is not
-    the memory's; a follow-up candidate.
+  - **A raw-clock sender's late step packet rings after any receiver-first hold** (`Follow::JumpLate`,
+    probe only, review rounds 3-4): its +8 ms lateness is left to the level loop, ~7 ms off and back
+    within 2 ms only after ~740 s. It happens on a clean in-hold `followed` release too (lag 5 s,
+    jitter 0, any S and sign), never without a hold, and identically on the slice-3 base, under all
+    three follow treatments. The receiver-first twin of the slice-2 round-2 JumpLate fix
+    (`a_raw_clock_senders_late_step_packet_leaves_no_residual_1381`, sender-first only); a
+    follow-up candidate.
+  - The pin's A/V window starts at the sender's first followed BLOCK (its content slot at or after
+    `follow_at`), not at the follow instant: an old-schedule block still in flight then reads |S|,
+    over the forward bound (review round 4).

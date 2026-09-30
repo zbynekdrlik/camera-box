@@ -323,7 +323,9 @@ struct StepRun {
     follow_dropped_ms: f64,
     follow_gap_ms: f64,
     /// Review round 3: max |A/V| from the sender's follow on, and the last time from the follow on
-    /// that |A/V| was over the bound (s after the follow, 0 = never), ms / s.
+    /// that |A/V| was over the bound (s after the follow, 0 = never), ms / s. Counted from the first
+    /// block the sender produced after its follow (its content slot at or after `follow_at`, review
+    /// round 4): an old-schedule block still in flight at that instant is not yet followed.
     follow_av_max_ms: f64,
     follow_av_settle_s: f64,
     /// max |estimated| of the servo after the step (ppm).
@@ -388,10 +390,10 @@ fn run_step_traced(case: StepCase, variant: Variant) -> (StepRun, StepTrace) {
         if t >= step_at(case) {
             r.av_max_all_ms = r.av_max_all_ms.max(av_ms.abs());
         }
-        if t >= follow_at(case) {
+        if slot_ns(pkt.slot) >= follow_at(case) {
             r.follow_av_max_ms = r.follow_av_max_ms.max(av_ms.abs());
             if av_ms.abs() > AV_BOUND_MS {
-                r.follow_av_settle_s = (t - follow_at(case)) as f64 / 1e9;
+                r.follow_av_settle_s = t.saturating_sub(follow_at(case)) as f64 / 1e9;
             }
         }
         if t >= measure_at {

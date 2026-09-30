@@ -729,10 +729,14 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
       round 3 probe). A sender-first pending that timed out followed by this box's own late step
       records a memory although the stamps already moved: harmless, since a later stamp jump would
       need the opposite sign and a matching size.
-    - A raw-clock sender (its stamps are its wall at emit) whose first stepped packet also arrives
-      late is not a relabel shape and takes the stock path; after an early age release the level
-      loop then rings about 13 min at ~7 ms. The same with or without the memory, on the slew or
-      placed (probe): not this slice's, a follow-up candidate.
+    - A raw-clock sender (its stamps are its wall at emit) whose step packet goes out late
+      (`Follow::JumpLate`, +8 ms) leaves that lateness to the level loop around ANY receiver-first
+      skew hold it follows: ~7 ms off, back within 2 ms only after ~740 s. Review round 4 measured
+      it on a clean in-hold `followed` release too (lag 5 s, jitter 0, any S and sign; no ring
+      without a hold; identical on the slice-3 base). So it is independent of the early release, of
+      the memory and of the follow's treatment: the receiver-first twin of the slice-2 round-2
+      JumpLate fix (`a_raw_clock_senders_late_step_packet_leaves_no_residual_1381`, sender-first
+      only). A follow-up candidate, not this slice's.
     - Wiring: the two fields in `obs-internal.h`, both wrappers pass them
       (`genlock_audio_step_hold_source`, `genlock_audio_relabel_pending_source`), the wiring test's
       needles and both pwsh gates.
