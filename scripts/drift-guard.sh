@@ -2229,7 +2229,13 @@ compare_observed() {
       # bin\64bit\distroav.dll (the ONLY path OBS loads it from). manifest_sha_for_component
       # resolves by BASENAME, so these two different keys map to the same distroav.dll and the
       # compare is honest once the deploy ships the bundle bytes to that load path (Option A).
-      if [ -n "$m_distroav_sha" ]; then
+      if [ "$o_strih_linux" = "1" ]; then
+        # #1397 (release run 36741922783, 30.9.2026): the Linux strih has no distroav.dll either --
+        # the check only engages when the pinned manifest lists distroav.dll (a FULL-bundle deploy),
+        # so it hid behind the obs.dll-only fast manifest until then and read UNKNOWN on a healthy
+        # rig. SKIP it exactly like the obs.dll facet above; the Windows boxes keep the check.
+        printf '  %-20s SKIPPED  (Windows-only distroav.dll byte facet skipped on a Linux strih -- genlock_build_sha parity covers the bundle -- #1397 --strih-linux)\n' "distroav_dll_sha256"
+      elif [ -n "$m_distroav_sha" ]; then
         rc=0
         if [ -n "$o_alt_manifest" ]; then
           drift_check_either "distroav_dll_sha256" "$m_distroav_sha" "$a_distroav_sha" \

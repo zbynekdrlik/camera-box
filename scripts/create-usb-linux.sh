@@ -9,8 +9,11 @@ set -euo pipefail
 # post-install patching. The boot-critical steps that make this true (all of which bit us live
 # on cam5 + cam6, 2026-07-03):
 #   * FAIL-LOUD dep check (check_required_files) BEFORE any disk write — the script copies sibling
-#     files (lib/install-grub-efi.sh, lib/camera-box-grow-root.sh, ../systemd/…grow-root.service)
-#     into the target; a MISSING sibling once broke the install mid-way AFTER partitioning (cam6).
+#     files (lib/install-grub-efi.sh, lib/camera-box-grow-root.sh, ../systemd/…grow-root.service,
+#     lib/grub-fast-boot.sh) into the target; a MISSING sibling once broke the install mid-way AFTER
+#     partitioning (cam6).
+#   * NO GRUB menu and NO countdown (#1394): timeout 0, style hidden, recordfail timeout 0 from
+#     lib/grub-fast-boot.sh, and the generated grub.cfg is graded before the image is accepted.
 #   * MASK systemd-networkd-wait-online in the chroot — unbounded, it stalled boot before
 #     multi-user.target so sshd never started (cam5/cam6 pinged but :22 was dead).
 #   * NAMED NVRAM UEFI boot entry (create_efi_boot_entry, host side) — grub-install --removable
@@ -110,13 +113,15 @@ check_requirements() {
 #   $SCRIPT_DIR/lib/install-grub-efi.sh              (sourced in the chroot, #344)
 #   $SCRIPT_DIR/lib/camera-box-grow-root.sh          (installed to /usr/local/sbin, #369)
 #   $SCRIPT_DIR/../systemd/camera-box-grow-root.service (installed as a systemd unit, #369)
+#   $SCRIPT_DIR/lib/grub-fast-boot.sh                (sourced in the chroot, #1394)
 check_required_files() {
     log "Checking required sibling files..."
     local f
     for f in \
         "$SCRIPT_DIR/lib/install-grub-efi.sh" \
         "$SCRIPT_DIR/lib/camera-box-grow-root.sh" \
-        "$SCRIPT_DIR/../systemd/camera-box-grow-root.service"; do
+        "$SCRIPT_DIR/../systemd/camera-box-grow-root.service" \
+        "$SCRIPT_DIR/lib/grub-fast-boot.sh"; do
         [[ -f "$f" ]] || error "Missing required file: $f — refusing to partition. Run \
 create-usb-linux.sh from a full repo checkout (its lib/ and systemd/ siblings MUST be present)."
     done
@@ -536,7 +541,6 @@ ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf
 # became the default and bricked CAM3/CAM4.
 cat > /etc/default/grub << 'GRUBEOF'
 GRUB_DEFAULT=saved
-GRUB_TIMEOUT=3
 GRUB_DISTRIBUTOR="Ubuntu"
 GRUB_CMDLINE_LINUX_DEFAULT=""
 GRUB_CMDLINE_LINUX="console=tty0"
@@ -545,6 +549,13 @@ GRUB_TERMINAL="console"
 # other disks) to this image's menu.
 GRUB_DISABLE_OS_PROBER=true
 GRUBEOF
+# #1394: no GRUB menu and no countdown -- timeout 0, style hidden, recordfail timeout 0, from the ONE
+# declaration (scripts/lib/grub-fast-boot.sh, the same lib setup-device.sh STEP 10 applies). The
+# recordfail timeout matters most: every menuentry saves recordfail=1 on every boot and only
+# grub-common (masked below) clears it, so every boot after the first takes Ubuntu's recordfail
+# branch, which would otherwise show the menu with a 30 s countdown (cam6, 30.9.2026).
+source /tmp/grub-fast-boot.sh
+grub_fast_boot_apply /etc/default/grub
 
 # Install GRUB. grub-install lays down the /boot/grub/x86_64-efi modules + grubx64,
 # but its --removable BOOTX64.EFI core is BROKEN on Ubuntu 24.04 (a live-media probe
@@ -607,6 +618,15 @@ if [ ! -f /boot/efi/EFI/BOOT/BOOTX64.EFI ]; then
     ERRORS=$((ERRORS+1))
 fi
 
+# Check GRUB fast boot (#1394): the grub.cfg update-grub generated above hides the menu and never
+# counts down, not even in the recordfail branch every later boot takes -- graded by the same
+# verdict verify-device.sh uses on a box.
+GRUB_FAST_VERDICT="$(grub_fast_boot_cfg_verdict "$(cat /boot/grub/grub.cfg 2>/dev/null)")"
+if [ "$GRUB_FAST_VERDICT" != "ok" ]; then
+    echo "ERROR: GRUB fast boot: ${GRUB_FAST_VERDICT#FAIL: }"
+    ERRORS=$((ERRORS+1))
+fi
+
 # Check user exists
 if ! id newlevel &>/dev/null; then
     echo "ERROR: User newlevel not created!"
@@ -627,12 +647,14 @@ SETUP_EOF
     # #344: make the shared GRUB EFI core installer available inside the chroot
     # (setup.sh sources it to overwrite the broken --removable core).
     cp "$SCRIPT_DIR/lib/install-grub-efi.sh" "$MOUNT_ROOT/tmp/install-grub-efi.sh"
+    # #1394: the fast-boot GRUB settings + the grub.cfg verdict (setup.sh sources it the same way).
+    cp "$SCRIPT_DIR/lib/grub-fast-boot.sh" "$MOUNT_ROOT/tmp/grub-fast-boot.sh"
 
     log "Running configuration inside chroot..."
     chroot "$MOUNT_ROOT" /tmp/setup.sh
 
     # Clean up setup script
-    rm -f "$MOUNT_ROOT/tmp/setup.sh" "$MOUNT_ROOT/tmp/install-grub-efi.sh"
+    rm -f "$MOUNT_ROOT/tmp/setup.sh" "$MOUNT_ROOT/tmp/install-grub-efi.sh" "$MOUNT_ROOT/tmp/grub-fast-boot.sh"
 
     # #369: install auto-grow-root first-boot service into the rw-root image.
     # growpart (from cloud-guest-utils, installed above) expands root to fill the disk on first boot

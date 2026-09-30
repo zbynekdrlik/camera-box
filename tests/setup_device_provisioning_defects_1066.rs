@@ -280,17 +280,22 @@ fn setup_device_supports_explicit_run_id_override_1066() {
         "the --run value must feed the CI artifact lookup via CI_RUN_ID_ARG (#1066)"
     );
     // The default gh-run-download path must still be present (the override does not remove it).
+    // #1394: the default run is resolved by the shared, head-anchored resolver instead of an
+    // inline `gh run list --status success` query (that query trusted one, sometimes STALE,
+    // runs listing).
     for needle in [
-        "gh run list",
+        r#"ci_run_latest_success "$GITHUB_REPO" "$CI_BRANCH""#,
         "gh run download",
-        r#"--branch "$CI_BRANCH""#,
-        "--status success",
     ] {
         assert!(
             on_noncomment_line(&body, needle),
-            "the default CI-artifact lookup must keep `{needle}` (#457, preserved by #1066)"
+            "the default CI-artifact lookup must keep `{needle}` (#457, preserved by #1066, #1394)"
         );
     }
+    assert!(
+        !on_noncomment_line(&body, "--status success"),
+        "the stale-trusting inline `--status success` query must be gone (#1394)"
+    );
 }
 
 // ============================================================================

@@ -50,13 +50,17 @@ fn setup_device_no_longer_installs_a_github_release_binary() {
 ///    CURRENT CI dev-build artifact — mirroring scripts/deploy-fleet.sh's own gh-run-download
 ///    mechanism (never re-invent a raw curl/API artifact fetch; GitHub Actions artifacts need
 ///    `gh`'s auth even on a public repo).
+///
+///    #1394: the run is resolved by the ONE shared resolver deploy-fleet.sh also uses
+///    (`ci_run_latest_success`, scripts/lib/ci-run-resolve.sh, anchored on the branch head),
+///    never by an inline `gh run list` query of its own.
 #[test]
 fn setup_device_binary_install_supports_override_and_ci_default() {
     let body = read_script();
     for needle in [
         "--binary",
         "CAMERA_BOX_BINARY_URL",
-        "gh run list",
+        "ci_run_latest_success",
         "gh run download",
         "camera-box-linux-amd64",
     ] {
@@ -79,19 +83,29 @@ fn setup_device_binary_install_supports_override_and_ci_default() {
 ///    and `scripts/deploy-fleet.sh` already defaults to `BRANCH=main`. A dev-tip provision drifted
 ///    cam1 to dev.626 vs the fleet's main pin dev.624 and tripped the `[0/8]` PIN-DRIFT gate
 ///    (2026-09-13). So this asserts the REVERSED contract (default `main`), matching deploy-fleet.
+///
+///    CONTRACT CHANGE (#1394): the lookup no longer carries its own server-side `--status success
+///    --limit 1` query — that query trusts ONE runs listing, which GitHub intermittently serves
+///    STALE (30.9.2026: a 3-week-old build went to four camboxes). It now calls the shared
+///    resolver with the branch, which picks the branch head's own successful run and keeps
+///    "success only" on the client side (conclusion == success, pinned by
+///    tests/python/test_ci_run_resolve_1394.py).
 #[test]
 fn setup_device_ci_binary_lookup_targets_main_branch_success_only() {
     let body = read_script();
     assert!(
-        on_noncomment_line(&body, "--branch \"$CI_BRANCH\"")
-            || on_noncomment_line(&body, "--branch \"${CI_BRANCH"),
-        "setup-device.sh's default CI-artifact lookup must filter by branch via a CI_BRANCH \
-         variable (#457)"
+        on_noncomment_line(
+            &body,
+            r#"ci_run_latest_success "$GITHUB_REPO" "$CI_BRANCH" ci.yml camera-box-linux-amd64"#
+        ),
+        "setup-device.sh's default CI-artifact lookup must resolve the CI_BRANCH run through the \
+         shared resolver (#457, #1394)"
     );
     assert!(
-        on_noncomment_line(&body, "--status success"),
-        "setup-device.sh's default CI-artifact lookup must filter --status success — an \
-         in-flight or failed run must never be picked up as \"latest\" (#457)"
+        !on_noncomment_line(&body, "--status success"),
+        "setup-device.sh must not keep its own server-side `--status success` listing query — \
+         the shared resolver filters success on the client side and anchors on the branch head \
+         (#1394)"
     );
     assert!(
         body.contains(r#"CI_BRANCH="${CAMERA_BOX_CI_BRANCH:-main}"#),
@@ -104,16 +118,24 @@ fn setup_device_ci_binary_lookup_targets_main_branch_success_only() {
 /// 4. `gh run list -q '.[0].databaseId'` on an EMPTY result list yields the literal text "null"
 ///    (jq's normal behaviour indexing a nonexistent array element), not an empty string — a bare
 ///    `[ -n "$RUN_ID" ]` guard would wrongly treat "null" as a real id and proceed to `gh run
-///    download null ...`. `// empty` is the fix (matches the already-proven setup-imag.sh pattern,
-///    `.claude/skills/ops` #458 footgun #3).
+///    download null ...`. `// empty` was the fix for the old inline query (matches the
+///    setup-imag.sh pattern, `.claude/skills/ops` #458 footgun #3).
+///
+///    #1394: the inline query is gone; RUN_ID now comes from the shared resolver, which prints
+///    only a numeric run id (anything else is skipped, pinned by the resolver's pytest suites) and
+///    an empty stdout on failure. So the guard here is: no `.[0].databaseId` query is left in
+///    setup-device.sh, and the resolver lib is sourced.
 #[test]
 fn setup_device_run_id_resolution_guards_against_jq_null_string() {
     let body = read_script();
     assert!(
-        body.contains("-q '.[0].databaseId // empty'"),
-        "setup-device.sh must resolve RUN_ID with `// empty` (not a bare `.[0].databaseId`) — \
-         otherwise an empty successful-run list silently becomes the literal string \"null\", \
-         which passes `[ -n \"$RUN_ID\" ]` and proceeds to download a nonexistent run (#457)"
+        !on_noncomment_line(&body, ".[0].databaseId"),
+        "setup-device.sh must not resolve RUN_ID with its own `.[0].databaseId` listing query any \
+         more — the shared resolver prints only a numeric run id (#457, #1394)"
+    );
+    assert!(
+        on_noncomment_line(&body, r#". "$HERE/lib/ci-run-resolve.sh""#),
+        "setup-device.sh must source the shared CI run resolver lib (#1394)"
     );
 }
 

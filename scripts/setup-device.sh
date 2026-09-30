@@ -66,6 +66,10 @@ fail() {
                                             # body, shared with bkshading-provision-relay.sh; it sources the
                                             # relay CI artifact names + the ONE run resolver itself.
                                             # verify-device.sh (ao) grades the result.
+# shellcheck source=scripts/lib/ci-run-resolve.sh
+. "$HERE/lib/ci-run-resolve.sh"  # ci_run_latest_success -- the ONE head-anchored CI run resolver (#1394),
+                                 # shared with deploy-fleet.sh / bkshading-deploy-relay.sh; STEP 3 and
+                                 # STEP 3b resolve their default camera-box / probe-tools run through it.
 # shellcheck source=scripts/lib/udev-camera-box.sh
 . "$HERE/lib/udev-camera-box.sh"  # udev_camera_box_rules_content/udev_camera_box_helper_script_content
                                    # (#894) -- also sourced (unmodified) by verify-device.sh's (w)
@@ -88,6 +92,12 @@ fail() {
                            # create-usb-linux.sh, single source of truth for the NTP-client DSCP
                            # nftables OUTPUT-mangle rule (udp dport 123 -> dscp ef) + its boot oneshot
 
+# shellcheck source=scripts/lib/cambox-egress-pacing.sh
+. "$HERE/lib/cambox-egress-pacing.sh"  # issue 1242: the ONE declaration of the NDI egress pacing
+                                       # (fq maxrate) + the generated boot script the
+                                       # [egress-pacing] sub-step installs -- also sourced by
+                                       # verify-device.sh's (ap) check + the E2E [0/8] row
+
 # shellcheck source=scripts/lib/ndi-discovery.sh
 . "$HERE/lib/ndi-discovery.sh"  # ndi_discovery_cambox_plan / ndi_discovery_cambox_apply_plan
                                 # (issue 1389) -- also sourced by verify-device.sh's (an) check +
@@ -102,6 +112,10 @@ fail() {
 . "$HERE/lib/efi-boot-entry.sh"  # EFI_CAM_BOX_LABEL/_LOADER + efi_cam_box_bootnums / efi_cam_box_leads /
                                  # efi_boot_order_lead (#1066 D6) -- shared with create-usb-linux.sh +
                                  # verify-device.sh (al) for the named cam-box UEFI entry on the box
+# shellcheck source=scripts/lib/grub-fast-boot.sh
+. "$HERE/lib/grub-fast-boot.sh"  # grub_fast_boot_apply (#1394) -- the ONE declaration of the no-menu,
+                                 # no-countdown GRUB settings STEP 10 applies; shared with
+                                 # create-usb-linux.sh / build-image.sh and verify-device.sh (aq)
 
 # shellcheck source=scripts/dantesync-version-gate.sh
 . "$HERE/dantesync-version-gate.sh"  # DANTESYNC_VERSION_PIN (#1066, source-safe: its source-guard
@@ -483,7 +497,7 @@ while [ $# -gt 0 ]; do
             ;;
         --run)
             # #1066: pin the CI artifact to an EXPLICIT ci.yml run id (mirrors deploy-fleet.sh's
-            # --run), bypassing the default `gh run list` latest-successful lookup -- for a
+            # --run), bypassing the default ci_run_latest_success lookup (#1394) -- for a
             # deliberate bisect/rollback or to match the fleet to one exact run.
             CI_RUN_ID_ARG="${2:?--run needs a ci.yml run id}"
             shift 2
@@ -541,6 +555,12 @@ if ! confirm_setup "$ASSUME_YES"; then
     echo "Aborted."
     exit 1
 fi
+
+# issue 1242: the [egress-pacing] sub-step installs the checked-in systemd/ unit next to this
+# scripts/ dir. Refuse HERE, before the rw remount and the first write, when only scripts/ was
+# staged on the box -- never a half-provisioned box that dies at that sub-step.
+[ -f "$CAMBOX_EGRESS_PACING_UNIT_SRC" ] \
+    || fail "missing $CAMBOX_EGRESS_PACING_UNIT_SRC -- stage the repo's scripts/ AND systemd/ dirs together before running setup-device.sh (issue 1242)"
 
 # =============================================================================
 # #1289: ensure root is writable BEFORE the first filesystem write of any kind -- a no-op on a
@@ -642,7 +662,9 @@ echo -e "${GREEN}[3/${TOTAL_STEPS}] Installing camera-box binary...${NC}"
 #   3. --run <id>                              - gh run download that EXACT ci.yml run's artifact
 #   4. default                                 - gh run download the latest successful ci.yml
 #      artifact on $CI_BRANCH (=main), mirroring scripts/deploy-fleet.sh's own mechanism, so a
-#      fresh box matches the fleet's pin with no manual copy.
+#      fresh box matches the fleet's pin with no manual copy. #1394: the run comes from the ONE
+#      shared resolver (scripts/lib/ci-run-resolve.sh) -- the branch head's own run, or a loud
+#      fallback / refusal -- never an inline listing query, which GitHub sometimes serves STALE.
 BINARY_SRC="${BINARY_ARG:-${CAMERA_BOX_BINARY_URL:-}}"
 if [ -n "$BINARY_SRC" ] && [ -f "$BINARY_SRC" ]; then
     echo "  Using local binary: $BINARY_SRC"
@@ -677,9 +699,8 @@ elif command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then
         RUN_ID="$CI_RUN_ID_ARG"
     else
         echo "  Fetching latest CI artifact (branch: $CI_BRANCH = the fleet's production pin)..."
-        RUN_ID="$(gh run list --repo "$GITHUB_REPO" --branch "$CI_BRANCH" --workflow ci.yml \
-            --status success --limit 1 --json databaseId -q '.[0].databaseId // empty' 2>/dev/null || true)"
-        [ -n "$RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' -- install manually, or re-run with --binary <url|path> / --run <id> / CAMERA_BOX_BINARY_URL"
+        RUN_ID="$(ci_run_latest_success "$GITHUB_REPO" "$CI_BRANCH" ci.yml camera-box-linux-amd64)" || RUN_ID=""
+        [ -n "$RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' (the ci-run-resolve line above names why) -- install manually, or re-run with --binary <url|path> / --run <id> / CAMERA_BOX_BINARY_URL"
     fi
     DIST_DIR="$(mktemp -d)"
     if gh run download "$RUN_ID" --repo "$GITHUB_REPO" -n camera-box-linux-amd64 --dir "$DIST_DIR" 2>/dev/null \
@@ -742,9 +763,8 @@ if cam2_is_painter_box "$DEVICE_NAME"; then
           PROBE_RUN_ID="$CI_RUN_ID_ARG"
         else
         echo "  Fetching probe-tools-linux-amd64 CI artifact (branch: $CI_BRANCH)..."
-        PROBE_RUN_ID="$(gh run list --repo "$GITHUB_REPO" --branch "$CI_BRANCH" --workflow ci.yml \
-            --status success --limit 1 --json databaseId -q '.[0].databaseId // empty' 2>/dev/null || true)"
-        [ -n "$PROBE_RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' -- cannot fetch frame-probe (#863). STAGE IT FROM dev1: gh run download <ci.yml run> -n probe-tools-linux-amd64 --dir /tmp && scp /tmp/frame-probe root@<box>:/tmp/ , then re-run: setup-device.sh --probe-binary /tmp/frame-probe <BOX> (FRAME_PROBE_BINARY_URL=<url|path> also works)."
+        PROBE_RUN_ID="$(ci_run_latest_success "$GITHUB_REPO" "$CI_BRANCH" ci.yml probe-tools-linux-amd64)" || PROBE_RUN_ID=""
+        [ -n "$PROBE_RUN_ID" ] || fail "no successful CI run found on branch '$CI_BRANCH' (the ci-run-resolve line above names why) -- cannot fetch frame-probe (#863). STAGE IT FROM dev1: gh run download <ci.yml run> -n probe-tools-linux-amd64 --dir /tmp && scp /tmp/frame-probe root@<box>:/tmp/ , then re-run: setup-device.sh --probe-binary /tmp/frame-probe <BOX> (FRAME_PROBE_BINARY_URL=<url|path> also works)."
         fi
         PROBE_DIST_DIR="$(mktemp -d)"
         if gh run download "$PROBE_RUN_ID" --repo "$GITHUB_REPO" -n probe-tools-linux-amd64 --dir "$PROBE_DIST_DIR" 2>/dev/null \
@@ -1056,10 +1076,9 @@ fi
 # =============================================================================
 echo ""
 echo -e "${GREEN}[10/${TOTAL_STEPS}] Configuring GRUB (fast + safe boot)...${NC}"
-sed -i 's/GRUB_TIMEOUT=.*/GRUB_TIMEOUT=0/' /etc/default/grub
-sed -i 's/GRUB_TIMEOUT_STYLE=.*/GRUB_TIMEOUT_STYLE=hidden/' /etc/default/grub
-grep -q "GRUB_TIMEOUT_STYLE" /etc/default/grub || echo "GRUB_TIMEOUT_STYLE=hidden" >> /etc/default/grub
-grep -q "GRUB_RECORDFAIL_TIMEOUT" /etc/default/grub || echo "GRUB_RECORDFAIL_TIMEOUT=0" >> /etc/default/grub
+# #1394: no GRUB menu and no countdown -- timeout 0, style hidden, recordfail timeout 0, from the ONE
+# declaration (scripts/lib/grub-fast-boot.sh, the same lib create-usb-linux.sh bakes into the image).
+grub_fast_boot_apply /etc/default/grub
 # #295: pin the default to the explicitly-saved known-good kernel, never "newest".
 if grep -q '^GRUB_DEFAULT=' /etc/default/grub; then
     sed -i 's/^GRUB_DEFAULT=.*/GRUB_DEFAULT=saved/' /etc/default/grub
@@ -1674,6 +1693,34 @@ dscp_nft_service_unit_content > "$DSCP_NFT_SERVICE_PATH"
 systemctl daemon-reload
 systemctl enable "$DSCP_NFT_SERVICE_NAME"   # fail-loud (set -e) like the sibling avahi enable -- a freshly-written+reloaded unit must enable cleanly (review 5B2)
 echo "  Installed: $DSCP_NFT_RULESET_PATH (udp dport 123 -> dscp ${DSCP_NFT_CLASS}) + ${DSCP_NFT_SERVICE_NAME}.service (enabled; applies at next boot)"
+
+# =============================================================================
+# [egress-pacing]: pace this box's NDI egress at boot (issue 1242, unnumbered sub-step, ENABLE-only)
+# =============================================================================
+# All seven cameras hand their frame to NDI on the same genlock grid instant, so their line-rate
+# bursts reach strih-lx together and its USB NIC answers with PAUSE storms. An fq root qdisc with a
+# per-flow maxrate (the ONE declaration in scripts/lib/cambox-egress-pacing.sh) spreads each frame
+# over ~7 ms while dantesync's PTP/NTP and the intercom stay their own flows. It ran by hand on
+# cam1-cam7 from 30.9.2026 and was lost on every reboot; this makes it permanent. The appliance has
+# no checkout of this repo, so the boot unit runs a script GENERATED from the lib, written here; the
+# unit is the checked-in systemd/ file (the pre-flight above refused a run without it). Enable-only
+# (never a live start or a live tc apply, .claude/rules/provisioning-scripts.md), in the rw window
+# before STEP 18's read-only flip; verify-device.sh (ap) grades the live qdisc + the unit after the
+# reboot.
+echo ""
+echo -e "${GREEN}[egress-pacing] Installing the NDI egress pacing boot unit (fq maxrate ${CAMBOX_EGRESS_PACING_RATE}, issue 1242)...${NC}"
+command -v tc >/dev/null 2>&1 \
+    || fail "tc (iproute2) is not installed -- the NDI egress pacing qdisc cannot be applied at boot (issue 1242)"
+mkdir -p "$(dirname "$CAMBOX_EGRESS_PACING_SCRIPT_PATH")" "$(dirname "$CAMBOX_EGRESS_PACING_SERVICE_PATH")"
+cambox_egress_pacing_boot_script > "$CAMBOX_EGRESS_PACING_SCRIPT_PATH"
+chmod 0755 "$CAMBOX_EGRESS_PACING_SCRIPT_PATH"
+install -m 0644 "$CAMBOX_EGRESS_PACING_UNIT_SRC" "$CAMBOX_EGRESS_PACING_SERVICE_PATH"
+systemctl daemon-reload
+systemctl enable "$CAMBOX_EGRESS_PACING_SERVICE_NAME"   # fail-loud (set -e) -- a freshly-written+reloaded unit must enable cleanly
+EGRESS_PACING_ENABLED_STATE="$(systemctl is-enabled "$CAMBOX_EGRESS_PACING_SERVICE_NAME" 2>/dev/null || true)"
+[ "$EGRESS_PACING_ENABLED_STATE" = "enabled" ] \
+    || fail "${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service is not enabled (is-enabled='${EGRESS_PACING_ENABLED_STATE:-<none>}') after install -- the NDI egress would be UNPACED after the next reboot (issue 1242)"
+echo "  Installed: $CAMBOX_EGRESS_PACING_SCRIPT_PATH + ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service (enabled; paces the default-route interface at next boot, fq maxrate ${CAMBOX_EGRESS_PACING_RATE} flow_limit ${CAMBOX_EGRESS_PACING_FLOW_LIMIT} limit ${CAMBOX_EGRESS_PACING_LIMIT})"
 
 
 # =============================================================================

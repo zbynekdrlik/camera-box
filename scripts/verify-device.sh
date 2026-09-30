@@ -125,6 +125,16 @@
 #       active. dantesync's rsntp Linux client cannot setsockopt(IP_TOS) on its own request socket,
 #       so this provisioning rule is the ONLY thing marking the request direction; a box missing
 #       nftables, the rule, or the oneshot FAILs (never a silent pass).
+#   (ap) NDI egress pacing (issue 1242) -- HARD FAIL: the default-route interface's ROOT qdisc is
+#       `fq` with maxrate / flow_limit / limit equal to scripts/lib/cambox-egress-pacing.sh's one
+#       declaration (400mbit / 2000 / 20000), AND what setup-device installed will run at the next
+#       boot: the boot script is executable, starts with #!/bin/bash and equals what the lib
+#       generates, the unit equals the checked-in systemd/ one (both compared on their functional
+#       lines, comments and blank lines ignored), enabled (reboot survival) and not failed. A
+#       hand-applied runtime qdisc alone FAILs: that is exactly the non-permanent state issue 1242
+#       fixes. `active` is not required (setup-device.sh is enable-only and a cambox is never
+#       rebooted remotely). Each FAIL names the fix that matches it (start / restart the unit, a
+#       network problem, or a re-provision).
 #   (af) v4l2-ctl (v4l-utils) is installed AND runnable (`v4l2-ctl --version`) -- issue 1213: the
 #       tool is already in setup-device.sh STEP 16's apt-get line, but that line is guarded by
 #       `2>/dev/null || true`, which silently swallows a per-box apt failure. cam3/cam4 were found
@@ -183,6 +193,11 @@
 #       the AMI USB auto-entry (which failed on cam2 after a warm reboot). setup-device.sh STEP 17d
 #       creates it on the box; this proves it took effect post-reboot. FAILs (test-strictness) if the
 #       entry is absent, not leading, or efibootmgr is unreadable/absent (a non-EFI box).
+#   (aq) no GRUB menu and no countdown (#1394) -- HARD FAIL: the box's generated /boot/grub/grub.cfg
+#        hides the menu (timeout_style=hidden) with timeout 0, AND its recordfail branch (the one every
+#        boot after the first takes: only the masked grub-common clears the flag) sets timeout 0 --
+#        graded by grub_fast_boot_cfg_verdict from the ONE lib scripts/lib/grub-fast-boot.sh that
+#        create-usb-linux.sh / setup-device.sh STEP 10 apply. An unreadable or empty grub.cfg FAILs.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -237,6 +252,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
                                  # dscp_nft_verdict -- the (ae) NTP-client DSCP nftables rule check
                                  # (dantesync issue 52; SAME source of truth as setup-device.sh /
                                  # create-usb-linux.sh)
+# shellcheck source=scripts/lib/cambox-egress-pacing.sh
+. "$HERE/lib/cambox-egress-pacing.sh"  # cambox_egress_pacing_gather_remote_snippet /
+                                       # _provision_verdict -- the (ap) NDI egress pacing check
+                                       # (issue 1242; SAME lib setup-device.sh installs it from)
 # shellcheck source=scripts/lib/remote-logging.sh
 . "$HERE/lib/remote-logging.sh"  # remote_log_gather_remote_snippet/remote_log_verdict -- the (ak)
                                  # off-box kernel(netconsole)+journal(upload) forensics check (#1311;
@@ -254,6 +273,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/efi-boot-entry.sh
 . "$HERE/lib/efi-boot-entry.sh"  # efi_entry_verdict -- the (al) named cam-box UEFI entry check
                                  # (#1066 D6; SAME source of truth as setup-device.sh / create-usb-linux.sh)
+# shellcheck source=scripts/lib/grub-fast-boot.sh
+. "$HERE/lib/grub-fast-boot.sh"  # grub_fast_boot_cfg_verdict -- the (aq) no-menu, no-countdown GRUB check
+                                 # (#1394; SAME lib create-usb-linux.sh / setup-device.sh STEP 10 apply)
 
 SSH_USER="${SSH_USER:-root}"
 CAM_PW="${CAM_PW:-newlevel}"
@@ -847,6 +869,10 @@ Checks:
       \`table ip dantesync_dscp\` OUTPUT-mangle rule marks outgoing NTP requests (udp dport 123) with
       DSCP EF, applied at boot by the enabled+active dantesync-dscp.service oneshot (rsntp cannot
       setsockopt(IP_TOS) on Linux, so this provisioning rule is the request-half fix)
+  (ap) NDI egress pacing (issue 1242): the default-route interface's root qdisc is fq with the
+      declared maxrate/flow_limit/limit (scripts/lib/cambox-egress-pacing.sh), the installed boot
+      script + unit match what setup-device installs, and cambox-egress-pacing.service is enabled
+      and not failed -- a hand-applied qdisc alone FAILs
   (af) v4l2-ctl (v4l-utils) installed and runnable (\`v4l2-ctl --version\`) -- already listed in
       setup-device.sh STEP 16's apt-get line, but that line silently swallows a per-box apt
       failure; cam3/cam4 were found live missing it despite the script listing it (issue 1213)
@@ -874,6 +900,9 @@ Checks:
   (ao) bkshading relay provisioned (issue 808): binary + byte-matching unit + env + gphoto2, and the
       unit enable-state matches the rig mode (TEST: source box + cam2 disabled; CAMERA_BOX_RIG_MODE=test|event,
       else read from cam2's painter state)
+  (aq) no GRUB menu and no countdown (#1394): the generated /boot/grub/grub.cfg hides the menu with
+      timeout 0 AND its recordfail branch (every boot after the first) sets timeout 0 -- an unreadable
+      or empty grub.cfg FAILs
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      CAMERA_BOX_RIG_MODE (test|event for the (ao) relay enable-state; unset = read cam2's painter state),
@@ -1567,6 +1596,30 @@ else
   ok "NTP-client DSCP marking live: dantesync_dscp nftables rule present + dantesync-dscp.service enabled+active (dantesync issue 52)"
 fi
 
+# (ap) NDI egress pacing: fq maxrate root qdisc live + boot unit enabled (issue 1242) -- HARD FAIL --
+# All seven cameras hand their frame to NDI on the same grid instant, so their line-rate bursts
+# reach strih-lx together (its USB NIC answers with PAUSE storms). setup-device.sh's
+# [egress-pacing] sub-step installs cambox-egress-pacing.service, which paces the default-route
+# interface at boot with the ONE declaration in scripts/lib/cambox-egress-pacing.sh. This reads
+# the live root qdisc, the unit state and what setup-device installed (the boot script's
+# executable bit + shebang, the functional-line sha256 of the script and of the unit) in one
+# read-only ssh round trip. It FAILs a
+# missing/drifted qdisc, a missing / non-executable / stale boot script, a unit that differs from
+# the checked-in systemd/ one, a unit that is not enabled (a hand-applied qdisc does not survive a
+# reboot) or a failed unit -- each named with the fix that matches it. Placed right after (ae) and
+# BEFORE (q): pytest executes the (ao)..(an) and (an)..(q) slices of this file, so a block there
+# would break them. fail() only, never a warn.
+aprc=0
+PACING_BLOCK="$(ssh_box "$(cambox_egress_pacing_gather_remote_snippet)")" || aprc=$?
+PACING_VERDICT="$(cambox_egress_pacing_provision_verdict "$PACING_BLOCK")"
+if [ "$aprc" -ne 0 ]; then
+  fail "could not reach the box to read the NDI egress pacing qdisc + ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service state (ssh rc=$aprc, issue 1242)"
+elif [ "$PACING_VERDICT" != "ok" ]; then
+  fail "NDI egress pacing: $(cambox_egress_pacing_verdict_oneline "$PACING_VERDICT") (issue 1242)"
+else
+  ok "NDI egress pacing live: $(cambox_egress_pacing_block_field "$PACING_BLOCK" PACING_IFACE) root $(cambox_egress_pacing_verdict "$(cambox_egress_pacing_block_field "$PACING_BLOCK" PACING_QDISC)" | sed 's/^OK //') + ${CAMBOX_EGRESS_PACING_SERVICE_NAME}.service installed + enabled (issue 1242)"
+fi
+
 # (af) v4l2-ctl installed AND runnable (v4l-utils runtime dependency, issue 1213) ------------------
 # setup-device.sh's STEP 16 apt-get line ALREADY lists v4l-utils, but that whole install line is
 # guarded by `2>/dev/null || true`, which silently swallows a per-box apt failure -- cam3/cam4 were
@@ -1799,6 +1852,30 @@ else
     FAIL:*) fail "bkshading-relay: ${RELAY_VERDICT#FAIL: }" ;;
     *) fail "could not grade bkshading-relay state (verdict='${RELAY_VERDICT}', present='${R_PRESENT}')" ;;
   esac
+fi
+
+# (aq) no GRUB menu and no countdown (#1394) -- HARD FAIL ----------------------------------------
+# A cambox boots straight to Linux (owner ROZHODNUTÉ issuecomment-5913502328: cam6 sat in the GRUB
+# menu with a 30 s recordfail countdown). Reads the box's GENERATED /boot/grub/grub.cfg -- what the
+# firmware really boots -- and grades it with the pure grub_fast_boot_cfg_verdict: the menu hidden
+# with timeout 0, and the recordfail branch (every menuentry saves the flag on every boot and only
+# grub-common, masked on the appliance, clears it -- so every boot after the first takes this branch)
+# also at timeout 0. An unreadable or empty
+# grub.cfg is a FAIL (test-strictness). Inserted after the relay blast-radius check and before the
+# relay provisioning check, per .claude/rules/provisioning-scripts.md: the .bak cruft check stays
+# last, and pytest executes the slices from the relay provisioning check onwards, so no new block
+# may sit inside them.
+aqrc=0
+GRUB_CFG_TEXT="$(ssh_box "cat /boot/grub/grub.cfg")" || aqrc=$?
+if [ "$aqrc" -ne 0 ] || [ -z "$GRUB_CFG_TEXT" ]; then
+  fail "could not read /boot/grub/grub.cfg over SSH (rc=$aqrc, empty=$([ -z "$GRUB_CFG_TEXT" ] && echo yes || echo no)) -- cannot certify the box boots with no GRUB menu or countdown (#1394)"
+else
+  GRUB_AQ_VERDICT="$(grub_fast_boot_cfg_verdict "$GRUB_CFG_TEXT")"
+  if [ "$GRUB_AQ_VERDICT" = "ok" ]; then
+    ok "GRUB boots straight to Linux: menu hidden with timeout 0 and the recordfail timeout 0 (the branch every later boot takes) -- no menu, no countdown (#1394)"
+  else
+    fail "GRUB fast boot: ${GRUB_AQ_VERDICT#FAIL: }"
+  fi
 fi
 
 # (ao) bkshading relay provisioned + enable-state matches the rig mode (issue 808) -- HARD FAIL -----
