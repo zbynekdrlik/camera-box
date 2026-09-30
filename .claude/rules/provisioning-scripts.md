@@ -399,7 +399,8 @@ ro-root-safe config, would pass a box whose service can never actually run).
 - `verify-device.sh` `(ao)` grades it. **Never add a check between `(an)` and `(q)`:**
   `tests/python/test_ndi_discovery_1342.py` slices the `(an)` block up to `(q)` and EXECUTES it
   with only the ndi-discovery lib sourced, so any new block there runs inside that test and fails
-  it (`command not found` / an unbound variable). `(ao)` sits after `(am)`, before `(an)`.
+  it (`command not found` / an unbound variable). The order is `(am)`, then `(aq)` (#1394), then
+  `(ao)`, then `(an)`.
 
 ## A cambox boots straight to Linux: no GRUB menu and no countdown, in ANY image (#1394)
 
@@ -409,11 +410,15 @@ reflash. The three settings (`GRUB_TIMEOUT=0`, `GRUB_TIMEOUT_STYLE=hidden`,
 a script.
 
 - **The recordfail timeout is the one that bites.** Ubuntu's `/etc/grub.d/00_header` renders
-  `set timeout=${GRUB_RECORDFAIL_TIMEOUT:-30}` in the `if [ "${recordfail}" = 1 ]` branch. GRUB sets
-  `recordfail` on every boot, and only a completed boot clears it, through `grub-common`, which every
-  cambox image MASKS. So after one cut boot or power-off, every later boot takes that branch. A
+  `set timeout=${GRUB_RECORDFAIL_TIMEOUT:-30}` in the `if [ "${recordfail}" = 1 ]` branch. Every
+  menuentry calls `recordfail`, which saves the flag into grubenv on every boot. Only
+  `grub-common.service` clears it (`grub-editenv ... unset recordfail`), and every cambox image MASKS
+  that unit. So every boot after the first takes that branch; no cut boot is needed. A
   `GRUB_TIMEOUT=0` alone never helps there. The branch sets only the timeout, and timeout 0 boots the
   default at once.
+- **An empty value is not 0.** `set timeout=` (GRUB_TIMEOUT unset with a style) makes GRUB wait
+  forever. The verdict shows it as `<empty>` and FAILs it, and grades every recordfail branch (two
+  of them with `GRUB_BUTTON_CMOS_ADDRESS`) against the recordfail timeout.
 - **Every image builder applies the lib to its `/etc/default/grub` before `update-grub`:**
   - `create-usb-linux.sh` copies the lib into the chroot (like `install-grub-efi.sh`), sources it
     and runs `grub_fast_boot_apply`. Its chroot verification grades the generated grub.cfg with

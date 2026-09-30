@@ -551,9 +551,9 @@ GRUB_DISABLE_OS_PROBER=true
 GRUBEOF
 # #1394: no GRUB menu and no countdown -- timeout 0, style hidden, recordfail timeout 0, from the ONE
 # declaration (scripts/lib/grub-fast-boot.sh, the same lib setup-device.sh STEP 10 applies). The
-# recordfail timeout matters most: grub-common is masked below, so the recordfail flag GRUB sets on
-# every boot is never cleared, and after a cut boot or a power-off Ubuntu's grub.cfg would otherwise
-# show the menu with a 30 s countdown (cam6, 30.9.2026).
+# recordfail timeout matters most: every menuentry saves recordfail=1 on every boot and only
+# grub-common (masked below) clears it, so every boot after the first takes Ubuntu's recordfail
+# branch, which would otherwise show the menu with a 30 s countdown (cam6, 30.9.2026).
 source /tmp/grub-fast-boot.sh
 grub_fast_boot_apply /etc/default/grub
 
@@ -619,7 +619,8 @@ if [ ! -f /boot/efi/EFI/BOOT/BOOTX64.EFI ]; then
 fi
 
 # Check GRUB fast boot (#1394): the grub.cfg update-grub generated above hides the menu and never
-# counts down, not even after a cut boot -- graded by the same verdict verify-device.sh uses on a box.
+# counts down, not even in the recordfail branch every later boot takes -- graded by the same
+# verdict verify-device.sh uses on a box.
 GRUB_FAST_VERDICT="$(grub_fast_boot_cfg_verdict "$(cat /boot/grub/grub.cfg 2>/dev/null)")"
 if [ "$GRUB_FAST_VERDICT" != "ok" ]; then
     echo "ERROR: GRUB fast boot: ${GRUB_FAST_VERDICT#FAIL: }"
