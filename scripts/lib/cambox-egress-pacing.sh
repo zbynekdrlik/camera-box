@@ -89,8 +89,9 @@ EOF
 
 # cambox_egress_pacing_boot_script -> the full content of ${CAMBOX_EGRESS_PACING_SCRIPT_PATH}: the
 # apply command above (verbatim, the one source) inside a bounded retry. Exit 0 once applied; after
-# the last attempt a loud FAILED line on stderr (the journal) and exit 1, so the unit reads `failed`
-# and verify-device (ap) names it -- never a silent unpaced box.
+# the last attempt a loud FAILED line on stderr (the journal) and exit 1, and the unit restarts for
+# the next round -- never a silent unpaced box. Only the first and the last attempt of a round log
+# their reason, so a route-less box does not flood the journal.
 # CAMBOX_EGRESS_PACING_RETRY_SLEEP_S in the unit's environment overrides the sleep (tests only).
 cambox_egress_pacing_boot_script() {
   cat <<EOF
@@ -109,7 +110,12 @@ $(cambox_egress_pacing_apply_cmd)
 cep_n=0
 while [ "\$cep_n" -lt "\$cep_attempts" ]; do
   cep_n=\$((cep_n + 1))
-  if cep_apply; then
+  if [ "\$cep_n" -eq 1 ] || [ "\$cep_n" -eq "\$cep_attempts" ]; then
+    if cep_apply; then
+      exit 0
+    fi
+  elif cep_apply 2>/dev/null; then
+    # The middle attempts of a round stay quiet: a route-less box retries forever (the unit restarts).
     exit 0
   fi
   if [ "\$cep_n" -lt "\$cep_attempts" ]; then
@@ -197,16 +203,27 @@ cambox_egress_pacing_verdict() {
   return 0
 }
 
+# cambox_egress_pacing_functional_lines -> stdin with the comment lines (a leading `#`, the shebang
+# included) and the blank lines dropped. The installed boot script and unit are compared on these
+# lines, so a comment-only edit in this repo never turns every provisioned box stale, while a
+# functional change (another rate, another ExecStart) still does. The gather embeds this exact
+# function (`declare -f`), so the box and dev1 filter the same way.
+cambox_egress_pacing_functional_lines() {
+  grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' || true
+}
+
 # cambox_egress_pacing_gather_remote_snippet -> READ-ONLY remote bash (verify-device (ap) and the E2E
 # row run it over ssh) printing one KEY=VALUE line per fact: the default-route interface, its qdisc
-# (`|`-flattened, or __TC_ABSENT__ / __NO_DEFAULT_ROUTE__), the unit's is-enabled / is-active, and
-# what setup-device installed -- the boot script's executable bit + sha256 and the unit's sha256
-# (empty when absent), so the verdict can prove the unit will actually run at the next boot. It
-# never changes anything (only `tc qdisc show` and reads). sbin is appended to PATH because a
-# non-login ssh PATH may omit it; a caller's own PATH entries still come first.
+# (`|`-flattened, or __TC_ABSENT__ / __NO_DEFAULT_ROUTE__), the unit's is-enabled / is-active /
+# restart count, and what setup-device installed -- the boot script is executable and starts with
+# its `#!/bin/bash` line, and the functional-line sha256 of the script and of the unit (empty when
+# absent) -- so the verdict can prove the unit will actually run at the next boot. It never changes
+# anything (only `tc qdisc show` and reads). sbin is appended to PATH because a non-login ssh PATH
+# may omit it; a caller's own PATH entries still come first.
 cambox_egress_pacing_gather_remote_snippet() {
   cat <<EOF
 PATH="\$PATH:/usr/sbin:/sbin"
+$(declare -f cambox_egress_pacing_functional_lines)
 _cep_if="\$($(cambox_egress_pacing_iface_cmd))"
 echo "PACING_IFACE=\$_cep_if"
 if ! command -v tc >/dev/null 2>&1; then
@@ -218,25 +235,39 @@ else
 fi
 echo "PACING_SVC_ENABLED=\$(systemctl is-enabled ${CAMBOX_EGRESS_PACING_SERVICE_NAME} 2>/dev/null)"
 echo "PACING_SVC_ACTIVE=\$(systemctl is-active ${CAMBOX_EGRESS_PACING_SERVICE_NAME} 2>/dev/null)"
-if [ -x "${CAMBOX_EGRESS_PACING_SCRIPT_PATH}" ]; then echo "PACING_SCRIPT_EXEC=yes"; else echo "PACING_SCRIPT_EXEC=no"; fi
-echo "PACING_SCRIPT_SHA=\$(sha256sum "${CAMBOX_EGRESS_PACING_SCRIPT_PATH}" 2>/dev/null | awk '{ print \$1 }')"
-echo "PACING_UNIT_SHA=\$(sha256sum "${CAMBOX_EGRESS_PACING_SERVICE_PATH}" 2>/dev/null | awk '{ print \$1 }')"
+echo "PACING_SVC_RESTARTS=\$(systemctl show -p NRestarts --value ${CAMBOX_EGRESS_PACING_SERVICE_NAME} 2>/dev/null)"
+if [ -x "${CAMBOX_EGRESS_PACING_SCRIPT_PATH}" ] && [ "\$(head -n 1 "${CAMBOX_EGRESS_PACING_SCRIPT_PATH}" 2>/dev/null)" = "#!/bin/bash" ]; then
+  echo "PACING_SCRIPT_EXEC=yes"
+else
+  echo "PACING_SCRIPT_EXEC=no"
+fi
+if [ -r "${CAMBOX_EGRESS_PACING_SCRIPT_PATH}" ]; then
+  echo "PACING_SCRIPT_SHA=\$(cambox_egress_pacing_functional_lines < "${CAMBOX_EGRESS_PACING_SCRIPT_PATH}" | sha256sum | awk '{ print \$1 }')"
+else
+  echo "PACING_SCRIPT_SHA="
+fi
+if [ -r "${CAMBOX_EGRESS_PACING_SERVICE_PATH}" ]; then
+  echo "PACING_UNIT_SHA=\$(cambox_egress_pacing_functional_lines < "${CAMBOX_EGRESS_PACING_SERVICE_PATH}" | sha256sum | awk '{ print \$1 }')"
+else
+  echo "PACING_UNIT_SHA="
+fi
 EOF
 }
 
-# cambox_egress_pacing_expected_script_sha -> the sha256 of the boot script setup-device writes
-# (this lib's own generator), so a stale installed copy (the rate changed here, the box was never
-# re-provisioned) is caught. Empty only when sha256sum is missing on the reading host.
+# cambox_egress_pacing_expected_script_sha -> the functional-line sha256 of the boot script
+# setup-device writes (this lib's own generator), so a stale installed copy (the rate changed here,
+# the box was never re-provisioned) is caught. Empty only when sha256sum is missing on the host.
 cambox_egress_pacing_expected_script_sha() {
-  cambox_egress_pacing_boot_script | sha256sum 2>/dev/null | awk '{ print $1 }' || true
+  cambox_egress_pacing_boot_script | cambox_egress_pacing_functional_lines | sha256sum 2>/dev/null | awk '{ print $1 }' || true
   return 0
 }
 
-# cambox_egress_pacing_expected_unit_sha -> the sha256 of the checked-in unit setup-device installs,
-# or nothing when it cannot be read (a caller that sources this lib without the systemd/ sibling).
+# cambox_egress_pacing_expected_unit_sha -> the functional-line sha256 of the checked-in unit
+# setup-device installs, or nothing when it cannot be read (a caller that sources this lib without
+# the systemd/ sibling).
 cambox_egress_pacing_expected_unit_sha() {
   [ -r "$CAMBOX_EGRESS_PACING_UNIT_SRC" ] || return 0
-  sha256sum "$CAMBOX_EGRESS_PACING_UNIT_SRC" 2>/dev/null | awk '{ print $1 }' || true
+  cambox_egress_pacing_functional_lines < "$CAMBOX_EGRESS_PACING_UNIT_SRC" | sha256sum 2>/dev/null | awk '{ print $1 }' || true
   return 0
 }
 
@@ -268,7 +299,7 @@ cambox_egress_pacing_block_field() {
 # Fail-closed on an unreadable block or an unreadable expected value. Always returns 0.
 cambox_egress_pacing_provision_verdict() {
   local block="${1:-}" want_script want_unit iface qdisc enabled active script_exec script_sha unit_sha
-  local v hint install_ok=1 fails="" nl=$'\n' svc="${CAMBOX_EGRESS_PACING_SERVICE_NAME}"
+  local restarts rounds="" v hint install_ok=1 fails="" nl=$'\n' svc="${CAMBOX_EGRESS_PACING_SERVICE_NAME}"
   local reprov="re-run setup-device.sh (its [egress-pacing] sub-step)"
   if [ "$#" -ge 2 ]; then want_script="$2"; else want_script="$(cambox_egress_pacing_expected_script_sha)"; fi
   if [ "$#" -ge 3 ]; then want_unit="$3"; else want_unit="$(cambox_egress_pacing_expected_unit_sha)"; fi
@@ -279,6 +310,11 @@ cambox_egress_pacing_provision_verdict() {
   script_exec="$(cambox_egress_pacing_block_field "$block" PACING_SCRIPT_EXEC | tr -d '[:space:]')"
   script_sha="$(cambox_egress_pacing_block_field "$block" PACING_SCRIPT_SHA | tr -d '[:space:]')"
   unit_sha="$(cambox_egress_pacing_block_field "$block" PACING_UNIT_SHA | tr -d '[:space:]')"
+  restarts="$(cambox_egress_pacing_block_field "$block" PACING_SVC_RESTARTS | tr -d '[:space:]')"
+  case "$restarts" in
+    '' | *[!0-9]*) ;;
+    *) rounds=" (${restarts} failed round(s) so far)" ;;
+  esac
 
   # --- install facets ---
   if [ "$script_exec" != "yes" ]; then
@@ -305,13 +341,13 @@ cambox_egress_pacing_provision_verdict() {
 
   # --- runtime facets ---
   if [ "$active" = "failed" ]; then
-    fails="${fails:+$fails$nl}FAIL: ${svc}.service failed -- its apply gave up; read journalctl -u ${svc}"
+    fails="${fails:+$fails$nl}FAIL: ${svc}.service failed -- an apply round failed${rounds}; read journalctl -u ${svc}"
   fi
   v="$(cambox_egress_pacing_verdict "$qdisc")"
   case "$v" in
     OK*) hint="" ;;
     *"no default route"*) hint="a network problem, not provisioning: the box has no default route" ;;
-    *"not installed"*) hint="install iproute2 (setup-device.sh does)" ;;
+    *"not installed"*) hint="install iproute2 (setup-device.sh refuses to run without tc)" ;;
     UNKNOWN*) hint="the qdisc could not be graded" ;;
     *)
       if [ "$install_ok" = 0 ]; then
@@ -320,7 +356,9 @@ cambox_egress_pacing_provision_verdict() {
         case "$active" in
           inactive) hint="the unit is installed + enabled but has not run since: systemctl start ${svc} (or the next reboot) applies it" ;;
           active) hint="the qdisc changed after the unit applied it: systemctl restart ${svc} re-applies it" ;;
-          activating) hint="the unit is still retrying (no default route yet?)" ;;
+          # A DRIFT read proves the default route exists, so a unit still restarting is failing to
+          # apply the qdisc (tc refusing it, e.g. a kernel without sch_fq) or is between rounds.
+          activating) hint="a default route exists but the unit has not applied the qdisc${rounds}: tc keeps failing, or it is between rounds (up to 30 s); read journalctl -u ${svc}" ;;
           failed) hint="see the failed unit" ;;
           *) hint="unit state ${active:-<none>}: systemctl start ${svc}" ;;
         esac
