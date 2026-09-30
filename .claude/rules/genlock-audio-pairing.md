@@ -689,6 +689,16 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
       that is how far past one packet a late follow can land.
     - Kept: a sender that steps AGAIN, toward this box's wall, while the age sits hundreds of ms
       off (a timed-out pending). It lands over the bound, so it still starts.
+    - **OPEN (review round 2, Design-question 5903897499).** The guard reads the age against the
+      nominal, and the nominal MOVES. A step just over one slot (|S| = 34–38 ms) can release the
+      skew hold EARLY on the age test under ±1–5 ms of arrival jitter, and the in-band nominal
+      then tracks the unmatched step. The sender's late follow then still starts a false pending
+      (a 10 s hold, then one slot placed at the timeout):
+      - backward (N = −2 overshoots the nominal): a hole slice 2 already had;
+      - forward, with the follow 60 s or more late: new in slice 3.
+      Genuine sender-first steps are unaffected, and so are late follows of 50–66 / 260 / 682 ms.
+      The fix is waiting for the main's choice (the recommended one: remember the unfollowed
+      step for the 600 s re-anchor window).
   - **The fold's slot is the pending bound's (review round 1).** Inside a pending, a move under one
     slot folds like the skew hold's, and a slot or more folds only when relabel-shaped. Forward, a
     slot starts at one packet − 100 ns (`genlock_audio_relabel_forward_slot_ns`); backward, at one
@@ -714,7 +724,8 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
   overwritten or dropped. The difference is the skew hold's own "over one packet places" rule,
   unchanged.
 - **Tests.**
-  - Unit (`src/genlock_audio_pairing_pending_tests.rs`): the bound at − 66 / + 34 / − 100 / − 101 ns
+  - Unit (`src/genlock_audio_pairing_pending_slice3_tests.rs`, a `#[path]` child of the pending
+    tests): the bound at − 66 / + 34 / − 100 / − 101 ns
     and exactly one packet; the arrival gap of a skipped slot; backward one packet;
     +35 / 40 / 50 / 60 / 66 ms at both grid jumps, resolved by this box's step with −r; the age
     band's exact edge; the start's widenings and its late-follow narrowing against slice 2; late
