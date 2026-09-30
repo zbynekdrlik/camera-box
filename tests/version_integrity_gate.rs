@@ -2559,6 +2559,112 @@ fn gate_passes_a_linux_strih_under_strih_linux_with_only_platform_agnostic_facet
     let _ = std::fs::remove_file(&manifest);
 }
 
+/// #1397: the REAL strih-lx key set carries NO obs/distroav `.dll` sha (the Linux box has no
+/// `.dll`; its `:8899` serves obs_version / distroav_version / genlock_build_sha) while the pinned
+/// manifest of a FULL-bundle deploy lists distroav.dll -- release E2E run 36741922783 refused a
+/// healthy rig on `distroav_dll_sha256 UNKNOWN`. Under `--strih-linux` BOTH Windows byte facets are
+/// loudly SKIPPED; the bundle stays graded by the genlock_build_sha parity + the vendor pin.
+#[test]
+fn gate_passes_a_linux_strih_without_dll_shas_under_a_full_manifest_1397() {
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    const OBS_SHA: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const DISTROAV_SHA: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    let manifest = write_manifest("bundle_lx_1397_pass", OBS_SHA, DISTROAV_SHA);
+    let base = with_sha(STRIH_LX_PLATFORM_AGNOSTIC, SHA);
+    let strih_json = format!(
+        "{},\"genlock_capability\":\"{GENLOCK_CAP_770}\"}}",
+        &base[..base.len() - 1]
+    );
+    let s = write_state("strih_lx_1397_pass", &strih_json);
+    let t = write_state(
+        "stream_1397_pass",
+        &with_obs_identity_ok(
+            &with_manifest_facet(
+                &with_sha(STREAM_PINNED, SHA),
+                OBS_SHA,
+                DISTROAV_SHA,
+                GENLOCK_CAP_770,
+            ),
+            false,
+        ),
+    );
+    let (code, stdout, stderr) = run_gate(&[
+        "--manifest",
+        manifest.to_str().unwrap(),
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--strih-linux",
+        "--imag-acked-offline",
+        "issue-1397-no-imag-in-this-fixture",
+    ]);
+    assert_eq!(
+        code, 0,
+        "a Linux strih without any .dll sha must PASS under --strih-linux with a full manifest. \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("distroav_dll_sha256")
+            && stdout.contains("Windows-only distroav.dll byte facet skipped on a Linux strih"),
+        "a Linux strih must SKIP the Windows distroav.dll byte facet (never UNKNOWN): {stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&manifest);
+}
+
+/// #1397 NEGATIVE ANCHOR: the Linux-strih SKIP must never leak onto the Windows stream box -- a
+/// stream whose deployed distroav.dll differs from the full manifest still DRIFTs (exit 20) under
+/// `--strih-linux`.
+#[test]
+fn gate_still_refuses_a_windows_stream_distroav_drift_under_strih_linux_1397() {
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    const OBS_SHA: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const DISTROAV_SHA: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    const DISTROAV_STALE: &str = "9999999999999999999999999999999999999999999999999999999999999999";
+    let manifest = write_manifest("bundle_lx_1397_neg", OBS_SHA, DISTROAV_SHA);
+    let base = with_sha(STRIH_LX_PLATFORM_AGNOSTIC, SHA);
+    let strih_json = format!(
+        "{},\"genlock_capability\":\"{GENLOCK_CAP_770}\"}}",
+        &base[..base.len() - 1]
+    );
+    let s = write_state("strih_lx_1397_neg", &strih_json);
+    let t = write_state(
+        "stream_1397_neg",
+        &with_obs_identity_ok(
+            &with_manifest_facet(
+                &with_sha(STREAM_PINNED, SHA),
+                OBS_SHA,
+                DISTROAV_STALE,
+                GENLOCK_CAP_770,
+            ),
+            false,
+        ),
+    );
+    let (code, stdout, stderr) = run_gate(&[
+        "--manifest",
+        manifest.to_str().unwrap(),
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--strih-linux",
+        "--imag-acked-offline",
+        "issue-1397-no-imag-in-this-fixture",
+    ]);
+    assert_eq!(
+        code, 20,
+        "a Windows stream with a drifted distroav.dll must still REFUSE under --strih-linux. \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(stdout.contains("distroav_dll_sha256"), "stdout: {stdout}");
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&manifest);
+}
+
 /// NEGATIVE ANCHOR: the SAME minimal Linux-strih state WITHOUT `--strih-linux` must still
 /// UNKNOWN-refuse (11), naming every Windows-only facet — proving the flag is the ONLY escape,
 /// mirroring `gate_still_refuses_absent_imag_without_the_ack_flag_1164`'s shape for imag.
