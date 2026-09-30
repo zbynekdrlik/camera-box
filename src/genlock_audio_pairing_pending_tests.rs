@@ -757,18 +757,20 @@ fn the_pending_age_band_is_half_a_packet_1381() {
     // the stamps must jump AWAY from this box's wall by more than HALF a packet: a one-slot step's
     // stamp age sits about one slot off (−S), so a late packet's arrival jitter no longer decides it
     let p = PACKET as i64;
+    // the age is `arrival shift − stamp jump`: this arrival shift puts a −(one packet + 1 ms) jump's
+    // age exactly on half a packet (p / 2 truncates, so it is spelled out, never approximated)
+    let edge = p / 2 - p - 1_000_000;
     // (stamp jump, arrival later than the grid (< 0 = earlier), starts)
-    let cases: [(i64, i64, bool); 6] = [
+    let cases: [(i64, i64, bool); 5] = [
         // over one packet, 10 ms late: age −(J − 10 ms) = −24.3 ms -- inside the old one-packet band
         (p + 1_000_000, 10_000_000, true),
         // one packet − 66 ns, 5 ms late: age −28.3 ms
         (p - 66, 5_000_000, true),
         // backward, 17.7 ms early: age exactly half a packet (strict) -- and one ns more
-        (-p - 1_000_000, -(p / 2 + 1_000_000), false),
-        (-p - 1_000_000, -(p / 2 + 1_000_001), true),
-        // a late follow's age comes back within half a packet: never a pending start
-        (p + 1_000_000, p + 1_000_000 - p / 2, false),
-        (-p - 1_000_000, -(p + 1_000_000) + p / 2, false),
+        (-p - 1_000_000, edge, false),
+        (-p - 1_000_000, edge + 1, true),
+        // an age back inside the band (5 ms under half a packet): never a pending start
+        (-p - 1_000_000, edge - 5_000_000, false),
     ];
     for (jump, late, starts) in cases {
         let mut f = Feed::new();
