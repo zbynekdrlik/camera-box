@@ -2107,7 +2107,9 @@ static inline bool genlock_audio_step_relabel_pending_starts(bool active, int64_
  * (genlock_audio_step_relabel_pending_starts) starts a PENDING relabel -- a hold on the pre-jump offset
  * minus the jump, released RELABEL_PENDING when this box's offset jumps (over step_min) to within one
  * packet of it, else at the bound (TIMEOUT) or on a reset; the ordinary follow and age releases do not
- * apply to it. */
+ * apply to it, and only a relabel-shaped stamp jump (genlock_audio_relabel_pending) moves its held offset
+ * (review round 1: a pause, a duplicated or a skipped slot keeps it). *relabel_pending is set when a hold
+ * starts and kept after its release (the log's pending=). */
 static inline int genlock_audio_step_hold(bool *active, int64_t *prev_off_ns, uint64_t *prev_raw_ns,
 					  uint64_t *prev_packet_ns, int64_t *nominal_age_ns,
 					  uint64_t *nominal_dev_since_ns, uint32_t *nominal_warm, int64_t *held_off_ns,
@@ -2120,7 +2122,6 @@ static inline int genlock_audio_step_hold(bool *active, int64_t *prev_off_ns, ui
 	if (!timecode) {
 		const bool was = *active;
 		*active = false;
-		*relabel_pending = false;
 		*prev_packet_ns = 0;
 		return was ? GENLOCK_AUDIO_STEP_RESET : GENLOCK_AUDIO_STEP_NONE;
 	}
@@ -2134,6 +2135,7 @@ static inline int genlock_audio_step_hold(bool *active, int64_t *prev_off_ns, ui
 	const int64_t dev_ns = had_prev ? (int64_t)(raw_ts_ns - (*prev_raw_ns + *prev_packet_ns)) : 0;
 	const int64_t jump_ns = had_prev ? (int64_t)((uint64_t)off_live_ns - (uint64_t)*prev_off_ns) : 0;
 	const int64_t age_ns = genlock_audio_stamp_age_ns(now_ns, raw_ts_ns, off_live_ns);
+	const uint64_t arrival_gap_ns = now_ns - *prev_arrival_ns;
 	const int64_t prev_off = *prev_off_ns;
 	*prev_off_ns = off_live_ns;
 	*prev_raw_ns = raw_ts_ns;
@@ -2156,6 +2158,7 @@ static inline int genlock_audio_step_hold(bool *active, int64_t *prev_off_ns, ui
 				*held_off_ns = held;
 				*start_ns = now_ns;
 				*step_ns = (int64_t)(0ULL - (uint64_t)jump_ns);
+				*relabel_pending = false;
 				if (off_nominal) {
 					genlock_audio_step_track_nominal(nominal_age_ns, nominal_dev_since_ns,
 									 nominal_warm, age_ns, packet_ns, now_ns);
@@ -2183,15 +2186,17 @@ static inline int genlock_audio_step_hold(bool *active, int64_t *prev_off_ns, ui
 	}
 	if (timeline_reset) {
 		*active = false;
-		*relabel_pending = false;
 		return GENLOCK_AUDIO_STEP_RESET;
 	}
-	*held_off_ns = (int64_t)((uint64_t)*held_off_ns - (uint64_t)followed);
+	/* review round 1: inside a pending relabel only a relabel-shaped stamp jump moves the held offset */
+	int64_t fold_ns = followed;
+	if (*relabel_pending)
+		fold_ns = genlock_audio_relabel_pending(dev_ns, arrival_gap_ns, packet_ns, step_min_ns) ? dev_ns : 0;
+	*held_off_ns = (int64_t)((uint64_t)*held_off_ns - (uint64_t)fold_ns);
 	if (*relabel_pending) {
 		if (genlock_audio_step_mag_ns(jump_ns) > min &&
 		    genlock_audio_step_mag_ns((int64_t)((uint64_t)off_live_ns - (uint64_t)*held_off_ns)) < packet_ns) {
 			*active = false;
-			*relabel_pending = false;
 			return GENLOCK_AUDIO_STEP_RELABEL_PENDING;
 		}
 	} else if (genlock_audio_step_mag_ns((int64_t)((uint64_t)off_live_ns - (uint64_t)*held_off_ns)) <= packet_ns ||
@@ -2201,7 +2206,6 @@ static inline int genlock_audio_step_hold(bool *active, int64_t *prev_off_ns, ui
 	}
 	if (now_ns - *start_ns >= GENLOCK_AUDIO_STEP_HOLD_MAX_NS) {
 		*active = false;
-		*relabel_pending = false;
 		return GENLOCK_AUDIO_STEP_TIMEOUT;
 	}
 	*off_out = *held_off_ns;
@@ -2406,8 +2410,9 @@ static bool genlock_audio_step_places(obs_source_t *source, int release, int64_t
  * jumped on the same packet) prints released=none held_ms=0.0 with this packet's wall step and its landing
  * move (-r, which the placement slew repays) as the residual. Design 5901213031: a PENDING relabel prints
  * one line when it ends -- released=relabel-pending (this box's own step followed, residual -r, counted in
- * relabels=) or released=timeout (J applied once) -- with the SENDER's step (its stamp jump) as step_ms.
- * relabels= counts every relabel. Marker mutually non-substring vs every genlock-* log family. */
+ * relabels=) or released=timeout (J applied once) -- with the SENDER's step (its stamp jump) as step_ms
+ * and pending=1 (review round 1: a pending timeout is told apart from a skew hold's). relabels= counts
+ * every relabel. Marker mutually non-substring vs every genlock-* log family. */
 static void genlock_audio_step_log(obs_source_t *source, int release, bool relabel, int64_t relabel_off_jump_ns,
 				   int64_t relabel_move_ns, int64_t off_live_ns, uint64_t now_ns)
 {
@@ -2424,12 +2429,13 @@ static void genlock_audio_step_log(obs_source_t *source, int release, bool relab
 	const int64_t residual_ns =
 		released ? genlock_audio_step_residual_ns(source->genlock_audio_step_held_off_ns, off_live_ns)
 			 : relabel_move_ns;
+	const int pending = released && source->genlock_audio_step_relabel_pending ? 1 : 0;
 	blog(LOG_INFO,
 	     "genlock-audio-step-hold '%s': step_ms=%+.3f held_ms=%.1f released=%s residual_ms=%+.1f "
-	     "holds=%u relabels=%u (issue 1381)",
+	     "holds=%u relabels=%u pending=%d (issue 1381)",
 	     source->context.name ? source->context.name : "?", (double)step_ns / 1e6, (double)held_ns / 1e6,
 	     genlock_audio_step_release_token(release), (double)residual_ns / 1e6, source->genlock_audio_step_holds,
-	     source->genlock_audio_relabels);
+	     source->genlock_audio_relabels, pending);
 }
 
 /* issue 1367: defined with the genlock FIFO further down; the audio ingest below maps a genlock
@@ -2693,9 +2699,10 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 
 	/* camera-box issue 1381 (design 5901213031, ROZHODNUTE on finding 5900705310): a relabel's remainder --
 	 * the landing move -r of a joint or split relabel, a resolved pending relabel's release residual -- is
-	 * repaid on the placement slew at GENLOCK_AUDIO_SLEW_PPM whatever its size, the level setpoint moved
-	 * with each consumed step (the booked 15.8 ms of the 682 ms step: ~16 s, not the ~725 s the timecode
-	 * ASRC's level loop took under its 16.7 ms booking band). Added before the backstop and the ASRC error
+	 * repaid on the placement slew at GENLOCK_AUDIO_SLEW_PPM whatever its size, each consumed step booked
+	 * out of the smoothing timeline (the timecode level loop reads the placement error, which moves with
+	 * it: the booked 15.8 ms of the 682 ms step settles in ~14 s, not the ~725 s the level loop took
+	 * under the timecode ASRC's 16.7 ms booking band). Added before the backstop and the ASRC error
 	 * input read the owed slew, so neither sees the remainder as a placement jump. Decision:
 	 * src/genlock_audio_pairing.rs audio_relabel_book_ns. */
 	source->genlock_audio_slew_remaining_ns += genlock_audio_relabel_book_ns(

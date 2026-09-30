@@ -105,9 +105,10 @@ pub struct AudioStepHold {
     /// render tick's `genlock-regrid` line; for a pending relabel the SENDER's step, its stamp jump).
     /// Kept after a release.
     pub step_ns: i64,
-    /// Design 5901213031: the running hold is a PENDING relabel -- the stamps jumped by J while this
-    /// box's offset did not move (the sender's box stepped first); `held_off_ns` is the pre-jump
-    /// offset minus J, so the packets keep appending on their continuous timeline.
+    /// Design 5901213031: the running (or the last) hold is a PENDING relabel -- the stamps jumped by
+    /// J while this box's offset did not move (the sender's box stepped first); `held_off_ns` is the
+    /// pre-jump offset minus J, so the packets keep appending on their continuous timeline. Set when
+    /// a hold starts, kept after its release (the log's `pending=`).
     pub relabel_pending: bool,
     /// Design 5901213031: the previous timecode packet's arrival (OBS monotonic), for the arrival
     /// gap [`audio_relabel_pending`] reads.
@@ -160,7 +161,10 @@ pub fn audio_stamp_age_ns(now_ns: u64, raw_ts_ns: u64, off_live_ns: i64) -> i64 
 /// `RelabelPending` on the packet whose live offset jumps (over `step_min_ns`) to within one packet of
 /// the held offset: this box's own step followed, the landing moved by the remainder only. Otherwise
 /// `Timeout` after [`AUDIO_STEP_HOLD_MAX_NS`] (J applied once), or `Reset`. The ordinary follow and
-/// age releases do not apply to it.
+/// age releases do not apply to it, and only a relabel-shaped stamp jump
+/// ([`audio_relabel_pending`]: over one packet, continuous arrival) moves its held offset -- a pause,
+/// a duplicated or a skipped slot keeps it, so this box's own step still resolves the pending
+/// (review round 1: folded, a 500 ms pause left it to the bound and placed 484 ms).
 ///
 /// Every arithmetic wraps in two's complement, like the C mirror `genlock_audio_step_hold`.
 #[allow(clippy::too_many_arguments)]
@@ -177,7 +181,6 @@ pub fn audio_step_hold(
     if !timecode {
         let was = s.active;
         s.active = false;
-        s.relabel_pending = false;
         s.prev_packet_ns = 0;
         let release = if was {
             AudioStepRelease::Reset
@@ -209,6 +212,7 @@ pub fn audio_step_hold(
         0
     };
     let age_ns = audio_stamp_age_ns(now_ns, raw_ts_ns, off_live_ns);
+    let arrival_gap_ns = now_ns.wrapping_sub(s.prev_arrival_ns);
     let prev_off_ns = s.prev_off_ns;
     s.prev_off_ns = off_live_ns;
     s.prev_raw_ns = raw_ts_ns;
@@ -234,6 +238,7 @@ pub fn audio_step_hold(
                 s.held_off_ns = held_ns;
                 s.start_ns = now_ns;
                 s.step_ns = 0_i64.wrapping_sub(jump_ns);
+                s.relabel_pending = false;
                 if off_nominal {
                     // the stamps got there first: a zero-length hold, released on its own packet
                     audio_step_track_nominal(s, age_ns, packet_ns, now_ns);
@@ -258,16 +263,22 @@ pub fn audio_step_hold(
     }
     if timeline_reset {
         s.active = false;
-        s.relabel_pending = false;
         return (off_live_ns, AudioStepRelease::Reset);
     }
-    s.held_off_ns = s.held_off_ns.wrapping_sub(followed);
+    // review round 1: inside a pending relabel only a relabel-shaped stamp jump moves the held offset
+    let fold_ns = if !s.relabel_pending {
+        followed
+    } else if audio_relabel_pending(dev_ns, arrival_gap_ns, packet_ns, step_min_ns) {
+        dev_ns
+    } else {
+        0
+    };
+    s.held_off_ns = s.held_off_ns.wrapping_sub(fold_ns);
     if s.relabel_pending {
         if jump_ns.unsigned_abs() > min
             && off_live_ns.wrapping_sub(s.held_off_ns).unsigned_abs() < packet_ns
         {
             s.active = false;
-            s.relabel_pending = false;
             return (off_live_ns, AudioStepRelease::RelabelPending);
         }
     } else if off_live_ns.wrapping_sub(s.held_off_ns).unsigned_abs() <= packet_ns || off_nominal {
@@ -276,7 +287,6 @@ pub fn audio_step_hold(
     }
     if now_ns.wrapping_sub(s.start_ns) >= AUDIO_STEP_HOLD_MAX_NS {
         s.active = false;
-        s.relabel_pending = false;
         return (off_live_ns, AudioStepRelease::Timeout);
     }
     (s.held_off_ns, AudioStepRelease::None)
