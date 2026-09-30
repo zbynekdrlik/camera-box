@@ -37,6 +37,7 @@ fn sender_first(wall_ns: i64, lag_ns: u64, burst_jitter_ns: u64) -> StepCase {
         sender_first_ns: lag_ns,
         burst_jitter_ns,
         connect_backlog: 0,
+        step_offset_ns: 0,
     }
 }
 
@@ -139,6 +140,7 @@ fn a_sender_pause_restart_or_catch_up_keeps_the_stock_path_byte_for_byte_1381() 
             sender_first_ns: 0,
             burst_jitter_ns: 0,
             connect_backlog: 0,
+            step_offset_ns: 0,
         })
         .collect();
     for wall_ns in [STEP_682_NS, -STEP_682_NS] {
@@ -149,6 +151,7 @@ fn a_sender_pause_restart_or_catch_up_keeps_the_stock_path_byte_for_byte_1381() 
             sender_first_ns: RECEIVER_LAGS[0],
             burst_jitter_ns: 0,
             connect_backlog: 0,
+            step_offset_ns: 0,
         });
     }
     for case in cases {
@@ -177,6 +180,7 @@ fn without_the_slew_booking_a_sub_band_remainder_takes_minutes_1381() {
         sender_first_ns: 0,
         burst_jitter_ns: 0,
         connect_backlog: 0,
+        step_offset_ns: 0,
     };
     for case in [
         joint(STEP_682_NS),
@@ -216,6 +220,7 @@ fn a_pause_inside_the_pending_window_keeps_the_pending_resolvable_1381() {
             sender_first_ns: RECEIVER_LAGS[1],
             burst_jitter_ns: 0,
             connect_backlog: 0,
+            step_offset_ns: 0,
         };
         let r = run_step(case, Variant::Production);
         let rem = remainder_ms(wall_ns);
@@ -279,6 +284,7 @@ fn a_raw_clock_senders_late_step_packet_leaves_no_residual_1381() {
                 sender_first_ns: lag,
                 burst_jitter_ns: 0,
                 connect_backlog: 0,
+                step_offset_ns: 0,
             };
             let r = run_step(case, Variant::Production);
             assert!(
@@ -297,5 +303,195 @@ fn a_raw_clock_senders_late_step_packet_leaves_no_residual_1381() {
                  stay in the held offset as a residual: {r:?}"
             );
         }
+    }
+}
+
+// Slice 3 (design 5902870861, ROZHODNUTÉ 5902983227): a sender-first step of ONE slot (N = +1).
+
+/// The one-slot sender-first steps: S from just over one slot to just under two (N = +1).
+const ONE_SLOT_STEPS_MS: [i64; 5] = [35, 40, 50, 60, 66];
+
+/// The case with both steps moved onto 100 ns grid position `position` (0..3).
+fn on_grid_position(mut case: StepCase, position: u64) -> StepCase {
+    case.step_offset_ns = slot_ns(position);
+    case
+}
+
+/// The stamp jump J the case's sender makes at its relabel: the one packet whose stamp moved more
+/// than 1 ms against its continuation.
+fn relabel_stamp_jump(case: StepCase) -> i64 {
+    let packet = frames_ns(PACKET_FRAMES);
+    let jumps: Vec<i64> = step_sender_packets(case)
+        .windows(2)
+        .map(|w| w[1].stamp.wrapping_sub(w[0].stamp + packet) as i64)
+        .filter(|j| j.unsigned_abs() > 1_000_000)
+        .collect();
+    assert_eq!(
+        jumps.len(),
+        1,
+        "{case:?}: exactly one relabelled stamp jump: {jumps:?}"
+    );
+    jumps[0]
+}
+
+#[test]
+fn a_one_slot_relabel_jumps_one_packet_minus_66_ns_on_one_grid_position_1381() {
+    // the premise (ROZHODNUTÉ 5902983227): the sender stamps in 100 ns units, so its 30 fps slots are
+    // 33 333 300 / 33 333 300 / 33 333 400 ns, and an N = +1 relabel's stamp jump (two slots minus
+    // the 33 333 333 ns packet) is one packet + 34 ns on two grid positions and one packet − 66 ns
+    // on the third -- which neither "more than one packet" nor "one packet − 1 ns" catches
+    let packet = frames_ns(PACKET_FRAMES) as i64;
+    for s_ms in ONE_SLOT_STEPS_MS {
+        let jumps: Vec<i64> = (0..3)
+            .map(|position| {
+                relabel_stamp_jump(on_grid_position(
+                    sender_first(s_ms * 1_000_000, RECEIVER_LAGS[0], 0),
+                    position,
+                ))
+            })
+            .collect();
+        assert_eq!(
+            jumps,
+            [packet + 34, packet - 66, packet + 34],
+            "issue 1381: +{s_ms} ms: the N = +1 stamp jump on grid positions 0, 1, 2"
+        );
+    }
+}
+
+#[test]
+fn a_one_slot_sender_first_step_is_appended_and_repaid_on_every_grid_position_1381() {
+    // slice 3: a forward stamp jump of one packet (at least one packet − 100 ns, one NDI timecode
+    // unit) with continuous arrival is a pending relabel and the age band is half a packet, so this
+    // box's own step of −(one slot + r) resolves it. Measured on slice 2 (grid position 1): no
+    // pending, the receiver's step released a zero-length hold with residual −S and PLACED the
+    // packet, overwriting queued audio (+40 ms: 7.2 / 9.7 ms).
+    for s_ms in ONE_SLOT_STEPS_MS {
+        let wall_ns = s_ms * 1_000_000;
+        let rem = remainder_ms(wall_ns);
+        for position in 0..3 {
+            for lag in RECEIVER_LAGS {
+                let case = on_grid_position(sender_first(wall_ns, lag, 0), position);
+                let r = run_step(case, Variant::Production);
+                assert!(
+                    r.pendings == 1
+                        && r.relabels == 1
+                        && r.overwritten_ms == 0.0
+                        && r.dropped_ms == 0.0
+                        && r.gap_ms == 0.0
+                        && r.discs.is_empty(),
+                    "issue 1381: {case:?}: a one-slot sender-first step must be a pending relabel, \
+                     appended -- never placed at the receiver's step: {r:?}"
+                );
+                assert!(
+                    r.releases == [(r.releases[0].0, AudioStepRelease::RelabelPending)]
+                        && r.releases[0].0 < 0.1
+                        && !r.holding_at_end,
+                    "issue 1381: {case:?}: the receiver's own step must resolve it: {r:?}"
+                );
+                assert!(
+                    r.av_max_all_ms <= rem + AV_BOUND_MS
+                        && r.jumps == 0
+                        && r.av_settle_s <= rem + REPAY_MARGIN_S
+                        && r.av_tail_ms <= AV_BOUND_MS
+                        && r.est_max_ppm <= RATE_BOUND_PPM,
+                    "issue 1381: {case:?}: at most r = {rem:.1} ms off, repaid within {:.1} s of \
+                     the receiver's step: {r:?}",
+                    rem + REPAY_MARGIN_S
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_one_slot_sender_first_step_the_receiver_never_follows_applies_the_jump_once_1381() {
+    // no receiver step within the run: the pending runs to the 10 s bound and releases `timeout`
+    // with the whole jump J as its residual, applied ONCE. Over one packet (J = packet + 34 ns) the
+    // release places the packet (a zero-filled gap of J, the skew hold's rule); within one packet
+    // (J = packet − 66 ns) it appends and the timecode ASRC books J. Nothing is overwritten or
+    // dropped either way.
+    let packet = frames_ns(PACKET_FRAMES) as i64;
+    let bound_s = AUDIO_STEP_HOLD_MAX_NS as f64 / 1e9;
+    for s_ms in [40_i64, 60] {
+        for position in 0..3 {
+            let case = on_grid_position(
+                sender_first(s_ms * 1_000_000, RECEIVER_NEVER_NS, 0),
+                position,
+            );
+            let jump = relabel_stamp_jump(case);
+            let r = run_step(case, Variant::Production);
+            assert!(
+                r.pendings == 1
+                    && r.relabels == 0
+                    && r.releases == [(r.releases[0].0, AudioStepRelease::Timeout)]
+                    && (r.releases[0].0 - bound_s).abs() < 0.1
+                    && r.overwritten_ms == 0.0
+                    && r.dropped_ms == 0.0
+                    && !r.holding_at_end
+                    && r.av_tail_ms <= AV_BOUND_MS,
+                "issue 1381: {case:?}: a one-slot pending no receiver step follows is released \
+                 once at the bound: {r:?}"
+            );
+            let once = if jump > packet {
+                r.discs.len() == 1 && r.jumps == 0
+            } else {
+                r.discs.is_empty() && r.jumps == 1 && r.gap_ms == 0.0
+            };
+            assert!(
+                once,
+                "issue 1381: {case:?}: J = {jump} ns applied exactly once (placed over one packet, \
+                 booked within it): {r:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_skipped_or_duplicated_block_and_a_one_slot_backward_step_keep_their_path_byte_for_byte_1381() {
+    // slice 3 widens the pending start only by a FORWARD jump of one packet (down to one packet −
+    // 100 ns) with continuous arrival and by the age band (half a packet): a skipped block jumps its
+    // stamps exactly like an N = +1 relabel but its arrival gaps by one block; a duplicated block,
+    // and an N = −1 relabel (byte-identical to it: one packet back), jump BACKWARD by one packet,
+    // which still needs more than one packet. None of them is a pending or a relabel on any grid
+    // position, so the ingest runs exactly its path without them -- and, the slice-3 start being a
+    // superset of slice 2's (the unit test
+    // `the_slice_3_start_only_adds_the_one_slot_forward_jump_and_the_half_packet_age_1381`),
+    // exactly the slice-2 path.
+    let mut cases: Vec<StepCase> = Vec::new();
+    for position in 0..3 {
+        for follow in [Follow::SkipBlock, Follow::DupBlock] {
+            cases.push(on_grid_position(
+                StepCase {
+                    wall_ns: 0,
+                    lag_ns: 0,
+                    follow,
+                    sender_first_ns: 0,
+                    burst_jitter_ns: 0,
+                    connect_backlog: 0,
+                    step_offset_ns: 0,
+                },
+                position,
+            ));
+        }
+        for s_ms in [-10_i64, -20, -30] {
+            for lag in RECEIVER_LAGS {
+                cases.push(on_grid_position(
+                    sender_first(s_ms * 1_000_000, lag, 0),
+                    position,
+                ));
+            }
+        }
+    }
+    for case in cases {
+        let (prod, prod_trace) = run_step_traced(case, Variant::Production);
+        let (before, before_trace) = run_step_traced(case, Variant::NoRelabel);
+        assert!(
+            prod.pendings == 0
+                && prod.relabels == 0
+                && prod_trace.len() > 1000
+                && prod_trace == before_trace,
+            "issue 1381: {case:?}: a skipped or duplicated block (or an N = −1 relabel) must take \
+             today's path byte for byte: {prod:?} vs {before:?}"
+        );
     }
 }

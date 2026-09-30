@@ -426,6 +426,75 @@ int main(void)
 	}
 	if (!h_released)
 		printf("NO-RELEASE within 400 packets\n");
+	/* slice 3 (design 5902870861, ROZHODNUTE 5902983227): the sender's box steps first by ONE slot. On its
+	 * 100 ns grid the stamps jump one packet - 66 ns (the grid position slice 2 missed) or one packet
+	 * + 34 ns, with continuous arrival: a pending relabel, resolved by this box's own step of -(one slot
+	 * + r) 15 packets later */
+	static const struct {
+		const char *name;
+		int64_t step_ns;
+		int64_t jump_ns;
+	} one_slot[] = {
+		{"pending_one_slot_40ms", 40000000, 33333267},
+		{"pending_one_slot_60ms", 60000000, 33333367},
+	};
+	for (size_t j = 0; j < sizeof(one_slot) / sizeof(one_slot[0]); j++) {
+		h_reset(one_slot[j].name);
+		h_steady(40);
+		h_shift += one_slot[j].jump_ns;
+		h_late += (uint64_t)(one_slot[j].step_ns - one_slot[j].jump_ns);
+		h_print("start", h_packet());
+		for (int i = 0; i < 15; i++) {
+			const struct h_out o = h_packet();
+			if (o.relabel || o.pending || !o.push_back || o.release || o.logged || o.book_ns)
+				h_print("PENDING-BROKEN", o);
+		}
+		h_off -= one_slot[j].step_ns;
+		h_print("resolve", h_packet());
+		h_print("after", h_packet());
+		h_steady(5);
+	}
+	/* a one-slot pending relabel this box never follows: released at the 10 s bound, its residual J within
+	 * one packet (the release does not place it; the timecode ASRC books it, outside this branch) */
+	h_reset("pending_one_slot_timeout");
+	h_steady(40);
+	h_shift += 33333267;
+	h_late += 6666733;
+	h_print("start", h_packet());
+	h_released = false;
+	for (int i = 0; i < 400 && !h_released; i++) {
+		const struct h_out o = h_packet();
+		if (o.release) {
+			h_print("timeout", o);
+			h_released = true;
+		}
+	}
+	if (!h_released)
+		printf("NO-RELEASE within 400 packets\n");
+	/* a skipped slot on the same grid position: the stamps jump one packet - 66 ns like an N = +1 relabel,
+	 * but the arrival gaps one packet -- the stock path, as in slice 2 (never a pending relabel) */
+	h_reset("skip_slot_one_slot");
+	h_steady(40);
+	h_k++;
+	h_shift -= 66;
+	h_print("skip", h_packet());
+	h_print("after", h_packet());
+	/* an N = -1 relabel (the sender's box steps back 10 ms first): its stamps repeat one packet, exactly a
+	 * duplicated slot, with continuous arrival (the emit re-phased r = 23.3 ms earlier) -- the stock path,
+	 * as in slice 2; this box's own step 15 packets later starts no hold (10 ms, under one packet) */
+	h_reset("n_minus_one_10ms");
+	h_steady(40);
+	h_shift -= (int64_t)H_PACKET_NS;
+	h_late += 23333333;
+	h_print("start", h_packet());
+	for (int i = 0; i < 15; i++) {
+		const struct h_out o = h_packet();
+		if (o.relabel || o.pending || !o.push_back || o.release || o.logged || o.book_ns)
+			h_print("N-MINUS-ONE-BROKEN", o);
+	}
+	h_off += 10000000;
+	h_print("step", h_packet());
+	h_print("after", h_packet());
 	printf("debug_lines=%d\n", h_debug_lines);
 	return 0;
 }

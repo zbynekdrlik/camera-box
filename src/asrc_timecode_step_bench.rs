@@ -73,6 +73,14 @@ enum Follow {
     /// at emit) whose step-carrying packet is submitted [`STEP_LATE_NS`] late -- its stamp and its
     /// arrival; the next packet is on time again.
     JumpLate,
+    /// Slice 3 (design 5902870861): the `Relabel` sender's block-per-boundary stamps with no wall step
+    /// at all; it never sends the first block at or after the step time (a SKIPPED slot: its stamps
+    /// jump one slot, exactly like an N = +1 relabel, but its arrival gaps by one block too).
+    SkipBlock,
+    /// Slice 3 (design 5902870861): the same sender RESENDS the block before the step time, 3 ms after
+    /// it (a DUPLICATED slot: the same stamp again, the stamp jump − one packet, exactly like an
+    /// N = −1 relabel).
+    DupBlock,
 }
 
 /// Issue 1381 (review round 1): the pause of [`Follow::RelabelPause`] (15 slots) and where it starts.
@@ -103,11 +111,21 @@ struct StepCase {
     /// Review round 2: this many packets were queued when the receiver connected (they arrive together
     /// with the next one, so the first packets read older than the steady transport lag).
     connect_backlog: usize,
+    /// Slice 3 (design 5902870861): both steps happen this much after [`STEP_AT_NS`]. A relabel's stamp
+    /// jump is quantized to the sender's 100 ns units, so on the 30 fps per-second grid an N = +1
+    /// relabel jumps one packet + 34 ns or one packet − 66 ns depending on the grid position of its
+    /// first relabelled block: `slot_ns(p)` puts it on position p (position 1 is the − 66 ns one).
+    step_offset_ns: u64,
+}
+
+/// When the first step happens (the sender's, when it steps first).
+fn step_at(case: StepCase) -> u64 {
+    STEP_AT_NS + case.step_offset_ns
 }
 
 /// When the receiver's own wall steps.
 fn recv_step_at(case: StepCase) -> u64 {
-    STEP_AT_NS + case.sender_first_ns
+    step_at(case) + case.sender_first_ns
 }
 
 /// Issue 1381 (design 5901213031): a `sender_first_ns` this large means the receiver never steps
@@ -116,7 +134,10 @@ const RECEIVER_NEVER_NS: u64 = STEP_RUN_NS;
 
 /// Whether the receiver's own wall steps within the run (a pause is no wall step at all).
 fn receiver_steps(case: StepCase) -> bool {
-    !matches!(case.follow, Follow::NoStep | Follow::Pause) && recv_step_at(case) < STEP_RUN_NS
+    !matches!(
+        case.follow,
+        Follow::NoStep | Follow::Pause | Follow::SkipBlock | Follow::DupBlock
+    ) && recv_step_at(case) < STEP_RUN_NS
 }
 
 /// From when the run's timings, events and A/V are measured: the receiver's step, or the sender's
@@ -125,7 +146,7 @@ fn measure_at(case: StepCase) -> u64 {
     if receiver_steps(case) {
         recv_step_at(case)
     } else {
-        STEP_AT_NS
+        step_at(case)
     }
 }
 
@@ -133,9 +154,9 @@ fn measure_at(case: StepCase) -> u64 {
 fn step_sender_packets(case: StepCase) -> Vec<Packet> {
     let mut rng = Lcg(0x1381_5882);
     let follow_at = if case.sender_first_ns > 0 {
-        STEP_AT_NS
+        step_at(case)
     } else {
-        STEP_AT_NS + case.lag_ns
+        step_at(case) + case.lag_ns
     };
     let wall = case.wall_ns as u64;
     let mut out = Vec::new();
@@ -170,7 +191,7 @@ fn step_sender_packets(case: StepCase) -> Vec<Packet> {
             }
             Follow::Never => {
                 let emit = nominal + jitter;
-                let leap = if emit >= STEP_AT_NS {
+                let leap = if emit >= step_at(case) {
                     0_u64.wrapping_sub(wall)
                 } else {
                     0
@@ -205,6 +226,16 @@ fn step_sender_packets(case: StepCase) -> Vec<Packet> {
                 }
                 (nominal + jitter, WALL0 + nominal + jitter, 0)
             }
+            Follow::SkipBlock | Follow::DupBlock => {
+                if case.follow == Follow::SkipBlock
+                    && nominal >= follow_at
+                    && slot_ns(k.wrapping_sub(1)) < follow_at
+                {
+                    k += 1;
+                    continue;
+                }
+                (nominal + jitter, WALL0 + nominal, 0)
+            }
         };
         let extra = if case.burst_jitter_ns > 0 {
             rng.ns(0, case.burst_jitter_ns)
@@ -219,6 +250,15 @@ fn step_sender_packets(case: StepCase) -> Vec<Packet> {
             stamp: stamp_wall / 100 * 100,
             arrival_ns,
         });
+        // slice 3: the duplicated block -- the one before the step time, resent 3 ms after it
+        if case.follow == Follow::DupBlock && nominal < follow_at && slot_ns(k + 1) >= follow_at {
+            let dup = Packet {
+                arrival_ns: arrival_ns + 3_000_000,
+                ..out[out.len() - 1]
+            };
+            prev_arrival = dup.arrival_ns;
+            out.push(dup);
+        }
         k += 1;
     }
     if case.connect_backlog > 0 && case.connect_backlog < out.len() {
@@ -306,7 +346,7 @@ fn run_step_traced(case: StepCase, variant: Variant) -> (StepRun, StepTrace) {
         obs.mix_until(mono_now);
         let dur = obs.asrc_process(mono_now);
         let wall = step_receiver_wall(pkt.arrival_ns, case);
-        if pkt.arrival_ns >= STEP_AT_NS && losses_at_step.is_none() {
+        if pkt.arrival_ns >= step_at(case) && losses_at_step.is_none() {
             losses_at_step = Some((
                 obs.relabels,
                 obs.overwritten_ns,
@@ -327,7 +367,7 @@ fn run_step_traced(case: StepCase, variant: Variant) -> (StepRun, StepTrace) {
         let truth =
             (MONO0 + slot_ns(pkt.slot) + genlock_audio_delay_ns(HOLD_MS)).wrapping_add(pkt.leap_ns);
         let av_ms = landed.actual.wrapping_sub(truth) as i64 as f64 / 1e6;
-        if t >= STEP_AT_NS {
+        if t >= step_at(case) {
             r.av_max_all_ms = r.av_max_all_ms.max(av_ms.abs());
         }
         if t >= measure_at {
@@ -387,6 +427,7 @@ fn jump(wall_ns: i64, lag_ns: u64) -> StepCase {
         sender_first_ns: 0,
         burst_jitter_ns: 0,
         connect_backlog: 0,
+        step_offset_ns: 0,
     }
 }
 
@@ -426,6 +467,7 @@ fn the_89_7_ms_step_costs_at_most_one_event_and_is_never_late_1381() {
                 sender_first_ns: 0,
                 burst_jitter_ns: 0,
                 connect_backlog: 0,
+                step_offset_ns: 0,
             };
             let r = run_step(case, Variant::Production);
             let released_s = r.releases.first().map_or(0.0, |x| x.0);
@@ -475,6 +517,7 @@ fn a_sender_that_catches_up_is_released_at_once_and_one_that_never_follows_at_th
                 sender_first_ns: 0,
                 burst_jitter_ns: 0,
                 connect_backlog: 0,
+                step_offset_ns: 0,
             };
             let r = run_step(case, Variant::Production);
             let caught_up_s = (lag as f64 + wall_ns.min(0).unsigned_abs() as f64) / 1e9;
@@ -505,6 +548,7 @@ fn a_sender_that_catches_up_is_released_at_once_and_one_that_never_follows_at_th
         sender_first_ns: 0,
         burst_jitter_ns: 0,
         connect_backlog: 0,
+        step_offset_ns: 0,
     };
     let r = run_step(never, Variant::Production);
     assert!(
@@ -529,6 +573,7 @@ fn steady_state_and_a_small_step_never_hold_1381() {
             sender_first_ns: 0,
             burst_jitter_ns: 0,
             connect_backlog: 0,
+            step_offset_ns: 0,
         },
         Variant::Production,
     );
@@ -584,6 +629,7 @@ fn a_sender_that_stepped_first_is_resolved_at_the_receiver_step_1381() {
             sender_first_ns: 2 * NS_PER_S,
             burst_jitter_ns: 0,
             connect_backlog: 0,
+            step_offset_ns: 0,
         };
         let r = run_step(case, Variant::Production);
         if follow == Follow::Jump {
@@ -641,6 +687,7 @@ fn heavy_arrival_jitter_bounds_a_small_step_to_two_events_1381() {
             sender_first_ns: 0,
             burst_jitter_ns: 20_000_000,
             connect_backlog: 0,
+            step_offset_ns: 0,
         };
         let r = run_step(case, Variant::Production);
         let pay_s = wall_ns.unsigned_abs() as f64 / 1e6;
@@ -667,6 +714,7 @@ fn heavy_arrival_jitter_bounds_a_small_step_to_two_events_1381() {
             sender_first_ns: 0,
             burst_jitter_ns: 20_000_000,
             connect_backlog: 0,
+            step_offset_ns: 0,
         },
         Variant::Production,
     );
@@ -695,6 +743,7 @@ fn a_connect_backlog_never_misreads_a_receiver_step_1381() {
             sender_first_ns: 0,
             burst_jitter_ns: 0,
             connect_backlog: 2,
+            step_offset_ns: 0,
         };
         let r = run_step(case, Variant::Production);
         let lag_s = LAG_MIN_NS as f64 / 1e9;
@@ -734,6 +783,7 @@ fn relabel_case(wall_ns: i64, lag_ns: u64) -> StepCase {
         sender_first_ns: 0,
         burst_jitter_ns: 0,
         connect_backlog: 0,
+        step_offset_ns: 0,
     }
 }
 
@@ -836,6 +886,7 @@ fn a_sender_that_catches_up_or_pauses_takes_todays_path_byte_for_byte_1381() {
         sender_first_ns: 0,
         burst_jitter_ns: 0,
         connect_backlog: 0,
+        step_offset_ns: 0,
     }];
     for wall_ns in [STEP_682_NS, -STEP_682_NS, STEP_90_NS, 2_500_000_000] {
         for lag in [LAG_MIN_NS, LAG_MAX_NS] {
@@ -846,6 +897,7 @@ fn a_sender_that_catches_up_or_pauses_takes_todays_path_byte_for_byte_1381() {
                 sender_first_ns: 0,
                 burst_jitter_ns: 0,
                 connect_backlog: 0,
+                step_offset_ns: 0,
             });
         }
     }
@@ -856,6 +908,7 @@ fn a_sender_that_catches_up_or_pauses_takes_todays_path_byte_for_byte_1381() {
         sender_first_ns: 0,
         burst_jitter_ns: 0,
         connect_backlog: 0,
+        step_offset_ns: 0,
     });
     for case in cases {
         let (prod, prod_trace) = run_step_traced(case, Variant::Production);

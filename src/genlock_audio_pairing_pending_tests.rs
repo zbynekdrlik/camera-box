@@ -650,3 +650,215 @@ fn the_pending_release_has_its_own_token_and_never_places_1381() {
     }
     assert_eq!(AUDIO_RELABEL_ARRIVAL_JITTER_NS, 15_000_000);
 }
+
+// Slice 3 (design 5902870861, ROZHODNUTÉ 5902983227): a sender-first step of ONE slot (N = +1).
+
+/// The one-slot sender-first steps: S from just over one slot to just under two (N = +1).
+const ONE_SLOT_STEPS: [i64; 5] = [35_000_000, 40_000_000, 50_000_000, 60_000_000, 66_000_000];
+
+/// The two stamp jumps an N = +1 relabel makes on the sender's 100 ns per-second grid (its 30 fps
+/// slots are 33 333 300 / 33 333 300 / 33 333 400 ns): one packet + 34 ns on two grid positions,
+/// one packet − 66 ns on the third.
+const ONE_SLOT_JUMPS: [i64; 2] = [PACKET as i64 + 34, PACKET as i64 - 66];
+
+#[test]
+fn a_one_slot_forward_jump_with_continuous_arrival_is_a_pending_relabel_1381() {
+    let p = PACKET;
+    let pi = p as i64;
+    let j = AUDIO_RELABEL_ARRIVAL_JITTER_NS;
+    assert_eq!(
+        AUDIO_RELABEL_FORWARD_TOLERANCE_NS, 100,
+        "one NDI timecode unit"
+    );
+    // forward: one packet − 100 ns and up, continuous arrival (the emit re-phased r earlier)
+    for jump in [pi - 66, pi + 34, pi - 100, pi, pi + 1] {
+        assert!(
+            audio_relabel_pending(jump, p - 6_666_733, p, MIN),
+            "issue 1381: a forward stamp jump of {jump} ns with continuous arrival is a pending \
+             relabel"
+        );
+    }
+    assert!(
+        !audio_relabel_pending(pi - 101, p, p, MIN),
+        "issue 1381: one ns more than one NDI unit under one packet is not a slot"
+    );
+    // the arrival still decides: a skipped slot jumps the same one packet, but its arrival gaps
+    assert!(!audio_relabel_pending(pi - 66, 2 * p, p, MIN));
+    assert!(!audio_relabel_pending(pi + 34, 2 * p, p, MIN));
+    assert!(audio_relabel_pending(pi - 66, p + j, p, MIN));
+    assert!(!audio_relabel_pending(pi - 66, p + j + 1, p, MIN));
+    // backward still needs MORE than one packet: a duplicated slot and an N = −1 relabel are
+    // exactly one packet back, and nothing less than that
+    for jump in [-pi, -(pi - 66), -(pi - 100), -(pi + 1) + 1] {
+        assert!(
+            !audio_relabel_pending(jump, p, p, MIN),
+            "issue 1381: a backward stamp jump of {jump} ns keeps today's path"
+        );
+    }
+    assert!(audio_relabel_pending(-pi - 1, p, p, MIN));
+    // packets shorter than the tolerance: the 2 ms step minimum still rules
+    assert!(!audio_relabel_pending(MIN, 50, 50, MIN));
+    assert!(audio_relabel_pending(MIN + 1, 50, 50, MIN));
+}
+
+#[test]
+fn a_one_slot_sender_first_step_resolves_at_the_receiver_step_1381() {
+    // slice 2 missed the one-packet − 66 ns jump (not over one packet): its stamps were appended and
+    // this box's later step PLACED the packet (a zero-length `followed` release, residual −S)
+    for step in ONE_SLOT_STEPS {
+        for jump in ONE_SLOT_JUMPS {
+            for lag_packets in [15_u64, 90] {
+                let mut f = Feed::new();
+                f.steady(WARM);
+                let r = step - jump;
+                f.shift = jump;
+                f.early = r as u64;
+                assert!(
+                    f.starts(),
+                    "issue 1381: step {step} jump {jump}: a one-slot sender-first step starts a \
+                     pending relabel"
+                );
+                assert_eq!(
+                    f.take(),
+                    (OFF - jump, AudioStepRelease::None),
+                    "step {step} jump {jump}"
+                );
+                assert!(f.s.active && f.s.relabel_pending && f.s.step_ns == jump);
+                for _ in 0..lag_packets {
+                    assert_eq!(
+                        f.take(),
+                        (OFF - jump, AudioStepRelease::None),
+                        "step {step} jump {jump}: held on the continuous timeline"
+                    );
+                }
+                f.off = OFF - step;
+                let (off, rel) = f.take();
+                assert_eq!(
+                    (off, rel),
+                    (OFF - step, AudioStepRelease::RelabelPending),
+                    "issue 1381: step {step} jump {jump} lag {lag_packets}: this box's own step of \
+                     −(one slot + r) resolves the pending"
+                );
+                let residual = audio_step_residual_ns(f.s.held_off_ns, off);
+                assert!(
+                    residual == -r && !audio_step_release_places(rel, residual, PACKET),
+                    "issue 1381: step {step} jump {jump}: released with −r, never placed"
+                );
+                f.steady(100);
+            }
+        }
+    }
+}
+
+#[test]
+fn the_pending_age_band_is_half_a_packet_1381() {
+    // the stamps must jump AWAY from this box's wall by more than HALF a packet: a one-slot step's
+    // stamp age sits about one slot off (−S), so a late packet's arrival jitter no longer decides it
+    let p = PACKET as i64;
+    // (stamp jump, arrival later than the grid (< 0 = earlier), starts)
+    let cases: [(i64, i64, bool); 6] = [
+        // over one packet, 10 ms late: age −(J − 10 ms) = −24.3 ms -- inside the old one-packet band
+        (p + 1_000_000, 10_000_000, true),
+        // one packet − 66 ns, 5 ms late: age −28.3 ms
+        (p - 66, 5_000_000, true),
+        // backward, 17.7 ms early: age exactly half a packet (strict) -- and one ns more
+        (-p - 1_000_000, -(p / 2 + 1_000_000), false),
+        (-p - 1_000_000, -(p / 2 + 1_000_001), true),
+        // a late follow's age comes back within half a packet: never a pending start
+        (p + 1_000_000, p + 1_000_000 - p / 2, false),
+        (-p - 1_000_000, -(p + 1_000_000) + p / 2, false),
+    ];
+    for (jump, late, starts) in cases {
+        let mut f = Feed::new();
+        f.steady(WARM);
+        f.shift = jump;
+        let now = (f.now() as i64 + late) as u64;
+        assert_eq!(
+            audio_step_relabel_pending_starts(&f.s, true, f.off, f.raw(), PACKET, now, MIN),
+            starts,
+            "issue 1381: jump {jump} arriving {late} ns late: age {} ns",
+            late - jump
+        );
+    }
+}
+
+/// The slice-2 pending-start decision (design 5901213031) verbatim: the reference the slice-3 start
+/// must contain.
+fn slice2_relabel_pending(jump_ns: i64, gap_ns: u64, packet_ns: u64, min_ns: i64) -> bool {
+    let jump = jump_ns.unsigned_abs();
+    jump > min_ns.unsigned_abs()
+        && jump > packet_ns
+        && gap_ns <= packet_ns.saturating_add(AUDIO_RELABEL_ARRIVAL_JITTER_NS)
+}
+
+#[test]
+fn the_slice_3_start_only_adds_the_one_slot_forward_jump_and_the_half_packet_age_1381() {
+    // every packet slice 2 started a pending on still starts one, and the only new starts are a
+    // forward jump of one packet − 100 ns ..= one packet, or an age between half a packet and one
+    // packet. So a skipped slot (an arrival gap), a duplicated slot and an N = −1 relabel (one packet
+    // back) -- none of them a slice-2 start, none in either new region -- keep the slice-2 path byte
+    // for byte (the bench pins the traces too).
+    let p = PACKET as i64;
+    let mut jumps = vec![0_i64, 3_000_000, 10_000_000, 40_000_000, 500_000_000, 2 * p];
+    for d in [0_i64, 1, 34, 66, 99, 100, 101, 1_000_000] {
+        jumps.extend([p - d, p + d]);
+    }
+    let jumps: Vec<i64> = jumps.iter().flat_map(|&j| [j, -j]).collect();
+    let (mut added_forward, mut added_age) = (0, 0);
+    for jump in jumps {
+        for late in [
+            -20_000_000_i64,
+            -(p / 2 + 1_000_001),
+            -5_000_000,
+            0,
+            5_000_000,
+            10_000_000,
+            15_000_000,
+            15_000_001,
+            p,
+        ] {
+            for off_move in [0_i64, -1_000_000, -40_000_000] {
+                let mut f = Feed::new();
+                f.steady(WARM);
+                f.shift = jump;
+                f.off = OFF + off_move;
+                let now = (f.now() as i64 + late) as u64;
+                let raw = f.raw();
+                let new =
+                    audio_step_relabel_pending_starts(&f.s, true, f.off, raw, PACKET, now, MIN);
+                let age_dev = audio_stamp_age_ns(now, raw, f.off).wrapping_sub(f.s.nominal_age_ns);
+                let stamp_jump =
+                    raw.wrapping_sub(f.s.prev_raw_ns.wrapping_add(f.s.prev_packet_ns)) as i64;
+                let old = f.off.wrapping_sub(f.s.prev_off_ns).unsigned_abs() <= MIN.unsigned_abs()
+                    && age_dev.unsigned_abs() > PACKET
+                    && slice2_relabel_pending(
+                        stamp_jump,
+                        now.wrapping_sub(f.s.prev_arrival_ns),
+                        PACKET,
+                        MIN,
+                    );
+                assert!(
+                    !old || new,
+                    "issue 1381: jump {jump} late {late} off {off_move}: a slice-2 start must \
+                     still start"
+                );
+                if new && !old {
+                    let forward_slot = stamp_jump > 0 && stamp_jump >= p - 100 && stamp_jump <= p;
+                    let age_band =
+                        age_dev.unsigned_abs() > PACKET / 2 && age_dev.unsigned_abs() <= PACKET;
+                    assert!(
+                        forward_slot || age_band,
+                        "issue 1381: jump {jump} late {late} off {off_move}: a new start outside \
+                         the one-slot forward jump and the half-packet age band"
+                    );
+                    added_forward += usize::from(forward_slot);
+                    added_age += usize::from(age_band);
+                }
+            }
+        }
+    }
+    assert!(
+        added_forward > 0 && added_age > 0,
+        "the sweep must reach both widenings: {added_forward} forward, {added_age} age"
+    );
+}

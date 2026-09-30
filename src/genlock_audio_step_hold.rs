@@ -40,6 +40,11 @@ pub const AUDIO_STEP_NOMINAL_WARM_DIV: i64 = 4;
 /// `GENLOCK_AUDIO_RELABEL_ARRIVAL_JITTER_NS`.
 pub const AUDIO_RELABEL_ARRIVAL_JITTER_NS: u64 = 15_000_000;
 
+/// Issue 1381 (design 5902870861, ROZHODNUTÉ 5902983227) — how far under one packet a FORWARD
+/// pending relabel's stamp jump may be: one NDI timecode unit (RED: declared, not used yet). Mirror
+/// of `GENLOCK_AUDIO_RELABEL_FORWARD_TOLERANCE_NS`.
+pub const AUDIO_RELABEL_FORWARD_TOLERANCE_NS: u64 = 100;
+
 /// Issue 1381 — why a skew hold ended on this packet (0 = it did not). Discriminants match the C
 /// `GENLOCK_AUDIO_STEP_*` defines and the log line's `released=` token.
 #[repr(u8)]

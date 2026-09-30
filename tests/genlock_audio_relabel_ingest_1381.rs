@@ -24,7 +24,13 @@
 //! trace carries the slew each packet adds. Pending relabels at +682 ms, -1.5 s and +2.5 s resolved by
 //! this box's own step, one this box never follows (the 10 s bound), a pause and a duplicated slot.
 //! A stamp leap and a restart now carry their real arrival gap (with continuous arrival a stamp jump
-//! IS a pending relabel). It FAILS LOUDLY when no C compiler is present.
+//! IS a pending relabel).
+//!
+//! Slice 3 (design 5902870861, ROZHODNUTÉ 5902983227): a sender-first step of ONE slot is a pending
+//! relabel too -- its stamp jump on the sender's 100 ns grid is one packet − 66 ns or + 34 ns, and
+//! the forward bound is one packet − 100 ns. Resolved at +40 / +60 ms, one this box never follows,
+//! and a skipped slot and an N = −1 relabel (a duplicated slot's stamps) that keep the slice-2 path.
+//! It FAILS LOUDLY when no C compiler is present.
 
 use std::fs;
 use std::path::PathBuf;
@@ -370,6 +376,49 @@ fn truth_table() -> Vec<String> {
         "step_ms=+666.667 held_ms=10033.3 released=timeout residual_ms=+666.7 holds=1 relabels=0 \
          pending=1",
     ));
+    // slice 3 (design 5902870861, ROZHODNUTÉ 5902983227): the sender's box steps first by ONE slot.
+    // On its 100 ns grid the stamps jump one packet − 66 ns (the grid position slice 2 missed: it
+    // appended the jump and this box's step then released a zero-length `followed` hold with
+    // residual −40.0 that the ingest PLACED) or one packet + 34 ns. Both are a pending relabel now,
+    // resolved by this box's own step of −(one slot + r); the log carries the sender's stamp jump
+    for (name, residual) in [
+        ("pending_one_slot_40ms", "-6.7"),
+        ("pending_one_slot_60ms", "-26.7"),
+    ] {
+        t.push(format!("== {name}"));
+        t.push(line("start", [0, 1, 1, 0, 0, 1, 0, 1, 0], "+0.0"));
+        t.push(line("resolve", [0, 0, 1, 0, 0, 1, 4, 0, 1], residual));
+        t.push(log(
+            name,
+            &format!(
+                "step_ms=+33.333 held_ms=533.3 released=relabel-pending residual_ms={residual} \
+                 holds=1 relabels=1 pending=1"
+            ),
+        ));
+        t.push(after(1));
+    }
+    // a one-slot pending this box never follows: released at the 10 s bound, its residual J within
+    // one packet (the ingest's step placement does not place it; the timecode ASRC books it)
+    t.push("== pending_one_slot_timeout".to_string());
+    t.push(line("start", [0, 1, 1, 0, 0, 1, 0, 1, 0], "+0.0"));
+    t.push(line("timeout", [0, 0, 1, 0, 0, 1, 2, 0, 0], "+0.0"));
+    t.push(log(
+        "pending_one_slot_timeout",
+        "step_ms=+33.333 held_ms=10033.3 released=timeout residual_ms=+33.3 holds=1 relabels=0 \
+         pending=1",
+    ));
+    // a skipped slot on the same grid position (the same one-packet − 66 ns stamp jump, an arrival
+    // gap of one packet) and an N = −1 relabel (its stamps repeat one packet, exactly a duplicated
+    // slot; this box's own −10 ms step comes 15 packets later): the stock path, byte for byte as in
+    // slice 2 -- snapped onto the timeline and appended (on_raw 0), no pending, no hold
+    let stock = |what: &str| line(what, [0, 0, 1, 0, 0, 0, 0, 0, 0], "+0.0");
+    t.push("== skip_slot_one_slot".to_string());
+    t.push(stock("skip"));
+    t.push(stock("after"));
+    t.push("== n_minus_one_10ms".to_string());
+    t.push(stock("start"));
+    t.push(stock("step"));
+    t.push(stock("after"));
     // the stock "exceeded TS_SMOOTHING_THRESHOLD" and "jumped" debug lines: the leap, the restart, the
     // two pauses and the second jump inside a pending only -- no relabel and no pending relabel's
     // start reached the stock >= 70 ms or > 2 s path

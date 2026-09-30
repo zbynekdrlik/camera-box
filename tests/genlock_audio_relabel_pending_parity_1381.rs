@@ -14,8 +14,11 @@
 //! pending, a second relabel-shaped jump inside a pending (folded, then resolved by one step of this
 //! box), a raw-clock sender's late step-carrying packet (its lateness folded back on the next
 //! packet), a dup / pause / leap that never starts one, a reset packet, a pending ended by a reset
-//! and by leaving timecode, the 10 s bound, and a late follow. It FAILS LOUDLY when no C compiler
-//! is present.
+//! and by leaving timecode, the 10 s bound, and a late follow. Slice 3 (design 5902870861,
+//! ROZHODNUTÉ 5902983227) adds the one-slot sender-first steps (a stamp jump of one packet − 66 ns
+//! and + 34 ns, the two N = +1 jumps on the sender's 100 ns grid), a start only the half-packet age
+//! band admits, a skipped slot at the − 66 ns position, and scalars at the one-packet − 100 ns
+//! forward bound. It FAILS LOUDLY when no C compiler is present.
 
 use camera_box::genlock_audio_pairing::{
     audio_relabel_book_ns, audio_relabel_pending, audio_step_hold,
@@ -177,6 +180,48 @@ fn pending_sequence() -> Vec<Pkt> {
     for _ in 0..3 {
         take(&mut v, &mut k, off, shift, early, false);
     }
+    // slice 3 (ROZHODNUTÉ 5902983227): a sender-first step of ONE slot. On the sender's 100 ns grid
+    // an N = +1 relabel jumps one packet − 66 ns or one packet + 34 ns; this box's own step of
+    // −(one slot + r) resolves it
+    for (jump, step, lag) in [(p - 66, 40_000_000_i64, 15_u64), (p + 34, 60_000_000, 90)] {
+        shift += jump;
+        early += (step - jump) as u64;
+        for _ in 0..=lag {
+            take(&mut v, &mut k, off, shift, early, false);
+        }
+        off -= step;
+        for _ in 0..5 {
+            take(&mut v, &mut k, off, shift, early, false);
+        }
+    }
+    // the half-packet age band: a jump over one packet whose packet arrives 10 ms late (its age
+    // −24.3 ms, inside the old one-packet band); this box's step 5 ms past the jump resolves it
+    let jump = p + 1_000_000;
+    shift += jump;
+    let raw = (WALL + k * PACKET).wrapping_add(shift as u64);
+    v.push((
+        true,
+        off,
+        raw,
+        PACKET,
+        MONO + k * PACKET - early + 10_000_000,
+        false,
+    ));
+    k += 1;
+    for _ in 0..5 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    off -= jump + 5_000_000;
+    for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    // a skipped slot on the same grid position (one packet − 66 ns, its arrival gapping one packet):
+    // never pending
+    k += 1;
+    shift -= 66;
+    for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
     // a duplicated slot (the same stamp 3 ms later), a pause, a stamp leap: never pending
     let (dup_raw, dup_now) = {
         let l = v.last().expect("a packet");
@@ -271,6 +316,17 @@ fn c_audio_relabel_pending_matches_the_rust_authority_1381() {
         (80_000_000, 66_666_666, p, m),
         (m, 1_000_000, 1_000_000, m),
         (m + 1, 1_000_000, 1_000_000, m),
+        // slice 3: a forward jump down to one packet − 100 ns (one NDI unit), backward still over
+        (p as i64 - 66, p, p, m),
+        (p as i64 + 34, p, p, m),
+        (p as i64 - 100, p, p, m),
+        (p as i64 - 101, p, p, m),
+        (-(p as i64 - 66), p, p, m),
+        (p as i64 - 66, 2 * p, p, m),
+        (p as i64 - 66, p + 15_000_000, p, m),
+        (p as i64 - 66, p + 15_000_001, p, m),
+        (3, 0, 50, 2),
+        (-3, 0, 50, 2),
         (i64::MIN, 0, 1, 0),
         (i64::MIN, u64::MAX, u64::MAX, 0),
         (i64::MAX, u64::MAX, u64::MAX - 1, m),
@@ -390,7 +446,7 @@ fn c_audio_relabel_pending_matches_the_rust_authority_1381() {
     }
     // the script must reach every pending path, or the gate proves less than it says
     assert!(
-        starts_n >= 11 && resolved >= 8 && timed_out >= 1 && reset >= 2,
+        starts_n >= 14 && resolved >= 11 && timed_out >= 1 && reset >= 2,
         "issue 1381: the script reaches {starts_n} pending starts, {resolved} resolved, {timed_out} \
          timed out, {reset} reset"
     );
