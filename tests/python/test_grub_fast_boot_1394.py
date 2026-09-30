@@ -312,14 +312,25 @@ def test_apply_refuses_an_unreadable_file_and_leaves_it_alone(tmp_path):
     f.write_text("GRUB_DEFAULT=saved\nGRUB_TIMEOUT=3\n")
     os.chmod(f, 0o200)
     try:
-        if os.access(f, os.R_OK):
-            return  # running as root: an unreadable file cannot be made here
+        assert not os.access(f, os.R_OK), (
+            "run as non-root: root can read a 0200 file, so the unreadable case cannot be built")
         r = _apply(f)
         assert r.returncode != 0
         assert str(f) in r.stderr
     finally:
         os.chmod(f, 0o644)
     assert f.read_text() == "GRUB_DEFAULT=saved\nGRUB_TIMEOUT=3\n"
+
+
+def test_apply_does_not_depend_on_the_callers_tmpdir(tmp_path):
+    # The create-usb chroot inherits the host environment; a host TMPDIR that does not exist in
+    # the chroot must not abort the image build. The temp is staged next to the target instead.
+    f = tmp_path / "grub"
+    f.write_text("GRUB_DEFAULT=saved\n")
+    r = _lib(f'grub_fast_boot_apply "{f}"', env={"TMPDIR": str(tmp_path / "absent")})
+    assert r.returncode == 0, r.stderr
+    assert f.read_text() == "GRUB_DEFAULT=saved\n" + WANT_LINES
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["grub"], "no temp is left behind"
 
 
 # =================================================================================================
