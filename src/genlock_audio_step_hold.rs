@@ -41,8 +41,10 @@ pub const AUDIO_STEP_NOMINAL_WARM_DIV: i64 = 4;
 pub const AUDIO_RELABEL_ARRIVAL_JITTER_NS: u64 = 15_000_000;
 
 /// Issue 1381 (design 5902870861, ROZHODNUTÉ 5902983227) — how far under one packet a FORWARD
-/// pending relabel's stamp jump may be: one NDI timecode unit (RED: declared, not used yet). Mirror
-/// of `GENLOCK_AUDIO_RELABEL_FORWARD_TOLERANCE_NS`.
+/// pending relabel's stamp jump may be: one NDI timecode unit. A sender stamps in 100 ns units, so
+/// its 30 fps slots are 33 333 300 / 33 333 300 / 33 333 400 ns, and a one-slot relabel (N = +1)
+/// jumps one packet − 66 ns or one packet + 34 ns depending on its grid position (at 60 fps, one
+/// packet − 32 ns or + 68 ns). Mirror of `GENLOCK_AUDIO_RELABEL_FORWARD_TOLERANCE_NS`.
 pub const AUDIO_RELABEL_FORWARD_TOLERANCE_NS: u64 = 100;
 
 /// Issue 1381 — why a skew hold ended on this packet (0 = it did not). Discriminants match the C
@@ -368,12 +370,20 @@ pub fn audio_step_relabel_jumps(
 /// - `stamp_jump_ns`: the raw stamp against the continuous timeline (J);
 /// - `arrival_gap_ns`: this packet's arrival minus the previous packet's (OBS monotonic).
 ///
-/// True when the stamps jumped by more than `step_min_ns` AND by more than one packet (a relabel moves
-/// them N whole slots; a stamp move of one packet or less is a skipped or duplicated sender slot, or
-/// the jitter of a sender that stamps its raw submission clock -- the paths the timecode ASRC already
-/// books), and the packet arrived within one packet plus [`AUDIO_RELABEL_ARRIVAL_JITTER_NS`] of the
-/// previous one: a relabelling sender re-phases its emit earlier, never later, while a pause or a
-/// restart shows the gap its stamps jumped by. Mirror of `genlock_audio_relabel_pending`.
+/// True when the stamps jumped by more than `step_min_ns` AND by a whole slot or more, and the packet
+/// arrived within one packet plus [`AUDIO_RELABEL_ARRIVAL_JITTER_NS`] of the previous one: a
+/// relabelling sender re-phases its emit earlier, never later, while a pause, a restart or a skipped
+/// slot shows the gap its stamps jumped by.
+///
+/// The slot size is asymmetric (design 5902870861, ROZHODNUTÉ 5902983227):
+/// - **forward**, at least one packet minus [`AUDIO_RELABEL_FORWARD_TOLERANCE_NS`] (one NDI timecode
+///   unit): a one-slot relabel (N = +1) jumps one packet − 66 ns .. + 34 ns on the sender's 100 ns
+///   grid. A skipped slot jumps the same, and is kept out by its arrival gap;
+/// - **backward**, MORE than one packet: exactly one packet back is a duplicated slot (the same stamp
+///   resent a few ms later), which an N = −1 relabel is byte-identical to (a documented limit), and
+///   under that is a raw-clock sender's submission jitter -- the paths the timecode ASRC books.
+///
+/// Mirror of `genlock_audio_relabel_pending`.
 pub fn audio_relabel_pending(
     stamp_jump_ns: i64,
     arrival_gap_ns: u64,
@@ -381,8 +391,13 @@ pub fn audio_relabel_pending(
     step_min_ns: i64,
 ) -> bool {
     let jump = stamp_jump_ns.unsigned_abs();
+    let whole_slot = if stamp_jump_ns > 0 {
+        jump >= packet_ns.saturating_sub(AUDIO_RELABEL_FORWARD_TOLERANCE_NS)
+    } else {
+        jump > packet_ns
+    };
     jump > step_min_ns.unsigned_abs()
-        && jump > packet_ns
+        && whole_slot
         && arrival_gap_ns <= packet_ns.saturating_add(AUDIO_RELABEL_ARRIVAL_JITTER_NS)
 }
 
@@ -392,10 +407,11 @@ pub fn audio_relabel_pending(
 ///
 /// Outside a hold, in timecode mode, with a previous timecode packet: this box's live offset moved by
 /// at most `step_min_ns` (no receiver step on this packet -- that is the skew hold or a joint relabel),
-/// the stamps jumped AWAY from this box's wall (their live-wall age leaves the one-packet band around
-/// the nominal age; a jump that brings the age back is a late follow after an early age release,
-/// today's path) and [`audio_relabel_pending`] holds for the stamp jump and the arrival gap. Mirror of
-/// `genlock_audio_step_relabel_pending_starts`.
+/// the stamps jumped AWAY from this box's wall (their live-wall age leaves the HALF-packet band around
+/// the nominal age, design 5902870861: a one-slot step's age sits about one slot off, so the packet's
+/// arrival jitter must not decide it; a jump that brings the age back is a late follow after an early
+/// age release, today's path) and [`audio_relabel_pending`] holds for the stamp jump and the arrival
+/// gap. Mirror of `genlock_audio_step_relabel_pending_starts`.
 pub fn audio_step_relabel_pending_starts(
     s: &AudioStepHold,
     timecode: bool,
@@ -412,7 +428,7 @@ pub fn audio_step_relabel_pending_starts(
     let age_dev_ns =
         audio_stamp_age_ns(now_ns, raw_ts_ns, off_live_ns).wrapping_sub(s.nominal_age_ns);
     off_live_ns.wrapping_sub(s.prev_off_ns).unsigned_abs() <= step_min_ns.unsigned_abs()
-        && age_dev_ns.unsigned_abs() > packet_ns
+        && age_dev_ns.unsigned_abs() > packet_ns / 2
         && audio_relabel_pending(
             stamp_jump_ns,
             now_ns.wrapping_sub(s.prev_arrival_ns),
