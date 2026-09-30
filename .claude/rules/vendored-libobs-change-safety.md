@@ -683,3 +683,17 @@ and drives it tick by tick. Lessons from its two review rounds:
     TS_SMOOTHING_THRESHOLD" / "jumped" lines) also proves that no packet reached the stock path.
   - Put the exact expected line in the truth table.
   - Worked example: `tests/genlock_audio_relabel_ingest_1381.rs`.
+- **A decision that runs OUTSIDE the lifted branch can be lifted as a second slice (receiver slice 2,
+  design 5901213031).** The relabel remainder booking runs after the skew hold, far below the
+  place-vs-append branch. Lift it verbatim between two count-1 comment anchors and substitute it into
+  the harness tail (`@BOOK_SLICE@`). The tail declares the locals the slice reads
+  (`genlock_step_release`, `genlock_asrc_tc`) and prints the slew it added as its own column.
+  - Without this, only a wiring needle pinned the booking. A wrong sign or a dropped condition
+    passed every value test.
+  - Mutation run: 29/29 C and wiring mutants killed, and all 12 wiring mutants were also rejected by
+    the real pwsh lines of both workflows.
+- **A harness scenario must carry the ARRIVAL shape of the event it models.** After slice 2, a stamp
+  jump of more than one packet with continuous arrival IS a pending relabel. The slice-1 harness
+  modelled the 1367 stamp leap and a sender restart as stamp jumps with continuous arrival, which
+  now read as sender-first steps. Model a pause, restart or skipped slot with its real arrival gap
+  (advance the slot counter, not only the stamp shift).
