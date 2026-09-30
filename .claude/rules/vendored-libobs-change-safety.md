@@ -708,7 +708,25 @@ and drives it tick by tick. Lessons from its two review rounds:
     an offset step survived behind it. When a flag starts to outlive its event, grep every test
     that reads it and make "running" read `active && flag`.
 - **A harness scenario must carry the ARRIVAL shape of the event it models.** After slice 2, a stamp
-  jump of more than one packet with continuous arrival IS a pending relabel. The slice-1 harness
-  modelled the 1367 stamp leap and a sender restart as stamp jumps with continuous arrival, which
-  now read as sender-first steps. Model a pause, restart or skipped slot with its real arrival gap
-  (advance the slot counter, not only the stamp shift).
+  jump of more than one packet with continuous arrival IS a pending relabel (since slice 3, forward
+  from one packet − 100 ns). The slice-1 harness modelled the 1367 stamp leap and a sender restart
+  as stamp jumps with continuous arrival, which now read as sender-first steps. Model a pause,
+  restart or skipped slot with its real arrival gap (advance the slot counter, not only the stamp
+  shift).
+- **Design a bound on NDI stamps in the STAMP domain: 100 ns, not ns (slice 3, design question
+  5902976714).**
+  - Every audio/video stamp a receiver reads is a multiple of 100 ns (DistroAV `timecode * 100`).
+    So the sender's 30 fps slots are 33 333 300 / 300 / 400 ns, not the receiver grid's
+    33 333 333 / 334.
+  - A one-slot stamp jump against the 33 333 333 ns packet is therefore packet + 34 ns or
+    packet − 66 ns, never packet ± 1.
+  - The design's `>= packet − 1 ns` bound was derived on the ns grid and would have decided exactly
+    like the old bound. Check any "± a few ns" tolerance against the 100 ns quantization first.
+  - Corollary for benches: a scenario at ONE fixed step time lands on ONE grid position and can
+    pass vacuously (the bench's 300 s step sat on a + 34 ns position slice 2 already handled). Sweep
+    the grid positions (`StepCase.step_offset_ns = slot_ns(p)`, p = 0..3), and pin the premise
+    itself with a test that computes the jump from the sender's own packets.
+- **A lane stops and asks when the design's arithmetic is wrong.** A scratch-copy probe of three
+  variants (the old code, the design as written, a candidate fix), over the same bench cases,
+  settled the question on the ticket in one round: 20/30, 20/30 and 30/30 caught. The main then
+  decided the bound (ROZHODNUTÉ 5902983227) instead of the lane picking it.

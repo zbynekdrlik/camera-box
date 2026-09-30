@@ -23,6 +23,13 @@
 //! `relabel-pending` release at the receiver's step, nothing booked as a placement jump, and the
 //! remainder repaid within r seconds + 1 s. A receiver that never steps: released once at the
 //! 10 s bound, J applied once. A sender pause or restart: today's path byte for byte.
+//!
+//! ## Slice 3 (design 5902870861, ROZHODNUTÉ 5902983227)
+//!
+//! A sender-first step of ONE slot (N = +1, +35 … +66 ms) on every 100 ns grid position (its stamp
+//! jump is one packet + 34 ns or − 66 ns), the receiver 0.5 s and 3 s later: the same acceptance as
+//! above. Never followed: one `timeout`, J applied once. A skipped block, a duplicated block and an
+//! N = −1 relabel: today's path byte for byte on every position.
 
 use super::*;
 

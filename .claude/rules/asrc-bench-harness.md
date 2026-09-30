@@ -970,6 +970,26 @@ re-booked a phantom jump against that stale error: `place_jumps` 0 → 180 → 4
       dropped, +2.5 s reset). `NoRelabel` is not such a check: it keeps the pure hold, and the
       pending start alone keeps a jump under 2 s appended there. Only the +2.5 s timeline reset
       loses.
+  - **Slice 3 (design 5902870861, ROZHODNUTÉ 5902983227): a one-slot sender-first step (N = +1).**
+    - **The grid position matters.** The sender's stamps are floored to 100 ns
+      (`stamp_wall / 100 * 100`), so an N = +1 relabel's stamp jump is one packet + 34 ns or one
+      packet − 66 ns depending on the grid position of its first relabelled block (pinned by
+      `a_one_slot_relabel_jumps_one_packet_minus_66_ns_on_one_grid_position_1381`). The bench's
+      fixed 300 s step lands on position 0, where slice 2 already caught N = +1, so a case there
+      cannot fail first.
+    - **`StepCase.step_offset_ns`** moves both steps: `slot_ns(p)` puts the step on position p, and
+      position 1 is the − 66 ns one. Every existing case uses 0.
+    - **The two new senders have no wall step.** `Follow::SkipBlock` never sends the first block at
+      or after the step time. `Follow::DupBlock` resends the block before it 3 ms later. Both use
+      block-per-boundary stamps.
+    - **Results (Production).** +35 / 40 / 50 / 60 / 66 ms on all three positions, with the receiver
+      0.5 s or 3 s later: one pending, one `RelabelPending` release, 0 ms lost, r repaid within
+      r s + 1 s. On slice 2, position 1 lost 2.1 / 4.6 … 33.2 / 35.7 ms, overwritten at the
+      receiver's step.
+    - **Never followed.** One `timeout` at the 10 s bound, J applied once: placed (a J-ms gap) on
+      the + 34 ns positions, booked by the timecode ASRC on the − 66 ns one.
+    - **Byte for byte.** A skipped block, a duplicated block, and N = −1 at −10 / −20 / −30 ms each
+      give 0 pendings and a trace identical to `NoRelabel`.
 - **Parity** (`tests/asrc_compensator_parity_1367.rs`): `tcs` = the skew, the placement, the
   backstop probes (also on a LOCKED arrival-mode servo). `tcw` = 5 s of skew, the placement, then
   8 s of a 15 ms error that must NOT arm the restore, which proves the sustained count restarts at
