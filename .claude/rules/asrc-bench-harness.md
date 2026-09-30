@@ -921,9 +921,10 @@ re-booked a phantom jump against that stale error: `place_jumps` 0 → 180 → 4
     - Production, at +260 / +682 / −1.5 s / +2.5 s, joint (lag 0) and split (lag 20 ms): 0 ms
       overwritten, dropped or zero-filled, no departure from the continuation, relabels = 1, and a
       split hold released `followed` once.
-    - |A/V| never exceeds r: the booked r = 26.7 ms is back within 2 ms at +24.6 s, and the
-      sub-band r = 15.8 ms only at +725 s (the level loop alone, pinned by `SUB_BAND_SETTLE_S`; see
-      the finding in `genlock-audio-pairing.md`).
+    - |A/V| never exceeds r. Slice 1 left a sub-band r to the level loop (15.8 ms back within
+      2 ms only at +725 s). Since slice 2 (design 5901213031) every r is slewed at 1000 ppm and
+      booked as NO placement jump: +260 ms back at +24.6 s, +682 ms at +13.8 s, asserted within
+      r s + `REPAY_MARGIN_S` (1 s).
     - NoRelabel places r early (exactly r overwritten, a −r departure). At +2.5 s it drops
       165–175 ms of queued audio and zero-fills 96 ms.
     - A catch-up / pausing sender, one that never follows, and a steady feed give a BYTE-IDENTICAL
@@ -931,6 +932,44 @@ re-booked a phantom jump against that stale error: `place_jumps` 0 → 180 → 4
       proves no false relabel on the model; the shipped C branch is pinned by the lift harness.
     - The rate estimate stays within ±5 ppm through a joint relabel's one short block (asserted;
       0.000 ppm measured).
+  - **Slice 2 (design 5901213031): the pending-relabel bench** `src/asrc_timecode_pending_bench.rs`
+    (a `#[path]` child of the step bench). It uses the same `Obs` replay, which mirrors the ingest's
+    pending start + timeline continuation, the relabel-pending count and the booking before the
+    placement decision.
+    - `StepCase.sender_first_ns = RECEIVER_NEVER_NS` means the receiver never steps. The relabel's
+      true landing is then its whole N slots (the video follows the stamps through an unstepped
+      wall).
+    - `Follow::Pause` is a sender that stops for `wall_ns` and resumes on its own wall, with no wall
+      step.
+    - Losses, relabels and pendings count from the FIRST step (either box's). Timings, events and
+      A/V count from the receiver's step (the sender's when the receiver never steps).
+      `av_max_all_ms` spans the whole window.
+    - Results (Production): +260 / +682 ms / -1.5 s / +2.5 s with the receiver stepping 0.5 s or
+      3 s after the sender: 0 ms overwritten, dropped or zero-filled, no departure, one
+      `RelabelPending` release at the receiver's step, 0 booked jumps, |A/V| <= r (15.8 ms,
+      26.7 ms, 0, 0), back within 2 ms at 13.8 s / 24.7 s. Also with 10 ms of extra arrival jitter.
+    - Never followed: one `Timeout` at 10.02 s and one placement (+682 ms: a 666.7 ms zero-filled
+      gap, J applied once), on the relabelled landing after it.
+    - A pause (100 ms / 500 ms / 3 s) and a catch-up sender that stepped first give a byte-identical
+      trace to `NoRelabel` with 0 pendings.
+    - `Variant::NoBook` (anti-tautology) puts the remainder back on the ASRC band: +682 ms joint or
+      sender-first settles only at +725 s, and +260 ms books one placement jump.
+    - The 1367 sender events never start a pending (`no_sender_event_starts_a_pending_relabel_1367`,
+      the `Run.pendings` counter).
+    - Review round 1: `Follow::RelabelPause` is the relabel sender plus a 500 ms pause 5 slots
+      after its own step, inside the pending window. +682 ms and +260 ms, the receiver 3 s later:
+      one `RelabelPending` release at the receiver's step, nothing overwritten or dropped, and a
+      zero-filled gap no longer than the sender's own pause. Before the fix, the held offset
+      absorbed the pause and the pending ran to the bound.
+    - Review round 2: `Follow::JumpLate` is the raw-clock `Jump` sender whose step-carrying packet
+      goes out 8 ms late (its stamp and its arrival). +682 / −682 / +90 ms, the receiver 0.5 s
+      and 3 s later: one `RelabelPending` release, no loss, |A/V| back under 2 ms within 1 s of the receiver's step. With the
+      round-1 fold rule the +8 ms stayed in the held offset: 8.8 ms off until +761 s.
+    - Loss anti-tautology (review round 1): `Variant::NoStepHold` on the same sender-first relabels
+      loses audio from the sender's step on (+260 / +682 ms: a 233 / 667 ms zero-filled gap, −1.5 s
+      dropped, +2.5 s reset). `NoRelabel` is not such a check: it keeps the pure hold, and the
+      pending start alone keeps a jump under 2 s appended there. Only the +2.5 s timeline reset
+      loses.
 - **Parity** (`tests/asrc_compensator_parity_1367.rs`): `tcs` = the skew, the placement, the
   backstop probes (also on a LOCKED arrival-mode servo). `tcw` = 5 s of skew, the placement, then
   8 s of a 15 ms error that must NOT arm the restore, which proves the sustained count restarts at

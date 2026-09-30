@@ -267,34 +267,44 @@ fn a_sender_that_catches_up_without_jumping_its_stamps_is_released_at_once_1381(
 }
 
 #[test]
-fn a_sender_that_stepped_first_is_never_held_1381() {
+fn a_sender_that_stepped_first_is_never_held_by_the_receiver_step_1381() {
     // review round 1: the SENDER's box stepped first (a cross-box timecode source whose sender is the
     // date master). Its stamps are already on the new wall when the receiver's own step lands, so the
     // receiver's step brings them BACK onto its wall: holding the pre-step offset would put the
-    // audio a whole step off for the full 10 s bound. The receiver-step packet is a zero-length hold,
-    // released at once with the whole step as its residual (the ingest places it: the window before
-    // left the audio a step off its stamps), and nothing is held after it.
+    // audio a whole step off for the full 10 s bound. Nothing is held after the receiver's step.
     for step in [682_474_000_i64, -682_474_000, 89_703_000] {
         // (a) the sender's stamps jump by the step (past the nominal's warm-up), the receiver steps
-        // 2 s later
+        // 2 s later. Design 5901213031: the stamp jump (over one packet, continuous arrival) is a
+        // PENDING relabel -- the packets keep appending on their continuous timeline (the stamps read
+        // shifted by -J) -- and the receiver's own step releases it within one packet, never placed
+        // (a raw-clock sender: the remainder is 0)
         let mut s = AudioStepHold::default();
         for k in 0..40 {
             feed(&mut s, k, 0, 0);
         }
         for k in 40..100 {
-            assert_eq!(feed(&mut s, k, 0, step), (OFF, AudioStepRelease::None));
+            assert_eq!(
+                feed(&mut s, k, 0, step),
+                (OFF - step, AudioStepRelease::None)
+            );
+            assert!(s.active && s.relabel_pending, "step {step}: pending at {k}");
         }
         assert_eq!(
             feed(&mut s, 100, step, step),
-            (OFF - step, AudioStepRelease::Followed),
-            "issue 1381: step {step}: the receiver's step is released on its own packet"
+            (OFF - step, AudioStepRelease::RelabelPending),
+            "issue 1381: step {step}: the receiver's step resolves the pending relabel"
         );
-        assert!(!s.active && s.step_ns == step && s.start_ns == 1_000_000_000_000 + 100 * PACKET);
+        assert!(
+            !s.active
+                && s.relabel_pending
+                && s.step_ns == step
+                && s.start_ns == 1_000_000_000_000 + 40 * PACKET
+        );
         let residual = audio_step_residual_ns(s.held_off_ns, OFF - step);
         assert!(
-            residual == -step
-                && audio_step_release_places(AudioStepRelease::Followed, residual, PACKET),
-            "issue 1381: step {step}: the zero-length release places the whole step once"
+            residual == 0
+                && !audio_step_release_places(AudioStepRelease::RelabelPending, residual, PACKET),
+            "issue 1381: step {step}: the receiver's step moves the landing by nothing"
         );
         for k in 101..400 {
             let r = feed(&mut s, k, step, step);
@@ -403,13 +413,15 @@ fn the_nominal_age_follows_in_band_and_reanchors_out_of_band_1381() {
         MIN,
     );
     assert_eq!(s.nominal_age_ns, seed + 2_929 - 4_885);
-    // stamps 100 ms ahead of the receiver's wall (the sender moved alone): out of band, the timer runs
+    // stamps 100 ms ahead of the receiver's wall (the sender moved alone, after a pause -- a jump
+    // with continuous arrival would be a pending relabel, design 5901213031): out of band, the timer
+    // runs
     let nominal = s.nominal_age_ns;
     let far = 100_000_000_000_u64;
     let k = w + 3;
-    let t0 = base + k * PACKET;
+    let t0 = base + k * PACKET + far;
     for n in 0..6_u64 {
-        let raw = WALL + k * PACKET + n * far + 100_000_000;
+        let raw = WALL + k * PACKET + (n + 1) * far + 100_000_000;
         let r = audio_step_hold(&mut s, true, OFF, raw, PACKET, t0 + n * far, false, MIN);
         assert_eq!(r, (OFF, AudioStepRelease::None));
         assert_eq!(
@@ -419,7 +431,7 @@ fn the_nominal_age_follows_in_band_and_reanchors_out_of_band_1381() {
         );
     }
     // exactly ten minutes out of band: the age is the nominal from now on
-    let raw = WALL + k * PACKET + 6 * far + 100_000_000;
+    let raw = WALL + k * PACKET + 7 * far + 100_000_000;
     audio_step_hold(&mut s, true, OFF, raw, PACKET, t0 + 6 * far, false, MIN);
     assert_eq!(
         (s.nominal_age_ns, s.nominal_dev_since_ns),

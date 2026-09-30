@@ -16,8 +16,15 @@
 //! it under `-Wall -Wextra -Wformat=2 -Werror`, drives relabels (joint and split, +260 ms, +682 ms,
 //! -1.5 s, +2.5 s), a catch-up sender, a stamp leap and a sender restart, and compares the trace with
 //! its truth table. The `genlock-audio-step-hold` line each relabel prints is lifted too and checked
-//! value for value (review round 1: the live acceptance reads its step, residual and counters). It
-//! FAILS LOUDLY when no C compiler is present.
+//! value for value (review round 1: the live acceptance reads its step, residual and counters).
+//!
+//! Design 5901213031 (receiver slice 2): the branch also decides the PENDING relabel (the sender's box
+//! stepped first: a stamp-only jump of more than one packet with continuous arrival), and the relabel
+//! remainder booking on the placement slew is lifted verbatim into the tail (`@BOOK_SLICE@`), so the
+//! trace carries the slew each packet adds. Pending relabels at +682 ms, -1.5 s and +2.5 s resolved by
+//! this box's own step, one this box never follows (the 10 s bound), a pause and a duplicated slot.
+//! A stamp leap and a restart now carry their real arrival gap (with continuous arrival a stamp jump
+//! IS a pending relabel). It FAILS LOUDLY when no C compiler is present.
 
 use std::fs;
 use std::path::PathBuf;
@@ -90,9 +97,20 @@ fn c_harness() -> String {
         lift_fn(&src, "static inline uint64_t uint64_diff("),
         lift_fn(&src, "static int genlock_audio_step_hold_source("),
         lift_fn(&src, "static bool genlock_audio_relabel_source("),
+        lift_fn(&src, "static bool genlock_audio_relabel_pending_source("),
         lift_fn(&src, "static void genlock_audio_step_log("),
     ]
     .join("\n");
+    // design 5901213031: the relabel remainder booking, verbatim (it runs after the hold in the tail)
+    let book = slice_between(
+        &src,
+        "\t/* camera-box issue 1381 (design 5901213031, ROZHODNUTE on finding 5900705310): a relabel's remainder",
+        "\t/* camera-box issue 1381: a hold release beyond one packet",
+    );
+    assert!(
+        book.contains("genlock_audio_relabel_book_ns("),
+        "issue 1381: the lifted booking slice no longer books the relabel remainder"
+    );
     let branch = slice_between(
         &src,
         "\t/* camera-box issue 1381 (design 5900385541): a RELABEL",
@@ -104,6 +122,7 @@ fn c_harness() -> String {
         "} else if (diff < TS_SMOOTHING_THRESHOLD) {",
         "if (source->next_audio_sys_ts_min == in.timestamp) {",
         "reset_audio_timing(source, data->timestamp, os_time);",
+        "genlock_audio_relabel_pending_source(",
     ] {
         assert!(
             branch.contains(needle),
@@ -116,6 +135,7 @@ fn c_harness() -> String {
         "@LIFTED_BLOCK@",
         "@LIFTED_FUNCTIONS@",
         "@INGEST_BRANCH@",
+        "@BOOK_SLICE@",
     ] {
         assert_eq!(
             template.matches(marker).count(),
@@ -128,6 +148,7 @@ fn c_harness() -> String {
         .replace("@LIFTED_BLOCK@", &lift_block())
         .replace("@LIFTED_FUNCTIONS@", &functions)
         .replace("@INGEST_BRANCH@", &branch)
+        .replace("@BOOK_SLICE@", &book)
 }
 
 fn c_trace() -> Vec<String> {
@@ -186,14 +207,15 @@ fn c_trace() -> Vec<String> {
         .collect()
 }
 
-/// One traced packet: relabel, push-back after the branch, a timeline reset, a dropped buffer, the
-/// raw-domain timeline continuing from this packet's own stamp, the skew hold's release and whether
-/// it holds, and the cumulative relabel count.
-fn line(what: &str, f: [u8; 8]) -> String {
-    let [relabel, push, reset, dropped, on_raw, release, active, relabels] = f;
+/// One traced packet: relabel, a pending relabel started (design 5901213031), push-back after the
+/// branch, a timeline reset, a dropped buffer, the raw-domain timeline continuing from this packet's
+/// own stamp, the skew hold's release and whether it holds, the cumulative relabel count, and the
+/// slew the relabel remainder booking added (ms).
+fn line(what: &str, f: [u8; 9], book: &str) -> String {
+    let [relabel, pending, push, reset, dropped, on_raw, release, active, relabels] = f;
     format!(
-        "{what} relabel={relabel} push={push} reset={reset} dropped={dropped} on_raw={on_raw} \
-         release={release} active={active} relabels={relabels}"
+        "{what} relabel={relabel} pending={pending} push={push} reset={reset} dropped={dropped} \
+         on_raw={on_raw} release={release} active={active} relabels={relabels} book={book}"
     )
 }
 
@@ -202,12 +224,18 @@ fn log(src: &str, fields: &str) -> String {
     format!("log genlock-audio-step-hold '{src}': {fields} (issue 1381)")
 }
 
+/// A steady, appended packet after a relabel (`relabels` so far).
+fn after(relabels: u8) -> String {
+    line("after", [0, 0, 1, 0, 0, 1, 0, 0, relabels], "+0.0")
+}
+
 /// The decided behaviour, packet by packet.
 fn truth_table() -> Vec<String> {
     let mut t = Vec::new();
     // a relabel on the receiver's step packet: appended, the timeline continued from the relabelled
     // stamp (also under the 70 ms smoothing: joint_40ms, one slot), no reset, no hold. Its line
-    // carries the wall step and the landing move -r = N slots - S (released=none, nothing held).
+    // carries the wall step and the landing move -r = N slots - S (released=none, nothing held), and
+    // design 5901213031 books that -r on the placement slew whatever its size
     for (name, step, residual) in [
         ("joint_40ms", "+40.000", "-6.7"),
         ("joint_260ms", "+260.000", "-26.7"),
@@ -216,40 +244,136 @@ fn truth_table() -> Vec<String> {
         ("joint_2500ms", "+2500.000", "+0.0"),
     ] {
         t.push(format!("== {name}"));
-        t.push(line("relabel", [1, 1, 0, 0, 1, 0, 0, 1]));
+        t.push(line("relabel", [1, 0, 1, 0, 0, 1, 0, 0, 1], residual));
         t.push(log(
             name,
             &format!(
-                "step_ms={step} held_ms=0.0 released=none residual_ms={residual} holds=0 relabels=1"
+                "step_ms={step} held_ms=0.0 released=none residual_ms={residual} holds=0 relabels=1 \
+                 pending=0"
             ),
         ));
-        t.push(line("after", [0, 1, 0, 0, 1, 0, 0, 1]));
+        t.push(after(1));
     }
     // the split shape: the hold starts on the step packet, the relabel appends and releases it
-    // FOLLOWED (1) after one packet, with the landing move -r as its residual
+    // FOLLOWED (1) after one packet, with the landing move -r as its residual, booked on the slew
     t.push("== split_682ms".to_string());
-    t.push(line("step", [0, 1, 0, 0, 1, 0, 1, 0]));
-    t.push(line("relabel", [1, 1, 0, 0, 1, 1, 0, 1]));
+    t.push(line("step", [0, 0, 1, 0, 0, 1, 0, 1, 0], "+0.0"));
+    t.push(line("relabel", [1, 0, 1, 0, 0, 1, 1, 0, 1], "-15.8"));
     t.push(log(
         "split_682ms",
-        "step_ms=+682.474 held_ms=33.3 released=followed residual_ms=-15.8 holds=1 relabels=1",
+        "step_ms=+682.474 held_ms=33.3 released=followed residual_ms=-15.8 holds=1 relabels=1 \
+         pending=0",
     ));
-    t.push(line("after", [0, 1, 0, 0, 1, 0, 0, 1]));
+    t.push(after(1));
     // a catch-up sender: today's path (continuous stamps snap and append, the hold runs)
     t.push("== catchup_682ms".to_string());
-    t.push(line("step", [0, 1, 0, 0, 1, 0, 1, 0]));
+    t.push(line("step", [0, 0, 1, 0, 0, 1, 0, 1, 0], "+0.0"));
     for _ in 0..3 {
-        t.push(line("burst", [0, 1, 0, 0, 1, 0, 1, 0]));
+        t.push(line("burst", [0, 0, 1, 0, 0, 1, 0, 1, 0], "+0.0"));
     }
-    // a stamp leap without a wall step: placed at its stamp (push 0), as today
+    // the 1367 stamp leap (a missing slot, 80 ms after an arrival gap): placed at its stamp (push 0),
+    // as today -- never a pending relabel
     t.push("== leap_80ms".to_string());
-    t.push(line("leap", [0, 0, 0, 0, 1, 0, 0, 0]));
-    // a sender restart without a wall step: handle_ts_jump resets and drops the buffer, as today
+    t.push(line("leap", [0, 0, 0, 0, 0, 1, 0, 0, 0], "+0.0"));
+    // a sender restart (the stamps and the arrival jump 3 s): handle_ts_jump resets and drops the
+    // buffer, as today
     t.push("== restart_3000ms".to_string());
-    t.push(line("restart", [0, 1, 1, 1, 1, 0, 0, 0]));
-    // the stock "exceeded TS_SMOOTHING_THRESHOLD" and "jumped" debug lines: the leap and the restart
-    // only -- no relabel reached the stock >= 70 ms or > 2 s path
-    t.push("debug_lines=2".to_string());
+    t.push(line("restart", [0, 0, 1, 1, 1, 1, 0, 0, 0], "+0.0"));
+    // a 500 ms pause (the arrival gap with the jump): placed at its stamp, as today
+    t.push("== pause_500ms".to_string());
+    t.push(line("pause", [0, 0, 0, 0, 0, 1, 0, 0, 0], "+0.0"));
+    // a duplicated slot: snapped onto the timeline and appended, as today (the timecode ASRC books it)
+    t.push("== dup_slot".to_string());
+    t.push(line("dup", [0, 0, 1, 0, 0, 0, 0, 0, 0], "+0.0"));
+    // design 5901213031: the sender's box steps first -- a pending relabel starts (appended on the
+    // continuous timeline, the hold active), this box's own step 16 packets later resolves it
+    // (released relabel-pending = 4, the remainder -r booked on the slew); the line carries the
+    // SENDER's step (its stamp jump, N slots)
+    for (name, jump, residual) in [
+        ("pending_682ms", "+666.667", "-15.8"),
+        ("pending_back_1500ms", "-1500.000", "+0.0"),
+        ("pending_2500ms", "+2500.000", "+0.0"),
+    ] {
+        t.push(format!("== {name}"));
+        t.push(line("start", [0, 1, 1, 0, 0, 1, 0, 1, 0], "+0.0"));
+        t.push(line("resolve", [0, 0, 1, 0, 0, 1, 4, 0, 1], residual));
+        t.push(log(
+            name,
+            &format!(
+                "step_ms={jump} held_ms=533.3 released=relabel-pending residual_ms={residual} \
+                 holds=1 relabels=1 pending=1"
+            ),
+        ));
+        t.push(after(1));
+    }
+    // review round 1: a 500 ms pause inside the pending window is placed at its stamp (push 0), as
+    // today, and keeps the held offset: this box's own step 27 packets after the start still
+    // resolves the pending
+    t.push("== pending_pause_682ms".to_string());
+    t.push(line("start", [0, 1, 1, 0, 0, 1, 0, 1, 0], "+0.0"));
+    t.push(line("pause", [0, 0, 0, 0, 0, 1, 0, 1, 0], "+0.0"));
+    t.push(line("resolve", [0, 0, 1, 0, 0, 1, 4, 0, 1], "-15.8"));
+    t.push(log(
+        "pending_pause_682ms",
+        "step_ms=+666.667 held_ms=900.0 released=relabel-pending residual_ms=-15.8 holds=1 \
+         relabels=1 pending=1",
+    ));
+    t.push(after(1));
+    // review round 1: a second relabel-shaped jump inside the pending window (the sender's box steps
+    // again, +110 ms = 3 slots, continuous arrival) is folded into the held offset. The stock
+    // system-domain check still sees its 100 ms raw jump, so it is PLACED (push 0) -- at its
+    // continuous landing, through the folded offset (the pure hold's unit test pins that landing).
+    // This box's one step by both then resolves the pending, the residual both remainders
+    // (-15.8 - 10.0). A joint relabel on the same source afterwards prints pending=0: the kept flag
+    // belongs to a pending's own release line only
+    t.push("== pending_twice_682ms".to_string());
+    t.push(line("start", [0, 1, 1, 0, 0, 1, 0, 1, 0], "+0.0"));
+    t.push(line("again", [0, 0, 0, 0, 0, 1, 0, 1, 0], "+0.0"));
+    t.push(line("resolve", [0, 0, 1, 0, 0, 1, 4, 0, 1], "-25.8"));
+    t.push(log(
+        "pending_twice_682ms",
+        "step_ms=+666.667 held_ms=390.0 released=relabel-pending residual_ms=-25.8 holds=1 \
+         relabels=1 pending=1",
+    ));
+    t.push(after(1));
+    t.push(line("joint", [1, 0, 1, 0, 0, 1, 0, 0, 2], "-26.7"));
+    t.push(log(
+        "pending_twice_682ms",
+        "step_ms=+260.000 held_ms=0.0 released=none residual_ms=-26.7 holds=1 relabels=2 pending=0",
+    ));
+    t.push(after(2));
+    // review round 2: a raw-clock sender steps first and submits the step-carrying packet 8 ms late
+    // (stamp and arrival). The pending starts on S + 8 ms; the next on-time packet's -8 ms move folds
+    // back into the held offset, so this box's step resolves it with NO residual and books nothing
+    // (unfolded: residual +8.0 booked on the slew, then left under the ASRC band). The pending start
+    // re-anchors the raw-domain smoothing timeline ON the late stamp (stock OBS would snap a jittered
+    // packet onto the timeline it already has), so every later on-time packet sits 8 ms off its raw
+    // stamp until the next timeline reset (on_raw 0) and uses 8 ms of the 70 ms snap headroom on one
+    // side. Harmless for the audio: placement, the ASRC error and the pairing offset read the raw
+    // stamp, and the appends stay continuous. A slice-1 relabel of a jittered stamp does the same
+    t.push("== pending_late_682ms".to_string());
+    t.push(line("start", [0, 1, 1, 0, 0, 1, 0, 1, 0], "+0.0"));
+    t.push(line("resolve", [0, 0, 1, 0, 0, 0, 4, 0, 1], "+0.0"));
+    t.push(log(
+        "pending_late_682ms",
+        "step_ms=+690.474 held_ms=192.0 released=relabel-pending residual_ms=+0.0 holds=1 \
+         relabels=1 pending=1",
+    ));
+    t.push(line("after", [0, 0, 1, 0, 0, 0, 0, 0, 1], "+0.0"));
+    // a pending relabel this box never follows: released at the 10 s bound (2 = timeout), its
+    // residual the whole jump (the ingest's step placement applies it once), no relabel counted
+    t.push("== pending_timeout_682ms".to_string());
+    t.push(line("start", [0, 1, 1, 0, 0, 1, 0, 1, 0], "+0.0"));
+    t.push(line("timeout", [0, 0, 1, 0, 0, 1, 2, 0, 0], "+0.0"));
+    t.push(log(
+        "pending_timeout_682ms",
+        "step_ms=+666.667 held_ms=10033.3 released=timeout residual_ms=+666.7 holds=1 relabels=0 \
+         pending=1",
+    ));
+    // the stock "exceeded TS_SMOOTHING_THRESHOLD" and "jumped" debug lines: the leap, the restart, the
+    // two pauses and the second jump inside a pending only -- no relabel and no pending relabel's
+    // start reached the stock >= 70 ms or > 2 s path
+    t.push("debug_lines=5".to_string());
     t
 }
 
@@ -259,6 +383,12 @@ fn the_shipped_ingest_appends_a_relabel_and_keeps_every_other_path_1381() {
     assert!(
         !trace.iter().any(|l| l.starts_with("STEADY-BROKEN")),
         "issue 1381: a steady packet no longer appends:\n{}",
+        trace.join("\n")
+    );
+    assert!(
+        !trace.iter().any(|l| l.starts_with("PENDING-BROKEN")),
+        "issue 1381: a packet inside a pending relabel no longer appends quietly on its continuous \
+         timeline:\n{}",
         trace.join("\n")
     );
     let want = truth_table();

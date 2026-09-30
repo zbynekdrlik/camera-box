@@ -683,3 +683,32 @@ and drives it tick by tick. Lessons from its two review rounds:
     TS_SMOOTHING_THRESHOLD" / "jumped" lines) also proves that no packet reached the stock path.
   - Put the exact expected line in the truth table.
   - Worked example: `tests/genlock_audio_relabel_ingest_1381.rs`.
+- **A decision that runs OUTSIDE the lifted branch can be lifted as a second slice (receiver slice 2,
+  design 5901213031).** The relabel remainder booking runs after the skew hold, far below the
+  place-vs-append branch. Lift it verbatim between two count-1 comment anchors and substitute it into
+  the harness tail (`@BOOK_SLICE@`). The tail declares the locals the slice reads
+  (`genlock_step_release`, `genlock_asrc_tc`) and prints the slew it added as its own column.
+  - Without this, only a wiring needle pinned the booking. A wrong sign or a dropped condition
+    passed every value test.
+  - Mutation run: 29/29 C and wiring mutants killed, and all 12 wiring mutants were also rejected by
+    the real pwsh lines of both workflows.
+  - Review round 1 (the pending's fold rule, its flag kept after a release for `pending=`): 32/32,
+    the same 12 wiring mutants rejected by pwsh. The first round-1 run left two survivors. One was a
+    fold that never moves the held offset: no script had a relabel-shaped jump INSIDE a pending.
+    The other printed `pending=` off the kept flag on a non-release line: no scenario logged a line
+    after a pending's release. A flag that outlives its event needs a test where it is still set
+    but must not be read (here a joint relabel after a resolved pending, which must print
+    `pending=0`).
+  - Review round 2 (a move under one packet inside a pending folds like the skew hold's): 34/34,
+    the two new mutants (the sub-packet arm dropped; `>` for `>=`) killed by the pending parity
+    script's late step packet and its duplicated slot inside a pending. The Rust authority's own
+    19 mutants (the unit tests and benches through the plain-rustc stub crate) are all killed.
+  - Keeping that flag also silently weakened older tests. Every assertion that read the flag as
+    "still pending" passed after a release too, and a Rust mutant that resolves a pending without
+    an offset step survived behind it. When a flag starts to outlive its event, grep every test
+    that reads it and make "running" read `active && flag`.
+- **A harness scenario must carry the ARRIVAL shape of the event it models.** After slice 2, a stamp
+  jump of more than one packet with continuous arrival IS a pending relabel. The slice-1 harness
+  modelled the 1367 stamp leap and a sender restart as stamp jumps with continuous arrival, which
+  now read as sender-first steps. Model a pause, restart or skipped slot with its real arrival gap
+  (advance the slot counter, not only the stamp shift).
