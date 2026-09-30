@@ -45,9 +45,10 @@ use crate::asrc_bench::{RealtimeAsrcCompensator, STEP_RECOVER_PPM};
 use crate::genlock_audio_pairing::{
     audio_actual_place_ns, audio_asrc_error_ms, audio_asrc_timecode, audio_hold_action,
     audio_intended_raw_ns, audio_level_shift_ns, audio_place_error_ns, audio_place_term_ns,
-    audio_placed_slew_fold_ns, audio_push_back_allowed, audio_relabel, audio_slew_book_ts_ns,
-    audio_slew_ppm, audio_slew_step_ns, audio_stamp_interval_s, audio_stamp_mono_ns,
-    audio_step_hold, audio_step_relabel_jumps, audio_step_release_places, audio_step_residual_ns,
+    audio_placed_slew_fold_ns, audio_push_back_allowed, audio_relabel, audio_relabel_book_ns,
+    audio_slew_book_ts_ns, audio_slew_ppm, audio_slew_step_ns, audio_stamp_interval_s,
+    audio_stamp_mono_ns, audio_step_hold, audio_step_relabel_jumps,
+    audio_step_relabel_pending_starts, audio_step_release_places, audio_step_residual_ns,
     audio_wall_to_mono_ns, genlock_audio_delay_ns, AudioHoldAction, AudioHoldMode, AudioStepHold,
     AudioStepRelease,
 };
@@ -147,6 +148,10 @@ enum Variant {
     /// append (today's code before it): a sender whose stamps jump WITH the wall step is placed at
     /// its raw landing (a stamp jump of 70 ms or more) or resets the buffer (over 2 s).
     NoRelabel,
+    /// Issue 1381 (design 5901213031, anti-tautology): the production path without the relabel
+    /// remainder booked on the placement slew: the remainder is left to the timecode ASRC, which
+    /// books it only from half a packet up (the slice-1 finding: 15.8 ms took ~725 s).
+    NoBook,
 }
 
 /// Issue 1381: what one `source_output_audio_data` call did with its packet.
@@ -275,8 +280,11 @@ struct Obs {
     step_hold: AudioStepHold,
     /// Issue 1381: packets the backstop placed (`place_beyond_cap` counts each as a placement jump).
     backstops: u32,
-    /// Issue 1381 (design 5900385541): packets recognised as a relabel and appended.
+    /// Issue 1381 (design 5900385541): packets recognised as a relabel and appended (design
+    /// 5901213031: and pending relabels this box's own step resolved).
     relabels: u32,
+    /// Issue 1381 (design 5901213031): pending relabels started (the sender's box stepped first).
+    pendings: u32,
     /// Issue 1381: queued audio a placement inside the buffer overwrote (and popped), ns.
     overwritten_ns: u64,
     /// Issue 1381: queued audio a buffer reset dropped (`handle_ts_jump`, or a placement before the
@@ -314,6 +322,7 @@ impl Obs {
             step_hold: AudioStepHold::default(),
             backstops: 0,
             relabels: 0,
+            pendings: 0,
             overwritten_ns: 0,
             dropped_ns: 0,
             gap_ns: 0,
@@ -351,19 +360,28 @@ impl Obs {
     /// Issue 1381: the skew hold and the backstop are production pieces (off for the anti-tautology
     /// variants; `NoStepHold` keeps the backstop).
     fn step_hold_on(&self) -> bool {
-        matches!(self.variant, Variant::Production | Variant::NoRelabel)
+        matches!(
+            self.variant,
+            Variant::Production | Variant::NoRelabel | Variant::NoBook
+        )
     }
 
     /// Issue 1381 (design 5900385541): the relabel append is a production piece (`NoRelabel` is the
-    /// path before it; it reads the skew hold's state, so it is inert without the hold).
+    /// path before it; it reads the skew hold's state, so it is inert without the hold). Design
+    /// 5901213031: so is the pending relabel's timeline continuation.
     fn relabel_on(&self) -> bool {
+        matches!(self.variant, Variant::Production | Variant::NoBook)
+    }
+
+    /// Issue 1381 (design 5901213031): the relabel remainder booked on the placement slew.
+    fn book_on(&self) -> bool {
         self.variant == Variant::Production
     }
 
     fn backstop_on(&self) -> bool {
         matches!(
             self.variant,
-            Variant::Production | Variant::NoStepHold | Variant::NoRelabel
+            Variant::Production | Variant::NoStepHold | Variant::NoRelabel | Variant::NoBook
         )
     }
 
@@ -419,14 +437,34 @@ impl Obs {
         // issue 1381 (design 5900385541): a RELABEL -- the stamps jumped WITH the wall step, on the
         // skew hold's state before it takes this packet -- continues the source's timeline: the
         // smoothing sees no jump (no 70 ms re-placement, no > 2 s reset) and the packet APPENDS
+        let jumps = audio_step_relabel_jumps(&self.step_hold, hold_timecode, off_live, ts);
         let relabel = self.relabel_on()
             && self.timing_set
             && self.next_ts_min != 0
-            && audio_step_relabel_jumps(&self.step_hold, hold_timecode, off_live, ts)
-                .is_some_and(|(stamp, off)| audio_relabel(stamp, off, dur, WALL_STEP_MIN_NS));
+            && jumps.is_some_and(|(stamp, off)| audio_relabel(stamp, off, dur, WALL_STEP_MIN_NS));
+        let relabel_move = jumps.map_or(0, |(stamp, off)| stamp.wrapping_add(off));
         if relabel {
             self.next_ts_min = ts;
             self.relabels += 1;
+        }
+        // issue 1381 (design 5901213031): a PENDING relabel -- the stamps jumped by more than one
+        // packet with continuous arrival while this box's offset did not move (the sender's box
+        // stepped first) -- continues the timelines the same way; the skew hold then maps the
+        // stamps through the pre-jump offset minus J until this box's own step follows
+        let relabel_pending = self.relabel_on()
+            && self.timing_set
+            && self.next_ts_min != 0
+            && audio_step_relabel_pending_starts(
+                &self.step_hold,
+                hold_timecode,
+                off_live,
+                ts,
+                dur,
+                mono_now,
+                WALL_STEP_MIN_NS,
+            );
+        if relabel_pending {
+            self.next_ts_min = ts;
         }
         if !self.timing_set {
             self.timing_adjust = mono_now.wrapping_sub(ts);
@@ -454,7 +492,8 @@ impl Obs {
         in_ts = in_ts.wrapping_add(self.timing_adjust);
         let mut push_back = false;
         // issue 1381 (design 5900385541): the relabel continues the system-domain timeline too
-        if relabel && self.next_sys_min != 0 {
+        // (design 5901213031: and so does a pending relabel's start)
+        if (relabel || relabel_pending) && self.next_sys_min != 0 {
             self.next_sys_min = in_ts;
         }
         if self.next_sys_min == in_ts {
@@ -471,6 +510,7 @@ impl Obs {
         }
         // issue 1381: the per-source skew hold -- a wall step keeps this source on its pre-step offset
         // until its own stamps follow (genlock_audio_step_hold in the ingest).
+        let was_pending = self.step_hold.relabel_pending;
         let (off, release) = audio_step_hold(
             &mut self.step_hold,
             hold_timecode,
@@ -481,6 +521,14 @@ impl Obs {
             timeline_reset,
             WALL_STEP_MIN_NS,
         );
+        if self.step_hold.relabel_pending && release == AudioStepRelease::None && !was_pending {
+            self.pendings += 1;
+        }
+        // design 5901213031: a pending relabel this box's own step resolved is a relabel
+        let relabel_released = release == AudioStepRelease::RelabelPending;
+        if relabel_released {
+            self.relabels += 1;
+        }
         let term = audio_place_term_ns(mode, hold_ms, off, self.timing_adjust);
         in_ts = in_ts.wrapping_add(term as u64);
         let prev_term =
@@ -522,6 +570,22 @@ impl Obs {
         self.prev_hold_ms = hold_ms;
         self.next_sys_min = self.next_ts_min.wrapping_add(self.timing_adjust);
         let intended = audio_intended_raw_ns(ts, self.timing_adjust, 0, 0, term);
+        // issue 1381 (design 5901213031, ROZHODNUTÉ): a relabel's remainder -- the landing move -r of
+        // a joint / split relabel, a resolved pending relabel's release residual -- is repaid on the
+        // placement slew at 1000 ppm whatever its size (never the timecode ASRC's half-packet band)
+        if self.book_on() {
+            let landing_move = if relabel {
+                relabel_move
+            } else {
+                audio_step_residual_ns(self.step_hold.held_off_ns, off_live)
+            };
+            self.slew_remaining_ns += audio_relabel_book_ns(
+                landing_move,
+                relabel || relabel_released,
+                push_back && self.audio_ts != 0,
+                self.c.timecode(),
+            );
+        }
         // issue 1381: a TIMEOUT release applies the new offset once (a placement); outside a hold a
         // jump the owed cap cannot hold is placed, never partially booked (the backstop).
         if audio_step_release_places(
@@ -629,6 +693,8 @@ struct Run {
     av_peak_ms: f64,
     /// A recovery payment and a slew step reached the same resampler call.
     stacked: bool,
+    /// Issue 1381 (design 5901213031): pending relabels started.
+    pendings: u32,
 }
 
 fn run(event: Event, variant: Variant, settle_ns: u64) -> Run {
@@ -661,6 +727,7 @@ fn run(event: Event, variant: Variant, settle_ns: u64) -> Run {
     r.jumps = obs.c.place_jump_count();
     r.recover_owed_final_ms = obs.c.step_recover_ms();
     r.stacked = obs.stacked;
+    r.pendings = obs.pendings;
     r
 }
 
@@ -767,6 +834,21 @@ fn the_arrival_servo_fails_the_catch_up_and_the_stamp_leap_1367() {
         "issue 1367: the arrival servo must drag the audio off a timeline the sender moved (a loss \
          by count, an excess by depth: no booking, the level loop drains it): {leap:?}"
     );
+}
+
+#[test]
+fn no_sender_event_starts_a_pending_relabel_1367() {
+    // issue 1381 (design 5901213031): a pending relabel needs a stamp jump of MORE than one packet
+    // with continuous arrival and no receiver step -- a skipped or duplicated slot (one packet), a
+    // stamp leap (a missing slot: an arrival gap), a restart (a gap) and a receiver-first wall step
+    // keep the 1367 path above
+    for (event, settle) in scenarios() {
+        let r = run(event, Variant::Production, settle);
+        assert_eq!(
+            r.pendings, 0,
+            "issue 1381: {event:?} must never start a pending relabel: {r:?}"
+        );
+    }
 }
 
 #[test]

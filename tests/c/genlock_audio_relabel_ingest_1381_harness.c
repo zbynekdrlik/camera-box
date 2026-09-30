@@ -6,7 +6,9 @@
  * the relabel decision, OBS's raw-domain TS smoothing (the 70 ms snap and the > 2 s handle_ts_jump
  * reset) and the system-domain push-back check (with its second > 2 s reset). Everything else here is
  * a stub libobs (the source fields that branch touches, the deques, blog) and a tail that runs the
- * shipped skew hold the way the real ingest does after the branch. */
+ * shipped skew hold the way the real ingest does after the branch. Design 5901213031: the branch also
+ * decides the PENDING relabel (the sender's box stepped first), and the tail runs the shipped relabel
+ * remainder booking (the slew the packet adds) lifted verbatim too. */
 #include <inttypes.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -88,8 +90,11 @@ struct obs_source {
 	bool async_unbuffered;
 	bool async_decoupled;
 	int64_t genlock_audio_slew_step_ns;
+	int64_t genlock_audio_slew_remaining_ns;
 	struct h_asrc asrc;
 	uint32_t genlock_audio_relabels;
+	bool genlock_audio_step_relabel_pending;
+	uint64_t genlock_audio_step_prev_arrival_ns;
 	bool genlock_audio_step_active;
 	int64_t genlock_audio_step_prev_off_ns;
 	uint64_t genlock_audio_step_prev_raw_ns;
@@ -111,6 +116,8 @@ struct obs_source {
  * after it, and an append / placement into the stub buffer */
 struct h_out {
 	bool relabel;
+	/* design 5901213031: this packet started a pending relabel */
+	bool pending;
 	bool push_back;
 	bool reset;
 	bool dropped;
@@ -119,6 +126,8 @@ struct h_out {
 	int release;
 	/* the packet logged a genlock-audio-step-hold line (kept in h_info) */
 	bool logged;
+	/* design 5901213031: the slew the relabel remainder booking added (ns) */
+	int64_t book_ns;
 };
 
 static struct h_out h_ingest(obs_source_t *source, const struct audio_data *data, int genlock_hold_mode,
@@ -135,18 +144,26 @@ static struct h_out h_ingest(obs_source_t *source, const struct audio_data *data
 	const uint64_t genlock_step_packet_ns = conv_frames_to_time(sample_rate, in.frames);
 @INGEST_BRANCH@
 	struct h_out out = {genlock_relabel,
+			    genlock_relabel_pending,
 			    push_back,
 			    genlock_timeline_reset,
 			    source->audio_input_buf[0].size < buf_before,
 			    source->next_audio_ts_min == data->timestamp + genlock_step_packet_ns,
 			    0,
-			    false};
+			    false,
+			    0};
 	int64_t genlock_off_ns = genlock_off_live_ns;
-	out.release = genlock_audio_step_hold_source(source, genlock_hold_mode == GENLOCK_AUDIO_HOLD_TIMECODE,
-						     genlock_off_live_ns, data->timestamp, genlock_step_packet_ns,
-						     os_time, genlock_timeline_reset, &genlock_off_ns);
-	genlock_audio_step_log(source, out.release, genlock_relabel, genlock_relabel_off_jump_ns, genlock_relabel_move_ns,
-			       genlock_off_live_ns, os_time);
+	const int genlock_step_release = genlock_audio_step_hold_source(
+		source, genlock_hold_mode == GENLOCK_AUDIO_HOLD_TIMECODE, genlock_off_live_ns, data->timestamp,
+		genlock_step_packet_ns, os_time, genlock_timeline_reset, &genlock_off_ns);
+	out.release = genlock_step_release;
+	/* the shipped booking reads the timecode ASRC flag (a timecode source with a resampler here) */
+	const bool genlock_asrc_tc = true;
+	const int64_t h_slew_before = source->genlock_audio_slew_remaining_ns;
+@BOOK_SLICE@
+	out.book_ns = source->genlock_audio_slew_remaining_ns - h_slew_before;
+	genlock_audio_step_log(source, genlock_step_release, genlock_relabel, genlock_relabel_off_jump_ns,
+			       genlock_relabel_move_ns, genlock_off_live_ns, os_time);
 	out.logged = h_info_set;
 	source->next_audio_sys_ts_min = source->next_audio_ts_min + source->timing_adjust;
 	if (push_back && source->audio_ts) {
@@ -201,9 +218,11 @@ static struct h_out h_packet(void)
 
 static void h_print(const char *what, struct h_out o)
 {
-	printf("%s relabel=%d push=%d reset=%d dropped=%d on_raw=%d release=%d active=%d relabels=%u\n", what,
-	       o.relabel ? 1 : 0, o.push_back ? 1 : 0, o.reset ? 1 : 0, o.dropped ? 1 : 0, o.on_raw ? 1 : 0,
-	       o.release, h_src.genlock_audio_step_active ? 1 : 0, h_src.genlock_audio_relabels);
+	printf("%s relabel=%d pending=%d push=%d reset=%d dropped=%d on_raw=%d release=%d active=%d relabels=%u "
+	       "book=%+.1f\n",
+	       what, o.relabel ? 1 : 0, o.pending ? 1 : 0, o.push_back ? 1 : 0, o.reset ? 1 : 0, o.dropped ? 1 : 0,
+	       o.on_raw ? 1 : 0, o.release, h_src.genlock_audio_step_active ? 1 : 0, h_src.genlock_audio_relabels,
+	       (double)o.book_ns / 1e6);
 	if (o.logged)
 		printf("log %s\n", h_info);
 }
@@ -214,7 +233,8 @@ static void h_steady(int n)
 	for (int i = 0; i < n; i++) {
 		const bool first = h_k == 0;
 		struct h_out o = h_packet();
-		if (o.relabel || o.reset || o.dropped || !o.on_raw || o.release || o.logged || o.push_back == first)
+		if (o.relabel || o.pending || o.reset || o.dropped || !o.on_raw || o.release || o.logged || o.book_ns ||
+		    o.push_back == first)
 			h_print("STEADY-BROKEN", o);
 	}
 }
@@ -262,16 +282,77 @@ int main(void)
 		h_late += 25000000ull;
 		h_print("burst", h_packet());
 	}
-	/* a stamp leap with no wall step (a skipped-slot leap): placed at its stamp, as today */
+	/* the 1367 stamp leap with no wall step (a slot never sent, the stamps 47 ms on: an 80 ms jump after an
+	 * arrival gap): placed at its stamp, as today -- the gap keeps it off the pending relabel */
 	h_reset("leap_80ms");
 	h_steady(40);
-	h_shift += 80000000;
+	h_k++;
+	h_shift += 47000000;
 	h_print("leap", h_packet());
-	/* a sender restart (the stamps jump 3 s, the wall does not): handle_ts_jump drops the buffer */
+	/* a sender restart (3 s silent, then on its own wall: the stamps AND the arrival jump 3 s):
+	 * handle_ts_jump drops the buffer, as today */
 	h_reset("restart_3000ms");
 	h_steady(40);
-	h_shift += 3000000000ll;
+	h_k += 90;
 	h_print("restart", h_packet());
+	/* a pause of 500 ms (15 slots never sent): the stamp jump comes with its arrival gap -- placed at its
+	 * stamp, as today */
+	h_reset("pause_500ms");
+	h_steady(40);
+	h_k += 15;
+	h_print("pause", h_packet());
+	/* a duplicated slot (the same stamp again, no later): the 70 ms smoothing appends it, as today */
+	h_reset("dup_slot");
+	h_steady(40);
+	h_k--;
+	h_print("dup", h_packet());
+	/* design 5901213031: the SENDER's box steps first -- its stamps jump N slots with continuous arrival
+	 * (the emit re-phased r earlier) while this box's offset stays: a pending relabel, appended on the
+	 * continuous timeline; this box's own step 15 packets later resolves it (the remainder -r booked on
+	 * the slew) */
+	static const struct {
+		const char *name;
+		int64_t step_ns;
+	} pending[] = {
+		{"pending_682ms", 682474000},
+		{"pending_back_1500ms", -1500000000},
+		{"pending_2500ms", 2500000000},
+	};
+	for (size_t j = 0; j < sizeof(pending) / sizeof(pending[0]); j++) {
+		h_reset(pending[j].name);
+		h_steady(40);
+		const int64_t s = pending[j].step_ns;
+		const int64_t n = s >= 0 ? s * 30 / 1000000000 : -((-s * 30 + 999999999) / 1000000000);
+		h_shift += H_SLOT(n);
+		h_late += (uint64_t)(s - H_SLOT(n));
+		h_print("start", h_packet());
+		for (int i = 0; i < 15; i++) {
+			const struct h_out o = h_packet();
+			if (o.relabel || o.pending || !o.push_back || o.release || o.logged || o.book_ns)
+				h_print("PENDING-BROKEN", o);
+		}
+		h_off -= s;
+		h_print("resolve", h_packet());
+		h_print("after", h_packet());
+		h_steady(5);
+	}
+	/* a pending relabel this box never follows: released at the 10 s bound (J applied once by the ingest's
+	 * step placement, outside this branch) */
+	h_reset("pending_timeout_682ms");
+	h_steady(40);
+	h_shift += H_SLOT(20);
+	h_print("start", h_packet());
+	/* bounded: 400 packets are 13.3 s, past the 10 s bound; no release at all prints its own line */
+	bool h_released = false;
+	for (int i = 0; i < 400 && !h_released; i++) {
+		const struct h_out o = h_packet();
+		if (o.release) {
+			h_print("timeout", o);
+			h_released = true;
+		}
+	}
+	if (!h_released)
+		printf("NO-RELEASE within 400 packets\n");
 	printf("debug_lines=%d\n", h_debug_lines);
 	return 0;
 }

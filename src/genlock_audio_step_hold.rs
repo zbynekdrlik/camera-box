@@ -33,6 +33,10 @@ pub const AUDIO_STEP_NOMINAL_WARM_PACKETS: u32 = 30;
 /// `GENLOCK_AUDIO_STEP_NOMINAL_WARM_DIV`.
 pub const AUDIO_STEP_NOMINAL_WARM_DIV: i64 = 4;
 
+/// Issue 1381 (design 5901213031) — the arrival jitter a PENDING relabel's packet may add to one packet
+/// duration (RED: declared, not used yet). Mirror of `GENLOCK_AUDIO_RELABEL_ARRIVAL_JITTER_NS`.
+pub const AUDIO_RELABEL_ARRIVAL_JITTER_NS: u64 = 15_000_000;
+
 /// Issue 1381 — why a skew hold ended on this packet (0 = it did not). Discriminants match the C
 /// `GENLOCK_AUDIO_STEP_*` defines and the log line's `released=` token.
 #[repr(u8)]
@@ -46,6 +50,8 @@ pub enum AudioStepRelease {
     Timeout = 2,
     /// The ingest reset the source's timeline in this packet, or the source left timecode mode.
     Reset = 3,
+    /// Design 5901213031: a PENDING relabel resolved (RED: never returned yet).
+    RelabelPending = 4,
 }
 
 impl AudioStepRelease {
@@ -56,6 +62,7 @@ impl AudioStepRelease {
             AudioStepRelease::Followed => "followed",
             AudioStepRelease::Timeout => "timeout",
             AudioStepRelease::Reset => "reset",
+            AudioStepRelease::RelabelPending => "relabel-pending",
         }
     }
 }
@@ -93,6 +100,10 @@ pub struct AudioStepHold {
     /// The wall step that started it (wall − mono, + = the wall jumped forward, the sign of the
     /// render tick's `genlock-regrid` line). Kept after a release.
     pub step_ns: i64,
+    /// Design 5901213031: the running hold is a PENDING relabel (RED: never set yet).
+    pub relabel_pending: bool,
+    /// Design 5901213031: the previous timecode packet's arrival (RED: never set yet).
+    pub prev_arrival_ns: u64,
 }
 
 /// Issue 1381 — how old a packet's stamp is on the live wall when it arrives, ns: `now − (raw +
@@ -280,6 +291,40 @@ pub fn audio_step_relabel_jumps(
         s.prev_off_ns
     };
     Some((stamp_jump_ns, off_live_ns.wrapping_sub(mapped_ns)))
+}
+
+/// Issue 1381 (design 5901213031) — is a stamp-only jump a PENDING relabel? RED stub: never.
+pub fn audio_relabel_pending(
+    _stamp_jump_ns: i64,
+    _arrival_gap_ns: u64,
+    _packet_ns: u64,
+    _step_min_ns: i64,
+) -> bool {
+    false
+}
+
+/// Issue 1381 (design 5901213031) — does this packet START a pending relabel? RED stub: never.
+pub fn audio_step_relabel_pending_starts(
+    _s: &AudioStepHold,
+    _timecode: bool,
+    _off_live_ns: i64,
+    _raw_ts_ns: u64,
+    _packet_ns: u64,
+    _now_ns: u64,
+    _step_min_ns: i64,
+) -> bool {
+    false
+}
+
+/// Issue 1381 (design 5901213031) — what a relabel adds to the placement slew. RED stub: nothing
+/// (the remainder stays with the timecode ASRC's booking band, the slice-1 path).
+pub fn audio_relabel_book_ns(
+    _move_ns: i64,
+    _relabel: bool,
+    _appended: bool,
+    _asrc_tc: bool,
+) -> i64 {
+    0
 }
 
 /// Issue 1381 (review round 1) — one packet outside a hold moves the nominal age. In the warm-up after

@@ -14,13 +14,16 @@
 //! packets, its exact edge), a timeline reset,
 //! leaving timecode mode in a hold, stamp jitter inside a hold, a step within one packet, the joint
 //! step, the 2 ms boundary (with 1 ms packets, where a 2 ms jump is more than a packet) and the
-//! one-packet boundary, and the two's-complement extremes. It FAILS LOUDLY when no C compiler is
-//! present.
+//! one-packet boundary, and the two's-complement extremes. Design 5901213031 adds the PENDING
+//! relabel (the sender's box stepped first) and the relabel remainder booked on the placement slew:
+//! their scalar vectors and a pending script on top of the hold script. It FAILS LOUDLY when no C
+//! compiler is present.
 
 use camera_box::genlock_audio_pairing::{
-    audio_relabel, audio_stamp_age_ns, audio_step_freezes_video, audio_step_hold,
-    audio_step_relabel_jumps, audio_step_release_places, audio_step_residual_ns, AudioStepHold,
-    AudioStepRelease, AUDIO_STEP_HOLD_MAX_NS, AUDIO_STEP_NOMINAL_REANCHOR_NS,
+    audio_relabel, audio_relabel_book_ns, audio_relabel_pending, audio_stamp_age_ns,
+    audio_step_freezes_video, audio_step_hold, audio_step_relabel_jumps,
+    audio_step_relabel_pending_starts, audio_step_release_places, audio_step_residual_ns,
+    AudioStepHold, AudioStepRelease, AUDIO_STEP_HOLD_MAX_NS, AUDIO_STEP_NOMINAL_REANCHOR_NS,
     AUDIO_STEP_NOMINAL_WARM_PACKETS,
 };
 use camera_box::genlock_wall_step::WALL_STEP_MIN_NS;
@@ -82,8 +85,9 @@ fn sequence() -> Vec<Pkt> {
         t += if i < 43 { PACKET } else { PACKET / 4 };
     }
     clear(&mut v);
-    // review round 1: the sender stepped FIRST -- its stamps jumped, the receiver steps 2 s later (a
-    // zero-length hold, released on the receiver's own packet), past the nominal's warm-up
+    // review round 1: the sender stepped FIRST -- its stamps jumped, the receiver steps 2 s later,
+    // past the nominal's warm-up (design 5901213031: a pending relabel from the stamp jump on,
+    // resolved by the receiver's own packet)
     for _ in 0..WARM {
         push(&mut v, &mut k, OFF, 0, 0, false);
     }
@@ -112,9 +116,10 @@ fn sequence() -> Vec<Pkt> {
     }
     clear(&mut v);
     // the nominal age: jittered arrivals move it in band (both signs, a remainder the division
-    // truncates toward zero); stamps 100 ms ahead leave the band and start the timer; packets 100 s
-    // apart reach the re-anchor at exactly 600 s; the receiver's later step then HOLDS (the stamps
-    // are off the re-anchored nominal)
+    // truncates toward zero); stamps 100 ms ahead (after a 100 s pause: with continuous arrival the
+    // jump would be a pending relabel, design 5901213031) leave the band and start the timer; packets
+    // 100 s apart reach the re-anchor at exactly 600 s; the receiver's later step then HOLDS (the
+    // stamps are off the re-anchored nominal)
     let mut t = MONO + k * PACKET;
     let jitter: [i64; 5] = [0, 3_000_001, -5_000_003, 1_234_567, -2_000_000];
     for i in 0..(WARM as usize + 20) {
@@ -124,12 +129,12 @@ fn sequence() -> Vec<Pkt> {
         t += PACKET;
     }
     let far = 100_000_000_000_u64;
-    for n in 0..8_u64 {
+    for n in 1..9_u64 {
         let raw = (WALL + k * PACKET + n * far).wrapping_add(100_000_000);
         v.push((true, OFF, raw, PACKET, t + n * far, false));
     }
-    let t_end = t + 7 * far;
-    let raw_end = WALL + k * PACKET + 7 * far + 100_000_000;
+    let t_end = t + 8 * far;
+    let raw_end = WALL + k * PACKET + 8 * far + 100_000_000;
     for j in 1..4_u64 {
         v.push((
             true,
@@ -252,7 +257,7 @@ fn clear(v: &mut Vec<Pkt>) {
 
 fn state_line(off: i64, rel: u8, s: &AudioStepHold) -> String {
     format!(
-        "{off} {rel} {} {} {} {} {} {} {} {} {} {}",
+        "{off} {rel} {} {} {} {} {} {} {} {} {} {} {} {}",
         u8::from(s.active),
         s.prev_off_ns,
         s.prev_raw_ns,
@@ -262,7 +267,9 @@ fn state_line(off: i64, rel: u8, s: &AudioStepHold) -> String {
         s.nominal_warm,
         s.held_off_ns,
         s.start_ns,
-        s.step_ns
+        s.step_ns,
+        s.prev_arrival_ns,
+        u8::from(s.relabel_pending)
     )
 }
 
@@ -283,19 +290,19 @@ fn c_audio_step_hold_matches_the_rust_authority_1381() {
     static const uint64_t pkt[] = {{ {} }};
     static const uint64_t now[] = {{ {} }};
     static const int rst[] = {{ {} }};
-    bool active = false;
+    bool active = false, pending = false;
     int64_t prev_off = 0, nominal = 0, held = 0, step = 0;
-    uint64_t prev_raw = 0, prev_pkt = 0, dev_since = 0, start = 0;
+    uint64_t prev_raw = 0, prev_pkt = 0, dev_since = 0, start = 0, prev_arrival = 0;
     uint32_t warm = 0;
     for (size_t i = 0; i < sizeof(tc) / sizeof(tc[0]); i++) {{
         int64_t use = 0;
         const int rel = genlock_audio_step_hold(&active, &prev_off, &prev_raw, &prev_pkt, &nominal, &dev_since,
-                                                &warm, &held, &start, &step, tc[i] != 0, off[i], raw[i], pkt[i],
-                                                now[i], rst[i] != 0, {min}ll, &use);
-        printf("%lld %d %d %lld %llu %llu %lld %llu %u %lld %llu %lld\n", (long long)use, rel, active ? 1 : 0,
-               (long long)prev_off, (unsigned long long)prev_raw, (unsigned long long)prev_pkt,
+                                                &warm, &held, &start, &step, &prev_arrival, &pending, tc[i] != 0,
+                                                off[i], raw[i], pkt[i], now[i], rst[i] != 0, {min}ll, &use);
+        printf("%lld %d %d %lld %llu %llu %lld %llu %u %lld %llu %lld %llu %d\n", (long long)use, rel,
+               active ? 1 : 0, (long long)prev_off, (unsigned long long)prev_raw, (unsigned long long)prev_pkt,
                (long long)nominal, (unsigned long long)dev_since, warm, (long long)held,
-               (unsigned long long)start, (long long)step);
+               (unsigned long long)start, (long long)step, (unsigned long long)prev_arrival, pending ? 1 : 0);
     }}
 "#,
         tcs.join(", "),
@@ -327,6 +334,7 @@ fn c_audio_step_hold_matches_the_rust_authority_1381() {
         AudioStepRelease::Followed,
         AudioStepRelease::Timeout,
         AudioStepRelease::Reset,
+        AudioStepRelease::RelabelPending,
     ] {
         assert!(
             want.iter()
@@ -414,7 +422,7 @@ fn c_audio_step_scalars_match_the_rust_authority_1381() {
         (i64::MIN, i64::MAX),
         (i64::MAX, i64::MIN),
     ];
-    let places: [(u8, i64, u64); 10] = [
+    let places: [(u8, i64, u64); 12] = [
         (0, -682_474_000, PACKET),
         (1, -682_474_000, PACKET),
         (1, PACKET as i64, PACKET),
@@ -425,11 +433,14 @@ fn c_audio_step_scalars_match_the_rust_authority_1381() {
         (3, -682_474_000, PACKET),
         (1, i64::MIN, u64::MAX),
         (2, i64::MIN, u64::MAX - 1),
+        (4, -15_807_333, PACKET),
+        (4, PACKET as i64 + 1, PACKET),
     ];
     let rel_of = |c: u8| match c {
         1 => AudioStepRelease::Followed,
         2 => AudioStepRelease::Timeout,
         3 => AudioStepRelease::Reset,
+        4 => AudioStepRelease::RelabelPending,
         _ => AudioStepRelease::None,
     };
     let mut body = String::new();
@@ -452,7 +463,7 @@ fn c_audio_step_scalars_match_the_rust_authority_1381() {
             i64_lit(*res)
         ));
     }
-    for rel in 0..5_u8 {
+    for rel in 0..6_u8 {
         body.push_str(&format!(
             "    printf(\"%s\\n\", genlock_audio_step_release_token({rel}));\n"
         ));
@@ -468,7 +479,7 @@ fn c_audio_step_scalars_match_the_rust_authority_1381() {
     for (rel, res, pkt) in &places {
         want.push(u8::from(audio_step_release_places(rel_of(*rel), *res, *pkt)).to_string());
     }
-    for rel in 0..5_u8 {
+    for rel in 0..6_u8 {
         want.push(rel_of(rel).token().to_string());
     }
     assert_eq!(
@@ -584,9 +595,9 @@ fn c_audio_relabel_matches_the_rust_authority_1381() {
     static const uint64_t pkt[] = {{ {} }};
     static const uint64_t now[] = {{ {} }};
     static const int rst[] = {{ {} }};
-    bool active = false;
+    bool active = false, pending = false;
     int64_t prev_off = 0, nominal = 0, held = 0, step = 0;
-    uint64_t prev_raw = 0, prev_pkt = 0, dev_since = 0, start = 0;
+    uint64_t prev_raw = 0, prev_pkt = 0, dev_since = 0, start = 0, prev_arrival = 0;
     uint32_t warm = 0;
     for (size_t i = 0; i < sizeof(tc) / sizeof(tc[0]); i++) {{
         int64_t sj = 0, oj = 0, use = 0;
@@ -594,8 +605,8 @@ fn c_audio_relabel_matches_the_rust_authority_1381() {
                                                            off[i], raw[i], &sj, &oj);
         const bool rel = have && genlock_audio_relabel(sj, oj, pkt[i], {min}ll);
         const int release = genlock_audio_step_hold(&active, &prev_off, &prev_raw, &prev_pkt, &nominal, &dev_since,
-                                                    &warm, &held, &start, &step, tc[i] != 0, off[i], raw[i], pkt[i],
-                                                    now[i], rst[i] != 0, {min}ll, &use);
+                                                    &warm, &held, &start, &step, &prev_arrival, &pending, tc[i] != 0,
+                                                    off[i], raw[i], pkt[i], now[i], rst[i] != 0, {min}ll, &use);
         printf("%d %lld %lld %d %d %lld\n", have ? 1 : 0, (long long)sj, (long long)oj, rel ? 1 : 0, release,
                (long long)use);
     }}
@@ -656,5 +667,296 @@ fn c_audio_relabel_matches_the_rust_authority_1381() {
     assert!(
         relabels >= 12 && released_by_relabel >= 5,
         "issue 1381: the script reaches {relabels} relabels, {released_by_relabel} ending a hold"
+    );
+}
+
+// Issue 1381 (design 5901213031) — the PENDING relabel (`audio_relabel_pending` /
+// `genlock_audio_relabel_pending`, `audio_step_relabel_pending_starts` /
+// `genlock_audio_step_relabel_pending_starts`, the hold's pending state) and the remainder booked on
+// the placement slew (`audio_relabel_book_ns` / `genlock_audio_relabel_book_ns`).
+
+/// Pending relabels and every shape that must NOT start one, on top of the hold script. The sender
+/// re-phases its emit r earlier at each relabel (cumulative), so the stamps' age returns to its
+/// nominal once this box's own step follows.
+fn pending_sequence() -> Vec<Pkt> {
+    let mut v = sequence();
+    clear(&mut v);
+    let mut k: u64 = 3_000_000;
+    let (mut off, mut shift, mut early) = (OFF, 0_i64, 0_u64);
+    let take = |v: &mut Vec<Pkt>, k: &mut u64, off: i64, shift: i64, early: u64, reset: bool| {
+        let now = MONO + *k * PACKET - early;
+        let raw = (WALL + *k * PACKET).wrapping_add(shift as u64);
+        v.push((true, off, raw, PACKET, now, reset));
+        *k += 1;
+    };
+    for _ in 0..WARM + 5 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    // the sender steps first, this box follows 15 or 90 packets later (0.5 s / 3 s)
+    for (step, lag) in [
+        (260_000_000_i64, 15_u64),
+        (682_474_000, 90),
+        (-1_500_000_000, 15),
+        (2_500_000_000, 90),
+    ] {
+        let jump = relabel_stamp_jump(step);
+        shift += jump;
+        early += (step - jump) as u64;
+        for _ in 0..=lag {
+            take(&mut v, &mut k, off, shift, early, false);
+        }
+        off -= step;
+        for _ in 0..5 {
+            take(&mut v, &mut k, off, shift, early, false);
+        }
+    }
+    // a receiver step that misses the jump (still pending), then the rest of it (resolved)
+    let jump = relabel_stamp_jump(682_474_000);
+    shift += jump;
+    early += (682_474_000 - jump) as u64;
+    take(&mut v, &mut k, off, shift, early, false);
+    off -= 100_000_000;
+    take(&mut v, &mut k, off, shift, early, false);
+    off -= 582_474_000;
+    for _ in 0..5 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    // the resolution edges: a receiver step exactly one packet off the jump stays pending (strict),
+    // the rest of it resolves; then a jump of one packet + 1 ms whose offset only DRIFTS (0.5 ms per
+    // packet, never a step) onto the held offset stays pending
+    let p = PACKET as i64;
+    shift += 666_666_666;
+    take(&mut v, &mut k, off, shift, early, false);
+    off -= 666_666_666 + p;
+    take(&mut v, &mut k, off, shift, early, false);
+    off += p;
+    for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    shift += p + 1_000_000;
+    take(&mut v, &mut k, off, shift, early, false);
+    for _ in 0..6 {
+        off -= 500_000;
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    clear(&mut v);
+    for _ in 0..WARM + 5 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    // a duplicated slot (the same stamp 3 ms later), a pause, a stamp leap: never pending
+    let (dup_raw, dup_now) = {
+        let l = v.last().expect("a packet");
+        (l.2, l.4 + 3_000_000)
+    };
+    v.push((true, off, dup_raw, PACKET, dup_now, false));
+    take(&mut v, &mut k, off, shift, early, false);
+    k += 15;
+    take(&mut v, &mut k, off, shift, early, false);
+    k += 1;
+    shift += 47_000_000;
+    take(&mut v, &mut k, off, shift, early, false);
+    for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    clear(&mut v);
+    // a pending relabel's fingerprint on a packet that reset the timeline (the ingest did not
+    // continue it): never a pending start
+    for _ in 0..WARM + 5 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    shift += relabel_stamp_jump(2_500_000_000);
+    take(&mut v, &mut k, off, shift, early, true);
+    take(&mut v, &mut k, off, shift, early, false);
+    clear(&mut v);
+    // a pending relabel ended by a timeline reset, and one ended by leaving timecode mode
+    for end_by_reset in [true, false] {
+        for _ in 0..WARM + 5 {
+            take(&mut v, &mut k, off, shift, early, false);
+        }
+        shift += relabel_stamp_jump(682_474_000);
+        take(&mut v, &mut k, off, shift, early, false);
+        take(&mut v, &mut k, off, shift, early, false);
+        if end_by_reset {
+            take(&mut v, &mut k, off, shift, early, true);
+        }
+        clear(&mut v);
+    }
+    // a pending relabel no receiver step follows: released at the bound (one packet past it)
+    for _ in 0..WARM + 5 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    shift += relabel_stamp_jump(-682_474_000);
+    for _ in 0..AUDIO_STEP_HOLD_MAX_NS.div_ceil(PACKET) + 3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    clear(&mut v);
+    // a receiver-first step whose sender never follows (held, then placed at the bound); the
+    // sender's LATE follow brings the age back to the nominal: never a pending relabel
+    for _ in 0..WARM + 5 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    off -= 682_474_000;
+    for _ in 0..AUDIO_STEP_HOLD_MAX_NS.div_ceil(PACKET) + 3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    shift += 682_474_000;
+    for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    v
+}
+
+#[test]
+fn c_audio_relabel_pending_matches_the_rust_authority_1381() {
+    let block = lift_block();
+    for helper in [
+        "static inline bool genlock_audio_relabel_pending(",
+        "static inline bool genlock_audio_step_relabel_pending_starts(",
+        "static inline int64_t genlock_audio_relabel_book_ns(",
+    ] {
+        assert!(
+            block.contains(helper),
+            "issue 1381: `{helper}` is no longer inside the contiguous audio-pairing block"
+        );
+    }
+    let p = PACKET;
+    let m = WALL_STEP_MIN_NS;
+    let pendings: Vec<(i64, u64, u64, i64)> = vec![
+        (233_333_333, p - 26_666_667, p, m),
+        (666_666_666, p - 15_807_334, p, m),
+        (-1_500_000_000, p, p, m),
+        (2_500_000_000, p, p, m),
+        (666_666_666, p + 15_000_000, p, m),
+        (666_666_666, p + 15_000_001, p, m),
+        (-(p as i64), 3_000_000, p, m),
+        (p as i64, p, p, m),
+        (p as i64 + 1, p, p, m),
+        (-(p as i64) - 1, 0, p, m),
+        (3_000_000, p, p, m),
+        (500_000_000, 533_333_333, p, m),
+        (80_000_000, 66_666_666, p, m),
+        (m, 1_000_000, 1_000_000, m),
+        (m + 1, 1_000_000, 1_000_000, m),
+        (i64::MIN, 0, 1, 0),
+        (i64::MIN, u64::MAX, u64::MAX, 0),
+        (i64::MAX, u64::MAX, u64::MAX - 1, m),
+        (5, 0, 1, i64::MIN),
+    ];
+    let books: Vec<(i64, bool, bool, bool)> = vec![
+        (-15_807_333, true, true, true),
+        (-26_666_667, true, true, true),
+        (13_333_333, true, true, true),
+        (-15_807_333, false, true, true),
+        (-15_807_333, true, false, true),
+        (-15_807_333, true, true, false),
+        (i64::MIN, true, true, true),
+        (i64::MAX, false, false, false),
+    ];
+    let b = |v: bool| u8::from(v);
+    let mut body = String::new();
+    for (sj, gap, pkt, min) in &pendings {
+        body.push_str(&format!(
+            "    printf(\"%d\\n\", genlock_audio_relabel_pending({}, {gap}ull, {pkt}ull, {}) ? 1 : 0);\n",
+            i64_lit(*sj),
+            i64_lit(*min)
+        ));
+    }
+    for (mv, rl, ap, tc) in &books {
+        body.push_str(&format!(
+            "    printf(\"%lld\\n\", (long long)genlock_audio_relabel_book_ns({}, {}, {}, {}));\n",
+            i64_lit(*mv),
+            b(*rl),
+            b(*ap),
+            b(*tc)
+        ));
+    }
+    let seq = pending_sequence();
+    let tcs: Vec<String> = seq.iter().map(|p| b(p.0).to_string()).collect();
+    let offs: Vec<String> = seq.iter().map(|p| i64_lit(p.1)).collect();
+    let raws: Vec<String> = seq.iter().map(|p| format!("{}ull", p.2)).collect();
+    let pkts: Vec<String> = seq.iter().map(|p| format!("{}ull", p.3)).collect();
+    let nows: Vec<String> = seq.iter().map(|p| format!("{}ull", p.4)).collect();
+    let resets: Vec<String> = seq.iter().map(|p| b(p.5).to_string()).collect();
+    body.push_str(&format!(
+        r#"    static const int tc[] = {{ {} }};
+    static const int64_t off[] = {{ {} }};
+    static const uint64_t raw[] = {{ {} }};
+    static const uint64_t pkt[] = {{ {} }};
+    static const uint64_t now[] = {{ {} }};
+    static const int rst[] = {{ {} }};
+    bool active = false, pending = false;
+    int64_t prev_off = 0, nominal = 0, held = 0, step = 0;
+    uint64_t prev_raw = 0, prev_pkt = 0, dev_since = 0, start = 0, prev_arrival = 0;
+    uint32_t warm = 0;
+    for (size_t i = 0; i < sizeof(tc) / sizeof(tc[0]); i++) {{
+        int64_t use = 0;
+        const bool starts = genlock_audio_step_relabel_pending_starts(active, prev_off, prev_raw, prev_pkt,
+                                                                      prev_arrival, nominal, tc[i] != 0, off[i],
+                                                                      raw[i], pkt[i], now[i], {min}ll);
+        const int release = genlock_audio_step_hold(&active, &prev_off, &prev_raw, &prev_pkt, &nominal, &dev_since,
+                                                    &warm, &held, &start, &step, &prev_arrival, &pending, tc[i] != 0,
+                                                    off[i], raw[i], pkt[i], now[i], rst[i] != 0, {min}ll, &use);
+        printf("%d %d %lld %d %d %lld %lld %llu\n", starts ? 1 : 0, release, (long long)use, active ? 1 : 0,
+               pending ? 1 : 0, (long long)held, (long long)step, (unsigned long long)prev_arrival);
+    }}
+"#,
+        tcs.join(", "),
+        offs.join(", "),
+        raws.join(", "),
+        pkts.join(", "),
+        nows.join(", "),
+        resets.join(", "),
+        min = WALL_STEP_MIN_NS
+    ));
+    let out = run_lines(&compile(&block, &body, "relabel_pending_1381"));
+    let mut want: Vec<String> = pendings
+        .iter()
+        .map(|&(sj, gap, pkt, min)| u8::from(audio_relabel_pending(sj, gap, pkt, min)).to_string())
+        .collect();
+    want.extend(
+        books
+            .iter()
+            .map(|&(mv, rl, ap, tc)| audio_relabel_book_ns(mv, rl, ap, tc).to_string()),
+    );
+    let mut s = AudioStepHold::default();
+    let (mut starts_n, mut resolved, mut timed_out, mut reset) = (0, 0, 0, 0);
+    for &(tc, off, raw, pkt, now, rst) in &seq {
+        let starts =
+            audio_step_relabel_pending_starts(&s, tc, off, raw, pkt, now, WALL_STEP_MIN_NS);
+        let was_pending = s.relabel_pending;
+        let (use_off, release) =
+            audio_step_hold(&mut s, tc, off, raw, pkt, now, rst, WALL_STEP_MIN_NS);
+        starts_n += usize::from(starts && s.relabel_pending);
+        if was_pending {
+            match release {
+                AudioStepRelease::RelabelPending => resolved += 1,
+                AudioStepRelease::Timeout => timed_out += 1,
+                AudioStepRelease::Reset => reset += 1,
+                _ => {}
+            }
+        }
+        want.push(format!(
+            "{} {} {use_off} {} {} {} {} {}",
+            u8::from(starts),
+            release as u8,
+            u8::from(s.active),
+            u8::from(s.relabel_pending),
+            s.held_off_ns,
+            s.step_ns,
+            s.prev_arrival_ns
+        ));
+    }
+    assert_eq!(out.len(), want.len(), "issue 1381: line count");
+    for (i, (c, r)) in out.iter().zip(&want).enumerate() {
+        assert_eq!(
+            c, r,
+            "issue 1381: the C pending relabel diverged from the Rust authority at line {i}"
+        );
+    }
+    // the script must reach every pending path, or the gate proves less than it says
+    assert!(
+        starts_n >= 8 && resolved >= 5 && timed_out >= 1 && reset >= 2,
+        "issue 1381: the script reaches {starts_n} pending starts, {resolved} resolved, {timed_out} \
+         timed out, {reset} reset"
     );
 }

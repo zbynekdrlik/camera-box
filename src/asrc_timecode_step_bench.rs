@@ -61,6 +61,10 @@ enum Follow {
     /// boundary -- the samples continuous, the emit re-phased by the remainder r = S − N·slot. The
     /// video is relabelled the same way, so the TRUE landing moves r earlier.
     Relabel,
+    /// Issue 1381 (design 5901213031): no wall step at all -- the sender PAUSES for `wall_ns` at the
+    /// step time (those slots are never sent, their samples lost) and resumes on its real-time grid:
+    /// its stamps jump by the pause and so does its arrival (a pause or a restart).
+    Pause,
 }
 
 /// Issue 1381 (design 5900385541): the slots a relabelling sender moves its stamps by at a wall step
@@ -88,6 +92,25 @@ struct StepCase {
 /// When the receiver's own wall steps.
 fn recv_step_at(case: StepCase) -> u64 {
     STEP_AT_NS + case.sender_first_ns
+}
+
+/// Issue 1381 (design 5901213031): a `sender_first_ns` this large means the receiver never steps
+/// within the run.
+const RECEIVER_NEVER_NS: u64 = STEP_RUN_NS;
+
+/// Whether the receiver's own wall steps within the run (a pause is no wall step at all).
+fn receiver_steps(case: StepCase) -> bool {
+    !matches!(case.follow, Follow::NoStep | Follow::Pause) && recv_step_at(case) < STEP_RUN_NS
+}
+
+/// From when the run's timings, events and A/V are measured: the receiver's step, or the sender's
+/// when the receiver never steps. Losses, relabels and pendings always count from the first step.
+fn measure_at(case: StepCase) -> u64 {
+    if receiver_steps(case) {
+        recv_step_at(case)
+    } else {
+        STEP_AT_NS
+    }
 }
 
 /// The sender's packets for one case; `leap_ns` carries the TRUE landing's move (two's complement).
@@ -139,9 +162,20 @@ fn step_sender_packets(case: StepCase) -> Vec<Packet> {
                 } else {
                     let boundary = slot_ns(k.wrapping_add(relabel_slots(case.wall_ns) as u64));
                     let due = boundary.wrapping_sub(wall).max(follow_at);
-                    let leap = boundary.wrapping_sub(nominal).wrapping_sub(wall);
+                    // the video follows the relabelled stamps through the receiver's wall: once
+                    // that wall stepped too, the true landing moved by N slots - S = -r; while it
+                    // never steps, by the whole N slots
+                    let recv_wall = if receiver_steps(case) { wall } else { 0 };
+                    let leap = boundary.wrapping_sub(nominal).wrapping_sub(recv_wall);
                     (due + jitter, WALL0 + boundary, leap)
                 }
+            }
+            Follow::Pause => {
+                if (follow_at..follow_at + wall).contains(&nominal) {
+                    k += 1;
+                    continue;
+                }
+                (nominal + jitter, WALL0 + nominal + jitter, 0)
             }
         };
         let extra = if case.burst_jitter_ns > 0 {
@@ -169,7 +203,7 @@ fn step_sender_packets(case: StepCase) -> Vec<Packet> {
 }
 
 fn step_receiver_wall(t_ns: u64, case: StepCase) -> u64 {
-    if case.follow != Follow::NoStep && t_ns >= recv_step_at(case) {
+    if receiver_steps(case) && t_ns >= recv_step_at(case) {
         (WALL0 + t_ns).wrapping_add(case.wall_ns as u64)
     } else {
         WALL0 + t_ns
@@ -198,10 +232,15 @@ struct StepRun {
     releases: Vec<(f64, AudioStepRelease)>,
     /// A hold still running at the end.
     holding_at_end: bool,
-    /// Issue 1381 (design 5900385541): packets appended as a relabel after the step.
+    /// Issue 1381 (design 5900385541): packets appended as a relabel after the first step (design
+    /// 5901213031: and pending relabels resolved).
     relabels: u32,
+    /// Issue 1381 (design 5901213031): pending relabels started after the first step.
+    pendings: u32,
+    /// max |A/V| from the FIRST step on (the sender's, when it stepped first), ms.
+    av_max_all_ms: f64,
     /// Queued audio overwritten by a placement inside the buffer, dropped by a buffer reset, and the
-    /// zero-filled gap a placement past the end opened -- after the step, ms.
+    /// zero-filled gap a placement past the end opened -- after the FIRST step (either box's), ms.
     overwritten_ms: f64,
     dropped_ms: f64,
     gap_ms: f64,
@@ -229,22 +268,30 @@ fn run_step_traced(case: StepCase, variant: Variant) -> (StepRun, StepTrace) {
     let mut trace = StepTrace::new();
     let mut jumps_at_step = None;
     let mut backstops_at_step = 0;
-    // (relabels, overwritten, dropped, gap) at the step
-    let mut losses_at_step = (0_u32, 0_u64, 0_u64, 0_u64);
+    // (relabels, overwritten, dropped, gap, pendings) at the FIRST step (either box's)
+    let mut losses_at_step: Option<(u32, u64, u64, u64, u32)> = None;
     let mut continuation: Option<u64> = None;
     let mut first_skip = None;
-    let measure_at = recv_step_at(case);
+    let measure_at = measure_at(case);
     for pkt in step_sender_packets(case) {
         let mono_now = MONO0 + pkt.arrival_ns;
         obs.mix_until(mono_now);
         let dur = obs.asrc_process(mono_now);
         let wall = step_receiver_wall(pkt.arrival_ns, case);
+        if pkt.arrival_ns >= STEP_AT_NS && losses_at_step.is_none() {
+            losses_at_step = Some((
+                obs.relabels,
+                obs.overwritten_ns,
+                obs.dropped_ns,
+                obs.gap_ns,
+                obs.pendings,
+            ));
+        }
         if pkt.arrival_ns >= measure_at {
             // taken BEFORE the first measured packet, so a booking on the step packet itself counts
             if jumps_at_step.is_none() {
                 jumps_at_step = Some(obs.c.place_jump_count());
                 backstops_at_step = obs.backstops;
-                losses_at_step = (obs.relabels, obs.overwritten_ns, obs.dropped_ns, obs.gap_ns);
             }
         }
         let landed = obs.ingest(&pkt, mono_now, wall, HOLD_MS, dur);
@@ -252,6 +299,9 @@ fn run_step_traced(case: StepCase, variant: Variant) -> (StepRun, StepTrace) {
         let truth =
             (MONO0 + slot_ns(pkt.slot) + genlock_audio_delay_ns(HOLD_MS)).wrapping_add(pkt.leap_ns);
         let av_ms = landed.actual.wrapping_sub(truth) as i64 as f64 / 1e6;
+        if t >= STEP_AT_NS {
+            r.av_max_all_ms = r.av_max_all_ms.max(av_ms.abs());
+        }
         if t >= measure_at {
             let after_s = (t - measure_at) as f64 / 1e9;
             if let Some(cont) = continuation {
@@ -292,10 +342,12 @@ fn run_step_traced(case: StepCase, variant: Variant) -> (StepRun, StepTrace) {
     r.jumps =
         obs.c.place_jump_count() - jumps_at_step.unwrap_or(0) - (obs.backstops - backstops_at_step);
     r.holding_at_end = obs.step_hold.active;
-    r.relabels = obs.relabels - losses_at_step.0;
-    r.overwritten_ms = (obs.overwritten_ns - losses_at_step.1) as f64 / 1e6;
-    r.dropped_ms = (obs.dropped_ns - losses_at_step.2) as f64 / 1e6;
-    r.gap_ms = (obs.gap_ns - losses_at_step.3) as f64 / 1e6;
+    let at = losses_at_step.unwrap_or_default();
+    r.relabels = obs.relabels - at.0;
+    r.overwritten_ms = (obs.overwritten_ns - at.1) as f64 / 1e6;
+    r.dropped_ms = (obs.dropped_ns - at.2) as f64 / 1e6;
+    r.gap_ms = (obs.gap_ns - at.3) as f64 / 1e6;
+    r.pendings = obs.pendings - at.4;
     (r, trace)
 }
 
@@ -465,17 +517,19 @@ fn steady_state_and_a_small_step_never_hold_1381() {
 }
 
 #[test]
-fn a_sender_that_stepped_first_costs_one_placement_at_the_receiver_step_1381() {
+fn a_sender_that_stepped_first_is_resolved_at_the_receiver_step_1381() {
     // review round 1: a cross-box sender whose box steps 2 s BEFORE the receiver's. Its stamps (a
     // jump, or a caught-up burst / pause) are already on the new wall when the receiver's step lands,
-    // so the receiver's step puts them back on its wall: nothing held, the receiver-step packet
-    // released at once and placed (one event, nothing booked), the audio on its true landing within
-    // 0.2 s of the receiver's step -- for a step under the owed cap too (appended, it would be booked
-    // and paid over ~90 s with a 70 ms TS-smoothing re-placement on the way). Review round 2: a step
-    // between one packet and the 70 ms TS-smoothing threshold, whose stamp jump OBS snapped onto the
-    // continuous timeline, must be placed at the packet's raw-stamp landing (at the smoothed timestamp
-    // it landed the step early and booked it again); and a step over OBS's 2 s timestamp-jump limit
-    // (dantesync's daily bound allows 3 s) must not re-seed the nominal at the timeline reset.
+    // so the receiver's step puts them back on its wall: never held after it.
+    //
+    // Design 5901213031: a sender whose stamps JUMPED by the step (its raw wall clock, over one
+    // packet, continuous arrival) is a PENDING relabel from its own step on -- appended on its
+    // continuous timeline (never placed N slots late, never reset past 2 s: the landing is its true
+    // one, its content never skipped) -- and the receiver's step releases it within one packet: no
+    // event, nothing booked, nothing lost, for a step under 70 ms and over 2 s too (the round-2
+    // cases). Review round 2: a CATCH-UP sender (continuous stamps: a burst forward, a pause back)
+    // is no relabel; the receiver-step packet is released at once and placed on its raw-stamp
+    // landing (one event, nothing booked), the audio on its true landing within 0.2 s.
     let sub_70 = [
         35_000_000_i64,
         50_000_000,
@@ -495,32 +549,43 @@ fn a_sender_that_stepped_first_costs_one_placement_at_the_receiver_step_1381() {
                 .map(|&w| (Follow::Burst, w)),
         );
     for (follow, wall_ns) in cases {
-        {
-            let case = StepCase {
-                wall_ns,
-                lag_ns: 0,
-                follow,
-                sender_first_ns: 2 * NS_PER_S,
-                burst_jitter_ns: 0,
-                connect_backlog: 0,
-            };
-            let r = run_step(case, Variant::Production);
-            // the receiver-step packet is released at once -- or, when OBS resets its own timeline on
-            // that packet (a backward sender step over 2 s left every packet in the window 2.5 s
-            // late, so OBS reset on each), placed by that reset: never held either way
+        let case = StepCase {
+            wall_ns,
+            lag_ns: 0,
+            follow,
+            sender_first_ns: 2 * NS_PER_S,
+            burst_jitter_ns: 0,
+            connect_backlog: 0,
+        };
+        let r = run_step(case, Variant::Production);
+        if follow == Follow::Jump {
             assert!(
-                r.releases.len() <= 1
-                    && r.releases
-                        .iter()
-                        .all(|x| x.1 == AudioStepRelease::Followed && x.0 < 0.1)
-                    && (r.releases.len() == 1 || wall_ns < -2 * NS_PER_S as i64)
+                r.pendings == 1
+                    && r.relabels == 1
+                    && r.releases == [(r.releases[0].0, AudioStepRelease::RelabelPending)]
+                    && r.releases[0].0 < 0.1
+                    && !r.holding_at_end
+                    && r.events() == 0
+                    && r.jumps == 0
+                    && r.overwritten_ms == 0.0
+                    && r.dropped_ms == 0.0
+                    && r.gap_ms == 0.0
+                    && r.av_max_all_ms <= AV_BOUND_MS,
+                "issue 1381: {case:?}: a sender whose stamps jumped first must stay on its \
+                 continuous timeline until the receiver's step resolves it: {r:?}"
+            );
+        } else {
+            assert!(
+                r.pendings == 0
+                    && r.releases == [(r.releases[0].0, AudioStepRelease::Followed)]
+                    && r.releases[0].0 < 0.1
                     && !r.holding_at_end
                     && r.events() <= 1
                     && r.jumps == 0
                     && r.av_settle_s <= 0.2
                     && r.av_tail_ms <= AV_BOUND_MS,
-                "issue 1381: {case:?}: a sender that stepped first must never be held -- the \
-                 receiver's step puts its stamps back on the receiver's wall: {r:?}"
+                "issue 1381: {case:?}: a catch-up sender that stepped first is released at the \
+                 receiver's step and placed once: {r:?}"
             );
         }
     }
@@ -628,11 +693,10 @@ const RELABEL_STEPS: [i64; 4] = [260_000_000, STEP_682_NS, -1_500_000_000, 2_500
 /// packet) or 20 ms later (the receiver's step packet still carries the old stamp and starts the
 /// hold, the next one releases it -- the split shape the contract's section 6 names).
 const RELABEL_LAGS: [u64; 2] = [0, 20_000_000];
-/// A relabel remainder under the timecode ASRC's booking band (half a packet, 16.7 ms) is never
-/// booked: the level loop alone repays it, measured here at ~725 s for the 15.8 ms of the 682 ms
-/// step (finding on the ticket: the design's "repaid at 1000 ppm in under 33 s" holds only at or
-/// over the band). Pinned so a slower loop fails.
-const SUB_BAND_SETTLE_S: f64 = 900.0;
+/// Design 5901213031 (ROZHODNUTÉ on finding 5900705310): a relabel remainder of r ms is repaid on
+/// the placement slew at 1000 ppm, whatever its size -- back within the A/V bound within r seconds,
+/// plus this margin.
+const REPAY_MARGIN_S: f64 = 1.0;
 
 fn relabel_case(wall_ns: i64, lag_ns: u64) -> StepCase {
     StepCase {
@@ -680,19 +744,17 @@ fn a_relabelling_sender_is_appended_and_its_remainder_repaid_1381() {
                 "issue 1381: {case:?}: the skew hold must release followed on the relabel packet \
                  (or never start): {r:?}"
             );
-            // the placement error is at most r, and the timecode ASRC repays it: a remainder at or
-            // over its booking band (half a packet) is booked and paid at 1000 ppm (r s); one under
-            // it is left to the level loop alone, which the bench pins at its measured pace
-            let booked = rem >= 0.5 * frames_ns(PACKET_FRAMES) as f64 / 1e6;
-            let settle_s = if booked { rem + 5.0 } else { SUB_BAND_SETTLE_S };
+            // the placement error is at most r, and the placement slew repays ALL of it at 1000 ppm
+            // (r ms in r s), under the timecode ASRC's half-packet booking band too (design
+            // 5901213031): nothing is booked as a placement jump
+            let settle_s = rem + REPAY_MARGIN_S;
             assert!(
                 r.av_max_ms <= rem + AV_BOUND_MS
-                    && r.jumps == u32::from(booked)
+                    && r.jumps == 0
                     && r.av_settle_s <= settle_s
                     && r.av_tail_ms <= AV_BOUND_MS,
                 "issue 1381: {case:?}: the audio may trail by at most r = {rem:.1} ms and must be \
-                 back within ±{AV_BOUND_MS} ms of its true landing within {settle_s:.1} s (booked: \
-                 {booked}): {r:?}"
+                 back within ±{AV_BOUND_MS} ms of its true landing within {settle_s:.1} s: {r:?}"
             );
             // review round 1: a joint relabel's one short stamp advance (dur − r) never reads as a
             // rate -- the timecode ASRC's estimate stays on the correct sender's 0 ppm
@@ -777,3 +839,8 @@ fn a_sender_that_catches_up_or_pauses_takes_todays_path_byte_for_byte_1381() {
         );
     }
 }
+
+// Issue 1381 (design 5901213031, receiver slice 2): a PENDING relabel (the sender's box stepped
+// first) and the relabel remainder repaid on the placement slew.
+#[path = "asrc_timecode_pending_bench.rs"]
+mod pending;
