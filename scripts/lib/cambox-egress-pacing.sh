@@ -313,7 +313,8 @@ cambox_egress_pacing_provision_verdict() {
   restarts="$(cambox_egress_pacing_block_field "$block" PACING_SVC_RESTARTS | tr -d '[:space:]')"
   case "$restarts" in
     '' | *[!0-9]*) ;;
-    *) rounds=" (${restarts} failed round(s) so far)" ;;
+    # NRestarts counts a restart when it runs, after the pause, so during a pause it lags one round.
+    *) rounds=" (at least ${restarts} failed round(s) so far)" ;;
   esac
 
   # --- install facets ---

@@ -128,8 +128,9 @@
 #   (ap) NDI egress pacing (issue 1242) -- HARD FAIL: the default-route interface's ROOT qdisc is
 #       `fq` with maxrate / flow_limit / limit equal to scripts/lib/cambox-egress-pacing.sh's one
 #       declaration (400mbit / 2000 / 20000), AND what setup-device installed will run at the next
-#       boot: the boot script is executable and byte-equal to what the lib generates, the unit is
-#       byte-equal to the checked-in systemd/ one, enabled (reboot survival) and not failed. A
+#       boot: the boot script is executable, starts with #!/bin/bash and equals what the lib
+#       generates, the unit equals the checked-in systemd/ one (both compared on their functional
+#       lines, comments and blank lines ignored), enabled (reboot survival) and not failed. A
 #       hand-applied runtime qdisc alone FAILs: that is exactly the non-permanent state issue 1242
 #       fixes. `active` is not required (setup-device.sh is enable-only and a cambox is never
 #       rebooted remotely). Each FAIL names the fix that matches it (start / restart the unit, a
@@ -1590,7 +1591,8 @@ fi
 # [egress-pacing] sub-step installs cambox-egress-pacing.service, which paces the default-route
 # interface at boot with the ONE declaration in scripts/lib/cambox-egress-pacing.sh. This reads
 # the live root qdisc, the unit state and what setup-device installed (the boot script's
-# executable bit + sha256, the unit's sha256) in one read-only ssh round trip. It FAILs a
+# executable bit + shebang, the functional-line sha256 of the script and of the unit) in one
+# read-only ssh round trip. It FAILs a
 # missing/drifted qdisc, a missing / non-executable / stale boot script, a unit that differs from
 # the checked-in systemd/ one, a unit that is not enabled (a hand-applied qdisc does not survive a
 # reboot) or a failed unit -- each named with the fix that matches it. Placed right after (ae) and
