@@ -383,6 +383,52 @@ fn a_pause_a_dup_or_a_skipped_slot_inside_a_pending_never_moves_its_held_offset_
 }
 
 #[test]
+fn a_late_step_packet_of_a_raw_clock_sender_folds_back_on_the_next_packet_1381() {
+    // review round 2: a raw-clock sender (its stamps are its submission wall) whose box steps first
+    // submits the step-carrying packet L late -- its stamp and its arrival. The pending takes S + L
+    // as its jump; the next on-time packet moves the stamps back by -L, a sub-packet move that folds
+    // like the skew hold's. This box's own step then resolves the pending with no residual (left in
+    // the held offset, +L was booked on the slew and sat under the ASRC's band for minutes).
+    let step = 682_474_000_i64;
+    for late in [3_000_000_u64, 8_000_000, 14_000_000] {
+        let mut f = Feed::new();
+        f.steady(WARM);
+        f.shift = step;
+        let (raw, now) = (f.raw().wrapping_add(late), f.now() + late);
+        let (off, rel) = audio_step_hold(&mut f.s, true, f.off, raw, PACKET, now, false, MIN);
+        assert!(
+            rel == AudioStepRelease::None
+                && f.s.active
+                && f.s.relabel_pending
+                && off == OFF - step - late as i64,
+            "issue 1381: late {late}: the pending starts on S + L: {:?}",
+            f.s
+        );
+        f.k += 1;
+        let (off, rel) = f.take();
+        assert_eq!(
+            (off, rel),
+            (OFF - step, AudioStepRelease::None),
+            "issue 1381: late {late}: the on-time packet folds the -L back"
+        );
+        for _ in 0..10 {
+            assert_eq!(
+                f.take(),
+                (OFF - step, AudioStepRelease::None),
+                "late {late}"
+            );
+        }
+        f.off = OFF - step;
+        let (off, rel) = f.take();
+        assert_eq!(
+            (off, rel, audio_step_residual_ns(f.s.held_off_ns, off)),
+            (OFF - step, AudioStepRelease::RelabelPending, 0),
+            "issue 1381: late {late}: this box's step resolves the pending with no residual"
+        );
+    }
+}
+
+#[test]
 fn a_skew_hold_after_a_pending_relabel_takes_the_ordinary_releases_1381() {
     // the kept pending flag is cleared when the next hold starts: a receiver-first step after a
     // resolved pending relabel is an ordinary skew hold, released followed when the stamps jump

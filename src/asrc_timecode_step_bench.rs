@@ -69,11 +69,19 @@ enum Follow {
     /// [`RELABEL_PAUSE_NS`] pause starting [`RELABEL_PAUSE_AFTER_SLOTS`] slots after its own step --
     /// inside a pending relabel's window when the sender stepped first.
     RelabelPause,
+    /// Issue 1381 (review round 2): the `Jump` sender (a raw-clock sender: its stamps are its wall
+    /// at emit) whose step-carrying packet is submitted [`STEP_LATE_NS`] late -- its stamp and its
+    /// arrival; the next packet is on time again.
+    JumpLate,
 }
 
 /// Issue 1381 (review round 1): the pause of [`Follow::RelabelPause`] (15 slots) and where it starts.
 const RELABEL_PAUSE_NS: u64 = 500_000_000;
 const RELABEL_PAUSE_AFTER_SLOTS: u64 = 5;
+
+/// Issue 1381 (review round 2): how late [`Follow::JumpLate`] submits its step-carrying packet
+/// (under the pending relabel's 15 ms arrival budget, over the 2 ms step minimum).
+const STEP_LATE_NS: u64 = 8_000_000;
 
 /// Issue 1381 (design 5900385541): the slots a relabelling sender moves its stamps by at a wall step
 /// of `wall_ns`: N = floor(S / slot), toward −∞ (the contract's floor).
@@ -132,6 +140,7 @@ fn step_sender_packets(case: StepCase) -> Vec<Packet> {
     let wall = case.wall_ns as u64;
     let mut out = Vec::new();
     let mut prev_arrival = 0_u64;
+    let mut late_done = false;
     let mut k = 0_u64;
     loop {
         let nominal = slot_ns(k);
@@ -141,9 +150,13 @@ fn step_sender_packets(case: StepCase) -> Vec<Packet> {
         let jitter = rng.ns(0, 1_000_000);
         let (emit, stamp_wall, leap_ns) = match case.follow {
             Follow::NoStep => (nominal + jitter, WALL0 + nominal + jitter, 0),
-            Follow::Jump => {
-                let emit = nominal + jitter;
+            Follow::Jump | Follow::JumpLate => {
+                let mut emit = nominal + jitter;
                 let followed = if emit >= follow_at { wall } else { 0 };
+                if case.follow == Follow::JumpLate && followed != 0 && !late_done {
+                    late_done = true;
+                    emit += STEP_LATE_NS;
+                }
                 (emit, (WALL0 + emit).wrapping_add(followed), 0)
             }
             Follow::Burst => {

@@ -261,3 +261,41 @@ fn without_the_hold_a_sender_first_relabel_loses_audio_at_the_sender_step_1381()
         );
     }
 }
+
+#[test]
+fn a_raw_clock_senders_late_step_packet_leaves_no_residual_1381() {
+    // review round 2: a raw-clock sender (its stamps are its wall at emit) whose box steps first
+    // submits the step-carrying packet 8 ms late -- its stamp and its arrival. The pending starts on
+    // S + 8 ms and the next on-time packet moves the stamps back by -8 ms: that sub-packet move folds
+    // back like the skew hold's, so this box's own step resolves the pending with no residual. Left
+    // in the held offset, the +8 ms was booked on the slew at the release and then sat under the
+    // timecode ASRC's booking band for the level loop (minutes).
+    for wall_ns in [STEP_682_NS, -STEP_682_NS, STEP_90_NS] {
+        for lag in RECEIVER_LAGS {
+            let case = StepCase {
+                wall_ns,
+                lag_ns: 0,
+                follow: Follow::JumpLate,
+                sender_first_ns: lag,
+                burst_jitter_ns: 0,
+                connect_backlog: 0,
+            };
+            let r = run_step(case, Variant::Production);
+            assert!(
+                r.pendings == 1
+                    && r.relabels == 1
+                    && r.releases == [(r.releases[0].0, AudioStepRelease::RelabelPending)]
+                    && r.releases[0].0 < 0.1
+                    && !r.holding_at_end
+                    && r.jumps == 0
+                    && r.overwritten_ms == 0.0
+                    && r.dropped_ms == 0.0
+                    && r.gap_ms == 0.0
+                    && r.av_settle_s <= 1.0
+                    && r.av_tail_ms <= AV_BOUND_MS,
+                "issue 1381: {case:?}: a late step-carrying packet's lateness must fold back, not \
+                 stay in the held offset as a residual: {r:?}"
+            );
+        }
+    }
+}

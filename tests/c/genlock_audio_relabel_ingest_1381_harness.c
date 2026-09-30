@@ -191,6 +191,8 @@ static uint64_t h_k;
 static int64_t h_shift;
 static int64_t h_off;
 static uint64_t h_late;
+/* review round 2: this packet submitted late by this much (its stamp and its arrival) */
+static uint64_t h_delay;
 
 static void h_reset(const char *name)
 {
@@ -200,6 +202,7 @@ static void h_reset(const char *name)
 	h_shift = 0;
 	h_off = H_OFF;
 	h_late = 0;
+	h_delay = 0;
 	printf("== %s\n", name);
 }
 
@@ -210,8 +213,8 @@ static struct h_out h_packet(void)
 	struct audio_data d;
 	memset(&d, 0, sizeof(d));
 	d.frames = H_PACKET_FRAMES;
-	d.timestamp = H_WALL + h_k * H_PACKET_NS + (uint64_t)h_shift;
-	const uint64_t now = H_MONO + h_k * H_PACKET_NS + H_LAG_NS - h_late;
+	d.timestamp = H_WALL + h_k * H_PACKET_NS + (uint64_t)h_shift + h_delay;
+	const uint64_t now = H_MONO + h_k * H_PACKET_NS + H_LAG_NS - h_late + h_delay;
 	h_k++;
 	return h_ingest(&h_src, &d, GENLOCK_AUDIO_HOLD_TIMECODE, h_off, now);
 }
@@ -388,6 +391,23 @@ int main(void)
 	h_off -= 260000000;
 	h_shift += H_SLOT(7);
 	h_print("joint", h_packet());
+	h_print("after", h_packet());
+	/* review round 2: a raw-clock sender (its stamps its submission wall) steps first by 682 ms and submits
+	 * the step-carrying packet 8 ms late (its stamp and its arrival): the pending starts on S + 8 ms, the
+	 * next on-time packet's -8 ms move folds back, and this box's step resolves it with no residual */
+	h_reset("pending_late_682ms");
+	h_steady(40);
+	h_shift += 682474000;
+	h_delay = 8000000;
+	h_print("start", h_packet());
+	h_delay = 0;
+	for (int i = 0; i < 5; i++) {
+		const struct h_out o = h_packet();
+		if (o.relabel || o.pending || !o.push_back || o.release || o.logged || o.book_ns)
+			h_print("PENDING-BROKEN", o);
+	}
+	h_off -= 682474000;
+	h_print("resolve", h_packet());
 	h_print("after", h_packet());
 	/* a pending relabel this box never follows: released at the 10 s bound (J applied once by the ingest's
 	 * step placement, outside this branch) */

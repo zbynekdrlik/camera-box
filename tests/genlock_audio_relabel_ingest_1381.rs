@@ -342,6 +342,21 @@ fn truth_table() -> Vec<String> {
         "step_ms=+260.000 held_ms=0.0 released=none residual_ms=-26.7 holds=1 relabels=2 pending=0",
     ));
     t.push(after(2));
+    // review round 2: a raw-clock sender steps first and submits the step-carrying packet 8 ms late
+    // (stamp and arrival). The pending starts on S + 8 ms; the next on-time packet's -8 ms move folds
+    // back into the held offset, so this box's step resolves it with NO residual and books nothing
+    // (unfolded: residual +8.0 booked on the slew, then left under the ASRC band). The raw-domain
+    // timeline was continued from the late stamp, so the on-time packets snap onto it (on_raw 0), as
+    // OBS's 70 ms smoothing does for any stamp jitter
+    t.push("== pending_late_682ms".to_string());
+    t.push(line("start", [0, 1, 1, 0, 0, 1, 0, 1, 0], "+0.0"));
+    t.push(line("resolve", [0, 0, 1, 0, 0, 0, 4, 0, 1], "+0.0"));
+    t.push(log(
+        "pending_late_682ms",
+        "step_ms=+690.474 held_ms=192.0 released=relabel-pending residual_ms=+0.0 holds=1 \
+         relabels=1 pending=1",
+    ));
+    t.push(line("after", [0, 0, 1, 0, 0, 0, 0, 0, 1], "+0.0"));
     // a pending relabel this box never follows: released at the 10 s bound (2 = timeout), its
     // residual the whole jump (the ingest's step placement applies it once), no relabel counted
     t.push("== pending_timeout_682ms".to_string());

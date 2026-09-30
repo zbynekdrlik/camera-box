@@ -12,7 +12,8 @@
 //! covers: pending relabels resolved 15 and 90 packets later, a receiver step that misses and then
 //! resolves, the one-packet and drift resolution edges, a pause / dup / skipped slot inside a
 //! pending, a second relabel-shaped jump inside a pending (folded, then resolved by one step of this
-//! box), a dup / pause / leap that never starts one, a reset packet, a pending ended by a reset
+//! box), a raw-clock sender's late step-carrying packet (its lateness folded back on the next
+//! packet), a dup / pause / leap that never starts one, a reset packet, a pending ended by a reset
 //! and by leaving timecode, the 10 s bound, and a late follow. It FAILS LOUDLY when no C compiler
 //! is present.
 
@@ -151,6 +152,28 @@ fn pending_sequence() -> Vec<Pkt> {
         take(&mut v, &mut k, off, shift, early, false);
     }
     off -= 682_474_000 + 110_000_000;
+    for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    // review round 2: a raw-clock sender steps first and submits the step-carrying packet 8 ms late
+    // (its stamp and its arrival); the next on-time packet's -8 ms move folds back, so this box's
+    // step resolves the pending with no residual
+    let late = 8_000_000_u64;
+    shift += 682_474_000;
+    let raw = (WALL + k * PACKET).wrapping_add(shift as u64) + late;
+    v.push((
+        true,
+        off,
+        raw,
+        PACKET,
+        MONO + k * PACKET - early + late,
+        false,
+    ));
+    k += 1;
+    for _ in 0..5 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    off -= 682_474_000;
     for _ in 0..3 {
         take(&mut v, &mut k, off, shift, early, false);
     }
@@ -367,7 +390,7 @@ fn c_audio_relabel_pending_matches_the_rust_authority_1381() {
     }
     // the script must reach every pending path, or the gate proves less than it says
     assert!(
-        starts_n >= 10 && resolved >= 7 && timed_out >= 1 && reset >= 2,
+        starts_n >= 11 && resolved >= 8 && timed_out >= 1 && reset >= 2,
         "issue 1381: the script reaches {starts_n} pending starts, {resolved} resolved, {timed_out} \
          timed out, {reset} reset"
     );
