@@ -32,6 +32,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
 RESOLVE_LIB = os.path.join(REPO, "scripts", "lib", "ci-run-resolve.sh")
 SETUP = os.path.join(REPO, "scripts", "setup-device.sh")
+DEPLOY_SERVICE = os.path.join(REPO, "scripts", "bkshading-deploy-service.sh")
 GH_REPO = "zbynekdrlik/camera-box"
 ART = "camera-box-linux-amd64"
 
@@ -45,6 +46,9 @@ STALE_4_9 = {"databaseId": 33857572305, "createdAt": "2026-09-04T09:17:04Z", "st
              "conclusion": "success", "headSha": "5ed4e44ad7deabe27a925eadc403d6e62c8af60a"}
 STALE_LISTING = [STALE_15_9, STALE_4_9]
 LIVE_ARTS = {36687519583: [ART], 34999288119: [(ART, True)], 33857572305: [ART]}
+
+# The live head while its own run is still in flight.
+HEAD_INPROG = dict(HEAD_RUN, status="in_progress", conclusion="")
 
 # A synthetic head whose own run is not usable, plus an older success that is.
 HEAD_B = "b" * 40
@@ -297,6 +301,58 @@ def test_head_success_with_an_expired_artifact_falls_back_with_a_named_line():
 
 
 # =============================================================================================
+# The fallback walks ONLY a listing that holds the head: a listing without the head's run is stale
+# even when the head lookup already shows that run in flight (review round 1)
+# =============================================================================================
+def test_fallback_never_walks_a_stale_listing_while_the_head_run_is_in_flight():
+    # The 30.9. case one step earlier: the head's CI is still running and the listing is the stale
+    # set. Walking it would deploy the 4.9. run again.
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = FakeGh(tmp, HEAD, [STALE_LISTING], [[HEAD_INPROG]], LIVE_ARTS)
+        r = _resolve(fake)
+        assert r.returncode == 1 and r.stdout.strip() == "", r.stdout + r.stderr
+        assert HEAD in r.stderr and "stale GitHub listing" in r.stderr and "pass --run <id>" in r.stderr, r.stderr
+        assert "runs/33857572305/artifacts" not in fake.calls(), "the stale listing was walked:\n" + fake.calls()
+        assert fake.count("listing") == 4 and fake.sleeps() == ["SLEEP 7"] * 3, fake.calls()
+
+
+def test_a_listing_proven_stale_before_the_head_run_appears_is_never_walked():
+    # Read 1: no head run anywhere. Read 2: the head lookup now shows the head's run in flight, but
+    # the listing is still the stale set -- it is re-read, never walked from read 1.
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = FakeGh(tmp, HEAD, [STALE_LISTING], [[], [HEAD_INPROG]], LIVE_ARTS)
+        r = _resolve(fake)
+        assert r.returncode == 1 and r.stdout.strip() == "", r.stdout + r.stderr
+        assert "stale GitHub listing" in r.stderr, r.stderr
+        assert "runs/33857572305/artifacts" not in fake.calls(), fake.calls()
+
+
+def test_a_stale_listing_that_catches_up_while_the_head_is_in_flight_falls_back():
+    newer = {"databaseId": 36600000000, "createdAt": "2026-09-29T12:00:00Z", "status": "completed",
+             "conclusion": "success", "headSha": "c" * 40}
+    fresh = [HEAD_INPROG, newer, STALE_15_9, STALE_4_9]
+    arts = dict(LIVE_ARTS)
+    arts[36600000000] = [ART]
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = FakeGh(tmp, HEAD, [STALE_LISTING, fresh], [[HEAD_INPROG]], arts)
+        r = _resolve(fake)
+        assert r.returncode == 0 and r.stdout.strip() == "36600000000", r.stdout + r.stderr
+        assert fake.sleeps() == ["SLEEP 7"], fake.sleeps()
+        loud = [ln for ln in r.stderr.splitlines() if "FALLING BACK" in ln]
+        assert len(loud) == 1 and "in_progress" in loud[0] and "36687519583" in loud[0], r.stderr
+        assert "runs/33857572305/artifacts" not in fake.calls(), fake.calls()
+
+
+def test_a_leading_zero_retry_count_is_read_as_decimal():
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = FakeGh(tmp, HEAD, [STALE_LISTING], [[]], LIVE_ARTS)
+        r = _resolve(fake, extra_env={"CI_RUN_RESOLVE_RETRIES": "08"})
+        assert r.returncode == 1 and r.stdout.strip() == "", r.stdout + r.stderr
+        assert "value too great" not in r.stderr, r.stderr
+        assert "stale GitHub listing" in r.stderr and fake.sleeps() == ["SLEEP 7"] * 8, r.stderr
+
+
+# =============================================================================================
 # gh errors on the head side fail loud -- never a fallback
 # =============================================================================================
 def test_gh_error_reading_the_head_fails_loud():
@@ -413,3 +469,29 @@ def test_setup_device_lookup_lines_resolve_the_head_through_a_fake_gh():
             r = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True, env=env)
             assert r.returncode == 0, r.stderr
             assert r.stdout == "36687519583", (var, art, r.stdout, r.stderr)
+
+
+# =============================================================================================
+# bkshading-deploy-service.sh (the strih service deploy) uses the same lib (review round 1)
+# =============================================================================================
+SERVICE_CALL_RE = re.compile(
+    r'^\s*RUN_ID="\$\(CI_RUN_RESOLVE_GH="\$GH" ci_run_latest_success "\$REPO" "\$BRANCH" ci\.yml "\$ARTIFACT"\)"'
+    r' \|\| RUN_ID=""\s*$')
+
+
+def test_deploy_service_resolves_its_run_through_the_lib():
+    code = _noncomment(_read(DEPLOY_SERVICE))
+    assert '. "$HERE/lib/ci-run-resolve.sh"' in code, "bkshading-deploy-service.sh must source the resolver lib"
+    assert "gh run list" not in code and '"$GH" run list' not in code, "no inline run listing left"
+    assert "--status success" not in code
+    lines = [ln for ln in code.splitlines() if SERVICE_CALL_RE.match(ln)]
+    assert len(lines) == 1, lines
+    with tempfile.TemporaryDirectory() as tmp:
+        fake = FakeGh(tmp, HEAD, [STALE_LISTING], [[HEAD_RUN]], {36687519583: ["bkshading-windows-amd64"]})
+        env = dict(os.environ)
+        env.pop("CI_RUN_RESOLVE_GH", None)
+        env["CI_RUN_RESOLVE_SLEEP"] = fake.sleep
+        snippet = ('. "%s"\nGH=%s\nREPO=%s\nBRANCH=main\nARTIFACT=bkshading-windows-amd64\n%s\n'
+                   'printf "%%s" "$RUN_ID"\n' % (RESOLVE_LIB, fake.path, GH_REPO, lines[0].strip()))
+        r = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True, env=env)
+        assert r.returncode == 0 and r.stdout == "36687519583", (r.stdout, r.stderr)
