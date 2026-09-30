@@ -261,6 +261,67 @@ def test_verdict_ignores_commented_timeouts():
     assert _verdict(fast + "# set timeout=30\n#set timeout_style=menu\n") == "ok"
 
 
+# Review round 1 (#1394): the shapes the first verdict mis-graded or left untested.
+
+def test_verdict_fails_an_empty_timeout_the_menu_that_waits_forever():
+    # What Ubuntu's make_timeout renders for GRUB_TIMEOUT unset + style hidden: `set timeout=`.
+    # GRUB reads an empty timeout as "no timeout", drops the hidden style and waits forever.
+    fast = _fixture("cam1-grub.cfg")
+    empty = fast.replace("    set timeout_style=hidden\n    set timeout=0\n",
+                         "    set timeout_style=hidden\n    set timeout=\n", 1)
+    assert empty != fast
+    v = _verdict(empty)
+    assert v.startswith("FAIL: ") and "menu timeout <empty>" in v
+    empty_rf = fast.replace('= 1 ] ; then\n  set timeout=0\n', '= 1 ] ; then\n  set timeout=\n', 1)
+    assert empty_rf != fast
+    v = _verdict(empty_rf)
+    assert v.startswith("FAIL: ") and "recordfail timeout is <empty>" in v
+
+
+def test_verdict_fails_a_cfg_without_any_timeout_style():
+    fast = _fixture("cam1-grub.cfg")
+    v = _verdict(fast.replace("    set timeout_style=hidden\n", ""))
+    assert v.startswith("FAIL: ") and "no timeout_style=hidden" in v
+
+
+def test_verdict_grades_every_recordfail_branch_against_the_recordfail_timeout():
+    # GRUB_BUTTON_CMOS_ADDRESS makes 00_header emit TWO make_timeout blocks; the second recordfail
+    # branch is still a recordfail branch.
+    fast = _fixture("cam1-grub.cfg")
+    marker = "### END /etc/grub.d/00_header ###"
+    second = ('if [ "${recordfail}" = 1 ] ; then\n  set timeout=30\nelse\n'
+              '  set timeout=0\nfi\n')
+    v = _verdict(fast.replace(marker, second + marker))
+    assert v.startswith("FAIL: ") and "recordfail timeout is 30 s" in v
+    assert "menu timeout" not in v
+
+
+def test_lib_key_loops_do_not_depend_on_the_callers_ifs(tmp_path):
+    f = tmp_path / "grub"
+    f.write_text("GRUB_DEFAULT=saved\n")
+    r = _lib(f'IFS=$\'\\n\'\ngrub_fast_boot_apply "{f}"\ngrub_fast_boot_is_applied "{f}"; '
+             'echo "applied=$?"\ngrub_fast_boot_default_lines')
+    assert r.returncode == 0, r.stderr
+    assert f.read_text() == "GRUB_DEFAULT=saved\n" + WANT_LINES
+    assert "applied=0" in r.stdout
+    assert r.stdout.endswith(WANT_LINES)
+
+
+def test_apply_refuses_an_unreadable_file_and_leaves_it_alone(tmp_path):
+    f = tmp_path / "grub"
+    f.write_text("GRUB_DEFAULT=saved\nGRUB_TIMEOUT=3\n")
+    os.chmod(f, 0o200)
+    try:
+        if os.access(f, os.R_OK):
+            return  # running as root: an unreadable file cannot be made here
+        r = _apply(f)
+        assert r.returncode != 0
+        assert str(f) in r.stderr
+    finally:
+        os.chmod(f, 0o644)
+    assert f.read_text() == "GRUB_DEFAULT=saved\nGRUB_TIMEOUT=3\n"
+
+
 # =================================================================================================
 # create-usb-linux.sh: the base image carries the settings, from the lib, and proves them
 # =================================================================================================
@@ -400,10 +461,26 @@ def test_build_image_emitted_default_grub_carries_the_three_settings(tmp_path):
 
 
 def test_build_image_grades_the_generated_grub_cfg_after_update_grub():
-    code = _code(_install_bootloader(_read(BUILD_IMAGE)))
-    v = code.find("grub_fast_boot_cfg_verdict")
-    assert code.find("update-grub") < v
-    assert "error " in code[v:v + 400]
+    func = _install_bootloader(_read(BUILD_IMAGE))
+    code = _code(func)
+    assert code.find("update-grub") < code.find("grub_fast_boot_cfg_verdict")
+    # Run the real grading lines (from `local fast_verdict` through its `|| error` line) inside a
+    # function, with error() stubbed: a slow cfg must abort the build, the fast one must pass.
+    s = func.find("local fast_verdict")
+    assert s >= 0
+    e = func.find("\n", func.find('|| error "#1394', s))
+    block = func[s:e]
+    for name, want_rc in (("cam1-grub.cfg", 0), ("base-image-grub.cfg", 1)):
+        script = (f'. "{LIB}"\nerror() {{ echo "ERR $*"; exit 1; }}\n'
+                  f'grub_cfg="{os.path.join(FIXTURES, name)}"\n'
+                  f"grade() {{\n{block}\n}}\ngrade\necho GRADED\n")
+        r = _bash("set -euo pipefail\n" + script)
+        assert r.returncode == want_rc, (name, r.stdout, r.stderr)
+        if want_rc:
+            assert "ERR #1394" in r.stdout and "recordfail timeout is 30 s" in r.stdout
+            assert "GRADED" not in r.stdout
+        else:
+            assert r.stdout.strip() == "GRADED"
 
 
 # =================================================================================================
