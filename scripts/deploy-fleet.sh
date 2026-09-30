@@ -240,11 +240,12 @@ if [ -n "$BINARY" ]; then
 else
   command -v gh >/dev/null 2>&1 || { err "gh CLI is required to download the artifact"; exit 1; }
   if [ -z "$RUN_ID" ]; then
-    info "Finding the newest successful ci.yml run on '$BRANCH' that carries '$ARTIFACT'..."
-    # issue 808: the ONE shared resolver (client-side newest SUCCESS by createdAt that carries the
-    # artifact, logged) -- never the server-side `--status success --limit 1` pick that went stale.
+    info "Resolving the ci.yml run of the '$BRANCH' head that carries '$ARTIFACT'..."
+    # issue 808 + #1394: the ONE shared resolver -- the branch head's own run, else a loud fallback
+    # to the newest older success carrying the artifact, else a loud refusal (a stale runs listing,
+    # a gh error). Never the server-side `--status success --limit 1` pick that went stale.
     RUN_ID="$(ci_run_latest_success "$REPO" "$BRANCH" ci.yml "$ARTIFACT")" || RUN_ID=""
-    [ -n "$RUN_ID" ] || { err "no successful ci.yml run on '$BRANCH' carries '$ARTIFACT'"; exit 1; }
+    [ -n "$RUN_ID" ] || { err "no usable ci.yml run on '$BRANCH' carries '$ARTIFACT' (the ci-run-resolve line above names why)"; exit 1; }
   fi
   RUN_SHA="$(gh run view "$RUN_ID" --repo "$REPO" --json headSha -q .headSha)"
   info "Downloading artifact '$ARTIFACT' from run $RUN_ID (sha ${RUN_SHA:0:9})..."
