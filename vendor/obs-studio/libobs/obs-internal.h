@@ -1225,6 +1225,8 @@ struct obs_source {
 	int64_t genlock_audio_step_step_ns;         /* the wall step that started it (+ = wall forward) */
 	uint32_t genlock_audio_step_holds;          /* cumulative holds released (log `genlock-audio-step-hold`) */
 	uint32_t genlock_audio_relabels;            /* issue 1381 (design 5900385541): cumulative relabels recognised (the same log line's relabels=) */
+	bool genlock_audio_step_relabel_pending;    /* issue 1381 (design 5901213031): the running hold is a PENDING relabel (the sender's box stepped first) */
+	uint64_t genlock_audio_step_prev_arrival_ns; /* issue 1381 (design 5901213031): the previous timecode packet's arrival (OBS monotonic) */
 	bool genlock_audio_step_relock_pending;     /* render thread: a latch relock landed inside a hold, replayed after it */
 	struct obs_source_frame *async_preload_frame;
 	DARRAY(struct async_frame) async_cache;
