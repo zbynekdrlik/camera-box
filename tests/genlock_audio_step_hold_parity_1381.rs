@@ -432,7 +432,7 @@ fn c_audio_step_scalars_match_the_rust_authority_1381() {
         (i64::MIN, i64::MAX),
         (i64::MAX, i64::MIN),
     ];
-    let places: [(u8, i64, u64); 15] = [
+    let places: [(u8, i64, u64); 20] = [
         (0, -682_474_000, PACKET),
         (1, -682_474_000, PACKET),
         (1, PACKET as i64, PACKET),
@@ -444,6 +444,13 @@ fn c_audio_step_scalars_match_the_rust_authority_1381() {
         (2, PACKET as i64 - 66, PACKET),
         (2, -(PACKET as i64 - 66), PACKET),
         (2, 0, PACKET),
+        // review round 3: one slot (one packet − 100 ns) is the edge; a folded pending's sub-slot
+        // residual is booked
+        (2, PACKET as i64 - 100, PACKET),
+        (2, PACKET as i64 - 101, PACKET),
+        (2, -(PACKET as i64 - 100), PACKET),
+        (2, -(PACKET as i64 - 101), PACKET),
+        (2, -966, PACKET),
         (3, -682_474_000, PACKET),
         (1, i64::MIN, u64::MAX),
         (2, i64::MIN, u64::MAX - 1),

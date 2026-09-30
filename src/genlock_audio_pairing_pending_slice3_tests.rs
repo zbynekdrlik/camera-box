@@ -458,6 +458,57 @@ fn a_never_followed_pending_applies_its_jump_once_on_every_grid_position_1381() 
 }
 
 #[test]
+fn a_timeout_places_one_slot_or_more_and_books_a_sub_slot_move_1381() {
+    // review round 3: point 2 of ROZHODNUTÉ 5903945145 is about a pending's jump J, one slot on every
+    // grid position. A relabel-shaped jump INSIDE a pending folds, so its timeout residual can be
+    // any size; under one slot it stays booked by the timecode ASRC like any sub-slot move.
+    let p = PACKET as i64;
+    let slot = p - AUDIO_RELABEL_FORWARD_TOLERANCE_NS as i64;
+    for (residual, places) in [
+        (slot, true),
+        (-slot, true),
+        (p - 66, true),
+        (682_474_000, true),
+        (slot - 1, false),
+        (-(slot - 1), false),
+        (-966, false),
+        (1, false),
+        (0, false),
+    ] {
+        assert_eq!(
+            audio_step_release_places(AudioStepRelease::Timeout, residual, PACKET),
+            places,
+            "issue 1381: a timeout residual of {residual} ns"
+        );
+    }
+    // the review's shape: a pending of J = one packet + 34 ns, then the sender steps back by one
+    // packet + 1 µs (relabel-shaped, it folds), and this box never steps
+    let jump = p + 34;
+    let mut f = Feed::new();
+    f.steady(WARM);
+    f.shift = jump;
+    f.early = (40_000_000 - jump) as u64;
+    assert!(f.starts());
+    f.take();
+    f.take();
+    f.shift -= p + 1_000;
+    let mut released = None;
+    for _ in 0..400 {
+        let (off, rel) = f.take();
+        if rel != AudioStepRelease::None {
+            released = Some((rel, audio_step_residual_ns(f.s.held_off_ns, off)));
+            break;
+        }
+    }
+    let (rel, residual) = released.expect("the pending ends");
+    assert_eq!((rel, residual), (AudioStepRelease::Timeout, jump - p - 1_000));
+    assert!(
+        !audio_step_release_places(rel, residual, PACKET),
+        "issue 1381: a folded pending's sub-slot timeout residual is booked, not placed"
+    );
+}
+
+#[test]
 fn a_backward_move_inside_a_pending_folds_under_one_packet_and_a_duplicated_slot_keeps_it_1381() {
     // review round 2 (slice 3): the fold's slot is asymmetric like the pending bound. Backward it
     // still starts at one packet: a duplicated slot (exactly one packet back) keeps the held offset,
