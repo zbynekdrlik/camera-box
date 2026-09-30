@@ -205,7 +205,7 @@ fn a_sender_first_relabel_appends_continuously_until_the_receiver_step_releases_
                     (OFF - jump, AudioStepRelease::None),
                     "step {step}"
                 );
-                assert!(f.continuous(off) && f.s.relabel_pending);
+                assert!(f.continuous(off) && f.s.active && f.s.relabel_pending);
             }
             // this box's own step: the landing moves by the remainder only
             f.off = OFF - step;
@@ -293,7 +293,7 @@ fn only_a_receiver_step_that_follows_the_jump_within_one_packet_resolves_it_1381
     f.off = OFF - 100_000_000;
     let (off, rel) = f.take();
     assert_eq!((off, rel), (OFF - jump, AudioStepRelease::None));
-    assert!(f.s.relabel_pending);
+    assert!(f.s.active && f.s.relabel_pending);
     // an offset that DRIFTS (every packet under the 2 ms step minimum) never resolves it, even onto
     // the held offset: a jump of one packet + 1 ms, then 0.5 ms of drift per packet
     let mut f = Feed::new();
@@ -301,13 +301,18 @@ fn only_a_receiver_step_that_follows_the_jump_within_one_packet_resolves_it_1381
     let jump = PACKET as i64 + 1_000_000;
     f.shift = jump;
     f.take();
-    assert!(f.s.relabel_pending);
+    assert!(f.s.active && f.s.relabel_pending);
     for _ in 0..6 {
         f.off -= 500_000;
-        f.take();
+        assert_eq!(
+            f.take().1,
+            AudioStepRelease::None,
+            "a drift never releases it"
+        );
     }
+    // the flag outlives a release (the log's pending=), so a RUNNING pending is active && flag
     assert!(
-        f.s.relabel_pending && (f.off - f.s.held_off_ns).unsigned_abs() < PACKET,
+        f.s.active && f.s.relabel_pending && (f.off - f.s.held_off_ns).unsigned_abs() < PACKET,
         "issue 1381: no offset step: still pending although the drift landed within one packet"
     );
 }

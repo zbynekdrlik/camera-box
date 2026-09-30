@@ -359,6 +359,36 @@ int main(void)
 	h_off -= 682474000;
 	h_print("resolve", h_packet());
 	h_print("after", h_packet());
+	/* review round 1: a second relabel-shaped jump INSIDE the pending window (the sender's box steps again
+	 * by 110 ms: 3 slots, continuous arrival) moves the held offset with it, so this box's one step by
+	 * both still resolves the pending (the residual both remainders); a joint relabel on the same source
+	 * afterwards prints pending=0 (the kept flag belongs to the pending's own release line only) */
+	h_reset("pending_twice_682ms");
+	h_steady(40);
+	h_shift += H_SLOT(20);
+	h_late += (uint64_t)(682474000 - H_SLOT(20));
+	h_print("start", h_packet());
+	for (int i = 0; i < 5; i++) {
+		const struct h_out o = h_packet();
+		if (o.relabel || o.pending || !o.push_back || o.release || o.logged || o.book_ns)
+			h_print("PENDING-BROKEN", o);
+	}
+	h_shift += H_SLOT(3);
+	h_late += (uint64_t)(110000000 - H_SLOT(3));
+	h_print("again", h_packet());
+	for (int i = 0; i < 5; i++) {
+		const struct h_out o = h_packet();
+		if (o.relabel || o.pending || !o.push_back || o.release || o.logged || o.book_ns)
+			h_print("PENDING-BROKEN", o);
+	}
+	h_off -= 682474000 + 110000000;
+	h_print("resolve", h_packet());
+	h_print("after", h_packet());
+	h_steady(5);
+	h_off -= 260000000;
+	h_shift += H_SLOT(7);
+	h_print("joint", h_packet());
+	h_print("after", h_packet());
 	/* a pending relabel this box never follows: released at the 10 s bound (J applied once by the ingest's
 	 * step placement, outside this branch) */
 	h_reset("pending_timeout_682ms");

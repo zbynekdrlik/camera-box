@@ -11,7 +11,8 @@
 //! and one pending script to give the same result from the C and the Rust authority. The script
 //! covers: pending relabels resolved 15 and 90 packets later, a receiver step that misses and then
 //! resolves, the one-packet and drift resolution edges, a pause / dup / skipped slot inside a
-//! pending, a dup / pause / leap that never starts one, a reset packet, a pending ended by a reset
+//! pending, a second relabel-shaped jump inside a pending (folded, then resolved by one step of this
+//! box), a dup / pause / leap that never starts one, a reset packet, a pending ended by a reset
 //! and by leaving timecode, the 10 s bound, and a late follow. It FAILS LOUDLY when no C compiler
 //! is present.
 
@@ -133,6 +134,23 @@ fn pending_sequence() -> Vec<Pkt> {
     k += 1;
     take(&mut v, &mut k, off, shift, early, false);
     off -= 682_474_000;
+    for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    // a second relabel-shaped jump inside a pending (the sender's box steps again by 110 ms: 3 slots,
+    // continuous arrival) moves the held offset with it, so one step of this box by both resolves it
+    shift += jump;
+    early += (682_474_000 - jump) as u64;
+    for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    let again = relabel_stamp_jump(110_000_000);
+    shift += again;
+    early += (110_000_000 - again) as u64;
+    for _ in 0..3 {
+        take(&mut v, &mut k, off, shift, early, false);
+    }
+    off -= 682_474_000 + 110_000_000;
     for _ in 0..3 {
         take(&mut v, &mut k, off, shift, early, false);
     }
@@ -349,7 +367,7 @@ fn c_audio_relabel_pending_matches_the_rust_authority_1381() {
     }
     // the script must reach every pending path, or the gate proves less than it says
     assert!(
-        starts_n >= 9 && resolved >= 6 && timed_out >= 1 && reset >= 2,
+        starts_n >= 10 && resolved >= 7 && timed_out >= 1 && reset >= 2,
         "issue 1381: the script reaches {starts_n} pending starts, {resolved} resolved, {timed_out} \
          timed out, {reset} reset"
     );

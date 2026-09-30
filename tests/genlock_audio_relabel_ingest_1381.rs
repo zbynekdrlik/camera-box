@@ -319,6 +319,29 @@ fn truth_table() -> Vec<String> {
          relabels=1 pending=1",
     ));
     t.push(after(1));
+    // review round 1: a second relabel-shaped jump inside the pending window (the sender's box steps
+    // again, +110 ms = 3 slots, continuous arrival) is folded into the held offset. The stock
+    // system-domain check still sees its 100 ms raw jump, so it is PLACED (push 0) -- at its
+    // continuous landing, through the folded offset (the pure hold's unit test pins that landing).
+    // This box's one step by both then resolves the pending, the residual both remainders
+    // (-15.8 - 10.0). A joint relabel on the same source afterwards prints pending=0: the kept flag
+    // belongs to a pending's own release line only
+    t.push("== pending_twice_682ms".to_string());
+    t.push(line("start", [0, 1, 1, 0, 0, 1, 0, 1, 0], "+0.0"));
+    t.push(line("again", [0, 0, 0, 0, 0, 1, 0, 1, 0], "+0.0"));
+    t.push(line("resolve", [0, 0, 1, 0, 0, 1, 4, 0, 1], "-25.8"));
+    t.push(log(
+        "pending_twice_682ms",
+        "step_ms=+666.667 held_ms=390.0 released=relabel-pending residual_ms=-25.8 holds=1 \
+         relabels=1 pending=1",
+    ));
+    t.push(after(1));
+    t.push(line("joint", [1, 0, 1, 0, 0, 1, 0, 0, 2], "-26.7"));
+    t.push(log(
+        "pending_twice_682ms",
+        "step_ms=+260.000 held_ms=0.0 released=none residual_ms=-26.7 holds=1 relabels=2 pending=0",
+    ));
+    t.push(after(2));
     // a pending relabel this box never follows: released at the 10 s bound (2 = timeout), its
     // residual the whole jump (the ingest's step placement applies it once), no relabel counted
     t.push("== pending_timeout_682ms".to_string());
@@ -329,9 +352,10 @@ fn truth_table() -> Vec<String> {
         "step_ms=+666.667 held_ms=10033.3 released=timeout residual_ms=+666.7 holds=1 relabels=0 \
          pending=1",
     ));
-    // the stock "exceeded TS_SMOOTHING_THRESHOLD" and "jumped" debug lines: the leap, the restart and
-    // the two pauses only -- no relabel and no pending relabel reached the stock >= 70 ms or > 2 s path
-    t.push("debug_lines=4".to_string());
+    // the stock "exceeded TS_SMOOTHING_THRESHOLD" and "jumped" debug lines: the leap, the restart, the
+    // two pauses and the second jump inside a pending only -- no relabel and no pending relabel's
+    // start reached the stock >= 70 ms or > 2 s path
+    t.push("debug_lines=5".to_string());
     t
 }
 
