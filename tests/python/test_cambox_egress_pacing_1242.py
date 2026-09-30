@@ -103,6 +103,7 @@ def _fakes(tmp_path):
         'case "$1" in\n'
         '  is-enabled) echo "${FAKE_ENABLED:-enabled}" ;;\n'
         '  is-active) echo "${FAKE_ACTIVE:-active}" ;;\n'
+        '  show) echo "${FAKE_RESTARTS:-0}" ;;\n'
         'esac\n')
     # sshpass -p PASS ssh ... USER@IP CMD -> print $FAKE_DIR/ssh/<ip>.txt, or fail like an
     # unreachable box (255) when there is none.
@@ -306,15 +307,28 @@ def test_gather_reads_the_installed_script_and_unit(tmp_path):
     unit.write_text("[Service]\nType=oneshot\n")
     pre = (f'CAMBOX_EGRESS_PACING_SCRIPT_PATH="{script}"\n'
            f'CAMBOX_EGRESS_PACING_SERVICE_PATH="{unit}"\n')
-    env = {**fk, "FAKE_IP_ROUTE": ROUTE_ENP2, "FAKE_TC_SHOW": CAM7_PACED}
+    env = {**fk, "FAKE_IP_ROUTE": ROUTE_ENP2, "FAKE_TC_SHOW": CAM7_PACED, "FAKE_RESTARTS": "3"}
     lines = _lib(pre + 'bash -c "$(cambox_egress_pacing_gather_remote_snippet)"', env=env).stdout.splitlines()
     assert "PACING_SCRIPT_EXEC=yes" in lines, lines
-    assert f"PACING_SCRIPT_SHA={hashlib.sha256(script.read_bytes()).hexdigest()}" in lines, lines
-    assert f"PACING_UNIT_SHA={hashlib.sha256(unit.read_bytes()).hexdigest()}" in lines, lines
+    assert f"PACING_SCRIPT_SHA={_functional_sha(script.read_text())}" in lines, lines
+    assert f"PACING_UNIT_SHA={_functional_sha(unit.read_text())}" in lines, lines
+    assert "PACING_SVC_RESTARTS=3" in lines, lines
+    # Executable but without its #!/bin/bash line is not runnable by systemd either.
+    script.write_text("echo paced\n")
+    lines = _lib(pre + 'bash -c "$(cambox_egress_pacing_gather_remote_snippet)"', env=env).stdout.splitlines()
+    assert "PACING_SCRIPT_EXEC=no" in lines, lines
     script.chmod(0o644)
     unit.unlink()
     lines = _lib(pre + 'bash -c "$(cambox_egress_pacing_gather_remote_snippet)"', env=env).stdout.splitlines()
     assert "PACING_SCRIPT_EXEC=no" in lines and "PACING_UNIT_SHA=" in lines, lines
+
+
+def _functional_sha(text):
+    """sha256 of the FUNCTIONAL lines only: comment lines (leading `#`, incl. the shebang) and blank
+    lines dropped -- review round 2, a comment-only edit must not turn every box stale."""
+    keep = [ln for ln in text.splitlines(keepends=True)
+            if not re.match(r"^[ \t]*#", ln) and not re.match(r"^[ \t]*$", ln)]
+    return hashlib.sha256("".join(keep).encode()).hexdigest()
 
 
 _EXPECTED = {}
@@ -330,20 +344,46 @@ def _expected():
 
 
 def _block(qdisc=CAM7_PACED + "|", enabled="enabled", active="active", iface="enp3s0",
-           script_exec="yes", script_sha=None, unit_sha=None):
+           script_exec="yes", script_sha=None, unit_sha=None, restarts="0"):
     e = _expected()
     script_sha = e["script"] if script_sha is None else script_sha
     unit_sha = e["unit"] if unit_sha is None else unit_sha
     return (f"PACING_IFACE={iface}\nPACING_QDISC={qdisc}\n"
             f"PACING_SVC_ENABLED={enabled}\nPACING_SVC_ACTIVE={active}\n"
+            f"PACING_SVC_RESTARTS={restarts}\n"
             f"PACING_SCRIPT_EXEC={script_exec}\nPACING_SCRIPT_SHA={script_sha}\n"
             f"PACING_UNIT_SHA={unit_sha}\n")
 
 
-def test_expected_hashes_are_the_bytes_setup_device_installs():
+def test_expected_hashes_are_the_functional_lines_setup_device_installs():
     boot = _lib("cambox_egress_pacing_boot_script").stdout
-    assert _expected()["script"] == hashlib.sha256(boot.encode()).hexdigest()
-    assert _expected()["unit"] == hashlib.sha256(UNIT.read_bytes()).hexdigest()
+    assert _expected()["script"] == _functional_sha(boot)
+    assert _expected()["unit"] == _functional_sha(UNIT.read_text())
+
+
+def test_a_comment_only_edit_keeps_every_box_current(tmp_path):
+    # Review round 2: the installed copies are compared on their functional lines, so a comment or
+    # blank-line edit to the unit or the boot-script template needs no fleet re-provision; a
+    # functional edit (another rate, another ExecStart) is still stale.
+    fk = _fakes(tmp_path)
+    unit = tmp_path / "installed.service"
+    script = tmp_path / "installed-script"
+    boot = _lib("cambox_egress_pacing_boot_script").stdout
+    pre = (f'CAMBOX_EGRESS_PACING_SCRIPT_PATH="{script}"\n'
+           f'CAMBOX_EGRESS_PACING_SERVICE_PATH="{unit}"\n')
+    env = {**fk, "FAKE_IP_ROUTE": ROUTE_ENP2, "FAKE_TC_SHOW": CAM7_PACED}
+
+    def grade(unit_text, script_text):
+        unit.write_text(unit_text)
+        script.write_text(script_text)
+        script.chmod(0o755)
+        block = _lib(pre + 'bash -c "$(cambox_egress_pacing_gather_remote_snippet)"', env=env).stdout
+        return _prov(block)
+
+    assert grade(_read(UNIT), boot) == "ok"
+    assert grade("# a new comment\n\n" + _read(UNIT), boot.replace("\nset -euo", "\n# note\n\nset -euo")) == "ok"
+    assert "differs" in grade(_read(UNIT).replace("RestartSec=30", "RestartSec=31"), boot)
+    assert "stale" in grade(_read(UNIT), boot.replace("maxrate 400mbit", "maxrate 300mbit"))
 
 
 def _prov(block):
@@ -403,6 +443,32 @@ def test_provision_verdict_gives_the_fix_that_matches_the_state():
     # A failed unit points at its own journal; a missing tc at iproute2.
     assert "journalctl -u cambox-egress-pacing" in _prov(_block(qdisc=CAM7_UNPACED + "|", active="failed"))
     assert "iproute2" in _prov(_block(qdisc="__TC_ABSENT__"))
+
+
+def test_provision_verdict_reads_a_retrying_unit_right():
+    # Review round 2: with Restart=on-failure forever a unit whose tc keeps failing (a kernel without
+    # sch_fq) sits in `activating`, never `failed`. A DRIFT read already proves a default route
+    # exists, so the hint must say the unit is not applying the qdisc and point at its journal.
+    v = _prov(_block(qdisc=CAM7_UNPACED + "|", active="activating", restarts="4"))
+    assert "default route exists" in v and "journalctl -u cambox-egress-pacing" in v, v
+    assert "4 failed round" in v, v
+    assert "no default route yet" not in v and "setup-device" not in v, v
+    # setup-device REFUSES without tc; it installs nothing.
+    v = _prov(_block(qdisc="__TC_ABSENT__"))
+    assert "refuses to run without tc" in v and "setup-device.sh does" not in v, v
+
+
+def test_boot_script_logs_a_missing_route_only_at_the_edges_of_a_round(tmp_path):
+    # Review round 2: a route-less box (dead NIC, a bench) retries forever; logging the
+    # "no default route" line on every attempt would put ~35 lines into the journal every ~90 s.
+    p, _ = _boot_script(tmp_path)
+    fk = _fakes(tmp_path)
+    attempts = int(_lib('echo "$CAMBOX_EGRESS_PACING_RETRY_ATTEMPTS"').stdout)
+    r = _run(f'"{p}"', env={**fk, "FAKE_IP_ROUTE": "", "CAMBOX_EGRESS_PACING_RETRY_SLEEP_S": "0"})
+    assert r.returncode == 1
+    assert (tmp_path / "ip.calls").read_text().strip() == str(attempts)
+    assert r.stderr.count("no default route yet") == 2, r.stderr
+    assert r.stderr.count("FAILED after") == 1, r.stderr
 
 
 # =================================================================================================
