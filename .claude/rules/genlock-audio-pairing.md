@@ -450,8 +450,8 @@ over a minute.
   - one `genlock-audio-step-hold` line per timecode source, `released=followed` normally;
   - `obs-vban pacing:` shows 0 new `discontinuities`;
   - the SongPlayer A/V gate stays green after the step.
-- **The compensator half (piece 1 re-seed, piece 3 backstop) and the two-clock bench:**
-  `asrc-bench-harness.md`, the issue-1381 section.
+- **The compensator half (piece 1 re-seed, piece 3 backstop):** `asrc-bench-harness.md`, the
+  issue-1381 section. The two-clock bench: `asrc-timecode-step-bench.md`.
 
 ### Issue 1381 — a sender that RELABELS at the step is APPENDED (design 5900385541)
 
@@ -517,7 +517,7 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
     260 ms / 682 ms / −1.5 s / 2.5 s, split 682 ms, catch-up, stamp leap and restart, plus a count of
     the stock debug lines.
   - The `RELABEL_WIRING` needles in the wiring test and both pwsh gates.
-  - The step bench (`asrc-bench-harness.md`).
+  - The step bench (`asrc-timecode-step-bench.md`).
   - Mutation proof: 11/11 C / wiring mutants killed by the Rust gates, and every wiring mutant also
     by the real pwsh lines of both ymls (run with the portable pwsh).
 - **Deploy + live acceptance (supervisor).** A FULL bundle, because the change is in libobs. Run a
@@ -633,7 +633,7 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
   - The harness's stamp leap and restart now carry their real arrival gap. With continuous arrival
     a stamp jump IS a pending relabel.
   - The `PENDING_WIRING` needles are in the wiring test and both pwsh gates.
-  - The bench is `src/asrc_timecode_pending_bench.rs` (`asrc-bench-harness.md`).
+  - The bench is `src/asrc_timecode_pending_bench.rs` (`asrc-timecode-step-bench.md`).
 - **The log (review round 1).** `pending=` is appended after `relabels=` on the
   `genlock-audio-step-hold` line. It is 1 on the release line of a pending relabel, whether it
   resolved (`released=relabel-pending`), ran out (`released=timeout`) or was reset
@@ -653,7 +653,7 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
     logs, against the 10 s bound. The bench assumes it stays inside the bound; nothing live has
     measured it yet.
 
-### Issue 1381 slice 3 — a sender-first step of ONE slot (N = +1) is a pending relabel (design 5902870861, ROZHODNUTÉ 5902983227)
+### Issue 1381 slice 3 — a sender-first step of ONE slot (N = +1) is a pending relabel (design 5902870861, ROZHODNUTÉ 5902983227 + 5903945145)
 
 - **The stamp domain is 100 ns, not ns.** Every NDI stamp the receiver reads is a multiple of
   100 ns (DistroAV multiplies the timecode by 100; the contract's per-second grid is in 100 ns
@@ -689,16 +689,37 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
       that is how far past one packet a late follow can land.
     - Kept: a sender that steps AGAIN, toward this box's wall, while the age sits hundreds of ms
       off (a timed-out pending). It lands over the bound, so it still starts.
-    - **OPEN (review round 2, Design-question 5903897499).** The guard reads the age against the
-      nominal, and the nominal MOVES. A step just over one slot (|S| = 34–38 ms) can release the
-      skew hold EARLY on the age test under ±1–5 ms of arrival jitter, and the in-band nominal
-      then tracks the unmatched step. The sender's late follow then still starts a false pending
-      (a 10 s hold, then one slot placed at the timeout):
-      - backward (N = −2 overshoots the nominal): a hole slice 2 already had;
-      - forward, with the follow 60 s or more late: new in slice 3.
-      Genuine sender-first steps are unaffected, and so are late follows of 50–66 / 260 / 682 ms.
-      The fix is waiting for the main's choice (the recommended one: remember the unfollowed
-      step for the 600 s re-anchor window).
+    - **The guard alone cannot see every late follow (review round 2, Design-question
+      5903897499).** It reads the age against the nominal, and the nominal MOVES. A step just over
+      one slot (|S| = 34–38 ms) can release the skew hold EARLY on the age test under ±1–5 ms of
+      arrival jitter, and the in-band nominal then tracks the unmatched step. The sender's late
+      follow then started a false pending (a 10 s hold, then one slot placed at the timeout):
+      backward (N = −2 overshoots the nominal), a hole slice 2 already had; forward, with the
+      follow 60 s or more late, new in slice 3. Fixed by the remembered step below.
+  - **The remembered unmatched step (ROZHODNUTÉ 5903945145).** A skew hold that ends WITHOUT the
+    stamps jumping remembers what they never matched: the residual `off_live − held` when it is
+    over one packet, and when. Two per-source fields: `AudioStepHold::unmatched_ns` /
+    `unmatched_at_ns` ↔ `obs_source` `genlock_audio_step_unmatched_ns` / `_at_ns`.
+    - Recorded at the age release (Followed with the residual still over one packet), the
+      zero-length release and a skew-hold timeout. Not recorded: a matched follow (within one
+      packet), a pending relabel's timeout (that is the SENDER's step, and its counterpart is this
+      box's own offset jump, which never starts a pending), RelabelPending, a reset.
+    - `audio_step_unmatched_follow` / `genlock_audio_step_unmatched_follow`: a stamp jump is that
+      step's follow when it is non-zero, of the OPPOSITE sign (the residual is `off_live − held`,
+      the stamps move against it), within one packet + the 15 ms arrival budget of the remembered
+      size, inside the 600 s re-anchor window (`AUDIO_STEP_NOMINAL_REANCHOR_NS`, strict).
+    - A follow VETOES the pending start (the last term of the starts predicate). A relabel-shaped
+      follow (`audio_relabel_pending`) CLEARS the memory in the hold, so a second jump is judged
+      afresh; a sub-slot stamp move of the same sign keeps it. Timecode off forgets it.
+    - "Resolved like a matched relabel" means: never a pending, and the memory is gone. The follow
+      packet itself takes the stock path (appended under 70 ms and booked by the timecode ASRC,
+      placed at 70 ms or more), so a step is never paid twice.
+    - Known limit, unchanged: the early age release PLACES the step before the follow (the skew
+      hold's slice-1 limit). For a forward step that placement overwrites up to one slot; the
+      bench's "zero audio overwritten" is counted from the follow on.
+    - Wiring: the two fields in `obs-internal.h`, both wrappers pass them
+      (`genlock_audio_step_hold_source`, `genlock_audio_relabel_pending_source`), the wiring test's
+      needles and both pwsh gates.
   - **The fold's slot is the pending bound's (review round 1).** Inside a pending, a move under one
     slot folds like the skew hold's, and a slot or more folds only when relabel-shaped. Forward, a
     slot starts at one packet − 100 ns (`genlock_audio_relabel_forward_slot_ns`); backward, at one
@@ -718,11 +739,10 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
   - a pause, a restart, a catch-up sender.
   The bench and the ingest lift pin those traces on every grid position.
 - **A one-slot pending this box never follows** runs to the 10 s bound and releases `timeout` with
-  J as its residual. Where J is over one packet (+ 34 ns), `audio_step_release_places` PLACES the
-  packet: a zero-filled gap of J, as slice 2 did there. Where J is within one packet (− 66 ns),
-  the release appends and the timecode ASRC books J once at 1000 ppm. Either way nothing is
-  overwritten or dropped. The difference is the skew hold's own "over one packet places" rule,
-  unchanged.
+  J as its residual, and `audio_step_release_places` PLACES the packet on EVERY grid position: a
+  zero-filled gap of J, nothing overwritten or dropped (ROZHODNUTÉ 5903945145 point 2: the stamps
+  win). `Timeout => residual != 0`; a Followed release still places only over one packet. Slice 3
+  first booked the − 66 ns position (J within one packet) at 1000 ppm through the timecode ASRC.
 - **Tests.**
   - Unit (`src/genlock_audio_pairing_pending_slice3_tests.rs`, a `#[path]` child of the pending
     tests): the bound at − 66 / + 34 / − 100 / − 101 ns
@@ -731,21 +751,37 @@ The skew hold cannot help: it moves the genlock term, not OBS's place-vs-append 
     band's exact edge; the start's widenings and its late-follow narrowing against slice 2; late
     follows of 50–66 / 682 ms (the first block up to 15 ms late); a toward jump still 382 ms off
     that starts; the away guard's strict edge; a skipped slot inside a pending on every grid
-    position; a backward move inside a pending (− p keeps, − (p − 50 ns) folds).
-  - Bench (`src/asrc_timecode_pending_bench.rs`, `asrc-bench-harness.md`): the grid premise, the
-    one-slot steps on all three positions, the never-follows case, a skipped block, a duplicated
-    block and N = −1 steps byte for byte, and a late follow (50–66 / 260 ms, 12 / 20 s after this
-    box's step, on every position) that never starts a pending.
+    position; a backward move inside a pending (− p keeps, − (p − 50 ns) folds). Round 2: the away
+    guard's far bound (a timed-out +100 ms pending, then the stamps at far / far + 1) and its edge
+    with a ±1 ms offset move; a never-followed pending placed on every grid position; the start
+    sweep's late-follow oracle (the scenario's own step, never the code under test); the two-box
+    jittered driver (14 400 runs: fps, step, lag, jitter, seed) with zero false pendings; the
+    memory (remembered, cleared, kept by a sub-slot move, not remembered for a matched follow, a
+    pending timeout or a reset, the window's strict edge, the wrong sign, a zero jump, timecode
+    off).
+  - Bench (`src/asrc_timecode_pending_bench.rs`, `asrc-timecode-step-bench.md`): the grid premise,
+    the one-slot steps on all three positions, the never-follows case (placed on every position), a
+    skipped block, a duplicated block and N = −1 steps byte for byte, a late follow (50–66 /
+    260 ms, 12 / 20 s after this box's step, on every position) that never starts a pending, and
+    the jittered late follow (S = ±34 / 36 / 38 ms, 12 / 60 / 120 s, 3 / 5 ms jitter): 0 pendings,
+    0 ms overwritten, dropped or zero-filled from the follow on (17 of 36 failed before).
   - Parity (`tests/genlock_audio_relabel_pending_parity_1381.rs`): scalars at the bound, both jumps,
     an age-band-only start, the band's edge (on it, 5 ms inside, 1 ns past), a skipped slot at
     − 66 ns outside and inside a pending, the late follows (on time; 5 ms late at − 66 ns), the toward
     jump 382 ms off, the away guard's edge (computed from the replayed Rust state) and a backward
-    move of p − 50 ns inside a pending.
+    move of p − 50 ns inside a pending. Round 2: the jittered 34 ms late follow, the far bound, a
+    follow exactly one packet short (never remembered), a 20 ms sub-slot move (keeps the memory),
+    scalar vectors of `audio_step_unmatched_follow` (window edges, both signs, saturation) and both
+    drivers printing the two memory fields; the step-hold parity replays a sequence that reaches a
+    remembered step.
   - Ingest lift: pending at +40 / +60 ms, one never followed, a skipped slot and an N = −1 relabel
     on the stock path, a skipped slot inside a pending (resolved with −6.7 ms), and the late follows
-    at 60 ms and at 66 ms with a 5 ms late block (no second hold).
-  - Mutation: C 20/20, Rust 18/19. The survivor, `stamp_jump_ns > 0` as `>= 0`, is equivalent: a
-    zero jump never passes `jump > step_min`.
+    at 60 ms and at 66 ms with a 5 ms late block (no second hold), and the jittered late follow of
+    34 ms (one step-hold line, `released=followed residual_ms=-34.0`, no pending).
+  - Mutation: C 42/42, Rust 40/41 (the away guard's constants, the memory's window, sign, zero
+    jump, budget, record threshold, clear shape, each record site, and the timeout placement). The
+    survivor, `stamp_jump_ns > 0` as `>= 0`, is equivalent: a zero jump never passes
+    `jump > step_min`.
 - **Live acceptance (supervisor).** Ships in the same FULL bundle. At a date step where a cross-box
   sender's box steps first by one slot (+33.3 … +66.7 ms): one `genlock-audio-step-hold …
   released=relabel-pending … pending=1` line with `step_ms=+33.333` and `residual_ms` = −r; no
