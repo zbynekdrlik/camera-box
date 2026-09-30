@@ -255,6 +255,64 @@ line 71, mid-paragraph. The header therefore documents `SSH_PASS` without its de
   - In the runner, name every variable so the sourced `dantesync-fleet-upgrade.sh` cannot overwrite
     it: it sets `HERE`, which first pointed the harness path at `scripts/`.
 
+## dantesync 1.15.0: the master's saved date on a rollback, and `holding` (issue 1372)
+
+dantesync 1.15.0 (dantesync issue 126) persists the NTP master's fleet date offset in
+`date-offset.json` beside `config.json` (`/etc/dantesync/`, `C:\ProgramData\DanteSync\`) and restores
+it at start, so a master restart keeps the fleet date.
+
+**The rollback rule.** A master rolled back to an older build must delete that file in the same
+step. Otherwise a 1.15 reinstalled within a day restores the session from before the rollback, a
+stale D.
+- `dantesync_rollback_clears_date_state ROLE RESTORED` decides it: 0 only for ROLE `ntp-master`
+  with a restored version below 1.15.0. The versions are ordered by the script's own
+  `dantesync_upgrade_status` (1.9.0 is below 1.15.0), never a second semver.
+- `rollback_node` gets RESTORED from `upgrade_node`'s pre-swap read (`cur`). It names the master
+  the way `verify_node` does (`NTP_MASTER`).
+- **Where the delete runs.** Both programs delete the file after the service stop and the `.bak`
+  restore, and before the start.
+  - Linux: inside the ro-root rw window.
+  - Windows: after the process-exit wait. The 1.15 master rewrites the file on its loop, so a
+    delete before the stop would be undone.
+- **The Windows delete.** `Remove-Item -Force -ErrorAction SilentlyContinue` sits in a try/catch.
+  Under `$ErrorActionPreference = 'Stop'` some failures still THROW: pwsh 7 in a non-interactive
+  session throws on a path it would prompt for. A throw there would skip `Start-Service`.
+- **ONE line per program:**
+  - `date-offset.json removed (rollback below 1.15.0, dantesync issue 126)`;
+  - `... absent, nothing to remove ...`, never claimed removed;
+  - a `WARNING: ... could NOT be removed` line when the file survives. The master still starts.
+- `dantesync_rollback_date_state_note` relays that line to the roll log. A successful rollback's
+  output is otherwise never printed.
+- **What never deletes.** A slave, a restore to 1.15.x (that file is valid for it; deleting it
+  would boot-step the fleet during the day), and every upgrade program.
+- **Where the code lives.** Both rollback programs moved unchanged into
+  `scripts/lib/dantesync-rollback.sh`, which keeps the upgrade script under its pinned
+  1000-line budget. With no arguments they emit byte-identical text, so the Rust `run_sourced`
+  anchors in `tests/dantesync_fleet_upgrade.rs` hold.
+- **Not covered: a forced DOWNGRADE of the master** (`--target 1.14.x --force`). That goes
+  through the upgrade program, which never deletes the file.
+
+**`holding` is a follower.** A 1.15.0 follower whose master went silent reports
+`date_authority: "holding"`. It keeps the adopted D and seq, takes no NTP step, and turns `local`
+after 900 s. It also reports `date_authority_hold_age_s`.
+- Every grader branches on `== "master"` only, so `holding` grades as a follower (date verdict
+  `none`, journal grade `step:<us>`). The graders are `date_master_verdict` /
+  `journal_date_grade_from_step`, their python twins, and `dantesync_clock_decision.py`, which
+  does not read the field.
+- It is pinned by rows in `tests/fixtures/dantesync_clock_discipline_1372.tsv`, including a holding
+  status with master-looking date fields, and by a synthesized 1.15.0 fixture.
+- Never special-case `holding` into the master branch.
+
+**Tier-0:**
+- `pytest tests/python/test_dantesync_fleet_upgrade_tray_1372.py`, the section at the end:
+  - the decision table;
+  - the emitted Linux rollback RUN with PATH stubs for systemctl / mount / findmnt / dantesync,
+    each logging whether the file exists when it runs;
+  - the `.ps1` RUN under pwsh with stub service cmdlets. A missing pwsh fails the test, never skips
+    it. A non-empty directory stands in for a file that cannot be removed.
+  - an orchestrator canary rollback of a master and of a slave.
+- `pytest tests/python/test_clock_discipline_1372.py` covers `holding`.
+
 ## Testing (Tier-0)
 
 Heavy `cargo test` is CI-only here (#477) — no `# airuleset:build-ok` bypass. Verify the bash logic

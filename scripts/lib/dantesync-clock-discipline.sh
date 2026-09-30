@@ -188,8 +188,8 @@ _ms_to_us() {
   fi
 }
 
-# date_authority_from_pipe_json TEXT -> "master" / "follower" / "local" / "" (the legacy or not-yet-
-# anchored blob).
+# date_authority_from_pipe_json TEXT -> "master" / "follower" / "holding" (dantesync 1.15.0: a follower
+# whose master went silent, still a follower) / "local" / "" (the legacy or not-yet-anchored blob).
 date_authority_from_pipe_json() {
   printf '%s' "$1" | grep -oE '"date_authority"[[:space:]]*:[[:space:]]*"[^"]*"' \
     | sed -n 's/.*"date_authority"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tail -1 || true
@@ -271,7 +271,7 @@ _date_master_micro_verdict() {
 }
 
 # date_master_verdict TEXT MARGIN_US [MICRO_BOUND_MS] -> none | ok | out | paused | unknown.
-#   none    -- not the date master (follower, local, legacy "", absent)
+#   none    -- not the date master (follower, holding, local, legacy "", absent)
 #   a master in date_correction_mode "daily" (dantesync 1.12.0, date_master_mode_class) ->
 #     _date_master_daily_verdict on DATE_MASTER_DAILY_BOUND_MS at date_master_now_s; decided FIRST,
 #     because a 1.12.0 master also carries date_correction_falling_behind
