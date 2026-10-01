@@ -108,7 +108,12 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # Dante leader re-election (~25 ppm), is detected and fed forward into the phase-lock integrator: the
 # learned frequency settles in <= ~22 s instead of the ~8-12 min PI slew that pulled every OBS media
 # clock off the Dante tick for minutes, camera-box issue 1372).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.14.0}"
+# Bumped 2026-10-01: fleet rolled to v1.15.0 (dantesync PR 127, dantesync issue 126 -- the date master
+# persists its fleet date offset D in date-offset.json and restores it on a restart, and a follower
+# whose master goes silent HOLDS D (date_authority "holding") instead of falling back to its own NTP:
+# a master restart no longer steps the fleet date. Rolled 1.10.2026 02:05-02:25Z after the nightly step,
+# followers first then the strih-lx master; a verification restart of the master stepped no follower).
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.15.0}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 
