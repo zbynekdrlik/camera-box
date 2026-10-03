@@ -272,14 +272,12 @@ EOF
 
 # root_mount_is_readonly OPTS -> 0 iff the FIRST comma-token of a mount-options string is exactly
 # "ro" (the kernel always emits ro/rw first). Substring-safe: a rw mount carrying
-# "errors=remount-ro" is correctly NOT read as read-only. Mirrors verify-device.sh's function of
-# the same name/contract (#547) -- kept as a local copy (not a shared-lib extraction) to keep
-# #599's fix scoped to this file.
+# "errors=remount-ro" is correctly NOT read as read-only. issue 808: the reading itself is
+# ro_root_mount_mode in scripts/lib/ro-root.sh (sourced above; shared with the handheld SBC
+# provisioning and the relay deploy). verify-device.sh keeps its own copy of the same contract
+# (#547), parity-tested against the lib by tests/python/test_ro_root_808.py.
 root_mount_is_readonly() {
-    case "$1" in
-        ro | ro,*) return 0 ;;
-        *) return 1 ;;
-    esac
+    [ "$(ro_root_mount_mode "${1:-}")" = ro ]
 }
 
 # ROOT_WAS_RO -- set by ensure_root_writable(), read by restore_root_mode() (#599). Tracks whether

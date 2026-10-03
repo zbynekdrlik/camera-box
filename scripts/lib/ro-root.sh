@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/lib/ro-root.sh — the ONE read-only-root canon for every Linux box we provision (issue 808).
+# scripts/lib/ro-root.sh — the ONE read-only-root canon of the provisioning scripts (issue 808).
 #
 # A cambox (scripts/setup-device.sh STEP 18) and a handheld SBC (scripts/bkshading-provision-sbc.sh
 # --install) both run with a READ-ONLY root plus tmpfs for the directories the system must write.
@@ -13,9 +13,12 @@
 #     Its written fstab is byte-identical to before (golden: tests/fixtures/ro_root_fstab_808/).
 #   - bkshading-provision-sbc.sh writes ro_root_fstab_text: the same root line + every other mount
 #     of the original fstab kept + the same tmpfs block.
-#   - ro_root_mount_mode is the same first-token reading as setup-device.sh / verify-device.sh
-#     root_mount_is_readonly (a python parity test pins it), used by the SBC --check and by
-#     bkshading-deploy-relay.sh to decide the remount cycle from the target's own root.
+#   - ro_root_mount_mode is the one first-token reading: setup-device.sh's root_mount_is_readonly
+#     calls it, verify-device.sh keeps its own copy (a python parity test pins both), the SBC
+#     --check and bkshading-deploy-relay.sh decide from it.
+# NOT covered: the image builders write their own fstab. create-usb-linux.sh writes the first-boot
+# (rw) fstab that setup-device STEP 18 later replaces with this canon; build-image.sh's read-only
+# overlay image still carries its own, different tmpfs set (no /var/spool, /var/log 64M).
 #
 # Source-only: pure functions, NO side effects, and deliberately no `set -euo pipefail` (it would
 # leak into the sourcing shell — .claude/rules/ci-testing-gotchas.md). No grep/awk/sed either: the

@@ -25,6 +25,7 @@ REPO = os.path.normpath(os.path.join(HERE, "..", ".."))
 LIB = os.path.join(REPO, "scripts", "lib", "ro-root.sh")
 LOG_DIET = os.path.join(REPO, "scripts", "lib", "log-diet.sh")
 SETUP = os.path.join(REPO, "scripts", "setup-device.sh")
+VERIFY = os.path.join(REPO, "scripts", "verify-device.sh")
 GOLDEN = os.path.join(REPO, "tests", "fixtures", "ro_root_fstab_808")
 
 TMPFS = [
@@ -107,20 +108,29 @@ def test_mount_mode_reads_the_first_token_only():
         assert _out('ro_root_mount_mode "$O"', O=opts) == want + "\n", opts
 
 
-def test_mount_mode_agrees_with_setup_device_root_mount_is_readonly():
-    # setup-device.sh's own function (its BASH_SOURCE guard makes sourcing safe) is the cambox
-    # reference: ro_root_mount_mode says `ro` exactly when it returns 0.
-    for opts, _want in MODES:
-        src = (
-            'set -uo pipefail\n. "%s"\n. "%s"\n'
-            'if root_mount_is_readonly "$O"; then a=ro; else a=not; fi\n'
-            'b="$(ro_root_mount_mode "$O")"; [ "$b" = ro ] || b=not\n'
-            'echo "$a $b"\n' % (SETUP, LIB)
-        )
-        r = subprocess.run(["bash", "-c", src], capture_output=True, text=True,
-                           env=dict(os.environ, O=opts))
-        a, b = r.stdout.split()
-        assert a == b, "parity broken for %r: setup-device=%s lib=%s" % (opts, a, b)
+def test_mount_mode_agrees_with_both_cambox_root_mount_is_readonly():
+    # setup-device.sh's root_mount_is_readonly delegates to the lib; verify-device.sh keeps its own
+    # copy of the same contract. Both scripts' BASH_SOURCE guards make sourcing safe. For each,
+    # ro_root_mount_mode says `ro` exactly when root_mount_is_readonly returns 0.
+    for script in (SETUP, VERIFY):
+        for opts, _want in MODES:
+            src = (
+                'set -uo pipefail\n. "%s"\n. "%s"\n'
+                'if root_mount_is_readonly "$O"; then a=ro; else a=not; fi\n'
+                'b="$(ro_root_mount_mode "$O")"; [ "$b" = ro ] || b=not\n'
+                'echo "$a $b"\n' % (script, LIB)
+            )
+            r = subprocess.run(["bash", "-c", src], capture_output=True, text=True,
+                               env=dict(os.environ, O=opts))
+            a, b = r.stdout.split()
+            assert a == b, "parity broken for %r: %s=%s lib=%s" % (opts, script, a, b)
+
+
+def test_setup_device_reads_the_root_through_the_lib():
+    body = open(SETUP, encoding="utf-8").read()
+    start = body.index("root_mount_is_readonly() {")
+    fn = body[start:body.index("\n}\n", start)]
+    assert "ro_root_mount_mode" in fn, "setup-device.sh must not keep its own copy of the reading"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -203,6 +213,23 @@ def test_step18_fstab_is_byte_identical_to_the_golden():
         assert r.returncode == 0 and not r.stderr, (name, r.returncode, r.stderr)
         want = open(os.path.join(GOLDEN, name), encoding="utf-8").read()
         assert r.stdout == want, "STEP 18 output drifted from %s:\n%s" % (name, r.stdout)
+
+
+def test_step18_refuses_an_empty_root_uuid():
+    body = open(SETUP, encoding="utf-8").read().splitlines()
+    start = next(i for i, l in enumerate(body) if l.startswith("cat > /etc/fstab << FSTABEOF"))
+    guard = body[start - 1]
+    assert guard.startswith('[ -n "$ROOT_UUID" ] || fail '), guard
+    src = (
+        "set -euo pipefail\nROOT_UUID=\n"
+        'fail() { echo "FAIL: $*" >&2; exit 1; }\n'
+        '. "%s"\n. "%s"\nblkid() { return 1; }\ngrep() { return 1; }\n%s\n%s\n'
+        % (LOG_DIET, LIB, guard, _step18_block())
+    )
+    r = subprocess.run(["bash", "-c", src], capture_output=True, text=True)
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert r.stdout == "", "no fstab may be written without a root UUID:\n" + r.stdout
+    assert "root filesystem UUID" in r.stderr, r.stderr
 
 
 def test_step18_sources_the_lib_and_calls_it_for_every_line():
