@@ -48,6 +48,11 @@ fail() {
                            # verify-device.sh's (u) check and create-usb-linux.sh, single source
                            # of truth for the journald RuntimeMaxUse cap path/value
 
+# shellcheck source=scripts/lib/ro-root.sh
+. "$HERE/lib/ro-root.sh"  # ro_root_root_line / ro_root_tmpfs_line (issue 808) -- the ONE read-only
+                          # root canon STEP 18 writes, shared with bkshading-provision-sbc.sh (the
+                          # handheld SBC goes read-only the same way)
+
 # shellcheck source=scripts/lib/remoteos-mcp.sh
 . "$HERE/lib/remoteos-mcp.sh"  # remoteos_mcp_install -- the ONE remoteos-mcp venv install (the MCP agent step; issue 1361)
 # shellcheck source=scripts/lib/mgmt-liveness.sh
@@ -1880,30 +1885,34 @@ else
 fi
 
 # Create new fstab with read-only root and tmpfs mounts.
-# The heredoc is UNQUOTED (it expands ROOT_UUID and two $(...) lines), so a backtick in its comment
+# The heredoc is UNQUOTED (it expands ROOT_UUID and the $(...) lines), so a backtick in its comment
 # text is a command substitution: escape every one as \` (issue 1311 -- a bare `nofail` ran as a
 # command and vanished from the written fstab).
+# issue 808: the root line and every tmpfs line come from scripts/lib/ro-root.sh (the handheld SBC
+# writes the same set); the EFI line and the journal-partition line stay here, so the written fstab
+# is byte-identical to before (tests/fixtures/ro_root_fstab_808/ is the golden).
+[ -n "$ROOT_UUID" ] || fail "could not read the root filesystem UUID (findmnt -n -o UUID /) -- refusing to write an fstab without a root line"
 cat > /etc/fstab << FSTABEOF
 # Root filesystem - read-only for reliability
-UUID=${ROOT_UUID} / ext4 ro 0 1
+$(ro_root_root_line "$ROOT_UUID" ext4)
 
 # EFI partition (if exists)
 $(grep '/boot/efi' /etc/fstab.bak 2>/dev/null || echo "# No EFI partition")
 
 # tmpfs mounts for writable directories
-tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=100M 0 0
-tmpfs /var/log tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=50M 0 0
+$(ro_root_tmpfs_line /tmp)
+$(ro_root_tmpfs_line /var/log)
 # #1309: persistent journal on the dedicated ext4 partition, mounted OVER the /var/log tmpfs (systemd
 # orders /var/log first by path prefix). \`nofail\` -> a box WITHOUT the partition (an old box not yet
 # reflashed via create-usb-linux.sh) still boots and journald simply falls back to a volatile journal
 # on the tmpfs above. Emitted only when the labelled partition actually exists, so setup-device.sh on
 # such an old box writes a harmless comment instead of an unmountable entry.
 $(if blkid -L "$LOG_DIET_JOURNAL_PART_LABEL" >/dev/null 2>&1; then log_diet_journal_fstab_line; else echo "# no '$LOG_DIET_JOURNAL_PART_LABEL' partition on this box -- reflash via create-usb-linux.sh for a persistent journal (#1309)"; fi)
-tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=50M 0 0
+$(ro_root_tmpfs_line /var/tmp)
 # #295: size /var/cache >=512M (uniformly across the fleet) so apt can never ENOSPC and leave a
 # freshly-installed kernel without its initrd (a 100M /var/cache filled up and did exactly that).
-tmpfs /var/cache tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=512M 0 0
-tmpfs /var/spool tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=10M 0 0
+$(ro_root_tmpfs_line /var/cache)
+$(ro_root_tmpfs_line /var/spool)
 FSTABEOF
 
 echo "  Root filesystem: read-only (ro)"
