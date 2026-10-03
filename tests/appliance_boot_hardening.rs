@@ -186,9 +186,19 @@ fn provisioning_pins_a_safe_grub_default() {
 
 /// 5. `/var/cache` must be sized uniformly and adequately (≥512M) so apt can never ENOSPC and leave
 ///    a kernel without an initrd. The provisioning drift (100M vs 500M) is removed.
+///
+///    issue 808: the tmpfs lines live ONCE in `scripts/lib/ro-root.sh` (shared with the handheld
+///    SBC), and `setup-device.sh` STEP 18 writes `/var/cache` through `ro_root_tmpfs_line`. So the
+///    size is read from the lib, and every setup script must call the lib for the line.
 #[test]
 fn provisioning_sizes_var_cache_adequately() {
     for script in SETUP_SCRIPTS {
+        assert!(
+            read(script).contains("$(ro_root_tmpfs_line /var/cache)"),
+            "{script} must write the /var/cache tmpfs line through scripts/lib/ro-root.sh (issue 808)"
+        );
+    }
+    for script in ["scripts/lib/ro-root.sh"] {
         let body = read(script);
         // Find the fstab tmpfs line for /var/cache and read its size= value.
         let line = body
