@@ -1660,3 +1660,24 @@ append `# airuleset:secret-ok <reason: public commit shas of this repo, the live
 to every `git add` / `git commit` call that stages that file. Never "hide" the sha by building it
 at runtime or splitting the literal. A synthetic sha the test only needs to be well-formed can be
 `"b" * 40`, which the scan never sees.
+
+## `mapfile < <(cmd; printf 'rc\0%s\0' "$?")` loses `cmd`'s exit code under `set -e` (issue 808)
+
+A process substitution INHERITS the caller's errexit. Under `set -euo pipefail`, a failing `cmd`
+ends that subshell before the trailing `printf` appends its exit code, so the caller reads its
+default ("nothing found") for every failure. Live: the SBC WiFi takeover read every netplan-reader
+failure as "no WiFi YAML" and, with a conf already present, exited 0 with netplan's wlan0 still live
+(caught by a fresh-context review, reproduced). Start the substitution with `set +e`:
+`mapfile -d '' -t f < <(set +e; cmd; printf 'rc\0%s\0' "$?")`. A test must assert the refusal TEXT of
+the real failure branch, not a word that the wrong branch prints too: the first refusal test passed
+on the broken code because both branches said "nothing changed".
+
+## A test that runs a real tool where it exists must ALSO pass where it does not (issue 808)
+
+`tests/python/test_bkshading_sbc_provision_808.py` runs the real `wpa_passphrase` on dev1 and an exact
+emulation elsewhere (the GitHub runner has no wpasupplicant). Green on dev1 proves only the first
+path. Run the other path locally with a PATH that lacks the tool: a scratch dir of symlinks to every
+`/usr/local/bin` `/usr/bin` `/bin` `/usr/sbin` `/sbin` entry except the tool (skip a name already
+linked, `[ -e x ] || [ -L x ]`, since dangling symlinks exist there), then `PATH=<that dir> python3 -m
+pytest …`, from a script FILE in a worktree lane. Pin the expected value independently of both
+paths (here `hashlib.pbkdf2_hmac`, the 802.11i PSK definition), never against the tool's own output.
