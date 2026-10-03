@@ -42,6 +42,10 @@ fn read(rel: &str) -> String {
 /// provisioning path.)
 const SETUP_SCRIPTS: [&str; 1] = ["scripts/setup-device.sh"];
 
+/// The ONE read-only-root canon the setup scripts write their tmpfs lines through (issue 808:
+/// shared by setup-device.sh STEP 18 and the handheld SBC provisioning).
+const RO_ROOT_LIBS: [&str; 1] = ["scripts/lib/ro-root.sh"];
+
 /// Minimum `/var/cache` tmpfs size (MiB). 100M filled up on .61 and broke apt with ENOSPC, which
 /// is what left the auto-installed kernel without an initrd. The fix sizes it uniformly ≥512M.
 const MIN_VAR_CACHE_MIB: u32 = 512;
@@ -198,7 +202,7 @@ fn provisioning_sizes_var_cache_adequately() {
             "{script} must write the /var/cache tmpfs line through scripts/lib/ro-root.sh (issue 808)"
         );
     }
-    for script in ["scripts/lib/ro-root.sh"] {
+    for script in RO_ROOT_LIBS {
         let body = read(script);
         // Find the fstab tmpfs line for /var/cache and read its size= value.
         let line = body
