@@ -1681,3 +1681,28 @@ path. Run the other path locally with a PATH that lacks the tool: a scratch dir 
 linked, `[ -e x ] || [ -L x ]`, since dangling symlinks exist there), then `PATH=<that dir> python3 -m
 pytest …`, from a script FILE in a worktree lane. Pin the expected value independently of both
 paths (here `hashlib.pbkdf2_hmac`, the 802.11i PSK definition), never against the tool's own output.
+
+## Splitting an over-budget pytest file mechanically, and testing a bash restore trap (issue 808 heal review)
+
+- **Split by `ast` segments, recompute imports from free names.** A segment is everything after the
+  previous top-level node's `end_lineno` up to this node's `end_lineno`, so a node moves with the
+  comments and blank lines above it. Classify segments by node name. A helper used by BOTH halves
+  goes to a shared non-`test_` module, which pytest never collects; tests import it after
+  `sys.path.insert(0, HERE)`. Build each file's `import` block from its free names (Load names minus
+  local defs, args, `*args`/`**kw`, nested defs, builtins). A name neither half defines aborts the
+  split. Prove it: pyflakes clean, and the collected test count unchanged (`pytest --collect-only`).
+  Worked split: tests/python/test_bkshading_sbc_provision_808.py -> wifi_takeover / wifi_heal /
+  wifi_heal_stuck + bkshading_sbc_fakes_808.py.
+- **A moved fixture that looks like a secret is blocked at `git add` AND `git commit`.** Append
+  `# airuleset:secret-ok <reason>` to each call. The worktree guard refuses a `git commit <<'EOF'`
+  heredoc followed by that comment ("names git in a form too complex"). Write the message with the
+  Write tool, then `git commit -F <file> -- <paths> # airuleset:secret-ok ...` as a plain call.
+- **Testing a trap in a bash script under test:**
+  - Let a stub the script runs send the signal. The stub must find the script's own bash among its
+    ancestors by `/proc/<pid>/cmdline`, never by guessing `getppid()`'s parent: a mutation that drops
+    a `timeout` wrapper would otherwise signal the pytest process.
+  - Bash with a TERM/INT trap runs it once the foreground child returns, so the trap's commands
+    land in the stub log in order.
+  - Drive an EXIT arm with a command that really fails under errexit inside the armed window. For
+    example, a stub turns a file the script will `rm -f` into a non-empty directory.
+  - Prove each arm with a mutant (delete the `trap` line in a scratch copy, run the test).
