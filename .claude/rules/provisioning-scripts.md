@@ -455,5 +455,6 @@ the issue-1309 journal-partition line, which sits BETWEEN `/var/log` and `/var/t
   only for an intended change.
 - **The lib must not use grep/awk/sed**: the issue-1311 heredoc test runs STEP 18 with `grep`
   stubbed out, and its harness sources the lib first.
-- `root_mount_is_readonly` stays defined in `setup-device.sh` (a Rust test pins it there); the lib's
-  `ro_root_mount_mode` is the same first-token reading, parity-tested against it.
+- `root_mount_is_readonly` stays DEFINED in `setup-device.sh` (a Rust test pins the definition
+  there) but calls the lib's `ro_root_mount_mode`. `verify-device.sh` keeps its own copy, because
+  pytests EXECUTE slices of it without sourcing libs; the parity test pins that copy to the lib.
