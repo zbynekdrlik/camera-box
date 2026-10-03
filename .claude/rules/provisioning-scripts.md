@@ -5,6 +5,7 @@ paths:
   - "scripts/verify-device.sh"
   - "scripts/build-image.sh"
   - "scripts/lib/grub-fast-boot.sh"
+  - "scripts/lib/ro-root.sh"
   - "tests/setup_device_pure_functions.rs"
   - "tests/verify_device_pure_functions.rs"
 ---
@@ -441,3 +442,18 @@ a script.
   Ubuntu's own `make_timeout` renders. Render a new shape by extracting `make_timeout` from dev1's
   `/etc/grub.d/00_header` and calling it with `verbose=` and `quick_boot=1` set. Never hand-type a
   grub.cfg shape.
+
+## STEP 18's root line and tmpfs lines come from `scripts/lib/ro-root.sh` (issue 808)
+
+The handheld SBC goes read-only the same way as a cambox (`bkshading-provision-sbc.sh --install`),
+so the read-only canon lives ONCE in `scripts/lib/ro-root.sh`. STEP 18 calls `ro_root_root_line`
+and `ro_root_tmpfs_line <path>` per line inside its own heredoc. The EFI line (from `fstab.bak`) and
+the issue-1309 journal-partition line, which sits BETWEEN `/var/log` and `/var/tmp`, stay in STEP 18.
+- **The written cambox fstab must stay byte-identical.** `tests/python/test_ro_root_808.py` lifts the
+  heredoc, runs it with the lib, and compares it with `tests/fixtures/ro_root_fstab_808/`. A change to
+  a tmpfs line goes into the LIB, and it changes both the camboxes and the SBC; regenerate the golden
+  only for an intended change.
+- **The lib must not use grep/awk/sed**: the issue-1311 heredoc test runs STEP 18 with `grep`
+  stubbed out, and its harness sources the lib first.
+- `root_mount_is_readonly` stays defined in `setup-device.sh` (a Rust test pins it there); the lib's
+  `ro_root_mount_mode` is the same first-token reading, parity-tested against it.
