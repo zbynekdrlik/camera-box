@@ -84,7 +84,8 @@ produkcny pocitac vsetko ma bezat vzdy a stale", "na strih nb ma po starte bezat
     restarted while its verdict is still unknown (its probe history is fresh: down needs 2 failed
     probes) must not forget that the server was down, or the outage's recovered refresh is lost.
   - **The state file's `sources` are `Keeper.rows()`**: the last finished pass's rows (its verdicts)
-    with the CURRENT committed memory, plus every restored source no pass listed yet. A pass cut short
+    with the CURRENT committed memory, plus every remembered source no finished pass listed yet (a
+    restored one, or one first committed in a pass that was cut short). A pass cut short
     by a lost connection may already have refreshed a source; with the last finished pass's rows the
     next keeper refreshed it a second time in the same OBS run (review round 6). A keeper restarted
     while OBS is down writes the restored memory back the same way.
@@ -95,8 +96,8 @@ produkcny pocitac vsetko ma bezat vzdy a stale", "na strih nb ma po starte bezat
     `OBS run identified by the obs process start time` or `... by the frame count only (no local obs
     process seen)`; on strih-lx the second one means the /proc read found no OBS of the keeper's uid.
   - Tests: `tests/python/test_strih_browser_keeper_obs_run_1399.py` runs the real loop against the real
-    obs-websocket fake (`strih_keeper_fakes_1399.py`: `restart()` = new process + frames from 0 +
-    dropped socket, `drop()` = socket only), one `k.run` per keeper process over one state file.
+    obs-websocket fake (`strih_keeper_fakes_1399.py`: `restart()` = new process + frames from 0 or a
+    given start count + dropped socket, `drop()` = socket only), one `k.run` per keeper process over one state file.
 - **TCP reachability is not HTTP health.** A page server behind a proxy that listens before its
   backend is ready serves an error page to the connect refresh, and the keeper never reloads it
   (TCP stayed up). The design chose the TCP probe; an HTTP-status probe is the next step if it bites.
