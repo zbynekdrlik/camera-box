@@ -119,6 +119,8 @@ xset s off -dpms s noblank 2>/dev/null || true
 rm -rf "$HOME/.config/obs-studio/.sentinel"/* 2>/dev/null || true
 systemctl --user start strih-obs.service || true
 systemctl --user start strih-bundle-state-server.service || true
+systemctl --user start strih-browser-keeper.service || true
+systemctl --user start bkshading-panel-app.service || true
 /opt/companion-satellite/companion-satellite >/dev/null 2>&1 &
 === openbox-menu ===
 <?xml version="1.0" encoding="UTF-8"?>

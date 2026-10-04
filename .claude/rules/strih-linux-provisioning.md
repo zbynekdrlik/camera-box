@@ -233,8 +233,9 @@ is byte-identical to the provisioned unit for the box's role, no drop-in overrid
 process runs its ExecStart (no readable process = not graded there; items 6/6b grade liveness). A drift
 is caught THERE, never by a blind restart on the next deploy; a kept-running daemon on a matching unit
 passes. The pytest runs the item's real text under `set -euo pipefail` with only its unit path moved.
-verify-strih.sh is at 1002 lines, just over its ~1000-line budget (item 36, issue 1391, is a
-two-line call into its lib), so the next item there needs a split of the file, not only a lib.
+verify-strih.sh reached 1002 lines with item 36 (issue 1391). Issue 1399 split item 28's collection
+reads into `scripts/lib/strih-obs-collection.sh` before adding items 37/38 (the session apps,
+`.claude/rules/strih-session-apps.md`), so it is ~970 lines now; a new item still goes into a lib.
 
 **Before the first strih-lx deploy of this change, read the master's command line** (read-only, on the
 box): `tr '\0' ' ' < /proc/$(systemctl show -p MainPID --value dantesync)/cmdline | sed 's/ *$//'` must
@@ -1090,6 +1091,22 @@ module to `/lib/modules/<kernel>/updates/r8152.ko`, which the next kernel would 
 - **Live apply (supervisor, after merge):** run setup-strih on strih-lx (the plan reads UPGRADE), then
   `verify-strih.sh` (item 36 passes before the reboot: the loaded plain copy is 2.21.4). After the next
   boot, read `/sys/module/r8152/version` + `modinfo -n r8152` (must be under `updates/dkms`).
+
+## A verify item for a supervised service grades the RUNNING process, not only the files (issue 1399)
+
+Files on disk byte-identical to the checkout + `is-active` = active still passes while the OLD process
+runs: the unit was overwritten under a running service, or a deploy changed its program without a
+restart. The issue-1399 review caught exactly that (the hand-made panel stopgap kept running after its
+unit and program were replaced). The pattern, in `scripts/lib/strih-session-apps.sh`:
+- **install writes a file only when its bytes or mode differ** (`strih_session_apps_put`), so its mtime
+  means "the content changed", then `daemon-reload` (when a unit file changed) and `try-restart` of the
+  changed units: a running one moves onto the new files, a stopped one is never started (enable-only);
+- **verify reads the main process**: `systemctl show -p MainPID` -> `/proc/<pid>/cmdline` must run the
+  installed program, and `show -p ExecMainStartTimestamp --value --timestamp=unix` (`@<secs>`) must be at
+  or after the newest mtime of program + unit (`strih_session_app_process_state`). Wrap the /proc read
+  as `{ tr ... < f; } 2>/dev/null`: a bare `< f 2>/dev/null` prints the open error first.
+- Do NOT grade `NeedDaemonReload` (manager-wide, see the dantesync section above).
+Reuse it for the next supervised service an item grades.
 
 ## Follow-ups (not done in the preparation lane)
 

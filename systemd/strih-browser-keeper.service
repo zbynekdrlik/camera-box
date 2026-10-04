@@ -1,0 +1,32 @@
+[Unit]
+# issue 1399 -- strih-lx's browser-source keeper. obs-browser loads a browser source's page ONCE at
+# OBS start and never retries a failed load; this keeper lists every browser_source over the local
+# obs-websocket and presses its `refreshnocache` button once per OBS run (a real OBS restart, never a
+# keeper restart or a WS reconnect) as soon as the page server answers, and again whenever the page
+# server comes back after being unreachable -- never on a working page. scripts/strih_browser_keeper.py;
+# installed by setup-strih.sh step 16d (scripts/lib/strih-session-apps.sh), started at login by the
+# kiosk autostart and after strih-obs by the strih-lx genlock deploy, graded by verify-strih.sh item 37.
+Description=strih-lx browser-source keeper -- reload OBS browser sources when their page server answers (issue 1399)
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=strih-obs.service
+# Never give up: the keeper must run whenever the operator session does (owner 4.10.2026).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# strih-lx's obs-websocket has NO password (setup-strih.sh step 7). %t = the user runtime dir
+# (/run/user/<uid>): the state file verify-strih reads for "last pass recent".
+ExecStart=/usr/bin/python3 /usr/local/bin/strih_browser_keeper.py --state-file %t/strih-browser-keeper.json
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=strih-browser-keeper
+
+[Install]
+# openbox never reaches graphical-session.target: the kiosk openbox autostart STARTS this unit at
+# every login (the strih-obs.service pattern); the WantedBy only makes `enable` meaningful.
+WantedBy=graphical-session.target
