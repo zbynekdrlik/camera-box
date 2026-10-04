@@ -220,10 +220,14 @@ Design comment 5979157737 (Approach 1); finding + live stopgap 5979039607.
   `TimeoutStartSec=20`, pinned by a test.
 - **State file** `%t/strih-satellite-watch.json` (version 1, atomic write): `since` on the boot clock
   (`CLOCK_BOOTTIME`, so no wall-clock step fakes a window), `condition`, `observation`, `restarts`,
-  `unhealed_restarts`, `effective_sustain_s`, `last_restart`. `--check-state` (verify item 40's pass
-  row) needs a pass within 90 s (three timer periods), and names the current condition plus any fault in
-  progress. While the condition is not `ok`, it FAILs when the last restart failed (no user bus) or the
-  watch backed off: a watch that runs but cannot cure the fault is a red, never a quiet OK.
+  `unhealed_restarts`, `effective_sustain_s`, `last_restart`, `last_ok_epoch_s`. `--check-state` (verify
+  item 40's pass row) needs a pass within 90 s (three timer periods), and names the current condition
+  plus any fault in progress with its (backed-off) restart time. While a FAULT holds (`restarted` or
+  `fault:*`), it FAILs when a restart newer than the last healthy pass failed (no user bus), or when the
+  watch backed off: a watch that runs but cannot cure the fault is a red, never a quiet OK. Companion
+  down or a silent REST is not such a fault, and an older failed restart is history (review round 2).
+- **The grader's process facts** are `exe|start|cmdline`: the free-form cmdline LAST, so a `|` inside
+  it never shifts the fixed fields (review round 2).
 - **Logs:** one line when the condition changes (rest-silent / companion-down / fault:<ids> / ok) and
   one per restart. A quiet pass logs nothing. The oneshot service sets `SyslogLevel=notice` +
   `LogLevelMax=notice`: the user manager's every-30-s "Starting"/"Finished" lines are info and are
