@@ -430,7 +430,7 @@ def _installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, p
 def _keeper_state(rundir, age=3.0, connected=True):
     rundir.mkdir(parents=True, exist_ok=True)
     (rundir / "strih-browser-keeper.json").write_text(json.dumps({
-        "version": 1, "updated_epoch_s": time.time() - age, "connected": connected, "connect_epoch": 1,
+        "version": 2, "updated_epoch_s": time.time() - age, "connected": connected, "obs_epoch": 1,
         "refreshes": 4, "sources": [{"name": "Odpocet", "reachable": True}], "last_error": None}))
 
 
@@ -457,7 +457,7 @@ def test_grade_rows_all_ok(tmp_path):
     assert rows[0].startswith("OK|(browser-keeper) strih-browser-keeper.service: unit + ")
     assert "its process started after the files were installed" in rows[0]
     assert rows[1].startswith("OK|(shading-app) bkshading-panel-app.service")
-    assert rows[2].startswith("OK|(browser-keeper-pass) last pass") and "connected (epoch 1)" in rows[2]
+    assert rows[2].startswith("OK|(browser-keeper-pass) last pass") and "connected (OBS run epoch 1)" in rows[2]
     assert rows[3] == 'OK|(shading-app-window) the panel window (%s, "Shading") is open on :0' % CLASS
 
 

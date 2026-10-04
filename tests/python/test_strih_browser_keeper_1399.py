@@ -5,8 +5,8 @@ WHY: obs-browser loads a browser source's page ONCE at OBS start and never retri
 empty until a manual `refreshnocache` (owner: "tie browser sceny maju byt vzdy nacitane").
 
 What this pins (design comment 5977447339, Approach 1):
-  * the pure decision `decide` as a table: (state, probe, connect epoch) -> refresh / none. A source is
-    refreshed once per connect epoch as soon as its page server is first reachable, again on every
+  * the pure decision `decide` as a table: (state, probe, OBS run epoch) -> refresh / none. A source is
+    refreshed once per OBS run as soon as its page server is first reachable, again on every
     unreachable -> reachable transition, never while the server is down, never periodically;
   * the URL -> probe target rule (a scheme-less `fohabl.lan` is http :80), the browser_source settings
     read, the verify-strih state verdict;
@@ -18,12 +18,9 @@ What this pins (design comment 5977447339, Approach 1):
 
 Tier-0: pytest + the websocket-client package (already a python-tests CI dependency). No OBS, no rig.
 """
-import base64
-import hashlib
 import importlib.util
 import json
 import socket
-import struct
 import subprocess
 import sys
 import threading
@@ -45,19 +42,22 @@ def _load():
 
 
 k = _load()
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from strih_keeper_fakes_1399 import FOHABL, INPUTS, PRESENTER, FakeObsWebSocket  # noqa: E402
 S = k.SourceState
 
 
 # --- the pure decision -------------------------------------------------------------------------
 
-# (prev state or None, probe reachable, connect epoch) -> (new state, action)
+# (prev state or None, probe reachable, OBS run epoch) -> (new state, action)
 DECISION_TABLE = [
     # never seen, server down: remember it is down, no refresh
     (None, False, 1, S(None, False), None),
     # never seen, server up: the once-per-connect refresh
-    (None, True, 1, S(1, True), k.ACTION_CONNECT),
+    (None, True, 1, S(1, True), k.ACTION_OBS_RUN),
     # down at connect, now up: still the connect refresh (OBS loaded before the server answered)
-    (S(None, False), True, 1, S(1, True), k.ACTION_CONNECT),
+    (S(None, False), True, 1, S(1, True), k.ACTION_OBS_RUN),
     # refreshed this epoch, still up: a working page is never refreshed again
     (S(1, True), True, 1, S(1, True), None),
     # refreshed this epoch, server went down: no refresh while down
@@ -66,12 +66,12 @@ DECISION_TABLE = [
     (S(1, False), False, 1, S(1, False), None),
     # refreshed this epoch, back up after being down: the recovered refresh
     (S(1, False), True, 1, S(1, True), k.ACTION_RECOVERED),
-    # a new connect epoch (OBS restarted), server up: refresh once more
-    (S(1, True), True, 2, S(2, True), k.ACTION_CONNECT),
-    # a new connect epoch while the server is down: wait for it, no refresh
+    # a new OBS run epoch (OBS restarted), server up: refresh once more
+    (S(1, True), True, 2, S(2, True), k.ACTION_OBS_RUN),
+    # a new OBS run epoch while the server is down: wait for it, no refresh
     (S(1, True), False, 2, S(1, False), None),
     # ... and then it comes up: the connect refresh (not "recovered")
-    (S(1, False), True, 2, S(2, True), k.ACTION_CONNECT),
+    (S(1, False), True, 2, S(2, True), k.ACTION_OBS_RUN),
     # a state never probed (reachable None) but refreshed this epoch: up stays quiet
     (S(1, None), True, 1, S(1, True), None),
     # no verdict yet (no finished probe, or not enough failures): nothing changes, nothing pressed
@@ -113,7 +113,7 @@ def test_decide_never_refreshes_a_steady_working_page_over_many_passes():
     for _ in range(200):
         state, action = k.decide(state, True, 7)
         actions.append(action)
-    assert actions[0] == k.ACTION_CONNECT
+    assert actions[0] == k.ACTION_OBS_RUN
     assert actions[1:] == [None] * 199
 
 
@@ -189,7 +189,7 @@ NOW = 1_790_000_000.0
 
 
 def _state(**kw):
-    base = {"version": 1, "updated_epoch_s": NOW - 4, "connected": True, "connect_epoch": 2,
+    base = {"version": 1, "updated_epoch_s": NOW - 4, "connected": True, "obs_epoch": 2,
             "refreshes": 5, "last_error": None,
             "sources": [{"name": "Odpocet", "reachable": True}, {"name": "Browser Ableset", "reachable": False}]}
     base.update(kw)
@@ -199,7 +199,7 @@ def _state(**kw):
 def test_state_verdict_fresh_and_connected_passes_with_counts():
     ok, text = k.state_verdict(_state(), NOW)
     assert ok
-    assert "last pass 4 s ago" in text and "connected (epoch 2)" in text
+    assert "last pass 4 s ago" in text and "connected (OBS run epoch 2)" in text
     assert "2 browser source(s), 1 with a reachable page server" in text and "5 refresh(es)" in text
 
 
@@ -229,7 +229,7 @@ def test_check_state_cli(tmp_path):
                                    capture_output=True, text=True, timeout=30)
     r = run(good)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "connected (epoch 2)" in r.stdout
+    assert "connected (OBS run epoch 2)" in r.stdout
     r = run(stale)
     assert r.returncode == 1 and "stale" in r.stdout
     r = run(tmp_path / "absent.json")
@@ -325,183 +325,6 @@ def test_tcp_probe_against_a_real_listener():
     assert k.tcp_probe("127.0.0.1", port, 2.0) is False
 
 
-# --- a real obs-websocket 5 server (stdlib RFC 6455) ------------------------------------------------
-
-WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
-
-
-def _recv_exact(conn, n):
-    buf = b""
-    while len(buf) < n:
-        chunk = conn.recv(n - len(buf))
-        if not chunk:
-            raise ConnectionError("peer closed")
-        buf += chunk
-    return buf
-
-
-class FakeObsWebSocket:
-    """obs-websocket 5 over a real localhost socket: Hello -> Identify -> Identified, then op 6
-    requests answered with op 7. Records every Identify and request with its connection number and
-    the number of GetInputList requests answered so far (= the keeper's pass count)."""
-
-    SALT, CHALLENGE = "c2FsdC0xMzk5", "Y2hhbGxlbmdlLTEzOTk="
-
-    def __init__(self, inputs, password=None):
-        self.inputs = inputs
-        self.password = password
-        self.auth_ok = []
-        self.lock = threading.Lock()
-        self.connections = 0
-        self.identifies = []
-        self.requests = []
-        self.list_calls = 0
-        self._conn = None
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.sock.bind(("127.0.0.1", 0))
-        self.sock.listen(8)
-        self.port = self.sock.getsockname()[1]
-        threading.Thread(target=self._accept, daemon=True).start()
-
-    def close(self):
-        self.sock.close()
-        self.drop()
-
-    def drop(self):
-        """Close the current connection, like an OBS restart."""
-        with self.lock:
-            conn, self._conn = self._conn, None
-        if conn is not None:
-            try:
-                conn.shutdown(socket.SHUT_RDWR)
-            except OSError as e:
-                print("fake obs: shutdown of a dead connection: %s" % e)
-            conn.close()
-
-    def presses(self):
-        return [(c, p, d["inputName"], d["propertyName"]) for c, p, t, d in self.requests
-                if t == "PressInputPropertiesButton"]
-
-    def _accept(self):
-        while True:
-            try:
-                conn, _ = self.sock.accept()
-            except OSError:
-                return
-            with self.lock:
-                self.connections += 1
-                n = self.connections
-                self._conn = conn
-            threading.Thread(target=self._serve, args=(conn, n), daemon=True).start()
-
-    def _send(self, conn, obj):
-        data = json.dumps(obj).encode()
-        if len(data) < 126:
-            head = struct.pack("!BB", 0x81, len(data))
-        elif len(data) < 65536:
-            head = struct.pack("!BBH", 0x81, 126, len(data))
-        else:
-            head = struct.pack("!BBQ", 0x81, 127, len(data))
-        conn.sendall(head + data)
-
-    def _recv(self, conn):
-        while True:
-            b1, b2 = _recv_exact(conn, 2)
-            opcode, length = b1 & 0x0F, b2 & 0x7F
-            if length == 126:
-                length = struct.unpack("!H", _recv_exact(conn, 2))[0]
-            elif length == 127:
-                length = struct.unpack("!Q", _recv_exact(conn, 8))[0]
-            mask = _recv_exact(conn, 4) if b2 & 0x80 else b"\0\0\0\0"
-            payload = bytes(c ^ mask[i % 4] for i, c in enumerate(_recv_exact(conn, length)))
-            if opcode == 8:
-                return None
-            if opcode == 9:
-                conn.sendall(struct.pack("!BB", 0x8A, len(payload)) + payload)
-                continue
-            if opcode == 1:
-                return json.loads(payload.decode())
-
-    def _handshake(self, conn):
-        raw = b""
-        while b"\r\n\r\n" not in raw:
-            chunk = conn.recv(4096)
-            if not chunk:
-                raise ConnectionError("closed during handshake")
-            raw += chunk
-        key = ""
-        for line in raw.decode("latin-1").split("\r\n"):
-            if line.lower().startswith("sec-websocket-key:"):
-                key = line.split(":", 1)[1].strip()
-        accept = base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
-        conn.sendall(("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
-                      "Sec-WebSocket-Accept: %s\r\n\r\n" % accept).encode())
-
-    def _handle(self, rtype, data):
-        if rtype == "GetInputList":
-            with self.lock:
-                self.list_calls += 1
-            return True, {"inputs": [{"inputName": i["name"], "inputKind": i["kind"],
-                                      "unversionedInputKind": i["kind"]} for i in self.inputs]}
-        if rtype == "GetInputSettings":
-            for i in self.inputs:
-                if i["name"] == data.get("inputName"):
-                    return True, {"inputSettings": i["settings"], "inputKind": i["kind"]}
-            return False, None
-        if rtype == "PressInputPropertiesButton":
-            return any(i["name"] == data.get("inputName") for i in self.inputs), None
-        return False, None
-
-    def _serve(self, conn, n):
-        try:
-            self._handshake(conn)
-            hello = {"obsWebSocketVersion": "5.6.2", "rpcVersion": 1}
-            if self.password:
-                hello["authentication"] = {"challenge": self.CHALLENGE, "salt": self.SALT}
-            self._send(conn, {"op": 0, "d": hello})
-            ident = self._recv(conn)
-            if ident is None:
-                return
-            with self.lock:
-                self.identifies.append((n, ident))
-            if self.password:
-                b64sha = lambda s: base64.b64encode(hashlib.sha256(s.encode()).digest()).decode()
-                ok = ident["d"].get("authentication") == b64sha(b64sha(self.password + self.SALT) + self.CHALLENGE)
-                self.auth_ok.append(ok)
-                if not ok:
-                    return
-            self._send(conn, {"op": 2, "d": {"negotiatedRpcVersion": 1}})
-            while True:
-                msg = self._recv(conn)
-                if msg is None:
-                    return
-                if msg.get("op") != 6:
-                    continue
-                d = msg["d"]
-                rtype, rdata = d["requestType"], d.get("requestData") or {}
-                with self.lock:
-                    self.requests.append((n, self.list_calls, rtype, rdata))
-                ok, resp = self._handle(rtype, rdata)
-                out = {"requestType": rtype, "requestId": d["requestId"],
-                       "requestStatus": {"result": ok, "code": 100 if ok else 600}}
-                if resp is not None:
-                    out["responseData"] = resp
-                self._send(conn, {"op": 7, "d": out})
-        except (OSError, ConnectionError, ValueError):
-            return
-        finally:
-            conn.close()
-
-
-INPUTS = [
-    {"name": "Browser camera crew", "kind": "browser_source", "settings": {"url": "http://presenter.lan/ui/camera"}},
-    {"name": "Odpocet", "kind": "browser_source", "settings": {"url": "http://presenter.lan/stream/moderator"}},
-    {"name": "Browser Ableset", "kind": "browser_source", "settings": {"url": "fohabl.lan"}},
-    {"name": "Local page", "kind": "browser_source", "settings": {"is_local_file": True, "local_file": "/x.html"}},
-    {"name": "NDI cam1", "kind": "ndi_source", "settings": {"ndi_source_name": "CAM1 (usb)"}},
-]
-PRESENTER, FOHABL = ("presenter.lan", 80), ("fohabl.lan", 80)
 
 
 def test_the_real_keeper_loop_against_a_fake_obs_websocket(tmp_path):
@@ -522,7 +345,7 @@ def test_the_real_keeper_loop_against_a_fake_obs_websocket(tmp_path):
         2: lambda: probes.__setitem__(PRESENTER, True),   # presenter comes up
         4: lambda: probes.__setitem__(FOHABL, False),     # Ableton box goes down mid-day (passes 5+6)
         6: lambda: probes.__setitem__(FOHABL, True),      # ... and back
-        7: server.drop,                                   # OBS restarts
+        7: server.restart,                                # OBS restarts (a new process)
     }
     done, sleeps, seen = 9, {"n": 0}, set()
     first_state = {}
@@ -539,16 +362,16 @@ def test_the_real_keeper_loop_against_a_fake_obs_websocket(tmp_path):
 
     k.run(connect, k.Prober(probe_fn=lambda h, p, t: probes[(h, p)], timeout=2.0), interval=0.0,
           state_file=str(state_file), log=logs.append, sleep=sleep, clock=time.time,
-          should_stop=lambda: server.list_calls >= done, endpoint="test")
+          should_stop=lambda: server.list_calls >= done, endpoint="test", obs_process=server.process_identity)
     server.close()
 
     assert server.presses() == [
-        # connection 1 = connect epoch 1
+        # connection 1 = OBS run epoch 1
         (1, 1, "Browser Ableset", "refreshnocache"),       # first pass: only the reachable server
         (1, 3, "Browser camera crew", "refreshnocache"),   # presenter came up after pass 2
         (1, 3, "Odpocet", "refreshnocache"),
         (1, 7, "Browser Ableset", "refreshnocache"),       # fohabl back after its outage (down 5+6)
-        # connection 2 = connect epoch 2 (OBS restarted): every source once more
+        # connection 2 = OBS run epoch 2 (OBS restarted): every source once more
         (2, 8, "Browser camera crew", "refreshnocache"),
         (2, 8, "Odpocet", "refreshnocache"),
         (2, 8, "Browser Ableset", "refreshnocache"),
@@ -565,7 +388,7 @@ def test_the_real_keeper_loop_against_a_fake_obs_websocket(tmp_path):
     assert first_state["after_refused"]["connected"] is False
     assert "Connection refused" in first_state["after_refused"]["last_error"]
     final = json.loads(state_file.read_text())
-    assert final["connected"] is True and final["connect_epoch"] == 2 and final["refreshes"] == 7
+    assert final["connected"] is True and final["obs_epoch"] == 2 and final["refreshes"] == 7
     assert [(s["name"], s["target"], s["reachable"], s["refreshed_epoch"]) for s in final["sources"]] == [
         ("Browser camera crew", "presenter.lan:80", True, 2),
         ("Odpocet", "presenter.lan:80", True, 2),
@@ -576,15 +399,17 @@ def test_the_real_keeper_loop_against_a_fake_obs_websocket(tmp_path):
 
     text = "\n".join(logs)
     assert text.count("obs-websocket test not reachable") == 1
-    assert "connected to obs-websocket test (connect epoch 1)" in text
-    assert "lost obs-websocket test in connect epoch 1" in text
-    assert "connected to obs-websocket test (connect epoch 2)" in text
+    assert "connected to obs-websocket test: a new OBS run (process boot-1:1000," in text
+    assert "-> OBS run epoch 1," in text
+    assert "lost obs-websocket test in OBS run epoch 1" in text
+    assert "connected to obs-websocket test: a new OBS run (process boot-1:1000+," in text
+    assert "-> OBS run epoch 2," in text
     assert "browser source 'Local page' has no network page server" in text
     assert "browser source 'Odpocet' page server presenter.lan:80 unreachable" in text
     assert "browser source 'Odpocet' page server presenter.lan:80 unreachable -> reachable" in text
     assert "browser source 'Browser Ableset' page server fohabl.lan:80 reachable -> unreachable" in text
     assert ("refreshed browser source 'Browser Ableset' (fohabl.lan): page server back after being "
-            "unreachable, connect epoch 1") in text
+            "unreachable, OBS run epoch 1") in text
     assert text.count("refreshed browser source") == 7
     # no log line per quiet pass: only refreshes, transitions and connection changes
     assert len(logs) <= 25, logs
