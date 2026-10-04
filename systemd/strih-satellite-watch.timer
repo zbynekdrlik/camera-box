@@ -1,0 +1,20 @@
+[Unit]
+# issue 1399 -- runs the Companion Satellite liveness watch (strih-satellite-watch.service) every 30 s.
+# Installed + enabled by setup-strih.sh step 16d (scripts/lib/strih-session-apps.sh), started at login by
+# the kiosk autostart and after strih-obs by the strih-lx genlock deploy, graded by verify-strih.sh item 40.
+Description=strih-lx Companion Satellite liveness watch every 30 s (issue 1399)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+# OnUnitActiveSec alone never fires before the service ran once: OnActiveSec gives the first pass 5 s after
+# the timer starts, then every 30 s after the previous pass.
+OnActiveSec=5s
+OnUnitActiveSec=30s
+# A user timer's default accuracy is 1 min, which would stretch the 30 s period to up to 90 s.
+AccuracySec=1s
+Unit=strih-satellite-watch.service
+
+[Install]
+# openbox never reaches graphical-session.target: the kiosk openbox autostart STARTS this timer at every
+# login (the strih-obs.service pattern); the WantedBy only makes `enable` meaningful.
+WantedBy=graphical-session.target

@@ -1,6 +1,7 @@
 ---
 paths:
   - "systemd/*.service"
+  - "systemd/*.timer"
 ---
 
 # dev1 `--user` systemd units — `PrivateTmp`/`ProtectHome`-class hardening is currently INERT (#1277)
@@ -47,3 +48,18 @@ A new script: `git add` it, then `git update-index --chmod=+x <path>` before com
 `journalctl --user -u <unit>.service --since -10min` must show the script's own `pass end` line and
 `Finished`, never `status=203/EXEC` or `Failed with result`. A quick sweep over every timer's service:
 `journalctl --user -u <svc> --since -3h | grep -c 'Failed with result'`.
+
+## A `--user` timer + oneshot: three systemd 255 facts, each checked on dev1 (issue 1399)
+
+- **Every run of a oneshot logs `Starting ...` + `Finished ...` at info level** from the user manager:
+  a 30 s timer writes ~5800 such lines a day. `LogLevelMax=notice` on the SERVICE drops them (the
+  directive also filters the manager's messages about the unit), and `SyslogLevel=notice` raises the
+  program's own unprefixed stdout/stderr so it stays; a failed run (`Main process exited`, `Failed with
+  result`) is still logged. Checked with `systemd-run --user -p Type=oneshot -p LogLevelMax=notice -p
+  SyslogLevel=notice /bin/echo x`. Worked example: `systemd/strih-satellite-watch.service`.
+- **`OnUnitActiveSec=` alone never fires before the service ran once**; pair it with `OnActiveSec=`. A
+  user timer's default `AccuracySec` is 1 min, so a 30 s period needs `AccuracySec=1s`.
+- **`systemctl show -p LastTriggerUSec --value --timestamp=unix <x>.timer` prints a LOCAL DATE, not
+  `@<secs>`** (the flag formats `*Timestamp` properties, not this one). To grade a timer's last run, read
+  the oneshot service's `ExecMainStartTimestamp` with `--timestamp=unix` instead: it prints `@<secs>`
+  and survives after the run while the timer keeps the service loaded.

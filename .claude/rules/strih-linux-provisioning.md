@@ -42,8 +42,8 @@ covers the provisioning scaffolding built during that preparation.
 > nvidia-primary**, preempt=full, de-jitter + no crash popups, maxperf, the power envelope. So the
 > GNOME **Wayland** session, `WAYLAND_DISPLAY`, the XWayland-PRIME GPU env (`@STRIH_LX_OBS_GPU_ENV@`,
 > removed), the step-15 governor oneshot and the 11c rtprio grant (removed; rtprio stays OFF) are
-> history. strih-obs-start.sh resolves `DISPLAY=:0` only; Companion Satellite starts from the openbox
-> autostart. See `.claude/rules/obs-box-baseline.md` for the conversion runbook.
+> history. strih-obs-start.sh resolves `DISPLAY=:0` only; Companion Satellite runs as the session app
+> `companion-satellite.service` (issue 1399), which the openbox autostart starts. See `.claude/rules/obs-box-baseline.md` for the conversion runbook.
 
 ## Per-box FACT files — one script for every strih box (issue 1361)
 

@@ -170,12 +170,13 @@ strih_lx_remote_setup_notes_cmd() {
 }
 
 # touch the start marker (the read-back only trusts an OBS log written after it), then start OBS,
-# then the issue-1399 session apps (the browser-source keeper + the shading panel window), the same
-# order the kiosk autostart starts them. The command's exit code is OBS's: a session app that does not
-# start is a WARNING here, and verify-strih items 37/38 (the deploy's acceptance step) name it.
+# then the issue-1399 session apps (the browser-source keeper, the shading panel window, Companion
+# Satellite and its watch timer), the same order the kiosk autostart starts them. The command's exit
+# code is OBS's: a session app that does not start is a WARNING here, and verify-strih items 37-40 (the
+# deploy's acceptance step) name it.
 strih_lx_remote_start_cmd() {
   # shellcheck disable=SC2016  # expanded on the box, not here
-  printf 'export XDG_RUNTIME_DIR=/run/user/$(id -u); touch %s; systemctl --user reset-failed strih-obs.service 2>/dev/null; systemctl --user start strih-obs.service; obs_rc=$?; systemctl --user start %s || echo "WARNING: [strih-lx start] the session apps (%s) did not start -- verify-strih items 37/38 name why" >&2; exit "$obs_rc"\n' \
+  printf 'export XDG_RUNTIME_DIR=/run/user/$(id -u); touch %s; systemctl --user reset-failed strih-obs.service 2>/dev/null; systemctl --user start strih-obs.service; obs_rc=$?; systemctl --user start %s || echo "WARNING: [strih-lx start] the session apps (%s) did not start -- verify-strih items 37-40 name why" >&2; exit "$obs_rc"\n' \
     "'$1/obs-start.marker'" "${STRIH_SESSION_APP_UNITS[*]}" "${STRIH_SESSION_APP_UNITS[*]}"
 }
 

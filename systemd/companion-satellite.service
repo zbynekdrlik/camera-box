@@ -1,0 +1,36 @@
+[Unit]
+# issue 1399 -- Bitfocus Companion Satellite, the agent that drives the strih Stream Deck XL for the venue
+# Companion (10.77.9.205:16622), as a supervised session app. It used to be launched by a bare kiosk
+# autostart line with its output discarded: a crash left the deck dead, with no log, until the next
+# login (owner 4.10.2026). The program is the Electron desktop build setup-strih.sh step 16 installs
+# (/opt/companion-satellite/companion-satellite, strih_companion_satellite_bin). Installed by step 16d
+# (scripts/lib/strih-session-apps.sh) under the SAME name the 4.10.2026 hand-made stopgap used, so it
+# replaces that unit; started at login by the kiosk autostart and after strih-obs by the strih-lx genlock
+# deploy; watched by strih-satellite-watch.timer; graded by verify-strih.sh item 39.
+Description=strih-lx Companion Satellite -- the Stream Deck XL agent for the venue Companion (issue 1399)
+Documentation=https://github.com/zbynekdrlik/camera-box
+# Never give up: the deck must work whenever the operator session runs (owner 4.10.2026).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# The kiosk's plain Xorg session (the strih-obs-start.sh display) for its tray + config window; Xlib reads
+# ~/.Xauthority.
+Environment=DISPLAY=:0
+ExecStart=/opt/companion-satellite/companion-satellite
+# always: a crash or an exit comes back after RestartSec (the deck reconnects within seconds).
+Restart=always
+RestartSec=3
+# A hung Electron app that ignores SIGTERM is killed after this, not the default 90 s: the watch restarts
+# a Satellite exactly when it stopped working.
+TimeoutStopSec=10
+
+# Logging: what the bare launch used to discard now lands in the user journal.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=companion-satellite
+
+[Install]
+# openbox never reaches graphical-session.target: the kiosk openbox autostart STARTS this unit at
+# every login (the strih-obs.service pattern); the WantedBy only makes `enable` meaningful.
+WantedBy=graphical-session.target

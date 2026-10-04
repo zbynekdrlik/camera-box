@@ -1124,9 +1124,10 @@ strih_janus_room_jcfg_ok() {
 # verify, run its own `install.sh --system --force` which installs to /opt + the desktop udev rule),
 # seeds the operator's app config.json (electron-store: remoteIp/remotePort), and records the
 # intended controller host in
-# host.conf. It is LAUNCHED by the kiosk openbox autostart (strih_openbox_autostart_text, issue 1357 --
-# openbox does not run XDG ~/.config/autostart), never mid-provision. verify-strih.sh grades it via
-# strih_companion_verdict. The version + tarball + sha256 are
+# host.conf. It RUNS as the supervised session app companion-satellite.service (issue 1399, setup-strih
+# step 16d: Restart=always + journal output), which the kiosk openbox autostart starts
+# (strih_openbox_autostart_text -- openbox does not run XDG ~/.config/autostart), never mid-provision.
+# verify-strih.sh grades it via strih_companion_verdict + its session-app rows. The version + tarball + sha256 are
 # REPRODUCIBLE pins (like the dantesync/NDI pins), never "latest"; COMPANION_SATELLITE_VERSION /
 # COMPANION_SATELLITE_TARBALL_URL / COMPANION_SATELLITE_SHA256 / COMPANION_SATELLITE_HOST /
 # COMPANION_SATELLITE_PORT override them so the supervisor can confirm/repin against the live box.
@@ -1151,8 +1152,9 @@ strih_companion_satellite_sha256() {
   printf '%s' "${COMPANION_SATELLITE_SHA256:-32b8b443d1c595e91ee733b929e20cb8abb8c6119975ba7bb98730c925a2a953}"
 }
 
-# strih_companion_satellite_bin -> the launch path install.sh --system installs to (single source).
-strih_companion_satellite_bin() { printf '/opt/companion-satellite/companion-satellite'; }
+# strih_companion_satellite_bin -> the path install.sh --system installs to and companion-satellite.service
+# runs (single source: STRIH_COMPANION_SATELLITE_BIN in scripts/lib/strih-session-apps.sh).
+strih_companion_satellite_bin() { printf '%s' "$STRIH_COMPANION_SATELLITE_BIN"; }
 
 # strih_companion_satellite_udev_rule -> the desktop (uaccess) udev rule install.sh --system drops in.
 strih_companion_satellite_udev_rule() { printf '/etc/udev/rules.d/50-satellite-desktop.rules'; }
@@ -1206,8 +1208,9 @@ EOF
 # VERIFY its sha256 (fail-loud on mismatch), extract, and run the tarball's OWN `install.sh --system
 # --force` (idempotent; installs to /opt + the desktop udev rule + the app-menu entry). A re-run with
 # the binary already present is a pure no-op (deps + download + install.sh all inside the absence
-# guard). NEVER a .deb, NEVER `systemctl start`/`enable` -- the desktop build has no system unit; the
-# kiosk openbox autostart (strih_openbox_autostart_text, issue 1357) launches it. Each statement is
+# guard). NEVER a .deb, NEVER `systemctl start`/`enable` -- the desktop build has no system unit; it runs
+# as the --user unit companion-satellite.service (issue 1399, step 16d), which the kiosk openbox autostart
+# (strih_openbox_autostart_text) starts. Each statement is
 # `;`-terminated (the _cmd-embedding trailing-newline-strip gotcha).
 strih_companion_satellite_install() {
   local url sha bin deps
@@ -1804,13 +1807,6 @@ strih_lx_reboot_pending() {
   return 0
 }
 
-# strih_companion_satellite_openbox_line -> the kiosk openbox autostart line that launches Companion
-# Satellite in the operator session (backgrounded; the Electron app keeps running). The ONE string both
-# strih_openbox_autostart_text writes and verify-strih's (companion) item greps for.
-strih_companion_satellite_openbox_line() {
-  printf '%s >/dev/null 2>&1 &' "$(strih_companion_satellite_bin)"
-}
-
 # strih_openbox_autostart_text -> the strih-lx kiosk ~/.config/openbox/autostart (lightdm autologin ->
 # openbox on plain Xorg, the imag appliance). The notebook panel is the ONLY desktop screen (1920x1080@60,
 # the operator's OBS UI + Multiview projector); every HDMI output stays OFF in X, because the HDMI output
@@ -1818,8 +1814,9 @@ strih_companion_satellite_openbox_line() {
 # It carries the shared kiosk preamble (never-blank
 # + OBS crash-sentinel clear, obs_box_openbox_autostart_preamble -- graded by the baseline verify), then
 # STARTS the supervised --user units (openbox never reaches graphical-session.target, so their WantedBy
-# alone would never fire -- imag's step-16 pattern) + the issue-1399 session apps, and launches Companion
-# Satellite. RustDesk needs no line: its system rustdesk.service serves the Xorg session itself. Needs obs-box-baseline.sh sourced.
+# alone would never fire -- imag's step-16 pattern) + the issue-1399 session apps, Companion Satellite
+# (companion-satellite.service) and its watch among them. RustDesk needs no line: its system
+# rustdesk.service serves the Xorg session itself. Needs obs-box-baseline.sh sourced.
 strih_openbox_autostart_text() {
   local box
   box="$(strih_lx_hostname)" || return 1
@@ -1844,5 +1841,4 @@ AUTOSTART_EOF
   printf '%s\n' 'systemctl --user start strih-obs.service || true' \
     'systemctl --user start strih-bundle-state-server.service || true'
   strih_session_apps_autostart_lines
-  printf '%s\n' "$(strih_companion_satellite_openbox_line)"
 }

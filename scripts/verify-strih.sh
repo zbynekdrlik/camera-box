@@ -535,16 +535,16 @@ else
   note "janus audiobridge jcfg absent (${JANUS_AB}) -- run setup-strih.sh step 14; report-only"
 fi
 
-# 19) Bitfocus Companion Satellite installed + desktop udev rule + kiosk launch + controller
+# 19) Bitfocus Companion Satellite installed + desktop udev rule + kiosk start + controller
 #     host seeded (issue 1317 rework -- the (companion) item, DESKTOP tarball model). /opt binary +
-#     /etc/udev/rules.d/50-satellite-desktop.rules + the openbox autostart launch line (issue 1357:
-#     the kiosk launches it; openbox runs no XDG ~/.config/autostart) + the seeded app
+#     /etc/udev/rules.d/50-satellite-desktop.rules + the openbox autostart line that starts
+#     companion-satellite.service (issue 1399; the unit itself is graded by item 39) + the seeded app
 #     config.json's remoteIp == the controller (strih_companion_verdict, fail-closed). FAIL loud on
 #     any missing part.
 CS_INSTALLED=0; [ -x "$(strih_companion_satellite_bin)" ] && CS_INSTALLED=1
 CS_UDEV_OK=0; [ -f "$(strih_companion_satellite_udev_rule)" ] && CS_UDEV_OK=1
 CS_AUTOSTART="${USER_HOME}/.config/openbox/autostart"
-CS_AUTOSTART_OK=0; grep -qxF "$(strih_companion_satellite_openbox_line)" "$CS_AUTOSTART" 2>/dev/null && CS_AUTOSTART_OK=1
+CS_AUTOSTART_OK=0; grep -qxF "$(strih_session_app_autostart_line "$STRIH_COMPANION_SATELLITE_UNIT")" "$CS_AUTOSTART" 2>/dev/null && CS_AUTOSTART_OK=1
 CS_HOST_OK=0
 CS_APPCFG="${COMPANION_SATELLITE_CONF:-${USER_HOME}/.config/Companion Satellite/config.json}"
 # Exact JSON read-back (never a regex whose dots would wildcard the IP); fail-closed on unreadable.
@@ -572,7 +572,7 @@ except Exception:
 fi
 CS_VERDICT="$(strih_companion_status_verdict "$CS_FILE_VERDICT" "$CS_RUNNING" "$CS_CONNECTED" || true)"
 if strih_companion_status_verdict "$CS_FILE_VERDICT" "$CS_RUNNING" "$CS_CONNECTED" >/dev/null 2>&1; then
-  ok "(companion) Companion Satellite ${CS_VERDICT} -- /opt + desktop udev rule + openbox autostart launch + controller $(strih_companion_satellite_host) (REST running=${CS_RUNNING} connected=${CS_CONNECTED})"
+  ok "(companion) Companion Satellite ${CS_VERDICT} -- /opt + desktop udev rule + openbox autostart start + controller $(strih_companion_satellite_host) (REST running=${CS_RUNNING} connected=${CS_CONNECTED})"
 else
   bad "(companion) Companion Satellite gate: ${CS_VERDICT} (bin=${CS_INSTALLED} udev=${CS_UDEV_OK} autostart=${CS_AUTOSTART_OK} host=${CS_HOST_OK} running=${CS_RUNNING} connected=${CS_CONNECTED}) -- re-run setup-strih.sh step 16"
 fi
@@ -825,8 +825,9 @@ else
   bad "(bkshading-service) unit /etc/systemd/system/bkshading-service.service not installed -- re-run setup-strih.sh step 16c (issue 1353)"
 fi
 
-# 37) + 38) issue 1399 session apps (scripts/lib/strih-session-apps.sh, sourced by strih-provision.sh): the
-#     browser-source keeper (unit + its last pass) and the shading panel window (unit + "Shading" on :0).
+# 37)-40) issue 1399 session apps (scripts/lib/strih-session-apps.sh, sourced by strih-provision.sh): the
+#     browser-source keeper (unit + its last pass), the shading panel window (unit + "Shading" on :0),
+#     Companion Satellite (unit + the /opt binary as its main process) and its watch (timer + last pass).
 strih_session_apps_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(session-apps) the grader did not print all of its rows"
 
 # 16) NIC xhci IRQ affinity (issue 1317 item H): the USB-NIC's xhci interrupt must be pinned to a
