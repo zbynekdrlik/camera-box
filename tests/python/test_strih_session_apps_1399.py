@@ -470,6 +470,10 @@ class _Err:
         return domain == 331 and code == self.code
 
 
+class _LoadEvent:
+    STARTED, REDIRECTED, COMMITTED, FINISHED = 0, 1, 2, 3
+
+
 class _Toolkit:
     def __init__(self):
         self.windows, self.views, self.timeouts, self.quit = [], [], [], 0
@@ -489,6 +493,7 @@ class _Toolkit:
 
         class WebKit2:
             NetworkError = _NetErr
+            LoadEvent = _LoadEvent
 
             @staticmethod
             def WebView():
@@ -554,9 +559,36 @@ def test_panel_failed_load_retries_after_3s_without_an_error_page():
     assert retry() is False  # a one-shot GLib timeout
     assert view.calls[-1] == ("load_uri", ("http://127.0.0.1:8770/",))
     assert app.retry_pending is False
-    assert any("reloading http://127.0.0.1:8770/ in 3 s" in line for line in logs)
+    assert any("reloading http://127.0.0.1:8770/ every 3 s until it loads" in line for line in logs)
     view.handlers["load-failed"](view, 1, "http://127.0.0.1:8770/", _Err(1))
     assert len(tk.timeouts) == 2, "a later failure schedules a new retry"
+
+
+def test_panel_logs_an_outage_once_and_its_end():
+    """A service down all day must not write a journal line every 3 s: one line when a failure starts
+    (or its reason changes), one when the panel loads again."""
+    _mod, tk, app, logs = _panel()
+    view = tk.views[0]
+    fail = lambda msg: (view.handlers["load-changed"](view, _LoadEvent.STARTED),
+                        view.handlers["load-failed"](view, 1, "http://127.0.0.1:8770/", _Err(1, msg)),
+                        view.handlers["load-changed"](view, _LoadEvent.FINISHED),
+                        tk.timeouts[-1][1]())
+    for _ in range(50):
+        fail("Connection refused")
+    assert len(tk.timeouts) == 50, "every failure still reloads"
+    assert sum("Connection refused" in line for line in logs) == 1
+    fail("Could not resolve host")
+    assert sum("Could not resolve host" in line for line in logs) == 1
+    assert not any("loaded" in line for line in logs), "a FINISHED after a failed load is not a load"
+    view.handlers["load-changed"](view, _LoadEvent.STARTED)
+    view.handlers["load-changed"](view, _LoadEvent.FINISHED)
+    assert logs[-1] == "bkshading-panel-app: loaded http://127.0.0.1:8770/ after 51 failed attempt(s)"
+    n = len(logs)
+    view.handlers["load-changed"](view, _LoadEvent.STARTED)
+    view.handlers["load-changed"](view, _LoadEvent.FINISHED)
+    assert len(logs) == n, "a normal reload logs nothing"
+    fail("Connection refused")
+    assert sum("Connection refused" in line for line in logs) == 2, "a new outage is logged again"
 
 
 def test_panel_cancelled_load_is_not_retried():
