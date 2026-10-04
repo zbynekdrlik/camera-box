@@ -129,7 +129,9 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
    in setup-strih.sh), never on "next boot", which the baseline prints on routine lines every run. A
    settle time the observable read-back window `(polls - 1) x secs` cannot outlast is refused in
    prepare (exit 3).
-7. **start + verify** — touch `<stage>/obs-start.marker`, start the unit, then poll (default 24 x 10 s)
+7. **start + verify** — touch `<stage>/obs-start.marker`, start the unit, then the issue-1399 session apps
+   (`STRIH_SESSION_APP_UNITS`, setup-strih installs them enable-only; the remote rc stays OBS's, an app
+   that does not start is a WARNING, `.claude/rules/strih-session-apps.md`), then poll (default 24 x 10 s)
    and REFUSE unless the polls pass `strih_lx_deploy_verdict` (marker == canonical,
    installed `libobs.so.30` sha256 == the manifest's — the BYTES, not only the marker, since `:8899`
    serves the same marker file — unit `active`, `render tick ENABLED` in an OBS log newer than the

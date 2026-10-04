@@ -7,7 +7,10 @@ paths:
   - "systemd/strih-browser-keeper.service"
   - "systemd/bkshading-panel-app.service"
   - "tests/python/test_strih_browser_keeper_1399.py"
+  - "tests/python/test_strih_browser_keeper_obs_run_1399.py"
+  - "tests/python/strih_keeper_fakes_1399.py"
   - "tests/python/test_strih_session_apps_1399.py"
+  - "tests/python/test_strih_lx_deploy_session_apps_1399.py"
 ---
 
 # strih-lx session apps: the browser-source keeper + the shading panel window (issue 1399)
@@ -50,22 +53,38 @@ produkcny pocitac vsetko ma bezat vzdy a stale", "na strih nb ma po starte bezat
 - **The decision is the pure `decide(state, verdict, epoch)`:**
   - no verdict yet -> nothing;
   - down -> no refresh, remember it is down;
-  - up and not yet refreshed in THIS connect epoch -> refresh (`connect`);
+  - up and not yet refreshed in THIS OBS run -> refresh (`obs-run`);
   - up, refreshed this epoch, and down before -> refresh (`recovered`);
   - otherwise nothing. A working page is never refreshed periodically (a refresh blanks the source
     for a moment).
 - **A refresh OBS refuses is pressed again.** The source's state is committed only after
   `PressInputPropertiesButton` succeeded; on a refusal the previous state stays, so the next pass decides
-  the same refresh (connect OR recovered). The first draft committed "up" on a failed recovered press
+  the same refresh (obs-run OR recovered). The first draft committed "up" on a failed recovered press
   and so forgot it. The reachability log keeps its own memory (`_logged`), so a retry never repeats a
   transition line; the refusal is logged once per distinct error.
-- **The connect epoch** goes up on every obs-websocket (re)connect. An OBS restart closes the
-  connection, so every source is refreshed once more as soon as its server answers. A keeper restart
-  (a crash, or setup-strih's try-restart after the keeper's own code changed) or a WS reconnect after a
-  10 s request timeout is a new connection too and refreshes each source once: the design's "once per
-  connect" cannot tell it from an OBS restart. Expect one short blank per source then. Telling them
-  apart (e.g. `GetStats.renderTotalFrames` going backwards, persisted in the state file) changes the
-  main's decided rule, so it was raised to the main, not done in the lane.
+- **The OBS run epoch** (main ROZHODNUTE 5978724027) goes up ONLY when OBS itself (re)started. A
+  keeper restart (a crash, setup-strih's try-restart after a code change) or a WS reconnect (a 10 s
+  request timeout, a dropped socket) under the same OBS refreshes NOTHING: a refresh blanks a graphic
+  on air. The first cut bumped on every (re)connect and could not tell these apart.
+  - **The identity**, read on every connect: `process` = `<boot id>:<start ticks>` of the newest local
+    process with comm `obs` owned by the keeper's uid (`/proc/<pid>/stat` field 22, split after the
+    LAST `)`; `local_obs_process_identity`), and `frames` = GetStats `renderTotalFrames` (also updated
+    every pass). `obs_restarted(stored, current)`: both process ids known -> new run iff they differ
+    (exact); else both frame counts known -> new run iff the count went backwards; nothing stored or
+    nothing comparable -> new run.
+  - **Persisted in the /run state file** with `obs_epoch` and per source the memory `decide` needs:
+    `refreshed_epoch` + `remembered_reachable`, kept apart from the pass's verdict `reachable`. A keeper
+    restarted while its verdict is still unknown (its probe history is fresh: down needs 2 failed
+    probes) must not forget that the server was down, or the outage's recovered refresh is lost. A
+    restored keeper writes that memory back even before its first pass (`Keeper.restore` sets
+    `last_sources`), so a restart while OBS is down keeps it too.
+  - `/run/user/<uid>` is tmpfs: after a boot nothing is stored, so OBS just started = a new run. A new
+    epoch is set past every restored `refreshed_epoch`, so each source is refreshed exactly once.
+  - A remote OBS (`--host` not loopback) has no process identity; the frame count decides.
+    `--obs-process-name` (default `obs`) names the process.
+  - Tests: `tests/python/test_strih_browser_keeper_obs_run_1399.py` runs the real loop against the real
+    obs-websocket fake (`strih_keeper_fakes_1399.py`: `restart()` = new process + frames from 0 +
+    dropped socket, `drop()` = socket only), one `k.run` per keeper process over one state file.
 - **TCP reachability is not HTTP health.** A page server behind a proxy that listens before its
   backend is ready serves an error page to the connect refresh, and the keeper never reloads it
   (TCP stayed up). The design chose the TCP probe; an HTTP-status probe is the next step if it bites.
@@ -76,9 +95,10 @@ produkcny pocitac vsetko ma bezat vzdy a stale", "na strih nb ma po starte bezat
   a WS password can reuse it.
 - **Logs:** one line per refresh, per reachability transition, and per connection change. A quiet
   pass logs nothing. "not reachable" is logged once per outage, not every 5 s.
-- **State file** `%t/strih-browser-keeper.json` (`/run/user/<uid>/`), written atomically every pass,
-  also while OBS is down (`connected: false`). `--check-state FILE` grades it for verify-strih:
-  last pass within 60 s AND connected.
+- **State file** `%t/strih-browser-keeper.json` (`/run/user/<uid>/`, version 2), written atomically
+  every pass, also while OBS is down (`connected: false`): `obs_epoch`, `obs_identity`, `refreshes`,
+  `sources[]`, `last_error`. `--check-state FILE` grades it for verify-strih: last pass within 60 s AND
+  connected. An unreadable file is logged and treated as after a boot.
 
 ## The panel app (`scripts/bkshading_panel_app.py`, `bkshading-panel-app.service`)
 
@@ -169,27 +189,39 @@ reads (find the active collection JSON, count `shader_filter` + `scripts-tool`) 
 Item 28's verdict and NOTE lines stay in verify-strih (the Rust anchor pins them). verify-strih is now
 ~970 lines; the next item there again needs a lib.
 
-## Enable-only means a box that never started them FAILs 37/38
+## The genlock deploy starts them; setup-strih stays enable-only
 
-setup-strih never starts a stopped unit. Items 37/38 grade them ACTIVE, so a box where they were never
-started FAILs those items: setup-strih's own step-17 gate, and the strih-lx genlock deploy's acceptance
-step (exit 5, "installed + running, the whole-box gate not clear"). On strih-lx today the stopgap panel
-runs (try-restart moves it onto the new unit) but the keeper never ran, so the FIRST deploy after this
-needs the keeper started once (live step 2) or a reboot; later deploys pass (a running keeper
-reconnects on its own and try-restart moves it onto changed code). Starting both in the deploy's own
-start step (after strih-obs) would remove that one manual step; raised to the main, not done here
-(the lane's instruction was enable-only).
+setup-strih never starts a stopped unit, and items 37/38 grade them ACTIVE. So the strih-lx genlock
+deploy's start step (`strih_lx_remote_start_cmd`, `scripts/lib/strih-lx-deploy.sh`) starts
+`STRIH_SESSION_APP_UNITS` right after strih-obs.service, the kiosk autostart's order (main ROZHODNUTE
+5978724027). The first deploy that installs them therefore needs no manual start, and its acceptance
+step (verify-strih) sees them active.
+- The remote command's rc stays OBS's (the deploy exits 4 on it). An app that does not start is a
+  named `WARNING: [strih-lx start] the session apps (...) did not start` on stderr; items 37/38 in the
+  acceptance step then name why. An OBS start failure still tries the apps.
+- `start` is a no-op on a running unit. A keeper that ran through the deploy reconnects to the new OBS
+  by itself: a new OBS process, so one refresh round, which is the point.
+- The same command is the failure path's best-effort start and the `--plan` STEP 7 line.
+- It must stay ONE line and carry none of the other steps' texts: the Rust exec test's ssh stub
+  dispatches on them, first match wins. `tests/python/test_strih_lx_deploy_session_apps_1399.py` runs
+  the command under bash with stub `systemctl`/`id`.
+- Outside a deploy (setup-strih run by hand, a fresh box), a stopped unit stays stopped until the next
+  kiosk login or a `systemctl --user start`.
 
 ## Live steps (supervisor, after integration)
 
-1. Re-run `setup-strih.sh --box strih-lx` (the next genlock deploy does): step 16d logs the stopgap
-   link + copy removed, both units enabled, and `try-restart ... bkshading-panel-app.service`.
-2. As the operator, start both if inactive (start is a no-op on a running unit):
-   `systemctl --user start strih-browser-keeper.service bkshading-panel-app.service` (or reboot the box).
-   try-restart only moved a RUNNING stopgap panel onto the new unit; a stopped one stays stopped.
-3. `journalctl --user -u strih-browser-keeper -n 30`: `connected to obs-websocket 127.0.0.1:4455
-   (connect epoch 1)`, one `refreshed browser source ...` line per browser source.
-4. `verify-strih.sh --box strih-lx`: items 37 + 38 PASS; the window row names the WM_CLASS.
-5. Acceptance: restart strih OBS while presenter.lan is up -> every browser scene renders again
-   without a hand refresh; stop the presenter page server for > 10 s, start it again -> its sources
-   refresh once; Alt+Tab reaches the "Shading" window.
+1. The next strih-lx genlock deploy (`deploy-genlock-fleet.sh --run-id <id> --boxes strih-lx`) runs
+   setup-strih: step 16d logs the stopgap link + copy removed, both units enabled, and `try-restart
+   ... bkshading-panel-app.service`. Its start step then starts strih-obs and both apps; no WARNING
+   line from `[strih-lx start]`. No manual start.
+2. `journalctl --user -u strih-browser-keeper -n 30`: `connected to obs-websocket 127.0.0.1:4455: a new
+   OBS run (process <boot>:<ticks>, N frames) -> OBS run epoch 1`, then one `refreshed browser source
+   ...` line per browser source.
+3. The deploy's acceptance step (verify-strih) PASSes items 37 + 38; the window row names the WM_CLASS.
+   Read the first live `wmctrl -lx` line once.
+4. Keeper restart, same OBS: `systemctl --user restart strih-browser-keeper` -> `resumed from ...` and
+   `the same OBS run as before (OBS run epoch 1) -- no refresh round`, and no `refreshed` line (no
+   blink on air).
+5. Acceptance: restart strih OBS while presenter.lan is up -> `a new OBS run ... -> OBS run epoch 2`
+   and every browser scene renders again without a hand refresh; stop the presenter page server for
+   > 10 s, start it again -> its sources refresh once; Alt+Tab reaches the "Shading" window.
