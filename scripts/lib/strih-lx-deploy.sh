@@ -53,7 +53,8 @@
 #     setup     -- setup-strih.sh as root, DETACHED on the box (an ssh drop cannot kill it mid-apt),
 #                  the GH token on the launch's STDIN only (never an argv, never a file), rc polled;
 #                  OBS is never started over an installer that is still running;
-#     start     -- systemctl --user start strih-obs.service (after touching a start marker);
+#     start     -- systemctl --user start strih-obs.service (after touching a start marker), then the
+#                  issue-1399 session apps (strih-browser-keeper + bkshading-panel-app; the rc is OBS's);
 #     verify    -- REFUSE unless /opt/obs-genlock/GENLOCK_BUILD_SHA.txt == the canonical SHA, the
 #                  installed /usr/lib/x86_64-linux-gnu/libobs.so.30 bytes match the bundle manifest,
 #                  strih-obs.service is active with the SAME MainPID and NRestarts for a settle time
@@ -73,6 +74,13 @@
 # Transport env: STRIH_LX_IP (dial override only, via fleet_box_ip -- must be an IPv4), STRIH_LX_USER
 # / STRIH_LX_PW (default newlevel / newlevel -- the rig's shared Linux-box creds, targets.md; sshpass
 # -p is the repo-wide convention), STRIH_LX_GH_TOKEN (a read-only token instead of the operator's).
+
+# issue 1399: the strih session apps' unit names (STRIH_SESSION_APP_UNITS), which the start step
+# starts after OBS -- the ONE list setup-strih installs and verify-strih grades.
+if ! declare -F strih_session_apps_autostart_lines >/dev/null; then
+  # shellcheck source=scripts/lib/strih-session-apps.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-session-apps.sh"
+fi
 
 STRIH_LX_STAGE_PARENT="/tmp"
 STRIH_LX_SSH_OPTS="-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=12 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
@@ -161,10 +169,14 @@ strih_lx_remote_setup_notes_cmd() {
   printf "grep -F -e ', then run verify-strih' '%s/setup-strih.log' 2>/dev/null || true\n" "$1"
 }
 
-# touch the start marker (the read-back only trusts an OBS log written after it), then start.
+# touch the start marker (the read-back only trusts an OBS log written after it), then start OBS,
+# then the issue-1399 session apps (the browser-source keeper + the shading panel window), the same
+# order the kiosk autostart starts them. The command's exit code is OBS's: a session app that does not
+# start is a WARNING here, and verify-strih items 37/38 (the deploy's acceptance step) name it.
 strih_lx_remote_start_cmd() {
   # shellcheck disable=SC2016  # expanded on the box, not here
-  printf 'export XDG_RUNTIME_DIR=/run/user/$(id -u); touch %s; systemctl --user reset-failed strih-obs.service 2>/dev/null; systemctl --user start strih-obs.service\n' "'$1/obs-start.marker'"
+  printf 'export XDG_RUNTIME_DIR=/run/user/$(id -u); touch %s; systemctl --user reset-failed strih-obs.service 2>/dev/null; systemctl --user start strih-obs.service; obs_rc=$?; systemctl --user start %s || echo "WARNING: [strih-lx start] the session apps (%s) did not start -- verify-strih items 37/38 name why" >&2; exit "$obs_rc"\n' \
+    "'$1/obs-start.marker'" "${STRIH_SESSION_APP_UNITS[*]}" "${STRIH_SESSION_APP_UNITS[*]}"
 }
 
 # one line `installed=<marker sha> active=<unit state> pid=<MainPID> restarts=<NRestarts>
