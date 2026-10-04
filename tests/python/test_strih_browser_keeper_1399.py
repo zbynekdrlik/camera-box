@@ -74,7 +74,33 @@ DECISION_TABLE = [
     (S(1, False), True, 2, S(2, True), k.ACTION_CONNECT),
     # a state never probed (reachable None) but refreshed this epoch: up stays quiet
     (S(1, None), True, 1, S(1, True), None),
+    # no verdict yet (no finished probe, or not enough failures): nothing changes, nothing pressed
+    (None, None, 1, S(None, None), None),
+    (S(1, True), None, 1, S(1, True), None),
+    (S(1, False), None, 2, S(1, False), None),
 ]
+
+
+# (failed probes in a row, last verdict, this probe) -> (failed probes in a row, verdict), DOWN_AFTER = 2
+DEBOUNCE_TABLE = [
+    (0, None, True, 0, True),       # a good probe is up at once
+    (0, None, False, 1, None),      # one failed first probe: no verdict yet
+    (1, None, False, 2, False),     # the second in a row: down
+    (0, True, False, 1, True),      # one lost connect on a working server: still up
+    (1, True, False, 2, False),     # the second in a row: down
+    (1, True, True, 0, True),       # a good probe resets the count
+    (2, False, True, 0, True),      # coming back is immediate
+    (2, False, False, 3, False),
+    (1, True, None, 1, True),       # an unfinished probe changes nothing
+    (0, None, None, 0, None),
+    (2, False, None, 2, False),
+]
+
+
+@pytest.mark.parametrize("fails,up,result,want_fails,want_up", DEBOUNCE_TABLE)
+def test_debounce_table(fails, up, result, want_fails, want_up):
+    assert k.debounce(fails, up, result) == (want_fails, want_up)
+    assert k.DOWN_AFTER == 2
 
 
 @pytest.mark.parametrize("prev,reachable,epoch,want_state,want_action", DECISION_TABLE)
@@ -115,6 +141,8 @@ def test_transition_words(prev, now, want):
     ("http://presenter.lan/stream/moderator", ("presenter.lan", 80)),
     ("fohabl.lan", ("fohabl.lan", 80)),
     ("fohabl.lan/set?x=1", ("fohabl.lan", 80)),
+    ("fohabl.lan/?next=http://x", ("fohabl.lan", 80)),  # a scheme only counts at the start
+    ("ftp://files.lan/x", None),
     ("  fohabl.lan  ", ("fohabl.lan", 80)),
     ("https://obsproject.com/browser-source", ("obsproject.com", 443)),
     ("HTTP://Presenter.lan:8080/x", ("presenter.lan", 8080)),
@@ -225,10 +253,11 @@ def test_prober_bounds_a_hung_probe_and_never_stacks_threads():
     t0 = time.monotonic()
     r = p.probe_all([("hung.lan", 80), ("up.lan", 80), ("down.lan", 80), ("up.lan", 80)])
     assert time.monotonic() - t0 < 3.0
-    assert r == {("hung.lan", 80): False, ("up.lan", 80): True, ("down.lan", 80): False}
+    # an unfinished probe is NO information (None), never "down"
+    assert r == {("hung.lan", 80): None, ("up.lan", 80): True, ("down.lan", 80): False}
     # the hung probe is still running: the next pass does not start a second thread for it
     r2 = p.probe_all([("hung.lan", 80), ("up.lan", 80)])
-    assert r2[("hung.lan", 80)] is False and r2[("up.lan", 80)] is True
+    assert r2[("hung.lan", 80)] is None and r2[("up.lan", 80)] is True
     assert calls.count(("hung.lan", 80)) == 1
     assert calls.count(("up.lan", 80)) == 2  # deduplicated within a pass
     release.set()
@@ -273,8 +302,12 @@ class FakeObsWebSocket:
     requests answered with op 7. Records every Identify and request with its connection number and
     the number of GetInputList requests answered so far (= the keeper's pass count)."""
 
-    def __init__(self, inputs):
+    SALT, CHALLENGE = "c2FsdC0xMzk5", "Y2hhbGxlbmdlLTEzOTk="
+
+    def __init__(self, inputs, password=None):
         self.inputs = inputs
+        self.password = password
+        self.auth_ok = []
         self.lock = threading.Lock()
         self.connections = 0
         self.identifies = []
@@ -380,10 +413,21 @@ class FakeObsWebSocket:
     def _serve(self, conn, n):
         try:
             self._handshake(conn)
-            self._send(conn, {"op": 0, "d": {"obsWebSocketVersion": "5.6.2", "rpcVersion": 1}})
+            hello = {"obsWebSocketVersion": "5.6.2", "rpcVersion": 1}
+            if self.password:
+                hello["authentication"] = {"challenge": self.CHALLENGE, "salt": self.SALT}
+            self._send(conn, {"op": 0, "d": hello})
             ident = self._recv(conn)
+            if ident is None:
+                return
             with self.lock:
                 self.identifies.append((n, ident))
+            if self.password:
+                b64sha = lambda s: base64.b64encode(hashlib.sha256(s.encode()).digest()).decode()
+                ok = ident["d"].get("authentication") == b64sha(b64sha(self.password + self.SALT) + self.CHALLENGE)
+                self.auth_ok.append(ok)
+                if not ok:
+                    return
             self._send(conn, {"op": 2, "d": {"negotiatedRpcVersion": 1}})
             while True:
                 msg = self._recv(conn)
@@ -433,11 +477,11 @@ def test_the_real_keeper_loop_against_a_fake_obs_websocket(tmp_path):
     # what happens after the keeper finished pass N (N = GetInputList requests answered so far)
     script = {
         2: lambda: probes.__setitem__(PRESENTER, True),   # presenter comes up
-        4: lambda: probes.__setitem__(FOHABL, False),     # Ableton box goes down mid-day
-        5: lambda: probes.__setitem__(FOHABL, True),      # ... and back
-        6: server.drop,                                   # OBS restarts
+        4: lambda: probes.__setitem__(FOHABL, False),     # Ableton box goes down mid-day (passes 5+6)
+        6: lambda: probes.__setitem__(FOHABL, True),      # ... and back
+        7: server.drop,                                   # OBS restarts
     }
-    done, sleeps, seen = 8, {"n": 0}, set()
+    done, sleeps, seen = 9, {"n": 0}, set()
     first_state = {}
 
     def sleep(_interval):
@@ -460,11 +504,11 @@ def test_the_real_keeper_loop_against_a_fake_obs_websocket(tmp_path):
         (1, 1, "Browser Ableset", "refreshnocache"),       # first pass: only the reachable server
         (1, 3, "Browser camera crew", "refreshnocache"),   # presenter came up after pass 2
         (1, 3, "Odpocet", "refreshnocache"),
-        (1, 6, "Browser Ableset", "refreshnocache"),       # fohabl back after its outage
+        (1, 7, "Browser Ableset", "refreshnocache"),       # fohabl back after its outage (down 5+6)
         # connection 2 = connect epoch 2 (OBS restarted): every source once more
-        (2, 7, "Browser camera crew", "refreshnocache"),
-        (2, 7, "Odpocet", "refreshnocache"),
-        (2, 7, "Browser Ableset", "refreshnocache"),
+        (2, 8, "Browser camera crew", "refreshnocache"),
+        (2, 8, "Odpocet", "refreshnocache"),
+        (2, 8, "Browser Ableset", "refreshnocache"),
     ]
     # the local-file source is never refreshed, a non-browser input never read
     settings_reads = {d["inputName"] for _c, _p, t, d in server.requests if t == "GetInputSettings"}
@@ -503,26 +547,88 @@ def test_the_real_keeper_loop_against_a_fake_obs_websocket(tmp_path):
     assert len(logs) <= 25, logs
 
 
-def test_a_failed_refresh_is_retried_next_pass_and_logged_once(tmp_path):
-    class Obs:
-        def __init__(self):
-            self.presses = 0
+class _ScriptedObs:
+    """One browser source; PressInputPropertiesButton fails on the press numbers in `fail_on`."""
 
-        def request(self, rtype, data=None):
-            if rtype == "GetInputList":
-                return {"inputs": [{"inputName": "Odpocet", "unversionedInputKind": "browser_source"}]}
-            if rtype == "GetInputSettings":
-                return {"inputSettings": {"url": "http://presenter.lan/x"}}
-            self.presses += 1
-            if self.presses < 3:
-                raise k.ObsRequestError("PressInputPropertiesButton failed: code 600 ")
-            return {}
+    def __init__(self, fail_on=()):
+        self.presses = 0
+        self.fail_on = set(fail_on)
+
+    def request(self, rtype, data=None):
+        if rtype == "GetInputList":
+            return {"inputs": [{"inputName": "Odpocet", "unversionedInputKind": "browser_source"}]}
+        if rtype == "GetInputSettings":
+            return {"inputSettings": {"url": "http://presenter.lan/x"}}
+        assert rtype == "PressInputPropertiesButton" and data["propertyName"] == "refreshnocache"
+        self.presses += 1
+        if self.presses in self.fail_on:
+            raise k.ObsRequestError("PressInputPropertiesButton failed: code 600 ")
+        return {}
+
+
+def _run_passes(probe_results, obs, epoch=1):
+    """Run one keeper pass per probe result (True/False/None) of presenter.lan:80."""
+    seq = iter(probe_results)
+    current = {}
+
+    class OnePerPass:
+        def probe_all(self, targets):
+            current["r"] = next(seq)
+            return {t: current["r"] for t in targets}
 
     logs = []
-    keeper = k.Keeper(k.Prober(probe_fn=lambda h, p, t: True, timeout=1.0), logs.append)
-    obs = Obs()
-    for _ in range(5):
-        keeper.run_pass(obs, 1)
+    keeper = k.Keeper(OnePerPass(), logs.append)
+    for _ in probe_results:
+        keeper.run_pass(obs, epoch)
+    return keeper, logs
+
+
+def test_a_failed_connect_refresh_is_pressed_again_and_logged_once():
+    obs = _ScriptedObs(fail_on={1, 2})
+    keeper, logs = _run_passes([True] * 5, obs)
     assert obs.presses == 3  # failed, failed, succeeded -- then quiet
     assert keeper.refreshes == 1
     assert sum("failed" in line for line in logs) == 1
+
+
+def test_a_failed_recovered_refresh_is_pressed_again():
+    # connect refresh ok, then the server goes down for two probes, comes back: the recovered refresh
+    # fails once and must be pressed again -- never forgotten (the review's reproduction).
+    obs = _ScriptedObs(fail_on={2})
+    keeper, logs = _run_passes([True, False, False, True, True, True, True], obs)
+    assert obs.presses == 3
+    assert keeper.refreshes == 2
+    assert sum("unreachable -> reachable" in line for line in logs) == 1, logs
+    assert sum("reachable -> unreachable" in line for line in logs) == 1, logs
+    assert sum("pressed again next pass" in line for line in logs) == 1
+    assert sum("page server back after being unreachable" in line for line in logs) == 1
+
+
+def test_one_lost_probe_or_an_unfinished_one_never_reloads_a_working_page():
+    obs = _ScriptedObs()
+    keeper, logs = _run_passes([True, False, True, None, True, False, None, True, None, None, True], obs)
+    assert obs.presses == 1, "only the connect refresh"
+    assert not any("unreachable" in line for line in logs), logs
+
+
+def test_the_first_failed_probe_gives_no_verdict_and_no_log():
+    obs = _ScriptedObs()
+    keeper, logs = _run_passes([False], obs)
+    assert obs.presses == 0 and logs == []
+    assert keeper.last_sources[0]["reachable"] is None and keeper.last_sources[0]["refreshed_epoch"] is None
+    keeper2, logs2 = _run_passes([False, False, True], _ScriptedObs())
+    assert [l.split(" page server ")[1] for l in logs2 if " page server " in l] == [
+        "presenter.lan:80 unreachable", "presenter.lan:80 unreachable -> reachable"]
+
+
+def test_obs_client_authenticates_when_obs_demands_it():
+    server = FakeObsWebSocket(INPUTS, password="s3cret")
+    try:
+        obs = k.ObsClient("127.0.0.1", server.port, timeout=5.0, password="s3cret")
+        assert [i["inputName"] for i in obs.request("GetInputList")["inputs"]][0] == "Browser camera crew"
+        obs.close()
+        with pytest.raises(k.ObsError, match="demands auth"):
+            k.ObsClient("127.0.0.1", server.port, timeout=5.0)
+    finally:
+        server.close()
+    assert server.auth_ok == [True]
