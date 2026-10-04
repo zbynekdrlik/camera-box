@@ -4,7 +4,8 @@ WHY (owner, 4.10.2026): "toto je produkcny pocitac vsetko ma bezat vzdy a stale"
 starte bezat shading appka" + "nevie to byt pekna pwa appka lebo tam v prehliadacoch je ta hnusna horna
 lista". The browser sources stayed empty after a boot and no window showed the shading panel.
 
-What this pins (design comment 5977447339, Approach 1):
+What this pins (design comment 5977447339, Approach 1; Companion Satellite + its watch joined the same
+list by design 5979157737, pinned in test_strih_companion_satellite_1399.py):
   * scripts/lib/strih-session-apps.sh -- the autostart lines, the setup-strih step 16d install (run for
     real through its path seams with fake dpkg-query / apt-get / systemctl / sudo / id on PATH: files,
     modes, the 4.10.2026 stopgap migrated, enable-only, never a start), the verify-strih rows (37
@@ -14,10 +15,11 @@ What this pins (design comment 5977447339, Approach 1):
   * scripts/bkshading_panel_app.py -- the real window wiring driven with stand-in Gtk / WebKit2 / GLib:
     title, size, a NORMAL window (never keep-above/below), no context menu, no new windows, no
     developer extras, a failed load / a crashed web process reloads after 3 s with no error page;
-  * the wiring: the kiosk autostart starts both units, setup-strih step 16d, verify-strih items
-    37/38, and the item-28 collection reads moved to scripts/lib/strih-obs-collection.sh.
+  * the wiring: the kiosk autostart starts the units, setup-strih step 16d, verify-strih items
+    37-40, and the item-28 collection reads moved to scripts/lib/strih-obs-collection.sh.
 
-Tier-0: bash + pytest only (no cargo, no root, no rig, no display).
+Tier-0: bash + pytest only (no cargo, no root, no rig, no display). The fakes live in
+strih_session_apps_fakes_1399.py (shared with the Satellite tests).
 """
 import importlib.util
 import json
@@ -26,14 +28,18 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 
 import pytest
 
-REPO = Path(__file__).resolve().parent.parent.parent
-SCRIPTS = REPO / "scripts"
-LIB = SCRIPTS / "lib" / "strih-session-apps.sh"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import strih_session_apps_fakes_1399 as F  # noqa: E402
+
+REPO = F.REPO
+SCRIPTS = F.SCRIPTS
+LIB = F.LIB
 COLL_LIB = SCRIPTS / "lib" / "strih-obs-collection.sh"
 PROVISION = SCRIPTS / "lib" / "strih-provision.sh"
 BASELINE = SCRIPTS / "lib" / "obs-box-baseline.sh"
@@ -42,90 +48,44 @@ VERIFY = SCRIPTS / "verify-strih.sh"
 KEEPER_UNIT = REPO / "systemd" / "strih-browser-keeper.service"
 PANEL_UNIT = REPO / "systemd" / "bkshading-panel-app.service"
 PANEL_APP = SCRIPTS / "bkshading_panel_app.py"
-UNITS = ("strih-browser-keeper.service", "bkshading-panel-app.service")
-LEAKY = ("STRIH_SESSION_APPS_BIN_DIR", "STRIH_SESSION_APPS_RUNTIME_DIR", "STRIH_SESSION_APPS_EUID",
-         "STRIH_SESSION_APPS_PYTHON", "STRIH_LX_IP", "STRIH_BOXES_DIR")
+UNITS = F.UNITS
+_bash = F.bash
+CLASS = F.PANEL_CLASS
+WIN = F.WIN
+ROWS = len(UNITS) + 3
 
 
-def _bash(body, env=None, sources=(LIB,), path_prepend=None, stdin=""):
-    """Source `sources` under the CALLERS' set -euo pipefail (setup-strih / verify-strih), run `body`."""
-    harness = "set -euo pipefail\n" + "".join('. "%s"\n' % s for s in sources) + body
-    full_env = {k: v for k, v in os.environ.items() if k not in LEAKY}
-    if path_prepend:
-        full_env["PATH"] = "%s:%s" % (path_prepend, full_env["PATH"])
-    if env:
-        full_env.update(env)
-    return subprocess.run(["bash", "-c", harness], capture_output=True, text=True, env=full_env,
-                          cwd=str(REPO), timeout=60, input=stdin)
+def _install(tmp_path, home, bindir, **fakes):
+    b, log = F.fake_bin(tmp_path, **fakes)
+    py = F.fake_python_ok(tmp_path)
+    r = _bash('strih_session_apps_install "%s" "%s" newlevel' % (REPO, home),
+              env={"STRIH_SESSION_APPS_BIN_DIR": str(bindir), "STRIH_SESSION_APPS_EUID": "1000",
+                   "STRIH_SESSION_APPS_PYTHON": str(py)}, path_prepend=str(b))
+    return r, log.read_text() if log.exists() else ""
 
 
-def _stub(bindir, name, body):
-    p = bindir / name
-    p.write_text("#!/bin/bash\n" + body)
-    p.chmod(0o755)
-
-
-PIDS = {"strih-browser-keeper.service": 4242, "bkshading-panel-app.service": 4343}
-
-
-def _fake_bin(tmp_path, *, missing=(), apt_installs=True, enable_ok=True, active="active", wmctrl=None,
-              started=None):
-    """Fakes for every external the lib calls. Each logs its argv to <bin>/calls.log. `started` = the
-    units' ExecMainStartTimestamp (unix s, default one minute from now: a process newer than the files)."""
-    b = tmp_path / "bin"
-    b.mkdir()
-    log = b / "calls.log"
-    state = b / "installed"
-    state.write_text("".join("%s\n" % m for m in missing))
-    started = int(time.time()) + 60 if started is None else started
-    _stub(b, "dpkg-query", 'echo "dpkg-query $*" >> "%s"\nlast="${@: -1}"\n'
-          'if grep -qxF "$last" "%s"; then exit 1; fi\nprintf "install ok installed"\n' % (log, state))
-    _stub(b, "apt-get", 'echo "apt-get $*" >> "%s"\n%s\n' % (
-        log, ': > "%s"' % state if apt_installs else "exit 100"))
-    _stub(b, "systemctl", 'echo "systemctl $*" >> "%s"\n'
-          'if [ "$2" = enable ]; then %s; fi\n'
-          'if [ "$2" = is-active ]; then echo %s; [ %s = active ]; exit; fi\n'
-          'if [ "$2" = show ] && [ "$4" = MainPID ]; then\n'
-          '  case "${@: -1}" in strih-browser-keeper.service) echo %d ;; bkshading-panel-app.service) echo %d ;; esac\n'
-          '  exit 0\nfi\n'
-          'if [ "$2" = show ] && [ "$4" = ExecMainStartTimestamp ]; then echo @%d; exit 0; fi\n'
-          'exit 0\n' % (log, "exit 0" if enable_ok else "{ echo 'Failed to connect to bus: No medium found' >&2; exit 1; }",
-                        active, active, PIDS["strih-browser-keeper.service"], PIDS["bkshading-panel-app.service"],
-                        started))
-    # sudo -u USER [VAR=val ...] CMD ...: log it, then run CMD with the VAR=vals (the root path runs for real)
-    _stub(b, "sudo", 'echo "sudo $*" >> "%s"\n[ "$1" = -u ] && shift 2\nexec env "$@"\n' % log)
-    _stub(b, "id", 'if [ "$1" = -u ] && [ -n "${2:-}" ]; then echo 1000; else echo 1000; fi\n')
-    _stub(b, "chown", 'echo "chown $*" >> "%s"\nexit 0\n' % log)
-    if wmctrl is not None:
-        (b / "wmctrl.out").write_text(wmctrl)
-        _stub(b, "wmctrl", 'cat "%s"\n' % (b / "wmctrl.out"))
-    return b, log
-
-
-def _fake_python_ok(tmp_path):
-    p = tmp_path / "py-ok"
-    p.write_text("#!/bin/bash\necho \"python $*\" >> \"%s\"\nexit 0\n" % (tmp_path / "bin" / "calls.log"))
-    p.chmod(0o755)
-    return p
+def _never_starts(calls):
+    for line in calls.splitlines():
+        if line.startswith("systemctl"):
+            words = line.split()
+            assert "start" not in words and "restart" not in words and "--now" not in words, line
 
 
 # --- constants + the autostart lines ----------------------------------------------------------------
 
-def test_autostart_lines_start_both_units_one_line_each():
+def test_autostart_lines_start_every_unit_one_line_each():
     r = _bash("strih_session_apps_autostart_lines")
     assert r.returncode == 0, r.stderr
     assert r.stdout.splitlines() == ["systemctl --user start %s || true" % u for u in UNITS]
 
 
-def test_kiosk_autostart_starts_the_session_apps_after_obs_and_before_companion():
+def test_kiosk_autostart_starts_the_session_apps_after_obs_in_list_order():
     r = _bash("strih_openbox_autostart_text", sources=(BASELINE, PROVISION))
     assert r.returncode == 0, r.stderr
     lines = r.stdout.splitlines()
-    i_obs = lines.index("systemctl --user start strih-obs.service || true")
-    i_keep = lines.index("systemctl --user start strih-browser-keeper.service || true")
-    i_panel = lines.index("systemctl --user start bkshading-panel-app.service || true")
-    i_comp = lines.index("/opt/companion-satellite/companion-satellite >/dev/null 2>&1 &")
-    assert i_obs < i_keep < i_panel < i_comp
+    idx = [lines.index("systemctl --user start %s || true" % u)
+           for u in ("strih-obs.service",) + UNITS]
+    assert idx == sorted(idx), "strih-obs first, then the session apps in STRIH_SESSION_APP_UNITS order"
     assert subprocess.run(["bash", "-n", "-c", r.stdout]).returncode == 0
 
 
@@ -138,18 +98,22 @@ def test_strih_provision_sources_the_session_apps_lib_alone():
 def test_imag_autostart_is_untouched():
     # imag keeps its own step-16 heredoc; the session apps are strih-only
     imag = (SCRIPTS / "setup-imag.sh").read_text()
-    assert "strih-browser-keeper" not in imag and "bkshading-panel-app" not in imag
+    for name in ("strih-browser-keeper", "bkshading-panel-app", "companion-satellite.service",
+                 "strih-satellite-watch"):
+        assert name not in imag, name
     assert "strih_session_apps" not in (SCRIPTS / "lib" / "obs-box-kiosk.sh").read_text()
 
 
 def test_script_mapping_and_items():
-    r = _bash('for u in %s; do printf "%%s %%s %%s\\n" "$u" "$(strih_session_app_script "$u")" '
+    r = _bash('for u in %s; do printf "%%s [%%s] %%s\\n" "$u" "$(strih_session_app_script "$u")" '
               '"$(strih_session_app_item "$u")"; done; strih_session_app_script bogus.service || echo REFUSED'
               % " ".join(UNITS))
     assert r.returncode == 0, r.stderr
     assert r.stdout.splitlines() == [
-        "strih-browser-keeper.service strih_browser_keeper.py browser-keeper",
-        "bkshading-panel-app.service bkshading_panel_app.py shading-app",
+        "strih-browser-keeper.service [strih_browser_keeper.py] browser-keeper",
+        "bkshading-panel-app.service [bkshading_panel_app.py] shading-app",
+        "companion-satellite.service [] companion-satellite",
+        "strih-satellite-watch.timer [strih_satellite_watch.py] satellite-watch",
         "REFUSED",
     ]
 
@@ -180,29 +144,16 @@ def test_panel_unit():
 
 def test_units_run_the_programs_the_install_writes():
     for unit in UNITS:
-        r = _bash('strih_session_app_script %s' % unit)
-        assert ("/usr/local/bin/%s" % r.stdout) in _unit(REPO / "systemd" / unit)["ExecStart"]
-        assert (SCRIPTS / r.stdout).is_file()
-        assert os.access(SCRIPTS / r.stdout, os.X_OK), "commit %s executable (git mode 100755)" % r.stdout
+        r = _bash('strih_session_app_script %s; echo; strih_session_app_run_unit %s' % (unit, unit))
+        script, run_unit = r.stdout.split("\n")[:2]
+        if not script:
+            continue  # companion-satellite.service runs the /opt binary step 16 installs
+        assert ("/usr/local/bin/%s" % script) in _unit(REPO / "systemd" / run_unit)["ExecStart"]
+        assert (SCRIPTS / script).is_file()
+        assert os.access(SCRIPTS / script, os.X_OK), "commit %s executable (git mode 100755)" % script
 
 
 # --- setup-strih step 16d: the install ------------------------------------------------------------------
-
-def _install(tmp_path, home, bindir, **fakes):
-    b, log = _fake_bin(tmp_path, **fakes)
-    py = _fake_python_ok(tmp_path)
-    r = _bash('strih_session_apps_install "%s" "%s" newlevel' % (REPO, home),
-              env={"STRIH_SESSION_APPS_BIN_DIR": str(bindir), "STRIH_SESSION_APPS_EUID": "1000",
-                   "STRIH_SESSION_APPS_PYTHON": str(py)}, path_prepend=str(b))
-    return r, log.read_text() if log.exists() else ""
-
-
-def _never_starts(calls):
-    for line in calls.splitlines():
-        if line.startswith("systemctl"):
-            words = line.split()
-            assert "start" not in words and "restart" not in words and "--now" not in words, line
-
 
 def test_install_writes_programs_and_units_and_migrates_the_stopgap(tmp_path):
     home, bindir = tmp_path / "home", tmp_path / "usrlocalbin"
@@ -214,26 +165,27 @@ def test_install_writes_programs_and_units_and_migrates_the_stopgap(tmp_path):
     (home / ".local/bin/bkshading-panel-app").write_text("#!/usr/bin/env python3\n")
     r, calls = _install(tmp_path, home, bindir, missing=("gir1.2-webkit2-4.1",))
     assert r.returncode == 0, r.stdout + r.stderr
-    for unit in UNITS:
+    for unit in F.UNIT_FILES:
         assert (unitdir / unit).read_bytes() == (REPO / "systemd" / unit).read_bytes()
         assert stat.S_IMODE((unitdir / unit).stat().st_mode) == 0o644
-    for prog in ("strih_browser_keeper.py", "bkshading_panel_app.py"):
+    for prog in F.PROGRAMS:
         assert (bindir / prog).read_bytes() == (SCRIPTS / prog).read_bytes()
         assert stat.S_IMODE((bindir / prog).stat().st_mode) == 0o755
+    assert sorted(p.name for p in bindir.iterdir()) == sorted(F.PROGRAMS), "the Satellite binary is step 16's"
     assert not os.path.lexists(unitdir / "default.target.wants/bkshading-panel-app.service")
     assert not (home / ".local/bin/bkshading-panel-app").exists()
     assert "removed the 4.10.2026 stopgap link" in r.stdout and "removed the stopgap copy" in r.stdout
     # only the missing package is installed, then the import preflight runs
     assert "apt-get install -y gir1.2-webkit2-4.1" in calls
     assert re.search(r"python -c import websocket, gi; .*WebKit2.*4\.1", calls)
-    # both units enabled in ONE call; the changed ones try-restarted (a running stopgap moves onto the new
+    # every unit enabled in ONE call; the changed ones try-restarted (a running stopgap moves onto the new
     # files), never a plain start / restart / --now
-    assert "systemctl --user enable strih-browser-keeper.service bkshading-panel-app.service" in calls
-    assert "systemctl --user try-restart strih-browser-keeper.service bkshading-panel-app.service" in calls
+    assert "systemctl --user enable %s" % " ".join(UNITS) in calls
+    assert "systemctl --user try-restart %s" % " ".join(UNITS) in calls
     # a unit file was written: an explicit reload before the restart, never a cached old definition
     lines = calls.splitlines()
     assert lines.index("systemctl --user daemon-reload") < lines.index(
-        "systemctl --user try-restart strih-browser-keeper.service bkshading-panel-app.service")
+        "systemctl --user try-restart %s" % " ".join(UNITS))
     _never_starts(calls)
     assert "a stopped unit is NOT started" in r.stdout
 
@@ -242,8 +194,7 @@ def test_install_rewrites_nothing_and_restarts_nothing_on_an_unchanged_rerun(tmp
     home, bindir = tmp_path / "home", tmp_path / "usrlocalbin"
     r1, _ = _install(tmp_path, home, bindir)
     assert r1.returncode == 0
-    files = [bindir / "strih_browser_keeper.py", bindir / "bkshading_panel_app.py"] + [
-        home / ".config/systemd/user" / u for u in UNITS]
+    files = [bindir / p for p in F.PROGRAMS] + [home / ".config/systemd/user" / u for u in F.UNIT_FILES]
     past = time.time() - 3600
     for f in files:
         os.utime(f, (past, past))
@@ -253,8 +204,8 @@ def test_install_rewrites_nothing_and_restarts_nothing_on_an_unchanged_rerun(tmp
     assert r2.returncode == 0, r2.stderr
     assert "apt-get" not in calls and "removed" not in r2.stdout
     assert {f: f.stat().st_mtime_ns for f in files} == old, "an unchanged file keeps its mtime"
-    assert "try-restart" not in calls
-    assert r2.stdout.count("unchanged") == 2
+    assert "try-restart" not in calls and "daemon-reload" not in calls
+    assert r2.stdout.count("unchanged") == len(UNITS)
 
 
 def test_install_restarts_only_the_unit_whose_files_changed(tmp_path):
@@ -271,14 +222,14 @@ def test_install_restarts_only_the_unit_whose_files_changed(tmp_path):
 
 
 def test_install_as_root_enables_in_the_operator_session(tmp_path):
-    b, log = _fake_bin(tmp_path)
-    py = _fake_python_ok(tmp_path)
+    b, log = F.fake_bin(tmp_path)
+    py = F.fake_python_ok(tmp_path)
     r = _bash('strih_session_apps_install "%s" "%s" newlevel' % (REPO, tmp_path / "home"),
               env={"STRIH_SESSION_APPS_BIN_DIR": str(tmp_path / "b"), "STRIH_SESSION_APPS_EUID": "0",
                    "STRIH_SESSION_APPS_PYTHON": str(py)}, path_prepend=str(b))
     assert r.returncode == 0, r.stderr
-    assert ("sudo -u newlevel XDG_RUNTIME_DIR=/run/user/1000 systemctl --user enable "
-            "strih-browser-keeper.service bkshading-panel-app.service") in log.read_text()
+    assert ("sudo -u newlevel XDG_RUNTIME_DIR=/run/user/1000 systemctl --user enable %s" % " ".join(UNITS)) \
+        in log.read_text()
 
 
 def test_install_warns_but_succeeds_without_a_user_bus_and_names_the_error(tmp_path):
@@ -298,7 +249,7 @@ def test_install_fails_loud_when_a_package_does_not_install(tmp_path):
 
 
 def test_install_fails_loud_on_a_failed_import_preflight(tmp_path):
-    b, _log = _fake_bin(tmp_path)
+    b, _log = F.fake_bin(tmp_path)
     bad = tmp_path / "py-bad"
     bad.write_text("#!/bin/bash\nexit 1\n")
     bad.chmod(0o755)
@@ -327,7 +278,7 @@ def test_import_check_imports_what_the_programs_import():
     assert "from websocket import create_connection" in (SCRIPTS / "strih_browser_keeper.py").read_text()
 
 
-# --- verify-strih items 37 + 38 ----------------------------------------------------------------------------
+# --- verify-strih items 37-40 ------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("args,want,rc", [
     ("ok ok 1 1 active ok", "ok", 0),
@@ -354,6 +305,10 @@ def test_unit_verdict_table(args, want, rc):
     ("/usr/bin/python3 /usr/local/bin/x.py ", "100", "100", "ok"),
     ("/usr/bin/python3 /usr/local/bin/x.py ", "@99", "100", "stale"),
     ("/usr/bin/python3 /home/newlevel/.local/bin/bkshading-panel-app ", "@200", "100", "wrong-program"),
+    # a binary unit (the Electron Satellite): the program is argv0
+    ("/usr/local/bin/x.py --enable-features=x ", "@200", "100", "ok"),
+    ("/usr/local/bin/x.py ", "@99", "100", "stale"),
+    ("/opt/other/app /usr/local/bin/x.pyz ", "@200", "100", "wrong-program"),
     ("", "@200", "100", "unreadable"),
     ("/usr/bin/python3 /usr/local/bin/x.py ", "", "100", "unreadable"),
     ("/usr/bin/python3 /usr/local/bin/x.py ", "n/a", "100", "unreadable"),
@@ -363,9 +318,6 @@ def test_process_state_table(cmdline, start, newest, want):
     r = _bash("v=$(strih_session_app_process_state /usr/local/bin/x.py %s %s %s) || true; printf '%%s' \"$v\""
               % (json.dumps(cmdline), json.dumps(start), json.dumps(newest)))
     assert r.stdout == want, r.stderr
-
-
-CLASS = "bkshading-panel-app.Bkshading-panel-app"
 
 
 @pytest.mark.parametrize("wm,present", [
@@ -396,102 +348,54 @@ def test_window_present_reads_a_large_list_without_sigpipe():
     assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr
 
 
-def _installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, panel_cmd=None):
-    home = tmp_path / "home"
-    unitdir = home / ".config/systemd/user"
-    (unitdir / "graphical-session.target.wants").mkdir(parents=True)
-    bindir = tmp_path / "usrlocalbin"
-    bindir.mkdir()
-    for unit in UNITS:
-        (unitdir / unit).write_bytes(unit_text.encode() if unit_text and unit.startswith("bkshading")
-                                     else (REPO / "systemd" / unit).read_bytes())
-        if enabled:
-            os.symlink(unitdir / unit, unitdir / "graphical-session.target.wants" / unit)
-    for prog in ("strih_browser_keeper.py", "bkshading_panel_app.py"):
-        shutil.copy(SCRIPTS / prog, bindir / prog)
-    (home / ".config/openbox").mkdir(parents=True)
-    lines = ["systemctl --user start strih-obs.service || true"]
-    if autostart:
-        lines += ["systemctl --user start %s || true" % u for u in UNITS]
-    (home / ".config/openbox/autostart").write_text("\n".join(lines) + "\n")
-    # the units' main processes as /proc shows them
-    proc = tmp_path / "proc"
-    argv = {
-        "strih-browser-keeper.service": ["/usr/bin/python3", str(bindir / "strih_browser_keeper.py"),
-                                         "--state-file", "/run/user/1000/strih-browser-keeper.json"],
-        "bkshading-panel-app.service": panel_cmd or ["/usr/bin/python3", str(bindir / "bkshading_panel_app.py")],
-    }
-    for unit, words in argv.items():
-        (proc / str(PIDS[unit])).mkdir(parents=True)
-        (proc / str(PIDS[unit]) / "cmdline").write_bytes(b"\0".join(w.encode() for w in words) + b"\0")
-    return home, bindir
-
-
-def _keeper_state(rundir, age=3.0, connected=True):
-    rundir.mkdir(parents=True, exist_ok=True)
-    (rundir / "strih-browser-keeper.json").write_text(json.dumps({
-        "version": 2, "updated_epoch_s": time.time() - age, "connected": connected, "obs_epoch": 1,
-        "refreshes": 4, "sources": [{"name": "Odpocet", "reachable": True}], "last_error": None}))
-
-
 def _grade(tmp_path, home, bindir, rundir, **fakes):
-    if (tmp_path / "bin").exists():
-        shutil.rmtree(tmp_path / "bin")
-    b, _log = _fake_bin(tmp_path, **fakes)
-    r = _bash('strih_session_apps_grade_rows "%s" "%s" newlevel' % (REPO, home),
-              env={"STRIH_SESSION_APPS_BIN_DIR": str(bindir), "STRIH_SESSION_APPS_EUID": "1000",
-                   "STRIH_SESSION_APPS_RUNTIME_DIR": str(rundir), "STRIH_SESSION_APPS_PROC": str(tmp_path / "proc")},
-              path_prepend=str(b))
-    assert r.returncode == 0, r.stderr
-    return r.stdout.splitlines()
-
-
-WIN = "0x01  0 %s  strih-lx Shading\n" % CLASS
+    return F.grade(tmp_path, home, bindir, rundir, **fakes)
 
 
 def test_grade_rows_all_ok(tmp_path):
-    home, bindir = _installed_home(tmp_path)
-    _keeper_state(tmp_path / "run")
+    home, bindir = F.installed_home(tmp_path)
+    F.all_states(tmp_path / "run")
     rows = _grade(tmp_path, home, bindir, tmp_path / "run", wmctrl=WIN)
-    assert [r.split("|", 1)[0] for r in rows] == ["OK", "OK", "OK", "OK"], rows
-    assert rows[0].startswith("OK|(browser-keeper) strih-browser-keeper.service: unit + ")
-    assert "its process started after the files were installed" in rows[0]
-    assert rows[1].startswith("OK|(shading-app) bkshading-panel-app.service")
-    assert rows[2].startswith("OK|(browser-keeper-pass) last pass") and "connected (OBS run epoch 1)" in rows[2]
-    assert rows[3] == 'OK|(shading-app-window) the panel window (%s, "Shading") is open on :0' % CLASS
+    assert [r.split("|", 1)[0] for r in rows] == ["OK"] * ROWS, rows
+    keeper = F.row(rows, "browser-keeper")
+    assert keeper.startswith("OK|(browser-keeper) strih-browser-keeper.service: unit + ")
+    assert "its process started after the files were installed" in keeper
+    assert F.row(rows, "shading-app").startswith("OK|(shading-app) bkshading-panel-app.service")
+    kpass = F.row(rows, "browser-keeper-pass")
+    assert kpass.startswith("OK|(browser-keeper-pass) last pass") and "connected (OBS run epoch 1)" in kpass
+    assert F.row(rows, "shading-app-window") == 'OK|(shading-app-window) the panel window (%s, "Shading") is open on :0' % CLASS
 
 
 def test_grade_rows_catch_a_process_older_than_the_installed_files(tmp_path):
     # the first deploy: the files are new, the running process is the one started before them
-    home, bindir = _installed_home(tmp_path)
-    _keeper_state(tmp_path / "run")
+    home, bindir = F.installed_home(tmp_path)
+    F.all_states(tmp_path / "run")
     rows = _grade(tmp_path, home, bindir, tmp_path / "run", wmctrl=WIN, started=int(time.time()) - 3600)
-    assert rows[0].startswith("FAIL|(browser-keeper) strih-browser-keeper.service: process:stale")
-    assert "systemctl --user restart strih-browser-keeper.service" in rows[0]
+    keeper = F.row(rows, "browser-keeper")
+    assert keeper.startswith("FAIL|(browser-keeper) strih-browser-keeper.service: process:stale")
+    assert "systemctl --user restart strih-browser-keeper.service" in keeper
 
 
 def test_grade_rows_catch_the_stopgap_process_and_its_window(tmp_path):
     # the unit file is already the new one, but the stopgap program is what still runs
-    home, bindir = _installed_home(tmp_path, panel_cmd=["/usr/bin/python3", "/home/newlevel/.local/bin/bkshading-panel-app"])
-    _keeper_state(tmp_path / "run")
+    home, bindir = F.installed_home(tmp_path, panel_cmd=["/usr/bin/python3", "/home/newlevel/.local/bin/bkshading-panel-app"])
+    F.all_states(tmp_path / "run")
     rows = _grade(tmp_path, home, bindir, tmp_path / "run",
                   wmctrl="0x01  0 bkshading-panel-app.py.Bkshading-panel-app.py  strih-lx Shading\n")
-    assert rows[1].startswith("FAIL|(shading-app) bkshading-panel-app.service: process:wrong-program")
-    assert rows[3].startswith("FAIL|(shading-app-window) no panel window")
+    assert F.row(rows, "shading-app").startswith("FAIL|(shading-app) bkshading-panel-app.service: process:wrong-program")
+    assert F.row(rows, "shading-app-window").startswith("FAIL|(shading-app-window) no panel window")
 
 
 def test_grade_rows_as_root_read_the_operator_session(tmp_path):
     # the deploy runs verify-strih as root: every systemctl read goes through sudo -u <operator>, and the
     # sudo stub really runs it (the process facts included)
-    home, bindir = _installed_home(tmp_path)
-    _keeper_state(tmp_path / "run")
-    b, log = _fake_bin(tmp_path, wmctrl=WIN)
+    home, bindir = F.installed_home(tmp_path)
+    F.all_states(tmp_path / "run")
+    b, log = F.fake_bin(tmp_path, wmctrl=WIN)
     r = _bash('strih_session_apps_grade_rows "%s" "%s" newlevel' % (REPO, home),
-              env={"STRIH_SESSION_APPS_BIN_DIR": str(bindir), "STRIH_SESSION_APPS_EUID": "0",
-                   "STRIH_SESSION_APPS_RUNTIME_DIR": str(tmp_path / "run"),
-                   "STRIH_SESSION_APPS_PROC": str(tmp_path / "proc")}, path_prepend=str(b))
+              env=F.grade_env(tmp_path, bindir, tmp_path / "run", euid="0"), path_prepend=str(b))
     assert r.returncode == 0 and r.stderr == "", r.stderr
-    assert [row.split("|", 1)[0] for row in r.stdout.splitlines()] == ["OK"] * 4, r.stdout
+    assert [row.split("|", 1)[0] for row in r.stdout.splitlines()] == ["OK"] * ROWS, r.stdout
     calls = log.read_text()
     for prop in ("MainPID", "ExecMainStartTimestamp"):
         assert ("sudo -u newlevel XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show -p %s" % prop) in calls
@@ -500,80 +404,81 @@ def test_grade_rows_as_root_read_the_operator_session(tmp_path):
 
 def test_grade_rows_a_vanished_main_process_reads_unreadable_without_noise(tmp_path):
     # MainPID exited between `show` and the /proc read: a named FAIL, nothing on verify's stderr
-    home, bindir = _installed_home(tmp_path)
-    shutil.rmtree(tmp_path / "proc" / str(PIDS["strih-browser-keeper.service"]))
-    _keeper_state(tmp_path / "run")
+    home, bindir = F.installed_home(tmp_path)
+    shutil.rmtree(tmp_path / "proc" / str(F.PIDS["strih-browser-keeper.service"]))
+    F.all_states(tmp_path / "run")
     if (tmp_path / "bin").exists():
         shutil.rmtree(tmp_path / "bin")
-    b, _ = _fake_bin(tmp_path, wmctrl=WIN)
+    b, _ = F.fake_bin(tmp_path, wmctrl=WIN)
     r = _bash('strih_session_apps_grade_rows "%s" "%s" newlevel' % (REPO, home),
-              env={"STRIH_SESSION_APPS_BIN_DIR": str(bindir), "STRIH_SESSION_APPS_EUID": "1000",
-                   "STRIH_SESSION_APPS_RUNTIME_DIR": str(tmp_path / "run"),
-                   "STRIH_SESSION_APPS_PROC": str(tmp_path / "proc")}, path_prepend=str(b))
+              env=F.grade_env(tmp_path, bindir, tmp_path / "run"), path_prepend=str(b))
     assert r.returncode == 0 and r.stderr == "", r.stderr
-    assert r.stdout.splitlines()[0].startswith(
+    assert F.row(r.stdout.splitlines(), "browser-keeper").startswith(
         "FAIL|(browser-keeper) strih-browser-keeper.service: process:unreadable")
 
 
 def test_grade_rows_catch_the_stopgap_unit(tmp_path):
-    home, bindir = _installed_home(tmp_path, unit_text="[Service]\nExecStart=%h/.local/bin/bkshading-panel-app\n")
-    _keeper_state(tmp_path / "run")
+    home, bindir = F.installed_home(tmp_path, unit_text="[Service]\nExecStart=%h/.local/bin/bkshading-panel-app\n")
+    F.all_states(tmp_path / "run")
     rows = _grade(tmp_path, home, bindir, tmp_path / "run", wmctrl="0x01  0 obs.obs  strih-lx OBS\n")
-    assert rows[1].startswith("FAIL|(shading-app) bkshading-panel-app.service: unit-differs")
-    assert "re-run setup-strih.sh step 16d" in rows[1]
-    assert rows[3].startswith("FAIL|(shading-app-window) no panel window")
+    panel = F.row(rows, "shading-app")
+    assert panel.startswith("FAIL|(shading-app) bkshading-panel-app.service: unit-differs")
+    assert "re-run setup-strih.sh step 16d" in panel
+    assert F.row(rows, "shading-app-window").startswith("FAIL|(shading-app-window) no panel window")
 
 
 def test_grade_rows_catch_inactive_disabled_and_no_autostart(tmp_path):
-    home, bindir = _installed_home(tmp_path, enabled=False, autostart=False)
-    _keeper_state(tmp_path / "run")
+    home, bindir = F.installed_home(tmp_path, enabled=False, autostart=False)
+    F.all_states(tmp_path / "run")
     rows = _grade(tmp_path, home, bindir, tmp_path / "run", active="inactive", wmctrl="")
-    assert rows[0].startswith("FAIL|(browser-keeper) strih-browser-keeper.service: not-enabled")
-    home2, bindir2 = _installed_home(tmp_path / "b", autostart=False)
-    rows2 = _grade(tmp_path / "b", home2, bindir2, tmp_path / "run", active="inactive", wmctrl="")
-    assert "no-autostart" in rows2[0] and "step 15" in rows2[0]
-    home3, bindir3 = _installed_home(tmp_path / "c")
-    rows3 = _grade(tmp_path / "c", home3, bindir3, tmp_path / "run", active="failed", wmctrl="")
-    assert "not-active:failed" in rows3[0] and "journalctl --user -u strih-browser-keeper.service" in rows3[0]
-    assert rows3[3].startswith("FAIL|(shading-app-window) the kiosk display :0 listed no window")
+    assert F.row(rows, "browser-keeper").startswith("FAIL|(browser-keeper) strih-browser-keeper.service: not-enabled")
+    home2, bindir2 = F.installed_home(tmp_path / "b", autostart=False)
+    rows2 = F.grade(tmp_path / "b", home2, bindir2, tmp_path / "run", active="inactive", wmctrl="")
+    keeper2 = F.row(rows2, "browser-keeper")
+    assert "no-autostart" in keeper2 and "step 15" in keeper2
+    home3, bindir3 = F.installed_home(tmp_path / "c")
+    rows3 = F.grade(tmp_path / "c", home3, bindir3, tmp_path / "run", active="failed", wmctrl="")
+    keeper3 = F.row(rows3, "browser-keeper")
+    assert "not-active:failed" in keeper3 and "journalctl --user -u strih-browser-keeper.service" in keeper3
+    assert F.row(rows3, "shading-app-window").startswith("FAIL|(shading-app-window) the kiosk display :0 listed no window")
 
 
 def test_grade_rows_catch_a_stale_or_disconnected_keeper(tmp_path):
-    home, bindir = _installed_home(tmp_path)
-    _keeper_state(tmp_path / "run", age=600)
+    home, bindir = F.installed_home(tmp_path)
+    F.watch_state(tmp_path / "run")
+    F.keeper_state(tmp_path / "run", age=600)
     rows = _grade(tmp_path, home, bindir, tmp_path / "run", wmctrl=WIN)
-    assert rows[2].startswith("FAIL|(browser-keeper-pass) stale")
-    _keeper_state(tmp_path / "run2", connected=False)
+    assert F.row(rows, "browser-keeper-pass").startswith("FAIL|(browser-keeper-pass) stale")
+    F.watch_state(tmp_path / "run2")
+    F.keeper_state(tmp_path / "run2", connected=False)
     rows = _grade(tmp_path, home, bindir, tmp_path / "run2", wmctrl=WIN)
-    assert rows[2].startswith("FAIL|(browser-keeper-pass) last pass") and "NOT connected" in rows[2]
+    kpass = F.row(rows, "browser-keeper-pass")
+    assert kpass.startswith("FAIL|(browser-keeper-pass) last pass") and "NOT connected" in kpass
     rows = _grade(tmp_path, home, bindir, tmp_path / "nothing", wmctrl=WIN)
-    assert rows[2].startswith("FAIL|(browser-keeper-pass) state file") and "unreadable" in rows[2]
+    kpass = F.row(rows, "browser-keeper-pass")
+    assert kpass.startswith("FAIL|(browser-keeper-pass) state file") and "unreadable" in kpass
 
 
 def test_grade_rows_name_a_missing_wmctrl(tmp_path):
-    home, bindir = _installed_home(tmp_path)
-    _keeper_state(tmp_path / "run")
-    b, _ = _fake_bin(tmp_path)
-    r = _bash('strih_session_apps_grade_rows "%s" "%s" newlevel' % (REPO, home),
-              env={"STRIH_SESSION_APPS_BIN_DIR": str(bindir), "STRIH_SESSION_APPS_EUID": "1000",
-                   "STRIH_SESSION_APPS_RUNTIME_DIR": str(tmp_path / "run"),
-                   "STRIH_SESSION_APPS_PROC": str(tmp_path / "proc"),
-                   "STRIH_SESSION_APPS_WMCTRL": "wmctrl-not-installed-1399"}, path_prepend=str(b))
+    home, bindir = F.installed_home(tmp_path)
+    F.all_states(tmp_path / "run")
+    b, _ = F.fake_bin(tmp_path)
+    env = F.grade_env(tmp_path, bindir, tmp_path / "run")
+    env["STRIH_SESSION_APPS_WMCTRL"] = "wmctrl-not-installed-1399"
+    r = _bash('strih_session_apps_grade_rows "%s" "%s" newlevel' % (REPO, home), env=env, path_prepend=str(b))
     assert r.returncode == 0, r.stderr
     assert "FAIL|(shading-app-window) wmctrl missing" in r.stdout, r.stdout
 
 
 def test_grade_report_routes_rows_to_ok_and_bad(tmp_path):
-    home, bindir = _installed_home(tmp_path)
-    _keeper_state(tmp_path / "run")
-    b, _ = _fake_bin(tmp_path, wmctrl=WIN)
+    home, bindir = F.installed_home(tmp_path)
+    F.all_states(tmp_path / "run")
+    b, _ = F.fake_bin(tmp_path, wmctrl=WIN)
     r = _bash('ok() { echo "PASS $1"; }; bad() { echo "FAIL $1"; }; '
               'strih_session_apps_grade_report "%s" "%s" newlevel; echo rc=$?' % (REPO, home),
-              env={"STRIH_SESSION_APPS_BIN_DIR": str(bindir), "STRIH_SESSION_APPS_EUID": "1000",
-                   "STRIH_SESSION_APPS_RUNTIME_DIR": str(tmp_path / "run"),
-                   "STRIH_SESSION_APPS_PROC": str(tmp_path / "proc")}, path_prepend=str(b))
+              env=F.grade_env(tmp_path, bindir, tmp_path / "run"), path_prepend=str(b))
     assert r.returncode == 0, r.stderr
-    assert r.stdout.count("PASS (") == 4 and r.stdout.strip().endswith("rc=0")
+    assert r.stdout.count("PASS (") == ROWS and r.stdout.strip().endswith("rc=0")
 
 
 def test_grade_report_fails_a_grader_that_stopped_part_way():
@@ -581,7 +486,7 @@ def test_grade_report_fails_a_grader_that_stopped_part_way():
               'strih_session_apps_grade_report x y z && echo rc=0 || echo rc=$?')
     assert r.stdout.strip() == "rc=1", r.stdout + r.stderr
     r = _bash('printf "%s" "$(strih_session_apps_row_count)"')
-    assert r.stdout == "4"
+    assert r.stdout == str(ROWS)
 
 
 # --- the panel app window ----------------------------------------------------------------------------------

@@ -32,7 +32,8 @@ import pytest
 REPO = Path(__file__).resolve().parents[2]
 SCRIPTS = REPO / "scripts"
 FLEET = SCRIPTS / "deploy-genlock-fleet.sh"
-UNITS = ["strih-browser-keeper.service", "bkshading-panel-app.service"]
+UNITS = ["strih-browser-keeper.service", "bkshading-panel-app.service", "companion-satellite.service",
+         "strih-satellite-watch.timer"]
 STAGE = "/tmp/genlock-stage-abc123"
 
 
@@ -112,7 +113,7 @@ def _run_start(tmp_path, obs_rc=0, apps_rc=0):
     return r, calls, stage
 
 
-def test_running_it_starts_obs_then_both_apps(tmp_path):
+def test_running_it_starts_obs_then_every_app(tmp_path):
     r, calls, stage = _run_start(tmp_path)
     assert r.returncode == 0 and "WARNING" not in r.stderr
     assert calls == ["id -u", "systemctl --user reset-failed strih-obs.service",
@@ -123,7 +124,7 @@ def test_running_it_starts_obs_then_both_apps(tmp_path):
 def test_a_session_app_that_does_not_start_is_a_warning_not_a_failed_deploy(tmp_path):
     r, calls, _ = _run_start(tmp_path, apps_rc=5)
     assert r.returncode == 0, "the deploy's start rc is OBS's"
-    assert ("WARNING: [strih-lx start] the session apps (%s) did not start -- verify-strih items 37/38 name why"
+    assert ("WARNING: [strih-lx start] the session apps (%s) did not start -- verify-strih items 37-40 name why"
             % " ".join(UNITS)) in r.stderr
 
 

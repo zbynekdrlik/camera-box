@@ -1319,17 +1319,27 @@ fn companion_satellite_appconfig_json_seeds_remoteip_remoteport() {
     assert_eq!(jcode, 0, "app config must be valid JSON; stderr={jerr}");
 }
 
-/// issue 1357: Companion Satellite is launched by the kiosk OPENBOX autostart (openbox runs no XDG
-/// ~/.config/autostart): ONE backgrounded line launching the installed /opt binary -- the SAME string
-/// setup-strih writes and verify-strih greps (owner rule: a needed feature is always-ON by default).
+/// issue 1399: Companion Satellite runs as the supervised session app `companion-satellite.service`
+/// (Restart=always, journal output); the kiosk openbox autostart STARTS that unit with the SAME line
+/// setup-strih writes and verify-strih greps. The bare backgrounded launch of the /opt binary is gone.
 #[test]
-fn companion_satellite_openbox_line_launches_the_opt_binary_backgrounded() {
-    let (code, line, _e) = run_sourced(&[], "strih_companion_satellite_openbox_line");
+fn companion_satellite_is_started_as_its_session_app_unit_1399() {
+    let (code, line, _e) = run_sourced(
+        &[],
+        "strih_session_app_autostart_line \"$STRIH_COMPANION_SATELLITE_UNIT\"",
+    );
     assert_eq!(code, 0);
     assert_eq!(
-        line, "/opt/companion-satellite/companion-satellite >/dev/null 2>&1 &",
-        "one backgrounded launch of the installed binary, no trailing newline"
+        line, "systemctl --user start companion-satellite.service || true",
+        "the autostart starts the unit, no trailing newline"
     );
+    let (code, bin, _e) = run_sourced(&[], "strih_companion_satellite_bin");
+    assert_eq!(
+        (code, bin.as_str()),
+        (0, "/opt/companion-satellite/companion-satellite")
+    );
+    let (code, _o, _e) = run_sourced(&[], "declare -F strih_companion_satellite_openbox_line");
+    assert_ne!(code, 0, "the bare launch line helper is removed");
 }
 
 /// The Companion Satellite install emitter downloads the PINNED tar.gz, VERIFIES its sha256
@@ -1438,8 +1448,10 @@ fn verify_strih_carries_perf_and_companion_items() {
         "verify-strih must run the companion verdict for the (companion) item"
     );
     assert!(
-        v.contains("grep -qxF \"$(strih_companion_satellite_openbox_line)\" \"$CS_AUTOSTART\""),
-        "the (companion) autostart signal is the openbox autostart launch line (issue 1357)"
+        v.contains(
+            "grep -qxF \"$(strih_session_app_autostart_line \"$STRIH_COMPANION_SATELLITE_UNIT\")\" \"$CS_AUTOSTART\""
+        ),
+        "the (companion) autostart signal is the openbox autostart unit start line (issue 1399)"
     );
 }
 
@@ -3676,7 +3688,7 @@ fn pl1_stepdown_watts_is_strih_specific_with_an_override() {
 }
 
 /// The kiosk openbox autostart: the shared preamble lines VERBATIM (the baseline verify greps them),
-/// ONE start per supervised --user unit, the Companion Satellite launch line, and valid bash.
+/// ONE start per supervised --user unit (Companion Satellite is one, issue 1399), and valid bash.
 #[test]
 fn openbox_autostart_text_carries_the_preamble_units_and_satellite() {
     let baseline = manifest_dir().join("scripts/lib/obs-box-baseline.sh");
@@ -3692,13 +3704,17 @@ fn openbox_autostart_text_carries_the_preamble_units_and_satellite() {
         "rm -rf \"$HOME/.config/obs-studio/.sentinel\"/* 2>/dev/null || true",
         "systemctl --user start strih-obs.service || true",
         "systemctl --user start strih-bundle-state-server.service || true",
-        "/opt/companion-satellite/companion-satellite >/dev/null 2>&1 &",
+        "systemctl --user start companion-satellite.service || true",
     ] {
         assert!(
             lines.contains(&want),
             "autostart must carry the line `{want}`:\n{out}"
         );
     }
+    assert!(
+        !out.contains("/opt/companion-satellite"),
+        "the bare Companion Satellite launch line is gone (issue 1399): {out}"
+    );
     let syntax = Command::new("bash")
         .arg("-n")
         .arg("-c")
