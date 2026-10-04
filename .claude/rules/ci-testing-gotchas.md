@@ -1706,3 +1706,12 @@ paths (here `hashlib.pbkdf2_hmac`, the 802.11i PSK definition), never against th
   - Drive an EXIT arm with a command that really fails under errexit inside the armed window. For
     example, a stub turns a file the script will `rm -f` into a non-empty directory.
   - Prove each arm with a mutant (delete the `trap` line in a scratch copy, run the test).
+
+## Two fixture traps that let a mutant survive (issue 1399)
+
+- **A "not UTF-8" fixture must hold INVALID UTF-8.** `b"obs\xc4\x9b"` is valid UTF-8 (`obsě`), so a
+  strict `.decode()` mutant of a bytes-safe /proc read still passed. Use a byte sequence that cannot
+  decode (`b"\xff\xc4"`, a lone lead byte at the end). Prove it with that mutant on a scratch copy.
+- **A fake server that logs a request BEFORE it decides to drop the connection** counts the dropped
+  request as one that ran. If the test means "this request never reached the target", remove the
+  logged entry when the fake drops (`DropOnPress` in `tests/python/test_strih_browser_keeper_obs_run_1399.py`).
