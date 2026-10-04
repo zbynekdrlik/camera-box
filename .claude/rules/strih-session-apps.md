@@ -161,16 +161,22 @@ Design comment 5979157737 (Approach 1); finding + live stopgap 5979039607.
   `TimeoutStopSec=10` (a hung Electron app that ignores SIGTERM must not hold a restart 90 s), journal
   output. `ExecStart` is the /opt binary; its ONE source is `STRIH_COMPANION_SATELLITE_BIN` in the lib,
   printed by `strih_companion_satellite_bin` (pinned by a test). The Electron ELF IS that file (read from
-  the pinned tarball, not a wrapper), so the unit's main process has it as argv0.
+  the pinned tarball, not a wrapper script). Its argv is NOT evidence: Chromium rewrites the browser
+  process title, so the grader reads `/proc/<MainPID>/exe` instead (below).
 - **The bare launch line and its helper are gone.** The autostart starts the unit like every session
   app, and verify-strih's (companion) item greps `strih_session_app_autostart_line
   "$STRIH_COMPANION_SATELLITE_UNIT"`.
 - **The stopgap takeover:** the main's live stopgap is a user unit under the SAME name
-  (`DISPLAY=:0`, `Restart=always`, enabled). Step 16d overwrites the file and removes any
-  `default.target.wants/<entry>` link (generalized from the panel migration to every entry). It then
-  runs `daemon-reload` and try-restarts the running stopgap onto the provisioned unit. Until the
-  deploy, a hand-run setup-strih only rewrites the autostart; the Electron singleton lock stops a
-  second instance anyway.
+  (`DISPLAY=:0`, `Restart=always`, enabled). Step 16d (any run of setup-strih with this code, by hand or
+  in a deploy) overwrites the file and removes any `default.target.wants/<entry>` link (generalized from
+  the panel migration to every entry). It then runs `daemon-reload` and try-restarts the running
+  stopgap onto the provisioned unit.
+- **A Satellite started OUTSIDE the unit is a fault this code does not grade.** The main reported that a
+  second launch exits on the Electron singleton lock. So if a stray instance holds the lock (a hand
+  launch, an old bare autostart line), the unit's own instance exits and `Restart=always` with
+  `StartLimitIntervalSec=0` relaunches it every 3 s, forever. The watch then reads the STRAY instance's
+  REST, and its try-restart cannot reach the stray process. After any hand launch, check: exactly one
+  main process, and it is the unit's `MainPID` (live step 7).
 
 ### The watch (`scripts/strih_satellite_watch.py`, a 30 s timer)
 
@@ -182,7 +188,10 @@ Design comment 5979157737 (Approach 1); finding + live stopgap 5979039607.
     `connected`, `/api/surfaces` (an array of the open surfaces), `/api/config` (`protocol`,
     `host`, `port`: the Companion target the Satellite itself uses, so no per-box fact in a
     committed unit);
-  - a TCP connect to that host:port;
+  - a TCP connect to that host:port, ONLY when the Satellite is not connected (review round 1). A live
+    session already proves the port answers. A bare connect every 30 s would show up as a client
+    session on the venue Companion, about 2880 a day. The probe never raises (an IDNA-invalid host is a
+    `ValueError`, caught);
   - the Stream Deck on USB from sysfs `idVendor:idProduct`, which is what lsusb reads, with no
     usbutils dependency. The default is `0fd9:008f` (the strih XL); `--usb-id` adds others. Never
     match the bare Elgato vendor 0fd9: it also covers capture devices, which would read as "the deck
@@ -194,13 +203,27 @@ Design comment 5979157737 (Approach 1); finding + live stopgap 5979039607.
   while the Companion port is down or unknown (`faults()` returns nothing), so nothing restarts while
   Companion itself is down. A silent REST, unreadable surfaces or unreadable USB are no information:
   the window starts over.
+- **Back-off (review round 1):** a fault a restart cannot cure would otherwise restart the Electron app
+  every 60-90 s forever on the production box. Examples: a Companion refusing the client's API version,
+  or the Stream Deck plugin disabled. `effective_sustain(sustain, unhealed)` counts restarts with no
+  healthy pass between them. After 3 (`BACKOFF_AFTER`), the next restart needs 120 s of fault, then
+  240 s, 480 s, and 900 s (`BACKOFF_MAX_S`, the cap). An `ok` pass resets the count. The back-off is
+  logged once, and the watch never gives up.
+- **The window clock:** `now` (the boot clock) is read BEFORE the slow REST/TCP reads, so a slow read
+  never shortens or stretches a window. More than 75 s between two passes (`MAX_PASS_GAP_S`, 2.5 timer
+  periods: a stopped timer, or a suspended notebook, since `CLOCK_BOOTTIME` counts suspend) is no
+  evidence the fault held in between. Every window starts over then, and the gap is logged.
 - **The restart** is `systemctl --user --no-block try-restart companion-satellite.service`. try-restart
   never starts a stopped unit (a deliberately stopped Satellite stays stopped), and `--no-block` keeps a
-  slow stop out of the oneshot's timeout. Each restart is logged with its fault and the held seconds.
+  slow stop out of the oneshot's timeout. Each restart is logged with its fault and the held seconds. A
+  pass is bounded: 3 REST reads + 1 TCP connect (3 s each) + systemctl (5 s) = 17 s, within
+  `TimeoutStartSec=20`, pinned by a test.
 - **State file** `%t/strih-satellite-watch.json` (version 1, atomic write): `since` on the boot clock
   (`CLOCK_BOOTTIME`, so no wall-clock step fakes a window), `condition`, `observation`, `restarts`,
-  `last_restart`. `--check-state` (verify item 40's pass row) needs a pass within 90 s (three timer
-  periods) and names the current condition plus any fault in progress.
+  `unhealed_restarts`, `effective_sustain_s`, `last_restart`. `--check-state` (verify item 40's pass
+  row) needs a pass within 90 s (three timer periods), and names the current condition plus any fault in
+  progress. While the condition is not `ok`, it FAILs when the last restart failed (no user bus) or the
+  watch backed off: a watch that runs but cannot cure the fault is a red, never a quiet OK.
 - **Logs:** one line when the condition changes (rest-silent / companion-down / fault:<ids> / ok) and
   one per restart. A quiet pass logs nothing. The oneshot service sets `SyslogLevel=notice` +
   `LogLevelMax=notice`: the user manager's every-30-s "Starting"/"Finished" lines are info and are
@@ -260,9 +283,11 @@ watch timer).
     the open error before the command's own redirect applies), so a main process that exits between
     `show` and the read is a quiet `unreadable`.
   - `(companion-satellite)`: the unit byte-identical, the /opt binary present (executable; there is
-    no checkout copy), enabled, the autostart line, active, and the main process: the program may be
-    argv0 (a binary) or argv1 (`/usr/bin/python3 <program>`), started at or after the unit's mtime. A
-    missing binary points at step 16.
+    no checkout copy), enabled, the autostart line, active, and the main process:
+    `readlink /proc/<MainPID>/exe` must equal `readlink -f <binary>` (`strih_session_app_binary_state`;
+    a binary replaced under the running process reads `... (deleted)` = wrong-program), started at or
+    after the newest mtime of the unit + binary. Its argv is never read (Chromium rewrites the title).
+    The python entries keep the argv1 check. A missing binary points at step 16.
   - `(satellite-watch)`: BOTH unit files (timer + service) and the program byte-identical, the timer
     enabled + autostarted + active, and instead of a main process (a oneshot has none between passes) the
     service's `ExecMainStartTimestamp` (its last run; `strih_session_app_last_run_state`: `never` /
@@ -339,10 +364,12 @@ step (verify-strih) sees them active.
    - `diff ~/.config/systemd/user/companion-satellite.service <checkout>/systemd/companion-satellite.service`
      is empty, and `ls ~/.config/systemd/user/default.target.wants/` has no companion-satellite link;
    - `systemctl --user show -p MainPID,ExecMainStartTimestamp,NRestarts companion-satellite.service`:
-     the start is after the unit file's mtime; `tr '\0' ' ' < /proc/<MainPID>/cmdline` starts with
-     `/opt/companion-satellite/companion-satellite` (the first live read of argv0);
-   - `pgrep -fc '^/opt/companion-satellite/companion-satellite$'` = 1 (one main process, no stray
-     second instance);
+     the start is after the unit file's mtime, `NRestarts` is not climbing (a climbing count = a stray
+     instance holds the singleton lock), and `readlink /proc/<MainPID>/exe` =
+     `/opt/companion-satellite/companion-satellite`;
+   - the main processes of that binary are exactly one, the unit's MainPID: every process whose
+     `/proc/<pid>/exe` is the binary and whose cmdline has no `--type=` argument (the Chromium child
+     processes carry one); read the first live `tr '\0' ' ' < /proc/<MainPID>/cmdline` once too;
    - `curl -s 127.0.0.1:9999/api/status` reads `"connected":true`, and `/api/surfaces` lists the XL;
    - `journalctl --user -u companion-satellite -n 20` now shows the Satellite's own output;
    - `systemctl --user list-timers strih-satellite-watch.timer` shows a next run within 30 s;
