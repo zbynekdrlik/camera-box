@@ -11,12 +11,15 @@ WHAT (design comment 5977447339, Approach 1): a supervised --user unit (systemd/
   * connects to the local obs-websocket (127.0.0.1:4455, no auth on strih-lx) and reconnects forever;
   * every PASS_INTERVAL_S lists every `browser_source` input with its URL over WS -- no source list
     is hard-coded, a source added later is picked up;
-  * TCP-probes each URL's host:port (bounded: one daemon thread per target, one deadline per pass);
+  * TCP-probes each URL's host:port (bounded: one daemon thread per target, one deadline per pass); a
+    page server counts as down only after DOWN_AFTER failed probes in a row, and a probe that did not
+    finish (a hung name lookup) is no information at all -- one slow probe never reloads a page;
   * presses the `refreshnocache` button (PressInputPropertiesButton) of a source:
       - ONCE after every WS (re)connect = an OBS (re)start, as soon as its host is first reachable;
       - after that, whenever its host goes unreachable -> reachable;
     never while the host is down, never periodically on a working page (a refresh blanks the source
-    for a moment). The decision is the pure `decide`, pytest-tested as a table.
+    for a moment). A refresh OBS refuses keeps its state, so the same refresh is pressed again next
+    pass. The decision is the pure `decide` (+ `debounce`), pytest-tested as tables.
   * writes a small state file every pass (the verify-strih "last pass recent" read, `--check-state`).
 
 A keeper restart while OBS keeps running is a new WS connection too, so it refreshes each source
@@ -28,6 +31,7 @@ strih-browser-keeper). Std-only except python3-websocket (the client every strih
 import argparse
 import json
 import os
+import re
 import socket
 import sys
 import threading
@@ -40,6 +44,9 @@ OBS_HOST = "127.0.0.1"
 OBS_PORT = 4455
 PASS_INTERVAL_S = 5.0
 PROBE_TIMEOUT_S = 5.0
+# A page server is down only after this many failed probes in a row (~10 s at the pass interval):
+# a single lost TCP connect must never read as an outage, whose end would reload a working page.
+DOWN_AFTER = 2
 WS_TIMEOUT_S = 10.0
 # The verify-strih read: a keeper that has not finished a pass for this long is dead or wedged
 # (a pass is <= PASS_INTERVAL_S + PROBE_TIMEOUT_S + a few WS round trips).
@@ -51,6 +58,8 @@ BROWSER_KIND = "browser_source"
 BROWSER_DEFAULT_URL = "https://obsproject.com/browser-source"
 REFRESH_BUTTON = "refreshnocache"
 DEFAULT_PORTS = {"http": 80, "https": 443}
+# A URL that STARTS with a scheme (`fohabl.lan/?next=http://x` has none: it is http).
+_HAS_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 
 ACTION_CONNECT = "connect"
 ACTION_RECOVERED = "recovered"
@@ -70,9 +79,27 @@ class SourceState:
     reachable: Optional[bool] = None
 
 
-def decide(prev, reachable, epoch):
-    """(per-source state, probe result, connect epoch) -> (new state, action or None).
+def debounce(fails, up, result, down_after=DOWN_AFTER):
+    """One page server's probe history -> its reachability verdict.
 
+    (failed probes in a row, last verdict True/False/None, this pass's probe True/False/None) ->
+    (failed probes in a row, verdict). A good probe is reachable at once. A failed probe counts, and the
+    server is down only from the `down_after`-th failure in a row; before that the last verdict holds.
+    A probe that did not finish (None) changes nothing."""
+    if result is True:
+        return 0, True
+    if result is None:
+        return fails, up
+    fails += 1
+    if fails >= down_after:
+        return fails, False
+    return fails, up
+
+
+def decide(prev, reachable, epoch):
+    """(per-source state, reachability verdict, connect epoch) -> (new state, action or None).
+
+    * verdict unknown (None: no probe has finished or failed often enough yet) -> nothing changes;
     * host unreachable -> never refresh, remember it is down;
     * host reachable and not yet refreshed in THIS connect epoch -> ACTION_CONNECT (OBS loaded the
       page at its start, maybe before the server answered);
@@ -81,6 +108,8 @@ def decide(prev, reachable, epoch):
     * otherwise nothing -- a working page is never refreshed.
     The caller commits the new state only after the refresh request succeeded."""
     prev = prev if prev is not None else SourceState()
+    if reachable is None:
+        return prev, None
     if not reachable:
         return SourceState(prev.refreshed_epoch, False), None
     if prev.refreshed_epoch != epoch:
@@ -128,7 +157,7 @@ def probe_target(url):
     if not isinstance(url, str) or not url.strip():
         return None
     url = url.strip()
-    if "://" not in url:
+    if not _HAS_SCHEME.match(url):
         url = "http://" + url
     try:
         parts = urlsplit(url)
@@ -288,8 +317,8 @@ def tcp_probe(host, port, timeout=PROBE_TIMEOUT_S):
 class Prober:
     """Probes each distinct target in its own daemon thread, joined against ONE deadline per pass,
     so a hung name lookup (getaddrinfo ignores the socket timeout) can never stall the loop. A
-    probe still running at the deadline reads unreachable, and a target whose previous probe is
-    still running is not probed again -- at most one thread per target."""
+    probe still running at the deadline reads None (no information, never "down"), and a target
+    whose previous probe is still running is not probed again -- at most one thread per target."""
 
     def __init__(self, probe_fn=tcp_probe, timeout=PROBE_TIMEOUT_S):
         self._probe_fn = probe_fn
@@ -302,7 +331,7 @@ class Prober:
         for target in sorted(set(targets)):
             running = self._inflight.get(target)
             if running is not None and running.is_alive():
-                results[target] = False
+                results[target] = None
                 continue
             box = {}
 
@@ -320,7 +349,8 @@ class Prober:
         deadline = time.monotonic() + self._timeout + 1.0
         for target, thread, box in started:
             thread.join(max(0.0, deadline - time.monotonic()))
-            results[target] = box.get("ok", False) if not thread.is_alive() else False
+            results[target] = box.get("ok", False) if not thread.is_alive() else None
+        self._inflight = {t: th for t, th in self._inflight.items() if th.is_alive() or t in results}
         return results
 
 
@@ -333,11 +363,24 @@ class Keeper:
     def __init__(self, prober, log):
         self.prober = prober
         self.log = log
-        self.states = {}
+        self.states = {}        # (name, url) -> SourceState, committed only after a refresh succeeded
+        self.targets = {}       # (host, port) -> (failed probes in a row, verdict), see debounce()
+        self._logged = {}       # (name, url) -> the reachability last logged for it
         self.refreshes = 0
         self._unwatched = set()
         self._press_errors = {}
         self.last_sources = []
+
+    def _verdicts(self, targets):
+        """Probe each target once and debounce it into a reachability verdict (True/False/None)."""
+        results = self.prober.probe_all(targets)
+        verdicts = {}
+        for target in set(targets):
+            fails, up = debounce(*self.targets.get(target, (0, None)), results.get(target))
+            self.targets[target] = (fails, up)
+            verdicts[target] = up
+        self.targets = {t: v for t, v in self.targets.items() if t in verdicts}
+        return verdicts
 
     def run_pass(self, obs, epoch):
         sources = list_browser_sources(obs, self.log)
@@ -350,17 +393,20 @@ class Keeper:
                     self.log("browser source '%s' has no network page server (url %r) -- not watched" % (name, url))
                 continue
             watched.append((name, url, target))
-        results = self.prober.probe_all([t for _, _, t in watched])
+        verdicts = self._verdicts([t for _, _, t in watched])
         listed = {(name, url) for name, url, _ in watched}
         self.states = {k: v for k, v in self.states.items() if k in listed}
+        self._logged = {k: v for k, v in self._logged.items() if k in listed}
         summary = []
         for name, url, target in watched:
             key = (name, url)
+            reachable = verdicts.get(target)
+            if reachable is not None:
+                word = transition(self._logged.get(key), reachable)
+                if word is not None:
+                    self.log("browser source '%s' page server %s %s" % (name, target_text(target), TRANSITION_TEXT[word]))
+                self._logged[key] = reachable
             prev = self.states.get(key)
-            reachable = results.get(target, False)
-            word = transition(prev.reachable if prev else None, reachable)
-            if word is not None:
-                self.log("browser source '%s' page server %s %s" % (name, target_text(target), TRANSITION_TEXT[word]))
             new, action = decide(prev, reachable, epoch)
             if action is not None:
                 try:
@@ -368,17 +414,17 @@ class Keeper:
                 except ObsRequestError as e:
                     if self._press_errors.get(key) != str(e):
                         self._press_errors[key] = str(e)
-                        self.log("refresh of browser source '%s' failed (%s) -- retried next pass" % (name, e))
-                    # not committed: the next pass decides the same refresh again
-                    new = SourceState(prev.refreshed_epoch if prev else None, reachable)
+                        self.log("refresh of browser source '%s' failed (%s) -- pressed again next pass" % (name, e))
+                    new = prev  # not committed: the next pass decides the same refresh again
                 else:
                     self._press_errors.pop(key, None)
                     self.refreshes += 1
                     self.log("refreshed browser source '%s' (%s): %s, connect epoch %d" % (
                         name, url, ACTION_TEXT[action], epoch))
-            self.states[key] = new
+            if new is not None:
+                self.states[key] = new
             summary.append({"name": name, "url": url, "target": target_text(target), "reachable": reachable,
-                            "refreshed_epoch": new.refreshed_epoch})
+                            "refreshed_epoch": new.refreshed_epoch if new is not None else None})
         self.last_sources = summary
         return summary
 
