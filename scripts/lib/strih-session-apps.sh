@@ -11,16 +11,17 @@
 # strih-obs.service (design comment 5977447339, Approach 1):
 #
 #   * strih-browser-keeper.service -> scripts/strih_browser_keeper.py: refreshes each OBS browser source
-#     once after every obs-websocket (re)connect as soon as its page server answers, and again when the
-#     page server comes back; never a working page.
+#     once per OBS run (a real OBS restart, never a keeper restart or a WS reconnect) as soon as its page
+#     server answers, and again when the page server comes back; never a working page.
 #   * bkshading-panel-app.service -> scripts/bkshading_panel_app.py: the bkshading panel (:8770) in a
 #     WebKitGTK window titled "Shading" -- a NORMAL window that openbox Alt+Tab reaches.
 #
 # Both units are WantedBy=graphical-session.target like strih-obs.service, and like it they are STARTED
 # by the kiosk openbox autostart (strih_openbox_autostart_text calls strih_session_apps_autostart_lines):
 # openbox never reaches graphical-session.target, and a default.target unit would also start on a
-# user-manager start with no X session (an ssh login), where the panel window cannot open. ONE start
-# path, the one OBS uses.
+# user-manager start with no X session (an ssh login), where the panel window cannot open. ONE login
+# start path, the one OBS uses; the strih-lx genlock deploy also starts both after strih-obs, into the
+# running session (scripts/lib/strih-lx-deploy.sh strih_lx_remote_start_cmd).
 #
 #   * strih_session_apps_install -- setup-strih step 16d: the packages (python3-gi + WebKit2 4.1 +
 #     python3-websocket) and an import preflight, both programs into the bin dir, both units into the

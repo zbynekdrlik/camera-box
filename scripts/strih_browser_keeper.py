@@ -199,9 +199,12 @@ def state_verdict(state, now, max_age=STATE_MAX_AGE_S):
             max(age, 0.0), state.get("last_error") or "no error recorded")
     sources = state.get("sources") if isinstance(state.get("sources"), list) else []
     reachable = sum(1 for s in sources if isinstance(s, dict) and s.get("reachable") is True)
+    ident = state.get("obs_identity") if isinstance(state.get("obs_identity"), dict) else {}
+    by = ("the obs process start time" if isinstance(ident.get("process"), str)
+          else "the frame count only (no local obs process seen)")
     return True, ("last pass %.0f s ago, connected (OBS run epoch %s), %d browser source(s), %d with a "
-                  "reachable page server, %s refresh(es) since the keeper started") % (
-        max(age, 0.0), state.get("obs_epoch"), len(sources), reachable, state.get("refreshes", 0))
+                  "reachable page server, %s refresh(es) since the keeper started; OBS run identified by %s") % (
+        max(age, 0.0), state.get("obs_epoch"), len(sources), reachable, state.get("refreshes", 0), by)
 
 
 # --- the OBS run: identity + the keeper's own memory across its restarts -------------------------
@@ -225,9 +228,14 @@ def proc_start_ticks(stat_text):
 
 
 def local_obs_process_identity(proc_root="/proc", name=OBS_PROCESS_NAME, uid=None):
-    """'<boot id>:<start ticks>' of the newest local process called NAME owned by UID (default: ours),
-    or None when there is none. Two runs of OBS never share it: a restart is a new process."""
+    """'<boot id>:<start ticks>' of the OLDEST local process called NAME owned by UID (default: ours),
+    or None when there is none. Two runs of OBS never share it: a restart is a new process. The oldest,
+    because OBS is single-instance: a second `obs` is a short-lived stray (the "already running" dialog
+    of a desktop launch), and reading it would make a reconnect look like a new OBS run.
+    /proc is read as BYTES: a 15-byte comm can cut a multi-byte character, and a decode error there
+    must never crash the keeper."""
     uid = os.getuid() if uid is None else uid
+    want = name.encode()
     try:
         with open(os.path.join(proc_root, "sys", "kernel", "random", "boot_id")) as f:
             boot = f.read().strip()
@@ -243,14 +251,14 @@ def local_obs_process_identity(proc_root="/proc", name=OBS_PROCESS_NAME, uid=Non
         try:
             if os.stat(base).st_uid != uid:
                 continue
-            with open(os.path.join(base, "comm")) as f:
-                if f.read().strip() != name:
+            with open(os.path.join(base, "comm"), "rb") as f:
+                if f.read().rstrip(b"\n") != want:
                     continue
-            with open(os.path.join(base, "stat")) as f:
-                ticks = proc_start_ticks(f.read())
+            with open(os.path.join(base, "stat"), "rb") as f:
+                ticks = proc_start_ticks(f.read().decode("ascii", "replace"))
         except OSError:
             continue  # the process exited while we looked
-        if ticks is not None and (best is None or ticks > best):
+        if ticks is not None and (best is None or ticks < best):
             best = ticks
     return None if best is None else "%s:%d" % (boot, best)
 
@@ -518,12 +526,26 @@ class Keeper:
         self.last_sources = []
 
     def restore(self, states):
-        """Take over the per-source states a previous keeper process stored (restored_sources()), and
-        keep them in the state file until this keeper's first pass (a restart before it must not lose them)."""
+        """Take over the per-source states a previous keeper process stored (restored_sources())."""
         self.states = dict(states)
         self._logged = {k: v.reachable for k, v in states.items() if v.reachable is not None}
-        self.last_sources = [source_entry(name, url, probe_target(url), None, st)
-                             for (name, url), st in self.states.items()]
+
+    def rows(self):
+        """The state file's `sources`: the last finished pass's rows (its verdicts), each carrying the
+        CURRENT committed memory, plus every remembered source no finished pass listed yet (a keeper
+        that restarted before its first pass). A pass cut short by a lost connection may already have
+        refreshed a source; the next keeper must know it, or it refreshes that source twice."""
+        out, seen = [], set()
+        for row in self.last_sources:
+            key = (row["name"], row["url"])
+            seen.add(key)
+            st = self.states.get(key)
+            out.append(dict(row, refreshed_epoch=st.refreshed_epoch if st is not None else None,
+                            remembered_reachable=st.reachable if st is not None else None))
+        for (name, url), st in self.states.items():
+            if (name, url) not in seen:
+                out.append(source_entry(name, url, probe_target(url), None, st))
+        return out
 
     def _verdicts(self, targets):
         """Probe each target once and debounce it into a reachability verdict (True/False/None)."""
@@ -637,7 +659,7 @@ def run(connect, prober, *, interval=PASS_INTERVAL_S, state_file=None, log=None,
         err = write_state(state_file, {
             "version": STATE_VERSION, "updated_epoch_s": clock(), "connected": connected, "obs_epoch": epoch,
             "obs_identity": identity, "endpoint": endpoint, "refreshes": keeper.refreshes,
-            "sources": keeper.last_sources, "last_error": error,
+            "sources": keeper.rows(), "last_error": error,
         })
         if err != state_error:
             state_error = err

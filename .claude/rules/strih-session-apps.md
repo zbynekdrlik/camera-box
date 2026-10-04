@@ -66,22 +66,34 @@ produkcny pocitac vsetko ma bezat vzdy a stale", "na strih nb ma po starte bezat
   keeper restart (a crash, setup-strih's try-restart after a code change) or a WS reconnect (a 10 s
   request timeout, a dropped socket) under the same OBS refreshes NOTHING: a refresh blanks a graphic
   on air. The first cut bumped on every (re)connect and could not tell these apart.
-  - **The identity**, read on every connect: `process` = `<boot id>:<start ticks>` of the newest local
-    process with comm `obs` owned by the keeper's uid (`/proc/<pid>/stat` field 22, split after the
-    LAST `)`; `local_obs_process_identity`), and `frames` = GetStats `renderTotalFrames` (also updated
-    every pass). `obs_restarted(stored, current)`: both process ids known -> new run iff they differ
+  - **The identity**, read on every connect: `process` = `<boot id>:<start ticks>` of the OLDEST
+    local process with comm `obs` owned by the keeper's uid (`/proc/<pid>/stat` field 22, split after
+    the LAST `)`; `local_obs_process_identity`), and `frames` = GetStats `renderTotalFrames`, updated
+    every pass (a restart after a long run can come back with more frames than the old run had at ITS
+    connect). `obs_restarted(stored, current)`: both process ids known -> new run iff they differ
     (exact); else both frame counts known -> new run iff the count went backwards; nothing stored or
     nothing comparable -> new run.
+  - **The oldest, not the newest:** OBS is single-instance, so a second `obs` is a short-lived stray
+    (the "already running" dialog of a desktop launch). Newest read it as a new run, a refresh round on
+    air, and another one when it exited (review round 6).
+  - **/proc is read as bytes.** A comm is cut at 15 bytes and can split a multi-byte character. Read as
+    text it raised `UnicodeDecodeError` (a ValueError, not an OSError) on every connect, and the keeper
+    crash-looped (review round 6).
   - **Persisted in the /run state file** with `obs_epoch` and per source the memory `decide` needs:
     `refreshed_epoch` + `remembered_reachable`, kept apart from the pass's verdict `reachable`. A keeper
     restarted while its verdict is still unknown (its probe history is fresh: down needs 2 failed
-    probes) must not forget that the server was down, or the outage's recovered refresh is lost. A
-    restored keeper writes that memory back even before its first pass (`Keeper.restore` sets
-    `last_sources`), so a restart while OBS is down keeps it too.
+    probes) must not forget that the server was down, or the outage's recovered refresh is lost.
+  - **The state file's `sources` are `Keeper.rows()`**: the last finished pass's rows (its verdicts)
+    with the CURRENT committed memory, plus every restored source no pass listed yet. A pass cut short
+    by a lost connection may already have refreshed a source; with the last finished pass's rows the
+    next keeper refreshed it a second time in the same OBS run (review round 6). A keeper restarted
+    while OBS is down writes the restored memory back the same way.
   - `/run/user/<uid>` is tmpfs: after a boot nothing is stored, so OBS just started = a new run. A new
     epoch is set past every restored `refreshed_epoch`, so each source is refreshed exactly once.
   - A remote OBS (`--host` not loopback) has no process identity; the frame count decides.
-    `--obs-process-name` (default `obs`) names the process.
+    `--obs-process-name` (default `obs`) names the process. `--check-state` (verify item 37) ends with
+    `OBS run identified by the obs process start time` or `... by the frame count only (no local obs
+    process seen)`; on strih-lx the second one means the /proc read found no OBS of the keeper's uid.
   - Tests: `tests/python/test_strih_browser_keeper_obs_run_1399.py` runs the real loop against the real
     obs-websocket fake (`strih_keeper_fakes_1399.py`: `restart()` = new process + frames from 0 +
     dropped socket, `drop()` = socket only), one `k.run` per keeper process over one state file.
@@ -135,7 +147,8 @@ STARTED by the kiosk openbox autostart (`strih_openbox_autostart_text` calls
 `strih_session_apps_autostart_lines`, after strih-obs + the bundle-state server, before Companion).
 - openbox never reaches graphical-session.target, so the WantedBy only makes `enable` meaningful.
 - A `default.target` unit would also start on a user-manager start with no X session (an ssh login,
-  linger), where the panel cannot open a window. ONE start path, the one OBS uses.
+  linger), where the panel cannot open a window. ONE login start path, the one OBS uses. The strih-lx
+  genlock deploy also starts both after strih-obs, into the running session (below).
 - imag's autostart is a separate renderer and is untouched.
 - Both units set `StartLimitIntervalSec=0`: never give up.
 
@@ -215,9 +228,10 @@ step (verify-strih) sees them active.
    ... bkshading-panel-app.service`. Its start step then starts strih-obs and both apps; no WARNING
    line from `[strih-lx start]`. No manual start.
 2. `journalctl --user -u strih-browser-keeper -n 30`: `connected to obs-websocket 127.0.0.1:4455: a new
-   OBS run (process <boot>:<ticks>, N frames) -> OBS run epoch 1`, then one `refreshed browser source
-   ...` line per browser source.
-3. The deploy's acceptance step (verify-strih) PASSes items 37 + 38; the window row names the WM_CLASS.
+   OBS run (process <boot>:<ticks>, N frames) -> OBS run epoch 1`, the process NOT `None`, then one
+   `refreshed browser source ...` line per browser source.
+3. The deploy's acceptance step (verify-strih) PASSes items 37 + 38; the window row names the WM_CLASS
+   and the keeper row ends `OBS run identified by the obs process start time`.
    Read the first live `wmctrl -lx` line once.
 4. Keeper restart, same OBS: `systemctl --user restart strih-browser-keeper` -> `resumed from ...` and
    `the same OBS run as before (OBS run epoch 1) -- no refresh round`, and no `refreshed` line (no

@@ -1,10 +1,11 @@
 [Unit]
 # issue 1399 -- strih-lx's browser-source keeper. obs-browser loads a browser source's page ONCE at
 # OBS start and never retries a failed load; this keeper lists every browser_source over the local
-# obs-websocket and presses its `refreshnocache` button once after every (re)connect = OBS (re)start
-# as soon as the page server answers, and again whenever the page server comes back after being
-# unreachable -- never on a working page. scripts/strih_browser_keeper.py; installed by
-# setup-strih.sh step 16d (scripts/lib/strih-session-apps.sh), graded by verify-strih.sh item 37.
+# obs-websocket and presses its `refreshnocache` button once per OBS run (a real OBS restart, never a
+# keeper restart or a WS reconnect) as soon as the page server answers, and again whenever the page
+# server comes back after being unreachable -- never on a working page. scripts/strih_browser_keeper.py;
+# installed by setup-strih.sh step 16d (scripts/lib/strih-session-apps.sh), started at login by the
+# kiosk autostart and after strih-obs by the strih-lx genlock deploy, graded by verify-strih.sh item 37.
 Description=strih-lx browser-source keeper -- reload OBS browser sources when their page server answers (issue 1399)
 Documentation=https://github.com/zbynekdrlik/camera-box
 After=strih-obs.service
