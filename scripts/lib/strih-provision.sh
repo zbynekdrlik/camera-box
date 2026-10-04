@@ -27,6 +27,11 @@ if ! declare -F strih_box_fact >/dev/null; then
   # shellcheck source=scripts/lib/strih-box-facts.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-box-facts.sh"
 fi
+# issue 1399: the session apps' own source-only lib (strih_openbox_autostart_text starts them).
+if ! declare -F strih_session_apps_autostart_lines >/dev/null; then
+  # shellcheck source=scripts/lib/strih-session-apps.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-session-apps.sh"
+fi
 
 # strih_lx_ndi_inputs -> the 10 NDI input names the strih role receives, one per line (issue 1317
 # spec; the 2ME feedback inputs are the task's explicit STRIH-SNV names). NOTE (issue 1352): the
@@ -1813,8 +1818,8 @@ strih_companion_satellite_openbox_line() {
 # It carries the shared kiosk preamble (never-blank
 # + OBS crash-sentinel clear, obs_box_openbox_autostart_preamble -- graded by the baseline verify), then
 # STARTS the supervised --user units (openbox never reaches graphical-session.target, so their WantedBy
-# alone would never fire -- imag's step-16 pattern) and launches Companion Satellite. RustDesk needs no
-# line: its system rustdesk.service serves the Xorg session itself. Needs obs-box-baseline.sh sourced.
+# alone would never fire -- imag's step-16 pattern) + the issue-1399 session apps, and launches Companion
+# Satellite. RustDesk needs no line: its system rustdesk.service serves the Xorg session itself. Needs obs-box-baseline.sh sourced.
 strih_openbox_autostart_text() {
   local box
   box="$(strih_lx_hostname)" || return 1
@@ -1838,5 +1843,6 @@ AUTOSTART_EOF
   # one start per unit: a not-yet-installed bundle-state server must never block the OBS start.
   printf '%s\n' 'systemctl --user start strih-obs.service || true' \
     'systemctl --user start strih-bundle-state-server.service || true'
+  strih_session_apps_autostart_lines
   printf '%s\n' "$(strih_companion_satellite_openbox_line)"
 }

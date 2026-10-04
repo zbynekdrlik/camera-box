@@ -37,6 +37,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${HERE}/lib/remoteos-mcp.sh"
 # shellcheck source=scripts/lib/obs-downstream-keyer.sh
 . "${HERE}/lib/obs-downstream-keyer.sh"
+# issue 1399: item 28's collection reads (moved out of this file, which sits at its line budget).
+# shellcheck source=scripts/lib/strih-obs-collection.sh
+. "${HERE}/lib/strih-obs-collection.sh"
 # issue 1317: the dantesync item grades a FRESH offset via the SHARED freshness-aware verdict (the
 # cambox verify-device (d) shape) instead of reading a Windows/imag dantesync JSON config file a
 # flag-based Linux client never creates. clock-offset-guard.sh has its own source-guard, so sourcing
@@ -697,48 +700,9 @@ fi
 #     entries in the ACTIVE collection JSON via the pure strih_collection_hygiene_verdict; NOTE only --
 #     provisioning NEVER rewrites the owner's collection, it only reports (a re-import re-introduces the
 #     boot popups this bake-in warns about).
-OBS_BASE="${USER_HOME}/.config/obs-studio"
-COLL_NAME="$(sed -n 's/^SceneCollectionFile=//p' "${OBS_BASE}/global.ini" 2>/dev/null | head -1 || true)"
-COLL_JSON=""
-if [ -n "$COLL_NAME" ] && [ -f "${OBS_BASE}/basic/scenes/${COLL_NAME}.json" ]; then
-  COLL_JSON="${OBS_BASE}/basic/scenes/${COLL_NAME}.json"
-else
-  # Fallback: newest *.json (the `*.json` glob already excludes the `*.json.bak*` backups). No ls|grep.
-  for _cj in "${OBS_BASE}/basic/scenes/"*.json; do
-    [ -e "$_cj" ] || continue
-    if [ -z "$COLL_JSON" ] || [ "$_cj" -nt "$COLL_JSON" ]; then COLL_JSON="$_cj"; fi
-  done
-fi
+COLL_JSON="$(strih_active_collection_json "${USER_HOME}/.config/obs-studio")"
 if [ -n "$COLL_JSON" ] && command -v python3 >/dev/null 2>&1; then
-  HYG_COUNTS="$(python3 - "$COLL_JSON" <<'PYHY' 2>/dev/null || true
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    sys.exit(0)   # print nothing -> caller NOTEs "could not parse"
-def count_id(o, val):
-    n = 0
-    if isinstance(o, dict):
-        if o.get("id") == val:
-            n += 1
-        for v in o.values():
-            n += count_id(v, val)
-    elif isinstance(o, list):
-        for v in o:
-            n += count_id(v, val)
-    return n
-shader = count_id(d, "shader_filter")
-lua = 0
-mods = d.get("modules", {}) if isinstance(d, dict) else {}
-st = mods.get("scripts-tool") if isinstance(mods, dict) else None
-if isinstance(st, list):
-    lua = len(st)
-elif isinstance(st, dict):
-    inner = st.get("scripts")
-    lua = len(inner) if isinstance(inner, list) else (1 if st else 0)
-print("%d %d" % (shader, lua))
-PYHY
-)"
+  HYG_COUNTS="$(strih_collection_hygiene_counts "$COLL_JSON")"
   if [ -n "$HYG_COUNTS" ]; then
     # HYG_COUNTS is "SHADER LUA" -- word-split into the two args on purpose.
     # shellcheck disable=SC2086
@@ -860,6 +824,10 @@ if [ -f /etc/systemd/system/bkshading-service.service ]; then
 else
   bad "(bkshading-service) unit /etc/systemd/system/bkshading-service.service not installed -- re-run setup-strih.sh step 16c (issue 1353)"
 fi
+
+# 37) + 38) issue 1399 session apps (scripts/lib/strih-session-apps.sh, sourced by strih-provision.sh): the
+#     browser-source keeper (unit + its last pass) and the shading panel window (unit + "Shading" on :0).
+strih_session_apps_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(session-apps) the grader printed no row"
 
 # 16) NIC xhci IRQ affinity (issue 1317 item H): the USB-NIC's xhci interrupt must be pinned to a
 #     SINGLE E-core (>= the first cpu_atom cpu) so its NET_RX softirq never shares an OBS core, AND

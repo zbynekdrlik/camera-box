@@ -790,7 +790,7 @@ obs_box_openbox_menu_xml "$(strih_lx_hostname)" "systemctl --user start strih-ob
 chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/openbox/menu.xml"
 rm -f "${USER_HOME}/.config/autostart/companion-satellite.desktop" "${USER_HOME}/.config/autostart/obs.desktop"
 rmdir "${USER_HOME}/.config/autostart" 2>/dev/null || true
-echo "  ~/.config/openbox/autostart (display layout + kiosk preamble + strih-obs/bundle-state start + Companion Satellite) + menu.xml written for ${DESKTOP_USER}; GNOME-era XDG autostarts removed"
+echo "  ~/.config/openbox/autostart (display layout + kiosk preamble + strih-obs/bundle-state/session-app starts + Companion Satellite) + menu.xml written for ${DESKTOP_USER}; GNOME-era XDG autostarts removed"
 
 # ---------------------------------------------------------------------------------------------
 step 16 "Bitfocus Companion Satellite (Stream Deck surface agent) -- desktop, launched by the openbox autostart"
@@ -952,6 +952,16 @@ if [ -x /opt/bkshading/bkshading ]; then
 else
   warn "  bkshading-service.service installed + enabled but /opt/bkshading/bkshading is ABSENT -- install the CI ${BKSH_ART} binary before go-live"
 fi
+
+# ---------------------------------------------------------------------------------------------
+# A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
+step "16d" "Session apps (issue 1399): browser-source keeper + shading panel window -- --user units, enable-only"
+# issue 1399 (owner 4.10.2026): the OBS browser sources reload themselves once their page server answers
+# (strih-browser-keeper.service), and the shading panel runs as an app window titled "Shading"
+# (bkshading-panel-app.service). Both are started by the kiosk openbox autostart (step 15), never here.
+# The whole step lives in scripts/lib/strih-session-apps.sh (sourced by strih-provision.sh).
+strih_session_apps_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" \
+  || fail "issue 1399: the session apps (browser-source keeper + shading panel window) could not be provisioned (above)"
 
 # ---------------------------------------------------------------------------------------------
 step 17 "Final verification (verify-strih.sh acceptance gate)"
