@@ -446,9 +446,10 @@ strih_session_app_ok_text() {
   fi
 }
 
-# strih_session_app_process_facts USER UNIT -> `<cmdline with spaces>|<exe>|<start>` of the unit's main
-# process, read in USER's session (each empty when unreadable; <exe> = readlink /proc/<pid>/exe).
-# STRIH_SESSION_APPS_PROC is the /proc test seam.
+# strih_session_app_process_facts USER UNIT -> `<exe>|<start>|<cmdline with spaces>` of the unit's main
+# process, read in USER's session (each empty when unreadable; <exe> = readlink /proc/<pid>/exe). The
+# free-form cmdline is LAST, so a "|" inside it never shifts the fixed fields. STRIH_SESSION_APPS_PROC is
+# the /proc test seam.
 strih_session_app_process_facts() {
   local user="$1" unit="$2" pid start cmd="" exe=""
   pid="$(strih_session_apps_user_systemctl "$user" show -p MainPID --value "$unit" 2>/dev/null || true)"
@@ -460,7 +461,7 @@ strih_session_app_process_facts() {
     cmd="$( { tr '\0' ' ' < "${STRIH_SESSION_APPS_PROC:-/proc}/${pid}/cmdline"; } 2>/dev/null || true)"
     exe="$(readlink "${STRIH_SESSION_APPS_PROC:-/proc}/${pid}/exe" 2>/dev/null || true)"
   fi
-  printf '%s|%s|%s' "$cmd" "$exe" "${start%%$'\n'*}"
+  printf '%s|%s|%s' "$exe" "${start%%$'\n'*}" "$cmd"
 }
 
 # strih_shading_window_present [CLASS] [TITLE] (stdin = `wmctrl -lx`) -> rc 0 iff a window has the panel
@@ -532,7 +533,7 @@ strih_session_apps_grade_rows() {
     active="$(strih_session_apps_user_systemctl "$user" is-active "$u" 2>/dev/null || true)"
     active="${active%%$'\n'*}"
     facts="$(strih_session_app_process_facts "$user" "$run")"
-    cmd="${facts%%|*}"; start="${facts##*|}"; exe="${facts#*|}"; exe="${exe%|*}"
+    exe="${facts%%|*}"; start="${facts#*|}"; cmd="${start#*|}"; start="${start%%|*}"
     newest="$(stat -c %Y "${files[@]/#/${unitdir}/}" "$program" 2>/dev/null | sort -n | tail -n 1 || true)"
     if [ "$run" != "$u" ]; then
       process="$(strih_session_app_last_run_state "$start" "$newest" || true)"

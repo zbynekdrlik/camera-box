@@ -350,6 +350,7 @@ def run_pass(state_file, observe_fn, restart, *, log, wall=time.time, boot=boot_
     d = decide(since_prev, obs, now, need)
     restarts = prev.get("restarts") if isinstance(prev.get("restarts"), int) and prev["restarts"] >= 0 else 0
     last_restart = prev.get("last_restart") if isinstance(prev.get("last_restart"), dict) else None
+    last_ok = prev.get("last_ok_epoch_s") if _is_time(prev.get("last_ok_epoch_s")) else None
     last_error = None
     if d.restart:
         held = "; ".join("%s, for %.0f s" % (fault_text(f, obs.companion), now - (
@@ -373,6 +374,7 @@ def run_pass(state_file, observe_fn, restart, *, log, wall=time.time, boot=boot_
         cond = condition_of(obs, d)
         if cond == "ok":
             unhealed = 0
+            last_ok = wall()
         if cond != prev.get("condition"):
             line = condition_line(cond, obs, need, unit, rest_url)
             if line is None:  # ok
@@ -382,7 +384,8 @@ def run_pass(state_file, observe_fn, restart, *, log, wall=time.time, boot=boot_
     state = {"version": STATE_VERSION, "updated_epoch_s": wall(), "boot_s": now, "since": d.since,
              "condition": cond, "observation": observation_dict(obs), "restarts": restarts,
              "unhealed_restarts": unhealed, "effective_sustain_s": effective_sustain(sustain, unhealed),
-             "last_restart": last_restart, "unit": unit, "sustain_s": sustain, "last_error": last_error}
+             "last_restart": last_restart, "last_ok_epoch_s": last_ok, "unit": unit, "sustain_s": sustain,
+             "last_error": last_error}
     werr = write_state(state_file, state)
     if werr:
         log("state file %s not written: %s" % (state_file, werr))
@@ -425,14 +428,20 @@ def state_verdict(state, now, max_age=STATE_MAX_AGE_S):
     if since and _is_time(boot_s):
         held = "; ".join("%s for %.0f s" % (fault_text(f, o.get("companion")), boot_s - t)
                          for f, t in since.items() if _is_time(t))
-        now_text += "; FAULT in progress: %s (restart at %.0f s)" % (held, state.get("sustain_s") or SUSTAIN_S)
+        restart_at = state.get("effective_sustain_s")
+        if not _is_time(restart_at):
+            restart_at = state.get("sustain_s") if _is_time(state.get("sustain_s")) else SUSTAIN_S
+        now_text += "; FAULT in progress: %s (restart at %.0f s)" % (held, restart_at)
     restarts = state.get("restarts") if isinstance(state.get("restarts"), int) else 0
     unit = state.get("unit") or SATELLITE_UNIT
     text = "last pass %.0f s ago: %s; %d restart(s) of %s since boot" % (max(age, 0.0), now_text, restarts, unit)
-    if cond != "ok":
-        # the watch runs but cannot cure the fault: a red, never a quiet OK
+    if cond == "restarted" or cond.startswith("fault:"):
+        # the watch runs but cannot cure a fault that holds NOW: a red, never a quiet OK. Companion down or a
+        # silent REST is not such a fault, and a failed restart older than the last healthy pass is history.
         lr = state.get("last_restart") if isinstance(state.get("last_restart"), dict) else {}
-        if lr.get("ok") is False:
+        last_ok = state.get("last_ok_epoch_s")
+        if lr.get("ok") is False and (not _is_time(last_ok) or not _is_time(lr.get("epoch_s"))
+                                      or lr["epoch_s"] > last_ok):
             return False, "the watch could NOT restart %s (%s) while the fault holds -- %s" % (
                 unit, lr.get("error"), text)
         unhealed = state.get("unhealed_restarts")
