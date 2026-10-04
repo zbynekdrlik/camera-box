@@ -1,0 +1,29 @@
+[Unit]
+# issue 1399 -- ONE pass of the Companion Satellite liveness watch (scripts/strih_satellite_watch.py),
+# run every 30 s by strih-satellite-watch.timer. It restarts companion-satellite.service when the
+# Satellite's own REST shows, for 60 s, `connected` false while the Companion port answers, or no surface
+# open while the Stream Deck is on USB -- never while Companion itself is down. Installed beside the
+# timer by setup-strih.sh step 16d (scripts/lib/strih-session-apps.sh); never enabled itself (the timer
+# starts it); graded by verify-strih.sh item 40.
+Description=strih-lx Companion Satellite liveness watch -- one pass (issue 1399)
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=companion-satellite.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+# %t = the user runtime dir (/run/user/<uid>): the state file keeps the fault start times between passes
+# and is what verify-strih reads for "the watch runs".
+ExecStart=/usr/bin/python3 /usr/local/bin/strih_satellite_watch.py --state-file %t/strih-satellite-watch.json
+# A pass is three REST reads + one TCP connect (3 s timeouts each) and a non-blocking try-restart.
+TimeoutStartSec=20
+NoNewPrivileges=true
+
+# Logging. Every 30 s the user manager logs "Starting"/"Finished" for a oneshot at info level: keep only
+# the watch's own lines (a condition change, a restart) and any failure. SyslogLevel raises the watch's
+# stdout to notice; LogLevelMax drops everything below it (systemd 255, checked on dev1).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=strih-satellite-watch
+SyslogLevel=notice
+LogLevelMax=notice

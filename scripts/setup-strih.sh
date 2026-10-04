@@ -775,9 +775,9 @@ step 15 "Kiosk openbox autostart + root menu (issue 1357: OBS + Companion Satell
 # issue 1357: the lightdm autologin -> openbox kiosk (baseline step 11) runs ~/.config/openbox/autostart
 # at every boot -- the imag step-16 pattern. openbox never reaches graphical-session.target, so the
 # --user units' WantedBy alone would never fire: the autostart STARTS strih-obs.service + the bundle-
-# state server itself and launches Companion Satellite (openbox does not run XDG ~/.config/autostart,
-# which is why the GNOME-era .desktop entries are removed below -- an XDG autostart that DID fire via
-# systemd --user would double-launch). It carries the shared kiosk preamble (never-blank + OBS crash-
+# state server itself, and the issue-1399 session apps, companion-satellite.service among them (openbox
+# does not run XDG ~/.config/autostart, which is why the GNOME-era .desktop entries are removed below --
+# an XDG autostart that DID fire via systemd --user would double-launch). It carries the shared kiosk preamble (never-blank + OBS crash-
 # sentinel clear) the baseline verify grades. The root menu is the SAME printer imag uses.
 install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" -m 755 "${USER_HOME}/.config/openbox"
 strih_openbox_autostart_text > "${USER_HOME}/.config/openbox/autostart" \
@@ -790,10 +790,10 @@ obs_box_openbox_menu_xml "$(strih_lx_hostname)" "systemctl --user start strih-ob
 chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/openbox/menu.xml"
 rm -f "${USER_HOME}/.config/autostart/companion-satellite.desktop" "${USER_HOME}/.config/autostart/obs.desktop"
 rmdir "${USER_HOME}/.config/autostart" 2>/dev/null || true
-echo "  ~/.config/openbox/autostart (display layout + kiosk preamble + strih-obs/bundle-state/session-app starts + Companion Satellite) + menu.xml written for ${DESKTOP_USER}; GNOME-era XDG autostarts removed"
+echo "  ~/.config/openbox/autostart (display layout + kiosk preamble + strih-obs/bundle-state/session-app starts, Companion Satellite included) + menu.xml written for ${DESKTOP_USER}; GNOME-era XDG autostarts removed"
 
 # ---------------------------------------------------------------------------------------------
-step 16 "Bitfocus Companion Satellite (Stream Deck surface agent) -- desktop, launched by the openbox autostart"
+step 16 "Bitfocus Companion Satellite (Stream Deck surface agent) -- desktop build, run by companion-satellite.service"
 # issue 1317: the owner caught this missing live -- the notebook's locally-attached Stream Deck was
 # dead because Companion Satellite was never installed. Install the SATELLITE (NOT full Companion --
 # the venue runs the Companion CONTROLLER at 10.77.9.205, this box only exposes its local surface to
@@ -845,9 +845,9 @@ chown "$DESKTOP_USER":"$DESKTOP_USER" "${CS_APPCFG_DIR}/config.json"
 # running instance adopts it live (connected:true afterwards). Best-effort: a no-op when the Satellite
 # is not up (a fresh box that seeds but never starts it), so it never aborts the provisioning run.
 eval "$(strih_companion_satellite_rest_apply_cmd "$CS_HOST" "$CS_PORT")" || true
-# issue 1357: launched by the kiosk openbox autostart (step 15, strih_companion_satellite_openbox_line) --
-# never started mid-provision, and no XDG ~/.config/autostart entry (openbox does not run those).
-echo "  Companion Satellite v${CS_VER} installed to /opt (launched by the openbox autostart for ${DESKTOP_USER}, NOT started now); controller ${CS_HOST}:${CS_PORT} seeded (config.json + host.conf)"
+# issue 1399: it runs as the --user unit companion-satellite.service (step 16d), which the kiosk openbox
+# autostart (step 15) starts -- never started mid-provision, and no XDG ~/.config/autostart entry.
+echo "  Companion Satellite v${CS_VER} installed to /opt (run by companion-satellite.service for ${DESKTOP_USER}, NOT started now); controller ${CS_HOST}:${CS_PORT} seeded (config.json + host.conf)"
 
 # ---------------------------------------------------------------------------------------------
 # A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
@@ -955,13 +955,15 @@ fi
 
 # ---------------------------------------------------------------------------------------------
 # A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
-step "16d" "Session apps (issue 1399): browser-source keeper + shading panel window -- --user units, enable-only"
+step "16d" "Session apps (issue 1399): browser-source keeper, shading panel window, Companion Satellite + its watch -- --user units, enable-only"
 # issue 1399 (owner 4.10.2026): the OBS browser sources reload themselves once their page server answers
-# (strih-browser-keeper.service), and the shading panel runs as an app window titled "Shading"
-# (bkshading-panel-app.service). Both are started by the kiosk openbox autostart (step 15), never here.
+# (strih-browser-keeper.service), the shading panel runs as an app window titled "Shading"
+# (bkshading-panel-app.service), and Companion Satellite (the Stream Deck XL agent, installed in step 16)
+# runs as companion-satellite.service with a 30 s liveness watch (strih-satellite-watch.timer). All are
+# started by the kiosk openbox autostart (step 15), never here.
 # The whole step lives in scripts/lib/strih-session-apps.sh (sourced by strih-provision.sh).
 strih_session_apps_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" \
-  || fail "issue 1399: the session apps (browser-source keeper + shading panel window) could not be provisioned (above)"
+  || fail "issue 1399: the session apps (keeper, panel window, Companion Satellite + its watch) could not be provisioned (above)"
 
 # ---------------------------------------------------------------------------------------------
 step 17 "Final verification (verify-strih.sh acceptance gate)"
