@@ -137,7 +137,7 @@ strih_session_apps_runtime_dir() {
 # provisioned with nobody logged in) only WARNs -- the autostart starts the units regardless.
 strih_session_apps_install() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
-  local bindir unitdir u script missing py w1 w2 err
+  local bindir unitdir u script missing py w1 w2 err unit_written
   local -a changed
   bindir="$(strih_session_apps_bin_dir)"
   unitdir="${home}/.config/systemd/user"
@@ -165,10 +165,12 @@ strih_session_apps_install() {
   install -d -m 0755 "$bindir" || { echo "strih-session-apps: cannot create ${bindir}" >&2; return 1; }
   install -d -m 0755 "$unitdir" || { echo "strih-session-apps: cannot create ${unitdir}" >&2; return 1; }
   changed=()
+  unit_written=0
   for u in "${STRIH_SESSION_APP_UNITS[@]}"; do
     script="$(strih_session_app_script "$u")" || return 1
     w1="$(strih_session_apps_put "${repo}/scripts/${script}" "${bindir}/${script}" 0755)" || return 1
     w2="$(strih_session_apps_put "${repo}/systemd/${u}" "${unitdir}/${u}" 0644)" || return 1
+    [ "$w2" = written ] && unit_written=1
     if [ "$w1" = written ] || [ "$w2" = written ]; then
       changed+=("$u")
       echo "  installed ${u} -> ${unitdir}/${u} (runs ${bindir}/${script}): program ${w1}, unit ${w2}"
@@ -188,19 +190,25 @@ strih_session_apps_install() {
   fi
   chown -R "${user}:${user}" "$unitdir" 2>/dev/null || echo "  WARN: could not chown ${unitdir} to ${user}"
 
-  if err="$(strih_session_apps_user_systemctl "$user" enable "${STRIH_SESSION_APP_UNITS[@]}" 2>&1)"; then
-    echo "  enabled ${STRIH_SESSION_APP_UNITS[*]} (a stopped unit is NOT started: the kiosk openbox autostart starts both at every login)"
-  else
+  if ! err="$(strih_session_apps_user_systemctl "$user" enable "${STRIH_SESSION_APP_UNITS[@]}" 2>&1)"; then
+    # No user bus = no running unit either: nothing to reload or restart.
     echo "  WARN: systemctl --user enable failed for ${user} (${err//$'\n'/ }) -- enable by hand once logged in: systemctl --user enable ${STRIH_SESSION_APP_UNITS[*]} (the autostart starts both regardless)"
+    return 0
   fi
+  echo "  enabled ${STRIH_SESSION_APP_UNITS[*]} (a stopped unit is NOT started: the kiosk openbox autostart starts both at every login)"
   # A RUNNING unit whose program or unit changed is restarted, so the new code runs (try-restart never
-  # starts a stopped unit: still enable-only). In the genlock deploy OBS is stopped here, so a keeper
+  # starts a stopped unit: still enable-only). A written unit file is reloaded explicitly first, so a
+  # restart never runs a cached old definition. In the genlock deploy OBS is stopped here, so a keeper
   # restart costs no extra refresh.
+  if [ "$unit_written" = 1 ] && ! err="$(strih_session_apps_user_systemctl "$user" daemon-reload 2>&1)"; then
+    echo "  WARN: systemctl --user daemon-reload failed (${err//$'\n'/ }) -- not restarting onto unit files the manager has not read; run daemon-reload + restart by hand"
+    return 0
+  fi
   if [ "${#changed[@]}" -gt 0 ]; then
     if err="$(strih_session_apps_user_systemctl "$user" try-restart "${changed[@]}" 2>&1)"; then
       echo "  try-restart ${changed[*]} (only a running unit is restarted onto the new files)"
     else
-      echo "  WARN: systemctl --user try-restart ${changed[*]} failed (${err//$'\n'/ }) -- restart them by hand: the running process still runs the old files"
+      echo "  WARN: systemctl --user try-restart ${changed[*]} failed (${err//$'\n'/ }) -- restart them by hand: a running one still runs the old files"
     fi
   fi
   return 0
@@ -287,7 +295,9 @@ strih_session_app_process_facts() {
   pid="$(strih_session_apps_user_systemctl "$user" show -p MainPID --value "$unit" 2>/dev/null || true)"
   start="$(strih_session_apps_user_systemctl "$user" show -p ExecMainStartTimestamp --value --timestamp=unix "$unit" 2>/dev/null || true)"
   if [[ "${pid%%$'\n'*}" =~ ^[1-9][0-9]*$ ]]; then
-    cmd="$(tr '\0' ' ' < "${STRIH_SESSION_APPS_PROC:-/proc}/${pid%%$'\n'*}/cmdline" 2>/dev/null || true)"
+    # the group carries the 2>/dev/null: a redirect fails before a command's own 2>/dev/null applies,
+    # and a main process that exited between `show` and this read must not print on verify's stderr.
+    cmd="$( { tr '\0' ' ' < "${STRIH_SESSION_APPS_PROC:-/proc}/${pid%%$'\n'*}/cmdline"; } 2>/dev/null || true)"
   fi
   printf '%s|%s' "$cmd" "${start%%$'\n'*}"
 }

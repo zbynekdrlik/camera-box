@@ -827,7 +827,7 @@ fi
 
 # 37) + 38) issue 1399 session apps (scripts/lib/strih-session-apps.sh, sourced by strih-provision.sh): the
 #     browser-source keeper (unit + its last pass) and the shading panel window (unit + "Shading" on :0).
-strih_session_apps_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(session-apps) the grader printed no row"
+strih_session_apps_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(session-apps) the grader did not print all of its rows"
 
 # 16) NIC xhci IRQ affinity (issue 1317 item H): the USB-NIC's xhci interrupt must be pinned to a
 #     SINGLE E-core (>= the first cpu_atom cpu) so its NET_RX softirq never shares an OBS core, AND

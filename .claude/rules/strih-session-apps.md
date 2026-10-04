@@ -39,7 +39,10 @@ produkcny pocitac vsetko ma bezat vzdy a stale", "na strih nb ma po starte bezat
 - **Probes are bounded.** One daemon thread per distinct `host:port`, joined against ONE deadline per
   pass (probe timeout 5 s + 1). `getaddrinfo` ignores the socket timeout, so a hung name lookup must
   not stall the loop: a probe still running at the deadline reads `None` (no information) and its
-  target is not probed again until that thread ends, so at most one thread per target.
+  target is not probed again until that thread ends, so at most one thread per target. Once it has
+  finished, its LATE result is the target's result on the next pass (used once): with slow DNS plus a
+  black-holed connect a down server must still read down eventually, or it never gets its recovered
+  refresh (review round 2).
 - **Debounce (`debounce()`):** a page server is DOWN only after `DOWN_AFTER` (2) failed probes in a row
   (~10 s); a good probe is up at once; an unfinished probe (`None`) changes nothing. Without it, one lost
   TCP connect or one slow DNS answer read as an outage, and the next good probe reloaded a working page
@@ -128,10 +131,14 @@ STARTED by the kiosk openbox autostart (`strih_openbox_autostart_text` calls
   - the 4.10.2026 stopgap migrated: the unit file is overwritten under the SAME name, its
     `default.target.wants` link and its `~/.local/bin/bkshading-panel-app` copy are removed;
   - `systemctl --user enable` both (as root through `sudo -u <user> XDG_RUNTIME_DIR=/run/user/<uid>`),
-    then `try-restart` the units whose files changed. try-restart restarts only a RUNNING unit (the
-    stopgap panel on the first deploy, an older keeper/panel later) and never starts a stopped one, so
-    this stays enable-only. In the genlock deploy OBS is stopped at that moment, so a keeper restart
-    costs no extra refresh. A failure of either only WARNs, with systemctl's own error.
+    then an explicit `daemon-reload` when a unit FILE was written, then `try-restart` the units whose
+    files changed. try-restart restarts only a RUNNING unit (the stopgap panel on the first deploy, an
+    older keeper/panel later) and never starts a stopped one, so this stays enable-only. In the genlock
+    deploy OBS is stopped at that moment, so a keeper restart costs no extra refresh. A failed enable
+    (no user bus = nothing runs) skips the reload and the restart; every failure only WARNs, with
+    systemctl's own error. `NeedDaemonReload` is deliberately NOT graded: systemd keeps it manager-wide
+    (the dantesync finding in `strih-linux-provisioning.md`), so another unit's change would FAIL this
+    item; the explicit reload before the restart + the process start-vs-mtime check cover it.
 - **verify-strih items 37 + 38** = `strih_session_apps_grade_report` (one PASS/FAIL row each; the
   report FAILs unless all `strih_session_apps_row_count` rows came back):
   - `(browser-keeper)` / `(shading-app)`: the unit and its program byte-identical to the checkout,
@@ -140,6 +147,9 @@ STARTED by the kiosk openbox autostart (`strih_openbox_autostart_text` calls
     `ExecMainStartTimestamp` (`--timestamp=unix`) must be at or after the newest mtime of the installed
     program + unit (`strih_session_app_process_state`: `stale` / `wrong-program` / `unreadable`). Files
     on disk alone would read OK while the old process runs (the stopgap, or code from before a deploy).
+    The /proc read wraps the redirect in a group with `2>/dev/null` (a bare `< file 2>/dev/null` prints
+    the open error before the command's own redirect applies), so a main process that exits between
+    `show` and the read is a quiet `unreadable`.
   - `(browser-keeper-pass)`: `strih_browser_keeper.py --check-state` on the runtime state file;
   - `(shading-app-window)`: a window with the panel's own WM_CLASS AND the title "Shading" in
     `wmctrl -lx` on :0 (field 3 = `res_name.res_class`, field 5 on = the title; as root through
@@ -147,7 +157,9 @@ STARTED by the kiosk openbox autostart (`strih_openbox_autostart_text` calls
     first live `wmctrl -lx` line on strih-lx when grading this the first time (dev1 has no wmctrl).
 - Test seams: `STRIH_SESSION_APPS_BIN_DIR`, `_RUNTIME_DIR`, `_EUID`, `_PYTHON`, `_WMCTRL`, `_PROC`; the
   pytest runs the real install + grader with fake `dpkg-query` / `apt-get` / `systemctl` / `sudo` /
-  `id` / `wmctrl` on PATH and a fake `/proc`, under the callers' `set -euo pipefail`.
+  `id` / `wmctrl` on PATH and a fake `/proc`, under the callers' `set -euo pipefail`. The fake `sudo`
+  drops `-u USER` and EXECS the rest (`env VAR=val cmd ...`), so a grade test with `_EUID=0` runs the
+  root path the deploy's verify takes, not just a logged line.
 
 ## verify-strih line budget: the item-28 split
 
@@ -172,7 +184,9 @@ start step (after strih-obs) would remove that one manual step; raised to the ma
 
 1. Re-run `setup-strih.sh --box strih-lx` (the next genlock deploy does): step 16d logs the stopgap
    link + copy removed, both units enabled, and `try-restart ... bkshading-panel-app.service`.
-2. As the operator: `systemctl --user start strih-browser-keeper.service` (or reboot the box).
+2. As the operator, start both if inactive (start is a no-op on a running unit):
+   `systemctl --user start strih-browser-keeper.service bkshading-panel-app.service` (or reboot the box).
+   try-restart only moved a RUNNING stopgap panel onto the new unit; a stopped one stays stopped.
 3. `journalctl --user -u strih-browser-keeper -n 30`: `connected to obs-websocket 127.0.0.1:4455
    (connect epoch 1)`, one `refreshed browser source ...` line per browser source.
 4. `verify-strih.sh --box strih-lx`: items 37 + 38 PASS; the window row names the WM_CLASS.

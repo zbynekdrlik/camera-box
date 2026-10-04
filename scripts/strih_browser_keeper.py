@@ -317,21 +317,29 @@ def tcp_probe(host, port, timeout=PROBE_TIMEOUT_S):
 class Prober:
     """Probes each distinct target in its own daemon thread, joined against ONE deadline per pass,
     so a hung name lookup (getaddrinfo ignores the socket timeout) can never stall the loop. A
-    probe still running at the deadline reads None (no information, never "down"), and a target
-    whose previous probe is still running is not probed again -- at most one thread per target."""
+    probe still running at the deadline reads None (no information, never "down") and is kept:
+    while it runs, the target is not probed again (at most one thread per target), and once it has
+    finished its late result is the target's result on the next pass -- slow DNS plus a black-holed
+    connect must still read down eventually."""
 
     def __init__(self, probe_fn=tcp_probe, timeout=PROBE_TIMEOUT_S):
         self._probe_fn = probe_fn
         self._timeout = timeout
-        self._inflight = {}
+        self._pending = {}  # target -> (thread, result box) of a probe that missed its deadline
 
     def probe_all(self, targets):
         results = {}
         started = []
-        for target in sorted(set(targets)):
-            running = self._inflight.get(target)
-            if running is not None and running.is_alive():
-                results[target] = None
+        wanted = sorted(set(targets))
+        for target in wanted:
+            pending = self._pending.get(target)
+            if pending is not None:
+                thread, box = pending
+                if thread.is_alive():
+                    results[target] = None
+                    continue
+                del self._pending[target]
+                results[target] = box.get("ok", False)  # the late result, used once
                 continue
             box = {}
 
@@ -343,14 +351,17 @@ class Prober:
                     out["error"] = str(e)
 
             thread = threading.Thread(target=_run, name="probe-%s" % target_text(target), daemon=True)
-            self._inflight[target] = thread
             thread.start()
             started.append((target, thread, box))
         deadline = time.monotonic() + self._timeout + 1.0
         for target, thread, box in started:
             thread.join(max(0.0, deadline - time.monotonic()))
-            results[target] = box.get("ok", False) if not thread.is_alive() else None
-        self._inflight = {t: th for t, th in self._inflight.items() if th.is_alive() or t in results}
+            if thread.is_alive():
+                self._pending[target] = (thread, box)
+                results[target] = None
+            else:
+                results[target] = box.get("ok", False)
+        self._pending = {t: p for t, p in self._pending.items() if t in results}
         return results
 
 
