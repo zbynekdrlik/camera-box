@@ -288,8 +288,8 @@ def test_prober_uses_a_late_result_on_the_next_pass():
     assert calls == ["slow.lan", "slow.lan"], "then a fresh probe"
 
 
-def test_debounce_marks_a_server_down_from_late_results_too():
-    # the keeper-level effect: late False results count as failed probes
+def test_an_unknown_probe_between_two_failures_still_marks_the_server_down():
+    # keeper level: a None (no information) between two failed probes neither resets nor counts
     keeper_logs = []
     seq = iter([None, False, None, False, True])
 
