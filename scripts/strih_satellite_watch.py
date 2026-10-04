@@ -10,15 +10,19 @@ WHAT (design comment 5979157737, Approach 1): ONE pass per run; strih-satellite-
 30 s (the oneshot strih-satellite-watch.service). A pass
   * reads the Satellite's local REST (127.0.0.1:9999): `/api/status` (`connected`), `/api/surfaces` (the
     open surfaces) and `/api/config` (the Companion host:port it connects to, tcp);
-  * TCP-probes that Companion host:port, and reads whether the Stream Deck is on USB (sysfs
-    idVendor:idProduct, what lsusb reads; default 0fd9:008f, the strih XL -- never the whole Elgato
-    vendor, which also makes capture devices);
+  * TCP-probes that Companion host:port ONLY when the Satellite is not connected (a live session already
+    proves the port answers; a bare connect every 30 s would be a client session on the venue Companion),
+    and reads whether the Stream Deck is on USB (sysfs idVendor:idProduct, what lsusb reads; default
+    0fd9:008f, the strih XL -- never the whole Elgato vendor, which also makes capture devices);
   * restarts companion-satellite.service (`systemctl --user --no-block try-restart`) when, SUSTAINED for
     60 s, either
       - not-connected: `connected` is false while the Companion port answers; or
       - no-surfaces: the surfaces list is empty while the Stream Deck is on USB.
     It never restarts while Companion itself is down (or its target is unknown), and a REST that does
     not answer is no information. The decision is the pure `decide()`, pytest-tested as tables.
+  * backs off when restarts cure nothing (a Companion that refuses the client, a disabled surface
+    plugin): after BACKOFF_AFTER restarts with no healthy pass between them, the sustain doubles per
+    restart up to BACKOFF_MAX_S, and a healthy pass resets it (`effective_sustain`). It never gives up.
   * keeps the fault start times (boot clock, so no wall-clock step fakes a window) in a /run state file
     between runs; `--check-state` is verify-strih's "the watch runs" read.
 
@@ -52,7 +56,15 @@ USB_ROOT = "/sys/bus/usb/devices"
 SUSTAIN_S = 60.0
 HTTP_TIMEOUT_S = 3.0
 TCP_TIMEOUT_S = 3.0
-SYSTEMCTL_TIMEOUT_S = 15.0
+# `--no-block` returns at once; a hung user bus must not push a pass past the oneshot's TimeoutStartSec=20
+# (3 REST reads + 1 TCP connect + this, pinned by a test).
+SYSTEMCTL_TIMEOUT_S = 5.0
+# More than this between two passes (the timer was stopped, the notebook suspended -- CLOCK_BOOTTIME
+# counts suspend) = no evidence that a fault held in between: every window starts over (2.5 periods).
+MAX_PASS_GAP_S = 75.0
+# The back-off: restarts that cured nothing (no healthy pass between them) before the sustain doubles.
+BACKOFF_AFTER = 3
+BACKOFF_MAX_S = 900.0
 # verify-strih: a watch whose last pass is older than three timer periods is not running.
 STATE_MAX_AGE_S = 90.0
 STATE_VERSION = 1
@@ -113,6 +125,15 @@ def decide(since, obs, now, sustain=SUSTAIN_S):
     return Decision(kept, ())
 
 
+def effective_sustain(sustain, unhealed):
+    """The seconds a fault must hold before the next restart: `sustain` until BACKOFF_AFTER restarts in a
+    row cured nothing (no healthy pass between them), then doubled per further restart, capped at
+    BACKOFF_MAX_S. A count that is not a non-negative int reads as 0."""
+    if not isinstance(unhealed, int) or isinstance(unhealed, bool) or unhealed < BACKOFF_AFTER:
+        return float(sustain)
+    return float(min(sustain * 2 ** (unhealed - BACKOFF_AFTER + 1), BACKOFF_MAX_S))
+
+
 # --- reading the Satellite, Companion and USB -----------------------------------------------------
 
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -159,7 +180,7 @@ def tcp_probe(host, port, timeout=TCP_TIMEOUT_S):
     try:
         with socket.create_connection((host, port), timeout=timeout):
             return True, None
-    except OSError as e:
+    except (OSError, ValueError) as e:  # ValueError: a host the IDNA codec rejects (UnicodeError)
         return False, "%s: %s" % (type(e).__name__, e)
 
 
@@ -193,7 +214,8 @@ def deck_on_usb(usb_root, usb_ids):
 def observe(rest_url=REST_URL, usb_root=USB_ROOT, usb_ids=STREAM_DECK_USB_IDS, http_timeout=HTTP_TIMEOUT_S,
             tcp_timeout=TCP_TIMEOUT_S):
     """One read of the Satellite REST, the Companion port and USB. A silent REST stops there: nothing
-    else it would report can be trusted, and the pass makes no decision."""
+    else it would report can be trusted, and the pass makes no decision. A connected Satellite proves the
+    Companion port answers, so it is probed only when the Satellite is not connected."""
     deck = deck_on_usb(usb_root, usb_ids)
     status, err = fetch_json(rest_url + "/api/status", http_timeout)
     if not isinstance(status, dict):
@@ -202,7 +224,12 @@ def observe(rest_url=REST_URL, usb_root=USB_ROOT, usb_ids=STREAM_DECK_USB_IDS, h
     raw, _err = fetch_json(rest_url + "/api/surfaces", http_timeout)
     config, cerr = fetch_json(rest_url + "/api/config", http_timeout)
     target, why = companion_target(config) if config is not None else (None, "/api/config unreadable: %s" % cerr)
-    up, perr = (None, why) if target is None else tcp_probe(target[0], target[1], tcp_timeout)
+    if target is None:
+        up, perr = None, why
+    elif connected is True:
+        up, perr = True, None
+    else:
+        up, perr = tcp_probe(target[0], target[1], tcp_timeout)
     return Observation(True, None, connected, surface_names(raw),
                        None if target is None else "%s:%d" % target, up, perr, deck)
 
@@ -303,15 +330,24 @@ def boot_clock():
 def run_pass(state_file, observe_fn, restart, *, log, wall=time.time, boot=boot_clock, sustain=SUSTAIN_S,
              unit=SATELLITE_UNIT, rest_url=REST_URL):
     """One timer firing: read the previous state, observe, decide, restart if due, log what changed, write
-    the state. `observe_fn()` -> Observation, `restart(unit)` -> (rc, text). Returns the state written."""
+    the state. `observe_fn()` -> Observation, `restart(unit)` -> (rc, text). Returns the state written.
+    The boot clock is read BEFORE the observation, so a slow read never shortens the next window."""
     prev, err = load_state(state_file)
     if err:
         log("state file %s unreadable (%s) -- starting with no fault history" % (state_file, err))
     prev = prev or {}
-    obs = observe_fn()
     now = boot()
     since_prev = prev.get("since") if isinstance(prev.get("since"), dict) else {}
-    d = decide(since_prev, obs, now, sustain)
+    prev_boot = prev.get("boot_s")
+    if since_prev and _is_time(prev_boot) and not 0 <= now - prev_boot <= MAX_PASS_GAP_S:
+        log("no watch pass for %.0f s (the timer was stopped or the box suspended) -- fault windows start over"
+            % (now - prev_boot))
+        since_prev = {}
+    obs = observe_fn()
+    unhealed = prev.get("unhealed_restarts")
+    unhealed = unhealed if isinstance(unhealed, int) and not isinstance(unhealed, bool) and unhealed >= 0 else 0
+    need = effective_sustain(sustain, unhealed)
+    d = decide(since_prev, obs, now, need)
     restarts = prev.get("restarts") if isinstance(prev.get("restarts"), int) and prev["restarts"] >= 0 else 0
     last_restart = prev.get("last_restart") if isinstance(prev.get("last_restart"), dict) else None
     last_error = None
@@ -321,7 +357,12 @@ def run_pass(state_file, observe_fn, restart, *, log, wall=time.time, boot=boot_
         rc, out = restart(unit)
         if rc == 0:
             restarts += 1
+            unhealed += 1
             log("restarting %s: %s (restart #%d since boot)" % (unit, held, restarts))
+            if unhealed == BACKOFF_AFTER:
+                log("backing off: %d restarts of %s cured nothing (no healthy pass between them) -- the next "
+                    "restart waits for %.0f s of fault, doubling up to %.0f s until a healthy pass"
+                    % (unhealed, unit, effective_sustain(sustain, unhealed), BACKOFF_MAX_S))
         else:
             last_error = "restart: %s" % (out or "rc %d" % rc)
             log("could NOT restart %s (%s): %s" % (unit, held, out or "rc %d" % rc))
@@ -330,14 +371,17 @@ def run_pass(state_file, observe_fn, restart, *, log, wall=time.time, boot=boot_
         cond = "restarted"
     else:
         cond = condition_of(obs, d)
+        if cond == "ok":
+            unhealed = 0
         if cond != prev.get("condition"):
-            line = condition_line(cond, obs, sustain, unit, rest_url)
+            line = condition_line(cond, obs, need, unit, rest_url)
             if line is None:  # ok
                 prefix = "healthy again" if prev.get("condition") else "watching %s" % unit
                 line = "%s: %s" % (prefix, describe(obs))
             log(line)
     state = {"version": STATE_VERSION, "updated_epoch_s": wall(), "boot_s": now, "since": d.since,
              "condition": cond, "observation": observation_dict(obs), "restarts": restarts,
+             "unhealed_restarts": unhealed, "effective_sustain_s": effective_sustain(sustain, unhealed),
              "last_restart": last_restart, "unit": unit, "sustain_s": sustain, "last_error": last_error}
     werr = write_state(state_file, state)
     if werr:
@@ -383,8 +427,21 @@ def state_verdict(state, now, max_age=STATE_MAX_AGE_S):
                          for f, t in since.items() if _is_time(t))
         now_text += "; FAULT in progress: %s (restart at %.0f s)" % (held, state.get("sustain_s") or SUSTAIN_S)
     restarts = state.get("restarts") if isinstance(state.get("restarts"), int) else 0
-    return True, "last pass %.0f s ago: %s; %d restart(s) of %s since boot" % (
-        max(age, 0.0), now_text, restarts, state.get("unit") or SATELLITE_UNIT)
+    unit = state.get("unit") or SATELLITE_UNIT
+    text = "last pass %.0f s ago: %s; %d restart(s) of %s since boot" % (max(age, 0.0), now_text, restarts, unit)
+    if cond != "ok":
+        # the watch runs but cannot cure the fault: a red, never a quiet OK
+        lr = state.get("last_restart") if isinstance(state.get("last_restart"), dict) else {}
+        if lr.get("ok") is False:
+            return False, "the watch could NOT restart %s (%s) while the fault holds -- %s" % (
+                unit, lr.get("error"), text)
+        unhealed = state.get("unhealed_restarts")
+        if isinstance(unhealed, int) and not isinstance(unhealed, bool) and unhealed >= BACKOFF_AFTER:
+            return False, ("the watch restarted %s %d times with no healthy pass between -- a restart does not "
+                           "cure this fault, it now waits %.0f s of fault per restart -- %s") % (
+                unit, unhealed, effective_sustain(SUSTAIN_S, unhealed) if not _is_time(
+                    state.get("effective_sustain_s")) else state["effective_sustain_s"], text)
+    return True, text
 
 
 def check_state_file(path, now=None, max_age=STATE_MAX_AGE_S):

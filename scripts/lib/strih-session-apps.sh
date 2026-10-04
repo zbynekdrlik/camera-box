@@ -335,17 +335,36 @@ strih_session_app_units_state() {
 }
 
 # strih_session_app_process_state PROGRAM CMDLINE START NEWEST -> ok | unreadable | wrong-program |
-# stale, rc 0 iff ok. Whether the unit's RUNNING process runs the installed files: CMDLINE is the
-# process argv with spaces for the NULs (/proc/<MainPID>/cmdline); PROGRAM must be its first word (a
-# binary such as the Electron Satellite) or its second (`/usr/bin/python3 <PROGRAM> ...`); START is the
-# unit's ExecMainStartTimestamp in unix seconds (a leading @ allowed); NEWEST is the newest mtime of the
-# installed program + unit. A process started before the files were last written still runs the old
-# code (stale) -- an installed-but-not-running change must never read as live.
+# stale, rc 0 iff ok. Whether a python entry's RUNNING process runs the installed files: CMDLINE is the
+# process argv with spaces for the NULs (/proc/<MainPID>/cmdline), its second word must be PROGRAM
+# (`/usr/bin/python3 <PROGRAM> ...`); START is the unit's ExecMainStartTimestamp in unix seconds (a
+# leading @ allowed); NEWEST is the newest mtime of the installed program + unit. A process started
+# before the files were last written still runs the old code (stale) -- an installed-but-not-running
+# change must never read as live.
 strih_session_app_process_state() {
-  local program="${1-}" cmdline="${2-}" start="${3#@}" newest="${4-}" argv0 argv1
+  local program="${1-}" cmdline="${2-}" start="${3-}" newest="${4-}" argv1
   [ -n "$cmdline" ] || { printf 'unreadable'; return 1; }
-  read -r argv0 argv1 _ <<<"$cmdline"
-  [ "$argv0" = "$program" ] || [ "$argv1" = "$program" ] || { printf 'wrong-program'; return 1; }
+  read -r _ argv1 _ <<<"$cmdline"
+  [ "$argv1" = "$program" ] || { printf 'wrong-program'; return 1; }
+  strih_session_app_start_state "$start" "$newest"
+}
+
+# strih_session_app_binary_state PROGRAM EXE START NEWEST -> ok | unreadable | wrong-program | stale, rc 0
+# iff ok. The same question for an entry that runs a binary (the Electron Satellite): Chromium rewrites
+# its process title, so argv proves nothing -- EXE is `readlink /proc/<MainPID>/exe` and must equal
+# PROGRAM resolved (`readlink -f`); a binary replaced under the running process reads `<path> (deleted)`
+# = wrong-program. START / NEWEST as for strih_session_app_process_state.
+strih_session_app_binary_state() {
+  local program="${1-}" exe="${2-}" start="${3-}" newest="${4-}"
+  [ -n "$exe" ] || { printf 'unreadable'; return 1; }
+  [ "$exe" = "$program" ] || { printf 'wrong-program'; return 1; }
+  strih_session_app_start_state "$start" "$newest"
+}
+
+# strih_session_app_start_state START NEWEST -> ok | unreadable | stale, rc 0 iff ok: the main process
+# started (unix seconds, a leading @ allowed) at or after the newest mtime of the installed files.
+strih_session_app_start_state() {
+  local start="${1#@}" newest="${2-}"
   if ! [[ "$start" =~ ^[0-9]+$ ]] || ! [[ "$newest" =~ ^[0-9]+$ ]]; then
     printf 'unreadable'
     return 1
@@ -427,18 +446,21 @@ strih_session_app_ok_text() {
   fi
 }
 
-# strih_session_app_process_facts USER UNIT -> `<cmdline with spaces>|<start>` of the unit's main process,
-# read in USER's session (both empty when unreadable). STRIH_SESSION_APPS_PROC is the /proc test seam.
+# strih_session_app_process_facts USER UNIT -> `<cmdline with spaces>|<exe>|<start>` of the unit's main
+# process, read in USER's session (each empty when unreadable; <exe> = readlink /proc/<pid>/exe).
+# STRIH_SESSION_APPS_PROC is the /proc test seam.
 strih_session_app_process_facts() {
-  local user="$1" unit="$2" pid start cmd=""
+  local user="$1" unit="$2" pid start cmd="" exe=""
   pid="$(strih_session_apps_user_systemctl "$user" show -p MainPID --value "$unit" 2>/dev/null || true)"
   start="$(strih_session_apps_user_systemctl "$user" show -p ExecMainStartTimestamp --value --timestamp=unix "$unit" 2>/dev/null || true)"
-  if [[ "${pid%%$'\n'*}" =~ ^[1-9][0-9]*$ ]]; then
+  pid="${pid%%$'\n'*}"
+  if [[ "$pid" =~ ^[1-9][0-9]*$ ]]; then
     # the group carries the 2>/dev/null: a redirect fails before a command's own 2>/dev/null applies,
     # and a main process that exited between `show` and this read must not print on verify's stderr.
-    cmd="$( { tr '\0' ' ' < "${STRIH_SESSION_APPS_PROC:-/proc}/${pid%%$'\n'*}/cmdline"; } 2>/dev/null || true)"
+    cmd="$( { tr '\0' ' ' < "${STRIH_SESSION_APPS_PROC:-/proc}/${pid}/cmdline"; } 2>/dev/null || true)"
+    exe="$(readlink "${STRIH_SESSION_APPS_PROC:-/proc}/${pid}/exe" 2>/dev/null || true)"
   fi
-  printf '%s|%s' "$cmd" "${start%%$'\n'*}"
+  printf '%s|%s|%s' "$cmd" "$exe" "${start%%$'\n'*}"
 }
 
 # strih_shading_window_present [CLASS] [TITLE] (stdin = `wmctrl -lx`) -> rc 0 iff a window has the panel
@@ -490,7 +512,7 @@ strih_session_app_pass_row() {
 strih_session_apps_grade_rows() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
   local unitdir u item script program run ustate sstate enabled autostart active process facts newest verdict
-  local wm
+  local wm cmd exe start
   local -a files
   unitdir="${home}/.config/systemd/user"
   for u in "${STRIH_SESSION_APP_UNITS[@]}"; do
@@ -510,11 +532,15 @@ strih_session_apps_grade_rows() {
     active="$(strih_session_apps_user_systemctl "$user" is-active "$u" 2>/dev/null || true)"
     active="${active%%$'\n'*}"
     facts="$(strih_session_app_process_facts "$user" "$run")"
+    cmd="${facts%%|*}"; start="${facts##*|}"; exe="${facts#*|}"; exe="${exe%|*}"
     newest="$(stat -c %Y "${files[@]/#/${unitdir}/}" "$program" 2>/dev/null | sort -n | tail -n 1 || true)"
     if [ "$run" != "$u" ]; then
-      process="$(strih_session_app_last_run_state "${facts##*|}" "$newest" || true)"
+      process="$(strih_session_app_last_run_state "$start" "$newest" || true)"
+    elif [ -z "$script" ]; then
+      process="$(strih_session_app_binary_state "$(readlink -f "$program" 2>/dev/null || printf '%s' "$program")" \
+        "$exe" "$start" "$newest" || true)"
     else
-      process="$(strih_session_app_process_state "$program" "${facts%|*}" "${facts##*|}" "$newest" || true)"
+      process="$(strih_session_app_process_state "$program" "$cmd" "$start" "$newest" || true)"
     fi
     if verdict="$(strih_session_app_unit_verdict "$ustate" "$sstate" "$enabled" "$autostart" "$active" "$process")"; then
       printf 'OK|(%s) %s: %s\n' "$item" "$u" "$(strih_session_app_ok_text "$u")"
