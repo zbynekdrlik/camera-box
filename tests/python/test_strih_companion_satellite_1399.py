@@ -21,10 +21,13 @@ What this pins (design comment 5979157737, Approach 1): companion-satellite.serv
 
 Tier-0: bash + pytest only.
 """
+import json
 import os
 import sys
 import time
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import strih_session_apps_fakes_1399 as F  # noqa: E402
@@ -193,7 +196,7 @@ def test_install_warns_when_step_16_left_no_satellite_binary(tmp_path):
 # --- verify-strih items 39 + 40 ------------------------------------------------------------------------------
 
 def _graded(tmp_path, **kw):
-    home_kw = {k: kw.pop(k) for k in list(kw) if k in ("satellite_cmd", "autostart", "enabled")}
+    home_kw = {k: kw.pop(k) for k in list(kw) if k in ("satellite_exe", "autostart", "enabled")}
     home, bindir = F.installed_home(tmp_path, **home_kw)
     F.all_states(tmp_path / "run")
     return home, bindir, F.grade(tmp_path, home, bindir, tmp_path / "run", wmctrl=F.WIN, **kw)
@@ -224,8 +227,38 @@ def test_grade_rows_a_missing_satellite_binary_points_at_step_16(tmp_path):
 
 
 def test_grade_rows_a_satellite_launched_some_other_way_is_the_wrong_program(tmp_path):
-    _home, _b, rows = _graded(tmp_path, satellite_cmd=["/bin/bash", "-c", "exec companion-satellite"])
+    _home, _b, rows = _graded(tmp_path, satellite_exe="/bin/bash")
     assert F.row(rows, "companion-satellite").startswith("FAIL|(companion-satellite) %s: process:wrong-program" % SAT)
+
+
+def test_grade_rows_a_replaced_satellite_binary_is_the_wrong_program(tmp_path):
+    # the binary was reinstalled under the running process: /proc/<pid>/exe reads "<path> (deleted)"
+    sat = tmp_path / "opt" / "companion-satellite" / "companion-satellite"
+    _home, _b, rows = _graded(tmp_path, satellite_exe="%s (deleted)" % sat)
+    assert F.row(rows, "companion-satellite").startswith("FAIL|(companion-satellite) %s: process:wrong-program" % SAT)
+
+
+def test_grade_rows_the_satellite_argv_is_never_read(tmp_path):
+    # Chromium rewrites its process title; the fakes give it a title that names no path at all, and the row
+    # is still OK because /proc/<pid>/exe is the binary
+    _home, _b, rows = _graded(tmp_path)
+    assert F.row(rows, "companion-satellite").startswith("OK|(companion-satellite) ")
+
+
+@pytest.mark.parametrize("program,exe,start,newest,want", [
+    ("/opt/cs/companion-satellite", "/opt/cs/companion-satellite", "@200", "100", "ok"),
+    ("/opt/cs/companion-satellite", "/opt/cs/companion-satellite", "100", "100", "ok"),
+    ("/opt/cs/companion-satellite", "/opt/cs/companion-satellite", "@99", "100", "stale"),
+    ("/opt/cs/companion-satellite", "/usr/bin/bash", "@200", "100", "wrong-program"),
+    ("/opt/cs/companion-satellite", "/opt/cs/companion-satellite (deleted)", "@200", "100", "wrong-program"),
+    ("/opt/cs/companion-satellite", "", "@200", "100", "unreadable"),
+    ("/opt/cs/companion-satellite", "/opt/cs/companion-satellite", "", "100", "unreadable"),
+    ("/opt/cs/companion-satellite", "/opt/cs/companion-satellite", "@200", "", "unreadable"),
+])
+def test_binary_state_table(program, exe, start, newest, want):
+    r = F.bash("v=$(strih_session_app_binary_state %s %s %s %s) || true; printf '%%s' \"$v\""
+               % tuple(json.dumps(x) for x in (program, exe, start, newest)))
+    assert r.stdout == want, r.stderr
 
 
 def test_grade_rows_a_satellite_older_than_its_unit_is_stale(tmp_path):

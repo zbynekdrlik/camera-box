@@ -105,9 +105,10 @@ def fake_satellite(tmp_path):
     return p
 
 
-def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, panel_cmd=None, satellite_cmd=None):
+def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, panel_cmd=None, satellite_exe=None):
     """A home + bin dir as step 16d leaves them (every unit + program from the checkout, enabled, started by
-    the autostart) and a fake /proc with each unit's main process. `unit_text` replaces the panel unit."""
+    the autostart) and a fake /proc with each unit's main process. `unit_text` replaces the panel unit;
+    `satellite_exe` is where the Satellite main process's /proc/<pid>/exe points (default: the binary)."""
     home = tmp_path / "home"
     unitdir = home / ".config/systemd/user"
     (unitdir / "graphical-session.target.wants").mkdir(parents=True)
@@ -132,12 +133,13 @@ def installed_home(tmp_path, *, unit_text=None, enabled=True, autostart=True, pa
         "strih-browser-keeper.service": ["/usr/bin/python3", str(bindir / "strih_browser_keeper.py"),
                                          "--state-file", "/run/user/1000/strih-browser-keeper.json"],
         "bkshading-panel-app.service": panel_cmd or ["/usr/bin/python3", str(bindir / "bkshading_panel_app.py")],
-        # an Electron binary: the program is argv0
-        "companion-satellite.service": satellite_cmd or [str(sat)],
+        # Chromium rewrites the browser process title, so the Satellite's argv proves nothing: its exe does
+        "companion-satellite.service": ["companion-satellite", "--rewritten-title"],
     }
     for unit, words in argv.items():
         (proc / str(PIDS[unit])).mkdir(parents=True)
         (proc / str(PIDS[unit]) / "cmdline").write_bytes(b"\0".join(w.encode() for w in words) + b"\0")
+    os.symlink(satellite_exe or str(sat), proc / str(PIDS["companion-satellite.service"]) / "exe")
     return home, bindir
 
 

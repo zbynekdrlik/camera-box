@@ -305,9 +305,8 @@ def test_unit_verdict_table(args, want, rc):
     ("/usr/bin/python3 /usr/local/bin/x.py ", "100", "100", "ok"),
     ("/usr/bin/python3 /usr/local/bin/x.py ", "@99", "100", "stale"),
     ("/usr/bin/python3 /home/newlevel/.local/bin/bkshading-panel-app ", "@200", "100", "wrong-program"),
-    # a binary unit (the Electron Satellite): the program is argv0
-    ("/usr/local/bin/x.py --enable-features=x ", "@200", "100", "ok"),
-    ("/usr/local/bin/x.py ", "@99", "100", "stale"),
+    # a python entry runs `python3 <program>`: the program as argv0 is not this unit's process
+    ("/usr/local/bin/x.py --enable-features=x ", "@200", "100", "wrong-program"),
     ("/opt/other/app /usr/local/bin/x.pyz ", "@200", "100", "wrong-program"),
     ("", "@200", "100", "unreadable"),
     ("/usr/bin/python3 /usr/local/bin/x.py ", "", "100", "unreadable"),

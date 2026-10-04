@@ -122,6 +122,12 @@ def test_decide_sustain_is_60_s_by_default_and_a_parameter():
     assert W.decide({NC: 970.0}, obs(connected=False), 1000.0).restart == ()
 
 
+@pytest.mark.parametrize("unhealed,want", [(0, 60.0), (1, 60.0), (2, 60.0), (3, 120.0), (4, 240.0), (5, 480.0),
+                                            (6, 900.0), (40, 900.0), (-1, 60.0), ("x", 60.0)])
+def test_effective_sustain_backs_off_after_three_restarts_that_cured_nothing(unhealed, want):
+    assert W.effective_sustain(60.0, unhealed) == want
+
+
 def test_decide_is_pure():
     since = {NC: 900.0}
     W.decide(since, obs(connected=False), 1000.0)
@@ -234,8 +240,27 @@ def test_observe_a_non_tcp_protocol_leaves_the_companion_unknown(tmp_path, rest,
 
 def test_observe_a_port_given_as_text_is_read(tmp_path, rest, companion):
     routes, url = rest
-    _routes(routes, str(companion))
+    _routes(routes, str(companion), connected=False)  # not connected: the port is really probed
     assert W.observe(url, usb_tree(tmp_path), ("0fd9:008f",)).companion_up is True
+
+
+def test_observe_never_probes_companion_while_the_satellite_is_connected(tmp_path, rest, monkeypatch):
+    # a live session already proves the port answers; a bare TCP connect every 30 s would be a client
+    # session on the venue Companion each pass
+    routes, url = rest
+    _routes(routes, _closed_port(), connected=True)
+    probes = []
+    monkeypatch.setattr(W, "tcp_probe", lambda *a, **k: probes.append(a) or (False, "probed"))
+    o = W.observe(url, usb_tree(tmp_path, "0fd9:008f"), ("0fd9:008f",))
+    assert probes == [] and o.companion_up is True and o.companion_error is None
+    _routes(routes, _closed_port(), connected=False)
+    W.observe(url, tmp_path / "usb", ("0fd9:008f",))
+    assert len(probes) == 1, "a fault candidate is probed"
+
+
+def test_tcp_probe_never_raises_on_a_bad_host():
+    ok, err = W.tcp_probe("a..b", 16622, timeout=1.0)  # the IDNA codec rejects it with a UnicodeError
+    assert ok is False and err
 
 
 @pytest.mark.parametrize("status", [(500, "Internal Server Error"), (200, "not json"), (200, [1, 2])])
@@ -337,6 +362,55 @@ def test_run_pass_restarts_once_after_60_s_and_logs_it(tmp_path):
     assert len(lines) == 1 and "healthy again" in lines[0]
 
 
+def test_run_pass_backs_off_when_restarts_cure_nothing_and_resets_on_health(tmp_path):
+    rig = Rig(tmp_path)
+    rig.fire(1000.0, obs(connected=False))
+    times = []
+    t = 1000.0
+    while len(rig.restarts) < 6 and t < 5000.0:
+        t += 30.0
+        n = len(rig.restarts)
+        _st, lines = rig.fire(t)
+        if len(rig.restarts) > n:
+            times.append(t)
+    gaps = [b - a for a, b in zip([1000.0] + times, times)]
+    # a restart, then the window restarts from the next firing: 60 s for three, then 120, 240, 480 s
+    assert gaps[:3] == [60.0, 90.0, 90.0]
+    assert gaps[3] == 150.0 and gaps[4] == 270.0 and gaps[5] == 510.0
+    assert any("backing off" in line for line in rig.logs)
+    assert sum("backing off" in line for line in rig.logs) == 1, "the back-off is logged once"
+    st = json.loads(rig.state.read_text())
+    assert st["unhealed_restarts"] == 6 and st["effective_sustain_s"] == 900.0
+    rig.fire(t + 30.0, obs())
+    st = json.loads(rig.state.read_text())
+    assert st["unhealed_restarts"] == 0 and st["effective_sustain_s"] == 60.0
+
+
+def test_run_pass_reads_the_clock_before_the_slow_observation(tmp_path):
+    order = []
+    rig = Rig(tmp_path)
+
+    def boot():
+        order.append("boot")
+        return 1000.0
+
+    def observe():
+        order.append("observe")
+        return obs()
+    W.run_pass(str(rig.state), observe, rig.restart, log=rig.logs.append, wall=lambda: 1.79e9, boot=boot)
+    assert order[:2] == ["boot", "observe"]
+
+
+def test_run_pass_a_gap_between_passes_starts_the_windows_over(tmp_path):
+    # a stopped timer or a suspended notebook: one faulty pass before the gap and one after are not 60 s of fault
+    rig = Rig(tmp_path)
+    rig.fire(1000.0, obs(connected=False))
+    st, lines = rig.fire(1600.0)
+    assert rig.restarts == [] and st["since"] == {NC: 1600.0}
+    assert any("no watch pass for 600 s" in line for line in lines)
+    assert W.MAX_PASS_GAP_S == 75.0
+
+
 def test_run_pass_never_restarts_while_companion_is_down(tmp_path):
     rig = Rig(tmp_path)
     _st, lines = rig.fire(1000.0, obs(connected=False, companion_up=False))
@@ -435,6 +509,32 @@ def test_check_state_stale_and_unreadable_fail(tmp_path):
 
 def test_check_state_limit_covers_three_timer_periods():
     assert W.STATE_MAX_AGE_S == 90.0
+
+
+def test_check_state_fails_a_watch_that_could_not_restart_while_the_fault_holds(tmp_path):
+    lr = {"epoch_s": time.time() - 20, "faults": [NC], "ok": False, "error": "Failed to connect to bus"}
+    p = _state(tmp_path, 5, condition="fault:" + NC, since={NC: 990.0}, last_restart=lr,
+               observation=W.observation_dict(obs(connected=False)))
+    rc, line = W.check_state_file(str(p))
+    assert rc == 1 and "could NOT restart companion-satellite.service" in line and "Failed to connect to bus" in line
+    # healthy again: an old failed restart is history, not a failure
+    p = _state(tmp_path, 5, last_restart=lr)
+    assert W.check_state_file(str(p))[0] == 0
+
+
+def test_check_state_fails_a_backed_off_watch_while_the_fault_holds(tmp_path):
+    p = _state(tmp_path, 5, condition="fault:" + NC, since={NC: 990.0}, unhealed_restarts=4,
+               effective_sustain_s=240.0, observation=W.observation_dict(obs(connected=False)))
+    rc, line = W.check_state_file(str(p))
+    assert rc == 1 and "restarted companion-satellite.service 4 times with no healthy pass" in line
+    assert "240 s" in line
+    p = _state(tmp_path, 5, unhealed_restarts=0)
+    assert W.check_state_file(str(p))[0] == 0
+
+
+def test_a_pass_fits_its_oneshot_timeout():
+    worst = 3 * W.HTTP_TIMEOUT_S + W.TCP_TIMEOUT_S + W.SYSTEMCTL_TIMEOUT_S
+    assert worst + 2 <= int(_unit(SERVICE)["TimeoutStartSec"]), worst
 
 
 # --- main(): the CLI end to end ------------------------------------------------------------------------
