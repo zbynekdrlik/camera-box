@@ -102,7 +102,8 @@ def test_a_comm_that_is_not_utf8_never_crashes_the_identity_read(tmp_path):
     root = _fake_proc(tmp_path / "proc", [(100, b"zm\xc4\x9bna-\xc4", 5), (200, b"\xff\xfe", 6), (300, "obs", 42),
                                           (400, b"obs\xc4", 1)])
     assert k.local_obs_process_identity(str(root), "obs", os.getuid()) == "boot-a:42"
-    (root / "300" / "stat").write_bytes(b"300 (obs\xc4\x9b) S 1 300 300 0 -1 4194560 1 2 3 4 5 6 7 8 20 0 40 0 77 1 2\n")
+    # the stat line's own comm field is the same cut name: bytes that are not UTF-8 there too
+    (root / "300" / "stat").write_bytes(b"300 (obs\xff\xc4) S 1 300 300 0 -1 4194560 1 2 3 4 5 6 7 8 20 0 40 0 77 1 2\n")
     assert k.local_obs_process_identity(str(root), "obs", os.getuid()) == "boot-a:77"
 
 
