@@ -263,6 +263,49 @@ def test_prober_bounds_a_hung_probe_and_never_stacks_threads():
     release.set()
 
 
+def test_prober_uses_a_late_result_on_the_next_pass():
+    # slow DNS + a black-holed connect: the probe finishes only after its pass's deadline. Its result
+    # must still count on the next pass, or a server that is really down would read "unknown" forever
+    # and never get its recovered refresh.
+    release = threading.Event()
+    calls = []
+
+    def probe(host, port, timeout):
+        calls.append(host)
+        release.wait(30)
+        return False
+
+    p = k.Prober(probe_fn=probe, timeout=0.2)
+    assert p.probe_all([("slow.lan", 80)]) == {("slow.lan", 80): None}
+    release.set()
+    for _ in range(100):
+        if not any(t.is_alive() for t in threading.enumerate() if t.name == "probe-slow.lan:80"):
+            break
+        time.sleep(0.02)
+    assert p.probe_all([("slow.lan", 80)]) == {("slow.lan", 80): False}, "the late result, used once"
+    assert calls == ["slow.lan"], "no new probe while a late result is waiting"
+    assert p.probe_all([("slow.lan", 80)]) == {("slow.lan", 80): False}
+    assert calls == ["slow.lan", "slow.lan"], "then a fresh probe"
+
+
+def test_debounce_marks_a_server_down_from_late_results_too():
+    # the keeper-level effect: late False results count as failed probes
+    keeper_logs = []
+    seq = iter([None, False, None, False, True])
+
+    class P:
+        def probe_all(self, targets):
+            r = next(seq)
+            return {t: r for t in targets}
+
+    keeper = k.Keeper(P(), keeper_logs.append)
+    obs = _ScriptedObs()
+    for _ in range(5):
+        keeper.run_pass(obs, 1)
+    assert any("unreachable" in line for line in keeper_logs)
+    assert obs.presses == 1  # the connect refresh once the server answered
+
+
 def test_prober_reads_a_raising_probe_as_unreachable():
     def probe(host, port, timeout):
         raise RuntimeError("boom")

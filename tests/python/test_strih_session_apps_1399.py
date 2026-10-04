@@ -92,7 +92,8 @@ def _fake_bin(tmp_path, *, missing=(), apt_installs=True, enable_ok=True, active
           'exit 0\n' % (log, "exit 0" if enable_ok else "{ echo 'Failed to connect to bus: No medium found' >&2; exit 1; }",
                         active, active, PIDS["strih-browser-keeper.service"], PIDS["bkshading-panel-app.service"],
                         started))
-    _stub(b, "sudo", 'echo "sudo $*" >> "%s"\nexit 0\n' % log)
+    # sudo -u USER [VAR=val ...] CMD ...: log it, then run CMD with the VAR=vals (the root path runs for real)
+    _stub(b, "sudo", 'echo "sudo $*" >> "%s"\n[ "$1" = -u ] && shift 2\nexec env "$@"\n' % log)
     _stub(b, "id", 'if [ "$1" = -u ] && [ -n "${2:-}" ]; then echo 1000; else echo 1000; fi\n')
     _stub(b, "chown", 'echo "chown $*" >> "%s"\nexit 0\n' % log)
     if wmctrl is not None:
@@ -229,6 +230,10 @@ def test_install_writes_programs_and_units_and_migrates_the_stopgap(tmp_path):
     # files), never a plain start / restart / --now
     assert "systemctl --user enable strih-browser-keeper.service bkshading-panel-app.service" in calls
     assert "systemctl --user try-restart strih-browser-keeper.service bkshading-panel-app.service" in calls
+    # a unit file was written: an explicit reload before the restart, never a cached old definition
+    lines = calls.splitlines()
+    assert lines.index("systemctl --user daemon-reload") < lines.index(
+        "systemctl --user try-restart strih-browser-keeper.service bkshading-panel-app.service")
     _never_starts(calls)
     assert "a stopped unit is NOT started" in r.stdout
 
@@ -261,6 +266,7 @@ def test_install_restarts_only_the_unit_whose_files_changed(tmp_path):
     assert r.returncode == 0, r.stderr
     assert "systemctl --user try-restart bkshading-panel-app.service\n" in calls
     assert "program written, unit unchanged" in r.stdout
+    assert "daemon-reload" not in calls, "no unit file changed: nothing to reload"
     _never_starts(calls)
 
 
@@ -276,9 +282,12 @@ def test_install_as_root_enables_in_the_operator_session(tmp_path):
 
 
 def test_install_warns_but_succeeds_without_a_user_bus_and_names_the_error(tmp_path):
-    r, _ = _install(tmp_path, tmp_path / "home", tmp_path / "b", enable_ok=False)
+    r, calls = _install(tmp_path, tmp_path / "home", tmp_path / "b", enable_ok=False)
     assert r.returncode == 0, r.stderr
     assert "WARN: systemctl --user enable failed for newlevel (Failed to connect to bus: No medium found)" in r.stdout
+    # no user bus = nothing runs: no reload / try-restart attempt and no "still runs the old files" warning
+    assert "try-restart" not in calls and "daemon-reload" not in calls
+    assert "still runs the old files" not in r.stdout
 
 
 def test_install_fails_loud_when_a_package_does_not_install(tmp_path):
@@ -469,6 +478,41 @@ def test_grade_rows_catch_the_stopgap_process_and_its_window(tmp_path):
                   wmctrl="0x01  0 bkshading-panel-app.py.Bkshading-panel-app.py  strih-lx Shading\n")
     assert rows[1].startswith("FAIL|(shading-app) bkshading-panel-app.service: process:wrong-program")
     assert rows[3].startswith("FAIL|(shading-app-window) no panel window")
+
+
+def test_grade_rows_as_root_read_the_operator_session(tmp_path):
+    # the deploy runs verify-strih as root: every systemctl read goes through sudo -u <operator>, and the
+    # sudo stub really runs it (the process facts included)
+    home, bindir = _installed_home(tmp_path)
+    _keeper_state(tmp_path / "run")
+    b, log = _fake_bin(tmp_path, wmctrl=WIN)
+    r = _bash('strih_session_apps_grade_rows "%s" "%s" newlevel' % (REPO, home),
+              env={"STRIH_SESSION_APPS_BIN_DIR": str(bindir), "STRIH_SESSION_APPS_EUID": "0",
+                   "STRIH_SESSION_APPS_RUNTIME_DIR": str(tmp_path / "run"),
+                   "STRIH_SESSION_APPS_PROC": str(tmp_path / "proc")}, path_prepend=str(b))
+    assert r.returncode == 0 and r.stderr == "", r.stderr
+    assert [row.split("|", 1)[0] for row in r.stdout.splitlines()] == ["OK"] * 4, r.stdout
+    calls = log.read_text()
+    for prop in ("MainPID", "ExecMainStartTimestamp"):
+        assert ("sudo -u newlevel XDG_RUNTIME_DIR=/run/user/1000 systemctl --user show -p %s" % prop) in calls
+    assert "sudo -u newlevel env DISPLAY=:0" in calls and "wmctrl -lx" in calls
+
+
+def test_grade_rows_a_vanished_main_process_reads_unreadable_without_noise(tmp_path):
+    # MainPID exited between `show` and the /proc read: a named FAIL, nothing on verify's stderr
+    home, bindir = _installed_home(tmp_path)
+    shutil.rmtree(tmp_path / "proc" / str(PIDS["strih-browser-keeper.service"]))
+    _keeper_state(tmp_path / "run")
+    if (tmp_path / "bin").exists():
+        shutil.rmtree(tmp_path / "bin")
+    b, _ = _fake_bin(tmp_path, wmctrl=WIN)
+    r = _bash('strih_session_apps_grade_rows "%s" "%s" newlevel' % (REPO, home),
+              env={"STRIH_SESSION_APPS_BIN_DIR": str(bindir), "STRIH_SESSION_APPS_EUID": "1000",
+                   "STRIH_SESSION_APPS_RUNTIME_DIR": str(tmp_path / "run"),
+                   "STRIH_SESSION_APPS_PROC": str(tmp_path / "proc")}, path_prepend=str(b))
+    assert r.returncode == 0 and r.stderr == "", r.stderr
+    assert r.stdout.splitlines()[0].startswith(
+        "FAIL|(browser-keeper) strih-browser-keeper.service: process:unreadable")
 
 
 def test_grade_rows_catch_the_stopgap_unit(tmp_path):
@@ -758,7 +802,7 @@ def test_setup_strih_step_16d_installs_the_session_apps():
 def test_verify_strih_grades_items_37_and_38():
     v = VERIFY.read_text()
     assert 'strih_session_apps_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}"' in v
-    assert '|| bad "(session-apps) the grader printed no row"' in v
+    assert '|| bad "(session-apps) the grader did not print all of its rows"' in v
     # never between item 34 and 32: test_ndi_discovery_1342 runs that slice with only its own lib sourced
     i = v.index("strih_session_apps_grade_report")
     assert not (v.index("# 34) NDI discovery") < i < v.index("# 32) the shared OBS-box"))
