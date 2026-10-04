@@ -233,8 +233,9 @@ is byte-identical to the provisioned unit for the box's role, no drop-in overrid
 process runs its ExecStart (no readable process = not graded there; items 6/6b grade liveness). A drift
 is caught THERE, never by a blind restart on the next deploy; a kept-running daemon on a matching unit
 passes. The pytest runs the item's real text under `set -euo pipefail` with only its unit path moved.
-verify-strih.sh is at 1002 lines, just over its ~1000-line budget (item 36, issue 1391, is a
-two-line call into its lib), so the next item there needs a split of the file, not only a lib.
+verify-strih.sh reached 1002 lines with item 36 (issue 1391). Issue 1399 split item 28's collection
+reads into `scripts/lib/strih-obs-collection.sh` before adding items 37/38 (the session apps,
+`.claude/rules/strih-session-apps.md`), so it is ~970 lines now; a new item still goes into a lib.
 
 **Before the first strih-lx deploy of this change, read the master's command line** (read-only, on the
 box): `tr '\0' ' ' < /proc/$(systemctl show -p MainPID --value dantesync)/cmdline | sed 's/ *$//'` must
