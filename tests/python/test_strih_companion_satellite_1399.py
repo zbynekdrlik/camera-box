@@ -242,7 +242,8 @@ def test_grade_rows_a_pipe_in_a_cmdline_never_shifts_the_process_facts(tmp_path)
     # the process facts carry a free-form cmdline: a "|" in it must not move the exe or the start time
     home, bindir = F.installed_home(tmp_path)
     keeper = tmp_path / "proc" / str(F.PIDS["strih-browser-keeper.service"]) / "cmdline"
-    keeper.write_bytes(b"\0".join([b"/usr/bin/python3", str(bindir / "strih_browser_keeper.py").encode(),
+    # the "|" BEFORE the program word: a parser that cut the cmdline at the first "|" loses argv1
+    keeper.write_bytes(b"\0".join([b"/usr/bin/py|thon3", str(bindir / "strih_browser_keeper.py").encode(),
                                     b"--state-file", b"/run/user/1000/a|b.json"]) + b"\0")
     sat = tmp_path / "proc" / str(F.PIDS[SAT]) / "cmdline"
     sat.write_bytes(b"companion-satellite --title=a|b|c\0")
