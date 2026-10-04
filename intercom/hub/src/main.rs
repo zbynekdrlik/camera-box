@@ -19,12 +19,13 @@ use std::sync::mpsc::SyncSender;
 
 use intercom_hub::engine::{Engine, InputBlock};
 use intercom_hub::http::{router, AppState};
+use intercom_hub::inputs::input_buffers;
 use intercom_hub::janus_pacing::{
     hub_block_period, PacedRing, RING_CAP_FRAMES, RING_TARGET_FRAMES,
 };
 use intercom_hub::local_audio::{
     spawn_local_sink, spawn_local_source, spawn_program_sink, LocalAudioStats, LocalSinkConfig,
-    LocalSourceConfig, LOCAL_CAPTURE_CAP_BLOCKS, LOCAL_CAPTURE_TARGET_FRAMES,
+    LocalSourceConfig,
 };
 use intercom_hub::matrix::Matrix;
 use intercom_hub::mulaw::stereo_to_mono;
@@ -32,13 +33,12 @@ use intercom_hub::state::{HubState, RuntimeStats};
 use intercom_hub::vban_io::{
     resolve_vban_addr, route_packet, to_hub_rate, JitterBuffer, OutBlock, VbanSender,
 };
+use intercom_hub::vban_jitter::missed_ticks;
 use intercom_hub::vban_rate::{VbanRateConverter, VbanRateStats};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_CONFIG: &str = "/etc/intercom-hub/intercom.toml";
 
-/// Jitter buffer depth = 8 blocks per participant (older samples drop as an overrun).
-const JITTER_CAP_BLOCKS: usize = 8;
 /// How often the output hosts are re-resolved off the hot path (DHCP lease moves).
 const OUTPUT_RESOLVE_REFRESH_S: u64 = 60;
 /// The fixed RTP SSRC of the hub's Janus plain-RTP leg ("STRL"), stable for a run (M3a).
@@ -313,21 +313,36 @@ async fn main() -> Result<()> {
             let mut tx_packets = vec![0u64; n];
             let mut frame_counter = vec![0u32; n];
             let mut cycle: u64 = 0;
+            let mut last_tick: Option<tokio::time::Instant> = None;
+            let mut missed_total: u64 = 0;
             loop {
-                ticker.tick().await;
+                let tick = ticker.tick().await;
                 cycle = cycle.wrapping_add(1);
+                // `tick` is the SCHEDULED instant, and Skip resumes on the same grid: a gap of more
+                // than one period means the loop missed ticks, and every output lost those blocks.
+                // The VBAN legs give up as many blocks of their oldest audio (issue 1401), so their
+                // depth stays at its target instead of the servo walking a block off for seconds.
+                let missed = last_tick.map_or(0, |prev| missed_ticks(tick - prev, period));
+                last_tick = Some(tick);
+                if missed > 0 {
+                    missed_total = missed_total.saturating_add(missed);
+                    tracing::debug!(missed, "intercom-hub: block loop missed ticks");
+                }
 
                 // Pop one block per participant + gather rx stats under the lock.
                 let mut input = InputBlock::silent(n);
                 let mut rx_stats = vec![RuntimeStats::default(); n];
                 if let Ok(mut jb) = jitter.lock() {
                     for (id, b) in jb.iter_mut().enumerate() {
+                        b.skip_missed(missed, block_frames);
                         input.set(id, b.pop_block(block_frames));
                         rx_stats[id].rx_packets = b.rx_packets;
                         rx_stats[id].underruns = b.underruns;
                         rx_stats[id].overruns = b.overruns;
                         rx_stats[id].last_rx_age_ms = b.last_rx_age_ms();
                         rx_stats[id].level_dbfs = b.last_level_dbfs();
+                        // The VBAN leg's target / depth / servo corrections (issue 1401).
+                        rx_stats[id].jitter = b.network_stats().map(Into::into);
                         if let Some(slot) = rate_stats.get(id) {
                             rx_stats[id].sample_rate = slot.sample_rate();
                             rx_stats[id].rate_rejects = slot.rate_rejects();
@@ -420,6 +435,8 @@ async fn main() -> Result<()> {
                         }
                     }
                     let mut snapshot = HubState::snapshot(&matrix, VERSION, &rx_stats);
+                    // The run's missed block-loop ticks (issue 1401): a lost block on every output.
+                    snapshot.missed_ticks = missed_total;
                     // Attach the Interkom picture facet (M3c) when the video leg is running.
                     if let Some(vs) = &video_for_loop {
                         let now_wall = std::time::SystemTime::now()
@@ -455,39 +472,6 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
     Ok(())
-}
-
-/// One input buffer per participant (issue 1345, 24.9.2026). The local PipeWire captures (the
-/// MiniFuse talkback) get the target-fill ring that absorbs pw-cat's 1024-frame bursts; the generic
-/// 2048-frame no-prefill buffer spliced ~8x/s. Every buffer fans a mono packet into ch2 for a
-/// participant with >= 2 input channels (the camboxes send mono VBAN).
-fn input_buffers(matrix: &Matrix) -> Vec<JitterBuffer> {
-    let block_frames = matrix.hub.block_frames;
-    let local_capture_ids: std::collections::HashSet<usize> = matrix
-        .local_inputs()
-        .into_iter()
-        .map(|(pid, _, _)| pid)
-        .collect();
-    matrix
-        .participants
-        .iter()
-        .enumerate()
-        .map(|(id, p)| {
-            // The Janus (phones) ingress is bursty 960-frame RTP chunks, so it gets the same
-            // target-fill ring as a local capture input (issue 1345: ~60 overruns/s otherwise).
-            let jb = if local_capture_ids.contains(&id)
-                || p.adapter == intercom_hub::matrix::ADAPTER_JANUS
-            {
-                JitterBuffer::local_capture(
-                    block_frames * LOCAL_CAPTURE_CAP_BLOCKS,
-                    LOCAL_CAPTURE_TARGET_FRAMES,
-                )
-            } else {
-                JitterBuffer::new(block_frames * JITTER_CAP_BLOCKS)
-            };
-            jb.with_min_channels(p.in_channels)
-        })
-        .collect()
 }
 
 /// The running local PipeWire bridges the block loop feeds and reports on.

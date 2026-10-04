@@ -18,6 +18,7 @@
 pub mod engine;
 pub mod fir;
 pub mod http;
+pub mod inputs;
 pub mod janus_codec;
 pub mod janus_pacing;
 pub mod janus_rtp;
@@ -28,4 +29,5 @@ pub mod mulaw;
 pub mod ndi_video;
 pub mod state;
 pub mod vban_io;
+pub mod vban_jitter;
 pub mod vban_rate;
