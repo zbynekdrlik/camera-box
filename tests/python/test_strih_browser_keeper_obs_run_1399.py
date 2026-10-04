@@ -69,27 +69,41 @@ def test_proc_start_ticks(text, want):
 
 
 def _fake_proc(root, procs, boot="boot-a"):
+    """PROCS: (pid, comm as str or raw bytes, start ticks)."""
     (root / "sys" / "kernel" / "random").mkdir(parents=True)
     (root / "sys" / "kernel" / "random" / "boot_id").write_text(boot + "\n")
     for pid, comm, ticks in procs:
         d = root / str(pid)
         d.mkdir()
-        (d / "comm").write_text(comm + "\n")
-        (d / "stat").write_text("%d (%s) S 1 %d %d 0 -1 4194560 1 2 3 4 5 6 7 8 20 0 40 0 %d 1 2\n"
-                                % (pid, comm, pid, pid, ticks))
+        raw = comm if isinstance(comm, bytes) else comm.encode()
+        (d / "comm").write_bytes(raw + b"\n")
+        (d / "stat").write_bytes(b"%d (%s) S 1 %d %d 0 -1 4194560 1 2 3 4 5 6 7 8 20 0 40 0 %d 1 2\n"
+                                 % (pid, raw, pid, pid, ticks))
     return root
 
 
-def test_local_obs_process_identity_reads_the_newest_obs(tmp_path):
+def test_local_obs_process_identity_reads_the_oldest_obs(tmp_path):
+    # the OLDEST: OBS is single-instance, so a second `obs` is a short-lived stray (an "already
+    # running" dialog of a desktop launch) -- the newest would read it as a new OBS run and blink
     root = _fake_proc(tmp_path / "proc", [(100, "bash", 5), (200, "obs", 700), (300, "obs-ffmpeg-mux", 900),
                                           (400, "obs", 800)])
-    assert k.local_obs_process_identity(str(root), "obs", os.getuid()) == "boot-a:800"
+    assert k.local_obs_process_identity(str(root), "obs", os.getuid()) == "boot-a:700"
     assert k.local_obs_process_identity(str(root), "obs", os.getuid() + 1) is None  # another user's
     assert k.local_obs_process_identity(str(root), "absent", os.getuid()) is None
     assert k.local_obs_process_identity(str(tmp_path / "no-proc"), "obs", os.getuid()) is None
     # the real /proc: this python is a process of ours, read without crashing
     me = k.local_obs_process_identity("/proc", Path("/proc/self/comm").read_text().strip(), os.getuid())
     assert me is not None and ":" in me
+
+
+def test_a_comm_that_is_not_utf8_never_crashes_the_identity_read(tmp_path):
+    # a 15-byte comm can cut a multi-byte character (an executable with a Slovak diacritic): read as
+    # text it raised UnicodeDecodeError, which is no OSError, and crash-looped the keeper on every connect
+    root = _fake_proc(tmp_path / "proc", [(100, b"zm\xc4\x9bna-\xc4", 5), (200, b"\xff\xfe", 6), (300, "obs", 42),
+                                          (400, b"obs\xc4", 1)])
+    assert k.local_obs_process_identity(str(root), "obs", os.getuid()) == "boot-a:42"
+    (root / "300" / "stat").write_bytes(b"300 (obs\xc4\x9b) S 1 300 300 0 -1 4194560 1 2 3 4 5 6 7 8 20 0 40 0 77 1 2\n")
+    assert k.local_obs_process_identity(str(root), "obs", os.getuid()) == "boot-a:77"
 
 
 def test_restored_sources_validates_every_entry():
@@ -119,6 +133,28 @@ def test_source_entry_keeps_the_verdict_and_the_memory_apart():
                  "reachable": None, "refreshed_epoch": 2, "remembered_reachable": False}
     assert k.source_entry("x", "about:blank", None, None, None)["target"] is None
     assert k.restored_sources({"obs_epoch": 2, "sources": [e]}) == {("Odpocet", "http://presenter.lan/x"): S(2, False)}
+
+
+def test_check_state_names_what_identifies_the_obs_run():
+    base = {"updated_epoch_s": 100.0, "connected": True, "obs_epoch": 2, "sources": [], "refreshes": 0}
+    ok, text = k.state_verdict(dict(base, obs_identity={"process": "b:7", "frames": 9}), 101.0)
+    assert ok and text.endswith("; OBS run identified by the obs process start time")
+    ok, text = k.state_verdict(dict(base, obs_identity={"process": None, "frames": 9}), 101.0)
+    assert ok and text.endswith("; OBS run identified by the frame count only (no local obs process seen)")
+    ok, text = k.state_verdict(dict(base, obs_identity=None), 101.0)
+    assert ok and text.endswith("; OBS run identified by the frame count only (no local obs process seen)")
+
+
+def test_main_reads_the_local_obs_process_only_for_a_local_obs(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(k, "run", lambda connect, prober, **kw: seen.append(kw))
+    monkeypatch.setattr(k, "local_obs_process_identity", lambda name="obs": "id-of-" + name)
+    assert k.main(["--state-file", str(tmp_path / "s.json")]) == 0
+    assert seen[-1]["obs_process"]() == "id-of-obs"
+    assert k.main(["--state-file", str(tmp_path / "s.json"), "--obs-process-name", "obs-dev"]) == 0
+    assert seen[-1]["obs_process"]() == "id-of-obs-dev"
+    assert k.main(["--host", "10.77.9.202", "--state-file", str(tmp_path / "s.json")]) == 0
+    assert seen[-1]["obs_process"] is None  # a remote OBS: the frame count decides
 
 
 def test_load_state(tmp_path):
@@ -157,6 +193,26 @@ def _keeper_run(server, state_file, probes, passes, events=None, obs_process="se
 
 
 BROWSERS = ["Browser camera crew", "Odpocet", "Browser Ableset"]
+
+
+class DropOnPress(FakeObsWebSocket):
+    """Loses the connection (same OBS process) on the `drop_at_press`-th refresh press once armed."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.drop_at_press = None
+        self._armed_presses = 0
+
+    def _handle(self, rtype, data):
+        if rtype == "PressInputPropertiesButton" and self.drop_at_press is not None:
+            self._armed_presses += 1
+            if self._armed_presses == self.drop_at_press:
+                self.drop_at_press = None
+                with self.lock:
+                    self.requests.pop()  # this press never reached the button: not a press
+                self.drop()
+                return False, None
+        return super()._handle(rtype, data)
 
 
 @pytest.fixture
@@ -207,6 +263,46 @@ def test_a_ws_reconnect_without_an_obs_restart_refreshes_nothing(tmp_path, obs_s
     assert obs_server.connections == 2
 
 
+def test_after_an_obs_restart_a_ws_reconnect_refreshes_nothing(tmp_path, obs_server):
+    # the identity must follow the NEW OBS: compared with the pre-restart one, every later reconnect
+    # would read as a new run and blink every graphic again
+    state = tmp_path / "strih-browser-keeper.json"
+    presses, _ = _keeper_run(obs_server, state, {PRESENTER: True, FOHABL: True}, 6,
+                             {2: obs_server.restart, 4: obs_server.drop})
+    assert len(presses) == 6 and sorted(presses[3:]) == sorted(BROWSERS)
+
+
+def test_after_an_obs_restart_a_keeper_restart_refreshes_nothing(tmp_path, obs_server):
+    state = tmp_path / "strih-browser-keeper.json"
+    probes = {PRESENTER: True, FOHABL: True}
+    _keeper_run(obs_server, state, probes, 4, {2: obs_server.restart})
+    again, logs = _keeper_run(obs_server, state, probes, 3)
+    assert again == []
+    assert "the same OBS run as before (OBS run epoch 2) -- no refresh round" in "\n".join(logs)
+
+
+def test_a_pass_cut_short_after_a_refresh_never_refreshes_that_source_twice(tmp_path):
+    # OBS restarts; the new round's SECOND press loses the socket; the keeper is restarted before it
+    # finished another pass. The refresh that went through is in the state file, so the next keeper
+    # presses only the sources still owed in this OBS run.
+    server = DropOnPress(INPUTS)
+    try:
+        state = tmp_path / "strih-browser-keeper.json"
+        probes = {PRESENTER: True, FOHABL: True}
+        _keeper_run(server, state, probes, 2)
+
+        def restart_and_arm():
+            server.restart()
+            server.drop_at_press = 2
+
+        cut, _ = _keeper_run(server, state, probes, 3, {2: restart_and_arm})
+        assert cut == ["Browser camera crew"]
+        rest, _ = _keeper_run(server, state, probes, 2)
+        assert sorted(rest) == ["Browser Ableset", "Odpocet"]
+    finally:
+        server.close()
+
+
 def test_a_pending_refresh_survives_a_keeper_restart(tmp_path, obs_server):
     # presenter was down for the whole first keeper run (its pages never got their refresh in this OBS
     # run); after a keeper restart under the same OBS, presenter comes up: refreshed once, fohabl not.
@@ -246,6 +342,15 @@ def test_the_frame_count_tells_a_restart_when_no_local_process_is_visible(tmp_pa
     # round 1, nothing after the drop (frames kept growing), round 2 after the restart (frames from 0)
     assert len(presses) == 6 and sorted(presses[:3]) == sorted(BROWSERS)
     assert json.loads(state.read_text())["obs_identity"]["process"] is None
+
+
+def test_the_frame_count_is_updated_every_pass_so_a_long_run_still_tells_a_restart(tmp_path, obs_server):
+    # the new OBS answers 90 at the reconnect: above the old run's count at ITS connect (30), below its
+    # count at the last pass (150). Only the per-pass update tells this restart apart.
+    state = tmp_path / "strih-browser-keeper.json"
+    presses, _ = _keeper_run(obs_server, state, {PRESENTER: True, FOHABL: True}, 6,
+                             {4: lambda: obs_server.restart(frames=60)}, obs_process=lambda: None)
+    assert len(presses) == 6 and sorted(presses[3:]) == sorted(BROWSERS)
 
 
 def test_the_state_file_carries_the_obs_identity_while_obs_is_down(tmp_path, obs_server):

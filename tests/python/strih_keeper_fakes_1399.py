@@ -58,10 +58,10 @@ class FakeObsWebSocket:
         """The keeper's obs_process callable: the identity of the OBS process now running."""
         return self.process
 
-    def restart(self, process=None):
-        """An OBS restart: a new process, the frame count from 0, the connection dropped."""
+    def restart(self, process=None, frames=0):
+        """An OBS restart: a new process, the frame count from FRAMES (0), the connection dropped."""
         with self.lock:
-            self.frames = 0
+            self.frames = frames
             self.process = process or self.process + "+"
         self.drop()
 
