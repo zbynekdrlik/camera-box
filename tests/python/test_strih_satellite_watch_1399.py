@@ -532,6 +532,54 @@ def test_check_state_fails_a_backed_off_watch_while_the_fault_holds(tmp_path):
     assert W.check_state_file(str(p))[0] == 0
 
 
+def _check(rig, after_s=5.0):
+    return W.check_state_file(str(rig.state), now=1.79e9 + rig.boot + after_s)
+
+
+def test_check_state_an_old_failed_restart_is_history_under_any_later_condition(tmp_path):
+    # a failed restart, then healthy passes, then Companion down or a silent REST: no fault holds, and the
+    # failed restart is older than the last healthy pass -- never a red (review round 2)
+    rig = Rig(tmp_path, restart_rc=1)
+    for t in (1000.0, 1030.0, 1060.0):
+        rig.fire(t, obs(connected=False))
+    assert _check(rig)[0] == 1, "the failed restart while the fault holds is a red"
+    for i in range(10):
+        rig.fire(1090.0 + 30.0 * i, obs())
+    assert _check(rig)[0] == 0
+    rig.fire(1390.0, obs(connected=False, companion_up=False))
+    rc, line = _check(rig)
+    assert rc == 0, line
+    rig.fire(1420.0, obs(rest_ok=False))
+    rc, line = _check(rig)
+    assert rc == 0, line
+    # the fault comes back: the OLD failed restart is still history (a new window has not restarted yet)
+    rig.fire(1450.0, obs(connected=False))
+    assert _check(rig)[0] == 0
+
+
+def test_check_state_a_backed_off_watch_is_red_only_while_a_fault_holds(tmp_path):
+    rig = Rig(tmp_path)
+    t = 1000.0
+    rig.fire(t, obs(connected=False))
+    while len(rig.restarts) < 3:
+        t += 30.0
+        rig.fire(t)
+    rc, line = _check(rig)
+    assert rc == 1 and "3 times with no healthy pass" in line
+    rig.fire(t + 30.0, obs(connected=False, companion_up=False))
+    rc, line = _check(rig)
+    assert rc == 0, "Companion down is not a fault the restart failed to cure: " + line
+    rig.fire(t + 60.0, obs(rest_ok=False))
+    assert _check(rig)[0] == 0
+
+
+def test_check_state_a_backed_off_fault_names_the_backed_off_restart_time(tmp_path):
+    p = _state(tmp_path, 5, condition="fault:" + NC, since={NC: 970.0}, unhealed_restarts=6,
+               effective_sustain_s=900.0, observation=W.observation_dict(obs(connected=False)))
+    rc, line = W.check_state_file(str(p))
+    assert rc == 1 and "(restart at 900 s)" in line and "(restart at 60 s)" not in line
+
+
 def test_a_pass_fits_its_oneshot_timeout():
     worst = 3 * W.HTTP_TIMEOUT_S + W.TCP_TIMEOUT_S + W.SYSTEMCTL_TIMEOUT_S
     assert worst + 2 <= int(_unit(SERVICE)["TimeoutStartSec"]), worst

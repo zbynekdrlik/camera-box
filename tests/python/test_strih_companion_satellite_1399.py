@@ -238,6 +238,20 @@ def test_grade_rows_a_replaced_satellite_binary_is_the_wrong_program(tmp_path):
     assert F.row(rows, "companion-satellite").startswith("FAIL|(companion-satellite) %s: process:wrong-program" % SAT)
 
 
+def test_grade_rows_a_pipe_in_a_cmdline_never_shifts_the_process_facts(tmp_path):
+    # the process facts carry a free-form cmdline: a "|" in it must not move the exe or the start time
+    home, bindir = F.installed_home(tmp_path)
+    keeper = tmp_path / "proc" / str(F.PIDS["strih-browser-keeper.service"]) / "cmdline"
+    keeper.write_bytes(b"\0".join([b"/usr/bin/python3", str(bindir / "strih_browser_keeper.py").encode(),
+                                    b"--state-file", b"/run/user/1000/a|b.json"]) + b"\0")
+    sat = tmp_path / "proc" / str(F.PIDS[SAT]) / "cmdline"
+    sat.write_bytes(b"companion-satellite --title=a|b|c\0")
+    F.all_states(tmp_path / "run")
+    rows = F.grade(tmp_path, home, bindir, tmp_path / "run", wmctrl=F.WIN)
+    assert F.row(rows, "browser-keeper").startswith("OK|(browser-keeper) "), rows
+    assert F.row(rows, "companion-satellite").startswith("OK|(companion-satellite) "), rows
+
+
 def test_grade_rows_the_satellite_argv_is_never_read(tmp_path):
     # Chromium rewrites its process title; the fakes give it a title that names no path at all, and the row
     # is still OK because /proc/<pid>/exe is the binary
