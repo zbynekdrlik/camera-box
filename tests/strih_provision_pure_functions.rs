@@ -1435,7 +1435,7 @@ fn setup_strih_wires_companion_satellite_before_final_verify() {
 
 /// verify-strih.sh grades performance through the SHARED baseline grader (issue 1357: its `perf` item
 /// = governor + strih-maxperf persistence) and carries the (companion) item, which now reads the
-/// openbox autostart launch line.
+/// openbox autostart line that starts companion-satellite.service (issue 1399).
 #[test]
 fn verify_strih_carries_perf_and_companion_items() {
     let v = read_script("scripts/verify-strih.sh");
