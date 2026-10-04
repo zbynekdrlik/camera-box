@@ -1092,6 +1092,22 @@ module to `/lib/modules/<kernel>/updates/r8152.ko`, which the next kernel would 
   `verify-strih.sh` (item 36 passes before the reboot: the loaded plain copy is 2.21.4). After the next
   boot, read `/sys/module/r8152/version` + `modinfo -n r8152` (must be under `updates/dkms`).
 
+## A verify item for a supervised service grades the RUNNING process, not only the files (issue 1399)
+
+Files on disk byte-identical to the checkout + `is-active` = active still passes while the OLD process
+runs: the unit was overwritten under a running service, or a deploy changed its program without a
+restart. The issue-1399 review caught exactly that (the hand-made panel stopgap kept running after its
+unit and program were replaced). The pattern, in `scripts/lib/strih-session-apps.sh`:
+- **install writes a file only when its bytes or mode differ** (`strih_session_apps_put`), so its mtime
+  means "the content changed", then `daemon-reload` (when a unit file changed) and `try-restart` of the
+  changed units: a running one moves onto the new files, a stopped one is never started (enable-only);
+- **verify reads the main process**: `systemctl show -p MainPID` -> `/proc/<pid>/cmdline` must run the
+  installed program, and `show -p ExecMainStartTimestamp --value --timestamp=unix` (`@<secs>`) must be at
+  or after the newest mtime of program + unit (`strih_session_app_process_state`). Wrap the /proc read
+  as `{ tr ... < f; } 2>/dev/null`: a bare `< f 2>/dev/null` prints the open error first.
+- Do NOT grade `NeedDaemonReload` (manager-wide, see the dantesync section above).
+Reuse it for the next supervised service an item grades.
+
 ## Follow-ups (not done in the preparation lane)
 
 - ~~obs-browser / CEF in the strih CI variant~~ — **DONE (issue 1317, CEF now wired)**, see the CI
