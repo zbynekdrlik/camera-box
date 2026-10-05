@@ -200,6 +200,12 @@ deploy_frame_probe_to_painter() {
   local was_deadman_armed
   was_deadman_armed="$(ssh_box "$ip" "systemctl is-active ${CAM2_PAINTER_DEADMAN_UNIT}.timer 2>/dev/null" || true)"
 
+  # issue 1407 (decision 5996845165 Q2): the bytes the painter may be restarted on are known up front:
+  # the artifact (the verified new build) and the build the painter runs now (read before the swap).
+  local local_sha pre_sha
+  local_sha="$(sha256sum "$FRAME_PROBE_BIN" | awk '{print $1}')"
+  pre_sha="$(ssh_box "$ip" "sha256sum /usr/local/bin/frame-probe 2>/dev/null | awk '{print \$1}'" || echo "")"
+
   # #1351: park the transient cam2-painter-deadman re-armer BEFORE stopping the painter, then
   # remount rw for the swap. The deadman (scripts/lib/cam2-painter-deadman.sh) re-fires every ~5 min
   # and would resurrect the OLD binary mid-swap; a re-arm inside the ~2 s swap window is a second way
@@ -219,33 +225,59 @@ deploy_frame_probe_to_painter() {
   # #1351: ETXTBSY-proof swap — scp to a SIDECAR, then go live via ONE atomic rename. The painter
   # binary may still be executing (Restart=always) when scp opens the destination for writing, which
   # gives `Text file busy` on the live path; a rename replaces the directory entry while the running
-  # process keeps its old inode, so ETXTBSY cannot occur by construction. byte-verify (below) reads
-  # the FINAL path and is the real gate — a failed rename leaves stale/absent bytes there.
+  # process keeps its old inode, so ETXTBSY cannot occur by construction.
+  # issue 1407 (decision 5996845165 Q2), the camera-box swap's shape: the SIDECAR is byte-verified
+  # BEFORE the rename, so a corrupt or partial copy never goes live; the rename is no longer `|| true`;
+  # any failure removes the sidecar while the root is still writable. The final-path byte-verify
+  # AFTER the rename stays the gate (#1351: it catches a rename that did not land).
+  local swap_fail="" sidecar_sha final_sha
   if ! scp_box "$ip" "$FRAME_PROBE_BIN" "/usr/local/bin/frame-probe.new"; then
-    err "[$painter] frame-probe scp failed"; FAILED+=("$painter-painter(scp-failed)")
-    # issue 1407: the #892 restore of the OLD binary, the window closed verified first (painter_restore
-    # records its own FAILED entry; this box already failed on the scp).
-    painter_restore "$ip" "$restore_action" "$was_deadman_armed" "the OLD frame-probe (the swap failed)" || true
-    return 0
-  fi
-  # chmod the sidecar, then atomically rename it over the (possibly running) live binary + fsync.
-  ssh_box "$ip" "chmod 0755 /usr/local/bin/frame-probe.new && mv -f /usr/local/bin/frame-probe.new /usr/local/bin/frame-probe && sync" || true
-
-  # Byte-verify (deploy-from-clean-tree.md Layer 3 — a partial scp / stale same-name binary would
-  # pass a mere presence check but fail this).
-  local local_sha remote_sha
-  local_sha="$(sha256sum "$FRAME_PROBE_BIN" | awk '{print $1}')"
-  remote_sha="$(ssh_box "$ip" "sha256sum /usr/local/bin/frame-probe 2>/dev/null | awk '{print \$1}'" || echo "")"
-  if [ "$local_sha" != "$remote_sha" ]; then
-    err "[$painter] frame-probe byte-verify FAILED: local $local_sha != remote ${remote_sha:-<none>}"
-    FAILED+=("$painter-painter(sha-mismatch)")
+    err "[$painter] frame-probe scp failed"; swap_fail="scp-failed"
   else
-    info "[$painter] frame-probe byte-verify OK (sha256 ${local_sha:0:12})"
+    sidecar_sha="$(ssh_box "$ip" "sha256sum /usr/local/bin/frame-probe.new 2>/dev/null | awk '{print \$1}'" || echo "")"
+    if [ "$sidecar_sha" != "$local_sha" ]; then
+      err "[$painter] frame-probe sidecar byte-verify FAILED: local $local_sha != sidecar ${sidecar_sha:-<none>} -- not moved over the live binary"
+      swap_fail="sidecar-sha-mismatch"
+    elif ! ssh_box "$ip" "chmod 0755 /usr/local/bin/frame-probe.new && mv -f /usr/local/bin/frame-probe.new /usr/local/bin/frame-probe && sync"; then
+      err "[$painter] the rename step of the verified frame-probe sidecar failed"
+      swap_fail="swap-failed"
+    fi
+  fi
+  if [ -n "$swap_fail" ]; then
+    FAILED+=("$painter-painter($swap_fail)")
+    ssh_box "$ip" "rm -f /usr/local/bin/frame-probe.new" || err "[$painter] could not remove the sidecar /usr/local/bin/frame-probe.new"
   fi
 
-  # #892 restore: re-arm ONLY a persistently-enabled unit; leave a disabled (event-mode) unit dark.
-  # issue 1407: the enable inside the window, the verified close, then the start + the deadman re-arm.
-  painter_restore "$ip" "$restore_action" "$was_deadman_armed" "frame-probe swapped" || true
+  # Byte-verify the FINAL path (deploy-from-clean-tree.md Layer 3 — a partial scp / stale same-name
+  # binary would pass a mere presence check but fail this).
+  final_sha="$(ssh_box "$ip" "sha256sum /usr/local/bin/frame-probe 2>/dev/null | awk '{print \$1}'" || echo "")"
+  if [ -z "$swap_fail" ]; then
+    if [ "$final_sha" != "$local_sha" ]; then
+      err "[$painter] frame-probe byte-verify FAILED: local $local_sha != remote ${final_sha:-<none>}"
+      FAILED+=("$painter-painter(sha-mismatch)")
+    else
+      info "[$painter] frame-probe byte-verify OK (sha256 ${local_sha:0:12})"
+    fi
+  fi
+
+  # issue 1407 (decision 5996845165 Q2): the painter is never started on an unverified binary. It is
+  # restored only when the live path reads the verified new build or, byte-identical, the build it ran
+  # before the swap (a failed swap leaves that untouched). Anything else (missing, unreadable, other
+  # bytes): the window still gets the verified ro close, but the painter is NOT started and its
+  # dead-man is NOT re-armed (its action would start the painter on that binary).
+  if [ -n "$final_sha" ] && { [ "$final_sha" = "$local_sha" ] || [ "$final_sha" = "$pre_sha" ]; }; then
+    local what="frame-probe swapped"
+    [ "$final_sha" = "$local_sha" ] || what="the unchanged frame-probe it ran before (the swap failed)"
+    # #892 restore: re-arm ONLY a persistently-enabled unit; leave a disabled (event-mode) unit dark.
+    # issue 1407: the enable inside the window, the verified close, then the start + the deadman re-arm.
+    painter_restore "$ip" "$restore_action" "$was_deadman_armed" "$what" || true
+  else
+    err "[$painter] the live /usr/local/bin/frame-probe (sha256 ${final_sha:-<none>}) is neither the verified new build nor the one it ran before -- cam2-painter.service is NOT started and its dead-man is not re-armed"
+    FAILED+=("$painter-painter(not-started: unverified binary)")
+    PENDING_START=""
+    close_ro_or_fail "$ip" "$painter" "$painter-painter" \
+      "cam2-painter.service is NOT started (its binary is unverified)." || true
+  fi
   echo ""
 }
 
