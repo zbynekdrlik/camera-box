@@ -31,7 +31,8 @@ paths:
   - `bundle_state_vban`: the obs-vban pacer loss.
   - `bundle_state_av_offset`: the dock offset trend, live age, quality.
   - `bundle_state_host`: install scans, NDI latency CSV, tasklist / VB-Matrix, AHK, record dir,
-    build sha, byte sha256.
+    build sha, byte sha256, the OBS handle count (issue 1406: the pure SystemProcessInformation
+    parser + the Linux `/proc` fd read; `.claude/rules/obs-handles-watchdog.md`).
 - **The server-side modules** (flat in `scripts/`, imported by the server DIRECTLY, never through
   the facade and never re-exported by it):
   - `bundle_state_windows`: the Windows-only identity readers and their process-lifetime caches:
