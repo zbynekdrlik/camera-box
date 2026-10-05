@@ -33,15 +33,14 @@
 # writable root is what this emitter no longer does, and the root mode is now READ, not assumed.
 #
 # The fix: open a remount-rw window, run ONLY the enable-state change FAIL-LOUD (no
-# `2>/dev/null || true` swallow, never `--now`), ALWAYS remount the root read-only (even on
-# failure), then VERIFY with `findmnt -no OPTIONS /` (read through the shared ro-root canon's
-# ro_root_mount_mode, scripts/lib/ro-root.sh) that the root reads `ro` -- the checked close
-# scripts/bkshading-deploy-relay.sh's remount_ro_checked also does. If it does not, FAIL LOUD naming
-# the holders (the processes with a file open for WRITING on / from `fuser -vm /`, plus the
-# deleted-but-open files from the shared issue-808 holder probe) and never start the painter. Then
-# verify the persistent `is-enabled` state actually changed, and only in enable-now mode start the
-# painter -- on a root already proven read-only. No retry loop: a writer that keeps the root busy
-# keeps it busy on every retry, so a retry only delays the same failure.
+# `2>/dev/null || true` swallow, never `--now`), then close it with the ONE verified close every
+# rw-window site shares (scripts/lib/ro-window.sh, issue 1407): ALWAYS the ro remount (even on
+# failure), then `findmnt -no OPTIONS /` READ through the ro-root canon's ro_root_mount_mode. A root
+# that does not read `ro` FAILS LOUD naming the holders (the processes with a file open for WRITING
+# on / from `fuser -vm /`, plus the deleted-but-open files from the issue-808 holder probe) and the
+# painter never starts. Then verify the persistent `is-enabled` state actually changed, and only in
+# enable-now mode start the painter -- on a root already proven read-only. No retry loop: a writer
+# that keeps the root busy keeps it busy on every retry, so a retry only delays the same failure.
 #
 # Every emitted statement ends with `;` (the CLAUDE.md `$(...)` trailing-newline-strip gotcha): the
 # callers embed this text via `$(...)`, so its last statement must still end cleanly whatever text
@@ -50,16 +49,11 @@
 # Source-only: a pure string builder, no ssh, no side effects at source time -- mirrors every other
 # _cmds builder in this codebase.
 
-# issue 1405: the root-mode reading is the ONE first-token reading of the shared ro-root canon.
-# Lazy-source it (rig-mode.sh does not source ro-root.sh itself) -- the same lazy-source pattern the
-# handoff lib uses for its own helpers. The function's definition is emitted INTO the remote text.
-command -v ro_root_mount_mode >/dev/null 2>&1 \
-  || . "${BASH_SOURCE[0]%/*}/ro-root.sh"
-# issue 1405: the holders of deleted-but-open files are named by the repo's ONE probe for that
-# EBUSY cause (issue 808, bkshading_deploy_ro_holder_probe_cmd); its text is emitted into the
-# failure branch. Lazy-sourced the same way (the lib is pure and side-effect free).
-command -v bkshading_deploy_ro_holder_probe_cmd >/dev/null 2>&1 \
-  || . "${BASH_SOURCE[0]%/*}/bkshading-deploy-runtime.sh"
+# issue 1407: the close -- the ro remount, the root-mode READ through the ro-root canon, the writer
+# naming -- is the ONE shared rw-window close (it sources ro-root.sh itself). Lazy-source it
+# (rig-mode.sh does not source it) -- the same lazy-source pattern the handoff lib uses.
+command -v ro_window_close_cmds >/dev/null 2>&1 \
+  || . "${BASH_SOURCE[0]%/*}/ro-window.sh"
 
 # cam2_painter_persist_state_cmds MODE -> REMOTE bash (embed via `$(cam2_painter_persist_state_cmds
 # enable-now|disable)` inside a remote-command heredoc that runs under the caller's `set -e`). MODE:
@@ -91,13 +85,8 @@ cam2_painter_persist_state_cmds() {
     return 0
     ;;
   esac
-  # (1) the shared root-mode reader, defined on the box (a statement of its own, ';'-terminated).
-  printf '%s;\n' "$(declare -f ro_root_mount_mode)"
-  # (2) the window: remount rw, the change, the ro remount. $action is a build-time value; every
-  #     RUNTIME var is \$-escaped so it survives into the emitted remote script. The FAIL line reads
-  #     the painter state with 'systemctl show -p ActiveState --value', never the is-active verb: the
-  #     disable text runs early in the EVENT script, and two tests find EVENT's later "painter
-  #     confirmed stopped" check by its is-active text (review round 4).
+  # (1) the window: remount rw, then the change. $action is a build-time value; every RUNTIME var
+  #     is \$-escaped so it survives into the emitted remote script.
   cat <<CMDS
 # #1175: cam2's root is READ-ONLY; the '$action' of cam2-painter.service cannot write the
 #        /etc/systemd/system enable symlink and FAILS 'Read-only file system'. Remount rw, change
@@ -111,38 +100,24 @@ if ! mount -o remount,rw / 2>/dev/null; then
 fi;
 _pss_rc=0;
 systemctl $action cam2-painter.service || _pss_rc=\$?;
-_pss_ro_rc=0;
-_pss_ro_err="\$(mount -o remount,ro / 2>&1)" || _pss_ro_rc=\$?;
-_pss_opts="\$(findmnt -no OPTIONS / 2>/dev/null || awk '\$2=="/"{print \$4; exit}' /proc/mounts 2>/dev/null || true)";
-_pss_root="\$(ro_root_mount_mode "\$_pss_opts")";
-if [ "\$_pss_root" != "ro" ]; then
-  echo "FAIL: [#1405] cam2's root is NOT read-only after the remount-rw window ('findmnt -no OPTIONS /' = '\$_pss_opts' -> \$_pss_root; 'mount -o remount,ro /' rc=\$_pss_ro_rc\${_pss_ro_err:+: \$_pss_ro_err}). A cambox must never run on a writable root, so $refusal. cam2-painter.service is-enabled now: '\$(systemctl is-enabled cam2-painter.service 2>/dev/null || true)', is-active now: '\$(systemctl show -p ActiveState --value cam2-painter.service 2>/dev/null || true)'." >&2;
-  echo "FAIL: [#1405] processes with a file open for WRITING on / ('fuser -vm /', ACCESS F):" >&2;
 CMDS
-  # (2b) the holders, in the failure branch only. The writer filter keeps the header and every line
-  #      whose ACCESS field (the one right after the PID) carries F: 'fuser -vm /' lists PID 1 and
-  #      the kernel threads first, so a cut at N lines hides a writer with a high PID. No writer
-  #      and no header line = fuser printed no listing (missing, failed): say so, never "none". A
-  #      writer line is printed whatever the header (a localized one is not matched). Literal
-  #      heredoc: every $ is awk's.
-  cat <<'CMDS'
-  { fuser -vm / 2>&1 || true; } | awk '/USER/ && /PID/ && /ACCESS/ { print; h = 1; next } { for (i = 1; i < NF; i++) if ($i ~ /^[0-9]+$/) { if ($(i + 1) ~ /F/) { print; n++ } break } } END { if (n == 0) print (h ? "  (none: no process holds a file open for writing on /)" : "  (fuser printed no listing -- is psmisc installed? check by hand: fuser -vm /)") }' >&2 || true;
-  echo "FAIL: [#1405] holders of deleted-but-open files on / (lsof +L1, else the /proc fd scan):" >&2;
-  {
-CMDS
-  bkshading_deploy_ro_holder_probe_cmd
+  # (2) the shared verified close (issue 1407): `exit 1` naming the writers when the root does not
+  #     read ro again, so nothing below runs on a writable root. The consequence reads the unit
+  #     state ON the box (\$-escaped). It reads the painter state with 'systemctl show -p
+  #     ActiveState --value', never the is-active verb: the disable text runs early in the EVENT
+  #     script, and two tests find EVENT's later "painter confirmed stopped" check by its is-active
+  #     text (issue 1405 review round 4).
+  ro_window_close_cmds "#1405" "cam2" \
+    "A cambox must never run on a writable root, so $refusal. cam2-painter.service is-enabled now: '\$(systemctl is-enabled cam2-painter.service 2>/dev/null || true)', is-active now: '\$(systemctl show -p ActiveState --value cam2-painter.service 2>/dev/null || true)'." \
+    "stop that holder on cam2, run 'mount -o remount,ro /' there until 'findmnt -no OPTIONS /' reads ro, then re-run rig-mode.sh $rig_mode (never reboot a cambox remotely)."
   cat <<CMDS
-  } >&2 || true;
-  echo "FAIL: [#1405] stop that holder on cam2, run 'mount -o remount,ro /' there until 'findmnt -no OPTIONS /' reads ro, then re-run rig-mode.sh $rig_mode (never reboot a cambox remotely)." >&2;
-  exit 1;
-fi;
 if [ "\$_pss_rc" -ne 0 ]; then
   echo "FAIL: [#1175] 'systemctl $action cam2-painter.service' failed (rc=\$_pss_rc) even inside the remount-rw window (the root is back read-only)." >&2;
   exit 1;
 fi;
 _pss_state="\$(systemctl is-enabled cam2-painter.service 2>/dev/null || true)";
 CMDS
-  # (3) the read-back verify (literal: $_pss_state / $_pss_opts are RUNTIME vars) and, in
+  # (3) the read-back verify (literal: $_pss_state / $_row_opts are RUNTIME vars) and, in
   #     enable-now mode only, the start on the proven read-only root.
   if [ "$want" = "enabled" ]; then
     cat <<'CMDS'
@@ -150,7 +125,7 @@ if [ "$_pss_state" != "enabled" ]; then
   echo "FAIL: [#1175] cam2-painter.service is-enabled='$_pss_state' after enable (expected 'enabled') -- it will NOT survive a reboot." >&2;
   exit 1;
 fi;
-echo "[#1175] cam2-painter.service ENABLED + persisted (is-enabled=enabled; survives reboot) via a remount-rw window; root back read-only (findmnt: $_pss_opts, issue 1405).";
+echo "[#1175] cam2-painter.service ENABLED + persisted (is-enabled=enabled; survives reboot) via a remount-rw window; root back read-only (findmnt: $_row_opts, issue 1405).";
 if ! systemctl start cam2-painter.service; then
   echo "FAIL: [#1405] cam2-painter.service is enabled + persisted and cam2's root is read-only, but 'systemctl start cam2-painter.service' failed -- the TEST painter is NOT running." >&2;
   exit 1;
@@ -163,7 +138,7 @@ if [ "$_pss_state" = "enabled" ]; then
   echo "FAIL: [#1175] cam2-painter.service still is-enabled='enabled' after disable -- a reboot would re-arm the QR painter on the live broadcast." >&2;
   exit 1;
 fi;
-echo "[#1175] cam2-painter.service DISABLED + persisted (is-enabled='$_pss_state'; a reboot cannot re-arm the QR) via a remount-rw window; root back read-only (findmnt: $_pss_opts, issue 1405).";
+echo "[#1175] cam2-painter.service DISABLED + persisted (is-enabled='$_pss_state'; a reboot cannot re-arm the QR) via a remount-rw window; root back read-only (findmnt: $_row_opts, issue 1405).";
 CMDS
   fi
 }

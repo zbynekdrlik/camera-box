@@ -412,9 +412,14 @@ chmod +x ./dist/camera-box
 
 # DEVICE_ROOT_PW: the box root password (NOT committed — export it from your password store before deploying)
 # 2. Deploy to device (device root pw — NOT committed)
+# Prefer scripts/deploy-fleet.sh --binary ./dist/camera-box (CAMERA_SET=camN): it closes the rw
+# window with the ONE verified ro close (scripts/lib/ro-window.sh, issue 1407) BEFORE the start.
+# By hand, the same order -- never start inside the window, never swallow the ro remount:
 sshpass -p "$DEVICE_ROOT_PW" ssh root@10.77.9.6X "mount -o remount,rw / && systemctl stop camera-box"
 sshpass -p "$DEVICE_ROOT_PW" scp ./dist/camera-box root@10.77.9.6X:/usr/local/bin/
-sshpass -p "$DEVICE_ROOT_PW" ssh root@10.77.9.6X "systemctl start camera-box && mount -o remount,ro / 2>/dev/null; true"
+sshpass -p "$DEVICE_ROOT_PW" ssh root@10.77.9.6X "sync -f /; mount -o remount,ro /; findmnt -no OPTIONS /"
+# findmnt must print ro,... -- only then:
+sshpass -p "$DEVICE_ROOT_PW" ssh root@10.77.9.6X "systemctl start camera-box"
 ```
 
 Use IP addresses — `.lan` DNS may not resolve.
@@ -854,9 +859,9 @@ rewrite, applied at SOME point after the paragraph above was written). **cam2 an
 genuinely rw-root** (a direct `/etc/...` write succeeds with no remount). The
 dantesync-deployment skill's "cam3 is the ONE exception" framing is now WRONG — treat EVERY box
 individually: attempt the plain write first, and on `Read-only file system` wrap it in
-`mount -o remount,rw /` ... `mount -o remount,ro / 2>/dev/null || true` (the same pattern
-`setup-device.sh`'s own `ensure_root_writable`/`restore_root_mode` already uses). Never assume a
-box's mode from this doc or from another box's result — check live.
+`mount -o remount,rw /` ... `mount -o remount,ro /`, then check `findmnt -no OPTIONS /` reads ro
+(never `2>/dev/null || true` on the ro remount: issue 1407, `.claude/rules/ro-window.md`). Never
+assume a box's mode from this doc or from another box's result — check live.
 
 **The brick (NOT fs corruption):** `unattended-upgrades` was active → auto-installed a `6.8.0-124`
 kernel; a FULL 100M `/var/cache` tmpfs broke apt with ENOSPC so its **initrd never generated**; a

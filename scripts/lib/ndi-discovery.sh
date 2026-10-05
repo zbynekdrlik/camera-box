@@ -65,6 +65,11 @@ if ! command -v obs_fleet_boxes >/dev/null 2>&1; then
   # shellcheck source=scripts/lib/obs-fleet.sh
   . "${BASH_SOURCE[0]%/*}/obs-fleet.sh"
 fi
+# The ONE verified ro close of the --cambox-apply window (issue 1407), lazy-sourced the same way.
+if ! command -v ro_window_close_cmds >/dev/null 2>&1; then
+  # shellcheck source=scripts/lib/ro-window.sh
+  . "${BASH_SOURCE[0]%/*}/ro-window.sh"
+fi
 
 # --- shared constants (single source of truth, consumed cross-file) ---------------------------
 # The SDK's own config file name.
@@ -649,9 +654,11 @@ ndi_discovery_cambox_verdict() {
 # re-running setup-device.sh STEP 7. It embeds the SAME plan/apply pair STEP 7 calls (declare -f, never
 # a copy). A clean box (plan none) writes nothing and never remounts; a refused plan (a foreign drop-in)
 # exits non-zero with nothing touched. Otherwise, on a read-only root it remounts rw, carries out the
-# plan, syncs and remounts ro again (retried 3x; a root it cannot put back is a loud non-zero, and the
-# EXIT trap puts it back on any failure), then runs `systemctl daemon-reload` when it removed the
-# drop-in. It needs no fleet list, so the program is the same for every cambox.
+# plan, and closes the window with the ONE verified ro close (scripts/lib/ro-window.sh, issue 1407:
+# the root mode is READ, a root left writable is a loud non-zero naming the writers, no retry; the
+# EXIT trap closes it the same way on any failure), then runs `systemctl daemon-reload` when it
+# removed the drop-in -- only after the verified close. It needs no fleet list, so the program is the
+# same for every cambox.
 ndi_discovery_cambox_apply_remote_snippet() {
   printf 'set -eu\n'
   printf 'NDI_DISCOVERY_CONFIG_NAME=%q\n' "$NDI_DISCOVERY_CONFIG_NAME"
@@ -659,7 +666,7 @@ ndi_discovery_cambox_apply_remote_snippet() {
   declare -f _ndi_discovery_json_string _ndi_discovery_networks_key ndi_discovery_config_ips \
     ndi_discovery_config_servers _ndi_discovery_norm_list ndi_discovery_dropin_config_dir \
     _ndi_discovery_dropin_foreign ndi_discovery_config_json _ndi_discovery_stripped_json ndi_discovery_cambox_plan \
-    ndi_discovery_cambox_apply_plan
+    ndi_discovery_cambox_apply_plan ro_root_mount_mode
   cat <<'NDI_APPLY'
 _ndi_plan="$(ndi_discovery_cambox_plan "$_ndi_dir" "$_ndi_dropin")"
 case "$_ndi_plan" in
@@ -676,29 +683,26 @@ _ndi_had_dropin=0
 [ ! -e "$_ndi_dropin" ] || _ndi_had_dropin=1
 _ndi_ro=0
 _ndi_opts="$(findmnt -no OPTIONS / 2>/dev/null || awk '$2=="/"{print $4; exit}' /proc/mounts 2>/dev/null || true)"
-case "$_ndi_opts" in ro | ro,*) _ndi_ro=1 ;; esac
+case "$(ro_root_mount_mode "$_ndi_opts")" in ro) _ndi_ro=1 ;; esac
+_ndi_open=0
 _ndi_restore_ro() {
-  [ "$_ndi_ro" = 1 ] || return 0
-  for _ndi_try in 1 2 3; do
-    if mount -o remount,ro /; then
-      _ndi_ro=0
-      return 0
-    fi
-    [ "$_ndi_try" = 3 ] || sleep 2
-  done
-  echo "ERROR: mount -o remount,ro / FAILED 3x -- the root stays read-WRITE; find the holder (lsof +L1; fuser -vm /) and run 'mount -o remount,ro /' by hand" >&2
-  return 1
+  [ "$_ndi_open" = 1 ] || return 0
+  _ndi_open=0
+NDI_APPLY
+  # issue 1407: the ONE verified ro close -- `exit 1` naming the writers when the root does not
+  # read ro again; called on the normal path and by the EXIT trap, at most once (_ndi_open).
+  ro_window_close_cmds "issue 1407" "\$(hostname 2>/dev/null || echo this cambox)" \
+    "The NDI discovery change is on disk, but the root stays read-WRITE, so the daemon-reload is not run." \
+    "stop that writer, put the root back read-only until 'findmnt -no OPTIONS /' reads ro, then run the daemon-reload there by hand (a re-run finds nothing left to do)."
+  cat <<'NDI_APPLY'
 }
-trap '_ndi_restore_ro || true' EXIT
+trap '_ndi_restore_ro' EXIT
 if [ "$_ndi_ro" = 1 ]; then
   mount -o remount,rw /
+  _ndi_open=1
 fi
 ndi_discovery_cambox_apply_plan "$_ndi_dir" "$_ndi_dropin" "$_ndi_plan"
-sync
-if ! _ndi_restore_ro; then
-  trap - EXIT
-  exit 1
-fi
+_ndi_restore_ro
 trap - EXIT
 if [ "$_ndi_had_dropin" = 1 ] && [ ! -e "$_ndi_dropin" ]; then
   systemctl daemon-reload

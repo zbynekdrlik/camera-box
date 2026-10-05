@@ -171,12 +171,13 @@ def test_the_emitted_linux_rollback_removes_the_date_state_after_the_stop_inside
     assert _DATE_LINE in run.stdout.splitlines(), run.stdout
     assert not st.exists()
     assert (bindir / "dantesync").read_text() == "the pre-upgrade binary\n"
+    # issue 1407: the window closes (verified) BEFORE the restart, never at EXIT after it.
     assert calls == [
         "mount -o remount,rw / state=present",
         "systemctl stop dantesync state=present",
+        "mount -o remount,ro / state=absent",
         "systemctl restart dantesync state=absent",
         "dantesync --version state=absent",
-        "mount -o remount,ro / state=absent",
     ], calls
 
 
@@ -436,11 +437,15 @@ def test_the_emitted_linux_downgrade_of_the_master_deletes_after_the_start_insid
     assert _DATE_LINE in run.stdout.splitlines(), run.stdout
     assert not st.exists()
     assert (bindir / "dantesync").read_text() == "the 1.14.0 binary\n"
+    # issue 1407: the swap's window closes (verified) before the restart; the delete after the
+    # good start opens its own window and closes it verified too.
     assert calls == [
         "mount -o remount,rw / state=present",
         "systemctl stop dantesync state=present",
+        "mount -o remount,ro / state=present",
         "systemctl restart dantesync state=present",
         "dantesync --version state=present",
+        "mount -o remount,rw / state=present",
         "mount -o remount,ro / state=absent",
     ], calls
 
@@ -454,14 +459,18 @@ def test_a_failed_start_of_the_downgrade_self_heals_with_the_saved_date_intact(t
     assert st.is_file(), "the 1.15 binary came back without its saved fleet date"
     assert (bindir / "dantesync").read_text() == "the 1.15.0 binary\n"
     assert "date-offset" not in run.stdout, run.stdout
-    assert calls[-2:] == ["systemctl restart dantesync state=present", "mount -o remount,ro / state=present"], calls
+    # issue 1407: the self-heal reopens the window for the .bak, closes it verified, then restarts.
+    assert calls[-3:] == ["mount -o remount,rw / state=present", "mount -o remount,ro / state=present",
+                          "systemctl restart dantesync state=present"], calls
 
 
 def test_the_emitted_linux_downgrade_of_a_slave_keeps_the_date_state(tmp_path):
     run, calls, st, _ = _run_linux_downgrade(tmp_path, "slave")
     assert run.returncode == 0, run.stdout + run.stderr
     assert st.is_file() and "date-offset" not in run.stdout, run.stdout
-    assert calls[-1] == "mount -o remount,ro / state=present", calls
+    # issue 1407: the verified close precedes the restart; nothing reopens the window afterwards.
+    assert calls[-3:] == ["mount -o remount,ro / state=present", "systemctl restart dantesync state=present",
+                          "dantesync --version state=present"], calls
 
 
 @pytest.mark.parametrize("role,fail_start,want_line,want_state,want_exe", [

@@ -804,7 +804,7 @@ jobs:
     # self-hosted dev1 runner (the ONLY box with SSH to the rig LAN). Downloads the
     # camera-box-linux-amd64 artifact built by THIS SAME run's `build` job and deploys it to every
     # ACTIVE cam box (CAMERA_ACTIVE_SET minus acked-offline, via scripts/lib/deploy-set.sh) by
-    # REUSING scripts/deploy-fleet.sh (stop → remount,rw → scp → start → remount,ro → byte-verify →
+    # REUSING scripts/deploy-fleet.sh (stop → remount,rw → scp → verified ro close → start → byte-verify →
     # version read-back → genlock-emit check — no new deploy code, no new credential: deploy-fleet.sh
     # already defaults SSH_PASS to the fleet-wide value). Fails LOUDLY on any active-and-unacked box
     # that mismatches or is unreachable; an acked-offline box is skipped. The push:[dev,main] E2E

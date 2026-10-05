@@ -155,7 +155,8 @@ was fbdev-era-latent: while playback wrote raw `/dev/fb0` (issue 1032, pre-1187)
 did not need the DRM master, so the collision was harmless; the #1187 move to `mpv --vo=drm` made it
 fatal. Do NOT `systemctl disable` here (that is EVENT-mode semantics) — only a `stop` is needed. The
 restore is ALREADY handled: `cmd_stop` → `rig-mode.sh test` → `cam2_painter_steady_state_handoff_cmds`
-runs `enable --now cam2-painter.service` (re-STARTS the unit) — never duplicate that.
+runs `systemctl enable cam2-painter.service` inside the rw window and `systemctl start` after the
+verified ro close (re-STARTS the unit, issues 1405/1407) — never duplicate that.
 
 Diagnosing an instant death: mpv runs `--no-terminal`, which swallows its own log/error output, so the
 plain `> /run/rig-lipsync-playback.log 2>&1` redirect came back EMPTY on the live DRM-master collision.

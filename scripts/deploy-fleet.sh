@@ -5,9 +5,11 @@
 # (e.g. #73 found cam1/cam4=dev.29, cam3=dev.22, cam2=dev.19 — three builds, none current, cam2
 # old enough that it predated the genlock-decimation report and so was NOT genlocking). This
 # script makes re-alignment a single command: download the SAME CI artifact once, push it to
-# every camera with the exact stop -> remount,rw -> scp -> start -> remount,ro cycle from the
-# project CLAUDE.md "Build & Deploy" section, then VERIFY each box reports the new version AND
-# is emitting the genlock report ("N fps emitted / M fps captured").
+# every camera with the stop -> remount,rw -> scp -> remount,ro (verified) -> start cycle, then
+# VERIFY each box reports the new version AND is emitting the genlock report ("N fps emitted / M fps
+# captured"). issue 1407: the window closes with the ONE verified ro close (scripts/lib/ro-window.sh)
+# BEFORE anything starts; a root that does not read ro again fails that box (holders named in FAILED)
+# and starts nothing -- a start on a writable root opens the writers that keep it rw (issue 1405).
 #
 # Per deploy-from-clean-tree.md the deploy source is ALWAYS a CI artifact from a committed,
 # pushed ref — never a locally built binary. This script downloads from a GitHub Actions run
@@ -53,6 +55,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/ci-run-resolve.sh"   # ci_run_latest_success() -- the ONE head-anchored CI run resolver, shared with bkshading-deploy-relay.sh (issue 808, #1394)
 # shellcheck source=scripts/lib/cam2-painter-deadman.sh
 . "$HERE/lib/cam2-painter-deadman.sh"  # cam2_painter_deadman_arm_cmds() — the #1351 re-arm of the TRANSIENT deadman timer (a stopped systemd-run unit is GC'd, so `systemctl start` cannot revive it)
+# shellcheck source=scripts/lib/ro-window.sh
+. "$HERE/lib/ro-window.sh"  # ro_window_close_cmds / ro_window_holders — the ONE verified ro close of every rw window (issue 1407)
 # The deadman re-fire window used when RESTORING a prior-armed deadman after the swap (#1351). The
 # canonical value is 5 min (#1072); overridable, matching cam2-painter-deadman.sh's own convention.
 CAM2_PAINTER_DEADMAN_MINUTES="${CAM2_PAINTER_DEADMAN_MINUTES:-5}"
@@ -82,8 +86,69 @@ done
 
 command -v sshpass >/dev/null 2>&1 || { err "sshpass is required (apt-get install sshpass)"; exit 1; }
 
-ssh_box()  { sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@$1" "$2"; }
+# SSH_SESSION is empty on the normal path and `setsid -w` inside the EXIT trap: the trap's ro close
+# then runs in its own session, so a second Ctrl-C cannot reach it (sshpass forwards SIGINT to ssh).
+SSH_SESSION=()
+ssh_box()  { "${SSH_SESSION[@]}" sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@$1" "$2"; }
 scp_box()  { sshpass -p "$SSH_PASS" scp -o StrictHostKeyChecking=no "$2" "root@$1:$3"; }
+
+# issue 1407: close a box's rw window with the ONE verified ro close (scripts/lib/ro-window.sh) --
+# the ro remount, the root mode READ on the box, and on a root left writable the box's FAIL lines
+# naming the writers. Returns 0 only when the root reads ro again. Otherwise it prints those lines,
+# records FAILED as LABEL(root-rw: <holders>) (LABEL(root-unverified: ...) on an ssh failure) and
+# returns 1, so the caller starts NOTHING.
+close_ro_or_fail() {  # $1=ip $2=box name $3=FAILED label $4=what the box is left with
+  local out rc=0 holders
+  out="$(ssh_box "$1" "$(ro_window_close_cmds "issue 1407" "$2" "$4" \
+    "stop that writer on $2, put the root back read-only until 'findmnt -no OPTIONS /' reads ro, then re-run deploy-fleet.sh for it (never reboot a cambox remotely).")" 2>&1)" || rc=$?
+  # The window counts as closed once the BOX answered (0 = ro, 1 = the close's own FAIL); an
+  # interrupted or failed ssh keeps it open, so the EXIT path closes it once more.
+  case "$rc" in 0 | 1) OPEN_WINDOW="" ;; esac
+  [ "$rc" -eq 0 ] && return 0
+  [ -z "$out" ] || printf '%s\n' "$out" >&2
+  if [ "$rc" -eq 1 ]; then
+    holders="$(ro_window_holders "$out")"
+    err "[$3] root NOT read-only after the swap -- nothing started (holders: ${holders:-none named})"
+    FAILED+=("$3(root-rw: ${holders:-none named})")
+  else
+    err "[$3] ssh failed during the ro close (rc $rc) -- the root mode is unverified, nothing started"
+    FAILED+=("$3(root-unverified: ssh rc $rc)")
+  fi
+  return 1
+}
+
+# issue 1407 + #892: finish the cam2 painter swap. Only `systemctl enable cam2-painter.service` (the
+# enable-now restore) runs inside the rw window; the window closes with the ONE verified ro close;
+# only then the painter starts and the parked deadman is re-armed (#1351, prior state). A root left
+# writable starts NOTHING: no painter and no deadman (its action would start the painter on that
+# root). Returns non-zero when the painter was not restored (FAILED recorded).
+painter_restore() {  # $1=ip $2=restore_action $3=prior deadman is-active $4=which binary runs now
+  local ip="$1" action="$2" armed="$3" what="$4" painter="cam2" rc=0 active
+  if [ "$action" = "enable-now" ] && ! ssh_box "$ip" "systemctl enable cam2-painter.service"; then
+    err "[$painter] cam2-painter.service enable failed"; FAILED+=("$painter-painter(restart-failed)")
+    rc=1
+  fi
+  close_ro_or_fail "$ip" "$painter" "$painter-painter" \
+    "A cambox must never run on a writable root, so cam2-painter.service is NOT started and its dead-man is not re-armed." || return 1
+  if [ "$action" != "enable-now" ]; then
+    log "[$painter] cam2-painter.service left in its prior state (not re-armed, #892: an event-mode/dark painter must not return onto a live broadcast); $what"
+  elif [ "$rc" -eq 0 ]; then
+    if ! ssh_box "$ip" "systemctl start cam2-painter.service"; then
+      err "[$painter] cam2-painter.service start failed"; FAILED+=("$painter-painter(restart-failed)"); rc=1
+    else
+      active="$(ssh_box "$ip" "systemctl is-active cam2-painter.service 2>/dev/null" || echo inactive)"
+      if [ "$active" = "active" ]; then
+        log "[$painter] cam2-painter.service re-armed + active on a root verified read-only; $what"
+      else
+        err "[$painter] cam2-painter.service not active after the start (is-active='$active')"; FAILED+=("$painter-painter(not-active)"); rc=1
+      fi
+    fi
+  fi
+  # #1351: re-arm the transient deadman timer parked before the swap, AFTER the verified close and the
+  # #892 restore so it never races the painter start (prior-state restore, #892-safe).
+  rearm_deadman_if_prior "$ip" "$armed" "$action"
+  return "$rc"
+}
 
 # #1351: RESTORE the transient cam2-painter-deadman timer to its PRIOR state after a swap. A stopped
 # systemd-run unit is garbage-collected, so `systemctl start …timer` can never revive it — the timer
@@ -139,8 +204,16 @@ deploy_frame_probe_to_painter() {
   # and would resurrect the OLD binary mid-swap; a re-arm inside the ~2 s swap window is a second way
   # the old inode stays busy (→ ETXTBSY). It is a transient systemd-run unit, so a stop when it was
   # never armed (a bare deploy-fleet run outside E2E) is a harmless no-op (|| true).
+  OPEN_WINDOW="$ip|$painter|$painter-painter"
+  # a pending start only for a painter that is restarted after the swap: the EXIT advice "start it by
+  # hand" must never reach a deliberately dark (#892 EVENT) painter -- that would put the QR on air.
+  if [ "$restore_action" = "enable-now" ]; then PENDING_START="$painter-painter|$painter"; fi
   if ! ssh_box "$ip" "mount -o remount,rw / && (systemctl stop cam2-painter-deadman.timer 2>/dev/null || true) && (systemctl stop cam2-painter.service 2>/dev/null || true)"; then
-    err "[$painter] remount-rw / painter stop failed"; FAILED+=("$painter-painter(stop-failed)"); return 0
+    err "[$painter] remount-rw / painter stop failed"; FAILED+=("$painter-painter(stop-failed)")
+    # issue 1407: the rw remount may have landed before the failure -- close it the verified way
+    # (it records its own FAILED entry when the root stays writable).
+    close_ro_or_fail "$ip" "$painter" "$painter-painter" "The painter swap stopped before the copy; nothing is started." || true
+    return 0
   fi
   # #1351: ETXTBSY-proof swap — scp to a SIDECAR, then go live via ONE atomic rename. The painter
   # binary may still be executing (Restart=always) when scp opens the destination for writing, which
@@ -149,10 +222,9 @@ deploy_frame_probe_to_painter() {
   # the FINAL path and is the real gate — a failed rename leaves stale/absent bytes there.
   if ! scp_box "$ip" "$FRAME_PROBE_BIN" "/usr/local/bin/frame-probe.new"; then
     err "[$painter] frame-probe scp failed"; FAILED+=("$painter-painter(scp-failed)")
-    # best-effort restore of the unit + re-arm the parked deadman (prior state) + read-only root even on a failed swap.
-    [ "$restore_action" = "enable-now" ] && ssh_box "$ip" "systemctl enable --now cam2-painter.service 2>/dev/null || true" || true
-    rearm_deadman_if_prior "$ip" "$was_deadman_armed" "$restore_action"
-    ssh_box "$ip" "(mount -o remount,ro / 2>/dev/null; true)" || true
+    # issue 1407: the #892 restore of the OLD binary, the window closed verified first (painter_restore
+    # records its own FAILED entry; this box already failed on the scp).
+    painter_restore "$ip" "$restore_action" "$was_deadman_armed" "the OLD frame-probe (the swap failed)" || true
     return 0
   fi
   # chmod the sidecar, then atomically rename it over the (possibly running) live binary + fsync.
@@ -171,41 +243,50 @@ deploy_frame_probe_to_painter() {
   fi
 
   # #892 restore: re-arm ONLY a persistently-enabled unit; leave a disabled (event-mode) unit dark.
-  if [ "$restore_action" = "enable-now" ]; then
-    if ! ssh_box "$ip" "systemctl enable --now cam2-painter.service && (mount -o remount,ro / 2>/dev/null; true)"; then
-      err "[$painter] cam2-painter.service enable --now failed"; FAILED+=("$painter-painter(restart-failed)")
-      # #1138 (review): the && short-circuits the remount-ro when enable --now fails, leaving root
-      # rw. Re-assert read-only root unconditionally before returning (best-effort). #1351: re-arm
-      # the parked deadman (prior state) here too.
-      rearm_deadman_if_prior "$ip" "$was_deadman_armed" "$restore_action"
-      ssh_box "$ip" "(mount -o remount,ro / 2>/dev/null; true)" || true
-      return 0
-    fi
-    local active
-    active="$(ssh_box "$ip" "systemctl is-active cam2-painter.service 2>/dev/null" || echo inactive)"
-    if [ "$active" = "active" ]; then
-      log "[$painter] cam2-painter.service re-armed + active on the new frame-probe"
-    else
-      err "[$painter] cam2-painter.service not active after enable --now (is-active='$active')"; FAILED+=("$painter-painter(not-active)")
-    fi
-  else
-    ssh_box "$ip" "(mount -o remount,ro / 2>/dev/null; true)" || true
-    log "[$painter] frame-probe swapped; cam2-painter.service left in its prior state ('${was_enabled:-<none>}') — not re-armed (#892: an event-mode/dark painter must not return onto a live broadcast)"
-  fi
-  # #1351: re-arm the transient deadman timer we parked before the swap, AFTER the #892 restore so it
-  # never races the painter restart — via systemd-run (a stopped transient unit can't be started),
-  # and only when it was armed before AND the painter is kept alive (prior-state restore, #892-safe).
-  rearm_deadman_if_prior "$ip" "$was_deadman_armed" "$restore_action"
+  # issue 1407: the enable inside the window, the verified close, then the start + the deadman re-arm.
+  painter_restore "$ip" "$restore_action" "$was_deadman_armed" "frame-probe swapped" || true
   echo ""
 }
 
 # Clean up a downloaded-artifact temp dir on exit (no-op when --binary was used).
 DIST=""
+# issue 1407: "ip|box|label" while a box's rw window is open (set just BEFORE the rw remount, cleared
+# by close_ro_or_fail once the box answered the close). A SIGINT/SIGTERM (a CI cancel) between the
+# rw+stop and the close would otherwise leave that cambox on a writable root with its service
+# stopped, silently.
+OPEN_WINDOW=""
+# issue 1407: "label|box" from the window open until the service start was attempted (or the box's
+# flow ended): an interrupt after the verified close but before the start leaves the service stopped.
+PENDING_START=""
 # shellcheck disable=SC2317  # invoked indirectly via the EXIT trap below
 # NB: must not leak a non-zero status from the trap (it would override the script's exit code) —
-# end with `:` so EXIT preserves the real exit status.
-cleanup() { [ -n "$DIST" ] && rm -rf "$DIST"; :; }
+# end with `:` so EXIT preserves the real exit status. An open window is closed the ONE verified way
+# (in its own session) and nothing is started (the binary on the box may be half-copied); a stopped,
+# not yet restarted service is named. Either way the box is named in FAILED.
+cleanup() {
+  if [ -n "$OPEN_WINDOW" ] || [ -n "$PENDING_START" ]; then
+    set +e
+    trap '' INT TERM
+    command -v setsid >/dev/null 2>&1 && SSH_SESSION=(setsid -w)
+    local ip box label
+    if [ -n "$OPEN_WINDOW" ]; then
+      IFS='|' read -r ip box label <<<"$OPEN_WINDOW"
+      err "[$label] deploy ended with the rw window still open (interrupted, or its close was not confirmed) -- closing it (verified); nothing is restarted, the service on $box may be STOPPED"
+      close_ro_or_fail "$ip" "$box" "$label" "The deploy ended mid-swap; nothing is started." \
+        && FAILED+=("$label(interrupted: root ro, service may be stopped)")
+    else
+      IFS='|' read -r label box <<<"$PENDING_START"
+      err "[$label] deploy interrupted after the verified ro close, before the service start -- the service on $box may be STOPPED; start it there by hand (its root is read-only)"
+      FAILED+=("$label(interrupted: service may be stopped)")
+    fi
+    err "DEPLOY NOT CLEAN — issues: ${FAILED[*]}"
+  fi
+  [ -n "$DIST" ] && rm -rf "$DIST"
+  :
+}
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- #1138 frame-probe-ONLY mode ----------------------------------------------------------
 # --frame-probe WITHOUT --binary/--run deploys ONLY the cam2 painter (the auto-align path in
@@ -226,6 +307,7 @@ if [ -n "$FRAME_PROBE_BIN" ] && [ -z "$BINARY" ] && [ -z "$RUN_ID" ]; then
   esac
   declare -a FAILED=()
   deploy_frame_probe_to_painter
+  PENDING_START=""
   echo "================================================================"
   if [ "${#FAILED[@]}" -eq 0 ]; then
     log "FRAME-PROBE DEPLOYED: cam2 painter aligned to the requested build"
@@ -266,6 +348,7 @@ echo ""
 # --- 2 + 3. Deploy + verify per box -------------------------------------------------------
 declare -a FAILED=()
 for cam in $SET; do
+  PENDING_START=""
   if ! camera_resolve "$cam"; then
     FAILED+=("$cam(invalid)"); continue
   fi
@@ -285,23 +368,36 @@ for cam in $SET; do
   fi
 
   # Each deploy step is guarded: a failure on ONE box records it and moves on to the next box
-  # (never aborts the whole fleet under set -e). The remount-ro is best-effort (2>/dev/null; true)
-  # — some devices have no read-only rootfs.
-  info "[$cam] stop service + remount rw + copy + start + remount ro"
+  # (never aborts the whole fleet under set -e). issue 1407: only the stop and the copy run inside
+  # the rw window; it closes with the ONE verified ro close (close_ro_or_fail), and camera-box starts
+  # only on a root that reads ro again. A root left writable is a FAILED box naming its writers --
+  # never a start, never a swallowed close (every cambox runs read-only, setup-device STEP 18).
+  info "[$cam] stop service + remount rw + copy + remount ro (verified) + start"
+  OPEN_WINDOW="$ip|$cam|$cam"
+  PENDING_START="$cam|$cam"
   if ! ssh_box "$ip" "mount -o remount,rw / && systemctl stop camera-box"; then
-    err "[$cam] remount-rw / stop failed"; FAILED+=("$cam(stop-failed)"); continue
+    err "[$cam] remount-rw / stop failed"; FAILED+=("$cam(stop-failed)")
+    # the rw remount may have landed before the failed stop (close_ro_or_fail records its own entry)
+    close_ro_or_fail "$ip" "$cam" "$cam" "The camera-box stop for the swap failed; nothing was copied or started." || true
+    continue
   fi
   if ! scp_box "$ip" "$BINARY" "/usr/local/bin/camera-box"; then
     err "[$cam] scp failed"; FAILED+=("$cam(scp-failed)")
-    ssh_box "$ip" "systemctl start camera-box && (mount -o remount,ro / 2>/dev/null; true)" || true
+    # bring camera-box back up, on a root verified read-only only. scp writes the target in place,
+    # so a mid-transfer failure can leave a partial binary that fails to start: the box is already
+    # FAILED (scp-failed) and the next deploy copies it again.
+    if close_ro_or_fail "$ip" "$cam" "$cam" "A cambox must never run on a writable root, so camera-box.service is NOT started (the copy failed)."; then
+      ssh_box "$ip" "systemctl start camera-box" || err "[$cam] camera-box start after the failed scp failed"
+    fi
+    PENDING_START=""
     continue
   fi
-  if ! ssh_box "$ip" "systemctl start camera-box && (mount -o remount,ro / 2>/dev/null; true)"; then
-    err "[$cam] start failed"; FAILED+=("$cam(start-failed)")
-    # #1138 (review): the && short-circuits the remount-ro on a failed start, leaving root rw —
-    # re-assert read-only root unconditionally before moving to the next box (best-effort).
-    ssh_box "$ip" "(mount -o remount,ro / 2>/dev/null; true)" || true
-    continue
+  close_ro_or_fail "$ip" "$cam" "$cam" "A cambox must never run on a writable root, so camera-box.service is NOT started (the new binary is in place)." || continue
+  start_rc=0
+  ssh_box "$ip" "systemctl start camera-box" || start_rc=$?
+  PENDING_START=""
+  if [ "$start_rc" -ne 0 ]; then
+    err "[$cam] start failed"; FAILED+=("$cam(start-failed)"); continue
   fi
 
   # Byte-verify: the deployed binary must hash-match the artifact we shipped (deploy-from-clean-tree.md
@@ -361,9 +457,12 @@ for cam in $SET; do
   echo ""
 done
 
+PENDING_START=""
+
 # --- #1138: ALSO deploy the cam2-painter (frame-probe) binary when --frame-probe was given -------
 if [ -n "$FRAME_PROBE_BIN" ]; then
   deploy_frame_probe_to_painter
+  PENDING_START=""
 fi
 
 # --- Summary ------------------------------------------------------------------------------

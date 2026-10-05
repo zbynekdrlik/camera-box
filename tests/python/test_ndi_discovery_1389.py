@@ -258,12 +258,24 @@ class CamboxApply1389(unittest.TestCase):
         slog = os.path.join(tmp, "systemctl.log")
         prog = _lib("ndi_discovery_cambox_apply_remote_snippet", env=self._env(tmp))
         self.assertEqual(prog.returncode, 0, prog.stderr)
+        # issue 1407: the fake root is STATEFUL (a file, since the program's close reads it from a
+        # command substitution): `mount` moves it, `findmnt` reads it, a busy ro remount leaves it rw.
+        rootf, fails = os.path.join(tmp, "root-opts"), os.path.join(tmp, "ro-fails")
+        with open(rootf, "w") as fh:
+            fh.write(root_opts + "\n")
+        with open(fails, "w") as fh:
+            fh.write(f"{ro_fails}\n")
         stubs = (
-            f'findmnt() {{ printf "%s\\n" "{root_opts}"; }}\n'
-            f'_ro_fails={ro_fails}\n'
+            f'findmnt() {{ cat "{rootf}"; }}\n'
             f'mount() {{ printf "%s\\n" "$*" >> "{log}"; '
-            'if [ "$*" = "-o remount,ro /" ] && [ "$_ro_fails" -gt 0 ]; then _ro_fails=$((_ro_fails - 1)); return 32; fi; }\n'
+            f'if [ "$*" = "-o remount,rw /" ]; then echo rw,relatime > "{rootf}"; fi; '
+            f'if [ "$*" = "-o remount,ro /" ]; then _f="$(cat "{fails}")"; '
+            f'if [ "$_f" -gt 0 ]; then echo $((_f - 1)) > "{fails}"; echo "mount: /: mount point is busy." >&2; return 32; fi; '
+            f'echo ro,relatime > "{rootf}"; fi; }}\n'
             f'systemctl() {{ printf "%s\\n" "$*" >> "{slog}"; }}\n'
+            'fuser() { echo "                     USER        PID ACCESS COMMAND" >&2; '
+            'echo "                     root      76355 F.... systemd-journal" >&2; }\n'
+            'lsof() { :; }\n'
             'sync() { :; }\nsleep() { :; }\n' + extra_stubs
         )
         # Fed on stdin to `bash -s`, exactly as the runbook's `ssh root@<cambox> bash -s < apply.sh` does.
@@ -482,12 +494,17 @@ class CamboxApply1389(unittest.TestCase):
             self.assertEqual(calls, [])
             self.assertFalse(os.path.exists(path))
 
-    def test_a_transient_busy_ro_remount_is_retried(self):
+    def test_a_busy_ro_remount_is_never_retried_and_names_the_writer(self):
+        # issue 1407: one verified close, no retry loop (a writer that keeps / busy keeps it busy on
+        # every retry); the failure names the writer and the daemon-reload never runs.
         with tempfile.TemporaryDirectory() as tmp:
             self._seed(tmp, self._canonical(tmp, ISSUE_1342_LIST))
-            r, calls, _ = self._run(tmp, ro_fails=2)
-            self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(calls.count("-o remount,ro /"), 3)
+            r, calls, sd = self._run(tmp, ro_fails=1)
+            self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(calls.count("-o remount,ro /"), 1, calls)
+            self.assertIn("systemd-journal", r.stderr)
+            self.assertIn("NOT read-only", r.stderr)
+            self.assertEqual(sd, [], "nothing runs on a root left writable")
 
     def test_a_failed_ro_remount_is_loud_and_non_zero(self):
         with tempfile.TemporaryDirectory() as tmp:

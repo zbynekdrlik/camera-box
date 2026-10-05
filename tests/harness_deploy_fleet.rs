@@ -12,7 +12,8 @@
 //!   1. it sources the SINGLE camera source-of-truth (`camera-set.sh`), not a baked-in IP map;
 //!   2. the deploy source is a CI artifact from a pushed ref (deploy-from-clean-tree), never a
 //!      locally built binary — it downloads via `gh run download`, not `cargo build`;
-//!   3. it performs the exact stop -> remount,rw -> scp -> start -> remount,ro cycle;
+//!   3. it performs the stop -> remount,rw -> scp -> verified ro close -> start cycle (the ro
+//!      close is the ONE shared scripts/lib/ro-window.sh emitter since issue 1407, BEFORE the start);
 //!   4. it VERIFIES the genlock report (`fps emitted` / `fps captured`) per box and FAILS the
 //!      box if it is missing — the cam2-regression guard;
 //!   5. it verifies the post-deploy `--version` matches the deployed binary and fails on drift;
@@ -84,16 +85,20 @@ fn deploy_fleet_deploys_ci_artifact_not_a_local_build() {
 
 #[test]
 fn deploy_fleet_uses_exact_remount_stop_start_cycle() {
-    // The CLAUDE.md "Build & Deploy" cycle: remount rw + stop, scp to /usr/local/bin, then
-    // start + remount ro. Each piece is load-bearing — a missing remount,rw leaves the
-    // read-only rootfs and the scp fails; a missing start leaves the service down.
+    // The cycle: remount rw + stop, scp to /usr/local/bin, then the verified ro close + start.
+    // Each piece is load-bearing — a missing remount,rw leaves the read-only rootfs and the scp
+    // fails; a missing start leaves the service down. issue 1407: the ro close is the ONE shared
+    // verified emitter (scripts/lib/ro-window.sh, which reads the root mode back), never a
+    // hand-written `remount,ro` here (tests/python/test_ro_window_sites_1407.py runs the order).
     let s = read("scripts/deploy-fleet.sh");
     for needle in [
         "mount -o remount,rw /",
         "systemctl stop camera-box",
         "/usr/local/bin/camera-box",
         "systemctl start camera-box",
-        "remount,ro /",
+        "lib/ro-window.sh",
+        "close_ro_or_fail",
+        "ro_window_close_cmds",
     ] {
         assert!(
             s.contains(needle),
@@ -196,6 +201,13 @@ fn run_fleet(remote_version: &str, journal_line: &str, sha_match: bool) -> RunRe
     );
     stub("mount", "#!/usr/bin/env bash\nexit 0\n".to_string());
     stub("systemctl", "#!/usr/bin/env bash\nexit 0\n".to_string());
+    // issue 1407: the swap's rw window closes through the shared verified close, which READS the
+    // root mode — a cambox root reads read-only again (never the CI runner's own rw root).
+    stub(
+        "findmnt",
+        "#!/usr/bin/env bash\necho 'ro,relatime'\n".to_string(),
+    );
+    stub("sync", "#!/usr/bin/env bash\nexit 0\n".to_string());
     // sha256sum: the script calls it BOTH locally (on the artifact) and remotely (on the deployed
     // file). Return a fixed hash for the local artifact path; for the remote path return the same
     // hash when sha_match, else a different one (forces a byte-verify mismatch).

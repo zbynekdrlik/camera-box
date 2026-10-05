@@ -94,10 +94,12 @@ the TEST handoff (`enable-now`) and the EVENT disable (`disable`).
   - That the START opened the blocking writer is INFERRED from that timing, not proven:
     `cam2-painter.service` writes only `/run`, and the one writer seen live (a second
     systemd-journald) is not explained by this unit. The live put-back names the real holder.
-- **The root mode decides, never the remount's exit code.** After the ro remount the emitter reads
-  `findmnt -no OPTIONS /` (with the `/proc/mounts` fallback) through the shared ro-root canon's
-  `ro_root_mount_mode`. Its definition is emitted INTO the remote text (`declare -f`, lazy-sourced
-  from `scripts/lib/ro-root.sh`).
+- **The root mode decides, never the remount's exit code.** Since issue 1407 the close is the ONE
+  shared verified close, `ro_window_close_cmds` (`scripts/lib/ro-window.sh`, `.claude/rules/ro-window.md`),
+  which every rw-window site uses. After the ro remount it reads `findmnt -no OPTIONS /` (with the
+  `/proc/mounts` fallback) through the shared ro-root canon's `ro_root_mount_mode`, whose definition
+  is emitted INTO the remote text (`declare -f`). This emitter passes the `[#1405]` tag, `cam2`, and
+  its own consequence + hint.
   - `rw` or `unknown` FAILS LOUD (exit 1), and the emitter never starts the painter. `unknown` is
     never assumed `ro`. The message names the findmnt reading, the mount error and the current
     `is-enabled` and active states (it reads whether the painter runs, never asserts it: an
@@ -109,9 +111,9 @@ the TEST handoff (`enable-now`) and the EVENT disable (`disable`).
   - **It names the HOLDERS, two ways.** First, the `fuser -vm /` lines whose ACCESS field carries
     `F` (a file open for writing). fuser lists PID 1 and the kernel threads first, so a `head -n
     40` cut a high-PID writer off (review round 1). Second, the deleted-but-open files from the
-    repo's ONE probe for that other EBUSY cause, `bkshading_deploy_ro_holder_probe_cmd` (issue 808,
-    `lsof +L1`, else the /proc fd scan). It is emitted into the failure branch, the same two-part
-    naming as `bkshading-deploy-relay.sh` `remount_ro_checked`.
+    repo's ONE probe for that other EBUSY cause, `ro_window_holder_probe_cmd` (issue 808, moved into
+    `ro-window.sh` by issue 1407: `lsof +L1`, else the /proc fd scan). Both live in the shared
+    close's failure branch.
 - **Order inside the emitter:** remount rw, change, remount ro, ro verify, the change's rc check, the
   `is-enabled` read-back, and (enable-now only) `systemctl start`. A failed start after a good
   enable is its own named `[#1405]` failure.
@@ -165,16 +167,12 @@ the TEST handoff (`enable-now`) and the EVENT disable (`disable`).
   Stop the holder that is not supposed to hold `/` (4.10: a second systemd-journald), then
   `mount -o remount,ro /` until findmnt reads `ro`. Then confirm with the next `rig-mode.sh test`
   that it still reads `ro`. This is a supervisor rig step, never a lane worker's.
-- **Same defect elsewhere, not covered here:** `scripts/deploy-fleet.sh` (an `enable --now
-  cam2-painter.service` then a swallowed ro remount), `scripts/lib/bkshading-relay-mode.sh`,
-  `scripts/dantesync-fleet-upgrade.sh` and `scripts/lib/dantesync-rollback.sh` close the window
-  with `mount -o remount,ro / ... || true` and never read the mount state. A shared "close ro,
-  verify, name the holders" emitter would serve them all. It is cross-cutting (5 sites, 4
-  subsystems), so the lane reported it to the supervisor as a `followup_candidates` entry in its
-  issue-1405 LANE-RETURN. It is tracked as issue 1407 (one shared verified rw-window emitter).
-  It should also absorb this emitter's writer filter: `bkshading-deploy-relay.sh`
-  `remount_ro_checked` still prints `fuser -vm / | head -n 40`, the cut-off fixed here. (The
-  filter cannot live in `ro-root.sh`, which must stay free of grep/awk/sed.)
+- **The same defect elsewhere is fixed by issue 1407.** deploy-fleet (the frame-probe swap used
+  `enable --now cam2-painter.service` then a swallowed ro remount, the camera-box swap started
+  camera-box inside the window), the dantesync upgrade + rollback, the bkshading relay mode + relay
+  deploy and the ndi-discovery apply all close through the same shared emitter now, and start
+  nothing before it. The writer filter moved with it (it cannot live in `ro-root.sh`, which must
+  stay free of grep/awk/sed). See `.claude/rules/ro-window.md`.
 
 ## The TEST painter's rig-test LEDGER entry — quoting the remote PID (issue 1382)
 

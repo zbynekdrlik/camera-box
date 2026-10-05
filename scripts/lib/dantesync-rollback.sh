@@ -27,6 +27,18 @@
 # DEPENDS (resolved at CALL time, all from dantesync-fleet-upgrade.sh): DANTESYNC_LINUX_BIN /
 # DANTESYNC_LINUX_BAK, DANTESYNC_WIN_EXE / DANTESYNC_WIN_BAK, dantesync_windows_wait_service_exit_ps,
 # dantesync_upgrade_status (the script's one version ordering), dantesync_is_ntp_master.
+#
+# THE READ-ONLY ROOT (issue 1407): a cambox runs dantesync on a read-only root, so both Linux programs
+# open a `mount -o remount,rw /` window for their writes. They share ONE window prologue
+# (_dantesync_linux_rw_window_sh): only file writes and the service STOP run inside it, the window is
+# closed with the ONE verified ro close (scripts/lib/ro-window.sh: the root mode is READ, a root left
+# writable exits 1 naming the writers), and the dantesync (re)start runs only AFTER that close. A
+# later write (the self-heal's .bak copy, the date-state delete) reopens its own window and closes it
+# the same way. A node whose root is read-write (strih-lx, dev1) never opens a window at all.
+
+# The ONE verified ro close (lazy-sourced: dantesync-fleet-upgrade.sh sources this lib).
+command -v ro_window_close_cmds >/dev/null 2>&1 \
+  || . "${BASH_SOURCE[0]%/*}/ro-window.sh"
 
 # The first dantesync release that persists the master's fleet date offset (dantesync issue 126).
 DANTESYNC_DATE_STATE_FIRST_VERSION='1.15.0'
@@ -51,17 +63,52 @@ dantesync_date_role() {
   if dantesync_is_ntp_master "${1:-}" "${2:-}"; then printf 'ntp-master'; else printf 'slave'; fi
 }
 
+# _dantesync_linux_rw_window_sh -> the remote bash lines both Linux programs open their read-only
+# root window with (issue 1407): read the root mode (findmnt, the /proc/mounts fallback) through the
+# ONE first-token reading, ro_root_mount_mode (its definition emitted here; `ro` as the FIRST
+# comma-token, #599/#1077), remount rw on a read-only root, and define the two window helpers:
+#   _dantesync_remount_ro -- the ONE verified ro close, at most once per open window (the normal
+#     path and the EXIT trap may both call it); a root left writable exits 1 naming the writers, so
+#     the dantesync (re)start after it never runs on a writable root.
+#   _dantesync_reopen_rw -- reopen the window for a later write (the self-heal's .bak copy, the date
+#     state delete). It never fails the program: a refused remount leaves that write to fail by name.
+_dantesync_linux_rw_window_sh() {
+  printf '%s\n' "$(declare -f ro_root_mount_mode)"
+  cat <<'EOF'
+ro_root=0
+opts="$(findmnt -no OPTIONS / 2>/dev/null || awk '$2=="/"{print $4; exit}' /proc/mounts 2>/dev/null)"
+case "$(ro_root_mount_mode "$opts")" in ro) ro_root=1 ;; esac
+if [ "$ro_root" = 1 ]; then mount -o remount,rw /; fi
+_ds_rw_open=$ro_root
+_dantesync_remount_ro() {
+  [ "$_ds_rw_open" = 1 ] || return 0
+  _ds_rw_open=0
+EOF
+  ro_window_close_cmds "issue 1407" "\$(hostname 2>/dev/null || echo this node)" \
+    "No dantesync start runs on a writable root; dantesync is '\$(systemctl show -p ActiveState --value dantesync 2>/dev/null || true)' now." \
+    "stop that writer, put the root back read-only until 'findmnt -no OPTIONS /' reads ro, then start dantesync there by hand if it is not running."
+  cat <<'EOF'
+}
+_dantesync_reopen_rw() {
+  [ "$ro_root" = 1 ] && [ "$_ds_rw_open" != 1 ] || return 0
+  if mount -o remount,rw /; then _ds_rw_open=1; else echo "WARNING: could not remount / read-write again" >&2; fi
+}
+EOF
+}
+
 # _dantesync_linux_date_state_rm_sh ROLE VERSION -> the remote bash lines that delete the persisted
 # date state, or nothing when the rule says no (VERSION = the restored one, or a downgrade's target).
-# The caller places them after the service stop (the 1.15 master rewrites the file on its loop) and
-# inside the read-only-root rw window. A file that cannot be removed is a named WARNING, never an
-# exit: the clock master is never left stopped over it.
+# The caller places them after the service stop (the 1.15 master rewrites the file on its loop). The
+# delete runs in its own read-only-root window (issue 1407): the window is reopened when the caller
+# already closed it (the downgrade deletes after the start) and closed verified after. A file that
+# cannot be removed is a named WARNING, never an exit: the clock master is never left stopped over it.
 _dantesync_linux_date_state_rm_sh() {
   local f="$DANTESYNC_LINUX_DATE_STATE" why
   dantesync_rollback_clears_date_state "${1:-}" "${2:-}" || return 0
   why="(rollback below $DANTESYNC_DATE_STATE_FIRST_VERSION, dantesync issue 126)"
   cat <<EOF
 # issue 1372: this date master goes back below $DANTESYNC_DATE_STATE_FIRST_VERSION, so the saved fleet date of its 1.15 session goes too.
+_dantesync_reopen_rw
 if [ -e "$f" ]; then
   rm -f "$f" || true
   if [ -e "$f" ]; then
@@ -72,6 +119,7 @@ if [ -e "$f" ]; then
 else
   echo "date-offset.json absent, nothing to remove $why"
 fi
+_dantesync_remount_ro
 EOF
 }
 
@@ -117,22 +165,17 @@ if [ ! -f "$DANTESYNC_LINUX_BAK" ]; then
   echo "no $DANTESYNC_LINUX_BAK to roll back to" >&2
   exit 1
 fi
-# Same read-only-root handling as the upgrade cmd (cam boxes) — restore ro on ANY exit. #1077
-# defect (3): read the real mount state (findmnt, /proc/mounts fallback), never a write probe —
-# mirrors setup-device.sh's ensure_root_writable() (#599); 'ro' as the FIRST comma-token.
-ro_root=0
-opts="\$(findmnt -no OPTIONS / 2>/dev/null || awk '\$2=="/"{print \$4; exit}' /proc/mounts 2>/dev/null)"
-case "\$opts" in ro | ro,*) ro_root=1 ;; esac
-if [ "\$ro_root" = 1 ]; then mount -o remount,rw /; fi
-_dantesync_remount_ro() {
-  if [ "\$ro_root" = 1 ]; then mount -o remount,ro / 2>/dev/null || true; fi
-}
+# Same read-only-root window as the upgrade cmd (cam boxes), issue 1407: the stop + the restore
+# inside it, the verified close, the restart after it; the EXIT trap closes it on any failure.
+# #1077 defect (3): the root mode is the real mount state (findmnt, /proc/mounts fallback).
+$(_dantesync_linux_rw_window_sh)
 trap '_dantesync_remount_ro' EXIT
 systemctl stop dantesync
 cp -a "$DANTESYNC_LINUX_BAK" $DANTESYNC_LINUX_BIN
 EOF
   _dantesync_linux_date_state_rm_sh "${1:-}" "${2:-}"
   cat <<EOF
+_dantesync_remount_ro
 systemctl restart dantesync
 dantesync --version
 EOF
