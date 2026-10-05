@@ -182,12 +182,21 @@ swap on the ro-rootfs cam boxes:
    → `ssh "chmod 0755 …/frame-probe.new && mv -f …/frame-probe.new …/frame-probe && sync"`. A rename
    replaces the directory ENTRY while the running process keeps its OLD inode open, so ETXTBSY cannot
    occur by construction (the running painter finishes on the old inode; the next start picks the
-   new one). Keep the byte-verify reading the FINAL path — it is the real gate (a failed rename
-   leaves stale/absent bytes there → sha-mismatch). Guard the swap `ssh_box … || true`: byte-verify
-   is the gate, matching the existing best-effort `chmod` pattern, and it keeps the pre-existing
-   PATH-stub real-run test (`frame_probe_parity_align_1138.rs`, which does NOT stub chmod/mv/sync)
-   green — the swap's `|| true` swallows the stub's chmod-on-nonexistent-`.new` failure, and the
-   stubbed `sha256sum` still reports byte-verify OK.
+   new one). Keep the byte-verify reading the FINAL path AFTER the rename — it is the real gate (a
+   failed rename leaves stale/absent bytes there → sha-mismatch).
+   **SUPERSEDED in part by issue 1407 (decision 5996845165 Q2):** the swap is no longer
+   `ssh_box … || true`. It now has the camera-box swap's shape:
+   - the SIDECAR is byte-verified BEFORE the rename, so a corrupt or partial copy never goes live;
+   - the rename is checked, and any failure removes `frame-probe.new` inside the window and FAILs
+     the box (`scp-failed` / `sidecar-sha-mismatch` / `swap-failed`);
+   - the painter is restarted only on the verified new build or the byte-identical pre-swap build
+     (read before the swap), else `not-started: unverified binary` with no dead-man re-arm.
+   The two PATH-stub harnesses that run the remote text on the CI HOST
+   (`frame_probe_parity_align_1138.rs`, `harness_deploy_fleet_frame_probe_swap_1351.rs`) therefore
+   stub `chmod` / `mv` / `rm` of a `/usr/local/bin/` path as no-op successes (pass-through
+   otherwise); the old `|| true` was what used to hide the host chmod of a missing `.new`. The
+   1351 assertion "never read the sidecar" became "the final path is read after the rename; a
+   sidecar read only before it". Detail: `.claude/rules/ro-window.md`.
 
 2. **Park the transient `cam2-painter-deadman.timer` across the swap, and RESTORE it via
    `systemd-run` — never `systemctl start`.** The `--on-unit-active` deadman (this rule's own

@@ -96,7 +96,7 @@ Three dev1-side pure parsers:
 | Site | Inside the window | After the verified close |
 |---|---|---|
 | `deploy-fleet.sh` camera-box swap | `systemctl stop camera-box`, scp to the `camera-box.new` sidecar, the sidecar's byte-verify, `chmod` + `mv -f` rename | `systemctl start camera-box` |
-| `deploy-fleet.sh` cam2 frame-probe swap (`painter_restore`) | dead-man + painter stop, scp + rename, `systemctl enable` (enable-now) | painter start, dead-man re-arm (#1351 prior state) |
+| `deploy-fleet.sh` cam2 frame-probe swap (`painter_restore`) | dead-man + painter stop, scp to `frame-probe.new`, its byte-verify, rename, the final-path byte-verify, `systemctl enable` (enable-now) | painter start + dead-man re-arm (#1351 prior state), only on a verified binary |
 | dantesync upgrade (`dantesync_linux_upgrade_cmd`) | backup, `systemctl stop dantesync`, install | `systemctl restart dantesync` |
 | dantesync rollback | stop, `.bak` restore, the master's date-state delete | restart |
 | `bkshading-relay-mode.sh` stop / start | `disable` / `enable` | (start only) `systemctl start` |
@@ -119,10 +119,20 @@ Three dev1-side pure parsers:
     one, or the new one if the rename landed before the step failed), with the box FAILED
     (`scp-failed` / `sidecar-sha-mismatch` / `swap-failed`). The final-path byte-verify after the
     start stays (`sha-mismatch`): it proves the rename landed.
-  - The frame-probe swap keeps its own, weaker shape for now (rename `|| true`, no sidecar verify):
-    its issue-1351 test pins "byte-verify reads the final path, never the sidecar", and it is bound
-    to the #892 painter restore. Giving it the same sidecar verify is a Design-question to the main
-    (issue 1407 comment 5996455127), not a silent change.
+  - **The cam2 frame-probe swap has the same shape** (decision 5996845165 Q2):
+    - scp to `frame-probe.new`, the sidecar byte-verify before the rename, `chmod && mv -f && sync`
+      with no `|| true`;
+    - any failure removes the sidecar inside the window and FAILs the box by name;
+    - the final-path byte-verify after the rename stays the gate (#1351, `sha-mismatch`);
+    - **the painter never starts on an unverified binary:** the live sha is read once before the
+      swap, and `painter_restore` runs only when the final path reads the verified new build or
+      that byte-identical pre-swap build (a failed copy or rename leaves it untouched). Anything
+      else (missing, unreadable, other bytes) gets the verified ro close, no start, no dead-man
+      re-arm (its action would start the painter), `PENDING_START` cleared, and FAILED
+      `cam2-painter(not-started: unverified binary)`.
+    - The 1351 harness assertion "never read the sidecar" became "the final path is read after
+      the rename; a sidecar read only before it" (its own commit; the final-path check is not
+      weakened).
   - **The window spans several separate ssh calls from dev1** (rw + stop, scp, close). Two markers
     cover it (review rounds 1-2):
     - `OPEN_WINDOW` (`ip|box|label`) is set just BEFORE the rw remount. `close_ro_or_fail` clears it
@@ -217,12 +227,22 @@ going into a production (the issue-868 class). TEST aborted before the painter s
 - **Say only what is not confirmed:** a failed box can still run its relay (the start runs after a
   failed enable) or still be armed, so the RESULT reads "may not be running / not armed for a
   reboot", never "is NOT running".
-- All four helpers are reports: nothing for rc 0, always return 0.
-- **Open edge (Design-question to the main, comment 5996455127):** when the failed relay box IS cam2
-  with its root stuck read-write, TEST still runs the painter steps as decided; the issue-1405
-  handoff then fails on the same writer and cam2 ends dark with no dead-man. The recommended
-  alternative stops TEST before the painter launch in that one case. A test pins the decided
-  behaviour (`test_test_failed_relay_on_the_painter_box_*`).
+- The warn / RESULT / Discord helpers are reports: nothing for rc 0, always return 0.
+- **The ONE exception: TEST stops when the PAINTER box's root stayed read-WRITE** (decision
+  5996845165, Q1 = B). The apply records every box whose own verified close failed
+  (`BKSHADING_RELAY_MODE_ROOT_RW`, `ip<TAB>entry` lines). do_test asks
+  `bkshading_relay_mode_painter_root_rw_stop test "$PAINTER_IP"` right after the apply. When it is
+  the painter box, that helper prints the RESULT naming cam2 and its writers ("STOPPED before the
+  painter launch") and TEST exits 1 before the continue-warning and every painter step.
+  - Why: the issue-1405 handoff closes its own rw window on that same root, so it can only fail.
+    Going on would stop the running permanent painter and leave cam2 dark with no dead-man. TEST
+    is development, so stopping strands nothing on air.
+  - It keys on the box's own close failing (root not ro); the writers are named whenever
+    fuser/lsof find any.
+  - Every other relay failure keeps the fold: the source box, and an UNREACHABLE painter box (no
+    close ran there). EVENT never stops here, because a burn left on air is the worse fault.
+  - Tests: `test_test_failed_relay_on_the_painter_box_with_a_read_write_root_stops_*` and
+    `test_test_unreachable_painter_box_still_runs_the_painter_steps`.
 - **Any NEW step in a rig-mode switch whose failure must not strand the rig gets the same shape:**
   record the rc, warn by name, continue, fold at the end. A bare call is right only for a step that
   must stop the switch (a hard precondition before any mutation, like the #789 TEST-entry gate).
@@ -307,7 +327,11 @@ token.
   and `sha256sum` are LOGGED wrappers around the real tools (the fs prefix un-mapped in the log), and
   the write tools refuse a write under the box fs while the root reads ro, so the sidecar swap's
   order (scp `.new`, verify `.new`, `mv -f`, close, start) is read from the log. The fake scp has
-  `FAKE_SCP_PARTIAL` (half the bytes, exit 1) and `FAKE_SCP_CORRUPT` (wrong bytes, exit 0).
+  `FAKE_SCP_PARTIAL` (half the bytes, exit 1) and `FAKE_SCP_CORRUPT` (wrong bytes, exit 0); a
+  wrapped tool fails on `FAKE_<TOOL>_RC` (`FAKE_MV_RC`: the rename step). `_deploy(live=...,
+  probe_live=...)` puts an old camera-box / frame-probe on the box first; a painter test that expects
+  a restart after a failed swap needs `probe_live`, since a box with no frame-probe has no verified
+  binary to start.
 - **The Rust deploy-fleet harness runs the remote text on the CI HOST itself**
   (`tests/harness_deploy_fleet.rs`), so it stubs `chmod` / `mv` / `rm` to a no-op for any
   `/usr/local/bin/` argument (pass-through otherwise): the sidecar rename must never touch the
