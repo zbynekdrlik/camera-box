@@ -205,7 +205,9 @@ deploy_frame_probe_to_painter() {
   # the old inode stays busy (→ ETXTBSY). It is a transient systemd-run unit, so a stop when it was
   # never armed (a bare deploy-fleet run outside E2E) is a harmless no-op (|| true).
   OPEN_WINDOW="$ip|$painter|$painter-painter"
-  PENDING_START="$painter-painter|$painter"
+  # a pending start only for a painter that is restarted after the swap: the EXIT advice "start it by
+  # hand" must never reach a deliberately dark (#892 EVENT) painter -- that would put the QR on air.
+  if [ "$restore_action" = "enable-now" ]; then PENDING_START="$painter-painter|$painter"; fi
   if ! ssh_box "$ip" "mount -o remount,rw / && (systemctl stop cam2-painter-deadman.timer 2>/dev/null || true) && (systemctl stop cam2-painter.service 2>/dev/null || true)"; then
     err "[$painter] remount-rw / painter stop failed"; FAILED+=("$painter-painter(stop-failed)")
     # issue 1407: the rw remount may have landed before the failure -- close it the verified way

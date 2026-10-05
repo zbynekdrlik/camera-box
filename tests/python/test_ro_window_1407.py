@@ -298,10 +298,29 @@ _RO_CALL = re.compile(r"(?:remount,ro|ro,remount)(?:,[\w=-]+)*[\"']?(?:\s+/(?=[\
 _REDIRS = re.compile(r"(?:\s*(?:[0-9]|&)?>>?&?\s*[^\s;|&)'\"]+)*")
 _DISCARDS = (re.compile(r"(?:2|&)>>?\s*/dev/null"), re.compile(r">\s*/dev/null.*2>&1"))
 # what may follow an ro remount without checking it: an `||` that goes on (true, :, a message, a
-# zero return/exit, continue/break), `; true`, `; :`, or a retry loop's `&& break`.
+# zero return/exit, continue/break), `; true`, `; :`, or a retry loop's `&& break`. A `|| { ... }`
+# group is read separately (_group_goes_on): to its MATCHING brace, so a `${var}` inside it never
+# ends it early.
 _GOES_ON = re.compile(r"\s*(?:\|\|\s*(?:true|:|echo|printf|warn|log|info|err|logger|return\s+0|exit\s+0|continue|break)"
-                      r"(?![\w-])|\|\|\s*\{(?:(?!\b(?:exit|return|fail|die)\b)[^}])*\}"
-                      r"|;\s*(?:true|:)(?![\w-])|&&\s*break(?![\w-]))")
+                      r"(?![\w-])|;\s*(?:true|:)(?![\w-])|&&\s*break(?![\w-]))")
+_GROUP = re.compile(r"\s*\|\|\s*\{")
+# a group is loud when it ends the step with a failure: a non-zero exit/return, a bare return
+# (it passes the mount's failure on), fail or die.
+_LOUD = re.compile(r"\b(?:exit|return)\s+[1-9]|\breturn\s*(?:;|$|\})|\b(?:fail|die)\b")
+
+
+def _group_goes_on(after):
+    m = _GROUP.match(after)
+    if not m:
+        return False
+    depth, i = 1, m.end()
+    while i < len(after) and depth:
+        if after[i] == "{":
+            depth += 1
+        elif after[i] == "}":
+            depth -= 1
+        i += 1
+    return not _LOUD.search(after[m.end():i - 1])
 
 
 class _Sweep:
@@ -317,7 +336,7 @@ class _Sweep:
             redirs = _REDIRS.match(rest).group(0)
             if any(d.search(redirs) for d in _DISCARDS):
                 return True
-            if _GOES_ON.match(rest[len(redirs):]):
+            if _GOES_ON.match(rest[len(redirs):]) or _group_goes_on(rest[len(redirs):]):
                 return True
         return False
 
