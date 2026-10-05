@@ -217,10 +217,11 @@ run (wrong timing; TEST mode must stay alive between runs).
   send. A failure (⚠️ sa NEVRÁTILA) goes ON TOP of the message, so it is not buried under a green
   contract; a success (✅ vrátená / ✅ už sedela / ✅ vrátená, ale snímku treba odložiť) goes at the
   end. The phone line never names a command (the owner cannot run one from the phone, it says
-  "napíš Claudovi"); the commands are in the run log. The prepend is written to a temp file and
-  moved over only when complete, and a failed read or write falls back to appending, so the
-  contract text itself is never lost. Nothing is added when no snapshot was waiting. The note can
-  never fail the caller.
+  "napíš Claudovi"); the commands are in the run log. The writing is the ONE shared
+  `event_mode_discord_note_add` (`scripts/lib/event-mode-discord-confirm.sh`, issue 1407; the relay
+  note uses it too): the prepend is written to a temp file and moved over only when complete, and a
+  failed read or write falls back to appending, so the contract text itself is never lost. Nothing
+  is added when no snapshot was waiting. The note can never fail the caller.
 - The outcome does NOT change the EVENT exit status: that verdict is the rig-cleanliness contract,
   and the camera exposure is a separate, loudly reported fact.
 

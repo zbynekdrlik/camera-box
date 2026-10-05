@@ -127,7 +127,10 @@ before/after journal recipe further down this runbook, and additionally note cam
   opens the rw window, runs the step, ALWAYS closes the window with the shared verified close (the
   ro remount, then `findmnt` must read `ro`; a root left writable prints its writers and fails),
   and only then reports the step's own failure. An `exit` inside it ends only that child shell, not
-  your session. Edit a placeholder (`<OLD_VER>`, `<Advanced...>`) inside the program before pasting.
+  your session, and the step's commands read `/dev/null`, so a dpkg/debconf prompt can never eat
+  the rest of the program. Edit a placeholder (`<OLD_VER>`, `<Advanced...>`) inside the program
+  before pasting: a step that still holds one refuses before it touches the root. The token sits
+  on its own line above its program; copy from `bash -s`.
 
 ### The mechanical planner — DRY-RUN, read-only, never mutates a box
 

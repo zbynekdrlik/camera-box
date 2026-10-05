@@ -115,11 +115,14 @@ Three dev1-side pure parsers:
     all inside the window. scp writes its target in place, so the old direct copy could leave half a
     binary at the live path when a transfer died. Now a failed copy, a sidecar that does not
     byte-match, or a failed rename removes the sidecar while the root is still writable, closes the
-    window the verified way and starts the OLD camera-box again (it is whole), with the box FAILED
-    (`scp-failed` / `sha-mismatch` / `swap-failed`). The final-path byte-verify after the start
-    stays: it proves the rename landed.
-  - The frame-probe swap keeps its own shape on purpose: its issue-1351 test pins "byte-verify reads
-    the final path, never the sidecar".
+    window the verified way and starts camera-box again on the live binary (a whole build: the old
+    one, or the new one if the rename landed before the step failed), with the box FAILED
+    (`scp-failed` / `sidecar-sha-mismatch` / `swap-failed`). The final-path byte-verify after the
+    start stays (`sha-mismatch`): it proves the rename landed.
+  - The frame-probe swap keeps its own, weaker shape for now (rename `|| true`, no sidecar verify):
+    its issue-1351 test pins "byte-verify reads the final path, never the sidecar", and it is bound
+    to the #892 painter restore. Giving it the same sidecar verify is a Design-question to the main
+    (issue 1407 comment 5996455127), not a silent change.
   - **The window spans several separate ssh calls from dev1** (rw + stop, scp, close). Two markers
     cover it (review rounds 1-2):
     - `OPEN_WINDOW` (`ip|box|label`) is set just BEFORE the rw remount. `close_ro_or_fail` clears it
@@ -201,10 +204,25 @@ going into a production (the issue-868 class). TEST aborted before the painter s
   (`label (ip) [writers: ...]`, `, `-joined) and `BKSHADING_RELAY_MODE_FAILED_BOXES` (`label (ip)`)
   in the CALLER's shell (it is never run in a subshell). The WARNING and RESULT lines read the first.
 - **The owner's EVENT Discord confirmation says it:** `bkshading_relay_mode_discord_note` puts one
-  plain-Slovak ⚠️ line ON TOP of the issue-724 message (the issue-1371 restore-note shape: a temp
-  file moved over, else append), naming the boxes only, never process names. Without it the phone
-  would read a clean confirmation while the run exits 1.
-- All three helpers are reports: nothing for rc 0, always return 0.
+  plain-Slovak ⚠️ line ON TOP of the issue-724 message, naming the boxes only, never process names,
+  and claiming nothing the contract below it decides. Without it the phone would read a clean
+  confirmation while the run exits 1.
+- **ONE writer for every EVENT Discord note:** `event_mode_discord_note_add MSG LINE top|end` in
+  `scripts/lib/event-mode-discord-confirm.sh` (top = a temp file moved over only when complete, else
+  an append; a missing file adds nothing; always 0). The issue-1371 exposure-restore note and the
+  relay note both call it, and both libs source that lib at load time. A new EVENT note calls it
+  too, never a third copy of the prepend (review round 1 found the relay note copying it). The
+  1371 `Rig` harness copies a fixed list of sibling libs into a scratch tree, so a new top-level
+  `.` of a sibling in `camera-test-settings.sh` must join that list.
+- **Say only what is not confirmed:** a failed box can still run its relay (the start runs after a
+  failed enable) or still be armed, so the RESULT reads "may not be running / not armed for a
+  reboot", never "is NOT running".
+- All four helpers are reports: nothing for rc 0, always return 0.
+- **Open edge (Design-question to the main, comment 5996455127):** when the failed relay box IS cam2
+  with its root stuck read-write, TEST still runs the painter steps as decided; the issue-1405
+  handoff then fails on the same writer and cam2 ends dark with no dead-man. The recommended
+  alternative stops TEST before the painter launch in that one case. A test pins the decided
+  behaviour (`test_test_failed_relay_on_the_painter_box_*`).
 - **Any NEW step in a rig-mode switch whose failure must not strand the rig gets the same shape:**
   record the rc, warn by name, continue, fold at the end. A bare call is right only for a step that
   must stop the switch (a hard precondition before any mutation, like the #789 TEST-entry gate).
@@ -228,16 +246,29 @@ both `purge-superseded-generic` forms, `blocked:no-rt-candidate`) now prints ONE
 `_rt_window_program STEP WORK [WHY]`:
 - `bash -s <<'RT_KERNEL_STEP'` ... `RT_KERNEL_STEP`, so the close's `exit 1` ends that child shell,
   never the root session the supervisor pasted it into;
-- `if mount -o remount,rw /; then WORK || _rt_rc=$?; else _rt_rc=$?; fi`;
+- WORK as a function `_rt_work() { WORK; }`, called `_rt_work </dev/null`. **That heredoc is the
+  child shell's STDIN**: a WORK that reads stdin (a dpkg conffile prompt, a debconf question) ate
+  the rest of the program, the verified close included, and left the root writable with exit 0
+  (review round 1, reproduced on the fake box). The purge steps also carry
+  `DEBIAN_FRONTEND=noninteractive`. Any future printed `bash -s` program must keep its commands off
+  the heredoc's stdin the same way;
+- a WORK holding an unreplaced `<...>` placeholder (`<OLD_VER>`, `<Advanced...>`) gets a guard first:
+  `declare -f _rt_work | grep -q '<[A-Za-z][^>]*>'` refuses (exit 2) before the root is touched. It
+  reads the function as the supervisor edited it, so a filled-in step runs;
+- `if mount -o remount,rw /; then _rt_work </dev/null || _rt_rc=$?; else _rt_rc=$?; fi`;
 - the shared `ro_window_close_cmds` text (tag `issue 899`, the box names itself via `$(hostname)`),
   run whatever WORK did;
 - then WORK's own `FAIL: [issue 899] the <step> step failed (rc=N)` + `exit N`, else an OK line.
 A note token keeps its `# SUPERVISOR:` / `# BLOCKED:` first line and the program follows it (the
 Rust `starts_with('#')` pin). A placeholder the supervisor edits (`<OLD_VER>`, `<Advanced...>`)
-sits inside the program. `tests/python/test_ro_window_sites_1407.py` runs every printed step on the
+sits inside the program. The driver (`rt-kernel-upgrade.sh --commands`) prints a multi-line step
+BELOW its token, never `token  bash -s ...` on one line (copying that line would run
+`install-lowlatency bash -s`); a one-line step keeps the `%-28s` token column. `tests/python/test_ro_window_sites_1407.py` runs every printed step on the
 fake box (with logged apt-get / update-grub / grub-set-default / mkdir stubs): rw open, work on rw,
-verified close, root ro; a failing work still closes; a busy root fails loud naming the writer; a
-pasted step never ends the session.
+verified close, root ro (the placeholder steps filled in first); a failing work still closes; a
+stdin-reading work still closes; an unfilled placeholder refuses before any mount; a busy root fails
+loud naming the writer; a pasted step never ends the session; the driver prints each step below its
+token.
 
 ## Tests (Tier-0, no cargo, no rig)
 
