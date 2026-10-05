@@ -86,44 +86,73 @@ cam2's root is read-only (setup-device STEP 18). Changing the unit's persistent 
 the TEST handoff (`enable-now`) and the EVENT disable (`disable`).
 
 - **Never start the painter inside the window.** The old `enable-now` ran `systemctl enable --now`
-  there. The start opened writers on the still-writable `/`, the following ro remount failed EBUSY,
-  its `|| true` hid that, and cam2 ran on a read-WRITE root until the next reboot. Live 4.10.2026:
-  the last `r/w` remount at 10:36:54 had no `ro` after it, and the painter became active that same
-  second. Only `systemctl enable` / `disable` runs in the window now.
+  there. The following ro remount failed EBUSY, its `|| true` hid that, and cam2 ran on a
+  read-WRITE root until the next reboot. Live 4.10.2026: the last `r/w` remount at 10:36:54 had no
+  `ro` after it, and the painter became active that same second. Only `systemctl enable` /
+  `disable` runs in the window now.
+  - That the START opened the blocking writer is INFERRED from that timing, not proven:
+    `cam2-painter.service` writes only `/run`, and the one writer seen live (a second
+    systemd-journald) is not explained by this unit. The live put-back names the real holder.
 - **The root mode decides, never the remount's exit code.** After the ro remount the emitter reads
   `findmnt -no OPTIONS /` (with the `/proc/mounts` fallback) through the shared ro-root canon's
   `ro_root_mount_mode`. Its definition is emitted INTO the remote text (`declare -f`, lazy-sourced
   from `scripts/lib/ro-root.sh`).
-  - `rw` or `unknown` FAILS LOUD (exit 1): the message names the findmnt reading and the mount
-    error, then prints `fuser -vm /` (the writers), and the painter is never started.
-  - `unknown` is never assumed `ro`.
+  - `rw` or `unknown` FAILS LOUD (exit 1), and the painter is never started. `unknown` is never
+    assumed `ro`. The message names the findmnt reading, the mount error and the current
+    `is-enabled` state.
+  - **It names the HOLDERS, two ways.** First, the `fuser -vm /` lines whose ACCESS field carries
+    `F` (a file open for writing). fuser lists PID 1 and the kernel threads first, so a `head -n
+    40` cut a high-PID writer off (review round 1). Second, the deleted-but-open files from the
+    repo's ONE probe for that other EBUSY cause, `bkshading_deploy_ro_holder_probe_cmd` (issue 808,
+    `lsof +L1`, else the /proc fd scan). It is emitted into the failure branch, the same two-part
+    naming as `bkshading-deploy-relay.sh` `remount_ro_checked`.
 - **Order inside the emitter:** remount rw, change, remount ro, ro verify, the change's rc check, the
   `is-enabled` read-back, and (enable-now only) `systemctl start`. A failed start after a good
   enable is its own named `[#1405]` failure.
   - There is no retry loop: a writer that keeps `/` busy keeps it busy on every retry.
   - The disable mode never names a start. The `tests/rig_mode.rs` #892 check forbids
     `systemctl start cam2-painter.service` anywhere in the EVENT text.
-- **EVENT consequence:** `painter_stop_remote` runs the disable at step 2.5 under `set -e`. A root
-  that cannot go back to ro now ends the cam-side EVENT script there, before the deadman disarm and
-  the camera-box restart. That is the same place every other #1175 failure already stopped it, and
-  do_event still runs the burn-clear and exits non-zero (#868). So a cam2 that is stuck read-write
-  must be put back to ro (find the writer, `mount -o remount,ro /`) BEFORE the next
-  `rig-mode.sh event`. Never reboot a cambox remotely for it.
+- **EVENT disarms the dead-man FIRST.** `rig-mode.sh test` arms the cam2-painter dead-man as a
+  standing net, and its action starts the painter whenever no frame-probe runs, even for a disabled
+  unit. `painter_stop_remote` runs under `set -e`, so a disable step that fails loud ends the
+  cam-side EVENT script.
+  - With the old order (disable at 2.5, disarm at 2.6), a root stuck rw left the dead-man armed,
+    and the QR came back on air within ~5 min (review round 1, 🔴).
+  - Now the disarm is step 2.5 and the stop+disable step 2.6. No failure in the disable step can
+    leave a resurrection timer behind, and the timer can no longer fire between the stop and the
+    disarm. The issue-1351 frame-probe swap uses the same order.
+  - The 1075 harness pins the order: the disarm comes before the stop and before the disable call.
+  - A failed disable still ends the script before the camera-box restart. That is the same place
+    every other #1175 failure stops it, and do_event still runs the burn-clear and exits non-zero
+    (#868). So a cam2 that is stuck read-write must be put back to ro BEFORE the next
+    `rig-mode.sh event`. Never reboot a cambox remotely for it.
 - **Every emitted statement ends with `;`.** The callers embed the text through `$(...)`, which
   strips its trailing newline (the CLAUDE.md #744/#746 gotcha).
 - **Test by running the text.** `tests/python/test_cam2_painter_ro_verify_1405.py` runs it with
   stateful fakes on a stub-only PATH:
-  - `mount`, `systemctl`, `findmnt` and `fuser` share one fake root and log each call with the
-    root mode at that moment;
+  - `mount`, `systemctl`, `findmnt`, `fuser` and `lsof` share one fake root and log each call with
+    the root mode at that moment;
   - a start on a rw root plants a writer that fails the next ro remount (the 4.10 mechanism);
-  - it covers the real TEST handoff, and the EVENT disable cut out of rig-mode.sh.
+  - the fake fuser prints PID 1 and 48 kernel threads before the real writer, the way a box does;
+  - it covers the real TEST handoff, the EVENT disable cut out of rig-mode.sh, and the WHOLE
+    `painter_stop_remote` text (the dead-man stop before the failing verify).
+  - The unreadable-root test swaps in a failing `awk`, so the `/proc/mounts` fallback never reads
+    the test machine's own root.
   - The Rust `tests/harness_cam2_painter_ro_persist_1175.rs` fakes `findmnt`/`fuser` too: without
     them the real findmnt reads the CI runner's own rw root.
+  - An order anchor must find the CALL (`systemctl enable cam2-painter.service ||`), not the bare
+    command text: the rw-remount FAIL message names the same command earlier.
 - **Live put-back** after a box was left rw: `findmnt -no OPTIONS /` on cam2. If it reads rw, run
-  `fuser -vm /` and stop the writer that is not supposed to hold `/` (4.10: a second
-  systemd-journald), then `mount -o remount,ro /` until findmnt reads `ro`. Then confirm with the
-  next `rig-mode.sh test` that it still reads `ro`. This is a supervisor rig step, never a lane
-  worker's.
+  `fuser -vm /` (and `ls -l /proc/*/fd 2>/dev/null | grep deleted` for a deleted-but-open file).
+  Stop the holder that is not supposed to hold `/` (4.10: a second systemd-journald), then
+  `mount -o remount,ro /` until findmnt reads `ro`. Then confirm with the next `rig-mode.sh test`
+  that it still reads `ro`. This is a supervisor rig step, never a lane worker's.
+- **Same defect elsewhere, not covered here:** `scripts/deploy-fleet.sh` (an `enable --now
+  cam2-painter.service` then a swallowed ro remount), `scripts/lib/bkshading-relay-mode.sh`,
+  `scripts/dantesync-fleet-upgrade.sh` and `scripts/lib/dantesync-rollback.sh` close the window
+  with `mount -o remount,ro / ... || true` and never read the mount state. A shared "close ro,
+  verify, name the holders" emitter in `scripts/lib/ro-root.sh` would serve them all (a supervisor
+  follow-up, cross-cutting).
 
 ## The TEST painter's rig-test LEDGER entry — quoting the remote PID (issue 1382)
 

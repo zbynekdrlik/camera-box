@@ -517,18 +517,20 @@ fi
 # (2) belt-and-suspenders: pkill -x matches the process NAME only (comm), so it can NEVER match the
 #     remote shell's own cmdline — immune to the self-match that strands cleanups (NOT pkill -f).
 pkill -x frame-probe 2>/dev/null || true
-# (2.5) #892: stop + disable the PERMANENT cam2-painter.service if present -- EVENT mode must
+# (2.5) #1075: disarm the transient cam2-painter-deadman timer. TEST mode arms it as a standing
+#       net, and a SIGKILLed recording-e2e run leaves it armed too; it issues a start of the cam2
+#       painter every ~5 min -- and "disable" below does NOT stop such a start -- so without this
+#       the QR painter is resurrected ON AIR within ~5 min of switching to EVENT (live 2026-08-15).
+#       issue 1405: it runs FIRST, before the stop + disable below, because that step now fails
+#       loud (ending this script under set -e) when cam2's root cannot go back to read-only; a
+#       disarm placed after it would then never run. Reuses the deadman lib's disarm (stop .timer +
+#       reset-failed .service). Guarded: a box without the cam2-painter unit is unaffected.
+$(cam2_painter_deadman_disarm_cmds)
+# (2.6) #892: stop + disable the PERMANENT cam2-painter.service if present -- EVENT mode must
 #       NEVER (re)start it (the old #440 "restore" call was the live-broadcast QR hazard this
 #       ticket fixes), and disabling closes the reboot path too. A box without the unit is
 #       unaffected.
 $(cam2_painter_service_disable_cmds)
-# (2.6) #1075: ALSO disarm the transient cam2-painter-deadman timer. A recording-e2e run that was
-#       SIGKILLed leaves that PERIODIC timer armed; it issues a start of the cam2 painter every
-#       ~5 min -- and "disable" above does NOT stop such a start -- so without this the QR painter
-#       is resurrected ON AIR within ~5 min of switching to EVENT (live 2026-08-15). Reuses the
-#       deadman lib's disarm (stop .timer + reset-failed .service). Guarded: a box without the
-#       cam2-painter unit is unaffected (same guard shape as the disable above).
-$(cam2_painter_deadman_disarm_cmds)
 # (3) wait until /dev/fb0 is released by the painter, then RESTORE the unconditional-preview
 #     camera-box (#291/#528): remove the transient CAMERA_BOX_NO_DISPLAY=1 drop-in TEST mode
 #     installed, reload, and RESTART so the unit's Environment drops the opt-out and camera-box
