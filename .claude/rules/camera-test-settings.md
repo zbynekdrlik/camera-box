@@ -163,12 +163,14 @@ run (wrong timing; TEST mode must stay alive between runs).
   reports no value for is left out. The fps context is never restored (`load_snapshot` refuses a
   `d006`/`d007` value key).
 - **LEGACY `context.d007` (issue 1402).** A snapshot saved before the d006 switch recorded the
-  project fps as `context.d007`, WHOLE fps (`60`). `context_fps100` reads `context.d006` whenever it
-  is present and falls back to the legacy `context.d007` (x100 = whole fps x 100) ONLY when d006 is
-  absent, so a snapshot taken during a running development period still restores and logs the same
-  1/N s (`test_a_legacy_snapshot_with_only_the_whole_fps_d007_still_restores_and_logs_the_same_shutter`).
-  The fallback exists until no old snapshot can be pending: the next production snapshot is written
-  with `d006`. A present but unreadable `d006` never falls back (no 1/N, just the angle).
+  project fps as `context.d007`, WHOLE fps (`60`). `context_fps100` reads `context.d006` whenever
+  the key is present and falls back to the legacy `context.d007` (x100 = whole fps x 100) ONLY when
+  the d006 key is absent, so a snapshot taken during a running development period still restores and
+  logs the same 1/N s
+  (`test_a_legacy_snapshot_with_only_the_whole_fps_d007_still_restores_and_logs_the_same_shutter`).
+  A present d006 that is null or not a number is unreadable and never falls back (no 1/N, just the
+  angle). Every snapshot written from now on carries `d006`. The legacy branch is kept on purpose:
+  it is one cheap branch, and no removal is planned.
 - **No record = no set.** A value that is not a plain token (it could not be written back through
   the word-split `--set-config`), a box label or time that is not one, or a snapshot that cannot be
   written (a full disk, a file where the directory should be), ABORTS the E2E before the camera

@@ -266,13 +266,14 @@ def _x100_text(value):
 def context_fps100(context):
     """The project fps x100 a snapshot's `context` records, or None.
 
-    `context.d006` (x100) wins whenever it is present. LEGACY (issue 1402): a snapshot saved before
+    `context.d006` (x100) wins whenever the key is present; a present but null or non-numeric d006
+    is unreadable (None), never a reason to fall back. LEGACY (issue 1402): a snapshot saved before
     the d006 switch carries only `context.d007` as WHOLE fps (the old, wrong key; on every BMPCC d007
-    is the off-speed rate). It is read, converted to x100, only when d006 is absent, so a snapshot
-    taken during a running development period still restores and logs the same 1/N s."""
+    is the off-speed rate). It is read, converted to x100, only when the d006 key is absent, so a
+    snapshot taken during a running development period still restores and logs the same 1/N s."""
     if not isinstance(context, dict):
         return None
-    if context.get("d006") is not None:
+    if "d006" in context:
         raw, scale = context["d006"], 1
     else:
         raw, scale = context.get(LEGACY_CONTEXT_FPS_KEY), 100
