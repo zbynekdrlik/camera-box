@@ -471,6 +471,10 @@ def test_the_sweep_reads_a_group_across_lines():
     loud_comment = "mount -o remount,ro / || {\n  # see } below\n  echo FAIL >&2\n  exit 1\n}\nnext_step\n"
     assert len(_swallowed_in_text(quiet_comment)) == 1, quiet_comment
     assert _swallowed_in_text(loud_comment) == [], loud_comment
+    # review round 6: a comment's TEXT is not code either -- "fail" / "exit 1" in it make no group loud
+    for quiet in ("mount -o remount,ro / || {\n  # we must not fail the deploy here\n  echo busy\n}\nx\n",
+                  "mount -o remount,ro / || {\n  # an exit 1 here would abort the roll\n  echo busy\n}\nx\n"):
+        assert len(_swallowed_in_text(quiet)) == 1, quiet
 
 
 def test_deploy_fleet_names_a_pending_painter_start_only_for_an_enable_now_restore():
