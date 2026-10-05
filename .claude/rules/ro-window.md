@@ -189,7 +189,8 @@ Audit, left as they are:
     follows must not just go on: `|| true`, `|| :`, `|| echo/printf/warn/log/info/err/logger`,
     `|| return 0`, `|| exit 0`, `|| continue`, `|| break`, `; true`, `; :`, a retry loop's
     `&& break`, and a `|| { ... }` group that does not end the step with the failure. The group is
-    read to its MATCHING brace, across lines, quote-, comment- and `${...}`-aware (an unclosed one is no
+    read to its MATCHING brace, across lines, quote-, comment- and `${...}`-aware (a comment's
+    text is not code: "fail" in it makes no group loud) (an unclosed one is no
     hit). It is loud only with a non-zero literal or a named variable as the exit/return code
     (`exit "$rc"` after `rc=$?`), `fail`/`die`, or the mount's own `$?` as its FIRST command.
     Inside a group a bare `return`/`exit`, or `$?` after another command, hands back THAT

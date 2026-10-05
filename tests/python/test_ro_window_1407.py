@@ -315,11 +315,13 @@ _LOUD_FIRST = re.compile(r"\s*(?:exit|return)\s+\"?\$\?")
 def _group_body(text):
     """`text` starts right after `|| {`: the body up to the MATCHING brace (quote-, escape-, comment-
     and ${...}-aware), or None when the group never closes. An unquoted `#` at a word start begins a
-    comment to the end of its line: an apostrophe in it opens no quote, a brace in it closes nothing."""
-    depth, quote, i = 1, None, 0
+    comment to the end of its line: an apostrophe in it opens no quote, a brace in it closes nothing,
+    and its text is left out of the returned body ("fail" in a comment makes no group loud)."""
+    depth, quote, i, kept = 1, None, 0, []
     while i < len(text):
         c = text[i]
         if c == "\\" and quote != "'":
+            kept.append(text[i:i + 2])
             i += 2
             continue
         if quote:
@@ -338,7 +340,8 @@ def _group_body(text):
         elif c == "}":
             depth -= 1
             if depth == 0:
-                return text[:i]
+                return "".join(kept)
+        kept.append(c)
         i += 1
     return None
 
