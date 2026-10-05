@@ -13,6 +13,7 @@ paths:
   - "scripts/genlock-lock-alert-watchdog.sh"
   - "scripts/render-freeze-alert-watchdog.sh"
   - "scripts/audio-mixer-alert-watchdog.sh"
+  - "scripts/obs-handles-alert-watchdog.sh"
   - "scripts/dantesync-clock-alert-watchdog.sh"
   - "scripts/obs-session-watchdog.sh"
   - "scripts/obs-burn-reconcile-watchdog.sh"
@@ -118,6 +119,7 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
 | genlock-lock | strih-lx stream imag resolume | the box's own :8899 `genlock_lock` facet; imag `retired` → dropped |
 | render-freeze | strih-lx stream resolume | :8899 `program_render_lagged` / `relock_bursts` |
 | audio-mixer | strih-lx stream resolume | issue 1381: :8899 `audio_mixer_*` (every OBS box's libobs mixer) + `vban_pacer_*` (resolume's obs-vban senders); the consumer polls resolume only while home (`obs_fleet_poll_now`) |
+| obs-handles | strih-lx stream resolume | issue 1406: :8899 `obs_handles*` -- the OBS process's handle count (Windows) or open-fd count (Linux `/proc`); every managed OBS can leak; resolume polled only while home (`obs_fleet_poll_now`) |
 | audio-lag | strih-lx stream | :8899 `audio_ts_lag_*` from the vendored OBS `audio-telemetry #800` lines — the same on Linux (reads UNKNOWN while no source carries audio, never a page) |
 | vb-matrix | stream | a Windows VB-Audio Matrix process check; strih-lx has none (PipeWire replaced it, issue 1344) |
 | av-step | stream | the av-sync dock is on the stream box only |

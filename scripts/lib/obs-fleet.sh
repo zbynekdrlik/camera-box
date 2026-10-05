@@ -85,6 +85,10 @@
 #   win-baseline  = stream resolume   (issue 1357: the Windows OBS boxes graded against the ONE
 #                   Windows baseline -- power plan, sleep, USB suspend, WER -- by
 #                   scripts/win-baseline-check.sh, report-only; resolume SKIPPED when away.)
+#   obs-handles   = strih-lx stream resolume   (issue 1406: every managed OBS process can leak
+#                   handles -- the 5.10.2026 stream obs64 held 4M after ~22 h -- and the :8899
+#                   `obs_handles*` facet reads its count on Windows AND Linux (strih-lx: /proc fds).
+#                   The consumer polls resolume only while home, via obs_fleet_poll_now.)
 #
 # TRAVELING-BOX SAFETY (resolume is home only sometimes): a naive add to the PAGING watchdogs would
 # false-page whenever resolume is away (the owner's hardest sensitivity -- the #739 5x false-page
@@ -189,8 +193,9 @@ obs_fleet_facet_members() {
     ndi-sender)    printf 'strih-lx stream resolume' ;;
     win-baseline)  printf 'stream resolume' ;;   # issue 1357: the Windows OBS-box baseline (win-baseline-check.sh)
     audio-mixer)   printf 'strih-lx stream resolume' ;;   # issue 1381: mixer real time + VBAN pacer loss
+    obs-handles)   printf 'strih-lx stream resolume' ;;   # issue 1406: the OBS process handle / fd count
     *)
-      echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock render-freeze ndi-portmap obs-session burn-reconcile rig-restore ndi-sender win-baseline audio-mixer)" >&2
+      echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock render-freeze ndi-portmap obs-session burn-reconcile rig-restore ndi-sender win-baseline audio-mixer obs-handles)" >&2
       return 1
       ;;
   esac

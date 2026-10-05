@@ -2,7 +2,8 @@
 """The host / process / filesystem facets of the bundle-state gather: the DistroAV + OBS install
 scans, the genlocked NDI input latency CSV, the tasklist parsers (OBS process count, VB-Matrix
 presence), the NL_STARTUP.ahk readers, the record-dir stats + free-space verdict, the deployed
-genlock build SHA and the component byte sha256.
+genlock build SHA, the component byte sha256, and the OBS handle count (issue 1406: the pure
+SystemProcessInformation parser the Windows reader feeds, and the Linux /proc fd read).
 
 Part of the bundle-state gather split (issue 1386): a PURE facet family re-exported by
 `bundle_state_gather` -- import it through that module, never directly (it resolves its flat
@@ -17,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import sys
 
 
@@ -438,3 +440,184 @@ def component_sha256(path):
             file=sys.stderr,
         )
         return ""
+
+
+# --- issue 1406: the OBS process handle count (`obs_handles*` facet) -----------------------------
+# On 5.10.2026 the stream obs64 held 4,066,772 handles after ~22 h: the Audio Monitor plugin kept
+# opening an absent audio endpoint and leaked one registry key per audio tick (46.875/s), ~100 h
+# from the 16,777,216 per-process cap. Nothing read a handle count, so the dev1 obs-handles
+# watchdog now reads these keys: the count, the pid + start epoch, and on Linux the run token (the
+# process identity; a new one, i.e. a restart, resets the baseline) and the soft open-files limit
+# (the Linux cap). Absent when unreadable, never a 0.
+
+# Field offsets of the x64 SYSTEM_PROCESS_INFORMATION record NtQuerySystemInformation returns
+# (class 5). `next`, `threads`, the ImageName UNICODE_STRING, `pid` and `handles` are the public
+# winternl.h layout; `create_time` sits inside its documented Reserved1 block, where NT has kept it
+# since Windows 7 (WorkingSetPrivateSize 8, HardFaultCount 16, NumberOfThreadsHighWatermark 20,
+# CycleTime 24, CreateTime 32). tests/python/test_obs_handles_gather_1406.py rebuilds the C layout
+# with ctypes and pins these numbers to it.
+SPI_OFFSETS = {
+    "next": 0,
+    "threads": 4,
+    "create_time": 32,
+    "name_length": 56,
+    "name_buffer": 64,
+    "pid": 80,
+    "handles": 96,
+}
+_SPI_HEADER_BYTES = 104          # through SessionId: every field above lies inside it
+_FILETIME_EPOCH_OFFSET_S = 11_644_473_600   # 1601-01-01 -> 1970-01-01
+
+
+def filetime_to_epoch(filetime):
+    """A Windows FILETIME (100 ns ticks since 1601 UTC) -> whole epoch seconds, or None for a
+    zero/negative value (the idle process, an unset field)."""
+    if not isinstance(filetime, int) or filetime <= 0:
+        return None
+    return filetime // 10_000_000 - _FILETIME_EPOCH_OFFSET_S
+
+
+def _spi_entry(raw, off, base_addr):
+    """One SYSTEM_PROCESS_INFORMATION record at byte offset *off* -> (next, process dict)."""
+    o = SPI_OFFSETS
+    (nxt,) = struct.unpack_from("<I", raw, off + o["next"])
+    (threads,) = struct.unpack_from("<I", raw, off + o["threads"])
+    (create,) = struct.unpack_from("<q", raw, off + o["create_time"])
+    (name_len,) = struct.unpack_from("<H", raw, off + o["name_length"])
+    (name_ptr,) = struct.unpack_from("<Q", raw, off + o["name_buffer"])
+    (pid,) = struct.unpack_from("<Q", raw, off + o["pid"])
+    (handles,) = struct.unpack_from("<I", raw, off + o["handles"])
+    name = ""
+    name_at = name_ptr - base_addr if name_ptr else -1
+    if name_len and 0 <= name_at and name_at + name_len <= len(raw):
+        name = raw[name_at:name_at + name_len].decode("utf-16-le", errors="replace")
+    return nxt, {"pid": pid, "name": name, "handles": handles, "threads": threads,
+                 "start": filetime_to_epoch(create)}
+
+
+def system_processes_from_spi(raw, base_addr):
+    """PURE: the x64 SystemProcessInformation buffer *raw* (whose image-name pointers are absolute,
+    the buffer starting at *base_addr*) -> one dict per process: pid, name, handles, threads,
+    start (epoch s or None). None when the buffer is short or malformed (an entry offset inside its
+    own header, or an entry running past the end): unreadable, never a partial list that could miss
+    the OBS process and read as "no OBS"."""
+    raw = raw or b""
+    procs, off = [], 0
+    while True:
+        if off + _SPI_HEADER_BYTES > len(raw):
+            return None
+        nxt, proc = _spi_entry(raw, off, base_addr)
+        procs.append(proc)
+        if nxt == 0:
+            return procs
+        if nxt < _SPI_HEADER_BYTES:
+            return None
+        off += nxt
+
+
+def obs_handles_facet(procs):
+    """PURE: the live OBS-shaped process (`OBS_PROCESS_NAME_RE` on the name minus `.exe`) with the
+    most handles -> the `obs_handles*` keys as strings ({} when there is none). A process with no
+    threads has exited (a zombie the system still lists) and never counts. `limit` (Linux only) is
+    the soft open-files limit; `start` may be None (the watchdog then keys on the pid alone)."""
+    best = None
+    for p in procs or ():
+        name = str(p.get("name") or "")
+        base = name[:-4] if name.lower().endswith(".exe") else name
+        if not OBS_PROCESS_NAME_RE.match(base) or p.get("threads", 1) == 0:
+            continue
+        if best is None or p["handles"] > best["handles"]:
+            best = p
+    if best is None:
+        return {}
+    start, limit = best.get("start"), best.get("limit")
+    return {
+        "obs_handles": str(best["handles"]),
+        "obs_handles_pid": str(best["pid"]),
+        "obs_handles_start": "" if start is None else str(start),
+        "obs_handles_run": best.get("run") or "",
+        "obs_handles_limit": "" if limit is None else str(limit),
+    }
+
+
+def proc_stat_start_ticks(stat_text):
+    """PURE: field 22 (starttime, clock ticks since boot) of a /proc/<pid>/stat line, or None.
+    The command name in field 2 may hold spaces and parentheses, so the fields after it are read
+    from the LAST ')'. The same parse as `proc_start_ticks` in scripts/strih_browser_keeper.py
+    (a separately deployed tree), pinned to it by tests/python/test_obs_handles_gather_1406.py."""
+    text = stat_text if isinstance(stat_text, str) else ""
+    cut = text.rfind(")")
+    if cut < 0:
+        return None
+    fields = text[cut + 1:].split()   # fields[0] is field 3 (state)
+    if len(fields) < 20 or not fields[19].isdigit():
+        return None
+    return int(fields[19])
+
+
+def proc_btime(proc_stat_text):
+    """PURE: the boot time (epoch s) from the `btime` line of /proc/stat, or None."""
+    for line in (proc_stat_text or "").splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0] == "btime" and parts[1].isdigit():
+            return int(parts[1])
+    return None
+
+
+def proc_nofile_soft_limit(limits_text):
+    """PURE: the soft `Max open files` limit from /proc/<pid>/limits, or None (absent, unreadable
+    or `unlimited`)."""
+    for line in (limits_text or "").splitlines():
+        if line.startswith("Max open files"):
+            soft = line[len("Max open files"):].split()[:1]
+            return int(soft[0]) if soft and soft[0].isdigit() else None
+    return None
+
+
+def _read_text(path):
+    """A small /proc file as text, or None when it cannot be read (the process exited)."""
+    try:
+        with open(path, "rb") as fh:
+            return fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _linux_obs_process(proc_root, pid, boot, btime, clk_tck):
+    """One /proc/<pid> -> a process dict when it is an OBS-shaped process whose fd directory this
+    user can list, else None (not OBS, another user's process, or one that exited mid-scan)."""
+    base = os.path.join(proc_root, pid)
+    comm = (_read_text(os.path.join(base, "comm")) or "").strip()
+    if not OBS_PROCESS_NAME_RE.match(comm):
+        return None
+    try:
+        handles = len(os.listdir(os.path.join(base, "fd")))
+    except OSError:
+        return None
+    ticks = proc_stat_start_ticks(_read_text(os.path.join(base, "stat")))
+    start = btime + ticks // clk_tck if btime is not None and ticks is not None else None
+    return {"pid": int(pid), "name": comm, "handles": handles, "start": start,
+            "run": None if ticks is None else f"{boot}:{ticks}",
+            "limit": proc_nofile_soft_limit(_read_text(os.path.join(base, "limits")))}
+
+
+def linux_obs_handles(proc_root="/proc", clk_tck=None):
+    """The Linux `obs_handles*` facet: the open-fd count of the OBS process (comm `obs`, the
+    strih-obs.service binary), its start epoch (btime + /proc/<pid>/stat start ticks, context), its
+    RUN token `<boot id>:<start ticks>` and its soft open-files limit. The run token is the process
+    identity: btime moves whenever the wall clock is stepped (strih-lx is the dantesync date
+    master), the boot id and the start ticks never do -- the same OBS-run identity
+    scripts/strih_browser_keeper.py uses. The server runs as the same user as OBS (on strih-lx both
+    are --user units of the desktop user), so the fd directory is listable. {} when no OBS process
+    is readable."""
+    try:
+        pids = [e for e in os.listdir(proc_root) if e.isdigit()]
+    except OSError:
+        return {}
+    if clk_tck is None:
+        clk_tck = os.sysconf("SC_CLK_TCK")
+    boot = (_read_text(os.path.join(proc_root, "sys", "kernel", "random", "boot_id")) or "").strip()
+    btime = proc_btime(_read_text(os.path.join(proc_root, "stat")))
+    procs = [p for p in (_linux_obs_process(proc_root, pid, boot, btime, clk_tck) for pid in pids)
+             if p]
+    return obs_handles_facet(procs)

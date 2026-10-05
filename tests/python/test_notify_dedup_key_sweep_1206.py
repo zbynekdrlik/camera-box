@@ -189,6 +189,12 @@ _PRODUCTION_CRITICAL_TIME_BUCKETED = {
     # as dumped (a partial start dump reads UNKNOWN; a wall-clock step never rescales the count), and
     # the VBAN arm counts only loss counters that moved inside the window (late_sends excluded).
     "audio-mixer-alert-watchdog.sh",      # issue 1381 -- audio mixer off real time / VBAN pacer loss
+    # issue 1406 -- an OBS process leaking handles (5.10.2026: the stream obs64 held 4,066,772,
+    # one registry key per audio tick, ~100 h from the 16.7M per-process cap) dies mid-production
+    # once it hits the cap. Its inputs are quality-gated: growth is graded per pass interval with a
+    # minimum interval (a manual run between passes HOLDs) and a 3-pass confirm, so a one-off step
+    # never pages; a restart re-baselines on the process identity (pid + start time).
+    "obs-handles-alert-watchdog.sh",      # issue 1406 -- OBS handle-count growth / ceiling
 }
 
 # The bucketing markers an inline --dedup-key carries when it time-buckets: the shared bash helper

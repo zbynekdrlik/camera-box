@@ -1,0 +1,28 @@
+{
+  "_doc": "issue 1406 -- the stream obs64 handle readings of 4./5.10.2026 recorded on the ticket (the issue body and issuecomment-5992943363), as the bundle-state facet fields the dev1 obs-handles watchdog replays. `base` is the rest of a stream /bundle-state.json body (OBS 32.2.0, genlock build eb4213867, from the relaunch's SESSION OK title). `leak`: obs64 pid 9224 started 4.10.2026 12:35 local (epoch 1791110100) with ~5,790 handles and leaking one registry key per audio tick (48000/1024 = 46.875 per second, +1172 every 25 s), 4,066,772 handles at the 5.10 census. `post_fix`: obs64 pid 5748 relaunched at ~12:45 local on 5.10 (epoch 1791197100) after the Audio Monitor config fix; the six samples are the 30-s readings of the live-fix table (12:45:33 .. 12:48:03).",
+  "base": {
+    "obs_version": "32.2.0",
+    "genlock_build_sha": "eb4213867",
+    "obs_process_count": "1"
+  },
+  "leak": {
+    "pid": "9224",
+    "start": "1791110100",
+    "start_handles": 5790,
+    "per_s": 46.875,
+    "census_handles": 4066772,
+    "census_growth_per_25s": 1172
+  },
+  "post_fix": {
+    "pid": "5748",
+    "start": "1791197100",
+    "samples": [
+      [1791197133, 5806],
+      [1791197163, 5790],
+      [1791197193, 5788],
+      [1791197223, 5790],
+      [1791197253, 5789],
+      [1791197283, 5791]
+    ]
+  }
+}
