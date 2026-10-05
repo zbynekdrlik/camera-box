@@ -255,10 +255,13 @@ _dantesync_remount_ro
 systemctl restart dantesync
 # success: re-set the EXIT trap (tmp cleanup + the ro close, a no-op once closed). The ERR self-heal
 # stays ARMED through the version read below: a new binary that cannot even print its version is
-# rolled back too (the orchestrator then reports the self-heal).
+# rolled back too (the orchestrator then reports the self-heal). It is disarmed right after it, so
+# nothing that follows (the master's date-state delete) can roll the master back to its .bak after
+# its date file is gone -- the state the issue-1372 delete-last order exists to avoid.
 trap 'rm -rf "\$tmp"; _dantesync_remount_ro' EXIT
 # 5. read the new version back
 dantesync --version
+trap - ERR
 EOF
   _dantesync_linux_date_state_rm_sh "${2:-}" "$version"
 }
@@ -822,6 +825,8 @@ upgrade_node() {
       # issue 1407: the program stopped at an ro close that failed -- nothing was started after it,
       # so this is NOT a self-heal: dantesync can be left STOPPED on a writable root there.
       err "[$name] upgrade command failed: the node's root did NOT go back read-only -- NOT self-healed; dantesync may be LEFT STOPPED there (the FAIL lines below name the writers)"
+    elif case "$REMOTE_OUT" in *"SELF-HEAL FAILED"*) true ;; *) false ;; esac; then
+      err "[$name] upgrade command failed and its self-heal could NOT restore the previous binary -- NOT self-healed; inspect dantesync on the node by hand"
     else
       err "[$name] upgrade command failed — the box self-healed to its previous version (not rolled forward)"
     fi

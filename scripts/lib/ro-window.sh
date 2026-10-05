@@ -108,21 +108,23 @@ CMDS
 # (ro_window_writers_cmd), the deleted-but-open holders (ro_window_holder_probe_cmd), and
 # `FAIL: [TAG] HINT` last. TAG, BOX, CONSEQUENCE and HINT are placed verbatim inside a double-quoted
 # remote echo: a `$` in them expands ON THE BOX (cam2-painter-ro-persist.sh reads the unit state that
-# way). A double quote or a backtick would break or inject into that echo, so such an argument emits
-# a remote text that FAILS LOUD (`exit 1`) instead of a close -- never a silent empty command. The
+# way). A double quote or a backtick would break or inject into that echo, so those characters are
+# STRIPPED (one WARNING on the caller's stderr) and the full verified close is still emitted -- a
+# refused close would leave the root writable and be misread on the dev1 side (review round 2). The
 # shared text names `remount,ro /` exactly once (the command; a caller's HINT may name it again) and
 # never `systemctl`, so a caller's text anchors and its "every systemctl line ends || true" rule
 # (bkshading-relay-mode.sh) are untouched.
 ro_window_close_cmds() {
-  local tag="${1:-ro-window}" box="${2:-this box}" consequence="${3:-}" hint="${4:-}" arg
-  for arg in "$tag" "$box" "$consequence" "$hint"; do
-    case "$arg" in
-    *'"'* | *'`'*)
-      printf '%s\n' "echo 'FAIL: ro_window_close_cmds: an argument holds a double quote or a backtick -- the rw window was NOT closed by this text; put the root back read-only by hand' >&2; exit 1;"
-      return 0
-      ;;
-    esac
-  done
+  local tag="${1:-ro-window}" box="${2:-this box}" consequence="${3:-}" hint="${4:-}" bad='["`]'
+  case "$tag$box$consequence$hint" in
+  *'"'* | *'`'*)
+    echo "WARNING: ro_window_close_cmds: a double quote or backtick in an argument was stripped (it would break the remote echo)" >&2
+    tag="${tag//$bad/}"
+    box="${box//$bad/}"
+    consequence="${consequence//$bad/}"
+    hint="${hint//$bad/}"
+    ;;
+  esac
   printf '%s;\n' "$(declare -f ro_root_mount_mode)"
   cat <<CMDS
 _row_sync_rc=0;

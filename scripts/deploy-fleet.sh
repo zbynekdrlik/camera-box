@@ -86,7 +86,10 @@ done
 
 command -v sshpass >/dev/null 2>&1 || { err "sshpass is required (apt-get install sshpass)"; exit 1; }
 
-ssh_box()  { sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@$1" "$2"; }
+# SSH_SESSION is empty on the normal path and `setsid -w` inside the EXIT trap: the trap's ro close
+# then runs in its own session, so a second Ctrl-C cannot reach it (sshpass forwards SIGINT to ssh).
+SSH_SESSION=()
+ssh_box()  { "${SSH_SESSION[@]}" sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "root@$1" "$2"; }
 scp_box()  { sshpass -p "$SSH_PASS" scp -o StrictHostKeyChecking=no "$2" "root@$1:$3"; }
 
 # issue 1407: close a box's rw window with the ONE verified ro close (scripts/lib/ro-window.sh) --
@@ -96,9 +99,11 @@ scp_box()  { sshpass -p "$SSH_PASS" scp -o StrictHostKeyChecking=no "$2" "root@$
 # returns 1, so the caller starts NOTHING.
 close_ro_or_fail() {  # $1=ip $2=box name $3=FAILED label $4=what the box is left with
   local out rc=0 holders
-  OPEN_WINDOW=""   # this close is the window's one close attempt (the EXIT path never repeats it)
   out="$(ssh_box "$1" "$(ro_window_close_cmds "issue 1407" "$2" "$4" \
     "stop that writer on $2, put the root back read-only until 'findmnt -no OPTIONS /' reads ro, then re-run deploy-fleet.sh for it (never reboot a cambox remotely).")" 2>&1)" || rc=$?
+  # The window counts as closed once the BOX answered (0 = ro, 1 = the close's own FAIL); an
+  # interrupted or failed ssh keeps it open, so the EXIT path closes it once more.
+  case "$rc" in 0 | 1) OPEN_WINDOW="" ;; esac
   [ "$rc" -eq 0 ] && return 0
   [ -z "$out" ] || printf '%s\n' "$out" >&2
   if [ "$rc" -eq 1 ]; then
@@ -200,6 +205,7 @@ deploy_frame_probe_to_painter() {
   # the old inode stays busy (→ ETXTBSY). It is a transient systemd-run unit, so a stop when it was
   # never armed (a bare deploy-fleet run outside E2E) is a harmless no-op (|| true).
   OPEN_WINDOW="$ip|$painter|$painter-painter"
+  PENDING_START="$painter-painter|$painter"
   if ! ssh_box "$ip" "mount -o remount,rw / && (systemctl stop cam2-painter-deadman.timer 2>/dev/null || true) && (systemctl stop cam2-painter.service 2>/dev/null || true)"; then
     err "[$painter] remount-rw / painter stop failed"; FAILED+=("$painter-painter(stop-failed)")
     # issue 1407: the rw remount may have landed before the failure -- close it the verified way
@@ -243,23 +249,35 @@ deploy_frame_probe_to_painter() {
 # Clean up a downloaded-artifact temp dir on exit (no-op when --binary was used).
 DIST=""
 # issue 1407: "ip|box|label" while a box's rw window is open (set just BEFORE the rw remount, cleared
-# by close_ro_or_fail). A SIGINT/SIGTERM (a CI cancel) between the rw+stop and the close would
-# otherwise leave that cambox on a writable root with its service stopped, silently.
+# by close_ro_or_fail once the box answered the close). A SIGINT/SIGTERM (a CI cancel) between the
+# rw+stop and the close would otherwise leave that cambox on a writable root with its service
+# stopped, silently.
 OPEN_WINDOW=""
+# issue 1407: "label|box" from the window open until the service start was attempted (or the box's
+# flow ended): an interrupt after the verified close but before the start leaves the service stopped.
+PENDING_START=""
 # shellcheck disable=SC2317  # invoked indirectly via the EXIT trap below
 # NB: must not leak a non-zero status from the trap (it would override the script's exit code) —
 # end with `:` so EXIT preserves the real exit status. An open window is closed the ONE verified way
-# and nothing is started (the binary on the box may be half-copied): the box is named in FAILED.
+# (in its own session) and nothing is started (the binary on the box may be half-copied); a stopped,
+# not yet restarted service is named. Either way the box is named in FAILED.
 cleanup() {
-  if [ -n "$OPEN_WINDOW" ]; then
+  if [ -n "$OPEN_WINDOW" ] || [ -n "$PENDING_START" ]; then
     set +e
     trap '' INT TERM
+    command -v setsid >/dev/null 2>&1 && SSH_SESSION=(setsid -w)
     local ip box label
-    IFS='|' read -r ip box label <<<"$OPEN_WINDOW"
-    err "[$label] deploy interrupted with the rw window open -- closing it (verified); the service on $box stays STOPPED"
-    close_ro_or_fail "$ip" "$box" "$label" "The deploy was interrupted mid-swap; nothing is started." \
-      && FAILED+=("$label(interrupted: root ro, service stopped)")
-    err "DEPLOY INTERRUPTED — issues: ${FAILED[*]}"
+    if [ -n "$OPEN_WINDOW" ]; then
+      IFS='|' read -r ip box label <<<"$OPEN_WINDOW"
+      err "[$label] deploy ended with the rw window still open (interrupted, or its close was not confirmed) -- closing it (verified); nothing is restarted, the service on $box may be STOPPED"
+      close_ro_or_fail "$ip" "$box" "$label" "The deploy ended mid-swap; nothing is started." \
+        && FAILED+=("$label(interrupted: root ro, service may be stopped)")
+    else
+      IFS='|' read -r label box <<<"$PENDING_START"
+      err "[$label] deploy interrupted after the verified ro close, before the service start -- the service on $box may be STOPPED; start it there by hand (its root is read-only)"
+      FAILED+=("$label(interrupted: service may be stopped)")
+    fi
+    err "DEPLOY NOT CLEAN — issues: ${FAILED[*]}"
   fi
   [ -n "$DIST" ] && rm -rf "$DIST"
   :
@@ -287,6 +305,7 @@ if [ -n "$FRAME_PROBE_BIN" ] && [ -z "$BINARY" ] && [ -z "$RUN_ID" ]; then
   esac
   declare -a FAILED=()
   deploy_frame_probe_to_painter
+  PENDING_START=""
   echo "================================================================"
   if [ "${#FAILED[@]}" -eq 0 ]; then
     log "FRAME-PROBE DEPLOYED: cam2 painter aligned to the requested build"
@@ -327,6 +346,7 @@ echo ""
 # --- 2 + 3. Deploy + verify per box -------------------------------------------------------
 declare -a FAILED=()
 for cam in $SET; do
+  PENDING_START=""
   if ! camera_resolve "$cam"; then
     FAILED+=("$cam(invalid)"); continue
   fi
@@ -352,6 +372,7 @@ for cam in $SET; do
   # never a start, never a swallowed close (every cambox runs read-only, setup-device STEP 18).
   info "[$cam] stop service + remount rw + copy + remount ro (verified) + start"
   OPEN_WINDOW="$ip|$cam|$cam"
+  PENDING_START="$cam|$cam"
   if ! ssh_box "$ip" "mount -o remount,rw / && systemctl stop camera-box"; then
     err "[$cam] remount-rw / stop failed"; FAILED+=("$cam(stop-failed)")
     # the rw remount may have landed before the failed stop (close_ro_or_fail records its own entry)
@@ -366,10 +387,14 @@ for cam in $SET; do
     if close_ro_or_fail "$ip" "$cam" "$cam" "A cambox must never run on a writable root, so camera-box.service is NOT started (the copy failed)."; then
       ssh_box "$ip" "systemctl start camera-box" || err "[$cam] camera-box start after the failed scp failed"
     fi
+    PENDING_START=""
     continue
   fi
   close_ro_or_fail "$ip" "$cam" "$cam" "A cambox must never run on a writable root, so camera-box.service is NOT started (the new binary is in place)." || continue
-  if ! ssh_box "$ip" "systemctl start camera-box"; then
+  start_rc=0
+  ssh_box "$ip" "systemctl start camera-box" || start_rc=$?
+  PENDING_START=""
+  if [ "$start_rc" -ne 0 ]; then
     err "[$cam] start failed"; FAILED+=("$cam(start-failed)"); continue
   fi
 
@@ -430,9 +455,12 @@ for cam in $SET; do
   echo ""
 done
 
+PENDING_START=""
+
 # --- #1138: ALSO deploy the cam2-painter (frame-probe) binary when --frame-probe was given -------
 if [ -n "$FRAME_PROBE_BIN" ]; then
   deploy_frame_probe_to_painter
+  PENDING_START=""
 fi
 
 # --- Summary ------------------------------------------------------------------------------
