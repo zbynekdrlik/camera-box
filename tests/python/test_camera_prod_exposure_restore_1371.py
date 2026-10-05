@@ -129,6 +129,13 @@ def test_snapshot_summary_reads_the_project_fps_from_d006_and_the_legacy_d007_on
                                                  context={"d007": "25"}))
     # d006 present: the legacy key is never read, even when it disagrees (an off-speed d007)
     assert "1/60 s" in cts.snapshot_summary(dict(PROD, context={"d006": "6000", "d007": "50"}))
+    # a present d006 that is null or not a number is unreadable, never "absent": no legacy fallback
+    # (review round 1: a null d006 fell back to the off-speed d007)
+    assert cts.context_fps100({"d006": None, "d007": "50"}) is None
+    assert cts.context_fps100({"d006": "x", "d007": "60"}) is None
+    assert cts.context_fps100({"d007": "60"}) == 6000
+    assert cts.context_fps100({"d006": "5994", "d007": "50"}) == 5994
+    assert cts.context_fps100({}) is None
     no_number = dict(PROD, context={"d006": "x", "d007": "60"})
     assert cts.snapshot_summary(no_number) == "ISO 800, uzávierka uhol 360°, cam1 2026-09-26T15:00:00Z"
 
