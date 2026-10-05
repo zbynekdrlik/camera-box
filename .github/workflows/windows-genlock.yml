@@ -775,6 +775,21 @@ jobs:
           if (-not $cb.Contains('cb_active = st->cb_mode_active; last_qr_ns = st->cb_video_last_decode_ts_ns; } if (cb_active) { cb_audio_gate_and_publish(st, frames, last_qr_ns); return; }')) {
             Write-Error "dock output sources: st_raw_audio no longer hands camera-box mode to the gate + FIFO copy (issue 1381)"; exit 1
           }
+          # Review round 1: camera-box mode and norihiro's phone params are read in ONE section under
+          # st->mutex, so no block reads the mode before the decode worker latched it and the rig's
+          # params after (that block ran norihiro's inline demod on the audio thread). Mirrors
+          # the_audio_callback_reads_the_mode_and_the_phone_params_in_one_lock in
+          # tests/av_sync_dock_audio_worker_1381.rs.
+          $iLock = $cb.IndexOf('lock(st->mutex)'); $iBranch = $cb.IndexOf('if (cb_active) {')
+          if ($iLock -lt 0 -or $iBranch -lt 0 -or $cb.IndexOf('lock(st->mutex)', $iLock + 1) -ge 0) {
+            Write-Error "dock output sources: st_raw_audio must take st->mutex exactly once, before the camera-box branch (issue 1381)"; exit 1
+          }
+          foreach ($need in @('f = st->f;', 'c = st->c;', 'q_ms = st->q_ms;', 'cb_active = st->cb_mode_active;')) {
+            $iNeed = $cb.IndexOf($need)
+            if ($iNeed -lt $iLock -or $iNeed -gt $iBranch) {
+              Write-Error "dock output sources: st_raw_audio no longer reads '$need' in its one lock section before the camera-box branch (issue 1381)"; exit 1
+            }
+          }
           $publish = Get-DockBody $output 'static void cb_audio_gate_and_publish(struct sync_test_output *st, const struct audio_data *frames, uint64_t last_qr_ns)'
           foreach ($need in @('const camerabox::CbAudioGate gate = camerabox::cb_audio_decode_gate( true, st->cb_measure_source_present.load(std::memory_order_relaxed), now, last_qr_ns, CAMERA_BOX_TEST_SIGNAL_FRESH_NS);', 'if (gate == camerabox::CbAudioGate::Open) {', 'st->cb_audio_fifo.publish(planes, nch, frames->frames, frames->timestamp);', 'st->cb_audio_fifo.end_session((unsigned)gate);', 'camerabox::cb_atomic_max_u64(st->cb_audio_publish_max_ns, os_gettime_ns() - publish_start_ns);')) {
             if (-not $publish.Contains($need)) {
