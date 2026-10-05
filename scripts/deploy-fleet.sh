@@ -166,10 +166,12 @@ rearm_deadman_if_prior() {  # $1=ip  $2=prior deadman is-active  $3=restore_acti
 
 # --- #1138: deploy the cam2-painter (frame-probe) binary to cam2, with the #892 lifecycle --------
 # frame-probe is installed ONLY on the painter box (setup-device.sh STEP 3b, cam2_is_painter_box),
-# so this is a cam2-only step, mirroring the camera-box loop's shape (stop → remount,rw → scp →
-# byte-verify → restore → remount,ro). The KEY difference from camera-box: the restart is
-# ENABLE-STATE-PRESERVING (frame_probe_restore_enable_decision, .claude/rules/cam2-painter-
-# lifecycle.md #892) — re-arm cam2-painter.service (`enable --now`) ONLY if it was persistently
+# so this is a cam2-only step with the camera-box loop's shape (issue 1407): dead-man park + painter
+# stop → remount,rw → scp to frame-probe.new → its byte-verify → rename → the final-path byte-verify
+# → `systemctl enable` inside the window → the verified ro close → start + dead-man re-arm, only on a
+# verified binary. The KEY difference from camera-box: the restart is ENABLE-STATE-PRESERVING
+# (frame_probe_restore_enable_decision, .claude/rules/cam2-painter-lifecycle.md #892) — re-arm
+# cam2-painter.service (enable in the window, start after the close) ONLY if it was persistently
 # enabled (devel/TEST mode); if it was disabled (EVENT mode — the operator deliberately dropped the
 # QR so it can't return onto a live broadcast) swap the binary but LEAVE the unit dark (the next
 # `rig-mode.sh test` re-arms it). Any genuine deploy failure is recorded in FAILED[] like a cam box.
@@ -239,7 +241,7 @@ deploy_frame_probe_to_painter() {
       err "[$painter] frame-probe sidecar byte-verify FAILED: local $local_sha != sidecar ${sidecar_sha:-<none>} -- not moved over the live binary"
       swap_fail="sidecar-sha-mismatch"
     elif ! ssh_box "$ip" "chmod 0755 /usr/local/bin/frame-probe.new && mv -f /usr/local/bin/frame-probe.new /usr/local/bin/frame-probe && sync"; then
-      err "[$painter] the rename step of the verified frame-probe sidecar failed"
+      err "[$painter] the rename step of the verified frame-probe sidecar failed -- the live binary is checked below before anything starts"
       swap_fail="swap-failed"
     fi
   fi
@@ -272,7 +274,7 @@ deploy_frame_probe_to_painter() {
     # issue 1407: the enable inside the window, the verified close, then the start + the deadman re-arm.
     painter_restore "$ip" "$restore_action" "$was_deadman_armed" "$what" || true
   else
-    err "[$painter] the live /usr/local/bin/frame-probe (sha256 ${final_sha:-<none>}) is neither the verified new build nor the one it ran before -- cam2-painter.service is NOT started and its dead-man is not re-armed"
+    err "[$painter] the live /usr/local/bin/frame-probe (sha256 ${final_sha:-<none>}) is neither the verified new build nor the one it ran before -- cam2-painter.service is NOT started and its dead-man is not re-armed. The unit keeps its enable state, so a reboot or another start path could still start that binary: check 'sha256sum /usr/local/bin/frame-probe' on $painter against $local_sha before anything starts it, or re-run the deploy."
     FAILED+=("$painter-painter(not-started: unverified binary)")
     PENDING_START=""
     close_ro_or_fail "$ip" "$painter" "$painter-painter" \
