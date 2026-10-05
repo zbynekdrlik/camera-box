@@ -21,7 +21,9 @@
 # entirely (fail-open — a missing confirmation must never fail rig-mode.sh event, and posting a
 # rig-cleanliness confirmation to a channel nobody reads defeats the whole point).
 #
-# Sourced by scripts/rig-mode.sh.
+# Sourced by scripts/rig-mode.sh, and (for the shared note writer event_mode_discord_note_add, issue
+# 1407) by scripts/lib/camera-test-settings.sh (so also inside recording-e2e.sh) and
+# scripts/lib/bkshading-relay-mode.sh. Function-only: sourcing it again has no side effect.
 
 # event_mode_discord_confirm_send MESSAGE -> post MESSAGE (already fully composed, Slovak,
 # phone-readable — see scripts/event_assert.py::format_discord_message_sk) to the owner's

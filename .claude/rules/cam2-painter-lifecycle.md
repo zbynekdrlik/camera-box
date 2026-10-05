@@ -133,12 +133,14 @@ the TEST handoff (`enable-now`) and the EVENT disable (`disable`).
   - A failed disable still ends the script before the camera-box restart AND before the issue-1176
     fb0 blank (step 5), so the cam2 screen keeps whatever fb0 last held until someone blanks it.
     That is the same place every other #1175 failure stops it, and do_event still runs the
-    burn-clear and exits non-zero (#868). A failed bkshading relay step is recorded and folded the
-    same way since issue 1407, and that is the rule for ANY new rig-mode step whose failure must not
-    strand the rig: record the rc, warn by name, run every remaining step, fold it into the exit
-    (`.claude/rules/ro-window.md`, "A failed relay step never stops a rig-mode switch half-way").
-    So a cam2 that is stuck read-write must be put back to ro
+    burn-clear and exits non-zero (#868). So a cam2 that is stuck read-write must be put back to ro
     BEFORE the next `rig-mode.sh event`. Never reboot a cambox remotely for it.
+- **A rig-mode step whose failure must not strand the rig is RECORDED, never bare (issue 1407).**
+  The cam-side restore (#868) and the bkshading relay step both do it: `|| _rc=$?`, a WARNING by
+  name, every remaining step runs, and the rc is folded into the mode's exit at the end. Use the
+  same shape for any new step of that kind; a bare call is right only for a hard precondition
+  before any mutation (the #789 TEST-entry gate). Detail: `.claude/rules/ro-window.md`, "A failed
+  relay step never stops a rig-mode switch half-way".
 - **The TEST handoff disarms the dead-man too (step H1b), before the transient painter stop.**
   `rig-mode.sh test` arms it only after a GOOD handoff, and only EVENT disarms it otherwise. On a
   second TEST whose window cannot close read-only, the first TEST's dead-man would start the
