@@ -46,6 +46,9 @@ if tool == "scp":
     dest = args[-1].split(":", 1)[1]
     with open(os.path.join(st, "log"), "a") as f:
         f.write(f"SCP {dest} root={root}\n")
+    if os.environ.get("FAKE_SCP_SLEEP"):
+        import time
+        time.sleep(float(os.environ["FAKE_SCP_SLEEP"]))
     if os.environ.get("FAKE_SCP_RC"):
         sys.exit(int(os.environ["FAKE_SCP_RC"]))
     if root != "rw":
@@ -146,6 +149,33 @@ def test_deploy_fleet_camera_box_failed_stop_still_puts_the_root_back_ro(tmp_pat
     assert "cam2(stop-failed)" in proc.stdout + proc.stderr
     assert root(box) == "ro", "a failed stop must not leave the root writable:\n" + "\n".join(calls)
     assert [c for c in calls if c.startswith("SCP")] == [], "\n".join(calls)
+
+
+def test_deploy_fleet_interrupted_mid_swap_closes_the_window_and_starts_nothing(tmp_path):
+    # review round 1: a SIGTERM (a CI cancel) between the rw+stop and the close must never leave the
+    # cambox on a writable root silently: the EXIT path closes the open window, verified.
+    import signal
+    import time
+    box = make_box(tmp_path, root="ro")
+    st = box["state"]
+    (st / "fs" / "usr" / "local" / "bin").mkdir(parents=True)
+    dev1 = _dev1_bin(tmp_path, box)
+    env = {"PATH": f"{dev1}:/usr/bin:/bin", "FAKE_STATE": str(st), "FAKE_BOX_PATH": str(box["stub"]),
+           "CAMERA_SET": "cam2", "SSH_PASS": "x", "GENLOCK_WAIT_TRIES": "1", "GENLOCK_WAIT_SECS": "0",
+           "HOME": str(tmp_path), "FAKE_SCP_SLEEP": "2"}
+    p = subprocess.Popen(["bash", str(_DEPLOY), "--binary", str(_camera_box_artifact(tmp_path))], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    for _ in range(200):
+        if "SCP " in (st / "log").read_text():
+            break
+        time.sleep(0.05)
+    p.send_signal(signal.SIGTERM)
+    out, err = p.communicate(timeout=60)
+    calls = log(box)
+    assert p.returncode != 0, out + err
+    assert root(box) == "ro", "an interrupted swap must not leave the root writable:\n" + "\n".join(calls)
+    assert [c for c in calls if c.startswith("systemctl start")] == [], "\n".join(calls)
+    assert "interrupted" in err, err
 
 
 # ---- deploy-fleet.sh: the cam2 frame-probe swap ------------------------------------------------- #
@@ -316,6 +346,54 @@ def test_dantesync_master_downgrade_deletes_the_date_state_in_its_own_verified_w
     assert root(box) == "ro"
 
 
+def test_dantesync_self_heal_that_cannot_restore_the_bak_says_so(tmp_path):
+    # review round 1: a .bak that cannot be copied back must never read "restored".
+    box, bindir, staged = _dantesync_box(tmp_path)
+    inst = box["stub"] / "install"
+    inst.unlink()
+    inst.write_text(f"#!{sys.executable}\nimport os, sys\nos.remove({str(bindir / 'dantesync.bak')!r})\nsys.exit(1)\n")
+    inst.chmod(0o755)
+    proc = _run_program(box, _dantesync_text(tmp_path, bindir, staged, "dantesync_linux_upgrade_cmd 1.16.0"))
+    calls = log(box)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "SELF-HEAL FAILED" in proc.stderr, proc.stderr
+    assert "SELF-HEAL: restored previous dantesync binary" not in proc.stderr, proc.stderr
+    assert starts_on_rw(calls) == [] and root(box) == "ro", "\n".join(calls)
+
+
+def _upgrade_node(tmp_path, remote_out):
+    """Run the orchestrator's REAL upgrade_node (cut out of the flow section, which a sourced script
+    never reaches; its header is a count-1 anchor) with run_upgrade stubbed to fail with REMOTE_OUT."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from dantesync_upgrade_harness_1372 import _source  # noqa: E402
+    text = _UPGRADE.read_text()
+    head = "\nupgrade_node() {\n"
+    assert text.count(head) == 1, "upgrade_node() must be defined exactly once"
+    start = text.index(head) + 1
+    fn = text[start:text.index("\n}\n", start) + 3]
+    body = ("TARGET=1.11.0; FORCE=0\n"
+            "log() { echo \"$*\"; }\nerr() { echo \"$*\" >&2; }\n"
+            "read_node_version() { echo 1.10.0; }\n"
+            f"run_upgrade() {{ REMOTE_OUT={remote_out!r}; return 1; }}\n"
+            f"{fn}\n"
+            "upgrade_node cam1 linux root@192.0.2.1; echo rc=$?")
+    return _source(tmp_path, body)
+
+
+def test_dantesync_orchestrator_names_a_failed_close_never_self_healed(tmp_path):
+    # review round 1: a program that stopped at a failed ro close did NOT self-heal -- dantesync can
+    # be left stopped there, and the roll log must say so.
+    out = ("FAIL: [issue 1407] CAM1's root is NOT read-only after the remount-rw window ('findmnt -no "
+           "OPTIONS /' = 'rw,relatime' -> rw; the ro remount rc=32: busy; sync rc=0). No dantesync start "
+           "runs on a writable root; dantesync is 'inactive' now.")
+    r = _upgrade_node(tmp_path, out)
+    assert "rc=1" in r.stdout, r.stdout + r.stderr
+    assert "NOT self-healed" in r.stderr, r.stderr
+    assert "self-healed to its previous version" not in r.stderr, r.stderr
+    r = _upgrade_node(tmp_path, "SELF-HEAL: restored previous dantesync binary")
+    assert "self-healed to its previous version (not rolled forward)" in r.stderr, r.stderr
+
+
 # ---- bkshading-relay-mode.sh ---------------------------------------------------------------------- #
 
 _RELAY = LIB / "bkshading-relay-mode.sh"
@@ -344,6 +422,31 @@ def test_relay_mode_event_failed_close_starts_nothing(tmp_path):
     assert [ln for ln in lines if ln.startswith("FAIL")][-1].endswith("rig-mode.sh event."), (
         "the LAST FAIL line (the one rig-mode relays) says what to do:\n" + proc.stderr)
     assert "systemd-journal" in proc.stderr
+
+
+_RELAY_SSHPASS = r'''
+import os, subprocess, sys
+env = {"PATH": os.environ["FAKE_BOX_PATH"], "FAKE_STATE": os.environ["FAKE_STATE"], "HOME": os.environ["FAKE_STATE"]}
+env.update({k: v for k, v in os.environ.items() if k.startswith("FAKE_")})
+sys.exit(subprocess.run(["/bin/bash", "-c", sys.argv[-1]], env=env).returncode)
+'''
+
+
+def test_relay_mode_apply_names_the_writers_on_its_one_fail_line(tmp_path):
+    # review round 1: bkshading_relay_mode_apply relays ONE line per box; a failed close must still
+    # name the writers there (the box's own FAIL lines are not shown by rig-mode).
+    box = make_box(tmp_path, root="ro")
+    dev1 = tmp_path / "dev1-bin"
+    dev1.mkdir()
+    (dev1 / "sshpass").write_text(f"#!{sys.executable}\n{_RELAY_SSHPASS}")
+    (dev1 / "sshpass").chmod(0o755)
+    env = {"PATH": f"{dev1}:/usr/bin:/bin", "FAKE_STATE": str(box["state"]), "FAKE_BOX_PATH": str(box["stub"]),
+           "FAKE_RO_FAIL": "1", "HOME": str(tmp_path)}
+    proc = subprocess.run(["/bin/bash", "-c", f'. "{_RELAY}"\nbkshading_relay_mode_apply event pw cam1=192.0.2.1'],
+                          env=env, capture_output=True, text=True, timeout=60)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    line = [ln for ln in proc.stderr.splitlines() if "bkshading-relay" in ln and "FAIL" in ln]
+    assert line and "holders: systemd-journal[76355]; relay[4242]" in line[-1], proc.stderr
 
 
 def test_relay_mode_test_disables_inside_and_verifies_the_close(tmp_path):

@@ -163,6 +163,45 @@ def test_holders_summary_names_the_writers_and_the_deleted_holders(box):
     assert out == "systemd-journal[76355]; relay[4242] /usr/local/bin/bkshading-relay", out
 
 
+def test_a_writer_under_a_numeric_uid_is_named_never_read_as_none(box):
+    # fuser prints an unresolvable USER as a number; the ACCESS field is found by its own shape, so
+    # `1000 4242 F.... cmd` still names PID 4242 (review round 1).
+    (box["stub"] / "fuser").unlink()
+    (box["stub"] / "fuser").write_text(
+        f"#!{sys.executable}\nimport sys\n"
+        "sys.stderr.write('                     USER        PID ACCESS COMMAND\\n')\n"
+        "sys.stderr.write('/:                   root     kernel mount /\\n')\n"
+        "sys.stderr.write('                     1000      4242 F.... uid-writer\\n')\n"
+        "sys.stderr.write('                     root      5151 F.... root-writer\\n')\n")
+    (box["stub"] / "fuser").chmod(0o755)
+    proc = run_text(box, _close_text(), FAKE_RO_FAIL="1")
+    assert proc.returncode == 1
+    assert "uid-writer" in proc.stderr and "root-writer" in proc.stderr, proc.stderr
+    assert "(none: no process holds a file open for writing on /)" not in proc.stderr, proc.stderr
+    out = build(f'. "{_RO_WINDOW}"\nro_window_holders "$1"', proc.stderr).strip()
+    assert out.startswith("uid-writer[4242]; root-writer[5151]"), out
+
+
+@pytest.mark.parametrize("bad", ['b"x', "b`id`x"])
+def test_an_argument_with_a_quote_or_backtick_fails_loud_on_the_box_never_silently(box, bad):
+    text = build(f'. "{_RO_WINDOW}"\nro_window_close_cmds "$1" "$2" "$3" "$4"', "t", bad, "c", "h")
+    assert text.strip(), "never an empty text (an empty ssh command would read as a good close)"
+    proc = run_text(box, text + "\necho NEVER-REACHED")
+    assert proc.returncode == 1, proc.stderr
+    assert "NEVER-REACHED" not in proc.stdout
+    assert "FAIL: ro_window_close_cmds" in proc.stderr, proc.stderr
+    assert not any(c.startswith("mount") for c in log(box)), "nothing is run on such a text"
+
+
+def test_close_failed_predicate_reads_the_shared_fail_line(box):
+    proc = run_text(box, _close_text(), FAKE_RO_FAIL="1")
+    rc = build(f'. "{_RO_WINDOW}"\nif ro_window_close_failed "$1"; then echo yes; else echo no; fi', proc.stderr)
+    assert rc.strip() == "yes"
+    rc = build(f'. "{_RO_WINDOW}"\nif ro_window_close_failed "$1"; then echo yes; else echo no; fi',
+               "SELF-HEAL: restored previous dantesync binary")
+    assert rc.strip() == "no"
+
+
 def test_holders_summary_of_nothing_is_empty():
     assert build(f'. "{_RO_WINDOW}"\nro_window_holders ""') == ""
     assert build(f'. "{_RO_WINDOW}"\nro_window_holders "ssh: connect to host x port 22: refused"') == ""
@@ -228,6 +267,10 @@ def test_every_text_site_closes_with_the_shared_emitter_and_starts_nothing_insid
     after = text[close:]
     assert not re.search(r"remount,ro\b[^\n]*(2>\s*/dev/null|\|\|\s*true)", after), (
         f"{site}: a swallowed ro close after the shared one:\n{after}")
+    # ONE first-token reading of the root mode (review round 1): the `ro | ro,*` pattern appears only
+    # inside an emitted ro_root_mount_mode definition, never as an inline copy at the site.
+    assert text.count("ro | ro,*") == text.count("ro_root_mount_mode () "), (
+        f"{site}: an inline copy of the first-token root-mode reading:\n{text}")
 
 
 # ---- the sweep: no swallowed ro close anywhere under scripts/ outside the shared lib -------------- #
@@ -235,10 +278,34 @@ def test_every_text_site_closes_with_the_shared_emitter_and_starts_nothing_insid
 # A ro remount whose failure is discarded: its stderr sent to /dev/null, or an `|| true` / `|| :` /
 # `; true` right after it (past any redirections). Anchored right after the command, so a later
 # `2>/dev/null` of ANOTHER command on the same line (a FAIL message reading the unit state) is no hit.
-_REDIRS = r"(?:\s*(?:[0-9]|&)?>>?&?\s*[^\s;|&)'\"]+)*?"
-_SWALLOW = re.compile(
-    r"remount,ro(?:\s+/)?" + _REDIRS + r"\s*(?:\|\|\s*(?:true|:)(?![\w-])|;\s*(?:true|:)(?![\w-]))"
-    r"|remount,ro(?:\s+/)?" + _REDIRS + r"\s*(?:2|&)>\s*/dev/null")
+_RO_CALL = re.compile(r"(?:remount,ro|ro,remount)(?:,[\w=-]+)*[\"']?(?:\s+/(?=[\s;|&)'\"]|$))?")
+_REDIRS = re.compile(r"(?:\s*(?:[0-9]|&)?>>?&?\s*[^\s;|&)'\"]+)*")
+_DISCARDS = (re.compile(r"(?:2|&)>>?\s*/dev/null"), re.compile(r">\s*/dev/null.*2>&1"))
+# what may follow an ro remount without checking it: an `||` that goes on (true, :, a message, a
+# zero return/exit, continue/break), `; true`, `; :`, or a retry loop's `&& break`.
+_GOES_ON = re.compile(r"\s*(?:\|\|\s*(?:true|:|echo|printf|warn|log|info|return(?:\s+0)?|exit\s+0|continue|break)"
+                      r"(?![\w-])|;\s*(?:true|:)(?![\w-])|&&\s*break(?![\w-]))")
+
+
+class _Sweep:
+    """A ro remount whose failure is discarded: its error sent to /dev/null, or an `||` / `;` /
+    `&& break` right after it (past its redirections) that just goes on. Anchored right after the
+    command, so a FAIL message that reads unit state with `2>/dev/null || true` later on the same
+    line is no hit, and a loud `|| fail ...` / `|| { ...; exit 1; }` is no hit either."""
+
+    @staticmethod
+    def search(line):
+        for m in _RO_CALL.finditer(line):
+            rest = line[m.end():]
+            redirs = _REDIRS.match(rest).group(0)
+            if any(d.search(redirs) for d in _DISCARDS):
+                return True
+            if _GOES_ON.match(rest[len(redirs):]):
+                return True
+        return False
+
+
+_SWALLOW = _Sweep
 
 
 def _swallowed_closes():
@@ -271,14 +338,26 @@ def test_the_sweep_pattern_catches_every_known_swallow_shape():
                 "mount -o remount,ro / || :",
                 "mount -o remount,ro /; true",
                 "mount -o remount,ro / >/dev/null 2>&1 || true",
-                "mount -o remount,ro / &>/dev/null"):
+                "mount -o remount,ro / &>/dev/null",
+                # review round 1: the shapes the first pattern missed
+                "mount -o remount,ro / || echo \"WARNING: could not remount\"",
+                "mount -o remount,ro / || return 0",
+                "mount -o remount,ro / || exit 0",
+                "mount -o ro,remount / || true",
+                "mount -o \"remount,ro\" / 2>/dev/null",
+                "mount -o remount,ro,noatime / || true",
+                "mount -o remount,ro / >/dev/null 2>&1",
+                "for i in 1 2 3; do mount -o remount,ro / && break; sleep 2; done"):
         assert _SWALLOW.search(bad), bad
     for good in ('_row_ro_err="$(mount -o remount,ro / 2>&1)" || _row_ro_rc=$?;',
                  'if "$MOUNT" -o remount,ro /; then',
                  "mount -o remount,ro / \\ || fail \"could not remount\"",
                  "ro,relatime,errors=remount-ro",
                  "echo \"the ro remount rc=$rc: $(systemctl is-enabled x 2>/dev/null || true)\"",
-                 "echo \"('mount -o remount,ro /' rc=$rc; is-enabled: $(systemctl is-enabled x 2>/dev/null || true))\""):
+                 "echo \"('mount -o remount,ro /' rc=$rc; is-enabled: $(systemctl is-enabled x 2>/dev/null || true))\"",
+                 "mount -o remount,ro / || fail \"could not remount root back to read-only\"",
+                 "mount -o remount,ro / || { echo \"FAIL: busy\" >&2; exit 1; }",
+                 "printf 'mount -o remount,rw / && apt-get update && mount -o remount,ro /   # comment'"):
         assert not _SWALLOW.search(good), good
 
 
