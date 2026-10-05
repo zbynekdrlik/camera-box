@@ -61,9 +61,10 @@ After a good close, `$_row_opts` holds the options read (the persist success lin
 Contract for the arguments: TAG, BOX, CONSEQUENCE and HINT land verbatim in a double-quoted remote
 `echo`. A `$` expands ON THE BOX: the persist lib and the dantesync prologue read the unit state
 that way, the relay mode and the ndi apply name the box with `$(hostname ...)`. A double quote or a
-backtick would break or inject into that echo (deploy-relay passes the operator's `--host`), so such
-an argument makes the emitter print a remote text that FAILS LOUD (`exit 1`) instead of a close. It
-never returns an empty text: an empty ssh command would read as a good close.
+backtick would break or inject into that echo (deploy-relay passes the operator's `--host`), so the
+emitter STRIPS those characters (one WARNING on the caller's stderr) and still emits the full
+verified close. Review round 2: refusing the close instead left the root writable, and the dev1 side
+misread that ("none named", "self-healed").
 
 The emitted text, by construction:
 - ends every statement with `;` (the `$(...)` trailing-newline gotcha), so it embeds inline, in an
@@ -106,12 +107,18 @@ Three dev1-side pure parsers:
   closes the window: a failed stop, a failed scp (camera-box is restarted only on a verified ro
   root; scp writes in place, so the restart can still fail on a partial binary), and the normal
   path.
-  - **The window spans several separate ssh calls from dev1** (rw + stop, scp, close). `OPEN_WINDOW`
-    (`ip|box|label`) is set just BEFORE the rw remount and cleared by `close_ro_or_fail`. The EXIT
-    trap, also reached on INT/TERM (`exit 130` / `exit 143`, e.g. a CI cancel), closes a window that
-    is still open, starts nothing (the binary may be half-copied), and names the box
-    (`interrupted: root ro, service stopped`, or `root-rw: ...`). Review round 1: before this, a
-    cancel mid-swap left the cambox writable with camera-box stopped, silently.
+  - **The window spans several separate ssh calls from dev1** (rw + stop, scp, close). Two markers
+    cover it (review rounds 1-2):
+    - `OPEN_WINDOW` (`ip|box|label`) is set just BEFORE the rw remount. `close_ro_or_fail` clears it
+      only once the BOX answered the close (rc 0 or 1). An interrupted or failed close ssh keeps it.
+    - `PENDING_START` (`label|box`) lives from the window open until the service start was
+      attempted (or the box's flow ended).
+    - The EXIT trap is also reached on INT/TERM (`exit 130` / `exit 143`, e.g. a CI cancel). An open
+      window is closed once more, verified, under `setsid -w`, so a second Ctrl-C cannot reach it
+      (sshpass forwards SIGINT to ssh). Nothing is started there: the binary may be half-copied.
+    - A pending start is named: "the service on <box> may be STOPPED". It says "may", because the
+      signal can land before the stop ran.
+    - Before this, a cancel mid-swap left the cambox writable with camera-box stopped, silently.
 - **dantesync:** both Linux programs open their window through ONE prologue,
   `_dantesync_linux_rw_window_sh` (`dantesync-rollback.sh`). It reads the root mode, remounts rw on
   a read-only root, and defines `_dantesync_remount_ro` (the close, at most once per open window,
@@ -130,8 +137,11 @@ Three dev1-side pure parsers:
     with `ro_window_close_failed`. If the program stopped at a failed close, it reports
     "NOT self-healed; dantesync may be LEFT STOPPED", because nothing was started after the close.
   - The ERR self-heal stays ARMED through the final `dantesync --version` on purpose: a binary that
-    cannot print its version is rolled back, and that is what the orchestrator then reports. The
-    old "disarm the restore trap" comment was wrong; only the EXIT trap is re-set there.
+    cannot print its version is rolled back, and that is what the orchestrator then reports.
+    `trap - ERR` follows right after it (review round 2), so the master's date-state delete that
+    comes next can never roll the master back to its `.bak` after its date file is gone, the state
+    the issue-1372 delete-last order exists to avoid.
+  - A `SELF-HEAL FAILED` program is reported as NOT self-healed too.
 - **bkshading-deploy-relay:** the close runs in ONE ssh call. rc 1 = the box said the root is not ro
   (its FAIL lines are printed, then one summary line from `ro_window_holders`); any other rc is the
   transport (ssh 255, sshpass 5/6). Either way `finish_box` starts nothing: the relay is left
@@ -151,6 +161,10 @@ remounted ro after the window.
 - On `rig-mode.sh event` this means a stuck-writable relay box gets no shading relay until the
   supervisor's live put-back. That put-back: `fuser -vm /`, stop the writer, `mount -o remount,ro /`
   until `findmnt` reads ro, then re-run.
+- `bkshading_relay_mode_apply` returns non-zero when any box failed (issue 1311 chose that; its
+  header used to say "always returns 0"). `rig-mode.sh` calls it bare under `set -euo pipefail`, so
+  a relay box left writable stops `rig-mode.sh test` / `event` at that line, loudly. The EVENT
+  contract and the TEST painter launch after it do not run; fix the box, then re-run the switch.
 
 Audit, left as they are:
 - `rt-kernel-plan.sh` only PRINTS supervisor commands for a reboot-class kernel step.
@@ -171,10 +185,12 @@ Audit, left as they are:
   - **the sweep:** no ro remount anywhere under `scripts/` outside the lib whose failure is
     discarded. It is structural, per ro remount CALL (`remount,ro` / `ro,remount`, quoted, with
     `,opts`, with or without ` /`). Its redirections must not send the error to `/dev/null`. What
-    follows must not just go on: `|| true`, `|| :`, `|| echo/printf/warn/log/info`, `|| return`,
-    `|| exit 0`, `|| continue`, `|| break`, `; true`, `; :`, a retry loop's `&& break`. A loud
-    `|| fail ...` / `|| { ...; exit 1; }` is fine, and so is a FAIL message that reads unit state with
-    `2>/dev/null || true` later on the same line (the check is anchored right after the command).
+    follows must not just go on: `|| true`, `|| :`, `|| echo/printf/warn/log/info/err/logger`,
+    `|| return 0`, `|| exit 0`, `|| continue`, `|| break`, a `|| { ... }` group without
+    exit/return/fail/die, `; true`, `; :`, a retry loop's `&& break`. A loud `|| fail ...` /
+    `|| { ...; exit 1; }` is fine, and so are `|| return` / `|| return 1` (they pass the failure on).
+    So is a FAIL message that reads unit state with `2>/dev/null || true` later on the same line
+    (the check is anchored right after the command).
     Comment lines are skipped; a continued line is one statement.
 - `test_ro_window_sites_1407.py`: every site run WHOLE on the fake box. deploy-fleet runs with a fake
   `sshpass` that executes each remote command on the box, with `/usr/local/bin/` mapped into the
