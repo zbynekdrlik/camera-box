@@ -20,11 +20,12 @@
 #
 # This builder is the HANDOFF: rig-mode.sh test keeps its transient painter ONLY for the
 # at-mode-set chain verification, then calls this to (1) stop the transient painter (free
-# fb0/DRM so the unit does not race it, #440), (2) `systemctl enable --now cam2-painter.service`
-# (enable -> survive reboot + re-arm after any EVENT #892 disable; --now -> start immediately),
-# (3) verify it is active + GENUINELY PAINTING (presenter-aware #464) + the marker CSV GROWING
-# (#431), FAILING LOUD (exit 1) on any miss -- a durable steady state that is claimed must be
-# proven, never a silent 2h nohup.
+# fb0/DRM so the unit does not race it, #440), (2) `systemctl enable cam2-painter.service`
+# inside the remount-rw window (enable -> survive reboot + re-arm after any EVENT #892 disable),
+# verify cam2's root reads read-only again, and only then `systemctl start` it (issue 1405: a start
+# inside the window kept the root read-write), (3) verify it is active + GENUINELY PAINTING
+# (presenter-aware #464) + the marker CSV GROWING (#431), FAILING LOUD (exit 1) on any miss -- a
+# durable steady state that is claimed must be proven, never a silent 2h nohup.
 #
 # Source-only: pure string builder, no ssh, no side effects at source time -- mirrors every other
 # _cmds builder in this codebase. REUSES audio_marker_emission_check_cmds (scripts/lib/audio-
@@ -74,17 +75,19 @@ if [ -f "$pidfile" ]; then
   rm -f "$pidfile" 2>/dev/null || true
 fi
 # (H3) hand STEADY STATE to the permanent unit: ENABLE (survive reboot; re-arm after any EVENT #892
-#      disable) + START NOW. reset-failed first so a prior failed state never blocks the start.
+#      disable), then START. reset-failed first so a prior failed state never blocks the start.
 #      #1175: the enable runs inside a remount-rw window and FAILS LOUD + verifies is-enabled=enabled
 #      (cam2's read-only root would otherwise silently swallow the symlink write, leaving the unit
 #      unenabled -> dead at the next reboot while this handoff claimed "survives reboot").
+#      issue 1405: only the enable runs inside that window; the start comes after the root reads
+#      read-only again (findmnt), and a root left writable FAILS LOUD naming the writers, no start.
 systemctl reset-failed cam2-painter.service 2>/dev/null || true
 $(cam2_painter_persist_state_cmds enable-now)
 echo "[#1008] handed TEST-mode steady state to the permanent cam2-painter.service (enabled + started -- Restart=always, survives reboot)"
 # (H4) verify ACTIVE -- FAIL LOUD.
 _h=0; while [ "\$(systemctl is-active cam2-painter.service 2>/dev/null)" != "active" ] && [ \$_h -lt 16 ]; do sleep 0.5; _h=\$((_h+1)); done
 if [ "\$(systemctl is-active cam2-painter.service 2>/dev/null)" != "active" ]; then
-  echo "FAIL: [#1008] cam2-painter.service did NOT become active after 'enable --now' -- the TEST-mode steady-state painter is DOWN." >&2
+  echo "FAIL: [#1008] cam2-painter.service did NOT become active after the enable + start -- the TEST-mode steady-state painter is DOWN." >&2
   systemctl status cam2-painter.service --no-pager >&2 2>/dev/null || true
   exit 1
 fi

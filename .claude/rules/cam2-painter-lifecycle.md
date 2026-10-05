@@ -2,12 +2,15 @@
 paths:
   - "scripts/rig-mode.sh"
   - "scripts/lib/cam2-painter-handoff.sh"
+  - "scripts/lib/cam2-painter-ro-persist.sh"
   - "scripts/lib/cam2-painter-restore-verify.sh"
   - "scripts/lib/cam2-painter-restore-retry.sh"
   - "scripts/lib/cam2-painter-restore-recheck.sh"
   - "scripts/lib/cam2-painter-deadman.sh"
   - "systemd/cam2-painter.service"
   - "tests/harness_cam2_painter_steady_state_handoff.rs"
+  - "tests/harness_cam2_painter_ro_persist_1175.rs"
+  - "tests/python/test_cam2_painter_ro_verify_1405.py"
   - "tests/harness_cam2_painter_coordination.rs"
   - "tests/harness_cam2_painter_restore_recheck_1126.rs"
   - "scripts/lib/rig-test-ledger.sh"
@@ -38,12 +41,13 @@ since #984, emitting the QPSK marker default-ON.
   painters racing fb0 make the displayed QR alternate run_ids, desyncing the marker), launches the
   transient painter, verifies the whole chain. (2) At the END, `do_test` calls
   `cam2_painter_steady_state_handoff_cmds` (`scripts/lib/cam2-painter-handoff.sh`): stop the
-  transient via its pidfile, `systemctl enable --now cam2-painter.service`, FAIL LOUD unless it is
-  active + genuinely painting (presenter-aware #464) + marker CSV growing. **Steady state ends on
-  the PERMANENT unit, never the nohup.**
+  transient via its pidfile, `systemctl enable cam2-painter.service` inside the remount-rw window,
+  verify the root reads read-only again, `systemctl start` it (issue 1405, below), FAIL LOUD unless
+  it is active + genuinely painting (presenter-aware #464) + marker CSV growing. **Steady state ends
+  on the PERMANENT unit, never the nohup.**
 - **`rig-mode.sh event`**: `painter_stop_remote` STOPS **and DISABLES** the permanent unit (#892 —
   EVENT must never leave a QR that can return via a restart or a reboot onto the LIVE broadcast).
-  So `test` must `enable --now` (not just `start`) to re-arm it after any prior EVENT cycle.
+  So `test` must ENABLE it (not just `start`) to re-arm it after any prior EVENT cycle.
 - **`recording-e2e.sh` measurement**: STOPS the permanent unit (arms the #872 on-box dead-man so a
   SIGKILLed run self-heals), runs its OWN measurement painter, and `cleanup()` restarts +
   `cam2_painter_restore_verify_cmds` + disarms the dead-man. This is now the ONLY time the unit
@@ -73,6 +77,53 @@ since #984, emitting the QPSK marker default-ON.
   A/V verdict path (`av_sync_recording.rs` pairs by fid, ignores `emit_ts`) — the E2E burn painter
   in `recording-e2e.sh` already carries it. Both changes take effect only after a cam2 re-provision
   (or a remount-rw unit edit + `daemon-reload` + painter restart) — a supervisor rig step.
+
+## The enable-state window must end READ-ONLY before the painter starts (issue 1405)
+
+cam2's root is read-only (setup-device STEP 18). Changing the unit's persistent enable-state needs a
+`mount -o remount,rw /` window. That window lives in ONE emitter,
+`cam2_painter_persist_state_cmds` (`scripts/lib/cam2-painter-ro-persist.sh`, issue 1175), used by
+the TEST handoff (`enable-now`) and the EVENT disable (`disable`).
+
+- **Never start the painter inside the window.** The old `enable-now` ran `systemctl enable --now`
+  there. The start opened writers on the still-writable `/`, the following ro remount failed EBUSY,
+  its `|| true` hid that, and cam2 ran on a read-WRITE root until the next reboot. Live 4.10.2026:
+  the last `r/w` remount at 10:36:54 had no `ro` after it, and the painter became active that same
+  second. Only `systemctl enable` / `disable` runs in the window now.
+- **The root mode decides, never the remount's exit code.** After the ro remount the emitter reads
+  `findmnt -no OPTIONS /` (with the `/proc/mounts` fallback) through the shared ro-root canon's
+  `ro_root_mount_mode`. Its definition is emitted INTO the remote text (`declare -f`, lazy-sourced
+  from `scripts/lib/ro-root.sh`).
+  - `rw` or `unknown` FAILS LOUD (exit 1): the message names the findmnt reading and the mount
+    error, then prints `fuser -vm /` (the writers), and the painter is never started.
+  - `unknown` is never assumed `ro`.
+- **Order inside the emitter:** remount rw, change, remount ro, ro verify, the change's rc check, the
+  `is-enabled` read-back, and (enable-now only) `systemctl start`. A failed start after a good
+  enable is its own named `[#1405]` failure.
+  - There is no retry loop: a writer that keeps `/` busy keeps it busy on every retry.
+  - The disable mode never names a start. The `tests/rig_mode.rs` #892 check forbids
+    `systemctl start cam2-painter.service` anywhere in the EVENT text.
+- **EVENT consequence:** `painter_stop_remote` runs the disable at step 2.5 under `set -e`. A root
+  that cannot go back to ro now ends the cam-side EVENT script there, before the deadman disarm and
+  the camera-box restart. That is the same place every other #1175 failure already stopped it, and
+  do_event still runs the burn-clear and exits non-zero (#868). So a cam2 that is stuck read-write
+  must be put back to ro (find the writer, `mount -o remount,ro /`) BEFORE the next
+  `rig-mode.sh event`. Never reboot a cambox remotely for it.
+- **Every emitted statement ends with `;`.** The callers embed the text through `$(...)`, which
+  strips its trailing newline (the CLAUDE.md #744/#746 gotcha).
+- **Test by running the text.** `tests/python/test_cam2_painter_ro_verify_1405.py` runs it with
+  stateful fakes on a stub-only PATH:
+  - `mount`, `systemctl`, `findmnt` and `fuser` share one fake root and log each call with the
+    root mode at that moment;
+  - a start on a rw root plants a writer that fails the next ro remount (the 4.10 mechanism);
+  - it covers the real TEST handoff, and the EVENT disable cut out of rig-mode.sh.
+  - The Rust `tests/harness_cam2_painter_ro_persist_1175.rs` fakes `findmnt`/`fuser` too: without
+    them the real findmnt reads the CI runner's own rw root.
+- **Live put-back** after a box was left rw: `findmnt -no OPTIONS /` on cam2. If it reads rw, run
+  `fuser -vm /` and stop the writer that is not supposed to hold `/` (4.10: a second
+  systemd-journald), then `mount -o remount,ro /` until findmnt reads `ro`. Then confirm with the
+  next `rig-mode.sh test` that it still reads `ro`. This is a supervisor rig step, never a lane
+  worker's.
 
 ## The TEST painter's rig-test LEDGER entry — quoting the remote PID (issue 1382)
 
