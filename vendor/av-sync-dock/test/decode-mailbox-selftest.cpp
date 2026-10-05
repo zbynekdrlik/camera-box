@@ -20,7 +20,10 @@
  *   7. on_thread_start runs once on the worker, before the first job;
  *   8. the publish-time high-water mark keeps the true maximum under concurrent updates;
  *   9. the frame copies (camera-box-frame-copy.hpp) equal a plain reference read of the frame, and
- *      every pixel norihiro's marker search reads lies inside the copied circle patch.
+ *      every pixel norihiro's marker search reads lies inside the copied circle patch;
+ *  10. prepare_slots() sizes and writes both slots' buffers before start(), so no publish into a
+ *      prepared slot takes a page fault on the producer thread (getrusage RUSAGE_THREAD,
+ *      cb-thread-faults.hpp), and it refuses while the worker runs (issue 1381).
  *
  * Dependency-free (STL + threads): `g++ -std=c++11 -O2 -Wall -Wextra -Werror -pthread`.
  * Driven by tests/av_sync_dock_decode_mailbox_1367.rs on every CI run. Exit 0 + "ALL PASS" = pass.
@@ -28,6 +31,7 @@
 
 #include "../src/camera-box-decode-mailbox.hpp"
 #include "../src/camera-box-frame-copy.hpp"
+#include "cb-thread-faults.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -35,6 +39,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -116,8 +121,73 @@ template<typename Pred> static bool wait_for(Pred pred, int timeout_ms)
 	return true;
 }
 
+/* 10. issue 1381: prepare_slots() sizes AND writes both slots' buffers on the caller's thread before
+ * start(), so the producer's fill -- the video-output thread in the dock -- copies into buffers that
+ * are already allocated and resident: no allocation and no page fault on its first frame into each
+ * slot. Without it the dock's fill grew the top band itself (1920 x 777 luma = 1.5 MB at 1080p, 6 MB
+ * at 4K): an allocation plus a fault on every one of its pages, on the video thread, per slot.
+ *
+ * Deterministic, never timed: the worker is held inside the first decode, so publish 1 fills one
+ * slot and publishes 2-3 fill the other, and each publish is bracketed by the producer thread's own
+ * fault count. A warm-up mailbox pages the publish/fill code in before anything is counted. Every
+ * mailbox here lives to the end, and main() runs this first, so no slot can reuse memory another
+ * test freed. prepare_slots() refuses (calling nothing) while the worker runs. */
+static void test_prepared_slots_never_fault()
+{
+	const size_t bytes = 1536 * 1024; // the 1080p top band, rounded up
+	std::vector<uint8_t> src(bytes, 0x5A); // the "frame": written (resident) before any count
+	/* The dock's fill shape: grow only when too small, then copy. */
+	auto fill = [&src, bytes](FakeJob &job, uint64_t id) {
+		job.id = id;
+		if (job.payload.size() < bytes)
+			job.payload.resize(bytes);
+		std::memcpy(job.payload.data(), src.data(), bytes);
+	};
+	auto prepare = [bytes](FakeJob &job) { job.payload.assign(bytes, 0); };
+
+	CbDecodeMailbox<FakeJob> warm;
+	CHECK(warm.prepare_slots(prepare), "faults: warm-up prepare_slots on a stopped mailbox");
+	CHECK(warm.start([](FakeJob &) {}), "faults: warm-up start");
+	CHECK(warm.publish([&](FakeJob &job) { fill(job, 0); }), "faults: warm-up publish");
+	CHECK(wait_for([&]() { return warm.taken() >= 1; }, 5000), "faults: warm-up frame decoded");
+
+	CbDecodeMailbox<FakeJob> mb;
+	std::atomic<bool> entered{false}, hold{true};
+	std::atomic<int> prepared_while_running{0};
+	CHECK(mb.prepare_slots(prepare), "faults: prepare_slots on a stopped mailbox");
+	CHECK(mb.start([&](FakeJob &) {
+		entered = true;
+		const steady::time_point t0 = steady::now();
+		while (hold && ms_since(t0) < 5000)
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}),
+	      "faults: start");
+	uint64_t faults = 0;
+	for (uint64_t id = 1; id <= 3; id++) {
+		const uint64_t f0 = cb_thread_page_faults();
+		CHECK(mb.publish([&](FakeJob &job) { fill(job, id); }), "faults: publish");
+		faults += cb_thread_page_faults() - f0;
+		if (id == 1)
+			CHECK(wait_for([&]() { return entered.load(); }, 5000), "faults: the worker took frame 1");
+	}
+	CHECK(!mb.prepare_slots([&](FakeJob &) { prepared_while_running++; }),
+	      "faults: prepare_slots refuses while the worker runs");
+	CHECK(prepared_while_running == 0, "faults: a refused prepare_slots calls nothing");
+	hold = false;
+	CHECK(wait_for([&]() { return mb.taken() >= 2; }, 5000), "faults: the held frame and the latest decoded");
+	std::printf("faults: %zu-byte job buffers, 3 publishes into both slots, %llu page fault(s) on the producer "
+		    "thread\n",
+		    bytes, (unsigned long long)faults);
+	CHECK(faults == 0, "faults: no publish() into a prepared slot takes a page fault on the producer thread");
+	mb.stop();
+	warm.stop();
+}
+
 int main()
 {
+	std::setvbuf(stdout, nullptr, _IOLBF, 0);
+	test_prepared_slots_never_fault();
+
 	/* 1-4: a 30 fps producer against a 50 ms decode. */
 	{
 		CbDecodeMailbox<FakeJob> mb;
