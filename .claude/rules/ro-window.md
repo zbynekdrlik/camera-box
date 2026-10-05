@@ -231,7 +231,11 @@ going into a production (the issue-868 class). TEST aborted before the painter s
   defines `do_event` / `do_test`), stubs every other function to a step logger, and keeps the whole
   relay chain real against fake read-only-root boxes behind a fake `sshpass` (TEST-NET addresses).
   It asserts the step order after a failed relay step, the exit code, the named WARNING/RESULT and
-  the Discord top line, plus the healthy controls.
+  the Discord top line, plus the healthy controls. Its `_KEEP` pattern lists the functions that stay
+  REAL: when kept code starts calling another lib's helper (the shared `event_mode_discord_note_add`),
+  that helper must join `_KEEP`, or the stub silently swallows its effect and the test reads
+  "nothing written". A test can run one more override through `_run(..., extra=...)` (the combo
+  test fails only the first `cam_ssh`, the issue-868 cam-side restore).
 
 Audit, left as they are:
 - `setup-device.sh` `restore_root_mode` and `bkshading-provision-sbc.sh` are provisioning-time and
