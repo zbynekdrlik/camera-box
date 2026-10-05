@@ -10,7 +10,10 @@ paths:
   - scripts/lib/bkshading-deploy-runtime.sh
   - scripts/lib/cam2-painter-ro-persist.sh
   - scripts/lib/ndi-discovery.sh
+  - scripts/lib/rt-kernel-plan.sh
+  - scripts/rt-kernel-upgrade.sh
   - tests/python/ro_window_fakes_1407.py
+  - tests/python/test_rig_mode_relay_rc_1407.py
   - tests/python/test_ro_window_1407.py
   - tests/python/test_ro_window_sites_1407.py
 ---
@@ -92,7 +95,7 @@ Three dev1-side pure parsers:
 
 | Site | Inside the window | After the verified close |
 |---|---|---|
-| `deploy-fleet.sh` camera-box swap | `systemctl stop camera-box`, scp | `systemctl start camera-box` |
+| `deploy-fleet.sh` camera-box swap | `systemctl stop camera-box`, scp to the `camera-box.new` sidecar, the sidecar's byte-verify, `chmod` + `mv -f` rename | `systemctl start camera-box` |
 | `deploy-fleet.sh` cam2 frame-probe swap (`painter_restore`) | dead-man + painter stop, scp + rename, `systemctl enable` (enable-now) | painter start, dead-man re-arm (#1351 prior state) |
 | dantesync upgrade (`dantesync_linux_upgrade_cmd`) | backup, `systemctl stop dantesync`, install | `systemctl restart dantesync` |
 | dantesync rollback | stop, `.bak` restore, the master's date-state delete | restart |
@@ -100,13 +103,23 @@ Three dev1-side pure parsers:
 | `bkshading-deploy-relay.sh` (`remount_ro_checked`) | relay stop, scp + rename | the relay restore (`start` if it ran) |
 | `cam2-painter-ro-persist.sh` (issue 1405) | `enable` / `disable` | (enable-now) `systemctl start` |
 | `ndi-discovery.sh --cambox-apply` | the config/drop-in removal | `systemctl daemon-reload` |
+| `rt-kernel-plan.sh` printed runbook (print-only) | the step's apt / grub work, its rc kept | (nothing started) the work's own FAIL / OK line |
 
 - **deploy-fleet:** `close_ro_or_fail IP BOX LABEL CONSEQUENCE` runs the close over ssh and records
   `LABEL(root-rw: <holders>)` in FAILED (`LABEL(root-unverified: ssh rc N)` on a transport
   failure), so the final `FLEET NOT FULLY ALIGNED` line names the writer. Every terminal path
-  closes the window: a failed stop, a failed scp (camera-box is restarted only on a verified ro
-  root; scp writes in place, so the restart can still fail on a partial binary), and the normal
-  path.
+  closes the window: a failed stop, a failed swap, and the normal path.
+  - **The camera-box binary is swapped through a SIDECAR** (design addendum item 2, the frame-probe
+    swap's #1351 shape): scp to `/usr/local/bin/camera-box.new`, byte-verify THAT file against the
+    artifact (`BINARY_SHA`, hashed once per run), then `chmod 0755 && mv -f .new camera-box && sync`,
+    all inside the window. scp writes its target in place, so the old direct copy could leave half a
+    binary at the live path when a transfer died. Now a failed copy, a sidecar that does not
+    byte-match, or a failed rename removes the sidecar while the root is still writable, closes the
+    window the verified way and starts the OLD camera-box again (it is whole), with the box FAILED
+    (`scp-failed` / `sha-mismatch` / `swap-failed`). The final-path byte-verify after the start
+    stays: it proves the rename landed.
+  - The frame-probe swap keeps its own shape on purpose: its issue-1351 test pins "byte-verify reads
+    the final path, never the sidecar".
   - **The window spans several separate ssh calls from dev1** (rw + stop, scp, close). Two markers
     cover it (review rounds 1-2):
     - `OPEN_WINDOW` (`ip|box|label`) is set just BEFORE the rw remount. `close_ro_or_fail` clears it
@@ -116,7 +129,9 @@ Three dev1-side pure parsers:
       the advice "start it by hand" must never reach a deliberately dark (#892 EVENT) painter.
     - The EXIT trap is also reached on INT/TERM (`exit 130` / `exit 143`, e.g. a CI cancel). An open
       window is closed once more, verified, under `setsid -w`, so a second Ctrl-C cannot reach it
-      (sshpass forwards SIGINT to ssh). Nothing is started there: the binary may be half-copied.
+      (sshpass forwards SIGINT to ssh). Nothing is started there: the swap may be unfinished (the
+      live binary is the old or the new whole build; a partial copy can only be the `.new` sidecar,
+      which the next deploy overwrites).
     - A pending start is named: "the service on <box> may be STOPPED". It says "may", because the
       signal can land before the stop ran.
     - Before this, a cancel mid-swap left the cambox writable with camera-box stopped, silently.
@@ -163,14 +178,66 @@ remounted ro after the window.
   supervisor's live put-back. That put-back: `fuser -vm /`, stop the writer, `mount -o remount,ro /`
   until `findmnt` reads ro, then re-run.
 - `bkshading_relay_mode_apply` returns non-zero when any box failed (issue 1311 chose that; its
-  header used to say "always returns 0"). `rig-mode.sh` calls it bare under `set -euo pipefail`, so
-  a relay box left writable stops `rig-mode.sh test` / `event` at that line, loudly. The EVENT
-  contract and the TEST painter launch after it do not run; fix the box, then re-run the switch.
+  header used to say "always returns 0").
+
+### A failed relay step never stops a rig-mode switch half-way (design addendum item 1, the issue-868 pattern)
+
+Before issue 1407 a failed relay-box ro close was swallowed, so nothing depended on the apply's exit
+code. Once 1407 made it fail loud, `rig-mode.sh` still called the apply bare under
+`set -euo pipefail`. EVENT then aborted BEFORE `toggle_burn event`: the measurement burn stayed ON
+going into a production (the issue-868 class). TEST aborted before the painter steps.
+
+- **Both modes record it:** `local _relay_rc=0` + `bkshading_relay_mode_apply <mode> ... || _relay_rc=$?`
+  (the call line itself is unchanged up to the `||`, so the 1311/1371 anchors still find it), then
+  `bkshading_relay_mode_warn_continue <mode> "$_relay_rc"` prints ONE loud named WARNING, and every
+  remaining step runs.
+- **It is folded into the exit:**
+  - EVENT's PASS branch needs `_relay_rc` 0 too. `bkshading_relay_mode_result event` prints the
+    relay RESULT line before the 868 / contract lines (the contract line is now an `elif` on
+    `EVENT_ASSERT_PASS`, so a relay-only failure never reads as a contract failure), then `exit 1`.
+  - TEST checks it after the ACHIEVED lines: `bkshading_relay_mode_result test` + `exit 1`, and the
+    "WHOLE CHAIN verified" RESULT is never printed for that run.
+- **The boxes are named at the end:** the apply sets `BKSHADING_RELAY_MODE_FAILED`
+  (`label (ip) [writers: ...]`, `, `-joined) and `BKSHADING_RELAY_MODE_FAILED_BOXES` (`label (ip)`)
+  in the CALLER's shell (it is never run in a subshell). The WARNING and RESULT lines read the first.
+- **The owner's EVENT Discord confirmation says it:** `bkshading_relay_mode_discord_note` puts one
+  plain-Slovak ⚠️ line ON TOP of the issue-724 message (the issue-1371 restore-note shape: a temp
+  file moved over, else append), naming the boxes only, never process names. Without it the phone
+  would read a clean confirmation while the run exits 1.
+- All three helpers are reports: nothing for rc 0, always return 0.
+- **Any NEW step in a rig-mode switch whose failure must not strand the rig gets the same shape:**
+  record the rc, warn by name, continue, fold at the end. A bare call is right only for a step that
+  must stop the switch (a hard precondition before any mutation, like the #789 TEST-entry gate).
+- **Test it by RUNNING the mode bodies**, never only by text: `tests/python/test_rig_mode_relay_rc_1407.py`
+  sources the flow section of rig-mode.sh (it sits after the source guard, so a plain source never
+  defines `do_event` / `do_test`), stubs every other function to a step logger, and keeps the whole
+  relay chain real against fake read-only-root boxes behind a fake `sshpass` (TEST-NET addresses).
+  It asserts the step order after a failed relay step, the exit code, the named WARNING/RESULT and
+  the Discord top line, plus the healthy controls.
 
 Audit, left as they are:
-- `rt-kernel-plan.sh` only PRINTS supervisor commands for a reboot-class kernel step.
 - `setup-device.sh` `restore_root_mode` and `bkshading-provision-sbc.sh` are provisioning-time and
   already fail loud.
+
+### rt-kernel-plan.sh prints the shared close (design addendum item 3)
+
+`rt_kernel_step_command` only PRINTS the supervisor's commands for the reboot-class kernel step,
+but those commands ended `&& mount -o remount,ro /`: never verified, and skipped once an earlier
+`&&` step failed. Every mutating step (`install-lowlatency`, `grub-pin:saved`, `safe-grub-regen`,
+both `purge-superseded-generic` forms, `blocked:no-rt-candidate`) now prints ONE program from
+`_rt_window_program STEP WORK [WHY]`:
+- `bash -s <<'RT_KERNEL_STEP'` ... `RT_KERNEL_STEP`, so the close's `exit 1` ends that child shell,
+  never the root session the supervisor pasted it into;
+- `if mount -o remount,rw /; then WORK || _rt_rc=$?; else _rt_rc=$?; fi`;
+- the shared `ro_window_close_cmds` text (tag `issue 899`, the box names itself via `$(hostname)`),
+  run whatever WORK did;
+- then WORK's own `FAIL: [issue 899] the <step> step failed (rc=N)` + `exit N`, else an OK line.
+A note token keeps its `# SUPERVISOR:` / `# BLOCKED:` first line and the program follows it (the
+Rust `starts_with('#')` pin). A placeholder the supervisor edits (`<OLD_VER>`, `<Advanced...>`)
+sits inside the program. `tests/python/test_ro_window_sites_1407.py` runs every printed step on the
+fake box (with logged apt-get / update-grub / grub-set-default / mkdir stubs): rw open, work on rw,
+verified close, root ro; a failing work still closes; a busy root fails loud naming the writer; a
+pasted step never ends the session.
 
 ## Tests (Tier-0, no cargo, no rig)
 
@@ -201,7 +268,15 @@ Audit, left as they are:
     Comment lines are skipped; a continued line is one statement.
 - `test_ro_window_sites_1407.py`: every site run WHOLE on the fake box. deploy-fleet runs with a fake
   `sshpass` that executes each remote command on the box, with `/usr/local/bin/` mapped into the
-  box's own fs, so the real `sha256sum` and the artifact's `--version` work.
+  box's own fs, so the real `sha256sum` and the artifact's `--version` work. Its `mv`, `rm`, `chmod`
+  and `sha256sum` are LOGGED wrappers around the real tools (the fs prefix un-mapped in the log), and
+  the write tools refuse a write under the box fs while the root reads ro, so the sidecar swap's
+  order (scp `.new`, verify `.new`, `mv -f`, close, start) is read from the log. The fake scp has
+  `FAKE_SCP_PARTIAL` (half the bytes, exit 1) and `FAKE_SCP_CORRUPT` (wrong bytes, exit 0).
+- **The Rust deploy-fleet harness runs the remote text on the CI HOST itself**
+  (`tests/harness_deploy_fleet.rs`), so it stubs `chmod` / `mv` / `rm` to a no-op for any
+  `/usr/local/bin/` argument (pass-through otherwise): the sidecar rename must never touch the
+  host's own `/usr/local/bin`.
 - **A harness that RUNS the close needs a `findmnt` stub.** Without one, the real findmnt reads the
   CI runner's own rw root and the close fails. Three Rust deploy-fleet harnesses and the relay-mode
   python test got a stub (`ro,relatime`) for that reason.
