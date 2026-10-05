@@ -191,6 +191,13 @@ def _server_env(host, windows, logs):
                                            lambda pid: "2026-09-28T01:02:03" if pid else ""))
         st.enter_context(mock.patch.object(bss, "DEFAULT_VB_MATRIX_INSTALL_DIRS",
                                            (str(host / "vbm"),)))
+        # issue 1406: the obs_handles leaves (a live process snapshot / the host's own /proc).
+        st.enter_context(mock.patch.object(bss, "windows_obs_handles", lambda: dict(
+            obs_handles="5790", obs_handles_pid="5748", obs_handles_start="1791197100",
+            obs_handles_limit="")))
+        st.enter_context(mock.patch.object(bss.bsg, "linux_obs_handles", lambda: dict(
+            obs_handles="812", obs_handles_pid="4242", obs_handles_start="1791190000",
+            obs_handles_limit="1024")))
         st.enter_context(mock.patch.object(bss, "log", logs.append))
         env = {k: v for k, v in os.environ.items() if k not in ("AUDIO_REF_BAND_SRC",)}
         env["BUNDLE_STATE_TIMING"] = "1"

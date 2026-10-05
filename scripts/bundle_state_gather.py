@@ -39,7 +39,8 @@ builder -- `build_bundle_state` over the served key order `BUNDLE_STATE_KEYS` --
   bundle_state_vban       the obs-vban pacer loss facet
   bundle_state_av_offset  the av-sync dock offset trend, live age, quality + quality age
   bundle_state_host       install scans, the NDI latency CSV, tasklist / VB-Matrix, the AHK
-                          readers, record-dir stats + free-space verdict, build sha, byte sha256
+                          readers, record-dir stats + free-space verdict, build sha, byte sha256,
+                          the OBS handle count (SystemProcessInformation parser, Linux /proc)
 
 Every one of them ships with the server: the deployed tree is declared ONCE in
 scripts/lib/bundle-state-files.txt (bash twin scripts/lib/bundle-state-files.sh, iterated by
@@ -95,6 +96,7 @@ from bundle_state_host import (  # noqa: E402 -- after the sibling path setup ab
     DISTROAV_SCAN_ROOTS,
     OBS_LIVE_MIN_MEM_KB,
     OBS_PROCESS_NAME_RE,
+    SPI_OFFSETS,
     VB_MATRIX_EXE_RE,
     VB_MATRIX_PROCESS_NAME_RE,
     ahk_app1_run,
@@ -102,13 +104,20 @@ from bundle_state_host import (  # noqa: E402 -- after the sibling path setup ab
     ahk_dead_config_present,
     component_sha256,
     distroav_dll_paths,
+    filetime_to_epoch,
     genlock_build_sha_from_file,
+    linux_obs_handles,
     ndi_input_latency_csv,
+    obs_handles_facet,
     obs_installs_under,
     obs_process_count_from_listing,
+    proc_btime,
+    proc_nofile_soft_limit,
+    proc_stat_start_ticks,
     record_dir_stats,
     recordings_free_line,
     recordings_free_verdict,
+    system_processes_from_spi,
     tasklist_mem_kb,
     tasklist_row_is_live_obs,
     vb_matrix_install_present_under,
@@ -174,6 +183,7 @@ __all__ = [
     "DISTROAV_SCAN_ROOTS",
     "OBS_LIVE_MIN_MEM_KB",
     "OBS_PROCESS_NAME_RE",
+    "SPI_OFFSETS",
     "VB_MATRIX_EXE_RE",
     "VB_MATRIX_PROCESS_NAME_RE",
     "ahk_app1_run",
@@ -181,13 +191,20 @@ __all__ = [
     "ahk_dead_config_present",
     "component_sha256",
     "distroav_dll_paths",
+    "filetime_to_epoch",
     "genlock_build_sha_from_file",
+    "linux_obs_handles",
     "ndi_input_latency_csv",
+    "obs_handles_facet",
     "obs_installs_under",
     "obs_process_count_from_listing",
+    "proc_btime",
+    "proc_nofile_soft_limit",
+    "proc_stat_start_ticks",
     "record_dir_stats",
     "recordings_free_line",
     "recordings_free_verdict",
+    "system_processes_from_spi",
     "tasklist_mem_kb",
     "tasklist_row_is_live_obs",
     "vb_matrix_install_present_under",
@@ -333,6 +350,14 @@ BUNDLE_STATE_KEYS = (
     # the positive "OBS is still logging now" proof the dev1 audio-mixer STALLED verdict needs.
     # "0" is a reading and is KEPT; no timestamped line omits it -> no proof downstream.
     "obs_log_head_age_s",
+    # issue 1406 -- the OBS process's handle count (Windows, from NtQuerySystemInformation) or
+    # open-fd count (Linux /proc), its pid + start epoch (a restart resets the dev1 obs-handles
+    # watchdog's baseline) and the Linux soft open-files limit. Omitted when no OBS process is
+    # readable -> UNKNOWN downstream, never a false 0.
+    "obs_handles",
+    "obs_handles_pid",
+    "obs_handles_start",
+    "obs_handles_limit",
 )
 _BUNDLE_STATE_KEY_SET = frozenset(BUNDLE_STATE_KEYS)
 

@@ -2,8 +2,9 @@
 """The Windows-only OBS-box identity readers of the :8899 bundle-state server, with their
 process-lifetime caches: who owns TCP :4455 (a native netstat PID probe + a PID-keyed CIM resolve),
 the ONE native tasklist read and its OBS-process / VB-Matrix consumers, the VB-Matrix start time
-(a PID-keyed CIM read), the NL_STARTUP.ahk text, and the Start-Menu shortcut + NDI runtime version
-(file-stat-keyed PowerShell reads).
+(a PID-keyed CIM read), the NL_STARTUP.ahk text, the Start-Menu shortcut + NDI runtime version
+(file-stat-keyed PowerShell reads), and the OBS handle count (issue 1406: one ctypes
+NtQuerySystemInformation process snapshot, uncached -- the count is the reading).
 
 Issue 1386 slice D: moved verbatim out of scripts/bundle-state-server.py. The server keeps the
 orchestration: its `_windows_*_facets` helpers call these readers through the SERVER's own module
@@ -20,6 +21,7 @@ cache an empty resolve, always clear on a failure) is written up in
 from __future__ import annotations
 
 import csv
+import ctypes
 import io
 import os
 import subprocess
@@ -478,3 +480,60 @@ def resolve_shortcut(lnk_path):
             _shortcut_cache["target"] = target
             _shortcut_cache["workdir"] = workdir
     return target, workdir
+
+
+# Issue 1406 -- the OBS handle count. ONE NtQuerySystemInformation(SystemProcessInformation) call
+# returns every process's HandleCount, pid and create time WITHOUT opening any process: the
+# non-elevated BundleStateServer task is denied an open of the elevated obs64 (issue 1067, the
+# Get-Process .Path access-denied), which GetProcessHandleCount would need, and a CIM read costs a
+# PowerShell cold start per request while the count cannot be cached. No subprocess, a few ms.
+_SYSTEM_PROCESS_INFORMATION = 5
+_STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
+_SPI_FIRST_BYTES = 1 << 20      # a rig box lists a few hundred processes (~0.5 MB)
+_SPI_MAX_BYTES = 64 << 20
+
+
+def system_process_information():
+    """The raw SystemProcessInformation snapshot as `(bytes, base address)` -- the image-name
+    pointers inside are absolute, so the parser needs the address the buffer lived at. None (with a
+    WARNING) when ntdll is unavailable (any non-Windows host), the interpreter is not 64-bit (the
+    parser reads the x64 layout), or the call fails. Grows the buffer while the kernel answers
+    STATUS_INFO_LENGTH_MISMATCH (a process list that grew between the size guess and the call)."""
+    try:
+        if ctypes.sizeof(ctypes.c_void_p) != 8:
+            log("WARNING: obs_handles needs a 64-bit Python (the x64 SystemProcessInformation layout)")
+            return None
+        query = ctypes.WinDLL("ntdll").NtQuerySystemInformation
+    except (AttributeError, OSError) as e:
+        log(f"WARNING: could not load NtQuerySystemInformation for obs_handles: {e}")
+        return None
+    query.restype = ctypes.c_uint32
+    query.argtypes = [ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
+                      ctypes.POINTER(ctypes.c_uint32)]
+    size = _SPI_FIRST_BYTES
+    while size <= _SPI_MAX_BYTES:
+        buf = ctypes.create_string_buffer(size)
+        needed = ctypes.c_uint32(0)
+        status = query(_SYSTEM_PROCESS_INFORMATION, buf, size, ctypes.byref(needed))
+        if status == 0:
+            return buf.raw, ctypes.addressof(buf)
+        if status != _STATUS_INFO_LENGTH_MISMATCH:
+            log(f"WARNING: NtQuerySystemInformation(SystemProcessInformation) failed: 0x{status:08X}")
+            return None
+        size = max(size * 2, needed.value + (64 << 10))
+    log(f"WARNING: the SystemProcessInformation snapshot exceeds {_SPI_MAX_BYTES} bytes")
+    return None
+
+
+def windows_obs_handles():
+    """The Windows `obs_handles*` facet (bsg.obs_handles_facet over the process snapshot): the
+    obs64 handle count, pid and start epoch. {} when the snapshot cannot be taken or parsed, or no
+    live OBS process exists -- the facet is then omitted (UNKNOWN downstream), never a 0."""
+    snap = system_process_information()
+    if snap is None:
+        return {}
+    procs = bsg.system_processes_from_spi(*snap)
+    if procs is None:
+        log("WARNING: could not parse the SystemProcessInformation snapshot; obs_handles omitted")
+        return {}
+    return bsg.obs_handles_facet(procs)

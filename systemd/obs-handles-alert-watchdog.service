@@ -1,0 +1,17 @@
+[Unit]
+# OBS handle-leak alert (issue 1406), DEV1-SIDE. ONE fetch -> decide -> alert pass. Reads the
+# `obs_handles*` facet bundle_state_gather exposes on :8899/bundle-state.json (the OBS process's
+# handle count on Windows, its open-fd count on Linux) and pages when it grows by >= 5,000/h for 3
+# consecutive passes or crosses its ceiling -- the 5.10.2026 stream obs64 held 4,066,772 handles
+# after ~22 h (an Audio Monitor output on an absent device), ~100 h from the 16.7M per-process cap.
+# DETECTION ONLY -- no auto-action. SAME dev1 topology as audio-mixer-alert-watchdog.service.
+Description=camera-box OBS handle-leak alert (issue 1406) — one fetch/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/obs-handles-alert-watchdog.sh
+# Per pass: up to 3 boxes × one :8899 curl (OBS_HANDLES_CURL_TIMEOUT, default 10 s each) + the
+# resolume home probe + a local python decision. Generous ceiling so a slow link never hangs the timer.
+TimeoutStartSec=60
