@@ -65,6 +65,20 @@ script gained text that a negated `!p.contains(...)` on the output could have ca
 a heredoc builder, also grep the tests that call it for negated output assertions. Run the one or two
 real test files that drive it with plain rustc (the stub-rlib recipe below).
 
+**A new line in an EMBEDDED builder can steal a `.find()` anchor whose count only goes N→N+1**
+(issue 1405). The persist emitter's ro-verify FAIL line read `systemctl is-active
+cam2-painter.service`. EVENT's `painter_stop_remote` embeds that text at step 2.6, so it became the
+FIRST `is-active cam2-painter` in the rendered script. `harness_rig_mode_fb0_blank_1176.rs` finds
+the step-5 "painter confirmed stopped" check by exactly that text and orders it before the fb0 `dd`.
+The count went 2→3, so no 1→2 sweep flags it, and every test stayed green. But a deleted step-5
+check would then pass too (a fresh-context reviewer ran that mutant). Two rules:
+- Before adding a command to a builder that another script embeds, find every `.find(...)` /
+  `.contains(...)` over the EMBEDDING script's rendered output for that command's text, and check
+  your copy cannot become the first match. Spell the new read another way instead
+  (`systemctl show -p ActiveState --value` for the state).
+- Prove an ordering anchor still bites with the mutant: delete the real check from the RENDERED
+  text and confirm the anchor's `find` returns -1.
+
 ## Adding a STEP between the merge call and `exit "$GATE"`: the occurrence-count sweep is BLIND to the 703 byte-DISTANCE window too (#1265)
 
 Sibling blind-spot to the #1263 negated-region one above, hit live on #1265. `tests/harness_e2e_execute_verdict_703.rs` does NOT anchor on a literal — it slices a FIXED BYTE WINDOW from the
