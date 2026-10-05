@@ -78,7 +78,7 @@ cam2_painter_persist_state_cmds() {
     action="enable"
     want="enabled"
     rig_mode="test"
-    refusal="cam2-painter.service is NOT started"
+    refusal="this handoff does NOT start cam2-painter.service"
     ;;
   disable)
     action="disable"
@@ -113,16 +113,17 @@ _pss_ro_err="\$(mount -o remount,ro / 2>&1)" || _pss_ro_rc=\$?;
 _pss_opts="\$(findmnt -no OPTIONS / 2>/dev/null || awk '\$2=="/"{print \$4; exit}' /proc/mounts 2>/dev/null || true)";
 _pss_root="\$(ro_root_mount_mode "\$_pss_opts")";
 if [ "\$_pss_root" != "ro" ]; then
-  echo "FAIL: [#1405] cam2's root is NOT read-only after the remount-rw window ('findmnt -no OPTIONS /' = '\$_pss_opts' -> \$_pss_root; 'mount -o remount,ro /' rc=\$_pss_ro_rc\${_pss_ro_err:+: \$_pss_ro_err}). A cambox must never run on a writable root, so $refusal. cam2-painter.service is-enabled now: '\$(systemctl is-enabled cam2-painter.service 2>/dev/null || true)'." >&2;
+  echo "FAIL: [#1405] cam2's root is NOT read-only after the remount-rw window ('findmnt -no OPTIONS /' = '\$_pss_opts' -> \$_pss_root; 'mount -o remount,ro /' rc=\$_pss_ro_rc\${_pss_ro_err:+: \$_pss_ro_err}). A cambox must never run on a writable root, so $refusal. cam2-painter.service is-enabled now: '\$(systemctl is-enabled cam2-painter.service 2>/dev/null || true)', is-active now: '\$(systemctl is-active cam2-painter.service 2>/dev/null || true)'." >&2;
   echo "FAIL: [#1405] processes with a file open for WRITING on / ('fuser -vm /', ACCESS F):" >&2;
 CMDS
   # (2b) the holders, in the failure branch only. The writer filter keeps the header and every line
   #      whose ACCESS field (the one right after the PID) carries F: 'fuser -vm /' lists PID 1 and
-  #      the kernel threads first, so a cut at N lines hides a writer with a high PID. No header
-  #      line = fuser printed no listing (missing, failed): say so, never "none". Literal heredoc:
-  #      every $ is awk's.
+  #      the kernel threads first, so a cut at N lines hides a writer with a high PID. No writer
+  #      and no header line = fuser printed no listing (missing, failed): say so, never "none". A
+  #      writer line is printed whatever the header (a localized one is not matched). Literal
+  #      heredoc: every $ is awk's.
   cat <<'CMDS'
-  { fuser -vm / 2>&1 || true; } | awk '/USER/ && /PID/ && /ACCESS/ { print; h = 1; next } { for (i = 1; i < NF; i++) if ($i ~ /^[0-9]+$/) { if ($(i + 1) ~ /F/) { print; n++ } break } } END { if (!h) print "  (fuser printed no listing -- is psmisc installed? check by hand: fuser -vm /)"; else if (n == 0) print "  (none: no process holds a file open for writing on /)" }' >&2 || true;
+  { fuser -vm / 2>&1 || true; } | awk '/USER/ && /PID/ && /ACCESS/ { print; h = 1; next } { for (i = 1; i < NF; i++) if ($i ~ /^[0-9]+$/) { if ($(i + 1) ~ /F/) { print; n++ } break } } END { if (n == 0) print (h ? "  (none: no process holds a file open for writing on /)" : "  (fuser printed no listing -- is psmisc installed? check by hand: fuser -vm /)") }' >&2 || true;
   echo "FAIL: [#1405] holders of deleted-but-open files on / (lsof +L1, else the /proc fd scan):" >&2;
   {
 CMDS

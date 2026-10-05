@@ -19,7 +19,8 @@
 # durable, supervised mechanism the "must-stay-alive" rule needs.
 #
 # This builder is the HANDOFF: rig-mode.sh test keeps its transient painter ONLY for the
-# at-mode-set chain verification, then calls this to (1) stop the transient painter (free
+# at-mode-set chain verification, then calls this to (0) disarm the cam2-painter dead-man (issue
+# 1405, step H1b: do_test re-arms it after a good handoff), (1) stop the transient painter (free
 # fb0/DRM so the unit does not race it, #440), (2) `systemctl enable cam2-painter.service`
 # inside the remount-rw window (enable -> survive reboot + re-arm after any EVENT #892 disable),
 # verify cam2's root reads read-only again, and only then `systemctl start` it (issue 1405: after an

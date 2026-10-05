@@ -98,9 +98,10 @@ the TEST handoff (`enable-now`) and the EVENT disable (`disable`).
   `findmnt -no OPTIONS /` (with the `/proc/mounts` fallback) through the shared ro-root canon's
   `ro_root_mount_mode`. Its definition is emitted INTO the remote text (`declare -f`, lazy-sourced
   from `scripts/lib/ro-root.sh`).
-  - `rw` or `unknown` FAILS LOUD (exit 1), and the painter is never started. `unknown` is never
-    assumed `ro`. The message names the findmnt reading, the mount error and the current
-    `is-enabled` state.
+  - `rw` or `unknown` FAILS LOUD (exit 1), and the emitter never starts the painter. `unknown` is
+    never assumed `ro`. The message names the findmnt reading, the mount error and the current
+    `is-enabled` and `is-active` states (it reads whether the painter runs, never asserts it: an
+    earlier dead-man fire can have started it).
   - **It names the HOLDERS, two ways.** First, the `fuser -vm /` lines whose ACCESS field carries
     `F` (a file open for writing). fuser lists PID 1 and the kernel threads first, so a `head -n
     40` cut a high-PID writer off (review round 1). Second, the deleted-but-open files from the
@@ -131,9 +132,10 @@ the TEST handoff (`enable-now`) and the EVENT disable (`disable`).
 - **The TEST handoff disarms the dead-man too (step H1b), before the transient painter stop.**
   `rig-mode.sh test` arms it only after a GOOD handoff, and only EVENT disarms it otherwise. On a
   second TEST whose window cannot close read-only, the first TEST's dead-man would start the
-  painter on the writable root within ~5 min, making the `cam2-painter.service is NOT started`
-  failure line untrue (review round 2). It could also fire between the transient stop and the
-  start. A failed handoff therefore leaves cam2 dark AND disarmed, which is what its FAIL line says;
+  painter on the writable root within ~5 min, after the FAIL line said the handoff does not start
+  it (review round 2). It could also fire between the transient stop and the start. A failed
+  handoff therefore leaves cam2 disarmed, normally dark, and its FAIL line reads `is-active`
+  rather than asserting it (a fire just before the disarm can still have started the painter);
   the next good `rig-mode.sh test` re-arms it.
 - **Every emitted statement ends with `;`.** The callers embed the text through `$(...)`, which
   strips its trailing newline (the CLAUDE.md #744/#746 gotcha).
@@ -163,7 +165,9 @@ the TEST handoff (`enable-now`) and the EVENT disable (`disable`).
   cam2-painter.service` then a swallowed ro remount), `scripts/lib/bkshading-relay-mode.sh`,
   `scripts/dantesync-fleet-upgrade.sh` and `scripts/lib/dantesync-rollback.sh` close the window
   with `mount -o remount,ro / ... || true` and never read the mount state. A shared "close ro,
-  verify, name the holders" emitter would serve them all (a supervisor follow-up, cross-cutting).
+  verify, name the holders" emitter would serve them all. It is cross-cutting (5 sites, 4
+  subsystems), so the lane reported it to the supervisor as a `followup_candidates` entry in its
+  issue-1405 LANE-RETURN; the ticket number goes here once the supervisor files it.
   It should also absorb this emitter's writer filter: `bkshading-deploy-relay.sh`
   `remount_ro_checked` still prints `fuser -vm / | head -n 40`, the cut-off fixed here. (The
   filter cannot live in `ro-root.sh`, which must stay free of grep/awk/sed.)
