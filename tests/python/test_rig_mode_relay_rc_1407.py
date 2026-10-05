@@ -49,7 +49,8 @@ sys.exit(subprocess.run(["/bin/bash", "-c", sys.argv[-1]], env=env).returncode)
 '''
 
 # The functions that stay REAL. Every other function the script defines becomes a step-logging stub.
-_KEEP = "do_event|do_test|bkshading_relay_*|_bkshading_relay_*|ro_window_*|ro_root_*"
+# event_mode_discord_note_add is the one shared Discord-note writer the relay note calls.
+_KEEP = "do_event|do_test|bkshading_relay_*|_bkshading_relay_*|ro_window_*|ro_root_*|event_mode_discord_note_add"
 
 
 def _flow_text():
