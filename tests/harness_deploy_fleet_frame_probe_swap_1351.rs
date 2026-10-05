@@ -200,23 +200,29 @@ fn atomic_rename_follows_the_scp() {
 }
 
 #[test]
-fn byte_verify_reads_the_final_path_not_the_sidecar() {
+fn byte_verify_reads_the_final_path_after_the_rename() {
     // deploy-from-clean-tree Layer 3 — byte-verify is the real gate and must read the FINAL path
-    // (a failed rename leaves stale/absent bytes there), never the sidecar.
+    // AFTER the rename (a failed rename leaves stale/absent bytes there). issue 1407, ROZHODNUTÉ
+    // 5996845165 (Q2): a sidecar byte-verify is ALSO allowed, but only BEFORE the rename (a corrupt
+    // copy then never goes live); it never replaces the final-path read, which stays the gate.
     let r = run_swap(false);
+    let mv_i = idx(
+        &r.log,
+        "mv -f /usr/local/bin/frame-probe.new /usr/local/bin/frame-probe",
+    );
     assert!(
-        r.log
+        r.log[mv_i + 1..]
             .iter()
             .any(|l| l.contains("sha256sum /usr/local/bin/frame-probe 2>/dev/null")),
-        "issue 1351: byte-verify must `sha256sum /usr/local/bin/frame-probe` (the FINAL path); \
-         log:\n{}",
+        "issue 1351: byte-verify must `sha256sum /usr/local/bin/frame-probe` (the FINAL path) \
+         AFTER the rename; log:\n{}",
         r.log.join("\n")
     );
     assert!(
-        !r.log
+        !r.log[mv_i..]
             .iter()
             .any(|l| l.contains("sha256sum /usr/local/bin/frame-probe.new")),
-        "issue 1351: byte-verify must NOT read the sidecar `.new`; log:\n{}",
+        "issue 1407: a sidecar `.new` read is allowed only BEFORE the rename; log:\n{}",
         r.log.join("\n")
     );
     assert!(
