@@ -170,6 +170,14 @@ static bool st_start(void *data)
 	st->audio_sample_rate = audio_output_get_sample_rate(audio);
 	st->audio_channels = audio_output_get_channels(audio);
 
+	/* issue 1381: size and write both decode jobs' copy buffers here, on the starting thread, so the
+	 * video-output thread's first frame into each slot neither allocates nor takes a page fault. */
+	if (!st->cb_decode_mailbox.prepare_slots(
+		    [st](st_video_decode_job &job) { st_video_decode_job_prepare(st, job); })) {
+		blog(LOG_ERROR, "av-sync-dock: the video decode worker is still running, cannot size its buffers");
+		return false;
+	}
+
 	/* issue 1367: the QR decode runs on this worker, never on libobs's video-output thread (a
 	 * decode there made OBS skip 28 % of output frames on the cg OBS). Started before data capture
 	 * so the first frame already has somewhere to go. */

@@ -150,10 +150,17 @@ static camerabox::CbPlaneView st_plane_view(const struct sync_test_output *st, c
 /* issue 1367 (producer, libobs's video-output thread): sample norihiro's whole-frame QR grid --
  * every qr_step-th pixel of every qr_step-th row, the sampling st_raw_video_qrcode_decode used to do
  * straight into quirc's buffer -- into the decode job, at the size quirc_resize() got in st_start. */
+/* issue 1381: the bytes st_norihiro_gather_grid copies per frame -- also what
+ * st_video_decode_job_prepare sizes each slot's grid to. */
+static size_t st_norihiro_grid_bytes(const struct sync_test_output *st)
+{
+	return (size_t)st->qr_grid_w * st->qr_grid_h;
+}
+
 static void st_norihiro_gather_grid(const struct sync_test_output *st, const struct video_data *frame,
 				    std::vector<uint8_t> &dst)
 {
-	const size_t need = (size_t)st->qr_grid_w * st->qr_grid_h;
+	const size_t need = st_norihiro_grid_bytes(st);
 	if (dst.size() < need)
 		dst.resize(need);
 	camerabox::cb_copy_step_grid(st_plane_view(st, frame), st->qr_step, st->qr_grid_w, st->qr_grid_h,
@@ -480,6 +487,15 @@ static bool st_raw_video_camera_box_decode(struct sync_test_output *st, const ui
 	return found_any;
 }
 
+/* issue 1381: the bytes st_cb_gather_top_band copies per frame for `plan` (0 when the plan has no
+ * band) -- also what st_video_decode_job_prepare sizes each slot's band to. */
+static size_t st_cb_top_band_bytes(const struct sync_test_output *st, const camerabox::CbTopBandPlan &plan)
+{
+	if (plan.band_h == 0 || plan.dst_w == 0 || plan.dst_h == 0)
+		return 0;
+	return (size_t)st->video_width * plan.band_h;
+}
+
 /* issue 1367 (producer, libobs's video-output thread): gather the TOP band (rows 0..band_h) into a
  * tight full-res luma buffer, honoring the pixel format's stride / offset / intensity extractor --
  * the gather st_raw_video_camera_box_decode used to do inline, now into the decode job. */
@@ -487,13 +503,28 @@ static void st_cb_gather_top_band(const struct sync_test_output *st, const struc
 				  std::vector<uint8_t> &dst)
 {
 	camerabox::CbTopBandPlan plan = camerabox::cb_top_band_decode_plan(st->video_width, st->video_height);
-	if (plan.band_h == 0 || plan.dst_w == 0 || plan.dst_h == 0)
+	const size_t need = st_cb_top_band_bytes(st, plan);
+	if (need == 0)
 		return;
 
-	const size_t need = (size_t)st->video_width * plan.band_h;
 	if (dst.size() < need)
 		dst.resize(need);
 	camerabox::cb_copy_top_band(st_plane_view(st, frame), st->video_width, plan.band_h, dst.data());
+}
+
+/* issue 1381 (the starting thread, through the mailbox's prepare_slots in st_start): size AND write
+ * one slot's copy buffers for this output's geometry -- the top band, and norihiro's grid, which
+ * st_raw_video fills on every frame until camera-box mode latches -- so the video-output thread's
+ * first frame into the slot neither allocates nor takes a page fault on these pages (the band alone
+ * is 1.5 MB at 1080p, 6 MB at 4K). assign() writes every byte, also on a restart where the buffer
+ * already has the size. The marker patches are left to grow on use: their size follows the circle
+ * radius of a decoded PHONE QR (norihiro mode, never the camera-box rig path), and a worst-case
+ * pre-size (a QR as tall as the frame) would hold ~9 MB per 4K output for a mode the rig never runs. */
+void st_video_decode_job_prepare(const struct sync_test_output *st, st_video_decode_job &job)
+{
+	const camerabox::CbTopBandPlan plan = camerabox::cb_top_band_decode_plan(st->video_width, st->video_height);
+	job.band.assign(st_cb_top_band_bytes(st, plan), 0);
+	job.grid.assign(st_norihiro_grid_bytes(st), 0);
 }
 
 /* issue 1367: libobs calls this on its ONE video-output thread, shared by every raw output on the
