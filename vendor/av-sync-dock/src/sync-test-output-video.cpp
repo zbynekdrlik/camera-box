@@ -401,6 +401,25 @@ static void video_marker_found(struct sync_test_output *st, uint64_t timestamp, 
 		sync_index_found(st, data.qr_data.index, data.timestamp, true, data.qr_data.index_max);
 }
 
+/* issue 1381: the rows of the top band for this output's geometry (0 when the plan has no band).
+ * The ONE row count: the pre-fault's size, the fill's buffer size, the rows the fill copies and the
+ * rows the decode worker reads all come from it, so none of them can be handed a different geometry
+ * (a copy or a read of more rows than the buffer holds would overrun it). */
+static uint32_t st_cb_top_band_rows(const struct sync_test_output *st)
+{
+	const camerabox::CbTopBandPlan plan = camerabox::cb_top_band_decode_plan(st->video_width, st->video_height);
+	if (plan.band_h == 0 || plan.dst_w == 0 || plan.dst_h == 0)
+		return 0;
+	return plan.band_h;
+}
+
+/* issue 1381: the bytes of the top band st_cb_gather_top_band copies per frame -- also what
+ * st_video_decode_job_prepare sizes each slot's band to, and the least the decode worker reads. */
+static size_t st_cb_top_band_bytes(const struct sync_test_output *st)
+{
+	return (size_t)st->video_width * st_cb_top_band_rows(st);
+}
+
 /* #398 fix (video index 98% missed): norihiro's whole-frame decode subsamples the WHOLE frame by
  * `qr_step` (÷8 at a 4K program output) with NEAREST sampling, shrinking each ~700 px dual-QR half to
  * ~87 px so quirc misses ~98 % of frames and the ring is almost never populated. This gives quirc a
@@ -411,14 +430,16 @@ static void video_marker_found(struct sync_test_output *st, uint64_t timestamp, 
  * true if any camera-box QR decoded (and records it into the ring).
  *
  * issue 1367: this runs on the decode worker thread. `src` is the top band st_cb_gather_top_band
- * copied on libobs's video-output thread (video_width x plan.band_h luma), `timestamp` that frame's
- * own timestamp. */
+ * copied on libobs's video-output thread (video_width x st_cb_top_band_rows luma; the caller checks
+ * the band holds that many bytes), `timestamp` that frame's own timestamp. The plan here only sets
+ * quirc's geometry; the rows read come from st_cb_top_band_rows (issue 1381 review round 4). */
 static bool st_raw_video_camera_box_decode(struct sync_test_output *st, const uint8_t *src, uint64_t timestamp)
 {
 	st->cb_video_frames_seen.fetch_add(1, std::memory_order_relaxed);
 
 	camerabox::CbTopBandPlan plan = camerabox::cb_top_band_decode_plan(st->video_width, st->video_height);
-	if (plan.band_h == 0 || plan.dst_w == 0 || plan.dst_h == 0)
+	const uint32_t rows = st_cb_top_band_rows(st);
+	if (rows == 0 || plan.dst_w == 0 || plan.dst_h == 0)
 		return false;
 
 	if (!st->cb_qr)
@@ -444,8 +465,7 @@ static bool st_raw_video_camera_box_decode(struct sync_test_output *st, const ui
 	for (int pass = 0; pass < 2 && !found_any; pass++) {
 		int w = 0, h = 0;
 		uint8_t *qbuf = quirc_begin(st->cb_qr, &w, &h);
-		camerabox::cb_box_downscale_luma(src, st->video_width, plan.band_h, qbuf, (uint32_t)w,
-		                                 (uint32_t)h);
+		camerabox::cb_box_downscale_luma(src, st->video_width, rows, qbuf, (uint32_t)w, (uint32_t)h);
 		if (pass == 1)
 			camerabox::cb_binarize_otsu(qbuf, (size_t)w * (size_t)h);
 		quirc_end(st->cb_qr);
@@ -474,7 +494,7 @@ static bool st_raw_video_camera_box_decode(struct sync_test_output *st, const ui
 				st->qr_corners[j].x =
 					(uint32_t)((uint64_t)code.corners[j].x * st->video_width / (w > 0 ? w : 1));
 				st->qr_corners[j].y =
-					(uint32_t)((uint64_t)code.corners[j].y * plan.band_h / (h > 0 ? h : 1));
+					(uint32_t)((uint64_t)code.corners[j].y * rows / (h > 0 ? h : 1));
 			}
 			signal_qrcode_found(st->context, timestamp - st->start_ts, st->qr_corners);
 			cb_video_qr_record(st, cb.frame_id, timestamp - st->start_ts);
@@ -485,25 +505,6 @@ static bool st_raw_video_camera_box_decode(struct sync_test_output *st, const ui
 	if (found_any)
 		st->cb_video_frames_decoded.fetch_add(1, std::memory_order_relaxed);
 	return found_any;
-}
-
-/* issue 1381: the rows of the top band st_cb_gather_top_band copies per frame for this output's
- * geometry (0 when the plan has no band). The ONE place the plan is derived: the fill's buffer
- * size, the rows it copies and the pre-fault's size all come from it, so none of them can be handed
- * a different geometry (a copy of more rows than the buffer holds would overrun it). */
-static uint32_t st_cb_top_band_rows(const struct sync_test_output *st)
-{
-	const camerabox::CbTopBandPlan plan = camerabox::cb_top_band_decode_plan(st->video_width, st->video_height);
-	if (plan.band_h == 0 || plan.dst_w == 0 || plan.dst_h == 0)
-		return 0;
-	return plan.band_h;
-}
-
-/* issue 1381: the bytes st_cb_gather_top_band copies per frame -- also what
- * st_video_decode_job_prepare sizes each slot's band to. */
-static size_t st_cb_top_band_bytes(const struct sync_test_output *st)
-{
-	return (size_t)st->video_width * st_cb_top_band_rows(st);
 }
 
 /* issue 1367 (producer, libobs's video-output thread): gather the TOP band (rows 0..band_h) into a
@@ -594,7 +595,10 @@ void st_video_decode_job_run(struct sync_test_output *st, st_video_decode_job &j
 	// is the SOLE video-QR source (norihiro's ÷qr_step whole-frame pass misses our big top QR), so
 	// skip norihiro's decode + marker-window logic — those are kept only for the phone-based method
 	// when NOT in camera-box mode.
-	st_raw_video_camera_box_decode(st, job.band.data(), job.timestamp);
+	/* issue 1381 review round 4: decode only a band holding every byte the decoder reads (the grid
+	 * below is guarded the same way). */
+	if (job.band.size() >= st_cb_top_band_bytes(st))
+		st_raw_video_camera_box_decode(st, job.band.data(), job.timestamp);
 	bool cb_active;
 	{
 		std::unique_lock<std::mutex> lock(st->mutex);

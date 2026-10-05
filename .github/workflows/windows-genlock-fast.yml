@@ -817,6 +817,10 @@ jobs:
           # The top band's plan is derived ONCE (st_cb_top_band_rows): the byte size, the fill's buffer
           # size and the rows it copies all come from it; a copy of more rows than the buffer holds
           # would overrun it on the video-output thread.
+          $rowsBody = Get-DockBody $output 'static uint32_t st_cb_top_band_rows(const struct sync_test_output *st)'
+          foreach ($need in @('const camerabox::CbTopBandPlan plan = camerabox::cb_top_band_decode_plan(st->video_width, st->video_height);', 'return plan.band_h;')) {
+            if (-not $rowsBody.Contains($need)) { Write-Error "dock output sources: st_cb_top_band_rows is no longer the output geometry's plan rows: '$need' (issue 1381)"; exit 1 }
+          }
           $bytesBody = Get-DockBody $output 'static size_t st_cb_top_band_bytes(const struct sync_test_output *st)'
           if (-not $bytesBody.Contains('return (size_t)st->video_width * st_cb_top_band_rows(st);')) {
             Write-Error "dock output sources: the top band's byte size is no longer video_width x st_cb_top_band_rows (issue 1381)"; exit 1
@@ -828,6 +832,16 @@ jobs:
           }
           if ((-not $fillGrid.Contains('const size_t need = st_norihiro_grid_bytes(st);')) -or $fillBand.Contains('cb_top_band_decode_plan(') -or $fillGrid.Contains('cb_top_band_decode_plan(')) {
             Write-Error "dock output sources: a per-frame fill no longer sizes with the helper the pre-fault uses, or derives a top-band plan of its own (issue 1381)"; exit 1
+          }
+          # Review round 4: the decode worker reads the same row count, and only from a band that holds
+          # every byte it reads (the grid decode is guarded the same way).
+          $decoder = Get-DockBody $output 'static bool st_raw_video_camera_box_decode(struct sync_test_output *st, const uint8_t *src, uint64_t timestamp)'
+          foreach ($need in @('const uint32_t rows = st_cb_top_band_rows(st);', 'camerabox::cb_box_downscale_luma(src, st->video_width, rows, qbuf, (uint32_t)w, (uint32_t)h);')) {
+            if (-not $decoder.Contains($need)) { Write-Error "dock output sources: the top-band decoder no longer reads the shared row count: '$need' (issue 1381)"; exit 1 }
+          }
+          $jobRun = Get-DockBody $output 'void st_video_decode_job_run(struct sync_test_output *st, st_video_decode_job &job)'
+          if ($decoder.Contains('plan.band_h') -or (-not $jobRun.Contains('if (job.band.size() >= st_cb_top_band_bytes(st)) st_raw_video_camera_box_decode(st, job.band.data(), job.timestamp);'))) {
+            Write-Error "dock output sources: the top-band decoder reads rows from its own plan, or the worker decodes a band without checking it holds every byte read (issue 1381)"; exit 1
           }
           Write-Output "dock decode off the video-output thread (issue 1367) — OK"
 
