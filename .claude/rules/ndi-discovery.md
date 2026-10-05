@@ -266,9 +266,11 @@ touches ONLY `/etc/ndi/ndi-config.v1.json` and the camera-box `ndi-discovery.con
   - **refuse**: the drop-in has content that points `NDI_CONFIG_DIR` somewhere else (a blank
     drop-in is never refused). It exits non-zero, `REFUSED:` names the drop-in, and nothing is
     touched: a human looks at it.
-  - For any change, a read-only root is remounted rw first and put back ro after `sync` (3 tries).
-    A root it cannot put back is a loud `ERROR ... read-WRITE` and a non-zero exit, and an EXIT trap
-    puts it back on any other failure.
+  - For any change, a read-only root is remounted rw first and closed with the ONE verified ro
+    close (`ro_window_close_cmds`, issue 1407, `.claude/rules/ro-window.md`): the root mode is READ,
+    no retry. A root it cannot put back is a loud `FAIL ... NOT read-only` naming the writers and a
+    non-zero exit, and the daemon-reload is not run. An EXIT trap closes it the same way on any
+    other failure.
 - It removes one or two ~100-byte files in the same rw window setup-device.sh and the dantesync
   upgrader use. That is not a risky write to the stick, and a clean box is never touched.
 - Tier-0 tests, all without a box:
