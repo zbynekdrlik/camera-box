@@ -32,7 +32,8 @@
 #
 # Callers: cam2-painter-ro-persist.sh (the cam2 painter enable/disable), deploy-fleet.sh (the
 # camera-box and frame-probe swaps), dantesync-rollback.sh (the dantesync upgrade + rollback
-# programs), bkshading-relay-mode.sh, bkshading-deploy-relay.sh, ndi-discovery.sh (--cambox-apply).
+# programs), bkshading-relay-mode.sh, bkshading-deploy-relay.sh, ndi-discovery.sh (--cambox-apply),
+# and rt-kernel-plan.sh (PRINTS it into the supervisor's per-step kernel runbook programs).
 # tests/python/test_ro_window_1407.py runs the emitted text against a fake box and sweeps scripts/
 # for a swallowed ro close outside this lib.
 

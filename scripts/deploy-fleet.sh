@@ -5,7 +5,8 @@
 # (e.g. #73 found cam1/cam4=dev.29, cam3=dev.22, cam2=dev.19 — three builds, none current, cam2
 # old enough that it predated the genlock-decimation report and so was NOT genlocking). This
 # script makes re-alignment a single command: download the SAME CI artifact once, push it to
-# every camera with the stop -> remount,rw -> scp -> remount,ro (verified) -> start cycle, then
+# every camera with the stop -> remount,rw -> scp to a sidecar -> byte-verify it -> atomic rename ->
+# remount,ro (verified) -> start cycle, then
 # VERIFY each box reports the new version AND is emitting the genlock report ("N fps emitted / M fps
 # captured"). issue 1407: the window closes with the ONE verified ro close (scripts/lib/ro-window.sh)
 # BEFORE anything starts; a root that does not read ro again fails that box (holders named in FAILED)
@@ -261,8 +262,9 @@ PENDING_START=""
 # shellcheck disable=SC2317  # invoked indirectly via the EXIT trap below
 # NB: must not leak a non-zero status from the trap (it would override the script's exit code) —
 # end with `:` so EXIT preserves the real exit status. An open window is closed the ONE verified way
-# (in its own session) and nothing is started (the binary on the box may be half-copied); a stopped,
-# not yet restarted service is named. Either way the box is named in FAILED.
+# (in its own session) and nothing is started (the swap may be unfinished: the live binary is the old
+# or the new whole build, a partial copy can only be the .new sidecar, which the next deploy
+# overwrites); a stopped, not yet restarted service is named. Either way the box is named in FAILED.
 cleanup() {
   if [ -n "$OPEN_WINDOW" ] || [ -n "$PENDING_START" ]; then
     set +e
@@ -342,6 +344,10 @@ chmod +x "$BINARY"
 
 NEW_VER="$("$BINARY" --version 2>/dev/null | awk '{print $NF}')"
 [ -n "$NEW_VER" ] || { err "could not read --version from the binary"; exit 1; }
+# the artifact's sha256, read once: every box's sidecar (before the rename) and live binary (after)
+# must match it
+BINARY_SHA="$(sha256sum "$BINARY" | awk '{print $1}')"
+[ -n "$BINARY_SHA" ] || { err "could not hash the binary $BINARY"; exit 1; }
 log "Deploying camera-box $NEW_VER to: $SET"
 echo ""
 
@@ -368,11 +374,11 @@ for cam in $SET; do
   fi
 
   # Each deploy step is guarded: a failure on ONE box records it and moves on to the next box
-  # (never aborts the whole fleet under set -e). issue 1407: only the stop and the copy run inside
-  # the rw window; it closes with the ONE verified ro close (close_ro_or_fail), and camera-box starts
+  # (never aborts the whole fleet under set -e). issue 1407: only the stop and the sidecar swap run
+  # inside the rw window; it closes with the ONE verified ro close (close_ro_or_fail), and camera-box starts
   # only on a root that reads ro again. A root left writable is a FAILED box naming its writers --
   # never a start, never a swallowed close (every cambox runs read-only, setup-device STEP 18).
-  info "[$cam] stop service + remount rw + copy + remount ro (verified) + start"
+  info "[$cam] stop service + remount rw + copy to a sidecar + byte-verify + atomic rename + remount ro (verified) + start"
   OPEN_WINDOW="$ip|$cam|$cam"
   PENDING_START="$cam|$cam"
   if ! ssh_box "$ip" "mount -o remount,rw / && systemctl stop camera-box"; then
@@ -381,13 +387,31 @@ for cam in $SET; do
     close_ro_or_fail "$ip" "$cam" "$cam" "The camera-box stop for the swap failed; nothing was copied or started." || true
     continue
   fi
-  if ! scp_box "$ip" "$BINARY" "/usr/local/bin/camera-box"; then
-    err "[$cam] scp failed"; FAILED+=("$cam(scp-failed)")
-    # bring camera-box back up, on a root verified read-only only. scp writes the target in place,
-    # so a mid-transfer failure can leave a partial binary that fails to start: the box is already
-    # FAILED (scp-failed) and the next deploy copies it again.
-    if close_ro_or_fail "$ip" "$cam" "$cam" "A cambox must never run on a writable root, so camera-box.service is NOT started (the copy failed)."; then
-      ssh_box "$ip" "systemctl start camera-box" || err "[$cam] camera-box start after the failed scp failed"
+  # issue 1407 design addendum item 2: the copy lands in a SIDECAR next to the live binary, is
+  # byte-verified THERE, and only then goes live by ONE atomic rename (the frame-probe swap's shape,
+  # #1351). scp writes its target in place, so a copy straight onto the live path could leave half a
+  # binary there when the transfer died; now the old binary stays whole until the rename. All of it
+  # runs inside the rw window. A failed copy, a sidecar that does not byte-match the artifact, or a
+  # failed rename removes the sidecar while the root is still writable, closes the window the
+  # verified way, and starts the OLD camera-box again (it is whole), with the box FAILED.
+  swap_fail=""
+  if ! scp_box "$ip" "$BINARY" "/usr/local/bin/camera-box.new"; then
+    err "[$cam] scp failed"; swap_fail="scp-failed"
+  else
+    sidecar_sha="$(ssh_box "$ip" "sha256sum /usr/local/bin/camera-box.new 2>/dev/null | awk '{print \$1}'" || echo "")"
+    if [ "$sidecar_sha" != "$BINARY_SHA" ]; then
+      err "[$cam] sidecar byte-verify FAILED: local $BINARY_SHA != sidecar ${sidecar_sha:-<none>} -- not moved over the live binary"
+      swap_fail="sha-mismatch"
+    elif ! ssh_box "$ip" "chmod 0755 /usr/local/bin/camera-box.new && mv -f /usr/local/bin/camera-box.new /usr/local/bin/camera-box && sync"; then
+      err "[$cam] the atomic rename of the verified sidecar failed -- the old binary stays live"
+      swap_fail="swap-failed"
+    fi
+  fi
+  if [ -n "$swap_fail" ]; then
+    FAILED+=("$cam($swap_fail)")
+    ssh_box "$ip" "rm -f /usr/local/bin/camera-box.new" || err "[$cam] could not remove the sidecar /usr/local/bin/camera-box.new"
+    if close_ro_or_fail "$ip" "$cam" "$cam" "A cambox must never run on a writable root, so camera-box.service is NOT started (the swap failed; the old binary is still in place)."; then
+      ssh_box "$ip" "systemctl start camera-box" || err "[$cam] camera-box start after the failed swap failed"
     fi
     PENDING_START=""
     continue
@@ -402,14 +426,14 @@ for cam in $SET; do
 
   # Byte-verify: the deployed binary must hash-match the artifact we shipped (deploy-from-clean-tree.md
   # Layer 3 — a --version match alone does NOT prove byte-identity; a partial scp or a stale same-version
-  # binary would pass a version check but fail this).
-  local_sha="$(sha256sum "$BINARY" | awk '{print $1}')"
+  # binary would pass a version check but fail this). The sidecar was verified before the rename; this
+  # reads the FINAL path, so it also proves the rename landed.
   remote_sha="$(ssh_box "$ip" "sha256sum /usr/local/bin/camera-box 2>/dev/null | awk '{print \$1}'" || echo "")"
-  if [ "$local_sha" != "$remote_sha" ]; then
-    err "[$cam] byte-verify FAILED: local $local_sha != remote ${remote_sha:-<none>}"
+  if [ "$BINARY_SHA" != "$remote_sha" ]; then
+    err "[$cam] byte-verify FAILED: local $BINARY_SHA != remote ${remote_sha:-<none>}"
     FAILED+=("$cam(sha-mismatch)"); continue
   fi
-  info "[$cam] byte-verify OK (sha256 ${local_sha:0:12})"
+  info "[$cam] byte-verify OK (sha256 ${BINARY_SHA:0:12})"
 
   # Verify version (absolute path — don't rely on the remote PATH resolving camera-box).
   after="$(ssh_box "$ip" "/usr/local/bin/camera-box --version 2>/dev/null | awk '{print \$NF}'" || echo "unknown")"
