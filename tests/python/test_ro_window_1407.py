@@ -390,7 +390,11 @@ def test_the_sweep_pattern_catches_every_known_swallow_shape():
                 "mount -o remount,ro / || logger -t deploy busy",
                 # review round 3: a group that ends in a ZERO return/exit goes on too
                 "mount -o remount,ro / || { echo x; return 0; }",
-                "mount -o remount,ro / || { warn x; exit 0; }"):
+                "mount -o remount,ro / || { warn x; exit 0; }",
+                # review round 4: inside a group a bare return/exit (or $?) hands back the LAST
+                # command's status, not the mount's
+                "mount -o remount,ro / || { warn busy; return; }",
+                "mount -o remount,ro / || { echo x; exit $?; }"):
         assert _SWALLOW.search(bad), bad
     for good in ('_row_ro_err="$(mount -o remount,ro / 2>&1)" || _row_ro_rc=$?;',
                  'if "$MOUNT" -o remount,ro /; then',
@@ -406,8 +410,21 @@ def test_the_sweep_pattern_catches_every_known_swallow_shape():
                  # review round 3: a loud group that names a ${var} before its exit
                  "mount -o remount,ro / || { echo \"FAIL on ${host}\" >&2; exit 1; }",
                  "mount -o remount,ro / || { err \"x ${h}\"; return 1; }",
+                 # review round 4: a variable exit code, a quoted brace
+                 "mount -o remount,ro / || { rc=$?; echo \"FAIL rc=$rc\" >&2; exit \"$rc\"; }",
+                 "mount -o remount,ro / || { echo \"}\"; exit 1; }",
                  "printf 'mount -o remount,rw / && apt-get update && mount -o remount,ro /   # comment'"):
         assert not _SWALLOW.search(good), good
+
+
+def test_the_sweep_reads_a_group_across_lines():
+    # review round 4: the sweep walks lines, so a loud group whose body sits on the next lines must
+    # be read to its matching brace, never as an empty (swallowing) group; an unclosed one is no hit.
+    loud = "mount -o remount,ro / || {\n  echo \"FAIL: busy\" >&2\n  exit 1\n}\nnext_step\n"
+    quiet = "mount -o remount,ro / || {\n  echo busy\n}\nnext_step\n"
+    assert _swallowed_in_text(loud) == [], loud
+    assert len(_swallowed_in_text(quiet)) == 1, quiet
+    assert _swallowed_in_text("mount -o remount,ro / || {\n  echo x\n") == [], "an unclosed group is no hit"
 
 
 def test_deploy_fleet_names_a_pending_painter_start_only_for_an_enable_now_restore():
