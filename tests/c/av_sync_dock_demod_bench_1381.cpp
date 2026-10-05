@@ -27,9 +27,11 @@
  *      same picker. For every signal the publish must stay <= CB_BENCH_AUDIO_THREAD_BUDGET_MS of
  *      thread CPU time in the mean AND the p99 push. The worst single push is REPORTED against
  *      CB_BENCH_AUDIO_THREAD_MAX_MS, never gated: thread CPU time still carries what a shared CI
- *      runner charges to the thread (one push read 2.42 ms on a 0.009 ms mean, run 37345820890, on a
- *      FIFO whose slots reused already-resident memory, so not a page fault of its own). The
- *      producer's page faults are reported beside it (first pass over the slots / every push); the
+ *      runner charges to the thread. One push read 2.42 ms (cpu ~= wall) on a 0.009 ms mean, run
+ *      37345820890, on a FIFO whose slots reused already-resident memory, so not a first touch of
+ *      its slots; whether it was another fault (a reclaimed page) or time charged to the thread is
+ *      unattributed -- that run had no fault counter. The producer's page faults are now reported
+ *      beside it (first pass over the slots / every push), so the next outlier is attributed; the
  *      deterministic no-fault check lives in the audio-worker self-test, whose window is the 64
  *      publishes right after start() -- here a memory-pressured runner may legitimately reclaim and
  *      refault a page during the 2 s run. Wall-clock p99 / max are reported.

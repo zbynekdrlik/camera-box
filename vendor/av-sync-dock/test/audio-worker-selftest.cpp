@@ -112,8 +112,9 @@ static bool wait_taken(const CbAudioBlockFifo &fifo, uint64_t n)
 /* 8. No publish() after start() takes a page fault on the producer thread -- libobs's audio thread
  * in the dock. A page fault is kernel work in the faulting thread (a fresh page zeroed, a reclaim
  * under memory pressure), and a reserve()-only start() left the first write of every slot page to
- * publish(): 385 faults over the first 64 pushes of a 4096-frame stereo FIFO on dev1's glibc, on
- * every session start. The 1024-frame FIFO is the dock's own AUDIO_OUTPUT_FRAMES block; on glibc
+ * publish(): 385 faults over the first 64 pushes of a 4096-frame stereo FIFO on dev1's glibc, on the
+ * first pass over the slots after each output start. The 1024-frame FIFO is the dock's own
+ * AUDIO_OUTPUT_FRAMES block; on glibc
  * malloc's chunk headers already touch nearly every page of a one-page plane, so that case faults 0-1
  * times even without the pre-fault, and the multi-page case is what proves start() on any allocator
  * (the dock runs on the Windows heap).
@@ -164,7 +165,10 @@ static void test_publish_never_faults_after_start()
 			    frames, (unsigned long long)accepted, CB_AUDIO_FIFO_SLOTS, (unsigned long long)faults);
 		CHECK(accepted == CB_AUDIO_FIFO_SLOTS,
 		      "faults: every slot was written once (the worker held block 0, nothing dropped)");
-		CHECK(faults == 0, "faults: no publish() after start() takes a page fault on the producer thread");
+		if (CB_THREAD_FAULTS_EXACT)
+			CHECK(faults == 0, "faults: no publish() after start() takes a page fault on the producer thread");
+		else
+			std::printf("faults: REPORT only (sanitizer build: its runtime faults on its own pages)\n");
 		CHECK(wait_taken(fifos[s], accepted), "faults: every block handled");
 	}
 	for (size_t s = 0; s < 2; s++)

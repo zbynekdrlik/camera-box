@@ -178,7 +178,10 @@ static void test_prepared_slots_never_fault()
 	std::printf("faults: %zu-byte job buffers, 3 publishes into both slots, %llu page fault(s) on the producer "
 		    "thread\n",
 		    bytes, (unsigned long long)faults);
-	CHECK(faults == 0, "faults: no publish() into a prepared slot takes a page fault on the producer thread");
+	if (CB_THREAD_FAULTS_EXACT)
+		CHECK(faults == 0, "faults: no publish() into a prepared slot takes a page fault on the producer thread");
+	else
+		std::printf("faults: REPORT only (sanitizer build: its runtime faults on its own pages)\n");
 	mb.stop();
 	warm.stop();
 }

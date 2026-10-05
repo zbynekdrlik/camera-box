@@ -799,6 +799,26 @@ jobs:
           if ($output -notmatch [regex]::Escape('#include "camera-box-frame-copy.hpp"')) {
             Write-Error "dock output sources: the frame copies no longer come from camera-box-frame-copy.hpp (issue 1367)"; exit 1
           }
+          # issue 1381: both decode jobs' copy buffers are sized AND written on the starting thread
+          # (after the geometry is set, before the worker starts) by the helpers the per-frame fills
+          # use, so st_raw_video's first frame into each slot neither allocates nor first-touches a page.
+          # Mirrors worker_lifecycle_follows_the_output in tests/av_sync_dock_decode_mailbox_1367.rs.
+          $vbody = Get-DockBody $output 'static bool st_start(void *data)'
+          $iResize = $vbody.IndexOf('quirc_resize(')
+          $iPrepare = $vbody.IndexOf('st->cb_decode_mailbox.prepare_slots( [st](st_video_decode_job &job) { st_video_decode_job_prepare(st, job); })')
+          $iWorker = $vbody.IndexOf('st->cb_decode_mailbox.start(')
+          if ($iResize -lt 0 -or $iPrepare -lt 0 -or $iWorker -lt 0 -or $iResize -gt $iPrepare -or $iPrepare -gt $iWorker) {
+            Write-Error "dock output sources: st_start no longer pre-faults both decode jobs through prepare_slots between the geometry and the worker start (issue 1381)"; exit 1
+          }
+          $prep = Get-DockBody $output 'void st_video_decode_job_prepare(const struct sync_test_output *st, st_video_decode_job &job)'
+          foreach ($need in @('job.band.assign(st_cb_top_band_bytes(st, plan), 0);', 'job.grid.assign(st_norihiro_grid_bytes(st), 0);')) {
+            if (-not $prep.Contains($need)) { Write-Error "dock output sources: st_video_decode_job_prepare no longer has '$need' (issue 1381)"; exit 1 }
+          }
+          $fillBand = Get-DockBody $output 'static void st_cb_gather_top_band(const struct sync_test_output *st, const struct video_data *frame, std::vector<uint8_t> &dst)'
+          $fillGrid = Get-DockBody $output 'static void st_norihiro_gather_grid(const struct sync_test_output *st, const struct video_data *frame, std::vector<uint8_t> &dst)'
+          if ((-not $fillBand.Contains('const size_t need = st_cb_top_band_bytes(st, plan);')) -or (-not $fillGrid.Contains('const size_t need = st_norihiro_grid_bytes(st);'))) {
+            Write-Error "dock output sources: a per-frame fill no longer sizes with the helper the pre-fault uses (issue 1381)"; exit 1
+          }
           Write-Output "dock decode off the video-output thread (issue 1367) — OK"
 
       - name: Assert dock decodes the marker per channel (issue 1367)

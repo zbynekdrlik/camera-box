@@ -194,6 +194,50 @@ fn worker_lifecycle_follows_the_output() {
         start_at < capture_at,
         "issue 1367: the decode worker must be running before the video callbacks start"
     );
+    // issue 1381: both decode jobs' copy buffers are sized AND written on the starting thread --
+    // after quirc_resize (the grid size is set right after it), before the worker starts -- so
+    // st_raw_video's first frame into each slot neither allocates nor first-touches a page there.
+    let prepare_at = start
+        .find(
+            "st->cb_decode_mailbox.prepare_slots( [st](st_video_decode_job &job) { \
+             st_video_decode_job_prepare(st, job); })",
+        )
+        .expect("issue 1381: st_start must pre-fault both decode jobs through prepare_slots");
+    assert!(
+        resize_at < prepare_at && prepare_at < start_at,
+        "issue 1381: prepare_slots must run after the geometry is set and before the worker starts"
+    );
+    // The pre-fault sizes come from the SAME helpers the per-frame fills use, so they cannot drift.
+    let prepare = unique_body_of(
+        &src,
+        "void st_video_decode_job_prepare(const struct sync_test_output *st, st_video_decode_job &job)",
+    );
+    for need in [
+        "job.band.assign(st_cb_top_band_bytes(st, plan), 0);",
+        "job.grid.assign(st_norihiro_grid_bytes(st), 0);",
+    ] {
+        assert!(
+            prepare.contains(need),
+            "issue 1381: st_video_decode_job_prepare no longer has `{need}`"
+        );
+    }
+    for (sig, need) in [
+        (
+            "static void st_cb_gather_top_band(const struct sync_test_output *st, \
+             const struct video_data *frame, std::vector<uint8_t> &dst)",
+            "const size_t need = st_cb_top_band_bytes(st, plan);",
+        ),
+        (
+            "static void st_norihiro_gather_grid(const struct sync_test_output *st, \
+             const struct video_data *frame, std::vector<uint8_t> &dst)",
+            "const size_t need = st_norihiro_grid_bytes(st);",
+        ),
+    ] {
+        assert!(
+            unique_body_of(&src, sig).contains(need),
+            "issue 1381: the per-frame fill must size with the helper the pre-fault uses: `{need}`"
+        );
+    }
 
     let stop = unique_body_of(&src, "static void st_stop(void *data, uint64_t)");
     assert!(
