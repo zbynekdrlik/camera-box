@@ -154,7 +154,7 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_OBS_COLLECTION=strih-lx",
         "STRIH_NDI_RUNTIME_PEER=10.77.9.61",
         "STRIH_COMPANION_HOST=10.77.9.205",
-        "STRIH_CG_SENDER=RESOLUME-SNV (cg-obs)",
+        "STRIH_CG_SENDER=RESOLUME-SNV (SP-program)",
         "STRIH_CAMERAS=1 2 3 4 5 6 7",
         "STRIH_HDMI_OUTPUT_BACKEND=vk-direct",
         "LOADED=strih-lx",

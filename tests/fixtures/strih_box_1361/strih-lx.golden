@@ -21,7 +21,7 @@ CAM6 (usb)
 CAM7 (usb)
 STRIH-SNV (2ME PGM)
 STRIH-SNV (2ME PVW)
-RESOLUME-SNV (cg-obs)
+RESOLUME-SNV (SP-program)
 === seed-manifest ===
 {
   "mode": "update-only",
@@ -35,8 +35,8 @@ RESOLUME-SNV (cg-obs)
     {"sender": "CAM7 (usb)", "input": "NDI cam7", "scene": "Cam 7"},
     {"sender": "STRIH-LX (2ME PVW)", "input": "NDI 2ME PVW", "scene": "2ME PVW"},
     {"sender": "STRIH-LX (2ME PGM)", "input": "NDI 2ME PGM (mv)", "scene": "2ME PGM"},
-    {"sender": "RESOLUME-SNV (cg-obs)", "input": "cg", "scene": "CG"},
-    {"sender": "RESOLUME-SNV (cg-obs)", "input": "CG-obs", "scene": "CG-obs"}
+    {"sender": "RESOLUME-SNV (SP-program)", "input": "cg", "scene": "CG"},
+    {"sender": "RESOLUME-SNV (SP-program)", "input": "CG-obs", "scene": "CG-obs"}
   ],
   "outputs": [
     "STRIH-LX (2ME PGM)",
