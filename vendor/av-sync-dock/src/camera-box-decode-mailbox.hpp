@@ -62,8 +62,9 @@ public:
 
 	/* Size the jobs' buffers before start() (issue 1381): `prepare(Job &)` runs on BOTH slots, on
 	 * the caller's thread, under the lock. The producer's fill then copies into buffers that are
-	 * already allocated AND resident, so the video-output thread neither allocates nor takes a page
-	 * fault on its first frame into each slot (the dock's top band alone is 1.5 MB at 1080p).
+	 * already allocated AND resident as of start(), so the video-output thread neither allocates
+	 * nor takes a first-touch page fault on its first frame into each slot (the dock's top band
+	 * alone is 1.5 MB at 1080p).
 	 * `prepare` must WRITE what it sizes -- assign(n, 0), not reserve(): a page that was never
 	 * written faults on its first write. Returns false, calling nothing, while the worker runs. */
 	template<typename Prepare> bool prepare_slots(Prepare prepare)

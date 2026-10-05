@@ -515,7 +515,7 @@ static void st_cb_gather_top_band(const struct sync_test_output *st, const struc
 /* issue 1381 (the starting thread, through the mailbox's prepare_slots in st_start): size AND write
  * one slot's copy buffers for this output's geometry -- the top band, and norihiro's grid, which
  * st_raw_video fills on every frame until camera-box mode latches -- so the video-output thread's
- * first frame into the slot neither allocates nor takes a page fault on these pages (the band alone
+ * first frame into the slot neither allocates nor first-touches these pages (the band alone
  * is 1.5 MB at 1080p, 6 MB at 4K). assign() writes every byte, also on a restart where the buffer
  * already has the size. The marker patches are left to grow on use: their size follows the circle
  * radius of a decoded PHONE QR (norihiro mode, never the camera-box rig path), and a worst-case

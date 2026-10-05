@@ -157,7 +157,7 @@ struct corner_type
  * The buffers live in the mailbox's two slots and are reused, so there is no per-frame allocation
  * once they have grown. Since issue 1381 st_start sizes and writes `band` and `grid` in both slots
  * (prepare_slots + st_video_decode_job_prepare), so the video thread's first frame neither allocates
- * nor page-faults; only the phone-mode marker `patches` still grow on use. */
+ * nor first-touches a page; only the phone-mode marker `patches` still grow on use. */
 struct st_marker_patch
 {
 	camerabox::CbPatchRect rect; // the circle's bounding box in the full-res frame

@@ -966,10 +966,18 @@ void st_raw_audio(void *data, struct audio_data *frames)
 	// proven demod (norihiro's is broken at c=1). Skip norihiro's audio path entirely then.
 	// issue 1381: that decode runs on the audio worker, and only while the test signal is fresh;
 	// this thread only runs the gate and copies the block.
+	// issue 1381 review round 1: norihiro's phone params are read in the SAME locked section as the
+	// mode. The decode worker sets the mode together with the rig's fixed params, so a block can no
+	// longer see the mode still off but the params already set, which ran norihiro's inline demod
+	// (and grew its sample deque) on this thread once per output start.
 	bool cb_active;
 	uint64_t last_qr_ns;
+	uint32_t f, c, q_ms;
 	{
 		std::unique_lock<std::mutex> lock(st->mutex);
+		f = st->f;
+		c = st->c;
+		q_ms = st->q_ms;
 		cb_active = st->cb_mode_active;
 		last_qr_ns = st->cb_video_last_decode_ts_ns;
 	}
@@ -977,12 +985,6 @@ void st_raw_audio(void *data, struct audio_data *frames)
 		cb_audio_gate_and_publish(st, frames, last_qr_ns);
 		return;
 	}
-
-	std::unique_lock<std::mutex> lock(st->mutex);
-	uint32_t f = st->f;
-	uint32_t c = st->c;
-	uint32_t q_ms = st->q_ms;
-	lock.unlock();
 
 	if (f <= 0 || c <= 0)
 		return;
