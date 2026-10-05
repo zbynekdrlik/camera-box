@@ -24,11 +24,13 @@ _READINGS = json.loads(
 _PASS_S = 300
 
 
-def _body(handles, pid, start, limit=""):
+def _body(handles, pid, start, limit="", run=""):
     body = dict(_READINGS["base"])
     body.update({"obs_handles": str(handles), "obs_handles_pid": pid, "obs_handles_start": start})
     if limit:
         body["obs_handles_limit"] = limit
+    if run:
+        body["obs_handles_run"] = run
     return json.dumps(body)
 
 
@@ -135,6 +137,35 @@ def test_a_manual_run_between_timer_passes_neither_pages_nor_resets(tmp_path):
     assert "verdict=HOLD" in held and "WOULD alert" not in held
     assert "WOULD alert" not in rp.run(*_leak_pass(2, t0))
     assert "WOULD alert (GROWING)" in rp.run(*_leak_pass(3, t0))
+
+
+def test_a_manual_run_during_a_ceiling_incident_does_not_advance_the_confirm(tmp_path):
+    # Review round 1: CEILING used to override HOLD, so a manual run 60 s after a timer pass paged.
+    leak = _READINGS["leak"]
+    rp = _Replay(tmp_path)
+    t = 1_791_190_000
+    assert "verdict=CEILING" in rp.run(t, _body(leak["census_handles"], leak["pid"], leak["start"]))
+    held = rp.run(t + 60, _body(leak["census_handles"] + 2_800, leak["pid"], leak["start"]))
+    assert "verdict=HOLD" in held and "WOULD alert" not in held
+    paged = rp.run(t + _PASS_S, _body(leak["census_handles"] + 14_064, leak["pid"], leak["start"]))
+    assert "[dry-run] WOULD alert (CEILING): stream" in paged
+
+
+def test_a_strih_lx_clock_step_keeps_the_leak_confirm(tmp_path):
+    # Review round 1: strih-lx steps its wall clock (the dantesync date master), which moves the
+    # btime-based start epoch by a second; the run token does not move, so a growing leak keeps its
+    # confirm instead of re-baselining (and logging a false RECOVERY) at the step.
+    rp = _Replay(tmp_path, boxes="strih-lx|10.77.9.202")
+    run = "1b4e28ba-2fa1-11d2-883f-0016d3cca427:360000"
+    logs = []
+    for i in range(4):
+        start = "1791190000" if i < 2 else "1791190001"
+        logs.append(rp.run(1000 + _PASS_S * i, _body(300 + 170 * i, "4242", start,
+                                                       limit="1024", run=run)))
+    assert "verdict=BASELINE" in logs[0]
+    assert all("verdict=GROWING" in log for log in logs[1:]), logs
+    assert not any("RECOVERY" in log for log in logs)
+    assert "[dry-run] WOULD alert (GROWING): strih-lx" in logs[3]
 
 
 def test_unfetchable_is_skip_and_absent_facet_is_unknown(tmp_path):

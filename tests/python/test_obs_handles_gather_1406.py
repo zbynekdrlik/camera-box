@@ -41,7 +41,9 @@ _spec = importlib.util.spec_from_file_location("bundle_state_server_obs_handles_
 bss = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(bss)
 
-_FACET_KEYS = ("obs_handles", "obs_handles_pid", "obs_handles_start", "obs_handles_limit")
+_FACET_KEYS = ("obs_handles", "obs_handles_pid", "obs_handles_start", "obs_handles_run",
+               "obs_handles_limit")
+_BOOT_ID = "1b4e28ba-2fa1-11d2-883f-0016d3cca427"
 
 # --- the x64 SYSTEM_PROCESS_INFORMATION layout ---------------------------------------------------
 
@@ -175,7 +177,7 @@ def test_facet_takes_the_live_obs_process_with_the_most_handles():
     ]
     assert bsg.obs_handles_facet(procs) == {
         "obs_handles": "4066772", "obs_handles_pid": "9224",
-        "obs_handles_start": "1791110100", "obs_handles_limit": "",
+        "obs_handles_start": "1791110100", "obs_handles_run": "", "obs_handles_limit": "",
     }
 
 
@@ -187,10 +189,11 @@ def test_facet_is_empty_without_a_live_obs_process():
 
 
 def test_facet_carries_the_linux_limit_and_a_missing_start_as_empty():
-    procs = [{"pid": 4242, "name": "obs", "handles": 7, "start": None, "limit": 1024}]
+    procs = [{"pid": 4242, "name": "obs", "handles": 7, "start": None, "limit": 1024,
+              "run": "b:5"}]
     assert bsg.obs_handles_facet(procs) == {
         "obs_handles": "7", "obs_handles_pid": "4242", "obs_handles_start": "",
-        "obs_handles_limit": "1024",
+        "obs_handles_run": "b:5", "obs_handles_limit": "1024",
     }
 
 
@@ -213,6 +216,8 @@ def _fake_proc(root, procs, btime=1_791_190_000):
     (root).mkdir()
     (root / "stat").write_text(f"cpu  1 2 3 4\nintr 5\nbtime {btime}\nprocesses 99\n")
     (root / "self").mkdir()
+    (root / "sys" / "kernel" / "random").mkdir(parents=True)
+    (root / "sys" / "kernel" / "random" / "boot_id").write_text(_BOOT_ID + "\n")
     for p in procs:
         d = root / str(p["pid"])
         d.mkdir()
@@ -227,9 +232,20 @@ def _fake_proc(root, procs, btime=1_791_190_000):
     return root
 
 
+_STAT_CASES = (
+    _stat_line(4242, "obs", 360_000),
+    _stat_line(7, "a) (b", 99),
+    _stat_line(8, "obs", -5),
+    "9 (obs) S 1 2 3",
+    "garbage",
+    "",
+)
+
+
 def test_proc_parsers():
     assert bsg.proc_stat_start_ticks(_stat_line(4242, "obs", 360_000)) == 360_000
     assert bsg.proc_stat_start_ticks(_stat_line(7, "a) (b", 99)) == 99
+    assert bsg.proc_stat_start_ticks(_stat_line(8, "obs", -5)) is None
     assert bsg.proc_stat_start_ticks("garbage") is None
     assert bsg.proc_stat_start_ticks("") is None
     assert bsg.proc_btime("cpu 1\nbtime 1791190000\n") == 1_791_190_000
@@ -237,6 +253,14 @@ def test_proc_parsers():
     assert bsg.proc_nofile_soft_limit(_LIMITS.format(soft="1024")) == 1024
     assert bsg.proc_nofile_soft_limit(_LIMITS.format(soft="unlimited")) is None
     assert bsg.proc_nofile_soft_limit("") is None
+
+
+def test_the_start_ticks_parser_matches_the_browser_keepers(tmp_path):
+    # The strih browser keeper (scripts/strih_browser_keeper.py) identifies an OBS run by the same
+    # /proc/<pid>/stat field; the two parsers must never drift apart.
+    import strih_browser_keeper
+    for line in _STAT_CASES:
+        assert bsg.proc_stat_start_ticks(line) == strih_browser_keeper.proc_start_ticks(line), line
 
 
 def test_linux_reader_counts_the_obs_fds(tmp_path):
@@ -248,8 +272,21 @@ def test_linux_reader_counts_the_obs_fds(tmp_path):
     ])
     assert bsg.linux_obs_handles(str(root), clk_tck=100) == {
         "obs_handles": "7", "obs_handles_pid": "4242",
-        "obs_handles_start": str(1_791_190_000 + 3600), "obs_handles_limit": "1024",
+        "obs_handles_start": str(1_791_190_000 + 3600),
+        "obs_handles_run": f"{_BOOT_ID}:360000", "obs_handles_limit": "1024",
     }
+
+
+def test_the_linux_run_token_does_not_move_with_a_clock_step(tmp_path):
+    # A wall-clock step moves btime (so the start epoch) but not the boot id or the start ticks.
+    a = _fake_proc(tmp_path / "a", [{"pid": 4242, "comm": "obs", "fds": 7, "ticks": 360_000}],
+                   btime=1_791_190_000)
+    b = _fake_proc(tmp_path / "b", [{"pid": 4242, "comm": "obs", "fds": 7, "ticks": 360_000}],
+                   btime=1_791_190_001)
+    fa = bsg.linux_obs_handles(str(a), clk_tck=100)
+    fb = bsg.linux_obs_handles(str(b), clk_tck=100)
+    assert fa["obs_handles_start"] != fb["obs_handles_start"]
+    assert fa["obs_handles_run"] == fb["obs_handles_run"] == f"{_BOOT_ID}:360000"
 
 
 def test_linux_reader_takes_the_largest_of_two_obs_and_drops_an_unlimited_limit(tmp_path):
@@ -285,7 +322,7 @@ def test_windows_reader_builds_the_facet_from_the_process_snapshot(monkeypatch):
     monkeypatch.setattr(bsw, "system_process_information", lambda: (raw, _BASE))
     assert bsw.windows_obs_handles() == {
         "obs_handles": "5790", "obs_handles_pid": "5748",
-        "obs_handles_start": "1791197100", "obs_handles_limit": "",
+        "obs_handles_start": "1791197100", "obs_handles_run": "", "obs_handles_limit": "",
     }
 
 
@@ -341,7 +378,9 @@ def _fail(*a, **k):
 @pytest.mark.parametrize("windows", [False, True])
 def test_the_server_serves_the_facet_on_both_platforms(monkeypatch, tmp_path, windows):
     facet = {"obs_handles": "5790", "obs_handles_pid": "5748",
-             "obs_handles_start": "1791197100", "obs_handles_limit": "" if windows else "1024"}
+             "obs_handles_start": "1791197100",
+             "obs_handles_run": "" if windows else f"{_BOOT_ID}:360000",
+             "obs_handles_limit": "" if windows else "1024"}
     state = _gather(monkeypatch, tmp_path, windows, facet)
     served = {k: state[k] for k in _FACET_KEYS if k in state}
     assert served == {k: v for k, v in facet.items() if v}

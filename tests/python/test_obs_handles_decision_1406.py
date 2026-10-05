@@ -3,12 +3,12 @@
 the watchdog kept from its previous pass.
 
 The calibration this pins (the 5.10.2026 readings on the ticket):
-  * healthy stream OBS after a restart: ~5,790 handles, flat (+-16 over 2.5 min);
+  * healthy stream OBS after a restart: ~5,790 handles, flat (+-16 over 2.5 min, ~384/h as a rate);
   * the Audio Monitor leak: +46.875 handles/s = 168,750/h, 4,066,772 after ~22 h;
   * the Windows per-process cap: 16,777,216 (2**24).
-Bounds: GROWING at >= 5,000 handles/h over one pass interval (34x below the leak rate, ~300x above
-the healthy wobble per hour); CEILING at 500,000 handles (86x healthy, 3% of the cap) or 80% of a
-Linux box's own soft open-files limit when that is lower.
+Bounds: GROWING at >= 5,000 handles/h over one pass interval (34x below the leak rate, ~13x above
+the healthy wobble's rate), lowered to half a Linux box's soft open-files limit per hour when that
+is lower; CEILING at 500,000 handles (86x healthy, 3% of the cap) or 80% of that Linux limit.
 """
 from __future__ import annotations
 
@@ -31,11 +31,13 @@ LEAK_PER_S = 48000 / 1024   # one registry key per OBS audio tick
 STREAM_START = 1_791_110_100  # 4.10.2026 12:35 local, the leaking obs64 pid 9224
 
 
-def _body(handles, pid="9224", start=str(STREAM_START), limit=""):
+def _body(handles, pid="9224", start=str(STREAM_START), limit="", run=""):
     facet = {"obs_version": "32.2.0", "obs_process_count": "1",
              "obs_handles": str(handles), "obs_handles_pid": pid, "obs_handles_start": start}
     if limit:
         facet["obs_handles_limit"] = limit
+    if run:
+        facet["obs_handles_run"] = run
     return json.dumps(facet)
 
 
@@ -133,11 +135,67 @@ def test_a_short_interval_holds_and_keeps_the_older_reference():
     assert (r["next_ident"], r["next_handles"], r["next_epoch"]) == (ident, 5790, 1000)
 
 
-def test_a_clock_step_back_rebases():
+def test_a_clock_step_back_rebases_the_reference_without_a_restart():
+    # Review round 1: an interval <= 0 (the dev1 clock stepped back, or two runs in one second) is
+    # the SAME process -- REBASE resets only the reference; BASELINE would clear a live alarm.
     ident = f"9224@{STREAM_START}"
     r = _run(_body(5790), 900, ref=(ident, 5790, 1000))
-    assert r["verdict"] == "BASELINE"
+    assert r["verdict"] == "REBASE"
     assert r["next_epoch"] == 900
+    r = _run(_body(5790), 1000, ref=(ident, 5790, 1000))
+    assert r["verdict"] == "REBASE"
+
+
+def test_a_manual_run_holds_even_over_the_ceiling():
+    # Review round 1: a run under the minimum interval is not a new observation for either arm, so
+    # it must not advance the CEILING confirm either.
+    ident = f"9224@{STREAM_START}"
+    r = _run(_body(4_070_000), 1100, ref=(ident, 4_066_772, 1000))
+    assert r["verdict"] == "HOLD"
+    assert (r["next_ident"], r["next_handles"], r["next_epoch"]) == (ident, 4_066_772, 1000)
+    assert r["ceiling"] == dec.DEFAULT_CEILING
+
+
+def test_a_rebase_over_the_ceiling_does_not_advance_the_confirm_either():
+    ident = f"9224@{STREAM_START}"
+    r = _run(_body(4_070_000), 900, ref=(ident, 4_066_772, 1000))
+    assert r["verdict"] == "REBASE"
+
+
+def test_a_linux_leak_under_a_1024_limit_reads_growing():
+    # Review round 1: a fixed 5,000/h is ~5x a 1024-fd limit per hour, so a Linux leak would hit
+    # EMFILE before paging. Half the limit per hour (512/h here) is the Linux growth bound.
+    ref = ("4242@1791190000", 600, 1000)
+    r = _run(_body(600 + 167, pid="4242", start="1791190000", limit="1024"), 1300, ref=ref)
+    assert r["verdict"] == "GROWING", r
+    assert r["growth_bound_per_h"] == 512
+
+
+def test_linux_wobble_under_a_1024_limit_stays_healthy():
+    ref = ("4242@1791190000", 600, 1000)
+    r = _run(_body(620, pid="4242", start="1791190000", limit="1024"), 1300, ref=ref)
+    assert r["verdict"] == "HEALTHY"
+
+
+def test_a_large_linux_limit_keeps_the_absolute_growth_bound():
+    ref = ("4242@1", 600, 1000)
+    r = _run(_body(900, pid="4242", start="1", limit="524288"), 1300, ref=ref)
+    assert r["verdict"] == "HEALTHY" and r["growth_bound_per_h"] == dec.DEFAULT_GROWTH_PER_H
+
+
+def test_the_run_token_keys_the_identity_through_a_clock_step():
+    # Review round 1: on Linux the start epoch is btime + ticks, and btime moves when the clock is
+    # stepped (strih-lx is the dantesync date master). The served run token (boot id + start
+    # ticks) does not move, so the identity follows it.
+    run = "1b4e28ba-2fa1-11d2-883f-0016d3cca427:360000"
+    first = _run(_body(600, pid="4242", start="1791190000", limit="1024", run=run), 1000)
+    assert first["verdict"] == "BASELINE" and first["next_ident"] == f"4242@{run}"
+    ref = (first["next_ident"], first["next_handles"], first["next_epoch"])
+    stepped = _run(_body(800, pid="4242", start="1791190001", limit="1024", run=run), 1300, ref=ref)
+    assert stepped["verdict"] == "GROWING"
+    other = _run(_body(800, pid="4242", start="1791190001", limit="1024", run="x:999"), 1300,
+                 ref=ref)
+    assert other["verdict"] == "BASELINE"
 
 
 def test_the_5_10_snapshot_is_over_the_ceiling():
@@ -187,9 +245,10 @@ def test_the_cli_prints_every_key_the_watchdog_reads():
     # int(5790 + 46.875 * 300) = 19852 -> +14062 handles in 300 s = 168,744/h
     assert kv["pid"] == "9224" and kv["rate_per_h"] == "168744"
     assert kv["next_ident"] == f"9224@{STREAM_START}" and kv["next_epoch"] == "1300"
-    for key in ("start", "ident", "limit", "cap", "ceiling", "interval_s", "hours_to_cap",
-                "next_handles"):
+    for key in ("start", "run", "ident", "limit", "cap", "ceiling", "growth_bound_per_h",
+                "interval_s", "hours_to_cap", "next_handles"):
         assert key in kv
+    assert kv["growth_bound_per_h"] == "5000"
 
 
 def test_the_cli_with_an_empty_reference_and_unreachable_box():
