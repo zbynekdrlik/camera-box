@@ -79,14 +79,17 @@ PROBE
 }
 
 # ro_window_writers_cmd -> ONE remote statement that prints the processes holding a file open for
-# WRITING on / (issue 1405): the header and every `fuser -vm /` line whose ACCESS field (the one
-# right after the PID) carries F. `fuser -vm /` lists PID 1 and the kernel threads first, so a cut
-# at N lines (`| head -n 40`) hides a writer with a high PID. No writer and no header line = fuser
-# printed no listing (missing, failed): it says so, never "none". A writer line is printed whatever
-# the header (a localized one is not matched). Literal heredoc: every $ is awk's.
+# WRITING on / (issue 1405): the header and every `fuser -vm /` line whose ACCESS field carries F.
+# The ACCESS field is found by its own shape (5 characters of `.rcefFm`, the PID right before it),
+# never as "the field after the first number": fuser prints an unresolvable USER as a number, and a
+# `1000 4242 F.... cmd` line would otherwise read the uid as the PID and skip the writer. `fuser -vm
+# /` lists PID 1 and the kernel threads first, so a cut at N lines (`| head -n 40`) hides a writer
+# with a high PID. No writer and no header line = fuser printed no listing (missing, failed): it
+# says so, never "none". A writer line is printed whatever the header (a localized one is not
+# matched). Literal heredoc: every $ is awk's.
 ro_window_writers_cmd() {
   cat <<'CMDS'
-  { fuser -vm / 2>&1 || true; } | awk '/USER/ && /PID/ && /ACCESS/ { print; h = 1; next } { for (i = 1; i < NF; i++) if ($i ~ /^[0-9]+$/) { if ($(i + 1) ~ /F/) { print; n++ } break } } END { if (n == 0) print (h ? "  (none: no process holds a file open for writing on /)" : "  (fuser printed no listing -- is psmisc installed? check by hand: fuser -vm /)") }' >&2 || true;
+  { fuser -vm / 2>&1 || true; } | awk '/USER/ && /PID/ && /ACCESS/ { print; h = 1; next } { for (i = 2; i <= NF; i++) if ($i ~ /^[.rcefFm][.rcefFm][.rcefFm][.rcefFm][.rcefFm]$/ && $(i - 1) ~ /^[0-9]+$/) { if ($i ~ /F/) { print; n++ } break } } END { if (n == 0) print (h ? "  (none: no process holds a file open for writing on /)" : "  (fuser printed no listing -- is psmisc installed? check by hand: fuser -vm /)") }' >&2 || true;
 CMDS
 }
 
@@ -104,12 +107,22 @@ CMDS
 # The FAIL lines: `FAIL: [TAG] BOX's root is NOT read-only ...` + CONSEQUENCE, the writers
 # (ro_window_writers_cmd), the deleted-but-open holders (ro_window_holder_probe_cmd), and
 # `FAIL: [TAG] HINT` last. TAG, BOX, CONSEQUENCE and HINT are placed verbatim inside a double-quoted
-# remote echo: they carry no double quote and no backtick, and a `$` in them expands ON THE BOX
-# (cam2-painter-ro-persist.sh reads the unit state that way). The whole text names `remount,ro /`
-# exactly once (the command) and never `systemctl`, so a caller's text anchors and its
-# "every systemctl line ends || true" rule (bkshading-relay-mode.sh) are untouched.
+# remote echo: a `$` in them expands ON THE BOX (cam2-painter-ro-persist.sh reads the unit state that
+# way). A double quote or a backtick would break or inject into that echo, so such an argument emits
+# a remote text that FAILS LOUD (`exit 1`) instead of a close -- never a silent empty command. The
+# shared text names `remount,ro /` exactly once (the command; a caller's HINT may name it again) and
+# never `systemctl`, so a caller's text anchors and its "every systemctl line ends || true" rule
+# (bkshading-relay-mode.sh) are untouched.
 ro_window_close_cmds() {
-  local tag="${1:-ro-window}" box="${2:-this box}" consequence="${3:-}" hint="${4:-}"
+  local tag="${1:-ro-window}" box="${2:-this box}" consequence="${3:-}" hint="${4:-}" arg
+  for arg in "$tag" "$box" "$consequence" "$hint"; do
+    case "$arg" in
+    *'"'* | *'`'*)
+      printf '%s\n' "echo 'FAIL: ro_window_close_cmds: an argument holds a double quote or a backtick -- the rw window was NOT closed by this text; put the root back read-only by hand' >&2; exit 1;"
+      return 0
+      ;;
+    esac
+  done
   printf '%s;\n' "$(declare -f ro_root_mount_mode)"
   cat <<CMDS
 _row_sync_rc=0;
@@ -154,6 +167,16 @@ ro_window_deleted_holders() {  # $1 = `lsof +L1` output
   ' || true
 }
 
+# ro_window_close_failed TEXT -> 0 when TEXT (a remote program's captured output) holds the shared
+# close's "root is NOT read-only" FAIL line, i.e. the program stopped at a close that failed: whatever
+# it would have started afterwards was NOT started. 1 otherwise. Pure, never fails the caller.
+ro_window_close_failed() {  # $1 = the captured stdout+stderr of a remote program
+  case "${1:-}" in
+  *"'s root is NOT read-only after the remount-rw window"*) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
 # ro_window_holders CLOSE_OUTPUT -> ONE line naming every holder a FAILED close listed: the writers
 # (`command[pid]`, from the 'processes with a file open for WRITING' section) and the deleted-but-open
 # holders (`command[pid] path`, the 'holders of deleted-but-open files' section), `; `-joined, in
@@ -166,9 +189,9 @@ ro_window_holders() {  # $1 = the captured stdout+stderr of a failed ro_window_c
     /processes with a file open for WRITING on \// { s = 1; next }
     /^FAIL: / { s = 0 }
     s == 1 && !(/USER/ && /PID/ && /ACCESS/) {
-      for (i = 1; i < NF; i++) if ($i ~ /^[0-9]+$/) {
-        if ($(i + 1) ~ /F/ && (i + 2) <= NF) {
-          key = $(i + 2) "[" $i "]"
+      for (i = 2; i <= NF; i++) if ($i ~ /^[.rcefFm][.rcefFm][.rcefFm][.rcefFm][.rcefFm]$/ && $(i - 1) ~ /^[0-9]+$/) {
+        if ($i ~ /F/ && (i + 1) <= NF) {
+          key = $(i + 1) "[" $(i - 1) "]"
           if (!seen[key]++) out = out (out == "" ? "" : "; ") key
         }
         break

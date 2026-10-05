@@ -666,7 +666,7 @@ ndi_discovery_cambox_apply_remote_snippet() {
   declare -f _ndi_discovery_json_string _ndi_discovery_networks_key ndi_discovery_config_ips \
     ndi_discovery_config_servers _ndi_discovery_norm_list ndi_discovery_dropin_config_dir \
     _ndi_discovery_dropin_foreign ndi_discovery_config_json _ndi_discovery_stripped_json ndi_discovery_cambox_plan \
-    ndi_discovery_cambox_apply_plan
+    ndi_discovery_cambox_apply_plan ro_root_mount_mode
   cat <<'NDI_APPLY'
 _ndi_plan="$(ndi_discovery_cambox_plan "$_ndi_dir" "$_ndi_dropin")"
 case "$_ndi_plan" in
@@ -683,7 +683,7 @@ _ndi_had_dropin=0
 [ ! -e "$_ndi_dropin" ] || _ndi_had_dropin=1
 _ndi_ro=0
 _ndi_opts="$(findmnt -no OPTIONS / 2>/dev/null || awk '$2=="/"{print $4; exit}' /proc/mounts 2>/dev/null || true)"
-case "$_ndi_opts" in ro | ro,*) _ndi_ro=1 ;; esac
+case "$(ro_root_mount_mode "$_ndi_opts")" in ro) _ndi_ro=1 ;; esac
 _ndi_open=0
 _ndi_restore_ro() {
   [ "$_ndi_open" = 1 ] || return 0

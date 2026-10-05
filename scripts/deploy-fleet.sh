@@ -96,6 +96,7 @@ scp_box()  { sshpass -p "$SSH_PASS" scp -o StrictHostKeyChecking=no "$2" "root@$
 # returns 1, so the caller starts NOTHING.
 close_ro_or_fail() {  # $1=ip $2=box name $3=FAILED label $4=what the box is left with
   local out rc=0 holders
+  OPEN_WINDOW=""   # this close is the window's one close attempt (the EXIT path never repeats it)
   out="$(ssh_box "$1" "$(ro_window_close_cmds "issue 1407" "$2" "$4" \
     "stop that writer on $2, put the root back read-only until 'findmnt -no OPTIONS /' reads ro, then re-run deploy-fleet.sh for it (never reboot a cambox remotely).")" 2>&1)" || rc=$?
   [ "$rc" -eq 0 ] && return 0
@@ -198,6 +199,7 @@ deploy_frame_probe_to_painter() {
   # and would resurrect the OLD binary mid-swap; a re-arm inside the ~2 s swap window is a second way
   # the old inode stays busy (→ ETXTBSY). It is a transient systemd-run unit, so a stop when it was
   # never armed (a bare deploy-fleet run outside E2E) is a harmless no-op (|| true).
+  OPEN_WINDOW="$ip|$painter|$painter-painter"
   if ! ssh_box "$ip" "mount -o remount,rw / && (systemctl stop cam2-painter-deadman.timer 2>/dev/null || true) && (systemctl stop cam2-painter.service 2>/dev/null || true)"; then
     err "[$painter] remount-rw / painter stop failed"; FAILED+=("$painter-painter(stop-failed)")
     # issue 1407: the rw remount may have landed before the failure -- close it the verified way
@@ -240,11 +242,31 @@ deploy_frame_probe_to_painter() {
 
 # Clean up a downloaded-artifact temp dir on exit (no-op when --binary was used).
 DIST=""
+# issue 1407: "ip|box|label" while a box's rw window is open (set just BEFORE the rw remount, cleared
+# by close_ro_or_fail). A SIGINT/SIGTERM (a CI cancel) between the rw+stop and the close would
+# otherwise leave that cambox on a writable root with its service stopped, silently.
+OPEN_WINDOW=""
 # shellcheck disable=SC2317  # invoked indirectly via the EXIT trap below
 # NB: must not leak a non-zero status from the trap (it would override the script's exit code) —
-# end with `:` so EXIT preserves the real exit status.
-cleanup() { [ -n "$DIST" ] && rm -rf "$DIST"; :; }
+# end with `:` so EXIT preserves the real exit status. An open window is closed the ONE verified way
+# and nothing is started (the binary on the box may be half-copied): the box is named in FAILED.
+cleanup() {
+  if [ -n "$OPEN_WINDOW" ]; then
+    set +e
+    trap '' INT TERM
+    local ip box label
+    IFS='|' read -r ip box label <<<"$OPEN_WINDOW"
+    err "[$label] deploy interrupted with the rw window open -- closing it (verified); the service on $box stays STOPPED"
+    close_ro_or_fail "$ip" "$box" "$label" "The deploy was interrupted mid-swap; nothing is started." \
+      && FAILED+=("$label(interrupted: root ro, service stopped)")
+    err "DEPLOY INTERRUPTED — issues: ${FAILED[*]}"
+  fi
+  [ -n "$DIST" ] && rm -rf "$DIST"
+  :
+}
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # --- #1138 frame-probe-ONLY mode ----------------------------------------------------------
 # --frame-probe WITHOUT --binary/--run deploys ONLY the cam2 painter (the auto-align path in
@@ -329,6 +351,7 @@ for cam in $SET; do
   # only on a root that reads ro again. A root left writable is a FAILED box naming its writers --
   # never a start, never a swallowed close (every cambox runs read-only, setup-device STEP 18).
   info "[$cam] stop service + remount rw + copy + remount ro (verified) + start"
+  OPEN_WINDOW="$ip|$cam|$cam"
   if ! ssh_box "$ip" "mount -o remount,rw / && systemctl stop camera-box"; then
     err "[$cam] remount-rw / stop failed"; FAILED+=("$cam(stop-failed)")
     # the rw remount may have landed before the failed stop (close_ro_or_fail records its own entry)
@@ -337,7 +360,9 @@ for cam in $SET; do
   fi
   if ! scp_box "$ip" "$BINARY" "/usr/local/bin/camera-box"; then
     err "[$cam] scp failed"; FAILED+=("$cam(scp-failed)")
-    # the old binary is still in place: bring it back up, on a root verified read-only only
+    # bring camera-box back up, on a root verified read-only only. scp writes the target in place,
+    # so a mid-transfer failure can leave a partial binary that fails to start: the box is already
+    # FAILED (scp-failed) and the next deploy copies it again.
     if close_ro_or_fail "$ip" "$cam" "$cam" "A cambox must never run on a writable root, so camera-box.service is NOT started (the copy failed)."; then
       ssh_box "$ip" "systemctl start camera-box" || err "[$cam] camera-box start after the failed scp failed"
     fi

@@ -64,18 +64,20 @@ dantesync_date_role() {
 }
 
 # _dantesync_linux_rw_window_sh -> the remote bash lines both Linux programs open their read-only
-# root window with (issue 1407): read the root mode (findmnt, the /proc/mounts fallback; `ro` as the
-# FIRST comma-token, #599/#1077), remount rw on a read-only root, and define the two window helpers:
+# root window with (issue 1407): read the root mode (findmnt, the /proc/mounts fallback) through the
+# ONE first-token reading, ro_root_mount_mode (its definition emitted here; `ro` as the FIRST
+# comma-token, #599/#1077), remount rw on a read-only root, and define the two window helpers:
 #   _dantesync_remount_ro -- the ONE verified ro close, at most once per open window (the normal
 #     path and the EXIT trap may both call it); a root left writable exits 1 naming the writers, so
 #     the dantesync (re)start after it never runs on a writable root.
 #   _dantesync_reopen_rw -- reopen the window for a later write (the self-heal's .bak copy, the date
 #     state delete). It never fails the program: a refused remount leaves that write to fail by name.
 _dantesync_linux_rw_window_sh() {
+  printf '%s\n' "$(declare -f ro_root_mount_mode)"
   cat <<'EOF'
 ro_root=0
 opts="$(findmnt -no OPTIONS / 2>/dev/null || awk '$2=="/"{print $4; exit}' /proc/mounts 2>/dev/null)"
-case "$opts" in ro | ro,*) ro_root=1 ;; esac
+case "$(ro_root_mount_mode "$opts")" in ro) ro_root=1 ;; esac
 if [ "$ro_root" = 1 ]; then mount -o remount,rw /; fi
 _ds_rw_open=$ro_root
 _dantesync_remount_ro() {
