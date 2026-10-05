@@ -208,6 +208,18 @@ fn run_fleet(remote_version: &str, journal_line: &str, sha_match: bool) -> RunRe
         "#!/usr/bin/env bash\necho 'ro,relatime'\n".to_string(),
     );
     stub("sync", "#!/usr/bin/env bash\nexit 0\n".to_string());
+    // issue 1407 design addendum item 2: the box-side swap renames a byte-verified SIDECAR over the
+    // live binary (`chmod`, `mv -f`, and `rm -f` of a bad sidecar). This harness runs the remote text
+    // on the host itself, so those must never touch the host's own /usr/local/bin: a box path is a
+    // no-op success, anything else (the local `chmod +x` of the artifact) is the real tool.
+    for tool in ["chmod", "mv", "rm"] {
+        stub(
+            tool,
+            format!(
+                "#!/usr/bin/env bash\ncase \"$*\" in */usr/local/bin/*) exit 0 ;; esac\ncommand -p {tool} \"$@\"\n"
+            ),
+        );
+    }
     // sha256sum: the script calls it BOTH locally (on the artifact) and remotely (on the deployed
     // file). Return a fixed hash for the local artifact path; for the remote path return the same
     // hash when sha_match, else a different one (forces a byte-verify mismatch).

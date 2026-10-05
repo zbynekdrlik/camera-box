@@ -1324,7 +1324,19 @@ do_test() {
   echo "===== rig-mode TEST (#247/#257/#291) — paint dual-QR vernier on cam2, genlock_burn ON downstream ====="
   echo
   echo "[relay] issue 1311: stop+disable bkshading-relay on the relay boxes (EVENT-only — removes the PTP-session power toggles + the issue-1229 polling noise from the shared USB hub during measurement):"
-  bkshading_relay_mode_apply test "$CAM_PW" "${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP"
+  # issue 1407 design addendum item 1 (the issue-868 pattern): a relay box whose state did not land
+  # (its root left read-WRITE, or no answer) makes the apply return non-zero, and under set -e that
+  # ended the TEST switch right here, before the painter. Record it, warn by name, run every step
+  # below, and fold it into the exit status at the end. ONE exception (decisions 5996845165 Q1 = B
+  # and 5997211658 Q3): when the failed box is the painter box itself and its rw window is broken
+  # (its root stayed read-WRITE, or it refused the rw remount), stop here, before the painter
+  # launch: the painter handoff would fail on that same root and leave cam2 dark.
+  local _relay_rc=0
+  bkshading_relay_mode_apply test "$CAM_PW" "${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP" || _relay_rc=$?
+  if [ "$_relay_rc" -ne 0 ] && bkshading_relay_mode_painter_window_stop test "$PAINTER_IP"; then
+    exit 1
+  fi
+  bkshading_relay_mode_warn_continue test "$_relay_rc"
   echo
   echo "[cam2 ${PAINTER_IP}] #725 resolve the QPSK audio-marker device from cam2's LIVE aplay -l (never trust the hardcoded default):"
   local resolved_marker_device
@@ -1381,6 +1393,10 @@ do_test() {
   echo "ACHIEVED (chain, #901): strih's live program scene confirmed NON-BLACK — the camera genuinely sees content, not just a live process."
   echo "                        mbc Dante transport confirmed bound + unmuted on stream."
   echo "                        measurement-audio arrival checked end to end (verdict printed above — PASS / non-blocking WARN / hard FAIL)."
+  if [ "${_relay_rc:-0}" -ne 0 ]; then
+    bkshading_relay_mode_result test "$_relay_rc"
+    exit 1
+  fi
   echo "RESULT: TEST mode — WHOLE CHAIN verified (cam emission + OBS program/burn/mapping + optical proof + Dante transport + measurement-audio arrival)."
 }
 
@@ -1679,7 +1695,13 @@ do_event() {
   camera_test_settings_restore "$RIG_MODE_DIR" "$STRIH_IP" "$STREAM_IP" "$CAM_PW" "${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP" || true
   echo
   echo "[relay] issue 1311: enable+start bkshading-relay on the relay boxes (EVENT-only — shading available for the broadcast):"
-  bkshading_relay_mode_apply event "$CAM_PW" "${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP"
+  # issue 1407 design addendum item 1 (the issue-868 pattern, as for the cam-side restore above): a
+  # relay box whose state did not land makes the apply return non-zero, and under set -e that ended
+  # EVENT here, BEFORE the burn-OFF below: a measurement burn left ON going into a production.
+  # Record it, warn by name, run every step below, and fold it into the exit status at the end.
+  local _relay_rc=0
+  bkshading_relay_mode_apply event "$CAM_PW" "${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP" || _relay_rc=$?
+  bkshading_relay_mode_warn_continue event "$_relay_rc"
   echo
   # #721 (live 2026-08-16): the painter stop + the ledger sweep above leave every painter dead, but
   # the marker CSV they wrote (/run/rig-qpsk-markers.csv, root-owned on tmpfs) SURVIVES -- and item 8
@@ -1705,6 +1727,7 @@ do_event() {
   echo "===== [#722] EVENT-mode CONTRACT — the full machine-checkable assert phase ====="
   event_mode_assert
   camera_test_settings_restore_discord_note "${EVENT_ASSERT_DISCORD_MSG_PATH:-}"
+  bkshading_relay_mode_discord_note "${EVENT_ASSERT_DISCORD_MSG_PATH:-}" "$_relay_rc"
   echo "=================================================================================="
   echo
   # #724: send the Discord confirmation on BOTH outcomes (pass=confirmation, fail=warning naming
@@ -1713,15 +1736,16 @@ do_event() {
   event_mode_discord_confirm_send "$(cat "$EVENT_ASSERT_DISCORD_MSG_PATH" 2>/dev/null || echo "$EVENT_ASSERT_SUMMARY")"
   rm -f "$EVENT_ASSERT_DISCORD_MSG_PATH" "$EVENT_ASSERT_RESULT_JSON" 2>/dev/null || true
   echo
-  # #868: fold the recorded cam-side restore failure into the final verdict — deferring it past the
-  # burn-clear must never SWALLOW it.
-  if [ "$EVENT_ASSERT_PASS" -eq 0 ] && [ "${_cam_restore_rc:-0}" -eq 0 ]; then
+  # #868: fold the recorded cam-side restore failure (and, issue 1407, the relay step's) into the
+  # final verdict — deferring them past the burn-clear must never SWALLOW them.
+  if [ "$EVENT_ASSERT_PASS" -eq 0 ] && [ "${_cam_restore_rc:-0}" -eq 0 ] && [ "${_relay_rc:-0}" -eq 0 ]; then
     echo "RESULT: EVENT mode — cam side PASS, burns OFF, #722 CONTRACT CONFIRMED clean for broadcast."
     exit 0
   fi
+  bkshading_relay_mode_result event "${_relay_rc:-0}"
   if [ "${_cam_restore_rc:-0}" -ne 0 ]; then
     echo "RESULT: EVENT mode — cam-side restore FAILED (#868, rc=${_cam_restore_rc}). Burns were still cleared, but the rig is NOT confirmed clean — see the cam-side failure above." >&2
-  else
+  elif [ "$EVENT_ASSERT_PASS" -ne 0 ]; then
     echo "RESULT: EVENT mode — #722 CONTRACT FAILED. The rig is NOT confirmed clean for broadcast — see the assert summary above." >&2
   fi
   exit 1

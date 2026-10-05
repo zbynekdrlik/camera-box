@@ -389,7 +389,7 @@ class Rig:
         os.makedirs(stubs)
         shutil.copy(MODULE, os.path.join(self.here, "camera_test_settings.py"))
         for name in ("camera-test-settings.sh", "cambox-offline-ack.sh", "stray-session-check.sh",
-                     "bkshading-relay-runtime.sh"):
+                     "bkshading-relay-runtime.sh", "event-mode-discord-confirm.sh"):
             shutil.copy(os.path.join(REPO, "scripts", "lib", name), os.path.join(self.here, "lib", name))
         self._exe(os.path.join(self.bin, "sshpass"), FAKE_SSHPASS)
         self._exe(os.path.join(self.here, "obs_phase2.py"), FAKE_OBS_PHASE2)

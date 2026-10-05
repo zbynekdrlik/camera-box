@@ -469,6 +469,18 @@ fn run_frame_probe_only_with_set(camera_set: &str) -> (bool, String) {
     // root mode — cam2's root reads read-only again (never the CI runner's own rw root).
     stub("findmnt", "#!/usr/bin/env bash\necho 'ro,relatime'\n");
     stub("sync", "#!/usr/bin/env bash\nexit 0\n");
+    // issue 1407 (ROZHODNUTÉ 5996845165 Q2): the painter swap's rename is no longer `|| true`, and a
+    // failure removes the sidecar. This harness runs the remote text on the HOST, so the box-side
+    // `chmod` / `mv` / `rm` of a `/usr/local/bin/` path are no-op successes here (never the host's
+    // own /usr/local/bin); any other path (the local artifact) goes to the real tool.
+    for tool in ["chmod", "mv", "rm"] {
+        stub(
+            tool,
+            &format!(
+                "#!/usr/bin/env bash\ncase \"$*\" in */usr/local/bin/*) exit 0 ;; esac\ncommand -p {tool} \"$@\"\n"
+            ),
+        );
+    }
     // The remote sha256sum must MATCH the local artifact so byte-verify passes. The local read is
     // on the artifact path; the remote read is on /usr/local/bin/frame-probe — return the same hash.
     stub("sha256sum", "#!/usr/bin/env bash\necho 'aaaa  '\"$1\"\n");
