@@ -368,7 +368,10 @@ def test_the_sweep_pattern_catches_every_known_swallow_shape():
                 # review round 2: print-only helpers and a message-only brace group go on too
                 "mount -o remount,ro / || err \"could not remount\"",
                 "mount -o remount,ro / || { warn \"busy\"; }",
-                "mount -o remount,ro / || logger -t deploy busy"):
+                "mount -o remount,ro / || logger -t deploy busy",
+                # review round 3: a group that ends in a ZERO return/exit goes on too
+                "mount -o remount,ro / || { echo x; return 0; }",
+                "mount -o remount,ro / || { warn x; exit 0; }"):
         assert _SWALLOW.search(bad), bad
     for good in ('_row_ro_err="$(mount -o remount,ro / 2>&1)" || _row_ro_rc=$?;',
                  'if "$MOUNT" -o remount,ro /; then',
@@ -381,8 +384,22 @@ def test_the_sweep_pattern_catches_every_known_swallow_shape():
                  # review round 2: a bare / non-zero return passes the failure on
                  "mount -o remount,ro / || return",
                  "mount -o remount,ro / || return 1",
+                 # review round 3: a loud group that names a ${var} before its exit
+                 "mount -o remount,ro / || { echo \"FAIL on ${host}\" >&2; exit 1; }",
+                 "mount -o remount,ro / || { err \"x ${h}\"; return 1; }",
                  "printf 'mount -o remount,rw / && apt-get update && mount -o remount,ro /   # comment'"):
         assert not _SWALLOW.search(good), good
+
+
+def test_deploy_fleet_names_a_pending_painter_start_only_for_an_enable_now_restore():
+    # review round 3: the interrupt advice "start it there by hand" must never be printed for a
+    # deliberately dark (#892 EVENT) painter -- a start would put the QR on a live broadcast.
+    text = (ROOT / "scripts" / "deploy-fleet.sh").read_text()
+    start = text.index("\ndeploy_frame_probe_to_painter() {\n")
+    body = text[start:text.index("\n}\n", start)]
+    marks = [ln for ln in body.splitlines() if re.search(r"\bPENDING_START=\"\$painter", ln)]
+    assert marks, "the painter swap sets a pending start"
+    assert all("enable-now" in ln for ln in marks), marks
 
 
 def test_the_shared_lib_is_sourced_by_every_rw_window_site():
