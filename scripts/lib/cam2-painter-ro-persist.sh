@@ -94,7 +94,10 @@ cam2_painter_persist_state_cmds() {
   # (1) the shared root-mode reader, defined on the box (a statement of its own, ';'-terminated).
   printf '%s;\n' "$(declare -f ro_root_mount_mode)"
   # (2) the window: remount rw, the change, the ro remount. $action is a build-time value; every
-  #     RUNTIME var is \$-escaped so it survives into the emitted remote script.
+  #     RUNTIME var is \$-escaped so it survives into the emitted remote script. The FAIL line reads
+  #     the painter state with 'systemctl show -p ActiveState --value', never the is-active verb: the
+  #     disable text runs early in the EVENT script, and two tests find EVENT's later "painter
+  #     confirmed stopped" check by its is-active text (review round 4).
   cat <<CMDS
 # #1175: cam2's root is READ-ONLY; the '$action' of cam2-painter.service cannot write the
 #        /etc/systemd/system enable symlink and FAILS 'Read-only file system'. Remount rw, change
@@ -113,7 +116,7 @@ _pss_ro_err="\$(mount -o remount,ro / 2>&1)" || _pss_ro_rc=\$?;
 _pss_opts="\$(findmnt -no OPTIONS / 2>/dev/null || awk '\$2=="/"{print \$4; exit}' /proc/mounts 2>/dev/null || true)";
 _pss_root="\$(ro_root_mount_mode "\$_pss_opts")";
 if [ "\$_pss_root" != "ro" ]; then
-  echo "FAIL: [#1405] cam2's root is NOT read-only after the remount-rw window ('findmnt -no OPTIONS /' = '\$_pss_opts' -> \$_pss_root; 'mount -o remount,ro /' rc=\$_pss_ro_rc\${_pss_ro_err:+: \$_pss_ro_err}). A cambox must never run on a writable root, so $refusal. cam2-painter.service is-enabled now: '\$(systemctl is-enabled cam2-painter.service 2>/dev/null || true)', is-active now: '\$(systemctl is-active cam2-painter.service 2>/dev/null || true)'." >&2;
+  echo "FAIL: [#1405] cam2's root is NOT read-only after the remount-rw window ('findmnt -no OPTIONS /' = '\$_pss_opts' -> \$_pss_root; 'mount -o remount,ro /' rc=\$_pss_ro_rc\${_pss_ro_err:+: \$_pss_ro_err}). A cambox must never run on a writable root, so $refusal. cam2-painter.service is-enabled now: '\$(systemctl is-enabled cam2-painter.service 2>/dev/null || true)', is-active now: '\$(systemctl show -p ActiveState --value cam2-painter.service 2>/dev/null || true)'." >&2;
   echo "FAIL: [#1405] processes with a file open for WRITING on / ('fuser -vm /', ACCESS F):" >&2;
 CMDS
   # (2b) the holders, in the failure branch only. The writer filter keeps the header and every line

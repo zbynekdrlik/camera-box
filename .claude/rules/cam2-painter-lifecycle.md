@@ -100,8 +100,12 @@ the TEST handoff (`enable-now`) and the EVENT disable (`disable`).
   from `scripts/lib/ro-root.sh`).
   - `rw` or `unknown` FAILS LOUD (exit 1), and the emitter never starts the painter. `unknown` is
     never assumed `ro`. The message names the findmnt reading, the mount error and the current
-    `is-enabled` and `is-active` states (it reads whether the painter runs, never asserts it: an
-    earlier dead-man fire can have started it).
+    `is-enabled` and active states (it reads whether the painter runs, never asserts it: an
+    earlier dead-man fire can have started it). The active state is read with
+    `systemctl show -p ActiveState --value`, never the `is-active` verb: the disable text runs early
+    in the EVENT script, and `harness_rig_mode_fb0_blank_1176.rs` + `rig_mode.rs` find EVENT's
+    step-5 "painter confirmed stopped" check by its `is-active cam2-painter` text, so an earlier
+    copy would blind both to a deleted step-5 check (review round 4).
   - **It names the HOLDERS, two ways.** First, the `fuser -vm /` lines whose ACCESS field carries
     `F` (a file open for writing). fuser lists PID 1 and the kernel threads first, so a `head -n
     40` cut a high-PID writer off (review round 1). Second, the deleted-but-open files from the
