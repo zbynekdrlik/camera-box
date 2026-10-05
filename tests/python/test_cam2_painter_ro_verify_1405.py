@@ -111,6 +111,8 @@ elif verb == "is-active":
     state = "active" if os.path.exists(active_file) else "inactive"
     print(state)
     sys.exit(0 if state == "active" else 3)
+elif verb == "show" and args[1:4] == ["-p", "ActiveState", "--value"]:
+    print("active" if os.path.exists(active_file) else "inactive")
 sys.exit(0)
 '''
 
@@ -410,8 +412,8 @@ def test_handoff_with_a_writer_on_root_fails_loud_before_any_start_1405(box, str
     assert proc.returncode != 0, log
     assert "FAIL: [#1405]" in proc.stderr, proc.stderr
     assert _starts(log) == [], log
-    # H4 polls is-active up to 17 times and the handoff then prints its "handed" line; the FAIL
-    # line may read is-active once (it reports whether the painter runs, review round 3).
+    # H4 reads is-active at least twice (its wait loop, then its if), right after the handoff
+    # prints its "handed" line; the FAIL line reads the active state once at most (review round 3).
     assert "[#1008] handed TEST-mode steady state" not in proc.stdout, proc.stdout
     assert sum(ln.startswith("systemctl is-active") for ln in log) <= 1, (
         f"the handoff must stop at the ro verify, before H4:\n{log}"
@@ -571,3 +573,19 @@ def test_failure_reports_whether_the_painter_runs_1405(box, mode):
     assert proc.returncode != 0, proc.stderr
     assert "is-active now: 'active'" in proc.stderr, proc.stderr
     assert "cam2-painter.service is NOT started" not in proc.stderr, proc.stderr
+
+
+# ---- review round 4: the FAIL line's state read never collides with the EVENT step-5 anchors ---- #
+
+
+def test_failure_branch_never_spells_the_event_inactive_check_1405():
+    # tests/harness_rig_mode_fb0_blank_1176.rs and tests/rig_mode.rs find the EVENT script's
+    # "painter confirmed stopped" check by its text `is-active cam2-painter` (painter_stop_remote
+    # step 5). The disable text runs earlier in that script, so a state read spelled the same way
+    # would become the first match and blind both tests to a removed step-5 check.
+    for mode in ("enable-now", "disable"):
+        text = _persist_text(mode)
+        assert "is-active cam2-painter" not in text, f"{mode}:\n{text}"
+    event = _painter_stop_text()
+    first = event.find("is-active cam2-painter")
+    assert first > event.find("#868") > 0, "the first `is-active cam2-painter` must be the step-5 check"
