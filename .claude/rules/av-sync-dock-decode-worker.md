@@ -262,7 +262,10 @@ on those threads.
     worker runs. `st_start` calls it right before `st->cb_decode_mailbox.start(` with
     `st_video_decode_job_prepare`, which `assign()`s the top band (1.5 MB at 1080p, 6 MB at 4K) and
     norihiro's grid (filled every frame until camera-box mode latches). The sizes come from the
-    same helpers the per-frame fills use (`st_cb_top_band_bytes`, `st_norihiro_grid_bytes`).
+    same helpers the per-frame fills use (`st_cb_top_band_bytes`, `st_norihiro_grid_bytes`). The
+    top band's plan is derived ONCE, in `st_cb_top_band_rows`: the byte size, the fill's buffer
+    size and the rows it copies all come from it. A second plan anywhere (review round 3) lets a
+    width/height swap copy more rows than the buffer holds -- a heap overrun on the video thread.
   - The ONE exception: the phone-mode marker `patches` grow on use. Their size follows the circle
     radius of a decoded PHONE QR (norihiro mode, never the camera-box rig path); a worst-case
     pre-size (a QR as tall as the frame) would hold ~9 MB per 4K output.
@@ -310,8 +313,10 @@ on those threads.
   in `tests/av_sync_dock_decode_mailbox_1367.rs` and the pwsh step "Assert dock decode runs off
   the video-output thread (issue 1367)" in both workflows require `prepare_slots` with
   `st_video_decode_job_prepare` between `quirc_resize(` and the worker start, the prepare's two
-  `assign()`s through the size helpers, and the fills sizing with the same helpers. Killed:
-  the call dropped, the band fill with its own formula, the grid not prepared.
+  `assign()`s through the size helpers, the bytes helper as `video_width x st_cb_top_band_rows`,
+  and the fills sizing and copying with the same helpers and no plan of their own. Killed in both
+  languages: the call dropped, the band fill with its own formula, the grid not prepared, a fill
+  copying with its own (swapped) plan, a bytes helper with its own plan.
 - **The bench reports, it does not gate.** `tests/c/av_sync_dock_demod_bench_1381.cpp` keeps the
   mean / p99 audio-thread budget as CHECKs and REPORTS the worst single push against
   `CB_BENCH_AUDIO_THREAD_MAX_MS` with the producer's faults beside it (`faults=<first pass over
