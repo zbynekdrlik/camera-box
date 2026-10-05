@@ -290,7 +290,7 @@ fn dantesync_clock_default_obs_nodes_name_the_production_strih_1317() {
     );
 }
 
-const ALL_FACETS: [&str; 15] = [
+const ALL_FACETS: [&str; 16] = [
     "audio-lag",
     "av-step",
     "vb-matrix",
@@ -306,6 +306,7 @@ const ALL_FACETS: [&str; 15] = [
     "ndi-sender",
     "win-baseline",
     "audio-mixer",
+    "obs-handles",
 ];
 
 // ---------------------------------------------------------------------------------------------
