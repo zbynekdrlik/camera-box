@@ -58,8 +58,9 @@ def _flow_text():
     return s[s.index("\nusage() {"):s.index('\nif [ "${BASH_SOURCE[0]}" = "${0}" ]; then')]
 
 
-def _run(tmp_path, mode, failing=(), assert_pass=0, enabled=False, missing=(), extra=""):
+def _run(tmp_path, mode, failing=(), assert_pass=0, enabled=False, missing=(), extra="", refused=()):
     """Run the REAL do_<mode> body. FAILING = relay box ips whose ro close fails (a writer on /);
+    REFUSED = relay box ips whose `mount -o remount,rw /` is refused (a root forced read-only);
     MISSING = relay box ips with no box at all (the fake ssh answers like an unreachable host);
     EXTRA = bash run after the stubs (a test overrides one more step there)."""
     boxes = tmp_path / "boxes"
@@ -74,6 +75,8 @@ def _run(tmp_path, mode, failing=(), assert_pass=0, enabled=False, missing=(), e
             (made[ip]["state"] / "enabled-bkshading-relay.service").write_text("enabled\n")
         if ip in failing:
             (boxes / ip / "fake.env").write_text("FAKE_RO_FAIL=1\n")
+        if ip in refused:
+            (boxes / ip / "fake.env").write_text("FAKE_RW_FAIL=1\n")
     dev1 = tmp_path / "dev1-bin"
     dev1.mkdir()
     (dev1 / "sshpass").write_text(f"#!{sys.executable}\n{_SSHPASS}")
@@ -289,3 +292,43 @@ def test_the_event_discord_note_is_one_shared_helper(tmp_path):
     assert [p.name for p in tmp_path.iterdir()] == ["msg.txt"], "no temp file is left behind"
     proc = _note_add(tmp_path / "absent" / "msg.txt", "X", "top")
     assert "RC=0" in proc.stdout and not (tmp_path / "absent").exists(), proc.stderr
+
+
+
+# ---- decision Q3 (ROZHODNUTÉ 5997211658): a REFUSED rw remount on cam2 stops TEST too ------------- #
+
+
+def test_test_refused_rw_remount_on_the_painter_box_stops_before_the_painter_launch(tmp_path):
+    # cam2 refuses `mount -o remount,rw /` (rc=98 in the relay stop FAIL line, e.g. a failing stick).
+    # The painter handoff needs that same rw window, so it cannot succeed either; continuing would only
+    # stop the running painter and leave cam2 dark with no dead-man. TEST stops before the painter
+    # launch, naming cam2 and the refused remount, and exits 1.
+    proc, ran, boxes, _sent = _run(tmp_path, "test", refused=(PAINTER_IP,), enabled=True)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert any(c.startswith("mount -o remount,rw /") for c in log(boxes[PAINTER_IP])), "the remount was tried"
+    for step in ("resolve_marker_device", "painter_launch_remote", "toggle_burn",
+                 "cam2_painter_steady_state_handoff_cmds", "cam2_painter_deadman_arm_cmds"):
+        assert not any(s == step or s.startswith(step + " ") for s in ran), f"{step} ran:\n" + "\n".join(ran)
+    result = [ln for ln in proc.stderr.splitlines() if ln.startswith("RESULT:") and "bkshading relay" in ln]
+    assert result and f"cam2 ({PAINTER_IP})" in result[0], proc.stderr
+    assert "before the painter launch" in result[0] and "rc=98" in result[0], result[0]
+    assert "continuing through" not in proc.stderr, proc.stderr
+
+
+def test_test_refused_rw_remount_on_the_source_box_still_runs_the_painter_steps(tmp_path):
+    # only the painter box stops TEST; a refused remount on the source box keeps the fold
+    proc, ran, _boxes, _sent = _run(tmp_path, "test", refused=(SOURCE_IP,), enabled=True)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert _at(ran, "painter_launch_remote") < _at(ran, "cam2_painter_steady_state_handoff_cmds"), "\n".join(ran)
+    assert "before the painter launch" not in proc.stderr, proc.stderr
+
+
+def test_event_refused_rw_remount_on_the_painter_box_never_stops_event(tmp_path):
+    # EVENT never stops on a relay box: the burn-OFF, the mapping and the contract still run
+    proc, ran, _boxes, sent = _run(tmp_path, "event", refused=(PAINTER_IP,))
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    order = [_at(ran, s) for s in ("toggle_burn event", "enforce_strih_ndi_mapping", "event_mode_assert",
+                                   "event_mode_discord_confirm_send")]
+    assert order == sorted(order), "\n".join(ran)
+    assert "before the painter launch" not in proc.stderr, proc.stderr
+    assert sent is not None and sent.startswith("⚠️"), sent
