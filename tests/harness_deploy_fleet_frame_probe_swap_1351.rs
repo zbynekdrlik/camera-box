@@ -76,6 +76,12 @@ fn run_swap(scp_fail: bool) -> SwapRun {
     stub("chmod", "#!/usr/bin/env bash\nexit 0\n");
     stub("mv", "#!/usr/bin/env bash\nexit 0\n");
     stub("sync", "#!/usr/bin/env bash\nexit 0\n");
+    // issue 1407: a failed swap removes the sidecar (`rm -f /usr/local/bin/frame-probe.new`); this
+    // harness runs the remote text on the HOST, so a box path is a no-op success here.
+    stub(
+        "rm",
+        "#!/usr/bin/env bash\ncase \"$*\" in */usr/local/bin/*) exit 0 ;; esac\ncommand -p rm \"$@\"\n",
+    );
     // issue 1407: the swap's rw window closes through the shared verified close, which READS the
     // root mode — cam2's root reads read-only again (never the CI runner's own rw root).
     stub("findmnt", "#!/usr/bin/env bash\necho 'ro,relatime'\n");

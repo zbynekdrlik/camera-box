@@ -103,6 +103,9 @@ with open(os.path.join(st, "log"), "a") as f:
 if tool != "sha256sum" and root != "rw" and any(a.startswith(fs) for a in sys.argv[1:]):
     sys.stderr.write(f"{tool}: cannot write: Read-only file system\n")
     sys.exit(1)
+if os.environ.get("FAKE_" + tool.upper() + "_RC"):  # a forced failure (FAKE_MV_RC: the rename step)
+    sys.stderr.write(f"{tool}: forced failure\n")
+    sys.exit(int(os.environ["FAKE_" + tool.upper() + "_RC"]))
 os.execv(real, [real] + sys.argv[1:])
 '''
 
@@ -119,15 +122,17 @@ def _log_file_tools(box):
 _OLD_CAMERA_BOX = b"#!/bin/bash\necho 'camera-box 1.0.0-old'\n"
 
 
-def _deploy(tmp_path, args, enabled=None, deadman=False, live=None, **fake):
-    """Run the REAL deploy-fleet.sh over CAMERA_SET=cam2 against the fake box. LIVE = the bytes of
-    the camera-box binary already installed on the box."""
+def _deploy(tmp_path, args, enabled=None, deadman=False, live=None, probe_live=None, **fake):
+    """Run the REAL deploy-fleet.sh over CAMERA_SET=cam2 against the fake box. LIVE / PROBE_LIVE =
+    the bytes of the camera-box / frame-probe binary already installed on the box."""
     box = make_box(tmp_path, root="ro")
     _log_file_tools(box)
     st = box["state"]
     (st / "fs" / "usr" / "local" / "bin").mkdir(parents=True)
     if live is not None:
         (st / "fs" / "usr" / "local" / "bin" / "camera-box").write_bytes(live)
+    if probe_live is not None:
+        (st / "fs" / "usr" / "local" / "bin" / "frame-probe").write_bytes(probe_live)
     if enabled:
         (st / "enabled-cam2-painter.service").write_text("enabled\n")
         (st / "active-cam2-painter.service").write_text("active\n")
@@ -308,6 +313,13 @@ def test_deploy_fleet_interrupted_during_the_close_closes_it_again(tmp_path):
 # ---- deploy-fleet.sh: the cam2 frame-probe swap ------------------------------------------------- #
 
 
+_OLD_PROBE = b"FRAME-PROBE-OLD-BUILD\n"
+
+
+def _probe_bin(box, name="frame-probe"):
+    return box["state"] / "fs" / "usr" / "local" / "bin" / name
+
+
 def _probe(tmp_path):
     p = tmp_path / "frame-probe-artifact"
     p.write_bytes(b"FRAME-PROBE-1407\n")
@@ -351,8 +363,10 @@ def test_deploy_fleet_dark_painter_stays_dark_and_the_root_goes_back_ro(tmp_path
 
 
 def test_deploy_fleet_painter_failed_scp_closes_before_the_restore(tmp_path):
+    # the box runs an old frame-probe: a failed copy leaves it untouched, so it is restarted (decision
+    # 5996845165 Q2: the painter starts only on the verified new build or the unchanged pre-swap one)
     proc, box = _deploy(tmp_path, ["--frame-probe", str(_probe(tmp_path))], enabled=True, deadman=True,
-                        FAKE_SCP_RC="1")
+                        probe_live=_OLD_PROBE, FAKE_SCP_RC="1")
     calls = log(box)
     assert proc.returncode != 0
     assert starts_on_rw(calls) == [], "\n".join(calls)
@@ -825,3 +839,84 @@ def test_rt_kernel_driver_prints_a_multi_line_step_below_its_token():
     assert not [ln for ln in lines if "bash -s <<" in ln and not ln.startswith("bash -s <<")], proc.stdout
     one_liner = [ln for ln in lines if ln.startswith("reboot-into-lowlatency")]
     assert one_liner and "# SUPERVISOR:" in one_liner[0], "single-line steps keep the token column"
+
+
+
+# ---- deploy-fleet.sh: the cam2 frame-probe swap gets the camera-box sidecar shape (decision Q2) ---- #
+# ROZHODNUTÉ 5996845165: sidecar scp, sidecar byte-verify BEFORE the rename, the rename with no
+# `|| true`, the final-path byte-verify AFTER it kept; on any failure the partial frame-probe.new is
+# removed, the painter never starts on an unverified binary, the box is FAILED by name, and the
+# verified ro close still runs.
+
+
+def test_deploy_fleet_painter_swap_verifies_the_sidecar_before_the_rename_and_the_final_path_after(tmp_path):
+    probe = _probe(tmp_path)
+    proc, box = _deploy(tmp_path, ["--frame-probe", str(probe)], enabled=True, deadman=True, probe_live=_OLD_PROBE)
+    calls = log(box)
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}\n" + "\n".join(calls)
+    scp = index(calls, "SCP /usr/local/bin/frame-probe.new root=rw")
+    verify = index(calls, "sha256sum /usr/local/bin/frame-probe.new root=rw", scp)
+    swap = index(calls, "mv -f /usr/local/bin/frame-probe.new /usr/local/bin/frame-probe root=rw", verify)
+    final = index(calls, "sha256sum /usr/local/bin/frame-probe root=rw", swap)
+    ro = index(calls, "mount -o remount,ro / root=rw", final)
+    start = index(calls, "systemctl start cam2-painter.service root=ro", ro)
+    assert scp < verify < swap < final < ro < start, "\n".join(calls)
+    assert _probe_bin(box).read_bytes() == probe.read_bytes()
+    assert not _probe_bin(box, "frame-probe.new").exists()
+
+
+def test_deploy_fleet_painter_corrupt_sidecar_never_goes_live_and_the_unchanged_painter_restarts(tmp_path):
+    proc, box = _deploy(tmp_path, ["--frame-probe", str(_probe(tmp_path))], enabled=True, deadman=True,
+                        probe_live=_OLD_PROBE, FAKE_SCP_CORRUPT="1")
+    calls = log(box)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    assert "cam2-painter(sidecar-sha-mismatch)" in out, out
+    assert [c for c in calls if c.startswith("mv ")] == [], "a corrupt sidecar is never renamed:\n" + "\n".join(calls)
+    assert _probe_bin(box).read_bytes() == _OLD_PROBE, "the corrupt copy must never go live"
+    assert not _probe_bin(box, "frame-probe.new").exists(), "the corrupt sidecar is removed"
+    assert starts_on_rw(calls) == [], "\n".join(calls)
+    assert index(calls, "findmnt -no OPTIONS / root=ro") < index(calls, "systemctl start cam2-painter.service root=ro")
+    assert root(box) == "ro"
+
+
+def test_deploy_fleet_painter_partial_copy_never_goes_live(tmp_path):
+    proc, box = _deploy(tmp_path, ["--frame-probe", str(_probe(tmp_path))], enabled=True, deadman=True,
+                        probe_live=_OLD_PROBE, FAKE_SCP_PARTIAL="1")
+    calls = log(box)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    assert "cam2-painter(scp-failed)" in out, out
+    assert _probe_bin(box).read_bytes() == _OLD_PROBE
+    assert not _probe_bin(box, "frame-probe.new").exists(), "the partial sidecar is removed:\n" + "\n".join(calls)
+    assert root(box) == "ro"
+
+
+def test_deploy_fleet_painter_failed_rename_fails_the_box_and_restarts_the_unchanged_painter(tmp_path):
+    # the rename step is no longer `|| true`: a failed rename is a FAILED box by name
+    proc, box = _deploy(tmp_path, ["--frame-probe", str(_probe(tmp_path))], enabled=True, deadman=True,
+                        probe_live=_OLD_PROBE, FAKE_MV_RC="1")
+    calls = log(box)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    assert "cam2-painter(swap-failed)" in out, out
+    assert _probe_bin(box).read_bytes() == _OLD_PROBE
+    assert not _probe_bin(box, "frame-probe.new").exists(), "\n".join(calls)
+    assert starts_on_rw(calls) == [], "\n".join(calls)
+    assert index(calls, "findmnt -no OPTIONS / root=ro") < index(calls, "systemctl start cam2-painter.service root=ro")
+    assert root(box) == "ro"
+
+
+def test_deploy_fleet_painter_never_starts_on_an_unverified_binary(tmp_path):
+    # no frame-probe on the box and the copy fails: the live path holds neither the verified new build
+    # nor an untouched pre-swap build, so the painter is NOT started and its dead-man is NOT re-armed
+    # (its action would start the painter); the window still gets the verified ro close.
+    proc, box = _deploy(tmp_path, ["--frame-probe", str(_probe(tmp_path))], enabled=True, deadman=True,
+                        FAKE_SCP_RC="1")
+    calls = log(box)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    assert starts(calls) == [], "no painter start, no dead-man re-arm:\n" + "\n".join(calls)
+    assert "cam2-painter(not-started" in out, out
+    index(calls, "findmnt -no OPTIONS / root=ro")
+    assert root(box) == "ro"
