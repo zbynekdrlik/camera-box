@@ -233,14 +233,33 @@ def test_event_relay_failure_and_a_failed_cam_side_restore_name_both_and_still_c
     assert any("cam-side restore FAILED" in ln for ln in results), proc.stderr
 
 
-def test_test_failed_relay_on_the_painter_box_still_runs_the_painter_steps_as_decided(tmp_path):
-    # Pins the DECIDED behaviour (design addendum Approach 1) for the painter box itself; the review
-    # raised stopping before the painter launch in this one case as a Design-question to the main.
+def test_test_failed_relay_on_the_painter_box_with_a_read_write_root_stops_before_the_painter_launch(tmp_path):
+    # ROZHODNUTÉ 5996845165 (Q1 = B): when the failed relay box IS the painter box (cam2) and its root
+    # stayed read-WRITE, TEST stops BEFORE the painter launch. The painter handoff closes its own rw
+    # window on that same root, so it can only fail; continuing would stop the running painter and
+    # leave cam2 dark with no dead-man. TEST is development, so stopping strands nothing on air. The
+    # run exits non-zero naming cam2 and its writers.
     proc, ran, _boxes, _sent = _run(tmp_path, "test", failing=(PAINTER_IP,), enabled=True)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    for step in ("resolve_marker_device", "painter_launch_remote", "toggle_burn",
+                 "cam2_painter_steady_state_handoff_cmds", "cam2_painter_deadman_arm_cmds"):
+        assert not any(s == step or s.startswith(step + " ") for s in ran), f"{step} ran:\n" + "\n".join(ran)
+    result = [ln for ln in proc.stderr.splitlines() if ln.startswith("RESULT:") and "bkshading relay" in ln]
+    assert result and f"cam2 ({PAINTER_IP})" in result[0] and WRITER in result[0], proc.stderr
+    assert "before the painter launch" in result[0], result[0]
+    assert "continuing through" not in proc.stderr, "a stopped run must not announce that it continues:\n" + proc.stderr
+    assert "WHOLE CHAIN verified" not in proc.stdout + proc.stderr
+
+
+def test_test_unreachable_painter_box_still_runs_the_painter_steps(tmp_path):
+    # Only a painter box whose root stayed read-WRITE stops TEST (Q1 = B); an unreachable painter box
+    # (no verified close ran there) keeps the issue-868 continue-and-fold, like every other failure.
+    proc, ran, _boxes, _sent = _run(tmp_path, "test", missing=(PAINTER_IP,), enabled=True)
     assert proc.returncode != 0, proc.stdout + proc.stderr
     assert _at(ran, "painter_launch_remote") < _at(ran, "cam2_painter_steady_state_handoff_cmds"), "\n".join(ran)
     result = [ln for ln in proc.stderr.splitlines() if ln.startswith("RESULT:") and "bkshading relay" in ln]
-    assert result and f"cam2 ({PAINTER_IP})" in result[0] and WRITER in result[0], proc.stderr
+    assert result and f"cam2 ({PAINTER_IP})" in result[0], proc.stderr
+    assert "before the painter launch" not in proc.stderr, proc.stderr
 
 
 _DISCORD_LIB = ROOT / "scripts" / "lib" / "event-mode-discord-confirm.sh"
