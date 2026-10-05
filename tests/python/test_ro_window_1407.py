@@ -458,6 +458,12 @@ def test_the_sweep_reads_a_group_across_lines():
     assert _swallowed_in_text(loud) == [], loud
     assert len(_swallowed_in_text(quiet)) == 1, quiet
     assert _swallowed_in_text("mount -o remount,ro / || {\n  echo x\n") == [], "an unclosed group is no hit"
+    # review round 5: a comment inside the group is not code -- an apostrophe in it opens no quote,
+    # a brace in it closes nothing.
+    quiet_comment = "mount -o remount,ro / || {\n  # don't stop here\n  echo busy\n}\nnext_step\n"
+    loud_comment = "mount -o remount,ro / || {\n  # see } below\n  echo FAIL >&2\n  exit 1\n}\nnext_step\n"
+    assert len(_swallowed_in_text(quiet_comment)) == 1, quiet_comment
+    assert _swallowed_in_text(loud_comment) == [], loud_comment
 
 
 def test_deploy_fleet_names_a_pending_painter_start_only_for_an_enable_now_restore():
