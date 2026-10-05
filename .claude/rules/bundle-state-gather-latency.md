@@ -93,6 +93,25 @@ paths:
   value, subprocess argv + keyword arguments, log lines and the four caches over every cache and
   failure path, plus the served JSON on both gather paths through the real readers.
 
+## Adding a facet the server gathers on its own (not from the log): the golden refresh recipe (issue 1406)
+
+A new server-side gather (the `obs_handles*` facet reads the live process table) changes BOTH
+goldens. Refresh them only after stubbing the new leaf in each harness:
+
+- In `test_bundle_state_split_1386.py` `_server_env`, which STUBS the readers, patch the leaf to a
+  fixed non-empty facet on both paths (`bss.windows_obs_handles`, `bss.bsg.linux_obs_handles`). The
+  served JSON then proves the wiring on both gather paths.
+- In `test_bundle_state_windows_split_1386.py` `_served_steps`, which runs the REAL readers, fake only
+  the I/O leaf so it reads nothing: `bsw.system_process_information` -> `None`, and
+  `functools.partial(bsg.linux_obs_handles, "<tmp>/no-proc")`. Never let a golden read the test host's
+  own `/proc`: a box running OBS would change the capture.
+- Refresh both with `--write-golden`, then prove the change is additive against the pre-change
+  golden (`git show <base>:…/golden.json`). For every `server` case: old keys + the new keys == new,
+  in order. The nested `genlock_lock` is attached AFTER `build_bundle_state`, so the new flat keys
+  land before it, not last. `cases`, `host` and `build_bundle_state` must be unchanged; the timing
+  keys only gain the new `_timed` name. The windows golden should change only in its
+  `gather timing:` lines.
+
 The strih/stream `:8899` server (`scripts/bundle-state-server.py` + pure parsers/builders behind
 `scripts/bundle_state_gather.py`) feeds `recording-e2e.sh`'s `[0/8]` version-integrity gate via
 `curl --max-time 30`. Two facets grow expensive with real-world session length and had to be
