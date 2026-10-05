@@ -65,7 +65,7 @@ fn ndi_inputs_are_the_ten_role_inputs() {
         "CAM7 (usb)",
         "STRIH-SNV (2ME PGM)",
         "STRIH-SNV (2ME PVW)",
-        "RESOLUME-SNV (cg-obs)",
+        "RESOLUME-SNV (SP-program)",
     ] {
         assert!(lines.contains(&want), "missing input {want} in: {out}");
     }

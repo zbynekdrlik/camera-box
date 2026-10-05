@@ -316,7 +316,7 @@ fn malformed_fact_files_are_refused() {
         (
             "control character in a value",
             vec![(
-                "STRIH_CG_SENDER=RESOLUME-SNV (cg-obs)",
+                "STRIH_CG_SENDER=RESOLUME-SNV (SP-program)",
                 "STRIH_CG_SENDER=RESOLUME-SNV\t(cg-obs)",
             )],
             "unsafe character",
@@ -609,7 +609,7 @@ fn seed_manifest_follows_the_camera_and_cg_facts() {
         &[
             ("STRIH_CAMERAS=1 2 3 4 5 6 7", "STRIH_CAMERAS=2 5"),
             (
-                "STRIH_CG_SENDER=RESOLUME-SNV (cg-obs)",
+                "STRIH_CG_SENDER=RESOLUME-SNV (SP-program)",
                 "STRIH_CG_SENDER=none",
             ),
         ],
@@ -767,7 +767,7 @@ fn every_fact_dependent_output_follows_a_different_box() {
                 "STRIH_COMPANION_HOST=10.0.0.205",
             ),
             (
-                "STRIH_CG_SENDER=RESOLUME-SNV (cg-obs)",
+                "STRIH_CG_SENDER=RESOLUME-SNV (SP-program)",
                 "STRIH_CG_SENDER=none",
             ),
             ("STRIH_CAMERAS=1 2 3 4 5 6 7", "STRIH_CAMERAS=1 3"),
@@ -837,7 +837,7 @@ fn a_non_ascii_value_is_refused_in_every_locale() {
             &d,
             "strih-lx",
             &[(
-                "STRIH_CG_SENDER=RESOLUME-SNV (cg-obs)",
+                "STRIH_CG_SENDER=RESOLUME-SNV (SP-program)",
                 "STRIH_CG_SENDER=RESOLUME-\u{10c} (cg)",
             )],
         );
