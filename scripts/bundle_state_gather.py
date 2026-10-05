@@ -351,12 +351,14 @@ BUNDLE_STATE_KEYS = (
     # "0" is a reading and is KEPT; no timestamped line omits it -> no proof downstream.
     "obs_log_head_age_s",
     # issue 1406 -- the OBS process's handle count (Windows, from NtQuerySystemInformation) or
-    # open-fd count (Linux /proc), its pid + start epoch (a restart resets the dev1 obs-handles
-    # watchdog's baseline) and the Linux soft open-files limit. Omitted when no OBS process is
-    # readable -> UNKNOWN downstream, never a false 0.
+    # open-fd count (Linux /proc), its pid + start epoch, the Linux run token (boot id + start
+    # ticks: the process identity that a clock step never moves -- a new identity resets the dev1
+    # obs-handles watchdog's baseline) and the Linux soft open-files limit. Omitted when no OBS
+    # process is readable -> UNKNOWN downstream, never a false 0.
     "obs_handles",
     "obs_handles_pid",
     "obs_handles_start",
+    "obs_handles_run",
     "obs_handles_limit",
 )
 _BUNDLE_STATE_KEY_SET = frozenset(BUNDLE_STATE_KEYS)

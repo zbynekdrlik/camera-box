@@ -446,8 +446,9 @@ def component_sha256(path):
 # On 5.10.2026 the stream obs64 held 4,066,772 handles after ~22 h: the Audio Monitor plugin kept
 # opening an absent audio endpoint and leaked one registry key per audio tick (46.875/s), ~100 h
 # from the 16,777,216 per-process cap. Nothing read a handle count, so the dev1 obs-handles
-# watchdog now reads these keys: the count, the pid + start time (a restart resets its baseline)
-# and, on Linux, the soft open-files limit (the Linux cap). Absent when unreadable, never a 0.
+# watchdog now reads these keys: the count, the pid + start epoch, and on Linux the run token (the
+# process identity; a new one, i.e. a restart, resets the baseline) and the soft open-files limit
+# (the Linux cap). Absent when unreadable, never a 0.
 
 # Field offsets of the x64 SYSTEM_PROCESS_INFORMATION record NtQuerySystemInformation returns
 # (class 5). `next`, `threads`, the ImageName UNICODE_STRING, `pid` and `handles` are the public
@@ -534,6 +535,7 @@ def obs_handles_facet(procs):
         "obs_handles": str(best["handles"]),
         "obs_handles_pid": str(best["pid"]),
         "obs_handles_start": "" if start is None else str(start),
+        "obs_handles_run": best.get("run") or "",
         "obs_handles_limit": "" if limit is None else str(limit),
     }
 
@@ -541,16 +543,16 @@ def obs_handles_facet(procs):
 def proc_stat_start_ticks(stat_text):
     """PURE: field 22 (starttime, clock ticks since boot) of a /proc/<pid>/stat line, or None.
     The command name in field 2 may hold spaces and parentheses, so the fields after it are read
-    from the LAST ')'."""
-    text = stat_text or ""
+    from the LAST ')'. The same parse as `proc_start_ticks` in scripts/strih_browser_keeper.py
+    (a separately deployed tree), pinned to it by tests/python/test_obs_handles_gather_1406.py."""
+    text = stat_text if isinstance(stat_text, str) else ""
     cut = text.rfind(")")
     if cut < 0:
         return None
-    fields = text[cut + 1:].split()
-    try:
-        return int(fields[19])   # fields[0] is field 3 (state)
-    except (IndexError, ValueError):
+    fields = text[cut + 1:].split()   # fields[0] is field 3 (state)
+    if len(fields) < 20 or not fields[19].isdigit():
         return None
+    return int(fields[19])
 
 
 def proc_btime(proc_stat_text):
@@ -581,7 +583,7 @@ def _read_text(path):
         return None
 
 
-def _linux_obs_process(proc_root, pid, btime, clk_tck):
+def _linux_obs_process(proc_root, pid, boot, btime, clk_tck):
     """One /proc/<pid> -> a process dict when it is an OBS-shaped process whose fd directory this
     user can list, else None (not OBS, another user's process, or one that exited mid-scan)."""
     base = os.path.join(proc_root, pid)
@@ -595,20 +597,27 @@ def _linux_obs_process(proc_root, pid, btime, clk_tck):
     ticks = proc_stat_start_ticks(_read_text(os.path.join(base, "stat")))
     start = btime + ticks // clk_tck if btime is not None and ticks is not None else None
     return {"pid": int(pid), "name": comm, "handles": handles, "start": start,
+            "run": None if ticks is None else f"{boot}:{ticks}",
             "limit": proc_nofile_soft_limit(_read_text(os.path.join(base, "limits")))}
 
 
 def linux_obs_handles(proc_root="/proc", clk_tck=None):
     """The Linux `obs_handles*` facet: the open-fd count of the OBS process (comm `obs`, the
-    strih-obs.service binary), its start time from /proc/<pid>/stat + btime, and its soft
-    open-files limit. The server runs as the same user as OBS (on strih-lx both are --user units
-    of the desktop user), so the fd directory is listable. {} when no OBS process is readable."""
+    strih-obs.service binary), its start epoch (btime + /proc/<pid>/stat start ticks, context), its
+    RUN token `<boot id>:<start ticks>` and its soft open-files limit. The run token is the process
+    identity: btime moves whenever the wall clock is stepped (strih-lx is the dantesync date
+    master), the boot id and the start ticks never do -- the same OBS-run identity
+    scripts/strih_browser_keeper.py uses. The server runs as the same user as OBS (on strih-lx both
+    are --user units of the desktop user), so the fd directory is listable. {} when no OBS process
+    is readable."""
     try:
         pids = [e for e in os.listdir(proc_root) if e.isdigit()]
     except OSError:
         return {}
     if clk_tck is None:
         clk_tck = os.sysconf("SC_CLK_TCK")
+    boot = (_read_text(os.path.join(proc_root, "sys", "kernel", "random", "boot_id")) or "").strip()
     btime = proc_btime(_read_text(os.path.join(proc_root, "stat")))
-    procs = [p for p in (_linux_obs_process(proc_root, pid, btime, clk_tck) for pid in pids) if p]
+    procs = [p for p in (_linux_obs_process(proc_root, pid, boot, btime, clk_tck) for pid in pids)
+             if p]
     return obs_handles_facet(procs)

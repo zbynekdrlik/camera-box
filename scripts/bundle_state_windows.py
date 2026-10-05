@@ -483,10 +483,12 @@ def resolve_shortcut(lnk_path):
 
 
 # Issue 1406 -- the OBS handle count. ONE NtQuerySystemInformation(SystemProcessInformation) call
-# returns every process's HandleCount, pid and create time WITHOUT opening any process: the
-# non-elevated BundleStateServer task is denied an open of the elevated obs64 (issue 1067, the
-# Get-Process .Path access-denied), which GetProcessHandleCount would need, and a CIM read costs a
-# PowerShell cold start per request while the count cannot be cached. No subprocess, a few ms.
+# returns every process's HandleCount, pid and create time WITHOUT opening any process and without a
+# pid lookup first. GetProcessHandleCount would need an open of the elevated obs64 from the
+# non-elevated BundleStateServer task: its PROCESS_QUERY_LIMITED_INFORMATION open is normally
+# granted, but that is not verified live, and issue 1067 showed an open of obs64 denied in this
+# task's context (Get-Process .Path). A CIM read costs a PowerShell cold start per request while the
+# count cannot be cached. No subprocess, a few ms.
 _SYSTEM_PROCESS_INFORMATION = 5
 _STATUS_INFO_LENGTH_MISMATCH = 0xC0000004
 _SPI_FIRST_BYTES = 1 << 20      # a rig box lists a few hundred processes (~0.5 MB)

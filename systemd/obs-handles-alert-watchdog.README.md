@@ -11,27 +11,33 @@ It reads the `obs_handles*` facet `bundle_state_gather` exposes on each box's
 `:8899/bundle-state.json`:
 
 - **`obs_handles`**: the OBS process's handle count. On Windows it comes from ONE
-  `NtQuerySystemInformation(SystemProcessInformation)` snapshot, which opens no process: the
-  non-elevated BundleStateServer task cannot open the elevated obs64 (issue 1067). On Linux
-  (strih-lx) it is the count of `/proc/<obs pid>/fd`.
-- **`obs_handles_pid` + `obs_handles_start`**: the process identity. A new pid or start time is an
-  OBS restart and re-baselines the watchdog.
+  `NtQuerySystemInformation(SystemProcessInformation)` snapshot, which opens no process and needs
+  no pid lookup (an open of the elevated obs64 from the non-elevated BundleStateServer task is not
+  verified live; issue 1067 saw one denied). On Linux (strih-lx) it is the count of
+  `/proc/<obs pid>/fd`.
+- **`obs_handles_pid` + `obs_handles_start`**: the pid and start epoch.
+- **`obs_handles_run`** (Linux only): `<boot id>:<start ticks>`, the process identity. A wall-clock
+  step moves the start epoch on Linux, never the run token. A new identity is an OBS restart and
+  re-baselines the watchdog (Windows: pid + start epoch, which never moves).
 - **`obs_handles_limit`** (Linux only): the soft open-files limit, the Linux cap.
 - The keys are omitted when no OBS process is readable, never a false 0.
 
 `scripts/obs_handles_decision.py` grades one pass's reading against the reference sample this
 watchdog stored on its previous pass:
 
-- **GROWING**: the count grew by ≥ **5,000 handles/h** over the pass interval. That is 34× below the
-  5.10 leak rate; a healthy OBS moves by tens. It pages after **3** consecutive GROWING passes
-  (~15 min), so a one-off step (a scene loading sources, an NDI reconnect) reads GROWING once,
-  HEALTHY next, and never pages.
+- **GROWING**: the count grew by ≥ **5,000 handles/h** over the pass interval (at most half a Linux
+  box's soft open-files limit per hour: 512/h under 1024). That is 34× below the 5.10 leak rate and
+  ~13× above the healthy wobble's rate. It pages after **3** consecutive GROWING passes (~15 min), so
+  a one-off step (a scene loading sources, an NDI reconnect) reads GROWING once, HEALTHY next, and
+  never pages.
 - **CEILING**: the count is ≥ **500,000** (86× a healthy ~5,790, 3% of the Windows cap), or ≥ 80%
   of a Linux box's soft open-files limit when that is lower. It pages after **2** passes.
-- **BASELINE**: the first reading of a process, or a restart. The alarm clears (machine-channel
-  recovery line).
+- **BASELINE**: the first reading of a process, or a restart (a new identity). The alarm clears
+  (machine-channel recovery line).
+- **REBASE**: the same process with an interval ≤ 0 (the dev1 clock stepped back). Only the
+  reference resets; the confirm is kept and no recovery is logged.
 - **HOLD**: under 240 s since the reference (a manual run between timer passes). The older reference
-  is kept, so a short interval never inflates the rate.
+  and the confirm are kept, also over the ceiling, so a short interval never inflates the rate.
 - **SKIP** (`:8899` not fetchable) and **UNKNOWN** (facet absent) never page. The bundle-state and
   network-reach watchdogs own a dark box.
 
@@ -44,7 +50,9 @@ Replay proof (`tests/python/test_obs_handles_watchdog_1406.py`, the 4./5.10 read
 - the leak from a fresh OBS pages GROWING on the 4th pass (15 min after the baseline);
 - the 5.10 census (4,066,772) pages CEILING on the 2nd pass;
 - the post-fix readings (5,806 → 5,791) never page;
-- a restart after a page logs a machine-channel RECOVERY.
+- a restart after a page logs a machine-channel RECOVERY;
+- a manual run 60 s after a ceiling pass HOLDs and does not page early;
+- a strih-lx fd leak under a 1024 limit pages through a one-second clock step of its start epoch.
 
 ## PRODUCTION-CRITICAL: time-bucketed re-ping (issue 1308)
 
@@ -78,10 +86,12 @@ curl -s http://10.77.9.202:8899/bundle-state.json | python3 -m json.tool | grep 
 curl -s http://resolume.lan:8899/bundle-state.json | python3 -m json.tool | grep obs_handles
 #    HARD ACCEPTANCE before step 2, per box:
 #    - stream: obs_handles ~5,790 (the post-fix count), obs_handles_pid = the obs64 pid.
-#    - strih-lx: obs_handles = `ls /proc/$(pgrep -x obs)/fd | wc -l` read on the box, and
-#      obs_handles_limit = the soft "Max open files" of /proc/<pid>/limits. If the count is above
+#    - strih-lx: obs_handles = `ls /proc/$(pgrep -x obs)/fd | wc -l` read on the box,
+#      obs_handles_limit = the soft "Max open files" of /proc/<pid>/limits, and obs_handles_run =
+#      `cat /proc/sys/kernel/random/boot_id`:<field 22 of /proc/<pid>/stat>. If the count is above
 #      80% of that limit, raise LimitNOFILE in strih-obs.service first, or the watchdog pages CEILING
-#      from its first passes.
+#      from its first passes. Under a 1024 limit a fast fd leak can still reach EMFILE before the
+#      page lands (.claude/rules/obs-handles-watchdog.md); a large LimitNOFILE is the durable cure.
 #    - An absent facet on Windows = the snapshot failed: read the server log
 #      (C:\ProgramData\camera-box\bundle-state-server.log) for the obs_handles WARNING.
 

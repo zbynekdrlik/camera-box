@@ -197,6 +197,7 @@ def _server_env(host, windows, logs):
             obs_handles_limit="")))
         st.enter_context(mock.patch.object(bss.bsg, "linux_obs_handles", lambda: dict(
             obs_handles="812", obs_handles_pid="4242", obs_handles_start="1791190000",
+            obs_handles_run="1b4e28ba-2fa1-11d2-883f-0016d3cca427:360000",
             obs_handles_limit="1024")))
         st.enter_context(mock.patch.object(bss, "log", logs.append))
         env = {k: v for k, v in os.environ.items() if k not in ("AUDIO_REF_BAND_SRC",)}

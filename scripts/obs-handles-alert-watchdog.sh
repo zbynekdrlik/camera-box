@@ -13,17 +13,17 @@ set -euo pipefail
 #
 # It reads the `obs_handles*` facet bundle_state_gather exposes on each box's
 # :8899/bundle-state.json -- the OBS process's handle count (Windows, from one NtQuerySystemInformation
-# snapshot) or open-fd count (Linux /proc), its pid + start epoch, and on Linux the soft open-files
-# limit -- and grades it with scripts/obs_handles_decision.py against the reference sample this
-# watchdog stored on its previous pass:
-#   * GROWING -- >= 5,000 handles/h over one pass interval; pages after 3 consecutive passes
-#     (~15 min), so a one-off step (a scene loading sources, an NDI reconnect) never pages;
+# snapshot) or open-fd count (Linux /proc), its pid + start epoch, and on Linux the run token and
+# the soft open-files limit -- and grades it with scripts/obs_handles_decision.py against the
+# reference sample this watchdog stored on its previous pass:
+#   * GROWING -- >= 5,000 handles/h (at most half a Linux soft limit per hour) over one pass
+#     interval; pages after 3 consecutive passes (~15 min), so a one-off step never pages;
 #   * CEILING -- >= 500,000 handles (86x a healthy ~5,790, 3% of the Windows cap) or 80% of a Linux
 #     box's own soft open-files limit; pages after 2 passes.
-# A new pid / start time (an OBS restart) re-baselines and clears the alarm; a manual run less than
-# 240 s after the reference HOLDs (the reference is kept). SKIP (:8899 not fetchable -- the
-# bundle-state / network-reach watchdogs own that) and UNKNOWN (facet absent: an older server or no
-# readable OBS) never page.
+# A new process identity (an OBS restart) re-baselines and clears the alarm; a manual run less than
+# 240 s after the reference HOLDs and an interval <= 0 REBASEs (the confirm is kept). SKIP (:8899
+# not fetchable -- the bundle-state / network-reach watchdogs own that) and UNKNOWN (facet absent:
+# an older server or no readable OBS) never page.
 #
 # PRODUCTION-CRITICAL class (issue 1308): a handle-capped OBS stops working mid-production, so the
 # page TIME-BUCKETS its --dedup-key (watchdog_notify_key "obs-handles-<box>") and re-pings while the
@@ -72,6 +72,7 @@ CURL_TIMEOUT="${OBS_HANDLES_CURL_TIMEOUT:-10}"
 CEILING="${OBS_HANDLES_CEILING:-500000}"                # 86x a healthy stream OBS, 3% of the cap
 LIMIT_FRACTION="${OBS_HANDLES_LIMIT_FRACTION:-0.8}"     # of a reported (Linux) soft fd limit
 GROWTH_PER_H="${OBS_HANDLES_GROWTH_PER_H:-5000}"        # 34x below the 5.10 leak rate
+LIMIT_GROWTH_FRACTION="${OBS_HANDLES_LIMIT_GROWTH_FRACTION:-0.5}"  # of a Linux soft limit, per hour
 MIN_INTERVAL_S="${OBS_HANDLES_MIN_INTERVAL_S:-240}"     # a shorter interval HOLDs
 GROWTH_CONFIRM="${OBS_HANDLES_GROWTH_CONFIRM:-3}"       # consecutive GROWING passes (~15 min)
 CEILING_CONFIRM="${OBS_HANDLES_CEILING_CONFIRM:-2}"
@@ -157,7 +158,7 @@ handle_healthy() {
 # -- per-box decision --------------------------------------------------------------------------
 handle_box() {
   local box="$1" ip="$2" body reachable out now_epoch verdict
-  local handles pid rate interval ceiling cap htc
+  local handles pid rate bound interval ceiling cap htc
 
   if body="$(fetch_bundle_json "$ip" OBS_HANDLES_FETCH_CMD)"; then reachable=1; else reachable=0; body=""; fi
   now_epoch="${OBS_HANDLES_NOW_EPOCH:-$(date +%s)}"
@@ -167,27 +168,29 @@ handle_box() {
     --ref-handles "$(read_state_field "obs-handles_ref_handles_${box}" "")" \
     --ref-epoch "$(read_state_field "obs-handles_ref_epoch_${box}" "")" \
     --ceiling "$CEILING" --limit-fraction "$LIMIT_FRACTION" --growth-per-h "$GROWTH_PER_H" \
-    --min-interval-s "$MIN_INTERVAL_S" 2>/dev/null)"
+    --limit-growth-fraction "$LIMIT_GROWTH_FRACTION" --min-interval-s "$MIN_INTERVAL_S" 2>/dev/null)"
   verdict="$(field "$out" verdict)"
   handles="$(field "$out" handles)"; pid="$(field "$out" pid)"
-  rate="$(field "$out" rate_per_h)"; interval="$(field "$out" interval_s)"
+  rate="$(field "$out" rate_per_h)"; bound="$(field "$out" growth_bound_per_h)"
+  interval="$(field "$out" interval_s)"
   ceiling="$(field "$out" ceiling)"; cap="$(field "$out" cap)"; htc="$(field "$out" hours_to_cap)"
   if [ -n "$out" ]; then
     write_state_field "obs-handles_ref_ident_${box}" "$(field "$out" next_ident)"
     write_state_field "obs-handles_ref_handles_${box}" "$(field "$out" next_handles)"
     write_state_field "obs-handles_ref_epoch_${box}" "$(field "$out" next_epoch)"
   fi
-  log "$box ($ip): reachable=$reachable verdict=${verdict:-<none>} handles=${handles} pid=${pid} rate=${rate}/h interval=${interval}s ceiling=${ceiling} cap=${cap} hours_to_cap=${htc}"
+  log "$box ($ip): reachable=$reachable verdict=${verdict:-<none>} handles=${handles} pid=${pid} rate=${rate}/h bound=${bound}/h interval=${interval}s ceiling=${ceiling} cap=${cap} hours_to_cap=${htc}"
 
   case "$verdict" in
     SKIP)     log "$box :$BUNDLE_PORT not fetchable -- bundle-state / reach watchdog territory; holding, no page" ;;
     UNKNOWN)  log "$box: no obs_handles facet (older bundle-state server / no readable OBS process) -- holding, no page" ;;
-    HOLD)     log "$box: ${interval}s since the reference sample (< ${MIN_INTERVAL_S}s) -- the reference is kept, no verdict this pass" ;;
+    HOLD)     log "$box: ${interval}s since the reference sample (< ${MIN_INTERVAL_S}s) -- the reference and the confirm are kept, no verdict this pass" ;;
+    REBASE)   log "$box: no usable interval (${interval}s: the dev1 clock stepped back or two runs in one second) -- the reference is reset, the confirm is kept" ;;
     BASELINE) log "$box: new reference for OBS pid ${pid} (first reading or a restart)"
               handle_healthy "$box" ;;
     HEALTHY)  handle_healthy "$box" ;;
     GROWING)  handle_arm "$box" GROWING "$GROWTH_CONFIRM" "$now_epoch" \
-      "🚨 OBS handle leak ($REPO_SLUG): **$box** ($ip) — OBS (pid ${pid}) drží **${handles} handlov** a pribúda ich **~${rate} za hodinu** súvisle počas ${GROWTH_CONFIRM} kontrol (zdravé OBS je stabilné, stream ~5 800). Pri tomto tempe narazí na limit procesu (${cap}) o ~${htc} h a potom zamrzne alebo spadne. 5.10. to bol plugin Audio Monitor s výstupom na odpojené zvukové zariadenie (1 handle na každý zvukový tick). Treba nájsť príčinu (plugin, zariadenie) a naplánovať reštart OBS." ;;
+      "🚨 OBS handle leak ($REPO_SLUG): **$box** ($ip) — OBS (pid ${pid}) drží **${handles} handlov** a pribúda ich **~${rate} za hodinu** (prah ${bound}/h) súvisle počas ${GROWTH_CONFIRM} kontrol (zdravé OBS je stabilné, stream ~5 800). Pri tomto tempe narazí na limit procesu (${cap}) o ~${htc} h a potom zamrzne alebo spadne. 5.10. to bol plugin Audio Monitor s výstupom na odpojené zvukové zariadenie (1 handle na každý zvukový tick). Treba nájsť príčinu (plugin, zariadenie) a naplánovať reštart OBS." ;;
     CEILING)  handle_arm "$box" CEILING "$CEILING_CONFIRM" "$now_epoch" \
       "🚨 OBS handle leak ($REPO_SLUG): **$box** ($ip) — OBS (pid ${pid}) drží **${handles} handlov**, nad stropom ${ceiling} (zdravé OBS ~5 800, limit procesu ${cap}). Keď narazí na limit, OBS zamrzne alebo spadne. 5.10. to bol plugin Audio Monitor s výstupom na odpojené zvukové zariadenie. Treba nájsť príčinu (plugin, zariadenie) a naplánovať reštart OBS. Potvrdené počas ${CEILING_CONFIRM} kontrol." ;;
     *)        log "$box: unexpected verdict '${verdict:-<empty>}' -- holding, no page" ;;
