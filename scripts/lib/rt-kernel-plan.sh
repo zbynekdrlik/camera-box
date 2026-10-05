@@ -91,7 +91,12 @@ _rt_purge_pkglist() {
 # `&& mount -o remount,ro /`: never verified, and skipped entirely once an earlier step failed, so a
 # failed apt or grub step left the cambox on a writable root. The program runs in a child
 # `bash -s <<'RT_KERNEL_STEP'`, so an exit inside it ends that child, never the root session it was
-# pasted into. WHY (optional) becomes a comment line. Print-only: nothing in this lib runs it.
+# pasted into. That heredoc is also the child's STDIN, so WORK runs as a function reading /dev/null:
+# a step that reads stdin (a dpkg or debconf prompt) would otherwise eat the rest of the program,
+# the verified close included (review round 1). A WORK still holding an unreplaced `<...>`
+# placeholder (`<OLD_VER>`, `<Advanced...>`) refuses before the root is touched; the check reads the
+# function as the supervisor edited it. WHY (optional) becomes a comment line. Print-only: nothing in
+# this lib runs it.
 # shellcheck disable=SC2016  # every $ here is remote text, printed literally for the box's shell
 _rt_window_program() {
   local step="$1" work="$2" why="${3:-}" close
@@ -100,8 +105,14 @@ _rt_window_program() {
     "the root is still read-WRITE: stop that writer, put the root back read-only until 'findmnt -no OPTIONS /' reads ro, then re-run the $step step.")"
   printf '%s\n' "bash -s <<'RT_KERNEL_STEP'"
   if [ -n "$why" ]; then printf '# %s\n' "$why"; fi
+  printf '%s\n' '_rt_work() {' "  $work" '}'
+  case "$work" in
+    *'<'[A-Za-z]*'>'*)
+      printf 'if declare -f _rt_work | grep -q '"'"'<[A-Za-z][^>]*>'"'"'; then echo "FAIL: [issue 899] replace the placeholder in the %s step first; nothing was changed" >&2; exit 2; fi\n' "$step"
+      ;;
+  esac
   printf '%s\n' '_rt_rc=0' 'if mount -o remount,rw /; then'
-  printf '  %s || _rt_rc=$?\n' "$work"
+  printf '%s\n' '  _rt_work </dev/null || _rt_rc=$?'
   printf '%s\n' 'else' '  _rt_rc=$?' 'fi'
   printf '%s\n' "$close"
   printf 'if [ "$_rt_rc" -ne 0 ]; then echo "FAIL: [issue 899] the %s step failed (rc=$_rt_rc); the root reads ro again -- fix the cause, then re-run this step" >&2; exit "$_rt_rc"; fi\n' "$step"
@@ -230,11 +241,11 @@ rt_kernel_step_command() {
       if _rt_stale_present "$stale"; then
         printf '%s\n' '# SUPERVISOR: restore single-kernel (check (k)) -- purge ONLY the OBSERVED superseded generic package(s) below. NEVER a wildcard generic purge (that removes the new running kernel).'
         _rt_window_program purge-superseded-generic \
-          "apt-get purge -y --allow-change-held-packages $(_rt_purge_pkglist "$stale")"
+          "DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-change-held-packages $(_rt_purge_pkglist "$stale")"
       else
         printf '%s\n' '# SUPERVISOR: restore single-kernel (check (k)) -- purge ONLY the specific pre-upgrade image (the old uname -r noted before the upgrade; put it in place of <OLD_VER> below). NEVER a wildcard generic purge (that removes the new running kernel).'
         _rt_window_program purge-superseded-generic \
-          'apt-get purge -y --allow-change-held-packages "linux-image-<OLD_VER>" "linux-modules-<OLD_VER>"'
+          'DEBIAN_FRONTEND=noninteractive apt-get purge -y --allow-change-held-packages "linux-image-<OLD_VER>" "linux-modules-<OLD_VER>"'
       fi ;;
     verify-single-kernel)
       printf '# SUPERVISOR: re-run verify-device.sh -- check (k) single-kernel invariant is restored; check (ac) still WARNs "not PREEMPT_RT" (EXPECTED -- preempt=full is STEP 1, full RT is STEP 2)' ;;

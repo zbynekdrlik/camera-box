@@ -45,6 +45,8 @@ _CTS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_CTS_LIB_DIR/stray-session-check.sh"
 # shellcheck source=scripts/lib/bkshading-relay-runtime.sh
 . "$_CTS_LIB_DIR/bkshading-relay-runtime.sh"
+# shellcheck source=scripts/lib/event-mode-discord-confirm.sh
+. "$_CTS_LIB_DIR/event-mode-discord-confirm.sh"   # event_mode_discord_note_add, the ONE note writer (issue 1407)
 
 # The name the test camera is acked under in CAMBOX_OFFLINE_ACK / rig-fleet.txt, e.g.
 #   CAMBOX_OFFLINE_ACK="testcam:usb-c-unplugged-until-1350"
@@ -528,11 +530,12 @@ camera_test_settings_restore() {
 # camera_test_settings_restore_discord_note MSG_FILE -> add the restore outcome to the EVENT
 # Discord confirmation (the owner reads THAT on the phone). A failure goes ON TOP of the message,
 # a success at the end; nothing for `none`. The phone line never names a command (the owner cannot
-# run it from the phone) -- the commands are in the run log. The confirmation body is never lost:
-# the prepend is written to a temp file and moved over only when complete, and a failed read or
-# write falls back to appending. Never fails.
+# run it from the phone) -- the commands are in the run log. The writing is the ONE shared
+# event_mode_discord_note_add (scripts/lib/event-mode-discord-confirm.sh, sourced above): the
+# prepend is moved over only when complete, else appended, so the confirmation body is never lost.
+# Never fails.
 camera_test_settings_restore_discord_note() {
-  local msg="${1:-}" line="" body="" tmp="" top=0
+  local msg="${1:-}" line="" where=end
   [ -n "$msg" ] && [ -f "$msg" ] || return 0
   case "${CTS_RESTORE_OUTCOME:-none}" in
     restored) line="✅ Testovacia kamera: produkčná expozícia vrátená (${CTS_RESTORE_SUMMARY:-})." ;;
@@ -540,17 +543,10 @@ camera_test_settings_restore_discord_note() {
     restored-unconsumed) line="✅ Testovacia kamera: produkčná expozícia vrátená (${CTS_RESTORE_SUMMARY:-}), ale snímku treba odložiť — napíš Claudovi." ;;
     failed)
       line="⚠️ Testovacia kamera: produkčná expozícia (ISO/uzávierka) sa NEVRÁTILA${CTS_RESTORE_SUMMARY:+ (čakala: $CTS_RESTORE_SUMMARY)} — kamera môže ostať na testovacej expozícii. Napíš Claudovi, nech ju vráti, keď je kamera na USB a rig nevysiela."
-      top=1
+      where=top
       ;;
     *) return 0 ;;
   esac
-  if [ "$top" -eq 1 ] && body="$(cat "$msg" 2>/dev/null)"; then
-    tmp="$msg.cts-note.$$"
-    if { printf '%s\n\n%s\n' "$line" "$body" >"$tmp"; } 2>/dev/null && mv -f "$tmp" "$msg" 2>/dev/null; then
-      return 0
-    fi
-    rm -f "$tmp" 2>/dev/null || true
-  fi
-  { printf '\n%s\n' "$line" >>"$msg"; } 2>/dev/null || true
+  event_mode_discord_note_add "$msg" "$line" "$where"
   return 0
 }

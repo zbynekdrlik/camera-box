@@ -90,3 +90,23 @@ _event_mode_discord_confirm_send_inner() {
   echo "[#724] EVENT-mode Discord confirmation posted (message id: $(printf '%s' "$body" | jq -r '.id // "unknown"'))."
   return 0
 }
+
+# event_mode_discord_note_add MSG_FILE LINE top|end -> add LINE to the EVENT confirmation message
+# file (the message this sender posts) before it is sent: on TOP for a failure the owner must see
+# first, else at the END. The top form writes a temp file next to the message and moves it over only
+# when it is complete, falling back to an append, so the message itself is never lost. A missing
+# file or an empty LINE adds nothing. A report, never a gate: always returns 0. The ONE writer of
+# such notes: the issue-1371 exposure-restore note and the issue-1407 relay note both call it.
+event_mode_discord_note_add() {  # $1 = message file, $2 = the line, $3 = top|end (default end)
+  local msg="${1:-}" line="${2:-}" where="${3:-end}" body="" tmp=""
+  [ -n "$msg" ] && [ -f "$msg" ] && [ -n "$line" ] || return 0
+  if [ "$where" = top ] && body="$(cat "$msg" 2>/dev/null)"; then
+    tmp="$msg.note.$$"
+    if { printf '%s\n\n%s\n' "$line" "$body" >"$tmp"; } 2>/dev/null && mv -f "$tmp" "$msg" 2>/dev/null; then
+      return 0
+    fi
+    rm -f "$tmp" 2>/dev/null || true
+  fi
+  { printf '\n%s\n' "$line" >>"$msg"; } 2>/dev/null || true
+  return 0
+}

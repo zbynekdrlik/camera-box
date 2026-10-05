@@ -392,8 +392,10 @@ for cam in $SET; do
   # #1351). scp writes its target in place, so a copy straight onto the live path could leave half a
   # binary there when the transfer died; now the old binary stays whole until the rename. All of it
   # runs inside the rw window. A failed copy, a sidecar that does not byte-match the artifact, or a
-  # failed rename removes the sidecar while the root is still writable, closes the window the
-  # verified way, and starts the OLD camera-box again (it is whole), with the box FAILED.
+  # failed rename step removes the sidecar while the root is still writable, closes the window the
+  # verified way, and starts camera-box again on the live binary (a whole build: the old one, or the
+  # new one if the rename landed before the step failed), with the box FAILED. A sidecar mismatch is
+  # FAILED as sidecar-sha-mismatch, apart from the final-path sha-mismatch below.
   swap_fail=""
   if ! scp_box "$ip" "$BINARY" "/usr/local/bin/camera-box.new"; then
     err "[$cam] scp failed"; swap_fail="scp-failed"
@@ -401,16 +403,16 @@ for cam in $SET; do
     sidecar_sha="$(ssh_box "$ip" "sha256sum /usr/local/bin/camera-box.new 2>/dev/null | awk '{print \$1}'" || echo "")"
     if [ "$sidecar_sha" != "$BINARY_SHA" ]; then
       err "[$cam] sidecar byte-verify FAILED: local $BINARY_SHA != sidecar ${sidecar_sha:-<none>} -- not moved over the live binary"
-      swap_fail="sha-mismatch"
+      swap_fail="sidecar-sha-mismatch"
     elif ! ssh_box "$ip" "chmod 0755 /usr/local/bin/camera-box.new && mv -f /usr/local/bin/camera-box.new /usr/local/bin/camera-box && sync"; then
-      err "[$cam] the atomic rename of the verified sidecar failed -- the old binary stays live"
+      err "[$cam] the rename step of the verified sidecar failed -- the live binary is a whole build (the old one, or the new one if the rename landed before the failure)"
       swap_fail="swap-failed"
     fi
   fi
   if [ -n "$swap_fail" ]; then
     FAILED+=("$cam($swap_fail)")
     ssh_box "$ip" "rm -f /usr/local/bin/camera-box.new" || err "[$cam] could not remove the sidecar /usr/local/bin/camera-box.new"
-    if close_ro_or_fail "$ip" "$cam" "$cam" "A cambox must never run on a writable root, so camera-box.service is NOT started (the swap failed; the old binary is still in place)."; then
+    if close_ro_or_fail "$ip" "$cam" "$cam" "A cambox must never run on a writable root, so camera-box.service is NOT started (the swap failed; the live binary is a whole build)."; then
       ssh_box "$ip" "systemctl start camera-box" || err "[$cam] camera-box start after the failed swap failed"
     fi
     PENDING_START=""
