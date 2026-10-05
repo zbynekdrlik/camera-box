@@ -487,16 +487,23 @@ static bool st_raw_video_camera_box_decode(struct sync_test_output *st, const ui
 	return found_any;
 }
 
-/* issue 1381: the bytes st_cb_gather_top_band copies per frame for this output's geometry (0 when
- * the plan has no band) -- also what st_video_decode_job_prepare sizes each slot's band to. The
- * plan is derived HERE from `st`, so the fill and the pre-fault can never be handed different
- * geometries. */
-static size_t st_cb_top_band_bytes(const struct sync_test_output *st)
+/* issue 1381: the rows of the top band st_cb_gather_top_band copies per frame for this output's
+ * geometry (0 when the plan has no band). The ONE place the plan is derived: the fill's buffer
+ * size, the rows it copies and the pre-fault's size all come from it, so none of them can be handed
+ * a different geometry (a copy of more rows than the buffer holds would overrun it). */
+static uint32_t st_cb_top_band_rows(const struct sync_test_output *st)
 {
 	const camerabox::CbTopBandPlan plan = camerabox::cb_top_band_decode_plan(st->video_width, st->video_height);
 	if (plan.band_h == 0 || plan.dst_w == 0 || plan.dst_h == 0)
 		return 0;
-	return (size_t)st->video_width * plan.band_h;
+	return plan.band_h;
+}
+
+/* issue 1381: the bytes st_cb_gather_top_band copies per frame -- also what
+ * st_video_decode_job_prepare sizes each slot's band to. */
+static size_t st_cb_top_band_bytes(const struct sync_test_output *st)
+{
+	return (size_t)st->video_width * st_cb_top_band_rows(st);
 }
 
 /* issue 1367 (producer, libobs's video-output thread): gather the TOP band (rows 0..band_h) into a
@@ -505,14 +512,14 @@ static size_t st_cb_top_band_bytes(const struct sync_test_output *st)
 static void st_cb_gather_top_band(const struct sync_test_output *st, const struct video_data *frame,
 				  std::vector<uint8_t> &dst)
 {
-	camerabox::CbTopBandPlan plan = camerabox::cb_top_band_decode_plan(st->video_width, st->video_height);
+	const uint32_t rows = st_cb_top_band_rows(st);
 	const size_t need = st_cb_top_band_bytes(st);
 	if (need == 0)
 		return;
 
 	if (dst.size() < need)
 		dst.resize(need);
-	camerabox::cb_copy_top_band(st_plane_view(st, frame), st->video_width, plan.band_h, dst.data());
+	camerabox::cb_copy_top_band(st_plane_view(st, frame), st->video_width, rows, dst.data());
 }
 
 /* issue 1381 (the starting thread, through the mailbox's prepare_slots in st_start): size AND write

@@ -207,8 +207,9 @@ fn worker_lifecycle_follows_the_output() {
         resize_at < prepare_at && prepare_at < start_at,
         "issue 1381: prepare_slots must run after the geometry is set and before the worker starts"
     );
-    // The pre-fault sizes come from the SAME helpers the per-frame fills use, and each helper
-    // derives its geometry from `st` itself, so the two sizes cannot drift.
+    // The pre-fault sizes come from the SAME helpers the per-frame fills use. The top band's plan
+    // is derived ONCE, in st_cb_top_band_rows: the bytes helper, the fill's buffer size and the
+    // rows it copies all come from it (a copy of more rows than the buffer holds overruns it).
     let prepare = unique_body_of(
         &src,
         "void st_video_decode_job_prepare(const struct sync_test_output *st, st_video_decode_job &job)",
@@ -222,21 +223,43 @@ fn worker_lifecycle_follows_the_output() {
             "issue 1381: st_video_decode_job_prepare no longer has `{need}`"
         );
     }
-    for (sig, need) in [
+    assert!(
+        unique_body_of(
+            &src,
+            "static size_t st_cb_top_band_bytes(const struct sync_test_output *st)"
+        )
+        .contains("return (size_t)st->video_width * st_cb_top_band_rows(st);"),
+        "issue 1381: the top band's byte size must be video_width x st_cb_top_band_rows"
+    );
+    let band_fill: &[&str] = &[
+        "const uint32_t rows = st_cb_top_band_rows(st);",
+        "const size_t need = st_cb_top_band_bytes(st);",
+        "camerabox::cb_copy_top_band(st_plane_view(st, frame), st->video_width, rows, dst.data());",
+    ];
+    let grid_fill: &[&str] = &["const size_t need = st_norihiro_grid_bytes(st);"];
+    for (sig, needs) in [
         (
             "static void st_cb_gather_top_band(const struct sync_test_output *st, \
              const struct video_data *frame, std::vector<uint8_t> &dst)",
-            "const size_t need = st_cb_top_band_bytes(st);",
+            band_fill,
         ),
         (
             "static void st_norihiro_gather_grid(const struct sync_test_output *st, \
              const struct video_data *frame, std::vector<uint8_t> &dst)",
-            "const size_t need = st_norihiro_grid_bytes(st);",
+            grid_fill,
         ),
     ] {
+        let body = unique_body_of(&src, sig);
+        for need in needs {
+            assert!(
+                body.contains(need),
+                "issue 1381: the per-frame fill must size and copy with the helpers the pre-fault \
+                 uses: `{need}`"
+            );
+        }
         assert!(
-            unique_body_of(&src, sig).contains(need),
-            "issue 1381: the per-frame fill must size with the helper the pre-fault uses: `{need}`"
+            !body.contains("cb_top_band_decode_plan("),
+            "issue 1381: a per-frame fill must derive no top-band plan of its own"
         );
     }
 
