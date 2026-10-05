@@ -59,6 +59,11 @@ if tool == "scp":
     sys.exit(0)
 env = {"PATH": os.environ["FAKE_BOX_PATH"], "FAKE_STATE": st, "HOME": st}
 env.update({k: v for k, v in os.environ.items() if k.startswith("FAKE_")})
+wait = os.path.join(st, "close-wait")
+if os.environ.get("FAKE_CLOSE_SLEEP") and "_row_ro_err=" in args[-1] and not os.path.exists(wait):
+    import time
+    open(wait, "w").write("x")
+    time.sleep(float(os.environ["FAKE_CLOSE_SLEEP"]))  # the first close is interrupted here
 sys.exit(subprocess.run(["/bin/bash", "-c", mapped(args[-1])], env=env).returncode)
 '''
 
@@ -176,6 +181,34 @@ def test_deploy_fleet_interrupted_mid_swap_closes_the_window_and_starts_nothing(
     assert root(box) == "ro", "an interrupted swap must not leave the root writable:\n" + "\n".join(calls)
     assert [c for c in calls if c.startswith("systemctl start")] == [], "\n".join(calls)
     assert "interrupted" in err, err
+
+
+def test_deploy_fleet_interrupted_during_the_close_closes_it_again(tmp_path):
+    # review round 2: a Ctrl-C to the whole process group while the close's ssh runs kills that ssh
+    # before the box ran the close; the open-window marker must survive until the box answered, so
+    # the EXIT path closes it again (in its own session, out of reach of a second Ctrl-C).
+    import signal
+    import time
+    box = make_box(tmp_path, root="ro")
+    st = box["state"]
+    (st / "fs" / "usr" / "local" / "bin").mkdir(parents=True)
+    dev1 = _dev1_bin(tmp_path, box)
+    env = {"PATH": f"{dev1}:/usr/bin:/bin", "FAKE_STATE": str(st), "FAKE_BOX_PATH": str(box["stub"]),
+           "CAMERA_SET": "cam2", "SSH_PASS": "x", "GENLOCK_WAIT_TRIES": "1", "GENLOCK_WAIT_SECS": "0",
+           "HOME": str(tmp_path), "FAKE_CLOSE_SLEEP": "5"}
+    p = subprocess.Popen(["bash", str(_DEPLOY), "--binary", str(_camera_box_artifact(tmp_path))], env=env,
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    for _ in range(300):
+        if (st / "close-wait").exists():
+            break
+        time.sleep(0.05)
+    os.killpg(p.pid, signal.SIGINT)
+    out, err = p.communicate(timeout=60)
+    calls = log(box)
+    assert p.returncode != 0, out + err
+    assert root(box) == "ro", "the interrupted close must be run again:\n" + "\n".join(calls) + err
+    assert [c for c in calls if c.startswith("systemctl start")] == [], "\n".join(calls)
+    assert "may be STOPPED" in err, err
 
 
 # ---- deploy-fleet.sh: the cam2 frame-probe swap ------------------------------------------------- #
@@ -392,6 +425,26 @@ def test_dantesync_orchestrator_names_a_failed_close_never_self_healed(tmp_path)
     assert "self-healed to its previous version" not in r.stderr, r.stderr
     r = _upgrade_node(tmp_path, "SELF-HEAL: restored previous dantesync binary")
     assert "self-healed to its previous version (not rolled forward)" in r.stderr, r.stderr
+
+
+def test_dantesync_orchestrator_names_a_failed_self_heal_never_self_healed(tmp_path):
+    # review round 2: a self-heal that could not copy the .bak back is no self-heal either.
+    r = _upgrade_node(tmp_path, "SELF-HEAL FAILED: the previous binary could NOT be copied back")
+    assert "rc=1" in r.stdout, r.stdout + r.stderr
+    assert "self-healed to its previous version" not in r.stderr, r.stderr
+    assert "could NOT restore the previous binary" in r.stderr, r.stderr
+
+
+def test_dantesync_err_self_heal_is_disarmed_before_the_master_date_state_delete(tmp_path):
+    # review round 2: the ERR self-heal covers the swap and the version read, never the date-state
+    # delete after them (a roll-back to the 1.15 .bak after its date file was deleted is the state
+    # the issue-1372 delete-last order exists to avoid).
+    box, bindir, staged = _dantesync_box(tmp_path)
+    text = _dantesync_text(tmp_path, bindir, staged, "dantesync_linux_upgrade_cmd 1.14.0 ntp-master")
+    version = text.index("\ndantesync --version\n")
+    disarm = text.index("\ntrap - ERR\n", version)
+    rm = text.index('rm -f "' + str(tmp_path / "date-offset.json") + '"')
+    assert version < disarm < rm, text
 
 
 # ---- bkshading-relay-mode.sh ---------------------------------------------------------------------- #

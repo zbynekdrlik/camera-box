@@ -182,15 +182,31 @@ def test_a_writer_under_a_numeric_uid_is_named_never_read_as_none(box):
     assert out.startswith("uid-writer[4242]; root-writer[5151]"), out
 
 
-@pytest.mark.parametrize("bad", ['b"x', "b`id`x"])
-def test_an_argument_with_a_quote_or_backtick_fails_loud_on_the_box_never_silently(box, bad):
-    text = build(f'. "{_RO_WINDOW}"\nro_window_close_cmds "$1" "$2" "$3" "$4"', "t", bad, "c", "h")
-    assert text.strip(), "never an empty text (an empty ssh command would read as a good close)"
-    proc = run_text(box, text + "\necho NEVER-REACHED")
-    assert proc.returncode == 1, proc.stderr
-    assert "NEVER-REACHED" not in proc.stdout
-    assert "FAIL: ro_window_close_cmds" in proc.stderr, proc.stderr
-    assert not any(c.startswith("mount") for c in log(box)), "nothing is run on such a text"
+def _build_with_stderr(*args):
+    proc = subprocess.run(["/bin/bash", "-c", f'set -euo pipefail\n. "{_RO_WINDOW}"\nro_window_close_cmds "$@"',
+                           "harness", *args], env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout, proc.stderr
+
+
+@pytest.mark.parametrize("bad,clean", [('b"x', "bx"), ("b`id`x", "bidx")])
+def test_an_argument_with_a_quote_or_backtick_is_stripped_and_the_close_still_runs(box, bad, clean):
+    # review round 2: refusing the close left the root WRITABLE and the dev1 side misread it; the
+    # characters are stripped (with a WARNING on dev1) and the full verified close still runs.
+    text, err = _build_with_stderr("t", bad, "c", "h")
+    assert "WARNING" in err and "ro_window_close_cmds" in err, err
+    assert '"' not in text.split("FAIL: [t] ")[1].split("'s root")[0] and "`" not in text, text
+    proc = run_text(box, text + "\necho AFTER")
+    assert proc.returncode == 0 and "AFTER" in proc.stdout, proc.stderr
+    assert root(box) == "ro", log(box)
+    busy = box["state"].parent / "busy"
+    busy.mkdir()
+    bbox = make_box(busy, root="rw")
+    proc = run_text(bbox, text, FAKE_RO_FAIL="1")
+    assert proc.returncode == 1
+    assert f"FAIL: [t] {clean}'s root is NOT read-only" in proc.stderr, proc.stderr
+    rc = build(f'. "{_RO_WINDOW}"\nif ro_window_close_failed "$1"; then echo yes; else echo no; fi', proc.stderr)
+    assert rc.strip() == "yes"
 
 
 def test_close_failed_predicate_reads_the_shared_fail_line(box):
@@ -283,8 +299,9 @@ _REDIRS = re.compile(r"(?:\s*(?:[0-9]|&)?>>?&?\s*[^\s;|&)'\"]+)*")
 _DISCARDS = (re.compile(r"(?:2|&)>>?\s*/dev/null"), re.compile(r">\s*/dev/null.*2>&1"))
 # what may follow an ro remount without checking it: an `||` that goes on (true, :, a message, a
 # zero return/exit, continue/break), `; true`, `; :`, or a retry loop's `&& break`.
-_GOES_ON = re.compile(r"\s*(?:\|\|\s*(?:true|:|echo|printf|warn|log|info|return(?:\s+0)?|exit\s+0|continue|break)"
-                      r"(?![\w-])|;\s*(?:true|:)(?![\w-])|&&\s*break(?![\w-]))")
+_GOES_ON = re.compile(r"\s*(?:\|\|\s*(?:true|:|echo|printf|warn|log|info|err|logger|return\s+0|exit\s+0|continue|break)"
+                      r"(?![\w-])|\|\|\s*\{(?:(?!\b(?:exit|return|fail|die)\b)[^}])*\}"
+                      r"|;\s*(?:true|:)(?![\w-])|&&\s*break(?![\w-]))")
 
 
 class _Sweep:
@@ -347,7 +364,11 @@ def test_the_sweep_pattern_catches_every_known_swallow_shape():
                 "mount -o \"remount,ro\" / 2>/dev/null",
                 "mount -o remount,ro,noatime / || true",
                 "mount -o remount,ro / >/dev/null 2>&1",
-                "for i in 1 2 3; do mount -o remount,ro / && break; sleep 2; done"):
+                "for i in 1 2 3; do mount -o remount,ro / && break; sleep 2; done",
+                # review round 2: print-only helpers and a message-only brace group go on too
+                "mount -o remount,ro / || err \"could not remount\"",
+                "mount -o remount,ro / || { warn \"busy\"; }",
+                "mount -o remount,ro / || logger -t deploy busy"):
         assert _SWALLOW.search(bad), bad
     for good in ('_row_ro_err="$(mount -o remount,ro / 2>&1)" || _row_ro_rc=$?;',
                  'if "$MOUNT" -o remount,ro /; then',
@@ -357,6 +378,9 @@ def test_the_sweep_pattern_catches_every_known_swallow_shape():
                  "echo \"('mount -o remount,ro /' rc=$rc; is-enabled: $(systemctl is-enabled x 2>/dev/null || true))\"",
                  "mount -o remount,ro / || fail \"could not remount root back to read-only\"",
                  "mount -o remount,ro / || { echo \"FAIL: busy\" >&2; exit 1; }",
+                 # review round 2: a bare / non-zero return passes the failure on
+                 "mount -o remount,ro / || return",
+                 "mount -o remount,ro / || return 1",
                  "printf 'mount -o remount,rw / && apt-get update && mount -o remount,ro /   # comment'"):
         assert not _SWALLOW.search(good), good
 
