@@ -99,7 +99,8 @@ fn run_emitted_on_root(
     write_fake(
         &bin,
         "fuser",
-        "#!/usr/bin/env bash\necho '/:                   root     76355 F.... systemd-journal' >&2\n",
+        "#!/usr/bin/env bash\necho '                     USER        PID ACCESS COMMAND' >&2\n\
+         echo '/:                   root     76355 F.... systemd-journal' >&2\n",
     );
     let path = format!(
         "{}:{}",
@@ -243,6 +244,10 @@ fn enable_with_the_root_left_rw_fails_loud_and_never_starts_1405() {
     assert!(
         out.contains("FAIL: [#1405]") && out.contains("systemd-journal"),
         "issue 1405: the failure must name the writers holding / (fuser -vm /). out:\n{out}"
+    );
+    assert!(
+        !out.contains("fuser printed no listing"),
+        "issue 1405: a listing with a writer must never also claim there was no listing. out:\n{out}"
     );
     assert!(
         !calls

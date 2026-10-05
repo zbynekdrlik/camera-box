@@ -533,3 +533,38 @@ def test_failure_says_so_when_fuser_prints_no_listing_1405(box, mode):
     assert proc.returncode != 0, proc.stderr
     assert "fuser printed no listing" in proc.stderr, proc.stderr
     assert "(none: no process holds a file open for writing on /)" not in proc.stderr, proc.stderr
+
+
+# ---- review round 3: no self-contradicting holder lines; the FAIL line says what runs ----------- #
+
+
+@pytest.mark.parametrize("mode", ["enable-now", "disable"])
+def test_a_listed_writer_without_a_header_is_not_called_no_listing_1405(box, mode):
+    # A fuser whose header is missing or localized still lists the writer: the failure must name
+    # it and must not also claim fuser printed nothing.
+    if mode == "disable":
+        (box["state"] / "enabled").write_text("enabled\n")
+    (box["stub"] / "fuser").unlink()
+    _write_stub(
+        box["stub"],
+        "fuser",
+        "import sys\nsys.stderr.write('/:                   root      76355 F.... systemd-journal\\n')\n",
+    )
+    proc = _run(box, _persist_text(mode), "set -e", FAKE_RO_FAIL="1")
+    assert proc.returncode != 0, proc.stderr
+    assert "systemd-journal" in proc.stderr, proc.stderr
+    assert "fuser printed no listing" not in proc.stderr, proc.stderr
+    assert "(none: no process holds a file open for writing on /)" not in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("mode", ["enable-now", "disable"])
+def test_failure_reports_whether_the_painter_runs_1405(box, mode):
+    # The window never starts the painter, but something else may have (a dead-man fire before the
+    # handoff disarmed it): the FAIL line reads the unit's active state instead of asserting it.
+    if mode == "disable":
+        (box["state"] / "enabled").write_text("enabled\n")
+    (box["state"] / "active").write_text("active\n")
+    proc = _run(box, _persist_text(mode), "set -e", FAKE_RO_FAIL="1")
+    assert proc.returncode != 0, proc.stderr
+    assert "is-active now: 'active'" in proc.stderr, proc.stderr
+    assert "cam2-painter.service is NOT started" not in proc.stderr, proc.stderr
