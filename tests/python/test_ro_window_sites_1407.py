@@ -8,12 +8,15 @@ So `starts_on_rw(log) == []` is the issue-1405/1407 invariant itself, read from 
   (the camera-box swap on a cambox, and the cam2 frame-probe swap in both #892 states);
 - the dantesync Linux upgrade and rollback programs, run as emitted (a staged binary, real files);
 - bkshading-relay-mode.sh's stop/start texts;
-- the ndi-discovery `--cambox-apply` program.
+- the ndi-discovery `--cambox-apply` program;
+- rt-kernel-plan.sh's printed runbook programs (print-only; the supervisor pastes them into a box's
+  root shell), run as printed.
 bkshading-deploy-relay.sh is driven end to end by its own tests (test_bkshading_relay_gaps_808.py).
 Tier-0 (#557): no cargo, no rig, no network.
 """
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 
@@ -54,6 +57,14 @@ if tool == "scp":
         sys.stderr.write(f"scp: {dest}: Read-only file system\n")
         sys.exit(1)
     os.makedirs(os.path.dirname(mapped(dest)), exist_ok=True)
+    if os.environ.get("FAKE_SCP_PARTIAL"):  # the transfer dies half-way: half the bytes landed
+        data = open(args[-2], "rb").read()
+        open(mapped(dest), "wb").write(data[:len(data) // 2])
+        sys.stderr.write("scp: Connection closed\n")
+        sys.exit(1)
+    if os.environ.get("FAKE_SCP_CORRUPT"):  # the transfer "succeeds" with the wrong bytes
+        open(mapped(dest), "wb").write(b"CORRUPTED-IN-TRANSIT\n")
+        sys.exit(0)
     shutil.copy(args[-2], mapped(dest))
     sys.exit(0)
 env = {"PATH": os.environ["FAKE_BOX_PATH"], "FAKE_STATE": st, "HOME": st}
@@ -77,11 +88,46 @@ def _dev1_bin(tmp_path, box):
     return d
 
 
-def _deploy(tmp_path, args, enabled=None, deadman=False, **fake):
-    """Run the REAL deploy-fleet.sh over CAMERA_SET=cam2 against the fake box."""
+# Box-side file tools the deploy's swap uses, LOGGED (with /usr/local/bin/ un-mapped) so a test reads
+# their order, and refusing a write under the fake fs while the root is read-only.
+_LOGGED_FILE_TOOL = r'''
+import os, sys
+real = __REAL__
+st = os.environ["FAKE_STATE"]
+fs = os.path.join(st, "fs")
+tool = os.path.basename(sys.argv[0])
+args = [a.replace(fs, "") for a in sys.argv[1:]]
+root = open(os.path.join(st, "root")).read().strip()
+with open(os.path.join(st, "log"), "a") as f:
+    f.write(tool + " " + " ".join(args) + f" root={root}\n")
+if tool != "sha256sum" and root != "rw" and any(a.startswith(fs) for a in sys.argv[1:]):
+    sys.stderr.write(f"{tool}: cannot write: Read-only file system\n")
+    sys.exit(1)
+os.execv(real, [real] + sys.argv[1:])
+'''
+
+
+def _log_file_tools(box):
+    for tool in ("mv", "rm", "chmod", "sha256sum"):
+        real = shutil.which(tool, path="/usr/bin:/bin")
+        stub = box["stub"] / tool
+        stub.unlink()
+        stub.write_text(f"#!{sys.executable}\n" + _LOGGED_FILE_TOOL.replace("__REAL__", repr(real)))
+        stub.chmod(0o755)
+
+
+_OLD_CAMERA_BOX = b"#!/bin/bash\necho 'camera-box 1.0.0-old'\n"
+
+
+def _deploy(tmp_path, args, enabled=None, deadman=False, live=None, **fake):
+    """Run the REAL deploy-fleet.sh over CAMERA_SET=cam2 against the fake box. LIVE = the bytes of
+    the camera-box binary already installed on the box."""
     box = make_box(tmp_path, root="ro")
+    _log_file_tools(box)
     st = box["state"]
     (st / "fs" / "usr" / "local" / "bin").mkdir(parents=True)
+    if live is not None:
+        (st / "fs" / "usr" / "local" / "bin" / "camera-box").write_bytes(live)
     if enabled:
         (st / "enabled-cam2-painter.service").write_text("enabled\n")
         (st / "active-cam2-painter.service").write_text("active\n")
@@ -106,19 +152,68 @@ def _camera_box_artifact(tmp_path):
 # ---- deploy-fleet.sh: the camera-box swap ------------------------------------------------------- #
 
 
+def _live_bin(box, name="camera-box"):
+    return box["state"] / "fs" / "usr" / "local" / "bin" / name
+
+
 def test_deploy_fleet_camera_box_starts_only_after_the_verified_close(tmp_path):
-    proc, box = _deploy(tmp_path, ["--binary", str(_camera_box_artifact(tmp_path))])
+    artifact = _camera_box_artifact(tmp_path)
+    proc, box = _deploy(tmp_path, ["--binary", str(artifact)], live=_OLD_CAMERA_BOX)
     calls = log(box)
     assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}\n" + "\n".join(calls)
     assert "FLEET ALIGNED" in proc.stdout, proc.stdout
     assert starts_on_rw(calls) == [], "camera-box started on a writable root:\n" + "\n".join(calls)
+    # design addendum item 2: the copy lands in a SIDECAR, is byte-verified THERE, and only then goes
+    # live by one atomic rename -- all inside the window; the start waits for the verified close
     rw = index(calls, "mount -o remount,rw /")
     stop = index(calls, "systemctl stop camera-box root=rw")
-    scp = index(calls, "SCP /usr/local/bin/camera-box root=rw")
+    scp = index(calls, "SCP /usr/local/bin/camera-box.new root=rw")
+    verify = index(calls, "sha256sum /usr/local/bin/camera-box.new root=rw")
+    swap = index(calls, "mv -f /usr/local/bin/camera-box.new /usr/local/bin/camera-box root=rw")
     ro = index(calls, "mount -o remount,ro / root=rw")
     read = index(calls, "findmnt -no OPTIONS / root=ro")
     start = index(calls, "systemctl start camera-box root=ro")
-    assert rw < stop < scp < ro < read < start, "\n".join(calls)
+    assert rw < stop < scp < verify < swap < ro < read < start, "\n".join(calls)
+    assert root(box) == "ro"
+    assert [c for c in calls if c.startswith("SCP /usr/local/bin/camera-box root")] == [], (
+        "the copy must never write the live binary in place:\n" + "\n".join(calls))
+    assert _live_bin(box).read_bytes() == artifact.read_bytes()
+    assert not _live_bin(box, "camera-box.new").exists(), "the sidecar is renamed away, never left behind"
+
+
+def test_deploy_fleet_camera_box_partial_copy_never_reaches_the_live_binary(tmp_path):
+    # design addendum item 2: a transfer that dies half-way used to leave half a binary at the LIVE
+    # path (scp writes in place). The half-copy now lands in the sidecar and never goes live: the
+    # old binary is still whole, the sidecar is removed inside the window, and the OLD camera-box is
+    # started again, on a verified read-only root, with the box FAILED.
+    proc, box = _deploy(tmp_path, ["--binary", str(_camera_box_artifact(tmp_path))], live=_OLD_CAMERA_BOX,
+                        FAKE_SCP_PARTIAL="1")
+    calls = log(box)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    assert "cam2(scp-failed)" in out, out
+    assert _live_bin(box).read_bytes() == _OLD_CAMERA_BOX, "a partial copy must never reach the live binary"
+    assert not _live_bin(box, "camera-box.new").exists(), "the partial sidecar is removed:\n" + "\n".join(calls)
+    assert [c for c in calls if c.startswith("mv ")] == [], "\n".join(calls)
+    assert starts_on_rw(calls) == [], "\n".join(calls)
+    assert index(calls, "findmnt -no OPTIONS / root=ro") < index(calls, "systemctl start camera-box root=ro")
+    assert root(box) == "ro"
+
+
+def test_deploy_fleet_camera_box_corrupt_sidecar_is_never_moved_into_place(tmp_path):
+    # design addendum item 2: a copy that "succeeds" with the wrong bytes fails the SIDECAR's byte
+    # verify; it is never renamed over the live binary, which keeps the old, whole build.
+    proc, box = _deploy(tmp_path, ["--binary", str(_camera_box_artifact(tmp_path))], live=_OLD_CAMERA_BOX,
+                        FAKE_SCP_CORRUPT="1")
+    calls = log(box)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    assert "cam2(sha-mismatch)" in out, out
+    assert _live_bin(box).read_bytes() == _OLD_CAMERA_BOX, "a corrupt sidecar must never go live"
+    assert not _live_bin(box, "camera-box.new").exists(), "the corrupt sidecar is removed:\n" + "\n".join(calls)
+    assert [c for c in calls if c.startswith("mv ")] == [], "\n".join(calls)
+    assert starts_on_rw(calls) == [], "\n".join(calls)
+    assert index(calls, "findmnt -no OPTIONS / root=ro") < index(calls, "systemctl start camera-box root=ro")
     assert root(box) == "ro"
 
 
@@ -561,3 +656,105 @@ def test_ndi_apply_failed_close_names_the_writer_and_never_reloads(tmp_path):
     assert sum(c.startswith("mount -o remount,ro") for c in calls) == 1, "one try, never a retry:\n" + "\n".join(calls)
     assert not any("daemon-reload" in c for c in calls), "\n".join(calls)
     assert "OK" not in proc.stdout
+
+
+# ---- rt-kernel-plan.sh: the printed runbook programs ---------------------------------------------- #
+# design addendum item 3: the planner PRINTS (never runs) the supervisor's per-step commands for the
+# reboot-class kernel upgrade. Each mutating step used to end `&& mount -o remount,ro /`: an
+# unverified close, skipped entirely when an earlier `&&` step failed. Each now prints ONE
+# self-contained program that closes with the shared verified close (ro-window.sh) whatever the
+# work did, and reports the work's own failure after it. These tests run the text AS PRINTED.
+
+_RT = LIB / "rt-kernel-plan.sh"
+
+# box-side tools the steps run, logged with the root mode; FAKE_<TOOL>_RC makes one fail
+_RT_TOOL = r'''
+import os, sys
+st = os.environ["FAKE_STATE"]
+tool = os.path.basename(sys.argv[0])
+root = open(os.path.join(st, "root")).read().strip()
+with open(os.path.join(st, "log"), "a") as f:
+    f.write(tool + " " + " ".join(sys.argv[1:]) + f" root={root}\n")
+rc = os.environ.get("FAKE_" + tool.upper().replace("-", "_") + "_RC")
+sys.exit(int(rc) if rc else 0)
+'''
+
+# every step that changes the box, with the first work command its program runs
+_RT_STEPS = (
+    ("install-lowlatency", "", "apt-get install"),
+    ("grub-pin:saved", "", "grub-set-default"),
+    ("safe-grub-regen", "", "update-grub"),
+    ("purge-superseded-generic", "", "apt-get purge"),
+    ("purge-superseded-generic", "6.8.0-134-generic,linux-image-generic", "apt-get purge"),
+    ("blocked:no-rt-candidate", "", "apt-get update"),
+)
+
+
+def _rt_box(tmp_path):
+    box = make_box(tmp_path, root="ro")
+    for tool in ("apt-get", "update-grub", "update-initramfs", "grub-set-default", "mkdir"):
+        p = box["stub"] / tool
+        p.write_text(f"#!{sys.executable}\n{_RT_TOOL}")
+        p.chmod(0o755)
+    return box
+
+
+def _rt_text(token, stale=""):
+    return build(f'. "{_RT}"\nrt_kernel_step_command "$1" "$2"', token, stale)
+
+
+def test_rt_kernel_runbook_steps_carry_the_shared_verified_close_never_a_bare_remount_ro():
+    writers = build(f'. "{LIB / "ro-window.sh"}"\nro_window_writers_cmd')
+    mode = build(f'. "{LIB / "ro-root.sh"}"\ndeclare -f ro_root_mount_mode')
+    for token, stale, _work in _RT_STEPS:
+        text = _rt_text(token, stale)
+        assert "&& mount -o remount,ro /" not in text, f"{token}: an unverified ro close:\n{text}"
+        assert text.count("mount -o remount,ro /") == 1, f"{token}: exactly the ONE shared close:\n{text}"
+        assert writers.strip() in text and mode.strip() in text, f"{token}: not the shared emitter's close:\n{text}"
+
+
+def test_rt_kernel_runbook_steps_run_on_a_read_only_box_and_leave_it_read_only(tmp_path):
+    for n, (token, stale, work) in enumerate(_RT_STEPS):
+        d = tmp_path / str(n)
+        d.mkdir()
+        box = _rt_box(d)
+        proc = run_text(box, _rt_text(token, stale))
+        calls = log(box)
+        assert proc.returncode == 0, f"{token}: {proc.stdout}\n{proc.stderr}\n" + "\n".join(calls)
+        rw = index(calls, "mount -o remount,rw / root=ro")
+        w = index(calls, work, rw)
+        assert calls[w].endswith("root=rw"), f"{token}: the work runs inside the window:\n" + "\n".join(calls)
+        ro = index(calls, "mount -o remount,ro / root=rw", w)
+        index(calls, "findmnt -no OPTIONS / root=ro", ro)
+        assert root(box) == "ro", f"{token}:\n" + "\n".join(calls)
+
+
+def test_rt_kernel_runbook_step_whose_work_fails_still_puts_the_root_back_read_only(tmp_path):
+    # the old `a && b && mount -o remount,ro /` never reached the remount once a or b failed
+    box = _rt_box(tmp_path)
+    proc = run_text(box, _rt_text("install-lowlatency"), FAKE_APT_GET_RC="100")
+    calls = log(box)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert root(box) == "ro", "a failed apt step must still close the window:\n" + "\n".join(calls)
+    assert index(calls, "apt-get") < index(calls, "mount -o remount,ro / root=rw")
+    fail = [ln for ln in proc.stderr.splitlines() if ln.startswith("FAIL") and "install-lowlatency" in ln]
+    assert fail and "rc=100" in fail[-1], proc.stderr
+
+
+def test_rt_kernel_runbook_step_on_a_busy_root_fails_loud_naming_the_writer(tmp_path):
+    box = _rt_box(tmp_path)
+    proc = run_text(box, _rt_text("safe-grub-regen"), FAKE_RO_FAIL="1")
+    calls = log(box)
+    assert proc.returncode != 0
+    assert "root is NOT read-only" in proc.stderr and "systemd-journal" in proc.stderr, proc.stderr
+    assert sum(c.startswith("mount -o remount,ro") for c in calls) == 1, "one try, never a retry:\n" + "\n".join(calls)
+
+
+def test_rt_kernel_runbook_step_pasted_into_a_root_shell_never_ends_that_shell(tmp_path):
+    # the supervisor pastes the text into an interactive ssh session on the box: a failed close
+    # exits the step's OWN child shell, never the session it was pasted into
+    box = _rt_box(tmp_path)
+    proc = run_text(box, _rt_text("install-lowlatency") + "\necho SESSION-STILL-ALIVE", strict=":",
+                    FAKE_RO_FAIL="1")
+    assert "root is NOT read-only" in proc.stderr, proc.stderr
+    assert "SESSION-STILL-ALIVE" in proc.stdout, proc.stdout + proc.stderr

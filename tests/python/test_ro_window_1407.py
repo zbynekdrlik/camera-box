@@ -494,7 +494,8 @@ def test_deploy_fleet_names_a_pending_painter_start_only_for_an_enable_now_resto
 def test_the_shared_lib_is_sourced_by_every_rw_window_site():
     for rel in ("scripts/deploy-fleet.sh", "scripts/bkshading-deploy-relay.sh",
                 "scripts/lib/cam2-painter-ro-persist.sh", "scripts/lib/bkshading-relay-mode.sh",
-                "scripts/lib/ndi-discovery.sh", "scripts/lib/dantesync-rollback.sh"):
+                "scripts/lib/ndi-discovery.sh", "scripts/lib/dantesync-rollback.sh",
+                "scripts/lib/rt-kernel-plan.sh"):
         text = (ROOT / rel).read_text()
         assert "ro-window.sh" in text and "ro_window_close_cmds" in text, rel
 
