@@ -171,7 +171,7 @@ the TEST handoff (`enable-now`) and the EVENT disable (`disable`).
   with `mount -o remount,ro / ... || true` and never read the mount state. A shared "close ro,
   verify, name the holders" emitter would serve them all. It is cross-cutting (5 sites, 4
   subsystems), so the lane reported it to the supervisor as a `followup_candidates` entry in its
-  issue-1405 LANE-RETURN; the ticket number goes here once the supervisor files it.
+  issue-1405 LANE-RETURN. It is tracked as issue 1407 (one shared verified rw-window emitter).
   It should also absorb this emitter's writer filter: `bkshading-deploy-relay.sh`
   `remount_ro_checked` still prints `fuser -vm / | head -n 40`, the cut-off fixed here. (The
   filter cannot live in `ro-root.sh`, which must stay free of grep/awk/sed.)
