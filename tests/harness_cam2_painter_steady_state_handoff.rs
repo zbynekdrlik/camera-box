@@ -5,9 +5,11 @@
 //! `do_test` keeps its transient painter only for the at-mode-set chain verification, then HANDS
 //! steady state to the durable unit via
 //! `scripts/lib/cam2-painter-handoff.sh::cam2_painter_steady_state_handoff_cmds()`: stop the
-//! transient painter (free fb0/DRM, #440), `systemctl enable --now cam2-painter.service`
-//! (re-enable after any EVENT-mode #892 disable + start now + survive reboot), then FAIL LOUD
-//! unless it is active + genuinely painting (presenter-aware #464) + marker CSV growing (#431).
+//! transient painter (free fb0/DRM, #440), `systemctl enable cam2-painter.service` inside a
+//! remount-rw window (re-enable after any EVENT-mode #892 disable + survive reboot), verify the root
+//! is read-only again, `systemctl start` it (issue 1405: never `enable --now` inside the window),
+//! then FAIL LOUD unless it is active + genuinely painting (presenter-aware #464) + marker CSV
+//! growing (#431).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -54,11 +56,17 @@ fn script_text() -> String {
 #[test]
 fn handoff_enables_and_starts_the_permanent_unit() {
     let h = handoff();
+    let enable = h.find("systemctl enable cam2-painter.service").expect(
+        "#1008: the handoff MUST enable the permanent cam2-painter.service -- so it survives \
+         reboot AND re-arms after any EVENT-mode #892 `disable`",
+    );
+    let start = h.find("systemctl start cam2-painter.service").expect(
+        "#1008: the handoff MUST start the permanent unit as the durable steady-state painter",
+    );
     assert!(
-        h.contains("systemctl enable --now cam2-painter.service"),
-        "#1008: the handoff MUST `enable --now` the permanent cam2-painter.service -- enable so it \
-         survives reboot AND re-arms after any EVENT-mode #892 `disable`, --now so it starts \
-         immediately as the durable steady-state painter. Got:\n{h}"
+        enable < start && !h.contains("systemctl enable --now"),
+        "issue 1405: enable inside the remount-rw window, start only after it (a start on a \
+         writable root kept cam2's root read-write). Got:\n{h}"
     );
 }
 
@@ -69,7 +77,7 @@ fn handoff_stops_transient_painter_before_enabling_permanent_unit() {
         "#440: handoff must stop the TRANSIENT painter via its pidfile before starting the unit",
     );
     let enable_pos = h
-        .find("systemctl enable --now cam2-painter.service")
+        .find("systemctl enable cam2-painter.service")
         .expect("#1008: handoff must enable+start the permanent unit");
     assert!(
         stop_pos < enable_pos,
