@@ -112,7 +112,8 @@ Three dev1-side pure parsers:
     - `OPEN_WINDOW` (`ip|box|label`) is set just BEFORE the rw remount. `close_ro_or_fail` clears it
       only once the BOX answered the close (rc 0 or 1). An interrupted or failed close ssh keeps it.
     - `PENDING_START` (`label|box`) lives from the window open until the service start was
-      attempted (or the box's flow ended).
+      attempted (or the box's flow ended). The painter gets one only for an enable-now restore:
+      the advice "start it by hand" must never reach a deliberately dark (#892 EVENT) painter.
     - The EXIT trap is also reached on INT/TERM (`exit 130` / `exit 143`, e.g. a CI cancel). An open
       window is closed once more, verified, under `setsid -w`, so a second Ctrl-C cannot reach it
       (sshpass forwards SIGINT to ssh). Nothing is started there: the binary may be half-copied.
@@ -186,8 +187,9 @@ Audit, left as they are:
     discarded. It is structural, per ro remount CALL (`remount,ro` / `ro,remount`, quoted, with
     `,opts`, with or without ` /`). Its redirections must not send the error to `/dev/null`. What
     follows must not just go on: `|| true`, `|| :`, `|| echo/printf/warn/log/info/err/logger`,
-    `|| return 0`, `|| exit 0`, `|| continue`, `|| break`, a `|| { ... }` group without
-    exit/return/fail/die, `; true`, `; :`, a retry loop's `&& break`. A loud `|| fail ...` /
+    `|| return 0`, `|| exit 0`, `|| continue`, `|| break`, a `|| { ... }` group (read to its
+    MATCHING brace, so a `${var}` never ends it) without a non-zero exit/return, a bare return, fail
+    or die, `; true`, `; :`, a retry loop's `&& break`. A loud `|| fail ...` /
     `|| { ...; exit 1; }` is fine, and so are `|| return` / `|| return 1` (they pass the failure on).
     So is a FAIL message that reads unit state with `2>/dev/null || true` later on the same line
     (the check is anchored right after the command).
