@@ -201,7 +201,17 @@ out of each step's `foreach (... in @(...))`.
     too, and the OLD steps against the NEW tree must fail;
   - compile and run the one or two Rust anchor tests that cover the change with plain `rustc --test`
     / `clippy-driver -D warnings`, and cover the others with a Python replica of their exact
-    needles (the owner's limit on local test runs).
+    needles (the owner's limit on local test runs). The av_sync_dock tests read
+    `env!("CARGO_PKG_VERSION")` at compile time too: set `CARGO_PKG_VERSION=0.0.0` beside
+    `CARGO_MANIFEST_DIR`. A `fmt --check && rustc …` chain that stops at fmt leaves the OLD binary
+    to run: compile in its own call, to a new output name.
+  - **Prove a new anchor in BOTH languages without touching `vendor/` (issue 1381).** Copy only
+    `vendor/av-sync-dock/{src,test}` into a scratch tree, apply one mutant there (a python script
+    with a count-1 `replace`), then run the extracted pwsh step with that tree as cwd
+    (`dock-output-source.ps1` resolves `../src` from its own path, so it reads the mutant) and
+    compile the Rust test with `CARGO_MANIFEST_DIR=<scratch tree>` (the union helper reads the
+    mutant). Every mutant must fail both; the real tree must pass both. Worked set: the eight
+    pre-fault wiring mutants in `av-sync-dock-decode-worker.md`.
   The dock change is live only after a FULL-bundle Windows deploy (`rig-state-inspection.md`).
 - **Size budget.** At the split `sync-test-output-audio.cpp` is 1021 lines and
   `st_raw_audio_camera_box` about 297 (their bodies unchanged). The next addition to the audio

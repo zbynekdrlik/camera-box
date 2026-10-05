@@ -146,6 +146,47 @@ fn the_audio_callback_only_gates_and_copies() {
     }
 }
 
+/// Review round 1: `st_raw_audio` reads camera-box mode AND norihiro's phone params (`f`, `c`,
+/// `q_ms`) in ONE lock section. The decode worker sets `cb_mode_active` together with the rig's
+/// fixed `f` / `c` under `st->mutex`. With two sections, a block that read the mode just before the
+/// worker latched it and the params just after ran norihiro's whole inline demod on libobs's audio
+/// thread, growing its sample deque there (one small allocation every few samples on MSVC), once per
+/// output start.
+#[test]
+fn the_audio_callback_reads_the_mode_and_the_phone_params_in_one_lock() {
+    let src = code();
+    let cb = unique_body_of(
+        &src,
+        "void st_raw_audio(void *data, struct audio_data *frames)",
+    );
+    assert_eq!(
+        cb.matches("lock(st->mutex)").count(),
+        1,
+        "{DOCK_OUTPUT}: st_raw_audio must take st->mutex exactly once (issue 1381 review round 1)"
+    );
+    let lock_at = cb
+        .find("lock(st->mutex)")
+        .expect("st_raw_audio takes st->mutex");
+    let branch_at = cb
+        .find("if (cb_active) {")
+        .expect("st_raw_audio branches on camera-box mode");
+    for need in [
+        "f = st->f;",
+        "c = st->c;",
+        "q_ms = st->q_ms;",
+        "cb_active = st->cb_mode_active;",
+    ] {
+        let at = cb
+            .find(need)
+            .unwrap_or_else(|| panic!("{DOCK_OUTPUT}: st_raw_audio no longer reads `{need}`"));
+        assert!(
+            lock_at < at && at < branch_at,
+            "{DOCK_OUTPUT}: st_raw_audio must read `{need}` in its one lock section, before the \
+             camera-box branch (issue 1381 review round 1)"
+        );
+    }
+}
+
 /// The worker runs the unchanged camera-box decode on the copied block and resets the decoders at
 /// every gap; ending a session unlocks the dock and shows STALE.
 #[test]

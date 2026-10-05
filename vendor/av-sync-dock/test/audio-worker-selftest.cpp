@@ -23,7 +23,10 @@
  *      all dropped merges its end into the previous one (the worker never saw it);
  *   6. stop() waits for an in-flight block and joins; publish() after stop() is a no-op; a restarted
  *      FIFO starts a new session; on_thread_start runs once on the worker;
- *   7. the per-block handling time is measured (max and sum, read-and-reset).
+ *   7. the per-block handling time is measured (max and sum, read-and-reset);
+ *   8. no publish() after start() takes a page fault on the producer thread (getrusage
+ *      RUSAGE_THREAD, cb-thread-faults.hpp): start() makes every slot plane resident, so libobs's
+ *      audio thread never writes a slot page for the first time.
  *
  * Dependency-free (STL + threads): `g++ -std=c++11 -O2 -Wall -Wextra -Werror -pthread`.
  * Driven by tests/av_sync_dock_audio_worker_1381.rs on every CI run. Exit 0 + "ALL PASS" = pass.
@@ -32,6 +35,7 @@
 #include "../src/camera-box-audio-worker.hpp"
 #include "../src/camera-box-channel-pick.hpp"
 #include "cb-marker-emitter.hpp"
+#include "cb-thread-faults.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -103,6 +107,73 @@ static bool wait_taken(const CbAudioBlockFifo &fifo, uint64_t n)
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
 	return true;
+}
+
+/* 8. No publish() after start() takes a page fault on the producer thread -- libobs's audio thread
+ * in the dock. A page fault is kernel work in the faulting thread (a fresh page zeroed, a reclaim
+ * under memory pressure), and a reserve()-only start() left the first write of every slot page to
+ * publish(): 385 faults over the first 64 pushes of a 4096-frame stereo FIFO on dev1's glibc, on the
+ * first pass over the slots after each output start. The 1024-frame FIFO is the dock's own
+ * AUDIO_OUTPUT_FRAMES block; on glibc
+ * malloc's chunk headers already touch nearly every page of a one-page plane, so that case faults 0-1
+ * times even without the pre-fault, and the multi-page case is what proves start() on any allocator
+ * (the dock runs on the Windows heap).
+ *
+ * Deterministic, never timed: the worker is held inside block 0, so the next 63 publishes fill every
+ * slot once with nothing dropped, and each publish is bracketed by the producer thread's own fault
+ * count. A warm-up FIFO pages publish()'s own code in before anything is counted, and every FIFO
+ * here lives to the end of the test, so no FIFO under test can reuse another one's resident memory.
+ * main() runs this first, before the other tests free FIFO memory a new FIFO could reuse. */
+static void test_publish_never_faults_after_start()
+{
+	const size_t nch = 2;
+	const size_t sizes[2] = {BLOCK, 4 * BLOCK};
+	std::vector<float> src(4 * BLOCK, 0.25f); // one source block, written (resident) before any count
+	const float *planes[2] = {src.data(), src.data()};
+
+	CbAudioBlockFifo warm(2);
+	CbAudioBlockFifo::Handlers wh;
+	wh.process = [](const CbAudioBlock &) {};
+	CHECK(warm.start(wh, nch, 4 * BLOCK), "faults: warm-up start");
+	CHECK(warm.publish(planes, nch, 4 * BLOCK, 0), "faults: warm-up publish");
+	CHECK(wait_taken(warm, 1), "faults: warm-up block handled");
+
+	CbAudioBlockFifo fifos[2];
+	Latch latches[2];
+	for (size_t s = 0; s < 2; s++) {
+		const size_t frames = sizes[s];
+		Latch &latch = latches[s];
+		CbAudioBlockFifo::Handlers h;
+		h.process = [&latch](const CbAudioBlock &b) {
+			if (b.timestamp == 0)
+				latch.wait_inside();
+		};
+		CHECK(fifos[s].start(h, nch, frames), "faults: start");
+		uint64_t faults = 0, accepted = 0;
+		for (uint64_t k = 0; k < CB_AUDIO_FIFO_SLOTS; k++) {
+			const uint64_t f0 = cb_thread_page_faults();
+			const bool ok = fifos[s].publish(planes, nch, frames, k);
+			faults += cb_thread_page_faults() - f0;
+			if (ok)
+				accepted++;
+			if (k == 0)
+				latch.wait_entered();
+		}
+		latch.release();
+		std::printf("faults: %zu-frame stereo FIFO, %llu of %zu slots written, %llu page fault(s) on the "
+			    "producer thread\n",
+			    frames, (unsigned long long)accepted, CB_AUDIO_FIFO_SLOTS, (unsigned long long)faults);
+		CHECK(accepted == CB_AUDIO_FIFO_SLOTS,
+		      "faults: every slot was written once (the worker held block 0, nothing dropped)");
+		if (CB_THREAD_FAULTS_EXACT)
+			CHECK(faults == 0, "faults: no publish() after start() takes a page fault on the producer thread");
+		else
+			std::printf("faults: REPORT only (sanitizer build: its runtime faults on its own pages)\n");
+		CHECK(wait_taken(fifos[s], accepted), "faults: every block handled");
+	}
+	for (size_t s = 0; s < 2; s++)
+		fifos[s].stop();
+	warm.stop();
 }
 
 static void test_gate()
@@ -550,6 +621,7 @@ int main()
 {
 	/* Line-buffered: a FAIL line reaches the log even if a later check hangs or crashes. */
 	std::setvbuf(stdout, nullptr, _IOLBF, 0);
+	test_publish_never_faults_after_start();
 	test_gate();
 	test_order_and_contents();
 	test_producer_never_blocked();

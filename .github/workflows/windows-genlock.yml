@@ -670,6 +670,50 @@ jobs:
           if ($output -notmatch [regex]::Escape('#include "camera-box-frame-copy.hpp"')) {
             Write-Error "dock output sources: the frame copies no longer come from camera-box-frame-copy.hpp (issue 1367)"; exit 1
           }
+          # issue 1381: both decode jobs' copy buffers are sized AND written on the starting thread
+          # (after the geometry is set, before the worker starts) by the helpers the per-frame fills
+          # use, so st_raw_video's first frame into each slot neither allocates nor first-touches a page.
+          # Mirrors worker_lifecycle_follows_the_output in tests/av_sync_dock_decode_mailbox_1367.rs.
+          $vbody = Get-DockBody $output 'static bool st_start(void *data)'
+          $iResize = $vbody.IndexOf('quirc_resize(')
+          $iPrepare = $vbody.IndexOf('st->cb_decode_mailbox.prepare_slots( [st](st_video_decode_job &job) { st_video_decode_job_prepare(st, job); })')
+          $iWorker = $vbody.IndexOf('st->cb_decode_mailbox.start(')
+          if ($iResize -lt 0 -or $iPrepare -lt 0 -or $iWorker -lt 0 -or $iResize -gt $iPrepare -or $iPrepare -gt $iWorker) {
+            Write-Error "dock output sources: st_start no longer pre-faults both decode jobs through prepare_slots between the geometry and the worker start (issue 1381)"; exit 1
+          }
+          $prep = Get-DockBody $output 'void st_video_decode_job_prepare(const struct sync_test_output *st, st_video_decode_job &job)'
+          foreach ($need in @('job.band.assign(st_cb_top_band_bytes(st), 0);', 'job.grid.assign(st_norihiro_grid_bytes(st), 0);')) {
+            if (-not $prep.Contains($need)) { Write-Error "dock output sources: st_video_decode_job_prepare no longer has '$need' (issue 1381)"; exit 1 }
+          }
+          # The top band's plan is derived ONCE (st_cb_top_band_rows): the byte size, the fill's buffer
+          # size and the rows it copies all come from it; a copy of more rows than the buffer holds
+          # would overrun it on the video-output thread.
+          $rowsBody = Get-DockBody $output 'static uint32_t st_cb_top_band_rows(const struct sync_test_output *st)'
+          foreach ($need in @('const camerabox::CbTopBandPlan plan = camerabox::cb_top_band_decode_plan(st->video_width, st->video_height);', 'return plan.band_h;')) {
+            if (-not $rowsBody.Contains($need)) { Write-Error "dock output sources: st_cb_top_band_rows is no longer the output geometry's plan rows: '$need' (issue 1381)"; exit 1 }
+          }
+          $bytesBody = Get-DockBody $output 'static size_t st_cb_top_band_bytes(const struct sync_test_output *st)'
+          if (-not $bytesBody.Contains('return (size_t)st->video_width * st_cb_top_band_rows(st);')) {
+            Write-Error "dock output sources: the top band's byte size is no longer video_width x st_cb_top_band_rows (issue 1381)"; exit 1
+          }
+          $fillBand = Get-DockBody $output 'static void st_cb_gather_top_band(const struct sync_test_output *st, const struct video_data *frame, std::vector<uint8_t> &dst)'
+          $fillGrid = Get-DockBody $output 'static void st_norihiro_gather_grid(const struct sync_test_output *st, const struct video_data *frame, std::vector<uint8_t> &dst)'
+          foreach ($need in @('const uint32_t rows = st_cb_top_band_rows(st);', 'const size_t need = st_cb_top_band_bytes(st);', 'camerabox::cb_copy_top_band(st_plane_view(st, frame), st->video_width, rows, dst.data());')) {
+            if (-not $fillBand.Contains($need)) { Write-Error "dock output sources: st_cb_gather_top_band no longer has '$need' (issue 1381)"; exit 1 }
+          }
+          if ((-not $fillGrid.Contains('const size_t need = st_norihiro_grid_bytes(st);')) -or $fillBand.Contains('cb_top_band_decode_plan(') -or $fillGrid.Contains('cb_top_band_decode_plan(')) {
+            Write-Error "dock output sources: a per-frame fill no longer sizes with the helper the pre-fault uses, or derives a top-band plan of its own (issue 1381)"; exit 1
+          }
+          # Review round 4: the decode worker reads the same row count, and only from a band that holds
+          # every byte it reads (the grid decode is guarded the same way).
+          $decoder = Get-DockBody $output 'static bool st_raw_video_camera_box_decode(struct sync_test_output *st, const uint8_t *src, uint64_t timestamp)'
+          foreach ($need in @('const uint32_t rows = st_cb_top_band_rows(st);', 'camerabox::cb_box_downscale_luma(src, st->video_width, rows, qbuf, (uint32_t)w, (uint32_t)h);')) {
+            if (-not $decoder.Contains($need)) { Write-Error "dock output sources: the top-band decoder no longer reads the shared row count: '$need' (issue 1381)"; exit 1 }
+          }
+          $jobRun = Get-DockBody $output 'void st_video_decode_job_run(struct sync_test_output *st, st_video_decode_job &job)'
+          if ($decoder.Contains('plan.band_h') -or (-not $jobRun.Contains('if (job.band.size() >= st_cb_top_band_bytes(st)) st_raw_video_camera_box_decode(st, job.band.data(), job.timestamp);'))) {
+            Write-Error "dock output sources: the top-band decoder reads rows from its own plan, or the worker decodes a band without checking it holds every byte read (issue 1381)"; exit 1
+          }
           Write-Output "dock decode off the video-output thread (issue 1367) — OK"
 
       - name: Assert dock decodes the marker per channel (issue 1367)
@@ -754,6 +798,21 @@ jobs:
           $cb = Get-DockBody $output 'void st_raw_audio(void *data, struct audio_data *frames)'
           if (-not $cb.Contains('cb_active = st->cb_mode_active; last_qr_ns = st->cb_video_last_decode_ts_ns; } if (cb_active) { cb_audio_gate_and_publish(st, frames, last_qr_ns); return; }')) {
             Write-Error "dock output sources: st_raw_audio no longer hands camera-box mode to the gate + FIFO copy (issue 1381)"; exit 1
+          }
+          # Review round 1: camera-box mode and norihiro's phone params are read in ONE section under
+          # st->mutex, so no block reads the mode before the decode worker latched it and the rig's
+          # params after (that block ran norihiro's inline demod on the audio thread). Mirrors
+          # the_audio_callback_reads_the_mode_and_the_phone_params_in_one_lock in
+          # tests/av_sync_dock_audio_worker_1381.rs.
+          $iLock = $cb.IndexOf('lock(st->mutex)'); $iBranch = $cb.IndexOf('if (cb_active) {')
+          if ($iLock -lt 0 -or $iBranch -lt 0 -or $cb.IndexOf('lock(st->mutex)', $iLock + 1) -ge 0) {
+            Write-Error "dock output sources: st_raw_audio must take st->mutex exactly once, before the camera-box branch (issue 1381)"; exit 1
+          }
+          foreach ($need in @('f = st->f;', 'c = st->c;', 'q_ms = st->q_ms;', 'cb_active = st->cb_mode_active;')) {
+            $iNeed = $cb.IndexOf($need)
+            if ($iNeed -lt $iLock -or $iNeed -gt $iBranch) {
+              Write-Error "dock output sources: st_raw_audio no longer reads '$need' in its one lock section before the camera-box branch (issue 1381)"; exit 1
+            }
           }
           $publish = Get-DockBody $output 'static void cb_audio_gate_and_publish(struct sync_test_output *st, const struct audio_data *frames, uint64_t last_qr_ns)'
           foreach ($need in @('const camerabox::CbAudioGate gate = camerabox::cb_audio_decode_gate( true, st->cb_measure_source_present.load(std::memory_order_relaxed), now, last_qr_ns, CAMERA_BOX_TEST_SIGNAL_FRESH_NS);', 'if (gate == camerabox::CbAudioGate::Open) {', 'st->cb_audio_fifo.publish(planes, nch, frames->frames, frames->timestamp);', 'st->cb_audio_fifo.end_session((unsigned)gate);', 'camerabox::cb_atomic_max_u64(st->cb_audio_publish_max_ns, os_gettime_ns() - publish_start_ns);')) {

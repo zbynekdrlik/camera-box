@@ -155,7 +155,9 @@ struct corner_type
  * taken on libobs's single video-output thread and decoded on the dock's own worker thread
  * (camera-box-decode-mailbox.hpp), so a slow QR decode can never make video-io skip output frames.
  * The buffers live in the mailbox's two slots and are reused, so there is no per-frame allocation
- * once they have grown. */
+ * once they have grown. Since issue 1381 st_start sizes and writes `band` and `grid` in both slots
+ * (prepare_slots + st_video_decode_job_prepare), so the video thread's first frame neither allocates
+ * nor first-touches a page; only the phone-mode marker `patches` still grow on use. */
 struct st_marker_patch
 {
 	camerabox::CbPatchRect rect; // the circle's bounding box in the full-res frame
@@ -382,6 +384,7 @@ struct sync_test_output
 /* sync-test-output-video.cpp */
 void st_raw_video(void *, struct video_data *);
 void st_video_decode_job_run(struct sync_test_output *, st_video_decode_job &);
+void st_video_decode_job_prepare(const struct sync_test_output *, st_video_decode_job &);
 void st_decode_worker_thread_setup();
 void signal_sync_found(obs_output_t *, const struct sync_index *);
 void sync_index_found(struct sync_test_output *, int, uint64_t, bool, uint32_t);

@@ -12,6 +12,7 @@ paths:
   - "vendor/av-sync-dock/test/audio-worker-selftest.cpp"
   - "tests/av_sync_dock_audio_worker_1381.rs"
   - "tests/c/av_sync_dock_demod_bench_1381.cpp"
+  - "vendor/av-sync-dock/test/cb-thread-faults.hpp"
   - "vendor/av-sync-dock/src/sync-test-dock.cpp"
 ---
 
@@ -199,8 +200,10 @@ source for every output. Live 27.9.2026 on the resolume cg OBS:
   since the previous diag line.
 - **Lifecycle** is the mailbox's: `st_start` stops a previous worker before rewriting the channel
   layout and starts it before `obs_output_begin_data_capture` (slots pre-sized for
-  `AUDIO_OUTPUT_FRAMES`, so the audio thread never allocates); joined in `st_stop` (right after the
-  video mailbox), in `st_destroy`, and in `~sync_test_output` before `delete cb_audio_dec`.
+  `AUDIO_OUTPUT_FRAMES` AND written, so the audio thread never allocates and never takes a
+  first-touch fault -- see "No first touch on libobs's threads" below); joined in `st_stop`
+  (right after the video mailbox), in `st_destroy`, and in `~sync_test_output` before
+  `delete cb_audio_dec`.
 
 ## Verifying (Tier-0)
 
@@ -236,3 +239,101 @@ source for every output. Live 27.9.2026 on the resolume cg OBS:
   (comments kept). A comment inside `st_raw_audio` or `cb_audio_gate_and_publish` must never spell
   a banned call with its parenthesis (`blog(`, `->push(`, `obs_get_source_by_name(`, ...), and no
   comment may sit between the tokens of a multi-statement needle.
+
+# No first touch on libobs's threads (issue 1381)
+
+A page fault is kernel work in the faulting thread's own context: a fresh page is zeroed, and under
+memory pressure the kernel may reclaim first. On libobs's audio or video-output thread one fault
+can stall the tick for milliseconds. So no producer-side buffer may be written for the FIRST time
+on those threads.
+
+## The rule
+
+- **Every buffer `publish()` writes is sized AND written before the worker starts**, on the
+  starting thread (`st_start`):
+  - `CbAudioBlockFifo::start()` writes every slot plane with `assign(reserve_frames, 0.0f)` and
+    then `clear()`s it (capacity and written pages kept). `reserve()` alone allocates but leaves
+    the pages untouched: the first `publish()` into each slot page then faulted on the audio
+    thread, on the first pass over the slots after each output start. `assign()`, not
+    `resize()`: on a restart a plane can already hold a block, and `resize()` to that size writes
+    nothing.
+  - The video mailbox is generic over its job, so `CbDecodeMailbox::prepare_slots(fn)` runs `fn`
+    on BOTH slots on the caller's thread under the lock, and refuses (calling nothing) while the
+    worker runs. `st_start` calls it right before `st->cb_decode_mailbox.start(` with
+    `st_video_decode_job_prepare`, which `assign()`s the top band (1.5 MB at 1080p, 6 MB at 4K) and
+    norihiro's grid (filled every frame until camera-box mode latches). The sizes come from the
+    same helpers the per-frame fills use (`st_cb_top_band_bytes`, `st_norihiro_grid_bytes`). The
+    top band's ROW COUNT is derived ONCE, in `st_cb_top_band_rows`: the byte size, the fill's
+    buffer size, the rows it copies and the rows the decode worker reads all come from it. The
+    worker's own plan only sets quirc's geometry, and `st_video_decode_job_run` decodes the band only
+    when it holds `st_cb_top_band_bytes` bytes (like the grid). A second row count (review rounds
+    3-4) lets a width/height swap copy more rows than the buffer holds (a heap overrun on the
+    video thread) or read past it on the worker.
+  - The ONE exception: the phone-mode marker `patches` grow on use. Their size follows the circle
+    radius of a decoded PHONE QR (norihiro mode, never the camera-box rig path); a worst-case
+    pre-size (a QR as tall as the frame) would hold ~9 MB per 4K output.
+- **A new producer-side buffer gets the same treatment and the same check.** `reserve()` is never
+  the pre-fault.
+- **What it guarantees, and what not:** every slot page is RESIDENT as of `start()`, so libobs's
+  threads never take a FIRST-touch fault. The audio FIFO's first `publish()` comes at the first
+  gate opening (a fresh camera-box QR + `mbc`), which can be hours after the output auto-starts. A
+  page the OS takes back in between (a Windows working-set trim or memory combining, a Linux
+  swap-out) can still fault there. Only locking the pages would prevent that, and the OBS process
+  cannot (the design's rejected `mlock` approach). Check it on the stream box after a deploy:
+  `audio_publish_max_us=` on the first diag line after the gate opens.
+- **Read the mode and norihiro's phone params in ONE lock section** (`st_raw_audio`). The decode
+  worker sets `cb_mode_active` together with the rig's fixed `f` / `c` under `st->mutex`. With two
+  sections, a block that read the mode just before the latch and the params just after ran
+  norihiro's whole inline demod on the audio thread (growing its sample deque there), once per
+  output start. Pinned by `the_audio_callback_reads_the_mode_and_the_phone_params_in_one_lock` and
+  its pwsh twin in the 1381 audio step of both workflows.
+
+## The check is a FAULT COUNT, never a timing bound
+
+- `vendor/av-sync-dock/test/cb-thread-faults.hpp`: `cb_thread_page_faults()` = the calling
+  thread's `ru_minflt + ru_majflt` from `getrusage(RUSAGE_THREAD)` (Linux; aborts on a refused
+  read). The self-tests and the bench include it; the dock never does.
+- The audio-worker self-test (`test_publish_never_faults_after_start`) and the mailbox self-test
+  (`test_prepared_slots_never_fault`) bracket every publish after `start()` with it and require 0.
+  The worker is held inside the first block / frame, so the next publishes fill every slot once
+  with nothing dropped.
+- **Test-writing traps** (each one made a check blind or flaky while it was written):
+  - glibc `malloc` writes a chunk header into the page each chunk starts on, so `reserve()` of a
+    ONE-page plane (the dock's 1024 frames = 4 KB) already makes nearly every page resident: 0-1
+    faults per FIFO without the pre-fault. Test a MULTI-page plane too (4096 frames: 385 faults
+    on a `reserve()`-only start). The Windows heap, where the dock runs, lays blocks out differently.
+  - A new FIFO reuses the freed, already-resident heap of a destroyed one: run the fault test
+    FIRST in `main()`, and keep every FIFO / mailbox of the test alive until its end.
+  - The first execution of `publish()`'s own code can fault on a text page: a warm-up FIFO /
+    mailbox (kept alive) publishes once before anything is counted.
+  - The source block the test copies from is written before the first count (a fresh vector
+    faults on its first read too).
+- Mutants killed (lane proof): `start()` back to `reserve()` only (1 + 385 faults),
+  `prepare_slots()` that calls nothing (770 faults) or only one slot (385), `prepare_slots()`
+  that runs while the worker runs (the refusal checks fail).
+- **The dock wiring is pinned in both languages** (review round 1: the self-tests use their own
+  jobs, so deleting the dock's call kept every test green). `worker_lifecycle_follows_the_output`
+  in `tests/av_sync_dock_decode_mailbox_1367.rs` and the pwsh step "Assert dock decode runs off
+  the video-output thread (issue 1367)" in both workflows require `prepare_slots` with
+  `st_video_decode_job_prepare` between `quirc_resize(` and the worker start, the prepare's two
+  `assign()`s through the size helpers, the bytes helper as `video_width x st_cb_top_band_rows`,
+  and the fills sizing and copying with the same helpers and no plan of their own, the row
+  helper's own plan, the decoder reading those rows (no `plan.band_h`), and the worker's band
+  guard. Killed in both languages: the call dropped, the band fill with its own formula, the grid
+  not prepared, a fill copying with its own (swapped) plan, a bytes helper with its own plan, the
+  decoder reading its own plan, the band guard dropped, the row helper with swapped geometry.
+- **The bench reports, it does not gate.** `tests/c/av_sync_dock_demod_bench_1381.cpp` keeps the
+  mean / p99 audio-thread budget as CHECKs and REPORTS the worst single push against
+  `CB_BENCH_AUDIO_THREAD_MAX_MS` with the producer's faults beside it (`faults=<first pass over
+  the slots>/<every push>`). Thread CPU time still carries what a shared CI runner charges to the
+  thread. Run 37345820890 read 2.42 ms (cpu ~= wall) on one push of a FIFO whose slots reused
+  resident memory (the bench reads `faults=0/0` on every signal), so it was not a first touch of
+  its slots. Whether it was another fault (a reclaimed page) or time charged to the thread is
+  unattributed: that run had no fault counter, the new `faults=` column attributes the next one.
+  A 2 s run on a memory-pressured runner may also legitimately refault a reclaimed page, which is
+  why the deterministic check lives in the self-tests' short window right after `start()`.
+- **Sanitizer builds report, they do not check.** Under `-fsanitize=thread` the TSAN runtime
+  faults on its own pages inside the bracketed window (the mailbox self-test reads 1 fault there,
+  on a slot an earlier publish already wrote). `CB_THREAD_FAULTS_EXACT` (in `cb-thread-faults.hpp`,
+  0 under TSAN/ASAN) turns the two fault CHECKs into REPORT lines in such a build; the plain build
+  CI compiles still checks. The TSAN race run stays clean.

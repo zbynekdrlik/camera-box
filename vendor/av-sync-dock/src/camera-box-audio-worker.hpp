@@ -136,8 +136,12 @@ public:
 	CbAudioBlockFifo &operator=(const CbAudioBlockFifo &) = delete;
 
 	/* Spawn the worker. Every slot gets `reserve_channels` x `reserve_frames` samples of room here,
-	 * so publish() allocates nothing for blocks up to that size. Returns false when already running
-	 * or when the thread cannot be created (the FIFO then stays stopped). */
+	 * WRITTEN once on this (the starting) thread: every slot page is resident as of start(), so
+	 * publish() allocates nothing and takes no FIRST-touch page fault for blocks up to that size. A
+	 * page the OS takes back while the FIFO idles (a working-set trim, a swap-out) can still fault
+	 * later; only locking the pages would prevent that, which the OBS process cannot do. Returns
+	 * false when already running or when the thread cannot be created (the FIFO then stays
+	 * stopped). */
 	bool start(Handlers handlers, size_t reserve_channels, size_t reserve_frames)
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
@@ -145,9 +149,19 @@ public:
 			return false;
 		h_ = std::move(handlers);
 		const size_t nch = std::min(reserve_channels, CB_AUDIO_FIFO_MAX_CHANNELS);
+		/* issue 1381: reserve() alone allocates but leaves the pages untouched, so the first write of
+		 * each slot page happened in publish(), on libobs's audio thread: a page fault there, on the
+		 * first pass over the slots after each output start (385 over the first 64 pushes of a
+		 * 4096-frame stereo FIFO on glibc).
+		 * assign() writes every sample, so every page is resident before the producer runs; clear()
+		 * keeps the capacity and the written pages. assign(), not resize(): on a restart the plane
+		 * may already hold a block, and resize() to that size would write nothing. */
 		for (size_t s = 0; s < slots_.size(); s++)
-			for (size_t c = 0; c < nch; c++)
-				slots_[s].planes[c].reserve(reserve_frames);
+			for (size_t c = 0; c < nch; c++) {
+				std::vector<float> &plane = slots_[s].planes[c];
+				plane.assign(reserve_frames, 0.0f);
+				plane.clear();
+			}
 		head_ = count_ = 0;
 		accepted_ = taken_seq_ = 0;
 		in_session_ = false;
