@@ -84,8 +84,13 @@ def test_every_enforceable_key_is_one_the_relay_writes():
 
 def test_shutter_and_iso_are_the_required_keys_and_fps_is_never_enforced():
     assert cts.REQUIRED_KEYS == ("iso", "d002")
-    assert "d007" not in cts.ENFORCEABLE_KEYS
-    assert "d007" in cts.READ_KEYS
+    # issue 1402: d006 is the PROJECT fps (x100), d007 the OFF-SPEED fps. Only the project fps is
+    # read, as log context; neither is ever enforced or set.
+    assert cts.CONTEXT_KEYS == ("d006",)
+    assert "x100" in cts.KEY_LABELS["d006"] and "project fps" in cts.KEY_LABELS["d006"]
+    for k in ("d006", "d007"):
+        assert k not in cts.ENFORCEABLE_KEYS
+    assert "d006" in cts.READ_KEYS and "d007" not in cts.READ_KEYS
 
 
 # ---------------------------------------------------------------------------------------------
@@ -148,15 +153,15 @@ def test_split_config_blocks_needs_the_exact_block_count():
 
 
 def test_parse_read_requires_iso_and_shutter_values():
-    cur = cts.parse_read(_blocks({"iso": 800, "d002": 9000, "d007": 60}))
+    cur = cts.parse_read(_blocks({"iso": 800, "d002": 9000, "d006": 6000}))
     assert cur["iso"] == "800" and cur["d002"] == "9000" and cur["f-number"] is None
-    assert cts.parse_read(_blocks({"iso": 800, "d007": 60})) is None
+    assert cts.parse_read(_blocks({"iso": 800, "d006": 6000})) is None
     assert cts.parse_read("") is None
 
 
 def test_plan_sets_only_the_pinned_keys_that_differ():
     b = cts.load_baseline(_baseline_text(_pinned(d004=5600)))
-    cur = {"iso": "800", "d002": "18000", "f-number": "f/2.8", "d004": "5600", "d005": "0", "d007": "60"}
+    cur = {"iso": "800", "d002": "18000", "f-number": "f/2.8", "d004": "5600", "d005": "0", "d006": "6000"}
     assert cts.plan_sets(cur, b) == [("iso", "400")]
     cur["d004"] = "3200"
     assert cts.plan_sets(cur, b) == [("iso", "400"), ("d004", "5600")]
@@ -170,10 +175,22 @@ def test_grade_readback_names_every_pinned_key_that_did_not_apply():
 
 
 def test_shutter_denominator_uses_the_relay_formula():
-    assert cts.shutter_denominator("18000", "60") == 120  # 180 deg at 60 fps = 1/120
-    assert cts.shutter_denominator("4320", "60") == 500
-    assert cts.shutter_denominator(None, "60") is None
-    assert cts.shutter_denominator("0", "60") is None
+    # the relay's convert_angle_or_denom(angle100, fps100): the project fps is d006, already x100
+    assert cts.shutter_denominator("18000", "6000") == 120  # 180 deg at 60 fps = 1/120
+    assert cts.shutter_denominator("4320", "6000") == 500
+    assert cts.shutter_denominator("2160", "6000") == 1000
+    assert cts.shutter_denominator("18000", "5994") == 120  # 59.94 fps: 119.88 rounds half up
+    assert cts.shutter_denominator("18000", "2500") == 50
+    assert cts.shutter_denominator(None, "6000") is None
+    assert cts.shutter_denominator("0", "6000") is None
+    assert cts.shutter_denominator("18000", None) is None
+
+
+def test_the_shutter_log_prints_the_project_fps_from_d006():
+    lines = cts._before_lines("NOW", {"iso": "800", "d002": "18000", "d006": "6000"})
+    assert "SHUTTER NOW 1/120 s at 60 fps" in lines
+    lines = cts._before_lines("NOW", {"iso": "800", "d002": "18000", "d006": "5994"})
+    assert "SHUTTER NOW 1/120 s at 59.94 fps" in lines
 
 
 def test_read_args_is_one_session_over_every_read_key():
@@ -214,13 +231,13 @@ def test_cli_status_plan_grade():
     path = _tmp_baseline(_pinned())
     try:
         assert _cli(["status", "--baseline", path]).stdout.strip() == "pinned"
-        r = _cli(["plan", "--baseline", path], _blocks({"iso": 800, "d002": 18000, "d007": 60}))
+        r = _cli(["plan", "--baseline", path], _blocks({"iso": 800, "d002": 18000, "d006": 6000}))
         assert r.returncode == 0
         assert "BEFORE iso 800" in r.stdout and "SHUTTER BEFORE 1/120 s at 60 fps" in r.stdout
         assert "SET iso 800 -> 400" in r.stdout
         assert "SETARGS --set-config iso=400" in r.stdout
         assert "d002=" not in r.stdout.split("SETARGS", 1)[1]
-        r = _cli(["grade", "--baseline", path], _blocks({"iso": 400, "d002": 9000, "d007": 60}))
+        r = _cli(["grade", "--baseline", path], _blocks({"iso": 400, "d002": 9000, "d006": 6000}))
         assert r.returncode == cts.EXIT_MISMATCH and "MISMATCH d002 want=18000 got=9000" in r.stdout
         assert _cli(["grade", "--baseline", path], _blocks({"iso": 400, "d002": 18000})).returncode == 0
         assert _cli(["plan", "--baseline", path], "garbage").returncode == cts.EXIT_UNREADABLE
@@ -234,7 +251,7 @@ def test_cli_status_plan_grade():
 
 
 def test_cli_suggest_pins_only_shutter_and_iso():
-    r = _cli(["suggest"], _blocks({"iso": 320, "d002": 4320, "f-number": "f/4", "d007": 60}))
+    r = _cli(["suggest"], _blocks({"iso": 320, "d002": 4320, "f-number": "f/4", "d006": 6000}))
     doc = json.loads(r.stdout)
     assert doc["values"]["iso"] == "320" and doc["values"]["d002"] == "4320"
     assert doc["values"]["f-number"] is None
@@ -458,7 +475,7 @@ class Rig:
         return self
 
 
-GOOD = {"iso": "400", "d002": "18000", "f-number": "f/5.6", "d004": "5600", "d005": "0", "d007": "60"}
+GOOD = {"iso": "400", "d002": "18000", "f-number": "f/5.6", "d004": "5600", "d005": "0", "d006": "6000"}
 
 
 def test_lib_parses():
@@ -525,6 +542,20 @@ def test_wrong_shutter_and_iso_are_set_after_the_guard_and_read_back():
     assert seq == ["GET", "GUARD", "SET", "GET"], r.calls
     assert "SET 10.77.9.61 iso=400 d002=18000" in r.calls
     assert r.camera["iso"] == "400" and r.camera["d002"] == "18000"
+
+
+def test_an_off_speed_camera_logs_the_project_fps_never_the_off_speed_rate():
+    # issue 1402: d006 = project fps 60 (x100), d007 = off-speed 50. The shutter is logged at the
+    # project fps the camera records, never at the off-speed sensor rate.
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600", d002="36000", d007="50"), _pinned()).run()
+    assert r.rc == 0, r.out
+    assert "SHUTTER BEFORE 1/60 s at 60 fps" in r.out
+    assert "SHUTTER AFTER 1/120 s at 60 fps" in r.out
+    assert "at 50 fps" not in r.out
+    # fps is only read, never written
+    assert "SET 10.77.9.61 iso=400 d002=18000" in r.calls
+    assert not any("d006" in c or "d007" in c for c in r.calls if c.startswith("SET")), r.calls
+    assert r.camera["d006"] == "6000" and r.camera["d007"] == "50"
 
 
 def test_camera_on_cam2_is_resolved_there():
@@ -595,7 +626,7 @@ def test_a_transport_timeout_is_named_not_reported_as_unreadable_output():
 
 
 def test_suggest_flags_a_value_that_cannot_be_pinned():
-    r = _cli(["suggest"], _blocks({"iso": "Auto ISO", "d002": 4320, "d007": 60}))
+    r = _cli(["suggest"], _blocks({"iso": "Auto ISO", "d002": 4320, "d006": 6000}))
     assert r.returncode == 0
     assert "UNPINNABLE iso" in r.stderr
 
