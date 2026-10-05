@@ -465,6 +465,10 @@ fn run_frame_probe_only_with_set(camera_set: &str) -> (bool, String) {
     };
     stub("mount", "#!/usr/bin/env bash\nexit 0\n");
     stub("systemctl", "#!/usr/bin/env bash\nexit 0\n");
+    // issue 1407: the swap's rw window closes through the shared verified close, which READS the
+    // root mode — cam2's root reads read-only again (never the CI runner's own rw root).
+    stub("findmnt", "#!/usr/bin/env bash\necho 'ro,relatime'\n");
+    stub("sync", "#!/usr/bin/env bash\nexit 0\n");
     // The remote sha256sum must MATCH the local artifact so byte-verify passes. The local read is
     // on the artifact path; the remote read is on /usr/local/bin/frame-probe — return the same hash.
     stub("sha256sum", "#!/usr/bin/env bash\necho 'aaaa  '\"$1\"\n");

@@ -76,6 +76,9 @@ fn run_swap(scp_fail: bool) -> SwapRun {
     stub("chmod", "#!/usr/bin/env bash\nexit 0\n");
     stub("mv", "#!/usr/bin/env bash\nexit 0\n");
     stub("sync", "#!/usr/bin/env bash\nexit 0\n");
+    // issue 1407: the swap's rw window closes through the shared verified close, which READS the
+    // root mode — cam2's root reads read-only again (never the CI runner's own rw root).
+    stub("findmnt", "#!/usr/bin/env bash\necho 'ro,relatime'\n");
     // sha256sum: match the local artifact read and the remote FINAL-path read to the same hash so
     // byte-verify passes (a stubbed no-op mv leaves no real file — the hash is what the gate reads).
     stub("sha256sum", "#!/usr/bin/env bash\necho 'aaaa  '\"$1\"\n");
