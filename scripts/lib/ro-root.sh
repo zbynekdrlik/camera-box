@@ -15,7 +15,8 @@
 #     of the original fstab kept + the same tmpfs block.
 #   - ro_root_mount_mode is the one first-token reading: setup-device.sh's root_mount_is_readonly
 #     calls it, verify-device.sh keeps its own copy (a python parity test pins both), the SBC
-#     --check and bkshading-deploy-relay.sh decide from it.
+#     --check and bkshading-deploy-relay.sh decide from it, and cam2-painter-ro-persist.sh emits its
+#     definition into cam2's remote text to verify the root went back to ro (issue 1405).
 # NOT covered: the image builders write their own fstab. create-usb-linux.sh writes the first-boot
 # (rw) fstab that setup-device STEP 18 later replaces with this canon; build-image.sh's read-only
 # overlay image still carries its own, different tmpfs set (no /var/spool, /var/log 64M).

@@ -2,12 +2,15 @@
 paths:
   - "scripts/rig-mode.sh"
   - "scripts/lib/cam2-painter-handoff.sh"
+  - "scripts/lib/cam2-painter-ro-persist.sh"
   - "scripts/lib/cam2-painter-restore-verify.sh"
   - "scripts/lib/cam2-painter-restore-retry.sh"
   - "scripts/lib/cam2-painter-restore-recheck.sh"
   - "scripts/lib/cam2-painter-deadman.sh"
   - "systemd/cam2-painter.service"
   - "tests/harness_cam2_painter_steady_state_handoff.rs"
+  - "tests/harness_cam2_painter_ro_persist_1175.rs"
+  - "tests/python/test_cam2_painter_ro_verify_1405.py"
   - "tests/harness_cam2_painter_coordination.rs"
   - "tests/harness_cam2_painter_restore_recheck_1126.rs"
   - "scripts/lib/rig-test-ledger.sh"
@@ -37,13 +40,15 @@ since #984, emitting the QPSK marker default-ON.
 - **`rig-mode.sh test`**: (1) `painter_launch_remote` STOPS the permanent unit first (#440 — two
   painters racing fb0 make the displayed QR alternate run_ids, desyncing the marker), launches the
   transient painter, verifies the whole chain. (2) At the END, `do_test` calls
-  `cam2_painter_steady_state_handoff_cmds` (`scripts/lib/cam2-painter-handoff.sh`): stop the
-  transient via its pidfile, `systemctl enable --now cam2-painter.service`, FAIL LOUD unless it is
-  active + genuinely painting (presenter-aware #464) + marker CSV growing. **Steady state ends on
-  the PERMANENT unit, never the nohup.**
+  `cam2_painter_steady_state_handoff_cmds` (`scripts/lib/cam2-painter-handoff.sh`): disarm the
+  dead-man, stop the transient via its pidfile, `systemctl enable cam2-painter.service` inside the
+  remount-rw window,
+  verify the root reads read-only again, `systemctl start` it (issue 1405, below), FAIL LOUD unless
+  it is active + genuinely painting (presenter-aware #464) + marker CSV growing. **Steady state ends
+  on the PERMANENT unit, never the nohup.**
 - **`rig-mode.sh event`**: `painter_stop_remote` STOPS **and DISABLES** the permanent unit (#892 —
   EVENT must never leave a QR that can return via a restart or a reboot onto the LIVE broadcast).
-  So `test` must `enable --now` (not just `start`) to re-arm it after any prior EVENT cycle.
+  So `test` must ENABLE it (not just `start`) to re-arm it after any prior EVENT cycle.
 - **`recording-e2e.sh` measurement**: STOPS the permanent unit (arms the #872 on-box dead-man so a
   SIGKILLed run self-heals), runs its OWN measurement painter, and `cleanup()` restarts +
   `cam2_painter_restore_verify_cmds` + disarms the dead-man. This is now the ONLY time the unit
@@ -73,6 +78,103 @@ since #984, emitting the QPSK marker default-ON.
   A/V verdict path (`av_sync_recording.rs` pairs by fid, ignores `emit_ts`) — the E2E burn painter
   in `recording-e2e.sh` already carries it. Both changes take effect only after a cam2 re-provision
   (or a remount-rw unit edit + `daemon-reload` + painter restart) — a supervisor rig step.
+
+## The enable-state window must end READ-ONLY before the painter starts (issue 1405)
+
+cam2's root is read-only (setup-device STEP 18). Changing the unit's persistent enable-state needs a
+`mount -o remount,rw /` window. That window lives in ONE emitter,
+`cam2_painter_persist_state_cmds` (`scripts/lib/cam2-painter-ro-persist.sh`, issue 1175), used by
+the TEST handoff (`enable-now`) and the EVENT disable (`disable`).
+
+- **Never start the painter inside the window.** The old `enable-now` ran `systemctl enable --now`
+  there. The following ro remount failed EBUSY, its `|| true` hid that, and cam2 ran on a
+  read-WRITE root until the next reboot. Live 4.10.2026: the last `r/w` remount at 10:36:54 had no
+  `ro` after it, and the painter became active that same second. Only `systemctl enable` /
+  `disable` runs in the window now.
+  - That the START opened the blocking writer is INFERRED from that timing, not proven:
+    `cam2-painter.service` writes only `/run`, and the one writer seen live (a second
+    systemd-journald) is not explained by this unit. The live put-back names the real holder.
+- **The root mode decides, never the remount's exit code.** After the ro remount the emitter reads
+  `findmnt -no OPTIONS /` (with the `/proc/mounts` fallback) through the shared ro-root canon's
+  `ro_root_mount_mode`. Its definition is emitted INTO the remote text (`declare -f`, lazy-sourced
+  from `scripts/lib/ro-root.sh`).
+  - `rw` or `unknown` FAILS LOUD (exit 1), and the emitter never starts the painter. `unknown` is
+    never assumed `ro`. The message names the findmnt reading, the mount error and the current
+    `is-enabled` and active states (it reads whether the painter runs, never asserts it: an
+    earlier dead-man fire can have started it). The active state is read with
+    `systemctl show -p ActiveState --value`, never the `is-active` verb: the disable text runs early
+    in the EVENT script, and `harness_rig_mode_fb0_blank_1176.rs` + `rig_mode.rs` find EVENT's
+    step-5 "painter confirmed stopped" check by its `is-active cam2-painter` text, so an earlier
+    copy would blind both to a deleted step-5 check (review round 4).
+  - **It names the HOLDERS, two ways.** First, the `fuser -vm /` lines whose ACCESS field carries
+    `F` (a file open for writing). fuser lists PID 1 and the kernel threads first, so a `head -n
+    40` cut a high-PID writer off (review round 1). Second, the deleted-but-open files from the
+    repo's ONE probe for that other EBUSY cause, `bkshading_deploy_ro_holder_probe_cmd` (issue 808,
+    `lsof +L1`, else the /proc fd scan). It is emitted into the failure branch, the same two-part
+    naming as `bkshading-deploy-relay.sh` `remount_ro_checked`.
+- **Order inside the emitter:** remount rw, change, remount ro, ro verify, the change's rc check, the
+  `is-enabled` read-back, and (enable-now only) `systemctl start`. A failed start after a good
+  enable is its own named `[#1405]` failure.
+  - There is no retry loop: a writer that keeps `/` busy keeps it busy on every retry.
+  - The disable mode never names a start. The `tests/rig_mode.rs` #892 check forbids
+    `systemctl start cam2-painter.service` anywhere in the EVENT text.
+- **EVENT disarms the dead-man FIRST.** `rig-mode.sh test` arms the cam2-painter dead-man as a
+  standing net, and its action starts the painter whenever no frame-probe runs, even for a disabled
+  unit. `painter_stop_remote` runs under `set -e`, so a disable step that fails loud ends the
+  cam-side EVENT script.
+  - With the old order (disable at 2.5, disarm at 2.6), a root stuck rw left the dead-man armed,
+    and the QR came back on air within ~5 min (review round 1, 🔴).
+  - Now the disarm is step 2.5 and the stop+disable step 2.6. No failure in the disable step can
+    leave a resurrection timer behind, and the timer can no longer fire between the stop and the
+    disarm. The issue-1351 frame-probe swap uses the same order.
+  - The 1075 harness pins the order: the disarm comes before the stop and before the disable call.
+  - A failed disable still ends the script before the camera-box restart AND before the issue-1176
+    fb0 blank (step 5), so the cam2 screen keeps whatever fb0 last held until someone blanks it.
+    That is the same place every other #1175 failure stops it, and do_event still runs the
+    burn-clear and exits non-zero (#868). So a cam2 that is stuck read-write must be put back to ro
+    BEFORE the next `rig-mode.sh event`. Never reboot a cambox remotely for it.
+- **The TEST handoff disarms the dead-man too (step H1b), before the transient painter stop.**
+  `rig-mode.sh test` arms it only after a GOOD handoff, and only EVENT disarms it otherwise. On a
+  second TEST whose window cannot close read-only, the first TEST's dead-man would start the
+  painter on the writable root within ~5 min, after the FAIL line said the handoff does not start
+  it (review round 2). It could also fire between the transient stop and the start. A failed
+  handoff therefore leaves cam2 disarmed, normally dark, and its FAIL line reads `is-active`
+  rather than asserting it (a fire just before the disarm can still have started the painter);
+  the next good `rig-mode.sh test` re-arms it.
+- **Every emitted statement ends with `;`.** The callers embed the text through `$(...)`, which
+  strips its trailing newline (the CLAUDE.md #744/#746 gotcha).
+- **Test by running the text.** `tests/python/test_cam2_painter_ro_verify_1405.py` runs it with
+  stateful fakes on a stub-only PATH:
+  - `mount`, `systemctl`, `findmnt`, `fuser` and `lsof` share one fake root and log each call with
+    the root mode at that moment;
+  - a start on a rw root plants a writer that fails the next ro remount (the MODELLED 4.10
+    mechanism, inferred, see the first bullet);
+  - the fake fuser prints PID 1 and 48 kernel threads before the real writer, the way a box does;
+  - it covers the real TEST handoff (the dead-man stop before the window), the EVENT disable cut
+    out of rig-mode.sh, and the WHOLE `painter_stop_remote` text (the dead-man stop before the
+    failing verify);
+  - a fuser that prints no listing must read as such, never as "no writer".
+  - The unreadable-root test swaps in a failing `awk`, so the `/proc/mounts` fallback never reads
+    the test machine's own root.
+  - The Rust `tests/harness_cam2_painter_ro_persist_1175.rs` fakes `findmnt`/`fuser` too: without
+    them the real findmnt reads the CI runner's own rw root.
+  - An order anchor must find the CALL (`systemctl enable cam2-painter.service ||`), not the bare
+    command text: the rw-remount FAIL message names the same command earlier.
+- **Live put-back** after a box was left rw: `findmnt -no OPTIONS /` on cam2. If it reads rw, run
+  `fuser -vm /` (and `ls -l /proc/*/fd 2>/dev/null | grep deleted` for a deleted-but-open file).
+  Stop the holder that is not supposed to hold `/` (4.10: a second systemd-journald), then
+  `mount -o remount,ro /` until findmnt reads `ro`. Then confirm with the next `rig-mode.sh test`
+  that it still reads `ro`. This is a supervisor rig step, never a lane worker's.
+- **Same defect elsewhere, not covered here:** `scripts/deploy-fleet.sh` (an `enable --now
+  cam2-painter.service` then a swallowed ro remount), `scripts/lib/bkshading-relay-mode.sh`,
+  `scripts/dantesync-fleet-upgrade.sh` and `scripts/lib/dantesync-rollback.sh` close the window
+  with `mount -o remount,ro / ... || true` and never read the mount state. A shared "close ro,
+  verify, name the holders" emitter would serve them all. It is cross-cutting (5 sites, 4
+  subsystems), so the lane reported it to the supervisor as a `followup_candidates` entry in its
+  issue-1405 LANE-RETURN; the ticket number goes here once the supervisor files it.
+  It should also absorb this emitter's writer filter: `bkshading-deploy-relay.sh`
+  `remount_ro_checked` still prints `fuser -vm / | head -n 40`, the cut-off fixed here. (The
+  filter cannot live in `ro-root.sh`, which must stay free of grep/awk/sed.)
 
 ## The TEST painter's rig-test LEDGER entry — quoting the remote PID (issue 1382)
 
