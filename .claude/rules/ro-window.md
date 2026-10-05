@@ -187,9 +187,13 @@ Audit, left as they are:
     discarded. It is structural, per ro remount CALL (`remount,ro` / `ro,remount`, quoted, with
     `,opts`, with or without ` /`). Its redirections must not send the error to `/dev/null`. What
     follows must not just go on: `|| true`, `|| :`, `|| echo/printf/warn/log/info/err/logger`,
-    `|| return 0`, `|| exit 0`, `|| continue`, `|| break`, a `|| { ... }` group (read to its
-    MATCHING brace, so a `${var}` never ends it) without a non-zero exit/return, a bare return, fail
-    or die, `; true`, `; :`, a retry loop's `&& break`. A loud `|| fail ...` /
+    `|| return 0`, `|| exit 0`, `|| continue`, `|| break`, `; true`, `; :`, a retry loop's
+    `&& break`, and a `|| { ... }` group that does not end the step with the failure. The group is
+    read to its MATCHING brace, across lines, quote- and `${...}`-aware (an unclosed one is no
+    hit). It is loud only with a non-zero literal or a named variable as the exit/return code
+    (`exit "$rc"` after `rc=$?`), `fail`/`die`, or the mount's own `$?` as its FIRST command.
+    Inside a group a bare `return`/`exit`, or `$?` after another command, hands back THAT
+    command's status, so it goes on. A loud `|| fail ...` /
     `|| { ...; exit 1; }` is fine, and so are `|| return` / `|| return 1` (they pass the failure on).
     So is a FAIL message that reads unit state with `2>/dev/null || true` later on the same line
     (the check is anchored right after the command).
