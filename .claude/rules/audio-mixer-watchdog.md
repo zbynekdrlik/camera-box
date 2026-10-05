@@ -16,6 +16,13 @@ in the OBS log. This watchdog pages on them. Same dev1 family as render-freeze (
 audio-lag (issue 1226): box facets on `:8899`, a pure python decision, a bash orchestrator reusing
 `obs-watchdog-decision.sh`.
 
+**Since 5.10.2026 the cg OBS sends NO VBAN** (owner directive, songplayer issue 221: cg OBS is only
+the NDI input "OBS manual" into SongPlayer; FOH plays SongPlayer's own VBAN). Its two VBAN Lua
+scripts are loaded with `lua_autostart=false`, so no `obs-vban pacing:` line and no `vban_pacer_*`
+facet exist on resolume, and the VBAN arm reads UNKNOWN there by design ("no VBAN output on this box
+-- holding, no page"). The MIXER arm still watches the cg OBS. The VBAN arm comes back by itself
+if a box sends VBAN again.
+
 ## The two signals
 
 | Facet group (gather) | Log line | Arm | Pages |

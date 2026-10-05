@@ -14,7 +14,10 @@ paths:
 `vendor/obs-vban` is norihiro/obs-vban 0.3.1 plus one camera-box change: the send thread is
 paced. `vendor/obs-vban/CAMERA-BOX-VENDOR.md` records the upstream commit and the full diff.
 
-- The cg OBS on RESOLUME-SNV sends program audio to FOH (fohabl) and lv1 with it.
+- The cg OBS on RESOLUME-SNV sent program audio to FOH (fohabl) and lv1 with it. **Since 5.10.2026
+  it sends nothing** (owner directive, songplayer issue 221): both VBAN Lua scripts stay loaded with
+  `lua_autostart=false`, cg OBS is only the NDI input "OBS manual" into SongPlayer, and FOH plays
+  SongPlayer's own VBAN. The plugin is still built and deployed; nothing on the rig runs it today.
 - Stock 0.3.1 sent one packet per wake, so the stream left in bursts and gaps (issue 1372).
 - The patched thread keeps a jitter buffer. The target is 64 ms by default, clamped to 20–200 ms,
   and set by the output setting `pacing_target_ms` ("Send Buffer").
