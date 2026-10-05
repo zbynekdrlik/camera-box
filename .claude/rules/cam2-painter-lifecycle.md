@@ -40,8 +40,9 @@ since #984, emitting the QPSK marker default-ON.
 - **`rig-mode.sh test`**: (1) `painter_launch_remote` STOPS the permanent unit first (#440 — two
   painters racing fb0 make the displayed QR alternate run_ids, desyncing the marker), launches the
   transient painter, verifies the whole chain. (2) At the END, `do_test` calls
-  `cam2_painter_steady_state_handoff_cmds` (`scripts/lib/cam2-painter-handoff.sh`): stop the
-  transient via its pidfile, `systemctl enable cam2-painter.service` inside the remount-rw window,
+  `cam2_painter_steady_state_handoff_cmds` (`scripts/lib/cam2-painter-handoff.sh`): disarm the
+  dead-man, stop the transient via its pidfile, `systemctl enable cam2-painter.service` inside the
+  remount-rw window,
   verify the root reads read-only again, `systemctl start` it (issue 1405, below), FAIL LOUD unless
   it is active + genuinely painting (presenter-aware #464) + marker CSV growing. **Steady state ends
   on the PERMANENT unit, never the nohup.**
@@ -122,20 +123,31 @@ the TEST handoff (`enable-now`) and the EVENT disable (`disable`).
     leave a resurrection timer behind, and the timer can no longer fire between the stop and the
     disarm. The issue-1351 frame-probe swap uses the same order.
   - The 1075 harness pins the order: the disarm comes before the stop and before the disable call.
-  - A failed disable still ends the script before the camera-box restart. That is the same place
-    every other #1175 failure stops it, and do_event still runs the burn-clear and exits non-zero
-    (#868). So a cam2 that is stuck read-write must be put back to ro BEFORE the next
-    `rig-mode.sh event`. Never reboot a cambox remotely for it.
+  - A failed disable still ends the script before the camera-box restart AND before the issue-1176
+    fb0 blank (step 5), so the cam2 screen keeps whatever fb0 last held until someone blanks it.
+    That is the same place every other #1175 failure stops it, and do_event still runs the
+    burn-clear and exits non-zero (#868). So a cam2 that is stuck read-write must be put back to ro
+    BEFORE the next `rig-mode.sh event`. Never reboot a cambox remotely for it.
+- **The TEST handoff disarms the dead-man too (step H1b), before the transient painter stop.**
+  `rig-mode.sh test` arms it only after a GOOD handoff, and only EVENT disarms it otherwise. On a
+  second TEST whose window cannot close read-only, the first TEST's dead-man would start the
+  painter on the writable root within ~5 min, making the `cam2-painter.service is NOT started`
+  failure line untrue (review round 2). It could also fire between the transient stop and the
+  start. A failed handoff therefore leaves cam2 dark AND disarmed, which is what its FAIL line says;
+  the next good `rig-mode.sh test` re-arms it.
 - **Every emitted statement ends with `;`.** The callers embed the text through `$(...)`, which
   strips its trailing newline (the CLAUDE.md #744/#746 gotcha).
 - **Test by running the text.** `tests/python/test_cam2_painter_ro_verify_1405.py` runs it with
   stateful fakes on a stub-only PATH:
   - `mount`, `systemctl`, `findmnt`, `fuser` and `lsof` share one fake root and log each call with
     the root mode at that moment;
-  - a start on a rw root plants a writer that fails the next ro remount (the 4.10 mechanism);
+  - a start on a rw root plants a writer that fails the next ro remount (the MODELLED 4.10
+    mechanism, inferred, see the first bullet);
   - the fake fuser prints PID 1 and 48 kernel threads before the real writer, the way a box does;
-  - it covers the real TEST handoff, the EVENT disable cut out of rig-mode.sh, and the WHOLE
-    `painter_stop_remote` text (the dead-man stop before the failing verify).
+  - it covers the real TEST handoff (the dead-man stop before the window), the EVENT disable cut
+    out of rig-mode.sh, and the WHOLE `painter_stop_remote` text (the dead-man stop before the
+    failing verify);
+  - a fuser that prints no listing must read as such, never as "no writer".
   - The unreadable-root test swaps in a failing `awk`, so the `/proc/mounts` fallback never reads
     the test machine's own root.
   - The Rust `tests/harness_cam2_painter_ro_persist_1175.rs` fakes `findmnt`/`fuser` too: without
@@ -151,8 +163,10 @@ the TEST handoff (`enable-now`) and the EVENT disable (`disable`).
   cam2-painter.service` then a swallowed ro remount), `scripts/lib/bkshading-relay-mode.sh`,
   `scripts/dantesync-fleet-upgrade.sh` and `scripts/lib/dantesync-rollback.sh` close the window
   with `mount -o remount,ro / ... || true` and never read the mount state. A shared "close ro,
-  verify, name the holders" emitter in `scripts/lib/ro-root.sh` would serve them all (a supervisor
-  follow-up, cross-cutting).
+  verify, name the holders" emitter would serve them all (a supervisor follow-up, cross-cutting).
+  It should also absorb this emitter's writer filter: `bkshading-deploy-relay.sh`
+  `remount_ro_checked` still prints `fuser -vm / | head -n 40`, the cut-off fixed here. (The
+  filter cannot live in `ro-root.sh`, which must stay free of grep/awk/sed.)
 
 ## The TEST painter's rig-test LEDGER entry — quoting the remote PID (issue 1382)
 

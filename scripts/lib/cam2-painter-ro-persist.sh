@@ -118,10 +118,11 @@ if [ "\$_pss_root" != "ro" ]; then
 CMDS
   # (2b) the holders, in the failure branch only. The writer filter keeps the header and every line
   #      whose ACCESS field (the one right after the PID) carries F: 'fuser -vm /' lists PID 1 and
-  #      the kernel threads first, so a cut at N lines hides a writer with a high PID. Literal
-  #      heredoc: every $ is awk's.
+  #      the kernel threads first, so a cut at N lines hides a writer with a high PID. No header
+  #      line = fuser printed no listing (missing, failed): say so, never "none". Literal heredoc:
+  #      every $ is awk's.
   cat <<'CMDS'
-  { fuser -vm / 2>&1 || true; } | awk '/USER/ && /PID/ && /ACCESS/ { print; next } { for (i = 1; i < NF; i++) if ($i ~ /^[0-9]+$/) { if ($(i + 1) ~ /F/) { print; n++ } break } } END { if (n == 0) print "  (none: no process holds a file open for writing on /)" }' >&2 || true;
+  { fuser -vm / 2>&1 || true; } | awk '/USER/ && /PID/ && /ACCESS/ { print; h = 1; next } { for (i = 1; i < NF; i++) if ($i ~ /^[0-9]+$/) { if ($(i + 1) ~ /F/) { print; n++ } break } } END { if (!h) print "  (fuser printed no listing -- is psmisc installed? check by hand: fuser -vm /)"; else if (n == 0) print "  (none: no process holds a file open for writing on /)" }' >&2 || true;
   echo "FAIL: [#1405] holders of deleted-but-open files on / (lsof +L1, else the /proc fd scan):" >&2;
   {
 CMDS

@@ -22,8 +22,8 @@
 # at-mode-set chain verification, then calls this to (1) stop the transient painter (free
 # fb0/DRM so the unit does not race it, #440), (2) `systemctl enable cam2-painter.service`
 # inside the remount-rw window (enable -> survive reboot + re-arm after any EVENT #892 disable),
-# verify cam2's root reads read-only again, and only then `systemctl start` it (issue 1405: a start
-# inside the window kept the root read-write), (3) verify it is active + GENUINELY PAINTING
+# verify cam2's root reads read-only again, and only then `systemctl start` it (issue 1405: after an
+# enable --now inside the window the root stayed read-write), (3) verify it is active + GENUINELY PAINTING
 # (presenter-aware #464) + the marker CSV GROWING (#431), FAILING LOUD (exit 1) on any miss -- a
 # durable steady state that is claimed must be proven, never a silent 2h nohup.
 #
@@ -48,6 +48,10 @@ command -v cam2_paint_signal_remote_fn >/dev/null 2>&1 \
 # handoff lib alone) -- same lazy-source pattern as cam2-paint-signal.sh above.
 command -v cam2_painter_persist_state_cmds >/dev/null 2>&1 \
   || . "${BASH_SOURCE[0]%/*}/cam2-painter-ro-persist.sh"
+# issue 1405: the handoff disarms the cam2-painter dead-man first (step H1b). Lazy-source its
+# builder the same way (rig-mode.sh already sources it).
+command -v cam2_painter_deadman_disarm_cmds >/dev/null 2>&1 \
+  || . "${BASH_SOURCE[0]%/*}/cam2-painter-deadman.sh"
 
 cam2_painter_steady_state_handoff_cmds() {
   local pidfile="$1"
@@ -62,6 +66,12 @@ if ! systemctl list-unit-files cam2-painter.service >/dev/null 2>&1; then
   echo "FAIL: [#1008] cam2-painter.service is NOT installed on this box -- TEST mode cannot hand steady-state to a durable supervised painter. Provision it (scripts/setup-device.sh installs+enables the #863 unit), then re-run rig-mode.sh test." >&2
   exit 1
 fi
+# (H1b) issue 1405: disarm the cam2-painter dead-man BEFORE the transient painter goes and the
+#      remount-rw window opens. rig-mode.sh test re-arms it right after a good handoff, and only
+#      EVENT disarms it otherwise -- so on a second TEST whose window cannot close read-only, the
+#      previous TEST's dead-man would start the painter on the writable root within ~5 min (and it
+#      could also fire between the transient stop and the start below).
+$(cam2_painter_deadman_disarm_cmds)
 # (H2) stop the TRANSIENT verification painter first (free /dev/fb0 + DRM master) so the permanent
 #      unit does not race it (#440). Stop via the PID FILE only -- never a pkill matching
 #      frame-probe (self-kill footgun + would hit the permanent unit's own frame-probe) -- then
