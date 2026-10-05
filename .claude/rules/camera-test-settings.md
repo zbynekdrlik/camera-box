@@ -39,12 +39,16 @@ relay reads and writes. If the relay renames a key, those tests go red, not the 
 
 - **REQUIRED `iso` + `d002`.** `d002` is the shutter ANGLE x100 (18000 = 180 deg), the raw value the
   relay writes. It is NOT a 1/N denominator. The log prints the derived `1/N s at <fps> fps` using
-  the relay's `convert_angle_or_denom` formula (`360*fps/angle`, round-half-up), as context only.
+  the relay's `convert_angle_or_denom(angle100, fps100)` formula (`360*fps100/angle100`,
+  round-half-up, both x100), as context only.
 - **OPTIONAL `f-number` / `d004` (WB K) / `d005` (tint).** null = read + logged only; a value =
   enforced. Aperture is NOT pinned by default because the cam1 BMPCC silently drops aperture PTP
   writes (issue 1343). A pinned f-number would abort every run on MISMATCH until that is solved.
-- **CONTEXT `d007` (project fps).** Read for the log line only, NEVER set. fps is the issue-809
-  grab-mode coupling, not a test-exposure setting.
+- **CONTEXT `d006` (project fps x100, `6000` = 60 fps).** Read for the log line only, NEVER set or
+  enforced. fps is the issue-809 grab-mode coupling, not a test-exposure setting. Issue 1402: on
+  every BMPCC `d006` (MENU) is the project fps the camera records and `d007` the OFF-SPEED sensor
+  rate, so `d007` is not read at all. An off-speed camera (d006 6000, d007 50) logs `at 60 fps`,
+  never 50. The log prints the x100 value as plain fps (`6000` -> `60`, `5994` -> `59.94`).
 - A baseline value must be a plain token (`[A-Za-z0-9./_+-]`), because it becomes a word of a
   remote `gphoto2 --set-config key=value`. An int is normalized to its string. bool, an empty
   string, an unknown key and a missing key are all refused, with a named ERROR and exit 1.
@@ -155,8 +159,16 @@ run (wrong timing; TEST mode must stay alive between runs).
   `camera_test_settings.py snapshot-path`; the bash lib, the rig-mode restore and the handover
   probe all ask it, never re-derive it.
 - Content: the camera's current value of every key the run ENFORCES (`pinned_keys`, today `iso` +
-  `d002`), `d007` as log context, the box and the UTC time. A key the camera reports no value for is
-  left out. `d007` is never restored.
+  `d002`), `d006` (project fps x100) as log context, the box and the UTC time. A key the camera
+  reports no value for is left out. The fps context is never restored (`load_snapshot` refuses a
+  `d006`/`d007` value key).
+- **LEGACY `context.d007` (issue 1402).** A snapshot saved before the d006 switch recorded the
+  project fps as `context.d007`, WHOLE fps (`60`). `context_fps100` reads `context.d006` whenever it
+  is present and falls back to the legacy `context.d007` (x100 = whole fps x 100) ONLY when d006 is
+  absent, so a snapshot taken during a running development period still restores and logs the same
+  1/N s (`test_a_legacy_snapshot_with_only_the_whole_fps_d007_still_restores_and_logs_the_same_shutter`).
+  The fallback exists until no old snapshot can be pending: the next production snapshot is written
+  with `d006`. A present but unreadable `d006` never falls back (no 1/N, just the angle).
 - **No record = no set.** A value that is not a plain token (it could not be written back through
   the word-split `--set-config`), a box label or time that is not one, or a snapshot that cannot be
   written (a full disk, a file where the directory should be), ABORTS the E2E before the camera

@@ -23,8 +23,11 @@ Keys:
   OPTIONAL  f-number, d004 (WB Kelvin), d005 (tint) -- null = read + logged only, a value = enforced.
             Aperture is NOT pinned by default: the cam1 BMPCC silently drops aperture PTP writes
             (issue 1343), so a pinned f-number would abort every run until that is solved.
-  CONTEXT   d007 (project fps) -- read only to log the shutter as 1/N s; NEVER set (fps is the
-            issue-809 grab-mode coupling, not a test-exposure setting).
+  CONTEXT   d006 (project fps x100, e.g. 6000 = 60 fps) -- read only to log the shutter as 1/N s;
+            NEVER set (fps is the issue-809 grab-mode coupling, not a test-exposure setting). Issue
+            1402: d006 is the project fps on every BMPCC and d007 the OFF-SPEED rate, so d007 is not
+            read. A snapshot saved before that switch carries the whole-fps `context.d007` (LEGACY,
+            see `context_fps100`).
 
 CLI (used by the bash lib; every subcommand is pure: stdin/args in, stdout + exit code out):
   status  --baseline F                     -> "pinned" | "unpinned"         (exit 2 = invalid file)
@@ -67,9 +70,13 @@ import sys
 
 REQUIRED_KEYS = ("iso", "d002")
 OPTIONAL_KEYS = ("f-number", "d004", "d005")
-CONTEXT_KEYS = ("d007",)
+CONTEXT_KEYS = ("d006",)
 ENFORCEABLE_KEYS = REQUIRED_KEYS + OPTIONAL_KEYS
 READ_KEYS = ENFORCEABLE_KEYS + CONTEXT_KEYS
+# LEGACY (issue 1402): a production-exposure snapshot saved before the d006 switch recorded the
+# project fps as `context.d007`, WHOLE fps. Read only when `context.d006` is absent; never read from
+# the camera (d007 is the off-speed rate). The next production snapshot replaces it.
+LEGACY_CONTEXT_FPS_KEY = "d007"
 
 KEY_LABELS = {
     "iso": "ISO",
@@ -77,7 +84,7 @@ KEY_LABELS = {
     "f-number": "aperture",
     "d004": "white balance K",
     "d005": "tint",
-    "d007": "project fps",
+    "d006": "project fps x100",
 }
 
 BASELINE_SCHEMA = 1
@@ -234,17 +241,45 @@ def grade_readback(readback, baseline):
     return [(k, baseline[k], readback.get(k)) for k in pinned_keys(baseline) if readback.get(k) != baseline[k]]
 
 
-def shutter_denominator(d002, d007):
-    """The shutter as a 1/N denominator (the relay's `convert_angle_or_denom`: round-half-up of
-    360 * fps / angle), or None when either value is missing/non-numeric. Log context only."""
+def shutter_denominator(d002, d006):
+    """The shutter as a 1/N denominator, or None when either value is missing/non-numeric. Log
+    context only. Both inputs are x100 (`d002` the angle, `d006` the project fps), exactly the
+    relay's `convert_angle_or_denom(angle100, fps100)`: round-half-up of 360 * fps100 / angle100."""
     try:
         angle100 = int(d002)
-        fps = int(d007)
+        fps100 = int(d006)
     except (TypeError, ValueError):
         return None
-    if angle100 <= 0 or fps <= 0:
+    if angle100 <= 0 or fps100 <= 0:
         return None
-    return max(1, int(360.0 * fps * 100 / angle100 + 0.5))
+    return max(1, int(360.0 * fps100 / angle100 + 0.5))
+
+
+def _x100_text(value):
+    """An x100 camera value as plain text: 6000 -> `60`, 5994 -> `59.94`, 2160 -> `21.6`."""
+    try:
+        return ("%.2f" % (int(value) / 100.0)).rstrip("0").rstrip(".")
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def context_fps100(context):
+    """The project fps x100 a snapshot's `context` records, or None.
+
+    `context.d006` (x100) wins whenever it is present. LEGACY (issue 1402): a snapshot saved before
+    the d006 switch carries only `context.d007` as WHOLE fps (the old, wrong key; on every BMPCC d007
+    is the off-speed rate). It is read, converted to x100, only when d006 is absent, so a snapshot
+    taken during a running development period still restores and logs the same 1/N s."""
+    if not isinstance(context, dict):
+        return None
+    if context.get("d006") is not None:
+        raw, scale = context["d006"], 1
+    else:
+        raw, scale = context.get(LEGACY_CONTEXT_FPS_KEY), 100
+    try:
+        return int(raw) * scale
+    except (TypeError, ValueError):
+        return None
 
 
 def decide(present, acked, pinned):
@@ -275,9 +310,9 @@ def _before_lines(tag, current):
     for k in READ_KEYS:
         v = current.get(k)
         lines.append("%s %s %s  (%s)" % (tag, k, v if v is not None else "-", KEY_LABELS[k]))
-    denom = shutter_denominator(current.get("d002"), current.get("d007"))
+    denom = shutter_denominator(current.get("d002"), current.get("d006"))
     if denom is not None:
-        lines.append("SHUTTER %s 1/%d s at %s fps" % (tag, denom, current.get("d007")))
+        lines.append("SHUTTER %s 1/%d s at %s fps" % (tag, denom, _x100_text(current.get("d006"))))
     return lines
 
 
@@ -310,10 +345,10 @@ def default_snapshot_path(env=None):
 
 def build_snapshot(current, baseline, box, taken_utc):
     """The snapshot document: the camera's CURRENT value of every key this run enforces (the keys it
-    may overwrite), plus the project fps as log context. A key the camera reports no value for is
-    left out (there is nothing to put back). A value that is not a plain token could not be written
-    back by the restore, so it raises SnapshotError: the caller refuses the set rather than
-    overwrite a production value it cannot restore."""
+    may overwrite), plus the project fps (d006, x100) as log context. A key the camera reports no
+    value for is left out (there is nothing to put back). A value that is not a plain token could
+    not be written back by the restore, so it raises SnapshotError: the caller refuses the set
+    rather than overwrite a production value it cannot restore."""
     for field, v in (("box", box), ("taken_utc", taken_utc)):
         if not isinstance(v, str) or not SNAPSHOT_FIELD_RE.match(v):
             raise SnapshotError("snapshot %s %r is not a plain token, the restore could not read it back"
@@ -399,23 +434,17 @@ def grade_restore(snapshot_values, readback):
             if k in snapshot_values and readback.get(k) != snapshot_values[k]]
 
 
-def _angle_text(d002):
-    try:
-        return ("%.2f" % (int(d002) / 100.0)).rstrip("0").rstrip(".")
-    except (TypeError, ValueError):
-        return str(d002)
-
-
 def snapshot_summary(doc):
     """One plain Slovak line for the operator log and the EVENT Discord note, e.g.
-    `ISO 800, uzávierka 1/60 s (uhol 360°), cam1 2026-09-26T15:00:00Z`."""
+    `ISO 800, uzávierka 1/60 s (uhol 360°), cam1 2026-09-26T15:00:00Z`. The 1/N s uses the
+    snapshot's project fps (`context_fps100`: d006, or the legacy whole-fps d007 without it)."""
     values = doc["values"]
     parts = []
     if "iso" in values:
         parts.append("ISO %s" % values["iso"])
     if "d002" in values:
-        denom = shutter_denominator(values["d002"], doc.get("context", {}).get("d007"))
-        angle = _angle_text(values["d002"])
+        denom = shutter_denominator(values["d002"], context_fps100(doc.get("context", {})))
+        angle = _x100_text(values["d002"])
         if denom is not None:
             parts.append("uzávierka 1/%d s (uhol %s°)" % (denom, angle))
         else:
