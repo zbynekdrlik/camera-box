@@ -10,9 +10,10 @@
 //! the change FAIL-LOUD, restores ro, and VERIFIES the resulting `is-enabled` state. These tests
 //! run its emitted remote bash with a fake `systemctl`/`mount`/`findmnt`/`fuser` on PATH — no rig.
 //!
-//! issue 1405: `enable-now` no longer runs `systemctl enable --now` inside the window. A start on a
-//! writable root opened writers that made the ro remount fail, and the `|| true` hid it (cam2 ran
-//! on a read-write root, 4.10.2026). Only `systemctl enable` runs in the window; after the ro
+//! issue 1405: `enable-now` no longer runs `systemctl enable --now` inside the window. The ro
+//! remount after it failed and the `|| true` hid it (cam2 ran on a read-write root, 4.10.2026; that
+//! the start opened the blocking writer is inferred from the timing). Only `systemctl enable` runs in
+//! the window; after the ro
 //! remount `findmnt -no OPTIONS /` must read `ro` (else FAIL LOUD naming the writers, no start),
 //! and only then `systemctl start`. The full run-the-text matrix lives in
 //! `tests/python/test_cam2_painter_ro_verify_1405.py`.

@@ -2,10 +2,11 @@
 
 `cam2_painter_persist_state_cmds` (scripts/lib/cam2-painter-ro-persist.sh, issue 1175) opens a
 `mount -o remount,rw /` window on cam2's read-only root to change the persistent enable-state of
-cam2-painter.service. Its `enable-now` mode used to run `systemctl enable --now` INSIDE that window:
-the start opened writers on the still-writable `/`, the following `mount -o remount,ro / 2>/dev/null
-|| true` failed with EBUSY, the `|| true` hid it, and cam2 ran on a WRITABLE root until the next
-reboot (live 4.10.2026, the second `rig-mode.sh test` of the day).
+cam2-painter.service. Its `enable-now` mode used to run `systemctl enable --now` INSIDE that window;
+the following `mount -o remount,ro / 2>/dev/null || true` failed with EBUSY, the `|| true` hid it,
+and cam2 ran on a WRITABLE root until the next reboot (live 4.10.2026, the second `rig-mode.sh test`
+of the day). That the start opened the blocking writer is INFERRED from the timing (the painter
+became active the same second as the last rw remount), not proven.
 
 The fix (main design, issue comment 5992175067):
 - only `systemctl enable` runs inside the window;
@@ -17,8 +18,8 @@ The fix (main design, issue comment 5992175067):
 Every test here RUNS the emitted remote text (the issue-1371 run-the-text pattern), never a text
 match: a stub-only PATH carries stateful fakes for `mount` / `systemctl` / `findmnt` / `fuser` that
 share one fake root state and log every call with the root mode at the moment of the call. A start
-on a writable root plants a writer that makes the next ro remount fail "busy" -- the 4.10.2026
-mechanism. Tier-0 (#557): no cargo, no rig.
+on a writable root plants a writer that makes the next ro remount fail "busy" -- the MODELLED 4.10.2026
+mechanism (inferred, see above). Tier-0 (#557): no cargo, no rig.
 """
 
 import os
@@ -74,7 +75,7 @@ active_file = os.path.join(st, "active")
 
 
 def started():
-    # A start on a WRITABLE root opens writers on / (the 4.10.2026 mechanism, issue 1405).
+    # A start on a WRITABLE root opens writers on / (the modelled 4.10.2026 mechanism, issue 1405).
     if root == "rw":
         open(os.path.join(st, "writer"), "w").write("systemd-journal 76355\n")
     open(active_file, "w").write("active\n")
@@ -501,3 +502,34 @@ def test_event_painter_stop_disarms_the_deadman_before_a_failing_disable_1405(bo
     ro = _index(log, "mount -o remount,ro /")
     assert disarm < stop < ro, f"the dead-man must be disarmed before the stop+disable:\n{log}"
     assert _starts(log) == [], log
+
+
+# ---- review round 2: the TEST handoff disarms the dead-man; an unavailable fuser is named ------- #
+
+
+@pytest.mark.parametrize("strict", _MODES)
+def test_handoff_disarms_the_deadman_before_a_failing_window_1405(box, strict):
+    # rig-mode.sh test arms the dead-man after a GOOD handoff; only EVENT disarms it. On a second
+    # TEST whose handoff fails at the ro verify, a still-armed dead-man would start the painter on
+    # the writable root within ~5 min, so the handoff disarms it first.
+    proc = _run(box, _handoff_text(), strict, FAKE_RO_FAIL="1")
+    log = _log(box)
+    assert proc.returncode != 0, log
+    assert "FAIL: [#1405]" in proc.stderr, proc.stderr
+    disarm = _index(log, "systemctl stop cam2-painter-deadman.timer")
+    rw = _index(log, "mount -o remount,rw /")
+    assert disarm < rw, f"the dead-man must be disarmed before the remount-rw window:\n{log}"
+    assert _starts(log) == [], log
+
+
+@pytest.mark.parametrize("mode", ["enable-now", "disable"])
+def test_failure_says_so_when_fuser_prints_no_listing_1405(box, mode):
+    # A missing or failing fuser must never read as "no process holds a file open for writing".
+    if mode == "disable":
+        (box["state"] / "enabled").write_text("enabled\n")
+    (box["stub"] / "fuser").unlink()
+    _write_stub(box["stub"], "fuser", "import sys\nsys.exit(1)\n")
+    proc = _run(box, _persist_text(mode), "set -e", FAKE_RO_FAIL="1")
+    assert proc.returncode != 0, proc.stderr
+    assert "fuser printed no listing" in proc.stderr, proc.stderr
+    assert "(none: no process holds a file open for writing on /)" not in proc.stderr, proc.stderr
