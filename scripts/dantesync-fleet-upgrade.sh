@@ -221,35 +221,29 @@ if [ "\$expected" != "\$actual" ]; then
   exit 1
 fi
 chmod +x "\$tmp/dantesync"
-# 1.5 cam boxes run a DELIBERATE read-only root (the deploy-fleet.sh remount cycle exists for
-# exactly this; the 2026-08-16 canary failed here with 'cp: ... Read-only file system').
-# Detect a read-only root, remount rw for the swap, and restore ro via the EXIT trap — so BOTH
-# the success path and the self-heal ERR path end read-only again. #1077 defect (3): read the
-# ACTUAL mount state (findmnt, with a /proc/mounts fallback for a findmnt-less box), never a
-# 'touch' write probe — a write probe conflates a read-only filesystem with a mere permission
-# error, and now that the script always runs escalated it would read as writable everywhere a
-# real move is possible. Mirrors setup-device.sh's ensure_root_writable()/root_mount_is_readonly()
-# (#599): match 'ro' as the FIRST comma-token so 'errors=remount-ro' never false-positives.
-ro_root=0
-opts="\$(findmnt -no OPTIONS / 2>/dev/null || awk '\$2=="/"{print \$4; exit}' /proc/mounts 2>/dev/null)"
-case "\$opts" in ro | ro,*) ro_root=1 ;; esac
-if [ "\$ro_root" = 1 ]; then mount -o remount,rw /; fi
-_dantesync_remount_ro() {
-  if [ "\$ro_root" = 1 ]; then mount -o remount,ro / 2>/dev/null || true; fi
-}
+# 1.5 cam boxes run a DELIBERATE read-only root (the 2026-08-16 canary failed here with
+# 'cp: ... Read-only file system'). The ONE window prologue (dantesync-rollback.sh, issue 1407):
+# read the ACTUAL mount state (#1077: findmnt + the /proc/mounts fallback, never a write probe),
+# remount rw on a read-only root, and the window helpers. Only writes and the stop run inside it;
+# the window closes VERIFIED before the restart, and the EXIT trap closes it on any failure.
+$(_dantesync_linux_rw_window_sh)
 trap 'rm -rf "\$tmp"; _dantesync_remount_ro' EXIT
 # 2. back up the current binary BEFORE overwriting it (rollback target)
 cp -a "$DANTESYNC_LINUX_BIN" "$DANTESYNC_LINUX_BAK"
-# 3. self-heal: from here (the point of no return), restore the .bak on ANY error
+# 3. self-heal: from here (the point of no return), restore the .bak on ANY error -- in its own
+#    rw window, closed verified, so the old binary comes back up on a read-only root
 _dantesync_restore() {
+  _dantesync_reopen_rw
   cp -a "$DANTESYNC_LINUX_BAK" "$DANTESYNC_LINUX_BIN" 2>/dev/null || true
+  _dantesync_remount_ro
   systemctl restart dantesync 2>/dev/null || true
   echo "SELF-HEAL: restored previous dantesync binary" >&2
 }
 trap '_dantesync_restore' ERR
-# 4. swap + restart
+# 4. swap, close the window (verified, issue 1407), then the restart on the read-only root
 systemctl stop dantesync
 install -m 0755 "\$tmp/dantesync" $DANTESYNC_LINUX_BIN
+_dantesync_remount_ro
 systemctl restart dantesync
 trap 'rm -rf "\$tmp"; _dantesync_remount_ro' EXIT   # success — disarm the restore trap, keep tmp cleanup + ro restore
 # 5. read the new version back
