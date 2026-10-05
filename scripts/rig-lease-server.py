@@ -30,7 +30,7 @@ contract for restreamer#349: `.claude/rules/rig-lease-http.md`.
 No authentication: the payload is a boolean + holder metadata (repo/run_id/job/timestamps) + a TTL
 number -- nothing secret, matching the issue's own explicit call. The default bind (0.0.0.0) is
 safe here ONLY because dev1 has no public IP exposure -- it is reachable exclusively via the two
-private interfaces (LAN 10.77.9.103, tailscale 100.104.8.125), and its firewall is already LAN-open
+private interfaces (LAN, reached by the name dev1 since the DHCP address drifts; tailscale 100.104.8.125), and its firewall is already LAN-open
 (verified in the issue before this was designed), so this widens reachable SURFACE on an already-
 open box, never actual internet access. NEVER deploy this on a box that DOES have a public IP
 without narrowing --bind to a private interface explicitly.

@@ -136,7 +136,7 @@ meets the A/V and spread bounds within the settle time, 3/3 repeats. The matrix 
 
 Preconditions:
 - TEST mode (`bash scripts/rig-mode.sh test`).
-- The lease is free: `curl -s http://10.77.9.103:8890/rig-lease.json` -> `"held": false`. A soak
+- The lease is free: `curl -s http://dev1:8890/rig-lease.json` -> `"held": false`. A soak
   or an E2E holds it otherwise.
 - The soak's 0600 env file `~/.config/camera-box/av-soak.env` with `CAM_PW`, `STREAM_USER`,
   `STREAM_PW`, `STRIH_USER`, `STRIH_PW`.

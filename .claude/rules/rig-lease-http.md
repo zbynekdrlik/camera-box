@@ -118,7 +118,7 @@ Before every `StartStream`, restreamer's stream-box runner does:
 
 ```powershell
 try {
-    $lease = Invoke-RestMethod -Uri "http://10.77.9.103:8890/rig-lease.json" -TimeoutSec 5
+    $lease = Invoke-RestMethod -Uri "http://dev1:8890/rig-lease.json" -TimeoutSec 5
 } catch {
     # connection refused / timeout -> PROCEED + log. Fail-OPEN: an endpoint that is down is NOT
     # the same as camera-box holding the rig, and camera-box's OWN OBS-state gate
@@ -182,9 +182,12 @@ rather than silently ignored.
 The global `machine-identities.md` rule says address dev1 by tailscale, not LAN IP, because the
 LAN IP drifts when equipment travels to events. That rule assumes the CONSUMER has a tailscale
 address to prefer. Here it does not: the stream box (10.77.9.204) has **no tailscale interface at
-all** (verified before this was designed — `Test-NetConnection 10.77.9.103 -Port 22` succeeded
-over LAN from the stream box; tailscale was never in the picture). So `http://10.77.9.103:8890/`
-(LAN) is the path restreamer's runner actually uses; `http://100.104.8.125:8890/` (tailscale) is
+all** (verified before this was designed — `Test-NetConnection` to dev1's LAN address on port 22 succeeded
+over LAN from the stream box; tailscale was never in the picture). So the LAN path is the one
+restreamer's runner actually uses, addressed by the NAME `http://dev1:8890/` (it resolves on the rig LAN
+from the stream box), never a literal LAN IP: dev1's DHCP address drifted from 10.77.9.103 to 10.77.9.109,
+and restreamer's fail-open consumer then silently never waited (found 5.10.2026, issue 1404). Tested from
+stream.lan on 5.10.2026: `dev1` OK, `10.77.9.109` OK, tailscale times out, `dev1.lan` does not resolve; `http://100.104.8.125:8890/` (tailscale) is
 served identically and stays available for any OTHER consumer that does have a tailscale address.
 
 ## Port choice

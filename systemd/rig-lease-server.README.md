@@ -47,7 +47,7 @@ systemctl --user daemon-reload
 
 # 3. Live-verify BEFORE (or right after) enabling:
 systemctl --user start rig-lease-server.service
-curl -sS http://10.77.9.103:8890/rig-lease.json   # LAN — the path restreamer's stream-box runner uses
+curl -sS http://dev1:8890/rig-lease.json   # LAN by NAME — the path restreamer's stream-box runner uses (never a literal LAN IP, it drifts)
 curl -sS http://100.104.8.125:8890/rig-lease.json # tailscale (if reachable from wherever you check)
 journalctl --user -u rig-lease-server -n 30
 
@@ -57,9 +57,9 @@ systemctl --user is-enabled rig-lease-server.service   # -> enabled
 
 # 5. Confirm the LIVE lease transition is visible (proves "computed fresh per request", never a
 #    stale cached snapshot) — during an actual E2E run holding the lease:
-curl -sS http://10.77.9.103:8890/rig-lease.json   # before: held=false
+curl -sS http://dev1:8890/rig-lease.json   # before: held=false
 #   ... start a full-path-e2e.yml run (or scripts/rig-busy-gate.sh acquire manually) ...
-curl -sS http://10.77.9.103:8890/rig-lease.json   # during: held=true, holder={...}, stale=false
+curl -sS http://dev1:8890/rig-lease.json   # during: held=true, holder={...}, stale=false
 ```
 
 ## What this does NOT do

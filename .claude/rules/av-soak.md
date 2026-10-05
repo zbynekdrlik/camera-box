@@ -213,7 +213,7 @@ its own as soon as the CSV covers the first hour; the exit code is the FULL run'
 ## Runbook (SUPERVISOR -- the lane never touches the rig)
 
 Preconditions: rig in TEST mode (`bash scripts/rig-mode.sh test`), no E2E running (the lease is free:
-`curl -s http://10.77.9.103:8890/rig-lease.json` -> `"held": false`), the CI artifacts of the commit
+`curl -s http://dev1:8890/rig-lease.json` -> `"held": false`), the CI artifacts of the commit
 under test, and a 0600 env file `~/.config/camera-box/av-soak.env` with `CAM_PW`, `STREAM_USER`,
 `STREAM_PW`, `STRIH_USER`, `STRIH_PW` (the values recording-e2e.sh uses, targets.md -- never
 committed). `--run` refuses (exit 4) when any of the five is missing.

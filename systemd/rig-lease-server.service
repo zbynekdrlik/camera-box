@@ -13,7 +13,7 @@ StartLimitBurst=20
 Type=simple
 # %h = the installing user's home on dev1 (newlevel). Adjust if the checkout lives elsewhere.
 # --bind 0.0.0.0: dev1's firewall is already LAN-open (verified before this was designed, see the
-# issue's own design comment) -- the two reachable private interfaces are LAN 10.77.9.103 and
+# issue's own design comment) -- the two reachable private interfaces are LAN (by the name dev1, the DHCP address drifts) and
 # tailscale 100.104.8.125; NEVER bind the box's public IP. Restreamer's stream-box runner has no
 # tailscale address, so the LAN path is the one it actually uses (address-by-tailscale rule: LAN is
 # the primary path here ONLY because the consumer cannot reach tailscale, not the general default).
