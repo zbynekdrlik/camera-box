@@ -129,8 +129,23 @@ import os, sys
 st = os.environ["FAKE_STATE"]
 with open(os.path.join(st, "log"), "a") as f:
     f.write("fuser " + " ".join(sys.argv[1:]) + "\n")
+if "-s" in sys.argv[1:]:
+    sys.exit(0)  # `fuser -s <dev>`: the device is held (the handoff's paint check)
+# `fuser -vm /` the way a real box prints it: PID 1 and the kernel threads come first, so the one
+# real writer (ACCESS F) sits far past the first 40 lines.
 sys.stderr.write("                     USER        PID ACCESS COMMAND\n")
-sys.stderr.write("/:                   root     76355 F.... systemd-journal\n")
+sys.stderr.write("/:                   root     kernel mount /\n")
+sys.stderr.write("                     root          1 .rce. systemd\n")
+for pid in range(2, 50):
+    sys.stderr.write(f"                     root      {pid:5d} .rc.. kworker/{pid}:0-events\n")
+sys.stderr.write("                     root      76355 F.... systemd-journal\n")
+'''
+
+# `lsof +L1`: one process holding a deleted-but-open file on / (the issue-808 EBUSY cause).
+_LSOF = r'''
+import sys
+print("COMMAND    PID USER  FD   TYPE DEVICE SIZE/OFF NLINK  NODE NAME")
+print("relay     4242 root txt    REG    8,2   123456     0 99999 /usr/local/bin/bkshading-relay (deleted)")
 '''
 
 _NOOP = "import sys\nsys.exit(0)\n"
@@ -154,7 +169,8 @@ def box(tmp_path):
     _write_stub(stub, "findmnt", _FINDMNT)
     _write_stub(stub, "fuser", _FUSER)
     _write_stub(stub, "sleep", _NOOP)
-    for tool in ("head", "rm"):
+    _write_stub(stub, "lsof", _LSOF)
+    for tool in ("awk", "grep", "head", "rm"):
         real = shutil.which(tool, path="/usr/bin:/bin")
         assert real, f"{tool} not found on this host"
         (stub / tool).symlink_to(real)
@@ -195,6 +211,12 @@ def _rig_mode_function(name: str) -> str:
     start = text.index(head) + 1
     end = text.index("\n}\n", start) + 3
     return text[start:end]
+
+
+def _painter_stop_text() -> str:
+    # The WHOLE EVENT cam-side script, built by sourcing rig-mode.sh (its BASH_SOURCE guard skips
+    # main) the way tests/rig_mode.rs::run_sourced does.
+    return _build(f'set +e\n. "{_RIG_MODE}"\npainter_stop_remote /nonexistent/rig-painter.pid')
 
 
 def _event_disable_text() -> str:
@@ -272,7 +294,10 @@ def test_enable_now_trusts_findmnt_not_the_mount_exit_code_1405(box, strict):
 
 @pytest.mark.parametrize("strict", _MODES)
 def test_enable_now_unreadable_root_state_refuses_the_start_1405(box, strict):
-    # findmnt fails and the /proc/mounts fallback has no awk: the mode is unknown, never assumed ro.
+    # findmnt fails and the /proc/mounts fallback fails too (a failing awk here, so the host's own
+    # /proc/mounts is never read): the mode is unknown, never assumed ro.
+    (box["stub"] / "awk").unlink()
+    _write_stub(box["stub"], "awk", "import sys\nsys.exit(2)\n")
     proc = _run(box, _persist_text("enable-now"), strict, FAKE_FINDMNT_EMPTY="1")
     log = _log(box)
     assert proc.returncode != 0, f"an unreadable root state must fail loud:\n{log}"
@@ -418,4 +443,61 @@ def test_event_disable_with_a_writer_on_root_fails_loud_1405(box, strict):
 def test_stub_path_is_hermetic(box):
     # Guard against a stub falling through to a real host tool (the CI runner's own root is rw).
     names = sorted(os.listdir(box["stub"]))
-    assert names == ["findmnt", "fuser", "head", "mount", "rm", "sleep", "systemctl"], names
+    assert names == ["awk", "findmnt", "fuser", "grep", "head", "lsof", "mount", "rm", "sleep", "systemctl"], names
+
+
+# ---- review round 1: the writers are named, and EVENT never leaves the dead-man armed ------------ #
+
+
+@pytest.mark.parametrize("mode", ["enable-now", "disable"])
+def test_failure_names_the_writer_past_the_kernel_threads_1405(box, mode):
+    # The writer is PID 76355 at line ~52 of `fuser -vm /`: a `| head -n 40` would cut it off.
+    if mode == "disable":
+        (box["state"] / "enabled").write_text("enabled\n")
+    proc = _run(box, _persist_text(mode), "set -e", FAKE_RO_FAIL="1")
+    assert proc.returncode != 0, proc.stderr
+    assert "76355" in proc.stderr and "systemd-journal" in proc.stderr, (
+        f"the process holding / open for WRITING must be named:\n{proc.stderr}"
+    )
+    assert "kworker/3:0-events" not in proc.stderr, (
+        f"only the writers (ACCESS F) are listed, not every process on /:\n{proc.stderr}"
+    )
+
+
+@pytest.mark.parametrize("mode", ["enable-now", "disable"])
+def test_failure_names_deleted_but_open_holders_1405(box, mode):
+    # A deleted-but-still-open file (a replaced binary) keeps / busy without any ACCESS F writer.
+    if mode == "disable":
+        (box["state"] / "enabled").write_text("enabled\n")
+    proc = _run(box, _persist_text(mode), "set -e", FAKE_RO_FAIL="1")
+    assert proc.returncode != 0, proc.stderr
+    assert "/usr/local/bin/bkshading-relay (deleted)" in proc.stderr, (
+        f"the deleted-but-open holder must be named (the existing issue-808 probe):\n{proc.stderr}"
+    )
+
+
+def test_disable_failure_reports_the_enable_state_1405(box):
+    (box["state"] / "enabled").write_text("enabled\n")
+    proc = _run(box, _persist_text("disable"), "set -e", FAKE_RO_FAIL="1")
+    assert proc.returncode != 0, proc.stderr
+    assert "is-enabled now: 'disabled'" in proc.stderr, (
+        f"a failed EVENT must still say whether a reboot would re-arm the QR:\n{proc.stderr}"
+    )
+
+
+@pytest.mark.parametrize("strict", _MODES)
+def test_event_painter_stop_disarms_the_deadman_before_a_failing_disable_1405(box, strict):
+    # rig-mode.sh test ARMS the cam2-painter dead-man (it starts cam2-painter whenever no
+    # frame-probe runs). If the EVENT disable step fails loud on a root left rw, the dead-man must
+    # already be disarmed, or it puts the QR painter back on air within ~5 min.
+    (box["state"] / "enabled").write_text("enabled\n")
+    (box["state"] / "active").write_text("active\n")
+    proc = _run(box, _painter_stop_text(), strict, FAKE_RO_FAIL="1")
+    log = _log(box)
+    assert proc.returncode != 0, f"stdout={proc.stdout!r}\nstderr={proc.stderr!r}\nlog={log}"
+    assert "FAIL: [#1405]" in proc.stderr, proc.stderr
+    disarm = _index(log, "systemctl stop cam2-painter-deadman.timer")
+    stop = _index(log, "systemctl stop cam2-painter.service")
+    ro = _index(log, "mount -o remount,ro /")
+    assert disarm < stop < ro, f"the dead-man must be disarmed before the stop+disable:\n{log}"
+    assert _starts(log) == [], log

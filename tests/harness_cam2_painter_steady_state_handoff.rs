@@ -56,7 +56,7 @@ fn script_text() -> String {
 #[test]
 fn handoff_enables_and_starts_the_permanent_unit() {
     let h = handoff();
-    let enable = h.find("systemctl enable cam2-painter.service").expect(
+    let enable = h.find("systemctl enable cam2-painter.service ||").expect(
         "#1008: the handoff MUST enable the permanent cam2-painter.service -- so it survives \
          reboot AND re-arms after any EVENT-mode #892 `disable`",
     );
@@ -77,7 +77,7 @@ fn handoff_stops_transient_painter_before_enabling_permanent_unit() {
         "#440: handoff must stop the TRANSIENT painter via its pidfile before starting the unit",
     );
     let enable_pos = h
-        .find("systemctl enable cam2-painter.service")
+        .find("systemctl enable cam2-painter.service ||")
         .expect("#1008: handoff must enable+start the permanent unit");
     assert!(
         stop_pos < enable_pos,

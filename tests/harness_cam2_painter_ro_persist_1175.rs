@@ -158,8 +158,8 @@ fn enable_builder_enables_in_the_window_and_starts_after_the_ro_verify_1405() {
     );
     let rw = e.find("mount -o remount,rw /").expect("must remount rw");
     let enable = e
-        .find("systemctl enable cam2-painter.service")
-        .expect("must enable inside the window");
+        .find("systemctl enable cam2-painter.service ||")
+        .expect("must enable inside the window (the call, not a message naming it)");
     let verify = e
         .find("findmnt -no OPTIONS /")
         .expect("issue 1405: must read the root mount state after the window");
