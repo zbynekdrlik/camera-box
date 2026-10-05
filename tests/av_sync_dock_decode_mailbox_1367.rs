@@ -207,13 +207,14 @@ fn worker_lifecycle_follows_the_output() {
         resize_at < prepare_at && prepare_at < start_at,
         "issue 1381: prepare_slots must run after the geometry is set and before the worker starts"
     );
-    // The pre-fault sizes come from the SAME helpers the per-frame fills use, so they cannot drift.
+    // The pre-fault sizes come from the SAME helpers the per-frame fills use, and each helper
+    // derives its geometry from `st` itself, so the two sizes cannot drift.
     let prepare = unique_body_of(
         &src,
         "void st_video_decode_job_prepare(const struct sync_test_output *st, st_video_decode_job &job)",
     );
     for need in [
-        "job.band.assign(st_cb_top_band_bytes(st, plan), 0);",
+        "job.band.assign(st_cb_top_band_bytes(st), 0);",
         "job.grid.assign(st_norihiro_grid_bytes(st), 0);",
     ] {
         assert!(
@@ -225,7 +226,7 @@ fn worker_lifecycle_follows_the_output() {
         (
             "static void st_cb_gather_top_band(const struct sync_test_output *st, \
              const struct video_data *frame, std::vector<uint8_t> &dst)",
-            "const size_t need = st_cb_top_band_bytes(st, plan);",
+            "const size_t need = st_cb_top_band_bytes(st);",
         ),
         (
             "static void st_norihiro_gather_grid(const struct sync_test_output *st, \

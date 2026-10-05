@@ -487,10 +487,13 @@ static bool st_raw_video_camera_box_decode(struct sync_test_output *st, const ui
 	return found_any;
 }
 
-/* issue 1381: the bytes st_cb_gather_top_band copies per frame for `plan` (0 when the plan has no
- * band) -- also what st_video_decode_job_prepare sizes each slot's band to. */
-static size_t st_cb_top_band_bytes(const struct sync_test_output *st, const camerabox::CbTopBandPlan &plan)
+/* issue 1381: the bytes st_cb_gather_top_band copies per frame for this output's geometry (0 when
+ * the plan has no band) -- also what st_video_decode_job_prepare sizes each slot's band to. The
+ * plan is derived HERE from `st`, so the fill and the pre-fault can never be handed different
+ * geometries. */
+static size_t st_cb_top_band_bytes(const struct sync_test_output *st)
 {
+	const camerabox::CbTopBandPlan plan = camerabox::cb_top_band_decode_plan(st->video_width, st->video_height);
 	if (plan.band_h == 0 || plan.dst_w == 0 || plan.dst_h == 0)
 		return 0;
 	return (size_t)st->video_width * plan.band_h;
@@ -503,7 +506,7 @@ static void st_cb_gather_top_band(const struct sync_test_output *st, const struc
 				  std::vector<uint8_t> &dst)
 {
 	camerabox::CbTopBandPlan plan = camerabox::cb_top_band_decode_plan(st->video_width, st->video_height);
-	const size_t need = st_cb_top_band_bytes(st, plan);
+	const size_t need = st_cb_top_band_bytes(st);
 	if (need == 0)
 		return;
 
@@ -522,8 +525,7 @@ static void st_cb_gather_top_band(const struct sync_test_output *st, const struc
  * pre-size (a QR as tall as the frame) would hold ~9 MB per 4K output for a mode the rig never runs. */
 void st_video_decode_job_prepare(const struct sync_test_output *st, st_video_decode_job &job)
 {
-	const camerabox::CbTopBandPlan plan = camerabox::cb_top_band_decode_plan(st->video_width, st->video_height);
-	job.band.assign(st_cb_top_band_bytes(st, plan), 0);
+	job.band.assign(st_cb_top_band_bytes(st), 0);
 	job.grid.assign(st_norihiro_grid_bytes(st), 0);
 }
 
