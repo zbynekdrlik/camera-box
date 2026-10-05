@@ -59,22 +59,33 @@ state the read-only appliance exists to prevent. The same hand-written close sat
 After a good close, `$_row_opts` holds the options read (the persist success line prints it).
 
 Contract for the arguments: TAG, BOX, CONSEQUENCE and HINT land verbatim in a double-quoted remote
-`echo`. No double quote, no backtick. A `$` expands ON THE BOX: the persist lib and the dantesync
-prologue read the unit state that way, the relay mode and the ndi apply name the box with
-`$(hostname ...)`.
+`echo`. A `$` expands ON THE BOX: the persist lib and the dantesync prologue read the unit state
+that way, the relay mode and the ndi apply name the box with `$(hostname ...)`. A double quote or a
+backtick would break or inject into that echo (deploy-relay passes the operator's `--host`), so such
+an argument makes the emitter print a remote text that FAILS LOUD (`exit 1`) instead of a close. It
+never returns an empty text: an empty ssh command would read as a good close.
 
 The emitted text, by construction:
 - ends every statement with `;` (the `$(...)` trailing-newline gotcha), so it embeds inline, in an
   `if`, or inside a function body;
-- names `remount,ro /` exactly ONCE (the command). The bkshading deploy-relay test counts close
-  calls by that text, and the FAIL line says "the ro remount rc", never the command;
+- names `remount,ro /` exactly ONCE in its shared part (the command); the FAIL line says "the ro
+  remount rc", never the command. A caller's HINT may name it again (the persist hint does). The
+  bkshading deploy-relay test counts close CALLS by that text, so the deploy-relay HINT must not;
 - never names `systemctl` or `is-active`. Two reasons: the relay-mode rule "every systemctl line
   ends `|| true`", and the issue-1405 rule that EVENT's first `is-active cam2-painter` must be the
   step-5 check. A CONSEQUENCE/HINT that reads unit state uses `systemctl show -p ActiveState --value`.
 
-Two dev1-side pure parsers: `ro_window_holders CLOSE_OUTPUT` (one line naming the writers
-`cmd[pid]` and the deleted holders `cmd[pid] path`, read section by section from a failed close's
-output) and `ro_window_deleted_holders LSOF_TEXT`.
+The writer filter finds the ACCESS field by its own shape (5 characters of `.rcefFm`, the PID
+right before it). fuser prints an unresolvable USER as a number, so "the field after the first
+number" read `1000 4242 F.... cmd` as PID 1000 and reported "(none: ...)" with a writer present
+(review round 1).
+
+Three dev1-side pure parsers:
+- `ro_window_holders CLOSE_OUTPUT`: one line naming the writers `cmd[pid]` and the deleted holders
+  `cmd[pid] path`, read section by section from a failed close's output;
+- `ro_window_deleted_holders LSOF_TEXT`;
+- `ro_window_close_failed TEXT`: 0 when a remote program's output holds the close's
+  "root is NOT read-only" FAIL line, i.e. the program stopped there and started nothing after it.
 
 ## The sites
 
@@ -92,8 +103,15 @@ output) and `ro_window_deleted_holders LSOF_TEXT`.
 - **deploy-fleet:** `close_ro_or_fail IP BOX LABEL CONSEQUENCE` runs the close over ssh and records
   `LABEL(root-rw: <holders>)` in FAILED (`LABEL(root-unverified: ssh rc N)` on a transport
   failure), so the final `FLEET NOT FULLY ALIGNED` line names the writer. Every terminal path
-  closes the window: a failed stop, a failed scp (the old binary is restarted only on a verified
-  ro root), and the normal path.
+  closes the window: a failed stop, a failed scp (camera-box is restarted only on a verified ro
+  root; scp writes in place, so the restart can still fail on a partial binary), and the normal
+  path.
+  - **The window spans several separate ssh calls from dev1** (rw + stop, scp, close). `OPEN_WINDOW`
+    (`ip|box|label`) is set just BEFORE the rw remount and cleared by `close_ro_or_fail`. The EXIT
+    trap, also reached on INT/TERM (`exit 130` / `exit 143`, e.g. a CI cancel), closes a window that
+    is still open, starts nothing (the binary may be half-copied), and names the box
+    (`interrupted: root ro, service stopped`, or `root-rw: ...`). Review round 1: before this, a
+    cancel mid-swap left the cambox writable with camera-box stopped, silently.
 - **dantesync:** both Linux programs open their window through ONE prologue,
   `_dantesync_linux_rw_window_sh` (`dantesync-rollback.sh`). It reads the root mode, remounts rw on
   a read-only root, and defines `_dantesync_remount_ro` (the close, at most once per open window,
@@ -105,10 +123,34 @@ output) and `ro_window_deleted_holders LSOF_TEXT`.
     good start in a second verified window. The "plain program + ONE delete block" invariant
     (test_dantesync_date_state_1372.py) holds, because the block itself carries the window calls.
   - A node whose root is read-write (strih-lx, dev1) opens no window at all.
+  - **The self-heal says whether it restored anything.** It copies the `.bak` back inside its own
+    window; when that copy fails it prints `SELF-HEAL FAILED ... restore by hand`, never
+    "restored".
+  - **The orchestrator never calls a failed close a self-heal.** `upgrade_node` checks REMOTE_OUT
+    with `ro_window_close_failed`. If the program stopped at a failed close, it reports
+    "NOT self-healed; dantesync may be LEFT STOPPED", because nothing was started after the close.
+  - The ERR self-heal stays ARMED through the final `dantesync --version` on purpose: a binary that
+    cannot print its version is rolled back, and that is what the orchestrator then reports. The
+    old "disarm the restore trap" comment was wrong; only the EXIT trap is re-set there.
 - **bkshading-deploy-relay:** the close runs in ONE ssh call. rc 1 = the box said the root is not ro
   (its FAIL lines are printed, then one summary line from `ro_window_holders`); any other rc is the
   transport (ssh 255, sshpass 5/6). Either way `finish_box` starts nothing: the relay is left
   STOPPED, and it says so.
+
+**Why the cambox-only sites force the root back read-only (review round 1, a decision, not a
+gap).** deploy-fleet and the relay mode never read the root mode before they open the window; the
+dantesync programs, deploy-relay and the ndi apply do, because they also reach boxes whose root is
+read-write by design (strih-lx, dev1, an SBC before its first read-only reboot). deploy-fleet and
+the relay mode reach only camboxes, which run read-only (setup-device STEP 18), and they always
+remounted ro after the window.
+- A cambox found writable is the stuck state this ticket exists to surface. If a writer keeps it
+  writable, the step now fails loud naming that writer and starts nothing. It used to start the
+  service and leave the box writable, silently.
+- The main's design names this trade-off ("a site that used to 'succeed' on a rw root now fails
+  loudly. That is the point").
+- On `rig-mode.sh event` this means a stuck-writable relay box gets no shading relay until the
+  supervisor's live put-back. That put-back: `fuser -vm /`, stop the writer, `mount -o remount,ro /`
+  until `findmnt` reads ro, then re-run.
 
 Audit, left as they are:
 - `rt-kernel-plan.sh` only PRINTS supervisor commands for a reboot-class kernel step.
@@ -126,10 +168,14 @@ Audit, left as they are:
   - a static window pin per text site: the text between the rw open and the close (inline, or the
     standalone `_dantesync_remount_ro` / `_ndi_restore_ro` call) holds no start, with the bodies of
     the functions defined inside the window stripped first;
-  - **the sweep:** no `remount,ro` followed by `2>/dev/null` / `|| true` / `; true` anywhere under
-    `scripts/` outside the lib. The pattern is anchored right after the command (past
-    redirections), so a FAIL message that reads unit state with `2>/dev/null || true` later on the
-    same line is no hit. Comment lines are skipped.
+  - **the sweep:** no ro remount anywhere under `scripts/` outside the lib whose failure is
+    discarded. It is structural, per ro remount CALL (`remount,ro` / `ro,remount`, quoted, with
+    `,opts`, with or without ` /`). Its redirections must not send the error to `/dev/null`. What
+    follows must not just go on: `|| true`, `|| :`, `|| echo/printf/warn/log/info`, `|| return`,
+    `|| exit 0`, `|| continue`, `|| break`, `; true`, `; :`, a retry loop's `&& break`. A loud
+    `|| fail ...` / `|| { ...; exit 1; }` is fine, and so is a FAIL message that reads unit state with
+    `2>/dev/null || true` later on the same line (the check is anchored right after the command).
+    Comment lines are skipped; a continued line is one statement.
 - `test_ro_window_sites_1407.py`: every site run WHOLE on the fake box. deploy-fleet runs with a fake
   `sshpass` that executes each remote command on the box, with `/usr/local/bin/` mapped into the
   box's own fs, so the real `sha256sum` and the artifact's `--version` work.
