@@ -139,9 +139,10 @@ the TEST handoff (`enable-now`) and the EVENT disable (`disable`).
   The cam-side restore (#868) and the bkshading relay step both do it: `|| _rc=$?`, a WARNING by
   name, every remaining step runs, and the rc is folded into the mode's exit at the end. Use the
   same shape for any new step of that kind; a bare call is right only for a hard precondition
-  before any mutation (the #789 TEST-entry gate). The one decided exception (5996845165, Q1 = B):
-  TEST stops right after the relay step, before the painter launch, when cam2's OWN root stayed
-  read-WRITE there, because the painter handoff would fail on it and leave cam2 dark. Detail:
+  before any mutation (the #789 TEST-entry gate). The one decided exception (5996845165 Q1 = B,
+  5997211658 Q3): TEST stops right after the relay step, before the painter launch, when cam2's OWN
+  rw window is broken there (its root stayed read-WRITE, or it refused the rw remount, rc=98),
+  because the painter handoff needs that window, would fail on it and leave cam2 dark. Detail:
   `.claude/rules/ro-window.md`, "A failed relay step never stops a rig-mode switch half-way".
 - **The TEST handoff disarms the dead-man too (step H1b), before the transient painter stop.**
   `rig-mode.sh test` arms it only after a GOOD handoff, and only EVENT disarms it otherwise. On a

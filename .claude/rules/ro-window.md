@@ -228,21 +228,32 @@ going into a production (the issue-868 class). TEST aborted before the painter s
   failed enable) or still be armed, so the RESULT reads "may not be running / not armed for a
   reboot", never "is NOT running".
 - The warn / RESULT / Discord helpers are reports: nothing for rc 0, always return 0.
-- **The ONE exception: TEST stops when the PAINTER box's root stayed read-WRITE** (decision
-  5996845165, Q1 = B). The apply records every box whose own verified close failed
-  (`BKSHADING_RELAY_MODE_ROOT_RW`, `ip<TAB>entry` lines). do_test asks
-  `bkshading_relay_mode_painter_root_rw_stop test "$PAINTER_IP"` right after the apply. When it is
-  the painter box, that helper prints the RESULT naming cam2 and its writers ("STOPPED before the
-  painter launch") and TEST exits 1 before the continue-warning and every painter step.
-  - Why: the issue-1405 handoff closes its own rw window on that same root, so it can only fail.
+- **The ONE exception: TEST stops when the PAINTER box's rw window itself is broken.** Two cases,
+  both decided: its root stayed read-WRITE (decision 5996845165, Q1 = B), or it REFUSED the rw
+  remount (decision 5997211658, Q3; e.g. a filesystem forced read-only on errors, a failing stick).
+  - The apply records each such box in `BKSHADING_RELAY_MODE_WINDOW_FAILED`
+    (`ip<TAB>kind<TAB>entry` lines):
+    - kind `root-rw` when `ro_window_close_failed` finds its own close failed;
+    - kind `rw-refused` when `_bkshading_relay_mode_rw_refused` finds
+      `persist did not land (rc=98 ` in its output. That is a `case` match, not a grep pipe, so it
+      is safe under the caller's pipefail. The text always prints `RELAY_ENABLED=`, so rc=98 is the
+      only marker.
+  - do_test asks `bkshading_relay_mode_painter_window_stop test "$PAINTER_IP"` right after the
+    apply. For the painter box, that helper prints the RESULT ("STOPPED before the painter launch",
+    naming cam2 and either its writers or the refused remount, plus what to check) and TEST exits 1
+    before the continue-warning and every painter step.
+  - Why: the issue-1405 handoff needs a working rw window on that same root, so it can only fail.
     Going on would stop the running permanent painter and leave cam2 dark with no dead-man. TEST
     is development, so stopping strands nothing on air.
-  - It keys on the box's own close failing (root not ro); the writers are named whenever
-    fuser/lsof find any.
-  - Every other relay failure keeps the fold: the source box, and an UNREACHABLE painter box (no
-    close ran there). EVENT never stops here, because a burn left on air is the worse fault.
-  - Tests: `test_test_failed_relay_on_the_painter_box_with_a_read_write_root_stops_*` and
-    `test_test_unreachable_painter_box_still_runs_the_painter_steps`.
+  - Every other relay failure keeps the fold: the source box (read-write root or refused remount),
+    and an UNREACHABLE painter box (no window ran there). EVENT never stops here, because a burn
+    left on air is the worse fault.
+  - Tests:
+    - `test_test_failed_relay_on_the_painter_box_with_a_read_write_root_stops_*`;
+    - `test_test_refused_rw_remount_on_the_painter_box_stops_*`;
+    - the controls `test_test_unreachable_painter_box_*`, `test_test_refused_rw_remount_on_the_source_box_*`
+      and `test_event_refused_rw_remount_on_the_painter_box_never_stops_event`. The fake roster box
+      takes `refused=` (`FAKE_RW_FAIL`).
 - **Any NEW step in a rig-mode switch whose failure must not strand the rig gets the same shape:**
   record the rc, warn by name, continue, fold at the end. A bare call is right only for a step that
   must stop the switch (a hard precondition before any mutation, like the #789 TEST-entry gate).
