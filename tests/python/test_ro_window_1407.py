@@ -304,23 +304,46 @@ _DISCARDS = (re.compile(r"(?:2|&)>>?\s*/dev/null"), re.compile(r">\s*/dev/null.*
 _GOES_ON = re.compile(r"\s*(?:\|\|\s*(?:true|:|echo|printf|warn|log|info|err|logger|return\s+0|exit\s+0|continue|break)"
                       r"(?![\w-])|;\s*(?:true|:)(?![\w-])|&&\s*break(?![\w-]))")
 _GROUP = re.compile(r"\s*\|\|\s*\{")
-# a group is loud when it ends the step with a failure: a non-zero exit/return, a bare return
-# (it passes the mount's failure on), fail or die.
-_LOUD = re.compile(r"\b(?:exit|return)\s+[1-9]|\breturn\s*(?:;|$|\})|\b(?:fail|die)\b")
+# a group is loud when it ends the step with the failure: a non-zero literal or a named variable as
+# the exit/return code (`exit "$rc"` after `rc=$?`), fail or die -- or the mount's own `$?` taken as
+# the group's FIRST command. Inside a group a bare `return`/`exit`, or `$?` after another command,
+# hands back THAT command's status (an echo's 0), so it goes on.
+_LOUD = re.compile(r"\b(?:exit|return)\s+(?:[1-9]|\"?\$\{?[A-Za-z_])|\b(?:fail|die)\b")
+_LOUD_FIRST = re.compile(r"\s*(?:exit|return)\s+\"?\$\?")
+
+
+def _group_body(text):
+    """`text` starts right after `|| {`: the body up to the MATCHING brace (quote-, escape- and
+    ${...}-aware), or None when the group never closes."""
+    depth, quote, i = 1, None, 0
+    while i < len(text):
+        c = text[i]
+        if c == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote:
+            if c == quote:
+                quote = None
+        elif c in "\"'":
+            quote = c
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return text[:i]
+        i += 1
+    return None
 
 
 def _group_goes_on(after):
     m = _GROUP.match(after)
     if not m:
         return False
-    depth, i = 1, m.end()
-    while i < len(after) and depth:
-        if after[i] == "{":
-            depth += 1
-        elif after[i] == "}":
-            depth -= 1
-        i += 1
-    return not _LOUD.search(after[m.end():i - 1])
+    body = _group_body(after[m.end():])
+    if body is None:
+        return False  # never closes in the text read: no hit
+    return not (_LOUD.search(body) or _LOUD_FIRST.match(body))
 
 
 class _Sweep:
@@ -330,18 +353,33 @@ class _Sweep:
     line is no hit, and a loud `|| fail ...` / `|| { ...; exit 1; }` is no hit either."""
 
     @staticmethod
-    def search(line):
+    def search(line, following=""):
+        """FOLLOWING: the lines after LINE (a `|| {` group may close there)."""
         for m in _RO_CALL.finditer(line):
             rest = line[m.end():]
             redirs = _REDIRS.match(rest).group(0)
             if any(d.search(redirs) for d in _DISCARDS):
                 return True
-            if _GOES_ON.match(rest[len(redirs):]) or _group_goes_on(rest[len(redirs):]):
+            after = rest[len(redirs):]
+            if _GOES_ON.match(after) or _group_goes_on(after + following):
                 return True
         return False
 
 
 _SWALLOW = _Sweep
+
+
+def _swallowed_in_text(text):
+    """[(line number, line)] of every swallowed ro close in TEXT (a continued line is one statement,
+    comment lines are skipped, a `|| {` group is read on into the next 200 lines)."""
+    lines = text.replace("\\\n", " ").splitlines()
+    hits = []
+    for n, line in enumerate(lines, 1):
+        if line.lstrip().startswith("#") or not _RO_CALL.search(line):
+            continue
+        if _SWALLOW.search(line, "\n" + "\n".join(lines[n:n + 200])):
+            hits.append((n, line.strip()))
+    return hits
 
 
 def _swallowed_closes():
@@ -353,12 +391,7 @@ def _swallowed_closes():
             text = path.read_text()
         except (UnicodeDecodeError, OSError):
             continue
-        text = text.replace("\\\n", " ")  # a continued line is one statement
-        for n, line in enumerate(text.splitlines(), 1):
-            if line.lstrip().startswith("#"):
-                continue
-            if _SWALLOW.search(line):
-                hits.append(f"{path.relative_to(ROOT)}:{n}: {line.strip()}")
+        hits += [f"{path.relative_to(ROOT)}:{n}: {line}" for n, line in _swallowed_in_text(text)]
     return hits
 
 
