@@ -410,7 +410,10 @@ def test_handoff_with_a_writer_on_root_fails_loud_before_any_start_1405(box, str
     assert proc.returncode != 0, log
     assert "FAIL: [#1405]" in proc.stderr, proc.stderr
     assert _starts(log) == [], log
-    assert not any(ln.startswith("systemctl is-active") for ln in log), (
+    # H4 polls is-active up to 17 times and the handoff then prints its "handed" line; the FAIL
+    # line may read is-active once (it reports whether the painter runs, review round 3).
+    assert "[#1008] handed TEST-mode steady state" not in proc.stdout, proc.stdout
+    assert sum(ln.startswith("systemctl is-active") for ln in log) <= 1, (
         f"the handoff must stop at the ro verify, before H4:\n{log}"
     )
 
