@@ -1327,12 +1327,13 @@ do_test() {
   # issue 1407 design addendum item 1 (the issue-868 pattern): a relay box whose state did not land
   # (its root left read-WRITE, or no answer) makes the apply return non-zero, and under set -e that
   # ended the TEST switch right here, before the painter. Record it, warn by name, run every step
-  # below, and fold it into the exit status at the end. ONE exception (decision 5996845165, Q1 = B):
-  # when the failed box is the painter box itself and its root stayed read-WRITE, stop here, before
-  # the painter launch: the painter handoff would fail on that same root and leave cam2 dark.
+  # below, and fold it into the exit status at the end. ONE exception (decisions 5996845165 Q1 = B
+  # and 5997211658 Q3): when the failed box is the painter box itself and its rw window is broken
+  # (its root stayed read-WRITE, or it refused the rw remount), stop here, before the painter
+  # launch: the painter handoff would fail on that same root and leave cam2 dark.
   local _relay_rc=0
   bkshading_relay_mode_apply test "$CAM_PW" "${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP" || _relay_rc=$?
-  if [ "$_relay_rc" -ne 0 ] && bkshading_relay_mode_painter_root_rw_stop test "$PAINTER_IP"; then
+  if [ "$_relay_rc" -ne 0 ] && bkshading_relay_mode_painter_window_stop test "$PAINTER_IP"; then
     exit 1
   fi
   bkshading_relay_mode_warn_continue test "$_relay_rc"
