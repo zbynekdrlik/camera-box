@@ -57,9 +57,10 @@ def _flow_text():
     return s[s.index("\nusage() {"):s.index('\nif [ "${BASH_SOURCE[0]}" = "${0}" ]; then')]
 
 
-def _run(tmp_path, mode, failing=(), assert_pass=0, enabled=False, missing=()):
+def _run(tmp_path, mode, failing=(), assert_pass=0, enabled=False, missing=(), extra=""):
     """Run the REAL do_<mode> body. FAILING = relay box ips whose ro close fails (a writer on /);
-    MISSING = relay box ips with no box at all (the fake ssh answers like an unreachable host)."""
+    MISSING = relay box ips with no box at all (the fake ssh answers like an unreachable host);
+    EXTRA = bash run after the stubs (a test overrides one more step there)."""
     boxes = tmp_path / "boxes"
     boxes.mkdir()
     made = {}
@@ -102,6 +103,7 @@ event_mode_assert() {{
   EVENT_ASSERT_PASS={assert_pass}
 }}
 event_mode_discord_confirm_send() {{ _stub_step event_mode_discord_confirm_send; printf '%s' "$1" >"{sent}"; }}
+{extra}
 do_{mode}
 """)
     env = {"PATH": f"{dev1}:/usr/bin:/bin", "FAKE_BOXES": str(boxes), "HOME": str(tmp_path)}
@@ -144,11 +146,14 @@ def test_event_failed_relay_close_still_clears_the_burns_maps_and_runs_the_contr
     assert result, proc.stderr
     assert f"cam1 ({SOURCE_IP})" in result[0] and WRITER in result[0], result[0]
     assert f"cam2 ({PAINTER_IP})" not in result[0], result[0]
+    # review round 1: never overstate -- a failed box can still run its relay, un-armed for reboot
+    assert "is NOT running" not in result[0], result[0]
     assert "CONFIRMED clean for broadcast" not in out, out
     # the owner's EVENT Discord confirmation says it at the top, never a clean confirmation alone
     assert sent is not None, "the issue-724 confirmation must still be sent"
     first = sent.strip().splitlines()[0]
     assert first.startswith("⚠️") and f"cam1 ({SOURCE_IP})" in first, sent
+    assert "burny vypnuté" not in first, "the note must not assert what the contract below decides:\n" + sent
     assert "EVENT kontrakt potvrdeny" in sent, sent
 
 
@@ -211,3 +216,56 @@ def test_test_with_every_relay_box_healthy_passes(tmp_path):
     assert proc.returncode == 0, out
     assert "WHOLE CHAIN verified" in proc.stdout, out
     assert _relay_lines(proc.stderr) == [], proc.stderr
+
+
+def test_event_relay_failure_and_a_failed_cam_side_restore_name_both_and_still_clear_the_burns(tmp_path):
+    # review round 1: the two recorded failures (the issue-868 cam-side restore + this relay step)
+    # together -- the burn-OFF still runs, both RESULT lines are printed, the run exits non-zero.
+    fail_first_cam_ssh = (
+        'cam_ssh() { _stub_step cam_ssh; if [ ! -e "$STEPS.camfail" ]; then : >"$STEPS.camfail"; return 7; fi; }'
+    )
+    proc, ran, _boxes, _sent = _run(tmp_path, "event", failing=(SOURCE_IP,), extra=fail_first_cam_ssh)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert _at(ran, "toggle_burn event") < _at(ran, "event_mode_assert"), "\n".join(ran)
+    results = [ln for ln in proc.stderr.splitlines() if ln.startswith("RESULT:")]
+    assert any("bkshading relay" in ln for ln in results), proc.stderr
+    assert any("cam-side restore FAILED" in ln for ln in results), proc.stderr
+
+
+def test_test_failed_relay_on_the_painter_box_still_runs_the_painter_steps_as_decided(tmp_path):
+    # Pins the DECIDED behaviour (design addendum Approach 1) for the painter box itself; the review
+    # raised stopping before the painter launch in this one case as a Design-question to the main.
+    proc, ran, _boxes, _sent = _run(tmp_path, "test", failing=(PAINTER_IP,), enabled=True)
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert _at(ran, "painter_launch_remote") < _at(ran, "cam2_painter_steady_state_handoff_cmds"), "\n".join(ran)
+    result = [ln for ln in proc.stderr.splitlines() if ln.startswith("RESULT:") and "bkshading relay" in ln]
+    assert result and f"cam2 ({PAINTER_IP})" in result[0] and WRITER in result[0], proc.stderr
+
+
+_DISCORD_LIB = ROOT / "scripts" / "lib" / "event-mode-discord-confirm.sh"
+
+
+def _note_add(msg, line, where):
+    script = f'. "{_DISCORD_LIB}"\nevent_mode_discord_note_add "$1" "$2" "$3"\necho RC=$?\n'
+    return subprocess.run(["/bin/bash", "-c", "set -euo pipefail\n" + script, "h", str(msg), line, where],
+                          capture_output=True, text=True, timeout=30)
+
+
+def test_the_event_discord_note_is_one_shared_helper(tmp_path):
+    # review round 1: the relay note copied the issue-1371 restore note's prepend-or-append code; both
+    # now call the ONE helper in the confirmation lib.
+    for rel in ("scripts/lib/camera-test-settings.sh", "scripts/lib/bkshading-relay-mode.sh"):
+        text = (ROOT / rel).read_text()
+        assert "event_mode_discord_note_add " in text, rel
+        assert 'mv -f "$tmp" "$msg"' not in text, f"{rel} still carries its own prepend copy"
+    msg = tmp_path / "msg.txt"
+    msg.write_text("contract text\n")
+    proc = _note_add(msg, "TOP LINE", "top")
+    assert "RC=0" in proc.stdout, proc.stderr
+    proc = _note_add(msg, "END LINE", "end")
+    assert "RC=0" in proc.stdout, proc.stderr
+    lines = [ln for ln in msg.read_text().splitlines() if ln.strip()]
+    assert lines == ["TOP LINE", "contract text", "END LINE"], msg.read_text()
+    assert [p.name for p in tmp_path.iterdir()] == ["msg.txt"], "no temp file is left behind"
+    proc = _note_add(tmp_path / "absent" / "msg.txt", "X", "top")
+    assert "RC=0" in proc.stdout and not (tmp_path / "absent").exists(), proc.stderr

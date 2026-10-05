@@ -208,7 +208,7 @@ def test_deploy_fleet_camera_box_corrupt_sidecar_is_never_moved_into_place(tmp_p
     calls = log(box)
     out = proc.stdout + proc.stderr
     assert proc.returncode != 0, out
-    assert "cam2(sha-mismatch)" in out, out
+    assert "cam2(sidecar-sha-mismatch)" in out, out
     assert _live_bin(box).read_bytes() == _OLD_CAMERA_BOX, "a corrupt sidecar must never go live"
     assert not _live_bin(box, "camera-box.new").exists(), "the corrupt sidecar is removed:\n" + "\n".join(calls)
     assert [c for c in calls if c.startswith("mv ")] == [], "\n".join(calls)
@@ -675,9 +675,21 @@ tool = os.path.basename(sys.argv[0])
 root = open(os.path.join(st, "root")).read().strip()
 with open(os.path.join(st, "log"), "a") as f:
     f.write(tool + " " + " ".join(sys.argv[1:]) + f" root={root}\n")
-rc = os.environ.get("FAKE_" + tool.upper().replace("-", "_") + "_RC")
+knob = "FAKE_" + tool.upper().replace("-", "_")
+if os.environ.get(knob + "_STDIN"):  # a tool that reads its stdin (a dpkg/debconf prompt)
+    sys.stdin.read()
+rc = os.environ.get(knob + "_RC")
 sys.exit(int(rc) if rc else 0)
 '''
+
+# the placeholders the supervisor replaces before pasting a step, with a stand-in each
+_RT_PLACEHOLDERS = {"<OLD_VER>": "6.8.0-134-generic", "<Advanced...>the new kernel>": "gnulinux-advanced>gnulinux-6.11"}
+
+
+def _rt_filled(text):
+    for placeholder, value in _RT_PLACEHOLDERS.items():
+        text = text.replace(placeholder, value)
+    return text
 
 # every step that changes the box, with the first work command its program runs
 _RT_STEPS = (
@@ -718,7 +730,7 @@ def test_rt_kernel_runbook_steps_run_on_a_read_only_box_and_leave_it_read_only(t
         d = tmp_path / str(n)
         d.mkdir()
         box = _rt_box(d)
-        proc = run_text(box, _rt_text(token, stale))
+        proc = run_text(box, _rt_filled(_rt_text(token, stale)))
         calls = log(box)
         assert proc.returncode == 0, f"{token}: {proc.stdout}\n{proc.stderr}\n" + "\n".join(calls)
         rw = index(calls, "mount -o remount,rw / root=ro")
@@ -758,3 +770,58 @@ def test_rt_kernel_runbook_step_pasted_into_a_root_shell_never_ends_that_shell(t
                     FAKE_RO_FAIL="1")
     assert "root is NOT read-only" in proc.stderr, proc.stderr
     assert "SESSION-STILL-ALIVE" in proc.stdout, proc.stdout + proc.stderr
+
+
+def test_rt_kernel_runbook_step_whose_work_reads_stdin_still_runs_the_verified_close(tmp_path):
+    # review round 1: the program is the stdin of `bash -s`, so a work command that reads stdin (a
+    # dpkg conffile prompt, a debconf question) used to eat the rest of it -- the verified close
+    # included -- and leave the root writable with exit 0. The work now reads /dev/null.
+    box = _rt_box(tmp_path)
+    proc = run_text(box, _rt_text("install-lowlatency"), FAKE_APT_GET_STDIN="1")
+    calls = log(box)
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}\n" + "\n".join(calls)
+    assert root(box) == "ro", "the close must still run after a stdin reader:\n" + "\n".join(calls)
+    index(calls, "findmnt -no OPTIONS / root=ro", index(calls, "apt-get install"))
+    assert "OK: [issue 899] install-lowlatency" in proc.stdout, proc.stdout + proc.stderr
+
+
+def test_rt_kernel_runbook_purge_steps_never_wait_for_a_prompt():
+    for stale in ("", "6.8.0-134-generic,linux-image-generic"):
+        text = _rt_text("purge-superseded-generic", stale)
+        assert "DEBIAN_FRONTEND=noninteractive apt-get purge" in text, text
+
+
+def test_rt_kernel_runbook_step_with_an_unreplaced_placeholder_refuses_before_the_rw_window(tmp_path):
+    # review round 1: the placeholder steps used to be inert notes; as programs they would run a
+    # literal `<OLD_VER>` / `<Advanced...>` (a bogus grub saved_entry before a reboot). Unedited, they
+    # refuse before the root is touched; edited, they run.
+    for n, token in enumerate(("grub-pin:saved", "purge-superseded-generic")):
+        d = tmp_path / str(n)
+        d.mkdir()
+        box = _rt_box(d)
+        proc = run_text(box, _rt_text(token))
+        calls = log(box)
+        assert proc.returncode != 0, f"{token}: {proc.stdout}\n{proc.stderr}"
+        assert not any(c.startswith("mount") for c in calls), f"{token}: the root was touched:\n" + "\n".join(calls)
+        assert "placeholder" in proc.stderr, f"{token}: {proc.stderr}"
+        d2 = tmp_path / f"{n}-filled"
+        d2.mkdir()
+        box2 = _rt_box(d2)
+        proc2 = run_text(box2, _rt_filled(_rt_text(token)))
+        assert proc2.returncode == 0, f"{token}: {proc2.stdout}\n{proc2.stderr}\n" + "\n".join(log(box2))
+        assert root(box2) == "ro"
+
+
+def test_rt_kernel_driver_prints_a_multi_line_step_below_its_token():
+    # review round 1: `%-28s %s` put `bash -s <<'RT_KERNEL_STEP'` on the token's own line, so copying
+    # that visible line ran `install-lowlatency bash -s`. The token now has a line of its own.
+    proc = subprocess.run(["bash", str(ROOT / "scripts" / "rt-kernel-upgrade.sh"), "--facts", "0 0 1 saved 1",
+                           "--commands"], capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    lines = proc.stdout.splitlines()
+    for token in ("install-lowlatency", "safe-grub-regen"):
+        i = lines.index(token)
+        assert lines[i + 1] == "bash -s <<'RT_KERNEL_STEP'", lines[i:i + 3]
+    assert not [ln for ln in lines if "bash -s <<" in ln and not ln.startswith("bash -s <<")], proc.stdout
+    one_liner = [ln for ln in lines if ln.startswith("reboot-into-lowlatency")]
+    assert one_liner and "# SUPERVISOR:" in one_liner[0], "single-line steps keep the token column"
