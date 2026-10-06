@@ -48,7 +48,8 @@ systemctl --user enable --now rig-marker-mirror.service
 
 # 3. verify
 sleep 25; curl -sI http://dev1:8890/rig-qpsk-markers.csv | grep -i -E 'x-mirror-age|content-length'   # age <= ~11
-journalctl --user -u rig-marker-mirror -n 20       # "following ...", no ERROR lines
+journalctl --user -u rig-marker-mirror -n 20       # "following ...", "replay complete ...", no ERROR lines
+journalctl --user -u rig-marker-mirror | grep -c 'RTT gate cannot measure'   # -> 0 (the gate works under the unit)
 ```
 
 A rotated fleet password goes into `~/.config/camera-box/rig-marker-mirror.env` (`SSH_PASS=…`,

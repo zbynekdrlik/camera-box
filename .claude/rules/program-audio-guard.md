@@ -113,6 +113,10 @@ is at a venue. So the mirror is a long-running service holding one
   nothing is connected or replayed over that link (owner rule: no dev1↔rig transfers during events).
   It is logged once per state change. An unknown RTT still tries ssh. The probe is ICMP, never a
   TCP connect to :22, which would make sshd log a pre-auth line into cam2's stick journal.
+  **dev1's ping needs its `cap_net_raw` file capability** (`net.ipv4.ping_group_range = 1 0`), so
+  the mirror unit must NOT set `NoNewPrivileges` (it drops the capability: ping exits 2,
+  'Operation not permitted'). A ping that cannot run is an `RttProbeError`, logged as `ERROR` once,
+  never read as 'cam2 did not answer'. Pinned by a test; review round 4.
 - **Reconnects.** A dropped connection logs `ERROR` with ssh's stderr and backs off
   10 → 300 s (back to 10 s after a connection that lived 300 s). The previous file is kept. The
   backoff is waited in 0.5 s slices: `time.sleep` resumes after SIGTERM, so one long sleep held a

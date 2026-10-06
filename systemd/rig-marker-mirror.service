@@ -25,7 +25,9 @@ RestartSec=10
 # ~/.config/environment.d/ is the user manager's GLOBAL environment and would hand the fleet
 # password to every --user unit.
 EnvironmentFile=-%h/.config/camera-box/rig-marker-mirror.env
-NoNewPrivileges=yes
+# NO NoNewPrivileges here: dev1's ping reaches ICMP only through its cap_net_raw file capability
+# (net.ipv4.ping_group_range = 1 0), and no-new-privs drops it -- the rig-away RTT gate would
+# then read every rig as 'unknown' and mirror over the metered venue link (issue 1404 review).
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=rig-marker-mirror

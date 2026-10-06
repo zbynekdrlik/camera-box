@@ -177,20 +177,31 @@ def replay_cap_s(announced: int) -> float:
 _RTT_RE = re.compile(r"rtt min/avg/max/mdev = ([0-9.]+)/")
 
 
+class RttProbeError(RuntimeError):
+    """The RTT probe itself cannot run (no ping, no ICMP permission) -- a broken gate, never
+    'cam2 did not answer'."""
+
+
 def parse_ping_rtt_ms(output: str) -> float | None:
     m = _RTT_RE.search(output)
     return float(m.group(1)) if m else None
 
 
 def ping_rtt_ms(host: str) -> float | None:
-    """The minimum ICMP RTT to `host` in ms over 3 pings, or None (no answer / no ping). ICMP, not a
-    TCP probe of :22: a bare TCP connect makes sshd log a pre-auth line on cam2's stick journal."""
+    """The minimum ICMP RTT to `host` in ms over 3 pings, or None when cam2 did not answer (ping
+    exit 1). Raises RttProbeError when ping itself cannot run: missing, timed out, or exit 2 --
+    e.g. 'socket: Operation not permitted' when the unit's NoNewPrivileges strips ping's
+    cap_net_raw file capability (dev1: net.ipv4.ping_group_range = 1 0, no unprivileged ICMP).
+    ICMP, not a TCP probe of :22: a bare TCP connect makes sshd log a pre-auth line on cam2's
+    stick journal."""
     try:
         r = subprocess.run(["ping", "-n", "-q", "-c", "3", "-i", "0.2", "-W", "1", host],
                            capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        log(f"rig-marker-mirror: ping {host} failed: {exc!r} -- RTT unknown")
-        return None
+        raise RttProbeError(f"ping {host} could not run: {exc!r}") from exc
+    if r.returncode not in (0, 1):
+        why = (r.stderr.strip() or r.stdout.strip() or "(no output)").splitlines()[-1]
+        raise RttProbeError(f"ping {host} exited {r.returncode}: {why}")
     return parse_ping_rtt_ms(r.stdout)
 
 
@@ -376,8 +387,20 @@ def run(host: str, serve_dir: str, *, remote_path: str = REMOTE_PATH,
 
     backoff = RECONNECT_MIN_S
     away = False
+    probe_broken = False
     while not out_of_time():
-        measured = rtt(host) if rtt is not None and rtt_max_ms > 0 else None
+        measured = None
+        if rtt is not None and rtt_max_ms > 0:
+            try:
+                measured = rtt(host)
+                if probe_broken:
+                    log("rig-marker-mirror: the RTT gate works again")
+                    probe_broken = False
+            except RttProbeError as exc:
+                if not probe_broken:
+                    log(f"ERROR rig-marker-mirror: the RTT gate cannot measure ({exc}) -- mirroring WITHOUT "
+                        "the rig-away check; fix the probe (the unit must not set NoNewPrivileges)")
+                    probe_broken = True
         if measured is not None and measured > rtt_max_ms:
             if not away:
                 log(f"rig-marker-mirror: the rig is away (RTT to {host} {measured:.1f} ms > {rtt_max_ms:g} ms: "
