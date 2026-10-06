@@ -416,8 +416,11 @@ def test_the_replay_cap_scales_with_the_announced_size():
 
 
 def test_a_slow_but_progressing_replay_is_not_cut(tmp_path, monkeypatch):
+    """Scaled down: a minimum cap (0.3 s) SHORTER than the replay (~0.35 s at one 64-byte chunk per
+    50 ms), the way the old fixed 120 s cap was shorter than a 2.7 MB replay at 20 kB/s; the
+    size-scaled cap (407 bytes at 100 B/s = ~4 s) lets it complete."""
     monkeypatch.setattr(rmm, "REPLAY_CAP_MIN_S", 0.3)
-    monkeypatch.setattr(rmm, "REPLAY_FLOOR_BPS", 1.0e9)  # the size-scaled part stays tiny too
+    monkeypatch.setattr(rmm, "REPLAY_FLOOR_BPS", 100.0)
     monkeypatch.setattr(rmm, "REPLAY_STALL_S", 0.5)
     big = HDR_A + b"".join(b"%d,%d,%d\n" % (i, i, i) for i in range(40))
     chunks = [big[i:i + 64] for i in range(0, len(big), 64)]
