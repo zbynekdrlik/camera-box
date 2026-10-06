@@ -210,15 +210,20 @@ def test_the_fragment_uses_no_powershell_7_only_syntax(tmp_path):
     scan.write_text(
         "$t = $null; $e = $null\n"
         "[void][System.Management.Automation.Language.Parser]::ParseFile($args[0], [ref]$t, [ref]$e)\n"
-        "$bad = @($t | Where-Object { $_.Kind -in 'AndAnd','OrOr','QuestionQuestion','QuestionQuestionEquals',"
+        "# tokens inside an expandable string's $( ... ) sit in NestedTokens\n"
+        "function Get-AllTokens($ts) { foreach ($x in $ts) { $x; if ($x.NestedTokens) { Get-AllTokens $x.NestedTokens } } }\n"
+        "$all = @(Get-AllTokens $t)\n"
+        "$bad = @($all | Where-Object { $_.Kind -in 'AndAnd','OrOr','QuestionQuestion','QuestionQuestionEquals',"
         "'QuestionDot','QuestionLBracket','QuestionMark' })\n"
         "foreach ($x in $bad) { Write-Output \"PS7-only $($x.Kind) at line $($x.Extent.StartLineNumber)\" }\n"
-        "Write-Output \"tokens=$($t.Count) errors=$($e.Count) ps7only=$($bad.Count)\"\n"
+        "Write-Output \"tokens=$($all.Count) nested=$($all.Count - $t.Count) errors=$($e.Count) ps7only=$($bad.Count)\"\n"
         "exit ($bad.Count + $e.Count)\n")
     r = subprocess.run([_pwsh(), "-NoProfile", "-NonInteractive", "-File", str(scan), str(src)],
                        capture_output=True, text=True, timeout=120)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "errors=0 ps7only=0" in r.stdout
+    # the scan really reaches into $( ... ) (the fragment has many)
+    assert int(re.search(r"nested=(\d+)", r.stdout).group(1)) > 50, r.stdout
 
 
 def test_the_whole_program_parses_as_powershell(tmp_path):
@@ -248,10 +253,15 @@ def test_the_whole_program_parses_as_powershell(tmp_path):
 # --- the fragment RUN in pwsh against a fake obs-websocket and a fake obs64 ----------------------
 
 # Get-Process shadowed by a function: only the test's own fake obs64 is visible, with a scripted
-# main window. Every other process comes from the real cmdlet.
+# main window. Every other process comes from the real cmdlet. EXTRA adds what a Windows box can
+# list next to it: `stale` = the fake's own pid still listed after it exited (HasExited true),
+# `sibling` = another obs64 with 0 threads (the 12.9.2026 resolume handle), `denied` = reading
+# HasExited throws (an access-denied handle).
 STUB = r"""
 $ccFakeObsPid = __PID__
 $ccFakeMode = '__MODE__'
+$ccFakeExtra = '__EXTRA__'
+$ccFakeSession = (Microsoft.PowerShell.Management\Get-Process -Id $PID).SessionId
 function Get-Process {
   [CmdletBinding()]
   param([Parameter(Position = 0)][string[]]$Name, [int[]]$Id)
@@ -262,6 +272,9 @@ function Get-Process {
     if ($ccFakeMode -eq 'nowindow') { $title = '' }
     if ($ccFakeMode -eq 'projector') { $title = 'Fullscreen Projector (Program)' }
     $q | Add-Member -Force -MemberType NoteProperty -Name MainWindowTitle -Value $title
+    if ($ccFakeExtra -eq 'denied') {
+      $q | Add-Member -Force -MemberType ScriptProperty -Name HasExited -Value { throw 'Access is denied' }
+    }
     $q | Add-Member -Force -MemberType ScriptMethod -Name CloseMainWindow -Value {
       Write-Host "HARNESS CloseMainWindow mode=$ccFakeMode pid=$($this.Id)"
       if ($ccFakeMode -eq 'clean') { $null = & /bin/kill -TERM $this.Id; return $true }
@@ -270,9 +283,24 @@ function Get-Process {
     }
     $q
   }
+  $wantObs = (-not $PSBoundParameters.ContainsKey('Name')) -or ($Name -contains 'obs64')
+  $byId = $PSBoundParameters.ContainsKey('Id')
+  if ($wantObs -and $ccFakeExtra -eq 'stale' -and ((-not $byId) -or ($Id -contains $ccFakeObsPid))) {
+    if (-not (Microsoft.PowerShell.Management\Get-Process -Id $ccFakeObsPid -ErrorAction SilentlyContinue)) {
+      [pscustomobject]@{ Id = $ccFakeObsPid; ProcessName = 'obs64'; SessionId = $ccFakeSession; HasExited = $true; Threads = @(1); MainWindowTitle = '' }
+    }
+  }
+  if ($wantObs -and $ccFakeExtra -eq 'sibling' -and -not $byId) {
+    [pscustomobject]@{ Id = 999999; ProcessName = 'obs64'; SessionId = $ccFakeSession; HasExited = $false; Threads = @(); MainWindowTitle = '' }
+  }
 }
 """
-REFUSAL_HOOK = "function Invoke-CcRefusalRestore { Write-Host 'HARNESS REFUSAL HOOK RAN' }\n"
+# a schtasks stand-in for the (1c) hook: logs its arguments, fails for any task named *fail*
+SCHTASKS = """#!/bin/sh
+echo "$*" >> "$CC_SCHTASKS_LOG"
+case "$*" in *fail*) exit 1 ;; esac
+exit 0
+"""
 
 
 class Rig:
@@ -298,16 +326,26 @@ class Rig:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
 
-    def run(self, uri, blocks=BLOCKS, mode="nowindow", close_ms=None, hook=False):
+    def run(self, uri, blocks=BLOCKS, mode="nowindow", close_ms=None, keepalive=None, extra="none"):
         body = "\n".join(_block(fn) for fn in blocks).replace(f"'{WS_URI}'", f"'{uri}'")
         if close_ms is not None:
             assert "\n$ccCloseTimeoutMs = 45000\n" in body
             body = body.replace("\n$ccCloseTimeoutMs = 45000\n", f"\n$ccCloseTimeoutMs = {close_ms}\n")
         pid = self.obs.pid if self.obs is not None else 0
-        prelude = STUB.replace("__PID__", str(pid)).replace("__MODE__", mode) + (REFUSAL_HOOK if hook else "")
+        prelude = STUB.replace("__PID__", str(pid)).replace("__MODE__", mode).replace("__EXTRA__", extra)
+        env = dict(os.environ, APPDATA=str(self.appdata))
+        if keepalive is not None:
+            # the REAL (1c) hook, over the tasks a step-(1b) disable would have left in this list
+            names = ", ".join(f"'{t}'" for t in keepalive)
+            prelude += f"$disabledKeepAlive = @({names})\n" + _block("obs_clean_close_refusal_restore_ps")
+            fakebin = self.tmp / "fakebin"
+            fakebin.mkdir(exist_ok=True)
+            (fakebin / "schtasks").write_text(SCHTASKS)
+            (fakebin / "schtasks").chmod(0o755)
+            env["PATH"] = f"{fakebin}:{env['PATH']}"
+            env["CC_SCHTASKS_LOG"] = str(self.tmp / "schtasks.log")
         prog = self.tmp / "program.ps1"
         prog.write_text("$ErrorActionPreference = 'Stop'\n" + prelude + body + "\nWrite-Host 'HARNESS DONE'\nexit 0\n")
-        env = dict(os.environ, APPDATA=str(self.appdata))
         return subprocess.run([_pwsh(), "-NoProfile", "-NonInteractive", "-File", str(prog)],
                               capture_output=True, text=True, timeout=120, env=env)
 
@@ -509,20 +547,46 @@ def test_run_no_closable_obs_window_is_forced_by_name(rig, ws, mode, line):
     out = res.stdout + res.stderr
     assert res.returncode == 0, out
     assert line in out
-    # a projector in front is never sent the close (it would drop out of the saved projectors)
+    # a projector in front is never sent the close (it would close the projector, wait out the
+    # bound and still force)
     assert ("HARNESS CloseMainWindow" in out) == (mode == "disabled")
     assert not r.obs_alive() and r.obs.returncode == -signal.SIGKILL
 
 
 def test_run_stream_started_after_0a_is_refused_and_restores(rig, ws):
     r, server = rig(), ws(stream_starts_after=1)
-    res = r.run(server.uri, mode="clean", hook=True)
+    res = r.run(server.uri, mode="clean", keepalive=["obs-self-heal", "keepalive-fail"])
     out = res.stdout + res.stderr
     assert res.returncode == 12, out
     assert "streaming=False" in out  # (0a) read it idle
     assert "STARTED STREAMING after the step-(0a) read" in out
-    assert out.index("STARTED STREAMING") < out.index("HARNESS REFUSAL HOOK RAN")
+    # the REAL (1c) hook ran after the refusal line: one task back, one named failure
+    ok = out.index("keep-alive task 'obs-self-heal' re-enabled after the refusal")
+    failed = out.index("keep-alive task 'keepalive-fail' did NOT re-enable (rc 1)")
+    assert out.index("STARTED STREAMING") < ok < failed
+    assert (r.tmp / "schtasks.log").read_text().splitlines() == [
+        "/Change /TN obs-self-heal /ENABLE", "/Change /TN keepalive-fail /ENABLE"]
     assert "HARNESS CloseMainWindow" not in out and "HARNESS DONE" not in out
     assert "StopRecord" not in server.requests
     assert r.obs_alive(), "a refused deploy must leave OBS running"
+
+
+# --- only a LIVE obs64 counts -------------------------------------------------------------------
+
+@pytest.mark.parametrize("extra", ["stale", "sibling", "denied"])
+def test_run_clean_close_ignores_a_dead_handle_and_a_denied_read(rig, ws, extra):
+    # stale: the fake stays listed after its exit (HasExited true) -- the wait must still end;
+    # sibling: a 0-thread obs64 next to it is not a second OBS; denied: a HasExited getter that
+    # throws (an access-denied handle) reads as $null in PowerShell, so the process counts as live
+    # and nothing aborts (Windows PowerShell 5.1 does the same, read on the stream box 6.10.2026)
+    r, server = rig(), ws()
+    res = r.run(server.uri, mode="clean", close_ms=5000, extra=extra)
+    out = res.stdout + res.stderr
+    assert res.returncode == 0, out
+    assert "HARNESS CloseMainWindow mode=clean" in out
+    # the wait ends when the LIVE process is gone, never at the (shortened) bound
+    waited_ms = int(re.search(r"clean close OK in (\d+) ms", out).group(1))
+    assert waited_ms < 4000, out
+    assert "-- forcing" not in out and "timed out" not in out
+    assert not r.obs_alive() and r.obs.returncode == -signal.SIGTERM
 
