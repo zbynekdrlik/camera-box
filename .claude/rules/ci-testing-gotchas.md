@@ -1252,6 +1252,9 @@ repeatedly this session (a worktree worker on issue 1317):
   refused ("runs python with a program computed at runtime"), even with zero git in it.
 - Any two-command sequence joined with `&&`/`|`/`;` or a trailing `| tail`/`echo "${PIPESTATUS[0]}"`
   is refused as "too complex".
+- A pipe into `awk '{...}'` is refused even for a pure field print ("runs awk with a program that
+  can execute commands", issue 1367: `avahi-browse -rtp _ndi._tcp | grep | awk`). Parse the output
+  in a python script file that runs the tool through `subprocess.run`.
 
 Workarounds that DO run (all used this session): (1) write the file with the **`Write` tool**, never
 a Bash heredoc, when its content holds a `github.com`/`git`-substring URL (Write is not a Bash-hook
