@@ -10,7 +10,7 @@
  * nobody answers on, and whether the SDK's own BY-NAME resolver reaches our sender. Any other URL
  * a bind lands on belongs to ANOTHER live sender: frames flow, but from the wrong source.
  *
- * The WIRING section below mirrors ndi_source_thread's use of the shipped helpers. `legacy` runs
+ * The WIRING section below mirrors ndi_source_thread's use of the shipped helpers (Approach 1b). `legacy` runs
  * the pre-1367 wiring (first name match, every mismatch forced BY-NAME, no exclusion); it must
  * reproduce the live ~55 s / 6-mismatch loop, which is what keeps the model honest. */
 #define MS_NS 1000000ULL
@@ -64,70 +64,64 @@ static const char *legacy_pick(const NDIlib_source_t *list, uint32_t n)
 	return NULL;
 }
 
-/* ---- WIRING: mirrors ndi_source_thread (Approach 1, design 6008662821) ---- */
+/* ---- WIRING: mirrors ndi_source_thread + its #1367 helpers (Approach 1b, decision 6009040469) ----
+ * Every decision is a SHIPPED pure helper: the reset step (ndi_stale_begin_reset_1367), the pick
+ * (ndi_find_url_for_source_name with the two slots), the verdict (ndi_identity_verdict_1367) and the
+ * action (ndi_stale_apply_verdict_1367). The model only replays the order the thread calls them in. */
 #define ACT_KEEP 0
 #define ACT_RETARGET 1
 #define ACT_BY_NAME 2
 
 typedef struct {
-	char excluded[URL_BUF];
-	uint64_t since;
-	char retarget[URL_BUF];
-	bool bound_via_retarget;
+	struct ndi_stale_state_1367 st;
 } wiring_t;
 
 static void copy_url(char *dst, const char *src) { snprintf(dst, URL_BUF, "%s", src ? src : ""); }
 
-/* reset block: expire the exclusion, hand out the retarget (consumed). */
+/* reset block (ndi_stale_reset_1367): expire, consume the retarget. */
 static bool wiring_begin_reset(wiring_t *w, uint64_t now, char *retarget_out)
 {
-	if (w->excluded[0] && !ndi_url_exclusion_active_1367(w->since, now, NDI_URL_EXCLUDE_TTL_NS)) {
-		w->excluded[0] = '\0';
-		w->since = 0;
-	}
-	w->bound_via_retarget = false;
-	copy_url(retarget_out, w->retarget);
-	w->retarget[0] = '\0';
+	(void)ndi_stale_begin_reset_1367(&w->st, now, retarget_out);
 	return retarget_out[0] != '\0';
 }
 
+static void wiring_mark_retarget(wiring_t *w) { w->st.bound_via_retarget = true; }
+
+/* the reset's fresh-finder pick: expired slots were cleared by the reset step, as in the thread. */
 static const char *wiring_pick(wiring_t *w, const NDIlib_source_t *list, uint32_t n, uint64_t now)
 {
 	(void)now;
-	return ndi_find_url_for_source_name(NAME, list, n, w->excluded[0] ? w->excluded : NULL);
+	return ndi_find_url_for_source_name(NAME, list, n, w->st.excluded[0], w->st.excluded[1]);
 }
 
-/* the #1180 verify after first frames; *excluded_out names a URL this verify excluded. */
+/* the #1180 verify after first frames (ndi_identity_verify_1367); *excluded_out names a URL this
+ * verify excluded. */
 static int wiring_verify(wiring_t *w, const char *bound, const NDIlib_source_t *list, uint32_t n, uint64_t now,
 			 char *excluded_out, bool *mismatch_out)
 {
 	excluded_out[0] = '\0';
-	const char *excl = (w->excluded[0] && ndi_url_exclusion_active_1367(w->since, now, NDI_URL_EXCLUDE_TTL_NS))
-				   ? w->excluded
-				   : NULL;
-	const char *v = ndi_find_url_for_source_name(NAME, list, n, excl);
-	bool mm = ndi_by_url_identity_mismatch(bound, v);
-	int action = ndi_identity_mismatch_action_1367(mm, v, w->bound_via_retarget);
-	*mismatch_out = mm;
-	if (mm) {
-		copy_url(w->excluded, bound);
-		w->since = now;
+	const char *ex0 = ndi_stale_exclusion_1367(&w->st, 0, now);
+	const char *ex1 = ndi_stale_exclusion_1367(&w->st, 1, now);
+	int verdict = ndi_identity_verdict_1367(bound, NAME, list, n, ex0, ex1);
+	const char *pick =
+		verdict == NDI_VERIFY_INCONCLUSIVE_1367 ? NULL : ndi_find_url_for_source_name(NAME, list, n, ex0, ex1);
+	int action = ndi_stale_apply_verdict_1367(&w->st, verdict, bound, pick, now);
+	*mismatch_out = verdict == NDI_VERIFY_STALE_1367 || verdict == NDI_VERIFY_MISMATCH_1367;
+	if (verdict == NDI_VERIFY_STALE_1367)
 		copy_url(excluded_out, bound);
-	}
-	if (action == 1) {
-		copy_url(w->retarget, v);
+	if (action == NDI_STALE_RETARGET_1367)
 		return ACT_RETARGET;
-	}
-	if (mm)
+	if (action == NDI_STALE_BY_NAME_1367)
 		return ACT_BY_NAME;
-	if (v && v[0]) {
-		w->excluded[0] = '\0';
-		w->since = 0;
-	}
 	return ACT_KEEP;
 }
 
-static unsigned wiring_exclusions(const wiring_t *w) { return w->excluded[0] ? 1u : 0u; }
+static const char *wiring_retarget(const wiring_t *w) { return w->st.retarget; }
+
+static unsigned wiring_exclusions(const wiring_t *w, uint64_t now)
+{
+	return (ndi_stale_exclusion_1367(&w->st, 0, now) ? 1u : 0u) + (ndi_stale_exclusion_1367(&w->st, 1, now) ? 1u : 0u);
+}
 /* ---- END WIRING ---- */
 
 typedef struct {
@@ -167,7 +161,7 @@ static void run(const scenario_t *sc, bool legacy)
 		if (!forced && have_retarget) {
 			bound = take;
 			mode = "RETARGET";
-			w.bound_via_retarget = true;
+			wiring_mark_retarget(&w);
 			st.retargets++;
 		} else if (!forced) {
 			bound = legacy ? legacy_pick(ph->reset_list, ph->n_reset)
@@ -220,13 +214,13 @@ static void run(const scenario_t *sc, bool legacy)
 			if (n_ever < 8)
 				copy_url(ever_excluded[n_ever++], excluded_now);
 		}
-		if (!legacy && wiring_exclusions(&w) > st.max_excl)
-			st.max_excl = wiring_exclusions(&w);
+		if (!legacy && wiring_exclusions(&w, t) > st.max_excl)
+			st.max_excl = wiring_exclusions(&w, t);
 		if (mm)
 			st.mismatches++;
 		if (action == ACT_RETARGET) {
 			printf("%s reset %u t_ms=%llu %s %s -> MISMATCH -> RETARGET %s\n", sc->tag, reset, ms(rel), mode, bound,
-			       w.retarget);
+			       wiring_retarget(&w));
 			continue;
 		}
 		if (action == ACT_BY_NAME) {

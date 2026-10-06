@@ -175,10 +175,16 @@ fn no_connection_path_rearms_the_fresh_finder_reset() {
 // ----------------------------------------------------------------------------------------------
 
 /// Lift the `ndi_find_url_for_source_name` helper VERBATIM (never retype it — a retyped copy verifies
-/// your typing, not the shipped bytes).
+/// your typing, not the shipped bytes). Since issue 1367 the picker calls `ndi_url_contested_1367`,
+/// which sits right before it, so the lift starts there and ends at the picker's closing brace.
 fn lift_url_picker() -> String {
     let src = vendor_file(NDI_SOURCE);
     let start = src
+        .find("static inline bool ndi_url_contested_1367(")
+        .unwrap_or_else(|| {
+            panic!("#1096: {NDI_SOURCE} no longer defines the issue-1367 contested check the picker calls.")
+        });
+    let picker = src
         .find("static inline const char *ndi_find_url_for_source_name(")
         .unwrap_or_else(|| {
             panic!(
@@ -186,9 +192,13 @@ fn lift_url_picker() -> String {
                  nothing to compile/behaviour-check."
             )
         });
-    let end = src[start..]
+    assert!(
+        start < picker,
+        "#1096: the contested check must precede the picker"
+    );
+    let end = src[picker..]
         .find("\n}\n")
-        .map(|i| start + i + 3)
+        .map(|i| picker + i + 3)
         .expect("#1096: ndi_find_url_for_source_name has no closing brace `\\n}\\n`");
     src[start..end].to_string()
 }
@@ -296,7 +306,7 @@ fn url_picker_computes_the_spec_truth_table() {
     let vs = vectors();
 
     let mut c = String::from(
-        "#include <stdint.h>\n#include <stddef.h>\n#include <string.h>\n#include <stdio.h>\n\
+        "#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n#include <string.h>\n#include <stdio.h>\n\
          typedef struct { const char *p_ndi_name; const char *p_url_address; } NDIlib_source_t;\n",
     );
     c.push_str(&helper);
@@ -319,11 +329,11 @@ fn url_picker_computes_the_spec_truth_table() {
             ));
             (format!("arr{i}"), format!("{count}u"))
         };
-        // Issue 1367 added a 4th `exclude_url` argument; NULL = no exclusion, i.e. exactly the
-        // first-match pick this truth table specifies (the duplicate-aware rows live in
-        // tests/distroav_stale_duplicate_retarget_1367.rs).
+        // Issue 1367 added two exclusion slots; NULL, NULL = no exclusion and, with no other name
+        // at a URL in these lists, exactly the first-match pick this truth table specifies (the
+        // excluded / contested rows live in tests/distroav_stale_duplicate_retarget_1367.rs).
         c.push_str(&format!(
-            "        const char *r = ndi_find_url_for_source_name({}, {}, {}, NULL);\n",
+            "        const char *r = ndi_find_url_for_source_name({}, {}, {}, NULL, NULL);\n",
             c_str(v.name),
             arr_expr,
             count_expr
