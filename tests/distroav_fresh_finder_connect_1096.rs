@@ -319,8 +319,11 @@ fn url_picker_computes_the_spec_truth_table() {
             ));
             (format!("arr{i}"), format!("{count}u"))
         };
+        // Issue 1367 added a 4th `exclude_url` argument; NULL = no exclusion, i.e. exactly the
+        // first-match pick this truth table specifies (the duplicate-aware rows live in
+        // tests/distroav_stale_duplicate_retarget_1367.rs).
         c.push_str(&format!(
-            "        const char *r = ndi_find_url_for_source_name({}, {}, {});\n",
+            "        const char *r = ndi_find_url_for_source_name({}, {}, {}, NULL);\n",
             c_str(v.name),
             arr_expr,
             count_expr
