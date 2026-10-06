@@ -85,6 +85,37 @@ On today's rig the YouTube leg would be red for reasons outside YouTube:
 
 Both freeze the program before stream OBS. Criterion 2 cancels them, because it compares against the recording, so the YouTube leg can ship before those fixes. The existing camera-chain gates stay red until they are fixed.
 
+
+### E. The CG / SongPlayer path (owner decision 6.10.2026, issue 1404 comment 6016291989)
+
+Owner, verbatim: "a dolezite je aby aj songplayer a obs manual bol zaradeny do testu aby bolo iste ani z cg/songplayer cesty nam neprichadza sekajuci obraz zvuk".
+
+The release E2E run gets two CG segments in its recording window. They are mandatory, not the old opt-in `CG_CHAIN=1` profile, and are measured on the stream recording AND on the YouTube VOD:
+
+1. **SongPlayer segment:** strih program on the CG scene (input `CG-obs` = `RESOLUME-SNV (SP-program)`), SongPlayer playing the test playlist.
+   - Picture: SongPlayer's own origin burn `911014` → strih burn → stream burn → YouTube.
+   - Sound: SongPlayer's test audio through the same chain.
+2. **OBS manuál segment:** SongPlayer's program on its input "OBS manuál" (source −1 = the cg OBS output), cut through SongPlayer's facade. cg OBS shows a test scene carrying its hop burn `911015`.
+   - Picture: `911015` → SongPlayer `911014` → strih → stream → YouTube.
+   - Sound: the cg OBS test audio through the same chain.
+
+Criteria per segment:
+- **Picture:** burn contiguity + max-hold at every hop (the existing `src/cg_chain_gate.rs` contiguity/hold, made BLOCKING), and 0 downstream dup/skip on YouTube (criterion 2).
+- **Sound:** continuity against the KNOWN source audio, i.e. block cross-correlation of the program audio against the reference file the source played. That catches a stutter anywhere upstream of stream OBS, not just downstream of it. Plus criterion 4 on YouTube.
+- **A/V:** the segment's audio vs its burn timing, consistent within the run.
+
+What SongPlayer has to provide (agreed with the songplayer session before the build):
+- a deterministic test playlist: a known audio file plus video, with the `911014` burn on;
+- the facade cut to/from "OBS manuál";
+- read-back of both programs.
+
+Camera-box provides:
+- the cg OBS test scene and its burn;
+- the strih/stream cuts (never `PRO` on the stream program; issue 1380 guard);
+- the measurement.
+
+The stale pieces are re-targeted to today's topology (issue 1302 comment 6004895923): the cg OBS scene mirror, the sp-* inputs, and `cg-chain-verify`'s cg-obs hop.
+
 ## Approaches considered
 
 1. **Chosen:** the YouTube leg is a blocking stage inside the full-path E2E run, with restreamer's session API and camera-box's tool. One rig lease, one run, the owner's "measure to YouTube" in the release gate.
