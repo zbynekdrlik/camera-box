@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -101,6 +102,8 @@ def test_the_calibrated_constants_are_pinned():
     assert pa.WINDOW_S == 2.0
     assert pa.SILENT_RMS_DBFS == -60.0
     assert pa.FOREIGN_OUTSIDE_BAND_PCT == 30.0
+    assert pa.MEASUREMENT_TONE_LINES_HZ == (1000.0,)
+    assert pa.TONE_LINE_HALF_WIDTH_HZ == 3.0
     assert pa.VERDICTS == ("MEASUREMENT", "FOREIGN", "SILENT", "UNKNOWN")
 
 
@@ -237,7 +240,11 @@ def test_build_payload_has_the_contract_fields_rounded():
     assert p == {
         "schema": 1, "ts_utc": "2026-10-06T19:30:02.123Z", "age_s": 0.0, "verdict": "MEASUREMENT",
         "rms_dbfs": -35.6, "outside_band_pct": 16.8, "window_s": 2.0, "source": "STREAM-SNV (stream)",
+        "last_foreign_ts_utc": None,
     }
+    latched = pa.build_payload("MEASUREMENT", -35.6, 16.8, now=now, window_s=2.0, source="S",
+                               last_foreign_ts_utc="2026-10-06T19:29:58.000Z")
+    assert latched["last_foreign_ts_utc"] == "2026-10-06T19:29:58.000Z"
     u = pa.build_payload("UNKNOWN", None, None, now=now, window_s=2.0, source="X", reason="no audio")
     assert u["rms_dbfs"] is None and u["outside_band_pct"] is None and u["reason"] == "no audio"
 
@@ -492,3 +499,161 @@ def test_the_sampler_refuses_a_serve_dir_inside_the_lease_dir(tmp_path, monkeypa
     rc = pas.main(["--serve-dir", str(lease / "serve"), "--lib", str(tmp_path / "no-libndi.so")])
     assert rc == 2
     assert not lease.exists()
+
+
+# ---------------------------------------------------------------------------------------------
+# review round 1 (issue 1404 T2): the CG clip's tone bed, NaN, a 0 Hz rate, error frames, the
+# FOREIGN latch, the private NDI config, signal handlers, a dead stdout
+# ---------------------------------------------------------------------------------------------
+
+
+def _tone(freq_hz, dbfs, n, sr):
+    return _scale_to_dbfs(np.sin(2 * np.pi * freq_hz * np.arange(n) / sr), dbfs)
+
+
+def test_the_cg_clip_tone_bed_under_the_marker_is_measurement():
+    """The plan's Task 5 measurement clip = the QPSK marker over a -30 dBFS 1 kHz tone bed. Without
+    the declared tone line the bed alone reads ~84 % outside the band = FOREIGN, and every CG-leg
+    session would stop itself."""
+    x, sr = _load_flac(FIX / "s2-R-rec.flac")
+    meas = _windows(x, sr)[5]
+    clip = meas + _tone(1000.0, -30.0, len(meas), sr)
+    rms, outside = pa.analyse(clip, sr)
+    assert pa.classify(rms, outside) == "MEASUREMENT"
+
+
+def test_the_tone_line_is_narrow_noise_with_the_bed_stays_foreign():
+    x, sr = _load_flac(FIX / "s2-R-rec.flac")
+    meas = _windows(x, sr)[5]
+    rng = np.random.default_rng(11)
+    mrms = 10 * np.log10(np.mean(meas ** 2))
+    noisy = meas + _tone(1000.0, -30.0, len(meas), sr) + _scale_to_dbfs(_pink(len(meas), rng), mrms)
+    rms, outside = pa.analyse(noisy, sr)
+    assert pa.classify(rms, outside) == "FOREIGN"
+    off_line = meas + _tone(1100.0, -30.0, len(meas), sr)  # not the declared bed
+    rms2, outside2 = pa.analyse(off_line, sr)
+    assert pa.classify(rms2, outside2) == "FOREIGN"
+
+
+def test_a_nan_sample_is_unknown_never_silent():
+    x = _scale_to_dbfs(np.random.default_rng(5).standard_normal(2 * SR), -15.0)
+    x[1000] = np.nan
+    rms, outside = pa.analyse(x, SR)
+    assert pa.classify(rms, outside) == "UNKNOWN"
+    x[1000] = np.inf
+    rms, outside = pa.analyse(x, SR)
+    assert pa.classify(rms, outside) == "UNKNOWN"
+
+
+def _bounded(code: str) -> subprocess.CompletedProcess:
+    """Run `code` in a child with a 1 GiB address-space cap and a 30 s timeout: a sample rate of 0
+    once looped forever while growing a list (an OOM risk on dev1), so these tests must FAIL on
+    that bug, never take the box down with it."""
+    import resource
+
+    def cap():
+        resource.setrlimit(resource.RLIMIT_AS, (1 << 30, 1 << 30))
+
+    return subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=30,
+                          preexec_fn=cap, cwd=str(_SCRIPTS))
+
+
+def test_the_accumulator_refuses_a_zero_sample_rate():
+    r = _bounded(
+        "import numpy as np, program_audio_sampler as pas\n"
+        "acc = pas.WindowAccumulator(2.0)\n"
+        "try:\n"
+        "    acc.push(np.ones((1600, 2), dtype=np.float32), 0)\n"
+        "except ValueError:\n"
+        "    print('REFUSED')\n"
+    )
+    assert r.stdout.strip() == "REFUSED", r.stderr[-500:]
+
+
+def test_run_skips_frames_with_a_bad_sample_rate_without_hanging(tmp_path):
+    r = _bounded(
+        "import json, numpy as np, program_audio_ndi as pan, program_audio_sampler as pas\n"
+        "class R:\n"
+        "    def __init__(self):\n"
+        "        self.b = [pan.AudioBlock(0, np.ones((1600, 2), dtype=np.float32)) for _ in range(5)]\n"
+        "    def capture(self, t):\n"
+        "        return self.b.pop(0) if self.b else None\n"
+        "    def connections(self):\n"
+        "        return 1\n"
+        "logs = []\n"
+        f"pas.run(R(), {str(tmp_path)!r}, source='S', mono=lambda: 0.0, max_loops=10, log=logs.append)\n"
+        "print(json.dumps(logs))\n"
+    )
+    assert r.returncode == 0, r.stderr[-500:]
+    logs = json.loads(r.stdout.strip().splitlines()[-1])
+    assert _read(tmp_path)["verdict"] == "UNKNOWN"
+    assert sum("sample_rate=0" in m for m in logs) == 1  # logged once, not per frame
+
+
+def test_run_does_not_spin_or_flood_on_repeated_error_frames(tmp_path):
+    class _Erroring(_FakeReceiver):
+        def capture(self, timeout_ms):
+            raise ConnectionError("NDI receive error from 'S' (connection lost)")
+
+    sleeps, logs = [], []
+    pas.run(_Erroring([]), str(tmp_path), source="S", mono=_Clock().mono, max_loops=50,
+            log=logs.append, sleep=sleeps.append)
+    assert len(sleeps) == 50 and all(s > 0 for s in sleeps)
+    assert sum("connection lost" in m for m in logs) == 1
+
+
+def test_run_latches_a_foreign_window_into_the_following_payloads(tmp_path):
+    rng = np.random.default_rng(1404)
+    x, sr = _load_flac(FIX / "s2-R-rec.flac")  # 16 kHz: 2 s of loud broadband, then 4 s of measurement
+    loud = _scale_to_dbfs(_pink(2 * sr, rng), -20.0).astype(np.float32)
+    meas = x[: 2 * sr * 2].astype(np.float32)
+    stereo = np.concatenate([np.stack([loud, loud], 1), np.stack([meas, meas], 1)])
+    blocks = [pan.AudioBlock(sr, stereo[i:i + 1600]) for i in range(0, stereo.shape[0], 1600)]
+    payloads = []
+    pas.run(_FakeReceiver(blocks), str(tmp_path), source="S", mono=_Clock().mono,
+            max_loops=len(blocks), on_write=payloads.append, log=lambda m: None)
+    verdicts = [q["verdict"] for q in payloads]
+    assert verdicts[1] == "FOREIGN"
+    assert verdicts[-1] == "MEASUREMENT"
+    assert payloads[-1]["last_foreign_ts_utc"] == payloads[1]["ts_utc"]
+    assert payloads[0]["last_foreign_ts_utc"] is None
+
+
+def test_main_forces_a_private_empty_ndi_config_dir_before_creating_the_receiver(tmp_path, monkeypatch):
+    """mDNS only, enforced in code: an NDI extra-IP list would open a TCP discovery connection into
+    every listed sender (.claude/rules/ndi-discovery.md)."""
+    monkeypatch.setenv("NDI_CONFIG_DIR", str(tmp_path / "operator-config"))
+    seen = {}
+
+    class _Probe:
+        def __init__(self, source, lib_path=None):
+            d = os.environ.get("NDI_CONFIG_DIR")
+            seen["dir"] = d
+            seen["empty"] = d is not None and os.path.isdir(d) and os.listdir(d) == []
+            raise RuntimeError("probe: stop here")
+
+    monkeypatch.setattr(pan, "NdiAudioReceiver", _Probe)
+    rc = pas.main(["--serve-dir", str(tmp_path / "serve"), "--source", "S"])
+    assert rc == 1
+    assert seen["dir"] != str(tmp_path / "operator-config")
+    assert seen["empty"] is True
+
+
+def test_main_installs_no_signal_handlers_when_the_receiver_fails(tmp_path):
+    import signal as _signal
+
+    before = (_signal.getsignal(_signal.SIGTERM), _signal.getsignal(_signal.SIGINT))
+    pas.main(["--serve-dir", str(tmp_path / "serve"), "--lib", str(tmp_path / "no-libndi.so")])
+    assert (_signal.getsignal(_signal.SIGTERM), _signal.getsignal(_signal.SIGINT)) == before
+
+
+def test_log_survives_a_dead_stdout(monkeypatch):
+    class _Dead:
+        def write(self, *_a):
+            raise BrokenPipeError("stdout gone")
+
+        def flush(self):
+            raise BrokenPipeError("stdout gone")
+
+    monkeypatch.setattr(sys, "stdout", _Dead())
+    pas.log("still alive")  # must not raise

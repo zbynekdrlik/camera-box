@@ -31,7 +31,7 @@ import rig_serve_files as rsf  # noqa: E402
 GUARD = _SCRIPTS / "program_audio_guard.py"
 LINE = re.compile(
     r"^program-audio verdict=(MEASUREMENT|FOREIGN|SILENT|UNKNOWN) rms=(-?\d+\.\d|-) "
-    r"outside_band=(\d+\.\d|-)% age=(\d+\.\d|-)( reason=.+)?$"
+    r"outside_band=(\d+\.\d|-)% age=(-?\d+\.\d|-)( reason=.+)?$"
 )
 
 
@@ -71,7 +71,7 @@ class _Fake:
 def _payload(verdict="MEASUREMENT", age=1.0, rms=-35.6, outside=16.8, **extra):
     p = {"schema": 1, "ts_utc": rsf.format_ts_utc(datetime.now(timezone.utc)), "age_s": age,
          "verdict": verdict, "rms_dbfs": rms, "outside_band_pct": outside, "window_s": 2.0,
-         "source": "STREAM-SNV (stream)"}
+         "source": "STREAM-SNV (stream)", "last_foreign_ts_utc": None, "last_foreign_age_s": None}
     p.update(extra)
     return json.dumps(p).encode()
 
@@ -206,3 +206,81 @@ def test_end_to_end_through_the_real_lease_server(tmp_path):
         server.shutdown()
         server.server_close()
         t.join(timeout=5)
+
+
+# ---------------------------------------------------------------------------------------------
+# review round 1 (issue 1404 T2): the FOREIGN latch, negative ages, broken HTTP
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_foreign_window_since_the_last_poll_exits_1_even_when_the_current_one_is_clean():
+    with _Fake(body=_payload("MEASUREMENT", last_foreign_age_s=6.0)) as f:
+        rc, line, m = _guard(f.url)
+    assert rc == 1
+    assert m.group(1) == "FOREIGN"
+    assert "latched" in line and "6.0 s ago" in line
+
+
+def test_a_foreign_window_older_than_max_age_no_longer_trips():
+    with _Fake(body=_payload("MEASUREMENT", last_foreign_age_s=30.0)) as f:
+        rc, _line, _m = _guard(f.url)
+    assert rc == 0
+
+
+def test_a_negative_age_beyond_a_clock_step_is_stale():
+    with _Fake(body=_payload("MEASUREMENT", age=-3600.0)) as f:
+        rc, line, m = _guard(f.url)
+    assert rc == 2
+    assert m.group(1) == "UNKNOWN" and "stale" in line
+
+
+def test_a_small_negative_age_from_a_date_step_is_fresh():
+    with _Fake(body=_payload("MEASUREMENT", age=-0.4)) as f:
+        rc, _line, _m = _guard(f.url)
+    assert rc == 0
+
+
+class _RawServer:
+    """Answers every connection with fixed raw bytes, then closes (a broken HTTP peer)."""
+
+    def __init__(self, raw: bytes):
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(4)
+        self.url = f"http://127.0.0.1:{self.sock.getsockname()[1]}/program-audio.json"
+        self.raw = raw
+        self._t = threading.Thread(target=self._serve, daemon=True)
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            with conn:
+                conn.recv(4096)
+                conn.sendall(self.raw)
+
+    def __enter__(self):
+        self._t.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.sock.shutdown(socket.SHUT_RDWR)
+        self.sock.close()
+        self._t.join(timeout=5)
+
+
+def test_a_garbled_status_line_exits_2_with_the_line():
+    with _RawServer(b"garbage\r\n\r\n") as srv:
+        rc, line, m = _guard(srv.url)
+    assert rc == 2
+    assert m.group(1) == "UNKNOWN"
+
+
+def test_a_truncated_body_exits_2_with_the_line():
+    raw = b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{\"verdict\": "
+    with _RawServer(raw) as srv:
+        rc, _line, m = _guard(srv.url)
+    assert rc == 2
+    assert m.group(1) == "UNKNOWN"
