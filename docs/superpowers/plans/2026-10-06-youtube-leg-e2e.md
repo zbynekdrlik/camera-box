@@ -42,6 +42,27 @@
 4. **Re-running the E2E on the same head SHA:** it must reuse the stored YouTube verdict and never open a second session. Test in Task 4.
 5. **The colour-coded painter QR on the left half** (frames undecodable with a left-only decoder): the decoder must read both halves, and the cadence-proven % must stay ≥ 90 % on the session-3 part-1 fixture. Test in Task 1.
 
+
+## Owner amendment (6.10.2026, issue 1404 comment 6016489928): nothing copyrighted on YouTube
+
+Owner, verbatim: "nemozes nejaku len tak hudbu z songplayera pustat do youtube lebo to moze sposobit ban, ved nech to je normalne qr meracie video aj s zvukovym meracim generatorom".
+
+Changes against the tasks below. They supersede any conflicting wording there.
+
+1. **Task 5 content:** the SongPlayer test item is NOT a cached music item. It is a camera-box-generated measurement file, `scripts/gen_measurement_clip.py`, which writes `tests/fixtures/...` and the deliverable `measurement-clip-v1.mp4`:
+   - 1080p30, 120 s;
+   - picture: a per-frame QR `P911016.{frame}.{pts_ns}.{crc}` (new reserved run id, an origin like 911014, never a camera node), the same QR geometry as the cam2 painter, plus a frame counter;
+   - sound: 48 kHz stereo, the QPSK marker (the same modulation and word format as `src/qpsk_marker.rs`, every 0.5 s, its index = frame index / 15) over a −30 dBFS 1 kHz tone bed;
+   - the generator and the decoder share one parameter set;
+   - the cg OBS test scene `E2E test (cg)` plays the same file in a media source;
+   - SongPlayer plays it as a local test item (songplayer issue 228, option 2).
+   - The CG sound check decodes the QPSK marker in the stream recording and the VOD, which proves continuity and A/V with the same instrument as the camera chain. The block correlation against the known file is the second, exact check. No music FLAC is used anywhere.
+2. **Task 4 safety guard (a new step):** before `youtube_leg_start` and every 10 s while the broadcast is live, read stream OBS's program audio level (the `InputVolumeMeters` peak of the inputs in the program tree, the `measurement_audio_meter_probe.py` method).
+   - Content louder than the measurement band, i.e. the existing issue-1323 "POLLUTED" bar of max > −20 dBFS on `mbc`, means non-measurement audio (music, a rehearsal) is on the program.
+   - Then: StopStream at once, `stop` the session, and the YouTube leg is UNKNOWN (red), with the reason "non-measurement audio on the program — broadcast stopped to protect the channel".
+   - Test: a fake meter feed above the bar triggers the stop within one poll.
+3. **Spec section E** is updated the same way: measurement content only, sound = QPSK + tone.
+
 ---
 
 ### Task 1: The measurement tool `scripts/youtube_leg_verdict.py`

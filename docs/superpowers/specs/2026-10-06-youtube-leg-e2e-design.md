@@ -104,6 +104,8 @@ Criteria per segment:
 - **Sound:** continuity against the KNOWN source audio, i.e. block cross-correlation of the program audio against the reference file the source played. That catches a stutter anywhere upstream of stream OBS, not just downstream of it. Plus criterion 4 on YouTube.
 - **A/V:** the segment's audio vs its burn timing, consistent within the run.
 
+Owner amendment 6.10.2026 (issue 1404 comment 6016489928): NOTHING copyrighted goes to YouTube. The SongPlayer test item and the cg OBS test scene play a camera-box-generated measurement clip: a per-frame QR and the QPSK marker over a tone bed. A live program-audio guard stops the broadcast when non-measurement audio appears. See the plan's owner amendment.
+
 What SongPlayer has to provide (agreed with the songplayer session before the build):
 - a deterministic test playlist: a known audio file plus video, with the `911014` burn on;
 - the facade cut to/from "OBS manuál";
