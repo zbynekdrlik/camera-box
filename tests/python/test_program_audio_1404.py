@@ -200,7 +200,19 @@ def test_stereo_channels_are_summed_in_power_so_an_inter_channel_delay_cannot_ca
     delayed = np.concatenate([np.zeros(d), w[:-d]])
     _r1, same = pa.analyse(np.stack([w, w], axis=1), sr)
     _r2, shifted = pa.analyse(np.stack([w, delayed], axis=1), sr)
-    assert abs(same - shifted) < 1.0
+    # power sum: 0.014 points apart on this window; a mono downmix moves it 0.34 points
+    assert abs(same - shifted) < 0.1
+
+
+def test_an_anti_phase_channel_pair_stays_measurement_never_silent():
+    """The extreme of the same property: R = -L. A downmix cancels to digital zero (SILENT, which
+    would pass the guard while hiding the content); summed channel powers keep the verdict."""
+    x, sr = _load_flac(FIX / "s2-R-rec.flac")
+    w = _windows(x, sr)[4]
+    rms, outside = pa.analyse(np.stack([w, -w], axis=1), sr)
+    assert pa.classify(rms, outside) == "MEASUREMENT"
+    _r, ref = pa.analyse(w, sr)
+    assert abs(outside - ref) < 1e-6
 
 
 def test_analyse_accepts_mono_and_float32():

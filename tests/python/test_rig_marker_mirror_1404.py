@@ -472,16 +472,17 @@ def test_serve_dir_conflict_detects_the_lease_dir_and_anything_inside_it(tmp_pat
     assert rsf.serve_dir_conflict(rsf.DEFAULT_SERVE_DIR, rsf.DEFAULT_LEASE_DIR) is None
 
 
-def test_server_main_refuses_a_serve_dir_inside_the_lease_dir(tmp_path, capsys):
+def test_server_main_refuses_a_serve_dir_inside_the_lease_dir(tmp_path):
+    """A bounded subprocess: if the refusal ever regresses, the server starts serving and the test
+    fails on the timeout instead of hanging the suite."""
     lease = tmp_path / "rig-lease"
-    try:
-        srv_mod.main(["--bind", "127.0.0.1", "--port", "0", "--lease-dir", str(lease),
-                      "--serve-dir", str(lease / "serve")])
-    except SystemExit as exc:
-        assert exc.code == 2
-    else:
-        raise AssertionError("main() accepted a serve dir inside the lease dir")
-    assert "held=true" in capsys.readouterr().err
+    r = subprocess.run(
+        [sys.executable, str(_SCRIPTS / "rig-lease-server.py"), "--bind", "127.0.0.1", "--port", "0",
+         "--lease-dir", str(lease), "--serve-dir", str(lease / "serve")],
+        capture_output=True, text=True, timeout=20,
+    )
+    assert r.returncode == 2
+    assert "held=true" in r.stderr
     assert not lease.exists()
 
 
