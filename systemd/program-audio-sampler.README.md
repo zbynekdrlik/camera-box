@@ -21,15 +21,20 @@ Prerequisite: the lease server runs the issue-1404 code (step 1 of `rig-marker-m
 the `~/devel/camera-box` checkout. So the steps below are due the moment that checkout moves to the
 marker-requirement code, not at some later install: until then the old process keeps writing
 MEASUREMENT on the spectral share alone. The lease server serves such a payload as UNKNOWN once IT
-runs the new code (step 0b), and the camera-box guard refuses it either way; both fail closed.
+runs the new code (step 1), and the camera-box guard refuses it either way; both fail closed.
 
 ```bash
-# 0b. reload the lease server on the new code, ONLY while the lease is free (held must be false):
-#     it serves a MEASUREMENT without a marker chain as UNKNOWN to every reader (restreamer too)
-curl -s http://127.0.0.1:8890/rig-lease.json
-systemctl --user restart rig-lease-server.service
+# 1. reload the lease server on the new code, ONLY while the lease is free: it serves a MEASUREMENT
+#    without a marker chain as UNKNOWN to every reader (restreamer too). The restart runs only when
+#    the lease reads held=false; otherwise re-run this step later (every step order fails closed).
+if curl -sf http://127.0.0.1:8890/rig-lease.json \
+     | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("held") is False else 1)'; then
+  systemctl --user restart rig-lease-server.service
+else
+  echo "rig lease held or unreadable -- lease server NOT restarted, retry later"
+fi
 
-# 0. build the QPSK marker decoder library FIRST (g++, a few seconds) -- the sampler refuses to run
+# 2. build the QPSK marker decoder library (g++, a few seconds) -- the sampler refuses to run
 #    without it (UNKNOWN + exit 1), and a sampler process started before this change keeps writing
 #    MEASUREMENT without a marker chain, which the new guard reads as UNKNOWN until it restarts.
 #    Rebuild after every pull that touches scripts/qpsk_guard_shim.cpp or
@@ -38,18 +43,18 @@ systemctl --user restart rig-lease-server.service
 #    a running sampler keeps its own copy until it restarts.
 bash ~/devel/camera-box/scripts/build-qpsk-guard-shim.sh   # -> ~/.local/lib/camera-box/libqpsk-guard-shim.so
 
-# 1. a 30 s foreground run: the log must show "marker decoder ... params={... 'carrier_hz': 442 ...}"
+# 3. a 30 s foreground run: the log must show "marker decoder ... params={... 'carrier_hz': 442 ...}"
 #    and "UNKNOWN -> MEASUREMENT" within ~5 s (the first 4 s are the marker warm-up)
 timeout 30 python3 ~/devel/camera-box/scripts/program_audio_sampler.py
 python3 ~/devel/camera-box/scripts/program_audio_guard.py   # verdict=UNKNOWN reason=sampler stopped, exit 2
 
-# 2. install + (re)start (a running sampler from before this change MUST be restarted)
+# 4. install + (re)start (a running sampler from before this change MUST be restarted)
 cp ~/devel/camera-box/systemd/program-audio-sampler.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable program-audio-sampler.service
 systemctl --user restart program-audio-sampler.service
 
-# 3. verify
+# 5. verify
 sleep 8
 python3 ~/devel/camera-box/scripts/program_audio_guard.py   # verdict=MEASUREMENT ... markers=8 chain=7 (chain >= 6), exit 0
 curl -s http://dev1:8890/program-audio.json; echo            # carries "markers_decoded" + "marker_chain"
