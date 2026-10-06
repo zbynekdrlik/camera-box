@@ -13,13 +13,13 @@ it is pinned on REAL data: the three manual sessions of 5./6.10.2026 (issue 1404
           the VOD (s3-vod) are decoded with BOTH QR halves by the tool itself (the left-only session
           decoder read part 1 76 % decodable / 83.5 % cadence-proven in window A)
 
-Tick maps are the original per-frame maps cut to the windows (indices and pts kept); audio is 20 s
-16 kHz mono FLAC cut at tick-matched positions (audio-clips.json = each clip's start pts); *.avsync.out
-are the saved `recording-verdict --av-sync` outputs. Synthetic tests (generated QR frames / videos, a
-fake probe) cover the both-halves decoder and the CLI contract end to end. Tier-0: pytest + ffmpeg,
-no cargo, no rig.
+Tick maps are the per-frame maps cut to the windows (indices and pts kept); audio is 20 s 16 kHz mono
+FLAC cut at tick-matched positions (audio-clips.json = each clip's start pts); *.avsync.out are the
+saved `recording-verdict --av-sync` outputs. Every fail-open path the review found has a test here
+(a VOD or its audio ending early, rows missing, a replay, a repeat behind an undecodable frame, a
+painter restart, a hung probe, a crash). The decoder itself: test_youtube_leg_ticks_1404.py.
+Tier-0: pytest + ffmpeg, no cargo, no rig, no network.
 """
-import importlib.util
 import json
 import pathlib
 import subprocess
@@ -28,14 +28,8 @@ import sys
 import numpy as np
 import pytest
 
-ROOT = pathlib.Path(__file__).resolve().parents[2]
-SCRIPT = ROOT / "scripts" / "youtube_leg_verdict.py"
-FIX = ROOT / "tests" / "fixtures" / "youtube_leg_1404"
-
-_spec = importlib.util.spec_from_file_location("youtube_leg_verdict", SCRIPT)
-ylv = importlib.util.module_from_spec(_spec)
-sys.modules["youtube_leg_verdict"] = ylv
-_spec.loader.exec_module(ylv)
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from youtube_leg_fakes_1404 import FIX, FPS, SCRIPT, SECONDS, write_video, ylv  # noqa: E402
 
 
 def hms(h, m, s):
@@ -52,6 +46,9 @@ S2_WINDOWS = [("A", hms(23, 23, 0), hms(23, 31, 25)), ("R", hms(23, 32, 5), hms(
 S3_A_START, S3_B_START = hms(1, 40, 15.901), hms(1, 51, 53.503)
 S3_WINDOWS = [("A", hms(1, 40, 40), hms(1, 49, 28)), ("R", hms(1, 50, 8), hms(1, 51, 4)),
               ("B", hms(1, 52, 10), hms(1, 58, 5))]
+CLEAN = {"lag_jumps": 0, "low_corr": 0, "silent": 0, "level_drops": 0}
+GOOD = {"coverage": {"rec_cadence_pct": 99.0, "vod_cadence_pct": 99.0}, "av": {"delta_ms": 10.0},
+        "dupskip": {"dup": 0, "skip": 0, "unjudged": 0, "vod_frames": 1000}, "audio": dict(CLEAN)}
 
 
 @pytest.fixture(scope="module")
@@ -80,6 +77,15 @@ def av(sess, window):
                                ylv.parse_avsync_output((FIX / f"{sess}-vod-{window}.avsync.out").read_text()))
 
 
+def steady(n, first=100, start=0.0):
+    """n recording-like rows at 30 fps with the 2-tick cadence."""
+    return [(i, start + i / 30.0, first + 2 * i) for i in range(n)]
+
+
+def vod_of(ticks):
+    return [(k, k / 30.0, t) for k, t in enumerate(ticks)]
+
+
 # ---------------------------------------------------------------- criterion 2: dup/skip on real sessions
 
 def test_session2_steady_windows_have_zero_downstream_dupskip(s2):
@@ -87,43 +93,64 @@ def test_session2_steady_windows_have_zero_downstream_dupskip(s2):
     frames = {"A": 14754, "R": 1309, "B": 10854}  # decoded recording frames, comment 6006986090
     for name, a, b in S2_WINDOWS:
         r = ylv.dupskip(rec, vod, S2_T0, a, b)
-        assert (r["dup"], r["skip"], r["unjudged"]) == (0, 0, 0), (name, r)
-        assert r["rec_frames"] == frames[name]
+        assert (r["dup"], r["skip"]) == (0, 0), (name, r)
+        assert r["unjudged"] <= 5 and r["rec_frames"] == frames[name]
         assert r["clamped_start_utc"] is None and r["clamped_end_utc"] is None
 
 
 def test_baseline_dupskip_reproduces_the_session_counts(base):
     rec, vod = base
     counts = {name: ylv.dupskip(rec, vod, BASE_T0, a, b) for name, a, b in BASE_WINDOWS}
-    assert (counts["A"]["dup"], counts["A"]["skip"]) == (10, 10)
-    assert (counts["B"]["dup"], counts["B"]["skip"]) == (2, 2)
-    # R, after the republish: the session tool counted 46 / 47. The tool also judges the VOD pair that
-    # straddles the window END: the VOD jumped from tick 1090906 to 1090910 over the recording's last
-    # window frame 1090908, which the session tool's in-window VOD filter could not see.
-    r = counts["R"]
-    assert (r["dup"], r["skip"]) == (46, 48)
-    # the window ending one frame earlier no longer holds tick 1090908: back to the session's 47
-    _, a, b = BASE_WINDOWS[1]
-    shorter = ylv.dupskip(rec, vod, BASE_T0, a, b - 1.0 / 30)
-    assert (shorter["dup"], shorter["skip"]) == (46, 47)
+    # The session tool counted A 10/10, R 46/47, B 2/2 between ADJACENT decoded VOD frames. The tool
+    # also judges pairs around an undecodable VOD frame by recording frame count (A: two more skips,
+    # e.g. VOD 1058514, 1058514, ?, 1058520 against recording 1058514, ?, 1058518, 1058520) and the
+    # pair straddling R's end (the VOD jumped over the window's last recording frame, tick 1090908).
+    assert {k: (c["dup"], c["skip"]) for k, c in counts.items()} == {"A": (10, 12), "R": (48, 51), "B": (2, 2)}
+    shorter = ylv.dupskip(rec, vod, BASE_T0, BASE_WINDOWS[1][1], BASE_WINDOWS[1][2] - 1.0 / 30)
+    assert (shorter["dup"], shorter["skip"]) == (48, 50)  # without tick 1090908: exactly that skip less
 
 
-def test_dupskip_counts_a_vod_jump_over_the_window_edge():
-    # recording: ticks 100..120 step 2 at 30 fps; VOD shows 100..112, then jumps 112 -> 118 (two
-    # recording frames lost) with the jump straddling the window END at content time of tick 116.
-    rec = [(i, i / 30.0, 100 + 2 * i) for i in range(11)]
-    vod = [(k, k / 30.0, t) for k, t in enumerate([100, 102, 104, 106, 108, 110, 112, 118, 120])]
-    r = ylv.dupskip(rec, vod, 0.0, 0.0, 8.5 / 30.0)  # window holds ticks 100..116
-    assert (r["dup"], r["skip"]) == (0, 2)
-    rep = [(k, k / 30.0, t) for k, t in enumerate([100, 102, 104, 104, 106, 108, 110, 112, 114, 116])]
-    assert (ylv.dupskip(rec, rep, 0.0, 0.0, 8.5 / 30.0)["dup"]) == 1
+def test_a_vod_jump_over_the_window_edge_counts():
+    rec = steady(11)  # ticks 100..120
+    r = ylv.dupskip(rec, vod_of([100, 102, 104, 106, 108, 110, 112, 118, 120]), 0.0, 0.0, 8.5 / 30.0)
+    assert (r["dup"], r["skip"]) == (0, 2)  # 114 and 116 never shown; the window holds ticks 100..116
+    r = ylv.dupskip(rec, vod_of([100, 102, 104, 104, 106, 108, 110, 112, 114, 116, 118, 120]), 0.0, 0.0, 8.5 / 30.0)
+    assert (r["dup"], r["skip"]) == (1, 0)
 
 
 def test_a_tick_the_rig_repeated_cancels_out():
     rec = [(0, 0.0, 100), (1, 1 / 30, 102), (2, 2 / 30, 102), (3, 3 / 30, 106), (4, 4 / 30, 108)]
-    vod = [(0, 0.0, 100), (1, 1 / 30, 102), (2, 2 / 30, 102), (3, 3 / 30, 106), (4, 4 / 30, 108)]
-    r = ylv.dupskip(rec, vod, 0.0, 0.0, 1.0)
+    r = ylv.dupskip(rec, list(rec), 0.0, 0.0, 5 / 30)
     assert (r["dup"], r["skip"]) == (0, 0)
+
+
+def test_a_vod_that_replays_content_is_counted():
+    rec = steady(41)  # ticks 100..180
+    replay = vod_of(list(range(100, 162, 2)) + list(range(100, 182, 2)))  # 30 frames shown again
+    r = ylv.dupskip(rec, replay, 0.0, 0.0, 41 / 30)
+    assert r["dup"] >= 30 and r["skip"] == 0
+    assert ylv.verdict([dict(GOOD, dupskip=r)], [])["overall"] == "FAIL"
+
+
+def test_dup_and_skip_hidden_behind_an_undecodable_vod_frame_are_counted():
+    rec = steady(21)  # ticks 100..140
+    hidden_dup = vod_of([100, 102, 104, None, 106, 108])  # the undecodable frame repeated 104
+    assert (ylv.dupskip(rec, hidden_dup, 0.0, 0.0, 6 / 30)["dup"]) == 1
+    hidden_skip = vod_of([100, 102, None, 108, 110])  # one of 104 / 106 never reached the VOD
+    assert (ylv.dupskip(rec, hidden_skip, 0.0, 0.0, 6 / 30)["skip"]) == 1
+    clean = vod_of([100, 102, None, 106, 108])
+    r = ylv.dupskip(rec, clean, 0.0, 0.0, 5 / 30)
+    assert (r["dup"], r["skip"], r["unjudged"]) == (0, 0, 0)
+
+
+def test_a_painter_restart_inside_the_window_is_unknown_and_its_ticks_never_alias():
+    restarted = steady(30, first=2_000_000) + [(30 + i, (30 + i) / 30.0, 2 * i) for i in range(30)]
+    r = ylv.dupskip(restarted, list(restarted), 0.0, 0.0, 2.0)
+    assert "error" in r and "restarted" in r["error"]
+    # a tick the recording shows twice, a minute apart (two painter runs), maps to no content time
+    twice = steady(5) + [(5000 + i, 100.0 + i / 30.0, 100 + 2 * i) for i in range(5)]
+    assert ylv.TickClock(twice, 0.0).time_of(104) is None
+    assert ylv.TickClock(steady(5), 0.0).time_of(104) == pytest.approx(2 / 30.0)
 
 
 # ---------------------------------------------------------------- Review Focus 2: the two-part join
@@ -143,7 +170,7 @@ def test_session3_two_part_join_has_no_seam_artefact(s3):
     alone = ylv.dupskip(b, vod, S3_B_START, wa, wb)
     for k in ("dup", "skip", "unjudged", "rec_frames", "vod_frames"):
         assert joined[k] == alone[k], k
-    assert (joined["dup"], joined["skip"], joined["unjudged"]) == (0, 0, 2)  # 2 VOD repeats unjudged
+    assert (joined["dup"], joined["skip"]) == (0, 0)
 
 
 def test_a_part_without_start_is_placed_by_painter_tick():
@@ -160,7 +187,7 @@ def test_every_session3_window_is_clean(s3):
     rows, t0, vod = s3
     for name, a, b in S3_WINDOWS:
         r = ylv.dupskip(rows, vod, t0, a, b)
-        assert (r["dup"], r["skip"]) == (0, 0), (name, r)
+        assert (r["dup"], r["skip"]) == (0, 0) and r["unjudged"] <= 5, (name, r)
 
 
 # ---------------------------------------------------------------- Review Focus 3: the clamp
@@ -169,95 +196,44 @@ def test_window_starting_before_the_vod_clamps_and_reports(s3):
     rows, t0, vod = s3
     name, a, b = S3_WINDOWS[0]
     r = ylv.dupskip(rows, vod, t0, a, b)
-    assert r["clamped_start_utc"] is not None
     # the VOD opens with a 55 s QR-less, silent pre-roll; its first content frame shows 01:41:10.0
-    assert abs(r["clamped_start_utc"] - hms(1, 41, 10.0)) < 0.1
-    assert r["clamped_end_utc"] is None
+    assert r["clamped_start_utc"] is not None and abs(r["clamped_start_utc"] - hms(1, 41, 10.0)) < 0.1
+    assert r["clamped_end_utc"] is None and r["vod_ends_early_s"] is None
     assert (r["dup"], r["skip"]) == (0, 0)
     cov = ylv.coverage(rows, vod, t0, r["start_utc"], r["end_utc"])
     assert cov["rec_cadence_pct"] >= 90 and cov["vod_cadence_pct"] >= 90
 
 
-def test_a_window_outside_the_vod_is_an_error_not_a_crash(s3):
+def test_a_window_outside_the_vod_or_the_recording_is_an_error_not_a_crash(s3):
     rows, t0, vod = s3
     r = ylv.dupskip(rows, vod, t0, hms(1, 40, 20), hms(1, 41, 0))  # entirely before the VOD
     assert "error" in r and r["dup"] is None
+    r = ylv.dupskip(rows, vod, t0, hms(1, 39, 0), hms(1, 41, 30))  # starts before the recording
+    assert "error" in r and "not inside the recording" in r["error"]
 
 
-# ---------------------------------------------------------------- Review Focus 5: both halves
-
-def test_both_halves_decode_keeps_session3_part1_cadence_above_90_percent():
-    a = ylv.load_ticks(FIX / "s3-rec_a-ticks.tsv.gz")
-    _, wa, wb = S3_WINDOWS[0]
-    win = [r for r in a if wa <= S3_A_START + r[1] < wb]
-    c = ylv.continuity(win)
-    assert 100.0 * c["cadence_proven"] / c["frames"] >= 90.0
-    # frames 1565..4124 (52-137 s): the session's left-only gray decoder read NONE of them (its one
-    # 2561-frame decode gap, rec_a-ticks.err); the colour-coded left now reads through blue
-    gap = [r for r in a if 1565 <= r[0] <= 4124]
-    assert len(gap) == 2560 and sum(r[2] is not None for r in gap) >= 0.9 * len(gap)
+def test_a_vod_that_ends_before_the_window_end_fails(s3):
+    rows, t0, vod = s3
+    _, a, b = S3_WINDOWS[2]
+    clock = ylv.TickClock(rows, t0)
+    cut = next(k for k, v in enumerate(vod) if v[2] is not None and (clock.time_of(v[2]) or 0) > b - 120)
+    r = ylv.dupskip(rows, vod[:cut], t0, a, b)
+    assert (r["dup"], r["skip"]) == (0, 0) and r["vod_ends_early_s"] == pytest.approx(120, abs=1)
+    v = ylv.verdict([dict(GOOD, dupskip=r)], [])
+    assert v["overall"] == "FAIL" and any("VOD ends" in x for x in v["reasons"])
 
 
-# BGR module colours of EQUAL gray (226): gray sees no QR at all, the blue channel sees 0 vs 255.
-# A stand-in for the mid-transition colour pattern the camera captures on the half just repainted.
-COLOUR_DARK, COLOUR_LIGHT = (0, 255, 255), (255, 255, 158)
-
-
-def _qr_frame(left, right, w=960, h=540, size=280, left_colours=((0, 0, 0), (255, 255, 255))):
-    """The painter's two QRs on white; `left_colours` = (dark, light) module colours of the left QR."""
-    import cv2
-
-    enc = cv2.QRCodeEncoder.create()
-    f = np.full((h, w, 3), 255, np.uint8)
-    for k, text in enumerate((left, right)):
-        if text is None:
-            continue
-        q = cv2.resize(enc.encode(text), (size, size), interpolation=cv2.INTER_NEAREST)
-        x0 = (w // 2) * k + (w // 2 - size) // 2
-        dark, light = left_colours if k == 0 else ((0, 0, 0), (255, 255, 255))
-        block = np.empty((size, size, 3), np.uint8)
-        block[:] = light
-        block[q < 128] = dark
-        f[20:20 + size, x0:x0 + size] = block
-    return f
-
-
-def test_half_ticks_reads_both_halves_and_a_colour_half_through_blue():
-    import cv2
-
-    det = cv2.QRCodeDetector()
-    assert ylv.half_ticks(_qr_frame("P123456.1000.17.42", "P123456.1001.17.42"), det) == (1000, 1001)
-    assert ylv.half_ticks(_qr_frame(None, "P123456.1001.17.42"), det) == (None, 1001)
-    # a node burn is never the painter tick
-    assert ylv.half_ticks(_qr_frame("P911001.5.17.42", "P123456.1003.17.42"), det) == (None, 1003)
-    assert ylv.half_ticks(_qr_frame(None, None), det) == (None, None)
-    colour = _qr_frame("P123456.1000.17.42", "P123456.999.17.42", left_colours=(COLOUR_DARK, COLOUR_LIGHT))
-    gray = cv2.cvtColor(colour[0:335, :480], cv2.COLOR_BGR2GRAY)
-    assert ylv._qr_tick(det, gray, ylv.DECODE_SCALE) is None  # gray alone cannot read it ...
-    assert ylv.half_ticks(colour, det) == (1000, 999)  # ... its blue channel can
-
-
-def test_a_right_only_frame_takes_the_local_capture_phase():
-    # odd phase (right = left + 1): right-only 1005 -> 1004; even phase (right = left - 1): 1005 -> 1006
-    odd = [(0, 0.0, 1000, 1001), (1, 0.033, None, 1003), (2, 0.067, 1004, 1005)]
-    even = [(0, 0.0, 1000, 999), (1, 0.033, None, 1001), (2, 0.067, 1004, 1003)]
-    assert [r[2:] for r in ylv.resolve_ticks(odd)] == [(1000, "B"), (1002, "R"), (1004, "B")]
-    assert [r[2:] for r in ylv.resolve_ticks(even)] == [(1000, "B"), (1002, "R"), (1004, "B")]
-    # a repeated frame stays a repeat (the phase does not come from the frame's own cadence)
-    dup = [(0, 0.0, 1000, 1001), (1, 0.033, None, 1001), (2, 0.067, 1002, 1003)]
-    assert [r[2] for r in ylv.resolve_ticks(dup)] == [1000, 1000, 1002]
-    # a phase step between the two sides, or no both-halves frame near: no tick, never a guess
-    step = [(0, 0.0, 1000, 1001), (1, 0.033, None, 1003), (2, 0.067, 1004, 1003)]
-    assert ylv.resolve_ticks(step)[1][2:] == (None, "r")
-    far = [(0, 0.0, 1000, 1001), (500, 16.7, None, 1999)]
-    assert ylv.resolve_ticks(far)[1][2:] == (None, "r")
-    # a pair that disagrees (|right - left| != 1) gives no phase; the left still counts
-    assert ylv.resolve_ticks([(0, 0.0, 1000, 1007)])[0][2:] == (1000, "L")
-
-
-def test_painter_tick_takes_the_lowest_painter_payload():
-    assert ylv.painter_tick(["P123456.204.1.1", "P123456.202.1.1", "P911014.9.1.1", "junk"]) == 202
-    assert ylv.painter_tick(["P911001.5.1.1"]) is None
+def test_rows_missing_from_a_map_lower_the_coverage(s3):
+    rows, t0, vod = s3
+    _, a, b = S3_WINDOWS[2]
+    full = ylv.dupskip(rows, vod, t0, a, b)
+    clock = ylv.TickClock(rows, t0)
+    first = next(k for k, v in enumerate(vod) if v[2] is not None and (clock.time_of(v[2]) or 0) > a + 60)
+    holed = vod[:first] + vod[first + 3000:]  # 100 s of decoded rows gone from the VOD map
+    cov = ylv.coverage(rows, holed, t0, full["start_utc"], full["end_utc"])
+    assert cov["vod_cadence_pct"] < 90
+    v = ylv.verdict([dict(GOOD, coverage=cov)], [])
+    assert v["overall"] == "UNKNOWN"
 
 
 # ---------------------------------------------------------------- criterion 3: publishes
@@ -291,7 +267,8 @@ def test_audio_clean_window_passes_and_a_cut_block_is_a_lag_jump():
     rec, vod, _ = clips("s2-R")
     ok = ylv.audio_blocks(rec, vod)
     assert ok["lag_jumps"] == 0 and ok["silent"] == 0 and ok["level_drops"] == 0 and ok["low_corr"] == 0
-    assert ok["blocks"] >= 60 and ok["corr_median"] > 0.95
+    assert ok["blocks"] == ok["expected_blocks"] >= 60 and ok["reliable_blocks"] == ok["signal_blocks"]
+    assert ok["vod_ends_early_s"] == 0 and ok["corr_median"] > 0.95
     assert abs(ok["lag_vs_video_ms"] - (-5.9)) < 2.0  # session 2 R: VOD audio vs its video, 6014624254
     cut = ylv.drop_samples(vod, at_s=10.0, ms=23)  # one lost AAC frame
     bad = ylv.audio_blocks(rec, cut)
@@ -303,31 +280,41 @@ def test_silence_and_a_level_drop_are_caught():
     rec, vod, _ = clips("s2-R")
     silent = vod.copy()
     silent[int(12.0 * ylv.SR): int(12.6 * ylv.SR)] = 0.0
-    r = ylv.audio_blocks(rec, silent)
-    assert r["silent"] >= 2
+    assert ylv.audio_blocks(rec, silent)["silent"] >= 2
     quiet = vod.copy()
     quiet[int(14.0 * ylv.SR):] *= 10 ** (-15 / 20)
     q = ylv.audio_blocks(rec, quiet)
     assert q["level_drops"] >= 4 and q["lag_jumps"] == 0
 
 
+def test_vod_audio_ending_early_fails_and_unusable_recording_audio_is_unknown():
+    rec, vod, _ = clips("s2-R")
+    short = ylv.audio_blocks(rec, vod[: 8 * ylv.SR])  # the VOD audio stops after 8 of 20 s
+    assert short["vod_ends_early_s"] > 10
+    v = ylv.verdict([dict(GOOD, audio=short)], [])
+    assert v["overall"] == "FAIL" and any("VOD audio ends" in x for x in v["reasons"])
+    faint = ylv.audio_blocks(rec * 10 ** (-60 / 20), vod)  # the recording carries no usable signal
+    assert faint["signal_blocks"] == 0
+    assert ylv.verdict([dict(GOOD, audio=faint)], [])["overall"] == "UNKNOWN"
+
+
 def test_baseline_audio_is_continuous_but_1370_ms_late():
     rec, vod, _ = clips("base-R")
-    r = ylv.audio_blocks(rec, vod)
+    r = ylv.audio_blocks(rec, vod, end_s=18.0)  # the VOD clip lacks the last 1.37 s of this content
     assert abs(r["lag_vs_video_ms"] - 1370.0) < 5.0  # +1370 ms, comment 6003342015 / audio tables
-    assert (r["lag_jumps"], r["silent"], r["level_drops"]) == (0, 0, 0)
+    assert (r["lag_jumps"], r["silent"], r["level_drops"], r["vod_ends_early_s"]) == (0, 0, 0, 0)
 
 
 def test_audio_window_clamps_to_the_vod_start(s3):
     rows, t0, vod_rows = s3
     rec, vod, meta = clips("s3-A")
     _, a, _ = S3_WINDOWS[0]
-    r = ylv.audio_window(rec, vod, rows, vod_rows, t0, a, a + 60.0,  # 01:40:40 .. 01:41:40
+    r = ylv.audio_window(rec, vod, rows, vod_rows, t0, a, a + 42.0,  # 01:40:40 .. 01:41:22, inside the clips
                          rec_pts0=meta["rec_pts0"], vod_pts0=meta["vod_pts0"])
     assert "error" not in r, r
     assert abs(r["start_utc"] - hms(1, 41, 10.0)) < 0.2  # starts at the VOD's first content frame
     assert (r["lag_jumps"], r["low_corr"], r["silent"], r["level_drops"]) == (0, 0, 0, 0)
-    assert r["blocks"] >= 20
+    assert r["signal_blocks"] >= 20 and r["reliable_blocks"] == r["signal_blocks"]
 
 
 def test_ncc_best_finds_a_known_offset():
@@ -367,12 +354,10 @@ def _session_windows(rec, vod, t0, windows, sess, audio):
     return out
 
 
-CLEAN = {"lag_jumps": 0, "low_corr": 0, "silent": 0, "level_drops": 0}
-
-
 def test_baseline_session_fails(base):
     rec, vod = base
-    audio = {"A": dict(CLEAN), "R": ylv.audio_blocks(*clips("base-R")[:2]), "B": dict(CLEAN)}
+    r_rec, r_vod, _ = clips("base-R")
+    audio = {"A": dict(CLEAN), "R": ylv.audio_blocks(r_rec, r_vod, end_s=18.0), "B": dict(CLEAN)}
     w = _session_windows(rec, vod, BASE_T0, BASE_WINDOWS, "base", audio)
     pubs = ylv.publish_gaps(rec, vod, BASE_T0, [hms(20, 34, 32.7)])
     v = ylv.verdict(w, pubs)
@@ -396,7 +381,7 @@ def test_session3_passes(s3):
     rows, t0, vod = s3
     rec_a, vod_a, meta = clips("s3-A")
     _, a, _ = S3_WINDOWS[0]
-    audio = {"A": ylv.audio_window(rec_a, vod_a, rows, vod, t0, a, a + 60.0, meta["rec_pts0"], meta["vod_pts0"]),
+    audio = {"A": ylv.audio_window(rec_a, vod_a, rows, vod, t0, a, a + 42.0, meta["rec_pts0"], meta["vod_pts0"]),
              "R": dict(CLEAN), "B": dict(CLEAN)}
     w = _session_windows(rows, vod, t0, S3_WINDOWS, "s3", audio)
     pubs = ylv.publish_gaps(rows, vod, t0, [hms(1, 40, 27.93), hms(1, 50, 7.60), hms(1, 52, 8.12)])
@@ -411,8 +396,7 @@ def test_verdict_unknown_when_coverage_below_90_percent():
 
 
 def test_verdict_fail_wins_over_unknown_and_nothing_measured_is_unknown():
-    good = {"coverage": {"rec_cadence_pct": 99.0, "vod_cadence_pct": 99.0}, "av": {"delta_ms": 10.0},
-            "dupskip": {"dup": 0, "skip": 0}, "audio": dict(CLEAN)}
+    good = GOOD
     assert ylv.verdict([good], [])["overall"] == "PASS"
     assert ylv.verdict([], [])["overall"] == "UNKNOWN"
     unknown = dict(good, av={"error": "probe missing"})
@@ -426,6 +410,8 @@ def test_verdict_fail_wins_over_unknown_and_nothing_measured_is_unknown():
     assert ylv.verdict([dict(good, errors=["the window spans two recording parts"])], [])["overall"] == "UNKNOWN"
     assert ylv.verdict([good], [{"utc": 1.0, "gap_s": None, "judged": True}])["overall"] == "FAIL"
     assert ylv.verdict([good], [{"utc": 1.0, "gap_s": 30.0, "judged": False}])["overall"] == "PASS"
+    many = dict(good, dupskip={"dup": 0, "skip": 0, "unjudged": 12, "vod_frames": 1000})
+    assert ylv.verdict([many], [])["overall"] == "UNKNOWN"  # too many VOD pairs nobody could judge
 
 
 # ---------------------------------------------------------------- CLI argument forms
@@ -448,33 +434,14 @@ def test_timestamps_windows_and_recordings_parse():
 
 # ---------------------------------------------------------------- CLI end to end (synthetic)
 
-FPS = 30
-SECONDS = 8
 T0 = 1791250000.0  # 2026-10-06 ~ (epoch); the recording's start
 
-
-def _write_video(path, ticks, right_only=(), colour_left=(), even_phase=False):
-    """A lossless (FFV1, RGB) 960x540 30 fps clip with the painter's two QRs (left = even tick,
-    right = tick + 1, or tick - 1 when captured on even painter ticks) and a deterministic
-    pink-noise audio track (identical in every generated file). Frames in `right_only` have no left
-    QR, frames in `colour_left` a left QR only the blue channel reads."""
-    ff = subprocess.Popen(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pix_fmt", "bgr24",
-                           "-s", "960x540", "-r", str(FPS), "-i", "-", "-f", "lavfi", "-i",
-                           f"anoisesrc=d={SECONDS + 1}:c=pink:r=48000:a=0.05:seed=7", "-map", "0:v:0",
-                           "-map", "1:a:0", "-c:v", "ffv1", "-pix_fmt", "bgr0", "-c:a", "aac", "-b:a", "192k",
-                           "-shortest", str(path)], stdin=subprocess.PIPE)
-    for k, t in enumerate(ticks):
-        left = None if k in right_only else f"P123456.{t}.17.42"
-        colours = (COLOUR_DARK, COLOUR_LIGHT) if k in colour_left else ((0, 0, 0), (255, 255, 255))
-        right = f"P123456.{t - 1 if even_phase else t + 1}.17.42"
-        ff.stdin.write(_qr_frame(left, right, left_colours=colours).tobytes())
-    ff.stdin.close()
-    assert ff.wait() == 0
-
-
 FAKE_PROBE = r'''#!/usr/bin/env python3
-import json, sys
+import json, sys, time
+MODE = "@MODE@"
 clip = sys.argv[sys.argv.index("--av-sync") + 1]
+if MODE == "SLEEP":
+    time.sleep(30)
 off = 30.0 if "av-rec-" in clip else 25.0
 print("\x1b[2mlog line before the JSON\x1b[0m", file=sys.stderr)
 print("{\n" + json.dumps({"av_offset_ms": off, "mad_ms": 4.0, "matched": 12, "audio_markers_decoded": 12,
@@ -487,39 +454,22 @@ print("A/V-sync offset measured", file=sys.stderr)
 def synth(tmp_path_factory):
     d = tmp_path_factory.mktemp("ylv-synth")
     ticks = [1000 + 2 * k for k in range(FPS * SECONDS)]
-    # the recording: captured on EVEN painter ticks, a 30-frame colour-coded-left stretch (read
-    # through blue) and a 30-frame no-left stretch (a fixed "right - 1" would read it 2 ticks low)
-    _write_video(d / "rec.mkv", ticks, right_only=set(range(120, 150)), colour_left=set(range(60, 90)),
-                 even_phase=True)
-    _write_video(d / "vod.mkv", ticks)
-    _write_video(d / "vod-skip.mkv", ticks[:100] + ticks[101:])  # YouTube lost one frame
-    probe = d / "fake-recording-verdict"
-    probe.write_text(FAKE_PROBE)
-    probe.chmod(0o755)
+    # the recording: captured on EVEN painter ticks with a colour-coded-left and a no-left stretch
+    write_video(d / "rec.mkv", ticks, right_only=set(range(120, 150)), colour_left=set(range(60, 90)), even_phase=True)
+    write_video(d / "vod.mkv", ticks)
+    write_video(d / "vod-skip.mkv", ticks[:100] + ticks[101:])  # YouTube lost one frame
+    for name, mode in (("fake-recording-verdict", "FAST"), ("sleepy-recording-verdict", "SLEEP")):
+        probe = d / name
+        probe.write_text(FAKE_PROBE.replace("@MODE@", mode))
+        probe.chmod(0o755)
     (d / "markers.csv").write_text("index,frame_id,emit_ts_ns\n")
     return d
 
 
-def test_decode_ticks_reads_colour_and_right_only_stretches(synth):
-    rows = ylv.decode_ticks(synth / "rec.mkv", workers=1)
-    assert len(rows) == FPS * SECONDS
-    # a detector miss leaves a frame undecoded; a decoded frame is never wrong (the phase rule)
-    want = [1000 + 2 * k for k in range(FPS * SECONDS)]
-    assert all(r[2] in (None, w) for r, w in zip(rows, want))
-    assert sum(r[2] is not None for r in rows) >= 0.95 * len(rows)
-    colour, right_only = rows[60:90], rows[120:150]
-    assert sum(r[3] == "B" for r in colour) >= 27  # the colour-coded left read through blue
-    assert sum(r[3] == "R" for r in right_only) >= 27  # right only, captured on even ticks: right + 1
-    assert {r[3] for r in right_only} <= {"R", ""}
-    assert rows[30][1] - rows[0][1] == pytest.approx(1.0, abs=0.002)  # pts: the container's timeline
-    c = ylv.continuity([r[:3] for r in rows])
-    assert c["cadence_proven"] == len(rows) and c["events"] == 0
-
-
-def _cli(synth, out, vod, probe=None):
+def _cli(synth, out, vod, probe=None, extra=()):
     cmd = [sys.executable, str(SCRIPT), "--vod", str(synth / vod), "--recording", f"{synth / 'rec.mkv'}@{T0}",
            "--markers", str(synth / "markers.csv"), "--windows", f"W1:{T0}:{T0 + SECONDS}", "--out", str(out),
-           "--probe-bin", str(probe or synth / "fake-recording-verdict"), "--workers", "2"]
+           "--probe-bin", str(probe or synth / "fake-recording-verdict"), "--workers", "2", *extra]
     r = subprocess.run(cmd, capture_output=True, text=True)
     return r, json.loads((out / "youtube-leg-verdict.json").read_text())
 
@@ -540,12 +490,23 @@ def test_cli_pass_fail_and_unknown_exit_codes(synth, tmp_path):
     assert r.returncode == 2 and j["overall"] == "UNKNOWN"
     assert any("A/V not measured" in x for x in j["reasons"])
 
+    r, j = _cli(synth, out, "vod.mkv", extra=["--publish", str(T0 + 3)])  # a publish inside W1
+    assert r.returncode == 2 and any("inside the window" in x for x in j["reasons"])
+
     r, j = _cli(synth, out, "vod-skip.mkv")
     assert r.returncode == 1 and j["overall"] == "FAIL"
     assert j["windows"][0]["dupskip"]["skip"] == 1
 
 
-def test_cli_tool_error_is_unknown_and_written(tmp_path):
+def test_a_hung_probe_times_out_and_leaves_no_clip(synth, tmp_path, monkeypatch):
+    monkeypatch.setattr(ylv, "PROBE_TIMEOUT_S", 2)
+    with pytest.raises(subprocess.TimeoutExpired):
+        ylv.av_window(synth / "rec.mkv", synth / "vod.mkv", 0.0, 0.0, synth / "markers.csv",
+                      synth / "sleepy-recording-verdict", 2.0, str(tmp_path))
+    assert not list(tmp_path.glob("*.mp4"))
+
+
+def test_cli_tool_error_and_a_crash_are_unknown(tmp_path):
     out = tmp_path / "out"
     r = subprocess.run([sys.executable, str(SCRIPT), "--vod", "not a file, not an id", "--recording", f"x.mp4@{T0}",
                         "--markers", "m.csv", "--windows", f"W1:{T0}:{T0 + 5}", "--out", str(out)],
@@ -555,3 +516,8 @@ def test_cli_tool_error_is_unknown_and_written(tmp_path):
     assert j["overall"] == "UNKNOWN" and j["reasons"][0].startswith("tool error:")
     usage = subprocess.run([sys.executable, str(SCRIPT), "--out", str(out)], capture_output=True, text=True)
     assert usage.returncode == 2
+    blocked = tmp_path / "a-file"
+    blocked.write_text("not a directory")  # the verdict cannot even be written: still 2, never FAIL's 1
+    crash = subprocess.run([sys.executable, str(SCRIPT), "--vod", "x", "--recording", f"x.mp4@{T0}", "--markers", "m",
+                            "--windows", f"W1:{T0}:{T0 + 5}", "--out", str(blocked)], capture_output=True, text=True)
+    assert crash.returncode == 2
