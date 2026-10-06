@@ -326,6 +326,12 @@ rig looked half-alive):
 
 ## Force-kill relaunch (fast-DLL swap, recovery) LOSES obs-websocket runtime writes — save the collection FIRST (issue 1333, 17.9.2026)
 
+**Since issue 1367 the fleet deploy program (`deploy-genlock-fleet.sh`, stream + resolume) closes OBS
+cleanly first and forces only as a named fallback (`genlock-fleet-deploy.md`).** This checklist still
+applies to every remaining force-kill: a deploy whose log shows `-- forcing`, the scratch
+`fastdll-swap-*.ps1` programs, `launch-obs-genlock.sh --force` on a running OBS, the mv-reverify
+escalation.
+
 `SetInputSettings` / `SetInputAudioSyncOffset` over obs-websocket change the RUNTIME source state but do
 NOT mark the project dirty, so OBS never rewrites the scene-collection JSON for them; a graceful exit
 would save them, but the genlock build has no `ExitOBS` and every swap/recovery path here is a
