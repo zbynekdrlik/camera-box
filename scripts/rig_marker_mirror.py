@@ -37,8 +37,16 @@ STREAM SEMANTICS:
     PARTIAL_LINE_CAP is dropped and logged.
   * a copy equal to, or a prefix of, the served file is not written: a reconnect with no new rows
     leaves the served file and its age alone.
-  * a replay not complete after REPLAY_CAP_S (the file was replaced between the size read and the
-    tail's open -- a millisecond race) ends the connection and reconnects for a fresh size.
+  * a replay is cut (the connection ends and reconnects for a fresh size) only when no byte arrived
+    for REPLAY_STALL_S, or when it outlives replay_cap_s(announced) = the larger of
+    REPLAY_CAP_MIN_S and the announced size at REPLAY_FLOOR_BPS -- the cap only ends the millisecond
+    race of a file replaced between the size read and the tail's open. A fixed 120 s cap re-downloaded
+    a 2.7 MB log forever over a 20-65 kB/s link (issue 1404 review round 3).
+RIG AWAY: before each connection the mirror pings cam2. An RTT over LAN_RTT_MAX_MS means the rig is
+at a venue behind tailscale over METERED mobile data (~70 ms; dev1 stays at church): nothing is
+connected or replayed over that link (owner rule: no dev1<->rig transfers during events) until the
+rig is back on the LAN. Logged once per state change. An unknown RTT (no ping answer) still tries
+ssh, which then fails or works on its own.
   * memory: the copy grows with the painter session (~5 MB a day); cam2 holds the same file in its
     own tmpfs, and a painter restart starts it over.
 RECONNECT: a connection that ends is logged with its stderr (ERROR) and retried after a backoff
@@ -53,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import selectors
 import shlex
 import signal
@@ -69,7 +78,10 @@ HEADER_PREFIX = b"# qpsk-params"
 COLUMN_HEADER = b"index,frame_id,emit_ts_ns"
 WRITE_INTERVAL_S = 10.0
 SELECT_TIMEOUT_S = 0.25
-REPLAY_CAP_S = 120.0
+REPLAY_CAP_MIN_S = 120.0
+REPLAY_FLOOR_BPS = 5000.0
+REPLAY_STALL_S = 60.0
+LAN_RTT_MAX_MS = 20.0
 PARTIAL_LINE_CAP = 4096
 RECONNECT_MIN_S = 10.0
 RECONNECT_MAX_S = 300.0
@@ -157,6 +169,31 @@ def spawn_ssh(host: str, remote_path: str) -> subprocess.Popen:
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
 
 
+def replay_cap_s(announced: int) -> float:
+    """The longest a replay may take: the larger of REPLAY_CAP_MIN_S and the size at a 5 kB/s floor."""
+    return max(REPLAY_CAP_MIN_S, announced / REPLAY_FLOOR_BPS)
+
+
+_RTT_RE = re.compile(r"rtt min/avg/max/mdev = ([0-9.]+)/")
+
+
+def parse_ping_rtt_ms(output: str) -> float | None:
+    m = _RTT_RE.search(output)
+    return float(m.group(1)) if m else None
+
+
+def ping_rtt_ms(host: str) -> float | None:
+    """The minimum ICMP RTT to `host` in ms over 3 pings, or None (no answer / no ping). ICMP, not a
+    TCP probe of :22: a bare TCP connect makes sshd log a pre-auth line on cam2's stick journal."""
+    try:
+        r = subprocess.run(["ping", "-n", "-q", "-c", "3", "-i", "0.2", "-W", "1", host],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        log(f"rig-marker-mirror: ping {host} failed: {exc!r} -- RTT unknown")
+        return None
+    return parse_ping_rtt_ms(r.stdout)
+
+
 def next_backoff(current: float, lived_s: float) -> float:
     if lived_s >= STABLE_CONNECTION_S:
         return RECONNECT_MIN_S
@@ -229,6 +266,7 @@ class _Connection:
         self.replaying = True
         self.stderr_tail = b""
         self.error = None
+        self.last_byte_at = None
         self._logged_dropped = 0
         self._logged_overflows = 0
         self._logged_cuts = 0
@@ -257,9 +295,9 @@ class _Connection:
             self.replaying = False
             self.log(f"rig-marker-mirror: replay complete ({self.received} of {self.announced} announced "
                      f"bytes, {self.mlog.sessions} session header(s))")
-        if self.mlog.dropped_bytes > self._logged_dropped:
-            self.log(f"rig-marker-mirror: dropping {self.mlog.dropped_bytes} bytes before the first session "
-                     "header (`# qpsk-params`) -- a painter without that header is never mirrored")
+        if self.mlog.dropped_bytes and not self._logged_dropped:  # once per connection
+            self.log(f"rig-marker-mirror: dropping bytes before the first session header (`# qpsk-params`, "
+                     f"{self.mlog.dropped_bytes} so far) -- a painter without that header is never mirrored")
             self._logged_dropped = self.mlog.dropped_bytes
         if self.mlog.cut_rows > self._logged_cuts:
             self.log("rig-marker-mirror: a new session header followed a half row (the painter restarted "
@@ -285,13 +323,19 @@ def _follow(proc, host, mirror: _Mirror, *, clock, out_of_time, log) -> str | No
             for key, _mask in sel.select(timeout=SELECT_TIMEOUT_S):
                 data = os.read(key.fileobj.fileno(), READ_CHUNK)
                 if data:
+                    if key.data == conn.on_stdout:
+                        conn.last_byte_at = clock()
                     key.data(data)
                 else:
                     sel.unregister(key.fileobj)
                     open_streams -= 1
             now = clock()
-            if conn.replaying and now - conn_start > REPLAY_CAP_S:
-                conn.error = (f"replay incomplete after {REPLAY_CAP_S:.0f} s ({conn.received} of "
+            last_byte = conn.last_byte_at if conn.last_byte_at is not None else conn_start
+            if conn.replaying and now - last_byte > REPLAY_STALL_S:
+                conn.error = (f"replay stalled: no byte for {REPLAY_STALL_S:.0f} s ({conn.received} of "
+                              f"{conn.announced} announced bytes) -- reconnecting")
+            elif conn.replaying and conn.announced is not None and now - conn_start > replay_cap_s(conn.announced):
+                conn.error = (f"replay incomplete after {replay_cap_s(conn.announced):.0f} s ({conn.received} of "
                               f"{conn.announced} announced bytes) -- reconnecting for a fresh size")
             elif not conn.replaying:
                 last_write = mirror.maybe_write(conn.mlog, now, last_write)
@@ -313,6 +357,7 @@ def run(host: str, serve_dir: str, *, remote_path: str = REMOTE_PATH,
         spawn: Callable[[str, str], subprocess.Popen] = spawn_ssh,
         clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
         wait: Callable[[float], None] | None = None,
+        rtt: Callable[[str], float | None] | None = ping_rtt_ms, rtt_max_ms: float = LAN_RTT_MAX_MS,
         write_interval_s: float = WRITE_INTERVAL_S,
         max_runtime_s: float | None = None, should_stop: Callable[[], bool] = lambda: False,
         log: Callable[[str], None] = log,
@@ -330,7 +375,22 @@ def run(host: str, serve_dir: str, *, remote_path: str = REMOTE_PATH,
             wait_interruptibly(seconds, out_of_time, clock, sleep)
 
     backoff = RECONNECT_MIN_S
+    away = False
     while not out_of_time():
+        measured = rtt(host) if rtt is not None and rtt_max_ms > 0 else None
+        if measured is not None and measured > rtt_max_ms:
+            if not away:
+                log(f"rig-marker-mirror: the rig is away (RTT to {host} {measured:.1f} ms > {rtt_max_ms:g} ms: "
+                    "the tailscale route over metered mobile data) -- not mirroring until it is back on the LAN")
+                away = True
+            wait(backoff)
+            backoff = next_backoff(backoff, 0.0)
+            continue
+        if away:
+            log(f"rig-marker-mirror: the rig is back on the LAN (RTT to {host} "
+                f"{'unknown' if measured is None else f'{measured:.1f} ms'}) -- mirroring again")
+            away = False
+            backoff = RECONNECT_MIN_S
         proc = spawn(host, remote_path)
         conn_start = clock()
         try:
@@ -357,6 +417,8 @@ def main(argv=None) -> int:
     ap.add_argument("--remote-path", default=REMOTE_PATH)
     ap.add_argument("--write-interval", type=float, default=WRITE_INTERVAL_S)
     ap.add_argument("--max-runtime", type=float, default=None, help="stop after N seconds (tests)")
+    ap.add_argument("--rtt-max-ms", type=float, default=LAN_RTT_MAX_MS,
+                    help=f"pause while the ping RTT to the host exceeds this (default {LAN_RTT_MAX_MS:g}; 0 = no gate)")
     args = ap.parse_args(argv)
     if not os.environ.get("SSHPASS"):
         err("ERROR rig-marker-mirror: $SSHPASS (the fleet password) is not set -- refusing")
@@ -375,7 +437,8 @@ def main(argv=None) -> int:
     signal.signal(signal.SIGINT, _stop)
     log(f"rig-marker-mirror: following {args.remote_path} on {args.host} -> {args.serve_dir}/{rsf.MARKERS_NAME}")
     rc = run(args.host, args.serve_dir, remote_path=args.remote_path, write_interval_s=args.write_interval,
-             max_runtime_s=args.max_runtime, should_stop=lambda: stop["signal"] is not None)
+             max_runtime_s=args.max_runtime, rtt_max_ms=args.rtt_max_ms,
+             should_stop=lambda: stop["signal"] is not None)
     log(f"rig-marker-mirror: stopped (signal {stop['signal']})")
     return rc
 

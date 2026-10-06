@@ -15,6 +15,8 @@ with camera-box.
   - Complete rows go into `$XDG_RUNTIME_DIR/rig-lease-serve/rig-qpsk-markers.csv` by temp + rename,
     at most every 10 s, and only when there are new rows.
   - A dropped connection is retried with a 10 → 300 s backoff, and the previous file is kept.
+  - While cam2's ping RTT is over 20 ms (the rig at a venue, behind tailscale over metered mobile
+    data) it does not connect at all: no marker log is pulled over that link.
 - `rig-marker-mirror.service`: `--user`, long-running, `Restart=always`, shipped DISABLED. There is
   no timer.
 - The lease server serves it as `text/csv` with `X-Mirror-Age-S` = seconds since new rows last

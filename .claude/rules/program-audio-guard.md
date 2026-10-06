@@ -32,7 +32,7 @@ its SERVE dir (`scripts/rig_serve_files.py`): `$XDG_RUNTIME_DIR/rig-lease-serve`
 
 The consumer CLI is `scripts/program_audio_guard.py`, used by both YouTube gates (camera-box and
 restreamer issue 357):
-- exit 0: MEASUREMENT or SILENT, fresh, and no FOREIGN window within `--max-age`;
+- exit 0: MEASUREMENT or SILENT, fresh (within `--max-age`), and no FOREIGN window within `--latch-s`;
 - exit 1: FOREIGN. That includes a stale FOREIGN, and a clean current window when a FOREIGN window
   ended within `--latch-s` (default 30 s, its own hold, longer than `--max-age`): a gate that polls
   at least every ~25 s (a 10 s poll plus the guard's runtime has margin) never misses one;
@@ -94,8 +94,10 @@ is at a venue. So the mirror is a long-running service holding one
     (the painter restarted mid-replay).
   - Nothing is written before that: not after a stall, not when the connection dies or the service
     stops mid-replay. An idle-gap rule failed review: a 50 ms marker cadence leaves no gap at all.
-  - A replay not complete after 120 s (the file replaced between `stat` and the tail's open) ends
-    the connection and reconnects for a fresh size.
+  - A replay is cut only when no byte arrived for 60 s, or after the larger of 120 s and the
+    announced size at 5 kB/s (the size-scaled cap ends the millisecond race of a file replaced
+    between `stat` and the tail's open). A fixed 120 s cap re-downloaded the 2.7 MB log forever over
+    the 20–65 kB/s venue link (review round 3).
   - A copy equal to, or a prefix of, the served file is not written, so a reconnect with no new
     rows keeps the served file and its age.
   - A new header that follows a half row on the same line (a truncation mid-row) starts the new
@@ -106,6 +108,11 @@ is at a venue. So the mirror is a long-running service holding one
   drops. Checked live: no leftover tail on cam2.
 - **Writes.** Only complete rows are kept, written by temp + rename at most every 10 s and only when
   something changed. Live, about 63 bytes/s of new rows.
+- **Rig away = no mirroring.** Before each connection the mirror pings cam2. An RTT over 20 ms is
+  the rig at a venue behind tailscale over METERED mobile data (~70 ms; dev1 stays at church), so
+  nothing is connected or replayed over that link (owner rule: no dev1↔rig transfers during events).
+  It is logged once per state change. An unknown RTT still tries ssh. The probe is ICMP, never a
+  TCP connect to :22, which would make sshd log a pre-auth line into cam2's stick journal.
 - **Reconnects.** A dropped connection logs `ERROR` with ssh's stderr and backs off
   10 → 300 s (back to 10 s after a connection that lived 300 s). The previous file is kept. The
   backoff is waited in 0.5 s slices: `time.sleep` resumes after SIGTERM, so one long sleep held a
