@@ -37,7 +37,7 @@ Each window compares the YouTube VOD against stream OBS's own program recording 
   - ~EUR 0.01 per run;
   - YouTube quota of ~10 sessions/day across both gates.
 
-### B. Measurement tool (owned by camera-box): `scripts/youtube-leg-verdict.py`
+### B. Measurement tool (owned by camera-box): `scripts/youtube_leg_verdict.py` (with its parts `youtube_leg_ticks.py`, `youtube_leg_timeline.py`, `youtube_leg_audio.py`)
 
 It is built from the session tools already proven (`qrticks.py`, `dupskip.py`, `avabs2.py`, `audiocont.py` in `~/.claude/work-products/issue-1404/`). Two changes:
 - the tick decode reads BOTH QR halves, because the painter alternates its colour-coded QR left/right and the session decoder lost those frames;
@@ -46,7 +46,7 @@ It is built from the session tools already proven (`qrticks.py`, `dupskip.py`, `
 CLI contract (shared with restreamer's gate):
 
 ```
-youtube-leg-verdict.py --vod <youtube id | local file> --recording <file>[@<record-start-utc>] ...
+youtube_leg_verdict.py --vod <youtube id | local file> --recording <file>[@<record-start-utc>] ...
                        --markers <cam2 qpsk marker csv> --windows <name:start-utc:end-utc> ...
                        --publish <utc> ... --out <dir>
 exit 0 = PASS, 1 = FAIL, 2 = UNKNOWN (tool/decode/download error)
