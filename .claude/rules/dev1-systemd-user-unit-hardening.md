@@ -63,3 +63,22 @@ A new script: `git add` it, then `git update-index --chmod=+x <path>` before com
   `@<secs>`** (the flag formats `*Timestamp` properties, not this one). To grade a timer's last run, read
   the oneshot service's `ExecMainStartTimestamp` with `--timestamp=unix` instead: it prints `@<secs>`
   and survives after the run while the timer keeps the service loaded.
+
+## `NoNewPrivileges=yes` DOES engage -- and it strips file capabilities (issue 1404)
+
+Unlike the namespace directives above, `NoNewPrivileges` is a per-process `prctl` and is live in a
+dev1 `--user` unit. It blocks every file capability the unit's processes would gain on exec. dev1's
+`ping` reaches ICMP only through one (`getcap /usr/bin/ping` = `cap_net_raw=ep`;
+`net.ipv4.ping_group_range = 1 0`, so no unprivileged ICMP): under no-new-privs it exits 2 with
+"Operation not permitted" / "missing cap_net_raw+p capability". Checked with
+`setpriv --no-new-privs ping -c1 127.0.0.1`. A unit whose program pings (the rig-marker-mirror
+rig-away gate) must not set it; say why in the unit and pin it with a test. A foreground runbook run
+has no NoNewPrivileges, so it shows a probe working that the unit does not have: reproduce the unit's
+restriction with `setpriv --no-new-privs` before trusting such a check.
+
+## A oneshot timer cannot keep a connection (issue 1404)
+
+A `Type=oneshot` service run by a timer loses every leftover process when it finishes: systemd kills
+the unit's cgroup, so an ssh ControlPersist master forked inside it dies with each run. Something that
+must hold ONE connection (to avoid a login per pass) is a long-running `Type=simple` service with its
+own loop, never a timer.

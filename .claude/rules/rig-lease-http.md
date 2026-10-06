@@ -11,6 +11,8 @@ paths:
   - "scripts/rig-busy-gate.sh"
   - "tests/python/test_rig_lease_refresh_1383.py"
   - "tests/python/test_rig_lease_refresh_races_1383.py"
+  - "scripts/rig_serve_files.py"
+  - "tests/python/test_rig_marker_mirror_1404.py"
 ---
 
 # rig-lease HTTP exposure (#1277) — the read-only window onto the #830 lockdir for a foreign host
@@ -212,6 +214,26 @@ as an ADVISORY signal for restreamer to wait a bounded time. If this server is d
 proceeding anyway is the correct, documented behavior — it is not a silent hole, it is the explicit
 design (Prístup 1's own trade-off statement: the server is new coordination surface, not a new
 hard dependency either side must have to function at all).
+
+## Two more read-only routes: the cam2 marker log + the program-audio verdict (issue 1404)
+
+The same server serves `GET/HEAD /rig-qpsk-markers.csv` (`text/csv`, `X-Mirror-Age-S`) and
+`GET/HEAD /program-audio.json` (`age_s` recomputed per request) from `--serve-dir`
+(`$RIG_LEASE_SERVE_DIR`, default `$XDG_RUNTIME_DIR/rig-lease-serve` = tmpfs, 0700,
+`scripts/rig_serve_files.py`). Both are a 404 while their file is absent, or when the server runs
+without a serve dir. A file another user owns is never served.
+- **The serve dir is NEVER the lease dir or inside it.** The lease dir's mere existence is
+  `held=true`, so a writer's `mkdir -p` there would fake a held lease. `main()` refuses it; a
+  bad owner/mode of the serve dir is checked per file, so it never stops the lease endpoint.
+- **`/rig-lease.json`, `/healthz` and the 404 are byte-identical** with and without a serve dir,
+  pinned to golden bytes captured from the pre-change server. The new routes sit after them in
+  `_handle()`; `_send()` gained only an optional `extra_headers`. An empty `$RIG_LEASE_DIR` now
+  means the default, as in `scripts/lib/rig-lease.sh` (`rsf.default_lease_dir()`).
+- **The server stays stdlib-only.** The numpy analysis lives in the sampler, never here.
+- Writers, contract, calibration and runbooks: `.claude/rules/program-audio-guard.md`,
+  `systemd/rig-marker-mirror.README.md`, `systemd/program-audio-sampler.README.md`. The running
+  unit serves the new routes only after `systemctl --user restart rig-lease-server.service`; do it
+  while `held=false`.
 
 ## Supervisor install step
 

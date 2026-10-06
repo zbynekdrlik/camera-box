@@ -1,0 +1,36 @@
+[Unit]
+# issue 1404: mirrors cam2's QPSK marker log (/run/rig-qpsk-markers.csv) into the rig-lease
+# server's serve dir, so http://dev1:8890/rig-qpsk-markers.csv serves it to restreamer's YouTube
+# A/V gate (which has no fleet ssh). DEV1-SIDE, --user, long-running: ONE ssh connection streaming
+# `tail -F` (a cam2 login writes 11 lines into cam2's persistent stick journal, so never a login
+# every 10 s). Rows reach the served file at most every 10 s. A dropped connection is retried with
+# a backoff and the previous mirror is kept; its X-Mirror-Age-S then grows. SHIPS DISABLED;
+# runbook: rig-marker-mirror.README.md.
+Description=camera-box cam2 QPSK marker-log mirror (issue 1404) — one ssh tail -F stream into the :8890 serve dir
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=network-online.target
+Wants=network-online.target
+# Bound a restart storm (the script refuses a bad serve dir / missing sshpass at once): 20 per 5 min.
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=simple
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/rig-marker-mirror.sh
+# The loop never ends on its own (it reconnects itself); any exit is a fault -> restart.
+Restart=always
+RestartSec=10
+# Optional overrides (RIG_LEASE_SERVE_DIR; SSH_PASS for a rotated fleet password). A PRIVATE file:
+# ~/.config/environment.d/ is the user manager's GLOBAL environment and would hand the fleet
+# password to every --user unit.
+EnvironmentFile=-%h/.config/camera-box/rig-marker-mirror.env
+# NO NoNewPrivileges here: dev1's ping reaches ICMP only through its cap_net_raw file capability
+# (net.ipv4.ping_group_range = 1 0), and no-new-privs drops it -- the rig-away RTT gate would
+# then read every rig as 'unknown' and mirror over the metered venue link (issue 1404 review).
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rig-marker-mirror
+
+[Install]
+WantedBy=default.target
