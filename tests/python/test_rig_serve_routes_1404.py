@@ -274,7 +274,8 @@ def test_program_audio_age_is_recomputed_at_request_time(tmp_path):
     payload = {
         "schema": 1, "ts_utc": _ts(datetime.now(timezone.utc) - timedelta(seconds=30)), "age_s": 0.0,
         "verdict": "MEASUREMENT", "rms_dbfs": -35.6, "outside_band_pct": 16.8, "window_s": 2.0,
-        "source": "STREAM-SNV (stream)", "last_foreign_ts_utc": None,
+        "source": "STREAM-SNV (stream)", "last_foreign_ts_utc": None, "markers_decoded": 9,
+        "marker_chain": 7,
     }
     (serve / rsf.PROGRAM_AUDIO_NAME).write_text(json.dumps(payload), encoding="utf-8")
     with _Server(tmp_path / "lease", str(serve)) as s:
@@ -286,7 +287,8 @@ def test_program_audio_age_is_recomputed_at_request_time(tmp_path):
     got = json.loads(body)
     assert 29.0 <= got["age_s"] <= 33.0
     assert got["last_foreign_age_s"] is None
-    for k in ("ts_utc", "verdict", "rms_dbfs", "outside_band_pct", "window_s", "source"):
+    for k in ("ts_utc", "verdict", "rms_dbfs", "outside_band_pct", "window_s", "source", "markers_decoded",
+              "marker_chain"):
         assert got[k] == payload[k]
     assert hstatus == 200 and hbody == b"" and hheaders["Content-Type"] == "application/json"
 
@@ -333,6 +335,54 @@ def test_program_audio_unparseable_ts_has_null_age(tmp_path):
     with _Server(tmp_path / "lease", str(serve)) as s:
         _status, _h, body = s.request("GET", "/program-audio.json")
     assert json.loads(body)["age_s"] is None
+
+
+def _pa_payload(**over):
+    p = {"schema": 1, "ts_utc": _ts(datetime.now(timezone.utc) - timedelta(seconds=2)), "age_s": 0.0,
+         "verdict": "MEASUREMENT", "rms_dbfs": -35.6, "outside_band_pct": 16.8, "window_s": 2.0,
+         "source": "STREAM-SNV (stream)", "last_foreign_ts_utc": None, "markers_decoded": 9,
+         "marker_chain": 7}
+    p.update(over)
+    return p
+
+
+def _served(tmp_path, payload):
+    serve = tmp_path / "serve"
+    serve.mkdir(mode=0o700, exist_ok=True)
+    (serve / rsf.PROGRAM_AUDIO_NAME).write_text(json.dumps(payload), encoding="utf-8")
+    return rsf.program_audio_response(str(serve / rsf.PROGRAM_AUDIO_NAME), datetime.now(timezone.utc))
+
+
+def test_a_measurement_without_a_marker_chain_is_served_as_unknown(tmp_path):
+    """issue 1404 (ROZHODNUTÉ 6026826572): MEASUREMENT needs the QPSK marker chain. A payload that
+    says MEASUREMENT without one comes from a sampler older than that requirement (it keeps running
+    after a pull until it is restarted). The server is the one place every consumer reads -- the
+    camera-box guard AND restreamer's own reader -- so it serves such a payload as UNKNOWN."""
+    p = _pa_payload()
+    del p["marker_chain"], p["markers_decoded"]
+    got = _served(tmp_path, p)
+    assert got["verdict"] == "UNKNOWN"
+    assert "marker chain" in got["reason"]
+    assert 1.0 <= got["age_s"] <= 6.0  # the ages stay: a stale reading still reads stale
+    assert got["rms_dbfs"] == -35.6 and got["outside_band_pct"] == 16.8
+
+
+def test_a_measurement_with_a_non_count_marker_chain_is_served_as_unknown(tmp_path):
+    for bad in (None, "7", True, -1, 2.5):
+        got = _served(tmp_path, _pa_payload(marker_chain=bad))
+        assert got["verdict"] == "UNKNOWN", bad
+
+
+def test_a_measurement_with_its_marker_chain_is_served_unchanged(tmp_path):
+    got = _served(tmp_path, _pa_payload(marker_chain=7))
+    assert got["verdict"] == "MEASUREMENT" and got["marker_chain"] == 7
+    assert "reason" not in got
+
+
+def test_silent_and_foreign_are_served_without_a_marker_chain(tmp_path):
+    for verdict in ("SILENT", "FOREIGN", "UNKNOWN"):
+        p = _pa_payload(verdict=verdict, marker_chain=None, markers_decoded=None)
+        assert _served(tmp_path, p)["verdict"] == verdict
 
 
 def test_program_audio_from_another_owner_is_served_as_unknown(tmp_path, monkeypatch):

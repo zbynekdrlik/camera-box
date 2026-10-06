@@ -287,6 +287,16 @@ def test_a_library_without_the_shim_abi_is_unavailable():
         pam.MarkerDecoder(libm if libm.startswith("/") else _resolve_lib(libm))
 
 
+def test_a_bare_shim_name_loads_the_file_that_was_checked(shim_path, tmp_path, monkeypatch):
+    """dlopen searches the system library paths for a name without a slash, so a bare override
+    (QPSK_GUARD_SHIM=libm.so.6) must load the file the existence check saw, not the system libm."""
+    shutil.copy(shim_path, tmp_path / "libm.so.6")
+    monkeypatch.chdir(tmp_path)
+    d = pam.MarkerDecoder("libm.so.6")
+    assert d.path == str(tmp_path / "libm.so.6")
+    assert d.params["carrier_hz"] == 442
+
+
 def _resolve_lib(name: str) -> str:
     for d in ("/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu", "/lib64", "/usr/lib64", "/lib", "/usr/lib"):
         p = pathlib.Path(d) / name
