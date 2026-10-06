@@ -671,16 +671,30 @@ fn exclusion_expiry_truth_table() {
 }
 
 // ----------------------------------------------------------------------------------------------
-// Facet C — replay the observed log through a C model of the receiver's reset -> bind -> verify
-// loop, built from the SHIPPED helpers (lifted verbatim): the duplicate-aware picker, the #1180
-// verdict, the action decision, the exclusion expiry, the #1287 frame-less rule and the two
-// constants. `legacy` runs the SAME loop with the old wiring (no retarget, no exclusion, every
-// mismatch forced BY-NAME) and must reproduce the live ~55 s loop, so the replay is faithful.
-// The model's C text lives in its own file (read at run time, like the sibling tests/c harnesses).
+// Facet C — replay sender port moves through a C model of the receiver's reset -> bind -> verify
+// loop, built from the SHIPPED helpers (lifted verbatim) plus a thin wiring section that mirrors
+// ndi_source_thread. Each scenario is a list of phases (what each finder lists, which URL our
+// sender delivers on, which port is dead); any other URL a bind lands on is ANOTHER live sender.
+// `legacy` runs the pre-1367 wiring and must reproduce the live ~55 s loop, so the replay is
+// faithful. The model's C text lives in its own file (read at run time, like the sibling tests/c
+// harnesses). Decision 6009040469 names the scenarios; no scenario may ever accept a wrong sender.
 // ----------------------------------------------------------------------------------------------
 
 /// The replay model: compiled AFTER the lifted helpers, never on its own.
 const MODEL_C: &str = "tests/c/distroav_stale_duplicate_model_1367.c";
+
+/// The shipped constants and helpers the model's wiring calls, lifted verbatim in this order.
+const MODEL_CONSTS: &[&str] = &[
+    "static const uint64_t GENLOCK_RECONNECT_STALE_NS",
+    "static const uint64_t NDI_URL_EXCLUDE_TTL_NS",
+];
+const MODEL_HELPERS: &[&str] = &[
+    "static inline const char *ndi_find_url_for_source_name(",
+    "static inline bool ndi_by_url_identity_mismatch(",
+    "static inline bool ndi_force_by_name_after_frameless(",
+    "static inline int ndi_identity_mismatch_action_1367(",
+    "static inline bool ndi_url_exclusion_active_1367(",
+];
 
 /// Parsed `RESULT` line of one model run.
 #[derive(Debug)]
@@ -690,29 +704,21 @@ struct Outcome {
     t_ms: u64,
     mismatches: u32,
     retargets: u32,
-    by_name_resets: u32,
-    stale_binds_after_mismatch: u32,
-    chained_retargets: u32,
+    frameless_binds: u32,
+    wrong_frames: u32,
+    reopened: u32,
+    excluded_ours: u32,
+    max_exclusions: u32,
     wrong_sender: bool,
-    excluded_after: String,
 }
 
-fn run_model() -> (Vec<String>, Vec<(String, bool, Outcome)>) {
+fn run_model() -> (String, Vec<(String, bool, Outcome)>) {
     let mut c = String::from(PRELUDE);
-    for k in [
-        "static const uint64_t GENLOCK_RECONNECT_STALE_NS",
-        "static const uint64_t NDI_URL_EXCLUDE_TTL_NS",
-    ] {
+    for k in MODEL_CONSTS {
         c.push_str(&lift_const(k));
         c.push('\n');
     }
-    for f in [
-        "static inline const char *ndi_find_url_for_source_name(",
-        "static inline bool ndi_by_url_identity_mismatch(",
-        "static inline bool ndi_force_by_name_after_frameless(",
-        "static inline int ndi_identity_mismatch_action_1367(",
-        "static inline bool ndi_url_exclusion_active_1367(",
-    ] {
+    for f in MODEL_HELPERS {
         c.push_str(&lift_fn(f));
         c.push('\n');
     }
@@ -743,15 +749,16 @@ fn run_model() -> (Vec<String>, Vec<(String, bool, Outcome)>) {
                 t_ms: num("t_ms"),
                 mismatches: num("mismatches") as u32,
                 retargets: num("retargets") as u32,
-                by_name_resets: num("by_name_resets") as u32,
-                stale_binds_after_mismatch: num("stale_binds_after_mismatch") as u32,
-                chained_retargets: num("chained_retargets") as u32,
+                frameless_binds: num("frameless_binds") as u32,
+                wrong_frames: num("wrong_frames") as u32,
+                reopened: num("reopened") as u32,
+                excluded_ours: num("excluded_ours") as u32,
+                max_exclusions: num("max_exclusions") as u32,
                 wrong_sender: num("wrong_sender") == 1,
-                excluded_after: kv["excluded_after"].to_string(),
             },
         ));
     }
-    (lines, out)
+    (lines.join("\n"), out)
 }
 
 fn outcome<'a>(all: &'a [(String, bool, Outcome)], tag: &str, legacy: bool) -> &'a Outcome {
@@ -762,41 +769,46 @@ fn outcome<'a>(all: &'a [(String, bool, Outcome)], tag: &str, legacy: bool) -> &
 }
 
 #[test]
-fn replay_observed_log_reattaches_on_the_first_post_mismatch_reset() {
+fn no_scenario_ever_accepts_a_wrong_sender() {
     let (trace, all) = run_model();
-    let trace = trace.join("\n");
-    let new = outcome(&all, "observed", false);
-    assert!(
-        new.attached && !new.wrong_sender,
-        "issue 1367: the observed replay never reattached to our sender:\n{trace}"
-    );
     assert_eq!(
-        new.reset, 2,
-        "issue 1367: the receiver must reattach on the FIRST post-mismatch reset (reset 2), not \
-         after another ladder cycle:\n{trace}"
+        all.len(),
+        6,
+        "issue 1367: expected 6 model runs (5 scenarios + the legacy incident):\n{trace}"
     );
-    assert_eq!(
-        (new.mismatches, new.retargets, new.by_name_resets),
-        (1, 1, 0),
-        "issue 1367: exactly one mismatch, one retarget and no BY-NAME round trip:\n{trace}"
+    for (tag, legacy, o) in &all {
+        assert!(
+            !o.wrong_sender && o.attached,
+            "issue 1367: {tag} (legacy={legacy}) must end on OUR sender, never a wrong one — \
+             got {o:?}:\n{trace}"
+        );
+        if !legacy {
+            assert_eq!(
+                o.excluded_ours, 0,
+                "issue 1367: {tag} excluded the URL our sender delivers on:\n{trace}"
+            );
+        }
+    }
+}
+
+#[test]
+fn incident_ordering_attaches_without_a_wrong_frame() {
+    let (trace, all) = run_model();
+    let o = outcome(&all, "incident", false);
+    assert!(
+        o.attached && o.reset == 1 && o.wrong_frames == 0 && o.mismatches == 0,
+        "issue 1367: the stale :5961 record is contested by cg-obs, so the FIRST pick must be the \
+         live :5971 — no wrong frame, no mismatch — got {o:?}:\n{trace}"
     );
     assert!(
-        new.t_ms < 1_000,
+        o.t_ms < 1_000,
         "issue 1367: reattach must take well under a second of ladder time, took {} ms:\n{trace}",
-        new.t_ms
-    );
-    assert_eq!(
-        new.stale_binds_after_mismatch, 0,
-        "issue 1367: the proven-stale record was bound again after the mismatch:\n{trace}"
-    );
-    assert_eq!(
-        new.excluded_after, "-",
-        "issue 1367: a verified identity must clear the exclusion:\n{trace}"
+        o.t_ms
     );
 
-    // The SAME replay with the old wiring reproduces the live loop: it attaches only after the
+    // The SAME replay with the pre-1367 wiring reproduces the live loop: it attaches only after the
     // stale record aged out, after several mismatch cycles (live: 6 mismatches, ~55 s).
-    let old = outcome(&all, "observed", true);
+    let old = outcome(&all, "incident", true);
     assert!(
         old.attached && old.t_ms >= 55_000 && old.mismatches >= 5,
         "issue 1367: the legacy replay must reproduce the live ~55 s / 6-mismatch loop, else the \
@@ -805,29 +817,43 @@ fn replay_observed_log_reattaches_on_the_first_post_mismatch_reset() {
 }
 
 #[test]
-fn replay_stale_record_listed_first_everywhere_still_reattaches_once() {
+fn reversed_ordering_keeps_the_correct_bind() {
     let (trace, all) = run_model();
-    let trace = trace.join("\n");
-    let o = outcome(&all, "stale_first", false);
+    let o = outcome(&all, "reversed", false);
     assert!(
-        o.attached && !o.wrong_sender && o.reset == 2 && o.by_name_resets == 0,
-        "issue 1367: with the stale record first in EVERY later finder (incl. the verify), the \
-         exclusion must still land the retarget and verify it on reset 2 — got {o:?}:\n{trace}"
+        o.attached && !o.wrong_sender && o.reset == 1 && o.mismatches == 0 && o.retargets == 0,
+        "issue 1367: the reset binds the live :5971; a verify that lists the stale :5961 first must \
+         still see :5971 as one of the name's uncontested records and keep the bind — no teardown, \
+         no retarget — got {o:?}:\n{trace}"
     );
 }
 
 #[test]
-fn replay_live_record_before_the_sender_delivers() {
+fn dead_old_port_keeps_todays_alternation_without_an_exclusion() {
     let (trace, all) = run_model();
-    let trace = trace.join("\n");
-    let o = outcome(&all, "not_yet_delivering", false);
+    let o = outcome(&all, "dead_old_port", false);
     assert!(
-        o.attached && !o.wrong_sender,
-        "issue 1367: never reattached:\n{trace}"
+        o.attached && !o.wrong_sender && o.mismatches == 0 && o.max_exclusions == 0,
+        "issue 1367: a dead, uncontested old port gives no evidence — never an exclusion, never a \
+         lock-on — got {o:?}:\n{trace}"
     );
-    assert_eq!(
-        o.stale_binds_after_mismatch, 0,
-        "issue 1367: a later fresh-finder pass picked the proven-stale record again:\n{trace}"
+    assert!(
+        o.frameless_binds >= 2
+            && trace
+                .contains("dead_old_port reset 1 t_ms=100 BYURL 10.77.9.201:5961 -> frame-less")
+            && trace.contains("dead_old_port reset 2 t_ms=10200 BYNAME"),
+        "issue 1367: the dead old port must keep today's BY-URL <-> BY-NAME alternation:\n{trace}"
+    );
+}
+
+#[test]
+fn a_sender_still_starting_is_never_excluded() {
+    let (trace, all) = run_model();
+    let o = outcome(&all, "still_starting", false);
+    assert!(
+        o.attached && !o.wrong_sender && o.excluded_ours == 0 && o.wrong_frames == 0,
+        "issue 1367: the new :5971 is frame-less while the sender starts; it must never be excluded \
+         and the contested :5961 never bound — got {o:?}:\n{trace}"
     );
     assert!(
         o.t_ms < 60_000 && o.t_ms - 12_000 <= 15_000,
@@ -838,23 +864,16 @@ fn replay_live_record_before_the_sender_delivers() {
 }
 
 #[test]
-fn a_wrong_retarget_falls_back_to_by_name_never_chains() {
+fn two_port_moves_never_reopen_the_first_stale_url() {
     let (trace, all) = run_model();
-    let trace = trace.join("\n");
-    let o = outcome(&all, "wrong_retarget", false);
+    let o = outcome(&all, "two_moves", false);
+    assert!(
+        o.attached && !o.wrong_sender && o.reopened == 0,
+        "issue 1367: after A -> B -> C the first proven-stale A must stay excluded while B is \
+         excluded too — got {o:?}:\n{trace}"
+    );
     assert_eq!(
-        o.chained_retargets, 0,
-        "issue 1367: a retarget that mismatched must take the #1180 BY-NAME safety net, never a \
-         second retarget in a row:\n{trace}"
-    );
-    assert!(
-        trace.contains(&format!(
-            "wrong_retarget reset 2 t_ms=230 RETARGET 10.77.9.201:5981 -> MISMATCH (name maps to {LIVE}) -> BYNAME"
-        )),
-        "issue 1367: the wrong retarget's mismatch must force BY-NAME:\n{trace}"
-    );
-    assert!(
-        o.attached && !o.wrong_sender,
-        "issue 1367: the wrong-retarget episode must still end on our sender — got {o:?}:\n{trace}"
+        o.max_exclusions, 2,
+        "issue 1367: both stale URLs must be excluded at once (two slots):\n{trace}"
     );
 }

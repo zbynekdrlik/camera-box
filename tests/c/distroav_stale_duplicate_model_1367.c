@@ -2,207 +2,335 @@
  *
  * NOT compiled on its own: tests/distroav_stale_duplicate_retarget_1367.rs prepends a stub
  * NDIlib_source_t plus the SHIPPED helpers and constants it lifts VERBATIM from
- * vendor/distroav/src/ndi-source.cpp (ndi_find_url_for_source_name, ndi_by_url_identity_mismatch,
- * ndi_force_by_name_after_frameless, ndi_identity_mismatch_action_1367,
- * ndi_url_exclusion_active_1367, GENLOCK_RECONNECT_STALE_NS, NDI_URL_EXCLUDE_TTL_NS), then compiles
- * the whole under -std=gnu99 -Wall -Wextra -Wformat=2 -Wconversion -Werror and parses the RESULT
- * lines. `legacy` runs the SAME loop with the pre-fix wiring (no retarget, no exclusion, every
- * mismatch forced BY-NAME); it must reproduce the live ~55 s / 6-mismatch loop, which is what keeps
- * the model honest. */
+ * vendor/distroav/src/ndi-source.cpp, then compiles the whole under -std=gnu99 -Wall -Wextra
+ * -Wformat=2 -Wconversion -Werror and parses the RESULT lines.
+ *
+ * A scenario is a list of PHASES. Each phase says what every fresh finder lists at a reset, what
+ * every #1180 verify finder lists, which URL our sender delivers on (and from when), which URL
+ * nobody answers on, and whether the SDK's own BY-NAME resolver reaches our sender. Any other URL
+ * a bind lands on belongs to ANOTHER live sender: frames flow, but from the wrong source.
+ *
+ * The WIRING section below mirrors ndi_source_thread's use of the shipped helpers. `legacy` runs
+ * the pre-1367 wiring (first name match, every mismatch forced BY-NAME, no exclusion); it must
+ * reproduce the live ~55 s / 6-mismatch loop, which is what keeps the model honest. */
 #define MS_NS 1000000ULL
 #define S_NS 1000000000ULL
 #define NAME "RESOLUME-SNV (SP-program)"
-#define STALE "10.77.9.201:5961" /* the stale record; another LIVE sender owns this port now */
-#define LIVE "10.77.9.201:5971"  /* our sender's new port */
-#define OTHER "10.77.9.201:5981" /* a third live sender */
+#define CGOBS "RESOLUME-SNV (cg-obs)"
+#define OVERLAY "RESOLUME-SNV (CG OVERLAY)"
+#define URL_A "10.77.9.201:5961"
+#define URL_B "10.77.9.201:5971"
+#define URL_C "10.77.9.201:5981"
+#define MAX_REC 6
+#define URL_BUF 128
+
+typedef struct {
+	uint64_t from_ns; /* phase start, episode-relative */
+	NDIlib_source_t reset_list[MAX_REC];
+	uint32_t n_reset;
+	NDIlib_source_t verify_list[MAX_REC];
+	uint32_t n_verify;
+	const char *ours;       /* the URL our sender delivers on in this phase */
+	uint64_t ours_from_ns;  /* episode-relative: our sender delivers from here */
+	const char *dead;       /* a URL nobody answers on (NULL = none) */
+	bool by_name_connects;  /* the SDK name resolver reaches our sender */
+} phase_t;
 
 typedef struct {
 	const char *tag;
-	NDIlib_source_t reset_before[4]; uint32_t n_reset_before; /* the reset's fresh finder while the stale record lives */
-	NDIlib_source_t reset_after[4]; uint32_t n_reset_after;   /* every finder after it aged out */
-	NDIlib_source_t verify_first[4]; uint32_t n_verify_first; /* the first #1180 verify finder */
-	NDIlib_source_t verify_later[4]; uint32_t n_verify_later; /* every later verify finder */
-	uint64_t stale_ages_out_ns;   /* episode-relative */
-	uint64_t live_delivers_from_ns; /* episode-relative: our sender delivers frames from here */
+	phase_t ph[3];
+	unsigned n_ph;
 } scenario_t;
 
 static bool same(const char *a, const char *b) { return a && b && strcmp(a, b) == 0; }
 
 static unsigned long long ms(uint64_t ns) { return (unsigned long long)(ns / MS_NS); }
 
-static void result(const char *tag, bool legacy, int attached, unsigned reset, uint64_t rel,
-		   unsigned mismatches, unsigned retargets, unsigned by_name, unsigned stale_after,
-		   unsigned chained, int wrong_sender, const char *excluded)
+static const phase_t *phase_at(const scenario_t *sc, uint64_t rel)
 {
-	printf("RESULT %s legacy=%d attached=%d reset=%u t_ms=%llu mismatches=%u retargets=%u by_name_resets=%u stale_binds_after_mismatch=%u chained_retargets=%u wrong_sender=%d excluded_after=%s\n",
-	       tag, legacy ? 1 : 0, attached, reset, ms(rel), mismatches, retargets, by_name, stale_after,
-	       chained, wrong_sender, excluded[0] ? excluded : "-");
+	const phase_t *p = &sc->ph[0];
+	for (unsigned i = 1; i < sc->n_ph; ++i)
+		if (rel >= sc->ph[i].from_ns)
+			p = &sc->ph[i];
+	return p;
+}
+
+/* The pre-1367 picker: the first record of the name with a usable address. */
+static const char *legacy_pick(const NDIlib_source_t *list, uint32_t n)
+{
+	for (uint32_t i = 0; i < n; ++i)
+		if (same(list[i].p_ndi_name, NAME))
+			return (list[i].p_url_address && list[i].p_url_address[0]) ? list[i].p_url_address : NULL;
+	return NULL;
+}
+
+/* ---- WIRING: mirrors ndi_source_thread (Approach 1, design 6008662821) ---- */
+#define ACT_KEEP 0
+#define ACT_RETARGET 1
+#define ACT_BY_NAME 2
+
+typedef struct {
+	char excluded[URL_BUF];
+	uint64_t since;
+	char retarget[URL_BUF];
+	bool bound_via_retarget;
+} wiring_t;
+
+static void copy_url(char *dst, const char *src) { snprintf(dst, URL_BUF, "%s", src ? src : ""); }
+
+/* reset block: expire the exclusion, hand out the retarget (consumed). */
+static bool wiring_begin_reset(wiring_t *w, uint64_t now, char *retarget_out)
+{
+	if (w->excluded[0] && !ndi_url_exclusion_active_1367(w->since, now, NDI_URL_EXCLUDE_TTL_NS)) {
+		w->excluded[0] = '\0';
+		w->since = 0;
+	}
+	w->bound_via_retarget = false;
+	copy_url(retarget_out, w->retarget);
+	w->retarget[0] = '\0';
+	return retarget_out[0] != '\0';
+}
+
+static const char *wiring_pick(wiring_t *w, const NDIlib_source_t *list, uint32_t n, uint64_t now)
+{
+	(void)now;
+	return ndi_find_url_for_source_name(NAME, list, n, w->excluded[0] ? w->excluded : NULL);
+}
+
+/* the #1180 verify after first frames; *excluded_out names a URL this verify excluded. */
+static int wiring_verify(wiring_t *w, const char *bound, const NDIlib_source_t *list, uint32_t n, uint64_t now,
+			 char *excluded_out, bool *mismatch_out)
+{
+	excluded_out[0] = '\0';
+	const char *excl = (w->excluded[0] && ndi_url_exclusion_active_1367(w->since, now, NDI_URL_EXCLUDE_TTL_NS))
+				   ? w->excluded
+				   : NULL;
+	const char *v = ndi_find_url_for_source_name(NAME, list, n, excl);
+	bool mm = ndi_by_url_identity_mismatch(bound, v);
+	int action = ndi_identity_mismatch_action_1367(mm, v, w->bound_via_retarget);
+	*mismatch_out = mm;
+	if (mm) {
+		copy_url(w->excluded, bound);
+		w->since = now;
+		copy_url(excluded_out, bound);
+	}
+	if (action == 1) {
+		copy_url(w->retarget, v);
+		return ACT_RETARGET;
+	}
+	if (mm)
+		return ACT_BY_NAME;
+	if (v && v[0]) {
+		w->excluded[0] = '\0';
+		w->since = 0;
+	}
+	return ACT_KEEP;
+}
+
+static unsigned wiring_exclusions(const wiring_t *w) { return w->excluded[0] ? 1u : 0u; }
+/* ---- END WIRING ---- */
+
+typedef struct {
+	unsigned mismatches, retargets, by_name, frameless, wrong_frames, reopened, excluded_ours, max_excl;
+} stats_t;
+
+static void result(const char *tag, bool legacy, int attached, unsigned reset, uint64_t rel, const stats_t *st,
+		   int wrong_sender)
+{
+	printf("RESULT %s legacy=%d attached=%d reset=%u t_ms=%llu mismatches=%u retargets=%u by_name_resets=%u frameless_binds=%u wrong_frames=%u reopened=%u excluded_ours=%u max_exclusions=%u wrong_sender=%d\n",
+	       tag, legacy ? 1 : 0, attached, reset, ms(rel), st->mismatches, st->retargets, st->by_name, st->frameless,
+	       st->wrong_frames, st->reopened, st->excluded_ours, st->max_excl, wrong_sender);
 }
 
 static void run(const scenario_t *sc, bool legacy)
 {
 	const uint64_t t0 = 5ULL * S_NS; /* the monotonic clock is never 0 (0 = "nothing excluded") */
 	uint64_t t = t0;
-	char retarget[64] = "";
-	char excluded[64] = "";
-	uint64_t excluded_since = 0;
-	bool force_by_name = false, prev_retarget = false, seen_mismatch = false;
-	unsigned mismatches = 0, retargets = 0, by_name = 0, stale_after = 0, chained = 0, verifies = 0;
+	wiring_t w;
+	memset(&w, 0, sizeof w);
+	stats_t st;
+	memset(&st, 0, sizeof st);
+	char ever_excluded[8][URL_BUF];
+	unsigned n_ever = 0;
+	bool force_by_name = false;
 	for (unsigned reset = 1; reset <= 24; ++reset) {
 		t += 100ULL * MS_NS; /* the reset block itself */
 		uint64_t rel = t - t0;
-		bool stale_listed = rel < sc->stale_ages_out_ns;
-		const NDIlib_source_t *rl = stale_listed ? sc->reset_before : sc->reset_after;
-		uint32_t nrl = stale_listed ? sc->n_reset_before : sc->n_reset_after;
-		/* reset block: consume the force flag + the retarget, expire the exclusion */
+		const phase_t *ph = phase_at(sc, rel);
 		bool forced = force_by_name;
 		force_by_name = false;
-		char take[64];
-		snprintf(take, sizeof take, "%s", retarget);
-		retarget[0] = '\0';
-		if (excluded[0] && !ndi_url_exclusion_active_1367(excluded_since, t, NDI_URL_EXCLUDE_TTL_NS)) {
-			excluded[0] = '\0';
-			excluded_since = 0;
-		}
-		const char *excl = (!legacy && excluded[0]) ? excluded : NULL;
-		bool via_retarget = false;
+		char take[URL_BUF];
+		take[0] = '\0';
+		bool have_retarget = legacy ? false : wiring_begin_reset(&w, t, take);
 		const char *bound = NULL;
 		const char *mode = "BYNAME";
-		if (!forced && !legacy && take[0]) {
+		if (!forced && have_retarget) {
 			bound = take;
 			mode = "RETARGET";
-			via_retarget = true;
-			retargets++;
+			w.bound_via_retarget = true;
+			st.retargets++;
 		} else if (!forced) {
-			bound = ndi_find_url_for_source_name(NAME, rl, nrl, excl);
+			bound = legacy ? legacy_pick(ph->reset_list, ph->n_reset)
+				       : wiring_pick(&w, ph->reset_list, ph->n_reset, t);
 			mode = bound ? "BYURL" : "BYNAME";
 		}
-		if (via_retarget && prev_retarget)
-			chained++;
-		prev_retarget = via_retarget;
 		if (!bound) {
-			/* BY-NAME: the SDK resolver follows the stale record while it is listed (live: no
-			 * connection inside the stale window); once it aged out it reaches our sender. */
-			by_name++;
-			if (!stale_listed && rel >= sc->live_delivers_from_ns) {
-				printf("%s reset %u t_ms=%llu BYNAME -> frames from " LIVE "\n", sc->tag, reset, ms(rel));
-				result(sc->tag, legacy, 1, reset, rel, mismatches, retargets, by_name, stale_after, chained, 0, excluded);
+			st.by_name++;
+			if (ph->by_name_connects && ph->ours && rel >= ph->ours_from_ns) {
+				printf("%s reset %u t_ms=%llu BYNAME -> frames from our sender\n", sc->tag, reset, ms(rel));
+				result(sc->tag, legacy, 1, reset, rel, &st, 0);
 				return;
 			}
-			printf("%s reset %u t_ms=%llu BYNAME -> no connection inside the stale window\n", sc->tag, reset, ms(rel));
+			printf("%s reset %u t_ms=%llu BYNAME -> no connection inside the stale window\n", sc->tag, reset,
+			       ms(rel));
 			t += GENLOCK_RECONNECT_STALE_NS;
 			force_by_name = ndi_force_by_name_after_frameless(false, false);
 			continue;
 		}
-		if (seen_mismatch && same(bound, STALE))
-			stale_after++;
-		bool delivers = !same(bound, LIVE) || rel >= sc->live_delivers_from_ns;
-		if (!delivers) {
-			printf("%s reset %u t_ms=%llu %s %s -> frame-less (sender not delivering yet)\n", sc->tag, reset, ms(rel), mode, bound);
+		for (unsigned i = 0; i < n_ever; ++i)
+			if (same(bound, ever_excluded[i]) && !same(bound, ph->ours))
+				st.reopened++;
+		bool ours = same(bound, ph->ours);
+		bool frameless = same(bound, ph->dead) || (ours && rel < ph->ours_from_ns);
+		if (frameless) {
+			st.frameless++;
+			printf("%s reset %u t_ms=%llu %s %s -> frame-less\n", sc->tag, reset, ms(rel), mode, bound);
 			t += GENLOCK_RECONNECT_STALE_NS;
 			force_by_name = ndi_force_by_name_after_frameless(true, false);
 			continue;
 		}
+		if (!ours)
+			st.wrong_frames++;
 		/* frames flow -> the one-shot #1180 identity verify (its own fresh finder) */
 		t += 30ULL * MS_NS;
-		const NDIlib_source_t *vl;
-		uint32_t nvl;
-		if (!stale_listed) {
-			vl = sc->reset_after;
-			nvl = sc->n_reset_after;
-		} else if (verifies == 0) {
-			vl = sc->verify_first;
-			nvl = sc->n_verify_first;
+		int action;
+		char excluded_now[URL_BUF];
+		excluded_now[0] = '\0';
+		bool mm = false;
+		if (legacy) {
+			const char *v = legacy_pick(ph->verify_list, ph->n_verify);
+			mm = ndi_by_url_identity_mismatch(bound, v);
+			action = mm ? ACT_BY_NAME : ACT_KEEP;
 		} else {
-			vl = sc->verify_later;
-			nvl = sc->n_verify_later;
+			action = wiring_verify(&w, bound, ph->verify_list, ph->n_verify, t, excluded_now, &mm);
 		}
-		verifies++;
-		const char *vexcl = (!legacy && excluded[0] &&
-				     ndi_url_exclusion_active_1367(excluded_since, t, NDI_URL_EXCLUDE_TTL_NS))
-					    ? excluded
-					    : NULL;
-		const char *v = ndi_find_url_for_source_name(NAME, vl, nvl, vexcl);
-		bool mm = ndi_by_url_identity_mismatch(bound, v);
-		int action = legacy ? (mm ? 2 : 0) : ndi_identity_mismatch_action_1367(mm, v, via_retarget);
-		if (mm) {
-			mismatches++;
-			seen_mismatch = true;
-			if (!legacy) {
-				snprintf(excluded, sizeof excluded, "%s", bound);
-				excluded_since = t;
-			}
+		if (excluded_now[0]) {
+			if (same(excluded_now, ph->ours))
+				st.excluded_ours++;
+			if (n_ever < 8)
+				copy_url(ever_excluded[n_ever++], excluded_now);
 		}
-		if (action == 1) {
-			snprintf(retarget, sizeof retarget, "%s", v);
-			printf("%s reset %u t_ms=%llu %s %s -> MISMATCH (name maps to %s) -> RETARGET\n", sc->tag, reset, ms(rel), mode, bound, v);
+		if (!legacy && wiring_exclusions(&w) > st.max_excl)
+			st.max_excl = wiring_exclusions(&w);
+		if (mm)
+			st.mismatches++;
+		if (action == ACT_RETARGET) {
+			printf("%s reset %u t_ms=%llu %s %s -> MISMATCH -> RETARGET %s\n", sc->tag, reset, ms(rel), mode, bound,
+			       w.retarget);
 			continue;
 		}
-		if (mm) {
+		if (action == ACT_BY_NAME) {
 			force_by_name = true;
-			printf("%s reset %u t_ms=%llu %s %s -> MISMATCH (name maps to %s) -> BYNAME\n", sc->tag, reset, ms(rel), mode, bound, v);
+			printf("%s reset %u t_ms=%llu %s %s -> MISMATCH -> BYNAME\n", sc->tag, reset, ms(rel), mode, bound);
 			continue;
 		}
-		if (v && v[0] && !legacy) {
-			excluded[0] = '\0';
-			excluded_since = 0;
-		}
-		if (same(bound, LIVE)) {
-			printf("%s reset %u t_ms=%llu %s %s -> frames, identity verified\n", sc->tag, reset, ms(t - t0), mode, bound);
-			result(sc->tag, legacy, 1, reset, t - t0, mismatches, retargets, by_name, stale_after, chained, 0, excluded);
+		if (ours) {
+			printf("%s reset %u t_ms=%llu %s %s -> frames from our sender, kept\n", sc->tag, reset, ms(t - t0), mode,
+			       bound);
+			result(sc->tag, legacy, 1, reset, t - t0, &st, 0);
 			return;
 		}
 		printf("%s reset %u t_ms=%llu %s %s -> WRONG SENDER ACCEPTED\n", sc->tag, reset, ms(rel), mode, bound);
-		result(sc->tag, legacy, 0, reset, t - t0, mismatches, retargets, by_name, stale_after, chained, 1, excluded);
+		result(sc->tag, legacy, 0, reset, t - t0, &st, 1);
 		return;
 	}
-	result(sc->tag, legacy, 0, 24, t - t0, mismatches, retargets, by_name, stale_after, chained, 0, excluded);
+	result(sc->tag, legacy, 0, 24, t - t0, &st, 0);
 }
 
 int main(void)
 {
-	/* A: the observed cg OBS log 6.10.2026 04:04:50 -- the reset finder lists the stale :5961
-	 * first, every #1180 verify resolved :5971, the stale record aged out after ~55 s. */
-	static const scenario_t observed = {
-		"observed",
-		{ { NAME, STALE }, { NAME, LIVE } }, 2,
-		{ { NAME, LIVE } }, 1,
-		{ { NAME, LIVE }, { NAME, STALE } }, 2,
-		{ { NAME, LIVE }, { NAME, STALE } }, 2,
-		55ULL * S_NS, 0,
+	/* The incident ordering (cg OBS 6.10.2026 04:04:50): the stale :5961 record of our name is listed
+	 * first, and the sender that now owns :5961 (cg-obs) advertises its own record there. Every verify
+	 * resolved :5971. The stale record ages out after ~55 s. */
+	static const scenario_t incident = {
+		"incident",
+		{ { 0,
+		    { { NAME, URL_A }, { NAME, URL_B }, { CGOBS, URL_A } }, 3,
+		    { { NAME, URL_B }, { NAME, URL_A }, { CGOBS, URL_A } }, 3,
+		    URL_B, 0, NULL, false },
+		  { 55ULL * S_NS,
+		    { { NAME, URL_B }, { CGOBS, URL_A } }, 2,
+		    { { NAME, URL_B }, { CGOBS, URL_A } }, 2,
+		    URL_B, 0, NULL, true } },
+		2,
 	};
-	/* A2: worst case -- after the first verify every finder lists the stale record first. */
-	static const scenario_t stale_first = {
-		"stale_first",
-		{ { NAME, STALE }, { NAME, LIVE } }, 2,
-		{ { NAME, LIVE } }, 1,
-		{ { NAME, LIVE }, { NAME, STALE } }, 2,
-		{ { NAME, STALE }, { NAME, LIVE } }, 2,
-		55ULL * S_NS, 0,
+	/* The reversed ordering (the review's probe): the reset finder lists the live :5971 first, the
+	 * verify finder the stale :5961 first, and neither shows :5961's new owner. */
+	static const scenario_t reversed = {
+		"reversed",
+		{ { 0,
+		    { { NAME, URL_B }, { NAME, URL_A } }, 2,
+		    { { NAME, URL_A }, { NAME, URL_B } }, 2,
+		    URL_B, 0, NULL, false },
+		  { 55ULL * S_NS,
+		    { { NAME, URL_B } }, 1,
+		    { { NAME, URL_B } }, 1,
+		    URL_B, 0, NULL, true } },
+		2,
 	};
-	/* B: strih-lx CG-obs shape -- the new :5971 record is listed before the sender delivers on it
-	 * (it delivers from 12 s), the stale record lives 60 s. */
-	static const scenario_t not_yet = {
-		"not_yet_delivering",
-		{ { NAME, STALE }, { NAME, LIVE } }, 2,
-		{ { NAME, LIVE } }, 1,
-		{ { NAME, LIVE }, { NAME, STALE } }, 2,
-		{ { NAME, STALE }, { NAME, LIVE } }, 2,
-		60ULL * S_NS, 12ULL * S_NS,
+	/* The old port is dead (nobody owns it) and nothing is contested: today's BY-URL <-> BY-NAME
+	 * alternation until the stale record ages out, never a lock-on. */
+	static const scenario_t dead_old_port = {
+		"dead_old_port",
+		{ { 0,
+		    { { NAME, URL_A }, { NAME, URL_B } }, 2,
+		    { { NAME, URL_A }, { NAME, URL_B } }, 2,
+		    URL_B, 0, URL_A, false },
+		  { 55ULL * S_NS,
+		    { { NAME, URL_B } }, 1,
+		    { { NAME, URL_B } }, 1,
+		    URL_B, 0, NULL, true } },
+		2,
 	};
-	/* C: a WRONG retarget -- the first verify resolves a third live sender. */
-	static const scenario_t wrong_retarget = {
-		"wrong_retarget",
-		{ { NAME, STALE }, { NAME, LIVE } }, 2,
-		{ { NAME, LIVE } }, 1,
-		{ { NAME, OTHER }, { NAME, LIVE } }, 2,
-		{ { NAME, LIVE }, { NAME, OTHER } }, 2,
-		55ULL * S_NS, 0,
+	/* The strih-lx shape: the new :5971 record is listed before the sender delivers on it (from 12 s);
+	 * cg-obs owns the old :5961 and advertises it. */
+	static const scenario_t still_starting = {
+		"still_starting",
+		{ { 0,
+		    { { NAME, URL_A }, { NAME, URL_B }, { CGOBS, URL_A } }, 3,
+		    { { NAME, URL_B }, { NAME, URL_A }, { CGOBS, URL_A } }, 3,
+		    URL_B, 12ULL * S_NS, NULL, false },
+		  { 60ULL * S_NS,
+		    { { NAME, URL_B }, { CGOBS, URL_A } }, 2,
+		    { { NAME, URL_B }, { CGOBS, URL_A } }, 2,
+		    URL_B, 12ULL * S_NS, NULL, true } },
+		2,
 	};
-	run(&observed, false);
-	run(&observed, true);
-	run(&stale_first, false);
-	run(&not_yet, false);
-	run(&wrong_retarget, false);
+	/* Two successive port moves before any bind verified (a crash-looping sender): A -> B, cg-obs
+	 * takes A; then B -> C while the first retarget is still connecting, CG OVERLAY takes B. The
+	 * reset finder of phase 1 does not show cg-obs yet, and from phase 2 on no finder shows cg-obs
+	 * at A any more, so only the first exclusion keeps A from being re-opened. */
+	static const scenario_t two_moves = {
+		"two_moves",
+		{ { 0,
+		    { { NAME, URL_A }, { NAME, URL_B } }, 2,
+		    { { NAME, URL_B }, { NAME, URL_A }, { CGOBS, URL_A } }, 3,
+		    URL_B, 0, NULL, false },
+		  { 200ULL * MS_NS,
+		    { { NAME, URL_A }, { NAME, URL_B }, { NAME, URL_C }, { OVERLAY, URL_B } }, 4,
+		    { { NAME, URL_A }, { NAME, URL_B }, { NAME, URL_C }, { OVERLAY, URL_B } }, 4,
+		    URL_C, 0, NULL, false },
+		  { 55ULL * S_NS,
+		    { { NAME, URL_C }, { OVERLAY, URL_B } }, 2,
+		    { { NAME, URL_C }, { OVERLAY, URL_B } }, 2,
+		    URL_C, 0, NULL, true } },
+		3,
+	};
+	run(&incident, false);
+	run(&incident, true);
+	run(&reversed, false);
+	run(&dead_old_port, false);
+	run(&still_starting, false);
+	run(&two_moves, false);
 	return 0;
 }
