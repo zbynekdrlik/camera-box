@@ -180,16 +180,32 @@ def container_frames(path):
 
 
 class FrameCountMismatch(RuntimeError):
-    """A pts anomaly and a decoded frame count that differs from the container's packet count."""
+    """The decode does not hold exactly the frames the container holds."""
+
+
+def _merge_chunks(parts):
+    """The rows of every chunk in pts order, numbered 0..n-1 again.
+
+    OpenCV seeks a frame number by its TIMESTAMP, so behind a timestamp gap that is really in the
+    file a chunk starts one frame early: that frame is read by two chunks (the same pts) and kept
+    once. A chunk that started late leaves a frame no chunk read: the count check catches it. A
+    chunk's own frame numbers are never trusted, they are where the seek was aimed, not where it
+    landed."""
+    by_pts = {}
+    for rows, _, _ in parts:
+        for r in rows:
+            by_pts.setdefault(r[1], r)
+    return [(k,) + r[1:] for k, r in enumerate(sorted(by_pts.values(), key=lambda r: r[1]))]
 
 
 def _check_decode(path, jobs, parts):
-    """The chunks must tile frames 0..n-1: a missed seek or a short read is allowed only once an
-    earlier chunk reached the end of the file. A pts step outside 0.5..1.5 x the median is either a
-    gap that is really in the file (an encoder that skipped a frame: allowed, the timeline module
-    judges it) or a frame the decoder lost or repeated: the decoded count against the container's
-    own packet count tells them apart (FrameCountMismatch)."""
-    raw = sorted(r for rows, _, _ in parts for r in rows)
+    """The decode of `path` from its chunks, or RuntimeError.
+
+    A missed seek is an error, a short read is allowed only once an earlier chunk reached the end of
+    the file, and the decode must hold exactly the container's own packet count (ffprobe), else
+    FrameCountMismatch. A gap that is really in the file (an encoder that skipped a frame) is kept:
+    the timeline module judges it. A single pass is taken in its own frame order (no pts merge)."""
+    raw = _merge_chunks(parts) if len(parts) > 1 else list(parts[0][0])
     if not raw:
         raise RuntimeError(f"no frame decoded from {path}")
     ended = None  # the start of the first chunk that ran into the end of the file
@@ -204,16 +220,10 @@ def _check_decode(path, jobs, parts):
             ended = job[1]
     if ended is None:
         raise RuntimeError(f"{path}: the decode never reached the end of the file")
-    holes = [k for k, r in enumerate(raw) if r[0] != k]
-    if holes:
-        raise RuntimeError(f"{path}: frames missing from the decode from frame {holes[0]} on")
-    steps = [r[1] - r0[1] for r0, r in zip(raw, raw[1:])]
-    if steps:
-        med = sorted(steps)[len(steps) // 2]
-        bad = [(raw[k + 1][0], s) for k, s in enumerate(steps) if not 0.5 * med <= s <= 1.5 * med]
-        if bad and container_frames(path) != len(raw):
-            raise FrameCountMismatch(f"{path}: pts step {bad[0][1]:.3f} s at frame {bad[0][0]} (median {med:.3f} s) "
-                                     f"and {len(raw)} frames decoded: a frame the decoder skipped or repeated")
+    n = container_frames(path)
+    if len(raw) != n:
+        what = "frames missing" if len(raw) < n else "frames read twice"
+        raise FrameCountMismatch(f"{path}: {len(raw)} frames decoded, the container holds {n} ({what})")
     return raw
 
 
@@ -221,9 +231,9 @@ def decode_raw(path, workers=4, scale=DECODE_SCALE):
     """Raw (index, pts, left, right) of EVERY frame of a video file, or RuntimeError.
 
     The file is cut into chunks by its frame count, the last chunk reads to the end of the file (a
-    frame count is an estimate in some containers); `_check_decode` refuses any hole. OpenCV seeks
-    a frame number by its timestamp, so in a file with a real timestamp gap a chunk lands a frame
-    off: then the file is decoded once more in ONE pass from frame 0 (no seek) and judged again."""
+    frame count is an estimate in some containers), and the chunks are merged by pts. When the merge
+    does not hold exactly the container's frames (a seek that landed late left a frame unread), the
+    file is decoded once more in ONE pass from frame 0 (no seek) and judged again."""
     import cv2
 
     cap = cv2.VideoCapture(str(path))
