@@ -1,0 +1,34 @@
+[Unit]
+# issue 1404: the stream program-audio sampler, DEV1-SIDE, --user. Receives the stream program's
+# audio (stream OBS's NDI program output "STREAM-SNV (stream)", audio-only, read-only -- a receiver
+# like any NDI monitor) and every 2 s rewrites program-audio.json in the rig-lease server's serve dir
+# with a MEASUREMENT | FOREIGN | SILENT | UNKNOWN verdict, served at http://dev1:8890/program-audio.json
+# and read by scripts/program_audio_guard.py (the YouTube channel guard). Logs only verdict changes +
+# a 10-minute summary. SHIPS DISABLED; runbook: program-audio-sampler.README.md.
+Description=camera-box stream program-audio sampler (issue 1404) — NDI audio-only -> :8890/program-audio.json
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=network-online.target
+Wants=network-online.target
+# Bound a restart storm (libndi missing, the serve dir unwritable): 20 starts per 5 min.
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=simple
+# %h = the installing user's home on dev1 (newlevel); numpy comes from that user's site-packages.
+ExecStart=/usr/bin/python3 %h/devel/camera-box/scripts/program_audio_sampler.py
+Restart=on-failure
+RestartSec=10
+# Optional overrides: PROGRAM_AUDIO_SOURCE (the NDI sender name), RIG_LEASE_SERVE_DIR, NDI_LIB_PATH.
+# NEVER give dev1 an NDI extra-IP list for this receiver: mDNS only opens no TCP discovery
+# connection into any sender (.claude/rules/ndi-discovery.md, issue 1389).
+EnvironmentFile=-%h/.config/environment.d/program-audio-sampler.conf
+# An FFT of 2 s of stereo every 2 s is a few ms of CPU; keep it below the interactive work.
+Nice=10
+NoNewPrivileges=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=program-audio-sampler
+
+[Install]
+WantedBy=default.target

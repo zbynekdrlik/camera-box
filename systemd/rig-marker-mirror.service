@@ -1,0 +1,29 @@
+[Unit]
+# issue 1404: ONE pass mirroring cam2's QPSK marker log (/run/rig-qpsk-markers.csv) into the
+# rig-lease server's serve dir, so http://dev1:8890/rig-qpsk-markers.csv serves it to restreamer's
+# YouTube A/V gate (which has no fleet ssh). DEV1-SIDE, --user. Fired every 10 s by
+# rig-marker-mirror.timer. A failed pass (cam2 down, EVENT mode purged the file) exits non-zero and
+# keeps the previous mirror; its X-Mirror-Age-S then grows. Runbook: rig-marker-mirror.README.md.
+Description=camera-box cam2 QPSK marker-log mirror (issue 1404) — one scp pass into the :8890 serve dir
+Documentation=https://github.com/zbynekdrlik/camera-box
+# A 10 s timer must never trip the default start-rate limit while cam2 is down for a long time.
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/rig-marker-mirror.sh
+# The scp itself is bounded by RIG_MARKER_MIRROR_TIMEOUT (default 8 s) inside the script.
+TimeoutStartSec=30
+# Optional overrides (RIG_LEASE_SERVE_DIR, SSH_PASS for a rotated fleet password,
+# RIG_MARKER_MIRROR_TIMEOUT); the defaults are correct for dev1.
+EnvironmentFile=-%h/.config/environment.d/rig-marker-mirror.conf
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=rig-marker-mirror
+# ~8600 runs a day: drop the user manager's per-run Starting/Finished info lines (LogLevelMax=notice)
+# but keep the script's own lines (SyslogLevel=notice raises them) and every failed run's
+# "Failed with result" (.claude/rules/dev1-systemd-user-unit-hardening.md, issue 1399 section). The
+# script itself prints a success line only when it (re)establishes the mirror.
+SyslogLevel=notice
+LogLevelMax=notice

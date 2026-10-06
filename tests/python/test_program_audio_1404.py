@@ -427,3 +427,56 @@ def test_frame_to_array_refuses_a_non_float_format():
 def test_the_sampler_defaults_name_the_live_stream_program_sender():
     assert pas.DEFAULT_SOURCE == "STREAM-SNV (stream)"
     assert pas.NO_AUDIO_TIMEOUT_S == 5.0
+
+
+# ---------------------------------------------------------------------------------------------
+# the sampler process: a receiver it cannot create leaves UNKNOWN behind, never a stale verdict
+# ---------------------------------------------------------------------------------------------
+
+
+def test_main_with_an_unloadable_libndi_writes_unknown_and_fails(tmp_path):
+    serve = tmp_path / "serve"
+    from datetime import datetime, timezone
+
+    old = pa.build_payload("MEASUREMENT", -35.0, 15.0, now=datetime.now(timezone.utc), window_s=2.0,
+                           source="X")
+    serve.mkdir()
+    pa.write_payload(str(serve), old)
+    rc = pas.main(["--serve-dir", str(serve), "--lib", str(tmp_path / "no-libndi.so"),
+                   "--source", "STREAM-SNV (stream)"])
+    assert rc == 1
+    got = _read(serve)
+    assert got["verdict"] == "UNKNOWN"
+    assert "cannot receive" in got["reason"]
+    assert "no-libndi.so" in got["reason"]
+
+
+def test_an_explicit_lib_path_is_the_only_candidate(tmp_path):
+    with pytest.raises(OSError) as exc:
+        pan._load_library(str(tmp_path / "no-libndi.so"))
+    assert "/usr/lib/ndi" not in str(exc.value)
+
+
+# ---------------------------------------------------------------------------------------------
+# the sampler unit -- long-running, restarts on failure, shipped disabled
+# ---------------------------------------------------------------------------------------------
+
+
+def test_the_sampler_unit_runs_the_sampler_and_restarts_on_failure():
+    import re
+
+    s = (_ROOT / "systemd" / "program-audio-sampler.service").read_text(encoding="utf-8")
+    assert re.search(r"^Type=simple$", s, re.M)
+    assert re.search(
+        r"^ExecStart=/usr/bin/python3 %h/devel/camera-box/scripts/program_audio_sampler.py$", s, re.M)
+    assert re.search(r"^Restart=on-failure$", s, re.M)
+    assert re.search(r"^RestartSec=\d+$", s, re.M)
+    assert re.search(r"^WantedBy=default.target$", s, re.M)
+
+
+def test_the_sampler_refuses_a_serve_dir_inside_the_lease_dir(tmp_path, monkeypatch):
+    lease = tmp_path / "rig-lease"
+    monkeypatch.setenv("RIG_LEASE_DIR", str(lease))
+    rc = pas.main(["--serve-dir", str(lease / "serve"), "--lib", str(tmp_path / "no-libndi.so")])
+    assert rc == 2
+    assert not lease.exists()

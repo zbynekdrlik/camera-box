@@ -19,6 +19,19 @@ contract for restreamer#349: `.claude/rules/rig-lease-http.md`.
   GET /healthz          -> 200 "ok" liveness probe.
   HEAD /rig-lease.json, HEAD /healthz -> same routing/status as the GET form, headers only, no body
                           (a cheap liveness probe for an external checker).
+  GET /rig-qpsk-markers.csv -> issue 1404: cam2's QPSK marker log as mirrored into the SERVE dir by
+                          scripts/rig-marker-mirror.sh (byte-identical, text/csv), with
+                          `X-Mirror-Age-S` = whole seconds since the last successful mirror pass;
+                          404 while the mirror is absent.
+  GET /program-audio.json -> issue 1404: the stream program-audio verdict written by
+                          scripts/program_audio_sampler.py, with `age_s` recomputed at THIS request
+                          from the payload's own ts_utc; 404 while absent; an unreadable file is
+                          served fail-closed as verdict UNKNOWN. Consumer: program_audio_guard.py.
+  HEAD on either of the two -> the same status + headers, no body.
+                          Both are read from `--serve-dir` (default $RIG_LEASE_SERVE_DIR or
+                          /var/tmp/rig-lease-serve, scripts/rig_serve_files.py) -- NEVER the lease
+                          dir, whose mere existence means held=true. Without a serve dir (the old
+                          make_server() call shape) both routes are a plain 404.
   any other PATH        -> 404.
   any other METHOD (POST/PUT/DELETE/OPTIONS/...) -> the stdlib default 501 Not Implemented (this
                           server implements no do_POST/do_PUT/etc. handler at all -- never a write
@@ -37,6 +50,7 @@ without narrowing --bind to a private interface explicitly.
 
 Usage:
   python3 rig-lease-server.py [--bind 0.0.0.0] [--port 8890] [--lease-dir DIR] [--stale-secs N]
+                              [--serve-dir DIR]
 
 `--lease-dir` defaults to `$RIG_LEASE_DIR` (matching scripts/lib/rig-lease.sh's own env override,
 so both halves of the #830 contract read the exact same env-overridable path) or
@@ -55,6 +69,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rig_lease_state as rls  # noqa: E402
+import rig_serve_files as rsf  # noqa: E402
 
 DEFAULT_BIND = "0.0.0.0"
 DEFAULT_PORT = 8890
@@ -87,6 +102,8 @@ class RigLeaseHandler(BaseHTTPRequestHandler):
     # Overridden per-instance by make_server() via a bound subclass -- see make_server() below.
     lease_dir = "/var/tmp/rig-lease"
     stale_secs = rls.DEFAULT_STALE_SECS
+    # issue 1404: the dir the two mirrored files are served from; None = those routes are a 404.
+    serve_dir = None
 
     server_version = "rig-lease-server/1277"
     # Suppress the interpreter version from the Server: response header (BaseHTTPRequestHandler's
@@ -103,7 +120,8 @@ class RigLeaseHandler(BaseHTTPRequestHandler):
         # restreamer's consumer contract fail-open and silently drop the lease check).
         return self.path.split("?", 1)[0]
 
-    def _send(self, status: int, content_type: str, body: bytes, *, no_store: bool = False) -> None:
+    def _send(self, status: int, content_type: str, body: bytes, *, no_store: bool = False,
+              extra_headers: tuple = ()) -> None:
         # The WHOLE response (status line + headers + body) is wrapped in ONE try/except -- a
         # client that disconnects between send_response() and end_headers() would otherwise raise
         # an unguarded BrokenPipeError/ConnectionResetError (only the body write used to be
@@ -113,6 +131,8 @@ class RigLeaseHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", content_type)
             if no_store:
                 self.send_header("Cache-Control", "no-store")
+            for name, value in extra_headers:
+                self.send_header(name, value)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             if self.command != "HEAD":
@@ -136,6 +156,21 @@ class RigLeaseHandler(BaseHTTPRequestHandler):
             self._send(200, "text/plain", b"ok")
             return
 
+        if path == "/rig-qpsk-markers.csv" and self.serve_dir:
+            mirror = rsf.read_mirror(os.path.join(self.serve_dir, rsf.MARKERS_NAME), time.time())
+            if mirror is not None:
+                data, age_s = mirror
+                self._send(200, "text/csv", data, no_store=True,
+                           extra_headers=(("X-Mirror-Age-S", str(age_s)),))
+                return
+
+        if path == "/program-audio.json" and self.serve_dir:
+            payload = rsf.program_audio_response(
+                os.path.join(self.serve_dir, rsf.PROGRAM_AUDIO_NAME), datetime.now(timezone.utc))
+            if payload is not None:
+                self._send(200, "application/json", json.dumps(payload).encode("utf-8"), no_store=True)
+                return
+
         self._send(404, "text/plain", b"")
 
     def do_GET(self):
@@ -149,14 +184,16 @@ class RigLeaseHandler(BaseHTTPRequestHandler):
         self._handle()
 
 
-def make_server(bind: str, port: int, lease_dir: str, stale_secs: int) -> ThreadingHTTPServer:
-    """Build a ThreadingHTTPServer bound to a handler CLASS carrying (lease_dir, stale_secs) --
-    BaseHTTPRequestHandler subclasses are instantiated per-request by the server, so the config is
-    threaded via class attributes on a small bound subclass rather than instance state."""
+def make_server(bind: str, port: int, lease_dir: str, stale_secs: int,
+                serve_dir: str | None = None) -> ThreadingHTTPServer:
+    """Build a ThreadingHTTPServer bound to a handler CLASS carrying (lease_dir, stale_secs,
+    serve_dir) -- BaseHTTPRequestHandler subclasses are instantiated per-request by the server, so
+    the config is threaded via class attributes on a small bound subclass rather than instance
+    state. serve_dir None (the default) keeps the issue-1404 file routes a plain 404."""
     bound_handler = type(
         "BoundRigLeaseHandler",
         (RigLeaseHandler,),
-        {"lease_dir": lease_dir, "stale_secs": stale_secs},
+        {"lease_dir": lease_dir, "stale_secs": stale_secs, "serve_dir": serve_dir},
     )
     return ThreadingHTTPServer((bind, port), bound_handler)
 
@@ -175,12 +212,20 @@ def main(argv=None) -> int:
         "--stale-secs", type=int, default=_default_stale_secs(),
         help="heartbeat-staleness threshold in seconds (default $RIG_LEASE_STALE_SECS or 5400)",
     )
+    parser.add_argument(
+        "--serve-dir", default=rsf.default_serve_dir(),
+        help="dir of the issue-1404 mirrored files (default $RIG_LEASE_SERVE_DIR or "
+             f"{rsf.DEFAULT_SERVE_DIR}); never the lease dir",
+    )
     args = parser.parse_args(argv)
+    conflict = rsf.serve_dir_conflict(args.serve_dir, args.lease_dir)
+    if conflict:
+        parser.error(conflict)
 
-    server = make_server(args.bind, args.port, args.lease_dir, args.stale_secs)
+    server = make_server(args.bind, args.port, args.lease_dir, args.stale_secs, serve_dir=args.serve_dir)
     log(
         f"rig-lease-server listening on {args.bind}:{args.port} "
-        f"(lease_dir={args.lease_dir}, stale_secs={args.stale_secs})"
+        f"(lease_dir={args.lease_dir}, stale_secs={args.stale_secs}, serve_dir={args.serve_dir})"
     )
     try:
         server.serve_forever()

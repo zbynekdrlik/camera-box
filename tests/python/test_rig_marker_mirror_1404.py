@@ -457,3 +457,39 @@ def test_the_new_units_ship_disabled():
             if re.search(rf"enable[^\n]*{unit}", text):
                 hits.append(f"{p.name}: {unit}")
     assert hits == []
+
+
+# ---------------------------------------------------------------------------------------------
+# a serve dir inside the lease dir would fake a held lease: every writer + the server refuse it
+# ---------------------------------------------------------------------------------------------
+
+
+def test_serve_dir_conflict_detects_the_lease_dir_and_anything_inside_it(tmp_path):
+    lease = tmp_path / "rig-lease"
+    assert rsf.serve_dir_conflict(str(lease), str(lease))
+    assert rsf.serve_dir_conflict(str(lease / "serve"), str(lease))
+    assert rsf.serve_dir_conflict(str(tmp_path / "rig-lease-serve"), str(lease)) is None
+    assert rsf.serve_dir_conflict(rsf.DEFAULT_SERVE_DIR, rsf.DEFAULT_LEASE_DIR) is None
+
+
+def test_server_main_refuses_a_serve_dir_inside_the_lease_dir(tmp_path, capsys):
+    lease = tmp_path / "rig-lease"
+    try:
+        srv_mod.main(["--bind", "127.0.0.1", "--port", "0", "--lease-dir", str(lease),
+                      "--serve-dir", str(lease / "serve")])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("main() accepted a serve dir inside the lease dir")
+    assert "held=true" in capsys.readouterr().err
+    assert not lease.exists()
+
+
+def test_mirror_refuses_a_serve_dir_inside_the_lease_dir_and_creates_nothing(tmp_path):
+    lease = tmp_path / "rig-lease"
+    r, _serve, logs = _run_mirror(tmp_path, extra_env={
+        "RIG_LEASE_DIR": str(lease), "RIG_LEASE_SERVE_DIR": str(lease / "serve")})
+    assert r.returncode != 0
+    assert "lease dir" in r.stderr
+    assert not lease.exists()
+    assert not (logs / "scp-argv").exists()  # refused before any network call
