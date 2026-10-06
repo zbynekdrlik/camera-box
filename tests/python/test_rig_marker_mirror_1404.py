@@ -13,6 +13,7 @@ and the bash entry with a fake `sshpass` + `ssh` first on PATH -- no test ever r
 """
 from __future__ import annotations
 
+import os
 import pathlib
 import re
 import stat
@@ -86,6 +87,15 @@ def test_marker_log_is_valid_only_with_the_column_header():
     assert m2.valid()
 
 
+def test_marker_log_caps_a_line_that_never_ends():
+    m = rmm.MarkerLog()
+    m.feed(HDR_A)
+    m.feed(b"x" * (rmm.PARTIAL_LINE_CAP + 10))
+    assert m.partial_overflows == 1
+    m.feed(b"\n1,1,1\n")
+    assert m.content() == HDR_A + b"1,1,1\n"
+
+
 def test_marker_log_version_moves_only_on_a_change():
     m = rmm.MarkerLog()
     v0 = m.version
@@ -101,9 +111,12 @@ def test_marker_log_version_moves_only_on_a_change():
 # ---------------------------------------------------------------------------------------------
 
 
-def test_remote_command_follows_by_name_and_dies_with_the_connection():
+def test_remote_command_announces_the_replay_size_then_follows_by_name():
+    """The first stdout line is the file's size at connect time: the replay is done once that many
+    bytes have arrived -- never guessed from an idle gap (a fast marker cadence has none)."""
     assert rmm.remote_command("/run/rig-qpsk-markers.csv") == (
-        "exec tail -c +1 -F --pid=$PPID /run/rig-qpsk-markers.csv")
+        "f=/run/rig-qpsk-markers.csv; stat -c %s -- \"$f\" 2>/dev/null || echo 0; "
+        "exec tail -c +1 -F --pid=$PPID -- \"$f\"")
     assert rmm.REMOTE_PATH == "/run/rig-qpsk-markers.csv"
 
 
@@ -130,6 +143,8 @@ def test_reconnect_backoff_doubles_to_the_cap_and_resets_after_a_stable_connecti
 
 def test_the_constants_are_pinned():
     assert rmm.WRITE_INTERVAL_S == 10.0
+    assert rmm.REPLAY_CAP_S == 120.0
+    assert rmm.PARTIAL_LINE_CAP == 4096
     assert rmm.RECONNECT_MIN_S == 10.0
     assert rmm.RECONNECT_MAX_S == 300.0
     assert rmm.STABLE_CONNECTION_S == 300.0
@@ -141,25 +156,35 @@ def test_the_constants_are_pinned():
 
 
 def _fake_stream(tmp_path, script_body):
-    """A python stand-in for `sshpass ssh ... tail -F`: writes scripted chunks to stdout."""
+    """A python stand-in for `sshpass ssh ... stat; tail -F`: writes scripted chunks to stdout."""
     p = tmp_path / "fake_stream.py"
     p.write_text("import sys, time\nout = sys.stdout.buffer\n" + textwrap.dedent(script_body))
     return [sys.executable, str(p)]
 
 
-def _run(tmp_path, script_body, *, max_runtime_s=3.0, write_interval_s=0.2, idle_s=0.05, sleeps=None,
-         logs=None):
+def _size(content: bytes) -> bytes:
+    return b"%d\n" % len(content)
+
+
+FULL = HDR_A + ROWS_A
+
+
+def _run(tmp_path, script_body, *, max_runtime_s=3.0, write_interval_s=0.2, waits=None, logs=None,
+         procs=None):
     serve = tmp_path / "serve"
     argv = _fake_stream(tmp_path, script_body)
     writes = []
 
     def spawn(_host, _path):
-        return subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 stdin=subprocess.DEVNULL, start_new_session=True)
+        if procs is not None:
+            procs.append(proc)
+        return proc
 
     rc = rmm.run("10.77.9.62", str(serve), spawn=spawn, write_interval_s=write_interval_s,
-                 idle_s=idle_s, max_runtime_s=max_runtime_s,
-                 sleep=(lambda s: sleeps.append(s)) if sleeps is not None else (lambda s: None),
+                 max_runtime_s=max_runtime_s,
+                 wait=(waits.append if waits is not None else (lambda s: None)),
                  log=(logs.append if logs is not None else (lambda m: None)),
                  on_write=writes.append)
     return rc, serve, writes
@@ -167,28 +192,28 @@ def _run(tmp_path, script_body, *, max_runtime_s=3.0, write_interval_s=0.2, idle
 
 def test_run_serves_the_streamed_log_by_temp_and_rename(tmp_path):
     body = f"""
-    out.write({HDR_A + ROWS_A!r}); out.flush()
+    out.write({_size(FULL) + FULL!r}); out.flush()
     time.sleep(5)
     """
-    rc, serve, writes = _run(tmp_path, body, max_runtime_s=1.5)
+    rc, serve, writes = _run(tmp_path, body, max_runtime_s=1.0)
     assert rc == 0
     f = serve / rsf.MARKERS_NAME
-    assert f.read_bytes() == HDR_A + ROWS_A
+    assert f.read_bytes() == FULL
     assert stat.S_IMODE(f.stat().st_mode) == 0o644
     assert stat.S_IMODE(serve.stat().st_mode) == 0o700
     assert sorted(p.name for p in serve.iterdir()) == [rsf.MARKERS_NAME]
-    assert len(writes) == 1
+    assert writes == [FULL]
 
 
 def test_run_follows_appends_at_most_once_per_write_interval(tmp_path):
     body = f"""
-    out.write({HDR_A!r}); out.flush()
+    out.write({_size(HDR_A) + HDR_A!r}); out.flush()
     for i in range(10):
         time.sleep(0.1)
         out.write(b"%d,%d,%d\\n" % (i, i, i)); out.flush()
     time.sleep(5)
     """
-    rc, serve, writes = _run(tmp_path, body, max_runtime_s=2.5, write_interval_s=0.4, idle_s=0.03)
+    rc, serve, writes = _run(tmp_path, body, max_runtime_s=2.5, write_interval_s=0.4)
     assert rc == 0
     expected = HDR_A + b"".join(b"%d,%d,%d\n" % (i, i, i) for i in range(10))
     assert (serve / rsf.MARKERS_NAME).read_bytes() == expected
@@ -196,52 +221,129 @@ def test_run_follows_appends_at_most_once_per_write_interval(tmp_path):
     assert 2 <= len(writes) <= 6
 
 
+def test_run_writes_while_markers_arrive_faster_than_any_idle_gap(tmp_path):
+    """The painter cadence is a CLI argument: rows every 50 ms leave no idle gap at all, and the
+    mirror must still write on its interval while they keep coming."""
+    body = f"""
+    out.write({_size(HDR_A) + HDR_A!r}); out.flush()
+    for i in range(40):
+        out.write(b"%d,%d,%d\\n" % (i, i, i)); out.flush()
+        time.sleep(0.05)
+    time.sleep(5)
+    """
+    _rc, _serve, writes = _run(tmp_path, body, max_runtime_s=1.5, write_interval_s=0.3)
+    assert len(writes) >= 3
+
+
 def test_run_serves_the_new_session_after_a_painter_restart(tmp_path):
     body = f"""
-    out.write({HDR_A + ROWS_A!r}); out.flush()
+    out.write({_size(FULL) + FULL!r}); out.flush()
     time.sleep(0.6)
     out.write({HDR_B + ROWS_B!r}); out.flush()
     time.sleep(5)
     """
-    rc, serve, _w = _run(tmp_path, body, max_runtime_s=2.0)
+    _rc, serve, _w = _run(tmp_path, body, max_runtime_s=1.5)
     assert (serve / rsf.MARKERS_NAME).read_bytes() == HDR_B + ROWS_B
 
 
-def test_run_never_serves_a_half_replayed_copy(tmp_path):
-    """A (re)connection replays the whole file; nothing is written until the replay is in (the
-    first idle gap), so a consumer never reads a copy shorter than the one it read before."""
+def test_run_never_serves_a_prefix_across_a_stall_mid_replay(tmp_path):
+    big = HDR_A + b"".join(b"%d,%d,%d\n" % (i, i, i) for i in range(200))
+    half = len(big) // 2
     body = f"""
-    out.write({HDR_A + ROWS_A!r}); out.flush()
-    time.sleep(0.01)
-    out.write({ROWS_B!r}); out.flush()
+    out.write({_size(big) + big[:half]!r}); out.flush()
+    time.sleep(0.6)
+    out.write({big[half:]!r}); out.flush()
     time.sleep(5)
     """
-    _rc, _serve, writes = _run(tmp_path, body, max_runtime_s=1.0, idle_s=0.2)
-    assert writes and writes[0] == HDR_A + ROWS_A + ROWS_B
+    _rc, _serve, writes = _run(tmp_path, body, max_runtime_s=1.5)
+    assert writes and writes[0] == big
+
+
+def test_run_keeps_the_served_copy_when_the_connection_dies_mid_replay(tmp_path):
+    serve = tmp_path / "serve"
+    serve.mkdir(mode=0o700)
+    big = HDR_A + b"".join(b"%d,%d,%d\n" % (i, i, i) for i in range(200))
+    (serve / rsf.MARKERS_NAME).write_bytes(big)
+    body = f"""
+    out.write({_size(big) + big[:len(big) // 4]!r}); out.flush()
+    sys.exit(255)
+    """
+    _rc, serve, writes = _run(tmp_path, body, max_runtime_s=1.0)
+    assert writes == []
+    assert (serve / rsf.MARKERS_NAME).read_bytes() == big
+
+
+def test_run_writes_nothing_when_stopped_mid_replay(tmp_path):
+    big = HDR_A + b"".join(b"%d,%d,%d\n" % (i, i, i) for i in range(200))
+    body = f"""
+    out.write({_size(big) + big[:100]!r}); out.flush()
+    time.sleep(5)
+    """
+    _rc, serve, writes = _run(tmp_path, body, max_runtime_s=0.8)
+    assert writes == []
+    assert not (serve / rsf.MARKERS_NAME).exists()
+
+
+def test_a_reconnect_without_new_rows_keeps_the_served_file_and_its_age(tmp_path):
+    serve = tmp_path / "serve"
+    serve.mkdir(mode=0o700)
+    f = serve / rsf.MARKERS_NAME
+    f.write_bytes(FULL)
+    past = os.stat(f).st_mtime - 50
+    os.utime(f, (past, past))
+    body = f"""
+    out.write({_size(FULL) + FULL!r}); out.flush()
+    time.sleep(5)
+    """
+    _rc, serve, writes = _run(tmp_path, body, max_runtime_s=1.0)
+    assert writes == []
+    assert os.stat(f).st_mtime == past
+
+
+def test_a_bad_size_line_ends_the_connection_with_an_error(tmp_path):
+    logs = []
+    body = """
+    out.write(b"<html>\\n"); out.flush()
+    time.sleep(5)
+    """
+    _rc, _serve, writes = _run(tmp_path, body, max_runtime_s=1.0, logs=logs)
+    assert writes == []
+    assert any(m.startswith("ERROR") and "size line" in m for m in logs)
 
 
 def test_run_never_serves_a_half_row(tmp_path):
     body = f"""
-    out.write({HDR_A + ROWS_A + b"99,99,17913"!r}); out.flush()
+    out.write({_size(FULL + b"99,99,17913") + FULL + b"99,99,17913"!r}); out.flush()
     time.sleep(5)
     """
-    _rc, serve, _w = _run(tmp_path, body, max_runtime_s=1.5)
-    assert (serve / rsf.MARKERS_NAME).read_bytes() == HDR_A + ROWS_A
+    _rc, serve, _w = _run(tmp_path, body, max_runtime_s=1.0)
+    assert (serve / rsf.MARKERS_NAME).read_bytes() == FULL
+
+
+def test_run_logs_bytes_dropped_before_the_first_session_header(tmp_path):
+    logs = []
+    body = f"""
+    out.write({_size(ROWS_A) + ROWS_A!r}); out.flush()
+    time.sleep(5)
+    """
+    _rc, serve, writes = _run(tmp_path, body, max_runtime_s=1.0, logs=logs)
+    assert writes == []
+    assert any("before the first session header" in m for m in logs)
 
 
 def test_run_keeps_the_previous_mirror_and_backs_off_when_ssh_fails(tmp_path):
     serve = tmp_path / "serve"
     serve.mkdir(mode=0o700)
     (serve / rsf.MARKERS_NAME).write_bytes(HDR_A + b"PREVIOUS\n")
-    sleeps, logs = [], []
+    waits, logs = [], []
     body = """
     sys.stderr.write("ssh: connect to host 10.77.9.62 port 22: No route to host\\n")
     sys.exit(255)
     """
-    _rc, serve, writes = _run(tmp_path, body, max_runtime_s=1.0, sleeps=sleeps, logs=logs)
+    _rc, serve, writes = _run(tmp_path, body, max_runtime_s=1.0, waits=waits, logs=logs)
     assert writes == []
     assert (serve / rsf.MARKERS_NAME).read_bytes() == HDR_A + b"PREVIOUS\n"
-    assert sleeps[:3] == [rmm.RECONNECT_MIN_S, 2 * rmm.RECONNECT_MIN_S, 4 * rmm.RECONNECT_MIN_S]
+    assert waits[:3] == [rmm.RECONNECT_MIN_S, 2 * rmm.RECONNECT_MIN_S, 4 * rmm.RECONNECT_MIN_S]
     errors = [m for m in logs if m.startswith("ERROR")]
     assert errors and "No route to host" in errors[0] and "10.77.9.62" in errors[0]
 
@@ -249,13 +351,50 @@ def test_run_keeps_the_previous_mirror_and_backs_off_when_ssh_fails(tmp_path):
 def test_run_logs_the_remote_tail_notes(tmp_path):
     logs = []
     body = f"""
-    out.write({HDR_A!r}); out.flush()
+    out.write({_size(HDR_A) + HDR_A!r}); out.flush()
     sys.stderr.write("tail: '/run/rig-qpsk-markers.csv' has become inaccessible: No such file or directory\\n")
     sys.stderr.flush()
     time.sleep(5)
     """
     _run(tmp_path, body, max_runtime_s=1.0, logs=logs)
     assert any("has become inaccessible" in m for m in logs)
+
+
+def test_the_backoff_wait_ends_as_soon_as_the_run_is_stopped():
+    """time.sleep resumes after SIGTERM (PEP 475): one long sleep would hold a `systemctl stop`
+    for the whole backoff (up to 300 s, past the 90 s stop timeout). The wait is sliced."""
+    clock = {"t": 0.0}
+    slept = []
+
+    def sleep(s):
+        slept.append(s)
+        clock["t"] += s
+
+    stop_at = 1.2
+    rmm.wait_interruptibly(300.0, out_of_time=lambda: clock["t"] >= stop_at,
+                           clock=lambda: clock["t"], sleep=sleep)
+    assert clock["t"] < stop_at + rmm.WAIT_SLICE_S + 1e-9
+    assert max(slept) <= rmm.WAIT_SLICE_S
+    clock["t"] = 0.0
+    slept.clear()
+    rmm.wait_interruptibly(2.0, out_of_time=lambda: False, clock=lambda: clock["t"], sleep=sleep)
+    assert abs(clock["t"] - 2.0) < 1e-9
+
+
+def test_run_stops_the_ssh_process_even_when_a_write_fails(tmp_path, monkeypatch):
+    procs = []
+
+    def boom(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(rsf, "write_bytes_atomic", boom)
+    body = f"""
+    out.write({_size(FULL) + FULL!r}); out.flush()
+    time.sleep(30)
+    """
+    with pytest.raises(OSError):
+        _run(tmp_path, body, max_runtime_s=3.0, procs=procs)
+    assert procs and procs[0].poll() is not None
 
 
 def test_run_refuses_a_serve_dir_inside_the_lease_dir(tmp_path, monkeypatch):
@@ -300,6 +439,7 @@ def _fake_bin(tmp_path, ssh_body):
 
 SSH_OK = (
     'printf "%s\\n" "$@" > "$FAKE_LOG_DIR/ssh-argv"\n'
+    'wc -c < "$FAKE_SRC"\n'
     'cat "$FAKE_SRC"\n'
     "sleep 30\n"
 )
@@ -331,7 +471,7 @@ def test_entry_mirrors_cam2_with_the_fleet_credential(tmp_path):
     assert (serve / rsf.MARKERS_NAME).read_bytes() == HDR_A + ROWS_A
     argv = (logs / "ssh-argv").read_text().split("\n")
     assert "root@10.77.9.62" in argv
-    assert "exec tail -c +1 -F --pid=$PPID /run/rig-qpsk-markers.csv" in argv
+    assert rmm.remote_command("/run/rig-qpsk-markers.csv") in argv
     assert (logs / "sshpass-env").read_text().strip() == _fleet_default_pass()
     assert _fleet_default_pass() not in (logs / "sshpass-argv").read_text().split("\n")
 

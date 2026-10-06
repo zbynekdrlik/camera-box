@@ -221,10 +221,26 @@ def test_a_foreign_window_since_the_last_poll_exits_1_even_when_the_current_one_
     assert "latched" in line and "6.0 s ago" in line
 
 
-def test_a_foreign_window_older_than_max_age_no_longer_trips():
-    with _Fake(body=_payload("MEASUREMENT", last_foreign_age_s=30.0)) as f:
+def test_a_foreign_window_older_than_the_latch_hold_no_longer_trips():
+    with _Fake(body=_payload("MEASUREMENT", last_foreign_age_s=40.0)) as f:
         rc, _line, _m = _guard(f.url)
     assert rc == 0
+
+
+def test_the_latch_hold_outlasts_max_age_so_a_late_poll_still_sees_it():
+    """A gate polls every ~10 s plus the guard's own runtime: a FOREIGN window that ended 25 s
+    ago is still reported (latch hold 30 s, independent of --max-age 10)."""
+    with _Fake(body=_payload("MEASUREMENT", last_foreign_age_s=25.0)) as f:
+        rc, line, _m = _guard(f.url)
+    assert rc == 1 and "latched" in line
+    with _Fake(body=_payload("MEASUREMENT", last_foreign_age_s=25.0)) as f:
+        rc2, _l2, _m2 = _guard(f.url, "--latch-s", "20")
+    assert rc2 == 0
+
+
+def test_the_latch_hold_default_is_pinned():
+    src = GUARD.read_text(encoding="utf-8")
+    assert "DEFAULT_LATCH_S = 30.0" in src
 
 
 def test_a_negative_age_beyond_a_clock_step_is_stale():
