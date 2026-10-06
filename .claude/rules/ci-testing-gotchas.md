@@ -670,6 +670,16 @@ dev-dep) — a kernel-atomic O_EXCL random name that CANNOT collide, whose Drop 
 the trailing manual `remove_dir_all` race. Rule: never hand-roll a unique temp path from
 pid+timestamp in a test; use `tempfile::tempdir()`.
 
+**A std-only lift-and-compile gate must not compile to a FIXED temp path either (issue 1367).** Six
+replay tests each compiled the same C harness to `<temp>/…/sequence.c/.bin`; under a parallel runner
+one test ran the binary while another rewrote it ("Text file busy", ETXTBSY). Measured: 9 of 10
+default-thread runs failed, while every local run used `--test-threads 1` and stayed green, and CI's
+nextest is parallel. Fix without giving up the plain-rustc path (`tempfile` is not std): name each
+compile `{tag}-{pid}-{counter}` with a `static AtomicUsize` counter. The counter separates threads of
+one process (unlike a clock), the pid separates nextest's per-test processes. Remove the call's own
+files after the run (`tests/support/ndi_source_lift_1367.rs`). Run every new lift gate at least once
+with the DEFAULT thread count, several times, before trusting it.
+
 ## A shared JSON/state file read FIELD-BY-FIELD (N separate parses) tears when a peer deletes it mid-read; read it ATOMICALLY (#970/#980)
 
 `scripts/lib/rig-lease.sh`'s `rig_lease_holder_summary` read holder.json via FIVE separate
