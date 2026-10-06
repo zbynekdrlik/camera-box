@@ -263,7 +263,7 @@ static const unsigned NDI_IDENTITY_VERIFY_MAX_WAITS = 2;
 
 /* camera-box #1367 (decision 6009040469): what the #1180 post-connect verify concludes about a BY-URL
  * bind that delivers frames (ndi_identity_verdict_1367). */
-enum ndi_identity_verdict_1367 {
+enum ndi_verify_verdict_1367 {
 	NDI_VERIFY_INCONCLUSIVE_1367 = 0, /* the name is not discoverable -> keep the feed, as #1180 always did */
 	NDI_VERIFY_VERIFIED_1367 = 1,     /* the bound URL is one of the name's uncontested records */
 	NDI_VERIFY_STALE_1367 = 2,        /* another name advertises the bound URL -> proven stale */
@@ -310,7 +310,9 @@ static inline bool ndi_url_contested_1367(const char *url, const char *name, con
  * live new one. Among the name's records the picker skips a URL in `exclude_a` / `exclude_b` (proven
  * stale earlier, see NDI_URL_EXCLUDE_TTL_NS) and a CONTESTED record (ndi_url_contested_1367: another
  * name advertises its URL), and returns the first remaining one. When none remains it returns NULL,
- * so the existing fallback ladder and BY-NAME take over -- never a bind to a proven-wrong sender.
+ * so the existing fallback ladder and BY-NAME take over. The picker itself never returns a contested
+ * or excluded record; the ladder's last-known rung after it is unchanged and can still bind a stale
+ * URL, which the verify then reports STALE.
  * NULL/empty excludes and an uncontested list = the original first-match pick
  * (tests/distroav_stale_duplicate_retarget_1367.rs). */
 static inline const char *ndi_find_url_for_source_name(const char *requested_name,

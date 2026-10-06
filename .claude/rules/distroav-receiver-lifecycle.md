@@ -362,7 +362,8 @@ the same finder list is stale (`ndi_url_contested_1367`; live `avahi-browse` on 
 name per URL, so the old port's new owner advertises it). A nameless record is no evidence.
 - **Picker, both pick sites.** `ndi_find_url_for_source_name(name, sources, n, exclude_a, exclude_b)`
   skips an excluded URL and a contested record, and returns the first remaining record of the name.
-  None left = NULL, so the existing ladder and BY-NAME take over, never a wrong bind. With no
+  None left = NULL, so the existing ladder and BY-NAME take over (its last-known rung is unchanged
+  and can still bind a stale URL, which the verify then reports STALE). With no
   exclusion and no contest it is the original first-match pick. In the incident the very first
   fresh-finder pick lands on `:5971`: no wrong frame, no mismatch.
 - **Duplicate-aware verify** (`ndi_identity_verdict_1367`, run by `ndi_identity_verify_1367` on the
@@ -392,9 +393,17 @@ name per URL, so the old port's new owner advertises it). A nameless record is n
   helpers between the `stale-duplicate state: BEGIN/END` markers. `ndi_source_thread` stays at its
   pre-1367 966 lines; the verify finder lives in `ndi_identity_verify_1367`, so the thread creates only
   the reset's finder.
-- **Known limit:** a bind to the stale port while NO finder snapshot lists the new owner's record
-  reads VERIFIED (the bound URL is then an uncontested record of our name). The evidence rule needs
-  the owner's record, which a live sender advertises.
+- **Known limits** (raised to the main as Design-question 6009544928 refinements, none a regression
+  against the pre-1367 code):
+  - the verify decides on the FIRST verify-finder snapshot that lists the name; a snapshot missing
+    the new owner's record reads a wrong bind VERIFIED, one missing our own new record reads a
+    correct bind MISMATCH (the #1180 BY-NAME path);
+  - a bound URL another name advertises while our name is not listed at all stays INCONCLUSIVE
+    (decision point 2), so that feed is kept;
+  - "contested" cannot tell which of two records is stale when ports swap or shift together (a
+    whole OBS box restarting): our correct new record can be contested by another output's stale
+    record, the picker then returns NULL, and a correct BY-URL bind can read STALE and be excluded;
+  - the ladder's last-known rung can bind the stale URL for one verify cycle (above).
 
 **The gate.**
 - Truth tables over the verbatim-lifted verdict block and state block:

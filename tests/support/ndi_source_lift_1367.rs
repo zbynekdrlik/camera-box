@@ -81,7 +81,7 @@ pub fn lift_const(prefix: &str) -> String {
 /// #1180 equality helper and the duplicate-aware verdict.
 pub fn lift_verdict_block() -> String {
     let src = repo_file(NDI_SOURCE);
-    let start = index_of(&src, "enum ndi_identity_verdict_1367 {", "the verdict enum");
+    let start = index_of(&src, "enum ndi_verify_verdict_1367 {", "the verdict enum");
     let sig = index_of(
         &src,
         "static inline int ndi_identity_verdict_1367(",
