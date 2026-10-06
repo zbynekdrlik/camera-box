@@ -34,11 +34,13 @@ timeout is UNKNOWN; a proven FAIL anywhere wins over an UNKNOWN.
 CLI (shared with restreamer's release gate):
   youtube_leg_verdict.py --vod <youtube id | local file> --recording <file>[@<record-start-utc>] ...
                          --markers <cam2 qpsk marker csv | http url> --windows <name:start:end> ...
-                         --publish <utc> ... --out <dir> [--probe-bin <recording-verdict>]
+                         --publish <utc> ... [--unpublish <utc> ...] --out <dir>
+                         [--probe-bin <recording-verdict>]
   exit 0 = PASS, 1 = FAIL, 2 = UNKNOWN; writes <dir>/youtube-leg-verdict.json.
   Timestamps: epoch seconds, ISO 8601 (2026-10-06T01:40:15.901Z) or compact (20261006T014015.901Z).
   More than one --recording = parts of one session split by an OBS restart; a part without @start is
-  placed after the previous one by painter tick. A window must lie inside one publish span.
+  placed after the previous one by painter tick. A window must lie inside one publish span: a
+  --publish inside it, or an --unpublish (StopStream) inside it or under 1 s after it, is UNKNOWN.
   `--decode-ticks <file>` (diagnostic) prints a file's per-frame tick map and exits.
 """
 import argparse
@@ -58,19 +60,21 @@ if _HERE not in sys.path:
 
 from youtube_leg_audio import (FOREIGN_DB, LAG_JUMP, LEVEL_DROP_DB, LOW_CORR, SILENT_VOD_DBFS,  # noqa: E402
                                SR, audio_blocks, audio_window, dbfs, drop_samples, load_audio,
-                               ncc_best, run_bounded)
+                               ncc_best)
+from youtube_leg_proc import install_cleanup, run_bounded  # noqa: E402
 from youtube_leg_ticks import (DECODE_SCALE, DECODER_VERSION, PHASE_RADIUS, _qr_tick,  # noqa: E402
-                               band_ticks, decode_raw, decode_ticks, half_ticks, load_raw,
+                               band_ticks, container_frames, decode_raw, decode_ticks, half_ticks, load_raw,
                                load_ticks, painter_payload, painter_tick, resolve_ticks,
                                write_ticks)
 from youtube_leg_timeline import (DETAIL_LIMIT, END_SLACK_S, TickClock, clamp_window,  # noqa: E402
                                   continuity, coverage, dupskip, join_part_rows,
-                                  painter_restarts, publish_gaps, vod_content_times, vod_pts_for)
+                                  painter_restarts, publish_gaps, timestamp_gaps, vod_content_times,
+                                  vod_pts_for)
 
 __all__ = ["SR", "run_bounded", "audio_blocks", "audio_window", "dbfs", "drop_samples", "load_audio", "ncc_best",
            "DECODE_SCALE", "DECODER_VERSION", "PHASE_RADIUS", "_qr_tick", "band_ticks", "decode_raw",
            "decode_ticks", "half_ticks", "load_raw", "load_ticks", "painter_payload", "painter_tick",
-           "resolve_ticks", "write_ticks", "DETAIL_LIMIT", "END_SLACK_S", "TickClock", "clamp_window",
+           "resolve_ticks", "write_ticks", "container_frames", "timestamp_gaps", "DETAIL_LIMIT", "END_SLACK_S", "TickClock", "clamp_window",
            "continuity", "coverage", "dupskip", "join_part_rows", "join_parts", "painter_restarts",
            "publish_gaps", "vod_content_times", "vod_pts_for", "parse_avsync_output", "av_from_outputs",
            "av_window", "verdict", "parse_utc", "parse_window", "parse_recording", "fmt_utc", "main"]
@@ -84,11 +88,12 @@ AV_MIN_MARKER_FRACTION = 0.5  # of the clip's expected markers (one per 0.5 s)
 PUBLISH_GAP_MAX_S = 0.5
 CADENCE_MIN_PCT = 90.0
 MIN_WINDOW_COVERED = 0.5  # a window the VOD covers under half of is UNKNOWN
-UNJUDGED_MIN, UNJUDGED_FRACTION = 5, 0.005  # more unjudged VOD pairs than this is UNKNOWN
+UNJUDGED_MAX = 5  # more unjudged adjacent VOD pairs than this is UNKNOWN (clean real windows: 0)
 AUDIO_END_SLACK_S = 0.5
 AUDIO_MIN_MEASURED = 0.9  # of the expected blocks
 AUDIO_MIN_SIGNAL = 0.25  # of the measured blocks must carry recording signal (the only judged ones)
-VOD_BLIND_MAX_S = 1.0  # a longer VOD-only undecodable stretch (black, a slate) is UNKNOWN
+VOD_BLIND_MAX_S = 0.1  # more VOD-only undecodable runs (2+ frames, black / slate / a flash) is UNKNOWN
+STOP_MARGIN_S = 1.0  # a window must end this long before a StopStream (the VOD loops its last frames)
 CLIP_TIMEOUT_S, PROBE_TIMEOUT_S, YTDLP_TIMEOUT_S, URL_TIMEOUT_S = 600, 1800, 3600, 60
 
 
@@ -212,12 +217,12 @@ def verdict(windows, publishes):
             bad("dupskip", f"{name}: the VOD ends {ds['vod_ends_early_s']:.1f} s before the recording's "
                            "last decoded frame of the window", "FAIL")
         if (ds.get("vod_blind_s") or 0) > VOD_BLIND_MAX_S:
-            bad("dupskip", f"{name}: the VOD decodes nothing for {ds['vod_blind_s']:.1f} s where the recording "
-                           "decodes (black or a slate on YouTube?)", "UNKNOWN")
+            bad("dupskip", f"{name}: the VOD decodes nothing for {ds['vod_blind_s']:.2f} s (runs of 2+ frames) "
+                           "where the recording decodes (black or a slate on YouTube?)", "UNKNOWN")
         if (ds.get("unanchored_s") or 0) > END_SLACK_S:
             bad("dupskip", f"{name}: {ds['unanchored_s']:.1f} s of the window has no frame both files show "
                            "unambiguously", "UNKNOWN")
-        if ds.get("unjudged", 0) > max(UNJUDGED_MIN, UNJUDGED_FRACTION * ds.get("vod_frames", 0)):
+        if ds.get("unjudged", 0) > UNJUDGED_MAX:
             bad("dupskip", f"{name}: {ds['unjudged']} VOD frame pairs could not be judged", "UNKNOWN")
         cov = w.get("coverage") or {}
         for side in ("rec", "vod"):
@@ -356,8 +361,11 @@ def measure_window(ctx, name, a, b):
     rec_rows, vod_rows, t0, starts = ctx["rec_rows"], ctx["vod_rows"], ctx["t0"], ctx["starts"]
     w = {"name": name, "start": fmt_utc(a), "end": fmt_utc(b), "errors": []}
     inside = [p for p in ctx["publishes"] if a < p < b]
-    if inside:
-        w["errors"].append(f"a publish at {fmt_utc(inside[0])} is inside the window (one publish span per window)")
+    stops = [u for u in ctx["unpublishes"] if a < u < b + STOP_MARGIN_S]
+    if inside or stops:
+        what = (f"a publish at {fmt_utc(inside[0])} is inside the window" if inside else
+                f"the stream stopped at {fmt_utc(stops[0])}, inside the window or under {STOP_MARGIN_S:.0f} s after it")
+        w["errors"].append(f"{what} (one publish span per window)")
         return w
     ds = _guard(dupskip, rec_rows, vod_rows, t0, a, b)
     w["dupskip"] = ds
@@ -374,8 +382,8 @@ def measure_window(ctx, name, a, b):
         return w
     if k not in ctx["rec_audio"]:
         ctx["rec_audio"][k] = load_audio(ctx["recs"][k][0])
-    w["audio"] = _guard(audio_window, ctx["rec_audio"][k], ctx["vod_audio"], rec_rows, vod_rows, t0, a2, b2,
-                        rec_pts0=starts[k] - t0)
+    w["audio"] = _guard(audio_window, ctx["rec_audio"][k], ctx["vod_audio"], rec_rows, vod_rows, t0, a2, cov_end,
+                        rec_pts0=starts[k] - t0)  # audio needs no painter: to the coverage end, not the VOD's
     w["audio"].pop("start_utc", None)
     rec_p, vod_p = vod_pts_for(rec_rows, vod_rows, t0, a2)
     if rec_p is None or vod_p is None:
@@ -393,7 +401,8 @@ def measure(args):
     recs = [parse_recording(r) for r in args.recording]
     vod_file = fetch_vod(args.vod, args.out)
     ctx = {"recs": recs, "vod_file": vod_file, "markers": fetch_markers(args.markers, args.out),
-           "probe_bin": args.probe_bin, "out": args.out, "rec_audio": {}, "publishes": publishes}
+           "probe_bin": args.probe_bin, "out": args.out, "rec_audio": {}, "publishes": publishes,
+           "unpublishes": [parse_utc(u) for u in args.unpublish]}
     part_rows = [cached_ticks(p, os.path.join(args.out, f"ticks-rec-{k + 1}.tsv"), args.workers)
                  for k, (p, _) in enumerate(recs)]
     ctx["vod_rows"] = cached_ticks(vod_file, os.path.join(args.out, "ticks-vod.tsv"), args.workers)
@@ -432,6 +441,7 @@ def main(argv=None):
     ap.add_argument("--markers")
     ap.add_argument("--windows", action="append", default=[])
     ap.add_argument("--publish", action="append", default=[])
+    ap.add_argument("--unpublish", action="append", default=[], help="a StopStream time (utc)")
     ap.add_argument("--out")
     ap.add_argument("--probe-bin", default=os.environ.get("RECORDING_VERDICT_BIN", "recording-verdict"))
     ap.add_argument("--workers", type=int, default=4)
@@ -457,6 +467,7 @@ def main(argv=None):
 
 def entry(argv=None):
     """main() with every crash (a full disk at write time, ...) mapped to UNKNOWN, never FAIL's 1."""
+    install_cleanup()
     try:
         return main(argv)
     except SystemExit:

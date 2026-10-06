@@ -48,8 +48,9 @@ CLI contract (shared with restreamer's gate):
 ```
 youtube_leg_verdict.py --vod <youtube id | local file> --recording <file>[@<record-start-utc>] ...
                        --markers <cam2 qpsk marker csv> --windows <name:start-utc:end-utc> ...
-                       --publish <utc> ... --out <dir>
+                       --publish <utc> ... [--unpublish <utc> ...] --out <dir>
 exit 0 = PASS, 1 = FAIL, 2 = UNKNOWN (tool/decode/download error)
+--unpublish = a StopStream time: a window holding one, or ending under 1 s before one, is UNKNOWN
 <dir>/youtube-leg-verdict.json:
   {schema: 1, overall: "PASS"|"FAIL"|"UNKNOWN", criteria: {...},
    windows: [{name, start, end,

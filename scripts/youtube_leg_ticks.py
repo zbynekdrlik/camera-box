@@ -30,12 +30,19 @@ import zlib
 
 import numpy as np
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+from youtube_leg_proc import run_bounded  # noqa: E402
+
 PAINTER_QR = re.compile(r"^P(\d+)\.(\d+)\.(-?\d+)\.(\d+)$")
 NODE_BURN_RUN = re.compile(r"^9110\d\d$")  # reserved node/origin burn ids 911001..911099, never the painter
 QR_TOP_FRACTION = 0.62  # the painter's two big QRs sit in the top 62 % of the frame
 DECODE_SCALE = 0.5
 PHASE_RADIUS = 60  # frames: the local capture phase comes from both-halves frames this near
 DECODER_VERSION = 2  # part of the tick-cache key: a map from another decoder is never reused
+PROBE_COUNT_TIMEOUT_S = 600
 
 
 def painter_payload(text):
@@ -159,13 +166,29 @@ def _decode_range(job):
             break
         out.append((i, cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0) + half_ticks(frame, det, scale))
         i += 1
+    if not hit_end and not cap.grab():  # the file ends exactly here (a frame count estimated too high)
+        hit_end = True
     cap.release()
     return out, True, hit_end
 
 
+def container_frames(path):
+    """The video stream's packet count as ffprobe reads it (one packet per frame)."""
+    r = run_bounded(["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets", "-show_entries",
+                     "stream=nb_read_packets", "-of", "csv=p=0", path], PROBE_COUNT_TIMEOUT_S, text=True, check=True)
+    return int(r.stdout.strip().split(",")[0])
+
+
+class FrameCountMismatch(RuntimeError):
+    """A pts anomaly and a decoded frame count that differs from the container's packet count."""
+
+
 def _check_decode(path, jobs, parts):
     """The chunks must tile frames 0..n-1: a missed seek or a short read is allowed only once an
-    earlier chunk reached the end of the file; pts must step by about one frame interval."""
+    earlier chunk reached the end of the file. A pts step outside 0.5..1.5 x the median is either a
+    gap that is really in the file (an encoder that skipped a frame: allowed, the timeline module
+    judges it) or a frame the decoder lost or repeated: the decoded count against the container's
+    own packet count tells them apart (FrameCountMismatch)."""
     raw = sorted(r for rows, _, _ in parts for r in rows)
     if not raw:
         raise RuntimeError(f"no frame decoded from {path}")
@@ -188,9 +211,9 @@ def _check_decode(path, jobs, parts):
     if steps:
         med = sorted(steps)[len(steps) // 2]
         bad = [(raw[k + 1][0], s) for k, s in enumerate(steps) if not 0.5 * med <= s <= 1.5 * med]
-        if bad:
-            raise RuntimeError(f"{path}: pts step {bad[0][1]:.3f} s at frame {bad[0][0]} (median {med:.3f} s): "
-                               "a frame the decoder skipped or repeated")
+        if bad and container_frames(path) != len(raw):
+            raise FrameCountMismatch(f"{path}: pts step {bad[0][1]:.3f} s at frame {bad[0][0]} (median {med:.3f} s) "
+                                     f"and {len(raw)} frames decoded: a frame the decoder skipped or repeated")
     return raw
 
 
@@ -198,7 +221,9 @@ def decode_raw(path, workers=4, scale=DECODE_SCALE):
     """Raw (index, pts, left, right) of EVERY frame of a video file, or RuntimeError.
 
     The file is cut into chunks by its frame count, the last chunk reads to the end of the file (a
-    frame count is an estimate in some containers); `_check_decode` refuses any hole."""
+    frame count is an estimate in some containers); `_check_decode` refuses any hole. OpenCV seeks
+    a frame number by its timestamp, so in a file with a real timestamp gap a chunk lands a frame
+    off: then the file is decoded once more in ONE pass from frame 0 (no seek) and judged again."""
     import cv2
 
     cap = cv2.VideoCapture(str(path))
@@ -219,7 +244,14 @@ def decode_raw(path, workers=4, scale=DECODE_SCALE):
 
         with multiprocessing.Pool(workers, initializer=cv2.setNumThreads, initargs=(1,)) as pool:
             parts = pool.map(_decode_range, jobs)  # one OpenCV thread per worker: no oversubscription
-    return _check_decode(path, jobs, parts)
+    try:
+        return _check_decode(path, jobs, parts)
+    except FrameCountMismatch as e:
+        if len(jobs) == 1:
+            raise
+        print(f"youtube_leg_ticks: {e}; decoding again in one pass (no seek)", file=sys.stderr)
+        one = [(str(path), 0, None, scale)]
+        return _check_decode(path, one, [_decode_range(one[0])])
 
 
 def decode_ticks(path, workers=4, scale=DECODE_SCALE):

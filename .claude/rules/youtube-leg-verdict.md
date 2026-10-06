@@ -32,7 +32,7 @@ is `recording-verdict --av-sync` (CI probe artifact) as a subprocess. Shared wit
 - The payload CRC is checked (zlib.crc32 of `run.tick.gen`, like `Payload::decode`); only the
   6-digit 9110xx ids are node burns, a 9-digit E2E RUN_ID starting 9110 is a painter id.
 
-## Fail-closed rules the two review rounds found holes in (each has a test)
+## Fail-closed rules the three review rounds found holes in (each has a test)
 
 - Dup/skip is judged twice: between ADJACENT decoded VOD frames (the session tool's rule, which
   finds balanced dup+skip pairs), and by the FRAME-COUNT BALANCE between consecutive anchors (ticks
@@ -43,31 +43,44 @@ is `recording-verdict --av-sync` (CI probe artifact) as a subprocess. Shared wit
   "the last copy of a0 / the first copy of a1": a rig repeat with one undecodable VOD copy made that
   read a false dup. A backward jump is a replay (dups). The real s2 / s3 windows balance to 0 over
   thousands of segments.
-- A VOD stretch over 1 s that decodes nothing where the recording decodes (>= 80 %) is UNKNOWN:
-  a black or slate VOD keeps its frame count, so the balance cannot see it. Over 2 s of a window
-  without an anchor pair, or too many unjudged adjacent pairs, is UNKNOWN.
+- VOD-only undecodable runs of 2+ frames where the recording decodes (>= 80 %) add up as
+  `vod_blind_s`; over 0.1 s is UNKNOWN: a black, slate or flash VOD keeps its frame count, so the
+  balance cannot see it. In the clean real windows every such run is ONE frame, so the floor is 2
+  frames, not 30 (a 0.83 s black flash used to pass). Over 2 s of a window without an anchor pair,
+  or more than 5 unjudged adjacent pairs (clean real windows: 0), is UNKNOWN.
 - A clamp is tolerated only at the START (YouTube starts a VOD at its own live transition; the
   session-3 VOD opens with a 55 s QR-less silent pre-roll, content from 01:41:10). "The VOD ends
   early" is measured against the recording's own last decoded frame of the window, so a tail
   without the painter (a CG segment) is not a VOD defect; coverage runs to the window end, so that
-  tail counts as unproven (UNKNOWN past 10 %). A window outside the recording, spanning parts,
-  holding a publish or a painter restart (tick falls back > 30 s) is UNKNOWN.
-- A decode must tile the file: a chunk that read short, a missed seek (also of the LAST chunk: the
-  file's tail used to vanish silently) or a pts step outside 0.5..1.5 x the median (a skipped
-  frame) is an error; coverage counts frames by index span.
+  tail counts as unproven (UNKNOWN past 10 %), and audio is judged to the window end (it needs no
+  painter). A window outside the recording, spanning parts, holding a publish, a StopStream
+  (`--unpublish`, also under 1 s after the window) or a painter restart (tick falls back > 30 s) is
+  UNKNOWN.
+- A decode must tile the file: a chunk that read short or a missed seek (also of the LAST chunk:
+  the file's tail used to vanish silently) is an error; a full chunk grabs one more frame, so a file
+  ending exactly on a chunk boundary is the end, not a missed seek. A pts step outside 0.5..1.5 x
+  the median is refused only when the decoded count differs from the container's own packet count
+  (ffprobe). OpenCV seeks a frame number by TIMESTAMP, so in a file with a real gap the parallel
+  chunks land a frame off (240 rows from a 239-frame file): on such a mismatch the file is decoded
+  again in one pass from frame 0, no seek. A gap really in the file (OBS skipped a frame under
+  encoding lag) is then kept, and the
+  timeline makes a recording window with one UNKNOWN (the stream encoder may have kept that
+  frame), while a VOD gap is simply a skip. Coverage counts frames by index span.
 - Audio: VOD audio running out before the window end FAILS; fewer than 90 % of the expected blocks
   measured, or recording signal (> -50 dBFS, the only judged blocks) in under 25 % of them, is
   UNKNOWN; VOD sound > 20 dB above a quiet recording block is foreign (FAIL); only reliable blocks
   move the tracked lag; the block search is clipped to the audio. The session-3 pre-LIVE program
   audio is quiet in about half its blocks: a "50 % reliable" rule read that real window as UNKNOWN.
-- Every subprocess runs through `run_bounded`: a timeout kills the whole process group (the
-  probe's or yt-dlp's ffmpeg too). `entry()` maps any crash to exit 2, never FAIL's 1.
+- Every subprocess runs through `youtube_leg_proc.run_bounded`: a timeout kills the whole process
+  group (the probe's or yt-dlp's ffmpeg too), a failure carries the child's stderr tail into the
+  reason, and `install_cleanup()` kills every running group when the tool gets SIGTERM / SIGINT (a
+  cancelled CI job). `entry()` maps any crash to exit 2, never FAIL's 1.
 - OPEN (main's call): the opening publish of a fresh broadcast cannot be judged from the VOD
   (its start varies 24-42 s after the publish), so criterion 3 only gates RE-publishes, and a late
   opening join is absorbed by the start clamp.
-- The VOD loops its last ~0.6 s after the final stop (session 2: the last 34 ticks 13 times). A
-  window must end >= 1 s before StopStream (Task 4 wiring); whether the loop is restreamer's drain
-  or YouTube's is not established.
+- The VOD loops its last ~0.6 s after the final stop (session 2: the last 34 ticks 13 times), so
+  a window reaching the stop reads replay dups: pass every StopStream as `--unpublish` (Task 4
+  wiring). Whether the loop is restreamer's drain or YouTube's is not established.
 
 ## Fixtures and re-decoding
 

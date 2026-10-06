@@ -19,6 +19,7 @@ RESTART_TICKS = 1800  # a decoded tick that falls back this far (30 s) is a pain
 END_SLACK_S = 2.0  # a window may reach this far past the recording's own first/last frame
 NEAR_S = 1.0  # recording rows this near the window are the only ones its dup/skip reads
 DETAIL_LIMIT = 20
+BLIND_MIN_RUN = 2  # VOD-only undecodable runs from this many frames count as blind (clean data: only 1)
 
 
 def join_part_rows(parts, starts):
@@ -225,18 +226,28 @@ def _segment_balance(rec_anchor, vod_anchor, events):
 
 
 def _blind_runs(rec_rows, pos, vdec, lo, hi):
-    """The longest run (s) of VOD frames that decode nothing where the recording's same content
-    decodes (>= 80 %): a VOD that lost the picture (black, a slate) while keeping its frame count."""
-    worst = 0.0
+    """Total seconds of VOD runs (BLIND_MIN_RUN frames or more) that decode nothing where the
+    recording's same content decodes (>= 80 %): a VOD that lost the picture (black, a slate, a flash)
+    while keeping its frame count. In the clean real windows every such run is one frame."""
+    total = 0
     for (i0, _, a0), (i1, _, a1) in zip(vdec, vdec[1:]):
         run = i1 - i0 - 1
-        if run <= MAX_JUDGED_GAP or not (lo <= a0 < a1 <= hi) or not pos.get(a0) or not pos.get(a1):
+        if run < BLIND_MIN_RUN or not (lo <= a0 < a1 <= hi) or not pos.get(a0) or not pos.get(a1):
             continue
         k0, k1 = max(pos[a0]), min(pos[a1])
         between = rec_rows[k0 + 1:k1]
         if between and sum(r[2] is not None for r in between) >= 0.8 * len(between):
-            worst = max(worst, run * FRAME_S)
-    return round(worst, 3)
+            total += run
+    return round(total * FRAME_S, 3)
+
+
+def timestamp_gaps(rows):
+    """Frame indices where the pts step leaves 0.5..1.5 x the median: a frame the encoder skipped."""
+    steps = [(r1[0], r1[1] - r0[1]) for r0, r1 in zip(rows, rows[1:]) if r1[0] == r0[0] + 1]
+    if not steps:
+        return []
+    med = sorted(s for _, s in steps)[len(steps) // 2]
+    return [i for i, s in steps if not 0.5 * med <= s <= 1.5 * med]
 
 
 def dupskip(rec_rows, vod_rows, t0, a, b):
@@ -269,6 +280,10 @@ def dupskip(rec_rows, vod_rows, t0, a, b):
         return {"error": "no decoded recording frame in the window", "dup": None, "skip": None}
     if painter_restarts(in_win):
         return {"error": "the painter restarted inside the window", "dup": None, "skip": None}
+    gaps = timestamp_gaps(in_win)
+    if gaps:  # the recording's own encoder skipped a frame the stream encoder may have kept
+        return {"error": f"the recording has a timestamp gap at frame {gaps[0]} (a frame its encoder skipped)",
+                "dup": None, "skip": None}
     lo, hi = min(r[2] for r in rw), max(r[2] for r in rw)
     pos = collections.defaultdict(list)  # tick -> recording row positions, only near the window
     for k, r in enumerate(rec_rows):

@@ -8,11 +8,8 @@ inserted), a low-correlation block (< 0.6 while the recording has signal), a sil
 (< -70 dBFS), a level drop (> 10 dB below the window's median gain) or foreign sound (the recording
 quiet, the VOD > 20 dB louder). The result also says how much of the window it really measured, so
 a VOD whose audio ends early, or a window with no usable recording audio, is never a silent PASS.
-`run_bounded` (every subprocess of the tool) kills the whole process group on a timeout.
 """
 import os
-import signal
-import subprocess
 import sys
 
 import numpy as np
@@ -21,6 +18,7 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
+from youtube_leg_proc import run_bounded  # noqa: E402
 from youtube_leg_timeline import clamp_window, vod_pts_for  # noqa: E402
 
 SR = 16000
@@ -38,22 +36,6 @@ LEVEL_DROP_DB = 10.0
 FOREIGN_DB = 20.0  # a quiet recording block whose VOD block is this much louder (and has signal): foreign sound
 AUDIO_LOAD_TIMEOUT_S = 900
 DETAIL_LIMIT = 20
-
-
-def run_bounded(cmd, timeout, text=False, check=False):
-    """subprocess.run with a timeout that kills the whole process group (an ffmpeg the probe or
-    yt-dlp started included, not only the direct child), then re-raises TimeoutExpired."""
-    p = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text,
-                         start_new_session=True)
-    try:
-        out, err = p.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        os.killpg(p.pid, signal.SIGKILL)
-        p.communicate()
-        raise
-    if check and p.returncode != 0:
-        raise subprocess.CalledProcessError(p.returncode, cmd, out, err)
-    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
 
 
 def load_audio(path, start_s=None, dur_s=None):
@@ -182,7 +164,9 @@ def audio_blocks(rec, vod, lag_s=0.0, start_s=0.0, end_s=None):
 
 
 def audio_window(rec_audio, vod_audio, rec_rows, vod_rows, t0, a, b, rec_pts0=0.0, vod_pts0=0.0):
-    """Audio continuity over content window [a, b), clamped to the part the VOD covers.
+    """Audio continuity over content window [a, b): the start is clamped to the VOD's first frame
+    (YouTube's live transition), the end is NOT -- audio needs no painter, so VOD audio that stops
+    before `b` is measured as ending early, never cut off with the picture.
 
     rec_pts0 / vod_pts0 = the pts (recording / VOD timeline) of sample 0 of each audio array."""
     span = clamp_window(rec_rows, vod_rows, t0, a, b)
@@ -192,6 +176,6 @@ def audio_window(rec_audio, vod_audio, rec_rows, vod_rows, t0, a, b, rec_pts0=0.
     if rec_p is None or vod_p is None:
         return {"error": "window start tick not found in the VOD"}
     res = audio_blocks(rec_audio, vod_audio, lag_s=(vod_p - vod_pts0) - (rec_p - rec_pts0),
-                       start_s=rec_p - rec_pts0, end_s=(span[1] - t0) - rec_pts0)
+                       start_s=rec_p - rec_pts0, end_s=(b - t0) - rec_pts0)
     res["start_utc"] = t0 + rec_p
     return res
