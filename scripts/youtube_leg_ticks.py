@@ -139,7 +139,8 @@ def resolve_ticks(raw, radius=PHASE_RADIUS):
 
 def _decode_range(job):
     """Raw (index, pts, left, right) of frames [start, end) (end None = to the end of the file).
-    Returns (rows, seek_ok): a seek that does not land on `start` is reported, never decoded."""
+    Returns (rows, seek_ok, hit_end): a seek that does not land on `start` is reported, never
+    decoded; hit_end = the file ran out before `end` (always, for end None)."""
     import cv2
 
     path, start, end, scale = job
@@ -147,26 +148,57 @@ def _decode_range(job):
     cap.set(cv2.CAP_PROP_POS_FRAMES, start)
     if int(cap.get(cv2.CAP_PROP_POS_FRAMES)) != start:
         cap.release()
-        return [], False
+        return [], False, False
     det = cv2.QRCodeDetector()
-    out = []
+    out, hit_end = [], False
     i = start
     while end is None or i < end:
         ok, frame = cap.read()
         if not ok:
+            hit_end = True
             break
         out.append((i, cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0) + half_ticks(frame, det, scale))
         i += 1
     cap.release()
-    return out, True
+    return out, True, hit_end
+
+
+def _check_decode(path, jobs, parts):
+    """The chunks must tile frames 0..n-1: a missed seek or a short read is allowed only once an
+    earlier chunk reached the end of the file; pts must step by about one frame interval."""
+    raw = sorted(r for rows, _, _ in parts for r in rows)
+    if not raw:
+        raise RuntimeError(f"no frame decoded from {path}")
+    ended = None  # the start of the first chunk that ran into the end of the file
+    for job, (rows, seek_ok, hit_end) in zip(jobs, parts):
+        if ended is not None:
+            if rows:
+                raise RuntimeError(f"{path}: frames decoded after the end of the file at chunk {job[1]}")
+            continue
+        if not seek_ok:
+            raise RuntimeError(f"{path}: seek to frame {job[1]} failed")
+        if hit_end:
+            ended = job[1]
+    if ended is None:
+        raise RuntimeError(f"{path}: the decode never reached the end of the file")
+    holes = [k for k, r in enumerate(raw) if r[0] != k]
+    if holes:
+        raise RuntimeError(f"{path}: frames missing from the decode from frame {holes[0]} on")
+    steps = [r[1] - r0[1] for r0, r in zip(raw, raw[1:])]
+    if steps:
+        med = sorted(steps)[len(steps) // 2]
+        bad = [(raw[k + 1][0], s) for k, s in enumerate(steps) if not 0.5 * med <= s <= 1.5 * med]
+        if bad:
+            raise RuntimeError(f"{path}: pts step {bad[0][1]:.3f} s at frame {bad[0][0]} (median {med:.3f} s): "
+                               "a frame the decoder skipped or repeated")
+    return raw
 
 
 def decode_raw(path, workers=4, scale=DECODE_SCALE):
     """Raw (index, pts, left, right) of EVERY frame of a video file, or RuntimeError.
 
     The file is cut into chunks by its frame count, the last chunk reads to the end of the file (a
-    frame count is an estimate in some containers). The result must hold frames 0..n-1 with no hole
-    and rising pts: a chunk that read short in the middle, or a seek that missed, is an error."""
+    frame count is an estimate in some containers); `_check_decode` refuses any hole."""
     import cv2
 
     cap = cv2.VideoCapture(str(path))
@@ -187,19 +219,7 @@ def decode_raw(path, workers=4, scale=DECODE_SCALE):
 
         with multiprocessing.Pool(workers, initializer=cv2.setNumThreads, initargs=(1,)) as pool:
             parts = pool.map(_decode_range, jobs)  # one OpenCV thread per worker: no oversubscription
-    raw = sorted(r for rows, _ in parts for r in rows)
-    if not raw:
-        raise RuntimeError(f"no frame decoded from {path}")
-    missed = [j[1] for j, (_, ok) in zip(jobs, parts) if not ok and j[1] < len(raw)]
-    if missed:
-        raise RuntimeError(f"{path}: seek to frame {missed[0]} failed")
-    holes = [k for k, r in enumerate(raw) if r[0] != k]
-    if holes:
-        raise RuntimeError(f"{path}: frames missing from the decode from frame {holes[0]} on")
-    back = [r[0] for r0, r in zip(raw, raw[1:]) if r[1] <= r0[1]]
-    if back:
-        raise RuntimeError(f"{path}: pts do not rise at frame {back[0]}")
-    return raw
+    return _check_decode(path, jobs, parts)
 
 
 def decode_ticks(path, workers=4, scale=DECODE_SCALE):

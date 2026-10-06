@@ -13,14 +13,19 @@ clock. Ported from the session tools of issue 1404 (comments 6006986090, 6008636
 Criteria (docs/superpowers/specs/2026-10-06-youtube-leg-e2e-design.md, the PASS bar):
   1. A/V: per window VOD - recording `recording-verdict --av-sync` offset within +/-150 ms of the
      run's first measured window (YouTube's own fixed term varies per session: the bar is relative).
-  2. 0 downstream dup/skip by painter tick (a tick the rig itself repeated cancels out). A VOD that
-     ends before the window end FAILS; too many unjudged pairs is UNKNOWN.
+  2. 0 downstream dup/skip by painter tick (a tick the rig itself repeated cancels out): adjacent
+     decoded VOD frames, plus the frame-count balance between ticks both files show unambiguously, so
+     content lost or repeated behind undecodable VOD frames is counted too. A VOD that ends before
+     the recording's last decoded frame of the window FAILS; a VOD stretch over 1 s that decodes
+     nothing where the recording decodes, too many unjudged pairs, or over 2 s of the window without
+     an anchor pair is UNKNOWN.
   3. The first VOD frame after every (re)publish is within 0.5 s of the publish, in content time.
      A publish with no VOD frame before it opened the VOD (YouTube starts the VOD at its own live
      transition, 24-42 s after the first publish in the sessions): its join is reported, not judged.
   4. Audio continuous: 0.25 s blocks, no lag jump > 1.5 ms, no low-correlation block (< 0.6) while
-     the recording has signal, no silent VOD block, no level drop > 10 dB; VOD audio that ends early
-     FAILS; a window whose recording carries too little audio signal to judge is UNKNOWN.
+     the recording has signal, no silent VOD block, no level drop > 10 dB, no foreign VOD sound where
+     the recording is quiet; VOD audio that ends early FAILS; a window whose recording carries too
+     little audio signal to judge is UNKNOWN.
   5. Coverage: a window under 90 % cadence-proven frames (either file), one the VOD covers under half
      of, one outside the recording, one with a publish or a painter restart inside: UNKNOWN.
 Overall PASS only when every window passes every criterion; a tool/decode/download error or a
@@ -42,7 +47,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import tempfile
 import traceback
@@ -52,8 +56,9 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
-from youtube_leg_audio import (LAG_JUMP, LEVEL_DROP_DB, LOW_CORR, SILENT_VOD_DBFS, SR,  # noqa: E402
-                               audio_blocks, audio_window, dbfs, drop_samples, load_audio, ncc_best)
+from youtube_leg_audio import (FOREIGN_DB, LAG_JUMP, LEVEL_DROP_DB, LOW_CORR, SILENT_VOD_DBFS,  # noqa: E402
+                               SR, audio_blocks, audio_window, dbfs, drop_samples, load_audio,
+                               ncc_best, run_bounded)
 from youtube_leg_ticks import (DECODE_SCALE, DECODER_VERSION, PHASE_RADIUS, _qr_tick,  # noqa: E402
                                band_ticks, decode_raw, decode_ticks, half_ticks, load_raw,
                                load_ticks, painter_payload, painter_tick, resolve_ticks,
@@ -62,7 +67,7 @@ from youtube_leg_timeline import (DETAIL_LIMIT, END_SLACK_S, TickClock, clamp_wi
                                   continuity, coverage, dupskip, join_part_rows,
                                   painter_restarts, publish_gaps, vod_content_times, vod_pts_for)
 
-__all__ = ["SR", "audio_blocks", "audio_window", "dbfs", "drop_samples", "load_audio", "ncc_best",
+__all__ = ["SR", "run_bounded", "audio_blocks", "audio_window", "dbfs", "drop_samples", "load_audio", "ncc_best",
            "DECODE_SCALE", "DECODER_VERSION", "PHASE_RADIUS", "_qr_tick", "band_ticks", "decode_raw",
            "decode_ticks", "half_ticks", "load_raw", "load_ticks", "painter_payload", "painter_tick",
            "resolve_ticks", "write_ticks", "DETAIL_LIMIT", "END_SLACK_S", "TickClock", "clamp_window",
@@ -83,6 +88,7 @@ UNJUDGED_MIN, UNJUDGED_FRACTION = 5, 0.005  # more unjudged VOD pairs than this 
 AUDIO_END_SLACK_S = 0.5
 AUDIO_MIN_MEASURED = 0.9  # of the expected blocks
 AUDIO_MIN_SIGNAL = 0.25  # of the measured blocks must carry recording signal (the only judged ones)
+VOD_BLIND_MAX_S = 1.0  # a longer VOD-only undecodable stretch (black, a slate) is UNKNOWN
 CLIP_TIMEOUT_S, PROBE_TIMEOUT_S, YTDLP_TIMEOUT_S, URL_TIMEOUT_S = 600, 1800, 3600, 60
 
 
@@ -106,16 +112,15 @@ def parse_avsync_output(text):
 
 
 def _cut_clip(src, start_s, dur_s, out):
-    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{start_s:.3f}",
-                    "-i", str(src), "-t", f"{dur_s:.3f}", "-map", "0:v:0", "-map", "0:a:0",
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "192k",
-                    str(out)], check=True, capture_output=True, timeout=CLIP_TIMEOUT_S)
+    run_bounded(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-ss", f"{start_s:.3f}",
+                 "-i", src, "-t", f"{dur_s:.3f}", "-map", "0:v:0", "-map", "0:a:0",
+                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-c:a", "aac", "-b:a", "192k", out],
+                CLIP_TIMEOUT_S, check=True)
 
 
 def _avsync(probe_bin, clip, markers_csv):
-    r = subprocess.run([str(probe_bin), "--stream", str(clip), "--av-sync", str(clip),
-                        "--av-marker-log", str(markers_csv)], capture_output=True, text=True,
-                       timeout=PROBE_TIMEOUT_S)
+    r = run_bounded([probe_bin, "--stream", clip, "--av-sync", clip, "--av-marker-log", markers_csv],
+                    PROBE_TIMEOUT_S, text=True)
     text = r.stderr + r.stdout
     with open(f"{clip}.avsync.out", "w") as f:
         f.write(text)
@@ -160,21 +165,22 @@ def av_window(rec_file, vod_file, rec_start_s, vod_start_s, markers_csv, probe_b
 
 def _audio_findings(name, au):
     """(kind, message) list for one window's audio block."""
-    keys = ("lag_jumps", "low_corr", "silent", "level_drops")
+    keys = ("lag_jumps", "low_corr", "silent", "level_drops", "foreign")
     if (au.get("vod_ends_early_s") or 0) > AUDIO_END_SLACK_S:
         return [("FAIL", f"{name}: the VOD audio ends {au['vod_ends_early_s']:.1f} s before the window end")]
     if any(au.get(k) is None for k in keys):
         return [("UNKNOWN", f"{name}: audio not measured ({au.get('error', 'missing')})")]
+    blocks, expected, signal = au.get("blocks", 0), au.get("expected_blocks"), au.get("signal_blocks")
+    if signal is not None and signal < AUDIO_MIN_SIGNAL * blocks:
+        # too little recording signal to judge: its counts (foreign sound above all) mean nothing
+        return [("UNKNOWN", f"{name}: the recording carries audio signal in only {signal} of {blocks} blocks")]
     out = []
     if any(au[k] for k in keys):
         out.append(("FAIL", f"{name}: audio " + ", ".join(f"{k} {au[k]}" for k in keys if au[k])))
     if (au.get("rec_ends_early_s") or 0) > AUDIO_END_SLACK_S:
         out.append(("UNKNOWN", f"{name}: the recording audio ends {au['rec_ends_early_s']:.1f} s before the window end"))
-    blocks, expected, signal = au.get("blocks", 0), au.get("expected_blocks"), au.get("signal_blocks")
     if expected is not None and blocks < AUDIO_MIN_MEASURED * expected:
         out.append(("UNKNOWN", f"{name}: audio measured over {blocks} of {expected} blocks"))
-    if signal is not None and signal < AUDIO_MIN_SIGNAL * blocks:
-        out.append(("UNKNOWN", f"{name}: the recording carries audio signal in only {signal} of {blocks} blocks"))
     return out
 
 
@@ -203,7 +209,14 @@ def verdict(windows, publishes):
         if ds["dup"] or ds["skip"]:
             bad("dupskip", f"{name}: {ds['dup']} downstream dup / {ds['skip']} skip", "FAIL")
         if (ds.get("vod_ends_early_s") or 0) > END_SLACK_S:
-            bad("dupskip", f"{name}: the VOD ends {ds['vod_ends_early_s']:.1f} s before the window end", "FAIL")
+            bad("dupskip", f"{name}: the VOD ends {ds['vod_ends_early_s']:.1f} s before the recording's "
+                           "last decoded frame of the window", "FAIL")
+        if (ds.get("vod_blind_s") or 0) > VOD_BLIND_MAX_S:
+            bad("dupskip", f"{name}: the VOD decodes nothing for {ds['vod_blind_s']:.1f} s where the recording "
+                           "decodes (black or a slate on YouTube?)", "UNKNOWN")
+        if (ds.get("unanchored_s") or 0) > END_SLACK_S:
+            bad("dupskip", f"{name}: {ds['unanchored_s']:.1f} s of the window has no frame both files show "
+                           "unambiguously", "UNKNOWN")
         if ds.get("unjudged", 0) > max(UNJUDGED_MIN, UNJUDGED_FRACTION * ds.get("vod_frames", 0)):
             bad("dupskip", f"{name}: {ds['unjudged']} VOD frame pairs could not be judged", "UNKNOWN")
         cov = w.get("coverage") or {}
@@ -292,10 +305,10 @@ def fetch_vod(vod, out):
         raise ValueError(f"--vod {vod!r} is neither a file nor a YouTube id")
     path = os.path.join(out, f"vod-{vod}.mp4")
     if not os.path.isfile(path):
-        subprocess.run(["yt-dlp", "-q", "--no-progress", "--socket-timeout", "30", "-f",
-                        "bv*[height<=1080][fps<=30][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=1080][fps<=30]+ba/b",
-                        "--merge-output-format", "mp4", "-o", path, f"https://www.youtube.com/watch?v={vod}"],
-                       check=True, timeout=YTDLP_TIMEOUT_S)
+        run_bounded(["yt-dlp", "-q", "--no-progress", "--socket-timeout", "30", "-f",
+                     "bv*[height<=1080][fps<=30][vcodec^=avc1]+ba[acodec^=mp4a]/bv*[height<=1080][fps<=30]+ba/b",
+                     "--merge-output-format", "mp4", "-o", path, f"https://www.youtube.com/watch?v={vod}"],
+                    YTDLP_TIMEOUT_S, check=True)
     return path
 
 
@@ -314,7 +327,7 @@ def cached_ticks(src, cache, workers):
     """The file's tick map, decoded once per (source, decoder) key and kept in the out dir."""
     st = os.stat(src)
     key = (f"source={os.path.abspath(src)} size={st.st_size} mtime={int(st.st_mtime)} "
-           f"decoder=v{DECODER_VERSION} scale={DECODE_SCALE} phase_radius={PHASE_RADIUS}")
+           f"decoder=v{DECODER_VERSION} scale={DECODE_SCALE} phase_radius={PHASE_RADIUS} opencv={_cv2_version()}")
     if os.path.isfile(cache):
         with open(cache) as f:
             if f.readline().strip() == f"# {key}":
@@ -322,6 +335,12 @@ def cached_ticks(src, cache, workers):
     rows = decode_ticks(src, workers)
     write_ticks(cache, rows, header=key)
     return [r[:3] for r in rows]
+
+
+def _cv2_version():
+    import cv2
+
+    return cv2.__version__
 
 
 def _guard(fn, *a, **kw):
@@ -345,10 +364,10 @@ def measure_window(ctx, name, a, b):
     if "error" in ds:
         w["errors"].append(ds["error"])
         return w
-    a2, b2 = ds.pop("start_utc"), ds.pop("end_utc")
+    a2, b2, cov_end = ds.pop("start_utc"), ds.pop("end_utc"), ds.pop("coverage_end_utc")
     w["clamped_start"], w["clamped_end"] = fmt_utc(ds.pop("clamped_start_utc")), fmt_utc(ds.pop("clamped_end_utc"))
     w["covered_fraction"] = round((b2 - a2) / (b - a), 3)
-    w["coverage"] = coverage(rec_rows, vod_rows, t0, a2, b2)
+    w["coverage"] = coverage(rec_rows, vod_rows, t0, a2, cov_end)  # a tail the VOD lacks counts as unproven
     k = max([i for i, s in enumerate(starts) if s <= a2 + 1e-6] or [0])
     if k + 1 < len(starts) and b2 > starts[k + 1]:
         w["errors"].append("the window spans two recording parts")
@@ -386,11 +405,12 @@ def measure(args):
     for p in pubs:
         for key in ("utc", "first_vod_frame_utc", "last_vod_frame_before_utc"):
             p[key] = fmt_utc(p[key])
-    return {"schema": SCHEMA, "overall": v["overall"],
+    return {"schema": SCHEMA, "overall": v["overall"], "tool": {"decoder": DECODER_VERSION, "opencv": _cv2_version()},
             "criteria": {"status": v["criteria"], "av_tolerance_ms": AV_TOLERANCE_MS,
                          "publish_gap_max_s": PUBLISH_GAP_MAX_S, "cadence_min_pct": CADENCE_MIN_PCT,
                          "lag_jump_ms": 1000.0 * LAG_JUMP / SR, "low_corr": LOW_CORR,
-                         "silent_vod_dbfs": SILENT_VOD_DBFS, "level_drop_db": LEVEL_DROP_DB},
+                         "silent_vod_dbfs": SILENT_VOD_DBFS, "level_drop_db": LEVEL_DROP_DB, "foreign_db": FOREIGN_DB,
+                         "vod_blind_max_s": VOD_BLIND_MAX_S},
             "recording_starts": [fmt_utc(s) for s in ctx["starts"]], "windows": windows, "publishes": pubs,
             "reasons": v["reasons"]}
 

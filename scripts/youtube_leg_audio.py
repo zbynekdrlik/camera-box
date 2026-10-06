@@ -5,11 +5,13 @@ Every 0.25 s block of the recording's audio (16 kHz mono) is found again in the 
 normalised cross-correlation, tracking the lag block to block (ported from the session tool
 audiocont.py). A downstream discontinuity shows as a lag jump (> 1.5 ms: audio dropped or
 inserted), a low-correlation block (< 0.6 while the recording has signal), a silent VOD block
-(< -70 dBFS) or a level drop (> 10 dB below the window's median gain). The result also says how
-much of the window it really measured, so a VOD whose audio ends early, or a window with no usable
-recording audio, is never a silent PASS.
+(< -70 dBFS), a level drop (> 10 dB below the window's median gain) or foreign sound (the recording
+quiet, the VOD > 20 dB louder). The result also says how much of the window it really measured, so
+a VOD whose audio ends early, or a window with no usable recording audio, is never a silent PASS.
+`run_bounded` (every subprocess of the tool) kills the whole process group on a timeout.
 """
 import os
+import signal
 import subprocess
 import sys
 
@@ -33,8 +35,25 @@ REC_SIGNAL_DBFS = -50.0
 SILENT_REC_DBFS = -60.0
 SILENT_VOD_DBFS = -70.0
 LEVEL_DROP_DB = 10.0
+FOREIGN_DB = 20.0  # a quiet recording block whose VOD block is this much louder (and has signal): foreign sound
 AUDIO_LOAD_TIMEOUT_S = 900
 DETAIL_LIMIT = 20
+
+
+def run_bounded(cmd, timeout, text=False, check=False):
+    """subprocess.run with a timeout that kills the whole process group (an ffmpeg the probe or
+    yt-dlp started included, not only the direct child), then re-raises TimeoutExpired."""
+    p = subprocess.Popen([str(c) for c in cmd], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=text,
+                         start_new_session=True)
+    try:
+        out, err = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGKILL)
+        p.communicate()
+        raise
+    if check and p.returncode != 0:
+        raise subprocess.CalledProcessError(p.returncode, cmd, out, err)
+    return subprocess.CompletedProcess(cmd, p.returncode, out, err)
 
 
 def load_audio(path, start_s=None, dur_s=None):
@@ -46,7 +65,7 @@ def load_audio(path, start_s=None, dur_s=None):
     if dur_s is not None:
         cmd += ["-t", f"{dur_s:.3f}"]
     cmd += ["-map", "0:a:0", "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"]
-    raw = subprocess.run(cmd, capture_output=True, check=True, timeout=AUDIO_LOAD_TIMEOUT_S).stdout
+    raw = run_bounded(cmd, AUDIO_LOAD_TIMEOUT_S, check=True).stdout
     return np.frombuffer(raw, dtype=np.float32)
 
 
@@ -108,7 +127,7 @@ def audio_blocks(rec, vod, lag_s=0.0, start_s=0.0, end_s=None):
     lag = lock_lag = lo4 + k4 - i
     start = i
     expected = max(0, (end - i) // BLOCK + 1)
-    det = {"lag_jumps": [], "low_corr": [], "silent": []}
+    det = {"lag_jumps": [], "low_corr": [], "silent": [], "foreign": []}
     lags, gains, corr, recdb = [], [], [], []
     search, reliable_prev, vod_short, signal = FIRST_SEARCH, None, 0.0, 0
     while i <= end:
@@ -129,6 +148,8 @@ def audio_blocks(rec, vod, lag_s=0.0, start_s=0.0, end_s=None):
             det["low_corr"].append((t, round(r, 3), round(rec_db, 1)))
         if rec_db > SILENT_REC_DBFS and vod_db < SILENT_VOD_DBFS:
             det["silent"].append((t, round(rec_db, 1), round(vod_db, 1)))
+        if rec_db <= REC_SIGNAL_DBFS and vod_db > REC_SIGNAL_DBFS and vod_db > rec_db + FOREIGN_DB:
+            det["foreign"].append((t, round(rec_db, 1), round(vod_db, 1)))  # VOD sound the recording lacks
         if reliable:
             if reliable_prev is not None and abs(new_lag - reliable_prev) > LAG_JUMP:
                 det["lag_jumps"].append((t, round((new_lag - reliable_prev) / SR * 1000, 2)))
@@ -150,13 +171,14 @@ def audio_blocks(rec, vod, lag_s=0.0, start_s=0.0, end_s=None):
             "analysed_from_s": round(start / SR, 3), "vod_ends_early_s": round(vod_short, 3),
             "rec_ends_early_s": round(rec_short, 3),
             "lag_jumps": len(det["lag_jumps"]), "low_corr": len(det["low_corr"]),
-            "silent": len(det["silent"]), "level_drops": len(drops),
+            "silent": len(det["silent"]), "level_drops": len(drops), "foreign": len(det["foreign"]),
             "corr_median": round(float(np.median(c)), 3), "corr_p01": round(float(np.percentile(c, 1)), 3),
             "initial_lock_corr": round(r4, 3), "lag_vs_video_ms": round((lock_lag / SR - lag_s) * 1000, 1),
             "lag_range_ms": round((max(lags) - min(lags)) / SR * 1000, 2) if lags else None,
             "gain_db_median": round(med, 1), "rec_level_dbfs_median": round(float(np.median(recdb)), 1),
             "details": {"lag_jumps": det["lag_jumps"][:DETAIL_LIMIT], "low_corr": det["low_corr"][:DETAIL_LIMIT],
-                        "silent": det["silent"][:DETAIL_LIMIT], "level_drops": drops[:DETAIL_LIMIT]}}
+                        "silent": det["silent"][:DETAIL_LIMIT], "level_drops": drops[:DETAIL_LIMIT],
+                        "foreign": det["foreign"][:DETAIL_LIMIT]}}
 
 
 def audio_window(rec_audio, vod_audio, rec_rows, vod_rows, t0, a, b, rec_pts0=0.0, vod_pts0=0.0):

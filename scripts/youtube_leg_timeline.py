@@ -151,19 +151,106 @@ def painter_restarts(rows):
     return [r1[0] for r0, r1 in zip(dec, dec[1:]) if r0[2] - r1[2] > RESTART_TICKS]
 
 
+def _single_anchors(rows, positions):
+    """{tick: frame index} of the ticks a file shows exactly once, between two decoded, index-adjacent
+    frames that show other ticks: an unambiguous point to count frames from."""
+    out = {}
+    for tick, ks in positions.items():
+        if len(ks) != 1:
+            continue
+        k = ks[0]
+        i = rows[k][0]
+        if (0 < k < len(rows) - 1 and rows[k - 1][0] == i - 1 and rows[k + 1][0] == i + 1
+                and rows[k - 1][2] not in (None, tick) and rows[k + 1][2] not in (None, tick)):
+            out[tick] = i
+    return out
+
+
+def _adjacent_events(rec_rows, rw_ticks, pos, vdec, lo, hi):
+    """dup / skip between ADJACENT decoded VOD frames (the session tool's judgement), each tagged with
+    the VOD frame index it ends at; and the number of same-tick pairs nobody could judge."""
+    rec_sorted = sorted(rw_ticks)
+
+    def judged_once(k, tick):
+        i = rec_rows[k][0]
+        prev_ok = k > 0 and rec_rows[k - 1][2] not in (None, tick) and rec_rows[k - 1][0] == i - 1
+        next_ok = k + 1 < len(rec_rows) and rec_rows[k + 1][2] not in (None, tick) and rec_rows[k + 1][0] == i + 1
+        return prev_ok and next_ok
+
+    events, unjudged = [], 0
+    for (i0, _, a0), (i1, p1, a1) in zip(vdec, vdec[1:]):
+        if i1 - i0 != 1 or max(a0, a1) < lo or min(a0, a1) > hi:
+            continue
+        if a1 < a0:  # the VOD replays content: every window recording tick it shows again is a dup
+            n = bisect.bisect_right(rec_sorted, a0) - bisect.bisect_left(rec_sorted, a1)
+            if n:
+                events.append({"kind": "dup", "vod_i": i1, "vod_pts": round(p1, 3), "replay_from_tick": a0,
+                               "to_tick": a1, "frames": n})
+        elif a1 == a0:
+            ks = pos.get(a0, [])
+            if len(ks) >= 2:
+                continue  # the rig repeated this tick itself: cancels out
+            if len(ks) == 1 and judged_once(ks[0], a0):
+                events.append({"kind": "dup", "vod_i": i1, "vod_pts": round(p1, 3), "tick": a0, "frames": 1})
+            else:
+                unjudged += 1
+        else:
+            n = bisect.bisect_left(rec_sorted, a1) - bisect.bisect_right(rec_sorted, a0)
+            if n:
+                events.append({"kind": "skip", "vod_i": i1, "vod_pts": round(p1, 3), "from_tick": a0,
+                               "to_tick": a1, "frames": n})
+    return events, unjudged
+
+
+def _segment_balance(rec_anchor, vod_anchor, events):
+    """Hidden dup / skip events from the frame-count balance between consecutive anchors.
+
+    Between two ticks both files show unambiguously, the VOD must hold exactly as many frames as the
+    recording: a rig repeat or skip is in both and cancels, an undecodable frame still counts. The
+    difference minus what the adjacent judgement already counted there is a dup (more VOD frames) or
+    skip (fewer) hidden behind undecodable VOD frames, however long the undecodable stretch."""
+    both = sorted(set(rec_anchor) & set(vod_anchor))
+    hidden, segments = [], 0
+    for ta, tb in zip(both, both[1:]):
+        ra, rb, va, vb = rec_anchor[ta], rec_anchor[tb], vod_anchor[ta], vod_anchor[tb]
+        if vb <= va or ra // PART_STRIDE != rb // PART_STRIDE:
+            continue
+        segments += 1
+        local = sum((e["frames"] if e["kind"] == "dup" else -e["frames"]) for e in events if va < e["vod_i"] <= vb)
+        residual = (vb - va) - (rb - ra) - local
+        if residual:
+            hidden.append({"kind": "dup" if residual > 0 else "skip", "vod_i": vb, "hidden": True,
+                           "between_ticks": [ta, tb], "frames": abs(residual)})
+    return hidden, segments, (both[0], both[-1]) if both else None
+
+
+def _blind_runs(rec_rows, pos, vdec, lo, hi):
+    """The longest run (s) of VOD frames that decode nothing where the recording's same content
+    decodes (>= 80 %): a VOD that lost the picture (black, a slate) while keeping its frame count."""
+    worst = 0.0
+    for (i0, _, a0), (i1, _, a1) in zip(vdec, vdec[1:]):
+        run = i1 - i0 - 1
+        if run <= MAX_JUDGED_GAP or not (lo <= a0 < a1 <= hi) or not pos.get(a0) or not pos.get(a1):
+            continue
+        k0, k1 = max(pos[a0]), min(pos[a1])
+        between = rec_rows[k0 + 1:k1]
+        if between and sum(r[2] is not None for r in between) >= 0.8 * len(between):
+            worst = max(worst, run * FRAME_S)
+    return round(worst, 3)
+
+
 def dupskip(rec_rows, vod_rows, t0, a, b):
     """Downstream dup/skip of the VOD against the recording over content window [a, b).
 
-    Pairs of consecutive decoded VOD frames (at most MAX_JUDGED_GAP apart) are judged:
-      - same tick: the VOD shows it (frame gap + 1) times; each showing more than the recording's is
-        a dup, judged when the recording shows the tick once between two decoded, adjacent,
-        different frames, or repeats it itself (a rig repeat cancels out);
-      - tick forward: the recording frames between the two ticks (by recording frame index, so an
-        undecodable recording frame still counts) against the VOD frames between them: more on the
-        recording = skips, more on the VOD = dups (a repeat hidden behind an undecodable frame);
-        an adjacent pair straddling the window edge counts the window's recording ticks it jumped;
-      - tick backward: the VOD replays content; every window recording tick in the replayed range
-        is a dup.
+    Two judgements, both by painter tick:
+      - adjacent decoded VOD frames (the session tool's): a tick shown twice is a dup when the
+        recording shows it once between two decoded, adjacent, different frames (a tick the rig
+        itself repeated cancels out); a tick jump skips every window recording tick in between; a
+        backward jump replays content, every window recording tick in the replayed range is a dup;
+      - the frame-count balance between consecutive anchors (ticks both files show unambiguously):
+        whatever the adjacent judgement could not see behind undecodable VOD frames, however many.
+    Also reported: the longest stretch the VOD alone cannot decode, how early the VOD ends against
+    the recording's own last decoded frame, and the seconds of the window no anchor pair covers.
     The window is clamped to the content the VOD covers; a window outside the recording, or with a
     painter restart inside, is an error (never a verdict)."""
     if not rec_rows:
@@ -183,58 +270,36 @@ def dupskip(rec_rows, vod_rows, t0, a, b):
     if painter_restarts(in_win):
         return {"error": "the painter restarted inside the window", "dup": None, "skip": None}
     lo, hi = min(r[2] for r in rw), max(r[2] for r in rw)
-    rec_sorted = sorted({r[2] for r in rw})
     pos = collections.defaultdict(list)  # tick -> recording row positions, only near the window
     for k, r in enumerate(rec_rows):
         if r[2] is not None and a2 - NEAR_S <= t0 + r[1] < b2 + NEAR_S:
             pos[r[2]].append(k)
-
-    def judged_once(k, tick):
-        i = rec_rows[k][0]
-        prev_ok = k > 0 and rec_rows[k - 1][2] not in (None, tick) and rec_rows[k - 1][0] == i - 1
-        next_ok = k + 1 < len(rec_rows) and rec_rows[k + 1][2] not in (None, tick) and rec_rows[k + 1][0] == i + 1
-        return prev_ok and next_ok
-
+    vpos = collections.defaultdict(list)  # tick -> VOD row positions, the window's ticks only
+    for k, v in enumerate(vod_rows):
+        if v[2] is not None and lo <= v[2] <= hi:
+            vpos[v[2]].append(k)
     vdec = [v for v in vod_rows if v[2] is not None]
-    dups, skips, unjudged = [], [], 0
-    for (i0, _, a0), (i1, p1, a1) in zip(vdec, vdec[1:]):
-        g = i1 - i0
-        if g > MAX_JUDGED_GAP or (max(a0, a1) < lo or min(a0, a1) > hi):
-            continue
-        if a1 < a0:
-            n = bisect.bisect_right(rec_sorted, a0) - bisect.bisect_left(rec_sorted, a1)
-            if n > 0:
-                dups.append({"vod_pts": round(p1, 3), "replay_from_tick": a0, "to_tick": a1, "frames": n})
-        elif a1 == a0:
-            # the VOD shows the tick at least g + 1 times; a tick the rig itself repeated cancels out
-            ks = pos.get(a0, [])
-            if len(ks) >= 2 or (len(ks) == 1 and judged_once(ks[0], a0)):
-                if g + 1 > len(ks):
-                    dups.append({"vod_pts": round(p1, 3), "tick": a0, "frames": g + 1 - len(ks)})
-            else:
-                unjudged += 1
-        elif a1 > a0 and g == 1:
-            n = bisect.bisect_left(rec_sorted, a1) - bisect.bisect_right(rec_sorted, a0)
-            if n > 0:
-                skips.append({"vod_pts": round(p1, 3), "from_tick": a0, "to_tick": a1, "frames": n})
-        elif lo <= a0 and a1 <= hi and pos.get(a0) and pos.get(a1):
-            k0, k1 = max(pos[a0]), min(pos[a1])
-            rec_between = rec_rows[k1][0] - rec_rows[k0][0] - 1
-            if not 0 <= rec_between <= MAX_JUDGED_GAP:
-                unjudged += 1
-                continue
-            d = rec_between - (g - 1)
-            if d > 0:
-                skips.append({"vod_pts": round(p1, 3), "from_tick": a0, "to_tick": a1, "frames": d})
-            elif d < 0:
-                dups.append({"vod_pts": round(p1, 3), "tick": a0, "to_tick": a1, "frames": -d})
-        else:
-            unjudged += 1
-    return {"dup": sum(d["frames"] for d in dups), "skip": sum(s["frames"] for s in skips), "unjudged": unjudged,
+    events, unjudged = _adjacent_events(rec_rows, {r[2] for r in rw}, pos, vdec, lo, hi)
+    rec_anchor = {t: i for t, i in _single_anchors(rec_rows, pos).items() if lo <= t <= hi}
+    hidden, segments, ends = _segment_balance(rec_anchor, _single_anchors(vod_rows, vpos), events)
+    if not segments:
+        return {"error": "no two frames both files show unambiguously in the window", "dup": None, "skip": None}
+    first_t, last_t = (t0 + rec_rows[pos[t][0]][1] for t in ends)
+    rec_dec_last = max(t0 + r[1] for r in rec_rows if r[2] is not None and a <= t0 + r[1] < b) + FRAME_S
+    early = None
+    if cl_end is not None:
+        early = round(max(0.0, min(b, rec_dec_last) - cl_end), 3)
+    allev = events + hidden
+    return {"dup": sum(e["frames"] for e in allev if e["kind"] == "dup"),
+            "skip": sum(e["frames"] for e in allev if e["kind"] == "skip"),
+            "hidden": sum(e["frames"] for e in hidden), "unjudged": unjudged, "segments": segments,
+            "unanchored_s": round(max(0.0, first_t - a2) + max(0.0, b2 - FRAME_S - last_t), 3),
+            "vod_blind_s": _blind_runs(rec_rows, pos, vdec, lo, hi),
             "rec_frames": len(rw), "vod_frames": sum(1 for v in vdec if lo <= v[2] <= hi),
-            "start_utc": a2, "end_utc": b2, "clamped_start_utc": cl_start, "clamped_end_utc": cl_end,
-            "vod_ends_early_s": round(b - cl_end, 3) if cl_end is not None else None,
-            "dups": dups[:DETAIL_LIMIT], "skips": skips[:DETAIL_LIMIT]}
+            "start_utc": a2, "end_utc": b2, "coverage_end_utc": min(b, rec_last),
+            "clamped_start_utc": cl_start, "clamped_end_utc": cl_end, "vod_ends_early_s": early,
+            "dups": [e for e in allev if e["kind"] == "dup"][:DETAIL_LIMIT],
+            "skips": [e for e in allev if e["kind"] == "skip"][:DETAIL_LIMIT]}
 
 
 def coverage(rec_rows, vod_rows, t0, a, b):

@@ -32,35 +32,58 @@ is `recording-verdict --av-sync` (CI probe artifact) as a subprocess. Shared wit
 - The payload CRC is checked (zlib.crc32 of `run.tick.gen`, like `Payload::decode`); only the
   6-digit 9110xx ids are node burns, a 9-digit E2E RUN_ID starting 9110 is a painter id.
 
-## Fail-closed rules the review found holes in (each has a test)
+## Fail-closed rules the two review rounds found holes in (each has a test)
 
+- Dup/skip is judged twice: between ADJACENT decoded VOD frames (the session tool's rule, which
+  finds balanced dup+skip pairs), and by the FRAME-COUNT BALANCE between consecutive anchors (ticks
+  both files show exactly once between decoded, adjacent, other ticks). Between two anchors the VOD
+  must hold as many frames as the recording: rig repeats and skips are in both and cancel, an
+  undecodable frame still counts, so content lost or repeated behind ANY number of undecodable VOD
+  frames is counted (a 10 s splice behind 1 or 31 black frames FAILS). Never judge a gap pair by
+  "the last copy of a0 / the first copy of a1": a rig repeat with one undecodable VOD copy made that
+  read a false dup. A backward jump is a replay (dups). The real s2 / s3 windows balance to 0 over
+  thousands of segments.
+- A VOD stretch over 1 s that decodes nothing where the recording decodes (>= 80 %) is UNKNOWN:
+  a black or slate VOD keeps its frame count, so the balance cannot see it. Over 2 s of a window
+  without an anchor pair, or too many unjudged adjacent pairs, is UNKNOWN.
 - A clamp is tolerated only at the START (YouTube starts a VOD at its own live transition; the
-  session-3 VOD opens with a 55 s QR-less silent pre-roll, content from 01:41:10). A VOD that ends
-  > 2 s before the window end FAILS. A window outside the recording, spanning parts, holding a
-  publish or a painter restart (tick falls back > 30 s) is UNKNOWN.
-- A decode with a hole (a chunk read short, a seek that missed, pts not rising) is an error;
-  coverage counts frames by index span so rows missing from a map count as unproven.
-- Dup/skip also judges pairs around undecodable VOD frames (recording frame count between the two
-  ticks vs VOD frame count) and backward jumps (a replay = dups). Baseline A rose 10/10 -> 10/12
-  this way: real dup+skip pairs next to an undecodable frame. Too many unjudged pairs is UNKNOWN.
+  session-3 VOD opens with a 55 s QR-less silent pre-roll, content from 01:41:10). "The VOD ends
+  early" is measured against the recording's own last decoded frame of the window, so a tail
+  without the painter (a CG segment) is not a VOD defect; coverage runs to the window end, so that
+  tail counts as unproven (UNKNOWN past 10 %). A window outside the recording, spanning parts,
+  holding a publish or a painter restart (tick falls back > 30 s) is UNKNOWN.
+- A decode must tile the file: a chunk that read short, a missed seek (also of the LAST chunk: the
+  file's tail used to vanish silently) or a pts step outside 0.5..1.5 x the median (a skipped
+  frame) is an error; coverage counts frames by index span.
 - Audio: VOD audio running out before the window end FAILS; fewer than 90 % of the expected blocks
   measured, or recording signal (> -50 dBFS, the only judged blocks) in under 25 % of them, is
-  UNKNOWN; only reliable blocks move the tracked lag; the block search is clipped to the audio, so
-  the last block is not lost to the +/-40 ms margin. The session-3 pre-LIVE program audio is quiet
-  in about half its blocks: a "50 % reliable" rule read that real window as UNKNOWN.
-- Every subprocess has a timeout; `entry()` maps any crash to exit 2, never FAIL's 1.
+  UNKNOWN; VOD sound > 20 dB above a quiet recording block is foreign (FAIL); only reliable blocks
+  move the tracked lag; the block search is clipped to the audio. The session-3 pre-LIVE program
+  audio is quiet in about half its blocks: a "50 % reliable" rule read that real window as UNKNOWN.
+- Every subprocess runs through `run_bounded`: a timeout kills the whole process group (the
+  probe's or yt-dlp's ffmpeg too). `entry()` maps any crash to exit 2, never FAIL's 1.
 - OPEN (main's call): the opening publish of a fresh broadcast cannot be judged from the VOD
-  (its start varies 24-42 s after the publish), so criterion 3 only gates RE-publishes.
+  (its start varies 24-42 s after the publish), so criterion 3 only gates RE-publishes, and a late
+  opening join is absorbed by the start clamp.
+- The VOD loops its last ~0.6 s after the final stop (session 2: the last 34 ticks 13 times). A
+  window must end >= 1 s before StopStream (Task 4 wiring); whether the loop is restreamer's drain
+  or YouTube's is not established.
 
 ## Fixtures and re-decoding
 
-- base/s2 maps are the session's left-only `qrticks.py` decode (3 columns); s3 part 1 and the s3
-  VOD are this decoder's output with raw left/right columns (`load_raw` -> `resolve_ticks`).
+- base/s2 maps are the session's LEFT-only `qrticks.py` decode (3 columns): a stale fresh half
+  cannot be told from a real repeat in them, so their dup/skip counts (baseline A 11/11, R 53/53,
+  B 2/2, all balanced) pin this tool's reading of those maps, not proven downstream events. s3 part
+  1 and the s3 VOD are this decoder's output with raw left/right columns (`load_raw` ->
+  `resolve_ticks`).
 - Re-decode from the real files (stream box `C:/Users/newlevel/Documents/_NLMEDIA stream/RECORDINGS`,
   VOD via `yt-dlp -f 137`) with `youtube_leg_verdict.py --decode-ticks`; ~20-40 min per 20 min
-  file with 4 workers on a loaded dev1. The cache key in the out dir carries the decoder version.
+  file with 4 workers on a loaded dev1. The cache key in the out dir carries the decoder version and
+  the OpenCV version; CI pins `opencv-python-headless==4.13.0.92`, dev1's.
 - Real-pixel crops: the QR band at 0.5 scale as JPEG q95 (decodes exactly like the lossless crop;
-  q90 changed one frame's result).
+  q90 changed one frame's result). Frame 2100's expected tick is pinned only to its bracketing
+  anchors (2196752 or 2196754): the session decoder never read it.
 - Synthetic test videos are lossless FFV1 (mp4v blurred one QR into a miss); a synthetic colour
   QR uses EQUAL-GRAY module colours ((0,255,255) on (255,255,158)), a yellow-on-white QR still
-  reads in gray.
+  reads in gray. A synthetic dup/skip test needs enough frames for anchor pairs (a 5-frame toy
+  window has none and is, correctly, an error).
