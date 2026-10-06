@@ -471,6 +471,60 @@ def test_the_rig_away_on_the_mobile_link_is_not_mirrored(tmp_path):
     assert sum("away" in m for m in logs) == 1  # logged once per state change, not per check
 
 
+def _fake_ping(tmp_path, monkeypatch, rc, stdout="", stderr=""):
+    fb = tmp_path / "pingbin"
+    fb.mkdir()
+    f = fb / "ping"
+    f.write_text("#!/usr/bin/env bash\n"
+                 f"printf %s {stdout!r}\n"
+                 f"printf %s {stderr!r} >&2\n"
+                 f"exit {rc}\n")
+    f.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fb}:/usr/bin:/bin")
+
+
+def test_ping_rtt_reads_a_reply(tmp_path, monkeypatch):
+    _fake_ping(tmp_path, monkeypatch, 0, stdout="rtt min/avg/max/mdev = 0.107/0.133/0.156/0.020 ms\n")
+    assert rmm.ping_rtt_ms("10.77.9.62") == pytest.approx(0.107)
+
+
+def test_ping_without_a_reply_is_an_unknown_rtt(tmp_path, monkeypatch):
+    _fake_ping(tmp_path, monkeypatch, 1, stdout="2 packets transmitted, 0 received, 100% packet loss\n")
+    assert rmm.ping_rtt_ms("10.77.9.62") is None
+
+
+def test_a_ping_that_cannot_run_is_a_probe_error_not_an_unknown_rtt(tmp_path, monkeypatch):
+    """Under NoNewPrivileges ping loses its cap_net_raw file capability and exits 2 with
+    'socket: Operation not permitted' -- that is a broken gate, never 'cam2 did not answer'."""
+    _fake_ping(tmp_path, monkeypatch, 2, stderr="ping: socket: Operation not permitted\n")
+    with pytest.raises(rmm.RttProbeError) as exc:
+        rmm.ping_rtt_ms("10.77.9.62")
+    assert "Operation not permitted" in str(exc.value)
+
+
+def test_a_broken_rtt_probe_is_logged_loudly_once_and_mirroring_goes_on(tmp_path):
+    def broken(_host):
+        raise rmm.RttProbeError("ping exited 2: ping: socket: Operation not permitted")
+
+    body = f"""
+    out.write({_size(FULL) + FULL!r}); out.flush()
+    sys.exit(255)
+    """
+    logs = []
+    _rc, _serve, writes = _run(tmp_path, body, max_runtime_s=1.0, rtt=broken, logs=logs)
+    assert writes == [FULL]
+    gate_errors = [m for m in logs if m.startswith("ERROR") and "RTT gate" in m]
+    assert len(gate_errors) == 1 and "Operation not permitted" in gate_errors[0]
+
+
+def test_the_mirror_unit_leaves_ping_its_capability():
+    """ping reaches ICMP only through its cap_net_raw file capability on dev1
+    (net.ipv4.ping_group_range = 1 0); NoNewPrivileges=yes drops it, and the RTT gate would read
+    every rig as 'unknown' and mirror over the metered venue link."""
+    s = (SYSTEMD / "rig-marker-mirror.service").read_text(encoding="utf-8")
+    assert not re.search(r"^NoNewPrivileges=(yes|true|1|on)\s*$", s, re.M | re.I)
+
+
 def test_an_unknown_rtt_still_tries_the_connection(tmp_path):
     body = f"""
     out.write({_size(FULL) + FULL!r}); out.flush()
