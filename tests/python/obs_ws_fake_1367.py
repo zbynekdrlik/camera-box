@@ -56,8 +56,16 @@ class FakeObsWs:
         self._thread.start()
 
     def close(self):
+        # shutdown() wakes the accept() blocked on the server thread; a bare close() does not on
+        # Linux, and that accept would still take one more connection.
+        try:
+            self._sock.shutdown(socket.SHUT_RDWR)
+        except OSError as exc:
+            self.errors.append(f"listening socket shutdown failed: {exc!r}")
         self._sock.close()
         self._thread.join(timeout=5)
+        if self._thread.is_alive():
+            self.errors.append("fake obs-websocket server thread did not stop")
 
     # --- transport ----------------------------------------------------------------------------
 

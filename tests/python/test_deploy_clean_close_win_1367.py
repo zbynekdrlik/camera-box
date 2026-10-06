@@ -26,6 +26,7 @@ import json
 import os
 import pathlib
 import shutil
+import socket
 import subprocess
 import sys
 
@@ -107,7 +108,8 @@ def test_clean_close_first_bounded_45s_force_only_as_named_fallback(box, mode):
     close = p.index("# (2) issue 1367")
     assert p.index("# (1b)") < close and p.index("# (1) ") < close
     seg = p[close:p.index("# (3) ")]
-    assert "$ccCloseTimeoutMs = 45000" in seg
+    # the whole line: a substring check would also accept 450000
+    assert "\n$ccCloseTimeoutMs = 45000\n" in seg
     # re-read right before the close; a stream that started since (0a) is refused too
     assert seg.index("Get-CcObsOutputState") < seg.index(".CloseMainWindow()")
     assert "STARTED STREAMING" in seg and "exit 12" in seg
@@ -288,16 +290,24 @@ def test_run_recording_is_stopped_and_confirmed_before_the_close(rig, ws):
     assert not r.obs_alive()
 
 
+def _dead_uri():
+    # a port that was free a moment ago and that nothing listens on
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return f"ws://127.0.0.1:{port}"
+
+
 def test_run_unreadable_websocket_fails_open_and_is_named(rig):
     r = rig()
-    closed = FakeObsWs()
-    uri = closed.uri
-    closed.close()  # nothing listens on that port any more
-    res = r.run(uri)
+    res = r.run(_dead_uri())
     out = res.stdout + res.stderr
     assert res.returncode == 0, out
-    assert out.count("unreadable") == 2, out  # step (0a) and step (2), both named
-    assert "the stream state is UNKNOWN; continuing" in out
+    # step (0a) and step (2) each name it, once
+    assert out.count("unreadable (") == 2, out
+    assert out.count("-- the stream state is UNKNOWN; continuing") == 1, out
+    assert out.count("-- closing without the stream/record read") == 1, out
     assert "HARNESS DONE" in out
     assert not r.obs_alive()
 
