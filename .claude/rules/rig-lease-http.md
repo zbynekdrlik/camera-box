@@ -230,6 +230,9 @@ without a serve dir. A file another user owns is never served.
   `_handle()`; `_send()` gained only an optional `extra_headers`. An empty `$RIG_LEASE_DIR` now
   means the default, as in `scripts/lib/rig-lease.sh` (`rsf.default_lease_dir()`).
 - **The server stays stdlib-only.** The numpy analysis lives in the sampler, never here.
+- **A MEASUREMENT without a numeric `marker_chain` is served as UNKNOWN** (ages kept, a reason
+  added). It comes from a sampler older than the issue-1404 marker requirement; the server is the
+  one place every reader sees, restreamer's own reader included.
 - Writers, contract, calibration and runbooks: `.claude/rules/program-audio-guard.md`,
   `systemd/rig-marker-mirror.README.md`, `systemd/program-audio-sampler.README.md`. The running
   unit serves the new routes only after `systemctl --user restart rig-lease-server.service`; do it

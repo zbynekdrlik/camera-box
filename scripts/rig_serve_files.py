@@ -168,7 +168,9 @@ def program_audio_response(path: str, now: datetime) -> dict | None:
     on another host never compares two clocks, and a sampler that stopped writing reads stale,
     never fresh). None while the file is absent. Anything else that is not a payload this user
     wrote (an OS error, not JSON, another owner) is served FAIL-CLOSED as UNKNOWN with `age_s`
-    null; an unparseable `ts_utc` keeps the verdict with `age_s` null (a consumer reads stale)."""
+    null; an unparseable `ts_utc` keeps the verdict with `age_s` null (a consumer reads stale). A
+    MEASUREMENT without a marker chain (a sampler older than the issue-1404 marker requirement) is
+    served as UNKNOWN with its ages kept."""
     try:
         with open(path, "rb") as fh:
             st = os.fstat(fh.fileno())
@@ -187,4 +189,16 @@ def program_audio_response(path: str, now: datetime) -> dict | None:
         return _unknown(f"program-audio.json unreadable: {exc}")
     payload["age_s"] = _age(now, payload.get("ts_utc"))
     payload["last_foreign_age_s"] = _age(now, payload.get("last_foreign_ts_utc"))
+    if payload.get("verdict") == "MEASUREMENT" and not _is_count(payload.get("marker_chain")):
+        # issue 1404 (ROZHODNUTÉ 6026826572): MEASUREMENT needs the QPSK marker chain. Without one
+        # the payload comes from a sampler older than that requirement (it keeps running after a
+        # pull until restarted). Refused HERE, the one place every consumer reads (the camera-box
+        # guard and restreamer's own reader); the ages stay, so a stale reading still reads stale.
+        payload["verdict"] = "UNKNOWN"
+        payload["reason"] = ("MEASUREMENT without a marker chain (a sampler older than the marker "
+                             "requirement -- build the QPSK shim and restart program-audio-sampler)")
     return payload
+
+
+def _is_count(v) -> bool:
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0

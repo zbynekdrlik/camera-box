@@ -32,13 +32,26 @@ _SCRIPTS = _ROOT / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
+_HERE = pathlib.Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
 import program_audio as pa  # noqa: E402
 import program_audio_ndi as pan  # noqa: E402
 import program_audio_sampler as pas  # noqa: E402
 import rig_serve_files as rsf  # noqa: E402
+from qpsk_guard_shim_1404 import FixedChain, NoMarkers, build_shim  # noqa: E402
 
 FIX = _ROOT / "tests" / "fixtures" / "youtube_leg_1404"
 SR = 48000
+# The spectral tests below hand classify() a full marker chain (or None) on purpose: the marker
+# requirement itself is tested in test_program_audio_marker_1404.py.
+CHAIN_OK = pa.MARKER_CHAIN_MIN
+
+
+@pytest.fixture(scope="session")
+def shim_path(tmp_path_factory):
+    return build_shim(tmp_path_factory.mktemp("qpsk-guard-shim"))
 
 
 def _load_flac(path: pathlib.Path):
@@ -121,7 +134,7 @@ def test_real_measurement_audio_is_measurement_in_every_window(clip):
         rms, outside = pa.analyse(w, sr)
         assert -40.0 < rms < -30.0
         assert outside < pa.FOREIGN_OUTSIDE_BAND_PCT
-        assert pa.classify(rms, outside) == "MEASUREMENT"
+        assert pa.classify(rms, outside, CHAIN_OK) == "MEASUREMENT"
 
 
 def test_the_real_vod_window_before_the_stream_began_is_silent():
@@ -129,7 +142,7 @@ def test_the_real_vod_window_before_the_stream_began_is_silent():
     2 s are digital silence."""
     x, sr = _load_flac(FIX / "s3-A-vod.flac")
     rms, outside = pa.analyse(_windows(x, sr)[0], sr)
-    assert pa.classify(rms, outside) == "SILENT"
+    assert pa.classify(rms, outside, None) == "SILENT"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -147,7 +160,7 @@ def test_broadband_and_speech_like_audio_is_foreign(kind):
     rms, outside = pa.analyse(np.stack([x, x], axis=1), SR)
     assert abs(rms - (-20.0)) < 0.5
     assert outside > pa.FOREIGN_OUTSIDE_BAND_PCT
-    assert pa.classify(rms, outside) == "FOREIGN"
+    assert pa.classify(rms, outside, None) == "FOREIGN"
 
 
 def test_pink_noise_at_the_measurement_level_mixed_under_a_real_window_is_foreign():
@@ -157,7 +170,7 @@ def test_pink_noise_at_the_measurement_level_mixed_under_a_real_window_is_foreig
     mrms = 10 * np.log10(np.mean(meas ** 2))
     noise = _scale_to_dbfs(_pink(len(meas), rng), mrms)
     rms, outside = pa.analyse(meas + noise, sr)
-    assert pa.classify(rms, outside) == "FOREIGN"
+    assert pa.classify(rms, outside, CHAIN_OK) == "FOREIGN"
 
 
 # ---------------------------------------------------------------------------------------------
@@ -169,7 +182,7 @@ def test_digital_silence_is_silent_with_no_spectral_share():
     rms, outside = pa.analyse(np.zeros((2 * SR, 2), dtype=np.float32), SR)
     assert rms == pa.DIGITAL_SILENCE_DBFS
     assert outside is None
-    assert pa.classify(rms, outside) == "SILENT"
+    assert pa.classify(rms, outside, None) == "SILENT"
 
 
 def test_a_minus_80_dbfs_noise_floor_is_silent_not_foreign():
@@ -177,21 +190,21 @@ def test_a_minus_80_dbfs_noise_floor_is_silent_not_foreign():
     x = _scale_to_dbfs(rng.standard_normal(2 * SR), -80.0)
     rms, outside = pa.analyse(x, SR)
     assert outside is not None and outside > 90.0  # white noise: broadband
-    assert pa.classify(rms, outside) == "SILENT"
+    assert pa.classify(rms, outside, None) == "SILENT"
 
 
 def test_classify_rejects_a_missing_measurement_as_unknown():
-    assert pa.classify(None, None) == "UNKNOWN"
-    assert pa.classify(float("nan"), 10.0) == "UNKNOWN"
-    assert pa.classify(-30.0, None) == "UNKNOWN"
-    assert pa.classify(-30.0, float("nan")) == "UNKNOWN"
+    assert pa.classify(None, None, CHAIN_OK) == "UNKNOWN"
+    assert pa.classify(float("nan"), 10.0, CHAIN_OK) == "UNKNOWN"
+    assert pa.classify(-30.0, None, CHAIN_OK) == "UNKNOWN"
+    assert pa.classify(-30.0, float("nan"), CHAIN_OK) == "UNKNOWN"
 
 
 def test_the_classifier_boundaries():
-    assert pa.classify(pa.SILENT_RMS_DBFS - 0.1, 99.0) == "SILENT"
-    assert pa.classify(pa.SILENT_RMS_DBFS, 10.0) == "MEASUREMENT"
-    assert pa.classify(-35.0, pa.FOREIGN_OUTSIDE_BAND_PCT) == "FOREIGN"
-    assert pa.classify(-35.0, pa.FOREIGN_OUTSIDE_BAND_PCT - 0.1) == "MEASUREMENT"
+    assert pa.classify(pa.SILENT_RMS_DBFS - 0.1, 99.0, None) == "SILENT"
+    assert pa.classify(pa.SILENT_RMS_DBFS, 10.0, CHAIN_OK) == "MEASUREMENT"
+    assert pa.classify(-35.0, pa.FOREIGN_OUTSIDE_BAND_PCT, CHAIN_OK) == "FOREIGN"
+    assert pa.classify(-35.0, pa.FOREIGN_OUTSIDE_BAND_PCT - 0.1, CHAIN_OK) == "MEASUREMENT"
 
 
 def test_stereo_channels_are_summed_in_power_so_an_inter_channel_delay_cannot_cancel():
@@ -213,7 +226,7 @@ def test_an_anti_phase_channel_pair_stays_measurement_never_silent():
     x, sr = _load_flac(FIX / "s2-R-rec.flac")
     w = _windows(x, sr)[4]
     rms, outside = pa.analyse(np.stack([w, -w], axis=1), sr)
-    assert pa.classify(rms, outside) == "MEASUREMENT"
+    assert pa.classify(rms, outside, CHAIN_OK) == "MEASUREMENT"
     _r, ref = pa.analyse(w, sr)
     assert abs(outside - ref) < 1e-6
 
@@ -223,7 +236,8 @@ def test_analyse_accepts_mono_and_float32():
     rms, outside = pa.analyse(x, SR)
     assert abs(rms + 30.0) < 0.2
     assert outside < 1.0  # a 442 Hz carrier is all in band
-    assert pa.classify(rms, outside) == "MEASUREMENT"
+    assert pa.classify(rms, outside, CHAIN_OK) == "MEASUREMENT"
+    assert pa.classify(rms, outside, 0) == "FOREIGN"  # a bare carrier holds no marker
 
 
 # ---------------------------------------------------------------------------------------------
@@ -240,7 +254,7 @@ def test_build_payload_has_the_contract_fields_rounded():
     assert p == {
         "schema": 1, "ts_utc": "2026-10-06T19:30:02.123Z", "age_s": 0.0, "verdict": "MEASUREMENT",
         "rms_dbfs": -35.6, "outside_band_pct": 16.8, "window_s": 2.0, "source": "STREAM-SNV (stream)",
-        "last_foreign_ts_utc": None,
+        "last_foreign_ts_utc": None, "markers_decoded": None, "marker_chain": None,
     }
     latched = pa.build_payload("MEASUREMENT", -35.6, 16.8, now=now, window_s=2.0, source="S",
                                last_foreign_ts_utc="2026-10-06T19:29:58.000Z")
@@ -335,10 +349,10 @@ def test_run_writes_unknown_at_start_then_a_measurement_verdict(tmp_path):
         seen.append(payload["verdict"])
 
     rx = _FakeReceiver(blocks)
-    pas.run(rx, str(tmp_path), source="STREAM-SNV (stream)", mono=clock.mono, max_loops=len(blocks),
-            on_write=on_write, log=lambda m: None)
+    pas.run(rx, str(tmp_path), source="STREAM-SNV (stream)", decoder=FixedChain(), mono=clock.mono,
+            max_loops=len(blocks), on_write=on_write, log=lambda m: None)
     assert seen[0] == "UNKNOWN"
-    assert seen[1:] == ["MEASUREMENT", "MEASUREMENT"]
+    assert seen[1:] == ["UNKNOWN", "MEASUREMENT"]  # the first window is the 4 s marker warm-up
     final = _read(tmp_path)
     assert final["verdict"] == "MEASUREMENT"
     assert final["source"] == "STREAM-SNV (stream)"
@@ -354,8 +368,8 @@ def test_run_reports_unknown_when_no_audio_arrives(tmp_path):
             return None
 
     rx = _Ticking([], connections=0)
-    pas.run(rx, str(tmp_path), source="STREAM-SNV (stream)", mono=clock.mono, max_loops=40,
-            log=lambda m: None)
+    pas.run(rx, str(tmp_path), source="STREAM-SNV (stream)", decoder=NoMarkers(), mono=clock.mono,
+            max_loops=40, log=lambda m: None)
     final = _read(tmp_path)
     assert final["verdict"] == "UNKNOWN"
     assert "no audio" in final["reason"]
@@ -377,8 +391,8 @@ def test_run_never_writes_a_stale_verdict_as_fresh_after_audio_stops(tmp_path):
             return None
 
     rx = _ThenSilence(blocks)
-    pas.run(rx, str(tmp_path), source="S", mono=clock.mono, max_loops=len(blocks) + 30,
-            log=lambda m: None)
+    pas.run(rx, str(tmp_path), source="S", decoder=NoMarkers(), mono=clock.mono,
+            max_loops=len(blocks) + 30, log=lambda m: None)
     assert _read(tmp_path)["verdict"] == "UNKNOWN"
 
 
@@ -453,7 +467,7 @@ def test_the_sampler_defaults_name_the_live_stream_program_sender():
 # ---------------------------------------------------------------------------------------------
 
 
-def test_main_with_an_unloadable_libndi_writes_unknown_and_fails(tmp_path):
+def test_main_with_an_unloadable_libndi_writes_unknown_and_fails(tmp_path, shim_path):
     serve = tmp_path / "serve"
     from datetime import datetime, timezone
 
@@ -462,7 +476,7 @@ def test_main_with_an_unloadable_libndi_writes_unknown_and_fails(tmp_path):
     serve.mkdir()
     pa.write_payload(str(serve), old)
     rc = pas.main(["--serve-dir", str(serve), "--lib", str(tmp_path / "no-libndi.so"),
-                   "--source", "STREAM-SNV (stream)"])
+                   "--source", "STREAM-SNV (stream)", "--marker-shim", shim_path])
     assert rc == 1
     got = _read(serve)
     assert got["verdict"] == "UNKNOWN"
@@ -519,7 +533,7 @@ def test_the_cg_clip_tone_bed_under_the_marker_is_measurement():
     meas = _windows(x, sr)[5]
     clip = meas + _tone(1000.0, -30.0, len(meas), sr)
     rms, outside = pa.analyse(clip, sr)
-    assert pa.classify(rms, outside) == "MEASUREMENT"
+    assert pa.classify(rms, outside, CHAIN_OK) == "MEASUREMENT"
 
 
 def test_the_tone_line_is_narrow_noise_with_the_bed_stays_foreign():
@@ -529,20 +543,20 @@ def test_the_tone_line_is_narrow_noise_with_the_bed_stays_foreign():
     mrms = 10 * np.log10(np.mean(meas ** 2))
     noisy = meas + _tone(1000.0, -30.0, len(meas), sr) + _scale_to_dbfs(_pink(len(meas), rng), mrms)
     rms, outside = pa.analyse(noisy, sr)
-    assert pa.classify(rms, outside) == "FOREIGN"
+    assert pa.classify(rms, outside, CHAIN_OK) == "FOREIGN"
     off_line = meas + _tone(1100.0, -30.0, len(meas), sr)  # not the declared bed
     rms2, outside2 = pa.analyse(off_line, sr)
-    assert pa.classify(rms2, outside2) == "FOREIGN"
+    assert pa.classify(rms2, outside2, CHAIN_OK) == "FOREIGN"
 
 
 def test_a_nan_sample_is_unknown_never_silent():
     x = _scale_to_dbfs(np.random.default_rng(5).standard_normal(2 * SR), -15.0)
     x[1000] = np.nan
     rms, outside = pa.analyse(x, SR)
-    assert pa.classify(rms, outside) == "UNKNOWN"
+    assert pa.classify(rms, outside, CHAIN_OK) == "UNKNOWN"
     x[1000] = np.inf
     rms, outside = pa.analyse(x, SR)
-    assert pa.classify(rms, outside) == "UNKNOWN"
+    assert pa.classify(rms, outside, CHAIN_OK) == "UNKNOWN"
 
 
 def _bounded(code: str) -> subprocess.CompletedProcess:
@@ -580,8 +594,12 @@ def test_run_skips_frames_with_a_bad_sample_rate_without_hanging(tmp_path):
         "        return self.b.pop(0) if self.b else None\n"
         "    def connections(self):\n"
         "        return 1\n"
+        "class D:\n"
+        "    def decode(self, samples, sample_rate):\n"
+        "        return [[] for _ in range(samples.shape[1])]\n"
         "logs = []\n"
-        f"pas.run(R(), {str(tmp_path)!r}, source='S', mono=lambda: 0.0, max_loops=10, log=logs.append)\n"
+        f"pas.run(R(), {str(tmp_path)!r}, source='S', decoder=D(), mono=lambda: 0.0, max_loops=10,"
+        " log=logs.append)\n"
         "print(json.dumps(logs))\n"
     )
     assert r.returncode == 0, r.stderr[-500:]
@@ -596,30 +614,30 @@ def test_run_does_not_spin_or_flood_on_repeated_error_frames(tmp_path):
             raise ConnectionError("NDI receive error from 'S' (connection lost)")
 
     sleeps, logs = [], []
-    pas.run(_Erroring([]), str(tmp_path), source="S", mono=_Clock().mono, max_loops=50,
-            log=logs.append, sleep=sleeps.append)
+    pas.run(_Erroring([]), str(tmp_path), source="S", decoder=NoMarkers(), mono=_Clock().mono,
+            max_loops=50, log=logs.append, sleep=sleeps.append)
     assert len(sleeps) == 50 and all(s > 0 for s in sleeps)
     assert sum("connection lost" in m for m in logs) == 1
 
 
 def test_run_latches_a_foreign_window_into_the_following_payloads(tmp_path):
     rng = np.random.default_rng(1404)
-    x, sr = _load_flac(FIX / "s2-R-rec.flac")  # 16 kHz: 2 s of loud broadband, then 4 s of measurement
-    loud = _scale_to_dbfs(_pink(2 * sr, rng), -20.0).astype(np.float32)
-    meas = x[: 2 * sr * 2].astype(np.float32)
+    x, sr = _load_flac(FIX / "s2-R-rec.flac")  # 16 kHz: 4 s of loud broadband, then 6 s of measurement
+    loud = _scale_to_dbfs(_pink(4 * sr, rng), -20.0).astype(np.float32)
+    meas = x[: 2 * sr * 3].astype(np.float32)
     stereo = np.concatenate([np.stack([loud, loud], 1), np.stack([meas, meas], 1)])
     blocks = [pan.AudioBlock(sr, stereo[i:i + 1600]) for i in range(0, stereo.shape[0], 1600)]
     payloads = []
-    pas.run(_FakeReceiver(blocks), str(tmp_path), source="S", mono=_Clock().mono,
+    pas.run(_FakeReceiver(blocks), str(tmp_path), source="S", decoder=FixedChain(), mono=_Clock().mono,
             max_loops=len(blocks), on_write=payloads.append, log=lambda m: None)
     verdicts = [q["verdict"] for q in payloads]
-    assert verdicts[1] == "FOREIGN"
-    assert verdicts[-1] == "MEASUREMENT"
-    assert payloads[-1]["last_foreign_ts_utc"] == payloads[1]["ts_utc"]
+    assert verdicts == ["UNKNOWN", "UNKNOWN", "FOREIGN", "MEASUREMENT", "MEASUREMENT", "MEASUREMENT"]
+    assert payloads[-1]["last_foreign_ts_utc"] == payloads[2]["ts_utc"]
     assert payloads[0]["last_foreign_ts_utc"] is None
 
 
-def test_main_forces_a_private_empty_ndi_config_dir_before_creating_the_receiver(tmp_path, monkeypatch):
+def test_main_forces_a_private_empty_ndi_config_dir_before_creating_the_receiver(tmp_path, monkeypatch,
+                                                                                    shim_path):
     """mDNS only, enforced in code: an NDI extra-IP list would open a TCP discovery connection into
     every listed sender (.claude/rules/ndi-discovery.md)."""
     monkeypatch.setenv("NDI_CONFIG_DIR", str(tmp_path / "operator-config"))
@@ -633,17 +651,18 @@ def test_main_forces_a_private_empty_ndi_config_dir_before_creating_the_receiver
             raise RuntimeError("probe: stop here")
 
     monkeypatch.setattr(pan, "NdiAudioReceiver", _Probe)
-    rc = pas.main(["--serve-dir", str(tmp_path / "serve"), "--source", "S"])
+    rc = pas.main(["--serve-dir", str(tmp_path / "serve"), "--source", "S", "--marker-shim", shim_path])
     assert rc == 1
     assert seen["dir"] != str(tmp_path / "operator-config")
     assert seen["empty"] is True
 
 
-def test_main_installs_no_signal_handlers_when_the_receiver_fails(tmp_path):
+def test_main_installs_no_signal_handlers_when_the_receiver_fails(tmp_path, shim_path):
     import signal as _signal
 
     before = (_signal.getsignal(_signal.SIGTERM), _signal.getsignal(_signal.SIGINT))
-    pas.main(["--serve-dir", str(tmp_path / "serve"), "--lib", str(tmp_path / "no-libndi.so")])
+    pas.main(["--serve-dir", str(tmp_path / "serve"), "--lib", str(tmp_path / "no-libndi.so"),
+              "--marker-shim", shim_path])
     assert (_signal.getsignal(_signal.SIGTERM), _signal.getsignal(_signal.SIGINT)) == before
 
 
@@ -664,4 +683,4 @@ def test_a_program_that_is_only_the_declared_bed_reads_silent():
     left: SILENT -- a sine is not copyrighted content, never a FOREIGN stop."""
     rms, outside = pa.analyse(_tone(1000.0, -30.0, 2 * SR, SR), SR)
     assert rms < pa.SILENT_RMS_DBFS
-    assert pa.classify(rms, outside) == "SILENT"
+    assert pa.classify(rms, outside, None) == "SILENT"

@@ -20,8 +20,16 @@ MEASUREMENT | FOREIGN | SILENT | UNKNOWN (scripts/program_audio.py) and atomical
 * Logging: a line per verdict CHANGE, the first NDI error frame / bad sample rate of a run, and a
   summary every LOG_SUMMARY_S -- never a line per 2 s window (~43 000 a day).
 
+* MARKER REQUIREMENT (ROZHODNUTÉ issue 1404 comments 6026577906 + 6026826572): MEASUREMENT also
+  needs the cam2 QPSK marker itself -- a timecode chain of >= pa.MARKER_CHAIN_MIN markers over the
+  trailing 4 s of contiguous non-silent audio, decoded by the dock's own decoder through the
+  `scripts/qpsk_guard_shim.cpp` library (scripts/program_audio_marker.py). Until 4 s of audio
+  arrived since the start or a receive gap (no audio block for over RECEIVE_GAP_S) every verdict is
+  UNKNOWN; a missing / unloadable library = UNKNOWN and exit 1, like a missing libndi.
+
 Usage (systemd/program-audio-sampler.service):
   program_audio_sampler.py [--source "STREAM-SNV (stream)"] [--serve-dir DIR] [--lib PATH]
+                           [--marker-shim PATH]
 """
 from __future__ import annotations
 
@@ -32,6 +40,7 @@ import signal
 import sys
 import tempfile
 import time
+from collections import deque
 from datetime import datetime, timezone
 from typing import Callable
 
@@ -39,6 +48,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import program_audio as pa  # noqa: E402
+import program_audio_marker as pam  # noqa: E402
 import rig_serve_files as rsf  # noqa: E402
 
 DEFAULT_SOURCE = "STREAM-SNV (stream)"
@@ -46,6 +56,11 @@ SOURCE_ENV = "PROGRAM_AUDIO_SOURCE"
 NO_AUDIO_TIMEOUT_S = 5.0
 CAPTURE_TIMEOUT_MS = 500
 LOG_SUMMARY_S = 600.0
+# No audio block for longer than this between two blocks = a receive gap: the audio around it is
+# never stitched into one marker span (the chain would read the gap as a jump in the index clock).
+# NDI delivers an OBS audio tick every ~21 ms and the sampler drains its queue within ~0.1 s
+# of a window's work, so a second without audio is an interruption, never jitter.
+RECEIVE_GAP_S = 1.0
 
 
 def log(msg: str) -> None:
@@ -65,6 +80,10 @@ class WindowAccumulator:
 
     def __init__(self, window_s: float):
         self.window_s = window_s
+        self.reset()
+
+    def reset(self) -> None:
+        """Drop the partial window (a receive gap: audio before and after it is never mixed)."""
         self._parts: list[np.ndarray] = []
         self._have = 0
         self._fmt: tuple[int, int] | None = None
@@ -90,41 +109,106 @@ class WindowAccumulator:
         return out
 
 
-def run(receiver, serve_dir: str, *, source: str, mono: Callable[[], float] = time.monotonic,
+class MarkerSpan:
+    """The trailing `span_s` of contiguous NON-SILENT audio the marker chain is read over, and the
+    warm-up: the seconds of audio received since the start, a receive gap or a format change.
+
+    * Warm-up: until `span_s` of audio arrived, every verdict is UNKNOWN (ROZHODNUTÉ issue 1404
+      comment 6026577906) -- never FOREIGN, never MEASUREMENT.
+    * A SILENT window empties the span: silence carries no marker, so the window after it holds only
+      its own markers and must not be judged against the full span (it reads UNKNOWN until the span
+      is full again; the s3-A-vod fixture is this start-of-stream case).
+    * `reset()` = a receive gap: both start over."""
+
+    def __init__(self, window_s: float = pa.WINDOW_S, span_s: float = pa.MARKER_SPAN_S):
+        k = span_s / window_s
+        if k < 1 or abs(k - round(k)) > 1e-9:
+            raise ValueError(f"MarkerSpan: span {span_s} s is not a whole number of {window_s} s windows")
+        self.window_s = window_s
+        self.span_s = span_s
+        self.windows = int(round(k))
+        self.reset()
+
+    def reset(self) -> None:
+        self._wins: deque[np.ndarray] = deque(maxlen=self.windows)
+        self._fmt: tuple[int, int] | None = None
+        self.audio_s = 0.0
+
+    @property
+    def warm(self) -> bool:
+        return self.audio_s >= self.span_s - 1e-9
+
+    @property
+    def non_silent_s(self) -> float:
+        return len(self._wins) * self.window_s
+
+    def push(self, win: np.ndarray, sample_rate: int, silent: bool) -> np.ndarray | None:
+        """Add one window; the full span (oldest first) once it holds `span_s` of non-silent audio."""
+        fmt = (int(sample_rate), int(win.shape[1]))
+        if fmt != self._fmt:
+            self.reset()
+            self._fmt = fmt
+        self.audio_s += self.window_s
+        if silent:
+            self._wins.clear()
+            return None
+        self._wins.append(win)
+        if len(self._wins) < self.windows:
+            return None
+        return np.concatenate(list(self._wins), axis=0)
+
+
+def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], float] = time.monotonic,
         max_loops: int | None = None, on_write: Callable[[dict], None] | None = None,
         log: Callable[[str], None] = log, sleep: Callable[[float], None] = time.sleep,
         capture_timeout_ms: int = CAPTURE_TIMEOUT_MS, no_audio_timeout_s: float = NO_AUDIO_TIMEOUT_S,
-        window_s: float = pa.WINDOW_S, should_stop: Callable[[], bool] = lambda: False) -> None:
+        receive_gap_s: float = RECEIVE_GAP_S, window_s: float = pa.WINDOW_S,
+        should_stop: Callable[[], bool] = lambda: False) -> None:
     """The sampler loop. `receiver` has capture(timeout_ms) -> AudioBlock|None (raises
-    ConnectionError on an NDI error frame) and connections(). Every written payload also goes
-    through `on_write` (tests)."""
+    ConnectionError on an NDI error frame) and connections(); `decoder` has
+    decode(samples, sample_rate) -> CRC-valid words per channel (program_audio_marker.MarkerDecoder).
+    Every written payload also goes through `on_write` (tests)."""
     latch = {"last_foreign": None}
 
-    def write(verdict, rms, outside, reason=None):
+    def write(verdict, rms, outside, reason=None, markers=None, chain=None):
         now = datetime.now(timezone.utc)
         if verdict == "FOREIGN":
             latch["last_foreign"] = rsf.format_ts_utc(now)
         payload = pa.build_payload(verdict, rms, outside, now=now, window_s=window_s, source=source,
-                                   reason=reason, last_foreign_ts_utc=latch["last_foreign"])
+                                   reason=reason, last_foreign_ts_utc=latch["last_foreign"],
+                                   markers_decoded=markers, marker_chain=chain)
         pa.write_payload(serve_dir, payload)
         if on_write is not None:
             on_write(payload)
         return payload
 
     acc = WindowAccumulator(window_s)
+    span = MarkerSpan(window_s, pa.MARKER_SPAN_S)
     write("UNKNOWN", None, None, reason="sampler starting")
     log(f"program-audio sampler: source={source!r} serve_dir={serve_dir} window={window_s}s "
         f"band={pa.BAND_LO_HZ:.0f}-{pa.BAND_HI_HZ:.0f}Hz tone_lines={pa.MEASUREMENT_TONE_LINES_HZ} "
-        f"foreign>={pa.FOREIGN_OUTSIDE_BAND_PCT}% silent<{pa.SILENT_RMS_DBFS}dBFS")
+        f"foreign>={pa.FOREIGN_OUTSIDE_BAND_PCT}% silent<{pa.SILENT_RMS_DBFS}dBFS "
+        f"marker_chain>={pa.MARKER_CHAIN_MIN} over {pa.MARKER_SPAN_S:g}s receive_gap>{receive_gap_s:g}s")
     last_audio = mono()
+    have_audio = False
     last_unknown = mono()
     last_verdict = "UNKNOWN"
     last_summary = mono()
     counts = {v: 0 for v in pa.VERDICTS}
-    errors = bad_rate = 0
+    errors = bad_rate = gaps = 0
     in_error = False
     bad_rate_logged = False
     loops = 0
+
+    def restart_span(why: str) -> None:
+        nonlocal gaps
+        gaps += 1
+        acc.reset()
+        span.reset()
+        if why:
+            log(f"program-audio sampler: {why} -- the marker span starts over (UNKNOWN for "
+                f"{pa.MARKER_SPAN_S:g} s)")
+
     while not should_stop() and (max_loops is None or loops < max_loops):
         loops += 1
         try:
@@ -134,6 +218,9 @@ def run(receiver, serve_dir: str, *, source: str, mono: Callable[[], float] = ti
             if not in_error:
                 log(f"program-audio sampler: {exc} -- the SDK reconnects by itself")
                 in_error = True
+            if have_audio:
+                restart_span("")  # audio after an error frame never continues the span
+            have_audio = False
             sleep(capture_timeout_ms / 1000.0)  # an error frame can come back at once: never spin
             block = None
         now = mono()
@@ -145,16 +232,19 @@ def run(receiver, serve_dir: str, *, source: str, mono: Callable[[], float] = ti
             block = None
         if block is not None and block.samples.shape[0] > 0:
             in_error = False
+            if have_audio and now - last_audio > receive_gap_s:
+                restart_span(f"receive gap of {now - last_audio:.1f} s")
+            have_audio = True
             last_audio = now
             for win, sr in acc.push(block.samples, block.sample_rate):
-                rms, outside = pa.analyse(win, sr)
-                verdict = pa.classify(rms, outside)
-                write(verdict, rms, outside)
+                verdict, rms, outside, reason, markers, chain = classify_window(win, sr, span, decoder)
+                write(verdict, rms, outside, reason, markers, chain)
                 counts[verdict] += 1
                 if verdict != last_verdict:
-                    log(f"program-audio verdict {last_verdict} -> {verdict} rms={rms:.1f} dBFS "
-                        f"outside_band={'-' if outside is None else f'{outside:.1f}'}% sr={sr} "
-                        f"channels={win.shape[1]}")
+                    log(f"program-audio verdict {last_verdict} -> {verdict} rms={_fmt(rms)} dBFS "
+                        f"outside_band={_fmt(outside)}% marker_chain={_fmt_count(chain)} "
+                        f"markers={_fmt_count(markers)} sr={sr} channels={win.shape[1]}"
+                        + (f": {reason}" if reason else ""))
                     last_verdict = verdict
         elif now - last_audio >= no_audio_timeout_s and now - last_unknown >= window_s:
             reason = (f"no audio from {source!r} for {now - last_audio:.1f} s "
@@ -166,11 +256,49 @@ def run(receiver, serve_dir: str, *, source: str, mono: Callable[[], float] = ti
                 log(f"program-audio verdict {last_verdict} -> UNKNOWN: {reason}")
                 last_verdict = "UNKNOWN"
         if now - last_summary >= LOG_SUMMARY_S:
-            log("program-audio summary (last %.0f s): %s error_frames=%d bad_rate_frames=%d" % (
-                now - last_summary, " ".join(f"{k}={v}" for k, v in counts.items()), errors, bad_rate))
+            log("program-audio summary (last %.0f s): %s error_frames=%d bad_rate_frames=%d "
+                "receive_gaps=%d" % (now - last_summary, " ".join(f"{k}={v}" for k, v in counts.items()),
+                                     errors, bad_rate, gaps))
             counts = {v: 0 for v in pa.VERDICTS}
-            errors = bad_rate = 0
+            errors = bad_rate = gaps = 0
             last_summary = now
+
+
+def _fmt(v) -> str:
+    return "-" if not pa.is_number(v) else f"{v:.1f}"
+
+
+def _fmt_count(v) -> str:
+    return "-" if v is None else str(v)
+
+
+def classify_window(win: np.ndarray, sr: int, span: MarkerSpan, decoder):
+    """One 2 s window -> (verdict, rms, outside, reason, markers_decoded, marker_chain): the spectral
+    measurement of this window and the marker chain over the trailing span (module doc of
+    program_audio.py). A decode failure leaves the chain unknown, which never reads MEASUREMENT."""
+    rms, outside = pa.analyse(win, sr)
+    silent = pa.is_number(rms) and rms < pa.SILENT_RMS_DBFS
+    full = span.push(win, sr, silent)
+    if not span.warm:
+        return ("UNKNOWN", rms, outside,
+                f"warming up: {span.audio_s:g} of {pa.MARKER_SPAN_S:g} s of audio since the start or a "
+                "receive gap", None, None)
+    markers = chain = None
+    reason = None
+    if full is not None:
+        try:
+            markers, chain = pa.span_markers(decoder.decode(full, sr))
+        except (pam.DecodeError, ValueError) as exc:
+            reason = f"marker decode failed: {exc}"
+    elif not silent:
+        reason = (f"marker span: {span.non_silent_s:g} of {pa.MARKER_SPAN_S:g} s of non-silent audio "
+                  "since the last silent window")
+    verdict = pa.classify(rms, outside, chain)
+    if verdict != "UNKNOWN":
+        reason = None
+    elif reason is None:
+        reason = "the window's level or spectrum is not a number"
+    return verdict, rms, outside, reason, markers, chain
 
 
 def private_ndi_config_dir() -> str:
@@ -186,6 +314,9 @@ def main(argv=None) -> int:
                     help=f"where program-audio.json goes (default ${rsf.SERVE_DIR_ENV} or "
                          "$XDG_RUNTIME_DIR/rig-lease-serve; never the lease dir)")
     ap.add_argument("--lib", default=None, help="libndi path (default $NDI_LIB_PATH or /usr/lib/ndi/libndi.so.6)")
+    ap.add_argument("--marker-shim", default=None,
+                    help=f"the QPSK marker decoder shim (default ${pam.SHIM_ENV} or {pam.DEFAULT_SHIM_PATH}; "
+                         "built by scripts/build-qpsk-guard-shim.sh)")
     args = ap.parse_args(argv)
 
     import program_audio_ndi as pan  # libndi only here, so the pure parts import without it
@@ -201,6 +332,21 @@ def main(argv=None) -> int:
         pa.write_payload(args.serve_dir, pa.build_payload(
             "UNKNOWN", None, None, now=datetime.now(timezone.utc), window_s=pa.WINDOW_S,
             source=args.source, reason=reason))
+
+    # The marker decoder BEFORE the receiver: without it no window can be MEASUREMENT, so the sampler
+    # must not run at all (fail closed, loud), never a spectral-only MEASUREMENT.
+    try:
+        decoder = pam.MarkerDecoder(args.marker_shim)
+    except pam.DecoderUnavailable as exc:
+        set_unknown(f"sampler cannot classify: {exc}")
+        log(f"program-audio sampler: FATAL {exc}")
+        return 1
+    log(f"program-audio sampler: marker decoder {decoder.path} params={decoder.params} "
+        f"sources_sha256={decoder.built_sha256[:12]}")
+    if decoder.sources_stale():
+        log(f"program-audio sampler: WARNING the marker decoder {decoder.path} was built from other "
+            f"sources than this checkout ({decoder.built_sha256[:12]} != {pam.sources_sha256()[:12]}) -- "
+            "rebuild it with scripts/build-qpsk-guard-shim.sh and restart")
 
     ndi_config_dir = private_ndi_config_dir()
     prev_ndi_config_dir = os.environ.get("NDI_CONFIG_DIR")
@@ -220,7 +366,8 @@ def main(argv=None) -> int:
         signal.signal(signal.SIGTERM, _stop)
         signal.signal(signal.SIGINT, _stop)
         try:
-            run(receiver, args.serve_dir, source=args.source, should_stop=lambda: stop["signal"] is not None)
+            run(receiver, args.serve_dir, source=args.source, decoder=decoder,
+                should_stop=lambda: stop["signal"] is not None)
         finally:
             receiver.close()
             set_unknown("sampler stopped")

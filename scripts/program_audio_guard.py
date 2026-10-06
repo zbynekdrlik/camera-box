@@ -7,7 +7,9 @@ Both YouTube gates call it before the broadcast starts and every ~10 s while it 
 `scripts/lib/youtube-leg.sh`, restreamer issue 357) and stop the broadcast on anything but 0.
 
   exit 0  MEASUREMENT or SILENT, and fresh (-1 s <= age_s <= --max-age), and no FOREIGN window
-          within --latch-s
+          within --latch-s; a MEASUREMENT must also carry its `marker_chain` (the QPSK marker
+          requirement, ROZHODNUTÉ issue 1404 comment 6026826572) -- one without it comes from a
+          sampler older than that requirement and reads UNKNOWN
   exit 1  FOREIGN (non-measurement audio on the program) -- also when stale: an old FOREIGN
           reading is never downgraded to "maybe" -- and also when the CURRENT window is clean but
           a FOREIGN window ended within --latch-s (`last_foreign_age_s`, the sampler's latch;
@@ -18,10 +20,11 @@ Both YouTube gates call it before the broadcast starts and every ~10 s while it 
           unreadable payload, an unexpected verdict -- fail CLOSED
 
 Output, always exactly one line on stdout:
-  program-audio verdict=<V> rms=<x> outside_band=<y>% age=<s>[ reason=<why>]
+  program-audio verdict=<V> rms=<x> outside_band=<y>% age=<s> markers=<n> chain=<c>[ reason=<why>]
 <V> is the EFFECTIVE verdict (UNKNOWN when the reading cannot be trusted), `-` for a missing
-number, and `reason=` explains every non-trivial outcome (stale, unreachable, the sampler's own
-UNKNOWN reason).
+number, `markers` / `chain` the sampler's raw CRC-valid word count and timecode chain over the
+trailing 4 s, and `reason=` explains every non-trivial outcome (stale, unreachable, the sampler's
+own UNKNOWN reason). Consumers act on the EXIT CODE; the line is for logs and people.
 
 Usage:
   program_audio_guard.py [--url http://dev1:8890/program-audio.json] [--max-age 10] [--latch-s 30]
@@ -57,9 +60,21 @@ def _fmt(v) -> str:
     return "-" if v is None else f"{v:.1f}"
 
 
-def _line(verdict, rms, outside, age, reason=None) -> str:
+def _count(v):
+    """A marker count from the payload: a non-negative whole number, else None."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        return None
+    return int(v) if v >= 0 and v == int(v) else None
+
+
+def _fmt_count(v) -> str:
+    v = _count(v)
+    return "-" if v is None else str(v)
+
+
+def _line(verdict, rms, outside, age, reason=None, markers=None, chain=None) -> str:
     line = (f"program-audio verdict={verdict} rms={_fmt(rms)} outside_band={_fmt(outside)}% "
-            f"age={_fmt(age)}")
+            f"age={_fmt(age)} markers={_fmt_count(markers)} chain={_fmt_count(chain)}")
     if reason:
         line += " reason=" + " ".join(str(reason).split())
     return line
@@ -69,6 +84,7 @@ def decide(payload: dict, max_age_s: float, latch_s: float = DEFAULT_LATCH_S) ->
     """(exit code, the one output line) for a fetched payload."""
     verdict = payload.get("verdict")
     rms, outside, age = payload.get("rms_dbfs"), payload.get("outside_band_pct"), _num(payload.get("age_s"))
+    counts = {"markers": payload.get("markers_decoded"), "chain": payload.get("marker_chain")}
     stale = age is None or age > max_age_s or age < -NEGATIVE_AGE_TOLERANCE_S
     if age is None:
         stale_why = "stale (no age)"
@@ -77,18 +93,25 @@ def decide(payload: dict, max_age_s: float, latch_s: float = DEFAULT_LATCH_S) ->
     else:
         stale_why = f"stale (age {age:.1f} s > max {max_age_s:g} s)"
     if verdict == "FOREIGN":
-        return EXIT_FOREIGN, _line("FOREIGN", rms, outside, age, stale_why if stale else None)
+        return EXIT_FOREIGN, _line("FOREIGN", rms, outside, age, stale_why if stale else None, **counts)
     last_foreign = _num(payload.get("last_foreign_age_s"))
     if last_foreign is not None and last_foreign <= latch_s:
         return EXIT_FOREIGN, _line("FOREIGN", rms, outside, age,
-                                   f"FOREIGN window {last_foreign:.1f} s ago (latched; current {verdict})")
+                                   f"FOREIGN window {last_foreign:.1f} s ago (latched; current {verdict})",
+                                   **counts)
     if verdict in ("MEASUREMENT", "SILENT"):
         if stale:
-            return EXIT_UNKNOWN, _line("UNKNOWN", rms, outside, age, f"{stale_why}, last verdict {verdict}")
-        return EXIT_OK, _line(verdict, rms, outside, age)
+            return EXIT_UNKNOWN, _line("UNKNOWN", rms, outside, age, f"{stale_why}, last verdict {verdict}",
+                                       **counts)
+        if verdict == "MEASUREMENT" and _count(counts["chain"]) is None:
+            return EXIT_UNKNOWN, _line("UNKNOWN", rms, outside, age,
+                                       "MEASUREMENT without a marker chain (a sampler older than the "
+                                       "marker requirement -- restart program-audio-sampler)", **counts)
+        return EXIT_OK, _line(verdict, rms, outside, age, **counts)
     if verdict == "UNKNOWN":
-        return EXIT_UNKNOWN, _line("UNKNOWN", rms, outside, age, payload.get("reason") or "sampler UNKNOWN")
-    return EXIT_UNKNOWN, _line("UNKNOWN", rms, outside, age, f"unexpected verdict {verdict!r}")
+        return EXIT_UNKNOWN, _line("UNKNOWN", rms, outside, age, payload.get("reason") or "sampler UNKNOWN",
+                                   **counts)
+    return EXIT_UNKNOWN, _line("UNKNOWN", rms, outside, age, f"unexpected verdict {verdict!r}", **counts)
 
 
 def fetch(url: str, timeout_s: float) -> dict:
