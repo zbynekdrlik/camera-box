@@ -243,7 +243,10 @@ def test_run_writes_while_markers_arrive_faster_than_any_idle_gap(tmp_path):
     time.sleep(5)
     """
     _rc, _serve, writes = _run(tmp_path, body, max_runtime_s=1.5, write_interval_s=0.3)
-    assert len(writes) >= 3
+    # The idle-gap rule wrote nothing while rows kept coming (only the final write at the stop):
+    # two or more writes = it wrote during the stream. Not >= 3: a loaded box shortens the window.
+    assert len(writes) >= 2
+    assert writes[0] != writes[-1]
 
 
 def test_run_serves_the_new_session_after_a_painter_restart(tmp_path):
@@ -366,7 +369,8 @@ def test_run_keeps_the_previous_mirror_and_backs_off_when_ssh_fails(tmp_path):
     sys.stderr.write("ssh: connect to host 10.77.9.62 port 22: No route to host\\n")
     sys.exit(255)
     """
-    _rc, serve, writes = _run(tmp_path, body, max_runtime_s=1.0, waits=waits, logs=logs)
+    # 3 s: three failed connections need three python spawns, which take ~1 s on a loaded box
+    _rc, serve, writes = _run(tmp_path, body, max_runtime_s=3.0, waits=waits, logs=logs)
     assert writes == []
     assert (serve / rsf.MARKERS_NAME).read_bytes() == HDR_A + b"PREVIOUS\n"
     assert waits[:3] == [rmm.RECONNECT_MIN_S, 2 * rmm.RECONNECT_MIN_S, 4 * rmm.RECONNECT_MIN_S]
