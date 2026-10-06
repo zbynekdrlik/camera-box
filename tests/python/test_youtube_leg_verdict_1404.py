@@ -24,6 +24,7 @@ import json
 import pathlib
 import subprocess
 import sys
+import time
 
 import numpy as np
 import pytest
@@ -46,7 +47,7 @@ S2_WINDOWS = [("A", hms(23, 23, 0), hms(23, 31, 25)), ("R", hms(23, 32, 5), hms(
 S3_A_START, S3_B_START = hms(1, 40, 15.901), hms(1, 51, 53.503)
 S3_WINDOWS = [("A", hms(1, 40, 40), hms(1, 49, 28)), ("R", hms(1, 50, 8), hms(1, 51, 4)),
               ("B", hms(1, 52, 10), hms(1, 58, 5))]
-CLEAN = {"lag_jumps": 0, "low_corr": 0, "silent": 0, "level_drops": 0}
+CLEAN = {"lag_jumps": 0, "low_corr": 0, "silent": 0, "level_drops": 0, "foreign": 0}
 GOOD = {"coverage": {"rec_cadence_pct": 99.0, "vod_cadence_pct": 99.0}, "av": {"delta_ms": 10.0},
         "dupskip": {"dup": 0, "skip": 0, "unjudged": 0, "vod_frames": 1000}, "audio": dict(CLEAN)}
 
@@ -102,26 +103,44 @@ def test_baseline_dupskip_reproduces_the_session_counts(base):
     rec, vod = base
     counts = {name: ylv.dupskip(rec, vod, BASE_T0, a, b) for name, a, b in BASE_WINDOWS}
     # The session tool counted A 10/10, R 46/47, B 2/2 between ADJACENT decoded VOD frames. The tool
-    # also judges pairs around an undecodable VOD frame by recording frame count (A: two more skips,
-    # e.g. VOD 1058514, 1058514, ?, 1058520 against recording 1058514, ?, 1058518, 1058520) and the
-    # pair straddling R's end (the VOD jumped over the window's last recording frame, tick 1090908).
-    assert {k: (c["dup"], c["skip"]) for k, c in counts.items()} == {"A": (10, 12), "R": (48, 51), "B": (2, 2)}
+    # adds the frame-count balance between unambiguous ticks (A: +1 dup +1 skip hidden behind
+    # undecodable VOD frames, R: +12) and the pair straddling R's end (the VOD jumped over the
+    # window's last recording frame, tick 1090908). Every window balances (dups == skips), the
+    # restreamer 0.29.27 CFR dup+skip signature. These maps are the session's LEFT-only decode, so
+    # a stale fresh half cannot be told from a real repeat here: the counts pin this tool's reading
+    # of those maps, the session numbers are their lower bound.
+    assert {k: (c["dup"], c["skip"]) for k, c in counts.items()} == {"A": (11, 11), "R": (53, 53), "B": (2, 2)}
+    assert all(c["dup"] - c["hidden"] >= 0 for c in counts.values())
     shorter = ylv.dupskip(rec, vod, BASE_T0, BASE_WINDOWS[1][1], BASE_WINDOWS[1][2] - 1.0 / 30)
-    assert (shorter["dup"], shorter["skip"]) == (48, 50)  # without tick 1090908: exactly that skip less
+    assert (shorter["dup"], shorter["skip"]) == (53, 52)  # without tick 1090908: exactly that skip less
+
+
+REC = steady(600, first=1000)  # 20 s of recording, ticks 1000..2198
+TICKS = [r[2] for r in REC]
+WHOLE = (0.0, 600 / 30.0)
+
+
+def judge(vod_ticks, rec=REC, win=WHOLE):
+    return ylv.dupskip(rec, vod_of(vod_ticks), 0.0, *win)
 
 
 def test_a_vod_jump_over_the_window_edge_counts():
-    rec = steady(11)  # ticks 100..120
-    r = ylv.dupskip(rec, vod_of([100, 102, 104, 106, 108, 110, 112, 118, 120]), 0.0, 0.0, 8.5 / 30.0)
-    assert (r["dup"], r["skip"]) == (0, 2)  # 114 and 116 never shown; the window holds ticks 100..116
-    r = ylv.dupskip(rec, vod_of([100, 102, 104, 104, 106, 108, 110, 112, 114, 116, 118, 120]), 0.0, 0.0, 8.5 / 30.0)
+    # the window holds ticks 1000..1180; the VOD jumps 1176 -> 1182 over its last two frames
+    r = judge(TICKS[:89] + TICKS[92:], win=(0.0, 90.5 / 30.0))
+    assert (r["dup"], r["skip"]) == (0, 2)
+    r = judge(TICKS[:20] + [TICKS[19]] + TICKS[20:])  # a repeat between two decoded neighbours
     assert (r["dup"], r["skip"]) == (1, 0)
 
 
-def test_a_tick_the_rig_repeated_cancels_out():
-    rec = [(0, 0.0, 100), (1, 1 / 30, 102), (2, 2 / 30, 102), (3, 3 / 30, 106), (4, 4 / 30, 108)]
-    r = ylv.dupskip(rec, list(rec), 0.0, 0.0, 5 / 30)
-    assert (r["dup"], r["skip"]) == (0, 0)
+def test_a_tick_the_rig_repeated_cancels_out_even_behind_an_undecodable_vod_copy():
+    rig = [(i, i / 30.0, t) for i, t in enumerate(TICKS[:100] + [TICKS[99]] + TICKS[100:])]  # rig repeat
+    rig_ticks = [r[2] for r in rig]
+    same = ylv.dupskip(rig, vod_of(rig_ticks), 0.0, *WHOLE)
+    assert (same["dup"], same["skip"]) == (0, 0)
+    for k in (99, 100):  # the VOD's first or second copy of the repeated tick undecodable
+        vod = rig_ticks[:k] + [None] + rig_ticks[k + 1:]
+        r = ylv.dupskip(rig, vod_of(vod), 0.0, *WHOLE)
+        assert (r["dup"], r["skip"]) == (0, 0), k
 
 
 def test_a_vod_that_replays_content_is_counted():
@@ -133,14 +152,39 @@ def test_a_vod_that_replays_content_is_counted():
 
 
 def test_dup_and_skip_hidden_behind_an_undecodable_vod_frame_are_counted():
-    rec = steady(21)  # ticks 100..140
-    hidden_dup = vod_of([100, 102, 104, None, 106, 108])  # the undecodable frame repeated 104
-    assert (ylv.dupskip(rec, hidden_dup, 0.0, 0.0, 6 / 30)["dup"]) == 1
-    hidden_skip = vod_of([100, 102, None, 108, 110])  # one of 104 / 106 never reached the VOD
-    assert (ylv.dupskip(rec, hidden_skip, 0.0, 0.0, 6 / 30)["skip"]) == 1
-    clean = vod_of([100, 102, None, 106, 108])
-    r = ylv.dupskip(rec, clean, 0.0, 0.0, 5 / 30)
-    assert (r["dup"], r["skip"], r["unjudged"]) == (0, 0, 0)
+    hidden_dup = judge(TICKS[:300] + [None] + TICKS[300:])  # the undecodable frame repeated a frame
+    assert (hidden_dup["dup"], hidden_dup["skip"], hidden_dup["hidden"]) == (1, 0, 1)
+    hidden_skip = judge(TICKS[:300] + [None] + TICKS[302:])  # two frames lost, one undecodable left
+    assert (hidden_skip["dup"], hidden_skip["skip"]) == (0, 1)
+    clean = judge(TICKS[:300] + [None] + TICKS[301:])
+    assert (clean["dup"], clean["skip"], clean["unjudged"]) == (0, 0, 0)
+
+
+@pytest.mark.parametrize("blind", [0, 1, 2, 31])
+def test_content_lost_at_a_splice_fails_whatever_the_vod_shows_there(blind):
+    # the VOD loses 10 s (300 frames) of content; at the splice it shows `blind` undecodable frames
+    r = judge(TICKS[:200] + [None] * blind + TICKS[500:])
+    assert r["skip"] >= 300 - blind and r["dup"] == 0
+    assert ylv.verdict([dict(GOOD, dupskip=r)], [])["overall"] == "FAIL"
+
+
+def test_a_vod_that_shows_black_where_the_recording_decodes_is_unknown():
+    r = judge(TICKS[:200] + [None] * 61 + TICKS[261:])  # 2 s of black, the frame count kept
+    assert (r["dup"], r["skip"]) == (0, 0) and r["vod_blind_s"] == pytest.approx(61 / 30.0, abs=0.01)
+    v = ylv.verdict([dict(GOOD, dupskip=r)], [])
+    assert v["overall"] == "UNKNOWN" and any("decodes nothing" in x for x in v["reasons"])
+    assert judge(TICKS[:200] + [None] * 20 + TICKS[220:])["vod_blind_s"] == 0  # under a second: fine
+
+
+def test_a_tail_without_the_painter_is_unproven_not_a_vod_that_ends_early():
+    rec = [(i, i / 30.0, t if i < 480 else None) for i, t in enumerate(TICKS)]  # last 4 s: no painter
+    vod = [r[2] for r in rec]
+    r = ylv.dupskip(rec, vod_of(vod), 0.0, *WHOLE)
+    assert (r["dup"], r["skip"]) == (0, 0) and not r["vod_ends_early_s"]
+    cov = ylv.coverage(rec, vod_of(vod), 0.0, r["start_utc"], r["coverage_end_utc"])
+    assert cov["rec_cadence_pct"] == pytest.approx(80.0, abs=0.5)
+    v = ylv.verdict([dict(GOOD, dupskip=r, coverage=cov)], [])
+    assert v["overall"] == "UNKNOWN" and not any("VOD ends" in x for x in v["reasons"])
 
 
 def test_a_painter_restart_inside_the_window_is_unknown_and_its_ticks_never_alias():
@@ -298,6 +342,16 @@ def test_vod_audio_ending_early_fails_and_unusable_recording_audio_is_unknown():
     assert ylv.verdict([dict(GOOD, audio=faint)], [])["overall"] == "UNKNOWN"
 
 
+def test_foreign_vod_sound_where_the_recording_is_quiet_fails():
+    rec, vod, _ = clips("s2-R")
+    assert ylv.audio_blocks(rec, vod)["foreign"] == 0
+    quiet = rec.copy()
+    quiet[12 * ylv.SR: 16 * ylv.SR] *= 1e-4  # 4 s: the recording quiet, the VOD still carries the sound
+    r = ylv.audio_blocks(quiet, vod)
+    assert r["foreign"] >= 4 and r["lag_jumps"] == 0
+    assert ylv.verdict([dict(GOOD, audio=r)], [])["overall"] == "FAIL"
+
+
 def test_baseline_audio_is_continuous_but_1370_ms_late():
     rec, vod, _ = clips("base-R")
     r = ylv.audio_blocks(rec, vod, end_s=18.0)  # the VOD clip lacks the last 1.37 s of this content
@@ -440,8 +494,11 @@ FAKE_PROBE = r'''#!/usr/bin/env python3
 import json, sys, time
 MODE = "@MODE@"
 clip = sys.argv[sys.argv.index("--av-sync") + 1]
-if MODE == "SLEEP":
-    time.sleep(30)
+if MODE == "SLEEP":  # a hung probe whose own child (an ffmpeg, say) hangs too
+    import subprocess
+    child = subprocess.Popen(["sleep", "60"])
+    open(clip + ".child", "w").write(str(child.pid))
+    time.sleep(60)
 off = 30.0 if "av-rec-" in clip else 25.0
 print("\x1b[2mlog line before the JSON\x1b[0m", file=sys.stderr)
 print("{\n" + json.dumps({"av_offset_ms": off, "mad_ms": 4.0, "matched": 12, "audio_markers_decoded": 12,
@@ -499,11 +556,26 @@ def test_cli_pass_fail_and_unknown_exit_codes(synth, tmp_path):
 
 
 def test_a_hung_probe_times_out_and_leaves_no_clip(synth, tmp_path, monkeypatch):
-    monkeypatch.setattr(ylv, "PROBE_TIMEOUT_S", 2)
+    monkeypatch.setattr(ylv, "PROBE_TIMEOUT_S", 3)
     with pytest.raises(subprocess.TimeoutExpired):
         ylv.av_window(synth / "rec.mkv", synth / "vod.mkv", 0.0, 0.0, synth / "markers.csv",
                       synth / "sleepy-recording-verdict", 2.0, str(tmp_path))
     assert not list(tmp_path.glob("*.mp4"))
+    # the whole process group is killed: the probe's own child is gone too, not left running
+    pid = int(next(tmp_path.glob("*.child")).read_text())
+    deadline = time.time() + 5
+    while _running(pid) and time.time() < deadline:
+        time.sleep(0.1)
+    assert not _running(pid)
+
+
+def _running(pid):
+    """The process exists and is not a zombie."""
+    try:
+        state = pathlib.Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+    except FileNotFoundError:
+        return False
+    return state != "Z"
 
 
 def test_cli_tool_error_and_a_crash_are_unknown(tmp_path):

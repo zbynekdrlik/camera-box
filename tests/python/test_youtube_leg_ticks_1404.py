@@ -8,9 +8,11 @@ decoder, JPEG q95 that decodes exactly like the lossless crop):
   - a right-only frame takes the LOCAL capture phase (it moves during a session);
   - a frame whose two halves contradict the phase of both neighbours (a stale fresh half: VOD frames
     20174 / 20210) is left undecoded, never turned into a false repeat + skip;
-  - a decode with a hole is an error, never a quietly shorter map.
-Expected ticks come from the session's own left-only decode (qrticks.py, an independent run), not
-from this decoder.
+  - a decode with a hole, a missed seek (also of the last chunk) or a pts jump is an error, never a
+    quietly shorter map.
+Expected ticks come from the session's own left-only decode (qrticks.py, an independent run) where it
+decoded the frame; for frame 2100, which it could not read, only its bracketing anchors are
+independent (see the test).
 """
 import gzip
 import pathlib
@@ -84,10 +86,14 @@ def test_real_colour_coded_halves_read_through_blue():
     import cv2
 
     det = cv2.QRCodeDetector()
-    # part 1 frame 2100, the colour-coded-LEFT period (even phase): the session's gray left decoder read
-    # nothing in frames 1565..4124; its anchors 1564 = 2195680 and 4125 = 2200804 plus the 2-tick
-    # cadence and the one rig skip at 1565 give frame 2100 = 2195680 + 2 * 536 + 2
-    assert ylv.band_ticks(_jpg("s3-rec_a-frame2100"), det, 1.0)[0] == 2196754
+    # part 1 frame 2100, the colour-coded-LEFT period: the session's gray left decoder read nothing in
+    # frames 1565..4124. Its anchors 1564 = 2195680 and 4125 = 2200804 hold exactly one +2 step more
+    # than the 2-tick cadence, so frame 2100 is 2195680 + 2 * 536 or that + 2, depending on where the
+    # step is (this decoder's own halves put a capture phase change at 1565: the + 2).
+    band = _jpg("s3-rec_a-frame2100")
+    gray_left = cv2.cvtColor(band[:, : band.shape[1] // 2], cv2.COLOR_BGR2GRAY)
+    assert ylv._qr_tick(det, gray_left, 1.0) is None  # gray cannot read the colour-coded left ...
+    assert ylv.band_ticks(band, det, 1.0)[0] in (2196752, 2196754)  # ... blue reads it, inside the anchors
     # part 1 frame 6000, the colour-coded-RIGHT period (odd phase): the session's left value + 1
     assert ylv.band_ticks(_jpg("s3-rec_a-frame6000"), det, 1.0) == (2204552, 2204553)
 
@@ -139,19 +145,38 @@ def test_decode_raw_refuses_a_hole_or_a_missed_seek(rec_video, monkeypatch):
     ticks_mod = sys.modules["youtube_leg_ticks"]
     real = ticks_mod._decode_range
 
+    assert len(ylv.decode_raw(rec_video, workers=1)) == FPS * SECONDS  # the real decode tiles the file
+
     def short_middle(job):
-        rows, ok = real(job)
-        return (rows[:-3], ok) if job[1] == 0 else (rows, ok)  # the first chunk stops 3 frames short
+        rows, ok, _ = real(job)
+        return (rows[:-3], ok, False) if job[1] == 0 else (rows, ok, job[2] is None)  # 3 frames short
 
     monkeypatch.setattr(ticks_mod, "_decode_range", short_middle)
     with pytest.raises(RuntimeError, match="frames missing"):
         ylv.decode_raw(rec_video, workers=1)
 
     def missed_seek(job):
-        return ([], False) if job[1] > 0 and job[2] is not None else real(job)
+        return ([], False, False) if job[1] > 0 and job[2] is not None else real(job)
 
     monkeypatch.setattr(ticks_mod, "_decode_range", missed_seek)
     with pytest.raises(RuntimeError, match="seek"):
+        ylv.decode_raw(rec_video, workers=1)
+
+    def last_seek_missed(job):  # every earlier chunk read fully, the last one never started
+        return ([], False, False) if job[2] is None else real(job)
+
+    monkeypatch.setattr(ticks_mod, "_decode_range", last_seek_missed)
+    with pytest.raises(RuntimeError, match="seek"):
+        ylv.decode_raw(rec_video, workers=1)
+
+    def skipped_frame(job):  # a decoder that drops a frame inside a chunk: the pts jump two intervals
+        rows, ok, end = real(job)
+        if job[1] == 0:
+            rows = [(i, p + (1 / FPS if i >= 10 else 0.0), lt, rt) for i, p, lt, rt in rows]
+        return rows, ok, end
+
+    monkeypatch.setattr(ticks_mod, "_decode_range", skipped_frame)
+    with pytest.raises(RuntimeError, match="pts step"):
         ylv.decode_raw(rec_video, workers=1)
 
 
