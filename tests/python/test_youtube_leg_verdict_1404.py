@@ -30,7 +30,8 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from youtube_leg_fakes_1404 import FIX, FPS, SCRIPT, SECONDS, write_video, ylv  # noqa: E402
+from youtube_leg_fakes_1404 import (FIX, FPS, SCRIPT, SECONDS, drop_frame, shared_rec_video,  # noqa: E402
+                                    write_video, ylv)
 
 
 def hms(h, m, s):
@@ -534,9 +535,9 @@ def synth(tmp_path_factory):
     d = tmp_path_factory.mktemp("ylv-synth")
     ticks = [1000 + 2 * k for k in range(FPS * SECONDS)]
     # the recording: captured on EVEN painter ticks with a colour-coded-left and a no-left stretch
-    write_video(d / "rec.mkv", ticks, right_only=set(range(120, 150)), colour_left=set(range(60, 90)), even_phase=True)
+    (d / "rec.mkv").symlink_to(shared_rec_video(tmp_path_factory))
     write_video(d / "vod.mkv", ticks)
-    write_video(d / "vod-skip.mkv", ticks[:100] + ticks[101:])  # YouTube lost one frame
+    drop_frame(d / "vod.mkv", d / "vod-skip.mkv", 100, keep_timestamps=False)  # YouTube lost one frame
     for name, mode in (("fake-recording-verdict", "FAST"), ("sleepy-recording-verdict", "SLEEP")):
         probe = d / name
         probe.write_text(FAKE_PROBE.replace("@MODE@", mode))

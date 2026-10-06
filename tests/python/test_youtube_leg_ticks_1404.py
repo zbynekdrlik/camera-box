@@ -8,8 +8,10 @@ decoder, JPEG q95 that decodes exactly like the lossless crop):
   - a right-only frame takes the LOCAL capture phase (it moves during a session);
   - a frame whose two halves contradict the phase of both neighbours (a stale fresh half: VOD frames
     20174 / 20210) is left undecoded, never turned into a false repeat + skip;
-  - a decode with a hole, a missed seek (also of the last chunk) or a pts jump is an error, never a
-    quietly shorter map.
+  - the parallel chunks are merged by pts: a frame two chunks read (a seek that landed early) is kept
+    once, a frame no chunk read sends the file through one sequential pass; a decode that does not
+    hold exactly the container's frames, or a missed seek (also of the last chunk), is an error,
+    never a quietly shorter or mislabelled map.
 Expected ticks come from the session's own left-only decode (qrticks.py, an independent run) where it
 decoded the frame; for frame 2100, which it could not read, only its bracketing anchors are
 independent (see the test).
@@ -21,8 +23,8 @@ import sys
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from youtube_leg_fakes_1404 import (COLOUR_DARK, COLOUR_LIGHT, FIX, FPS, SECONDS, payload,  # noqa: E402
-                                    qr_frame, write_video, ylv)
+from youtube_leg_fakes_1404 import (COLOUR_DARK, COLOUR_LIGHT, FIX, FPS, SECONDS, drop_frame,  # noqa: E402
+                                    payload, qr_frame, shared_rec_video, ylv)
 
 
 def _jpg(name):
@@ -118,12 +120,15 @@ def test_the_tick_map_keeps_the_raw_halves(tmp_path):
 
 @pytest.fixture(scope="module")
 def rec_video(tmp_path_factory):
-    d = tmp_path_factory.mktemp("ylv-ticks")
-    ticks = [1000 + 2 * k for k in range(FPS * SECONDS)]
-    # captured on EVEN painter ticks, a 30-frame colour-coded-left stretch (read through blue) and a
-    # 30-frame no-left stretch (a fixed "right - 1" would read it 2 ticks low)
-    write_video(d / "rec.mkv", ticks, right_only=set(range(120, 150)), colour_left=set(range(60, 90)), even_phase=True)
-    return d / "rec.mkv"
+    return shared_rec_video(tmp_path_factory)
+
+
+@pytest.fixture
+def cheap_halves(monkeypatch):
+    """Decode MECHANICS only (chunks, seeks, counts): a content fingerprint of the frame stands in
+    for the QR read (~60 ms a frame), so a row still proves which frame it came from."""
+    monkeypatch.setattr(sys.modules["youtube_leg_ticks"], "half_ticks",
+                        lambda frame, det, scale: (int(frame[::5, ::5].sum()), None))
 
 
 def test_decode_ticks_reads_colour_and_right_only_stretches(rec_video):
@@ -141,15 +146,15 @@ def test_decode_ticks_reads_colour_and_right_only_stretches(rec_video):
     assert c["cadence_proven"] == len(rows) and c["events"] == 0
 
 
-def test_decode_raw_refuses_a_hole_or_a_missed_seek(rec_video, monkeypatch):
+def test_decode_raw_refuses_a_hole_or_a_missed_seek(rec_video, cheap_halves, monkeypatch):
     ticks_mod = sys.modules["youtube_leg_ticks"]
     real = ticks_mod._decode_range
 
     assert len(ylv.decode_raw(rec_video, workers=1)) == FPS * SECONDS  # the real decode tiles the file
 
-    def short_middle(job):
+    def short_middle(job):  # the decoder stops 3 frames early, in the chunks AND in the one-pass decode
         rows, ok, _ = real(job)
-        return (rows[:-3], ok, False) if job[1] == 0 else (rows, ok, job[2] is None)  # 3 frames short
+        return (rows[:-3], ok, job[2] is None) if job[1] == 0 else (rows, ok, job[2] is None)
 
     monkeypatch.setattr(ticks_mod, "_decode_range", short_middle)
     with pytest.raises(RuntimeError, match="frames missing"):
@@ -177,17 +182,51 @@ def test_decode_raw_refuses_a_hole_or_a_missed_seek(rec_video, monkeypatch):
 
     monkeypatch.setattr(ticks_mod, "_decode_range", skipped_frame)
     monkeypatch.setattr(ticks_mod, "container_frames", lambda path: FPS * SECONDS + 1)  # the file has one more
-    with pytest.raises(RuntimeError, match="pts step"):
+    with pytest.raises(RuntimeError, match="frames missing"):
         ylv.decode_raw(rec_video, workers=1)
 
 
-def test_a_timestamp_gap_really_in_the_file_is_kept_and_a_chunk_ending_with_the_file_is_the_end(rec_video, tmp_path):
-    import subprocess
+def _one_pass(path):
+    return sys.modules["youtube_leg_ticks"]._decode_range((str(path), 0, None, ylv.DECODE_SCALE))[0]
 
-    gap = tmp_path / "gap.mkv"  # frame 120 dropped, the other timestamps kept: an encoder that skipped
-    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(rec_video), "-vf",
-                    "select='not(eq(n\\,120))'", "-fps_mode", "passthrough", "-an", "-c:v", "ffv1", str(gap)], check=True)
-    raw = ylv.decode_raw(gap, workers=1)
+
+def test_a_seek_that_lands_a_frame_early_never_mislabels_the_frames_behind_it(rec_video, cheap_halves, monkeypatch):
+    ticks_mod = sys.modules["youtube_leg_ticks"]
+    real = ticks_mod._decode_range
+    truth = _one_pass(rec_video)
+    first = {}
+
+    def early(job):  # the second chunk starts one frame early: one frame read twice, one never read,
+        path, s, e, scale = job  # the same total as a clean decode
+        if s > 0 and e is not None and first.setdefault("s", s) == s:
+            rows, ok, end = real((path, s - 1, e - 1, scale))
+            return [(s + k,) + r[1:] for k, r in enumerate(rows)], ok, end
+        return real(job)
+
+    monkeypatch.setattr(ticks_mod, "_decode_range", early)
+    assert ylv.decode_raw(rec_video, workers=1) == truth
+
+
+@pytest.fixture(scope="module")
+def gap_video(rec_video, tmp_path_factory):
+    gap = tmp_path_factory.mktemp("ylv-gap") / "gap.mkv"  # frame 120 dropped, the other timestamps kept:
+    drop_frame(rec_video, gap, 120, keep_timestamps=True)  # an encoder that skipped a frame
+    return gap
+
+
+def test_a_timestamp_gap_really_in_the_file_is_kept_and_a_chunk_ending_with_the_file_is_the_end(rec_video, gap_video,
+                                                                                              cheap_halves, monkeypatch):
+    ticks_mod = sys.modules["youtube_leg_ticks"]
+    real = ticks_mod._decode_range
+    jobs = []
+    monkeypatch.setattr(ticks_mod, "_decode_range", lambda job: jobs.append(job[1:3]) or real(job))
+    raw = ylv.decode_raw(gap_video, workers=1)
+    # OpenCV seeks by timestamp, so behind the gap a chunk starts one frame early: that frame is kept
+    # once and the parallel decode stands, no whole-file second pass (minutes on a real recording)
+    assert len(jobs) > 1 and (0, None) not in jobs
+    monkeypatch.setattr(ticks_mod, "_decode_range", real)
+    assert raw == _one_pass(gap_video)
+    gap = gap_video
     assert len(raw) == FPS * SECONDS - 1 == ylv.container_frames(gap)
     assert ylv.timestamp_gaps([(i, p, lt) for i, p, lt, _ in raw]) == [120]
     # a chunk whose end is exactly the last frame reports the end of the file (one more grab fails)

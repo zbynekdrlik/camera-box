@@ -78,3 +78,29 @@ def write_video(path, ticks, right_only=(), colour_left=(), even_phase=False):
         ff.stdin.write(qr_frame(left, payload(t - 1 if even_phase else t + 1), left_colours=colours).tobytes())
     ff.stdin.close()
     assert ff.wait() == 0
+
+
+_SHARED = {}
+
+
+def shared_rec_video(tmp_path_factory):
+    """The synthetic recording both test modules decode, written once per test session (a QR
+    payload per frame makes writing a clip ~10 s): captured on EVEN painter ticks, a 30-frame
+    colour-coded-left stretch (read through blue) and a 30-frame no-left stretch (a fixed
+    "right - 1" would read it 2 ticks low)."""
+    if "rec" not in _SHARED:
+        d = tmp_path_factory.mktemp("ylv-shared")
+        write_video(d / "rec.mkv", [1000 + 2 * k for k in range(FPS * SECONDS)], right_only=set(range(120, 150)),
+                    colour_left=set(range(60, 90)), even_phase=True)
+        _SHARED["rec"] = d / "rec.mkv"
+    return _SHARED["rec"]
+
+
+def drop_frame(src, dst, n, keep_timestamps):
+    """`src` without frame n, lossless. keep_timestamps: the other frames keep their pts (an encoder
+    that skipped a frame: a timestamp gap); else the frames are re-timed back to back (content lost,
+    the timeline regular, as when a frame never reached the platform)."""
+    select = f"select='not(eq(n\\,{n}))'"
+    timing = ["-vf", select, "-fps_mode", "passthrough"] if keep_timestamps else ["-vf", f"{select},setpts=N/({FPS}*TB)"]
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), *timing, "-c:v", "ffv1",
+                    "-pix_fmt", "bgr0", "-c:a", "copy", str(dst)], check=True)
