@@ -425,8 +425,9 @@ bytes for stream and resolume; design comment 6014590298):
   ONE live obs64 in the program's own session shows OBS's own window in front (title `OBS ...`;
   `UpdateTitleBar` always starts it so), `CloseMainWindow()`, waited up to
   `$ccCloseTimeoutMs = 45000`: `clean close OK in N ms '<title>'`. WM_CLOSE goes to the front
-  unowned window, so a projector in front is never sent it (it would close and drop out of the saved
-  projector list). The old `Get-Process obs64,obs-browser-page | Stop-Process -Force` runs only
+  unowned window, so a projector in front is never sent it (it would close the projector, wait out
+  the 45 s and log a false `timed out -- forcing`; closing a projector saves nothing, so the
+  relaunch would restore it). The old `Get-Process obs64,obs-browser-page | Stop-Process -Force` runs only
   inside `if ($ccForce)`, after one of five named lines: wrong obs64 count / session, `has no main
   window`, `shows '<title>' in front, not the OBS main window`, `did not take the close (disabled
   behind a modal dialog)`, `clean close timed out -- forcing`. A clean exit only sweeps leftover
@@ -476,8 +477,16 @@ OBS window, so the runs shadow `Get-Process` with a function (the stub-function 
 `tests/pwsh/run_dantesync_tray_swap_1372.sh`) that returns only the test's OWN fake with a scripted
 `MainWindowTitle` + `CloseMainWindow`: a clean exit (SIGTERM, never a SIGKILL, done well under the
 bound), a hang (bound shortened by the test, then the named force), no window, a projector in front,
-a refused close, and a stream that starts between the (0a) and (2) reads. 17 mutants of the lib and
-the planner are killed (the commit messages list them).
+a refused close, a stream that starts between the (0a) and (2) reads (the REAL (1c) hook runs over a
+`schtasks` stand-in on PATH), and what a Windows box can list next to OBS: its own pid still listed
+after the exit, a 0-thread obs64 sibling, a `HasExited` that throws. 21 mutants of the lib and the
+planner are killed (the commit messages list them).
+
+**A throwing property getter reads as `$null` in PowerShell (non-strict), it does not abort.** An
+access-denied `HasExited` therefore counts the process as live and nothing ends the program, even
+under `$ErrorActionPreference = 'Stop'` (read on the stream box under Windows PowerShell 5.1 and in
+pwsh 7, 6.10.2026). The live filter keeps the repo's `-not $_.HasExited -and $_.Threads.Count -gt
+0` idiom; the thread count from the process snapshot still rules out a dead handle.
 
 **PowerShell trap the run caught:** an awaited void Task's `.GetAwaiter().GetResult()` returns a
 `VoidTaskResult` object in PowerShell. Unassigned, it lands in the function's output, so a function

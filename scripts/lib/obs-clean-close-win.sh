@@ -230,8 +230,8 @@ if ($ccAll.Count -eq 0) {
       Write-Host "issue 1367 clean close not possible: obs64 pid $($ccP.Id) has no main window -- forcing"
       $ccForce = $true
     } elseif ($ccTitle -notlike 'OBS *') {
-      # WM_CLOSE goes to the front unowned window: a projector there would close (and drop out of
-      # the saved projector list) instead of OBS.
+      # WM_CLOSE goes to the front unowned window: a projector there would get the close instead
+      # of OBS, close, and the bound would run out into a force anyway.
       Write-Host "issue 1367 clean close not possible: obs64 pid $($ccP.Id) shows '$ccTitle' in front, not the OBS main window -- forcing"
       $ccForce = $true
     } else {
