@@ -1,0 +1,208 @@
+"""issue 1404 Task 2 -- `scripts/program_audio_guard.py`, the CLI both YouTube gates call
+(camera-box and restreamer issue 357) before and during a broadcast.
+
+Contract: exit 0 MEASUREMENT / SILENT (fresh), 1 FOREIGN, 2 UNKNOWN / stale / unreachable /
+unreadable -- fail closed. One stdout line:
+  program-audio verdict=<V> rms=<x> outside_band=<y>% age=<s>[ reason=<...>]
+
+Run as a real subprocess (real exit codes) against a real stdlib HTTP server on an ephemeral
+127.0.0.1 port, and once end-to-end through the real rig-lease-server.
+"""
+from __future__ import annotations
+
+import http.server
+import importlib.util
+import json
+import pathlib
+import re
+import socket
+import subprocess
+import sys
+import threading
+from datetime import datetime, timedelta, timezone
+
+_ROOT = pathlib.Path(__file__).resolve().parents[2]
+_SCRIPTS = _ROOT / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+
+import rig_serve_files as rsf  # noqa: E402
+
+GUARD = _SCRIPTS / "program_audio_guard.py"
+LINE = re.compile(
+    r"^program-audio verdict=(MEASUREMENT|FOREIGN|SILENT|UNKNOWN) rms=(-?\d+\.\d|-) "
+    r"outside_band=(\d+\.\d|-)% age=(\d+\.\d|-)( reason=.+)?$"
+)
+
+
+class _Fake:
+    """Serves one canned response on any GET."""
+
+    def __init__(self, status=200, body=b"", content_type="application/json"):
+        outer = self
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                outer.paths.append(self.path)
+                self.send_response(outer.status)
+                self.send_header("Content-Type", outer.content_type)
+                self.send_header("Content-Length", str(len(outer.body)))
+                self.end_headers()
+                self.wfile.write(outer.body)
+
+            def log_message(self, *a):
+                pass
+
+        self.status, self.body, self.content_type, self.paths = status, body, content_type, []
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}/program-audio.json"
+        self._t = threading.Thread(target=self.server.serve_forever, daemon=True)
+
+    def __enter__(self):
+        self._t.start()
+        return self
+
+    def __exit__(self, *exc):
+        self.server.shutdown()
+        self.server.server_close()
+        self._t.join(timeout=5)
+
+
+def _payload(verdict="MEASUREMENT", age=1.0, rms=-35.6, outside=16.8, **extra):
+    p = {"schema": 1, "ts_utc": rsf.format_ts_utc(datetime.now(timezone.utc)), "age_s": age,
+         "verdict": verdict, "rms_dbfs": rms, "outside_band_pct": outside, "window_s": 2.0,
+         "source": "STREAM-SNV (stream)"}
+    p.update(extra)
+    return json.dumps(p).encode()
+
+
+def _guard(url, *extra):
+    r = subprocess.run([sys.executable, str(GUARD), "--url", url, "--max-age", "10", *extra],
+                       capture_output=True, text=True, timeout=30)
+    lines = r.stdout.splitlines()
+    assert len(lines) == 1, r.stdout + r.stderr
+    m = LINE.match(lines[0])
+    assert m, lines[0]
+    return r.returncode, lines[0], m
+
+
+def test_fresh_measurement_exits_0_with_the_contract_line():
+    with _Fake(body=_payload("MEASUREMENT", age=1.3)) as f:
+        rc, line, _m = _guard(f.url)
+    assert rc == 0
+    assert line == "program-audio verdict=MEASUREMENT rms=-35.6 outside_band=16.8% age=1.3"
+    assert f.paths == ["/program-audio.json"]
+
+
+def test_fresh_silent_exits_0():
+    with _Fake(body=_payload("SILENT", rms=-92.4, outside=None)) as f:
+        rc, line, _m = _guard(f.url)
+    assert rc == 0
+    assert line == "program-audio verdict=SILENT rms=-92.4 outside_band=-% age=1.0"
+
+
+def test_foreign_exits_1():
+    with _Fake(body=_payload("FOREIGN", rms=-18.2, outside=78.5)) as f:
+        rc, line, _m = _guard(f.url)
+    assert rc == 1
+    assert line == "program-audio verdict=FOREIGN rms=-18.2 outside_band=78.5% age=1.0"
+
+
+def test_a_stale_foreign_still_exits_1_never_downgraded():
+    with _Fake(body=_payload("FOREIGN", age=60.0)) as f:
+        rc, line, _m = _guard(f.url)
+    assert rc == 1
+    assert "stale" in line
+
+
+def test_unknown_exits_2_with_its_reason():
+    with _Fake(body=_payload("UNKNOWN", rms=None, outside=None, reason="no audio for 6.0 s")) as f:
+        rc, line, m = _guard(f.url)
+    assert rc == 2
+    assert m.group(1) == "UNKNOWN"
+    assert "no audio for 6.0 s" in line
+
+
+def test_a_stale_measurement_exits_2():
+    with _Fake(body=_payload("MEASUREMENT", age=42.0)) as f:
+        rc, line, m = _guard(f.url)
+    assert rc == 2
+    assert m.group(1) == "UNKNOWN"
+    assert m.group(4) == "42.0"
+    assert "stale" in line and "MEASUREMENT" in line
+
+
+def test_a_measurement_exactly_at_max_age_is_fresh():
+    with _Fake(body=_payload("MEASUREMENT", age=10.0)) as f:
+        rc, _line, _m = _guard(f.url)
+    assert rc == 0
+
+
+def test_a_missing_age_exits_2():
+    with _Fake(body=_payload("MEASUREMENT", age=None)) as f:
+        rc, _line, m = _guard(f.url)
+    assert rc == 2
+    assert m.group(4) == "-"
+
+
+def test_an_unknown_verdict_string_exits_2():
+    with _Fake(body=_payload("LOUD")) as f:
+        rc, _line, m = _guard(f.url)
+    assert rc == 2 and m.group(1) == "UNKNOWN"
+
+
+def test_http_404_exits_2():
+    with _Fake(status=404, body=b"") as f:
+        rc, line, _m = _guard(f.url)
+    assert rc == 2
+    assert "404" in line
+
+
+def test_invalid_json_exits_2():
+    with _Fake(body=b"{nope") as f:
+        rc, _line, _m = _guard(f.url)
+    assert rc == 2
+
+
+def test_unreachable_exits_2():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()  # nothing listens there
+    rc, line, m = _guard(f"http://127.0.0.1:{port}/program-audio.json", "--timeout", "2")
+    assert rc == 2
+    assert m.group(1) == "UNKNOWN"
+    assert "unreachable" in line
+
+
+def test_defaults_point_at_dev1():
+    src = GUARD.read_text(encoding="utf-8")
+    assert 'DEFAULT_URL = "http://dev1:8890/program-audio.json"' in src
+    assert "DEFAULT_MAX_AGE_S = 10.0" in src
+
+
+def test_end_to_end_through_the_real_lease_server(tmp_path):
+    spec = importlib.util.spec_from_file_location("rls_e2e_1404", _SCRIPTS / "rig-lease-server.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    serve = tmp_path / "serve"
+    serve.mkdir()
+    payload = json.loads(_payload("MEASUREMENT", age=0.0))
+    payload["ts_utc"] = rsf.format_ts_utc(datetime.now(timezone.utc) - timedelta(seconds=3))
+    rsf.write_bytes_atomic(str(serve / rsf.PROGRAM_AUDIO_NAME), json.dumps(payload).encode())
+    server = mod.make_server("127.0.0.1", 0, str(tmp_path / "lease"), 5400, serve_dir=str(serve))
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/program-audio.json"
+        rc, line, m = _guard(url)
+        assert rc == 0, line
+        assert 2.5 <= float(m.group(4)) <= 6.0  # the server's age, not the file's 0.0
+        payload["ts_utc"] = rsf.format_ts_utc(datetime.now(timezone.utc) - timedelta(seconds=30))
+        rsf.write_bytes_atomic(str(serve / rsf.PROGRAM_AUDIO_NAME), json.dumps(payload).encode())
+        rc2, _line2, _m2 = _guard(url)
+        assert rc2 == 2  # a sampler that stopped writing reads stale, never fresh
+    finally:
+        server.shutdown()
+        server.server_close()
+        t.join(timeout=5)
