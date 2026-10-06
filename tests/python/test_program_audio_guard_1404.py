@@ -2,8 +2,9 @@
 (camera-box and restreamer issue 357) before and during a broadcast.
 
 Contract: exit 0 MEASUREMENT / SILENT (fresh), 1 FOREIGN, 2 UNKNOWN / stale / unreachable /
-unreadable -- fail closed. One stdout line:
-  program-audio verdict=<V> rms=<x> outside_band=<y>% age=<s>[ reason=<...>]
+unreadable -- fail closed; a MEASUREMENT without a marker chain (a sampler older than the marker
+requirement, ROZHODNUTÉ 6026826572) is UNKNOWN. One stdout line:
+  program-audio verdict=<V> rms=<x> outside_band=<y>% age=<s> markers=<n> chain=<c>[ reason=<...>]
 
 Run as a real subprocess (real exit codes) against a real stdlib HTTP server on an ephemeral
 127.0.0.1 port, and once end-to-end through the real rig-lease-server.
@@ -31,7 +32,7 @@ import rig_serve_files as rsf  # noqa: E402
 GUARD = _SCRIPTS / "program_audio_guard.py"
 LINE = re.compile(
     r"^program-audio verdict=(MEASUREMENT|FOREIGN|SILENT|UNKNOWN) rms=(-?\d+\.\d|-) "
-    r"outside_band=(\d+\.\d|-)% age=(-?\d+\.\d|-)( reason=.+)?$"
+    r"outside_band=(\d+\.\d|-)% age=(-?\d+\.\d|-) markers=(\d+|-) chain=(\d+|-)( reason=.+)?$"
 )
 
 
@@ -68,10 +69,11 @@ class _Fake:
         self._t.join(timeout=5)
 
 
-def _payload(verdict="MEASUREMENT", age=1.0, rms=-35.6, outside=16.8, **extra):
+def _payload(verdict="MEASUREMENT", age=1.0, rms=-35.6, outside=16.8, markers=9, chain=8, **extra):
     p = {"schema": 1, "ts_utc": rsf.format_ts_utc(datetime.now(timezone.utc)), "age_s": age,
          "verdict": verdict, "rms_dbfs": rms, "outside_band_pct": outside, "window_s": 2.0,
-         "source": "STREAM-SNV (stream)", "last_foreign_ts_utc": None, "last_foreign_age_s": None}
+         "source": "STREAM-SNV (stream)", "last_foreign_ts_utc": None, "last_foreign_age_s": None,
+         "markers_decoded": markers, "marker_chain": chain}
     p.update(extra)
     return json.dumps(p).encode()
 
@@ -90,22 +92,22 @@ def test_fresh_measurement_exits_0_with_the_contract_line():
     with _Fake(body=_payload("MEASUREMENT", age=1.3)) as f:
         rc, line, _m = _guard(f.url)
     assert rc == 0
-    assert line == "program-audio verdict=MEASUREMENT rms=-35.6 outside_band=16.8% age=1.3"
+    assert line == "program-audio verdict=MEASUREMENT rms=-35.6 outside_band=16.8% age=1.3 markers=9 chain=8"
     assert f.paths == ["/program-audio.json"]
 
 
 def test_fresh_silent_exits_0():
-    with _Fake(body=_payload("SILENT", rms=-92.4, outside=None)) as f:
+    with _Fake(body=_payload("SILENT", rms=-92.4, outside=None, markers=None, chain=None)) as f:
         rc, line, _m = _guard(f.url)
     assert rc == 0
-    assert line == "program-audio verdict=SILENT rms=-92.4 outside_band=-% age=1.0"
+    assert line == "program-audio verdict=SILENT rms=-92.4 outside_band=-% age=1.0 markers=- chain=-"
 
 
 def test_foreign_exits_1():
-    with _Fake(body=_payload("FOREIGN", rms=-18.2, outside=78.5)) as f:
+    with _Fake(body=_payload("FOREIGN", rms=-18.2, outside=78.5, markers=31, chain=1)) as f:
         rc, line, _m = _guard(f.url)
     assert rc == 1
-    assert line == "program-audio verdict=FOREIGN rms=-18.2 outside_band=78.5% age=1.0"
+    assert line == "program-audio verdict=FOREIGN rms=-18.2 outside_band=78.5% age=1.0 markers=31 chain=1"
 
 
 def test_a_stale_foreign_still_exits_1_never_downgraded():
@@ -136,6 +138,36 @@ def test_a_measurement_exactly_at_max_age_is_fresh():
     with _Fake(body=_payload("MEASUREMENT", age=10.0)) as f:
         rc, _line, _m = _guard(f.url)
     assert rc == 0
+
+
+def test_a_measurement_without_a_marker_chain_exits_2():
+    """A payload from a sampler older than the marker requirement says MEASUREMENT on the spectral
+    share alone: never trusted (ROZHODNUTÉ 6026826572)."""
+    p = json.loads(_payload("MEASUREMENT"))
+    del p["marker_chain"], p["markers_decoded"]
+    with _Fake(body=json.dumps(p).encode()) as f:
+        rc, line, m = _guard(f.url)
+    assert rc == 2
+    assert m.group(1) == "UNKNOWN"
+    assert "marker chain" in line
+    with _Fake(body=_payload("MEASUREMENT", chain=None)) as f:
+        rc2, _l2, m2 = _guard(f.url)
+    assert rc2 == 2 and m2.group(1) == "UNKNOWN"
+
+
+def test_silent_and_foreign_never_need_a_marker_chain():
+    with _Fake(body=_payload("SILENT", rms=-90.0, outside=None, markers=None, chain=None)) as f:
+        rc, _line, _m = _guard(f.url)
+    assert rc == 0
+    with _Fake(body=_payload("FOREIGN", markers=None, chain=None)) as f:
+        rc2, _l2, _m2 = _guard(f.url)
+    assert rc2 == 1
+
+
+def test_the_line_carries_the_marker_counts():
+    with _Fake(body=_payload("MEASUREMENT", markers=12, chain=7)) as f:
+        _rc, _line, m = _guard(f.url)
+    assert (m.group(5), m.group(6)) == ("12", "7")
 
 
 def test_a_missing_age_exits_2():
