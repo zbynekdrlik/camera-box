@@ -1665,6 +1665,24 @@ jobs:
           if (([regex]::Matches($ndi, [regex]::Escape('ndi_force_by_name_after_frameless(connected_by_url_1180, frames_seen_since_reset_1180)) { force_by_name_next_reset_1180 = true;'))).Count -lt 3) {
             Write-Error "ndi-source.cpp: the #1287 helper-gated corrective set is wired at fewer than 3 reset-forcing arms -- it must gate AND SET force_by_name_next_reset_1180 in the no_connections==0 arm, the #767 stale-while-connected arm, AND the #1096 (reopen 16.9) connected-but-frameless arm (anchoring the whole adjacency so deleting only the set is caught), else a frame-less bind is never flipped to BY-NAME. Re-apply the wiring at all three sites"; exit 1
           }
+          # camera-box issue 1367: after a sender restart moves its NDI port the finder can list the
+          # STALE old-port record first (another live sender may own that port now). A confirmed #1180
+          # mismatch therefore RETARGETS the next reset BY-URL to the verified URL and EXCLUDES the
+          # mismatched URL for this name at both pick sites (the reset's fresh finder and the verify),
+          # until a verified bind or 120 s -- else the receiver loops ~1 min until the record ages out.
+          # This path ships distroav.dll, so re-assert here too -- mirrors
+          # tests/distroav_stale_duplicate_retarget_1367.rs.
+          foreach ($tok1367 in @(
+              'static inline int ndi_identity_mismatch_action_1367(',
+              'static inline bool ndi_url_exclusion_active_1367(',
+              'ndi_find_url_for_source_name(owned_source_name, fresh_sources, n_fresh, excluded_url_1367)',
+              'ndi_find_url_for_source_name(owned_source_name, v_sources, n_v, verify_exclude_1367)',
+              'int action_1367 = ndi_identity_mismatch_action_1367(mismatch_1180, verify_url_1180, bound_via_retarget_1367);',
+              'bound_via_retarget_1367 = true; } else if (!force_by_name_1180 && owned_source_name && owned_source_name[0]) {')) {
+            if ($ndi -notmatch [regex]::Escape($tok1367)) {
+              Write-Error "ndi-source.cpp: the issue-1367 stale-duplicate retarget/exclusion wiring is gone (missing: $tok1367) -- after a sender port move the receiver re-picks the stale finder record and loops ~1 min before it reattaches. Re-apply the issue-1367 fix"; exit 1
+            }
+          }
           # camera-box #1096 (reopen 16.9.2026): a bind that CONNECTS (no_connections>0) but delivers
           # ZERO frames (reset BY-NAME into the poisoned finder in the 12:10 fleet-deploy wedge on
           # cam2/5/6) leaves s->last_frame_timestamp==0, invisible to genlock_reconnect_decision

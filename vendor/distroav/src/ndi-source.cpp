@@ -271,9 +271,20 @@ static const unsigned NDI_IDENTITY_VERIFY_MAX_WAITS = 2;
  * name-based connect, i.e. no worse than upstream). Exact name match -- mirrors recv_create's own
  * name-equality. PURE (only primitives + the two const char* fields) so it lift-compiles +
  * truth-table-tests offline -- CI is otherwise the first compiler for this file
- * (tests/distroav_fresh_finder_connect_1096.rs). */
+ * (tests/distroav_fresh_finder_connect_1096.rs).
+ *
+ * camera-box #1367: `exclude_url` makes the pick DUPLICATE-AWARE. After a sender restart moves its
+ * NDI port, the finder can hold TWO records for the same name -- the stale old port (which another
+ * live sender may now own) and the live new one -- and the first match is the stale one (live
+ * 6.10.2026: `RESOLUME-SNV (SP-program)` at stale :5961 + live :5971, the reattach looped ~56 s).
+ * A same-name record whose URL equals `exclude_url` (the URL #1180 proved delivers the WRONG sender
+ * for this name) is skipped and the NEXT match is returned. The excluded URL is never returned, not
+ * even as the only match: NULL then, so the caller's existing fallback ladder takes over instead of
+ * re-binding the proven-wrong sender. NULL/empty `exclude_url` = the original first-match pick
+ * (tests/distroav_stale_duplicate_retarget_1367.rs). */
 static inline const char *ndi_find_url_for_source_name(const char *requested_name,
-						       const NDIlib_source_t *sources, uint32_t n_sources)
+						       const NDIlib_source_t *sources, uint32_t n_sources,
+						       const char *exclude_url)
 {
 	if (!requested_name || !requested_name[0])
 		return NULL; /* no name to match -> keep the name path (nothing to bypass) */
@@ -283,9 +294,11 @@ static inline const char *ndi_find_url_for_source_name(const char *requested_nam
 		const char *name = sources[i].p_ndi_name;
 		if (name && strcmp(name, requested_name) == 0) {
 			const char *url = sources[i].p_url_address;
-			if (url && url[0])
-				return url; /* current address -> connect BY-URL, bypassing the poison */
-			return NULL;   /* matched but no usable address -> fall back to name */
+			if (!url || !url[0])
+				return NULL; /* matched but no usable address -> fall back to name */
+			if (exclude_url && exclude_url[0] && strcmp(url, exclude_url) == 0)
+				continue; /* #1367: the proven-stale duplicate -> try the next same-name record */
+			return url; /* current address -> connect BY-URL, bypassing the poison */
 		}
 	}
 	return NULL; /* not discovered (yet) -> fall back to name */
@@ -333,6 +346,52 @@ static inline bool ndi_force_by_name_after_frameless(bool connected_by_url, bool
 	if (frames_seen_since_reset)
 		return false; /* frames flowed -> not a wedge; #1180 identity path owns it */
 	return connected_by_url; /* frame-less BY-URL -> force BY-NAME next (alternates; default is BY-URL) */
+}
+
+/* camera-box #1367: how long a URL that #1180 proved delivers the WRONG sender for a name stays
+ * excluded from that name's picks. One stale-mDNS record lifetime: the live stale duplicate aged out
+ * of the finder after ~56 s, so 120 s outlives it with margin, yet a sender that later LEGITIMATELY
+ * returns to that port is never locked out for long. A bind whose identity VERIFIES clears the
+ * exclusion sooner. */
+static const uint64_t NDI_URL_EXCLUDE_TTL_NS = 120ULL * 1000ULL * 1000ULL * 1000ULL;
+
+/* camera-box #1367: what to do after the #1180 post-connect identity verify. The defect it fixes:
+ * on a confirmed mismatch #1180 already holds the CORRECT url (the verify finder resolved it) but
+ * threw it away and forced BY-NAME, and the SDK's name resolver followed the same stale record as
+ * the fresh finder, so every reset re-picked the stale port (a ~56 s loop live). Returns
+ *   0 = keep the bind (identity OK, or INCONCLUSIVE -- never tear down a feed on a can't-confirm);
+ *   1 = RETARGET: the next reset connects BY-URL straight to `verified_url` (the bound URL is
+ *       excluded for this name, see NDI_URL_EXCLUDE_TTL_NS);
+ *   2 = force BY-NAME (the unchanged #1180 safety net) -- when the bind that mismatched was ITSELF a
+ *       retarget, so one episode retargets at most once in a row and a wrong retarget can never chain
+ *       into another, or when there is no verified URL to go to.
+ * `identity_mismatch` is ndi_by_url_identity_mismatch()'s verdict. PURE (only primitives) so it
+ * lift-compiles + truth-table-tests offline (tests/distroav_stale_duplicate_retarget_1367.rs). */
+static inline int ndi_identity_mismatch_action_1367(bool identity_mismatch, const char *verified_url,
+						    bool bound_via_retarget)
+{
+	if (!identity_mismatch)
+		return 0; /* identity OK or INCONCLUSIVE -> keep the bind */
+	if (bound_via_retarget)
+		return 2; /* the retarget itself mismatched -> the #1180 BY-NAME safety net */
+	if (!verified_url || !verified_url[0])
+		return 2; /* nothing verified to retarget to -> BY-NAME */
+	return 1;         /* first mismatch -> RETARGET BY-URL to the verified URL */
+}
+
+/* camera-box #1367: is the per-name URL exclusion recorded at `excluded_since_ns` still in force at
+ * `now_ns`? 0 = nothing excluded; a zero ttl disables it; an age below the ttl keeps it (no measurable
+ * age yet counts as fresh). PURE (only primitives) so it lift-compiles + truth-table-tests offline
+ * (tests/distroav_stale_duplicate_retarget_1367.rs). */
+static inline bool ndi_url_exclusion_active_1367(uint64_t excluded_since_ns, uint64_t now_ns, uint64_t ttl_ns)
+{
+	if (excluded_since_ns == 0)
+		return false; /* nothing excluded */
+	if (ttl_ns == 0)
+		return false; /* exclusion disabled */
+	if (now_ns <= excluded_since_ns)
+		return true; /* no measurable age yet -> still in force */
+	return (now_ns - excluded_since_ns) < ttl_ns;
 }
 
 /* camera-box #1096 (reopen): synthesize the CURRENT network address for a camera-box sender from the
@@ -1048,6 +1107,23 @@ void *ndi_source_thread(void *data)
 	bool frames_seen_since_reset_1180 = false;
 	bool force_by_name_next_reset_1180 = false;
 
+	/* camera-box #1367: stale-duplicate finder record recovery (all thread-local, next to the #1180
+	 * state they extend). After a sender restart moves its NDI port the finder can hold the stale
+	 * old-port record FIRST (another live sender may own that port now) and the live one second, so
+	 * every #1096 fresh-finder pick and the SDK's own BY-NAME resolver kept choosing the stale port
+	 * while #1180's verify already knew the right one (live: a ~56 s reattach loop). On a confirmed
+	 * #1180 mismatch: retarget_url_1367 = the URL the verify resolved (the NEXT reset connects BY-URL
+	 * straight to it, consumed there); excluded_url_1367 = the URL that delivered the wrong sender,
+	 * skipped among same-name duplicates by every pick (reset + verify) until a bind's identity
+	 * verifies or NDI_URL_EXCLUDE_TTL_NS passes (excluded_since_ns_1367). bound_via_retarget_1367
+	 * marks the current bind as a retarget, so a retarget that itself mismatches falls back to the
+	 * #1180 BY-NAME safety net instead of retargeting again. Both strings are owned (bstrdup), dropped
+	 * on a configured-name change, freed on thread exit. */
+	char *retarget_url_1367 = nullptr;
+	char *excluded_url_1367 = nullptr;
+	uint64_t excluded_since_ns_1367 = 0;
+	bool bound_via_retarget_1367 = false;
+
 	/* camera-box #1096 (reopen): finder-blind BY-URL fallback state. last_delivered_url_1096 = the URL
 	 * that actually DELIVERED frames on a BY-URL bind (retried before by-name when the fresh finder
 	 * resolves nothing); no_url_cycles_1096 = the consecutive finder-blind reset count driving the
@@ -1103,6 +1179,17 @@ void *ndi_source_thread(void *data)
 			// depth): bind recv_desc to these, NOT to the live config.* pointers
 			// that ndi_source_update frees. bfree(nullptr) is a safe no-op.
 			//
+			// camera-box #1367: a retarget / URL exclusion was proven for ONE configured name; a
+			// name change (an operator re-pick, a reattach CLEAR-then-SET) drops both.
+			if ((retarget_url_1367 || excluded_url_1367) &&
+			    !(owned_source_name && s->config.ndi_source_name &&
+			      strcmp(owned_source_name, s->config.ndi_source_name) == 0)) {
+				bfree(retarget_url_1367);
+				retarget_url_1367 = nullptr;
+				bfree(excluded_url_1367);
+				excluded_url_1367 = nullptr;
+				excluded_since_ns_1367 = 0;
+			}
 			bfree(owned_source_name);
 			owned_source_name = bstrdup(s->config.ndi_source_name);
 			bfree(owned_receiver_name);
@@ -1202,8 +1289,9 @@ void *ndi_source_thread(void *data)
 			//
 			bool url_resolved_1096 = false;
 			// camera-box #1096 (reopen): which URL source THIS reset bound to (0 fresh finder, 1
-			// last-known-good, 2 fleet map) -- used ONLY for the log line; url_resolved_1096 stays the
-			// umbrella "bound BY-URL" flag so the #1180/#1287 arming below is byte-identical.
+			// last-known-good, 2 fleet map, 3 the #1367 verified retarget) -- used ONLY for the log
+			// line; url_resolved_1096 stays the umbrella "bound BY-URL" flag so the #1180/#1287
+			// arming below is byte-identical.
 			int url_bind_kind_1096 = 0;
 			// camera-box #1180: a confirmed BY-URL identity mismatch forces THIS one reset to connect
 			// BY-NAME (skip the #1096 fresh-finder BY-URL resolution), abandoning the wrong-sender URL
@@ -1212,7 +1300,32 @@ void *ndi_source_thread(void *data)
 			// is forced; the next reset resumes the normal #1096 BY-URL path.
 			bool force_by_name_1180 = force_by_name_next_reset_1180;
 			force_by_name_next_reset_1180 = false;
-			if (!force_by_name_1180 && owned_source_name && owned_source_name[0]) {
+			// camera-box #1367: consume the verified retarget (THIS reset only) and expire a URL
+			// exclusion past NDI_URL_EXCLUDE_TTL_NS, so a sender that legitimately returns to that
+			// port is reachable again. A retarget wins over the fresh finder (it is the URL #1180's
+			// verify proved carries this name); a forced BY-NAME wins over a retarget.
+			char *retarget_1367 = retarget_url_1367;
+			retarget_url_1367 = nullptr;
+			bound_via_retarget_1367 = false;
+			if (excluded_url_1367 &&
+			    !ndi_url_exclusion_active_1367(excluded_since_ns_1367, os_gettime_ns(), NDI_URL_EXCLUDE_TTL_NS)) {
+				obs_log(LOG_INFO,
+					"'%s' ndi_source_thread: reset_ndi_receiver: #1367 exclusion of '%s' expired after %llu s (that port may carry this name again)",
+					obs_source_name, excluded_url_1367,
+					(unsigned long long)(NDI_URL_EXCLUDE_TTL_NS / 1000000000ULL));
+				bfree(excluded_url_1367);
+				excluded_url_1367 = nullptr;
+				excluded_since_ns_1367 = 0;
+			}
+			if (!force_by_name_1180 && retarget_1367 && retarget_1367[0]) {
+				// Ownership of the retarget string moves to the bind.
+				bfree(owned_source_url);
+				owned_source_url = retarget_1367;
+				retarget_1367 = nullptr;
+				url_resolved_1096 = true;
+				url_bind_kind_1096 = 3;
+				bound_via_retarget_1367 = true;
+			} else if (!force_by_name_1180 && owned_source_name && owned_source_name[0]) {
 				NDIlib_find_create_t fresh_find_desc = {0};
 				fresh_find_desc.show_local_sources = true;
 				fresh_find_desc.p_groups = nullptr;
@@ -1223,8 +1336,10 @@ void *ndi_source_thread(void *data)
 						uint32_t n_fresh = 0;
 						const NDIlib_source_t *fresh_sources =
 							ndiLib->find_get_current_sources(fresh_finder, &n_fresh);
+						// camera-box #1367: skip the proven-stale duplicate record of this name.
 						const char *fresh_url = ndi_find_url_for_source_name(owned_source_name,
-												     fresh_sources, n_fresh);
+												     fresh_sources, n_fresh,
+												     excluded_url_1367);
 						if (fresh_url && fresh_url[0]) {
 							// Copy the URL out while the finder (owner of the string) is alive.
 							bfree(owned_source_url);
@@ -1244,6 +1359,8 @@ void *ndi_source_thread(void *data)
 						obs_source_name);
 				}
 			}
+			// camera-box #1367: a retarget this reset did not consume (a forced BY-NAME won) is dropped.
+			bfree(retarget_1367);
 			//
 			// camera-box #1096 (reopen): the fresh finder resolved NO url and BY-NAME was not
 			// force-required. Rather than fall to the poisoned BY-NAME resolver forever (the strih
@@ -1281,7 +1398,12 @@ void *ndi_source_thread(void *data)
 				// Empty p_ndi_name => the SDK uses p_url_address directly (bypass the finder).
 				recv_desc.source_to_connect_to.p_ndi_name = "";
 				recv_desc.source_to_connect_to.p_url_address = owned_source_url;
-				if (url_bind_kind_1096 == 2)
+				if (url_bind_kind_1096 == 3)
+					obs_log(LOG_WARNING,
+						"'%s' ndi_source_thread: reset_ndi_receiver: #1367 retarget BY-URL '%s' (verified; excluding '%s')",
+						obs_source_name, owned_source_url,
+						excluded_url_1367 ? excluded_url_1367 : "");
+				else if (url_bind_kind_1096 == 2)
 					obs_log(LOG_WARNING,
 						"'%s' ndi_source_thread: reset_ndi_receiver: #1096 rebind BY-URL '%s' (fleet map after finder-blind cycles; contract-derived, port-cycling)",
 						obs_source_name, owned_source_url);
@@ -1354,6 +1476,11 @@ void *ndi_source_thread(void *data)
 				// reconnect BY-URL to the wrong-sender URL again).
 				if (force_by_name_1180)
 					force_by_name_next_reset_1180 = true;
+				// camera-box #1367: likewise a retarget bind keeps its verified URL for the retry.
+				if (bound_via_retarget_1367 && owned_source_url && owned_source_url[0]) {
+					bfree(retarget_url_1367);
+					retarget_url_1367 = bstrdup(owned_source_url);
+				}
 				pthread_mutex_lock(&s->config_mutex);
 				s->config.reset_ndi_receiver = true;
 				pthread_mutex_unlock(&s->config_mutex);
@@ -1461,6 +1588,11 @@ void *ndi_source_thread(void *data)
 					// camera-box #1180: preserve a forced-BY-NAME intent across a framesync-create retry too.
 					if (force_by_name_1180)
 						force_by_name_next_reset_1180 = true;
+					// camera-box #1367: and a retarget bind's verified URL.
+					if (bound_via_retarget_1367 && owned_source_url && owned_source_url[0]) {
+						bfree(retarget_url_1367);
+						retarget_url_1367 = bstrdup(owned_source_url);
+					}
 					pthread_mutex_lock(&s->config_mutex);
 					s->config.reset_ndi_receiver = true;
 					pthread_mutex_unlock(&s->config_mutex);
@@ -1672,6 +1804,12 @@ void *ndi_source_thread(void *data)
 				// a healthy frame loop (review #1180).
 				identity_verify_pending_1180 = false;
 				char *verify_url_1180 = nullptr;
+				// camera-box #1367: the verify skips the proven-stale duplicate too -- else a retarget
+				// bind would be "verified" against the stale record listed first and ping-pong back.
+				const char *verify_exclude_1367 =
+					ndi_url_exclusion_active_1367(excluded_since_ns_1367, os_gettime_ns(), NDI_URL_EXCLUDE_TTL_NS)
+						? excluded_url_1367
+						: nullptr;
 				NDIlib_find_create_t verify_find_desc = {0};
 				verify_find_desc.show_local_sources = true;
 				verify_find_desc.p_groups = nullptr;
@@ -1682,8 +1820,8 @@ void *ndi_source_thread(void *data)
 						uint32_t n_v = 0;
 						const NDIlib_source_t *v_sources =
 							ndiLib->find_get_current_sources(verify_finder, &n_v);
-						const char *v_url =
-							ndi_find_url_for_source_name(owned_source_name, v_sources, n_v);
+						const char *v_url = ndi_find_url_for_source_name(owned_source_name, v_sources, n_v,
+												 verify_exclude_1367);
 						if (v_url && v_url[0]) {
 							bfree(verify_url_1180);
 							verify_url_1180 = bstrdup(v_url);
@@ -1693,6 +1831,38 @@ void *ndi_source_thread(void *data)
 					ndiLib->find_destroy(verify_finder);
 				}
 				bool mismatch_1180 = ndi_by_url_identity_mismatch(owned_source_url, verify_url_1180);
+				// camera-box #1367: a confirmed mismatch already names the RIGHT url (verify_url_1180).
+				// Keep it as the next reset's BY-URL retarget instead of a BY-NAME round trip through
+				// the SDK resolver that serves the same stale record, and exclude the wrong-sender URL
+				// for this name (both actions), so no later pick -- fresh finder, verify -- and no
+				// last-known-good fallback lands on it again. A retarget that itself mismatches takes
+				// the unchanged #1180 BY-NAME path below.
+				int action_1367 =
+					ndi_identity_mismatch_action_1367(mismatch_1180, verify_url_1180, bound_via_retarget_1367);
+				if (mismatch_1180) {
+					bfree(excluded_url_1367);
+					excluded_url_1367 = bstrdup(owned_source_url);
+					excluded_since_ns_1367 = os_gettime_ns();
+					if (last_delivered_url_1096 && strcmp(last_delivered_url_1096, owned_source_url) == 0) {
+						bfree(last_delivered_url_1096);
+						last_delivered_url_1096 = nullptr;
+					}
+				}
+				if (action_1367 == 1) {
+					obs_log(LOG_WARNING,
+						"genlock: #1180 BY-URL identity MISMATCH '%s' -- configured name now maps to '%s' but the receiver is bound to '%s'; retargeting BY-URL to the verified URL on the next reset (#1367 sender NDI port move)",
+						obs_source_name, verify_url_1180, owned_source_url);
+					// Ownership of the verified URL moves to the retarget; give the fresh
+					// connection a full #767 stale window and re-arm the reset.
+					bfree(retarget_url_1367);
+					retarget_url_1367 = verify_url_1180;
+					verify_url_1180 = nullptr;
+					was_disconnected = true;
+					pthread_mutex_lock(&s->config_mutex);
+					s->config.reset_ndi_receiver = true;
+					pthread_mutex_unlock(&s->config_mutex);
+					continue;
+				}
 				if (mismatch_1180) {
 					obs_log(LOG_WARNING,
 						"genlock: #1180 BY-URL identity MISMATCH '%s' -- configured name now maps to '%s' but the receiver is bound to '%s'; forcing a fresh BY-NAME reset (sender NDI port reshuffle after an OBS restart?)",
@@ -1707,6 +1877,17 @@ void *ndi_source_thread(void *data)
 					s->config.reset_ndi_receiver = true;
 					pthread_mutex_unlock(&s->config_mutex);
 					continue;
+				}
+				// camera-box #1367: this bind delivers frames AND the name resolves to its URL --
+				// identity VERIFIED, so the exclusion has done its job; clear it (an INCONCLUSIVE
+				// verify, the name not resolvable, keeps it until NDI_URL_EXCLUDE_TTL_NS).
+				if (verify_url_1180 && verify_url_1180[0] && excluded_url_1367) {
+					obs_log(LOG_INFO,
+						"'%s' ndi_source_thread: #1367 identity verified on '%s' -- clearing the exclusion of '%s'",
+						obs_source_name, owned_source_url ? owned_source_url : "", excluded_url_1367);
+					bfree(excluded_url_1367);
+					excluded_url_1367 = nullptr;
+					excluded_since_ns_1367 = 0;
 				}
 				bfree(verify_url_1180);
 			}
@@ -1931,6 +2112,10 @@ void *ndi_source_thread(void *data)
 	owned_source_url = nullptr;
 	bfree(last_delivered_url_1096);
 	last_delivered_url_1096 = nullptr;
+	bfree(retarget_url_1367); // camera-box #1367
+	retarget_url_1367 = nullptr;
+	bfree(excluded_url_1367);
+	excluded_url_1367 = nullptr;
 
 	obs_log(LOG_DEBUG, "'%s' -ndi_source_thread(…)", obs_source_name);
 
