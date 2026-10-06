@@ -151,7 +151,10 @@ def test_reconnect_backoff_doubles_to_the_cap_and_resets_after_a_stable_connecti
 
 def test_the_constants_are_pinned():
     assert rmm.WRITE_INTERVAL_S == 10.0
-    assert rmm.REPLAY_CAP_S == 120.0
+    assert rmm.REPLAY_CAP_MIN_S == 120.0
+    assert rmm.REPLAY_FLOOR_BPS == 5000.0
+    assert rmm.REPLAY_STALL_S == 60.0
+    assert rmm.LAN_RTT_MAX_MS == 20.0
     assert rmm.PARTIAL_LINE_CAP == 4096
     assert rmm.RECONNECT_MIN_S == 10.0
     assert rmm.RECONNECT_MAX_S == 300.0
@@ -178,7 +181,7 @@ FULL = HDR_A + ROWS_A
 
 
 def _run(tmp_path, script_body, *, max_runtime_s=3.0, write_interval_s=0.2, waits=None, logs=None,
-         procs=None):
+         procs=None, rtt=lambda _host: 0.5):
     serve = tmp_path / "serve"
     argv = _fake_stream(tmp_path, script_body)
     writes = []
@@ -191,7 +194,7 @@ def _run(tmp_path, script_body, *, max_runtime_s=3.0, write_interval_s=0.2, wait
         return proc
 
     rc = rmm.run("10.77.9.62", str(serve), spawn=spawn, write_interval_s=write_interval_s,
-                 max_runtime_s=max_runtime_s,
+                 max_runtime_s=max_runtime_s, rtt=rtt,
                  wait=(waits.append if waits is not None else (lambda s: None)),
                  log=(logs.append if logs is not None else (lambda m: None)),
                  on_write=writes.append)
@@ -404,6 +407,93 @@ def test_the_backoff_wait_ends_as_soon_as_the_run_is_stopped():
     assert abs(clock["t"] - 2.0) < 1e-9
 
 
+def test_the_replay_cap_scales_with_the_announced_size():
+    """A fixed 120 s cap re-downloaded a 2.7 MB log forever over a 20-65 kB/s link: the cap is
+    the larger of 120 s and the size at a 5 kB/s floor."""
+    assert rmm.replay_cap_s(0) == rmm.REPLAY_CAP_MIN_S
+    assert rmm.replay_cap_s(2_663_956) == pytest.approx(2_663_956 / rmm.REPLAY_FLOOR_BPS)
+    assert rmm.replay_cap_s(100_000) == rmm.REPLAY_CAP_MIN_S
+
+
+def test_a_slow_but_progressing_replay_is_not_cut(tmp_path, monkeypatch):
+    monkeypatch.setattr(rmm, "REPLAY_CAP_MIN_S", 0.3)
+    monkeypatch.setattr(rmm, "REPLAY_FLOOR_BPS", 1.0e9)  # the size-scaled part stays tiny too
+    monkeypatch.setattr(rmm, "REPLAY_STALL_S", 0.5)
+    big = HDR_A + b"".join(b"%d,%d,%d\n" % (i, i, i) for i in range(40))
+    chunks = [big[i:i + 64] for i in range(0, len(big), 64)]
+    body = f"""
+    out.write({_size(big)!r}); out.flush()
+    for c in {chunks!r}:
+        out.write(c); out.flush()
+        time.sleep(0.05)
+    time.sleep(5)
+    """
+    logs = []
+    _rc, _serve, writes = _run(tmp_path, body, max_runtime_s=2.0, logs=logs)
+    assert writes and writes[0] == big
+    assert not any("replay" in m and m.startswith("ERROR") for m in logs)
+
+
+def test_a_stalled_replay_reconnects(tmp_path, monkeypatch):
+    monkeypatch.setattr(rmm, "REPLAY_STALL_S", 0.3)
+    big = HDR_A + b"".join(b"%d,%d,%d\n" % (i, i, i) for i in range(40))
+    body = f"""
+    out.write({_size(big) + big[:50]!r}); out.flush()
+    time.sleep(5)
+    """
+    logs, waits = [], []
+    _rc, _serve, writes = _run(tmp_path, body, max_runtime_s=1.2, logs=logs, waits=waits)
+    assert writes == []
+    assert any(m.startswith("ERROR") and "stalled" in m for m in logs)
+    assert waits
+
+
+def test_parse_ping_rtt_reads_the_minimum():
+    out = ("3 packets transmitted, 3 received, 0% packet loss, time 411ms\n"
+           "rtt min/avg/max/mdev = 0.107/0.133/0.156/0.020 ms\n")
+    assert rmm.parse_ping_rtt_ms(out) == pytest.approx(0.107)
+    assert rmm.parse_ping_rtt_ms("2 packets transmitted, 0 received, 100% packet loss\n") is None
+
+
+def test_the_rig_away_on_the_mobile_link_is_not_mirrored(tmp_path):
+    """dev1 stays at church while the rig travels to a venue behind tailscale over metered mobile
+    data (~70 ms RTT): no ssh, no replay is pulled over that link (owner rule)."""
+    spawned, waits, logs = [], [], []
+
+    def spawn(_host, _path):
+        spawned.append(1)
+        raise AssertionError("must not connect while the rig is away")
+
+    rmm.run("10.77.9.62", str(tmp_path / "serve"), spawn=spawn, rtt=lambda _h: 72.5,
+            max_runtime_s=0.3, wait=waits.append, log=logs.append)
+    assert spawned == []
+    assert waits and waits[0] == rmm.RECONNECT_MIN_S
+    assert sum("away" in m for m in logs) == 1  # logged once per state change, not per check
+
+
+def test_an_unknown_rtt_still_tries_the_connection(tmp_path):
+    body = f"""
+    out.write({_size(FULL) + FULL!r}); out.flush()
+    time.sleep(5)
+    """
+    _rc, serve, writes = _run(tmp_path, body, max_runtime_s=1.0, rtt=lambda _h: None)
+    assert writes == [FULL]
+
+
+def test_the_dropped_header_bytes_are_logged_once_per_connection(tmp_path):
+    rows = b"".join(b"%d,%d,%d\n" % (i, i, i) for i in range(30))
+    body = f"""
+    out.write({_size(rows)!r}); out.flush()
+    for i in range(30):
+        out.write(b"%d,%d,%d\\n" % (i, i, i)); out.flush()
+        time.sleep(0.02)
+    time.sleep(5)
+    """
+    logs = []
+    _run(tmp_path, body, max_runtime_s=1.2, logs=logs)
+    assert sum("before the first session header" in m for m in logs) == 1
+
+
 def test_run_stops_the_ssh_process_even_when_a_write_fails(tmp_path, monkeypatch):
     procs = []
 
@@ -468,7 +558,8 @@ SSH_OK = (
 )
 
 
-def _run_entry(tmp_path, ssh_body=SSH_OK, extra_env=None, args=("--max-runtime", "2", "--write-interval", "0.2")):
+def _run_entry(tmp_path, ssh_body=SSH_OK, extra_env=None,
+               args=("--max-runtime", "2", "--write-interval", "0.2", "--rtt-max-ms", "0")):
     logs = tmp_path / "logs"
     logs.mkdir(exist_ok=True)
     src = tmp_path / "src.csv"
