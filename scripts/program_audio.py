@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """issue 1404 -- stream program-audio classification: is the stream program carrying ONLY the
-measurement signal? Pure (numpy), no NDI, no network.
+measurement signal? Pure (numpy), no NDI, no network; the marker words come from the decoder
+(scripts/program_audio_marker.py).
 
 WHY: every YouTube test session must stop at once when non-measurement audio (music, a rehearsal)
 is on the stream program -- copyrighted content on the channel risks a ban (owner amendment, issue
@@ -27,12 +28,31 @@ Measurement per window (WINDOW_S = 2 s, any sample rate, mono or N channels):
                     A +-3 Hz line removes nothing measurable from broadband music. The clip
                     generator must import this constant (one parameter set for both sides).
 
+Marker requirement (ROZHODNUTÉ issue 1404 comments 6026577906 + 6026826572): the spectral share
+is necessary, not sufficient -- tonal content inside 200-800 Hz has none outside the band. The only
+property unique to the measurement is the cam2 QPSK marker itself, decoded by the dock's own
+decoder (scripts/qpsk_guard_shim.cpp via scripts/program_audio_marker.py) over the trailing
+MARKER_SPAN_S of contiguous non-silent audio, every channel on its own (never a downmix). A raw
+CRC-valid word proves nothing (preamble + zero nibble + CRC-4 is only 12 bits per screen pass;
+steady in-band tones yield runs of them), so per channel:
+  1. same-index words less than MARKER_MIN_SEP_S apart are one marker;
+  2. an index that appears again MARKER_MIN_SEP_S or more away is dropped: the emitter's index is
+     frame_id mod 256 at 60 fps and wraps only every 256/60 = 4.27 s, longer than the span, while
+     steady tones decode the same few indices again and again;
+  3. the chain = the most remaining markers, MARKER_MIN_SEP_S apart, on one timecode line
+     idx_j - idx_i == round(60 * (t_j - t_i)) (mod 256, +-MARKER_INDEX_TOL);
+  4. MEASUREMENT needs chain >= MARKER_CHAIN_MIN.
+`markers_decoded` (the most raw CRC-valid words any channel decoded, diagnostics) and `marker_chain`
+are additive fields of program-audio.json.
+
 Verdict (classify):
-  UNKNOWN      a measurement is missing / not a number (the sampler also writes UNKNOWN itself
-               when no audio arrives at all)
+  UNKNOWN      a measurement is missing / not a number, or the window is in band but has no
+               marker chain (the 4 s warm-up after a start or a receive gap, a span cut by a
+               silent window, no decoder) -- the sampler also writes UNKNOWN itself when no
+               audio arrives at all or while it warms up
   SILENT       rms_dbfs < SILENT_RMS_DBFS (the spectral share of a noise floor means nothing)
-  FOREIGN      outside_band_pct >= FOREIGN_OUTSIDE_BAND_PCT
-  MEASUREMENT  otherwise
+  FOREIGN      outside_band_pct >= FOREIGN_OUTSIDE_BAND_PCT, or marker_chain < MARKER_CHAIN_MIN
+  MEASUREMENT  otherwise (in band AND chain >= MARKER_CHAIN_MIN)
 
 CALIBRATION (6.10.2026, the real session recordings in ~/.claude/work-products/issue-1404/audio/,
 48 kHz stereo, every 2 s window): rec2 (604 windows), rec3a (324), rec3b (286), session (637) --
@@ -45,15 +65,24 @@ maximum and 12 below speech. SILENT_RMS_DBFS = -60 sits 23 dB under the quietest
 LIVE (6.10.2026, the real NDI path): the stream program (`STREAM-SNV (stream)`) read 12.4-22.1 %
 at -35.9...-35.5 dBFS = MEASUREMENT; the SongPlayer program (`RESOLUME-SNV (SP-program)`, music)
 read 87.6-94.0 % at -15.4...-14.6 dBFS = FOREIGN.
+MARKER CALIBRATION (7.10.2026, scripts/program_audio_marker_calibrate.py through the real sampler
+loop and the real shim; the bars of ROZHODNUTÉ 6026577906):
+  (a) real measurement audio, chain >= MARKER_CHAIN_MIN + 2 in every judged window and 0 FOREIGN:
+      rec2 / rec3a / rec3b / session = 1847 judged windows, chain 6-8, minimum 6 (rec3b at
+      292 s); the Task 1 fixtures 51 windows, minimum 6 (s3-A-vod's first span after the
+      stream began). Margin: exactly two missed decodes.
+  (b) synthetic in-band content with no marker, 50 trials x 10 windows, -30 and -15 dBFS: the
+      worst chain held over 3 consecutive windows = chords 1, tremolo chords 1, melody 1,
+      band-limited 200-800 Hz noise 3 -- all below 4, so every 3 windows hold a FOREIGN.
+  Without rule 2 a held tremolo chord read a chain of 4 window after window (6026817074).
 Known limits:
   * foreign content mixed well BELOW the measurement level is missed: pink noise under it reads
     32.3 % at -3 dB (FOREIGN) but 26.2 % at -6 dB. Music at program level is ~20 dB OVER the
     measurement and reads ~90 %.
-  * tonal content that sits inside 200-800 Hz reads MEASUREMENT (a soft C-E-G chord 0.7 %, a
-    220-440 Hz melody 10.1 %, the issue-1404 review). Real program music is broadband, but this
-    class is not caught by the spectral share; the discriminator for it is the QPSK marker itself
-    (a follow-up candidate, not this guard).
-Pinned by tests/python/test_program_audio_1404.py.
+  * in-band music mixed UNDER a marker that still decodes reads MEASUREMENT (the marker chain
+    stands, the share stays in band); broadband music is caught by the spectral share. The
+    measurement-clip-only rule for SongPlayer and the cg OBS (plan Task 5) is the control for it.
+Pinned by tests/python/test_program_audio_1404.py + test_program_audio_marker_1404.py.
 """
 from __future__ import annotations
 
@@ -76,9 +105,79 @@ FOREIGN_OUTSIDE_BAND_PCT = 30.0
 MEASUREMENT_TONE_LINES_HZ = (1000.0,)
 TONE_LINE_HALF_WIDTH_HZ = 3.0
 DIGITAL_SILENCE_DBFS = -200.0
+# -- the marker requirement (ROZHODNUTÉ issue 1404 comments 6026577906 + 6026826572; the rule and
+#    its calibration in the module doc; pinned by tests/python/test_program_audio_marker_1404.py) --
+MARKER_INDEX_RATE_HZ = 60.0   # the emitter's index = frame_id mod 256 at vr=60/1 (`# qpsk-params`)
+MARKER_INDEX_MODULUS = 256    # the 8-bit index wraps every 256 / 60 = 4.27 s
+MARKER_INDEX_TOL = 2          # +-2 indices around round(60 * dt): the emit jitter of +-1 frame, with margin
+MARKER_MIN_SEP_S = 0.25       # one marker: same-index re-hits closer than this; distinct markers this far apart
+MARKER_SPAN_S = 4.0           # the trailing span of contiguous non-silent audio; MUST stay < 256 / 60 s
+MARKER_CHAIN_MIN = 4          # MEASUREMENT needs a chain this long (real audio min 6, in-band content < 4)
 
 VERDICTS = ("MEASUREMENT", "FOREIGN", "SILENT", "UNKNOWN")
 SCHEMA = 1
+
+
+def _round_half_up(x):
+    return np.floor(x + 0.5)
+
+
+def marker_candidates(words) -> list[tuple[float, int]]:
+    """Rules 1 + 2 over ONE channel's CRC-valid words `[(start_s, index), ...]` of one span: the
+    candidate markers, one per index, in time order.
+
+    1. Same-index words less than MARKER_MIN_SEP_S apart are ONE marker (a re-hit of one burst); it
+       takes the earliest word's time.
+    2. An index whose words lie MARKER_MIN_SEP_S or more apart repeats inside the span, so it is
+       dropped entirely: a real marker's index advances 60/s and wraps only every 256/60 = 4.27 s,
+       longer than the span, while steady in-band tones decode the same few indices again and again.
+    Rule 2 is decided on the whole index (its first and last word), never by chaining re-hits, so a
+    dense run of one index can never collapse into a single marker."""
+    by_index: dict[int, list[float]] = {}
+    for start_s, index in words:
+        t = float(start_s)
+        if not math.isfinite(t):
+            raise ValueError(f"marker_candidates: word time {start_s!r} is not finite")
+        by_index.setdefault(int(index) % MARKER_INDEX_MODULUS, []).append(t)
+    out = [(min(ts), index) for index, ts in by_index.items() if max(ts) - min(ts) < MARKER_MIN_SEP_S]
+    return sorted(out)
+
+
+def marker_chain(words) -> int:
+    """Rules 1-3 over ONE channel's CRC-valid words of one span: the longest timecode chain.
+
+    3. A real marker's index is the emitter's frame_id mod 256 at MARKER_INDEX_RATE_HZ, so two real
+       markers satisfy `idx_j - idx_i == round(60 * (t_j - t_i)) (mod 256, +-MARKER_INDEX_TOL)`. The
+       chain is the largest number of candidates (rules 1 + 2) on one such timecode line -- each
+       candidate in turn is the anchor the others are checked against -- counting only candidates
+       at least MARKER_MIN_SEP_S apart, in time order."""
+    cands = marker_candidates(words)
+    if not cands:
+        return 0
+    t = np.asarray([c[0] for c in cands], dtype=np.float64)
+    idx = np.asarray([c[1] for c in cands], dtype=np.int64)
+    best = 0
+    for a in range(t.shape[0]):
+        expected = _round_half_up(MARKER_INDEX_RATE_HZ * (t - t[a])).astype(np.int64)
+        d = np.mod(idx - idx[a] - expected, MARKER_INDEX_MODULUS)
+        on_line = t[np.minimum(d, MARKER_INDEX_MODULUS - d) <= MARKER_INDEX_TOL]  # t is sorted
+        count, last = 0, None
+        for ts in on_line:
+            if last is None or ts - last >= MARKER_MIN_SEP_S:
+                count += 1
+                last = ts
+        best = max(best, count)
+    return best
+
+
+def span_markers(words_per_channel) -> tuple[int, int]:
+    """(markers_decoded, marker_chain) of one span: every channel is read on its own (never a
+    downmix, see the module doc) and the best one counts. `markers_decoded` = the most raw CRC-valid
+    words any channel decoded (diagnostics only); `marker_chain` = the longest chain (rule 3)."""
+    channels = list(words_per_channel)
+    if not channels:
+        raise ValueError("span_markers: no channels")
+    return max(len(w) for w in channels), max(marker_chain(w) for w in channels)
 
 
 def analyse(samples, sample_rate: int) -> tuple[float, float | None]:
@@ -119,33 +218,49 @@ def analyse(samples, sample_rate: int) -> tuple[float, float | None]:
     return rms_dbfs, 100.0 * (1.0 - in_band / total)
 
 
-def _is_number(v) -> bool:
+def is_number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
-def classify(rms_dbfs, outside_band_pct) -> str:
-    """MEASUREMENT | FOREIGN | SILENT | UNKNOWN (rules in the module doc)."""
-    if not _is_number(rms_dbfs):
+def classify(rms_dbfs, outside_band_pct, marker_chain) -> str:
+    """MEASUREMENT | FOREIGN | SILENT | UNKNOWN (rules in the module doc). `marker_chain` is the
+    trailing span's chain (span_markers), or None when there is none (warm-up, a span cut by
+    silence, no decoder): None can never read MEASUREMENT."""
+    if not is_number(rms_dbfs):
         return "UNKNOWN"
     if rms_dbfs < SILENT_RMS_DBFS:
         return "SILENT"
-    if not _is_number(outside_band_pct):
+    if not is_number(outside_band_pct):
         return "UNKNOWN"
     if outside_band_pct >= FOREIGN_OUTSIDE_BAND_PCT:
+        return "FOREIGN"
+    if not isinstance(marker_chain, int) or isinstance(marker_chain, bool):
+        return "UNKNOWN"
+    if marker_chain < MARKER_CHAIN_MIN:
         return "FOREIGN"
     return "MEASUREMENT"
 
 
 def _round1(v):
-    return round(float(v), 1) if _is_number(v) else None
+    return round(float(v), 1) if is_number(v) else None
+
+
+def _count(v):
+    if v is None:
+        return None
+    if not isinstance(v, int) or isinstance(v, bool) or v < 0:
+        raise ValueError(f"a marker count must be a non-negative int, got {v!r}")
+    return v
 
 
 def build_payload(verdict: str, rms_dbfs, outside_band_pct, *, now: datetime, window_s: float,
                   source: str, reason: str | None = None,
-                  last_foreign_ts_utc: str | None = None) -> dict:
+                  last_foreign_ts_utc: str | None = None, markers_decoded: int | None = None,
+                  marker_chain: int | None = None) -> dict:
     """The program-audio.json payload. `age_s` is 0.0 as written; the lease server recomputes it
     (and `last_foreign_age_s` from `last_foreign_ts_utc`, the FOREIGN latch) at every request
-    (rig_serve_files.program_audio_response)."""
+    (rig_serve_files.program_audio_response). `markers_decoded` (raw CRC-valid words, diagnostics)
+    and `marker_chain` are additive fields, null when the window has no full marker span."""
     if verdict not in VERDICTS:
         raise ValueError(f"unknown verdict {verdict!r}")
     payload = {
@@ -158,6 +273,8 @@ def build_payload(verdict: str, rms_dbfs, outside_band_pct, *, now: datetime, wi
         "window_s": float(window_s),
         "source": source,
         "last_foreign_ts_utc": last_foreign_ts_utc,
+        "markers_decoded": _count(markers_decoded),
+        "marker_chain": _count(marker_chain),
     }
     if reason is not None:
         payload["reason"] = reason
