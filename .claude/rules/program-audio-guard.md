@@ -151,7 +151,9 @@ level. Re-run the full calibration after any decoder or rule change:
   reads UNKNOWN ("marker span") until the span is full again. Without this a silence→measurement
   start read a short chain and could latch a false FOREIGN.
 - **A missing or unloadable shim** = UNKNOWN + exit 1 before the NDI receiver is created, like a
-  missing libndi. A decode error on one window = UNKNOWN for that window.
+  missing libndi. A decode error on one window = UNKNOWN for that window. The path is made absolute
+  before dlopen: a bare name (`QPSK_GUARD_SHIM=libm.so.6`) would make dlopen search the system
+  library paths and load a different file than the one checked (review round 1).
 - **A shim built from other sources** (sha256 of the shim + the two headers, embedded at build
   time) still loads, with a WARNING asking for a rebuild.
 - **A MEASUREMENT without `marker_chain` is refused twice.** After a pull, an old sampler process
