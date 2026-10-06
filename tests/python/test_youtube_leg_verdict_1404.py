@@ -173,7 +173,9 @@ def test_a_vod_that_shows_black_where_the_recording_decodes_is_unknown():
     assert (r["dup"], r["skip"]) == (0, 0) and r["vod_blind_s"] == pytest.approx(61 / 30.0, abs=0.01)
     v = ylv.verdict([dict(GOOD, dupskip=r)], [])
     assert v["overall"] == "UNKNOWN" and any("decodes nothing" in x for x in v["reasons"])
-    assert judge(TICKS[:200] + [None] * 20 + TICKS[220:])["vod_blind_s"] == 0  # under a second: fine
+    assert judge(TICKS[:200] + [None] + TICKS[201:])["vod_blind_s"] == 0  # one frame: the clean-data norm
+    flash = judge(TICKS[:200] + [None] * 25 + TICKS[225:])  # a 0.83 s black flash
+    assert ylv.verdict([dict(GOOD, dupskip=flash)], [])["overall"] == "UNKNOWN"
 
 
 def test_a_tail_without_the_painter_is_unproven_not_a_vod_that_ends_early():
@@ -185,6 +187,16 @@ def test_a_tail_without_the_painter_is_unproven_not_a_vod_that_ends_early():
     assert cov["rec_cadence_pct"] == pytest.approx(80.0, abs=0.5)
     v = ylv.verdict([dict(GOOD, dupskip=r, coverage=cov)], [])
     assert v["overall"] == "UNKNOWN" and not any("VOD ends" in x for x in v["reasons"])
+
+
+def test_a_frame_the_recording_encoder_skipped_is_unknown_and_one_the_vod_lacks_is_a_skip():
+    # the recording's encoder skipped content frame 300: its pts jump two intervals there
+    rec = [(k, (k if k < 300 else k + 1) / 30.0, t) for k, t in enumerate(TICKS[:300] + TICKS[301:])]
+    r = ylv.dupskip(rec, vod_of(TICKS), 0.0, *WHOLE)
+    assert "error" in r and "timestamp gap" in r["error"]
+    # the VOD lacks a frame the recording has (a gap in the VOD's own timestamps): a downstream skip
+    vod = [(k, (k if k < 300 else k + 1) / 30.0, t) for k, t in enumerate(TICKS[:300] + TICKS[301:])]
+    assert ylv.dupskip(REC, vod, 0.0, *WHOLE)["skip"] == 1
 
 
 def test_a_painter_restart_inside_the_window_is_unknown_and_its_ticks_never_alias():
@@ -350,6 +362,16 @@ def test_foreign_vod_sound_where_the_recording_is_quiet_fails():
     r = ylv.audio_blocks(quiet, vod)
     assert r["foreign"] >= 4 and r["lag_jumps"] == 0
     assert ylv.verdict([dict(GOOD, audio=r)], [])["overall"] == "FAIL"
+
+
+def test_audio_runs_to_the_window_end_even_where_the_vod_picture_stops():
+    rec, vod, _ = clips("s2-R")
+    vod_rows = vod_of(TICKS[:300])  # the VOD's picture (painter) stops at 10 s
+    full = ylv.audio_window(rec, vod, REC, vod_rows, 0.0, 0.0, 18.0)
+    assert full["blocks"] >= 60 and full["vod_ends_early_s"] == 0  # the sound is judged to 18 s
+    cut = ylv.audio_window(rec, vod[: 10 * ylv.SR], REC, vod_rows, 0.0, 0.0, 18.0)  # picture AND sound lost
+    assert cut["vod_ends_early_s"] > 7
+    assert ylv.verdict([dict(GOOD, audio=cut)], [])["overall"] == "FAIL"
 
 
 def test_baseline_audio_is_continuous_but_1370_ms_late():
@@ -550,6 +572,9 @@ def test_cli_pass_fail_and_unknown_exit_codes(synth, tmp_path):
     r, j = _cli(synth, out, "vod.mkv", extra=["--publish", str(T0 + 3)])  # a publish inside W1
     assert r.returncode == 2 and any("inside the window" in x for x in j["reasons"])
 
+    r, j = _cli(synth, out, "vod.mkv", extra=["--unpublish", str(T0 + SECONDS + 0.5)])  # stopped 0.5 s after
+    assert r.returncode == 2 and any("stream stopped" in x for x in j["reasons"])
+
     r, j = _cli(synth, out, "vod-skip.mkv")
     assert r.returncode == 1 and j["overall"] == "FAIL"
     assert j["windows"][0]["dupskip"]["skip"] == 1
@@ -576,6 +601,27 @@ def _running(pid):
     except FileNotFoundError:
         return False
     return state != "Z"
+
+
+def test_a_failed_child_reports_its_stderr_and_a_stopped_tool_kills_its_children(tmp_path):
+    with pytest.raises(RuntimeError, match="exited 3: video is processing"):
+        ylv.run_bounded(["sh", "-c", "echo video is processing >&2; exit 3"], 10, check=True)
+    pidfile = tmp_path / "child.pid"
+    code = (f"import sys; sys.path.insert(0, {str(SCRIPT.parent)!r})\n"
+            "import youtube_leg_proc as p\n"
+            "p.install_cleanup()\n"
+            f"p.run_bounded(['sh', '-c', 'sleep 60 & echo $! > {pidfile}; wait'], 120)\n")
+    tool = subprocess.Popen([sys.executable, "-c", code])
+    deadline = time.time() + 10
+    while not (pidfile.exists() and pidfile.read_text().strip()) and time.time() < deadline:
+        time.sleep(0.1)
+    child = int(pidfile.read_text())
+    tool.terminate()  # a cancelled CI job
+    assert tool.wait(10) == 128 + 15
+    deadline = time.time() + 5
+    while _running(child) and time.time() < deadline:
+        time.sleep(0.1)
+    assert not _running(child)
 
 
 def test_cli_tool_error_and_a_crash_are_unknown(tmp_path):

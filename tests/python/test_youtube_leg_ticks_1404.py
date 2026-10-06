@@ -176,8 +176,25 @@ def test_decode_raw_refuses_a_hole_or_a_missed_seek(rec_video, monkeypatch):
         return rows, ok, end
 
     monkeypatch.setattr(ticks_mod, "_decode_range", skipped_frame)
+    monkeypatch.setattr(ticks_mod, "container_frames", lambda path: FPS * SECONDS + 1)  # the file has one more
     with pytest.raises(RuntimeError, match="pts step"):
         ylv.decode_raw(rec_video, workers=1)
+
+
+def test_a_timestamp_gap_really_in_the_file_is_kept_and_a_chunk_ending_with_the_file_is_the_end(rec_video, tmp_path):
+    import subprocess
+
+    gap = tmp_path / "gap.mkv"  # frame 120 dropped, the other timestamps kept: an encoder that skipped
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(rec_video), "-vf",
+                    "select='not(eq(n\\,120))'", "-fps_mode", "passthrough", "-an", "-c:v", "ffv1", str(gap)], check=True)
+    raw = ylv.decode_raw(gap, workers=1)
+    assert len(raw) == FPS * SECONDS - 1 == ylv.container_frames(gap)
+    assert ylv.timestamp_gaps([(i, p, lt) for i, p, lt, _ in raw]) == [120]
+    # a chunk whose end is exactly the last frame reports the end of the file (one more grab fails)
+    rows, seek_ok, hit_end = sys.modules["youtube_leg_ticks"]._decode_range((str(rec_video), 200, FPS * SECONDS, 0.5))
+    assert (len(rows), seek_ok, hit_end) == (40, True, True)
+    rows, seek_ok, hit_end = sys.modules["youtube_leg_ticks"]._decode_range((str(rec_video), 200, FPS * SECONDS - 1, 0.5))
+    assert (len(rows), hit_end) == (39, False)
 
 
 def test_the_committed_session3_maps_carry_their_raw_halves():
