@@ -383,11 +383,18 @@ const PRELUDE: &str = "#include <stdint.h>\n#include <stddef.h>\n#include <stdbo
                        #include <string.h>\n#include <stdio.h>\n\
                        typedef struct { const char *p_ndi_name; const char *p_url_address; } NDIlib_source_t;\n";
 
+/// Each compile gets its own file names: several tests build the SAME tag (the six replays all
+/// build "sequence"), and a parallel runner (CI's nextest, `cargo test` threads) would otherwise run
+/// one test's binary while another rewrites it (ETXTBSY, "Text file busy"). The pid separates
+/// processes, the counter separates threads of one process.
 fn compile_and_run(c: &str, tag: &str) -> Vec<String> {
+    static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let dir = std::env::temp_dir().join("distroav_stale_duplicate_retarget_1367");
     fs::create_dir_all(&dir).expect("create the scratch dir");
-    let cfile = dir.join(format!("{tag}.c"));
-    let bin = dir.join(format!("{tag}.bin"));
+    let stem = format!("{tag}-{}-{n}", std::process::id());
+    let cfile = dir.join(format!("{stem}.c"));
+    let bin = dir.join(format!("{stem}.bin"));
     fs::write(&cfile, c).expect("write the harness");
 
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
@@ -422,6 +429,9 @@ fn compile_and_run(c: &str, tag: &str) -> Vec<String> {
     let run = Command::new(&bin)
         .output()
         .expect("issue 1367: the compiled harness failed to execute");
+    // This call's own files only; a failed removal leaves a uniquely named scratch file behind.
+    fs::remove_file(&cfile).ok();
+    fs::remove_file(&bin).ok();
     assert!(
         run.status.success(),
         "issue 1367: the {tag} harness exited non-zero: {}",
