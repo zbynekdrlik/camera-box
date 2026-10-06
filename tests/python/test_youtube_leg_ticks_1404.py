@@ -9,22 +9,28 @@ decoder, JPEG q95 that decodes exactly like the lossless crop):
   - a frame whose two halves contradict the phase of both neighbours (a stale fresh half: VOD frames
     20174 / 20210) is left undecoded, never turned into a false repeat + skip;
   - the parallel chunks are merged by pts: a frame two chunks read (a seek that landed early) is kept
-    once, a frame no chunk read sends the file through one sequential pass; a decode that does not
-    hold exactly the container's frames, or a missed seek (also of the last chunk), is an error,
-    never a quietly shorter or mislabelled map.
+    once; any chunk failure (a frame no chunk read, a missed seek, pts that fall inside a chunk)
+    sends the file through one sequential pass, and a one pass that does not hold exactly the
+    container's frames is an error, never a quietly shorter or mislabelled map;
+  - the worker pool is spawned, never forked (OpenCV's threads in this process would deadlock a
+    forked child), and bounded.
 Expected ticks come from the session's own left-only decode (qrticks.py, an independent run) where it
 decoded the frame; for frame 2100, which it could not read, only its bracketing anchors are
 independent (see the test).
 """
 import gzip
+import os
 import pathlib
+import signal
+import subprocess
 import sys
+import textwrap
 
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from youtube_leg_fakes_1404 import (COLOUR_DARK, COLOUR_LIGHT, FIX, FPS, SECONDS, drop_frame,  # noqa: E402
-                                    payload, qr_frame, shared_rec_video, ylv)
+from youtube_leg_fakes_1404 import (COLOUR_DARK, COLOUR_LIGHT, FIX, FPS, SCRIPT, SECONDS,  # noqa: E402
+                                    drop_frame, payload, qr_frame, shared_rec_video, ylv)
 
 
 def _jpg(name):
@@ -146,11 +152,13 @@ def test_decode_ticks_reads_colour_and_right_only_stretches(rec_video):
     assert c["cadence_proven"] == len(rows) and c["events"] == 0
 
 
-def test_decode_raw_refuses_a_hole_or_a_missed_seek(rec_video, cheap_halves, monkeypatch):
+def test_a_chunk_failure_takes_one_pass_and_a_bad_one_pass_is_refused(rec_video, cheap_halves, monkeypatch):
     ticks_mod = sys.modules["youtube_leg_ticks"]
     real = ticks_mod._decode_range
+    truth = _one_pass(rec_video)
 
-    assert len(ylv.decode_raw(rec_video, workers=1)) == FPS * SECONDS  # the real decode tiles the file
+    assert ylv.decode_raw(rec_video, workers=1) == truth  # the real decode tiles the file
+    assert len(truth) == FPS * SECONDS
 
     def short_middle(job):  # the decoder stops 3 frames early, in the chunks AND in the one-pass decode
         rows, ok, _ = real(job)
@@ -160,17 +168,26 @@ def test_decode_raw_refuses_a_hole_or_a_missed_seek(rec_video, cheap_halves, mon
     with pytest.raises(RuntimeError, match="frames missing"):
         ylv.decode_raw(rec_video, workers=1)
 
-    def missed_seek(job):
+    def missed_seek(job):  # a chunk's seek failed: the one pass needs no seek
         return ([], False, False) if job[1] > 0 and job[2] is not None else real(job)
 
     monkeypatch.setattr(ticks_mod, "_decode_range", missed_seek)
-    with pytest.raises(RuntimeError, match="seek"):
-        ylv.decode_raw(rec_video, workers=1)
+    assert ylv.decode_raw(rec_video, workers=1) == truth
 
     def last_seek_missed(job):  # every earlier chunk read fully, the last one never started
-        return ([], False, False) if job[2] is None else real(job)
+        return ([], False, False) if job[1] > 0 and job[2] is None else real(job)
 
     monkeypatch.setattr(ticks_mod, "_decode_range", last_seek_missed)
+    assert ylv.decode_raw(rec_video, workers=1) == truth
+
+    def early_end(job):  # a chunk claims the end of the file, a later chunk still reads frames
+        rows, ok, end = real(job)
+        return rows, ok, end or job[1] == 0
+
+    monkeypatch.setattr(ticks_mod, "_decode_range", early_end)
+    assert ylv.decode_raw(rec_video, workers=1) == truth
+
+    monkeypatch.setattr(ticks_mod, "_decode_range", lambda job: ([], False, False))  # not even frame 0
     with pytest.raises(RuntimeError, match="seek"):
         ylv.decode_raw(rec_video, workers=1)
 
@@ -205,6 +222,53 @@ def test_a_seek_that_lands_a_frame_early_never_mislabels_the_frames_behind_it(re
 
     monkeypatch.setattr(ticks_mod, "_decode_range", early)
     assert ylv.decode_raw(rec_video, workers=1) == truth
+
+
+def test_pts_that_fall_inside_a_chunk_take_one_pass(rec_video, cheap_halves, monkeypatch):
+    ticks_mod = sys.modules["youtube_leg_ticks"]
+    real = ticks_mod._decode_range
+    truth = _one_pass(rec_video)
+    first = {}
+
+    def swapped(job):  # a decoder that misreports two pts after a seek: frame order is read order
+        rows, ok, end = real(job)
+        if job[1] > 0 and job[2] is not None and first.setdefault("s", job[1]) == job[1]:
+            a, b = rows[5], rows[6]
+            rows[5], rows[6] = (a[0], b[1]) + a[2:], (b[0], a[1]) + b[2:]
+        return rows, ok, end
+
+    monkeypatch.setattr(ticks_mod, "_decode_range", swapped)
+    assert ylv.decode_raw(rec_video, workers=1) == truth
+
+
+def test_a_decode_in_this_process_never_hangs_the_next_worker_pool(rec_video):
+    # a one pass (a fallback, or workers=1) starts OpenCV's own threads in this process; a pool
+    # FORKED after that inherits their locked mutexes and hangs forever (no verdict, the rig held)
+    code = textwrap.dedent(f"""
+        import sys
+        sys.path.insert(0, {str(SCRIPT.parent)!r})
+        import youtube_leg_verdict  # the tool's whole module graph, as the CLI runs it
+        t = sys.modules["youtube_leg_ticks"]
+        t._decode_range(({str(rec_video)!r}, 0, 30, t.DECODE_SCALE))
+        print(len(t.decode_raw({str(rec_video)!r}, workers=2)))
+    """)
+    p = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         start_new_session=True)
+    try:
+        out, err = p.communicate(timeout=240)
+    except subprocess.TimeoutExpired:
+        os.killpg(p.pid, signal.SIGKILL)  # the hung pool workers are in its process group
+        p.communicate()
+        pytest.fail("the worker pool after a decode in the parent process hung")
+    assert p.returncode == 0 and out.split()[-1] == str(FPS * SECONDS), err
+
+
+def test_a_worker_pool_that_does_not_finish_is_an_error_not_a_hang(rec_video, monkeypatch):
+    ticks_mod = sys.modules["youtube_leg_ticks"]
+    monkeypatch.setattr(ticks_mod, "DECODE_TIMEOUT_FLOOR_S", 0.01)
+    monkeypatch.setattr(ticks_mod, "DECODE_S_PER_FRAME", 0.0)
+    with pytest.raises(RuntimeError, match="did not finish"):
+        ylv.decode_raw(rec_video, workers=2)
 
 
 @pytest.fixture(scope="module")
