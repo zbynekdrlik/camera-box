@@ -62,6 +62,7 @@ exit 0 = PASS, 1 = FAIL, 2 = UNKNOWN (tool/decode/download error)
 
 - More than one `--recording` = parts of one session split by an OBS restart, joined by tick.
 - The VOD is fetched with `yt-dlp` (video 1080p30 + audio).
+- The cam2 QPSK marker log (`/run/rig-qpsk-markers.csv` on cam2) is mirrored read-only over HTTP on dev1, next to the rig lease (`dev1:8890`, LAN only). Restreamer's gate fetches it from there; the fleet ssh credentials stay with camera-box.
 
 ### C. Wiring in the full-path E2E (camera-box)
 
