@@ -337,6 +337,18 @@ jobs:
         # Pillow + qrcode: test-only, generate REAL fixture QR codes to decode back.
         run: pip install pytest websocket-client matplotlib opencv-python-headless numpy Pillow qrcode pyyaml
 
+      # ffmpeg: scripts/youtube_leg_verdict.py (issue 1404) decodes its real-session FLAC audio
+      # fixtures and builds its synthetic test videos with ffmpeg. The SAME pinned, sha256-verified
+      # static binary the Rust test job installs (never apt: see that step for why).
+      - name: Install ffmpeg
+        run: |
+          url=https://github.com/zbynekdrlik/camera-box/releases/download/ci-assets-ffmpeg-20260825/ffmpeg-N-126264-g007cd1fd43-linux64-gpl.tar.xz
+          curl -fsSL --retry 3 --retry-delay 5 "$url" -o /tmp/ffmpeg.tar.xz
+          echo "aa86544042631a525b03d1b732614d705f74ca971efdb73f298d75e50288ed3e  /tmp/ffmpeg.tar.xz" | sha256sum -c -
+          mkdir -p /tmp/ff && tar xf /tmp/ffmpeg.tar.xz -C /tmp/ff --strip-components=1
+          sudo install /tmp/ff/bin/ffmpeg /tmp/ff/bin/ffprobe /usr/local/bin/
+          ffmpeg -version | head -1
+
       - name: Run harness unit tests (#149 self-verify guard)
         # PYTEST_DISABLE_PLUGIN_AUTOLOAD keeps the run hermetic (no third-party
         # pytest plugins). These tests pin the obs_phase2 self-verify guard that

@@ -1,0 +1,38 @@
+[2m2026-10-05T22:30:54.881041Z[0m [32m INFO[0m [2mcamera_box::probe::recording[0m[2m:[0m recording native resolution probed [3mfile[0m[2m=[0mabs2-rec-B.mp4 [3mwidth[0m[2m=[0m1920 [3mheight[0m[2m=[0m1080
+[2m2026-10-05T22:30:54.881233Z[0m [32m INFO[0m [2mcamera_box::probe::recording[0m[2m:[0m recording analysis start (parallel decode, #187 memory-bounded worker pool, #207 fast-then-robust) [3mfile[0m[2m=[0mabs2-rec-B.mp4 [3mwidth[0m[2m=[0m1920 [3mheight[0m[2m=[0m1080 [3mworkers[0m[2m=[0m4 [3mmandatory_burns[0m[2m=[0m[911001, 911002, 911004] [3many_of_burns[0m[2m=[0m[] [3mmin_distinct_optical[0m[2m=[0mNone [3mavail_mb[0m[2m=[0m4683
+[2m2026-10-05T22:33:55.712345Z[0m [32m INFO[0m [2mcamera_box::probe::recording[0m[2m:[0m recording decode progress [3mfile[0m[2m=[0mabs2-rec-B.mp4 [3mframes_read[0m[2m=[0m1000
+[2m2026-10-05T22:34:30.084631Z[0m [32m INFO[0m [2mcamera_box::probe::recording[0m[2m:[0m recording fully decoded via ffmpeg gray8 pipe [3mfile[0m[2m=[0mabs2-rec-B.mp4 [3mframes[0m[2m=[0m1200
+[2m2026-10-05T22:34:31.673826Z[0m [32m INFO[0m [2mcamera_box::probe::recording[0m[2m:[0m recording analysis complete (#207 decode-path split, cumulative this run) [3mfile[0m[2m=[0mabs2-rec-B.mp4 [3mtotal[0m[2m=[0m1200 [3mwith_qr[0m[2m=[0m1200 [3mworkers[0m[2m=[0m4 [3mfast_path_frames[0m[2m=[0m0 [3mrobust_fallback_frames[0m[2m=[0m1200 [3mburn_region_recoveries[0m[2m=[0m0
+{
+  "audio_channel_pick": {
+    "chosen_channel": 0,
+    "per_channel": [
+      {
+        "channel": 0,
+        "cluster_samples": 79,
+        "crc_fail": 392,
+        "crc_ok": 79,
+        "peak_dbfs": -14.249369521143569,
+        "preamble_screens": 471
+      },
+      {
+        "channel": 1,
+        "cluster_samples": 79,
+        "crc_fail": 392,
+        "crc_ok": 79,
+        "peak_dbfs": -14.249369521143569,
+        "preamble_screens": 471
+      }
+    ]
+  },
+  "audio_markers_decoded": 79,
+  "av_offset_ms": 44.156249999998565,
+  "candidates": 79,
+  "emit_rows": 37348,
+  "latency_adjust_ms": -44.156249999998565,
+  "mad_ms": 5.07291666666454,
+  "matched": 78,
+  "video_fps": 30.0,
+  "video_ticks": 1188
+}
+[2m2026-10-05T22:34:32.343367Z[0m [32m INFO[0m [2mrecording_verdict[0m[2m:[0m A/V-sync offset measured (video − audio; >0 = video lags audio) [3mav_offset_ms[0m[2m=[0m44.156249999998565 [3mmad_ms[0m[2m=[0m5.07291666666454 [3mmatched[0m[2m=[0m78 [3maudio_markers[0m[2m=[0m79 [3mvideo_ticks[0m[2m=[0m1188 [3maudio_channel[0m[2m=[0mmarker channel 0 of 2 (cluster ch0=79 ch1=79)
