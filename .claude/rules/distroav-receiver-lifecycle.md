@@ -6,6 +6,10 @@ paths:
   - "tests/distroav_fresh_finder_connect_1096.rs"
   - "tests/distroav_by_url_identity_verify_1180.rs"
   - "tests/distroav_frameless_by_url_escape_1287.rs"
+  - "tests/distroav_stale_duplicate_retarget_1367.rs"
+  - "tests/distroav_stale_duplicate_replay_1367.rs"
+  - "tests/support/ndi_source_lift_1367.rs"
+  - "tests/c/distroav_stale_duplicate_model_1367.c"
 ---
 
 # DistroAV NDI receiver-thread lifecycle — a `break` is a PERMANENT, reattach-proof death (#1080)
@@ -165,6 +169,10 @@ operator's Studio-Monitor re-pick does. Rejected alternatives: dropping #1096 BY
 re-opens the #1096 restart-wedge; verifying INSIDE the reset block (before connect) doesn't help —
 the reshuffle races the reset, so a second finder sampled at the same instant resolves the same
 stale advertisement. The verify MUST be post-connect, after the sender set has settled.
+**Issue 1367 (the stale-duplicate section below) found the limit of this choice:** the SDK name
+resolver follows the same stale finder record, so a forced BY-NAME can fail for ~1 min. Since
+decision 6009040469 the verify is duplicate-aware, and a PROVEN-stale bind (another sender advertises
+its URL) retargets BY-URL to the picker's choice; every other mismatch keeps this BY-NAME path.
 
 The live wrong-source cure is NOT offline-verifiable (vendored receive path compiles on CI only,
 the reshuffle reproduces only live) — the offline gate proves the DECISION logic; the actual cure
@@ -312,6 +320,114 @@ offline-verifiable — confirmed only by the supervisor's post-deploy rig repro 
 `#1287 ... forcing BY-NAME` → `#1180 connect BY-NAME` → `received=` Δ>0 within ~2 stale windows).
 The `[1/8]` frozen-camera gate (pixel-hash, 2 samples) was RIGHT to fail on the live incident —
 cross-check with the `received=` Δ before calling any FROZEN a false positive.
+
+## issue 1367 — a sender port move leaves a STALE DUPLICATE finder record; decide on evidence (contested records), never on finder order
+
+**The mechanism (live, cg OBS 6.10.2026 04:04:50–04:05:46).** SongPlayer restarted and its
+`RESOLUME-SNV (SP-program)` sender moved from `10.77.9.201:5961` to `:5971`. For about a minute the
+NDI finder held TWO records for that one name: the stale `:5961`, now owned by ANOTHER live sender
+on that box, listed FIRST, and the live `:5971` second.
+- The #1096 fresh finder picked the first match, `:5961`. It delivered frames, but from the wrong
+  sender.
+- The #1180 verify resolved `:5971` (its own finder listed the records in another order). It logged
+  `#1180 BY-URL identity MISMATCH ... now maps to '10.77.9.201:5971' but the receiver is bound to
+  '10.77.9.201:5961'`, threw that correct URL away and forced BY-NAME.
+- The SDK's name resolver follows the same stale record, so the BY-NAME bind did not connect inside
+  the 10 s `GENLOCK_RECONNECT_STALE_NS` window.
+- The stale-window rebind started the ladder again at a fresh finder, which picked `:5961` again.
+- Six cycles, ~55 s without frames, ended only when the stale mDNS record aged out. strih-lx
+  `CG-obs` ran the same ladder during the 01:52Z deploy.
+
+Reading the log: `#1096 connect BY-URL '<A>'` → `#1180 BY-URL identity MISMATCH ... maps to '<B>' ...
+bound to '<A>'` → `#1180 connect BY-NAME` repeating every ~10 s, always the same A and B = this
+class. The NDI SDK finder exposes no record freshness and no stable order, so "prefer the last
+duplicate" is luck (the reset finder and the verify finder disagreed on order in this very log).
+
+**Why Approach 1 (trust the verify finder's pick) was replaced (review of the first lane).** Each
+fresh finder orders duplicate records independently. With the reset finder listing the live record
+first and the verify finder listing the stale one first:
+- a FALSE mismatch excluded the CORRECT URL and retargeted onto the stale port, another live sender;
+- that retarget's verify could only resolve the stale port, which equalled the bound URL, so it read
+  "identity verified" and cleared the exclusion;
+- the wrong source stayed on air indefinitely, where the old code recovered after ~1 min.
+
+The first gate replayed only the observed ordering and stayed green. Lesson: any rule that trusts
+one finder's pick must be replayed under every reset × verify ordering, with an assertion that no
+scenario ever ends on a wrong sender.
+
+**The fix (decision 6009040469, Approach 1b; `ndi_source_thread` + the helpers before it,
+`tests/distroav_stale_duplicate_retarget_1367.rs`): decide on EVIDENCE, never on finder order.** Two
+live senders cannot share one URL, so a record of our name whose URL ANOTHER name also advertises in
+the same finder list is stale (`ndi_url_contested_1367`; live `avahi-browse` on 10.77.9.201 shows one
+name per URL, so the old port's new owner advertises it). A nameless record is no evidence.
+- **Picker, both pick sites.** `ndi_find_url_for_source_name(name, sources, n, exclude_a, exclude_b)`
+  skips an excluded URL and a contested record, and returns the first remaining record of the name.
+  None left = NULL, so the existing ladder and BY-NAME take over (its last-known rung is unchanged
+  and can still bind a stale URL, which the verify then reports STALE). With no
+  exclusion and no contest it is the original first-match pick. In the incident the very first
+  fresh-finder pick lands on `:5971`: no wrong frame, no mismatch.
+- **Duplicate-aware verify** (`ndi_identity_verdict_1367`, run by `ndi_identity_verify_1367` on the
+  first verify-finder snapshot that lists the name):
+  - VERIFIED when the bound URL is one of the name's uncontested records in ANY position (the
+    reversed ordering keeps a correct bind);
+  - STALE when another name advertises the bound URL (checked before the exclusions);
+  - MISMATCH when the bound URL is excluded or not among the name's records;
+  - INCONCLUSIVE (keep the feed, as #1180 always did) when the name is not discoverable.
+- **Only a STALE bind is excluded and retargeted** (`ndi_stale_apply_verdict_1367`): the bound URL
+  takes an exclusion slot, and the next reset binds BY-URL to the PICKER's choice from the verify list
+  (never that finder's raw first record), or goes BY-NAME when none remains. The bound URL is also
+  dropped from `last_delivered_url_1096`. A MISMATCH takes the unchanged #1180 BY-NAME block (its log
+  line byte-identical) and excludes nothing. The verify helper logs the STALE line, forces BY-NAME when
+  needed, and arms the reset itself.
+- **Two exclusion slots** (`NDI_URL_SLOTS_1367`), each `NDI_URL_EXCLUDE_TTL_NS` = 120 s, so a second
+  port move inside one episode never re-opens the first stale URL. An already-excluded URL is
+  refreshed; with both slots in force the OLDEST is replaced. A bind VERIFIED with frames clears all
+  of them; INCONCLUSIVE keeps them.
+- **No exclusion on a frame-less bind.** A sender still starting is frame-less on its correct new
+  URL; #1287's alternation handles it unchanged.
+- **The retarget** is consumed by exactly one reset (`ndi_stale_reset_1367`: expiries logged, the one
+  `#1367 retarget BY-URL '<url>' (verified; excluding '<stale>')` line, `url_bind_kind_1096 = 3`, so
+  the #1180/#1287 arming applies to it). A forced BY-NAME wins over it and drops it. It survives a
+  #1080/#1097 create-failure retry. A configured-name change drops the whole state.
+- **Size.** The state is one fixed-buffer `struct ndi_stale_state_1367` (nothing to free) with pure
+  helpers between the `stale-duplicate state: BEGIN/END` markers. `ndi_source_thread` stays at its
+  pre-1367 966 lines; the verify finder lives in `ndi_identity_verify_1367`, so the thread creates only
+  the reset's finder.
+- **Known limits** (raised to the main as Design-question 6009544928 refinements, none a regression
+  against the pre-1367 code):
+  - the verify decides on the FIRST verify-finder snapshot that lists the name; a snapshot missing
+    the new owner's record reads a wrong bind VERIFIED, one missing our own new record reads a
+    correct bind MISMATCH (the #1180 BY-NAME path);
+  - a bound URL another name advertises while our name is not listed at all stays INCONCLUSIVE
+    (decision point 2), so that feed is kept;
+  - "contested" cannot tell which of two records is stale when ports swap or shift together (a
+    whole OBS box restarting): our correct new record can be contested by another output's stale
+    record, the picker then returns NULL, and a correct BY-URL bind can read STALE and be excluded;
+  - the ladder's last-known rung can bind the stale URL for one verify cycle (above).
+
+**The gate.**
+- Truth tables over the verbatim-lifted verdict block and state block:
+  - the picker;
+  - the verdict;
+  - a scripted run of every state helper;
+  - the expiry.
+- A SEQUENCE REPLAY, `tests/c/distroav_stale_duplicate_model_1367.c`: a phase-based model (what each
+  finder lists, which URL our sender delivers on and from when, a dead port; any other URL is another
+  live sender) whose every decision is a shipped helper. The five decided scenarios:
+  - incident ordering: attach on reset 1, zero wrong frames;
+  - reversed ordering: the correct bind is kept;
+  - dead uncontested old port: today's alternation, no exclusion;
+  - sender still starting: never excluded;
+  - two moves before any verified bind: both stale URLs excluded, none re-opened.
+
+  No scenario may accept a wrong sender. The `legacy` run must reproduce the live 6-mismatch loop
+  (~61 s in the model, ~55 s of missing frames live).
+- 25/25 scratch mutants of the helpers and wiring are killed.
+- The pwsh mirror is one `foreach ($tok1367 ...)` needle list plus the #1180 verdict needle in BOTH
+  `windows-genlock*.yml`, run for real with the portable pwsh: 0 errors on the fix, 9 on the old source.
+- The live cure needs a FULL-bundle deploy, then a SongPlayer restart. Expect `received=` advancing
+  within seconds and no `#1180 ... MISMATCH` ladder. A `#1367 retarget BY-URL` line appears only when
+  a reset finder missed the new owner's record.
 
 ## A FINDER-BLIND sender needs a fallback ladder — by-name/BY-URL both die when discovery itself is blind (#1096 reopen)
 
