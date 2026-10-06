@@ -20,9 +20,10 @@ ExecStart=/usr/bin/python3 %h/devel/camera-box/scripts/program_audio_sampler.py
 Restart=on-failure
 RestartSec=10
 # Optional overrides: PROGRAM_AUDIO_SOURCE (the NDI sender name), RIG_LEASE_SERVE_DIR, NDI_LIB_PATH.
-# NEVER give dev1 an NDI extra-IP list for this receiver: mDNS only opens no TCP discovery
-# connection into any sender (.claude/rules/ndi-discovery.md, issue 1389).
-EnvironmentFile=-%h/.config/environment.d/program-audio-sampler.conf
+# A private file, never the GLOBAL ~/.config/environment.d/. The sampler runs its receiver with a
+# private, empty NDI_CONFIG_DIR itself: mDNS only, no TCP discovery connection into any sender
+# (.claude/rules/ndi-discovery.md, issue 1389).
+EnvironmentFile=-%h/.config/camera-box/program-audio-sampler.env
 # An FFT of 2 s of stereo every 2 s is a few ms of CPU; keep it below the interactive work.
 Nice=10
 NoNewPrivileges=yes

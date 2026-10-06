@@ -5,7 +5,8 @@ OBS's NDI program output (`STREAM-SNV (stream)`). The receiver is audio-only and
 any NDI monitor. Every 2 s the service classifies the audio and rewrites `program-audio.json` in
 the rig-lease server's serve dir. Gates call
 `scripts/program_audio_guard.py --url http://dev1:8890/program-audio.json --max-age 10` and stop
-the broadcast on any exit but 0 (1 FOREIGN, 2 UNKNOWN / stale / unreachable).
+the broadcast on any exit but 0 (1 FOREIGN, also a FOREIGN window within the last 10 s; 2 UNKNOWN /
+stale / unreachable). The served file lives in `$XDG_RUNTIME_DIR/rig-lease-serve` (tmpfs).
 
 Verdicts, thresholds, calibration and limits: `.claude/rules/program-audio-guard.md`.
 
@@ -30,7 +31,11 @@ curl -s http://dev1:8890/program-audio.json; echo
 journalctl --user -u program-audio-sampler -n 20
 ```
 
-Never add an NDI extra-IP list (`~/.ndi/ndi-config.v1.json` `networks.ips`) on dev1 for this
-receiver. With mDNS only it opens no TCP discovery connection into any sender
+The sampler runs its receiver with a private, empty `NDI_CONFIG_DIR`, so an NDI extra-IP list on
+dev1 can never reach it. With mDNS only it opens no TCP discovery connection into any sender
 (`.claude/rules/ndi-discovery.md`). While the rig is away at an event, behind tailscale, the
 receiver finds nothing. It then reads UNKNOWN and pulls nothing over the mobile link.
+
+Overrides (`PROGRAM_AUDIO_SOURCE`, `RIG_LEASE_SERVE_DIR`, `NDI_LIB_PATH`) go into
+`~/.config/camera-box/program-audio-sampler.env`, never `~/.config/environment.d/` (the user
+manager's global environment).

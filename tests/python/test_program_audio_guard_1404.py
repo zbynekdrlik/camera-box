@@ -276,11 +276,13 @@ def test_a_garbled_status_line_exits_2_with_the_line():
         rc, line, m = _guard(srv.url)
     assert rc == 2
     assert m.group(1) == "UNKNOWN"
+    assert "broken HTTP response" in line  # named, not the generic guard-error catch-all
 
 
 def test_a_truncated_body_exits_2_with_the_line():
     raw = b"HTTP/1.0 200 OK\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{\"verdict\": "
     with _RawServer(raw) as srv:
-        rc, _line, m = _guard(srv.url)
+        rc, line, m = _guard(srv.url)
     assert rc == 2
     assert m.group(1) == "UNKNOWN"
+    assert "broken HTTP response" in line

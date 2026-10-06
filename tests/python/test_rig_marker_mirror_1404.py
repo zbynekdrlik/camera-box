@@ -13,7 +13,6 @@ and the bash entry with a fake `sshpass` + `ssh` first on PATH -- no test ever r
 """
 from __future__ import annotations
 
-import os
 import pathlib
 import re
 import stat
@@ -206,6 +205,19 @@ def test_run_serves_the_new_session_after_a_painter_restart(tmp_path):
     """
     rc, serve, _w = _run(tmp_path, body, max_runtime_s=2.0)
     assert (serve / rsf.MARKERS_NAME).read_bytes() == HDR_B + ROWS_B
+
+
+def test_run_never_serves_a_half_replayed_copy(tmp_path):
+    """A (re)connection replays the whole file; nothing is written until the replay is in (the
+    first idle gap), so a consumer never reads a copy shorter than the one it read before."""
+    body = f"""
+    out.write({HDR_A + ROWS_A!r}); out.flush()
+    time.sleep(0.01)
+    out.write({ROWS_B!r}); out.flush()
+    time.sleep(5)
+    """
+    _rc, _serve, writes = _run(tmp_path, body, max_runtime_s=1.0, idle_s=0.2)
+    assert writes and writes[0] == HDR_A + ROWS_A + ROWS_B
 
 
 def test_run_never_serves_a_half_row(tmp_path):

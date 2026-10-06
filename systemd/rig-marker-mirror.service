@@ -1,29 +1,34 @@
 [Unit]
-# issue 1404: ONE pass mirroring cam2's QPSK marker log (/run/rig-qpsk-markers.csv) into the
-# rig-lease server's serve dir, so http://dev1:8890/rig-qpsk-markers.csv serves it to restreamer's
-# YouTube A/V gate (which has no fleet ssh). DEV1-SIDE, --user. Fired every 10 s by
-# rig-marker-mirror.timer. A failed pass (cam2 down, EVENT mode purged the file) exits non-zero and
-# keeps the previous mirror; its X-Mirror-Age-S then grows. Runbook: rig-marker-mirror.README.md.
-Description=camera-box cam2 QPSK marker-log mirror (issue 1404) — one scp pass into the :8890 serve dir
+# issue 1404: mirrors cam2's QPSK marker log (/run/rig-qpsk-markers.csv) into the rig-lease
+# server's serve dir, so http://dev1:8890/rig-qpsk-markers.csv serves it to restreamer's YouTube
+# A/V gate (which has no fleet ssh). DEV1-SIDE, --user, long-running: ONE ssh connection streaming
+# `tail -F` (a cam2 login writes 11 lines into cam2's persistent stick journal, so never a login
+# every 10 s). Rows reach the served file at most every 10 s. A dropped connection is retried with
+# a backoff and the previous mirror is kept; its X-Mirror-Age-S then grows. SHIPS DISABLED;
+# runbook: rig-marker-mirror.README.md.
+Description=camera-box cam2 QPSK marker-log mirror (issue 1404) — one ssh tail -F stream into the :8890 serve dir
 Documentation=https://github.com/zbynekdrlik/camera-box
-# A 10 s timer must never trip the default start-rate limit while cam2 is down for a long time.
-StartLimitIntervalSec=0
+After=network-online.target
+Wants=network-online.target
+# Bound a restart storm (the script refuses a bad serve dir / missing sshpass at once): 20 per 5 min.
+StartLimitIntervalSec=300
+StartLimitBurst=20
 
 [Service]
-Type=oneshot
+Type=simple
 # %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
 ExecStart=%h/devel/camera-box/scripts/rig-marker-mirror.sh
-# The scp itself is bounded by RIG_MARKER_MIRROR_TIMEOUT (default 8 s) inside the script.
-TimeoutStartSec=30
-# Optional overrides (RIG_LEASE_SERVE_DIR, SSH_PASS for a rotated fleet password,
-# RIG_MARKER_MIRROR_TIMEOUT); the defaults are correct for dev1.
-EnvironmentFile=-%h/.config/environment.d/rig-marker-mirror.conf
+# The loop never ends on its own (it reconnects itself); any exit is a fault -> restart.
+Restart=always
+RestartSec=10
+# Optional overrides (RIG_LEASE_SERVE_DIR; SSH_PASS for a rotated fleet password). A PRIVATE file:
+# ~/.config/environment.d/ is the user manager's GLOBAL environment and would hand the fleet
+# password to every --user unit.
+EnvironmentFile=-%h/.config/camera-box/rig-marker-mirror.env
+NoNewPrivileges=yes
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=rig-marker-mirror
-# ~8600 runs a day: drop the user manager's per-run Starting/Finished info lines (LogLevelMax=notice)
-# but keep the script's own lines (SyslogLevel=notice raises them) and every failed run's
-# "Failed with result" (.claude/rules/dev1-systemd-user-unit-hardening.md, issue 1399 section). The
-# script itself prints a success line only when it (re)establishes the mirror.
-SyslogLevel=notice
-LogLevelMax=notice
+
+[Install]
+WantedBy=default.target

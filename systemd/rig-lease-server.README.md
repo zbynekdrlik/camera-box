@@ -65,7 +65,7 @@ curl -sS http://dev1:8890/rig-lease.json   # during: held=true, holder={...}, st
 ## Issue 1404: two more read-only routes
 
 The server also serves `/rig-qpsk-markers.csv` and `/program-audio.json` from `--serve-dir`
-(default `/var/tmp/rig-lease-serve`; never the lease dir). It still writes nothing: two other
+(default `$XDG_RUNTIME_DIR/rig-lease-serve`; never the lease dir). It still writes nothing: two other
 dev1 units write those files (`rig-marker-mirror.README.md`, `program-audio-sampler.README.md`).
 Picking up the new routes needs a `systemctl --user restart rig-lease-server.service`, done
 while `/rig-lease.json` reads `held=false`.

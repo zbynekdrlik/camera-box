@@ -7,15 +7,18 @@ with avahi on 6.10.2026), audio-only, read-only (a receiver like any NDI monitor
 rig changes). Every WINDOW_S (2 s) of audio it computes `rms_dbfs` + `outside_band_pct`, classifies
 MEASUREMENT | FOREIGN | SILENT | UNKNOWN (scripts/program_audio.py) and atomically rewrites
 `<serve dir>/program-audio.json`, which the rig-lease server serves at
-`http://dev1:8890/program-audio.json` (age recomputed per request). Consumers call
+`http://dev1:8890/program-audio.json` (ages recomputed per request). Consumers call
 `scripts/program_audio_guard.py` and stop the YouTube broadcast on anything but MEASUREMENT/SILENT.
 
-No audio for NO_AUDIO_TIMEOUT_S (sender down, the rig away at an event, mDNS not seeing it) ->
-UNKNOWN with the reason and the receiver's connection count, rewritten every window so the file
-never reads fresh while it holds an old verdict. At start the file is set to UNKNOWN at once.
-
-Logging: a line per verdict CHANGE (with the numbers) and a summary every LOG_SUMMARY_S -- never a
-line per 2 s window (~43 000 a day).
+* FOREIGN LATCH: every payload carries `last_foreign_ts_utc`, the newest FOREIGN window, so a gate
+  that polls every ~10 s still sees a FOREIGN window that fell between two of its polls.
+* UNKNOWN whenever it is not sampling: at start, after NO_AUDIO_TIMEOUT_S without audio (sender
+  down, the rig away at an event, mDNS not seeing it; rewritten every window so the file never
+  reads fresh while it holds an old verdict), when libndi cannot be loaded, and on stop.
+* mDNS ONLY, enforced: the receiver runs with a private, empty NDI_CONFIG_DIR, so no NDI extra-IP
+  list can make it open a TCP discovery connection into a sender (.claude/rules/ndi-discovery.md).
+* Logging: a line per verdict CHANGE, the first NDI error frame / bad sample rate of a run, and a
+  summary every LOG_SUMMARY_S -- never a line per 2 s window (~43 000 a day).
 
 Usage (systemd/program-audio-sampler.service):
   program_audio_sampler.py [--source "STREAM-SNV (stream)"] [--serve-dir DIR] [--lib PATH]
@@ -24,8 +27,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import signal
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from typing import Callable
@@ -44,7 +49,14 @@ LOG_SUMMARY_S = 600.0
 
 
 def log(msg: str) -> None:
-    print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
+    # A service context can hand this a dead stdout pipe (the bundle-state-server #829 class) --
+    # logging must never take the sampler down, and it cannot log its own failure (stdout is the
+    # broken resource).
+    # airuleset:script-ok a dead stdout is the one resource this swallow is for; it cannot be logged
+    try:
+        print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
+    except (OSError, ValueError):
+        pass
 
 
 class WindowAccumulator:
@@ -60,6 +72,8 @@ class WindowAccumulator:
     def push(self, samples: np.ndarray, sample_rate: int) -> list[tuple[np.ndarray, int]]:
         if samples.ndim != 2:
             raise ValueError(f"WindowAccumulator: samples must be (n, channels), got {samples.shape}")
+        if sample_rate <= 0:
+            raise ValueError(f"WindowAccumulator: sample_rate={sample_rate} is not a rate")
         fmt = (int(sample_rate), int(samples.shape[1]))
         if fmt != self._fmt:
             self._parts, self._have, self._fmt = [], 0, fmt
@@ -78,15 +92,20 @@ class WindowAccumulator:
 
 def run(receiver, serve_dir: str, *, source: str, mono: Callable[[], float] = time.monotonic,
         max_loops: int | None = None, on_write: Callable[[dict], None] | None = None,
-        log: Callable[[str], None] = log, capture_timeout_ms: int = CAPTURE_TIMEOUT_MS,
-        no_audio_timeout_s: float = NO_AUDIO_TIMEOUT_S, window_s: float = pa.WINDOW_S,
-        should_stop: Callable[[], bool] = lambda: False) -> None:
-    """The sampler loop. `receiver` has capture(timeout_ms) -> AudioBlock|None and connections().
-    Every written payload goes through `on_write` too (tests)."""
+        log: Callable[[str], None] = log, sleep: Callable[[float], None] = time.sleep,
+        capture_timeout_ms: int = CAPTURE_TIMEOUT_MS, no_audio_timeout_s: float = NO_AUDIO_TIMEOUT_S,
+        window_s: float = pa.WINDOW_S, should_stop: Callable[[], bool] = lambda: False) -> None:
+    """The sampler loop. `receiver` has capture(timeout_ms) -> AudioBlock|None (raises
+    ConnectionError on an NDI error frame) and connections(). Every written payload also goes
+    through `on_write` (tests)."""
+    latch = {"last_foreign": None}
 
     def write(verdict, rms, outside, reason=None):
-        payload = pa.build_payload(verdict, rms, outside, now=datetime.now(timezone.utc),
-                                   window_s=window_s, source=source, reason=reason)
+        now = datetime.now(timezone.utc)
+        if verdict == "FOREIGN":
+            latch["last_foreign"] = rsf.format_ts_utc(now)
+        payload = pa.build_payload(verdict, rms, outside, now=now, window_s=window_s, source=source,
+                                   reason=reason, last_foreign_ts_utc=latch["last_foreign"])
         pa.write_payload(serve_dir, payload)
         if on_write is not None:
             on_write(payload)
@@ -95,23 +114,37 @@ def run(receiver, serve_dir: str, *, source: str, mono: Callable[[], float] = ti
     acc = WindowAccumulator(window_s)
     write("UNKNOWN", None, None, reason="sampler starting")
     log(f"program-audio sampler: source={source!r} serve_dir={serve_dir} window={window_s}s "
-        f"band={pa.BAND_LO_HZ:.0f}-{pa.BAND_HI_HZ:.0f}Hz foreign>={pa.FOREIGN_OUTSIDE_BAND_PCT}% "
-        f"silent<{pa.SILENT_RMS_DBFS}dBFS")
+        f"band={pa.BAND_LO_HZ:.0f}-{pa.BAND_HI_HZ:.0f}Hz tone_lines={pa.MEASUREMENT_TONE_LINES_HZ} "
+        f"foreign>={pa.FOREIGN_OUTSIDE_BAND_PCT}% silent<{pa.SILENT_RMS_DBFS}dBFS")
     last_audio = mono()
     last_unknown = mono()
     last_verdict = "UNKNOWN"
     last_summary = mono()
     counts = {v: 0 for v in pa.VERDICTS}
+    errors = bad_rate = 0
+    in_error = False
+    bad_rate_logged = False
     loops = 0
     while not should_stop() and (max_loops is None or loops < max_loops):
         loops += 1
         try:
             block = receiver.capture(capture_timeout_ms)
         except ConnectionError as exc:
-            log(f"program-audio sampler: {exc} -- the SDK reconnects by itself")
+            errors += 1
+            if not in_error:
+                log(f"program-audio sampler: {exc} -- the SDK reconnects by itself")
+                in_error = True
+            sleep(capture_timeout_ms / 1000.0)  # an error frame can come back at once: never spin
             block = None
         now = mono()
+        if block is not None and block.sample_rate <= 0:
+            bad_rate += 1
+            if not bad_rate_logged:
+                log(f"program-audio sampler: dropping an NDI audio frame with sample_rate={block.sample_rate}")
+                bad_rate_logged = True
+            block = None
         if block is not None and block.samples.shape[0] > 0:
+            in_error = False
             last_audio = now
             for win, sr in acc.push(block.samples, block.sample_rate):
                 rms, outside = pa.analyse(win, sr)
@@ -133,10 +166,16 @@ def run(receiver, serve_dir: str, *, source: str, mono: Callable[[], float] = ti
                 log(f"program-audio verdict {last_verdict} -> UNKNOWN: {reason}")
                 last_verdict = "UNKNOWN"
         if now - last_summary >= LOG_SUMMARY_S:
-            log("program-audio summary (last %.0f s): %s" % (
-                now - last_summary, " ".join(f"{k}={v}" for k, v in counts.items())))
+            log("program-audio summary (last %.0f s): %s error_frames=%d bad_rate_frames=%d" % (
+                now - last_summary, " ".join(f"{k}={v}" for k, v in counts.items()), errors, bad_rate))
             counts = {v: 0 for v in pa.VERDICTS}
+            errors = bad_rate = 0
             last_summary = now
+
+
+def private_ndi_config_dir() -> str:
+    """A fresh, empty NDI config dir: libndi then uses its defaults = mDNS discovery only."""
+    return tempfile.mkdtemp(prefix="program-audio-sampler-ndi-")
 
 
 def main(argv=None) -> int:
@@ -145,25 +184,17 @@ def main(argv=None) -> int:
                     help=f"NDI source name (default ${SOURCE_ENV} or {DEFAULT_SOURCE!r})")
     ap.add_argument("--serve-dir", default=rsf.default_serve_dir(),
                     help=f"where program-audio.json goes (default ${rsf.SERVE_DIR_ENV} or "
-                         f"{rsf.DEFAULT_SERVE_DIR}; never the lease dir)")
+                         "$XDG_RUNTIME_DIR/rig-lease-serve; never the lease dir)")
     ap.add_argument("--lib", default=None, help="libndi path (default $NDI_LIB_PATH or /usr/lib/ndi/libndi.so.6)")
     args = ap.parse_args(argv)
 
     import program_audio_ndi as pan  # libndi only here, so the pure parts import without it
 
-    conflict = rsf.serve_dir_conflict(args.serve_dir, rsf.default_lease_dir())
-    if conflict:
-        log(f"program-audio sampler: FATAL {conflict}")
+    try:
+        rsf.ensure_serve_dir(args.serve_dir, rsf.default_lease_dir())
+    except (ValueError, OSError) as exc:
+        log(f"program-audio sampler: FATAL serve dir: {exc}")
         return 2
-    os.makedirs(args.serve_dir, exist_ok=True)
-    stop = {"flag": False}
-
-    def _stop(signum, _frame):
-        log(f"program-audio sampler: signal {signum}, stopping")
-        stop["flag"] = True
-
-    signal.signal(signal.SIGTERM, _stop)
-    signal.signal(signal.SIGINT, _stop)
 
     def set_unknown(reason: str) -> None:
         # Never leave a fresh-looking verdict behind a sampler that is not sampling.
@@ -171,18 +202,35 @@ def main(argv=None) -> int:
             "UNKNOWN", None, None, now=datetime.now(timezone.utc), window_s=pa.WINDOW_S,
             source=args.source, reason=reason))
 
+    ndi_config_dir = private_ndi_config_dir()
+    prev_ndi_config_dir = os.environ.get("NDI_CONFIG_DIR")
+    os.environ["NDI_CONFIG_DIR"] = ndi_config_dir
     try:
-        receiver = pan.NdiAudioReceiver(args.source, lib_path=args.lib)
-    except (OSError, RuntimeError) as exc:
-        set_unknown(f"sampler cannot receive: {exc}")
-        log(f"program-audio sampler: FATAL cannot create the NDI receiver: {exc}")
-        return 1
-    try:
-        run(receiver, args.serve_dir, source=args.source, should_stop=lambda: stop["flag"])
+        try:
+            receiver = pan.NdiAudioReceiver(args.source, lib_path=args.lib)
+        except (OSError, RuntimeError) as exc:
+            set_unknown(f"sampler cannot receive: {exc}")
+            log(f"program-audio sampler: FATAL cannot create the NDI receiver: {exc}")
+            return 1
+        stop = {"signal": None}
+
+        def _stop(signum, _frame):
+            stop["signal"] = signum  # only a flag: no I/O inside a signal handler
+
+        signal.signal(signal.SIGTERM, _stop)
+        signal.signal(signal.SIGINT, _stop)
+        try:
+            run(receiver, args.serve_dir, source=args.source, should_stop=lambda: stop["signal"] is not None)
+        finally:
+            receiver.close()
+            set_unknown("sampler stopped")
+            log(f"program-audio sampler: stopped (signal {stop['signal']}), program-audio.json set to UNKNOWN")
     finally:
-        receiver.close()
-        set_unknown("sampler stopped")
-        log("program-audio sampler: stopped, program-audio.json set to UNKNOWN")
+        shutil.rmtree(ndi_config_dir, ignore_errors=True)
+        if prev_ndi_config_dir is None:
+            os.environ.pop("NDI_CONFIG_DIR", None)
+        else:
+            os.environ["NDI_CONFIG_DIR"] = prev_ndi_config_dir
     return 0
 
 

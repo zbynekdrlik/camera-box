@@ -20,18 +20,19 @@ contract for restreamer#349: `.claude/rules/rig-lease-http.md`.
   HEAD /rig-lease.json, HEAD /healthz -> same routing/status as the GET form, headers only, no body
                           (a cheap liveness probe for an external checker).
   GET /rig-qpsk-markers.csv -> issue 1404: cam2's QPSK marker log as mirrored into the SERVE dir by
-                          scripts/rig-marker-mirror.sh (byte-identical, text/csv), with
-                          `X-Mirror-Age-S` = whole seconds since the last successful mirror pass;
-                          404 while the mirror is absent.
+                          the rig-marker-mirror service (complete rows, text/csv), with
+                          `X-Mirror-Age-S` = whole seconds since the mirror last received new rows;
+                          404 while absent, unreadable or owned by another user.
   GET /program-audio.json -> issue 1404: the stream program-audio verdict written by
-                          scripts/program_audio_sampler.py, with `age_s` recomputed at THIS request
-                          from the payload's own ts_utc; 404 while absent; an unreadable file is
-                          served fail-closed as verdict UNKNOWN. Consumer: program_audio_guard.py.
+                          scripts/program_audio_sampler.py, with `age_s` and `last_foreign_age_s`
+                          recomputed at THIS request; 404 while absent; an unreadable or foreign-
+                          owned file is served fail-closed as verdict UNKNOWN. Consumer:
+                          scripts/program_audio_guard.py.
   HEAD on either of the two -> the same status + headers, no body.
                           Both are read from `--serve-dir` (default $RIG_LEASE_SERVE_DIR or
-                          /var/tmp/rig-lease-serve, scripts/rig_serve_files.py) -- NEVER the lease
-                          dir, whose mere existence means held=true. Without a serve dir (the old
-                          make_server() call shape) both routes are a plain 404.
+                          $XDG_RUNTIME_DIR/rig-lease-serve, scripts/rig_serve_files.py) -- NEVER
+                          the lease dir, whose mere existence means held=true. Without a serve dir
+                          (the old make_server() call shape) both routes are a plain 404.
   any other PATH        -> 404.
   any other METHOD (POST/PUT/DELETE/OPTIONS/...) -> the stdlib default 501 Not Implemented (this
                           server implements no do_POST/do_PUT/etc. handler at all -- never a write
@@ -76,7 +77,9 @@ DEFAULT_PORT = 8890
 
 
 def _default_lease_dir() -> str:
-    return os.environ.get("RIG_LEASE_DIR", "/var/tmp/rig-lease")
+    # One default for this server and the issue-1404 writers: an EMPTY $RIG_LEASE_DIR means the
+    # default, exactly like scripts/lib/rig-lease.sh's ${RIG_LEASE_DIR:-/var/tmp/rig-lease}.
+    return rsf.default_lease_dir()
 
 
 def _default_stale_secs() -> int:
@@ -157,7 +160,11 @@ class RigLeaseHandler(BaseHTTPRequestHandler):
             return
 
         if path == "/rig-qpsk-markers.csv" and self.serve_dir:
-            mirror = rsf.read_mirror(os.path.join(self.serve_dir, rsf.MARKERS_NAME), time.time())
+            try:
+                mirror = rsf.read_mirror(os.path.join(self.serve_dir, rsf.MARKERS_NAME), time.time())
+            except OSError as exc:
+                log(f"{rsf.MARKERS_NAME} unreadable: {exc!r} -- serving 404")
+                mirror = None
             if mirror is not None:
                 data, age_s = mirror
                 self._send(200, "text/csv", data, no_store=True,
@@ -214,13 +221,15 @@ def main(argv=None) -> int:
     )
     parser.add_argument(
         "--serve-dir", default=rsf.default_serve_dir(),
-        help="dir of the issue-1404 mirrored files (default $RIG_LEASE_SERVE_DIR or "
-             f"{rsf.DEFAULT_SERVE_DIR}); never the lease dir",
+        help="dir of the issue-1404 served files (default $RIG_LEASE_SERVE_DIR or "
+             "$XDG_RUNTIME_DIR/rig-lease-serve); never the lease dir",
     )
     args = parser.parse_args(argv)
-    conflict = rsf.serve_dir_conflict(args.serve_dir, args.lease_dir)
-    if conflict:
-        parser.error(conflict)
+    # Only the lease-dir case stops the server: ownership/permissions are checked per served file,
+    # so a bad serve dir never takes the lease endpoint itself down.
+    inside = rsf.serve_dir_inside_lease(args.serve_dir, args.lease_dir)
+    if inside:
+        parser.error(inside)
 
     server = make_server(args.bind, args.port, args.lease_dir, args.stale_secs, serve_dir=args.serve_dir)
     log(

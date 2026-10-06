@@ -6,29 +6,37 @@ paths:
   - "scripts/program_audio_guard.py"
   - "scripts/rig_serve_files.py"
   - "scripts/rig-marker-mirror.sh"
+  - "scripts/rig_marker_mirror.py"
   - "systemd/program-audio-sampler.*"
   - "systemd/rig-marker-mirror.*"
   - "tests/python/test_program_audio_1404.py"
   - "tests/python/test_program_audio_guard_1404.py"
   - "tests/python/test_rig_marker_mirror_1404.py"
+  - "tests/python/test_rig_serve_routes_1404.py"
 ---
 
 # The stream program-audio guard + the cam2 marker mirror (issue 1404)
 
-Two dev1 endpoints next to the rig lease on :8890. They are served by `scripts/rig-lease-server.py`
-from its SERVE dir (`/var/tmp/rig-lease-serve`, `$RIG_LEASE_SERVE_DIR`, `scripts/rig_serve_files.py`).
-The serve dir is never the lease dir, whose existence means `held=true`.
+Two dev1 endpoints next to the rig lease on :8890. `scripts/rig-lease-server.py` serves them from
+its SERVE dir (`scripts/rig_serve_files.py`): `$XDG_RUNTIME_DIR/rig-lease-serve`, overridable with
+`$RIG_LEASE_SERVE_DIR`.
+- **tmpfs:** the mirror rewrites a multi-MB file every 10 s, which must not wear the SSD.
+- **0700:** no other dev1 account can plant a file.
+- **Never the lease dir or inside it:** the lease dir's existence means `held=true`.
+- **Only files this user owns are served.**
 
 | Route | Writer | Contract |
 |---|---|---|
-| `/rig-qpsk-markers.csv` | `scripts/rig-marker-mirror.sh`, `--user` timer every 10 s | cam2's `/run/rig-qpsk-markers.csv`, byte-identical; `text/csv`; `X-Mirror-Age-S`; 404 absent |
-| `/program-audio.json` | `scripts/program_audio_sampler.py`, `--user` service | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source[, reason]}`; `age_s` recomputed by the server at every request; 404 absent; an unreadable file is served as UNKNOWN |
+| `/rig-qpsk-markers.csv` | `rig-marker-mirror` `--user` service (`scripts/rig-marker-mirror.sh` → `rig_marker_mirror.py`) | cam2's `/run/rig-qpsk-markers.csv`, complete rows; `text/csv`; `X-Mirror-Age-S` = seconds since new rows last arrived; 404 absent |
+| `/program-audio.json` | `program-audio-sampler` `--user` service | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s[, reason]}`; both ages recomputed by the server per request; 404 absent; unreadable or foreign-owned = UNKNOWN |
 
 The consumer CLI is `scripts/program_audio_guard.py`, used by both YouTube gates (camera-box and
 restreamer issue 357):
-- exit 0: MEASUREMENT or SILENT, and fresh;
-- exit 1: FOREIGN, even when stale;
-- exit 2: UNKNOWN, stale, unreachable or unreadable (fail closed).
+- exit 0: MEASUREMENT or SILENT, fresh, and no FOREIGN window within `--max-age`;
+- exit 1: FOREIGN. That includes a stale FOREIGN, and a clean current window when a FOREIGN window
+  ended within `--max-age` (the latch, so a 10 s poller misses nothing);
+- exit 2: UNKNOWN, stale (more than 1 s in the future counts as stale), unreachable, or a broken
+  HTTP response (fail closed).
 
 It prints one line: `program-audio verdict=<V> rms=<x> outside_band=<y>% age=<s>[ reason=…]`.
 
@@ -38,47 +46,76 @@ The owner rule (issue 1404 comment 6016489928): nothing copyrighted on YouTube. 
 tell the loud healthy QPSK marker from music. The marker (carrier 442 Hz) and its room sit in
 200–800 Hz, so the verdict is the share of energy OUTSIDE that band:
 - the FFT is per channel and the channel POWERS are summed. Never a mono downmix: the marker is on
-  L and R ~10 ms apart, and their sum comb-filters it;
-- the level gates SILENT.
+  L and R ~10 ms apart, and an anti-phase pair would cancel to zero;
+- the level gates SILENT;
+- a NaN/Inf sample is UNKNOWN.
+
+**The declared measurement tone lines** (`MEASUREMENT_TONE_LINES_HZ = (1000.0,)`, ±3 Hz) are
+removed before measuring, from the level and from both sides of the share.
+- The plan's Task 5 CG clip plays the QPSK marker over a −30 dBFS 1 kHz bed. Marker + bed read
+  84 % outside the band, which would make every CG session stop itself.
+- Why not count the bed as measurement: the louder bed would then dilute foreign content under it.
+- A bed-only program reads SILENT.
+- The Task 5 generator must import this constant.
 
 ## Calibration (6.10.2026) — the constants in `scripts/program_audio.py`, pinned by the tests
 
 | Audio | windows | outside_band_pct | rms dBFS | verdict |
 |---|---|---|---|---|
 | Session recordings rec2/rec3a/rec3b/session (48 k stereo) | 1851 | 9.1 … 25.3 (p99 23.7) | −37.0 … −34.9 | MEASUREMENT |
-| LIVE stream program via NDI (`STREAM-SNV (stream)`) | 15 | 12.4 … 22.1 | −35.9 … −35.5 | MEASUREMENT |
+| LIVE stream program via NDI (`STREAM-SNV (stream)`) | 15 + 11 | 12.4 … 22.1 | −35.9 … −35.5 | MEASUREMENT |
 | LIVE SongPlayer program via NDI (`RESOLUME-SNV (SP-program)`, music) | 8 | 87.6 … 94.0 | −15.4 … −14.6 | FOREIGN |
 | Generated white / pink / speech-shaped noise | — | 97.6 / 81.2 / 42.2 | (−20) | FOREIGN |
 
 `FOREIGN_OUTSIDE_BAND_PCT = 30` (4.7 points over the measurement maximum) and
 `SILENT_RMS_DBFS = −60` (23 dB under the quietest measurement window).
 
-Known limit: foreign content mixed well BELOW the measurement level is missed. Pink noise at −6 dB
-under the measurement reads 26.2 %; at −3 dB it reads 32.3 % and is caught. Music at program level is
-~20 dB OVER the measurement and reads ~90 %.
+Known limits:
+- **Quiet foreign content is missed.** Foreign content mixed well BELOW the measurement level is
+  not caught: pink noise at −6 dB under it reads 26.2 % (at −3 dB, 32.3 %, caught). Music at
+  program level is ~20 dB over the measurement and reads ~90 %.
+- **Tonal content inside 200–800 Hz reads MEASUREMENT** (a soft C-E-G chord reads 0.7 %).
+  Requiring the QPSK marker itself is the discriminator for that, a follow-up candidate.
 
 Re-calibrate only from real program audio. Use `analyse()` over 2 s windows of a stream recording
 or of a live NDI receive, and never tune the threshold to pass a single run.
+
+## The marker mirror: ONE ssh connection, never a login per pass
+
+One cam2 login writes **11 lines** into cam2's PERSISTENT journal on its USB stick
+(`Storage=persistent`, `SystemMaxUse=200M`, measured 6.10.2026). A 10 s scp timer would have
+meant ~95 000 lines a day, and a full multi-MB copy every 10 s, over the metered link when the rig
+is at a venue. So the mirror is a long-running service holding one
+`ssh … exec tail -c +1 -F --pid=$PPID /run/rig-qpsk-markers.csv`:
+- **The replay.** `-c +1` replays the file on every (re)connection. Nothing is written until the
+  first idle gap, so a consumer never gets a half-replayed copy.
+- **Name following.** `-F` follows the name through a painter restart (`File::create` = truncate +
+  a new `# qpsk-params` header, which restarts the copy) and through an EVENT purge + re-creation.
+- **No leftover tail.** `--pid=$PPID` (the sshd session) ends the remote tail when the connection
+  drops. Checked live: no leftover tail on cam2.
+- **Writes.** Only complete rows are kept, written by temp + rename at most every 10 s and only when
+  something changed. Live, about 63 bytes/s of new rows.
+- **Reconnects.** A dropped connection logs `ERROR` with ssh's stderr and backs off
+  10 → 300 s (back to 10 s after a connection that lived 300 s). The previous file is kept.
+- **The password** goes through `sshpass -e` (`$SSHPASS`), never argv. A oneshot timer cannot hold
+  a connection: systemd kills a ControlPersist master with the oneshot's cgroup.
 
 ## Traps
 
 - **The NDI receiver is ctypes over `/usr/lib/ndi/libndi.so.6`.** The in-repo `src/ndi.rs`
   receiver is video-only (a NULL audio frame). Struct layouts come from the vendored SDK headers,
-  pinned by `test_ndi_struct_layout_matches_the_sdk_headers`.
-- **The receiver is created BY NAME** (the SDK runs the finder and reconnects by itself), with
-  `NDIlib_recv_bandwidth_audio_only`.
-- **mDNS only.** Never add an NDI extra-IP list on dev1: an extra-IP finder opens a TCP discovery
-  connection into each listed sender (`.claude/rules/ndi-discovery.md`, issue 1389).
+  pinned by a test.
+- **The receiver is created BY NAME, audio-only.** It runs with a private, empty
+  `NDI_CONFIG_DIR` (mDNS only, enforced in code; an extra-IP finder opens TCP discovery connections
+  into senders, `.claude/rules/ndi-discovery.md`). Checked live: it still finds the sender.
 - **Away at an event, the sampler finds nothing.** The rig sits behind tailscale, so the verdict is
-  UNKNOWN and no audio is pulled over the mobile link.
+  UNKNOWN and no audio crosses the mobile link.
 - **The sampler writes UNKNOWN at every point it is not sampling:** at start, after 5 s without
-  audio, when it cannot load libndi, and when it stops. The server's per-request `age_s` covers a
-  sampler that died without writing.
-- **Noise budget.** The mirror runs ~8600 times a day: its unit sets `LogLevelMax=notice` +
-  `SyslogLevel=notice`, and the script prints on success only when the mirror is (re)established.
-  The sampler logs verdict changes plus a 10-minute summary.
-- **Read-only on the rig.** A live check receives an existing sender. Never play a test sound on
-  the rig (only the QPSK marker may sound there): FOREIGN was verified live on the SongPlayer
-  program sender, which already carries music.
-- **Restart the lease server only while `held=false`** (the runbook in
-  `systemd/rig-marker-mirror.README.md`). The existing routes stay byte-identical.
+  audio, when it cannot load libndi, and when it stops. A sample rate ≤ 0 is dropped (it once
+  looped forever), and an NDI error frame sleeps instead of spinning.
+- **Logging.** Both services log state changes, never per window or row. Private env files
+  `~/.config/camera-box/*.env`, never the global `environment.d`.
+- **Read-only on the rig.** Never play a test sound there (only the QPSK marker may sound):
+  FOREIGN was verified live on the SongPlayer program sender, which already carries music.
+- **Restart the lease server only while `held=false`.** `/rig-lease.json`, `/healthz` and the 404
+  are pinned to golden bytes captured from the pre-change server.

@@ -657,3 +657,11 @@ def test_log_survives_a_dead_stdout(monkeypatch):
 
     monkeypatch.setattr(sys, "stdout", _Dead())
     pas.log("still alive")  # must not raise
+
+
+def test_a_program_that_is_only_the_declared_bed_reads_silent():
+    """With the declared tone removed, a bed-only program (a marker muted in the clip) has nothing
+    left: SILENT -- a sine is not copyrighted content, never a FOREIGN stop."""
+    rms, outside = pa.analyse(_tone(1000.0, -30.0, 2 * SR, SR), SR)
+    assert rms < pa.SILENT_RMS_DBFS
+    assert pa.classify(rms, outside) == "SILENT"

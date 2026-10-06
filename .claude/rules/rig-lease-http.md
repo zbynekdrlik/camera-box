@@ -219,12 +219,16 @@ hard dependency either side must have to function at all).
 
 The same server serves `GET/HEAD /rig-qpsk-markers.csv` (`text/csv`, `X-Mirror-Age-S`) and
 `GET/HEAD /program-audio.json` (`age_s` recomputed per request) from `--serve-dir`
-(`$RIG_LEASE_SERVE_DIR`, default `/var/tmp/rig-lease-serve`, `scripts/rig_serve_files.py`). Both
-are a 404 while their file is absent, or when the server runs without a serve dir.
-- **The serve dir is NEVER the lease dir.** The lease dir's mere existence is `held=true`, so a file
-  written there would fake a held lease. `main()` refuses `--serve-dir` == `--lease-dir`.
-- **`/rig-lease.json` and `/healthz` are byte-identical** with and without a serve dir. The new
-  routes sit after them in `_handle()`; `_send()` gained only an optional `extra_headers`.
+(`$RIG_LEASE_SERVE_DIR`, default `$XDG_RUNTIME_DIR/rig-lease-serve` = tmpfs, 0700,
+`scripts/rig_serve_files.py`). Both are a 404 while their file is absent, or when the server runs
+without a serve dir. A file another user owns is never served.
+- **The serve dir is NEVER the lease dir or inside it.** The lease dir's mere existence is
+  `held=true`, so a writer's `mkdir -p` there would fake a held lease. `main()` refuses it; a
+  bad owner/mode of the serve dir is checked per file, so it never stops the lease endpoint.
+- **`/rig-lease.json`, `/healthz` and the 404 are byte-identical** with and without a serve dir,
+  pinned to golden bytes captured from the pre-change server. The new routes sit after them in
+  `_handle()`; `_send()` gained only an optional `extra_headers`. An empty `$RIG_LEASE_DIR` now
+  means the default, as in `scripts/lib/rig-lease.sh` (`rsf.default_lease_dir()`).
 - **The server stays stdlib-only.** The numpy analysis lives in the sampler, never here.
 - Writers, contract, calibration and runbooks: `.claude/rules/program-audio-guard.md`,
   `systemd/rig-marker-mirror.README.md`, `systemd/program-audio-sampler.README.md`. The running

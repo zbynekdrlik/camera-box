@@ -6,10 +6,14 @@ scripts/rig-lease-server.py with `age_s` recomputed per request) and answers wit
 Both YouTube gates call it before the broadcast starts and every ~10 s while it is live (camera-box
 `scripts/lib/youtube-leg.sh`, restreamer issue 357) and stop the broadcast on anything but 0.
 
-  exit 0  MEASUREMENT or SILENT, and fresh (age_s <= --max-age)
+  exit 0  MEASUREMENT or SILENT, and fresh (-1 s <= age_s <= --max-age), and no FOREIGN window
+          within --max-age
   exit 1  FOREIGN (non-measurement audio on the program) -- also when stale: an old FOREIGN
-          reading is never downgraded to "maybe"
-  exit 2  UNKNOWN, stale (age_s > --max-age or missing), unreachable, an HTTP error, an
+          reading is never downgraded to "maybe" -- and also when the CURRENT window is clean but
+          a FOREIGN window ended within --max-age (`last_foreign_age_s`, the sampler's latch), so a
+          gate polling every --max-age seconds never misses a FOREIGN window between two polls
+  exit 2  UNKNOWN, stale (age_s > --max-age, missing, or more than 1 s in the future -- a small
+          negative age is a dantesync date step), unreachable, an HTTP or protocol error, an
           unreadable payload, an unexpected verdict -- fail CLOSED
 
 Output, always exactly one line on stdout:
@@ -24,6 +28,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import math
 import sys
@@ -33,6 +38,7 @@ import urllib.request
 DEFAULT_URL = "http://dev1:8890/program-audio.json"
 DEFAULT_MAX_AGE_S = 10.0
 DEFAULT_TIMEOUT_S = 5.0
+NEGATIVE_AGE_TOLERANCE_S = 1.0  # a dantesync date step moves dev1's clock by tens of ms
 
 EXIT_OK = 0
 EXIT_FOREIGN = 1
@@ -60,11 +66,19 @@ def decide(payload: dict, max_age_s: float) -> tuple[int, str]:
     """(exit code, the one output line) for a fetched payload."""
     verdict = payload.get("verdict")
     rms, outside, age = payload.get("rms_dbfs"), payload.get("outside_band_pct"), _num(payload.get("age_s"))
-    stale = age is None or age > max_age_s
-    stale_why = ("stale (no age)" if age is None
-                 else f"stale (age {age:.1f} s > max {max_age_s:g} s)")
+    stale = age is None or age > max_age_s or age < -NEGATIVE_AGE_TOLERANCE_S
+    if age is None:
+        stale_why = "stale (no age)"
+    elif age < -NEGATIVE_AGE_TOLERANCE_S:
+        stale_why = f"stale (age {age:.1f} s is in the future)"
+    else:
+        stale_why = f"stale (age {age:.1f} s > max {max_age_s:g} s)"
     if verdict == "FOREIGN":
         return EXIT_FOREIGN, _line("FOREIGN", rms, outside, age, stale_why if stale else None)
+    last_foreign = _num(payload.get("last_foreign_age_s"))
+    if last_foreign is not None and last_foreign <= max_age_s:
+        return EXIT_FOREIGN, _line("FOREIGN", rms, outside, age,
+                                   f"FOREIGN window {last_foreign:.1f} s ago (latched; current {verdict})")
     if verdict in ("MEASUREMENT", "SILENT"):
         if stale:
             return EXIT_UNKNOWN, _line("UNKNOWN", rms, outside, age, f"{stale_why}, last verdict {verdict}")
@@ -84,6 +98,8 @@ def fetch(url: str, timeout_s: float) -> dict:
     except (urllib.error.URLError, OSError) as exc:
         reason = getattr(exc, "reason", exc)
         raise ValueError(f"unreachable: {url}: {reason}") from exc
+    except http.client.HTTPException as exc:  # a garbled status line, a truncated body
+        raise ValueError(f"broken HTTP response from {url}: {exc!r}") from exc
     try:
         payload = json.loads(body)
     except ValueError as exc:
@@ -103,10 +119,11 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     try:
         payload = fetch(args.url, args.timeout)
-    except ValueError as exc:
-        print(_line("UNKNOWN", None, None, None, str(exc)), flush=True)
+        code, line = decide(payload, args.max_age)
+    except Exception as exc:  # fail CLOSED with the contract line on anything unforeseen
+        reason = str(exc) if isinstance(exc, ValueError) else f"guard error: {exc!r}"
+        print(_line("UNKNOWN", None, None, None, reason), flush=True)
         return EXIT_UNKNOWN
-    code, line = decide(payload, args.max_age)
     print(line, flush=True)
     return code
 
