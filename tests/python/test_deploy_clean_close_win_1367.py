@@ -18,17 +18,26 @@ This suite pins the emitted program for both Windows boxes (stream, resolume), F
     obs-websocket (tests/python/obs_ws_fake_1367.py) and a fake obs64 process.
 
 pwsh: ubuntu-latest ships it; dev1 has a portable one at ~/.local/pwsh74/pwsh. A missing pwsh
-FAILS, never skips. pwsh 7 on Linux is not Windows PowerShell 5.1 and has no window to close, so
-CloseMainWindow takes its "no main window -- forcing" branch here; the clean-exit and timeout
-branches are pinned as text and were proven live (6.10.2026, a clean close exited in 6.6 s).
+FAILS, never skips. pwsh 7 on Linux has no OBS window, so the runs shadow Get-Process with a
+function (the repo's stub-function pattern) that returns the test's OWN fake obs64 with a scripted
+MainWindowTitle and CloseMainWindow: a clean exit (SIGTERM), a hang (the bound shortened by the
+test), no window, a projector in front, a refused close. A manual WM_CLOSE of stream OBS exited in
+6.6 s live (6.10.2026, comment 6013239473); this fragment's own close first runs live at the next
+deploy. pwsh 7 also accepts syntax Windows PowerShell 5.1 rejects, so a token scan bans that.
+
+Only the test's own fake obs64 is visible to the fragment (the stub filters by pid), so two runs of
+this file in parallel lanes cannot kill each other's fake.
 """
 import json
 import os
 import pathlib
+import re
 import shutil
 import socket
+import signal
 import subprocess
 import sys
+import threading
 
 import pytest
 
@@ -117,8 +126,12 @@ def test_clean_close_first_bounded_45s_force_only_as_named_fallback(box, mode):
     stop = seg.index("'StopRecord'")
     assert stop < seg.index("'GetRecordStatus'", stop) < seg.index(".CloseMainWindow()")
     assert "recording stopped in" in seg
-    # the close on the ONE obs64 of this session, waited on up to the bound
+    # the close on the ONE LIVE obs64 of this session (a stale handle of an exited obs64 is not
+    # counted), only when its front window is OBS's own, waited on up to the bound
+    assert "$ccAll = @(Get-CcLiveObs)" in seg
     assert "$_.SessionId -eq $ccSession" in seg
+    assert seg.index("$ccTitle -notlike 'OBS *'") < seg.index(".CloseMainWindow()")
+    assert "Where-Object { -not $_.HasExited -and $_.Threads.Count -gt 0 }" in p
     wait = seg.index("$ccSw.ElapsedMilliseconds -lt $ccCloseTimeoutMs")
     assert seg.index(".CloseMainWindow()") < wait
     ok = seg.index("clean close OK in $($ccSw.ElapsedMilliseconds) ms")
@@ -129,7 +142,8 @@ def test_clean_close_first_bounded_45s_force_only_as_named_fallback(box, mode):
     assert p.count(FORCE_LINE) == 1
     branch = seg.index("if ($ccForce) {")
     assert timed_out < branch < seg.index(FORCE_LINE) < seg.index("} else {", branch)
-    assert seg.count("$ccForce = $true") == 3  # wrong process count, no main window, timeout
+    # wrong process count, no main window, a projector in front, a refused close, the timeout
+    assert seg.count("$ccForce = $true") == 5
     # the crash-sentinel clear and its settle stay after the stop
     assert seg.index(FORCE_LINE) < seg.index("Start-Sleep -Seconds 5") < seg.index(".sentinel")
 
@@ -170,6 +184,43 @@ def test_the_fragment_carries_no_box_specific_or_secret_text():
     assert text.index("if ($hello.d.authentication)") < text.index(".server_password")
 
 
+@pytest.mark.parametrize("mode", MODES)
+def test_a_late_stream_refusal_re_enables_the_keep_alive_tasks(mode):
+    stream = _program("stream", mode)
+    # stream (keep-alive tasks): the hook is defined right after the step-(1b) disable, before (2)
+    hook = stream.index("# (1c) issue 1367")
+    assert stream.index("# (1b)") < hook < stream.index("# (2) issue 1367")
+    assert stream.count("function Invoke-CcRefusalRestore") == 1
+    seg = stream[hook:stream.index("# (2) issue 1367")]
+    assert "foreach ($t in $disabledKeepAlive)" in seg and "schtasks /Change /TN $t /ENABLE" in seg
+    # the step-(2) refusal calls it, if defined, right before its exit 12
+    close = stream[stream.index("# (2) issue 1367"):stream.index("# (3) ")]
+    late = close.index("STARTED STREAMING")
+    call = close.index("if (Get-Command Invoke-CcRefusalRestore -ErrorAction SilentlyContinue) { Invoke-CcRefusalRestore }", late)
+    assert call < close.index("exit 12", late)
+    # resolume has no keep-alive task, so no hook (the refusal only exits)
+    assert "Invoke-CcRefusalRestore {" not in _program("resolume", mode)
+
+
+def test_the_fragment_uses_no_powershell_7_only_syntax(tmp_path):
+    # pwsh 7 parses && || ?? ?. and the ternary; Windows PowerShell 5.1 rejects them all
+    src = tmp_path / "fragment.ps1"
+    src.write_text("".join(_block(fn) for fn in BLOCKS + ["obs_clean_close_refusal_restore_ps"]))
+    scan = tmp_path / "scan.ps1"
+    scan.write_text(
+        "$t = $null; $e = $null\n"
+        "[void][System.Management.Automation.Language.Parser]::ParseFile($args[0], [ref]$t, [ref]$e)\n"
+        "$bad = @($t | Where-Object { $_.Kind -in 'AndAnd','OrOr','QuestionQuestion','QuestionQuestionEquals',"
+        "'QuestionDot','QuestionLBracket','QuestionMark' })\n"
+        "foreach ($x in $bad) { Write-Output \"PS7-only $($x.Kind) at line $($x.Extent.StartLineNumber)\" }\n"
+        "Write-Output \"tokens=$($t.Count) errors=$($e.Count) ps7only=$($bad.Count)\"\n"
+        "exit ($bad.Count + $e.Count)\n")
+    r = subprocess.run([_pwsh(), "-NoProfile", "-NonInteractive", "-File", str(scan), str(src)],
+                       capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "errors=0 ps7only=0" in r.stdout
+
+
 def test_the_whole_program_parses_as_powershell(tmp_path):
     pwsh = _pwsh()
     files = []
@@ -196,6 +247,34 @@ def test_the_whole_program_parses_as_powershell(tmp_path):
 
 # --- the fragment RUN in pwsh against a fake obs-websocket and a fake obs64 ----------------------
 
+# Get-Process shadowed by a function: only the test's own fake obs64 is visible, with a scripted
+# main window. Every other process comes from the real cmdlet.
+STUB = r"""
+$ccFakeObsPid = __PID__
+$ccFakeMode = '__MODE__'
+function Get-Process {
+  [CmdletBinding()]
+  param([Parameter(Position = 0)][string[]]$Name, [int[]]$Id)
+  foreach ($q in @(Microsoft.PowerShell.Management\Get-Process @PSBoundParameters)) {
+    if ($q.ProcessName -ne 'obs64') { $q; continue }
+    if ($q.Id -ne $ccFakeObsPid) { continue }
+    $title = 'OBS Studio 32.2.0 - newlevel.media build fake - Profile: Stream_Obs'
+    if ($ccFakeMode -eq 'nowindow') { $title = '' }
+    if ($ccFakeMode -eq 'projector') { $title = 'Fullscreen Projector (Program)' }
+    $q | Add-Member -Force -MemberType NoteProperty -Name MainWindowTitle -Value $title
+    $q | Add-Member -Force -MemberType ScriptMethod -Name CloseMainWindow -Value {
+      Write-Host "HARNESS CloseMainWindow mode=$ccFakeMode pid=$($this.Id)"
+      if ($ccFakeMode -eq 'clean') { $null = & /bin/kill -TERM $this.Id; return $true }
+      if ($ccFakeMode -eq 'hang') { return $true }
+      return $false
+    }
+    $q
+  }
+}
+"""
+REFUSAL_HOOK = "function Invoke-CcRefusalRestore { Write-Host 'HARNESS REFUSAL HOOK RAN' }\n"
+
+
 class Rig:
     """A fake obs64 (a copy of `sleep` under that name) + APPDATA, and the fragment run in pwsh."""
 
@@ -204,27 +283,39 @@ class Rig:
         self.appdata = tmp_path / "appdata"
         (self.appdata / "obs-studio" / "basic" / "scenes").mkdir(parents=True)
         self.obs = None
+        self.reaper = None
         if obs_running:
             exe = tmp_path / "bin" / "obs64"
             exe.parent.mkdir()
             shutil.copy(shutil.which("sleep"), exe)
             self.obs = subprocess.Popen([str(exe), "600"])
+            # reap it the moment it dies, so a closed fake leaves no zombie behind
+            self.reaper = threading.Thread(target=self.obs.wait, daemon=True)
+            self.reaper.start()
 
     def write(self, rel, text):
         path = self.appdata / "obs-studio" / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
 
-    def run(self, uri, blocks=BLOCKS):
+    def run(self, uri, blocks=BLOCKS, mode="nowindow", close_ms=None, hook=False):
         body = "\n".join(_block(fn) for fn in blocks).replace(f"'{WS_URI}'", f"'{uri}'")
+        if close_ms is not None:
+            assert "\n$ccCloseTimeoutMs = 45000\n" in body
+            body = body.replace("\n$ccCloseTimeoutMs = 45000\n", f"\n$ccCloseTimeoutMs = {close_ms}\n")
+        pid = self.obs.pid if self.obs is not None else 0
+        prelude = STUB.replace("__PID__", str(pid)).replace("__MODE__", mode) + (REFUSAL_HOOK if hook else "")
         prog = self.tmp / "program.ps1"
-        prog.write_text("$ErrorActionPreference = 'Stop'\n" + body + "\nWrite-Host 'HARNESS DONE'\nexit 0\n")
+        prog.write_text("$ErrorActionPreference = 'Stop'\n" + prelude + body + "\nWrite-Host 'HARNESS DONE'\nexit 0\n")
         env = dict(os.environ, APPDATA=str(self.appdata))
         return subprocess.run([_pwsh(), "-NoProfile", "-NonInteractive", "-File", str(prog)],
                               capture_output=True, text=True, timeout=120, env=env)
 
     def obs_alive(self):
-        return self.obs is not None and self.obs.poll() is None
+        if self.obs is None:
+            return False
+        self.reaper.join(timeout=2)
+        return self.obs.returncode is None
 
     def close(self):
         if self.obs_alive():
@@ -378,3 +469,60 @@ def test_run_read_back_failure_is_named_and_never_fails_the_deploy(rig, damage):
     assert res.returncode == 0, out
     assert "saved-settings read-back UNREAD" in out
     assert "HARNESS DONE" in out
+
+
+# --- the close branch itself, through the Get-Process stub -------------------------------------
+
+def test_run_clean_close_exits_by_itself_and_is_never_forced(rig, ws):
+    r, server = rig(), ws()
+    res = r.run(server.uri, mode="clean")
+    out = res.stdout + res.stderr
+    assert res.returncode == 0, out
+    assert "HARNESS CloseMainWindow mode=clean" in out
+    assert "clean close OK in" in out and "'OBS Studio 32.2.0" in out
+    # the wait ends when OBS is gone, not at the 45 s bound
+    waited_ms = int(re.search(r"clean close OK in (\d+) ms", out).group(1))
+    assert waited_ms < 10000, out
+    assert "-- forcing" not in out
+    assert not r.obs_alive() and r.obs.returncode == -signal.SIGTERM  # closed, not killed
+
+
+def test_run_close_that_hangs_is_forced_after_the_bound(rig, ws):
+    r, server = rig(), ws()
+    res = r.run(server.uri, mode="hang", close_ms=1500)
+    out = res.stdout + res.stderr
+    assert res.returncode == 0, out
+    assert "HARNESS CloseMainWindow mode=hang" in out
+    assert "clean close timed out -- forcing" in out and "after 1.5 s" in out
+    assert "clean close OK" not in out
+    assert not r.obs_alive() and r.obs.returncode == -signal.SIGKILL  # the named force did it
+
+
+@pytest.mark.parametrize("mode,line", [
+    ("projector", "shows 'Fullscreen Projector (Program)' in front, not the OBS main window -- forcing"),
+    ("nowindow", "has no main window -- forcing"),
+    ("disabled", "did not take the close (disabled behind a modal dialog) -- forcing"),
+])
+def test_run_no_closable_obs_window_is_forced_by_name(rig, ws, mode, line):
+    r, server = rig(), ws()
+    res = r.run(server.uri, mode=mode)
+    out = res.stdout + res.stderr
+    assert res.returncode == 0, out
+    assert line in out
+    # a projector in front is never sent the close (it would drop out of the saved projectors)
+    assert ("HARNESS CloseMainWindow" in out) == (mode == "disabled")
+    assert not r.obs_alive() and r.obs.returncode == -signal.SIGKILL
+
+
+def test_run_stream_started_after_0a_is_refused_and_restores(rig, ws):
+    r, server = rig(), ws(stream_starts_after=1)
+    res = r.run(server.uri, mode="clean", hook=True)
+    out = res.stdout + res.stderr
+    assert res.returncode == 12, out
+    assert "streaming=False" in out  # (0a) read it idle
+    assert "STARTED STREAMING after the step-(0a) read" in out
+    assert out.index("STARTED STREAMING") < out.index("HARNESS REFUSAL HOOK RAN")
+    assert "HARNESS CloseMainWindow" not in out and "HARNESS DONE" not in out
+    assert "StopRecord" not in server.requests
+    assert r.obs_alive(), "a refused deploy must leave OBS running"
+

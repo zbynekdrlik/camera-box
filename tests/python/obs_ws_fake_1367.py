@@ -33,10 +33,15 @@ def obs_auth(password, salt=SALT, challenge=CHALLENGE):
 class FakeObsWs:
     """streaming / recording: the output state GetStreamStatus / GetRecordStatus report.
     password: None = no authentication, else the password the Identify must prove.
-    record_stops_after: how many GetRecordStatus reads after StopRecord still report active."""
+    record_stops_after: how many GetRecordStatus reads after StopRecord still report active.
+    stream_starts_after: when set, GetStreamStatus reports a live stream from that many reads on
+    (a broadcast that starts between two reads)."""
 
-    def __init__(self, streaming=False, recording=False, password=None, record_stops_after=0):
+    def __init__(self, streaming=False, recording=False, password=None, record_stops_after=0,
+                 stream_starts_after=None):
         self.streaming = streaming
+        self.stream_starts_after = stream_starts_after
+        self._stream_reads = 0
         self.recording = recording
         self.password = password
         self.record_stops_after = record_stops_after
@@ -160,6 +165,9 @@ class FakeObsWs:
         self.requests.append(rt)
         ok, data = True, None
         if rt == "GetStreamStatus":
+            if self.stream_starts_after is not None and self._stream_reads >= self.stream_starts_after:
+                self.streaming = True
+            self._stream_reads += 1
             data = {"outputActive": self.streaming, "outputReconnecting": False}
         elif rt == "GetRecordStatus":
             if self._stop_pending is not None:
