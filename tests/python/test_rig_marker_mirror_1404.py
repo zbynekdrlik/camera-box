@@ -70,6 +70,14 @@ def test_marker_log_starts_a_fresh_copy_at_every_session_header():
     assert m.sessions == 2
 
 
+def test_marker_log_starts_the_new_session_when_its_header_follows_a_half_row():
+    m = rmm.MarkerLog()
+    m.feed(HDR_A + b"39,39,17912" + HDR_B + ROWS_B)
+    assert m.content() == HDR_B + ROWS_B
+    assert m.cut_rows == 1
+    assert m.sessions == 2
+
+
 def test_marker_log_drops_bytes_before_the_first_header():
     m = rmm.MarkerLog()
     m.feed(b"7,7,7\n" + HDR_A + ROWS_A)
@@ -271,6 +279,21 @@ def test_run_keeps_the_served_copy_when_the_connection_dies_mid_replay(tmp_path)
     _rc, serve, writes = _run(tmp_path, body, max_runtime_s=1.0)
     assert writes == []
     assert (serve / rsf.MARKERS_NAME).read_bytes() == big
+
+
+def test_a_painter_restart_during_the_replay_ends_it_at_the_new_header(tmp_path):
+    """The file was truncated + rewritten mid-replay: the announced size is never reached, but
+    everything after the second session header is the new file, in order -- serve it."""
+    big = HDR_A + b"".join(b"%d,%d,%d\n" % (i, i, i) for i in range(200))
+    body = f"""
+    out.write({_size(big) + big[:len(big) // 4]!r}); out.flush()
+    time.sleep(0.2)
+    out.write({HDR_B + ROWS_B!r}); out.flush()
+    time.sleep(5)
+    """
+    _rc, serve, writes = _run(tmp_path, body, max_runtime_s=1.2)
+    assert writes == [HDR_B + ROWS_B]
+    assert (serve / rsf.MARKERS_NAME).read_bytes() == HDR_B + ROWS_B
 
 
 def test_run_writes_nothing_when_stopped_mid_replay(tmp_path):

@@ -34,7 +34,8 @@ The consumer CLI is `scripts/program_audio_guard.py`, used by both YouTube gates
 restreamer issue 357):
 - exit 0: MEASUREMENT or SILENT, fresh, and no FOREIGN window within `--max-age`;
 - exit 1: FOREIGN. That includes a stale FOREIGN, and a clean current window when a FOREIGN window
-  ended within `--max-age` (the latch, so a 10 s poller misses nothing);
+  ended within `--latch-s` (default 30 s, its own hold, longer than `--max-age`): a gate that polls
+  at least every ~25 s (a 10 s poll plus the guard's runtime has margin) never misses one;
 - exit 2: UNKNOWN, stale (more than 1 s in the future counts as stale), unreachable, or a broken
   HTTP response (fail closed).
 
@@ -87,8 +88,18 @@ One cam2 login writes **11 lines** into cam2's PERSISTENT journal on its USB sti
 meant ~95 000 lines a day, and a full multi-MB copy every 10 s, over the metered link when the rig
 is at a venue. So the mirror is a long-running service holding one
 `ssh … exec tail -c +1 -F --pid=$PPID /run/rig-qpsk-markers.csv`:
-- **The replay.** `-c +1` replays the file on every (re)connection. Nothing is written until the
-  first idle gap, so a consumer never gets a half-replayed copy.
+- **The replay is counted, never guessed.** The remote prints the file size (`stat`, 0 when
+  absent) before `tail -c +1`.
+  - The replay is complete once that many bytes arrived, or once a second session header arrived
+    (the painter restarted mid-replay).
+  - Nothing is written before that: not after a stall, not when the connection dies or the service
+    stops mid-replay. An idle-gap rule failed review: a 50 ms marker cadence leaves no gap at all.
+  - A replay not complete after 120 s (the file replaced between `stat` and the tail's open) ends
+    the connection and reconnects for a fresh size.
+  - A copy equal to, or a prefix of, the served file is not written, so a reconnect with no new
+    rows keeps the served file and its age.
+  - A new header that follows a half row on the same line (a truncation mid-row) starts the new
+    session there.
 - **Name following.** `-F` follows the name through a painter restart (`File::create` = truncate +
   a new `# qpsk-params` header, which restarts the copy) and through an EVENT purge + re-creation.
 - **No leftover tail.** `--pid=$PPID` (the sshd session) ends the remote tail when the connection
@@ -96,7 +107,12 @@ is at a venue. So the mirror is a long-running service holding one
 - **Writes.** Only complete rows are kept, written by temp + rename at most every 10 s and only when
   something changed. Live, about 63 bytes/s of new rows.
 - **Reconnects.** A dropped connection logs `ERROR` with ssh's stderr and backs off
-  10 → 300 s (back to 10 s after a connection that lived 300 s). The previous file is kept.
+  10 → 300 s (back to 10 s after a connection that lived 300 s). The previous file is kept. The
+  backoff is waited in 0.5 s slices: `time.sleep` resumes after SIGTERM, so one long sleep held a
+  `systemctl stop` past its 90 s timeout. A failed write still stops the ssh process group.
+- **Memory.** The copy grows with the painter session (~5 MB a day) in RAM and on tmpfs; cam2 holds
+  the same file in its own tmpfs, and a painter restart starts it over. A line over 4096 bytes and
+  bytes before the first session header are dropped and logged.
 - **The password** goes through `sshpass -e` (`$SSHPASS`), never argv. A oneshot timer cannot hold
   a connection: systemd kills a ControlPersist master with the oneshot's cgroup.
 

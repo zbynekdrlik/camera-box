@@ -54,6 +54,7 @@ Changes against the tasks below. They supersede any conflicting wording there.
    - picture: a per-frame QR `P911016.{frame}.{pts_ns}.{crc}` (new reserved run id, an origin like 911014, never a camera node), the same QR geometry as the cam2 painter, plus a frame counter;
    - sound: 48 kHz stereo, the QPSK marker (the same modulation and word format as `src/qpsk_marker.rs`, every 0.5 s, its index = frame index / 15) over a −30 dBFS 1 kHz tone bed;
    - the generator and the decoder share one parameter set;
+   - the tone bed frequency is `scripts/program_audio.py` `MEASUREMENT_TONE_LINES_HZ` (import it): the program-audio guard removes exactly that line, so any other bed frequency makes every CG session read FOREIGN and stop (issue 1404 Task 2 review);
    - the cg OBS test scene `E2E test (cg)` plays the same file in a media source;
    - SongPlayer plays it as a local test item (songplayer issue 228, option 2).
    - The CG sound check decodes the QPSK marker in the stream recording and the VOD, which proves continuity and A/V with the same instrument as the camera chain. The block correlation against the known file is the second, exact check. No music FLAC is used anywhere.
@@ -159,6 +160,7 @@ def test_verdict_unknown_when_coverage_below_90_percent():
 
 **Files:**
 - Create: `scripts/rig-marker-mirror.sh`. One pass: scp cam2 `/run/rig-qpsk-markers.csv` (via `camera_resolve CAM2`) into `$RIG_LEASE_SERVE_DIR/rig-qpsk-markers.csv` through a temp + atomic rename, and fail loud on error.
+- **As built (Task 2 lane, review rounds 1-2, issue 1404 comment 6024708653):** one cam2 login writes 11 lines into cam2's persistent stick journal, so the mirror is a long-running `--user` service holding ONE ssh connection (`stat` size, then `tail -c +1 -F --pid=$PPID`), not a 10 s scp timer; the serve dir is `$XDG_RUNTIME_DIR/rig-lease-serve` (tmpfs, 0700). The program-audio sampler, guard and both routes are as specified, plus a FOREIGN latch (`--latch-s`, default 30 s). Details: `.claude/rules/program-audio-guard.md`.
 - Create: `systemd/rig-marker-mirror.service` + `systemd/rig-marker-mirror.timer`, every 10 s, `--user`, shipped DISABLED like the other dev1 units.
 - Modify: `scripts/rig-lease-server.py`: route `GET/HEAD /rig-qpsk-markers.csv` to the mirrored file, `text/csv`. Return 404 while it is absent, and add an `X-Mirror-Age-S` header.
 - Test: `tests/python/test_rig_marker_mirror_1404.py`

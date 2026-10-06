@@ -5,7 +5,7 @@ OBS's NDI program output (`STREAM-SNV (stream)`). The receiver is audio-only and
 any NDI monitor. Every 2 s the service classifies the audio and rewrites `program-audio.json` in
 the rig-lease server's serve dir. Gates call
 `scripts/program_audio_guard.py --url http://dev1:8890/program-audio.json --max-age 10` and stop
-the broadcast on any exit but 0 (1 FOREIGN, also a FOREIGN window within the last 10 s; 2 UNKNOWN /
+the broadcast on any exit but 0 (1 FOREIGN, also a FOREIGN window within `--latch-s` 30 s; 2 UNKNOWN /
 stale / unreachable). The served file lives in `$XDG_RUNTIME_DIR/rig-lease-serve` (tmpfs).
 
 Verdicts, thresholds, calibration and limits: `.claude/rules/program-audio-guard.md`.

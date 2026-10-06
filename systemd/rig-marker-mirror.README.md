@@ -10,8 +10,10 @@ with camera-box.
 - `rig_marker_mirror.py` holds ONE ssh connection streaming
   `tail -c +1 -F --pid=$PPID /run/rig-qpsk-markers.csv`. One cam2 login writes 11 lines into
   cam2's persistent stick journal, so it never logs in every pass.
+  - The remote announces the file size first; nothing is written until that many bytes have
+    arrived (the replay), so a consumer never gets a prefix.
   - Complete rows go into `$XDG_RUNTIME_DIR/rig-lease-serve/rig-qpsk-markers.csv` by temp + rename,
-    at most every 10 s.
+    at most every 10 s, and only when there are new rows.
   - A dropped connection is retried with a 10 → 300 s backoff, and the previous file is kept.
 - `rig-marker-mirror.service`: `--user`, long-running, `Restart=always`, shipped DISABLED. There is
   no timer.

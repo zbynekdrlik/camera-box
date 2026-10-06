@@ -7,11 +7,12 @@ Both YouTube gates call it before the broadcast starts and every ~10 s while it 
 `scripts/lib/youtube-leg.sh`, restreamer issue 357) and stop the broadcast on anything but 0.
 
   exit 0  MEASUREMENT or SILENT, and fresh (-1 s <= age_s <= --max-age), and no FOREIGN window
-          within --max-age
+          within --latch-s
   exit 1  FOREIGN (non-measurement audio on the program) -- also when stale: an old FOREIGN
           reading is never downgraded to "maybe" -- and also when the CURRENT window is clean but
-          a FOREIGN window ended within --max-age (`last_foreign_age_s`, the sampler's latch), so a
-          gate polling every --max-age seconds never misses a FOREIGN window between two polls
+          a FOREIGN window ended within --latch-s (`last_foreign_age_s`, the sampler's latch;
+          default 30 s, three times a ~10 s gate poll plus the guard's own runtime), so a gate
+          that polls at least every ~25 s never misses a FOREIGN window between two polls
   exit 2  UNKNOWN, stale (age_s > --max-age, missing, or more than 1 s in the future -- a small
           negative age is a dantesync date step), unreachable, an HTTP or protocol error, an
           unreadable payload, an unexpected verdict -- fail CLOSED
@@ -23,7 +24,8 @@ number, and `reason=` explains every non-trivial outcome (stale, unreachable, th
 UNKNOWN reason).
 
 Usage:
-  program_audio_guard.py [--url http://dev1:8890/program-audio.json] [--max-age 10] [--timeout 5]
+  program_audio_guard.py [--url http://dev1:8890/program-audio.json] [--max-age 10] [--latch-s 30]
+                         [--timeout 5]
 """
 from __future__ import annotations
 
@@ -38,6 +40,7 @@ import urllib.request
 DEFAULT_URL = "http://dev1:8890/program-audio.json"
 DEFAULT_MAX_AGE_S = 10.0
 DEFAULT_TIMEOUT_S = 5.0
+DEFAULT_LATCH_S = 30.0
 NEGATIVE_AGE_TOLERANCE_S = 1.0  # a dantesync date step moves dev1's clock by tens of ms
 
 EXIT_OK = 0
@@ -62,7 +65,7 @@ def _line(verdict, rms, outside, age, reason=None) -> str:
     return line
 
 
-def decide(payload: dict, max_age_s: float) -> tuple[int, str]:
+def decide(payload: dict, max_age_s: float, latch_s: float = DEFAULT_LATCH_S) -> tuple[int, str]:
     """(exit code, the one output line) for a fetched payload."""
     verdict = payload.get("verdict")
     rms, outside, age = payload.get("rms_dbfs"), payload.get("outside_band_pct"), _num(payload.get("age_s"))
@@ -76,7 +79,7 @@ def decide(payload: dict, max_age_s: float) -> tuple[int, str]:
     if verdict == "FOREIGN":
         return EXIT_FOREIGN, _line("FOREIGN", rms, outside, age, stale_why if stale else None)
     last_foreign = _num(payload.get("last_foreign_age_s"))
-    if last_foreign is not None and last_foreign <= max_age_s:
+    if last_foreign is not None and last_foreign <= latch_s:
         return EXIT_FOREIGN, _line("FOREIGN", rms, outside, age,
                                    f"FOREIGN window {last_foreign:.1f} s ago (latched; current {verdict})")
     if verdict in ("MEASUREMENT", "SILENT"):
@@ -114,12 +117,14 @@ def main(argv=None) -> int:
     ap.add_argument("--url", default=DEFAULT_URL, help=f"default {DEFAULT_URL}")
     ap.add_argument("--max-age", type=float, default=DEFAULT_MAX_AGE_S,
                     help=f"seconds a reading stays fresh (default {DEFAULT_MAX_AGE_S:g})")
+    ap.add_argument("--latch-s", type=float, default=DEFAULT_LATCH_S,
+                    help=f"exit 1 while a FOREIGN window ended this recently (default {DEFAULT_LATCH_S:g})")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_S,
                     help=f"HTTP timeout in seconds (default {DEFAULT_TIMEOUT_S:g})")
     args = ap.parse_args(argv)
     try:
         payload = fetch(args.url, args.timeout)
-        code, line = decide(payload, args.max_age)
+        code, line = decide(payload, args.max_age, args.latch_s)
     except Exception as exc:  # fail CLOSED with the contract line on anything unforeseen
         reason = str(exc) if isinstance(exc, ValueError) else f"guard error: {exc!r}"
         print(_line("UNKNOWN", None, None, None, reason), flush=True)
