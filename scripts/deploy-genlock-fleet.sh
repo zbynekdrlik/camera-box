@@ -70,6 +70,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-box-baseline-win.sh
 # issue 1357: the Windows OBS-box baseline -- step (0b) sets + reads back a max-performance power plan.
 . "$HERE/lib/obs-box-baseline-win.sh"
+# shellcheck source=scripts/lib/obs-clean-close-win.sh
+# issue 1367: steps (0a)/(2)/(2b) -- refuse a live stream, close OBS CLEANLY so it saves, read back.
+. "$HERE/lib/obs-clean-close-win.sh"
 # shellcheck source=scripts/lib/strih-lx-deploy.sh
 # issue 1317 part 6: the strih-lx EXECUTE arm + the builders its --plan arm prints (plan == execute).
 . "$HERE/lib/strih-lx-deploy.sh"
@@ -275,6 +278,7 @@ foreach ($t in $keepAliveTasks) {
 }
 PSKAD_BODY
 )"
+    keepalive_disable+=$'\n'"$(obs_clean_close_refusal_restore_ps)"  # issue 1367: (1c) refusal hook
     keepalive_restore=$(cat <<'PSKAR'
 # (8b) #1140 -- re-enable the OBS keep-alive scheduled tasks we disabled in step (1b), VERIFIED
 #      (mirrors the strih AHK verified-restart). Once the STEP-2 launch relaunches obs64 the
@@ -338,8 +342,11 @@ PSFAST
   plugin_backup_block="$(genlock_plugin_backup_ps "$mode")"
   plugin_deploy_block="$(genlock_plugin_deploy_ps "$mode")"
   # issue 1357: the power-plan set + read-back (the ONLY baseline mutation), before OBS is touched.
-  local power_plan_block
+  local power_plan_block clean_close_pre clean_close_stop saved_readback
   power_plan_block="$(win_baseline_power_plan_ensure_ps)"
+  clean_close_pre="$(obs_clean_close_preflight_ps)"
+  clean_close_stop="$(obs_clean_close_stop_ps)"
+  saved_readback="$(obs_saved_settings_readback_ps)"
 
   cat <<PS
 # ===== issue 789 genlock FLEET deploy -- box=${box} mode=${mode} (paste into the ${box} win-* MCP Shell) =====
@@ -357,18 +364,21 @@ PSFAST
 if (-not (Test-Path \$stage))  { Write-Error "stage \$stage not found -- upload the artifact first (plan STEP 0)"; exit 2 }
 if (-not (Test-Path \$obsDir)) { Write-Error "OBS install \$obsDir not found"; exit 2 }
 
+${clean_close_pre}
+
 ${power_plan_block}
 
 ${ahk_stop}
 
 ${keepalive_disable}
 
-# (2) Stop obs64 (+ obs-browser-page) and clear crash sentinels so the swap's files are unlocked and
-#     OBS does not pop the Crash-Detected modal on relaunch. obs.dll's handle can outlive a short
-#     sleep, so wait a bit.
-Get-Process obs64,obs-browser-page -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+${clean_close_stop}
+# (2a) obs.dll's handle can outlive the process by a moment, so wait a bit; clear the crash sentinels
+#      so OBS does not pop the Crash-Detected modal on relaunch (a forced stop leaves one).
 Start-Sleep -Seconds 5
 Remove-Item "\$env:APPDATA\\obs-studio\\.sentinel\\*" -Force -ErrorAction SilentlyContinue
+
+${saved_readback}
 
 # (3) Back up the components we are about to overwrite (instant rollback), one dated dir per deploy.
 \$stamp     = Get-Date -Format 'yyyy-MM-ddTHH-mm-ss'
@@ -751,7 +761,7 @@ emit_windows_plan() {
 # STEP 0 (once per box): upload the downloaded '${artifact}' bytes (staged locally at ${stage}) to
 #         the box at ${win_stage} via the ${mcp} MCP FileUpload (or sshpass scp -O of a zip +
 #         Expand-Archive on the box), then run the program below in the ${mcp} MCP Shell
-#         (timeout >= 240 s):
+#         (timeout >= 360 s: the issue-1367 clean close may wait 30 s for a recording + 45 s for OBS):
 # ----------------------------------------------------------------------------------------------------
 ${program}
 # ----------------------------------------------------------------------------------------------------

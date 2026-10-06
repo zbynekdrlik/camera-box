@@ -174,7 +174,7 @@ owner sets it. That is an expected report-only row, not a bug.
   any of those strings.
 - No error message may contain the literal `powercfg /setactive`. The pytest counts the powercfg
   mutating verbs in the whole deploy program and expects exactly one.
-- `deploy-genlock-fleet.sh` is at 975 of its 1000-line budget (asserted in `deploy_genlock_fleet.rs`).
+- `deploy-genlock-fleet.sh` is at 985 of its 1000-line budget (asserted in `deploy_genlock_fleet.rs`).
 - The facet's rendering lives in the lib (`win_baseline_report_rows`); the gate only adds the wiring
   (one option + one call line in main()). The gate was since split (issues 1377 + 1384: facet libs,
   `vig_row_*` row functions), so a gate row belongs in its lib, never back in main()

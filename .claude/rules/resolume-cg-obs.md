@@ -101,7 +101,7 @@ live `getent hosts resolume.lan` address.
 
    Follow the emitted plan: the STEP -1 identity-confirm, then upload the staged bytes to
    `C:\stage-genlock-<sha>` via the **win-resolume MCP** FileUpload, then paste the emitted deploy
-   program into the **win-resolume MCP Shell** (timeout ≥ 240 s). It stops the AutoHotkey64 watcher
+   program into the **win-resolume MCP Shell** (timeout ≥ 360 s, issue 1367 clean close). It stops the AutoHotkey64 watcher
    ONLY if it is running (so it can't respawn obs64 mid-copy) + obs64, backs up, swaps the bytes,
    writes the markers, byte-verifies the deployed obs.dll/distroav.dll, and only REPORTS the
    AutoHotkey64 count. It never restarts AHK (issue 1372); OBS stays down until STEP 2.

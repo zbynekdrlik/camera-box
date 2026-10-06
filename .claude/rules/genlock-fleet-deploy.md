@@ -5,6 +5,8 @@ paths:
   - "scripts/lib/genlock-fleet-boxes.sh"
   - "scripts/lib/strih-lx-deploy.sh"
   - "scripts/lib/genlock-plugin-deploy.sh"
+  - "scripts/lib/obs-clean-close-win.sh"
+  - "scripts/lib/mv-reverify-escalate.sh"
 ---
 
 **Line budget (issue 1372):** `tests/deploy_genlock_fleet.rs` pins `deploy-genlock-fleet.sh` under
@@ -393,16 +395,108 @@ The airuleset `post-push-ci-cleanup` hook cancels every run whose commit is an a
 
 After every fleet relaunch, re-run `scripts/ndi-portmap-audit.sh --check`: the sender-output pin (issue 1185) re-orders strih's NDI ports on relaunch, so the checked-in baseline goes stale and the dev1 port-map watchdog pages (14 pages 15./16.9.) — `--capture` + commit the baseline as part of the deploy sitting.
 
-## GOTCHA — a FAST/full deploy's OBS stop DROPS live WS-applied values that OBS never saved (23.9.2026)
+## The Windows deploy closes OBS CLEANLY so runtime WS writes persist (issue 1367)
 
-The Windows deploy program stops OBS hard to swap the bytes, so any input setting written over
-OBS-WS since OBS last saved its scene collection is lost at the relaunch. Live: the `[8/8g]` apply
-had set stream `NDI 2ME PGM genlock_latency_ms_src` 987 + `mbc` audio sync offset +2 (recorded in
-`~/.camera-box/av-sync-last.json`), and after the next FAST deploy + relaunch the box came back at
-976 / +29 (the values last saved). The #1265 swing guard then compares the next run against a pin
-the box is not actually running. After EVERY stream deploy/relaunch: read the live pin + `mbc`
-offset over WS and, if they differ from `av-sync-last.json`'s `applied_latency_ms` /
-`audio_offset_ms`, re-apply those (read-back verified) before the next E2E.
+**The persistence finding.** A setting written over obs-websocket (`SetInputSettings`,
+`SetInputAudioSyncOffset`: the #856 A/V apply, the latency pins) changes OBS RUNTIME only. It reaches
+the scene-collection JSON at OBS's next save, and a clean exit always saves
+(`OBSBasic::closeEvent` -> `closeWindow()` -> `saveAll()`). A `Stop-Process -Force` skips that save,
+so the relaunch reloads the last SAVED values. Live: 23.9.2026 the stream pin 987 / `mbc` +2 came back
+as 976 / +29 after a FAST deploy; 6.10.2026 runtime `mbc` sync 37 ms vs saved 29 ms
+(`Stream_Obs.json`), and the 30.9 runtime pin 1020 most likely came back as the saved 1040 behind the
++48 ms rig A/V shift (issue 1367 comment 6013239473).
+
+**What the deploy program does now** (one shared lib, `scripts/lib/obs-clean-close-win.sh`, the same
+bytes for stream and resolume; design comment 6014590298):
+
+- **(0a)**, before ANY change on the box (before the power plan, the AutoHotkey64 stop, the
+  keep-alive disable): defines the on-box obs-websocket client (`ClientWebSocket`, Windows PowerShell
+  5.1, `ws://127.0.0.1:4455`, rpc v1, no event subscriptions) and reads GetStreamStatus +
+  GetRecordStatus. A live stream = `clean close REFUSED`, **exit 12**, nothing changed. :4455
+  unreadable while obs64 runs = a named WARNING and the deploy goes on (the rig-busy guard's rule:
+  refuse what it can READ as live). A password is answered only when the Hello asks, from the box's
+  own `plugin_config\obs-websocket\config.json`. obs64 is counted LIVE only (`Get-CcLiveObs`:
+  not `HasExited`, threads > 0), so a stale handle of an exited obs64 (the 12.9.2026 resolume
+  case) neither counts as a second OBS nor keeps the close waiting.
+- **(1c)**, only on a box with keep-alive tasks (stream): `Invoke-CcRefusalRestore`, which
+  re-enables the tasks step (1b) disabled. The step-(2) refusal calls it when it is defined.
+- **(2)**: re-read right before the close (a stream that started since (0a) = exit 12, after the
+  (1c) hook). A running recording gets StopRecord + a GetRecordStatus confirm (30 s). Then, when the
+  ONE live obs64 in the program's own session shows OBS's own window in front (title `OBS ...`;
+  `UpdateTitleBar` always starts it so), `CloseMainWindow()`, waited up to
+  `$ccCloseTimeoutMs = 45000`: `clean close OK in N ms '<title>'`. WM_CLOSE goes to the front
+  unowned window, so a projector in front is never sent it (it would close the projector, wait out
+  the 45 s and log a false `timed out -- forcing`; closing a projector saves nothing, so the
+  relaunch would restore it). The old `Get-Process obs64,obs-browser-page | Stop-Process -Force` runs only
+  inside `if ($ccForce)`, after one of five named lines: wrong obs64 count / session, `has no main
+  window`, `shows '<title>' in front, not the OBS main window`, `did not take the close (disabled
+  behind a modal dialog)`, `clean close timed out -- forcing`. A clean exit only sweeps leftover
+  obs-browser-page processes.
+- **(2b)**, REPORT-ONLY, after the stop: from the active collection (`user.ini`
+  `SceneCollectionFile=`, OBS 32 stores it WITH `.json`; else `global.ini`) every `ndi_source`'s saved
+  `genlock_latency_ms_src` (absent = the build default) and every source with `mixers != 0` (libobs
+  saves 0 for a source without audio) with its saved `sync` in ms. Any failure is one `read-back
+  UNREAD` line, never an exit.
+
+**Limits, stated:**
+
+- The close needs the INTERACTIVE session. The win-* MCP Shell is session 1 (read live on stream and
+  resolume), so WM_CLOSE reaches the window; a program run over plain ssh (session 0) gets the named
+  force line. 6.10.2026 a MANUAL WM_CLOSE of stream OBS in the interactive session exited in 6.6 s;
+  this program's own close first runs live at the next deploy (its OK / timeout lines are the proof).
+- A stream it cannot READ is not protected: with :4455 down (e.g. the 18.9 regenerated config with
+  `server_enabled false`) a streaming OBS asks to confirm the exit, the 45 s bound runs out and the
+  named force kills it under the stream, the same as before this change.
+- The MCP Shell timeout for the program is now >= 360 s (the plan says so): the close may wait 30 s
+  for a recording and 45 s for OBS on top of the copy.
+- OBS asks to confirm the exit when `ConfirmOnExit` is set and an output is still active (replay
+  buffer, virtual camera, a recording that would not stop). Nobody answers it, so the 45 s bound runs
+  out and the named force follows, and the runtime writes are lost THAT time. After a deploy whose log
+  shows a `-- forcing` line, read the live pin + `mbc` offset over WS and re-apply
+  `~/.camera-box/av-sync-last.json`'s `applied_latency_ms` / `audio_offset_ms` (read back) before
+  the next E2E, as before. A `clean close OK` deploy needs no re-apply: compare the (2b) lines with
+  the values read before the deploy.
+- **`scripts/lib/mv-reverify-escalate.sh` stays a force-kill.** It restarts strih OBS headless over
+  ssh (session 0 cannot post WM_CLOSE to a session-1 window, issue 958) and this OBS build has no
+  `ExitOBS` request, so that escalation still loses unsaved runtime writes. Since issue 1317 it acts
+  only on a Windows strih. strih-lx restarts through its systemd unit, and a SIGTERM on Linux runs
+  `OBSApp::processSigTerm` -> `saveAll()` before `quit()` (`vendor/obs-studio/frontend/OBSApp.cpp`),
+  so the Linux boxes keep their runtime writes on a unit stop or restart.
+- Other obs64 force-kills that still skip the save: `scripts/launch-obs-genlock.sh --force` on a
+  RUNNING OBS (its stop before the relaunch) and `scripts/obs-guarded-launch.ps1`. In the deploy flow
+  OBS is already down at the STEP-2 relaunch, so nothing is lost there; a standalone `--force`
+  relaunch still needs the save-trigger checklist in `rig-state-inspection.md` (issue 1333).
+
+**Tests** (`tests/python/test_deploy_clean_close_win_1367.py`, CI's `pytest tests/python`): the
+emitted program for stream + resolume, FULL + FAST (order, the 45 s bound, the force only in the
+named branch, the (1c) hook on stream only, the read-back, one shared fragment), a pwsh parse of
+every program, a token scan banning the syntax pwsh 7 accepts and Windows PowerShell 5.1 rejects
+(`&&` `||` `??` `?.` the ternary), and the fragment RUN in pwsh against a stdlib fake obs-websocket
+(`tests/python/obs_ws_fake_1367.py`) and a fake `obs64` (a copy of `sleep`). pwsh on Linux has no
+OBS window, so the runs shadow `Get-Process` with a function (the stub-function pattern of
+`tests/pwsh/run_dantesync_tray_swap_1372.sh`) that returns only the test's OWN fake with a scripted
+`MainWindowTitle` + `CloseMainWindow`: a clean exit (SIGTERM, never a SIGKILL, done well under the
+bound), a hang (bound shortened by the test, then the named force), no window, a projector in front,
+a refused close, a stream that starts between the (0a) and (2) reads (the REAL (1c) hook runs over a
+`schtasks` stand-in on PATH), and what a Windows box can list next to OBS: its own pid still listed
+after the exit, a 0-thread obs64 sibling, a `HasExited` that throws. 21 mutants of the lib and the
+planner are killed (the commit messages list them).
+
+**A throwing property getter reads as `$null` in PowerShell (non-strict), it does not abort.** An
+access-denied `HasExited` therefore counts the process as live and nothing ends the program, even
+under `$ErrorActionPreference = 'Stop'` (read on the stream box under Windows PowerShell 5.1 and in
+pwsh 7, 6.10.2026). The live filter keeps the repo's `-not $_.HasExited -and $_.Threads.Count -gt
+0` idiom; the thread count from the process snapshot still rules out a dead handle.
+
+**PowerShell trap the run caught:** an awaited void Task's `.GetAwaiter().GetResult()` returns a
+`VoidTaskResult` object in PowerShell. Unassigned, it lands in the function's output, so a function
+that returned the socket returned an array. Assign every such call to `$null`.
+
+**Live read-only check of the fragment** (no close, no kill): build a `.ps1` from the (0a) and (2b)
+blocks only, write it with the win-* MCP FileWrite to the box's `%TEMP%`, run it with `powershell
+-NoProfile -ExecutionPolicy Bypass -File`, then delete it. 6.10.2026 it read `streaming=False
+recording=False` and printed the saved pins and sync on both stream and resolume (Windows PowerShell
+5.1.26100).
 
 ## Lookups in the emitted remote programs must fail through a NAMED line (issue 1367)
 
