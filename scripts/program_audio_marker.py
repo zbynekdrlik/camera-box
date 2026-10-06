@@ -63,7 +63,9 @@ class MarkerDecoder:
     (start_s, index) CRC-valid words, in time order."""
 
     def __init__(self, path: str | None = None):
-        self.path = path or default_shim_path()
+        # Absolute, so dlopen loads the file the existence check saw: for a name without a slash it
+        # would search the system library paths instead (QPSK_GUARD_SHIM=libm.so.6).
+        self.path = os.path.abspath(path or default_shim_path())
         if not os.path.isfile(self.path):
             raise DecoderUnavailable(
                 f"QPSK marker decoder shim {self.path} is missing -- build it with "

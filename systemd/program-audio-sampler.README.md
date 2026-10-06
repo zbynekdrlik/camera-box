@@ -17,7 +17,18 @@ Verdicts, thresholds, calibration and limits: `.claude/rules/program-audio-guard
 
 Prerequisite: the lease server runs the issue-1404 code (step 1 of `rig-marker-mirror.README.md`).
 
+**The sampler unit is already installed and enabled on dev1** (issue-1404 Task 2), and it runs from
+the `~/devel/camera-box` checkout. So the steps below are due the moment that checkout moves to the
+marker-requirement code, not at some later install: until then the old process keeps writing
+MEASUREMENT on the spectral share alone. The lease server serves such a payload as UNKNOWN once IT
+runs the new code (step 0b), and the camera-box guard refuses it either way; both fail closed.
+
 ```bash
+# 0b. reload the lease server on the new code, ONLY while the lease is free (held must be false):
+#     it serves a MEASUREMENT without a marker chain as UNKNOWN to every reader (restreamer too)
+curl -s http://127.0.0.1:8890/rig-lease.json
+systemctl --user restart rig-lease-server.service
+
 # 0. build the QPSK marker decoder library FIRST (g++, a few seconds) -- the sampler refuses to run
 #    without it (UNKNOWN + exit 1), and a sampler process started before this change keeps writing
 #    MEASUREMENT without a marker chain, which the new guard reads as UNKNOWN until it restarts.

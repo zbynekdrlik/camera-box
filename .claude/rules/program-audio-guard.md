@@ -154,9 +154,24 @@ level. Re-run the full calibration after any decoder or rule change:
   missing libndi. A decode error on one window = UNKNOWN for that window.
 - **A shim built from other sources** (sha256 of the shim + the two headers, embedded at build
   time) still loads, with a WARNING asking for a rebuild.
-- **The guard rejects a MEASUREMENT without `marker_chain`.** After a pull, an old sampler process
-  keeps writing spectral-only MEASUREMENT until it restarts, and the new guard reads that as UNKNOWN.
-  Build the shim, then restart the sampler (the README runbook).
+- **A MEASUREMENT without `marker_chain` is refused twice.** After a pull, an old sampler process
+  keeps writing spectral-only MEASUREMENT until it restarts.
+  - The lease server (`rig_serve_files.program_audio_response`) serves it as UNKNOWN with its ages
+    kept. That is the one place every reader sees, restreamer's own reader included (review round 1).
+  - The camera-box guard also refuses it (exit 2), for a server that still runs the old code.
+  - The unit is already enabled on dev1, so the README steps are due when the checkout moves:
+    restart the lease server (only while `held=false`), build the shim, restart the sampler.
+- **Known limit: audio lost WITHOUT a receive gap is stitched into the span.** If samples go missing
+  while blocks keep arriving under 1 s apart, the chain reads the hole as a jump of the index clock.
+  - A review probe cut 0.1–0.8 s holes into the real clips: 4 of 762 cases read one FOREIGN window,
+    which latches.
+  - OBS fills its own output stalls with silence, which keeps the time, so this needs real NDI frame
+    loss.
+  - The NDI timecode could detect the loss, but it also jumps with every dantesync date step. That
+    trade-off is a design call left open.
+- **Warm-up hides a spectral FOREIGN too** (the ruling: UNKNOWN, never FOREIGN, before 4 s of audio).
+  A music burst shorter than the warm-up right after a receive gap therefore does not start the
+  latch; the guard still exits 2 on that UNKNOWN.
 - **Install order matters.** The build renames the new library over the old one, never writes it in
   place: a running sampler keeps its mapped copy (writing a mapped `.so` in place can SIGBUS it).
 - **Cost:** ~70 ms of decode per 2 s window (4 s stereo span at 48 kHz) plus the FFT.

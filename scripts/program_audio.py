@@ -82,6 +82,15 @@ Known limits:
   * in-band music mixed UNDER a marker that still decodes reads MEASUREMENT (the marker chain
     stands, the share stays in band); broadband music is caught by the spectral share. The
     measurement-clip-only rule for SongPlayer and the cg OBS (plan Task 5) is the control for it.
+  * audio LOST without a receive gap (samples missing while blocks keep arriving under 1 s
+    apart) is stitched into one span; the chain then reads the hole as a jump of the index clock.
+    A review probe cut 0.1-0.8 s holes into the real clips: 4 of 762 cases read one FOREIGN
+    window (which latches). OBS fills its own output stalls with silence (time kept), so this
+    needs real NDI frame loss; the NDI timecode could detect it but also jumps with every
+    dantesync date step (a design call, not taken here).
+  * during the 4 s warm-up a spectrally FOREIGN window reads UNKNOWN too (the ruling: never
+    FOREIGN, never MEASUREMENT before 4 s of audio), so a music burst shorter than the warm-up
+    right after a receive gap does not start the FOREIGN latch; the guard still exits 2 on it.
 Pinned by tests/python/test_program_audio_1404.py + test_program_audio_marker_1404.py.
 """
 from __future__ import annotations
