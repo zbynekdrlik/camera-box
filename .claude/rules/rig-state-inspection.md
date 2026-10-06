@@ -329,8 +329,9 @@ rig looked half-alive):
 **Since issue 1367 the fleet deploy program (`deploy-genlock-fleet.sh`, stream + resolume) closes OBS
 cleanly first and forces only as a named fallback (`genlock-fleet-deploy.md`).** This checklist still
 applies to every remaining force-kill: a deploy whose log shows `-- forcing`, the scratch
-`fastdll-swap-*.ps1` programs, `launch-obs-genlock.sh --force` on a running OBS, the mv-reverify
-escalation.
+`fastdll-swap-*.ps1` programs, `launch-obs-genlock.sh --force` on a running OBS, and the
+mv-reverify escalation's Windows-strih branch (retired with the Windows strih; strih-lx restarts
+through its unit, and OBS saves on SIGTERM on Linux).
 
 `SetInputSettings` / `SetInputAudioSyncOffset` over obs-websocket change the RUNTIME source state but do
 NOT mark the project dirty, so OBS never rewrites the scene-collection JSON for them; a graceful exit

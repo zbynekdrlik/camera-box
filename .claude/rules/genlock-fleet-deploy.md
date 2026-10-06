@@ -415,14 +415,22 @@ bytes for stream and resolume; design comment 6014590298):
   GetRecordStatus. A live stream = `clean close REFUSED`, **exit 12**, nothing changed. :4455
   unreadable while obs64 runs = a named WARNING and the deploy goes on (the rig-busy guard's rule:
   refuse what it can READ as live). A password is answered only when the Hello asks, from the box's
-  own `plugin_config\obs-websocket\config.json`.
-- **(2)**: re-read right before the close (a stream that started since (0a) = exit 12, naming that
-  steps 0b/1/1b already ran). A running recording gets StopRecord + a GetRecordStatus confirm (30 s).
-  Then `CloseMainWindow()` on the ONE obs64 in the program's own session, waited up to
-  `$ccCloseTimeoutMs = 45000`: `clean close OK in N ms`. The old `Get-Process obs64,obs-browser-page
-  | Stop-Process -Force` runs only inside `if ($ccForce)`, after one of three named lines: wrong
-  obs64 count / session, `has no main window to close -- forcing`, `clean close timed out --
-  forcing`. A clean exit only sweeps leftover obs-browser-page processes.
+  own `plugin_config\obs-websocket\config.json`. obs64 is counted LIVE only (`Get-CcLiveObs`:
+  not `HasExited`, threads > 0), so a stale handle of an exited obs64 (the 12.9.2026 resolume
+  case) neither counts as a second OBS nor keeps the close waiting.
+- **(1c)**, only on a box with keep-alive tasks (stream): `Invoke-CcRefusalRestore`, which
+  re-enables the tasks step (1b) disabled. The step-(2) refusal calls it when it is defined.
+- **(2)**: re-read right before the close (a stream that started since (0a) = exit 12, after the
+  (1c) hook). A running recording gets StopRecord + a GetRecordStatus confirm (30 s). Then, when the
+  ONE live obs64 in the program's own session shows OBS's own window in front (title `OBS ...`;
+  `UpdateTitleBar` always starts it so), `CloseMainWindow()`, waited up to
+  `$ccCloseTimeoutMs = 45000`: `clean close OK in N ms '<title>'`. WM_CLOSE goes to the front
+  unowned window, so a projector in front is never sent it (it would close and drop out of the saved
+  projector list). The old `Get-Process obs64,obs-browser-page | Stop-Process -Force` runs only
+  inside `if ($ccForce)`, after one of five named lines: wrong obs64 count / session, `has no main
+  window`, `shows '<title>' in front, not the OBS main window`, `did not take the close (disabled
+  behind a modal dialog)`, `clean close timed out -- forcing`. A clean exit only sweeps leftover
+  obs-browser-page processes.
 - **(2b)**, REPORT-ONLY, after the stop: from the active collection (`user.ini`
   `SceneCollectionFile=`, OBS 32 stores it WITH `.json`; else `global.ini`) every `ndi_source`'s saved
   `genlock_latency_ms_src` (absent = the build default) and every source with `mixers != 0` (libobs
@@ -433,7 +441,13 @@ bytes for stream and resolume; design comment 6014590298):
 
 - The close needs the INTERACTIVE session. The win-* MCP Shell is session 1 (read live on stream and
   resolume), so WM_CLOSE reaches the window; a program run over plain ssh (session 0) gets the named
-  force line. 6.10.2026 a clean close of stream OBS exited in 6.6 s.
+  force line. 6.10.2026 a MANUAL WM_CLOSE of stream OBS in the interactive session exited in 6.6 s;
+  this program's own close first runs live at the next deploy (its OK / timeout lines are the proof).
+- A stream it cannot READ is not protected: with :4455 down (e.g. the 18.9 regenerated config with
+  `server_enabled false`) a streaming OBS asks to confirm the exit, the 45 s bound runs out and the
+  named force kills it under the stream, the same as before this change.
+- The MCP Shell timeout for the program is now >= 360 s (the plan says so): the close may wait 30 s
+  for a recording and 45 s for OBS on top of the copy.
 - OBS asks to confirm the exit when `ConfirmOnExit` is set and an output is still active (replay
   buffer, virtual camera, a recording that would not stop). Nobody answers it, so the 45 s bound runs
   out and the named force follows, and the runtime writes are lost THAT time. After a deploy whose log
@@ -454,10 +468,16 @@ bytes for stream and resolume; design comment 6014590298):
 
 **Tests** (`tests/python/test_deploy_clean_close_win_1367.py`, CI's `pytest tests/python`): the
 emitted program for stream + resolume, FULL + FAST (order, the 45 s bound, the force only in the
-named branch, the read-back, one shared fragment), a pwsh parse of every program, and the fragment
-RUN in pwsh against a stdlib fake obs-websocket (`tests/python/obs_ws_fake_1367.py`) and a fake
-`obs64` process (a copy of `sleep`). Under pwsh on Linux `CloseMainWindow` finds no window, so the
-runs take the named force branch; the clean-exit and timeout branches are pinned as text.
+named branch, the (1c) hook on stream only, the read-back, one shared fragment), a pwsh parse of
+every program, a token scan banning the syntax pwsh 7 accepts and Windows PowerShell 5.1 rejects
+(`&&` `||` `??` `?.` the ternary), and the fragment RUN in pwsh against a stdlib fake obs-websocket
+(`tests/python/obs_ws_fake_1367.py`) and a fake `obs64` (a copy of `sleep`). pwsh on Linux has no
+OBS window, so the runs shadow `Get-Process` with a function (the stub-function pattern of
+`tests/pwsh/run_dantesync_tray_swap_1372.sh`) that returns only the test's OWN fake with a scripted
+`MainWindowTitle` + `CloseMainWindow`: a clean exit (SIGTERM, never a SIGKILL, done well under the
+bound), a hang (bound shortened by the test, then the named force), no window, a projector in front,
+a refused close, and a stream that starts between the (0a) and (2) reads. 17 mutants of the lib and
+the planner are killed (the commit messages list them).
 
 **PowerShell trap the run caught:** an awaited void Task's `.GetAwaiter().GetResult()` returns a
 `VoidTaskResult` object in PowerShell. Unassigned, it lands in the function's output, so a function

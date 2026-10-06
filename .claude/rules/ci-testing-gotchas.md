@@ -1571,6 +1571,27 @@ Limits:
   run cannot catch that.
 - A runner that sources a repo script must not reuse its variable names. The sourced
   `dantesync-fleet-upgrade.sh` sets `HERE`.
+- pwsh 7 also PARSES syntax 5.1 rejects (`&&` `||` `??` `?.` the ternary), so a pwsh parse proves
+  nothing about 5.1 syntax. Scan the tokens: `ParseFile(..., [ref]$tokens, [ref]$errors)` and
+  refuse `Kind -in 'AndAnd','OrOr','QuestionQuestion','QuestionDot','QuestionMark', …`
+  (`test_the_fragment_uses_no_powershell_7_only_syntax`, issue 1367).
+
+Three more harness traps from the issue-1367 clean-close tests (`tests/python/test_deploy_clean_close_win_1367.py`):
+- **`pwsh -Command '<script>' a b c` does NOT bind `a b c` to `$args`:** the extra words are
+  appended to the command text and parsed with it. Write the script to a file and run
+  `pwsh -File script.ps1 a b c`.
+- **A shadow function can hand the program a Process with a SCRIPTED method:** `Get-Process`
+  defined as an advanced function wraps `Microsoft.PowerShell.Management\Get-Process
+  @PSBoundParameters` and adds `Add-Member -Force -MemberType ScriptMethod -Name CloseMainWindow`
+  / `NoteProperty -Name MainWindowTitle` to the real object; the instance member wins over the .NET
+  one, and `Stop-Process` still takes the object. Filter it to the test's OWN fake pid, so two runs
+  in parallel lanes never kill each other's fake.
+- **A python test server's listening socket: `close()` does not wake an `accept()` blocked on
+  another thread on Linux** — that accept still takes one more connection, so an "unreachable"
+  case read a live server. `shutdown(socket.SHUT_RDWR)` first (accept then fails EINVAL). For a
+  plain "nothing listens there" URI, bind a socket to port 0, read the port, close it without
+  `listen()`. Reap a fake child process from a thread (`threading.Thread(target=popen.wait)`), or a
+  SIGTERMed fake stays a zombie that `Get-Process` still lists.
 
 ## A pytest that sources a bash lib must source it under the CALLER's `set -euo pipefail` (issue 1357)
 
