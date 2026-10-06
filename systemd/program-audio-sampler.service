@@ -19,7 +19,9 @@ Type=simple
 ExecStart=/usr/bin/python3 %h/devel/camera-box/scripts/program_audio_sampler.py
 Restart=on-failure
 RestartSec=10
-# Optional overrides: PROGRAM_AUDIO_SOURCE (the NDI sender name), RIG_LEASE_SERVE_DIR, NDI_LIB_PATH.
+# Optional overrides: PROGRAM_AUDIO_SOURCE (the NDI sender name), RIG_LEASE_SERVE_DIR, NDI_LIB_PATH,
+# QPSK_GUARD_SHIM (the marker decoder library; default ~/.local/lib/camera-box/libqpsk-guard-shim.so,
+# built by scripts/build-qpsk-guard-shim.sh -- without it the sampler writes UNKNOWN and exits 1).
 # A private file, never the GLOBAL ~/.config/environment.d/. The sampler runs its receiver with a
 # private, empty NDI_CONFIG_DIR itself: mDNS only, no TCP discovery connection into any sender
 # (.claude/rules/ndi-discovery.md, issue 1389).

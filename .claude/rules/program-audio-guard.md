@@ -4,6 +4,10 @@ paths:
   - "scripts/program_audio_ndi.py"
   - "scripts/program_audio_sampler.py"
   - "scripts/program_audio_guard.py"
+  - "scripts/program_audio_marker.py"
+  - "scripts/program_audio_marker_calibrate.py"
+  - "scripts/qpsk_guard_shim.cpp"
+  - "scripts/build-qpsk-guard-shim.sh"
   - "scripts/rig_serve_files.py"
   - "scripts/rig-marker-mirror.sh"
   - "scripts/rig_marker_mirror.py"
@@ -11,6 +15,8 @@ paths:
   - "systemd/rig-marker-mirror.*"
   - "tests/python/test_program_audio_1404.py"
   - "tests/python/test_program_audio_guard_1404.py"
+  - "tests/python/test_program_audio_marker_1404.py"
+  - "tests/python/qpsk_guard_shim_1404.py"
   - "tests/python/test_rig_marker_mirror_1404.py"
   - "tests/python/test_rig_serve_routes_1404.py"
 ---
@@ -28,18 +34,21 @@ its SERVE dir (`scripts/rig_serve_files.py`): `$XDG_RUNTIME_DIR/rig-lease-serve`
 | Route | Writer | Contract |
 |---|---|---|
 | `/rig-qpsk-markers.csv` | `rig-marker-mirror` `--user` service (`scripts/rig-marker-mirror.sh` → `rig_marker_mirror.py`) | cam2's `/run/rig-qpsk-markers.csv`, complete rows; `text/csv`; `X-Mirror-Age-S` = seconds since new rows last arrived; 404 absent |
-| `/program-audio.json` | `program-audio-sampler` `--user` service | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s[, reason]}`; both ages recomputed by the server per request; 404 absent; unreadable or foreign-owned = UNKNOWN |
+| `/program-audio.json` | `program-audio-sampler` `--user` service | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain[, reason]}`; both ages recomputed by the server per request; the two marker counts are null without a full marker span; 404 absent; unreadable or foreign-owned = UNKNOWN |
 
 The consumer CLI is `scripts/program_audio_guard.py`, used by both YouTube gates (camera-box and
 restreamer issue 357):
-- exit 0: MEASUREMENT or SILENT, fresh (within `--max-age`), and no FOREIGN window within `--latch-s`;
+- exit 0: MEASUREMENT or SILENT, fresh (within `--max-age`), and no FOREIGN window within `--latch-s`.
+  A MEASUREMENT must also carry a numeric `marker_chain`: one without it comes from a sampler older
+  than the marker requirement and exits 2;
 - exit 1: FOREIGN. That includes a stale FOREIGN, and a clean current window when a FOREIGN window
   ended within `--latch-s` (default 30 s, its own hold, longer than `--max-age`): a gate that polls
   at least every ~25 s (a 10 s poll plus the guard's runtime has margin) never misses one;
 - exit 2: UNKNOWN, stale (more than 1 s in the future counts as stale), unreachable, or a broken
   HTTP response (fail closed).
 
-It prints one line: `program-audio verdict=<V> rms=<x> outside_band=<y>% age=<s>[ reason=…]`.
+It prints one line: `program-audio verdict=<V> rms=<x> outside_band=<y>% age=<s> markers=<n> chain=<c>[ reason=…]`.
+Consumers act on the exit code; the line is for logs and people.
 
 ## Why spectral, not a level bar
 
@@ -75,11 +84,82 @@ Known limits:
 - **Quiet foreign content is missed.** Foreign content mixed well BELOW the measurement level is
   not caught: pink noise at −6 dB under it reads 26.2 % (at −3 dB, 32.3 %, caught). Music at
   program level is ~20 dB over the measurement and reads ~90 %.
-- **Tonal content inside 200–800 Hz reads MEASUREMENT** (a soft C-E-G chord reads 0.7 %).
-  Requiring the QPSK marker itself is the discriminator for that, a follow-up candidate.
+- **In-band music mixed UNDER a marker that still decodes reads MEASUREMENT.** The chain stands and
+  the share stays in band. The measurement-clip-only rule for SongPlayer and the cg OBS (plan
+  Task 5) is the control for it.
 
 Re-calibrate only from real program audio. Use `analyse()` over 2 s windows of a stream recording
 or of a live NDI receive, and never tune the threshold to pass a single run.
+
+## MEASUREMENT needs the QPSK marker itself (ROZHODNUTÉ 6026577906 + 6026826572)
+
+The spectral share is necessary, not sufficient: a soft chord or a melody inside 200–800 Hz has
+almost nothing outside the band (Design-question 6026559236). The only property unique to the
+measurement is the cam2 QPSK marker. So MEASUREMENT = the spectral condition on the current 2 s
+window AND a timecode chain of at least `MARKER_CHAIN_MIN` = 4 markers over the trailing 4 s of
+contiguous non-silent audio, read per channel (never a downmix), best channel.
+
+**The decoder is the dock's own**, never a third copy. `scripts/qpsk_guard_shim.cpp` is a thin C ABI
+(`qpsk_guard_decode_channel`) over `cb_scan_markers` in
+`vendor/av-sync-dock/src/camera-box-marker-scan.hpp`, the C++ port pinned to `src/qpsk_marker.rs`.
+- It runs with the dock's constants: 442 Hz, c = 1, threshold 0.35. They match `rig60()`,
+  `DOCK_QPSK_THRESHOLD` and the painter log's `# qpsk-params` line, pinned by a test.
+- It returns each CRC-valid word as (start sample, index) and decides nothing.
+- `scripts/build-qpsk-guard-shim.sh` builds it with g++ (no cargo) into
+  `~/.local/lib/camera-box/libqpsk-guard-shim.so` (override: `QPSK_GUARD_SHIM`).
+- `scripts/program_audio_marker.py` loads it with ctypes.
+
+**A raw CRC-valid word is not a marker.** Preamble + zero nibble + CRC-4 is only 12 bits per screen
+pass, and in-band tonal audio passes the screen at thousands of positions. A raw count of ≥ 2 per
+window passed held chords (75/300 windows) and band-limited noise (297/300). The rule, per channel,
+in `program_audio.py` (`marker_candidates`, `marker_chain`, `span_markers`):
+1. **Merge one marker's re-hits.** Same-index words less than 0.25 s apart are one marker.
+2. **Drop repeating indices.** An index whose words lie 0.25 s or more apart is dropped entirely.
+   - The emitter's index is frame_id mod 256 at 60 fps, so it wraps every 256/60 = 4.27 s, longer
+     than the span. That is why `MARKER_SPAN_S` must stay < 4.27 s (pinned).
+   - Decided on the whole index, never by chaining re-hits: a dense run of one index (every 70 ms)
+     spans more than 0.25 s and is dropped, not merged into one marker.
+   - Without this step a held tremolo chord read a chain of 4 window after window (each dense
+     same-index run crosses any 60/s line once; 6026817074).
+3. **Count the chain.** The most remaining markers, ≥ 0.25 s apart, on one line
+   `idx_j − idx_i ≡ round(60·Δt)` (mod 256, ±2).
+4. **Decide.** MEASUREMENT needs chain ≥ 4; below = FOREIGN; no chain = UNKNOWN.
+
+**Calibration (7.10.2026)**, through the real sampler loop and the real shim:
+`scripts/program_audio_marker_calibrate.py` (exit 1 on a failed bar).
+
+| Bar | Audio | Result |
+|---|---|---|
+| (a) real: chain ≥ MIN + 2, 0 FOREIGN | rec2 / rec3a / rec3b / session, 1847 judged windows | chain 6–8, minimum 6 (rec3b at 292 s, committed as `tests/fixtures/program_audio_1404/rec3b-290s-stereo-48k.flac`) |
+| (a) | Task 1 fixtures, 51 judged windows | minimum 6 (`s3-A-vod`, the first span after the stream began) |
+| (b) synthetic in-band: a FOREIGN in every 3 consecutive windows | 50 trials × 10 windows, −30 and −15 dBFS | worst chain held over 3 windows: chords 1, tremolo chords 1, melody 1, band-limited noise 3 |
+
+The tests run bar (a) on the fixtures + the committed clip, and bar (b) on 3 trials per class and
+level. Re-run the full calibration after any decoder or rule change:
+`python3 scripts/program_audio_marker_calibrate.py --real <the four recordings> --synthetic-trials 50`
+(`--classes` splits the synthetic run; each class takes ~1.5 min on dev1).
+
+**The sampler (`program_audio_sampler.py`):**
+- **Warm-up.** Until 4 s of audio arrived since the start, a receive gap or a format change, every
+  verdict is UNKNOWN (also SILENT and spectral FOREIGN), never MEASUREMENT.
+- **Receive gap.** No audio block for over `RECEIVE_GAP_S` = 1 s between two blocks, or an NDI error
+  frame. The window and the span restart, so audio around a gap is never stitched into one span
+  (the chain would read the gap as a jump of the index clock). NDI delivers an OBS audio tick every
+  ~21 ms and the sampler drains it within ~0.1 s of a window's work, so 1 s is an interruption,
+  never jitter.
+- **A SILENT window empties the span.** The next non-silent window holds only its own markers, so it
+  reads UNKNOWN ("marker span") until the span is full again. Without this a silence→measurement
+  start read a short chain and could latch a false FOREIGN.
+- **A missing or unloadable shim** = UNKNOWN + exit 1 before the NDI receiver is created, like a
+  missing libndi. A decode error on one window = UNKNOWN for that window.
+- **A shim built from other sources** (sha256 of the shim + the two headers, embedded at build
+  time) still loads, with a WARNING asking for a rebuild.
+- **The guard rejects a MEASUREMENT without `marker_chain`.** After a pull, an old sampler process
+  keeps writing spectral-only MEASUREMENT until it restarts, and the new guard reads that as UNKNOWN.
+  Build the shim, then restart the sampler (the README runbook).
+- **Install order matters.** The build renames the new library over the old one, never writes it in
+  place: a running sampler keeps its mapped copy (writing a mapped `.so` in place can SIGBUS it).
+- **Cost:** ~70 ms of decode per 2 s window (4 s stereo span at 48 kHz) plus the FFT.
 
 ## The marker mirror: ONE ssh connection, never a login per pass
 
