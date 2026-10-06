@@ -15,8 +15,9 @@
 # saved 1040). Design: issue 1367 comment 6014590298; evidence: comment 6013239473.
 #
 # The deploy program runs in the box's win-* MCP Shell, which is the interactive session (session 1),
-# so a WM_CLOSE reaches OBS's window (6.10.2026: a clean close exited in 6.6 s). The fragment is
-# printed as three ORDERED blocks from this one lib:
+# so a WM_CLOSE reaches OBS's window (6.10.2026: a MANUAL WM_CLOSE of stream OBS in the interactive
+# session exited in 6.6 s; this fragment's own close is first run live by the next deploy). The
+# fragment is printed as three ORDERED blocks from this one lib, plus one optional hook:
 #
 #   obs_clean_close_preflight_ps   -- step (0a), BEFORE anything on the box changes: the obs-websocket
 #                                     helpers (defined once, used by (2) too) and the stream/record
@@ -26,19 +27,25 @@
 #                                     refusal there would leave them changed under a live stream.
 #   obs_clean_close_stop_ps        -- step (2): re-read right before the close (a broadcast can start
 #                                     after (0a), the issue-1271 rule), StopRecord + confirm when a
-#                                     recording runs, CloseMainWindow on the ONE obs64 in this
-#                                     session, a 45 s bound, `clean close OK in N ms`; only when it
-#                                     cannot close or times out, the old Stop-Process -Force, named
+#                                     recording runs, CloseMainWindow on the ONE live obs64 in this
+#                                     session when its main window is OBS's own (title `OBS ...`),
+#                                     a 45 s bound, `clean close OK in N ms`; only when it cannot
+#                                     close or times out, the old Stop-Process -Force, named
 #                                     (`clean close timed out -- forcing`).
 #   obs_saved_settings_readback_ps -- step (2b), REPORT-ONLY: from the active scene collection JSON,
 #                                     every NDI input's saved genlock_latency_ms_src and every audio
 #                                     input's saved sync -- what the relaunch will load.
+#   obs_clean_close_refusal_restore_ps -- the deploy program emits it after its keep-alive disable
+#                                     (step 1b, stream): a step-(2) refusal calls it, so a live
+#                                     broadcast keeps the self-heal tasks the deploy had disabled.
 #
 # obs-websocket: ws://127.0.0.1:4455 on the box, rpc v1, no event subscriptions. Both boxes run it
 # with auth_required false (read live 6.10.2026); when a Hello carries a challenge anyway, the
 # password comes from the box's own plugin_config\obs-websocket\config.json, never from this program.
 # An unreadable :4455 while obs64 runs is a named WARNING and the deploy goes on -- the rig-busy
-# guard's rule (scripts/lib/stray-session-check.sh): refuse what it can READ as live.
+# guard's rule (scripts/lib/stray-session-check.sh): refuse what it can READ as live. A stream it
+# cannot read is NOT protected: OBS then asks to confirm the exit, nobody answers, and the 45 s bound
+# forces it (the same as before this change).
 #
 # Exit codes added to the deploy program: 12 = a broadcast stream is live (refused).
 # The PowerShell avoids Write-Error: under the program's $ErrorActionPreference = 'Stop' it throws and
@@ -129,6 +136,11 @@ function Invoke-CcObsWsRequest($ws, [string]$type) {
   }
   throw "obs-websocket $type got no response"
 }
+function Get-CcLiveObs {
+  # LIVE obs64 only: a stale handle of an exited obs64 (HasExited / 0 threads, the 12.9.2026
+  # RESOLUME-SNV case) must neither count as a second OBS nor keep the close waiting.
+  @(Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { -not $_.HasExited -and $_.Threads.Count -gt 0 })
+}
 function Get-CcObsOutputState {
   $ws = Open-CcObsWs
   try {
@@ -139,7 +151,7 @@ function Get-CcObsOutputState {
     Close-CcObsWs $ws
   }
 }
-if (@(Get-Process obs64 -ErrorAction SilentlyContinue).Count -eq 0) {
+if (@(Get-CcLiveObs).Count -eq 0) {
   Write-Host "issue 1367 clean close: obs64 is not running -- no broadcast to protect"
 } else {
   $ccState = $null
@@ -168,7 +180,7 @@ obs_clean_close_stop_ps() {
 PSCCSTOPHEAD
   cat <<'PSCCSTOP'
 $ccForce = $false
-$ccAll = @(Get-Process obs64 -ErrorAction SilentlyContinue)
+$ccAll = @(Get-CcLiveObs)
 if ($ccAll.Count -eq 0) {
   Write-Host "issue 1367 clean close: obs64 is not running -- nothing to close"
 } else {
@@ -179,7 +191,8 @@ if ($ccAll.Count -eq 0) {
   if ($null -eq $ccState) {
     Write-Warning "issue 1367 clean close: obs-websocket $ccObsWsUri unreadable ($ccStateErr) -- closing without the stream/record read"
   } elseif ($ccState.streaming) {
-    Write-Host "issue 1367 clean close REFUSED: obs64 STARTED STREAMING after the step-(0a) read -- this deploy never stops OBS under a live stream. OBS was not stopped and no file was copied, but steps 0b/1/1b already ran: their lines above name what they changed (a keep-alive task they disabled must be re-enabled by hand)."
+    Write-Host "issue 1367 clean close REFUSED: obs64 STARTED STREAMING after the step-(0a) read -- this deploy never stops OBS under a live stream. OBS was not stopped and no file was copied; steps 0b/1/1b already ran and their lines above name what they changed."
+    if (Get-Command Invoke-CcRefusalRestore -ErrorAction SilentlyContinue) { Invoke-CcRefusalRestore }
     exit 12
   } elseif ($ccState.recording) {
     # The deploy restarts OBS anyway: a stopped recording is a finished file, a killed one is not.
@@ -212,21 +225,32 @@ if ($ccAll.Count -eq 0) {
     $ccForce = $true
   } else {
     $ccP = $ccHere[0]
-    $ccSw = [System.Diagnostics.Stopwatch]::StartNew()
-    $ccPosted = $false
-    try { $ccPosted = $ccP.CloseMainWindow() } catch { Write-Host "issue 1367 clean close: CloseMainWindow failed ($($_.Exception.Message))" }
-    if (-not $ccPosted) {
-      Write-Host "issue 1367 clean close not possible: obs64 pid $($ccP.Id) has no main window to close -- forcing"
+    $ccTitle = [string]$ccP.MainWindowTitle
+    if (-not $ccTitle) {
+      Write-Host "issue 1367 clean close not possible: obs64 pid $($ccP.Id) has no main window -- forcing"
+      $ccForce = $true
+    } elseif ($ccTitle -notlike 'OBS *') {
+      # WM_CLOSE goes to the front unowned window: a projector there would close (and drop out of
+      # the saved projector list) instead of OBS.
+      Write-Host "issue 1367 clean close not possible: obs64 pid $($ccP.Id) shows '$ccTitle' in front, not the OBS main window -- forcing"
       $ccForce = $true
     } else {
-      while ($ccSw.ElapsedMilliseconds -lt $ccCloseTimeoutMs -and (Get-Process -Id $ccP.Id -ErrorAction SilentlyContinue)) {
-        Start-Sleep -Milliseconds 250
-      }
-      if (Get-Process -Id $ccP.Id -ErrorAction SilentlyContinue) {
-        Write-Host "issue 1367 clean close timed out -- forcing (obs64 pid $($ccP.Id) still running after $($ccCloseTimeoutMs / 1000) s)"
+      $ccSw = [System.Diagnostics.Stopwatch]::StartNew()
+      $ccPosted = $false
+      try { $ccPosted = $ccP.CloseMainWindow() } catch { Write-Host "issue 1367 clean close: CloseMainWindow failed ($($_.Exception.Message))" }
+      if (-not $ccPosted) {
+        Write-Host "issue 1367 clean close not possible: the OBS main window did not take the close (disabled behind a modal dialog) -- forcing"
         $ccForce = $true
       } else {
-        Write-Host "issue 1367 clean close OK in $($ccSw.ElapsedMilliseconds) ms (obs64 pid $($ccP.Id) exited and saved its scene collection)"
+        while ($ccSw.ElapsedMilliseconds -lt $ccCloseTimeoutMs -and @(Get-CcLiveObs | Where-Object { $_.Id -eq $ccP.Id }).Count -gt 0) {
+          Start-Sleep -Milliseconds 250
+        }
+        if (@(Get-CcLiveObs | Where-Object { $_.Id -eq $ccP.Id }).Count -gt 0) {
+          Write-Host "issue 1367 clean close timed out -- forcing (obs64 pid $($ccP.Id) '$ccTitle' still running after $($ccCloseTimeoutMs / 1000) s)"
+          $ccForce = $true
+        } else {
+          Write-Host "issue 1367 clean close OK in $($ccSw.ElapsedMilliseconds) ms (obs64 pid $($ccP.Id) '$ccTitle' exited and saved its scene collection)"
+        }
       }
     }
   }
@@ -286,4 +310,25 @@ try {
   Write-Host "issue 1367 saved-settings read-back UNREAD: $($_.Exception.Message) -- report-only, the deploy goes on"
 }
 PSCCREAD
+}
+
+# obs_clean_close_refusal_restore_ps -> emitted by the deploy program right after its keep-alive
+# disable (step 1b, a box with keep-alive tasks): defines Invoke-CcRefusalRestore, which the step-(2)
+# refusal calls, so a live broadcast keeps the self-heal tasks the deploy had disabled. A box without
+# keep-alive tasks defines no hook, and the refusal only exits.
+obs_clean_close_refusal_restore_ps() {
+  cat <<'PSCCHOOK'
+# (1c) issue 1367 -- if step (2) refuses (a stream started after the step-(0a) read), this hook
+#      re-enables the keep-alive tasks step (1b) disabled before the program exits.
+function Invoke-CcRefusalRestore {
+  foreach ($t in $disabledKeepAlive) {
+    schtasks /Change /TN $t /ENABLE | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+      Write-Host "issue 1367: keep-alive task '$t' re-enabled after the refusal"
+    } else {
+      Write-Host "issue 1367: keep-alive task '$t' did NOT re-enable (rc $LASTEXITCODE) -- re-enable it by hand"
+    }
+  }
+}
+PSCCHOOK
 }

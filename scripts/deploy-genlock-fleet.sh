@@ -278,6 +278,7 @@ foreach ($t in $keepAliveTasks) {
 }
 PSKAD_BODY
 )"
+    keepalive_disable+=$'\n'"$(obs_clean_close_refusal_restore_ps)"  # issue 1367: (1c) refusal hook
     keepalive_restore=$(cat <<'PSKAR'
 # (8b) #1140 -- re-enable the OBS keep-alive scheduled tasks we disabled in step (1b), VERIFIED
 #      (mirrors the strih AHK verified-restart). Once the STEP-2 launch relaunches obs64 the
@@ -760,7 +761,7 @@ emit_windows_plan() {
 # STEP 0 (once per box): upload the downloaded '${artifact}' bytes (staged locally at ${stage}) to
 #         the box at ${win_stage} via the ${mcp} MCP FileUpload (or sshpass scp -O of a zip +
 #         Expand-Archive on the box), then run the program below in the ${mcp} MCP Shell
-#         (timeout >= 240 s):
+#         (timeout >= 360 s: the issue-1367 clean close may wait 30 s for a recording + 45 s for OBS):
 # ----------------------------------------------------------------------------------------------------
 ${program}
 # ----------------------------------------------------------------------------------------------------
