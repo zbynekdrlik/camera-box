@@ -7,6 +7,8 @@ paths:
   - "tests/distroav_by_url_identity_verify_1180.rs"
   - "tests/distroav_frameless_by_url_escape_1287.rs"
   - "tests/distroav_stale_duplicate_retarget_1367.rs"
+  - "tests/distroav_stale_duplicate_replay_1367.rs"
+  - "tests/support/ndi_source_lift_1367.rs"
   - "tests/c/distroav_stale_duplicate_model_1367.c"
 ---
 
