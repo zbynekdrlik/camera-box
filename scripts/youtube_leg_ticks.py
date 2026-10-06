@@ -43,6 +43,11 @@ DECODE_SCALE = 0.5
 PHASE_RADIUS = 60  # frames: the local capture phase comes from both-halves frames this near
 DECODER_VERSION = 2  # part of the tick-cache key: a map from another decoder is never reused
 PROBE_COUNT_TIMEOUT_S = 600
+# The worker pool's bound: about 4x the slowest measured decode (~0.27 s a frame per worker for the
+# 1080p session files on a loaded dev1), never under 10 min. A worker the OOM killer took leaves
+# multiprocessing's map waiting forever; the bound turns that into an error (UNKNOWN), not a hang.
+DECODE_S_PER_FRAME = 1.0
+DECODE_TIMEOUT_FLOOR_S = 600
 
 
 def painter_payload(text):
@@ -179,8 +184,8 @@ def container_frames(path):
     return int(r.stdout.strip().split(",")[0])
 
 
-class FrameCountMismatch(RuntimeError):
-    """The decode does not hold exactly the frames the container holds."""
+class ChunkedDecodeError(RuntimeError):
+    """A chunked (seeking) decode that does not tile the file; one sequential pass may still read it."""
 
 
 def _merge_chunks(parts):
@@ -199,41 +204,77 @@ def _merge_chunks(parts):
 
 
 def _check_decode(path, jobs, parts):
-    """The decode of `path` from its chunks, or RuntimeError.
+    """The decode of `path` from its chunks, or an error.
 
-    A missed seek is an error, a short read is allowed only once an earlier chunk reached the end of
-    the file, and the decode must hold exactly the container's own packet count (ffprobe), else
-    FrameCountMismatch. A gap that is really in the file (an encoder that skipped a frame) is kept:
-    the timeline module judges it. A single pass is taken in its own frame order (no pts merge)."""
-    raw = _merge_chunks(parts) if len(parts) > 1 else list(parts[0][0])
-    if not raw:
-        raise RuntimeError(f"no frame decoded from {path}")
+    The chunks must be in order: every seek landed, a chunk that ran into the end of the file is
+    followed only by empty chunks, the pts rise strictly inside each chunk (frame order is read
+    order; a merge by misreported pts would reorder frames silently), and the merge holds exactly the
+    container's own packet count (ffprobe). Any of these failing in a chunked decode raises
+    ChunkedDecodeError (one sequential pass may still read the file); in a single pass it is a plain
+    RuntimeError. A gap that is really in the file (an encoder that skipped a frame) is kept: the
+    timeline module judges it. A single pass is taken in its own frame order (no pts merge)."""
+    err = ChunkedDecodeError if len(parts) > 1 else RuntimeError
     ended = None  # the start of the first chunk that ran into the end of the file
     for job, (rows, seek_ok, hit_end) in zip(jobs, parts):
         if ended is not None:
             if rows:
-                raise RuntimeError(f"{path}: frames decoded after the end of the file at chunk {job[1]}")
+                raise err(f"{path}: frames decoded after the end of the file at chunk {job[1]}")
             continue
         if not seek_ok:
-            raise RuntimeError(f"{path}: seek to frame {job[1]} failed")
+            raise err(f"{path}: seek to frame {job[1]} failed")
+        if len(parts) > 1 and any(r1[1] <= r0[1] for r0, r1 in zip(rows, rows[1:])):
+            raise err(f"{path}: pts do not rise inside the chunk at frame {job[1]}")
         if hit_end:
             ended = job[1]
     if ended is None:
-        raise RuntimeError(f"{path}: the decode never reached the end of the file")
+        raise err(f"{path}: the decode never reached the end of the file")
+    raw = _merge_chunks(parts) if len(parts) > 1 else list(parts[0][0])
+    if not raw:
+        raise err(f"no frame decoded from {path}")
     n = container_frames(path)
     if len(raw) != n:
         what = "frames missing" if len(raw) < n else "frames read twice"
-        raise FrameCountMismatch(f"{path}: {len(raw)} frames decoded, the container holds {n} ({what})")
+        raise err(f"{path}: {len(raw)} frames decoded, the container holds {n} ({what})")
     return raw
+
+
+def _worker_init():
+    import cv2
+
+    cv2.setNumThreads(1)  # one OpenCV thread per worker: no oversubscription
+
+
+def _run_jobs(path, jobs, workers, frames):
+    """`_decode_range` over `jobs`: in this process for one worker, else in a SPAWNED pool, bounded.
+
+    Never a forked pool: a decode in this process (workers=1, or the one-pass fallback) starts
+    OpenCV's own threads here, and a forked child inherits their locked mutexes and waits forever.
+    A pool that does not finish within its bound (a worker the OOM killer took, a decoder that hangs)
+    is a RuntimeError, never a hang; leaving the `with` terminates the workers. A spawned worker
+    imports the caller's main module, so a calling SCRIPT keeps its work under
+    `if __name__ == "__main__":` (the tool's CLI does); without it every worker dies at start-up and
+    the pool runs into its bound."""
+    if workers == 1:
+        return [_decode_range(j) for j in jobs]
+    import multiprocessing
+
+    n = min(workers, len(jobs))
+    limit = max(DECODE_TIMEOUT_FLOOR_S, DECODE_S_PER_FRAME * frames / n)
+    with multiprocessing.get_context("spawn").Pool(n, initializer=_worker_init) as pool:
+        try:
+            return pool.map_async(_decode_range, jobs).get(limit)
+        except multiprocessing.TimeoutError:
+            raise RuntimeError(f"{path}: the decode did not finish in {limit:.0f} s") from None
 
 
 def decode_raw(path, workers=4, scale=DECODE_SCALE):
     """Raw (index, pts, left, right) of EVERY frame of a video file, or RuntimeError.
 
     The file is cut into chunks by its frame count, the last chunk reads to the end of the file (a
-    frame count is an estimate in some containers), and the chunks are merged by pts. When the merge
-    does not hold exactly the container's frames (a seek that landed late left a frame unread), the
-    file is decoded once more in ONE pass from frame 0 (no seek) and judged again."""
+    frame count is an estimate in some containers), and the chunks are merged by pts. When the
+    chunks do not tile the file (a seek that missed or landed late, pts that fall inside a chunk),
+    the file is decoded once more in ONE pass from frame 0 (no seek), which must hold exactly the
+    container's frames too."""
     import cv2
 
     cap = cv2.VideoCapture(str(path))
@@ -247,21 +288,12 @@ def decode_raw(path, workers=4, scale=DECODE_SCALE):
     chunk = max(1, (n + workers * 4 - 1) // (workers * 4))
     starts = list(range(0, n, chunk))
     jobs = [(str(path), s, s + chunk if k + 1 < len(starts) else None, scale) for k, s in enumerate(starts)]
-    if workers == 1:
-        parts = [_decode_range(j) for j in jobs]
-    else:
-        import multiprocessing
-
-        with multiprocessing.Pool(workers, initializer=cv2.setNumThreads, initargs=(1,)) as pool:
-            parts = pool.map(_decode_range, jobs)  # one OpenCV thread per worker: no oversubscription
     try:
-        return _check_decode(path, jobs, parts)
-    except FrameCountMismatch as e:
-        if len(jobs) == 1:
-            raise
+        return _check_decode(path, jobs, _run_jobs(path, jobs, workers, n))
+    except ChunkedDecodeError as e:
         print(f"youtube_leg_ticks: {e}; decoding again in one pass (no seek)", file=sys.stderr)
-        one = [(str(path), 0, None, scale)]
-        return _check_decode(path, one, [_decode_range(one[0])])
+    one = [(str(path), 0, None, scale)]
+    return _check_decode(path, one, _run_jobs(path, one, workers, n))
 
 
 def decode_ticks(path, workers=4, scale=DECODE_SCALE):

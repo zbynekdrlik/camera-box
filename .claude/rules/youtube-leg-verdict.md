@@ -32,7 +32,7 @@ is `recording-verdict --av-sync` (CI probe artifact) as a subprocess. Shared wit
 - The payload CRC is checked (zlib.crc32 of `run.tick.gen`, like `Payload::decode`); only the
   6-digit 9110xx ids are node burns, a 9-digit E2E RUN_ID starting 9110 is a painter id.
 
-## Fail-closed rules the four review rounds found holes in (each has a test)
+## Fail-closed rules the five review rounds found holes in (each has a test)
 
 - Dup/skip is judged twice: between ADJACENT decoded VOD frames (the session tool's rule, which
   finds balanced dup+skip pairs), and by the FRAME-COUNT BALANCE between consecutive anchors (ticks
@@ -56,19 +56,27 @@ is `recording-verdict --av-sync` (CI probe artifact) as a subprocess. Shared wit
   painter). A window outside the recording, spanning parts, holding a publish, a StopStream
   (`--unpublish`, also under 1 s after the window) or a painter restart (tick falls back > 30 s) is
   UNKNOWN.
-- A decode must hold EXACTLY the container's frames: a missed seek (also of the LAST chunk: the
-  file's tail used to vanish silently) is an error; a full chunk grabs one more frame, so a file
-  ending exactly on a chunk boundary is the end. OpenCV seeks a frame number by TIMESTAMP, so a
-  chunk's own frame numbers say where the seek was AIMED, not where it landed: behind a real gap a
-  chunk starts one frame early (240 rows from a 239-frame file). So the chunks are merged by pts (a
-  frame two chunks read is kept once) and renumbered, and the merge must hold the container's own
-  packet count (ffprobe; the real s3 recording and VOD: packets = decoded frames = rows). Short of
-  it (a seek that landed late, or an early + late pair that would cancel in a plain count and
-  mislabel every row between them) the file is decoded again in ONE pass from frame 0, no seek, and
-  that pass must match too. A gap really in the file (OBS skipped a frame under encoding lag) is
-  kept by the parallel decode, and the timeline makes a recording window with one UNKNOWN (the
-  stream encoder may have kept that frame), while a VOD gap is simply a skip. The pts-step rule
-  lives only in `timeline.timestamp_gaps`. Coverage counts frames by index span.
+- A decode must hold EXACTLY the container's frames. OpenCV seeks a frame number by TIMESTAMP, so
+  a chunk's own frame numbers say where the seek was AIMED, not where it landed: behind a real gap
+  a chunk starts one frame early (240 rows from a 239-frame file). So the chunks are merged by pts
+  (a frame two chunks read is kept once) and renumbered, and the merge must hold the container's
+  own packet count (ffprobe; the real s3 recording and VOD: packets = decoded frames = rows). Any
+  chunk failure takes ONE sequential pass from frame 0 (no seek), which must hold the count too: a
+  missed seek (also of the LAST chunk: the file's tail used to vanish silently), a chunk that
+  claims the end while a later one still reads, pts that do not rise inside a chunk (a merge by a
+  misreported pts would reorder frames silently), a merge short of the count (a seek that landed
+  late, or an early + late pair that would cancel in a plain count and mislabel every row between
+  them). A full chunk grabs one more frame, so a file ending exactly on a chunk boundary is the
+  end. A gap really in the file (OBS skipped a frame under encoding lag) is kept by the parallel
+  decode, and the timeline makes a recording window with one UNKNOWN (the stream encoder may have
+  kept that frame), while a VOD gap is simply a skip. The pts-step rule lives only in
+  `timeline.timestamp_gaps`. Coverage counts frames by index span.
+- The worker pool is SPAWNED, never forked, and bounded. A decode in the tool's own process (the
+  one pass, or workers=1) starts OpenCV's threads there; a pool forked after that inherited their
+  locked mutexes and hung forever (reproduced with the tool's module graph: no verdict, the rig
+  lease held to the job timeout). The bound (1 s a frame per worker, at least 10 min) turns a lost
+  worker into an error. A spawned worker imports the caller's main module: a script that calls
+  `decode_raw` keeps its work under `if __name__ == "__main__":`.
 - Audio: VOD audio running out before the window end FAILS; fewer than 90 % of the expected blocks
   measured, or recording signal (> -50 dBFS, the only judged blocks) in under 25 % of them, is
   UNKNOWN; VOD sound > 20 dB above a quiet recording block is foreign (FAIL); only reliable blocks
