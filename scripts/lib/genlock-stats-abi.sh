@@ -76,7 +76,7 @@ genlock_stats_abi_is_pair() {
 #   line must be a version; the second `output_stats=<version>` (case-sensitive); no third line. The
 #   PowerShell gate transcribes it (ASCII-decoded bytes, `-split '\n'`, `-replace '\s'`, `-cmatch`).
 _genlock_stats_abi_marker_fields() {
-  local line n=0 l1="" l2=""
+  local line="" n=0 l1="" l2=""
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line//[$' \t\r\v\f']/}"
     [ -n "$line" ] || continue
@@ -105,7 +105,8 @@ _genlock_stats_abi_marker_fields() {
 #   (neither whitespace nor a digit), the way the PowerShell gate reads it.
 genlock_stats_abi_pair_from_marker() {
   local fields s o
-  fields="$(tr '\000' '?' | _genlock_stats_abi_marker_fields)"
+  # an unreadable stdin (a directory, an I/O error) reads as no marker, never an abort of the caller
+  fields="$(tr '\000' '?' | _genlock_stats_abi_marker_fields)" || fields=""
   s="${fields%%$'\n'*}"; o="${fields#*$'\n'}"
   if [[ "$s" =~ ^v([123456789][0123456789]{0,8})$ ]]; then
     s="${BASH_REMATCH[1]}"
@@ -126,7 +127,7 @@ genlock_stats_abi_marker_text() {
 #   than once, or not a version; rc 2 for a DEFINE that is not a C macro name.
 genlock_stats_abi_from_obs_h() {
   local define="${1:-OBS_GENLOCK_STATS_VERSION}" lines value
-  [[ "$define" =~ ^[A-Z_][A-Z0-9_]*$ ]] || return 2
+  [[ "$define" =~ ^[ABCDEFGHIJKLMNOPQRSTUVWXYZ_][ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_]*$ ]] || return 2
   lines="$(grep -E "^[[:space:]]*#[[:space:]]*define[[:space:]]+${define}([[:space:]]|\$)" || true)"
   # two defines leave two lines in the value, which the version pattern (one whole string) refuses
   value="$(printf '%s\n' "$lines" | sed -E "s/^[[:space:]]*#[[:space:]]*define[[:space:]]+${define}[[:space:]]*//; s/[[:space:]]*(\\/[*/].*)?\$//")"
@@ -155,7 +156,9 @@ _genlock_stats_abi_version_text() {
 #   NEW_PAIR     the new obs.dll's `<stats>:<output_stats>` pair (the planner's read; a part that is
 #                not a version is unknown, genlock_stats_abi_part).
 #   MARKER_STATE "present" (the box has GENLOCK_STATS_ABI.txt, its content is MARKER_TEXT) or "missing".
-#   MARKER_TEXT  the marker's content, read by _genlock_stats_abi_marker_fields.
+#   MARKER_TEXT  the marker's content, read by _genlock_stats_abi_marker_fields. A bash string cannot
+#                hold a NUL byte and $(cat) drops one, so a caller that reads the marker's bytes maps
+#                each NUL to '?' first (`tr '\000' '?'`), the way the gate reads it: never a digit.
 # Each struct is proven equal only when the box names a version, the new obs.dll names one and they
 # are the same. Prints ONE line and returns 0 = the fast deploy may run, 1 = REFUSED, 2 = usage error:
 #   OK frontend stats ABI vN == new obs.dll vN; frontend output stats ABI vK == new obs.dll vK

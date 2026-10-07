@@ -85,11 +85,13 @@ SHA marker 14:58) while dev carried v4.
   line 1 and `-cmatch '^output_stats=([1-9][0-9]{0,8})$'` on line 2 (case-sensitive like the bash
   `=~`), compared as strings. The bash side is locale-independent too (review round 1):
   `_genlock_stats_abi_marker_fields` strips the explicit ASCII set ` \t\r\v\f`, and every bash
-  `=~` pattern spells its digits out (`[123456789][0123456789]{0,8}`, the hex SHA set likewise). A
-  bracket RANGE such as `[1-9]` follows the locale's collation, and under en_US.UTF-8 it also matches
-  Arabic-Indic, superscript and fullwidth digits the gate refuses; a pytest pins that no bash `=~`
-  pattern in the stats-ABI code uses one. `genlock_stats_abi_pair_from_marker` reads a NUL byte as
-  `?` (bash `read` would drop it silently; the gate reads it as a non-digit). A pair that reaches the
+  `=~` pattern spells its sets out (`[123456789][0123456789]{0,8}`; the hex SHA set and the
+  define-name letters likewise). A bracket RANGE such as `[1-9]` follows the locale's collation, and
+  under en_US.UTF-8 it also matches Arabic-Indic, superscript and fullwidth digits the gate refuses;
+  a pytest refuses any `X-Y` range inside a bracket on a bash `=~` line of the stats-ABI code.
+  `genlock_stats_abi_pair_from_marker` reads a NUL byte as `?` (bash `read` would drop it silently;
+  the gate reads it as a non-digit), and an unreadable stdin reads as no marker, never an abort of
+  its caller. A pair that reaches the
   builders is validated part by part first, so a quote in an operator `--sha` never reaches either
   program.
 - **A struct change must bump its version** (the rule in obs.h's comment). The gate compares
