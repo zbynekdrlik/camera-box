@@ -130,10 +130,9 @@ pub const STAMP_MODE_EXIT_RATE_PPM: u64 = 2_500;
 /// A move of the mono-to-real offset between two frames of at least this much is a realtime CLOCK
 /// STEP, not the camera drifting. A slewing clock (dantesync's `adjtimex` frequency and offset
 /// slews) moves `CLOCK_MONOTONIC` and `CLOCK_REALTIME` together, so the offset the capture loop
-/// re-samples every 100 captured frames moves only on a step, or when one of its two clock reads
-/// is preempted. A preempted read of 1 ms or more re-anchors twice (on the spike and on its
-/// return at the next re-sample), each at most one duplicate or missing slot when the instant
-/// sits within the hysteresis of an edge, and neither is counted as a crossing.
+/// holds (`genlock_stamp::StampOffset`) moves only on a step: in the frame the wall steps by 2 ms
+/// or more (issue 1372), else at its 100-frame cadence. Its clock read is bracketed, so a
+/// preempted read is never adopted and never re-anchors.
 pub const CLOCK_STEP_NS: u64 = 1_000_000;
 
 const _: () = assert!(LOCK_MIN_FRAMES >= 3 && LOCK_MIN_FRAMES <= FIT_WINDOW_FRAMES);
