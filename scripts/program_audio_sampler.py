@@ -321,7 +321,7 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
                     log(f"program-audio sampler: {j.detail}")
             have_audio = True
             last_audio = now
-            prev = (block.timestamp, block.samples.shape[0], block.sample_rate)
+            prev = (block.timestamp, block.samples.shape[0], block.sample_rate, block.samples.shape[1])
             if missing:
                 # The hole's samples, as silence, at their place on the sender's timeline: every
                 # later sample keeps its timeline position, so the marker chain stays on its line.
@@ -359,7 +359,8 @@ class Judgement(NamedTuple):
 
 
 def judge_continuity(prev, block, arrival_gap_s: float, receive_gap_s: float) -> Judgement:
-    """How `block` follows the previous audio block `prev` = (timestamp, samples, sample_rate);
+    """How `block` follows the previous audio block `prev` = (timestamp, samples, sample_rate,
+    channels);
     the kind is one of
       "continue"        on the sender timeline, arrival within receive_gap_s: nothing to say
       "late_burst"      on the sender timeline after an arrival gap over receive_gap_s: the span is
@@ -368,10 +369,10 @@ def judge_continuity(prev, block, arrival_gap_s: float, receive_gap_s: float) ->
                         caller inserts `missing_samples` zeros before the frame and keeps the span,
                         whatever the arrival gap (design issue 1404 comment 6036098516)
       "timeline_break"  off the sender timeline (pa.DISCONTINUITY, or a hole whose frame changed
-                        the sample rate): the span restarts
+                        the sample rate or the channel count): the span restarts
       "receive_gap"     a timestamp is undefined (pa.UNKNOWN_TS) and the arrival gap is over
                         receive_gap_s: the fallback restarts the span"""
-    p_ts, p_n, p_sr = prev
+    p_ts, p_n, p_sr, p_ch = prev
     tol = pa.continuity_tolerance_100ns(p_n, p_sr)
     tol_ms = tol * 1e3 / pa.NDI_TIME_UNITS_PER_S
     decision = pa.frame_continues(p_ts, p_n, p_sr, block.timestamp, tol)
@@ -381,9 +382,10 @@ def judge_continuity(prev, block, arrival_gap_s: float, receive_gap_s: float) ->
                                              "timestamp, the arrival-time fallback)"), None)
         return Judgement("continue", "", None)
     off_ms = pa.timeline_offset_100ns(p_ts, p_n, p_sr, block.timestamp) * 1e3 / pa.NDI_TIME_UNITS_PER_S
-    if decision.kind == pa.BRIDGE and block.sample_rate != p_sr:
-        return Judgement("timeline_break", (f"audio timeline hole of {off_ms:+.1f} ms at a sample rate "
-                                            f"change ({p_sr} -> {block.sample_rate} Hz, arrival gap "
+    if decision.kind == pa.BRIDGE and (block.sample_rate, block.samples.shape[1]) != (p_sr, p_ch):
+        return Judgement("timeline_break", (f"audio timeline hole of {off_ms:+.1f} ms at a format change "
+                                            f"({p_sr} Hz x {p_ch} -> {block.sample_rate} Hz x "
+                                            f"{block.samples.shape[1]} channels, arrival gap "
                                             f"{arrival_gap_s:.1f} s)"), off_ms)
     if decision.kind == pa.BRIDGE:
         n = decision.missing_samples
@@ -431,7 +433,7 @@ def classify_window(win: np.ndarray, sr: int, span: MarkerSpan, decoder, real: n
     measurement of this window and the marker chain over the trailing span (module doc of
     program_audio.py). A decode failure leaves the chain unknown, which never reads MEASUREMENT.
     `real` is the window's real-sample mask (None = no bridged zeros in it)."""
-    rms, outside = pa.analyse(win, sr)
+    rms, outside = pa.analyse(win, sr, real)
     silent = pa.is_number(rms) and rms < pa.SILENT_RMS_DBFS
     full = span.push(win, sr, silent, real)
     if not span.warm:

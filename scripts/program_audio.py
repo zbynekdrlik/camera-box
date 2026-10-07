@@ -334,19 +334,30 @@ def span_markers(words_per_channel) -> tuple[int, int]:
     return max(len(w) for w in channels), max(marker_chain(w) for w in channels)
 
 
-def analyse(samples, sample_rate: int) -> tuple[float, float | None]:
-    """(rms_dbfs, outside_band_pct) of one window. `samples`: shape (n,) or (n, channels)."""
+def analyse(samples, sample_rate: int, real=None) -> tuple[float, float | None]:
+    """(rms_dbfs, outside_band_pct) of one window. `samples`: shape (n,) or (n, channels).
+    `real`: the window's real-sample mask when it holds zeros that bridge a sender-timeline hole
+    (None = every sample delivered). The level is then the delivered samples' own: the zeros would
+    lower it, and a quiet FOREIGN window could read SILENT. The spectrum keeps every sample at its
+    timeline place; the zeros add no energy to either side of the share, so it stays a ratio of the
+    delivered signal. A window with no delivered sample at all is UNKNOWN."""
     x = np.asarray(samples, dtype=np.float64)
     if x.ndim == 1:
         x = x[:, None]
     if x.ndim != 2 or x.shape[0] < 2:
         raise ValueError(f"analyse: need (n,) or (n, channels) with n >= 2, got shape {x.shape}")
-    mean_sq = float(np.mean(x * x))
+    n = x.shape[0]
+    if real is not None:
+        real = np.asarray(real, dtype=bool)
+        if real.shape != (n,):
+            raise ValueError(f"analyse: the real-sample mask has shape {real.shape}, the window {x.shape}")
+        if not real.any():
+            return float("nan"), None  # nothing delivered: never SILENT, never a number -> UNKNOWN
+    mean_sq = float(np.mean(x * x)) if real is None else float(np.mean(x[real] * x[real]))
     if not math.isfinite(mean_sq):
         return float("nan"), None  # a NaN/Inf sample: never SILENT, never a number -> UNKNOWN
     if not mean_sq > 0.0:
         return DIGITAL_SILENCE_DBFS, None
-    n = x.shape[0]
     window = np.hanning(n)
     power = np.zeros(n // 2 + 1)
     for c in range(x.shape[1]):
