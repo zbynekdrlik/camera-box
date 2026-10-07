@@ -423,7 +423,7 @@ def test_plan_full_with_an_unreadable_abi_removes_the_marker_1302(tmp_path):
 def test_execute_mode_stages_the_abi_before_strih_lx_is_touched_1302():
     s = FLEET.read_text()
     main = s[s.index("main() {"):]
-    resolve = main.index('stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$boxes" 1)" || exit 3',
+    resolve = main.index('stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$boxes")" 1)" || exit 3',
                          main.index("# --- execute mode"))
     prepare = main.index('strih_lx_prepare "$sha"')
     stage = main.index('genlock_stats_abi_stage "$STRIH_LX_PREP_WORK/bundle" "$stats_abi" || exit 3')
@@ -437,7 +437,9 @@ def test_plan_reads_without_network_and_names_the_boxes_1302():
     s = FLEET.read_text()
     main = s[s.index("main() {"):]
     plan = main[:main.index("# --- execute mode")]
-    assert 'stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$boxes")" || exit 3' in plan
+    assert 'stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$boxes")")" || exit 3' in plan
+    # the execute mode's own Windows-box switch reads the same predicate (one place names the boxes)
+    assert 'want_win="$(fleet_boxes_swap_obs_dll "$boxes")"' in main
 
 
 @pytest.mark.parametrize("boxes", ["imag", "strih-lx", "strih-lx,imag"])
@@ -464,11 +466,11 @@ def stale_clone(tmp_path):
     subprocess.run(["git", "init", "-q", str(origin)], check=True)
     obs_h = origin / "vendor" / "obs-studio" / "libobs" / "obs.h"
     obs_h.parent.mkdir(parents=True)
-    obs_h.write_text("#define OBS_GENLOCK_STATS_VERSION 3\n")
+    obs_h.write_text("#define OBS_GENLOCK_STATS_VERSION 3\n#define OBS_GENLOCK_OUTPUT_STATS_VERSION 1\n")
     subprocess.run(["git", "-C", str(origin), *git, "add", "-A"], check=True)
     subprocess.run(["git", "-C", str(origin), *git, "commit", "-q", "-m", "v3"], check=True)
     subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
-    obs_h.write_text("#define OBS_GENLOCK_STATS_VERSION 4\n")
+    obs_h.write_text("#define OBS_GENLOCK_STATS_VERSION 4\n#define OBS_GENLOCK_OUTPUT_STATS_VERSION 1\n")
     subprocess.run(["git", "-C", str(origin), *git, "commit", "-q", "-am", "v4"], check=True)
     sha4 = subprocess.run(["git", "-C", str(origin), "rev-parse", "HEAD"], capture_output=True, text=True,
                           check=True).stdout.strip()
@@ -477,9 +479,9 @@ def stale_clone(tmp_path):
 
 def test_execute_mode_fetches_origin_once_before_giving_up_1302(stale_clone):
     clone, sha4 = stale_clone
-    r = _lib('rc=0; genlock_stats_abi_resolve "$2" "$3" fast stream || rc=$?; echo "rc=$rc"', sha4, clone)
+    r = _lib('rc=0; genlock_stats_abi_resolve "$2" "$3" fast 1 || rc=$?; echo "rc=$rc"', sha4, clone)
     assert r.stdout == "rc=3\n", r.stderr
-    r = _lib('genlock_stats_abi_resolve "$2" "$3" fast stream 1', sha4, clone)
+    r = _lib('genlock_stats_abi_resolve "$2" "$3" fast 1 1', sha4, clone)
     assert r.returncode == 0, r.stderr
     assert r.stdout == "4\n"
     assert "fetching origin once" in r.stderr
@@ -488,7 +490,7 @@ def test_execute_mode_fetches_origin_once_before_giving_up_1302(stale_clone):
 def test_an_abbreviated_sha_is_never_fetched_1302(stale_clone):
     """A fetch needs the full object id; a short SHA (every test SHA) never reaches the network."""
     clone, sha4 = stale_clone
-    r = _lib('rc=0; genlock_stats_abi_resolve "$2" "$3" fast stream 1 || rc=$?; echo "rc=$rc"', sha4[:12], clone)
+    r = _lib('rc=0; genlock_stats_abi_resolve "$2" "$3" fast 1 1 || rc=$?; echo "rc=$rc"', sha4[:12], clone)
     assert r.stdout == "rc=3\n", r.stderr
     assert "fetching origin once" not in r.stderr
 
@@ -500,9 +502,100 @@ def test_a_full_deploy_clears_the_marker_before_the_copy_1302(box):
     clear = p.index("# (3c) issue 1302")
     assert p.index("# (3) Back up") < clear < p.index("# (4) FULL bundle")
     seg = p[clear:p.index("# (4) FULL bundle")]
-    assert "Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt')" in seg
+    assert "$abiStale = Join-Path $obsDir 'GENLOCK_STATS_ABI.txt'" in seg
+    assert "if (Test-Path -LiteralPath $abiStale) { Remove-Item -LiteralPath $abiStale -Force -ErrorAction Stop }" in seg
     assert p.index("# (4) FULL bundle") < p.index("Write-MarkerAtomic (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt') '4'")
     assert "(3c) issue 1302" not in _program(box, "fast", "4")
+
+
+@pytest.mark.parametrize("state,rc", [("file", 0), ("missing", 0), ("blocked", 1)])
+def test_the_clear_before_the_copy_is_fail_closed_1302(tmp_path, state, rc):
+    """A marker the (3c) step cannot remove stops the program before the copy (never a silent
+    no-op that would leave the old version naming a half-copied frontend)."""
+    box = tmp_path / "obs"
+    box.mkdir()
+    marker = box / "GENLOCK_STATS_ABI.txt"
+    if state in ("file", "blocked"):
+        marker.write_text("3\r\n")
+    block = _lib("genlock_stats_abi_clear_ps full").stdout
+    assert "(3c) issue 1302" in block
+    script = tmp_path / "clear.ps1"
+    script.write_text("$ErrorActionPreference = 'Stop'\n"
+                      f"$obsDir = '{box}'\n" + block + "\nWrite-Host 'HARNESS AFTER THE CLEAR'\nexit 0\n")
+    if state == "blocked":
+        # the Linux stand-in for a file another process holds open on Windows: a read-only parent
+        # directory makes the removal a NON-terminating error, which SilentlyContinue would swallow
+        if os.geteuid() == 0:
+            pytest.fail("run as a non-root user: root ignores the read-only directory this case needs")
+        box.chmod(0o555)
+    try:
+        r = subprocess.run([_pwsh(), "-NoProfile", "-NonInteractive", "-File", str(script)],
+                           capture_output=True, text=True, timeout=120)
+    finally:
+        box.chmod(0o755)
+    if rc == 0:
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "HARNESS AFTER THE CLEAR" in r.stdout
+        assert not marker.exists()
+    else:
+        assert r.returncode != 0, r.stdout + r.stderr
+        assert "HARNESS AFTER THE CLEAR" not in r.stdout
+        assert marker.exists()
+
+
+@pytest.mark.parametrize("boxes,want", [("stream", "1"), ("resolume", "1"), ("imag,resolume", "1"),
+                                        ("strih-lx,stream", "1"), ("strih-lx", "0"), ("imag", "0"),
+                                        ("strih-lx,imag", "0"), ("", "0"), ("strih", "0")])
+def test_the_per_box_table_names_the_boxes_a_fast_deploy_swaps_obs_dll_on_1302(boxes, want):
+    r = _bash('. "$1"; fleet_boxes_swap_obs_dll "$2"', SCRIPTS / "lib" / "genlock-fleet-boxes.sh", boxes)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == want + "\n"
+
+
+def test_a_failed_fetch_names_why_1302(stale_clone):
+    clone, _ = stale_clone
+    absent = "b" * 40  # a well-formed commit id the origin does not have
+    r = _lib('rc=0; genlock_stats_abi_resolve "$2" "$3" fast 1 1 || rc=$?; echo "rc=$rc"', absent, clone)
+    assert r.stdout == "rc=3\n", r.stderr
+    assert f"git fetch origin {absent} failed" in r.stderr
+
+
+@pytest.fixture(scope="module")
+def output_repo(tmp_path_factory):
+    """obs.h at stats v4 with the output stats struct at v1, then at v2, then without its define."""
+    repo = tmp_path_factory.mktemp("output_repo")
+    git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    obs_h = repo / "vendor" / "obs-studio" / "libobs" / "obs.h"
+    obs_h.parent.mkdir(parents=True)
+    shas = {}
+    for tag, out in (("out1", "#define OBS_GENLOCK_OUTPUT_STATS_VERSION 1\n"),
+                     ("out2", "#define OBS_GENLOCK_OUTPUT_STATS_VERSION 2\n"), ("none", "")):
+        obs_h.write_text("#define OBS_GENLOCK_STATS_VERSION 4\n" + out)
+        subprocess.run(git + ["add", "-A"], check=True)
+        subprocess.run(git + ["commit", "-q", "-m", tag], check=True)
+        shas[tag] = subprocess.run(git + ["rev-parse", "HEAD"], capture_output=True, text=True,
+                                   check=True).stdout.strip()
+    return repo, shas
+
+
+@pytest.mark.parametrize("tag,mode,swaps,rc", [
+    ("out1", "fast", "1", 0), ("out2", "fast", "1", 3), ("none", "fast", "1", 3),
+    ("out2", "full", "1", 0), ("out2", "fast", "0", 0),
+])
+def test_a_fast_deploy_refuses_an_output_stats_struct_the_gate_does_not_cover_1302(output_repo, tag, mode, swaps, rc):
+    """The gate compares only OBS_GENLOCK_STATS_VERSION; struct obs_genlock_output_stats is on the
+    frontend's stack too, so a fast obs.dll swap is refused at deploy time unless it is the version
+    the gate is known safe for (1) -- the deploy-time twin of the CI pin below."""
+    repo, shas = output_repo
+    r = _lib('rc=0; out="$(genlock_stats_abi_resolve "$2" "$3" "$4" "$5")" || rc=$?; echo "rc=$rc out=$out"',
+             shas[tag], repo, mode, swaps)
+    assert r.returncode == 0, r.stderr
+    if rc == 0:
+        assert r.stdout == "rc=0 out=4\n", r.stderr
+    else:
+        assert r.stdout == "rc=3 out=\n", r.stderr
+        assert "obs_genlock_output_stats" in r.stderr and "deploy --full" in r.stderr
 
 
 # --- the gate's premise: every stats struct change bumps a version the gate reads -----------------
