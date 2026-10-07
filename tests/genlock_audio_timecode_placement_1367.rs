@@ -205,9 +205,11 @@ fn pairing_offset_and_audit_basis_use_the_measured_delay_1367() {
         "\"audio_hold=%s video_delay_ms=%lld audio_health=%d \"",
         "the audit line no longer carries the audio pairing basis",
     );
+    // issue 1302: the hold mode is printed from the shared stats snapshot, the same value the LOCK
+    // widget's heartbeat carries.
     assert_has(
         &src,
-        "genlock_audio_hold_token(source->genlock_audio_hold_mode),",
+        "genlock_audio_hold_token(gs.audio_hold_mode),",
         "the audit line no longer prints the hold mode",
     );
     assert_has(

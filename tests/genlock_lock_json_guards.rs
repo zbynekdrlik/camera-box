@@ -139,6 +139,26 @@ fn genlock_lock_recent_event_baseline_present_1302() {
 }
 
 #[test]
+fn genlock_lock_input_audio_placement_present_1302() {
+    // Issue 1302 (schema v8): each inputs[] element carries the input's audio PLACEMENT -- the hold
+    // token (off / latency / timecode / pending), the withheld-packet count and the measured placement
+    // error (null until seeded) -- from the v4 libobs stats, so a consumer (the SongPlayer A/V gate)
+    // can wait for real audio instead of a box-level LOCKED. Omitted for a pre-v4 libobs. Linux-CI
+    // twin of the issue-1302 pwsh block in BOTH windows-genlock{,-fast}.yml.
+    assert_has(STATUSBAR_CPP, "\\\"audio_hold\\\":");
+    assert_has(
+        STATUSBAR_CPP,
+        "\\\"audio_withheld\\\":%llu,\\\"audio_place_err_ms\\\":",
+    );
+    assert_has(STATUSBAR_CPP, "if (r.audio_stats) {");
+    assert_has(STATUSBAR_CPP, "rec.audio_stats = true;");
+    assert_has(
+        STATUSBAR_CPP,
+        "rec.audio_place_err_seeded = st.audio_place_err_seeded;",
+    );
+}
+
+#[test]
 fn genlock_lock_idle_input_class_present_1341() {
     // #1341: a CONNECTED-but-IDLE input (a keep-alive-only SongPlayer playlist input) is excluded
     // from the DEGRADED gate. The widget derives per-input idle from the received-frame delta over
@@ -204,8 +224,9 @@ fn genlock_lock_qpc_windowed_drift_present_1299_part4() {
     assert_has(STATUSBAR_CPP, "obs_data_get_double(d, \"f_phase_ppm\")");
     // the v5 report-only telemetry keys the bundle-state parser reads
     assert_has(STATUSBAR_CPP, "\\\"qpc_drift_ppm\\\":");
-    // issue 1372 part D bumped the schema literal to v7 (additive media_clock); pin the current version.
-    assert_has(STATUSBAR_CPP, "{\\\"v\\\":7,\\\"state\\\":");
+    // issue 1302 bumped the schema literal to v8 (additive per-input audio placement); pin the
+    // current version.
+    assert_has(STATUSBAR_CPP, "{\\\"v\\\":8,\\\"state\\\":");
     // the windowed-rate ring member + the bounds
     assert_has(
         STATUSBAR_HPP,
