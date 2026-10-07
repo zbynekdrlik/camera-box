@@ -5,8 +5,11 @@ OBS's NDI program output (`STREAM-SNV (stream)`). The receiver is audio-only and
 any NDI monitor. Every 2 s the service classifies the audio and rewrites `program-audio.json` in
 the rig-lease server's serve dir. MEASUREMENT needs the cam2 QPSK marker itself (a timecode chain of
 4 markers over the trailing 4 s), decoded by the dock's own decoder through a small library built on
-dev1 with g++ (`scripts/build-qpsk-guard-shim.sh`); the first 4 s after a start or a receive gap read
-UNKNOWN. Gates call
+dev1 with g++ (`scripts/build-qpsk-guard-shim.sh`). Nothing reads MEASUREMENT in the first 4 s after a
+start or a span restart: a window whose spectrum alone says FOREIGN reads FOREIGN, the rest UNKNOWN.
+The span restarts on a hole in the SENDER's NDI audio timeline (the frames' SDK timestamps), never on
+a late delivery while dev1 is busy; only a frame without a timestamp falls back to a 1 s arrival gap,
+and a dantesync date step costs one warm-up. Gates call
 `scripts/program_audio_guard.py --url http://dev1:8890/program-audio.json --max-age 10` and stop
 the broadcast on any exit but 0 (1 FOREIGN, also a FOREIGN window within `--latch-s` 30 s; 2 UNKNOWN /
 stale / unreachable). The served file lives in `$XDG_RUNTIME_DIR/rig-lease-serve` (tmpfs).
@@ -59,6 +62,30 @@ sleep 8
 python3 ~/devel/camera-box/scripts/program_audio_guard.py   # verdict=MEASUREMENT ... markers=8 chain=7 (chain >= 6), exit 0
 curl -s http://dev1:8890/program-audio.json; echo            # carries "markers_decoded" + "marker_chain"
 journalctl --user -u program-audio-sampler -n 20             # no WARNING about the decoder sources
+```
+
+## Update: span continuity on the sender timeline (issue 1404, design 6030385284)
+
+Only the sampler's Python changed (`program_audio.py`, `program_audio_sampler.py`,
+`program_audio_ndi.py`); the shim, the unit and the lease server did not. Once the `~/devel/camera-box`
+checkout carries the change, restart the sampler. The restart writes UNKNOWN for ~4 s (start +
+warm-up), and restreamer stops a running YouTube session on 2 UNKNOWN polls, so restart only while
+the rig lease is free:
+
+```bash
+if curl -sf http://127.0.0.1:8890/rig-lease.json \
+     | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("held") is False else 1)'; then
+  systemctl --user restart program-audio-sampler.service
+else
+  echo "rig lease held or unreadable -- sampler NOT restarted, retry later"
+fi
+sleep 8
+python3 ~/devel/camera-box/scripts/program_audio_guard.py      # verdict=MEASUREMENT ... chain >= 6, exit 0
+journalctl --user -u program-audio-sampler -n 5 --no-pager      # start line: continuity=sender timeline (frame+20ms)
+# after 10 min: the summary line reads timeline_breaks=0 ... receive_gaps=0; a busy dev1 shows up as
+# late_bursts=N with "late burst after 1.x s without audio: the sender timeline continues" lines,
+# and no MEASUREMENT -> UNKNOWN transition for them
+journalctl --user -u program-audio-sampler --since -15min --no-pager | grep -E 'summary|late burst|discontinuity'
 ```
 
 To re-check the marker bars on new real audio (for example after a decoder change), run

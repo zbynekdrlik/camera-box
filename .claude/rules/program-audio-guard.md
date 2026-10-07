@@ -16,6 +16,7 @@ paths:
   - "tests/python/test_program_audio_1404.py"
   - "tests/python/test_program_audio_guard_1404.py"
   - "tests/python/test_program_audio_marker_1404.py"
+  - "tests/python/test_program_audio_timeline_1404.py"
   - "tests/python/qpsk_guard_shim_1404.py"
   - "tests/python/test_rig_marker_mirror_1404.py"
   - "tests/python/test_rig_serve_routes_1404.py"
@@ -140,13 +141,59 @@ level. Re-run the full calibration after any decoder or rule change:
 (`--classes` splits the synthetic run; each class takes ~1.5 min on dev1).
 
 **The sampler (`program_audio_sampler.py`):**
-- **Warm-up.** Until 4 s of audio arrived since the start, a receive gap or a format change, every
-  verdict is UNKNOWN (also SILENT and spectral FOREIGN), never MEASUREMENT.
-- **Receive gap.** No audio block for over `RECEIVE_GAP_S` = 1 s between two blocks, or an NDI error
-  frame. The window and the span restart, so audio around a gap is never stitched into one span
-  (the chain would read the gap as a jump of the index clock). NDI delivers an OBS audio tick every
-  ~21 ms and the sampler drains it within ~0.1 s of a window's work, so 1 s is an interruption,
-  never jitter.
+- **Warm-up.** Until 4 s of audio arrived since the start, a span restart or a format change,
+  nothing reads MEASUREMENT. A window whose spectrum alone says FOREIGN (`spectral_foreign`: level
+  ≥ −60 dBFS and ≥ 30 % outside the band) reads FOREIGN and starts the latch (ROZHODNUTÉ 6027706292
+  item 1: only MEASUREMENT needs the marker chain). Every other warm-up window, SILENT included,
+  reads UNKNOWN.
+- **The span restarts on a hole in the SENDER's audio timeline, never on dev1's arrival time**
+  (design 6030385284, Approach 1; `frame_continues` in `program_audio.py`, pinned by
+  `tests/python/test_program_audio_timeline_1404.py`).
+  - Why: the old rule (no audio block for over 1 s) read 57 spurious `MEASUREMENT -> UNKNOWN` in 6 h
+    on 7.10.2026, all `receive gap of 1.0–2.0 s` while worktree lanes loaded dev1. The sampler was
+    starved and the NDI SDK handed the queued audio over in one late burst; nothing was lost.
+    Restreamer's watchdog stops a YouTube session on 2 consecutive UNKNOWN polls.
+  - The rule: every NDI audio frame carries the SDK `timestamp` (100 ns, the sender's submission
+    time). `expected = prev_timestamp + prev_samples / sample_rate`. Within ± (one frame + 20 ms)
+    = ±41.3 ms at 1024 samples / 48 kHz it CONTINUES, whatever the arrival gap (logged as a
+    `late burst … the marker span is kept`). Farther off it is a DISCONTINUITY and the window and
+    span restart (`audio timeline discontinuity: the frame sits +X ms off …`).
+  - It also closes the old reverse hole: audio LOST while blocks kept arriving under 1 s apart was
+    stitched into one span and could read one false FOREIGN (review of 6027557132: 4 of 762 cut
+    clips). A lost stretch now moves the timestamps and restarts the span.
+  - Fallback: only when a timestamp is undefined (`INT64_MAX` = `NDIlib_recv_timestamp_undefined`,
+    or ≤ 0) the old arrival rule applies (`RECEIVE_GAP_S` = 1 s, logged `receive gap of … (no NDI
+    sender timestamp …)`). An NDI error frame still restarts the span unconditionally (stricter
+    than the fallback; 0 error frames in the 6 h live journal).
+  - The 10-minute summary counts `timeline_breaks`, `late_bursts` and `receive_gaps` (fallback only).
+  - STEP 0 (7.10.2026): a second, read-only sampler instance (private serve dir) took the live
+    `STREAM-SNV (stream)` for 25 min while dev1 ran test suites and the marker calibration.
+    70 304 frames (comment 6030714990):
+    - the one arrival gap over 1 s (1.25 s; the old loop logged `receive gap of 1.2 s` and
+      `MEASUREMENT -> UNKNOWN`) sat +0.87 ms on the timeline, and the burst after it delivered
+      1259 ms of audio within 50 ms: nothing lost;
+    - all 14 gaps of 0.5–0.96 s and all 140 over 0.2 s were on the timeline;
+    - the submission jitter reached −21.1 / +24.5 ms (p99 11.7 ms) against the ±41.3 ms
+      tolerance: no false discontinuity in 70 302 continuous pairs;
+    - ONE real hole was off it: +199.8 ms with a 0.19 s arrival gap. Its frames were never
+      delivered, the old rule stitched across it, and the stream OBS log shows nothing at that
+      moment, so where they were lost is not known;
+    - the SDK `timestamp` and the sender's `timecode` agree to 2 µs: both are its wall clock at
+      submission (`vendor/distroav/src/ndi-output.cpp`, `genlock_wall_now_100ns`).
+    A probe can reuse the scratch recipe: subclass `NdiAudioReceiver.capture` to log
+    `frame.timestamp`, run `program_audio_sampler.run` with a private serve dir, never the live
+    one, and never restart the live unit for it.
+  - **A dantesync date step** moves the sender's wall clock and so its timestamps once. A step over
+    the tolerance reads as ONE discontinuity: one UNKNOWN warm-up window per step (the nightly
+    1.12.0 step included), never FOREIGN, because a restarted span is never judged as a short chain.
+    Micro-corrections of a few ms stay inside the tolerance. Accepted in the design.
+  - Residual limits: a sender stall longer than the tolerance (OBS submitting a frame > ~20 ms
+    later than its normal jitter) costs one warm-up although nothing was lost; a sender with no
+    timestamps falls back to the arrival rule and its old limit.
+  - Tests: the fakes use a local `_Block` with a timestamp field, so they exercise the loop, not the
+    binding; `pan.AudioBlock` defaults `timestamp` to undefined, so an old fake (2 fields) runs the
+    arrival fallback. `program_audio_marker_calibrate.py` stamps its blocks on a continuous
+    timeline, so the bars run the same path as the service.
 - **A SILENT window empties the span.** The next non-silent window holds only its own markers, so it
   reads UNKNOWN ("marker span") until the span is full again. Without this a silence→measurement
   start read a short chain and could latch a false FOREIGN.
@@ -163,17 +210,6 @@ level. Re-run the full calibration after any decoder or rule change:
   - The camera-box guard also refuses it (exit 2), for a server that still runs the old code.
   - The unit is already enabled on dev1, so the README steps are due when the checkout moves:
     restart the lease server (only while `held=false`), build the shim, restart the sampler.
-- **Known limit: audio lost WITHOUT a receive gap is stitched into the span.** If samples go missing
-  while blocks keep arriving under 1 s apart, the chain reads the hole as a jump of the index clock.
-  - A review probe cut 0.1–0.8 s holes into the real clips: 4 of 762 cases read one FOREIGN window,
-    which latches.
-  - OBS fills its own output stalls with silence, which keeps the time, so this needs real NDI frame
-    loss.
-  - The NDI timecode could detect the loss, but it also jumps with every dantesync date step. That
-    trade-off is a design call left open.
-- **Warm-up hides a spectral FOREIGN too** (the ruling: UNKNOWN, never FOREIGN, before 4 s of audio).
-  A music burst shorter than the warm-up right after a receive gap therefore does not start the
-  latch; the guard still exits 2 on that UNKNOWN.
 - **Install order matters.** The build renames the new library over the old one, never writes it in
   place: a running sampler keeps its mapped copy (writing a mapped `.so` in place can SIGBUS it).
 - **Cost:** ~70 ms of decode per 2 s window (4 s stereo span at 48 kHz) plus the FFT.
