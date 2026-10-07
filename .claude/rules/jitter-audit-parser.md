@@ -103,6 +103,11 @@ Local run without serde: a replica of `jitter_audit.rs` with `summaries_to_json`
 dropped compiles with plain `rustc --test` (script in the #1355 lane notes, `drop_fn` by brace
 matching).
 
+Keys added this way so far: `stamp_dup` / `stamp_gap` (#1355), `n1_grows` and `n2_early` (issue
+1367), `relabelled` (issue 1372 part B, the receive-FIFO date-step relabel, right after
+`n2_early=`; `genlock-fifo-relabel.md`). A RED for a new key that compiles: add the field and the
+delta first with no `match` arm, so the parse test reads 0 for the logged value.
+
 ## The relock-BURST family (issue 1318)
 
 A THIRD parser family over the same log, beside INPUT (`genlock-fifo audit`) and SEND
