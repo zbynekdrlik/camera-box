@@ -98,7 +98,10 @@ fn the_dock_list_is_the_rust_reserved_origin_ids_1404() {
 #[test]
 fn the_predicate_reads_the_one_list_1404() {
     let hdr = squish(&strip_cpp_comments(&read(QR_HEADER)));
-    let body = unique_body_of(&hdr, "inline bool camera_box_qr_is_paired_run(uint32_t run_id)");
+    let body = unique_body_of(
+        &hdr,
+        "inline bool camera_box_qr_is_paired_run(uint32_t run_id)",
+    );
     for need in [
         "static const uint32_t reserved[] = CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS;",
         "if (reserved[i] == run_id) return false;",
@@ -121,7 +124,9 @@ fn the_record_refuses_a_reserved_origin_before_touching_the_ring_1404() {
         av_sync_dock_output::LABEL,
         &body[..body.len().min(160)]
     );
-    let refuse = body.find("return false;").expect("the refusal returns false");
+    let refuse = body
+        .find("return false;")
+        .expect("the refusal returns false");
     let ring = body
         .find("st->cb_video_ts_ns[low] = video_ts;")
         .expect("the ring write");
