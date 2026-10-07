@@ -156,6 +156,22 @@ def test_a_failed_encode_fails_loud_and_leaves_nothing(tmp_path, monkeypatch):
     assert gen.main(["--out", str(out), "--seconds", "1"]) == 1
 
 
+def test_the_committed_deliverable_frame_reads_its_ticks():
+    """tests/fixtures/measurement-clip-1404/clip-v1-frame-1801.png is frame 1801 of the real
+    deliverable (H.264, gray via ffmpeg). The Rust recording decode reads the same file
+    (tests/measurement_clip_decode_1404.rs); its expected payloads are the generator's own."""
+    import cv2
+
+    img = cv2.imread(str(_ROOT / "tests" / "fixtures" / "measurement-clip-1404" / "clip-v1-frame-1801.png"))
+    assert img is not None and img.shape[:2] == (gen.HEIGHT, gen.WIDTH)
+    assert ylt.half_ticks(img, cv2.QRCodeDetector()) == (3602, 3601)
+    assert gen.frame_payloads(1801) == ("P911016.3602.60033333333.1636215862",
+                                        "P911016.3601.60016666667.527692900")
+    rs = _src("tests/measurement_clip_decode_1404.rs")
+    assert "frame_id: 3602,\n            gen_ts_ns: 60_033_333_333," in rs
+    assert "frame_id: 3601,\n            gen_ts_ns: 60_016_666_667," in rs
+
+
 # ---------------------------------------------------------------------------------------------
 # the picture
 # ---------------------------------------------------------------------------------------------
