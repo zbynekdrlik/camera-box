@@ -382,7 +382,8 @@ def test_sigterm_stops_both_threads_and_writes_unknown(tmp_path, monkeypatch, sh
     killer = threading.Thread(target=_term_once_capturing, daemon=True)
     killer.start()
     try:
-        rc = pas.main(["--serve-dir", str(tmp_path / "serve"), "--source", "S", "--marker-shim", shim_path])
+        rc = pas.main(["--serve-dir", str(tmp_path / "serve"), "--source", "S", "--marker-shim", shim_path,
+                       "--http-port", "0"])  # no endpoint: never bind the default port in a test
     finally:
         done.set()
         killer.join(5)
