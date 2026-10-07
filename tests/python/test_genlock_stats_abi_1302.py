@@ -381,13 +381,15 @@ def test_the_full_program_removes_the_marker_when_the_abi_is_unknown_1302(box, a
 
 @pytest.mark.parametrize("mode", ["fast", "full"])
 @pytest.mark.parametrize("abi,stats,out", [
-    ("4'; Remove-Item C:\\x -Recurse; '", "", ""),
-    ("4:1'; Remove-Item C:\\x -Recurse; '", "4", ""),
-    ("4'; Remove-Item C:\\x -Recurse; ':1", "", "1"),
+    ("4'; Write-Host INJECTED; '", "", ""),
+    ("4:1'; Write-Host INJECTED; '", "4", ""),
+    ("4'; Write-Host INJECTED; ':1", "", "1"),
+    # a ':' inside the payload moves the split, never past the validation
+    ("4'; Write-Host C:\\INJECTED; '", "", ""),
 ])
 def test_an_injected_abi_never_reaches_the_program_1302(mode, abi, stats, out):
     p = _program("stream", mode, abi)
-    assert "Remove-Item C:" not in p
+    assert "INJECTED" not in p
     if mode == "fast":
         assert f"\n$abiNew    = '{stats}'\n" in p
         assert f"\n$abiNewOut = '{out}'\n" in p
