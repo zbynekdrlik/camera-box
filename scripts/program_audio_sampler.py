@@ -42,8 +42,17 @@ MEASUREMENT | FOREIGN | SILENT | UNKNOWN (scripts/program_audio.py) and atomical
   sender restart and a larger dantesync date step restart it whatever the arrival time
   (one warm-up). Only a frame with no timestamp falls back to the arrival gap (no audio block for
   over RECEIVE_GAP_S), and an NDI error frame always restarts the span.
-* program-audio.json carries the additive `holes_bridged` / `bridged_ms` (since the sampler
-  started; null while it is not sampling).
+* program-audio.json carries the additive `holes_bridged` / `bridged_ms` / `queue_drops` (since the
+  sampler started; null while it is not sampling).
+* CAPTURE THREAD (design issue 1404 comment 6037613222): main() runs the NDI capture in its own
+  thread (scripts/program_audio_capture.py), which only calls NDIlib_recv_capture_v3 and queues; this
+  loop is the consumer. A full queue's drop is a hole of known length (`queue overflow` line,
+  `queue_drops`). run(capture=None) keeps the capture call in the loop (SyncCapture): the
+  calibration CLI and the loop tests.
+* DATE_STEP: a forward timestamp jump that matches dev1's own wall-clock step (read once per block
+  by the capture path) is the fleet date step, nothing lost: no zeros, no restart.
+* HOLED SPAN (ROZHODNUTÉ issue 1404 comment 6037765523): a short chain over a span holding bridged
+  audio reads UNKNOWN, never FOREIGN on its own.
 
 Usage (systemd/program-audio-sampler.service):
   program_audio_sampler.py [--source "STREAM-SNV (stream)"] [--serve-dir DIR] [--lib PATH]
@@ -53,6 +62,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import resource
 import shutil
 import signal
 import sys
@@ -66,6 +76,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import program_audio as pa  # noqa: E402
+import program_audio_capture as pac  # noqa: E402
 import program_audio_marker as pam  # noqa: E402
 import rig_serve_files as rsf  # noqa: E402
 
@@ -206,13 +217,21 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
         log: Callable[[str], None] = log, sleep: Callable[[float], None] = time.sleep,
         capture_timeout_ms: int = CAPTURE_TIMEOUT_MS, no_audio_timeout_s: float = NO_AUDIO_TIMEOUT_S,
         receive_gap_s: float = RECEIVE_GAP_S, window_s: float = pa.WINDOW_S,
-        should_stop: Callable[[], bool] = lambda: False) -> None:
-    """The sampler loop. `receiver` has capture(timeout_ms) -> AudioBlock|None (raises
+        should_stop: Callable[[], bool] = lambda: False, capture=None,
+        wall_offset: Callable[[], int | None] = pac.read_wall_offset_ns) -> None:
+    """The sampler's consumer loop. `receiver` has capture(timeout_ms) -> AudioBlock|None (raises
     ConnectionError on an NDI error frame) and connections(); `decoder` has
     decode(samples, sample_rate) -> CRC-valid words per channel (program_audio_marker.MarkerDecoder).
-    Every written payload also goes through `on_write` (tests)."""
+    `capture`: the capture side (program_audio_capture.CaptureThread, started by the caller); None =
+    a SyncCapture that calls the receiver in this loop (the calibration and the loop tests), reading
+    dev1's wall offset through `wall_offset` once per block. Every written payload also goes through
+    `on_write` (tests)."""
     latch = {"last_foreign": None}
     bridged_total = {"holes": 0, "ms": 0.0}  # since the start: the JSON's holes_bridged / bridged_ms
+    drops_total = {"frames": 0}              # since the start: the JSON's queue_drops
+    cap = capture if capture is not None else pac.SyncCapture(receiver, mono=mono, wall_offset=wall_offset,
+                                                              sleep=sleep)
+    walls = pa.WallSteps()
 
     def write(verdict, rms, outside, reason=None, markers=None, chain=None):
         now = datetime.now(timezone.utc)
@@ -222,7 +241,7 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
                                    reason=reason, last_foreign_ts_utc=latch["last_foreign"],
                                    markers_decoded=markers, marker_chain=chain,
                                    holes_bridged=bridged_total["holes"],
-                                   bridged_ms=bridged_total["ms"])
+                                   bridged_ms=bridged_total["ms"], queue_drops=drops_total["frames"])
         pa.write_payload(serve_dir, payload)
         if on_write is not None:
             on_write(payload)
@@ -235,17 +254,20 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
         f"band={pa.BAND_LO_HZ:.0f}-{pa.BAND_HI_HZ:.0f}Hz tone_lines={pa.MEASUREMENT_TONE_LINES_HZ} "
         f"foreign>={pa.FOREIGN_OUTSIDE_BAND_PCT}% silent<{pa.SILENT_RMS_DBFS}dBFS "
         f"marker_chain>={pa.MARKER_CHAIN_MIN} over {pa.MARKER_SPAN_S:g}s continuity=sender timeline "
-        f"(frame+{pa.CONTINUITY_SLACK_S * 1e3:g}ms, holes up to {pa.HOLE_BRIDGE_MAX_MS:g}ms bridged) "
-        f"receive_gap>{receive_gap_s:g}s without a timestamp")
+        f"(frame+{pa.CONTINUITY_SLACK_S * 1e3:g}ms, holes up to {pa.HOLE_BRIDGE_MAX_MS:g}ms bridged, "
+        f"date steps matched to dev1's own wall step +-{pa.DATE_STEP_MATCH_MS:g}ms within "
+        f"{pa.DATE_STEP_WINDOW_S:g}s) receive_gap>{receive_gap_s:g}s without a timestamp "
+        f"capture={'thread' if capture is not None else 'in-loop'}")
     last_audio = mono()
     have_audio = False
     last_unknown = mono()
     last_verdict = "UNKNOWN"
     last_summary = mono()
     counts = {v: 0 for v in pa.VERDICTS}
-    errors = bad_rate = gaps = breaks = late_bursts = bridged = 0
+    errors = bad_rate = gaps = breaks = late_bursts = bridged = drops = date_steps = 0
     bridged_ms = 0.0     # the audio this summary interval bridged with zeros
     max_offset_ms = 0.0  # the largest |offset| of a frame that continued the sender timeline
+    max_lag_ms = 0.0     # the oldest captured item the consumer took (its backlog behind the capture)
     prev = None  # (timestamp, samples, sample_rate) of the previous audio block
     in_error = False
     bad_rate_logged = False
@@ -276,18 +298,24 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
 
     while not should_stop() and (max_loops is None or loops < max_loops):
         loops += 1
-        try:
-            block = receiver.capture(capture_timeout_ms)
-        except ConnectionError as exc:
+        item = cap.get(capture_timeout_ms)
+        block = None
+        if item is not None and item.dropped_frames:
+            # The sampler's own capture queue was full: those frames are a hole of known length
+            # (judged below with the next block), counted, never silent.
+            drops += item.dropped_frames
+            drops_total["frames"] += item.dropped_frames
+        if item is not None and item.error is not None:
             errors += 1
             if not in_error:
-                log(f"program-audio sampler: {exc} -- the SDK reconnects by itself")
+                log(f"program-audio sampler: {item.error} -- the SDK reconnects by itself")
                 in_error = True
             if have_audio:
                 restart_span("")  # audio after an error frame never continues the span
             have_audio = False
-            sleep(capture_timeout_ms / 1000.0)  # an error frame can come back at once: never spin
-            block = None
+        elif item is not None:
+            block = item.block
+            walls.observe(item.arrival_s, item.wall_offset_ns)
         now = mono()
         if block is not None and block.sample_rate <= 0:
             bad_rate += 1
@@ -298,8 +326,11 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
         if block is not None and block.samples.shape[0] > 0:
             in_error = False
             missing = 0
+            max_lag_ms = max(max_lag_ms, (now - item.arrival_s) * 1e3)
             if have_audio:
-                j = judge_continuity(prev, block, now - last_audio, receive_gap_s)
+                j = judge_continuity(prev, block, item.arrival_s - last_audio, receive_gap_s,
+                                     dropped_frames=item.dropped_frames, dropped_100ns=item.dropped_100ns,
+                                     wall_steps=walls.recent(item.arrival_s))
                 if j.offset_ms is not None and j.kind in ("continue", "late_burst"):
                     max_offset_ms = max(max_offset_ms, abs(j.offset_ms))
                 if j.kind == "timeline_break":
@@ -311,16 +342,22 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
                 elif j.kind == "late_burst":
                     late_bursts += 1
                     log(f"program-audio sampler: {j.detail}")
+                elif j.kind == "date_step":
+                    date_steps += 1
+                    walls.consume(j.wall_step_100ns)
+                    missing = j.missing_samples
+                    log(f"program-audio sampler: {j.detail}")
                 elif j.kind == "bridge":
                     missing = j.missing_samples
+                    log(f"program-audio sampler: {j.detail}")
+                if missing:
                     hole_ms = missing * 1e3 / block.sample_rate
                     bridged += 1
                     bridged_ms += hole_ms
                     bridged_total["holes"] += 1
                     bridged_total["ms"] += hole_ms
-                    log(f"program-audio sampler: {j.detail}")
             have_audio = True
-            last_audio = now
+            last_audio = item.arrival_s
             prev = (block.timestamp, block.samples.shape[0], block.sample_rate, block.samples.shape[1])
             if missing:
                 # The hole's samples, as silence, at their place on the sender's timeline: every
@@ -339,54 +376,90 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
                 last_verdict = "UNKNOWN"
         if now - last_summary >= LOG_SUMMARY_S:
             log("program-audio summary (last %.0f s): %s error_frames=%d bad_rate_frames=%d "
+                "queue_drops=%d max_lag_ms=%.0f date_steps=%d "
                 "timeline_breaks=%d late_bursts=%d receive_gaps=%d max_offset_ms=%.1f "
                 "holes_bridged=%d bridged_ms=%.1f"
                 % (now - last_summary, " ".join(f"{k}={v}" for k, v in counts.items()),
-                   errors, bad_rate, breaks, late_bursts, gaps, max_offset_ms, bridged, bridged_ms))
+                   errors, bad_rate, drops, max_lag_ms, date_steps, breaks, late_bursts, gaps,
+                   max_offset_ms, bridged, bridged_ms))
             counts = {v: 0 for v in pa.VERDICTS}
-            errors = bad_rate = gaps = breaks = late_bursts = bridged = 0
-            bridged_ms = max_offset_ms = 0.0
+            errors = bad_rate = gaps = breaks = late_bursts = bridged = drops = date_steps = 0
+            bridged_ms = max_offset_ms = max_lag_ms = 0.0
             last_summary = now
 
 
 class Judgement(NamedTuple):
     """judge_continuity's answer: `kind` (below), the log `detail`, the frame's offset from the
-    sender timeline in ms (None without timestamps) and, for "bridge", the missing samples."""
+    sender timeline in ms (None without timestamps), for "bridge" / "date_step" the missing samples
+    (the zeros to insert), and for "date_step" the dev1 wall step (100 ns) it used."""
     kind: str
     detail: str
     offset_ms: float | None
     missing_samples: int = 0
+    wall_step_100ns: float | None = None
 
 
-def judge_continuity(prev, block, arrival_gap_s: float, receive_gap_s: float) -> Judgement:
+def judge_continuity(prev, block, arrival_gap_s: float, receive_gap_s: float, *, dropped_frames: int = 0,
+                     dropped_100ns: float = 0.0, wall_steps=()) -> Judgement:
     """How `block` follows the previous audio block `prev` = (timestamp, samples, sample_rate,
-    channels);
-    the kind is one of
+    channels); `dropped_frames` / `dropped_100ns`: frames the sampler's own capture queue dropped
+    between the two (a hole of known length); `wall_steps`: dev1's own recent wall-clock steps
+    (pa.WallSteps.recent). The kind is one of
       "continue"        on the sender timeline, arrival within receive_gap_s: nothing to say
       "late_burst"      on the sender timeline after an arrival gap over receive_gap_s: the span is
                         kept (the SDK queued the audio while dev1 starved the sampler)
-      "bridge"          a hole AHEAD of the timeline up to pa.HOLE_BRIDGE_MAX_MS (pa.BRIDGE): the
-                        caller inserts `missing_samples` zeros before the frame and keeps the span,
-                        whatever the arrival gap (design issue 1404 comment 6036098516)
-      "timeline_break"  off the sender timeline (pa.DISCONTINUITY, or a hole whose frame changed
-                        the sample rate or the channel count): the span restarts
+      "date_step"       a forward jump that matches dev1's own wall step (pa.DATE_STEP): the fleet
+                        date step, nothing lost; no zeros (only a known queue drop's), the span kept
+      "bridge"          a hole AHEAD of the timeline up to pa.HOLE_BRIDGE_MAX_MS (pa.BRIDGE), or a
+                        queue drop: the caller inserts `missing_samples` zeros before the frame and
+                        keeps the span, whatever the arrival gap (design issue 1404 comment 6036098516)
+      "timeline_break"  off the sender timeline (pa.DISCONTINUITY, a queue drop over the bridge
+                        limit, or a hole whose frame changed the sample rate or the channel count):
+                        the span restarts
       "receive_gap"     a timestamp is undefined (pa.UNKNOWN_TS) and the arrival gap is over
                         receive_gap_s: the fallback restarts the span"""
     p_ts, p_n, p_sr, p_ch = prev
     tol = pa.continuity_tolerance_100ns(p_n, p_sr)
     tol_ms = tol * 1e3 / pa.NDI_TIME_UNITS_PER_S
-    decision = pa.frame_continues(p_ts, p_n, p_sr, block.timestamp, tol)
+    decision = pa.frame_continues(p_ts, p_n, p_sr, block.timestamp, tol, dropped_100ns=dropped_100ns,
+                                  wall_steps=wall_steps)
+    fmt_changed = (block.sample_rate, block.samples.shape[1]) != (p_sr, p_ch)
+    drop_ms = dropped_100ns * 1e3 / pa.NDI_TIME_UNITS_PER_S
+    queue = (f"queue overflow: {dropped_frames} frames ({drop_ms:.1f} ms) dropped by the sampler's own "
+             "capture queue -- " if dropped_frames else "")
     if decision.kind == pa.UNKNOWN_TS:
         if arrival_gap_s > receive_gap_s:
             return Judgement("receive_gap", (f"receive gap of {arrival_gap_s:.1f} s (no NDI sender "
                                              "timestamp, the arrival-time fallback)"), None)
         return Judgement("continue", "", None)
-    off_ms = pa.timeline_offset_100ns(p_ts, p_n, p_sr, block.timestamp) * 1e3 / pa.NDI_TIME_UNITS_PER_S
-    if decision.kind == pa.BRIDGE and (block.sample_rate, block.samples.shape[1]) != (p_sr, p_ch):
-        return Judgement("timeline_break", (f"audio timeline hole of {off_ms:+.1f} ms at a format change "
-                                            f"({p_sr} Hz x {p_ch} -> {block.sample_rate} Hz x "
+    if pa.timestamp_defined(p_ts) and pa.timestamp_defined(block.timestamp):
+        off_ms = pa.timeline_offset_100ns(p_ts, p_n, p_sr, block.timestamp) * 1e3 / pa.NDI_TIME_UNITS_PER_S
+    else:
+        off_ms = None  # only with a queue drop: frame_continues judged the known drop alone
+    if decision.kind in (pa.BRIDGE, pa.DATE_STEP) and decision.missing_samples and fmt_changed:
+        return Judgement("timeline_break", (f"{queue}audio timeline hole of {_fmt_ms(off_ms, drop_ms)} at a "
+                                            f"format change ({p_sr} Hz x {p_ch} -> {block.sample_rate} Hz x "
                                             f"{block.samples.shape[1]} channels, arrival gap "
                                             f"{arrival_gap_s:.1f} s)"), off_ms)
+    if decision.kind == pa.DATE_STEP:
+        rest = pa.timeline_offset_100ns(p_ts, p_n, p_sr, block.timestamp) - dropped_100ns
+        step = pa.matching_wall_step(rest, wall_steps)  # the same call frame_continues matched with
+        n = decision.missing_samples
+        return Judgement("date_step", (f"{queue}audio timeline date step: the frame sits {off_ms:+.1f} ms ahead "
+                                       f"of the sender's timeline and dev1's own wall clock stepped "
+                                       f"{step / 1e4:+.1f} ms within {pa.DATE_STEP_WINDOW_S:g} s -- the "
+                                       "fleet date step, nothing lost: the timeline is re-based, no zeros"
+                                       + (f" (only the {n} dropped samples)" if n else "")
+                                       + ", the marker span is kept"), off_ms, n, step)
+    if decision.kind == pa.BRIDGE and dropped_frames:
+        n = decision.missing_samples
+        return Judgement("bridge", (f"{queue}bridged with {n} zero samples ({n * 1e3 / p_sr:.1f} ms; the "
+                                    f"frame sits {_fmt_ms(off_ms, drop_ms)} off the sender's timeline, "
+                                    f"arrival gap {arrival_gap_s:.1f} s), the marker span is kept"), off_ms, n)
+    if decision.kind == pa.DISCONTINUITY and dropped_frames:
+        return Judgement("timeline_break", (f"{queue}a hole of {_fmt_ms(off_ms, drop_ms)} (over the "
+                                            f"{pa.HOLE_BRIDGE_MAX_MS:g} ms bridge, or off the sender's "
+                                            f"timeline beyond +-{tol_ms:.1f} ms)"), off_ms)
     if decision.kind == pa.BRIDGE:
         n = decision.missing_samples
         return Judgement("bridge", (f"audio timeline hole: the frame sits {off_ms:+.1f} ms ahead of the "
@@ -403,6 +476,12 @@ def judge_continuity(prev, block, arrival_gap_s: float, receive_gap_s: float) ->
                                         f"timeline continues ({off_ms:+.1f} ms), the marker span is kept"),
                          off_ms)
     return Judgement("continue", "", off_ms)
+
+
+def _fmt_ms(off_ms: float | None, drop_ms: float) -> str:
+    """A hole for a log line: the frame's sender-timeline offset, or the dropped audio when the
+    frames carry no timestamp."""
+    return f"{off_ms:+.1f} ms" if off_ms is not None else f"{drop_ms:.1f} ms (no sender timestamp)"
 
 
 def _fmt(v) -> str:
@@ -454,12 +533,59 @@ def classify_window(win: np.ndarray, sr: int, span: MarkerSpan, decoder, real: n
     elif not silent:
         reason = (f"marker span: {span.non_silent_s:g} of {pa.MARKER_SPAN_S:g} s of non-silent audio "
                   "since the last silent window")
-    verdict = pa.classify(rms, outside, chain)
+    holed = full is not None and span.real is not None
+    verdict = pa.classify(rms, outside, chain, holed=holed)
     if verdict != "UNKNOWN":
         reason = None
+    elif reason is None and holed and isinstance(chain, int) and chain < pa.MARKER_CHAIN_MIN:
+        zeros_ms = int(np.count_nonzero(~span.real)) * 1e3 / sr
+        reason = (f"marker chain {chain} < {pa.MARKER_CHAIN_MIN} over a span holding {zeros_ms:.1f} ms of "
+                  "bridged audio -- a chain cut short by a hole is never FOREIGN on its own "
+                  "(ROZHODNUTÉ issue 1404 comment 6037765523)")
     elif reason is None:
         reason = "the window's level or spectrum is not a number"
     return verdict, rms, outside, reason, markers, chain
+
+
+# The unit's CPUWeight (systemd/program-audio-sampler.service): the sampler's cgroup gets this weight
+# against the other units of the user's app.slice (the worktree lanes run there too).
+CPU_WEIGHT_WANTED = 1000
+
+
+def scheduling_state(cgroup_file: str = "/proc/self/cgroup",
+                     cgroup_root: str = "/sys/fs/cgroup") -> tuple[int, int | None, int | None]:
+    """(nice, the cgroup's cpu.weight or None when unreadable, the RLIMIT_NICE soft limit or None)
+    of this process, for the one start line (scheduling_line)."""
+    nice = os.getpriority(os.PRIO_PROCESS, 0)
+    weight = None
+    try:
+        with open(cgroup_file, encoding="utf-8") as fh:
+            path = next((line.split("::", 1)[1].strip() for line in fh if line.startswith("0::")), None)
+        if path is not None:
+            with open(os.path.join(cgroup_root, path.lstrip("/"), "cpu.weight"), encoding="utf-8") as fh:
+                weight = int(fh.read().strip())
+    except (OSError, ValueError):
+        weight = None  # reported as "unreadable" in the start line, never guessed
+    limit = resource.getrlimit(resource.RLIMIT_NICE)[0]
+    rlimit_nice = None if limit == resource.RLIM_INFINITY else int(limit)
+    return nice, weight, rlimit_nice
+
+
+def scheduling_line(nice: int, weight: int | None, rlimit_nice: int | None) -> str:
+    """The one start line about the sampler's CPU priority. A `--user` unit cannot lower nice on dev1
+    (RLIMIT_NICE 0: systemd --user runs `Nice=-5` at 0 without an error, checked 7.10.2026), so the
+    unit sets CPUWeight only and this line is a WARNING whenever the nice is not below 0 -- saying
+    whether the CPU weight is in effect (without it the sampler competes like any other process)."""
+    w = "unreadable" if weight is None else str(weight)
+    lim = "?" if rlimit_nice is None else str(rlimit_nice)
+    effective = weight is not None and weight >= CPU_WEIGHT_WANTED
+    if nice < 0 and effective:
+        return f"program-audio sampler: scheduling nice={nice} cpu.weight={w}"
+    tail = (f"its priority is the cgroup's cpu.weight={w} only" if effective else
+            f"and its cgroup's cpu.weight={w} is not the unit's CPUWeight={CPU_WEIGHT_WANTED}: it "
+            "competes like any other process and can starve under load")
+    return (f"program-audio sampler: WARNING scheduling nice={nice} (a --user unit cannot lower it here, "
+            f"RLIMIT_NICE={lim}) -- {tail}")
 
 
 def private_ndi_config_dir() -> str:
@@ -526,11 +652,21 @@ def main(argv=None) -> int:
 
         signal.signal(signal.SIGTERM, _stop)
         signal.signal(signal.SIGINT, _stop)
+        log(scheduling_line(*scheduling_state()))
+        # The capture thread only calls the SDK and queues; the window work below never delays the
+        # next capture call (design issue 1404 comment 6037613222).
+        cap = pac.CaptureThread(receiver, timeout_ms=CAPTURE_TIMEOUT_MS)
+        cap.start()
         try:
-            run(receiver, args.serve_dir, source=args.source, decoder=decoder,
+            run(receiver, args.serve_dir, source=args.source, decoder=decoder, capture=cap,
                 should_stop=lambda: stop["signal"] is not None)
         finally:
-            receiver.close()
+            if cap.stop():
+                receiver.close()
+            else:
+                log("program-audio sampler: ERROR the capture thread is still inside the NDI capture call -- "
+                    "the receiver is left to the process exit (destroying it under a running capture "
+                    "would crash the SDK)")
             set_unknown("sampler stopped")
             log(f"program-audio sampler: stopped (signal {stop['signal']}), program-audio.json set to UNKNOWN")
     finally:
