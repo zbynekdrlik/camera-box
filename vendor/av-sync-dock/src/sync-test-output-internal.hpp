@@ -250,6 +250,10 @@ struct sync_test_output
 	 * on the audio decode worker (issue 1381) under the same mutex as the other cb_video_* fields. */
 	uint64_t cb_video_last_decode_ts_ns = 0;
 
+	/* issue 1404: the reserved origin run whose QRs `cb_video_qr_record` is ignoring right now (0 =
+	 * none), so the "ignoring" line is logged once per CG segment, never per frame. Decode worker only. */
+	uint32_t cb_ignored_origin_run = 0;
+
 	/* #398 fix: rolling history of recently-resolved (audio_ts, offset_ns) samples for
 	 * `cb_smooth_offset_ns` — median-smooths the displayed offset so a single false CRC-4 accept
 	 * (~1/16 likely on real program audio) can't show garbage (review MEDIUM finding). Touched
