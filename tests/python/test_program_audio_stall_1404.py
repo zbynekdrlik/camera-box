@@ -544,8 +544,11 @@ def test_a_long_stall_bridges_once_before_its_first_frame(tmp_path):
     stall = (128.0, 106.7, 85.3, 64.0, 42.7, 21.3)
     items = [_audio_item(k) for k in range(10)]
     items += [_audio_item(10 + i, off) for i, off in enumerate(stall)]
-    items += [_audio_item(k) for k in range(16, 200)]
+    # 279 frames + the 2050 zeros = 287 746 samples, just under the 288 000 of three 2 s windows: a frame
+    # taken in twice (the filed frames fed again) would complete a third window
+    items += [_audio_item(k) for k in range(16, 279)]
     payloads, lines = _scripted_run(items, tmp_path, max_loops=len(items))
+    assert len([p for p in payloads if p.get("reason") != "sampler starting"]) == 2, lines
     assert payloads[-1]["holes_bridged"] == 1, lines
     assert payloads[-1]["bridged_ms"] == pytest.approx(42.7, abs=0.05)
     assert payloads[-1]["sender_stalls"] == 0
