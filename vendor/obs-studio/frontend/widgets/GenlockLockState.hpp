@@ -199,12 +199,14 @@ static inline genlock_input_idle_class_t genlock_input_idle_class(int64_t span_m
 	/* the full window: the #1341 rule decides */
 	if (span_ms >= GENLOCK_IDLE_FULL_SPAN_MS)
 		return delta_frames < GENLOCK_IDLE_INPUT_MIN_FRAMES ? GENLOCK_INPUT_IDLE : GENLOCK_INPUT_LIVE;
-	/* a decided class holds while the ring is shorter (a ring a long widget stall pruned) */
-	if (prev_class == GENLOCK_INPUT_LIVE || prev_class == GENLOCK_INPUT_IDLE)
-		return prev_class;
-	/* the fast first classification: >= 60 frames over >= 5 s is a live rate; it never says IDLE */
+	/* the fast rule: >= 60 frames over >= 5 s is a live rate, whatever the previous class (a
+	 * keep-alive input never meets it); it never says IDLE */
 	if (span_ms >= GENLOCK_IDLE_FAST_SPAN_MS && delta_frames >= GENLOCK_IDLE_FAST_MIN_FRAMES)
 		return GENLOCK_INPUT_LIVE;
+	/* else the previous class holds on a short ring (a ring a long widget stall pruned): LIVE is
+	 * never demoted, IDLE stays IDLE, anything else stays UNCLASSIFIED */
+	if (prev_class == GENLOCK_INPUT_LIVE || prev_class == GENLOCK_INPUT_IDLE)
+		return prev_class;
 	return GENLOCK_INPUT_UNCLASSIFIED;
 }
 
