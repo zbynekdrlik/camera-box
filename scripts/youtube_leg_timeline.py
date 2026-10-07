@@ -5,6 +5,15 @@ Rows are (frame index, pts s, painter tick | None) from youtube_leg_ticks. The r
 (content time = record start + pts) is the clock; a VOD frame's content time is the time the
 recording first showed its tick. Everything here is pure (no I/O): the multi-part join, the window
 clamp, coverage, downstream dup/skip (criterion 2) and the join after a publish (criterion 3).
+
+Run-scoped rows (frame index, pts s, tick | None, run | None), from a decode that also reads a
+reserved run (the measurement clip 911016 in the CG segments: youtube_leg_ticks `runs`), carry more
+than one tick line: the clip restarts its tick on every play beside the painter's. Each line is kept
+apart (issue 1404 Task 5 part b, design comment 6048239795): the recording splits into run segments
+with a seam at every run change (`run_segments`), every segment has its own TickClock, every VOD row
+is resolved to the segment it shows (`RunTimeline`), and a window is judged on its one segment
+(TickClock, vpos, dup/skip, coverage per run and window). Legacy 3-column rows take the old code
+unchanged (restreamer's gate decodes without `runs`).
 """
 import bisect
 import collections
@@ -20,6 +29,13 @@ END_SLACK_S = 2.0  # a window may reach this far past the recording's own first/
 NEAR_S = 1.0  # recording rows this near the window are the only ones its dup/skip reads
 DETAIL_LIMIT = 20
 BLIND_MIN_RUN = 2  # VOD-only undecodable runs from this many frames count as blind (clean data: only 1)
+RUN = 3  # the run column of a run-scoped row (index, pts, tick, run)
+
+
+def carries_runs(rows):
+    """True for run-scoped rows (index, pts, tick, run) from a decode that also read a reserved run.
+    Legacy rows (index, pts, tick) are read exactly as before."""
+    return bool(rows) and len(rows[0]) == RUN + 1
 
 
 def join_part_rows(parts, starts):
@@ -27,7 +43,8 @@ def join_part_rows(parts, starts):
 
     starts[k] is the part's record start (content seconds) or None for k >= 1: then it is placed by
     painter tick after the previous part. Returns (rows, t0, resolved starts); part k's rows get
-    pts + (start_k - t0) and frame index + k * PART_STRIDE, so no adjacency crosses a seam."""
+    pts + (start_k - t0) and frame index + k * PART_STRIDE, so no adjacency crosses a seam. A
+    run-scoped row keeps its run; such a part is placed by the previous part's last run only."""
     if not parts:
         raise ValueError("no recording parts")
     if starts[0] is None:
@@ -37,6 +54,8 @@ def join_part_rows(parts, starts):
         if start is None:
             prev = [r for r in parts[k - 1] if r[2] is not None]
             cur = [r for r in part if r[2] is not None]
+            if prev and carries_runs(prev):  # another run's ticks say nothing about this run's time
+                cur = [r for r in cur if r[RUN] == prev[-1][RUN]]
             if not prev or not cur:
                 raise ValueError(f"recording part {k + 1}: no decoded tick to place it by")
             dt = (cur[0][2] - prev[-1][2]) / PAINTER_HZ
@@ -45,7 +64,7 @@ def join_part_rows(parts, starts):
             start = resolved[k - 1] + prev[-1][1] + dt - cur[0][1]
         resolved.append(float(start))
         off = resolved[k] - t0
-        rows.extend((i + k * PART_STRIDE, p + off, t) for i, p, t in part)
+        rows.extend((r[0] + k * PART_STRIDE, r[1] + off) + tuple(r[2:]) for r in part)
     return rows, t0, resolved
 
 
@@ -77,8 +96,197 @@ class TickClock:
         return self.times[j] + (tick - self.ticks[j]) / PAINTER_HZ
 
 
+Segment = collections.namedtuple("Segment", "run k0 k1 restart")
+Segment.__doc__ = """One run segment: rows [k0, k1) of one run; restart = it began where the run's tick fell
+back (a restarted painter, the clip played again), not at a run change."""
+
+
+def run_segments(rows):
+    """The run segments of run-scoped rows, in order: a seam at the first decoded row of another run
+    and at a tick that falls back more than RESTART_TICKS within a run (painter_restarts' rule).
+    Undecoded rows stay with the segment before them (leading ones with the first)."""
+    segs, cur = [], None  # cur = [run, k0, last decoded tick, restart]
+    for k, r in enumerate(rows):
+        if r[2] is None:
+            continue
+        if cur is None:
+            cur = [r[RUN], 0, r[2], False]
+        elif r[RUN] != cur[0] or cur[2] - r[2] > RESTART_TICKS:
+            segs.append(Segment(cur[0], cur[1], k, cur[3]))
+            cur = [r[RUN], k, r[2], r[RUN] == cur[0]]
+        else:
+            cur[2] = r[2]
+    if cur is not None:
+        segs.append(Segment(cur[0], cur[1], len(rows), cur[3]))
+    return segs
+
+
+def _consecutive_groups(items):
+    """[[a, a+1, ...], ...] of a sorted list of ints."""
+    groups = []
+    for x in items:
+        if groups and x == groups[-1][-1] + 1:
+            groups[-1].append(x)
+        else:
+            groups.append([x])
+    return groups
+
+
+class RunTimeline:
+    """Run-scoped rows of a recording and its VOD, every tick line kept apart.
+
+    The recording splits into run segments (`run_segments`), each with its own TickClock. A decoded
+    VOD row maps through the one segment of its run that shows its tick: the segment whose tick span
+    holds it (else, at a segment edge, the one whose clock maps it within MAP_TICK_RADIUS). The
+    painter counts on across its segments, so that is unique. The measurement clip restarts its tick
+    on every play, so a clip tick sits in EVERY play's span: a VOD segment holding such a tick is
+    resolved as a whole, by content ORDER (the VOD is a copy of the program, so its order is content
+    order), against the recording segments of its run between the VOD rows already mapped around it.
+    A group the order cannot pin (a different number of plays on the two sides between the same
+    mapped neighbours) stays unmapped: its windows read UNKNOWN, never another play's verdict."""
+
+    def __init__(self, rec_rows, vod_rows, t0):
+        self.rec, self.vod, self.t0 = rec_rows, vod_rows, t0
+        # a segment holds one run, so its rows go to the one-tick-line code as (index, pts, tick)
+        self.rec3, self.vod3 = [r[:RUN] for r in rec_rows], [r[:RUN] for r in vod_rows]
+        self.segs = run_segments(rec_rows)
+        self.clocks = [TickClock(self.rec3[s.k0:s.k1], t0) for s in self.segs]
+        self.spans = []
+        for s in self.segs:
+            ticks = [r[2] for r in rec_rows[s.k0:s.k1] if r[2] is not None]
+            self.spans.append((min(ticks), max(ticks)))
+        self.seg_of = [None] * len(rec_rows)  # recording row position -> segment
+        self.by_run = {}  # run -> its segments
+        for j, s in enumerate(self.segs):
+            self.seg_of[s.k0:s.k1] = [j] * (s.k1 - s.k0)
+            self.by_run.setdefault(s.run, []).append(j)
+        self.vod_seg = [None] * len(vod_rows)  # decoded VOD row position -> the segment it shows
+        self._resolve()
+
+    def _segments_showing(self, run, tick):
+        """The recording segments of `run` that show `tick` (see the class doc)."""
+        same = self.by_run.get(run, [])
+        held = [j for j in same if self.spans[j][0] <= tick <= self.spans[j][1]]
+        return [j for j in (held or same) if self.clocks[j].time_of(tick) is not None]
+
+    def _seg_times(self, j):
+        s = self.segs[j]
+        return self.t0 + self.rec[s.k0][1], self.t0 + self.rec[s.k1 - 1][1]
+
+    def _mapped_time(self, ks):
+        """Content time of the first mapped VOD row among positions `ks`, or None."""
+        for k in ks:
+            j = self.vod_seg[k]
+            if j is not None:
+                return self.clocks[j].time_of(self.vod[k][2])
+        return None
+
+    def _resolve(self):
+        vsegs = run_segments(self.vod)
+        ambiguous = []
+        for v, vs in enumerate(vsegs):
+            shown = [(k, self._segments_showing(vs.run, self.vod[k][2]))
+                     for k in range(vs.k0, vs.k1) if self.vod[k][2] is not None]
+            if any(len(js) > 1 for _, js in shown):
+                ambiguous.append(v)
+                continue
+            for k, js in shown:
+                if js:
+                    self.vod_seg[k] = js[0]
+        for group in _consecutive_groups(ambiguous):
+            first, last = vsegs[group[0]], vsegs[group[-1]]
+            lo = self._mapped_time(range(first.k0 - 1, -1, -1))
+            hi = self._mapped_time(range(last.k1, len(self.vod)))
+            for v, j in zip(group, self._order_match([vsegs[v] for v in group], lo, hi)):
+                for k in range(vsegs[v].k0, vsegs[v].k1):
+                    t = self.vod[k][2]
+                    if t is not None and self.clocks[j].time_of(t) is not None:
+                        self.vod_seg[k] = j
+
+    def _order_match(self, group, lo, hi):
+        """The recording segments a group of consecutive ambiguous VOD segments shows, in order, or []
+        when the order cannot pin them. The candidates are the segments of the group's runs between the
+        content times `lo` / `hi` of the mapped VOD rows around the group (None = the VOD starts / ends
+        there: YouTube's start clamp drops earlier content, an early end later content)."""
+        runs = {vs.run for vs in group}
+        cands = sorted((j for j, s in enumerate(self.segs) if s.run in runs
+                        and (lo is None or self._seg_times(j)[0] >= lo - AMBIGUOUS_S)
+                        and (hi is None or self._seg_times(j)[1] <= hi + AMBIGUOUS_S)),
+                       key=lambda j: self._seg_times(j)[0])
+        n = len(group)
+        if len(cands) != n:
+            if lo is None and hi is not None and len(cands) > n:
+                cands = cands[-n:]  # the VOD starts inside this stretch: it lost the earlier plays
+            elif hi is None and lo is not None and len(cands) > n:
+                cands = cands[:n]  # the VOD ends inside it: it lost the later plays
+            else:
+                return []
+        if any(self.segs[j].run != vs.run for j, vs in zip(cands, group)):
+            return []
+        return cands
+
+    def window_segment(self, a, b):
+        """(segment, None) of the one run segment whose ticks the recording shows in content window
+        [a, b), or (None, reason): a window must not hold a seam (a cut between runs, a restarted
+        run). Undecoded frames at a cut say nothing about a run and do not count here (coverage
+        counts them as unproven)."""
+        js = sorted({self.seg_of[k] for k, r in enumerate(self.rec) if r[2] is not None and a <= self.t0 + r[1] < b})
+        if not js:
+            return None, "no decoded recording frame of any run in the window"
+        if len(js) > 1:
+            s = self.segs[js[1]]
+            if s.restart:
+                return None, f"the painter restarted inside the window (run {s.run}, frame {self.rec[s.k0][0]})"
+            return None, (f"the window holds a cut from run {self.segs[js[0]].run} to run {s.run} at frame "
+                          f"{self.rec[s.k0][0]} (one run per window)")
+        return js[0], None
+
+    def segment_at(self, at):
+        """The segment of the first decoded recording row at/after content time `at`, or None."""
+        for k, r in enumerate(self.rec):
+            if r[2] is not None and self.t0 + r[1] >= at:
+                return self.seg_of[k]
+        return None
+
+    def rec_rows_of(self, j):
+        """Segment j's recording rows as (index, pts, tick)."""
+        s = self.segs[j]
+        return self.rec3[s.k0:s.k1]
+
+    def vod_rows_of(self, j):
+        """The VOD rows that show segment j, as (index, pts, tick): its mapped rows and the undecoded
+        rows between them (frame indices kept, so adjacency and frame counts read the VOD's frames)."""
+        ks = [k for k, s in enumerate(self.vod_seg) if s == j]
+        if not ks:
+            return []
+        return [r for k, r in enumerate(self.vod3[ks[0]:ks[-1] + 1], ks[0]) if r[2] is None or self.vod_seg[k] == j]
+
+    def content_times(self):
+        """[(content time, vod row)] for every decoded VOD row mapped to a segment."""
+        return [(self.clocks[j].time_of(r[2]), r) for r, j in zip(self.vod, self.vod_seg) if j is not None]
+
+
+_TIMELINE = []  # [(rec rows, vod rows, t0, RunTimeline)]: the last session's, rebuilt only for new rows
+
+
+def run_timeline(rec_rows, vod_rows, t0):
+    """The RunTimeline of these rows (the verdict asks for it once per criterion and window)."""
+    if _TIMELINE and _TIMELINE[0][0] is rec_rows and _TIMELINE[0][1] is vod_rows and _TIMELINE[0][2] == t0:
+        return _TIMELINE[0][3]
+    tl = RunTimeline(rec_rows, vod_rows, t0)
+    _TIMELINE[:] = [(rec_rows, vod_rows, t0, tl)]
+    return tl
+
+
 def vod_content_times(rec_rows, vod_rows, t0):
-    """[(content time, vod row)] for every decoded VOD frame that maps to the recording."""
+    """[(content time, vod row)] for every decoded VOD frame that maps to the recording (run-scoped
+    rows: through the segment it shows)."""
+    if carries_runs(rec_rows):
+        return run_timeline(rec_rows, vod_rows, t0).content_times()
+    return _vod_content_times(rec_rows, vod_rows, t0)
+
+
+def _vod_content_times(rec_rows, vod_rows, t0):
     clock = TickClock(rec_rows, t0)
     out = []
     for r in vod_rows:
@@ -91,7 +299,18 @@ def vod_content_times(rec_rows, vod_rows, t0):
 
 def vod_pts_for(rec_rows, vod_rows, t0, at):
     """(rec pts, vod pts) of the first decoded recording frame at/after content time `at` and the VOD
-    frame showing the same tick (nearest VOD tick within 40, corrected by the tick difference)."""
+    frame showing the same tick (nearest VOD tick within 40, corrected by the tick difference); for
+    run-scoped rows, within the run segment of that recording frame."""
+    if carries_runs(rec_rows):
+        tl = run_timeline(rec_rows, vod_rows, t0)
+        j = tl.segment_at(at)
+        if j is None:
+            return None, None
+        return _vod_pts_for(tl.rec_rows_of(j), tl.vod_rows_of(j), t0, at)
+    return _vod_pts_for(rec_rows, vod_rows, t0, at)
+
+
+def _vod_pts_for(rec_rows, vod_rows, t0, at):
     by_tick = {}
     for _, p, t in vod_rows:
         if t is not None:
@@ -138,8 +357,17 @@ def _pct(n, d):
 
 
 def clamp_window(rec_rows, vod_rows, t0, a, b):
-    """The part of [a, b) the VOD covers: (a', b', clamped_start | None, clamped_end | None)."""
-    times = [c for c, _ in vod_content_times(rec_rows, vod_rows, t0)]
+    """The part of [a, b) the VOD covers: (a', b', clamped_start | None, clamped_end | None); for
+    run-scoped rows, by the VOD frames of the window's run segment (None when the window has none)."""
+    if carries_runs(rec_rows):
+        tl = run_timeline(rec_rows, vod_rows, t0)
+        j, _ = tl.window_segment(a, b)
+        return None if j is None else _clamp_window(tl.rec_rows_of(j), tl.vod_rows_of(j), t0, a, b)
+    return _clamp_window(rec_rows, vod_rows, t0, a, b)
+
+
+def _clamp_window(rec_rows, vod_rows, t0, a, b):
+    times = [c for c, _ in _vod_content_times(rec_rows, vod_rows, t0)]
     if not times:
         return None
     first, last = min(times), max(times) + FRAME_S
@@ -263,14 +491,38 @@ def dupskip(rec_rows, vod_rows, t0, a, b):
     Also reported: the longest stretch the VOD alone cannot decode, how early the VOD ends against
     the recording's own last decoded frame, and the seconds of the window no anchor pair covers.
     The window is clamped to the content the VOD covers; a window outside the recording, or with a
-    painter restart inside, is an error (never a verdict)."""
+    painter restart inside, is an error (never a verdict).
+
+    Run-scoped rows: the window must lie in ONE run segment (a cut between runs or a restarted run
+    inside is an error, like a restart), and both judgements run on that segment's recording rows
+    and the VOD rows that show it, through its own TickClock. The result names the run."""
+    out = _window_check(rec_rows, t0, a, b)
+    if out is not None:
+        return out
+    if carries_runs(rec_rows):
+        tl = run_timeline(rec_rows, vod_rows, t0)
+        j, why = tl.window_segment(a, b)
+        if j is None:
+            return {"error": why, "dup": None, "skip": None, "run": None}
+        return dict(_dupskip(tl.rec_rows_of(j), tl.vod_rows_of(j), t0, a, b), run=tl.segs[j].run)
+    return _dupskip(rec_rows, vod_rows, t0, a, b)
+
+
+def _window_check(rec_rows, t0, a, b):
+    """The error of a window that is not inside the recording, or None."""
     if not rec_rows:
         return {"error": "no recording rows", "dup": None, "skip": None}
     rec_first, rec_last = t0 + rec_rows[0][1], t0 + rec_rows[-1][1] + FRAME_S
     if a < rec_first - END_SLACK_S or b > rec_last + END_SLACK_S:
         return {"error": f"the window is not inside the recording ({a - rec_first:+.1f} s / {b - rec_last:+.1f} s)",
                 "dup": None, "skip": None}
-    span = clamp_window(rec_rows, vod_rows, t0, a, b)
+    return None
+
+
+def _dupskip(rec_rows, vod_rows, t0, a, b):
+    """dupskip on one tick line; the caller checked the window is inside the recording."""
+    rec_last = t0 + rec_rows[-1][1] + FRAME_S
+    span = _clamp_window(rec_rows, vod_rows, t0, a, b)
     if span is None or span[1] <= span[0]:
         return {"error": "the VOD has no frame of this window", "dup": None, "skip": None}
     a2, b2, cl_start, cl_end = span
@@ -318,7 +570,24 @@ def dupskip(rec_rows, vod_rows, t0, a, b):
 
 
 def coverage(rec_rows, vod_rows, t0, a, b):
-    """Decodable % and cadence-proven % of the recording and the VOD over content window [a, b)."""
+    """Decodable % and cadence-proven % of the recording and the VOD over content window [a, b).
+
+    Run-scoped rows: counted per run segment the window touches (each through the VOD rows that
+    show it) and summed, so a cut between two tick lines is never read as a cadence event and the
+    frames at a cut no run decodes count as unproven."""
+    if not carries_runs(rec_rows):
+        return _coverage_pct(*_coverage_counts(rec_rows, vod_rows, t0, a, b))
+    tl = run_timeline(rec_rows, vod_rows, t0)
+    rc, vc = continuity([]), continuity([])
+    for j in sorted({j for j, r in zip(tl.seg_of, rec_rows) if j is not None and a <= t0 + r[1] < b}):
+        rj, vj = _coverage_counts(tl.rec_rows_of(j), tl.vod_rows_of(j), t0, a, b)
+        rc = {k: rc[k] + rj[k] for k in rc}
+        vc = {k: vc[k] + vj[k] for k in vc}
+    return _coverage_pct(rc, vc)
+
+
+def _coverage_counts(rec_rows, vod_rows, t0, a, b):
+    """The continuity counts of the recording's window rows and of the VOD stretch showing their ticks."""
     rw = [r for r in rec_rows if a <= t0 + r[1] < b]
     rc = continuity(rw)
     ticks = [r[2] for r in rw if r[2] is not None]
@@ -328,6 +597,10 @@ def coverage(rec_rows, vod_rows, t0, a, b):
         idx = [k for k, v in enumerate(vod_rows) if v[2] is not None and lo <= v[2] <= hi]
         if idx:
             vc = continuity(vod_rows[idx[0]: idx[-1] + 1])
+    return rc, vc
+
+
+def _coverage_pct(rc, vc):
     return {"rec_frames": rc["frames"], "rec_decodable_pct": _pct(rc["decodable"], rc["frames"]),
             "rec_cadence_pct": _pct(rc["cadence_proven"], rc["frames"]), "rec_events": rc["events"],
             "vod_frames": vc["frames"], "vod_decodable_pct": _pct(vc["decodable"], vc["frames"]),

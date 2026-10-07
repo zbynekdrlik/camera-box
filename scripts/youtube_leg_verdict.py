@@ -42,6 +42,11 @@ CLI (shared with restreamer's release gate):
   placed after the previous one by painter tick. A window must lie inside one publish span: a
   --publish inside it, or an --unpublish (StopStream) inside it or under 1 s after it, is UNKNOWN.
   `--decode-ticks <file>` (diagnostic) prints a file's per-frame tick map and exits.
+  `--runs 911016 [--clip-markers <clip>.markers.csv]` (issue 1404 Task 5 part b): also read the
+  measurement clip's tick (the CG segments). Every window is then judged on its ONE run segment (a
+  window holding a cut between runs is UNKNOWN), and a clip window's A/V pairs the clip's own tick
+  and marker (`recording-verdict --av-run 911016` with the clip's marker log). Without `--runs` the
+  decode, the cache and the verdict are exactly what they were (restreamer's gate).
 """
 import argparse
 import datetime
@@ -62,22 +67,24 @@ from youtube_leg_audio import (FOREIGN_DB, LAG_JUMP, LEVEL_DROP_DB, LOW_CORR, SI
                                SR, audio_blocks, audio_window, dbfs, drop_samples, load_audio,
                                ncc_best)
 from youtube_leg_proc import install_cleanup, run_bounded  # noqa: E402
-from youtube_leg_ticks import (DECODE_SCALE, DECODER_VERSION, PHASE_RADIUS, _qr_tick,  # noqa: E402
-                               band_ticks, container_frames, decode_raw, decode_ticks, half_ticks, load_raw,
-                               load_ticks, painter_payload, painter_tick, resolve_ticks,
-                               write_ticks)
-from youtube_leg_timeline import (DETAIL_LIMIT, END_SLACK_S, TickClock, clamp_window,  # noqa: E402
-                                  continuity, coverage, dupskip, join_part_rows,
-                                  painter_restarts, publish_gaps, timestamp_gaps, vod_content_times,
-                                  vod_pts_for)
+from youtube_leg_ticks import (CLIP_RUNS, DECODE_SCALE, DECODER_VERSION, PHASE_RADIUS, _qr_tick,  # noqa: E402
+                               band_ticks, container_frames, decode_raw, decode_ticks, half_ticks,
+                               half_ticks_run, load_raw, load_run_ticks, load_ticks, painter_payload,
+                               painter_tick, resolve_ticks, write_ticks)
+from youtube_leg_timeline import (DETAIL_LIMIT, END_SLACK_S, RunTimeline, TickClock,  # noqa: E402
+                                  carries_runs, clamp_window, continuity, coverage, dupskip,
+                                  join_part_rows, painter_restarts, publish_gaps, run_segments,
+                                  run_timeline, timestamp_gaps, vod_content_times, vod_pts_for)
 
 __all__ = ["SR", "run_bounded", "audio_blocks", "audio_window", "dbfs", "drop_samples", "load_audio", "ncc_best",
-           "DECODE_SCALE", "DECODER_VERSION", "PHASE_RADIUS", "_qr_tick", "band_ticks", "decode_raw",
-           "decode_ticks", "half_ticks", "load_raw", "load_ticks", "painter_payload", "painter_tick",
-           "resolve_ticks", "write_ticks", "container_frames", "timestamp_gaps", "DETAIL_LIMIT", "END_SLACK_S", "TickClock", "clamp_window",
+           "CLIP_RUNS", "DECODE_SCALE", "DECODER_VERSION", "PHASE_RADIUS", "_qr_tick", "band_ticks", "decode_raw",
+           "decode_ticks", "half_ticks", "half_ticks_run", "load_raw", "load_run_ticks", "load_ticks",
+           "painter_payload", "painter_tick", "resolve_ticks", "write_ticks", "container_frames", "timestamp_gaps",
+           "DETAIL_LIMIT", "END_SLACK_S", "RunTimeline", "TickClock", "carries_runs", "clamp_window",
            "continuity", "coverage", "dupskip", "join_part_rows", "join_parts", "painter_restarts",
-           "publish_gaps", "vod_content_times", "vod_pts_for", "parse_avsync_output", "av_from_outputs",
-           "av_window", "verdict", "parse_utc", "parse_window", "parse_recording", "fmt_utc", "main"]
+           "publish_gaps", "run_segments", "run_timeline", "vod_content_times", "vod_pts_for",
+           "parse_avsync_output", "av_from_outputs", "av_window", "verdict", "parse_utc", "parse_window",
+           "parse_recording", "fmt_utc", "main"]
 
 SCHEMA = 1
 EXIT_PASS, EXIT_FAIL, EXIT_UNKNOWN = 0, 1, 2
@@ -123,9 +130,13 @@ def _cut_clip(src, start_s, dur_s, out):
                 CLIP_TIMEOUT_S, check=True)
 
 
-def _avsync(probe_bin, clip, markers_csv):
-    r = run_bounded([probe_bin, "--stream", clip, "--av-sync", clip, "--av-marker-log", markers_csv],
-                    PROBE_TIMEOUT_S, text=True)
+def _avsync(probe_bin, clip, markers_csv, av_run=None):
+    """`recording-verdict --av-sync` on one clip; `av_run` = pair through that self-marked run's own
+    QR tick + marker (the measurement clip: `--av-run 911016`) instead of the cam2 painter's."""
+    cmd = [probe_bin, "--stream", clip, "--av-sync", clip, "--av-marker-log", markers_csv]
+    if av_run is not None:
+        cmd += ["--av-run", str(av_run)]
+    r = run_bounded(cmd, PROBE_TIMEOUT_S, text=True)
     text = r.stderr + r.stdout
     with open(f"{clip}.avsync.out", "w") as f:
         f.write(text)
@@ -148,18 +159,21 @@ def av_from_outputs(rec_j, vod_j, dur_s=AV_CLIP_S):
             "mad_rec_ms": round(rec_j.get("mad_ms") or 0.0, 1), "mad_vod_ms": round(vod_j.get("mad_ms") or 0.0, 1)}
 
 
-def av_window(rec_file, vod_file, rec_start_s, vod_start_s, markers_csv, probe_bin, dur_s=AV_CLIP_S, workdir=None):
+def av_window(rec_file, vod_file, rec_start_s, vod_start_s, markers_csv, probe_bin, dur_s=AV_CLIP_S, workdir=None,
+              av_run=None):
     """Cut the same content from both files (tick-matched starts) and measure each clip's A/V. The
-    clips are deleted afterwards; each clip's probe output stays next to it as *.avsync.out."""
+    clips are deleted afterwards; each clip's probe output stays next to it as *.avsync.out.
+    `av_run`: a CG window's self-marked run (its clips are paired through their own tick + marker)."""
     if workdir is None:
         with tempfile.TemporaryDirectory(prefix="ylv-av-") as tmp:
-            return av_window(rec_file, vod_file, rec_start_s, vod_start_s, markers_csv, probe_bin, dur_s, tmp)
+            return av_window(rec_file, vod_file, rec_start_s, vod_start_s, markers_csv, probe_bin, dur_s, tmp,
+                             av_run)
     results = []
     for kind, src, start in (("rec", rec_file, rec_start_s), ("vod", vod_file, vod_start_s)):
         clip = os.path.join(workdir, f"av-{kind}-{start:.3f}.mp4")
         try:
             _cut_clip(src, start, dur_s, clip)
-            results.append(_avsync(probe_bin, clip, markers_csv))
+            results.append(_avsync(probe_bin, clip, markers_csv, av_run))
         finally:
             if os.path.exists(clip):
                 os.remove(clip)
@@ -317,9 +331,9 @@ def fetch_vod(vod, out):
     return path
 
 
-def fetch_markers(src, out):
+def fetch_markers(src, out, name="markers.csv"):
     if re.match(r"https?://", src):
-        path = os.path.join(out, "markers.csv")
+        path = os.path.join(out, name)
         with urllib.request.urlopen(src, timeout=URL_TIMEOUT_S) as r, open(path, "wb") as f:
             shutil.copyfileobj(r, f)
         return path
@@ -328,15 +342,27 @@ def fetch_markers(src, out):
     return src
 
 
-def cached_ticks(src, cache, workers):
-    """The file's tick map, decoded once per (source, decoder) key and kept in the out dir."""
+def tick_cache_key(src, runs=()):
+    """The tick-map cache key: source, decoder, OpenCV; a run-scoped decode adds its `runs` (the
+    default key is the one restreamer's gate has always written)."""
     st = os.stat(src)
     key = (f"source={os.path.abspath(src)} size={st.st_size} mtime={int(st.st_mtime)} "
            f"decoder=v{DECODER_VERSION} scale={DECODE_SCALE} phase_radius={PHASE_RADIUS} opencv={_cv2_version()}")
+    return key + (f" runs={','.join(str(r) for r in runs)}" if runs else "")
+
+
+def cached_ticks(src, cache, workers, runs=()):
+    """The file's tick map, decoded once per (source, decoder, runs) key and kept in the out dir:
+    (index, pts, tick) rows, or run-scoped (index, pts, tick, run) rows when `runs` is given."""
+    key = tick_cache_key(src, runs)
     if os.path.isfile(cache):
         with open(cache) as f:
             if f.readline().strip() == f"# {key}":
-                return load_ticks(cache)
+                return load_run_ticks(cache) if runs else load_ticks(cache)
+    if runs:
+        rows = decode_ticks(src, workers, runs=tuple(runs))
+        write_ticks(cache, rows, header=key)
+        return [r[:3] + (r[6],) for r in rows]
     rows = decode_ticks(src, workers)
     write_ticks(cache, rows, header=key)
     return [r[:3] for r in rows]
@@ -368,6 +394,8 @@ def measure_window(ctx, name, a, b):
         w["errors"].append(f"{what} (one publish span per window)")
         return w
     ds = _guard(dupskip, rec_rows, vod_rows, t0, a, b)
+    if "run" in ds:  # run-scoped rows (--runs): the window's run, judged on its own tick line
+        w["run"] = ds.pop("run")
     w["dupskip"] = ds
     if "error" in ds:
         w["errors"].append(ds["error"])
@@ -386,11 +414,16 @@ def measure_window(ctx, name, a, b):
                         rec_pts0=starts[k] - t0)  # audio needs no painter: to the coverage end, not the VOD's
     w["audio"].pop("start_utc", None)
     rec_p, vod_p = vod_pts_for(rec_rows, vod_rows, t0, a2)
+    markers, av_run = ctx["markers"], None
+    if w.get("run") in ctx["runs"]:  # a CG window: the clip carries its own marker (--av-run)
+        markers, av_run = ctx["clip_markers"], w["run"]
     if rec_p is None or vod_p is None:
         w["av"] = {"error": "window start tick not found in the VOD"}
+    elif markers is None:
+        w["av"] = {"error": f"no marker log for run {av_run} (--clip-markers)"}
     else:
         w["av"] = _guard(av_window, ctx["recs"][k][0], ctx["vod_file"], rec_p - (starts[k] - t0), vod_p,
-                         ctx["markers"], ctx["probe_bin"], min(AV_CLIP_S, b2 - a2), ctx["out"])
+                         markers, ctx["probe_bin"], min(AV_CLIP_S, b2 - a2), ctx["out"], av_run)
     return w
 
 
@@ -400,12 +433,15 @@ def measure(args):
     publishes = [parse_utc(p) for p in args.publish]
     recs = [parse_recording(r) for r in args.recording]
     vod_file = fetch_vod(args.vod, args.out)
+    runs = tuple(args.runs)
     ctx = {"recs": recs, "vod_file": vod_file, "markers": fetch_markers(args.markers, args.out),
            "probe_bin": args.probe_bin, "out": args.out, "rec_audio": {}, "publishes": publishes,
-           "unpublishes": [parse_utc(u) for u in args.unpublish]}
-    part_rows = [cached_ticks(p, os.path.join(args.out, f"ticks-rec-{k + 1}.tsv"), args.workers)
+           "unpublishes": [parse_utc(u) for u in args.unpublish], "runs": runs,
+           "clip_markers": (fetch_markers(args.clip_markers, args.out, "clip-markers.csv")
+                            if args.clip_markers else None)}
+    part_rows = [cached_ticks(p, os.path.join(args.out, f"ticks-rec-{k + 1}.tsv"), args.workers, runs)
                  for k, (p, _) in enumerate(recs)]
-    ctx["vod_rows"] = cached_ticks(vod_file, os.path.join(args.out, "ticks-vod.tsv"), args.workers)
+    ctx["vod_rows"] = cached_ticks(vod_file, os.path.join(args.out, "ticks-vod.tsv"), args.workers, runs)
     ctx["rec_rows"], ctx["t0"], ctx["starts"] = join_part_rows(part_rows, [s for _, s in recs])
     ctx["vod_audio"] = load_audio(vod_file)
     windows = [measure_window(ctx, name, a, b) for name, a, b in windows_in]
@@ -414,7 +450,10 @@ def measure(args):
     for p in pubs:
         for key in ("utc", "first_vod_frame_utc", "last_vod_frame_before_utc"):
             p[key] = fmt_utc(p[key])
-    return {"schema": SCHEMA, "overall": v["overall"], "tool": {"decoder": DECODER_VERSION, "opencv": _cv2_version()},
+    tool = {"decoder": DECODER_VERSION, "opencv": _cv2_version()}
+    if runs:
+        tool["runs"] = list(runs)
+    return {"schema": SCHEMA, "overall": v["overall"], "tool": tool,
             "criteria": {"status": v["criteria"], "av_tolerance_ms": AV_TOLERANCE_MS,
                          "publish_gap_max_s": PUBLISH_GAP_MAX_S, "cadence_min_pct": CADENCE_MIN_PCT,
                          "lag_jump_ms": 1000.0 * LAG_JUMP / SR, "low_corr": LOW_CORR,
@@ -445,9 +484,16 @@ def main(argv=None):
     ap.add_argument("--out")
     ap.add_argument("--probe-bin", default=os.environ.get("RECORDING_VERDICT_BIN", "recording-verdict"))
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--runs", type=int, action="append", default=[], choices=CLIP_RUNS,
+                    help="also read this reserved run as a tick (the measurement clip 911016 in the CG segments); "
+                         "every window is then judged on its own run segment")
+    ap.add_argument("--clip-markers", help="the measurement clip's own marker log (<clip>.markers.csv | http url): "
+                                           "the A/V of a window of a --runs run")
     args = ap.parse_args(argv)
     if args.decode_ticks:
-        for r in decode_ticks(args.decode_ticks, args.workers):
+        rows = decode_ticks(args.decode_ticks, args.workers, runs=tuple(args.runs)) if args.runs else \
+            decode_ticks(args.decode_ticks, args.workers)
+        for r in rows:
             print("\t".join([str(r[0]), f"{r[1]:.3f}"] + ["" if v is None else str(v) for v in r[2:]]))
         return EXIT_PASS
     if not (args.vod and args.markers and args.out and args.recording and args.windows):
