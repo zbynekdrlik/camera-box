@@ -208,6 +208,7 @@ pub fn parse_audit_line(line: &str) -> Option<AuditSample> {
             "stamp_gap" => set!(stamp_gap),
             "n1_grows" => set!(n1_grows),
             "n2_early" => set!(n2_early),
+            "relabelled" => set!(relabelled),
             _ => {}
         }
     }
