@@ -846,7 +846,7 @@ main() {
     [ -n "$stage" ] || { echo "ERROR: --plan requires --stage (no network in plan mode)" >&2; exit 2; }
     [ -n "$sha_override" ] || { echo "ERROR: --plan requires --sha (no network in plan mode)" >&2; exit 2; }
     local sha="$sha_override" stats_abi
-    stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$boxes")" || exit 3
+    stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$boxes")")" || exit 3
     echo "# ===== issue 789 genlock FLEET deploy PLAN — run=${run_id} sha=${sha} boxes=${boxes} mode=${mode} ====="
     # subshell so the comma-split IFS never leaks past the loop (the loop only prints).
     ( IFS=','; for b in $boxes; do
@@ -880,7 +880,7 @@ main() {
     || { echo "ERROR: could not resolve headSha for anchor run $run_id" >&2; exit 3; }
   [ -n "$sha" ] || { echo "ERROR: empty headSha for anchor run $run_id" >&2; exit 3; }
   echo "# anchor run $run_id -> canonical SHA $sha; deploying: $boxes (mode $mode; retention --yes=$yes)"
-  local stats_abi; stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$boxes" 1)" || exit 3
+  local stats_abi; stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$(fleet_boxes_swap_obs_dll "$boxes")" 1)" || exit 3
 
   local workdir; workdir="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -889,7 +889,7 @@ main() {
   # detect requested box classes without a `local IFS=','` that would leak past a brace group
   # (a { …; } group is not a new scope) -- match the comma-list directly.
   local want_win=0 want_imag=0 want_strihlx=0
-  case ",$boxes," in *,stream,*|*,resolume,*) want_win=1 ;; esac
+  want_win="$(fleet_boxes_swap_obs_dll "$boxes")"
   case ",$boxes," in *,imag,*) want_imag=1 ;; esac
   case ",$boxes," in *,strih-lx,*) want_strihlx=1 ;; esac
   # --- strih-lx (issue 1317 part 6, scripts/lib/strih-lx-deploy.sh), phase 1: resolve + download +

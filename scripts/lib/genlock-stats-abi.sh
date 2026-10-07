@@ -27,13 +27,16 @@
 # verdict and the same refusal text.
 #
 # Scope: the gate compares OBS_GENLOCK_STATS_VERSION. struct obs_genlock_output_stats is on the
-# frontend's stack too (OBS_GENLOCK_OUTPUT_STATS_VERSION 1, never bumped); the pytest pins its body,
-# so a change to it fails CI until this gate also records + compares its version.
+# frontend's stack too (OBS_GENLOCK_OUTPUT_STATS_VERSION 1, never bumped). Until the marker records
+# its version as well, a Windows --fast is refused at plan time unless the deployed commit's output
+# version is GENLOCK_STATS_ABI_OUTPUT_COVERED, and the pytest pins the struct body so a change fails CI.
 
 # The obs.h path inside the repo, read at the deployed build's commit.
 GENLOCK_STATS_ABI_OBS_H="vendor/obs-studio/libobs/obs.h"
 # The box marker file name (next to GENLOCK_BUILD_SHA.txt).
 GENLOCK_STATS_ABI_MARKER="GENLOCK_STATS_ABI.txt"
+# The OBS_GENLOCK_OUTPUT_STATS_VERSION a fast deploy is known safe for (the gate does not compare it yet).
+GENLOCK_STATS_ABI_OUTPUT_COVERED="1"
 
 # genlock_stats_abi_is_version TEXT -> 0 when TEXT is a stats version (a positive integer without a
 # leading zero, at most 9 digits), else 1. The PowerShell gate uses the same pattern.
@@ -41,26 +44,29 @@ genlock_stats_abi_is_version() {
   [[ "${1:-}" =~ ^[1-9][0-9]{0,8}$ ]]
 }
 
-# genlock_stats_abi_from_obs_h  (stdin: the text of an obs.h) -> the OBS_GENLOCK_STATS_VERSION value.
-#   rc 1 (nothing printed) when the define is absent, defined more than once, or not a version.
+# genlock_stats_abi_from_obs_h [DEFINE]  (stdin: the text of an obs.h) -> the value of DEFINE
+#   (default OBS_GENLOCK_STATS_VERSION). rc 1 (nothing printed) when the define is absent, defined more
+#   than once, or not a version; rc 2 for a DEFINE that is not a C macro name.
 genlock_stats_abi_from_obs_h() {
-  local lines value
-  lines="$(grep -E '^[[:space:]]*#[[:space:]]*define[[:space:]]+OBS_GENLOCK_STATS_VERSION([[:space:]]|$)' || true)"
+  local define="${1:-OBS_GENLOCK_STATS_VERSION}" lines value
+  [[ "$define" =~ ^[A-Z_][A-Z0-9_]*$ ]] || return 2
+  lines="$(grep -E "^[[:space:]]*#[[:space:]]*define[[:space:]]+${define}([[:space:]]|\$)" || true)"
   # two defines leave two lines in the value, which the version pattern (one whole string) refuses
-  value="$(printf '%s\n' "$lines" | sed -E 's/^[[:space:]]*#[[:space:]]*define[[:space:]]+OBS_GENLOCK_STATS_VERSION[[:space:]]*//; s/[[:space:]]*(\/[*/].*)?$//')"
+  value="$(printf '%s\n' "$lines" | sed -E "s/^[[:space:]]*#[[:space:]]*define[[:space:]]+${define}[[:space:]]*//; s/[[:space:]]*(\\/[*/].*)?\$//")"
   genlock_stats_abi_is_version "$value" || return 1
   printf '%s\n' "$value"
 }
 
-# genlock_stats_abi_at_sha SHA REPO -> the stats version of the build at commit SHA, read from its own
-#   obs.h in the git checkout REPO. rc 1 (nothing printed) when SHA is not a hex commit id, the commit
-#   or the file is not in REPO (fetch it first), or the define is unreadable.
+# genlock_stats_abi_at_sha SHA REPO [DEFINE] -> the value of DEFINE (default OBS_GENLOCK_STATS_VERSION)
+#   in the build at commit SHA, read from its own obs.h in the git checkout REPO. rc 1 (nothing printed)
+#   when SHA is not a hex commit id, the commit or the file is not in REPO (fetch it first), or the
+#   define is unreadable.
 genlock_stats_abi_at_sha() {
-  local sha="${1:-}" repo="${2:-}" text
+  local sha="${1:-}" repo="${2:-}" define="${3:-OBS_GENLOCK_STATS_VERSION}" text
   [[ "$sha" =~ ^[0-9a-fA-F]{7,40}$ ]] || return 1
   [ -n "$repo" ] || return 1
   text="$(git -C "$repo" show "${sha}:${GENLOCK_STATS_ABI_OBS_H}" 2>/dev/null)" || return 1
-  printf '%s\n' "$text" | genlock_stats_abi_from_obs_h
+  printf '%s\n' "$text" | genlock_stats_abi_from_obs_h "$define"
 }
 
 # genlock_fast_abi_verdict NEW_ABI MARKER_STATE [MARKER_TEXT] -- the FAST deploy's decision.
@@ -135,7 +141,9 @@ genlock_stats_abi_clear_ps() {
   cat <<PS
 # (3c) issue 1302: FULL -- remove ${GENLOCK_STATS_ABI_MARKER} before the copy; step (5b) records the new
 #      build's version once every copy passed, so a half-done copy reads as "missing" to a fast deploy.
-Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path \$obsDir '${GENLOCK_STATS_ABI_MARKER}')
+#      A marker it cannot remove stops the program here, before the copy.
+\$abiStale = Join-Path \$obsDir '${GENLOCK_STATS_ABI_MARKER}'
+if (Test-Path -LiteralPath \$abiStale) { Remove-Item -LiteralPath \$abiStale -Force -ErrorAction Stop }
 PS
 }
 
@@ -182,28 +190,40 @@ genlock_stats_abi_stage() {
   fi
 }
 
-# genlock_stats_abi_resolve SHA REPO MODE BOXES [FETCH] -> the stats version of the build at SHA, or
+# genlock_stats_abi_resolve SHA REPO MODE SWAPS_DLL [FETCH] -> the stats version of the build at SHA, or
 #   "" when it cannot be read. FETCH=1 (execute mode; plan mode has no network) fetches that one commit
 #   from origin before giving up (a full 40-hex SHA only: the anchor run's headSha is one, and the
-#   tests' short SHAs never reach the network). "" is REFUSED (rc 3) for a FAST deploy that swaps an obs.dll (BOXES names stream
-#   or resolume), because the gate cannot compare an unknown version; otherwise it is allowed and named
-#   on stderr (each box's marker is removed).
+#   tests' short SHAs never reach the network). SWAPS_DLL=1 when the box list holds a box a FAST
+#   deploy swaps obs.dll on (fleet_boxes_swap_obs_dll). For such a FAST deploy "" is REFUSED (rc 3),
+#   because the gate cannot compare an unknown version, and so is a commit whose
+#   OBS_GENLOCK_OUTPUT_STATS_VERSION is not GENLOCK_STATS_ABI_OUTPUT_COVERED (the gate does not compare
+#   that struct yet). Otherwise "" is allowed and named on stderr (each full-bundle box's marker is
+#   removed).
 genlock_stats_abi_resolve() {
-  local sha="${1:-}" repo="${2:-}" mode="${3:-}" boxes="${4:-}" fetch="${5:-0}" abi
+  local sha="${1:-}" repo="${2:-}" mode="${3:-}" swaps="${4:-0}" fetch="${5:-0}" abi out rc=0 fast=0
+  [ "$mode" = "fast" ] && [ "$swaps" = "1" ] && fast=1
   abi="$(genlock_stats_abi_at_sha "$sha" "$repo")" || abi=""
   # a fetch needs the full object id (git cannot fetch an abbreviation); the anchor run's headSha is one
   if [ -z "$abi" ] && [ "$fetch" = "1" ] && [[ "$sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
     echo "# genlock stats ABI: $sha is not readable in $repo -- fetching origin once" >&2
-    # the one commit only (never every branch): bounded, no credential prompt
-    GIT_TERMINAL_PROMPT=0 timeout 120 git -C "$repo" fetch -q origin "$sha" >/dev/null 2>&1 || true
+    # the one commit only (never every branch): bounded, no credential prompt; git's reason is kept
+    out="$(GIT_TERMINAL_PROMPT=0 timeout 120 git -C "$repo" fetch -q origin "$sha" 2>&1)" || rc=$?
+    [ "$rc" = 0 ] || printf '# git fetch origin %s failed (rc %s): %s\n' "$sha" "$rc" "${out:-no output}" >&2
     abi="$(genlock_stats_abi_at_sha "$sha" "$repo")" || abi=""
   fi
   if [ -n "$abi" ]; then
     echo "# genlock stats ABI of $sha: v$abi (${GENLOCK_STATS_ABI_OBS_H} at that commit)" >&2
+    if [ "$fast" = 1 ]; then
+      out="$(genlock_stats_abi_at_sha "$sha" "$repo" OBS_GENLOCK_OUTPUT_STATS_VERSION)" || out=""
+      if [ "$out" != "$GENLOCK_STATS_ABI_OUTPUT_COVERED" ]; then
+        echo "ERROR: struct obs_genlock_output_stats is version ${out:-unreadable} at $sha -- the --fast stats-ABI gate covers only version ${GENLOCK_STATS_ABI_OUTPUT_COVERED} of it (it does not compare that struct yet, issue 1302); deploy --full" >&2
+        return 3
+      fi
+    fi
     printf '%s\n' "$abi"
     return 0
   fi
-  if [ "$mode" = "fast" ] && [[ ",$boxes," == *,stream,* || ",$boxes," == *,resolume,* ]]; then
+  if [ "$fast" = 1 ]; then
     echo "ERROR: cannot read OBS_GENLOCK_STATS_VERSION from ${GENLOCK_STATS_ABI_OBS_H} at $sha in $repo -- a --fast deploy cannot be gated on an unknown stats ABI; fetch the commit (git fetch origin) or deploy --full" >&2
     return 3
   fi
