@@ -465,46 +465,53 @@ def test_the_sync_path_still_drives_the_existing_loop_tests(tmp_path):
 
 
 # ---------------------------------------------------------------------------------------------
-# the CPU priority: the unit's CPUWeight, the one start line
+# the CPU priority: normal priority, no host tuning (coordinator, 7.10.2026: the sampler moves off
+# dev1, so no dev1-specific CPUWeight/Nice); the one start line reports what the sampler runs at
 # ---------------------------------------------------------------------------------------------
 
 
-def test_the_unit_gives_the_sampler_a_cpu_weight_and_no_nice():
-    """CPUWeight=1000 against the lanes in the user's app.slice; no Nice= at all: the old Nice=10 put
-    the sampler behind every lane, and a --user unit cannot lower it (Nice=-5 runs at 0 on dev1)."""
+@pytest.mark.parametrize("unit", ["program-audio-sampler.service", "program-audio-sampler.strih-lx.service"])
+def test_the_units_run_the_sampler_at_normal_priority(unit):
+    """No Nice= (the old Nice=10 put the sampler behind every other process, and a --user unit cannot
+    lower it anyway) and no CPUWeight= (on strih-lx it would rank the sampler ahead of OBS in the same
+    slice): normal priority in both units."""
     import re
 
-    s = (_ROOT / "systemd" / "program-audio-sampler.service").read_text(encoding="utf-8")
-    assert re.search(r"^CPUWeight=1000$", s, re.M)
+    s = (_ROOT / "systemd" / unit).read_text(encoding="utf-8")
     assert not re.search(r"^Nice=", s, re.M)
-    assert pas.CPU_WEIGHT_WANTED == 1000
+    assert not re.search(r"^CPUWeight=", s, re.M)
 
 
-@pytest.mark.parametrize("nice, weight, warn, says", [
-    (0, 1000, True, "its priority is the cgroup's cpu.weight=1000 only"),
-    (10, 1000, True, "nice=10"),
-    (0, 100, True, "can starve under load"),
-    (0, None, True, "cpu.weight=unreadable"),
-    (-5, 1000, False, "nice=-5 cpu.weight=1000"),
-    (-5, 100, True, "nice=-5 but its cgroup's cpu.weight=100"),
+@pytest.mark.parametrize("nice, cpus, weight, warn, says", [
+    (0, "12-15", 100, False, "scheduling nice=0 cpus=12-15 cpu.weight=100"),
+    (0, "0-15", None, False, "cpus=0-15 cpu.weight=unreadable"),
+    (10, "0-3", 100, True, "nice=10"),
+    (-5, "12-15", None, False, "nice=-5"),
 ])
-def test_the_scheduling_line_warns_once_when_the_nice_is_not_lowered(nice, weight, warn, says):
-    line = pas.scheduling_line(nice, weight, 0)
+def test_the_scheduling_line_reports_nice_cpus_and_weight(nice, cpus, weight, warn, says):
+    line = pas.scheduling_line(nice, cpus, weight)
     assert ("WARNING" in line) is warn
     assert says in line
     assert line.count("\n") == 0
 
 
-def test_scheduling_state_reads_the_cgroup_weight(tmp_path):
+@pytest.mark.parametrize("cpus, want", [
+    ({12, 13, 14, 15}, "12-15"), ({0, 2, 3, 5}, "0,2-3,5"), ({7}, "7"), (set(), ""),
+])
+def test_cpu_list_is_compact(cpus, want):
+    assert pas.cpu_list(cpus) == want
+
+
+def test_scheduling_state_reads_the_cgroup_weight_and_the_affinity(tmp_path):
     cg = tmp_path / "cgroup"
     cg.write_text("0::/user.slice/x.service\n", encoding="utf-8")
     d = tmp_path / "root" / "user.slice" / "x.service"
     d.mkdir(parents=True)
-    (d / "cpu.weight").write_text("1000\n", encoding="utf-8")
-    nice, weight, _lim = pas.scheduling_state(str(cg), str(tmp_path / "root"))
-    assert weight == 1000 and nice == os.getpriority(os.PRIO_PROCESS, 0)
-    assert pas.scheduling_state(str(cg), str(tmp_path / "nowhere"))[1] is None
-
+    (d / "cpu.weight").write_text("100\n", encoding="utf-8")
+    nice, cpus, weight = pas.scheduling_state(str(cg), str(tmp_path / "root"))
+    assert weight == 100 and nice == os.getpriority(os.PRIO_PROCESS, 0)
+    assert cpus == pas.cpu_list(os.sched_getaffinity(0))
+    assert pas.scheduling_state(str(cg), str(tmp_path / "nowhere"))[2] is None
 
 
 # ---------------------------------------------------------------------------------------------
