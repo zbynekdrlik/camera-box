@@ -141,7 +141,11 @@ What changed:
   - Overrides: `PROGRAM_AUDIO_HTTP_PORT` (0 = none), `PROGRAM_AUDIO_HTTP_BIND`,
     `PROGRAM_AUDIO_SERVE_DIR`.
   - The dev1 lease route `http://dev1:8890/program-audio.json` keeps working until the consumers switch.
-- `program-audio.json` gains `queue_drops` and `lag_ms` (additive).
+- `program-audio.json` gains `queue_drops`, `lag_ms` and `sender_stalls` (additive).
+- **The sender-stall look-ahead:** a frame ahead of the timeline is held with up to 4 frames after
+  it; when they come back within the tolerance it is the stream OBS's audio-thread stall, nothing
+  lost (no zeros, `sender_stalls`). A real loss is still bridged (exactly the lost audio) or
+  restarts beyond 250 ms.
 - Normal priority in both units: the old `Nice=10` is gone; there is no `CPUWeight`.
 - **The sampler moves to strih-lx.** The new consumer URL is
   `http://10.77.9.202:8891/program-audio.json`. It is provisioned by setup-strih step 16e, graded by
@@ -182,8 +186,8 @@ python3 ~/devel/camera-box/scripts/program_audio_guard.py --url http://10.77.9.2
 
 # 4. after 10 min on strih-lx: the summary line reads "queue_drops=0 max_lag_ms=<well under 10000>
 #    date_steps=0 ..."; "late burst" lines from the 5 GbE NIC's rx_missed bursts (issue 1242/1387) are
-#    fine (no restart); a "+4x ms" bridge with "arrival gap 0.0-0.1 s" is most often a sender stall
-#    (Design-question 6037861831), read UNKNOWN at worst, never FOREIGN
+#    fine (no restart); "sender_stalls=N max_stall_ms=4x-7x" is the stream OBS's audio-thread stall
+#    (~2 a minute), with no zeros and no UNKNOWN; a "bridged with" line is a real loss
 journalctl --user -u program-audio-sampler --since -15min --no-pager | grep -E 'summary|queue overflow|date step|discontinuity'
 
 # 5. EVENT: rig-mode.sh event removes the TEST marker and stops it ("[program-audio 10.77.9.202] event:
@@ -207,9 +211,9 @@ It must show `audio timeline date step: ... nothing lost`, not `bridged with` / 
   wall step and the stream box's follower step are announced together.
 - A miss is not a regression (the jump is bridged or restarted as before), but report it on issue 1404.
 
-Rule A does not end restreamer's stops on a sender stall: the stall pattern reads UNKNOWN windows
-(`U U M M M M U M U U M` on the live replay), which is enough for its 2-consecutive / 3-within-60 s
-rule. The remedy is open on Design-question 6037861831.
+A sender stall no longer costs a window: the live stall replay reads MEASUREMENT after the warm-up
+(it read `U U M M M M U M U U M` with rule A alone). After the install, the 10-min summary should show
+`sender_stalls` in the tens per hour and `holes_bridged=0` unless audio was really lost.
 
 Rollback on strih-lx: `rig-mode.sh event` (or `rm -f ~/.config/camera-box/program-audio-sampler.test-mode;
 systemctl --user disable --now program-audio-sampler.service`; a later setup-strih run enables it again,

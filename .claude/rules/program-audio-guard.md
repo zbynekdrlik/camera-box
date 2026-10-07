@@ -44,7 +44,7 @@ its SERVE dir (`scripts/rig_serve_files.py`): `$XDG_RUNTIME_DIR/rig-lease-serve`
 | Route | Writer | Contract |
 |---|---|---|
 | `/rig-qpsk-markers.csv` | `rig-marker-mirror` `--user` service (`scripts/rig-marker-mirror.sh` → `rig_marker_mirror.py`) | cam2's `/run/rig-qpsk-markers.csv`, complete rows; `text/csv`; `X-Mirror-Age-S` = seconds since new rows last arrived; 404 absent |
-| `/program-audio.json` | `program-audio-sampler` `--user` service | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain, holes_bridged, bridged_ms, queue_drops, lag_ms[, reason]}`; both ages recomputed by the server per request; the two marker counts are null without a full marker span; `holes_bridged`/`bridged_ms` count the bridged holes and `queue_drops` the frames the sampler's own capture queue dropped, since the sampler started (null while it is not sampling); `lag_ms` = how long the block that completed the judged window waited in the capture queue before the consumer took it (the consumer's backlog, the window's own ~17–85 ms of processing on top; null with no window); 404 absent; unreadable or foreign-owned = UNKNOWN |
+| `/program-audio.json` | `program-audio-sampler` `--user` service | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain, holes_bridged, bridged_ms, queue_drops, lag_ms, sender_stalls[, reason]}`; both ages recomputed by the server per request; the two marker counts are null without a full marker span; `holes_bridged`/`bridged_ms` count the bridged holes, `queue_drops` the frames the sampler's own capture queue dropped and `sender_stalls` the sender stalls the look-ahead found, since the sampler started (null while it is not sampling); `lag_ms` = how long the block that completed the judged window waited in the capture queue before the consumer took it (the consumer's backlog, the window's own ~17–85 ms of processing on top; null with no window); 404 absent; unreadable or foreign-owned = UNKNOWN |
 
 The consumer CLI is `scripts/program_audio_guard.py`, used by both YouTube gates (camera-box and
 restreamer issue 357):
@@ -224,8 +224,7 @@ level. Re-run the full calibration after any decoder or rule change:
     - **A FORWARD timestamp step with no sample lost** (Design-question 6036260703) pushed every later
       marker round(60·δ) indices off the line when bridged: +50…+250 ms on the committed clip gave
       2 FOREIGN windows, minimum chain 3. The fleet date step is now matched to dev1's own wall step
-      (DATE_STEP, below). A sender stall that bridges zeros for nothing is the open case (the capture
-      thread section).
+      (DATE_STEP, below), and a sender stall by the look-ahead (below).
   - Fallback: only when a timestamp is undefined (`INT64_MAX` = `NDIlib_recv_timestamp_undefined`,
     or ≤ 0) the old arrival rule applies (`RECEIVE_GAP_S` = 1 s, logged `receive gap of … (no NDI
     sender timestamp …)`). An NDI error frame still restarts the span unconditionally (stricter
@@ -235,8 +234,10 @@ level. Re-run the full calibration after any decoder or rule change:
     jitter against the 41.3 ms tolerance (the margin to watch), then `holes_bridged` and
     `bridged_ms`; a restart after an NDI error frame shows as `error_frames`. Each restart, each
     late burst and each bridge also logs one line. Since design 6037613222 the line also carries
-    `queue_drops`, `max_lag_ms` and `date_steps` (between `bad_rate_frames` and `timeline_breaks`, so
-    the older field anchors keep their neighbours).
+    `queue_drops`, `max_lag_ms` and `date_steps`, and since the look-ahead `sender_stalls` and
+    `max_stall_ms` (all between `bad_rate_frames` and `timeline_breaks`, so the older field anchors
+    keep their neighbours). A held frame's decision lands in the interval in which the look-ahead
+    decides it (up to 4 frames later).
   - STEP 0 (7.10.2026): a second, read-only sampler instance (private serve dir) took the live
     `STREAM-SNV (stream)` for 25 min while dev1 ran test suites and the marker calibration.
     70 304 frames (comment 6030714990):
@@ -282,9 +283,10 @@ level. Re-run the full calibration after any decoder or rule change:
     - The two windows whose span holds a DATE_STEP count as holed for the short-chain rule below:
       the ±20 ms match can absorb a small real loss (one frame plus negative jitter).
     - Micro-corrections of a few ms stay inside the tolerance.
-  - Residual limits: a sender stall longer than the tolerance (OBS submitting a frame > ~20 ms
-    later than its normal jitter) costs one warm-up although nothing was lost; a sender with no
-    timestamps falls back to the arrival rule and its old limit.
+  - Residual limits: a sender stall whose catch-up frames do not bring the timeline back within the
+    tolerance in 4 frames (a stall of ~150 ms or more) is bridged as a hole of its smallest offset
+    although nothing was lost (a holed span, rule A); a sender with no timestamps falls back to the
+    arrival rule and its old limit.
   - **Test trap: a fake decoder must follow the stretch it is handed.** With a bridge in the span
     the decoder is called once per delivered stretch, and `FixedChain` returns the same 8 words for
     every call, so the copies collide on rule 2 and a measurement span reads FOREIGN. Loop tests
@@ -385,11 +387,47 @@ level. Re-run the full calibration after any decoder or rule change:
     its audio thread stalls ~64 ms (`audio-stall #1367: tick_gap_max_ms=58…68` every minute) and
     then submits three frames back to back. The bridge inserts ~43 ms of zeros for audio that was
     never lost, and every later marker sits 2.6 indices off the line. That is the 14:17:37 false
-    FOREIGN. Open on Design-question 6037861831 (a look-ahead that tells a stall from a loss).
-    Rule A above turns the FOREIGN into UNKNOWN meanwhile, but that does NOT end the YouTube stop:
-    the live pattern replayed through the new code reads `U U M M M M U M U U M` (two UNKNOWN in a
-    row, three within ~20 s), which still meets restreamer's 2-consecutive / 3-within-60 s rule.
-    Only the look-ahead (reading those windows MEASUREMENT) removes it.
+    FOREIGN. Rule A alone turned it into UNKNOWN, which did NOT end the YouTube stop: the live
+    pattern replayed read `U U M M M M U M U U M` (two UNKNOWN in a row, three within ~20 s), enough
+    for restreamer's 2-consecutive / 3-within-60 s rule. The look-ahead (next section) ends it.
+- **The sender-stall look-ahead** (ROZHODNUTÉ on issue 1404, the answer to Design-question
+  6037861831; `program_audio.resolve_ahead` + `program_audio_sampler.HeldFrames`, pinned by
+  `tests/python/test_program_audio_stall_1404.py`).
+  - A frame more than the tolerance AHEAD of the timeline (beyond any known queue drop), with no
+    matching dev1 wall step and no format change, is HELD (`judge_continuity` kind `ahead`), and so
+    are up to `STALL_LOOKAHEAD_FRAMES` = 4 frames after it (~85 ms).
+  - Each held frame's CUMULATIVE offset is measured against the frame before the step: its stamp
+    minus (that frame's stamp + its duration + every held frame before it + the first frame's known
+    drop). Summed as integer differences: a live stamp (~1.8e16) does not fit a float exactly.
+  - The first held frame back at or under the tolerance decides at once: a SENDER STALL. Nothing
+    lost: no zeros (only the first frame's known queue drop), the span kept, `sender_stalls` +1
+    (summary + JSON) and `max_stall_ms`. The frames before it are filed at their TIMELINE place,
+    never at their late stamps, so the next frame is judged against the timeline (a +100 ms stall
+    spread over three frames is one stall, never a −58 ms backward jump). A live stall (+42/−21/−21)
+    decides at its first follower, so it costs no wait. No log line per stall (~2 a minute live);
+    the summary carries them.
+  - None back after 4 followers: the hole = the SMALLEST cumulative offset. Up to 250 ms (with the
+    known drop) a BRIDGE of exactly that (`audio timeline hole: the frame sits +X ms ahead … the
+    smallest offset +H ms is the hole … bridged with N zero samples`), else a restart (`audio
+    timeline discontinuity: … the smallest offset over the next N frame(s) …`). A late-stamped frame after a real loss is filed at
+    its place behind the hole, so the zeros are the lost audio, never the late stamp's offset.
+  - Every held frame is decided, never lost: a frame that cannot join (a known queue drop, another
+    rate or channel count, no stamp) decides the held ones first with what arrived (`complete`), and
+    so do a quiet capture poll, an NDI error frame (the held audio belongs to the old span) and the
+    loop's stop.
+  - The window holding a stall is NOT holed (no zeros), so rule A never touches it: the in-band chord
+    around a stall reads FOREIGN in the same window as without it (restreamer's safety test). Rule A
+    and the spectral FOREIGN are unchanged.
+  - Evidence (7.10.2026): the STEP-0 probes' recorded stamps replayed through the real loop: the
+    capture-thread probe's 20 forward steps under 250 ms are 20 sender stalls, 0 zeros (its 2 losses
+    of 417/448 ms still restart); the in-loop probe at nice 10 reads 19 stalls, 3 bridges, 5 restarts
+    (its own starvation). The live 16-step pattern replayed on the committed clip through the real
+    decoder reads MEASUREMENT in every window after the warm-up (was `U U M M M M U M U U M`).
+    Calibration unchanged: bar a minimum chain 6, bar b chords/tremolo/melody 1, band noise 3.
+  - Tests that changed on purpose: a 2-frame hole with a 5 ms late stamp bridges 42.7 ms (was
+    47.7); a loop test whose summary boundary fell on a held frame moves it to the 5th frame after
+    the hole; a test whose music ended within a few samples of a window boundary got more music
+    (exact bridges no longer pad the timeline).
 - **A SILENT window empties the span.** The next non-silent window holds only its own markers, so it
   reads UNKNOWN ("marker span") until the span is full again. Without this a silence→measurement
   start read a short chain and could latch a false FOREIGN.
