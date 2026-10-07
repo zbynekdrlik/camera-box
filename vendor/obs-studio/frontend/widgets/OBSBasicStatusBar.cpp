@@ -104,6 +104,10 @@ static constexpr uint64_t GENLOCK_IDLE_INPUT_MIN_FRAMES = 60;
  * qpc rate_ready precedent), so a live source is never mislabelled idle during the first ~54 s. */
 static constexpr qint64 GENLOCK_IDLE_WINDOW_MS = 60000;
 
+/* camera-box issue 1302: recent_event holds for this long after the last NEW phase event of a
+ * contributing input (the per-input baseline, genlock_recent_events_tick). */
+static constexpr int64_t GENLOCK_RECENT_EVENT_WINDOW_MS = 60000;
+
 namespace {
 /* camera-box #1299: the structured per-input record the genlock-lock-json: line carries (the
  * tooltip `rows` above are pre-formatted human strings; this is the machine-readable sibling). */
@@ -125,7 +129,6 @@ struct GenlockScan {
 	int n_locked = 0;
 	int n_absent = 0; /* #1299: of n_inputs, how many have NO live NDI receiver connection */
 	int n_idle = 0;   /* #1341: of n_inputs, how many are CONNECTED but IDLE (keep-alive-only) — computed post-scan from the received-frame delta */
-	quint64 event_sum = 0;
 	int64_t max_abs_qpc_drift_ms = 0;
 	int64_t qpc_signed_ms = 0; /* #1299 Part 4: the SIGNED cumulative wall-vs-QPC drift (process-global, so every input reports the same value; last wins) — feeds the windowed-rate ring */
 	uint32_t min_latency_ms = 0;
@@ -153,10 +156,9 @@ bool genlock_scan_source(void *param, obs_source_t *source)
 	scan->n_inputs++;
 	if (st.locked)
 		scan->n_locked++;
-	/* #1299 Part 3: the recent-event driver (scan->event_sum) is NO LONGER summed here — an
-	 * incremental sum over EVERY input + EVERY event class (incl. underruns + absent-sender rebind
-	 * churn) latched the 60 s window forever. It is recomputed AFTER the scan as the CONNECTED-only,
-	 * PHASE-only aggregate via genlock_input_phase_events (see UpdateGenlockLabel). */
+	/* #1299 Part 3 + issue 1302: the recent-event driver is NOT summed here -- a sum over EVERY input
+	 * and EVERY event class latched the 60 s window forever. UpdateGenlockLabel counts each input's
+	 * NEW phase events against its own baseline after the scan (genlock_recent_events_tick). */
 	const int64_t d = st.wall_qpc_drift_ms < 0 ? -st.wall_qpc_drift_ms : st.wall_qpc_drift_ms;
 	if (d > scan->max_abs_qpc_drift_ms)
 		scan->max_abs_qpc_drift_ms = d;
@@ -240,6 +242,78 @@ bool genlock_scan_output(void *param, obs_output_t *output)
 	if (st.wall_timecode_stamping)
 		scan->stamping = true;
 	return true;
+}
+
+/* camera-box issue 1302: the recent_event driver, a per-input event BASELINE. Each input's NEW phase
+ * events this tick come from the parity-gated genlock_input_new_phase_events against what the widget
+ * remembered at the last tick (GenlockRecentEvents.hpp), so a reconnect, a wake from idle or a first
+ * sight re-baselines instead of counting the input's whole lifetime total (the #1299 aggregate compare
+ * did, and held the box DEGRADED for 60 s after every reattach). recent_event = a new event within
+ * window_ms; the top offender is the input with the most new events in that window. Keep the two
+ * structs, the add and the tick CONTIGUOUS and std-only: tests/genlock_phase_baseline_1302.rs lifts
+ * them verbatim and replays the widget's ticks with g++. */
+struct GenlockPhaseInput {
+	std::string name;
+	bool connected = true; /* the DistroAV receiver has a live NDI connection */
+	bool idle = false;     /* #1341: connected but keep-alive-only */
+	uint64_t relocks = 0;
+	uint64_t late_holds = 0;
+	uint64_t backward_steps = 0;
+};
+struct GenlockRecentEventTick {
+	uint64_t new_events = 0;   /* the new phase events of every input this tick */
+	bool recent_event = false; /* a tick within window_ms saw a new event */
+	std::string top_name;      /* the input with the most new events in the window ("" = none) */
+	uint64_t top_events = 0;   /* its new events in the window */
+};
+uint64_t genlock_phase_sat_add(uint64_t a, uint64_t b)
+{
+	return a > UINT64_MAX - b ? UINT64_MAX : a + b;
+}
+GenlockRecentEventTick genlock_recent_events_tick(GenlockRecentEvents &st, int64_t now_ms, int64_t window_ms,
+						   const std::vector<GenlockPhaseInput> &inputs)
+{
+	GenlockRecentEventTick tick;
+	std::set<std::string> present;
+	for (const GenlockPhaseInput &in : inputs) {
+		const int contributing = (in.connected && !in.idle) ? 1 : 0;
+		const uint64_t total = genlock_input_phase_events(in.connected ? 1 : 0, in.idle ? 1 : 0, in.relocks,
+								  in.late_holds, in.backward_steps);
+		const auto found = st.inputs.find(in.name);
+		const int has_prev = found != st.inputs.end() ? 1 : 0;
+		GenlockPhaseBaseline &b = has_prev ? found->second : st.inputs[in.name];
+		const uint64_t fresh =
+			genlock_input_new_phase_events(has_prev, b.contributing ? 1 : 0, b.total, contributing, total);
+		b.total = total;
+		b.contributing = contributing != 0;
+		if (fresh > 0) {
+			b.recent.emplace_back(now_ms, fresh);
+			tick.new_events = genlock_phase_sat_add(tick.new_events, fresh);
+		}
+		while (!b.recent.empty() && now_ms - b.recent.front().first >= window_ms)
+			b.recent.pop_front();
+		uint64_t windowed = 0;
+		for (const auto &e : b.recent)
+			windowed = genlock_phase_sat_add(windowed, e.second);
+		/* strictly more: a tie keeps the first input in scan order */
+		if (windowed > tick.top_events) {
+			tick.top_events = windowed;
+			tick.top_name = in.name;
+		}
+		present.insert(in.name);
+	}
+	/* bound the remembered state: an input that left the scan is forgotten, so its return is a first
+	 * sight (re-baselined), never a burst of the events it collected while away. */
+	for (auto it = st.inputs.begin(); it != st.inputs.end();) {
+		if (present.count(it->first) == 0)
+			it = st.inputs.erase(it);
+		else
+			++it;
+	}
+	if (tick.new_events > 0)
+		st.last_event_ms = now_ms;
+	tick.recent_event = st.last_event_ms >= 0 && now_ms - st.last_event_ms < window_ms;
+	return tick;
 }
 
 const char *genlock_state_name(genlock_lock_state_t s)
@@ -1362,39 +1436,29 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 		}
 	}
 
-	/* #1299 Part 3: recompute the recent-event driver as the CONNECTED-only, PHASE-only aggregate
-	 * (relocks + late_holds + backward_steps). UNDERRUNS are DROPPED — a latency-budget miss owned
-	 * by the genlock-fifo audit + cg-chain-verify (issue 1302), and bursty, so counting it latched
-	 * the 60 s window chronically; an ABSENT input (its #1096 rebind churn) contributes 0. Also pick
-	 * the top offender — the connected input carrying the most phase events — so a DEGRADED reason
-	 * NAMES the culprit (reason=recent_event:<name>). genlock_input_phase_events is the pure rule
-	 * shared with src/genlock_lock_state.rs (C-vs-Rust parity-gated). */
-	scan.event_sum = 0;
-	std::string recent_event_input_name;
-	uint64_t recent_event_input_events = 0;
+	/* recent_event (a relock / late-hold / backward-step on a CONNECTED, non-idle input in the last
+	 * 60 s). #1299 Part 3: PHASE events only -- UNDERRUNS are dropped (a latency-budget miss the
+	 * genlock-fifo audit + cg-chain-verify own, and bursty) and an ABSENT or IDLE input contributes 0.
+	 * Issue 1302: counted per input against its own baseline, so a reconnect, a wake or a first sight
+	 * re-baselines instead of adding the input's lifetime total; the offender is the input with the
+	 * most new events in the window, named in the DEGRADED reason (reason=recent_event:<name>). */
+	std::vector<GenlockPhaseInput> phase_inputs;
+	phase_inputs.reserve(scan.inputs.size());
 	for (const GenlockInputRow &r : scan.inputs) {
-		const uint64_t pe = genlock_input_phase_events(r.connected ? 1 : 0, r.idle ? 1 : 0, r.relocks,
-							       r.late_holds, r.backward_steps);
-		scan.event_sum += pe;
-		if (pe > recent_event_input_events) {
-			recent_event_input_events = pe;
-			recent_event_input_name = r.name;
-		}
+		GenlockPhaseInput in;
+		in.name = r.name;
+		in.connected = r.connected;
+		in.idle = r.idle;
+		in.relocks = r.relocks;
+		in.late_holds = r.late_holds;
+		in.backward_steps = r.backward_steps;
+		phase_inputs.push_back(std::move(in));
 	}
-
-	/* recent-event (relock/late-hold/backward-step on a CONNECTED input in the last 60 s): detect an
-	 * INCREASE of the aggregate cumulative counter across ticks. A decrease (a reconnect reset
-	 * the counters) re-baselines with no event. */
-	if (genlockFirstSample) {
-		genlockLastEventSum = scan.event_sum;
-		genlockFirstSample = false;
-	} else if (scan.event_sum > genlockLastEventSum) {
-		genlockLastEventMs = now_ms;
-		genlockLastEventSum = scan.event_sum;
-	} else if (scan.event_sum < genlockLastEventSum) {
-		genlockLastEventSum = scan.event_sum;
-	}
-	const bool recent_event = genlockLastEventMs >= 0 && (now_ms - genlockLastEventMs) < 60000;
+	const GenlockRecentEventTick events =
+		genlock_recent_events_tick(genlockRecentEvents, now_ms, GENLOCK_RECENT_EVENT_WINDOW_MS, phase_inputs);
+	const bool recent_event = events.recent_event;
+	const std::string &recent_event_input_name = events.top_name;
+	const uint64_t recent_event_input_events = events.top_events;
 
 	/* clock present iff a successful :8898 poll landed within the last 3 s. */
 	const bool clock_present = genlockClockLastOkMs >= 0 && (now_ms - genlockClockLastOkMs) < 3000;

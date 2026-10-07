@@ -153,6 +153,29 @@ static inline uint64_t genlock_input_phase_events(int connected, int idle, uint6
 	return sum;
 }
 
+/* issue 1302 — the NEW phase events of ONE input since the widget's previous tick: the per-input
+ * event BASELINE that replaced the #1299 aggregate compare (it summed every input's lifetime total,
+ * so a reconnecting or waking input added its whole total at once and held the box DEGRADED
+ * recent_event for 60 s after every reattach). The totals are the input-phase-events values above;
+ * contributing = connected and not idle; has_prev 0 = the widget has no sample of the input (first
+ * sight, or it left the scan and was forgotten). Contributing in BOTH samples and the total rose:
+ * the rise. It just started contributing (reconnect, wake from idle, first sight): 0, and the current
+ * total becomes its baseline. The total went backward (a counter reset): 0, re-baseline. Not
+ * contributing now: 0. Byte-for-byte mirror of camera_box::genlock_lock_state::input_new_phase_events,
+ * parity-gated by tests/genlock_phase_baseline_1302.rs. */
+static inline uint64_t genlock_input_new_phase_events(int has_prev, int prev_contributing, uint64_t prev_total,
+						      int contributing, uint64_t total)
+{
+	/* RED stub (issue 1302): the #1299 aggregate's reading -- an input not contributing last tick (or
+	 * never seen) counted 0, so its whole lifetime total enters as new events on its first
+	 * contributing tick. The GREEN commit replaces this body. */
+	uint64_t base;
+	if (!contributing)
+		return 0;
+	base = (has_prev && prev_contributing) ? prev_total : 0;
+	return total > base ? total - base : 0;
+}
+
 /* #1303 — case-insensitive ASCII substring test, a private helper for genlock_name_is_camera below.
  * Returns 1 iff `needle` (assumed non-empty) occurs in `hay`. Pure C (no libc strcasestr, which is
  * non-standard), so it lifts + compiles standalone in the parity gate. */

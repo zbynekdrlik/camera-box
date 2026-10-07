@@ -315,6 +315,57 @@ pub fn top_phase_event_offender(inputs: &[InputEventCounts]) -> Option<(usize, u
     best
 }
 
+/// Issue 1302 — one input's phase-event sample, as the widget's per-input event BASELINE remembers
+/// it from one 1 Hz tick to the next.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PhaseEventSample {
+    /// The input's phase total as [`input_phase_events`] reads it: the cumulative
+    /// `relocks + late_holds + backward_steps` (saturating) while it contributes, 0 while it does not.
+    pub total: u64,
+    /// The input feeds `recent_event` this tick: CONNECTED and not IDLE.
+    pub contributing: bool,
+}
+
+impl PhaseEventSample {
+    /// The sample of one input's counters this tick.
+    pub fn of(c: &InputEventCounts) -> PhaseEventSample {
+        PhaseEventSample {
+            total: input_phase_events(c),
+            contributing: c.connected && !c.idle,
+        }
+    }
+}
+
+/// Issue 1302 — the NEW phase events of ONE input since the widget's previous tick (`prev`, `None` =
+/// the widget has no sample of it: first sight, or it left the scan and was forgotten). This is the
+/// per-input baseline that replaced the #1299 aggregate compare. That compare summed every input's
+/// LIFETIME total and raised `recent_event` on any rise, so a reconnecting or waking input added its
+/// whole total at once and held the box DEGRADED for 60 s after every reattach.
+///
+/// The cases:
+///
+/// - it contributed in BOTH samples and its total rose: the rise;
+/// - it just started contributing (a reconnect, a wake from idle, or first sight): 0, and the current
+///   total becomes its baseline;
+/// - its total went backward (a counter reset): 0, re-baseline;
+/// - it does not contribute now: 0.
+///
+/// Mirrored byte-for-byte by `genlock_input_new_phase_events` in `GenlockLockState.hpp`,
+/// parity-gated by `tests/genlock_phase_baseline_1302.rs`.
+pub fn input_new_phase_events(prev: Option<PhaseEventSample>, cur: PhaseEventSample) -> u64 {
+    // RED stub (issue 1302): the #1299 aggregate's reading -- an input not contributing last tick
+    // (or never seen) counted 0, so its whole lifetime total enters as new events on its first
+    // contributing tick. The GREEN commit replaces this body.
+    if !cur.contributing {
+        return 0;
+    }
+    let base = match prev {
+        Some(p) if p.contributing => p.total,
+        _ => 0,
+    };
+    cur.total.saturating_sub(base)
+}
+
 // #1299 Part 4 + #1357 scope C — the wall-vs-monotonic `qpc_drift` term. The CUMULATIVE offset must
 // never gate: on a dantesync-disciplined Windows box the wall ran at the grandmaster rate vs the free
 // QPC crystal and the offset grew ~50 ms/h (38 false pages overnight 15./16.9.2026; issue 1372 has
@@ -1085,6 +1136,99 @@ mod tests {
     #[test]
     fn saturating_never_overflows_on_a_pathological_count() {
         assert_eq!(input_phase_events(&ev(true, u64::MAX, 5, 0)), u64::MAX);
+    }
+
+    // --- issue 1302: the per-input event baseline (a reattach never counts old events as new) ------
+
+    fn sample(total: u64, contributing: bool) -> PhaseEventSample {
+        PhaseEventSample {
+            total,
+            contributing,
+        }
+    }
+
+    #[test]
+    fn the_sample_reads_the_total_and_the_contribution_1302() {
+        assert_eq!(PhaseEventSample::of(&ev(true, 2, 3, 4)), sample(9, true));
+        // an absent or an idle input contributes nothing, so its total reads 0
+        assert_eq!(PhaseEventSample::of(&ev(false, 2, 3, 4)), sample(0, false));
+        assert_eq!(PhaseEventSample::of(&ev_idle(2, 3, 4)), sample(0, false));
+    }
+
+    #[test]
+    fn a_steadily_contributing_input_adds_its_rise_1302() {
+        assert_eq!(
+            input_new_phase_events(Some(sample(40, true)), sample(43, true)),
+            3
+        );
+        assert_eq!(
+            input_new_phase_events(Some(sample(40, true)), sample(40, true)),
+            0
+        );
+    }
+
+    #[test]
+    fn a_reconnect_rebaselines_instead_of_counting_the_lifetime_total_1302() {
+        // the songplayer probe: 40 lifetime relocks, disconnected last tick, connected now
+        let was = PhaseEventSample::of(&ev(false, 40, 0, 0));
+        let now = PhaseEventSample::of(&ev(true, 40, 0, 0));
+        assert_eq!(input_new_phase_events(Some(was), now), 0);
+        // the next tick counts only what happened after the attach
+        let next = PhaseEventSample::of(&ev(true, 41, 0, 0));
+        assert_eq!(input_new_phase_events(Some(now), next), 1);
+    }
+
+    #[test]
+    fn a_wake_from_idle_rebaselines_1302() {
+        let was = PhaseEventSample::of(&ev_idle(60, 30, 5));
+        let now = PhaseEventSample::of(&ev(true, 60, 30, 5));
+        assert_eq!(input_new_phase_events(Some(was), now), 0);
+    }
+
+    #[test]
+    fn first_sight_rebaselines_1302() {
+        // the live strih-lx offender of 7.10.2026: 567 lifetime relocks on CG-obs
+        let now = PhaseEventSample::of(&ev(true, 567, 0, 0));
+        assert_eq!(input_new_phase_events(None, now), 0);
+    }
+
+    #[test]
+    fn a_backward_total_rebaselines_1302() {
+        assert_eq!(
+            input_new_phase_events(Some(sample(50, true)), sample(3, true)),
+            0
+        );
+        // the next rise counts from the new baseline
+        assert_eq!(
+            input_new_phase_events(Some(sample(3, true)), sample(5, true)),
+            2
+        );
+    }
+
+    #[test]
+    fn a_vanished_input_returns_as_first_sight_1302() {
+        // The widget forgets an input that left the scan. It relocked 50 times while away; when it
+        // returns, the widget has no sample of it (None), so the 50 never count.
+        let left = sample(40, true);
+        assert_eq!(input_new_phase_events(Some(left), sample(40, true)), 0);
+        assert_eq!(input_new_phase_events(None, sample(90, true)), 0);
+    }
+
+    #[test]
+    fn an_input_that_stops_contributing_adds_nothing_1302() {
+        let was = sample(40, true);
+        let gone = PhaseEventSample::of(&ev(false, 45, 0, 0));
+        let idle = PhaseEventSample::of(&ev_idle(45, 0, 0));
+        assert_eq!(input_new_phase_events(Some(was), gone), 0);
+        assert_eq!(input_new_phase_events(Some(was), idle), 0);
+    }
+
+    #[test]
+    fn new_events_never_overflow_1302() {
+        assert_eq!(
+            input_new_phase_events(Some(sample(0, true)), sample(u64::MAX, true)),
+            u64::MAX
+        );
     }
 
     // ---- #1299 Part 4 / #1357 scope C: the qpc_drift term is a wall STEP, one semantics per box ----

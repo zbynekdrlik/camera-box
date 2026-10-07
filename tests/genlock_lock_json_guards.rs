@@ -70,9 +70,10 @@ fn genlock_lock_recent_event_offender_present_1299_part3() {
         STATUSBAR_CPP,
         "genlock_json_append_escaped(j, recent_event_input_name);",
     );
+    // issue 1302: the phase total is read inside the per-input baseline tick
     assert_has(
         STATUSBAR_CPP,
-        "genlock_input_phase_events(r.connected ? 1 : 0, r.idle ? 1 : 0, r.relocks,",
+        "genlock_input_phase_events(in.connected ? 1 : 0, in.idle ? 1 : 0, in.relocks,",
     );
     // the enriched human reason (reason=recent_event:<name>) built from the offender name
     assert_has(
@@ -83,6 +84,57 @@ fn genlock_lock_recent_event_offender_present_1299_part3() {
     assert_has(
         "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp",
         "static inline uint64_t genlock_input_phase_events(int connected, int idle, uint64_t relocks,",
+    );
+}
+
+#[test]
+fn genlock_lock_recent_event_baseline_present_1302() {
+    // Issue 1302: recent_event is fed by each input's NEW phase events against its own baseline, so a
+    // reconnect, a wake from idle or a first sight never counts the input's lifetime total (the #1299
+    // aggregate compare held the box DEGRADED for 60 s after every reattach). A subtree pull that
+    // brings the aggregate back re-opens that false DEGRADED. Linux-CI twin of the issue-1302 pwsh
+    // block in BOTH windows-genlock{,-fast}.yml -- keep all three in lock-step.
+    const HPP: &str = "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp";
+    const STATE_HPP: &str = "vendor/obs-studio/frontend/widgets/GenlockRecentEvents.hpp";
+    // the pure per-input rule (parity-gated by tests/genlock_phase_baseline_1302.rs)
+    assert_has(
+        HPP,
+        "static inline uint64_t genlock_input_new_phase_events(int has_prev, int prev_contributing, uint64_t prev_total, int contributing, uint64_t total)",
+    );
+    // the widget's per-input state, a member of the status bar
+    assert_has(STATE_HPP, "struct GenlockRecentEvents {");
+    assert_has(
+        STATE_HPP,
+        "std::map<std::string, GenlockPhaseBaseline> inputs;",
+    );
+    assert_has(STATUSBAR_HPP, "#include \"GenlockRecentEvents.hpp\"");
+    assert_has(STATUSBAR_HPP, "GenlockRecentEvents genlockRecentEvents;");
+    // the tick (replayed on the shipped bytes by tests/genlock_phase_baseline_1302.rs) and its call
+    assert_has(
+        STATUSBAR_CPP,
+        "const uint64_t fresh = genlock_input_new_phase_events(has_prev, b.contributing ? 1 : 0, b.total, contributing, total);",
+    );
+    assert_has(
+        STATUSBAR_CPP,
+        "genlock_recent_events_tick(genlockRecentEvents, now_ms, GENLOCK_RECENT_EVENT_WINDOW_MS, phase_inputs);",
+    );
+    assert_has(
+        STATUSBAR_CPP,
+        "static constexpr int64_t GENLOCK_RECENT_EVENT_WINDOW_MS = 60000;",
+    );
+    // the aggregate compare is gone, and the state header stays OBS/Qt-free (the replay compiles it)
+    let widget = squish(&vendor_file(STATUSBAR_CPP));
+    let header = squish(&vendor_file(STATUSBAR_HPP));
+    for gone in ["event_sum", "genlockLastEventSum", "genlockFirstSample"] {
+        assert!(
+            !widget.contains(gone) && !header.contains(gone),
+            "issue 1302: the #1299 aggregate recent-event compare (`{gone}`) is back -- a reattach would count its lifetime total as new events again"
+        );
+    }
+    let state = vendor_file(STATE_HPP);
+    assert!(
+        !state.contains("#include <obs") && !state.contains("#include <Q"),
+        "{STATE_HPP}: issue 1302 -- the recent-event state header must stay OBS/Qt-free"
     );
 }
 
