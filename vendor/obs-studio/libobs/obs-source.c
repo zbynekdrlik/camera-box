@@ -40,6 +40,7 @@
 #include "obs-genlock-grid.h" /* camera-box #1355: the ONE per-second genlock grid */
 #include "obs-genlock-audio-buffering.h" /* camera-box issue 1367: the audio-buffering floor */
 #include "obs-genlock-wall-step.h" /* camera-box issue 1381: GENLOCK_WALL_STEP_MIN_NS for the audio skew hold */
+#include "obs-genlock-fifo-relabel.h" /* camera-box issue 1372 part B: the receive-FIFO relabel */
 
 #define get_weak(source) ((obs_weak_source_t *)source->context.control)
 
@@ -4842,6 +4843,10 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 		source->genlock_rx_last_ts = 0;
 		source->genlock_rx_min_delta_ns = 0;
 		source->genlock_rx_arrival_lag_ns = 0; /* issue 1367: no frame received on the new timeline */
+		/* camera-box issue 1372 part B: the new timeline is not the stepped one -- close an open relabel
+		 * window and forget a remembered stamp jump (the booking stays applied). */
+		source->genlock_relabel.arrival.old_epoch = false;
+		source->genlock_relabel.jump_ns = 0;
 		pthread_mutex_unlock(&source->async_mutex);
 		return;
 	}
@@ -4891,6 +4896,15 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 				 * ARRIVAL order (stamp_dup= / stamp_gap= on the audit line) -- the measured
 				 * evidence of a sender stamping at send time (a slow frame -> gap + dup). Placed
 				 * after the #99 peak update so that update stays next to the received count. */
+				/* camera-box issue 1372 part B (design 6026394143): a frame the sender stamped in the
+				 * OLD date epoch, arriving after this box booked a fleet date step, is relabelled by
+				 * the step -- while it continues the relabelled timeline within one frame, until the
+				 * sender's own step, a real stamp jump or one latency window ends it -- BEFORE the
+				 * stamp tracker and the arrival lag below read it. Also remembers a raw stamp jump
+				 * (the sender stepped first). Decision: obs-genlock-fifo-relabel.h. */
+				output->timestamp = genlock_fifo_relabel_receive(&source->genlock_relabel,
+										 source->genlock_rx_last_ts, output->timestamp,
+										 source->genlock_rx_min_delta_ns, os_gettime_ns());
 				genlock_stamp_track_observe(&source->genlock_rx_last_ts, &source->genlock_rx_min_delta_ns,
 							    &source->genlock_stamp_dups, &source->genlock_stamp_gaps,
 							    output->timestamp);
@@ -6682,6 +6696,11 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	      * at most 0.1 % of the ticks over an hour; a climbing rate means the camera arrival lag
 	      * exceeds GENLOCK_N2_AGE_BASE_NS + pin. Audit-line-only (not in obs_genlock_stats). */
 	     "n2_early=%llu "
+	     /* camera-box issue 1372 part B: cumulative frames the receive-FIFO relabel moved by a booked
+	      * fleet date step (queued at the booking + old-epoch arrivals). Flat between date steps; a
+	      * nightly step adds about one queue depth plus the frames a lagging sender still stamped in the
+	      * old epoch. Audit-line-only (not in obs_genlock_stats); parsed by src/jitter_audit.rs. */
+	     "relabelled=%llu "
 	     /* camera-box issue 1367 (ROZHODNUTÉ 5827497952): the SHALLOW per-lock depth + the audio slew.
 	      * shallow_depth= the latched D in frames (0 = none; a deep source latches its base + 1 too),
 	      * shallow_capped= the min-latency (imag) guard capped it, shallow_latches= cumulative latches
@@ -6752,6 +6771,7 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	     (unsigned long long)source->genlock_stamp_gaps,
 	     (unsigned long long)source->genlock_n1_grows,
 	     (unsigned long long)source->genlock_n2_early,
+	     (unsigned long long)source->genlock_relabel.relabelled,
 	     /* camera-box issue 1367: the shallow depth + the audio slew (audit-line-only). */
 	     (unsigned long long)source->genlock_shallow_target_frames, source->genlock_shallow_capped ? 1 : 0,
 	     source->genlock_shallow_latches, (long long)(source->genlock_audio_slew_remaining_ns / 1000000),
@@ -8360,6 +8380,55 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 	return true;
 }
 
+/* camera-box issue 1372 part B (design 6026394143): the box-wide wall-step booking of the
+ * receive-FIFO relabel. Render (graphics) thread only -- ready_async_frame is its one caller. It runs
+ * the render tick's own detector (genlock_wall_step_observe) on the bracketed read each release takes
+ * its wall_now from: the render tick's detector runs at the END of a tick (video_sleep), after that
+ * tick's release, so it cannot book the step for the release that follows it. */
+static struct genlock_fifo_relabel_booking genlock_relabel_booking;
+
+/* The queue callbacks of genlock_fifo_relabel_apply: this source's async_frames, FIFO order. */
+static uint64_t genlock_relabel_stamp_get(const void *ctx, size_t i)
+{
+	const obs_source_t *source = ctx;
+	return source->async_frames.array[i]->timestamp;
+}
+
+static void genlock_relabel_stamp_set(void *ctx, size_t i, uint64_t ts)
+{
+	obs_source_t *source = ctx;
+	source->async_frames.array[i]->timestamp = ts;
+}
+
+/* Book a wall step this release's bracketed read sees, then apply every booking this source has not
+ * applied yet -- BEFORE the release reads its queue (render thread, under async_mutex): the old-epoch
+ * queued frames, the locked boundary and the stamp tracker's last stamp move by the step and the
+ * arrival window opens. One genlock-fifo-relabel line per booking and per applied source. Decision:
+ * obs-genlock-fifo-relabel.h, src/genlock_fifo_relabel.rs. */
+static void genlock_fifo_relabel_tick(obs_source_t *source, uint64_t mono_before, uint64_t wall_now,
+				      uint64_t mono_after, uint64_t interval, uint32_t reserve_ms)
+{
+	if (genlock_fifo_relabel_book(&genlock_relabel_booking, mono_before, wall_now, mono_after))
+		blog(LOG_INFO,
+		     "genlock-fifo-relabel: the wall clock stepped %+.3f ms -- booked step %llu for the "
+		     "receive FIFO relabel (issue 1372)",
+		     (double)genlock_relabel_booking.step_ns / 1e6, (unsigned long long)genlock_relabel_booking.seq);
+	const struct genlock_fifo_relabel_queue queue = {source, source->async_frames.num, genlock_relabel_stamp_get,
+							 genlock_relabel_stamp_set};
+	struct genlock_fifo_relabel_plan plan = {0, false, false};
+	if (!genlock_fifo_relabel_apply(&source->genlock_relabel, &genlock_relabel_booking, &queue,
+					&source->genlock_locked_next_boundary_ns, &source->genlock_rx_last_ts, interval,
+					source->genlock_rx_min_delta_ns, (uint64_t)reserve_ms * 1000000ULL, wall_now, &plan))
+		return;
+	blog(LOG_INFO,
+	     "genlock-fifo-relabel '%s': step %+.3f ms -- relabelled %zu of %zu queued frame(s), "
+	     "boundary_moved=%d arrivals=%s window_ms=%.0f (issue 1372)",
+	     source->context.name ? source->context.name : "?",
+	     (double)source->genlock_relabel.arrival.step_ns / 1e6, plan.queue_old, source->async_frames.num,
+	     plan.prev_old ? 1 : 0, plan.newest_old ? "judged" : "closed",
+	     (double)(source->genlock_relabel.arrival.until_ns - genlock_relabel_booking.wall_ns) / 1e6);
+}
+
 static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 {
 	struct obs_source_frame *next_frame = source->async_frames.array[0];
@@ -8430,7 +8499,14 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 				 * doubling the per-frame precise-clock read on this hot path. The
 				 * single read also makes the skew measured at the SAME instant as the
 				 * deadline. */
+				/* camera-box issue 1372 part B: the one wall read is bracketed by two monotonic reads, so
+				 * the relabel booking can trust it; a booked date step relabels this source's old-epoch
+				 * frames BEFORE the deadline, the due scan and the backward-step guard read them. */
+				const uint64_t relabel_mono_before = os_gettime_ns();
 				const uint64_t wall_now = genlock_wall_now_ns();
+				const uint64_t relabel_mono_after = os_gettime_ns();
+				genlock_fifo_relabel_tick(source, relabel_mono_before, wall_now, relabel_mono_after, interval,
+							  reserve_ms);
 				uint64_t present_ts =
 					reserve_ms > 0
 						? genlock_present_ts_reserve(wall_now, reserve_ms)
