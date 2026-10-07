@@ -46,8 +46,8 @@ if ! declare -F strih_session_apps_put >/dev/null; then
   . "$(dirname "${BASH_SOURCE[0]}")/strih-session-apps.sh"
 fi
 
-STRIH_PROGRAM_AUDIO_UNIT=program-audio-sampler.service
-STRIH_PROGRAM_AUDIO_UNIT_TEMPLATE=program-audio-sampler.strih-lx.service
+STRIH_PROGRAM_AUDIO_UNIT="program-audio-sampler.service"
+STRIH_PROGRAM_AUDIO_UNIT_TEMPLATE="program-audio-sampler.strih-lx.service"
 STRIH_PROGRAM_AUDIO_PACKAGES=(python3-numpy)
 # Everything the sampler imports + the decoder shim's sources and build script, in the checkout layout
 # (pinned against the sampler's real import closure by a test).
@@ -174,7 +174,7 @@ strih_program_audio_missing_packages() {
 # or a shim that will not build; a `systemctl --user` call that cannot reach the user bus only WARNs.
 strih_program_audio_install() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
-  local prefix unitdir rel w missing ecores tmp err shim changed=0 unit_written=0
+  local prefix unitdir rel w missing ecores tmp err shim pa_changed=0 unit_written=0
   prefix="$(strih_program_audio_prefix)"
   unitdir="${home}/.config/systemd/user"
   for rel in "${STRIH_PROGRAM_AUDIO_FILES[@]}"; do
@@ -196,9 +196,9 @@ strih_program_audio_install() {
   for rel in "${STRIH_PROGRAM_AUDIO_FILES[@]}"; do
     install -d -m 0755 "${prefix}/$(dirname "$rel")" || { echo "strih-program-audio: cannot create ${prefix}/$(dirname "$rel")" >&2; return 1; }
     w="$(strih_session_apps_put "${repo}/${rel}" "${prefix}/${rel}" "$(strih_program_audio_file_mode "$rel")")" || return 1
-    [ "$w" = written ] && changed=1
+    [ "$w" = written ] && pa_changed=1
   done
-  if [ "$changed" = 1 ]; then
+  if [ "$pa_changed" = 1 ]; then
     echo "  installed the sampler files -> ${prefix} (${#STRIH_PROGRAM_AUDIO_FILES[@]} files, the checkout layout)"
   else
     echo "  the sampler files in ${prefix} unchanged"
@@ -211,7 +211,7 @@ strih_program_audio_install() {
       echo "strih-program-audio: building the decoder shim as ${user} failed (g++ present?)" >&2; return 1; }
     shim="$(strih_program_audio_shim_state "$user" "$home")"
     [ "$shim" = current ] || { echo "strih-program-audio: the decoder shim reads '${shim}' right after its build" >&2; return 1; }
-    changed=1
+    pa_changed=1
   else
     echo "  decoder shim current (built from the installed sources)"
   fi
@@ -227,7 +227,7 @@ strih_program_audio_install() {
   rm -f "$tmp"
   if [ "$w" = written ]; then
     unit_written=1
-    changed=1
+    pa_changed=1
   fi
   echo "  ${STRIH_PROGRAM_AUDIO_UNIT} ${w} (CPUAffinity=${ecores:-none: no cpu_atom, every cpu}; normal priority)"
   chown -R "${user}:${user}" "$unitdir" 2>/dev/null || echo "  WARN: could not chown ${unitdir} to ${user}"
@@ -241,7 +241,7 @@ strih_program_audio_install() {
     echo "  WARN: systemctl --user daemon-reload failed (${err//$'\n'/ }) -- run daemon-reload + try-restart ${STRIH_PROGRAM_AUDIO_UNIT} by hand"
     return 0
   fi
-  if [ "$changed" = 1 ]; then
+  if [ "$pa_changed" = 1 ]; then
     if err="$(strih_session_apps_user_systemctl "$user" try-restart "$STRIH_PROGRAM_AUDIO_UNIT" 2>&1)"; then
       echo "  try-restart ${STRIH_PROGRAM_AUDIO_UNIT} (only a running sampler is restarted onto the new files)"
     else
