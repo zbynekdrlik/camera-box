@@ -31,6 +31,10 @@ is `recording-verdict --av-sync` (CI probe artifact) as a subprocess. Shared wit
   The gray left-only session decoder turned these into a false repeat + skip.
 - The payload CRC is checked (zlib.crc32 of `run.tick.gen`, like `Payload::decode`); only the
   6-digit 9110xx ids are node burns, a 9-digit E2E RUN_ID starting 9110 is a painter id.
+- One reserved id IS a tick: 911016, the measurement clip's painted dual-QR (the CG segments'
+  painter, `.claude/rules/measurement-clip.md`). The clip carries the 60 Hz tick (2 per 30 fps
+  frame), so `continuity(step=2)` proves its frames like a painter recording. Since it reads,
+  `DECODER_VERSION` is 3; the session-3 maps were re-stamped v3 with their rows unchanged.
 
 ## Fail-closed rules the five review rounds found holes in (each has a test)
 
