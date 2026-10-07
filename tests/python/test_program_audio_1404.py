@@ -255,6 +255,7 @@ def test_build_payload_has_the_contract_fields_rounded():
         "schema": 1, "ts_utc": "2026-10-06T19:30:02.123Z", "age_s": 0.0, "verdict": "MEASUREMENT",
         "rms_dbfs": -35.6, "outside_band_pct": 16.8, "window_s": 2.0, "source": "STREAM-SNV (stream)",
         "last_foreign_ts_utc": None, "markers_decoded": None, "marker_chain": None,
+        "holes_bridged": None, "bridged_ms": None,
     }
     latched = pa.build_payload("MEASUREMENT", -35.6, 16.8, now=now, window_s=2.0, source="S",
                                last_foreign_ts_utc="2026-10-06T19:29:58.000Z")
@@ -288,8 +289,8 @@ def test_window_accumulator_emits_exact_windows_from_ndi_sized_blocks():
     for _ in range(130):  # 130 * 1600 = 208000 samples = 2 windows + 16000
         out.extend(acc.push(block, 48000))
     assert len(out) == 2
-    for w, sr in out:
-        assert sr == 48000 and w.shape == (96000, 2)
+    for w, sr, real in out:
+        assert sr == 48000 and w.shape == (96000, 2) and real is None
 
 
 def test_window_accumulator_restarts_on_a_format_change():

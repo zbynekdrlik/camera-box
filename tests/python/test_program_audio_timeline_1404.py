@@ -98,7 +98,7 @@ def _tol():
 
 def test_the_next_frame_on_the_timeline_continues():
     nxt = TS0 + round(FRAME_100NS)
-    assert pa.frame_continues(TS0, FRAME, SR, nxt, _tol()) == pa.CONTINUE
+    assert pa.frame_continues(TS0, FRAME, SR, nxt, _tol()).kind == pa.CONTINUE
     assert pa.timeline_offset_100ns(TS0, FRAME, SR, nxt) == pytest.approx(0.0, abs=1.0)
 
 
@@ -108,13 +108,15 @@ def test_the_senders_submission_jitter_continues(off_ms):
     jitter reached -21.1 / +24.5 ms (p99 11.7) in 25 min and +29.5 ms (p99 18.2) in a second
     20-min run; anything inside one frame + 20 ms (41.3 ms) is the same timeline."""
     ts = TS0 + round(FRAME_100NS + off_ms * 10_000)
-    assert pa.frame_continues(TS0, FRAME, SR, ts, _tol()) == pa.CONTINUE
+    assert pa.frame_continues(TS0, FRAME, SR, ts, _tol()).kind == pa.CONTINUE
 
 
-@pytest.mark.parametrize("off_ms", [42.0, -42.0, 100.0, 2500.0, -300.0])
+@pytest.mark.parametrize("off_ms", [-42.0, 250.1, 300.0, 2500.0, -300.0])
 def test_a_timeline_jump_beyond_the_tolerance_is_a_discontinuity(off_ms):
+    """Behind the timeline beyond the tolerance, or ahead beyond HOLE_BRIDGE_MAX_MS (a hole ahead
+    up to it is a BRIDGE, design 6036098516, pinned in test_program_audio_bridge_1404.py)."""
     ts = TS0 + round(FRAME_100NS + off_ms * 10_000)
-    assert pa.frame_continues(TS0, FRAME, SR, ts, _tol()) == pa.DISCONTINUITY
+    assert pa.frame_continues(TS0, FRAME, SR, ts, _tol()).kind == pa.DISCONTINUITY
 
 
 @pytest.mark.parametrize("prev, ts", [
@@ -126,22 +128,22 @@ def test_a_timeline_jump_beyond_the_tolerance_is_a_discontinuity(off_ms):
     (TS0, None),
 ])
 def test_an_undefined_timestamp_is_unknown_ts(prev, ts):
-    assert pa.frame_continues(prev, FRAME, SR, ts, _tol()) == pa.UNKNOWN_TS
+    assert pa.frame_continues(prev, FRAME, SR, ts, _tol()).kind == pa.UNKNOWN_TS
 
 
 def test_the_expected_stamp_and_the_tolerance_come_from_the_previous_frame():
     """After a 100 ms frame the next stamp is 100 ms later and the tolerance is 100 + 20 ms; judged
-    with the NEXT (10 ms) frame's size it would sit 90 ms off a 30 ms tolerance."""
+    with the NEXT (10 ms) frame's size it would sit 90 ms off a 30 ms tolerance (a 90 ms hole: bridged)."""
     nxt = TS0 + 1_000_000
     tol = pa.continuity_tolerance_100ns(4800, SR)
     assert tol == pytest.approx(1_200_000)
-    assert pa.frame_continues(TS0, 4800, SR, nxt, tol) == pa.CONTINUE
-    assert pa.frame_continues(TS0, 480, SR, nxt, pa.continuity_tolerance_100ns(480, SR)) == pa.DISCONTINUITY
+    assert pa.frame_continues(TS0, 4800, SR, nxt, tol).kind == pa.CONTINUE
+    assert pa.frame_continues(TS0, 480, SR, nxt, pa.continuity_tolerance_100ns(480, SR)) == (pa.BRIDGE, 4320)
 
 
 def test_numpy_integer_timestamps_are_judged_like_ints():
     nxt = np.int64(TS0 + round(FRAME_100NS))
-    assert pa.frame_continues(np.int64(TS0), FRAME, SR, nxt, _tol()) == pa.CONTINUE
+    assert pa.frame_continues(np.int64(TS0), FRAME, SR, nxt, _tol()).kind == pa.CONTINUE
 
 
 def test_the_decision_refuses_a_frame_that_is_not_one():
@@ -275,24 +277,27 @@ def test_a_late_burst_keeps_the_span(decoder, tmp_path):
 
 
 def test_a_timestamp_hole_with_no_arrival_gap_restarts_the_span(decoder, tmp_path):
-    """Real sample loss with no arrival gap: 0.2 s of audio is cut out, the blocks keep arriving at
-    their normal pace, and the sender timestamps after the hole sit 0.2 s later. The span restarts:
-    the audio around the hole is never stitched into one chain."""
+    """Real sample loss with no arrival gap: 0.3 s of audio is cut out, the blocks keep arriving at
+    their normal pace, and the sender timestamps after the hole sit 0.3 s later. Over
+    HOLE_BRIDGE_MAX_MS the span restarts: the audio around the hole is never stitched into one
+    chain (a hole up to 250 ms is bridged instead, test_program_audio_bridge_1404.py)."""
     stereo, sr = _fixture("base-R-rec")
-    cut = slice(6 * sr, 6 * sr + sr // 5)
+    cut = slice(6 * sr, 6 * sr + sr * 3 // 10)
     keep = np.concatenate([stereo[: cut.start], stereo[cut.stop: cut.stop + 4 * sr]])
-    blocks = _blocks(keep, sr, jumps={at_s(6, sr): (sr // 5) * NDI_UNITS // sr})
+    blocks = _blocks(keep, sr, jumps={at_s(6, sr): (sr * 3 // 10) * NDI_UNITS // sr})
     payloads, lines = _run(blocks, tmp_path, decoder)
     assert _verdicts(payloads) == ["UNKNOWN", "UNKNOWN", "MEASUREMENT", "MEASUREMENT", "UNKNOWN",
                                    "MEASUREMENT"]
     assert "warming up" in payloads[4]["reason"]
-    assert any("timeline discontinuity" in line and "+200.0 ms" in line for line in lines), lines
+    assert any("timeline discontinuity" in line and "+300.0 ms" in line for line in lines), lines
 
 
-@pytest.mark.parametrize("step_s", [2.5, -0.3, 0.05])
+@pytest.mark.parametrize("step_s", [2.5, -0.3, 0.3])
 def test_a_date_step_costs_one_warm_up_never_foreign(decoder, tmp_path, step_s):
-    """A dantesync date step moves the sender's wall clock (and so its NDI timestamps) once. It
-    reads as ONE discontinuity: one UNKNOWN warm-up window, never FOREIGN, then MEASUREMENT."""
+    """A dantesync date step moves the sender's wall clock (and so its NDI timestamps) once. A
+    backward step or a forward one over HOLE_BRIDGE_MAX_MS reads as ONE discontinuity: one UNKNOWN
+    warm-up window, never FOREIGN, then MEASUREMENT. (A forward step up to 250 ms is bridged like
+    a hole: the open question of design 6036098516, issue 1404 comment 6036260703.)"""
     stereo, sr = _fixture("base-R-rec")
     blocks = _blocks(stereo[: 10 * sr], sr, jumps={at_s(6, sr): round(step_s * NDI_UNITS)})
     payloads, lines = _run(blocks, tmp_path, decoder)
@@ -331,12 +336,12 @@ def test_the_summary_reports_the_largest_offset_that_continued(tmp_path):
     largest |offset| of a frame that CONTINUED (late bursts included), never a discontinuity's
     offset, reset with every summary.
 
-    Interval 1: a -15 ms micro-correction, a +50 ms step (a break), then a late burst that triggers
-    the summary -> 15.0 (the break's 50 does not count, the sign does not). Interval 2: a late burst
+    Interval 1: a -15 ms micro-correction, a +300 ms step (a break), then a late burst that triggers
+    the summary -> 15.0 (the break's 300 does not count, the sign does not). Interval 2: a late burst
     sitting +12 ms off -> 12.0 (reset, and the late-burst frame counts)."""
     stereo, sr = _fixture("base-R-rec")
     blocks = _blocks(stereo[: 10 * sr], sr,
-                     jumps={at_s(1, sr): -150_000, at_s(2, sr): 500_000, at_s(8, sr): 120_000})
+                     jumps={at_s(1, sr): -150_000, at_s(2, sr): 3_000_000, at_s(8, sr): 120_000})
     gap = pas.LOG_SUMMARY_S + 1.0
     _payloads, lines = _run(blocks, tmp_path, FixedChain(), arrival_gaps={at_s(4, sr): gap, at_s(8, sr): gap})
     summary = [line for line in lines if "program-audio summary" in line]
@@ -460,5 +465,5 @@ def test_the_calibration_feeds_a_continuous_sender_timeline():
     assert all(pa.timestamp_defined(b.timestamp) for b in blocks)
     for a, b in zip(blocks, blocks[1:]):
         tol = pa.continuity_tolerance_100ns(a.samples.shape[0], a.sample_rate)
-        assert pa.frame_continues(a.timestamp, a.samples.shape[0], a.sample_rate, b.timestamp, tol) == pa.CONTINUE
+        assert pa.frame_continues(a.timestamp, a.samples.shape[0], a.sample_rate, b.timestamp, tol).kind == pa.CONTINUE
         assert abs(pa.timeline_offset_100ns(a.timestamp, a.samples.shape[0], a.sample_rate, b.timestamp)) <= 1
