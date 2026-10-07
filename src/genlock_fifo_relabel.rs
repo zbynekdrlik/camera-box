@@ -85,24 +85,22 @@ pub fn continuous(delta_ns: i64, src_ns: u64, frame_ns: u64) -> bool {
 ///
 /// Mirror of the C `genlock_fifo_relabel_delta_carries_step()`.
 pub fn delta_carries_step(delta_ns: i64, step_ns: i64, src_ns: u64, frame_ns: u64) -> bool {
-    let _ = (delta_ns, step_ns, src_ns, frame_ns);
-    false
+    let off = dev_ns(delta_ns.wrapping_sub(step_ns), src_ns);
+    off <= frame_ns && off < dev_ns(delta_ns, src_ns)
 }
 
 /// Whether a booked step is relabelled at all: `|step| >= MIN_STEP_NS`.
 ///
 /// Mirror of the C `genlock_fifo_relabel_step_relabels()`.
 pub fn step_relabels(step_ns: i64) -> bool {
-    let _ = step_ns;
-    false
+    step_ns.unsigned_abs() >= MIN_STEP_NS as u64
 }
 
 /// Whether a raw received stamp delta is remembered as a stamp jump.
 ///
 /// Mirror of the C `genlock_fifo_relabel_jump_recorded()`.
 pub fn jump_recorded(delta_ns: i64, src_ns: u64) -> bool {
-    let _ = (delta_ns, src_ns);
-    false
+    dev_ns(delta_ns, src_ns) > JUMP_RECORD_DEV_NS
 }
 
 /// Whether the sender's own step reached this source BEFORE the receiver booked its step: a
@@ -201,8 +199,27 @@ pub fn plan(
     frame_ns: u64,
     stepped_before: bool,
 ) -> Plan {
-    let _ = (prev, stamps, step_ns, src_ns, frame_ns, stepped_before);
-    Plan::default()
+    let mut pred = prev;
+    for (k, &ts) in stamps.iter().enumerate() {
+        if pred != 0 && delta_carries_step(ts.wrapping_sub(pred) as i64, step_ns, src_ns, frame_ns)
+        {
+            return Plan {
+                queue_old: k,
+                prev_old: prev != 0,
+                newest_old: false,
+            };
+        }
+        pred = ts;
+    }
+    if stepped_before {
+        Plan::default()
+    } else {
+        Plan {
+            queue_old: stamps.len(),
+            prev_old: prev != 0,
+            newest_old: true,
+        }
+    }
 }
 
 /// The arrival window a booking opens on one source.
@@ -227,7 +244,24 @@ pub struct Arrival {
 ///
 /// Mirror of the C `genlock_fifo_relabel_arrival_add()`.
 pub fn arrival_add(a: &mut Arrival, prev: u64, stamp: u64, src_ns: u64) -> i64 {
-    let _ = (a, prev, stamp, src_ns);
+    if !a.old_epoch || a.step_ns == 0 || prev == 0 {
+        return 0;
+    }
+    let relabelled = stamp.wrapping_add(a.step_ns as u64);
+    if relabelled > a.until_ns {
+        a.old_epoch = false;
+        return 0;
+    }
+    let raw = dev_ns(stamp.wrapping_sub(prev) as i64, src_ns);
+    let rel = dev_ns(relabelled.wrapping_sub(prev) as i64, src_ns);
+    if raw <= a.frame_ns && raw <= rel {
+        a.old_epoch = false;
+        return 0;
+    }
+    if rel <= a.frame_ns {
+        return a.step_ns;
+    }
+    a.old_epoch = false;
     0
 }
 
