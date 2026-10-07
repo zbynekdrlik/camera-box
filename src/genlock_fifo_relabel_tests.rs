@@ -539,6 +539,12 @@ fn a_source_that_was_not_releasing_at_the_step_takes_the_booking_without_relabel
             "a source silent just over the bound",
             mono_now - APPLY_MAX_GAP_NS - 1,
         ),
+        // a shallow source whose sender went silent across the step resumes with post-step frames
+        // only: the boundary behind the outage is invisible to the plan, so it must not relabel
+        (
+            "a shallow source silent for 300 ms across the step",
+            mono_now - 300_000_000,
+        ),
     ] {
         let mut st = RelabelState {
             last_release_mono_ns: last_release,
@@ -574,6 +580,28 @@ fn a_source_that_was_not_releasing_at_the_step_takes_the_booking_without_relabel
             "{name}"
         );
     }
+    // just after boot (the monotonic clock under the bound) a never-released source is still new
+    let mut st = RelabelState::default();
+    let mut queue = frames(W0 - 4 * I30, 3, I30);
+    let (mut boundary, mut rx_last) = (queue[0], queue[2]);
+    let early = Booking {
+        mono_ns: 100_000_000,
+        ..b
+    };
+    assert_eq!(
+        st.apply(
+            &early,
+            &mut queue,
+            &mut boundary,
+            &mut rx_last,
+            I30,
+            I30,
+            3_000_000,
+            add(W0, S),
+            100_001_000,
+        ),
+        None
+    );
     // exactly at the bound the source still counts as releasing
     let mut st = RelabelState {
         last_release_mono_ns: mono_now - APPLY_MAX_GAP_NS,

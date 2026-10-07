@@ -15,6 +15,7 @@
 use camera_box::genlock_fifo_relabel::{
     arrival_add, continuous, delta_carries_step, dev_ns, jump_recorded, plan,
     sender_stepped_before, step_relabels, window_ns, Arrival, Booking, RelabelState,
+    APPLY_MAX_GAP_NS,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -323,6 +324,8 @@ struct Scenario {
     pre_arrivals: Vec<(u64, u64)>,
     /// The source's previous release (an apply of the empty booking), `None` = never released.
     prev_release: Option<u64>,
+    /// The monotonic instant of the release that applies the booking.
+    apply_mono: u64,
     reads: Vec<(u64, u64, u64)>,
     interval: u64,
     src: u64,
@@ -361,6 +364,7 @@ fn scenarios() -> Vec<Scenario> {
             rx_last: last,
             pre_arrivals: Vec::new(),
             prev_release: Some(RELEASE),
+            apply_mono: APPLY_MONO,
             reads: reads_for(step),
             interval: I30,
             src: I30,
@@ -378,6 +382,7 @@ fn scenarios() -> Vec<Scenario> {
             rx_last: old,
             pre_arrivals: vec![(first_new, MONO0 + I30 - 30_000_000)],
             prev_release: Some(RELEASE),
+            apply_mono: APPLY_MONO,
             reads: reads_for(step),
             interval: I30,
             src: I30,
@@ -394,6 +399,7 @@ fn scenarios() -> Vec<Scenario> {
             rx_last: cam_last,
             pre_arrivals: Vec::new(),
             prev_release: Some(RELEASE),
+            apply_mono: APPLY_MONO,
             reads: reads_for(step),
             interval: I30,
             src: 0,
@@ -408,11 +414,11 @@ fn scenarios() -> Vec<Scenario> {
         });
     }
     // a source that was not releasing at the step: never released, silent for an hour, and one
-    // exactly at the 1 s bound (still releasing); a stale boundary from before the silence
+    // exactly at the bound (still releasing); a stale boundary from before the silence
     for prev_release in [
         None,
         Some(APPLY_MONO - 3_600_000_000_000),
-        Some(APPLY_MONO - 1_000_000_000),
+        Some(APPLY_MONO - APPLY_MAX_GAP_NS),
     ] {
         let fresh: Vec<u64> = (1..=3u64).map(|k| W0 - 4 * I30 + k * I30).collect();
         out.push(Scenario {
@@ -421,6 +427,7 @@ fn scenarios() -> Vec<Scenario> {
             boundary: W0 - 3_600_000_000_000,
             pre_arrivals: Vec::new(),
             prev_release,
+            apply_mono: APPLY_MONO,
             reads: reads_for(S),
             interval: I30,
             src: I30,
@@ -429,6 +436,25 @@ fn scenarios() -> Vec<Scenario> {
             arrivals: vec![(W0, MONO0 + I30 + 9)],
         });
     }
+    // a never-released source on a box 0.1 s after boot: the monotonic clock is still under the
+    // bound, so only the "never released" check keeps it from counting as releasing
+    out.push(Scenario {
+        queue: vec![W0 - 2 * I30, W0 - I30],
+        boundary: W0 - 3 * I30,
+        rx_last: W0 - I30,
+        pre_arrivals: Vec::new(),
+        prev_release: None,
+        apply_mono: 100_002_000,
+        reads: vec![
+            (100_000_000 - I30, W0 - I30, 100_001_000 - I30),
+            (100_000_000, W0 + S as u64, 100_001_000),
+        ],
+        interval: I30,
+        src: I30,
+        reserve: 3_000_000,
+        wall_now: W0 + S as u64,
+        arrivals: vec![(W0, 100_003_000)],
+    });
     // no booking at all, and an unknown interval
     out.push(Scenario {
         queue: vec![W0, W0 + I30],
@@ -436,6 +462,7 @@ fn scenarios() -> Vec<Scenario> {
         rx_last: W0 + I30,
         pre_arrivals: Vec::new(),
         prev_release: Some(RELEASE),
+        apply_mono: APPLY_MONO,
         reads: vec![
             (MONO0, W0, MONO0 + 100),
             (MONO0 + I30, W0 + I30, MONO0 + I30 + 100),
@@ -452,6 +479,7 @@ fn scenarios() -> Vec<Scenario> {
         rx_last: W0 + I30,
         pre_arrivals: Vec::new(),
         prev_release: Some(RELEASE),
+        apply_mono: APPLY_MONO,
         reads: reads_for(S),
         interval: 0,
         src: I30,
@@ -587,7 +615,7 @@ fn rust_trace() -> Vec<String> {
             sc.src,
             sc.reserve,
             sc.wall_now,
-            APPLY_MONO,
+            sc.apply_mono,
         );
         let plan_s = p.map_or("none".to_string(), |p| {
             format!("{} {} {}", p.queue_old, b(p.prev_old), b(p.newest_old))
@@ -608,7 +636,7 @@ fn rust_trace() -> Vec<String> {
             sc.src,
             sc.reserve,
             sc.wall_now,
-            APPLY_MONO,
+            sc.apply_mono,
         );
         out.push(format!("again {n} {}", b(again.is_some())));
         for &(stamp, mono) in &sc.arrivals {
@@ -758,7 +786,7 @@ fn c_harness() -> String {
         body.push_str(&format!(
             "\t\tapply_line({n}, &st, &bk, q, qn, &boundary, &rx_last, {}ULL, {}ULL, {}ULL, {}ULL, \
              {}ULL);\n",
-            sc.interval, sc.src, sc.reserve, sc.wall_now, APPLY_MONO
+            sc.interval, sc.src, sc.reserve, sc.wall_now, sc.apply_mono
         ));
         for &(stamp, mono) in &sc.arrivals {
             body.push_str(&format!(
@@ -945,6 +973,8 @@ fn c_fifo_relabel_matches_the_rust_authority_1372() {
             && has("apply 0 31 1 1")
             // the -S sender-first scenario: the remembered jump, nothing relabelled
             && has("apply 7 0 0 0")
+            // the never-released source just after boot takes the booking without a relabel
+            && has("apply 18 none ")
             && r.iter().any(|l| l.starts_with("apply ") && l.contains(" none "))
             && !r.iter().any(|l| l.starts_with("again ") && l.ends_with(" 1")),
         "issue 1372: the parity vectors no longer exercise a boundary, a relabelled arrival, the \
