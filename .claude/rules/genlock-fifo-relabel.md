@@ -91,20 +91,32 @@ no-step run; sender stepping -30 / -15 / 0 / +15 / +30 ms against the receiver:
 | deep N==1 2ME PGM (pin 1026) | 0 / 0 | 0 / 0 | 1 / 1 (`dropped_due` +1) |
 | shallow cg feed (pin 3) | 0 / 0 | 0 / 0 | 1 / 1 |
 | N>=2 60->30 camera with prompt stamps (pin 3) | 0 / 0 | 1 / 1 (2 / 2 at +30 ms) | 0..2 / 0..2 |
+| N>=2 60->30 camera, the production cambox `StampOffset` | 0 / 0 (also -1600 / +200 / -200 ms, 4 cadence phases) | — | — |
 
 The unquantized camera cost is the 0.59-frame phase move the quantum removes (the N>=2 grid release
 picks by stamp; an exact-S relabel lands 0.59 slot off the grid).
 
-## The cambox stamp lag (Design-question 6032724613, open)
+## The cambox stamp lag (Design-question 6032724613, decided: ROZHODNUTÉ 6033853074 option 1)
 
-A cambox stamps through a mono→real offset re-sampled every 100 captured frames
-(`genlock_stamp::OFFSET_RESAMPLE_INTERVAL_FRAMES`), so its stamps switch epoch up to ~1.67 s after
-its own wall stepped (924 ms in the capture-phase bench). The whole-slot re-anchor is clean
-(`a_whole_slot_date_step_re_anchors_by_whole_slots_with_no_crossing_1372`: 97 / -95 / 13 slots, 0
-off-slot intervals, 0 crossings; the unquantized step exactly 1, so the measure is not vacuous). But the receiver's one-latency window (~67 ms on a strih-lx camera
-input) closes long before: lag 400 / 800 / 1200 / 1600 ms costs 4 / 6 / 9 / 11 repeats + skips
-(today one more each); a 2 s window gives 0 at every lag. The fork (cambox re-samples its offset on
-a step vs a ~2 s receiver window) waits for the main.
+Before: a cambox stamped through a mono→real offset re-sampled only every 100 captured frames
+(`genlock_stamp::OFFSET_RESAMPLE_INTERVAL_FRAMES`), so its stamps switched epoch up to ~1.67 s after
+its own wall stepped (924 ms in the capture-phase bench). The receiver's one-latency window (~67 ms
+on a strih-lx camera input) closes long before: a lag of 400 / 800 / 1200 / 1600 ms costs
+4 / 6 / 9 / 11 repeats + skips (`cambox_stale_offset_cost_is_reported_1372`, the `Cambox::Lagged`
+model, kept as the report).
+
+Now the cambox re-samples in the frame its wall steps (`genlock_stamp::StampOffset`, wired in
+`main.rs`, `capture-phase-tracker.md`): ONE bracketed mono/wall/mono read per captured frame; a
+difference of 2 ms or more (`OFFSET_STEP_RESAMPLE_NS` = `genlock_wall_step::WALL_STEP_MIN_NS`)
+against the cached offset is adopted in that frame, smaller ones wait for the cadence, a preempted
+read never counts. The receiver keeps its one-latency window. The bench models the production
+cambox (`Cambox::Production`: the real `StampOffset` fed one read per frame at its dequeue, 11 ms
+after the capture): `a_production_cambox_follows_its_step_within_one_frame_and_costs_nothing_1372`
+reads stamp lag 0 and 0 repeats / 0 skips / 0 late holds on the strih-lx N>=2 60->30 camera input
+for +1600 / -1600 / +200 / -200 ms, sender -30..+30 ms, at cadence phases 0 / 25 / 50 / 75. On the
+pre-change cadence-only offset (the RED commit's stub) the same runs lag 0-99 frames and cost up to
+14 repeats + 14 skips. A frame captured up to one dequeue before the step but read after it gets
+the new-epoch stamp (`early` <= 1 in the bench), which costs nothing.
 
 ## Known limits (review round 1 nits, accepted)
 
@@ -146,6 +158,10 @@ a step vs a ~2 s receiver window) waits for the main.
   `genlock_fifo_relabel.rs` with the RED commit's version (`show <red-sha>:src/…`), run the one test.
 - Capture-phase bench: the `capture-phase-tracker.md` replica (its `ndi.rs` stub needs the
   `UNITS_PER_SECOND` const).
+- Since the stamp-offset lane the relabel bench also needs `genlock_stamp` (+ `genlock_wall_step`)
+  in the replica's `lib.rs`; `genlock_stamp` reaches `crate::ndi::floor_boundary_100ns`, so the
+  `ndi.rs` stub needs the `UNITS_PER_SECOND` const too. The bench module is Linux-gated with
+  `genlock_stamp`.
 
 ## Live acceptance (supervisor, FULL bundle on every genlock OBS box)
 
@@ -153,5 +169,8 @@ At the next 02:00 UTC step (quantized after the dantesync 1.16.0 roll): one
 `genlock-fifo-relabel:` booking line per box at the `genlock-regrid:` second; one per-source line per
 genlock input with `relabelled A of B` (A ≈ the queue depth, `arrivals=judged` on a receiver-first
 input); the audit `relabelled=` steps once; `late_holds` / `dropped_due` / `relocks` flat across the
-step on strih-lx and stream; the stream program recording shows 0 repeats / 0 skips at 02:00
-(camera inputs: subject to the open cambox-lag question above).
+step on strih-lx and stream; the stream program recording shows 0 repeats / 0 skips at 02:00.
+Camera inputs need the stamp-offset camera-box binary on the fleet too: each cambox journal shows
+one `#1372 stamp offset re-sampled on a wall step of +<S> ms` line at the step (S = the booked
+step), and the strih-lx `genlock-fifo audit 'NDI camN'` lines read `late_holds` / `stamp_gap` /
+`relocks` flat across it.

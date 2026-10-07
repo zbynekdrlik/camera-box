@@ -83,11 +83,17 @@ Stamps **MUST** be taken from the realtime clock (`CLOCK_REALTIME` on Linux;
 monotonic→realtime offset that is re-sampled at least every ~100 emitted frames, so a realtime
 clock step/slew (an NTP/PTP correction) cannot skew a stamp or a sleep.
 
+A sender that stamps through such an offset **SHOULD** re-sample it in the frame the wall clock
+steps (a jump of 2 ms or more against the cached offset), so its stamps change epoch within one
+frame like a sender that floors the wall at emit; a re-sample only every ~100 frames leaves them in
+the old epoch for up to ~1.7 s at 60 fps, longer than a shallow receiver's relabel window (§5).
+
 *Reference implementation (camera-box):* `wall_clock_ns` = `CLOCK_REALTIME`
-(`src/main.rs:40`); `monotonic_clock_ns` = `CLOCK_MONOTONIC` (`:57`);
-`sample_mono_to_real_offset_100ns` (`:74`) re-sampled every
-`OFFSET_RESAMPLE_INTERVAL_FRAMES = 100` frames (`src/genlock_stamp.rs:87`, gated by
-`should_resample_mono_to_real_offset`, `:94`).
+(`src/main.rs:40`); `monotonic_clock_ns` = `CLOCK_MONOTONIC` (`:57`); ONE bracketed
+mono/wall/mono read per captured frame, `read_mono_wall_mono_ns` (`:76`), fed to
+`genlock_stamp::StampOffset`, which re-samples every `OFFSET_RESAMPLE_INTERVAL_FRAMES = 100` frames
+and in the frame the wall steps by `OFFSET_STEP_RESAMPLE_NS` (2 ms) or more (the pure decision
+`offset_resample_decision`; a preempted read, a bracket over 100 µs, never counts; issue 1372).
 
 ### 2. Sender create
 

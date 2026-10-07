@@ -35,6 +35,11 @@ The load-bearing invariants the contract pins to this code (keep them honest):
   from the smoothed capture phase, up to 500 us after the smoothed capture instant and still before
   the emit instant, and the gate decides on that same slot (contract §4 + §5 say so). Seeding and
   over-rate cameras keep the raw capture stamp + poll-time gate.
+- **A wall-clock STEP reaches a camera's stamps within one frame** (issue 1372, ROZHODNUTÉ
+  6033853074): the capture loop maps every capture through `genlock_stamp::StampOffset`, fed one
+  bracketed mono/wall/mono read per captured frame; a move of 2 ms or more is adopted in that frame,
+  so camera-box stamps the stepped wall like an OBS sender that floors the wall at emit (contract
+  §1). The old 100-frame-only re-sample left the stamps up to 1.67 s in the old epoch.
 - **Sender create `clock_video=false, clock_audio=false`** (`src/ndi.rs`) — the app owns cadence,
   never the NDI SDK's free-running clock.
 - **Pacing on the SAME per-second grid as the stamps** (#1355 step 3 — before it the emit gate
