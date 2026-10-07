@@ -392,6 +392,22 @@ def _first_foreign(payloads):
     return next((i for i, p in enumerate(payloads) if p["last_foreign_ts_utc"] is not None), None)
 
 
+def _holed_chord_fails_closed(holed, ref):
+    """ROZHODNUTÉ issue 1404 comment 6037765523: an in-band chord's FOREIGN comes from a short marker
+    chain only, and a short chain over a span that holds bridged audio reads UNKNOWN, never FOREIGN
+    on its own. So against the same audio without the holes every window reads the same or UNKNOWN,
+    never MEASUREMENT where the reference does not, and the FOREIGN still comes -- at the latest two
+    windows later, once the 4 s span no longer holds the bridged audio. Every consumer fails closed
+    on UNKNOWN (the accepted trade-off)."""
+    hv, rv = _verdicts(holed), _verdicts(ref)
+    assert len(hv) == len(rv), (hv, rv)
+    for h, r in zip(hv, rv):
+        assert h == r or h == "UNKNOWN", (hv, rv)
+    assert "FOREIGN" in hv, hv
+    assert _first_foreign(holed) is not None and _first_foreign(ref) is not None
+    assert _first_foreign(holed) <= _first_foreign(ref) + 2, (hv, rv)
+
+
 ONSET_S = 6.5
 
 
@@ -407,17 +423,22 @@ ONSET_S = 6.5
 def test_music_around_a_bridged_hole_reads_foreign_in_the_same_window(decoder, rec_clip, tmp_path,
                                                                       kind, hole_at, frames):
     """Measurement, then broadband music (pink, spectrally FOREIGN) or an in-band chord (FOREIGN only
-    through the marker chain). With a bridged hole anywhere around the music's arrival, every window
-    reads what it reads without the hole, so FOREIGN comes in the same window and the latch starts
-    with the same payload."""
-    audio = np.concatenate([rec_clip[: int(ONSET_S * SR)], _music(kind, 12.0 - ONSET_S)])
+    through the marker chain). Pink: with a bridged hole anywhere around the music's arrival, every
+    window reads what it reads without the hole, so FOREIGN comes in the same window and the latch
+    starts with the same payload. Chord: a window whose span holds the hole reads UNKNOWN instead of
+    FOREIGN (ROZHODNUTÉ 6037765523, _holed_chord_fails_closed), never MEASUREMENT."""
+    # 16 s: room for the chord's FOREIGN once the 4 s span no longer holds a hole at ONSET_S + 1.6
+    audio = np.concatenate([rec_clip[: int(ONSET_S * SR)], _music(kind, 16.0 - ONSET_S)])
     ref, _ = _run(_frames(audio)[0], tmp_path, decoder)
     assert "FOREIGN" in _verdicts(ref)
     k = _frame_at(hole_at)
     holed, lines = _run(_frames(audio, drop=set(range(k, k + frames)))[0], tmp_path, decoder)
     assert sum("bridged with" in line for line in lines) == 1, lines
-    assert _verdicts(holed) == _verdicts(ref), (kind, hole_at, lines)
-    assert _first_foreign(holed) == _first_foreign(ref) is not None
+    if kind == "pink":
+        assert _verdicts(holed) == _verdicts(ref), (kind, hole_at, lines)
+        assert _first_foreign(holed) == _first_foreign(ref) is not None
+    else:
+        _holed_chord_fails_closed(holed, ref)
 
 
 def _mostly_zeros_frames(audio, start_s, seconds):
@@ -469,7 +490,12 @@ def test_music_mostly_of_bridged_zeros_never_reads_measurement(decoder, tmp_path
     assert sum("bridged with" in line for line in lines) >= 30, lines
     verdicts = _verdicts(holed)
     assert "MEASUREMENT" not in verdicts, verdicts
-    assert verdicts[2:] == ["FOREIGN"] * (len(verdicts) - 2), verdicts
+    if kind == "pink":
+        assert verdicts[2:] == ["FOREIGN"] * (len(verdicts) - 2), verdicts
+    else:
+        # every span holds bridged zeros: the chord's short chain reads UNKNOWN (ROZHODNUTÉ
+        # 6037765523), never FOREIGN on its own and never MEASUREMENT
+        assert set(verdicts[2:]) <= {"FOREIGN", "UNKNOWN"}, verdicts
     assert spy.calls and max(spy.calls) < FRAME, spy.calls
     chains = [p["marker_chain"] for p in holed if p["marker_chain"] is not None]
     assert all(c < pa.MARKER_CHAIN_MIN for c in chains), chains
@@ -486,8 +512,13 @@ def test_measurement_then_music_mostly_of_bridged_zeros_reads_as_without_the_hol
     spy = _ZeroWordDecoder(decoder)
     holed, lines = _run(_frames(audio, drop=_mostly_zeros_frames(audio, 6.0, 6.0))[0], tmp_path, spy)
     assert sum("bridged with" in line for line in lines) >= 15, lines
-    assert _verdicts(holed) == _verdicts(ref), (_verdicts(holed), _verdicts(ref))
-    assert _first_foreign(holed) == _first_foreign(ref) is not None
+    if kind == "pink":
+        assert _verdicts(holed) == _verdicts(ref), (_verdicts(holed), _verdicts(ref))
+        assert _first_foreign(holed) == _first_foreign(ref) is not None
+    else:
+        hv, rv = _verdicts(holed), _verdicts(ref)
+        assert all(h == r or h == "UNKNOWN" for h, r in zip(hv, rv)) and len(hv) == len(rv), (hv, rv)
+        assert "MEASUREMENT" not in hv[rv.index("FOREIGN"):], (hv, rv)
     assert spy.calls and max(spy.calls) < FRAME, spy.calls
 
 
