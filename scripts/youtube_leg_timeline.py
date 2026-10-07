@@ -38,13 +38,15 @@ def carries_runs(rows):
     return bool(rows) and len(rows[0]) == RUN + 1
 
 
-def join_part_rows(parts, starts):
+def join_part_rows(parts, starts, restarting=()):
     """Join recording parts (each its own tick rows) on one content timeline.
 
     starts[k] is the part's record start (content seconds) or None for k >= 1: then it is placed by
     painter tick after the previous part. Returns (rows, t0, resolved starts); part k's rows get
     pts + (start_k - t0) and frame index + k * PART_STRIDE, so no adjacency crosses a seam. A
-    run-scoped row keeps its run; such a part is placed by the previous part's last run only."""
+    run-scoped row keeps its run; such a part is placed by the last run of the previous part that is
+    not in `restarting` (the runs whose tick restarts on every play: the measurement clip), and by
+    that run's first row in this part: the painter counts on across the seam, the clip does not."""
     if not parts:
         raise ValueError("no recording parts")
     if starts[0] is None:
@@ -55,7 +57,8 @@ def join_part_rows(parts, starts):
             prev = [r for r in parts[k - 1] if r[2] is not None]
             cur = [r for r in part if r[2] is not None]
             if prev and carries_runs(prev):  # another run's ticks say nothing about this run's time
-                cur = [r for r in cur if r[RUN] == prev[-1][RUN]]
+                prev = [r for r in prev if r[RUN] not in restarting]
+                cur = [r for r in cur if prev and r[RUN] == prev[-1][RUN]]
             if not prev or not cur:
                 raise ValueError(f"recording part {k + 1}: no decoded tick to place it by")
             dt = (cur[0][2] - prev[-1][2]) / PAINTER_HZ
@@ -260,6 +263,16 @@ class RunTimeline:
         if not ks:
             return []
         return [r for k, r in enumerate(self.vod3[ks[0]:ks[-1] + 1], ks[0]) if r[2] is None or self.vod_seg[k] == j]
+
+    def foreign_rows_of(self, j):
+        """The decoded VOD rows inside the VOD stretch showing segment j that do NOT show j (another
+        run, another stretch of the same run, or no recording frame at all): frames the VOD put into
+        j's content that are not j's. dupskip counts each one inside a window as a dup frame."""
+        ks = [k for k, s in enumerate(self.vod_seg) if s == j]
+        if not ks:
+            return []
+        return [r for k, r in enumerate(self.vod[ks[0]:ks[-1] + 1], ks[0])
+                if r[2] is not None and self.vod_seg[k] != j]
 
     def content_times(self):
         """[(content time, vod row)] for every decoded VOD row mapped to a segment."""
@@ -504,7 +517,8 @@ def dupskip(rec_rows, vod_rows, t0, a, b):
         j, why = tl.window_segment(a, b)
         if j is None:
             return {"error": why, "dup": None, "skip": None, "run": None}
-        return dict(_dupskip(tl.rec_rows_of(j), tl.vod_rows_of(j), t0, a, b), run=tl.segs[j].run)
+        out = _dupskip(tl.rec_rows_of(j), tl.vod_rows_of(j), t0, a, b, foreign=tl.foreign_rows_of(j))
+        return dict(out, run=tl.segs[j].run)
     return _dupskip(rec_rows, vod_rows, t0, a, b)
 
 
@@ -519,8 +533,14 @@ def _window_check(rec_rows, t0, a, b):
     return None
 
 
-def _dupskip(rec_rows, vod_rows, t0, a, b):
-    """dupskip on one tick line; the caller checked the window is inside the recording."""
+def _dupskip(rec_rows, vod_rows, t0, a, b, foreign=None):
+    """dupskip on one tick line; the caller checked the window is inside the recording.
+
+    `foreign` (run-scoped rows only): the decoded VOD rows inside the VOD stretch of this window's
+    segment that show something else (RunTimeline.foreign_rows_of). Each one between the window's
+    first and last VOD frame is a dup frame: the VOD showed content that is not this window's. It
+    also enters the frame-count balance, so a foreign frame that REPLACED a window frame reads one
+    dup + one (hidden) skip, an inserted one one dup. The result then reports `foreign_frames`."""
     rec_last = t0 + rec_rows[-1][1] + FRAME_S
     span = _clamp_window(rec_rows, vod_rows, t0, a, b)
     if span is None or span[1] <= span[0]:
@@ -547,6 +567,14 @@ def _dupskip(rec_rows, vod_rows, t0, a, b):
             vpos[v[2]].append(k)
     vdec = [v for v in vod_rows if v[2] is not None]
     events, unjudged = _adjacent_events(rec_rows, {r[2] for r in rw}, pos, vdec, lo, hi)
+    alien = []
+    if foreign is not None:
+        vis = [vod_rows[k][0] for ks in vpos.values() for k in ks]
+        if vis:
+            lo_i, hi_i = min(vis), max(vis)
+            alien = [{"kind": "dup", "vod_i": r[0], "vod_pts": round(r[1], 3), "foreign_tick": r[2],
+                      "foreign_run": r[RUN], "frames": 1} for r in foreign if lo_i < r[0] < hi_i]
+        events = alien + events
     rec_anchor = {t: i for t, i in _single_anchors(rec_rows, pos).items() if lo <= t <= hi}
     hidden, segments, ends = _segment_balance(rec_anchor, _single_anchors(vod_rows, vpos), events)
     if not segments:
@@ -557,16 +585,19 @@ def _dupskip(rec_rows, vod_rows, t0, a, b):
     if cl_end is not None:
         early = round(max(0.0, min(b, rec_dec_last) - cl_end), 3)
     allev = events + hidden
-    return {"dup": sum(e["frames"] for e in allev if e["kind"] == "dup"),
-            "skip": sum(e["frames"] for e in allev if e["kind"] == "skip"),
-            "hidden": sum(e["frames"] for e in hidden), "unjudged": unjudged, "segments": segments,
-            "unanchored_s": round(max(0.0, first_t - a2) + max(0.0, b2 - FRAME_S - last_t), 3),
-            "vod_blind_s": _blind_runs(rec_rows, pos, vdec, lo, hi),
-            "rec_frames": len(rw), "vod_frames": sum(1 for v in vdec if lo <= v[2] <= hi),
-            "start_utc": a2, "end_utc": b2, "coverage_end_utc": min(b, rec_last),
-            "clamped_start_utc": cl_start, "clamped_end_utc": cl_end, "vod_ends_early_s": early,
-            "dups": [e for e in allev if e["kind"] == "dup"][:DETAIL_LIMIT],
-            "skips": [e for e in allev if e["kind"] == "skip"][:DETAIL_LIMIT]}
+    out = {"dup": sum(e["frames"] for e in allev if e["kind"] == "dup"),
+           "skip": sum(e["frames"] for e in allev if e["kind"] == "skip"),
+           "hidden": sum(e["frames"] for e in hidden), "unjudged": unjudged, "segments": segments,
+           "unanchored_s": round(max(0.0, first_t - a2) + max(0.0, b2 - FRAME_S - last_t), 3),
+           "vod_blind_s": _blind_runs(rec_rows, pos, vdec, lo, hi),
+           "rec_frames": len(rw), "vod_frames": sum(1 for v in vdec if lo <= v[2] <= hi),
+           "start_utc": a2, "end_utc": b2, "coverage_end_utc": min(b, rec_last),
+           "clamped_start_utc": cl_start, "clamped_end_utc": cl_end, "vod_ends_early_s": early,
+           "dups": [e for e in allev if e["kind"] == "dup"][:DETAIL_LIMIT],
+           "skips": [e for e in allev if e["kind"] == "skip"][:DETAIL_LIMIT]}
+    if foreign is not None:
+        out["foreign_frames"] = len(alien)
+    return out
 
 
 def coverage(rec_rows, vod_rows, t0, a, b):

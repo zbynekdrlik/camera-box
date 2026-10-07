@@ -236,6 +236,7 @@ def test_one_run_reads_a_real_session_exactly_like_the_legacy_timeline(sess):
     for name, a, b in windows:
         old, new = ylv.dupskip(rec, vod, t0, a, b), ylv.dupskip(run, vrun, t0, a, b)
         assert new.pop("run") == PAINTER
+        assert new.pop("foreign_frames") == 0  # one run: nothing foreign in its VOD stretch
         assert new == old, (sess, name)
         assert ylv.coverage(run, vrun, t0, a, b) == ylv.coverage(rec, vod, t0, a, b), (sess, name)
 

@@ -442,7 +442,7 @@ def measure(args):
     part_rows = [cached_ticks(p, os.path.join(args.out, f"ticks-rec-{k + 1}.tsv"), args.workers, runs)
                  for k, (p, _) in enumerate(recs)]
     ctx["vod_rows"] = cached_ticks(vod_file, os.path.join(args.out, "ticks-vod.tsv"), args.workers, runs)
-    ctx["rec_rows"], ctx["t0"], ctx["starts"] = join_part_rows(part_rows, [s for _, s in recs])
+    ctx["rec_rows"], ctx["t0"], ctx["starts"] = join_part_rows(part_rows, [s for _, s in recs], restarting=runs)
     ctx["vod_audio"] = load_audio(vod_file)
     windows = [measure_window(ctx, name, a, b) for name, a, b in windows_in]
     pubs = publish_gaps(ctx["rec_rows"], ctx["vod_rows"], ctx["t0"], publishes)
