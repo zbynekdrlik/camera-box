@@ -57,7 +57,7 @@ use camera_box::probe::recording_latency::{
     strih_stream_samples_from_stream, write_latency_csv, HopLatency, LatencySample, RunIds,
     BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM2, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4, BURN_RUN_ID_CAM5,
     BURN_RUN_ID_CAM6, BURN_RUN_ID_CAM7, BURN_RUN_ID_CG, BURN_RUN_ID_IMAG, BURN_RUN_ID_SONGPLAYER,
-    BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
+    BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH, MEASUREMENT_CLIP_RUN_ID,
 };
 use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_segments::{
@@ -3527,7 +3527,7 @@ fn build_and_print_verdict_with_stream_diffs(
     let strih_ids = RunIds {
         node_burn: args.burn_strih_run_id,
         cam2: cam2_pin,
-        other_burns: vec![args.burn_songplayer_run_id, args.burn_cg_run_id],
+        other_burns: cg_segment_excluded_ids(args).to_vec(), // issue 1404: + the clip
     };
     // cam→strih ABSOLUTE latency needs the strih recording (its in-frame strih-burn +
     // cam2 stamps). Skipped in cam1-only optical-readability mode.
@@ -3628,11 +3628,9 @@ fn build_and_print_verdict_with_stream_diffs(
             // #1301: the CG-chain burns can ride into the stream recording during a CG_CHAIN run —
             // exclude them alongside the forwarded strih burn so they are never read as cam2 in the
             // UNPINNED fallback (the `--cam2-run-id` pin already protects the normal path).
-            other_burns: vec![
-                args.burn_strih_run_id,
-                args.burn_songplayer_run_id,
-                args.burn_cg_run_id,
-            ],
+            other_burns: std::iter::once(args.burn_strih_run_id)
+                .chain(cg_segment_excluded_ids(args))
+                .collect(),
         };
         // #111 PART A: prefer the WHOLE strih→stream hop from the STREAM recording
         // ALONE — the stream frames carry the FORWARDED strih burn + stream's own burn,
@@ -3893,21 +3891,8 @@ fn build_and_print_verdict_with_stream_diffs(
             // BURN-READABILITY defect to FIX (never silently excluded); a genuinely absent
             // frame = a REAL drop. No percentages, no jargon.
             // ===========================================================================
-            let all_burns = [
-                args.burn_cam1_run_id,
-                args.burn_cam2_run_id,
-                args.burn_cam3_run_id,
-                args.burn_cam4_run_id,
-                args.burn_cam5_run_id,
-                args.burn_cam6_run_id,
-                args.burn_cam7_run_id,
-                args.burn_strih_run_id,
-                args.burn_stream_run_id,
-                // #1301: the CG-chain burns can ride into this recording during a CG_CHAIN run —
-                // exclude them from the cam2 optical detection like every other node burn.
-                args.burn_songplayer_run_id,
-                args.burn_cg_run_id,
-            ];
+            // #1301 / issue 1404: every node burn plus the CG-segment ids (`optical_exclusion_ids`).
+            let all_burns = optical_exclusion_ids(args);
             println!();
             println!(
                 "=== #186 ZERO-LOSS VERDICT — per-node burn-id contiguity (the ONE trustworthy check) ==="
@@ -4954,21 +4939,8 @@ fn build_and_print_verdict_with_stream_diffs(
                 // In practice every recording-e2e.sh invocation always pins `--cam2-run-id`,
                 // which takes precedence over this fallback — this widening only hardens the
                 // unpinned/manual-invocation path.
-                let all_burns = [
-                    args.burn_cam1_run_id,
-                    args.burn_cam2_run_id,
-                    args.burn_cam3_run_id,
-                    args.burn_cam4_run_id,
-                    args.burn_cam5_run_id,
-                    args.burn_cam6_run_id,
-                    args.burn_cam7_run_id,
-                    args.burn_strih_run_id,
-                    args.burn_stream_run_id,
-                    // #1301: exclude the CG-chain burns from the cam2 optical anchor like every
-                    // other node burn (they can ride in during a CG_CHAIN run).
-                    args.burn_songplayer_run_id,
-                    args.burn_cg_run_id,
-                ];
+                // #1301 / issue 1404: every node burn plus the CG-segment ids.
+                let all_burns = optical_exclusion_ids(args);
                 let (seg_frames, no_anchor) = segment_frames_from_recording(
                     stream_frames,
                     &anchor_run_ids,
@@ -6818,21 +6790,8 @@ fn build_and_print_verdict_with_stream_diffs(
                 // cam6 + strih + stream) so a forwarded camera burn is never mistaken for cam2's
                 // optical QR when no anchor id was found on a frame (the continuity sweep's own
                 // `all_burns` above never needed all of them, since it never reads every payload).
-                let latency_all_burns = [
-                    args.burn_cam1_run_id,
-                    args.burn_cam2_run_id,
-                    args.burn_cam3_run_id,
-                    args.burn_cam4_run_id,
-                    args.burn_cam5_run_id,
-                    args.burn_cam6_run_id,
-                    args.burn_cam7_run_id,
-                    args.burn_strih_run_id,
-                    args.burn_stream_run_id,
-                    // #1301: exclude the CG-chain burns from the cam2 optical anchor like every
-                    // other node burn (they can ride in during a CG_CHAIN run).
-                    args.burn_songplayer_run_id,
-                    args.burn_cg_run_id,
-                ];
+                // #1301 / issue 1404: every node burn plus the CG-segment ids.
+                let latency_all_burns = optical_exclusion_ids(args);
                 let (latency_windows, latency_no_anchor) = partition_frames_by_window(
                     stream_frames,
                     &anchor_run_ids,
@@ -7791,6 +7750,38 @@ fn camera_under_test_burn_ids(args: &Args) -> Vec<u32> {
         .collect()
 }
 
+/// #1301 / issue 1404 — the ids a CG segment carries into a strih/stream recording: the SongPlayer
+/// origin burn, the cg OBS hop burn and the measurement clip's painted dual-QR. None of them is ever
+/// cam2's optical QR. The ONE list every cam2-optical exclusion site uses (the three
+/// [`optical_exclusion_ids`] lists, the #638 extract list, the strih/stream `RunIds::other_burns`),
+/// so a new CG id is added here once, never at each site.
+fn cg_segment_excluded_ids(args: &Args) -> [u32; 3] {
+    [
+        args.burn_songplayer_run_id,
+        args.burn_cg_run_id,
+        MEASUREMENT_CLIP_RUN_ID,
+    ]
+}
+
+/// Every reserved id that is never cam2's optical QR in a strih/stream recording: the seven camera
+/// burns, strih, stream, then [`cg_segment_excluded_ids`]. The #186 contiguity, the segment sweep
+/// and the per-camera latency lists all use this one builder.
+fn optical_exclusion_ids(args: &Args) -> Vec<u32> {
+    let mut ids = vec![
+        args.burn_cam1_run_id,
+        args.burn_cam2_run_id,
+        args.burn_cam3_run_id,
+        args.burn_cam4_run_id,
+        args.burn_cam5_run_id,
+        args.burn_cam6_run_id,
+        args.burn_cam7_run_id,
+        args.burn_strih_run_id,
+        args.burn_stream_run_id,
+    ];
+    ids.extend(cg_segment_excluded_ids(args));
+    ids
+}
+
 /// #208 + #186: the sibling directory (BESIDE the partial JSON) where `--extract-partial` writes
 /// this box's pixel-proof PNGs and `--merge-partials` looks for the pulled-back copies. For a
 /// partial `…/strih-partial-42.json` it is `…/strih-partial-42-pixels`. Deriving it the SAME way
@@ -7837,8 +7828,8 @@ fn extract_partial_flagged_frames(
     all_burns.push(args.burn_stream_run_id);
     // #1301: the CG-chain burns (SongPlayer origin + cg OBS hop) can ride into this recording
     // during a CG_CHAIN run — exclude them from the cam2 optical detection like every other burn.
-    all_burns.push(args.burn_songplayer_run_id);
-    all_burns.push(args.burn_cg_run_id);
+    // issue 1404: the measurement clip's painted QR (a CG segment) is never cam2's optical QR.
+    all_burns.extend(cg_segment_excluded_ids(args));
     // UNDECODABLE frames (no readable QR at all) — the exact set `report_recording_diag` extracts.
     let ticks = FrameTick::from_recording_frames(frames);
     let cfg = VerdictConfig {
@@ -8660,6 +8651,39 @@ mod tests {
         // #706
         scope_camera_window_to_own_schedule,
     };
+
+    /// issue 1404: every cam2-optical exclusion list carries the three CG-segment ids, the
+    /// measurement clip among them, and the optical list is the node burns plus exactly those.
+    #[test]
+    fn every_optical_exclusion_list_carries_the_cg_segment_ids_1404() {
+        use clap::Parser;
+
+        let args = super::Args::parse_from(["recording-verdict"]);
+        let cg = super::cg_segment_excluded_ids(&args);
+        assert_eq!(
+            cg,
+            [
+                super::BURN_RUN_ID_SONGPLAYER,
+                super::BURN_RUN_ID_CG,
+                super::MEASUREMENT_CLIP_RUN_ID
+            ]
+        );
+        assert_eq!(super::MEASUREMENT_CLIP_RUN_ID, 911_016);
+        let optical = super::optical_exclusion_ids(&args);
+        assert_eq!(optical.len(), 12);
+        assert_eq!(&optical[9..], &cg[..]);
+        for id in [
+            args.burn_cam1_run_id,
+            args.burn_cam7_run_id,
+            args.burn_strih_run_id,
+            args.burn_stream_run_id,
+        ] {
+            assert!(
+                optical.contains(&id),
+                "{id} missing from the optical exclusion list"
+            );
+        }
+    }
 
     /// #312 — locks the key design split: `CAMERA_UNDER_TEST_NODES` (digital contiguity) is
     /// broader than `OPTICAL_INJECTION_NODES` (cam2→camera optical-injection latency) by EXACTLY

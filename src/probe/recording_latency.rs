@@ -163,6 +163,20 @@ pub const BURN_RUN_ID_CG: u32 = 911015;
 /// which extracts them BY this run_id explicitly. Reserved fresh, outside every id already in
 /// use (911001..911004/911007..911012; 911005/911006/911099 are test-fixture-only synthetics).
 pub const AUX_TICK_RUN_ID: u32 = 911013;
+/// issue 1404 — the camera-box MEASUREMENT CLIP's run_id (`scripts/gen_measurement_clip.py`). Not a
+/// digital burn: PAINTED content, like [`AUX_TICK_RUN_ID`]. The clip is a synthesized 30 fps
+/// recording of the cam2 painter (the dual-QR Vernier of the 60 Hz tick, the QPSK marker) that
+/// SongPlayer and the cg OBS play in the CG segments of the release E2E instead of music. A chain
+/// ORIGIN like [`BURN_RUN_ID_SONGPLAYER`], never a camera-under-test node (never in
+/// `CAMERA_UNDER_TEST_NODES`). Tick-excluded ([`crate::probe::recording::NODE_BURN_RUN_IDS`]) and
+/// excluded from every `all_burns` array: its `frame_id` is the clip's own tick, unrelated to the
+/// cam2 Vernier tick, and a CG segment rides into the strih/stream recordings. No overlay slot
+/// (`crate::burn_regions::slot_for_run_id` = `None`), so the echo gate never drops it. The
+/// YouTube-leg tick decoder (`scripts/youtube_leg_ticks.py`) reads it as a tick only when asked
+/// (`runs=CLIP_RUNS`), and the stream av-sync dock records it like any camera-box QR (an open
+/// Task 5 part b decision). Reserved fresh, outside every id already in use
+/// (911001..911004/911007..911015).
+pub const MEASUREMENT_CLIP_RUN_ID: u32 = 911016;
 
 /// Per-hop latency over the analyzed window, with the #108 stability dimensions
 /// (jitter + drift) on top of the reused [`LatencyStats`] percentiles.

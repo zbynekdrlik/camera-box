@@ -35,6 +35,12 @@ source) and flows `SongPlayer → cg OBS (RESOLUME-SNV) → strih → stream`.
   composites it at `burn_geom::Corner::BottomCenterRight` (the mirror of imag's BottomCenterLeft
   from the right; resolved from the `resolume` hostname in `ndi-burn-filter.cpp`'s host-role map).
 
+**911016 = the measurement clip (issue 1404), a third CG-segment ORIGIN.** SongPlayer and the cg OBS
+play `measurement-clip-v1.mp4` (`scripts/gen_measurement_clip.py`), which paints the painter's
+dual-QR under `MEASUREMENT_CLIP_RUN_ID`. Registered exactly like 911014 below: tick-excluded, in
+every exclusion array and python mirror, no slot, never `CAMERA_UNDER_TEST_NODES`. Details:
+`.claude/rules/measurement-clip.md`.
+
 Both ids ARE tick-excluded (`src/probe/recording.rs::NODE_BURN_RUN_IDS`) + in the python mirrors
 (`qr_align_pins.py`, `mv_skew_snapshot.py`) + in EVERY `all_burns`/`latency_all_burns` exclusion
 array + the `#638` push site in `recording-verdict.rs` — because a CG burn can ride into a

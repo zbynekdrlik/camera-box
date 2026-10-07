@@ -38,6 +38,14 @@ from youtube_leg_proc import run_bounded  # noqa: E402
 
 PAINTER_QR = re.compile(r"^P(\d+)\.(\d+)\.(-?\d+)\.(\d+)$")
 NODE_BURN_RUN = re.compile(r"^9110\d\d$")  # reserved node/origin burn ids 911001..911099, never the painter
+# The camera-box measurement clip (scripts/gen_measurement_clip.py) paints the painter's dual-QR
+# Vernier under this reserved id: the CG segments' tick. It is read as a tick ONLY when the caller asks
+# for it (`runs=CLIP_RUNS`): the clip restarts its tick on every play, and the timeline keys a whole
+# session on one tick line, so a clip tick in a default decode would turn every camera window next to
+# a CG segment into replay dups (issue 1404 review). A decode that passes `runs` must key its tick
+# cache on them. The Rust recording decode never reads it as the cam2 Vernier tick (NODE_BURN_RUN_IDS).
+MEASUREMENT_CLIP_RUN_ID = 911016
+CLIP_RUNS = (MEASUREMENT_CLIP_RUN_ID,)
 QR_TOP_FRACTION = 0.62  # the painter's two big QRs sit in the top 62 % of the frame
 DECODE_SCALE = 0.5
 PHASE_RADIUS = 60  # frames: the local capture phase comes from both-halves frames this near
@@ -50,24 +58,27 @@ DECODE_S_PER_FRAME = 1.0
 DECODE_TIMEOUT_FLOOR_S = 600
 
 
-def painter_payload(text):
-    """(run, tick) of a valid painter payload (CRC-checked like Payload::decode), else None."""
+def painter_payload(text, runs=()):
+    """(run, tick) of a valid painter payload (CRC-checked like Payload::decode), else None. A reserved
+    9110xx id is refused unless the caller lists it in `runs` (the measurement clip: CLIP_RUNS)."""
     m = PAINTER_QR.match(text or "")
     if not m:
         return None
     run, tick, gen, crc = (int(g) for g in m.groups())
-    if zlib.crc32(f"{run}.{tick}.{gen}".encode()) != crc or NODE_BURN_RUN.match(str(run)):
+    if zlib.crc32(f"{run}.{tick}.{gen}".encode()) != crc:
+        return None
+    if NODE_BURN_RUN.match(str(run)) and run not in runs:
         return None
     return run, tick
 
 
-def painter_tick(texts):
+def painter_tick(texts, runs=()):
     """The painter tick among decoded QR texts (the lowest valid painter payload), or None."""
-    ticks = [p[1] for p in map(painter_payload, texts or ()) if p is not None]
+    ticks = [p[1] for p in (painter_payload(t, runs) for t in texts or ()) if p is not None]
     return min(ticks) if ticks else None
 
 
-def _qr_tick(det, plane, scale):
+def _qr_tick(det, plane, scale, runs=()):
     import cv2
 
     if scale != 1.0:
@@ -77,28 +88,28 @@ def _qr_tick(det, plane, scale):
     except cv2.error as e:  # one unreadable half is an undecodable half, never a crash
         print(f"youtube_leg_ticks: QR detector error on a frame half: {e}", file=sys.stderr)
         return None
-    return painter_tick(texts) if ok else None
+    return painter_tick(texts, runs) if ok else None
 
 
-def _half_tick(det, img, scale):
+def _half_tick(det, img, scale, runs=()):
     """Painter tick of one QR half: gray first, then the blue channel (the mid-transition colour)."""
     import cv2
 
-    tick = _qr_tick(det, cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), scale)
+    tick = _qr_tick(det, cv2.cvtColor(img, cv2.COLOR_BGR2GRAY), scale, runs)
     if tick is None:
-        tick = _qr_tick(det, np.ascontiguousarray(img[:, :, 0]), scale)
+        tick = _qr_tick(det, np.ascontiguousarray(img[:, :, 0]), scale, runs)
     return tick
 
 
-def band_ticks(band, det, scale=DECODE_SCALE):
+def band_ticks(band, det, scale=DECODE_SCALE, runs=()):
     """(left tick | None, right tick | None) of the QR band (the top 62 % of a frame)."""
     w = band.shape[1]
-    return _half_tick(det, band[:, : w // 2], scale), _half_tick(det, band[:, w // 2:], scale)
+    return _half_tick(det, band[:, : w // 2], scale, runs), _half_tick(det, band[:, w // 2:], scale, runs)
 
 
-def half_ticks(frame, det, scale=DECODE_SCALE):
+def half_ticks(frame, det, scale=DECODE_SCALE, runs=()):
     """(left tick | None, right tick | None) of one BGR frame."""
-    return band_ticks(frame[0:int(frame.shape[0] * QR_TOP_FRACTION)], det, scale)
+    return band_ticks(frame[0:int(frame.shape[0] * QR_TOP_FRACTION)], det, scale, runs)
 
 
 def _pair_phase(left, right):
@@ -155,7 +166,8 @@ def _decode_range(job):
     decoded; hit_end = the file ran out before `end` (always, for end None)."""
     import cv2
 
-    path, start, end, scale = job
+    path, start, end, scale = job[:4]
+    runs = tuple(job[4]) if len(job) > 4 else ()  # the reserved ids read as a tick (decode_raw `runs`)
     cap = cv2.VideoCapture(path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, start)
     if int(cap.get(cv2.CAP_PROP_POS_FRAMES)) != start:
@@ -169,7 +181,9 @@ def _decode_range(job):
         if not ok:
             hit_end = True
             break
-        out.append((i, cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0) + half_ticks(frame, det, scale))
+        # a default decode keeps the 3-argument call (the decode-mechanics tests swap half_ticks)
+        halves = half_ticks(frame, det, scale, runs=runs) if runs else half_ticks(frame, det, scale)
+        out.append((i, cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0) + halves)
         i += 1
     if not hit_end and not cap.grab():  # the file ends exactly here (a frame count estimated too high)
         hit_end = True
@@ -267,8 +281,9 @@ def _run_jobs(path, jobs, workers, frames):
             raise RuntimeError(f"{path}: the decode did not finish in {limit:.0f} s") from None
 
 
-def decode_raw(path, workers=4, scale=DECODE_SCALE):
-    """Raw (index, pts, left, right) of EVERY frame of a video file, or RuntimeError.
+def decode_raw(path, workers=4, scale=DECODE_SCALE, runs=()):
+    """Raw (index, pts, left, right) of EVERY frame of a video file, or RuntimeError. `runs`: the
+    reserved ids also read as a tick (CLIP_RUNS for a measurement-clip file; default none).
 
     The file is cut into chunks by its frame count, the last chunk reads to the end of the file (a
     frame count is an estimate in some containers), and the chunks are merged by pts. When the
@@ -287,18 +302,20 @@ def decode_raw(path, workers=4, scale=DECODE_SCALE):
     workers = max(1, int(workers))
     chunk = max(1, (n + workers * 4 - 1) // (workers * 4))
     starts = list(range(0, n, chunk))
-    jobs = [(str(path), s, s + chunk if k + 1 < len(starts) else None, scale) for k, s in enumerate(starts)]
+    extra = (tuple(runs),) if runs else ()  # a default decode keeps the 4-field job
+    jobs = [(str(path), s, s + chunk if k + 1 < len(starts) else None, scale) + extra
+            for k, s in enumerate(starts)]
     try:
         return _check_decode(path, jobs, _run_jobs(path, jobs, workers, n))
     except ChunkedDecodeError as e:
         print(f"youtube_leg_ticks: {e}; decoding again in one pass (no seek)", file=sys.stderr)
-    one = [(str(path), 0, None, scale)]
+    one = [(str(path), 0, None, scale) + extra]
     return _check_decode(path, one, _run_jobs(path, one, workers, n))
 
 
-def decode_ticks(path, workers=4, scale=DECODE_SCALE):
-    """Per-frame (index, pts, tick | None, half, left, right) of a video file."""
-    raw = decode_raw(path, workers, scale)
+def decode_ticks(path, workers=4, scale=DECODE_SCALE, runs=()):
+    """Per-frame (index, pts, tick | None, half, left, right) of a video file (`runs`: decode_raw)."""
+    raw = decode_raw(path, workers, scale, runs)
     return [res + raw_row[2:] for res, raw_row in zip(resolve_ticks(raw), raw)]
 
 

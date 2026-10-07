@@ -115,6 +115,8 @@ RESERVED_RUN_IDS = frozenset({
     # #1301: the CG chain (SongPlayer 911014 origin / cg OBS 911015 hop) node burns -- reserved,
     # so never auto-detected as "the painter" nor used as a common skew-sample id.
     911014, 911015,
+    # issue 1404: the measurement clip's painted dual-QR (a CG segment) -- reserved, same reason.
+    911016,
 })
 
 

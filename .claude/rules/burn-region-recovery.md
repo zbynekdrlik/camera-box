@@ -165,7 +165,11 @@ exactly `qr::cam1_burn_origin(320)`.
 
 ## Verifying a decode change here at Tier-0 (no cargo)
 
-The probe path compiles at CI only, but the REAL rqrr can run locally:
+The probe path compiles at CI only, but the REAL rqrr can run locally. Shortest path (issue 1404):
+link a small std-only harness against the self-hosted runner's release build,
+`rustc --edition 2021 -O h.rs --extern rqrr=<…/target/release/deps/librqrr-*.rlib> -L <that deps dir>`
+(`~/actions-runner-camera-box/_work/camera-box/camera-box/target/release/deps`, same toolchain), and
+feed it a PIL `.y8` dump through `PreparedImage::prepare_from_greyscale`. Otherwise build it:
 1. Build `rqrr` 0.9.3 without its `img` feature, plus its chain (unicode-ident, proc-macro2 with
    `--cfg wrap_proc_macro`, quote, syn 2, g2poly, g2gen proc-macro, g2p, lru without hashbrown),
    with plain `rustc` from `~/.cargo/registry/src/*/`. It takes a few seconds.
