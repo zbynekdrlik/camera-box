@@ -13,12 +13,15 @@
 
 #include "../src/camera-box-audio.hpp"
 #include "../src/camera-box-channel-pick.hpp"
+#include "../src/camera-box-qr.hpp"
 #include "../src/camera-box-video.hpp"
 #include "cb-marker-emitter.hpp"
 
 #include <cstdio>
 #include <cmath>
+#include <cstring>
 #include <limits>
+#include <string>
 #include <vector>
 #include <cstdint>
 
@@ -641,6 +644,47 @@ int main()
 		}
 		CHECK(refines > 1000, "1381: the refine window test exercised its refines");
 		CHECK(wrong == 0, "1381: the refine window lands where the linear refine did");
+	}
+
+	/* issue 1404: the dock pairs only the cam2 painter's QRs. A decoded QR of a reserved ORIGIN run
+	 * (SongPlayer 911014, the cg OBS 911015, the measurement clip 911016) is never recorded into the
+	 * video ring; a painter / camera-node QR is. `record` mirrors cb_video_qr_record's first statement
+	 * (the predicate) and its ring write; the anchors in tests/av_sync_dock_reserved_origin_1404.rs and
+	 * both windows-genlock workflows pin that the dock's function starts with the same predicate. */
+	{
+		uint64_t ring_ts[256] = {0};
+		bool ring_valid[256] = {false};
+		auto payload = [](uint32_t run, uint32_t frame_id, long long gen) {
+			char body[96];
+			std::snprintf(body, sizeof(body), "%u.%u.%lld", run, frame_id, gen);
+			char text[128];
+			std::snprintf(text, sizeof(text), "P%s.%u", body, camera_box_crc32(body, std::strlen(body)));
+			return std::string(text);
+		};
+		auto record = [&](const std::string &text, uint64_t ts) {
+			CameraBoxQrData cb;
+			if (!decode_camera_box_qr(text.c_str(), &cb) || !camera_box_qr_is_paired_run(cb.run_id))
+				return false;
+			ring_ts[cb.frame_id & 0xFFu] = ts;
+			ring_valid[cb.frame_id & 0xFFu] = true;
+			return true;
+		};
+		CHECK(record(payload(123456789u, 120u, 2000000000LL), 1000u), "1404: a painter QR is recorded");
+		CHECK(ring_valid[120] && ring_ts[120] == 1000u, "1404: the painter QR's slot holds its time");
+		CHECK(!record(payload(911016u, 122u, 2033333333LL), 2000u), "1404: a measurement-clip QR is NOT recorded");
+		CHECK(!ring_valid[122], "1404: the clip QR left its ring slot empty");
+		CHECK(!record(payload(911016u, 120u, 2000000000LL), 3000u), "1404: a clip QR never overwrites a painter slot");
+		CHECK(ring_ts[120] == 1000u, "1404: the painter slot keeps the painter's time");
+		CHECK(!record(payload(911014u, 7u, 5LL), 4000u) && !ring_valid[7], "1404: a SongPlayer origin QR is NOT recorded");
+		CHECK(!record(payload(911015u, 8u, 5LL), 5000u) && !ring_valid[8], "1404: a cg OBS hop QR is NOT recorded");
+		/* only the three origins: the camera-node burns and every other run still pair */
+		CHECK(record(payload(911001u, 9u, 5LL), 6000u), "1404: a camera-node burn (911001) still records");
+		CHECK(record(payload(911013u, 10u, 5LL), 7000u), "1404: the aux tick id (911013) still records");
+		CHECK(record(payload(911017u, 11u, 5LL), 8000u), "1404: an id past the origins still records");
+		const uint32_t reserved[] = CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS;
+		CHECK(sizeof(reserved) / sizeof(reserved[0]) == 3 && reserved[0] == 911014u && reserved[1] == 911015u &&
+			      reserved[2] == 911016u,
+		      "1404: the reserved origin list is 911014, 911015, 911016");
 	}
 
 	if (g_failures == 0) {

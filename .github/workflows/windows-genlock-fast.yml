@@ -1017,7 +1017,7 @@ jobs:
           foreach ($need in @('if (st->cb_audio_dec) st->cb_audio_dec->reset_window();', 'cb_audio_forget_lock(st);', 'signal_stale_changed(st->context, true);', 'st->cb_audio_paused = true;')) {
             if (-not $end.Contains($need)) { Write-Error "dock output sources: st_audio_session_end no longer has '$need' (issue 1381)"; exit 1 }
           }
-          $record = Get-DockBody $output 'static void cb_video_qr_record(struct sync_test_output *st, uint32_t frame_id, uint64_t video_ts)'
+          $record = Get-DockBody $output 'static bool cb_video_qr_record(struct sync_test_output *st, uint32_t run_id, uint32_t frame_id, uint64_t video_ts)'
           if (-not $record.Contains('cb_refresh_measure_source(st, video_ts);')) {
             Write-Error "dock output sources: the QR record no longer refreshes the measurement-source check on the decode worker (issue 1381)"; exit 1
           }
@@ -1378,6 +1378,32 @@ jobs:
           $dock = (Get-Content "vendor/av-sync-dock/src/sync-test-dock.cpp" -Raw) -replace '\s+', ' '
           if ($dock -notmatch [regex]::Escape('cb_dock_latency_display_ms(dock_native_ts_ns, data.gate_convention)')) { Write-Error "on_sync_found no longer routes through cb_dock_latency_display_ms (#999) — dock display sign fix reverted"; exit 1 }
           Write-Output "#398 camera-box dual-QR dock patch present - OK"
+
+      # issue 1404 Task 5 part b: the dock pairs only the cam2 painter's QRs, never a reserved
+      # ORIGIN run of the CG path (SongPlayer 911014, the cg OBS 911015, the measurement clip 911016):
+      # cb_video_qr_record refuses one as its first statement, and both QR decodes drop a refused QR
+      # before any signal. Twin of tests/av_sync_dock_reserved_origin_1404.rs.
+      - name: Assert dock never pairs a reserved origin QR (issue 1404)
+        shell: pwsh
+        run: |
+          $hdr = (Get-Content "vendor/av-sync-dock/src/camera-box-qr.hpp" -Raw) -replace '\s+', ' '
+          if (([regex]::Matches($hdr, [regex]::Escape('#define CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS {911014u, 911015u, 911016u}'))).Count -ne 1) { Write-Error "camera-box-qr.hpp: the reserved origin list is not exactly 911014, 911015, 911016 (issue 1404)"; exit 1 }
+          if ($hdr -notmatch [regex]::Escape('static const uint32_t reserved[] = CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS;')) { Write-Error "camera-box-qr.hpp: camera_box_qr_is_paired_run no longer reads the one list (issue 1404)"; exit 1 }
+          . ./vendor/av-sync-dock/test/dock-output-source.ps1
+          $src = Get-DockOutputSource
+          $sig = 'static bool cb_video_qr_record(struct sync_test_output *st, uint32_t run_id, uint32_t frame_id, uint64_t video_ts)'
+          $record = Get-DockBody $src $sig
+          if (-not $record.StartsWith("$sig { if (!camera_box_qr_is_paired_run(run_id)) {", [StringComparison]::Ordinal)) { Write-Error "dock output sources: cb_video_qr_record no longer STARTS with the reserved-origin refusal (issue 1404)"; exit 1 }
+          $refuse = $record.IndexOf('return false;', [StringComparison]::Ordinal)
+          $ring = $record.IndexOf('st->cb_video_ts_ns[low] = video_ts;', [StringComparison]::Ordinal)
+          if ($refuse -lt 0 -or $ring -lt 0 -or $refuse -gt $ring) { Write-Error "dock output sources: the reserved-origin refusal must return before the ring write (issue 1404)"; exit 1 }
+          $guard = 'if (!cb_video_qr_record(st, cb.run_id, cb.frame_id, timestamp - st->start_ts)) continue;'
+          if (([regex]::Matches($src, [regex]::Escape($guard))).Count -ne 2) { Write-Error "dock output sources: the guarded QR record != 2 (issue 1404) -- a QR decode records without the run filter"; exit 1 }
+          foreach ($need in @("if (decode_camera_box_qr((char *)data.payload, &cb)) { $guard", "if (!decode_camera_box_qr((char *)data.payload, &cb)) continue; $guard")) {
+            if (([regex]::Matches($src, [regex]::Escape($need))).Count -ne 1) { Write-Error "dock output sources: a QR decode no longer runs the guarded record right after the decode: '$need' (issue 1404)"; exit 1 }
+          }
+          if ($src -match [regex]::Escape('cb_video_qr_record(st, cb.frame_id,')) { Write-Error "dock output sources: the OLD unfiltered QR record call is back (issue 1404)"; exit 1 }
+          Write-Output "issue 1404 dock reserved-origin filter present - OK"
 
       # #188: compile-check the A/V sync dock against the SAME installed OBS SDK (reuses the
       # OBS build above — no second full OBS build). Catches a dock C++/Qt/CMake error at the
