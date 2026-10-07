@@ -327,17 +327,22 @@ def test_a_micro_correction_inside_the_tolerance_keeps_the_span(tmp_path):
 
 
 def test_the_summary_reports_the_largest_offset_that_continued(tmp_path):
-    """The 10-minute summary carries max_offset_ms, the sender jitter's margin to the tolerance: here
-    a +15 ms micro-correction (continued), then a late burst that also triggers the summary."""
+    """The 10-minute summary carries max_offset_ms, the sender jitter's margin to the tolerance: the
+    largest |offset| of a frame that CONTINUED (late bursts included), never a discontinuity's
+    offset, reset with every summary.
+
+    Interval 1: a -15 ms micro-correction, a +50 ms step (a break), then a late burst that triggers
+    the summary -> 15.0 (the break's 50 does not count, the sign does not). Interval 2: a late burst
+    sitting +12 ms off -> 12.0 (reset, and the late-burst frame counts)."""
     stereo, sr = _fixture("base-R-rec")
-    blocks = _blocks(stereo[: 10 * sr], sr, jumps={at_s(4, sr): 150_000})
-    payloads, lines = _run(blocks, tmp_path, FixedChain(),
-                           arrival_gaps={at_s(6, sr): pas.LOG_SUMMARY_S + 1.0})
+    blocks = _blocks(stereo[: 10 * sr], sr,
+                     jumps={at_s(1, sr): -150_000, at_s(2, sr): 500_000, at_s(8, sr): 120_000})
+    gap = pas.LOG_SUMMARY_S + 1.0
+    _payloads, lines = _run(blocks, tmp_path, FixedChain(), arrival_gaps={at_s(4, sr): gap, at_s(8, sr): gap})
     summary = [line for line in lines if "program-audio summary" in line]
-    assert len(summary) == 1, lines
-    assert "max_offset_ms=15.0" in summary[0]
-    assert "timeline_breaks=0 late_bursts=1 receive_gaps=0" in summary[0]
-    assert "UNKNOWN" not in _verdicts(payloads)[2:]
+    assert len(summary) == 2, lines
+    assert "timeline_breaks=1 late_bursts=1 receive_gaps=0 max_offset_ms=15.0" in summary[0]
+    assert "timeline_breaks=0 late_bursts=1 receive_gaps=0 max_offset_ms=12.0" in summary[1]
 
 
 @pytest.mark.parametrize("undefined", [INT64_MAX, 0])
