@@ -115,7 +115,9 @@ after the capture): `a_production_cambox_follows_its_step_within_one_frame_and_c
 reads stamp lag 0 and 0 repeats / 0 skips / 0 late holds on the strih-lx N>=2 60->30 camera input
 for +1600 / -1600 / +200 / -200 ms, sender -30..+30 ms, at cadence phases 0 / 25 / 50 / 75. On the
 pre-change cadence-only offset (the RED commit's stub) the same runs lag 0-99 frames and cost up to
-14 repeats + 14 skips. A frame captured up to one dequeue before the step but read after it gets
+14 repeats + 14 skips at +1600 / +200 ms, 12 + 12 (6 late holds) at -200 ms and 96 + 96 (48 late
+holds) at -1600 ms (18 of 20 rows; the RED commit message's "up to 14 + 14" understated the
+negative steps). A frame captured up to one dequeue before the step but read after it gets
 the new-epoch stamp (`early` <= 1 in the bench), which costs nothing.
 
 ## Known limits (review round 1 nits, accepted)

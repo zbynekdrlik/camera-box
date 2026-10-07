@@ -107,7 +107,8 @@ pub fn should_resample_mono_to_real_offset(frames_since_last_sample: u64) -> boo
 /// 200 ms since dantesync 1.16.0), re-sampled in THAT frame so the stamps change epoch within one
 /// frame, like every OBS sender (DistroAV floors the wall at emit). The OBS render tick's
 /// wall-step threshold (`genlock_wall_step::WALL_STEP_MIN_NS`, obs-video.c
-/// `GENLOCK_WALL_STEP_MAX_SLEW_NS`, 2 ms), single-sourced.
+/// `GENLOCK_WALL_STEP_MAX_SLEW_NS`, 2 ms), single-sourced. Inclusive here (`>=`, the ROZHODNUTÉ);
+/// the render tick's detector compares strictly (`>`): they differ at exactly 2.000 ms only.
 pub const OFFSET_STEP_RESAMPLE_NS: i64 = crate::genlock_wall_step::WALL_STEP_MIN_NS;
 
 /// What the capture loop does with its monotonic->realtime offset in one captured frame

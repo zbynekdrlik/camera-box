@@ -714,8 +714,9 @@ fn cambox_stamp_epochs(c: &Case) -> (u64, u64) {
 /// within one frame wherever the step lands in its 100-frame cadence (stamp lag 0), and the strih-lx
 /// N>=2 60 → 30 camera input reads 0 repeats / 0 skips across the quantized +1600 ms step with the
 /// sender stepping −30..+30 ms around the receiver — and across −1600 / +200 / −200 ms as well.
-/// Measured on the pre-change cadence-only offset (the RED commit): stamp lag 0–99 frames, up to
-/// 14 repeats + 14 skips per step.
+/// Measured on the pre-change cadence-only offset (the RED commit's stub): stamp lag 0–99 frames;
+/// up to 14 repeats + 14 skips at +1600 and +200 ms, 12 + 12 (6 late holds) at −200 ms, and
+/// 96 + 96 (48 late holds) at −1600 ms in 18 of its 20 rows.
 #[test]
 fn a_production_cambox_follows_its_step_within_one_frame_and_costs_nothing_1372() {
     let mut rows = Vec::new();

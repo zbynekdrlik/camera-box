@@ -31,7 +31,7 @@ fn unique(hay: &str, needle: &str) -> usize {
 fn one_bracketed_offset_reader_for_the_seed_and_every_frame_1372() {
     let s = main_rs();
     let def = unique(&s, "fn read_mono_wall_mono_ns() -> (u64, u64, u64) {");
-    let body = &s[def..(def + 260).min(s.len())];
+    let body: String = s[def..].lines().take(6).collect::<Vec<_>>().join("\n");
     let before = body.find("let mono_before = monotonic_clock_ns();");
     let wall = body.find("let wall = wall_clock_ns();");
     let after = body.find("let mono_after = monotonic_clock_ns();");
@@ -106,6 +106,6 @@ fn one_line_per_wall_step_1372() {
         step < observe && observe < line && line - step < 400,
         "the line is logged for the WallStep decision of this frame's observe"
     );
-    let call = &s[line..(line + 120).min(s.len())];
+    let call: String = s[line..].lines().take(2).collect::<Vec<_>>().join("\n");
     assert!(call.contains("step_ns as f64 / 1e6"), "{call}");
 }

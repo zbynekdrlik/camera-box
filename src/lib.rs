@@ -480,7 +480,7 @@ mod genlock_wall_step_bench;
 // Issue 1372 part B — the genlock receive FIFO relabels its OLD-EPOCH frames by the booked wall step
 // (queued at the booking, late arrivals while the sender has not stepped, one latency window at
 // most), so the nightly dantesync fleet date step costs no frame on an input whose sender's stamps
-// follow its own step (a cambox's do within one frame: `genlock_stamp::StampOffset`). A booking
+// follow its own step (a cambox's stamps follow within one frame: `genlock_stamp::StampOffset`). A booking
 // reaches only a source that was releasing at the step. Crate-root + std-only (Tier-0); the C twin
 // `vendor/obs-studio/libobs/obs-genlock-fifo-relabel.h` is held identical by the committed parity
 // gate `tests/genlock_fifo_relabel_parity_1372.rs`.

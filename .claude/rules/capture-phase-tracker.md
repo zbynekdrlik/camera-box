@@ -98,8 +98,9 @@ ONE missing frame per crossing.
     there, as before); a preempted read (bracket over 100 µs) is never adopted, so it can never
     re-anchor (review round 4's double re-anchor on a preempted read is gone). The bench:
     `a_whole_slot_date_step_re_anchors_by_whole_slots_with_no_crossing_1372` switches the stamp
-    epoch 7 ms after the step (the first frame captured after it, was 924 ms), still 97 / -95 / 13
-    whole slots with 0 off-slot intervals; `a_preempted_clock_read_never_moves_the_stamps_1372`
+    epoch with the first frame READ after the step (captured 9 ms before it and dequeued 2 ms
+    after: the bench steps the clock at the read; was 924 ms late), still 97 / -95 / 13 whole
+    slots with 0 off-slot intervals; `a_preempted_clock_read_never_moves_the_stamps_1372`
     keeps the stamps one slot per frame across an 8 ms preempted read 2.5 ms before an edge.
 - **The gate** (`DecimationGate::note_stamp_slot` before the unchanged `poll` call) decides on the
   slot alone via the pure `dupe_decimation::stamp_slot_action`:
@@ -226,7 +227,7 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
   `genlock_wall_step` since issue 1372 (`genlock_stamp` uses its bracket and threshold). Add a
   stub `ndi.rs` holding the real `floor_boundary_100ns` (awk it out of `src/ndi.rs`) and copy the
   `lib.rs` const-assert. Then `rustc --edition 2021 --test -D warnings lib.rs` and run it, and
-  `clippy-driver --edition 2021 --test -D warnings lib.rs`. The whole replica runs 158 tests in
+  `clippy-driver --edition 2021 --test -D warnings lib.rs`. The whole replica runs 175 tests in
   ~1 s. Put the steps in a script file: the worktree guard refuses variable-driven one-liners.
 - `tests/harness_send_stagger_1242.rs` reads main.rs text only: build it with plain `rustc
   --test` and run it from the worktree root with `CARGO_MANIFEST_DIR` set (again from a script).

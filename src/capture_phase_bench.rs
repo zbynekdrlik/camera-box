@@ -84,7 +84,8 @@ struct Scenario {
     start_phase_ns: f64,
     /// The device drops the frame at this second (its sequence number is never delivered).
     drop_at_s: Option<f64>,
-    /// A CLOCK_REALTIME step (ns) at this second (a dantesync date step).
+    /// A CLOCK_REALTIME step (ns) at this second (a dantesync date step), seen by every clock
+    /// read at or after it: the capture loop's per-frame read and the poll.
     realtime_step: Option<(f64, i64)>,
     /// The capture loop's bracketed clock read is preempted for this long (ns) between its first
     /// monotonic read and the wall read on the first frame at or after this second.
@@ -167,9 +168,12 @@ fn frames(sc: &Scenario) -> Vec<Frame> {
             continue;
         }
         let truth = MONO0 as f64 + truth_rel;
+        // The wall clock as read at the dequeue (the poll instant): a frame captured just before the
+        // step but dequeued after it already reads the stepped wall, as in production.
+        let poll_s = (truth_rel + POLL_LATENCY_NS + poll_noise) / 1e9;
         let off_true = off0
             + sc.realtime_step
-                .filter(|&(at, _)| t_s >= at)
+                .filter(|&(at, _)| poll_s >= at)
                 .map_or(0, |(_, step)| step);
         let seq = if reopened {
             (k - reopen_k) as u32
@@ -540,10 +544,11 @@ fn the_tracker_gives_one_per_crossing_at_the_design_jitter_1367() {
 /// content-to-slot phase by the fraction: one repeated or one skipped slot (reported).
 ///
 /// The cambox re-samples its mono→real offset in the frame its wall steps (ROZHODNUTÉ 6033853074,
-/// `genlock_stamp::StampOffset`), so its stamps switch to the new epoch with the FIRST frame
-/// captured after the step, though the step at 60.75 s lands mid-cadence here (the 100-frame
-/// cadence alone switched them 924 ms late). The receiver-side cost is in the issue-1372 FIFO
-/// relabel bench (`crate::genlock_fifo_relabel_bench`).
+/// `genlock_stamp::StampOffset`), so its stamps switch to the new epoch with the FIRST frame READ
+/// after the step (captured at most one dequeue before it, or less than a frame after it), though
+/// the step at 60.75 s lands mid-cadence here (the 100-frame cadence alone switched them 924 ms
+/// late). The receiver-side cost is in the issue-1372 FIFO relabel bench
+/// (`crate::genlock_fifo_relabel_bench`).
 #[test]
 fn a_whole_slot_date_step_re_anchors_by_whole_slots_with_no_crossing_1372() {
     let one_slot = |delta: i64| delta == 166_666 || delta == 166_667;
@@ -596,9 +601,9 @@ fn a_whole_slot_date_step_re_anchors_by_whole_slots_with_no_crossing_1372() {
             "step {step}: the date step is never a crossing, a re-seed, a shed or a repeat"
         );
         assert!(
-            (0.0..period / 1e9).contains(&(switch_s - 60.75)),
-            "issue 1372, step {step}: the stamps must switch epoch with the first frame captured \
-             after the step, not at the next 100-frame re-sample (lag {:.0} ms)",
+            (-(POLL_LATENCY_NS + 1_000_000.0) / 1e9..period / 1e9).contains(&(switch_s - 60.75)),
+            "issue 1372, step {step}: the stamps must switch epoch with the first frame read after \
+             the step, not at the next 100-frame re-sample (lag {:.0} ms)",
             (switch_s - 60.75) * 1000.0
         );
         if step % 200_000_000 == 0 {

@@ -89,7 +89,7 @@ frame like a sender that floors the wall at emit; a re-sample only every ~100 fr
 the old epoch for up to ~1.7 s at 60 fps, longer than a shallow receiver's relabel window (§5).
 
 *Reference implementation (camera-box):* `wall_clock_ns` = `CLOCK_REALTIME`
-(`src/main.rs:40`); `monotonic_clock_ns` = `CLOCK_MONOTONIC` (`:57`); ONE bracketed
+(`src/main.rs:41`); `monotonic_clock_ns` = `CLOCK_MONOTONIC` (`:57`); ONE bracketed
 mono/wall/mono read per captured frame, `read_mono_wall_mono_ns` (`:76`), fed to
 `genlock_stamp::StampOffset`, which re-samples every `OFFSET_RESAMPLE_INTERVAL_FRAMES = 100` frames
 and in the frame the wall steps by `OFFSET_STEP_RESAMPLE_NS` (2 ms) or more (the pure decision
@@ -290,7 +290,7 @@ window cannot read as "flat" (`:47`).
 
 | Rule | Receiver / sender fact | Location (re-verify the symbol, not the line) |
 | --- | --- | --- |
-| §1 Clock | realtime + monotonic + 100-frame offset resample | `src/main.rs:40,57,74`; `src/genlock_stamp.rs:87,94` |
+| §1 Clock | realtime + monotonic + one bracketed read per frame; offset resampled every 100 frames and in the frame the wall steps 2 ms or more | `src/main.rs:41,57,76`; `src/genlock_stamp.rs:94,111,141,168` |
 | §2 Create | `clock_video/clock_audio=false`, progressive | `src/ndi.rs:628-629,1075` |
 | §4 Timecode | FLOOR boundary, 100 ns epoch | `src/ndi.rs:78,1079` (doctrine `:62-78`); `src/genlock_stamp.rs:52`; `vendor/distroav/src/ndi-output.cpp:613` (doctrine `:34-60`) |
 | §5 Pacing | per-second grid gate, catch-up ≤ 8, resync, re-latch, repeat | `src/genlock_pacing.rs:62,79,92-100,150,165,262`; `src/genlock_grid.rs` |
