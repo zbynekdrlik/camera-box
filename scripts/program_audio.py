@@ -554,9 +554,10 @@ def build_payload(verdict: str, rms_dbfs, outside_band_pct, *, now: datetime, wi
     sender-timeline holes the running sampler bridged with zeros since it started, null in a
     payload written while it is not sampling. `queue_drops` (additive, design issue 1404 comment
     6037613222) counts the audio frames the sampler's own capture queue dropped since it started
-    (each one is read as a hole), null while it is not sampling. `lag_ms` (additive): how long
-    before the write the newest audio of the judged window was captured -- the consumer's backlog
-    behind its capture thread, so a lagging sampler never passes for a fresh one; null with no
+    (each one is read as a hole), null while it is not sampling. `lag_ms` (additive): how long the
+    block that completed the judged window waited in the capture queue before the consumer took it
+    -- the consumer's backlog behind its capture thread, so a lagging sampler never passes for a
+    fresh one (the window's own FFT + decode + write, ~17-85 ms, comes on top); null with no
     window."""
     if verdict not in VERDICTS:
         raise ValueError(f"unknown verdict {verdict!r}")
