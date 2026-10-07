@@ -258,6 +258,11 @@ level. Re-run the full calibration after any decoder or rule change:
     every call, so the copies collide on rule 2 and a measurement span reads FOREIGN. Loop tests
     with a bridge use `_TimelineMarkers` (markers written into channel 0 at ~−100 dBFS on the
     sender timeline, read back where the sampler puts them) or the real shim.
+  - **Test trap: a hole exactly AT a limit is decided by the stamps' floor rounding.** 1024-sample
+    frames at 48 kHz are 213 333.3 units of 100 ns, so a test hole meant as "+250.0 ms" lands a few
+    units over or under the limit depending on the frame index (one landed as a discontinuity).
+    Pin a boundary with 4800-sample frames (exactly 1 000 000 units), and keep loop tests a little
+    inside it (249 ms).
   - Tests: the fakes use a local `_Block` with a timestamp field, so they exercise the loop, not the
     binding; `pan.AudioBlock` defaults `timestamp` to undefined, so an old fake (2 fields) runs the
     arrival fallback. `program_audio_marker_calibrate.py` stamps its blocks on a continuous
