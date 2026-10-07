@@ -68,8 +68,12 @@ STRIH_PROGRAM_AUDIO_FILES=(
 STRIH_PROGRAM_AUDIO_TEST_MARKER=.config/camera-box/program-audio-sampler.test-mode
 # The sampler's private env file (the unit's EnvironmentFile): the grader reads the endpoint port from it.
 STRIH_PROGRAM_AUDIO_ENV_FILE=.config/camera-box/program-audio-sampler.env
-# A verdict older than this is a sampler that stopped writing (= program_audio_guard.py --max-age).
+# The guard's own freshness window, -FUTURE_TOLERANCE_S <= age_s <= MAX_AGE_S: older is a sampler that
+# stopped writing (= program_audio_guard.py DEFAULT_MAX_AGE_S, its --max-age default); a little in the
+# future is a dantesync date step -- strih-lx is the date master -- (= its NEGATIVE_AGE_TOLERANCE_S).
+# Both pinned to the guard by a test.
 STRIH_PROGRAM_AUDIO_MAX_AGE_S=10
+STRIH_PROGRAM_AUDIO_FUTURE_TOLERANCE_S=1
 # The build script's default output, relative to the operator's home (= program_audio_marker.py's
 # DEFAULT_SHIM_PATH).
 STRIH_PROGRAM_AUDIO_SHIM=.local/lib/camera-box/libqpsk-guard-shim.so
@@ -248,10 +252,12 @@ strih_program_audio_install() {
 # --- verify-strih item 41 ------------------------------------------------------------------------------
 
 # strih_program_audio_env_value HOME KEY -> KEY's value in the sampler's env file (the last
-# `KEY=value` line, quotes stripped), EMPTY when the file or the key is absent. Always rc 0.
+# `KEY=value` line; whitespace around `=` and after the value dropped and quotes stripped, as systemd's
+# EnvironmentFile reads it), EMPTY when the file or the key is absent. Parsed, never sourced. Always rc 0.
 strih_program_audio_env_value() {
   local file="${1:?home required}/${STRIH_PROGRAM_AUDIO_ENV_FILE}" key="${2:?key required}" v=""
-  [ -r "$file" ] && v="$(sed -n "s/^[[:space:]]*${key}=//p" "$file" 2>/dev/null | tail -n 1 || true)"
+  [ -r "$file" ] && v="$(sed -n "s/^[[:space:]]*${key}[[:space:]]*=[[:space:]]*//p" "$file" 2>/dev/null | tail -n 1 || true)"
+  v="${v%"${v##*[![:space:]]}"}"
   v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
   printf '%s' "$v"
 }
@@ -270,8 +276,8 @@ strih_program_audio_endpoint() {
 }
 
 # strih_program_audio_endpoint_read HOST PORT -> `<verdict> <age_s> fresh|stale` of
-# http://HOST:PORT/program-audio.json (stale = older than STRIH_PROGRAM_AUDIO_MAX_AGE_S or no age),
-# EMPTY when it does not answer a payload with a verdict and a source. Always rc 0.
+# http://HOST:PORT/program-audio.json (stale = outside the guard's -FUTURE_TOLERANCE_S..MAX_AGE_S
+# window, or no age), EMPTY when it does not answer a payload with a verdict and a source. Always rc 0.
 strih_program_audio_endpoint_read() {
   local host="${1:?host required}" port="${2:?port required}" body
   body="$("${STRIH_PROGRAM_AUDIO_CURL:-curl}" -fsS --max-time 3 "http://${host}:${port}/program-audio.json" 2>/dev/null || true)"
@@ -283,13 +289,16 @@ except ValueError:
     sys.exit(0)
 if isinstance(j, dict) and j.get("verdict") in ("MEASUREMENT", "FOREIGN", "SILENT", "UNKNOWN") and "source" in j:
     age = j.get("age_s")
-    fresh = isinstance(age, (int, float)) and not isinstance(age, bool) and 0 <= age <= float(sys.argv[1])
-    print(j["verdict"], age, "fresh" if fresh else "stale")' "$STRIH_PROGRAM_AUDIO_MAX_AGE_S" 2>/dev/null || true
+    fresh = (isinstance(age, (int, float)) and not isinstance(age, bool)
+             and -float(sys.argv[2]) <= age <= float(sys.argv[1]))
+    print(j["verdict"], age, "fresh" if fresh else "stale")' \
+    "$STRIH_PROGRAM_AUDIO_MAX_AGE_S" "$STRIH_PROGRAM_AUDIO_FUTURE_TOLERANCE_S" 2>/dev/null || true
 }
 
 # strih_program_audio_state USER -> the unit's is-active word, re-read (up to 3 x, STRIH_PROGRAM_AUDIO_RETRY_SLEEP
 # apart) while it is in a transition (activating / deactivating / reloading): a sampler that is just
-# starting settles, a crash loop stays `activating`. Always rc 0.
+# starting settles, a crash loop stays `activating`. `unreadable` when systemctl printed nothing (the
+# operator's user manager unreachable). Always rc 0.
 strih_program_audio_state() {
   local user="${1:?user required}" s i
   for i in 1 2 3; do
@@ -341,6 +350,13 @@ strih_program_audio_grade_rows() {
   marker=no; [ -e "${home}/${STRIH_PROGRAM_AUDIO_TEST_MARKER}" ] && marker=yes
   case "$active" in
     active)
+      if [ "$marker" = no ]; then
+        # EVENT mode, yet running: rig-mode.sh event removed the marker but its stop failed or timed
+        # out, or the marker was removed by hand -- the state the opt-in marker exists to prevent
+        printf 'FAIL|(program-audio-endpoint) running but not in TEST mode (no ~/%s): rig-mode.sh event did not stop it -- systemctl --user stop %s, or rig-mode.sh test if this is a development period\n' \
+          "$STRIH_PROGRAM_AUDIO_TEST_MARKER" "$STRIH_PROGRAM_AUDIO_UNIT"
+        return 0
+      fi
       if [ "$port" = 0 ]; then
         printf 'FAIL|(program-audio-endpoint) running with no endpoint (PROGRAM_AUDIO_HTTP_PORT=0 in ~/%s) -- its consumers read nothing\n' "$STRIH_PROGRAM_AUDIO_ENV_FILE"
         return 0
@@ -360,8 +376,8 @@ strih_program_audio_grade_rows() {
           "$host" "$port" "${answer%% *}" "${answer#* }"
       else
         answer="${answer% *}"
-        printf 'FAIL|(program-audio-endpoint) running but its verdict is stale (verdict=%s age_s=%s, more than %s s) -- the sampler stopped writing; read journalctl --user -u %s\n' \
-          "${answer%% *}" "${answer#* }" "$STRIH_PROGRAM_AUDIO_MAX_AGE_S" "$STRIH_PROGRAM_AUDIO_UNIT"
+        printf 'FAIL|(program-audio-endpoint) running but its verdict is stale (verdict=%s age_s=%s, outside -%s..%s s) -- the sampler stopped writing, or the clock moved; read journalctl --user -u %s\n' \
+          "${answer%% *}" "${answer#* }" "$STRIH_PROGRAM_AUDIO_FUTURE_TOLERANCE_S" "$STRIH_PROGRAM_AUDIO_MAX_AGE_S" "$STRIH_PROGRAM_AUDIO_UNIT"
       fi
       ;;
     failed)
@@ -375,6 +391,10 @@ strih_program_audio_grade_rows() {
         printf 'NOTE|(program-audio-endpoint) down: not in TEST mode (no ~/%s: EVENT mode, or never put in TEST mode since the provisioning) -- rig-mode.sh test starts it\n' \
           "$STRIH_PROGRAM_AUDIO_TEST_MARKER"
       fi
+      ;;
+    unreadable)
+      printf 'FAIL|(program-audio-endpoint) the state of %s is unreadable: the operator'"'"'s user manager does not answer (is %s lingering? loginctl show-user %s -p Linger)\n' \
+        "$STRIH_PROGRAM_AUDIO_UNIT" "$user" "$user"
       ;;
     *)
       printf 'FAIL|(program-audio-endpoint) %s is %s (a crash loop, or stuck in a transition) -- read journalctl --user -u %s\n' \

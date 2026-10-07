@@ -225,7 +225,8 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$RIG_MODE_DIR/lib/cg-obs-burn-backstop.sh"
 
 # issue 1404: the stream program-audio sampler (the YouTube channel guard of the test streams) runs on
-# strih-lx in TEST mode only: TEST starts it, EVENT stops it and leaves the marker its unit checks.
+# strih-lx in TEST mode only: TEST leaves the marker its unit checks and starts it, EVENT removes it
+# and stops it.
 # Report-only (a WARNING, never the exit status). Source-only lib, no side effects at source time.
 # shellcheck source=scripts/lib/program-audio-mode.sh
 . "$RIG_MODE_DIR/lib/program-audio-mode.sh"

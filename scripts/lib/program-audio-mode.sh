@@ -5,8 +5,10 @@
 #
 # scripts/lib/program-audio-mode.sh -- issue 1404 (ROZHODNUTÉ 6039368611): the stream program-audio
 # sampler on strih-lx (the YouTube channel guard of the CI/test streams) runs in TEST mode only.
-#   rig-mode.sh test  -> leave the TEST marker, `systemctl --user start program-audio-sampler.service`
-#   rig-mode.sh event -> remove the TEST marker, `systemctl --user stop program-audio-sampler.service`
+#   rig-mode.sh test  -> leave the TEST marker, clear a failed state, `systemctl --user start` the unit
+#   rig-mode.sh event -> remove the TEST marker, `systemctl --user stop` the unit, clear a failed state
+# (`reset-failed`: a crash loop that hit StartLimitBurst refuses the next start for up to 300 s, and
+# `stop` leaves a failed unit failed -- verify-strih item 41 would FAIL it in EVENT mode).
 # The unit's ExecCondition skips every start without the marker
 # (~/.config/camera-box/program-audio-sampler.test-mode, STRIH_PROGRAM_AUDIO_TEST_MARKER): the sampler is
 # down by default and stays down across a reboot during a production; a reboot in TEST mode brings it
@@ -40,12 +42,12 @@ program_audio_mode_remote_cmd() {
   local mode="${1-}" u="$STRIH_PROGRAM_AUDIO_UNIT" m="$STRIH_PROGRAM_AUDIO_TEST_MARKER"
   case "$mode" in
     test)
-      printf 'mkdir -p "$HOME/%s" && : > "$HOME/%s"; systemctl --user start %s; sleep 2; s="$(systemctl --user is-active %s)"; echo "program-audio-sampler: $s"; [ "$s" = active ]' \
-        "${m%/*}" "$m" "$u" "$u"
+      printf 'mkdir -p "$HOME/%s" && : > "$HOME/%s"; systemctl --user reset-failed %s 2>/dev/null; systemctl --user start %s; sleep 2; s="$(systemctl --user is-active %s)"; echo "program-audio-sampler: $s"; [ "$s" = active ]' \
+        "${m%/*}" "$m" "$u" "$u" "$u"
       ;;
     event)
-      printf 'rm -f "$HOME/%s"; systemctl --user stop %s; s="$(systemctl --user is-active %s)"; echo "program-audio-sampler: $s"; [ "$s" != active ]' \
-        "$m" "$u" "$u"
+      printf 'rm -f "$HOME/%s"; systemctl --user stop %s; systemctl --user reset-failed %s 2>/dev/null; s="$(systemctl --user is-active %s)"; echo "program-audio-sampler: $s"; [ "$s" != active ]' \
+        "$m" "$u" "$u" "$u"
       ;;
     *)
       echo "program_audio_mode_remote_cmd: mode must be test or event, got '${mode}'" >&2

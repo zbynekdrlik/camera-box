@@ -10,7 +10,8 @@
 # starts it, rig-mode.sh event stops it (scripts/lib/program-audio-mode.sh); verify-strih.sh grades it.
 Description=strih-lx stream program-audio sampler (issue 1404) -- NDI audio-only -> :8891/program-audio.json
 Documentation=https://github.com/zbynekdrlik/camera-box
-After=network-online.target
+# No ordering on network-online.target: a user manager cannot see system targets. The NDI receiver
+# waits for the source itself (and Restart=on-failure covers a start before the network).
 # Bound a restart storm (libndi missing, the serve dir unwritable): 20 starts per 5 min.
 StartLimitIntervalSec=300
 StartLimitBurst=20
