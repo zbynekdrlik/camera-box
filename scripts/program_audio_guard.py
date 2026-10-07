@@ -40,7 +40,7 @@ import sys
 import urllib.error
 import urllib.request
 
-DEFAULT_URL = "http://dev1:8890/program-audio.json"
+DEFAULT_URL = "http://10.77.9.202:8891/program-audio.json"
 DEFAULT_MAX_AGE_S = 10.0
 DEFAULT_TIMEOUT_S = 5.0
 DEFAULT_LATCH_S = 30.0
