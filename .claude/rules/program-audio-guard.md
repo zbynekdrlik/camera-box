@@ -4,6 +4,9 @@ paths:
   - "scripts/program_audio_ndi.py"
   - "scripts/program_audio_sampler.py"
   - "scripts/program_audio_capture.py"
+  - "scripts/program_audio_http.py"
+  - "scripts/lib/strih-program-audio.sh"
+  - "scripts/lib/program-audio-mode.sh"
   - "scripts/program_audio_guard.py"
   - "scripts/program_audio_marker.py"
   - "scripts/program_audio_marker_calibrate.py"
@@ -22,6 +25,10 @@ paths:
   - "tests/python/qpsk_guard_shim_1404.py"
   - "tests/python/test_rig_marker_mirror_1404.py"
   - "tests/python/test_rig_serve_routes_1404.py"
+  - "tests/python/test_program_audio_capture_1404.py"
+  - "tests/python/test_program_audio_datestep_1404.py"
+  - "tests/python/test_program_audio_http_1404.py"
+  - "tests/python/test_strih_program_audio_1404.py"
 ---
 
 # The stream program-audio guard + the cam2 marker mirror (issue 1404)
@@ -359,16 +366,18 @@ level. Re-run the full calibration after any decoder or rule change:
     cgroup, 600 s, three capture-thread probes side by side: nice 10 lost audio 13 times (7.2 s, 9 of
     them its own), nice 0 and nice 0 + `CPUWeight=1000` 4 times each (2.9–3.1 s), and those 4 were ONE
     box-wide event that hit every receiver on dev1 at once, the live unit included (+1638.5 ms at
-    12:48:10Z; dev1 IO pressure, 4.7 GB swap in use; the stream OBS log quiet). So the unit drops
-    `Nice=10` and sets `CPUWeight=1000` (it keeps the sampler ahead of the lanes in app.slice).
-    - A `--user` unit cannot lower nice on dev1: `systemd-run --user -p Nice=-5` runs at nice 0
-      with no error (RLIMIT_NICE 0). So there is no `Nice=` at all, and the sampler logs ONE start
-      line, a WARNING while its nice is not below 0, naming its cgroup's cpu.weight.
-    - A `--user` CPUWeight competes only inside the user's own slice. Against other users' load
-      (other projects' CI in system.slice / other user slices), the passive run's capture thread
-      at nice 10 had no loss of its own.
+    12:48:10Z; dev1 IO pressure, 4.7 GB swap in use; the stream OBS log quiet). So `Nice=10` is
+    gone from the unit; that is the measured cure.
+    - **No host tuning (coordinator, 7.10.2026): both units run the sampler at NORMAL priority** (no
+      `Nice=`, no `CPUWeight=`). A `--user` unit cannot lower nice on dev1 anyway (`systemd-run
+      --user -p Nice=-5` runs at nice 0 with no error, RLIMIT_NICE 0), and on strih-lx a CPUWeight
+      would rank the sampler ahead of OBS in the same slice. The sampler logs one start line,
+      `scheduling nice=N cpus=<list> cpu.weight=W` (a WARNING only at a positive nice).
+    - A `--user` CPUWeight competes only inside the user's own slice; against other users' load the
+      passive run's capture thread at nice 10 had no loss of its own.
     - A system unit with a realtime capture thread was weighed and not taken: the remaining losses
-      are box-wide, and the SDK's own receive threads (`ndir:*`) stall with them.
+      are box-wide, and the SDK's own receive threads (`ndir:*`) stall with them. The real answer
+      to dev1's load was the move to strih-lx (below).
   - **Most "holes" are not lost audio: a SENDER stall.** 20 of the 22 forward steps over the
     tolerance in the 720 s run were identical in all three receivers (both probes and the live
     unit, to 0.1 ms) and each was followed by two frames at −21.1 ms: the cumulative offset returns
@@ -466,3 +475,59 @@ is at a venue. So the mirror is a long-running service holding one
   FOREIGN was verified live on the SongPlayer program sender, which already carries music.
 - **Restart the lease server only while `held=false`.** `/rig-lease.json`, `/healthz` and the 404
   are pinned to golden bytes captured from the pre-change server.
+
+## The host: strih-lx, its own endpoint :8891 (ROZHODNUTÉ 6039368611)
+
+The owner rejected dev1 for the sampler (shared, loaded by other projects' CI: "naozaj to musi bezat tu
+na dev1?!"). It needs only NDI reach to `STREAM-SNV (stream)` and an HTTP endpoint, so it moves to
+strih-lx (16 cores, the E-cores 12-15 nearly idle; stream.lan was rejected: a Windows port of the
+shim + numpy next to restreamer's broadcast encoder).
+- **Its own read-only endpoint** (`scripts/program_audio_http.py`, served from the sampler process):
+  `GET/HEAD /program-audio.json` through the SAME `rig_serve_files.program_audio_response` the lease
+  server uses (ages per request, foreign-owned / garbage / a chain-less MEASUREMENT = UNKNOWN), 404
+  while absent, `/healthz`, anything else 404, other methods 501. `--http-port` /
+  `PROGRAM_AUDIO_HTTP_PORT` default **8891** (0 = none), `--http-bind` / `PROGRAM_AUDIO_HTTP_BIND`
+  default 0.0.0.0, `--serve-dir` / `PROGRAM_AUDIO_SERVE_DIR`. Routine requests are not logged.
+  - **One response framing for both servers:** `rig_serve_files.ReadOnlyHandler` (GET/HEAD through one
+    `_handle`, the query-string strip, `_send`, no Python version in `Server:`), moved verbatim out of
+    `rig-lease-server.py`; the lease routes' golden bytes are unchanged.
+  - **Bound after the receiver exists, stopped after the final UNKNOWN.** A port in use closes the
+    receiver, writes UNKNOWN `sampler cannot serve http on …` and exits 1 (fail loud; systemd restarts).
+  - Tests never bind the default port (`--http-port 0`, or a free ephemeral port).
+- **The dev1 lease route stays** (`http://dev1:8890/program-audio.json`) until the consumers switch to
+  `http://10.77.9.202:8891/program-audio.json`; nothing proxies yet.
+- **The unit** `systemd/program-audio-sampler.strih-lx.service` (a TEMPLATE) is installed as the
+  operator's `--user` `program-audio-sampler.service`:
+  - `CPUAffinity=` = the box's own `/sys/devices/cpu_atom/cpus` (12-15 on strih-lx), read the way
+    `strih_lx_lowprio_prefix` reads it (whitespace stripped; a value that is not a cpu list = no pin;
+    no cpu_atom = no affinity line). Normal priority (no Nice/CPUWeight: never ahead of OBS).
+  - `ExecCondition=/usr/bin/test ! -e %h/.config/camera-box/program-audio-sampler.event-mode`: the EVENT
+    marker skips every start, so the sampler stays down across a reboot during a production.
+  - `ExecStart` runs the installed checkout-layout copy `/usr/local/lib/camera-box/scripts/…`;
+    `WantedBy=default.target` (no X needed; a reboot in TEST mode brings it back).
+  - libndi: `/usr/local/lib/libndi.so.6` (strih-lx's NDI 6.3.2 runtime) is a lookup candidate.
+- **Provisioning = setup-strih step 16e** (`scripts/lib/strih-program-audio.sh`, as root):
+  - apt `python3-numpy` only when missing, then an `import numpy` preflight;
+  - the sampler's import closure + the shim's C++ source, its two vendored headers and the build
+    script into `/usr/local/lib/camera-box` in the checkout layout (pinned against the real import
+    closure by a test), each written only when it differs. The sampler compares the decoder it loads
+    with those sources, and the build script builds from them;
+  - the shim built AS THE OPERATOR (`sudo -u newlevel env HOME=…`) into the default
+    `~/.local/lib/camera-box/libqpsk-guard-shim.so`, only when missing / unloadable / built from other
+    sources. A library in the operator's home is never loaded as root (the state check runs as the
+    operator too);
+  - the rendered unit written only when it differs, `enable`, a daemon-reload when the unit changed, a
+    `try-restart` when anything changed. NEVER a start (enable-only).
+  - newlevel has no passwordless sudo on strih-lx: everything root goes through setup-strih itself.
+    The firewall is off; no ufw rule is added.
+- **verify-strih item 41** (`strih_program_audio_grade_report`, 3 rows): files + unit + enabled; the
+  shim current; the endpoint. A running unit must answer `/program-audio.json` with a verdict (else
+  FAIL); `failed` is a FAIL; a stopped unit is a NOTE (EVENT marker present, or not started since the
+  provisioning: setup-strih never starts it).
+- **rig-mode.sh** (`scripts/lib/program-audio-mode.sh`, sourced; one call each, after the relay step):
+  TEST removes the marker and `systemctl --user start`s the unit; EVENT leaves the marker and stops
+  it. Over plain ssh as the operator (`sshpass … timeout … ssh`, `UserKnownHostsFile=/dev/null`);
+  report-only: a WARNING naming the state, never rig-mode's exit status (a stopped sampler fails closed
+  for its consumers). A Windows strih is one SKIP line.
+- strih-lx's USB 5 GbE NIC still has rx_missed bursts (issue 1242 / 1387): NDI rides TCP/RUDP, so they
+  show as late bursts, which the sender-timeline logic keeps.
