@@ -46,6 +46,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 HOPS="${CG_CHAIN_HOPS:-cg-obs strih}"
 CG_CHAIN_STREAM_SRC="${CG_CHAIN_STREAM_SRC:-NDIA cg stream}"
+# issue 1302: the strih input that receives SongPlayer's SP-program (named `CG-obs` on strih-lx since
+# songplayer 221 B4). Overridable; the default keeps the historical `cg`.
+CG_CHAIN_STRIH_SRC="${CG_CHAIN_STRIH_SRC:-cg}"
 SKEW_BOUND_MS=20
 MIN_SAMPLES=2
 ASRC_FLOOR_PPM=10
@@ -86,7 +89,7 @@ _hop_sources() {
   local hop="$1" log="$2"
   case "$hop" in
     cg-obs) printf '%s\n' "$log" | cg_chain_enumerate_sources "$CG_CHAIN_CGOBS_SRC_RE" ;;
-    strih)  printf 'cg\n' ;;
+    strih)  printf '%s\n' "$CG_CHAIN_STRIH_SRC" ;;
     stream) printf '%s\n' "$CG_CHAIN_STREAM_SRC" ;;
     *) : ;;
   esac
