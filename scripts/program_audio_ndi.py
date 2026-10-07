@@ -18,7 +18,10 @@ The receiver:
     simply finds nothing and pulls nothing over the mobile link.
 
 Only FLTP (planar 32-bit float, the SDK's receive format) is accepted; each frame is COPIED into a
-numpy array `(no_samples, no_channels)` before the SDK frame is freed.
+numpy array `(no_samples, no_channels)` before the SDK frame is freed. The block also carries the
+frame's SDK `timestamp` (100 ns, the moment the sender submitted it; NDIlib_recv_timestamp_undefined
+when the SDK has none): the sampler judges receive continuity on that sender timeline, never on its
+own arrival time (program_audio.frame_continues, design issue 1404 comment 6030385284).
 """
 from __future__ import annotations
 
@@ -28,6 +31,8 @@ import os
 from typing import NamedTuple
 
 import numpy as np
+
+from program_audio import NDI_TIMESTAMP_UNDEFINED
 
 # -- SDK enum values (Processing.NDI.structs.h / Processing.NDI.Recv.h) --
 FRAME_TYPE_NONE = 0
@@ -73,6 +78,7 @@ class NDIlib_audio_frame_v3_t(ctypes.Structure):
 class AudioBlock(NamedTuple):
     sample_rate: int
     samples: np.ndarray  # float32, shape (no_samples, no_channels)
+    timestamp: int = NDI_TIMESTAMP_UNDEFINED  # the frame's SDK timestamp (100 ns, sender submission)
 
 
 def frame_to_array(frame: NDIlib_audio_frame_v3_t) -> np.ndarray:
@@ -163,7 +169,7 @@ class NdiAudioReceiver:
         if kind != FRAME_TYPE_AUDIO:
             return None
         try:
-            return AudioBlock(int(frame.sample_rate), frame_to_array(frame))
+            return AudioBlock(int(frame.sample_rate), frame_to_array(frame), int(frame.timestamp))
         finally:
             self._lib.NDIlib_recv_free_audio_v3(self._recv, ctypes.byref(frame))
 

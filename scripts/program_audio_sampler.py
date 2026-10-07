@@ -24,8 +24,15 @@ MEASUREMENT | FOREIGN | SILENT | UNKNOWN (scripts/program_audio.py) and atomical
   needs the cam2 QPSK marker itself -- a timecode chain of >= pa.MARKER_CHAIN_MIN markers over the
   trailing 4 s of contiguous non-silent audio, decoded by the dock's own decoder through the
   `scripts/qpsk_guard_shim.cpp` library (scripts/program_audio_marker.py). Until 4 s of audio
-  arrived since the start or a receive gap (no audio block for over RECEIVE_GAP_S) every verdict is
-  UNKNOWN; a missing / unloadable library = UNKNOWN and exit 1, like a missing libndi.
+  arrived since the start or a span restart nothing reads MEASUREMENT: a window whose spectrum alone
+  says FOREIGN reads FOREIGN and starts the latch (ROZHODNUTÉ 6027706292 item 1), every other one
+  reads UNKNOWN. A missing / unloadable library = UNKNOWN and exit 1, like a missing libndi.
+* SPAN RESTARTS (design issue 1404 comment 6030385284): continuity is judged on the SENDER's NDI
+  audio timeline (pa.frame_continues over each frame's SDK timestamp), never on dev1's arrival
+  time: a late burst after dev1 starved the sampler keeps the span; a timeline hole (lost audio, a
+  sender restart, a dantesync date step: one warm-up) restarts it whatever the arrival time. Only a
+  frame with no timestamp falls back to the arrival gap (no audio block for over RECEIVE_GAP_S),
+  and an NDI error frame always restarts the span.
 
 Usage (systemd/program-audio-sampler.service):
   program_audio_sampler.py [--source "STREAM-SNV (stream)"] [--serve-dir DIR] [--lib PATH]
@@ -56,10 +63,12 @@ SOURCE_ENV = "PROGRAM_AUDIO_SOURCE"
 NO_AUDIO_TIMEOUT_S = 5.0
 CAPTURE_TIMEOUT_MS = 500
 LOG_SUMMARY_S = 600.0
-# No audio block for longer than this between two blocks = a receive gap: the audio around it is
+# The FALLBACK continuity rule, for a frame whose sender timestamp is undefined (pa.UNKNOWN_TS): no
+# audio block for longer than this between two blocks = a receive gap, and the audio around it is
 # never stitched into one marker span (the chain would read the gap as a jump in the index clock).
-# NDI delivers an OBS audio tick every ~21 ms and the sampler drains its queue within ~0.1 s
-# of a window's work, so a second without audio is an interruption, never jitter.
+# With timestamps the sender timeline decides instead (pa.frame_continues): on a busy dev1 the
+# sampler was starved for 1.0-2.0 s and the SDK's queued audio arrived as one late burst, which
+# this arrival rule read as 57 spurious restarts in 6 h (issue 1404, 7.10.2026).
 RECEIVE_GAP_S = 1.0
 
 
@@ -111,14 +120,16 @@ class WindowAccumulator:
 
 class MarkerSpan:
     """The trailing `span_s` of contiguous NON-SILENT audio the marker chain is read over, and the
-    warm-up: the seconds of audio received since the start, a receive gap or a format change.
+    warm-up: the seconds of audio received since the start, a span restart or a format change.
 
-    * Warm-up: until `span_s` of audio arrived, every verdict is UNKNOWN (ROZHODNUTÉ issue 1404
-      comment 6026577906) -- never FOREIGN, never MEASUREMENT.
+    * Warm-up: until `span_s` of audio arrived, nothing reads MEASUREMENT (ROZHODNUTÉ issue 1404
+      comment 6026577906); a window whose spectrum alone says FOREIGN reads FOREIGN (6027706292
+      item 1), every other one UNKNOWN.
     * A SILENT window empties the span: silence carries no marker, so the window after it holds only
       its own markers and must not be judged against the full span (it reads UNKNOWN until the span
       is full again; the s3-A-vod fixture is this start-of-stream case).
-    * `reset()` = a receive gap: both start over."""
+    * `reset()` = a span restart (a sender-timeline discontinuity, a receive gap without a
+      timestamp, an NDI error frame): both start over."""
 
     def __init__(self, window_s: float = pa.WINDOW_S, span_s: float = pa.MARKER_SPAN_S):
         k = span_s / window_s
@@ -188,25 +199,25 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
     log(f"program-audio sampler: source={source!r} serve_dir={serve_dir} window={window_s}s "
         f"band={pa.BAND_LO_HZ:.0f}-{pa.BAND_HI_HZ:.0f}Hz tone_lines={pa.MEASUREMENT_TONE_LINES_HZ} "
         f"foreign>={pa.FOREIGN_OUTSIDE_BAND_PCT}% silent<{pa.SILENT_RMS_DBFS}dBFS "
-        f"marker_chain>={pa.MARKER_CHAIN_MIN} over {pa.MARKER_SPAN_S:g}s receive_gap>{receive_gap_s:g}s")
+        f"marker_chain>={pa.MARKER_CHAIN_MIN} over {pa.MARKER_SPAN_S:g}s continuity=sender timeline "
+        f"(frame+{pa.CONTINUITY_SLACK_S * 1e3:g}ms) receive_gap>{receive_gap_s:g}s without a timestamp")
     last_audio = mono()
     have_audio = False
     last_unknown = mono()
     last_verdict = "UNKNOWN"
     last_summary = mono()
     counts = {v: 0 for v in pa.VERDICTS}
-    errors = bad_rate = gaps = 0
+    errors = bad_rate = gaps = breaks = late_bursts = 0
+    prev = None  # (timestamp, samples, sample_rate) of the previous audio block
     in_error = False
     bad_rate_logged = False
     loops = 0
 
     def restart_span(why: str) -> None:
-        nonlocal gaps
-        gaps += 1
         acc.reset()
         span.reset()
         if why:
-            log(f"program-audio sampler: {why} -- the marker span starts over (UNKNOWN for "
+            log(f"program-audio sampler: {why} -- the marker span starts over (no MEASUREMENT for "
                 f"{pa.MARKER_SPAN_S:g} s)")
 
     while not should_stop() and (max_loops is None or loops < max_loops):
@@ -232,10 +243,20 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
             block = None
         if block is not None and block.samples.shape[0] > 0:
             in_error = False
-            if have_audio and now - last_audio > receive_gap_s:
-                restart_span(f"receive gap of {now - last_audio:.1f} s")
+            if have_audio:
+                kind, detail = judge_continuity(prev, block, now - last_audio, receive_gap_s)
+                if kind == "timeline_break":
+                    breaks += 1
+                    restart_span(detail)
+                elif kind == "receive_gap":
+                    gaps += 1
+                    restart_span(detail)
+                elif kind == "late_burst":
+                    late_bursts += 1
+                    log(f"program-audio sampler: {detail}")
             have_audio = True
             last_audio = now
+            prev = (block.timestamp, block.samples.shape[0], block.sample_rate)
             for win, sr in acc.push(block.samples, block.sample_rate):
                 verdict, rms, outside, reason, markers, chain = classify_window(win, sr, span, decoder)
                 write(verdict, rms, outside, reason, markers, chain)
@@ -257,11 +278,40 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
                 last_verdict = "UNKNOWN"
         if now - last_summary >= LOG_SUMMARY_S:
             log("program-audio summary (last %.0f s): %s error_frames=%d bad_rate_frames=%d "
-                "receive_gaps=%d" % (now - last_summary, " ".join(f"{k}={v}" for k, v in counts.items()),
-                                     errors, bad_rate, gaps))
+                "timeline_breaks=%d late_bursts=%d receive_gaps=%d"
+                % (now - last_summary, " ".join(f"{k}={v}" for k, v in counts.items()),
+                   errors, bad_rate, breaks, late_bursts, gaps))
             counts = {v: 0 for v in pa.VERDICTS}
-            errors = bad_rate = gaps = 0
+            errors = bad_rate = gaps = breaks = late_bursts = 0
             last_summary = now
+
+
+def judge_continuity(prev, block, arrival_gap_s: float, receive_gap_s: float) -> tuple[str, str]:
+    """How `block` follows the previous audio block `prev` = (timestamp, samples, sample_rate):
+    (kind, log detail), kind one of
+      "continue"        on the sender timeline, arrival within receive_gap_s: nothing to say
+      "late_burst"      on the sender timeline after an arrival gap over receive_gap_s: the span is
+                        kept (the SDK queued the audio while dev1 starved the sampler)
+      "timeline_break"  off the sender timeline (pa.DISCONTINUITY): the span restarts
+      "receive_gap"     a timestamp is undefined (pa.UNKNOWN_TS) and the arrival gap is over
+                        receive_gap_s: the fallback restarts the span"""
+    p_ts, p_n, p_sr = prev
+    tol = pa.continuity_tolerance_100ns(p_n, p_sr)
+    verdict = pa.frame_continues(p_ts, p_n, p_sr, block.timestamp, tol)
+    if verdict == pa.UNKNOWN_TS:
+        if arrival_gap_s > receive_gap_s:
+            return "receive_gap", (f"receive gap of {arrival_gap_s:.1f} s (no NDI sender timestamp, "
+                                   "the arrival-time fallback)")
+        return "continue", ""
+    off_ms = pa.timeline_offset_100ns(p_ts, p_n, p_sr, block.timestamp) * 1e3 / pa.NDI_TIME_UNITS_PER_S
+    if verdict == pa.DISCONTINUITY:
+        return "timeline_break", (f"audio timeline discontinuity: the frame sits {off_ms:+.1f} ms off "
+                                  f"the sender's timeline (tolerance +-{tol * 1e3 / pa.NDI_TIME_UNITS_PER_S:.1f} ms, "
+                                  f"arrival gap {arrival_gap_s:.1f} s)")
+    if arrival_gap_s > receive_gap_s:
+        return "late_burst", (f"late burst after {arrival_gap_s:.1f} s without audio: the sender "
+                              f"timeline continues ({off_ms:+.1f} ms), the marker span is kept")
+    return "continue", ""
 
 
 def _fmt(v) -> str:
@@ -280,9 +330,13 @@ def classify_window(win: np.ndarray, sr: int, span: MarkerSpan, decoder):
     silent = pa.is_number(rms) and rms < pa.SILENT_RMS_DBFS
     full = span.push(win, sr, silent)
     if not span.warm:
+        if pa.spectral_foreign(rms, outside):
+            # ROZHODNUTÉ issue 1404 comment 6027706292 item 1: a spectral FOREIGN needs no marker
+            # span, so it is reported (and latched) in the warm-up too; only MEASUREMENT waits.
+            return "FOREIGN", rms, outside, None, None, None
         return ("UNKNOWN", rms, outside,
                 f"warming up: {span.audio_s:g} of {pa.MARKER_SPAN_S:g} s of audio since the start or a "
-                "receive gap", None, None)
+                "span restart", None, None)
     markers = chain = None
     reason = None
     if full is not None:

@@ -3,7 +3,8 @@
 
 The two bars of ROZHODNUTÉ issue 1404 comment 6026577906 (the rule: 6026826572), computed through
 the REAL sampler loop (program_audio_sampler.run, a fake receiver feeding the audio in NDI-sized
-blocks, the real marker decoder shim) -- so a bar is checked on exactly what the dev1 service does:
+blocks stamped on a continuous sender timeline like the SDK's `timestamp`, the real marker decoder
+shim) -- so a bar is checked on exactly what the dev1 service does:
 
   (a) REAL measurement audio: no window reads FOREIGN, and every window with a full marker span
       (non-silent) has a chain >= MARKER_CHAIN_MIN + 2 -- a margin of two missed decodes;
@@ -43,18 +44,22 @@ SYNTH_SR = 48000
 SYNTH_CLASSES = ("chord", "tremolo", "bandnoise", "melody")
 SYNTH_LEVELS_DBFS = (-30.0, -15.0)
 RUN_OF = 3                   # bar (b): a FOREIGN in every RUN_OF consecutive judged windows
+TIMELINE_START = 17_913_444_397_535_105  # a real sender timestamp (100 ns), read live on 7.10.2026
 
 
 class _Block(NamedTuple):
     sample_rate: int
     samples: np.ndarray
+    timestamp: int
 
 
 class _FileReceiver:
-    """Feeds one buffer in NDI-sized blocks, then nothing."""
+    """Feeds one buffer in NDI-sized blocks, then nothing. Each block carries the sender timestamp
+    its first sample would have on a continuous timeline, as the NDI SDK stamps a live frame."""
 
     def __init__(self, samples: np.ndarray, sample_rate: int):
-        self._blocks = [_Block(sample_rate, samples[i:i + BLOCK_FRAMES])
+        self._blocks = [_Block(sample_rate, samples[i:i + BLOCK_FRAMES],
+                               TIMELINE_START + i * pa.NDI_TIME_UNITS_PER_S // sample_rate)
                         for i in range(0, samples.shape[0], BLOCK_FRAMES)]
 
     def __len__(self):
