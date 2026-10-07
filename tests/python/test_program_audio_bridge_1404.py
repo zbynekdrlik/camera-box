@@ -283,7 +283,8 @@ def test_a_hole_at_a_sample_rate_change_restarts(tmp_path):
     blocks = [_Block(SR, x[i:i + FRAME], TS0 + (i * NDI_UNITS) // SR) for i in range(0, 20 * FRAME, FRAME)]
     blocks.append(_Block(44100, x[:FRAME], blocks[-1].timestamp + round(FRAME_100NS + 500_000)))
     _payloads, lines = _run(blocks, tmp_path, NoMarkers())
-    assert any("sample rate change (48000 -> 44100 Hz" in line and "starts over" in line for line in lines), lines
+    assert any("format change (48000 Hz x 2 -> 44100 Hz x 2 channels" in line and "starts over" in line
+               for line in lines), lines
     assert not any("bridged with" in line for line in lines)
 
 
@@ -550,15 +551,111 @@ def test_bridged_zeros_do_not_dilute_a_music_windows_share(make, seed):
         assert pa.spectral_foreign(rms, outside)
 
 
-def test_a_bridged_hole_keeps_real_measurement_windows_in_band(rec_clip):
-    """The other direction: a 2-frame hole in a real measurement window (the five windows of the
-    committed clip, 19 positions each) never pushes its share to the FOREIGN bar. (Probe on the
-    whole rec3b recording, 286 windows x 2 positions: the hole moved the share by up to +12.7 points
-    and the highest window read 28.7 %; a 5 ms fade at the hole edges moved it as much, so the
-    shift is the lost audio, not the edges.)"""
+def test_a_bridged_hole_keeps_the_committed_measurement_windows_in_band(rec_clip):
+    """The other direction, on the committed clip: a 2-frame hole at 19 positions in each of its
+    five windows keeps the share under the FOREIGN bar.
+
+    NOT a general guarantee (review round 1). The measurement's in-band energy comes in marker
+    bursts (a decoded word every ~0.5 s), so a hole that removes a burst raises the share of the
+    delivered audio. Random positions on the full rec3b + rec2 recordings (5340 window cases): one
+    2-frame hole crossed the bar 3 times (worst 32.8 %), two holes per window 8 times (worst 53 %).
+    A 5 ms fade of the hole edges gave 2 and 10, so the crossings are the lost burst, not the
+    edges. Recorded on the issue as the residual false-FOREIGN risk."""
     worst = 0.0
     for w in range(rec_clip.shape[0] // (2 * SR)):
         win = rec_clip[w * 2 * SR:(w + 1) * 2 * SR]
         for start in np.arange(0.05, 1.95, 0.1):
-            worst = max(worst, pa.analyse(_bridge(win, start, 2), SR)[1])
+            y = _bridge(win, start, 2)
+            real = np.ones(y.shape[0], dtype=bool)
+            a = int(start * SR)
+            real[a:a + 2 * FRAME] = False
+            worst = max(worst, pa.analyse(y, SR, real)[1])
     assert worst < pa.FOREIGN_OUTSIDE_BAND_PCT, worst
+
+
+# ---------------------------------------------------------------------------------------------
+# review round 1: the level of the delivered samples, the format at a hole, the exact limit, the
+# zeros before the frame
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dbfs, frames_missing, pattern", [
+    (-59.6, 12, "one 249 ms hole"),
+    (-56.0, 10, "two thirds bridged"),
+])
+def test_quiet_music_with_bridged_holes_stays_foreign_never_silent(tmp_path, dbfs, frames_missing, pattern):
+    """Quiet broadband music just over the SILENT bar: with bridged holes every window reads what it
+    reads without them. The level is the delivered samples' own; taken over the window with its
+    zeros it fell under -60 dBFS and the window read SILENT, which the gate passes."""
+    audio = _pink_stereo(10.0, dbfs, seed=7)
+    ref, _ = _run(_frames(audio)[0], tmp_path, NoMarkers())
+    assert set(_verdicts(ref)[1:]) == {"FOREIGN"}, _verdicts(ref)
+    if pattern == "one 249 ms hole":
+        drop, jitter = _hole(_frame_at(4.5), 249.0)
+    else:
+        drop, jitter = _mostly_zeros_frames(audio, 1.0, 8.5), {}
+    holed, lines = _run(_frames(audio, drop=drop, jitter=jitter)[0], tmp_path, NoMarkers())
+    assert any("bridged with" in line for line in lines), lines
+    assert _verdicts(holed)[: len(_verdicts(ref))] == _verdicts(ref)[: len(_verdicts(holed))], (
+        [(p["verdict"], p["rms_dbfs"]) for p in holed])
+    assert "SILENT" not in _verdicts(holed)
+
+
+def test_the_level_of_a_holed_window_is_the_delivered_samples_level():
+    win = _pink_stereo(2.0, -30.0, seed=11)
+    real = np.ones(win.shape[0], dtype=bool)
+    real[30_000:42_000] = False
+    real[60_000:70_240] = False
+    y = win.copy()
+    y[~real] = 0.0
+    rms, _outside = pa.analyse(y, SR, real)
+    want = 10 * np.log10(np.mean(win[real].astype(np.float64) ** 2))
+    assert rms == pytest.approx(want, abs=0.01)
+    assert pa.analyse(y, SR)[0] < rms - 0.5            # over the zeros it reads lower
+    assert pa.analyse(win, SR, None) == pa.analyse(win, SR)
+    nan_rms, none_share = pa.analyse(np.zeros_like(win), SR, np.zeros(win.shape[0], dtype=bool))
+    assert np.isnan(nan_rms) and none_share is None and pa.classify(nan_rms, none_share, 7) == "UNKNOWN"
+    with pytest.raises(ValueError):
+        pa.analyse(y, SR, real[:-1])
+
+
+def test_a_hole_at_a_channel_count_change_restarts(tmp_path):
+    x = _pink_stereo(1.0, -30.0)
+    blocks = [_Block(SR, x[i:i + FRAME], TS0 + (i * NDI_UNITS) // SR) for i in range(0, 20 * FRAME, FRAME)]
+    blocks.append(_Block(SR, x[:FRAME, :1], blocks[-1].timestamp + round(FRAME_100NS + 500_000)))
+    _payloads, lines = _run(blocks, tmp_path, NoMarkers())
+    assert any("format change (48000 Hz x 2 -> 48000 Hz x 1 channels" in line and "starts over" in line
+               for line in lines), lines
+    assert not any("bridged with" in line for line in lines)
+
+
+def test_the_250_ms_limit_is_inclusive_to_the_100_ns_unit():
+    """A 4800-sample frame is exactly 1 000 000 units of 100 ns, so the limit lands exactly."""
+    tol = pa.continuity_tolerance_100ns(4800, SR)
+    at_limit = TS0 + 1_000_000 + 2_500_000
+    assert pa.frame_continues(TS0, 4800, SR, at_limit, tol) == (pa.BRIDGE, 12000)
+    assert pa.frame_continues(TS0, 4800, SR, at_limit + 1, tol) == (pa.DISCONTINUITY, 0)
+
+
+def test_the_zeros_go_in_before_the_frame_at_its_timeline_place(rec_clip, tmp_path, monkeypatch):
+    """The window that holds the hole carries the zeros exactly where the missing frames were and
+    the first frame after the hole right behind them: every delivered sample at its sender-timeline
+    place (zeros pushed after the frame would move that frame 42.7 ms early)."""
+    seen = []
+    analyse = pa.analyse
+
+    def spy(samples, sample_rate, real=None):
+        seen.append((np.array(samples, copy=True), None if real is None else np.array(real, copy=True)))
+        return analyse(samples, sample_rate, real)
+
+    monkeypatch.setattr(pas.pa, "analyse", spy)
+    k = _frame_at(5.0)                       # inside the third window [4 s, 6 s)
+    _run(_frames(rec_clip, drop={k, k + 1})[0], tmp_path, NoMarkers())
+    holed = [(w, r) for w, r in seen if r is not None]
+    assert len(holed) == 1
+    win, real = holed[0]
+    a = k * FRAME - 2 * 2 * SR               # the hole's place inside the window starting at 4 s
+    assert pa.real_runs(~real) == [(a, a + 2 * FRAME)]
+    assert not win[a:a + 2 * FRAME].any()
+    np.testing.assert_array_equal(win[a + 2 * FRAME:a + 3 * FRAME], rec_clip[(k + 2) * FRAME:(k + 3) * FRAME])
+    np.testing.assert_array_equal(win[:a], rec_clip[2 * 2 * SR:k * FRAME])
