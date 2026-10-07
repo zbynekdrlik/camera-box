@@ -367,6 +367,20 @@ impl InputIdleClass {
 /// newest minus oldest sample time, `delta_frames` = the frames received across it, `prev` = the
 /// class of the previous tick (`Unclassified` after a (re)connect, a first sight or a counter reset).
 ///
+/// The rules, in order:
+///
+/// - the ring spans the full window: the #1341 rule decides, `Idle` below
+///   [`GENLOCK_IDLE_INPUT_MIN_FRAMES`], else `Live`;
+/// - a decided class (`Live` / `Idle`) holds while the ring is shorter, so a ring a long widget
+///   stall pruned never flips an idle input live;
+/// - an `Unclassified` input turns `Live` once its ring spans [`GENLOCK_IDLE_FAST_SPAN_MS`] with at
+///   least [`GENLOCK_IDLE_FAST_MIN_FRAMES`] in it, else stays `Unclassified` (the fast stage never
+///   says `Idle`).
+///
+/// A live source therefore contributes after ~5 s, a keep-alive one (~1 frame per 11 s) never; the
+/// widget's per-input event baseline is taken at the first `Live` tick ([`input_new_phase_events`]
+/// re-baselines on a not-contributing to contributing step).
+///
 /// Mirrored byte-for-byte by `genlock_input_idle_class` in `GenlockLockState.hpp`, parity-gated by
 /// `tests/genlock_idle_class_1302.rs`.
 pub fn input_idle_class(span_ms: i64, delta_frames: u64, prev: InputIdleClass) -> InputIdleClass {
@@ -377,9 +391,13 @@ pub fn input_idle_class(span_ms: i64, delta_frames: u64, prev: InputIdleClass) -
             InputIdleClass::Live
         };
     }
-    // RED stub: the pre-fix reading -- a connected input counts as live until the full window.
-    let _ = prev;
-    InputIdleClass::Live
+    if prev != InputIdleClass::Unclassified {
+        return prev;
+    }
+    if span_ms >= GENLOCK_IDLE_FAST_SPAN_MS && delta_frames >= GENLOCK_IDLE_FAST_MIN_FRAMES {
+        return InputIdleClass::Live;
+    }
+    InputIdleClass::Unclassified
 }
 
 // #1299 Part 4 + #1357 scope C — the wall-vs-monotonic `qpc_drift` term. The CUMULATIVE offset must
