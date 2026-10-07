@@ -114,3 +114,15 @@ def test_rig_health_runs_only_the_strih_hop():
 def test_help_prints_the_whole_header():
     r = subprocess.run(["bash", str(_TOOL), "--help"], capture_output=True, text=True)
     assert "a missing strih `cg` still FAILs" in r.stdout
+
+
+def test_the_strih_hop_source_is_overridable_for_the_live_cg_obs_input(tmp_path):
+    # issue 1302: since SongPlayer's B4 (songplayer 221) the strih-lx input receiving SP-program is
+    # named `CG-obs`; CG_CHAIN_STRIH_SRC selects it, the default stays `cg`.
+    logs = {"STRIH": _log(tmp_path, "strih", ["CG-obs"])}
+    r = _run(tmp_path, args=("--hops", "strih"), env_extra={"CG_CHAIN_STRIH_SRC": "CG-obs"}, logs=logs)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert any(ln.startswith("strih") and "CG-obs" in ln for ln in r.stdout.splitlines()), r.stdout
+    # Without the override the strih hop still looks for `cg` and fails on its absence.
+    r2 = _run(tmp_path, args=("--hops", "strih"), logs=logs)
+    assert r2.returncode != 0, r2.stdout
