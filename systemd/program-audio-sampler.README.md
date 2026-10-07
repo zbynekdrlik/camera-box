@@ -70,8 +70,7 @@ Only the sampler's Python changed (`program_audio.py`, `program_audio_sampler.py
 `program_audio_ndi.py`); the shim, the unit and the lease server did not. Once the `~/devel/camera-box`
 checkout carries the change, restart the sampler. The restart writes UNKNOWN for ~4 s (start +
 warm-up), and restreamer stops a running YouTube session on 2 consecutive UNKNOWN polls or 3 within
-60 s, so restart only while
-the rig lease is free:
+60 s, so restart only while the rig lease is free:
 
 ```bash
 if curl -sf http://127.0.0.1:8890/rig-lease.json \
@@ -84,7 +83,9 @@ sleep 8
 python3 ~/devel/camera-box/scripts/program_audio_guard.py      # verdict=MEASUREMENT ... chain >= 6, exit 0
 journalctl --user -u program-audio-sampler -n 5 --no-pager      # start line: continuity=sender timeline (frame+20ms)
 # after 10 min: the summary line reads receive_gaps=0 and few timeline_breaks (a real hole in the
-# sender audio, the nightly date step; 1 in the 25-min STEP-0 run); a busy dev1 shows up as
+# sender audio, the nightly date step; 1 in the 25-min STEP-0 run), and max_offset_ms (the sender's
+# largest jitter on frames that continued) well under the 41.3 ms tolerance (STEP 0: 24.5 and 29.5);
+# a busy dev1 shows up as
 # late_bursts=N with "late burst after 1.x s without audio: the sender timeline continues" lines,
 # and no MEASUREMENT -> UNKNOWN transition for them
 journalctl --user -u program-audio-sampler --since -15min --no-pager | grep -E 'summary|late burst|discontinuity'

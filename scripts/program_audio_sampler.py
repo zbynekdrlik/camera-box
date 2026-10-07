@@ -20,7 +20,8 @@ MEASUREMENT | FOREIGN | SILENT | UNKNOWN (scripts/program_audio.py) and atomical
 * Logging: a line per verdict CHANGE, the first NDI error frame / bad sample rate of a run, a line
   per span restart (`audio timeline discontinuity`, the no-timestamp `receive gap`) and per late
   burst the timeline proved continuous, and a summary every LOG_SUMMARY_S (timeline_breaks,
-  late_bursts, receive_gaps; a restart after an NDI error frame shows as error_frames) -- never a
+  late_bursts, receive_gaps, and max_offset_ms = the largest |offset| of a frame that continued,
+  the margin to the tolerance; a restart after an NDI error frame shows as error_frames) -- never a
   line per 2 s window (~43 000 a day).
 
 * MARKER REQUIREMENT (ROZHODNUTÉ issue 1404 comments 6026577906 + 6026826572): MEASUREMENT also
@@ -211,6 +212,7 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
     last_summary = mono()
     counts = {v: 0 for v in pa.VERDICTS}
     errors = bad_rate = gaps = breaks = late_bursts = 0
+    max_offset_ms = 0.0  # the largest |offset| of a frame that continued the sender timeline
     prev = None  # (timestamp, samples, sample_rate) of the previous audio block
     in_error = False
     bad_rate_logged = False
@@ -247,7 +249,9 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
         if block is not None and block.samples.shape[0] > 0:
             in_error = False
             if have_audio:
-                kind, detail = judge_continuity(prev, block, now - last_audio, receive_gap_s)
+                kind, detail, off_ms = judge_continuity(prev, block, now - last_audio, receive_gap_s)
+                if off_ms is not None and kind in ("continue", "late_burst"):
+                    max_offset_ms = max(max_offset_ms, abs(off_ms))
                 if kind == "timeline_break":
                     breaks += 1
                     restart_span(detail)
@@ -281,17 +285,19 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
                 last_verdict = "UNKNOWN"
         if now - last_summary >= LOG_SUMMARY_S:
             log("program-audio summary (last %.0f s): %s error_frames=%d bad_rate_frames=%d "
-                "timeline_breaks=%d late_bursts=%d receive_gaps=%d"
+                "timeline_breaks=%d late_bursts=%d receive_gaps=%d max_offset_ms=%.1f"
                 % (now - last_summary, " ".join(f"{k}={v}" for k, v in counts.items()),
-                   errors, bad_rate, breaks, late_bursts, gaps))
+                   errors, bad_rate, breaks, late_bursts, gaps, max_offset_ms))
             counts = {v: 0 for v in pa.VERDICTS}
             errors = bad_rate = gaps = breaks = late_bursts = 0
+            max_offset_ms = 0.0
             last_summary = now
 
 
-def judge_continuity(prev, block, arrival_gap_s: float, receive_gap_s: float) -> tuple[str, str]:
+def judge_continuity(prev, block, arrival_gap_s: float,
+                     receive_gap_s: float) -> tuple[str, str, float | None]:
     """How `block` follows the previous audio block `prev` = (timestamp, samples, sample_rate):
-    (kind, log detail), kind one of
+    (kind, log detail, ms off the sender timeline or None without timestamps), kind one of
       "continue"        on the sender timeline, arrival within receive_gap_s: nothing to say
       "late_burst"      on the sender timeline after an arrival gap over receive_gap_s: the span is
                         kept (the SDK queued the audio while dev1 starved the sampler)
@@ -304,17 +310,17 @@ def judge_continuity(prev, block, arrival_gap_s: float, receive_gap_s: float) ->
     if verdict == pa.UNKNOWN_TS:
         if arrival_gap_s > receive_gap_s:
             return "receive_gap", (f"receive gap of {arrival_gap_s:.1f} s (no NDI sender timestamp, "
-                                   "the arrival-time fallback)")
-        return "continue", ""
+                                   "the arrival-time fallback)"), None
+        return "continue", "", None
     off_ms = pa.timeline_offset_100ns(p_ts, p_n, p_sr, block.timestamp) * 1e3 / pa.NDI_TIME_UNITS_PER_S
     if verdict == pa.DISCONTINUITY:
         return "timeline_break", (f"audio timeline discontinuity: the frame sits {off_ms:+.1f} ms off "
                                   f"the sender's timeline (tolerance +-{tol * 1e3 / pa.NDI_TIME_UNITS_PER_S:.1f} ms, "
-                                  f"arrival gap {arrival_gap_s:.1f} s)")
+                                  f"arrival gap {arrival_gap_s:.1f} s)"), off_ms
     if arrival_gap_s > receive_gap_s:
         return "late_burst", (f"late burst after {arrival_gap_s:.1f} s without audio: the sender "
-                              f"timeline continues ({off_ms:+.1f} ms), the marker span is kept")
-    return "continue", ""
+                              f"timeline continues ({off_ms:+.1f} ms), the marker span is kept"), off_ms
+    return "continue", "", off_ms
 
 
 def _fmt(v) -> str:

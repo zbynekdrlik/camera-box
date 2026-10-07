@@ -170,7 +170,9 @@ level. Re-run the full calibration after any decoder or rule change:
     or ≤ 0) the old arrival rule applies (`RECEIVE_GAP_S` = 1 s, logged `receive gap of … (no NDI
     sender timestamp …)`). An NDI error frame still restarts the span unconditionally (stricter
     than the fallback; 0 error frames in the 6 h live journal).
-  - The 10-minute summary counts `timeline_breaks`, `late_bursts` and `receive_gaps` (fallback only);
+  - The 10-minute summary counts `timeline_breaks`, `late_bursts` and `receive_gaps` (fallback only),
+    and reports `max_offset_ms`: the largest |offset| of a frame that continued, i.e. the sender's
+    jitter against the 41.3 ms tolerance (the margin to watch);
     a restart after an NDI error frame shows as `error_frames`. Each restart and each late burst
     also logs one line.
   - STEP 0 (7.10.2026): a second, read-only sampler instance (private serve dir) took the live
@@ -188,7 +190,8 @@ level. Re-run the full calibration after any decoder or rule change:
     - the SDK `timestamp` and the sender's `timecode` agree to 2 µs: both are its wall clock at
       submission (`vendor/distroav/src/ndi-output.cpp`, `genlock_wall_now_100ns`);
     - a second 20-min run of the NEW loop on the live sender (56 250 frames): jitter up to 29.5 ms
-      (p99 18.2, so the margin to 41.3 ms is ~12 ms, watch it), 0 timeline breaks, 0 receive gaps,
+      (p99 18.2, so the margin to 41.3 ms is ~12 ms: watch `max_offset_ms`), 0 timeline breaks,
+      0 receive gaps,
       599 MEASUREMENT windows and only the start-up UNKNOWN.
     A probe can reuse the scratch recipe: subclass `NdiAudioReceiver.capture` to log
     `frame.timestamp`, run `program_audio_sampler.run` with a private serve dir, never the live
