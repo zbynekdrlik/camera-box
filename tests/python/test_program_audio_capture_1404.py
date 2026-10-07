@@ -367,12 +367,25 @@ def test_sigterm_stops_both_threads_and_writes_unknown(tmp_path, monkeypatch, sh
     monkeypatch.setattr(pan, "NdiAudioReceiver", _MainRx)
     _MainRx.instances.clear()
     before = (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT))
-    timer = threading.Timer(1.5, os.kill, args=(os.getpid(), signal.SIGTERM))
-    timer.start()
+    done = threading.Event()
+
+    def _term_once_capturing():
+        # signal only once main() is capturing (its handler is installed before the capture thread
+        # starts), never on a fixed timer that a slow runner could beat
+        end = time.monotonic() + 20.0
+        while not done.is_set() and time.monotonic() < end:
+            if _MainRx.instances and _MainRx.instances[-1].i > 10:
+                os.kill(os.getpid(), signal.SIGTERM)
+                return
+            time.sleep(0.05)
+
+    killer = threading.Thread(target=_term_once_capturing, daemon=True)
+    killer.start()
     try:
         rc = pas.main(["--serve-dir", str(tmp_path / "serve"), "--source", "S", "--marker-shim", shim_path])
     finally:
-        timer.cancel()
+        done.set()
+        killer.join(5)
         signal.signal(signal.SIGTERM, before[0])
         signal.signal(signal.SIGINT, before[1])
     assert rc == 0
@@ -472,6 +485,7 @@ def test_the_unit_gives_the_sampler_a_cpu_weight_and_no_nice():
     (0, 100, True, "can starve under load"),
     (0, None, True, "cpu.weight=unreadable"),
     (-5, 1000, False, "nice=-5 cpu.weight=1000"),
+    (-5, 100, True, "nice=-5 but its cgroup's cpu.weight=100"),
 ])
 def test_the_scheduling_line_warns_once_when_the_nice_is_not_lowered(nice, weight, warn, says):
     line = pas.scheduling_line(nice, weight, 0)
@@ -489,3 +503,270 @@ def test_scheduling_state_reads_the_cgroup_weight(tmp_path):
     nice, weight, _lim = pas.scheduling_state(str(cg), str(tmp_path / "root"))
     assert weight == 1000 and nice == os.getpriority(os.PRIO_PROCESS, 0)
     assert pas.scheduling_state(str(cg), str(tmp_path / "nowhere"))[1] is None
+
+
+
+# ---------------------------------------------------------------------------------------------
+# review round 1: the queue drop in the pure decision, a drop on an item the consumer never judges,
+# the arrival fallback with a drop, the sync path reads no clock, lag_ms, a date-step span is holed
+# ---------------------------------------------------------------------------------------------
+
+DROP4_100NS = 4 * FRAME * NDI_UNITS / SR
+
+
+def _tol():
+    return pa.continuity_tolerance_100ns(FRAME, SR)
+
+
+def _after_drop(extra_ms):
+    """The stamp of the frame after one frame and 4 dropped frames, `extra_ms` off that point."""
+    return TS0 + round(FRAME * NDI_UNITS / SR + DROP4_100NS + extra_ms * 10_000)
+
+
+@pytest.mark.parametrize("extra_ms, want", [
+    (0.0, (pa.BRIDGE, 4096)),
+    (10.0, (pa.BRIDGE, 4096)),      # send jitter: exactly the dropped audio, never round(offset * sr)
+    (-15.0, (pa.BRIDGE, 4096)),
+    (100.0, (pa.BRIDGE, 8896)),     # more missing than the drop: the whole offset (185.3 ms)
+    (-45.0, (pa.DISCONTINUITY, 0)),  # behind the dropped audio beyond the tolerance
+    (180.0, (pa.DISCONTINUITY, 0)),  # 265.3 ms in all: over the bridge limit
+])
+def test_a_known_drop_is_a_hole_of_exactly_the_dropped_audio(extra_ms, want):
+    assert pa.frame_continues(TS0, FRAME, SR, _after_drop(extra_ms), _tol(), dropped_100ns=DROP4_100NS) == want
+
+
+def test_a_known_drop_without_timestamps_is_still_a_hole():
+    undefined = pa.NDI_TIMESTAMP_UNDEFINED
+    assert pa.frame_continues(undefined, FRAME, SR, undefined, _tol(), dropped_100ns=DROP4_100NS) \
+        == (pa.BRIDGE, 4096)
+    assert pa.frame_continues(undefined, FRAME, SR, undefined, _tol(), dropped_100ns=3_000_000) \
+        == (pa.DISCONTINUITY, 0)
+    assert pa.frame_continues(undefined, FRAME, SR, undefined, _tol()) == (pa.UNKNOWN_TS, 0)
+
+
+def test_a_date_step_with_a_known_drop_bridges_only_the_drop():
+    step = 2_000_000  # 200 ms
+    assert pa.frame_continues(TS0, FRAME, SR, _after_drop(200.0), _tol(), dropped_100ns=DROP4_100NS,
+                              wall_steps=(step,)) == (pa.DATE_STEP, 4096)
+    assert pa.frame_continues(TS0, FRAME, SR, _after_drop(200.0) + 3_000_000 - round(DROP4_100NS), _tol(),
+                              dropped_100ns=3_000_000, wall_steps=(step,)) == (pa.DISCONTINUITY, 0)
+
+
+def test_the_overflow_bridges_the_dropped_audio_even_when_the_next_frame_is_late(rec_clip, tmp_path):
+    """The frame after the dropped 4 is stamped 10 ms late (send jitter): the bridge is still exactly
+    the 4096 dropped samples, never the 95.3 ms offset the timeline alone would give."""
+    keep = int(0.5 / FRAME_S)
+    rx = _GatedRx(rec_clip[: 6 * SR], keep + 4)
+    k = keep + 4
+    rx.blocks[k] = rx.blocks[k]._replace(timestamp=rx.blocks[k].timestamp + 100_000)
+    cap = pac.CaptureThread(rx, timeout_ms=50, max_queue_s=0.5)
+    rx.cap = cap
+    payloads, lines = [], []
+    cap.start()
+    try:
+        assert rx.first_done.wait(10)
+        rx.gate.set()
+        pas.run(rx, str(tmp_path), source="S", decoder=NoMarkers(), capture=cap, on_write=payloads.append,
+                log=lines.append, capture_timeout_ms=50,
+                should_stop=lambda: rx.exhausted and cap.qsize() == 0)
+    finally:
+        cap.stop()
+    overflow = [line for line in lines if "queue overflow" in line]
+    assert len(overflow) == 1 and "bridged with 4096 zero samples" in overflow[0], lines
+    assert payloads[-1]["bridged_ms"] == pytest.approx(4 * FRAME_S * 1e3, abs=0.06)
+
+
+def _audio_block(i, ts=None):
+    x = np.full((FRAME, 2), 0.01, dtype=np.float32)
+    return _Block(SR, x, _stamp(i) if ts is None else ts)
+
+
+def test_a_drop_never_rides_on_an_item_the_consumer_does_not_judge():
+    """The drop goes to the next AUDIO block that gets in, never to an error item or an empty block
+    (those are never judged, so the hole would be lost)."""
+    cap = pac.CaptureThread(object(), timeout_ms=10, max_queue_s=0.05)
+    first = pac.Captured(_audio_block(0), None, 1.0, 0)
+    cap._put(first)
+    cap._put(pac.Captured(_audio_block(1), None, 1.02, 0))
+    cap._put(pac.Captured(_audio_block(2), None, 1.04, 0))   # 3 frames > 50 ms: dropped
+    cap._put(pac.Captured(None, ConnectionError("lost"), 1.05, None))
+    empty = _Block(SR, np.zeros((0, 2), dtype=np.float32), _stamp(3))
+    cap._put(pac.Captured(empty, None, 1.06, 0))
+    got = [cap.get(10) for _ in range(4)]
+    assert [g.dropped_frames for g in got] == [0, 0, 0, 0]
+    cap._put(pac.Captured(_audio_block(4), None, 1.08, 0))   # the queue has room again
+    last = cap.get(10)
+    assert last.dropped_frames == 1 and last.dropped_100ns == pytest.approx(FRAME * NDI_UNITS / SR)
+
+
+class _Scripted:
+    """A capture side that hands the consumer a fixed list of Captured items (no thread, no clock)."""
+
+    def __init__(self, items):
+        self.items = list(items)
+
+    def get(self, _timeout_ms):
+        return self.items.pop(0) if self.items else None
+
+    def qsize(self):
+        return len(self.items)
+
+
+def test_without_timestamps_a_drop_after_an_arrival_gap_restarts_like_the_fallback(tmp_path):
+    """No sender timestamps and an arrival gap over RECEIVE_GAP_S: the arrival fallback restarts the
+    span, as without a drop -- the known drop cannot vouch for what else the gap lost."""
+    u = pa.NDI_TIMESTAMP_UNDEFINED
+    items = [pac.Captured(_audio_block(i, u), None, 100.0 + i * FRAME_S, None) for i in range(5)]
+    items.append(pac.Captured(_audio_block(9, u), None, 100.0 + 5 * FRAME_S + 1.5, None,
+                              dropped_frames=4, dropped_100ns=DROP4_100NS))
+    lines = []
+    pas.run(object(), str(tmp_path), source="S", decoder=NoMarkers(), capture=_Scripted(items),
+            mono=lambda: 200.0, max_loops=len(items), log=lines.append)
+    assert any("receive gap of 1.5 s" in line and "starts over" in line for line in lines), lines
+    assert not any("bridged with" in line for line in lines), lines
+
+
+def test_without_timestamps_a_drop_with_no_arrival_gap_is_bridged(tmp_path):
+    u = pa.NDI_TIMESTAMP_UNDEFINED
+    items = [pac.Captured(_audio_block(i, u), None, 100.0 + i * FRAME_S, None) for i in range(5)]
+    items.append(pac.Captured(_audio_block(9, u), None, 100.0 + 5 * FRAME_S, None,
+                              dropped_frames=4, dropped_100ns=DROP4_100NS))
+    lines = []
+    pas.run(object(), str(tmp_path), source="S", decoder=NoMarkers(), capture=_Scripted(items),
+            mono=lambda: 200.0, max_loops=len(items), log=lines.append)
+    assert any("queue overflow" in line and "bridged with 4096 zero samples" in line for line in lines), lines
+
+
+def test_the_in_loop_capture_reads_no_clock_by_default(tmp_path, monkeypatch):
+    """run() without a capture thread (the calibration CLI, the loop tests) reads no wall clock unless
+    one is passed: a real dantesync date step during a test or a calibration must never decide it."""
+    import inspect
+
+    assert inspect.signature(pas.run).parameters["wall_offset"].default is None
+    seen = []
+    observe = pa.WallSteps.observe
+
+    def spy(self, arrival_s, offset_ns):
+        seen.append(offset_ns)
+        return observe(self, arrival_s, offset_ns)
+
+    monkeypatch.setattr(pa.WallSteps, "observe", spy)
+    blocks = [_audio_block(i) for i in range(10)]
+    state = {"i": 0}
+
+    class Rx:
+        def capture(self, _t):
+            if state["i"] >= len(blocks):
+                return None
+            state["i"] += 1
+            return blocks[state["i"] - 1]
+
+        def connections(self):
+            return 1
+
+    pas.run(Rx(), str(tmp_path), source="S", decoder=NoMarkers(), mono=lambda: 0.0, max_loops=12,
+            log=lambda m: None)
+    assert seen == [None] * len(blocks)
+
+
+def test_the_payload_carries_the_consumer_lag(rec_clip, tmp_path):
+    """lag_ms (additive): how old the newest audio of the judged window was when it was written. The
+    2 s consumer stall shows up there, so a lagging sampler is never mistaken for a fresh one."""
+    audio = rec_clip[: int(5.5 * SR)]
+    sdk = _PacedSdk(audio, hold_s=1.3)
+    cap = pac.CaptureThread(sdk, timeout_ms=100)
+    payloads = []
+    stall = _GilStall(2.0)
+
+    def on_write(p):
+        payloads.append(p)
+        stall(p)
+
+    cap.start()
+    try:
+        pas.run(sdk, str(tmp_path), source="S", decoder=FixedChain(), capture=cap, on_write=on_write,
+                log=lambda m: None, capture_timeout_ms=100,
+                should_stop=lambda: sdk.exhausted and cap.qsize() == 0)
+    finally:
+        cap.stop()
+    assert payloads[0]["lag_ms"] is None                     # the start payload: no window yet
+    lags = [p["lag_ms"] for p in payloads[1:]]
+    assert all(isinstance(v, (int, float)) and v >= 0 for v in lags), lags
+    assert max(lags) >= 1000.0, lags                          # the window right after the stall
+    assert lags[0] < 500.0, lags
+
+
+def test_the_lag_is_null_when_not_sampling():
+    from datetime import datetime, timezone
+
+    p = pa.build_payload("UNKNOWN", None, None, now=datetime.now(timezone.utc), window_s=2.0, source="S")
+    assert p["lag_ms"] is None
+    q = pa.build_payload("MEASUREMENT", -35.0, 15.0, now=datetime.now(timezone.utc), window_s=2.0, source="S",
+                         marker_chain=7, lag_ms=12.34)
+    assert q["lag_ms"] == 12.3
+
+
+class _ShortChain:
+    """A decoder that finds 2 markers on one line in any span: a chain of 2."""
+
+    def decode(self, samples, sample_rate):
+        ch = samples.shape[1]
+        return [[(0.1, 17), (0.6, 47)]] + [[] for _ in range(ch - 1)]
+
+
+def test_a_span_holding_a_date_step_is_holed_for_the_short_chain_rule():
+    """A DATE_STEP inserts no zeros, yet its +-20 ms match can absorb a small real loss: a short chain
+    over a span that holds one reads UNKNOWN, never FOREIGN on its own."""
+    win = np.full((2 * SR, 2), 0.01, dtype=np.float32)
+    rng = np.random.default_rng(5)
+    win[:, 0] = (0.03 * np.sin(2 * np.pi * 442 * np.arange(2 * SR) / SR)
+                 + 0.001 * rng.standard_normal(2 * SR)).astype(np.float32)
+    win[:, 1] = win[:, 0]
+    for rebased, want in ((False, "FOREIGN"), (True, "UNKNOWN")):
+        span = pas.MarkerSpan()
+        pas.classify_window(win, SR, span, _ShortChain())
+        verdict, _rms, outside, reason, _m, chain = pas.classify_window(win, SR, span, _ShortChain(),
+                                                                         rebased=rebased)
+        assert outside < pa.FOREIGN_OUTSIDE_BAND_PCT and chain == 2
+        assert verdict == want, (rebased, verdict, reason)
+        if rebased:
+            assert "date step" in reason
+
+
+def test_the_two_windows_around_a_date_step_are_marked(rec_clip, tmp_path, monkeypatch):
+    """The window that holds the date step and the next one (the 4 s span is two windows) are judged
+    as holding it; a later window is not."""
+    marks = []
+    real = pas.classify_window
+
+    def spy(win, sr, span, decoder, real_mask=None, rebased=False):
+        marks.append(rebased)
+        return real(win, sr, span, decoder, real_mask, rebased=rebased)
+
+    monkeypatch.setattr(pas, "classify_window", spy)
+    k = int(round(6.1 * SR)) // FRAME
+    blocks = [_Block(SR, rec_clip[i:i + FRAME], TS0 + (i * NDI_UNITS) // SR + (2_000_000 if i // FRAME >= k else 0))
+              for i in range(0, rec_clip.shape[0], FRAME)]
+    clock = {"t": 100.0}
+    state = {"i": 0}
+
+    class Rx:
+        def capture(self, _t):
+            i = state["i"]
+            if i >= len(blocks):
+                return None
+            clock["t"] += FRAME / SR
+            state["i"] = i + 1
+            return blocks[i]
+
+        def connections(self):
+            return 1
+
+    def wall():
+        return 1_000_000_000 + (200_000_000 if state["i"] - 1 >= k else 0)
+
+    lines = []
+    pas.run(Rx(), str(tmp_path), source="S", decoder=NoMarkers(), mono=lambda: clock["t"],
+            max_loops=len(blocks), log=lines.append, wall_offset=wall)
+    assert any("timeline date step" in line for line in lines), lines
+    assert marks == [False, False, False, True, True], marks

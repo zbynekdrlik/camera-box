@@ -12,9 +12,11 @@ samples; the sampler inserts that many zeros before the frame and keeps the span
 timeline beyond the tolerance, a hole over 250 ms and an undefined timestamp restart as before.
 
 The safety checks restreamer asked for (coordinator, 7.10.2026): a bridged hole never turns FOREIGN
-into MEASUREMENT and never delays the FOREIGN latch; a window that is mostly bridged zeros + music
-never reads MEASUREMENT; the chain is decoded over REAL samples only (the zeros are never handed to
-the decoder, so they cannot add a word); the spectral share stays a ratio of the real signal.
+into MEASUREMENT and never delays a SPECTRAL (broadband) FOREIGN; a window that is mostly bridged
+zeros + music never reads MEASUREMENT; the chain is decoded over REAL samples only (the zeros are
+never handed to the decoder, so they cannot add a word); the spectral share stays a ratio of the
+real signal. Since ROZHODNUTÉ 6037765523 an in-band chord (FOREIGN only through a short chain) reads
+UNKNOWN while its span holds bridged audio, and FOREIGN at most two windows later.
 """
 from __future__ import annotations
 
@@ -502,11 +504,11 @@ def test_music_mostly_of_bridged_zeros_never_reads_measurement(decoder, tmp_path
 
 
 @pytest.mark.parametrize("kind", ["pink", "chord"])
-def test_measurement_then_music_mostly_of_bridged_zeros_reads_as_without_the_holes(decoder, rec_clip,
-                                                                                  tmp_path, kind):
-    """Measurement, then music about two thirds bridged zeros: every window reads what it reads
+def test_measurement_then_music_mostly_of_bridged_zeros_fails_closed(decoder, rec_clip, tmp_path, kind):
+    """Measurement, then music about two thirds bridged zeros. Pink: every window reads what it reads
     without the holes (the first music window's span still holds 2 s of real measurement, in both),
-    so FOREIGN comes in the same window and the latch starts with the same payload."""
+    so FOREIGN comes in the same window and the latch starts with the same payload. Chord: a window
+    reads the same or UNKNOWN (ROZHODNUTÉ 6037765523), never MEASUREMENT once the music began."""
     audio = np.concatenate([rec_clip[:6 * SR], _music(kind, 8.0)])
     ref, _ = _run(_frames(audio)[0], tmp_path, decoder)
     spy = _ZeroWordDecoder(decoder)

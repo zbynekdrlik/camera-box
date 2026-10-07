@@ -323,6 +323,7 @@ def test_a_holed_unknown_says_why(decoder, rec_clip, tmp_path):
     audio = np.concatenate([rec_clip, rec_clip])
     payloads, _lines = _run_with_wall(_live_pattern(audio, "stall"), tmp_path, decoder)
     holed = [p for p in payloads if p["verdict"] == "UNKNOWN" and "bridged" in (p.get("reason") or "")]
+    assert len(holed) == 3, [(p["verdict"], p["marker_chain"], p.get("reason")) for p in payloads]
     for p in holed:
         assert p["marker_chain"] is not None and p["marker_chain"] < pa.MARKER_CHAIN_MIN
         assert "never FOREIGN" in p["reason"]
