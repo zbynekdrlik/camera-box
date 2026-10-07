@@ -347,11 +347,11 @@ which the boxes' last full-bundle deploy predates — so obs.dll-only leaves tho
 **A PUBLIC stats-struct change is NOT obs.dll-only-safe (issue 1302).** `struct obs_genlock_stats` and
 `struct obs_genlock_output_stats` live on the FRONTEND's stack and obs.dll fills them with no size,
 so a newer obs.dll that writes a bigger struct crashes the old obs64.exe. Never hand-swap obs.dll for
-such a change. `deploy-genlock-fleet.sh --fast` refuses an `obs_genlock_stats` change on the box (the
-box's `GENLOCK_STATS_ABI.txt` vs the build's `OBS_GENLOCK_STATS_VERSION`, step 0f, exit 13; a
-full-bundle deploy records the marker). An `obs_genlock_output_stats` change is caught only at plan
-time (a Windows `--fast` is refused unless that struct's version is 1) and by the CI pin, until the
-marker records its version too.
+such a change. `deploy-genlock-fleet.sh --fast` refuses a change of EITHER struct on the box (the
+box's two-line `GENLOCK_STATS_ABI.txt` vs the build's `OBS_GENLOCK_STATS_VERSION` and
+`OBS_GENLOCK_OUTPUT_STATS_VERSION`, step 0f, exit 13, naming the struct that differs; a full-bundle
+deploy records the marker, and a one-line marker from before ROZHODNUTÉ 6030159870 refuses as missing
+output stats). A struct change must bump its version; the CI pins each struct body to its version.
 
 Procedure (per box, ~10 files actually differ but deploy the whole stage for NO-DRIFT):
 

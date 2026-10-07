@@ -322,13 +322,12 @@ lowest)**; else LOCKED (green).
   Since the issue-1302 follow-up `deploy-genlock-fleet.sh --fast` refuses it mechanically: every
   full-bundle deploy records its frontend's `OBS_GENLOCK_STATS_VERSION` in `GENLOCK_STATS_ABI.txt`,
   and the FAST program refuses (exit 13) when that marker is missing or differs from the new
-  obs.dll's version (`genlock-fleet-deploy.md`). A struct change MUST bump
-  `OBS_GENLOCK_STATS_VERSION` (the obs.h comment's rule), or the gate cannot see it; the pytest pins
-  the struct body to its version so a change without a bump fails CI. `struct
-  obs_genlock_output_stats` (the per-output facet) is on the frontend's stack the same way; the gate
-  does not compare its version yet, so its body is pinned at `OBS_GENLOCK_OUTPUT_STATS_VERSION 1`
-  (a change fails CI) and a Windows `--fast` of a commit whose output version is not 1 is refused at
-  plan time, until the gate covers it. CI is the first place the C/Qt compiles — locally only
+  obs.dll's version (`genlock-fleet-deploy.md`). `struct obs_genlock_output_stats` (the per-output
+  facet) is on the frontend's stack the same way, so the marker records
+  `OBS_GENLOCK_OUTPUT_STATS_VERSION` too (line 2, `output_stats=<N>`, ROZHODNUTÉ 6030159870) and the
+  gate compares both. A struct change MUST bump its version (the obs.h comment's rule), or the gate
+  cannot see it; the pytest pins each struct body to its version so a change without a bump fails
+  CI. CI is the first place the C/Qt compiles — locally only
   `cargo fmt --all --check` + the pure Rust module (`rustc --test`) + the parity/guard tests
   (standalone) verify; the blog refactor's format/arg types were lift-compiled under `gcc
   -Wformat=2 -Werror`.
