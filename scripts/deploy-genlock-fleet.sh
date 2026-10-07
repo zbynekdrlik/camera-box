@@ -179,7 +179,7 @@ fleet_pick_run_at_sha() {
 #   markers + DEPLOYED_AT temp-then-rename, sha256-verifies the deployed obs.dll against the bundle
 #   manifest (fail-closed), and prints a box-backup RETENTION PLAN (keep newest KEEP; delete only
 #   when $fleetConfirmRetention). Env-free (the genlock build carries no OBS_GENLOCK_*/OBS_BURN_*).
-#   STATS_ABI (issue 1302): FAST refuses at step (0f) unless the box's GENLOCK_STATS_ABI.txt equals it; FULL records it.
+#   STATS_ABI (issue 1302): FAST refuses at step (0f) unless the box's GENLOCK_STATS_ABI.txt equals it; FULL clears it (3c), records it (5b).
 build_windows_deploy_program() {
   local box="$1" mode="$2" stage="$3" obs_dir="$4" has_ahk="$5" backup_root="$6" keep="$7" gsha="$8" dsha="$9" confirm="${10:-0}" stats_abi="${11:-}"
   # Escape ' for the PowerShell single-quoted strings (double it) -- incl. gsha/dsha (--sha is
@@ -393,6 +393,7 @@ New-Item -ItemType Directory -Force -Path \$backupDir | Out-Null
 Copy-Item -Force (Join-Path \$obsDir 'bin\\64bit\\obs.dll') (Join-Path \$backupDir 'obs.dll.pre-789') -ErrorAction SilentlyContinue
 Copy-Item -Force (Join-Path \$obsDir 'GENLOCK_BUILD_SHA.txt') (Join-Path \$backupDir 'GENLOCK_BUILD_SHA.txt.pre-789') -ErrorAction SilentlyContinue
 ${plugin_backup_block}
+$(genlock_stats_abi_clear_ps "$mode")
 
 ${copy_block}
 
@@ -845,7 +846,7 @@ main() {
     [ -n "$stage" ] || { echo "ERROR: --plan requires --stage (no network in plan mode)" >&2; exit 2; }
     [ -n "$sha_override" ] || { echo "ERROR: --plan requires --sha (no network in plan mode)" >&2; exit 2; }
     local sha="$sha_override" stats_abi
-    stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode")" || exit 3
+    stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$boxes")" || exit 3
     echo "# ===== issue 789 genlock FLEET deploy PLAN — run=${run_id} sha=${sha} boxes=${boxes} mode=${mode} ====="
     # subshell so the comma-split IFS never leaks past the loop (the loop only prints).
     ( IFS=','; for b in $boxes; do
@@ -879,7 +880,7 @@ main() {
     || { echo "ERROR: could not resolve headSha for anchor run $run_id" >&2; exit 3; }
   [ -n "$sha" ] || { echo "ERROR: empty headSha for anchor run $run_id" >&2; exit 3; }
   echo "# anchor run $run_id -> canonical SHA $sha; deploying: $boxes (mode $mode; retention --yes=$yes)"
-  local stats_abi; stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode")" || exit 3
+  local stats_abi; stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$boxes" 1)" || exit 3
 
   local workdir; workdir="$(mktemp -d)"
   # shellcheck disable=SC2064

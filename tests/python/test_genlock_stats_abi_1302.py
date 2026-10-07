@@ -485,6 +485,14 @@ def test_execute_mode_fetches_origin_once_before_giving_up_1302(stale_clone):
     assert "fetching origin once" in r.stderr
 
 
+def test_an_abbreviated_sha_is_never_fetched_1302(stale_clone):
+    """A fetch needs the full object id; a short SHA (every test SHA) never reaches the network."""
+    clone, sha4 = stale_clone
+    r = _lib('rc=0; genlock_stats_abi_resolve "$2" "$3" fast stream 1 || rc=$?; echo "rc=$rc"', sha4[:12], clone)
+    assert r.stdout == "rc=3\n", r.stderr
+    assert "fetching origin once" not in r.stderr
+
+
 @pytest.mark.parametrize("box", BOXES)
 def test_a_full_deploy_clears_the_marker_before_the_copy_1302(box):
     """A copy that fails half way must not leave a new frontend under the old marker."""

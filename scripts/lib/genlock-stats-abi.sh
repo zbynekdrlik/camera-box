@@ -12,16 +12,23 @@
 # issue 1302 comment 6028838843 (Approach 1, part 2).
 #
 # The mechanism:
-#   * every full-bundle deploy records its frontend's stats version in GENLOCK_STATS_ABI.txt next to
-#     GENLOCK_BUILD_SHA.txt (the Windows program step (5b); the Linux genlock_write_markers 5th arg);
+#   * every full-bundle deploy the planner drives records its frontend's stats version in
+#     GENLOCK_STATS_ABI.txt next to GENLOCK_BUILD_SHA.txt (the Windows program clears it at step (3c)
+#     before the copy and writes it at step (5b); the Linux genlock_write_markers 5th arg). An
+#     install that cannot name its version (setup-imag.sh's own provisioning) removes it;
 #   * the planner reads the version of the build it deploys from that build's own obs.h
 #     (`git show <sha>:vendor/obs-studio/libobs/obs.h`), never from the checkout;
 #   * the FAST program reads the box's marker FIRST and refuses (exit 13) when it is missing or names
 #     another version, before anything on the box changes.
 #
-# genlock_fast_abi_verdict is the ONE decision. The PowerShell gate the FAST program carries
-# (genlock_fast_abi_gate_ps) transcribes it; tests/python/test_genlock_stats_abi_1302.py runs both on
-# the same vectors and requires the same verdict and the same refusal text.
+# genlock_fast_abi_verdict is the REFERENCE decision; what decides on the box is its transcription,
+# the PowerShell gate the FAST program carries (genlock_fast_abi_gate_ps).
+# tests/python/test_genlock_stats_abi_1302.py runs both on the same vectors and requires the same
+# verdict and the same refusal text.
+#
+# Scope: the gate compares OBS_GENLOCK_STATS_VERSION. struct obs_genlock_output_stats is on the
+# frontend's stack too (OBS_GENLOCK_OUTPUT_STATS_VERSION 1, never bumped); the pytest pins its body,
+# so a change to it fails CI until this gate also records + compares its version.
 
 # The obs.h path inside the repo, read at the deployed build's commit.
 GENLOCK_STATS_ABI_OBS_H="vendor/obs-studio/libobs/obs.h"
@@ -120,6 +127,18 @@ Write-Host "stats ABI OK: frontend stats ABI v\$abiBox == new obs.dll v\$abiNew 
 PS
 }
 
+# genlock_stats_abi_clear_ps MODE -> step (3c) of the Windows deploy program, right before the copy.
+#   FULL: remove GENLOCK_STATS_ABI.txt, so a copy that fails half way never leaves a new frontend under
+#   the old marker (step 5b writes the new version once every copy passed). FAST: nothing.
+genlock_stats_abi_clear_ps() {
+  [ "${1:-}" = "full" ] || return 0
+  cat <<PS
+# (3c) issue 1302: FULL -- remove ${GENLOCK_STATS_ABI_MARKER} before the copy; step (5b) records the new
+#      build's version once every copy passed, so a half-done copy reads as "missing" to a fast deploy.
+Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path \$obsDir '${GENLOCK_STATS_ABI_MARKER}')
+PS
+}
+
 # genlock_stats_abi_marker_ps MODE NEW_ABI -> step (5b) of the Windows deploy program, after the other
 #   markers (it uses the program's Write-MarkerAtomic). FULL with a version: record it. FULL without one
 #   (the planner could not read obs.h): REMOVE the marker, so a later fast deploy refuses until a full
@@ -163,21 +182,31 @@ genlock_stats_abi_stage() {
   fi
 }
 
-# genlock_stats_abi_resolve SHA REPO MODE -> the stats version of the build at SHA, or "" when it cannot
-#   be read. FULL: "" is allowed (the deploy removes the box marker) and named on stderr. FAST: "" is
-#   REFUSED (rc 3), because the fast gate cannot compare an unknown version.
+# genlock_stats_abi_resolve SHA REPO MODE BOXES [FETCH] -> the stats version of the build at SHA, or
+#   "" when it cannot be read. FETCH=1 (execute mode; plan mode has no network) fetches that one commit
+#   from origin before giving up (a full 40-hex SHA only: the anchor run's headSha is one, and the
+#   tests' short SHAs never reach the network). "" is REFUSED (rc 3) for a FAST deploy that swaps an obs.dll (BOXES names stream
+#   or resolume), because the gate cannot compare an unknown version; otherwise it is allowed and named
+#   on stderr (each box's marker is removed).
 genlock_stats_abi_resolve() {
-  local sha="${1:-}" repo="${2:-}" mode="${3:-}" abi
+  local sha="${1:-}" repo="${2:-}" mode="${3:-}" boxes="${4:-}" fetch="${5:-0}" abi
   abi="$(genlock_stats_abi_at_sha "$sha" "$repo")" || abi=""
+  # a fetch needs the full object id (git cannot fetch an abbreviation); the anchor run's headSha is one
+  if [ -z "$abi" ] && [ "$fetch" = "1" ] && [[ "$sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    echo "# genlock stats ABI: $sha is not readable in $repo -- fetching origin once" >&2
+    # the one commit only (never every branch): bounded, no credential prompt
+    GIT_TERMINAL_PROMPT=0 timeout 120 git -C "$repo" fetch -q origin "$sha" >/dev/null 2>&1 || true
+    abi="$(genlock_stats_abi_at_sha "$sha" "$repo")" || abi=""
+  fi
   if [ -n "$abi" ]; then
     echo "# genlock stats ABI of $sha: v$abi (${GENLOCK_STATS_ABI_OBS_H} at that commit)" >&2
     printf '%s\n' "$abi"
     return 0
   fi
-  if [ "$mode" = "fast" ]; then
+  if [ "$mode" = "fast" ] && [[ ",$boxes," == *,stream,* || ",$boxes," == *,resolume,* ]]; then
     echo "ERROR: cannot read OBS_GENLOCK_STATS_VERSION from ${GENLOCK_STATS_ABI_OBS_H} at $sha in $repo -- a --fast deploy cannot be gated on an unknown stats ABI; fetch the commit (git fetch origin) or deploy --full" >&2
     return 3
   fi
-  echo "WARNING: cannot read OBS_GENLOCK_STATS_VERSION from ${GENLOCK_STATS_ABI_OBS_H} at $sha in $repo -- this full deploy REMOVES each box's ${GENLOCK_STATS_ABI_MARKER}, so a later --fast refuses until a full deploy records a known version" >&2
+  echo "WARNING: cannot read OBS_GENLOCK_STATS_VERSION from ${GENLOCK_STATS_ABI_OBS_H} at $sha in $repo -- this deploy REMOVES each full-bundle box's ${GENLOCK_STATS_ABI_MARKER}, so a later --fast refuses until a full deploy records a known version" >&2
   return 0
 }
