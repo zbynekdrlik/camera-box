@@ -538,7 +538,11 @@ def test_the_clear_before_the_copy_is_fail_closed_1302(tmp_path, state, rc):
         assert "HARNESS AFTER THE CLEAR" in r.stdout
         assert not marker.exists()
     else:
-        assert r.returncode != 0, r.stdout + r.stderr
+        # a named failure with the program's copy-failure code, never a raw exception (OBS is
+        # stopped at this point, so the operator must be told what to bring back)
+        assert r.returncode == 4, r.stdout + r.stderr
+        assert "(3c) FAILED: could not remove" in r.stdout
+        assert "nothing was copied" in r.stdout
         assert "HARNESS AFTER THE CLEAR" not in r.stdout
         assert marker.exists()
 
