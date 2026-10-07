@@ -188,11 +188,21 @@ level. Re-run the full calibration after any decoder or rule change:
       inside the zeros (4 in one chord trial) and a chain one higher than the delivered stretches in
       3 of 40 in-band trials. A span with no bridge decodes in ONE call as before, so the bars cannot
       move (re-run 7.10.2026: bar a 1847 windows min 6, bar b chords/tremolo/melody 1, bandnoise 3).
-    - **The spectral share stays a ratio of the real signal.** Zeros add no energy to either side.
-      Music windows with 2–11-frame holes or two thirds zeros keep their share within 5 points
-      (pink ~80 %, speech-shaped ~42 %, all over the bar). A 2-frame hole in a REAL measurement
-      window moves its share by up to +12.7 points (rec3b, 286 windows × 2 positions, highest
-      28.7 %); a 5 ms fade at the hole edges moves it as much, so it is the lost audio, not the edges.
+    - **The level is the delivered samples' own** (`analyse(samples, sr, real)`, review round 1).
+      Over the window with its zeros the level falls (a 250 ms hole = −0.58 dB, two thirds zeros
+      = −4.8 dB), and quiet broadband music just over the −60 dBFS bar read SILENT, which the gate
+      passes. A window with nothing delivered is UNKNOWN.
+    - **The spectral share stays a ratio of the delivered signal.** Zeros add no energy to either
+      side. Music windows with 2–11-frame holes or two thirds zeros keep their share within 5 points
+      (pink ~80 %, speech-shaped ~42 %, all over the bar).
+    - **Residual: a hole can lift a REAL measurement window over the bar (a false FOREIGN).** The
+      measurement's in-band energy comes in marker bursts (a decoded word every ~0.5 s), so a hole
+      that removes a burst raises the share of what was delivered. Random positions on the full
+      rec3b + rec2 recordings, 5340 window cases each: one 2-frame hole crossed the bar 3 times
+      (worst 32.8 %), two holes in one window 8 times (worst 53 %). A 5 ms fade of the hole edges
+      gave 2 and 10, so it is the lost burst, not the edge step, and no fade is applied. Before the
+      bridge the window holding a hole was never judged (the span restarted, UNKNOWN). Reported on
+      the Design-question thread (6036260703) next to the date step.
     - Restreamer's safety checks, pinned: music (pink, or an in-band chord) arriving before, across
       or after a bridged hole reads FOREIGN in the same window and starts the latch with the same
       payload as without the hole; music two thirds bridged zeros never reads MEASUREMENT and the

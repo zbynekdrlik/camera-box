@@ -113,10 +113,11 @@ sleep 8
 python3 ~/devel/camera-box/scripts/program_audio_guard.py      # verdict=MEASUREMENT ... chain >= 6, exit 0
 journalctl --user -u program-audio-sampler -n 5 --no-pager      # start line: ... holes up to 250ms bridged
 curl -s http://dev1:8890/program-audio.json; echo               # carries "holes_bridged" + "bridged_ms"
-# after 10 min: the summary line ends "holes_bridged=N bridged_ms=X"; the +41...+53 ms holes read
-# "audio timeline hole: the frame sits +4x.x ms ahead ... bridged with 2048 zero samples (42.7 ms),
-# the marker span is kept" with no MEASUREMENT -> UNKNOWN for them; timeline_breaks counts only the
-# holes over 250 ms, frames behind the timeline and the larger date steps
+# after 10 min: the summary line ends "holes_bridged=N bridged_ms=X"; a +44.7 ms hole reads
+# "audio timeline hole: the frame sits +44.7 ms ahead ... bridged with 2146 zero samples (44.7 ms),
+# the marker span is kept" (round(offset * 48 kHz): 1987...2525 for the live +41.4...+52.6 ms) with no
+# MEASUREMENT -> UNKNOWN for it; timeline_breaks counts only the holes over 250 ms, frames behind
+# the timeline, a format change at a hole and the larger date steps
 journalctl --user -u program-audio-sampler --since -15min --no-pager | grep -E 'summary|bridged|discontinuity'
 ```
 

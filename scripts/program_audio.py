@@ -78,14 +78,17 @@ plus send jitter, arrival gap 0.1 s, never answered by a negative one: real hole
 dropped while dev1 was loaded, each a 4 s UNKNOWN warm-up (a 10-min summary read timeline_breaks=33,
 UNKNOWN=22). The timestamp says how many samples are missing, so the zeros put every later sample
 back on its sender-timeline position and the marker chain stays on its line (stitching the hole
-would move every later marker 2.56 indices, past the +-2 tolerance). The zeros are silence in the window; the marker chain is decoded over
-the REAL samples only (program_audio_sampler.decode_real_samples: each delivered stretch on its
-own, so no word can come from the zeros), and the spectral share stays a ratio of the real signal
+would move every later marker 2.56 indices, past the +-2 tolerance). The zeros are silence in the
+window, but: the marker chain is decoded over the REAL samples only
+(program_audio_sampler.decode_real_samples: each delivered stretch on its own, so no word can come
+from the zeros); the level is the delivered samples' own (analyse(..., real)), else quiet foreign
+audio would sink under the SILENT bar; the spectral share stays a ratio of the delivered signal
 (zeros add no energy to either side). A frame BEHIND the timeline beyond the tolerance (an overlap,
-a backward jump) and a hole over HOLE_BRIDGE_MAX_MS still restart.
-Open question (issue 1404 comment 6036260703): a FORWARD timestamp step of up to 250 ms with no
-sample lost (a dantesync date step) is bridged too; its markers then sit off the line and a span
-holding it can read a short chain.
+a backward jump), a hole over HOLE_BRIDGE_MAX_MS and a format change at a hole still restart.
+Open (issue 1404 comment 6036260703): a FORWARD timestamp step of up to 250 ms with no sample lost
+(a dantesync date step) is bridged too, its markers then sit off the line and a span holding it can
+read a short chain; and a hole that removes a marker burst can lift a real measurement window over
+the FOREIGN bar (3 of 5340 single 2-frame holes on rec3b + rec2, 8 of 5340 with two per window).
 STEP 0 (7.10.2026, 25 min / 70 304 frames of the live stream program, received by a second sampler
 instance while dev1 was loaded; issue 1404 comment 6030714990): the sender's submission jitter
 reached 24.5 ms against a tolerance of 41.3 ms (1024 samples at 48 kHz + 20 ms); every arrival gap
