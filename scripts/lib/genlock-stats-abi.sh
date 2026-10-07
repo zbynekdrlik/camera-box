@@ -141,9 +141,14 @@ genlock_stats_abi_clear_ps() {
   cat <<PS
 # (3c) issue 1302: FULL -- remove ${GENLOCK_STATS_ABI_MARKER} before the copy; step (5b) records the new
 #      build's version once every copy passed, so a half-done copy reads as "missing" to a fast deploy.
-#      A marker it cannot remove stops the program here, before the copy.
+#      A marker it cannot remove stops the program here, before the copy, named, with the copy-failure code.
 \$abiStale = Join-Path \$obsDir '${GENLOCK_STATS_ABI_MARKER}'
-if (Test-Path -LiteralPath \$abiStale) { Remove-Item -LiteralPath \$abiStale -Force -ErrorAction Stop }
+try {
+  if (Test-Path -LiteralPath \$abiStale) { Remove-Item -LiteralPath \$abiStale -Force -ErrorAction Stop }
+} catch {
+  Write-Host "(3c) FAILED: could not remove \$abiStale (\$_) -- nothing was copied. OBS is stopped, and AutoHotkey64 + the keep-alive tasks stay as steps (1) and (1b) left them: bring them back by hand, then run the deploy again." -ForegroundColor Red
+  exit 4
+}
 PS
 }
 
