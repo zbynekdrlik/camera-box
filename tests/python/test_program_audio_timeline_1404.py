@@ -326,6 +326,20 @@ def test_a_micro_correction_inside_the_tolerance_keeps_the_span(tmp_path):
     assert _verdicts(payloads) == ["UNKNOWN", "UNKNOWN"] + ["MEASUREMENT"] * 4
 
 
+def test_the_summary_reports_the_largest_offset_that_continued(tmp_path):
+    """The 10-minute summary carries max_offset_ms, the sender jitter's margin to the tolerance: here
+    a +15 ms micro-correction (continued), then a late burst that also triggers the summary."""
+    stereo, sr = _fixture("base-R-rec")
+    blocks = _blocks(stereo[: 10 * sr], sr, jumps={at_s(4, sr): 150_000})
+    payloads, lines = _run(blocks, tmp_path, FixedChain(),
+                           arrival_gaps={at_s(6, sr): pas.LOG_SUMMARY_S + 1.0})
+    summary = [line for line in lines if "program-audio summary" in line]
+    assert len(summary) == 1, lines
+    assert "max_offset_ms=15.0" in summary[0]
+    assert "timeline_breaks=0 late_bursts=1 receive_gaps=0" in summary[0]
+    assert "UNKNOWN" not in _verdicts(payloads)[2:]
+
+
 @pytest.mark.parametrize("undefined", [INT64_MAX, 0])
 def test_an_undefined_timestamp_falls_back_to_the_arrival_gap(tmp_path, undefined):
     stereo, sr = _fixture("base-R-rec")
