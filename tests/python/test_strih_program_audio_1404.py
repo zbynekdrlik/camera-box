@@ -10,10 +10,13 @@ Pinned here:
     was built from other sources, the unit written only when it differs, enable + daemon-reload +
     try-restart -- NEVER a start;
   * verify-strih item 41 (`strih_program_audio_grade_rows`): files + unit + enabled, the shim current,
-    the unit's state against the TEST marker (running = a FRESH verdict on the env file's endpoint, read
-    with retries; down without the marker = a NOTE; down with it, failed, or a crash loop = a FAIL);
-  * rig-mode.sh: TEST leaves the marker and starts the sampler (read 2 s later), EVENT removes it and
-    stops it (`scripts/lib/program-audio-mode.sh`), report-only;
+    the unit's state against the TEST marker (running in TEST mode = a FRESH verdict -- the guard's
+    -1 s .. --max-age window -- on the env file's endpoint, read with retries; down without the marker =
+    a NOTE; running WITHOUT the marker, down with it, failed, a crash loop or an unreadable state = a
+    FAIL);
+  * rig-mode.sh: TEST leaves the marker, clears a failed state and starts the sampler (read 2 s later),
+    EVENT removes the marker, stops it and clears a failed state (`scripts/lib/program-audio-mode.sh`),
+    report-only;
   * the installed file list covers the sampler's whole import closure + the shim's sources.
 
 Every bash run sources the lib under the caller's `set -euo pipefail`; values reach bash as
@@ -65,6 +68,8 @@ case "${args[0]}" in
   start)
     date +%s.%N > "$FAKE_STATE/started" ;;
   is-active)
+    # the operator's user manager unreachable: nothing on stdout, the error on stderr, rc 1
+    [ -e "$FAKE_STATE/bus-down" ] && { echo "Failed to connect to bus: No medium found" >&2; exit 1; }
     if [ -e "$FAKE_STATE/die-after-1s" ] && [ -e "$FAKE_STATE/started" ] \
        && python3 -c 'import sys, time; sys.exit(0 if time.time() - float(open(sys.argv[1]).read()) > 1.0 else 1)' "$FAKE_STATE/started"; then
       s=failed
@@ -178,6 +183,8 @@ def test_the_template_pins_the_e_cores_normal_priority_and_the_event_marker():
     assert re.search(r"^EnvironmentFile=-%h/\.config/camera-box/program-audio-sampler\.env$", t, re.M)
     assert re.search(r"^WantedBy=default\.target$", t, re.M)
     assert re.search(r"^Restart=on-failure$", t, re.M)
+    # a user manager cannot see system targets: an After=/Wants= on one would only look like ordering
+    assert not re.search(r"^(After|Wants|Requires)=.*network-online\.target", t, re.M)
 
 
 @pytest.mark.parametrize("content, want", [
@@ -342,6 +349,7 @@ def test_test_mode_but_down_fails(tmp_path):
 def test_a_running_sampler_must_answer_a_fresh_verdict(tmp_path):
     box = Box(tmp_path)
     assert box.install().returncode == 0
+    _marker(box)
     (box.state / "active").write_text("active")
     rows = box.rows()
     assert rows[2][0] == "FAIL" and "does not answer" in rows[2][1]
@@ -359,9 +367,56 @@ def test_a_running_sampler_must_answer_a_fresh_verdict(tmp_path):
     assert box.rows()[2][0] == "FAIL"
 
 
+@pytest.mark.parametrize("age, want", [
+    (-0.5, "OK"),     # strih-lx is the dantesync date master: its nightly step can put the clock behind
+    (-1.0, "OK"),
+    (10.0, "OK"),
+    (-1.5, "FAIL"),
+    (10.5, "FAIL"),
+])
+def test_freshness_is_the_guards_own_window(tmp_path, age, want):
+    box = Box(tmp_path)
+    assert box.install().returncode == 0
+    _marker(box)
+    (box.state / "active").write_text("active")
+    (box.state / "curl-body").write_text('{"verdict": "MEASUREMENT", "source": "S", "age_s": %s}' % age)
+    row = box.rows()[2]
+    assert row[0] == want, row
+    if want == "FAIL":
+        assert "stale" in row[1] and "-1..10 s" in row[1]
+
+
+def test_the_freshness_window_is_pinned_to_the_guard():
+    import program_audio_guard as pag
+    assert float(_lib_value("STRIH_PROGRAM_AUDIO_MAX_AGE_S")) == pag.DEFAULT_MAX_AGE_S
+    assert float(_lib_value("STRIH_PROGRAM_AUDIO_FUTURE_TOLERANCE_S")) == pag.NEGATIVE_AGE_TOLERANCE_S
+
+
+def test_running_without_the_test_marker_fails(tmp_path):
+    """Running in EVENT mode: rig-mode.sh event removed the marker but the stop failed or timed out, or
+    the marker was removed by hand -- the state the opt-in marker exists to prevent."""
+    box = Box(tmp_path)
+    assert box.install().returncode == 0
+    (box.state / "active").write_text("active")
+    (box.state / "curl-body").write_text('{"verdict": "MEASUREMENT", "source": "S", "age_s": 0.2}')
+    row = box.rows()[2]
+    assert row[0] == "FAIL" and "not in TEST mode" in row[1] and "rig-mode.sh event" in row[1], row
+
+
+def test_an_unreadable_state_names_the_user_manager(tmp_path):
+    box = Box(tmp_path)
+    assert box.install().returncode == 0
+    _marker(box)
+    (box.state / "bus-down").write_text("")
+    row = box.rows()[2]
+    assert row[0] == "FAIL" and "unreadable" in row[1] and "linger" in row[1], row
+    assert "crash loop" not in row[1]
+
+
 def test_the_endpoint_read_retries_a_sampler_that_is_still_binding(tmp_path):
     box = Box(tmp_path)
     assert box.install().returncode == 0
+    _marker(box)
     (box.state / "active").write_text("active")
     (box.state / "curl-body").write_text('{"verdict": "UNKNOWN", "source": "S", "age_s": 0.1}')
     (box.state / "curl-fail-first").write_text("2")
@@ -372,6 +427,9 @@ def test_the_endpoint_read_retries_a_sampler_that_is_still_binding(tmp_path):
     ("PROGRAM_AUDIO_HTTP_PORT=18891\n", "http://127.0.0.1:18891/program-audio.json"),
     ("PROGRAM_AUDIO_HTTP_PORT='18892'\nPROGRAM_AUDIO_HTTP_BIND=10.77.9.202\n", "http://10.77.9.202:18892/program-audio.json"),
     ("PROGRAM_AUDIO_HTTP_BIND=0.0.0.0\n", "http://127.0.0.1:8891/program-audio.json"),
+    # systemd's EnvironmentFile takes whitespace around `=` and after the value
+    ("PROGRAM_AUDIO_HTTP_PORT = 18893  \n PROGRAM_AUDIO_HTTP_BIND =10.77.9.202\t\n",
+     "http://10.77.9.202:18893/program-audio.json"),
 ])
 def test_the_endpoint_follows_the_env_file(tmp_path, env, url):
     box = Box(tmp_path)
@@ -379,6 +437,7 @@ def test_the_endpoint_follows_the_env_file(tmp_path, env, url):
     f = box.home / _lib_value("STRIH_PROGRAM_AUDIO_ENV_FILE")
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text(env)
+    _marker(box)
     (box.state / "active").write_text("active")
     (box.state / "curl-body").write_text('{"verdict": "SILENT", "source": "S", "age_s": 1.0}')
     rows = box.rows()
@@ -392,6 +451,7 @@ def test_a_running_sampler_with_no_endpoint_fails(tmp_path):
     f = box.home / _lib_value("STRIH_PROGRAM_AUDIO_ENV_FILE")
     f.parent.mkdir(parents=True, exist_ok=True)
     f.write_text("PROGRAM_AUDIO_HTTP_PORT=0\n")
+    _marker(box)
     (box.state / "active").write_text("active")
     rows = box.rows()
     assert rows[2][0] == "FAIL" and "no endpoint" in rows[2][1]
@@ -506,7 +566,10 @@ def _remote(tmp_path, mode, active):
 def test_test_mode_leaves_the_marker_and_starts_the_unit(tmp_path, active, rc0):
     box, r = _remote(tmp_path, "test", active)
     assert (r.returncode == 0) is rc0 and f"program-audio-sampler: {active}" in r.stdout
-    assert f"systemctl --user start {UNIT}" in box.calls()
+    calls = box.calls()
+    assert f"systemctl --user start {UNIT}" in calls
+    # a start-limit hit (StartLimitBurst) is cleared first, or the start is refused for up to 300 s
+    assert calls.index(f"systemctl --user reset-failed {UNIT}") < calls.index(f"systemctl --user start {UNIT}")
     assert (box.home / _lib_value("STRIH_PROGRAM_AUDIO_TEST_MARKER")).exists()
 
 
@@ -529,7 +592,10 @@ def test_event_mode_removes_the_marker_and_stops_the_unit(tmp_path, active, rc0)
     cmd = _mode("program_audio_mode_remote_cmd", "event", env=box.env()).stdout
     r = subprocess.run(["bash", "-c", cmd], env=box.env(), capture_output=True, text=True, timeout=30)
     assert (r.returncode == 0) is rc0 and f"program-audio-sampler: {active}" in r.stdout
-    assert f"systemctl --user stop {UNIT}" in box.calls()
+    calls = box.calls()
+    assert f"systemctl --user stop {UNIT}" in calls
+    # `stop` leaves a failed unit failed: item 41 would FAIL in EVENT mode until a reboot
+    assert calls.index(f"systemctl --user stop {UNIT}") < calls.index(f"systemctl --user reset-failed {UNIT}")
     assert not m.exists()
 
 
