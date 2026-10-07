@@ -164,7 +164,7 @@ sudo GH_TOKEN=<gh-pat-repo-read> ./setup-strih.sh --box strih-lx --yes
 
 # 2. start it (TEST mode) from dev1 -- rig-mode.sh test does this itself ("[program-audio 10.77.9.202]
 #    test: program-audio-sampler: active"); by hand:
-ssh newlevel@10.77.9.202 'rm -f ~/.config/camera-box/program-audio-sampler.event-mode; systemctl --user start program-audio-sampler.service'
+ssh newlevel@10.77.9.202 'mkdir -p ~/.config/camera-box && touch ~/.config/camera-box/program-audio-sampler.test-mode; systemctl --user start program-audio-sampler.service'
 
 # 3. verify on strih-lx (as newlevel)
 journalctl --user -u program-audio-sampler -n 12 --no-pager
@@ -184,13 +184,16 @@ python3 ~/devel/camera-box/scripts/program_audio_guard.py --url http://10.77.9.2
 #    (Design-question 6037861831), read UNKNOWN at worst, never FOREIGN
 journalctl --user -u program-audio-sampler --since -15min --no-pager | grep -E 'summary|queue overflow|date step|discontinuity'
 
-# 5. EVENT: rig-mode.sh event stops it and leaves the marker ("[program-audio 10.77.9.202] event:
-#    program-audio-sampler: inactive"); a reboot during the production keeps it down (ExecCondition);
-#    rig-mode.sh test brings it back.
+# 5. EVENT: rig-mode.sh event removes the TEST marker and stops it ("[program-audio 10.77.9.202] event:
+#    program-audio-sampler: inactive"); without the marker every start is skipped (ExecCondition), so a
+#    reboot during the production keeps it down; rig-mode.sh test brings it back.
 ```
 
 Then switch restreamer's guard URL to `http://10.77.9.202:8891/program-audio.json` (restreamer's own
-repo). After that the dev1 unit can be disabled (`systemctl --user disable --now
+repo). In the SAME cut-over step, change `DEFAULT_URL` in `scripts/program_audio_guard.py` (and its
+docstring) from `http://dev1:8890/program-audio.json` to the strih-lx URL, so a camera-box caller
+without `--url` follows. Never do this before the strih-lx sampler serves: until then that default would
+read nothing (UNKNOWN, fail closed). After that the dev1 unit can be disabled (`systemctl --user disable --now
 program-audio-sampler.service` on dev1, only while the lease is free). Until then the dev1 unit keeps
 serving the dev1 route. Its unit file lost `Nice=10`: on dev1, `cp` + `daemon-reload` + a restart while
 the lease is free, or leave it until it is disabled.

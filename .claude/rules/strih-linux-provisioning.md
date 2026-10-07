@@ -239,6 +239,8 @@ reads into `scripts/lib/strih-obs-collection.sh` before adding items 37/38 (the 
 Item 41 (issue 1404, the stream program-audio sampler moved here from dev1) is such a lib grader:
 `scripts/lib/strih-program-audio.sh` (sourced by strih-provision.sh) holds setup-strih step 16e + the
 item's 3 rows; verify-strih gained 4 lines. Details: `.claude/rules/program-audio-guard.md` ("The host").
+**setup-strih.sh is exactly 1000 lines with step 16e:** the next step goes into a lib too (the
+step-16d/16e shape: one lettered `step` line + one lib call in setup-strih).
 
 **Before the first strih-lx deploy of this change, read the master's command line** (read-only, on the
 box): `tr '\0' ' ' < /proc/$(systemctl show -p MainPID --value dantesync)/cmdline | sed 's/ *$//'` must

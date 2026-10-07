@@ -501,8 +501,12 @@ shim + numpy next to restreamer's broadcast encoder).
   - `CPUAffinity=` = the box's own `/sys/devices/cpu_atom/cpus` (12-15 on strih-lx), read the way
     `strih_lx_lowprio_prefix` reads it (whitespace stripped; a value that is not a cpu list = no pin;
     no cpu_atom = no affinity line). Normal priority (no Nice/CPUWeight: never ahead of OBS).
-  - `ExecCondition=/usr/bin/test ! -e %h/.config/camera-box/program-audio-sampler.event-mode`: the EVENT
-    marker skips every start, so the sampler stays down across a reboot during a production.
+  - `ExecCondition=/usr/bin/test -e %h/.config/camera-box/program-audio-sampler.test-mode`: an OPT-IN
+    TEST marker (review round 3). Without it every start is skipped, so the sampler is DOWN by default:
+    a fresh provisioning, and a reboot during a production (strih-lx lingers the user manager,
+    `Linger=yes`), never start it. An opt-out EVENT marker would not exist before the first
+    `rig-mode.sh event` with this code. strih-lx's `/usr/bin/test` is uutils; its exit 1 on a missing
+    file was read live (systemd 259 there).
   - `ExecStart` runs the installed checkout-layout copy `/usr/local/lib/camera-box/scripts/…`;
     `WantedBy=default.target` (no X needed; a reboot in TEST mode brings it back).
   - libndi: `/usr/local/lib/libndi.so.6` (strih-lx's NDI 6.3.2 runtime) is a lookup candidate.
@@ -521,13 +525,27 @@ shim + numpy next to restreamer's broadcast encoder).
   - newlevel has no passwordless sudo on strih-lx: everything root goes through setup-strih itself.
     The firewall is off; no ufw rule is added.
 - **verify-strih item 41** (`strih_program_audio_grade_report`, 3 rows): files + unit + enabled; the
-  shim current; the endpoint. A running unit must answer `/program-audio.json` with a verdict (else
-  FAIL); `failed` is a FAIL; a stopped unit is a NOTE (EVENT marker present, or not started since the
-  provisioning: setup-strih never starts it).
+  shim current; the unit's state against the TEST marker:
+  - the state is re-read up to 3 x (1 s apart) while it is in a transition: a starting sampler
+    settles, a crash loop (`activating`, auto-restart) stays and is a FAIL. `failed` is a FAIL;
+  - running = its endpoint must answer a FRESH verdict (`age_s` <= 10, the guard's `--max-age`) at the
+    port/bind of its env file (`PROGRAM_AUDIO_HTTP_PORT` / `_BIND`, a wildcard bind read on
+    127.0.0.1), read up to 3 x (a grade right after step 16e's try-restart, before the bind). A
+    running sampler with port 0 is a FAIL;
+  - down WITH the TEST marker = a FAIL; down without it = a NOTE (EVENT mode, or never put in TEST
+    mode: setup-strih's own step 17 runs right after an enable-only install).
 - **rig-mode.sh** (`scripts/lib/program-audio-mode.sh`, sourced; one call each, after the relay step):
-  TEST removes the marker and `systemctl --user start`s the unit; EVENT leaves the marker and stops
-  it. Over plain ssh as the operator (`sshpass … timeout … ssh`, `UserKnownHostsFile=/dev/null`);
-  report-only: a WARNING naming the state, never rig-mode's exit status (a stopped sampler fails closed
-  for its consumers). A Windows strih is one SKIP line.
+  TEST leaves the marker, `systemctl --user start`s the unit and reads its state 2 s later (a
+  Type=simple unit reads active the moment it is forked, so a sampler that dies on import would pass
+  an immediate read); EVENT removes the marker and stops it. Over plain ssh as the operator
+  (`sshpass … timeout … ssh`, `UserKnownHostsFile=/dev/null`; a plain ssh command gets
+  `XDG_RUNTIME_DIR=/run/user/1000` on strih-lx); report-only: a WARNING naming the state, never
+  rig-mode's exit status (a stopped sampler fails closed for its consumers). A Windows strih is one
+  SKIP line.
+- **The shared read-only handler drops an idle client after 10 s** (`ReadOnlyHandler.timeout`): the
+  endpoint listens on 0.0.0.0 on a production box with no firewall; the lease server gets it too.
+- **strih-lx's stack:** Python 3.14.4 and apt's numpy 2.3.5 (dev1: 3.12 + 2.4.6). The sampler suites
+  (365 cases) and the marker calibration (bar a min chain 6, bar b unchanged) also pass under 3.14 +
+  numpy 2.3.5 (`uv run --python 3.14 --with numpy==2.3.5`).
 - strih-lx's USB 5 GbE NIC still has rx_missed bursts (issue 1242 / 1387): NDI rides TCP/RUDP, so they
   show as late bursts, which the sender-timeline logic keeps.
