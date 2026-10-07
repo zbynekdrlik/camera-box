@@ -22,8 +22,10 @@
 #   GENLOCK_BUILD_SHA.txt   -- the deployed genlock-monorepo build commit (libobs/obs-frontend)
 #   DISTROAV_BUILD_SHA.txt  -- the deployed distroav build commit
 #   DEPLOYED_AT             -- an ISO-8601 timestamp of this deploy
-#   GENLOCK_STATS_ABI.txt   -- issue 1302: the deployed build's OBS_GENLOCK_STATS_VERSION (the 5th
-#                              argument); a fast obs.dll swap refuses unless it equals the new one
+#   GENLOCK_STATS_ABI.txt   -- issue 1302: the deployed build's OBS_GENLOCK_STATS_VERSION on line 1 and
+#                              `output_stats=<OBS_GENLOCK_OUTPUT_STATS_VERSION>` on line 2 (the 5th
+#                              argument, the pair `<stats>:<output_stats>`); a fast obs.dll swap refuses
+#                              unless both equal the new one's (scripts/lib/genlock-stats-abi.sh)
 
 # _genlock_marker_atomic DEST CONTENT -> write CONTENT + one trailing newline to DEST atomically
 # (temp-then-rename). Returns 0 on success, 1 on any I/O failure (cleaning up the temp file). Private
@@ -48,9 +50,11 @@ _genlock_marker_atomic() {
 #   Writes the three genlock deploy markers into MARKER_DIR, each atomically (temp-then-rename).
 #   DEPLOYED_AT defaults to `date -Is`. A missing MARKER_DIR / GENLOCK_SHA / DISTROAV_SHA is a
 #   fail-loud usage error (return 2) -- never a silent partial write. Returns 0 on success, 1 on an
-#   I/O failure, 2 on a usage error. STATS_ABI (issue 1302): a version (a positive integer) writes
-#   GENLOCK_STATS_ABI.txt with the others; empty or malformed REMOVES any GENLOCK_STATS_ABI.txt an older
-#   deploy left (it would name another build's ABI), with a note on stderr for a malformed one.
+#   I/O failure, 2 on a usage error. STATS_ABI (issue 1302): the pair `<stats>:<output_stats>` (two
+#   positive integers) writes GENLOCK_STATS_ABI.txt with the others, as two lines `<stats>` and
+#   `output_stats=<output_stats>`; empty or anything else (a bare stats version too) REMOVES any
+#   GENLOCK_STATS_ABI.txt an older deploy left (it would name another build's ABI, or one struct only),
+#   with a note on stderr for a non-empty one.
 genlock_write_markers() {
   local marker_dir="${1:-}" genlock_sha="${2:-}" distroav_sha="${3:-}" deployed_at="${4:-}" stats_abi="${5:-}"
   if [ -z "$marker_dir" ]; then
@@ -69,10 +73,11 @@ genlock_write_markers() {
   _genlock_marker_atomic "$marker_dir/GENLOCK_BUILD_SHA.txt"  "$genlock_sha"  || return 1
   _genlock_marker_atomic "$marker_dir/DISTROAV_BUILD_SHA.txt" "$distroav_sha" || return 1
   _genlock_marker_atomic "$marker_dir/DEPLOYED_AT"           "$deployed_at"  || return 1
-  if [[ "$stats_abi" =~ ^[1-9][0-9]{0,8}$ ]]; then
-    _genlock_marker_atomic "$marker_dir/GENLOCK_STATS_ABI.txt" "$stats_abi" || return 1
+  if [[ "$stats_abi" =~ ^([1-9][0-9]{0,8}):([1-9][0-9]{0,8})$ ]]; then
+    _genlock_marker_atomic "$marker_dir/GENLOCK_STATS_ABI.txt" \
+      "${BASH_REMATCH[1]}"$'\n'"output_stats=${BASH_REMATCH[2]}" || return 1
   else
-    [ -z "$stats_abi" ] || echo "genlock_write_markers: STATS_ABI '$stats_abi' is not a version -- GENLOCK_STATS_ABI.txt removed" >&2
+    [ -z "$stats_abi" ] || echo "genlock_write_markers: STATS_ABI '$stats_abi' is not a <stats>:<output_stats> pair -- GENLOCK_STATS_ABI.txt removed" >&2
     if ! rm -f "$marker_dir/GENLOCK_STATS_ABI.txt" 2>/dev/null; then
       echo "genlock_write_markers: could not remove $marker_dir/GENLOCK_STATS_ABI.txt" >&2; return 1
     fi
