@@ -55,9 +55,11 @@ SHA marker 14:58) while dev carried v4.
     own message kept on stderr when it fails. Plan mode never fetches, so a test's short SHA never
     reaches the network.
   - Still unreadable (a missing / duplicate / malformed define, named in the message): a `--fast` that
-    swaps an obs.dll is REFUSED (exit 3, "fetch the commit or deploy --full"). That is a box with a
-    win-* MCP in the list: `fleet_boxes_swap_obs_dll` in the per-box table, the one predicate main's
-    own Windows switch reads too.
+    swaps an obs.dll is REFUSED (exit 3: "fetch the commit or deploy --full" when the commit is not
+    in the checkout, "deploy --full" when its stats version read fine and only the output-stats
+    define is missing, since a fetch cannot help there). That is a box with a win-* MCP in the list:
+    `fleet_boxes_swap_obs_dll` in the per-box table, the one predicate main's own Windows switch reads
+    too.
   - Any other run warns and the full-bundle programs REMOVE the box's marker, so a later fast deploy
     refuses until a full deploy records a known pair.
   - A readable version is carried as it is, whatever its value: the plan-time stopgap that refused a
@@ -81,17 +83,24 @@ SHA marker 14:58) while dev carried v4.
   decides on the box, transcribes it. The marker is read as raw bytes, ASCII-decoded, split on LF,
   every ASCII whitespace inside a line removed, blank lines skipped, `-cmatch '^[1-9][0-9]{0,8}$'` on
   line 1 and `-cmatch '^output_stats=([1-9][0-9]{0,8})$'` on line 2 (case-sensitive like the bash
-  `=~`), compared as strings. The bash parser `_genlock_stats_abi_marker_fields` strips the explicit
-  ASCII set ` \t\r\v\f`, never a locale class. A pair that reaches the builders is validated part by
-  part first, so a quote in an operator `--sha` never reaches either program.
+  `=~`), compared as strings. The bash side is locale-independent too (review round 1):
+  `_genlock_stats_abi_marker_fields` strips the explicit ASCII set ` \t\r\v\f`, and every bash
+  `=~` pattern spells its digits out (`[123456789][0123456789]{0,8}`, the hex SHA set likewise). A
+  bracket RANGE such as `[1-9]` follows the locale's collation, and under en_US.UTF-8 it also matches
+  Arabic-Indic, superscript and fullwidth digits the gate refuses; a pytest pins that no bash `=~`
+  pattern in the stats-ABI code uses one. `genlock_stats_abi_pair_from_marker` reads a NUL byte as
+  `?` (bash `read` would drop it silently; the gate reads it as a non-digit). A pair that reaches the
+  builders is validated part by part first, so a quote in an operator `--sha` never reaches either
+  program.
 - **A struct change must bump its version** (the rule in obs.h's comment). The gate compares
   versions, so the pytest pins each struct's body (comments stripped, the first 16 hex digits of its
   sha256) to its version: a field change without a bump fails CI.
 - **Tests:** `tests/python/test_genlock_stats_abi_1302.py`:
   - the reader (the repo's obs.h, a throwaway two-commit repo whose working tree differs), the
     verdict vectors (each struct alone, both, the one-line marker, malformed lines, partial pairs);
-  - the (0f) block RUN in pwsh on 25 marker/pair vectors against the bash verdict (same result, same
-    text), and the (5b) writer run in pwsh feeding the (0f) gate;
+  - the (0f) block RUN in pwsh on 31 marker/pair vectors (incl. non-ASCII digits and NUL bytes)
+    against the bash verdict, run in a UTF-8 locale (en_US.UTF-8 where the box has it), same result,
+    same text; and the (5b) writer run in pwsh feeding the (0f) gate;
   - the emitted program order for stream + resolume, a pwsh parse + PS-7-only token scan of every
     program, the whole FAST program run in pwsh against a box without the right marker (exit 13, no
     file changed);

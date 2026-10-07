@@ -43,9 +43,11 @@ GENLOCK_STATS_ABI_OBS_H="vendor/obs-studio/libobs/obs.h"
 GENLOCK_STATS_ABI_MARKER="GENLOCK_STATS_ABI.txt"
 
 # genlock_stats_abi_is_version TEXT -> 0 when TEXT is a stats version (a positive integer without a
-# leading zero, at most 9 digits), else 1. The PowerShell gate uses the same pattern.
+# leading zero, at most 9 digits), else 1. The PowerShell gate uses the same pattern. Every bash
+# pattern here spells its digits out: a bracket RANGE such as [1-9] follows the locale's collation,
+# and under en_US.UTF-8 it also matches non-ASCII digits the gate refuses (review round 1).
 genlock_stats_abi_is_version() {
-  [[ "${1:-}" =~ ^[1-9][0-9]{0,8}$ ]]
+  [[ "${1:-}" =~ ^[123456789][0123456789]{0,8}$ ]]
 }
 
 # genlock_stats_abi_part PAIR 1|2 -> the stats (1) or output-stats (2) version of PAIR
@@ -64,7 +66,7 @@ genlock_stats_abi_part() {
 
 # genlock_stats_abi_is_pair PAIR -> 0 when both parts of PAIR are versions (and nothing follows), else 1.
 genlock_stats_abi_is_pair() {
-  [[ "${1:-}" =~ ^[1-9][0-9]{0,8}:[1-9][0-9]{0,8}$ ]]
+  [[ "${1:-}" =~ ^[123456789][0123456789]{0,8}:[123456789][0123456789]{0,8}$ ]]
 }
 
 # _genlock_stats_abi_marker_fields (stdin: a GENLOCK_STATS_ABI.txt's text) -> two lines: what the
@@ -90,7 +92,7 @@ _genlock_stats_abi_marker_fields() {
     printf 'missing (no output_stats line in %s)\n' "$GENLOCK_STATS_ABI_MARKER"
   elif [ "$n" -gt 2 ]; then
     printf 'unreadable (%s has more than two lines)\n' "$GENLOCK_STATS_ABI_MARKER"
-  elif [[ "$l2" =~ ^output_stats=([1-9][0-9]{0,8})$ ]]; then
+  elif [[ "$l2" =~ ^output_stats=([123456789][0123456789]{0,8})$ ]]; then
     printf 'v%s\n' "${BASH_REMATCH[1]}"
   else
     printf 'unreadable (line 2 of %s is not output_stats=<version>)\n' "$GENLOCK_STATS_ABI_MARKER"
@@ -99,14 +101,15 @@ _genlock_stats_abi_marker_fields() {
 
 # genlock_stats_abi_pair_from_marker (stdin: a GENLOCK_STATS_ABI.txt's text) -> its `<stats>:<output_stats>`
 #   pair when it names both versions, else nothing. Always rc 0. setup-strih.sh reads the planner's
-#   staged marker back with it.
+#   staged marker back with it. A NUL byte, which bash read would drop silently, is read as '?'
+#   (neither whitespace nor a digit), the way the PowerShell gate reads it.
 genlock_stats_abi_pair_from_marker() {
   local fields s o
-  fields="$(_genlock_stats_abi_marker_fields)"
+  fields="$(tr '\000' '?' | _genlock_stats_abi_marker_fields)"
   s="${fields%%$'\n'*}"; o="${fields#*$'\n'}"
-  if [[ "$s" =~ ^v([1-9][0-9]{0,8})$ ]]; then
+  if [[ "$s" =~ ^v([123456789][0123456789]{0,8})$ ]]; then
     s="${BASH_REMATCH[1]}"
-    [[ "$o" =~ ^v([1-9][0-9]{0,8})$ ]] && printf '%s:%s\n' "$s" "${BASH_REMATCH[1]}"
+    [[ "$o" =~ ^v([123456789][0123456789]{0,8})$ ]] && printf '%s:%s\n' "$s" "${BASH_REMATCH[1]}"
   fi
   return 0
 }
@@ -137,7 +140,7 @@ genlock_stats_abi_from_obs_h() {
 #   define is unreadable.
 genlock_stats_abi_at_sha() {
   local sha="${1:-}" repo="${2:-}" define="${3:-OBS_GENLOCK_STATS_VERSION}" text
-  [[ "$sha" =~ ^[0-9a-fA-F]{7,40}$ ]] || return 1
+  [[ "$sha" =~ ^[0123456789abcdefABCDEF]{7,40}$ ]] || return 1
   [ -n "$repo" ] || return 1
   text="$(git -C "$repo" show "${sha}:${GENLOCK_STATS_ABI_OBS_H}" 2>/dev/null)" || return 1
   printf '%s\n' "$text" | genlock_stats_abi_from_obs_h "$define"
@@ -321,7 +324,7 @@ genlock_stats_abi_resolve() {
   pair="$(_genlock_stats_abi_read_pair "$sha" "$repo")"
   # an unreadable stats version means the commit is not in the checkout (every genlock commit defines
   # it); a fetch needs the full object id (git cannot fetch an abbreviation), the anchor run's headSha
-  if [ -z "${pair%%:*}" ] && [ "$fetch" = "1" ] && [[ "$sha" =~ ^[0-9a-fA-F]{40}$ ]]; then
+  if [ -z "${pair%%:*}" ] && [ "$fetch" = "1" ] && [[ "$sha" =~ ^[0123456789abcdefABCDEF]{40}$ ]]; then
     echo "# genlock stats ABI: $sha is not readable in $repo -- fetching origin once" >&2
     # the one commit only (never every branch): bounded, no credential prompt; git's reason is kept
     out="$(GIT_TERMINAL_PROMPT=0 timeout 120 git -C "$repo" fetch -q origin "$sha" 2>&1)" || rc=$?
@@ -336,7 +339,10 @@ genlock_stats_abi_resolve() {
   [ -n "${pair%%:*}" ] || unread="OBS_GENLOCK_STATS_VERSION"
   [ -n "${pair#*:}" ] || unread="${unread:+$unread and }OBS_GENLOCK_OUTPUT_STATS_VERSION"
   if [ "$fast" = 1 ]; then
-    echo "ERROR: cannot read $unread from ${GENLOCK_STATS_ABI_OBS_H} at $sha in $repo -- a --fast deploy cannot be gated on an unknown stats ABI; fetch the commit (git fetch origin) or deploy --full" >&2
+    # the stats version read fine: the commit is in the checkout and a fetch cannot help
+    out="fetch the commit (git fetch origin) or deploy --full"
+    [ -z "${pair%%:*}" ] || out="the commit is in the checkout, so deploy --full"
+    echo "ERROR: cannot read $unread from ${GENLOCK_STATS_ABI_OBS_H} at $sha in $repo -- a --fast deploy cannot be gated on an unknown stats ABI; $out" >&2
     return 3
   fi
   echo "WARNING: cannot read $unread from ${GENLOCK_STATS_ABI_OBS_H} at $sha in $repo -- this deploy REMOVES each full-bundle box's ${GENLOCK_STATS_ABI_MARKER}, so a later --fast refuses until a full deploy records a known pair" >&2

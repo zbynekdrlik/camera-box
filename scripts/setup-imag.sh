@@ -138,7 +138,7 @@ genlock_write_markers() {
     _genlock_marker_atomic "$marker_dir/GENLOCK_BUILD_SHA.txt"  "$genlock_sha"  || return 1
     _genlock_marker_atomic "$marker_dir/DISTROAV_BUILD_SHA.txt" "$distroav_sha" || return 1
     _genlock_marker_atomic "$marker_dir/DEPLOYED_AT"           "$deployed_at"  || return 1
-    if [[ "$stats_abi" =~ ^([1-9][0-9]{0,8}):([1-9][0-9]{0,8})$ ]]; then
+    if [[ "$stats_abi" =~ ^([123456789][0123456789]{0,8}):([123456789][0123456789]{0,8})$ ]]; then
         _genlock_marker_atomic "$marker_dir/GENLOCK_STATS_ABI.txt" \
             "${BASH_REMATCH[1]}"$'\n'"output_stats=${BASH_REMATCH[2]}" || return 1
     else

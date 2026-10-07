@@ -242,8 +242,8 @@ pub fn decide(f: &GenlockFacets) -> (LockState, LockReason) {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{qpc_drift_beyond_bound, GENLOCK_QPC_STEP_BOUND_MS};
     use super::*;
-    use crate::genlock_lock_state::{qpc_drift_beyond_bound, GENLOCK_QPC_STEP_BOUND_MS};
 
     /// A fully healthy box: clock locked, every input locked, output stamping.
     fn healthy() -> GenlockFacets {

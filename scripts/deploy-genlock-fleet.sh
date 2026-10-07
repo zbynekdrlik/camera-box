@@ -179,7 +179,7 @@ fleet_pick_run_at_sha() {
 #   markers + DEPLOYED_AT temp-then-rename, sha256-verifies the deployed obs.dll against the bundle
 #   manifest (fail-closed), and prints a box-backup RETENTION PLAN (keep newest KEEP; delete only
 #   when $fleetConfirmRetention). Env-free (the genlock build carries no OBS_GENLOCK_*/OBS_BURN_*).
-#   STATS_ABI (issue 1302): the pair <stats>:<output_stats>; FAST refuses at step (0f) unless the box's GENLOCK_STATS_ABI.txt names both; FULL clears it (3c), records it (5b).
+#   STATS_ABI (issue 1302): the pair <stats>:<output_stats>; FAST refuses at step (0f) unless the box's GENLOCK_STATS_ABI.txt names both and each equals it; FULL clears it (3c), records it (5b).
 build_windows_deploy_program() {
   local box="$1" mode="$2" stage="$3" obs_dir="$4" has_ahk="$5" backup_root="$6" keep="$7" gsha="$8" dsha="$9" confirm="${10:-0}" stats_abi="${11:-}"
   # Escape ' for the PowerShell single-quoted strings (double it) -- incl. gsha/dsha (--sha is
