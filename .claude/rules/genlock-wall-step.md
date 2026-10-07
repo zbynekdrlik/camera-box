@@ -75,7 +75,11 @@ sender) is the supervisor's rig investigation, not this code.
   exactly as on any late tick; the re-grid itself never adds a lagged frame when it lands on time.
 - **The stamp interval that carries the step is inherent**: after a −51 ms step the next stamp is one
   slot BACKWARD (a receiver shows a repeated frame), after +51 ms it skips a slot. No sender change can
-  avoid it (the wall moved); the re-grid only keeps every stamp after it on the grid.
+  avoid it (the wall moved); the re-grid only keeps every stamp after it on the grid. It is inherent
+  only at the SENDER: on this fleet every receiver steps too, so since issue 1372 part B the receive
+  FIFO relabels the old-epoch frames by the booked step and a step of 100 ms or more (the nightly
+  dantesync step, a multiple of 200 ms since 1.16.0) costs a receiver nothing
+  (`genlock-fifo-relabel.md`). A smaller step still pays this interval.
 - **The recovery books the MEASURED loss** (the regression residual, which counts the lost samples
   exactly), confirmed by the SIGNED level corroboration (the buffer moved the same way by ≥ half), the
   total owed capped at ±`ASRC_STEP_RECOVER_MAX_MS` = 100 ms. The per-callback level only confirms: it

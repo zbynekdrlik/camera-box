@@ -399,6 +399,13 @@ impl Fifo {
         self.rx_lag_ns = arrival_wall_ns.saturating_sub(stamp_ns);
     }
 
+    /// Issue 1372 part B: the locked boundary, which the receive-FIFO relabel moves with the
+    /// presented frame (the C `genlock_fifo_relabel_apply` on `genlock_locked_next_boundary_ns`).
+    #[cfg(test)]
+    pub(crate) fn locked_boundary_mut(&mut self) -> &mut u64 {
+        &mut self.locked_next_boundary
+    }
+
     /// One render tick: the N==1 branches of the C `genlock_release_tick`, in its order. `wall` is
     /// the processing wall (the C `wall_now`), `scheduled` the wall instant the tick was scheduled
     /// for (the C `obs->video.video_time`, here already in wall time).

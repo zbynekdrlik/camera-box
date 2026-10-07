@@ -519,3 +519,86 @@ fn the_tracker_gives_one_per_crossing_at_the_design_jitter_1367() {
         assert_eq!(t.reseeds, 0, "ppm {ppm}");
     }
 }
+
+/// Issue 1372 part B — the nightly fleet date step on a stamp-driven 1:1 camera. A step that is a
+/// whole number of slots (dantesync 1.16.0 rounds it to 200 ms) re-anchors the slot chooser by
+/// exactly that many slots: no crossing, no shed, no repeat, and the stamp sequence with the step
+/// taken out is one slot per frame — so a receiver that relabels its old-epoch frames by the same
+/// step sees a continuous stream. The measured unquantized step (+1543.16 ms, 92.59 slots) moves the
+/// content-to-slot phase by the fraction: one repeated or one skipped slot (reported).
+///
+/// The cambox stamps through a mono→real offset re-sampled every 100 frames, so its stamps switch to
+/// the new epoch at that re-sample, up to 100 frames after its wall stepped (the step at 60.75 s
+/// lands mid-cadence here). The lag is reported; the receiver-side cost is in the issue-1372 FIFO
+/// relabel bench (`crate::genlock_fifo_relabel_bench`).
+#[test]
+fn a_whole_slot_date_step_re_anchors_by_whole_slots_with_no_crossing_1372() {
+    let one_slot = |delta: i64| delta == 166_666 || delta == 166_667;
+    for step in [1_600_000_000i64, -1_600_000_000, 200_000_000, 1_543_160_000] {
+        let mut sc = Scenario::new(16.0, 120.0);
+        sc.realtime_step = Some((60.75, step));
+        let t = run(&sc, true);
+        let step_100ns = step / 100;
+        // the one stamp interval that carries the step (every other one is one slot)
+        let jumps: Vec<usize> = t
+            .stamps
+            .windows(2)
+            .enumerate()
+            .filter(|(_, w)| (w[1] - w[0]).abs() > 5 * 166_667)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(jumps.len(), 1, "step {step}: exactly one stamp jump");
+        let j = jumps[0];
+        // the stamps with the step taken out from the jump on
+        let relabelled: Vec<i64> = t
+            .stamps
+            .iter()
+            .enumerate()
+            .map(|(i, &s)| if i > j { s - step_100ns } else { s })
+            .collect();
+        let off_slot = relabelled
+            .windows(2)
+            .filter(|w| !one_slot(w[1] - w[0]))
+            .count();
+        // stamp j + 1 is frame j + 2 (frame 0 never emits): the epoch switch
+        let period = NOMINAL_60 / (1.0 + sc.ppm * 1e-6);
+        let switch_s = (sc.start_phase_ns + (j + 2) as f64 * period) / 1e9;
+        eprintln!(
+            "step {:+.2} ms: jump {:.2} slots at {:.3} s (stamp epoch lag {:.0} ms), relabelled \
+             off-slot intervals {}, crossings {} reseeds {} sheds {} repeats {} resyncs {}",
+            step as f64 / 1e6,
+            (t.stamps[j + 1] - t.stamps[j]) as f64 / 166_666.67,
+            switch_s,
+            (switch_s - 60.75) * 1000.0,
+            off_slot,
+            t.crossings,
+            t.reseeds,
+            t.sheds,
+            t.repeats,
+            t.stamp_resyncs
+        );
+        assert_eq!(
+            (t.crossings, t.reseeds, t.sheds, t.repeats),
+            (0, 0, 0, 0),
+            "step {step}: the date step is never a crossing, a re-seed, a shed or a repeat"
+        );
+        assert!(
+            (0.0..=100.0 * period / 1e9 + 0.001).contains(&(switch_s - 60.75)),
+            "step {step}: the stamps switch epoch at the next offset re-sample (<= 100 frames)"
+        );
+        if step % 200_000_000 == 0 {
+            assert_eq!(
+                off_slot, 0,
+                "issue 1372: a whole-slot step must re-anchor by whole slots: with the step taken \
+                 out the stamps are one slot per frame (step {step})"
+            );
+        } else {
+            // exactly one: the fraction shows (so the measure above can see an off-slot interval,
+            // and the quantized steps' 0 is not vacuous)
+            assert_eq!(
+                off_slot, 1,
+                "the unquantized step moves the phase by a fraction: exactly one off-slot interval"
+            );
+        }
+    }
+}
