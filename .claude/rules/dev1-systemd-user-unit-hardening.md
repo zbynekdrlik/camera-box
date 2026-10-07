@@ -82,3 +82,13 @@ A `Type=oneshot` service run by a timer loses every leftover process when it fin
 the unit's cgroup, so an ssh ControlPersist master forked inside it dies with each run. Something that
 must hold ONE connection (to avoid a login per pass) is a long-running `Type=simple` service with its
 own loop, never a timer.
+
+## `network-online.target` does not exist in a user manager (issue 1404)
+
+`systemctl --user show -p LoadState network-online.target` on dev1 reads `not-found` (7.10.2026): a
+user manager cannot see system targets, so `After=`/`Wants=network-online.target` in a `--user` unit
+orders nothing. Leave it out of a new `--user` unit (strih-lx's user units too); a program that needs
+the network waits for it itself (retry / `Restart=on-failure`). The issue-1404 dev1 units and
+`rig-lease-server.service` dropped it, pinned by a test. A SYSTEM unit (`WantedBy=multi-user.target`,
+or a `DynamicUser=` unit like `intercom-hub.service` even with `WantedBy=default.target`) keeps it:
+there it is real.
