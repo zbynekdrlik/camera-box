@@ -24,6 +24,10 @@ The serve dir:
 
 This module is stdlib-only on purpose: the lease server is a coordination endpoint and must not
 gain a numpy dependency (the sampler's analysis lives in `program_audio.py`).
+
+`ReadOnlyHandler` is the one response framing of the two read-only servers that serve these files:
+the dev1 rig-lease server and the program-audio sampler's own endpoint (`program_audio_http.py`,
+host-agnostic since the sampler moves off dev1; issue 1404 design 6037613222).
 """
 from __future__ import annotations
 
@@ -32,6 +36,7 @@ import os
 import stat
 import tempfile
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler
 
 SERVE_DIR_ENV = "RIG_LEASE_SERVE_DIR"
 SERVE_DIR_NAME = "rig-lease-serve"
@@ -202,3 +207,59 @@ def program_audio_response(path: str, now: datetime) -> dict | None:
 
 def _is_count(v) -> bool:
     return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
+class ReadOnlyHandler(BaseHTTPRequestHandler):
+    """The response framing both read-only servers share (the dev1 rig-lease server and the
+    program-audio sampler's own endpoint): GET and HEAD route through ONE `_handle()` the subclass
+    defines (so the two can never drift on which paths exist; HEAD suppresses only the body), a
+    query string is stripped before matching, and any other method is the base class's 501 -- never
+    a write. A subclass sets `server_version` and `log_message`."""
+
+    # Suppress the interpreter version from the Server: response header (BaseHTTPRequestHandler's
+    # version_string() concatenates server_version + " " + sys_version) -- no reason to advertise
+    # the exact Python patch version to an unauthenticated caller.
+    sys_version = ""
+    # A client that connects and sends nothing (or stalls mid-request) is dropped after this many
+    # seconds instead of holding a server thread forever: both servers listen on 0.0.0.0, the
+    # sampler's on a production box with no firewall (issue 1404 review round 3).
+    timeout = 10
+
+    def _handle(self):  # pragma: no cover -- every subclass defines its routes
+        raise NotImplementedError
+
+    def _request_path(self) -> str:
+        # Strip a query string before matching -- `GET /rig-lease.json?t=1` (a common client-side
+        # cache-buster) must still hit the real route, not fall through to 404 (which would make
+        # restreamer's consumer contract fail-open and silently drop the lease check).
+        return self.path.split("?", 1)[0]
+
+    def _send(self, status: int, content_type: str, body: bytes, *, no_store: bool = False,
+              extra_headers: tuple = ()) -> None:
+        # The WHOLE response (status line + headers + body) is wrapped in ONE try/except -- a
+        # client that disconnects between send_response() and end_headers() would otherwise raise
+        # an unguarded BrokenPipeError/ConnectionResetError (only the body write used to be
+        # guarded), which socketserver logs as a traceback even though it is not a real fault.
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            if no_store:
+                self.send_header("Cache-Control", "no-store")
+            for name, value in extra_headers:
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):  # airuleset:script-ok a client hang-up mid-response is not a server fault
+            return
+
+    def do_GET(self):
+        self._handle()
+
+    def do_HEAD(self):
+        # A cheap liveness probe an external checker can use without paying for a JSON body --
+        # routes through the SAME path matching as do_GET (_handle() suppresses the body write via
+        # self.command == "HEAD" inside _send()), so the two can never drift on which paths are
+        # recognized.
+        self._handle()

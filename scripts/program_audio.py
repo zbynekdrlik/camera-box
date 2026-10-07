@@ -85,10 +85,32 @@ from the zeros); the level is the delivered samples' own (analyse(..., real)), e
 audio would sink under the SILENT bar; the spectral share stays a ratio of the delivered signal
 (zeros add no energy to either side). A frame BEHIND the timeline beyond the tolerance (an overlap,
 a backward jump), a hole over HOLE_BRIDGE_MAX_MS and a format change at a hole still restart.
-Open (issue 1404 comment 6036260703): a FORWARD timestamp step of up to 250 ms with no sample lost
-(a dantesync date step) is bridged too, its markers then sit off the line and a span holding it can
-read a short chain; and a hole that removes a marker burst can lift a real measurement window over
+A FORWARD timestamp step with no sample lost, bridged, puts its markers off the line and a span
+holding it can read a short chain (issue 1404 comment 6036260703). The fleet date step is therefore
+DATE_STEP (below); a hole that removes a marker burst can still lift a real measurement window over
 the FOREIGN bar (3 of 5340 single 2-frame holes on rec3b + rec2, 8 of 5340 with two per window).
+HOLED SPAN (ROZHODNUTÉ issue 1404 comment 6037765523): a chain under MARKER_CHAIN_MIN over a span
+that holds bridged samples (a bridged hole or a capture-queue drop) reads UNKNOWN, never FOREIGN on
+its own (classify(..., holed=True)); a spectral FOREIGN stays immediate. STEP 0 of design 6037613222
+(comment 6037861831): most live "holes" of +41...+54 ms are a SENDER stall (the stream OBS stamps at
+submission, its audio thread stalls ~64 ms and then submits three frames back to back: +42, -21,
+-21 ms, nothing lost), so the bridge inserted zeros for nothing; the stall replayed on the committed
+clip read chain 3 = FOREIGN, with rule A UNKNOWN (U U M M M M U M U U M, still a flap stop).
+SENDER STALL (ROZHODNUTÉ on issue 1404, Design-question 6037861831): a frame more than the tolerance
+AHEAD of the timeline with no matching dev1 wall step is HELD with up to STALL_LOOKAHEAD_FRAMES
+following frames (~85 ms); the hole is the SMALLEST cumulative offset over them, against the frame
+before the step (resolve_ahead). At or under the tolerance it is a sender stall: nothing lost, no
+zeros, the span kept, counted as `sender_stalls`. Over it, a real hole of that size: bridged up to
+HOLE_BRIDGE_MAX_MS, else a restart, as before -- and a hole followed by a late-stamped frame is now
+bridged with exactly the lost audio, never the late stamp's offset. The same stall replay reads
+MEASUREMENT in every window after the start-up warm-up. Rule A and the spectral FOREIGN are unchanged.
+DATE_STEP (design issue 1404 comment 6037613222): dev1 runs the same fleet dantesync and steps its
+own wall clock at the same announced instant. The sampler reads dev1's wall-minus-monotonic offset
+with every block (one bracketed read, program_audio_capture.read_wall_offset_ns; WallSteps keeps the
+steps of WALL_STEP_MIN_MS or more). A forward jump over the tolerance that matches a forward dev1
+step of the same size (DATE_STEP_MATCH_MS) seen within DATE_STEP_WINDOW_S is DATE_STEP: no zeros,
+no restart, the next frame judged against the stepped one. Without a matching dev1 step the rules
+above stay. A capture-queue drop of known length (`dropped_100ns`) is a hole of exactly that audio.
 STEP 0 (7.10.2026, 25 min / 70 304 frames of the live stream program, received by a second sampler
 instance while dev1 was loaded; issue 1404 comment 6030714990): the sender's submission jitter
 reached 24.5 ms against a tolerance of 41.3 ms (1024 samples at 48 kHz + 20 ms); every arrival gap
@@ -96,10 +118,11 @@ reached 24.5 ms against a tolerance of 41.3 ms (1024 samples at 48 kHz + 20 ms);
 timeline; one real 200 ms hole (its frames never delivered, the arrival gap only 0.19 s) was off it.
 A second 20-min run of THIS loop on the live sender (56 250 frames): jitter up to 29.5 ms (p99 18.2),
 0 timeline breaks, 0 receive gaps, 599 MEASUREMENT windows and the one start-up UNKNOWN.
-A dantesync DATE STEP moves the sender's wall clock, and so its timestamps, once: a backward step
-or a forward one over HOLE_BRIDGE_MAX_MS reads as ONE discontinuity = one UNKNOWN warm-up window
-(never FOREIGN: a restarted span is never judged as a short chain); a forward step up to 250 ms is
-bridged (the open question above); a micro-correction of a few ms stays inside the tolerance.
+A dantesync DATE STEP moves the sender's wall clock, and so its timestamps, once: matched to dev1's
+own step it is DATE_STEP (above); unmatched, a backward step or a forward one over
+HOLE_BRIDGE_MAX_MS reads as ONE discontinuity = one UNKNOWN warm-up window (never FOREIGN: a
+restarted span is never judged as a short chain) and a forward one up to 250 ms is bridged; a
+micro-correction of a few ms stays inside the tolerance.
 
 CALIBRATION (6.10.2026, the real session recordings in ~/.claude/work-products/issue-1404/audio/,
 48 kHz stereo, every 2 s window): rec2 (604 windows), rec3a (324), rec3b (286), session (637) --
@@ -129,20 +152,29 @@ Known limits:
   * in-band music mixed UNDER a marker that still decodes reads MEASUREMENT (the marker chain
     stands, the share stays in band); broadband music is caught by the spectral share. The
     measurement-clip-only rule for SongPlayer and the cg OBS (plan Task 5) is the control for it.
-  * a sender stall longer than the tolerance (its audio thread submitting > ~20 ms late beyond its
-    normal jitter) reads as a discontinuity although no sample was lost: one warm-up. STEP 0 saw
-    no such stall in 25 min; the arrival-time rule it replaces cost a warm-up per dev1 stall.
+  * a sender stall whose catch-up frames do not bring the timeline back within the tolerance in
+    STALL_LOOKAHEAD_FRAMES frames (a stall of ~150 ms or more) reads as a hole of the smallest
+    offset: bridged (a holed span, rule A) although no sample was lost. The live stalls are ~64 ms
+    and come back at the second frame.
   * a hole inside the tolerance is stitched: one missing frame (21.3 ms) always, two or three when
-    the sender's jitter pulls the next stamp back inside 41.3 ms. The lane's review probe cut 1-3
+    the sender's jitter pulls a stamp back inside 41.3 ms. The lane's review probe cut 1-3
     frame holes into the three real 16 kHz fixtures at 45 positions per case, with exact and
     jittered stamps, through the real decoder shim: 0 FOREIGN windows. A frame the sampler drops
-    itself (sample rate <= 0) is such a hole too.
+    itself (sample rate <= 0) is such a hole too. With the look-ahead ANY of the 4 followers can
+    pull a 2-frame loss (42.7 ms, only 1.3 ms over the tolerance) back: cut into the real STEP-0
+    stamps, 16.4 % / 37.0 % of 2-frame losses read as a sender stall (the one-frame rule stitched
+    8.9 % / 20.3 %), 3-frame losses 0 %. Such a loss gets no zeros and its span is not holed (rule A
+    does not apply). Consequence probe: 2- and 3-frame losses every 4.5 s cut into the four real
+    recordings (1841 windows each), stamped with the live capture-thread probe's jitter and stalls,
+    through the real decoder: 0 FOREIGN and 0 UNKNOWN after the warm-up, minimum chain 4 (before
+    the look-ahead: 1 FOREIGN, 1 UNKNOWN).
   * a timestamp hole is seen only between two frames that both carry a timestamp; a sender
     without one (an SDK older than v2.5) falls back to the arrival gap and its known limit
     (audio lost without a 1 s arrival gap is stitched, review of 6027557132: 4 of 762 cut clips
     read one FOREIGN window).
 Pinned by tests/python/test_program_audio_1404.py + test_program_audio_marker_1404.py +
-test_program_audio_timeline_1404.py.
+test_program_audio_timeline_1404.py + test_program_audio_bridge_1404.py +
+test_program_audio_datestep_1404.py + test_program_audio_stall_1404.py.
 """
 from __future__ import annotations
 
@@ -181,8 +213,18 @@ NDI_TIME_UNITS_PER_S = 10_000_000     # NDI timestamps count 100 ns
 CONTINUITY_SLACK_S = 0.020            # tolerance = one frame duration + this (continuity_tolerance_100ns)
 HOLE_BRIDGE_MAX_MS = 250.0            # a frame up to this far AHEAD (beyond the tolerance) is a hole the
                                       # sampler bridges with zeros, the span kept (design 6036098516)
+# -- the fleet date step (design issue 1404 comment 6037613222; the rule in the module doc; pinned by
+#    tests/python/test_program_audio_datestep_1404.py) --
+DATE_STEP_MATCH_MS = 20.0             # the sender's jump and dev1's own wall step agree within this
+DATE_STEP_WINDOW_S = 2.0              # dev1's step counts for a jump arriving up to this long after it
+WALL_STEP_MIN_MS = 5.0                # a change of dev1's wall-minus-monotonic offset this large is a step
+# -- the sender-stall look-ahead (ROZHODNUTÉ on issue 1404, the answer to Design-question 6037861831;
+#    the rule at resolve_ahead; pinned by tests/python/test_program_audio_stall_1404.py) --
+STALL_LOOKAHEAD_FRAMES = 4            # frames held after a frame AHEAD of the timeline (~85 ms of 1024 at 48 kHz)
 CONTINUE = "CONTINUE"
 BRIDGE = "BRIDGE"
+DATE_STEP = "DATE_STEP"
+SENDER_STALL = "SENDER_STALL"
 DISCONTINUITY = "DISCONTINUITY"
 UNKNOWN_TS = "UNKNOWN_TS"
 
@@ -218,10 +260,10 @@ def timeline_offset_100ns(prev_ts: int, prev_samples: int, sample_rate: int, ts:
 
 
 class Continuity(NamedTuple):
-    """frame_continues' outcome: `kind` is CONTINUE | BRIDGE | DISCONTINUITY | UNKNOWN_TS;
-    `missing_samples` (BRIDGE only, else 0) is how many samples per channel are missing before the
-    frame on the sender's timeline: the zeros the sampler inserts so every later sample keeps its
-    sender-timeline position."""
+    """frame_continues' outcome: `kind` is CONTINUE | BRIDGE | DATE_STEP | DISCONTINUITY | UNKNOWN_TS;
+    `missing_samples` is how many samples per channel are missing before the frame on the sender's
+    timeline (BRIDGE, or a DATE_STEP that coincides with a known queue drop; else 0): the zeros the
+    sampler inserts so every later sample keeps its sender-timeline position."""
     kind: str
     missing_samples: int = 0
 
@@ -241,28 +283,211 @@ def bridge_samples(offset_100ns: float, sample_rate: int) -> int:
     return int(math.floor(offset_100ns * sample_rate / NDI_TIME_UNITS_PER_S + 0.5))
 
 
-def frame_continues(prev_ts, prev_samples: int, sample_rate: int, ts, tolerance: float) -> Continuity:
+def matching_wall_step(jump_100ns: float, wall_steps) -> float | None:
+    """The dev1 wall step (100 ns, from `wall_steps`) that a FORWARD timestamp jump of `jump_100ns`
+    matches: a forward step within DATE_STEP_MATCH_MS of the jump, the closest one; None when none
+    does (a backward jump or step never matches)."""
+    if not jump_100ns > 0:
+        return None
+    match_100ns = DATE_STEP_MATCH_MS * NDI_TIME_UNITS_PER_S / 1000.0
+    best = None
+    for step in wall_steps:
+        if step > 0 and abs(jump_100ns - step) <= match_100ns:
+            if best is None or abs(jump_100ns - step) < abs(jump_100ns - best):
+                best = step
+    return best
+
+
+def _hole(missing_100ns: float, sample_rate: int) -> Continuity:
+    """A known hole: BRIDGE up to HOLE_BRIDGE_MAX_MS, a DISCONTINUITY beyond."""
+    if missing_100ns <= hole_bridge_max_100ns():
+        return Continuity(BRIDGE, bridge_samples(missing_100ns, sample_rate))
+    return Continuity(DISCONTINUITY)
+
+
+def frame_continues(prev_ts, prev_samples: int, sample_rate: int, ts, tolerance: float, *,
+                    dropped_100ns: float = 0.0, wall_steps=()) -> Continuity:
     """Does the frame stamped `ts` continue the sender's audio timeline after the previous frame
-    (stamped `prev_ts`, `prev_samples` long at `sample_rate`)? With off = timeline_offset_100ns:
-      |off| <= tolerance                      CONTINUE, whatever its arrival time
-      tolerance < off <= hole_bridge_max      BRIDGE: a hole of `missing_samples` = round(off * sr)
-                                              (the sampler inserts that many zeros, the span kept)
-      otherwise                               DISCONTINUITY (behind the timeline beyond the tolerance =
-                                              an overlap / a backward jump, or a hole over
-                                              HOLE_BRIDGE_MAX_MS, a sender restart, a large date step)
-      either timestamp undefined              UNKNOWN_TS: the caller falls back to the arrival gap
+    (stamped `prev_ts`, `prev_samples` long at `sample_rate`)? `dropped_100ns` is audio the sampler
+    KNOWS it dropped between the two (its own capture queue overflowed; 0 normally); `wall_steps`
+    the sizes (100 ns) of dev1's own wall-clock steps seen within DATE_STEP_WINDOW_S before the
+    frame arrived (WallSteps.recent). With off = timeline_offset_100ns and rest = off - dropped:
+      rest > tolerance, matching a dev1 step   DATE_STEP: the fleet date step moved the sender's
+                                               timestamps, nothing was lost -- no zeros (only the
+                                               known drop, if any), the span kept
+      |rest| <= tolerance                      CONTINUE, whatever its arrival time; with a known drop
+                                               a BRIDGE of exactly the dropped audio
+      tolerance < rest, off <= hole_bridge_max BRIDGE: a hole of `missing_samples` = round(off * sr)
+                                               (the sampler inserts that many zeros, the span kept)
+      otherwise                                DISCONTINUITY (behind the timeline beyond the tolerance =
+                                               an overlap / a backward jump, or a hole over
+                                               HOLE_BRIDGE_MAX_MS, a sender restart, a large date step
+                                               dev1 did not make)
+      either timestamp undefined               UNKNOWN_TS: the caller falls back to the arrival gap;
+                                               with a known drop, that drop as a hole (BRIDGE or a
+                                               DISCONTINUITY over the limit)
     `tolerance` is in 100 ns (continuity_tolerance_100ns)."""
     if not tolerance >= 0:
         raise ValueError(f"frame_continues: tolerance {tolerance!r} must be >= 0")
+    if not (dropped_100ns >= 0 and math.isfinite(dropped_100ns)):
+        raise ValueError(f"frame_continues: dropped_100ns {dropped_100ns!r} must be a finite number >= 0")
     if not (timestamp_defined(prev_ts) and timestamp_defined(ts)):
         _frame_100ns(prev_samples, sample_rate)  # an invalid frame is refused here too
+        if dropped_100ns > 0:
+            return _hole(dropped_100ns, sample_rate)
         return Continuity(UNKNOWN_TS)
     off = timeline_offset_100ns(prev_ts, prev_samples, sample_rate, ts)
-    if abs(off) <= tolerance:
+    rest = off - dropped_100ns
+    if rest > tolerance and matching_wall_step(rest, wall_steps) is not None:
+        if dropped_100ns <= 0:
+            return Continuity(DATE_STEP)
+        if dropped_100ns <= hole_bridge_max_100ns():
+            return Continuity(DATE_STEP, bridge_samples(dropped_100ns, sample_rate))
+        return Continuity(DISCONTINUITY)
+    if abs(rest) <= tolerance:
+        if dropped_100ns > 0:
+            return _hole(dropped_100ns, sample_rate)
         return Continuity(CONTINUE)
-    if tolerance < off <= hole_bridge_max_100ns():
+    if tolerance < rest and off <= hole_bridge_max_100ns():
         return Continuity(BRIDGE, bridge_samples(off, sample_rate))
     return Continuity(DISCONTINUITY)
+
+
+def ahead_of_timeline(prev_ts, prev_samples: int, sample_rate: int, ts, tolerance: float, *,
+                      dropped_100ns: float = 0.0) -> bool:
+    """Does the frame stamped `ts` sit more than `tolerance` AHEAD of the sender's timeline after the
+    previous frame, beyond any audio the sampler knows it dropped (`dropped_100ns`)? False when a
+    timestamp is undefined. The caller holds such a frame for resolve_ahead, unless frame_continues
+    already read it as a DATE_STEP (a matching dev1 wall step)."""
+    if not (timestamp_defined(prev_ts) and timestamp_defined(ts)):
+        return False
+    return timeline_offset_100ns(prev_ts, prev_samples, sample_rate, ts) - dropped_100ns > tolerance
+
+
+class Lookahead(NamedTuple):
+    """resolve_ahead's outcome. `kind`: SENDER_STALL | BRIDGE | DISCONTINUITY.
+    `missing_samples`: the zeros to insert before the first held frame (BRIDGE: the hole and the first
+    frame's known queue drop; SENDER_STALL: only that known drop, 0 normally).
+    `stamps`: the sender-timeline stamps the caller files the first len(stamps) held frames under
+    (their place on the timeline, the hole included -- a stalled frame's own late stamp is never the
+    timeline); every held frame after them is judged normally against the last of them.
+    `first_offset_100ns`: how far the first held frame sat ahead (its known drop excluded);
+    `hole_100ns`: the smallest cumulative offset over the held frames (100 ns)."""
+    kind: str
+    missing_samples: int
+    stamps: tuple
+    first_offset_100ns: float
+    hole_100ns: float
+
+
+def resolve_ahead(prev_ts: int, prev_samples: int, sample_rate: int, held, tolerance: float, *,
+                  complete: bool = False) -> Lookahead | None:
+    """The sender-stall look-ahead (ROZHODNUTÉ on issue 1404, Design-question 6037861831). The stream
+    OBS stamps each NDI audio frame with its wall clock AT SUBMISSION. When its audio thread stalls
+    (~64 ms, the `audio-stall #1367` lines) it submits the next frames back to back: the first sits
+    +42 ms "ahead", the next two -21 ms each. No sample is missing, and bridging the +42 ms with
+    zeros pushed every later marker off the chain line (the live false FOREIGN / flap UNKNOWN).
+
+    `held` = [(timestamp, samples, dropped_100ns), ...]: the frame AHEAD of the timeline after the
+    previous frame (`prev_ts`, `prev_samples` at `sample_rate`) first -- it may carry a known queue
+    drop -- then the frames that followed it (defined stamps, the same rate, no drop). Each one's
+    CUMULATIVE offset is measured against the frame before the step: its stamp minus (prev_ts + the
+    previous frame + every held frame before it + the first frame's known drop).
+      a held frame at or under `tolerance`  SENDER_STALL (decided at once): nothing lost, no zeros
+                                            (only the first frame's known drop), the span kept; the
+                                            frames before it are filed at their timeline place
+      none after 1 + STALL_LOOKAHEAD_FRAMES frames (or `complete`: no more frame can join -- a drop,
+      a format change, an undefined stamp, an error, the capture went quiet)
+                                            the hole = the SMALLEST cumulative offset: BRIDGE with
+                                            round((hole + known drop) * sr) zeros up to
+                                            HOLE_BRIDGE_MAX_MS, else DISCONTINUITY (the first frame
+                                            starts a new span at its own stamp)
+    None while undecided (hold the next frame). Stamps are summed as integer differences, like
+    timeline_offset_100ns: a float cannot hold a 100 ns stamp of this size exactly."""
+    if not held:
+        raise ValueError("resolve_ahead: no held frame")
+    if not tolerance >= 0:
+        raise ValueError(f"resolve_ahead: tolerance {tolerance!r} must be >= 0")
+    if not timestamp_defined(prev_ts):
+        raise ValueError(f"resolve_ahead: the previous frame's stamp {prev_ts!r} is undefined")
+    base = int(prev_ts)
+    rel = _frame_100ns(prev_samples, sample_rate)   # the next frame's timeline place, minus base
+    offsets: list[float] = []
+    places: list[float] = []
+    drop0 = float(held[0][2])
+    for i, (ts, samples, dropped) in enumerate(held):
+        if not timestamp_defined(ts):
+            raise ValueError(f"resolve_ahead: held frame {i} has no sender stamp")
+        if not (dropped >= 0 and math.isfinite(dropped)) or (i and dropped):
+            raise ValueError(f"resolve_ahead: held frame {i} carries a drop of {dropped!r} "
+                             "(only the first one may, and it must be >= 0)")
+        rel += dropped
+        off = (int(ts) - base) - rel
+        if i == 0 and not off > tolerance:
+            raise ValueError(f"resolve_ahead: the first held frame sits {off!r} off, not ahead "
+                             f"beyond the tolerance {tolerance!r}")
+        if off <= tolerance:
+            if drop0 > hole_bridge_max_100ns():
+                return Lookahead(DISCONTINUITY, 0, (int(held[0][0]),), offsets[0], min(offsets + [off]))
+            missing = bridge_samples(drop0, sample_rate) if drop0 > 0 else 0
+            return Lookahead(SENDER_STALL, missing, tuple(base + round(p) for p in places), offsets[0],
+                             min(offsets + [off]))
+        offsets.append(off)
+        places.append(rel)
+        rel += _frame_100ns(samples, sample_rate)
+    if not complete and len(held) < 1 + STALL_LOOKAHEAD_FRAMES:
+        return None
+    hole = min(offsets)
+    # the first frame holding the smallest offset; frames on the same place differ only by the
+    # stamps' integer rounding (under one 100 ns unit), which must not pick a later one
+    j = next(i for i, off in enumerate(offsets) if off <= hole + 1.0)
+    if drop0 + hole > hole_bridge_max_100ns():
+        return Lookahead(DISCONTINUITY, 0, (int(held[0][0]),), offsets[0], hole)
+    # The frames before the smallest one sat later still (a stall on top of the hole): filed at their
+    # timeline place behind the hole. The first frame always goes in here, so the caller never judges
+    # it again; with j == 0 its place IS its own stamp.
+    stamps = tuple(base + round(p + hole) for p in places[:max(j, 1)])
+    return Lookahead(BRIDGE, bridge_samples(drop0 + hole, sample_rate), stamps, offsets[0], hole)
+
+
+class WallSteps:
+    """dev1's OWN wall-clock steps, read from one bracketed wall-minus-monotonic reading per captured
+    block (program_audio_capture.read_wall_offset_ns). Frequency slewing moves both clocks alike, so
+    the offset changes only when the wall clock is stepped: a change of WALL_STEP_MIN_MS or more
+    between two readings is a step, recorded with the arrival time of the block that showed it.
+    `recent(t)` = the steps seen within DATE_STEP_WINDOW_S up to t, for frame_continues; a step a
+    DATE_STEP used is `consume`d, so one dev1 step excuses one jump. Pure: no clock reads here."""
+
+    def __init__(self):
+        self._last: int | None = None
+        self._steps: list[tuple[float, float]] = []   # (arrival_s, step in 100 ns)
+
+    def observe(self, arrival_s: float, offset_ns: int | None) -> float | None:
+        """Feed one reading (None = no clean read: ignored, the baseline kept). Returns the step in
+        100 ns when this reading shows one, else None."""
+        if offset_ns is None:
+            return None
+        step = None
+        if self._last is not None:
+            d = int(offset_ns) - self._last
+            if abs(d) >= WALL_STEP_MIN_MS * 1e6:
+                step = d / 100.0
+                self._steps.append((float(arrival_s), step))
+        self._last = int(offset_ns)
+        return step
+
+    def recent(self, arrival_s: float) -> tuple[float, ...]:
+        """The steps (100 ns) seen within DATE_STEP_WINDOW_S up to `arrival_s`; older ones are
+        forgotten."""
+        self._steps = [(t, s) for t, s in self._steps if arrival_s - t <= DATE_STEP_WINDOW_S]
+        return tuple(s for t, s in self._steps if t <= arrival_s)
+
+    def consume(self, step_100ns: float | None) -> None:
+        """Forget the step a DATE_STEP used (the first one of that size); nothing when absent."""
+        for i, (_t, s) in enumerate(self._steps):
+            if step_100ns is not None and s == step_100ns:
+                del self._steps[i]
+                return
 
 
 def real_runs(real) -> list[tuple[int, int]]:
@@ -398,10 +623,13 @@ def spectral_foreign(rms_dbfs, outside_band_pct) -> bool:
             and is_number(outside_band_pct) and outside_band_pct >= FOREIGN_OUTSIDE_BAND_PCT)
 
 
-def classify(rms_dbfs, outside_band_pct, marker_chain) -> str:
+def classify(rms_dbfs, outside_band_pct, marker_chain, holed: bool = False) -> str:
     """MEASUREMENT | FOREIGN | SILENT | UNKNOWN (rules in the module doc). `marker_chain` is the
     trailing span's chain (span_markers), or None when there is none (warm-up, a span cut by
-    silence, no decoder): None can never read MEASUREMENT."""
+    silence, no decoder): None can never read MEASUREMENT. `holed`: the span holds bridged samples
+    (a bridged hole or a queue drop); then a chain under MARKER_CHAIN_MIN with a measurement-like
+    spectrum reads UNKNOWN, never FOREIGN (ROZHODNUTÉ issue 1404 comment 6037765523) -- a spectral
+    FOREIGN stays immediate."""
     if not is_number(rms_dbfs):
         return "UNKNOWN"
     if rms_dbfs < SILENT_RMS_DBFS:
@@ -413,7 +641,7 @@ def classify(rms_dbfs, outside_band_pct, marker_chain) -> str:
     if not isinstance(marker_chain, int) or isinstance(marker_chain, bool):
         return "UNKNOWN"
     if marker_chain < MARKER_CHAIN_MIN:
-        return "FOREIGN"
+        return "UNKNOWN" if holed else "FOREIGN"
     return "MEASUREMENT"
 
 
@@ -433,14 +661,23 @@ def build_payload(verdict: str, rms_dbfs, outside_band_pct, *, now: datetime, wi
                   source: str, reason: str | None = None,
                   last_foreign_ts_utc: str | None = None, markers_decoded: int | None = None,
                   marker_chain: int | None = None, holes_bridged: int | None = None,
-                  bridged_ms: float | None = None) -> dict:
+                  bridged_ms: float | None = None, queue_drops: int | None = None,
+                  lag_ms: float | None = None, sender_stalls: int | None = None) -> dict:
     """The program-audio.json payload. `age_s` is 0.0 as written; the lease server recomputes it
     (and `last_foreign_age_s` from `last_foreign_ts_utc`, the FOREIGN latch) at every request
     (rig_serve_files.program_audio_response). `markers_decoded` (raw CRC-valid words, diagnostics)
     and `marker_chain` are additive fields, null when the window has no full marker span.
     `holes_bridged` / `bridged_ms` (additive, design issue 1404 comment 6036098516) count the
     sender-timeline holes the running sampler bridged with zeros since it started, null in a
-    payload written while it is not sampling."""
+    payload written while it is not sampling. `queue_drops` (additive, design issue 1404 comment
+    6037613222) counts the audio frames the sampler's own capture queue dropped since it started
+    (each one is read as a hole), null while it is not sampling. `lag_ms` (additive): how long the
+    block that completed the judged window waited in the capture queue before the consumer took it
+    -- the consumer's backlog behind its capture thread, so a lagging sampler never passes for a
+    fresh one (the window's own FFT + decode + write, ~17-85 ms, comes on top); null with no
+    window. `sender_stalls` (additive, ROZHODNUTÉ on issue 1404): the sender stalls the look-ahead
+    found since the sampler started (a frame ahead of the timeline whose followers came back within
+    the tolerance: nothing lost, no zeros), null while it is not sampling."""
     if verdict not in VERDICTS:
         raise ValueError(f"unknown verdict {verdict!r}")
     payload = {
@@ -457,6 +694,9 @@ def build_payload(verdict: str, rms_dbfs, outside_band_pct, *, now: datetime, wi
         "marker_chain": _count(marker_chain),
         "holes_bridged": _count(holes_bridged),
         "bridged_ms": _round1(bridged_ms),
+        "queue_drops": _count(queue_drops),
+        "lag_ms": _round1(lag_ms),
+        "sender_stalls": _count(sender_stalls),
     }
     if reason is not None:
         payload["reason"] = reason

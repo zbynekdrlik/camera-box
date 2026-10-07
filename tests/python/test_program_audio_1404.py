@@ -255,7 +255,8 @@ def test_build_payload_has_the_contract_fields_rounded():
         "schema": 1, "ts_utc": "2026-10-06T19:30:02.123Z", "age_s": 0.0, "verdict": "MEASUREMENT",
         "rms_dbfs": -35.6, "outside_band_pct": 16.8, "window_s": 2.0, "source": "STREAM-SNV (stream)",
         "last_foreign_ts_utc": None, "markers_decoded": None, "marker_chain": None,
-        "holes_bridged": None, "bridged_ms": None,
+        "holes_bridged": None, "bridged_ms": None, "queue_drops": None, "lag_ms": None,
+        "sender_stalls": None,
     }
     latched = pa.build_payload("MEASUREMENT", -35.6, 16.8, now=now, window_s=2.0, source="S",
                                last_foreign_ts_utc="2026-10-06T19:29:58.000Z")

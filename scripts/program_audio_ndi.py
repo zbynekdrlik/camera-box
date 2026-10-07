@@ -43,7 +43,10 @@ COLOR_FORMAT_BGRX_BGRA = 0
 FOURCC_FLTP = ord("F") | ord("L") << 8 | ord("T") << 16 | ord("p") << 24
 
 LIB_ENV = "NDI_LIB_PATH"
-DEFAULT_LIB_CANDIDATES = ("/usr/lib/ndi/libndi.so.6", "/usr/lib/ndi/libndi.so", "libndi.so.6")
+# /usr/lib/ndi = dev1; /usr/local/lib = strih-lx (its NDI 6.3.2 runtime, setup-strih step 4b; the
+# sampler moved there, issue 1404 ROZHODNUTÉ 6039368611).
+DEFAULT_LIB_CANDIDATES = ("/usr/lib/ndi/libndi.so.6", "/usr/lib/ndi/libndi.so", "/usr/local/lib/libndi.so.6",
+                          "libndi.so.6")
 RECEIVER_NAME = "camera-box program-audio sampler"
 
 

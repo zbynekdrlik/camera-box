@@ -3,6 +3,10 @@ paths:
   - "scripts/program_audio.py"
   - "scripts/program_audio_ndi.py"
   - "scripts/program_audio_sampler.py"
+  - "scripts/program_audio_capture.py"
+  - "scripts/program_audio_http.py"
+  - "scripts/lib/strih-program-audio.sh"
+  - "scripts/lib/program-audio-mode.sh"
   - "scripts/program_audio_guard.py"
   - "scripts/program_audio_marker.py"
   - "scripts/program_audio_marker_calibrate.py"
@@ -21,6 +25,10 @@ paths:
   - "tests/python/qpsk_guard_shim_1404.py"
   - "tests/python/test_rig_marker_mirror_1404.py"
   - "tests/python/test_rig_serve_routes_1404.py"
+  - "tests/python/test_program_audio_capture_1404.py"
+  - "tests/python/test_program_audio_datestep_1404.py"
+  - "tests/python/test_program_audio_http_1404.py"
+  - "tests/python/test_strih_program_audio_1404.py"
 ---
 
 # The stream program-audio guard + the cam2 marker mirror (issue 1404)
@@ -36,7 +44,7 @@ its SERVE dir (`scripts/rig_serve_files.py`): `$XDG_RUNTIME_DIR/rig-lease-serve`
 | Route | Writer | Contract |
 |---|---|---|
 | `/rig-qpsk-markers.csv` | `rig-marker-mirror` `--user` service (`scripts/rig-marker-mirror.sh` → `rig_marker_mirror.py`) | cam2's `/run/rig-qpsk-markers.csv`, complete rows; `text/csv`; `X-Mirror-Age-S` = seconds since new rows last arrived; 404 absent |
-| `/program-audio.json` | `program-audio-sampler` `--user` service | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain, holes_bridged, bridged_ms[, reason]}`; both ages recomputed by the server per request; the two marker counts are null without a full marker span; `holes_bridged`/`bridged_ms` count the bridged holes since the sampler started (null while it is not sampling); 404 absent; unreadable or foreign-owned = UNKNOWN |
+| `/program-audio.json` | `program-audio-sampler` `--user` service | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain, holes_bridged, bridged_ms, queue_drops, lag_ms, sender_stalls[, reason]}`; both ages recomputed by the server per request; the two marker counts are null without a full marker span; `holes_bridged`/`bridged_ms` count the bridged holes, `queue_drops` the frames the sampler's own capture queue dropped and `sender_stalls` the sender stalls the look-ahead found, since the sampler started (null while it is not sampling); `lag_ms` = how long the block that completed the judged window waited in the capture queue before the consumer took it (the consumer's backlog, the window's own ~17–85 ms of processing on top; null with no window); 404 absent; unreadable or foreign-owned = UNKNOWN |
 
 The consumer CLI is `scripts/program_audio_guard.py`, used by both YouTube gates (camera-box and
 restreamer issue 357):
@@ -204,18 +212,19 @@ level. Re-run the full calibration after any decoder or rule change:
       carried the window over the bar, 32.8 % -> 29.3 % faded), so no fade is applied. Before the
       bridge the window holding a hole was never judged (the span restarted, UNKNOWN). Reported on
       the Design-question thread (6036260703) next to the date step.
-    - Restreamer's safety checks, pinned: music (pink, or an in-band chord) arriving before, across
-      or after a bridged hole reads FOREIGN in the same window and starts the latch with the same
-      payload as without the hole; music two thirds bridged zeros never reads MEASUREMENT and the
-      decoder never sees a bridged sample. Before, the same hole restarted the span and an in-band
-      chord waited out the warm-up.
+    - Restreamer's safety checks, pinned: BROADBAND music (pink) arriving before, across or after a
+      bridged hole reads FOREIGN in the same window and starts the latch with the same payload as
+      without the hole; music two thirds bridged zeros never reads MEASUREMENT and the decoder never
+      sees a bridged sample. An in-band chord (FOREIGN only through a short chain) now reads UNKNOWN
+      while its span holds bridged audio and FOREIGN at most two windows later: the rule-A
+      trade-off below (ROZHODNUTÉ 6037765523), never MEASUREMENT.
     - Replay of the 55 live offsets as real holes (frames dropped, the rest as send jitter) through
       the real decoder on rec2 and session (20 min each): 49 bridged, 6 UNKNOWN (only the holes over
       250 ms: 256.3, 337.8, 357.6, 543.0, 556.2, 571.7 ms), 0 FOREIGN, minimum chain 7.
-    - **Open (Design-question 6036260703): a FORWARD timestamp step with no sample lost**, i.e. a
-      dantesync date step of up to 250 ms, is bridged too. The zeros then push every later marker
-      round(60·δ) indices off the line. Probe on the committed clip: +50…+250 ms at 33 positions,
-      2 FOREIGN windows, minimum chain 3; before, one UNKNOWN. Not decided in the lane.
+    - **A FORWARD timestamp step with no sample lost** (Design-question 6036260703) pushed every later
+      marker round(60·δ) indices off the line when bridged: +50…+250 ms on the committed clip gave
+      2 FOREIGN windows, minimum chain 3. The fleet date step is now matched to dev1's own wall step
+      (DATE_STEP, below), and a sender stall by the look-ahead (below).
   - Fallback: only when a timestamp is undefined (`INT64_MAX` = `NDIlib_recv_timestamp_undefined`,
     or ≤ 0) the old arrival rule applies (`RECEIVE_GAP_S` = 1 s, logged `receive gap of … (no NDI
     sender timestamp …)`). An NDI error frame still restarts the span unconditionally (stricter
@@ -224,7 +233,11 @@ level. Re-run the full calibration after any decoder or rule change:
     and reports `max_offset_ms`: the largest |offset| of a frame that continued, i.e. the sender's
     jitter against the 41.3 ms tolerance (the margin to watch), then `holes_bridged` and
     `bridged_ms`; a restart after an NDI error frame shows as `error_frames`. Each restart, each
-    late burst and each bridge also logs one line.
+    late burst and each bridge also logs one line. Since design 6037613222 the line also carries
+    `queue_drops`, `max_lag_ms` and `date_steps`, and since the look-ahead `sender_stalls` and
+    `max_stall_ms` (all between `bad_rate_frames` and `timeline_breaks`, so the older field anchors
+    keep their neighbours). A held frame's decision lands in the interval in which the look-ahead
+    decides it (up to 4 frames later).
   - STEP 0 (7.10.2026): a second, read-only sampler instance (private serve dir) took the live
     `STREAM-SNV (stream)` for 25 min while dev1 ran test suites and the marker calibration.
     70 304 frames (comment 6030714990):
@@ -245,14 +258,35 @@ level. Re-run the full calibration after any decoder or rule change:
     A probe can reuse the scratch recipe: subclass `NdiAudioReceiver.capture` to log
     `frame.timestamp`, run `program_audio_sampler.run` with a private serve dir, never the live
     one, and never restart the live unit for it.
-  - **A dantesync date step** moves the sender's wall clock and so its timestamps once. A backward
-    step or a forward one over 250 ms reads as ONE discontinuity: one UNKNOWN warm-up window per
-    step, never FOREIGN, because a restarted span is never judged as a short chain. A forward step
-    up to 250 ms is bridged like a hole (the open question above). Micro-corrections of a few ms
-    stay inside the tolerance.
-  - Residual limits: a sender stall longer than the tolerance (OBS submitting a frame > ~20 ms
-    later than its normal jitter) costs one warm-up although nothing was lost; a sender with no
-    timestamps falls back to the arrival rule and its old limit.
+  - **A dantesync date step is DATE_STEP, never a hole** (design 6037613222; `frame_continues(...,
+    wall_steps=...)`, `WallSteps`, pinned by `tests/python/test_program_audio_datestep_1404.py`).
+    - dev1 runs the same fleet dantesync as the stream box (both followers, the same announced
+      `date_offset_seq`), so dev1's own wall clock steps at the same instant.
+    - The capture path reads dev1's wall-minus-monotonic offset with every block: ONE bracketed read
+      (`read_wall_offset_ns`: monotonic, wall, monotonic; the wall placed at the middle; a bracket over
+      1 ms is retried 3 times, else no reading). Frequency slewing moves both clocks alike, so the
+      offset changes only on a STEP; a change of 5 ms or more between two readings is a dev1 step.
+    - A FORWARD timestamp jump over the tolerance that matches a forward dev1 step of the same size
+      (±20 ms), seen within the last 2 s, is a DATE_STEP: no zeros, no restart; the next frame is
+      judged against the stepped one, so the timeline is re-based. One dev1 step excuses one jump
+      (it is consumed). A `audio timeline date step: … nothing lost` line, `date_steps` in the summary.
+    - Without a matching dev1 step (dev1's dantesync missed it, or stepped more than 2 s earlier, or
+      the sender's jump came first) the rules stay: a forward jump up to 250 ms is bridged, a larger
+      one or a backward one restarts the span (one UNKNOWN, never FOREIGN).
+    - Only FORWARD jumps (the design). A backward date step still costs one warm-up.
+    - The match only looks BACK: dev1 must have stepped before the first stepped frame arrives (the
+      stream box and dev1 step at the same announced instant, the frame then needs the network and
+      the SDK). If dev1 steps later, or corrects its date by slewing / micro-steps instead (its
+      `/status` shows `date_slew_active` / `date_micro_active`), the jump falls back to the bridge or
+      a restart. Confirm the order at the next nightly step before calling DATE_STEP live: the
+      journal's `timeline date step` line, never a `bridged with` line, at the step time.
+    - The two windows whose span holds a DATE_STEP count as holed for the short-chain rule below:
+      the ±20 ms match can absorb a small real loss (one frame plus negative jitter).
+    - Micro-corrections of a few ms stay inside the tolerance.
+  - Residual limits: a sender stall whose catch-up frames do not bring the timeline back within the
+    tolerance in 4 frames (a stall of ~150 ms or more) is bridged as a hole of its smallest offset
+    although nothing was lost (a holed span, rule A); a sender with no timestamps falls back to the
+    arrival rule and its old limit.
   - **Test trap: a fake decoder must follow the stretch it is handed.** With a bridge in the span
     the decoder is called once per delivered stretch, and `FixedChain` returns the same 8 words for
     every call, so the copies collide on rule 2 and a measurement span reads FOREIGN. Loop tests
@@ -275,6 +309,149 @@ level. Re-run the full calibration after any decoder or rule change:
   - The previous-frame rule and the `max_offset_ms` bookkeeping are pinned by mutants: judging with
     the current block's size, a break feeding the max, a dropped `abs`, no reset, and late bursts
     left out each fail a test.
+- **A chain cut short by bridged audio is never FOREIGN on its own** (ROZHODNUTÉ 6037765523,
+  restreamer run 37602415434; `classify(..., holed=True)`).
+  - When the trailing span holds bridged samples (a bridged hole or a queue drop) and the spectrum
+    is measurement-like, a chain under 4 reads UNKNOWN with the reason `marker chain N < 4 over a
+    span holding X ms of bridged audio -- … never FOREIGN on its own`. A spectral FOREIGN stays
+    immediate, holed or not.
+  - The live case: 14:17:37 `MEASUREMENT -> FOREIGN … marker_chain=3` after 16 "holes" of
+    +41…+54 ms in 13 s. Replayed on the committed clip through the real decoder: the STALL shape
+    (below) gives 3 FOREIGN windows with chain 3 before, 3 UNKNOWN after; the same 16 holes as REAL
+    loss give chain 4–8 and no FOREIGN either way.
+  - Trade-off, accepted by the owner: an in-band chord during a holed span reads UNKNOWN instead of
+    FOREIGN, and FOREIGN comes once the 4 s span no longer holds the bridged audio (at most two
+    windows later). Every consumer fails closed on UNKNOWN; restreamer stops on 2 consecutive
+    UNKNOWN or 3 within 60 s. Broadband music keeps its same-window FOREIGN.
+- **The capture thread** (design 6037613222; `scripts/program_audio_capture.py`, pinned by
+  `tests/python/test_program_audio_capture_1404.py`).
+  - Why: the single loop called `NDIlib_recv_capture_v3` and did the window work (FFT, ctypes decode,
+    JSON writes) in one thread. Under load it stopped calling the capture for up to 2 s, and the
+    SDK, which holds about 1.3 s of audio, dropped the oldest.
+  - The thread only blocks in the capture call (ctypes releases the GIL), stamps the arrival time and
+    the dev1 wall offset, and appends to a queue bounded at 10 s of audio. It never runs the FFT, the
+    decode or a write (a test spies the thread names). The consumer is the old loop, unchanged except
+    that it takes items from the queue.
+  - A full queue drops the NEW frame and counts it (`queue_drops`, summary + JSON). The drop rides on
+    the next queued AUDIO block (never an error item or an empty block: the consumer does not judge
+    those, so the hole would be lost), and the consumer reads it as a hole of exactly the dropped
+    audio: a BRIDGE of those samples up to 250 ms, or of the whole offset when the timestamps show
+    more missing; a span restart beyond 250 ms or behind the dropped audio. It is logged
+    `queue overflow: N frames (X ms) dropped by the sampler's own capture queue -- …`. Every branch
+    is pinned in the pure decision, including a drop with send jitter (bridged with exactly the
+    dropped samples, never round(offset·sr)). Without timestamps a drop is bridged too, but an
+    arrival gap over 1 s still takes the arrival-fallback restart.
+  - An NDI error frame is queued as an error item (the span restarts as before), and the thread waits
+    one capture timeout. Any other exception in the capture call is handed to the consumer, whose
+    next get raises it, so the sampler exits non-zero and systemd restarts it (never a live consumer
+    reading "no audio" forever).
+  - Shutdown: SIGTERM sets the flag, the consumer returns, `CaptureThread.stop()` waits for the thread
+    to leave the SDK call, and only then is the receiver closed (destroying it under a running
+    capture would crash the SDK; if the thread is still inside after the join, the receiver is left
+    to the process exit). The JSON then reads UNKNOWN `sampler stopped` as before.
+  - `max_lag_ms` in the summary is the oldest captured item the consumer took (its backlog), and
+    `lag_ms` in the JSON is the lag of the window it judges: a consumer that falls behind its 10 s
+    queue never passes for a fresh one (`ts_utc` is the write time). The arrival gaps (late bursts)
+    are now the capture thread's own.
+  - `run(capture=None)` (the calibration CLI and every loop test) keeps the capture call in the loop
+    through `SyncCapture`, the same items without a thread, so the bars and the loop tests run the
+    same consumer deterministically. It reads NO wall clock unless `wall_offset` is passed: a real
+    dantesync step during a test or a calibration run must never turn a bridge into a date step.
+  - **STEP 0 (7.10.2026, Design-question 6037861831):** two read-only probes on the live
+    `STREAM-SNV (stream)`, private serve dirs, side by side at nice 10, 720 s under the natural load
+    (load avg 6–18, other projects' CI). Single loop: 5 losses from its own starvation (arrival
+    gaps 1.74–2.03 s, 362–826 ms lost each, a span restart each); capture thread: 0 (its largest
+    gap between two captures 0.51 s). Both also saw 2 losses at the same moments (418/579 ms and
+    224/449 ms): a whole-process stall that also starved the SDK's own threads. The receiver holds
+    more than one thread of its own (`ndir:audio`, `ndir:reconn` ×N for the RUDP connections).
+  - **CPU priority (STEP 0 run 2, comment 6038303132).** Four busy loops at nice 0 in the lanes' own
+    cgroup, 600 s, three capture-thread probes side by side: nice 10 lost audio 13 times (7.2 s, 9 of
+    them its own), nice 0 and nice 0 + `CPUWeight=1000` 4 times each (2.9–3.1 s), and those 4 were ONE
+    box-wide event that hit every receiver on dev1 at once, the live unit included (+1638.5 ms at
+    12:48:10Z; dev1 IO pressure, 4.7 GB swap in use; the stream OBS log quiet). So `Nice=10` is
+    gone from the unit; that is the measured cure.
+    - **No host tuning (coordinator, 7.10.2026): both units run the sampler at NORMAL priority** (no
+      `Nice=`, no `CPUWeight=`). A `--user` unit cannot lower nice on dev1 anyway (`systemd-run
+      --user -p Nice=-5` runs at nice 0 with no error, RLIMIT_NICE 0), and on strih-lx a CPUWeight
+      would rank the sampler ahead of OBS in the same slice. The sampler logs one start line,
+      `scheduling nice=N cpus=<list> cpu.weight=W` (a WARNING only at a positive nice).
+    - A `--user` CPUWeight competes only inside the user's own slice; against other users' load the
+      passive run's capture thread at nice 10 had no loss of its own.
+    - A system unit with a realtime capture thread was weighed and not taken: the remaining losses
+      are box-wide, and the SDK's own receive threads (`ndir:*`) stall with them. The real answer
+      to dev1's load was the move to strih-lx (below).
+  - **Most "holes" are not lost audio: a SENDER stall.** 20 of the 22 forward steps over the
+    tolerance in the 720 s run were identical in all three receivers (both probes and the live
+    unit, to 0.1 ms) and each was followed by two frames at −21.1 ms: the cumulative offset returns
+    to within ±1.1 ms. The stream OBS stamps an NDI audio frame with its wall clock at SUBMISSION;
+    its audio thread stalls ~64 ms (`audio-stall #1367: tick_gap_max_ms=58…68` every minute) and
+    then submits three frames back to back. The bridge inserts ~43 ms of zeros for audio that was
+    never lost, and every later marker sits 2.6 indices off the line. That is the 14:17:37 false
+    FOREIGN. Rule A alone turned it into UNKNOWN, which did NOT end the YouTube stop: the live
+    pattern replayed read `U U M M M M U M U U M` (two UNKNOWN in a row, three within ~20 s), enough
+    for restreamer's 2-consecutive / 3-within-60 s rule. The look-ahead (next section) ends it.
+- **The sender-stall look-ahead** (ROZHODNUTÉ on issue 1404, the answer to Design-question
+  6037861831; `program_audio.resolve_ahead` + `program_audio_sampler.HeldFrames`, pinned by
+  `tests/python/test_program_audio_stall_1404.py`).
+  - A frame more than the tolerance AHEAD of the timeline (beyond any known queue drop), with no
+    matching dev1 wall step and no format change, is HELD (`judge_continuity` kind `ahead`), and so
+    are up to `STALL_LOOKAHEAD_FRAMES` = 4 frames after it (~85 ms).
+  - Each held frame's CUMULATIVE offset is measured against the frame before the step: its stamp
+    minus (that frame's stamp + its duration + every held frame before it + the first frame's known
+    drop). Summed as integer differences: a live stamp (~1.8e16) does not fit a float exactly.
+  - The first held frame back at or under the tolerance decides at once: a SENDER STALL. Nothing
+    lost: no zeros (only the first frame's known queue drop), the span kept, `sender_stalls` +1
+    (summary + JSON) and `max_stall_ms`. The frames before it are filed at their TIMELINE place,
+    never at their late stamps, so the next frame is judged against the timeline (a +100 ms stall
+    spread over three frames is one stall, never a −58 ms backward jump). A live stall (+42/−21/−21)
+    decides at its first follower, so it costs no wait. No log line per stall (~2 a minute live);
+    the summary carries them.
+  - None back after 4 followers: the hole = the SMALLEST cumulative offset. Up to 250 ms (with the
+    known drop) a BRIDGE of exactly that (`audio timeline hole: the frame sits +X ms ahead … the
+    smallest offset +H ms is the hole … bridged with N zero samples`), else a restart (`audio
+    timeline discontinuity: … the smallest offset over the next N frame(s) …`). A late-stamped frame after a real loss is filed at
+    its place behind the hole, so the zeros are the lost audio, never the late stamp's offset.
+  - Every held frame is decided, never lost: a frame that cannot join (a known queue drop, another
+    rate or channel count, no stamp) decides the held ones first with what arrived (`complete`), and
+    so do a quiet capture poll, an NDI error frame (the held audio belongs to the old span) and the
+    loop's stop.
+  - The window holding a stall is NOT holed (no zeros), so rule A never touches it: the in-band chord
+    around a stall reads FOREIGN in the same window as without it (restreamer's safety test). Rule A
+    and the spectral FOREIGN are unchanged.
+  - Evidence (7.10.2026): the STEP-0 probes' recorded stamps replayed through the real loop: the
+    capture-thread probe's 20 forward steps under 250 ms are 20 sender stalls, 0 zeros (its 2 losses
+    of 417/448 ms still restart); the in-loop probe at nice 10 reads 19 stalls, 3 bridges, 5 restarts
+    (its own starvation). The live 16-step pattern replayed on the committed clip through the real
+    decoder reads MEASUREMENT in every window after the warm-up (was `U U M M M M U M U U M`).
+    Calibration unchanged: bar a minimum chain 6, bar b chords/tremolo/melody 1, band noise 3.
+  - **Residual: a real 2-frame loss can read as a stall.** A 2-frame loss (42.7 ms) is only 1.3 ms
+    over the tolerance, so a follower stamped 1.3 ms early brings it "back". Cut into the real STEP-0
+    stamps (fresh-context review), 16.4 % / 37.0 % of 2-frame losses read as a stall (the old
+    one-frame rule stitched 8.9 % / 20.3 % the same way), 3-frame losses 0 %. Such a loss gets no
+    zeros and its span is not holed, so rule A does not cover it, and no `bridged with` line names
+    it. Consequence probe: 2- and 3-frame losses every 4.5 s cut into rec2 / rec3a / rec3b / session
+    (1841 windows per run), stamped with the live capture-thread probe's jitter and stalls, through
+    the real decoder: 0 FOREIGN, 0 UNKNOWN after the warm-up, minimum chain 4; the pre-look-ahead
+    code read 1 FOREIGN (session, 3-frame) and 1 UNKNOWN (rec3b) on the same input.
+  - `max_offset_ms` counts a stall's catch-up frame with its offset against the TIMELINE (up to
+    the tolerance), while the stalled frames themselves go to `max_stall_ms`: a large stall can
+    raise `max_offset_ms` towards 41.3 ms without any jitter.
+  - Tests that changed on purpose: a 2-frame hole with a 5 ms late stamp bridges 42.7 ms (was
+    47.7); a loop test whose summary boundary fell on a held frame moves it to the 5th frame after
+    the hole; a test whose music ended within a few samples of a window boundary got more music
+    (exact bridges no longer pad the timeline); the holed-UNKNOWN reason test now uses an in-band
+    chord with real losses and pins its 4 holed windows.
+  - The limits are pinned to the 100 ns unit with 4800-sample frames (1 000 000 units each); re-held
+    groups, a queue drop or a channel change after a held frame, and a frame 300 ms late are pinned
+    by scripted runs, and so are the glue's own steps (a follower with no stamp never joins, the
+    first frame's known drop reaches resolve_ahead, zeros only before the first held frame, each
+    frame taken in once). 22
+    mutants (flushes, stamps, limits, the join rules, the re-feed, the glue) all fail a test.
+  - A bridge after the look-ahead is the smallest offset, so a follower stamped early shortens it
+    by its jitter (a 64 ms loss with followers 8 ms early bridges 56 ms): the later markers sit that
+    much early. One marker index is 16.7 ms and the chain allows +-2 (33 ms); live jitter reaches
+    p99 18.2 ms (about 1.1 index), max 29.5 ms (about 1.8). The consequence probe above (live jitter
+    and stalls, 2- and 3-frame losses) read 0 FOREIGN, 0 UNKNOWN, minimum chain 4.
 - **A SILENT window empties the span.** The next non-silent window holds only its own markers, so it
   reads UNKNOWN ("marker span") until the span is full again. Without this a silence→measurement
   start read a short chain and could latch a false FOREIGN.
@@ -360,3 +537,88 @@ is at a venue. So the mirror is a long-running service holding one
   FOREIGN was verified live on the SongPlayer program sender, which already carries music.
 - **Restart the lease server only while `held=false`.** `/rig-lease.json`, `/healthz` and the 404
   are pinned to golden bytes captured from the pre-change server.
+
+## The host: strih-lx, its own endpoint :8891 (ROZHODNUTÉ 6039368611)
+
+The owner rejected dev1 for the sampler (shared, loaded by other projects' CI: "naozaj to musi bezat tu
+na dev1?!"). It needs only NDI reach to `STREAM-SNV (stream)` and an HTTP endpoint, so it moves to
+strih-lx (16 cores, the E-cores 12-15 nearly idle; stream.lan was rejected: a Windows port of the
+shim + numpy next to restreamer's broadcast encoder).
+- **Its own read-only endpoint** (`scripts/program_audio_http.py`, served from the sampler process):
+  `GET/HEAD /program-audio.json` through the SAME `rig_serve_files.program_audio_response` the lease
+  server uses (ages per request, foreign-owned / garbage / a chain-less MEASUREMENT = UNKNOWN), 404
+  while absent, `/healthz`, anything else 404, other methods 501. `--http-port` /
+  `PROGRAM_AUDIO_HTTP_PORT` default **8891** (0 = none), `--http-bind` / `PROGRAM_AUDIO_HTTP_BIND`
+  default 0.0.0.0, `--serve-dir` / `PROGRAM_AUDIO_SERVE_DIR`. Routine requests are not logged.
+  - **One response framing for both servers:** `rig_serve_files.ReadOnlyHandler` (GET/HEAD through one
+    `_handle`, the query-string strip, `_send`, no Python version in `Server:`), moved verbatim out of
+    `rig-lease-server.py`; the lease routes' golden bytes are unchanged.
+  - **Bound after the receiver exists, stopped after the final UNKNOWN.** A port in use closes the
+    receiver, writes UNKNOWN `sampler cannot serve http on …` and exits 1 (fail loud; systemd restarts).
+  - Tests never bind the default port (`--http-port 0`, or a free ephemeral port).
+- **The dev1 lease route stays** (`http://dev1:8890/program-audio.json`) until the consumers switch to
+  `http://10.77.9.202:8891/program-audio.json`; nothing proxies yet.
+- **The unit** `systemd/program-audio-sampler.strih-lx.service` (a TEMPLATE) is installed as the
+  operator's `--user` `program-audio-sampler.service`:
+  - `CPUAffinity=` = the box's own `/sys/devices/cpu_atom/cpus` (12-15 on strih-lx), read the way
+    `strih_lx_lowprio_prefix` reads it (whitespace stripped; a value that is not a cpu list = no pin;
+    no cpu_atom = no affinity line). Normal priority (no Nice/CPUWeight: never ahead of OBS).
+  - `ExecCondition=/usr/bin/test -e %h/.config/camera-box/program-audio-sampler.test-mode`: an OPT-IN
+    TEST marker (review round 3). Without it every start is skipped, so the sampler is DOWN by default:
+    a fresh provisioning, and a reboot during a production (strih-lx lingers the user manager,
+    `Linger=yes`), never start it. An opt-out EVENT marker would not exist before the first
+    `rig-mode.sh event` with this code. strih-lx's `/usr/bin/test` is uutils; its exit 1 on a missing
+    file was read live (systemd 259 there).
+  - `ExecStart` runs the installed checkout-layout copy `/usr/local/lib/camera-box/scripts/…`;
+    `WantedBy=default.target` (no X needed; a reboot in TEST mode brings it back).
+  - No `After=network-online.target`: a user manager cannot see system targets (review round 4); the
+    receiver waits for the source itself.
+  - libndi: `/usr/local/lib/libndi.so.6` (strih-lx's NDI 6.3.2 runtime) is a lookup candidate.
+- **Provisioning = setup-strih step 16e** (`scripts/lib/strih-program-audio.sh`, as root):
+  - apt `python3-numpy` only when missing, then an `import numpy` preflight;
+  - the sampler's import closure + the shim's C++ source, its two vendored headers and the build
+    script into `/usr/local/lib/camera-box` in the checkout layout (pinned against the real import
+    closure by a test), each written only when it differs. The sampler compares the decoder it loads
+    with those sources, and the build script builds from them;
+  - the shim built AS THE OPERATOR (`sudo -u newlevel env HOME=…`) into the default
+    `~/.local/lib/camera-box/libqpsk-guard-shim.so`, only when missing / unloadable / built from other
+    sources. A library in the operator's home is never loaded as root (the state check runs as the
+    operator too);
+  - the rendered unit written only when it differs, `enable`, a daemon-reload when the unit changed, a
+    `try-restart` when anything changed. NEVER a start (enable-only).
+  - newlevel has no passwordless sudo on strih-lx: everything root goes through setup-strih itself.
+    The firewall is off; no ufw rule is added.
+- **verify-strih item 41** (`strih_program_audio_grade_report`, 3 rows): files + unit + enabled; the
+  shim current; the unit's state against the TEST marker:
+  - the state is re-read up to 3 x (1 s apart) while it is in a transition: a starting sampler
+    settles, a crash loop (`activating`, auto-restart) stays and is a FAIL. `failed` is a FAIL. An
+    EMPTY answer (the operator's user manager unreachable) reads `unreadable`, a FAIL naming linger;
+  - running WITHOUT the TEST marker = a FAIL (review round 4): EVENT mode, yet running -- rig-mode.sh
+    event's stop failed or timed out, or the marker was removed by hand;
+  - running in TEST mode = its endpoint must answer a FRESH verdict at the port/bind of its env file
+    (`PROGRAM_AUDIO_HTTP_PORT` / `_BIND`, parsed like systemd reads it -- whitespace around `=`
+    dropped, never sourced; a wildcard bind read on 127.0.0.1), read up to 3 x (a grade right after
+    step 16e's try-restart, before the bind). Fresh = the guard's own window, -1 s <= `age_s` <= 10 s
+    (`STRIH_PROGRAM_AUDIO_FUTURE_TOLERANCE_S` / `_MAX_AGE_S`, pinned to `program_audio_guard`'s
+    `NEGATIVE_AGE_TOLERANCE_S` / `DEFAULT_MAX_AGE_S`): strih-lx is the dantesync date master, so a grade
+    right after its nightly step can read a verdict slightly in the future. A running sampler with
+    port 0 is a FAIL;
+  - down WITH the TEST marker = a FAIL; down without it = a NOTE (EVENT mode, or never put in TEST
+    mode: setup-strih's own step 17 runs right after an enable-only install).
+- **rig-mode.sh** (`scripts/lib/program-audio-mode.sh`, sourced; one call each, after the relay step):
+  TEST leaves the marker, clears a failed state (`reset-failed`: a crash loop that hit StartLimitBurst
+  refuses the next start for up to 300 s), `systemctl --user start`s the unit and reads its state 2 s
+  later (a Type=simple unit reads active the moment it is forked, so a sampler that dies on import
+  would pass an immediate read); EVENT removes the marker, stops it and clears a failed state (`stop`
+  leaves a failed unit failed, which item 41 would FAIL in EVENT mode). Over plain ssh as the operator
+  (`sshpass … timeout … ssh`, `UserKnownHostsFile=/dev/null`; a plain ssh command gets
+  `XDG_RUNTIME_DIR=/run/user/1000` on strih-lx); report-only: a WARNING naming the state, never
+  rig-mode's exit status (a stopped sampler fails closed for its consumers). A Windows strih is one
+  SKIP line.
+- **The shared read-only handler drops an idle client after 10 s** (`ReadOnlyHandler.timeout`): the
+  endpoint listens on 0.0.0.0 on a production box with no firewall; the lease server gets it too.
+- **strih-lx's stack:** Python 3.14.4 and apt's numpy 2.3.5 (dev1: 3.12 + 2.4.6). The sampler suites
+  and the marker calibration (bar a min chain 6, bar b unchanged) also pass under Python 3.14.2 +
+  numpy 2.3.5 on dev1 (`uv run --no-project --python 3.14 --with numpy==2.3.5 --with pytest`).
+- strih-lx's USB 5 GbE NIC still has rx_missed bursts (issue 1242 / 1387): NDI rides TCP/RUDP, so they
+  show as late bursts, which the sender-timeline logic keeps.

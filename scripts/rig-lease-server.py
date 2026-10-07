@@ -66,7 +66,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rig_lease_state as rls  # noqa: E402
@@ -101,47 +101,20 @@ def log(msg: str) -> None:
         pass
 
 
-class RigLeaseHandler(BaseHTTPRequestHandler):
-    # Overridden per-instance by make_server() via a bound subclass -- see make_server() below.
+class RigLeaseHandler(rsf.ReadOnlyHandler):
+    # The response framing (GET/HEAD through _handle(), the query-string strip, _send(), no Python
+    # version in the Server header) is rig_serve_files.ReadOnlyHandler, shared with the program-audio
+    # sampler's own endpoint (issue 1404). Overridden per-instance by make_server() via a bound
+    # subclass -- see make_server() below.
     lease_dir = "/var/tmp/rig-lease"
     stale_secs = rls.DEFAULT_STALE_SECS
     # issue 1404: the dir the two mirrored files are served from; None = those routes are a 404.
     serve_dir = None
 
     server_version = "rig-lease-server/1277"
-    # Suppress the interpreter version from the Server: response header (BaseHTTPRequestHandler's
-    # version_string() concatenates server_version + " " + sys_version) -- no reason to advertise
-    # the exact Python patch version to an unauthenticated caller.
-    sys_version = ""
 
     def log_message(self, fmt, *args):
         log(f"{self.address_string()} {fmt % args}")
-
-    def _request_path(self) -> str:
-        # Strip a query string before matching -- `GET /rig-lease.json?t=1` (a common client-side
-        # cache-buster) must still hit the real route, not fall through to 404 (which would make
-        # restreamer's consumer contract fail-open and silently drop the lease check).
-        return self.path.split("?", 1)[0]
-
-    def _send(self, status: int, content_type: str, body: bytes, *, no_store: bool = False,
-              extra_headers: tuple = ()) -> None:
-        # The WHOLE response (status line + headers + body) is wrapped in ONE try/except -- a
-        # client that disconnects between send_response() and end_headers() would otherwise raise
-        # an unguarded BrokenPipeError/ConnectionResetError (only the body write used to be
-        # guarded), which socketserver logs as a traceback even though it is not a real fault.
-        try:
-            self.send_response(status)
-            self.send_header("Content-Type", content_type)
-            if no_store:
-                self.send_header("Cache-Control", "no-store")
-            for name, value in extra_headers:
-                self.send_header(name, value)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            if self.command != "HEAD":
-                self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
-            pass  # a client that disconnected mid-response is not this server's problem
 
     def _handle(self):
         path = self._request_path()
@@ -179,16 +152,6 @@ class RigLeaseHandler(BaseHTTPRequestHandler):
                 return
 
         self._send(404, "text/plain", b"")
-
-    def do_GET(self):
-        self._handle()
-
-    def do_HEAD(self):
-        # A cheap liveness probe an external checker can use without paying for a JSON body --
-        # routes through the SAME path matching as do_GET (_handle() suppresses the body write
-        # via self.command == "HEAD" inside _send()), so the two can never drift on which paths
-        # are recognized.
-        self._handle()
 
 
 def make_server(bind: str, port: int, lease_dir: str, stale_secs: int,

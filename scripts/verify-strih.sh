@@ -830,6 +830,10 @@ fi
 #     Companion Satellite (unit + the /opt binary as its main process) and its watch (timer + last pass).
 strih_session_apps_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(session-apps) the grader did not print all of its rows"
 
+# 41) issue 1404 stream program-audio sampler (scripts/lib/strih-program-audio.sh): its files + E-core unit
+#     installed and enabled, its decoder shim current, its :8891 endpoint answering while it runs.
+strih_program_audio_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(program-audio) the grader did not print all of its rows"
+
 # 16) NIC xhci IRQ affinity (issue 1317 item H): the USB-NIC's xhci interrupt must be pinned to a
 #     SINGLE E-core (>= the first cpu_atom cpu) so its NET_RX softirq never shares an OBS core, AND
 #     that IRQ's /proc/interrupts counter must be ADVANCING over a live 2-s window (NEVER a static

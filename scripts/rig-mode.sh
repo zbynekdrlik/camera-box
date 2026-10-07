@@ -224,6 +224,13 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/cg-obs-burn-backstop.sh
 . "$RIG_MODE_DIR/lib/cg-obs-burn-backstop.sh"
 
+# issue 1404: the stream program-audio sampler (the YouTube channel guard of the test streams) runs on
+# strih-lx in TEST mode only: TEST leaves the marker its unit checks and starts it, EVENT removes it
+# and stops it.
+# Report-only (a WARNING, never the exit status). Source-only lib, no side effects at source time.
+# shellcheck source=scripts/lib/program-audio-mode.sh
+. "$RIG_MODE_DIR/lib/program-audio-mode.sh"
+
 # --- pinned constants (overridable via env, but DEFAULTS are the single source of truth) -----------
 CAM_PW="${CAM_PW:-newlevel}"                 # dev-rig LAN root pw (same as the sibling e2e scripts)
 PAINTER_IP="${PAINTER_IP:-10.77.9.62}"       # cam2 — has /dev/fb0 + the monitor the broadcast cam films
@@ -1338,6 +1345,9 @@ do_test() {
   fi
   bkshading_relay_mode_warn_continue test "$_relay_rc"
   echo
+  echo "[program-audio] issue 1404: start the stream program-audio sampler on the Linux strih (the test-stream YouTube guard, :8891):"
+  program_audio_mode_apply test "$STRIH_IP"
+  echo
   echo "[cam2 ${PAINTER_IP}] #725 resolve the QPSK audio-marker device from cam2's LIVE aplay -l (never trust the hardcoded default):"
   local resolved_marker_device
   resolved_marker_device="$(resolve_marker_device)"
@@ -1702,6 +1712,9 @@ do_event() {
   local _relay_rc=0
   bkshading_relay_mode_apply event "$CAM_PW" "${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP" || _relay_rc=$?
   bkshading_relay_mode_warn_continue event "$_relay_rc"
+  echo
+  echo "[program-audio] issue 1404: stop the stream program-audio sampler on the Linux strih (EVENT: it stays down, across a reboot too):"
+  program_audio_mode_apply event "$STRIH_IP"
   echo
   # #721 (live 2026-08-16): the painter stop + the ledger sweep above leave every painter dead, but
   # the marker CSV they wrote (/run/rig-qpsk-markers.csv, root-owned on tmpfs) SURVIVES -- and item 8

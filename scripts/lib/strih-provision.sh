@@ -32,6 +32,11 @@ if ! declare -F strih_session_apps_autostart_lines >/dev/null; then
   # shellcheck source=scripts/lib/strih-session-apps.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-session-apps.sh"
 fi
+# issue 1404: the program-audio sampler's own source-only lib (setup-strih step 16e, verify-strih item 41).
+if ! declare -F strih_program_audio_install >/dev/null; then
+  # shellcheck source=scripts/lib/strih-program-audio.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-program-audio.sh"
+fi
 
 # strih_lx_ndi_inputs -> the 10 NDI input names the strih role receives, one per line (issue 1317
 # spec; the 2ME feedback inputs are the task's explicit STRIH-SNV names). NOTE (issue 1352): the

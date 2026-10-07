@@ -12,9 +12,11 @@ samples; the sampler inserts that many zeros before the frame and keeps the span
 timeline beyond the tolerance, a hole over 250 ms and an undefined timestamp restart as before.
 
 The safety checks restreamer asked for (coordinator, 7.10.2026): a bridged hole never turns FOREIGN
-into MEASUREMENT and never delays the FOREIGN latch; a window that is mostly bridged zeros + music
-never reads MEASUREMENT; the chain is decoded over REAL samples only (the zeros are never handed to
-the decoder, so they cannot add a word); the spectral share stays a ratio of the real signal.
+into MEASUREMENT and never delays a SPECTRAL (broadband) FOREIGN; a window that is mostly bridged
+zeros + music never reads MEASUREMENT; the chain is decoded over REAL samples only (the zeros are
+never handed to the decoder, so they cannot add a word); the spectral share stays a ratio of the
+real signal. Since ROZHODNUTÉ 6037765523 an in-band chord (FOREIGN only through a short chain) reads
+UNKNOWN while its span holds bridged audio, and FOREIGN at most two windows later.
 """
 from __future__ import annotations
 
@@ -216,7 +218,9 @@ def test_a_two_frame_hole_keeps_the_span_on_real_audio(decoder, rec_clip, tmp_pa
     timeline or 5 ms late (the live offsets read +41.4...+52.6 ms). The span is kept: the verdicts
     are the uncut clip's (one start-up warm-up, then MEASUREMENT), the hole is logged as bridged,
     and the chain stays >= MARKER_CHAIN_MIN + 2 (bar a) unless the cut itself removed a decoded
-    marker word, then >= MARKER_CHAIN_MIN + 1."""
+    marker word, then >= MARKER_CHAIN_MIN + 1. The bridge is the lost audio itself, 42.7 ms either
+    way: the sender-stall look-ahead takes the smallest offset over the next frames, so the late
+    stamp's extra 5 ms is never filled with zeros (ROZHODNUTÉ on issue 1404)."""
     ref_blocks, _ = _frames(rec_clip)
     ref, _ = _run(ref_blocks, tmp_path, decoder)
     assert _verdicts(ref) == ["UNKNOWN", "UNKNOWN"] + ["MEASUREMENT"] * 4
@@ -230,7 +234,7 @@ def test_a_two_frame_hole_keeps_the_span_on_real_audio(decoder, rec_clip, tmp_pa
         assert not any("starts over" in line for line in lines), (t, lines)
         bridged = [line for line in lines if "bridged with" in line]
         assert len(bridged) == 1 and "the marker span is kept" in bridged[0], lines
-        want_ms = 2 * FRAME * 1e3 / SR + jitter_ms
+        want_ms = 2 * FRAME * 1e3 / SR
         assert payloads[-1]["holes_bridged"] == 1
         assert payloads[-1]["bridged_ms"] == pytest.approx(want_ms, abs=0.06)
         eats = _eats_a_word(ref_words, k * FRAME / SR, (k + 2) * FRAME / SR)
@@ -294,17 +298,20 @@ def test_the_counters_reach_the_summary_and_the_json(rec_clip, tmp_path):
     out of max_offset_ms."""
     a, b, c = _frame_at(2.0), _frame_at(4.0), _frame_at(8.0)
     gap = pas.LOG_SUMMARY_S + 1.0
+    # the second summary comes once hole c is decided: the frame after it is held with the next 4
+    # (the sender-stall look-ahead), so the interval ends at the 5th frame after the hole
     blocks, arrival = _frames(_with_timeline_markers(rec_clip), drop={a, a + 1, b, b + 1, c, c + 1},
-                              jitter={a + 2: 50_000}, gaps={_frame_at(6.0): gap, c + 2: gap})
+                              jitter={a + 2: 50_000}, gaps={_frame_at(6.0): gap, c + 7: gap})
     payloads, lines = _run(blocks, tmp_path, _TimelineMarkers(), arrival_gaps=arrival)
     assert payloads[0]["holes_bridged"] == 0 and payloads[0]["bridged_ms"] == 0.0
     assert payloads[-1]["holes_bridged"] == 3
-    assert payloads[-1]["bridged_ms"] == pytest.approx(3 * 42.667 + 5.0, abs=0.1)
+    assert payloads[-1]["bridged_ms"] == pytest.approx(3 * 42.667, abs=0.1)
     summary = [line for line in lines if "program-audio summary" in line]
     assert len(summary) == 2, lines
-    # 5.0 = the frame after the late-stamped bridged frame (it sits 5 ms early); the bridged
-    # frame's own +47.7 ms never counts
-    assert summary[0].endswith("max_offset_ms=5.0 holes_bridged=2 bridged_ms=90.3"), summary[0]
+    # the late-stamped frame after the first hole is filed at its timeline place (the look-ahead's
+    # smallest offset is the 42.7 ms hole), so the frame after it sits on the timeline: 0.0; the
+    # bridged frame's own +47.7 ms never counts
+    assert summary[0].endswith("max_offset_ms=0.0 holes_bridged=2 bridged_ms=85.3"), summary[0]
     assert summary[1].endswith("holes_bridged=1 bridged_ms=42.7"), summary[1]
     assert "timeline_breaks=0" in summary[0] and "timeline_breaks=0" in summary[1]
     assert sum("bridged with" in line for line in lines) == 3
@@ -392,6 +399,22 @@ def _first_foreign(payloads):
     return next((i for i, p in enumerate(payloads) if p["last_foreign_ts_utc"] is not None), None)
 
 
+def _holed_chord_fails_closed(holed, ref):
+    """ROZHODNUTÉ issue 1404 comment 6037765523: an in-band chord's FOREIGN comes from a short marker
+    chain only, and a short chain over a span that holds bridged audio reads UNKNOWN, never FOREIGN
+    on its own. So against the same audio without the holes every window reads the same or UNKNOWN,
+    never MEASUREMENT where the reference does not, and the FOREIGN still comes -- at the latest two
+    windows later, once the 4 s span no longer holds the bridged audio. Every consumer fails closed
+    on UNKNOWN (the accepted trade-off)."""
+    hv, rv = _verdicts(holed), _verdicts(ref)
+    assert len(hv) == len(rv), (hv, rv)
+    for h, r in zip(hv, rv):
+        assert h == r or h == "UNKNOWN", (hv, rv)
+    assert "FOREIGN" in hv, hv
+    assert _first_foreign(holed) is not None and _first_foreign(ref) is not None
+    assert _first_foreign(holed) <= _first_foreign(ref) + 2, (hv, rv)
+
+
 ONSET_S = 6.5
 
 
@@ -407,17 +430,22 @@ ONSET_S = 6.5
 def test_music_around_a_bridged_hole_reads_foreign_in_the_same_window(decoder, rec_clip, tmp_path,
                                                                       kind, hole_at, frames):
     """Measurement, then broadband music (pink, spectrally FOREIGN) or an in-band chord (FOREIGN only
-    through the marker chain). With a bridged hole anywhere around the music's arrival, every window
-    reads what it reads without the hole, so FOREIGN comes in the same window and the latch starts
-    with the same payload."""
-    audio = np.concatenate([rec_clip[: int(ONSET_S * SR)], _music(kind, 12.0 - ONSET_S)])
+    through the marker chain). Pink: with a bridged hole anywhere around the music's arrival, every
+    window reads what it reads without the hole, so FOREIGN comes in the same window and the latch
+    starts with the same payload. Chord: a window whose span holds the hole reads UNKNOWN instead of
+    FOREIGN (ROZHODNUTÉ 6037765523, _holed_chord_fails_closed), never MEASUREMENT."""
+    # 16 s: room for the chord's FOREIGN once the 4 s span no longer holds a hole at ONSET_S + 1.6
+    audio = np.concatenate([rec_clip[: int(ONSET_S * SR)], _music(kind, 16.0 - ONSET_S)])
     ref, _ = _run(_frames(audio)[0], tmp_path, decoder)
     assert "FOREIGN" in _verdicts(ref)
     k = _frame_at(hole_at)
     holed, lines = _run(_frames(audio, drop=set(range(k, k + frames)))[0], tmp_path, decoder)
     assert sum("bridged with" in line for line in lines) == 1, lines
-    assert _verdicts(holed) == _verdicts(ref), (kind, hole_at, lines)
-    assert _first_foreign(holed) == _first_foreign(ref) is not None
+    if kind == "pink":
+        assert _verdicts(holed) == _verdicts(ref), (kind, hole_at, lines)
+        assert _first_foreign(holed) == _first_foreign(ref) is not None
+    else:
+        _holed_chord_fails_closed(holed, ref)
 
 
 def _mostly_zeros_frames(audio, start_s, seconds):
@@ -469,25 +497,35 @@ def test_music_mostly_of_bridged_zeros_never_reads_measurement(decoder, tmp_path
     assert sum("bridged with" in line for line in lines) >= 30, lines
     verdicts = _verdicts(holed)
     assert "MEASUREMENT" not in verdicts, verdicts
-    assert verdicts[2:] == ["FOREIGN"] * (len(verdicts) - 2), verdicts
+    if kind == "pink":
+        assert verdicts[2:] == ["FOREIGN"] * (len(verdicts) - 2), verdicts
+    else:
+        # every span holds bridged zeros: the chord's short chain reads UNKNOWN (ROZHODNUTÉ
+        # 6037765523), never FOREIGN on its own and never MEASUREMENT
+        assert set(verdicts[2:]) <= {"FOREIGN", "UNKNOWN"}, verdicts
     assert spy.calls and max(spy.calls) < FRAME, spy.calls
     chains = [p["marker_chain"] for p in holed if p["marker_chain"] is not None]
     assert all(c < pa.MARKER_CHAIN_MIN for c in chains), chains
 
 
 @pytest.mark.parametrize("kind", ["pink", "chord"])
-def test_measurement_then_music_mostly_of_bridged_zeros_reads_as_without_the_holes(decoder, rec_clip,
-                                                                                  tmp_path, kind):
-    """Measurement, then music about two thirds bridged zeros: every window reads what it reads
+def test_measurement_then_music_mostly_of_bridged_zeros_fails_closed(decoder, rec_clip, tmp_path, kind):
+    """Measurement, then music about two thirds bridged zeros. Pink: every window reads what it reads
     without the holes (the first music window's span still holds 2 s of real measurement, in both),
-    so FOREIGN comes in the same window and the latch starts with the same payload."""
+    so FOREIGN comes in the same window and the latch starts with the same payload. Chord: a window
+    reads the same or UNKNOWN (ROZHODNUTÉ 6037765523), never MEASUREMENT once the music began."""
     audio = np.concatenate([rec_clip[:6 * SR], _music(kind, 8.0)])
     ref, _ = _run(_frames(audio)[0], tmp_path, decoder)
     spy = _ZeroWordDecoder(decoder)
     holed, lines = _run(_frames(audio, drop=_mostly_zeros_frames(audio, 6.0, 6.0))[0], tmp_path, spy)
     assert sum("bridged with" in line for line in lines) >= 15, lines
-    assert _verdicts(holed) == _verdicts(ref), (_verdicts(holed), _verdicts(ref))
-    assert _first_foreign(holed) == _first_foreign(ref) is not None
+    if kind == "pink":
+        assert _verdicts(holed) == _verdicts(ref), (_verdicts(holed), _verdicts(ref))
+        assert _first_foreign(holed) == _first_foreign(ref) is not None
+    else:
+        hv, rv = _verdicts(holed), _verdicts(ref)
+        assert all(h == r or h == "UNKNOWN" for h, r in zip(hv, rv)) and len(hv) == len(rv), (hv, rv)
+        assert "MEASUREMENT" not in hv[rv.index("FOREIGN"):], (hv, rv)
     assert spy.calls and max(spy.calls) < FRAME, spy.calls
 
 
