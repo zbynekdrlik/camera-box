@@ -47,7 +47,7 @@ typedef struct genlock_lock_facets {
 	int n_locked;               /* of those, currently locked */
 	int n_absent;               /* #1299: of n_inputs, how many have NO live NDI receiver connection (sender not running); n_connected = n_inputs - n_absent is the DEGRADED-gate denominator */
 	int n_idle;                 /* #1341: of n_inputs, how many are CONNECTED but IDLE (keep-alive-only, received-frame rate below the idle floor over the window); excluded from n_locked + n_connected = n_inputs - n_absent - n_idle */
-	int recent_event;           /* bool: relock/underrun/late-hold/backward-step in last 60 s */
+	int recent_event;           /* bool: a NEW relock/late-hold/backward-step of a connected, non-idle input in the last 60 s (issue 1302: per-input baseline) */
 	int qpc_drift_beyond_bound; /* bool */
 	int clock_present;          /* bool: dantesync :8898/status answered */
 	int clock_locked;           /* bool: is_locked */

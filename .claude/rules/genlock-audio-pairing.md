@@ -56,6 +56,13 @@ the AUDIO leg a first-class genlocked signal with the same evidence bar.
    also carries `shallow_depth= shallow_capped= shallow_latches= audio_slew_ms= audio_slews=
    audio_steps= audio_withheld= audio_place_err_ms=` right after `n1_grows=` (audit-line-only;
    `audio_place_err_ms=` = the measured placement error of the samples, below).
+   **Issue 1302:** `audio_hold=`, `audio_withheld=` and `audio_place_err_ms=` are no longer
+   audit-line-only. They ride `obs_genlock_stats` v4 (`audio_hold_mode`, `audio_withheld`,
+   `audio_place_err_ms` + `audio_place_err_seeded`), the audit line prints them from the shared
+   snapshot `gs`, and the LOCK widget carries them per input on the v8 `genlock-lock-json:` line
+   (the `genlock_lock.inputs[<name>]` facet), so a consumer can wait for a freshly attached
+   input's audio to leave `pending`. `tests/genlock_audio_timecode_placement_1367.rs` pins the
+   `genlock_audio_hold_token(gs.audio_hold_mode),` form.
 
 ## The pure decision + parity discipline
 
