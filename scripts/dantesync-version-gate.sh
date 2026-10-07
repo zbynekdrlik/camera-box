@@ -113,7 +113,10 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # whose master goes silent HOLDS D (date_authority "holding") instead of falling back to its own NTP:
 # a master restart no longer steps the fleet date. Rolled 1.10.2026 02:05-02:25Z after the nightly step,
 # followers first then the strih-lx master; a verification restart of the master stepped no follower).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.15.0}"
+# Bumped 2026-10-07: v1.16.0 (dantesync PR 128, a991f13 -- the daily-mode nightly date step is rounded
+# to a 200 ms quantum (`date_daily_step_quantum_ms`), a whole number of frames at 25/30/50/60 fps, so
+# the 02:00 UTC step no longer shifts any genlock grid's phase; camera-box issue 1372 part A).
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.16.0}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 
