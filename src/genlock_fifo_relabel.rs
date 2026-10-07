@@ -81,8 +81,12 @@ pub const BOOK_MAX_GAP_NS: u64 = 1_000_000_000;
 
 /// A source whose previous release is more than this before the current one was not releasing at
 /// the step (a new source, one silent across it, a resumed traveling feed): it takes the booking
-/// WITHOUT relabelling, ns. Its queue holds frames that arrived after the step.
-pub const APPLY_MAX_GAP_NS: u64 = 1_000_000_000;
+/// WITHOUT relabelling, ns. Its queue holds frames that arrived after the step. A releasing source
+/// has a frame queued on nearly every tick, so the bound only absorbs a few empty ticks. Kept short
+/// because a shallow source whose sender went silent across the step resumes with post-step
+/// frames only, and [`plan`] cannot see the boundary behind the outage (the delta across it is the
+/// outage + the step, not "the step within one frame"): past this bound it is not relabelled.
+pub const APPLY_MAX_GAP_NS: u64 = 250_000_000;
 
 /// The presented age a window takes is capped here, ns: a stale locked boundary must never open a
 /// window of hours. The pin itself is never cut (the window is at least the pin).

@@ -52,7 +52,7 @@
 #define GENLOCK_FIFO_RELABEL_BOOK_MAX_GAP_NS 1000000000ULL
 /* A source whose previous release is more than this before the current one takes the booking
  * without relabelling, ns. Mirror of APPLY_MAX_GAP_NS. */
-#define GENLOCK_FIFO_RELABEL_APPLY_MAX_GAP_NS 1000000000ULL
+#define GENLOCK_FIFO_RELABEL_APPLY_MAX_GAP_NS 250000000ULL
 /* The presented age a window takes is capped here, ns. Mirror of WINDOW_MAX_AGE_NS. */
 #define GENLOCK_FIFO_RELABEL_WINDOW_MAX_AGE_NS 2000000000ULL
 

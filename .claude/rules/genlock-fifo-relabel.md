@@ -62,13 +62,15 @@ arrivals=judged|closed window_ms=W` once per source per booking.
 - **"One frame" = the canvas interval; the source step = the stamp tracker's learned min delta**
   (`genlock_rx_min_delta_ns`), the canvas interval when none is learned yet.
 - **A booking reaches only a source that was releasing at the step** (review round 1, a 🔴): apply
-  relabels only when the source's previous release is at most `APPLY_MAX_GAP_NS` (1 s) before this
+  relabels only when the source's previous release is at most `APPLY_MAX_GAP_NS` (250 ms) before this
   one; a new source, one silent across the step (an acked-offline camera, a cambox unplugged after
   an event, the away resolume feed) takes the booking as is. Every release records itself, applied
   or not. Without it a source created after a booking relabelled its post-step queue by +S, and a
   stale locked boundary opened a window of HOURS that relabelled every arrival (the input froze 1.6 s
   in the future). The bench `a_source_that_starts_after_the_step_is_never_relabelled_1372` bites on
-  the pre-fix module (deep input: 48 skips + a relock).
+  the pre-fix module (deep input: 48 skips + a relock). Review round 2 cut the bound from 1 s to
+  250 ms (a releasing source has a frame queued on nearly every tick) and added a vector on a box
+  0.1 s after boot, where only the "never released" check keeps a new source from relabelling.
 - **The booking re-seeds after a silent stretch:** a trusted read more than `BOOK_MAX_GAP_NS` (1 s)
   after the previous trusted one resets the detector instead of booking (it is fed only by genlock
   releases; an untrusted read never refreshes the reference).
@@ -88,7 +90,7 @@ no-step run; sender stepping -30 / -15 / 0 / +15 / +30 ms against the receiver:
 |---|---|---|---|
 | deep N==1 2ME PGM (pin 1026) | 0 / 0 | 0 / 0 | 1 / 1 (`dropped_due` +1) |
 | shallow cg feed (pin 3) | 0 / 0 | 0 / 0 | 1 / 1 |
-| N>=2 60->30 camera (pin 3) | 0 / 0 | 1 / 1 (2 / 2 at +30 ms) | 0..2 / 0..2 |
+| N>=2 60->30 camera with prompt stamps (pin 3) | 0 / 0 | 1 / 1 (2 / 2 at +30 ms) | 0..2 / 0..2 |
 
 The unquantized camera cost is the 0.59-frame phase move the quantum removes (the N>=2 grid release
 picks by stamp; an exact-S relabel lands 0.59 slot off the grid).
@@ -113,6 +115,13 @@ a step vs a ~2 s receiver window) waits for the main.
   step with the sender first) it reads |S| too long, bounded by the 2 s cap.
 - Only the LAST raw stamp jump is remembered; a later non-step jump of 50 ms or more before the
   booking hides the sender's step from `sender_stepped_before` (only decisive for S < 0).
+- **The continuity rules need a gap-free sender across the step.** A sender outage of more than
+  about one canvas frame that spans the step hides it: the delta across the outage is the outage
+  plus S, so the plan reads post-step frames behind it as old and moves them by +S; and an old-epoch
+  frame after the outage continues neither timeline, so the window closes and it stays S behind.
+  A shallow source whose queue ran empty hits the +S case only while it still counts as releasing:
+  an outage over `APPLY_MAX_GAP_NS` (250 ms; review round 2 cut it from 1 s) takes the booking
+  without a relabel. A deep queue keeps releasing through an outage, so the bound does not help it.
 - A frame received after the receiver's step but before the booking leaves
   `genlock_rx_arrival_lag_ns` off by S until the next push (the bench port models it, no cost).
 
