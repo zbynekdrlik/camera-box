@@ -26,15 +26,17 @@
 #       anything changed. A stopped sampler is NEVER started here (enable-only): rig-mode.sh test starts
 #       it, rig-mode.sh event stops it (scripts/lib/program-audio-mode.sh).
 #   * strih_program_audio_grade_rows / _report -- verify-strih item 41: the files + the rendered unit
-#     installed and enabled; the shim built from the installed sources; the endpoint answering a
-#     verdict while the unit runs (a stopped unit is a NOTE: EVENT mode, or not started since the
-#     provisioning; a failed one is a FAIL).
+#     installed and enabled; the shim built from the installed sources; the unit's state against the
+#     TEST marker: running = its endpoint must answer a FRESH verdict; down without the marker = a NOTE
+#     (EVENT mode, or never put in TEST mode -- the default after provisioning); down WITH the marker,
+#     failed, or stuck activating (a crash loop) = a FAIL.
 #
 # Test seams (tests/python/test_strih_program_audio_1404.py): STRIH_PROGRAM_AUDIO_PREFIX
 # (/usr/local/lib/camera-box), STRIH_PROGRAM_AUDIO_SYSFS (/sys), STRIH_PROGRAM_AUDIO_EUID (the running
 # uid), STRIH_PROGRAM_AUDIO_PYTHON (/usr/bin/python3), STRIH_PROGRAM_AUDIO_CURL (curl),
-# STRIH_PROGRAM_AUDIO_PORT (8891); `dpkg-query`, `apt-get`, `sudo`, `systemctl`, `id` and `chown` are
-# looked up on PATH.
+# STRIH_PROGRAM_AUDIO_PORT (the endpoint port when the env file names none: 8891),
+# STRIH_PROGRAM_AUDIO_RETRY_SLEEP (1 s between the grader's re-reads); `dpkg-query`, `apt-get`, `sudo`,
+# `systemctl`, `id` and `chown` are looked up on PATH.
 
 # The write-if-changed installer + the operator-session systemctl live in the session-apps lib.
 if ! declare -F strih_session_apps_put >/dev/null; then
@@ -60,9 +62,14 @@ STRIH_PROGRAM_AUDIO_FILES=(
   vendor/av-sync-dock/src/camera-box-audio.hpp
   vendor/av-sync-dock/src/camera-box-marker-scan.hpp
 )
-# rig-mode.sh event leaves this file in the operator's home; the unit's ExecCondition then skips every
-# start (pinned against the template's ExecCondition by a test).
-STRIH_PROGRAM_AUDIO_EVENT_MARKER=.config/camera-box/program-audio-sampler.event-mode
+# rig-mode.sh test leaves this file in the operator's home and rig-mode.sh event removes it; the unit's
+# ExecCondition skips every start without it, so the sampler is DOWN by default (a fresh provisioning, a
+# reboot during a production). Pinned against the template's ExecCondition by a test.
+STRIH_PROGRAM_AUDIO_TEST_MARKER=.config/camera-box/program-audio-sampler.test-mode
+# The sampler's private env file (the unit's EnvironmentFile): the grader reads the endpoint port from it.
+STRIH_PROGRAM_AUDIO_ENV_FILE=.config/camera-box/program-audio-sampler.env
+# A verdict older than this is a sampler that stopped writing (= program_audio_guard.py --max-age).
+STRIH_PROGRAM_AUDIO_MAX_AGE_S=10
 # The build script's default output, relative to the operator's home (= program_audio_marker.py's
 # DEFAULT_SHIM_PATH).
 STRIH_PROGRAM_AUDIO_SHIM=.local/lib/camera-box/libqpsk-guard-shim.so
@@ -223,7 +230,7 @@ strih_program_audio_install() {
     echo "  WARN: systemctl --user enable ${STRIH_PROGRAM_AUDIO_UNIT} failed for ${user} (${err//$'\n'/ }) -- enable it by hand once logged in"
     return 0
   fi
-  echo "  enabled ${STRIH_PROGRAM_AUDIO_UNIT} (NOT started here: rig-mode.sh test starts it, event stops it)"
+  echo "  enabled ${STRIH_PROGRAM_AUDIO_UNIT} (NOT started here: it runs in TEST mode only -- rig-mode.sh test starts it, event stops it)"
   if [ "$unit_written" = 1 ] && ! err="$(strih_session_apps_user_systemctl "$user" daemon-reload 2>&1)"; then
     echo "  WARN: systemctl --user daemon-reload failed (${err//$'\n'/ }) -- run daemon-reload + try-restart ${STRIH_PROGRAM_AUDIO_UNIT} by hand"
     return 0
@@ -240,11 +247,34 @@ strih_program_audio_install() {
 
 # --- verify-strih item 41 ------------------------------------------------------------------------------
 
-# strih_program_audio_endpoint_read PORT -> `<verdict> <age_s>` of http://127.0.0.1:PORT/program-audio.json,
+# strih_program_audio_env_value HOME KEY -> KEY's value in the sampler's env file (the last
+# `KEY=value` line, quotes stripped), EMPTY when the file or the key is absent. Always rc 0.
+strih_program_audio_env_value() {
+  local file="${1:?home required}/${STRIH_PROGRAM_AUDIO_ENV_FILE}" key="${2:?key required}" v=""
+  [ -r "$file" ] && v="$(sed -n "s/^[[:space:]]*${key}=//p" "$file" 2>/dev/null | tail -n 1 || true)"
+  v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
+  printf '%s' "$v"
+}
+
+# strih_program_audio_endpoint HOME -> `<host> <port>` the grader reads: the env file's
+# PROGRAM_AUDIO_HTTP_PORT / _BIND, else the default port; a wildcard or loopback bind is read on
+# 127.0.0.1. Port 0 (no endpoint) prints `- 0`.
+strih_program_audio_endpoint() {
+  local home="${1:?home required}" port bind
+  port="$(strih_program_audio_env_value "$home" PROGRAM_AUDIO_HTTP_PORT)"
+  bind="$(strih_program_audio_env_value "$home" PROGRAM_AUDIO_HTTP_BIND)"
+  case "$port" in ''|*[!0-9]*) port="$(strih_program_audio_port)" ;; esac
+  case "$bind" in ''|0.0.0.0|::|127.0.0.1|localhost) bind=127.0.0.1 ;; esac
+  [ "$port" = 0 ] && bind=-
+  printf '%s %s' "$bind" "$port"
+}
+
+# strih_program_audio_endpoint_read HOST PORT -> `<verdict> <age_s> fresh|stale` of
+# http://HOST:PORT/program-audio.json (stale = older than STRIH_PROGRAM_AUDIO_MAX_AGE_S or no age),
 # EMPTY when it does not answer a payload with a verdict and a source. Always rc 0.
 strih_program_audio_endpoint_read() {
-  local port="${1:?port required}" body
-  body="$("${STRIH_PROGRAM_AUDIO_CURL:-curl}" -fsS --max-time 3 "http://127.0.0.1:${port}/program-audio.json" 2>/dev/null || true)"
+  local host="${1:?host required}" port="${2:?port required}" body
+  body="$("${STRIH_PROGRAM_AUDIO_CURL:-curl}" -fsS --max-time 3 "http://${host}:${port}/program-audio.json" 2>/dev/null || true)"
   [ -n "$body" ] || return 0
   printf '%s' "$body" | python3 -c 'import json, sys
 try:
@@ -252,14 +282,30 @@ try:
 except ValueError:
     sys.exit(0)
 if isinstance(j, dict) and j.get("verdict") in ("MEASUREMENT", "FOREIGN", "SILENT", "UNKNOWN") and "source" in j:
-    print(j["verdict"], j.get("age_s"))' 2>/dev/null || true
+    age = j.get("age_s")
+    fresh = isinstance(age, (int, float)) and not isinstance(age, bool) and 0 <= age <= float(sys.argv[1])
+    print(j["verdict"], age, "fresh" if fresh else "stale")' "$STRIH_PROGRAM_AUDIO_MAX_AGE_S" 2>/dev/null || true
+}
+
+# strih_program_audio_state USER -> the unit's is-active word, re-read (up to 3 x, STRIH_PROGRAM_AUDIO_RETRY_SLEEP
+# apart) while it is in a transition (activating / deactivating / reloading): a sampler that is just
+# starting settles, a crash loop stays `activating`. Always rc 0.
+strih_program_audio_state() {
+  local user="${1:?user required}" s i
+  for i in 1 2 3; do
+    s="$(strih_session_apps_user_systemctl "$user" is-active "$STRIH_PROGRAM_AUDIO_UNIT" 2>/dev/null || true)"
+    s="${s%%$'\n'*}"
+    case "$s" in activating|deactivating|reloading) ;; *) break ;; esac
+    [ "$i" = 3 ] || sleep "${STRIH_PROGRAM_AUDIO_RETRY_SLEEP:-1}"
+  done
+  printf '%s' "${s:-unreadable}"
 }
 
 # strih_program_audio_grade_rows REPO USER_HOME DESKTOP_USER -> verify-strih rows `OK|text`, `NOTE|text`
 # or `FAIL|text` (strih_program_audio_row_count of them). Always rc 0.
 strih_program_audio_grade_rows() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
-  local prefix unitdir rel st bad_files="" tmp ustate enabled shim active port answer marker
+  local prefix unitdir rel st bad_files="" tmp ustate enabled shim active endpoint host port answer marker i
   prefix="$(strih_program_audio_prefix)"
   unitdir="${home}/.config/systemd/user"
   for rel in "${STRIH_PROGRAM_AUDIO_FILES[@]}"; do
@@ -289,30 +335,50 @@ strih_program_audio_grade_rows() {
       "$STRIH_PROGRAM_AUDIO_SHIM" "$shim" "$user"
   fi
 
-  active="$(strih_session_apps_user_systemctl "$user" is-active "$STRIH_PROGRAM_AUDIO_UNIT" 2>/dev/null || true)"
-  active="${active%%$'\n'*}"
-  port="$(strih_program_audio_port)"
-  marker=no; [ -e "${home}/${STRIH_PROGRAM_AUDIO_EVENT_MARKER}" ] && marker=yes
+  active="$(strih_program_audio_state "$user")"
+  endpoint="$(strih_program_audio_endpoint "$home")"
+  host="${endpoint%% *}"; port="${endpoint#* }"
+  marker=no; [ -e "${home}/${STRIH_PROGRAM_AUDIO_TEST_MARKER}" ] && marker=yes
   case "$active" in
     active)
-      answer="$(strih_program_audio_endpoint_read "$port")"
-      if [ -n "$answer" ]; then
-        printf 'OK|(program-audio-endpoint) running; http://127.0.0.1:%s/program-audio.json answers verdict=%s age_s=%s\n' \
-          "$port" "${answer%% *}" "${answer#* }"
+      if [ "$port" = 0 ]; then
+        printf 'FAIL|(program-audio-endpoint) running with no endpoint (PROGRAM_AUDIO_HTTP_PORT=0 in ~/%s) -- its consumers read nothing\n' "$STRIH_PROGRAM_AUDIO_ENV_FILE"
+        return 0
+      fi
+      answer=""
+      for i in 1 2 3; do  # a grade right after a (re)start: the sampler binds within a second or two
+        answer="$(strih_program_audio_endpoint_read "$host" "$port")"
+        [ -z "$answer" ] || break
+        [ "$i" = 3 ] || sleep "${STRIH_PROGRAM_AUDIO_RETRY_SLEEP:-1}"
+      done
+      if [ -z "$answer" ]; then
+        printf 'FAIL|(program-audio-endpoint) running but http://%s:%s/program-audio.json does not answer a verdict -- read journalctl --user -u %s\n' \
+          "$host" "$port" "$STRIH_PROGRAM_AUDIO_UNIT"
+      elif [ "${answer##* }" = fresh ]; then
+        answer="${answer% *}"
+        printf 'OK|(program-audio-endpoint) running; http://%s:%s/program-audio.json answers verdict=%s age_s=%s\n' \
+          "$host" "$port" "${answer%% *}" "${answer#* }"
       else
-        printf 'FAIL|(program-audio-endpoint) running but http://127.0.0.1:%s/program-audio.json does not answer a verdict -- read journalctl --user -u %s\n' \
-          "$port" "$STRIH_PROGRAM_AUDIO_UNIT"
+        answer="${answer% *}"
+        printf 'FAIL|(program-audio-endpoint) running but its verdict is stale (verdict=%s age_s=%s, more than %s s) -- the sampler stopped writing; read journalctl --user -u %s\n' \
+          "${answer%% *}" "${answer#* }" "$STRIH_PROGRAM_AUDIO_MAX_AGE_S" "$STRIH_PROGRAM_AUDIO_UNIT"
       fi
       ;;
     failed)
       printf 'FAIL|(program-audio-endpoint) %s failed -- read journalctl --user -u %s\n' "$STRIH_PROGRAM_AUDIO_UNIT" "$STRIH_PROGRAM_AUDIO_UNIT"
       ;;
-    *)
+    inactive)
       if [ "$marker" = yes ]; then
-        printf 'NOTE|(program-audio-endpoint) stopped: EVENT mode (~/%s present) -- rig-mode.sh test starts it\n' "$STRIH_PROGRAM_AUDIO_EVENT_MARKER"
+        printf 'FAIL|(program-audio-endpoint) TEST mode (~/%s present) but %s is not running -- systemctl --user start %s; read its journal\n' \
+          "$STRIH_PROGRAM_AUDIO_TEST_MARKER" "$STRIH_PROGRAM_AUDIO_UNIT" "$STRIH_PROGRAM_AUDIO_UNIT"
       else
-        printf 'NOTE|(program-audio-endpoint) not running (%s) and no EVENT marker -- in TEST mode run rig-mode.sh test (setup-strih never starts it)\n' "${active:-unreadable}"
+        printf 'NOTE|(program-audio-endpoint) down: not in TEST mode (no ~/%s: EVENT mode, or never put in TEST mode since the provisioning) -- rig-mode.sh test starts it\n' \
+          "$STRIH_PROGRAM_AUDIO_TEST_MARKER"
       fi
+      ;;
+    *)
+      printf 'FAIL|(program-audio-endpoint) %s is %s (a crash loop, or stuck in a transition) -- read journalctl --user -u %s\n' \
+        "$STRIH_PROGRAM_AUDIO_UNIT" "$active" "$STRIH_PROGRAM_AUDIO_UNIT"
       ;;
   esac
   return 0

@@ -17,10 +17,11 @@ StartLimitBurst=20
 
 [Service]
 Type=simple
-# EVENT mode (rig-mode.sh event) leaves this marker: the sampler then stays down, also across a reboot
-# during a production (ExecCondition exit 1 = the start is skipped, never a failure). rig-mode.sh test
-# removes it before the start.
-ExecCondition=/usr/bin/test ! -e %h/.config/camera-box/program-audio-sampler.event-mode
+# Runs ONLY in TEST mode: rig-mode.sh test leaves this marker, rig-mode.sh event removes it. Without it
+# every start is skipped (ExecCondition exit 1 = skipped, never a failure), so the default is DOWN: a
+# fresh provisioning, and a reboot during a production (the user manager lingers on strih-lx), never
+# start the sampler. A reboot in TEST mode brings it back.
+ExecCondition=/usr/bin/test -e %h/.config/camera-box/program-audio-sampler.test-mode
 # The checkout-layout copy setup-strih installs (the shim sources sit next to it, so the sampler can
 # tell when the decoder library was built from other sources); numpy is the apt python3-numpy.
 ExecStart=/usr/bin/python3 /usr/local/lib/camera-box/scripts/program_audio_sampler.py
@@ -38,5 +39,5 @@ StandardError=journal
 SyslogIdentifier=program-audio-sampler
 
 [Install]
-# Starts with the operator's user manager (no X needed), so a reboot in TEST mode brings it back.
+# Starts with the operator's user manager (no X needed) -- in TEST mode only (the ExecCondition above).
 WantedBy=default.target

@@ -220,6 +220,10 @@ class ReadOnlyHandler(BaseHTTPRequestHandler):
     # version_string() concatenates server_version + " " + sys_version) -- no reason to advertise
     # the exact Python patch version to an unauthenticated caller.
     sys_version = ""
+    # A client that connects and sends nothing (or stalls mid-request) is dropped after this many
+    # seconds instead of holding a server thread forever: both servers listen on 0.0.0.0, the
+    # sampler's on a production box with no firewall (issue 1404 review round 3).
+    timeout = 10
 
     def _handle(self):  # pragma: no cover -- every subclass defines its routes
         raise NotImplementedError

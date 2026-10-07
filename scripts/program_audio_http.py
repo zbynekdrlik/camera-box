@@ -72,12 +72,15 @@ class ProgramAudioHandler(rsf.ReadOnlyHandler):
         self._send(404, "text/plain", b"")
 
 
-def make_server(bind: str, port: int, serve_dir: str,
-                log: Callable[[str], None] = _log) -> ThreadingHTTPServer:
+def make_server(bind: str, port: int, serve_dir: str, log: Callable[[str], None] = _log,
+                timeout: float | None = None) -> ThreadingHTTPServer:
     """A ThreadingHTTPServer on (bind, port) serving `serve_dir`. Binding happens here, so a port in
-    use raises OSError at once (the sampler then fails loud). Request threads are daemons."""
-    bound = type("BoundProgramAudioHandler", (ProgramAudioHandler,),
-                 {"serve_dir": serve_dir, "log_fn": staticmethod(log)})
+    use raises OSError at once (the sampler then fails loud). Request threads are daemons; an idle
+    client is dropped after `timeout` s (default rig_serve_files.ReadOnlyHandler.timeout)."""
+    attrs = {"serve_dir": serve_dir, "log_fn": staticmethod(log)}
+    if timeout is not None:
+        attrs["timeout"] = timeout
+    bound = type("BoundProgramAudioHandler", (ProgramAudioHandler,), attrs)
     server = ThreadingHTTPServer((bind, port), bound)
     server.daemon_threads = True
     return server

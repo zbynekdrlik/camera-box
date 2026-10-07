@@ -5,11 +5,12 @@
 #
 # scripts/lib/program-audio-mode.sh -- issue 1404 (ROZHODNUTÉ 6039368611): the stream program-audio
 # sampler on strih-lx (the YouTube channel guard of the CI/test streams) runs in TEST mode only.
-#   rig-mode.sh test  -> remove the EVENT marker, `systemctl --user start program-audio-sampler.service`
-#   rig-mode.sh event -> leave the EVENT marker, `systemctl --user stop program-audio-sampler.service`
-# The marker (~/.config/camera-box/program-audio-sampler.event-mode, STRIH_PROGRAM_AUDIO_EVENT_MARKER)
-# makes the unit's ExecCondition skip every start, so the sampler stays down across a reboot during a
-# production too. Both run as the operator over plain ssh (the strih-lx transport: sshpass, `timeout`
+#   rig-mode.sh test  -> leave the TEST marker, `systemctl --user start program-audio-sampler.service`
+#   rig-mode.sh event -> remove the TEST marker, `systemctl --user stop program-audio-sampler.service`
+# The unit's ExecCondition skips every start without the marker
+# (~/.config/camera-box/program-audio-sampler.test-mode, STRIH_PROGRAM_AUDIO_TEST_MARKER): the sampler is
+# down by default and stays down across a reboot during a production; a reboot in TEST mode brings it
+# back. Both run as the operator over plain ssh (the strih-lx transport: sshpass, `timeout`
 # INSIDE it, UserKnownHostsFile=/dev/null). Report-only: a failure is a WARNING line naming the state
 # and never changes rig-mode's exit status (a stopped sampler fails closed for its consumers: UNKNOWN).
 # A Windows strih has no sampler: one SKIP line.
@@ -33,17 +34,18 @@ PROGRAM_AUDIO_MODE_SSH_OPTS=(-o UserKnownHostsFile=/dev/null -o StrictHostKeyChe
 
 # program_audio_mode_remote_cmd test|event -> the shell text the operator's login shell runs on strih-lx.
 # It prints `program-audio-sampler: <is-active>` and exits 0 only when the sampler reached the mode's
-# state (test: active; event: not active).
+# state (test: still active 2 s after the start -- a Type=simple unit reads active the moment it is
+# forked, so a sampler that dies on import would pass an immediate read; event: not active).
 program_audio_mode_remote_cmd() {
-  local mode="${1-}" u="$STRIH_PROGRAM_AUDIO_UNIT" m="$STRIH_PROGRAM_AUDIO_EVENT_MARKER"
+  local mode="${1-}" u="$STRIH_PROGRAM_AUDIO_UNIT" m="$STRIH_PROGRAM_AUDIO_TEST_MARKER"
   case "$mode" in
     test)
-      printf 'rm -f "$HOME/%s"; systemctl --user start %s; s="$(systemctl --user is-active %s)"; echo "program-audio-sampler: $s"; [ "$s" = active ]' \
-        "$m" "$u" "$u"
+      printf 'mkdir -p "$HOME/%s" && : > "$HOME/%s"; systemctl --user start %s; sleep 2; s="$(systemctl --user is-active %s)"; echo "program-audio-sampler: $s"; [ "$s" = active ]' \
+        "${m%/*}" "$m" "$u" "$u"
       ;;
     event)
-      printf 'mkdir -p "$HOME/%s" && : > "$HOME/%s"; systemctl --user stop %s; s="$(systemctl --user is-active %s)"; echo "program-audio-sampler: $s"; [ "$s" != active ]' \
-        "${m%/*}" "$m" "$u" "$u"
+      printf 'rm -f "$HOME/%s"; systemctl --user stop %s; s="$(systemctl --user is-active %s)"; echo "program-audio-sampler: $s"; [ "$s" != active ]' \
+        "$m" "$u" "$u"
       ;;
     *)
       echo "program_audio_mode_remote_cmd: mode must be test or event, got '${mode}'" >&2
@@ -72,7 +74,7 @@ program_audio_mode_apply() {
   elif [ "$mode" = test ]; then
     echo "WARNING: [program-audio ${host}] the program-audio sampler did not start (rc=${rc}: ${out:-no answer}) -- the YouTube guard reads UNKNOWN until it runs; is it provisioned (setup-strih.sh step 16e)? journalctl --user -u ${STRIH_PROGRAM_AUDIO_UNIT} on ${host}" >&2
   else
-    echo "WARNING: [program-audio ${host}] the program-audio sampler did not stop (rc=${rc}: ${out:-no answer}) -- stop it by hand: ssh ${user}@${host} 'touch ~/${STRIH_PROGRAM_AUDIO_EVENT_MARKER}; systemctl --user stop ${STRIH_PROGRAM_AUDIO_UNIT}'" >&2
+    echo "WARNING: [program-audio ${host}] the program-audio sampler did not stop (rc=${rc}: ${out:-no answer}) -- stop it by hand: ssh ${user}@${host} 'rm -f ~/${STRIH_PROGRAM_AUDIO_TEST_MARKER}; systemctl --user stop ${STRIH_PROGRAM_AUDIO_UNIT}'" >&2
   fi
   return 0
 }
