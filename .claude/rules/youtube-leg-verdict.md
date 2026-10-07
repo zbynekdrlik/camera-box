@@ -31,10 +31,17 @@ is `recording-verdict --av-sync` (CI probe artifact) as a subprocess. Shared wit
   The gray left-only session decoder turned these into a false repeat + skip.
 - The payload CRC is checked (zlib.crc32 of `run.tick.gen`, like `Payload::decode`); only the
   6-digit 9110xx ids are node burns, a 9-digit E2E RUN_ID starting 9110 is a painter id.
-- One reserved id IS a tick: 911016, the measurement clip's painted dual-QR (the CG segments'
-  painter, `.claude/rules/measurement-clip.md`). The clip carries the 60 Hz tick (2 per 30 fps
-  frame), so `continuity(step=2)` proves its frames like a painter recording. Since it reads,
-  `DECODER_VERSION` is 3; the session-3 maps were re-stamped v3 with their rows unchanged.
+- One reserved id can be a tick, but only when the caller asks: 911016, the measurement clip's
+  painted dual-QR (the CG segments' painter, `.claude/rules/measurement-clip.md`), read with
+  `runs=CLIP_RUNS` (threaded `decode_ticks` → `decode_raw` → `_decode_range` job field 5 →
+  `half_ticks` → `painter_payload`). The default decode refuses it and is byte-identical to before
+  (`DECODER_VERSION` stays 2). Why opt-in: the clip restarts its tick on every play, and the
+  timeline keys a whole session on one tick line (`TickClock`, `_adjacent_events`), so a clip tick
+  in a default decode turned a PERFECT camera window next to a CG segment into 600 replay dups (the
+  issue-1404 review probe). Reading CG windows needs the timeline to keep the clip's run apart from
+  the painter's first (Task 5 part b), and a decode with `runs` must key its tick cache on them. The
+  clip carries the 60 Hz tick (2 per 30 fps frame), so `continuity(step=2)` proves its frames like
+  a painter recording.
 
 ## Fail-closed rules the five review rounds found holes in (each has a test)
 
