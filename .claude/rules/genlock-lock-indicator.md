@@ -327,7 +327,8 @@ lowest)**; else LOCKED (green).
   the struct body to its version so a change without a bump fails CI. `struct
   obs_genlock_output_stats` (the per-output facet) is on the frontend's stack the same way; the gate
   does not compare its version yet, so its body is pinned at `OBS_GENLOCK_OUTPUT_STATS_VERSION 1`
-  and a change fails CI until the gate covers it. CI is the first place the C/Qt compiles — locally only
+  (a change fails CI) and a Windows `--fast` of a commit whose output version is not 1 is refused at
+  plan time, until the gate covers it. CI is the first place the C/Qt compiles — locally only
   `cargo fmt --all --check` + the pure Rust module (`rustc --test`) + the parity/guard tests
   (standalone) verify; the blog refactor's format/arg types were lift-compiled under `gcc
   -Wformat=2 -Werror`.

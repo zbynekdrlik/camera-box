@@ -27,7 +27,8 @@ FAST one: the box's `BUNDLE_MANIFEST.json` 08:36, its SHA marker 14:58) while de
 
 - **Every full-bundle deploy the planner drives records the frontend's ABI** as
   `GENLOCK_STATS_ABI.txt` next to `GENLOCK_BUILD_SHA.txt`: the Windows program removes it at step
-  (3c), right before the copy (`genlock_stats_abi_clear_ps`), so a copy that fails half way reads
+  (3c), right before the copy (`genlock_stats_abi_clear_ps`; fail-closed, `-ErrorAction Stop`, so a
+  marker it cannot remove stops the program before the copy), so a copy that fails half way reads
   as "missing", and writes the new version at step (5b) (`genlock_stats_abi_marker_ps`, after the
   other markers, through `Write-MarkerAtomic`); the Linux legs through `genlock_write_markers`'
   5th argument (the imag program passes it; strih-lx gets it as `bundle/GENLOCK_STATS_ABI.txt`,
@@ -39,10 +40,11 @@ FAST one: the box's `BUNDLE_MANIFEST.json` 08:36, its SHA marker 14:58) while de
   `vendor/obs-studio/libobs/obs.h` AT the deployed commit from the checkout's object store (`show
   <sha>:<path>`, plan AND execute mode, before any box is touched) and takes the ONE
   `#define OBS_GENLOCK_STATS_VERSION`. Execute mode first fetches that ONE commit from origin when
-  it is not in the checkout (full 40-hex SHA only, `GIT_TERMINAL_PROMPT=0`, 120 s bound; plan mode
-  never fetches, so a test's short SHA never reaches the network). Still unreadable (a missing /
-  duplicate / malformed define): a `--fast` that swaps an obs.dll (stream or resolume in the box
-  list) is REFUSED (exit 3, "fetch the commit or deploy --full"); any other run warns and the
+  it is not in the checkout (full 40-hex SHA only, `GIT_TERMINAL_PROMPT=0`, 120 s bound, git's own
+  message kept on stderr when it fails; plan mode never fetches, so a test's short SHA never reaches
+  the network). Still unreadable (a missing / duplicate / malformed define): a `--fast` that swaps an
+  obs.dll (a box with a win-* MCP in the list: `fleet_boxes_swap_obs_dll` in the per-box table, the
+  one predicate main's own Windows switch reads too) is REFUSED (exit 3, "fetch the commit or deploy --full"); any other run warns and the
   full-bundle programs REMOVE the box's marker, so a later fast deploy refuses until a full deploy
   records a known version.
 - **The FAST program gates at step (0f)**, right after the `(0)` path preflight and BEFORE the
@@ -61,10 +63,14 @@ FAST one: the box's `BUNDLE_MANIFEST.json` 08:36, its SHA marker 14:58) while de
 - **A struct change must bump `OBS_GENLOCK_STATS_VERSION`** (the rule in obs.h's comment). The gate
   compares versions, so the pytest pins `struct obs_genlock_stats`' body (comments stripped, the first
   16 hex digits of its sha256) to the version: a change without a bump fails CI.
-- **`struct obs_genlock_output_stats` is NOT covered yet.** The frontend keeps it on its stack too,
-  filled by obs.dll through `obs_output_get_genlock_stats` with no size. The gate does not record
-  `OBS_GENLOCK_OUTPUT_STATS_VERSION` (1, never bumped), so the pytest pins that struct's body and
-  version and fails with "extend the gate first" the moment either changes.
+- **`struct obs_genlock_output_stats` is NOT compared on the box yet.** The frontend keeps it on its
+  stack too, filled by obs.dll through `obs_output_get_genlock_stats` with no size. The marker does
+  not record `OBS_GENLOCK_OUTPUT_STATS_VERSION` (1, never bumped), so two tripwires hold it: at plan
+  time a Windows `--fast` is REFUSED (exit 3) unless the deployed commit's output version is
+  `GENLOCK_STATS_ABI_OUTPUT_COVERED` (1) -- the fleet deploy anchors on a windows-genlock run, which
+  runs no pytest -- and the pytest pins that struct's body and version, failing with "extend the gate
+  first" the moment either changes. Extending the marker to both versions is a follow-up (it changes
+  the marker format and the refusal text the design fixed).
 - **Tests:** `tests/python/test_genlock_stats_abi_1302.py` -- the reader (the repo's obs.h, a
   throwaway two-commit repo whose working tree differs), the verdict vectors, the (0f) block RUN in
   pwsh on 15 marker/version vectors against the bash verdict (same result, same text), the emitted
