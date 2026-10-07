@@ -420,7 +420,7 @@ def test_plan_full_with_an_unreadable_abi_removes_the_marker_1302(tmp_path):
 def test_execute_mode_stages_the_abi_before_strih_lx_is_touched_1302():
     s = FLEET.read_text()
     main = s[s.index("main() {"):]
-    resolve = main.index('stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode")" || exit 3',
+    resolve = main.index('stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$boxes" 1)" || exit 3',
                          main.index("# --- execute mode"))
     prepare = main.index('strih_lx_prepare "$sha"')
     stage = main.index('genlock_stats_abi_stage "$STRIH_LX_PREP_WORK/bundle" "$stats_abi" || exit 3')
@@ -428,6 +428,120 @@ def test_execute_mode_stages_the_abi_before_strih_lx_is_touched_1302():
     assert resolve < prepare < stage < apply_
     assert '"$yes" "$stats_abi"' in main
     assert 'build_imag_deploy_program "$imag_stage" \'/opt/obs-genlock\' \'/opt/obs-backup\' "$sha" "$sha" "$RETENTION_KEEP" "$yes" "$stats_abi"' in main
+
+
+def test_plan_reads_without_network_and_names_the_boxes_1302():
+    s = FLEET.read_text()
+    main = s[s.index("main() {"):]
+    plan = main[:main.index("# --- execute mode")]
+    assert 'stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode" "$boxes")" || exit 3' in plan
+
+
+@pytest.mark.parametrize("boxes", ["imag", "strih-lx", "strih-lx,imag"])
+def test_plan_fast_without_a_windows_box_never_refuses_an_unknown_abi_1302(tmp_path, boxes):
+    """--fast swaps an obs.dll only on stream / resolume; a Linux-only run deploys the full bundle."""
+    r = _plan(tmp_path, "fast", "deadbeefdeadbeef", boxes)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "WARNING: cannot read OBS_GENLOCK_STATS_VERSION" in r.stderr
+    assert "ERROR: cannot read" not in r.stderr
+
+
+@pytest.mark.parametrize("boxes", ["stream", "resolume", "strih-lx,stream", "imag,resolume"])
+def test_plan_fast_with_a_windows_box_refuses_an_unknown_abi_1302(tmp_path, boxes):
+    r = _plan(tmp_path, "fast", "deadbeefdeadbeef", boxes)
+    assert r.returncode == 3, r.stdout + r.stderr
+
+
+@pytest.fixture()
+def stale_clone(tmp_path):
+    """An origin at stats v3, a clone of it, then origin moves to v4: the clone lacks the v4 commit."""
+    origin = tmp_path / "origin"
+    clone = tmp_path / "clone"
+    git = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+    subprocess.run(["git", "init", "-q", str(origin)], check=True)
+    obs_h = origin / "vendor" / "obs-studio" / "libobs" / "obs.h"
+    obs_h.parent.mkdir(parents=True)
+    obs_h.write_text("#define OBS_GENLOCK_STATS_VERSION 3\n")
+    subprocess.run(["git", "-C", str(origin), *git, "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(origin), *git, "commit", "-q", "-m", "v3"], check=True)
+    subprocess.run(["git", "clone", "-q", str(origin), str(clone)], check=True)
+    obs_h.write_text("#define OBS_GENLOCK_STATS_VERSION 4\n")
+    subprocess.run(["git", "-C", str(origin), *git, "commit", "-q", "-am", "v4"], check=True)
+    sha4 = subprocess.run(["git", "-C", str(origin), "rev-parse", "HEAD"], capture_output=True, text=True,
+                          check=True).stdout.strip()
+    return clone, sha4
+
+
+def test_execute_mode_fetches_origin_once_before_giving_up_1302(stale_clone):
+    clone, sha4 = stale_clone
+    r = _lib('rc=0; genlock_stats_abi_resolve "$2" "$3" fast stream || rc=$?; echo "rc=$rc"', sha4, clone)
+    assert r.stdout == "rc=3\n", r.stderr
+    r = _lib('genlock_stats_abi_resolve "$2" "$3" fast stream 1', sha4, clone)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "4\n"
+    assert "fetching origin once" in r.stderr
+
+
+@pytest.mark.parametrize("box", BOXES)
+def test_a_full_deploy_clears_the_marker_before_the_copy_1302(box):
+    """A copy that fails half way must not leave a new frontend under the old marker."""
+    p = _program(box, "full", "4")
+    clear = p.index("# (3c) issue 1302")
+    assert p.index("# (3) Back up") < clear < p.index("# (4) FULL bundle")
+    seg = p[clear:p.index("# (4) FULL bundle")]
+    assert "Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt')" in seg
+    assert p.index("# (4) FULL bundle") < p.index("Write-MarkerAtomic (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt') '4'")
+    assert "(3c) issue 1302" not in _program(box, "fast", "4")
+
+
+# --- the gate's premise: every stats struct change bumps a version the gate reads -----------------
+
+def _struct_body(name):
+    """The body of `struct <name> {...};` in obs.h, comments stripped, whitespace collapsed."""
+    text = OBS_H.read_text()
+    start = text.index(f"struct {name} {{")
+    body = text[start:text.index("\n};", start) + 3]
+    body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
+    body = re.sub(r"//[^\n]*", "", body)
+    return " ".join(body.split())
+
+
+def _define(name):
+    found = re.findall(rf"^\s*#\s*define\s+{name}\s+(\d+)\b", OBS_H.read_text(), re.M)
+    assert len(found) == 1, (name, found)
+    return found[0]
+
+
+# The struct bodies the pinned versions describe (the first 16 hex digits of the sha256 of the body,
+# comments stripped, whitespace collapsed). A field change without a version bump would be invisible
+# to the fast-deploy gate (it compares versions), so a change here must bump the version AND update
+# the pin in the same commit.
+STATS_STRUCT_PINS = {"4": "9d1269d58919eb2d"}
+OUTPUT_STATS_STRUCT_PINS = {"1": "ba0f22422814c0f1"}
+
+
+def test_a_stats_struct_change_bumps_its_version_1302():
+    import hashlib
+    version = _define("OBS_GENLOCK_STATS_VERSION")
+    digest = hashlib.sha256(_struct_body("obs_genlock_stats").encode()).hexdigest()[:16]
+    assert STATS_STRUCT_PINS.get(version) == digest, (
+        f"struct obs_genlock_stats changed (sha256 {digest}) at OBS_GENLOCK_STATS_VERSION {version}: a "
+        "struct change must bump OBS_GENLOCK_STATS_VERSION (the fast-deploy gate compares versions, issue "
+        "1302), then pin the new body here")
+
+
+def test_the_output_stats_struct_is_pinned_until_the_gate_covers_it_1302():
+    """The frontend keeps struct obs_genlock_output_stats on its stack too, filled by obs.dll with no
+    size. The fast-deploy gate compares OBS_GENLOCK_STATS_VERSION only, so this struct must not
+    change until the gate also records + compares OBS_GENLOCK_OUTPUT_STATS_VERSION."""
+    import hashlib
+    version = _define("OBS_GENLOCK_OUTPUT_STATS_VERSION")
+    digest = hashlib.sha256(_struct_body("obs_genlock_output_stats").encode()).hexdigest()[:16]
+    assert version == "1" and OUTPUT_STATS_STRUCT_PINS.get(version) == digest, (
+        f"struct obs_genlock_output_stats changed (version {version}, sha256 {digest}): extend the fast-deploy "
+        "stats-ABI gate (scripts/lib/genlock-stats-abi.sh, issue 1302) to record and compare "
+        "OBS_GENLOCK_OUTPUT_STATS_VERSION first -- a new obs.dll filling a bigger output struct crashes an old "
+        "frontend exactly like the source stats struct")
 
 
 # --- the Linux legs --------------------------------------------------------------------------------
