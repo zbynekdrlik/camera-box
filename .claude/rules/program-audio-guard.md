@@ -205,6 +205,14 @@ level. Re-run the full calibration after any decoder or rule change:
     binding; `pan.AudioBlock` defaults `timestamp` to undefined, so an old fake (2 fields) runs the
     arrival fallback. `program_audio_marker_calibrate.py` stamps its blocks on a continuous
     timeline, so the bars run the same path as the service.
+  - **Trap: the tolerance scales with the block size.** The committed fixtures
+    (`tests/fixtures/youtube_leg_1404/*.flac`) are 16 kHz MONO, not the live 48 kHz stereo. The old
+    sampler tests feed 1600-sample blocks = 100 ms frames, so the tolerance there is 120 ms and a
+    50 ms date step would read as continuous. The timeline tests use `sr // 50` (20 ms) blocks, so
+    the tolerance (40 ms) matches the live 41.3 ms, and 6 s is a whole block count.
+  - The previous-frame rule and the `max_offset_ms` bookkeeping are pinned by mutants: judging with
+    the current block's size, a break feeding the max, a dropped `abs`, no reset, and late bursts
+    left out each fail a test.
 - **A SILENT window empties the span.** The next non-silent window holds only its own markers, so it
   reads UNKNOWN ("marker span") until the span is full again. Without this a silence→measurement
   start read a short chain and could latch a false FOREIGN.
