@@ -279,8 +279,21 @@ fn gone(name: &'static str) -> Row {
 
 struct Scenario {
     name: &'static str,
-    /// one entry per 1 Hz tick; tick i runs at i * 1000 ms
+    /// one entry per 1 Hz tick; tick i runs at i * 1000 ms, plus the stall below once past it
     ticks: Vec<Vec<Row>>,
+    /// `(k, ms)`: the widget's timer stalled `ms` between tick `k` and tick `k + 1`
+    stall: Option<(usize, i64)>,
+}
+
+impl Scenario {
+    /// The monotonic ms of tick `k`.
+    fn at(&self, k: usize) -> i64 {
+        let extra = match self.stall {
+            Some((after, ms)) if k > after => ms,
+            _ => 0,
+        };
+        k as i64 * 1000 + extra
+    }
 }
 
 /// The reference model of the widget's ring tick, built on the Rust authority.
@@ -331,10 +344,9 @@ fn run_replay(scenarios: &[Scenario]) -> Vec<Vec<String>> {
     src.push_str(
         r#"
 struct Row { const char *name; int connected, locked; uint64_t frames, relocks; };
-static void emit(const char *sc, int tick, GenlockIdleClassifier &idle, GenlockRecentEvents &ev,
-		 const std::vector<Row> &rows)
+static void emit(const char *sc, int tick, int64_t now_ms, GenlockIdleClassifier &idle,
+		 GenlockRecentEvents &ev, const std::vector<Row> &rows)
 {
-	const int64_t now_ms = (int64_t)tick * 1000;
 	std::vector<GenlockRxInput> rx;
 	for (const Row &r : rows) {
 		GenlockRxInput in;
@@ -394,8 +406,9 @@ int main()
                 })
                 .collect();
             src.push_str(&format!(
-                "\t\temit(\"{}\", {i}, idle, ev, std::vector<Row>{{{}}});\n",
+                "\t\temit(\"{}\", {i}, {}, idle, ev, std::vector<Row>{{{}}});\n",
                 sc.name,
+                sc.at(i),
                 items.join(",")
             ));
         }
@@ -451,6 +464,7 @@ fn scenarios() -> Vec<Scenario> {
                 ]
             })
             .collect(),
+        stall: None,
     });
 
     // A keep-alive input that has been IDLE for 70 s, vanishes for 5 s and reattaches: its relocks
@@ -461,6 +475,7 @@ fn scenarios() -> Vec<Scenario> {
     out.push(Scenario {
         name: "keepalive_reattach",
         ticks: t,
+        stall: None,
     });
 
     // A live camera reattaches at tick 75: it relocks at tick 77 (UNCLASSIFIED, never counted), is
@@ -479,6 +494,7 @@ fn scenarios() -> Vec<Scenario> {
     out.push(Scenario {
         name: "live_reattach",
         ticks: t,
+        stall: None,
     });
 
     // The source is recreated with no disconnect: its received counter restarts at 0 (tick 70). A
@@ -497,6 +513,7 @@ fn scenarios() -> Vec<Scenario> {
     out.push(Scenario {
         name: "counter_reset",
         ticks: t,
+        stall: None,
     });
 
     // A 5 fps still source: UNCLASSIFIED until it has delivered 60 frames (tick 12); a relock at tick
@@ -513,6 +530,27 @@ fn scenarios() -> Vec<Scenario> {
                 vec![pgm(k), row("still-5fps", 5 * k, relocks)]
             })
             .collect(),
+        stall: None,
+    });
+    // The widget's 1 Hz timer stalls for 70 s after tick 69 (a blocked UI thread): every ring is
+    // pruned to its newest sample. A decided class holds through the short ring -- the keep-alive
+    // input stays IDLE, the camera stays LIVE -- so the camera's relock right after the stall still
+    // DEGRADES and the keep-alive input never turns LIVE.
+    let stall_ms = 70_000;
+    let at = |k: u64| k * 1000 + if k > 69 { stall_ms as u64 } else { 0 };
+    out.push(Scenario {
+        name: "widget_stall",
+        ticks: (0..80u64)
+            .map(|k| {
+                let s = at(k) / 1000;
+                vec![
+                    pgm(s),
+                    keep_alive(s),
+                    row("NDI cam5", 60 * s, if k >= 71 { 4 } else { 3 }),
+                ]
+            })
+            .collect(),
+        stall: Some((69, stall_ms)),
     });
     out
 }
@@ -537,7 +575,7 @@ fn the_widget_ticks_match_the_reference_and_only_a_live_input_degrades_1302() {
             assert_eq!(line[0], sc.name);
             assert_eq!(line[1], k.to_string());
             let want: Vec<String> = reference
-                .tick(k as i64 * 1000, rows)
+                .tick(sc.at(k), rows)
                 .iter()
                 .map(u8::to_string)
                 .collect();
@@ -641,4 +679,21 @@ fn the_widget_ticks_match_the_reference_and_only_a_live_input_degrades_1302() {
         assert_eq!(state("slow_source", k), LOCKED, "slow_source tick {k}");
     }
     degraded_for_60_s("slow_source", 20, "still-5fps");
+
+    // the widget stall: the classes hold through the pruned rings, the LIVE relock still counts
+    for k in 54..80 {
+        assert_eq!(class("widget_stall", k, 1), "2", "widget_stall tick {k}");
+        assert_eq!(class("widget_stall", k, 2), "1", "widget_stall tick {k}");
+    }
+    for k in 0..71 {
+        assert_eq!(state("widget_stall", k), LOCKED, "widget_stall tick {k}");
+    }
+    for k in 71..80 {
+        assert_eq!(state("widget_stall", k), DEGRADED, "widget_stall tick {k}");
+        assert_eq!(
+            field("widget_stall", k, 5),
+            "NDI cam5",
+            "widget_stall tick {k}"
+        );
+    }
 }
