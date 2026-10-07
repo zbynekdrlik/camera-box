@@ -12,14 +12,19 @@
 //! - the recording decode reads both 911016 payloads (left = tick 3602, right = tick 3601);
 //! - the clip's ids never become the cam2 Vernier tick (`RecordingFrame::tick` stays `None`:
 //!   911016 is in `NODE_BURN_RUN_IDS`), so a CG segment cannot corrupt the camera-chain metrics;
+//! - the echo-gated grouped decode the strih/stream analysis runs reads them (911016 has no slot);
 //! - the robust optical decode (a strict superset) reads them too.
 
 #![cfg(feature = "probe")]
 
 use camera_box::probe::payload::Payload;
-use camera_box::probe::qr::decode_qr_luma_all_robust_optical;
+use camera_box::probe::qr::{
+    decode_qr_luma_all_fast_then_robust_grouped_pathed_optical, decode_qr_luma_all_robust_optical,
+};
 use camera_box::probe::recording::decode_recording_frame_with_burns;
-use camera_box::probe::recording_latency::MEASUREMENT_CLIP_RUN_ID;
+use camera_box::probe::recording_latency::{
+    BURN_RUN_ID_CAM1, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH, MEASUREMENT_CLIP_RUN_ID,
+};
 use image::GrayImage;
 use std::path::PathBuf;
 
@@ -72,6 +77,27 @@ fn the_clip_frame_decodes_both_halves_and_never_becomes_the_vernier_tick_1404() 
         frame.tick, None,
         "the measurement clip's ids are tick-excluded: they must never become the cam2 tick"
     );
+}
+
+#[test]
+fn the_echo_gated_grouped_decode_the_verdict_runs_reads_the_clip_frame_1404() {
+    // The strih/stream recording analysis decodes through the GROUPED, echo-gated core
+    // (`NodeBurnGate::OwnSlot`): strih + stream burns mandatory, the cameras any-of. A clip frame
+    // carries none of them, so it takes the robust path; 911016 has no burn slot, so the echo gate
+    // must keep both halves.
+    let (payloads, _path) = decode_qr_luma_all_fast_then_robust_grouped_pathed_optical(
+        fixture_luma(),
+        &[BURN_RUN_ID_STRIH, BURN_RUN_ID_STREAM],
+        &[BURN_RUN_ID_CAM1],
+        None,
+    );
+    for want in frame_1801_payloads() {
+        assert!(
+            payloads.contains(&want),
+            "the echo-gated grouped decode must read {}; got {payloads:?}",
+            want.encode()
+        );
+    }
 }
 
 #[test]
