@@ -123,6 +123,13 @@ struct GenlockInputRow {
 	uint64_t late_holds = 0;
 	uint64_t backward_steps = 0; /* #1299 Part 3: phase-event class (with relocks+late_holds), NOT underruns */
 	uint32_t depth = 0;
+	/* issue 1302: the input's audio PLACEMENT (libobs stats v4), carried per input by the v8 json so a
+	 * consumer can wait until a freshly attached input's audio is really placed. */
+	bool audio_stats = false;            /* the four fields below are filled (stats version >= 4) */
+	std::string audio_hold;              /* the audit token: off / latency / timecode / pending (withheld) */
+	uint64_t audio_withheld = 0;         /* cumulative packets withheld while no video delay was known */
+	int64_t audio_place_err_ms = 0;      /* smoothed placement error, actual - intended (ms) */
+	bool audio_place_err_seeded = false; /* a placement error has been measured (else json null) */
 };
 struct GenlockScan {
 	int n_inputs = 0;
@@ -222,6 +229,14 @@ bool genlock_scan_source(void *param, obs_source_t *source)
 	rec.late_holds = st.late_holds;
 	rec.backward_steps = st.backward_steps; /* #1299 Part 3: feeds genlock_input_phase_events */
 	rec.depth = (uint32_t)st.depth;
+	/* issue 1302: the audio placement, named through libobs' own audit token function. */
+	if (st.version >= 4) {
+		rec.audio_stats = true;
+		rec.audio_hold = obs_genlock_audio_hold_token(st.audio_hold_mode);
+		rec.audio_withheld = st.audio_withheld;
+		rec.audio_place_err_ms = st.audio_place_err_ms;
+		rec.audio_place_err_seeded = st.audio_place_err_seeded;
+	}
 	scan->inputs.push_back(std::move(rec));
 	return true;
 }
@@ -534,11 +549,14 @@ std::string genlock_build_lock_json(const char *state_name, const char *reason_k
 	 * report-only windowed-drift telemetry qpc_drift_ppm / qpc_expected_ppm / qpc_step at the END.
 	 * #1341 (v6) adds top-level n_idle + per-input idle (a connected-but-keep-alive-only input,
 	 * excluded from the DEGRADED gate). Issue 1372 part D (v7) adds the media_clock object at the END
-	 * ({state, drift_us, window_s, ready, discipline}). All additive: the bundle-state parser defaults
+	 * ({state, drift_us, window_s, ready, discipline}). Issue 1302 (v8) adds per-input audio_hold /
+	 * audio_withheld / audio_place_err_ms (the audio placement, omitted for a pre-v4 libobs), and
+	 * recent_event_inputs[].events counts the input's NEW events in the 60 s window (its own
+	 * baseline) instead of its lifetime total. All additive: the bundle-state parser defaults
 	 * n_absent->None, n_idle->None, connected->true, idle->false, the qpc_*_ppm trio->None, and OMITS
-	 * recent_event_inputs / audio_unexpected_inputs / media_clock when absent/empty, so a v1..v6 line
-	 * from an older build reads cleanly. */
-	std::string j = "{\"v\":7,\"state\":";
+	 * recent_event_inputs / audio_unexpected_inputs / media_clock / the per-input audio keys when
+	 * absent/empty, so a v1..v7 line from an older build reads cleanly. */
+	std::string j = "{\"v\":8,\"state\":";
 	genlock_json_append_escaped(j, state_name);
 	j += ",\"reason\":";
 	genlock_json_append_escaped(j, reason_key);
@@ -587,10 +605,26 @@ std::string genlock_build_lock_json(const char *state_name, const char *reason_k
 			 r.latency_ms);
 		j += num;
 		snprintf(num, sizeof(num),
-			 "\"underruns\":%llu,\"relocks\":%llu,\"late_holds\":%llu,\"depth\":%u}",
+			 "\"underruns\":%llu,\"relocks\":%llu,\"late_holds\":%llu,\"depth\":%u",
 			 (unsigned long long)r.underruns, (unsigned long long)r.relocks,
 			 (unsigned long long)r.late_holds, r.depth);
 		j += num;
+		/* issue 1302 (v8): the audio placement -- the hold token, the withheld packets and the measured
+		 * placement error (null until one is measured). Omitted when libobs' stats predate v4. */
+		if (r.audio_stats) {
+			j += ",\"audio_hold\":";
+			genlock_json_append_escaped(j, r.audio_hold.c_str());
+			snprintf(num, sizeof(num), ",\"audio_withheld\":%llu,\"audio_place_err_ms\":",
+				 (unsigned long long)r.audio_withheld);
+			j += num;
+			if (r.audio_place_err_seeded) {
+				snprintf(num, sizeof(num), "%lld", (long long)r.audio_place_err_ms);
+				j += num;
+			} else {
+				j += "null";
+			}
+		}
+		j += "}";
 	}
 	j += "]";
 	/* #1299 Part 4 (v5): report-only windowed-drift telemetry at the END of the object. Since #1357 the

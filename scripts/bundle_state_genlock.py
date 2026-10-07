@@ -105,6 +105,12 @@ def _genlock_lock_payload(text):
     return payload
 
 
+# Issue 1302 (schema v8): the per-input audio PLACEMENT keys the widget writes (from libobs stats v4)
+# -- `audio_hold` (off / latency / timecode / pending), `audio_withheld` and `audio_place_err_ms`
+# (null until a placement error is measured). Passed through as written, omitted when absent.
+_GENLOCK_LOCK_INPUT_AUDIO_KEYS = ("audio_hold", "audio_withheld", "audio_place_err_ms")
+
+
 def _genlock_lock_inputs(raw_inputs):
     """The facet's per-input map `{name: {...}}` from the widget's `inputs` array; a row that is not
     an object or has no non-empty string name is skipped, a duplicate name keeps the last."""
@@ -116,7 +122,7 @@ def _genlock_lock_inputs(raw_inputs):
             name = row.get("name")
             if not isinstance(name, str) or not name:
                 continue
-            inputs_map[name] = {
+            entry = {
                 "locked": bool(row.get("locked")),
                 # #1299 (schema v2): whether the DistroAV receiver has a live NDI connection. Default
                 # True for a v1 line from an older build (no `connected` key) so a senderless-but-
@@ -131,6 +137,12 @@ def _genlock_lock_inputs(raw_inputs):
                 "late_holds": row.get("late_holds"),
                 "depth": row.get("depth"),
             }
+            # issue 1302 (schema v8): the audio placement, only the keys the row carries -- a v1..v7
+            # row (or a pre-v4 libobs) parses exactly as before, never a fabricated "placed".
+            for key in _GENLOCK_LOCK_INPUT_AUDIO_KEYS:
+                if key in row:
+                    entry[key] = row[key]
+            inputs_map[name] = entry
     return inputs_map
 
 
@@ -176,9 +188,17 @@ def genlock_lock_facet_from_log(text):
       {state, reason, n_inputs, n_locked, n_absent, n_idle, latency_ms, recent_event, qpc_drift_ms,
        qpc_drift_ppm, qpc_expected_ppm, qpc_step,
        clock:{state}, output:{present, stamping_wallclock},
-       inputs:{<name>:{locked, connected, idle, latency_ms, underruns, relocks, late_holds, depth}},
+       inputs:{<name>:{locked, connected, idle, latency_ms, underruns, relocks, late_holds, depth,
+                       [audio_hold, audio_withheld, audio_place_err_ms]}},
        [recent_event_inputs:[{name, events}]], [audio_unexpected_inputs:[{name}]],
        [media_clock:{state, drift_us, window_s, ready, discipline}], source:"log"}
+
+    Issue 1302 (schema v8): each input carries its audio PLACEMENT -- `audio_hold` (off / latency /
+    timecode / pending = withheld), `audio_withheld` (packets withheld while no video delay was
+    known) and `audio_place_err_ms` (null until measured) -- passed through only when the line
+    carries them (a v1..v7 line, or a pre-v4 libobs, parses exactly as before). And
+    `recent_event_inputs[].events` counts the offender's NEW events in the 60 s window against its
+    own baseline, no longer its lifetime total.
 
     Issue 1372 part D (schema v7): `media_clock` is the audio (media) clock facet the widget decided
     with -- `state` ok|drift|undisciplined, the wall-vs-media drift `drift_us` per `window_s` (the
