@@ -671,12 +671,14 @@ def test_the_in_loop_capture_reads_no_clock_by_default(tmp_path, monkeypatch):
 
 def test_the_payload_carries_the_consumer_lag(rec_clip, tmp_path):
     """lag_ms (additive): how old the newest audio of the judged window was when it was written. The
-    2 s consumer stall shows up there, so a lagging sampler is never mistaken for a fresh one."""
+    consumer stall shows up there, so a lagging sampler is never mistaken for a fresh one. Only the
+    block that completes a window sets it: with 2 s windows a 3.5 s stall that starts at the first
+    window leaves the second window's block waiting ~1.5 s."""
     audio = rec_clip[: int(5.5 * SR)]
     sdk = _PacedSdk(audio, hold_s=1.3)
     cap = pac.CaptureThread(sdk, timeout_ms=100)
     payloads = []
-    stall = _GilStall(2.0)
+    stall = _GilStall(3.5)  # the window-2 block arrives ~2 s into the stall: lag ~1.5 s
 
     def on_write(p):
         payloads.append(p)
