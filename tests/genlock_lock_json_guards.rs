@@ -28,6 +28,8 @@ fn squish(s: &str) -> String {
 
 const STATUSBAR_CPP: &str = "vendor/obs-studio/frontend/widgets/OBSBasicStatusBar.cpp";
 const STATUSBAR_HPP: &str = "vendor/obs-studio/frontend/widgets/OBSBasicStatusBar.hpp";
+/// Issue 1302: the per-input recent-event tick, its own translation unit.
+const RECENT_CPP: &str = "vendor/obs-studio/frontend/widgets/GenlockRecentEvents.cpp";
 
 fn assert_has(file: &str, needle: &str) {
     let src = squish(&vendor_file(file));
@@ -70,9 +72,9 @@ fn genlock_lock_recent_event_offender_present_1299_part3() {
         STATUSBAR_CPP,
         "genlock_json_append_escaped(j, recent_event_input_name);",
     );
-    // issue 1302: the phase total is read inside the per-input baseline tick
+    // issue 1302: the phase total is read inside the per-input baseline tick (its own TU)
     assert_has(
-        STATUSBAR_CPP,
+        RECENT_CPP,
         "genlock_input_phase_events(in.connected ? 1 : 0, in.idle ? 1 : 0, in.relocks,",
     );
     // the enriched human reason (reason=recent_event:<name>) built from the offender name
@@ -109,10 +111,19 @@ fn genlock_lock_recent_event_baseline_present_1302() {
     );
     assert_has(STATUSBAR_HPP, "#include \"GenlockRecentEvents.hpp\"");
     assert_has(STATUSBAR_HPP, "GenlockRecentEvents genlockRecentEvents;");
-    // the tick (replayed on the shipped bytes by tests/genlock_phase_baseline_1302.rs) and its call
+    // the tick (its own TU, replayed on the shipped bytes by tests/genlock_phase_baseline_1302.rs),
+    // built into the frontend, and its call
     assert_has(
-        STATUSBAR_CPP,
+        RECENT_CPP,
         "const uint64_t fresh = genlock_input_new_phase_events(has_prev, b.contributing ? 1 : 0, b.total, contributing, total);",
+    );
+    assert_has(
+        STATE_HPP,
+        "GenlockRecentEventTick genlock_recent_events_tick(GenlockRecentEvents &st,",
+    );
+    assert_has(
+        "vendor/obs-studio/frontend/cmake/ui-widgets.cmake",
+        "widgets/GenlockRecentEvents.cpp widgets/GenlockRecentEvents.hpp",
     );
     assert_has(
         STATUSBAR_CPP,
@@ -131,11 +142,13 @@ fn genlock_lock_recent_event_baseline_present_1302() {
             "issue 1302: the #1299 aggregate recent-event compare (`{gone}`) is back -- a reattach would count its lifetime total as new events again"
         );
     }
-    let state = vendor_file(STATE_HPP);
-    assert!(
-        !state.contains("#include <obs") && !state.contains("#include <Q"),
-        "{STATE_HPP}: issue 1302 -- the recent-event state header must stay OBS/Qt-free"
-    );
+    for file in [STATE_HPP, RECENT_CPP] {
+        let src = vendor_file(file);
+        assert!(
+            !src.contains("#include <obs") && !src.contains("#include <Q"),
+            "{file}: issue 1302 -- the recent-event tick must stay OBS/Qt-free"
+        );
+    }
 }
 
 #[test]

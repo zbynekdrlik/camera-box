@@ -1,17 +1,17 @@
 // GenlockRecentEvents.hpp — camera-box issue 1302
 //
-// The state the in-OBS genlock LOCK indicator (OBSBasicStatusBar) keeps between its 1 Hz ticks to
-// decide `recent_event`: a per-input event BASELINE. Each input remembers its phase total
-// (relocks + late_holds + backward_steps) and whether it contributed (connected and not idle) at the
-// last tick, so a reconnect, a wake from idle or a first sight re-baselines instead of counting the
-// input's whole lifetime total as new events (the #1299 aggregate compare did, and held the box
-// DEGRADED recent_event for 60 s after every reattach).
+// The recent_event driver of the in-OBS genlock LOCK indicator (OBSBasicStatusBar): a per-input
+// event BASELINE. Each input remembers its phase total (relocks + late_holds + backward_steps) and
+// whether it contributed (connected and not idle) at the last 1 Hz tick, so a reconnect, a wake from
+// idle or a first sight re-baselines instead of counting the input's whole lifetime total as new
+// events (the #1299 aggregate compare did, and held the box DEGRADED recent_event for 60 s after
+// every reattach).
 //
-// Plain std C++ (no OBS/Qt) so tests/genlock_phase_baseline_1302.rs compiles it with the widget's
-// tick function and replays the widget's ticks on the real bytes. The tick itself
-// (genlock_recent_events_tick) lives in OBSBasicStatusBar.cpp next to the scan, because it calls
-// the C decision helpers of GenlockLockState.hpp, which this header must not pull into every TU
-// that includes the status bar.
+// Plain std C++ (no OBS/Qt). The tick lives in its own translation unit, GenlockRecentEvents.cpp,
+// which calls the parity-gated C rules of GenlockLockState.hpp; this header does not include that
+// one, so every TU that includes the status bar sees only these std structs.
+// tests/genlock_phase_baseline_1302.rs compiles GenlockRecentEvents.cpp with g++ and replays the
+// widget's ticks on the shipped bytes.
 #pragma once
 
 #include <cstdint>
@@ -19,6 +19,7 @@
 #include <map>
 #include <string>
 #include <utility>
+#include <vector>
 
 /* what the widget remembers about ONE genlock input between its ticks */
 struct GenlockPhaseBaseline {
@@ -36,3 +37,28 @@ struct GenlockRecentEvents {
 	std::map<std::string, GenlockPhaseBaseline> inputs;
 	int64_t last_event_ms = -1; /* monotonic ms of the last tick that saw a new event; -1 = never */
 };
+
+/* one genlock input as the tick reads it (the widget copies it out of its scan) */
+struct GenlockPhaseInput {
+	std::string name;
+	bool connected = true; /* the DistroAV receiver has a live NDI connection */
+	bool idle = false;     /* #1341: connected but keep-alive-only */
+	uint64_t relocks = 0;
+	uint64_t late_holds = 0;
+	uint64_t backward_steps = 0;
+};
+
+/* what one tick produced */
+struct GenlockRecentEventTick {
+	uint64_t new_events = 0;   /* the new phase events of every input this tick */
+	bool recent_event = false; /* a tick within window_ms saw a new event */
+	std::string top_name;      /* the input with the most new events in the window ("" = none) */
+	uint64_t top_events = 0;   /* its new events in the window */
+};
+
+/* One 1 Hz tick: each input's NEW phase events from the parity-gated genlock_input_new_phase_events
+ * against what `st` remembered at the last tick; recent_event = a new event within window_ms; the top
+ * offender is the input with the most new events in that window (a tie keeps the first in scan
+ * order). Inputs no longer in `inputs` are forgotten. */
+GenlockRecentEventTick genlock_recent_events_tick(GenlockRecentEvents &st, int64_t now_ms, int64_t window_ms,
+						   const std::vector<GenlockPhaseInput> &inputs);

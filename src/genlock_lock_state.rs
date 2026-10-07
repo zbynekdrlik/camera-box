@@ -243,9 +243,9 @@ pub fn decide(f: &GenlockFacets) -> (LockState, LockReason) {
 }
 
 /// #1299 Part 3 — one genlock input's cumulative event counters as the recent-event driver reads
-/// them (issue 1302: through [`PhaseEventSample::of`], one input at a time). Plain scalars so the C mirror (`GenlockLockState.hpp`, `genlock_input_phase_events`)
-/// ports byte-for-byte; the committed parity gate `tests/genlock_lock_state_parity.rs` keeps the two
-/// numerically identical.
+/// them (issue 1302: through [`PhaseEventSample::of`], one input at a time). Plain scalars so the C
+/// mirror (`GenlockLockState.hpp`, `genlock_input_phase_events`) ports byte-for-byte; the committed
+/// parity gate `tests/genlock_lock_state_parity.rs` keeps the two numerically identical.
 #[derive(Debug, Clone, Copy)]
 pub struct InputEventCounts {
     /// The DistroAV receiver has a live NDI connection (sender running). A disconnected input

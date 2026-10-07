@@ -11,9 +11,9 @@
 //!    [`camera_box::genlock_lock_state::input_new_phase_events`] over every flag combination crossed
 //!    with a spread of totals (equal, rise, backward, both extremes).
 //! 2. **A widget-shaped replay on the shipped bytes**: the widget's tick
-//!    (`genlock_recent_events_tick` + its two structs, lifted verbatim from `OBSBasicStatusBar.cpp`,
-//!    with the real `GenlockRecentEvents.hpp` and `GenlockLockState.hpp`) runs under `c++` over
-//!    scripted 1 Hz scenarios, and the C `genlock_decide_lock_state` grades every tick. Each tick is
+//!    (`genlock_recent_events_tick`, its own translation unit `GenlockRecentEvents.cpp`, compiled
+//!    as shipped with the real `GenlockRecentEvents.hpp` and `GenlockLockState.hpp`) runs under
+//!    `c++` over scripted 1 Hz scenarios, and the C `genlock_decide_lock_state` grades every tick. Each tick is
 //!    checked against a reference model built on the Rust authority, and each scenario against its
 //!    own hand-written expectation: an input with 40 lifetime relocks that reattaches stays LOCKED,
 //!    a real event after the attach still DEGRADES for exactly 60 s.
@@ -29,7 +29,8 @@ use std::process::Command;
 
 const HEADER: &str = "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp";
 const STATE_HEADER: &str = "vendor/obs-studio/frontend/widgets/GenlockRecentEvents.hpp";
-const STATUSBAR_CPP: &str = "vendor/obs-studio/frontend/widgets/OBSBasicStatusBar.cpp";
+const WIDGETS: &str = "vendor/obs-studio/frontend/widgets";
+const RECENT_CPP: &str = "vendor/obs-studio/frontend/widgets/GenlockRecentEvents.cpp";
 /// The widget's `GENLOCK_RECENT_EVENT_WINDOW_MS` (pinned by `tests/genlock_lock_json_guards.rs`).
 const WINDOW_MS: i64 = 60_000;
 
@@ -49,11 +50,12 @@ fn scratch(tag: &str) -> PathBuf {
     dir
 }
 
-/// Compile `src` with `compiler` + `flags` into `dir/<name>` and return its stdout. Panics (never
-/// skips) when the compiler is missing or the program fails.
+/// Compile `src` (plus the shipped `extra` sources) with `compiler` + `flags` into `dir/<name>` and
+/// return its stdout. Panics (never skips) when the compiler is missing or the program fails.
 fn build_and_run(
     compiler: &str,
     flags: &[&str],
+    extra: &[PathBuf],
     dir: &Path,
     name: &str,
     ext: &str,
@@ -65,6 +67,7 @@ fn build_and_run(
     let out = Command::new(compiler)
         .args(flags)
         .arg(&file)
+        .args(extra)
         .arg("-o")
         .arg(&bin)
         .output()
@@ -77,7 +80,7 @@ fn build_and_run(
         });
     assert!(
         out.status.success(),
-        "issue 1302: the lifted harness `{name}` does NOT COMPILE under {flags:?}:\n--- stderr ---\n{}\n--- harness ---\n{src}",
+        "issue 1302: the harness `{name}` does NOT COMPILE under {flags:?}:\n--- stderr ---\n{}\n--- harness ---\n{src}",
         String::from_utf8_lossy(&out.stderr)
     );
     let run = Command::new(&bin).output().unwrap_or_else(|e| {
@@ -161,6 +164,7 @@ fn c_input_new_phase_events_matches_the_rust_authority_1302() {
             "-Werror",
             "-O1",
         ],
+        &[],
         &scratch("parity"),
         "new_phase_events",
         "c",
@@ -322,22 +326,30 @@ impl Reference {
     }
 }
 
-/// The lifted widget tick + a driver that replays every scenario and prints one line per tick:
+#[test]
+fn the_tick_tu_stays_obs_and_qt_free_1302() {
+    // The replay compiles the shipped TU on its own; an OBS or Qt include would make it uncompilable
+    // here (and pull Qt into a file that has no business with it).
+    for file in [STATE_HEADER, RECENT_CPP] {
+        let src = read(file);
+        assert!(
+            !src.contains("#include <obs")
+                && !src.contains("#include <Q")
+                && !src.contains("#include \"OBSBasic")
+                && !src.contains("#include <widgets/"),
+            "{file}: issue 1302 -- the recent-event tick must stay plain std C++"
+        );
+    }
+}
+
+/// The widget's tick TU + a driver that replays every scenario and prints one line per tick:
 /// `scenario|tick|new|recent|top_name|top_events|remembered|state|reason`.
 fn run_replay(scenarios: &[Scenario]) -> Vec<Vec<String>> {
-    let cpp = read(STATUSBAR_CPP);
-    let block = lift(
-        &cpp,
-        STATUSBAR_CPP,
-        "struct GenlockPhaseInput {",
-        "GenlockRecentEventTick genlock_recent_events_tick(",
-    );
+    let widgets = repo(WIDGETS);
     let mut src = String::from(
-        "#include <cstdint>\n#include <cstdio>\n#include <set>\n#include <string>\n#include <vector>\n",
+        "#include <cstdint>\n#include <cstdio>\n#include <string>\n#include <vector>\n\
+         #include \"GenlockLockState.hpp\"\n#include \"GenlockRecentEvents.hpp\"\n",
     );
-    src.push_str(&format!("#include \"{}\"\n", repo(HEADER).display()));
-    src.push_str(&format!("#include \"{}\"\n", repo(STATE_HEADER).display()));
-    src.push_str(&block);
     src.push_str(
         r#"
 struct Row { const char *name; int connected, idle, locked; uint64_t relocks, late_holds, backward_steps; };
@@ -405,9 +417,11 @@ int main()
     src.push_str("\treturn 0;\n}\n");
 
     let cxx = std::env::var("CXX").unwrap_or_else(|_| "c++".to_string());
+    let include = format!("-I{}", widgets.display());
     let stdout = build_and_run(
         &cxx,
-        &["-std=c++17", "-Wall", "-Wextra", "-Werror", "-O1"],
+        &["-std=c++17", "-Wall", "-Wextra", "-Werror", "-O1", &include],
+        &[repo(RECENT_CPP)],
         &scratch("replay"),
         "recent_events_replay",
         "cpp",
@@ -504,6 +518,30 @@ fn scenarios() -> Vec<Scenario> {
     out.push(Scenario {
         name: "offender_tie",
         ticks: t,
+    });
+
+    // The offender leaves the scan inside the window (its source was removed): recent_event holds
+    // to the end of the window, but nobody is named and the input is forgotten.
+    let mut t = vec![vec![live(pgm, 3), live(cg, 10)]];
+    t.extend(repeat(4, vec![live(pgm, 3), live(cg, 12)]));
+    t.extend(repeat(60, vec![live(pgm, 3)]));
+    out.push(Scenario {
+        name: "offender_leaves",
+        ticks: t,
+    });
+
+    // Both sums saturate: two inputs that each rise by over half the range on one tick, then one of
+    // them resets and rises by the whole range inside the window.
+    let half = u64::MAX / 2 + 10;
+    let sat = vec![
+        vec![live(cam, 0), live(cg, 0)],
+        vec![live(cam, half), live(cg, half)],
+        vec![live(cam, 0), live(cg, half)],
+        vec![live(cam, u64::MAX), live(cg, half)],
+    ];
+    out.push(Scenario {
+        name: "saturation",
+        ticks: sat,
     });
     out
 }
@@ -621,4 +659,36 @@ fn the_widget_tick_matches_the_reference_and_a_reattach_stays_locked_1302() {
     assert_eq!(field("offender_window", 61, 5), "4");
     assert_eq!(field("offender_tie", 1, 4), "NDI cam7");
     assert_eq!(field("offender_tie", 1, 5), "2");
+
+    // an offender that left the scan: still DEGRADED for the rest of the window, nobody named
+    assert_eq!(field("offender_leaves", 1, 4), "CG-obs");
+    for k in 5..61 {
+        assert_eq!(
+            state("offender_leaves", k),
+            DEGRADED,
+            "offender_leaves tick {k}"
+        );
+        assert_eq!(
+            reason("offender_leaves", k),
+            REASON_RECENT_EVENT,
+            "tick {k}"
+        );
+        assert_eq!(
+            field("offender_leaves", k, 4),
+            "",
+            "tick {k}: a forgotten input is never named"
+        );
+        assert_eq!(field("offender_leaves", k, 5), "0", "tick {k}");
+        assert_eq!(
+            field("offender_leaves", k, 6),
+            "1",
+            "tick {k}: the input is forgotten"
+        );
+    }
+    assert_eq!(state("offender_leaves", 61), LOCKED, "60 s after the event");
+
+    // both sums saturate instead of wrapping
+    assert_eq!(field("saturation", 1, 2), u64::MAX.to_string());
+    assert_eq!(field("saturation", 3, 4), "NDI cam7");
+    assert_eq!(field("saturation", 3, 5), u64::MAX.to_string());
 }
