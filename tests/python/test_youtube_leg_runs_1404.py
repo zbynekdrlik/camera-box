@@ -159,6 +159,57 @@ def test_coverage_counts_undecodable_frames_at_a_cut_as_unproven_never_as_an_eve
     assert ylv.coverage(rec, vod, 0.0, 19.75, 25.0)["rec_cadence_pct"] < 100.0
 
 
+def _replace_vod_row(vod, k, tick, run):
+    """The VOD with row k showing another tick (of `run`): a spliced or stale frame, frame count kept."""
+    return vod[:k] + [(vod[k][0], vod[k][1], tick, run)] + vod[k + 1:]
+
+
+def test_a_clip_frame_spliced_into_a_camera_window_fails_it_never_a_clean_pass():
+    rec = painter_rows(0, 600) + clip_rows(600, 300)
+    vod = _replace_vod_row(vod_of(rec), 300, 50, CLIP)  # one camera frame replaced by a clip frame
+    r = ylv.dupskip(rec, vod, 0.0, *CAMERA_W)
+    assert r["run"] == PAINTER and r["dup"] >= 1 and r["skip"] >= 1, r
+    assert r["foreign_frames"] == 1, r
+    # a clip frame outside the window's own VOD stretch is not this window's business
+    far = _replace_vod_row(vod_of(rec), 520, 50, CLIP)
+    r = ylv.dupskip(rec, far, 0.0, *CAMERA_W)
+    assert (r["dup"], r["skip"], r["foreign_frames"]) == (0, 0, 0), r
+
+
+def test_a_frame_of_an_earlier_camera_stretch_spliced_into_a_later_one_fails_it():
+    stale = 100000 + 2 * 100  # the painter tick of session frame 100, in the FIRST camera stretch
+    vod = _replace_vod_row(vod_of(SESSION), 1050, stale, PAINTER)
+    r = ylv.dupskip(SESSION, vod, 0.0, 31.0, 39.0)
+    assert r["run"] == PAINTER and r["dup"] >= 1 and r["skip"] >= 1, r
+    first = ylv.dupskip(SESSION, vod, 0.0, *CAMERA_W)  # the first stretch's own window is intact
+    assert (first["dup"], first["skip"]) == (0, 0), first
+
+
+def test_a_later_part_is_placed_by_the_painter_never_by_the_clip():
+    # part 1: camera, then a CG segment it ends in; part 2: painter only (the CG segment ended in the
+    # OBS restart); the painter counted on through the 3 s restart gap
+    part1 = [(i, i / 30.0, 100000 + 2 * i, PAINTER) for i in range(300)] + clip_rows(300, 300)
+    gap = 90  # frames of the restart
+    part2 = [(k, k / 30.0, 100000 + 2 * (600 + gap + k), PAINTER) for k in range(300)]
+    rows, t0, starts = ylv.join_part_rows([part1, part2], [1000.0, None], restarting=ylv.CLIP_RUNS)
+    assert starts[1] == pytest.approx(1000.0 + (600 + gap) / 30.0), starts
+    # part 2 opens in a LATER play of the clip (a higher clip tick than part 1 ended on), then the painter
+    part2b = clip_rows(0, 60, first_tick=2000) + [(60 + k, (60 + k) / 30.0, 100000 + 2 * (600 + gap + 60 + k), PAINTER)
+                                                  for k in range(240)]
+    rows, t0, starts = ylv.join_part_rows([part1, part2b], [1000.0, None], restarting=ylv.CLIP_RUNS)
+    assert starts[1] == pytest.approx(1000.0 + (600 + gap) / 30.0), starts
+    with pytest.raises(ValueError, match="no decoded tick to place it by"):
+        ylv.join_part_rows([part1, clip_rows(0, 60)], [1000.0, None], restarting=ylv.CLIP_RUNS)
+
+
+def test_a_vod_that_ends_inside_the_first_play_maps_it_to_the_first_play():
+    vod = vod_of(SESSION[:700])  # the VOD stops 3 s into the first clip play
+    tl = ylv.run_timeline(SESSION, vod, 0.0)
+    assert {tl.vod_seg[k] for k in range(600, 700)} == {1}
+    r = ylv.dupskip(SESSION, vod, 0.0, 20.5, 23.0)
+    assert (r.get("error"), r["dup"], r["skip"], r["run"]) == (None, 0, 0, CLIP), r
+
+
 def test_publish_joins_and_av_starts_read_the_run_segments():
     vod = vod_of(SESSION)
     pubs = ylv.publish_gaps(SESSION, vod, 0.0, [25.0])
