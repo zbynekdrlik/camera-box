@@ -50,7 +50,9 @@ use crate::colour_scale::Rect;
 use crate::probe::burn_echo::{reads_in_frame, LocatedPayload};
 use crate::probe::payload::Payload;
 use crate::probe::qr::{decode_qr_luma_all_reads, merge_payloads, otsu_threshold};
-use crate::probe::recording_latency::{AUX_TICK_RUN_ID, BURN_RUN_ID_SONGPLAYER};
+use crate::probe::recording_latency::{
+    AUX_TICK_RUN_ID, BURN_RUN_ID_SONGPLAYER, MEASUREMENT_CLIP_RUN_ID,
+};
 use image::{GrayImage, Luma};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -234,14 +236,18 @@ pub fn tight_box_reads(
 
 /// Log ONCE per process when an expected burn run_id is not a reserved id at all (an operator
 /// `--burn-*-run-id` override), so the pass silently skipping it stays visible. The reserved ids
-/// without a fixed overlay slot (SongPlayer, the painted aux marks) are expected and not logged.
+/// without a fixed overlay slot (SongPlayer, the painted aux marks, the measurement clip) are
+/// expected and not logged.
 fn warn_once_on_unlocalized(missing_run_ids: &[u32]) {
     static WARNED: AtomicBool = AtomicBool::new(false);
     let unlocalized: Vec<u32> = missing_run_ids
         .iter()
         .copied()
         .filter(|&id| {
-            slot_for_run_id(id).is_none() && id != BURN_RUN_ID_SONGPLAYER && id != AUX_TICK_RUN_ID
+            slot_for_run_id(id).is_none()
+                && id != BURN_RUN_ID_SONGPLAYER
+                && id != AUX_TICK_RUN_ID
+                && id != MEASUREMENT_CLIP_RUN_ID
         })
         .collect();
     if !unlocalized.is_empty() && !WARNED.swap(true, Ordering::Relaxed) {

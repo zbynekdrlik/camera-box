@@ -38,10 +38,14 @@ from youtube_leg_proc import run_bounded  # noqa: E402
 
 PAINTER_QR = re.compile(r"^P(\d+)\.(\d+)\.(-?\d+)\.(\d+)$")
 NODE_BURN_RUN = re.compile(r"^9110\d\d$")  # reserved node/origin burn ids 911001..911099, never the painter
+# The camera-box measurement clip (scripts/gen_measurement_clip.py) paints the painter's dual-QR
+# Vernier under this reserved id: the CG segments' tick. The ONE reserved id read as a tick here (the
+# Rust recording decode keeps it out of the cam2 Vernier tick: src/probe/recording.rs NODE_BURN_RUN_IDS).
+MEASUREMENT_CLIP_RUN_ID = 911016
 QR_TOP_FRACTION = 0.62  # the painter's two big QRs sit in the top 62 % of the frame
 DECODE_SCALE = 0.5
 PHASE_RADIUS = 60  # frames: the local capture phase comes from both-halves frames this near
-DECODER_VERSION = 2  # part of the tick-cache key: a map from another decoder is never reused
+DECODER_VERSION = 3  # part of the tick-cache key: a map from another decoder is never reused (3: reads 911016)
 PROBE_COUNT_TIMEOUT_S = 600
 # The worker pool's bound: about 4x the slowest measured decode (~0.27 s a frame per worker for the
 # 1080p session files on a loaded dev1), never under 10 min. A worker the OOM killer took leaves
@@ -51,12 +55,15 @@ DECODE_TIMEOUT_FLOOR_S = 600
 
 
 def painter_payload(text):
-    """(run, tick) of a valid painter payload (CRC-checked like Payload::decode), else None."""
+    """(run, tick) of a valid painter payload (CRC-checked like Payload::decode), else None. The
+    measurement clip's id is the one reserved id that reads as a tick (the CG segments' painter)."""
     m = PAINTER_QR.match(text or "")
     if not m:
         return None
     run, tick, gen, crc = (int(g) for g in m.groups())
-    if zlib.crc32(f"{run}.{tick}.{gen}".encode()) != crc or NODE_BURN_RUN.match(str(run)):
+    if zlib.crc32(f"{run}.{tick}.{gen}".encode()) != crc:
+        return None
+    if NODE_BURN_RUN.match(str(run)) and run != MEASUREMENT_CLIP_RUN_ID:
         return None
     return run, tick
 

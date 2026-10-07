@@ -57,7 +57,7 @@ use camera_box::probe::recording_latency::{
     strih_stream_samples_from_stream, write_latency_csv, HopLatency, LatencySample, RunIds,
     BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM2, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4, BURN_RUN_ID_CAM5,
     BURN_RUN_ID_CAM6, BURN_RUN_ID_CAM7, BURN_RUN_ID_CG, BURN_RUN_ID_IMAG, BURN_RUN_ID_SONGPLAYER,
-    BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
+    BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH, MEASUREMENT_CLIP_RUN_ID,
 };
 use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_segments::{
@@ -3527,7 +3527,11 @@ fn build_and_print_verdict_with_stream_diffs(
     let strih_ids = RunIds {
         node_burn: args.burn_strih_run_id,
         cam2: cam2_pin,
-        other_burns: vec![args.burn_songplayer_run_id, args.burn_cg_run_id],
+        other_burns: vec![
+            args.burn_songplayer_run_id,
+            args.burn_cg_run_id,
+            MEASUREMENT_CLIP_RUN_ID, // issue 1404: the measurement clip (a CG segment)
+        ],
     };
     // cam→strih ABSOLUTE latency needs the strih recording (its in-frame strih-burn +
     // cam2 stamps). Skipped in cam1-only optical-readability mode.
@@ -3632,6 +3636,7 @@ fn build_and_print_verdict_with_stream_diffs(
                 args.burn_strih_run_id,
                 args.burn_songplayer_run_id,
                 args.burn_cg_run_id,
+                MEASUREMENT_CLIP_RUN_ID, // issue 1404: the measurement clip
             ],
         };
         // #111 PART A: prefer the WHOLE strih→stream hop from the STREAM recording
@@ -3907,6 +3912,8 @@ fn build_and_print_verdict_with_stream_diffs(
                 // exclude them from the cam2 optical detection like every other node burn.
                 args.burn_songplayer_run_id,
                 args.burn_cg_run_id,
+                // issue 1404: the measurement clip's painted QR rides in during a CG segment.
+                MEASUREMENT_CLIP_RUN_ID,
             ];
             println!();
             println!(
@@ -4968,6 +4975,8 @@ fn build_and_print_verdict_with_stream_diffs(
                     // other node burn (they can ride in during a CG_CHAIN run).
                     args.burn_songplayer_run_id,
                     args.burn_cg_run_id,
+                    // issue 1404: the measurement clip's painted QR rides in during a CG segment.
+                    MEASUREMENT_CLIP_RUN_ID,
                 ];
                 let (seg_frames, no_anchor) = segment_frames_from_recording(
                     stream_frames,
@@ -6832,6 +6841,8 @@ fn build_and_print_verdict_with_stream_diffs(
                     // other node burn (they can ride in during a CG_CHAIN run).
                     args.burn_songplayer_run_id,
                     args.burn_cg_run_id,
+                    // issue 1404: the measurement clip's painted QR rides in during a CG segment.
+                    MEASUREMENT_CLIP_RUN_ID,
                 ];
                 let (latency_windows, latency_no_anchor) = partition_frames_by_window(
                     stream_frames,
@@ -7839,6 +7850,8 @@ fn extract_partial_flagged_frames(
     // during a CG_CHAIN run — exclude them from the cam2 optical detection like every other burn.
     all_burns.push(args.burn_songplayer_run_id);
     all_burns.push(args.burn_cg_run_id);
+    // issue 1404: the measurement clip's painted QR (a CG segment) is never cam2's optical QR.
+    all_burns.push(MEASUREMENT_CLIP_RUN_ID);
     // UNDECODABLE frames (no readable QR at all) — the exact set `report_recording_diag` extracts.
     let ticks = FrameTick::from_recording_frames(frames);
     let cfg = VerdictConfig {

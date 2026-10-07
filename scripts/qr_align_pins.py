@@ -197,6 +197,9 @@ NODE_BURN_RUN_IDS = frozenset({
     # they must never win painter_run_id's smallest-id tie-break.
     911014,  # BURN_RUN_ID_SONGPLAYER (CG-chain origin)
     911015,  # BURN_RUN_ID_CG (cg OBS hop)
+    # issue 1404: the measurement clip's painted dual-QR (scripts/gen_measurement_clip.py), played
+    # by SongPlayer / the cg OBS in a CG segment; a reserved id, never the painter.
+    911016,  # MEASUREMENT_CLIP_RUN_ID (CG-segment origin)
 })
 
 

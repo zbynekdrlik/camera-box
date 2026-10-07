@@ -92,7 +92,8 @@ impl BurnSlot {
 /// The slot of a reserved node-burn run_id (the `probe::recording_latency::BURN_RUN_ID_*`
 /// defaults). `None` for an id without a fixed overlay position: the SongPlayer content burn
 /// (911014, painted by the sender), the painted aux tick marks (911013, optical content, not a
-/// burn) and an operator-overridden `--burn-*-run-id` value (the rig uses the reserved defaults).
+/// burn), the measurement clip's painted dual-QR (911016, issue 1404) and an operator-overridden
+/// `--burn-*-run-id` value (the rig uses the reserved defaults).
 /// Such an id is never localized, so the recovery pass skips it.
 pub fn slot_for_run_id(run_id: u32) -> Option<BurnSlot> {
     match run_id {
@@ -496,6 +497,18 @@ mod tests {
         assert!(!node_burn_in_own_slot(911_001, 900.0, 727.9, w, h));
         // The pad grows the slot: 4 px outside the slot edge is still inside the crop.
         assert!(node_burn_in_own_slot(911_002, 36.0, 734.0, w, h));
+    }
+
+    #[test]
+    fn the_measurement_clip_id_has_no_slot_and_is_never_echo_gated_1404() {
+        // issue 1404: the measurement clip paints the dual-QR Vernier under 911016 at the
+        // painter's place (the top band), not in a burn slot. Without a slot the echo gate must
+        // accept it anywhere, or every CG-segment frame would lose its tick.
+        assert_eq!(slot_for_run_id(911_016), None);
+        assert!(recovery_slots(&[911_016]).is_empty());
+        for (cx, cy) in [(480.0, 374.0), (1440.0, 374.0), (0.0, 0.0)] {
+            assert!(node_burn_in_own_slot(911_016, cx, cy, 1920, 1080));
+        }
     }
 
     #[test]

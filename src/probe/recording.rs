@@ -178,7 +178,11 @@ pub struct RecordingFrame {
 /// the strict gates are calibrated on. Only the report-only tear surface (`crate::tear_detect`
 /// v2) reads them, by run_id, explicitly. Appended LAST so index-based test uses (`N[0]` = cam1)
 /// stay stable.
-pub const NODE_BURN_RUN_IDS: [u32; 13] = [
+///
+/// **issue 1404:** the measurement clip's painted dual-QR (`recording_latency::MEASUREMENT_CLIP_RUN_ID`)
+/// rides into the strih/stream recordings during a CG segment; its `frame_id` is the clip's own
+/// tick, so it is tick-excluded like the aux pair. Appended last for the same reason.
+pub const NODE_BURN_RUN_IDS: [u32; 14] = [
     crate::probe::recording_latency::BURN_RUN_ID_CAM1,
     crate::probe::recording_latency::BURN_RUN_ID_CAM2,
     crate::probe::recording_latency::BURN_RUN_ID_CAM3,
@@ -195,6 +199,7 @@ pub const NODE_BURN_RUN_IDS: [u32; 13] = [
     crate::probe::recording_latency::BURN_RUN_ID_SONGPLAYER,
     crate::probe::recording_latency::BURN_RUN_ID_CG,
     crate::probe::recording_latency::AUX_TICK_RUN_ID,
+    crate::probe::recording_latency::MEASUREMENT_CLIP_RUN_ID,
 ];
 
 /// The node-burn run_ids the GENERIC diagnostic tools ([`decode_recording_frame`] /
@@ -1259,6 +1264,19 @@ mod tests {
                 "#1301: BURN_RUN_ID_{label} ({id}) must be in NODE_BURN_RUN_IDS"
             );
         }
+    }
+
+    #[test]
+    fn node_burn_run_ids_includes_the_measurement_clip_1404() {
+        // issue 1404: the measurement clip's painted dual-QR rides into a strih/stream recording
+        // during a CG segment; its frame_id is the clip's own tick and must never become the cam2
+        // Vernier tick.
+        let clip = crate::probe::recording_latency::MEASUREMENT_CLIP_RUN_ID;
+        assert_eq!(clip, 911_016);
+        assert!(
+            NODE_BURN_RUN_IDS.contains(&clip),
+            "MEASUREMENT_CLIP_RUN_ID must be in NODE_BURN_RUN_IDS"
+        );
     }
 
     #[test]
