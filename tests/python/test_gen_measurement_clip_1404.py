@@ -209,6 +209,16 @@ def test_an_encode_without_the_right_frame_count_is_never_renamed(tmp_path, monk
     assert sorted(p.name for p in tmp_path.iterdir()) == ["bin"]
 
 
+def test_a_missing_ffprobe_is_a_runtime_error_and_leaves_no_part(tmp_path, monkeypatch):
+    # ffmpeg reads every frame and writes a file, but no ffprobe is on PATH to count its frames
+    _fake_ffmpeg(tmp_path, monkeypatch, '/bin/cat >/dev/null\nfor last; do :; done\necho junk > "$last"\n')
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    out = tmp_path / "i.mp4"
+    with pytest.raises(RuntimeError, match="cannot be probed"):
+        gen.write_clip(str(out), 1)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["bin"]
+
+
 def test_a_stopped_generator_kills_ffmpeg_and_leaves_nothing(tmp_path, monkeypatch):
     import os
     import signal
