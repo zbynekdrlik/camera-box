@@ -14,6 +14,8 @@ target_sources(
     widgets/AudioMixer.hpp
     widgets/ColorSelect.cpp
     widgets/ColorSelect.hpp
+    widgets/GenlockRecentEvents.cpp
+    widgets/GenlockRecentEvents.hpp
     widgets/OBSBasic.cpp
     widgets/OBSBasic.hpp
     widgets/OBSBasic_Browser.cpp

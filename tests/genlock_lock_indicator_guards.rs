@@ -49,9 +49,10 @@ fn assert_has(file: &str, needle: &str) {
 #[test]
 fn source_stats_api_present() {
     // #1303 bumped the stats struct to v2 (append-only: +audio_enabled/audio_delay_ms/
-    // audio_pairing_offset_ms); #1299 bumped it to v3 (append-only: +connected). Pin the current
-    // version so a subtree pull that reverts the bump is caught.
-    assert_has(OBS_API, "#define OBS_GENLOCK_STATS_VERSION 3");
+    // audio_pairing_offset_ms); #1299 bumped it to v3 (append-only: +connected); issue 1302 bumped it
+    // to v4 (append-only: the audio placement). Pin the current version so a subtree pull that
+    // reverts the bump is caught.
+    assert_has(OBS_API, "#define OBS_GENLOCK_STATS_VERSION 4");
     assert_has(OBS_API, "struct obs_genlock_stats {");
     assert_has(
         OBS_API,
@@ -98,6 +99,106 @@ fn audit_routes_through_the_shared_fill() {
     // still routed through the shared fill, and the audio facet rides the SAME line.
     assert_has(OBS_SOURCE, "(long long)gs.wall_qpc_drift_ms,");
     assert_has(OBS_SOURCE, "(long long)gs.audio_pairing_offset_ms);");
+}
+
+#[test]
+fn audio_placement_stats_present_1302() {
+    // Issue 1302: the per-input audio PLACEMENT (hold mode, withheld packets, measured placement
+    // error) rides the stats struct (v4) through the ONE shared fill, so the `genlock-fifo audit`
+    // line and the LOCK widget's heartbeat cannot disagree. A consumer (the SongPlayer A/V gate)
+    // waits on it per input. Linux-CI twin of the issue-1302 pwsh block in BOTH
+    // windows-genlock{,-fast}.yml -- keep all three in lock-step.
+    for field in [
+        "int audio_hold_mode;",
+        "uint64_t audio_withheld;",
+        "int64_t audio_place_err_ms;",
+        "bool audio_place_err_seeded;",
+    ] {
+        assert_has(OBS_API, field);
+    }
+    // the four fields are APPENDED after the v3 `connected`, in this order (additive versioning)
+    let api = vendor_file(OBS_API);
+    let start = api
+        .find("struct obs_genlock_stats {")
+        .expect("struct obs_genlock_stats");
+    let body = &api[start..start + api[start..].find("\n};").expect("the struct's end")];
+    let order: Vec<Option<usize>> = [
+        "bool connected;",
+        "int audio_hold_mode;",
+        "uint64_t audio_withheld;",
+        "int64_t audio_place_err_ms;",
+        "bool audio_place_err_seeded;",
+    ]
+    .iter()
+    .map(|f| body.find(f))
+    .collect();
+    assert!(
+        order.iter().all(Option::is_some) && order.windows(2).all(|w| w[0] < w[1]),
+        "issue 1302: the v4 audio placement fields must be appended after `connected`, in order: {order:?}"
+    );
+    let last = body
+        .find("bool audio_place_err_seeded;")
+        .expect("checked above");
+    let field_after = body[last..].lines().skip(1).any(|l| {
+        l.trim_start()
+            .starts_with(|c: char| c.is_ascii_alphabetic())
+    });
+    assert!(
+        !field_after,
+        "issue 1302: `audio_place_err_seeded` must stay the LAST stats field until the next version bump"
+    );
+    // the shared fill reads the source fields the audit line reads
+    assert_has(
+        OBS_SOURCE,
+        "stats->audio_hold_mode = source->genlock_audio_hold_mode;",
+    );
+    assert_has(
+        OBS_SOURCE,
+        "stats->audio_withheld = source->genlock_audio_withheld;",
+    );
+    assert_has(
+        OBS_SOURCE,
+        "stats->audio_place_err_ms = (int64_t)(source->genlock_audio_place_err_ns / 1000000);",
+    );
+    assert_has(
+        OBS_SOURCE,
+        "stats->audio_place_err_seeded = source->genlock_audio_place_err_seeded;",
+    );
+    // ... and the audit line prints them from that same snapshot, never straight from the source
+    assert_has(OBS_SOURCE, "(unsigned long long)gs.audio_withheld,");
+    assert_has(OBS_SOURCE, "(long long)gs.audio_place_err_ms,");
+    assert_has(OBS_SOURCE, "genlock_audio_hold_token(gs.audio_hold_mode),");
+    let src = squish(&vendor_file(OBS_SOURCE));
+    for direct in [
+        "(unsigned long long)source->genlock_audio_withheld,",
+        "genlock_audio_hold_token(source->genlock_audio_hold_mode),",
+    ] {
+        assert!(
+            !src.contains(direct),
+            "issue 1302: the audit line still reads `{direct}` past the shared fill"
+        );
+    }
+    // the frontend names the mode through the ONE token function (never a retyped string table)
+    assert_has(
+        OBS_API,
+        "EXPORT const char *obs_genlock_audio_hold_token(int mode);",
+    );
+    assert_has(
+        OBS_SOURCE,
+        "const char *obs_genlock_audio_hold_token(int mode) { return genlock_audio_hold_token(mode); }",
+    );
+    assert_has(
+        STATUSBAR_CPP,
+        "rec.audio_hold = obs_genlock_audio_hold_token(st.audio_hold_mode);",
+    );
+    assert_has(STATUSBAR_CPP, "if (st.version >= 4) {");
+    let widget = squish(&vendor_file(STATUSBAR_CPP));
+    for retyped in ["\"pending\"", "\"timecode\""] {
+        assert!(
+            !widget.contains(retyped),
+            "issue 1302: the widget retypes the audio hold token {retyped} -- name it through obs_genlock_audio_hold_token"
+        );
+    }
 }
 
 #[test]

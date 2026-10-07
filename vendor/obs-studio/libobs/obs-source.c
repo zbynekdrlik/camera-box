@@ -6580,6 +6580,13 @@ static void genlock_fill_stats(const obs_source_t *source, struct obs_genlock_st
 	 * legitimately-idle NDI input never false-pages the fleet watchdog. Default true (obs_source_init),
 	 * driven live by obs_source_set_genlock_connected from ndi-source.cpp's receiver loop. */
 	stats->connected = source->genlock_connected;
+	/* camera-box issue 1302 (v4): the audio PLACEMENT -- the hold mode, the withheld packets and the
+	 * measured placement error the audit line prints (it reads them from this snapshot too). Written
+	 * by the audio thread and read here unlocked, like the other audio facets above. */
+	stats->audio_hold_mode = source->genlock_audio_hold_mode;
+	stats->audio_withheld = source->genlock_audio_withheld;
+	stats->audio_place_err_ms = (int64_t)(source->genlock_audio_place_err_ns / 1000000);
+	stats->audio_place_err_seeded = source->genlock_audio_place_err_seeded;
 }
 
 /* Periodic audit log: emit the FIFO health counters every ~5 s so underruns are
@@ -6681,19 +6688,22 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	      * (a lock, a sender restart, a pin change); audio_slew_ms= placement move still owed,
 	      * audio_slews= / audio_steps= cumulative slews / legacy step re-placements (steps must stay 0
 	      * on a source with an ASRC resampler), audio_withheld= packets withheld while no video delay
-	      * was known. Audit-line-only (not in obs_genlock_stats). */
+	      * was known. Audit-line-only (not in obs_genlock_stats), except audio_withheld= (stats v4,
+	      * issue 1302). */
 	     "shallow_depth=%llu shallow_capped=%d shallow_latches=%u audio_slew_ms=%lld audio_slews=%u "
 	     "audio_steps=%u audio_withheld=%llu "
 	     /* camera-box issue 1367 (live 25.9.2026 12:31): the smoothed placement error of the samples
-	      * (actual minus intended, ms; negative = the audio sits EARLY, the hold is not in them). */
+	      * (actual minus intended, ms; negative = the audio sits EARLY, the hold is not in them).
+	      * In obs_genlock_stats since v4 (issue 1302). */
 	     "audio_place_err_ms=%lld "
 	     /* camera-box issue 1367 (Option 3): the audio pairing's basis. audio_hold= off / latency (the
 	      * #1303 arrival + latency_ms hold, before the first measurement settles) / timecode (the NDI
 	      * timecode + the measured video delay); video_delay_ms= the smoothed MEASURED stamp->present
 	      * delay the audio follows (0 = not measured); audio_health= decide_audio_health on the
 	      * pairing offset (0 ok, 3 = more than half a frame off; -1 = fps unknown; the program-source
-	      * and ASRC-saturation inputs are not known here and pass 0). Audit-line-only (not in
-	      * obs_genlock_stats); unknown keys are ignored by src/jitter_audit.rs. */
+	      * and ASRC-saturation inputs are not known here and pass 0). audio_hold= is in
+	      * obs_genlock_stats since v4 (issue 1302), the other two are audit-line-only; unknown keys
+	      * are ignored by src/jitter_audit.rs. */
 	     "audio_hold=%s video_delay_ms=%lld audio_health=%d "
 	     /* camera-box #1303: receiver-side AUDIO genlock parity facet. audio_enabled= the
 	      * source's NDI audio is active; audio_delay_ms= the hold applied at ingest so the
@@ -6746,10 +6756,12 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	     (unsigned long long)source->genlock_shallow_target_frames, source->genlock_shallow_capped ? 1 : 0,
 	     source->genlock_shallow_latches, (long long)(source->genlock_audio_slew_remaining_ns / 1000000),
 	     source->genlock_audio_slews, source->genlock_audio_steps,
-	     (unsigned long long)source->genlock_audio_withheld,
-	     (long long)(source->genlock_audio_place_err_ns / 1000000),
-	     /* camera-box issue 1367: the audio pairing basis (audit-line-only). */
-	     genlock_audio_hold_token(source->genlock_audio_hold_mode),
+	     /* camera-box issue 1302: the withheld packets, the placement error and the hold mode come from
+	      * the shared snapshot `gs` (stats v4) -- the values the LOCK widget's heartbeat carries. */
+	     (unsigned long long)gs.audio_withheld,
+	     (long long)gs.audio_place_err_ms,
+	     /* camera-box issue 1367: the audio pairing basis. */
+	     genlock_audio_hold_token(gs.audio_hold_mode),
 	     (long long)((source->genlock_video_delay_smoothed_ns + 500000ull) / 1000000ull),
 	     audio_health,
 	     /* camera-box #1303: the audio parity facet, also from the shared snapshot `gs`. */
@@ -10564,6 +10576,14 @@ bool obs_source_get_genlock_stats(const obs_source_t *source, struct obs_genlock
 	genlock_fill_stats(source, stats);
 	pthread_mutex_unlock(&((obs_source_t *)source)->async_mutex);
 	return true;
+}
+
+/* camera-box issue 1302: name an obs_genlock_stats.audio_hold_mode with the ONE token function the
+ * genlock-fifo audit line uses, so the LOCK widget's heartbeat and the audit line can never spell a
+ * mode differently. */
+const char *obs_genlock_audio_hold_token(int mode)
+{
+	return genlock_audio_hold_token(mode);
 }
 
 void obs_source_set_async_unbuffered(obs_source_t *source, bool unbuffered)

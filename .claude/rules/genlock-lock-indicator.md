@@ -5,6 +5,8 @@ paths:
   - "src/genlock_lock_state.rs"
   - "tests/genlock_lock_state_parity.rs"
   - "tests/genlock_lock_indicator_guards.rs"
+  - "vendor/obs-studio/frontend/widgets/GenlockRecentEvents.hpp"
+  - "tests/genlock_phase_baseline_1302.rs"
 ---
 
 # In-OBS GENLOCK LOCK indicator (#1298)
@@ -21,7 +23,8 @@ facet + dev1 watchdog that CONSUMES the same structs over obs-websocket).
 | The DECISION (pure) | `src/genlock_lock_state.rs` (`decide`) | Tier-0 authority, crate-root, std-only. |
 | The DECISION (C port) | `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` (`genlock_decide_lock_state`) | Byte-for-byte mirror; OBS/Qt-free so the parity gate lifts + `cc`-compiles it. Keep the two enums + struct + fn CONTIGUOUS (the lift slices from the first enum through the fn's closing brace). |
 | C-vs-Rust parity gate | `tests/genlock_lock_state_parity.rs` | Lifts the C block, `cc`-compiles it, compares `(state, reason)` over all 2^9 flag combos × the three media-clock verdicts × a set of `(n_inputs, n_locked, n_absent, n_idle)` tuples (a TABLE + loop harness since issue 1372 part D: ~35k straight-line assignments took ~1 min at `-O1`, the table compiles in < 1 s — keep new axes in the table) (the 8th flag is #1303's `audio_unpaired`; the `n_absent` axis is #1299's — some-absent-but-all-connected-locked → LOCKED, some-absent-with-a-connected-unlocked → DEGRADED, all-absent → HEALTHY-idle, and the impossible `n_absent > n_inputs` both ports saturate to `n_connected=0`). |
-| Per-source stats API | `obs.h` (`struct obs_genlock_stats`, `obs_source_get_genlock_stats`) + `obs-source.c` (`genlock_fill_stats`) | The `genlock-fifo audit` log line and the API BOTH route through `genlock_fill_stats` — they can never disagree. Additive + versioned (`OBS_GENLOCK_STATS_VERSION`). |
+| Per-source stats API | `obs.h` (`struct obs_genlock_stats`, `obs_source_get_genlock_stats`) + `obs-source.c` (`genlock_fill_stats`) | The `genlock-fifo audit` log line and the API BOTH route through `genlock_fill_stats` — they can never disagree. Additive + versioned (`OBS_GENLOCK_STATS_VERSION`, 4 since issue 1302: `audio_hold_mode` / `audio_withheld` / `audio_place_err_ms` / `audio_place_err_seeded`, which the audit line now prints from the same snapshot; the frontend names the mode through the export `obs_genlock_audio_hold_token`, never a copy of the strings). |
+| Per-input event baseline (issue 1302) | `src/genlock_lock_state.rs` (`PhaseEventSample`, `input_new_phase_events`) ↔ `GenlockLockState.hpp` (`genlock_input_new_phase_events`, right after `genlock_input_phase_events`); the widget's state + tick in their own plain-C++ unit `GenlockRecentEvents.{hpp,cpp}` (registered in `frontend/cmake/ui-widgets.cmake`; the header does not include `GenlockLockState.hpp`, so the status bar's other includers see only std structs) | `tests/genlock_phase_baseline_1302.rs`: C-vs-Rust parity of the rule (512 vectors) + a replay of the widget's tick on the shipped C++ bytes graded by the C decision. Guards: `genlock_lock_recent_event_baseline_present_1302` + the issue-1302 pwsh block in both ymls. |
 | Per-output stats API | `obs.h` (`struct obs_genlock_output_stats`, `obs_output_set_genlock_wall_stamping`, `obs_output_get_genlock_stats`) + `obs-output.c` + `obs-internal.h` (two bool fields, bzalloc-zeroed) | DistroAV's `ndi-output.cpp` sets `wall_stamping=true` at `begin_data_capture` success, `false` at stop. |
 | The widget | `OBSBasicStatusBar.{hpp,cpp}` (`UpdateGenlockLabel`, `PollGenlockClock`) | A permanent `QLabel` + an ALWAYS-ON 1 Hz `QTimer` (NOT the stream-only `refreshTimer`). |
 | Vendored-source guards | `tests/genlock_lock_indicator_guards.rs` | std-only, runnable via `rustc --test`; the Linux-CI twin of the pwsh gates. |
@@ -169,23 +172,45 @@ lowest)**; else LOCKED (green).
   (async on the event loop). `clock_present` = a successful `:8898/status` poll within the last 3 s
   — so killing dantesync flips the widget to UNLOCKED within ~3-5 s (the acceptance bar). JSON is
   parsed with OBS's own `obs_data_create_from_json` (no new dependency).
-- **`recent_event` is derived by the WIDGET, not libobs** — it stamps "now" on any INCREASE of an
-  aggregate cumulative counter across its 1 Hz samples (a decrease = reconnect reset → re-baseline,
-  no event), and `recent_event = (now − last) < 60 s`. This keeps libobs free of a new hot-path
-  remembered-state field.
-  - **#1299 Part 3: that aggregate is CONNECTED inputs' PHASE events only.** The driver is
-    `sum over connected inputs of (relocks + late_holds + backward_steps)` — computed post-scan via
-    the pure `genlock_input_phase_events` (mirrored in `GenlockLockState.hpp`, parity-gated). UNDERRUNS
-    are DROPPED from the lock verdict (a latency-budget miss owned by the `genlock-fifo audit` +
-    cg-chain-verify / issue 1302, and bursty — counting them latched the 60 s window chronically),
-    and an ABSENT input's #1096 rebind churn is excluded (`connected == false` contributes 0).
-    Underruns stay in the per-input facet counters (report-only). The window itself is unchanged and
-    correct — the fix was the FEED, not the window.
-  - **The DEGRADED/recent_event reason NAMES the offender** — the connected input carrying the most
-    phase events. It rides the `genlock-lock-json:` line as `recent_event_inputs:[{name, events}]`
-    (schema v2→v3, additive, omit-when-absent) and the human `genlock-lock:` line as
-    `reason=recent_event:<name>`; `genlock_lock_decision.analyze` enriches the watchdog's reason to
-    `recent_event:<name>` so a page is actionable.
+- **`recent_event` is derived by the WIDGET, not libobs** — `recent_event = (now − last) < 60 s`,
+  where `last` is the last 1 Hz tick that saw a NEW phase event. This keeps libobs free of a new
+  hot-path remembered-state field.
+  - **#1299 Part 3: PHASE events of CONNECTED inputs only.** An input's phase total is
+    `relocks + late_holds + backward_steps` via the pure `genlock_input_phase_events` (mirrored in
+    `GenlockLockState.hpp`, parity-gated). UNDERRUNS are DROPPED from the lock verdict (a
+    latency-budget miss owned by the `genlock-fifo audit` + cg-chain-verify, and bursty — counting
+    them latched the 60 s window chronically), and an ABSENT or IDLE input contributes 0. Underruns
+    stay in the per-input facet counters (report-only).
+  - **Issue 1302: each input is counted against its OWN baseline.** The #1299 widget summed every
+    contributing input's LIFETIME total into one aggregate and raised the event on any rise, so an
+    input that reconnected or woke from idle added its whole total at once: the box read DEGRADED
+    `recent_event` for 60 s after every reattach (the SongPlayer A/V gate found it). Now
+    `genlock_recent_events_tick` (`GenlockRecentEvents.cpp`, over the state in
+    `GenlockRecentEvents.hpp`) asks the parity-gated `genlock_input_new_phase_events` per input
+    against what it remembered last tick: the rise only when the input contributed (connected and
+    not idle) in BOTH samples; a reconnect, a wake, a first sight or a backward total re-baselines
+    (0). An input that leaves the scan is forgotten, so its return is a first sight. The counters
+    stay cumulative in libobs (the audit delta readers depend on that). Real events after the attach
+    still DEGRADE for exactly 60 s.
+  - **The DEGRADED/recent_event reason NAMES the offender** — since issue 1302 the input with the
+    most NEW events in the 60 s window (its own window of `(tick, new events)`), ties to the first
+    in scan order. It rides the `genlock-lock-json:` line as `recent_event_inputs:[{name, events}]`
+    (`events` = those windowed new events since v8, the lifetime total before) and the human
+    `genlock-lock:` line as `reason=recent_event:<name>`; `genlock_lock_decision.analyze` enriches
+    the watchdog's reason to `recent_event:<name>` so a page is actionable.
+  - **Tier-0 proof of the tick on the shipped bytes:** `tests/genlock_phase_baseline_1302.rs`
+    compiles `GenlockRecentEvents.cpp` as shipped (keep it plain std C++; the test refuses an OBS/Qt
+    include) with g++ and the real headers, replays scripted 1 Hz scenarios (a 40-relock reattach, a
+    real event after it, a wake, a vanish, a backward reset, the offender window and its tie, an
+    offender that leaves the scan inside the window, saturation of both sums) graded by the C
+    decision, and checks every tick against a reference built on the Rust authority.
+  - **Known limit (review round 1, not fixed here): a KEEP-ALIVE input that reattaches still reads
+    as live for ~54 s.** The #1341 idle ring of an absent input is dropped, and a fresh ring
+    classifies only once it spans 90 % of the window, so a reconnected playlist input contributes
+    until then and each keep-alive relock in that time is a new event. The same holds for every
+    keep-alive input after an OBS start. Pre-existing (the aggregate did the same); a follow-up
+    decision, because the cure either changes the #1341 classifier or hides a genuinely live new
+    input's events for its first ~54 s.
 - **`qpc_drift` is the wall STEP only — never the cumulative offset (#1299 Part 4), never a rate
   (#1357 scope C).** The libobs producer `genlock_wall_qpc_drift_ms()` is a wall-vs-`os_gettime_ns`
   accumulator since OBS start. What it measures DIFFERS PER OS, which is why no rate/offset term may
@@ -261,7 +286,17 @@ lowest)**; else LOCKED (green).
   the enum/struct anchor literals verbatim. Same self-collision class the top-level CLAUDE.md +
   `vendored-libobs-change-safety.md` document for `recording-e2e.sh`/`obs-source.c` anchors.
 - **This is a vendored FRONTEND change ⇒ FULL-BUNDLE deploy** (not a fast obs.dll hot-swap), per
-  `vendored-obs-frontend-crash-safety.md`. CI is the first place the C/Qt compiles — locally only
+  `vendored-obs-frontend-crash-safety.md`. **A stats-version bump makes a fast deploy UNSAFE, not
+  just incomplete (issue 1302 review):** the caller allocates `struct obs_genlock_stats` and passes no
+  size, so a NEW obs.dll writes the bigger struct (memset + fill) past an OLD frontend's stack copy.
+  The `version` field only protects the other pairing (an old libobs under a new frontend: the
+  frontend reads the v4 fields only when `version >= 4`). For this bump that pairing never even
+  reaches the struct on Windows: the new frontend imports `obs_genlock_audio_hold_token`, which an
+  old obs.dll lacks, so obs64 does not start. On Linux (lazy binding) it starts and runs without
+  the per-input audio keys, because the import is called only under `version >= 4`.
+  `deploy-genlock-fleet.sh --fast` does not refuse
+  such a commit mechanically yet (follow-up candidate); never `--fast` a change that touches
+  `struct obs_genlock_stats`. CI is the first place the C/Qt compiles — locally only
   `cargo fmt --all --check` + the pure Rust module (`rustc --test`) + the parity/guard tests
   (standalone) verify; the blog refactor's format/arg types were lift-compiled under `gcc
   -Wformat=2 -Werror`.

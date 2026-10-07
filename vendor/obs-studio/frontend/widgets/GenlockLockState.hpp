@@ -47,7 +47,7 @@ typedef struct genlock_lock_facets {
 	int n_locked;               /* of those, currently locked */
 	int n_absent;               /* #1299: of n_inputs, how many have NO live NDI receiver connection (sender not running); n_connected = n_inputs - n_absent is the DEGRADED-gate denominator */
 	int n_idle;                 /* #1341: of n_inputs, how many are CONNECTED but IDLE (keep-alive-only, received-frame rate below the idle floor over the window); excluded from n_locked + n_connected = n_inputs - n_absent - n_idle */
-	int recent_event;           /* bool: relock/underrun/late-hold/backward-step in last 60 s */
+	int recent_event;           /* bool: a NEW relock/late-hold/backward-step of a connected, non-idle input in the last 60 s (issue 1302: per-input baseline) */
 	int qpc_drift_beyond_bound; /* bool */
 	int clock_present;          /* bool: dantesync :8898/status answered */
 	int clock_locked;           /* bool: is_locked */
@@ -151,6 +151,26 @@ static inline uint64_t genlock_input_phase_events(int connected, int idle, uint6
 		return UINT64_MAX;
 	sum += backward_steps;
 	return sum;
+}
+
+/* issue 1302 — the NEW phase events of ONE input since the widget's previous tick: the per-input
+ * event BASELINE that replaced the #1299 aggregate compare (it summed every input's lifetime total,
+ * so a reconnecting or waking input added its whole total at once and held the box DEGRADED
+ * recent_event for 60 s after every reattach). The totals are the input-phase-events values above;
+ * contributing = connected and not idle; has_prev 0 = the widget has no sample of the input (first
+ * sight, or it left the scan and was forgotten). Contributing in BOTH samples and the total rose:
+ * the rise. It just started contributing (reconnect, wake from idle, first sight): 0, and the current
+ * total becomes its baseline. The total went backward (a counter reset): 0, re-baseline. Not
+ * contributing now: 0. Byte-for-byte mirror of camera_box::genlock_lock_state::input_new_phase_events,
+ * parity-gated by tests/genlock_phase_baseline_1302.rs. */
+static inline uint64_t genlock_input_new_phase_events(int has_prev, int prev_contributing, uint64_t prev_total,
+						      int contributing, uint64_t total)
+{
+	if (!has_prev || !prev_contributing || !contributing)
+		return 0;
+	if (total < prev_total)
+		return 0;
+	return total - prev_total;
 }
 
 /* #1303 — case-insensitive ASCII substring test, a private helper for genlock_name_is_camera below.

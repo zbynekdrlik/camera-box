@@ -49,6 +49,11 @@ struct GenlockInputRow {
 \tuint64_t late_holds = 0;
 \tuint64_t backward_steps = 0;
 \tuint32_t depth = 0;
+\tbool audio_stats = false;
+\tstd::string audio_hold;
+\tuint64_t audio_withheld = 0;
+\tint64_t audio_place_err_ms = 0;
+\tbool audio_place_err_seeded = false;
 };
 """
 
@@ -87,6 +92,16 @@ int main() {
     // issue 1372 part D: DEGRADED/media_clock lines -- a drifting mixer and a raw-QPC fallback
     printf("%s\n", genlock_build_lock_json("DEGRADED","media_clock",4,4,0,0,3,"locked","stamping",false,nullptr,0,67,13.5,13.0,0,nullptr,"drift",8100,600,1,"active",ins2).c_str());
     printf("%s\n", genlock_build_lock_json("DEGRADED","media_clock",4,4,0,0,3,"locked","stamping",false,nullptr,0,0,0.0,13.0,0,nullptr,"undisciplined",0,600,0,"disabled",ins2).c_str());
+    // issue 1302 (v8): the per-input audio placement -- a withheld probe (no error yet), a placed
+    // timecode hold 3 ms early, and an input whose libobs stats are older than v4 (no audio keys)
+    std::vector<GenlockInputRow> ins4;
+    GenlockInputRow s1; s1.name="sp-probe"; s1.locked=true; s1.latency_ms=3; s1.relocks=40; s1.depth=2;
+    s1.audio_stats=true; s1.audio_hold="pending"; s1.audio_withheld=118; s1.audio_place_err_seeded=false;
+    GenlockInputRow s2; s2.name="NDI 2ME PGM"; s2.locked=true; s2.latency_ms=3; s2.depth=2;
+    s2.audio_stats=true; s2.audio_hold="timecode"; s2.audio_withheld=0; s2.audio_place_err_ms=-3; s2.audio_place_err_seeded=true;
+    GenlockInputRow s3; s3.name="cg"; s3.locked=true; s3.latency_ms=3; s3.depth=2; s3.audio_stats=false;
+    ins4.push_back(s1); ins4.push_back(s2); ins4.push_back(s3);
+    printf("%s\n", genlock_build_lock_json("LOCKED","none",3,3,0,0,3,"locked","stamping",false,nullptr,0,0,0.0,0.0,0,nullptr,"ok",0,600,1,"n/a",ins4).c_str());
     return 0;
 }
 '''
@@ -126,7 +141,7 @@ def test_cpp_builder_output_roundtrips_through_the_python_parser(tmp_path):
     run = subprocess.run([str(binp)], capture_output=True, text=True)
     assert run.returncode == 0, run.stderr
     lines = [ln for ln in run.stdout.splitlines() if ln.strip()]
-    assert len(lines) == 8, f"expected 8 emitted lines, got {lines}"
+    assert len(lines) == 9, f"expected 9 emitted lines, got {lines}"
 
     # Each emitted object is valid JSON, and feeding it through the parser (wrapped as a real log
     # line) yields a facet whose NAMES/VALUES match the C++'s own decided fields.
@@ -150,7 +165,8 @@ def test_cpp_builder_output_roundtrips_through_the_python_parser(tmp_path):
         assert facet["qpc_expected_ppm"] == obj["qpc_expected_ppm"]
         assert facet["qpc_step"] == obj["qpc_step"]
         # issue 1372 part D v7: the media-clock facet round-trips key for key.
-        assert obj["v"] == 7
+        # issue 1302: v8 (additive per-input audio placement)
+        assert obj["v"] == 8
         assert facet["media_clock"] == {
             "state": obj["media_clock"]["state"],
             "drift_us": obj["media_clock"]["drift_us"],
@@ -189,6 +205,12 @@ def test_cpp_builder_output_roundtrips_through_the_python_parser(tmp_path):
             assert got["relocks"] == r["relocks"]
             assert got["late_holds"] == r["late_holds"]
             assert got["depth"] == r["depth"]
+            # issue 1302 v8: the audio placement round-trips per input when emitted, never fabricated
+            for key in ("audio_hold", "audio_withheld", "audio_place_err_ms"):
+                if key in r:
+                    assert got[key] == r[key], (r["name"], key)
+                else:
+                    assert key not in got, (r["name"], key)
 
     # issue 1372 part D: the two DEGRADED/media_clock lines carry the sub-kind the watchdog names.
     drift = json.loads(lines[6])["media_clock"]
@@ -196,3 +218,12 @@ def test_cpp_builder_output_roundtrips_through_the_python_parser(tmp_path):
                      "discipline": "active"}
     undisc = json.loads(lines[7])["media_clock"]
     assert undisc["state"] == "undisciplined" and undisc["discipline"] == "disabled"
+
+    # issue 1302 v8: the placement line carries the three keys exactly where libobs filled them.
+    placement = {r["name"]: r for r in json.loads(lines[8])["inputs"]}
+    assert placement["sp-probe"]["audio_hold"] == "pending"
+    assert placement["sp-probe"]["audio_withheld"] == 118
+    assert placement["sp-probe"]["audio_place_err_ms"] is None
+    assert placement["NDI 2ME PGM"]["audio_hold"] == "timecode"
+    assert placement["NDI 2ME PGM"]["audio_place_err_ms"] == -3
+    assert not {"audio_hold", "audio_withheld", "audio_place_err_ms"} & set(placement["cg"])
