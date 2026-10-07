@@ -1097,6 +1097,9 @@ compiles it as an ordinary program whose `main` can call the module's items dire
 `--test`-run and the append-`main` build are two separate standalone-rustc invocations of the same
 copied source; neither needs cargo.) This is the Rust analogue of the vendored-C lift-and-compile
 recipe and pairs with a bash-replica `diff` to prove the two implementations agree exhaustively.
+A module split into a directory (`genlock_lock_state` since issue 1302: `#[path]` submodules under
+`src/genlock_lock_state/`) needs that directory copied next to the copy, or mount the original
+with `#[path]` in a scratch lib.rs instead of copying it.
 
 ## A delegation-parity pytest that loads BOTH modules via `spec_from_file_location` CANNOT assert `is`-identity across them (#1308)
 

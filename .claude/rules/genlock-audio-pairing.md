@@ -841,7 +841,7 @@ Full contract: `genlock-lock-indicator.md` + `genlock-lock-facet.md`.
 ## LOCK-indicator audio DEGRADE term (#1303 part 3b — DONE)
 
 Landed as an additive term in the parity-gated LOCK decision: `GenlockFacets` (Rust
-`src/genlock_lock_state.rs` + the C `genlock_lock_facets_t` in `GenlockLockState.hpp`) gained a bool
+`src/genlock_lock_state/decision.rs` + the C `genlock_lock_facets_t` in `GenlockLockState.hpp`) gained a bool
 `audio_unpaired`; `decide` / `genlock_decide_lock_state` gained a lowest-precedence DEGRADED branch
 mapping it to a new `LockReason::AudioPairing` (=9); the statusbar widget `OBSBasicStatusBar.cpp`
 aggregates the per-source pairing-offset breach (`st.version >= 2 && st.audio_enabled &&
