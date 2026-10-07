@@ -187,6 +187,16 @@ def test_the_template_pins_the_e_cores_normal_priority_and_the_event_marker():
     assert not re.search(r"^(After|Wants|Requires)=.*network-online\.target", t, re.M)
 
 
+@pytest.mark.parametrize("unit", ["program-audio-sampler.service", "rig-marker-mirror.service",
+                                  "rig-lease-server.service"])
+def test_the_dev1_user_units_carry_no_network_online_ordering(unit):
+    """dev1's user manager reads network-online.target as LoadState=not-found (checked 7.10.2026): the
+    ordering in these --user units only looked like one."""
+    t = (_ROOT / "systemd" / unit).read_text(encoding="utf-8")
+    assert re.search(r"^WantedBy=default\.target$", t, re.M)
+    assert not re.search(r"^(After|Wants|Requires)=.*network-online\.target", t, re.M)
+
+
 @pytest.mark.parametrize("content, want", [
     ("12-15\n", "12-15"), (" 12-13,15 \n", "12-13,15"), ("", ""), ("   \n", ""), ("abc\n", ""),
     ("12-\n", ""), (",4\n", ""), (None, ""),
@@ -472,6 +482,9 @@ def test_failed_and_crash_looping_units_fail(tmp_path, states, want):
     assert row[0] == want, row
     if states == "activating":
         assert "crash loop" in row[1]
+    if states == "failed":
+        # rig-mode.sh test (and event) clear a failed state: the row names the remedy
+        assert "reset-failed" in row[1] and "rig-mode.sh test" in row[1], row
 
 
 def test_drifted_files_or_a_stale_shim_fail(tmp_path):
@@ -597,6 +610,17 @@ def test_event_mode_removes_the_marker_and_stops_the_unit(tmp_path, active, rc0)
     # `stop` leaves a failed unit failed: item 41 would FAIL in EVENT mode until a reboot
     assert calls.index(f"systemctl --user stop {UNIT}") < calls.index(f"systemctl --user reset-failed {UNIT}")
     assert not m.exists()
+
+
+def test_event_mode_with_an_unreadable_state_is_not_a_success(tmp_path):
+    """The operator's user manager unreachable: is-active prints nothing. EVENT must not read that as
+    stopped (it would print a success line, never the WARNING)."""
+    box = Box(tmp_path)
+    _marker(box)
+    (box.state / "bus-down").write_text("")
+    cmd = _mode("program_audio_mode_remote_cmd", "event", env=box.env()).stdout
+    r = subprocess.run(["bash", "-c", cmd], env=box.env(), capture_output=True, text=True, timeout=30)
+    assert r.returncode != 0, (r.stdout, r.stderr)
 
 
 def test_an_unknown_mode_is_refused():
