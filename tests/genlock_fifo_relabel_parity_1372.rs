@@ -32,6 +32,10 @@ const S: i64 = 1_600_000_000;
 const S_RAW: i64 = 1_543_160_000;
 const W0: u64 = 1_791_338_400_000_000_000;
 const MONO0: u64 = 123_456_789_000_000;
+/// Every scenario books at MONO0 + I30 + 1000 (`reads_for`): the previous release a tick before,
+/// the release that applies just after.
+const RELEASE: u64 = MONO0 + 5_000;
+const APPLY_MONO: u64 = MONO0 + I30 + 2_000;
 
 fn b(v: bool) -> u8 {
     u8::from(v)
@@ -269,6 +273,8 @@ struct Scenario {
     boundary: u64,
     rx_last: u64,
     pre_arrivals: Vec<(u64, u64)>,
+    /// The source's previous release (an apply of the empty booking), `None` = never released.
+    prev_release: Option<u64>,
     reads: Vec<(u64, u64, u64)>,
     interval: u64,
     src: u64,
@@ -306,6 +312,7 @@ fn scenarios() -> Vec<Scenario> {
             boundary: presented + I30,
             rx_last: last,
             pre_arrivals: Vec::new(),
+            prev_release: Some(RELEASE),
             reads: reads_for(step),
             interval: I30,
             src: I30,
@@ -322,6 +329,7 @@ fn scenarios() -> Vec<Scenario> {
             boundary: first_new + I30,
             rx_last: old,
             pre_arrivals: vec![(first_new, MONO0 + I30 - 30_000_000)],
+            prev_release: Some(RELEASE),
             reads: reads_for(step),
             interval: I30,
             src: I30,
@@ -337,6 +345,7 @@ fn scenarios() -> Vec<Scenario> {
             boundary: 0,
             rx_last: cam_last,
             pre_arrivals: Vec::new(),
+            prev_release: Some(RELEASE),
             reads: reads_for(step),
             interval: I30,
             src: 0,
@@ -356,6 +365,7 @@ fn scenarios() -> Vec<Scenario> {
         boundary: W0,
         rx_last: W0 + I30,
         pre_arrivals: Vec::new(),
+        prev_release: Some(RELEASE),
         reads: vec![
             (MONO0, W0, MONO0 + 100),
             (MONO0 + I30, W0 + I30, MONO0 + I30 + 100),
@@ -371,6 +381,7 @@ fn scenarios() -> Vec<Scenario> {
         boundary: W0,
         rx_last: W0 + I30,
         pre_arrivals: Vec::new(),
+        prev_release: Some(RELEASE),
         reads: reads_for(S),
         interval: 0,
         src: I30,
@@ -478,6 +489,20 @@ fn rust_trace() -> Vec<String> {
             rx_last = got;
             out.push(format!("pre {n} {got} {}", fmt_state(&st)));
         }
+        if let Some(m) = sc.prev_release {
+            let none = Booking::new();
+            st.apply(
+                &none,
+                &mut queue,
+                &mut boundary,
+                &mut rx_last,
+                sc.interval,
+                sc.src,
+                sc.reserve,
+                sc.wall_now,
+                m,
+            );
+        }
         for &(mb, w, ma) in &sc.reads {
             bk.observe(mb, w, ma);
         }
@@ -490,6 +515,7 @@ fn rust_trace() -> Vec<String> {
             sc.src,
             sc.reserve,
             sc.wall_now,
+            APPLY_MONO,
         );
         let plan_s = p.map_or("none".to_string(), |p| {
             format!("{} {} {}", p.queue_old, b(p.prev_old), b(p.newest_old))
@@ -510,6 +536,7 @@ fn rust_trace() -> Vec<String> {
             sc.src,
             sc.reserve,
             sc.wall_now,
+            APPLY_MONO,
         );
         out.push(format!("again {n} {}", b(again.is_some())));
         for &(stamp, mono) in &sc.arrivals {
@@ -592,7 +619,7 @@ fn c_harness() -> String {
     }
     for (n, seq) in booking_sequences().iter().enumerate() {
         body.push_str(
-            "\t{\n\t\tstruct genlock_fifo_relabel_booking bk = {{0, 0, 0, 0}, 0, 0, 0, 0};\n",
+            "\t{\n\t\tstruct genlock_fifo_relabel_booking bk;\n\t\tmemset(&bk, 0, sizeof bk);\n",
         );
         for &(mb, w, ma) in seq {
             body.push_str(&format!(
@@ -644,14 +671,22 @@ fn c_harness() -> String {
                 sc.src
             ));
         }
+        if let Some(m) = sc.prev_release {
+            body.push_str(&format!(
+                "\t\trelease_line(&st, q, qn, &boundary, &rx_last, {}ULL, {}ULL, {}ULL, {}ULL, \
+                 {m}ULL);\n",
+                sc.interval, sc.src, sc.reserve, sc.wall_now
+            ));
+        }
         for &(mb, w, ma) in &sc.reads {
             body.push_str(&format!(
                 "\t\t(void)genlock_fifo_relabel_book(&bk, {mb}ULL, {w}ULL, {ma}ULL);\n"
             ));
         }
         body.push_str(&format!(
-            "\t\tapply_line({n}, &st, &bk, q, qn, &boundary, &rx_last, {}ULL, {}ULL, {}ULL, {}ULL);\n",
-            sc.interval, sc.src, sc.reserve, sc.wall_now
+            "\t\tapply_line({n}, &st, &bk, q, qn, &boundary, &rx_last, {}ULL, {}ULL, {}ULL, {}ULL, \
+             {}ULL);\n",
+            sc.interval, sc.src, sc.reserve, sc.wall_now, APPLY_MONO
         ));
         for &(stamp, mono) in &sc.arrivals {
             body.push_str(&format!(
@@ -713,14 +748,26 @@ static void state_line(const struct genlock_fifo_relabel_state *st)
 	       st->jump_ns, st->jump_mono_ns, st->relabelled);
 }}
 
+static void release_line(struct genlock_fifo_relabel_state *st, uint64_t *q, size_t qn, uint64_t *boundary,
+			 uint64_t *rx_last, uint64_t interval, uint64_t src, uint64_t reserve, uint64_t wall_now,
+			 uint64_t mono)
+{{
+	const struct genlock_fifo_relabel_queue queue = {{q, qn, q_get, q_set}};
+	struct genlock_fifo_relabel_booking none;
+	memset(&none, 0, sizeof none);
+	struct genlock_fifo_relabel_plan p = {{0, false, false}};
+	(void)genlock_fifo_relabel_apply(st, &none, &queue, boundary, rx_last, interval, src, reserve, wall_now, mono,
+					 &p);
+}}
+
 static void apply_line(int n, struct genlock_fifo_relabel_state *st, const struct genlock_fifo_relabel_booking *bk,
 		       uint64_t *q, size_t qn, uint64_t *boundary, uint64_t *rx_last, uint64_t interval, uint64_t src,
-		       uint64_t reserve, uint64_t wall_now)
+		       uint64_t reserve, uint64_t wall_now, uint64_t mono_now)
 {{
 	const struct genlock_fifo_relabel_queue queue = {{q, qn, q_get, q_set}};
 	struct genlock_fifo_relabel_plan p = {{0, false, false}};
 	const bool applied =
-		genlock_fifo_relabel_apply(st, bk, &queue, boundary, rx_last, interval, src, reserve, wall_now, &p);
+		genlock_fifo_relabel_apply(st, bk, &queue, boundary, rx_last, interval, src, reserve, wall_now, mono_now, &p);
 	if (applied)
 		printf("apply %d %zu %d %d boundary %" PRIu64 " rx %" PRIu64 " ", n, p.queue_old, p.prev_old ? 1 : 0,
 		       p.newest_old ? 1 : 0, *boundary, *rx_last);
@@ -733,7 +780,7 @@ static void apply_line(int n, struct genlock_fifo_relabel_state *st, const struc
 	printf("\n");
 	struct genlock_fifo_relabel_plan p2 = {{0, false, false}};
 	const bool again =
-		genlock_fifo_relabel_apply(st, bk, &queue, boundary, rx_last, interval, src, reserve, wall_now, &p2);
+		genlock_fifo_relabel_apply(st, bk, &queue, boundary, rx_last, interval, src, reserve, wall_now, mono_now, &p2);
 	printf("again %d %d\n", n, again ? 1 : 0);
 }}
 

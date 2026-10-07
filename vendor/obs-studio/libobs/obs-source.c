@@ -8418,7 +8418,8 @@ static void genlock_fifo_relabel_tick(obs_source_t *source, uint64_t mono_before
 	struct genlock_fifo_relabel_plan plan = {0, false, false};
 	if (!genlock_fifo_relabel_apply(&source->genlock_relabel, &genlock_relabel_booking, &queue,
 					&source->genlock_locked_next_boundary_ns, &source->genlock_rx_last_ts, interval,
-					source->genlock_rx_min_delta_ns, (uint64_t)reserve_ms * 1000000ULL, wall_now, &plan))
+					source->genlock_rx_min_delta_ns, (uint64_t)reserve_ms * 1000000ULL, wall_now, mono_after,
+					&plan))
 		return;
 	blog(LOG_INFO,
 	     "genlock-fifo-relabel '%s': step %+.3f ms -- relabelled %zu of %zu queued frame(s), "

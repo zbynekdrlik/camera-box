@@ -386,6 +386,7 @@ fn run(c: &Case) -> Seen {
                     track.min_delta_ns,
                     reserve_ns,
                     wall_now,
+                    fire + 2_000,
                 );
                 for (slot, ts) in n2.q.iter_mut().zip(q) {
                     slot.0 = ts;
@@ -401,6 +402,7 @@ fn run(c: &Case) -> Seen {
                     track.min_delta_ns,
                     reserve_ns,
                     wall_now,
+                    fire + 2_000,
                 );
                 *fifo.locked_boundary_mut() = boundary;
             }

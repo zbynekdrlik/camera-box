@@ -64,6 +64,21 @@ pub const MIN_STEP_NS: i64 = 100_000_000;
 /// relabelled step always lands beyond it, a one-slot gap at 30 fps (33 ms off the step) never.
 pub const JUMP_RECORD_DEV_NS: u64 = (MIN_STEP_NS / 2) as u64;
 
+/// A trusted booking read more than this after the previous trusted one RE-SEEDS the booking
+/// detector instead of booking, ns. The detector is fed only by genlock releases; after a stretch
+/// with none (every genlock queue empty) the offset it holds is stale, and a step (or a raw-clock
+/// drift) that happened long ago must never be booked as if it happened now.
+pub const BOOK_MAX_GAP_NS: u64 = 1_000_000_000;
+
+/// A source whose previous release is more than this before the current one was not releasing at
+/// the step (a new source, one silent across it, a resumed traveling feed): it takes the booking
+/// WITHOUT relabelling, ns. Its queue holds frames that arrived after the step.
+pub const APPLY_MAX_GAP_NS: u64 = 1_000_000_000;
+
+/// The presented age a window takes is capped here, ns: a stale locked boundary must never open a
+/// window of hours. The pin itself is never cut (the window is at least the pin).
+pub const WINDOW_MAX_AGE_NS: u64 = 2_000_000_000;
+
 /// How far a stamp delta is from the source's own step: `|delta − src_ns|`, ns. The subtraction
 /// wraps like the C `int64_t` arithmetic. `src_ns = 0` gives `|delta|`.
 ///
@@ -146,6 +161,8 @@ pub struct Booking {
     pub wall_ns: u64,
     /// The monotonic read that closed that bracket.
     pub mono_ns: u64,
+    /// The monotonic read that closed the last TRUSTED bracket (`0` = none yet).
+    pub last_mono_ns: u64,
 }
 
 impl Booking {
@@ -279,6 +296,8 @@ pub struct RelabelState {
     pub jump_mono_ns: u64,
     /// Frames relabelled (queued + arrivals) — the audit's `relabelled=`.
     pub relabelled: u64,
+    /// The monotonic instant of this source's previous release (`0` = none yet).
+    pub last_release_mono_ns: u64,
 }
 
 impl RelabelState {
@@ -287,7 +306,8 @@ impl RelabelState {
     /// frames, the locked boundary (`0` = unlocked; the presented stamp is `boundary − interval`)
     /// and the stamp tracker's last stamp (`rx_last`, `0` = none), and open the arrival window.
     /// `src_ns` is the source's learned stamp step (`0` = none yet: the canvas interval),
-    /// `reserve_ns` its configured latency, `wall_now` the release's (post-step) wall read. Returns
+    /// `reserve_ns` its configured latency, `wall_now` the release's (post-step) wall read and
+    /// `mono_now` its monotonic clock (every release passes it, applied or not). Returns
     /// the plan when it relabelled anything or opened a window, `None` when the booking was applied
     /// already or does not relabel (a step under [`MIN_STEP_NS`], an unknown interval). A newer
     /// booking always closes the previous window.
@@ -304,7 +324,9 @@ impl RelabelState {
         src_ns: u64,
         reserve_ns: u64,
         wall_now: u64,
+        mono_now: u64,
     ) -> Option<Plan> {
+        self.last_release_mono_ns = mono_now;
         if self.seq == b.seq {
             return None;
         }

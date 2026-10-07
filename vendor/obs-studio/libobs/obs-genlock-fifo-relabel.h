@@ -43,6 +43,14 @@
 /* A raw stamp delta more than this off the source's own step is remembered as a stamp jump, ns.
  * Mirror of JUMP_RECORD_DEV_NS. */
 #define GENLOCK_FIFO_RELABEL_JUMP_RECORD_DEV_NS 50000000ULL
+/* A trusted booking read more than this after the previous trusted one re-seeds the booking
+ * detector instead of booking, ns. Mirror of BOOK_MAX_GAP_NS. */
+#define GENLOCK_FIFO_RELABEL_BOOK_MAX_GAP_NS 1000000000ULL
+/* A source whose previous release is more than this before the current one takes the booking
+ * without relabelling, ns. Mirror of APPLY_MAX_GAP_NS. */
+#define GENLOCK_FIFO_RELABEL_APPLY_MAX_GAP_NS 1000000000ULL
+/* The presented age a window takes is capped here, ns. Mirror of WINDOW_MAX_AGE_NS. */
+#define GENLOCK_FIFO_RELABEL_WINDOW_MAX_AGE_NS 2000000000ULL
 
 /* The box-wide booking (render thread only). Mirror of src/genlock_fifo_relabel.rs Booking. */
 struct genlock_fifo_relabel_booking {
@@ -51,6 +59,7 @@ struct genlock_fifo_relabel_booking {
 	int64_t step_ns;
 	uint64_t wall_ns;
 	uint64_t mono_ns;
+	uint64_t last_mono_ns;
 };
 
 /* Which frames are old-epoch at a booking. Mirror of Plan. */
@@ -75,6 +84,7 @@ struct genlock_fifo_relabel_state {
 	int64_t jump_ns;
 	uint64_t jump_mono_ns;
 	uint64_t relabelled;
+	uint64_t last_release_mono_ns;
 };
 
 /* A source's queue, FIFO order: n stamps read and written through the callbacks. */
@@ -211,9 +221,10 @@ static inline bool genlock_fifo_relabel_apply(struct genlock_fifo_relabel_state 
 					      const struct genlock_fifo_relabel_booking *b,
 					      const struct genlock_fifo_relabel_queue *q, uint64_t *locked_boundary,
 					      uint64_t *rx_last, uint64_t interval_ns, uint64_t src_ns,
-					      uint64_t reserve_ns, uint64_t wall_now,
+					      uint64_t reserve_ns, uint64_t wall_now, uint64_t mono_now,
 					      struct genlock_fifo_relabel_plan *plan_out)
 {
+	s->last_release_mono_ns = mono_now;
 	if (s->seq == b->seq)
 		return false;
 	s->seq = b->seq;
