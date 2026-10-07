@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """issue 1404 -- the stream program-audio GUARD: may the stream program go to YouTube right now?
 
-Reads `http://dev1:8890/program-audio.json` (written by scripts/program_audio_sampler.py, served by
+Reads `http://10.77.9.202:8891/program-audio.json` (strih-lx since issue 1404 ROZHODNUTE 6039368611; the dev1 :8890 route is the old host) (written by scripts/program_audio_sampler.py, served by
 scripts/rig-lease-server.py with `age_s` recomputed per request) and answers with an exit code.
 Both YouTube gates call it before the broadcast starts and every ~10 s while it is live (camera-box
 `scripts/lib/youtube-leg.sh`, restreamer issue 357) and stop the broadcast on anything but 0.
@@ -27,7 +27,7 @@ trailing 4 s, and `reason=` explains every non-trivial outcome (stale, unreachab
 own UNKNOWN reason). Consumers act on the EXIT CODE; the line is for logs and people.
 
 Usage:
-  program_audio_guard.py [--url http://dev1:8890/program-audio.json] [--max-age 10] [--latch-s 30]
+  program_audio_guard.py [--url http://10.77.9.202:8891/program-audio.json] [--max-age 10] [--latch-s 30]
                          [--timeout 5]
 """
 from __future__ import annotations
