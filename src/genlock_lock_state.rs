@@ -114,8 +114,9 @@ pub struct GenlockFacets {
     /// inputs are ALL idle/absent stays HEALTHY-idle LOCKED. Additive: an all-zero `n_idle`
     /// reproduces every pre-#1341 verdict exactly.
     pub n_idle: u32,
-    /// A relock / underrun / late-hold / backward-step was observed in the last 60 s
-    /// (the widget tracks counter deltas across its 1 Hz samples to compute this).
+    /// A relock / late-hold / backward-step of a connected, non-idle input was observed in the last
+    /// 60 s. Issue 1302: the widget counts each input's NEW events against its own baseline
+    /// ([`input_new_phase_events`]), so a reattaching input never re-counts its lifetime total.
     pub recent_event: bool,
     /// The wall clock stepped by more than one frame (the step-only `qpc_drift_beyond_bound`).
     pub qpc_drift_beyond_bound: bool,
@@ -241,8 +242,8 @@ pub fn decide(f: &GenlockFacets) -> (LockState, LockReason) {
     (LockState::Locked, LockReason::None)
 }
 
-/// #1299 Part 3 — one genlock input's cumulative event counters as the recent-event aggregation
-/// reads them. Plain scalars so the C mirror (`GenlockLockState.hpp`, `genlock_input_phase_events`)
+/// #1299 Part 3 — one genlock input's cumulative event counters as the recent-event driver reads
+/// them (issue 1302: through [`PhaseEventSample::of`], one input at a time). Plain scalars so the C mirror (`GenlockLockState.hpp`, `genlock_input_phase_events`)
 /// ports byte-for-byte; the committed parity gate `tests/genlock_lock_state_parity.rs` keeps the two
 /// numerically identical.
 #[derive(Debug, Clone, Copy)]
@@ -281,38 +282,6 @@ pub fn input_phase_events(c: &InputEventCounts) -> u64 {
     c.relocks
         .saturating_add(c.late_holds)
         .saturating_add(c.backward_steps)
-}
-
-/// #1299 Part 3 — the aggregate phase-event counter (summed over CONNECTED inputs) whose INCREASE
-/// across the widget's 1 Hz samples sets `recent_event`. Absent + underrun contributions are
-/// excluded per [`input_phase_events`], so the existing 60 s recency window ages out normally
-/// instead of latching on a continuously-incrementing underrun / absent-sender rebind driver.
-pub fn connected_phase_event_sum(inputs: &[InputEventCounts]) -> u64 {
-    inputs
-        .iter()
-        .map(input_phase_events)
-        .fold(0u64, |a, e| a.saturating_add(e))
-}
-
-/// #1299 Part 3 (b) — the top recent-event offender: the index of the CONNECTED input carrying the
-/// most phase events, and that count. `None` when no connected input carries any phase event (so the
-/// DEGRADED reason is never enriched with a spurious `:<name>` and the JSON `recent_event_inputs`
-/// list stays empty). Ties resolve to the FIRST (lowest index) in scan order — deterministic,
-/// mirroring the widget's `unlocked_names.front()` selection. The widget maps the index back to the
-/// input's name for `reason=recent_event:<name>`.
-pub fn top_phase_event_offender(inputs: &[InputEventCounts]) -> Option<(usize, u64)> {
-    let mut best: Option<(usize, u64)> = None;
-    for (i, c) in inputs.iter().enumerate() {
-        let e = input_phase_events(c);
-        if e == 0 {
-            continue;
-        }
-        match best {
-            Some((_, be)) if be >= e => {}
-            _ => best = Some((i, e)),
-        }
-    }
-    best
 }
 
 /// Issue 1302 — one input's phase-event sample, as the widget's per-input event BASELINE remembers
@@ -1082,50 +1051,6 @@ mod tests {
         // #1341 — a connected-but-idle input's relock/late-hold churn (a keep-alive frame re-acquires
         // a FIFO boundary every ~11 s) must NOT feed recent_event: exactly the connected==false path.
         assert_eq!(input_phase_events(&ev_idle(60, 30, 5)), 0);
-    }
-
-    #[test]
-    fn connected_sum_excludes_idle_inputs() {
-        // #1341 — only the connected, NON-idle input contributes; the idle one (raw counters high)
-        // is dropped exactly like the absent one.
-        let inputs = [ev(true, 1, 0, 0), ev_idle(500, 0, 0), ev(true, 0, 2, 0)];
-        assert_eq!(connected_phase_event_sum(&inputs), 3);
-    }
-
-    #[test]
-    fn offender_excludes_idle_inputs() {
-        // #1341 — an idle SongPlayer input carries the most raw counters but must never be named the
-        // recent-event offender; the top CONNECTED-non-idle input wins.
-        let inputs = [ev(true, 2, 0, 0), ev_idle(9999, 0, 0), ev(true, 5, 0, 0)];
-        assert_eq!(top_phase_event_offender(&inputs), Some((2, 5)));
-    }
-
-    #[test]
-    fn connected_sum_excludes_absent_inputs() {
-        let inputs = [ev(true, 1, 0, 0), ev(false, 500, 0, 0), ev(true, 0, 2, 0)];
-        assert_eq!(connected_phase_event_sum(&inputs), 3);
-    }
-
-    #[test]
-    fn offender_is_the_top_connected_phase_input() {
-        // cg (index 1) has the most phase events among CONNECTED inputs; the absent input at index 2
-        // has more raw counters but is excluded.
-        let inputs = [ev(true, 1, 0, 0), ev(true, 20, 5, 0), ev(false, 9999, 0, 0)];
-        assert_eq!(top_phase_event_offender(&inputs), Some((1, 25)));
-    }
-
-    #[test]
-    fn no_offender_when_no_connected_phase_event() {
-        // Only an absent input carries counters -> no connected phase event -> None (the reason is
-        // never enriched with a spurious :<name>, the JSON list stays empty).
-        let inputs = [ev(true, 0, 0, 0), ev(false, 50, 0, 0)];
-        assert_eq!(top_phase_event_offender(&inputs), None);
-    }
-
-    #[test]
-    fn offender_ties_resolve_to_the_first_in_scan_order() {
-        let inputs = [ev(true, 3, 0, 0), ev(true, 3, 0, 0)];
-        assert_eq!(top_phase_event_offender(&inputs), Some((0, 3)));
     }
 
     #[test]
