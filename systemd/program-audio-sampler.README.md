@@ -144,8 +144,9 @@ What changed:
 - `program-audio.json` gains `queue_drops`, `lag_ms` and `sender_stalls` (additive).
 - **The sender-stall look-ahead:** a frame ahead of the timeline is held with up to 4 frames after
   it; when they come back within the tolerance it is the stream OBS's audio-thread stall, nothing
-  lost (no zeros, `sender_stalls`). A real loss is still bridged (exactly the lost audio) or
-  restarts beyond 250 ms.
+  lost (no zeros, `sender_stalls`). A real loss is bridged with the smallest offset over those
+  frames (the lost audio, less any follower's early send jitter) or restarts beyond 250 ms; a
+  2-frame loss can also read as a stall (the rule doc's residual).
 - Normal priority in both units: the old `Nice=10` is gone; there is no `CPUWeight`.
 - **The sampler moves to strih-lx.** The new consumer URL is
   `http://10.77.9.202:8891/program-audio.json`. It is provisioned by setup-strih step 16e, graded by

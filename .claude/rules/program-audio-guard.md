@@ -443,7 +443,12 @@ level. Re-run the full calibration after any decoder or rule change:
     chord with real losses and pins its 4 holed windows.
   - The limits are pinned to the 100 ns unit with 4800-sample frames (1 000 000 units each); re-held
     groups, a queue drop or a channel change after a held frame, and a frame 300 ms late are pinned
-    by scripted runs. 18 mutants (flushes, stamps, limits, the join rules, the re-feed) all fail a test.
+    by scripted runs, and so are the glue's own steps (a follower with no stamp never joins, the
+    first frame's known drop reaches resolve_ahead, zeros only before the first held frame). 21
+    mutants (flushes, stamps, limits, the join rules, the re-feed, the glue) all fail a test.
+  - A bridge after the look-ahead is the smallest offset, so a follower stamped early shortens it
+    by its jitter (a 64 ms loss with followers 8 ms early bridges 56 ms): the later markers sit that
+    much early, well inside the chain's +-2 index tolerance at live jitter.
 - **A SILENT window empties the span.** The next non-silent window holds only its own markers, so it
   reads UNKNOWN ("marker span") until the span is full again. Without this a silence→measurement
   start read a short chain and could latch a false FOREIGN.
