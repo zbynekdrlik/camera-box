@@ -187,7 +187,8 @@ python3 ~/devel/camera-box/scripts/program_audio_guard.py --url http://10.77.9.2
 # 4. after 10 min on strih-lx: the summary line reads "queue_drops=0 max_lag_ms=<well under 10000>
 #    date_steps=0 ..."; "late burst" lines from the 5 GbE NIC's rx_missed bursts (issue 1242/1387) are
 #    fine (no restart); "sender_stalls=N max_stall_ms=4x-7x" is the stream OBS's audio-thread stall
-#    (~2 a minute), with no zeros and no UNKNOWN; a "bridged with" line is a real loss
+#    (~2 a minute), with no zeros and no UNKNOWN; a "bridged with" line is a real loss (a 2-frame
+#    loss can also read as a stall: the rule doc's residual)
 journalctl --user -u program-audio-sampler --since -15min --no-pager | grep -E 'summary|queue overflow|date step|discontinuity'
 
 # 5. EVENT: rig-mode.sh event removes the TEST marker and stops it ("[program-audio 10.77.9.202] event:
@@ -213,7 +214,8 @@ It must show `audio timeline date step: ... nothing lost`, not `bridged with` / 
 
 A sender stall no longer costs a window: the live stall replay reads MEASUREMENT after the warm-up
 (it read `U U M M M M U M U U M` with rule A alone). After the install, the 10-min summary should show
-`sender_stalls` in the tens per hour and `holes_bridged=0` unless audio was really lost.
+`sender_stalls` at about 20 per 10 minutes (STEP 0: 20 in 720 s) and `holes_bridged=0` unless audio
+was really lost.
 
 Rollback on strih-lx: `rig-mode.sh event` (or `rm -f ~/.config/camera-box/program-audio-sampler.test-mode;
 systemctl --user disable --now program-audio-sampler.service`; a later setup-strih run enables it again,

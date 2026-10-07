@@ -157,10 +157,17 @@ Known limits:
     offset: bridged (a holed span, rule A) although no sample was lost. The live stalls are ~64 ms
     and come back at the second frame.
   * a hole inside the tolerance is stitched: one missing frame (21.3 ms) always, two or three when
-    the sender's jitter pulls the next stamp back inside 41.3 ms. The lane's review probe cut 1-3
+    the sender's jitter pulls a stamp back inside 41.3 ms. The lane's review probe cut 1-3
     frame holes into the three real 16 kHz fixtures at 45 positions per case, with exact and
     jittered stamps, through the real decoder shim: 0 FOREIGN windows. A frame the sampler drops
-    itself (sample rate <= 0) is such a hole too.
+    itself (sample rate <= 0) is such a hole too. With the look-ahead ANY of the 4 followers can
+    pull a 2-frame loss (42.7 ms, only 1.3 ms over the tolerance) back: cut into the real STEP-0
+    stamps, 16.4 % / 37.0 % of 2-frame losses read as a sender stall (the one-frame rule stitched
+    8.9 % / 20.3 %), 3-frame losses 0 %. Such a loss gets no zeros and its span is not holed (rule A
+    does not apply). Consequence probe: 2- and 3-frame losses every 4.5 s cut into the four real
+    recordings (1841 windows each), stamped with the live capture-thread probe's jitter and stalls,
+    through the real decoder: 0 FOREIGN and 0 UNKNOWN after the warm-up, minimum chain 4 (before
+    the look-ahead: 1 FOREIGN, 1 UNKNOWN).
   * a timestamp hole is seen only between two frames that both carry a timestamp; a sender
     without one (an SDK older than v2.5) falls back to the arrival gap and its known limit
     (audio lost without a 1 s arrival gap is stitched, review of 6027557132: 4 of 762 cut clips

@@ -424,10 +424,26 @@ level. Re-run the full calibration after any decoder or rule change:
     (its own starvation). The live 16-step pattern replayed on the committed clip through the real
     decoder reads MEASUREMENT in every window after the warm-up (was `U U M M M M U M U U M`).
     Calibration unchanged: bar a minimum chain 6, bar b chords/tremolo/melody 1, band noise 3.
+  - **Residual: a real 2-frame loss can read as a stall.** A 2-frame loss (42.7 ms) is only 1.3 ms
+    over the tolerance, so a follower stamped 1.3 ms early brings it "back". Cut into the real STEP-0
+    stamps (fresh-context review), 16.4 % / 37.0 % of 2-frame losses read as a stall (the old
+    one-frame rule stitched 8.9 % / 20.3 % the same way), 3-frame losses 0 %. Such a loss gets no
+    zeros and its span is not holed, so rule A does not cover it, and no `bridged with` line names
+    it. Consequence probe: 2- and 3-frame losses every 4.5 s cut into rec2 / rec3a / rec3b / session
+    (1841 windows per run), stamped with the live capture-thread probe's jitter and stalls, through
+    the real decoder: 0 FOREIGN, 0 UNKNOWN after the warm-up, minimum chain 4; the pre-look-ahead
+    code read 1 FOREIGN (session, 3-frame) and 1 UNKNOWN (rec3b) on the same input.
+  - `max_offset_ms` counts a stall's catch-up frame with its offset against the TIMELINE (up to
+    the tolerance), while the stalled frames themselves go to `max_stall_ms`: a large stall can
+    raise `max_offset_ms` towards 41.3 ms without any jitter.
   - Tests that changed on purpose: a 2-frame hole with a 5 ms late stamp bridges 42.7 ms (was
     47.7); a loop test whose summary boundary fell on a held frame moves it to the 5th frame after
     the hole; a test whose music ended within a few samples of a window boundary got more music
-    (exact bridges no longer pad the timeline).
+    (exact bridges no longer pad the timeline); the holed-UNKNOWN reason test now uses an in-band
+    chord with real losses and pins its 4 holed windows.
+  - The limits are pinned to the 100 ns unit with 4800-sample frames (1 000 000 units each); re-held
+    groups, a queue drop or a channel change after a held frame, and a frame 300 ms late are pinned
+    by scripted runs. 18 mutants (flushes, stamps, limits, the join rules, the re-feed) all fail a test.
 - **A SILENT window empties the span.** The next non-silent window holds only its own markers, so it
   reads UNKNOWN ("marker span") until the span is full again. Without this a silence→measurement
   start read a short chain and could latch a false FOREIGN.
