@@ -56,13 +56,28 @@ FORCE_LINE = ("Get-Process obs64,obs-browser-page -ErrorAction SilentlyContinue 
 REQUIRED = ": a full-bundle deploy is required"
 
 
+def _utf8_locale():
+    """The UTF-8 locale the bash side runs in: en_US.UTF-8 when the box has it (dev1, the operator's
+    locale, where bash ranges like [1-9] also match non-ASCII digits), else C.UTF-8 (the CI runner)."""
+    have = subprocess.run(["locale", "-a"], capture_output=True, text=True, check=True).stdout.split()
+    for want in ("en_US.utf8", "C.utf8"):
+        if want in have:
+            return want
+    pytest.fail(f"no UTF-8 locale on this box (locale -a: {have})")
+
+
+UTF8_LOCALE = _utf8_locale()
+
+
 def _bash(script, *args, strict=True):
-    """Run `script` under the caller's strict mode. Every variable value goes in as a positional
-    ARGUMENT ($1, $2, ...), never into the script text: a value carrying a quote must stay data (a
-    first draft interpolated an injection vector and its own `rm -rf /` ran in the harness)."""
+    """Run `script` under the caller's strict mode, in a UTF-8 locale. Every variable value goes in as
+    a positional ARGUMENT ($1, $2, ...), never into the script text: a value carrying a quote must
+    stay data (a first draft interpolated an injection vector and its own `rm -rf /` ran in the
+    harness)."""
     head = "set -euo pipefail\n" if strict else "set -uo pipefail\n"
     return subprocess.run(["bash", "-c", head + script, "harness", *map(str, args)],
-                          capture_output=True, text=True, timeout=120)
+                          capture_output=True, text=True, timeout=120,
+                          env={**os.environ, "LC_ALL": UTF8_LOCALE})
 
 
 def _lib(script, *args):
@@ -246,6 +261,12 @@ VERDICTS = [
     ("4:x", "present", "4\noutput_stats=1", 1, _refused(output=("v1", "unknown"))),
     ("4:1:2", "present", "4\noutput_stats=1", 1, _refused(output=("v1", "unknown"))),
     ("x", "missing", "", 1, _refused(stats=(NO_FILE, "unknown"), output=(NO_FILE, "unknown"))),
+    # review round 1: a version is ASCII digits only, in any locale (en_US.UTF-8 bash ranges such as
+    # [1-9] also match Arabic-Indic, superscript and fullwidth digits; the PowerShell gate never does)
+    ("٤:1", "present", "4\noutput_stats=1", 1, _refused(stats=("v4", "unknown"))),
+    ("4:¹", "present", "4\noutput_stats=1", 1, _refused(output=("v1", "unknown"))),
+    ("4:1", "present", "٤\noutput_stats=1", 1, _refused(stats=(BAD_LINE1, "v4"))),
+    ("4:1", "present", "4\noutput_stats=１", 1, _refused(output=(BAD_LINE2, "v1"))),
 ]
 
 
@@ -254,7 +275,7 @@ def test_the_fast_verdict_1302(new, state, text, rc, line):
     r = subprocess.run(
         ["bash", "-c", 'set -euo pipefail; . "$1"; rc=0; genlock_fast_abi_verdict "$2" "$3" "$4" || rc=$?; echo "rc=$rc"',
          "x", str(LIB), new, state, text],
-        capture_output=True, text=True, timeout=60)
+        capture_output=True, text=True, timeout=60, env={**os.environ, "LC_ALL": UTF8_LOCALE})
     assert r.returncode == 0, r.stderr
     assert r.stdout == f"{line}\nrc={rc}\n"
 
@@ -278,6 +299,10 @@ GATE_VECTORS = [
     (b"4 4\r\noutput_stats=1\r\n", "44:1"), (b"4\routput_stats=1", "4:1"),
     (None, "4:1"), (None, ""), (b"4\r\noutput_stats=1\r\n", ""), (b"4\r\noutput_stats=1\r\n", "4"),
     (b"4\r\noutput_stats=1\r\n", "x"), (b"4\r\noutput_stats=1\r\n", ":1"), (b"4\r\noutput_stats=1\r\n", "4:1:2"),
+    # review round 1: non-ASCII digits (marker and pair) and a NUL byte are never a version
+    ("٤\noutput_stats=1\n".encode(), "4:1"), ("4\noutput_stats=１\n".encode(), "4:1"),
+    (b"4\r\noutput_stats=1\r\n", "٤:1"), (b"4\r\noutput_stats=1\r\n", "4:¹"),
+    (b"4\x00\r\noutput_stats=1\r\n", "4:1"), (b"4\r\noutput_stats=1\x00\r\n", "4:1"),
 ]
 
 
@@ -304,7 +329,9 @@ def test_the_powershell_gate_decides_as_the_bash_verdict_1302(tmp_path, marker, 
         sh = _lib('rc=0; genlock_fast_abi_verdict "$2" missing "" || rc=$?; echo "rc=$rc"', new)
     else:
         (tmp_path / "marker").write_bytes(marker)
-        sh = _lib('rc=0; genlock_fast_abi_verdict "$2" present "$(cat "$3")" || rc=$?; echo "rc=$rc"',
+        # a bash string cannot hold a NUL byte; the gate reads one as a character that is neither
+        # whitespace nor a digit, which '?' is too (genlock_stats_abi_pair_from_marker maps it the same)
+        sh = _lib('rc=0; genlock_fast_abi_verdict "$2" present "$(tr \'\\000\' \'?\' < "$3")" || rc=$?; echo "rc=$rc"',
                   new, tmp_path / "marker")
     assert sh.returncode == 0, sh.stderr
     line, rc = sh.stdout.splitlines()
@@ -733,12 +760,35 @@ def test_the_planner_reads_the_output_stats_version_too_1302(output_repo, tag, m
         assert "cannot read OBS_GENLOCK_OUTPUT_STATS_VERSION" in r.stderr
         assert "cannot read OBS_GENLOCK_STATS_VERSION" not in r.stderr
     assert "deploy --full" not in r.stderr or rc == 3
+    if rc == 3:
+        # review round 1: the commit is in the checkout (its stats version read fine), so a fetch
+        # cannot help -- the refusal says so instead of sending the operator to git fetch
+        assert "fetch the commit" not in r.stderr and "deploy --full" in r.stderr, r.stderr
 
 
 def test_the_plan_time_output_stats_stopgap_is_retired_1302():
     s = LIB.read_text()
     assert "GENLOCK_STATS_ABI_OUTPUT_COVERED" not in s
     assert "does not compare that struct yet" not in s
+
+
+def _write_markers_text(path):
+    """setup-imag.sh's inline genlock_write_markers, or the whole file for the libs."""
+    s = path.read_text()
+    if path == SETUP_IMAG:
+        start = s.index("genlock_write_markers() {")
+        s = s[start:s.index("\n}\n", start)]
+    return s
+
+
+@pytest.mark.parametrize("path", [LIB, MARKERS, SETUP_IMAG], ids=["stats-abi", "markers", "setup-imag-inline"])
+def test_every_bash_version_pattern_names_ascii_digits_explicitly_1302(path):
+    """Review round 1: a bash bracket RANGE ([0-9], [1-9]) follows the locale's collation, and under
+    en_US.UTF-8 it also matches non-ASCII digits the PowerShell gate refuses. Every bash `=~`
+    pattern in the stats-ABI code spells its digit sets out instead."""
+    for n, line in enumerate(_write_markers_text(path).splitlines(), 1):
+        if "=~" in line:
+            assert "[0-9]" not in line and "[1-9]" not in line and "[0-9a-fA-F]" not in line, (path, n, line)
 
 
 # --- the gate's premise: every stats struct change bumps a version the gate reads -----------------
@@ -859,6 +909,9 @@ def test_the_staged_bundle_file_1302(tmp_path):
     (b"4\noutput_stats=1\n", "4:1"), (b"4\r\noutput_stats=1\r\n", "4:1"), (b"12\noutput_stats=3", "12:3"),
     (b"4\n", ""), (b"", ""), (b"4\noutput_stats=1\nx\n", ""), (b"4\noutput_stats=x\n", ""),
     (b"x\noutput_stats=1\n", ""), (None, ""),
+    # review round 1: a NUL byte or a non-ASCII digit is never a version (the gate refuses both)
+    (b"4\x00\noutput_stats=1\n", ""), (b"4\noutput_stats=1\x00\n", ""),
+    ("٤\noutput_stats=1\n".encode(), ""), ("4\noutput_stats=¹\n".encode(), ""),
 ])
 def test_the_pair_read_back_from_a_marker_1302(tmp_path, marker, pair):
     """setup-strih.sh reads the planner's staged marker back into the pair it hands genlock_write_markers:
