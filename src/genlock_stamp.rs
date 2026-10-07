@@ -146,13 +146,13 @@ pub fn offset_resample_decision(
     let Some(measured) = measured_offset_ns else {
         return OffsetResample::Keep;
     };
-    if cached_offset_ns.is_none() {
+    let Some(cached) = cached_offset_ns else {
         return OffsetResample::Cadence;
-    }
-    // Issue 1372 RED stub: the wall-step re-sample is not implemented yet (the 100-frame cadence
-    // only, today's behaviour); `measured` is adopted only at the cadence.
-    let _ = measured;
-    if should_resample_mono_to_real_offset(frames_since_last_sample) {
+    };
+    let step_ns = measured.saturating_sub(cached);
+    if step_ns.saturating_abs() >= OFFSET_STEP_RESAMPLE_NS {
+        OffsetResample::WallStep { step_ns }
+    } else if should_resample_mono_to_real_offset(frames_since_last_sample) {
         OffsetResample::Cadence
     } else {
         OffsetResample::Keep
