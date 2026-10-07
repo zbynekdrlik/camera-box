@@ -289,10 +289,12 @@ lowest)**; else LOCKED (green).
   `vendored-obs-frontend-crash-safety.md`. **A stats-version bump makes a fast deploy UNSAFE, not
   just incomplete (issue 1302 review):** the caller allocates `struct obs_genlock_stats` and passes no
   size, so a NEW obs.dll writes the bigger struct (memset + fill) past an OLD frontend's stack copy.
-  The `version` field only protects the other direction (an old obs.dll under a new frontend). The
-  reverse direction fails loudly instead: a new frontend imports `obs_genlock_audio_hold_token`,
-  which an old libobs lacks (Windows refuses to load obs64; Linux stops at the first call with a
-  symbol lookup error). `deploy-genlock-fleet.sh --fast` does not refuse
+  The `version` field only protects the other pairing (an old libobs under a new frontend: the
+  frontend reads the v4 fields only when `version >= 4`). For this bump that pairing never even
+  reaches the struct on Windows: the new frontend imports `obs_genlock_audio_hold_token`, which an
+  old obs.dll lacks, so obs64 does not start. On Linux (lazy binding) it starts and runs without
+  the per-input audio keys, because the import is called only under `version >= 4`.
+  `deploy-genlock-fleet.sh --fast` does not refuse
   such a commit mechanically yet (follow-up candidate); never `--fast` a change that touches
   `struct obs_genlock_stats`. CI is the first place the C/Qt compiles — locally only
   `cargo fmt --all --check` + the pure Rust module (`rustc --test`) + the parity/guard tests
