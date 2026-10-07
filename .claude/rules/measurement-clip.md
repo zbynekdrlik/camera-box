@@ -120,6 +120,11 @@ The tick rule lives in `TICK_HZ` / `TICKS_PER_FRAME` / `MARKER_EVERY_TICKS`; `TI
 - `recording-verdict.rs` takes every cam2-optical exclusion list from ONE builder pair,
   `cg_segment_excluded_ids` (SongPlayer, cg OBS, the clip) and `optical_exclusion_ids`, pinned by a
   unit test, so a new CG id is added once.
+- RED-proving the fail-fast tests against an older generator: the old code has no up-front length
+  check, so `test_a_clip_longer_than_the_counter...` runs a full 334 s encode there, and a killed
+  pytest leaves an orphaned ffmpeg plus a 64 MB `/tmp/measurement-clip-*` dir (the old code had no
+  SIGTERM unwind). Leave that test out of a RED run against old code, and after any killed run
+  `pgrep -af 'f rawvideo -pix_fmt gray'` and remove the leftover temp dirs.
 - Re-verify the real rqrr on dev1 without cargo: link a small harness against the runner's release
   `librqrr-*.rlib` (`~/actions-runner-camera-box/_work/camera-box/camera-box/target/release/deps`)
   with plain `rustc --extern rqrr=<rlib> -L <deps>`.

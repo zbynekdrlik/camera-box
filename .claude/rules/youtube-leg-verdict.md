@@ -42,6 +42,10 @@ is `recording-verdict --av-sync` (CI probe artifact) as a subprocess. Shared wit
   the painter's first (Task 5 part b), and a decode with `runs` must key its tick cache on them. The
   clip carries the 60 Hz tick (2 per 30 fps frame), so `continuity(step=2)` proves its frames like
   a painter recording.
+- Adding a parameter to the per-frame decode chain: the decode-mechanics tests swap `half_ticks`
+  for a 3-argument lambda (`cheap_halves`), so `_decode_range` must keep the plain
+  `half_ticks(frame, det, scale)` call on the default path (the `runs` keyword only when non-empty),
+  and a default job keeps its 4 fields. A 4th positional argument failed 5 of those tests.
 
 ## Fail-closed rules the five review rounds found holes in (each has a test)
 
