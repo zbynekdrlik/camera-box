@@ -102,11 +102,11 @@ def test_the_next_frame_on_the_timeline_continues():
     assert pa.timeline_offset_100ns(TS0, FRAME, SR, nxt) == pytest.approx(0.0, abs=1.0)
 
 
-@pytest.mark.parametrize("off_ms", [-21.1, -10.0, 11.7, 24.5, 41.0, -41.0])
+@pytest.mark.parametrize("off_ms", [-21.1, -10.0, 11.7, 24.5, 29.5, 41.0, -41.0])
 def test_the_senders_submission_jitter_continues(off_ms):
-    """STEP 0 (7.10.2026, 25 min of the live stream program, comment 6030714990): the sender's
-    submission jitter reached -21.1 / +24.5 ms (p99 11.7); anything inside one frame + 20 ms
-    (41.3 ms) is the same timeline."""
+    """STEP 0 (7.10.2026, the live stream program, comment 6030714990): the sender's submission
+    jitter reached -21.1 / +24.5 ms (p99 11.7) in 25 min and +29.5 ms (p99 18.2) in a second
+    20-min run; anything inside one frame + 20 ms (41.3 ms) is the same timeline."""
     ts = TS0 + round(FRAME_100NS + off_ms * 10_000)
     assert pa.frame_continues(TS0, FRAME, SR, ts, _tol()) == pa.CONTINUE
 
@@ -127,6 +127,16 @@ def test_a_timeline_jump_beyond_the_tolerance_is_a_discontinuity(off_ms):
 ])
 def test_an_undefined_timestamp_is_unknown_ts(prev, ts):
     assert pa.frame_continues(prev, FRAME, SR, ts, _tol()) == pa.UNKNOWN_TS
+
+
+def test_the_expected_stamp_and_the_tolerance_come_from_the_previous_frame():
+    """After a 100 ms frame the next stamp is 100 ms later and the tolerance is 100 + 20 ms; judged
+    with the NEXT (10 ms) frame's size it would sit 90 ms off a 30 ms tolerance."""
+    nxt = TS0 + 1_000_000
+    tol = pa.continuity_tolerance_100ns(4800, SR)
+    assert tol == pytest.approx(1_200_000)
+    assert pa.frame_continues(TS0, 4800, SR, nxt, tol) == pa.CONTINUE
+    assert pa.frame_continues(TS0, 480, SR, nxt, pa.continuity_tolerance_100ns(480, SR)) == pa.DISCONTINUITY
 
 
 def test_numpy_integer_timestamps_are_judged_like_ints():
@@ -290,6 +300,22 @@ def test_a_date_step_costs_one_warm_up_never_foreign(decoder, tmp_path, step_s):
     assert verdicts == ["UNKNOWN", "UNKNOWN", "MEASUREMENT", "MEASUREMENT", "UNKNOWN", "MEASUREMENT"]
     assert "FOREIGN" not in verdicts and payloads[-1]["last_foreign_ts_utc"] is None
     assert sum("timeline discontinuity" in line for line in lines) == 1
+
+
+def test_mixed_frame_sizes_are_judged_against_the_previous_frame(tmp_path):
+    """Frames of 100 ms and 10 ms alternate on one continuous timeline: every frame is judged from
+    the frame BEFORE it (expected stamp and tolerance), so nothing restarts."""
+    stereo, sr = _fixture("base-R-rec")
+    audio = stereo[: 8 * sr]
+    blocks, i, k = [], 0, 0
+    while i < audio.shape[0]:
+        n = sr // 10 if k % 2 == 0 else sr // 100
+        blocks.append(_Block(sr, audio[i:i + n], TS0 + (i * NDI_UNITS) // sr))
+        i += n
+        k += 1
+    payloads, lines = _run(blocks, tmp_path, FixedChain())
+    assert _verdicts(payloads) == ["UNKNOWN", "UNKNOWN"] + ["MEASUREMENT"] * 3
+    assert not any("discontinuity" in line for line in lines), lines
 
 
 def test_a_micro_correction_inside_the_tolerance_keeps_the_span(tmp_path):
