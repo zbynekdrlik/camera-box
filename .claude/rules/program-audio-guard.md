@@ -509,6 +509,8 @@ shim + numpy next to restreamer's broadcast encoder).
     file was read live (systemd 259 there).
   - `ExecStart` runs the installed checkout-layout copy `/usr/local/lib/camera-box/scripts/…`;
     `WantedBy=default.target` (no X needed; a reboot in TEST mode brings it back).
+  - No `After=network-online.target`: a user manager cannot see system targets (review round 4); the
+    receiver waits for the source itself.
   - libndi: `/usr/local/lib/libndi.so.6` (strih-lx's NDI 6.3.2 runtime) is a lookup candidate.
 - **Provisioning = setup-strih step 16e** (`scripts/lib/strih-program-audio.sh`, as root):
   - apt `python3-numpy` only when missing, then an `import numpy` preflight;
@@ -527,17 +529,26 @@ shim + numpy next to restreamer's broadcast encoder).
 - **verify-strih item 41** (`strih_program_audio_grade_report`, 3 rows): files + unit + enabled; the
   shim current; the unit's state against the TEST marker:
   - the state is re-read up to 3 x (1 s apart) while it is in a transition: a starting sampler
-    settles, a crash loop (`activating`, auto-restart) stays and is a FAIL. `failed` is a FAIL;
-  - running = its endpoint must answer a FRESH verdict (`age_s` <= 10, the guard's `--max-age`) at the
-    port/bind of its env file (`PROGRAM_AUDIO_HTTP_PORT` / `_BIND`, a wildcard bind read on
-    127.0.0.1), read up to 3 x (a grade right after step 16e's try-restart, before the bind). A
-    running sampler with port 0 is a FAIL;
+    settles, a crash loop (`activating`, auto-restart) stays and is a FAIL. `failed` is a FAIL. An
+    EMPTY answer (the operator's user manager unreachable) reads `unreadable`, a FAIL naming linger;
+  - running WITHOUT the TEST marker = a FAIL (review round 4): EVENT mode, yet running -- rig-mode.sh
+    event's stop failed or timed out, or the marker was removed by hand;
+  - running in TEST mode = its endpoint must answer a FRESH verdict at the port/bind of its env file
+    (`PROGRAM_AUDIO_HTTP_PORT` / `_BIND`, parsed like systemd reads it -- whitespace around `=`
+    dropped, never sourced; a wildcard bind read on 127.0.0.1), read up to 3 x (a grade right after
+    step 16e's try-restart, before the bind). Fresh = the guard's own window, -1 s <= `age_s` <= 10 s
+    (`STRIH_PROGRAM_AUDIO_FUTURE_TOLERANCE_S` / `_MAX_AGE_S`, pinned to `program_audio_guard`'s
+    `NEGATIVE_AGE_TOLERANCE_S` / `DEFAULT_MAX_AGE_S`): strih-lx is the dantesync date master, so a grade
+    right after its nightly step can read a verdict slightly in the future. A running sampler with
+    port 0 is a FAIL;
   - down WITH the TEST marker = a FAIL; down without it = a NOTE (EVENT mode, or never put in TEST
     mode: setup-strih's own step 17 runs right after an enable-only install).
 - **rig-mode.sh** (`scripts/lib/program-audio-mode.sh`, sourced; one call each, after the relay step):
-  TEST leaves the marker, `systemctl --user start`s the unit and reads its state 2 s later (a
-  Type=simple unit reads active the moment it is forked, so a sampler that dies on import would pass
-  an immediate read); EVENT removes the marker and stops it. Over plain ssh as the operator
+  TEST leaves the marker, clears a failed state (`reset-failed`: a crash loop that hit StartLimitBurst
+  refuses the next start for up to 300 s), `systemctl --user start`s the unit and reads its state 2 s
+  later (a Type=simple unit reads active the moment it is forked, so a sampler that dies on import
+  would pass an immediate read); EVENT removes the marker, stops it and clears a failed state (`stop`
+  leaves a failed unit failed, which item 41 would FAIL in EVENT mode). Over plain ssh as the operator
   (`sshpass … timeout … ssh`, `UserKnownHostsFile=/dev/null`; a plain ssh command gets
   `XDG_RUNTIME_DIR=/run/user/1000` on strih-lx); report-only: a WARNING naming the state, never
   rig-mode's exit status (a stopped sampler fails closed for its consumers). A Windows strih is one
@@ -545,7 +556,7 @@ shim + numpy next to restreamer's broadcast encoder).
 - **The shared read-only handler drops an idle client after 10 s** (`ReadOnlyHandler.timeout`): the
   endpoint listens on 0.0.0.0 on a production box with no firewall; the lease server gets it too.
 - **strih-lx's stack:** Python 3.14.4 and apt's numpy 2.3.5 (dev1: 3.12 + 2.4.6). The sampler suites
-  (365 cases) and the marker calibration (bar a min chain 6, bar b unchanged) also pass under 3.14 +
-  numpy 2.3.5 (`uv run --python 3.14 --with numpy==2.3.5`).
+  and the marker calibration (bar a min chain 6, bar b unchanged) also pass under Python 3.14.2 +
+  numpy 2.3.5 on dev1 (`uv run --no-project --python 3.14 --with numpy==2.3.5 --with pytest`).
 - strih-lx's USB 5 GbE NIC still has rx_missed bursts (issue 1242 / 1387): NDI rides TCP/RUDP, so they
   show as late bursts, which the sender-timeline logic keeps.

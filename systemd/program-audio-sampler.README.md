@@ -159,12 +159,12 @@ rule.
 #    "installing python3-numpy" (first time), "installed the sampler files -> /usr/local/lib/camera-box",
 #    "decoder shim missing: building it as newlevel", "program-audio-sampler.service written
 #    (CPUAffinity=12-15; normal priority)", "enabled ... (NOT started here ...)". Step 17 (verify-strih)
-#    then shows item 41: two PASS rows + "NOTE (program-audio-endpoint) not running ...".
+#    then shows item 41: two PASS rows + "NOTE (program-audio-endpoint) down: not in TEST mode ...".
 sudo GH_TOKEN=<gh-pat-repo-read> ./setup-strih.sh --box strih-lx --yes
 
 # 2. start it (TEST mode) from dev1 -- rig-mode.sh test does this itself ("[program-audio 10.77.9.202]
 #    test: program-audio-sampler: active"); by hand:
-ssh newlevel@10.77.9.202 'mkdir -p ~/.config/camera-box && touch ~/.config/camera-box/program-audio-sampler.test-mode; systemctl --user start program-audio-sampler.service'
+ssh newlevel@10.77.9.202 'mkdir -p ~/.config/camera-box && touch ~/.config/camera-box/program-audio-sampler.test-mode; systemctl --user reset-failed program-audio-sampler.service; systemctl --user start program-audio-sampler.service'
 
 # 3. verify on strih-lx (as newlevel)
 journalctl --user -u program-audio-sampler -n 12 --no-pager
@@ -176,7 +176,9 @@ grep Cpus_allowed_list /proc/$(systemctl --user show -p MainPID --value program-
 # from dev1:
 curl -s http://10.77.9.202:8891/program-audio.json; echo        # verdict MEASUREMENT, "queue_drops": 0, "lag_ms" tens of ms
 python3 ~/devel/camera-box/scripts/program_audio_guard.py --url http://10.77.9.202:8891/program-audio.json   # exit 0
-# verify-strih item 41 now: three PASS rows (files, shim, endpoint answering a verdict)
+# verify-strih item 41 now: three PASS rows (files, shim, "running; http://127.0.0.1:8891/program-audio.json
+#   answers verdict=... age_s=..."); a FAIL "running but not in TEST mode" means the marker is gone while
+#   the sampler runs (EVENT's stop failed): stop it, or rig-mode.sh test
 
 # 4. after 10 min on strih-lx: the summary line reads "queue_drops=0 max_lag_ms=<well under 10000>
 #    date_steps=0 ..."; "late burst" lines from the 5 GbE NIC's rx_missed bursts (issue 1242/1387) are
@@ -209,8 +211,9 @@ Rule A does not end restreamer's stops on a sender stall: the stall pattern read
 (`U U M M M M U M U U M` on the live replay), which is enough for its 2-consecutive / 3-within-60 s
 rule. The remedy is open on Design-question 6037861831.
 
-Rollback on strih-lx: `rig-mode.sh event` (or `systemctl --user disable --now program-audio-sampler.service`).
-The consumers still have the dev1 route.
+Rollback on strih-lx: `rig-mode.sh event` (or `rm -f ~/.config/camera-box/program-audio-sampler.test-mode;
+systemctl --user disable --now program-audio-sampler.service`; a later setup-strih run enables it again,
+and without the TEST marker it stays down). The consumers still have the dev1 route.
 
 To re-check the marker bars on new real audio (for example after a decoder change), run
 `python3 ~/devel/camera-box/scripts/program_audio_marker_calibrate.py --real <recordings…>
