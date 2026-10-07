@@ -25,10 +25,13 @@
 //!   one a SKIP, a negative one a backward present. The step's cost is the run with the step minus
 //!   the identical run without it (same seeds, same frames).
 //!
-//! A cambox stamps through a monotonic-to-realtime offset it re-samples every 100 frames
-//! (`crate::genlock_stamp::OFFSET_RESAMPLE_INTERVAL_FRAMES`), so its stamps follow the box's own
-//! date step up to ~1.67 s late. `cambox_stale_offset_cost_is_reported_1372` reports what that lag
-//! still costs with the one-latency-window rule (Design-question on the ticket).
+//! A cambox stamps through a monotonic-to-realtime offset. Re-sampled only every 100 frames
+//! (`crate::genlock_stamp::OFFSET_RESAMPLE_INTERVAL_FRAMES`) its stamps followed the box's own
+//! date step up to ~1.67 s late; `cambox_stale_offset_cost_is_reported_1372` reports what such a
+//! lag costs with the one-latency-window rule (Design-question 6032724613). Since ROZHODNUTÉ
+//! 6033853074 the box re-samples in the frame its wall steps (`crate::genlock_stamp::StampOffset`,
+//! driven here exactly as `main.rs` drives it, `Cambox::Production`):
+//! `a_production_cambox_follows_its_step_within_one_frame_and_costs_nothing_1372`.
 
 use crate::genlock_backlog::{phase_pinned_deadline, source_interval_from_stamps};
 use crate::genlock_fifo_relabel::{Booking, RelabelState};
@@ -41,6 +44,7 @@ use crate::genlock_n1_depth::n1_tick_is_on_grid;
 use crate::genlock_n2_grid::{
     n2_select, n2_source_interval_ns, n2_target_stamp_ns, n2_tick_ns, N2Kind,
 };
+use crate::genlock_stamp::{capture_realtime_100ns, genlock_emit_timecode_100ns, StampOffset};
 use crate::genlock_wall_step::{deadline_ns, WallStepState};
 use std::collections::VecDeque;
 
@@ -146,14 +150,30 @@ enum Book {
     TickEnd,
 }
 
+/// How a cambox's stamps follow its own date step.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Cambox {
+    /// The stamps follow the box's step this long late (ns): the stale offset of a cambox that
+    /// re-sampled only every 100 frames, as a fixed lag (the Design-question report).
+    Lagged(u64),
+    /// The production stamp offset (`genlock_stamp::StampOffset`) fed ONE bracketed clock read per
+    /// captured frame at its dequeue, exactly as `main.rs`; `cadence_phase` = frames the box had
+    /// counted toward its 100-frame cadence at the first frame here (where the step lands in it).
+    Production { cadence_phase: u64 },
+}
+
+/// A cambox's capture callback runs this long after the capture instant (the dequeue; the
+/// capture-phase bench's 11 ms).
+const CAMBOX_DEQUEUE_NS: u64 = 11_000_000;
+
 #[derive(Clone, Copy, Debug)]
 struct Case {
     input: Input,
     step: i64,
     /// The sender's date step relative to the receiver's, ns (positive = after).
     sender_offset: i64,
-    /// How long after its box's step a cambox's STAMPS follow (the stale mono→real offset).
-    stamp_lag: u64,
+    /// How a cambox's stamps follow its box's step.
+    cambox: Cambox,
     book: Book,
     /// The source's first frame arrives this long after the receiver's step (0 = it runs
     /// throughout): a new source, or one that was silent across the step.
@@ -208,26 +228,67 @@ fn obs_sender(c: &Case, seed: u64, deep: bool) -> Vec<Frame> {
     out
 }
 
+/// The capture instant (the bench's monotonic timeline, ns) of a cambox's frame `k`.
+fn camera_capture(k: u64) -> u64 {
+    let first = grid_next_boundary_ns(WALL0, I60);
+    MONO0 + (grid_advance_ns(first, k, I60) - WALL0) + 1_000
+}
+
+/// The cambox's ONE bracketed clock read (mono, wall, mono) at its capture callback for a frame
+/// captured at `capture`, its wall stepping by `c.step` at the sender's step.
+fn cambox_read(c: &Case, capture: u64) -> (u64, u64, u64) {
+    let read = capture + CAMBOX_DEQUEUE_NS;
+    (
+        read,
+        wall(read + 500, c.step, sender_step_at(c)),
+        read + 1_000,
+    )
+}
+
 /// A 60 fps cambox: captures 1 µs after each per-second 60 fps grid point (of the OLD epoch; a
-/// quantized step keeps that phase), stamps the per-second floor of the capture on its wall clock —
-/// which follows the box's step `stamp_lag` late — and delivers 17–50 ms later, in order.
+/// quantized step keeps that phase), stamps the per-second floor of the capture mapped onto its
+/// wall clock — through the production `StampOffset`, or with a fixed `Cambox::Lagged` lag —
+/// and delivers 17–50 ms later, in order.
 fn camera_sender(c: &Case, seed: u64) -> Vec<Frame> {
     let at = sender_step_at(c);
-    let stamp_at = at + c.stamp_lag;
     let mut rng = Rng(seed);
     let mut out = Vec::new();
     let mut last_arrival = 0;
-    let first = grid_next_boundary_ns(WALL0, I60);
+    let lag = match c.cambox {
+        Cambox::Lagged(lag) => lag,
+        Cambox::Production { .. } => 0,
+    };
+    let mut offset = match c.cambox {
+        Cambox::Lagged(_) => None,
+        Cambox::Production { cadence_phase } => {
+            let (b, w, a) = cambox_read(c, camera_capture(0) - CAMBOX_DEQUEUE_NS);
+            let mut o = StampOffset::seed(b, w, a);
+            for _ in 0..cadence_phase {
+                o.observe_frame(b, w, a);
+            }
+            Some(o)
+        }
+    };
     for k in 0.. {
-        let capture = MONO0 + (grid_advance_ns(first, k, I60) - WALL0) + 1_000;
+        let capture = camera_capture(k);
         if capture > END + NS_PER_SECOND {
             break;
         }
-        let stamp = per_second_floor(
-            wall(capture, c.step, stamp_at) / 100,
-            60,
-            UNITS_100NS_PER_SECOND,
-        ) * 100;
+        let stamp = match offset.as_mut() {
+            Some(o) => {
+                let (b, w, a) = cambox_read(c, capture);
+                o.observe_frame(b, w, a);
+                let real = capture_realtime_100ns((capture / 100) as i64, o.offset_100ns());
+                genlock_emit_timecode_100ns(real, real, 60) as u64 * 100
+            }
+            None => {
+                per_second_floor(
+                    wall(capture, c.step, at + lag) / 100,
+                    60,
+                    UNITS_100NS_PER_SECOND,
+                ) * 100
+            }
+        };
         let arrival = (capture + rng.uniform(17_000_000, 50_000_000)).max(last_arrival + 1);
         last_arrival = arrival;
         out.push(Frame {
@@ -481,7 +542,7 @@ fn case(input: Input, step: i64, offset_ms: i64, book: Book) -> Case {
         input,
         step,
         sender_offset: offset_ms * 1_000_000,
-        stamp_lag: 0,
+        cambox: Cambox::Lagged(0),
         book,
         start_after_step: 0,
         box_books_every_tick: false,
@@ -587,17 +648,18 @@ fn the_unquantized_step_cost_is_reported_1372() {
     }
 }
 
-/// A cambox stamps through a mono→real offset re-sampled every 100 frames, so its stamps follow its
-/// own step up to ~1.67 s late (60 fps). Report what that costs a strih-lx camera input (pin 3 ms,
-/// one latency window ~67 ms) with the relabel, against today. Measured (+1600 ms): lag 0 → 0 / 0,
-/// 400 → 4 / 4, 800 → 6 / 6, 1200 → 9 / 9, 1600 → 11 / 11 (today one frame more each); a 2 s
-/// window gives 0 / 0 at every lag — the Design-question on the ticket.
+/// A cambox that re-sampled its mono→real offset only every 100 frames (before ROZHODNUTÉ
+/// 6033853074) stamped its own step up to ~1.67 s late (60 fps). Report what such a lag costs a
+/// strih-lx camera input (pin 3 ms, one latency window ~67 ms) with the relabel, against today.
+/// Measured (+1600 ms): lag 0 → 0 / 0, 400 → 4 / 4, 800 → 6 / 6, 1200 → 9 / 9, 1600 → 11 / 11
+/// (today one frame more each); a 2 s window gives 0 / 0 at every lag — Design-question 6032724613.
+/// The production cambox has no lag: the test below.
 #[test]
 fn cambox_stale_offset_cost_is_reported_1372() {
     eprintln!("cambox stamp lag  relabel(rep/skip/back late)  today(rep/skip/back late)");
     for lag_ms in [0u64, 400, 800, 1_200, 1_600] {
         let c = Case {
-            stamp_lag: lag_ms * 1_000_000,
+            cambox: Cambox::Lagged(lag_ms * 1_000_000),
             ..case(Input::Camera, S_QUANTIZED, 0, Book::Release)
         };
         let on = cost(&c);
@@ -622,6 +684,86 @@ fn cambox_stale_offset_cost_is_reported_1372() {
         assert!(
             on.visible() <= today.visible(),
             "lag {lag_ms}: {on:?} vs {today:?}"
+        );
+    }
+}
+
+/// A cambox's stamp epochs around its own step: frames captured at or after the step that still
+/// carry an OLD-epoch stamp (`late`), and frames captured before it that already carry the new one
+/// (`early`: the callback read the step before the frame was stamped, at most one frame).
+fn cambox_stamp_epochs(c: &Case) -> (u64, u64) {
+    let at = sender_step_at(c);
+    let (mut late, mut early) = (0, 0);
+    for f in camera_sender(c, 0) {
+        let capture = camera_capture(f.id);
+        let old = per_second_floor(wall(capture, 0, at) / 100, 60, UNITS_100NS_PER_SECOND) * 100;
+        let new_epoch = f.stamp != old;
+        if capture >= at && !new_epoch {
+            late += 1;
+        }
+        if capture < at && new_epoch {
+            early += 1;
+        }
+    }
+    (late, early)
+}
+
+/// Issue 1372 (ROZHODNUTÉ 6033853074) — THE CAMBOX CLAIM: the production cambox
+/// (`genlock_stamp::StampOffset`, one bracketed clock read per captured frame, as `main.rs`)
+/// re-samples its mono→real offset in the frame its wall steps, so its stamps follow its own step
+/// within one frame wherever the step lands in its 100-frame cadence (stamp lag 0), and the strih-lx
+/// N>=2 60 → 30 camera input reads 0 repeats / 0 skips across the quantized +1600 ms step with the
+/// sender stepping −30..+30 ms around the receiver — and across −1600 / +200 / −200 ms as well.
+/// Measured on the pre-change cadence-only offset (the RED commit): stamp lag 0–99 frames, up to
+/// 14 repeats + 14 skips per step.
+#[test]
+fn a_production_cambox_follows_its_step_within_one_frame_and_costs_nothing_1372() {
+    let mut rows = Vec::new();
+    for step in [S_QUANTIZED, -S_QUANTIZED, 200_000_000, -200_000_000] {
+        for cadence_phase in [0u64, 25, 50, 75] {
+            for off in SENDER_OFFSETS_MS {
+                let c = Case {
+                    cambox: Cambox::Production { cadence_phase },
+                    ..case(Input::Camera, step, off, Book::Release)
+                };
+                let (late, early) = cambox_stamp_epochs(&c);
+                rows.push((step, cadence_phase, off, late, early, cost(&c)));
+            }
+        }
+    }
+    eprintln!("step        cadence phase  sender   stamp lag late/early  cost rep/skip/back late");
+    for (step, cadence_phase, off, late, early, cost) in &rows {
+        eprintln!(
+            "{:+8.0} ms  {cadence_phase:>13}  {off:+4} ms  {late:>9}/{early:<5}       \
+             {:>3}/{:>3}/{:>2} {:>3}",
+            *step as f64 / 1e6,
+            cost.repeats,
+            cost.skips,
+            cost.backward,
+            cost.late_holds
+        );
+    }
+    for (step, cadence_phase, off, late, early, cost) in rows {
+        let at = format!("step {step}, cadence phase {cadence_phase}, sender {off:+} ms");
+        assert_eq!(
+            late, 0,
+            "issue 1372: {at}: every frame captured after the cambox's own step must carry a \
+             new-epoch stamp"
+        );
+        assert!(
+            early <= 1,
+            "{at}: at most the one frame in flight at the step: {early}"
+        );
+        assert_eq!(
+            (cost.repeats, cost.skips, cost.backward),
+            (0, 0, 0),
+            "issue 1372: {at}: the quantized step must cost a strih-lx camera input no frame: \
+             {cost:?}"
+        );
+        assert_eq!(
+            (cost.late_holds, cost.relocks, cost.underruns),
+            (0, 0, 0),
+            "{at}: {cost:?}"
         );
     }
 }

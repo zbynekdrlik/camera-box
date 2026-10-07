@@ -16,6 +16,14 @@
 //! DECISION is unit-tested here without a camera. The production wiring (extracting
 //! `v4l2_buffer.timestamp`, sampling the monotonic->realtime offset, and calling these)
 //! is the follow-up increment, certified on the rig. Root: #286 / #145 / #188. Gate: #624.
+//!
+//! Issue 1372 (ROZHODNUTÉ 6033853074): the monotonic->realtime offset is held by
+//! [`StampOffset`]. The capture loop feeds it ONE bracketed mono/wall/mono read per captured
+//! frame; it re-samples at the 100-frame cadence AND in the frame whose read differs from the
+//! cached offset by [`OFFSET_STEP_RESAMPLE_NS`] or more (a dantesync date step), so the stamps
+//! change epoch within one frame instead of up to 1.67 s later, and a preempted read
+//! ([`crate::genlock_wall_step::wall_offset_ns`]) never triggers it. Pure decision:
+//! [`offset_resample_decision`].
 
 /// Map a `CLOCK_MONOTONIC` capture timestamp (what the V4L2 UVC driver stamps on the
 /// dequeued buffer) into the `CLOCK_REALTIME` (DanteSync-disciplined) domain that the
@@ -78,12 +86,11 @@ pub fn stamp_arrival_divergence_100ns(
 
 /// How many CONSECUTIVE captured frames elapse before the monotonic->realtime offset
 /// (`capture_realtime_100ns`'s `mono_to_real_offset_100ns` input) is due for a re-sample.
-/// 100 frames is ~1.7s at 60fps / ~3.3s at 30fps — frequent enough to track NTP/PTP
-/// realtime-clock slew (per this module's doc: "re-sampled periodically so a realtime
-/// step/slew does not skew the stamp"), rare enough that the back-to-back
-/// `clock_gettime(CLOCK_REALTIME)` + `clock_gettime(CLOCK_MONOTONIC)` pair never
-/// meaningfully taxes the per-frame capture hot path. See
-/// [`should_resample_mono_to_real_offset`].
+/// 100 frames is ~1.7s at 60fps / ~3.3s at 30fps. A slewing clock (dantesync's `adjtimex`
+/// frequency and offset slews) moves `CLOCK_MONOTONIC` and `CLOCK_REALTIME` together, so the
+/// offset moves only on a STEP: a step of [`OFFSET_STEP_RESAMPLE_NS`] or more is re-sampled in
+/// the frame it shows (issue 1372, [`offset_resample_decision`]); this cadence picks up a smaller
+/// one. See [`should_resample_mono_to_real_offset`].
 pub const OFFSET_RESAMPLE_INTERVAL_FRAMES: u64 = 100;
 
 /// Pure cadence decision: is the monotonic->realtime offset due for a re-sample, given how
@@ -93,6 +100,123 @@ pub const OFFSET_RESAMPLE_INTERVAL_FRAMES: u64 = 100;
 #[inline]
 pub fn should_resample_mono_to_real_offset(frames_since_last_sample: u64) -> bool {
     frames_since_last_sample >= OFFSET_RESAMPLE_INTERVAL_FRAMES
+}
+
+/// Issue 1372 — a difference of at least this much between a frame's measured wall-vs-monotonic
+/// offset and the cached one is a wall STEP (the nightly dantesync fleet date step, a multiple of
+/// 200 ms since dantesync 1.16.0), re-sampled in THAT frame so the stamps change epoch within one
+/// frame, like every OBS sender (DistroAV floors the wall at emit). The OBS render tick's
+/// wall-step threshold (`genlock_wall_step::WALL_STEP_MIN_NS`, obs-video.c
+/// `GENLOCK_WALL_STEP_MAX_SLEW_NS`, 2 ms), single-sourced.
+pub const OFFSET_STEP_RESAMPLE_NS: i64 = crate::genlock_wall_step::WALL_STEP_MIN_NS;
+
+/// What the capture loop does with its monotonic->realtime offset in one captured frame
+/// ([`offset_resample_decision`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OffsetResample {
+    /// Keep the cached offset.
+    Keep,
+    /// The [`OFFSET_RESAMPLE_INTERVAL_FRAMES`] cadence is due (or the cached offset came from a
+    /// preempted seed read): adopt this frame's offset.
+    Cadence,
+    /// The wall stepped against the cached offset: adopt this frame's offset now.
+    WallStep {
+        /// This frame's offset minus the cached one, ns (the step, positive = the wall moved
+        /// forward).
+        step_ns: i64,
+    },
+}
+
+/// Issue 1372 (ROZHODNUTÉ 6033853074) — the pure re-sample decision of one captured frame.
+///
+/// - `frames_since_last_sample`: captured frames since the last re-sample, this one included.
+/// - `cached_offset_ns`: the offset the loop stamps through, `None` while it came from a
+///   preempted seed read (the first trusted read then replaces it as a `Cadence`, never a step).
+/// - `measured_offset_ns`: this frame's offset from ONE bracketed mono/wall/mono read
+///   ([`crate::genlock_wall_step::wall_offset_ns`]), `None` when the bracket was preempted.
+///
+/// A difference of [`OFFSET_STEP_RESAMPLE_NS`] or more is a `WallStep`; below it the cadence
+/// decides. A preempted read decides nothing (`Keep`): it can never look like a step, and the
+/// cadence stays due until a trusted read arrives.
+pub fn offset_resample_decision(
+    frames_since_last_sample: u64,
+    cached_offset_ns: Option<i64>,
+    measured_offset_ns: Option<i64>,
+) -> OffsetResample {
+    let Some(measured) = measured_offset_ns else {
+        return OffsetResample::Keep;
+    };
+    if cached_offset_ns.is_none() {
+        return OffsetResample::Cadence;
+    }
+    // Issue 1372 RED stub: the wall-step re-sample is not implemented yet (the 100-frame cadence
+    // only, today's behaviour); `measured` is adopted only at the cadence.
+    let _ = measured;
+    if should_resample_mono_to_real_offset(frames_since_last_sample) {
+        OffsetResample::Cadence
+    } else {
+        OffsetResample::Keep
+    }
+}
+
+/// Issue 1372 — the capture loop's monotonic->realtime stamp offset: seeded from one bracketed
+/// read before the first frame, then fed ONE bracketed read per captured frame
+/// ([`StampOffset::observe_frame`]) and re-sampled per [`offset_resample_decision`]. The capture
+/// loop stamps through [`StampOffset::offset_100ns`]; the capture-phase tracker sees the same
+/// offset, so a whole-slot step re-anchors its slot chooser in the same frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StampOffset {
+    /// The cached offset, ns.
+    offset_ns: i64,
+    /// `false` while `offset_ns` came from a preempted seed read.
+    trusted: bool,
+    /// Captured frames since the last re-sample.
+    frames_since_sample: u64,
+}
+
+impl StampOffset {
+    /// Seed from the loop's first bracketed read. A preempted one still gives a usable offset
+    /// (`wall` minus the bracket's midpoint), replaced at the first trusted read.
+    pub fn seed(mono_before: u64, wall: u64, mono_after: u64) -> Self {
+        let measured = crate::genlock_wall_step::wall_offset_ns(mono_before, wall, mono_after);
+        let mid = mono_before.min(mono_after) + mono_before.abs_diff(mono_after) / 2;
+        StampOffset {
+            offset_ns: measured.unwrap_or(wall.wrapping_sub(mid) as i64),
+            trusted: measured.is_some(),
+            frames_since_sample: 0,
+        }
+    }
+
+    /// One captured frame's bracketed read: count it toward the cadence, decide, and adopt the
+    /// read on a `Cadence` or a `WallStep` (the caller logs the step).
+    pub fn observe_frame(
+        &mut self,
+        mono_before: u64,
+        wall: u64,
+        mono_after: u64,
+    ) -> OffsetResample {
+        self.frames_since_sample = self.frames_since_sample.saturating_add(1);
+        let measured = crate::genlock_wall_step::wall_offset_ns(mono_before, wall, mono_after);
+        let decision = offset_resample_decision(
+            self.frames_since_sample,
+            self.trusted.then_some(self.offset_ns),
+            measured,
+        );
+        if let (Some(offset), OffsetResample::Cadence | OffsetResample::WallStep { .. }) =
+            (measured, decision)
+        {
+            self.offset_ns = offset;
+            self.trusted = true;
+            self.frames_since_sample = 0;
+        }
+        decision
+    }
+
+    /// The offset the capture loop stamps through, 100 ns units
+    /// ([`capture_realtime_100ns`]'s `mono_to_real_offset_100ns`).
+    pub fn offset_100ns(&self) -> i64 {
+        self.offset_ns.div_euclid(100)
+    }
 }
 
 /// Convert a raw V4L2 buffer timestamp (`sec` whole seconds, `usec` microseconds — the
@@ -250,6 +374,221 @@ mod tests {
         assert!(
             should_resample_mono_to_real_offset(OFFSET_RESAMPLE_INTERVAL_FRAMES + 50),
             "stays due past the interval (a missed sample must not un-arm it)"
+        );
+    }
+
+    /// Issue 1372 — the box's clocks around one capture callback: 7.10.2026 02:00 UTC realtime,
+    /// ~3.5 days of monotonic uptime.
+    const WALL_0200: u64 = 1_791_338_400 * 1_000_000_000;
+    const MONO: u64 = 300_000 * 1_000_000_000;
+    const OFFSET: i64 = (WALL_0200 - MONO) as i64;
+
+    /// One trusted bracketed read (a 2 µs bracket) at monotonic `mono` with the box's offset
+    /// `offset_ns`: (mono before, wall, mono after).
+    fn read(mono: u64, offset_ns: i64) -> (u64, u64, u64) {
+        (mono, (mono as i64 + 1_000 + offset_ns) as u64, mono + 2_000)
+    }
+
+    /// Feed `frames` frames 1/60 s apart from `mono0` through `o`, the box's offset `offset_ns`.
+    fn feed(o: &mut StampOffset, mono0: u64, frames: u64, offset_ns: i64) -> Vec<OffsetResample> {
+        (0..frames)
+            .map(|k| {
+                let (b, w, a) = read(mono0 + k * 16_666_667, offset_ns);
+                o.observe_frame(b, w, a)
+            })
+            .collect()
+    }
+
+    fn seeded() -> StampOffset {
+        let (b, w, a) = read(MONO, OFFSET);
+        let o = StampOffset::seed(b, w, a);
+        assert_eq!(o.offset_100ns(), OFFSET / 100);
+        o
+    }
+
+    /// No step: the offset is kept until the 100-frame cadence, then re-sampled (and the cadence
+    /// restarts), exactly today's behaviour.
+    #[test]
+    fn no_step_keeps_the_offset_until_the_cadence_1372() {
+        let mut o = seeded();
+        let d = feed(
+            &mut o,
+            MONO + 16_666_667,
+            2 * OFFSET_RESAMPLE_INTERVAL_FRAMES,
+            OFFSET,
+        );
+        for (k, d) in d.iter().enumerate() {
+            let due = (k as u64 + 1).is_multiple_of(OFFSET_RESAMPLE_INTERVAL_FRAMES);
+            assert_eq!(
+                *d,
+                if due {
+                    OffsetResample::Cadence
+                } else {
+                    OffsetResample::Keep
+                },
+                "frame {k}"
+            );
+        }
+        assert_eq!(o.offset_100ns(), OFFSET / 100);
+    }
+
+    /// THE CLAIM (ROZHODNUTÉ 6033853074): the quantized +1600 ms nightly date step is re-sampled
+    /// in the FIRST frame that reads it — mid-cadence, never up to 100 frames later — so that
+    /// frame's stamp is already in the new epoch, and the cadence restarts from it.
+    #[test]
+    fn a_plus_1600_ms_step_resamples_in_that_frame_1372() {
+        let mut o = seeded();
+        let pre = feed(&mut o, MONO + 16_666_667, 37, OFFSET);
+        assert!(pre.iter().all(|d| *d == OffsetResample::Keep));
+        let stepped = OFFSET + 1_600_000_000;
+        let d = feed(&mut o, MONO + 38 * 16_666_667, 1, stepped);
+        assert_eq!(
+            d[0],
+            OffsetResample::WallStep {
+                step_ns: 1_600_000_000
+            },
+            "issue 1372: the frame that reads the step must re-sample at once"
+        );
+        assert_eq!(
+            o.offset_100ns(),
+            stepped / 100,
+            "the stamps change epoch now"
+        );
+        let after = feed(&mut o, MONO + 39 * 16_666_667, 99, stepped);
+        assert!(
+            after.iter().all(|d| *d == OffsetResample::Keep),
+            "one re-sample per step, the cadence restarts from it: {after:?}"
+        );
+        assert_eq!(
+            feed(&mut o, MONO + 138 * 16_666_667, 1, stepped)[0],
+            OffsetResample::Cadence
+        );
+    }
+
+    /// A negative (backward) step re-samples in its frame just the same.
+    #[test]
+    fn a_minus_200_ms_step_resamples_in_that_frame_1372() {
+        let mut o = seeded();
+        feed(&mut o, MONO + 16_666_667, 80, OFFSET);
+        let stepped = OFFSET - 200_000_000;
+        assert_eq!(
+            feed(&mut o, MONO + 81 * 16_666_667, 1, stepped)[0],
+            OffsetResample::WallStep {
+                step_ns: -200_000_000
+            }
+        );
+        assert_eq!(o.offset_100ns(), stepped / 100);
+    }
+
+    /// A 1 ms move is no step: it waits for the cadence (the capture-phase tracker re-anchors on
+    /// it there, as today).
+    #[test]
+    fn a_1_ms_drift_waits_for_the_cadence_1372() {
+        let mut o = seeded();
+        let moved = OFFSET + 1_000_000;
+        let d = feed(
+            &mut o,
+            MONO + 16_666_667,
+            OFFSET_RESAMPLE_INTERVAL_FRAMES,
+            moved,
+        );
+        assert!(d[..99].iter().all(|d| *d == OffsetResample::Keep), "{d:?}");
+        assert_eq!(o.offset_100ns(), moved / 100, "adopted at the cadence");
+        assert_eq!(d[99], OffsetResample::Cadence);
+    }
+
+    /// The threshold is the render tick's 2 ms, inclusive (">= 2 ms" per the ROZHODNUTÉ).
+    #[test]
+    fn the_step_threshold_is_two_ms_inclusive_1372() {
+        assert_eq!(OFFSET_STEP_RESAMPLE_NS, 2_000_000);
+        assert_eq!(
+            OFFSET_STEP_RESAMPLE_NS,
+            crate::genlock_wall_step::WALL_STEP_MIN_NS
+        );
+        for (step, expect) in [
+            (2_000_000, OffsetResample::WallStep { step_ns: 2_000_000 }),
+            (
+                -2_000_000,
+                OffsetResample::WallStep {
+                    step_ns: -2_000_000,
+                },
+            ),
+            (1_999_999, OffsetResample::Keep),
+            (-1_999_999, OffsetResample::Keep),
+        ] {
+            assert_eq!(
+                offset_resample_decision(1, Some(OFFSET), Some(OFFSET + step)),
+                expect,
+                "step {step} ns"
+            );
+        }
+    }
+
+    /// A preempted read (a bracket wider than `genlock_wall_step::READ_MAX_NS`) is never a step
+    /// and is never adopted at the cadence: the cadence stays due and the next trusted read
+    /// takes it.
+    #[test]
+    fn a_preempted_read_never_resamples_1372() {
+        let mut o = seeded();
+        // Preempted for 5 ms between the first monotonic read and the wall read: its midpoint
+        // offset reads 2.5 ms off, a step if it were trusted.
+        let m = MONO + 16_666_667;
+        let preempted = (m - 5_000_000, (m as i64 + OFFSET) as u64, m);
+        assert_eq!(
+            o.observe_frame(preempted.0, preempted.1, preempted.2),
+            OffsetResample::Keep
+        );
+        assert_eq!(o.offset_100ns(), OFFSET / 100);
+        // ... also when the step it seems to show is real-sized: still no re-sample.
+        let wild = (m - 300_000, (m as i64 + OFFSET + 1_600_000_000) as u64, m);
+        assert_eq!(
+            o.observe_frame(wild.0, wild.1, wild.2),
+            OffsetResample::Keep
+        );
+        assert_eq!(o.offset_100ns(), OFFSET / 100);
+        // At the cadence a preempted read keeps the cadence due ...
+        feed(
+            &mut o,
+            m + 16_666_667,
+            OFFSET_RESAMPLE_INTERVAL_FRAMES - 3,
+            OFFSET,
+        );
+        assert_eq!(
+            o.observe_frame(preempted.0, preempted.1, preempted.2),
+            OffsetResample::Keep,
+            "a preempted read is never adopted at the cadence"
+        );
+        // ... and the next trusted read takes it.
+        assert_eq!(
+            feed(&mut o, m + 200 * 16_666_667, 1, OFFSET + 1_000)[0],
+            OffsetResample::Cadence
+        );
+        assert_eq!(o.offset_100ns(), (OFFSET + 1_000) / 100);
+    }
+
+    /// A preempted SEED still gives a usable offset, and the first trusted read replaces it as a
+    /// cadence re-sample, never as a step (no step line for a seed the loop never trusted).
+    #[test]
+    fn a_preempted_seed_is_replaced_by_the_first_trusted_read_without_a_step_1372() {
+        let m = MONO;
+        let o0 = StampOffset::seed(m - 6_000_000, (m as i64 + OFFSET) as u64, m);
+        assert_eq!(
+            o0.offset_100ns(),
+            (OFFSET + 3_000_000) / 100,
+            "the midpoint offset"
+        );
+        let mut o = o0;
+        assert_eq!(
+            feed(&mut o, m + 16_666_667, 1, OFFSET)[0],
+            OffsetResample::Cadence
+        );
+        assert_eq!(o.offset_100ns(), OFFSET / 100);
+        // trusted from here on: a real step is a step again
+        assert_eq!(
+            feed(&mut o, m + 2 * 16_666_667, 1, OFFSET + 200_000_000)[0],
+            OffsetResample::WallStep {
+                step_ns: 200_000_000
+            }
         );
     }
 
