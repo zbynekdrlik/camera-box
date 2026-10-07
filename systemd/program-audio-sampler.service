@@ -7,8 +7,8 @@
 # a 10-minute summary. SHIPS DISABLED; runbook: program-audio-sampler.README.md.
 Description=camera-box stream program-audio sampler (issue 1404) — NDI audio-only -> :8890/program-audio.json
 Documentation=https://github.com/zbynekdrlik/camera-box
-After=network-online.target
-Wants=network-online.target
+# No ordering on network-online.target: dev1's user manager reads it as LoadState=not-found (a user
+# manager cannot see system targets, checked 7.10.2026), so it only looked like one.
 # Bound a restart storm (libndi missing, the serve dir unwritable): 20 starts per 5 min.
 StartLimitIntervalSec=300
 StartLimitBurst=20

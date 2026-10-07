@@ -27,9 +27,11 @@
 #       it, rig-mode.sh event stops it (scripts/lib/program-audio-mode.sh).
 #   * strih_program_audio_grade_rows / _report -- verify-strih item 41: the files + the rendered unit
 #     installed and enabled; the shim built from the installed sources; the unit's state against the
-#     TEST marker: running = its endpoint must answer a FRESH verdict; down without the marker = a NOTE
-#     (EVENT mode, or never put in TEST mode -- the default after provisioning); down WITH the marker,
-#     failed, or stuck activating (a crash loop) = a FAIL.
+#     TEST marker: running in TEST mode = its endpoint must answer a FRESH verdict (the guard's own
+#     -1 s .. 10 s window); down without the marker = a NOTE (EVENT mode, or never put in TEST mode --
+#     the default after provisioning); running WITHOUT the marker (EVENT's stop failed), down WITH the
+#     marker, failed, stuck activating (a crash loop) or unreadable (the user manager does not answer)
+#     = a FAIL.
 #
 # Test seams (tests/python/test_strih_program_audio_1404.py): STRIH_PROGRAM_AUDIO_PREFIX
 # (/usr/local/lib/camera-box), STRIH_PROGRAM_AUDIO_SYSFS (/sys), STRIH_PROGRAM_AUDIO_EUID (the running
@@ -381,7 +383,8 @@ strih_program_audio_grade_rows() {
       fi
       ;;
     failed)
-      printf 'FAIL|(program-audio-endpoint) %s failed -- read journalctl --user -u %s\n' "$STRIH_PROGRAM_AUDIO_UNIT" "$STRIH_PROGRAM_AUDIO_UNIT"
+      printf 'FAIL|(program-audio-endpoint) %s failed -- read journalctl --user -u %s; rig-mode.sh test clears it and starts it again (by hand: systemctl --user reset-failed %s)\n' \
+        "$STRIH_PROGRAM_AUDIO_UNIT" "$STRIH_PROGRAM_AUDIO_UNIT" "$STRIH_PROGRAM_AUDIO_UNIT"
       ;;
     inactive)
       if [ "$marker" = yes ]; then

@@ -8,8 +8,8 @@
 # runbook: rig-marker-mirror.README.md.
 Description=camera-box cam2 QPSK marker-log mirror (issue 1404) — one ssh tail -F stream into the :8890 serve dir
 Documentation=https://github.com/zbynekdrlik/camera-box
-After=network-online.target
-Wants=network-online.target
+# No ordering on network-online.target: dev1's user manager reads it as LoadState=not-found (a user
+# manager cannot see system targets, checked 7.10.2026), so it only looked like one.
 # Bound a restart storm (the script refuses a bad serve dir / missing sshpass at once): 20 per 5 min.
 StartLimitIntervalSec=300
 StartLimitBurst=20

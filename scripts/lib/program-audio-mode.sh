@@ -37,7 +37,8 @@ PROGRAM_AUDIO_MODE_SSH_OPTS=(-o UserKnownHostsFile=/dev/null -o StrictHostKeyChe
 # program_audio_mode_remote_cmd test|event -> the shell text the operator's login shell runs on strih-lx.
 # It prints `program-audio-sampler: <is-active>` and exits 0 only when the sampler reached the mode's
 # state (test: still active 2 s after the start -- a Type=simple unit reads active the moment it is
-# forked, so a sampler that dies on import would pass an immediate read; event: not active).
+# forked, so a sampler that dies on import would pass an immediate read; event: `inactive` after the
+# stop + reset-failed -- an EMPTY answer, the operator's user manager unreachable, is no proof of a stop).
 program_audio_mode_remote_cmd() {
   local mode="${1-}" u="$STRIH_PROGRAM_AUDIO_UNIT" m="$STRIH_PROGRAM_AUDIO_TEST_MARKER"
   case "$mode" in
@@ -46,7 +47,7 @@ program_audio_mode_remote_cmd() {
         "${m%/*}" "$m" "$u" "$u" "$u"
       ;;
     event)
-      printf 'rm -f "$HOME/%s"; systemctl --user stop %s; systemctl --user reset-failed %s 2>/dev/null; s="$(systemctl --user is-active %s)"; echo "program-audio-sampler: $s"; [ "$s" != active ]' \
+      printf 'rm -f "$HOME/%s"; systemctl --user stop %s; systemctl --user reset-failed %s 2>/dev/null; s="$(systemctl --user is-active %s)"; echo "program-audio-sampler: $s"; [ "$s" = inactive ]' \
         "$m" "$u" "$u" "$u"
       ;;
     *)
