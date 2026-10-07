@@ -155,6 +155,12 @@ struct Case {
     /// How long after its box's step a cambox's STAMPS follow (the stale mono→real offset).
     stamp_lag: u64,
     book: Book,
+    /// The source's first frame arrives this long after the receiver's step (0 = it runs
+    /// throughout): a new source, or one that was silent across the step.
+    start_after_step: u64,
+    /// Another genlock source on the box releases every tick, so the box books the step at the
+    /// step even while this source's queue is empty.
+    box_books_every_tick: bool,
 }
 
 /// One received frame: arrival (receiver monotonic), stamp, content id.
@@ -327,6 +333,10 @@ fn run(c: &Case) -> Seen {
         Input::Shallow => obs_sender(c, seed, false),
         Input::Camera => camera_sender(c, seed),
     };
+    let frames: Vec<Frame> = frames
+        .into_iter()
+        .filter(|f| c.start_after_step == 0 || f.arrival >= STEP_AT + c.start_after_step)
+        .collect();
     let expect: i64 = if c.input == Input::Camera { 2 } else { 1 };
     let latency_ms: u32 = if c.input == Input::Deep { 1026 } else { 3 };
     let reserve_ns = u64::from(latency_ms) * 1_000_000;
@@ -371,10 +381,10 @@ fn run(c: &Case) -> Seen {
         } else {
             !fifo.queue.is_empty()
         };
+        if c.book == Book::Release && (queued || c.box_books_every_tick) {
+            booking.observe(fire, wall_now, fire + 2_000);
+        }
         if queued && c.book != Book::Off {
-            if c.book == Book::Release {
-                booking.observe(fire, wall_now, fire + 2_000);
-            }
             if c.input == Input::Camera {
                 let mut q: Vec<u64> = n2.q.iter().map(|f| f.0).collect();
                 relabel.apply(
@@ -473,13 +483,17 @@ fn case(input: Input, step: i64, offset_ms: i64, book: Book) -> Case {
         sender_offset: offset_ms * 1_000_000,
         stamp_lag: 0,
         book,
+        start_after_step: 0,
+        box_books_every_tick: false,
     }
 }
 
 const INPUTS: [Input; 3] = [Input::Deep, Input::Shallow, Input::Camera];
 
-/// THE CLAIM: the quantized +1600 ms step costs NOTHING on any input, whichever box steps first
-/// (0–30 ms either way): no repeated, skipped or backward frame, no late hold, relock or underrun.
+/// THE CLAIM: the quantized +1600 ms step costs NOTHING on any input whose sender's stamps follow
+/// its own step, whichever box steps first (0–30 ms either way): no repeated, skipped or backward
+/// frame, no late hold, relock or underrun. A cambox whose stamps lag its step is the separate
+/// report below.
 #[test]
 fn the_quantized_step_costs_no_frame_on_any_input_1372() {
     for input in INPUTS {
@@ -608,6 +622,33 @@ fn cambox_stale_offset_cost_is_reported_1372() {
         assert!(
             on.visible() <= today.visible(),
             "lag {lag_ms}: {on:?} vs {today:?}"
+        );
+    }
+}
+
+/// Review round 1: a source that starts 5 s AFTER the step (a new source, or one silent across it),
+/// while another source on the box books the step at the step. Its queue holds only frames stamped
+/// after the step, so the booking must be taken WITHOUT relabelling: no relabelled frame and no
+/// cost. A stale booking applied to it (the pre-fix code) moved its new-epoch frames by +S.
+#[test]
+fn a_source_that_starts_after_the_step_is_never_relabelled_1372() {
+    for input in INPUTS {
+        let c = Case {
+            start_after_step: 5 * NS_PER_SECOND,
+            box_books_every_tick: true,
+            ..case(input, S_QUANTIZED, 0, Book::Release)
+        };
+        let seen = run(&c);
+        assert_eq!(
+            seen.relabelled, 0,
+            "issue 1372: {input:?}: a source that was not releasing at the step must not relabel: \
+             {seen:?}"
+        );
+        let cost = cost(&c);
+        assert_eq!(
+            cost.visible(),
+            0,
+            "issue 1372: {input:?}: the step must cost a late-starting source nothing: {cost:?}"
         );
     }
 }

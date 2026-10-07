@@ -1,5 +1,7 @@
 //! Issue 1372 part B — the genlock receive FIFO relabels its OLD-EPOCH frames by the booked wall
-//! step, so the nightly dantesync fleet date step costs no frame at the receiver.
+//! step, so the nightly dantesync fleet date step costs no frame at the receiver on every input
+//! whose sender's stamps follow its own step (the OBS senders; a cambox's stamps lag its step by up
+//! to ~1.67 s, the open Design-question 6032724613).
 //!
 //! ## Why this module exists
 //!
@@ -20,7 +22,13 @@
 //!   trusted reads is a step) on the wall read it releases against, and books the step (`seq`,
 //!   `S`, its wall and monotonic instant). The render tick's own detector runs at the END of a tick
 //!   (`video_sleep`), after that tick's release, so it cannot book the step for the release that
-//!   follows the step; this one books it before it.
+//!   follows the step; this one books it before it. It is fed only by genlock releases, so a
+//!   trusted read more than [`BOOK_MAX_GAP_NS`] after the previous trusted one re-seeds instead of
+//!   booking: a step (or a raw-clock drift) from a silent stretch is never booked as new.
+//! - **Only a source that was releasing at the step relabels** ([`RelabelState::apply`]): a source
+//!   with no previous release, or one more than [`APPLY_MAX_GAP_NS`] ago (a new source, one silent
+//!   across the step, a resumed traveling feed), takes the booking without relabelling — its queue
+//!   holds frames that arrived after the step.
 //! - **Queued frames** ([`plan`], applied once per source per booking by [`RelabelState::apply`]):
 //!   in FIFO order the old epoch is the prefix before the first adjacent stamp jump that carries `S`
 //!   within one frame ([`delta_carries_step`]); with no such jump in the queue, the queue shares the
@@ -34,7 +42,8 @@
 //!   timeline means the sender has stepped: relabelling ends. A stamp that continues neither (a
 //!   sender restart, a song change) is a real jump: never relabelled, relabelling ends. The window is
 //!   ONE latency window on the sender's own stamp timeline: a relabelled stamp after the step instant
-//!   plus the source's presented age (at least its pin) ends it ([`window_ns`]).
+//!   plus the source's presented age (at most [`WINDOW_MAX_AGE_NS`], at least its pin) ends it
+//!   ([`window_ns`]).
 //! - **Only a step of [`MIN_STEP_NS`] or more** is relabelled ([`step_relabels`]): below two canvas
 //!   frames a continuous stamp and a stepped one cannot be told apart within one frame. dantesync
 //!   1.16.0 steps the date by 0 or a multiple of 200 ms; a smaller step keeps the one-tick re-grid.
@@ -51,7 +60,7 @@
 //! header only); `tests/genlock_fifo_relabel_parity_1372.rs` compiles it and requires byte-identical
 //! results. The two-clock bench is the test-only `crate::genlock_fifo_relabel_bench`.
 
-use crate::genlock_wall_step::WallStepState;
+use crate::genlock_wall_step::{wall_offset_ns, WallStepState};
 
 /// The smallest wall step the FIFO relabels, ns. Below two canvas frames (66.7 ms at 30 fps) a
 /// stamp that continues the timeline and one that carries the step cannot be told apart within one
@@ -138,12 +147,13 @@ pub fn sender_stepped_before(
         && booking_mono_ns <= jump_mono_ns.saturating_add(window_ns)
 }
 
-/// ONE latency window, ns: the source's presented age at the booking, at least its configured
-/// latency (the pin). Old-epoch frames arrive for at most about that long after a sender's step.
+/// ONE latency window, ns: the source's presented age at the booking (at most
+/// [`WINDOW_MAX_AGE_NS`]), at least its configured latency (the pin). Old-epoch frames arrive for
+/// at most about that long after a sender's step.
 ///
 /// Mirror of the C `genlock_fifo_relabel_window_ns()`.
 pub fn window_ns(reserve_ns: u64, presented_age_ns: u64) -> u64 {
-    reserve_ns.max(presented_age_ns)
+    reserve_ns.max(presented_age_ns.min(WINDOW_MAX_AGE_NS))
 }
 
 /// The box-wide step booking the release path keeps: the detector, a sequence number every source
@@ -173,10 +183,19 @@ impl Booking {
 
     /// Feed one bracketed read (mono, wall, mono) — the one the release reads its `wall_now` with.
     /// Returns `true` when it booked a new step. An untrusted read decides nothing (the detector's
-    /// rules, `crate::genlock_wall_step`).
+    /// rules, `crate::genlock_wall_step`). A trusted read more than [`BOOK_MAX_GAP_NS`] after the
+    /// previous trusted one re-seeds the detector instead: its offset is stale.
     ///
     /// Mirror of the C `genlock_fifo_relabel_book()`.
     pub fn observe(&mut self, mono_before: u64, wall: u64, mono_after: u64) -> bool {
+        if wall_offset_ns(mono_before, wall, mono_after).is_some() {
+            if self.last_mono_ns != 0
+                && mono_after.saturating_sub(self.last_mono_ns) > BOOK_MAX_GAP_NS
+            {
+                self.detector = WallStepState::new();
+            }
+            self.last_mono_ns = mono_after;
+        }
         let step = self.detector.observe(mono_before, wall, mono_after);
         if step == 0 {
             return false;
@@ -309,8 +328,10 @@ impl RelabelState {
     /// `reserve_ns` its configured latency, `wall_now` the release's (post-step) wall read and
     /// `mono_now` its monotonic clock (every release passes it, applied or not). Returns
     /// the plan when it relabelled anything or opened a window, `None` when the booking was applied
-    /// already or does not relabel (a step under [`MIN_STEP_NS`], an unknown interval). A newer
-    /// booking always closes the previous window.
+    /// already or does not relabel (a step under [`MIN_STEP_NS`], an unknown interval, or a source
+    /// that was not releasing at the step: no previous release, or one more than
+    /// [`APPLY_MAX_GAP_NS`] ago — a new source, one silent across the step). A newer booking always
+    /// closes the previous window.
     ///
     /// Mirror of the C `genlock_fifo_relabel_apply()`.
     #[allow(clippy::too_many_arguments)]
@@ -326,6 +347,8 @@ impl RelabelState {
         wall_now: u64,
         mono_now: u64,
     ) -> Option<Plan> {
+        let releasing = self.last_release_mono_ns != 0
+            && mono_now.saturating_sub(self.last_release_mono_ns) <= APPLY_MAX_GAP_NS;
         self.last_release_mono_ns = mono_now;
         if self.seq == b.seq {
             return None;
@@ -333,7 +356,7 @@ impl RelabelState {
         self.seq = b.seq;
         self.arrival = Arrival::default();
         let step = b.step_ns;
-        if !step_relabels(step) || interval_ns == 0 {
+        if !releasing || !step_relabels(step) || interval_ns == 0 {
             return None;
         }
         let src = if src_ns != 0 { src_ns } else { interval_ns };

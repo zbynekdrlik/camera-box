@@ -1357,7 +1357,7 @@ jobs:
           if ($src -notmatch [regex]::Escape('static struct genlock_fifo_relabel_booking genlock_relabel_booking;')) {
             Write-Error "obs-source.c: the receive-FIFO date-step relabel is gone or moved -- a fleet date step would cost the genlock inputs frames again (issue 1372)"; exit 1
           }
-          if ($src -notmatch [regex]::Escape('source->genlock_relabel.arrival.old_epoch = false; source->genlock_relabel.jump_ns = 0;')) {
+          if ($src -notmatch [regex]::Escape('source->genlock_relabel.arrival.old_epoch = false; source->genlock_relabel.jump_ns = 0; source->genlock_relabel.last_release_mono_ns = 0;')) {
             Write-Error "obs-source.c: the receive-FIFO date-step relabel is gone or moved -- a fleet date step would cost the genlock inputs frames again (issue 1372)"; exit 1
           }
           if ($src -notmatch [regex]::Escape('"relabelled=%llu "')) {

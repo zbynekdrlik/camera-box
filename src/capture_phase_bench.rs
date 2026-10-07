@@ -593,9 +593,11 @@ fn a_whole_slot_date_step_re_anchors_by_whole_slots_with_no_crossing_1372() {
                  out the stamps are one slot per frame (step {step})"
             );
         } else {
-            assert!(
-                off_slot <= 1,
-                "the unquantized step moves the phase by a fraction: at most one off-slot interval"
+            // exactly one: the fraction shows (so the measure above can see an off-slot interval,
+            // and the quantized steps' 0 is not vacuous)
+            assert_eq!(
+                off_slot, 1,
+                "the unquantized step moves the phase by a fraction: exactly one off-slot interval"
             );
         }
     }

@@ -42,7 +42,7 @@ const RELABEL_WIRING: [&str; 7] = [
     "output->timestamp = genlock_fifo_relabel_receive(&source->genlock_relabel, source->genlock_rx_last_ts, output->timestamp, source->genlock_rx_min_delta_ns, os_gettime_ns());",
     "const uint64_t relabel_mono_before = os_gettime_ns(); const uint64_t wall_now = genlock_wall_now_ns(); const uint64_t relabel_mono_after = os_gettime_ns(); genlock_fifo_relabel_tick(source, relabel_mono_before, wall_now, relabel_mono_after, interval, reserve_ms);",
     "static struct genlock_fifo_relabel_booking genlock_relabel_booking;",
-    "source->genlock_relabel.arrival.old_epoch = false; source->genlock_relabel.jump_ns = 0;",
+    "source->genlock_relabel.arrival.old_epoch = false; source->genlock_relabel.jump_ns = 0; source->genlock_relabel.last_release_mono_ns = 0;",
     "\"relabelled=%llu \"",
     "(unsigned long long)source->genlock_n2_early, (unsigned long long)source->genlock_relabel.relabelled,",
 ];

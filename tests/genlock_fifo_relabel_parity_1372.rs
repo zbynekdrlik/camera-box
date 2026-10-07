@@ -95,6 +95,16 @@ fn steps() -> Vec<i64> {
 }
 
 const SRCS: [u64; 4] = [0, I30, I60, 16_666_666];
+/// `(reserve, presented age)` window vectors around the 2 s age cap.
+const WINDOW_VECTORS: [(u64, u64); 7] = [
+    (3_000_000, 70_000_000),
+    (1_026_000_000, 5),
+    (0, 0),
+    (3_000_000, 1_999_999_999),
+    (3_000_000, 2_000_000_001),
+    (3_000_000, 10_800_000_000_000),
+    (2_500_000_000, 10_800_000_000_000),
+];
 const FRAMES: [u64; 3] = [I30, 0, I60];
 
 /// `(prev, stamps, step, src, frame, stepped_before)` plan vectors.
@@ -263,6 +273,44 @@ fn booking_sequences() -> Vec<Vec<(u64, u64, u64)>> {
         ));
         out.push(s);
     }
+    let ns = 1_000_000_000u64;
+    // a stale reference (2 s, then 3 h, of no trusted read), a step after reads resumed
+    out.push(vec![
+        (MONO0, W0, MONO0 + 1_000),
+        (
+            MONO0 + 2 * ns,
+            (W0 + 2 * ns).wrapping_add(S as u64),
+            MONO0 + 2 * ns + 1_000,
+        ),
+        (
+            MONO0 + 3 * 3600 * ns,
+            (W0 + 3 * 3600 * ns).wrapping_add(S as u64) + 150_000_000,
+            MONO0 + 3 * 3600 * ns + 1_000,
+        ),
+        (
+            MONO0 + 3 * 3600 * ns + I30,
+            (W0 + 3 * 3600 * ns + I30).wrapping_add(S as u64) + 350_000_000,
+            MONO0 + 3 * 3600 * ns + I30 + 1_000,
+        ),
+    ]);
+    // an untrusted read 0.9 s in never refreshes the reference; exactly 1 s still books
+    out.push(vec![
+        (MONO0, W0, MONO0 + 1_000),
+        (MONO0 + 900_000_000, W0 + 900_000_000, MONO0 + 900_500_000),
+        (
+            MONO0 + 1_200_000_000,
+            (W0 + 1_200_000_000).wrapping_add(S as u64),
+            MONO0 + 1_200_001_000,
+        ),
+    ]);
+    out.push(vec![
+        (MONO0, W0, MONO0 + 1_000),
+        (
+            MONO0 + ns,
+            (W0 + ns).wrapping_add(S as u64),
+            MONO0 + ns + 1_000,
+        ),
+    ]);
     out
 }
 
@@ -359,6 +407,28 @@ fn scenarios() -> Vec<Scenario> {
             ],
         });
     }
+    // a source that was not releasing at the step: never released, silent for an hour, and one
+    // exactly at the 1 s bound (still releasing); a stale boundary from before the silence
+    for prev_release in [
+        None,
+        Some(APPLY_MONO - 3_600_000_000_000),
+        Some(APPLY_MONO - 1_000_000_000),
+    ] {
+        let fresh: Vec<u64> = (1..=3u64).map(|k| W0 - 4 * I30 + k * I30).collect();
+        out.push(Scenario {
+            rx_last: fresh[2],
+            queue: fresh,
+            boundary: W0 - 3_600_000_000_000,
+            pre_arrivals: Vec::new(),
+            prev_release,
+            reads: reads_for(S),
+            interval: I30,
+            src: I30,
+            reserve: 3_000_000,
+            wall_now: W0 + S as u64,
+            arrivals: vec![(W0, MONO0 + I30 + 9)],
+        });
+    }
     // no booking at all, and an unknown interval
     out.push(Scenario {
         queue: vec![W0, W0 + I30],
@@ -394,7 +464,7 @@ fn scenarios() -> Vec<Scenario> {
 
 fn fmt_state(st: &RelabelState) -> String {
     format!(
-        "seq {} step {} until {} frame {} old {} jump {} at {} relabelled {}",
+        "seq {} step {} until {} frame {} old {} jump {} at {} relabelled {} release {}",
         st.seq,
         st.arrival.step_ns,
         st.arrival.until_ns,
@@ -402,7 +472,8 @@ fn fmt_state(st: &RelabelState) -> String {
         b(st.arrival.old_epoch),
         st.jump_ns,
         st.jump_mono_ns,
-        st.relabelled
+        st.relabelled,
+        st.last_release_mono_ns
     )
 }
 
@@ -445,7 +516,7 @@ fn rust_trace() -> Vec<String> {
             b(sender_stepped_before(jump, at, s, I30, I30, MONO0, win))
         ));
     }
-    for (r, a) in [(3_000_000u64, 70_000_000u64), (1_026_000_000, 5), (0, 0)] {
+    for (r, a) in WINDOW_VECTORS {
         out.push(format!("window {r} {a} {}", window_ns(r, a)));
     }
     for (n, seq) in booking_sequences().iter().enumerate() {
@@ -453,12 +524,13 @@ fn rust_trace() -> Vec<String> {
         for &(mb, w, ma) in seq {
             let booked = bk.observe(mb, w, ma);
             out.push(format!(
-                "book {n} {} {} {} {} {}",
+                "book {n} {} {} {} {} {} {}",
                 b(booked),
                 bk.seq,
                 bk.step_ns,
                 bk.wall_ns,
-                bk.mono_ns
+                bk.mono_ns,
+                bk.last_mono_ns
             ));
         }
     }
@@ -611,7 +683,7 @@ fn c_harness() -> String {
             c_i64(s)
         ));
     }
-    for (r, a) in [(3_000_000u64, 70_000_000u64), (1_026_000_000, 5), (0, 0)] {
+    for (r, a) in WINDOW_VECTORS {
         body.push_str(&format!(
             "\tprintf(\"window %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \"\\n\", (uint64_t){r}ULL, \
              (uint64_t){a}ULL, genlock_fifo_relabel_window_ns({r}ULL, {a}ULL));\n"
@@ -722,8 +794,8 @@ static void before_line(int64_t jump, uint64_t at, int64_t s, uint64_t win)
 static void book_line(int n, struct genlock_fifo_relabel_booking *bk, uint64_t mb, uint64_t w, uint64_t ma)
 {{
 	const bool booked = genlock_fifo_relabel_book(bk, mb, w, ma);
-	printf("book %d %d %" PRIu64 " %" PRId64 " %" PRIu64 " %" PRIu64 "\n", n, booked ? 1 : 0, bk->seq, bk->step_ns,
-	       bk->wall_ns, bk->mono_ns);
+	printf("book %d %d %" PRIu64 " %" PRId64 " %" PRIu64 " %" PRIu64 " %" PRIu64 "\n", n, booked ? 1 : 0, bk->seq,
+	       bk->step_ns, bk->wall_ns, bk->mono_ns, bk->last_mono_ns);
 }}
 
 static void plan_line(int n, uint64_t prev, uint64_t *q, size_t qn, int64_t s, uint64_t src, uint64_t frame,
@@ -743,9 +815,9 @@ static void arrive_line(int n, struct genlock_fifo_relabel_arrival *a, uint64_t 
 static void state_line(const struct genlock_fifo_relabel_state *st)
 {{
 	printf("seq %" PRIu64 " step %" PRId64 " until %" PRIu64 " frame %" PRIu64 " old %d jump %" PRId64
-	       " at %" PRIu64 " relabelled %" PRIu64 "\n",
+	       " at %" PRIu64 " relabelled %" PRIu64 " release %" PRIu64 "\n",
 	       st->seq, st->arrival.step_ns, st->arrival.until_ns, st->arrival.frame_ns, st->arrival.old_epoch ? 1 : 0,
-	       st->jump_ns, st->jump_mono_ns, st->relabelled);
+	       st->jump_ns, st->jump_mono_ns, st->relabelled, st->last_release_mono_ns);
 }}
 
 static void release_line(struct genlock_fifo_relabel_state *st, uint64_t *q, size_t qn, uint64_t *boundary,

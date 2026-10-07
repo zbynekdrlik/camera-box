@@ -4844,9 +4844,11 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 		source->genlock_rx_min_delta_ns = 0;
 		source->genlock_rx_arrival_lag_ns = 0; /* issue 1367: no frame received on the new timeline */
 		/* camera-box issue 1372 part B: the new timeline is not the stepped one -- close an open relabel
-		 * window and forget a remembered stamp jump (the booking stays applied). */
+		 * window, forget a remembered stamp jump and the last release (a resumed source takes the next
+		 * booking without relabelling; the applied booking stays applied). */
 		source->genlock_relabel.arrival.old_epoch = false;
 		source->genlock_relabel.jump_ns = 0;
+		source->genlock_relabel.last_release_mono_ns = 0;
 		pthread_mutex_unlock(&source->async_mutex);
 		return;
 	}

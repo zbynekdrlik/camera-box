@@ -22,7 +22,11 @@
  *   raw stamp does not; a raw stamp that continues it (the sender stepped) or neither (a sender
  *   restart, a song change: never relabelled) ends the window, and so does a relabelled stamp past
  *   the step instant + one latency window (the presented age, at least the pin);
- * - only a step of GENLOCK_FIFO_RELABEL_MIN_STEP_NS or more is relabelled.
+ * - only a step of GENLOCK_FIFO_RELABEL_MIN_STEP_NS or more is relabelled;
+ * - the booking re-seeds instead of booking after GENLOCK_FIFO_RELABEL_BOOK_MAX_GAP_NS with no trusted
+ *   read, only a source that released within GENLOCK_FIFO_RELABEL_APPLY_MAX_GAP_NS relabels (a new or
+ *   resumed source takes the booking as is), and the window takes at most a
+ *   GENLOCK_FIFO_RELABEL_WINDOW_MAX_AGE_NS presented age.
  *
  * Pure: stdint/stdbool/stddef + the wall-step header, no libobs types; the queue is reached through
  * the two callbacks of struct genlock_fifo_relabel_queue. tests/genlock_fifo_relabel_parity_1372.rs
@@ -142,16 +146,31 @@ static inline bool genlock_fifo_relabel_sender_stepped_before(int64_t jump_ns, u
 	       booking_mono_ns <= reach;
 }
 
-/* One latency window: the presented age, at least the configured latency. Mirror of window_ns. */
+/* One latency window: the presented age (at most GENLOCK_FIFO_RELABEL_WINDOW_MAX_AGE_NS), at least the
+ * configured latency. Mirror of window_ns. */
 static inline uint64_t genlock_fifo_relabel_window_ns(uint64_t reserve_ns, uint64_t presented_age_ns)
 {
-	return reserve_ns > presented_age_ns ? reserve_ns : presented_age_ns;
+	const uint64_t age = presented_age_ns < GENLOCK_FIFO_RELABEL_WINDOW_MAX_AGE_NS
+				     ? presented_age_ns
+				     : GENLOCK_FIFO_RELABEL_WINDOW_MAX_AGE_NS;
+	return reserve_ns > age ? reserve_ns : age;
 }
 
-/* Feed the release's bracketed read; true = a new step was booked. Mirror of Booking::observe. */
+/* Feed the release's bracketed read; true = a new step was booked. A trusted read more than
+ * GENLOCK_FIFO_RELABEL_BOOK_MAX_GAP_NS after the previous trusted one re-seeds the detector (its
+ * offset is stale). Mirror of Booking::observe. */
 static inline bool genlock_fifo_relabel_book(struct genlock_fifo_relabel_booking *b, uint64_t mono_before,
 					     uint64_t wall, uint64_t mono_after)
 {
+	int64_t offset = 0;
+	if (genlock_wall_offset_ns(mono_before, wall, mono_after, &offset)) {
+		if (b->last_mono_ns != 0 && mono_after > b->last_mono_ns &&
+		    mono_after - b->last_mono_ns > GENLOCK_FIFO_RELABEL_BOOK_MAX_GAP_NS) {
+			const struct genlock_wall_step_state fresh = {0, 0, 0, 0};
+			b->detector = fresh;
+		}
+		b->last_mono_ns = mono_after;
+	}
 	const int64_t step = genlock_wall_step_observe(&b->detector, mono_before, wall, mono_after);
 	if (step == 0)
 		return false;
@@ -214,9 +233,11 @@ static inline int64_t genlock_fifo_relabel_arrival_add(struct genlock_fifo_relab
 }
 
 /* Apply a booking this source has not applied yet (see the header comment). *locked_boundary: 0 =
- * unlocked; the presented stamp is boundary - interval. *rx_last: 0 = none. Returns true with *plan_out
- * set when it relabelled or opened a window, false when the booking was applied already or does not
- * relabel. Mirror of RelabelState::apply. */
+ * unlocked; the presented stamp is boundary - interval. *rx_last: 0 = none. mono_now: this release's
+ * monotonic clock (every release passes it). Returns true with *plan_out set when it relabelled or
+ * opened a window, false when the booking was applied already or does not relabel -- including a
+ * source that was not releasing at the step (no previous release, or one more than
+ * GENLOCK_FIFO_RELABEL_APPLY_MAX_GAP_NS ago). Mirror of RelabelState::apply. */
 static inline bool genlock_fifo_relabel_apply(struct genlock_fifo_relabel_state *s,
 					      const struct genlock_fifo_relabel_booking *b,
 					      const struct genlock_fifo_relabel_queue *q, uint64_t *locked_boundary,
@@ -224,6 +245,9 @@ static inline bool genlock_fifo_relabel_apply(struct genlock_fifo_relabel_state 
 					      uint64_t reserve_ns, uint64_t wall_now, uint64_t mono_now,
 					      struct genlock_fifo_relabel_plan *plan_out)
 {
+	const bool releasing = s->last_release_mono_ns != 0 &&
+			       (mono_now > s->last_release_mono_ns ? mono_now - s->last_release_mono_ns : 0) <=
+				       GENLOCK_FIFO_RELABEL_APPLY_MAX_GAP_NS;
 	s->last_release_mono_ns = mono_now;
 	if (s->seq == b->seq)
 		return false;
@@ -231,7 +255,7 @@ static inline bool genlock_fifo_relabel_apply(struct genlock_fifo_relabel_state 
 	const struct genlock_fifo_relabel_arrival closed = {0, 0, 0, false};
 	s->arrival = closed;
 	const int64_t step = b->step_ns;
-	if (!genlock_fifo_relabel_step_relabels(step) || interval_ns == 0)
+	if (!releasing || !genlock_fifo_relabel_step_relabels(step) || interval_ns == 0)
 		return false;
 	const uint64_t src = src_ns != 0 ? src_ns : interval_ns;
 	const uint64_t prev = *locked_boundary > interval_ns ? *locked_boundary - interval_ns : 0;
