@@ -28,7 +28,7 @@ use std::collections::HashMap;
 /// Field names mirror the log's `key=value` tokens exactly (see [`parse_audit_line`]).
 /// The counters (`received`, `consumed`, `underruns`, `holds`, `overruns`,
 /// `backward_steps`, `backward_regime_ticks`, `dropped_due`, `relocks`, `late_holds`,
-/// `stamp_dup`, `stamp_gap`, `n1_grows`, `n2_early`, `empty_run`) are CUMULATIVE
+/// `stamp_dup`, `stamp_gap`, `n1_grows`, `n2_early`, `relabelled`, `empty_run`) are CUMULATIVE
 /// since the source was created — they only ever increase — so a per-run answer needs the
 /// DELTA between the first and last sample of a captured window ([`summarize`]), never the
 /// raw value alone. `ts_head_skew_ms` is an instantaneous per-tick value, not cumulative.
@@ -118,6 +118,11 @@ pub struct AuditSample {
     /// climbing rate means the camera's arrival lag exceeds 50 ms + the pin. Flat on an N==1 source.
     /// Absent on older logs — parses as 0.
     pub n2_early: u64,
+    /// issue 1372 part B — CUMULATIVE frames the receive-FIFO relabel moved by a booked fleet
+    /// date step (`relabelled=`): the queued frames at the booking plus the old-epoch arrivals
+    /// after it. Flat between date steps; a nightly step adds about one queue depth plus the
+    /// frames a lagging sender still stamped in the old epoch. Absent on older logs — parses as 0.
+    pub relabelled: u64,
 }
 
 /// Parse ONE `genlock-fifo audit` log line into an [`AuditSample`].
@@ -268,6 +273,9 @@ pub struct AuditSummary {
     /// issue 1367 slice D1 — window delta of the N>=2 early presents (0 on older logs and on N==1
     /// sources). Divide by the window's ticks for the rate the 0.1 % budget is read against.
     pub delta_n2_early: u64,
+    /// issue 1372 part B — window delta of the relabelled frames (0 on older logs). Non-zero only
+    /// across a fleet date step.
+    pub delta_relabelled: u64,
     /// Largest `|ts_head_skew_ms|` observed across the window — the worst-case arrival
     /// jitter this reserve had to absorb.
     pub max_abs_head_skew_ms: i64,
@@ -323,6 +331,7 @@ pub fn summarize(samples: &[AuditSample]) -> Option<AuditSummary> {
         delta_stamp_gap: last.stamp_gap.saturating_sub(first.stamp_gap),
         delta_n1_grows: last.n1_grows.saturating_sub(first.n1_grows),
         delta_n2_early: last.n2_early.saturating_sub(first.n2_early),
+        delta_relabelled: last.relabelled.saturating_sub(first.relabelled),
         max_abs_head_skew_ms,
         mean_abs_head_skew_ms,
         mean_head_skew_ms,
@@ -932,6 +941,32 @@ mod tests {
         );
     }
 
+    /// issue 1372 part B — the receive-FIFO relabel counter: parsed from its token (printed right
+    /// after `n2_early=` by the vendored audit line), 0 on an older line, window-delta'd.
+    #[test]
+    fn relabelled_parses_defaults_and_deltas_1372() {
+        let line = SAMPLE_LINE_CAM1.replace(
+            "wall_qpc_drift_ms=-252 ",
+            "wall_qpc_drift_ms=-252 stamp_dup=7 stamp_gap=9 n1_grows=2 n2_early=5 relabelled=31 ",
+        );
+        let s = parse_audit_line(&line).expect("a relabel line parses");
+        assert_eq!((s.n2_early, s.relabelled), (5, 31));
+        let old = parse_audit_line(SAMPLE_LINE_CAM1).expect("an older line still parses");
+        assert_eq!(old.relabelled, 0);
+        let later = parse_audit_line(&line.replace("relabelled=31", "relabelled=33")).unwrap();
+        let sum = summarize(&[s, later]).unwrap();
+        assert_eq!(sum.delta_relabelled, 2);
+        assert_eq!(
+            (
+                sum.delta_n2_early,
+                sum.delta_dropped_due,
+                sum.delta_late_holds
+            ),
+            (0, 0, 0),
+            "a relabel is neither an early present nor a drop nor a late hold"
+        );
+    }
+
     /// #1355 — the two new keys are mutually non-substring with every key the input-side parser
     /// already matches, so no existing token can be mis-read as one of them or vice versa.
     #[test]
@@ -967,8 +1002,14 @@ mod tests {
             "audio_pairing_offset_ms",
         ];
         // issue 1367 adds `n1_grows` — deliberately not `*_holds`, which would contain `holds` —
-        // and slice D1 `n2_early`.
-        for new in ["stamp_dup", "stamp_gap", "n1_grows", "n2_early"] {
+        // and slice D1 `n2_early`; issue 1372 part B `relabelled`.
+        for new in [
+            "stamp_dup",
+            "stamp_gap",
+            "n1_grows",
+            "n2_early",
+            "relabelled",
+        ] {
             for old in existing {
                 assert!(
                     !old.contains(new) && !new.contains(old),
