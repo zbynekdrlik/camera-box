@@ -3,15 +3,17 @@
 Pinned here:
   * the strih-lx unit template: the E-cores through ONE `CPUAffinity=@E_CORES@` line rendered from the
     box's own /sys/devices/cpu_atom/cpus (the strih_lx_lowprio_prefix contract), normal priority, the
-    EVENT marker as an ExecCondition, the sampler from the installed checkout-layout copy;
+    opt-in TEST marker as an ExecCondition (down by default), the sampler from the installed
+    checkout-layout copy;
   * setup-strih step 16e (`strih_program_audio_install`): numpy from apt only when missing, the files
     written only when they differ, the decoder shim built (as the operator) only when it is missing or
     was built from other sources, the unit written only when it differs, enable + daemon-reload +
     try-restart -- NEVER a start;
   * verify-strih item 41 (`strih_program_audio_grade_rows`): files + unit + enabled, the shim current,
-    the :8891 endpoint answering while the unit runs (stopped = a NOTE, failed = a FAIL);
-  * rig-mode.sh: TEST starts the sampler, EVENT stops it and leaves the marker
-    (`scripts/lib/program-audio-mode.sh`), report-only;
+    the unit's state against the TEST marker (running = a FRESH verdict on the env file's endpoint, read
+    with retries; down without the marker = a NOTE; down with it, failed, or a crash loop = a FAIL);
+  * rig-mode.sh: TEST leaves the marker and starts the sampler (read 2 s later), EVENT removes it and
+    stops it (`scripts/lib/program-audio-mode.sh`), report-only;
   * the installed file list covers the sampler's whole import closure + the shim's sources.
 
 Every bash run sources the lib under the caller's `set -euo pipefail`; values reach bash as
@@ -60,13 +62,28 @@ case "${args[0]}" in
   enable)
     mkdir -p "$HOME/.config/systemd/user/default.target.wants"
     for u in "${args[@]:1}"; do ln -sf "$HOME/.config/systemd/user/$u" "$HOME/.config/systemd/user/default.target.wants/$u"; done ;;
+  start)
+    date +%s.%N > "$FAKE_STATE/started" ;;
   is-active)
-    s="$(cat "$FAKE_STATE/active" 2>/dev/null || echo inactive)"; echo "$s"; [ "$s" = active ] ;;
+    if [ -e "$FAKE_STATE/die-after-1s" ] && [ -e "$FAKE_STATE/started" ] \
+       && python3 -c 'import sys, time; sys.exit(0 if time.time() - float(open(sys.argv[1]).read()) > 1.0 else 1)' "$FAKE_STATE/started"; then
+      s=failed
+    else
+      # one state per line, consumed one per call; the last line stays
+      s="$(head -n 1 "$FAKE_STATE/active" 2>/dev/null || echo inactive)"
+      [ "$(sed -n '$=' "$FAKE_STATE/active" 2>/dev/null || echo 0)" -gt 1 ] && sed -i 1d "$FAKE_STATE/active"
+      : "${s:=inactive}"
+    fi
+    echo "$s"; [ "$s" = active ] ;;
   *) exit 0 ;;
 esac
 """
 _FAKE_CURL = """#!/bin/bash
 echo "curl $*" >> "$FAKE_STATE/calls"
+if [ -e "$FAKE_STATE/curl-fail-first" ]; then
+  n="$(cat "$FAKE_STATE/curl-fail-first")"
+  if [ "$n" -gt 0 ]; then echo $((n - 1)) > "$FAKE_STATE/curl-fail-first"; exit 7; fi
+fi
 [ -e "$FAKE_STATE/curl-body" ] || exit 7
 cat "$FAKE_STATE/curl-body"
 """
@@ -104,6 +121,7 @@ class Box:
             "STRIH_PROGRAM_AUDIO_SYSFS": str(self.sys),
             "STRIH_PROGRAM_AUDIO_PYTHON": sys.executable,
             "STRIH_PROGRAM_AUDIO_CURL": str(self.bin / "curl"),
+            "STRIH_PROGRAM_AUDIO_RETRY_SLEEP": "0",
             "LANG": "C.UTF-8",
             # HOME is the fake operator's: keep the real user site-packages (numpy on dev1 comes from
             # pip --user; strih-lx gets it from apt)
@@ -153,8 +171,9 @@ def test_the_template_pins_the_e_cores_normal_priority_and_the_event_marker():
     t = TEMPLATE.read_text(encoding="utf-8")
     assert t.count("\nCPUAffinity=@E_CORES@\n") == 1
     assert not re.search(r"^(Nice|CPUWeight)=", t, re.M)
-    marker = _lib_value("STRIH_PROGRAM_AUDIO_EVENT_MARKER")
-    assert re.search(rf"^ExecCondition=/usr/bin/test ! -e %h/{re.escape(marker)}$", t, re.M)
+    marker = _lib_value("STRIH_PROGRAM_AUDIO_TEST_MARKER")
+    assert re.search(rf"^ExecCondition=/usr/bin/test -e %h/{re.escape(marker)}$", t, re.M)
+    assert t.count("ExecCondition=") == 1
     assert re.search(r"^ExecStart=/usr/bin/python3 /usr/local/lib/camera-box/scripts/program_audio_sampler.py$", t, re.M)
     assert re.search(r"^EnvironmentFile=-%h/\.config/camera-box/program-audio-sampler\.env$", t, re.M)
     assert re.search(r"^WantedBy=default\.target$", t, re.M)
@@ -295,44 +314,104 @@ def test_a_failing_apt_or_a_missing_source_fails_the_step(tmp_path):
 # ---------------------------------------------------------------------------------------------
 
 
-def test_a_fresh_install_grades_ok_ok_and_a_not_running_note(tmp_path):
+def _marker(box):
+    m = box.home / _lib_value("STRIH_PROGRAM_AUDIO_TEST_MARKER")
+    m.parent.mkdir(parents=True, exist_ok=True)
+    m.write_text("")
+    return m
+
+
+def test_a_fresh_install_grades_ok_ok_and_a_down_note(tmp_path):
+    """setup-strih's own step 17 runs verify-strih right after an enable-only install: no TEST marker,
+    the sampler down -- a NOTE, never a FAIL."""
     box = Box(tmp_path)
     assert box.install().returncode == 0
     rows = box.rows()
     assert [s for s, _ in rows] == ["OK", "OK", "NOTE"], rows
-    assert "not running" in rows[2][1] and "rig-mode.sh test" in rows[2][1]
+    assert "not in TEST mode" in rows[2][1] and "rig-mode.sh test" in rows[2][1]
 
 
-def test_the_event_marker_is_a_stopped_note(tmp_path):
+def test_test_mode_but_down_fails(tmp_path):
     box = Box(tmp_path)
     assert box.install().returncode == 0
-    m = box.home / _lib_value("STRIH_PROGRAM_AUDIO_EVENT_MARKER")
-    m.parent.mkdir(parents=True, exist_ok=True)
-    m.write_text("")
+    _marker(box)
     rows = box.rows()
-    assert rows[2][0] == "NOTE" and "EVENT mode" in rows[2][1]
+    assert rows[2][0] == "FAIL" and "TEST mode" in rows[2][1] and "not running" in rows[2][1]
 
 
-def test_a_running_sampler_must_answer_its_endpoint(tmp_path):
+def test_a_running_sampler_must_answer_a_fresh_verdict(tmp_path):
     box = Box(tmp_path)
     assert box.install().returncode == 0
     (box.state / "active").write_text("active")
     rows = box.rows()
     assert rows[2][0] == "FAIL" and "does not answer" in rows[2][1]
+    assert sum("program-audio.json" in c for c in box.calls() if c.startswith("curl")) == 3   # read 3 x
     (box.state / "curl-body").write_text('{"verdict": "MEASUREMENT", "source": "S", "age_s": 0.4}')
     rows = box.rows()
     assert rows[2] == ["OK", "(program-audio-endpoint) running; http://127.0.0.1:8891/program-audio.json "
                              "answers verdict=MEASUREMENT age_s=0.4"]
-    assert any("http://127.0.0.1:8891/program-audio.json" in c for c in box.calls())
+    (box.state / "curl-body").write_text('{"verdict": "MEASUREMENT", "source": "S", "age_s": 30.0}')
+    rows = box.rows()
+    assert rows[2][0] == "FAIL" and "stale" in rows[2][1]
+    (box.state / "curl-body").write_text('{"verdict": "MEASUREMENT", "source": "S", "age_s": null}')
+    assert box.rows()[2][0] == "FAIL"
     (box.state / "curl-body").write_text('{"verdict": "MAYBE"}')
     assert box.rows()[2][0] == "FAIL"
 
 
-def test_a_failed_unit_fails(tmp_path):
+def test_the_endpoint_read_retries_a_sampler_that_is_still_binding(tmp_path):
     box = Box(tmp_path)
     assert box.install().returncode == 0
-    (box.state / "active").write_text("failed")
-    assert box.rows()[2][0] == "FAIL"
+    (box.state / "active").write_text("active")
+    (box.state / "curl-body").write_text('{"verdict": "UNKNOWN", "source": "S", "age_s": 0.1}')
+    (box.state / "curl-fail-first").write_text("2")
+    assert box.rows()[2][0] == "OK"
+
+
+@pytest.mark.parametrize("env, url", [
+    ("PROGRAM_AUDIO_HTTP_PORT=18891\n", "http://127.0.0.1:18891/program-audio.json"),
+    ("PROGRAM_AUDIO_HTTP_PORT='18892'\nPROGRAM_AUDIO_HTTP_BIND=10.77.9.202\n", "http://10.77.9.202:18892/program-audio.json"),
+    ("PROGRAM_AUDIO_HTTP_BIND=0.0.0.0\n", "http://127.0.0.1:8891/program-audio.json"),
+])
+def test_the_endpoint_follows_the_env_file(tmp_path, env, url):
+    box = Box(tmp_path)
+    assert box.install().returncode == 0
+    f = box.home / _lib_value("STRIH_PROGRAM_AUDIO_ENV_FILE")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(env)
+    (box.state / "active").write_text("active")
+    (box.state / "curl-body").write_text('{"verdict": "SILENT", "source": "S", "age_s": 1.0}')
+    rows = box.rows()
+    assert rows[2][0] == "OK" and url in rows[2][1]
+    assert any(url in c for c in box.calls())
+
+
+def test_a_running_sampler_with_no_endpoint_fails(tmp_path):
+    box = Box(tmp_path)
+    assert box.install().returncode == 0
+    f = box.home / _lib_value("STRIH_PROGRAM_AUDIO_ENV_FILE")
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text("PROGRAM_AUDIO_HTTP_PORT=0\n")
+    (box.state / "active").write_text("active")
+    rows = box.rows()
+    assert rows[2][0] == "FAIL" and "no endpoint" in rows[2][1]
+
+
+@pytest.mark.parametrize("states, want", [
+    ("failed", "FAIL"),
+    ("activating", "FAIL"),                      # a crash loop (auto-restart) stays activating
+    ("activating\nactivating\nactive", "OK"),    # a sampler that is just starting settles
+])
+def test_failed_and_crash_looping_units_fail(tmp_path, states, want):
+    box = Box(tmp_path)
+    assert box.install().returncode == 0
+    _marker(box)
+    (box.state / "active").write_text(states)
+    (box.state / "curl-body").write_text('{"verdict": "MEASUREMENT", "source": "S", "age_s": 0.2}')
+    row = box.rows()[2]
+    assert row[0] == want, row
+    if states == "activating":
+        assert "crash loop" in row[1]
 
 
 def test_drifted_files_or_a_stale_shim_fail(tmp_path):
@@ -424,28 +503,33 @@ def _remote(tmp_path, mode, active):
 
 
 @pytest.mark.parametrize("active, rc0", [("active", True), ("inactive", False)])
-def test_test_mode_starts_the_unit_and_succeeds_only_when_it_runs(tmp_path, active, rc0):
+def test_test_mode_leaves_the_marker_and_starts_the_unit(tmp_path, active, rc0):
     box, r = _remote(tmp_path, "test", active)
     assert (r.returncode == 0) is rc0 and f"program-audio-sampler: {active}" in r.stdout
     assert f"systemctl --user start {UNIT}" in box.calls()
+    assert (box.home / _lib_value("STRIH_PROGRAM_AUDIO_TEST_MARKER")).exists()
+
+
+def test_test_mode_reads_the_state_after_a_settle(tmp_path):
+    """A Type=simple unit reads active the moment it is forked: a sampler that dies on import a
+    second later must not pass. The remote text reads is-active 2 s after the start."""
+    box = Box(tmp_path)
+    (box.state / "die-after-1s").write_text("")
+    (box.state / "active").write_text("active")
+    cmd = _mode("program_audio_mode_remote_cmd", "test", env=box.env()).stdout
+    r = subprocess.run(["bash", "-c", cmd], env=box.env(), capture_output=True, text=True, timeout=30)
+    assert r.returncode != 0 and "program-audio-sampler: failed" in r.stdout
 
 
 @pytest.mark.parametrize("active, rc0", [("inactive", True), ("active", False)])
-def test_event_mode_leaves_the_marker_and_stops_the_unit(tmp_path, active, rc0):
-    box, r = _remote(tmp_path, "event", active)
+def test_event_mode_removes_the_marker_and_stops_the_unit(tmp_path, active, rc0):
+    box = Box(tmp_path)
+    m = _marker(box)
+    (box.state / "active").write_text(active)
+    cmd = _mode("program_audio_mode_remote_cmd", "event", env=box.env()).stdout
+    r = subprocess.run(["bash", "-c", cmd], env=box.env(), capture_output=True, text=True, timeout=30)
     assert (r.returncode == 0) is rc0 and f"program-audio-sampler: {active}" in r.stdout
     assert f"systemctl --user stop {UNIT}" in box.calls()
-    assert (box.home / _lib_value("STRIH_PROGRAM_AUDIO_EVENT_MARKER")).exists()
-
-
-def test_test_mode_removes_an_existing_marker(tmp_path):
-    box = Box(tmp_path)
-    m = box.home / _lib_value("STRIH_PROGRAM_AUDIO_EVENT_MARKER")
-    m.parent.mkdir(parents=True)
-    m.write_text("")
-    (box.state / "active").write_text("active")
-    cmd = _mode("program_audio_mode_remote_cmd", "test", env=box.env()).stdout
-    assert subprocess.run(["bash", "-c", cmd], env=box.env(), capture_output=True, timeout=30).returncode == 0
     assert not m.exists()
 
 

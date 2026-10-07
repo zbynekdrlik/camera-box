@@ -156,6 +156,27 @@ def test_the_shared_payload_rules_apply(tmp_path, monkeypatch):
         assert json.loads(h.request("GET", "/program-audio.json")[2])["verdict"] == "UNKNOWN"
 
 
+def test_an_idle_client_is_dropped_after_the_request_timeout(tmp_path):
+    """A client that connects and sends nothing must not hold a server thread forever: the endpoint
+    listens on 0.0.0.0 on a production box with no firewall (review round 3)."""
+    assert rsf.ReadOnlyHandler.timeout == 10
+    serve = _serve(tmp_path)
+    server = pah.make_server("127.0.0.1", 0, str(serve), timeout=0.5)
+    host, port = server.server_address
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    try:
+        s = socket.create_connection((host, port), timeout=5)
+        t0 = time.monotonic()
+        assert s.recv(1024) == b""               # the server closed the idle connection
+        assert time.monotonic() - t0 < 4.0
+        s.close()
+    finally:
+        server.shutdown()
+        server.server_close()
+        t.join(5)
+
+
 def test_the_server_header_names_the_sampler_and_hides_the_python_version(tmp_path):
     serve = _serve(tmp_path)
     with _Http(serve) as h:
