@@ -3,8 +3,9 @@
 The clip replaces music in the CG segments of the release E2E (owner amendment, comment 6016489928):
 a synthesized 30 fps recording of the cam2 painter. Pinned here on a real generated 10 s clip,
 decoded by the REAL consumers, never by a re-implementation:
-  - the YouTube-leg tick decoder (scripts/youtube_leg_ticks.py) reads the painter's 60 Hz tick of
-    every frame (>= 99 %);
+  - the YouTube-leg tick decoder (scripts/youtube_leg_ticks.py), asked for the clip's id
+    (`runs=CLIP_RUNS`), reads the painter's 60 Hz tick of every frame (>= 99 %) and the timeline
+    proves every frame's cadence; its default decode still refuses the reserved id;
   - the dock's own QPSK decoder (the shim built by scripts/build-qpsk-guard-shim.sh) finds every
     marker at its time and index on BOTH channels, and nothing else;
   - the program-audio guard (the real sampler loop + the shim) reads every window after the warm-up
@@ -12,13 +13,15 @@ decoded by the REAL consumers, never by a re-implementation:
     the guard's 60 Hz timecode line;
   - two runs give the same bytes.
 The parameter block is pinned to the Rust painter / marker sources, the dock header and the shim's
-compiled-in parameters (one parameter set). `recording-verdict --av-sync` on the clip is CI/live only
+compiled-in parameters (one parameter set), and the waveform to the vendored norihiro encoder
+(vendor/av-sync-dock/tool/videogen.py) for all 256 indices. `recording-verdict --av-sync` on the clip is CI/live only
 (the probe feature never compiles on dev1, Tier-0).
 """
 import hashlib
 import math
 import pathlib
 import re
+import struct
 import subprocess
 import sys
 
@@ -87,11 +90,27 @@ def _log_rows(path):
 
 
 def test_the_tick_decoder_reads_the_painters_tick_on_every_frame(clip):
-    rows = ylt.decode_ticks(str(clip[0]), workers=4)
+    import youtube_leg_timeline as ytl
+
+    rows = ylt.decode_ticks(str(clip[0]), workers=4, runs=ylt.CLIP_RUNS)
     assert len(rows) == CLIP_SECONDS * gen.FPS == ylt.container_frames(str(clip[0]))
-    right = sum(1 for r in rows if r[2] == gen.TICKS_PER_FRAME * r[0])
+    right = sum(1 for r in rows if r[2] == 2 * r[0])  # the painter's 60 Hz tick: 2 per 30 fps frame
     assert right >= 0.99 * len(rows), f"only {right}/{len(rows)} frames read their tick"
-    assert all(r[2] in (None, gen.TICKS_PER_FRAME * r[0]) for r in rows), "a frame read a WRONG tick"
+    assert all(r[2] in (None, 2 * r[0]) for r in rows), "a frame read a WRONG tick"
+    cont = ytl.continuity([r[:3] for r in rows])  # the YouTube-leg timeline's own cadence proof
+    assert (cont["cadence_proven"], cont["events"]) == (len(rows), 0), cont
+
+
+def test_the_default_tick_decode_still_refuses_the_clip_id():
+    """A default decode (camera windows, restreamer's gate) never reads the clip's tick: the clip
+    restarts its tick every play, so a clip tick there would read as replay dups."""
+    import cv2
+
+    det = cv2.QRCodeDetector()
+    for f in (1, 151):
+        frame = cv2.cvtColor(gen.render_frame(f), cv2.COLOR_GRAY2BGR)
+        assert ylt.half_ticks(frame, det) == (None, None)
+        assert ylt.half_ticks(frame, det, runs=ylt.CLIP_RUNS) == (2 * f, 2 * f - 1)
 
 
 def test_the_dock_decoder_finds_every_marker_on_both_channels_and_nothing_else(clip, clip_audio, decoder):
@@ -156,6 +175,73 @@ def test_a_failed_encode_fails_loud_and_leaves_nothing(tmp_path, monkeypatch):
     assert gen.main(["--out", str(out), "--seconds", "1"]) == 1
 
 
+def _fake_ffmpeg(tmp_path, monkeypatch, body):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "ffmpeg"
+    fake.write_text("#!/bin/sh\n" + body)
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}:/usr/bin:/bin:/usr/local/bin")
+
+
+def test_an_ffmpeg_that_exits_0_without_reading_is_a_failure(tmp_path, monkeypatch):
+    _fake_ffmpeg(tmp_path, monkeypatch, "exit 0\n")
+    out = tmp_path / "e.mp4"
+    with pytest.raises(RuntimeError, match="input not read in full"):
+        gen.write_clip(str(out), 1)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["bin"]
+
+
+def test_a_hung_ffmpeg_is_killed_by_the_bound_and_leaves_nothing(tmp_path, monkeypatch):
+    _fake_ffmpeg(tmp_path, monkeypatch, "sleep 60\n")  # never reads its input
+    out = tmp_path / "f.mp4"
+    with pytest.raises(RuntimeError, match="bound ran out"):
+        gen.write_clip(str(out), 1, timeout_s=2)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["bin"]
+
+
+def test_an_encode_without_the_right_frame_count_is_never_renamed(tmp_path, monkeypatch):
+    # reads every frame, exits 0, but writes no real mp4 (ffprobe cannot count its frames)
+    _fake_ffmpeg(tmp_path, monkeypatch, 'cat >/dev/null\nfor last; do :; done\necho junk > "$last"\n')
+    out = tmp_path / "g.mp4"
+    with pytest.raises(RuntimeError, match="cannot be probed|frames, expected"):
+        gen.write_clip(str(out), 1)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["bin"]
+
+
+def test_a_stopped_generator_kills_ffmpeg_and_leaves_nothing(tmp_path, monkeypatch):
+    import os
+    import signal
+    import time
+
+    _fake_ffmpeg(tmp_path, monkeypatch, 'echo $$ > "$FAKE_FFMPEG_PID"\nsleep 60\n')  # never reads
+    work = tmp_path / "tmp"
+    work.mkdir()
+    pid_file = tmp_path / "pid"
+    env = dict(os.environ, TMPDIR=str(work), FAKE_FFMPEG_PID=str(pid_file))
+    p = subprocess.Popen([sys.executable, str(_SCRIPTS / "gen_measurement_clip.py"), "--out",
+                          str(tmp_path / "s.mp4"), "--seconds", "1"], env=env,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    deadline = time.monotonic() + 60
+    while not (pid_file.exists() and pid_file.read_text().strip()) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert pid_file.exists(), "the fake ffmpeg never started"
+    time.sleep(0.5)  # the generator is now blocked feeding frames
+    p.send_signal(signal.SIGTERM)
+    _, err = p.communicate(timeout=60)
+    assert p.returncode == 128 + signal.SIGTERM, err
+    assert not os.path.exists(f"/proc/{int(pid_file.read_text())}"), "ffmpeg survived the stop"
+    assert not list(work.iterdir()), "the temp audio dir was left behind"
+    assert sorted(x.name for x in tmp_path.iterdir()) == ["bin", "pid", "tmp"]
+
+
+def test_a_clip_longer_than_the_counter_is_refused_before_any_encode(tmp_path):
+    assert 10 ** gen.DIGITS // gen.FPS == 333
+    with pytest.raises(ValueError, match="frame counter"):
+        gen.write_clip(str(tmp_path / "h.mp4"), 334)
+    assert not list(tmp_path.iterdir())
+
+
 def test_the_committed_deliverable_frame_reads_its_ticks():
     """tests/fixtures/measurement-clip-1404/clip-v1-frame-1801.png is frame 1801 of the real
     deliverable (H.264, gray via ffmpeg). The Rust recording decode reads the same file
@@ -164,7 +250,7 @@ def test_the_committed_deliverable_frame_reads_its_ticks():
 
     img = cv2.imread(str(_ROOT / "tests" / "fixtures" / "measurement-clip-1404" / "clip-v1-frame-1801.png"))
     assert img is not None and img.shape[:2] == (gen.HEIGHT, gen.WIDTH)
-    assert ylt.half_ticks(img, cv2.QRCodeDetector()) == (3602, 3601)
+    assert ylt.half_ticks(img, cv2.QRCodeDetector(), runs=ylt.CLIP_RUNS) == (3602, 3601)
     assert gen.frame_payloads(1801) == ("P911016.3602.60033333333.1636215862",
                                         "P911016.3601.60016666667.527692900")
     rs = _src("tests/measurement_clip_decode_1404.rs")
@@ -185,18 +271,20 @@ def test_frame_payloads_are_crc_valid_painter_payloads_of_the_frames_tick():
     for f in (0, 1, 151, 1800, 3599):
         left, right = gen.frame_payloads(f)
         t = gen.TICKS_PER_FRAME * f
-        assert ylt.painter_payload(left) == (gen.RUN_ID, t)
-        assert ylt.painter_payload(right) == (gen.RUN_ID, max(t - 1, 0))
+        assert ylt.painter_payload(left, ylt.CLIP_RUNS) == (gen.RUN_ID, t)
+        assert ylt.painter_payload(right, ylt.CLIP_RUNS) == (gen.RUN_ID, max(t - 1, 0))
         assert left.split(".")[2] == str(gen.tick_pts_ns(t))
     assert gen.tick_pts_ns(2) == 33_333_333 and gen.tick_pts_ns(1) == 16_666_667
     assert gen.tick_pts_ns(2 * 30) == 1_000_000_000  # frame 30 = 1 s
 
 
-def test_the_tick_decoder_reads_the_clip_id_and_still_refuses_every_other_reserved_id():
-    assert ylt.MEASUREMENT_CLIP_RUN_ID == gen.RUN_ID == 911016
-    assert ylt.painter_payload(gen.qr_payload(911016, 7, 0)) == (911016, 7)
+def test_the_tick_decoder_reads_the_clip_id_only_when_asked_and_never_another_reserved_id():
+    assert ylt.MEASUREMENT_CLIP_RUN_ID == gen.RUN_ID == 911016 and ylt.CLIP_RUNS == (911016,)
+    assert ylt.painter_payload(gen.qr_payload(911016, 7, 0)) is None  # the default decode
+    assert ylt.painter_payload(gen.qr_payload(911016, 7, 0), ylt.CLIP_RUNS) == (911016, 7)
     for run in (911001, 911013, 911014, 911015, 911017):
-        assert ylt.painter_payload(gen.qr_payload(run, 7, 0)) is None
+        assert ylt.painter_payload(gen.qr_payload(run, 7, 0), ylt.CLIP_RUNS) is None
+    assert ylt.painter_tick([gen.qr_payload(911016, 9, 0), "junk"], ylt.CLIP_RUNS) == 9
 
 
 def test_the_geometry_is_the_painters():
@@ -278,6 +366,38 @@ def test_the_qpsk_parameters_are_the_rust_painters_the_docks_and_the_shims(decod
         assert re.search(rf"static const uint32_t {name} = {value}u;", hpp), name
     assert (decoder.params["sample_rate"], decoder.params["carrier_hz"], decoder.params["c"]) == \
         (gen.SAMPLE_RATE, gen.CARRIER_HZ, gen.CYCLES_PER_SYMBOL)
+
+
+def test_every_scheduled_marker_ends_inside_the_clip():
+    assert gen.signal_len() < gen.SAMPLE_RATE // gen.FPS  # 1085 samples < one frame (1600)
+    for frames in (60, 61, 74, 3600):
+        last_f = gen.marker_schedule(frames)[-1][0]
+        assert last_f < frames
+        assert last_f * gen.SAMPLE_RATE // gen.FPS + gen.signal_len() <= frames * gen.SAMPLE_RATE // gen.FPS
+
+
+def test_the_waveform_is_the_vendored_norihiro_encoders_for_every_index(tmp_path):
+    """vendor/av-sync-dock/tool/videogen.py `Pattern.audio_frames` is the reference encoder the dock
+    decodes: every marker of the generator matches it within one int16 step (float order)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "videogen_1404", _ROOT / "vendor" / "av-sync-dock" / "tool" / "videogen.py")
+    videogen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(videogen)
+    ctx = videogen.Context(str(tmp_path), str(gen.TICK_HZ), str(gen.SAMPLE_RATE))
+    pat = videogen.Pattern(ctx, f"q={gen.QPSK_Q},f={gen.CARRIER_HZ}")
+    assert (pat.q, pat.f, pat.c) == (gen.QPSK_Q, gen.CARRIER_HZ, gen.CYCLES_PER_SYMBOL)
+    lead = ctx.ar * (pat.q * 2) * ctx.vr[1] // ctx.vr[0]  # skip the reference's lead silence
+    worst = 0
+    for index in range(256):
+        pat.i = index
+        raw = pat.audio_frames(start_offset=lead)
+        ref = np.array(struct.unpack(f"<{len(raw) // 2}h", raw), dtype=np.int64)
+        mine = np.round(gen.marker_signal(index).astype(np.float64) * 32767 * gen.MARKER_AMPLITUDE)
+        assert ref.shape == mine.shape, (index, ref.shape, mine.shape)
+        worst = max(worst, int(np.abs(ref - mine.astype(np.int64)).max()))
+    assert worst <= 1, f"the waveform differs from videogen.py by {worst} int16 steps"
 
 
 def test_the_marker_signal_is_ten_raised_cosine_symbols():
