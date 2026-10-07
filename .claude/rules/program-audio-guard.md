@@ -17,6 +17,7 @@ paths:
   - "tests/python/test_program_audio_guard_1404.py"
   - "tests/python/test_program_audio_marker_1404.py"
   - "tests/python/test_program_audio_timeline_1404.py"
+  - "tests/python/test_program_audio_bridge_1404.py"
   - "tests/python/qpsk_guard_shim_1404.py"
   - "tests/python/test_rig_marker_mirror_1404.py"
   - "tests/python/test_rig_serve_routes_1404.py"
@@ -35,7 +36,7 @@ its SERVE dir (`scripts/rig_serve_files.py`): `$XDG_RUNTIME_DIR/rig-lease-serve`
 | Route | Writer | Contract |
 |---|---|---|
 | `/rig-qpsk-markers.csv` | `rig-marker-mirror` `--user` service (`scripts/rig-marker-mirror.sh` → `rig_marker_mirror.py`) | cam2's `/run/rig-qpsk-markers.csv`, complete rows; `text/csv`; `X-Mirror-Age-S` = seconds since new rows last arrived; 404 absent |
-| `/program-audio.json` | `program-audio-sampler` `--user` service | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain[, reason]}`; both ages recomputed by the server per request; the two marker counts are null without a full marker span; 404 absent; unreadable or foreign-owned = UNKNOWN |
+| `/program-audio.json` | `program-audio-sampler` `--user` service | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain, holes_bridged, bridged_ms[, reason]}`; both ages recomputed by the server per request; the two marker counts are null without a full marker span; `holes_bridged`/`bridged_ms` count the bridged holes since the sampler started (null while it is not sampling); 404 absent; unreadable or foreign-owned = UNKNOWN |
 
 The consumer CLI is `scripts/program_audio_guard.py`, used by both YouTube gates (camera-box and
 restreamer issue 357):
@@ -166,14 +167,64 @@ level. Re-run the full calibration after any decoder or rule change:
     holes into the three real fixtures (45 positions per case, exact and jittered stamps, the real
     decoder shim): 0 FOREIGN windows. A frame the sampler drops itself (sample rate ≤ 0) is such a
     hole too.
+  - **A hole up to 250 ms AHEAD of the timeline is BRIDGED, never a restart** (design 6036098516,
+    Approach 1; `HOLE_BRIDGE_MAX_MS`, `frame_continues` returns `Continuity(kind, missing_samples)`,
+    pinned by `tests/python/test_program_audio_bridge_1404.py`).
+    - Why: on 7.10.2026 11:30–12:35 the journal held 55 discontinuities, all POSITIVE, 42 of them
+      +41.4…+52.6 ms = two NDI frames (2048 samples) plus send jitter, arrival gap 0.1 s, never
+      answered by a negative step. The receiver dropped frames while dev1 was loaded, and every hole
+      cost a 4 s warm-up (`timeline_breaks=33 UNKNOWN=22` in one summary); restreamer's watchdog
+      stopped its YouTube gate on it (dev CI 37602415434).
+    - The rule: tolerance < offset ≤ 250 ms → `round(offset·sr)` zero samples go through the window
+      accumulator before the frame and the span is kept (one `audio timeline hole: … bridged with N
+      zero samples (X ms), the marker span is kept` line). Behind the timeline beyond the tolerance
+      (an overlap, a backward jump), a hole over 250 ms, a sample-rate change at the hole and an
+      undefined timestamp restart as before. The bridged frame's offset is a hole, never jitter, so
+      it stays out of `max_offset_ms`.
+    - **The chain is decoded over the REAL samples only.** The accumulator and `MarkerSpan` carry a
+      real-sample mask; `decode_real_samples` hands the decoder each delivered stretch on its own and
+      moves the word times to their timeline place, so the zeros (and the edges next to them) can
+      never add a word. Probe before the change: decoding the zero-filled span found words starting
+      inside the zeros (4 in one chord trial) and a chain one higher than the delivered stretches in
+      3 of 40 in-band trials. A span with no bridge decodes in ONE call as before, so the bars cannot
+      move (re-run 7.10.2026: bar a 1847 windows min 6, bar b chords/tremolo/melody 1, bandnoise 3).
+    - **The level is the delivered samples' own** (`analyse(samples, sr, real)`, review round 1).
+      Over the window with its zeros the level falls (a 250 ms hole = −0.58 dB, two thirds zeros
+      = −4.8 dB), and quiet broadband music just over the −60 dBFS bar read SILENT, which the gate
+      passes. A window with nothing delivered is UNKNOWN.
+    - **The spectral share stays a ratio of the delivered signal.** Zeros add no energy to either
+      side. Music windows with 2–11-frame holes or two thirds zeros keep their share within 5 points
+      (pink ~80 %, speech-shaped ~42 %, all over the bar).
+    - **Residual: a hole can lift a REAL measurement window over the bar (a false FOREIGN).** The
+      measurement's in-band energy comes in marker bursts (a decoded word every ~0.5 s), so a hole
+      that removes a burst raises the share of what was delivered. Random positions on the full
+      rec3b + rec2 recordings, 5340 window cases each: one 2-frame hole crossed the bar 3 times
+      (worst 32.8 %), two holes in one window 8 times (worst 53 %). A 5 ms fade of the hole edges
+      gave 2 and 10: a fade does not lower the rate (in one case, rec3b window 64, the edge step alone
+      carried the window over the bar, 32.8 % -> 29.3 % faded), so no fade is applied. Before the
+      bridge the window holding a hole was never judged (the span restarted, UNKNOWN). Reported on
+      the Design-question thread (6036260703) next to the date step.
+    - Restreamer's safety checks, pinned: music (pink, or an in-band chord) arriving before, across
+      or after a bridged hole reads FOREIGN in the same window and starts the latch with the same
+      payload as without the hole; music two thirds bridged zeros never reads MEASUREMENT and the
+      decoder never sees a bridged sample. Before, the same hole restarted the span and an in-band
+      chord waited out the warm-up.
+    - Replay of the 55 live offsets as real holes (frames dropped, the rest as send jitter) through
+      the real decoder on rec2 and session (20 min each): 49 bridged, 6 UNKNOWN (only the holes over
+      250 ms: 256.3, 337.8, 357.6, 543.0, 556.2, 571.7 ms), 0 FOREIGN, minimum chain 7.
+    - **Open (Design-question 6036260703): a FORWARD timestamp step with no sample lost**, i.e. a
+      dantesync date step of up to 250 ms, is bridged too. The zeros then push every later marker
+      round(60·δ) indices off the line. Probe on the committed clip: +50…+250 ms at 33 positions,
+      2 FOREIGN windows, minimum chain 3; before, one UNKNOWN. Not decided in the lane.
   - Fallback: only when a timestamp is undefined (`INT64_MAX` = `NDIlib_recv_timestamp_undefined`,
     or ≤ 0) the old arrival rule applies (`RECEIVE_GAP_S` = 1 s, logged `receive gap of … (no NDI
     sender timestamp …)`). An NDI error frame still restarts the span unconditionally (stricter
     than the fallback; 0 error frames in the 6 h live journal).
   - The 10-minute summary counts `timeline_breaks`, `late_bursts` and `receive_gaps` (fallback only),
     and reports `max_offset_ms`: the largest |offset| of a frame that continued, i.e. the sender's
-    jitter against the 41.3 ms tolerance (the margin to watch); a restart after an NDI error frame
-    shows as `error_frames`. Each restart and each late burst also logs one line.
+    jitter against the 41.3 ms tolerance (the margin to watch), then `holes_bridged` and
+    `bridged_ms`; a restart after an NDI error frame shows as `error_frames`. Each restart, each
+    late burst and each bridge also logs one line.
   - STEP 0 (7.10.2026): a second, read-only sampler instance (private serve dir) took the live
     `STREAM-SNV (stream)` for 25 min while dev1 ran test suites and the marker calibration.
     70 304 frames (comment 6030714990):
@@ -194,13 +245,24 @@ level. Re-run the full calibration after any decoder or rule change:
     A probe can reuse the scratch recipe: subclass `NdiAudioReceiver.capture` to log
     `frame.timestamp`, run `program_audio_sampler.run` with a private serve dir, never the live
     one, and never restart the live unit for it.
-  - **A dantesync date step** moves the sender's wall clock and so its timestamps once. A step over
-    the tolerance reads as ONE discontinuity: one UNKNOWN warm-up window per step (the nightly
-    1.12.0 step included), never FOREIGN, because a restarted span is never judged as a short chain.
-    Micro-corrections of a few ms stay inside the tolerance. Accepted in the design.
+  - **A dantesync date step** moves the sender's wall clock and so its timestamps once. A backward
+    step or a forward one over 250 ms reads as ONE discontinuity: one UNKNOWN warm-up window per
+    step, never FOREIGN, because a restarted span is never judged as a short chain. A forward step
+    up to 250 ms is bridged like a hole (the open question above). Micro-corrections of a few ms
+    stay inside the tolerance.
   - Residual limits: a sender stall longer than the tolerance (OBS submitting a frame > ~20 ms
     later than its normal jitter) costs one warm-up although nothing was lost; a sender with no
     timestamps falls back to the arrival rule and its old limit.
+  - **Test trap: a fake decoder must follow the stretch it is handed.** With a bridge in the span
+    the decoder is called once per delivered stretch, and `FixedChain` returns the same 8 words for
+    every call, so the copies collide on rule 2 and a measurement span reads FOREIGN. Loop tests
+    with a bridge use `_TimelineMarkers` (markers written into channel 0 at ~−100 dBFS on the
+    sender timeline, read back where the sampler puts them) or the real shim.
+  - **Test trap: a hole exactly AT a limit is decided by the stamps' floor rounding.** 1024-sample
+    frames at 48 kHz are 213 333.3 units of 100 ns, so a test hole meant as "+250.0 ms" lands a few
+    units over or under the limit depending on the frame index (one landed as a discontinuity).
+    Pin a boundary with 4800-sample frames (exactly 1 000 000 units), and keep loop tests a little
+    inside it (249 ms).
   - Tests: the fakes use a local `_Block` with a timestamp field, so they exercise the loop, not the
     binding; `pan.AudioBlock` defaults `timestamp` to undefined, so an old fake (2 fields) runs the
     arrival fallback. `program_audio_marker_calibrate.py` stamps its blocks on a continuous

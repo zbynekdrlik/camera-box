@@ -64,11 +64,31 @@ queued audio in one late burst (live 7.10.2026: 57 spurious `receive gap of 1.0-
 sampler judges continuity on the SENDER's audio timeline (frame_continues): every NDI audio frame
 carries the SDK `timestamp` (100 ns, the sender's submission time, NDIlib_recv_timestamp_undefined
 = INT64_MAX when the SDK has none) and its sample count, and
-  expected = prev_timestamp + prev_samples / sample_rate
-  |timestamp - expected| <= one frame duration + CONTINUITY_SLACK_S   CONTINUE (any arrival time)
+  expected = prev_timestamp + prev_samples / sample_rate, off = timestamp - expected
+  |off| <= one frame duration + CONTINUITY_SLACK_S (the tolerance)   CONTINUE (any arrival time)
+  tolerance < off <= HOLE_BRIDGE_MAX_MS                               BRIDGE: round(off * sr) samples
+                                                                      are missing; the sampler inserts
+                                                                      that many zeros, the span kept
   otherwise                                                           DISCONTINUITY (span restarts)
   either timestamp undefined (INT64_MAX, or <= 0)                     UNKNOWN_TS (the sampler falls
                                                                       back to the arrival gap)
+BRIDGE (design issue 1404 comment 6036098516, Approach 1): live 7.10.2026 11:30-12:35, 55 frames sat
+POSITIVE steps off the timeline, 42 of them +41.4...+52.6 ms = two NDI frames (2048 samples, 42.7 ms)
+plus send jitter, arrival gap 0.1 s, never answered by a negative one: real holes the receiver
+dropped while dev1 was loaded, each a 4 s UNKNOWN warm-up (a 10-min summary read timeline_breaks=33,
+UNKNOWN=22). The timestamp says how many samples are missing, so the zeros put every later sample
+back on its sender-timeline position and the marker chain stays on its line (stitching the hole
+would move every later marker 2.56 indices, past the +-2 tolerance). The zeros are silence in the
+window, but: the marker chain is decoded over the REAL samples only
+(program_audio_sampler.decode_real_samples: each delivered stretch on its own, so no word can come
+from the zeros); the level is the delivered samples' own (analyse(..., real)), else quiet foreign
+audio would sink under the SILENT bar; the spectral share stays a ratio of the delivered signal
+(zeros add no energy to either side). A frame BEHIND the timeline beyond the tolerance (an overlap,
+a backward jump), a hole over HOLE_BRIDGE_MAX_MS and a format change at a hole still restart.
+Open (issue 1404 comment 6036260703): a FORWARD timestamp step of up to 250 ms with no sample lost
+(a dantesync date step) is bridged too, its markers then sit off the line and a span holding it can
+read a short chain; and a hole that removes a marker burst can lift a real measurement window over
+the FOREIGN bar (3 of 5340 single 2-frame holes on rec3b + rec2, 8 of 5340 with two per window).
 STEP 0 (7.10.2026, 25 min / 70 304 frames of the live stream program, received by a second sampler
 instance while dev1 was loaded; issue 1404 comment 6030714990): the sender's submission jitter
 reached 24.5 ms against a tolerance of 41.3 ms (1024 samples at 48 kHz + 20 ms); every arrival gap
@@ -76,9 +96,10 @@ reached 24.5 ms against a tolerance of 41.3 ms (1024 samples at 48 kHz + 20 ms);
 timeline; one real 200 ms hole (its frames never delivered, the arrival gap only 0.19 s) was off it.
 A second 20-min run of THIS loop on the live sender (56 250 frames): jitter up to 29.5 ms (p99 18.2),
 0 timeline breaks, 0 receive gaps, 599 MEASUREMENT windows and the one start-up UNKNOWN.
-A dantesync DATE STEP moves the sender's wall clock, and so its timestamps, once: a step over the
-tolerance reads as ONE discontinuity = one UNKNOWN warm-up window (never FOREIGN: a restarted span
-is never judged as a short chain); a micro-correction of a few ms stays inside the tolerance.
+A dantesync DATE STEP moves the sender's wall clock, and so its timestamps, once: a backward step
+or a forward one over HOLE_BRIDGE_MAX_MS reads as ONE discontinuity = one UNKNOWN warm-up window
+(never FOREIGN: a restarted span is never judged as a short chain); a forward step up to 250 ms is
+bridged (the open question above); a micro-correction of a few ms stays inside the tolerance.
 
 CALIBRATION (6.10.2026, the real session recordings in ~/.claude/work-products/issue-1404/audio/,
 48 kHz stereo, every 2 s window): rec2 (604 windows), rec3a (324), rec3b (286), session (637) --
@@ -129,6 +150,7 @@ import json
 import math
 import os
 from datetime import datetime
+from typing import NamedTuple
 
 import numpy as np
 
@@ -157,7 +179,10 @@ MARKER_CHAIN_MIN = 4          # MEASUREMENT needs a chain this long (real audio 
 NDI_TIMESTAMP_UNDEFINED = 2**63 - 1   # NDIlib_recv_timestamp_undefined (Processing.NDI.structs.h)
 NDI_TIME_UNITS_PER_S = 10_000_000     # NDI timestamps count 100 ns
 CONTINUITY_SLACK_S = 0.020            # tolerance = one frame duration + this (continuity_tolerance_100ns)
+HOLE_BRIDGE_MAX_MS = 250.0            # a frame up to this far AHEAD (beyond the tolerance) is a hole the
+                                      # sampler bridges with zeros, the span kept (design 6036098516)
 CONTINUE = "CONTINUE"
+BRIDGE = "BRIDGE"
 DISCONTINUITY = "DISCONTINUITY"
 UNKNOWN_TS = "UNKNOWN_TS"
 
@@ -192,21 +217,62 @@ def timeline_offset_100ns(prev_ts: int, prev_samples: int, sample_rate: int, ts:
     return (int(ts) - int(prev_ts)) - _frame_100ns(prev_samples, sample_rate)  # exact int difference first
 
 
-def frame_continues(prev_ts, prev_samples: int, sample_rate: int, ts, tolerance: float) -> str:
-    """CONTINUE | DISCONTINUITY | UNKNOWN_TS: does the frame stamped `ts` continue the sender's
-    audio timeline after the previous frame (stamped `prev_ts`, `prev_samples` long at
-    `sample_rate`)? Within +-`tolerance` (100 ns; continuity_tolerance_100ns) of the expected
-    stamp it continues, whatever its arrival time; farther away (a hole, a sender restart, a date
-    step) it is a discontinuity. UNKNOWN_TS when either timestamp is undefined: the caller then
-    falls back to the arrival gap."""
+class Continuity(NamedTuple):
+    """frame_continues' outcome: `kind` is CONTINUE | BRIDGE | DISCONTINUITY | UNKNOWN_TS;
+    `missing_samples` (BRIDGE only, else 0) is how many samples per channel are missing before the
+    frame on the sender's timeline: the zeros the sampler inserts so every later sample keeps its
+    sender-timeline position."""
+    kind: str
+    missing_samples: int = 0
+
+
+def hole_bridge_max_100ns() -> float:
+    """HOLE_BRIDGE_MAX_MS in NDI 100 ns units: the largest offset ahead of the timeline that is
+    bridged."""
+    return HOLE_BRIDGE_MAX_MS * NDI_TIME_UNITS_PER_S / 1000.0
+
+
+def bridge_samples(offset_100ns: float, sample_rate: int) -> int:
+    """round(offset * sample_rate): the samples per channel a hole of `offset_100ns` holds."""
+    if not sample_rate > 0:
+        raise ValueError(f"bridge_samples: sample_rate {sample_rate!r} must be > 0")
+    if not offset_100ns > 0:
+        raise ValueError(f"bridge_samples: offset {offset_100ns!r} must be > 0")
+    return int(math.floor(offset_100ns * sample_rate / NDI_TIME_UNITS_PER_S + 0.5))
+
+
+def frame_continues(prev_ts, prev_samples: int, sample_rate: int, ts, tolerance: float) -> Continuity:
+    """Does the frame stamped `ts` continue the sender's audio timeline after the previous frame
+    (stamped `prev_ts`, `prev_samples` long at `sample_rate`)? With off = timeline_offset_100ns:
+      |off| <= tolerance                      CONTINUE, whatever its arrival time
+      tolerance < off <= hole_bridge_max      BRIDGE: a hole of `missing_samples` = round(off * sr)
+                                              (the sampler inserts that many zeros, the span kept)
+      otherwise                               DISCONTINUITY (behind the timeline beyond the tolerance =
+                                              an overlap / a backward jump, or a hole over
+                                              HOLE_BRIDGE_MAX_MS, a sender restart, a large date step)
+      either timestamp undefined              UNKNOWN_TS: the caller falls back to the arrival gap
+    `tolerance` is in 100 ns (continuity_tolerance_100ns)."""
     if not tolerance >= 0:
         raise ValueError(f"frame_continues: tolerance {tolerance!r} must be >= 0")
     if not (timestamp_defined(prev_ts) and timestamp_defined(ts)):
         _frame_100ns(prev_samples, sample_rate)  # an invalid frame is refused here too
-        return UNKNOWN_TS
-    if abs(timeline_offset_100ns(prev_ts, prev_samples, sample_rate, ts)) <= tolerance:
-        return CONTINUE
-    return DISCONTINUITY
+        return Continuity(UNKNOWN_TS)
+    off = timeline_offset_100ns(prev_ts, prev_samples, sample_rate, ts)
+    if abs(off) <= tolerance:
+        return Continuity(CONTINUE)
+    if tolerance < off <= hole_bridge_max_100ns():
+        return Continuity(BRIDGE, bridge_samples(off, sample_rate))
+    return Continuity(DISCONTINUITY)
+
+
+def real_runs(real) -> list[tuple[int, int]]:
+    """The [start, stop) sample ranges of the True runs of a real-sample mask (the samples the
+    receiver delivered, as opposed to the zeros that bridge a hole), in order."""
+    m = np.asarray(real, dtype=bool)
+    if m.ndim != 1:
+        raise ValueError(f"real_runs: the mask must be 1-D, got shape {m.shape}")
+    edges = np.flatnonzero(np.diff(np.concatenate(([False], m, [False])).astype(np.int8)))
+    return [(int(a), int(b)) for a, b in zip(edges[0::2], edges[1::2])]
 
 
 def _round_half_up(x):
@@ -271,19 +337,30 @@ def span_markers(words_per_channel) -> tuple[int, int]:
     return max(len(w) for w in channels), max(marker_chain(w) for w in channels)
 
 
-def analyse(samples, sample_rate: int) -> tuple[float, float | None]:
-    """(rms_dbfs, outside_band_pct) of one window. `samples`: shape (n,) or (n, channels)."""
+def analyse(samples, sample_rate: int, real=None) -> tuple[float, float | None]:
+    """(rms_dbfs, outside_band_pct) of one window. `samples`: shape (n,) or (n, channels).
+    `real`: the window's real-sample mask when it holds zeros that bridge a sender-timeline hole
+    (None = every sample delivered). The level is then the delivered samples' own: the zeros would
+    lower it, and a quiet FOREIGN window could read SILENT. The spectrum keeps every sample at its
+    timeline place; the zeros add no energy to either side of the share, so it stays a ratio of the
+    delivered signal. A window with no delivered sample at all is UNKNOWN."""
     x = np.asarray(samples, dtype=np.float64)
     if x.ndim == 1:
         x = x[:, None]
     if x.ndim != 2 or x.shape[0] < 2:
         raise ValueError(f"analyse: need (n,) or (n, channels) with n >= 2, got shape {x.shape}")
-    mean_sq = float(np.mean(x * x))
+    n = x.shape[0]
+    if real is not None:
+        real = np.asarray(real, dtype=bool)
+        if real.shape != (n,):
+            raise ValueError(f"analyse: the real-sample mask has shape {real.shape}, the window {x.shape}")
+        if not real.any():
+            return float("nan"), None  # nothing delivered: never SILENT, never a number -> UNKNOWN
+    mean_sq = float(np.mean(x * x)) if real is None else float(np.mean(x[real] * x[real]))
     if not math.isfinite(mean_sq):
         return float("nan"), None  # a NaN/Inf sample: never SILENT, never a number -> UNKNOWN
     if not mean_sq > 0.0:
         return DIGITAL_SILENCE_DBFS, None
-    n = x.shape[0]
     window = np.hanning(n)
     power = np.zeros(n // 2 + 1)
     for c in range(x.shape[1]):
@@ -355,11 +432,15 @@ def _count(v):
 def build_payload(verdict: str, rms_dbfs, outside_band_pct, *, now: datetime, window_s: float,
                   source: str, reason: str | None = None,
                   last_foreign_ts_utc: str | None = None, markers_decoded: int | None = None,
-                  marker_chain: int | None = None) -> dict:
+                  marker_chain: int | None = None, holes_bridged: int | None = None,
+                  bridged_ms: float | None = None) -> dict:
     """The program-audio.json payload. `age_s` is 0.0 as written; the lease server recomputes it
     (and `last_foreign_age_s` from `last_foreign_ts_utc`, the FOREIGN latch) at every request
     (rig_serve_files.program_audio_response). `markers_decoded` (raw CRC-valid words, diagnostics)
-    and `marker_chain` are additive fields, null when the window has no full marker span."""
+    and `marker_chain` are additive fields, null when the window has no full marker span.
+    `holes_bridged` / `bridged_ms` (additive, design issue 1404 comment 6036098516) count the
+    sender-timeline holes the running sampler bridged with zeros since it started, null in a
+    payload written while it is not sampling."""
     if verdict not in VERDICTS:
         raise ValueError(f"unknown verdict {verdict!r}")
     payload = {
@@ -374,6 +455,8 @@ def build_payload(verdict: str, rms_dbfs, outside_band_pct, *, now: datetime, wi
         "last_foreign_ts_utc": last_foreign_ts_utc,
         "markers_decoded": _count(markers_decoded),
         "marker_chain": _count(marker_chain),
+        "holes_bridged": _count(holes_bridged),
+        "bridged_ms": _round1(bridged_ms),
     }
     if reason is not None:
         payload["reason"] = reason
