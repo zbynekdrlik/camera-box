@@ -31,6 +31,8 @@ pub mod ndi;
 pub mod genlock_pacing;
 // #286 — pure genlock timecode-stamp decision (A/V-cut root fix). Linux-gated because it reuses
 // the ndi boundary math; its Tier-0 tests run on the Linux `test` CI job (default features).
+// Issue 1372: it also holds the capture loop's mono->realtime stamp offset (`StampOffset`), re-sampled
+// in the frame the wall clock steps.
 #[cfg(target_os = "linux")]
 pub mod genlock_stamp;
 // (#889) dupe-preferring decimation for the genlock capture->emit gate — a fast/over-rate
@@ -478,16 +480,17 @@ mod genlock_wall_step_bench;
 // Issue 1372 part B — the genlock receive FIFO relabels its OLD-EPOCH frames by the booked wall step
 // (queued at the booking, late arrivals while the sender has not stepped, one latency window at
 // most), so the nightly dantesync fleet date step costs no frame on an input whose sender's stamps
-// follow its own step (a cambox's stamp lag is an open question). A booking reaches only a source
-// that was releasing at the step. Crate-root + std-only (Tier-0); the C twin
+// follow its own step (a cambox's stamps follow within one frame: `genlock_stamp::StampOffset`). A booking
+// reaches only a source that was releasing at the step. Crate-root + std-only (Tier-0); the C twin
 // `vendor/obs-studio/libobs/obs-genlock-fifo-relabel.h` is held identical by the committed parity
 // gate `tests/genlock_fifo_relabel_parity_1372.rs`.
 pub mod genlock_fifo_relabel;
 
 // Issue 1372 part B — the two-clock bench of the relabel: the measured +1543.16 ms and the quantized
 // +1600 ms step against the deep N==1 2ME PGM, the shallow cg feed and an N>=2 camera, the sender
-// stepping 0–30 ms either side of the receiver. Test-only.
-#[cfg(test)]
+// stepping 0–30 ms either side of the receiver; the camera through the production cambox stamp
+// offset (`genlock_stamp::StampOffset`). Test-only; Linux-gated with `genlock_stamp`.
+#[cfg(all(test, target_os = "linux"))]
 mod genlock_fifo_relabel_bench;
 
 // Issue 1372 part A — the Windows OBS media clock runs at the dantesync-disciplined system-time rate: the

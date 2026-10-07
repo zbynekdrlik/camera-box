@@ -27,7 +27,7 @@ use crate::capture_phase::{slot_stamp_100ns, CapturePhase};
 use crate::dupe_decimation::{DecimationGate, StampSlotAction};
 use crate::genlock_grid::{per_second_floor, StampTrack, NS_PER_SECOND, UNITS_100NS_PER_SECOND};
 use crate::genlock_pacing::{boundary_skip_count, starvation_repeat_timecode_100ns};
-use crate::genlock_stamp::OFFSET_RESAMPLE_INTERVAL_FRAMES;
+use crate::genlock_stamp::StampOffset;
 
 const FPS: u64 = 60;
 const I60: u64 = NS_PER_SECOND / FPS;
@@ -84,8 +84,12 @@ struct Scenario {
     start_phase_ns: f64,
     /// The device drops the frame at this second (its sequence number is never delivered).
     drop_at_s: Option<f64>,
-    /// A CLOCK_REALTIME step (ns) at this second (a dantesync date step).
+    /// A CLOCK_REALTIME step (ns) at this second (a dantesync date step), seen by every clock
+    /// read at or after it: the capture loop's per-frame read and the poll.
     realtime_step: Option<(f64, i64)>,
+    /// The capture loop's bracketed clock read is preempted for this long (ns) between its first
+    /// monotonic read and the wall read on the first frame at or after this second.
+    preempted_read: Option<(f64, u64)>,
     /// A device re-open at this second: no frames for `gap_s`, then the sequence restarts at 0
     /// and the capture phase moves by `shift_ns`.
     reopen: Option<(f64, f64, f64)>,
@@ -105,6 +109,7 @@ impl Scenario {
             start_phase_ns: NOMINAL_60 / 2.0,
             drop_at_s: None,
             realtime_step: None,
+            preempted_read: None,
             reopen: None,
             hidden_skip: None,
             ts_sigma_ns: None,
@@ -120,7 +125,8 @@ struct Frame {
     ts_mono: u64,
     poll_real: u64,
     poll_mono: u64,
-    /// The mono -> real offset the loop holds for this frame (re-sampled every 100 frames).
+    /// The mono -> real offset the loop stamps this frame through (the production
+    /// `genlock_stamp::StampOffset`, fed one bracketed read per frame like `main.rs`).
     loop_offset_ns: i64,
 }
 
@@ -130,8 +136,8 @@ fn frames(sc: &Scenario) -> Vec<Frame> {
     let mut ts_rng = Rng(sc.seed);
     let mut poll_rng = Rng(sc.seed ^ 0xD2D2_D2D2);
     let mut out = Vec::new();
-    let mut loop_offset = off0;
-    let mut since_sample = 0u64;
+    let mut stamp_offset: Option<StampOffset> = None;
+    let mut preempted = false;
     let n = (sc.secs * FPS as f64) as u64;
     let mut reopened = false;
     let mut reopen_k = 0u64;
@@ -162,21 +168,31 @@ fn frames(sc: &Scenario) -> Vec<Frame> {
             continue;
         }
         let truth = MONO0 as f64 + truth_rel;
+        // The wall clock as read at the dequeue (the poll instant): a frame captured just before the
+        // step but dequeued after it already reads the stepped wall, as in production.
+        let poll_s = (truth_rel + POLL_LATENCY_NS + poll_noise) / 1e9;
         let off_true = off0
             + sc.realtime_step
-                .filter(|&(at, _)| t_s >= at)
+                .filter(|&(at, _)| poll_s >= at)
                 .map_or(0, |(_, step)| step);
-        if since_sample == 0 || since_sample >= OFFSET_RESAMPLE_INTERVAL_FRAMES {
-            loop_offset = off_true;
-            since_sample = 0;
-        }
-        since_sample += 1;
         let seq = if reopened {
             (k - reopen_k) as u32
         } else {
             (1000 + k - hidden) as u32
         };
         let poll_mono = (truth + POLL_LATENCY_NS + poll_noise).round() as u64;
+        // The capture loop's ONE bracketed mono/wall/mono read at the top of its callback (the
+        // dequeue instant), seeded before the first frame and fed per frame, exactly as `main.rs`.
+        let mut before = poll_mono - 1_000;
+        if !preempted && sc.preempted_read.is_some_and(|(at, _)| t_s >= at) {
+            preempted = true;
+            before -= sc.preempted_read.map_or(0, |(_, ns)| ns);
+        }
+        let wall = (poll_mono as i64 + off_true) as u64;
+        let o =
+            stamp_offset.get_or_insert_with(|| StampOffset::seed(before, wall, poll_mono + 1_000));
+        o.observe_frame(before, wall, poll_mono + 1_000);
+        let loop_offset = o.offset_100ns() * 100;
         out.push(Frame {
             t_s,
             seq,
@@ -527,10 +543,12 @@ fn the_tracker_gives_one_per_crossing_at_the_design_jitter_1367() {
 /// step sees a continuous stream. The measured unquantized step (+1543.16 ms, 92.59 slots) moves the
 /// content-to-slot phase by the fraction: one repeated or one skipped slot (reported).
 ///
-/// The cambox stamps through a mono→real offset re-sampled every 100 frames, so its stamps switch to
-/// the new epoch at that re-sample, up to 100 frames after its wall stepped (the step at 60.75 s
-/// lands mid-cadence here). The lag is reported; the receiver-side cost is in the issue-1372 FIFO
-/// relabel bench (`crate::genlock_fifo_relabel_bench`).
+/// The cambox re-samples its mono→real offset in the frame its wall steps (ROZHODNUTÉ 6033853074,
+/// `genlock_stamp::StampOffset`), so its stamps switch to the new epoch with the FIRST frame READ
+/// after the step (captured at most one dequeue before it, or less than a frame after it), though
+/// the step at 60.75 s lands mid-cadence here (the 100-frame cadence alone switched them 924 ms
+/// late). The receiver-side cost is in the issue-1372 FIFO relabel bench
+/// (`crate::genlock_fifo_relabel_bench`).
 #[test]
 fn a_whole_slot_date_step_re_anchors_by_whole_slots_with_no_crossing_1372() {
     let one_slot = |delta: i64| delta == 166_666 || delta == 166_667;
@@ -583,8 +601,10 @@ fn a_whole_slot_date_step_re_anchors_by_whole_slots_with_no_crossing_1372() {
             "step {step}: the date step is never a crossing, a re-seed, a shed or a repeat"
         );
         assert!(
-            (0.0..=100.0 * period / 1e9 + 0.001).contains(&(switch_s - 60.75)),
-            "step {step}: the stamps switch epoch at the next offset re-sample (<= 100 frames)"
+            (-(POLL_LATENCY_NS + 1_000_000.0) / 1e9..period / 1e9).contains(&(switch_s - 60.75)),
+            "issue 1372, step {step}: the stamps must switch epoch with the first frame read after \
+             the step, not at the next 100-frame re-sample (lag {:.0} ms)",
+            (switch_s - 60.75) * 1000.0
         );
         if step % 200_000_000 == 0 {
             assert_eq!(
@@ -600,5 +620,30 @@ fn a_whole_slot_date_step_re_anchors_by_whole_slots_with_no_crossing_1372() {
                 "the unquantized step moves the phase by a fraction: exactly one off-slot interval"
             );
         }
+    }
+}
+
+/// Issue 1372 — a preempted clock read never moves the stamp offset: the capture loop's bracketed
+/// read preempted for 8 ms (its midpoint offset 4 ms off, a step if it were trusted) is neither a
+/// step re-sample nor adopted at the cadence, so the stamps stay one slot per frame. The capture
+/// phase sits ~2.5 ms before a slot edge, so an adopted 4 ms error would move a stamp one slot.
+#[test]
+fn a_preempted_clock_read_never_moves_the_stamps_1372() {
+    for at in [60.0f64, 60.0 + 99.0 / 60.0] {
+        let mut sc = Scenario::new(16.0, 120.0);
+        sc.start_phase_ns = NOMINAL_60 - 1_500_000.0;
+        sc.preempted_read = Some((at, 8_000_000));
+        let t = run(&sc, true);
+        let off_slot = t
+            .stamps
+            .windows(2)
+            .filter(|w| w[1] - w[0] != 166_666 && w[1] - w[0] != 166_667)
+            .count();
+        assert_eq!(
+            (off_slot, t.stamp_resyncs, t.skip_events),
+            (0, 0, 0),
+            "preempted read at {at} s: the stamps must stay one slot per frame"
+        );
+        assert_eq!((t.crossings, t.reseeds, t.sheds, t.repeats), (0, 0, 0, 0));
     }
 }

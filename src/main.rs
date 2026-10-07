@@ -51,10 +51,9 @@ fn wall_clock_ns() -> u64 {
 
 /// #286 — monotonic clock time in ns (`CLOCK_MONOTONIC`, boot-relative). This is the same
 /// clock domain the V4L2 UVC driver stamps on a dequeued capture buffer by default (the
-/// `TIMESTAMP_MONOTONIC` flag), so sampling it back-to-back with [`wall_clock_ns`] gives the
+/// `TIMESTAMP_MONOTONIC` flag), so reading it around [`wall_clock_ns`] gives the
 /// monotonic->realtime offset the capture-based genlock stamp needs
-/// ([`sample_mono_to_real_offset_100ns`]). Mirrors `wall_clock_ns`'s exact
-/// `clock_gettime` pattern.
+/// ([`read_mono_wall_mono_ns`]). Mirrors `wall_clock_ns`'s exact `clock_gettime` pattern.
 fn monotonic_clock_ns() -> u64 {
     let mut ts = libc::timespec {
         tv_sec: 0,
@@ -66,16 +65,19 @@ fn monotonic_clock_ns() -> u64 {
     (ts.tv_sec as u64) * 1_000_000_000 + (ts.tv_nsec as u64)
 }
 
-/// #286 — sample `realtime_now - monotonic_now` in 100ns units
-/// (`genlock_stamp::capture_realtime_100ns`'s `mono_to_real_offset_100ns` input). The two
-/// `clock_gettime` calls are made back-to-back so the (sub-microsecond) gap between reading
-/// each clock is negligible against the 100ns stamp granularity. Re-sampled periodically by
-/// the capture loop (see [`camera_box::genlock_stamp::should_resample_mono_to_real_offset`])
-/// so a realtime clock step/slew (e.g. DanteSync/NTP correction) cannot skew the stamp.
-fn sample_mono_to_real_offset_100ns() -> i64 {
-    let real_100ns = (wall_clock_ns() / 100) as i64;
-    let mono_100ns = (monotonic_clock_ns() / 100) as i64;
-    real_100ns - mono_100ns
+/// #286 / issue 1372 — the ONE clock read of the capture loop's monotonic->realtime stamp offset
+/// (`genlock_stamp::capture_realtime_100ns`'s `mono_to_real_offset_100ns` input):
+/// `CLOCK_MONOTONIC`, `CLOCK_REALTIME`, `CLOCK_MONOTONIC` back-to-back, `(mono before, wall,
+/// mono after)` in ns. The bracket is judged by `camera_box::genlock_wall_step::wall_offset_ns`
+/// (wider than its 100 us = the thread was preempted between the reads, never trusted). Taken
+/// once before the first frame and once per captured frame, fed to
+/// [`camera_box::genlock_stamp::StampOffset`], which re-samples at the 100-frame cadence and in
+/// the frame the wall clock steps (a DanteSync date step).
+fn read_mono_wall_mono_ns() -> (u64, u64, u64) {
+    let mono_before = monotonic_clock_ns();
+    let wall = wall_clock_ns();
+    let mono_after = monotonic_clock_ns();
+    (mono_before, wall, mono_after)
 }
 
 /// #685 follow-up (live-discovered 2026-07-11, deploying to cam1): the box's OS-level
@@ -907,14 +909,14 @@ async fn run_capture_loop(
         // gate-instant emitted-frame timecode (0 ⇒ genlock off, a degenerate no-op) — used by
         // BOTH the probe burn path and the #286 production capture-based timecode below.
         let send_fps: u32 = genlock_fps.unwrap_or(0);
-        // #286 — the periodically-resampled monotonic->realtime clock offset
-        // (`genlock_stamp::capture_realtime_100ns`'s `mono_to_real_offset_100ns`), plus how
-        // many captured frames have elapsed since the last sample. Sampled once here (before
-        // the first frame) and re-sampled inside the loop per
-        // `genlock_stamp::should_resample_mono_to_real_offset` so a realtime clock step/slew
-        // (DanteSync/NTP correction) never permanently skews the capture-based genlock stamp.
-        let mut mono_to_real_offset_100ns: i64 = sample_mono_to_real_offset_100ns();
-        let mut frames_since_offset_sample: u64 = 0;
+        // #286 / issue 1372 — the monotonic->realtime clock offset the capture-based genlock stamp
+        // maps through (`genlock_stamp::StampOffset`): seeded here (before the first frame) from one
+        // bracketed read, then fed one per captured frame inside the loop, so a realtime clock step
+        // (a DanteSync date step) reaches the stamps within one frame and a slew never skews them.
+        let mut stamp_offset = {
+            let (mono_before, wall, mono_after) = read_mono_wall_mono_ns();
+            camera_box::genlock_stamp::StampOffset::seed(mono_before, wall, mono_after)
+        };
         #[cfg(feature = "probe")]
         let mut burn_ids = camera_box::probe::genlock::BurnFrameIdSource::default();
         #[cfg(feature = "probe")]
@@ -1079,17 +1081,22 @@ async fn run_capture_loop(
                 // behind → skip the stagger sleep for it).
                 let cb_started = std::time::Instant::now();
                 let mut frame_backlogged = false;
-                // #286 — periodically re-sample the monotonic->realtime clock offset. Counts
-                // EVERY captured frame toward the cadence (regardless of emit/decimate
-                // decisions below), so the offset stays fresh even during a long decimated
-                // stretch — mirrors the chroma sample's "always count captured frames" note.
-                frames_since_offset_sample += 1;
-                if camera_box::genlock_stamp::should_resample_mono_to_real_offset(
-                    frames_since_offset_sample,
-                ) {
-                    mono_to_real_offset_100ns = sample_mono_to_real_offset_100ns();
-                    frames_since_offset_sample = 0;
+                // #286 / issue 1372 — EVERY captured frame (regardless of the emit/decimate
+                // decisions below) takes ONE bracketed clock read: the monotonic->realtime offset is
+                // re-sampled at the 100-frame cadence and, when the wall moved 2 ms or more against
+                // it (a DanteSync date step), in THIS frame, so this frame's tracked slot and stamp
+                // are already in the new epoch (ROZHODNUTÉ 6033853074). A preempted read decides
+                // nothing.
+                let (mono_before, wall, mono_after) = read_mono_wall_mono_ns();
+                if let camera_box::genlock_stamp::OffsetResample::WallStep { step_ns } =
+                    stamp_offset.observe_frame(mono_before, wall, mono_after)
+                {
+                    tracing::info!(
+                        "#1372 stamp offset re-sampled on a wall step of {:+.3} ms",
+                        step_ns as f64 / 1e6
+                    );
                 }
+                let mono_to_real_offset_100ns = stamp_offset.offset_100ns();
                 // Issue 1367 D2 — track every good frame; `Some` = the tracker drives this frame's
                 // stamp and gate decision, `None` = today's raw stamp and poll-time gate.
                 let phase_slot_ns = capture_phase.stamp_frame(

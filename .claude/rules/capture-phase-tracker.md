@@ -6,6 +6,7 @@ paths:
   - "src/dupe_decimation/stamp.rs"
   - "src/dupe_decimation/stamp/**"
   - "src/dupe_decimation/gate.rs"
+  - "src/genlock_stamp.rs"
   - "src/main.rs"
 ---
 
@@ -85,12 +86,22 @@ ONE missing frame per crossing.
     lands the phase just past an edge never leaves the stamp one slot behind the realtime floor
     (`a_realtime_step_landing_inside_the_hysteresis_follows_the_new_floor`, review round 3). A
     slewing clock never trips it: dantesync's `adjtimex` frequency and offset slews move
-    `CLOCK_MONOTONIC` and `CLOCK_REALTIME` together, so the offset (re-sampled every 100 captured
-    frames, `main.rs` `sample_mono_to_real_offset_100ns`) moves only on a step or when one of its
-    two clock reads is preempted. A preempted read of 1 ms or more re-anchors twice (the spike, and
-    its return at the next re-sample), each at most one duplicate or missing slot when the instant
-    sits within the hysteresis of an edge, never counted as a crossing (review round 4). The gate
+    `CLOCK_MONOTONIC` and `CLOCK_REALTIME` together, so the offset moves only on a step. The gate
     still sees a real step as a slot jump and fills or skips it like the poll-time gate.
+  - **The offset changes epoch in the frame the wall steps (issue 1372, ROZHODNUTÉ 6033853074).**
+    `main.rs` holds it in `genlock_stamp::StampOffset`: seeded before the loop, then fed ONE
+    bracketed read per captured frame (`read_mono_wall_mono_ns`: mono, wall, mono, judged by
+    `genlock_wall_step::wall_offset_ns`) at the top of the callback, before `stamp_frame`. A
+    difference of 2 ms or more against the cached offset (`OFFSET_STEP_RESAMPLE_NS`, the render
+    tick's `WALL_STEP_MIN_NS`) is adopted at once and logged once (`#1372 stamp offset re-sampled
+    on a wall step of <ms>`); a smaller one waits for the 100-frame cadence (the tracker re-anchors
+    there, as before); a preempted read (bracket over 100 µs) is never adopted, so it can never
+    re-anchor (review round 4's double re-anchor on a preempted read is gone). The bench:
+    `a_whole_slot_date_step_re_anchors_by_whole_slots_with_no_crossing_1372` switches the stamp
+    epoch with the first frame READ after the step (captured 9 ms before it and dequeued 2 ms
+    after: the bench steps the clock at the read; was 924 ms late), still 97 / -95 / 13 whole
+    slots with 0 off-slot intervals; `a_preempted_clock_read_never_moves_the_stamps_1372`
+    keeps the stamps one slot per frame across an 8 ms preempted read 2.5 ms before an edge.
 - **The gate** (`DecimationGate::note_stamp_slot` before the unchanged `poll` call) decides on the
   slot alone via the pure `dupe_decimation::stamp_slot_action`:
 
@@ -149,9 +160,10 @@ over-rate.
 - The `#707 SKIPPED` line for a real clock step: the stamp path sets the boundary to the slot after
   the emitted one and folds the fill into the intentional extra advance, so a forward step logs
   one SKIP (the bench: a +700 ms step = 42 slots, one line).
-- The mono->real offset re-sample every 100 frames. The tracker is MONOTONIC, so a realtime step
-  never re-seeds it; the step shows as one stamp jump at the next re-sample (the slot chooser
-  re-anchors, no crossing is counted).
+- The mono->real offset re-sample every 100 frames (now inside `genlock_stamp::StampOffset`),
+  plus the issue-1372 wall-step re-sample in the step frame. The tracker is MONOTONIC, so a
+  realtime step never re-seeds it; the step shows as one stamp jump in the step frame (the slot
+  chooser re-anchors, no crossing is counted).
 - `harness_send_stagger_1242.rs` pins `let emit = decimation_gate.poll(` and friends as UNIQUE
   text in main.rs. That is why the slot is STAGED (`note_stamp_slot`) instead of a second poll call.
 
@@ -211,10 +223,11 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
 - The pure modules + the bench compile standalone: a scratch crate whose `lib.rs` declares
   `genlock_grid`, `genlock_pacing`, `genlock_stamp`, `dupe_decimation`, `capture_phase` and
   `capture_phase_bench` as plain `mod` items with the source files SYMLINKED in (so the child
-  modules `capture_phase/tests.rs` and `dupe_decimation/stamp/tests.rs` resolve normally). Add a
+  modules `capture_phase/tests.rs` and `dupe_decimation/stamp/tests.rs` resolve normally), plus
+  `genlock_wall_step` since issue 1372 (`genlock_stamp` uses its bracket and threshold). Add a
   stub `ndi.rs` holding the real `floor_boundary_100ns` (awk it out of `src/ndi.rs`) and copy the
   `lib.rs` const-assert. Then `rustc --edition 2021 --test -D warnings lib.rs` and run it, and
-  `clippy-driver --edition 2021 --test -D warnings lib.rs`. The whole replica runs 158 tests in
+  `clippy-driver --edition 2021 --test -D warnings lib.rs`. The whole replica runs 175 tests in
   ~1 s. Put the steps in a script file: the worktree guard refuses variable-driven one-liners.
 - `tests/harness_send_stagger_1242.rs` reads main.rs text only: build it with plain `rustc
   --test` and run it from the worktree root with `CARGO_MANIFEST_DIR` set (again from a script).
@@ -230,6 +243,11 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
 - A debug replica (`rustc --test`, no `-O`) has overflow checks on, so an `i128` product that
   would wrap silently in the release binary panics there: build the worst-case window in a test
   (`a_slow_stream_with_outlier_runs_never_overflows_the_fit`) instead of trusting a bound comment.
+- **A bench clock step applies at the instant the code READS the clock** (issue 1372 review round 1):
+  the capture loop reads the wall at the dequeue, ~11 ms after the capture, so a frame captured
+  just before a step and dequeued after it already reads the stepped wall. Keying the step on the
+  capture time made the bench's "exactly as main.rs" read unfaithful and hid that early frame. Step
+  every modelled read (the per-frame bracket and the poll) at its own instant.
 - `main.rs` compiles first on CI.
 
 ## Live acceptance (supervisor)
