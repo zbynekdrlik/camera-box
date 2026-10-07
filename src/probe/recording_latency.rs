@@ -172,8 +172,10 @@ pub const AUX_TICK_RUN_ID: u32 = 911013;
 /// excluded from every `all_burns` array: its `frame_id` is the clip's own tick, unrelated to the
 /// cam2 Vernier tick, and a CG segment rides into the strih/stream recordings. No overlay slot
 /// (`crate::burn_regions::slot_for_run_id` = `None`), so the echo gate never drops it. The
-/// YouTube-leg tick decoder (`scripts/youtube_leg_ticks.py`) is the one consumer that reads it as a
-/// tick, by this id. Reserved fresh, outside every id already in use (911001..911004/911007..911015).
+/// YouTube-leg tick decoder (`scripts/youtube_leg_ticks.py`) reads it as a tick only when asked
+/// (`runs=CLIP_RUNS`), and the stream av-sync dock records it like any camera-box QR (an open
+/// Task 5 part b decision). Reserved fresh, outside every id already in use
+/// (911001..911004/911007..911015).
 pub const MEASUREMENT_CLIP_RUN_ID: u32 = 911016;
 
 /// Per-hop latency over the analyzed window, with the #108 stability dimensions

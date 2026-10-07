@@ -401,14 +401,16 @@ def write_clip(out_path: str, seconds: int = SECONDS, marker_log_path: str | Non
             raise RuntimeError(f"ffmpeg failed ({why}{'' if fed else ', input not read in full'}) "
                                f"writing {out_path}: {tail.strip()}")
     try:
-        got = ylt.container_frames(part)
-    except (RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        try:
+            got = ylt.container_frames(part)
+        except (RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError(f"{out_path}: the encoded file cannot be probed: {exc}") from exc
+        if got != frames:
+            raise RuntimeError(f"{out_path}: the encoded file holds {got} frames, expected {frames}")
+        os.replace(part, out_path)
+    except BaseException:  # a failed probe, a missing ffprobe, a stop: never a partial clip
         _remove_part(part)
-        raise RuntimeError(f"{out_path}: the encoded file cannot be probed: {exc}") from exc
-    if got != frames:
-        _remove_part(part)
-        raise RuntimeError(f"{out_path}: the encoded file holds {got} frames, expected {frames}")
-    os.replace(part, out_path)
+        raise
     _atomic_write_text(log_path, marker_log_text(frames))
     return log_path
 
