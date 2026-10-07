@@ -353,17 +353,12 @@ impl PhaseEventSample {
 /// Mirrored byte-for-byte by `genlock_input_new_phase_events` in `GenlockLockState.hpp`,
 /// parity-gated by `tests/genlock_phase_baseline_1302.rs`.
 pub fn input_new_phase_events(prev: Option<PhaseEventSample>, cur: PhaseEventSample) -> u64 {
-    // RED stub (issue 1302): the #1299 aggregate's reading -- an input not contributing last tick
-    // (or never seen) counted 0, so its whole lifetime total enters as new events on its first
-    // contributing tick. The GREEN commit replaces this body.
-    if !cur.contributing {
-        return 0;
-    }
-    let base = match prev {
-        Some(p) if p.contributing => p.total,
+    match prev {
+        Some(p) if p.contributing && cur.contributing && cur.total >= p.total => {
+            cur.total - p.total
+        }
         _ => 0,
-    };
-    cur.total.saturating_sub(base)
+    }
 }
 
 // #1299 Part 4 + #1357 scope C — the wall-vs-monotonic `qpc_drift` term. The CUMULATIVE offset must

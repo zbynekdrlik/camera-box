@@ -166,14 +166,11 @@ static inline uint64_t genlock_input_phase_events(int connected, int idle, uint6
 static inline uint64_t genlock_input_new_phase_events(int has_prev, int prev_contributing, uint64_t prev_total,
 						      int contributing, uint64_t total)
 {
-	/* RED stub (issue 1302): the #1299 aggregate's reading -- an input not contributing last tick (or
-	 * never seen) counted 0, so its whole lifetime total enters as new events on its first
-	 * contributing tick. The GREEN commit replaces this body. */
-	uint64_t base;
-	if (!contributing)
+	if (!has_prev || !prev_contributing || !contributing)
 		return 0;
-	base = (has_prev && prev_contributing) ? prev_total : 0;
-	return total > base ? total - base : 0;
+	if (total < prev_total)
+		return 0;
+	return total - prev_total;
 }
 
 /* #1303 — case-insensitive ASCII substring test, a private helper for genlock_name_is_camera below.
