@@ -7,7 +7,8 @@ OBS test scene play THIS file instead of music, so the CG segments of the releas
 instrument as the camera chain: a per-frame painter-format QR and the cam2 QPSK marker.
 
 What the clip IS: a 30 fps recording of the cam2 painter, synthesized. Every parameter that a
-decoder reads is the painter's, so the existing decoders read the clip unchanged:
+decoder reads is the painter's, so the existing decoders read the clip with the painter's rules (the
+YouTube-leg tick decoder reads the reserved id 911016 only when asked: `runs=CLIP_RUNS`):
   picture  1920x1080, 30 fps, H.264 yuv420p. Frame f shows the painter's dual-QR Vernier for the
            60 Hz tick T = 2f (src/probe/painter.rs `vernier_ids`): LEFT = the latest even tick (T),
            RIGHT = the latest odd tick (T - 1), each `P911016.{tick}.{pts_ns}.{crc32}`
@@ -34,8 +35,11 @@ ONE parameter set: TICK_HZ and the tone line come from program_audio (the guard)
 youtube_leg_ticks (the tick decoder); the QPSK and geometry constants are pinned to the Rust and C++
 sources and to the decoder shim's compiled-in parameters by tests/python/test_gen_measurement_clip_1404.py.
 
-Deterministic: the same generator version and the same ffmpeg build give the same bytes (x264 threads
-pinned, bitexact muxing, no timestamps in the metadata). The CLI prints the sha256.
+Deterministic on one machine: the same generator version with the same ffmpeg and numpy builds
+gives the same bytes (x264 threads pinned, bitexact muxing, no timestamps in the metadata). Another
+CPU or build may take other float paths (AAC, sin/cos), so the published sha256 is the build box's.
+The CLI prints the sha256. The encoded file must hold exactly seconds x 30 frames (ffprobe), or no
+clip is written.
 
   python3 scripts/gen_measurement_clip.py --out measurement-clip-v1.mp4 [--seconds 120]
 """
@@ -49,6 +53,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import zlib
 
 import numpy as np
@@ -247,16 +252,10 @@ def marker_signal(index: int) -> np.ndarray:
 def marker_schedule(frames: int) -> list[tuple[int, int, int]]:
     """(frame, tick, index) of every marker of a `frames`-long clip: one every MARKER_EVERY_TICKS
     ticks from the first cadence point (the painter fires at tick 30, never at 0), index = tick &
-    0xFF, only markers whose whole signal ends inside the clip."""
+    0xFF. A marker starts on a frame inside the clip and its signal (22.6 ms) is shorter than one
+    frame (pinned by a test), so every marker ends inside the clip."""
     every = MARKER_EVERY_TICKS // TICKS_PER_FRAME
-    total = frames * SAMPLE_RATE // FPS
-    out = []
-    for f in range(every, frames, every):
-        if f * SAMPLE_RATE // FPS + signal_len() > total:
-            break
-        tick = TICKS_PER_FRAME * f
-        out.append((f, tick, tick % INDEX_MODULUS))
-    return out
+    return [(f, TICKS_PER_FRAME * f, (TICKS_PER_FRAME * f) % INDEX_MODULUS) for f in range(every, frames, every)]
 
 
 def tone_bed(n: int) -> np.ndarray:
@@ -316,6 +315,36 @@ def ffmpeg_cmd(audio_path: str, out_path: str) -> list[str]:
             "-movflags", "+faststart", "-f", "mp4", out_path]
 
 
+def _kill_group(pid: int) -> None:
+    """SIGKILL ffmpeg's whole process group (its own session); a group already gone is logged."""
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        print(f"gen_measurement_clip: ffmpeg group {pid} already exited", file=sys.stderr)
+
+
+def _remove_part(part: str) -> None:
+    if os.path.exists(part):
+        os.remove(part)
+
+
+def _feed_ffmpeg(proc: subprocess.Popen, frames: int) -> bool:
+    """Write every frame to ffmpeg's stdin. False when ffmpeg stopped reading (a broken pipe):
+    a clip it did not read in full is a failure whatever its exit code says."""
+    try:
+        for f in range(frames):
+            proc.stdin.write(render_frame(f).tobytes())
+        proc.stdin.close()
+        return True
+    except BrokenPipeError:
+        print("gen_measurement_clip: ffmpeg stopped reading its video input", file=sys.stderr)
+        try:
+            proc.stdin.close()
+        except BrokenPipeError as exc:
+            print(f"gen_measurement_clip: unflushed video input dropped ({exc})", file=sys.stderr)
+        return False
+
+
 def _atomic_write_text(path: str, text: str) -> None:
     tmp = f"{path}.part"
     with open(tmp, "w", encoding="ascii", newline="\n") as f:
@@ -325,12 +354,16 @@ def _atomic_write_text(path: str, text: str) -> None:
 
 def write_clip(out_path: str, seconds: int = SECONDS, marker_log_path: str | None = None,
                timeout_s: float = 3600.0) -> str:
-    """Encode the clip to `out_path` (through a `.part` file, renamed only after ffmpeg succeeded)
-    and its marker log next to it (default `<out>.markers.csv`). Returns the marker log path.
-    Raises RuntimeError naming ffmpeg's error on any failure; never leaves a partial clip."""
+    """Encode the clip to `out_path` (through a `.part` file, renamed only after ffmpeg succeeded and
+    the file holds exactly seconds x FPS frames) and its marker log next to it (default
+    `<out>.markers.csv`). Returns the marker log path. Every failure is a RuntimeError naming the
+    cause (ffmpeg's stderr tail), never a partial clip. `timeout_s` bounds the whole encode, the
+    frame feed included: a watchdog kills ffmpeg's process group when it runs out."""
     if seconds <= 0:
         raise ValueError(f"seconds must be positive, got {seconds}")
     frames = int(seconds) * FPS
+    if frames > 10 ** DIGITS:
+        raise ValueError(f"{seconds} s = {frames} frames does not fit the {DIGITS}-digit frame counter")
     log_path = marker_log_path or f"{out_path}.markers.csv"
     part = f"{out_path}.part"
     with tempfile.TemporaryDirectory(prefix="measurement-clip-") as tmp:
@@ -340,30 +373,41 @@ def write_clip(out_path: str, seconds: int = SECONDS, marker_log_path: str | Non
         with open(err_path, "w+b") as err:
             proc = subprocess.Popen(ffmpeg_cmd(audio_path, part), stdin=subprocess.PIPE,
                                     stdout=subprocess.DEVNULL, stderr=err, start_new_session=True)
+            expired = threading.Event()
+
+            def _expire(pid=proc.pid):
+                expired.set()
+                _kill_group(pid)
+
+            watchdog = threading.Timer(timeout_s, _expire)
+            watchdog.start()
             try:
-                for f in range(frames):
-                    proc.stdin.write(render_frame(f).tobytes())
-                proc.stdin.close()
+                fed = _feed_ffmpeg(proc, frames)
                 rc = proc.wait(timeout=timeout_s)
-            except BrokenPipeError:  # ffmpeg exited early: its exit code and stderr say why
-                print("gen_measurement_clip: ffmpeg closed its video input early", file=sys.stderr)
-                try:
-                    proc.stdin.close()
-                except BrokenPipeError as exc:
-                    print(f"gen_measurement_clip: unflushed video input dropped ({exc})", file=sys.stderr)
-                rc = proc.wait(timeout=60)
-            except BaseException:
-                os.killpg(proc.pid, signal.SIGKILL)
+            except BaseException as exc:
+                _kill_group(proc.pid)
                 proc.wait()
-                if os.path.exists(part):
-                    os.remove(part)
+                _remove_part(part)
+                if isinstance(exc, subprocess.TimeoutExpired):
+                    raise RuntimeError(f"ffmpeg did not finish {out_path} in {timeout_s:.0f} s") from exc
                 raise
+            finally:
+                watchdog.cancel()
             err.seek(0)
             tail = err.read().decode("utf-8", "replace")[-800:]
-        if rc != 0:
-            if os.path.exists(part):
-                os.remove(part)
-            raise RuntimeError(f"ffmpeg failed (exit {rc}) writing {out_path}: {tail.strip()}")
+        if rc != 0 or not fed:
+            _remove_part(part)
+            why = f"the {timeout_s:.0f} s bound ran out" if expired.is_set() else f"exit {rc}"
+            raise RuntimeError(f"ffmpeg failed ({why}{'' if fed else ', input not read in full'}) "
+                               f"writing {out_path}: {tail.strip()}")
+    try:
+        got = ylt.container_frames(part)
+    except (RuntimeError, ValueError, subprocess.SubprocessError) as exc:
+        _remove_part(part)
+        raise RuntimeError(f"{out_path}: the encoded file cannot be probed: {exc}") from exc
+    if got != frames:
+        _remove_part(part)
+        raise RuntimeError(f"{out_path}: the encoded file holds {got} frames, expected {frames}")
     os.replace(part, out_path)
     _atomic_write_text(log_path, marker_log_text(frames))
     return log_path
@@ -377,12 +421,21 @@ def sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
+def _stop_on_sigterm(signum, _frame):
+    print(f"gen_measurement_clip: stopped by signal {signum}; cleaning up", file=sys.stderr)
+    raise SystemExit(128 + signum)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="issue 1404 -- write the camera-box measurement clip")
     ap.add_argument("--out", required=True, help="the clip path (mp4), e.g. measurement-clip-v1.mp4")
     ap.add_argument("--seconds", type=int, default=SECONDS, help=f"length in seconds (default {SECONDS})")
     ap.add_argument("--marker-log", default=None, help="the marker log path (default <out>.markers.csv)")
     args = ap.parse_args(argv)
+    # A stopped run (SIGTERM, a cancelled job) unwinds like Ctrl-C: write_clip kills ffmpeg's group
+    # and removes the `.part`, and the temp audio dir is cleaned. Without it a killed generator left
+    # an orphaned ffmpeg encoding and its 64 MB temp audio behind (seen in the lane's RED runs).
+    signal.signal(signal.SIGTERM, _stop_on_sigterm)
     try:
         log_path = write_clip(args.out, args.seconds, args.marker_log)
     except (RuntimeError, ValueError, OSError) as exc:
