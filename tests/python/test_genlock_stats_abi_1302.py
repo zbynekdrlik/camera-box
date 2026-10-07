@@ -785,10 +785,22 @@ def _write_markers_text(path):
 def test_every_bash_version_pattern_names_ascii_digits_explicitly_1302(path):
     """Review round 1: a bash bracket RANGE ([0-9], [1-9]) follows the locale's collation, and under
     en_US.UTF-8 it also matches non-ASCII digits the PowerShell gate refuses. Every bash `=~`
-    pattern in the stats-ABI code spells its digit sets out instead."""
+    pattern in the stats-ABI code spells its sets out instead -- no `X-Y` range inside any bracket
+    (review round 2: the narrower first lint missed the `[A-Z_]` define-name check)."""
     for n, line in enumerate(_write_markers_text(path).splitlines(), 1):
         if "=~" in line:
-            assert "[0-9]" not in line and "[1-9]" not in line and "[0-9a-fA-F]" not in line, (path, n, line)
+            assert not re.search(r"\[[^\]]*\w-\w[^\]]*\]", line), (path, n, line)
+
+
+def test_the_marker_read_back_never_aborts_its_caller_1302(tmp_path):
+    """Review round 2: called as a bare statement under the caller's errexit, the read-back of an
+    unreadable staged marker (here a directory) prints nothing and returns 0."""
+    d = tmp_path / "GENLOCK_STATS_ABI.txt"
+    d.mkdir()
+    r = _lib('genlock_stats_abi_pair_from_marker < "$2" > "$3"\necho "survived"', d, tmp_path / "out")
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == "survived\n"
+    assert (tmp_path / "out").read_text() == ""
 
 
 # --- the gate's premise: every stats struct change bumps a version the gate reads -----------------
