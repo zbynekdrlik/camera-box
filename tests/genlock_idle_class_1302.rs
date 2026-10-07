@@ -552,6 +552,32 @@ fn scenarios() -> Vec<Scenario> {
             .collect(),
         stall: Some((69, stall_ms)),
     });
+
+    // A keep-alive input, IDLE after 54 s, starts a song at 60 fps while the widget timer is stalled
+    // for 70 s after tick 69. After the stall its ring holds one sample, so IDLE holds for 5 s; the
+    // relock at tick 72 never counts. The fast rule turns it LIVE at tick 75 (its baseline), and its
+    // relock at tick 77 DEGRADES for 60 s -- not 54 s later, as a held IDLE would.
+    let song = |s: u64, relocks: u64| row("sp-song", 2_000 + 60 * s.saturating_sub(100), relocks);
+    out.push(Scenario {
+        name: "idle_wakes_in_stall",
+        ticks: (0..140u64)
+            .map(|k| {
+                let s = at(k) / 1000;
+                let input = if k < 70 {
+                    keep_alive(s)
+                } else {
+                    let relocks = match k {
+                        ..=71 => 46,
+                        72..=76 => 47,
+                        _ => 48,
+                    };
+                    song(s, relocks)
+                };
+                vec![pgm(s), input]
+            })
+            .collect(),
+        stall: Some((69, stall_ms)),
+    });
     out
 }
 
@@ -696,4 +722,22 @@ fn the_widget_ticks_match_the_reference_and_only_a_live_input_degrades_1302() {
             "widget_stall tick {k}"
         );
     }
+
+    // an IDLE input that went live during the stall: LIVE 5 s after it, its LIVE relock DEGRADES
+    for k in 54..75 {
+        assert_eq!(
+            class("idle_wakes_in_stall", k, 1),
+            "2",
+            "idle_wakes_in_stall tick {k}"
+        );
+    }
+    assert_eq!(class("idle_wakes_in_stall", 75, 1), "1");
+    for k in 0..77 {
+        assert_eq!(
+            state("idle_wakes_in_stall", k),
+            LOCKED,
+            "idle_wakes_in_stall tick {k}"
+        );
+    }
+    degraded_for_60_s("idle_wakes_in_stall", 77, "sp-song");
 }

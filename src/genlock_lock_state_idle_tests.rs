@@ -170,9 +170,32 @@ fn the_rule_at_its_boundaries_1302() {
         assert_eq!(input_idle_class(i64::MAX, u64::MAX, prev), Live);
     }
     // a decided class holds while the ring spans less than the full window (a long widget stall
-    // pruned it): an IDLE input never turns LIVE on a short ring, nor a LIVE one UNCLASSIFIED
+    // pruned it): a LIVE input is never demoted on a short ring, an IDLE one stays IDLE until it
+    // delivers a live rate -- then the fast rule turns it LIVE like an UNCLASSIFIED one (a keep-alive
+    // input can never meet it)
     assert_eq!(input_idle_class(0, 0, Live), Live);
-    assert_eq!(input_idle_class(10_000, 600, Idle), Idle);
+    assert_eq!(input_idle_class(5_000, 0, Live), Live);
+    assert_eq!(input_idle_class(10_000, 59, Idle), Idle);
+    assert_eq!(input_idle_class(4_999, 600, Idle), Idle);
+    assert_eq!(input_idle_class(5_000, 60, Idle), Live);
+    assert_eq!(input_idle_class(10_000, 600, Idle), Live);
     assert_eq!(input_idle_class(-1, 1_000, Unclassified), Unclassified);
     assert_eq!(input_idle_class(i64::MIN, 0, Idle), Idle);
+}
+
+#[test]
+fn an_idle_input_that_went_live_during_a_widget_stall_turns_live_in_5_s_1302() {
+    // a keep-alive input for 70 s (IDLE), then the widget timer stalls 70 s while the song starts at
+    // 60 fps: the stall prunes the ring to one sample, IDLE holds for the first seconds after it, and
+    // the fast rule turns it LIVE 5 s after the stall instead of after the full 54 s window
+    let mut ring = Ring::default();
+    for s in 0..70 {
+        ring.tick(s * 1000, 100 + (s / 11) as u64);
+    }
+    assert_eq!(ring.class, Some(Idle));
+    let after: Vec<_> = (140..148)
+        .map(|s| ring.tick(s * 1000, 200 + 60 * (s - 100) as u64))
+        .collect();
+    assert_eq!(&after[..5], &[Idle; 5], "{after:?}");
+    assert_eq!(&after[5..], &[Live; 3], "{after:?}");
 }
