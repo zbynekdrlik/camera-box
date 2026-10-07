@@ -307,7 +307,8 @@ def _live_pattern(audio, shape):
 @pytest.mark.parametrize("shape", ["loss", "stall"])
 def test_the_live_pattern_of_16_holes_in_13_s_never_reads_foreign(decoder, rec_clip, tmp_path, shape):
     """The exact live pattern on real measurement audio through the real decoder: 0 FOREIGN windows,
-    and nothing reads MEASUREMENT on a chain under MARKER_CHAIN_MIN."""
+    and nothing reads MEASUREMENT on a chain under MARKER_CHAIN_MIN. As real losses every step is
+    bridged; as sender stalls none is (the look-ahead, ROZHODNUTÉ on issue 1404)."""
     audio = np.concatenate([rec_clip, rec_clip])
     payloads, lines = _run_with_wall(_live_pattern(audio, shape), tmp_path, decoder)
     verdicts = _verdicts(payloads)
@@ -316,14 +317,21 @@ def test_the_live_pattern_of_16_holes_in_13_s_never_reads_foreign(decoder, rec_c
     for p in payloads:
         if p["verdict"] == "MEASUREMENT":
             assert p["marker_chain"] >= pa.MARKER_CHAIN_MIN
-    assert sum("bridged with" in line for line in lines) >= 10, lines
+    if shape == "loss":
+        assert sum("bridged with" in line for line in lines) >= 10, lines
+    else:
+        assert not any("bridged with" in line for line in lines), lines
+        assert payloads[-1]["sender_stalls"] == 16
 
 
 def test_a_holed_unknown_says_why(decoder, rec_clip, tmp_path):
-    audio = np.concatenate([rec_clip, rec_clip])
-    payloads, _lines = _run_with_wall(_live_pattern(audio, "stall"), tmp_path, decoder)
+    """An in-band chord after the measurement, with the live pattern as real losses: the windows whose
+    span holds the bridged audio read UNKNOWN and say why. (The pattern as sender stalls bridges
+    nothing since the look-ahead, so it holds no such window.)"""
+    audio = np.concatenate([rec_clip, _music("chord", 14.0)])
+    payloads, _lines = _run_with_wall(_live_pattern(audio, "loss"), tmp_path, decoder)
     holed = [p for p in payloads if p["verdict"] == "UNKNOWN" and "bridged" in (p.get("reason") or "")]
-    assert len(holed) == 3, [(p["verdict"], p["marker_chain"], p.get("reason")) for p in payloads]
+    assert len(holed) >= 2, [(p["verdict"], p["marker_chain"], p.get("reason")) for p in payloads]
     for p in holed:
         assert p["marker_chain"] is not None and p["marker_chain"] < pa.MARKER_CHAIN_MIN
         assert "never FOREIGN" in p["reason"]
@@ -334,7 +342,9 @@ def test_music_after_the_holed_measurement_still_reads_foreign(decoder, rec_clip
     """Rule A only softens a SHORT CHAIN over a holed span: broadband music reads FOREIGN through the
     spectrum at once, and an in-band chord reads FOREIGN as soon as its span holds no bridged audio
     (here 4 s after the last hole). Never MEASUREMENT."""
-    audio = np.concatenate([rec_clip, _music(kind, 12.0)])
+    # 14 s of music: the bridges are the lost audio itself (the look-ahead), so 12 s left the last
+    # window short by the early-stamped frames' few samples and it never completed
+    audio = np.concatenate([rec_clip, _music(kind, 14.0)])
     blocks = _live_pattern(audio, "loss")
     payloads, _lines = _run_with_wall(blocks, tmp_path, decoder)
     verdicts = _verdicts(payloads)
