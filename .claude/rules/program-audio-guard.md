@@ -200,7 +200,8 @@ level. Re-run the full calibration after any decoder or rule change:
       that removes a burst raises the share of what was delivered. Random positions on the full
       rec3b + rec2 recordings, 5340 window cases each: one 2-frame hole crossed the bar 3 times
       (worst 32.8 %), two holes in one window 8 times (worst 53 %). A 5 ms fade of the hole edges
-      gave 2 and 10, so it is the lost burst, not the edge step, and no fade is applied. Before the
+      gave 2 and 10: a fade does not lower the rate (in one case, rec3b window 64, the edge step alone
+      carried the window over the bar, 32.8 % -> 29.3 % faded), so no fade is applied. Before the
       bridge the window holding a hole was never judged (the span restarted, UNKNOWN). Reported on
       the Design-question thread (6036260703) next to the date step.
     - Restreamer's safety checks, pinned: music (pink, or an in-band chord) arriving before, across

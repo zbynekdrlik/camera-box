@@ -559,8 +559,9 @@ def test_a_bridged_hole_keeps_the_committed_measurement_windows_in_band(rec_clip
     bursts (a decoded word every ~0.5 s), so a hole that removes a burst raises the share of the
     delivered audio. Random positions on the full rec3b + rec2 recordings (5340 window cases): one
     2-frame hole crossed the bar 3 times (worst 32.8 %), two holes per window 8 times (worst 53 %).
-    A 5 ms fade of the hole edges gave 2 and 10, so the crossings are the lost burst, not the
-    edges. Recorded on the issue as the residual false-FOREIGN risk."""
+    A 5 ms fade of the hole edges gave 2 and 10: a fade does not lower the rate, although in one
+    case (rec3b window 64, 32.8 % -> 29.3 % faded) the edge step alone carried the window over the
+    bar. Recorded on the issue as the residual false-FOREIGN risk."""
     worst = 0.0
     for w in range(rec_clip.shape[0] // (2 * SR)):
         win = rec_clip[w * 2 * SR:(w + 1) * 2 * SR]
@@ -587,7 +588,7 @@ def test_quiet_music_with_bridged_holes_stays_foreign_never_silent(tmp_path, dbf
     """Quiet broadband music just over the SILENT bar: with bridged holes every window reads what it
     reads without them. The level is the delivered samples' own; taken over the window with its
     zeros it fell under -60 dBFS and the window read SILENT, which the gate passes."""
-    audio = _pink_stereo(10.0, dbfs, seed=7)
+    audio = _pink_stereo(10.5, dbfs, seed=7)      # 10.5 s: 5 windows also when the hole loses 7 ms
     ref, _ = _run(_frames(audio)[0], tmp_path, NoMarkers())
     assert set(_verdicts(ref)[1:]) == {"FOREIGN"}, _verdicts(ref)
     if pattern == "one 249 ms hole":
@@ -596,8 +597,7 @@ def test_quiet_music_with_bridged_holes_stays_foreign_never_silent(tmp_path, dbf
         drop, jitter = _mostly_zeros_frames(audio, 1.0, 8.5), {}
     holed, lines = _run(_frames(audio, drop=drop, jitter=jitter)[0], tmp_path, NoMarkers())
     assert any("bridged with" in line for line in lines), lines
-    assert _verdicts(holed)[: len(_verdicts(ref))] == _verdicts(ref)[: len(_verdicts(holed))], (
-        [(p["verdict"], p["rms_dbfs"]) for p in holed])
+    assert _verdicts(holed) == _verdicts(ref), [(p["verdict"], p["rms_dbfs"]) for p in holed]
     assert "SILENT" not in _verdicts(holed)
 
 
