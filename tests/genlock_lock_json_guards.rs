@@ -184,10 +184,11 @@ fn genlock_lock_idle_input_class_present_1341() {
     assert_has(STATUSBAR_CPP, "\\\"idle\\\":");
     // the widget fills the facet from the post-scan idle classification
     assert_has(STATUSBAR_CPP, "f.n_idle = scan.n_idle;");
-    // the idle floor + window constants driving the classification
+    // the idle floor + window constants driving the classification (issue 1302: they live in the
+    // header next to the parity-gated genlock_input_idle_class)
     assert_has(
-        STATUSBAR_CPP,
-        "static constexpr uint64_t GENLOCK_IDLE_INPUT_MIN_FRAMES = 60;",
+        "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp",
+        "#define GENLOCK_IDLE_INPUT_MIN_FRAMES UINT64_C(60)",
     );
     // the pure decision's C mirror gains the n_idle facet + the idle phase-events param (kept in
     // lock-step by tests/genlock_lock_state_parity.rs)
@@ -198,6 +199,48 @@ fn genlock_lock_idle_input_class_present_1341() {
     assert_has(
         "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp",
         "static inline uint64_t genlock_input_phase_events(int connected, int idle, uint64_t relocks,",
+    );
+}
+
+#[test]
+fn genlock_lock_idle_first_classification_present_1302() {
+    // Issue 1302: after a (re)connect, a first sight or an OBS start an input is UNCLASSIFIED and
+    // contributes nothing until it proves a live rate (>= 60 frames over >= 5 s) or the full #1341
+    // window classifies it. A subtree pull that reverts this re-opens the ~54 s window in which a
+    // keep-alive input's relocks DEGRADE the box after every reattach. Linux-CI twin of the issue-1302
+    // idle-class pwsh block in BOTH windows-genlock{,-fast}.yml -- keep all three in lock-step.
+    const HPP: &str = "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp";
+    const STATE_HPP: &str = "vendor/obs-studio/frontend/widgets/GenlockRecentEvents.hpp";
+    // the pure rule + its fast-stage constants (parity-gated by tests/genlock_idle_class_1302.rs)
+    assert_has(
+        HPP,
+        "static inline genlock_input_idle_class_t genlock_input_idle_class(int64_t span_ms, uint64_t delta_frames, genlock_input_idle_class_t prev_class)",
+    );
+    assert_has(HPP, "#define GENLOCK_IDLE_FAST_SPAN_MS INT64_C(5000)");
+    assert_has(HPP, "#define GENLOCK_IDLE_FAST_MIN_FRAMES UINT64_C(60)");
+    // the ring tick in the plain-C++ unit asks the rule, and the widget owns its state
+    assert_has(
+        RECENT_CPP,
+        "ring.idle_class = (int)genlock_input_idle_class(span_ms, delta_frames, (genlock_input_idle_class_t)ring.idle_class);",
+    );
+    assert_has(
+        STATE_HPP,
+        "std::vector<int> genlock_idle_classify_tick(GenlockIdleClassifier &st, int64_t now_ms,",
+    );
+    assert_has(STATUSBAR_HPP, "GenlockIdleClassifier genlockIdle;");
+    // only a LIVE input is graded: UNCLASSIFIED and IDLE take the idle path
+    assert_has(
+        STATUSBAR_CPP,
+        "const std::vector<int> classes = genlock_idle_classify_tick(genlockIdle, now_ms, rx_inputs);",
+    );
+    assert_has(STATUSBAR_CPP, "r.idle = classes[i] != GENLOCK_INPUT_LIVE;");
+    // the old in-widget ring (classified only at the full window) is gone
+    let widget = squish(&vendor_file(STATUSBAR_CPP));
+    let header = squish(&vendor_file(STATUSBAR_HPP));
+    assert!(
+        !widget.contains("genlockRxHistory") && !header.contains("genlockRxHistory"),
+        "issue 1302: the widget's own idle ring is back -- a reconnected keep-alive input would count \
+         as live for ~54 s again"
     );
 }
 

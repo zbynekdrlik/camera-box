@@ -1,7 +1,8 @@
-// GenlockRecentEvents.cpp — camera-box issue 1302: the per-input recent-event tick of the in-OBS
-// genlock LOCK indicator (see GenlockRecentEvents.hpp). Plain std C++ + the parity-gated C rules of
-// GenlockLockState.hpp; no OBS/Qt, so tests/genlock_phase_baseline_1302.rs compiles THIS file with
-// g++ and replays the widget's ticks on it.
+// GenlockRecentEvents.cpp — camera-box issue 1302: the per-input recent-event tick and the idle
+// classification ring of the in-OBS genlock LOCK indicator (see GenlockRecentEvents.hpp). Plain std
+// C++ + the parity-gated C rules of GenlockLockState.hpp; no OBS/Qt, so
+// tests/genlock_phase_baseline_1302.rs and tests/genlock_idle_class_1302.rs compile THIS file with
+// g++ and replay the widget's ticks on it.
 #include "GenlockRecentEvents.hpp"
 #include "GenlockLockState.hpp"
 
@@ -59,4 +60,43 @@ GenlockRecentEventTick genlock_recent_events_tick(GenlockRecentEvents &st, int64
 		st.last_event_ms = now_ms;
 	tick.recent_event = st.last_event_ms >= 0 && now_ms - st.last_event_ms < window_ms;
 	return tick;
+}
+
+std::vector<int> genlock_idle_classify_tick(GenlockIdleClassifier &st, int64_t now_ms,
+					    const std::vector<GenlockRxInput> &inputs)
+{
+	std::vector<int> classes;
+	classes.reserve(inputs.size());
+	std::set<std::string> present;
+	for (const GenlockRxInput &in : inputs) {
+		if (!in.connected) {
+			/* an absent input is n_absent, never classified; its ring is forgotten below */
+			classes.push_back(GENLOCK_INPUT_UNCLASSIFIED);
+			continue;
+		}
+		present.insert(in.name);
+		GenlockRxRing &ring = st.inputs[in.name];
+		if (!ring.samples.empty() && in.frames_received < ring.samples.back().second) {
+			/* the received counter went backward: a reconnect -- re-baseline and re-classify */
+			ring.samples.clear();
+			ring.idle_class = GENLOCK_INPUT_UNCLASSIFIED;
+		}
+		ring.samples.emplace_back(now_ms, in.frames_received);
+		while (ring.samples.size() > 1 && now_ms - ring.samples.front().first > GENLOCK_IDLE_WINDOW_MS)
+			ring.samples.pop_front();
+		const int64_t span_ms = ring.samples.back().first - ring.samples.front().first;
+		const uint64_t delta_frames = ring.samples.back().second - ring.samples.front().second;
+		ring.idle_class = (int)genlock_input_idle_class(span_ms, delta_frames,
+								(genlock_input_idle_class_t)ring.idle_class);
+		classes.push_back(ring.idle_class);
+	}
+	/* bound the remembered state: a ring whose input is not connected this tick is forgotten, so its
+	 * return is a first sight (UNCLASSIFIED). */
+	for (auto it = st.inputs.begin(); it != st.inputs.end();) {
+		if (present.count(it->first) == 0)
+			it = st.inputs.erase(it);
+		else
+			++it;
+	}
+	return classes;
 }
