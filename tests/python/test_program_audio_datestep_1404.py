@@ -331,7 +331,8 @@ def test_a_holed_unknown_says_why(decoder, rec_clip, tmp_path):
     audio = np.concatenate([rec_clip, _music("chord", 14.0)])
     payloads, _lines = _run_with_wall(_live_pattern(audio, "loss"), tmp_path, decoder)
     holed = [p for p in payloads if p["verdict"] == "UNKNOWN" and "bridged" in (p.get("reason") or "")]
-    assert len(holed) >= 2, [(p["verdict"], p["marker_chain"], p.get("reason")) for p in payloads]
+    # U U M M M M M U U U U F: the four windows whose span holds a bridged loss, then the chord's FOREIGN
+    assert len(holed) == 4, [(p["verdict"], p["marker_chain"], p.get("reason")) for p in payloads]
     for p in holed:
         assert p["marker_chain"] is not None and p["marker_chain"] < pa.MARKER_CHAIN_MIN
         assert "never FOREIGN" in p["reason"]

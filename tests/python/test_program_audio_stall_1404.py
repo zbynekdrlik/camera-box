@@ -401,3 +401,103 @@ def test_a_quiet_capture_decides_the_held_frames(tmp_path):
     bridged = [line for line in lines if "bridged with" in line]
     assert len(bridged) == 1 and "next 0 frame(s)" in bridged[0], lines
     assert not any("starts over" in line for line in lines), lines
+
+
+# ---------------------------------------------------------------------------------------------
+# review round 1: the first frame's drop in a bridge / restart, the exact limits, a frame far ahead
+# held, re-held groups (a frame that cannot join, the order of every frame)
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_bridge_or_a_restart_counts_the_first_frames_known_drop():
+    """The first held frame carries a known queue drop of 4 frames and the timeline stays 60 ms
+    ahead beyond it: the zeros are the drop and the hole, and the 250 ms limit applies to both."""
+    drop = 4 * FRAME_MS
+    got = _resolve(_held(60.0, 60.0, 60.0, 60.0, 60.0, drop0_ms=drop))
+    assert got.kind == pa.BRIDGE
+    assert got.missing_samples == pa.bridge_samples(_ms(drop) + _ms(60.0), SR)
+    over = _resolve(_held(60.0, 60.0, 60.0, 60.0, 60.0, drop0_ms=200.0))
+    assert over.kind == pa.DISCONTINUITY and over.missing_samples == 0
+
+
+# 4800-sample frames are exactly 1 000 000 units of 100 ns, so a stamp can sit ON a limit (1024-sample
+# frames never do: 213 333.3 units)
+BIG = 4800
+BIG_100NS = 1_000_000
+
+
+def _big_held(*cum_100ns):
+    return [(TS0 + (i + 1) * BIG_100NS + c, BIG, 0.0) for i, c in enumerate(cum_100ns)]
+
+
+def _big_resolve(held, complete=False):
+    return pa.resolve_ahead(TS0, BIG, SR, held, pa.continuity_tolerance_100ns(BIG, SR), complete=complete)
+
+
+def test_the_limits_are_exact_to_the_100_ns_unit():
+    tol = round(pa.continuity_tolerance_100ns(BIG, SR))
+    assert tol == 1_200_000
+    # a follower exactly ON the tolerance is back: a stall; one unit over is not
+    assert _big_resolve(_big_held(tol + 1, tol)).kind == pa.SENDER_STALL
+    assert _big_resolve(_big_held(tol + 1, tol + 1)) is None
+    # a hole of exactly 250 ms is bridged, one unit more restarts
+    limit = round(pa.hole_bridge_max_100ns())
+    assert _big_resolve(_big_held(*[limit] * 5)).kind == pa.BRIDGE
+    assert _big_resolve(_big_held(*[limit + 1] * 5)).kind == pa.DISCONTINUITY
+
+
+def test_a_frame_stamped_300_ms_late_with_its_followers_on_the_timeline_is_a_stall(tmp_path):
+    """A frame more than 250 ms AHEAD is held too (never an immediate restart): its followers on the
+    timeline make it a stall, no restart, no zeros."""
+    items = [_audio_item(k) for k in range(10)] + [_audio_item(10, 300.0)]
+    items += [_audio_item(k) for k in range(11, 200)]      # 200 frames: a window gets written
+    payloads, lines = _scripted_run(items, tmp_path, max_loops=len(items))
+    assert not any("starts over" in line or "bridged with" in line for line in lines), lines
+    assert payloads[-1]["sender_stalls"] == 1
+
+
+def _regroup_items(tail):
+    """f10 sits +45 ms ahead, f11 +90 ms (+45 against f10), then `tail`. The first group's smallest
+    offset is f10's 45 ms: bridged, f10 at its own stamp; f11 is then +45 against it and is held
+    again (a re-held group)."""
+    return [_audio_item(k) for k in range(10)] + [_audio_item(10, 45.0), _audio_item(11, 90.0)] + tail
+
+
+def test_a_re_held_group_keeps_every_frame_in_order(tmp_path):
+    """f12 onward sit +50 ms: after f10's 45 ms bridge, f11 is held again and f12 (+5 against f10's
+    place) brings it back: one stall. Every frame is taken in once, in order: 2 s windows complete
+    on the expected sample count, never an error."""
+    items = _regroup_items([_audio_item(k, 50.0) for k in range(12, 200)])
+    payloads, lines = _scripted_run(items, tmp_path, max_loops=len(items))
+    assert payloads[-1]["holes_bridged"] == 1 and payloads[-1]["sender_stalls"] == 1, lines
+    assert payloads[-1]["bridged_ms"] == pytest.approx(45.0, abs=0.05)
+    assert not any("starts over" in line for line in lines), lines
+    taken_s = 200 * FRAME / SR + 0.045
+    assert len([p for p in payloads if p.get("reason") != "sampler starting"]) == int(taken_s // 2.0)
+
+
+def test_a_queue_drop_after_a_re_held_group_never_joins_it(tmp_path):
+    """f12 carries a known queue drop: it cannot join, so the held frames are decided first -- the
+    re-held f11 too -- and only then is f12 judged with its own drop (never a held frame with a drop)."""
+    x = np.full((FRAME, 2), 0.01, dtype=np.float32)
+    f12 = pac.Captured(_Block(SR, x, _place(13) + _ms(90.0)), None, 101.0, 0, dropped_frames=1,
+                       dropped_100ns=FRAME_100NS)
+    items = _regroup_items([f12] + [_audio_item(k, 90.0) for k in range(14, 30)])
+    payloads, lines = _scripted_run(items, tmp_path, max_loops=len(items))
+    bridged = [line for line in lines if "bridged with" in line]
+    assert len(bridged) == 3, lines            # f10's hole, the re-held f11's, f12's dropped frame
+    assert sum("next 0 frame(s)" in line for line in bridged) == 1, bridged   # f11, alone
+    assert any("queue overflow: 1 frames" in line for line in bridged), bridged
+    assert not any("starts over" in line for line in lines), lines
+
+
+def test_a_frame_with_another_channel_count_never_joins(tmp_path):
+    """f11 has one channel (a format change): it cannot join the held f10, so f10 is decided alone
+    (next 0 frames) and f11 restarts at its format change."""
+    mono = pac.Captured(_Block(SR, np.full((FRAME, 1), 0.01, dtype=np.float32), _place(11) + _ms(90.0)),
+                        None, 101.0, 0)
+    items = [_audio_item(k) for k in range(10)] + [_audio_item(10, 45.0), mono]
+    _payloads, lines = _scripted_run(items, tmp_path, max_loops=len(items))
+    bridged = [line for line in lines if "bridged with" in line]
+    assert len(bridged) == 1 and "next 0 frame(s)" in bridged[0], lines
+    assert any("format change" in line and "starts over" in line for line in lines), lines
