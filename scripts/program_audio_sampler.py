@@ -53,6 +53,11 @@ MEASUREMENT | FOREIGN | SILENT | UNKNOWN (scripts/program_audio.py) and atomical
   by the capture path) is the fleet date step, nothing lost: no zeros, no restart.
 * HOLED SPAN (ROZHODNUTÉ issue 1404 comment 6037765523): a short chain over a span holding bridged
   audio reads UNKNOWN, never FOREIGN on its own.
+* SENDER STALL (ROZHODNUTÉ on issue 1404, Design-question 6037861831): a frame AHEAD of the timeline
+  (no matching wall step) is held with up to pa.STALL_LOOKAHEAD_FRAMES following frames (HeldFrames,
+  pa.resolve_ahead). Back within the tolerance = the stream OBS stamped late after an audio-thread
+  stall, nothing lost: no zeros, the span kept, counted (`sender_stalls`). Otherwise the hole is the
+  smallest offset over them: bridged or a restart, as before.
 
 Usage (systemd/program-audio-sampler.service):
   program_audio_sampler.py [--source "STREAM-SNV (stream)"] [--serve-dir DIR] [--lib PATH]
@@ -219,6 +224,46 @@ class MarkerSpan:
         return np.concatenate(list(self._wins), axis=0)
 
 
+class HeldFrames:
+    """The frames the sender-stall look-ahead holds for pa.resolve_ahead: the frame AHEAD of the
+    sender's timeline first, then up to pa.STALL_LOOKAHEAD_FRAMES frames that followed it, each as
+    (Captured item, audio block). Pure bookkeeping: run() decides and takes them in."""
+
+    def __init__(self):
+        self._frames: list[tuple] = []
+
+    def __bool__(self) -> bool:
+        return bool(self._frames)
+
+    def __len__(self) -> int:
+        return len(self._frames)
+
+    def hold(self, item, block) -> None:
+        self._frames.append((item, block))
+
+    def can_join(self, item, block) -> bool:
+        """A frame joins only when it continues the same stream: a sender stamp, the first frame's
+        rate and channel count, and no known queue drop of its own (that hole is judged on its own,
+        after the held frames are decided)."""
+        _item0, block0 = self._frames[0]
+        return (item.dropped_frames == 0 and pa.timestamp_defined(block.timestamp)
+                and (block.sample_rate, block.samples.shape[1])
+                == (block0.sample_rate, block0.samples.shape[1]))
+
+    def resolve(self, prev, complete: bool):
+        """pa.resolve_ahead over the held frames after the previous frame `prev` = (timestamp,
+        samples, sample_rate, channels); None while undecided."""
+        p_ts, p_n, p_sr, _ch = prev
+        frames = [(block.timestamp, block.samples.shape[0], item.dropped_100ns if k == 0 else 0.0)
+                  for k, (item, block) in enumerate(self._frames)]
+        return pa.resolve_ahead(p_ts, p_n, p_sr, frames, pa.continuity_tolerance_100ns(p_n, p_sr),
+                                complete=complete)
+
+    def take(self) -> list[tuple]:
+        frames, self._frames = self._frames, []
+        return frames
+
+
 def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], float] = time.monotonic,
         max_loops: int | None = None, on_write: Callable[[dict], None] | None = None,
         log: Callable[[str], None] = log, sleep: Callable[[float], None] = time.sleep,
@@ -238,6 +283,7 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
     latch = {"last_foreign": None}
     bridged_total = {"holes": 0, "ms": 0.0}  # since the start: the JSON's holes_bridged / bridged_ms
     drops_total = {"frames": 0}              # since the start: the JSON's queue_drops
+    stalls_total = {"n": 0}                  # since the start: the JSON's sender_stalls
     cap = capture if capture is not None else pac.SyncCapture(
         receiver, mono=mono, wall_offset=wall_offset if wall_offset is not None else (lambda: None),
         sleep=sleep)
@@ -253,7 +299,7 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
                                    markers_decoded=markers, marker_chain=chain,
                                    holes_bridged=bridged_total["holes"],
                                    bridged_ms=bridged_total["ms"], queue_drops=drops_total["frames"],
-                                   lag_ms=lag["ms"])
+                                   lag_ms=lag["ms"], sender_stalls=stalls_total["n"])
         pa.write_payload(serve_dir, payload)
         if on_write is not None:
             on_write(payload)
@@ -268,7 +314,8 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
         f"marker_chain>={pa.MARKER_CHAIN_MIN} over {pa.MARKER_SPAN_S:g}s continuity=sender timeline "
         f"(frame+{pa.CONTINUITY_SLACK_S * 1e3:g}ms, holes up to {pa.HOLE_BRIDGE_MAX_MS:g}ms bridged, "
         f"date steps matched to dev1's own wall step +-{pa.DATE_STEP_MATCH_MS:g}ms within "
-        f"{pa.DATE_STEP_WINDOW_S:g}s) receive_gap>{receive_gap_s:g}s without a timestamp "
+        f"{pa.DATE_STEP_WINDOW_S:g}s, a frame ahead looked ahead over {pa.STALL_LOOKAHEAD_FRAMES} "
+        f"frames for a sender stall) receive_gap>{receive_gap_s:g}s without a timestamp "
         f"capture={'thread' if capture is not None else 'in-loop'}")
     last_audio = mono()
     have_audio = False
@@ -276,11 +323,16 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
     last_verdict = "UNKNOWN"
     last_summary = mono()
     counts = {v: 0 for v in pa.VERDICTS}
-    errors = bad_rate = gaps = breaks = late_bursts = bridged = drops = date_steps = 0
+    errors = bad_rate = gaps = breaks = late_bursts = bridged = drops = date_steps = stalls = 0
     bridged_ms = 0.0     # the audio this summary interval bridged with zeros
     max_offset_ms = 0.0  # the largest |offset| of a frame that continued the sender timeline
     max_lag_ms = 0.0     # the oldest captured item the consumer took (its backlog behind the capture)
-    prev = None  # (timestamp, samples, sample_rate) of the previous audio block
+    max_stall_ms = 0.0   # the largest offset ahead of a frame the look-ahead read as a sender stall
+    # (timestamp, samples, sample_rate, channels) of the previous frame taken in; the timestamp is its
+    # place on the sender's timeline (a stalled frame's own late stamp never is)
+    prev = None
+    held = HeldFrames()  # a frame AHEAD of the timeline and the frames after it (the look-ahead)
+    now = mono()
     rebase_windows = 0  # windows still to come whose span holds a DATE_STEP (judged as holed)
     in_error = False
     bad_rate_logged = False
@@ -313,9 +365,112 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
                     + (f": {reason}" if reason else ""))
                 last_verdict = verdict
 
+    def place(item, block, stamp: int, missing: int = 0) -> None:
+        """Take a decided frame in: `missing` zeros before it (a bridged hole, counted), then its
+        samples. The next frame is judged against `stamp`, its place on the sender's timeline."""
+        nonlocal have_audio, last_audio, prev, bridged, bridged_ms
+        if missing:
+            hole_ms = missing * 1e3 / block.sample_rate
+            bridged += 1
+            bridged_ms += hole_ms
+            bridged_total["holes"] += 1
+            bridged_total["ms"] += hole_ms
+        have_audio = True
+        last_audio = item.arrival_s
+        lag["ms"] = (now - item.arrival_s) * 1e3
+        prev = (stamp, block.samples.shape[0], block.sample_rate, block.samples.shape[1])
+        if missing:
+            # The hole's samples, as silence, at their place on the sender's timeline: every
+            # later sample keeps its timeline position, so the marker chain stays on its line.
+            consume(np.zeros((missing, block.samples.shape[1]), dtype=block.samples.dtype),
+                    block.sample_rate, real=False)
+        consume(block.samples, block.sample_rate)
+
+    def admit(item, block) -> None:
+        """Judge a frame against the previous one and take it in -- or, AHEAD of the timeline, hold
+        it for the sender-stall look-ahead."""
+        nonlocal breaks, gaps, late_bursts, date_steps, rebase_windows, max_offset_ms
+        missing = 0
+        if have_audio:
+            j = judge_continuity(prev, block, item.arrival_s - last_audio, receive_gap_s,
+                                 dropped_frames=item.dropped_frames, dropped_100ns=item.dropped_100ns,
+                                 wall_steps=walls.recent(item.arrival_s))
+            if j.offset_ms is not None and j.kind in ("continue", "late_burst"):
+                max_offset_ms = max(max_offset_ms, abs(j.offset_ms))
+            if j.kind == "ahead":
+                held.hold(item, block)
+                return
+            if j.kind == "timeline_break":
+                breaks += 1
+                restart_span(j.detail)
+            elif j.kind == "receive_gap":
+                gaps += 1
+                restart_span(j.detail)
+            elif j.kind == "late_burst":
+                late_bursts += 1
+                log(f"program-audio sampler: {j.detail}")
+            elif j.kind == "date_step":
+                date_steps += 1
+                walls.consume(j.wall_step_100ns)
+                # The window that holds the step and the next one (a span is span.windows
+                # windows): their short chain is never FOREIGN on its own (rule A), since the
+                # +-20 ms match can absorb a small real loss.
+                rebase_windows = span.windows
+                missing = j.missing_samples
+                log(f"program-audio sampler: {j.detail}")
+            elif j.kind == "bridge":
+                missing = j.missing_samples
+                log(f"program-audio sampler: {j.detail}")
+        place(item, block, block.timestamp, missing)
+
+    def decide(res, frames) -> None:
+        """Act on the look-ahead's answer for the held `frames` (pa.Lookahead): file the first
+        len(res.stamps) at their timeline place, then judge every later one normally."""
+        nonlocal stalls, max_stall_ms, breaks
+        item0, _block0 = frames[0]
+        detail = lookahead_detail(res, len(frames) - 1, prev[1], prev[2], item0.dropped_frames,
+                                  item0.dropped_100ns)
+        if res.kind == pa.SENDER_STALL:
+            stalls += 1
+            stalls_total["n"] += 1
+            max_stall_ms = max(max_stall_ms, res.first_offset_100ns * 1e3 / pa.NDI_TIME_UNITS_PER_S)
+            if detail:
+                log(f"program-audio sampler: {detail}")
+        elif res.kind == pa.BRIDGE:
+            log(f"program-audio sampler: {detail}")
+        else:
+            breaks += 1
+            restart_span(detail)
+        for k, stamp in enumerate(res.stamps):
+            place(*frames[k], stamp, res.missing_samples if k == 0 else 0)
+        for it, blk in frames[len(res.stamps):]:
+            feed(it, blk)
+
+    def settle(complete: bool) -> None:
+        res = held.resolve(prev, complete)
+        if res is not None:
+            decide(res, held.take())
+
+    def feed(item, block) -> None:
+        """The entry for every audio frame: it joins the held look-ahead when one is open (a frame
+        that cannot join first closes it), else it is judged."""
+        while held and not held.can_join(item, block):
+            settle(complete=True)
+        if held:
+            held.hold(item, block)
+            settle(complete=False)
+        else:
+            admit(item, block)
+
+    def flush() -> None:
+        """Decide every held frame with what arrived (the capture went quiet, an error, the stop)."""
+        while held:
+            settle(complete=True)
+
     while not should_stop() and (max_loops is None or loops < max_loops):
         loops += 1
         item = cap.get(capture_timeout_ms)
+        now = mono()
         block = None
         if item is not None and item.dropped_frames:
             # The sampler's own capture queue was full: those frames are a hole of known length
@@ -323,6 +478,7 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
             drops += item.dropped_frames
             drops_total["frames"] += item.dropped_frames
         if item is not None and item.error is not None:
+            flush()  # the frames held before the error are real audio of the old span
             errors += 1
             if not in_error:
                 log(f"program-audio sampler: {item.error} -- the SDK reconnects by itself")
@@ -333,7 +489,6 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
         elif item is not None:
             block = item.block
             walls.observe(item.arrival_s, item.wall_offset_ns)
-        now = mono()
         if block is not None and block.sample_rate <= 0:
             bad_rate += 1
             if not bad_rate_logged:
@@ -342,73 +497,34 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
             block = None
         if block is not None and block.samples.shape[0] > 0:
             in_error = False
-            missing = 0
             max_lag_ms = max(max_lag_ms, (now - item.arrival_s) * 1e3)
-            if have_audio:
-                j = judge_continuity(prev, block, item.arrival_s - last_audio, receive_gap_s,
-                                     dropped_frames=item.dropped_frames, dropped_100ns=item.dropped_100ns,
-                                     wall_steps=walls.recent(item.arrival_s))
-                if j.offset_ms is not None and j.kind in ("continue", "late_burst"):
-                    max_offset_ms = max(max_offset_ms, abs(j.offset_ms))
-                if j.kind == "timeline_break":
-                    breaks += 1
-                    restart_span(j.detail)
-                elif j.kind == "receive_gap":
-                    gaps += 1
-                    restart_span(j.detail)
-                elif j.kind == "late_burst":
-                    late_bursts += 1
-                    log(f"program-audio sampler: {j.detail}")
-                elif j.kind == "date_step":
-                    date_steps += 1
-                    walls.consume(j.wall_step_100ns)
-                    # The window that holds the step and the next one (a span is span.windows
-                    # windows): their short chain is never FOREIGN on its own (rule A), since the
-                    # +-20 ms match can absorb a small real loss.
-                    rebase_windows = span.windows
-                    missing = j.missing_samples
-                    log(f"program-audio sampler: {j.detail}")
-                elif j.kind == "bridge":
-                    missing = j.missing_samples
-                    log(f"program-audio sampler: {j.detail}")
-                if missing:
-                    hole_ms = missing * 1e3 / block.sample_rate
-                    bridged += 1
-                    bridged_ms += hole_ms
-                    bridged_total["holes"] += 1
-                    bridged_total["ms"] += hole_ms
-            have_audio = True
-            last_audio = item.arrival_s
-            lag["ms"] = (now - item.arrival_s) * 1e3
-            prev = (block.timestamp, block.samples.shape[0], block.sample_rate, block.samples.shape[1])
-            if missing:
-                # The hole's samples, as silence, at their place on the sender's timeline: every
-                # later sample keeps its timeline position, so the marker chain stays on its line.
-                consume(np.zeros((missing, block.samples.shape[1]), dtype=block.samples.dtype),
-                        block.sample_rate, real=False)
-            consume(block.samples, block.sample_rate)
-        elif now - last_audio >= no_audio_timeout_s and now - last_unknown >= window_s:
-            reason = (f"no audio from {source!r} for {now - last_audio:.1f} s "
-                      f"(connections={receiver.connections()})")
-            lag["ms"] = None  # no window judged: no lag to report
-            write("UNKNOWN", None, None, reason=reason)
-            counts["UNKNOWN"] += 1
-            last_unknown = now
-            if last_verdict != "UNKNOWN":
-                log(f"program-audio verdict {last_verdict} -> UNKNOWN: {reason}")
-                last_verdict = "UNKNOWN"
+            feed(item, block)
+        else:
+            if item is None:
+                flush()  # the capture went quiet: no more frame can join the look-ahead
+            if now - last_audio >= no_audio_timeout_s and now - last_unknown >= window_s:
+                reason = (f"no audio from {source!r} for {now - last_audio:.1f} s "
+                          f"(connections={receiver.connections()})")
+                lag["ms"] = None  # no window judged: no lag to report
+                write("UNKNOWN", None, None, reason=reason)
+                counts["UNKNOWN"] += 1
+                last_unknown = now
+                if last_verdict != "UNKNOWN":
+                    log(f"program-audio verdict {last_verdict} -> UNKNOWN: {reason}")
+                    last_verdict = "UNKNOWN"
         if now - last_summary >= LOG_SUMMARY_S:
             log("program-audio summary (last %.0f s): %s error_frames=%d bad_rate_frames=%d "
-                "queue_drops=%d max_lag_ms=%.0f date_steps=%d "
+                "queue_drops=%d max_lag_ms=%.0f date_steps=%d sender_stalls=%d max_stall_ms=%.1f "
                 "timeline_breaks=%d late_bursts=%d receive_gaps=%d max_offset_ms=%.1f "
                 "holes_bridged=%d bridged_ms=%.1f"
                 % (now - last_summary, " ".join(f"{k}={v}" for k, v in counts.items()),
-                   errors, bad_rate, drops, max_lag_ms, date_steps, breaks, late_bursts, gaps,
-                   max_offset_ms, bridged, bridged_ms))
+                   errors, bad_rate, drops, max_lag_ms, date_steps, stalls, max_stall_ms, breaks,
+                   late_bursts, gaps, max_offset_ms, bridged, bridged_ms))
             counts = {v: 0 for v in pa.VERDICTS}
-            errors = bad_rate = gaps = breaks = late_bursts = bridged = drops = date_steps = 0
-            bridged_ms = max_offset_ms = max_lag_ms = 0.0
+            errors = bad_rate = gaps = breaks = late_bursts = bridged = drops = date_steps = stalls = 0
+            bridged_ms = max_offset_ms = max_lag_ms = max_stall_ms = 0.0
             last_summary = now
+    flush()  # the stop: decide the frames still held, so no taken-in audio is left behind
 
 
 class Judgement(NamedTuple):
@@ -433,6 +549,9 @@ def judge_continuity(prev, block, arrival_gap_s: float, receive_gap_s: float, *,
                         kept (the SDK queued the audio while dev1 starved the sampler)
       "date_step"       a forward jump that matches dev1's own wall step (pa.DATE_STEP): the fleet
                         date step, nothing lost; no zeros (only a known queue drop's), the span kept
+      "ahead"           more than the tolerance AHEAD of the timeline beyond any known drop, with no
+                        matching wall step and no format change: the caller holds it for the
+                        sender-stall look-ahead (HeldFrames, pa.resolve_ahead), which decides it
       "bridge"          a hole AHEAD of the timeline up to pa.HOLE_BRIDGE_MAX_MS (pa.BRIDGE), or a
                         queue drop: the caller inserts `missing_samples` zeros before the frame and
                         keeps the span, whatever the arrival gap (design issue 1404 comment 6036098516)
@@ -462,6 +581,9 @@ def judge_continuity(prev, block, arrival_gap_s: float, receive_gap_s: float, *,
         off_ms = pa.timeline_offset_100ns(p_ts, p_n, p_sr, block.timestamp) * 1e3 / pa.NDI_TIME_UNITS_PER_S
     else:
         off_ms = None  # only with a queue drop: frame_continues judged the known drop alone
+    if (defined and not fmt_changed and decision.kind in (pa.BRIDGE, pa.DISCONTINUITY)
+            and pa.ahead_of_timeline(p_ts, p_n, p_sr, block.timestamp, tol, dropped_100ns=dropped_100ns)):
+        return Judgement("ahead", "", off_ms)
     if decision.kind in (pa.BRIDGE, pa.DATE_STEP) and decision.missing_samples and fmt_changed:
         return Judgement("timeline_break", (f"{queue}audio timeline hole of {_fmt_ms(off_ms, drop_ms)} at a "
                                             f"format change ({p_sr} Hz x {p_ch} -> {block.sample_rate} Hz x "
@@ -502,6 +624,36 @@ def judge_continuity(prev, block, arrival_gap_s: float, receive_gap_s: float, *,
                                         f"timeline continues ({off_ms:+.1f} ms), the marker span is kept"),
                          off_ms)
     return Judgement("continue", "", off_ms)
+
+
+def lookahead_detail(res, held_n: int, prev_samples: int, sample_rate: int, dropped_frames: int = 0,
+                     dropped_100ns: float = 0.0) -> str:
+    """The log text for the look-ahead's answer `res` (pa.Lookahead) over the first held frame and
+    `held_n` frames after it; the previous frame was `prev_samples` long at `sample_rate`, and the
+    first held frame carried a known queue drop of `dropped_frames` / `dropped_100ns`. Empty for a
+    plain sender stall: those are counted (summary + JSON), never logged one by one (~2 a minute live)."""
+    units = pa.NDI_TIME_UNITS_PER_S
+    tol_ms = pa.continuity_tolerance_100ns(prev_samples, sample_rate) * 1e3 / units
+    off_ms = res.first_offset_100ns * 1e3 / units
+    hole_ms = res.hole_100ns * 1e3 / units
+    drop_ms = dropped_100ns * 1e3 / units
+    n = res.missing_samples
+    queue = (f"queue overflow: {dropped_frames} frames ({drop_ms:.1f} ms) dropped by the sampler's own "
+             "capture queue -- " if dropped_frames else "")
+    if res.kind == pa.SENDER_STALL:
+        if not n:
+            return ""
+        return (f"{queue}bridged with {n} zero samples ({n * 1e3 / sample_rate:.1f} ms; the frame sat "
+                f"{off_ms:+.1f} ms beyond the dropped audio and the next {held_n} frame(s) came back "
+                f"within +-{tol_ms:.1f} ms: a sender stall), the marker span is kept")
+    if res.kind == pa.BRIDGE:
+        return (f"{queue}audio timeline hole: the frame sits {off_ms:+.1f} ms ahead of the sender's "
+                f"timeline and the next {held_n} frame(s) never came back within +-{tol_ms:.1f} ms (the "
+                f"smallest offset {hole_ms:+.1f} ms is the hole, bridge up to {pa.HOLE_BRIDGE_MAX_MS:g} ms) "
+                f"-- bridged with {n} zero samples ({n * 1e3 / sample_rate:.1f} ms), the marker span is kept")
+    return (f"{queue}audio timeline discontinuity: the frame sits {off_ms:+.1f} ms off the sender's "
+            f"timeline (the smallest offset over the next {held_n} frame(s) {hole_ms:+.1f} ms, with the "
+            f"dropped audio over the {pa.HOLE_BRIDGE_MAX_MS:g} ms bridge; tolerance +-{tol_ms:.1f} ms)")
 
 
 def _fmt_ms(off_ms: float | None, drop_ms: float) -> str:
