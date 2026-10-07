@@ -324,6 +324,13 @@ pub mod switch_in_transient;
 // deliverable 4 wires the ±20ms bound on top of this).
 pub mod av_window;
 
+// issue 1404 Task 5 part b — `recording-verdict --av-sync --av-run <run>`: the A/V of a SELF-MARKED
+// run (the camera-box measurement clip, 911016) paired through its OWN dual-QR tick and its own
+// marker in the same recording, instead of the cam2 painter's tick. The pure tick source (the
+// selected run's per-frame tick + the restart refusal); the probe glue
+// (`probe::av_sync_recording`) decodes and pairs through the same calls as the painter path.
+pub mod av_run_pairing;
+
 // #656 — capture-delivery-rate sanity check (pure decision, prevention item 1). Given the
 // periodic captured-fps sample the appliance's own capture loop already computes, decides
 // whether the box's capture device has silently drifted off its negotiated rate for enough
