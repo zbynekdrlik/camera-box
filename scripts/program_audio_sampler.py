@@ -77,11 +77,19 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import program_audio as pa  # noqa: E402
 import program_audio_capture as pac  # noqa: E402
+import program_audio_http as pah  # noqa: E402
 import program_audio_marker as pam  # noqa: E402
 import rig_serve_files as rsf  # noqa: E402
 
 DEFAULT_SOURCE = "STREAM-SNV (stream)"
 SOURCE_ENV = "PROGRAM_AUDIO_SOURCE"
+# The sampler's own read-only endpoint (program_audio_http.py; host-agnostic, the sampler moves off
+# dev1): port 0 = no endpoint. The serve dir has its own override next to the lease server's one.
+DEFAULT_HTTP_PORT = 8891
+DEFAULT_HTTP_BIND = "0.0.0.0"
+HTTP_PORT_ENV = "PROGRAM_AUDIO_HTTP_PORT"
+HTTP_BIND_ENV = "PROGRAM_AUDIO_HTTP_BIND"
+SERVE_DIR_ENV = "PROGRAM_AUDIO_SERVE_DIR"
 NO_AUDIO_TIMEOUT_S = 5.0
 CAPTURE_TIMEOUT_MS = 500
 LOG_SUMMARY_S = 600.0
@@ -622,18 +630,32 @@ def private_ndi_config_dir() -> str:
     return tempfile.mkdtemp(prefix="program-audio-sampler-ndi-")
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description="issue 1404 -- the dev1 stream program-audio sampler")
+def build_parser() -> argparse.ArgumentParser:
+    """The sampler's CLI; every default can come from its environment variable (the unit's private
+    env file), so the same unit runs on any Linux node."""
+    ap = argparse.ArgumentParser(description="issue 1404 -- the stream program-audio sampler")
     ap.add_argument("--source", default=os.environ.get(SOURCE_ENV) or DEFAULT_SOURCE,
                     help=f"NDI source name (default ${SOURCE_ENV} or {DEFAULT_SOURCE!r})")
-    ap.add_argument("--serve-dir", default=rsf.default_serve_dir(),
-                    help=f"where program-audio.json goes (default ${rsf.SERVE_DIR_ENV} or "
-                         "$XDG_RUNTIME_DIR/rig-lease-serve; never the lease dir)")
+    ap.add_argument("--serve-dir", default=os.environ.get(SERVE_DIR_ENV) or rsf.default_serve_dir(),
+                    help=f"where program-audio.json goes (default ${SERVE_DIR_ENV}, else "
+                         f"${rsf.SERVE_DIR_ENV} or $XDG_RUNTIME_DIR/rig-lease-serve; never the lease dir)")
     ap.add_argument("--lib", default=None, help="libndi path (default $NDI_LIB_PATH or /usr/lib/ndi/libndi.so.6)")
     ap.add_argument("--marker-shim", default=None,
                     help=f"the QPSK marker decoder shim (default ${pam.SHIM_ENV} or {pam.DEFAULT_SHIM_PATH}; "
                          "built by scripts/build-qpsk-guard-shim.sh)")
+    ap.add_argument("--http-port", type=int, default=os.environ.get(HTTP_PORT_ENV) or DEFAULT_HTTP_PORT,
+                    help=f"the sampler's own read-only /program-audio.json endpoint (default ${HTTP_PORT_ENV} "
+                         f"or {DEFAULT_HTTP_PORT}; 0 = no endpoint)")
+    ap.add_argument("--http-bind", default=os.environ.get(HTTP_BIND_ENV) or DEFAULT_HTTP_BIND,
+                    help=f"its bind address (default ${HTTP_BIND_ENV} or {DEFAULT_HTTP_BIND})")
+    return ap
+
+
+def main(argv=None) -> int:
+    ap = build_parser()
     args = ap.parse_args(argv)
+    if not 0 <= args.http_port <= 65535:
+        ap.error(f"--http-port {args.http_port} is not a port (0 = no endpoint)")
 
     import program_audio_ndi as pan  # libndi only here, so the pure parts import without it
 
@@ -674,6 +696,20 @@ def main(argv=None) -> int:
             set_unknown(f"sampler cannot receive: {exc}")
             log(f"program-audio sampler: FATAL cannot create the NDI receiver: {exc}")
             return 1
+        http = None
+        if args.http_port:
+            try:
+                server = pah.make_server(args.http_bind, args.http_port, args.serve_dir)
+            except OSError as exc:
+                receiver.close()
+                set_unknown(f"sampler cannot serve http on {args.http_bind}:{args.http_port}: {exc}")
+                log(f"program-audio sampler: FATAL cannot serve http on {args.http_bind}:{args.http_port}: {exc}")
+                return 1
+            http = (server, pah.serve_in_thread(server))
+            log(f"program-audio sampler: serving http://{args.http_bind}:{args.http_port}/program-audio.json "
+                f"from {args.serve_dir}")
+        else:
+            log("program-audio sampler: no http endpoint (--http-port 0)")
         stop = {"signal": None}
 
         def _stop(signum, _frame):
@@ -697,6 +733,8 @@ def main(argv=None) -> int:
                     "the receiver is left to the process exit (destroying it under a running capture "
                     "would crash the SDK)")
             set_unknown("sampler stopped")
+            if http is not None:
+                pah.stop(*http)
             log(f"program-audio sampler: stopped (signal {stop['signal']}), program-audio.json set to UNKNOWN")
     finally:
         shutil.rmtree(ndi_config_dir, ignore_errors=True)
