@@ -16,8 +16,9 @@ The capture thread:
     read_wall_offset_ns), and appends to a bounded in-process queue. It never runs the FFT, the
     marker decode or a file write (pinned by tests/python/test_program_audio_capture_1404.py);
   * bounds the queue by queued AUDIO time (CAPTURE_QUEUE_MAX_S). When it is full the NEW frame is
-    dropped and counted; the drop rides on the next queued item (`dropped_frames`,
-    `dropped_100ns`), so the consumer treats it as a hole of exactly that length, never silently;
+    dropped and counted; the drop rides on the next queued AUDIO block (`dropped_frames`,
+    `dropped_100ns`; never an error item or an empty block, which the consumer does not judge), so
+    the consumer treats it as a hole of exactly that length, never silently;
   * on an NDI error frame queues an error item and waits one capture timeout (never a spin);
   * dies LOUDLY: any other exception in the capture call is handed to the consumer, whose next
     get() raises it, so the sampler exits non-zero and systemd restarts it (as the single loop
@@ -180,7 +181,9 @@ class CaptureThread:
                 self._pending_100ns += dur
                 self.drops_total += 1
                 return
-            if self._pending_frames:
+            if self._pending_frames and dur > 0:
+                # Only an audio block carries the drop: the consumer never judges an error item or
+                # an empty block, so a hole handed to one of those would be lost.
                 item = item._replace(dropped_frames=self._pending_frames, dropped_100ns=self._pending_100ns)
                 self._pending_frames, self._pending_100ns = 0, 0.0
             self._items.append(item)

@@ -544,7 +544,8 @@ def build_payload(verdict: str, rms_dbfs, outside_band_pct, *, now: datetime, wi
                   source: str, reason: str | None = None,
                   last_foreign_ts_utc: str | None = None, markers_decoded: int | None = None,
                   marker_chain: int | None = None, holes_bridged: int | None = None,
-                  bridged_ms: float | None = None, queue_drops: int | None = None) -> dict:
+                  bridged_ms: float | None = None, queue_drops: int | None = None,
+                  lag_ms: float | None = None) -> dict:
     """The program-audio.json payload. `age_s` is 0.0 as written; the lease server recomputes it
     (and `last_foreign_age_s` from `last_foreign_ts_utc`, the FOREIGN latch) at every request
     (rig_serve_files.program_audio_response). `markers_decoded` (raw CRC-valid words, diagnostics)
@@ -553,7 +554,10 @@ def build_payload(verdict: str, rms_dbfs, outside_band_pct, *, now: datetime, wi
     sender-timeline holes the running sampler bridged with zeros since it started, null in a
     payload written while it is not sampling. `queue_drops` (additive, design issue 1404 comment
     6037613222) counts the audio frames the sampler's own capture queue dropped since it started
-    (each one is read as a hole), null while it is not sampling."""
+    (each one is read as a hole), null while it is not sampling. `lag_ms` (additive): how long
+    before the write the newest audio of the judged window was captured -- the consumer's backlog
+    behind its capture thread, so a lagging sampler never passes for a fresh one; null with no
+    window."""
     if verdict not in VERDICTS:
         raise ValueError(f"unknown verdict {verdict!r}")
     payload = {
@@ -571,6 +575,7 @@ def build_payload(verdict: str, rms_dbfs, outside_band_pct, *, now: datetime, wi
         "holes_bridged": _count(holes_bridged),
         "bridged_ms": _round1(bridged_ms),
         "queue_drops": _count(queue_drops),
+        "lag_ms": _round1(lag_ms),
     }
     if reason is not None:
         payload["reason"] = reason

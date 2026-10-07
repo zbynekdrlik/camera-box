@@ -218,19 +218,23 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
         capture_timeout_ms: int = CAPTURE_TIMEOUT_MS, no_audio_timeout_s: float = NO_AUDIO_TIMEOUT_S,
         receive_gap_s: float = RECEIVE_GAP_S, window_s: float = pa.WINDOW_S,
         should_stop: Callable[[], bool] = lambda: False, capture=None,
-        wall_offset: Callable[[], int | None] = pac.read_wall_offset_ns) -> None:
+        wall_offset: Callable[[], int | None] | None = None) -> None:
     """The sampler's consumer loop. `receiver` has capture(timeout_ms) -> AudioBlock|None (raises
     ConnectionError on an NDI error frame) and connections(); `decoder` has
     decode(samples, sample_rate) -> CRC-valid words per channel (program_audio_marker.MarkerDecoder).
     `capture`: the capture side (program_audio_capture.CaptureThread, started by the caller); None =
     a SyncCapture that calls the receiver in this loop (the calibration and the loop tests), reading
-    dev1's wall offset through `wall_offset` once per block. Every written payload also goes through
-    `on_write` (tests)."""
+    dev1's wall offset through `wall_offset` once per block -- None (the default) reads no clock, so
+    a real dantesync step never decides a test or a calibration run; the dev1 service's
+    CaptureThread reads the clock itself. Every written payload also goes through `on_write`
+    (tests)."""
     latch = {"last_foreign": None}
     bridged_total = {"holes": 0, "ms": 0.0}  # since the start: the JSON's holes_bridged / bridged_ms
     drops_total = {"frames": 0}              # since the start: the JSON's queue_drops
-    cap = capture if capture is not None else pac.SyncCapture(receiver, mono=mono, wall_offset=wall_offset,
-                                                              sleep=sleep)
+    cap = capture if capture is not None else pac.SyncCapture(
+        receiver, mono=mono, wall_offset=wall_offset if wall_offset is not None else (lambda: None),
+        sleep=sleep)
+    lag = {"ms": None}        # the consumer's lag behind the capture for the window being written
     walls = pa.WallSteps()
 
     def write(verdict, rms, outside, reason=None, markers=None, chain=None):
@@ -241,7 +245,8 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
                                    reason=reason, last_foreign_ts_utc=latch["last_foreign"],
                                    markers_decoded=markers, marker_chain=chain,
                                    holes_bridged=bridged_total["holes"],
-                                   bridged_ms=bridged_total["ms"], queue_drops=drops_total["frames"])
+                                   bridged_ms=bridged_total["ms"], queue_drops=drops_total["frames"],
+                                   lag_ms=lag["ms"])
         pa.write_payload(serve_dir, payload)
         if on_write is not None:
             on_write(payload)
@@ -269,13 +274,16 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
     max_offset_ms = 0.0  # the largest |offset| of a frame that continued the sender timeline
     max_lag_ms = 0.0     # the oldest captured item the consumer took (its backlog behind the capture)
     prev = None  # (timestamp, samples, sample_rate) of the previous audio block
+    rebase_windows = 0  # windows still to come whose span holds a DATE_STEP (judged as holed)
     in_error = False
     bad_rate_logged = False
     loops = 0
 
     def restart_span(why: str) -> None:
+        nonlocal rebase_windows
         acc.reset()
         span.reset()
+        rebase_windows = 0
         if why:
             log(f"program-audio sampler: {why} -- the marker span starts over (no MEASUREMENT for "
                 f"{pa.MARKER_SPAN_S:g} s)")
@@ -283,10 +291,12 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
     def consume(samples: np.ndarray, sample_rate: int, real: bool = True) -> None:
         """Push audio (a frame, or with real=False the zeros that bridge a hole before it) into the
         window accumulator; classify, write and log every window it completes."""
-        nonlocal last_verdict
+        nonlocal last_verdict, rebase_windows
         for win, sr, win_real in acc.push(samples, sample_rate, real):
             verdict, rms, outside, reason, markers, chain = classify_window(win, sr, span, decoder,
-                                                                            win_real)
+                                                                            win_real,
+                                                                            rebased=rebase_windows > 0)
+            rebase_windows = max(0, rebase_windows - 1)
             write(verdict, rms, outside, reason, markers, chain)
             counts[verdict] += 1
             if verdict != last_verdict:
@@ -345,6 +355,10 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
                 elif j.kind == "date_step":
                     date_steps += 1
                     walls.consume(j.wall_step_100ns)
+                    # The window that holds the step and the next one (a span is span.windows
+                    # windows): their short chain is never FOREIGN on its own (rule A), since the
+                    # +-20 ms match can absorb a small real loss.
+                    rebase_windows = span.windows
                     missing = j.missing_samples
                     log(f"program-audio sampler: {j.detail}")
                 elif j.kind == "bridge":
@@ -358,6 +372,7 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
                     bridged_total["ms"] += hole_ms
             have_audio = True
             last_audio = item.arrival_s
+            lag["ms"] = (now - item.arrival_s) * 1e3
             prev = (block.timestamp, block.samples.shape[0], block.sample_rate, block.samples.shape[1])
             if missing:
                 # The hole's samples, as silence, at their place on the sender's timeline: every
@@ -368,6 +383,7 @@ def run(receiver, serve_dir: str, *, source: str, decoder, mono: Callable[[], fl
         elif now - last_audio >= no_audio_timeout_s and now - last_unknown >= window_s:
             reason = (f"no audio from {source!r} for {now - last_audio:.1f} s "
                       f"(connections={receiver.connections()})")
+            lag["ms"] = None  # no window judged: no lag to report
             write("UNKNOWN", None, None, reason=reason)
             counts["UNKNOWN"] += 1
             last_unknown = now
@@ -427,12 +443,15 @@ def judge_continuity(prev, block, arrival_gap_s: float, receive_gap_s: float, *,
     drop_ms = dropped_100ns * 1e3 / pa.NDI_TIME_UNITS_PER_S
     queue = (f"queue overflow: {dropped_frames} frames ({drop_ms:.1f} ms) dropped by the sampler's own "
              "capture queue -- " if dropped_frames else "")
+    defined = pa.timestamp_defined(p_ts) and pa.timestamp_defined(block.timestamp)
+    if not defined and arrival_gap_s > receive_gap_s:
+        # The arrival fallback, a known queue drop or not: the drop cannot vouch for what else the
+        # arrival gap lost when no timestamp tells.
+        return Judgement("receive_gap", (f"{queue}receive gap of {arrival_gap_s:.1f} s (no NDI sender "
+                                         "timestamp, the arrival-time fallback)"), None)
     if decision.kind == pa.UNKNOWN_TS:
-        if arrival_gap_s > receive_gap_s:
-            return Judgement("receive_gap", (f"receive gap of {arrival_gap_s:.1f} s (no NDI sender "
-                                             "timestamp, the arrival-time fallback)"), None)
         return Judgement("continue", "", None)
-    if pa.timestamp_defined(p_ts) and pa.timestamp_defined(block.timestamp):
+    if defined:
         off_ms = pa.timeline_offset_100ns(p_ts, p_n, p_sr, block.timestamp) * 1e3 / pa.NDI_TIME_UNITS_PER_S
     else:
         off_ms = None  # only with a queue drop: frame_continues judged the known drop alone
@@ -507,11 +526,13 @@ def decode_real_samples(decoder, samples: np.ndarray, sr: int, real: np.ndarray 
     return words
 
 
-def classify_window(win: np.ndarray, sr: int, span: MarkerSpan, decoder, real: np.ndarray | None = None):
+def classify_window(win: np.ndarray, sr: int, span: MarkerSpan, decoder, real: np.ndarray | None = None,
+                    rebased: bool = False):
     """One 2 s window -> (verdict, rms, outside, reason, markers_decoded, marker_chain): the spectral
     measurement of this window and the marker chain over the trailing span (module doc of
     program_audio.py). A decode failure leaves the chain unknown, which never reads MEASUREMENT.
-    `real` is the window's real-sample mask (None = no bridged zeros in it)."""
+    `real` is the window's real-sample mask (None = no bridged zeros in it); `rebased`: the span holds
+    a DATE_STEP, which counts as holed for the short-chain rule (ROZHODNUTÉ 6037765523)."""
     rms, outside = pa.analyse(win, sr, real)
     silent = pa.is_number(rms) and rms < pa.SILENT_RMS_DBFS
     full = span.push(win, sr, silent, real)
@@ -533,14 +554,18 @@ def classify_window(win: np.ndarray, sr: int, span: MarkerSpan, decoder, real: n
     elif not silent:
         reason = (f"marker span: {span.non_silent_s:g} of {pa.MARKER_SPAN_S:g} s of non-silent audio "
                   "since the last silent window")
-    holed = full is not None and span.real is not None
+    holed = full is not None and (span.real is not None or rebased)
     verdict = pa.classify(rms, outside, chain, holed=holed)
     if verdict != "UNKNOWN":
         reason = None
     elif reason is None and holed and isinstance(chain, int) and chain < pa.MARKER_CHAIN_MIN:
-        zeros_ms = int(np.count_nonzero(~span.real)) * 1e3 / sr
-        reason = (f"marker chain {chain} < {pa.MARKER_CHAIN_MIN} over a span holding {zeros_ms:.1f} ms of "
-                  "bridged audio -- a chain cut short by a hole is never FOREIGN on its own "
+        held = []
+        if span.real is not None:
+            held.append(f"{int(np.count_nonzero(~span.real)) * 1e3 / sr:.1f} ms of bridged audio")
+        if rebased:
+            held.append("a date step")
+        reason = (f"marker chain {chain} < {pa.MARKER_CHAIN_MIN} over a span holding {' and '.join(held)} -- "
+                  "a chain cut short by a hole is never FOREIGN on its own "
                   "(ROZHODNUTÉ issue 1404 comment 6037765523)")
     elif reason is None:
         reason = "the window's level or spectrum is not a number"
@@ -581,6 +606,10 @@ def scheduling_line(nice: int, weight: int | None, rlimit_nice: int | None) -> s
     effective = weight is not None and weight >= CPU_WEIGHT_WANTED
     if nice < 0 and effective:
         return f"program-audio sampler: scheduling nice={nice} cpu.weight={w}"
+    if nice < 0:
+        return (f"program-audio sampler: WARNING scheduling nice={nice} but its cgroup's cpu.weight={w} "
+                f"is not the unit's CPUWeight={CPU_WEIGHT_WANTED}: it can starve under the other "
+                "units' load")
     tail = (f"its priority is the cgroup's cpu.weight={w} only" if effective else
             f"and its cgroup's cpu.weight={w} is not the unit's CPUWeight={CPU_WEIGHT_WANTED}: it "
             "competes like any other process and can starve under load")
