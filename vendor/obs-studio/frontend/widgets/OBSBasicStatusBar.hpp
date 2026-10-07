@@ -105,11 +105,10 @@ private:
 	 * itself each tick, over GENLOCK_MEDIA_CLOCK_WINDOW_S. The media-clock term keys on their RATE (wall
 	 * steps left out): since part A the media clock follows the disciplined wall on every box. */
 	std::deque<std::pair<qint64, int64_t>> genlockMediaClockHistory;
-	/* #1341: per-input received-frame history (input name -> ring of (monotonic ms, cumulative
-	 * frames_received)) over GENLOCK_IDLE_WINDOW_MS. An input whose received DELTA over the window is
-	 * below GENLOCK_IDLE_INPUT_MIN_FRAMES is IDLE (keep-alive-only) and excluded from the DEGRADED
-	 * gate; entries for inputs no longer present are pruned each tick so the state stays bounded. */
-	std::map<std::string, std::deque<std::pair<qint64, uint64_t>>> genlockRxHistory;
+	/* #1341 + issue 1302: per-input received-frame rings + each input's class (UNCLASSIFIED / LIVE /
+	 * IDLE), ticked by genlock_idle_classify_tick (GenlockRecentEvents.cpp). Only a LIVE input is
+	 * graded; an input no longer connected is forgotten each tick so the state stays bounded. */
+	GenlockIdleClassifier genlockIdle;
 	/* genlock-lock: log-on-change de-dup */
 	int genlockLastLoggedState = -1;
 	int genlockLastLoggedReason = -1;

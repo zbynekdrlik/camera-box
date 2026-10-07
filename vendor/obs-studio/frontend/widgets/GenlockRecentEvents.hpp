@@ -5,7 +5,9 @@
 // whether it contributed (connected and not idle) at the last 1 Hz tick, so a reconnect, a wake from
 // idle or a first sight re-baselines instead of counting the input's whole lifetime total as new
 // events (the #1299 aggregate compare did, and held the box DEGRADED recent_event for 60 s after
-// every reattach).
+// every reattach). The same unit keeps the #1341 idle classification ring, which decides which
+// inputs contribute at all: an input is UNCLASSIFIED after a (re)connect or first sight, LIVE once
+// it delivers a live rate (genlock_idle_classify_tick).
 //
 // Plain std C++ (no OBS/Qt). The tick lives in its own translation unit, GenlockRecentEvents.cpp,
 // which calls the parity-gated C rules of GenlockLockState.hpp; this header does not include that
@@ -62,3 +64,34 @@ struct GenlockRecentEventTick {
  * order). Inputs no longer in `inputs` are forgotten. */
 GenlockRecentEventTick genlock_recent_events_tick(GenlockRecentEvents &st, int64_t now_ms, int64_t window_ms,
 						   const std::vector<GenlockPhaseInput> &inputs);
+
+/* issue 1302 + #1341: what the widget remembers about ONE connected genlock input's received frames */
+struct GenlockRxRing {
+	/* (monotonic ms, cumulative frames_received) within the idle window, oldest first */
+	std::deque<std::pair<int64_t, uint64_t>> samples;
+	/* the input's class at the last tick: genlock_input_idle_class_t of GenlockLockState.hpp
+	 * (0 UNCLASSIFIED, 1 LIVE, 2 IDLE) */
+	int idle_class = 0;
+};
+
+/* the widget's whole idle-classification state: input name -> its ring. An input that is not connected
+ * or leaves the scan is forgotten, so its return is a first sight (UNCLASSIFIED). */
+struct GenlockIdleClassifier {
+	std::map<std::string, GenlockRxRing> inputs;
+};
+
+/* one genlock input as the idle classification reads it */
+struct GenlockRxInput {
+	std::string name;
+	bool connected = true;        /* the DistroAV receiver has a live NDI connection */
+	uint64_t frames_received = 0; /* cumulative frames queued onto the FIFO (obs_genlock_stats) */
+};
+
+/* One 1 Hz tick of the idle classification: each connected input's ring takes this tick's sample (a
+ * received counter that went backward clears the ring and the class: a reconnect), is pruned to the
+ * idle window, and the parity-gated genlock_input_idle_class decides from its span, its frame delta and
+ * the previous class. Returns each input's class in scan order (a disconnected input reads UNCLASSIFIED
+ * and is forgotten). Only a LIVE input is graded and feeds recent_event; the widget gives UNCLASSIFIED
+ * and IDLE inputs the idle path. */
+std::vector<int> genlock_idle_classify_tick(GenlockIdleClassifier &st, int64_t now_ms,
+					    const std::vector<GenlockRxInput> &inputs);

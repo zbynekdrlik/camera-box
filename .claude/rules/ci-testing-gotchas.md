@@ -1763,3 +1763,25 @@ paths (here `hashlib.pbkdf2_hmac`, the 802.11i PSK definition), never against th
 - **A fake server that logs a request BEFORE it decides to drop the connection** counts the dropped
   request as one that ran. If the test means "this request never reached the target", remove the
   logged entry when the fake drops (`DropOnPress` in `tests/python/test_strih_browser_keeper_obs_run_1399.py`).
+
+## A test harness that runs bash must pass values as ARGUMENTS, never inside the script text (issue 1302)
+
+A pytest helper like `_bash(f'. "{LIB}"; fn \'{value}\'')` builds shell text from a Python value. A
+test whose value is an injection vector (`4'; rm -rf /; '`, written to prove the CODE rejects it)
+then breaks the HARNESS quoting and the harness itself runs the payload. It happened: the first draft
+of `tests/python/test_genlock_stats_abi_1302.py` ran `rm -rf /` on dev1, and only GNU rm's
+`--preserve-root` refused it. Pass every variable as a positional argument:
+`subprocess.run(["bash", "-c", script, "harness", *args])` and use `"$1"`, `"$2"` in the script (the
+`_bash` / `_lib` helpers there). And never use a destructive payload as the injection vector: `touch
+INJECTED` proves the same point.
+
+## A pwsh Remove-Item that must fail NON-terminating: a read-only parent directory, not a non-empty one (issue 1302)
+
+To prove an emitted PowerShell step is fail-closed (`-ErrorAction Stop`) where it used to be silent
+(`-ErrorAction SilentlyContinue`), the failure must be one SilentlyContinue really swallows.
+`Remove-Item` on a NON-EMPTY directory under `pwsh -NonInteractive` fails TERMINATING (the host
+cannot ask the recurse confirmation) whatever `-ErrorAction` says, so the old code fails too and the
+test is not RED. A read-only parent directory (`chmod 0555`) makes the delete a non-terminating
+access error, the stand-in for a file another process holds open on Windows. It needs a non-root
+user (root ignores the mode); the test fails loudly as root rather than skipping, and restores the
+mode in `finally` so pytest can clean the temp dir.

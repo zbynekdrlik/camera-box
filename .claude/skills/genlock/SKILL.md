@@ -344,6 +344,15 @@ which the boxes' last full-bundle deploy predates — so obs.dll-only leaves tho
 `drift-guard --compare` (manifest per-component check) reports the mismatch. If the ticket/spec says
 "full bundle, NO DRIFT", deploy the whole bundle, not just obs.dll.
 
+**A PUBLIC stats-struct change is NOT obs.dll-only-safe (issue 1302).** `struct obs_genlock_stats` and
+`struct obs_genlock_output_stats` live on the FRONTEND's stack and obs.dll fills them with no size,
+so a newer obs.dll that writes a bigger struct crashes the old obs64.exe. Never hand-swap obs.dll for
+such a change. `deploy-genlock-fleet.sh --fast` refuses an `obs_genlock_stats` change on the box (the
+box's `GENLOCK_STATS_ABI.txt` vs the build's `OBS_GENLOCK_STATS_VERSION`, step 0f, exit 13; a
+full-bundle deploy records the marker). An `obs_genlock_output_stats` change is caught only at plan
+time (a Windows `--fast` is refused unless that struct's version is 1) and by the CI pin, until the
+marker records its version too.
+
 Procedure (per box, ~10 files actually differ but deploy the whole stage for NO-DRIFT):
 
 1. `airuleset.py`-serve or `python3 -m http.server --bind <dev1 LAN>` the bundle as ONE zip

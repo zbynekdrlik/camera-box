@@ -575,7 +575,9 @@ strih_lx_plan_steps() {
 #   Every ssh below is 'sshpass -p \$PW timeout 180 ssh ${STRIH_LX_SSH_OPTS} ${u}@${host} <cmd>'.
 # STEP 0 (resolve): the linux-genlock.yml run at ${sha}; download its '${art}'
 #          artifact to ${lstage}/bundle -- REFUSED unless its GENLOCK_BUILD_SHA.txt is ${sha} and its
-#          BUNDLE_MANIFEST.json carries lib/x86_64-linux-gnu/libobs.so.30.
+#          BUNDLE_MANIFEST.json carries lib/x86_64-linux-gnu/libobs.so.30. The planner adds
+#          bundle/GENLOCK_STATS_ABI.txt = the stats version of obs.h at ${sha} (removed when unreadable;
+#          issue 1302), which setup-strih.sh records next to GENLOCK_BUILD_SHA.txt.
 # STEP 1 (tree): the committed scripts/ systemd/ intercom/ vendor/realtek-r8152 of this checkout (archive of HEAD) + the
 #          generated run-setup.sh -> ${lstage}/repo.
 # STEP 2 (preflight): the box must be the fact file's host ('$(strih_lx_remote_identity_cmd)' == STRIH_HOSTNAME),

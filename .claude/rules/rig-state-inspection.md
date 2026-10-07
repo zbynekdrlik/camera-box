@@ -151,6 +151,12 @@ transfer/deploy.
 
 ### 5b. The FAST-DLL variant (libobs-only change) — when the full bundle is overkill (issue 960, 2026-08-03)
 
+**Never hand-swap obs.dll when the change touches `struct obs_genlock_stats` / `struct
+obs_genlock_output_stats` or their versions (issue 1302):** the frontend keeps both structs on its
+stack, so a newer obs.dll filling a bigger struct crashes the old obs64.exe. Use
+`deploy-genlock-fleet.sh --fast`, which compares the box's `GENLOCK_STATS_ABI.txt` with the build's
+`OBS_GENLOCK_STATS_VERSION` and refuses a mismatch; a hand swap must make the same comparison first.
+
 When the merged vendor change touches ONLY `vendor/obs-studio/libobs/**` (compiles into `obs.dll`),
 the `windows-genlock-fast` artifact (`obs-genlock-fast-dll`: obs.dll + GENLOCK_BUILD_SHA.txt +
 fast manifest, ~1.3 MB) replaces steps 1-2 above — but FIRST prove the fast build's tree matches

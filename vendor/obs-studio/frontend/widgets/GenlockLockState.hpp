@@ -173,6 +173,43 @@ static inline uint64_t genlock_input_new_phase_events(int has_prev, int prev_con
 	return total - prev_total;
 }
 
+/* issue 1302 + #1341 — the per-input idle classification the widget's ring tick (GenlockRecentEvents.cpp,
+ * genlock_idle_classify_tick) asks once per input per 1 Hz tick. The ring holds (monotonic ms, cumulative
+ * frames received) pruned to the idle window; span_ms = its newest minus oldest sample time, delta_frames
+ * = the frames received across it, prev_class = the previous tick's class (UNCLASSIFIED after a
+ * (re)connect, a first sight or a received-counter reset). Only a LIVE input is graded and feeds
+ * recent_event; UNCLASSIFIED and IDLE take the idle path. Byte-for-byte mirror of
+ * camera_box::genlock_lock_state::input_idle_class and its constants, parity-gated by
+ * tests/genlock_idle_class_1302.rs (which lifts from the window constant through the function). */
+#define GENLOCK_IDLE_WINDOW_MS INT64_C(60000)
+#define GENLOCK_IDLE_FULL_SPAN_MS (GENLOCK_IDLE_WINDOW_MS * 9 / 10)
+#define GENLOCK_IDLE_INPUT_MIN_FRAMES UINT64_C(60)
+#define GENLOCK_IDLE_FAST_SPAN_MS INT64_C(5000)
+#define GENLOCK_IDLE_FAST_MIN_FRAMES UINT64_C(60)
+
+typedef enum genlock_input_idle_class {
+	GENLOCK_INPUT_UNCLASSIFIED = 0, /* just (re)connected or first seen: not yet proven live */
+	GENLOCK_INPUT_LIVE = 1,         /* delivers frames at a live rate */
+	GENLOCK_INPUT_IDLE = 2,         /* #1341 keep-alive-only over the full window */
+} genlock_input_idle_class_t;
+
+static inline genlock_input_idle_class_t genlock_input_idle_class(int64_t span_ms, uint64_t delta_frames,
+								  genlock_input_idle_class_t prev_class)
+{
+	/* the full window: the #1341 rule decides */
+	if (span_ms >= GENLOCK_IDLE_FULL_SPAN_MS)
+		return delta_frames < GENLOCK_IDLE_INPUT_MIN_FRAMES ? GENLOCK_INPUT_IDLE : GENLOCK_INPUT_LIVE;
+	/* the fast rule: >= 60 frames over >= 5 s is a live rate, whatever the previous class (a
+	 * keep-alive input never meets it); it never says IDLE */
+	if (span_ms >= GENLOCK_IDLE_FAST_SPAN_MS && delta_frames >= GENLOCK_IDLE_FAST_MIN_FRAMES)
+		return GENLOCK_INPUT_LIVE;
+	/* else the previous class holds on a short ring (a ring a long widget stall pruned): LIVE is
+	 * never demoted, IDLE stays IDLE, anything else stays UNCLASSIFIED */
+	if (prev_class == GENLOCK_INPUT_LIVE || prev_class == GENLOCK_INPUT_IDLE)
+		return prev_class;
+	return GENLOCK_INPUT_UNCLASSIFIED;
+}
+
 /* #1303 — case-insensitive ASCII substring test, a private helper for genlock_name_is_camera below.
  * Returns 1 iff `needle` (assumed non-empty) occurs in `hay`. Pure C (no libc strcasestr, which is
  * non-standard), so it lifts + compiles standalone in the parity gate. */

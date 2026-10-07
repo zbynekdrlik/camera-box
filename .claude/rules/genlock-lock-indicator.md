@@ -7,6 +7,9 @@ paths:
   - "tests/genlock_lock_indicator_guards.rs"
   - "vendor/obs-studio/frontend/widgets/GenlockRecentEvents.hpp"
   - "tests/genlock_phase_baseline_1302.rs"
+  - "vendor/obs-studio/frontend/widgets/GenlockRecentEvents.cpp"
+  - "tests/genlock_idle_class_1302.rs"
+  - "src/genlock_lock_state_idle_tests.rs"
 ---
 
 # In-OBS GENLOCK LOCK indicator (#1298)
@@ -25,6 +28,7 @@ facet + dev1 watchdog that CONSUMES the same structs over obs-websocket).
 | C-vs-Rust parity gate | `tests/genlock_lock_state_parity.rs` | Lifts the C block, `cc`-compiles it, compares `(state, reason)` over all 2^9 flag combos × the three media-clock verdicts × a set of `(n_inputs, n_locked, n_absent, n_idle)` tuples (a TABLE + loop harness since issue 1372 part D: ~35k straight-line assignments took ~1 min at `-O1`, the table compiles in < 1 s — keep new axes in the table) (the 8th flag is #1303's `audio_unpaired`; the `n_absent` axis is #1299's — some-absent-but-all-connected-locked → LOCKED, some-absent-with-a-connected-unlocked → DEGRADED, all-absent → HEALTHY-idle, and the impossible `n_absent > n_inputs` both ports saturate to `n_connected=0`). |
 | Per-source stats API | `obs.h` (`struct obs_genlock_stats`, `obs_source_get_genlock_stats`) + `obs-source.c` (`genlock_fill_stats`) | The `genlock-fifo audit` log line and the API BOTH route through `genlock_fill_stats` — they can never disagree. Additive + versioned (`OBS_GENLOCK_STATS_VERSION`, 4 since issue 1302: `audio_hold_mode` / `audio_withheld` / `audio_place_err_ms` / `audio_place_err_seeded`, which the audit line now prints from the same snapshot; the frontend names the mode through the export `obs_genlock_audio_hold_token`, never a copy of the strings). |
 | Per-input event baseline (issue 1302) | `src/genlock_lock_state.rs` (`PhaseEventSample`, `input_new_phase_events`) ↔ `GenlockLockState.hpp` (`genlock_input_new_phase_events`, right after `genlock_input_phase_events`); the widget's state + tick in their own plain-C++ unit `GenlockRecentEvents.{hpp,cpp}` (registered in `frontend/cmake/ui-widgets.cmake`; the header does not include `GenlockLockState.hpp`, so the status bar's other includers see only std structs) | `tests/genlock_phase_baseline_1302.rs`: C-vs-Rust parity of the rule (512 vectors) + a replay of the widget's tick on the shipped C++ bytes graded by the C decision. Guards: `genlock_lock_recent_event_baseline_present_1302` + the issue-1302 pwsh block in both ymls. |
+| Fast first idle classification (issue 1302) | `src/genlock_lock_state.rs` (`InputIdleClass`, `input_idle_class`, the `GENLOCK_IDLE_*` constants; unit cases in the `#[path]` child `genlock_lock_state_idle_tests.rs`) ↔ `GenlockLockState.hpp` (`genlock_input_idle_class` + the constants as macros, right after `genlock_input_new_phase_events`); the ring tick `genlock_idle_classify_tick` in `GenlockRecentEvents.cpp` (state `GenlockIdleClassifier`, the status bar member `genlockIdle`) | `tests/genlock_idle_class_1302.rs`: C-vs-Rust parity of the rule and its five constants (312 vectors) + a replay of the shipped ring tick and recent-event tick on six scenarios graded by the C decision, every tick's classes checked against a reference ring on the Rust authority. Guards: `genlock_lock_idle_first_classification_present_1302` + the issue-1302 idle-class pwsh block in both ymls. |
 | Per-output stats API | `obs.h` (`struct obs_genlock_output_stats`, `obs_output_set_genlock_wall_stamping`, `obs_output_get_genlock_stats`) + `obs-output.c` + `obs-internal.h` (two bool fields, bzalloc-zeroed) | DistroAV's `ndi-output.cpp` sets `wall_stamping=true` at `begin_data_capture` success, `false` at stop. |
 | The widget | `OBSBasicStatusBar.{hpp,cpp}` (`UpdateGenlockLabel`, `PollGenlockClock`) | A permanent `QLabel` + an ALWAYS-ON 1 Hz `QTimer` (NOT the stream-only `refreshTimer`). |
 | Vendored-source guards | `tests/genlock_lock_indicator_guards.rs` | std-only, runnable via `rustc --test`; the Linux-CI twin of the pwsh gates. |
@@ -204,13 +208,34 @@ lowest)**; else LOCKED (green).
     real event after it, a wake, a vanish, a backward reset, the offender window and its tie, an
     offender that leaves the scan inside the window, saturation of both sums) graded by the C
     decision, and checks every tick against a reference built on the Rust authority.
-  - **Known limit (review round 1, not fixed here): a KEEP-ALIVE input that reattaches still reads
-    as live for ~54 s.** The #1341 idle ring of an absent input is dropped, and a fresh ring
-    classifies only once it spans 90 % of the window, so a reconnected playlist input contributes
-    until then and each keep-alive relock in that time is a new event. The same holds for every
-    keep-alive input after an OBS start. Pre-existing (the aggregate did the same); a follow-up
-    decision, because the cure either changes the #1341 classifier or hides a genuinely live new
-    input's events for its first ~54 s.
+  - **A (re)connected input is UNCLASSIFIED until it proves a live rate (issue 1302, ROZHODNUTÉ
+    6028553391, design 6028838843).** Before it, the #1341 ring classified an input only once it
+    spanned 90 % of the window, so a reconnected keep-alive playlist input (and every keep-alive input
+    after an OBS start) counted as live for ~54 s and each keep-alive relock in that time was a new
+    event. Now each connected input's ring tick (`genlock_idle_classify_tick`) asks the parity-gated
+    `genlock_input_idle_class(span_ms, delta_frames, prev_class)`:
+    - a ring spanning the full window (54 s): the #1341 rule, IDLE below 60 frames, else LIVE;
+    - the fast rule: a ring spanning >= 5 s with >= 60 frames in it (>= 12 fps) is LIVE, whatever
+      the previous class. A keep-alive input can never meet it, so it also safely promotes an IDLE
+      input that went live while the widget timer stalled (5 s after the stall, not 54 s; the
+      `idle_wakes_in_stall` replay, review round 1);
+    - otherwise the previous class holds on a short ring: LIVE is never demoted when a stalled
+      timer pruned the ring to one sample (the `widget_stall` replay), IDLE stays IDLE, UNCLASSIFIED
+      stays UNCLASSIFIED. The fast stage never says IDLE, so a slow 1-5 fps source is LIVE once it
+      has delivered 60 frames (5 fps at 12 s, 2 fps at 30 s) and a 1 fps one is left to the full
+      window as before.
+
+    A first sight, a received counter that goes backward (the ring and the class are cleared) or an
+    input that left the scan (forgotten) restarts at UNCLASSIFIED. Only a LIVE input is graded: the
+    widget gives UNCLASSIFIED and IDLE inputs the idle path (`r.idle`: out of `n_locked` /
+    `n_connected`, 0 phase events, never blamed as unlocked), so the per-input event baseline is
+    taken at the first LIVE tick and a keep-alive input never contributes. Consequences: a real new
+    input's events are hidden for its first ~5 s; at an OBS start every input is UNCLASSIFIED for
+    ~5 s, so the box reads HEALTHY-idle LOCKED (n_connected 0) until the live ones are proven; in the
+    v8 JSON and the tooltip an UNCLASSIFIED input reads `"idle": true` / low-rate (no schema change).
+    The window constants live in `GenlockLockState.hpp` now (`GENLOCK_IDLE_WINDOW_MS`,
+    `GENLOCK_IDLE_INPUT_MIN_FRAMES`, `GENLOCK_IDLE_FAST_SPAN_MS`, `GENLOCK_IDLE_FAST_MIN_FRAMES`), never a
+    second copy in the widget.
 - **`qpc_drift` is the wall STEP only — never the cumulative offset (#1299 Part 4), never a rate
   (#1357 scope C).** The libobs producer `genlock_wall_qpc_drift_ms()` is a wall-vs-`os_gettime_ns`
   accumulator since OBS start. What it measures DIFFERS PER OS, which is why no rate/offset term may
@@ -294,9 +319,16 @@ lowest)**; else LOCKED (green).
   reaches the struct on Windows: the new frontend imports `obs_genlock_audio_hold_token`, which an
   old obs.dll lacks, so obs64 does not start. On Linux (lazy binding) it starts and runs without
   the per-input audio keys, because the import is called only under `version >= 4`.
-  `deploy-genlock-fleet.sh --fast` does not refuse
-  such a commit mechanically yet (follow-up candidate); never `--fast` a change that touches
-  `struct obs_genlock_stats`. CI is the first place the C/Qt compiles — locally only
+  Since the issue-1302 follow-up `deploy-genlock-fleet.sh --fast` refuses it mechanically: every
+  full-bundle deploy records its frontend's `OBS_GENLOCK_STATS_VERSION` in `GENLOCK_STATS_ABI.txt`,
+  and the FAST program refuses (exit 13) when that marker is missing or differs from the new
+  obs.dll's version (`genlock-fleet-deploy.md`). A struct change MUST bump
+  `OBS_GENLOCK_STATS_VERSION` (the obs.h comment's rule), or the gate cannot see it; the pytest pins
+  the struct body to its version so a change without a bump fails CI. `struct
+  obs_genlock_output_stats` (the per-output facet) is on the frontend's stack the same way; the gate
+  does not compare its version yet, so its body is pinned at `OBS_GENLOCK_OUTPUT_STATS_VERSION 1`
+  (a change fails CI) and a Windows `--fast` of a commit whose output version is not 1 is refused at
+  plan time, until the gate covers it. CI is the first place the C/Qt compiles — locally only
   `cargo fmt --all --check` + the pure Rust module (`rustc --test`) + the parity/guard tests
   (standalone) verify; the blog refactor's format/arg types were lift-compiled under `gcc
   -Wformat=2 -Werror`.

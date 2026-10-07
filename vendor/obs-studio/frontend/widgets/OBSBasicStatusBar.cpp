@@ -93,16 +93,10 @@ static constexpr int64_t GENLOCK_AUDIO_PAIRING_BOUND_MS = 33;
  * always holds a fresh one even on a box whose state has not changed since startup. */
 static constexpr int GENLOCK_JSON_HEARTBEAT_TICKS = 30;
 
-/* camera-box #1341: a CONNECTED genlock input whose received-frame DELTA over the idle window is
- * below this floor is IDLE (keep-alive-only) — excluded from n_locked/n_connected and contributing 0
- * phase events, so an idle SongPlayer playlist input (~1 frame / 11 s -> ~5 frames / 60 s) never
- * flaps the box DEGRADED/recent_event, while a live source (>= 23.98 fps -> >= 1400 frames / 60 s)
- * clears it by a wide margin. */
-static constexpr uint64_t GENLOCK_IDLE_INPUT_MIN_FRAMES = 60;
-/* The window (ms) the received-frame delta is measured over — the SAME 60 s window recent_event
- * uses; an input is classified idle only once its per-input sample ring spans >= 90 % of it (the
- * qpc rate_ready precedent), so a live source is never mislabelled idle during the first ~54 s. */
-static constexpr qint64 GENLOCK_IDLE_WINDOW_MS = 60000;
+/* camera-box #1341 + issue 1302: the idle classification's window and floors (GENLOCK_IDLE_WINDOW_MS,
+ * GENLOCK_IDLE_INPUT_MIN_FRAMES and the fast first classification) live in GenlockLockState.hpp next to
+ * the parity-gated genlock_input_idle_class; the ring tick is genlock_idle_classify_tick
+ * (GenlockRecentEvents.cpp). */
 
 /* camera-box issue 1302: recent_event holds for this long after the last NEW phase event of a
  * contributing input (the per-input baseline, genlock_recent_events_tick). */
@@ -1345,44 +1339,36 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 
 	const qint64 now_ms = genlockClock.elapsed();
 
-	/* #1341: classify each CONNECTED input as IDLE (keep-alive-only) from its received-frame DELTA
-	 * over the same 60 s window recent_event uses. An idle SongPlayer playlist input keeps a live
-	 * NDI connection but sends ~1 frame / 11 s, so its FIFO re-acquires a boundary on each keep-alive
-	 * frame (a relock) — which would falsely feed recent_event and DEGRADE the box. An idle input is
-	 * excluded from n_locked + n_connected and contributes 0 phase events. A per-input sample ring
-	 * (name -> (monotonic ms, cumulative frames_received)) is pruned to the window; a counter DECREASE
-	 * re-baselines (reconnect); classification waits until the ring spans ~the full window so a live
-	 * source is never mislabelled idle at startup. */
+	/* #1341 + issue 1302: classify each CONNECTED input LIVE / IDLE / UNCLASSIFIED from its received
+	 * frames (genlock_idle_classify_tick, GenlockRecentEvents.cpp, over the parity-gated
+	 * genlock_input_idle_class). An idle SongPlayer playlist input keeps a live NDI connection but sends
+	 * ~1 frame / 11 s, so its FIFO re-acquires a boundary on each keep-alive frame (a relock), which
+	 * would falsely feed recent_event and DEGRADE the box. After a (re)connect, a first sight or an OBS
+	 * start an input is UNCLASSIFIED until it proves a live rate (>= 60 frames over >= 5 s) or the full
+	 * window classifies it. Only a LIVE input is graded: an UNCLASSIFIED or IDLE one takes the idle path
+	 * -- excluded from n_locked + n_connected, 0 phase events, never blamed as unlocked. */
 	{
-		std::set<std::string> present;
+		std::vector<GenlockRxInput> rx_inputs;
+		rx_inputs.reserve(scan.inputs.size());
+		for (const GenlockInputRow &r : scan.inputs) {
+			GenlockRxInput in;
+			in.name = r.name;
+			in.connected = r.connected;
+			in.frames_received = r.frames_received;
+			rx_inputs.push_back(std::move(in));
+		}
+		const std::vector<int> classes = genlock_idle_classify_tick(genlockIdle, now_ms, rx_inputs);
 		scan.n_idle = 0;
-		for (GenlockInputRow &r : scan.inputs) {
+		for (size_t i = 0; i < scan.inputs.size(); i++) {
+			GenlockInputRow &r = scan.inputs[i];
 			if (!r.connected)
 				continue; /* an absent input is n_absent, never idle (no live connection) */
-			present.insert(r.name);
-			auto &ring = genlockRxHistory[r.name];
-			if (!ring.empty() && r.frames_received < ring.back().second)
-				ring.clear(); /* received counter went backward -> reconnect reset, re-baseline */
-			ring.emplace_back(now_ms, r.frames_received);
-			while (ring.size() > 1 && now_ms - ring.front().first > GENLOCK_IDLE_WINDOW_MS)
-				ring.pop_front();
-			const qint64 span = ring.back().first - ring.front().first;
-			if (span >= GENLOCK_IDLE_WINDOW_MS * 9 / 10) {
-				const uint64_t delta = ring.back().second - ring.front().second;
-				r.idle = delta < GENLOCK_IDLE_INPUT_MIN_FRAMES;
-			}
+			r.idle = classes[i] != GENLOCK_INPUT_LIVE;
 			if (r.idle) {
 				scan.n_idle++;
 				if (r.locked)
 					scan.n_locked--; /* idle inputs are excluded from n_locked */
 			}
-		}
-		/* bound the remembered state: drop ring entries for inputs no longer present this tick. */
-		for (auto it = genlockRxHistory.begin(); it != genlockRxHistory.end();) {
-			if (present.count(it->first) == 0)
-				it = genlockRxHistory.erase(it);
-			else
-				++it;
 		}
 		/* an idle input must never be BLAMED as the unlocked offender: drop idle names from the
 		 * unlocked list (the scan built it over all connected-!locked inputs, idle-unaware). */

@@ -22,6 +22,15 @@
 # fleet_box_mcp BOX -> the win-* MCP server that drives a WINDOWS genlock box (stream, resolume);
 # rc 2 for any other name (a Linux box has no win-* MCP).
 fleet_box_mcp() { case "${1:-}" in stream) echo "win-stream-snv" ;; resolume) echo "win-resolume" ;; *) return 2 ;; esac; }
+# fleet_boxes_swap_obs_dll CSV -> 1 when the list holds a Windows box (one with a win-* MCP above: the
+# boxes a --fast deploy swaps obs.dll on), else 0. issue 1302: the stats-ABI gate's scope.
+fleet_boxes_swap_obs_dll() {
+  local b IFS=','
+  for b in ${1:-}; do
+    if fleet_box_mcp "$b" >/dev/null 2>&1; then echo 1; return 0; fi
+  done
+  echo 0
+}
 
 # fleet_box_ip BOX -> the address a planner prints/dials. stream + resolume come from the fleet list
 # (resolume's is the HOSTNAME resolume.lan -- NEVER a pinned literal IP: it is DHCP-drifting and

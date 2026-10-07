@@ -207,7 +207,10 @@ if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
   cp -a "${STRIH_LX_BUNDLE_SRC%/}/." "$GENLOCK_DIR/" || fail "genlock bundle copy failed"
   GSHA="$(cat "$GENLOCK_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown)"
   DSHA="$(cat "$GENLOCK_DIR/DISTROAV_BUILD_SHA.txt" 2>/dev/null || echo unknown)"
-  genlock_write_markers "$GENLOCK_DIR" "$GSHA" "$DSHA" || fail "genlock_write_markers failed"
+  # issue 1302: the stats ABI the planner staged into the bundle (read from the STAGE, never from the
+  # install dir, which still holds the previous deploy's marker); absent = unknown = the marker is removed.
+  SABI="$(tr -d '[:space:]' 2>/dev/null < "${STRIH_LX_BUNDLE_SRC%/}/GENLOCK_STATS_ABI.txt" || true)"
+  genlock_write_markers "$GENLOCK_DIR" "$GSHA" "$DSHA" "" "$SABI" || fail "genlock_write_markers failed"
   echo "  installed genlock bundle to ${GENLOCK_DIR} (genlock ${GSHA}, distroav ${DSHA})"
   # issue 1317: install the bundle into its /usr prefix so the dynamic loader finds it -- the /opt
   # staged copy above is the marker home, but OBS is BUILT for /usr (libs -> /usr/lib/x86_64-linux-gnu,
