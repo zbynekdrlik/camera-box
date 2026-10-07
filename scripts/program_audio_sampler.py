@@ -17,8 +17,11 @@ MEASUREMENT | FOREIGN | SILENT | UNKNOWN (scripts/program_audio.py) and atomical
   reads fresh while it holds an old verdict), when libndi cannot be loaded, and on stop.
 * mDNS ONLY, enforced: the receiver runs with a private, empty NDI_CONFIG_DIR, so no NDI extra-IP
   list can make it open a TCP discovery connection into a sender (.claude/rules/ndi-discovery.md).
-* Logging: a line per verdict CHANGE, the first NDI error frame / bad sample rate of a run, and a
-  summary every LOG_SUMMARY_S -- never a line per 2 s window (~43 000 a day).
+* Logging: a line per verdict CHANGE, the first NDI error frame / bad sample rate of a run, a line
+  per span restart (`audio timeline discontinuity`, the no-timestamp `receive gap`) and per late
+  burst the timeline proved continuous, and a summary every LOG_SUMMARY_S (timeline_breaks,
+  late_bursts, receive_gaps; a restart after an NDI error frame shows as error_frames) -- never a
+  line per 2 s window (~43 000 a day).
 
 * MARKER REQUIREMENT (ROZHODNUTÉ issue 1404 comments 6026577906 + 6026826572): MEASUREMENT also
   needs the cam2 QPSK marker itself -- a timecode chain of >= pa.MARKER_CHAIN_MIN markers over the
@@ -92,7 +95,7 @@ class WindowAccumulator:
         self.reset()
 
     def reset(self) -> None:
-        """Drop the partial window (a receive gap: audio before and after it is never mixed)."""
+        """Drop the partial window (a span restart: audio before and after it is never mixed)."""
         self._parts: list[np.ndarray] = []
         self._have = 0
         self._fmt: tuple[int, int] | None = None

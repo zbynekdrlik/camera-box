@@ -152,7 +152,7 @@ level. Re-run the full calibration after any decoder or rule change:
   - Why: the old rule (no audio block for over 1 s) read 57 spurious `MEASUREMENT -> UNKNOWN` in 6 h
     on 7.10.2026, all `receive gap of 1.0–2.0 s` while worktree lanes loaded dev1. The sampler was
     starved and the NDI SDK handed the queued audio over in one late burst; nothing was lost.
-    Restreamer's watchdog stops a YouTube session on 2 consecutive UNKNOWN polls.
+    Restreamer's watchdog stops a YouTube session on 2 consecutive UNKNOWN polls or 3 within 60 s.
   - The rule: every NDI audio frame carries the SDK `timestamp` (100 ns, the sender's submission
     time). `expected = prev_timestamp + prev_samples / sample_rate`. Within ± (one frame + 20 ms)
     = ±41.3 ms at 1024 samples / 48 kHz it CONTINUES, whatever the arrival gap (logged as a
@@ -160,12 +160,19 @@ level. Re-run the full calibration after any decoder or rule change:
     span restart (`audio timeline discontinuity: the frame sits +X ms off …`).
   - It also closes the old reverse hole: audio LOST while blocks kept arriving under 1 s apart was
     stitched into one span and could read one false FOREIGN (review of 6027557132: 4 of 762 cut
-    clips). A lost stretch now moves the timestamps and restarts the span.
+    clips). A lost stretch longer than the tolerance now moves the timestamps and restarts the
+    span. A shorter one is still stitched: one missing frame (21.3 ms) always, two or three when the
+    sender's jitter pulls the next stamp back inside 41.3 ms. The lane's review probe cut 1–3 frame
+    holes into the three real fixtures (45 positions per case, exact and jittered stamps, the real
+    decoder shim): 0 FOREIGN windows. A frame the sampler drops itself (sample rate ≤ 0) is such a
+    hole too.
   - Fallback: only when a timestamp is undefined (`INT64_MAX` = `NDIlib_recv_timestamp_undefined`,
     or ≤ 0) the old arrival rule applies (`RECEIVE_GAP_S` = 1 s, logged `receive gap of … (no NDI
     sender timestamp …)`). An NDI error frame still restarts the span unconditionally (stricter
     than the fallback; 0 error frames in the 6 h live journal).
-  - The 10-minute summary counts `timeline_breaks`, `late_bursts` and `receive_gaps` (fallback only).
+  - The 10-minute summary counts `timeline_breaks`, `late_bursts` and `receive_gaps` (fallback only);
+    a restart after an NDI error frame shows as `error_frames`. Each restart and each late burst
+    also logs one line.
   - STEP 0 (7.10.2026): a second, read-only sampler instance (private serve dir) took the live
     `STREAM-SNV (stream)` for 25 min while dev1 ran test suites and the marker calibration.
     70 304 frames (comment 6030714990):
@@ -179,7 +186,10 @@ level. Re-run the full calibration after any decoder or rule change:
       delivered, the old rule stitched across it, and the stream OBS log shows nothing at that
       moment, so where they were lost is not known;
     - the SDK `timestamp` and the sender's `timecode` agree to 2 µs: both are its wall clock at
-      submission (`vendor/distroav/src/ndi-output.cpp`, `genlock_wall_now_100ns`).
+      submission (`vendor/distroav/src/ndi-output.cpp`, `genlock_wall_now_100ns`);
+    - a second 20-min run of the NEW loop on the live sender (56 250 frames): jitter up to 29.5 ms
+      (p99 18.2, so the margin to 41.3 ms is ~12 ms, watch it), 0 timeline breaks, 0 receive gaps,
+      599 MEASUREMENT windows and only the start-up UNKNOWN.
     A probe can reuse the scratch recipe: subclass `NdiAudioReceiver.capture` to log
     `frame.timestamp`, run `program_audio_sampler.run` with a private serve dir, never the live
     one, and never restart the live unit for it.
