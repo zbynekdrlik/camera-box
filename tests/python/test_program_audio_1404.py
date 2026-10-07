@@ -631,7 +631,11 @@ def test_run_latches_a_foreign_window_into_the_following_payloads(tmp_path):
     pas.run(_FakeReceiver(blocks), str(tmp_path), source="S", decoder=FixedChain(), mono=_Clock().mono,
             max_loops=len(blocks), on_write=payloads.append, log=lambda m: None)
     verdicts = [q["verdict"] for q in payloads]
-    assert verdicts == ["UNKNOWN", "UNKNOWN", "FOREIGN", "MEASUREMENT", "MEASUREMENT", "MEASUREMENT"]
+    # The first window is in the 4 s marker warm-up, yet its spectrum alone already says FOREIGN, so
+    # it reads FOREIGN (ROZHODNUTÉ issue 1404 comment 6027706292 item 1: only MEASUREMENT needs the
+    # marker chain). The latch then holds the NEWEST FOREIGN window.
+    assert verdicts == ["UNKNOWN", "FOREIGN", "FOREIGN", "MEASUREMENT", "MEASUREMENT", "MEASUREMENT"]
+    assert payloads[1]["last_foreign_ts_utc"] == payloads[1]["ts_utc"]
     assert payloads[-1]["last_foreign_ts_utc"] == payloads[2]["ts_utc"]
     assert payloads[0]["last_foreign_ts_utc"] is None
 
