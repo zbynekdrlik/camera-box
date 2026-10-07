@@ -102,10 +102,11 @@ def test_the_next_frame_on_the_timeline_continues():
     assert pa.timeline_offset_100ns(TS0, FRAME, SR, nxt) == pytest.approx(0.0, abs=1.0)
 
 
-@pytest.mark.parametrize("off_ms", [-21.8, -10.0, 10.7, 21.9, 41.0, -41.0])
+@pytest.mark.parametrize("off_ms", [-21.1, -10.0, 11.7, 24.5, 41.0, -41.0])
 def test_the_senders_submission_jitter_continues(off_ms):
-    """STEP 0 (7.10.2026, the live stream program): the sender's submission jitter reached
-    +-21.9 ms; anything inside one frame + 20 ms (41.3 ms) is the same timeline."""
+    """STEP 0 (7.10.2026, 25 min of the live stream program, comment 6030714990): the sender's
+    submission jitter reached -21.1 / +24.5 ms (p99 11.7); anything inside one frame + 20 ms
+    (41.3 ms) is the same timeline."""
     ts = TS0 + round(FRAME_100NS + off_ms * 10_000)
     assert pa.frame_continues(TS0, FRAME, SR, ts, _tol()) == pa.CONTINUE
 
