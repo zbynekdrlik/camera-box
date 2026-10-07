@@ -103,6 +103,8 @@ manifest_sha_for_path() {
 # Writes each marker temp-then-rename (a POSIX same-dir `mv -f`) so a concurrent drift-guard reader
 # never sees a half-written marker. A missing MARKER_DIR/GENLOCK_SHA/DISTROAV_SHA is fail-loud
 # (return 2), never a silent partial write — under this script's `set -e` a non-zero return aborts.
+# issue 1302: the optional 5th argument STATS_ABI writes GENLOCK_STATS_ABI.txt (a version) or removes it
+# (empty / malformed), exactly as the lib does.
 _genlock_marker_atomic() {
     local dest="$1" content="$2" tmp
     tmp="${dest}.tmp.$$"
@@ -119,7 +121,7 @@ _genlock_marker_atomic() {
     return 0
 }
 genlock_write_markers() {
-    local marker_dir="${1:-}" genlock_sha="${2:-}" distroav_sha="${3:-}" deployed_at="${4:-}"
+    local marker_dir="${1:-}" genlock_sha="${2:-}" distroav_sha="${3:-}" deployed_at="${4:-}" stats_abi="${5:-}"
     if [ -z "$marker_dir" ]; then
         echo "genlock_write_markers: MARKER_DIR (arg 1) is required" >&2; return 2
     fi
@@ -136,6 +138,14 @@ genlock_write_markers() {
     _genlock_marker_atomic "$marker_dir/GENLOCK_BUILD_SHA.txt"  "$genlock_sha"  || return 1
     _genlock_marker_atomic "$marker_dir/DISTROAV_BUILD_SHA.txt" "$distroav_sha" || return 1
     _genlock_marker_atomic "$marker_dir/DEPLOYED_AT"           "$deployed_at"  || return 1
+    if [[ "$stats_abi" =~ ^[1-9][0-9]{0,8}$ ]]; then
+        _genlock_marker_atomic "$marker_dir/GENLOCK_STATS_ABI.txt" "$stats_abi" || return 1
+    else
+        [ -z "$stats_abi" ] || echo "genlock_write_markers: STATS_ABI '$stats_abi' is not a version -- GENLOCK_STATS_ABI.txt removed" >&2
+        if ! rm -f "$marker_dir/GENLOCK_STATS_ABI.txt" 2>/dev/null; then
+            echo "genlock_write_markers: could not remove $marker_dir/GENLOCK_STATS_ABI.txt" >&2; return 1
+        fi
+    fi
     return 0
 }
 

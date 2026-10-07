@@ -56,6 +56,9 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/genlock-markers.sh
 . "$HERE/lib/genlock-markers.sh"
+# shellcheck source=scripts/lib/genlock-stats-abi.sh
+# issue 1302: the --fast stats-ABI gate (step 0f) + the full deploy's GENLOCK_STATS_ABI.txt (step 5b).
+. "$HERE/lib/genlock-stats-abi.sh"
 # shellcheck source=scripts/lib/ahk-watchdog.sh
 # Shared AHK fragments: the issue-1372 GUARD (stop if running, never restart) + the #789 relaunch.
 . "$HERE/lib/ahk-watchdog.sh"
@@ -166,7 +169,7 @@ fleet_pick_run_at_sha() {
   jq -r --arg s "$sha" '[.[] | select(.headSha == $s and .conclusion == "success")][0].databaseId // empty'
 }
 
-# build_windows_deploy_program BOX MODE STAGE OBS_DIR HAS_AHK BACKUP_ROOT KEEP GSHA DSHA
+# build_windows_deploy_program BOX MODE STAGE OBS_DIR HAS_AHK BACKUP_ROOT KEEP GSHA DSHA [CONFIRM] [STATS_ABI]
 #   Emit the PowerShell program the agent pastes into the box's win-* MCP Shell. HAS_AHK=guard (the
 #   planner's pick for resolume, issue 1372) stops a RUNNING AutoHotkey64 and never restarts it; HAS_AHK=1
 #   stops + restart-verifies it. Step (0b, issue 1357) first sets + reads back a max-performance
@@ -176,8 +179,9 @@ fleet_pick_run_at_sha() {
 #   markers + DEPLOYED_AT temp-then-rename, sha256-verifies the deployed obs.dll against the bundle
 #   manifest (fail-closed), and prints a box-backup RETENTION PLAN (keep newest KEEP; delete only
 #   when $fleetConfirmRetention). Env-free (the genlock build carries no OBS_GENLOCK_*/OBS_BURN_*).
+#   STATS_ABI (issue 1302): FAST refuses at step (0f) unless the box's GENLOCK_STATS_ABI.txt equals it; FULL records it.
 build_windows_deploy_program() {
-  local box="$1" mode="$2" stage="$3" obs_dir="$4" has_ahk="$5" backup_root="$6" keep="$7" gsha="$8" dsha="$9" confirm="${10:-0}"
+  local box="$1" mode="$2" stage="$3" obs_dir="$4" has_ahk="$5" backup_root="$6" keep="$7" gsha="$8" dsha="$9" confirm="${10:-0}" stats_abi="${11:-}"
   # Escape ' for the PowerShell single-quoted strings (double it) -- incl. gsha/dsha (--sha is
   # operator-supplied in plan mode and also flows into $stage paths; #789 review #7 defense-in-depth).
   local stage_ps="${stage//\'/\'\'}" obs_ps="${obs_dir//\'/\'\'}" back_ps="${backup_root//\'/\'\'}"
@@ -364,6 +368,8 @@ PSFAST
 if (-not (Test-Path \$stage))  { Write-Error "stage \$stage not found -- upload the artifact first (plan STEP 0)"; exit 2 }
 if (-not (Test-Path \$obsDir)) { Write-Error "OBS install \$obsDir not found"; exit 2 }
 
+$(genlock_fast_abi_gate_ps "$mode" "$stats_abi")
+
 ${clean_close_pre}
 
 ${power_plan_block}
@@ -400,6 +406,7 @@ function Write-MarkerAtomic(\$dest, \$content) {
 Write-MarkerAtomic (Join-Path \$obsDir 'GENLOCK_BUILD_SHA.txt')  '${gsha_ps}'
 Write-MarkerAtomic (Join-Path \$obsDir 'DISTROAV_BUILD_SHA.txt') '${dsha_ps}'
 Write-MarkerAtomic (Join-Path \$obsDir 'DEPLOYED_AT')            (Get-Date -Format o)
+$(genlock_stats_abi_marker_ps "$mode" "$stats_abi")
 
 # (6) sha256 verify the DEPLOYED obs.dll bytes against the bundle manifest (fail-closed) -- proof the
 #     right build actually landed, not just that the copy step said ok (the #122/#121 deploy contract).
@@ -450,7 +457,8 @@ PS
 #   imag-obs-stop.sh/imag-obs-start.sh helpers, and directs the mandatory 1026 WS filter-enum survival
 #   check. The markers are the shared single source of truth across the deploy legs.
 build_imag_deploy_program() {
-  local bundle_dir="$1" marker_dir="$2" backup_root="$3" gsha="$4" dsha="$5" keep="$6" confirm="${7:-0}"
+  local bundle_dir="$1" marker_dir="$2" backup_root="$3" gsha="$4" dsha="$5" keep="$6" confirm="${7:-0}" abi="${8:-}"
+  genlock_stats_abi_is_version "$abi" || abi=""   # issue 1302: the stats ABI, or "" (= remove the marker)
   # Escape ' for the emitted bash single-quoted strings (' -> '\'') -- parity with the Windows leg's
   # #789 review #7 defense-in-depth (--sha is operator-supplied and flows into the marker call).
   local gsha_bq="${gsha//"'"/"'\''"}" dsha_bq="${dsha//"'"/"'\''"}"
@@ -575,7 +583,7 @@ nm -D -u "\$OBS_FRONTEND_REAL" 2>/dev/null | grep 'obs_display_set_render_diviso
   || { echo "post-swap /usr/bin/obs does not reference obs_display_set_render_divisor -- refuse a stock/wrong frontend (#499)" >&2; exit 4; }
 
 # (5) markers via the SHARED helper (bod 4 single source of truth)
-genlock_write_markers "\$MARKER_DIR" '${gsha_bq}' '${dsha_bq}'
+genlock_write_markers "\$MARKER_DIR" '${gsha_bq}' '${dsha_bq}' '' '${abi}'
 cp -a "\$MANIFEST" "\$MARKER_DIR/BUNDLE_MANIFEST.json"
 
 # (5a) issue 1367: the genlock MIN-LATENCY imag marker libobs reads (absent = fail OPEN), as the desktop
@@ -745,12 +753,12 @@ PREFLIGHT
 
 # emit the plan for one Windows box (STEP 0 upload -> the deploy program -> STEP 2 relaunch).
 emit_windows_plan() {
-  local box="$1" mode="$2" stage="$3" gsha="$4" dsha="$5" confirm="${6:-0}"
+  local box="$1" mode="$2" stage="$3" gsha="$4" dsha="$5" confirm="${6:-0}" abi="${7:-}"
   local mcp ip has_ahk win_stage program artifact
   mcp="$(fleet_box_mcp "$box")"; ip="$(fleet_box_ip "$box")"; has_ahk="$(fleet_box_ahk_mode "$box")"
   artifact="$(fleet_windows_artifact "$mode")"
   win_stage="C:\\stage-genlock-${gsha}"
-  program="$(build_windows_deploy_program "$box" "$mode" "$win_stage" 'C:\Program Files\obs-studio' "$has_ahk" 'C:\obs-backup' "$RETENTION_KEEP" "$gsha" "$dsha" "$confirm")"
+  program="$(build_windows_deploy_program "$box" "$mode" "$win_stage" 'C:\Program Files\obs-studio' "$has_ahk" 'C:\obs-backup' "$RETENTION_KEEP" "$gsha" "$dsha" "$confirm" "$abi")"
   echo "# ================= FLEET PLAN: box=${box} (${mcp}, ${ip}) mode=${mode} ================="
   # resolume (issue 1295): emit the box-IDENTITY confirm preamble (STEP -1) before STEP 0 -- a
   # traveling DHCP box colliding with `bridge` at .201 must be resolved + identity-confirmed live.
@@ -773,10 +781,10 @@ PLAN
 
 # emit the imag plan (STEP 0 scp -> run the on-imag program over ssh).
 emit_imag_plan() {
-  local stage="$1" gsha="$2" dsha="$3" confirm="${4:-0}"
+  local stage="$1" gsha="$2" dsha="$3" confirm="${4:-0}" abi="${5:-}"
   local imag_stage="/tmp/genlock-stage-${gsha}"
   local program
-  program="$(build_imag_deploy_program "$imag_stage" '/opt/obs-genlock' '/opt/obs-backup' "$gsha" "$dsha" "$RETENTION_KEEP" "$confirm")"
+  program="$(build_imag_deploy_program "$imag_stage" '/opt/obs-genlock' '/opt/obs-backup' "$gsha" "$dsha" "$RETENTION_KEEP" "$confirm" "$abi")"
   # #1303 part 4: report-only forced-table AUDIO/yuv audit BEFORE the swap (never a write, never a gate).
   emit_forced_table_audit_preflight imag imag
   cat <<PLAN
@@ -836,13 +844,14 @@ main() {
   if [ "$plan" = 1 ]; then
     [ -n "$stage" ] || { echo "ERROR: --plan requires --stage (no network in plan mode)" >&2; exit 2; }
     [ -n "$sha_override" ] || { echo "ERROR: --plan requires --sha (no network in plan mode)" >&2; exit 2; }
-    local sha="$sha_override"
+    local sha="$sha_override" stats_abi
+    stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode")" || exit 3
     echo "# ===== issue 789 genlock FLEET deploy PLAN — run=${run_id} sha=${sha} boxes=${boxes} mode=${mode} ====="
     # subshell so the comma-split IFS never leaks past the loop (the loop only prints).
     ( IFS=','; for b in $boxes; do
       case "$b" in
-        stream|resolume) emit_windows_plan "$b" "$mode" "$stage" "$sha" "$sha" ;;
-        imag)            emit_imag_plan "$stage" "$sha" "$sha" ;;
+        stream|resolume) emit_windows_plan "$b" "$mode" "$stage" "$sha" "$sha" 0 "$stats_abi" ;;
+        imag)            emit_imag_plan "$stage" "$sha" "$sha" 0 "$stats_abi" ;;
         # issue 1317 part 3: strih-lx gets its OWN plan (setup-strih.sh + strih-obs.service), never
         # the imag on-box program (which restarts imag-obs.service, a unit strih-lx does not have).
         strih-lx)        emit_strih_lx_plan "$stage" "$sha" "$run_id" ;;
@@ -870,6 +879,7 @@ main() {
     || { echo "ERROR: could not resolve headSha for anchor run $run_id" >&2; exit 3; }
   [ -n "$sha" ] || { echo "ERROR: empty headSha for anchor run $run_id" >&2; exit 3; }
   echo "# anchor run $run_id -> canonical SHA $sha; deploying: $boxes (mode $mode; retention --yes=$yes)"
+  local stats_abi; stats_abi="$(genlock_stats_abi_resolve "$sha" "$HERE/.." "$mode")" || exit 3
 
   local workdir; workdir="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -886,6 +896,7 @@ main() {
   # changes, so a missing Windows/imag build can never leave the production strih on another SHA.
   if [ "$want_strihlx" = 1 ]; then
     strih_lx_prepare "$sha" "$workdir" "$HERE/.." "$GENLOCK_REPO" || exit $?
+    genlock_stats_abi_stage "$STRIH_LX_PREP_WORK/bundle" "$stats_abi" || exit 3
   fi
 
   # --- Windows: download the same-SHA artifact, emit the per-box plan (agent uploads + pastes) -----
@@ -928,7 +939,7 @@ main() {
     imag_ip="${imag_ip:-10.77.9.182}"
     local imag_user="${IMAG_USER:-newlevel}" imag_pw="${IMAG_PW:-newlevel}"
     local imag_stage="/tmp/genlock-stage-$sha"
-    build_imag_deploy_program "$imag_stage" '/opt/obs-genlock' '/opt/obs-backup' "$sha" "$sha" "$RETENTION_KEEP" "$yes" > "$workdir/bundle/deploy.sh"
+    build_imag_deploy_program "$imag_stage" '/opt/obs-genlock' '/opt/obs-backup' "$sha" "$sha" "$RETENTION_KEEP" "$yes" "$stats_abi" > "$workdir/bundle/deploy.sh"
   fi
 
   # --- strih-lx phase 2: the box steps (stage before stop, graceful stop, setup, fail-closed
@@ -952,7 +963,7 @@ main() {
   if [ "$want_win" = 1 ]; then
     echo "# Upload it to each box at C:\\stage-genlock-$sha (win-* MCP FileUpload / scp), then paste each program:"
     # subshell so the comma-split IFS never leaks into the rest of main (the loop only prints).
-    ( IFS=','; for b in $boxes; do case "$b" in stream|resolume) emit_windows_plan "$b" "$mode" "$workdir/win" "$sha" "$sha" "$yes" ;; esac; done )
+    ( IFS=','; for b in $boxes; do case "$b" in stream|resolume) emit_windows_plan "$b" "$mode" "$workdir/win" "$sha" "$sha" "$yes" "$stats_abi" ;; esac; done )
   fi
 
   # --- imag: the ssh deploy of the bundle prepared above --------------------------------------------
