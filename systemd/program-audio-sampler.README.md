@@ -121,6 +121,50 @@ curl -s http://dev1:8890/program-audio.json; echo               # carries "holes
 journalctl --user -u program-audio-sampler --since -15min --no-pager | grep -E 'summary|bridged|discontinuity'
 ```
 
+## Update: a capture thread, the fleet date step, and the unit's CPU weight (issue 1404, design 6037613222)
+
+What changed:
+- `program_audio_capture.py` (new), `program_audio.py` and `program_audio_sampler.py`: the NDI
+  capture runs in its own thread that only captures and queues, so the window work never delays it.
+  A forward timestamp jump that matches dev1's own wall-clock step is the fleet date step (no zeros,
+  no restart). A short marker chain over a span holding bridged audio reads UNKNOWN, never FOREIGN on
+  its own (ROZHODNUTÉ 6037765523).
+- The unit: `CPUWeight=1000`, and `Nice=10` is gone. A `--user` unit cannot lower nice on dev1
+  (`Nice=-5` runs at 0 without an error), so there is no `Nice=` at all.
+- The shim and the lease server did not change. `program-audio.json` gains `queue_drops` (additive).
+
+The unit file changed, so this is a supervisor step: copy it, reload, and restart only while the
+rig lease is free (the restart writes UNKNOWN for ~4 s, and restreamer stops a running YouTube
+session on 2 consecutive UNKNOWN polls or 3 within 60 s):
+
+```bash
+cp ~/devel/camera-box/systemd/program-audio-sampler.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+if curl -sf http://127.0.0.1:8890/rig-lease.json \
+     | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("held") is False else 1)'; then
+  systemctl --user restart program-audio-sampler.service
+else
+  echo "rig lease held or unreadable -- sampler NOT restarted, retry later"
+fi
+sleep 8
+python3 ~/devel/camera-box/scripts/program_audio_guard.py      # verdict=MEASUREMENT ... chain >= 6, exit 0
+journalctl --user -u program-audio-sampler -n 8 --no-pager
+#   start line ends "capture=thread" and names the date-step match (+-20ms within 2s)
+#   "WARNING scheduling nice=0 (a --user unit cannot lower it here, RLIMIT_NICE=0) -- its priority is
+#    the cgroup's cpu.weight=1000 only": expected on dev1; "can starve under load" instead means the
+#    CPUWeight is not in effect (check the next two lines)
+cat /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/program-audio-sampler.service/cpu.weight  # 1000
+cat /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/cgroup.subtree_control              # has "cpu"
+curl -s http://dev1:8890/program-audio.json; echo               # carries "queue_drops": 0
+# after 10 min: the summary line reads "queue_drops=0 max_lag_ms=<well under 10000> date_steps=0 ...";
+# timeline_breaks counts only real losses over 250 ms; a "+4x ms" bridge with "arrival gap 0.0-0.1 s"
+# is most often a sender stall (Design-question 6037861831), read UNKNOWN at worst, never FOREIGN
+journalctl --user -u program-audio-sampler --since -15min --no-pager | grep -E 'summary|queue overflow|date step|discontinuity'
+```
+
+Rollback: copy the previous unit back (`git show <previous commit>:systemd/program-audio-sampler.service`),
+`daemon-reload`, and restart the same way.
+
 To re-check the marker bars on new real audio (for example after a decoder change), run
 `python3 ~/devel/camera-box/scripts/program_audio_marker_calibrate.py --real <recordings…>
 --synthetic-trials 50`; it exits 1 when a bar fails.

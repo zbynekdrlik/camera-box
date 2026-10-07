@@ -3,6 +3,7 @@ paths:
   - "scripts/program_audio.py"
   - "scripts/program_audio_ndi.py"
   - "scripts/program_audio_sampler.py"
+  - "scripts/program_audio_capture.py"
   - "scripts/program_audio_guard.py"
   - "scripts/program_audio_marker.py"
   - "scripts/program_audio_marker_calibrate.py"
@@ -36,7 +37,7 @@ its SERVE dir (`scripts/rig_serve_files.py`): `$XDG_RUNTIME_DIR/rig-lease-serve`
 | Route | Writer | Contract |
 |---|---|---|
 | `/rig-qpsk-markers.csv` | `rig-marker-mirror` `--user` service (`scripts/rig-marker-mirror.sh` → `rig_marker_mirror.py`) | cam2's `/run/rig-qpsk-markers.csv`, complete rows; `text/csv`; `X-Mirror-Age-S` = seconds since new rows last arrived; 404 absent |
-| `/program-audio.json` | `program-audio-sampler` `--user` service | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain, holes_bridged, bridged_ms[, reason]}`; both ages recomputed by the server per request; the two marker counts are null without a full marker span; `holes_bridged`/`bridged_ms` count the bridged holes since the sampler started (null while it is not sampling); 404 absent; unreadable or foreign-owned = UNKNOWN |
+| `/program-audio.json` | `program-audio-sampler` `--user` service | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain, holes_bridged, bridged_ms, queue_drops[, reason]}`; both ages recomputed by the server per request; the two marker counts are null without a full marker span; `holes_bridged`/`bridged_ms` count the bridged holes and `queue_drops` the frames the sampler's own capture queue dropped, since the sampler started (null while it is not sampling); 404 absent; unreadable or foreign-owned = UNKNOWN |
 
 The consumer CLI is `scripts/program_audio_guard.py`, used by both YouTube gates (camera-box and
 restreamer issue 357):
@@ -212,10 +213,11 @@ level. Re-run the full calibration after any decoder or rule change:
     - Replay of the 55 live offsets as real holes (frames dropped, the rest as send jitter) through
       the real decoder on rec2 and session (20 min each): 49 bridged, 6 UNKNOWN (only the holes over
       250 ms: 256.3, 337.8, 357.6, 543.0, 556.2, 571.7 ms), 0 FOREIGN, minimum chain 7.
-    - **Open (Design-question 6036260703): a FORWARD timestamp step with no sample lost**, i.e. a
-      dantesync date step of up to 250 ms, is bridged too. The zeros then push every later marker
-      round(60·δ) indices off the line. Probe on the committed clip: +50…+250 ms at 33 positions,
-      2 FOREIGN windows, minimum chain 3; before, one UNKNOWN. Not decided in the lane.
+    - **A FORWARD timestamp step with no sample lost** (Design-question 6036260703) pushed every later
+      marker round(60·δ) indices off the line when bridged: +50…+250 ms on the committed clip gave
+      2 FOREIGN windows, minimum chain 3. The fleet date step is now matched to dev1's own wall step
+      (DATE_STEP, below). A sender stall that bridges zeros for nothing is the open case (the capture
+      thread section).
   - Fallback: only when a timestamp is undefined (`INT64_MAX` = `NDIlib_recv_timestamp_undefined`,
     or ≤ 0) the old arrival rule applies (`RECEIVE_GAP_S` = 1 s, logged `receive gap of … (no NDI
     sender timestamp …)`). An NDI error frame still restarts the span unconditionally (stricter
@@ -224,7 +226,9 @@ level. Re-run the full calibration after any decoder or rule change:
     and reports `max_offset_ms`: the largest |offset| of a frame that continued, i.e. the sender's
     jitter against the 41.3 ms tolerance (the margin to watch), then `holes_bridged` and
     `bridged_ms`; a restart after an NDI error frame shows as `error_frames`. Each restart, each
-    late burst and each bridge also logs one line.
+    late burst and each bridge also logs one line. Since design 6037613222 the line also carries
+    `queue_drops`, `max_lag_ms` and `date_steps` (between `bad_rate_frames` and `timeline_breaks`, so
+    the older field anchors keep their neighbours).
   - STEP 0 (7.10.2026): a second, read-only sampler instance (private serve dir) took the live
     `STREAM-SNV (stream)` for 25 min while dev1 ran test suites and the marker calibration.
     70 304 frames (comment 6030714990):
@@ -245,11 +249,23 @@ level. Re-run the full calibration after any decoder or rule change:
     A probe can reuse the scratch recipe: subclass `NdiAudioReceiver.capture` to log
     `frame.timestamp`, run `program_audio_sampler.run` with a private serve dir, never the live
     one, and never restart the live unit for it.
-  - **A dantesync date step** moves the sender's wall clock and so its timestamps once. A backward
-    step or a forward one over 250 ms reads as ONE discontinuity: one UNKNOWN warm-up window per
-    step, never FOREIGN, because a restarted span is never judged as a short chain. A forward step
-    up to 250 ms is bridged like a hole (the open question above). Micro-corrections of a few ms
-    stay inside the tolerance.
+  - **A dantesync date step is DATE_STEP, never a hole** (design 6037613222; `frame_continues(...,
+    wall_steps=...)`, `WallSteps`, pinned by `tests/python/test_program_audio_datestep_1404.py`).
+    - dev1 runs the same fleet dantesync as the stream box (both followers, the same announced
+      `date_offset_seq`), so dev1's own wall clock steps at the same instant.
+    - The capture path reads dev1's wall-minus-monotonic offset with every block: ONE bracketed read
+      (`read_wall_offset_ns`: monotonic, wall, monotonic; the wall placed at the middle; a bracket over
+      1 ms is retried 3 times, else no reading). Frequency slewing moves both clocks alike, so the
+      offset changes only on a STEP; a change of 5 ms or more between two readings is a dev1 step.
+    - A FORWARD timestamp jump over the tolerance that matches a forward dev1 step of the same size
+      (±20 ms), seen within the last 2 s, is a DATE_STEP: no zeros, no restart; the next frame is
+      judged against the stepped one, so the timeline is re-based. One dev1 step excuses one jump
+      (it is consumed). A `audio timeline date step: … nothing lost` line, `date_steps` in the summary.
+    - Without a matching dev1 step (dev1's dantesync missed it, or stepped more than 2 s earlier, or
+      the sender's jump came first) the rules stay: a forward jump up to 250 ms is bridged, a larger
+      one or a backward one restarts the span (one UNKNOWN, never FOREIGN).
+    - Only FORWARD jumps (the design). A backward date step still costs one warm-up.
+    - Micro-corrections of a few ms stay inside the tolerance.
   - Residual limits: a sender stall longer than the tolerance (OBS submitting a frame > ~20 ms
     later than its normal jitter) costs one warm-up although nothing was lost; a sender with no
     timestamps falls back to the arrival rule and its old limit.
@@ -275,7 +291,76 @@ level. Re-run the full calibration after any decoder or rule change:
   - The previous-frame rule and the `max_offset_ms` bookkeeping are pinned by mutants: judging with
     the current block's size, a break feeding the max, a dropped `abs`, no reset, and late bursts
     left out each fail a test.
-- **A SILENT window empties the span.** The next non-silent window holds only its own markers, so it
+- **A chain cut short by bridged audio is never FOREIGN on its own** (ROZHODNUTÉ 6037765523,
+  restreamer run 37602415434; `classify(..., holed=True)`).
+  - When the trailing span holds bridged samples (a bridged hole or a queue drop) and the spectrum
+    is measurement-like, a chain under 4 reads UNKNOWN with the reason `marker chain N < 4 over a
+    span holding X ms of bridged audio -- … never FOREIGN on its own`. A spectral FOREIGN stays
+    immediate, holed or not.
+  - The live case: 14:17:37 `MEASUREMENT -> FOREIGN … marker_chain=3` after 16 "holes" of
+    +41…+54 ms in 13 s. Replayed on the committed clip through the real decoder: the STALL shape
+    (below) gives 3 FOREIGN windows with chain 3 before, 3 UNKNOWN after; the same 16 holes as REAL
+    loss give chain 4–8 and no FOREIGN either way.
+  - Trade-off, accepted by the owner: an in-band chord during a holed span reads UNKNOWN instead of
+    FOREIGN, and FOREIGN comes once the 4 s span no longer holds the bridged audio (at most two
+    windows later). Every consumer fails closed on UNKNOWN; restreamer stops on 2 consecutive
+    UNKNOWN or 3 within 60 s. Broadband music keeps its same-window FOREIGN.
+- **The capture thread** (design 6037613222; `scripts/program_audio_capture.py`, pinned by
+  `tests/python/test_program_audio_capture_1404.py`).
+  - Why: the single loop called `NDIlib_recv_capture_v3` and did the window work (FFT, ctypes decode,
+    JSON writes) in one thread. Under load it stopped calling the capture for up to 2 s, and the
+    SDK, which holds about 1.3 s of audio, dropped the oldest.
+  - The thread only blocks in the capture call (ctypes releases the GIL), stamps the arrival time and
+    the dev1 wall offset, and appends to a queue bounded at 10 s of audio. It never runs the FFT, the
+    decode or a write (a test spies the thread names). The consumer is the old loop, unchanged except
+    that it takes items from the queue.
+  - A full queue drops the NEW frame and counts it (`queue_drops`, summary + JSON). The drop rides on
+    the next queued item, and the consumer reads it as a hole of exactly the dropped audio: a BRIDGE
+    of those samples (plus any extra the timestamps show) up to 250 ms, a span restart beyond, logged
+    `queue overflow: N frames (X ms) dropped by the sampler's own capture queue -- …`.
+  - An NDI error frame is queued as an error item (the span restarts as before), and the thread waits
+    one capture timeout. Any other exception in the capture call is handed to the consumer, whose
+    next get raises it, so the sampler exits non-zero and systemd restarts it (never a live consumer
+    reading "no audio" forever).
+  - Shutdown: SIGTERM sets the flag, the consumer returns, `CaptureThread.stop()` waits for the thread
+    to leave the SDK call, and only then is the receiver closed (destroying it under a running
+    capture would crash the SDK; if the thread is still inside after the join, the receiver is left
+    to the process exit). The JSON then reads UNKNOWN `sampler stopped` as before.
+  - `max_lag_ms` in the summary is the oldest captured item the consumer took (its backlog), and the
+    arrival gaps (late bursts) are now the capture thread's own.
+  - `run(capture=None)` (the calibration CLI and every loop test) keeps the capture call in the loop
+    through `SyncCapture`, the same items without a thread, so the bars and the loop tests run the
+    same consumer deterministically.
+  - **STEP 0 (7.10.2026, Design-question 6037861831):** two read-only probes on the live
+    `STREAM-SNV (stream)`, private serve dirs, side by side at nice 10, 720 s under the natural load
+    (load avg 6–18, other projects' CI). Single loop: 5 losses from its own starvation (arrival
+    gaps 1.74–2.03 s, 362–826 ms lost each, a span restart each); capture thread: 0 (its largest
+    gap between two captures 0.51 s). Both also saw 2 losses at the same moments (418/579 ms and
+    224/449 ms): a whole-process stall that also starved the SDK's own threads. The receiver holds
+    more than one thread of its own (`ndir:audio`, `ndir:reconn` ×N for the RUDP connections).
+  - **CPU priority (STEP 0 run 2, comment 6038303132).** Four busy loops at nice 0 in the lanes' own
+    cgroup, 600 s, three capture-thread probes side by side: nice 10 lost audio 13 times (7.2 s, 9 of
+    them its own), nice 0 and nice 0 + `CPUWeight=1000` 4 times each (2.9–3.1 s), and those 4 were ONE
+    box-wide event that hit every receiver on dev1 at once, the live unit included (+1638.5 ms at
+    12:48:10Z; dev1 IO pressure, 4.7 GB swap in use; the stream OBS log quiet). So the unit drops
+    `Nice=10` and sets `CPUWeight=1000` (it keeps the sampler ahead of the lanes in app.slice).
+    - A `--user` unit cannot lower nice on dev1: `systemd-run --user -p Nice=-5` runs at nice 0
+      with no error (RLIMIT_NICE 0). So there is no `Nice=` at all, and the sampler logs ONE start
+      line, a WARNING while its nice is not below 0, naming its cgroup's cpu.weight.
+    - A `--user` CPUWeight competes only inside the user's own slice. Against other users' load
+      (other projects' CI in system.slice / other user slices), the passive run's capture thread
+      at nice 10 had no loss of its own.
+    - A system unit with a realtime capture thread was weighed and not taken: the remaining losses
+      are box-wide, and the SDK's own receive threads (`ndir:*`) stall with them.
+  - **Most "holes" are not lost audio: a SENDER stall.** 20 of the 22 forward steps over the
+    tolerance in the 720 s run were identical in all three receivers (both probes and the live
+    unit, to 0.1 ms) and each was followed by two frames at −21.1 ms: the cumulative offset returns
+    to within ±1.1 ms. The stream OBS stamps an NDI audio frame with its wall clock at SUBMISSION;
+    its audio thread stalls ~64 ms (`audio-stall #1367: tick_gap_max_ms=58…68` every minute) and
+    then submits three frames back to back. The bridge inserts ~43 ms of zeros for audio that was
+    never lost, and every later marker sits 2.6 indices off the line. That is the 14:17:37 false
+    FOREIGN. Open on Design-question 6037861831 (a look-ahead that tells a stall from a loss);
+    rule A above turns it into UNKNOWN meanwhile.
   reads UNKNOWN ("marker span") until the span is full again. Without this a silence→measurement
   start read a short chain and could latch a false FOREIGN.
 - **A missing or unloadable shim** = UNKNOWN + exit 1 before the NDI receiver is created, like a
