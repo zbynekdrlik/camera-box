@@ -161,6 +161,11 @@ mod tests {
         assert!(run_tick_samples(&held, 30.0, 0.0).is_ok());
         let over: Vec<(u64, Option<u32>)> = vec![(0, Some(10)), (1, Some(12)), (62, Some(12))];
         assert!(run_tick_samples(&over, 30.0, 0.0).is_err());
+        // exactly RESTART_GAP_S (60 frames at 30 fps) is still a repeat: the bound is exclusive
+        let at_bound: Vec<(u64, Option<u32>)> = vec![(0, Some(10)), (60, Some(10))];
+        assert!(run_tick_samples(&at_bound, 30.0, 0.0).is_ok());
+        // the gap is in seconds of the file's own fps: 60 frames at 25 fps is 2.4 s, a restart
+        assert!(run_tick_samples(&at_bound, 25.0, 0.0).is_err());
     }
 
     #[test]
