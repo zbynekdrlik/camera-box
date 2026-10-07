@@ -511,7 +511,8 @@ pub mod vban_pacing;
 // #1298 — the pure LOCKED/DEGRADED/UNLOCKED decision for the in-OBS genlock statusbar
 // indicator. Crate-root + std-only so it is Tier-0 verifiable; the C port in
 // `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` is held identical by the
-// committed parity gate `tests/genlock_lock_state_parity.rs`.
+// committed parity gate `tests/genlock_lock_state_parity.rs`. Split by concern into
+// `src/genlock_lock_state/` (issue 1302); every item is re-exported at this path.
 pub mod genlock_lock_state;
 
 // #1303 — the pure receiver-side AUDIO ↔ video-FIFO pairing decision (issue 1367: audio placed at

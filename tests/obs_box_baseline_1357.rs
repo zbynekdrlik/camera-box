@@ -1469,6 +1469,8 @@ fn no_bare_apt_get_update_on_the_obs_box_provisioning_paths() {
         "scripts/lib/strih-provision.sh",
         "scripts/lib/strih-drm-output.sh",
         "scripts/lib/genlock-markers.sh",
+        // issue 1302: setup-strih reads the staged stats-ABI marker back through it
+        "scripts/lib/genlock-stats-abi.sh",
         "scripts/lib/ndi-discovery.sh",
         "scripts/lib/ndi-runtime.sh",
         "scripts/lib/imag-power-envelope.sh",

@@ -56,6 +56,8 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 . "${HERE}/lib/strih-drm-output.sh"   # issue 1346: the DRM-lease HDMI output config + verdict helpers
 # shellcheck source=scripts/lib/genlock-markers.sh
 . "${HERE}/lib/genlock-markers.sh"
+# shellcheck source=scripts/lib/genlock-stats-abi.sh
+. "${HERE}/lib/genlock-stats-abi.sh"   # issue 1302: reads the staged GENLOCK_STATS_ABI.txt back (step 4)
 # shellcheck source=scripts/lib/ndi-discovery.sh
 . "${HERE}/lib/ndi-discovery.sh"   # issue 1342: the receiver-side NDI config, networks.ips (with setup-device.sh)
 # shellcheck source=scripts/lib/ndi-runtime.sh
@@ -207,9 +209,10 @@ if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
   cp -a "${STRIH_LX_BUNDLE_SRC%/}/." "$GENLOCK_DIR/" || fail "genlock bundle copy failed"
   GSHA="$(cat "$GENLOCK_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown)"
   DSHA="$(cat "$GENLOCK_DIR/DISTROAV_BUILD_SHA.txt" 2>/dev/null || echo unknown)"
-  # issue 1302: the stats ABI the planner staged into the bundle (read from the STAGE, never from the
-  # install dir, which still holds the previous deploy's marker); absent = unknown = the marker is removed.
-  SABI="$(tr -d '[:space:]' 2>/dev/null < "${STRIH_LX_BUNDLE_SRC%/}/GENLOCK_STATS_ABI.txt" || true)"
+  # issue 1302: the stats ABI pair the planner staged into the bundle (read from the STAGE, never from
+  # the install dir, which still holds the previous deploy's marker); absent or not a complete two-line
+  # marker = unknown = the marker is removed.
+  SABI="$(genlock_stats_abi_pair_from_marker 2>/dev/null < "${STRIH_LX_BUNDLE_SRC%/}/GENLOCK_STATS_ABI.txt" || true)"
   genlock_write_markers "$GENLOCK_DIR" "$GSHA" "$DSHA" "" "$SABI" || fail "genlock_write_markers failed"
   echo "  installed genlock bundle to ${GENLOCK_DIR} (genlock ${GSHA}, distroav ${DSHA})"
   # issue 1317: install the bundle into its /usr prefix so the dynamic loader finds it -- the /opt

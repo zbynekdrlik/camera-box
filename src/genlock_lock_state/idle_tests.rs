@@ -1,6 +1,6 @@
 //! Issue 1302 — the unit cases of the fast first idle classification
-//! ([`super::input_idle_class`]). A `#[path]` child of `genlock_lock_state`, split out to keep that
-//! file's size down.
+//! ([`super::input_idle_class`]). A `#[path]` child of `genlock_lock_state::phase_events`, in its own
+//! file to keep that module's size down.
 //!
 //! The widget feeds the classifier one 1 Hz tick at a time from a per-input ring of
 //! (monotonic ms, cumulative frames received) pruned to [`GENLOCK_IDLE_WINDOW_MS`]: a counter that

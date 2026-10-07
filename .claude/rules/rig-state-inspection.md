@@ -154,8 +154,9 @@ transfer/deploy.
 **Never hand-swap obs.dll when the change touches `struct obs_genlock_stats` / `struct
 obs_genlock_output_stats` or their versions (issue 1302):** the frontend keeps both structs on its
 stack, so a newer obs.dll filling a bigger struct crashes the old obs64.exe. Use
-`deploy-genlock-fleet.sh --fast`, which compares the box's `GENLOCK_STATS_ABI.txt` with the build's
-`OBS_GENLOCK_STATS_VERSION` and refuses a mismatch; a hand swap must make the same comparison first.
+`deploy-genlock-fleet.sh --fast`, which compares the box's two-line `GENLOCK_STATS_ABI.txt` with the
+build's `OBS_GENLOCK_STATS_VERSION` and `OBS_GENLOCK_OUTPUT_STATS_VERSION` and refuses a mismatch of
+either; a hand swap must make the same comparison first.
 
 When the merged vendor change touches ONLY `vendor/obs-studio/libobs/**` (compiles into `obs.dll`),
 the `windows-genlock-fast` artifact (`obs-genlock-fast-dll`: obs.dll + GENLOCK_BUILD_SHA.txt +

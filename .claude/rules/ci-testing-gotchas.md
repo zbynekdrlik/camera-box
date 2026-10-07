@@ -1097,6 +1097,9 @@ compiles it as an ordinary program whose `main` can call the module's items dire
 `--test`-run and the append-`main` build are two separate standalone-rustc invocations of the same
 copied source; neither needs cargo.) This is the Rust analogue of the vendored-C lift-and-compile
 recipe and pairs with a bash-replica `diff` to prove the two implementations agree exhaustively.
+A module split into a directory (`genlock_lock_state` since issue 1302: `#[path]` submodules under
+`src/genlock_lock_state/`) needs that directory copied next to the copy, or mount the original
+with `#[path]` in a scratch lib.rs instead of copying it.
 
 ## A delegation-parity pytest that loads BOTH modules via `spec_from_file_location` CANNOT assert `is`-identity across them (#1308)
 
@@ -1494,6 +1497,14 @@ each other with `crate::`. Write one scratch `lib.rs`:
 
 Then `CARGO_MANIFEST_DIR=<worktree> rustc --edition 2021 --test lib.rs` (the env var serves a test's
 `env!` fixture path) and `clippy-driver --edition 2021 --test -D warnings lib.rs`.
+- **Splitting a crate-root module into a directory breaks this mount unless the submodules carry
+  explicit paths** (issue 1302). rustc treats a `#[path]`-mounted file like a `mod.rs`, so a bare
+  `mod decision;` inside `src/foo.rs` is looked up at `src/decision.rs` (E0583), while the real crate
+  finds `src/foo/decision.rs`. Write `#[path = "foo/decision.rs"] mod decision;`: a path attribute is
+  relative to the file's directory in both cases. A test inside a submodule that needs a sibling
+  imports it through `super::super::`, never `crate::foo::`, so the module also compiles when a
+  replica copies it in as the crate root. Prove all three mounts (`src/genlock_lock_state.rs` is the
+  worked example).
 - A module that derives `serde::{Serialize, Deserialize}` has no serde crate here. Include a COPY with
   the `use serde::…` line and the `, Serialize, Deserialize` derive entries sed-stripped. The derive
   is attribute-only, so the behaviour under test is unchanged.
@@ -1785,3 +1796,16 @@ test is not RED. A read-only parent directory (`chmod 0555`) makes the delete a 
 access error, the stand-in for a file another process holds open on Windows. It needs a non-root
 user (root ignores the mode); the test fails loudly as root rather than skipping, and restores the
 mode in `finally` so pytest can clean the temp dir.
+
+## A bash bracket RANGE in a validation regex follows the locale: spell the set out (issue 1302)
+
+Under `en_US.UTF-8` (dev1, the operator's ssh locale), bash `[[ x =~ ^[1-9][0-9]*$ ]]` also accepts
+Arabic-Indic, superscript and fullwidth digits (the review counted 568 BMP code points), and
+`[A-Z]` accepts accented letters. GitHub's runners run `C.UTF-8`, where the same range is ASCII-only,
+so CI never sees it. A bash check that must agree with a PowerShell / Rust / C twin (all ASCII) is
+then looser than its twin. Spell the set out (`[123456789][0123456789]{0,8}`,
+`[0123456789abcdefABCDEF]`), run the pytest's bash with `LC_ALL=en_US.utf8` when the box has it, and
+pin it with a lint that refuses any `X-Y` range inside a bracket on a `=~` line
+(`test_every_bash_version_pattern_names_ascii_digits_explicitly_1302`). Same review: bash `read` and
+`$(cat)` drop a NUL byte silently, so a byte-reading twin that treats NUL as a character needs a
+`tr '\000' '?'` before the bash parse.

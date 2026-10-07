@@ -1,6 +1,6 @@
 //! #1298 — an EXECUTABLE C-vs-Rust parity gate for the genlock lock-state decision.
 //!
-//! `src/genlock_lock_state.rs` is the Tier-0 authority and
+//! `src/genlock_lock_state.rs` (its submodules under `src/genlock_lock_state/`) is the Tier-0 authority and
 //! `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` is the production port the
 //! OBS statusbar widget actually calls; the two are required to be numerically identical.
 //! A static text anchor (see `tests/genlock_preload.rs`) proves the C still *says* the

@@ -367,8 +367,9 @@ fn qpc_drift_books_a_fleet_date_step_1372() {
         1,
         "issue 1372: a second genlockQpcHistory push would skip the date-step booking"
     );
-    // the widget's two booking constants stay equal to the Rust authority's
-    let rust = vendor_file("src/genlock_lock_state.rs");
+    // the widget's two booking constants stay equal to the Rust authority's (issue 1302 split the
+    // module; the qpc/wall-step concern lives in its qpc_step submodule)
+    let rust = vendor_file("src/genlock_lock_state/qpc_step.rs");
     for (widget, authority) in [
         (
             "static constexpr int64_t GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS = 66;",
@@ -382,8 +383,8 @@ fn qpc_drift_books_a_fleet_date_step_1372() {
         assert_has(STATUSBAR_CPP, widget);
         assert!(
             rust.contains(authority),
-            "issue 1372: `{authority}` drifted in src/genlock_lock_state.rs — keep the widget and \
-             the Rust authority in lock-step"
+            "issue 1372: `{authority}` drifted in src/genlock_lock_state/qpc_step.rs — keep the widget \
+             and the Rust authority in lock-step"
         );
     }
 }
