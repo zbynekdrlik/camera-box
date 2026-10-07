@@ -47,12 +47,38 @@ are additive fields of program-audio.json.
 
 Verdict (classify):
   UNKNOWN      a measurement is missing / not a number, or the window is in band but has no
-               marker chain (the 4 s warm-up after a start or a receive gap, a span cut by a
+               marker chain (the 4 s warm-up after a start or a span restart, a span cut by a
                silent window, no decoder) -- the sampler also writes UNKNOWN itself when no
-               audio arrives at all or while it warms up
+               audio arrives at all
   SILENT       rms_dbfs < SILENT_RMS_DBFS (the spectral share of a noise floor means nothing)
-  FOREIGN      outside_band_pct >= FOREIGN_OUTSIDE_BAND_PCT, or marker_chain < MARKER_CHAIN_MIN
+  FOREIGN      spectral_foreign (outside_band_pct >= FOREIGN_OUTSIDE_BAND_PCT above the silent
+               level) -- also during the warm-up, ROZHODNUTÉ 6027706292 item 1: only MEASUREMENT
+               needs the marker chain -- or marker_chain < MARKER_CHAIN_MIN
   MEASUREMENT  otherwise (in band AND chain >= MARKER_CHAIN_MIN)
+
+Receive continuity (design issue 1404 comment 6030385284, Approach 1): the marker span must not
+stitch audio across a hole the chain could misread, and must not restart when nothing was lost.
+Arrival time cannot tell the two apart: a sampler starved for ~1 s on a busy dev1 gets the SDK's
+queued audio in one late burst (live 7.10.2026: 57 spurious `receive gap of 1.0-2.0 s` UNKNOWNs in
+6 h), while audio lost with blocks still arriving under 1 s apart showed no gap at all. So the
+sampler judges continuity on the SENDER's audio timeline (frame_continues): every NDI audio frame
+carries the SDK `timestamp` (100 ns, the sender's submission time, NDIlib_recv_timestamp_undefined
+= INT64_MAX when the SDK has none) and its sample count, and
+  expected = prev_timestamp + prev_samples / sample_rate
+  |timestamp - expected| <= one frame duration + CONTINUITY_SLACK_S   CONTINUE (any arrival time)
+  otherwise                                                           DISCONTINUITY (span restarts)
+  either timestamp undefined (INT64_MAX, or <= 0)                     UNKNOWN_TS (the sampler falls
+                                                                      back to the arrival gap)
+STEP 0 (7.10.2026, 25 min / 70 304 frames of the live stream program, received by a second sampler
+instance while dev1 was loaded; issue 1404 comment 6030714990): the sender's submission jitter
+reached 24.5 ms against a tolerance of 41.3 ms (1024 samples at 48 kHz + 20 ms); every arrival gap
+(the 1.25 s one the old rule restarted on, and 14 of 0.5-0.96 s) was a late burst on a continuous
+timeline; one real 200 ms hole (its frames never delivered, the arrival gap only 0.19 s) was off it.
+A second 20-min run of THIS loop on the live sender (56 250 frames): jitter up to 29.5 ms (p99 18.2),
+0 timeline breaks, 0 receive gaps, 599 MEASUREMENT windows and the one start-up UNKNOWN.
+A dantesync DATE STEP moves the sender's wall clock, and so its timestamps, once: a step over the
+tolerance reads as ONE discontinuity = one UNKNOWN warm-up window (never FOREIGN: a restarted span
+is never judged as a short chain); a micro-correction of a few ms stays inside the tolerance.
 
 CALIBRATION (6.10.2026, the real session recordings in ~/.claude/work-products/issue-1404/audio/,
 48 kHz stereo, every 2 s window): rec2 (604 windows), rec3a (324), rec3b (286), session (637) --
@@ -82,16 +108,20 @@ Known limits:
   * in-band music mixed UNDER a marker that still decodes reads MEASUREMENT (the marker chain
     stands, the share stays in band); broadband music is caught by the spectral share. The
     measurement-clip-only rule for SongPlayer and the cg OBS (plan Task 5) is the control for it.
-  * audio LOST without a receive gap (samples missing while blocks keep arriving under 1 s
-    apart) is stitched into one span; the chain then reads the hole as a jump of the index clock.
-    A review probe cut 0.1-0.8 s holes into the real clips: 4 of 762 cases read one FOREIGN
-    window (which latches). OBS fills its own output stalls with silence (time kept), so this
-    needs real NDI frame loss; the NDI timecode could detect it but also jumps with every
-    dantesync date step (a design call, not taken here).
-  * during the 4 s warm-up a spectrally FOREIGN window reads UNKNOWN too (the ruling: never
-    FOREIGN, never MEASUREMENT before 4 s of audio), so a music burst shorter than the warm-up
-    right after a receive gap does not start the FOREIGN latch; the guard still exits 2 on it.
-Pinned by tests/python/test_program_audio_1404.py + test_program_audio_marker_1404.py.
+  * a sender stall longer than the tolerance (its audio thread submitting > ~20 ms late beyond its
+    normal jitter) reads as a discontinuity although no sample was lost: one warm-up. STEP 0 saw
+    no such stall in 25 min; the arrival-time rule it replaces cost a warm-up per dev1 stall.
+  * a hole inside the tolerance is stitched: one missing frame (21.3 ms) always, two or three when
+    the sender's jitter pulls the next stamp back inside 41.3 ms. The lane's review probe cut 1-3
+    frame holes into the three real 16 kHz fixtures at 45 positions per case, with exact and
+    jittered stamps, through the real decoder shim: 0 FOREIGN windows. A frame the sampler drops
+    itself (sample rate <= 0) is such a hole too.
+  * a timestamp hole is seen only between two frames that both carry a timestamp; a sender
+    without one (an SDK older than v2.5) falls back to the arrival gap and its known limit
+    (audio lost without a 1 s arrival gap is stitched, review of 6027557132: 4 of 762 cut clips
+    read one FOREIGN window).
+Pinned by tests/python/test_program_audio_1404.py + test_program_audio_marker_1404.py +
+test_program_audio_timeline_1404.py.
 """
 from __future__ import annotations
 
@@ -122,9 +152,61 @@ MARKER_INDEX_TOL = 2          # +-2 indices around round(60 * dt): the emit jitt
 MARKER_MIN_SEP_S = 0.25       # one marker: same-index re-hits closer than this; distinct markers this far apart
 MARKER_SPAN_S = 4.0           # the trailing span of contiguous non-silent audio; MUST stay < 256 / 60 s
 MARKER_CHAIN_MIN = 4          # MEASUREMENT needs a chain this long (real audio min 6, in-band content < 4)
+# -- the receive continuity (design issue 1404 comment 6030385284; the rule in the module doc;
+#    pinned by tests/python/test_program_audio_timeline_1404.py) --
+NDI_TIMESTAMP_UNDEFINED = 2**63 - 1   # NDIlib_recv_timestamp_undefined (Processing.NDI.structs.h)
+NDI_TIME_UNITS_PER_S = 10_000_000     # NDI timestamps count 100 ns
+CONTINUITY_SLACK_S = 0.020            # tolerance = one frame duration + this (continuity_tolerance_100ns)
+CONTINUE = "CONTINUE"
+DISCONTINUITY = "DISCONTINUITY"
+UNKNOWN_TS = "UNKNOWN_TS"
 
 VERDICTS = ("MEASUREMENT", "FOREIGN", "SILENT", "UNKNOWN")
 SCHEMA = 1
+
+
+def timestamp_defined(ts) -> bool:
+    """A real NDI sender timestamp: an integer above 0 and below NDIlib_recv_timestamp_undefined
+    (INT64_MAX, "the SDK has none"). 0 and anything that is not an integer read as undefined."""
+    return (isinstance(ts, (int, np.integer)) and not isinstance(ts, bool)
+            and 0 < int(ts) < NDI_TIMESTAMP_UNDEFINED)
+
+
+def _frame_100ns(samples: int, sample_rate: int) -> float:
+    if not samples > 0:
+        raise ValueError(f"a frame needs samples > 0, got {samples!r}")
+    if not sample_rate > 0:
+        raise ValueError(f"a frame needs sample_rate > 0, got {sample_rate!r}")
+    return samples * NDI_TIME_UNITS_PER_S / sample_rate
+
+
+def continuity_tolerance_100ns(samples: int, sample_rate: int) -> float:
+    """THE continuity tolerance (100 ns units): one frame duration (`samples` at `sample_rate`, the
+    previous frame) + CONTINUITY_SLACK_S. 1024 samples at 48 kHz: 21.3 + 20 = 41.3 ms."""
+    return _frame_100ns(samples, sample_rate) + CONTINUITY_SLACK_S * NDI_TIME_UNITS_PER_S
+
+
+def timeline_offset_100ns(prev_ts: int, prev_samples: int, sample_rate: int, ts: int) -> float:
+    """How far frame `ts` sits from where the sender's audio timeline puts it: ts minus
+    (prev_ts + prev_samples / sample_rate), in 100 ns units. Both timestamps must be defined."""
+    return (int(ts) - int(prev_ts)) - _frame_100ns(prev_samples, sample_rate)  # exact int difference first
+
+
+def frame_continues(prev_ts, prev_samples: int, sample_rate: int, ts, tolerance: float) -> str:
+    """CONTINUE | DISCONTINUITY | UNKNOWN_TS: does the frame stamped `ts` continue the sender's
+    audio timeline after the previous frame (stamped `prev_ts`, `prev_samples` long at
+    `sample_rate`)? Within +-`tolerance` (100 ns; continuity_tolerance_100ns) of the expected
+    stamp it continues, whatever its arrival time; farther away (a hole, a sender restart, a date
+    step) it is a discontinuity. UNKNOWN_TS when either timestamp is undefined: the caller then
+    falls back to the arrival gap."""
+    if not tolerance >= 0:
+        raise ValueError(f"frame_continues: tolerance {tolerance!r} must be >= 0")
+    if not (timestamp_defined(prev_ts) and timestamp_defined(ts)):
+        _frame_100ns(prev_samples, sample_rate)  # an invalid frame is refused here too
+        return UNKNOWN_TS
+    if abs(timeline_offset_100ns(prev_ts, prev_samples, sample_rate, ts)) <= tolerance:
+        return CONTINUE
+    return DISCONTINUITY
 
 
 def _round_half_up(x):
@@ -231,6 +313,14 @@ def is_number(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
 
 
+def spectral_foreign(rms_dbfs, outside_band_pct) -> bool:
+    """The window's spectrum alone says FOREIGN: a level at or above SILENT_RMS_DBFS and at least
+    FOREIGN_OUTSIDE_BAND_PCT of the energy outside the marker band. Needs no marker span, so the
+    sampler reports it during the warm-up too (ROZHODNUTÉ issue 1404 comment 6027706292 item 1)."""
+    return (is_number(rms_dbfs) and rms_dbfs >= SILENT_RMS_DBFS
+            and is_number(outside_band_pct) and outside_band_pct >= FOREIGN_OUTSIDE_BAND_PCT)
+
+
 def classify(rms_dbfs, outside_band_pct, marker_chain) -> str:
     """MEASUREMENT | FOREIGN | SILENT | UNKNOWN (rules in the module doc). `marker_chain` is the
     trailing span's chain (span_markers), or None when there is none (warm-up, a span cut by
@@ -241,7 +331,7 @@ def classify(rms_dbfs, outside_band_pct, marker_chain) -> str:
         return "SILENT"
     if not is_number(outside_band_pct):
         return "UNKNOWN"
-    if outside_band_pct >= FOREIGN_OUTSIDE_BAND_PCT:
+    if spectral_foreign(rms_dbfs, outside_band_pct):
         return "FOREIGN"
     if not isinstance(marker_chain, int) or isinstance(marker_chain, bool):
         return "UNKNOWN"

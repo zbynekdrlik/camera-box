@@ -503,7 +503,10 @@ def test_run_is_unknown_until_4_s_of_audio_then_measurement(decoder, tmp_path):
     assert json.loads((tmp_path / rsf.PROGRAM_AUDIO_NAME).read_text())["marker_chain"] >= 6
 
 
-def test_run_restarts_the_span_after_a_receive_gap(decoder, tmp_path):
+def test_run_restarts_the_span_after_a_receive_gap_without_a_timestamp(decoder, tmp_path):
+    """The arrival-gap FALLBACK: these blocks carry no sender timestamp (AudioBlock's default is
+    NDIlib_recv_timestamp_undefined). With timestamps the sender timeline decides instead
+    (tests/python/test_program_audio_timeline_1404.py)."""
     x, sr = _fixture("base-R-rec")
     stereo = _stereo(x[: 10 * sr])
     blocks = _blocks(stereo, sr)
