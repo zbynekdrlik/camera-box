@@ -62,7 +62,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import resource
 import shutil
 import signal
 import sys
@@ -580,15 +579,25 @@ def classify_window(win: np.ndarray, sr: int, span: MarkerSpan, decoder, real: n
     return verdict, rms, outside, reason, markers, chain
 
 
-# The unit's CPUWeight (systemd/program-audio-sampler.service): the sampler's cgroup gets this weight
-# against the other units of the user's app.slice (the worktree lanes run there too).
-CPU_WEIGHT_WANTED = 1000
+def cpu_list(cpus) -> str:
+    """A cpu set as a compact list: {12, 13, 14, 15} -> "12-15", {0, 2, 3, 5} -> "0,2-3,5"."""
+    out, run = [], []
+    for c in sorted(cpus):
+        if run and c == run[-1] + 1:
+            run.append(c)
+            continue
+        if run:
+            out.append(str(run[0]) if len(run) == 1 else f"{run[0]}-{run[-1]}")
+        run = [c]
+    if run:
+        out.append(str(run[0]) if len(run) == 1 else f"{run[0]}-{run[-1]}")
+    return ",".join(out)
 
 
 def scheduling_state(cgroup_file: str = "/proc/self/cgroup",
-                     cgroup_root: str = "/sys/fs/cgroup") -> tuple[int, int | None, int | None]:
-    """(nice, the cgroup's cpu.weight or None when unreadable, the RLIMIT_NICE soft limit or None)
-    of this process, for the one start line (scheduling_line)."""
+                     cgroup_root: str = "/sys/fs/cgroup") -> tuple[int, str, int | None]:
+    """(nice, the cpus this process may run on, its cgroup's cpu.weight or None when unreadable),
+    for the one start line (scheduling_line)."""
     nice = os.getpriority(os.PRIO_PROCESS, 0)
     weight = None
     try:
@@ -599,30 +608,19 @@ def scheduling_state(cgroup_file: str = "/proc/self/cgroup",
                 weight = int(fh.read().strip())
     except (OSError, ValueError):
         weight = None  # reported as "unreadable" in the start line, never guessed
-    limit = resource.getrlimit(resource.RLIMIT_NICE)[0]
-    rlimit_nice = None if limit == resource.RLIM_INFINITY else int(limit)
-    return nice, weight, rlimit_nice
+    return nice, cpu_list(os.sched_getaffinity(0)), weight
 
 
-def scheduling_line(nice: int, weight: int | None, rlimit_nice: int | None) -> str:
-    """The one start line about the sampler's CPU priority. A `--user` unit cannot lower nice on dev1
-    (RLIMIT_NICE 0: systemd --user runs `Nice=-5` at 0 without an error, checked 7.10.2026), so the
-    unit sets CPUWeight only and this line is a WARNING whenever the nice is not below 0 -- saying
-    whether the CPU weight is in effect (without it the sampler competes like any other process)."""
+def scheduling_line(nice: int, cpus: str, weight: int | None) -> str:
+    """The one start line about where and how the sampler runs: its nice, its cpus (strih-lx pins the
+    E-cores through the unit's CPUAffinity=) and its cgroup's cpu.weight. Both units run it at normal
+    priority (no Nice=, no CPUWeight=); a positive nice is a WARNING: a deprioritised sampler stops
+    calling the NDI capture under load, and the SDK drops audio after ~1.3 s (issue 1404 STEP 0)."""
     w = "unreadable" if weight is None else str(weight)
-    lim = "?" if rlimit_nice is None else str(rlimit_nice)
-    effective = weight is not None and weight >= CPU_WEIGHT_WANTED
-    if nice < 0 and effective:
-        return f"program-audio sampler: scheduling nice={nice} cpu.weight={w}"
-    if nice < 0:
-        return (f"program-audio sampler: WARNING scheduling nice={nice} but its cgroup's cpu.weight={w} "
-                f"is not the unit's CPUWeight={CPU_WEIGHT_WANTED}: it can starve under the other "
-                "units' load")
-    tail = (f"its priority is the cgroup's cpu.weight={w} only" if effective else
-            f"and its cgroup's cpu.weight={w} is not the unit's CPUWeight={CPU_WEIGHT_WANTED}: it "
-            "competes like any other process and can starve under load")
-    return (f"program-audio sampler: WARNING scheduling nice={nice} (a --user unit cannot lower it here, "
-            f"RLIMIT_NICE={lim}) -- {tail}")
+    line = f"scheduling nice={nice} cpus={cpus or '?'} cpu.weight={w}"
+    if nice > 0:
+        return f"program-audio sampler: WARNING {line} -- deprioritised, it can starve under load"
+    return f"program-audio sampler: {line}"
 
 
 def private_ndi_config_dir() -> str:

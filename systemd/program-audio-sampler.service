@@ -26,14 +26,10 @@ RestartSec=10
 # private, empty NDI_CONFIG_DIR itself: mDNS only, no TCP discovery connection into any sender
 # (.claude/rules/ndi-discovery.md, issue 1389).
 EnvironmentFile=-%h/.config/camera-box/program-audio-sampler.env
-# CPU priority (design issue 1404 comment 6037613222). The sampler's capture thread must call the NDI
-# capture at least every ~1.3 s (the SDK drops older audio), so the unit must never lose the CPU to
-# the worktree lanes that share the user's app.slice: CPUWeight=1000 gives its cgroup 10x the default
-# weight there (systemd enables the cpu controller in app.slice for it). There is NO Nice=: a --user
-# unit cannot lower it on dev1 (RLIMIT_NICE 0, systemd runs Nice=-5 at 0 without an error), and the old
-# Nice=10 put the sampler behind every lane in the flat app.slice. The sampler logs one start line
-# with its nice and cpu.weight (a WARNING while the nice is not below 0).
-CPUWeight=1000
+# Normal priority (issue 1404): no Nice= -- the old Nice=10 put the sampler behind every other process,
+# and its capture then stopped long enough for the NDI SDK to drop audio (STEP 0, comment 6037861831).
+# The sampler logs one start line with its nice, cpus and cpu.weight. It is moving off dev1 to strih-lx
+# (systemd/program-audio-sampler.strih-lx.service); this dev1 unit stays until the consumers switch.
 NoNewPrivileges=yes
 StandardOutput=journal
 StandardError=journal

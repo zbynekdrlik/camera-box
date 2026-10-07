@@ -972,6 +972,16 @@ strih_session_apps_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" \
   || fail "issue 1399: the session apps (keeper, panel window, Companion Satellite + its watch) could not be provisioned (above)"
 
 # ---------------------------------------------------------------------------------------------
+# A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
+step "16e" "Stream program-audio sampler (issue 1404): numpy, the sampler files + decoder shim, the E-core --user unit -- enable-only"
+# issue 1404 (ROZHODNUTE 6039368611): the YouTube channel guard's sampler moved off dev1 to this box. It
+# runs as the operator's program-audio-sampler.service on the E-cores at normal priority and serves
+# :8891/program-audio.json itself. rig-mode.sh test starts it, rig-mode.sh event stops it; never here.
+# The whole step lives in scripts/lib/strih-program-audio.sh (sourced by strih-provision.sh).
+strih_program_audio_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" \
+  || fail "issue 1404: the program-audio sampler (numpy, its files, the decoder shim, its unit) could not be provisioned (above)"
+
+# ---------------------------------------------------------------------------------------------
 step 17 "Final verification (verify-strih.sh acceptance gate)"
 if [ -x "${HERE}/verify-strih.sh" ]; then
   if strih_lx_reboot_pending "$(cat /proc/cmdline 2>/dev/null || true)"; then

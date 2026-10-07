@@ -1,0 +1,42 @@
+[Unit]
+# issue 1404 -- the stream program-audio sampler on strih-lx (ROZHODNUTÉ 6039368611: it moved off
+# dev1, whose other projects' CI starved it). Receives the stream program's audio (stream OBS's NDI
+# output "STREAM-SNV (stream)", audio-only, read-only) and every 2 s classifies it MEASUREMENT /
+# FOREIGN / SILENT / UNKNOWN; serves the verdict itself at http://<strih-lx>:8891/program-audio.json
+# (scripts/program_audio_http.py), read by scripts/program_audio_guard.py (the YouTube channel guard).
+# This is a TEMPLATE: setup-strih.sh step 16e (scripts/lib/strih-program-audio.sh) fills the
+# CPUAffinity= line in from the box's own /sys/devices/cpu_atom/cpus (no line on a non-hybrid box) and
+# installs it as ~/.config/systemd/user/program-audio-sampler.service, enable-only. rig-mode.sh test
+# starts it, rig-mode.sh event stops it (scripts/lib/program-audio-mode.sh); verify-strih.sh grades it.
+Description=strih-lx stream program-audio sampler (issue 1404) -- NDI audio-only -> :8891/program-audio.json
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=network-online.target
+# Bound a restart storm (libndi missing, the serve dir unwritable): 20 starts per 5 min.
+StartLimitIntervalSec=300
+StartLimitBurst=20
+
+[Service]
+Type=simple
+# EVENT mode (rig-mode.sh event) leaves this marker: the sampler then stays down, also across a reboot
+# during a production (ExecCondition exit 1 = the start is skipped, never a failure). rig-mode.sh test
+# removes it before the start.
+ExecCondition=/usr/bin/test ! -e %h/.config/camera-box/program-audio-sampler.event-mode
+# The checkout-layout copy setup-strih installs (the shim sources sit next to it, so the sampler can
+# tell when the decoder library was built from other sources); numpy is the apt python3-numpy.
+ExecStart=/usr/bin/python3 /usr/local/lib/camera-box/scripts/program_audio_sampler.py
+Restart=on-failure
+RestartSec=10
+# Optional overrides: PROGRAM_AUDIO_SOURCE, PROGRAM_AUDIO_HTTP_PORT (default 8891), PROGRAM_AUDIO_HTTP_BIND,
+# PROGRAM_AUDIO_SERVE_DIR, NDI_LIB_PATH, QPSK_GUARD_SHIM. A private file, never ~/.config/environment.d/.
+EnvironmentFile=-%h/.config/camera-box/program-audio-sampler.env
+# The E-cores only (strih-lx: 12-15), off the P-cores OBS runs on; normal priority (no Nice, no
+# CPUWeight): the sampler must never be ahead of OBS on this production box.
+CPUAffinity=@E_CORES@
+NoNewPrivileges=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=program-audio-sampler
+
+[Install]
+# Starts with the operator's user manager (no X needed), so a reboot in TEST mode brings it back.
+WantedBy=default.target
