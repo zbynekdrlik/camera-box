@@ -61,10 +61,9 @@ stitch audio across a hole the chain could misread, and must not restart when no
 Arrival time cannot tell the two apart: a sampler starved for ~1 s on a busy dev1 gets the SDK's
 queued audio in one late burst (live 7.10.2026: 57 spurious `receive gap of 1.0-2.0 s` UNKNOWNs in
 6 h), while audio lost with blocks still arriving under 1 s apart showed no gap at all. So the
-sampler judges continuity on
-the SENDER's audio timeline (frame_continues): every NDI audio frame carries the SDK `timestamp`
-(100 ns, the sender's submission time, NDIlib_recv_timestamp_undefined = INT64_MAX when the SDK has
-none) and its sample count, and
+sampler judges continuity on the SENDER's audio timeline (frame_continues): every NDI audio frame
+carries the SDK `timestamp` (100 ns, the sender's submission time, NDIlib_recv_timestamp_undefined
+= INT64_MAX when the SDK has none) and its sample count, and
   expected = prev_timestamp + prev_samples / sample_rate
   |timestamp - expected| <= one frame duration + CONTINUITY_SLACK_S   CONTINUE (any arrival time)
   otherwise                                                           DISCONTINUITY (span restarts)
