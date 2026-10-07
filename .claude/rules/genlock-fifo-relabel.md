@@ -135,8 +135,9 @@ a step vs a ~2 s receiver window) waits for the main.
 - Parity: `extern crate self as camera_box;` + the two modules + the test file as `#[path]` mods,
   `CARGO_MANIFEST_DIR` and `CARGO_TARGET_TMPDIR` set at COMPILE time. Mutation: point
   `CARGO_MANIFEST_DIR` at a scratch repo holding the mutated header AND a copy of
-  `obs-genlock-wall-step.h`; 25/25 C mutants RED after review round 1 (the window end `>` and the
-  equidistant tie needed their own vectors; the stale-booking bounds have seven).
+  `obs-genlock-wall-step.h`; 27/27 C mutants RED after review round 2 (the window end `>` and the
+  equidistant tie needed their own vectors; the stale-booking bounds have nine, incl. one just
+  over the apply bound so a larger C bound diverges, and a box 0.1 s after boot).
   The generated C harness zero-fills the header's structs with `memset`, never a positional
   `{0, 0, …}` initializer: a field added to the header later fails the harness compile under
   `-Werror=missing-field-initializers` (review round 1 hit it on `last_mono_ns`).
