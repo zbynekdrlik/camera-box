@@ -34,7 +34,15 @@ pub const RESTART_GAP_S: f64 = 2.0;
 
 /// Ok when `run` may be passed to `--av-run` (a [`SELF_MARKED_RUN_IDS`] member), else the reason.
 pub fn check_av_run(run: u32) -> Result<(), String> {
-    Err(format!("--av-run {run}: not implemented yet (RED stub)"))
+    if SELF_MARKED_RUN_IDS.contains(&run) {
+        Ok(())
+    } else {
+        Err(format!(
+            "--av-run {run}: not a self-marked run (one whose recording carries its own QPSK marker \
+             next to its dual-QR tick); the only one is the measurement clip, {:?}",
+            SELF_MARKED_RUN_IDS
+        ))
+    }
 }
 
 /// The tick of one decoded frame for `run`: the highest `frame_id` among that run's payloads (the
@@ -44,8 +52,11 @@ pub fn run_frame_tick<I>(payloads: I, run: u32) -> Option<u32>
 where
     I: IntoIterator<Item = (u32, u32)>,
 {
-    let _ = (payloads.into_iter().count(), run);
-    None
+    payloads
+        .into_iter()
+        .filter(|&(r, _)| r == run)
+        .map(|(_, frame_id)| frame_id)
+        .max()
 }
 
 /// `(tick, video_ts)` samples of one run's frames (`(frame_index, tick)` in file order): the first
@@ -57,6 +68,22 @@ pub fn run_tick_samples(
     fps: f64,
     video_start_s: f64,
 ) -> Result<Vec<(u32, f64)>, String> {
+    if !(fps.is_finite() && fps > 0.0) {
+        return Err(format!("video fps {fps} is not a positive number"));
+    }
+    let mut first: std::collections::HashMap<u32, u64> = std::collections::HashMap::new();
+    for &(frame_index, tick) in frames {
+        let Some(t) = tick else { continue };
+        let at = *first.entry(t).or_insert(frame_index);
+        let gap_s = frame_index.abs_diff(at) as f64 / fps;
+        if gap_s > RESTART_GAP_S {
+            return Err(format!(
+                "the run's tick {t} shows again {gap_s:.1} s after its first frame (frames {at} and \
+                 {frame_index}): the run restarted inside this recording (a looped or replayed clip); \
+                 measure a cut that holds one play"
+            ));
+        }
+    }
     Ok(window_ticks(frames, fps, video_start_s))
 }
 

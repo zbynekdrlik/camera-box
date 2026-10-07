@@ -9,6 +9,7 @@
 //! is pure Tier-0 in `crate::qpsk_marker`, and the per-channel decode + best-channel pick (issue
 //! 1367, never a downmix) in `crate::qpsk_channel_select`; this module is only the ffmpeg I/O glue.
 
+use crate::av_run_pairing::{check_av_run, run_frame_tick, run_tick_samples};
 use crate::probe::recording::analyze_recording;
 use crate::qpsk_channel_select::{
     decode_best_channel, f32le_to_channels, ffmpeg_extract_args, ffprobe_channels_args,
@@ -209,6 +210,12 @@ fn decode_best_audio_channel(
 /// index-match, deduping near-simultaneous same-`frame_id` duplicates (`av_offset_candidates_deduped`,
 /// #733); the offset is the median of the DENSEST cluster of those candidates (`cluster_offset_ms`)
 /// — robust to false audio decodes and the index wrap.
+///
+/// issue 1404 Task 5 part b: `av_run = Some(run)` pairs through that SELF-MARKED run's own dual-QR
+/// tick (`crate::av_run_pairing`, the measurement clip 911016, whose recording carries its own
+/// marker; `marker_log_csv` is then the clip's marker log) instead of `RecordingFrame::tick`, and
+/// refuses a run that restarted inside the recording. `None` is the cam2 painter path, unchanged.
+#[allow(clippy::too_many_arguments)]
 pub fn av_sync_from_recording(
     recording: &Path,
     marker_log_csv: &str,
@@ -217,7 +224,11 @@ pub fn av_sync_from_recording(
     threshold: f64,
     min_matched: usize,
     cluster_tol_ms: f64,
+    av_run: Option<u32>,
 ) -> Result<AvSyncReport> {
+    if let Some(run) = av_run {
+        check_av_run(run).map_err(anyhow::Error::msg)?;
+    }
     let fps = probe_video_fps(recording)?;
     let emit_log = parse_qpsk_marker_log(marker_log_csv);
     anyhow::ensure!(
@@ -232,16 +243,34 @@ pub fn av_sync_from_recording(
     // Video: decode every frame's optical tick → sorted (tick, video_ts) samples, first per tick.
     let frames = analyze_recording(recording)
         .with_context(|| format!("decode video {}", recording.display()))?;
-    let mut ticks: Vec<(u32, f64)> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for fr in &frames {
-        if let Some(t) = fr.tick {
-            if seen.insert(t) {
-                ticks.push((t, video_start + fr.frame_index as f64 / fps));
+    let ticks: Vec<(u32, f64)> = match av_run {
+        None => {
+            let mut ticks: Vec<(u32, f64)> = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for fr in &frames {
+                if let Some(t) = fr.tick {
+                    if seen.insert(t) {
+                        ticks.push((t, video_start + fr.frame_index as f64 / fps));
+                    }
+                }
             }
+            ticks.sort_by_key(|&(t, _)| t);
+            ticks
         }
-    }
-    ticks.sort_by_key(|&(t, _)| t);
+        // issue 1404: the selected run's own tick (the payloads keep every run; `tick` drops 911016)
+        Some(run) => {
+            let run_frames: Vec<(u64, Option<u32>)> = frames
+                .iter()
+                .map(|fr| {
+                    let pairs = fr.payloads.iter().map(|p| (p.run_id, p.frame_id));
+                    (fr.frame_index, run_frame_tick(pairs, run))
+                })
+                .collect();
+            run_tick_samples(&run_frames, fps, video_start)
+                .map_err(anyhow::Error::msg)
+                .with_context(|| format!("run {run} ticks of {}", recording.display()))?
+        }
+    };
     let video_ticks = ticks.len();
 
     // #936 FAIL-CLOSED GUARD: the emit-log's frame_id coverage must overlap the recording's own

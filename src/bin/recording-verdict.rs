@@ -404,6 +404,12 @@ struct Args {
     /// for the full audit.
     #[arg(long, default_value_t = 25.0)]
     av_cluster_tol_ms: f64,
+    /// issue 1404 A/V-sync: pair through this SELF-MARKED run's own dual-QR tick instead of the cam2
+    /// painter's: the measurement clip `911016`, whose recording (a CG segment) carries its own QPSK
+    /// marker. `--av-marker-log` is then the clip's own `<clip>.markers.csv`. Requires `--av-sync`;
+    /// unset = the painter path, unchanged (`camera_box::av_run_pairing`).
+    #[arg(long)]
+    av_run: Option<u32>,
     /// issue 930 lipsync cross-validation: the SyncNet-aggregated offset (ms, video - audio) for
     /// the PAIRED lipsync-test-mode recording of the SAME rig state, from `scripts/av_sync_measure.py`
     /// and `scripts/av_sync_calibrate.py --calibrate` (its `mean_offset_ms`). Optional -- when
@@ -3001,6 +3007,7 @@ fn run_av_sync(args: &Args) -> Result<()> {
         args.av_threshold,
         args.av_min_matched,
         args.av_cluster_tol_ms,
+        args.av_run,
     )?;
     // The measured offset + the latency ADJUSTMENT it implies: ADD this (signed) to the video
     // source's current genlock latency to zero the offset (offset > 0 ⇒ video lags ⇒ negative
@@ -3021,6 +3028,9 @@ fn run_av_sync(args: &Args) -> Result<()> {
         // (additive key; every pre-existing key keeps its name and meaning).
         "audio_channel_pick": report.audio_channels,
     });
+    if let Some(run) = args.av_run {
+        json["av_run"] = serde_json::json!(run); // issue 1404: the self-marked run paired (additive)
+    }
     // issue 930/1032 — lipsync cross-validation: only added when the caller supplied the paired
     // lipsync-test-mode run's SyncNet offset (never printed on a plain --av-sync call, so every
     // pre-930 invocation's JSON shape is byte-for-byte unchanged).
@@ -3123,6 +3133,10 @@ fn main() -> Result<()> {
     if args.av_sync.is_some() {
         return run_av_sync(&args);
     }
+    anyhow::ensure!(
+        args.av_run.is_none(),
+        "--av-run selects the tick of an --av-sync measurement; it requires --av-sync"
+    );
 
     tracing::info!(
         strih = ?args.strih.as_ref().map(|p| p.display().to_string()),
