@@ -7,9 +7,11 @@ the rig-lease server's serve dir. MEASUREMENT needs the cam2 QPSK marker itself 
 4 markers over the trailing 4 s), decoded by the dock's own decoder through a small library built on
 dev1 with g++ (`scripts/build-qpsk-guard-shim.sh`). Nothing reads MEASUREMENT in the first 4 s after a
 start or a span restart: a window whose spectrum alone says FOREIGN reads FOREIGN, the rest UNKNOWN.
-The span restarts on a hole in the SENDER's NDI audio timeline (the frames' SDK timestamps), never on
-a late delivery while dev1 is busy; only a frame without a timestamp falls back to a 1 s arrival gap,
-and a dantesync date step costs one warm-up. Gates call
+The span follows the SENDER's NDI audio timeline (the frames' SDK timestamps), never dev1's arrival
+time: a late delivery while dev1 is busy keeps it, a hole up to 250 ms AHEAD of the timeline is
+bridged with zeros and keeps it, and a frame behind the timeline, a longer hole or a larger date
+step restarts it (one warm-up); only a frame without a timestamp falls back to a 1 s arrival gap.
+Gates call
 `scripts/program_audio_guard.py --url http://dev1:8890/program-audio.json --max-age 10` and stop
 the broadcast on any exit but 0 (1 FOREIGN, also a FOREIGN window within `--latch-s` 30 s; 2 UNKNOWN /
 stale / unreachable). The served file lives in `$XDG_RUNTIME_DIR/rig-lease-serve` (tmpfs).
@@ -88,6 +90,34 @@ journalctl --user -u program-audio-sampler -n 5 --no-pager      # start line: co
 # a busy dev1 shows up as late_bursts=N with "late burst after 1.x s without audio: the sender
 # timeline continues" lines, and no MEASUREMENT -> UNKNOWN transition for them
 journalctl --user -u program-audio-sampler --since -15min --no-pager | grep -E 'summary|late burst|discontinuity'
+```
+
+## Update: a short hole is bridged, not a restart (issue 1404, design 6036098516)
+
+Only `program_audio.py` and `program_audio_sampler.py` changed; the shim, the unit and the lease
+server did not. On 7.10.2026, under dev1 load, the receiver dropped two NDI frames at a time: 55
+`audio timeline discontinuity` lines in an hour, each a 4 s UNKNOWN warm-up (one summary:
+`timeline_breaks=33 UNKNOWN=22`), which stopped restreamer's YouTube gate. A frame up to 250 ms ahead
+of the timeline is now bridged: the missing samples go into the window as zeros, the marker span is
+kept, and the chain is decoded over the real samples only. Restart the sampler the same way as
+above, only while the rig lease is free:
+
+```bash
+if curl -sf http://127.0.0.1:8890/rig-lease.json \
+     | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("held") is False else 1)'; then
+  systemctl --user restart program-audio-sampler.service
+else
+  echo "rig lease held or unreadable -- sampler NOT restarted, retry later"
+fi
+sleep 8
+python3 ~/devel/camera-box/scripts/program_audio_guard.py      # verdict=MEASUREMENT ... chain >= 6, exit 0
+journalctl --user -u program-audio-sampler -n 5 --no-pager      # start line: ... holes up to 250ms bridged
+curl -s http://dev1:8890/program-audio.json; echo               # carries "holes_bridged" + "bridged_ms"
+# after 10 min: the summary line ends "holes_bridged=N bridged_ms=X"; the +41...+53 ms holes read
+# "audio timeline hole: the frame sits +4x.x ms ahead ... bridged with 2048 zero samples (42.7 ms),
+# the marker span is kept" with no MEASUREMENT -> UNKNOWN for them; timeline_breaks counts only the
+# holes over 250 ms, frames behind the timeline and the larger date steps
+journalctl --user -u program-audio-sampler --since -15min --no-pager | grep -E 'summary|bridged|discontinuity'
 ```
 
 To re-check the marker bars on new real audio (for example after a decoder change), run
