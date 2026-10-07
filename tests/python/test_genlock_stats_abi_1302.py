@@ -292,13 +292,16 @@ def test_the_full_program_records_the_abi_next_to_the_build_sha_1302(box):
     sha = p.index("Write-MarkerAtomic (Join-Path $obsDir 'GENLOCK_BUILD_SHA.txt')")
     abi = p.index("Write-MarkerAtomic (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt') '4'")
     assert sha < abi < p.index("# (6) sha256 verify")
-    assert "Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt')" not in p
+    # nothing removes the recorded marker after the copy (a clear BEFORE the copy is allowed)
+    after_copy = p[p.index("# (4) FULL bundle"):]
+    assert "Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt')" not in after_copy
 
 
 @pytest.mark.parametrize("box", BOXES)
 def test_the_full_program_removes_the_marker_when_the_abi_is_unknown_1302(box):
     p = _program(box, "full", "")
-    rm = p.index("Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt')")
+    # the LAST removal: the one after the markers (a clear before the copy may come earlier)
+    rm = p.rindex("Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt')")
     assert p.index("Write-MarkerAtomic (Join-Path $obsDir 'GENLOCK_BUILD_SHA.txt')") < rm < p.index("# (6) sha256 verify")
     assert "Write-MarkerAtomic (Join-Path $obsDir 'GENLOCK_STATS_ABI.txt')" not in p
     assert "a fast deploy will refuse until the next full-bundle deploy" in p
