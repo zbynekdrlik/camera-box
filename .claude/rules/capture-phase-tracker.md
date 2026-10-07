@@ -243,6 +243,11 @@ A +-16 ppm camera, 2300 s (two crossings), driven frame by frame through the REA
 - A debug replica (`rustc --test`, no `-O`) has overflow checks on, so an `i128` product that
   would wrap silently in the release binary panics there: build the worst-case window in a test
   (`a_slow_stream_with_outlier_runs_never_overflows_the_fit`) instead of trusting a bound comment.
+- **A bench clock step applies at the instant the code READS the clock** (issue 1372 review round 1):
+  the capture loop reads the wall at the dequeue, ~11 ms after the capture, so a frame captured
+  just before a step and dequeued after it already reads the stepped wall. Keying the step on the
+  capture time made the bench's "exactly as main.rs" read unfaithful and hid that early frame. Step
+  every modelled read (the per-frame bracket and the poll) at its own instant.
 - `main.rs` compiles first on CI.
 
 ## Live acceptance (supervisor)
