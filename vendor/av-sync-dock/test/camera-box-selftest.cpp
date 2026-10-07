@@ -685,6 +685,26 @@ int main()
 		CHECK(sizeof(reserved) / sizeof(reserved[0]) == 3 && reserved[0] == 911014u && reserved[1] == 911015u &&
 			      reserved[2] == 911016u,
 		      "1404: the reserved origin list is 911014, 911015, 911016");
+		CHECK(camera_box_reserved_origin_index(911014u) == 0 && camera_box_reserved_origin_index(911016u) == 2 &&
+			      camera_box_reserved_origin_index(123456789u) == -1,
+		      "1404: the reserved origin index");
+	}
+
+	/* issue 1404: the "ignoring reserved origin run N" line is rate-limited per run, so QRs that
+	 * alternate (two origin burns on one frame, a crossfade at a cut) never log once per frame. */
+	{
+		const uint64_t s = 1000000000ULL;
+		CameraBoxIgnoredOriginLog log;
+		CHECK(log.due(0, 5 * s), "1404: the first sight of a run logs");
+		CHECK(log.due(1, 5 * s), "1404: the first sight of another run logs too");
+		int lines = 0;
+		for (uint64_t f = 0; f < 1800; f++) /* 30 s of frames, the two runs alternating every frame */
+			lines += log.due((int)(f % 2), 5 * s + f * s / 60) ? 1 : 0;
+		CHECK(lines == 0, "1404: alternating runs inside the minute log nothing more");
+		CHECK(!log.due(0, 5 * s + 59 * s), "1404: a run again just inside the minute does not log");
+		CHECK(log.due(0, 5 * s + 60 * s), "1404: a run a minute after its last line logs again");
+		CHECK(log.due(1, 2 * s), "1404: frame time that went backwards (an output restart) logs again");
+		CHECK(!log.due(-1, 5 * s) && !log.due(3, 5 * s), "1404: an index outside the list never logs");
 	}
 
 	if (g_failures == 0) {

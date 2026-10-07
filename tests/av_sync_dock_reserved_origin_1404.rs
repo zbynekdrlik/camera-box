@@ -98,20 +98,29 @@ fn the_dock_list_is_the_rust_reserved_origin_ids_1404() {
 #[test]
 fn the_predicate_reads_the_one_list_1404() {
     let hdr = squish(&strip_cpp_comments(&read(QR_HEADER)));
-    let body = unique_body_of(
+    let index = unique_body_of(
         &hdr,
-        "inline bool camera_box_qr_is_paired_run(uint32_t run_id)",
+        "inline int camera_box_reserved_origin_index(uint32_t run_id)",
     );
     for need in [
         "static const uint32_t reserved[] = CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS;",
-        "if (reserved[i] == run_id) return false;",
-        "return true;",
+        "static_assert(sizeof(reserved) / sizeof(reserved[0]) == CAMERA_BOX_RESERVED_ORIGIN_COUNT,",
+        "if (reserved[i] == run_id) return (int)i;",
+        "return -1;",
     ] {
         assert!(
-            body.contains(need),
-            "{QR_HEADER}: camera_box_qr_is_paired_run lost `{need}`"
+            index.contains(need),
+            "{QR_HEADER}: camera_box_reserved_origin_index lost `{need}`"
         );
     }
+    let paired = unique_body_of(
+        &hdr,
+        "inline bool camera_box_qr_is_paired_run(uint32_t run_id)",
+    );
+    assert_eq!(
+        paired, "{ return camera_box_reserved_origin_index(run_id) < 0; }",
+        "{QR_HEADER}: camera_box_qr_is_paired_run must be exactly `not in the one list`"
+    );
 }
 
 #[test]
@@ -187,17 +196,25 @@ fn both_callers_drop_a_refused_qr_before_any_signal_1404() {
 }
 
 #[test]
-fn the_ignored_run_is_logged_once_per_segment_not_per_frame_1404() {
+fn the_ignored_run_is_logged_at_most_once_a_minute_per_run_1404() {
     let src = code();
     let body = unique_body_of(&src, RECORD_SIG);
-    for need in [
-        "if (st->cb_ignored_origin_run != run_id) { st->cb_ignored_origin_run = run_id;",
-        "st->cb_ignored_origin_run = 0;",
-    ] {
-        assert!(body.contains(need), "cb_video_qr_record lost `{need}`");
-    }
+    let gated = "if (st->cb_ignored_origin_log.due(camera_box_reserved_origin_index(run_id), video_ts)) blog(LOG_INFO,";
     assert!(
-        src.contains("uint32_t cb_ignored_origin_run = 0;"),
-        "the worker-owned field is declared"
+        body.contains(gated),
+        "cb_video_qr_record must log an ignored QR only through the per-run rate limit"
     );
+    assert_eq!(
+        body.matches("blog(").count(),
+        1,
+        "the record logs only the rate-limited ignore line"
+    );
+    assert!(
+        src.contains("CameraBoxIgnoredOriginLog cb_ignored_origin_log;"),
+        "the worker-owned rate limit is declared"
+    );
+    // the limit itself (camera-box-qr.hpp) is exercised by camera-box-selftest.cpp: alternating runs
+    // log once each, a run again inside the minute does not, after a minute or a time step back it does
+    let hdr = squish(&strip_cpp_comments(&read(QR_HEADER)));
+    assert!(hdr.contains("#define CAMERA_BOX_IGNORED_ORIGIN_LOG_NS 60000000000ULL"));
 }

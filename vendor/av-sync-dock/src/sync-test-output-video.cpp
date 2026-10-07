@@ -118,16 +118,13 @@ static void cb_refresh_measure_source(struct sync_test_output *st, uint64_t vide
 static bool cb_video_qr_record(struct sync_test_output *st, uint32_t run_id, uint32_t frame_id, uint64_t video_ts)
 {
 	if (!camera_box_qr_is_paired_run(run_id)) {
-		if (st->cb_ignored_origin_run != run_id) {
-			st->cb_ignored_origin_run = run_id;
+		if (st->cb_ignored_origin_log.due(camera_box_reserved_origin_index(run_id), video_ts))
 			blog(LOG_INFO,
 			     "av-sync-dock: ignoring the camera-box QRs of reserved origin run %u (the CG path, issue 1404) "
 			     "-- the dock pairs only the cam2 painter's tick",
 			     (unsigned)run_id);
-		}
 		return false;
 	}
-	st->cb_ignored_origin_run = 0;
 	uint8_t low = (uint8_t)(frame_id & 0xFFu);
 	{
 		// Same mutex the audio side locks to READ these — the video ring + f/c/q_ms are written

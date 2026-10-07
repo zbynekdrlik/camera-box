@@ -1941,7 +1941,8 @@ jobs:
         run: |
           $hdr = (Get-Content "vendor/av-sync-dock/src/camera-box-qr.hpp" -Raw) -replace '\s+', ' '
           if (([regex]::Matches($hdr, [regex]::Escape('#define CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS {911014u, 911015u, 911016u}'))).Count -ne 1) { Write-Error "camera-box-qr.hpp: the reserved origin list is not exactly 911014, 911015, 911016 (issue 1404)"; exit 1 }
-          if ($hdr -notmatch [regex]::Escape('static const uint32_t reserved[] = CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS;')) { Write-Error "camera-box-qr.hpp: camera_box_qr_is_paired_run no longer reads the one list (issue 1404)"; exit 1 }
+          if ($hdr -notmatch [regex]::Escape('static const uint32_t reserved[] = CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS;')) { Write-Error "camera-box-qr.hpp: camera_box_reserved_origin_index no longer reads the one list (issue 1404)"; exit 1 }
+          if ($hdr -notmatch [regex]::Escape('inline bool camera_box_qr_is_paired_run(uint32_t run_id) { return camera_box_reserved_origin_index(run_id) < 0; }')) { Write-Error "camera-box-qr.hpp: camera_box_qr_is_paired_run is no longer exactly 'not in the one list' (issue 1404)"; exit 1 }
           . ./vendor/av-sync-dock/test/dock-output-source.ps1
           $src = Get-DockOutputSource
           $sig = 'static bool cb_video_qr_record(struct sync_test_output *st, uint32_t run_id, uint32_t frame_id, uint64_t video_ts)'
@@ -1950,6 +1951,7 @@ jobs:
           $refuse = $record.IndexOf('return false;', [StringComparison]::Ordinal)
           $ring = $record.IndexOf('st->cb_video_ts_ns[low] = video_ts;', [StringComparison]::Ordinal)
           if ($refuse -lt 0 -or $ring -lt 0 -or $refuse -gt $ring) { Write-Error "dock output sources: the reserved-origin refusal must return before the ring write (issue 1404)"; exit 1 }
+          if (-not $record.Contains('if (st->cb_ignored_origin_log.due(camera_box_reserved_origin_index(run_id), video_ts)) blog(LOG_INFO,')) { Write-Error "dock output sources: cb_video_qr_record no longer logs an ignored QR only through the per-run rate limit (issue 1404)"; exit 1 }
           $guard = 'if (!cb_video_qr_record(st, cb.run_id, cb.frame_id, timestamp - st->start_ts)) continue;'
           if (([regex]::Matches($src, [regex]::Escape($guard))).Count -ne 2) { Write-Error "dock output sources: the guarded QR record != 2 (issue 1404) -- a QR decode records without the run filter"; exit 1 }
           foreach ($need in @("if (decode_camera_box_qr((char *)data.payload, &cb)) { $guard", "if (!decode_camera_box_qr((char *)data.payload, &cb)) continue; $guard")) {
