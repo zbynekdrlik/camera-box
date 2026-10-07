@@ -131,7 +131,8 @@ What changed:
   its own (ROZHODNUTÉ 6037765523).
 - The unit: `CPUWeight=1000`, and `Nice=10` is gone. A `--user` unit cannot lower nice on dev1
   (`Nice=-5` runs at 0 without an error), so there is no `Nice=` at all.
-- The shim and the lease server did not change. `program-audio.json` gains `queue_drops` (additive).
+- The shim and the lease server did not change. `program-audio.json` gains `queue_drops` and `lag_ms`
+  (additive).
 
 The unit file changed, so this is a supervisor step: copy it, reload, and restart only while the
 rig lease is free (the restart writes UNKNOWN for ~4 s, and restreamer stops a running YouTube
@@ -155,12 +156,21 @@ journalctl --user -u program-audio-sampler -n 8 --no-pager
 #    CPUWeight is not in effect (check the next two lines)
 cat /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/program-audio-sampler.service/cpu.weight  # 1000
 cat /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/cgroup.subtree_control              # has "cpu"
-curl -s http://dev1:8890/program-audio.json; echo               # carries "queue_drops": 0
+curl -s http://dev1:8890/program-audio.json; echo               # carries "queue_drops": 0 and "lag_ms" (tens of ms)
 # after 10 min: the summary line reads "queue_drops=0 max_lag_ms=<well under 10000> date_steps=0 ...";
 # timeline_breaks counts only real losses over 250 ms; a "+4x ms" bridge with "arrival gap 0.0-0.1 s"
 # is most often a sender stall (Design-question 6037861831), read UNKNOWN at worst, never FOREIGN
 journalctl --user -u program-audio-sampler --since -15min --no-pager | grep -E 'summary|queue overflow|date step|discontinuity'
 ```
+
+After the next nightly dantesync date step, check it was matched (dev1 stepped first):
+`journalctl --user -u program-audio-sampler --since <step time - 1 min> --until <step time + 1 min>`
+shows `audio timeline date step: ... nothing lost`, not `bridged with` / `discontinuity`. A miss is
+not a regression (the jump is bridged or restarted as before), but report it on issue 1404.
+
+Rule A does not end restreamer's stops on a sender stall: the stall pattern reads UNKNOWN windows
+(`U U M M M M U M U U M` on the live replay), enough for its 2-consecutive / 3-within-60 s rule.
+The remedy is open on Design-question 6037861831.
 
 Rollback: copy the previous unit back (`git show <previous commit>:systemd/program-audio-sampler.service`),
 `daemon-reload`, and restart the same way.

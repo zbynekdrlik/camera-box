@@ -37,7 +37,7 @@ its SERVE dir (`scripts/rig_serve_files.py`): `$XDG_RUNTIME_DIR/rig-lease-serve`
 | Route | Writer | Contract |
 |---|---|---|
 | `/rig-qpsk-markers.csv` | `rig-marker-mirror` `--user` service (`scripts/rig-marker-mirror.sh` → `rig_marker_mirror.py`) | cam2's `/run/rig-qpsk-markers.csv`, complete rows; `text/csv`; `X-Mirror-Age-S` = seconds since new rows last arrived; 404 absent |
-| `/program-audio.json` | `program-audio-sampler` `--user` service | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain, holes_bridged, bridged_ms, queue_drops[, reason]}`; both ages recomputed by the server per request; the two marker counts are null without a full marker span; `holes_bridged`/`bridged_ms` count the bridged holes and `queue_drops` the frames the sampler's own capture queue dropped, since the sampler started (null while it is not sampling); 404 absent; unreadable or foreign-owned = UNKNOWN |
+| `/program-audio.json` | `program-audio-sampler` `--user` service | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain, holes_bridged, bridged_ms, queue_drops, lag_ms[, reason]}`; both ages recomputed by the server per request; the two marker counts are null without a full marker span; `holes_bridged`/`bridged_ms` count the bridged holes and `queue_drops` the frames the sampler's own capture queue dropped, since the sampler started (null while it is not sampling); `lag_ms` = how long before the write the newest audio of the judged window was captured (the consumer's backlog; null with no window); 404 absent; unreadable or foreign-owned = UNKNOWN |
 
 The consumer CLI is `scripts/program_audio_guard.py`, used by both YouTube gates (camera-box and
 restreamer issue 357):
@@ -205,11 +205,12 @@ level. Re-run the full calibration after any decoder or rule change:
       carried the window over the bar, 32.8 % -> 29.3 % faded), so no fade is applied. Before the
       bridge the window holding a hole was never judged (the span restarted, UNKNOWN). Reported on
       the Design-question thread (6036260703) next to the date step.
-    - Restreamer's safety checks, pinned: music (pink, or an in-band chord) arriving before, across
-      or after a bridged hole reads FOREIGN in the same window and starts the latch with the same
-      payload as without the hole; music two thirds bridged zeros never reads MEASUREMENT and the
-      decoder never sees a bridged sample. Before, the same hole restarted the span and an in-band
-      chord waited out the warm-up.
+    - Restreamer's safety checks, pinned: BROADBAND music (pink) arriving before, across or after a
+      bridged hole reads FOREIGN in the same window and starts the latch with the same payload as
+      without the hole; music two thirds bridged zeros never reads MEASUREMENT and the decoder never
+      sees a bridged sample. An in-band chord (FOREIGN only through a short chain) now reads UNKNOWN
+      while its span holds bridged audio and FOREIGN at most two windows later: the rule-A
+      trade-off below (ROZHODNUTÉ 6037765523), never MEASUREMENT.
     - Replay of the 55 live offsets as real holes (frames dropped, the rest as send jitter) through
       the real decoder on rec2 and session (20 min each): 49 bridged, 6 UNKNOWN (only the holes over
       250 ms: 256.3, 337.8, 357.6, 543.0, 556.2, 571.7 ms), 0 FOREIGN, minimum chain 7.
@@ -265,6 +266,14 @@ level. Re-run the full calibration after any decoder or rule change:
       the sender's jump came first) the rules stay: a forward jump up to 250 ms is bridged, a larger
       one or a backward one restarts the span (one UNKNOWN, never FOREIGN).
     - Only FORWARD jumps (the design). A backward date step still costs one warm-up.
+    - The match only looks BACK: dev1 must have stepped before the first stepped frame arrives (the
+      stream box and dev1 step at the same announced instant, the frame then needs the network and
+      the SDK). If dev1 steps later, or corrects its date by slewing / micro-steps instead (its
+      `/status` shows `date_slew_active` / `date_micro_active`), the jump falls back to the bridge or
+      a restart. Confirm the order at the next nightly step before calling DATE_STEP live: the
+      journal's `timeline date step` line, never a `bridged with` line, at the step time.
+    - The two windows whose span holds a DATE_STEP count as holed for the short-chain rule below:
+      the ±20 ms match can absorb a small real loss (one frame plus negative jitter).
     - Micro-corrections of a few ms stay inside the tolerance.
   - Residual limits: a sender stall longer than the tolerance (OBS submitting a frame > ~20 ms
     later than its normal jitter) costs one warm-up although nothing was lost; a sender with no
@@ -315,9 +324,14 @@ level. Re-run the full calibration after any decoder or rule change:
     decode or a write (a test spies the thread names). The consumer is the old loop, unchanged except
     that it takes items from the queue.
   - A full queue drops the NEW frame and counts it (`queue_drops`, summary + JSON). The drop rides on
-    the next queued item, and the consumer reads it as a hole of exactly the dropped audio: a BRIDGE
-    of those samples (plus any extra the timestamps show) up to 250 ms, a span restart beyond, logged
-    `queue overflow: N frames (X ms) dropped by the sampler's own capture queue -- …`.
+    the next queued AUDIO block (never an error item or an empty block: the consumer does not judge
+    those, so the hole would be lost), and the consumer reads it as a hole of exactly the dropped
+    audio: a BRIDGE of those samples up to 250 ms, or of the whole offset when the timestamps show
+    more missing; a span restart beyond 250 ms or behind the dropped audio. It is logged
+    `queue overflow: N frames (X ms) dropped by the sampler's own capture queue -- …`. Every branch
+    is pinned in the pure decision, including a drop with send jitter (bridged with exactly the
+    dropped samples, never round(offset·sr)). Without timestamps a drop is bridged too, but an
+    arrival gap over 1 s still takes the arrival-fallback restart.
   - An NDI error frame is queued as an error item (the span restarts as before), and the thread waits
     one capture timeout. Any other exception in the capture call is handed to the consumer, whose
     next get raises it, so the sampler exits non-zero and systemd restarts it (never a live consumer
@@ -326,11 +340,14 @@ level. Re-run the full calibration after any decoder or rule change:
     to leave the SDK call, and only then is the receiver closed (destroying it under a running
     capture would crash the SDK; if the thread is still inside after the join, the receiver is left
     to the process exit). The JSON then reads UNKNOWN `sampler stopped` as before.
-  - `max_lag_ms` in the summary is the oldest captured item the consumer took (its backlog), and the
-    arrival gaps (late bursts) are now the capture thread's own.
+  - `max_lag_ms` in the summary is the oldest captured item the consumer took (its backlog), and
+    `lag_ms` in the JSON is the lag of the window it judges: a consumer that falls behind its 10 s
+    queue never passes for a fresh one (`ts_utc` is the write time). The arrival gaps (late bursts)
+    are now the capture thread's own.
   - `run(capture=None)` (the calibration CLI and every loop test) keeps the capture call in the loop
     through `SyncCapture`, the same items without a thread, so the bars and the loop tests run the
-    same consumer deterministically.
+    same consumer deterministically. It reads NO wall clock unless `wall_offset` is passed: a real
+    dantesync step during a test or a calibration run must never turn a bridge into a date step.
   - **STEP 0 (7.10.2026, Design-question 6037861831):** two read-only probes on the live
     `STREAM-SNV (stream)`, private serve dirs, side by side at nice 10, 720 s under the natural load
     (load avg 6–18, other projects' CI). Single loop: 5 losses from its own starvation (arrival
@@ -359,8 +376,12 @@ level. Re-run the full calibration after any decoder or rule change:
     its audio thread stalls ~64 ms (`audio-stall #1367: tick_gap_max_ms=58…68` every minute) and
     then submits three frames back to back. The bridge inserts ~43 ms of zeros for audio that was
     never lost, and every later marker sits 2.6 indices off the line. That is the 14:17:37 false
-    FOREIGN. Open on Design-question 6037861831 (a look-ahead that tells a stall from a loss);
-    rule A above turns it into UNKNOWN meanwhile.
+    FOREIGN. Open on Design-question 6037861831 (a look-ahead that tells a stall from a loss).
+    Rule A above turns the FOREIGN into UNKNOWN meanwhile, but that does NOT end the YouTube stop:
+    the live pattern replayed through the new code reads `U U M M M M U M U U M` (two UNKNOWN in a
+    row, three within ~20 s), which still meets restreamer's 2-consecutive / 3-within-60 s rule.
+    Only the look-ahead (reading those windows MEASUREMENT) removes it.
+- **A SILENT window empties the span.** The next non-silent window holds only its own markers, so it
   reads UNKNOWN ("marker span") until the span is full again. Without this a silence→measurement
   start read a short chain and could latch a false FOREIGN.
 - **A missing or unloadable shim** = UNKNOWN + exit 1 before the NDI receiver is created, like a
