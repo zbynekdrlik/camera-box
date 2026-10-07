@@ -25,19 +25,25 @@ frontend allocates `struct obs_genlock_stats` on its stack and passes no size to
 copy and OBS crashes. Live 7.10.2026: stream ran a stats-v3 build (`a33d91a8e`, its last deploy a
 FAST one: the box's `BUNDLE_MANIFEST.json` 08:36, its SHA marker 14:58) while dev carried v4.
 
-- **Every full-bundle deploy records the frontend's ABI** as `GENLOCK_STATS_ABI.txt` next to
-  `GENLOCK_BUILD_SHA.txt`: the Windows program at step (5b) (`genlock_stats_abi_marker_ps`, after
-  the other markers, through `Write-MarkerAtomic`); the Linux legs through `genlock_write_markers`'
+- **Every full-bundle deploy the planner drives records the frontend's ABI** as
+  `GENLOCK_STATS_ABI.txt` next to `GENLOCK_BUILD_SHA.txt`: the Windows program removes it at step
+  (3c), right before the copy (`genlock_stats_abi_clear_ps`), so a copy that fails half way reads
+  as "missing", and writes the new version at step (5b) (`genlock_stats_abi_marker_ps`, after the
+  other markers, through `Write-MarkerAtomic`); the Linux legs through `genlock_write_markers`'
   5th argument (the imag program passes it; strih-lx gets it as `bundle/GENLOCK_STATS_ABI.txt`,
   staged by the planner after `strih_lx_prepare`, and `setup-strih.sh` reads it from the STAGE,
   never from `/opt/obs-genlock`, which still holds the previous deploy's marker). `setup-imag.sh`'s
-  inline copy of `genlock_write_markers` does the same, behaviour for behaviour (pinned by the pytest).
+  inline copy of `genlock_write_markers` does the same, behaviour for behaviour (pinned by the
+  pytest); its own provisioning install cannot name the version, so it REMOVES the marker.
 - **The version comes from the deployed build's own obs.h**: `genlock_stats_abi_resolve` reads
   `vendor/obs-studio/libobs/obs.h` AT the deployed commit from the checkout's object store (`show
   <sha>:<path>`, plan AND execute mode, before any box is touched) and takes the ONE
-  `#define OBS_GENLOCK_STATS_VERSION`. Unreadable (the commit not fetched, a missing / duplicate /
-  malformed define): `--fast` is REFUSED (exit 3, "fetch the commit or deploy --full"); `--full`
-  warns and the program REMOVES the box's marker, so a later fast deploy refuses until a full deploy
+  `#define OBS_GENLOCK_STATS_VERSION`. Execute mode first fetches that ONE commit from origin when
+  it is not in the checkout (full 40-hex SHA only, `GIT_TERMINAL_PROMPT=0`, 120 s bound; plan mode
+  never fetches, so a test's short SHA never reaches the network). Still unreadable (a missing /
+  duplicate / malformed define): a `--fast` that swaps an obs.dll (stream or resolume in the box
+  list) is REFUSED (exit 3, "fetch the commit or deploy --full"); any other run warns and the
+  full-bundle programs REMOVE the box's marker, so a later fast deploy refuses until a full deploy
   records a known version.
 - **The FAST program gates at step (0f)**, right after the `(0)` path preflight and BEFORE the
   issue-1367 obs-websocket read, the power plan, AutoHotkey64, the keep-alive tasks, the stop, the
@@ -46,13 +52,19 @@ FAST one: the box's `BUNDLE_MANIFEST.json` 08:36, its SHA marker 14:58) while de
   box was changed.` and exit 13 (`Write-Host`, never `Write-Error`, so the number survives
   `$ErrorActionPreference = 'Stop'`). A FAST deploy leaves the marker as it is: it names the
   frontend, which it keeps.
-- **One decision, two transcriptions.** `genlock_fast_abi_verdict NEW present|missing TEXT` is the
-  bash rule; the (0f) PowerShell block transcribes it (the marker read as raw bytes,
+- **A reference decision and its transcription.** `genlock_fast_abi_verdict NEW present|missing
+  TEXT` is the reference rule (no production path calls it); the (0f) PowerShell block, which is
+  what decides on the box, transcribes it (the marker read as raw bytes,
   ASCII-decoded, all whitespace removed, `^[1-9][0-9]{0,8}$`, compared as strings). A version that
   reaches the builders is validated first, so a quote in an operator `--sha` never reaches either
   program.
 - **A struct change must bump `OBS_GENLOCK_STATS_VERSION`** (the rule in obs.h's comment). The gate
-  compares versions, so a struct change without a bump is invisible to it.
+  compares versions, so the pytest pins `struct obs_genlock_stats`' body (comments stripped, the first
+  16 hex digits of its sha256) to the version: a change without a bump fails CI.
+- **`struct obs_genlock_output_stats` is NOT covered yet.** The frontend keeps it on its stack too,
+  filled by obs.dll through `obs_output_get_genlock_stats` with no size. The gate does not record
+  `OBS_GENLOCK_OUTPUT_STATS_VERSION` (1, never bumped), so the pytest pins that struct's body and
+  version and fails with "extend the gate first" the moment either changes.
 - **Tests:** `tests/python/test_genlock_stats_abi_1302.py` -- the reader (the repo's obs.h, a
   throwaway two-commit repo whose working tree differs), the verdict vectors, the (0f) block RUN in
   pwsh on 15 marker/version vectors against the bash verdict (same result, same text), the emitted

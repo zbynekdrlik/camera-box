@@ -215,11 +215,14 @@ lowest)**; else LOCKED (green).
     event. Now each connected input's ring tick (`genlock_idle_classify_tick`) asks the parity-gated
     `genlock_input_idle_class(span_ms, delta_frames, prev_class)`:
     - a ring spanning the full window (54 s): the #1341 rule, IDLE below 60 frames, else LIVE;
-    - a decided class (LIVE / IDLE) holds while the ring is shorter, so a ring a stalled widget
-      timer pruned to one sample never flips an idle input live (the `widget_stall` replay);
-    - an UNCLASSIFIED input turns LIVE once its ring spans >= 5 s with >= 60 frames in it (>= 12 fps),
-      else stays UNCLASSIFIED; the fast stage never says IDLE, so a slow 1-5 fps source is LIVE once
-      it has delivered 60 frames (5 fps at 12 s, 2 fps at 30 s) and a 1 fps one is left to the full
+    - the fast rule: a ring spanning >= 5 s with >= 60 frames in it (>= 12 fps) is LIVE, whatever
+      the previous class. A keep-alive input can never meet it, so it also safely promotes an IDLE
+      input that went live while the widget timer stalled (5 s after the stall, not 54 s; the
+      `idle_wakes_in_stall` replay, review round 1);
+    - otherwise the previous class holds on a short ring: LIVE is never demoted when a stalled
+      timer pruned the ring to one sample (the `widget_stall` replay), IDLE stays IDLE, UNCLASSIFIED
+      stays UNCLASSIFIED. The fast stage never says IDLE, so a slow 1-5 fps source is LIVE once it
+      has delivered 60 frames (5 fps at 12 s, 2 fps at 30 s) and a 1 fps one is left to the full
       window as before.
 
     A first sight, a received counter that goes backward (the ring and the class are cleared) or an
@@ -320,7 +323,11 @@ lowest)**; else LOCKED (green).
   full-bundle deploy records its frontend's `OBS_GENLOCK_STATS_VERSION` in `GENLOCK_STATS_ABI.txt`,
   and the FAST program refuses (exit 13) when that marker is missing or differs from the new
   obs.dll's version (`genlock-fleet-deploy.md`). A struct change MUST bump
-  `OBS_GENLOCK_STATS_VERSION` (the obs.h comment's rule), or the gate cannot see it. CI is the first place the C/Qt compiles — locally only
+  `OBS_GENLOCK_STATS_VERSION` (the obs.h comment's rule), or the gate cannot see it; the pytest pins
+  the struct body to its version so a change without a bump fails CI. `struct
+  obs_genlock_output_stats` (the per-output facet) is on the frontend's stack the same way; the gate
+  does not compare its version yet, so its body is pinned at `OBS_GENLOCK_OUTPUT_STATS_VERSION 1`
+  and a change fails CI until the gate covers it. CI is the first place the C/Qt compiles — locally only
   `cargo fmt --all --check` + the pure Rust module (`rustc --test`) + the parity/guard tests
   (standalone) verify; the blog refactor's format/arg types were lift-compiled under `gcc
   -Wformat=2 -Werror`.
