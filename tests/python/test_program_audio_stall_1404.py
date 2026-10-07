@@ -501,3 +501,52 @@ def test_a_frame_with_another_channel_count_never_joins(tmp_path):
     bridged = [line for line in lines if "bridged with" in line]
     assert len(bridged) == 1 and "next 0 frame(s)" in bridged[0], lines
     assert any("format change" in line and "starts over" in line for line in lines), lines
+
+
+
+# ---------------------------------------------------------------------------------------------
+# review round 2: the sampler glue around the pure decision (a follower with no stamp, the first
+# frame's known drop through HeldFrames, the zeros before the first held frame only)
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_follower_with_no_sender_stamp_never_joins(tmp_path):
+    """A frame with no stamp after a held one cannot join: the held frame is decided alone (next 0
+    frames) and the stamp-less frame is judged on its own, never handed to resolve_ahead."""
+    x = np.full((FRAME, 2), 0.01, dtype=np.float32)
+    bare = pac.Captured(_Block(SR, x, pa.NDI_TIMESTAMP_UNDEFINED), None, 101.0, 0)
+    items = [_audio_item(k) for k in range(10)] + [_audio_item(10, 45.0), bare]
+    _payloads, lines = _scripted_run(items, tmp_path, max_loops=len(items))
+    bridged = [line for line in lines if "bridged with" in line]
+    assert len(bridged) == 1 and "next 0 frame(s)" in bridged[0], lines
+
+
+def test_a_known_queue_drop_before_a_stall_is_bridged_through_the_loop(tmp_path):
+    """Frame 10 dropped by the sampler's own queue; frame 11 (carrying that drop) is a +42.2 ms
+    stall, frame 12 at +21.1, then the timeline. The drop is bridged (1024 samples), the stall on
+    top of it is not."""
+    x = np.full((FRAME, 2), 0.01, dtype=np.float32)
+    f11 = pac.Captured(_Block(SR, x, _place(11) + _ms(42.2)), None, 101.0, 0, dropped_frames=1,
+                       dropped_100ns=FRAME_100NS)
+    items = [_audio_item(k) for k in range(10)] + [f11, _audio_item(12, 21.1)]
+    items += [_audio_item(k) for k in range(13, 200)]
+    payloads, lines = _scripted_run(items, tmp_path, max_loops=len(items))
+    assert payloads[-1]["sender_stalls"] == 1, lines
+    assert payloads[-1]["holes_bridged"] == 1
+    assert payloads[-1]["bridged_ms"] == pytest.approx(FRAME_MS, abs=0.05)
+    assert payloads[-1]["queue_drops"] == 1
+
+
+def test_a_long_stall_bridges_once_before_its_first_frame(tmp_path):
+    """The documented limit through the loop: +128, +106.7, +85.3, +64, +42.7, then back. ONE hole of
+    the smallest offset (42.7 ms) before the first held frame; the frames before the smallest one are
+    filed behind it with no zeros of their own."""
+    stall = (128.0, 106.7, 85.3, 64.0, 42.7, 21.3)
+    items = [_audio_item(k) for k in range(10)]
+    items += [_audio_item(10 + i, off) for i, off in enumerate(stall)]
+    items += [_audio_item(k) for k in range(16, 200)]
+    payloads, lines = _scripted_run(items, tmp_path, max_loops=len(items))
+    assert payloads[-1]["holes_bridged"] == 1, lines
+    assert payloads[-1]["bridged_ms"] == pytest.approx(42.7, abs=0.05)
+    assert payloads[-1]["sender_stalls"] == 0
+    assert not any("starts over" in line for line in lines), lines
