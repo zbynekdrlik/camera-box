@@ -207,9 +207,10 @@ def test_unreachable_exits_2():
     assert "unreachable" in line
 
 
-def test_defaults_point_at_dev1():
+def test_defaults_point_at_strih_lx():
+    # issue 1404 ROZHODNUTE 6039368611: the sampler moved off dev1 to strih-lx and serves :8891 itself.
     src = GUARD.read_text(encoding="utf-8")
-    assert 'DEFAULT_URL = "http://dev1:8890/program-audio.json"' in src
+    assert 'DEFAULT_URL = "http://10.77.9.202:8891/program-audio.json"' in src
     assert "DEFAULT_MAX_AGE_S = 10.0" in src
 
 
