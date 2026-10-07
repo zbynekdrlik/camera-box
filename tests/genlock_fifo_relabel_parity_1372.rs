@@ -413,11 +413,13 @@ fn scenarios() -> Vec<Scenario> {
             ],
         });
     }
-    // a source that was not releasing at the step: never released, silent for an hour, and one
-    // exactly at the bound (still releasing); a stale boundary from before the silence
+    // a source that was not releasing at the step: never released, silent for an hour, one just
+    // over the bound, and one exactly at it (still releasing); a stale boundary from before the
+    // silence
     for prev_release in [
         None,
         Some(APPLY_MONO - 3_600_000_000_000),
+        Some(APPLY_MONO - APPLY_MAX_GAP_NS - 1),
         Some(APPLY_MONO - APPLY_MAX_GAP_NS),
     ] {
         let fresh: Vec<u64> = (1..=3u64).map(|k| W0 - 4 * I30 + k * I30).collect();
@@ -974,7 +976,7 @@ fn c_fifo_relabel_matches_the_rust_authority_1372() {
             // the -S sender-first scenario: the remembered jump, nothing relabelled
             && has("apply 7 0 0 0")
             // the never-released source just after boot takes the booking without a relabel
-            && has("apply 18 none ")
+            && has("apply 19 none ")
             && r.iter().any(|l| l.starts_with("apply ") && l.contains(" none "))
             && !r.iter().any(|l| l.starts_with("again ") && l.ends_with(" 1")),
         "issue 1372: the parity vectors no longer exercise a boundary, a relabelled arrival, the \
