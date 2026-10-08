@@ -24,7 +24,9 @@
 #     download -- the strih FULL artifact, REFUSED unless its GENLOCK_BUILD_SHA.txt is the canonical
 #                 SHA and its BUNDLE_MANIFEST.json carries the libobs.so.30 sha256 the read-back uses;
 #     tree     -- the COMMITTED scripts/ systemd/ intercom/ + vendor/realtek-r8152 (the rig NIC driver
-#                 source setup-strih step 1b builds through DKMS, issue 1391) of this checkout (an archive
+#                 source setup-strih step 1b builds through DKMS, issue 1391) + the vendored dock headers
+#                 the program-audio sampler step 16e builds its shim from (issue 1404; the list is
+#                 strih_lx_tree_paths) of this checkout (an archive
 #                 of HEAD) + the generated run-setup.sh, checked for the box's fact file scripts/strih-boxes/strih-lx.env
 #                 and the intercom routing file it names; the GH token (STRIH_LX_GH_TOKEN, else
 #                 `gh auth token`). setup-strih.sh runs as `setup-strih.sh --box strih-lx` (issue 1361).
@@ -81,6 +83,28 @@ if ! declare -F strih_session_apps_autostart_lines >/dev/null; then
   # shellcheck source=scripts/lib/strih-session-apps.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-session-apps.sh"
 fi
+# issue 1404: setup-strih step 16e installs the program-audio sampler from STRIH_PROGRAM_AUDIO_FILES,
+# which names two vendored dock headers outside scripts/ -- the staged tree must carry them.
+if ! declare -p STRIH_PROGRAM_AUDIO_FILES >/dev/null 2>&1; then
+  # shellcheck source=scripts/lib/strih-program-audio.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-program-audio.sh"
+fi
+
+# strih_lx_tree_paths -> the repo paths the provisioning tree archives, one per line: the dirs
+# setup-strih.sh / verify-strih.sh read (scripts/ systemd/ intercom/ + the vendored rig NIC driver)
+# plus every STRIH_PROGRAM_AUDIO_FILES entry outside them (issue 1404: the decoder shim's vendored
+# av-sync-dock headers). Live 8.10.2026: a tree without them failed setup-strih step 16e.
+strih_lx_tree_paths() {
+  local base=(scripts systemd intercom vendor/realtek-r8152) f d covered
+  printf '%s\n' "${base[@]}"
+  for f in "${STRIH_PROGRAM_AUDIO_FILES[@]}"; do
+    covered=0
+    for d in "${base[@]}"; do
+      case "$f" in "$d"/*) covered=1 ;; esac
+    done
+    [ "$covered" = 1 ] || printf '%s\n' "$f"
+  done
+}
 
 STRIH_LX_STAGE_PARENT="/tmp"
 STRIH_LX_SSH_OPTS="-o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ConnectTimeout=12 -o ServerAliveInterval=15 -o ServerAliveCountMax=4"
@@ -282,6 +306,9 @@ strih_lx_tree_check() {
     [ -f "$tree/$f" ] || { echo "strih_lx_tree_check: no $f" >&2; return 1; }
   done
   [ -f "$env" ] || { echo "strih_lx_tree_check: no scripts/strih-boxes/$box.env (the box fact file)" >&2; return 1; }
+  for f in "${STRIH_PROGRAM_AUDIO_FILES[@]}"; do
+    [ -f "$tree/$f" ] || { echo "strih_lx_tree_check: no $f (setup-strih step 16e installs the program-audio sampler from it, issue 1404)" >&2; return 1; }
+  done
   ic="$(sed -n 's/^STRIH_INTERCOM_CONFIG=//p' "$env" | head -n 1)"
   [ -n "$ic" ] || { echo "strih_lx_tree_check: scripts/strih-boxes/$box.env has no STRIH_INTERCOM_CONFIG" >&2; return 1; }
   [ -f "$tree/$ic" ] || { echo "strih_lx_tree_check: no $ic (STRIH_INTERCOM_CONFIG) -- the intercom/ dir must be staged" >&2; return 1; }
@@ -395,15 +422,16 @@ strih_lx_prepare() {
 
   tree_rev="$(git -C "$repo" rev-parse --short HEAD 2>/dev/null)" || tree_rev=""
   [ -n "$tree_rev" ] || { _strih_lx_fail tree 1 3 "$repo is not a git checkout"; return; }
-  git -C "$repo" archive --format=tar HEAD scripts systemd intercom vendor/realtek-r8152 | tar -x -C "$w/repo"; rc=$?
-  [ "$rc" = 0 ] || { _strih_lx_fail tree "$rc" 3 "archiving scripts/ systemd/ intercom/ vendor/realtek-r8152 at $tree_rev failed"; return; }
+  local -a tree_paths; mapfile -t tree_paths < <(strih_lx_tree_paths)
+  git -C "$repo" archive --format=tar HEAD "${tree_paths[@]}" | tar -x -C "$w/repo"; rc=$?
+  [ "$rc" = 0 ] || { _strih_lx_fail tree "$rc" 3 "archiving ${tree_paths[*]} at $tree_rev failed"; return; }
   STRIH_LX_PREP_HOSTNAME="$(strih_lx_tree_check "$w/repo" strih-lx)" \
     || { _strih_lx_fail tree 1 3 "the provisioning tree at $tree_rev is incomplete (above)"; return; }
   strih_lx_setup_runner "$STRIH_LX_PREP_STAGE" strih-lx > "$w/repo/run-setup.sh" || { _strih_lx_fail tree 1 3 "cannot write run-setup.sh"; return; }
   STRIH_LX_PREP_TOKEN="${STRIH_LX_GH_TOKEN:-}"
   [ -n "$STRIH_LX_PREP_TOKEN" ] || STRIH_LX_PREP_TOKEN="$(gh auth token 2>/dev/null)" || STRIH_LX_PREP_TOKEN=""
   [ -n "$STRIH_LX_PREP_TOKEN" ] || { _strih_lx_fail tree 1 3 "no GH token (STRIH_LX_GH_TOKEN / gh auth token) -- setup-strih.sh needs GH_TOKEN for the bundle-state + bkshading fetch"; return; }
-  echo "# strih-lx: provisioning tree = the committed scripts/ systemd/ intercom/ vendor/realtek-r8152 at $tree_rev; target ${STRIH_LX_PREP_USER}@${STRIH_LX_PREP_HOST}:$STRIH_LX_PREP_STAGE"
+  echo "# strih-lx: provisioning tree = the committed ${tree_paths[*]} at $tree_rev; target ${STRIH_LX_PREP_USER}@${STRIH_LX_PREP_HOST}:$STRIH_LX_PREP_STAGE"
 }
 
 # strih_lx_apply SHA -> the box steps, after strih_lx_prepare (and every other box's resolution)
@@ -578,7 +606,8 @@ strih_lx_plan_steps() {
 #          BUNDLE_MANIFEST.json carries lib/x86_64-linux-gnu/libobs.so.30. The planner adds
 #          bundle/GENLOCK_STATS_ABI.txt = the stats + output-stats versions of obs.h at ${sha} (removed
 #          when either is unreadable; issue 1302), which setup-strih.sh records next to GENLOCK_BUILD_SHA.txt.
-# STEP 1 (tree): the committed scripts/ systemd/ intercom/ vendor/realtek-r8152 of this checkout (archive of HEAD) + the
+# STEP 1 (tree): the committed scripts/ systemd/ intercom/ vendor/realtek-r8152 + the program-audio sampler's vendored
+#          dock headers (strih_lx_tree_paths, issue 1404) of this checkout (archive of HEAD) + the
 #          generated run-setup.sh -> ${lstage}/repo.
 # STEP 2 (preflight): the box must be the fact file's host ('$(strih_lx_remote_identity_cmd)' == STRIH_HOSTNAME),
 #          and no previous install may run:  $(strih_lx_remote_installer_cmd)
