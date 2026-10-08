@@ -203,7 +203,8 @@ pub const NODE_BURN_RUN_IDS: [u32; 14] = [
 ];
 
 /// The node-burn run_ids the GENERIC diagnostic tools ([`decode_recording_frame`] /
-/// [`analyze_recording`] — `forensic-dump`, `recording-probe`, `probe::av_sync_recording`)
+/// [`analyze_recording`] — `forensic-dump`, `recording-probe`; the `--av-sync` painter path uses
+/// the same set through `crate::av_sync_decode_plan::PAINTER_PATH_NODE_BURNS`, issue 1404)
 /// require before the #207 fast path may skip the robust tiles. Deliberately NOT
 /// [`NODE_BURN_RUN_IDS`] (#463): these generic, box-agnostic tools only ever decode a
 /// strih/stream/cam1-grab recording (never imag's own recording, which has its own dedicated
@@ -387,11 +388,12 @@ fn probe_dimensions(path: &Path) -> Result<(u32, u32)> {
 /// byte count (`width * height`), so a truncated trailing frame is ignored.
 ///
 /// `on_frame` returns `true` to keep reading and `false` to ABORT the read loop
-/// early (the consumer can no longer accept frames — e.g. the parallel decode's
-/// worker pool has died). On an early abort `read_frames` returns the count
-/// emitted so far; the caller distinguishes "all frames read" (count == decoded)
-/// from "aborted" via its own bookkeeping. ffmpeg is killed on abort so it does
-/// not linger writing to a closed pipe.
+/// early (the consumer can no longer accept frames — the parallel decode's
+/// worker pool has died, or a head analysis, [`analyze_recording_head`], has
+/// all its frames). On an early abort `read_frames` returns the count READ,
+/// including the frame it stopped at; the caller distinguishes "all frames
+/// read" (count == decoded) from "aborted" via its own bookkeeping. ffmpeg is
+/// killed on abort so it does not linger writing to a closed pipe.
 ///
 /// ffmpeg's stderr is INHERITED (not piped): on a 30-min / 54k-frame clip a piped
 /// stderr we only drain after the stdout loop could fill its ~64 KB OS pipe buffer
@@ -451,7 +453,8 @@ fn read_frames(
     // clean 0 — do not treat that as a decode failure (the abort is the real
     // cause, surfaced by the caller). Reap the child and return the partial count.
     // (ffmpeg may print a harmless "Error writing trailer"/SIGPIPE line to the
-    // inherited stderr on kill — expected noise on this rare abort path, not a fault.)
+    // inherited stderr on kill — expected noise on the abort path, which every
+    // head analysis takes, not a fault.)
     if aborted {
         let _ = child.wait();
         return Ok(frame_index);
@@ -787,6 +790,9 @@ fn analyze_frames(
 ) -> Result<Vec<RecordingFrame>> {
     let (width, height) = probe_dimensions(path)?;
     let workers = decode_workers(width, height);
+    // issue 1404: the counters are process-global and the --av-sync painter head adds its frames
+    // to them, so the complete line also reports this analysis's own split
+    let (fast_before, robust_before) = crate::probe::qr::decode_path_counts();
     tracing::info!(
         file = %path.display(), width, height, workers,
         mandatory_burns = ?mandatory_burns, any_of_burns = ?any_of_burns,
@@ -835,6 +841,8 @@ fn analyze_frames(
     tracing::info!(
         file = %path.display(), total = frames.len(), with_qr = decoded, workers,
         fast_path_frames = fast, robust_fallback_frames = robust, burn_region_recoveries,
+        this_analysis_fast = fast.saturating_sub(fast_before),
+        this_analysis_robust = robust.saturating_sub(robust_before),
         "recording analysis complete (#207 decode-path split, cumulative this run)"
     );
     Ok(frames)

@@ -30,7 +30,9 @@ pub const PAINTER_PATH_NODE_BURNS: [u32; 3] = [911_001, 911_002, 911_004];
 pub const DUAL_QR_HALVES: usize = 2;
 
 /// How many leading frames the painter path reads before its full decode: 2 s of a 30 fps
-/// recording. A rig recording carries a node burn on its first frame, so it never waits for them.
+/// recording. A rig recording already shows a node burn and a cam2 tick on its first frame, but the
+/// head still decodes all of these frames on the fast path (about 7 CPU-s in release) before the
+/// full decode starts.
 pub const PAINTER_HEAD_FRAMES: u64 = 60;
 
 /// What one decode asks the #207 fast-path gate for (the arguments of
@@ -210,6 +212,36 @@ mod tests {
         for want in ["no cam2 painter tick", "60 frames", "911001", "--av-run"] {
             assert!(m.contains(want), "{want:?} in {m}");
         }
+    }
+
+    /// The probe glue wiring (it compiles in CI only): the painter path runs the head check, and runs
+    /// it BEFORE the full decode, which decodes with this plan's request.
+    #[test]
+    fn the_painter_head_runs_before_the_full_decode_1404() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let glue = std::fs::read_to_string(root.join("src/probe/av_sync_recording.rs"))
+            .expect("src/probe/av_sync_recording.rs");
+        let body = glue
+            .split("pub fn av_sync_from_recording(")
+            .nth(1)
+            .expect("av_sync_from_recording in the glue");
+        let head = body
+            .find("if av_run.is_none() {\n        check_painter_head(recording)?;\n    }")
+            .expect("the painter path runs the head check");
+        let request = body
+            .find("let request = av_decode_request(av_run);")
+            .expect("the full decode request comes from the plan");
+        let decode = body
+            .find("analyze_recording_with_grouped_burns_optical(\n        recording,\n        &request.mandatory_burns,")
+            .expect("the full decode uses the plan's request");
+        assert!(
+            head < request && request < decode,
+            "head check, then the plan's request, then the full decode"
+        );
+        assert!(
+            !body.contains("analyze_recording(recording)"),
+            "the --av-sync decode must go through the plan's request"
+        );
     }
 
     #[test]
