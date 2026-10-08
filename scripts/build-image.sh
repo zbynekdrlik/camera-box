@@ -92,7 +92,7 @@ create_image() {
 # - NO root line, on purpose: this image's / is the overlayfs configure_overlay's initramfs hook
 #   assembles (the root partition as its read-only lower layer, the overlay partition as its
 #   writable upper layer). A `UUID=... / ext4 ro` entry would make systemd-remount-fs remount that
-#   overlay root read-only, and nothing could be written to the overlay partition any more.
+#   overlay root read-only: nothing written through / would reach the overlay's upper layer.
 build_image_fstab_text() {
     printf '%s\n' \
         "# camera-box fstab - / is the overlayfs the initramfs assembles (configure_overlay): the root" \

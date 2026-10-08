@@ -463,7 +463,8 @@ the issue-1309 journal-partition line, which sits BETWEEN `/var/log` and `/var/t
 
 No script under `scripts/` except `ro-root.sh` may type an fstab-shaped tmpfs line for `/tmp`,
 `/var/log`, `/var/tmp`, `/var/cache` or `/var/spool` (`tests/python/test_image_builder_fstab_1400.py`
-scans every file; comment lines are exempt). Each builder keeps its fstab in a small PURE function
+scans every file, comment lines exempt; it also catches a whole fstab in ONE string literal after a
+`\n` escape, `\t` separators, a `none` fs_spec and a trailing slash). Each builder keeps its fstab in a small PURE function
 the test calls without root, with goldens in `tests/fixtures/image_builder_fstab_1400/`:
 - **`create-usb-linux.sh`: `create_usb_first_boot_fstab ROOT_UUID EFI_UUID`** (tests call it through
   `CREATE_USB_SOURCE_ONLY=1`; clear the positional parameters before that `source`, the script's

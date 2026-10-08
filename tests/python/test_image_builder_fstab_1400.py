@@ -13,8 +13,8 @@ These tests pin:
     top-level `trap cleanup EXIT` removes /tmp/camera-box-build) prints the golden: a header and
     the WHOLE canon tmpfs set. It carries NO root line, on purpose: the image's / is the overlayfs
     that configure_overlay's initramfs hook assembles, and a `UUID=... / ext4 ro` line would make
-    systemd-remount-fs remount that overlay root read-only (no persistent writes to the overlay
-    partition any more).
+    systemd-remount-fs remount that overlay root read-only (nothing written through / would reach
+    the overlay's upper layer).
   - create-usb-linux.sh: `create_usb_first_boot_fstab ROOT_UUID EFI_UUID` (called through the
     script's own CREATE_USB_SOURCE_ONLY=1 mode, fake UUIDs, no root) prints the golden. Its
     pre-setup differences are pinned: the root stays rw until STEP 18 rewrites the fstab, the EFI
@@ -52,11 +52,17 @@ PRE_1400_CREATE_USB = (
     "LABEL=cambox-journal /var/log/journal ext4 rw,nofail,noatime,nosuid,nodev 0 2\n"
 )
 
-# An fstab-shaped tmpfs line for one of the canon's mount points: fs_spec `tmpfs`, the mount point,
-# then fstype `tmpfs`. Anchored on a line start, whitespace or a quote, so a heredoc line and a
-# printf/echo string both match, while `mount -t tmpfs tmpfs /tmp` (no fstype after the path) does not.
+# An fstab-shaped tmpfs line for one of the canon's mount points: fs_spec `tmpfs` or `none` (tmpfs
+# ignores it), the mount point (a trailing slash allowed), then fstype `tmpfs`. The fields may be
+# separated by whitespace or a `\t` escape, and the line may start at a line start, whitespace, a
+# quote or a `\n`/`\t` escape, so a heredoc line, a printf/echo string and a whole fstab in ONE
+# format/string literal all match, while `mount -t tmpfs tmpfs /tmp` (no fstype after the path)
+# does not.
+_SEP = r"(?:\s|\\t)+"
 HAND_TYPED_TMPFS = re.compile(
-    r"""(?:^|[\s'"])tmpfs\s+(?:/tmp|/var/log|/var/tmp|/var/cache|/var/spool)\s+tmpfs(?:\s|$)"""
+    r"""(?:^|[\s'"]|\\[nt])(?:tmpfs|none)""" + _SEP
+    + r"(?:/tmp|/var/log|/var/tmp|/var/cache|/var/spool)/?" + _SEP
+    + r"""tmpfs(?:\s|\\[nt]|['"]|$)"""
 )
 
 

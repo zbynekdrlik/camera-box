@@ -290,7 +290,7 @@ EOF
     EFI_UUID=$(blkid -s UUID -o value "$PART_EFI")
 
     create_usb_first_boot_fstab "$ROOT_UUID" "$EFI_UUID" > "$MOUNT_ROOT/etc/fstab" \
-        || error "issue 1400: no first-boot fstab written -- the root or EFI filesystem UUID is empty (root='$ROOT_UUID' efi='$EFI_UUID')"
+        || error "issue 1400: no first-boot fstab written -- an empty root or EFI filesystem UUID, or a failed write to $MOUNT_ROOT/etc/fstab (root='$ROOT_UUID' efi='$EFI_UUID')"
     # #1309: create the mountpoint in the base image so the persistent-journal partition mounts on
     # first boot (before setup-device.sh ever runs). `nofail` in the line above means a box whose p3
     # is somehow absent still boots. Single source of truth for the path: LOG_DIET_JOURNAL_DIR.
