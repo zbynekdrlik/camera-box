@@ -1282,9 +1282,18 @@ touch /etc/cloud/cloud-init.disabled 2>/dev/null || true
 # Auto updates — #295: an active unattended-upgrades auto-installed a kernel without an initrd that
 # bricked CAM3/CAM4. PIN the kernel and disable unattended upgrades entirely; an appliance must
 # never silently gain a new kernel.
-systemctl disable --now unattended-upgrades.service apt-daily.timer apt-daily-upgrade.timer \
-    apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+systemctl disable --now unattended-upgrades.service 2>/dev/null || true
 systemctl mask unattended-upgrades.service 2>/dev/null || true
+# issue 1394: MASK the apt timers + services (the ONE list in scripts/lib/ro-root.sh), never only
+# disable them. On the read-only root apt-daily(-upgrade).service fail every pass (exit 2,
+# /var/lib/apt is read-only) and leave the box `degraded`, and a package upgrade's maintainer
+# scripts re-enable a timer that is only disabled (live on every cambox, 8.10.2026). Stopped first
+# (best-effort: a minimal image may lack one), then masked fail-loud. STEP 16's apt-get below is
+# unaffected: apt-get never goes through these units. verify-device.sh (ar) grades the masks.
+mapfile -t RO_ROOT_APT_UNITS < <(ro_root_masked_apt_units)
+systemctl disable --now "${RO_ROOT_APT_UNITS[@]}" 2>/dev/null || true
+systemctl mask "${RO_ROOT_APT_UNITS[@]}" \
+    || fail "could not mask ${RO_ROOT_APT_UNITS[*]} -- they would fail on the read-only root and leave the box degraded (issue 1394)"
 apt-mark hold linux-image-generic linux-headers-generic linux-generic 2>/dev/null || true
 cat > /etc/apt/apt.conf.d/20auto-upgrades << 'EOF'
 // Camera-box appliance: never auto-update (#295 — kernels are pinned with apt-mark hold).
@@ -1928,9 +1937,17 @@ echo "  To remount read-write: mount -o remount,rw /"
 mkdir -p "$(dirname "$LOG_BOUND_TIMER_DROPIN_PATH")"
 log_bound_logrotate_config > "$LOG_BOUND_LOGROTATE_PATH"
 log_bound_timer_dropin > "$LOG_BOUND_TIMER_DROPIN_PATH"
+# issue 1394: that bound holds only if logrotate RUNS, and on the read-only root it could not: its
+# state file /var/lib/logrotate/status is on the root, so every 15-min pass failed (exit 3) and left
+# the box `degraded` (cam1/cam2/cam5, 8.10.2026). The drop-in keeps the state in /run -- the shared
+# ro-root canon, the same base the handheld SBC writes. The daemon-reload below loads it;
+# verify-device.sh (ar) grades it byte-for-byte.
+RO_ROOT_LOGROTATE_DROPIN="/etc/systemd/system/$(ro_root_logrotate_dropin_relpath)"
+mkdir -p "$(dirname "$RO_ROOT_LOGROTATE_DROPIN")"
+ro_root_logrotate_dropin_content > "$RO_ROOT_LOGROTATE_DROPIN"
 systemctl daemon-reload
 systemctl restart logrotate.timer
-echo "  /var/log bound: ${LOG_BOUND_LOGROTATE_PATH} size cap ${LOG_BOUND_SIZE_CAP}, logrotate.timer every 15min (#679)"
+echo "  /var/log bound: ${LOG_BOUND_LOGROTATE_PATH} size cap ${LOG_BOUND_SIZE_CAP}, logrotate.timer every 15min (#679), logrotate state in $(ro_root_logrotate_state_file) (issue 1394)"
 
 # =============================================================================
 # #599: restore root to its original mode now that STEP 15-18 are done -- a no-op on a

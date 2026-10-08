@@ -23,6 +23,10 @@
 #     build-image.sh's build_image_fstab_text writes ro_root_tmpfs_lines and no root line (its / is an
 #     initramfs overlayfs). Goldens: tests/fixtures/image_builder_fstab_1400/. A test fails when any
 #     other script under scripts/ hand-types one of these tmpfs lines.
+#   - the units a read-only root breaks (issue 1394): logrotate's state file and the apt timers. The
+#     logrotate drop-in BASE is ro_root_logrotate_dropin_service; setup-device.sh and the cambox live
+#     apply (scripts/lib/cambox-ro-units.sh) write ro_root_logrotate_dropin_content, the SBC builds its
+#     own drop-in from the same base plus its Armbian ramlog resets.
 #
 # Source-only: pure functions, NO side effects, and deliberately no `set -euo pipefail` (it would
 # leak into the sourcing shell — .claude/rules/ci-testing-gotchas.md). No grep/awk/sed either: the
@@ -120,4 +124,49 @@ ro_root_fstab_text() {
   fi
   printf '\n%s\n' "# tmpfs mounts for writable directories"
   ro_root_tmpfs_lines
+}
+
+# --- the units a read-only root breaks (issue 1394; the SBC since issue 808) -----------------------
+
+# logrotate keeps its state in /var/lib/logrotate/status, which is on the read-only root: every run
+# failed "error opening state file ... Read-only file system" (exit 3) and left the box `degraded`
+# (the handheld SBC 4.10.2026; cam1/cam2/cam5 8.10.2026, every 15 min since the issue-679 timer).
+# /run is a tmpfs, so the state lives there. /var/log is a tmpfs too and is wiped at every boot, so
+# only rotation within one boot matters: after a boot logrotate finds no state, stamps every log as
+# just rotated and rotates nothing time-based in that boot; the size rules still apply.
+ro_root_logrotate_state_file() { printf '%s\n' /run/logrotate.status; }
+
+# ro_root_logrotate_dropin_service [LINE...] -> the drop-in's [Service] section, the BASE every
+# read-only-root box shares: the section header, each LINE given (a box's own resets, e.g. the SBC's
+# Armbian `ExecStartPre=` / `ExecStartPost=`), then the ExecStart override. `ExecStart=` comes first:
+# a oneshot runs EVERY ExecStart line, so the stock one must be cleared before it is re-stated. The
+# config argument is the stock /etc/logrotate.conf of both images (Ubuntu 24.04, Debian/Armbian).
+# shellcheck disable=SC2120  # the LINE arguments come from bkshading-sbc-runtime.sh (another file)
+ro_root_logrotate_dropin_service() {
+  printf '%s\n' "[Service]"
+  [ "$#" -eq 0 ] || printf '%s\n' "$@"
+  printf '%s\n' "ExecStart=" "ExecStart=/usr/sbin/logrotate --state $(ro_root_logrotate_state_file) /etc/logrotate.conf"
+}
+
+# The cambox drop-in's path relative to the unit dir (/etc/systemd/system). `zz-` sorts after any
+# letter-named drop-in (drop-ins of all dirs apply in filename order). The SBC keeps its own
+# historical name, zz-bkshading-ro-root.conf (bkshading-sbc-runtime.sh): handheld-1 carries it.
+ro_root_logrotate_dropin_relpath() { printf '%s\n' logrotate.service.d/zz-camera-box-ro-root.conf; }
+
+# ro_root_logrotate_dropin_content -> the whole cambox drop-in: two comment lines + the base.
+# verify-device.sh (ar) grades the box's file byte-for-byte against this.
+ro_root_logrotate_dropin_content() {
+  printf '%s\n' \
+    "# Written by scripts/setup-device.sh / scripts/cambox-ro-units-apply.sh (issue 1394): the root is" \
+    "# read-only, so logrotate keeps its state in /run (the base is scripts/lib/ro-root.sh)."
+  ro_root_logrotate_dropin_service
+}
+
+# The apt timers and services a read-only-root box MASKS. apt-daily(-upgrade).service exit 2 on
+# every pass (apt cannot write /var/lib/apt), and a timer that is only DISABLED is enabled again by
+# a package upgrade's maintainer scripts; a mask (a link to /dev/null) survives it. apt-get itself
+# never goes through these units. setup-device.sh STEP 15, the cambox live apply and verify-device
+# (ar) all read this ONE list.
+ro_root_masked_apt_units() {
+  printf '%s\n' apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service
 }
