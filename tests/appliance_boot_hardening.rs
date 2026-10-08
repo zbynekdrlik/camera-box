@@ -590,13 +590,22 @@ fn image_builders_enable_grow_root_service() {
 fn image_builders_size_var_cache_512m() {
     for script in IMAGE_BUILDERS {
         let body = read(script);
+        // Match the CODE part of a line only: the source line's own trailing `# ...` note names
+        // the lib functions, and a note must never stand in for the call it describes.
+        let in_code = |needle: &str| {
+            body.lines().any(|l| {
+                !l.trim_start().starts_with('#')
+                    && l.split_once(" #")
+                        .map_or(l, |(code, _)| code)
+                        .contains(needle)
+            })
+        };
         assert!(
-            on_noncomment_line(&body, ". \"$SCRIPT_DIR/lib/ro-root.sh\""),
+            in_code(". \"$SCRIPT_DIR/lib/ro-root.sh\""),
             "{script} must source scripts/lib/ro-root.sh, the read-only-root canon (issue 1400)"
         );
         assert!(
-            on_noncomment_line(&body, "ro_root_tmpfs_line /var/cache")
-                || on_noncomment_line(&body, "ro_root_tmpfs_lines"),
+            in_code("ro_root_tmpfs_line /var/cache") || in_code("ro_root_tmpfs_lines"),
             "{script} must write its /var/cache tmpfs line through scripts/lib/ro-root.sh \
              (ro_root_tmpfs_line /var/cache or ro_root_tmpfs_lines), so the uniform ≥512M size \
              reaches every image (#369/#295, issue 1400)"
