@@ -1,21 +1,24 @@
 #!/usr/bin/env python3
-"""issue 1404 -- the files the dev1 rig-lease server (:8890) serves next to the lease, stdlib only.
+"""issue 1404 -- the read-only file serving shared by the dev1 rig-lease server (:8890) and the
+program-audio sampler's own endpoint on strih-lx (:8891), stdlib only.
 
-Two dev1 writers keep one file each in the SERVE dir, and `scripts/rig-lease-server.py` serves
-them read-only:
+The dev1 rig-lease server (`scripts/rig-lease-server.py`) serves one file from its SERVE dir:
 
   rig-qpsk-markers.csv  <- scripts/rig_marker_mirror.py (the --user service rig-marker-mirror,
                            one ssh `tail -F` stream from cam2): cam2's `/run/rig-qpsk-markers.csv`,
                            complete rows only. Restreamer's gate fetches it from
                            `http://dev1:8890/rig-qpsk-markers.csv` and never needs the fleet ssh
                            credentials.
-  program-audio.json    <- scripts/program_audio_sampler.py (a --user service): the verdict on
-                           whether the stream program audio is measurement-only (the YouTube
-                           channel guard, `scripts/program_audio_guard.py`).
 
-The serve dir:
+The program-audio verdict (`program-audio.json`, the YouTube channel guard's input) is written and
+served by the sampler itself on strih-lx (`scripts/program_audio_sampler.py` +
+`scripts/program_audio_http.py`), from the sampler's own serve dir; it uses this module's
+`program_audio_response`, `write_bytes_atomic`, `ensure_serve_dir` and `ReadOnlyHandler`. The dev1
+route `http://dev1:8890/program-audio.json` was retired on 8.10.2026 (issue 1404).
+
+The dev1 serve dir:
   * defaults to `$XDG_RUNTIME_DIR/rig-lease-serve` (`/run/user/<uid>`: tmpfs, 0700, this user only),
-    `$RIG_LEASE_SERVE_DIR` overrides it for the server and both writers alike. tmpfs: the mirror
+    `$RIG_LEASE_SERVE_DIR` overrides it for the server and the mirror alike. tmpfs: the mirror
     rewrites a multi-MB file every 10 s, which must not wear dev1's SSD. 0700: no other account on
     dev1 can plant a file the guard would trust;
   * is NEVER the lease dir or inside it: the lease dir's mere existence means `held=true`
@@ -25,9 +28,9 @@ The serve dir:
 This module is stdlib-only on purpose: the lease server is a coordination endpoint and must not
 gain a numpy dependency (the sampler's analysis lives in `program_audio.py`).
 
-`ReadOnlyHandler` is the one response framing of the two read-only servers that serve these files:
-the dev1 rig-lease server and the program-audio sampler's own endpoint (`program_audio_http.py`,
-host-agnostic since the sampler moves off dev1; issue 1404 design 6037613222).
+`ReadOnlyHandler` is the one response framing of the two read-only servers: the dev1 rig-lease
+server and the program-audio sampler's own endpoint (`program_audio_http.py`, host-agnostic;
+issue 1404 design 6037613222).
 """
 from __future__ import annotations
 
@@ -168,9 +171,10 @@ def _age(now: datetime, value) -> float | None:
 
 
 def program_audio_response(path: str, now: datetime) -> dict | None:
-    """The program-audio payload as served: `age_s` and `last_foreign_age_s` recomputed at request
-    time from the payload's own `ts_utc` / `last_foreign_ts_utc` (one clock, dev1's, so a consumer
-    on another host never compares two clocks, and a sampler that stopped writing reads stale,
+    """The program-audio payload as served by the sampler's own endpoint: `age_s` and
+    `last_foreign_age_s` recomputed at request time from the payload's own `ts_utc` /
+    `last_foreign_ts_utc` (one clock, the serving host's, so a consumer on another host never
+    compares two clocks, and a sampler that stopped writing reads stale,
     never fresh). None while the file is absent. Anything else that is not a payload this user
     wrote (an OS error, not JSON, another owner) is served FAIL-CLOSED as UNKNOWN with `age_s`
     null; an unparseable `ts_utc` keeps the verdict with `age_s` null (a consumer reads stale). A
@@ -197,8 +201,9 @@ def program_audio_response(path: str, now: datetime) -> dict | None:
     if payload.get("verdict") == "MEASUREMENT" and not _is_count(payload.get("marker_chain")):
         # issue 1404 (ROZHODNUTÉ 6026826572): MEASUREMENT needs the QPSK marker chain. Without one
         # the payload comes from a sampler older than that requirement (it keeps running after a
-        # pull until restarted). Refused HERE, the one place every consumer reads (the camera-box
-        # guard and restreamer's own reader); the ages stay, so a stale reading still reads stale.
+        # pull until restarted). Refused HERE, in the one endpoint every consumer reads (the
+        # camera-box guard and restreamer's own reader); the ages stay, so a stale reading still
+        # reads stale.
         payload["verdict"] = "UNKNOWN"
         payload["reason"] = ("MEASUREMENT without a marker chain (a sampler older than the marker "
                              "requirement -- build the QPSK shim and restart program-audio-sampler)")

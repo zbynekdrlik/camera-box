@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""issue 1404 -- the dev1 stream program-audio sampler (a long-running --user service).
+"""issue 1404 -- the stream program-audio sampler (a long-running --user service on strih-lx).
 
 Receives the stream program's audio from stream OBS's own NDI program output (the
 `genlock-ndi-output 'stream'` sender, NDI name `STREAM-SNV (stream)` at 10.77.9.204 -- read live
 with avahi on 6.10.2026), audio-only, read-only (a receiver like any NDI monitor; nothing on the
 rig changes). Every WINDOW_S (2 s) of audio it computes `rms_dbfs` + `outside_band_pct`, classifies
 MEASUREMENT | FOREIGN | SILENT | UNKNOWN (scripts/program_audio.py) and atomically rewrites
-`<serve dir>/program-audio.json`, which the rig-lease server serves at
-`http://dev1:8890/program-audio.json` (ages recomputed per request). Consumers call
+`<serve dir>/program-audio.json`, which the sampler serves itself (program_audio_http.py,
+`http://<host>:8891/program-audio.json`, ages recomputed per request). Consumers call
 `scripts/program_audio_guard.py` and stop the YouTube broadcast on anything but MEASUREMENT/SILENT.
 
 * FOREIGN LATCH: every payload carries `last_foreign_ts_utc`, the newest FOREIGN window, so a gate
@@ -59,9 +59,9 @@ MEASUREMENT | FOREIGN | SILENT | UNKNOWN (scripts/program_audio.py) and atomical
   stall, nothing lost: no zeros, the span kept, counted (`sender_stalls`). Otherwise the hole is the
   smallest offset over them: bridged or a restart, as before.
 
-Usage (systemd/program-audio-sampler.service):
+Usage (systemd/program-audio-sampler.strih-lx.service, installed by setup-strih step 16e):
   program_audio_sampler.py [--source "STREAM-SNV (stream)"] [--serve-dir DIR] [--lib PATH]
-                           [--marker-shim PATH]
+                           [--marker-shim PATH] [--http-port 8891] [--http-bind 0.0.0.0]
 """
 from __future__ import annotations
 
@@ -87,13 +87,16 @@ import rig_serve_files as rsf  # noqa: E402
 
 DEFAULT_SOURCE = "STREAM-SNV (stream)"
 SOURCE_ENV = "PROGRAM_AUDIO_SOURCE"
-# The sampler's own read-only endpoint (program_audio_http.py; host-agnostic, the sampler moves off
-# dev1): port 0 = no endpoint. The serve dir has its own override next to the lease server's one.
+# The sampler's own read-only endpoint (program_audio_http.py; host-agnostic, on strih-lx): port 0 =
+# no endpoint. The serve dir is the sampler's own: $PROGRAM_AUDIO_SERVE_DIR, else
+# $XDG_RUNTIME_DIR/program-audio-sampler (tmpfs, created 0700). Never the dev1 lease server's serve
+# dir: that one served the verdict at http://dev1:8890 until the route was retired (8.10.2026).
 DEFAULT_HTTP_PORT = 8891
 DEFAULT_HTTP_BIND = "0.0.0.0"
 HTTP_PORT_ENV = "PROGRAM_AUDIO_HTTP_PORT"
 HTTP_BIND_ENV = "PROGRAM_AUDIO_HTTP_BIND"
 SERVE_DIR_ENV = "PROGRAM_AUDIO_SERVE_DIR"
+SERVE_DIR_NAME = "program-audio-sampler"
 NO_AUDIO_TIMEOUT_S = 5.0
 CAPTURE_TIMEOUT_MS = 500
 LOG_SUMMARY_S = 600.0
@@ -775,6 +778,16 @@ def scheduling_line(nice: int, cpus: str, weight: int | None) -> str:
     return f"program-audio sampler: {line}"
 
 
+def default_serve_dir() -> str:
+    """$PROGRAM_AUDIO_SERVE_DIR, else $XDG_RUNTIME_DIR/program-audio-sampler (the user's runtime
+    tmpfs: the file is rewritten every 2 s). The dev1 lease server's $RIG_LEASE_SERVE_DIR never moves
+    it (issue 1404: the sampler has no dev1 shape left)."""
+    if os.environ.get(SERVE_DIR_ENV):
+        return os.environ[SERVE_DIR_ENV]
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.geteuid()}"
+    return os.path.join(runtime, SERVE_DIR_NAME)
+
+
 def private_ndi_config_dir() -> str:
     """A fresh, empty NDI config dir: libndi then uses its defaults = mDNS discovery only."""
     return tempfile.mkdtemp(prefix="program-audio-sampler-ndi-")
@@ -786,9 +799,9 @@ def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description="issue 1404 -- the stream program-audio sampler")
     ap.add_argument("--source", default=os.environ.get(SOURCE_ENV) or DEFAULT_SOURCE,
                     help=f"NDI source name (default ${SOURCE_ENV} or {DEFAULT_SOURCE!r})")
-    ap.add_argument("--serve-dir", default=os.environ.get(SERVE_DIR_ENV) or rsf.default_serve_dir(),
-                    help=f"where program-audio.json goes (default ${SERVE_DIR_ENV}, else "
-                         f"${rsf.SERVE_DIR_ENV} or $XDG_RUNTIME_DIR/rig-lease-serve; never the lease dir)")
+    ap.add_argument("--serve-dir", default=default_serve_dir(),
+                    help=f"where program-audio.json goes and is served from (default ${SERVE_DIR_ENV}, "
+                         f"else $XDG_RUNTIME_DIR/{SERVE_DIR_NAME}; never the lease dir)")
     ap.add_argument("--lib", default=None, help="libndi path (default $NDI_LIB_PATH or /usr/lib/ndi/libndi.so.6)")
     ap.add_argument("--marker-shim", default=None,
                     help=f"the QPSK marker decoder shim (default ${pam.SHIM_ENV} or {pam.DEFAULT_SHIM_PATH}; "

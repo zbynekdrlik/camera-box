@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """issue 1404 -- the stream program-audio GUARD: may the stream program go to YouTube right now?
 
-Reads `http://10.77.9.202:8891/program-audio.json` (strih-lx since issue 1404 ROZHODNUTE 6039368611; the dev1 :8890 route is the old host) (written by scripts/program_audio_sampler.py, served by
-scripts/rig-lease-server.py with `age_s` recomputed per request) and answers with an exit code.
+Reads `http://10.77.9.202:8891/program-audio.json` (strih-lx since issue 1404 ROZHODNUTE 6039368611;
+the dev1 :8890 route was retired on 8.10.2026), written and served by the sampler itself
+(scripts/program_audio_sampler.py + scripts/program_audio_http.py, `age_s` recomputed per request),
+and answers with an exit code.
 Both YouTube gates call it before the broadcast starts and every ~10 s while it is live (camera-box
 `scripts/lib/youtube-leg.sh`, restreamer issue 357) and stop the broadcast on anything but 0.
 

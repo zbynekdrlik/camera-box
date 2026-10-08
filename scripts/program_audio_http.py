@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """issue 1404 -- the program-audio sampler's OWN read-only HTTP endpoint (host-agnostic).
 
-The sampler is moving off dev1 (owner, 7.10.2026: dev1 is shared and loaded by other projects' CI)
-to a rig node that is still being chosen, so it can no longer depend on dev1's rig-lease server
-(:8890) to publish its verdict. The sampler process serves the file it writes itself:
+The sampler moved off dev1 to strih-lx (owner, 7.10.2026: dev1 is shared and loaded by other
+projects' CI; ROZHODNUTÉ 6039368611), and the process serves the file it writes itself. This is the
+only place the verdict is served: the dev1 rig-lease server's :8890 route was retired on 8.10.2026.
 
-  GET/HEAD /program-audio.json  -> rig_serve_files.program_audio_response (the SAME rules the lease
-                                   server applies: ages recomputed per request, a file another user
-                                   owns or an unreadable / non-JSON one = UNKNOWN, a MEASUREMENT
-                                   without a marker chain = UNKNOWN), 404 while the file is absent
+  GET/HEAD /program-audio.json  -> rig_serve_files.program_audio_response (ages recomputed per
+                                   request, a file another user owns or an unreadable / non-JSON
+                                   one = UNKNOWN, a MEASUREMENT without a marker chain = UNKNOWN),
+                                   404 while the file is absent
   GET/HEAD /healthz             -> ok
   anything else                 -> 404; any other method -> 501 (read-only, never a write)
 
