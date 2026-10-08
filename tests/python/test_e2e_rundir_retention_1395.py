@@ -17,6 +17,7 @@ creates OUTDIR. Tier-0: pure python + bash subprocesses (no cargo).
 import os
 import pathlib
 import re
+import shutil
 import subprocess
 import time
 
@@ -30,12 +31,13 @@ _CONTINUES = "CALLER-CONTINUES"
 
 def _run(args, env_extra=None, path_prefix=None):
     """Source the lib under the caller's real `set -euo pipefail`, call the helper as a BARE statement
-    (exactly like recording-e2e.sh does) and prove the caller keeps running after it."""
-    quoted = " ".join("'" + str(a).replace("'", "'\\''") + "'" for a in args)
+    (exactly like recording-e2e.sh does) and prove the caller keeps running after it. Every value
+    reaches bash as a positional argument, never inside the script text."""
     script = (
         "set -euo pipefail\n"
-        f'. "{_LIB}"\n'
-        f"e2e_rundir_retention {quoted}\n"
+        '. "$1"\n'
+        "shift\n"
+        'e2e_rundir_retention "$@"\n'
         f'echo "{_CONTINUES} rc=$? opts=$-"\n'
         "set -o | grep -E '^pipefail[[:space:]]+on$'\n"
     )
@@ -44,7 +46,8 @@ def _run(args, env_extra=None, path_prefix=None):
         env.update(env_extra)
     if path_prefix:
         env["PATH"] = f"{path_prefix}:{env['PATH']}"
-    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
+    proc = subprocess.run(["bash", "-c", script, "harness", str(_LIB), *(str(a) for a in args)],
+                          capture_output=True, text=True, env=env, timeout=60)
     assert proc.returncode == 0, f"the caller must survive: rc={proc.returncode}\n{proc.stdout}\n{proc.stderr}"
     assert f"{_CONTINUES} rc=0" in proc.stdout, f"the caller must keep running:\n{proc.stdout}\n{proc.stderr}"
     opts = proc.stdout.split(f"{_CONTINUES} rc=0 opts=", 1)[1].split()[0]
@@ -162,6 +165,46 @@ def test_no_arguments_at_all_never_kill_the_caller(tmp_path):
     _run([])
 
 
+def test_the_keep_argument_beats_e2e_rundir_keep(tmp_path):
+    parent = tmp_path / "p"
+    parent.mkdir()
+    current = _mkrun(parent, "recording-e2e-1", 0)
+    for i in range(4):
+        _mkrun(parent, f"recording-e2e-{10 + i}", 60 * (i + 1))
+    _run([parent, current, "1"], env_extra={"E2E_RUNDIR_KEEP": "5"})
+    assert _names(parent) == ["recording-e2e-1", "recording-e2e-10"]
+
+
+def test_a_keep_with_leading_zeros_is_decimal(tmp_path):
+    parent = tmp_path / "p"
+    parent.mkdir()
+    current = _mkrun(parent, "recording-e2e-1", 0)
+    for i in range(10):
+        _mkrun(parent, f"recording-e2e-{100 + i}", 60 * (i + 1))
+    lines, _ = _run([parent, current, "08"])
+    assert len(_names(parent)) == 1 + 8, _names(parent)
+    assert len(lines) == 1 and "removed 2" in lines[0], lines
+
+
+def test_an_entry_whose_mtime_cannot_be_read_is_kept(tmp_path):
+    parent = tmp_path / "p"
+    parent.mkdir()
+    current = _mkrun(parent, "recording-e2e-1", 0)
+    _mkrun(parent, "recording-e2e-2", 7200)
+    _mkrun(parent, "recording-e2e-777", 9000)
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    stat_stub = stubs / "stat"
+    stat_stub.write_text(
+        "#!/bin/sh\n"
+        'case "$*" in *recording-e2e-777*) exit 1 ;; esac\n'
+        f'exec "{shutil.which("stat")}" "$@"\n'
+    )
+    stat_stub.chmod(0o755)
+    _run([parent, current, "0"], path_prefix=stubs)
+    assert _names(parent) == ["recording-e2e-1", "recording-e2e-777"]
+
+
 def test_an_invalid_keep_removes_nothing(tmp_path):
     parent = tmp_path / "p"
     parent.mkdir()
@@ -237,12 +280,19 @@ def test_the_lib_is_source_only():
 
 
 def test_recording_e2e_sources_the_lib_once_and_calls_it_right_after_creating_outdir():
+    """Whole top-level LINES, so a commented-out, indented or dead call or source line fails it: the
+    source statement sits at column 0 under its shellcheck directive, and the call is the column-0
+    line right after the OUTDIR mkdir + the stale-artifact check."""
     s = _E2E.read_text()
     assert s.count(_SOURCE_STMT) == 1
-    src_at = s.index(_SOURCE_STMT)
-    assert s.rfind("# shellcheck source=scripts/lib/e2e-rundir-retention.sh", 0, src_at) != -1
     assert s.count(_CALL_STMT) == 1
-    mkdir_at = s.find('mkdir -p "$OUTDIR"')
-    call_at = s.index(_CALL_STMT)
-    assert src_at < mkdir_at < call_at
-    assert call_at - mkdir_at < 600, "the prune runs right after OUTDIR exists, before any rig work"
+    src = list(re.finditer(
+        r'^# shellcheck source=scripts/lib/e2e-rundir-retention\.sh\n'
+        + re.escape(_SOURCE_STMT) + r"$", s, re.M))
+    assert len(src) == 1, "sourced once, at column 0, right under its shellcheck directive"
+    block = list(re.finditer(
+        r'^mkdir -p "\$OUTDIR"\nstale_dante_artifact_warn "\$OUTDIR"\n'
+        + re.escape(_CALL_STMT) + r"$", s, re.M))
+    assert len(block) == 1, "the call is the column-0 line right after the OUTDIR mkdir"
+    assert s.find('mkdir -p "$OUTDIR"') == block[0].start(), "that mkdir is the one that creates OUTDIR"
+    assert src[0].start() < block[0].start()
