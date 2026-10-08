@@ -12,6 +12,9 @@ paths:
   - scripts/lib/ndi-discovery.sh
   - scripts/lib/rt-kernel-plan.sh
   - scripts/rt-kernel-upgrade.sh
+  - scripts/lib/cambox-ro-units.sh
+  - scripts/cambox-ro-units-apply.sh
+  - tests/python/test_cambox_ro_units_1394.py
   - tests/python/ro_window_fakes_1407.py
   - tests/python/test_rig_mode_relay_rc_1407.py
   - tests/python/test_ro_window_1407.py
@@ -104,7 +107,15 @@ Three dev1-side pure parsers:
 | `cam2-painter-ro-persist.sh` (issue 1405) | `enable` / `disable` | (enable-now) `systemctl start` |
 | `ndi-discovery.sh --cambox-apply` | the config/drop-in removal | `systemctl daemon-reload` |
 | `rt-kernel-plan.sh` printed runbook (print-only) | the step's apt / grub work, its rc kept | (nothing started) the work's own FAIL / OK line |
+| `cambox-ro-units.sh` apply (`scripts/cambox-ro-units-apply.sh`, issue 1394) | the logrotate drop-in + netconsole unit (temp file + rename), `systemctl mask --no-reload` of the apt units | daemon-reload, stop the masked apt units, reset-failed, `start logrotate`, `restart cambox-netconsole`, the `is-system-running` read-back |
 
+- **cambox-ro-units apply (issue 1394):** a cambox-only site, so a root found writable is also
+  forced back read-only (the decision below). It opens the window only when something needs a write
+  (an idempotent re-run never remounts), and its whole program runs in ONE function called with
+  `</dev/null`, since it arrives on `bash -s` stdin (the rt-kernel-plan stdin finding). The fake box
+  of `ro_window_fakes_1407.py` gained `mask`/`unmask` (refused on a ro root, like enable),
+  `is-failed`, `reset-failed` and `is-system-running` (`degraded` while a `failed-<unit>` file
+  exists) for its tests in `tests/python/test_cambox_ro_units_1394.py`.
 - **deploy-fleet:** `close_ro_or_fail IP BOX LABEL CONSEQUENCE` runs the close over ssh and records
   `LABEL(root-rw: <holders>)` in FAILED (`LABEL(root-unverified: ssh rc N)` on a transport
   failure), so the final `FLEET NOT FULLY ALIGNED` line names the writer. Every terminal path
