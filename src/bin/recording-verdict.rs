@@ -406,9 +406,10 @@ struct Args {
     av_cluster_tol_ms: f64,
     /// issue 1404 A/V-sync: pair through this SELF-MARKED run's own dual-QR tick instead of the cam2
     /// painter's: the measurement clip `911016`, whose recording (a CG segment) carries its own QPSK
-    /// marker. `--av-marker-log` is then the clip's own `<clip>.markers.csv`. Requires `--av-sync`;
-    /// unset = the painter path, unchanged (`camera_box::av_run_pairing`).
-    #[arg(long)]
+    /// marker. `--av-marker-log` is then the clip's own `<clip>.markers.csv`. Requires `--av-sync`
+    /// (clap refuses it with any other mode); unset = the painter path, unchanged
+    /// (`camera_box::av_run_pairing`).
+    #[arg(long, requires = "av_sync")]
     av_run: Option<u32>,
     /// issue 930 lipsync cross-validation: the SyncNet-aggregated offset (ms, video - audio) for
     /// the PAIRED lipsync-test-mode recording of the SAME rig state, from `scripts/av_sync_measure.py`
@@ -3133,10 +3134,6 @@ fn main() -> Result<()> {
     if args.av_sync.is_some() {
         return run_av_sync(&args);
     }
-    anyhow::ensure!(
-        args.av_run.is_none(),
-        "--av-run selects the tick of an --av-sync measurement; it requires --av-sync"
-    );
 
     tracing::info!(
         strih = ?args.strih.as_ref().map(|p| p.display().to_string()),
