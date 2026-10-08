@@ -12,11 +12,11 @@
 
 use crate::av_run_pairing::{check_av_run, run_frame_tick, run_tick_samples};
 use crate::av_sync_decode_plan::{
-    av_decode_request, no_cam2_tick_message, painter_head_request, painter_head_verdict,
-    PainterHead, PAINTER_HEAD_FRAMES,
+    av_decode_request, no_cam2_tick_message, painter_full_request, painter_head_request,
+    painter_head_verdict, PainterHead, PAINTER_HEAD_FRAMES,
 };
 use crate::probe::recording::{
-    analyze_recording_head, analyze_recording_with_grouped_burns_optical,
+    analyze_recording_head, analyze_recording_with_grouped_burns_optical, NODE_BURN_RUN_IDS,
 };
 use crate::qpsk_channel_select::{
     decode_best_channel, f32le_to_channels, ffmpeg_extract_args, ffprobe_channels_args,
@@ -212,8 +212,9 @@ fn decode_best_audio_channel(
 /// Issue 1404: the painter path's head check. Decodes the first [`PAINTER_HEAD_FRAMES`] frames with
 /// the head request (nothing required, so no frame goes robust) and stops with "no cam2 tick" when
 /// they show the self-marked measurement clip and none of them a cam2 tick or a rig node burn
-/// (`painter_head_verdict`). Any other head goes on to the unchanged full decode.
-fn check_painter_head(recording: &Path) -> Result<()> {
+/// (`painter_head_verdict`). Any other head goes on to the full decode, and its observation (one
+/// `(cam2 tick, run ids)` per head frame) decides that decode's request (`painter_full_request`).
+fn check_painter_head(recording: &Path) -> Result<Vec<(Option<u32>, Vec<u32>)>> {
     let request = painter_head_request();
     let head = analyze_recording_head(
         recording,
@@ -232,7 +233,7 @@ fn check_painter_head(recording: &Path) -> Result<()> {
         "av-sync painter head (issue 1404): a cam2 tick or a rig burn sends it to the full decode"
     );
     match verdict {
-        PainterHead::FullDecode => Ok(()),
+        PainterHead::FullDecode => Ok(seen),
         PainterHead::NoCam2Tick { frames } => {
             anyhow::bail!("{}: {}", recording.display(), no_cam2_tick_message(frames))
         }
@@ -280,15 +281,16 @@ pub fn av_sync_from_recording(
     // Video: decode every frame's optical tick → sorted (tick, video_ts) samples, first per tick.
     // Issue 1404: the decode asks the #207 gate for exactly the QRs this path reads
     // (`crate::av_sync_decode_plan`); the painter path stops after a cheap head on a recording with
-    // neither a cam2 tick nor a rig burn, instead of running every frame through the robust recovery.
-    if av_run.is_none() {
-        check_painter_head(recording)?;
-    }
-    let request = av_decode_request(av_run);
+    // neither a cam2 tick nor a rig burn, instead of running every frame through the robust recovery,
+    // and otherwise asks its full decode for exactly the node burns that head read.
+    let request = match av_run {
+        Some(_) => av_decode_request(av_run),
+        None => painter_full_request(&check_painter_head(recording)?, &NODE_BURN_RUN_IDS),
+    };
     let frames = analyze_recording_with_grouped_burns_optical(
         recording,
         &request.mandatory_burns,
-        &[],
+        &request.any_of_burns,
         request.min_distinct_optical,
     )
     .with_context(|| format!("decode video {}", recording.display()))?;

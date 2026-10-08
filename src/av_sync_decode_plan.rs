@@ -11,23 +11,35 @@
 //! - `--av-run <run>` requests exactly what its frames carry: the run's own dual-QR Vernier (both
 //!   halves), no node burn. A rig recording of a CG segment still reads its burns on the plain
 //!   pass; they are only no longer required.
-//! - The painter path keeps today's request ([`PAINTER_PATH_NODE_BURNS`]) for every recording it
-//!   decodes in full. It first reads a short head with a request that names nothing, so no head
+//! - The painter path first reads a short head with a request that names nothing, so no head
 //!   frame goes robust. A head that shows the self-marked measurement clip and neither a cam2
-//!   tick nor any of those rig burns is the clip's own recording: the path stops there
-//!   ([`PainterHead::NoCam2Tick`]) instead of decoding every frame through the robust recovery.
-//!   Any rig frame in the head, and any head without the clip (a QR-less pre-roll), goes on to
-//!   the unchanged full decode. Two residual edges, both accepted: a burn-free recording whose
-//!   head shows only the clip but which later switches to painter content is refused; and a
-//!   clip-only recording that opens on a QR-less pre-roll longer than the head is decoded in full
-//!   through the robust recovery, then fails on the coverage guard as before this change.
+//!   tick nor any of the [`PAINTER_PATH_NODE_BURNS`] rig burns is the clip's own recording: the
+//!   path stops there ([`PainterHead::NoCam2Tick`]) instead of decoding every frame through the
+//!   robust recovery. Any rig frame in the head, and any head without the clip (a QR-less
+//!   pre-roll), goes on to the full decode. Two residual edges, both accepted: a burn-free
+//!   recording whose head shows only the clip but which later switches to painter content is
+//!   refused; and a clip-only recording that opens on a QR-less pre-roll longer than the head is
+//!   decoded in full through the robust recovery, then fails on the coverage guard.
+//! - The painter path's full decode asks for exactly the node burns the head read
+//!   ([`painter_full_request`], ROZHODNUTÉ 6051603225). The YouTube-leg stream recordings of the
+//!   5.10 sessions ran with the burns off: every frame carries only the painter run and the aux
+//!   pair, so the old cam1/strih/stream request sent all 1200 frames of each window through the
+//!   robust recovery (101-190 s instead of 32-58 s per 40 s clip, 8 workers). A burns-on rig
+//!   recording keeps every strih / stream burn its head read mandatory and gets the camera group as
+//!   the issue-632 any-of group, so the deployed camera's burn (whichever camera) satisfies it.
+//!   `--av-sync` pairs the painter tick with the audio marker; the burns carry no A/V information,
+//!   so a burn the fast path skips cannot change the result. On all 9 re-made stream-recording
+//!   fixtures the output stayed byte-identical with every frame fast (issue 1404 comment
+//!   6051594115).
 //!
 //! Pure (no I/O). `probe::av_sync_recording` decodes the head and the recording with these
 //! requests; `probe::recording::analyze_recording_head` stops ffmpeg after the head.
 
-/// The node burns the painter path requires on the #207 fast path: cam1, strih, stream (the
-/// `recording_latency` run ids 911001 / 911002 / 911004). Today's set: it mirrors
-/// `probe::recording::GENERIC_DIAGNOSTIC_BURN_IDS`, the set `analyze_recording` decodes with.
+/// The painter path's rig burns: cam1, strih, stream (the `recording_latency` run ids 911001 /
+/// 911002 / 911004). It mirrors `probe::recording::GENERIC_DIAGNOSTIC_BURN_IDS`, the set
+/// `analyze_recording` decodes with. The head verdict reads them as a rig signal; the full decode
+/// requires all three only after a head that read no QR, and otherwise requires the strih / stream
+/// members the head read ([`painter_full_request`]).
 pub const PAINTER_PATH_NODE_BURNS: [u32; 3] = [911_001, 911_002, 911_004];
 
 /// The dual-QR Vernier shows two halves of its run on a frame (the clip's frame 0 shows one).
@@ -51,8 +63,9 @@ pub struct AvDecodeRequest {
     pub min_distinct_optical: Option<(u32, usize)>,
 }
 
-/// The decode request of `--av-sync`: `None` = the painter path (today's set), `Some(run)` =
-/// `--av-run <run>`.
+/// The decode request of `--av-sync`: `Some(run)` = `--av-run <run>`; `None` = the painter path's
+/// request when its head read no QR (all of [`PAINTER_PATH_NODE_BURNS`]). Every other painter-path
+/// request comes from [`painter_full_request`].
 pub fn av_decode_request(av_run: Option<u32>) -> AvDecodeRequest {
     match av_run {
         Some(run) => AvDecodeRequest {
@@ -86,10 +99,42 @@ fn painter_request() -> AvDecodeRequest {
 /// - a head that read no QR at all (an empty head, a QR-less pre-roll) keeps today's request
 ///   ([`av_decode_request`] `(None)`).
 pub fn painter_full_request(
-    _head: &[(Option<u32>, Vec<u32>)],
-    _node_burn_table: &[u32],
+    head: &[(Option<u32>, Vec<u32>)],
+    node_burn_table: &[u32],
 ) -> AvDecodeRequest {
-    painter_request()
+    let read_a_qr = head
+        .iter()
+        .any(|(tick, run_ids)| tick.is_some() || !run_ids.is_empty());
+    if !read_a_qr {
+        return painter_request();
+    }
+    let read = |id: u32| head.iter().any(|(_, run_ids)| run_ids.contains(&id));
+    let mandatory_burns: Vec<u32> = PAINTER_PATH_NODE_BURNS
+        .iter()
+        .copied()
+        .filter(|&id| !is_camera_burn(id) && read(id))
+        .collect();
+    let cameras: Vec<u32> = node_burn_table
+        .iter()
+        .copied()
+        .filter(|&id| is_camera_burn(id))
+        .collect();
+    let any_of_burns = if cameras.iter().any(|&id| read(id)) {
+        cameras
+    } else {
+        Vec::new()
+    };
+    AvDecodeRequest {
+        mandatory_burns,
+        any_of_burns,
+        min_distinct_optical: None,
+    }
+}
+
+/// A camera capture burn: its overlay slot is the centred camera slot (`crate::burn_regions`).
+fn is_camera_burn(run_id: u32) -> bool {
+    crate::burn_regions::slot_for_run_id(run_id)
+        == Some(crate::burn_regions::BurnSlot::CameraCapture)
 }
 
 /// The request of the painter path's head: nothing required, so every head frame stays on the fast
