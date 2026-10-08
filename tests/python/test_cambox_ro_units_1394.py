@@ -24,6 +24,7 @@ The main's design (issuecomment-6057869233, Approach 1):
 Tier-0: stdlib + bash only, no rig. The apply program runs on the shared fake read-only-root box
 (tests/python/ro_window_fakes_1407.py).
 """
+import calendar
 import hashlib
 import json
 import os
@@ -578,7 +579,7 @@ def test_apply_program_keeps_its_commands_off_the_programs_stdin():
 # =================================================================================================
 
 _SSHPASS = r'''
-import os, sys
+import os, sys, time
 d = os.environ["FAKE_SSH_DIR"]
 n = len([f for f in os.listdir(d) if f.startswith("argv-")])
 open(os.path.join(d, f"argv-{n}"), "w").write("\n".join(sys.argv[1:]))
@@ -587,7 +588,16 @@ host = next(a for a in sys.argv if a.startswith("root@"))
 fail = os.environ.get("FAKE_FAIL_HOST", "")
 if os.environ.get("FAKE_RECORD_LEASE"):  # what the lease reads while this box is applied
     hp = os.path.join(os.environ["RIG_LEASE_DIR"], "holder.json")
+    hb = os.path.join(os.environ["RIG_LEASE_DIR"], "heartbeat")
     open(os.path.join(d, f"lease-{n}"), "w").write(open(hp).read() if os.path.exists(hp) else "ABSENT")
+    open(os.path.join(d, f"lease-at-{n}"), "w").write(
+        "%f %f" % (time.time(), os.stat(hb).st_mtime if os.path.exists(hb) else 0.0))
+    if os.environ.get("FAKE_AGE_LEASE") and os.path.exists(hp):  # the lease as minutes went by
+        import json
+        held = json.load(open(hp))
+        held["expected_release_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        json.dump(held, open(hp, "w"))
+        os.utime(hb, (time.time() - 1000, time.time() - 1000))
 if host == "root@" + os.environ.get("FAKE_TAKE_LEASE_ON_HOST", ""):  # an E2E takes the rig mid-run
     d = os.environ["RIG_LEASE_DIR"]
     os.makedirs(d, exist_ok=True)
@@ -624,6 +634,12 @@ if sys.argv[1:2] == ["rig-busy-check"]:
 
 
 def _cli(tmp_path, *args, env=None):
+    e, sshdir = _cli_env(tmp_path, env)
+    r = subprocess.run(["bash", str(CLI), *args], capture_output=True, text=True, env=e, timeout=120)
+    return r, sshdir
+
+
+def _cli_env(tmp_path, env=None):
     bindir = tmp_path / "dev1-bin"
     bindir.mkdir(exist_ok=True)
     (bindir / "sshpass").write_text(f"#!{sys.executable}\n{_SSHPASS}")
@@ -639,8 +655,7 @@ def _cli(tmp_path, *args, env=None):
          "RIG_LEASE_DIR": str(tmp_path / "rig-lease"), "CAMERA_BOX_RIG_HEARTBEAT": str(tmp_path / "rig-active"),
          "CAMBOX_RO_UNITS_OBS_PHASE2_DIR": str(obsdir), "FAKE_OBS_LOG": str(tmp_path / "obs.log")}
     e.update(env or {})
-    r = subprocess.run(["bash", str(CLI), *args], capture_output=True, text=True, env=e, timeout=120)
-    return r, sshdir
+    return e, sshdir
 
 
 def test_cli_plan_prints_the_program_and_touches_nothing(tmp_path):
@@ -1044,3 +1059,66 @@ def test_cli_applies_a_box_named_twice_once(tmp_path):
     r, _ = _cli(tmp_path, "--plan", "--box", "cam1", "--box", "CAM1", "--box", "cam3")
     assert r.returncode == 0, r.stderr
     assert re.findall(r"(?m)^== (cam\d) ", r.stdout) == ["cam1", "cam3"], r.stdout
+
+
+# =================================================================================================
+# 11. review round 4: the declared hold, the per-box refresh, a TERM during the acquire
+# =================================================================================================
+
+def _gate_wait_budget_s():
+    # rig-busy-gate.sh fails FAST (exit 44) when a holder's expected_release_at is further away than
+    # its whole wait budget, RIG_LEASE_MAX_WAIT_SECS = MAX_ITERATIONS x SLEEP_SECS by default.
+    gate = (REPO / "scripts" / "rig-busy-gate.sh").read_text()
+    iters = int(re.search(r'(?m)^MAX_ITERATIONS="\$\{RIG_BUSY_GATE_ITERATIONS:-(\d+)\}"', gate).group(1))
+    sleep_s = int(re.search(r'(?m)^SLEEP_SECS="\$\{RIG_BUSY_GATE_SLEEP_SECS:-(\d+)\}"', gate).group(1))
+    return iters * sleep_s
+
+
+def _iso_epoch(text):
+    return calendar.timegm(time.strptime(text, "%Y-%m-%dT%H:%M:%SZ"))
+
+
+def test_cli_apply_declares_a_hold_the_e2e_gate_waits_out(tmp_path):
+    # Review round 4 finding 1: a declared expected_release_at past the gate's wait budget makes
+    # every full-path E2E that starts during an apply fail at once (exit 44) instead of waiting.
+    r, sshdir = _cli(tmp_path, "--apply", "--box", "cam1", env={"FAKE_RECORD_LEASE": "1"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    held = json.loads((sshdir / "lease-0").read_text())
+    seen_at = float((sshdir / "lease-at-0").read_text().split()[0])
+    remaining = _iso_epoch(held["expected_release_at"]) - seen_at
+    assert 0 < remaining <= _gate_wait_budget_s(), (remaining, _gate_wait_budget_s(), held)
+
+
+def test_cli_apply_refreshes_its_own_lease_before_every_box(tmp_path):
+    # Review round 4 nit 3: the per-box rig_lease_refresh_if_mine was unpinned. Box 1's fake ages the
+    # lease (a heartbeat 1000 s old, a release time of now); box 2 must read both moved forward.
+    r, sshdir = _cli(tmp_path, "--apply", "--box", "cam1", "--box", "cam3",
+                     env={"FAKE_RECORD_LEASE": "1", "FAKE_AGE_LEASE": "1"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    held = json.loads((sshdir / "lease-1").read_text())
+    seen_at, hb_mtime = (float(x) for x in (sshdir / "lease-at-1").read_text().split())
+    assert seen_at - hb_mtime < 60, ("the heartbeat was not beaten before box 2", seen_at - hb_mtime)
+    assert _iso_epoch(held["expected_release_at"]) - seen_at > 300, held
+
+
+def test_cli_apply_never_leaves_a_lease_behind_on_a_term_during_the_acquire(tmp_path):
+    # Review round 4 nit 2: RIG_LEASE_OURS was set only after the acquire returned, so a TERM that
+    # landed while the holder was written left a live lease nobody released (up to ~90 min). The
+    # holder write is slowed by a python3 wrapper that marks the moment it starts.
+    e, _ = _cli_env(tmp_path)
+    mark = tmp_path / "acquire-started"
+    wrapper = tmp_path / "dev1-bin" / "python3"
+    wrapper.write_text("#!/bin/bash\n"
+                       f'case "$*" in *json.dump*) : > "{mark}"; /bin/sleep 3 ;; esac\n'
+                       f'exec {sys.executable} "$@"\n')
+    wrapper.chmod(0o755)
+    proc = subprocess.Popen(["bash", str(CLI), "--apply", "--box", "cam1"], env=e,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.time() + 30
+    while not mark.exists() and proc.poll() is None and time.time() < deadline:
+        time.sleep(0.05)
+    assert mark.exists(), "the acquire never wrote a holder"
+    proc.send_signal(15)
+    out, err = proc.communicate(timeout=60)
+    assert proc.returncode == 143, (proc.returncode, out, err)
+    assert not (tmp_path / "rig-lease").exists(), ("a lease was left behind", err)
