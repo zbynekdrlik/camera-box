@@ -17,7 +17,9 @@ set -euo pipefail
 # It is a root write on a cambox, so --apply TAKES the rig lease (scripts/lib/rig-lease.sh, repo
 # camera-box-ro-units-apply) for its whole run and releases it on every exit: a live foreign holder
 # (an E2E / the soak) refuses the run before any box, and no E2E can take the rig while a box is
-# applied. Before EVERY box it also REFUSES (exit 1, that box and the rest untouched, the boxes
+# applied. It declares the rolling 15-min look-ahead and refreshes it before every box (never the
+# whole run: a full-path E2E then WAITS for the release instead of failing fast on a long hold).
+# Before EVERY box it also REFUSES (exit 1, that box and the rest untouched, the boxes
 # already done summarised) while:
 #   - the issue-281 rig heartbeat (scripts/lib/rig-heartbeat.sh rig_held_reason; recording-e2e /
 #     rig-mode TEST, which does not take the lease) is fresh, or a lease that is not ours is live;
@@ -38,7 +40,7 @@ set -euo pipefail
 # Env: CAM_PW (cambox root password, default newlevel -- the fleet's dev password, as verify-device.sh),
 #      SSH_TIMEOUT (ssh ConnectTimeout, default 10), STRIH_HOST / STREAM_HOST (rig-busy OBS-WS hosts,
 #      default 10.77.9.202 / 10.77.9.204), OBS_PASSWORD, RIG_LEASE_DIR / RIG_LEASE_STALE_SECS /
-#      CAMERA_BOX_RIG_HEARTBEAT (the lease + heartbeat libs' own knobs),
+#      RIG_LEASE_LOOKAHEAD_SECS / CAMERA_BOX_RIG_HEARTBEAT (the lease + heartbeat libs' own knobs),
 #      CAMBOX_RO_UNITS_OBS_PHASE2_DIR (dir holding obs_phase2.py for the rig-busy guard; tests).
 # Exit: 0 every box OK; 1 a box failed or the rig guard refused (named on stderr); 2 a bad
 # invocation (nothing touched).
@@ -204,12 +206,23 @@ trap 'exit 143' TERM
 if [ "$FORCE_LIVE" = 1 ]; then
   echo "WARNING: --force-live -- SKIPPING the rig guard (lease, rig heartbeat, rig-busy) for the issue-1394 apply on: ${NAMES[*]}" >&2
 else
-  _ours="ro-units-apply-$(date -u +%Y%m%dT%H%M%SZ)-$$"
-  if _lease_out="$(rig_lease_acquire "$RIG_LEASE_REPO_NAME" "$_ours" "" ro-units-apply \
-    "$(date -u -d '+60 min' +%Y-%m-%dT%H:%M:%SZ)" "$RIG_LEASE_STALE_SECS")"; then
-    RIG_LEASE_OURS="$_ours"
+  # Set BEFORE the acquire (review round 4): a TERM that lands while the holder is written still
+  # finds our id in cleanup and gives the lease back. rig_lease_release checks the holder's run_id,
+  # so a foreign holder is never touched.
+  RIG_LEASE_OURS="ro-units-apply-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  # Declare the rolling look-ahead the per-box refresh keeps rolling (rig_lease_refresh_if_mine,
+  # RIG_LEASE_LOOKAHEAD_SECS, 900 s), never the whole run: rig-busy-gate.sh fails FAST (exit 44) on
+  # a holder whose expected_release_at lies past its 1800 s wait budget, so a longer declaration made
+  # every full-path E2E that started during an apply fail at once instead of waiting (round 4).
+  case "${RIG_LEASE_LOOKAHEAD_SECS:-}" in
+    "" | *[!0-9]*) _hold_s=900 ;;
+    *) _hold_s="$RIG_LEASE_LOOKAHEAD_SECS" ;;
+  esac
+  if _lease_out="$(rig_lease_acquire "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" "" ro-units-apply \
+    "$(date -u -d "+${_hold_s} seconds" +%Y-%m-%dT%H:%M:%SZ)" "$RIG_LEASE_STALE_SECS")"; then
     echo "[rig-lease] ${_lease_out} as ${RIG_LEASE_REPO_NAME}#${RIG_LEASE_OURS}, held until this run ends"
   else
+    RIG_LEASE_OURS=""
     echo "ERROR: refused -- the rig lease is held: ${_lease_out#RIG_LEASE_HELD_BY=}. No box was touched; run --apply after it is released." >&2
     exit 1
   fi
@@ -224,7 +237,7 @@ for _i in "${!NAMES[@]}"; do
   _ip="${IPS[$_i]}"
   if [ "$FORCE_LIVE" = 0 ]; then
     # keep our own lease truthful (the :8890 view) while the run goes on; a no-op when not ours
-    rig_lease_refresh_if_mine "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" >/dev/null 2>&1 || true
+    rig_lease_refresh_if_mine "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" "$_hold_s" >/dev/null 2>&1 || true
     if rig_refused "$_name"; then
       UNTOUCHED=("${NAMES[@]:_i}")
       echo "ERROR: refused before $_name -- ${RIG_REFUSAL}. Not touched: ${UNTOUCHED[*]}; run --apply for them after it ends." >&2
