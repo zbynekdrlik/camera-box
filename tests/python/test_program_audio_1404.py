@@ -493,17 +493,17 @@ def test_an_explicit_lib_path_is_the_only_candidate(tmp_path):
 
 
 # ---------------------------------------------------------------------------------------------
-# the sampler unit -- long-running, restarts on failure, shipped disabled
+# the sampler unit (the strih-lx template, the only one) -- long-running, restarts on failure
 # ---------------------------------------------------------------------------------------------
 
 
 def test_the_sampler_unit_runs_the_sampler_and_restarts_on_failure():
     import re
 
-    s = (_ROOT / "systemd" / "program-audio-sampler.service").read_text(encoding="utf-8")
+    s = (_ROOT / "systemd" / "program-audio-sampler.strih-lx.service").read_text(encoding="utf-8")
     assert re.search(r"^Type=simple$", s, re.M)
     assert re.search(
-        r"^ExecStart=/usr/bin/python3 %h/devel/camera-box/scripts/program_audio_sampler.py$", s, re.M)
+        r"^ExecStart=/usr/bin/python3 /usr/local/lib/camera-box/scripts/program_audio_sampler.py$", s, re.M)
     assert re.search(r"^Restart=on-failure$", s, re.M)
     assert re.search(r"^RestartSec=\d+$", s, re.M)
     assert re.search(r"^WantedBy=default.target$", s, re.M)

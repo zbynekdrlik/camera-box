@@ -470,11 +470,11 @@ def test_the_sync_path_still_drives_the_existing_loop_tests(tmp_path):
 # ---------------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("unit", ["program-audio-sampler.service", "program-audio-sampler.strih-lx.service"])
+@pytest.mark.parametrize("unit", ["program-audio-sampler.strih-lx.service"])
 def test_the_units_run_the_sampler_at_normal_priority(unit):
     """No Nice= (the old Nice=10 put the sampler behind every other process, and a --user unit cannot
     lower it anyway) and no CPUWeight= (on strih-lx it would rank the sampler ahead of OBS in the same
-    slice): normal priority in both units."""
+    slice): normal priority (the dev1 unit was retired, issue 1404 8.10.2026)."""
     import re
 
     s = (_ROOT / "systemd" / unit).read_text(encoding="utf-8")

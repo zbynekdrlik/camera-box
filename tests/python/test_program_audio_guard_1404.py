@@ -7,12 +7,11 @@ requirement, ROZHODNUTÉ 6026826572) is UNKNOWN. One stdout line:
   program-audio verdict=<V> rms=<x> outside_band=<y>% age=<s> markers=<n> chain=<c>[ reason=<...>]
 
 Run as a real subprocess (real exit codes) against a real stdlib HTTP server on an ephemeral
-127.0.0.1 port, and once end-to-end through the real rig-lease-server.
+127.0.0.1 port, and once end-to-end through the sampler's real endpoint (program_audio_http).
 """
 from __future__ import annotations
 
 import http.server
-import importlib.util
 import json
 import pathlib
 import re
@@ -27,6 +26,7 @@ _SCRIPTS = _ROOT / "scripts"
 if str(_SCRIPTS) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS))
 
+import program_audio_http as pah  # noqa: E402
 import rig_serve_files as rsf  # noqa: E402
 
 GUARD = _SCRIPTS / "program_audio_guard.py"
@@ -214,16 +214,15 @@ def test_defaults_point_at_strih_lx():
     assert "DEFAULT_MAX_AGE_S = 10.0" in src
 
 
-def test_end_to_end_through_the_real_lease_server(tmp_path):
-    spec = importlib.util.spec_from_file_location("rls_e2e_1404", _SCRIPTS / "rig-lease-server.py")
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
+def test_end_to_end_through_the_real_sampler_endpoint(tmp_path):
+    """The guard against the sampler's own endpoint (program_audio_http, strih-lx :8891), the one
+    place the verdict is served since the dev1 lease route was retired (issue 1404, 8.10.2026)."""
     serve = tmp_path / "serve"
     serve.mkdir()
     payload = json.loads(_payload("MEASUREMENT", age=0.0))
     payload["ts_utc"] = rsf.format_ts_utc(datetime.now(timezone.utc) - timedelta(seconds=3))
     rsf.write_bytes_atomic(str(serve / rsf.PROGRAM_AUDIO_NAME), json.dumps(payload).encode())
-    server = mod.make_server("127.0.0.1", 0, str(tmp_path / "lease"), 5400, serve_dir=str(serve))
+    server = pah.make_server("127.0.0.1", 0, str(serve))
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
     try:

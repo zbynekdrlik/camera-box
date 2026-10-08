@@ -1,12 +1,11 @@
-"""issue 1404 Task 2 -- the rig-lease server's two read-only file routes on dev1 (:8890).
+"""issue 1404 Task 2 -- the rig-lease server's read-only file route on dev1 (:8890).
 
-`scripts/rig-lease-server.py` serves two files from its SERVE dir (`scripts/rig_serve_files.py`;
+`scripts/rig-lease-server.py` serves one file from its SERVE dir (`scripts/rig_serve_files.py`;
 never the lease dir, whose mere existence means held=true):
   GET/HEAD /rig-qpsk-markers.csv  -> cam2's QPSK marker log, text/csv, X-Mirror-Age-S, 404 absent
-  GET/HEAD /program-audio.json    -> the program-audio verdict, age_s (+ last_foreign_age_s)
-                                     recomputed per request, 404 absent, unreadable = UNKNOWN
 while `/rig-lease.json`, `/healthz` and the 404 stay byte-identical to the pre-change server
-(golden bytes captured from it at 9e06ea0b3).
+(golden bytes captured from it at 9e06ea0b3). The program-audio verdict is served only by the
+sampler's own endpoint on strih-lx (test_program_audio_http_1404.py).
 
 A REAL ThreadingHTTPServer on an ephemeral 127.0.0.1 port (never a mock), the harness of
 test_rig_lease_server_1277.py.
@@ -23,7 +22,6 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timedelta, timezone
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _SCRIPTS = _ROOT / "scripts"
@@ -99,10 +97,6 @@ def _serve_dir(tmp_path):
     d = tmp_path / "serve"
     d.mkdir(mode=0o700)
     return d
-
-
-def _ts(dt):
-    return rsf.format_ts_utc(dt)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -257,145 +251,6 @@ def test_main_wires_the_serve_dir_flag():
 
 
 # ---------------------------------------------------------------------------------------------
-# /program-audio.json
-# ---------------------------------------------------------------------------------------------
-
-
-def test_program_audio_route_is_404_while_absent(tmp_path):
-    with _Server(tmp_path / "lease", str(_serve_dir(tmp_path))) as s:
-        status, _h, _b = s.request("GET", "/program-audio.json")
-    assert status == 404
-
-
-def test_program_audio_age_is_recomputed_at_request_time(tmp_path):
-    """The sampler writes age_s 0; the server recomputes it from ts_utc so a consumer on another
-    host never compares two clocks and a stopped sampler reads stale, never fresh."""
-    serve = _serve_dir(tmp_path)
-    payload = {
-        "schema": 1, "ts_utc": _ts(datetime.now(timezone.utc) - timedelta(seconds=30)), "age_s": 0.0,
-        "verdict": "MEASUREMENT", "rms_dbfs": -35.6, "outside_band_pct": 16.8, "window_s": 2.0,
-        "source": "STREAM-SNV (stream)", "last_foreign_ts_utc": None, "markers_decoded": 9,
-        "marker_chain": 7,
-    }
-    (serve / rsf.PROGRAM_AUDIO_NAME).write_text(json.dumps(payload), encoding="utf-8")
-    with _Server(tmp_path / "lease", str(serve)) as s:
-        status, headers, body = s.request("GET", "/program-audio.json")
-        hstatus, hheaders, hbody = s.request("HEAD", "/program-audio.json")
-    assert status == 200
-    assert headers["Content-Type"] == "application/json"
-    assert headers["Cache-Control"] == "no-store"
-    got = json.loads(body)
-    assert 29.0 <= got["age_s"] <= 33.0
-    assert got["last_foreign_age_s"] is None
-    for k in ("ts_utc", "verdict", "rms_dbfs", "outside_band_pct", "window_s", "source", "markers_decoded",
-              "marker_chain"):
-        assert got[k] == payload[k]
-    assert hstatus == 200 and hbody == b"" and hheaders["Content-Type"] == "application/json"
-
-
-def test_program_audio_last_foreign_age_is_recomputed_too(tmp_path):
-    serve = _serve_dir(tmp_path)
-    now = datetime.now(timezone.utc)
-    payload = {"verdict": "MEASUREMENT", "ts_utc": _ts(now - timedelta(seconds=1)), "age_s": 0.0,
-               "last_foreign_ts_utc": _ts(now - timedelta(seconds=7))}
-    (serve / rsf.PROGRAM_AUDIO_NAME).write_text(json.dumps(payload), encoding="utf-8")
-    with _Server(tmp_path / "lease", str(serve)) as s:
-        _status, _h, body = s.request("GET", "/program-audio.json")
-    got = json.loads(body)
-    assert 6.0 <= got["last_foreign_age_s"] <= 9.0
-
-
-def test_program_audio_unreadable_file_is_served_fail_closed_unknown(tmp_path):
-    serve = _serve_dir(tmp_path)
-    (serve / rsf.PROGRAM_AUDIO_NAME).write_text("{not json", encoding="utf-8")
-    with _Server(tmp_path / "lease", str(serve)) as s:
-        status, _h, body = s.request("GET", "/program-audio.json")
-    assert status == 200
-    got = json.loads(body)
-    assert got["verdict"] == "UNKNOWN"
-    assert got["age_s"] is None
-    assert "unreadable" in got["reason"]
-
-
-def test_program_audio_os_error_is_served_fail_closed_unknown(tmp_path):
-    serve = _serve_dir(tmp_path)
-    (serve / rsf.PROGRAM_AUDIO_NAME).mkdir()  # open() raises IsADirectoryError
-    with _Server(tmp_path / "lease", str(serve)) as s:
-        status, _h, body = s.request("GET", "/program-audio.json")
-    assert status == 200
-    got = json.loads(body)
-    assert got["verdict"] == "UNKNOWN" and got["age_s"] is None
-    assert "unreadable" in got["reason"]
-
-
-def test_program_audio_unparseable_ts_has_null_age(tmp_path):
-    serve = _serve_dir(tmp_path)
-    (serve / rsf.PROGRAM_AUDIO_NAME).write_text(
-        json.dumps({"verdict": "MEASUREMENT", "ts_utc": "yesterday", "age_s": 0.0}), encoding="utf-8")
-    with _Server(tmp_path / "lease", str(serve)) as s:
-        _status, _h, body = s.request("GET", "/program-audio.json")
-    assert json.loads(body)["age_s"] is None
-
-
-def _pa_payload(**over):
-    p = {"schema": 1, "ts_utc": _ts(datetime.now(timezone.utc) - timedelta(seconds=2)), "age_s": 0.0,
-         "verdict": "MEASUREMENT", "rms_dbfs": -35.6, "outside_band_pct": 16.8, "window_s": 2.0,
-         "source": "STREAM-SNV (stream)", "last_foreign_ts_utc": None, "markers_decoded": 9,
-         "marker_chain": 7}
-    p.update(over)
-    return p
-
-
-def _served(tmp_path, payload):
-    serve = tmp_path / "serve"
-    serve.mkdir(mode=0o700, exist_ok=True)
-    (serve / rsf.PROGRAM_AUDIO_NAME).write_text(json.dumps(payload), encoding="utf-8")
-    return rsf.program_audio_response(str(serve / rsf.PROGRAM_AUDIO_NAME), datetime.now(timezone.utc))
-
-
-def test_a_measurement_without_a_marker_chain_is_served_as_unknown(tmp_path):
-    """issue 1404 (ROZHODNUTÉ 6026826572): MEASUREMENT needs the QPSK marker chain. A payload that
-    says MEASUREMENT without one comes from a sampler older than that requirement (it keeps running
-    after a pull until it is restarted). The server is the one place every consumer reads -- the
-    camera-box guard AND restreamer's own reader -- so it serves such a payload as UNKNOWN."""
-    p = _pa_payload()
-    del p["marker_chain"], p["markers_decoded"]
-    got = _served(tmp_path, p)
-    assert got["verdict"] == "UNKNOWN"
-    assert "marker chain" in got["reason"]
-    assert 1.0 <= got["age_s"] <= 6.0  # the ages stay: a stale reading still reads stale
-    assert got["rms_dbfs"] == -35.6 and got["outside_band_pct"] == 16.8
-
-
-def test_a_measurement_with_a_non_count_marker_chain_is_served_as_unknown(tmp_path):
-    for bad in (None, "7", True, -1, 2.5):
-        got = _served(tmp_path, _pa_payload(marker_chain=bad))
-        assert got["verdict"] == "UNKNOWN", bad
-
-
-def test_a_measurement_with_its_marker_chain_is_served_unchanged(tmp_path):
-    got = _served(tmp_path, _pa_payload(marker_chain=7))
-    assert got["verdict"] == "MEASUREMENT" and got["marker_chain"] == 7
-    assert "reason" not in got
-
-
-def test_silent_and_foreign_are_served_without_a_marker_chain(tmp_path):
-    for verdict in ("SILENT", "FOREIGN", "UNKNOWN"):
-        p = _pa_payload(verdict=verdict, marker_chain=None, markers_decoded=None)
-        assert _served(tmp_path, p)["verdict"] == verdict
-
-
-def test_program_audio_from_another_owner_is_served_as_unknown(tmp_path, monkeypatch):
-    serve = _serve_dir(tmp_path)
-    (serve / rsf.PROGRAM_AUDIO_NAME).write_text(
-        json.dumps({"verdict": "MEASUREMENT", "ts_utc": _ts(datetime.now(timezone.utc))}), encoding="utf-8")
-    monkeypatch.setattr(rsf, "owned_by_me", lambda st: False)
-    got = rsf.program_audio_response(str(serve / rsf.PROGRAM_AUDIO_NAME), datetime.now(timezone.utc))
-    assert got["verdict"] == "UNKNOWN"
-    assert "owner" in got["reason"]
-
-
-# ---------------------------------------------------------------------------------------------
 # /rig-lease.json, /healthz and the 404 stay byte-identical to the pre-change server
 # ---------------------------------------------------------------------------------------------
 
@@ -445,15 +300,14 @@ def test_existing_routes_match_the_pre_change_golden_bytes(tmp_path):
                 assert _mask_now(path, got_body) == body, (method, path)
 
 
-def test_mirror_routes_are_404_when_no_serve_dir_is_configured(tmp_path):
+def test_the_markers_route_is_404_when_no_serve_dir_is_configured(tmp_path):
     with _Server(tmp_path / "lease", use_kw=False) as s:
         assert s.request("GET", "/rig-qpsk-markers.csv")[0] == 404
-        assert s.request("GET", "/program-audio.json")[0] == 404
 
 
-def test_post_to_a_mirror_route_is_never_a_write(tmp_path):
+def test_post_to_the_markers_route_is_never_a_write(tmp_path):
     serve = _serve_dir(tmp_path)
     with _Server(tmp_path / "lease", str(serve)) as s:
-        status, _h, _b = s.request("POST", "/program-audio.json")
+        status, _h, _b = s.request("POST", "/rig-qpsk-markers.csv")
     assert status == 501
     assert list(serve.iterdir()) == []

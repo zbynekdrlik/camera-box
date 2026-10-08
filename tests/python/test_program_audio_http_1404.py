@@ -1,16 +1,16 @@
 """issue 1404 -- the program-audio sampler serves its OWN read-only HTTP endpoint (host-agnostic).
 
-The owner moves the sampler off dev1 to a rig node (still being chosen), so it can no longer rely on
-dev1's rig-lease server (:8890). The sampler process now serves `/program-audio.json` itself:
-  * GET/HEAD `/program-audio.json` -> the payload through the SAME `rig_serve_files.
-    program_audio_response` the lease server uses (ages recomputed per request, a foreign-owned or
-    unreadable file = UNKNOWN, a MEASUREMENT without a marker chain = UNKNOWN), 404 while absent;
+The sampler runs on strih-lx and serves `/program-audio.json` itself, the only place the verdict is
+served (the dev1 rig-lease server's :8890 route was retired, 8.10.2026):
+  * GET/HEAD `/program-audio.json` -> the payload through `rig_serve_files.program_audio_response`
+    (ages recomputed per request, a foreign-owned or unreadable file = UNKNOWN, a MEASUREMENT
+    without a marker chain = UNKNOWN), 404 while absent;
   * `/healthz` -> ok; anything else 404; any other method 501 (read-only);
   * port `--http-port` / $PROGRAM_AUDIO_HTTP_PORT, default 8891 (0 = no endpoint), bind
     `--http-bind` / $PROGRAM_AUDIO_HTTP_BIND, default 0.0.0.0, serve dir `--serve-dir` /
     $PROGRAM_AUDIO_SERVE_DIR (else the old default);
-  * the response code is ONE handler base shared with the lease server (rig_serve_files), and the
-    dev1 lease route keeps working byte-identically (test_rig_serve_routes_1404.py goldens).
+  * the response code is ONE handler base shared with the dev1 lease server (rig_serve_files), whose
+    own routes stay byte-identical (test_rig_serve_routes_1404.py goldens).
 
 A REAL ThreadingHTTPServer on an ephemeral 127.0.0.1 port, never a mock.
 """
@@ -197,6 +197,102 @@ def test_one_response_code_for_both_servers():
 
 
 # ---------------------------------------------------------------------------------------------
+# the payload rules (rig_serve_files.program_audio_response), served by this endpoint only since
+# the dev1 lease route was retired (issue 1404, 8.10.2026)
+# ---------------------------------------------------------------------------------------------
+
+
+def test_the_endpoint_recomputes_last_foreign_age_too(tmp_path):
+    serve = _serve(tmp_path)
+    now = datetime.now(timezone.utc)
+    payload = {"verdict": "MEASUREMENT", "ts_utc": rsf.format_ts_utc(now - timedelta(seconds=1)),
+               "age_s": 0.0, "last_foreign_ts_utc": rsf.format_ts_utc(now - timedelta(seconds=7))}
+    (serve / rsf.PROGRAM_AUDIO_NAME).write_text(json.dumps(payload), encoding="utf-8")
+    with _Http(serve) as h:
+        _status, _h, body = h.request("GET", "/program-audio.json")
+    assert 6.0 <= json.loads(body)["last_foreign_age_s"] <= 9.0
+
+
+def test_an_unreadable_file_is_served_fail_closed_unknown(tmp_path):
+    serve = _serve(tmp_path)
+    (serve / rsf.PROGRAM_AUDIO_NAME).mkdir()  # open() raises IsADirectoryError
+    with _Http(serve) as h:
+        status, _h, body = h.request("GET", "/program-audio.json")
+    assert status == 200
+    got = json.loads(body)
+    assert got["verdict"] == "UNKNOWN" and got["age_s"] is None
+    assert "unreadable" in got["reason"]
+
+
+def test_an_unparseable_ts_has_null_age(tmp_path):
+    serve = _serve(tmp_path)
+    (serve / rsf.PROGRAM_AUDIO_NAME).write_text(
+        json.dumps({"verdict": "MEASUREMENT", "ts_utc": "yesterday", "age_s": 0.0}), encoding="utf-8")
+    with _Http(serve) as h:
+        _status, _h, body = h.request("GET", "/program-audio.json")
+    assert json.loads(body)["age_s"] is None
+
+
+def _pa_payload(**over):
+    p = {"schema": 1, "ts_utc": rsf.format_ts_utc(datetime.now(timezone.utc) - timedelta(seconds=2)),
+         "age_s": 0.0, "verdict": "MEASUREMENT", "rms_dbfs": -35.6, "outside_band_pct": 16.8, "window_s": 2.0,
+         "source": "STREAM-SNV (stream)", "last_foreign_ts_utc": None, "markers_decoded": 9,
+         "marker_chain": 7}
+    p.update(over)
+    return p
+
+
+def _served(tmp_path, payload):
+    serve = tmp_path / "serve"
+    serve.mkdir(mode=0o700, exist_ok=True)
+    (serve / rsf.PROGRAM_AUDIO_NAME).write_text(json.dumps(payload), encoding="utf-8")
+    return rsf.program_audio_response(str(serve / rsf.PROGRAM_AUDIO_NAME), datetime.now(timezone.utc))
+
+
+def test_a_measurement_without_a_marker_chain_is_served_as_unknown(tmp_path):
+    """issue 1404 (ROZHODNUTÉ 6026826572): MEASUREMENT needs the QPSK marker chain. A payload that
+    says MEASUREMENT without one comes from a sampler older than that requirement (it keeps running
+    after a pull until it is restarted). The server is the one place every consumer reads -- the
+    camera-box guard AND restreamer's own reader -- so it serves such a payload as UNKNOWN."""
+    p = _pa_payload()
+    del p["marker_chain"], p["markers_decoded"]
+    got = _served(tmp_path, p)
+    assert got["verdict"] == "UNKNOWN"
+    assert "marker chain" in got["reason"]
+    assert 1.0 <= got["age_s"] <= 6.0  # the ages stay: a stale reading still reads stale
+    assert got["rms_dbfs"] == -35.6 and got["outside_band_pct"] == 16.8
+
+
+def test_a_measurement_with_a_non_count_marker_chain_is_served_as_unknown(tmp_path):
+    for bad in (None, "7", True, -1, 2.5):
+        got = _served(tmp_path, _pa_payload(marker_chain=bad))
+        assert got["verdict"] == "UNKNOWN", bad
+
+
+def test_a_measurement_with_its_marker_chain_is_served_unchanged(tmp_path):
+    got = _served(tmp_path, _pa_payload(marker_chain=7))
+    assert got["verdict"] == "MEASUREMENT" and got["marker_chain"] == 7
+    assert "reason" not in got
+
+
+def test_silent_and_foreign_are_served_without_a_marker_chain(tmp_path):
+    for verdict in ("SILENT", "FOREIGN", "UNKNOWN"):
+        p = _pa_payload(verdict=verdict, marker_chain=None, markers_decoded=None)
+        assert _served(tmp_path, p)["verdict"] == verdict
+
+
+def test_program_audio_from_another_owner_is_served_as_unknown(tmp_path, monkeypatch):
+    serve = _serve(tmp_path)
+    (serve / rsf.PROGRAM_AUDIO_NAME).write_text(
+        json.dumps({"verdict": "MEASUREMENT", "ts_utc": rsf.format_ts_utc(datetime.now(timezone.utc))}),
+        encoding="utf-8")
+    monkeypatch.setattr(rsf, "owned_by_me", lambda st: False)
+    got = rsf.program_audio_response(str(serve / rsf.PROGRAM_AUDIO_NAME), datetime.now(timezone.utc))
+    assert got["verdict"] == "UNKNOWN"
+    assert "owner" in got["reason"]
+
+
+# ---------------------------------------------------------------------------------------------
 # the sampler's CLI: port, bind, serve dir; the endpoint's lifetime is the sampler's
 # ---------------------------------------------------------------------------------------------
 
@@ -207,7 +303,6 @@ def test_the_cli_defaults_and_env_overrides(monkeypatch, tmp_path):
     args = pas.build_parser().parse_args([])
     assert args.http_port == pas.DEFAULT_HTTP_PORT == 8891
     assert args.http_bind == "0.0.0.0"
-    assert args.serve_dir == rsf.default_serve_dir()
     monkeypatch.setenv(pas.HTTP_PORT_ENV, "18899")
     monkeypatch.setenv(pas.HTTP_BIND_ENV, "127.0.0.1")
     monkeypatch.setenv(pas.SERVE_DIR_ENV, str(tmp_path / "s"))

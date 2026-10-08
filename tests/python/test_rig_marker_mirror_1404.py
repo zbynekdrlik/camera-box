@@ -695,7 +695,7 @@ def test_the_mirror_is_a_long_running_service_not_a_timer():
     assert not (SYSTEMD / "rig-marker-mirror.timer").exists()
 
 
-@pytest.mark.parametrize("unit", ["rig-marker-mirror.service", "program-audio-sampler.service"])
+@pytest.mark.parametrize("unit", ["rig-marker-mirror.service", "program-audio-sampler.strih-lx.service"])
 def test_the_units_read_a_private_env_file_never_the_global_environment_d(unit):
     s = (SYSTEMD / unit).read_text(encoding="utf-8")
     env_files = re.findall(r"^EnvironmentFile=(.*)$", s, re.M)
@@ -706,11 +706,12 @@ def test_the_units_read_a_private_env_file_never_the_global_environment_d(unit):
 
 
 def test_the_new_units_ship_disabled():
-    """No provisioning/install script enables them; the supervisor does, on dev1."""
+    """No provisioning/install script enables the dev1 mirror; the supervisor does, on dev1. (The
+    program-audio sampler is no dev1 unit: setup-strih step 16e enables it on strih-lx.)"""
     hits = []
     for p in list(_SCRIPTS.glob("*.sh")) + list((_SCRIPTS / "lib").glob("*.sh")):
         text = p.read_text(encoding="utf-8", errors="replace")
-        for unit in ("rig-marker-mirror", "program-audio-sampler"):
+        for unit in ("rig-marker-mirror",):
             if re.search(rf"enable[^\n]*{unit}", text):
                 hits.append(f"{p.name}: {unit}")
     assert hits == []
