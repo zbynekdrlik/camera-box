@@ -4,13 +4,20 @@
 //! and the QPSK marker from the recording's AUDIO track (the hand-mic'd cam2 HDMI marker, captured
 //! into the stream OBS as the "mbc" input), then pairs them via the cam2 emit log
 //! (`index → frame_id`) to compute the video↔audio offset. Cross-platform (ffmpeg + the pure
-//! `qpsk_marker` decode + `recording::analyze_recording`) so it runs ON stream.lan alongside the
+//! `qpsk_marker` decode + the `recording` analysis) so it runs ON stream.lan alongside the
 //! zero-loss `recording-verdict` (#193). All the JUDGEMENT (decode, pair, offset, interpolation)
 //! is pure Tier-0 in `crate::qpsk_marker`, and the per-channel decode + best-channel pick (issue
-//! 1367, never a downmix) in `crate::qpsk_channel_select`; this module is only the ffmpeg I/O glue.
+//! 1367, never a downmix) in `crate::qpsk_channel_select`; what the video decode requests (issue
+//! 1404) is `crate::av_sync_decode_plan`. This module is only the ffmpeg I/O glue.
 
 use crate::av_run_pairing::{check_av_run, run_frame_tick, run_tick_samples};
-use crate::probe::recording::analyze_recording;
+use crate::av_sync_decode_plan::{
+    av_decode_request, no_cam2_tick_message, painter_head_request, painter_head_verdict,
+    PainterHead, PAINTER_HEAD_FRAMES,
+};
+use crate::probe::recording::{
+    analyze_recording_head, analyze_recording_with_grouped_burns_optical,
+};
 use crate::qpsk_channel_select::{
     decode_best_channel, f32le_to_channels, ffmpeg_extract_args, ffprobe_channels_args,
     parse_ffprobe_channels, BestChannelDecode, ChannelPick,
@@ -202,6 +209,36 @@ fn decode_best_audio_channel(
     })
 }
 
+/// Issue 1404: the painter path's head check. Decodes the first [`PAINTER_HEAD_FRAMES`] frames with
+/// the head request (nothing required, so no frame goes robust) and stops with "no cam2 tick" when
+/// they show the self-marked measurement clip and none of them a cam2 tick or a rig node burn
+/// (`painter_head_verdict`). Any other head goes on to the unchanged full decode.
+fn check_painter_head(recording: &Path) -> Result<()> {
+    let request = painter_head_request();
+    let head = analyze_recording_head(
+        recording,
+        PAINTER_HEAD_FRAMES,
+        &request.mandatory_burns,
+        request.min_distinct_optical,
+    )
+    .with_context(|| format!("decode the head of {}", recording.display()))?;
+    let seen: Vec<(Option<u32>, Vec<u32>)> = head
+        .iter()
+        .map(|f| (f.tick, f.payloads.iter().map(|p| p.run_id).collect()))
+        .collect();
+    let verdict = painter_head_verdict(&seen);
+    tracing::info!(
+        file = %recording.display(), head_frames = head.len(), verdict = ?verdict,
+        "av-sync painter head (issue 1404): a cam2 tick or a rig burn sends it to the full decode"
+    );
+    match verdict {
+        PainterHead::FullDecode => Ok(()),
+        PainterHead::NoCam2Tick { frames } => {
+            anyhow::bail!("{}: {}", recording.display(), no_cam2_tick_message(frames))
+        }
+    }
+}
+
 /// Measure the A/V-sync offset of `recording` (which carries BOTH the cam2 dual-QR video and the
 /// mbc audio marker) using the cam2 `marker_log_csv` (the emitter's `index,frame_id,emit_ts_ns`).
 ///
@@ -241,8 +278,20 @@ pub fn av_sync_from_recording(
     let audio_start = probe_stream_start_time(recording, &format!("a:{audio_track}"))?;
 
     // Video: decode every frame's optical tick → sorted (tick, video_ts) samples, first per tick.
-    let frames = analyze_recording(recording)
-        .with_context(|| format!("decode video {}", recording.display()))?;
+    // Issue 1404: the decode asks the #207 gate for exactly the QRs this path reads
+    // (`crate::av_sync_decode_plan`); the painter path stops after a cheap head on a recording with
+    // neither a cam2 tick nor a rig burn, instead of running every frame through the robust recovery.
+    if av_run.is_none() {
+        check_painter_head(recording)?;
+    }
+    let request = av_decode_request(av_run);
+    let frames = analyze_recording_with_grouped_burns_optical(
+        recording,
+        &request.mandatory_burns,
+        &[],
+        request.min_distinct_optical,
+    )
+    .with_context(|| format!("decode video {}", recording.display()))?;
     let ticks: Vec<(u32, f64)> = match av_run {
         None => {
             let mut ticks: Vec<(u32, f64)> = Vec::new();
