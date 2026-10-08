@@ -69,21 +69,58 @@ fn run_gate_env(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, Stri
     )
 }
 
-fn tmp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "camera-box-version-gate-test-{tag}-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A fresh, uniquely named temp dir that is removed when it drops (issue 1395: the old pid-named
+/// dir was never removed and piled up in the shared dev1 /tmp).
+fn tmp_dir(tag: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("camera-box-version-gate-test-{tag}-"))
+        .tempdir()
+        .unwrap()
 }
 
-/// Write `text` to a fixture file and return its path (the CAMERA_BOX_VERSION_GATE_VERSION_<NAME>
+/// A version fixture file inside its own temp dir. It derefs to the file's path, and the dir (with
+/// the file) is removed when the fixture drops at the end of the test (issue 1395).
+struct VersionFixture {
+    _dir: tempfile::TempDir,
+    path: PathBuf,
+}
+
+impl std::ops::Deref for VersionFixture {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+/// Write `text` to a fixture file and return it (the CAMERA_BOX_VERSION_GATE_VERSION_<NAME>
 /// seam cats the file, mirroring dantesync-version-gate.sh's own version fixture convention).
-fn write_version_fixture(tag: &str, text: &str) -> PathBuf {
-    let p = tmp_dir(tag).join("version.txt");
-    std::fs::write(&p, text).unwrap();
-    p
+fn write_version_fixture(tag: &str, text: &str) -> VersionFixture {
+    let dir = tmp_dir(tag);
+    let path = dir.path().join("version.txt");
+    std::fs::write(&path, text).unwrap();
+    VersionFixture { _dir: dir, path }
+}
+
+/// issue 1395: a fixture's temp dir is removed when the fixture drops at the end of its test. The
+/// pid-named dir used to stay in /tmp forever (108 leftovers on dev1, one per tag per test run).
+#[test]
+fn version_fixture_dir_is_removed_when_the_fixture_drops_1395() {
+    let fixture = write_version_fixture("drop1395", "camera-box 1.7.0-dev.1\n");
+    let dir = fixture
+        .parent()
+        .expect("a fixture file lives in its own temp dir")
+        .to_path_buf();
+    assert!(
+        dir.is_dir(),
+        "the fixture dir exists while the fixture is alive"
+    );
+    drop(fixture);
+    assert!(
+        !dir.exists(),
+        "issue 1395: the fixture's temp dir must be removed once the fixture drops: {}",
+        dir.display()
+    );
 }
 
 // ---------------------------------------------------------------------------

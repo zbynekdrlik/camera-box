@@ -1831,3 +1831,28 @@ every fixture's skews (-4/8/-6, 3/-9, -40/52) happened to sort the same both way
 - give every parity fixture at least one set of values whose text order differs from their number
   order (8, 25, -100, 99: the text max is 99, the number max 100). A fixture that sorts the same
   both ways cannot catch the bug.
+
+## A sourced lib that DELETES files must reset the caller's shell state first (issue 1395)
+
+A function a caller runs as a bare statement inherits that caller's shell state, also inside a
+`( ... )` subshell. A fresh-context review reproduced each of these on the first cut of
+`scripts/lib/e2e-rundir-retention.sh`:
+- with `nocasematch` + `nocaseglob`, the name check accepted an upper-case look-alike and it was
+  removed;
+- with `failglob`, an empty parent killed the subshell before its one log line;
+- with `IFS` set to newline+tab, the `read -r mtime name` loop removed nothing.
+
+So a lib that removes anything starts its subshell body with `set +e +f`,
+`shopt -u nocasematch nocaseglob failglob`, `unset GLOBIGNORE`, `IFS=$' \t\n'` and
+`export LC_ALL=C`; none of it leaks back to the caller. Test each one by running the helper behind
+that caller state (the `caller_setup` argument of `_run` in
+`tests/python/test_e2e_rundir_retention_1395.py`). Two traps in those tests:
+- **GLOBIGNORE patterns match the whole expanded path, and `*` there does not cross `/`.** A test
+  `GLOBIGNORE='*recording-e2e-4'` ignores nothing, so it passes with or without the reset. Use the
+  full path (`GLOBIGNORE="$2/recording-e2e-4"`, the parent passed as an argument).
+- **Pin a printed size through a `du` stub, never a real file.** 3076 KiB prints "3.0 MB" under both
+  `/1024` and `/1000`, so a real 3 MiB file cannot see the unit. A stub reporting 5000 KiB pins the
+  exact `4.8 MB` and makes the test filesystem-independent.
+
+The locale half (a bracket range under en_US.UTF-8) is the issue-1302 entry above: spell the digit
+set out (`[0123456789]`) and pin it with a lint.

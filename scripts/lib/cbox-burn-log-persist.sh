@@ -17,8 +17,9 @@
 # be the very latest run.
 #
 # This lib mirrors the proven `cam1-capture-stats.txt` per-run scp-back sidecar: a few KB per run
-# turns "only the latest run is inspectable" into "every archived /tmp/recording-e2e-<RUN_ID>/ on
-# dev1 carries its own cam-box capture-rate ground truth".
+# turns "only the latest run is inspectable" into "every retained /tmp/recording-e2e-<RUN_ID>/ on
+# dev1 carries its own cam-box capture-rate ground truth" (the newest 9 run dirs since issue 1395,
+# scripts/lib/e2e-rundir-retention.sh).
 #
 # The DECISION LOGIC (which path each box writes, the per-run OUTDIR filename) lives here as pure
 # functions so it is Tier-0 unit-testable (tests/harness_cbox_burn_log_persist.rs); the

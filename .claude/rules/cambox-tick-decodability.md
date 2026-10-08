@@ -26,6 +26,8 @@ splitter topology (a per-box-own-camera era, where only cam2's box saw the Verni
 
 ## Verify from verdict data, not the doc
 
+(dev1 keeps only the newest 9 run dirs since issue 1395; to mine more, see the
+`scripts/lib/e2e-rundir-retention.sh` header.)
 Mine `/tmp/recording-e2e-*/verdict-*.json` → `all_cambox_continuity.segments[]`. On real runs
 (measured across 76 local verdicts, #768) the non-cam2 windows decode fine:
 
