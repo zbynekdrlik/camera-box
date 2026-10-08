@@ -23,6 +23,9 @@
 #     <parent_dir> whose name is exactly recording-e2e-<digits> (newest by mtime);
 #   * keep = the 3rd argument, else E2E_RUNDIR_KEEP, else 8; anything but a plain non-negative
 #     integer (1-6 digits) removes nothing;
+#   * "digits" means the ASCII 0-9 only, spelled out in every bracket set: under dev1's
+#     en_US.UTF-8 a bash bracket RANGE also matches Arabic-Indic, superscript and fullwidth
+#     digits (the issue-1302 locale trap; GitHub's C.UTF-8 runners never see it);
 #   * removes the older ones with rm -rf, which unlinks a symlink INSIDE a run dir and never
 #     descends into its target;
 #   * never touches any other name, a regular file, or a symlink named like a run dir (never
@@ -42,12 +45,12 @@ e2e_rundir_retention() {
 _e2e_rundir_retention_run() {
   set +e
   local parent="${1:-}" current="${2:-}" keep="${3:-${E2E_RUNDIR_KEEP:-8}}"
-  local tag="e2e-rundir-retention:" run_re='^recording-e2e-[0-9]+$'
+  local tag="e2e-rundir-retention:" run_re='^recording-e2e-[0123456789]+$'
   if [ -z "$parent" ] || [ ! -d "$parent" ]; then
     echo "$tag no run-dir parent '${parent}' -- nothing to prune"
     return 0
   fi
-  if ! [[ $keep =~ ^[0-9]{1,6}$ ]]; then
+  if ! [[ $keep =~ ^[0123456789]{1,6}$ ]]; then
     echo "$tag keep '${keep}' is not a non-negative integer -- removed nothing under ${parent}"
     return 0
   fi
@@ -65,7 +68,7 @@ _e2e_rundir_retention_run() {
     [ -n "$cur_name" ] && [ "$name" = "$cur_name" ] && continue
     [ -n "$current" ] && [ "$entry" -ef "$current" ] && continue
     mtime="$(stat -c %Y -- "$entry" 2>/dev/null)"
-    [[ $mtime =~ ^[0-9]+$ ]] || continue
+    [[ $mtime =~ ^[0123456789]+$ ]] || continue
     rows+=("$mtime $name")
   done
 
@@ -79,8 +82,8 @@ _e2e_rundir_retention_run() {
       fi
       entry="$parent/$name"
       kb="$(du -sk -- "$entry" 2>/dev/null)"
-      kb="${kb%%[!0-9]*}"
-      [[ $kb =~ ^[0-9]+$ ]] || kb=0
+      kb="${kb%%[!0123456789]*}"
+      [[ $kb =~ ^[0123456789]+$ ]] || kb=0
       if rm -rf -- "$entry" 2>/dev/null && [ ! -e "$entry" ]; then
         removed=$((removed + 1))
         freed_kb=$((freed_kb + kb))
