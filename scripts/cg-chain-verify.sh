@@ -128,6 +128,15 @@ _iterations() {
   }'
 }
 
+if [ -n "$CSV_PATH" ] && [ ! -s "$CSV_PATH" ]; then
+  cg_chain_csv_header > "$CSV_PATH"
+elif [ -n "$CSV_PATH" ] && [ "$(head -n 1 "$CSV_PATH")" != "$(cg_chain_csv_header)" ]; then
+  # issue 1302 appended a column: appending rows to a CSV written by an older tool version would make
+  # it ragged, so refuse it loudly instead.
+  echo "cg-chain-verify: $CSV_PATH carries a different column header (an older tool version?); appending would make it ragged -- use a new --csv path" >&2
+  exit 2
+fi
+
 # VERDICT stays the LAST column: rig-health-audit.py cg_chain_detail_from_output reads it as the
 # last token of a row (issue 1302 put the dLTCH column before it).
 printf '%-7s %-14s %-4s %-5s %-7s %-6s %-5s %-5s %-6s %-5s %-9s %-12s %-6s %s\n' \
@@ -135,9 +144,6 @@ printf '%-7s %-14s %-4s %-5s %-7s %-6s %-5s %-5s %-6s %-5s %-9s %-12s %-6s %s\n'
 
 overall_fail=0
 verified=0
-if [ -n "$CSV_PATH" ] && [ ! -s "$CSV_PATH" ]; then
-  cg_chain_csv_header > "$CSV_PATH"
-fi
 
 run_one_window() {
   local hop log sources src summary verdict_out verdict ts asrc band
@@ -215,9 +221,12 @@ run_one_window() {
       fi
       printf '%-7s %-14s %-4s %-5s %-7s %-6s %-5s %-5s %-6s %-5s %-9s %-12s %-6s %s\n' \
         "$hop" "$src" "$lockw" "$samples" "$maxskew" "$d_drop" "$d_und" "$d_rel" "$d_late" "$d_brt" "$asrcw" "$audiow" "$dltchw" "$verdict"
-      if [ "${sh_graded:-0}" -gt 0 ]; then
-        printf '         shallow: latched depth %s frame(s) = %s ms @ %s fps; SKEWms is the head-age excursion from it (raw max |skew| %s ms)\n' \
+      if [ "${sh_graded:-0}" -gt 0 ] && [ -n "$sh_target" ]; then
+        printf '         shallow: worst sample at latched depth %s frame(s) = %s ms @ %s fps; SKEWms is its head-age excursion (raw max |skew| %s ms)\n' \
           "$sh_depth" "$sh_target" "$sh_fps" "$rawskew"
+      elif [ "${sh_graded:-0}" -gt 0 ]; then
+        printf '         shallow: the worst sample carried no latched depth or canvas rate, so SKEWms is its absolute head age (raw max |skew| %s ms)\n' \
+          "$rawskew"
       fi
       verified=$((verified + 1))
       if [ "$verdict" != "PASS" ]; then
