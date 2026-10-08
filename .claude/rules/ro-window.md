@@ -117,6 +117,10 @@ Three dev1-side pure parsers:
     on it). An idempotent re-run on a read-only root never remounts.
   - A failed write, mask or rw remount fails by name; a failure inside the window reaches the EXIT
     trap, which runs the same verified close (`test_apply_failure_inside_the_window_*` pins it).
+  - The apt timers/services are stopped BEFORE the window (they are masked inside it). Accepted
+    residual (review round 3): `logrotate.timer` (every 15 min) stays armed, since stopping it would
+    need a restart on every exit path, the trap's included. A run it starts inside the ~1 s window
+    holds a writer; the verified close then fails loud and starts nothing, and a re-run fixes it.
   - Its whole program runs in ONE function called with `</dev/null`, since it arrives on `bash -s`
     stdin (the rt-kernel-plan stdin finding).
   - The fake box of `ro_window_fakes_1407.py` gained `mask`/`unmask` (refused on a ro root, like

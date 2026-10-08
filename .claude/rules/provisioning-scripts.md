@@ -497,17 +497,21 @@ section above), and a box that reads `degraded` hides real failures.
   daemon-reload, reset-failed, one logrotate run, the netconsole restart, and an
   `is-system-running` = running read-back. A box without the issue-1311 unit gets a NOTE and no new unit (that box needs its
   setup-device re-run); the CLI's RESULT names it.
-  - **It is a root write on a cambox, so `--apply` runs the rig guard before EVERY box** and refuses
-    (exit 1) while the rig is held (`rig_held_reason` in `scripts/lib/rig-heartbeat.sh`: a fresh
-    issue-281 heartbeat or a live issue-830 lease) or strih/stream record or stream
-    (`stray_session_check_assert`, the shared rig-busy guard, run in a subshell so its `exit 1`
-    returns to the CLI). A refusal mid-run stops before that box, names every untouched box and
-    still summarises the boxes already done: one box can take minutes (the netconsole arm waits for
-    dev1), so a guard read once per run let an E2E start in between (review round 2, reproduced).
-    `--force-live` skips the guard loudly (supervisor-only). `--plan` runs no guard.
-  - **The RESULT tells two failures apart:** a box whose files landed but a check after the close
-    failed (the netconsole arm, a failed unit; named by its first `FAIL: [issue 1394]` line) and a
-    box where the unit set did not land. A netconsole that cannot arm FAILS the box although
+  - **It is a root write on a cambox, so `--apply` TAKES the rig lease for its whole run** (repo
+    `camera-box-ro-units-apply`, a per-run id, released on EXIT/INT/TERM; a live foreign holder
+    refuses the run before any box, a stale one is reclaimed). One box can take minutes (the
+    netconsole arm waits for dev1), so a lease only READ once per run let an E2E start in between
+    (review rounds 2-3, reproduced). Before EVERY box it also refuses (exit 1) while the rig is held
+    otherwise (`rig_held_reason [stale] [own_run_id]` in `scripts/lib/rig-heartbeat.sh`: a fresh
+    issue-281 heartbeat -- rig-mode.sh TEST takes no lease -- or a live lease that is not ours) or
+    strih/stream record or stream (`stray_session_check_assert`, the shared rig-busy guard, run in a
+    subshell so its `exit 1` returns to the CLI). A refusal mid-run stops before that box (never
+    `continue`), and the RESULT names the boxes already done (`RESULT: in place on:`) and every
+    untouched one. `--force-live` skips the lease and the guard loudly (supervisor-only). `--plan`
+    runs no guard. A box named twice is applied once.
+  - **The RESULT tells two failures apart:** a box whose files landed but a step outside the rw
+    window failed (the apt stop before it, the netconsole arm or a failed unit after it; named by its
+    first `FAIL: [issue 1394]` line) and a box where the unit set did not land. A netconsole that cannot arm FAILS the box although
     `is-system-running` then reads running: a `Restart=on-failure` oneshot in auto-restart is
     `activating`, not `failed`.
   - **A failed unit is fixed by the apply, never by a setup-device re-run**: setup-device never runs

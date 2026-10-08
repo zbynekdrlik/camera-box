@@ -140,7 +140,7 @@ Tier-0 boot-order coverage: `tests/python/test_remote_logging_boot_order_1311.py
 
 ## The netconsole oneshot RETRIES a failed arm (issue 1394, live 8.10.2026)
 
-The in-script retry above is bounded (~60 s route + ~60 s MAC), and once it gave up the oneshot
+The in-script retry above is bounded (~60 s route + ~60-90 s MAC), and once it gave up the oneshot
 stayed `failed` until the next boot: cam1's netconsole had been failed since 4.10. 06:24Z (the reason
 was rotated away), no kernel printk reached dev1, and the box read `degraded`. The unit now carries
 `Restart=on-failure` + `RestartSec=30` + `RestartSteps=4` + `RestartMaxDelaySec=600` in `[Service]`
