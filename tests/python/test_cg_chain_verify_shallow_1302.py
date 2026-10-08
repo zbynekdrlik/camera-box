@@ -84,6 +84,9 @@ def _lib(tmp_path, text, body, *args):
     r = subprocess.run(["bash", "-c", script, "harness", str(_LIB), str(log), *args],
                        capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+    # a lib function never writes stderr: an awk runtime error (gawk aborts on a division by zero
+    # where mawk prints inf) would otherwise pass as an empty facet
+    assert r.stderr == "", r.stderr
     return r.stdout
 
 
@@ -150,6 +153,15 @@ def test_the_target_rounds_two_and_four_frames_on_a_30_fps_canvas(tmp_path):
     assert r.returncode == 3 and _row(r.stdout)[4] == "21", r.stdout
 
 
+def test_the_excursion_rounds_half_up_at_the_bar(tmp_path):
+    # D=2 -> 66.67 ms; head age 46 -> excursion 20.67 -> 21 > 20 FAILs (a truncation would read 20
+    # and pass it).
+    text = _line(0, 46, depth=2, latches=1) + _line(5, 46, depth=2, latches=1)
+    r = _run(tmp_path, text)
+    assert r.returncode == 3, r.stdout
+    assert _row(r.stdout)[4] == "21", r.stdout
+
+
 def test_the_interval_comes_from_the_line_canvas_rate(tmp_path):
     # A 60 fps canvas: D=3 -> 50 ms.
     text = _line(0, 50, depth=3, latches=2, fps="60.000") + _line(5, 50, depth=3, latches=2, fps="60.000")
@@ -164,6 +176,31 @@ def test_an_unknown_canvas_rate_keeps_the_absolute_grading(tmp_path):
     text = _line(0, 100, depth=3, latches=2, fps="0.000") + _line(5, 100, depth=3, latches=2, fps="0.000")
     r = _run(tmp_path, text)
     assert r.returncode == 3 and _row(r.stdout)[4] == "100", r.stdout
+    # the facet is still read (no awk error): nothing graded, the latch delta kept
+    out = _lib(tmp_path, text, "printf '%s\\n' \"$LOG\" | cg_chain_shallow_window 'CG-obs'")
+    assert out.strip() == "0|100|3||0|", out
+
+
+def test_the_reason_names_the_sample_that_produced_the_max(tmp_path):
+    # The worst term comes from a sample with no canvas rate (graded absolutely), while another
+    # sample of the window was graded against D: the reason must not blame the latched depth.
+    text = _line(0, 100, depth=3, latches=4) + _line(5, 100, depth=3, latches=4, fps="0.000")
+    r = _run(tmp_path, text)
+    assert r.returncode == 3, r.stdout
+    reasons = _reasons(r.stdout)
+    skew = [x for x in reasons if "excursion" in x]
+    assert len(skew) == 1 and skew[0].startswith("skew excursion 100 ms"), reasons
+    assert "graded absolutely" in skew[0] and "latched shallow depth" not in skew[0], skew
+    out = _lib(tmp_path, text, "printf '%s\\n' \"$LOG\" | cg_chain_shallow_window 'CG-obs'")
+    assert out.strip() == "1|100|3||0|", out
+
+
+def test_a_source_name_with_an_fps_like_text_never_sets_the_rate(tmp_path):
+    # The rate is read from the `(... frames @ F fps)` parenthetical, never from the source name.
+    src = "cg @ 60fps"
+    text = _line(0, 100, depth=3, latches=1, src=src) + _line(5, 100, depth=3, latches=1, src=src)
+    r = _run(tmp_path, text, src=src)
+    assert r.returncode == 0, r.stdout
 
 
 def test_an_unsampled_tick_is_not_an_excursion(tmp_path):
@@ -247,6 +284,8 @@ def test_a_re_latch_in_the_window_fails_with_its_reason(tmp_path):
     assert row[-1] == "FAIL" and row[-2] == "2", r.stdout
     latch = [x for x in _reasons(r.stdout) if "re-latch" in x]
     assert len(latch) == 1 and latch[0].startswith("2 shallow re-latch"), r.stdout
+    # every latch counts, a lock or a re-measure (obs-source.c increments on any latch)
+    assert "re-measure" in latch[0], latch[0]
 
 
 def test_the_table_carries_dltch_before_the_verdict(tmp_path):
@@ -273,6 +312,18 @@ def test_the_csv_appends_d_shallow_latches(tmp_path):
     assert plain_row[-1] == "" and plain_row[4] == "9", lines[2]
 
 
+def test_a_csv_from_an_older_tool_version_is_refused_not_made_ragged(tmp_path):
+    csv = tmp_path / "old.csv"
+    old = ("ts_utc,hop,source,verdict,max_abs_skew_ms,d_dropped,d_underruns,d_relocks,d_late_holds,"
+           "d_backward_regime,asrc_ppm,audio_enabled,audio_delay_ms,audio_pairing_offset_ms\n"
+           "T,strih,cg,PASS,8,0,0,0,0,0,7.62,0,0,-99\n")
+    csv.write_text(old)
+    r = _run(tmp_path, _LIVE, args=("--csv", str(csv)))
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "different column header" in r.stderr
+    assert csv.read_text() == old
+
+
 def test_the_csv_row_helper_takes_the_appended_column(tmp_path):
     out = _lib(tmp_path, "", 'cg_chain_csv_header; cg_chain_csv_row "$@"',
                "T", "strih", "cg", "PASS", "0", "0", "0", "0", "0", "0", "7.62", "0", "0", "-99", "3")
@@ -289,7 +340,10 @@ def test_help_prints_the_shallow_paragraph():
 # ---------------------------------------------------------------------------------------------
 # the rig-health fold still reads the verdict as the last token
 # ---------------------------------------------------------------------------------------------
-def test_rig_health_fold_counts_a_shallow_pass(tmp_path):
+def test_the_rig_health_fold_still_reads_the_verdict_as_the_last_token(tmp_path):
+    # This pins the FOLD over the tool's table (dLTCH sits before VERDICT, the `shallow:` line ends
+    # in no verdict word). It does not claim the rig-health row itself reads strih-lx `CG-obs`: that
+    # row still runs the strih hop with the default source.
     spec = importlib.util.spec_from_file_location("rig_health_audit_1302", _AUDIT)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
