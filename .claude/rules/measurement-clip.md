@@ -206,6 +206,13 @@ Then the probe-gated `tests/*.rs` compile with `--cfg 'feature="probe"' --extern
 and `clippy-driver -D warnings` lints them. That ran the edited `av_sync_from_recording` end to end on
 the fixture: clean -0.15 ms, audio early +99.87 ms, painter path stops with the head reason.
 
+**Heavy real-clip decodes run on dev2, not dev1** (issue 1404). Build the release replica binary on
+dev1 with plain rustc. It links Rust statically and needs only glibc; dev2 runs the same Ubuntu
+24.04. Copy the binary and the clips to dev2 and run them under `nice` there. Use 8 cores, not dev1's
+4 shared ones; nine 40 s clips decoded old + new took about 20 min. The `pre-deploy-clean-tree`
+hook refuses any scp while the worktree has uncommitted edits, even a scratch copy that is no deploy.
+Add `# airuleset:deploy-dirty-ok <reason>` to that one scp call.
+
 ## The painter path's full-decode request (ROZHODNUTÉ 6051603225)
 
 **The YouTube-leg fixtures are burns-OFF.** The 5.10 sessions ran with every measurement burn off.
