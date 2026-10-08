@@ -69,7 +69,8 @@ The server also serves `/rig-qpsk-markers.csv` from `--serve-dir` (default
 unit writes that file (`rig-marker-mirror.README.md`).
 
 `/program-audio.json` is not served here any more: the dev1 route was retired on 8.10.2026, and the
-server answers 404 for it. The program-audio sampler runs on strih-lx and serves
+server answers 404 for it once it is restarted on that code (`program-audio-sampler.README.md`,
+the post-merge step). The program-audio sampler runs on strih-lx and serves
 `http://10.77.9.202:8891/program-audio.json` itself (`program-audio-sampler.README.md`).
 
 Picking up a route change needs a `systemctl --user restart rig-lease-server.service`, done while

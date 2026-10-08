@@ -272,7 +272,8 @@ fleet's date master.
   - **A dantesync date step is DATE_STEP, never a hole** (design 6037613222; `frame_continues(...,
     wall_steps=...)`, `WallSteps`, pinned by `tests/python/test_program_audio_datestep_1404.py`).
     - dev1 runs the same fleet dantesync as the stream box (both followers, the same announced
-      `date_offset_seq`), so dev1's own wall clock steps at the same instant.
+      `date_offset_seq`), so dev1's own wall clock steps at the same instant. On strih-lx, the
+      date MASTER, its own wall step is announced together with the stream box's follower step.
     - The capture path reads dev1's wall-minus-monotonic offset with every block: ONE bracketed read
       (`read_wall_offset_ns`: monotonic, wall, monotonic; the wall placed at the middle; a bracket over
       1 ms is retried 3 times, else no reading). Frequency slewing moves both clocks alike, so the
@@ -575,8 +576,9 @@ shim + numpy next to restreamer's broadcast encoder).
   camera-box guard's `DEFAULT_URL`. So the dev1 `--user` unit file is deleted, the dev1 lease server
   answers its plain 404 for `/program-audio.json` (after its restart on this code: the README's
   post-merge step), and the sampler has no dev1 default left. The dev1 unit was disabled live the
-  same day. A rollback to dev1 is a revert of that commit, never a live
-  need: the owner ruled the sampler off dev1. Pinned: `test_the_dev1_sampler_unit_is_gone`,
+  same day. A rollback to dev1 is a revert of this slice's `[green]` commit (`fix(#1404): [green]
+  retire the dev1 program-audio sampler path`), never a live need: the owner ruled the sampler off
+  dev1. Pinned: `test_the_dev1_sampler_unit_is_gone`,
   `test_the_dev1_server_no_longer_serves_program_audio`, `test_the_default_serve_dir_is_the_samplers_own`.
 - **The unit** `systemd/program-audio-sampler.strih-lx.service` (a TEMPLATE) is installed as the
   operator's `--user` `program-audio-sampler.service`:

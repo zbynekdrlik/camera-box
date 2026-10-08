@@ -46,16 +46,22 @@ Post-merge, on dev1 (supervisor). Restart the lease server only while the lease 
 `held=false`; the restart is the only step that touches a running service:
 
 ```bash
-if curl -sf http://127.0.0.1:8890/rig-lease.json \
-     | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("held") is False else 1)'; then
-  systemctl --user restart rig-lease-server.service
+# dev1 ONLY: on strih-lx ~/.config/systemd/user/program-audio-sampler.service is the production
+# sampler unit setup-strih renders, so the block refuses any other host (if, not exit: it is pasted)
+if [ "$(hostname)" = dev1 ]; then
+  if curl -sf http://127.0.0.1:8890/rig-lease.json \
+       | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("held") is False else 1)'; then
+    systemctl --user restart rig-lease-server.service
+  else
+    echo "rig lease held or unreadable -- lease server NOT restarted, retry later"
+  fi
+  rm -f "$XDG_RUNTIME_DIR/rig-lease-serve/program-audio.json"   # the dev1 sampler's last file
+  rm -f ~/.config/systemd/user/program-audio-sampler.service && systemctl --user daemon-reload
+  curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8890/program-audio.json   # 404
+  curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8890/rig-lease.json       # 200
 else
-  echo "rig lease held or unreadable -- lease server NOT restarted, retry later"
+  echo "not dev1 -- nothing done"
 fi
-rm -f "$XDG_RUNTIME_DIR/rig-lease-serve/program-audio.json"   # the dev1 sampler's last file
-rm -f ~/.config/systemd/user/program-audio-sampler.service && systemctl --user daemon-reload
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8890/program-audio.json   # 404
-curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8890/rig-lease.json       # 200
 ```
 
 ## What the sampler does (issue 1404, designs 6030385284, 6036098516, 6037613222)
