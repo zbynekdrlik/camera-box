@@ -41,7 +41,10 @@
 #     many dirs it could not remove;
 #   * ALWAYS returns 0 and never aborts a caller running under set -euo pipefail, on any input (an
 #     empty or missing parent, no match, a failing stat/du/rm): the work runs in a subshell, so even
-#     an unexpected expansion error stays inside it.
+#     an unexpected expansion error stays inside it;
+#   * the caller's shell state never changes the outcome: the subshell turns pathname expansion
+#     back on, clears nocasematch/nocaseglob/failglob and GLOBIGNORE, and runs with the default IFS
+#     and LC_ALL=C (nothing of it leaks back to the caller).
 
 e2e_rundir_retention() {
   (_e2e_rundir_retention_run "$@") || true
@@ -50,7 +53,11 @@ e2e_rundir_retention() {
 
 # The body, always run in the subshell above (never call it directly from a caller under set -e).
 _e2e_rundir_retention_run() {
-  set +e
+  set +e +f
+  shopt -u nocasematch nocaseglob failglob 2>/dev/null
+  unset GLOBIGNORE 2>/dev/null
+  IFS=$' \t\n'
+  export LC_ALL=C
   local parent="${1:-}" current="${2:-}" keep="${3:-${E2E_RUNDIR_KEEP:-8}}"
   local tag="e2e-rundir-retention:" run_re='^recording-e2e-[0123456789]+$'
   if [ -z "$parent" ] || [ ! -d "$parent" ]; then
