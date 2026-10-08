@@ -81,13 +81,13 @@ fn run_gate_env(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, Stri
     )
 }
 
-fn tmp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "dantesync-version-gate-test-{tag}-{}",
-        std::process::id()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// A fresh, uniquely named temp dir that is removed when it drops (issue 1395: the old pid-named
+/// dir was never removed and piled up in the shared dev1 /tmp).
+fn tmp_dir(tag: &str) -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix(&format!("dantesync-version-gate-test-{tag}-"))
+        .tempdir()
+        .unwrap()
 }
 
 /// issue 1395: a test's temp dir is removed when it drops at the end of the test. The pid-named dir
@@ -332,7 +332,7 @@ fn fleet_report_prints_a_box_to_version_table_on_failure() {
 #[test]
 fn cli_win_node_reads_dantesync_version_via_fixture_override() {
     let dir = tmp_dir("win");
-    let path = dir.join("strih.out");
+    let path = dir.path().join("strih.out");
     std::fs::write(&path, "dantesync 1.8.21\n").unwrap();
     let (code, out, err) = run_gate_env(
         &["--pin", "1.8.21", "--win", "strih=newlevel@10.77.9.202"],
@@ -365,7 +365,7 @@ fn cli_win_node_unreachable_is_unknown_never_a_silent_pass() {
 #[test]
 fn cli_local_node_reads_dantesync_version_via_fixture_override() {
     let dir = tmp_dir("local");
-    let path = dir.join("dev1.out");
+    let path = dir.path().join("dev1.out");
     std::fs::write(&path, "dantesync 1.8.17\n").unwrap();
     let (code, out, err) = run_gate_env(
         &["--pin", "1.8.21", "--local", "dev1"],
@@ -381,7 +381,7 @@ fn cli_local_node_reads_dantesync_version_via_fixture_override() {
 #[test]
 fn cli_linux_node_reads_dantesync_version_via_fixture_override() {
     let dir = tmp_dir("linux");
-    let path = dir.join("cam1.out");
+    let path = dir.path().join("cam1.out");
     std::fs::write(&path, "dantesync 1.8.21\n").unwrap();
     let (code, out, err) = run_gate_env(
         &["--pin", "1.8.21", "--linux", "cam1=root@10.77.9.61"],
@@ -507,7 +507,7 @@ fn tray_alarm_is_report_only_does_not_block_an_otherwise_clean_gate() {
     // A clean daemon (matches pin) + a LAGGING tray must still PASS (exit 0): the tray ALARM is
     // report-only. NEWEST==pin isolates the tray alarm from the pin-lag alarm.
     let dir = tmp_dir("tray_report_only");
-    let path = dir.join("strih.out");
+    let path = dir.path().join("strih.out");
     std::fs::write(&path, "dantesync 1.8.48\n").unwrap();
     let (code, out, err) = run_gate_env(
         &["--pin", "1.8.48", "--win", "strih=newlevel@10.77.9.202"],
@@ -544,7 +544,7 @@ fn pin_lag_alarm_is_report_only_does_not_block_an_otherwise_clean_gate() {
     // A clean daemon + a clean tray + a pin BEHIND the newest release must still PASS (exit 0):
     // the lag alarm is report-only.
     let dir = tmp_dir("lag_report_only");
-    let path = dir.join("strih.out");
+    let path = dir.path().join("strih.out");
     std::fs::write(&path, "dantesync 1.8.48\n").unwrap();
     let (code, out, err) = run_gate_env(
         &["--pin", "1.8.48", "--win", "strih=newlevel@10.77.9.202"],
