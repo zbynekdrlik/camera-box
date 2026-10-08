@@ -923,8 +923,12 @@ fn create_usb_partitions_a_dedicated_persistent_journal_partition_1309() {
         body.contains("mkfs.ext4 -L \"$LOG_DIET_JOURNAL_PART_LABEL\""),
         "create-usb-linux.sh must mkfs the journal partition with the shared label (#1309)"
     );
+    // issue 1400: the base-image fstab is built by create_usb_first_boot_fstab, which CALLS the
+    // shared generator (no longer a `$(...)` inside a heredoc). Anchor on the call name; that the
+    // journal line really lands in the written fstab is pinned byte-for-byte by
+    // tests/python/test_image_builder_fstab_1400.py.
     assert!(
-        on_noncomment_line(&body, "$(log_diet_journal_fstab_line)"),
+        on_noncomment_line(&body, "log_diet_journal_fstab_line"),
         "create-usb-linux.sh base-image fstab must mount the journal partition via the shared \
          log_diet_journal_fstab_line (#1309)"
     );
