@@ -134,6 +134,11 @@ because it carried no dantesync — this brings it under the fleet clock-discipl
   adaptation are NOT gated; the frame-jump signal `backward_regime_ticks` IS). For the 24h
   acceptance (skew flat ±20 ms), sample a long OBS-log window and raise `--min-samples`. The
   supervisor owns the live deploy + the 24h run; this is a verify tool, not a hard E2E gate.
+  **Not for a shallow-latched input (issue 1302):** the strih-lx CG input (`CG-obs`, 3 ms pin) is
+  held at a latched depth D (audit `shallow_depth=`), so its head age reads D × interval (100 ms at
+  D=3). `--verdict-source` grades that ABSOLUTE head age and FAILs it by design. Verify the CG feed
+  with `scripts/cg-chain-verify.sh` (`CG_CHAIN_STRIH_SRC=CG-obs`), which grades the excursion from D
+  and counts re-latches (`.claude/rules/cg-chain-verify.md`).
 - **Dev1 fleet registration — the ONE declared OBS_FLEET list (#1296).** resolume is now a member of
   `scripts/lib/obs-fleet.sh` (`OBS_FLEET`, class `windows-genlock`, host `resolume.lan`, home-check
   `traveling`), from which all six dev1 watchdogs DERIVE their box rosters (`.claude/rules/obs-fleet-list.md`).

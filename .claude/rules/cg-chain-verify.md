@@ -4,6 +4,7 @@ paths:
   - "scripts/lib/cg-chain-verify.sh"
   - "tests/harness_cg_chain_verify_1300.rs"
   - "tests/python/test_cg_chain_verify_hops_1380.py"
+  - "tests/python/test_cg_chain_verify_shallow_1302.py"
 ---
 
 # CG-chain receiver-side verdict (#1300)
@@ -30,6 +31,69 @@ the PARITY GATE: it feeds the SAME raw-log + the SAME windows to BOTH the Rust f
 bash replica and asserts identical summaries + PASS/FAIL. **If you change the Rust bounds
 (`PlaybackBounds`) or `jitter_audit::summarize`, the parity test goes RED — update the replica to
 match, never let them drift.** Do not re-derive thresholds in bash from scratch.
+
+**awk compares a `substr()` result as TEXT.** `getval()` returns a `substr()` string, so before
+issue 1302 the window max compared skews lexicographically: 8 then 25 read 8, and 99 then 100 read
+99. The parity fixtures of the time all happened to sort the same both ways. `absval` now does
+`x = x + 0`, and the harness carries a fixture whose text order and number order differ
+(`FIX_NUMERIC`). Coerce every awk value you compare or take a max of (`+ 0`), and give each new
+parity fixture values whose text order differs from their number order.
+
+## Shallow-latched inputs (issue 1302) — a TOOL-ONLY rule on top of the replica
+
+**The problem it fixes.** A shallow N==1 input is held at a latched depth D by design (issue 1367,
+`.claude/rules/genlock-n1-pin-derived-depth.md`). Its audit line carries `shallow_depth=` D. The
+strih-lx `CG-obs` sits at a 3 ms pin. Its `ts_head_skew_ms` (`wall_now - head stamp`) therefore
+reads about D × interval: 100 ms at D=3 on the 30 fps canvas. The absolute 20 ms bar FAILed every
+window of a correctly latched input.
+
+**`cg_chain_shallow_window <source>`** grades each sample's skew term:
+- **Target-relative.** A SAMPLED tick (`ts_present` != 0) with D > 0 and a known canvas rate F gets
+  `round(|ts_head_skew_ms − D × 1000 / F|)`. F comes from the `(≈N frames @ F fps)` parenthetical.
+  This is the head age's excursion from the latched depth.
+- **Absolute, unchanged.** Every other sample gets `|ts_head_skew_ms|`:
+  - an unsampled tick (`genlock_clear_ts_sample` zeroes the skew) keeps its 0;
+  - D = 0 (not N==1) stays absolute;
+  - an unknown rate (`@ 0.000fps`) stays absolute, which is fail-closed.
+
+Its output is `graded|skew_term|depth|target_ms|d_shallow_latches|fps`. It is EMPTY on a log that
+carries neither shallow token.
+
+**`cg_chain_verdict`'s optional fourth argument** takes that line:
+- when `graded > 0`, its skew term replaces the absolute max, with a named `head-age excursion …
+  from the latched shallow depth …` reason;
+- `d_shallow_latches > 0` adds a `shallow re-latch(es)` reason (a lock event: ACQUIRE / GAP RESYNC
+  / pin change);
+- an absent or EMPTY argument is byte-identical to the replica. The parity harness pins that path to
+  `evaluate` too (`verdict_with_an_empty_shallow_argument_matches_evaluate`).
+
+**Why tool-only, not in `resolume_playback::evaluate`:**
+- `evaluate`'s one consumer is `genlock-jitter-report --verdict-source`, a manual resolume
+  maintenance verify;
+- its `jitter_audit` input parses neither `shallow_depth=` nor the canvas rate, so porting the
+  rule means new `AuditSample` fields (kept out of the byte-locked `--json`, #757) and a Rust change
+  no Tier-0 lane can compile;
+- the SongPlayer acceptance (the songplayer genlock series) runs this tool.
+
+So `--verdict-source` still grades a shallow input's ABSOLUTE head age and FAILs it by design. Verify
+the CG feed with this tool instead (the ops skill says so at its recipe).
+
+**What the operator sees:**
+- **table:** `SKEWms` shows the GRADED term. A `shallow:` line under the row names D, the target and
+  the raw max. A new `dLTCH` column sits BEFORE `VERDICT`, because `rig-health-audit.py`'s
+  `cg_chain_detail_from_output` reads the verdict as the LAST token of a row; keep VERDICT last.
+- **CSV:** `d_shallow_latches` is APPENDED after the audio columns. `max_abs_skew_ms` carries the
+  graded term, so the 24 h flatness plot reads the same ±20 ms bar.
+
+Pinned by `tests/python/test_cg_chain_verify_shallow_1302.py`, which includes two real strih-lx
+`CG-obs` lines.
+
+**Live replay 8.10.2026:** strih-lx `CG-obs`, 58 samples, D=3. The window FAILs on real faults only:
+- one 133 ms sample = a 33 ms excursion, one extra frame;
+- `dropped_due` +5 and `underruns` +37;
+- `d_shallow_latches` 0.
+
+Before the fix it read `skew excursion 133 ms` on every window.
 
 ## Hops, sources, and the reader seam
 
@@ -86,5 +150,12 @@ out-of-band present reading folds into the hop verdict; `UNKNOWN` never fails.
   awk-internal comments apostrophe-free (and mind bare `(`/`)` after a stray quote).
 - **Tier-0 (#557, no cargo of any compiling shape):** `bash -n` + `shellcheck -S warning`; source
   the lib and drive the pure functions over fixtures; pytest for the python part
-  (`tests/python/test_cg_chain_rig_health_1300.py`); `cargo fmt --all --check`. The Rust parity
-  harness runs on CI — that is the FIRST place the replica-vs-Rust equality actually executes.
+  (`tests/python/test_cg_chain_rig_health_1300.py`); `cargo fmt --all --check`.
+- **The Rust parity harness runs locally with plain rustc (issue 1302).** Build a std-only
+  `camera_box` stub rlib from the REAL `src/resolume_playback.rs` plus a copy of
+  `src/jitter_audit.rs` with its one serde function (`summaries_to_json`, never called by the
+  harness) cut out. Compile the real `tests/harness_cg_chain_verify_1300.rs` against it with
+  `CARGO_MANIFEST_DIR=<worktree> rustc --edition 2021 --test … --extern camera_box=<rlib>`, plus
+  the same with `clippy-driver -D warnings`, and run the binary from the worktree root. For the RED
+  proof, point `CARGO_MANIFEST_DIR` at an export of the pre-fix scripts. CI remains the
+  authoritative run.

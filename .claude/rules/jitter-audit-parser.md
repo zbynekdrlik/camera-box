@@ -78,6 +78,13 @@ NDI feed plays frame-loss-free on strih/stream after a dantesync roll (#811). La
   (`delta_dropped_due`/`underruns`/`relocks`/`late_holds`/`backward_regime_ticks` == 0);
   `backward_regime_ticks` (#1009) IS the true frame-jump/duplicate signal. Gating holds/overruns
   would false-fail any non-60 source.
+- **The verdict is NOT shallow-aware (issue 1302).** A shallow-latched N==1 input (audit
+  `shallow_depth=` D > 0, the strih-lx `CG-obs` at a 3 ms pin) is held at D frames by design, so
+  its absolute `max_abs_head_skew_ms` reads about D × interval and `evaluate` FAILs it. That rule
+  lives only in `scripts/cg-chain-verify.sh` (`cg_chain_shallow_window`, `.claude/rules/cg-chain-verify.md`),
+  because this parser reads neither `shallow_depth=` nor the canvas rate (the `(≈N frames @ F fps)`
+  parenthetical is skipped on purpose). Verify a shallow input with that tool, not with
+  `--verdict-source`. Porting the rule here means new `AuditSample` fields kept OUT of `--json`.
 - **The verdict lives in a crate-root PURE module** (`src/resolume_playback.rs`, self-contained std,
   no `use crate::…`) so it is standalone-rustc Tier-0 testable (`rustc --test src/resolume_playback.rs`),
   same recipe as `jitter_audit.rs`. The bin maps `AuditSummary → PlaybackWindow` (a trivial field
