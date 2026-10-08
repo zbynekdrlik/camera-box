@@ -50,7 +50,11 @@ SETUP = REPO / "scripts" / "setup-device.sh"
 VERIFY = REPO / "scripts" / "verify-device.sh"
 CLI = REPO / "scripts" / "cambox-ro-units-apply.sh"
 
-APT_UNITS = ["apt-daily.timer", "apt-daily-upgrade.timer", "apt-daily.service", "apt-daily-upgrade.service"]
+# Live 8.10.2026 (issue 1394 apply): after the apt masks, cam3/cam4/cam6/cam7 still read degraded on
+# dpkg-db-backup.service ("savelog: could not touch alternatives.tar", /var/backups on the read-only
+# root), so the daily dpkg database backup is masked with the apt units.
+APT_UNITS = ["apt-daily.timer", "apt-daily-upgrade.timer", "apt-daily.service", "apt-daily-upgrade.service",
+             "dpkg-db-backup.timer", "dpkg-db-backup.service"]
 LR_EXEC = "ExecStart=/usr/sbin/logrotate --state /run/logrotate.status /etc/logrotate.conf"
 LR_RELPATH = "logrotate.service.d/zz-camera-box-ro-root.conf"
 
