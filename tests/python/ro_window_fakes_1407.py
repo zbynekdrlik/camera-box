@@ -13,7 +13,8 @@ Issue 1394 added `mask`/`unmask` (refused on a ro root, like enable), `is-failed
 and `is-system-running` (state/failed-<unit> files; `degraded` while one exists, or
 FAKE_SYSTEM_STATE); a failed start leaves its unit failed, a good start clears it.
 FAKE_RESTART_FAIL_UNIT fails one unit's start/restart WITHOUT a failed state (a Restart= unit in
-auto-restart), FAKE_DAEMON_RELOAD_RC fails `daemon-reload`.
+auto-restart), FAKE_DAEMON_RELOAD_RC fails `daemon-reload`, FAKE_STOP_FAIL_UNIT fails a stop that
+names that unit (anywhere in its list), FAKE_RESET_FAILED_RC fails `reset-failed`.
 
 `run_text(box, text)` runs emitted remote text under `set -e` and `set -euo pipefail` callers' modes
 with PATH = the stub dir only (plus the few real text tools the emitted text needs), so nothing
@@ -127,6 +128,9 @@ elif verb == "is-failed":
         print(state)
     sys.exit(0 if state == "failed" else 1)
 elif verb == "reset-failed":
+    if os.environ.get("FAKE_RESET_FAILED_RC"):
+        sys.stderr.write("Failed to reset failed state: fake failure\n")
+        sys.exit(int(os.environ["FAKE_RESET_FAILED_RC"]))
     for u in units:
         if os.path.exists(path("failed", u)):
             os.remove(path("failed", u))
@@ -137,6 +141,9 @@ elif verb == "is-system-running":
     print(state)
     sys.exit(0 if state == "running" else 1)
 elif verb == "stop":
+    if os.environ.get("FAKE_STOP_FAIL_UNIT") in units:  # one named unit of the list fails to stop
+        sys.stderr.write(f"Failed to stop {os.environ['FAKE_STOP_FAIL_UNIT']}.\n")
+        sys.exit(1)
     if os.environ.get("FAKE_STOP_RC") and not unit.endswith(".timer"):
         sys.stderr.write(f"Failed to stop {unit}.\n")
         sys.exit(int(os.environ["FAKE_STOP_RC"]))

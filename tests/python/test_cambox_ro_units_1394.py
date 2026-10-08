@@ -585,6 +585,9 @@ open(os.path.join(d, f"argv-{n}"), "w").write("\n".join(sys.argv[1:]))
 open(os.path.join(d, f"stdin-{n}"), "w").write(sys.stdin.read())
 host = next(a for a in sys.argv if a.startswith("root@"))
 fail = os.environ.get("FAKE_FAIL_HOST", "")
+if os.environ.get("FAKE_RECORD_LEASE"):  # what the lease reads while this box is applied
+    hp = os.path.join(os.environ["RIG_LEASE_DIR"], "holder.json")
+    open(os.path.join(d, f"lease-{n}"), "w").write(open(hp).read() if os.path.exists(hp) else "ABSENT")
 if host == "root@" + os.environ.get("FAKE_TAKE_LEASE_ON_HOST", ""):  # an E2E takes the rig mid-run
     d = os.environ["RIG_LEASE_DIR"]
     os.makedirs(d, exist_ok=True)
@@ -961,3 +964,83 @@ def test_cli_result_tells_landed_files_from_a_failed_check_after_the_close(tmp_p
     assert r.returncode == 1, r.stdout + r.stderr
     assert "cam1 (the unit files are in place; a step outside the rw window failed: cambox-netconsole.service did not arm" \
         in r.stderr, r.stderr
+
+
+# =================================================================================================
+# 10. review round 3: the run holds the lease, a full summary, the stale threshold, failure counts
+# =================================================================================================
+
+def test_cli_apply_stops_before_the_next_box_and_summarises_the_whole_run(tmp_path):
+    # Review round 3 finding 1 + nit 2: with three boxes, a guard refusal before cam3 must stop the
+    # run (never `continue` to cam4) and the RESULT must name the box already done AND both untouched.
+    r, sshdir = _cli(tmp_path, "--apply", "--box", "cam1", "--box", "cam3", "--box", "cam4",
+                     env={"FAKE_TAKE_LEASE_ON_HOST": "10.77.9.61"})
+    out = r.stdout + r.stderr
+    assert r.returncode == 1, out
+    assert len([f for f in os.listdir(sshdir) if f.startswith("argv-")]) == 1, "cam3 and cam4 untouched"
+    assert "RESULT: in place on: cam1" in out, out
+    assert "RESULT: refused by the rig guard, not touched: cam3 cam4" in out, out
+
+
+def test_cli_apply_holds_the_rig_lease_for_the_whole_run_and_releases_it(tmp_path):
+    # Review round 3 nit 4: reading the lease is not enough -- an E2E could take the rig while one
+    # box is applied (minutes, the netconsole arm). The run takes the lease, and gives it back.
+    r, sshdir = _cli(tmp_path, "--apply", "--box", "cam1", "--box", "cam3", env={"FAKE_RECORD_LEASE": "1"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    seen = [(sshdir / f).read_text() for f in sorted(os.listdir(sshdir)) if f.startswith("lease-")]
+    assert len(seen) == 2 and all('"repo": "camera-box-ro-units-apply"' in s for s in seen), seen
+    assert not (tmp_path / "rig-lease").exists(), "the lease is released at the end"
+
+
+def test_cli_apply_gives_a_reclaimed_lease_back_and_never_a_foreign_one(tmp_path):
+    r, _ = _cli(tmp_path, "--apply", "--box", "cam1", "--box", "cam3", env={"FAKE_TAKE_LEASE_ON_HOST": "10.77.9.61"})
+    assert r.returncode == 1
+    holder = json.loads((tmp_path / "rig-lease" / "holder.json").read_text())
+    assert holder["run_id"] == "4242", "the foreign holder that took the rig keeps its lease"
+
+
+def test_cli_apply_honours_rig_lease_stale_secs(tmp_path):
+    # Review round 3 nit 2: a heartbeat 4000 s old is stale at 3600 s and LIVE at the 5400 s default.
+    _seed_lease(tmp_path)
+    old = time.time() - 4000
+    os.utime(tmp_path / "rig-lease" / "heartbeat", (old, old))
+    r, sshdir = _cli(tmp_path, "--apply", "--box", "cam1")
+    assert r.returncode == 1 and os.listdir(sshdir) == [], r.stdout + r.stderr
+    r, sshdir = _cli(tmp_path, "--apply", "--box", "cam1", env={"RIG_LEASE_STALE_SECS": "3600"})
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_rig_held_reason_skips_the_callers_own_lease(tmp_path):
+    lease = tmp_path / "rig-lease"
+    lease.mkdir()
+    (lease / "holder.json").write_text('{"repo": "camera-box-ro-units-apply", "run_id": "mine-1"}')
+    (lease / "heartbeat").write_text("")
+    env = {"RIG_LEASE_DIR": str(lease), "CAMERA_BOX_RIG_HEARTBEAT": str(tmp_path / "rig-active")}
+    lib = LIB / "rig-heartbeat.sh"
+    r = _bash(f'set -euo pipefail\n. "{lib}"\nif rig_held_reason 5400 mine-1; then echo HELD; else echo FREE; fi\n'
+              f'if rig_held_reason 5400 other; then echo HELD; else echo FREE; fi\n'
+              f'if rig_held_reason; then echo HELD; else echo FREE; fi', env=env)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == ["FREE", "HELD", "HELD"], r.stdout
+
+
+def test_apply_counts_a_failed_apt_stop(tmp_path):
+    box, unit_dir = _box(tmp_path)
+    proc = run_text(box, _program(unit_dir), FAKE_STOP_FAIL_UNIT="apt-daily-upgrade.service")
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "could not stop the apt units" in proc.stderr, proc.stderr
+    assert root(box) == "ro"
+    index(log(box), "systemctl start logrotate.service")  # the rest still ran
+
+
+def test_apply_counts_a_failed_reset_failed(tmp_path):
+    box, unit_dir = _box(tmp_path)
+    proc = run_text(box, _program(unit_dir), FAKE_RESET_FAILED_RC="1")
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "could not reset-failed" in proc.stderr, proc.stderr
+
+
+def test_cli_applies_a_box_named_twice_once(tmp_path):
+    r, _ = _cli(tmp_path, "--plan", "--box", "cam1", "--box", "CAM1", "--box", "cam3")
+    assert r.returncode == 0, r.stderr
+    assert re.findall(r"(?m)^== (cam\d) ", r.stdout) == ["cam1", "cam3"], r.stdout
