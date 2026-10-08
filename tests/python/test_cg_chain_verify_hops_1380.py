@@ -118,11 +118,11 @@ def test_help_prints_the_whole_header():
 
 def test_the_strih_hop_source_is_overridable_for_the_live_cg_obs_input(tmp_path):
     # issue 1302: since SongPlayer's B4 (songplayer 221) the strih-lx input receiving SP-program is
-    # named `CG-obs`; CG_CHAIN_STRIH_SRC selects it, the default stays `cg`.
+    # named `CG-obs`; it is the DEFAULT (strih-lx is the only strih), CG_CHAIN_STRIH_SRC overrides it.
     logs = {"STRIH": _log(tmp_path, "strih", ["CG-obs"])}
-    r = _run(tmp_path, args=("--hops", "strih"), env_extra={"CG_CHAIN_STRIH_SRC": "CG-obs"}, logs=logs)
+    r = _run(tmp_path, args=("--hops", "strih"), logs=logs)
     assert r.returncode == 0, r.stdout + r.stderr
     assert any(ln.startswith("strih") and "CG-obs" in ln for ln in r.stdout.splitlines()), r.stdout
-    # Without the override the strih hop still looks for `cg` and fails on its absence.
-    r2 = _run(tmp_path, args=("--hops", "strih"), logs=logs)
+    # An explicit override to the retired Windows strih's `cg` input looks for that one instead.
+    r2 = _run(tmp_path, args=("--hops", "strih"), env_extra={"CG_CHAIN_STRIH_SRC": "cg"}, logs=logs)
     assert r2.returncode != 0, r2.stdout
