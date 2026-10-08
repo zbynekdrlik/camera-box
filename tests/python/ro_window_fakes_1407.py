@@ -12,6 +12,8 @@ stays rw), FAKE_FINDMNT_EMPTY, FAKE_START_RC, FAKE_ENABLE_RC, FAKE_STOP_RC, FAKE
 Issue 1394 added `mask`/`unmask` (refused on a ro root, like enable), `is-failed`, `reset-failed`
 and `is-system-running` (state/failed-<unit> files; `degraded` while one exists, or
 FAKE_SYSTEM_STATE); a failed start leaves its unit failed, a good start clears it.
+FAKE_RESTART_FAIL_UNIT fails one unit's start/restart WITHOUT a failed state (a Restart= unit in
+auto-restart), FAKE_DAEMON_RELOAD_RC fails `daemon-reload`.
 
 `run_text(box, text)` runs emitted remote text under `set -e` and `set -euo pipefail` callers' modes
 with PATH = the stub dir only (plus the few real text tools the emitted text needs), so nothing
@@ -104,6 +106,10 @@ if verb in ("enable", "disable", "mask", "unmask"):
     elif os.path.exists(path("enabled", unit)):
         os.remove(path("enabled", unit))
 elif verb in ("start", "restart"):
+    if os.environ.get("FAKE_RESTART_FAIL_UNIT") == unit:
+        # a Restart=on-failure oneshot whose (re)start fails: activating (auto-restart), not failed
+        sys.stderr.write(f"Job for {unit} failed (auto-restart scheduled).\n")
+        sys.exit(1)
     if os.environ.get("FAKE_START_RC"):
         fail = os.path.join(st, "start-failed-once")
         if os.environ.get("FAKE_START_ONCE") != "1" or not os.path.exists(fail):
@@ -112,6 +118,9 @@ elif verb in ("start", "restart"):
             sys.stderr.write(f"Job for {unit} failed.\n")
             sys.exit(int(os.environ["FAKE_START_RC"]))
     started(unit)
+elif verb == "daemon-reload" and os.environ.get("FAKE_DAEMON_RELOAD_RC"):
+    sys.stderr.write("Failed to reload daemon: fake failure\n")
+    sys.exit(int(os.environ["FAKE_DAEMON_RELOAD_RC"]))
 elif verb == "is-failed":
     state = "failed" if os.path.exists(path("failed", unit)) else "inactive"
     if "--quiet" not in args:

@@ -585,6 +585,16 @@ open(os.path.join(d, f"argv-{n}"), "w").write("\n".join(sys.argv[1:]))
 open(os.path.join(d, f"stdin-{n}"), "w").write(sys.stdin.read())
 host = next(a for a in sys.argv if a.startswith("root@"))
 fail = os.environ.get("FAKE_FAIL_HOST", "")
+if host == "root@" + os.environ.get("FAKE_TAKE_LEASE_ON_HOST", ""):  # an E2E takes the rig mid-run
+    d = os.environ["RIG_LEASE_DIR"]
+    os.makedirs(d, exist_ok=True)
+    open(os.path.join(d, "holder.json"), "w").write(
+        '{"repo": "zbynekdrlik/camera-box", "run_id": "4242", "run_url": "u", "job": "e2e"}')
+    open(os.path.join(d, "heartbeat"), "w").write("")
+if host == "root@" + os.environ.get("FAKE_RUNTIME_FAIL_HOST", ""):  # files land, the arm fails
+    print("OK: the unit files are written and the root of cam1 reads read-only again (ro,relatime)")
+    sys.stderr.write("FAIL: [issue 1394] cambox-netconsole.service did not arm on cam1 (Result=exit-code); it retries now\n")
+    sys.exit(1)
 if host == "root@" + os.environ.get("FAKE_NO_NC_HOST", ""):
     print("NOTE: no /etc/systemd/system/cambox-netconsole.service on cam3 -- issue 1311 netconsole is not provisioned here; re-run setup-device.sh for it (this program writes no new unit)")
 if host == "root@" + fail:
@@ -842,3 +852,108 @@ def test_no_cambox_provisioner_types_an_apt_unit_name():
         for unit in APT_UNITS:
             assert unit not in code, (rel, unit)
     assert "ro_root_masked_apt_units" in _code((REPO / "scripts" / "build-image.sh").read_text())
+
+
+# =================================================================================================
+# 9. review round 2: the guard before EVERY box, the arm-failure exit, named post-close failures
+# =================================================================================================
+
+def test_cli_apply_reads_the_rig_guard_before_every_box(tmp_path):
+    # Review round 2 finding 1: an E2E that takes the lease while cam1 is applied must stop the run
+    # before cam3 is touched (one box can take minutes: the netconsole arm waits for dev1).
+    r, sshdir = _cli(tmp_path, "--apply", "--box", "cam1", "--box", "cam3",
+                     env={"FAKE_TAKE_LEASE_ON_HOST": "10.77.9.61"})
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert len([f for f in os.listdir(sshdir) if f.startswith("argv-")]) == 1, "cam3 must stay untouched"
+    assert "Not touched: cam3" in r.stderr and "#4242" in r.stderr, r.stderr
+
+
+def test_cli_apply_goes_ahead_on_a_stale_or_broken_lease(tmp_path):
+    # Review round 2 nit 4: only a LIVE holder refuses; a stale heartbeat or a lockdir without
+    # holder.json is reclaimable (rig_lease_is_stale), never a reason to refuse.
+    _seed_lease(tmp_path)
+    old = time.time() - 7200
+    os.utime(tmp_path / "rig-lease" / "heartbeat", (old, old))
+    r, sshdir = _cli(tmp_path, "--apply", "--box", "cam1", env={"RIG_LEASE_STALE_SECS": "3600"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert len([f for f in os.listdir(sshdir) if f.startswith("argv-")]) == 1
+    (tmp_path / "rig-lease" / "holder.json").unlink()
+    os.utime(tmp_path / "rig-lease" / "heartbeat")
+    r, sshdir = _cli(tmp_path, "--apply", "--box", "cam1")
+    assert r.returncode == 0, r.stdout + r.stderr
+
+
+def test_the_rig_held_read_is_one_shared_function():
+    # Review round 2 nit 5: the "is the rig driven right now" read (issue-281 heartbeat OR a live
+    # issue-830 lease) lives ONCE in rig-heartbeat.sh; the apply and the burn-reconcile watchdog
+    # both call it.
+    lib = (LIB / "rig-heartbeat.sh").read_text()
+    body = lib[lib.index("rig_held_reason() {"):]
+    body = body[:body.index("\n}\n")]
+    assert "rig_heartbeat_active" in body and "rig_lease_is_stale" in body, body
+    for rel in ("scripts/cambox-ro-units-apply.sh", "scripts/obs-burn-reconcile-watchdog.sh"):
+        code = _code((REPO / rel).read_text())
+        assert "rig_held_reason" in code, rel
+        assert "rig_heartbeat_active" not in code and "rig_lease_is_stale" not in code, rel
+
+
+def test_apply_fails_a_box_whose_netconsole_cannot_arm(tmp_path):
+    # Review round 2 finding 2: on systemd 255 a Restart=on-failure oneshot whose restart fails sits
+    # in `activating (auto-restart)`, not `failed`, so is-system-running stays `running`; only the
+    # program's own exit code can fail the box.
+    box, unit_dir = _box(tmp_path)
+    proc = run_text(box, _program(unit_dir), FAKE_RESTART_FAIL_UNIT="cambox-netconsole.service")
+    assert proc.returncode != 0, proc.stdout + proc.stderr
+    assert "did not arm" in proc.stderr, proc.stderr
+    assert "is-system-running = running" in proc.stdout, proc.stdout
+    assert root(box) == "ro"
+
+
+def test_netconsole_unit_has_no_key_systemd_would_ignore(tmp_path):
+    # Review round 2 nit 3: systemd-analyze verify exits 0 on an unknown key or a bad value, only
+    # warning "... ignoring"; the good unit must print no such warning.
+    exe = shutil.which("systemd-analyze")
+    assert exe, "systemd-analyze is needed (systemd 255 on dev1 and the CI runner)"
+    unit = _lib(REMOTE_LOG, "remote_log_netconsole_service_unit_content")
+    unit = re.sub(r"(?m)^ExecStart=.*$", "ExecStart=/bin/true", unit)
+    good = tmp_path / "cambox-netconsole.service"
+    good.write_text(unit)
+    r = subprocess.run([exe, "verify", "--man=no", str(good)], capture_output=True, text=True, timeout=60)
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "ignoring" not in out.lower() and "unknown key" not in out.lower(), out
+    # the check bites: a misspelled key is reported as ignored
+    bad = tmp_path / "bad" / "cambox-netconsole.service"
+    bad.parent.mkdir()
+    bad.write_text(unit.replace("RestartSteps=", "RestartStep="))
+    r = subprocess.run([exe, "verify", "--man=no", str(bad)], capture_output=True, text=True, timeout=60)
+    assert "ignoring" in (r.stdout + r.stderr).lower(), r.stdout + r.stderr
+
+
+def test_apply_names_a_failed_daemon_reload_and_still_reads_back(tmp_path):
+    box, unit_dir = _box(tmp_path)
+    proc = run_text(box, _program(unit_dir), FAKE_DAEMON_RELOAD_RC="1")
+    calls = log(box)
+    assert proc.returncode != 0
+    assert "FAIL: [issue 1394] systemctl daemon-reload failed" in proc.stderr, proc.stderr
+    index(calls, "systemctl is-system-running")
+
+
+def test_apply_names_a_failed_mkdir_inside_the_window(tmp_path):
+    box, unit_dir = _box(tmp_path)
+    unit_dir.joinpath("logrotate.service.d").write_text("not a directory\n")
+    proc = run_text(box, _program(unit_dir))
+    calls = log(box)
+    assert proc.returncode != 0
+    assert "could not write" in proc.stderr, proc.stderr
+    assert root(box) == "ro", "\n".join(calls)
+    assert not any(c.startswith(("systemctl start", "systemctl restart")) for c in calls), calls
+
+
+def test_cli_result_tells_landed_files_from_a_failed_check_after_the_close(tmp_path):
+    # Review round 2 nit 6: "did NOT land" was printed even when the files landed and only a check
+    # after the close (the netconsole arm, a failed unit) failed.
+    r, _ = _cli(tmp_path, "--apply", "--box", "cam1", env={"FAKE_RUNTIME_FAIL_HOST": "10.77.9.61"})
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "cam1 (the unit files are in place; a check after the close failed: cambox-netconsole.service did not arm" \
+        in r.stderr, r.stderr
