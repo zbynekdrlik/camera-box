@@ -164,7 +164,8 @@ def test_setup_device_masks_in_step15_before_step16_apt_and_types_no_unit_name()
     text = SETUP.read_text()
     s15 = text.find("# STEP 15:")
     s16 = text.find("# STEP 16:")
-    assert 0 <= s15 < text.find("mapfile -t RO_ROOT_APT_UNITS") < s16 < text.find("apt-get update -qq")
+    # the pre-flight curl install runs apt-get earlier too; STEP 16's own apt-get is the one after it
+    assert 0 <= s15 < text.find("mapfile -t RO_ROOT_APT_UNITS") < s16 < text.find("apt-get update -qq", s16)
     # The names come from the ro-root canon only (one list for setup-device, verify-device, the apply).
     assert "apt-daily" not in _code(text[s15:s16]), _code(text[s15:s16])
     # unattended-upgrades handling is unchanged (#295)
@@ -304,7 +305,9 @@ def test_ar_verdict_fails_each_facet_by_name(prefix, replacement, needle):
 
 def test_ar_verdict_fails_closed_on_an_empty_read():
     v = _verdict("")
-    assert v.count("FAIL: ") >= 4 + len(APT_UNITS), v
+    # one per fact read: the drop-in, the logrotate Result, each apt unit, the netconsole unit (the
+    # loaded-checks follow a readable file only)
+    assert v.count("FAIL: ") == 3 + len(APT_UNITS), v
 
 
 # A box-side systemctl that answers the gather's reads from a JSON state (FAKE_SYSTEMD).
