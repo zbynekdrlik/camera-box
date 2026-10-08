@@ -127,3 +127,59 @@ inline bool decode_camera_box_qr(const char *payload, CameraBoxQrData *out)
 	out->valid = true;
 	return true;
 }
+
+/* issue 1404 (Task 5 part b, ROZHODNUTE issue 1404 comment 6048179415 item 3): the reserved ORIGIN run
+ * ids of the CG path -- SongPlayer's origin burn 911014, the cg OBS hop burn 911015 and the camera-box
+ * measurement clip 911016. Their frame_id counts ANOTHER tick line than the cam2 painter whose `mbc`
+ * room marker this dock hears, so pairing one would feed a meaningless offset into the cluster, the
+ * LOCK-CORRECT suggestions and the av-step watchdog. A CG segment's A/V is measured offline from the
+ * clip's own marker (`recording-verdict --av-sync --av-run 911016`), never here.
+ * The ONE dock list, mirroring the Rust ids (src/probe/recording_latency.rs BURN_RUN_ID_SONGPLAYER,
+ * BURN_RUN_ID_CG, MEASUREMENT_CLIP_RUN_ID) and their python twins: parity-pinned by
+ * tests/av_sync_dock_reserved_origin_1404.rs and tests/python/test_reserved_origin_runs_1404.py. */
+#define CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS {911014u, 911015u, 911016u}
+#define CAMERA_BOX_RESERVED_ORIGIN_COUNT 3
+
+/* issue 1404: the position of `run_id` in CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS, or -1 (any other run). */
+inline int camera_box_reserved_origin_index(uint32_t run_id)
+{
+	static const uint32_t reserved[] = CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS;
+	static_assert(sizeof(reserved) / sizeof(reserved[0]) == CAMERA_BOX_RESERVED_ORIGIN_COUNT,
+		      "CAMERA_BOX_RESERVED_ORIGIN_COUNT must count CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS");
+	for (size_t i = 0; i < sizeof(reserved) / sizeof(reserved[0]); i++)
+		if (reserved[i] == run_id)
+			return (int)i;
+	return -1;
+}
+
+/* issue 1404: true = a decoded camera-box QR of `run_id` is one this dock pairs (the cam2 painter, a
+ * camera node); false = a reserved origin id (CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS). */
+inline bool camera_box_qr_is_paired_run(uint32_t run_id)
+{
+	return camera_box_reserved_origin_index(run_id) < 0;
+}
+
+/* issue 1404: the "ignoring reserved origin run N" log line is due at most once per this much frame
+ * time per run, however the QRs alternate (two origin burns on one frame, a crossfade at a cut). */
+#define CAMERA_BOX_IGNORED_ORIGIN_LOG_NS 60000000000ULL
+
+/* issue 1404: the per-run rate limit of that line (owned by the dock's decode worker). */
+struct CameraBoxIgnoredOriginLog {
+	uint64_t last_ns[CAMERA_BOX_RESERVED_ORIGIN_COUNT] = {};
+	bool seen[CAMERA_BOX_RESERVED_ORIGIN_COUNT] = {};
+
+	/* true = log the ignored QR of reserved origin `index` seen at frame time `now_ns` (and remember
+	 * it): its first sight, a sight CAMERA_BOX_IGNORED_ORIGIN_LOG_NS after the last line, or frame time
+	 * that went backwards (an output restart). */
+	bool due(int index, uint64_t now_ns)
+	{
+		if (index < 0 || index >= CAMERA_BOX_RESERVED_ORIGIN_COUNT)
+			return false;
+		const size_t k = (size_t)index;
+		if (seen[k] && now_ns >= last_ns[k] && now_ns - last_ns[k] < CAMERA_BOX_IGNORED_ORIGIN_LOG_NS)
+			return false;
+		seen[k] = true;
+		last_ns[k] = now_ns;
+		return true;
+	}
+};

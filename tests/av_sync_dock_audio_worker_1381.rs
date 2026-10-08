@@ -346,9 +346,10 @@ fn measurement_source_presence_is_read_off_the_audio_thread() {
         "{DOCK_OUTPUT}: the measurement source name has one declaration, in {AUDIO_HEADER}"
     );
     assert!(src.contains("std::atomic<bool> cb_measure_source_present{false};"));
+    // issue 1404: the record takes the QR's run id and returns false for a reserved origin run
     let record = unique_body_of(
         &src,
-        "static void cb_video_qr_record(struct sync_test_output *st, uint32_t frame_id, uint64_t video_ts)",
+        "static bool cb_video_qr_record(struct sync_test_output *st, uint32_t run_id, uint32_t frame_id, uint64_t video_ts)",
     );
     assert!(
         record.contains("cb_refresh_measure_source(st, video_ts);"),

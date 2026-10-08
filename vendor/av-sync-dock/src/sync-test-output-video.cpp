@@ -109,9 +109,22 @@ static void cb_refresh_measure_source(struct sync_test_output *st, uint64_t vide
  * frame_id low byte (the SAME value the audio index carries) and set the FIXED rig audio params +
  * dock-UI qr_data. The SINGLE source of truth for that update, called by BOTH the norihiro
  * whole-frame decode (kept for the phone method) and the #398 better-scaled top-band decode below.
- * `video_ts` is already frame-relative (`frame->timestamp - start_ts`). */
-static void cb_video_qr_record(struct sync_test_output *st, uint32_t frame_id, uint64_t video_ts)
+ * `video_ts` is already frame-relative (`frame->timestamp - start_ts`).
+ * issue 1404: a QR of a reserved ORIGIN run (the CG path: SongPlayer 911014, the cg OBS 911015, the
+ * measurement clip 911016; camera_box_qr_is_paired_run) is never recorded -- its frame_id counts
+ * another tick line than the painter whose marker this dock hears. Returns false then, and the caller
+ * drops the QR entirely (no qrcode_found, no marker, not counted as decoded): a CG segment on program
+ * leaves the dock's QR freshness to expire, so its audio decode closes instead of pairing the clip. */
+static bool cb_video_qr_record(struct sync_test_output *st, uint32_t run_id, uint32_t frame_id, uint64_t video_ts)
 {
+	if (!camera_box_qr_is_paired_run(run_id)) {
+		if (st->cb_ignored_origin_log.due(camera_box_reserved_origin_index(run_id), video_ts))
+			blog(LOG_INFO,
+			     "av-sync-dock: ignoring the camera-box QRs of reserved origin run %u (the CG path, issue 1404) "
+			     "-- the dock pairs only the cam2 painter's tick",
+			     (unsigned)run_id);
+		return false;
+	}
 	uint8_t low = (uint8_t)(frame_id & 0xFFu);
 	{
 		// Same mutex the audio side locks to READ these — the video ring + f/c/q_ms are written
@@ -133,6 +146,7 @@ static void cb_video_qr_record(struct sync_test_output *st, uint32_t frame_id, u
 	st->qr_data.index = low;
 	st->qr_data.index_max = 256;
 	st->qr_data.valid = true;
+	return true;
 }
 
 /* issue 1367: the frame's first plane as camera-box-frame-copy.hpp reads it. */
@@ -206,12 +220,13 @@ static void st_raw_video_qrcode_decode(struct sync_test_output *st, const uint8_
 		 * method, still fully supported below, is untouched). */
 		CameraBoxQrData cb;
 		if (decode_camera_box_qr((char *)data.payload, &cb)) {
+			if (!cb_video_qr_record(st, cb.run_id, cb.frame_id, timestamp - st->start_ts))
+				continue;
 			for (int j = 0; j < 4; j++) {
 				st->qr_corners[j].x = code.corners[j].x * st->qr_step;
 				st->qr_corners[j].y = code.corners[j].y * st->qr_step;
 			}
 			signal_qrcode_found(st->context, timestamp - st->start_ts, st->qr_corners);
-			cb_video_qr_record(st, cb.frame_id, timestamp - st->start_ts);
 			video_marker_found(st, timestamp, 1.0f);
 			continue;
 		}
@@ -487,6 +502,8 @@ static bool st_raw_video_camera_box_decode(struct sync_test_output *st, const ui
 			CameraBoxQrData cb;
 			if (!decode_camera_box_qr((char *)data.payload, &cb))
 				continue;
+			if (!cb_video_qr_record(st, cb.run_id, cb.frame_id, timestamp - st->start_ts))
+				continue;
 
 			// Map quirc corners (downscaled top-band coords) back to FRAME coords (the band is
 			// top-anchored at y=0). Cosmetic — the ring/marker use frame_id, not the corners.
@@ -497,7 +514,6 @@ static bool st_raw_video_camera_box_decode(struct sync_test_output *st, const ui
 					(uint32_t)((uint64_t)code.corners[j].y * rows / (h > 0 ? h : 1));
 			}
 			signal_qrcode_found(st->context, timestamp - st->start_ts, st->qr_corners);
-			cb_video_qr_record(st, cb.frame_id, timestamp - st->start_ts);
 			video_marker_found(st, timestamp, 1.0f);
 			found_any = true;
 		}

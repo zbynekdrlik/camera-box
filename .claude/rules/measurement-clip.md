@@ -4,6 +4,10 @@ paths:
   - "tests/python/test_gen_measurement_clip_1404.py"
   - "tests/measurement_clip_decode_1404.rs"
   - "tests/fixtures/measurement-clip-1404/**"
+  - "src/av_run_pairing.rs"
+  - "tests/av_run_pairing_clip_1404.rs"
+  - "tests/av_run_recording_1404.rs"
+  - "tests/av_sync_dock_reserved_origin_1404.rs"
 ---
 
 # The camera-box measurement clip (issue 1404 Task 5 part a)
@@ -55,18 +59,29 @@ The tick rule lives in `TICK_HZ` / `TICKS_PER_FRAME` / `MARKER_EVERY_TICKS`; `TI
   issue-1159 drift guard parses `MEASUREMENT_CLIP_RUN_ID` too).
 - `youtube_leg_ticks` reads 911016 as a tick ONLY when the caller passes `runs=CLIP_RUNS`; its
   default decode refuses it, byte-identical to before (`DECODER_VERSION` stays 2). Accepting it by
-  default broke the timeline (issue 1404 review): the clip restarts its tick on every play and the
-  timeline keys a whole session on ONE tick line, so a perfect camera window next to a CG segment
-  read 600 replay dups, and a second play made every clip tick ambiguous. **Task 5 part b
-  blocker:** before a CG window is decoded with `runs`, the timeline must keep the clip's run apart
-  from the painter's (run-scoped rows, a seam at a run change, `TickClock` per run and window), and
-  the tick cache must be keyed on `runs`.
-- **The stream av-sync dock reads the clip too.** `cb_video_qr_record`
-  (`vendor/av-sync-dock/src/sync-test-output-video.cpp`) records any camera-box QR, with no run-id
-  filter, and the clip's QR and marker agree with each other. So during a CG segment on the stream
-  program the dock measures the CG path's A/V. That feeds its offset cluster, the
-  `LOCK-CORRECT SUGGESTED` lines and the disabled av-step watchdog. Whether that is wanted is an open
-  part-b decision on the ticket.
+  default broke the one-line timeline (a perfect camera window next to a CG segment read 600 replay
+  dups, a second play made every clip tick ambiguous). Since Task 5 part b the run-scoped decode
+  keeps each frame's run and the timeline judges every run segment on its own TickClock
+  (`.claude/rules/youtube-leg-verdict.md`, "Run-scoped decode + timeline"); the verdict reads CG
+  windows with `--runs 911016 --clip-markers <clip>.markers.csv`.
+- **The stream av-sync dock never pairs the clip** (ROZHODNUTE issue 1404 comment 6048179415 item
+  3, Task 5 part b). Its audio is the cam2 painter's `mbc` room marker, so pairing the clip's tick
+  fed a meaningless offset into its cluster, the LOCK-CORRECT suggestions and the av-step watchdog.
+  `cb_video_qr_record` refuses a QR whose run is in `CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS`
+  (`camera-box-qr.hpp`: 911014, 911015, 911016) as its first statement, and both QR decodes drop it
+  before any signal. During a CG segment the dock's QR freshness expires and its audio decode
+  closes; a box seeing only reserved-origin QRs never latches camera-box mode. The ignore line is
+  rate-limited per run (`CameraBoxIgnoredOriginLog`, one line per run per minute of frame time).
+  The list is parity-pinned to the Rust ids and the python mirrors
+  (`tests/av_sync_dock_reserved_origin_1404.rs`, `tests/python/test_reserved_origin_runs_1404.py`),
+  behaviour by `camera-box-selftest.cpp`, the wiring also by the pwsh step "Assert dock never pairs
+  a reserved origin QR (issue 1404)" in both windows-genlock workflows. Live after a FULL-bundle
+  deploy on the stream box. Camera-node burns (9110xx below 911013) are still paired, as decided;
+  see the ticket's follow-up note.
+- **The CG A/V is measured offline from the clip's own marker:** `recording-verdict --av-sync <rec>
+  --av-marker-log <clip>.markers.csv --av-run 911016` (`src/av_run_pairing.rs`: the clip's own tick
+  per frame, refused when the clip restarts inside the cut; `--av-run` requires `--av-sync`). On the
+  committed fixture it reads -0.15 ms clean, +99.85 ms with the audio 100 ms early.
 
 ## The deliverable
 
@@ -88,13 +103,13 @@ The tick rule lives in `TICK_HZ` / `TICKS_PER_FRAME` / `MARKER_EVERY_TICKS`; `TI
 - The decode fixture `tests/fixtures/measurement-clip-1404/clip-v1-frame-1801.png` is frame 1801
   of the deliverable. zbarimg, OpenCV and the real rqrr plain pass all read both halves.
 
-## Known limits (Task 5 part b)
+## Known limits
 
-- **`recording-verdict --av-sync` cannot pair the clip yet.** It pairs a marker through
-  `RecordingFrame::tick` (`av_sync_recording.rs`), which excludes `NODE_BURN_RUN_IDS`. The CG A/V
-  through the probe needs a Rust change, for example an explicit `--av-sync` tick run id. That is a
-  CI/live step; the probe never compiles on dev1.
-- **A loop seam (open decision on the ticket).** 120 s is not a whole number of index wraps and
+- **The painter path still never reads the clip** (by design): `recording-verdict --av-sync` without
+  `--av-run` pairs through `RecordingFrame::tick`, which excludes `NODE_BURN_RUN_IDS`, so on a clip it
+  measures nothing (pinned by `tests/av_run_recording_1404.rs`). Use `--av-run 911016`.
+- **A loop seam (ROZHODNUTE 6048179415 item 2 decided 128 s; the generator's `SECONDS` and the
+  published deliverable below are still 120 s, a follow-up on the ticket).** 120 s is not a whole number of index wraps and
   marker periods; 1920 frames (64 s) is, so 128 s is too. When a player loops the 120 s clip, the
   guard's chain over a span that holds the seam drops to exactly `MARKER_CHAIN_MIN` (4; the review
   probe swept every span offset), below the guard's own calibration bar of `MIN + 2`. One lost
@@ -127,4 +142,19 @@ The tick rule lives in `TICK_HZ` / `TICKS_PER_FRAME` / `MARKER_EVERY_TICKS`; `TI
   `pgrep -af 'f rawvideo -pix_fmt gray'` and remove the leftover temp dirs.
 - Re-verify the real rqrr on dev1 without cargo: link a small harness against the runner's release
   `librqrr-*.rlib` (`~/actions-runner-camera-box/_work/camera-box/camera-box/target/release/deps`)
-  with plain `rustc --extern rqrr=<rlib> -L <deps>`.
+  with plain `rustc --extern rqrr=<rlib> -L <deps>`. The same deps dir type-checks a probe-gated
+  CLI test without compiling the crate: `clippy-driver --test --cfg 'feature="probe"' --extern
+  serde_json=<rlib> -L <deps>` with a dummy `CARGO_BIN_EXE_recording-verdict` (and checks a clap
+  attribute's behaviour: a 20-line scratch `#[derive(Parser)]` against `libclap-*.rlib`).
+
+## The 4 s A/V fixture (Task 5 part b)
+
+- `clip-v1-4s.mp4` = `write_clip(out, 4)` of this generator (607 700 bytes; 120 frames, 7 markers
+  at 0.5 .. 3.5 s), its `clip-v1-4s.mp4.markers.csv`, and `clip-v1-4s.ticks.tsv` = its run-scoped
+  YouTube-leg decode (7 columns; a test pins it to a fresh decode). `git add` of the mp4 trips the
+  secret scan (hex runs in the H.264 bitstream): `# airuleset:secret-ok <reason>` on add and commit.
+- `tests/av_run_pairing_clip_1404.rs` (default features, Tier-0 via a plain-rustc replica of the
+  crate-root qpsk modules + `av_window` + `av_run_pairing`): the fixture's tick map + its REAL audio
+  through the probe glue's own crate-root calls read 0 within a frame, +100 / -100 +/- 17 ms with the
+  audio shifted by ffmpeg (`atrim=start=0.1,asetpts=PTS-STARTPTS` = audio early = picture lags = +;
+  `adelay=100:all=1` = -). `tests/av_run_recording_1404.rs` (probe, CI) runs the compiled CLI on it.
