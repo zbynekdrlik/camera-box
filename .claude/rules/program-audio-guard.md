@@ -33,18 +33,25 @@ paths:
 
 # The stream program-audio guard + the cam2 marker mirror (issue 1404)
 
-Two dev1 endpoints next to the rig lease on :8890. `scripts/rig-lease-server.py` serves them from
-its SERVE dir (`scripts/rig_serve_files.py`): `$XDG_RUNTIME_DIR/rig-lease-serve`, overridable with
-`$RIG_LEASE_SERVE_DIR`.
-- **tmpfs:** the mirror rewrites a multi-MB file every 10 s, which must not wear the SSD.
-- **0700:** no other dev1 account can plant a file.
-- **Never the lease dir or inside it:** the lease dir's existence means `held=true`.
-- **Only files this user owns are served.**
+Two read-only endpoints:
+- **The cam2 marker mirror is a dev1 endpoint** next to the rig lease on :8890.
+  `scripts/rig-lease-server.py` serves it from its SERVE dir (`scripts/rig_serve_files.py`):
+  `$XDG_RUNTIME_DIR/rig-lease-serve`, overridable with `$RIG_LEASE_SERVE_DIR`.
+  - **tmpfs:** the mirror rewrites a multi-MB file every 10 s, which must not wear the SSD.
+  - **0700:** no other dev1 account can plant a file.
+  - **Never the lease dir or inside it:** the lease dir's existence means `held=true`.
+  - **Only files this user owns are served.**
+- **The program-audio verdict is served by the sampler itself on strih-lx**
+  (`http://10.77.9.202:8891/program-audio.json`, "The host" below). Its serve dir is its own
+  `$XDG_RUNTIME_DIR/program-audio-sampler` (override `$PROGRAM_AUDIO_SERVE_DIR`), never the lease
+  server's. The dev1 copy was retired on 8.10.2026 (design 6054654255): the dev1 unit file is
+  deleted, and the dev1 server answers its plain 404 for `/program-audio.json`, so a stale file
+  left in its serve dir never reads as a live verdict.
 
 | Route | Writer | Contract |
 |---|---|---|
-| `/rig-qpsk-markers.csv` | `rig-marker-mirror` `--user` service (`scripts/rig-marker-mirror.sh` → `rig_marker_mirror.py`) | cam2's `/run/rig-qpsk-markers.csv`, complete rows; `text/csv`; `X-Mirror-Age-S` = seconds since new rows last arrived; 404 absent |
-| `/program-audio.json` | `program-audio-sampler` `--user` service | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain, holes_bridged, bridged_ms, queue_drops, lag_ms, sender_stalls[, reason]}`; both ages recomputed by the server per request; the two marker counts are null without a full marker span; `holes_bridged`/`bridged_ms` count the bridged holes, `queue_drops` the frames the sampler's own capture queue dropped and `sender_stalls` the sender stalls the look-ahead found, since the sampler started (null while it is not sampling); `lag_ms` = how long the block that completed the judged window waited in the capture queue before the consumer took it (the consumer's backlog, the window's own ~17–85 ms of processing on top; null with no window); 404 absent; unreadable or foreign-owned = UNKNOWN |
+| dev1 `:8890/rig-qpsk-markers.csv` | `rig-marker-mirror` `--user` service (`scripts/rig-marker-mirror.sh` → `rig_marker_mirror.py`) | cam2's `/run/rig-qpsk-markers.csv`, complete rows; `text/csv`; `X-Mirror-Age-S` = seconds since new rows last arrived; 404 absent |
+| strih-lx `:8891/program-audio.json` | the `program-audio-sampler` `--user` service on strih-lx, which serves it itself | `{schema, ts_utc, age_s, verdict, rms_dbfs, outside_band_pct, window_s, source, last_foreign_ts_utc, last_foreign_age_s, markers_decoded, marker_chain, holes_bridged, bridged_ms, queue_drops, lag_ms, sender_stalls[, reason]}`; both ages recomputed by the endpoint per request; the two marker counts are null without a full marker span; `holes_bridged`/`bridged_ms` count the bridged holes, `queue_drops` the frames the sampler's own capture queue dropped and `sender_stalls` the sender stalls the look-ahead found, since the sampler started (null while it is not sampling); `lag_ms` = how long the block that completed the judged window waited in the capture queue before the consumer took it (the consumer's backlog, the window's own ~17–85 ms of processing on top; null with no window); 404 absent; unreadable or foreign-owned = UNKNOWN |
 
 The consumer CLI is `scripts/program_audio_guard.py`, used by both YouTube gates (camera-box and
 restreamer issue 357):
@@ -149,7 +156,10 @@ level. Re-run the full calibration after any decoder or rule change:
 `python3 scripts/program_audio_marker_calibrate.py --real <the four recordings> --synthetic-trials 50`
 (`--classes` splits the synthetic run; each class takes ~1.5 min on dev1).
 
-**The sampler (`program_audio_sampler.py`):**
+**The sampler (`program_audio_sampler.py`):** the rules below were found and measured while the
+sampler ran on dev1 (until 7.10.2026), so their text says "dev1". Since then it runs only on
+strih-lx, where "dev1's wall step" and "dev1's arrival time" mean strih-lx's own; strih-lx is the
+fleet's date master.
 - **Warm-up.** Until 4 s of audio arrived since the start, a span restart or a format change,
   nothing reads MEASUREMENT. A window whose spectrum alone says FOREIGN (`spectral_foreign`: level
   ≥ −60 dBFS and ≥ 30 % outside the band) reads FOREIGN and starts the latch (ROZHODNUTÉ 6027706292
@@ -463,11 +473,12 @@ level. Re-run the full calibration after any decoder or rule change:
   time) still loads, with a WARNING asking for a rebuild.
 - **A MEASUREMENT without `marker_chain` is refused twice.** After a pull, an old sampler process
   keeps writing spectral-only MEASUREMENT until it restarts.
-  - The lease server (`rig_serve_files.program_audio_response`) serves it as UNKNOWN with its ages
-    kept. That is the one place every reader sees, restreamer's own reader included (review round 1).
-  - The camera-box guard also refuses it (exit 2), for a server that still runs the old code.
-  - The unit is already enabled on dev1, so the README steps are due when the checkout moves:
-    restart the lease server (only while `held=false`), build the shim, restart the sampler.
+  - The sampler's own endpoint (`rig_serve_files.program_audio_response`) serves it as UNKNOWN
+    with its ages kept. That is the one place every reader sees, restreamer's own reader included
+    (review round 1).
+  - The camera-box guard also refuses it (exit 2), for an endpoint that still runs the old code.
+  - On strih-lx, setup-strih step 16e rebuilds the shim when its sources changed and try-restarts
+    the sampler, so a redeploy picks up the new code.
 - **Install order matters.** The build renames the new library over the old one, never writes it in
   place: a running sampler keeps its mapped copy (writing a mapped `.so` in place can SIGBUS it).
 - **Cost:** ~70 ms of decode per 2 s window (4 s stereo span at 48 kHz) plus the FFT.
@@ -545,19 +556,26 @@ na dev1?!"). It needs only NDI reach to `STREAM-SNV (stream)` and an HTTP endpoi
 strih-lx (16 cores, the E-cores 12-15 nearly idle; stream.lan was rejected: a Windows port of the
 shim + numpy next to restreamer's broadcast encoder).
 - **Its own read-only endpoint** (`scripts/program_audio_http.py`, served from the sampler process):
-  `GET/HEAD /program-audio.json` through the SAME `rig_serve_files.program_audio_response` the lease
-  server uses (ages per request, foreign-owned / garbage / a chain-less MEASUREMENT = UNKNOWN), 404
-  while absent, `/healthz`, anything else 404, other methods 501. `--http-port` /
-  `PROGRAM_AUDIO_HTTP_PORT` default **8891** (0 = none), `--http-bind` / `PROGRAM_AUDIO_HTTP_BIND`
-  default 0.0.0.0, `--serve-dir` / `PROGRAM_AUDIO_SERVE_DIR`. Routine requests are not logged.
+  `GET/HEAD /program-audio.json` through `rig_serve_files.program_audio_response` (ages per request,
+  foreign-owned / garbage / a chain-less MEASUREMENT = UNKNOWN), 404 while absent, `/healthz`,
+  anything else 404, other methods 501. `--http-port` / `PROGRAM_AUDIO_HTTP_PORT` default **8891**
+  (0 = none), `--http-bind` / `PROGRAM_AUDIO_HTTP_BIND` default 0.0.0.0, `--serve-dir` /
+  `PROGRAM_AUDIO_SERVE_DIR` default `$XDG_RUNTIME_DIR/program-audio-sampler` (the sampler's own
+  tmpfs dir, created 0700; never the dev1 lease server's `$RIG_LEASE_SERVE_DIR`). Routine requests
+  are not logged.
   - **One response framing for both servers:** `rig_serve_files.ReadOnlyHandler` (GET/HEAD through one
     `_handle`, the query-string strip, `_send`, no Python version in `Server:`), moved verbatim out of
     `rig-lease-server.py`; the lease routes' golden bytes are unchanged.
   - **Bound after the receiver exists, stopped after the final UNKNOWN.** A port in use closes the
     receiver, writes UNKNOWN `sampler cannot serve http on …` and exits 1 (fail loud; systemd restarts).
   - Tests never bind the default port (`--http-port 0`, or a free ephemeral port).
-- **The dev1 lease route stays** (`http://dev1:8890/program-audio.json`) until the consumers switch to
-  `http://10.77.9.202:8891/program-audio.json`; nothing proxies yet.
+- **The dev1 copy is retired (8.10.2026, design 6054654255).** The consumers read
+  `http://10.77.9.202:8891/program-audio.json`: restreamer on main (its PRs 384 and 385) and the
+  camera-box guard's `DEFAULT_URL`. So the dev1 `--user` unit file is deleted, the dev1 lease server
+  answers its plain 404 for `/program-audio.json`, and the sampler has no dev1 default left. The dev1
+  unit was disabled live the same day. A rollback to dev1 is a revert of that commit, never a live
+  need: the owner ruled the sampler off dev1. Pinned: `test_the_dev1_sampler_unit_is_gone`,
+  `test_the_dev1_server_no_longer_serves_program_audio`, `test_the_default_serve_dir_is_the_samplers_own`.
 - **The unit** `systemd/program-audio-sampler.strih-lx.service` (a TEMPLATE) is installed as the
   operator's `--user` `program-audio-sampler.service`:
   - `CPUAffinity=` = the box's own `/sys/devices/cpu_atom/cpus` (12-15 on strih-lx), read the way

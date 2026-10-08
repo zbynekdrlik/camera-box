@@ -1,163 +1,77 @@
 # program-audio-sampler — install note (issue 1404)
 
-> **Moving to strih-lx (ROZHODNUTÉ 6039368611).** The sampler now serves its own
-> `http://<host>:8891/program-audio.json` and runs on strih-lx as the E-core `--user` unit from
-> `program-audio-sampler.strih-lx.service` (setup-strih step 16e, verify-strih item 41, rig-mode TEST/EVENT).
-> The strih-lx runbook is the last section. The dev1 sections below stay valid until the consumers switch.
+The YouTube channel guard. The sampler runs on **strih-lx** as the operator's E-core `--user` unit
+`program-audio-sampler.service`, rendered from the template `program-audio-sampler.strih-lx.service`:
+- setup-strih step 16e installs it (enable-only);
+- verify-strih item 41 grades it;
+- `rig-mode.sh test` starts it, `rig-mode.sh event` stops it (ROZHODNUTÉ 6039368611).
 
-The YouTube channel guard. A dev1 `--user` service receives the stream program's audio from stream
-OBS's NDI program output (`STREAM-SNV (stream)`). The receiver is audio-only and read-only, like
-any NDI monitor. Every 2 s the service classifies the audio and rewrites `program-audio.json` in
-the rig-lease server's serve dir. MEASUREMENT needs the cam2 QPSK marker itself (a timecode chain of
-4 markers over the trailing 4 s), decoded by the dock's own decoder through a small library built on
-dev1 with g++ (`scripts/build-qpsk-guard-shim.sh`). Nothing reads MEASUREMENT in the first 4 s after a
-start or a span restart: a window whose spectrum alone says FOREIGN reads FOREIGN, the rest UNKNOWN.
-The span follows the SENDER's NDI audio timeline (the frames' SDK timestamps), never dev1's arrival
-time: a late delivery while dev1 is busy keeps it, a hole up to 250 ms AHEAD of the timeline is
-bridged with zeros and keeps it, and a frame behind the timeline, a longer hole or a larger date
-step restarts it (one warm-up); only a frame without a timestamp falls back to a 1 s arrival gap.
-Gates call
-`scripts/program_audio_guard.py --url http://dev1:8890/program-audio.json --max-age 10` and stop
-the broadcast on any exit but 0 (1 FOREIGN, also a FOREIGN window within `--latch-s` 30 s; 2 UNKNOWN /
-stale / unreachable). The served file lives in `$XDG_RUNTIME_DIR/rig-lease-serve` (tmpfs).
+It receives the stream program's audio from stream OBS's NDI program output
+(`STREAM-SNV (stream)`); the receiver is audio-only and read-only, like any NDI monitor. Every 2 s
+it classifies the audio and rewrites `program-audio.json` in its own serve dir
+(`$XDG_RUNTIME_DIR/program-audio-sampler`, tmpfs; `PROGRAM_AUDIO_SERVE_DIR` overrides it). The
+process serves that file itself at `http://10.77.9.202:8891/program-audio.json`
+(`scripts/program_audio_http.py`).
+
+MEASUREMENT needs the cam2 QPSK marker itself: a timecode chain of 4 markers over the trailing 4 s.
+The marker is decoded by the dock's own decoder through a small library that step 16e builds with
+g++ (`scripts/build-qpsk-guard-shim.sh`).
+- Nothing reads MEASUREMENT in the first 4 s after a start or a span restart: a window whose
+  spectrum alone says FOREIGN reads FOREIGN, the rest UNKNOWN.
+- The span follows the SENDER's NDI audio timeline (the frames' SDK timestamps), never the arrival
+  time.
+  - A late delivery keeps the span.
+  - A hole up to 250 ms AHEAD of the timeline is bridged with zeros and keeps it.
+  - A sender stall that comes back within 4 frames costs nothing.
+  - A frame behind the timeline, a longer hole or a larger date step restarts it (one warm-up).
+  - Only a frame without a timestamp falls back to a 1 s arrival gap.
+
+Gates call `scripts/program_audio_guard.py` (its default URL is the strih-lx endpoint, `--max-age
+10`). They stop the broadcast on any exit but 0:
+- exit 1: FOREIGN, also a FOREIGN window within `--latch-s` 30 s;
+- exit 2: UNKNOWN / stale / unreachable.
 
 Verdicts, thresholds, calibration and limits: `.claude/rules/program-audio-guard.md`.
 
-## Supervisor install + live check (dev1)
+**The dev1 copy is retired (8.10.2026, design 6054654255).** The sampler ran on dev1 until
+7.10.2026 and was served at `http://dev1:8890/program-audio.json`. The consumers now read the strih-lx
+endpoint: restreamer on main (its PRs 384 and 385) and the camera-box guard's `DEFAULT_URL`. So:
+- the dev1 `--user` unit file is deleted from the repo;
+- the dev1 unit was disabled live (`systemctl --user disable --now program-audio-sampler.service`);
+- the dev1 rig-lease server answers 404 for `/program-audio.json`.
 
-Prerequisite: the lease server runs the issue-1404 code (step 1 of `rig-marker-mirror.README.md`).
+A dev1 that still has the old unit file installed can drop it, while the rig lease reads
+`held=false`:
+`rm ~/.config/systemd/user/program-audio-sampler.service; systemctl --user daemon-reload`.
+Nothing on dev1 reads it.
 
-**The sampler unit is already installed and enabled on dev1** (issue-1404 Task 2), and it runs from
-the `~/devel/camera-box` checkout. So the steps below are due the moment that checkout moves to the
-marker-requirement code, not at some later install: until then the old process keeps writing
-MEASUREMENT on the spectral share alone. The lease server serves such a payload as UNKNOWN once IT
-runs the new code (step 1), and the camera-box guard refuses it either way; both fail closed.
+## What the sampler does (issue 1404, designs 6030385284, 6036098516, 6037613222)
 
-```bash
-# 1. reload the lease server on the new code, ONLY while the lease is free: it serves a MEASUREMENT
-#    without a marker chain as UNKNOWN to every reader (restreamer too). The restart runs only when
-#    the lease reads held=false; otherwise re-run this step later (every step order fails closed).
-if curl -sf http://127.0.0.1:8890/rig-lease.json \
-     | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("held") is False else 1)'; then
-  systemctl --user restart rig-lease-server.service
-else
-  echo "rig lease held or unreadable -- lease server NOT restarted, retry later"
-fi
-
-# 2. build the QPSK marker decoder library (g++, a few seconds) -- the sampler refuses to run
-#    without it (UNKNOWN + exit 1), and a sampler process started before this change keeps writing
-#    MEASUREMENT without a marker chain, which the new guard reads as UNKNOWN until it restarts.
-#    Rebuild after every pull that touches scripts/qpsk_guard_shim.cpp or
-#    vendor/av-sync-dock/src/camera-box-{audio,marker-scan}.hpp (the sampler logs a WARNING when the
-#    library was built from other sources). The build renames the new library over the old one, so
-#    a running sampler keeps its own copy until it restarts.
-bash ~/devel/camera-box/scripts/build-qpsk-guard-shim.sh   # -> ~/.local/lib/camera-box/libqpsk-guard-shim.so
-
-# 3. a 30 s foreground run: the log must show "marker decoder ... params={... 'carrier_hz': 442 ...}"
-#    and "UNKNOWN -> MEASUREMENT" within ~5 s (the first 4 s are the marker warm-up)
-timeout 30 python3 ~/devel/camera-box/scripts/program_audio_sampler.py
-python3 ~/devel/camera-box/scripts/program_audio_guard.py   # verdict=UNKNOWN reason=sampler stopped, exit 2
-
-# 4. install + (re)start (a running sampler from before this change MUST be restarted)
-cp ~/devel/camera-box/systemd/program-audio-sampler.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable program-audio-sampler.service
-systemctl --user restart program-audio-sampler.service
-
-# 5. verify
-sleep 8
-python3 ~/devel/camera-box/scripts/program_audio_guard.py   # verdict=MEASUREMENT ... markers=8 chain=7 (chain >= 6), exit 0
-curl -s http://dev1:8890/program-audio.json; echo            # carries "markers_decoded" + "marker_chain"
-journalctl --user -u program-audio-sampler -n 20             # no WARNING about the decoder sources
-```
-
-## Update: span continuity on the sender timeline (issue 1404, design 6030385284)
-
-Only the sampler's Python changed (`program_audio.py`, `program_audio_sampler.py`,
-`program_audio_ndi.py`); the shim, the unit and the lease server did not. Once the `~/devel/camera-box`
-checkout carries the change, restart the sampler. The restart writes UNKNOWN for ~4 s (start +
-warm-up), and restreamer stops a running YouTube session on 2 consecutive UNKNOWN polls or 3 within
-60 s, so restart only while the rig lease is free:
-
-```bash
-if curl -sf http://127.0.0.1:8890/rig-lease.json \
-     | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("held") is False else 1)'; then
-  systemctl --user restart program-audio-sampler.service
-else
-  echo "rig lease held or unreadable -- sampler NOT restarted, retry later"
-fi
-sleep 8
-python3 ~/devel/camera-box/scripts/program_audio_guard.py      # verdict=MEASUREMENT ... chain >= 6, exit 0
-journalctl --user -u program-audio-sampler -n 5 --no-pager      # start line: continuity=sender timeline (frame+20ms)
-# after 10 min: the summary line reads receive_gaps=0 and few timeline_breaks (a real hole in the
-# sender audio, the nightly date step; 1 in the 25-min STEP-0 run), and max_offset_ms (the sender's
-# largest jitter on frames that continued) well under the 41.3 ms tolerance (STEP 0: 24.5 and 29.5);
-# a busy dev1 shows up as late_bursts=N with "late burst after 1.x s without audio: the sender
-# timeline continues" lines, and no MEASUREMENT -> UNKNOWN transition for them
-journalctl --user -u program-audio-sampler --since -15min --no-pager | grep -E 'summary|late burst|discontinuity'
-```
-
-## Update: a short hole is bridged, not a restart (issue 1404, design 6036098516)
-
-Only `program_audio.py` and `program_audio_sampler.py` changed; the shim, the unit and the lease
-server did not. On 7.10.2026, under dev1 load, the receiver dropped two NDI frames at a time: 55
-`audio timeline discontinuity` lines in an hour, each a 4 s UNKNOWN warm-up (one summary:
-`timeline_breaks=33 UNKNOWN=22`), which stopped restreamer's YouTube gate. A frame up to 250 ms ahead
-of the timeline is now bridged: the missing samples go into the window as zeros, the marker span is
-kept, and the chain is decoded over the real samples only. Restart the sampler the same way as
-above, only while the rig lease is free:
-
-```bash
-if curl -sf http://127.0.0.1:8890/rig-lease.json \
-     | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("held") is False else 1)'; then
-  systemctl --user restart program-audio-sampler.service
-else
-  echo "rig lease held or unreadable -- sampler NOT restarted, retry later"
-fi
-sleep 8
-python3 ~/devel/camera-box/scripts/program_audio_guard.py      # verdict=MEASUREMENT ... chain >= 6, exit 0
-journalctl --user -u program-audio-sampler -n 5 --no-pager      # start line: ... holes up to 250ms bridged
-curl -s http://dev1:8890/program-audio.json; echo               # carries "holes_bridged" + "bridged_ms"
-# after 10 min: the summary line ends "holes_bridged=N bridged_ms=X"; a +44.7 ms hole reads
-# "audio timeline hole: the frame sits +44.7 ms ahead ... bridged with 2146 zero samples (44.7 ms),
-# the marker span is kept" (round(offset * 48 kHz): 1987...2525 for the live +41.4...+52.6 ms) with no
-# MEASUREMENT -> UNKNOWN for it; timeline_breaks counts only the holes over 250 ms, frames behind
-# the timeline, a format change at a hole and the larger date steps
-journalctl --user -u program-audio-sampler --since -15min --no-pager | grep -E 'summary|bridged|discontinuity'
-```
-
-## Update: the capture thread, the fleet date step, its own endpoint, and the move to strih-lx (issue 1404, design 6037613222, ROZHODNUTÉ 6039368611)
-
-What changed:
-- `program_audio_capture.py` (new), `program_audio.py`, `program_audio_sampler.py`:
-  - the NDI capture runs in its own thread that only captures and queues, so the window work never
-    delays it;
-  - a forward timestamp jump that matches the host's own wall-clock step is the fleet date step (no
-    zeros, no restart);
-  - a short marker chain over a span holding bridged audio reads UNKNOWN, never FOREIGN on its own
-    (ROZHODNUTÉ 6037765523).
-- `program_audio_http.py` (new): the sampler serves its own read-only
-  `http://<host>:8891/program-audio.json` (+ `/healthz`).
-  - Overrides: `PROGRAM_AUDIO_HTTP_PORT` (0 = none), `PROGRAM_AUDIO_HTTP_BIND`,
-    `PROGRAM_AUDIO_SERVE_DIR`.
-  - The dev1 lease route `http://dev1:8890/program-audio.json` keeps working until the consumers switch.
-- `program-audio.json` gains `queue_drops`, `lag_ms` and `sender_stalls` (additive).
+- `program_audio_capture.py`: the NDI capture runs in its own thread that only captures and queues,
+  so the window work never delays it.
+- A forward timestamp jump that matches the host's own wall-clock step is the fleet date step (no
+  zeros, no restart).
+- A short marker chain over a span holding bridged audio reads UNKNOWN, never FOREIGN on its own
+  (ROZHODNUTÉ 6037765523).
+- `program-audio.json` carries `queue_drops`, `lag_ms` and `sender_stalls` next to `holes_bridged`
+  and `bridged_ms`.
 - **The sender-stall look-ahead:** a frame ahead of the timeline is held with up to 4 frames after
-  it; when they come back within the tolerance it is the stream OBS's audio-thread stall, nothing
-  lost (no zeros, `sender_stalls`). A real loss is bridged with the smallest offset over those
-  frames (the lost audio, less any follower's early send jitter) or restarts beyond 250 ms; a
-  2-frame loss can also read as a stall (the rule doc's residual).
-- Normal priority in both units: the old `Nice=10` is gone; there is no `CPUWeight`.
-- **The sampler moves to strih-lx.** The new consumer URL is
-  `http://10.77.9.202:8891/program-audio.json`. It is provisioned by setup-strih step 16e, graded by
-  verify-strih item 41, started by `rig-mode.sh test` and stopped by `rig-mode.sh event`. The details
-  are in `.claude/rules/program-audio-guard.md` ("The host").
+  it. When they come back within the tolerance it is the stream OBS's audio-thread stall: nothing
+  lost, no zeros, counted in `sender_stalls`. A real loss is bridged with the smallest offset over
+  those frames, or restarts beyond 250 ms. A 2-frame loss can also read as a stall (the rule doc's
+  residual).
+- Normal priority: no `Nice=`, no `CPUWeight=`. The sampler must never be ahead of OBS on this
+  production box.
 
-### strih-lx: install + live check (supervisor; strih-lx is a production box)
+## strih-lx: install + live check (supervisor; strih-lx is a production box)
 
 Nothing here is run by a lane. newlevel has no passwordless sudo on strih-lx, so the root part goes
 through setup-strih as always. No firewall rule is needed: the firewall is off, so do not add a ufw
 rule.
+
+A restart writes UNKNOWN for ~4 s (start + warm-up). Restreamer stops a running YouTube session on
+2 consecutive UNKNOWN polls or 3 within 60 s. So redeploy or restart the sampler only while the rig
+lease reads `held=false` (`curl -s http://dev1:8890/rig-lease.json`).
 
 ```bash
 # 1. provision: setup-strih (the genlock deploy runs it, or by hand on the box) -- step 16e logs
@@ -165,6 +79,7 @@ rule.
 #    "decoder shim missing: building it as newlevel", "program-audio-sampler.service written
 #    (CPUAffinity=12-15; normal priority)", "enabled ... (NOT started here ...)". Step 17 (verify-strih)
 #    then shows item 41: two PASS rows + "NOTE (program-audio-endpoint) down: not in TEST mode ...".
+#    A redeploy rebuilds the shim when its sources changed and try-restarts a running sampler.
 sudo GH_TOKEN=<gh-pat-repo-read> ./setup-strih.sh --box strih-lx --yes
 
 # 2. start it (TEST mode) from dev1 -- rig-mode.sh test does this itself ("[program-audio 10.77.9.202]
@@ -175,12 +90,12 @@ ssh newlevel@10.77.9.202 'mkdir -p ~/.config/camera-box && touch ~/.config/camer
 journalctl --user -u program-audio-sampler -n 12 --no-pager
 #   "marker decoder /home/newlevel/.local/lib/camera-box/libqpsk-guard-shim.so ... " with NO WARNING about the sources
 #   "scheduling nice=0 cpus=12-15 cpu.weight=..." (the E-cores, no WARNING)
-#   "serving http://0.0.0.0:8891/program-audio.json from /run/user/<uid>/rig-lease-serve"
+#   "serving http://0.0.0.0:8891/program-audio.json from /run/user/<uid>/program-audio-sampler"
 #   the start line ends "capture=thread"; within ~5 s "verdict UNKNOWN -> MEASUREMENT ... marker_chain=6..8"
 grep Cpus_allowed_list /proc/$(systemctl --user show -p MainPID --value program-audio-sampler.service)/status  # 12-15
 # from dev1:
 curl -s http://10.77.9.202:8891/program-audio.json; echo        # verdict MEASUREMENT, "queue_drops": 0, "lag_ms" tens of ms
-python3 ~/devel/camera-box/scripts/program_audio_guard.py --url http://10.77.9.202:8891/program-audio.json   # exit 0
+python3 ~/devel/camera-box/scripts/program_audio_guard.py       # (default URL = strih-lx) exit 0
 # verify-strih item 41 now: three PASS rows (files, shim, "running; http://127.0.0.1:8891/program-audio.json
 #   answers verdict=... age_s=..."); a FAIL "running but not in TEST mode" means the marker is gone while
 #   the sampler runs (EVENT's stop failed): stop it, or rig-mode.sh test
@@ -197,15 +112,6 @@ journalctl --user -u program-audio-sampler --since -15min --no-pager | grep -E '
 #    reboot during the production keeps it down; rig-mode.sh test brings it back.
 ```
 
-Then switch restreamer's guard URL to `http://10.77.9.202:8891/program-audio.json` (restreamer's own
-repo). In the SAME cut-over step, change `DEFAULT_URL` in `scripts/program_audio_guard.py` (and its
-docstring) from `http://dev1:8890/program-audio.json` to the strih-lx URL, so a camera-box caller
-without `--url` follows. Never do this before the strih-lx sampler serves: until then that default would
-read nothing (UNKNOWN, fail closed). After that the dev1 unit can be disabled (`systemctl --user disable --now
-program-audio-sampler.service` on dev1, only while the lease is free). Until then the dev1 unit keeps
-serving the dev1 route. Its unit file lost `Nice=10`: on dev1, `cp` + `daemon-reload` + a restart while
-the lease is free, or leave it until it is disabled.
-
 After the next nightly dantesync date step, check that strih-lx matched it:
 `journalctl --user -u program-audio-sampler --since <step time - 1 min> --until <step time + 1 min>`.
 It must show `audio timeline date step: ... nothing lost`, not `bridged with` / `discontinuity`.
@@ -213,25 +119,26 @@ It must show `audio timeline date step: ... nothing lost`, not `bridged with` / 
   wall step and the stream box's follower step are announced together.
 - A miss is not a regression (the jump is bridged or restarted as before), but report it on issue 1404.
 
-A sender stall no longer costs a window: the live stall replay reads MEASUREMENT after the warm-up
-(it read `U U M M M M U M U U M` with rule A alone). After the install, the 10-min summary should show
+A sender stall costs no window: the live stall replay reads MEASUREMENT after the warm-up (it read
+`U U M M M M U M U U M` with rule A alone). After the install, the 10-min summary should show
 `sender_stalls` at about 20 per 10 minutes (STEP 0: 20 in 720 s) and `holes_bridged=0` unless audio
 was really lost.
 
 Rollback on strih-lx: `rig-mode.sh event` (or `rm -f ~/.config/camera-box/program-audio-sampler.test-mode;
 systemctl --user disable --now program-audio-sampler.service`; a later setup-strih run enables it again,
-and without the TEST marker it stays down). The consumers still have the dev1 route.
+and without the TEST marker it stays down). With the sampler down every consumer reads unreachable /
+UNKNOWN and fails closed: no YouTube broadcast passes the guard.
 
 To re-check the marker bars on new real audio (for example after a decoder change), run
 `python3 ~/devel/camera-box/scripts/program_audio_marker_calibrate.py --real <recordings…>
 --synthetic-trials 50`; it exits 1 when a bar fails.
 
 The sampler runs its receiver with a private, empty `NDI_CONFIG_DIR`, so an NDI extra-IP list on
-dev1 can never reach it. With mDNS only it opens no TCP discovery connection into any sender
+the host can never reach it. With mDNS only it opens no TCP discovery connection into any sender
 (`.claude/rules/ndi-discovery.md`). While the rig is away at an event, behind tailscale, the
 receiver finds nothing. It then reads UNKNOWN and pulls nothing over the mobile link.
 
 Overrides (`PROGRAM_AUDIO_SOURCE`, `PROGRAM_AUDIO_HTTP_PORT`, `PROGRAM_AUDIO_HTTP_BIND`,
-`PROGRAM_AUDIO_SERVE_DIR`, `RIG_LEASE_SERVE_DIR`, `NDI_LIB_PATH`, `QPSK_GUARD_SHIM`) go into
+`PROGRAM_AUDIO_SERVE_DIR`, `NDI_LIB_PATH`, `QPSK_GUARD_SHIM`) go into
 `~/.config/camera-box/program-audio-sampler.env`, never `~/.config/environment.d/` (the user
 manager's global environment).
