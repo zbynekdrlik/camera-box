@@ -189,6 +189,46 @@ def test_a_failing_du_and_rm_never_abort_the_caller(tmp_path):
     assert len(lines) == 1 and "could not be removed" in lines[0], lines
 
 
+# dev1's camera-box runner runs en_US.UTF-8 (its LANG); GitHub's runners run C.UTF-8. Under en_US a
+# bash bracket RANGE like [0-9] also matches Arabic-Indic, superscript and fullwidth digits (the
+# issue-1302 trap), so only a spelled-out ASCII digit set keeps the delete contract on dev1.
+_UNICODE_LOCALE = "en_US.UTF-8"
+
+
+def test_only_ascii_digit_names_are_run_dirs_under_a_unicode_locale(tmp_path):
+    parent = tmp_path / "p"
+    parent.mkdir()
+    current = _mkrun(parent, "recording-e2e-1", 0)
+    _mkrun(parent, "recording-e2e-2", 7200)
+    others = ["recording-e2e-\u0661\u0662", "recording-e2e-\u00b2", "recording-e2e-\uff11\uff12"]
+    for name in others:
+        _mkrun(parent, name, 50_000)
+    _run([parent, current, "0"], env_extra={"LC_ALL": _UNICODE_LOCALE})
+    assert _names(parent) == sorted(others + ["recording-e2e-1"])
+
+
+def test_a_non_ascii_digit_keep_removes_nothing_under_a_unicode_locale(tmp_path):
+    parent = tmp_path / "p"
+    parent.mkdir()
+    current = _mkrun(parent, "recording-e2e-1", 0)
+    _mkrun(parent, "recording-e2e-2", 7200)
+    lines, _ = _run([parent, current], env_extra={"LC_ALL": _UNICODE_LOCALE, "E2E_RUNDIR_KEEP": "\u0665"})
+    assert len(lines) == 1 and "removed nothing" in lines[0], lines
+    assert _names(parent) == ["recording-e2e-1", "recording-e2e-2"]
+
+
+def test_every_bracket_set_in_the_lib_spells_its_characters_out():
+    """A lint over the lib's code lines: no `x-y` range inside a bracket expression (locale-bound)."""
+    bad = []
+    for no, line in enumerate(_LIB.read_text().splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        for m in re.finditer(r"\[[!^]?([^\[\]]*)\]", line):
+            if re.search(r"\w-\w", m.group(1)):
+                bad.append(f"{no}: {line.strip()}")
+    assert not bad, "spell digit sets out ([0123456789]), never a range:\n" + "\n".join(bad)
+
+
 def test_the_lib_is_source_only():
     text = _LIB.read_text()
     assert not re.search(r"^\s*set\s+-[a-zA-Z]*[eu]", text, re.M), \
