@@ -185,6 +185,35 @@ def test_a_frame_of_an_earlier_camera_stretch_spliced_into_a_later_one_fails_it(
     assert (first["dup"], first["skip"]) == (0, 0), first
 
 
+def _frozen(rows, first, n):
+    """`rows` with frames first .. first+n-1 holding the tick of frame `first` (the rig froze)."""
+    held = rows[first][2]
+    return [r if not first <= r[0] < first + n else (r[0], r[1], held, r[3]) for r in rows]
+
+
+def test_a_rig_freeze_or_a_recording_blind_stretch_reads_like_the_legacy_timeline():
+    # a camera leg frozen 3 s: both files hold one tick longer than AMBIGUOUS_S, so that tick maps
+    # nowhere; a rig fault, never a downstream dup/skip (review round 2: read as 90 / 90)
+    frozen = _frozen(painter_rows(0, 600), 200, 90)
+    vod = vod_of(frozen)
+    old = ylv.dupskip(legacy(frozen), legacy(vod), 0.0, *CAMERA_W)
+    new = ylv.dupskip(frozen, vod, 0.0, *CAMERA_W)
+    assert (old["dup"], old["skip"]) == (0, 0), old
+    assert new.pop("run") == PAINTER and new.pop("foreign_frames") == 0, new
+    assert new == old
+    # the recording cannot decode 5 s the VOD decodes: those VOD ticks map to no recording tick
+    blind = [r if not 200 <= r[0] < 350 else (r[0], r[1], None, None) for r in painter_rows(0, 600)]
+    vod = vod_of(painter_rows(0, 600))
+    old = ylv.dupskip(legacy(blind), legacy(vod), 0.0, *CAMERA_W)
+    new = ylv.dupskip(blind, vod, 0.0, *CAMERA_W)
+    assert new.pop("run") == PAINTER and new.pop("foreign_frames") == 0, new
+    assert new == old
+    # the same freeze inside a camera window of a session with CG segments
+    vod = vod_of(_frozen(SESSION, 950, 90))
+    r = ylv.dupskip(_frozen(SESSION, 950, 90), vod, 0.0, 31.0, 39.0)
+    assert (r.get("error"), r["dup"], r["skip"], r["foreign_frames"]) == (None, 0, 0, 0), r
+
+
 def test_a_later_part_is_placed_by_the_painter_never_by_the_clip():
     # part 1: camera, then a CG segment it ends in; part 2: painter only (the CG segment ended in the
     # OBS restart); the painter counted on through the 3 s restart gap
