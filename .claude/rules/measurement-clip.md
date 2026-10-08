@@ -108,7 +108,8 @@ The tick rule lives in `TICK_HZ` / `TICKS_PER_FRAME` / `MARKER_EVERY_TICKS`; `TI
 - **The painter path still never reads the clip** (by design): `recording-verdict --av-sync` without
   `--av-run` pairs through `RecordingFrame::tick`, which excludes `NODE_BURN_RUN_IDS`, so on a clip it
   measures nothing (pinned by `tests/av_run_recording_1404.rs`). Use `--av-run 911016`.
-- **A loop seam (ROZHODNUTE 6048179415 item 2: the clip is 128 s).** 120 s is not a whole number of index wraps and
+- **A loop seam (ROZHODNUTE 6048179415 item 2 decided 128 s; the generator's `SECONDS` and the
+  published deliverable below are still 120 s, a follow-up on the ticket).** 120 s is not a whole number of index wraps and
   marker periods; 1920 frames (64 s) is, so 128 s is too. When a player loops the 120 s clip, the
   guard's chain over a span that holds the seam drops to exactly `MARKER_CHAIN_MIN` (4; the review
   probe swept every span offset), below the guard's own calibration bar of `MIN + 2`. One lost

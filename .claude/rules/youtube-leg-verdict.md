@@ -57,7 +57,7 @@ Why: the clip restarts its tick on every play beside the painter's line, and the
   `_vod_content_times` / `_vod_pts_for` / `_coverage_counts`).
   - `run_segments`: a seam at the first decoded row of another run and at a tick fall-back over
     `RESTART_TICKS` (a loop of a clip shorter than 30 s is NOT split: its ticks stay ambiguous and
-    its windows read UNKNOWN; the deliverable is 128 s). Undecoded rows stay with the segment
+    its windows read UNKNOWN; the clip is decided at 128 s, ROZHODNUTE 6048179415 item 2, while the generator and the current deliverable are still 120 s). Undecoded rows stay with the segment
     before them.
   - `RunTimeline` (cached per session, `run_timeline`): one TickClock per rec segment; a VOD row maps
     to the ONE segment of its run whose tick span holds its tick (the painter counts on, so that is
@@ -71,10 +71,13 @@ Why: the clip restarts its tick on every play beside the painter's line, and the
     segments the window touches (a fade nobody decodes at a cut counts as unproven, never an event);
     publish joins read every mapped VOD row.
   - **Foreign VOD frames (review round 1, the false PASS):** a decoded VOD row inside the segment's
-    VOD stretch that shows something else (another run, another stretch of the same run, no rec
-    frame) is a dup frame AND enters the frame-count balance, so a replaced frame reads dup + hidden
-    skip and an inserted one a dup (`foreign_frames` in a run-scoped result). Dropping those rows
-    silently kept the balance and read a spliced frame as a clean PASS.
+    VOD stretch that shows ANOTHER run or a frame of ANOTHER segment is a dup frame AND enters the
+    frame-count balance, so a replaced frame reads dup + hidden skip and an inserted one a dup
+    (`foreign_frames` in a run-scoped result). Dropping those rows silently kept the balance and
+    read a spliced frame as a clean PASS. A row of the segment's own run that maps to NO segment
+    is NOT foreign (review round 2): a tick the rig held over AMBIGUOUS_S or a stretch only the VOD
+    decodes maps nowhere, and counting it read a 3 s freeze as 90 dup / 90 skip; it stays in the
+    segment's rows and the one-line code judges it as before.
   - `join_part_rows(..., restarting=runs)`: a later part without @start is placed by the previous
     part's last NON-restarting run (the painter), never by the clip (a part 1 that ended in a CG
     segment made the verdict UNKNOWN or silently misplaced part 2).

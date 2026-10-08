@@ -256,23 +256,28 @@ class RunTimeline:
         s = self.segs[j]
         return self.rec3[s.k0:s.k1]
 
-    def vod_rows_of(self, j):
-        """The VOD rows that show segment j, as (index, pts, tick): its mapped rows and the undecoded
-        rows between them (frame indices kept, so adjacency and frame counts read the VOD's frames)."""
+    def _is_foreign(self, k, j):
+        """VOD row k shows another run, or a frame of ANOTHER segment: not segment j's content. A row
+        of j's run that maps to NO segment stays j's (a tick the rig held over AMBIGUOUS_S, a tick
+        the recording could not decode): the one-line code judges it by its tick, as it always did."""
+        r = self.vod[k]
+        return r[2] is not None and (r[RUN] != self.segs[j].run or self.vod_seg[k] not in (None, j))
+
+    def _stretch(self, j):
         ks = [k for k, s in enumerate(self.vod_seg) if s == j]
-        if not ks:
-            return []
-        return [r for k, r in enumerate(self.vod3[ks[0]:ks[-1] + 1], ks[0]) if r[2] is None or self.vod_seg[k] == j]
+        return range(ks[0], ks[-1] + 1) if ks else range(0)
+
+    def vod_rows_of(self, j):
+        """The VOD rows that show segment j, as (index, pts, tick): every row of the VOD stretch from
+        j's first to its last mapped row except the foreign ones (`_is_foreign`); frame indices kept,
+        so adjacency and frame counts read the VOD's own frames."""
+        return [self.vod3[k] for k in self._stretch(j) if not self._is_foreign(k, j)]
 
     def foreign_rows_of(self, j):
-        """The decoded VOD rows inside the VOD stretch showing segment j that do NOT show j (another
-        run, another stretch of the same run, or no recording frame at all): frames the VOD put into
-        j's content that are not j's. dupskip counts each one inside a window as a dup frame."""
-        ks = [k for k, s in enumerate(self.vod_seg) if s == j]
-        if not ks:
-            return []
-        return [r for k, r in enumerate(self.vod[ks[0]:ks[-1] + 1], ks[0])
-                if r[2] is not None and self.vod_seg[k] != j]
+        """The decoded VOD rows inside the VOD stretch showing segment j that show another run or
+        another segment (a spliced or stale frame): frames the VOD put into j's content that are not
+        j's. dupskip counts each one inside a window as a dup frame."""
+        return [self.vod[k] for k in self._stretch(j) if self._is_foreign(k, j)]
 
     def content_times(self):
         """[(content time, vod row)] for every decoded VOD row mapped to a segment."""
