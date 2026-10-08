@@ -5,7 +5,8 @@
 //! - a head of N frames holds exactly the recording's first N frames, in order;
 //! - a head of 0 frames decodes nothing;
 //! - every single real rig frame read with the head request carries both a cam2 tick and a rig
-//!   node burn, so a rig recording always goes on to the unchanged full decode;
+//!   node burn, so one rig frame anywhere in the head sends the recording on to the unchanged full
+//!   decode (a head with no self-marked run, such as a QR-less pre-roll, never stops it either);
 //! - the painter path stops a burn-free clip after its head, with the "no cam2 tick" reason.
 //!
 //! The measurement clip's frame f shows the 911016 dual-QR ticks 2f and 2f - 1 (frame 0 shows tick
@@ -76,8 +77,8 @@ fn a_zero_frame_head_decodes_nothing_1404() {
 
 /// Real 1080p rig frames (a stream recording with cam3 deployed, another stream run, a cam1 grab):
 /// read alone with the head request, each one carries a cam2 tick AND a rig node burn, and either
-/// signal by itself sends the painter path to the full decode. So the head can never stop a rig
-/// recording, even one whose optical or whose burns are unreadable for the whole head.
+/// signal by itself sends the painter path to the full decode. So one rig frame in the head is
+/// enough, even when the optical or the burns are unreadable on every other head frame.
 #[test]
 fn every_real_rig_frame_alone_sends_the_painter_path_to_the_full_decode_1404() {
     let request = painter_head_request();

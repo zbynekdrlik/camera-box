@@ -115,6 +115,8 @@ mod tests {
     const CAM1: u32 = 911_001;
     const STRIH: u32 = 911_002;
     const STREAM: u32 = 911_004;
+    /// The cg OBS hop burn: a reserved node burn, but not in the painter path's set.
+    const CG_OBS: u32 = 911_015;
 
     /// `n` head frames, each with no cam2 tick and the run ids `runs`.
     fn head(n: usize, runs: &[u32]) -> Vec<(Option<u32>, Vec<u32>)> {
@@ -163,10 +165,31 @@ mod tests {
             painter_head_verdict(&head(frames, &[CLIP, CLIP])),
             PainterHead::NoCam2Tick { frames }
         );
-        // a head that read nothing at all (black frames) stops too
+        // the clip after a black pre-roll, and next to a cg-path burn (no painter-set rig burn)
+        let mut pre_roll = head(frames, &[]);
+        pre_roll[frames - 1].1 = vec![CLIP, CLIP];
+        pre_roll[frames - 2].1 = vec![CG_OBS, CLIP];
+        assert_eq!(
+            painter_head_verdict(&pre_roll),
+            PainterHead::NoCam2Tick { frames }
+        );
+    }
+
+    /// A head that shows neither the rig NOR a self-marked run (a black or slate pre-roll, NDI
+    /// inputs still reconnecting after an OBS restart) proves nothing: the recording goes on to
+    /// the unchanged full decode, which reads its later frames as before.
+    #[test]
+    fn a_pre_roll_head_goes_on_to_the_full_decode_1404() {
+        let frames = PAINTER_HEAD_FRAMES as usize;
         assert_eq!(
             painter_head_verdict(&head(frames, &[])),
-            PainterHead::NoCam2Tick { frames }
+            PainterHead::FullDecode,
+            "a head that read nothing at all"
+        );
+        assert_eq!(
+            painter_head_verdict(&head(frames, &[CG_OBS])),
+            PainterHead::FullDecode,
+            "a reserved cg-path burn alone is not the clip"
         );
     }
 
@@ -209,7 +232,13 @@ mod tests {
     #[test]
     fn the_no_tick_message_names_the_frames_the_burns_and_the_av_run_way_1404() {
         let m = no_cam2_tick_message(60);
-        for want in ["no cam2 painter tick", "60 frames", "911001", "--av-run"] {
+        for want in [
+            "no cam2 painter tick",
+            "60 frames",
+            "911001",
+            "measurement clip",
+            "--av-run 911016",
+        ] {
             assert!(m.contains(want), "{want:?} in {m}");
         }
     }
