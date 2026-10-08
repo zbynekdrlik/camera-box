@@ -235,9 +235,12 @@ install_base() {
 }
 
 # Issue 1400: the base image's FIRST-BOOT root line. Deliberately NOT the read-only-root canon's
-# `ro_root_root_line`: this root stays rw until setup-device.sh STEP 18 replaces the whole fstab,
-# because setup-device first runs apt installs and purges, update-initramfs and update-grub on it.
-# An empty UUID prints nothing and returns 1 (never an unbootable `UUID= /` line).
+# `ro_root_root_line`: this root stays rw until setup-device.sh STEP 18 replaces the whole fstab.
+# This first-boot fstab mounts only /var/cache as tmpfs, so a read-only root would leave /tmp,
+# /var/log, /var/tmp and /var/spool unwritable on first boot. (setup-device's own writes before
+# STEP 18, its apt installs and purges and update-grub, would not need it: its ensure_root_writable
+# remounts a read-only root rw.) An empty UUID prints nothing and returns 1 (never an unbootable
+# `UUID= /` line).
 create_usb_first_boot_root_line() {
     [[ -n "${1:-}" ]] || return 1
     printf 'UUID=%s /         ext4  errors=remount-ro 0 1\n' "$1"
