@@ -99,7 +99,8 @@ def _write(serve, verdict="MEASUREMENT", chain=7, now=None, **kw):
 
 def test_the_endpoint_serves_the_payload_with_its_age_recomputed(tmp_path):
     serve = _serve(tmp_path)
-    _write(serve, now=datetime.now(timezone.utc) - timedelta(seconds=3))
+    written = datetime.now(timezone.utc) - timedelta(seconds=3)
+    _write(serve, now=written)
     with _Http(serve) as h:
         status, headers, body = h.request("GET", "/program-audio.json")
         q_status, _qh, q_body = h.request("GET", "/program-audio.json?t=1")
@@ -109,6 +110,10 @@ def test_the_endpoint_serves_the_payload_with_its_age_recomputed(tmp_path):
     j = json.loads(body)
     assert j["verdict"] == "MEASUREMENT" and j["marker_chain"] == 7
     assert 2.5 <= j["age_s"] <= 10.0
+    assert j["last_foreign_age_s"] is None  # no FOREIGN window yet
+    # every other field passes through as written
+    assert (j["ts_utc"], j["rms_dbfs"], j["outside_band_pct"], j["window_s"], j["source"]) == (
+        rsf.format_ts_utc(written), -35.6, 16.8, 2.0, "S")
     assert json.loads(q_body)["verdict"] == "MEASUREMENT"
 
 
