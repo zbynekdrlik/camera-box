@@ -476,3 +476,15 @@ def test_911016_is_a_reserved_tick_excluded_origin_id_everywhere_the_ids_are_lis
     block = block[:block.index("];")]
     assert "recording_latency::MEASUREMENT_CLIP_RUN_ID" in block
     assert "911_016 =>" not in _src("src/burn_regions.rs")  # no overlay slot: never an echo-gated burn
+
+
+def test_the_default_clip_length_is_a_whole_number_of_index_wraps_1404():
+    # ROZHODNUTE 6048179415 item 2: 128 s keeps the marker line continuous across a loop (120 s does not).
+    import importlib.util, pathlib
+    p = pathlib.Path(__file__).resolve().parents[2] / "scripts" / "gen_measurement_clip.py"
+    spec = importlib.util.spec_from_file_location("gmc_len_1404", p)
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    assert m.SECONDS == 128
+    ticks = m.SECONDS * 60  # the painter's 60 Hz tick
+    assert ticks % 256 == 0, "the marker index (tick & 0xFF) must wrap a whole number of times"
