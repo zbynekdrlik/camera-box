@@ -6,6 +6,9 @@ paths:
   - "scripts/build-image.sh"
   - "scripts/lib/grub-fast-boot.sh"
   - "scripts/lib/ro-root.sh"
+  - "scripts/lib/cambox-ro-units.sh"
+  - "scripts/cambox-ro-units-apply.sh"
+  - "tests/python/test_cambox_ro_units_1394.py"
   - "tests/setup_device_pure_functions.rs"
   - "tests/verify_device_pure_functions.rs"
 ---
@@ -159,8 +162,9 @@ under `set -euo pipefail` with stubbed `ok`/`fail`/`ssh_box`. Both also assert `
 block. A new check inserted anywhere between `(ao)` and `(q)` therefore breaks them: its lib function
 is undefined in their harness, and a `warn` trips the assertion. Insert a new check earlier (the
 issue-1242 `(ap)` sits right after `(ae)`), and grep `tests/python` for `find("\n# (` slices before
-picking the spot. `(aq)` (#1394, GRUB fast boot) now sits after `(am)`, before `(ao)`; the next free
-letter is `(ar)`.
+picking the spot. `(aq)` (#1394, GRUB fast boot) now sits after `(am)`, before `(ao)`. `(ar)` (#1394,
+the read-only-root unit set) sits after `(ak)`, before `(al)`; the next free letter is `(as)`. Also
+keep a new check out of `(aq)..(ao)`: `tests/python/test_grub_fast_boot_1394.py` executes that slice.
 
 ## Two-char check-letter scheme is now at (ac) (#899)
 
@@ -458,6 +462,69 @@ the issue-1309 journal-partition line, which sits BETWEEN `/var/log` and `/var/t
 - `root_mount_is_readonly` stays DEFINED in `setup-device.sh` (a Rust test pins the definition
   there) but calls the lib's `ro_root_mount_mode`. `verify-device.sh` keeps its own copy, because
   pytests EXECUTE slices of it without sourcing libs; the parity test pins that copy to the lib.
+
+### The units a read-only root breaks: logrotate state, apt timers, netconsole retry (issue 1394)
+
+Live 8.10.2026 every cambox read `systemctl is-system-running` = `degraded` with four failed units.
+A unit that writes `/var/lib` fails on the read-only root at EVERY start (the `StateDirectory=`
+section above), and a box that reads `degraded` hides real failures.
+- **logrotate** keeps `/var/lib/logrotate/status` on the root: every 15-min pass (the issue-679 timer)
+  failed exit 3, so `/var/log` was not rotated at all. The fix is the ro-root canon's drop-in
+  (`ro_root_logrotate_dropin_service` = the base, `ro_root_logrotate_dropin_content` = the cambox file
+  `logrotate.service.d/zz-camera-box-ro-root.conf`, `--state /run/logrotate.status`). setup-device
+  writes it in the issue-679 block right after STEP 18's fstab, before that block's daemon-reload. The
+  SBC builds its own file from the SAME base plus its Armbian ramlog resets (byte-identical, sha
+  pinned in `tests/python/test_cambox_ro_units_1394.py`); it keeps its historical name
+  `zz-bkshading-ro-root.conf`, which handheld-1 already carries.
+- **apt-daily(-upgrade)** exit 2 on every pass (`/var/lib/apt`), and a package upgrade re-enables a
+  timer that is only DISABLED. STEP 15 MASKS the four units of `ro_root_masked_apt_units` (fail-loud,
+  after a best-effort `disable --now`). `apt-get` itself never goes through them, so STEP 16's
+  installs are unaffected (and STEP 15 runs before STEP 16 anyway). No cambox provisioner types the
+  four names: setup-device, build-image.sh (the overlay image), verify-device and the live apply read
+  the one list (`test_no_cambox_provisioner_types_an_apt_unit_name`). The SBC does not use it yet.
+- **cambox-netconsole** (issue 1311) was a oneshot with no `Restart=`, so one missed arm at boot kept
+  it failed until the next boot (cam1 from 4.10.). It now has `Restart=on-failure` + `RestartSec=30`
+  backing off to 10 min + `StartLimitIntervalSec=0` (`.claude/rules/cambox-remote-logging.md`).
+- **verify-device `(ar)`** grades all of it through `scripts/lib/cambox-ro-units.sh`: the drop-in
+  byte-for-byte AND loaded (`DropInPaths` names it), logrotate's last `Result` = success, each apt
+  unit `masked` + `inactive` (a masked timer still running would elapse into its masked service and
+  fail), the netconsole unit byte-identical with `Restart=on-failure` loaded. `(ak)` names a failed
+  netconsole with its `Result`.
+- **An already-provisioned box is brought up to date WITHOUT a setup-device re-run** by
+  `scripts/cambox-ro-units-apply.sh --plan|--apply --box <name>` (or `--active` for
+  `CAMERA_ACTIVE_SET`). The remote program writes inside ONE verified ro window
+  (`.claude/rules/ro-window.md`, the sites table), the apt units stopped before it; then
+  daemon-reload, reset-failed, one logrotate run, the netconsole restart, and an
+  `is-system-running` = running read-back. A box without the issue-1311 unit gets a NOTE and no new unit (that box needs its
+  setup-device re-run); the CLI's RESULT names it.
+  - **It is a root write on a cambox, so `--apply` TAKES the rig lease for its whole run** (repo
+    `camera-box-ro-units-apply`, a per-run id, released on EXIT/INT/TERM; a live foreign holder
+    refuses the run before any box, a stale one is reclaimed). One box can take minutes (the
+    netconsole arm waits for dev1), so a lease only READ once per run let an E2E start in between
+    (review rounds 2-3, reproduced). Before EVERY box it also refuses (exit 1) while the rig is held
+    otherwise (`rig_held_reason [stale] [own_run_id]` in `scripts/lib/rig-heartbeat.sh`: a fresh
+    issue-281 heartbeat -- rig-mode.sh TEST takes no lease -- or a live lease that is not ours) or
+    strih/stream record or stream (`stray_session_check_assert`, the shared rig-busy guard, run in a
+    subshell so its `exit 1` returns to the CLI). A refusal mid-run stops before that box (never
+    `continue`), and the RESULT names the boxes already done (`RESULT: in place on:`) and every
+    untouched one. `--force-live` skips the lease and the guard loudly (supervisor-only). `--plan`
+    runs no guard. A box named twice is applied once.
+  - **The lease declares the rolling 15-min look-ahead, never the whole run** (review round 4,
+    reproduced): `rig-busy-gate.sh` fails FAST (exit 44) on a holder whose `expected_release_at`
+    lies past its 1800 s wait budget, so a "+60 min" declaration turned every full-path E2E that
+    started during an apply red instead of making it wait. The per-box `rig_lease_refresh_if_mine`
+    keeps rolling it. The run's lease id is set BEFORE the acquire, so a TERM while the holder is
+    written still releases it. Holder notes for the :8890 consumers: `.claude/rules/rig-lease-http.md`.
+  - **The RESULT tells two failures apart:** a box whose files landed but a step outside the rw
+    window failed (the apt stop before it, the netconsole arm or a failed unit after it; named by its
+    first `FAIL: [issue 1394]` line) and a box where the unit set did not land. A netconsole that cannot arm FAILS the box although
+    `is-system-running` then reads running: a `Restart=on-failure` oneshot in auto-restart is
+    `activating`, not `failed`.
+  - **A failed unit is fixed by the apply, never by a setup-device re-run**: setup-device never runs
+    `reset-failed`, and a cambox is never rebooted remotely. The `(ar)` hints say so.
+  - **Tests point every rig input into tmp_path** (`RIG_LEASE_DIR`, `CAMERA_BOX_RIG_HEARTBEAT`,
+    `CAMBOX_RO_UNITS_OBS_PHASE2_DIR` with a fake `obs_phase2.py`): on dev1 the real lease, heartbeat
+    and OBS are live, on the CI runner there is no rig network.
 
 ### The image builders write through the same lib (issue 1400)
 

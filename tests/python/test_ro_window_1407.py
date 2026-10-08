@@ -252,6 +252,9 @@ def _site_texts():
         "relay-mode stop": (build(f'. "{relay}"\nbkshading_relay_mode_stop_cmds'), _INLINE_CLOSE),
         "relay-mode start": (build(f'. "{relay}"\nbkshading_relay_mode_start_cmds'), _INLINE_CLOSE),
         "ndi apply": (build(f'. "{ndi}"\nndi_discovery_cambox_apply_remote_snippet'), "\n_ndi_restore_ro\n"),
+        # issue 1394: the cambox read-only-root unit set's live apply
+        "ro-units apply": (build(f'. "{LIB / "cambox-ro-units.sh"}"\ncambox_ro_units_apply_program'),
+                           "\n_rou_close\n"),
         "dantesync upgrade": (build(f'set +e\n. "{upgrade}"\nset -e\ndantesync_linux_upgrade_cmd 1.15.0'),
                               "\n_dantesync_remount_ro\n"),
         "dantesync rollback": (build(f'set +e\n. "{upgrade}"\nset -e\ndantesync_linux_rollback_cmd'),
@@ -260,7 +263,7 @@ def _site_texts():
 
 
 _SITES = ["dantesync rollback", "dantesync upgrade", "ndi apply", "persist disable", "persist enable-now",
-          "relay-mode start", "relay-mode stop"]
+          "relay-mode start", "relay-mode stop", "ro-units apply"]
 
 
 def test_the_site_list_is_complete():
@@ -495,7 +498,7 @@ def test_the_shared_lib_is_sourced_by_every_rw_window_site():
     for rel in ("scripts/deploy-fleet.sh", "scripts/bkshading-deploy-relay.sh",
                 "scripts/lib/cam2-painter-ro-persist.sh", "scripts/lib/bkshading-relay-mode.sh",
                 "scripts/lib/ndi-discovery.sh", "scripts/lib/dantesync-rollback.sh",
-                "scripts/lib/rt-kernel-plan.sh"):
+                "scripts/lib/rt-kernel-plan.sh", "scripts/lib/cambox-ro-units.sh"):
         text = (ROOT / rel).read_text()
         assert "ro-window.sh" in text and "ro_window_close_cmds" in text, rel
 

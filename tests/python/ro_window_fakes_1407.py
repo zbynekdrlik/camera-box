@@ -9,6 +9,12 @@ The modelled failure (issue 1405, live 4.10.2026 on cam2): a service START on a 
 a writer on /, so the next ro remount fails "busy". `systemctl start|restart|enable --now` on an rw
 root plants that writer. Env knobs: FAKE_RW_FAIL, FAKE_RO_FAIL (busy), FAKE_RO_LIES (exit 0, root
 stays rw), FAKE_FINDMNT_EMPTY, FAKE_START_RC, FAKE_ENABLE_RC, FAKE_STOP_RC, FAKE_UNIT_MISSING.
+Issue 1394 added `mask`/`unmask` (refused on a ro root, like enable), `is-failed`, `reset-failed`
+and `is-system-running` (state/failed-<unit> files; `degraded` while one exists, or
+FAKE_SYSTEM_STATE); a failed start leaves its unit failed, a good start clears it.
+FAKE_RESTART_FAIL_UNIT fails one unit's start/restart WITHOUT a failed state (a Restart= unit in
+auto-restart), FAKE_DAEMON_RELOAD_RC fails `daemon-reload`, FAKE_STOP_FAIL_UNIT fails a stop that
+names that unit (anywhere in its list), FAKE_RESET_FAILED_RC fails `reset-failed`.
 
 `run_text(box, text)` runs emitted remote text under `set -e` and `set -euo pipefail` callers' modes
 with PATH = the stub dir only (plus the few real text tools the emitted text needs), so nothing
@@ -76,9 +82,11 @@ def started(u):
     if root == "rw":
         open(os.path.join(st, "writer"), "w").write("systemd-journal 76355\n")
     open(path("active", u), "w").write("active\n")
+    if os.path.exists(path("failed", u)):  # a good start clears a unit's failed state
+        os.remove(path("failed", u))
 
 
-if verb in ("enable", "disable"):
+if verb in ("enable", "disable", "mask", "unmask"):
     if verb == "enable" and os.environ.get("FAKE_ENABLE_RC"):
         sys.stderr.write("Failed to enable unit: fake failure\n")
         sys.exit(int(os.environ["FAKE_ENABLE_RC"]))
@@ -89,17 +97,53 @@ if verb in ("enable", "disable"):
         open(path("enabled", unit), "w").write("enabled\n")
         if "--now" in args:
             started(unit)
+    elif verb == "mask":  # issue 1394: a mask is a symlink write on the root, like enable
+        for u in units:
+            open(path("masked", u), "w").write("masked\n")
+    elif verb == "unmask":
+        for u in units:
+            if os.path.exists(path("masked", u)):
+                os.remove(path("masked", u))
     elif os.path.exists(path("enabled", unit)):
         os.remove(path("enabled", unit))
 elif verb in ("start", "restart"):
+    if os.environ.get("FAKE_RESTART_FAIL_UNIT") == unit:
+        # a Restart=on-failure oneshot whose (re)start fails: activating (auto-restart), not failed
+        sys.stderr.write(f"Job for {unit} failed (auto-restart scheduled).\n")
+        sys.exit(1)
     if os.environ.get("FAKE_START_RC"):
         fail = os.path.join(st, "start-failed-once")
         if os.environ.get("FAKE_START_ONCE") != "1" or not os.path.exists(fail):
             open(fail, "w").write("x")
+            open(path("failed", unit), "w").write("failed\n")
             sys.stderr.write(f"Job for {unit} failed.\n")
             sys.exit(int(os.environ["FAKE_START_RC"]))
     started(unit)
+elif verb == "daemon-reload" and os.environ.get("FAKE_DAEMON_RELOAD_RC"):
+    sys.stderr.write("Failed to reload daemon: fake failure\n")
+    sys.exit(int(os.environ["FAKE_DAEMON_RELOAD_RC"]))
+elif verb == "is-failed":
+    state = "failed" if os.path.exists(path("failed", unit)) else "inactive"
+    if "--quiet" not in args:
+        print(state)
+    sys.exit(0 if state == "failed" else 1)
+elif verb == "reset-failed":
+    if os.environ.get("FAKE_RESET_FAILED_RC"):
+        sys.stderr.write("Failed to reset failed state: fake failure\n")
+        sys.exit(int(os.environ["FAKE_RESET_FAILED_RC"]))
+    for u in units:
+        if os.path.exists(path("failed", u)):
+            os.remove(path("failed", u))
+elif verb == "is-system-running":
+    # FAKE_SYSTEM_STATE wins; else `degraded` while any unit is failed, the way systemd reads it
+    failed = [f for f in os.listdir(st) if f.startswith("failed-")]
+    state = os.environ.get("FAKE_SYSTEM_STATE") or ("degraded" if failed else "running")
+    print(state)
+    sys.exit(0 if state == "running" else 1)
 elif verb == "stop":
+    if os.environ.get("FAKE_STOP_FAIL_UNIT") in units:  # one named unit of the list fails to stop
+        sys.stderr.write(f"Failed to stop {os.environ['FAKE_STOP_FAIL_UNIT']}.\n")
+        sys.exit(1)
     if os.environ.get("FAKE_STOP_RC") and not unit.endswith(".timer"):
         sys.stderr.write(f"Failed to stop {unit}.\n")
         sys.exit(int(os.environ["FAKE_STOP_RC"]))
@@ -107,6 +151,8 @@ elif verb == "stop":
         os.remove(path("active", unit))
 elif verb == "is-enabled":
     state = "enabled" if os.path.exists(path("enabled", unit)) else "disabled"
+    if os.path.exists(path("masked", unit)):
+        state = "masked"
     print(state)
     sys.exit(0 if state == "enabled" else 1)
 elif verb == "is-active":

@@ -169,7 +169,14 @@
 #       the NEXT half-dead-stick death ships its kernel + journal messages off-box in real time,
 #       instead of dying with the stick like the on-STICK #1309 journal does. FAILs fail-closed on any
 #       missing/wrong facet. journal-upload's ACTIVE state is not gated (it depends on the dev1 sink,
-#       a separate supervisor step); enabled + correct config is the cambox-side bar.
+#       a separate supervisor step); enabled + correct config is the cambox-side bar. A `failed`
+#       netconsole is named with its systemd Result (issue 1394).
+#   (ar) the read-only-root unit set (issue 1394) -- HARD FAIL: the logrotate drop-in (state in /run,
+#        the ro-root canon) byte-for-byte AND loaded, logrotate.service's last Result success, the
+#        four apt timers/services masked + inactive, and the cambox-netconsole unit byte-identical to
+#        scripts/lib/remote-logging.sh (Restart=on-failure loaded) -- the four units that left every
+#        cambox `degraded` on 8.10.2026. Graded by cambox_ro_units_verdict (scripts/lib/cambox-ro-units.sh,
+#        the SAME lib scripts/cambox-ro-units-apply.sh fixes a live box with).
 #   (am) bkshading-relay blast-radius + info logging (#1309) -- HARD FAIL on the box that RUNS the
 #        relay: TasksMax <= 512 (fork/thread runaway can't starve the box pid space) AND a running
 #        relay logs at info (zero journal lines while active = an old binary predating info-by-
@@ -260,6 +267,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/remote-logging.sh"  # remote_log_gather_remote_snippet/remote_log_verdict -- the (ak)
                                  # off-box kernel(netconsole)+journal(upload) forensics check (#1311;
                                  # SAME source of truth as setup-device.sh / create-usb-linux.sh)
+# shellcheck source=scripts/lib/cambox-ro-units.sh
+. "$HERE/lib/cambox-ro-units.sh"  # cambox_ro_units_gather_remote_snippet/cambox_ro_units_verdict -- the (ar)
+                                  # read-only-root unit set (issue 1394; the SAME ro-root canon setup-device writes)
 # shellcheck source=scripts/lib/ndi-discovery.sh
 . "$HERE/lib/ndi-discovery.sh"   # ndi_discovery_cambox_verdict + the gather/section helpers --
                                  # the (an) check: a cambox carries no networks.ips (issue 1389; the
@@ -889,6 +899,11 @@ Checks:
       cambox-mgmt-selfcheck.timer enabled -- the local ssh-banner probe + restart safety net
   (ak) off-box remote logging (#1311): cambox-netconsole.service enabled+active with a live configfs
       target to dev1:514, AND systemd-journal-upload enabled with URL -> the dev1 sink + a /run cursor
+      (a failed netconsole is named with its Result, issue 1394)
+  (ar) read-only-root unit set (issue 1394): the logrotate drop-in (state in /run) byte-for-byte and
+      loaded, logrotate's last Result success, the four apt timers/services masked + inactive, and the
+      netconsole unit byte-identical with Restart=on-failure loaded -- fix a live box with
+      scripts/cambox-ro-units-apply.sh --apply --box NAME
   (al) named cam-box UEFI boot entry (#1066 D6): efibootmgr reports a \`cam-box\` entry that is FIRST
       in BootOrder (read with -v), with an HD() path on the /boot/efi PARTUUID (issue 1311) -- FAILs if absent /
       not leading / mangled (VenHw) or stale path / efibootmgr or ESP PARTUUID unreadable (test-strictness)
@@ -1779,6 +1794,30 @@ elif [ "$REMOTELOG_VERDICT" != "ok" ]; then
   fail "off-box remote logging not provisioned: $(printf '%s' "$REMOTELOG_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')"
 else
   ok "off-box remote logging live: netconsole armed -> dev1:${REMOTE_LOG_NETCONSOLE_PORT} + systemd-journal-upload -> ${REMOTE_LOG_JOURNAL_URL} (the next #1309 stick death ships its kernel+journal off-box, #1311)"
+fi
+
+# (ar) read-only-root unit set (issue 1394) -- HARD FAIL -------------------------------------------
+# 8.10.2026 every cambox read `degraded`: logrotate kept its state on the read-only root (fails
+# every 15 min, /var/log not rotated), apt-daily(-upgrade) failed every pass with their timers only
+# disabled, and the issue-1311 netconsole oneshot never retried a boot-time miss. setup-device.sh
+# writes the fixes; scripts/cambox-ro-units-apply.sh brings a live box up to date. One read-only ssh
+# gather (cambox_ro_units_gather_remote_snippet), graded by the pure cambox_ro_units_verdict from the
+# SAME lib, against the ro-root canon and remote-logging.sh. HARD FAIL (fail-closed on an unreadable
+# fact). Inserted after (ak), before (al): outside the slices pytest executes ((aq)..(ao),
+# (ao)..(an), (an)..(q)) and before the .bak cruft check, which stays last.
+arrc=0
+RO_UNITS_BLOCK="$(ssh_box "$(cambox_ro_units_gather_remote_snippet)")" || arrc=$?
+if [ "$arrc" -ne 0 ] || [ -z "$RO_UNITS_BLOCK" ]; then
+  fail "could not read the read-only-root unit state over SSH (rc=$arrc) -- cannot certify logrotate / the apt masks / the netconsole retry (issue 1394)"
+else
+  RO_UNITS_VERDICT="$(cambox_ro_units_verdict "$RO_UNITS_BLOCK")"
+  if [ "$RO_UNITS_VERDICT" = "ok" ]; then
+    ok "read-only-root unit set in place: logrotate keeps its state in /run (last run success), the four apt units masked + inactive, netconsole retries on failure (issue 1394)"
+  else
+    while IFS= read -r _reason; do
+      [ -n "$_reason" ] && fail "read-only-root units: ${_reason#FAIL: }"
+    done <<<"$RO_UNITS_VERDICT"
+  fi
 fi
 
 # (al) named `cam-box` UEFI boot entry leads BootOrder (#1066 D6) -- HARD FAIL --------------------

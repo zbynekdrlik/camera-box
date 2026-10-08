@@ -176,8 +176,11 @@ install_camera_box() {
 
     # Disable conflicting services
     chroot "${WORK_DIR}/rootfs" systemctl mask systemd-timesyncd.service
-    chroot "${WORK_DIR}/rootfs" systemctl mask apt-daily.timer
-    chroot "${WORK_DIR}/rootfs" systemctl mask apt-daily-upgrade.timer
+    # issue 1394: the apt timers AND services, from the ONE list of the read-only-root canon
+    # (scripts/lib/ro-root.sh); setup-device.sh STEP 15 and the live apply mask the same four.
+    local -a apt_units
+    mapfile -t apt_units < <(ro_root_masked_apt_units)
+    chroot "${WORK_DIR}/rootfs" systemctl mask "${apt_units[@]}"
     chroot "${WORK_DIR}/rootfs" systemctl mask sleep.target
     chroot "${WORK_DIR}/rootfs" systemctl mask suspend.target
     chroot "${WORK_DIR}/rootfs" systemctl mask hibernate.target

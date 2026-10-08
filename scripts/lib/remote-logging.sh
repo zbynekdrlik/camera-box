@@ -201,7 +201,12 @@ SCRIPT_BODY
 # network-online.target is meaningless on this box class (wait-online is MASKED, #547/#1311), so the
 # setup script also retries the egress-route lookup. Type=oneshot + RemainAfterExit
 # so `systemctl is-active` reads `active` after a successful arm (the verify (ak) check keys on that).
-# Pulled in at boot by multi-user.target (reboot survival via `enable`).
+# Issue 1394: an arm that still fails (dev1's MAC not resolvable, a late route) used to stay failed
+# until the next boot (cam1 from 4.10 06:24Z, the box `degraded`, no kernel printk off-box).
+# Restart=on-failure retries it (30 s backing off to 10 min), with no start-rate limit. systemd 255
+# allows on-failure for a oneshot (always/on-success it refuses) and has RestartSteps /
+# RestartMaxDelaySec; tests/python/test_cambox_ro_units_1394.py runs systemd-analyze verify on this
+# text. Pulled in at boot by multi-user.target (reboot survival via `enable`).
 remote_log_netconsole_service_unit_content() {
   cat <<EOF
 [Unit]
@@ -215,10 +220,20 @@ After=network-online.target
 After=systemd-networkd.service network.target
 Wants=network-online.target
 Wants=systemd-networkd.service
+# Issue 1394: no start-rate limit. A safeguard: at RestartSec=30 the default limit (5 starts in
+# 10 s) cannot trip, but the Restart= retries below must never run out.
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+# Issue 1394: a failed arm retries until dev1 answers, instead of staying failed (and the box
+# degraded) until the next boot. The delay grows from 30 s to 10 min over 4 steps, so a box away
+# from dev1 (the travelling rig) does not write a failed arm into the stick journal every 30 s.
+Restart=on-failure
+RestartSec=30
+RestartSteps=4
+RestartMaxDelaySec=600
 ExecStart=${REMOTE_LOG_NC_SCRIPT_PATH}
 
 [Install]
@@ -279,6 +294,7 @@ remote_log_gather_remote_snippet() {
   cat <<'REMOTE'
 echo "NC_SVC_ENABLED=$(systemctl is-enabled cambox-netconsole 2>/dev/null)"
 echo "NC_SVC_ACTIVE=$(systemctl is-active cambox-netconsole 2>/dev/null)"
+echo "NC_SVC_RESULT=$(systemctl show -p Result --value cambox-netconsole 2>/dev/null)"
 echo "NC_SCRIPT_X=$(test -x /usr/local/sbin/cambox-netconsole-setup.sh && echo yes || echo no)"
 if [ -d /sys/kernel/config/netconsole/cambox ]; then
   echo "NC_ENABLED=$(cat /sys/kernel/config/netconsole/cambox/enabled 2>/dev/null)"
@@ -313,10 +329,11 @@ REMOTE
 remote_log_verdict() {
   local block="$1" fails="" nl
   nl=$'\n'
-  local nc_enabled_svc nc_active nc_script_x nc_target nc_ip nc_port
+  local nc_enabled_svc nc_active nc_result nc_script_x nc_target nc_ip nc_port
   local ju_enabled ju_url ju_state
   nc_enabled_svc="$(printf '%s\n' "$block" | sed -n 's/^NC_SVC_ENABLED=//p' | tr -d '[:space:]')"
   nc_active="$(printf '%s\n' "$block" | sed -n 's/^NC_SVC_ACTIVE=//p' | tr -d '[:space:]')"
+  nc_result="$(printf '%s\n' "$block" | sed -n 's/^NC_SVC_RESULT=//p' | tr -d '[:space:]')"
   nc_script_x="$(printf '%s\n' "$block" | sed -n 's/^NC_SCRIPT_X=//p' | tr -d '[:space:]')"
   nc_target="$(printf '%s\n' "$block" | sed -n 's/^NC_ENABLED=//p' | tr -d '[:space:]')"
   nc_ip="$(printf '%s\n' "$block" | sed -n 's/^NC_REMOTE_IP=//p' | tr -d '[:space:]')"
@@ -326,7 +343,13 @@ remote_log_verdict() {
   ju_state="$(printf '%s\n' "$block" | sed -n 's/^JU_STATE_SAVE=//p' | tr -d '[:space:]')"
 
   [ "$nc_enabled_svc" = "enabled" ] || fails="${fails:+$fails$nl}FAIL: ${REMOTE_LOG_NC_SERVICE_NAME}.service is not enabled (state=${nc_enabled_svc:-<none>}) -- netconsole will not survive a reboot (#1311)"
-  [ "$nc_active" = "active" ] || fails="${fails:+$fails$nl}FAIL: ${REMOTE_LOG_NC_SERVICE_NAME}.service is not active (state=${nc_active:-<none>}) -- the netconsole boot oneshot did not arm (#1311)"
+  # Issue 1394: a `failed` unit is named with its systemd Result (exit-code, timeout, ...), so the
+  # report says WHY it never armed; an old gather without the Result line reads `<unread>`.
+  case "$nc_active" in
+    active) : ;;
+    failed) fails="${fails:+$fails$nl}FAIL: ${REMOTE_LOG_NC_SERVICE_NAME}.service FAILED (Result=${nc_result:-<unread>}) -- the netconsole arm failed and no kernel printk leaves the box; a unit without the issue-1394 Restart=on-failure stays failed until the next boot (#1311)" ;;
+    *) fails="${fails:+$fails$nl}FAIL: ${REMOTE_LOG_NC_SERVICE_NAME}.service is not active (state=${nc_active:-<none>}, Result=${nc_result:-<unread>}) -- the netconsole boot oneshot did not arm (#1311)" ;;
+  esac
   [ "$nc_script_x" = "yes" ] || fails="${fails:+$fails$nl}FAIL: ${REMOTE_LOG_NC_SCRIPT_PATH} is missing/not executable -- re-provision with the current setup-device.sh (#1311)"
   if [ "$nc_target" = "__NO_TARGET__" ]; then
     fails="${fails:+$fails$nl}FAIL: no netconsole configfs target at ${REMOTE_LOG_NC_CONFIGFS} -- kernel printk is not leaving the box (#1311)"
