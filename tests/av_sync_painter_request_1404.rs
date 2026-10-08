@@ -196,6 +196,7 @@ fn a_burns_on_rig_frame_keeps_its_hop_burns_required_1404() {
         assert_eq!(plan.any_of_burns, CAMERAS, "the camera group: {what}");
         assert_eq!(plan.min_distinct_optical, None, "{what}");
 
+        // One decode per request (a robust 1080p decode is the expensive part of a CI debug run).
         let decode = |req: &camera_box::av_sync_decode_plan::AvDecodeRequest| {
             decode_qr_luma_all_fast_then_robust_grouped_pathed_optical(
                 luma.clone(),
@@ -205,32 +206,29 @@ fn a_burns_on_rig_frame_keeps_its_hop_burns_required_1404() {
             )
         };
         let (plan_payloads, plan_path) = decode(&plan);
-        let (_, today_path) = decode(&today);
+        let (today_payloads, today_path) = decode(&today);
         assert_eq!(plan_path, DecodePath::Fast, "the plan's request: {what}");
         assert_eq!(
             today_path,
             DecodePath::Robust,
             "today's request (none carries cam1, strih and stream): {what}"
         );
-        let plan_frame = decode_recording_frame_with_grouped_burns_optical(
-            0,
-            luma.clone(),
-            &plan.mandatory_burns,
-            &plan.any_of_burns,
-            plan.min_distinct_optical,
-        );
-        let today_frame = decode_recording_frame_with_grouped_burns_optical(
-            0,
-            luma,
-            &today.mandatory_burns,
-            &today.any_of_burns,
-            today.min_distinct_optical,
-        );
         assert_eq!(
-            plan_frame.tick, today_frame.tick,
+            cam2_tick(&plan_payloads),
+            cam2_tick(&today_payloads),
             "the same cam2 tick: {what}"
         );
-        assert_eq!(plan_frame.tick, seen.tick, "{what}");
-        assert!(!plan_payloads.is_empty(), "{what}");
+        assert_eq!(cam2_tick(&plan_payloads), seen.tick, "{what}");
+        assert!(seen.tick.is_some(), "{what}");
     }
+}
+
+/// The cam2 tick of a frame's payloads, derived like `RecordingFrame::tick`: the newest `frame_id`
+/// of a QR that is not a reserved node-burn id.
+fn cam2_tick(payloads: &[camera_box::probe::payload::Payload]) -> Option<u32> {
+    payloads
+        .iter()
+        .filter(|p| !NODE_BURN_RUN_IDS.contains(&p.run_id))
+        .map(|p| p.frame_id)
+        .max()
 }
