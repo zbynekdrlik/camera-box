@@ -152,14 +152,25 @@ fn watchdog_uses_the_pure_decision_lib_never_inlined_logic() {
 #[test]
 fn watchdog_reuses_existing_coordination_primitives_never_a_new_one() {
     let body = read(WATCHDOG);
+    // Issue 1394 review round 2: the "is the rig driven right now" read is ONE shared function in
+    // rig-heartbeat.sh (rig_held_reason), built from the #281 heartbeat and the #830 lease; the
+    // watchdog and scripts/cambox-ro-units-apply.sh both call it instead of two copies.
     assert!(
-        body.contains("lib/rig-heartbeat.sh") && body.contains("rig_heartbeat_active"),
-        "coordination must reuse the #281 rig-active heartbeat (a live TEST/E2E harness), \
-         never a new signal"
+        body.contains("lib/rig-heartbeat.sh") && body.contains("rig_held_reason"),
+        "coordination must reuse the shared rig-held read (rig_held_reason), never a new signal"
     );
     assert!(
         body.contains("lib/rig-lease.sh"),
         "coordination must ALSO honor the #830 rig lease (a live CI gate holding the rig)"
+    );
+    let lib = read("scripts/lib/rig-heartbeat.sh");
+    let start = lib
+        .find("rig_held_reason() {")
+        .expect("rig-heartbeat.sh defines rig_held_reason");
+    let held = &lib[start..start + lib[start..].find("\n}\n").expect("function end")];
+    assert!(
+        held.contains("rig_heartbeat_active") && held.contains("rig_lease_is_stale"),
+        "rig_held_reason must read the #281 rig-active heartbeat AND the #830 rig lease: {held}"
     );
 }
 
