@@ -45,8 +45,14 @@ pub struct AvDecodeRequest {
 
 /// The decode request of `--av-sync`: `None` = the painter path (today's set), `Some(run)` =
 /// `--av-run <run>`.
-pub fn av_decode_request(_av_run: Option<u32>) -> AvDecodeRequest {
-    painter_request()
+pub fn av_decode_request(av_run: Option<u32>) -> AvDecodeRequest {
+    match av_run {
+        Some(run) => AvDecodeRequest {
+            mandatory_burns: Vec::new(),
+            min_distinct_optical: Some((run, DUAL_QR_HALVES)),
+        },
+        None => painter_request(),
+    }
 }
 
 /// The request of the painter path's full decode.
@@ -57,9 +63,14 @@ fn painter_request() -> AvDecodeRequest {
     }
 }
 
-/// The request of the painter path's head.
+/// The request of the painter path's head: nothing required, so every head frame stays on the fast
+/// path (plain + Otsu, plus the #754 top-band look on a frame short of a dual-QR). The head only
+/// has to show whether a cam2 tick or a rig burn is there; the plain pass reads both.
 pub fn painter_head_request() -> AvDecodeRequest {
-    painter_request()
+    AvDecodeRequest {
+        mandatory_burns: Vec::new(),
+        min_distinct_optical: None,
+    }
 }
 
 /// What the painter path's head decided.
@@ -74,8 +85,15 @@ pub enum PainterHead {
 
 /// The painter head's verdict. `head` holds one `(cam2 tick, run ids read)` per decoded head
 /// frame, in any order: the tick is `RecordingFrame::tick` (reserved ids already excluded).
-pub fn painter_head_verdict(_head: &[(Option<u32>, Vec<u32>)]) -> PainterHead {
-    PainterHead::FullDecode
+pub fn painter_head_verdict(head: &[(Option<u32>, Vec<u32>)]) -> PainterHead {
+    let rig_recording = head.iter().any(|(tick, run_ids)| {
+        tick.is_some() || run_ids.iter().any(|r| PAINTER_PATH_NODE_BURNS.contains(r))
+    });
+    if rig_recording || head.is_empty() {
+        PainterHead::FullDecode
+    } else {
+        PainterHead::NoCam2Tick { frames: head.len() }
+    }
 }
 
 /// The error the painter path stops with on [`PainterHead::NoCam2Tick`].

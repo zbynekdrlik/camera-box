@@ -748,12 +748,49 @@ pub fn analyze_recording_with_grouped_burns_optical(
     any_of_burns: &[u32],
     min_distinct_optical: Option<(u32, usize)>,
 ) -> Result<Vec<RecordingFrame>> {
+    analyze_frames(
+        path,
+        mandatory_burns,
+        any_of_burns,
+        min_distinct_optical,
+        None,
+    )
+}
+
+/// Issue 1404 — [`analyze_recording_with_grouped_burns_optical`] (no any-of group) over only the
+/// FIRST `max_frames` frames of `path`, every frame when the recording is shorter: ffmpeg is
+/// stopped once they are read. The `--av-sync` painter path reads its cheap head with it before
+/// the full decode (`crate::av_sync_decode_plan`).
+pub fn analyze_recording_head(
+    path: &Path,
+    max_frames: u64,
+    mandatory_burns: &[u32],
+    min_distinct_optical: Option<(u32, usize)>,
+) -> Result<Vec<RecordingFrame>> {
+    analyze_frames(
+        path,
+        mandatory_burns,
+        &[],
+        min_distinct_optical,
+        Some(max_frames),
+    )
+}
+
+/// The recording analysis behind [`analyze_recording_with_grouped_burns_optical`] (`max_frames =
+/// None`, the whole recording) and [`analyze_recording_head`].
+fn analyze_frames(
+    path: &Path,
+    mandatory_burns: &[u32],
+    any_of_burns: &[u32],
+    min_distinct_optical: Option<(u32, usize)>,
+    max_frames: Option<u64>,
+) -> Result<Vec<RecordingFrame>> {
     let (width, height) = probe_dimensions(path)?;
     let workers = decode_workers(width, height);
     tracing::info!(
         file = %path.display(), width, height, workers,
         mandatory_burns = ?mandatory_burns, any_of_burns = ?any_of_burns,
-        min_distinct_optical = ?min_distinct_optical,
+        min_distinct_optical = ?min_distinct_optical, max_frames = ?max_frames,
         avail_mb = available_mem_bytes().map(|b| b / 1_048_576),
         "recording analysis start (parallel decode, #187 memory-bounded worker pool, #207 fast-then-robust)"
     );
@@ -771,12 +808,18 @@ pub fn analyze_recording_with_grouped_burns_optical(
         any_of_burns,
         min_distinct_optical,
         |emit| {
-            read_frames(path, width, height, |idx, luma| {
+            let read = read_frames(path, width, height, |idx, luma| {
+                // issue 1404: a head analysis stops ffmpeg at the first frame past the head
+                if max_frames.is_some_and(|max| idx >= max) {
+                    return false;
+                }
                 if idx > 0 && idx % PROGRESS_EVERY == 0 {
                     tracing::info!(file = %path.display(), frames_read = idx, "recording decode progress");
                 }
                 emit(idx, luma)
-            })
+            })?;
+            // read_frames also counts the frame it stopped at, which the head never decoded
+            Ok(max_frames.map_or(read, |max| read.min(max)))
         },
     )?;
     let decoded: usize = frames.iter().filter(|f| !f.payloads.is_empty()).count();
