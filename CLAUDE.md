@@ -414,6 +414,7 @@ wrong PR with no review of it.
   with `git switch -C <own worktree branch> origin/dev` (clean tree, no history rewrite) — or make
   `worktree-issue-<N>` from origin/dev and report THAT name — then `git branch --unset-upstream`
   so no bare `git push` can ever target `dev`.
+- **A lane deletes every scratch dir it created (downloaded bundles, stage copies, experiment trees) before its LANE-RETURN; the supervisor deletes a merged lane's leftovers at integration (issue 1395: lane scratch piled up to 25 GB on dev1's one shared disk; the E2E run dirs are bounded by `scripts/lib/e2e-rundir-retention.sh`).**
 - **A worker's OWN local `origin/dev` tracking ref can drift AHEAD mid-session too** (confirmed
   live, issue 1278, 2026-09-02: a lane's local `origin/dev` moved from its own fork point
   `85ee75632` to `ddf43a3a8` — a SIBLING lane's merge — sometime between the lane's initial fetch
