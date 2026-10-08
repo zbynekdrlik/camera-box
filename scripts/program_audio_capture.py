@@ -123,7 +123,7 @@ class SyncCapture:
 
 
 class CaptureThread:
-    """The capture side as its own thread (the dev1 service). start() it before handing it to
+    """The capture side as its own thread (the sampler service). start() it before handing it to
     program_audio_sampler.run(capture=...), stop() it before the receiver is closed: stop() waits
     for the thread to leave the SDK call, and the receiver must never be destroyed under a running
     capture."""

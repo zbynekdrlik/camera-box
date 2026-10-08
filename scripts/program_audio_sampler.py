@@ -10,6 +10,10 @@ MEASUREMENT | FOREIGN | SILENT | UNKNOWN (scripts/program_audio.py) and atomical
 `http://<host>:8891/program-audio.json`, ages recomputed per request). Consumers call
 `scripts/program_audio_guard.py` and stop the YouTube broadcast on anything but MEASUREMENT/SILENT.
 
+The rules below were found and measured while the sampler ran on dev1 (until 7.10.2026), so their
+text says "dev1". It runs only on strih-lx now (the fleet's date master), where "dev1's arrival
+time" and "dev1's own wall-clock step" mean strih-lx's own.
+
 * FOREIGN LATCH: every payload carries `last_foreign_ts_utc`, the newest FOREIGN window, so a gate
   that polls every ~10 s still sees a FOREIGN window that fell between two of its polls.
 * UNKNOWN whenever it is not sampling: at start, after NO_AUDIO_TIMEOUT_S without audio (sender
@@ -782,10 +786,7 @@ def default_serve_dir() -> str:
     """$PROGRAM_AUDIO_SERVE_DIR, else $XDG_RUNTIME_DIR/program-audio-sampler (the user's runtime
     tmpfs: the file is rewritten every 2 s). The dev1 lease server's $RIG_LEASE_SERVE_DIR never moves
     it (issue 1404: the sampler has no dev1 shape left)."""
-    if os.environ.get(SERVE_DIR_ENV):
-        return os.environ[SERVE_DIR_ENV]
-    runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.geteuid()}"
-    return os.path.join(runtime, SERVE_DIR_NAME)
+    return rsf.runtime_serve_dir(SERVE_DIR_ENV, SERVE_DIR_NAME)
 
 
 def private_ndi_config_dir() -> str:

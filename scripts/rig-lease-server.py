@@ -150,7 +150,7 @@ def make_server(bind: str, port: int, lease_dir: str, stale_secs: int,
     """Build a ThreadingHTTPServer bound to a handler CLASS carrying (lease_dir, stale_secs,
     serve_dir) -- BaseHTTPRequestHandler subclasses are instantiated per-request by the server, so
     the config is threaded via class attributes on a small bound subclass rather than instance
-    state. serve_dir None (the default) keeps the issue-1404 file routes a plain 404."""
+    state. serve_dir None (the default) keeps the issue-1404 marker route a plain 404."""
     bound_handler = type(
         "BoundRigLeaseHandler",
         (RigLeaseHandler,),
@@ -175,7 +175,7 @@ def main(argv=None) -> int:
     )
     parser.add_argument(
         "--serve-dir", default=rsf.default_serve_dir(),
-        help="dir of the issue-1404 served files (default $RIG_LEASE_SERVE_DIR or "
+        help="dir of the issue-1404 served marker file (default $RIG_LEASE_SERVE_DIR or "
              "$XDG_RUNTIME_DIR/rig-lease-serve); never the lease dir",
     )
     args = parser.parse_args(argv)

@@ -46,7 +46,7 @@ DEFAULT_URL = "http://10.77.9.202:8891/program-audio.json"
 DEFAULT_MAX_AGE_S = 10.0
 DEFAULT_TIMEOUT_S = 5.0
 DEFAULT_LATCH_S = 30.0
-NEGATIVE_AGE_TOLERANCE_S = 1.0  # a dantesync date step moves dev1's clock by tens of ms
+NEGATIVE_AGE_TOLERANCE_S = 1.0  # a dantesync date step moves the serving host's clock by tens of ms
 
 EXIT_OK = 0
 EXIT_FOREIGN = 1

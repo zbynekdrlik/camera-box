@@ -48,11 +48,18 @@ MARKERS_NAME = "rig-qpsk-markers.csv"
 PROGRAM_AUDIO_NAME = "program-audio.json"
 
 
-def default_serve_dir() -> str:
-    if os.environ.get(SERVE_DIR_ENV):
-        return os.environ[SERVE_DIR_ENV]
+def runtime_serve_dir(env_var: str, name: str) -> str:
+    """$<env_var>, else <name> in the user's runtime tmpfs dir ($XDG_RUNTIME_DIR, else
+    /run/user/<uid>). One rule for the dev1 lease server's serve dir and the sampler's own."""
+    if os.environ.get(env_var):
+        return os.environ[env_var]
     runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.geteuid()}"
-    return os.path.join(runtime, SERVE_DIR_NAME)
+    return os.path.join(runtime, name)
+
+
+def default_serve_dir() -> str:
+    """The dev1 lease server's (and the marker mirror's) serve dir."""
+    return runtime_serve_dir(SERVE_DIR_ENV, SERVE_DIR_NAME)
 
 
 def default_lease_dir() -> str:

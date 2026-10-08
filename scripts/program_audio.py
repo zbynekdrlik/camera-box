@@ -663,9 +663,9 @@ def build_payload(verdict: str, rms_dbfs, outside_band_pct, *, now: datetime, wi
                   marker_chain: int | None = None, holes_bridged: int | None = None,
                   bridged_ms: float | None = None, queue_drops: int | None = None,
                   lag_ms: float | None = None, sender_stalls: int | None = None) -> dict:
-    """The program-audio.json payload. `age_s` is 0.0 as written; the lease server recomputes it
-    (and `last_foreign_age_s` from `last_foreign_ts_utc`, the FOREIGN latch) at every request
-    (rig_serve_files.program_audio_response). `markers_decoded` (raw CRC-valid words, diagnostics)
+    """The program-audio.json payload. `age_s` is 0.0 as written; the sampler's own endpoint
+    (program_audio_http) recomputes it (and `last_foreign_age_s` from `last_foreign_ts_utc`, the
+    FOREIGN latch) at every request (rig_serve_files.program_audio_response). `markers_decoded` (raw CRC-valid words, diagnostics)
     and `marker_chain` are additive fields, null when the window has no full marker span.
     `holes_bridged` / `bridged_ms` (additive, design issue 1404 comment 6036098516) count the
     sender-timeline holes the running sampler bridged with zeros since it started, null in a
