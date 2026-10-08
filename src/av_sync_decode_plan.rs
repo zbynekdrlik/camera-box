@@ -24,12 +24,18 @@
 //!   ([`painter_full_request`], ROZHODNUTÉ 6051603225). The YouTube-leg stream recordings of the
 //!   5.10 sessions ran with the burns off: every frame carries only the painter run and the aux
 //!   pair, so the old cam1/strih/stream request sent all 1200 frames of each window through the
-//!   robust recovery (101-190 s instead of 32-58 s per 40 s clip, 8 workers). A burns-on rig
-//!   recording keeps every strih / stream burn its head read mandatory and gets the camera group as
-//!   the issue-632 any-of group, so the deployed camera's burn (whichever camera) satisfies it.
-//!   `--av-sync` pairs the painter tick with the audio marker; the burns carry no A/V information,
-//!   so a burn the fast path skips cannot change the result. On all 9 re-made stream-recording
-//!   fixtures the output stayed byte-identical with every frame fast (issue 1404 comment
+//!   robust recovery (the video decode alone: 101-190 s instead of 32-58 s per 40 s clip, 8
+//!   workers). A burns-on rig recording keeps every strih / stream burn its head read mandatory and
+//!   gets the camera group as the issue-632 any-of group, so the deployed camera's burn (whichever
+//!   camera) satisfies it.
+//!
+//!   Why the result cannot move: `--av-sync` pairs the painter tick with the audio marker, and
+//!   node burns are tick-excluded. A frame the new request keeps on the fast path skips the
+//!   bottom-band tiles (the bottom 45 % of the frame) and the burn slot looks. Neither can hold a
+//!   whole dual-QR primary, which spans more than half the frame height on the rig. A
+//!   cam1-deployed frame always took this same fast path under the old request. Measured: on the
+//!   10 800 frames of the 9 re-made stream-recording fixtures, no frame read a different optical
+//!   payload. Every frame is fast now, and the output stayed byte-identical (issue 1404 comment
 //!   6051594115).
 //!
 //! Pure (no I/O). `probe::av_sync_recording` decodes the head and the recording with these

@@ -226,7 +226,9 @@ from what the painter head read:
 
 Measured on dev2 (8 workers, the runner's release decoder):
 - the 9 re-made stream-recording clips went from 0/1200 to 1200/1200 fast frames;
-- 45-73 s per 40 s clip (dev2 at load ~20), against 101-190 s;
+- the video decode alone: 32-58 s per 40 s clip with nothing required, against 101-190 s with
+  the old request (`cmp.rs`, decode only). The whole new `--av-sync` run (head + full decode +
+  audio) took 45-73 s on dev2 at load ~20;
 - the JSON is byte-identical to each committed `.avsync.out` block;
 - three committed burns-on rig frames keep strih / stream required and read the same tick.
 
@@ -246,4 +248,15 @@ Re-making the clips:
 - `tests/av_sync_painter_request_1404.rs` pins that JSON with the compiled CLI, plus >= 95 % fast
   frames read from the last `recording analysis complete` line (`this_analysis_fast`).
 - If the pinned ffmpeg or the decoder changes, regenerate the JSON with the OLD request on the same
-  clip. Never write it with the new code.
+  clip. Never write it with the new code. No CLI path runs the old request any more, so use a small
+  plain-rustc harness against the runner's release probe rlib (the replica recipe above):
+  - decode with `analyze_recording_with_grouped_burns_optical(clip, &PAINTER_PATH_NODE_BURNS, &[], None)`
+    (= `av_decode_request(None)`);
+  - run the rest of `av_sync_from_recording`'s painter path on those frames (first sample per tick,
+    the coverage guard, the best audio channel, `av_offset_candidates_deduped`,
+    `cluster_offset_ms(.., 4, 25.0)`);
+  - print `run_av_sync`'s JSON keys with `serde_json::to_string_pretty`.
+
+  The kit's `cmp.rs` is exactly that (its `today` decode). It matched the old
+  `av_sync_from_recording` byte for byte (its `real` mode); that check works only on a runner rlib
+  built before this change.

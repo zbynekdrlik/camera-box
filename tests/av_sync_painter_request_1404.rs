@@ -55,8 +55,11 @@ fn fixture(parts: &[&str]) -> PathBuf {
     p
 }
 
+/// The compiled CLI on `clip`. The test reads the decode's info-level log lines, so an inherited
+/// `RUST_LOG` that hides them is overridden.
 fn av_sync(clip: &Path, marker_log: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_recording-verdict"))
+        .env("RUST_LOG", "info")
         .arg("--av-sync")
         .arg(clip)
         .arg("--av-marker-log")
