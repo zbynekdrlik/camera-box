@@ -481,9 +481,10 @@ def test_apply_writes_inside_one_verified_window_and_starts_only_after_it(tmp_pa
     close = index(calls, "mount -o remount,ro / root=rw")
     assert len(mvs) == 2 and all(rw < i < close for i in mvs + [mask]), "\n".join(calls)
     assert all(calls[i].endswith("root=rw") for i in mvs), "\n".join(calls)
+    # round 2: the apt units are stopped BEFORE the window, so no apt timer fires inside it
+    assert index(calls, "systemctl stop " + " ".join(APT_UNITS) + " root=ro") < rw, "\n".join(calls)
     after = [index(calls, p, close) for p in (
         "systemctl daemon-reload root=ro",
-        "systemctl stop " + " ".join(APT_UNITS) + " root=ro",
         "systemctl reset-failed logrotate.service root=ro",
         "systemctl start logrotate.service root=ro",
         "systemctl restart cambox-netconsole.service root=ro",
