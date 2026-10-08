@@ -86,6 +86,27 @@ fn write_version_fixture(tag: &str, text: &str) -> PathBuf {
     p
 }
 
+/// issue 1395: a fixture's temp dir is removed when the fixture drops at the end of its test. The
+/// pid-named dir used to stay in /tmp forever (108 leftovers on dev1, one per tag per test run).
+#[test]
+fn version_fixture_dir_is_removed_when_the_fixture_drops_1395() {
+    let fixture = write_version_fixture("drop1395", "camera-box 1.7.0-dev.1\n");
+    let dir = fixture
+        .parent()
+        .expect("a fixture file lives in its own temp dir")
+        .to_path_buf();
+    assert!(
+        dir.is_dir(),
+        "the fixture dir exists while the fixture is alive"
+    );
+    drop(fixture);
+    assert!(
+        !dir.exists(),
+        "issue 1395: the fixture's temp dir must be removed once the fixture drops: {}",
+        dir.display()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // camera_box_version_from_version_output — PURE extraction from `camera-box --version` stdout.
 // ---------------------------------------------------------------------------

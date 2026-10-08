@@ -90,6 +90,21 @@ fn tmp_dir(tag: &str) -> PathBuf {
     dir
 }
 
+/// issue 1395: a test's temp dir is removed when it drops at the end of the test. The pid-named dir
+/// used to stay in /tmp forever (30 leftovers on dev1, one per tag per test run).
+#[test]
+fn tmp_dir_is_removed_when_it_drops_1395() {
+    let dir = tmp_dir("drop1395");
+    let path = AsRef::<std::path::Path>::as_ref(&dir).to_path_buf();
+    assert!(path.is_dir(), "the dir exists while it is alive");
+    drop(dir);
+    assert!(
+        !path.exists(),
+        "issue 1395: the temp dir must be removed once it drops: {}",
+        path.display()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // dantesync_version_from_version_output — PURE version extraction from `dantesync --version`
 // stdout (#862 follow-up: the journal/service-log reader this replaced returned "" on EVERY box
