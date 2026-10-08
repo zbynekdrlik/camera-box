@@ -17,7 +17,10 @@
 //!   tick nor any of those rig burns is the clip's own recording: the path stops there
 //!   ([`PainterHead::NoCam2Tick`]) instead of decoding every frame through the robust recovery.
 //!   Any rig frame in the head, and any head without the clip (a QR-less pre-roll), goes on to
-//!   the unchanged full decode.
+//!   the unchanged full decode. Two residual edges, both accepted: a burn-free recording whose
+//!   head shows only the clip but which later switches to painter content is refused; and a
+//!   clip-only recording that opens on a QR-less pre-roll longer than the head is decoded in full
+//!   through the robust recovery, then fails on the coverage guard as before this change.
 //!
 //! Pure (no I/O). `probe::av_sync_recording` decodes the head and the recording with these
 //! requests; `probe::recording::analyze_recording_head` stops ffmpeg after the head.
