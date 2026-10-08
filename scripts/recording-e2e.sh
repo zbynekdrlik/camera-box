@@ -411,6 +411,10 @@ IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # bundle_state_gather.recordings_free_line (the soak uses the same reader).
 # shellcheck source=scripts/lib/recordings-free-line.sh
 . "$HERE/lib/recordings-free-line.sh"
+# issue 1395: bounded retention of the dev1 run dirs -- keeps this run + the newest
+# E2E_RUNDIR_KEEP (default 8) older ones, removes the rest, never aborts the run.
+# shellcheck source=scripts/lib/e2e-rundir-retention.sh
+. "$HERE/lib/e2e-rundir-retention.sh"
 # #1134: the SOURCE-camera role (the "cam1 role") is no longer hard-pinned to cam1 -- it is the
 # first strih-routable member of CAMERA_ACTIVE_SET (camera_source_box, scripts/camera-set.sh), so
 # retiring cam1 from the active set (its USB grabber hw-faulted -- #1110 -EPROTO, owner order
@@ -678,6 +682,7 @@ esac
 OUTDIR="${OUTDIR:-/tmp/recording-e2e-${RUN_ID}}"
 mkdir -p "$OUTDIR"
 stale_dante_artifact_warn "$OUTDIR"
+e2e_rundir_retention "$(dirname "$OUTDIR")" "$OUTDIR"
 # #359: wall-clock run start. The painter ground-truth CSV (gen_ts_ns = CLOCK_REALTIME epoch
 # ns under --wall-clock) is freshness-gated against this — a stale CSV whose first gen_ts is
 # hours off (run 354002 was 14.9h off) is REJECTED before it can corrupt the verdict.
