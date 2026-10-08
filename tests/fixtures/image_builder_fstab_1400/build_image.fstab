@@ -1,0 +1,8 @@
+# camera-box fstab - / is the overlayfs the initramfs assembles (configure_overlay): the root
+# partition is its read-only lower layer, the overlay partition its writable upper layer, so
+# there is no root line. The tmpfs set is the read-only-root canon (scripts/lib/ro-root.sh).
+tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=100M 0 0
+tmpfs /var/log tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=50M 0 0
+tmpfs /var/tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=50M 0 0
+tmpfs /var/cache tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=512M 0 0
+tmpfs /var/spool tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=10M 0 0
