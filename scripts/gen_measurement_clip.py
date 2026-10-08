@@ -41,7 +41,7 @@ CPU or build may take other float paths (AAC, sin/cos), so the published sha256 
 The CLI prints the sha256. The encoded file must hold exactly seconds x 30 frames (ffprobe), or no
 clip is written.
 
-  python3 scripts/gen_measurement_clip.py --out measurement-clip-v1.mp4 [--seconds 120]
+  python3 scripts/gen_measurement_clip.py --out measurement-clip-v1.mp4 [--seconds 128]
 """
 from __future__ import annotations
 
@@ -70,7 +70,7 @@ CLIP_VERSION = 1
 RUN_ID = ylt.MEASUREMENT_CLIP_RUN_ID      # 911016: an origin like SongPlayer's 911014, never a camera
 WIDTH, HEIGHT = 1920, 1080                # the painter canvas (frame-probe --canvas-w / --canvas-h)
 FPS = 30
-SECONDS = 120
+SECONDS = 128  # issue 1404 ROZHODNUTE 6048179415: 7680 ticks = 30 index wraps, a loop keeps the marker line
 TICK_HZ = int(pa.MARKER_INDEX_RATE_HZ)    # 60: the painter's tick rate = the guard's index rate
 TICKS_PER_FRAME = TICK_HZ // FPS          # 2: a 30 fps recording of the painter sees every 2nd tick
 QR_SIZE = 700                             # cam2-painter.service --qr-size
