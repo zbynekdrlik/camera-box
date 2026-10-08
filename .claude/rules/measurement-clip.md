@@ -12,6 +12,7 @@ paths:
   - "src/probe/av_sync_recording.rs"
   - "tests/av_sync_decode_plan_1404.rs"
   - "tests/av_sync_painter_head_1404.rs"
+  - "tests/av_sync_painter_request_1404.rs"
 ---
 
 # The camera-box measurement clip (issue 1404 Task 5 part a)
@@ -172,11 +173,13 @@ The first CI run of `tests/av_run_recording_1404.rs` killed three tests at nexte
 clip carries none, so every frame ran the robust recovery: the issue-423 class (`.config/nextest.toml`).
 `src/av_sync_decode_plan.rs` now decides the request:
 - **`--av-run <run>`** requires only the run's own dual-QR (both halves), no node burn.
-- **The painter path** keeps today's cam1/strih/stream set for its full decode. It first reads a
-  60-frame head that requires nothing (`probe::recording::analyze_recording_head`, which stops
-  ffmpeg). It stops only when the head shows the clip and no rig signal (no cam2 tick, none of the
-  three burns). A head with nothing (a QR-less pre-roll; the s3 VOD opens on 55 s of one) goes on
-  to the unchanged full decode. Two residual edges are written in the module doc.
+- **The painter path** first reads a 60-frame head that requires nothing
+  (`probe::recording::analyze_recording_head`, which stops ffmpeg). It stops only when the head
+  shows the clip and no rig signal (no cam2 tick, none of the three burns). Two residual edges are
+  written in the module doc.
+- **The painter path's full decode** asks for exactly the node burns that head read
+  (`painter_full_request`, ROZHODNUTÉ 6051603225, next section). A head that read no QR at all (a
+  QR-less pre-roll; the s3 VOD opens on 55 s of one) keeps the cam1/strih/stream request.
 
 Measured with the runner's real release decoder on the clip (one thread):
 - per frame: robust 434 ms; own-run request 124 ms; no request 114 ms; the plain rqrr pass alone
@@ -187,10 +190,7 @@ CI's Test job is a DEBUG build. Calibration from run 37708407889: the coverage j
 old tests together, 360 robust frames in 4 vCPU x 522 s, about 13x the local release CPU time.
 Estimate before you push: release CPU s x 13, divided over the 4 vCPU the concurrent tests share.
 
-Finding, not changed here: real YouTube-leg stream/VOD clips decode ALL robust on the painter path
-(`fast_path_frames=0` of 1200 in every `tests/fixtures/youtube_leg_1404/*.avsync.out`). They carry
-strih + stream + the deployed camera's burn, never cam1 unless cam1 is deployed. The fix would be
-the issue-632 grouped shape; see the ticket.
+The real YouTube-leg windows: see "The painter path's full-decode request" below.
 
 **Running probe glue locally without cargo:** link a replica crate against the self-hosted runner's
 RELEASE probe rlib (`~/actions-runner-camera-box/_work/camera-box/camera-box/target/release/deps/libcamera_box-*.rlib`;
@@ -205,3 +205,65 @@ Then the probe-gated `tests/*.rs` compile with `--cfg 'feature="probe"' --extern
 --extern image=<runner image rlib>` (a 30-line `tempfile` shim when a test needs it), run in release,
 and `clippy-driver -D warnings` lints them. That ran the edited `av_sync_from_recording` end to end on
 the fixture: clean -0.15 ms, audio early +99.87 ms, painter path stops with the head reason.
+
+**Heavy real-clip decodes run on dev2, not dev1** (issue 1404). Build the release replica binary on
+dev1 with plain rustc. It links Rust statically and needs only glibc; dev2 runs the same Ubuntu
+24.04. Copy the binary and the clips to dev2 and run them under `nice` there. Use 8 cores, not dev1's
+4 shared ones; nine 40 s clips decoded old + new took about 20 min. The `pre-deploy-clean-tree`
+hook refuses any scp while the worktree has uncommitted edits, even a scratch copy that is no deploy.
+Add `# airuleset:deploy-dirty-ok <reason>` to that one scp call.
+
+## The painter path's full-decode request (ROZHODNUTÉ 6051603225)
+
+**The YouTube-leg fixtures are burns-OFF.** The 5.10 sessions ran with every measurement burn off.
+Each `tests/fixtures/youtube_leg_1404/*-rec-*` clip carries only the painter run and the aux pair
+911013 on every frame: no strih, stream or camera burn, even after the robust recovery. The old
+"they carry strih + stream" premise was wrong.
+
+`av_sync_decode_plan::painter_full_request(head, NODE_BURN_RUN_IDS)` builds the full-decode request
+from what the painter head read:
+- the strih / stream burns of `PAINTER_PATH_NODE_BURNS` the head read are mandatory; imag, cg and
+  SongPlayer never are;
+- the camera group is the issue-632 any-of group, only when the head read a camera burn. The group
+  is the table's ids whose `burn_regions::slot_for_run_id` is the camera slot, never a literal list;
+- a head that read QRs but no node burn requires nothing (a burns-off recording);
+- a head that read no QR keeps the cam1/strih/stream request.
+
+`--av-sync` pairs the painter tick with the audio marker, so the burns carry no A/V information.
+
+Measured on dev2 (8 workers, the runner's release decoder):
+- the 9 re-made stream-recording clips went from 0/1200 to 1200/1200 fast frames;
+- the video decode alone: 32-58 s per 40 s clip with nothing required, against 101-190 s with
+  the old request (`cmp.rs`, decode only). The whole new `--av-sync` run (head + full decode +
+  audio) took 45-73 s on dev2 at load ~20;
+- the JSON is byte-identical to each committed `.avsync.out` block;
+- three committed burns-on rig frames keep strih / stream required and read the same tick.
+
+Re-making the clips:
+- `~/.claude/work-products/issue-1404/request-proof/README.md` (dev1-local) holds the source
+  recordings, the exact `-ss` offsets, `cut.sh` (the avabs2.py command) and the
+  today-vs-candidate comparison tool `cmp.rs`.
+- Cut on dev1 (the original clips were cut there): with its ffmpeg 6.1.1 every re-made clip gives
+  its committed `.avsync.out` JSON block byte for byte. The original clips are gone, so the clip
+  bytes themselves were never compared.
+- The 9 VOD fixtures cannot be re-made: YouTube says "Video unavailable" for all three broadcasts.
+
+**The committed CI clip** is `base-rec-A-4s-540p.mp4`: the first 4 s of window A, 960x540, crf 28.
+- The 540p scale keeps the debug decode short (60 head + 120 full frames).
+- `base-rec-A-4s-540p.avsync.json` is the OLD code's output on that clip. It is identical with
+  dev1's ffmpeg 6.1.1 and CI's pinned N-126264.
+- `tests/av_sync_painter_request_1404.rs` pins that JSON with the compiled CLI, plus >= 95 % fast
+  frames read from the last `recording analysis complete` line (`this_analysis_fast`).
+- If the pinned ffmpeg or the decoder changes, regenerate the JSON with the OLD request on the same
+  clip. Never write it with the new code. No CLI path runs the old request any more, so use a small
+  plain-rustc harness against the runner's release probe rlib (the replica recipe above):
+  - decode with `analyze_recording_with_grouped_burns_optical(clip, &PAINTER_PATH_NODE_BURNS, &[], None)`
+    (= `av_decode_request(None)`);
+  - run the rest of `av_sync_from_recording`'s painter path on those frames (first sample per tick,
+    the coverage guard, the best audio channel, `av_offset_candidates_deduped`,
+    `cluster_offset_ms(.., 4, 25.0)`);
+  - print `run_av_sync`'s JSON keys with `serde_json::to_string_pretty`.
+
+  The kit's `cmp.rs` is exactly that (its `today` decode). It matched the old
+  `av_sync_from_recording` byte for byte (its `real` mode); that check works only on a runner rlib
+  built before this change.

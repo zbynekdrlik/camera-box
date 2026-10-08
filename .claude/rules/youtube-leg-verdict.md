@@ -167,6 +167,13 @@ Why: the clip restarts its tick on every play beside the painter's line, and the
   VOD via `yt-dlp -f 137`) with `youtube_leg_verdict.py --decode-ticks`; ~20-40 min per 20 min
   file with 4 workers on a loaded dev1. The cache key in the out dir carries the decoder version and
   the OpenCV version; CI pins `opencv-python-headless==4.13.0.92`, dev1's.
+- **The three VODs are gone** (`EK_cqSvsCKo`, `0q5ZdDMwRwQ`, `bsf_M-HdabY`: "Video unavailable",
+  8.10.2026). Only the stream recordings are left, so a VOD fixture can no longer be re-made.
+- **The 5.10 session recordings are burns-OFF**: no node burn on any frame, only the painter run and
+  the aux pair 911013. The `*.avsync.out` A/V clips (40 s, `avabs2.py`) can be re-cut from those
+  recordings. The offsets and `cut.sh` are in `~/.claude/work-products/issue-1404/request-proof/`
+  (dev1-local). How `--av-sync` decodes them is in `.claude/rules/measurement-clip.md` ("The
+  painter path's full-decode request").
 - Real-pixel crops: the QR band at 0.5 scale as JPEG q95 (decodes exactly like the lossless crop;
   q90 changed one frame's result). Frame 2100's expected tick is pinned only to its bracketing
   anchors (2196752 or 2196754): the session decoder never read it.

@@ -204,7 +204,7 @@ pub const NODE_BURN_RUN_IDS: [u32; 14] = [
 
 /// The node-burn run_ids the GENERIC diagnostic tools ([`decode_recording_frame`] /
 /// [`analyze_recording`] — `forensic-dump`, `recording-probe`; the `--av-sync` painter path uses
-/// the same set through `crate::av_sync_decode_plan::PAINTER_PATH_NODE_BURNS`, issue 1404)
+/// it via `av_sync_decode_plan::PAINTER_PATH_NODE_BURNS` only after a QR-less head, issue 1404)
 /// require before the #207 fast path may skip the robust tiles. Deliberately NOT
 /// [`NODE_BURN_RUN_IDS`] (#463): these generic, box-agnostic tools only ever decode a
 /// strih/stream/cam1-grab recording (never imag's own recording, which has its own dedicated
