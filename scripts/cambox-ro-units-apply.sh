@@ -14,14 +14,17 @@ set -euo pipefail
 #   - the apt timers/services stopped before the window; after the close: daemon-reload,
 #     reset-failed, one logrotate run, the netconsole restart, and the `is-system-running` read-back.
 #
-# It is a root write on a cambox, so --apply runs the rig guard before EVERY box and REFUSES (exit 1,
-# that box and the rest untouched, the boxes already done summarised) while:
-#   - the rig lease (scripts/lib/rig-lease.sh, the E2E / soak holder) is held by a live holder;
-#   - the issue-281 rig heartbeat (scripts/lib/rig-heartbeat.sh, recording-e2e / rig-mode TEST) is
-#     fresh;
+# It is a root write on a cambox, so --apply TAKES the rig lease (scripts/lib/rig-lease.sh, repo
+# camera-box-ro-units-apply) for its whole run and releases it on every exit: a live foreign holder
+# (an E2E / the soak) refuses the run before any box, and no E2E can take the rig while a box is
+# applied. Before EVERY box it also REFUSES (exit 1, that box and the rest untouched, the boxes
+# already done summarised) while:
+#   - the issue-281 rig heartbeat (scripts/lib/rig-heartbeat.sh rig_held_reason; recording-e2e /
+#     rig-mode TEST, which does not take the lease) is fresh, or a lease that is not ours is live;
 #   - strih or stream records or streams (the ONE shared rig-busy guard,
 #     scripts/lib/stray-session-check.sh, as bkshading-deploy-relay.sh uses it).
-# --force-live skips the guard, loudly (supervisor-only). --plan runs no guard and touches nothing.
+# --force-live skips the lease and the guard, loudly (supervisor-only). --plan runs no guard and
+# touches nothing.
 # It never reboots anything.
 #
 # Usage:
@@ -115,12 +118,19 @@ if [ -z "$MODE" ] || [ "${#BOXES[@]}" -eq 0 ]; then
   exit 2
 fi
 
-# Resolve every name BEFORE the first box is touched: a typo stops the run with nothing changed.
+# Resolve every name BEFORE the first box is touched: a typo stops the run with nothing changed. A box
+# named twice (cam1 and CAM1) is applied once.
 NAMES=()
 IPS=()
 for _box in "${BOXES[@]}"; do
   _name="$(printf '%s' "$_box" | tr '[:upper:]' '[:lower:]')"
   camera_resolve "$_name" || exit 2
+  case " ${NAMES[*]:-} " in
+    *" $CAMERA_NAME "*)
+      echo "NOTE: $CAMERA_NAME is named more than once -- applied once" >&2
+      continue
+      ;;
+  esac
   NAMES+=("$CAMERA_NAME")
   IPS+=("$CAMERA_IP")
   camera_is_active "$CAMERA_NAME" \
@@ -143,14 +153,21 @@ command -v sshpass >/dev/null 2>&1 || {
   exit 2
 }
 
+# The rig lease this run holds (review round 3): taken before the first box and released on every
+# exit, so no E2E / soak can take the rig while a box is applied (one box can take minutes: the
+# netconsole arm waits for dev1). A foreign live holder refuses the run before any box; a stale one is
+# reclaimed (rig_lease_acquire). Its identity is this repo's apply + a per-run id.
+RIG_LEASE_REPO_NAME="camera-box-ro-units-apply"
+RIG_LEASE_OURS=""
+
 # rig_refused BOX -> 0 and RIG_REFUSAL set when BOX must not be touched NOW: the shared rig-held read
-# (rig_held_reason: a fresh issue-281 heartbeat or a live rig lease) or the shared rig-busy guard
+# (rig_held_reason: a fresh issue-281 heartbeat, which the lease does not cover -- rig-mode.sh TEST
+# writes only that -- or a live lease that is not ours) or the shared rig-busy guard
 # (stray_session_check_assert, run in a subshell so its own `exit 1` comes back here and the boxes
-# already done still get their summary). Read before EVERY box (review round 2): one box can take
-# minutes (the netconsole arm waits for dev1), and an E2E may take the rig in between.
+# already done still get their summary). Read before EVERY box (review round 2).
 rig_refused() {
   RIG_REFUSAL=""
-  if RIG_REFUSAL="$(rig_held_reason "$RIG_LEASE_STALE_SECS")"; then
+  if RIG_REFUSAL="$(rig_held_reason "$RIG_LEASE_STALE_SECS" "$RIG_LEASE_OURS")"; then
     return 0
   fi
   RIG_REFUSAL=""
@@ -172,22 +189,47 @@ first_fail_line() {
   printf '%s\n' "(no FAIL line; see the output above)"
 }
 
-if [ "$FORCE_LIVE" = 1 ]; then
-  echo "WARNING: --force-live -- SKIPPING the rig guard (lease, rig heartbeat, rig-busy) for the issue-1394 apply on: ${NAMES[*]}" >&2
-fi
+cleanup() {
+  rm -f "$LOG"
+  if [ -n "$RIG_LEASE_OURS" ]; then
+    rig_lease_release "$RIG_LEASE_OURS" >&2 || true
+  fi
+}
 
 LOG="$(mktemp)"
-trap 'rm -f "$LOG"' EXIT
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if [ "$FORCE_LIVE" = 1 ]; then
+  echo "WARNING: --force-live -- SKIPPING the rig guard (lease, rig heartbeat, rig-busy) for the issue-1394 apply on: ${NAMES[*]}" >&2
+else
+  _ours="ro-units-apply-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+  if _lease_out="$(rig_lease_acquire "$RIG_LEASE_REPO_NAME" "$_ours" "" ro-units-apply \
+    "$(date -u -d '+60 min' +%Y-%m-%dT%H:%M:%SZ)" "$RIG_LEASE_STALE_SECS")"; then
+    RIG_LEASE_OURS="$_ours"
+    echo "[rig-lease] ${_lease_out} as ${RIG_LEASE_REPO_NAME}#${RIG_LEASE_OURS}, held until this run ends"
+  else
+    echo "ERROR: refused -- the rig lease is held: ${_lease_out#RIG_LEASE_HELD_BY=}. No box was touched; run --apply after it is released." >&2
+    exit 1
+  fi
+fi
+
+DONE=()
 FAILED=()
 NO_NETCONSOLE=()
 UNTOUCHED=()
 for _i in "${!NAMES[@]}"; do
   _name="${NAMES[$_i]}"
   _ip="${IPS[$_i]}"
-  if [ "$FORCE_LIVE" = 0 ] && rig_refused "$_name"; then
-    UNTOUCHED=("${NAMES[@]:_i}")
-    echo "ERROR: refused before $_name -- ${RIG_REFUSAL}. Not touched: ${UNTOUCHED[*]}; run --apply for them after it ends." >&2
-    break
+  if [ "$FORCE_LIVE" = 0 ]; then
+    # keep our own lease truthful (the :8890 view) while the run goes on; a no-op when not ours
+    rig_lease_refresh_if_mine "$RIG_LEASE_REPO_NAME" "$RIG_LEASE_OURS" >/dev/null 2>&1 || true
+    if rig_refused "$_name"; then
+      UNTOUCHED=("${NAMES[@]:_i}")
+      echo "ERROR: refused before $_name -- ${RIG_REFUSAL}. Not touched: ${UNTOUCHED[*]}; run --apply for them after it ends." >&2
+      break
+    fi
   fi
   echo "== $_name ($_ip): applying the issue-1394 read-only-root unit set =="
   _rc=0
@@ -201,6 +243,7 @@ for _i in "${!NAMES[@]}"; do
     *"issue 1311 netconsole is not provisioned here"*) NO_NETCONSOLE+=("$_name") ;;
   esac
   if [ "$_rc" -eq 0 ]; then
+    DONE+=("$_name")
     echo "== $_name: OK =="
     continue
   fi
@@ -209,7 +252,7 @@ for _i in "${!NAMES[@]}"; do
   else
     case "$_out" in
       *"OK: the unit files are written"* | *"OK: nothing to write on"*)
-        FAILED+=("$_name (the unit files are in place; a check after the close failed: $(first_fail_line "$_out"))") ;;
+        FAILED+=("$_name (the unit files are in place; a step outside the rw window failed: $(first_fail_line "$_out"))") ;;
       *) FAILED+=("$_name (rc=$_rc; the unit set did not land: $(first_fail_line "$_out"))") ;;
     esac
   fi
@@ -220,6 +263,7 @@ if [ "${#NO_NETCONSOLE[@]}" -gt 0 ]; then
   echo "NOTE: no issue-1311 netconsole unit on: ${NO_NETCONSOLE[*]} -- re-run setup-device.sh there; verify-device (ak)/(ar) fail it until then" >&2
 fi
 if [ "${#FAILED[@]}" -gt 0 ] || [ "${#UNTOUCHED[@]}" -gt 0 ]; then
+  [ "${#DONE[@]}" -eq 0 ] || echo "RESULT: in place on: ${DONE[*]}"
   [ "${#FAILED[@]}" -eq 0 ] || echo "RESULT: not clean on: $(printf '%s; ' "${FAILED[@]}")" >&2
   [ "${#UNTOUCHED[@]}" -eq 0 ] || echo "RESULT: refused by the rig guard, not touched: ${UNTOUCHED[*]}" >&2
   exit 1

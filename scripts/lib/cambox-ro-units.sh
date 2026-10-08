@@ -237,10 +237,13 @@ if [ "$_rou_mode" != ro ]; then
   echo "NOTE: the root of $_rou_box reads '$_rou_mode' before this program -- a cambox runs read-only; the verified close puts it back before anything is run"
 fi
 _rou_rc=0
-# The apt timers/services stop BEFORE the window: a timer still armed while the root is writable
-# could start its service inside it (the issue-1405 shape); they are masked inside, and a masked
-# unit that kept running would elapse into its masked service and fail. A stop on a stopped unit is
-# a no-op.
+# The apt timers/services stop BEFORE the window: they are masked inside it, and a masked timer that
+# kept running would elapse into its masked service and fail; stopped first, none can fire while the
+# root is writable either. A stop on a stopped unit is a no-op. Accepted residual (review round 3):
+# logrotate.timer (every 15 min, issue 679) stays armed -- stopping it would need a restart on every
+# exit path, the trap's included. A run it starts inside the ~1 s window would hold a writer, and the
+# verified close then fails loud (fuser may name it, if it is still writing) and starts nothing; a
+# re-run fixes it.
 if ! systemctl stop $_rou_apt; then
   echo "FAIL: [issue 1394] could not stop the apt units on $_rou_box" >&2
   _rou_rc=1
@@ -252,7 +255,7 @@ _rou_close() {
   _rou_open=0
 PROG
   ro_window_close_cmds "issue 1394" "\$_rou_box" \
-    "The issue-1394 unit files are on disk, but the root stays read-WRITE, so this program runs no daemon-reload and starts nothing." \
+    "Whatever this program wrote is on disk, but the root stays read-WRITE, so it runs no daemon-reload and starts nothing." \
     "stop that writer, put the root back read-only until 'findmnt -no OPTIONS /' reads ro, then re-run scripts/cambox-ro-units-apply.sh --apply for this box (never reboot a cambox remotely)."
   cat <<'PROG'
 }

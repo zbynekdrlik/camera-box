@@ -173,11 +173,12 @@ rig_heartbeat_stop() {
   rig_heartbeat_clear
 }
 
-# rig_held_reason [lease_stale_secs] -> exit 0 and ONE line naming who drives the rig right now, or
-# exit 1 (nothing printed) when nobody does. Held = a FRESH heartbeat above (recording-e2e.sh /
-# rig-mode.sh TEST) OR the issue-830 rig lease held by a LIVE holder (rig_lease_is_stale with
-# lease_stale_secs, default 5400 -- the lease lib's own default; a stale or holder-less lockdir is
-# reclaimable, never "held"). The ONE "is the rig driven right now" read: the burn-reconcile
+# rig_held_reason [lease_stale_secs] [own_run_id] -> exit 0 and ONE line naming who drives the rig
+# right now, or exit 1 (nothing printed) when nobody does. Held = a FRESH heartbeat above
+# (recording-e2e.sh / rig-mode.sh TEST) OR the issue-830 rig lease held by a LIVE holder
+# (rig_lease_is_stale with lease_stale_secs, default 5400 -- the lease lib's own default; a stale or
+# holder-less lockdir is reclaimable, never "held") that is not own_run_id (a caller holding the
+# lease itself passes its run id). The ONE "is the rig driven right now" read: the burn-reconcile
 # watchdog defers on it, scripts/cambox-ro-units-apply.sh refuses a cambox root write on it before
 # every box (issue 1394).
 rig_held_reason() {
@@ -186,6 +187,9 @@ rig_held_reason() {
     return 0
   fi
   if [ -d "$(rig_lease_dir)" ] && ! rig_lease_is_stale "${1:-5400}"; then
+    if [ -n "${2:-}" ] && [ "$(rig_lease_read_holder_field run_id)" = "$2" ]; then
+      return 1
+    fi
     printf 'the rig lease is held: %s\n' "$(rig_lease_holder_summary)"
     return 0
   fi
