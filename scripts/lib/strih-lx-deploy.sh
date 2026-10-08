@@ -306,14 +306,14 @@ strih_lx_tree_check() {
     [ -f "$tree/$f" ] || { echo "strih_lx_tree_check: no $f" >&2; return 1; }
   done
   [ -f "$env" ] || { echo "strih_lx_tree_check: no scripts/strih-boxes/$box.env (the box fact file)" >&2; return 1; }
-  for f in "${STRIH_PROGRAM_AUDIO_FILES[@]}"; do
-    [ -f "$tree/$f" ] || { echo "strih_lx_tree_check: no $f (setup-strih step 16e installs the program-audio sampler from it, issue 1404)" >&2; return 1; }
-  done
   ic="$(sed -n 's/^STRIH_INTERCOM_CONFIG=//p' "$env" | head -n 1)"
   [ -n "$ic" ] || { echo "strih_lx_tree_check: scripts/strih-boxes/$box.env has no STRIH_INTERCOM_CONFIG" >&2; return 1; }
   [ -f "$tree/$ic" ] || { echo "strih_lx_tree_check: no $ic (STRIH_INTERCOM_CONFIG) -- the intercom/ dir must be staged" >&2; return 1; }
   hn="$(sed -n 's/^STRIH_HOSTNAME=//p' "$env" | head -n 1)"
   [ -n "$hn" ] || { echo "strih_lx_tree_check: scripts/strih-boxes/$box.env has no STRIH_HOSTNAME" >&2; return 1; }
+  for f in "${STRIH_PROGRAM_AUDIO_FILES[@]}"; do
+    [ -f "$tree/$f" ] || { echo "strih_lx_tree_check: no $f (setup-strih step 16e installs the program-audio sampler from it, issue 1404)" >&2; return 1; }
+  done
   printf '%s\n' "$hn"
 }
 
