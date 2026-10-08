@@ -435,7 +435,7 @@ def test_the_marker_index_is_the_painters_and_sits_on_the_guards_timecode_line()
     sched = gen.marker_schedule(gen.SECONDS * gen.FPS)
     assert sched[0] == (15, 30, 30) and sched[1] == (30, 60, 60)
     assert all(idx == tick & 0xFF and tick == gen.TICKS_PER_FRAME * f for f, tick, idx in sched)
-    assert len(sched) == 239  # every 0.5 s of 120 s, the first at 0.5 s
+    assert len(sched) == 2 * gen.SECONDS - 1  # every 0.5 s of the clip, the first at 0.5 s
     words = [(tick / gen.TICK_HZ, idx) for _, tick, idx in sched]
     for start in (0.4, 30.0, 63.7, 115.5):
         span = [w for w in words if start <= w[0] < start + pa.MARKER_SPAN_S]
