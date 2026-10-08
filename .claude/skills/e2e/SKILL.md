@@ -2515,7 +2515,14 @@ The per-hop log tail is supplied explicitly (the tool ships no untested ssh/MCP 
 #   strih / stream: a byte-safe PowerShell gc tail over ssh (or a bundle-state :8899 fetch)
 #   cg-obs (RESOLUME-SNV): paste the win-resolume MCP FileRead of its OBS log to a file
 export CG_CHAIN_CG_OBS_LOG=/tmp/cg-obs-obs.log     # from win-resolume MCP FileRead
-export CG_CHAIN_STRIH_CMD='ssh -o StrictHostKeyChecking=no newlevel@10.77.9.202 "powershell -c \"gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName | select -last 4000\""'
+# strih is the LINUX strih-lx since the M4 cut-over; read it through the ONE platform-resolved strih
+# log reader (`.claude/rules/strih-log-read.md`, bounded ssh). The tool evals the command where HERE is
+# set, and STRIH_PW must be EXPORTED (an unset one reads the hop UNREADABLE). Its SongPlayer input is
+# `CG-obs` (issue 1302), held at a latched shallow depth, so its skew is graded as the excursion
+# from that depth (`.claude/rules/cg-chain-verify.md`):
+export STRIH_PW=...                                  # the strih-lx ssh password (targets.md)
+export CG_CHAIN_STRIH_SRC=CG-obs
+export CG_CHAIN_STRIH_CMD='. "$HERE/lib/strih-log-read.sh"; strih_log_tail 10.77.9.202 newlevel "$STRIH_PW" 1500 30'
 export CG_CHAIN_STREAM_CMD='ssh -o StrictHostKeyChecking=no newlevel@10.77.9.204 "powershell -c \"gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName | select -last 4000\""'
 scripts/cg-chain-verify.sh                          # one window, default hops cg-obs + strih → table + OVERALL, exit 3 on FAIL
 # the stream hop only on request (its old input `NDI obs hudba` was removed 27.9.2026); an input with no

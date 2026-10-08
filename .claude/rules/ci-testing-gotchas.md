@@ -1818,3 +1818,16 @@ lost the rustup toolchain env, so the REAL tree failed too and all 7 mutants rea
 reads pass. Also: an unsigned `now - last < BOUND`
 after a `now >= last` guard makes the guard's removal an equivalent mutant (the wrap reads huge);
 drop such a mutant instead of counting it as surviving.
+
+## An awk replica pinned by a parity harness: its fixtures must sort differently as text and as numbers (issue 1302)
+
+awk compares two STRINGS as text. A value cut out with `substr()` (or `split()` + `substr()`) is a
+plain string, not a number, so `if (a > max) max = a` over such values takes a TEXT max: 8 then 25
+reads 8, 99 then 100 reads 99. The `scripts/lib/cg-chain-verify.sh` replica of
+`jitter_audit::summarize` did exactly that for months. Its Rust parity harness stayed green because
+every fixture's skews (-4/8/-6, 3/-9, -40/52) happened to sort the same both ways. Two rules:
+- coerce with `+ 0` before any compare or max (`x = x + 0`), in a shared awk preamble so every
+  parser of the file has the same copy (`_cg_chain_awk_common`);
+- give every parity fixture at least one set of values whose text order differs from their number
+  order (8, 25, -100, 99: the text max is 99, the number max 100). A fixture that sorts the same
+  both ways cannot catch the bug.
