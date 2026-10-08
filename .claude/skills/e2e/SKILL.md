@@ -2219,9 +2219,10 @@ NOT the video frame the id was decoded at; use `.id`), then grep BOTH the same r
 downstream), it was never lost anywhere — SPURIOUS. This is the diagnostic-time twin of the
 already-shipped #356 cross-recording reconciliation fix (same "does the downstream recording
 prove delivery" idea, applied by hand during investigation instead of automatically in the
-verdict). **Two locally-cached CI runs' full partials (multi-MB JSON + pixel-proof dirs) survive
-in `/tmp/recording-e2e-<run>/` on dev1 for a long time after the run — check there BEFORE
-spending rig time on a fresh repro; the evidence may already exist.**
+verdict). **The newest locally-cached CI runs' full partials (multi-MB JSON + pixel-proof dirs)
+stay in `/tmp/recording-e2e-<run>/` on dev1 — check there BEFORE spending rig time on a fresh
+repro; the evidence may already exist. Since issue 1395 only the newest 9 run dirs are kept
+(`scripts/lib/e2e-rundir-retention.sh`); copy a run out of /tmp to keep it longer.**
 
 **The fix** (`src/probe/burn_contiguity.rs` + `src/bin/recording-verdict.rs`): a NEW `window_of`
 parameter (computed by reusing the EXISTING `frame_gen_ts_anchor`/`place_frame_in_window` #706/#312

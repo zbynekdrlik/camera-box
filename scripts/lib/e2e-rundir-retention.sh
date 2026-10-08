@@ -17,10 +17,17 @@
 # KEEPING RUNS FOR MINING: every later run prunes again with its own keep (CI never sets
 # E2E_RUNDIR_KEEP), so raising the keep on one run protects nothing. To keep a run, copy or move it
 # OUT of the run-dir parent under its own name (e.g. ~/e2e-archive/recording-e2e-<id>/, so the
-# mining tools still parse the run id) and point the tool's glob or --run-dir there. The
+# mining tools still parse the run id) and point the tool's glob or --run-dir there
+# (arrival_floor_decompose.py takes --runs-glob / --run-dir, residual_churn_attribution.py takes run
+# dirs; window_gate_walkdown.py reads /tmp only, so it sees just the retained runs). The
 # recording-e2e-full-path CI artifact of each run (gh run download <run-id> -n
-# recording-e2e-full-path) carries only verdict-*.json, the report PNG and the pixel proof -- not the
-# burn logs, genlock audits or painter CSVs the other miners read.
+# recording-e2e-full-path) carries only verdict-*.json, the report PNG and the pixel-proof files
+# (pixel-proof/, *-missing/, missing-slot-pixels-*.json) -- not the burn logs, genlock audits or
+# painter CSVs the other miners read.
+#
+# A run refused by an early preflight still counts: OUTDIR is created before the preflights, so a
+# burst of refused runs pushes the last green runs out of the 8 kept. Copy a green run out first
+# when it matters.
 #
 # The prune runs in the PARENT of whatever OUTDIR is (recording-e2e.sh passes its dirname), so a
 # caller that sets OUTDIR must never point it into a directory that holds archived runs.
