@@ -155,11 +155,23 @@ fn a_run_that_is_not_self_marked_or_av_run_alone_is_refused_1404() {
         all.contains("not a self-marked run") && all.contains("911016"),
         "{all}"
     );
-    let alone = verdict(&["--av-run", CLIP_RUN]);
-    assert!(!alone.status.success());
-    assert!(
-        String::from_utf8_lossy(&alone.stderr).contains("requires --av-sync"),
-        "{}",
-        String::from_utf8_lossy(&alone.stderr)
-    );
+    // clap refuses --av-run without --av-sync in EVERY mode (never silently ignored)
+    for argv in [
+        vec!["--av-run", CLIP_RUN],
+        vec!["--av-run", CLIP_RUN, "--qpsk-probe", "missing.wav"],
+        vec![
+            "--av-run",
+            CLIP_RUN,
+            "--merge-partials",
+            "strih=missing.json",
+        ],
+    ] {
+        let alone = verdict(&argv);
+        let err = String::from_utf8_lossy(&alone.stderr);
+        assert_eq!(alone.status.code(), Some(2), "{argv:?}: {err}");
+        assert!(
+            err.contains("required arguments were not provided") && err.contains("--av-sync"),
+            "{argv:?}: {err}"
+        );
+    }
 }
