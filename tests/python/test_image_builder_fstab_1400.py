@@ -206,7 +206,13 @@ def test_create_usb_first_boot_fstab_refuses_an_empty_uuid():
 
 def test_create_usb_writes_the_fstab_through_the_function():
     conf = _code(_function(_read(CREATE_USB), "configure_system"))
-    assert 'create_usb_first_boot_fstab "$ROOT_UUID" "$EFI_UUID" > "$MOUNT_ROOT/etc/fstab"' in conf
+    # The call and its named failure, as ONE statement: without the `|| error` continuation the
+    # build would still stop (errexit), but with no message saying why.
+    call = (
+        'create_usb_first_boot_fstab "$ROOT_UUID" "$EFI_UUID" > "$MOUNT_ROOT/etc/fstab" \\\n'
+        '        || error "issue 1400: no first-boot fstab written'
+    )
+    assert call in conf, conf
     assert 'cat > "$MOUNT_ROOT/etc/fstab"' not in conf, "no hand-written fstab heredoc"
 
 
