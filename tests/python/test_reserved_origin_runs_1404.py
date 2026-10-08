@@ -49,6 +49,16 @@ def test_every_python_mirror_reserves_each_origin_id():
     assert ylt.MEASUREMENT_CLIP_RUN_ID in _dock_ids() and set(ylt.CLIP_RUNS) <= set(_dock_ids())
 
 
+def test_the_self_marked_runs_of_av_run_are_the_clip_runs_of_the_tick_decoder():
+    """`recording-verdict --av-run` (src/av_run_pairing.rs SELF_MARKED_RUN_IDS) accepts exactly the
+    runs the YouTube-leg tick decoder reads with `runs=CLIP_RUNS`."""
+    text = (ROOT / "src/av_run_pairing.rs").read_text()
+    m = re.findall(r"pub const SELF_MARKED_RUN_IDS: \[u32; \d+\] = \[([^\]]*)\];", text)
+    assert len(m) == 1, m
+    rust = [int(v.strip().replace("_", "")) for v in m[0].split(",") if v.strip()]
+    assert rust == list(ylt.CLIP_RUNS) == [911016]
+
+
 def test_the_youtube_leg_tick_decoder_refuses_the_burn_origins_even_when_asked_for_the_clip():
     import zlib
 

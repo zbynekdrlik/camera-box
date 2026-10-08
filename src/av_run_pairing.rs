@@ -23,8 +23,8 @@ use crate::av_window::window_ticks;
 
 /// The runs that carry their OWN QPSK marker next to their dual-QR tick, so one recording pairs
 /// picture against sound: only the measurement clip. Mirrors
-/// `probe::recording_latency::MEASUREMENT_CLIP_RUN_ID` and `youtube_leg_ticks.CLIP_RUNS`; pinned by
-/// `tests/av_run_pairing_clip_1404.rs`.
+/// `probe::recording_latency::MEASUREMENT_CLIP_RUN_ID` (pinned by `tests/av_run_pairing_clip_1404.rs`)
+/// and `youtube_leg_ticks.CLIP_RUNS` (pinned by `tests/python/test_reserved_origin_runs_1404.py`).
 pub const SELF_MARKED_RUN_IDS: [u32; 1] = [911_016];
 
 /// A tick of the selected run seen again more than this long after its first frame is a restart of
@@ -60,9 +60,10 @@ where
 }
 
 /// `(tick, video_ts)` samples of one run's frames (`(frame_index, tick)` in file order): the first
-/// frame per tick, sorted by tick (`av_window::window_ticks`, the painter path's own builder), or an
-/// error when a tick shows again more than [`RESTART_GAP_S`] after its first frame: the run
-/// restarted inside the recording, and a marker could pair with either play.
+/// frame per tick, sorted by tick (`av_window::window_ticks`, the same construction the painter path
+/// in `probe::av_sync_recording` writes inline), or an error when a tick shows again more than
+/// [`RESTART_GAP_S`] after its first frame: the run restarted inside the recording, and a marker
+/// could pair with either play.
 pub fn run_tick_samples(
     frames: &[(u64, Option<u32>)],
     fps: f64,
