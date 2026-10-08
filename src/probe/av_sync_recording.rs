@@ -211,8 +211,8 @@ fn decode_best_audio_channel(
 
 /// Issue 1404: the painter path's head check. Decodes the first [`PAINTER_HEAD_FRAMES`] frames with
 /// the head request (nothing required, so no frame goes robust) and stops with "no cam2 tick" when
-/// none of them carries a cam2 tick or a rig node burn. A rig recording always passes, on to the
-/// unchanged full decode.
+/// they show the self-marked measurement clip and none of them a cam2 tick or a rig node burn
+/// (`painter_head_verdict`). Any other head goes on to the unchanged full decode.
 fn check_painter_head(recording: &Path) -> Result<()> {
     let request = painter_head_request();
     let head = analyze_recording_head(

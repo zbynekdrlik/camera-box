@@ -13,10 +13,11 @@
 //!   pass; they are only no longer required.
 //! - The painter path keeps today's request ([`PAINTER_PATH_NODE_BURNS`]) for every recording it
 //!   decodes in full. It first reads a short head with a request that names nothing, so no head
-//!   frame goes robust. A head with neither a cam2 tick nor any of those rig burns is not a
-//!   cam2-painter rig recording, and the path stops there ([`PainterHead::NoCam2Tick`]) instead
-//!   of decoding every frame through the robust recovery. A rig recording (it carries the burns)
-//!   always goes on to the unchanged full decode.
+//!   frame goes robust. A head that shows the self-marked measurement clip and neither a cam2
+//!   tick nor any of those rig burns is the clip's own recording: the path stops there
+//!   ([`PainterHead::NoCam2Tick`]) instead of decoding every frame through the robust recovery.
+//!   Any rig frame in the head, and any head without the clip (a QR-less pre-roll), goes on to
+//!   the unchanged full decode.
 //!
 //! Pure (no I/O). `probe::av_sync_recording` decodes the head and the recording with these
 //! requests; `probe::recording::analyze_recording_head` stops ffmpeg after the head.
@@ -31,8 +32,8 @@ pub const DUAL_QR_HALVES: usize = 2;
 
 /// How many leading frames the painter path reads before its full decode: 2 s of a 30 fps
 /// recording. A rig recording already shows a node burn and a cam2 tick on its first frame, but the
-/// head still decodes all of these frames on the fast path (about 7 CPU-s in release) before the
-/// full decode starts.
+/// head still decodes all of these frames on the fast path (about 7 CPU-s in release at 1080p,
+/// about 4x that for a 4K strih recording) before the full decode starts.
 pub const PAINTER_HEAD_FRAMES: u64 = 60;
 
 /// What one decode asks the #207 fast-path gate for (the arguments of
@@ -78,32 +79,45 @@ pub fn painter_head_request() -> AvDecodeRequest {
 /// What the painter path's head decided.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PainterHead {
-    /// The head carries a cam2 tick or a rig node burn (or is empty): decode the whole recording
-    /// with today's request, unchanged.
+    /// The head carries a cam2 tick or a rig node burn, or shows no self-marked run (an empty head,
+    /// a QR-less pre-roll): decode the whole recording with today's request, unchanged.
     FullDecode,
-    /// None of the head's `frames` frames carries a cam2 tick or a rig node burn.
+    /// The head's `frames` frames show a self-marked run (the measurement clip) and none of them a
+    /// cam2 tick or a rig node burn: the clip's own recording, not a cam2-painter one.
     NoCam2Tick { frames: usize },
 }
 
 /// The painter head's verdict. `head` holds one `(cam2 tick, run ids read)` per decoded head
 /// frame, in any order: the tick is `RecordingFrame::tick` (reserved ids already excluded).
+///
+/// The head stops only a recording it positively recognises: one that shows a self-marked run
+/// (`av_run_pairing::SELF_MARKED_RUN_IDS`) and no rig signal at all. A head that shows nothing
+/// proves nothing (a black or slate pre-roll, NDI inputs still reconnecting after an OBS restart),
+/// so that recording goes on to the full decode, which reads its later frames exactly as before.
 pub fn painter_head_verdict(head: &[(Option<u32>, Vec<u32>)]) -> PainterHead {
-    let rig_recording = head.iter().any(|(tick, run_ids)| {
+    let rig_signal = head.iter().any(|(tick, run_ids)| {
         tick.is_some() || run_ids.iter().any(|r| PAINTER_PATH_NODE_BURNS.contains(r))
     });
-    if rig_recording || head.is_empty() {
-        PainterHead::FullDecode
-    } else {
+    let self_marked_run = head.iter().any(|(_, run_ids)| {
+        run_ids
+            .iter()
+            .any(|r| crate::av_run_pairing::SELF_MARKED_RUN_IDS.contains(r))
+    });
+    if self_marked_run && !rig_signal {
         PainterHead::NoCam2Tick { frames: head.len() }
+    } else {
+        PainterHead::FullDecode
     }
 }
 
 /// The error the painter path stops with on [`PainterHead::NoCam2Tick`].
 pub fn no_cam2_tick_message(frames: usize) -> String {
+    let clip = crate::av_run_pairing::SELF_MARKED_RUN_IDS[0];
     format!(
         "no cam2 painter tick and no rig node burn {PAINTER_PATH_NODE_BURNS:?} on any of the \
-         first {frames} frames: not a cam2-painter rig recording, nothing to measure (a \
-         self-marked run such as the measurement clip is measured with --av-run <run>)"
+         first {frames} frames, only the self-marked measurement clip (run {clip}): not a \
+         cam2-painter rig recording, nothing to measure on the painter path (measure the clip \
+         with --av-run {clip})"
     )
 }
 
