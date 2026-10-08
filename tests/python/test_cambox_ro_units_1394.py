@@ -590,7 +590,7 @@ if os.environ.get("FAKE_RECORD_LEASE"):  # what the lease reads while this box i
     hp = os.path.join(os.environ["RIG_LEASE_DIR"], "holder.json")
     hb = os.path.join(os.environ["RIG_LEASE_DIR"], "heartbeat")
     open(os.path.join(d, f"lease-{n}"), "w").write(open(hp).read() if os.path.exists(hp) else "ABSENT")
-    open(os.path.join(d, f"lease-at-{n}"), "w").write(
+    open(os.path.join(d, f"readtime-{n}"), "w").write(
         "%f %f" % (time.time(), os.stat(hb).st_mtime if os.path.exists(hb) else 0.0))
     if os.environ.get("FAKE_AGE_LEASE") and os.path.exists(hp):  # the lease as minutes went by
         import json
@@ -1084,7 +1084,7 @@ def test_cli_apply_declares_a_hold_the_e2e_gate_waits_out(tmp_path):
     r, sshdir = _cli(tmp_path, "--apply", "--box", "cam1", env={"FAKE_RECORD_LEASE": "1"})
     assert r.returncode == 0, r.stdout + r.stderr
     held = json.loads((sshdir / "lease-0").read_text())
-    seen_at = float((sshdir / "lease-at-0").read_text().split()[0])
+    seen_at = float((sshdir / "readtime-0").read_text().split()[0])
     remaining = _iso_epoch(held["expected_release_at"]) - seen_at
     assert 0 < remaining <= _gate_wait_budget_s(), (remaining, _gate_wait_budget_s(), held)
 
@@ -1096,7 +1096,7 @@ def test_cli_apply_refreshes_its_own_lease_before_every_box(tmp_path):
                      env={"FAKE_RECORD_LEASE": "1", "FAKE_AGE_LEASE": "1"})
     assert r.returncode == 0, r.stdout + r.stderr
     held = json.loads((sshdir / "lease-1").read_text())
-    seen_at, hb_mtime = (float(x) for x in (sshdir / "lease-at-1").read_text().split())
+    seen_at, hb_mtime = (float(x) for x in (sshdir / "readtime-1").read_text().split())
     assert seen_at - hb_mtime < 60, ("the heartbeat was not beaten before box 2", seen_at - hb_mtime)
     assert _iso_epoch(held["expected_release_at"]) - seen_at > 300, held
 
