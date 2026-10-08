@@ -331,6 +331,12 @@ pub mod av_window;
 // (`probe::av_sync_recording`) decodes and pairs through the same calls as the painter path.
 pub mod av_run_pairing;
 
+// issue 1404 (the CI timeout of the probe CLI test) — what the `--av-sync` video decode asks the
+// #207 fast-path gate for: `--av-run <run>` exactly its own dual-QR (no node burn it cannot
+// carry), the painter path today's cam1/strih/stream set after a cheap head that stops a recording
+// with neither a cam2 tick nor a rig burn. Pure, so it unit-tests Tier-0.
+pub mod av_sync_decode_plan;
+
 // #656 — capture-delivery-rate sanity check (pure decision, prevention item 1). Given the
 // periodic captured-fps sample the appliance's own capture loop already computes, decides
 // whether the box's capture device has silently drifted off its negotiated rate for enough
