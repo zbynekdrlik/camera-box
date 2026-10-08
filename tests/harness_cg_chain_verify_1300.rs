@@ -15,6 +15,14 @@
 //! tests/harness_asio_starve_health_1023.rs) and static-anchor assertions of the orchestrator +
 //! the rig-health-audit.py report-only wiring.
 //!
+//! Issue 1302 adds a TOOL-ONLY shallow-latch rule on top of the replica. A shallow-latched input
+//! has its head age graded against its latched depth, and its re-latch delta FAILs. The rule lives
+//! in `cg_chain_shallow_window` and in the OPTIONAL fourth `cg_chain_verdict` argument. The Rust
+//! `evaluate` is not extended: its only consumer is the `genlock-jitter-report --verdict-source`
+//! maintenance verify, whose `jitter_audit` input parses neither `shallow_depth=` nor the canvas
+//! rate. So the summary and the verdict with an EMPTY fourth argument stay pinned to the Rust code
+//! here; the shallow rule is covered by tests/python/test_cg_chain_verify_shallow_1302.py.
+//!
 //! RED before the lib/script exist (sourcing fails / anchors absent); GREEN after.
 
 use camera_box::jitter_audit::{group_by_source, parse_audit_lines, summarize};
@@ -79,6 +87,15 @@ const FIX_LOSSY: &str = "\
 14:00:05.001: genlock-fifo audit 'cg': received=1100 consumed=1080 underruns=5 holds=4 overruns=0 backward_steps=0 dropped_due=9 relocks=3 late_holds=10 locked=0 depth=3 peak=5 latency_ms=3 ts_head_skew_ms=52 backward_regime_ticks=15
 ";
 
+// Issue 1302: skews whose TEXT order differs from their NUMBER order (8 < 25 < 99 < 100, but "8" sorts
+// above "25", "100" and "99"). A string-compared max reads 99; jitter_audit::summarize reads 100.
+const FIX_NUMERIC: &str = "\
+14:00:00.001: genlock-fifo audit 'cg': received=1000 consumed=1000 underruns=0 holds=0 overruns=0 backward_steps=0 dropped_due=0 relocks=0 late_holds=0 locked=1 depth=3 peak=5 latency_ms=3 ts_head_skew_ms=8 backward_regime_ticks=0
+14:00:05.001: genlock-fifo audit 'cg': received=1150 consumed=1150 underruns=0 holds=0 overruns=0 backward_steps=0 dropped_due=0 relocks=0 late_holds=0 locked=1 depth=3 peak=5 latency_ms=3 ts_head_skew_ms=25 backward_regime_ticks=0
+14:00:10.001: genlock-fifo audit 'cg': received=1300 consumed=1300 underruns=0 holds=0 overruns=0 backward_steps=0 dropped_due=0 relocks=0 late_holds=0 locked=1 depth=3 peak=5 latency_ms=3 ts_head_skew_ms=-100 backward_regime_ticks=0
+14:00:15.001: genlock-fifo audit 'cg': received=1450 consumed=1450 underruns=0 holds=0 overruns=0 backward_steps=0 dropped_due=0 relocks=0 late_holds=0 locked=1 depth=3 peak=5 latency_ms=3 ts_head_skew_ms=99 backward_regime_ticks=0
+";
+
 /// Shell FIX literal wrapping `text` into `$LOG` via a quoted heredoc (no expansion in body).
 fn log_var(text: &str) -> String {
     format!("LOG=$(cat <<'FIX'\n{text}FIX\n)\n")
@@ -97,6 +114,7 @@ fn lib_defines_the_pure_functions() {
         "cg_chain_parse_asrc_ppm",
         "cg_chain_asrc_in_band",
         "cg_chain_parse_audio_facet",
+        "cg_chain_shallow_window",
         "cg_chain_csv_header",
         "cg_chain_csv_row",
     ] {
@@ -131,6 +149,7 @@ fn summary_parity_with_jitter_audit() {
         (FIX_CGOBS, "sp-1_video"),
         (FIX_CGOBS, "sp-2_video"),
         (FIX_LOSSY, "cg"),
+        (FIX_NUMERIC, "cg"),
     ] {
         // Rust source of truth.
         let samples = parse_audit_lines(log);
@@ -257,6 +276,32 @@ fn verdict_parity_with_resolume_playback_evaluate() {
 }
 
 #[test]
+fn verdict_with_an_empty_shallow_argument_matches_evaluate() {
+    // Issue 1302: the shallow rule is TOOL-ONLY, behind an optional fourth argument. An EMPTY fourth
+    // argument must leave the evaluate replica exactly as it is.
+    let cases = [
+        (30, 8, 0, 0, 0, 0, 0),
+        (30, 25, 0, 0, 0, 0, 0),
+        (30, 8, 3, 0, 1, 0, 0),
+        (1, 8, 0, 0, 0, 0, 0),
+        (30, 50, 2, 2, 1, 1, 4),
+    ];
+    let bounds = PlaybackBounds::default();
+    for (s, sk, dd, du, dr, dl, db) in cases {
+        let rust_pass = evaluate(&window(s, sk, dd, du, dr, dl, db), &bounds).pass;
+        let line = format!("{s}|3|{sk}|{dd}|{du}|{dr}|{dl}|{db}|1");
+        let out = stdout_of(&format!(
+            "cg_chain_verdict '{line}' 20 2 '' {DRAIN_FIRST_LINE}"
+        ));
+        assert_eq!(
+            rust_pass,
+            out == "PASS",
+            "empty-shallow verdict parity mismatch for {line}: rust={rust_pass} bash={out}"
+        );
+    }
+}
+
+#[test]
 fn absent_source_fails_in_both() {
     // Rust: an absent source has no window -> the orchestrator treats it as FAIL/ABSENT; the bash
     // replica FAILs on an empty summary line (the absent sentinel), matching "not verifiable".
@@ -335,10 +380,11 @@ fn parse_audio_facet_is_empty_on_a_pre_1303_log() {
 // ---------------------------------------------------------------------------------------------
 #[test]
 fn csv_row_with_audio_columns_matches_the_header_count() {
-    // the #1303 audio columns are appended; a row supplying them must still match the header count.
+    // the #1303 audio columns are appended, then the issue-1302 d_shallow_latches column; a row
+    // supplying them must still match the header count.
     let header = stdout_of("cg_chain_csv_header");
     let row =
-        stdout_of("cg_chain_csv_row '2026-09-12T20:00:00Z' strih cg PASS 8 0 0 0 0 0 7.62 1 3 0");
+        stdout_of("cg_chain_csv_row '2026-09-12T20:00:00Z' strih cg PASS 8 0 0 0 0 0 7.62 1 3 0 2");
     assert_eq!(
         header.split(',').count(),
         row.split(',').count(),
@@ -347,12 +393,12 @@ fn csv_row_with_audio_columns_matches_the_header_count() {
     assert!(
         header
             .trim_end()
-            .ends_with(",audio_enabled,audio_delay_ms,audio_pairing_offset_ms"),
-        "header must append the audio columns: {header}"
+            .ends_with(",audio_enabled,audio_delay_ms,audio_pairing_offset_ms,d_shallow_latches"),
+        "header must append the audio columns, then d_shallow_latches: {header}"
     );
     assert!(
-        row.trim_end().ends_with(",1,3,0"),
-        "row must carry the audio values: {row}"
+        row.trim_end().ends_with(",1,3,0,2"),
+        "row must carry the audio values, then the latch delta: {row}"
     );
 }
 
