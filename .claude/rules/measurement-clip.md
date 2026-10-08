@@ -8,6 +8,10 @@ paths:
   - "tests/av_run_pairing_clip_1404.rs"
   - "tests/av_run_recording_1404.rs"
   - "tests/av_sync_dock_reserved_origin_1404.rs"
+  - "src/av_sync_decode_plan.rs"
+  - "src/probe/av_sync_recording.rs"
+  - "tests/av_sync_decode_plan_1404.rs"
+  - "tests/av_sync_painter_head_1404.rs"
 ---
 
 # The camera-box measurement clip (issue 1404 Task 5 part a)
@@ -107,7 +111,9 @@ The tick rule lives in `TICK_HZ` / `TICKS_PER_FRAME` / `MARKER_EVERY_TICKS`; `TI
 
 - **The painter path still never reads the clip** (by design): `recording-verdict --av-sync` without
   `--av-run` pairs through `RecordingFrame::tick`, which excludes `NODE_BURN_RUN_IDS`, so on a clip it
-  measures nothing (pinned by `tests/av_run_recording_1404.rs`). Use `--av-run 911016`.
+  measures nothing (pinned by `tests/av_run_recording_1404.rs`). Since the CI-timeout fix it stops
+  after a cheap 60-frame head with "no cam2 painter tick ... measure the clip with --av-run 911016"
+  (next section). Use `--av-run 911016`.
 - **A loop seam (ROZHODNUTE 6048179415 item 2 decided 128 s; the generator's `SECONDS` and the
   published deliverable below are still 120 s, a follow-up on the ticket).** 120 s is not a whole number of index wraps and
   marker periods; 1920 frames (64 s) is, so 128 s is too. When a player loops the 120 s clip, the
@@ -158,3 +164,44 @@ The tick rule lives in `TICK_HZ` / `TICKS_PER_FRAME` / `MARKER_EVERY_TICKS`; `TI
   through the probe glue's own crate-root calls read 0 within a frame, +100 / -100 +/- 17 ms with the
   audio shifted by ffmpeg (`atrim=start=0.1,asetpts=PTS-STARTPTS` = audio early = picture lags = +;
   `adelay=100:all=1` = -). `tests/av_run_recording_1404.rs` (probe, CI) runs the compiled CLI on it.
+
+## The `--av-sync` decode request and the painter head (the 480 s CI timeout)
+
+The first CI run of `tests/av_run_recording_1404.rs` killed three tests at nextest's 480 s limit.
+`--av-sync` decoded the clip with `analyze_recording`, which requires the cam1/strih/stream burns. The
+clip carries none, so every frame ran the robust recovery: the issue-423 class (`.config/nextest.toml`).
+`src/av_sync_decode_plan.rs` now decides the request:
+- **`--av-run <run>`** requires only the run's own dual-QR (both halves), no node burn.
+- **The painter path** keeps today's cam1/strih/stream set for its full decode. It first reads a
+  60-frame head that requires nothing (`probe::recording::analyze_recording_head`, which stops
+  ffmpeg). It stops only when the head shows the clip and no rig signal (no cam2 tick, none of the
+  three burns). A head with nothing (a QR-less pre-roll; the s3 VOD opens on 55 s of one) goes on
+  to the unchanged full decode. Two residual edges are written in the module doc.
+
+Measured with the runner's real release decoder on the clip (one thread):
+- per frame: robust 434 ms; own-run request 124 ms; no request 114 ms; the plain rqrr pass alone
+  is 55 ms, and the always-run Otsu pass is the other half of the fast path;
+- per test (CPU s): `--av-run` 13.5-15, painter path 7.3 (the head only); before the fix ~52 each.
+
+CI's Test job is a DEBUG build. Calibration from run 37708407889: the coverage job ran the three
+old tests together, 360 robust frames in 4 vCPU x 522 s, about 13x the local release CPU time.
+Estimate before you push: release CPU s x 13, divided over the 4 vCPU the concurrent tests share.
+
+Finding, not changed here: real YouTube-leg stream/VOD clips decode ALL robust on the painter path
+(`fast_path_frames=0` of 1200 in every `tests/fixtures/youtube_leg_1404/*.avsync.out`). They carry
+strih + stream + the deployed camera's burn, never cam1 unless cam1 is deployed. The fix would be
+the issue-632 grouped shape; see the ticket.
+
+**Running probe glue locally without cargo:** link a replica crate against the self-hosted runner's
+RELEASE probe rlib (`~/actions-runner-camera-box/_work/camera-box/camera-box/target/release/deps/libcamera_box-*.rlib`;
+pick the one whose `.d` lists `src/probe/`). Its `lib.rs` contains:
+- `extern crate cb_real;`
+- `#[path]` mounts of the EDITED files: the crate-root modules, `probe/av_sync_recording.rs`, and
+  `probe/recording.rs` cut before the pixel-proof code;
+- `pub use cb_real::probe::{qr, payload, recording_decode, ...}` for the untouched decoder;
+- a `recording_latency` shim that re-exports cb_real's and adds any const newer than that build.
+
+Then the probe-gated `tests/*.rs` compile with `--cfg 'feature="probe"' --extern camera_box=<replica>
+--extern image=<runner image rlib>` (a 30-line `tempfile` shim when a test needs it), run in release,
+and `clippy-driver -D warnings` lints them. That ran the edited `av_sync_from_recording` end to end on
+the fixture: clean -0.15 ms, audio early +99.87 ms, painter path stops with the head reason.
