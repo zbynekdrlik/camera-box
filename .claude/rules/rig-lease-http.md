@@ -237,6 +237,12 @@ without a serve dir. A file another user owns is never served.
   (`test_the_dev1_server_no_longer_serves_program_audio`), and the dev1 sampler unit file is gone.
   The payload rules (ages per request, a chain-less MEASUREMENT = UNKNOWN) stay in
   `rig_serve_files.program_audio_response`, used by the sampler's endpoint.
+- **Proving a retired file route live: read it while the stale file is still there.** Every file
+  route here is already a 404 on the OLD code once its file is absent. A check that deletes the
+  leftover first and then reads 404 passes whether or not the server was restarted. Order: restart
+  (while `held=false`), wait for `/healthz` (the unit is `Type=simple`, the restart returns before
+  it listens), read the route (want 404), then delete the file. On a re-run the file is gone and
+  the 404 proves nothing (`systemd/program-audio-sampler.README.md`, the dev1 post-merge block).
 - Writer, contract and runbook: `systemd/rig-marker-mirror.README.md`. The running unit picks up a
   change to the routes only after `systemctl --user restart rig-lease-server.service`; do it while
   `held=false`.
