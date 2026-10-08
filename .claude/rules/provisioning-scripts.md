@@ -458,3 +458,24 @@ the issue-1309 journal-partition line, which sits BETWEEN `/var/log` and `/var/t
 - `root_mount_is_readonly` stays DEFINED in `setup-device.sh` (a Rust test pins the definition
   there) but calls the lib's `ro_root_mount_mode`. `verify-device.sh` keeps its own copy, because
   pytests EXECUTE slices of it without sourcing libs; the parity test pins that copy to the lib.
+
+### The image builders write through the same lib (issue 1400)
+
+No script under `scripts/` except `ro-root.sh` may type an fstab-shaped tmpfs line for `/tmp`,
+`/var/log`, `/var/tmp`, `/var/cache` or `/var/spool` (`tests/python/test_image_builder_fstab_1400.py`
+scans every file; comment lines are exempt). Each builder keeps its fstab in a small PURE function
+the test calls without root, with goldens in `tests/fixtures/image_builder_fstab_1400/`:
+- **`create-usb-linux.sh`: `create_usb_first_boot_fstab ROOT_UUID EFI_UUID`** (tests call it through
+  `CREATE_USB_SOURCE_ONLY=1`; clear the positional parameters before that `source`, the script's
+  argument parser reads and shifts them). It writes the rw root line
+  (`create_usb_first_boot_root_line`, rw until STEP 18 because setup-device runs apt, DKMS and the
+  kernel purge on that root first), the EFI line, `ro_root_tmpfs_line /var/cache` and
+  `log_diet_journal_fstab_line`. These pre-setup differences are test-pinned, so a canon change shows
+  up as a deliberate golden diff. An empty UUID fails the build by name: the call is a plain
+  function call with `|| error`, never a `$(...)` inside a heredoc, whose failure `set -e` ignores.
+- **`build-image.sh`: `build_image_fstab_text`** (the script cannot be sourced: its top-level
+  `trap cleanup EXIT` removes `/tmp/camera-box-build`, so the test lifts the function text). It writes
+  the whole `ro_root_tmpfs_lines` set and NO root line: that image's `/` is the overlayfs
+  `configure_overlay`'s initramfs hook assembles, and a `UUID=... / ext4 ro` entry would make
+  systemd-remount-fs remount the overlay root read-only. If the overlay ever goes, revisit that
+  decision (the test checks the overlay is still there).
