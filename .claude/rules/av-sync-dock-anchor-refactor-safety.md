@@ -8,6 +8,8 @@ paths:
   - "tests/av_sync_dock_output_sources_1386.rs"
   - "vendor/av-sync-dock/src/camera-box-audio.hpp"
   - "vendor/av-sync-dock/src/camera-box-audio-worker.hpp"
+  - "vendor/av-sync-dock/src/camera-box-qr.hpp"
+  - "tests/av_sync_dock_reserved_origin_1404.rs"
   - "tests/genlock_preload.rs"
   - ".github/workflows/windows-genlock.yml"
   - ".github/workflows/windows-genlock-fast.yml"
@@ -136,6 +138,23 @@ diag-ARGUMENT anchor now ends at `(unsigned long long)st->cb_switch_log.total,` 
 follow it) in the Rust test and both pwsh copies. Replay all of them from the YAML text before pushing: a python squish
 (`re.sub(r"\s+", " ", ...)`, comments kept) + the brace-balanced `Get-DockBody`, reading the needle lists
 out of each step's `foreach (... in @(...))`.
+
+## The reserved-origin QR filter's anchors (issue 1404)
+
+`cb_video_qr_record` is `static bool cb_video_qr_record(struct sync_test_output *st, uint32_t run_id,
+uint32_t frame_id, uint64_t video_ts)` since issue 1404: its first statement refuses a run in
+`CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS` (`camera-box-qr.hpp`), and both QR decodes call it as
+`if (!cb_video_qr_record(st, cb.run_id, cb.frame_id, timestamp - st->start_ts)) continue;` right
+after the decode, before any signal. Pinned in three places, all to be edited together:
+`tests/av_sync_dock_reserved_origin_1404.rs` (comment-stripped; also the list parity with the Rust
+ids), the pwsh step "Assert dock never pairs a reserved origin QR (issue 1404)" in BOTH workflows
+(comments kept: no comment may sit inside the guarded call, between the decode and it, at the start
+of the record's body, or inside the rate-limited `due(...)) blog(LOG_INFO,` call), and the signature
+needle of the issue-1381 audio step (`cb_refresh_measure_source(st, video_ts);` inside the record)
+in the Rust 1381 test and both workflows. Behaviour (the predicate, the ring, the log limiter) is
+the g++ `camera-box-selftest.cpp` block run by `tests/av_sync_dock_cpp_mirror_gate.rs`. A lane
+proved the set with 9 mutants on a scratch copy (each killed by the Rust anchor, the pwsh step or
+the self-test).
 
 ## The dock output is split over several files; every anchor reads them as ONE source (issue 1386)
 

@@ -41,6 +41,11 @@ dual-QR under `MEASUREMENT_CLIP_RUN_ID`. Registered exactly like 911014 below: t
 every exclusion array and python mirror, no slot, never `CAMERA_UNDER_TEST_NODES`. Details:
 `.claude/rules/measurement-clip.md`.
 
+**The stream av-sync dock never pairs a QR of any of the three CG origins** (911014, 911015, 911016;
+`CAMERA_BOX_RESERVED_ORIGIN_RUN_IDS` in `vendor/av-sync-dock/src/camera-box-qr.hpp`, issue 1404 Task
+5 part b): its audio is the cam2 painter's marker, so a CG tick line would feed it a meaningless
+offset. A new CG origin id goes into that list too (its parity tests fail otherwise).
+
 Both ids ARE tick-excluded (`src/probe/recording.rs::NODE_BURN_RUN_IDS`) + in the python mirrors
 (`qr_align_pins.py`, `mv_skew_snapshot.py`) + in EVERY `all_burns`/`latency_all_burns` exclusion
 array + the `#638` push site in `recording-verdict.rs` — because a CG burn can ride into a

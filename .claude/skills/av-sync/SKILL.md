@@ -107,6 +107,11 @@ with the emitter confirmed live before any number is trusted again.
    ```
    JSON: `av_offset_ms`, `mad_ms` (should be ≤ ~15), `matched` (cluster size; expect ~⅓ of
    emitted markers at 30 fps recording), `latency_adjust_ms`.
+5. **A CG segment (the measurement clip, issue 1404):** the clip carries its own dual-QR tick and
+   its own marker, so its A/V comes from the same recording with the CLIP's marker log and
+   `--av-run 911016` (`src/av_run_pairing.rs`; requires `--av-sync`; refused when the clip restarts
+   inside the cut, so cut inside one play). The painter path above never reads the clip's tick.
+   The JSON gains `"av_run": 911016`. Details: `.claude/rules/measurement-clip.md`.
 
 ## The two measurement-bias gotchas (both cost a full rig cycle — DO NOT reintroduce)
 

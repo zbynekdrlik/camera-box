@@ -1809,3 +1809,12 @@ pin it with a lint that refuses any `X-Y` range inside a bracket on a `=~` line
 (`test_every_bash_version_pattern_names_ascii_digits_explicitly_1302`). Same review: bash `read` and
 `$(cat)` drop a NUL byte silently, so a byte-reading twin that treats NUL as a character needs a
 `tr '\000' '?'` before the bash parse.
+
+## A mutation harness that runs the replica with a MINIMAL env reports every mutant "killed" (issue 1404)
+
+A python mutation driver that runs each scratch tree through `subprocess.run([...], env={"PATH": ..., "HOME": ...})`
+lost the rustup toolchain env, so the REAL tree failed too and all 7 mutants read "killed". Pass
+`env=dict(os.environ, ...)`, print the REAL tree's result first, and trust a kill only when that line
+reads pass. Also: an unsigned `now - last < BOUND`
+after a `now >= last` guard makes the guard's removal an equivalent mutant (the wrap reads huge);
+drop such a mutant instead of counting it as surviving.

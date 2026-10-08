@@ -4,6 +4,7 @@ paths:
   - "tests/python/test_youtube_leg_*_1404.py"
   - "tests/python/youtube_leg_fakes_1404.py"
   - "tests/fixtures/youtube_leg_1404/**"
+  - "tests/python/test_reserved_origin_runs_1404.py"
 ---
 
 # YouTube-leg verdict tool (issue 1404 Task 1)
@@ -34,14 +35,58 @@ is `recording-verdict --av-sync` (CI probe artifact) as a subprocess. Shared wit
 - One reserved id can be a tick, but only when the caller asks: 911016, the measurement clip's
   painted dual-QR (the CG segments' painter, `.claude/rules/measurement-clip.md`), read with
   `runs=CLIP_RUNS` (threaded `decode_ticks` → `decode_raw` → `_decode_range` job field 5 →
-  `half_ticks` → `painter_payload`). The default decode refuses it and is byte-identical to before
-  (`DECODER_VERSION` stays 2). Why opt-in: the clip restarts its tick on every play, and the
-  timeline keys a whole session on one tick line (`TickClock`, `_adjacent_events`), so a clip tick
-  in a default decode turned a PERFECT camera window next to a CG segment into 600 replay dups (the
-  issue-1404 review probe). Reading CG windows needs the timeline to keep the clip's run apart from
-  the painter's first (Task 5 part b), and a decode with `runs` must key its tick cache on them. The
-  clip carries the 60 Hz tick (2 per 30 fps frame), so `continuity(step=2)` proves its frames like
-  a painter recording.
+  `half_ticks_run` → `painter_tick_run` → `painter_payload`). The default decode refuses it and is
+  byte-identical to before (`DECODER_VERSION` stays 2). The clip carries the 60 Hz tick (2 per
+  30 fps frame), so `continuity(step=2)` proves its frames like a painter recording. A decode with
+  `runs` is RUN-SCOPED: next section.
+
+## Run-scoped decode + timeline (issue 1404 Task 5 part b, design comment 6048239795)
+
+Why: the clip restarts its tick on every play beside the painter's line, and the one-line timeline
+(`TickClock`, `_adjacent_events`) read the painter -> clip cut as a replay of every window tick
+(a perfect camera window next to a CG segment: 300-600 dups).
+
+- **Decode.** `decode_ticks(..., runs=CLIP_RUNS)` rows gain the run as a 7th column (None where no
+  tick resolved); `load_run_ticks` reads it back as `(index, pts, tick, run)`. Halves read under
+  two different runs (a blend at a cut) read as nothing. A right-only frame takes the local phase
+  of frames of ITS OWN run (`resolve_ticks`): the clip and the painter tick on independent phases.
+- **Cache.** `tick_cache_key(src, runs)` appends ` runs=911016` only for a run-scoped decode; the
+  default key is the one restreamer's gate always wrote.
+- **Timeline.** `carries_runs(rows)` = 4-column rows; 3-column rows take the old code byte for byte
+  (the public functions dispatch, the old bodies are `_dupskip` / `_clamp_window` /
+  `_vod_content_times` / `_vod_pts_for` / `_coverage_counts`).
+  - `run_segments`: a seam at the first decoded row of another run and at a tick fall-back over
+    `RESTART_TICKS` (a loop of a clip shorter than 30 s is NOT split: its ticks stay ambiguous and
+    its windows read UNKNOWN; the deliverable is 128 s). Undecoded rows stay with the segment
+    before them.
+  - `RunTimeline` (cached per session, `run_timeline`): one TickClock per rec segment; a VOD row maps
+    to the ONE segment of its run whose tick span holds its tick (the painter counts on, so that is
+    unique). A clip tick sits in every play's span: such a VOD segment is pinned by content ORDER
+    (`_order_match`) against the rec segments between the mapped VOD rows around it; a missing
+    neighbour = the VOD's start / end clamp (keep the last / first plays); any other count mismatch
+    stays unmapped -> UNKNOWN, never another play's verdict.
+  - A window is judged on its ONE segment (`window_segment`, decoded rows only): a cut between runs
+    or a restart inside is an error (UNKNOWN), like a publish or a part seam. dupskip / clamp /
+    vod_pts_for / audio run on that segment's rows and the VOD rows that show it; coverage sums the
+    segments the window touches (a fade nobody decodes at a cut counts as unproven, never an event);
+    publish joins read every mapped VOD row.
+  - **Foreign VOD frames (review round 1, the false PASS):** a decoded VOD row inside the segment's
+    VOD stretch that shows something else (another run, another stretch of the same run, no rec
+    frame) is a dup frame AND enters the frame-count balance, so a replaced frame reads dup + hidden
+    skip and an inserted one a dup (`foreign_frames` in a run-scoped result). Dropping those rows
+    silently kept the balance and read a spliced frame as a clean PASS.
+  - `join_part_rows(..., restarting=runs)`: a later part without @start is placed by the previous
+    part's last NON-restarting run (the painter), never by the clip (a part 1 that ended in a CG
+    segment made the verdict UNKNOWN or silently misplaced part 2).
+- **Verdict CLI.** `--runs 911016` (choices = CLIP_RUNS) + `--clip-markers <clip>.markers.csv`; each
+  window records its `run`; a clip window's A/V calls `recording-verdict --av-sync --av-run 911016`
+  with the clip's marker log (no `--clip-markers` = that window's A/V UNKNOWN). Without `--runs` the
+  JSON has no `run` / `tool.runs` / `foreign_frames` key.
+- **Rule:** a CG window must never hold a loop point or a cut; place E2E windows inside one segment.
+- Tests: `tests/python/test_youtube_leg_runs_1404.py` (synthetic sessions with two plays, the VOD
+  starting / ending inside a play, a spliced frame, a loop, a fade at a cut, multi-part placement,
+  the real s2/s3 sessions read identically through one run, the committed clip fixture decoded, the
+  CLI end to end with a fake probe that records its argv).
 - Adding a parameter to the per-frame decode chain: the decode-mechanics tests swap `half_ticks`
   for a 3-argument lambda (`cheap_halves`), so `_decode_range` must keep the plain
   `half_ticks(frame, det, scale)` call on the default path (the `runs` keyword only when non-empty),
