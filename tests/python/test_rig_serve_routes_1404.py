@@ -326,6 +326,7 @@ def test_the_dev1_server_no_longer_serves_program_audio(tmp_path):
     payload = {"schema": 1, "ts_utc": rsf.format_ts_utc(datetime.now(timezone.utc)), "age_s": 0.0,
                "verdict": "MEASUREMENT", "marker_chain": 7, "markers_decoded": 9}
     (serve / "program-audio.json").write_text(json.dumps(payload), encoding="utf-8")
+    (serve / rsf.MARKERS_NAME).write_bytes(MARKERS_CSV)  # the serve dir IS wired: the CSV answers
     not_found = _GOLDEN[("GET", "/nope")]
     head_not_found = _GOLDEN[("HEAD", "/nope")]
     with _Server(tmp_path / "lease", str(serve)) as s:
@@ -333,3 +334,4 @@ def test_the_dev1_server_no_longer_serves_program_audio(tmp_path):
         assert s.raw("GET", "/program-audio.json?t=1") == not_found
         assert s.raw("HEAD", "/program-audio.json") == head_not_found
         assert s.request("GET", "/rig-lease.json")[0] == 200  # the lease route stays
+        assert s.request("GET", "/rig-qpsk-markers.csv")[:3:2] == (200, MARKERS_CSV)

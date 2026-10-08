@@ -153,8 +153,11 @@ def test_the_shared_payload_rules_apply(tmp_path, monkeypatch):
         j = json.loads(h.request("GET", "/program-audio.json")[2])
         assert j["verdict"] == "UNKNOWN" and "owner" in j["reason"]
         monkeypatch.undo()
-        (serve / rsf.PROGRAM_AUDIO_NAME).write_bytes(b"not json")
-        assert json.loads(h.request("GET", "/program-audio.json")[2])["verdict"] == "UNKNOWN"
+        for garbage in (b"not json", b"[1, 2]"):  # not JSON; JSON but not an object
+            (serve / rsf.PROGRAM_AUDIO_NAME).write_bytes(garbage)
+            j = json.loads(h.request("GET", "/program-audio.json")[2])
+            assert j["verdict"] == "UNKNOWN" and j["age_s"] is None, garbage
+            assert "unreadable" in j["reason"], garbage
 
 
 def test_an_idle_client_is_dropped_after_the_request_timeout(tmp_path):
