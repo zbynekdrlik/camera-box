@@ -31,6 +31,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -434,6 +435,9 @@ with open(os.path.join(st, "log"), "a") as f:
 if root != "rw" and any(a.startswith(fs) for a in sys.argv[1:]):
     sys.stderr.write("mv: cannot move: Read-only file system\n")
     sys.exit(1)
+if os.environ.get("FAKE_MV_RC"):  # a rename that fails while the window is open
+    sys.stderr.write("mv: forced failure\n")
+    sys.exit(int(os.environ["FAKE_MV_RC"]))
 os.execv(real, [real] + sys.argv[1:])
 '''
 
@@ -580,6 +584,8 @@ open(os.path.join(d, f"argv-{n}"), "w").write("\n".join(sys.argv[1:]))
 open(os.path.join(d, f"stdin-{n}"), "w").write(sys.stdin.read())
 host = next(a for a in sys.argv if a.startswith("root@"))
 fail = os.environ.get("FAKE_FAIL_HOST", "")
+if host == "root@" + os.environ.get("FAKE_NO_NC_HOST", ""):
+    print("NOTE: no /etc/systemd/system/cambox-netconsole.service on cam3 -- issue 1311 netconsole is not provisioned here; re-run setup-device.sh for it (this program writes no new unit)")
 if host == "root@" + fail:
     if os.environ.get("FAKE_CLOSE_FAIL"):
         sys.stderr.write("FAIL: [issue 1394] cam1's root is NOT read-only after the remount-rw window ('findmnt -no OPTIONS /' = 'rw' -> rw; the ro remount rc=32: busy; sync rc=0). x\n")
@@ -591,6 +597,18 @@ print("OK: applied on " + host)
 '''
 
 
+# The rig-busy read (obs_phase2.py rig-busy-check) the --apply guard makes, answered from FAKE_BUSY
+# and logged, so a test never talks to the real strih / stream OBS.
+_OBS_PHASE2 = r'''
+import json, os, sys
+open(os.environ["FAKE_OBS_LOG"], "a").write(" ".join(sys.argv[1:]) + "\n")
+if sys.argv[1:2] == ["rig-busy-check"]:
+    busy = os.environ.get("FAKE_BUSY") == "1"
+    print(json.dumps({"busy": busy, "hint": "fake",
+                      "diagnostics": [{"host": "stream", "streaming": busy, "recording": False}]}))
+'''
+
+
 def _cli(tmp_path, *args, env=None):
     bindir = tmp_path / "dev1-bin"
     bindir.mkdir(exist_ok=True)
@@ -598,7 +616,14 @@ def _cli(tmp_path, *args, env=None):
     (bindir / "sshpass").chmod(0o755)
     sshdir = tmp_path / "ssh"
     sshdir.mkdir(exist_ok=True)
-    e = {"PATH": f"{bindir}:/usr/bin:/bin", "FAKE_SSH_DIR": str(sshdir), "HOME": str(tmp_path)}
+    obsdir = tmp_path / "obs"
+    obsdir.mkdir(exist_ok=True)
+    (obsdir / "obs_phase2.py").write_text(_OBS_PHASE2)
+    # Every rig input of the --apply guard points into tmp_path: no real lease dir, no real
+    # issue-281 heartbeat, no real OBS (the CI runner has no rig network; dev1 has a live one).
+    e = {"PATH": f"{bindir}:/usr/bin:/bin", "FAKE_SSH_DIR": str(sshdir), "HOME": str(tmp_path),
+         "RIG_LEASE_DIR": str(tmp_path / "rig-lease"), "CAMERA_BOX_RIG_HEARTBEAT": str(tmp_path / "rig-active"),
+         "CAMBOX_RO_UNITS_OBS_PHASE2_DIR": str(obsdir), "FAKE_OBS_LOG": str(tmp_path / "obs.log")}
     e.update(env or {})
     r = subprocess.run(["bash", str(CLI), *args], capture_output=True, text=True, env=e, timeout=120)
     return r, sshdir
@@ -658,3 +683,161 @@ def test_the_new_scripts_parse_and_lint():
     assert sc, "shellcheck is preinstalled on dev1 and the CI runner"
     r = subprocess.run([sc, "-S", "warning", str(UNITS), str(CLI)], capture_output=True, text=True)
     assert r.returncode == 0, r.stdout
+
+
+# =================================================================================================
+# 8. review round 1: a stuck-writable root, a failure inside the window, the rig guard, backoff
+# =================================================================================================
+
+def test_apply_on_a_stuck_writable_root_with_nothing_to_write_closes_before_any_start(tmp_path):
+    # Review finding 1: with every file and mask already in place, the window (and its verified
+    # close) used to be skipped, so a root stuck WRITABLE got logrotate + netconsole started on it.
+    box, unit_dir = _box(tmp_path)
+    assert run_text(box, _program(unit_dir)).returncode == 0
+    box["state"].joinpath("root").write_text("rw\n")
+    box["state"].joinpath("log").write_text("")
+    proc = run_text(box, _program(unit_dir))
+    calls = log(box)
+    assert proc.returncode == 0, f"{proc.stdout}\n{proc.stderr}\n" + "\n".join(calls)
+    assert starts_on_rw(calls) == [], "\n".join(calls)
+    assert root(box) == "ro"
+    assert sum(c.startswith("mount -o remount,ro") for c in calls) == 1, "\n".join(calls)
+    assert not any(c.startswith(("mv ", "systemctl mask")) for c in calls), "nothing to write"
+    assert "reads 'rw'" in proc.stdout, proc.stdout
+
+
+def test_apply_on_a_stuck_writable_busy_root_fails_loud_and_starts_nothing(tmp_path):
+    box, unit_dir = _box(tmp_path)
+    assert run_text(box, _program(unit_dir)).returncode == 0
+    box["state"].joinpath("root").write_text("rw\n")
+    box["state"].joinpath("log").write_text("")
+    proc = run_text(box, _program(unit_dir), FAKE_RO_FAIL="1")
+    calls = log(box)
+    assert proc.returncode != 0
+    assert "root is NOT read-only" in proc.stderr, proc.stderr
+    assert not any(c.startswith(("systemctl start", "systemctl restart", "systemctl daemon-reload")) for c in calls), calls
+
+
+def test_apply_failure_inside_the_window_closes_it_and_starts_nothing(tmp_path):
+    # Review finding 2: the EXIT trap is what closes the window when a write fails inside it.
+    box, unit_dir = _box(tmp_path)
+    proc = run_text(box, _program(unit_dir), FAKE_MV_RC="1")
+    calls = log(box)
+    assert proc.returncode != 0
+    assert root(box) == "ro", "\n".join(calls)
+    assert sum(c.startswith("mount -o remount,ro") for c in calls) == 1, "\n".join(calls)
+    assert not any(c.startswith(("systemctl start", "systemctl restart", "systemctl daemon-reload")) for c in calls), calls
+    assert "could not write" in proc.stderr, proc.stderr
+    assert not list(unit_dir.rglob("*.new")), "a failed write leaves no temp file behind"
+
+
+def test_apply_names_a_refused_rw_remount(tmp_path):
+    box, unit_dir = _box(tmp_path)
+    proc = run_text(box, _program(unit_dir), FAKE_RW_FAIL="1")
+    assert proc.returncode != 0
+    assert "could not remount / read-write" in proc.stderr and "nothing was written" in proc.stderr, proc.stderr
+
+
+def test_netconsole_retry_backs_off_to_ten_minutes():
+    # Review nit: a box away from dev1 (the travelling rig) retried every 30 s forever into the
+    # issue-1309 journal on the USB stick. systemd 255 RestartSteps/RestartMaxDelaySec (validated by
+    # the systemd-analyze test above, which verifies this same unit text).
+    sec = _sections(_lib(REMOTE_LOG, "remote_log_netconsole_service_unit_content"))
+    assert "RestartSteps=4" in sec["Service"] and "RestartMaxDelaySec=600" in sec["Service"], sec
+
+
+def test_ar_verdict_points_runtime_failures_at_the_apply_not_at_setup_device():
+    # Review nit: setup-device never clears a unit's failed state (and a cambox is never rebooted
+    # remotely), so for a failed unit only the apply script is a fix.
+    lines = [ln if not ln.startswith("APT_UNIT=apt-daily.service ") else "APT_UNIT=apt-daily.service masked failed"
+             for ln in _green().splitlines()]
+    v = _verdict("\n".join(lines) + "\n")
+    assert "cambox-ro-units-apply.sh" in v and "setup-device" not in v, v
+    v = _verdict(_green().replace("LR_RESULT=success", "LR_RESULT=exit-code"))
+    assert "cambox-ro-units-apply.sh" in v and "setup-device" not in v, v
+    nc_missing = "\n".join("NC_UNIT_SHA=__ABSENT__" if ln.startswith("NC_UNIT_SHA=") else ln
+                           for ln in _green().splitlines()) + "\n"
+    v = _verdict(nc_missing)
+    assert "setup-device.sh" in v, v
+
+
+def _seed_lease(tmp_path):
+    d = tmp_path / "rig-lease"
+    d.mkdir()
+    (d / "holder.json").write_text(json.dumps({"repo": "zbynekdrlik/camera-box", "run_id": "4242",
+                                               "run_url": "https://example.invalid/4242", "job": "e2e",
+                                               "acquired_at": "2026-10-08T10:00:00Z",
+                                               "expected_release_at": "2026-10-08T11:00:00Z"}))
+    (d / "heartbeat").write_text("")
+
+
+def _obs_calls(tmp_path):
+    f = tmp_path / "obs.log"
+    return f.read_text().splitlines() if f.exists() else []
+
+
+def test_cli_apply_refuses_while_a_live_rig_lease_is_held(tmp_path):
+    # Review finding 3: no cambox root write while an E2E holds the rig (the 17.9.2026 incident).
+    _seed_lease(tmp_path)
+    r, sshdir = _cli(tmp_path, "--apply", "--box", "cam1")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert os.listdir(sshdir) == [], "no box touched"
+    assert "zbynekdrlik/camera-box#4242" in r.stderr, r.stderr
+
+
+def test_cli_apply_refuses_while_the_issue_281_rig_heartbeat_is_fresh(tmp_path):
+    (tmp_path / "rig-active").write_text("%d\trecording-e2e\t4242\n" % int(time.time()))
+    r, sshdir = _cli(tmp_path, "--apply", "--box", "cam1")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert os.listdir(sshdir) == [], "no box touched"
+    assert "heartbeat" in r.stderr, r.stderr
+
+
+def test_cli_apply_refuses_while_strih_or_stream_broadcasts(tmp_path):
+    r, sshdir = _cli(tmp_path, "--apply", "--box", "cam1", env={"FAKE_BUSY": "1"})
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert os.listdir(sshdir) == [], "no box touched"
+    assert any(c.startswith("rig-busy-check") for c in _obs_calls(tmp_path))
+
+
+def test_cli_apply_force_live_bypasses_the_rig_guard_loudly(tmp_path):
+    _seed_lease(tmp_path)
+    r, sshdir = _cli(tmp_path, "--apply", "--force-live", "--box", "cam1", env={"FAKE_BUSY": "1"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "--force-live" in r.stderr and "WARNING" in r.stderr, r.stderr
+    assert len([f for f in os.listdir(sshdir) if f.startswith("argv-")]) == 1
+
+
+def test_cli_plan_never_runs_the_rig_guard(tmp_path):
+    _seed_lease(tmp_path)
+    r, _ = _cli(tmp_path, "--plan", "--box", "cam1", env={"FAKE_BUSY": "1"})
+    assert r.returncode == 0, r.stderr
+    assert _obs_calls(tmp_path) == []
+
+
+def test_cli_apply_keeps_a_dead_connection_from_hanging_the_fleet_loop(tmp_path):
+    r, sshdir = _cli(tmp_path, "--apply", "--box", "cam1")
+    assert r.returncode == 0, r.stdout + r.stderr
+    argv = (sshdir / "argv-0").read_text().splitlines()
+    assert "ServerAliveInterval=10" in argv and "ServerAliveCountMax=6" in argv, argv
+
+
+def test_cli_names_a_box_without_the_1311_netconsole_unit_in_its_result(tmp_path):
+    r, _ = _cli(tmp_path, "--apply", "--box", "cam1", "--box", "cam3", env={"FAKE_NO_NC_HOST": "10.77.9.63"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "no issue-1311 netconsole unit on: cam3" in r.stdout + r.stderr, r.stdout + r.stderr
+
+
+_CAMBOX_PROVISIONERS = ["scripts/setup-device.sh", "scripts/build-image.sh", "scripts/create-usb-linux.sh",
+                        "scripts/verify-device.sh", "scripts/lib/cambox-ro-units.sh",
+                        "scripts/cambox-ro-units-apply.sh"]
+
+
+def test_no_cambox_provisioner_types_an_apt_unit_name():
+    # The four names live ONLY in ro_root_masked_apt_units: setup-device, the overlay image builder,
+    # verify-device and the live apply all read that one list.
+    for rel in _CAMBOX_PROVISIONERS:
+        code = _code((REPO / rel).read_text())
+        for unit in APT_UNITS:
+            assert unit not in code, (rel, unit)
+    assert "ro_root_masked_apt_units" in _code((REPO / "scripts" / "build-image.sh").read_text())
