@@ -30,6 +30,13 @@ healthy baseline (mirrors `phase-sync-calibrator-testing.md`'s #893 "reuse a gre
 JSON" — a full hardware E2E is ~1h and collides with the `full-path-e2e.yml` concurrency group).
 Report the per-run baseline table on the ticket as part of the design comment.
 
+**dev1 keeps only the newest run dirs (issue 1395):** every E2E run prunes the older
+`/tmp/recording-e2e-<digits>` dirs and keeps the current run + `E2E_RUNDIR_KEEP` (default 8) older
+ones (`scripts/lib/e2e-rundir-retention.sh`), so a local glob sees at most 9 runs. For a wider
+sample, download `verdict-*.json` from each run's `recording-e2e-full-path` CI artifact
+(`gh run download <run-id> -n recording-e2e-full-path`), or raise `E2E_RUNDIR_KEEP` on the runs you
+plan to mine.
+
 ## 2. Pick the signal with the TIGHTEST GREEN CEILING, not a noisy one
 The #1036 lesson: the metric may expose several fields; gate on the one whose green-run
 distribution has a tight ceiling far below the pathology. `paired_fraction` (the specific
