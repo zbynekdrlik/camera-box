@@ -191,6 +191,9 @@ def test_the_reason_names_the_sample_that_produced_the_max(tmp_path):
     skew = [x for x in reasons if "excursion" in x]
     assert len(skew) == 1 and skew[0].startswith("skew excursion 100 ms"), reasons
     assert "graded absolutely" in skew[0] and "latched shallow depth" not in skew[0], skew
+    # the table's shallow: line follows the same provenance (never "= ms @ fps" with empty values)
+    info = [ln for ln in r.stdout.splitlines() if "shallow:" in ln]
+    assert len(info) == 1 and "carried no latched depth or canvas rate" in info[0], r.stdout
     out = _lib(tmp_path, text, "printf '%s\\n' \"$LOG\" | cg_chain_shallow_window 'CG-obs'")
     assert out.strip() == "1|100|3||0|", out
 
