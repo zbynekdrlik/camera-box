@@ -54,8 +54,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOPS="${CG_CHAIN_HOPS:-cg-obs strih}"
 CG_CHAIN_STREAM_SRC="${CG_CHAIN_STREAM_SRC:-NDIA cg stream}"
 # issue 1302: the strih input that receives SongPlayer's SP-program (named `CG-obs` on strih-lx since
-# songplayer 221 B4). Overridable; the default keeps the historical `cg`.
-CG_CHAIN_STRIH_SRC="${CG_CHAIN_STRIH_SRC:-cg}"
+# songplayer 221 B4). Overridable; the default is strih-lx's `CG-obs` (the only strih).
+CG_CHAIN_STRIH_SRC="${CG_CHAIN_STRIH_SRC:-CG-obs}"
 SKEW_BOUND_MS=20
 MIN_SAMPLES=2
 ASRC_FLOOR_PPM=10

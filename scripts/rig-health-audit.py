@@ -604,6 +604,18 @@ def cg_chain_detail_from_output(stdout: str) -> str:
             f"sources_absent={absent} (report-only #1300; #787 resolume-rate exemption unchanged)")
 
 
+# issue 1302: the CG-chain row grades ~5 min of the strih-lx log (about 1500 lines there).
+CG_CHAIN_TAIL_LINES = 1500
+CG_CHAIN_HEAD_LINES = 600  # the head block _linux_obs_log_tail_cmd prepends
+
+
+def cg_chain_tail_window(text: str, head_lines: int = CG_CHAIN_HEAD_LINES) -> str:
+    """Pure: drop the session-head block obs_log_tail prepends, so the verdict's first-vs-last
+    deltas cover the recent tail only, never the whole OBS session (issue 1302)."""
+    lines = text.splitlines()
+    return "\n".join(lines[head_lines:]) if len(lines) > head_lines else text
+
+
 def check_cg_chain() -> None:
     """REPORT-ONLY CG-chain row (#1300): fetch the strih OBS log tail, run cg-chain-verify.sh
     --hops strih --report-only over it, and emit ONE NOTE row (issue 1380: the stream hop is off the
@@ -613,12 +625,12 @@ def check_cg_chain() -> None:
 
     logs: dict[str, str] = {}
     for hop, ip in (("strih", STRIH),):
-        tail = obs_log_tail(ip)
+        tail = obs_log_tail(ip, CG_CHAIN_TAIL_LINES)
         if tail is None:
             emit(CG_CHAIN_REPORT_VERDICT, "cg-chain",
                  f"{hop} OBS log unreadable -- CG-chain verdict skipped (report-only #1300)")
             return
-        logs[hop] = tail
+        logs[hop] = cg_chain_tail_window(tail)
 
     env = dict(os.environ)
     tmp: list[str] = []
