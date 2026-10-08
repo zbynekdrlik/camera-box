@@ -213,12 +213,25 @@ def test_guard_pattern_matches_the_hand_typed_shapes():
         "tmpfs /var/spool tmpfs defaults 0 0",
         "    echo 'tmpfs /tmp tmpfs defaults,size=100M 0 0' >> /etc/fstab",
         '    printf "%s\\n" "tmpfs /var/cache tmpfs defaults 0 0"',
+        # a whole fstab in ONE format/string literal: the line starts after a `\n` escape
+        "    printf 'UUID=%s / ext4 ro 0 1\\ntmpfs /tmp tmpfs defaults,size=100M 0 0\\n' \"$u\"",
+        'FSTAB = "UUID=x / ext4 ro 0 1\\ntmpfs /var/log tmpfs defaults 0 0\\n"',
+        # `\t` escapes or real tabs between the fields
+        "printf 'tmpfs\\t/var/tmp\\ttmpfs\\tdefaults 0 0\\n'",
+        "tmpfs\t/var/spool\ttmpfs\tdefaults\t0 0",
+        # any fs_spec (tmpfs ignores it; `none` is common), a trailing slash on the mount point
+        "none /var/log tmpfs defaults,size=50M 0 0",
+        "tmpfs /var/log/ tmpfs defaults 0 0",
     ):
         assert HAND_TYPED_TMPFS.search(line), line
     for line in (
         "mount -t tmpfs tmpfs /tmp",
+        "mount -t tmpfs none /tmp",
         "tmpfs /var/lib tmpfs defaults 0 0",
+        "none /var/lib tmpfs defaults 0 0",
         "tmpfs /tmpx tmpfs defaults 0 0",
+        "tmpfs /tmp/x tmpfs defaults 0 0",
+        "proc /proc proc defaults 0 0",
         "$(ro_root_tmpfs_line /var/cache)",
     ):
         assert not HAND_TYPED_TMPFS.search(line), line
