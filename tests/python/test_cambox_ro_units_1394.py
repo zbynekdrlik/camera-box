@@ -877,8 +877,12 @@ def test_cli_apply_goes_ahead_on_a_stale_or_broken_lease(tmp_path):
     r, sshdir = _cli(tmp_path, "--apply", "--box", "cam1", env={"RIG_LEASE_STALE_SECS": "3600"})
     assert r.returncode == 0, r.stdout + r.stderr
     assert len([f for f in os.listdir(sshdir) if f.startswith("argv-")]) == 1
-    (tmp_path / "rig-lease" / "holder.json").unlink()
-    os.utime(tmp_path / "rig-lease" / "heartbeat")
+    # a lockdir with a fresh heartbeat but no holder.json (re-seeded: the run above may have taken
+    # and released the lease)
+    lease = tmp_path / "rig-lease"
+    lease.mkdir(exist_ok=True)
+    (lease / "holder.json").unlink(missing_ok=True)
+    (lease / "heartbeat").write_text("")
     r, sshdir = _cli(tmp_path, "--apply", "--box", "cam1")
     assert r.returncode == 0, r.stdout + r.stderr
 
@@ -955,5 +959,5 @@ def test_cli_result_tells_landed_files_from_a_failed_check_after_the_close(tmp_p
     # after the close (the netconsole arm, a failed unit) failed.
     r, _ = _cli(tmp_path, "--apply", "--box", "cam1", env={"FAKE_RUNTIME_FAIL_HOST": "10.77.9.61"})
     assert r.returncode == 1, r.stdout + r.stderr
-    assert "cam1 (the unit files are in place; a check after the close failed: cambox-netconsole.service did not arm" \
+    assert "cam1 (the unit files are in place; a step outside the rw window failed: cambox-netconsole.service did not arm" \
         in r.stderr, r.stderr
