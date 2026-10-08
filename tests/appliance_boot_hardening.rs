@@ -581,44 +581,44 @@ fn image_builders_enable_grow_root_service() {
 ///     the image builders were missing it, leaving cam1 with a 100M /var/cache that filled up
 ///     and triggered an apt ENOSPC → initrd-less kernel → brick (#369 follow-on to #295).
 ///
-///     Reuses the same size-parsing logic as the existing provisioning_sizes_var_cache_adequately
-///     test so the assertion is consistent across ALL provisioning paths.
+///     issue 1400: the builders no longer type the line. They write it through the ONE
+///     read-only-root canon, `scripts/lib/ro-root.sh` (create-usb-linux.sh with
+///     `ro_root_tmpfs_line /var/cache`, build-image.sh with the whole `ro_root_tmpfs_lines` set),
+///     and `provisioning_sizes_var_cache_adequately` (test 5) reads the ≥512M size from that lib.
+///     So each builder must source the lib, call it, and keep no literal /var/cache tmpfs line.
 #[test]
 fn image_builders_size_var_cache_512m() {
     for script in IMAGE_BUILDERS {
         let body = read(script);
-        let line = body
-            .lines()
-            .find(|l| l.contains("/var/cache") && l.contains("tmpfs") && l.contains("size="))
-            .unwrap_or_else(|| {
-                panic!(
-                    "{script} must mount /var/cache as a sized tmpfs in fstab — the builder was \
-                     missing this line (uniform 512M /var/cache prevents apt ENOSPC, #369/#295)"
-                )
-            });
-        let size_tok = line
-            .split("size=")
-            .nth(1)
-            .and_then(|s| s.split([',', ' ']).next())
-            .unwrap_or("")
-            .to_uppercase();
-        let mib: u32 = if let Some(g) = size_tok.strip_suffix('G') {
-            g.parse::<u32>().unwrap_or(0) * 1024
-        } else if let Some(m) = size_tok.strip_suffix('M') {
-            m.parse::<u32>().unwrap_or(0)
-        } else if let Some(k) = size_tok.strip_suffix('K') {
-            k.parse::<u32>().unwrap_or(0) / 1024
-        } else {
-            size_tok
-                .parse::<u64>()
-                .map(|b| (b / (1024 * 1024)) as u32)
-                .unwrap_or(0)
+        // Match the CODE part of a line only: the source line's own trailing `# ...` note names
+        // the lib functions, and a note must never stand in for the call it describes.
+        let in_code = |needle: &str| {
+            body.lines().any(|l| {
+                !l.trim_start().starts_with('#')
+                    && l.split_once(" #")
+                        .map_or(l, |(code, _)| code)
+                        .contains(needle)
+            })
         };
         assert!(
-            mib >= MIN_VAR_CACHE_MIB,
-            "{script} sizes /var/cache tmpfs to `{size_tok}` (= {mib} MiB) — it must be \
-             ≥{MIN_VAR_CACHE_MIB}M so apt can never ENOSPC and leave a kernel without an \
-             initrd (#369/#295). Line: {line}"
+            in_code(". \"$SCRIPT_DIR/lib/ro-root.sh\""),
+            "{script} must source scripts/lib/ro-root.sh, the read-only-root canon (issue 1400)"
+        );
+        assert!(
+            in_code("ro_root_tmpfs_line /var/cache") || in_code("ro_root_tmpfs_lines"),
+            "{script} must write its /var/cache tmpfs line through scripts/lib/ro-root.sh \
+             (ro_root_tmpfs_line /var/cache or ro_root_tmpfs_lines), so the uniform ≥512M size \
+             reaches every image (#369/#295, issue 1400)"
+        );
+        let literal = body.lines().find(|l| {
+            !l.trim_start().starts_with('#')
+                && l.contains("/var/cache")
+                && l.contains("tmpfs")
+                && l.contains("size=")
+        });
+        assert!(
+            literal.is_none(),
+            "{script} must not keep a hand-typed /var/cache tmpfs line (issue 1400): {literal:?}"
         );
     }
 }

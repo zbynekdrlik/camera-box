@@ -1,0 +1,4 @@
+UUID=TESTROOTUUID /         ext4  errors=remount-ro 0 1
+UUID=ABCD-1234  /boot/efi vfat  umask=0077        0 1
+tmpfs /var/cache tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=512M 0 0
+LABEL=cambox-journal /var/log/journal ext4 rw,nofail,noatime,nosuid,nodev 0 2

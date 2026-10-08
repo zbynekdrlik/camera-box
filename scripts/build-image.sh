@@ -8,6 +8,9 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=scripts/lib/grub-fast-boot.sh
 . "$SCRIPT_DIR/lib/grub-fast-boot.sh"  # grub_fast_boot_apply / grub_fast_boot_cfg_verdict (#1394) --
                                        # the SAME no-menu, no-countdown GRUB settings as create-usb-linux.sh
+# shellcheck source=scripts/lib/ro-root.sh
+. "$SCRIPT_DIR/lib/ro-root.sh"  # ro_root_tmpfs_lines (issue 1400) -- the SAME tmpfs set as
+                                # setup-device.sh STEP 18 and the handheld SBC
 BINARY_TARBALL="${1:-}"
 OUTPUT_IMAGE="camera-box-image.img"
 IMAGE_SIZE="4G"
@@ -83,6 +86,21 @@ create_image() {
     mkfs.ext4 -L "overlay" "${LOOP_DEV}p3"
 }
 
+# Issue 1400: the image's /etc/fstab. Pure: prints the text, bootstrap_rootfs writes it.
+# - The tmpfs set is the read-only-root canon (scripts/lib/ro-root.sh), the same lines
+#   setup-device.sh STEP 18 and the handheld SBC write, so a canon change reaches this image too.
+# - NO root line, on purpose: this image's / is the overlayfs configure_overlay's initramfs hook
+#   assembles (the root partition as its read-only lower layer, the overlay partition as its
+#   writable upper layer). A `UUID=... / ext4 ro` entry would make systemd-remount-fs remount that
+#   overlay root read-only: nothing written through / would reach the overlay's upper layer.
+build_image_fstab_text() {
+    printf '%s\n' \
+        "# camera-box fstab - / is the overlayfs the initramfs assembles (configure_overlay): the root" \
+        "# partition is its read-only lower layer, the overlay partition its writable upper layer, so" \
+        "# there is no root line. The tmpfs set is the read-only-root canon (scripts/lib/ro-root.sh)."
+    ro_root_tmpfs_lines
+}
+
 bootstrap_rootfs() {
     mkdir -p "${WORK_DIR}/rootfs" "${WORK_DIR}/efi"
 
@@ -100,14 +118,8 @@ bootstrap_rootfs() {
     # Set hostname
     echo "camera-box" > "${WORK_DIR}/rootfs/etc/hostname"
 
-    # Configure fstab for read-only root with overlay
-    cat > "${WORK_DIR}/rootfs/etc/fstab" << 'EOF'
-# camera-box fstab - read-only root with overlay
-tmpfs           /tmp            tmpfs   defaults,noatime,nosuid,nodev,mode=1777  0 0
-tmpfs           /var/log        tmpfs   defaults,noatime,nosuid,nodev,size=64M   0 0
-tmpfs           /var/tmp        tmpfs   defaults,noatime,nosuid,nodev,mode=1777  0 0
-tmpfs           /var/cache      tmpfs   defaults,noatime,nosuid,nodev,mode=0755,size=512M  0 0
-EOF
+    # Issue 1400: the tmpfs set comes from the read-only-root canon (see build_image_fstab_text).
+    build_image_fstab_text > "${WORK_DIR}/rootfs/etc/fstab"
 
     # Install additional packages
     log "Installing additional packages..."

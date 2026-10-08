@@ -17,9 +17,12 @@
 #     calls it, verify-device.sh keeps its own copy (a python parity test pins both), the SBC
 #     --check and bkshading-deploy-relay.sh decide from it, and cam2-painter-ro-persist.sh emits its
 #     definition into cam2's remote text to verify the root went back to ro (issue 1405).
-# NOT covered: the image builders write their own fstab. create-usb-linux.sh writes the first-boot
-# (rw) fstab that setup-device STEP 18 later replaces with this canon; build-image.sh's read-only
-# overlay image still carries its own, different tmpfs set (no /var/spool, /var/log 64M).
+#   - the image builders write through it too (issue 1400). create-usb-linux.sh's
+#     create_usb_first_boot_fstab takes ro_root_tmpfs_line /var/cache; its rw root line (rw until
+#     STEP 18 replaces the fstab) and its own EFI and journal-partition lines are deliberate.
+#     build-image.sh's build_image_fstab_text writes ro_root_tmpfs_lines and no root line (its / is an
+#     initramfs overlayfs). Goldens: tests/fixtures/image_builder_fstab_1400/. A test fails when any
+#     other script under scripts/ hand-types one of these tmpfs lines.
 #
 # Source-only: pure functions, NO side effects, and deliberately no `set -euo pipefail` (it would
 # leak into the sourcing shell — .claude/rules/ci-testing-gotchas.md). No grep/awk/sed either: the

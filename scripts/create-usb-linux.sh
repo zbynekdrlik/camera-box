@@ -70,6 +70,9 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 . "$SCRIPT_DIR/lib/efi-boot-entry.sh"  # efi_whole_disk_of / EFI_CAM_BOX_LABEL / EFI_CAM_BOX_LOADER
                                        # (#1066 D6) -- SAME source of truth as setup-device.sh/
                                        # verify-device.sh for the named cam-box UEFI entry logic
+# shellcheck source=scripts/lib/ro-root.sh
+. "$SCRIPT_DIR/lib/ro-root.sh"  # ro_root_tmpfs_line (issue 1400) -- the SAME /var/cache tmpfs line
+                                # as setup-device.sh STEP 18 (the read-only-root canon)
 
 # Colors for output
 RED='\033[0;31m'
@@ -231,6 +234,39 @@ install_base() {
     debootstrap --arch=amd64 noble "$MOUNT_ROOT" http://archive.ubuntu.com/ubuntu/
 }
 
+# Issue 1400: the base image's FIRST-BOOT root line. Deliberately NOT the read-only-root canon's
+# `ro_root_root_line`: this root stays rw until setup-device.sh STEP 18 replaces the whole fstab.
+# This first-boot fstab mounts only /var/cache as tmpfs, so a read-only root would leave /tmp,
+# /var/log, /var/tmp and /var/spool unwritable on first boot. (setup-device's own writes before
+# STEP 18, its apt installs and purges and update-grub, would not need it: its ensure_root_writable
+# remounts a read-only root rw.) An empty UUID prints nothing and returns 1 (never an unbootable
+# `UUID= /` line).
+create_usb_first_boot_root_line() {
+    [[ -n "${1:-}" ]] || return 1
+    printf 'UUID=%s /         ext4  errors=remount-ro 0 1\n' "$1"
+}
+
+# Issue 1400: create_usb_first_boot_fstab ROOT_UUID EFI_UUID -> the base image's /etc/fstab. Pure (no
+# disk, no root), so tests call it with fake UUIDs (CREATE_USB_SOURCE_ONLY=1). Test-pinned:
+# - what differs from the fstab STEP 18 later writes: the rw root line above, and /var/cache as the
+#   only tmpfs (STEP 18 writes the whole ro-root.sh tmpfs set);
+# - the EFI line and the issue-1309 journal-partition line, which the ro-root.sh canon does not
+#   carry. STEP 18 writes both too: the journal line from the same generator, and the EFI line
+#   COPIED VERBATIM from this file (it greps '/boot/efi' out of fstab.bak), so its text is
+#   load-bearing.
+# The /var/cache line comes from scripts/lib/ro-root.sh, so a canon change reaches this image.
+# An empty UUID prints nothing and returns 1. The lines are chained with && so any failed write
+# fails the call, also when the caller tests it with `||` (where errexit does not apply).
+create_usb_first_boot_fstab() {
+    local root_uuid="${1:-}" efi_uuid="${2:-}" root_line
+    root_line="$(create_usb_first_boot_root_line "$root_uuid")" || return 1
+    [[ -n "$efi_uuid" ]] || return 1
+    printf '%s\n' "$root_line" \
+        && printf 'UUID=%s  /boot/efi vfat  umask=0077        0 1\n' "$efi_uuid" \
+        && ro_root_tmpfs_line /var/cache \
+        && log_diet_journal_fstab_line
+}
+
 # Configure the system
 configure_system() {
     log "Configuring system..."
@@ -255,16 +291,13 @@ EOF
 127.0.1.1   camera-box
 EOF
 
-    # Configure fstab
+    # Configure fstab (issue 1400: create_usb_first_boot_fstab, the read-only-root canon's /var/cache
+    # line plus this image's own rw root, EFI and journal-partition lines)
     ROOT_UUID=$(blkid -s UUID -o value "$PART_ROOT")
     EFI_UUID=$(blkid -s UUID -o value "$PART_EFI")
 
-    cat > "$MOUNT_ROOT/etc/fstab" << EOF
-UUID=$ROOT_UUID /         ext4  errors=remount-ro 0 1
-UUID=$EFI_UUID  /boot/efi vfat  umask=0077        0 1
-tmpfs           /var/cache tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=512M 0 0
-$(log_diet_journal_fstab_line)
-EOF
+    create_usb_first_boot_fstab "$ROOT_UUID" "$EFI_UUID" > "$MOUNT_ROOT/etc/fstab" \
+        || error "issue 1400: no first-boot fstab written -- an empty root or EFI filesystem UUID, or a failed write to $MOUNT_ROOT/etc/fstab (root='$ROOT_UUID' efi='$EFI_UUID')"
     # #1309: create the mountpoint in the base image so the persistent-journal partition mounts on
     # first boot (before setup-device.sh ever runs). `nofail` in the line above means a box whose p3
     # is somehow absent still boots. Single source of truth for the path: LOG_DIET_JOURNAL_DIR.
