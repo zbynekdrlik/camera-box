@@ -83,6 +83,15 @@ issue 1383 the holder keeps its own lease truthful from acquire to release:
   wait minutes for dev1) its `heartbeat_age_s` reads minutes old although the holder is alive.
   restreamer's :8890 consumer waits its 900 s cap for any live holder, so an apply delays a
   restreamer stream E2E by up to ~15 min although it never touches OBS.
+- **Checklist for a NEW holder script** (both items were review-round-4 findings on the apply,
+  reproduced):
+  - Declare `expected_release_at` = now + the look-ahead and keep it rolling with
+    `rig_lease_refresh_if_mine`, unless you WANT a CI E2E to fail fast (the soak does). The gate
+    fails fast (exit 44) on any holder whose release lies past its 1800 s wait budget.
+  - Store the run id the cleanup releases BEFORE calling `rig_lease_acquire`, never from its result.
+    On a TERM, bash finishes the `$(rig_lease_acquire …)` substitution (the holder gets written) and
+    only then runs the trap, so an id set after it leaves a live lease nobody releases. Releasing an
+    id that never became the holder is safe: `rig_lease_release` checks the run_id.
 - **The hold CEILING keeps the #830 "never a permanent deadlock" backstop:** no beat past
   `acquired_at + RIG_LEASE_MAX_HOLD_SECS` (default 4500 s = `full-path-e2e.yml`'s `timeout-minutes:
   75`, lock-stepped by a test; the soak sets its declared run window). An unparseable `acquired_at`
