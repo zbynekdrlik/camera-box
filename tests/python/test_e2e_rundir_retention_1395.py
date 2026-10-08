@@ -29,13 +29,15 @@ _CALL_STMT = 'e2e_rundir_retention "$(dirname "$OUTDIR")" "$OUTDIR"'
 _CONTINUES = "CALLER-CONTINUES"
 
 
-def _run(args, env_extra=None, path_prefix=None):
+def _run(args, env_extra=None, path_prefix=None, caller_setup="", after_source=""):
     """Source the lib under the caller's real `set -euo pipefail`, call the helper as a BARE statement
     (exactly like recording-e2e.sh does) and prove the caller keeps running after it. Every value
     reaches bash as a positional argument, never inside the script text."""
     script = (
         "set -euo pipefail\n"
+        f"{caller_setup}\n"
         '. "$1"\n'
+        f"{after_source}\n"
         "shift\n"
         'e2e_rundir_retention "$@"\n'
         f'echo "{_CONTINUES} rc=$? opts=$-"\n'
@@ -270,6 +272,33 @@ def test_every_bracket_set_in_the_lib_spells_its_characters_out():
             if re.search(r"\w-\w", m.group(1)):
                 bad.append(f"{no}: {line.strip()}")
     assert not bad, "spell digit sets out ([0123456789]), never a range:\n" + "\n".join(bad)
+
+
+def test_the_callers_glob_and_match_options_change_nothing(tmp_path):
+    """A caller's nocasematch/nocaseglob must not widen the name contract (an upper-case look-alike
+    survives), and its failglob must not cost the one log line on an empty parent."""
+    parent = tmp_path / "p"
+    parent.mkdir()
+    current = _mkrun(parent, "recording-e2e-1", 0)
+    _mkrun(parent, "recording-e2e-2", 7200)
+    _mkrun(parent, "RECORDING-E2E-77", 9000)
+    lines, _ = _run([parent, current, "0"], caller_setup="shopt -s nocasematch nocaseglob")
+    assert _names(parent) == ["RECORDING-E2E-77", "recording-e2e-1"]
+    assert len(lines) == 1 and "removed 1" in lines[0], lines
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    lines, _ = _run([empty, empty / "recording-e2e-1"], caller_setup="shopt -s failglob")
+    assert len(lines) == 1 and "removed 0" in lines[0], lines
+
+
+def test_the_callers_ifs_changes_nothing(tmp_path):
+    parent = tmp_path / "p"
+    parent.mkdir()
+    current = _mkrun(parent, "recording-e2e-1", 0)
+    _mkrun(parent, "recording-e2e-2", 7200)
+    lines, _ = _run([parent, current, "0"], caller_setup="IFS=$'\\n\\t'")
+    assert _names(parent) == ["recording-e2e-1"]
+    assert len(lines) == 1 and "removed 1" in lines[0], lines
 
 
 def test_the_lib_is_source_only():
