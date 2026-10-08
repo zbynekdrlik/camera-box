@@ -36,7 +36,8 @@ def _run(args, env_extra=None, path_prefix=None):
         "set -euo pipefail\n"
         f'. "{_LIB}"\n'
         f"e2e_rundir_retention {quoted}\n"
-        f'echo "{_CONTINUES} rc=$?"\n'
+        f'echo "{_CONTINUES} rc=$? opts=$-"\n'
+        "set -o | grep -E '^pipefail[[:space:]]+on$'\n"
     )
     env = {k: v for k, v in os.environ.items() if k != "E2E_RUNDIR_KEEP"}
     if env_extra:
@@ -46,7 +47,10 @@ def _run(args, env_extra=None, path_prefix=None):
     proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=env, timeout=60)
     assert proc.returncode == 0, f"the caller must survive: rc={proc.returncode}\n{proc.stdout}\n{proc.stderr}"
     assert f"{_CONTINUES} rc=0" in proc.stdout, f"the caller must keep running:\n{proc.stdout}\n{proc.stderr}"
-    helper_lines = [ln for ln in proc.stdout.splitlines() if not ln.startswith(_CONTINUES)]
+    opts = proc.stdout.split(f"{_CONTINUES} rc=0 opts=", 1)[1].split()[0]
+    assert "e" in opts and "u" in opts, f"the helper must leave the caller's -e/-u on: {opts}"
+    helper_lines = [ln for ln in proc.stdout.splitlines()
+                    if not ln.startswith(_CONTINUES) and not ln.startswith("pipefail")]
     return helper_lines, proc
 
 
@@ -147,10 +151,10 @@ def test_an_empty_or_missing_parent_is_a_no_op(tmp_path):
     empty = tmp_path / "empty"
     empty.mkdir()
     lines, _ = _run([empty, empty / "recording-e2e-1"])
-    assert len(lines) <= 1
+    assert len(lines) == 1 and "removed 0" in lines[0], lines
     assert _names(empty) == []
     lines, _ = _run([tmp_path / "missing", tmp_path / "missing" / "recording-e2e-1"])
-    assert len(lines) <= 1
+    assert len(lines) == 1 and "nothing to prune" in lines[0], lines
     assert not (tmp_path / "missing").exists()
 
 
@@ -163,8 +167,9 @@ def test_an_invalid_keep_removes_nothing(tmp_path):
     parent.mkdir()
     current = _mkrun(parent, "recording-e2e-1", 0)
     _mkrun(parent, "recording-e2e-2", 7200)
-    _run([parent, current], env_extra={"E2E_RUNDIR_KEEP": "lots"})
-    _run([parent, current, "-1"])
+    for lines, _ in (_run([parent, current], env_extra={"E2E_RUNDIR_KEEP": "lots"}),
+                     _run([parent, current, "-1"])):
+        assert len(lines) == 1 and "removed nothing" in lines[0], lines
     assert _names(parent) == ["recording-e2e-1", "recording-e2e-2"]
 
 
