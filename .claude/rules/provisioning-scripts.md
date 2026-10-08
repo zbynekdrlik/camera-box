@@ -479,11 +479,12 @@ section above), and a box that reads `degraded` hides real failures.
 - **apt-daily(-upgrade)** exit 2 on every pass (`/var/lib/apt`), and a package upgrade re-enables a
   timer that is only DISABLED. STEP 15 MASKS the four units of `ro_root_masked_apt_units` (fail-loud,
   after a best-effort `disable --now`). `apt-get` itself never goes through them, so STEP 16's
-  installs are unaffected (and STEP 15 runs before STEP 16 anyway). Never type the four names in a
-  script: the list is read by setup-device, verify-device and the live apply.
+  installs are unaffected (and STEP 15 runs before STEP 16 anyway). No cambox provisioner types the
+  four names: setup-device, build-image.sh (the overlay image), verify-device and the live apply read
+  the one list (`test_no_cambox_provisioner_types_an_apt_unit_name`). The SBC does not use it yet.
 - **cambox-netconsole** (issue 1311) was a oneshot with no `Restart=`, so one missed arm at boot kept
   it failed until the next boot (cam1 from 4.10.). It now has `Restart=on-failure` + `RestartSec=30`
-  + `StartLimitIntervalSec=0` (`.claude/rules/cambox-remote-logging.md`).
+  backing off to 10 min + `StartLimitIntervalSec=0` (`.claude/rules/cambox-remote-logging.md`).
 - **verify-device `(ar)`** grades all of it through `scripts/lib/cambox-ro-units.sh`: the drop-in
   byte-for-byte AND loaded (`DropInPaths` names it), logrotate's last `Result` = success, each apt
   unit `masked` + `inactive` (a masked timer still running would elapse into its masked service and
@@ -494,8 +495,17 @@ section above), and a box that reads `degraded` hides real failures.
   `CAMERA_ACTIVE_SET`). The remote program writes inside ONE verified ro window
   (`.claude/rules/ro-window.md`, the sites table), then daemon-reload, stop the masked apt units,
   reset-failed, one logrotate run, the netconsole restart, and an `is-system-running` = running
-  read-back. It is a root write on a cambox, so it runs outside a production; a box without the
-  issue-1311 unit gets a NOTE and no new unit (that box needs its setup-device re-run).
+  read-back. A box without the issue-1311 unit gets a NOTE and no new unit (that box needs its
+  setup-device re-run); the CLI's RESULT names it.
+  - **It is a root write on a cambox, so `--apply` refuses (exit 1, no box touched)** while the rig
+    lease is held by a live holder, while the issue-281 rig heartbeat is fresh, and while strih or
+    stream records/streams (`stray_session_check_assert`, the shared rig-busy guard). `--force-live`
+    skips the guard loudly (supervisor-only). `--plan` runs no guard.
+  - **A failed unit is fixed by the apply, never by a setup-device re-run**: setup-device never runs
+    `reset-failed`, and a cambox is never rebooted remotely. The `(ar)` hints say so.
+  - **Tests point every rig input into tmp_path** (`RIG_LEASE_DIR`, `CAMERA_BOX_RIG_HEARTBEAT`,
+    `CAMBOX_RO_UNITS_OBS_PHASE2_DIR` with a fake `obs_phase2.py`): on dev1 the real lease, heartbeat
+    and OBS are live, on the CI runner there is no rig network.
 
 ### The image builders write through the same lib (issue 1400)
 

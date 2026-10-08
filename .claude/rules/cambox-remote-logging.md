@@ -143,8 +143,11 @@ Tier-0 boot-order coverage: `tests/python/test_remote_logging_boot_order_1311.py
 The in-script retry above is bounded (~60 s route + ~60 s MAC), and once it gave up the oneshot
 stayed `failed` until the next boot: cam1's netconsole had been failed since 4.10. 06:24Z (the reason
 was rotated away), no kernel printk reached dev1, and the box read `degraded`. The unit now carries
-`Restart=on-failure` + `RestartSec=30` in `[Service]` and `StartLimitIntervalSec=0` in `[Unit]`, so a
-failed arm retries every 30 s until dev1 answers.
+`Restart=on-failure` + `RestartSec=30` + `RestartSteps=4` + `RestartMaxDelaySec=600` in `[Service]`
+and `StartLimitIntervalSec=0` in `[Unit]`, so a failed arm retries until dev1 answers, the delay
+growing from 30 s to 10 min (a box away from dev1, e.g. the travelling rig on mobile data, would
+otherwise write a failed arm into the issue-1309 journal on the USB stick every 30 s forever). The
+start-limit lift is a safeguard: at RestartSec=30 the default limit cannot trip.
 - **systemd 255 allows `Restart=on-failure` on `Type=oneshot`** (with `RemainAfterExit=yes`);
   `always` / `on-success` are refused for a oneshot. `tests/python/test_cambox_ro_units_1394.py` runs
   `systemd-analyze verify` on the generated unit (ExecStart swapped to `/bin/true`) and proves the

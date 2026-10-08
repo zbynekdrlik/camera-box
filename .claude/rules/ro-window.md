@@ -110,12 +110,18 @@ Three dev1-side pure parsers:
 | `cambox-ro-units.sh` apply (`scripts/cambox-ro-units-apply.sh`, issue 1394) | the logrotate drop-in + netconsole unit (temp file + rename), `systemctl mask --no-reload` of the apt units | daemon-reload, stop the masked apt units, reset-failed, `start logrotate`, `restart cambox-netconsole`, the `is-system-running` read-back |
 
 - **cambox-ro-units apply (issue 1394):** a cambox-only site, so a root found writable is also
-  forced back read-only (the decision below). It opens the window only when something needs a write
-  (an idempotent re-run never remounts), and its whole program runs in ONE function called with
-  `</dev/null`, since it arrives on `bash -s` stdin (the rt-kernel-plan stdin finding). The fake box
-  of `ro_window_fakes_1407.py` gained `mask`/`unmask` (refused on a ro root, like enable),
-  `is-failed`, `reset-failed` and `is-system-running` (`degraded` while a `failed-<unit>` file
-  exists) for its tests in `tests/python/test_cambox_ro_units_1394.py`.
+  forced back read-only (the decision below).
+  - It READS the root mode first (the canon's `ro_root_mount_mode`, its definition emitted into the
+    program). It opens the window when something needs a write OR the root does not read `ro`
+    (review round 1: a skipped window let a stuck-writable root get logrotate and netconsole started
+    on it). An idempotent re-run on a read-only root never remounts.
+  - A failed write, mask or rw remount fails by name; a failure inside the window reaches the EXIT
+    trap, which runs the same verified close (`test_apply_failure_inside_the_window_*` pins it).
+  - Its whole program runs in ONE function called with `</dev/null`, since it arrives on `bash -s`
+    stdin (the rt-kernel-plan stdin finding).
+  - The fake box of `ro_window_fakes_1407.py` gained `mask`/`unmask` (refused on a ro root, like
+    enable), `is-failed`, `reset-failed` and `is-system-running` (`degraded` while a `failed-<unit>`
+    file exists) for its tests in `tests/python/test_cambox_ro_units_1394.py`.
 - **deploy-fleet:** `close_ro_or_fail IP BOX LABEL CONSEQUENCE` runs the close over ssh and records
   `LABEL(root-rw: <holders>)` in FAILED (`LABEL(root-unverified: ssh rc N)` on a transport
   failure), so the final `FLEET NOT FULLY ALIGNED` line names the writer. Every terminal path
