@@ -158,7 +158,7 @@ level. Re-run the full calibration after any decoder or rule change:
 (`--classes` splits the synthetic run; each class takes ~1.5 min on dev1).
 
 **The sampler (`program_audio_sampler.py`):** the rules below were found and measured while the
-sampler ran on dev1 (until 7.10.2026), so their text says "dev1". Since then it runs only on
+sampler ran on dev1 (until 8.10.2026; strih-lx serving since 7.10.2026), so their text says "dev1". Since then it runs only on
 strih-lx, where "dev1's wall step" and "dev1's arrival time" mean strih-lx's own; strih-lx is the
 fleet's date master.
 - **Warm-up.** Until 4 s of audio arrived since the start, a span restart or a format change,
@@ -576,9 +576,10 @@ shim + numpy next to restreamer's broadcast encoder).
   camera-box guard's `DEFAULT_URL`. So the dev1 `--user` unit file is deleted, the dev1 lease server
   answers its plain 404 for `/program-audio.json` (after its restart on this code: the README's
   post-merge step), and the sampler has no dev1 default left. The dev1 unit was disabled live the
-  same day. A rollback to dev1 is a revert of this slice's `[green]` commit (`fix(#1404): [green]
-  retire the dev1 program-audio sampler path`), never a live need: the owner ruled the sampler off
-  dev1. Pinned: `test_the_dev1_sampler_unit_is_gone`,
+  same day. A rollback to dev1 would revert this slice from its `[red]` commit (`test(#1404): [red]
+  the dev1 program-audio path is gone: …`) on: the `[red]` tests, the `[green]` change, the review
+  fixes and the docs (the test-retarget commit before it is green either way). It is never a live
+  need: the owner ruled the sampler off dev1. Pinned: `test_the_dev1_sampler_unit_is_gone`,
   `test_the_dev1_server_no_longer_serves_program_audio`, `test_the_default_serve_dir_is_the_samplers_own`.
 - **The unit** `systemd/program-audio-sampler.strih-lx.service` (a TEMPLATE) is installed as the
   operator's `--user` `program-audio-sampler.service`:

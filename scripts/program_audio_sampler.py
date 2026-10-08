@@ -10,7 +10,7 @@ MEASUREMENT | FOREIGN | SILENT | UNKNOWN (scripts/program_audio.py) and atomical
 `http://<host>:8891/program-audio.json`, ages recomputed per request). Consumers call
 `scripts/program_audio_guard.py` and stop the YouTube broadcast on anything but MEASUREMENT/SILENT.
 
-The rules below were found and measured while the sampler ran on dev1 (until 7.10.2026), so their
+The rules below were found and measured while the sampler ran on dev1 (until 8.10.2026), so their
 text says "dev1". It runs only on strih-lx now (the fleet's date master), where "dev1's arrival
 time" and "dev1's own wall-clock step" mean strih-lx's own.
 
