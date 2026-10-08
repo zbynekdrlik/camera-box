@@ -18,8 +18,8 @@
 #     --check and bkshading-deploy-relay.sh decide from it, and cam2-painter-ro-persist.sh emits its
 #     definition into cam2's remote text to verify the root went back to ro (issue 1405).
 #   - the image builders write through it too (issue 1400). create-usb-linux.sh's
-#     create_usb_first_boot_fstab takes ro_root_tmpfs_line /var/cache; its rw root line, EFI line and
-#     journal-partition line are deliberate pre-setup differences until STEP 18 replaces the fstab.
+#     create_usb_first_boot_fstab takes ro_root_tmpfs_line /var/cache; its rw root line (rw until
+#     STEP 18 replaces the fstab) and its own EFI and journal-partition lines are deliberate.
 #     build-image.sh's build_image_fstab_text writes ro_root_tmpfs_lines and no root line (its / is an
 #     initramfs overlayfs). Goldens: tests/fixtures/image_builder_fstab_1400/. A test fails when any
 #     other script under scripts/ hand-types one of these tmpfs lines.

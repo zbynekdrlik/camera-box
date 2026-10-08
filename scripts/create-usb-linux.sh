@@ -236,18 +236,22 @@ install_base() {
 
 # Issue 1400: the base image's FIRST-BOOT root line. Deliberately NOT the read-only-root canon's
 # `ro_root_root_line`: this root stays rw until setup-device.sh STEP 18 replaces the whole fstab,
-# because setup-device runs apt, DKMS and the kernel purge on it first. An empty UUID prints nothing
-# and returns 1 (never an unbootable `UUID= /` line).
+# because setup-device first runs apt installs and purges, update-initramfs and update-grub on it.
+# An empty UUID prints nothing and returns 1 (never an unbootable `UUID= /` line).
 create_usb_first_boot_root_line() {
     [[ -n "${1:-}" ]] || return 1
     printf 'UUID=%s /         ext4  errors=remount-ro 0 1\n' "$1"
 }
 
 # Issue 1400: create_usb_first_boot_fstab ROOT_UUID EFI_UUID -> the base image's /etc/fstab. Pure (no
-# disk, no root), so tests call it with fake UUIDs (CREATE_USB_SOURCE_ONLY=1). Its pre-setup
-# differences from the STEP 18 canon are intentional and test-pinned: the rw root line above, the EFI
-# line, the issue-1309 journal-partition line, and /var/cache as the only tmpfs (STEP 18 adds the
-# rest). The /var/cache line comes from scripts/lib/ro-root.sh, so a canon change reaches this image.
+# disk, no root), so tests call it with fake UUIDs (CREATE_USB_SOURCE_ONLY=1). Test-pinned:
+# - what differs from the fstab STEP 18 later writes: the rw root line above, and /var/cache as the
+#   only tmpfs (STEP 18 writes the whole ro-root.sh tmpfs set);
+# - the EFI line and the issue-1309 journal-partition line, which the ro-root.sh canon does not
+#   carry. STEP 18 writes both too: the journal line from the same generator, and the EFI line
+#   COPIED VERBATIM from this file (it greps '/boot/efi' out of fstab.bak), so its text is
+#   load-bearing.
+# The /var/cache line comes from scripts/lib/ro-root.sh, so a canon change reaches this image.
 # An empty UUID prints nothing and returns 1. The lines are chained with && so any failed write
 # fails the call, also when the caller tests it with `||` (where errexit does not apply).
 create_usb_first_boot_fstab() {
