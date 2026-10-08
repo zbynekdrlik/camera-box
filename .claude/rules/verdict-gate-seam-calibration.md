@@ -32,10 +32,12 @@ Report the per-run baseline table on the ticket as part of the design comment.
 
 **dev1 keeps only the newest run dirs (issue 1395):** every E2E run prunes the older
 `/tmp/recording-e2e-<digits>` dirs and keeps the current run + `E2E_RUNDIR_KEEP` (default 8) older
-ones (`scripts/lib/e2e-rundir-retention.sh`), so a local glob sees at most 9 runs. For a wider
-sample, download `verdict-*.json` from each run's `recording-e2e-full-path` CI artifact
-(`gh run download <run-id> -n recording-e2e-full-path`), or raise `E2E_RUNDIR_KEEP` on the runs you
-plan to mine.
+ones (`scripts/lib/e2e-rundir-retention.sh`), so a local glob sees at most 9 runs. Raising the keep
+on one run protects nothing (the next run prunes with its own). For a wider sample, download
+`verdict-*.json` from each run's `recording-e2e-full-path` CI artifact (`gh run download <run-id>
+-n recording-e2e-full-path`; it carries the verdict, report PNG and pixel proof only), or copy the
+runs you want out of /tmp under their own names (e.g. `~/e2e-archive/recording-e2e-<id>/`) and
+mine there.
 
 ## 2. Pick the signal with the TIGHTEST GREEN CEILING, not a noisy one
 The #1036 lesson: the metric may expose several fields; gate on the one whose green-run

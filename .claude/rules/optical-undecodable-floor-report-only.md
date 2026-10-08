@@ -158,6 +158,8 @@ two) reds:
   tests in `test_e2e_discord_report_optical_floor_905.py` (anchor on `nad floor`, not the bare
   `optická čitateľnosť` shared with the imag PRESENCE label).
 
+(dev1 keeps only the newest 9 run dirs since issue 1395; to mine more, see the
+`scripts/lib/e2e-rundir-retention.sh` header.)
 **Data recipe (mine local verdicts on dev1, `/tmp/recording-e2e-*/verdict-*.json`):** attribute
 `all_cambox_continuity.segments[].undecodable` PER cambox; segregate by the last run carrying any
 CAM1 undecodable (cam1's ShadowCast noise, issue 909 — ceases after the card swap) to isolate the

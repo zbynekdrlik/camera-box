@@ -14,9 +14,16 @@
 # (arrival_floor_decompose.py --runs-glob, window_gate_walkdown.py, the verdict-JSON calibration
 # recipes in .claude/rules/) read several archived runs.
 #
-# A wider mining set than the newest few runs: raise E2E_RUNDIR_KEEP for the runs you plan to mine,
-# or pull verdict-*.json from each run's recording-e2e-full-path CI artifact
-# (gh run download <run-id> -n recording-e2e-full-path).
+# KEEPING RUNS FOR MINING: every later run prunes again with its own keep (CI never sets
+# E2E_RUNDIR_KEEP), so raising the keep on one run protects nothing. To keep a run, copy or move it
+# OUT of the run-dir parent under its own name (e.g. ~/e2e-archive/recording-e2e-<id>/, so the
+# mining tools still parse the run id) and point the tool's glob or --run-dir there. The
+# recording-e2e-full-path CI artifact of each run (gh run download <run-id> -n
+# recording-e2e-full-path) carries only verdict-*.json, the report PNG and the pixel proof -- not the
+# burn logs, genlock audits or painter CSVs the other miners read.
+#
+# The prune runs in the PARENT of whatever OUTDIR is (recording-e2e.sh passes its dirname), so a
+# caller that sets OUTDIR must never point it into a directory that holds archived runs.
 #
 # CONTRACT -- e2e_rundir_retention <parent_dir> <current_run_dir> [keep]:
 #   * keeps <current_run_dir> whatever its age, plus the newest <keep> OTHER directories in
