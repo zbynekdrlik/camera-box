@@ -1,0 +1,32 @@
+{
+  "audio_channel_pick": {
+    "chosen_channel": 0,
+    "per_channel": [
+      {
+        "channel": 0,
+        "cluster_samples": 8,
+        "crc_fail": 11,
+        "crc_ok": 8,
+        "peak_dbfs": -15.182491197915354,
+        "preamble_screens": 19
+      },
+      {
+        "channel": 1,
+        "cluster_samples": 8,
+        "crc_fail": 17,
+        "crc_ok": 8,
+        "peak_dbfs": -15.205180037076707,
+        "preamble_screens": 25
+      }
+    ]
+  },
+  "audio_markers_decoded": 8,
+  "av_offset_ms": 47.750000000000185,
+  "candidates": 7,
+  "emit_rows": 47,
+  "latency_adjust_ms": -47.750000000000185,
+  "mad_ms": 5.7291666666663374,
+  "matched": 7,
+  "video_fps": 30.0,
+  "video_ticks": 120
+}
