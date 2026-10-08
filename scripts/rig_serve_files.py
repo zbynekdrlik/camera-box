@@ -20,7 +20,7 @@ The dev1 serve dir:
   * defaults to `$XDG_RUNTIME_DIR/rig-lease-serve` (`/run/user/<uid>`: tmpfs, 0700, this user only),
     `$RIG_LEASE_SERVE_DIR` overrides it for the server and the mirror alike. tmpfs: the mirror
     rewrites a multi-MB file every 10 s, which must not wear dev1's SSD. 0700: no other account on
-    dev1 can plant a file the guard would trust;
+    dev1 can plant a file restreamer's gate would trust (the marker CSV);
   * is NEVER the lease dir or inside it: the lease dir's mere existence means `held=true`
     (`scripts/rig_lease_state.py`), so a writer's `mkdir -p` there would fake a held lease;
   * is served only file by file: a file another user owns is never served (`owned_by_me`).

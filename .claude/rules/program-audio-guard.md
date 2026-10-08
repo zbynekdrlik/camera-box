@@ -382,7 +382,7 @@ fleet's date master.
     box-wide event that hit every receiver on dev1 at once, the live unit included (+1638.5 ms at
     12:48:10Z; dev1 IO pressure, 4.7 GB swap in use; the stream OBS log quiet). So `Nice=10` is
     gone from the unit; that is the measured cure.
-    - **No host tuning (coordinator, 7.10.2026): both units run the sampler at NORMAL priority** (no
+    - **No host tuning (coordinator, 7.10.2026): the unit runs the sampler at NORMAL priority** (no
       `Nice=`, no `CPUWeight=`). A `--user` unit cannot lower nice on dev1 anyway (`systemd-run
       --user -p Nice=-5` runs at nice 0 with no error, RLIMIT_NICE 0), and on strih-lx a CPUWeight
       would rank the sampler ahead of OBS in the same slice. The sampler logs one start line,

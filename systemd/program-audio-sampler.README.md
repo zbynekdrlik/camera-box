@@ -34,8 +34,9 @@ Gates call `scripts/program_audio_guard.py` (its default URL is the strih-lx end
 Verdicts, thresholds, calibration and limits: `.claude/rules/program-audio-guard.md`.
 
 **The dev1 copy is retired (8.10.2026, design 6054654255).** The sampler ran on dev1 until
-8.10.2026 (strih-lx serving since 7.10.2026) and was served at `http://dev1:8890/program-audio.json`. The consumers now read the strih-lx
-endpoint: restreamer on main (its PRs 384 and 385) and the camera-box guard's `DEFAULT_URL`. So:
+8.10.2026 (strih-lx serving since 7.10.2026) and was served at
+`http://dev1:8890/program-audio.json`. The consumers now read the strih-lx endpoint: restreamer on
+main (its PRs 384 and 385) and the camera-box guard's `DEFAULT_URL`. So:
 - the dev1 `--user` unit file is deleted from the repo;
 - the dev1 unit was disabled live (`systemctl --user disable --now program-audio-sampler.service`);
 - the dev1 rig-lease server answers 404 for `/program-audio.json` once it runs this code. Until its
@@ -57,11 +58,13 @@ if [ "$(hostname)" = dev1 ]; then
       [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8890/healthz)" = 200 ] && break
       sleep 1
     done
+    [ "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8890/healthz)" = 200 ] \
+      || echo "LEASE SERVER NOT ANSWERING -- journalctl --user -u rig-lease-server -n 30"
     # the proof, read while the dev1 sampler's last file is still in the serve dir: the old code
     # serves it (200), only the new code answers 404 (on a re-run the file is gone: proves nothing)
     curl -s -o /dev/null -w 'program-audio.json %{http_code} (want 404)\n' http://127.0.0.1:8890/program-audio.json
     curl -s -o /dev/null -w 'rig-lease.json %{http_code} (want 200)\n' http://127.0.0.1:8890/rig-lease.json
-    rm -f "$XDG_RUNTIME_DIR/rig-lease-serve/program-audio.json"   # the dev1 sampler's last file
+    rm -f "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/rig-lease-serve/program-audio.json"   # the dev1 sampler's last file
   else
     echo "rig lease held or unreadable -- lease server NOT restarted (it still serves the stale UNKNOWN,"
     echo "fail closed); retry later"
