@@ -22,6 +22,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _SCRIPTS = _ROOT / "scripts"
@@ -311,3 +312,24 @@ def test_post_to_the_markers_route_is_never_a_write(tmp_path):
         status, _h, _b = s.request("POST", "/rig-qpsk-markers.csv")
     assert status == 501
     assert list(serve.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------------------------
+# /program-audio.json is no dev1 route (issue 1404, 8.10.2026): the consumers read the sampler's
+# own endpoint on strih-lx, so the dev1 server answers its plain 404 even with a valid payload
+# sitting in its serve dir (a stale file there must never read as a live verdict)
+# ---------------------------------------------------------------------------------------------
+
+
+def test_the_dev1_server_no_longer_serves_program_audio(tmp_path):
+    serve = _serve_dir(tmp_path)
+    payload = {"schema": 1, "ts_utc": rsf.format_ts_utc(datetime.now(timezone.utc)), "age_s": 0.0,
+               "verdict": "MEASUREMENT", "marker_chain": 7, "markers_decoded": 9}
+    (serve / "program-audio.json").write_text(json.dumps(payload), encoding="utf-8")
+    not_found = _GOLDEN[("GET", "/nope")]
+    head_not_found = _GOLDEN[("HEAD", "/nope")]
+    with _Server(tmp_path / "lease", str(serve)) as s:
+        assert s.raw("GET", "/program-audio.json") == not_found
+        assert s.raw("GET", "/program-audio.json?t=1") == not_found
+        assert s.raw("HEAD", "/program-audio.json") == head_not_found
+        assert s.request("GET", "/rig-lease.json")[0] == 200  # the lease route stays

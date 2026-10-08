@@ -8,7 +8,8 @@ served (the dev1 rig-lease server's :8890 route was retired, 8.10.2026):
   * `/healthz` -> ok; anything else 404; any other method 501 (read-only);
   * port `--http-port` / $PROGRAM_AUDIO_HTTP_PORT, default 8891 (0 = no endpoint), bind
     `--http-bind` / $PROGRAM_AUDIO_HTTP_BIND, default 0.0.0.0, serve dir `--serve-dir` /
-    $PROGRAM_AUDIO_SERVE_DIR (else the old default);
+    $PROGRAM_AUDIO_SERVE_DIR, default $XDG_RUNTIME_DIR/program-audio-sampler (the sampler's own,
+    never the dev1 lease server's serve dir);
   * the response code is ONE handler base shared with the dev1 lease server (rig_serve_files), whose
     own routes stay byte-identical (test_rig_serve_routes_1404.py goldens).
 
@@ -310,6 +311,19 @@ def test_the_cli_defaults_and_env_overrides(monkeypatch, tmp_path):
     assert (args.http_port, args.http_bind, args.serve_dir) == (18899, "127.0.0.1", str(tmp_path / "s"))
     args = pas.build_parser().parse_args(["--http-port", "0", "--serve-dir", str(tmp_path / "t")])
     assert args.http_port == 0 and args.serve_dir == str(tmp_path / "t")
+
+
+def test_the_default_serve_dir_is_the_samplers_own(monkeypatch):
+    """issue 1404 (8.10.2026): the sampler no longer writes into the dev1 lease server's serve dir.
+    Its default is its own tmpfs dir, and the lease server's $RIG_LEASE_SERVE_DIR never moves it."""
+    monkeypatch.delenv(pas.SERVE_DIR_ENV, raising=False)
+    monkeypatch.setenv("RIG_LEASE_SERVE_DIR", "/tmp/not-the-sampler")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/4242")
+    assert pas.build_parser().parse_args([]).serve_dir == "/run/user/4242/program-audio-sampler"
+    monkeypatch.delenv("XDG_RUNTIME_DIR")
+    assert pas.build_parser().parse_args([]).serve_dir == f"/run/user/{os.geteuid()}/program-audio-sampler"
+    monkeypatch.delenv("RIG_LEASE_SERVE_DIR")
+    assert pas.build_parser().parse_args([]).serve_dir != rsf.default_serve_dir()
 
 
 def _free_port():

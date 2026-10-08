@@ -509,6 +509,13 @@ def test_the_sampler_unit_runs_the_sampler_and_restarts_on_failure():
     assert re.search(r"^WantedBy=default.target$", s, re.M)
 
 
+def test_the_dev1_sampler_unit_is_gone():
+    """issue 1404 (8.10.2026): the consumers read the strih-lx endpoint, so the dev1 --user unit was
+    retired; the strih-lx template is the one sampler unit (git history keeps the old file)."""
+    assert not (_ROOT / "systemd" / "program-audio-sampler.service").exists()
+    assert (_ROOT / "systemd" / "program-audio-sampler.strih-lx.service").is_file()
+
+
 def test_the_sampler_refuses_a_serve_dir_inside_the_lease_dir(tmp_path, monkeypatch):
     lease = tmp_path / "rig-lease"
     monkeypatch.setenv("RIG_LEASE_DIR", str(lease))
