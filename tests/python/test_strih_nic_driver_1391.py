@@ -997,8 +997,16 @@ def test_verify_strih_grades_item_36_before_item_35():
 
 
 def test_the_deploy_archive_stages_the_vendored_driver():
+    # issue 1404 moved the archive list into strih_lx_tree_paths (it adds the program-audio sampler's
+    # vendored dock headers); the driver must stay in that list and the archive must use the list.
     d = DEPLOY.read_text()
-    assert "git -C \"$repo\" archive --format=tar HEAD scripts systemd intercom vendor/realtek-r8152 |" in d
+    assert 'git -C "$repo" archive --format=tar HEAD "${tree_paths[@]}" |' in d
+    assert "mapfile -t tree_paths < <(strih_lx_tree_paths)" in d
+    out = subprocess.run(
+        ["bash", "-c", '. "$1" && strih_lx_tree_paths', "harness", str(DEPLOY)],
+        capture_output=True, text=True, check=True,
+    ).stdout.split()
+    assert "vendor/realtek-r8152" in out, out
 
 
 def test_the_step_and_item_carry_no_box_identity_literal():
