@@ -215,28 +215,37 @@ proceeding anyway is the correct, documented behavior — it is not a silent hol
 design (Prístup 1's own trade-off statement: the server is new coordination surface, not a new
 hard dependency either side must have to function at all).
 
-## Two more read-only routes: the cam2 marker log + the program-audio verdict (issue 1404)
+## One more read-only route: the cam2 marker log (issue 1404)
 
-The same server serves `GET/HEAD /rig-qpsk-markers.csv` (`text/csv`, `X-Mirror-Age-S`) and
-`GET/HEAD /program-audio.json` (`age_s` recomputed per request) from `--serve-dir`
-(`$RIG_LEASE_SERVE_DIR`, default `$XDG_RUNTIME_DIR/rig-lease-serve` = tmpfs, 0700,
-`scripts/rig_serve_files.py`). Both are a 404 while their file is absent, or when the server runs
+The same server serves `GET/HEAD /rig-qpsk-markers.csv` (`text/csv`, `X-Mirror-Age-S`) from
+`--serve-dir` (`$RIG_LEASE_SERVE_DIR`, default `$XDG_RUNTIME_DIR/rig-lease-serve` = tmpfs, 0700,
+`scripts/rig_serve_files.py`). It is a 404 while its file is absent, or when the server runs
 without a serve dir. A file another user owns is never served.
 - **The serve dir is NEVER the lease dir or inside it.** The lease dir's mere existence is
   `held=true`, so a writer's `mkdir -p` there would fake a held lease. `main()` refuses it; a
   bad owner/mode of the serve dir is checked per file, so it never stops the lease endpoint.
 - **`/rig-lease.json`, `/healthz` and the 404 are byte-identical** with and without a serve dir,
-  pinned to golden bytes captured from the pre-change server. The new routes sit after them in
+  pinned to golden bytes captured from the pre-change server. The marker route sits after them in
   `_handle()`; `_send()` gained only an optional `extra_headers`. An empty `$RIG_LEASE_DIR` now
   means the default, as in `scripts/lib/rig-lease.sh` (`rsf.default_lease_dir()`).
 - **The server stays stdlib-only.** The numpy analysis lives in the sampler, never here.
-- **A MEASUREMENT without a numeric `marker_chain` is served as UNKNOWN** (ages kept, a reason
-  added). It comes from a sampler older than the issue-1404 marker requirement; the server is the
-  one place every reader sees, restreamer's own reader included.
-- Writers, contract, calibration and runbooks: `.claude/rules/program-audio-guard.md`,
-  `systemd/rig-marker-mirror.README.md`, `systemd/program-audio-sampler.README.md`. The running
-  unit serves the new routes only after `systemctl --user restart rig-lease-server.service`; do it
-  while `held=false`.
+- **`/program-audio.json` is no dev1 route any more (retired 8.10.2026, design 6054654255).** The
+  program-audio sampler moved to strih-lx and serves its own `:8891/program-audio.json`
+  (`.claude/rules/program-audio-guard.md`, "The host"); every consumer reads that. Running this
+  code (a restart while `held=false`, `systemd/program-audio-sampler.README.md` post-merge step),
+  the dev1 server answers its plain 404 for the path even when an old payload sits in its serve dir
+  (`test_the_dev1_server_no_longer_serves_program_audio`), and the dev1 sampler unit file is gone.
+  The payload rules (ages per request, a chain-less MEASUREMENT = UNKNOWN) stay in
+  `rig_serve_files.program_audio_response`, used by the sampler's endpoint.
+- **Proving a retired file route live: read it while the stale file is still there.** Every file
+  route here is already a 404 on the OLD code once its file is absent. A check that deletes the
+  leftover first and then reads 404 passes whether or not the server was restarted. Order: restart
+  (while `held=false`), wait for `/healthz` (the unit is `Type=simple`, the restart returns before
+  it listens), read the route (want 404), then delete the file. On a re-run the file is gone and
+  the 404 proves nothing (`systemd/program-audio-sampler.README.md`, the dev1 post-merge block).
+- Writer, contract and runbook: `systemd/rig-marker-mirror.README.md`. The running unit picks up a
+  change to the routes only after `systemctl --user restart rig-lease-server.service`; do it while
+  `held=false`.
 
 ## Supervisor install step
 

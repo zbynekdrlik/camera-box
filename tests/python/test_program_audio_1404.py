@@ -493,20 +493,27 @@ def test_an_explicit_lib_path_is_the_only_candidate(tmp_path):
 
 
 # ---------------------------------------------------------------------------------------------
-# the sampler unit -- long-running, restarts on failure, shipped disabled
+# the sampler unit (the strih-lx template, the only one) -- long-running, restarts on failure
 # ---------------------------------------------------------------------------------------------
 
 
 def test_the_sampler_unit_runs_the_sampler_and_restarts_on_failure():
     import re
 
-    s = (_ROOT / "systemd" / "program-audio-sampler.service").read_text(encoding="utf-8")
+    s = (_ROOT / "systemd" / "program-audio-sampler.strih-lx.service").read_text(encoding="utf-8")
     assert re.search(r"^Type=simple$", s, re.M)
     assert re.search(
-        r"^ExecStart=/usr/bin/python3 %h/devel/camera-box/scripts/program_audio_sampler.py$", s, re.M)
+        r"^ExecStart=/usr/bin/python3 /usr/local/lib/camera-box/scripts/program_audio_sampler.py$", s, re.M)
     assert re.search(r"^Restart=on-failure$", s, re.M)
     assert re.search(r"^RestartSec=\d+$", s, re.M)
     assert re.search(r"^WantedBy=default.target$", s, re.M)
+
+
+def test_the_dev1_sampler_unit_is_gone():
+    """issue 1404 (8.10.2026): the consumers read the strih-lx endpoint, so the dev1 --user unit was
+    retired; the strih-lx template is the one sampler unit (git history keeps the old file)."""
+    assert not (_ROOT / "systemd" / "program-audio-sampler.service").exists()
+    assert (_ROOT / "systemd" / "program-audio-sampler.strih-lx.service").is_file()
 
 
 def test_the_sampler_refuses_a_serve_dir_inside_the_lease_dir(tmp_path, monkeypatch):

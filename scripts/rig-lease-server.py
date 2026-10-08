@@ -22,18 +22,16 @@ contract for restreamer#349: `.claude/rules/rig-lease-http.md`.
   GET /rig-qpsk-markers.csv -> issue 1404: cam2's QPSK marker log as mirrored into the SERVE dir by
                           the rig-marker-mirror service (complete rows, text/csv), with
                           `X-Mirror-Age-S` = whole seconds since the mirror last received new rows;
-                          404 while absent, unreadable or owned by another user.
-  GET /program-audio.json -> issue 1404: the stream program-audio verdict written by
-                          scripts/program_audio_sampler.py, with `age_s` and `last_foreign_age_s`
-                          recomputed at THIS request; 404 while absent; an unreadable or foreign-
-                          owned file is served fail-closed as verdict UNKNOWN. Consumer:
-                          scripts/program_audio_guard.py.
-  HEAD on either of the two -> the same status + headers, no body.
-                          Both are read from `--serve-dir` (default $RIG_LEASE_SERVE_DIR or
-                          $XDG_RUNTIME_DIR/rig-lease-serve, scripts/rig_serve_files.py) -- NEVER
-                          the lease dir, whose mere existence means held=true. Without a serve dir
-                          (the old make_server() call shape) both routes are a plain 404.
-  any other PATH        -> 404.
+                          404 while absent, unreadable or owned by another user. HEAD -> the same
+                          status + headers, no body. Read from `--serve-dir` (default
+                          $RIG_LEASE_SERVE_DIR or $XDG_RUNTIME_DIR/rig-lease-serve,
+                          scripts/rig_serve_files.py) -- NEVER the lease dir, whose mere existence
+                          means held=true. Without a serve dir (the old make_server() call shape)
+                          the route is a plain 404.
+  any other PATH        -> 404. That includes /program-audio.json: the program-audio verdict is
+                          served only by the sampler's own endpoint on strih-lx
+                          (scripts/program_audio_http.py, :8891); the dev1 route was retired on
+                          8.10.2026 (issue 1404).
   any other METHOD (POST/PUT/DELETE/OPTIONS/...) -> the stdlib default 501 Not Implemented (this
                           server implements no do_POST/do_PUT/etc. handler at all -- never a write
                           surface, never a 5xx from application code). This server accepts GET/HEAD
@@ -108,7 +106,7 @@ class RigLeaseHandler(rsf.ReadOnlyHandler):
     # subclass -- see make_server() below.
     lease_dir = "/var/tmp/rig-lease"
     stale_secs = rls.DEFAULT_STALE_SECS
-    # issue 1404: the dir the two mirrored files are served from; None = those routes are a 404.
+    # issue 1404: the dir the mirrored marker file is served from; None = that route is a 404.
     serve_dir = None
 
     server_version = "rig-lease-server/1277"
@@ -144,13 +142,6 @@ class RigLeaseHandler(rsf.ReadOnlyHandler):
                            extra_headers=(("X-Mirror-Age-S", str(age_s)),))
                 return
 
-        if path == "/program-audio.json" and self.serve_dir:
-            payload = rsf.program_audio_response(
-                os.path.join(self.serve_dir, rsf.PROGRAM_AUDIO_NAME), datetime.now(timezone.utc))
-            if payload is not None:
-                self._send(200, "application/json", json.dumps(payload).encode("utf-8"), no_store=True)
-                return
-
         self._send(404, "text/plain", b"")
 
 
@@ -159,7 +150,7 @@ def make_server(bind: str, port: int, lease_dir: str, stale_secs: int,
     """Build a ThreadingHTTPServer bound to a handler CLASS carrying (lease_dir, stale_secs,
     serve_dir) -- BaseHTTPRequestHandler subclasses are instantiated per-request by the server, so
     the config is threaded via class attributes on a small bound subclass rather than instance
-    state. serve_dir None (the default) keeps the issue-1404 file routes a plain 404."""
+    state. serve_dir None (the default) keeps the issue-1404 marker route a plain 404."""
     bound_handler = type(
         "BoundRigLeaseHandler",
         (RigLeaseHandler,),
@@ -184,7 +175,7 @@ def main(argv=None) -> int:
     )
     parser.add_argument(
         "--serve-dir", default=rsf.default_serve_dir(),
-        help="dir of the issue-1404 served files (default $RIG_LEASE_SERVE_DIR or "
+        help="dir of the issue-1404 served marker file (default $RIG_LEASE_SERVE_DIR or "
              "$XDG_RUNTIME_DIR/rig-lease-serve); never the lease dir",
     )
     args = parser.parse_args(argv)

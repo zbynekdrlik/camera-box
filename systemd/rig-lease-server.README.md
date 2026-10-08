@@ -62,13 +62,19 @@ curl -sS http://dev1:8890/rig-lease.json   # before: held=false
 curl -sS http://dev1:8890/rig-lease.json   # during: held=true, holder={...}, stale=false
 ```
 
-## Issue 1404: two more read-only routes
+## Issue 1404: one more read-only route
 
-The server also serves `/rig-qpsk-markers.csv` and `/program-audio.json` from `--serve-dir`
-(default `$XDG_RUNTIME_DIR/rig-lease-serve`; never the lease dir). It still writes nothing: two other
-dev1 units write those files (`rig-marker-mirror.README.md`, `program-audio-sampler.README.md`).
-Picking up the new routes needs a `systemctl --user restart rig-lease-server.service`, done
-while `/rig-lease.json` reads `held=false`.
+The server also serves `/rig-qpsk-markers.csv` from `--serve-dir` (default
+`$XDG_RUNTIME_DIR/rig-lease-serve`; never the lease dir). It still writes nothing: another dev1
+unit writes that file (`rig-marker-mirror.README.md`).
+
+`/program-audio.json` is not served here any more: the dev1 route was retired on 8.10.2026, and the
+server answers 404 for it once it is restarted on that code (`program-audio-sampler.README.md`,
+the post-merge step). The program-audio sampler runs on strih-lx and serves
+`http://10.77.9.202:8891/program-audio.json` itself (`program-audio-sampler.README.md`).
+
+Picking up a route change needs a `systemctl --user restart rig-lease-server.service`, done while
+`/rig-lease.json` reads `held=false`.
 
 ## What this does NOT do
 

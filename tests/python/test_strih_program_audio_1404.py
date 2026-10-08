@@ -187,8 +187,7 @@ def test_the_template_pins_the_e_cores_normal_priority_and_the_event_marker():
     assert not re.search(r"^(After|Wants|Requires)=.*network-online\.target", t, re.M)
 
 
-@pytest.mark.parametrize("unit", ["program-audio-sampler.service", "rig-marker-mirror.service",
-                                  "rig-lease-server.service"])
+@pytest.mark.parametrize("unit", ["rig-marker-mirror.service", "rig-lease-server.service"])
 def test_the_dev1_user_units_carry_no_network_online_ordering(unit):
     """dev1's user manager reads network-online.target as LoadState=not-found (checked 7.10.2026): the
     ordering in these --user units only looked like one."""
