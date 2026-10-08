@@ -162,11 +162,12 @@ ro_root_logrotate_dropin_content() {
   ro_root_logrotate_dropin_service
 }
 
-# The apt timers and services a read-only-root box MASKS. apt-daily(-upgrade).service exit 2 on
+# The apt timers and services a read-only-root CAMBOX masks. apt-daily(-upgrade).service exit 2 on
 # every pass (apt cannot write /var/lib/apt), and a timer that is only DISABLED is enabled again by
 # a package upgrade's maintainer scripts; a mask (a link to /dev/null) survives it. apt-get itself
-# never goes through these units. setup-device.sh STEP 15, the cambox live apply and verify-device
-# (ar) all read this ONE list.
+# never goes through these units. setup-device.sh STEP 15, build-image.sh (the overlay image), the
+# cambox live apply (scripts/lib/cambox-ro-units.sh) and verify-device (ar) all read this ONE list.
+# The handheld SBC does not use it yet (its own masks are bkshading_sbc_masked_units).
 ro_root_masked_apt_units() {
   printf '%s\n' apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service
 }

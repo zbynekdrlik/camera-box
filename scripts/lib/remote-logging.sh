@@ -203,10 +203,10 @@ SCRIPT_BODY
 # so `systemctl is-active` reads `active` after a successful arm (the verify (ak) check keys on that).
 # Issue 1394: an arm that still fails (dev1's MAC not resolvable, a late route) used to stay failed
 # until the next boot (cam1 from 4.10 06:24Z, the box `degraded`, no kernel printk off-box).
-# Restart=on-failure retries it every RestartSec, with no start-rate limit. systemd 255 allows
-# on-failure for a oneshot (always/on-success it refuses); tests/python/test_cambox_ro_units_1394.py
-# runs systemd-analyze verify on this text. Pulled in at boot by multi-user.target (reboot survival
-# via `enable`).
+# Restart=on-failure retries it (30 s backing off to 10 min), with no start-rate limit. systemd 255
+# allows on-failure for a oneshot (always/on-success it refuses) and has RestartSteps /
+# RestartMaxDelaySec; tests/python/test_cambox_ro_units_1394.py runs systemd-analyze verify on this
+# text. Pulled in at boot by multi-user.target (reboot survival via `enable`).
 remote_log_netconsole_service_unit_content() {
   cat <<EOF
 [Unit]
@@ -220,17 +220,20 @@ After=network-online.target
 After=systemd-networkd.service network.target
 Wants=network-online.target
 Wants=systemd-networkd.service
-# Issue 1394: no start-rate limit, so the Restart= retries below never run out (the journal-upload
-# drop-in's reason, #1311).
+# Issue 1394: no start-rate limit. A safeguard: at RestartSec=30 the default limit (5 starts in
+# 10 s) cannot trip, but the Restart= retries below must never run out.
 StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# Issue 1394: a failed arm retries every 30 s until dev1 answers, instead of staying failed (and the
-# box degraded) until the next boot.
+# Issue 1394: a failed arm retries until dev1 answers, instead of staying failed (and the box
+# degraded) until the next boot. The delay grows from 30 s to 10 min over 4 steps, so a box away
+# from dev1 (the travelling rig) does not write a failed arm into the stick journal every 30 s.
 Restart=on-failure
 RestartSec=30
+RestartSteps=4
+RestartMaxDelaySec=600
 ExecStart=${REMOTE_LOG_NC_SCRIPT_PATH}
 
 [Install]

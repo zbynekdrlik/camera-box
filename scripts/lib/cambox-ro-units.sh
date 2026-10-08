@@ -49,7 +49,7 @@ cambox_ro_units_logrotate_dropin_path() {
 }
 
 cambox_ro_units_netconsole_unit_path() {
-  printf '%s/%s.service\n' "$CAMBOX_RO_UNITS_UNIT_DIR" "$REMOTE_LOG_NC_SERVICE_NAME"
+  printf '%s/%s\n' "$CAMBOX_RO_UNITS_UNIT_DIR" "${REMOTE_LOG_NC_SERVICE_PATH##*/}"
 }
 
 # cambox_ro_units_sha FUNCTION -> the sha256 hex of FUNCTION's output: the bytes setup-device
@@ -114,7 +114,9 @@ cambox_ro_units_verdict() {
   want_nc="$(cambox_ro_units_sha remote_log_netconsole_service_unit_content)"
   dropin="$(cambox_ro_units_logrotate_dropin_path)"
   nc_path="$(cambox_ro_units_netconsole_unit_path)"
-  fix="run scripts/cambox-ro-units-apply.sh --apply for this box, or re-run setup-device.sh (issue 1394)"
+  # The fix for a box in the field is the apply: it also clears a unit's failed state, which a
+  # setup-device re-run never does (and a cambox is never rebooted remotely).
+  fix="fix: scripts/cambox-ro-units-apply.sh --apply --box <this box> (issue 1394)"
 
   case "$lr_sha" in
     "$want_lr")
@@ -128,7 +130,7 @@ cambox_ro_units_verdict() {
     *) fails="${fails}FAIL: the logrotate drop-in ${dropin} differs from the ro-root canon (sha ${lr_sha:0:12} != ${want_lr:0:12}); ${fix}${nl}" ;;
   esac
   [ "$lr_result" = success ] \
-    || fails="${fails}FAIL: logrotate.service last Result=${lr_result:-<unread>}, not success -- it fails on the read-only root (or a logrotate config is broken: journalctl -u logrotate.service); ${fix}${nl}"
+    || fails="${fails}FAIL: logrotate.service last Result=${lr_result:-<unread>}, not success -- it fails on the read-only root, or a logrotate config is broken (journalctl -u logrotate.service); ${fix}${nl}"
 
   for u in $(ro_root_masked_apt_units); do
     found=0
@@ -149,7 +151,7 @@ cambox_ro_units_verdict() {
       [ "$nc_restart" = on-failure ] \
         || fails="${fails}FAIL: ${REMOTE_LOG_NC_SERVICE_NAME}.service is on disk but systemd runs it with Restart=${nc_restart:-<unread>} -- a daemon-reload is missing; ${fix}${nl}"
       ;;
-    __ABSENT__) fails="${fails}FAIL: ${nc_path##*/} is missing at ${nc_path} -- issue-1311 netconsole is not provisioned; re-run setup-device.sh${nl}" ;;
+    __ABSENT__) fails="${fails}FAIL: ${nc_path##*/} is missing at ${nc_path} -- issue-1311 netconsole is not provisioned on this box; re-run setup-device.sh (the apply writes no new unit)${nl}" ;;
     "") fails="${fails}FAIL: ${nc_path##*/} could not be read (no NC_UNIT_SHA); ${fix}${nl}" ;;
     *) fails="${fails}FAIL: ${nc_path##*/} differs from scripts/lib/remote-logging.sh (a unit without the issue-1394 Restart=on-failure stays failed after one missed arm); ${fix}${nl}" ;;
   esac
@@ -165,17 +167,22 @@ cambox_ro_units_verdict() {
 # cambox's issue-1394 unit set up to date. Everything runs inside ONE function called with
 # </dev/null: the program arrives on bash's stdin, so a command that read stdin would eat the rest
 # of it, the verified close included (the rt-kernel-plan finding, .claude/rules/ro-window.md).
-#   1. read (nothing written): which of the three need a write -- the logrotate drop-in, the
-#      netconsole unit (only where issue 1311 put one; a box without it gets a NOTE, never a new
-#      unit), the apt masks;
-#   2. only when something needs a write: `mount -o remount,rw /` (a refused remount ends the
-#      program before any write), the files written through a temp file + rename, the masks
-#      (`--no-reload`), then the ONE verified close -- a root that does not read ro again exits 1
-#      naming the writers, and nothing after it runs. A cambox runs read-only, so a root that was
-#      already writable is also forced back read-only (the cambox-only doctrine of ro-window.md);
-#   3. after the close: daemon-reload, stop the masked apt units, reset-failed the four units of the
-#      live finding, run logrotate once (it must succeed), restart netconsole (it must arm; if it
-#      cannot, the unit now retries every 30 s), read back `is-system-running` (must be running).
+#   1. read (nothing written): the root mode (the ro-root canon's ro_root_mount_mode), and which of
+#      the three need a write -- the logrotate drop-in, the netconsole unit (only where issue 1311
+#      put one; a box without it gets a NOTE, never a new unit), the apt masks;
+#   2. the rw window, when something needs a write OR the root does not read `ro`: a cambox runs
+#      read-only, so a root found writable is the stuck state, and it is put back read-only through
+#      the verified close BEFORE anything starts (review round 1: with nothing to write the window
+#      used to be skipped, and logrotate + netconsole started on the writable root). Inside: the rw
+#      remount (a refused one ends the program by name, nothing written), the files written through
+#      a temp file + rename (a failed write removes its temp file and fails by name), the masks
+#      (`--no-reload`), then the ONE verified close. Any failure inside reaches the EXIT trap, which
+#      runs the same close; a root that does not read ro again exits 1 naming the writers, and
+#      nothing after it runs;
+#   3. after the close: daemon-reload, stop the masked apt units, reset-failed the units of the live
+#      finding, run logrotate once (it must succeed), restart netconsole (it must arm; if it cannot,
+#      the unit now retries, backing off from 30 s to 10 min), read back `is-system-running` (must
+#      be running).
 # Exit 0 only when every step held. The text is the same for every cambox (the box names itself).
 cambox_ro_units_apply_program() {
   local apt lr nc
@@ -195,16 +202,22 @@ PROG
   printf '_rou_nc_want=%q\n' "$(cambox_ro_units_sha remote_log_netconsole_service_unit_content)"
   printf '_rou_nc_unit=%q\n' "${REMOTE_LOG_NC_SERVICE_NAME}.service"
   printf '_rou_apt="%s"\n' "${apt//$'\n'/ }"
+  printf '%s\n' "$(declare -f ro_root_mount_mode)"
   cat <<'PROG'
 _rou_box="$(hostname 2>/dev/null || echo this cambox)"
 _rou_sha() { if [ -e "$1" ]; then _rou_s="$(sha256sum <"$1")"; echo "${_rou_s%% *}"; else echo __ABSENT__; fi; }
 # Inside the window only: a temp file + rename, so a cut write never leaves half a unit file.
 _rou_write() {
   mkdir -p "${1%/*}"
-  printf '%s\n' "$2" >"$1.new"
-  mv -f "$1.new" "$1"
+  if printf '%s\n' "$2" >"$1.new" && mv -f "$1.new" "$1"; then
+    return 0
+  fi
+  rm -f "$1.new"
+  echo "FAIL: [issue 1394] could not write $1 on $_rou_box -- the window is closed again by the verified close" >&2
+  return 1
 }
-# --- 1. what this box needs (read before anything is written) ---
+# --- 1. the root mode and what this box needs (read before anything is written) ---
+_rou_mode="$(ro_root_mount_mode "$(findmnt -no OPTIONS / 2>/dev/null || awk '$2=="/"{print $4; exit}' /proc/mounts 2>/dev/null || true)")"
 _rou_do_lr=0
 [ "$(_rou_sha "$_rou_lr")" = "$_rou_lr_want" ] || _rou_do_lr=1
 _rou_nc_present=0
@@ -215,9 +228,12 @@ _rou_mask=""
 for _rou_u in $_rou_apt; do
   [ "$(systemctl is-enabled "$_rou_u" 2>/dev/null || true)" = masked ] || _rou_mask="$_rou_mask $_rou_u"
 done
-echo "PLAN ($_rou_box): logrotate drop-in $([ "$_rou_do_lr" = 1 ] && echo write || echo in-place); netconsole unit $([ "$_rou_nc_present" = 0 ] && echo absent || { [ "$_rou_do_nc" = 1 ] && echo write || echo in-place; }); mask:${_rou_mask:- none (all masked)}"
+echo "PLAN ($_rou_box): root $_rou_mode; logrotate drop-in $([ "$_rou_do_lr" = 1 ] && echo write || echo in-place); netconsole unit $([ "$_rou_nc_present" = 0 ] && echo absent || { [ "$_rou_do_nc" = 1 ] && echo write || echo in-place; }); mask:${_rou_mask:- none (all masked)}"
 if [ "$_rou_nc_present" = 0 ]; then
   echo "NOTE: no $_rou_nc on $_rou_box -- issue 1311 netconsole is not provisioned here; re-run setup-device.sh for it (this program writes no new unit)"
+fi
+if [ "$_rou_mode" != ro ]; then
+  echo "NOTE: the root of $_rou_box reads '$_rou_mode' before this program -- a cambox runs read-only; the verified close puts it back before anything is run"
 fi
 # --- 2. the rw window, closed by the ONE verified close ---
 _rou_open=0
@@ -232,19 +248,31 @@ PROG
 }
 trap '_rou_close' EXIT
 _rou_wrote=0
-if [ "$_rou_do_lr" = 1 ] || [ "$_rou_do_nc" = 1 ] || [ -n "$_rou_mask" ]; then
-mount -o remount,rw /
+_rou_opened=0
+if [ "$_rou_do_lr" = 1 ] || [ "$_rou_do_nc" = 1 ] || [ -n "$_rou_mask" ] || [ "$_rou_mode" != ro ]; then
+if ! mount -o remount,rw /; then
+  echo "FAIL: [issue 1394] could not remount / read-write on $_rou_box -- nothing was written" >&2
+  exit 1
+fi
 _rou_open=1
-_rou_wrote=1
-if [ "$_rou_do_lr" = 1 ]; then _rou_write "$_rou_lr" "$_rou_lr_body"; fi
-if [ "$_rou_do_nc" = 1 ]; then _rou_write "$_rou_nc" "$_rou_nc_body"; fi
+_rou_opened=1
+if [ "$_rou_do_lr" = 1 ]; then _rou_write "$_rou_lr" "$_rou_lr_body"; _rou_wrote=1; fi
+if [ "$_rou_do_nc" = 1 ]; then _rou_write "$_rou_nc" "$_rou_nc_body"; _rou_wrote=1; fi
 # The masks are links on the root; --no-reload: the daemon-reload runs after the close.
-if [ -n "$_rou_mask" ]; then systemctl mask --no-reload $_rou_mask; fi
+if [ -n "$_rou_mask" ]; then
+  if ! systemctl mask --no-reload $_rou_mask; then
+    echo "FAIL: [issue 1394] could not mask$_rou_mask on $_rou_box -- the window is closed again by the verified close" >&2
+    exit 1
+  fi
+  _rou_wrote=1
+fi
 fi
 _rou_close
 trap - EXIT
 if [ "$_rou_wrote" = 1 ]; then
   echo "OK: the unit files are written and the root of $_rou_box reads read-only again ($_row_opts)"
+elif [ "$_rou_opened" = 1 ]; then
+  echo "OK: nothing to write on $_rou_box; its root read '$_rou_mode' and reads read-only again ($_row_opts)"
 else
   echo "OK: nothing to write on $_rou_box -- the root was not touched"
 fi
@@ -269,7 +297,7 @@ if [ "$_rou_nc_present" = 1 ]; then
   if systemctl restart "$_rou_nc_unit"; then
     echo "OK: $_rou_nc_unit armed"
   else
-    echo "FAIL: [issue 1394] $_rou_nc_unit did not arm on $_rou_box (Result=$(systemctl show -p Result --value "$_rou_nc_unit" 2>/dev/null || true)); it retries every 30 s now -- read: journalctl -u $_rou_nc_unit -n 20" >&2
+    echo "FAIL: [issue 1394] $_rou_nc_unit did not arm on $_rou_box (Result=$(systemctl show -p Result --value "$_rou_nc_unit" 2>/dev/null || true)); it retries now, backing off from 30 s to 10 min -- read: journalctl -u $_rou_nc_unit -n 20" >&2
     _rou_rc=1
   fi
 fi
