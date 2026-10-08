@@ -111,9 +111,12 @@ def test_the_endpoint_serves_the_payload_with_its_age_recomputed(tmp_path):
     assert j["verdict"] == "MEASUREMENT" and j["marker_chain"] == 7
     assert 2.5 <= j["age_s"] <= 10.0
     assert j["last_foreign_age_s"] is None  # no FOREIGN window yet
-    # every other field passes through as written
-    assert (j["ts_utc"], j["rms_dbfs"], j["outside_band_pct"], j["window_s"], j["source"]) == (
-        rsf.format_ts_utc(written), -35.6, 16.8, 2.0, "S")
+    # every other field passes through exactly as written on disk
+    disk = json.loads((serve / rsf.PROGRAM_AUDIO_NAME).read_text(encoding="utf-8"))
+    ages = ("age_s", "last_foreign_age_s")
+    assert {k: v for k, v in j.items() if k not in ages} == {k: v for k, v in disk.items() if k not in ages}
+    assert disk["ts_utc"] == rsf.format_ts_utc(written)
+    assert {"schema", "ts_utc", "source", "markers_decoded", "marker_chain", "holes_bridged"} <= set(j)
     assert json.loads(q_body)["verdict"] == "MEASUREMENT"
 
 
