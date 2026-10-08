@@ -1120,6 +1120,25 @@ fn strih_lx_tree_check_needs_the_fact_file_and_its_intercom_file_1317() {
     );
     fs::create_dir_all(d.join("intercom")).unwrap();
     fs::write(d.join("intercom/x.toml"), "x").unwrap();
+    // issue 1404: setup-strih step 16e installs the program-audio sampler from these files, two of
+    // them vendored headers outside scripts/, so the tree check refuses a tree without them.
+    let (out, err) = check(d);
+    assert!(
+        out.contains("rc=1") && err.contains("issue 1404"),
+        "a tree without the sampler files is refused:\n{out}{err}"
+    );
+    let listed = Command::new("bash")
+        .arg("-c")
+        .arg(". \"$LIB\"; printf '%s\\n' \"${STRIH_PROGRAM_AUDIO_FILES[@]}\"")
+        .env("LIB", lib())
+        .output()
+        .unwrap();
+    let files = String::from_utf8_lossy(&listed.stdout).into_owned();
+    assert!(files.contains("vendor/av-sync-dock/src/"), "{files}");
+    for f in files.lines() {
+        fs::create_dir_all(d.join(f).parent().unwrap()).unwrap();
+        fs::write(d.join(f), "x").unwrap();
+    }
     let (out, err) = check(d);
     assert!(
         out.contains("strih-lx\nrc=0"),
