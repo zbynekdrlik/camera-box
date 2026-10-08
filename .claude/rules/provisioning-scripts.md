@@ -509,6 +509,12 @@ section above), and a box that reads `degraded` hides real failures.
     `continue`), and the RESULT names the boxes already done (`RESULT: in place on:`) and every
     untouched one. `--force-live` skips the lease and the guard loudly (supervisor-only). `--plan`
     runs no guard. A box named twice is applied once.
+  - **The lease declares the rolling 15-min look-ahead, never the whole run** (review round 4,
+    reproduced): `rig-busy-gate.sh` fails FAST (exit 44) on a holder whose `expected_release_at`
+    lies past its 1800 s wait budget, so a "+60 min" declaration turned every full-path E2E that
+    started during an apply red instead of making it wait. The per-box `rig_lease_refresh_if_mine`
+    keeps rolling it. The run's lease id is set BEFORE the acquire, so a TERM while the holder is
+    written still releases it. Holder notes for the :8890 consumers: `.claude/rules/rig-lease-http.md`.
   - **The RESULT tells two failures apart:** a box whose files landed but a step outside the rw
     window failed (the apt stop before it, the netconsole arm or a failed unit after it; named by its
     first `FAIL: [issue 1394]` line) and a box where the unit set did not land. A netconsole that cannot arm FAILS the box although

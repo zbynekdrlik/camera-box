@@ -52,6 +52,9 @@
 #   - scripts/lib/rig-heartbeat.sh (the holder's issue-281 refresher: rig_lease_refresh_if_mine on
 #                                 every beat, issue 1383) + scripts/av-soak.sh (slot boundaries) +
 #                                 scripts/rig-busy-gate.sh (busy-wait + the lease-only keep-alive)
+#   - scripts/cambox-ro-units-apply.sh --apply (issue 1394: holds it as camera-box-ro-units-apply
+#                                 for its whole run, beats only once per box, so its heartbeat can
+#                                 read minutes old while the apply is alive; releases on every exit)
 #
 # Tunables (env, all optional):
 #   RIG_LEASE_DIR              lockdir path (default /var/tmp/rig-lease; tests override for isolation)

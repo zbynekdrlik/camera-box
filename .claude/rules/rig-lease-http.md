@@ -74,6 +74,15 @@ issue 1383 the holder keeps its own lease truthful from acquire to release:
      stderr, so a mismatched identity is visible in the run log.
   3. `av-soak.sh` itself at every slot start and in the between-slot wait (not ours → abort; past its
      window → abort with that reason; an fs error → logged, carry on).
+- **A fourth holder, `scripts/cambox-ro-units-apply.sh --apply` (issue 1394),** takes the lease as
+  `camera-box-ro-units-apply` + `ro-units-apply-<stamp>-<pid>` for its whole run (a root write on
+  the camboxes, minutes per box) and gives it back on every exit. It declares the rolling look-ahead
+  (`RIG_LEASE_LOOKAHEAD_SECS`, 900 s), never its whole run, so a CI E2E that starts meanwhile WAITS
+  for the release instead of failing fast (the gate refuses a holder whose release lies past its
+  1800 s wait budget). It beats only before each box, so while one box runs (the netconsole arm can
+  wait minutes for dev1) its `heartbeat_age_s` reads minutes old although the holder is alive.
+  restreamer's :8890 consumer waits its 900 s cap for any live holder, so an apply delays a
+  restreamer stream E2E by up to ~15 min although it never touches OBS.
 - **The hold CEILING keeps the #830 "never a permanent deadlock" backstop:** no beat past
   `acquired_at + RIG_LEASE_MAX_HOLD_SECS` (default 4500 s = `full-path-e2e.yml`'s `timeout-minutes:
   75`, lock-stepped by a test; the soak sets its declared run window). An unparseable `acquired_at`
@@ -107,7 +116,8 @@ which beats once per poll, `RIG_BUSY_GATE_SLEEP_SECS` 60 s). `ttl_s` is the larg
 release and the rolling look-ahead: ≈ 1980-2700 s in the first ~30 min of a CI run (acquire +
 45 min still wins the max), ≈ 870-900 s after that — NOT the run's end time (the run ends when
 `held` goes `false`). A held lease whose heartbeat is many minutes old is a dead holder or one past
-its hold ceiling — reclaimable once `stale` flips — not a long step. Supervisor live check: during a
+its hold ceiling — reclaimable once `stale` flips — not a long step; the one exception is the
+`camera-box-ro-units-apply` holder above, which beats only once per box. Supervisor live check: during a
 release E2E, read `curl -s http://127.0.0.1:8890/rig-lease.json` twice ~40 s apart, once during the
 verdict-exe fetch step and once past minute 45 of the run: `heartbeat_age_s` < 60 and `ttl_s` > 0
 both times, and past minute 45 `ttl_s` ≈ 870-900 with `expected_release_at` moving forward between
