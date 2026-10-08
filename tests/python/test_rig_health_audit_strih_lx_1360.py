@@ -205,5 +205,5 @@ def test_cg_chain_reads_strih_through_the_platform_resolved_tail_1360(monkeypatc
     monkeypatch.setattr(_mod, "ssh", fake_ssh)
     _mod.results.clear()
     _mod.check_cg_chain()
-    assert seen.get(_mod.STRIH) == _mod._obs_log_tail_cmd(_mod.STRIH, 500), seen
+    assert seen.get(_mod.STRIH) == _mod._obs_log_tail_cmd(_mod.STRIH, _mod.CG_CHAIN_TAIL_LINES), seen
     assert "powershell" not in seen[_mod.STRIH]

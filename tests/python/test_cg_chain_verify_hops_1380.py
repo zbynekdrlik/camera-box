@@ -37,7 +37,7 @@ def _run(tmp_path, args=(), env_extra=None, logs=None):
 
 def _logs(tmp_path, stream_sources=("NDI obs hudba",)):
     return {"CG_OBS": _log(tmp_path, "cg", ["sp-1_video"]),
-            "STRIH": _log(tmp_path, "strih", ["cg"]),
+            "STRIH": _log(tmp_path, "strih", ["CG-obs"]),
             "STREAM": _log(tmp_path, "stream", list(stream_sources))}
 
 
