@@ -475,7 +475,9 @@ the test calls without root, with goldens in `tests/fixtures/image_builder_fstab
   These lines are test-pinned, so a canon change shows up as a deliberate golden diff. STEP 18 copies
   the EFI line VERBATIM from this fstab (it greps `/boot/efi` out of `fstab.bak`), so that line's
   text is load-bearing. An empty UUID fails the build by name: the call is a plain function call
-  with `|| error`, never a `$(...)` inside a heredoc, whose failure `set -e` ignores.
+  with `|| error`, never a `$(...)` inside a heredoc, whose failure `set -e` ignores. A function
+  called on the left of `||` runs its WHOLE body with errexit off, so its writes are chained with
+  `&&`: otherwise a failed early write is masked by the status of a later successful one.
 - **`build-image.sh`: `build_image_fstab_text`** (the script cannot be sourced: its top-level
   `trap cleanup EXIT` removes `/tmp/camera-box-build`, so the test lifts the function text). It writes
   the whole `ro_root_tmpfs_lines` set and NO root line: that image's `/` is the overlayfs
