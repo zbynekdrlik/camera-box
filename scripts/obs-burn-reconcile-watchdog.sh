@@ -128,14 +128,9 @@ log() { printf '%s [obs-burn-reconcile-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:
 # 0 (coordinating) if a FRESH #281 rig-active heartbeat exists (recording-e2e.sh / rig-mode.sh
 # TEST) OR the #830 rig lease is held by a LIVE holder (a CI gate). Either => a burn set right now
 # is legitimate and this watchdog must DEFER, never sweep it.
+# The read is the ONE shared rig_held_reason (scripts/lib/rig-heartbeat.sh, issue 1394).
 rig_is_coordinating() {
-  if rig_heartbeat_active; then
-    return 0
-  fi
-  if [ -d "$(rig_lease_dir)" ] && ! rig_lease_is_stale "$RIG_LEASE_STALE_SECS"; then
-    return 0
-  fi
-  return 1
+  rig_held_reason "$RIG_LEASE_STALE_SECS" >/dev/null
 }
 
 # obs_burn_filter.py wrapper (reused for session-probe / sweep-check / sweep-off).

@@ -22,9 +22,9 @@
 #     brings an already-provisioned box up to date without a setup-device re-run.
 # The program writes everything inside ONE rw window and closes it with the ONE verified close
 # (scripts/lib/ro-window.sh, issue 1407): only file writes and masks inside, the root mode READ
-# back, nothing started before the close. After the close it reloads, stops the masked apt units,
-# clears the four units' failed state, runs logrotate once, restarts netconsole and reads back
-# `is-system-running`. Rule: .claude/rules/ro-window.md (the sites table).
+# back, nothing started before the close. The apt units are stopped before the window. After the
+# close it reloads, clears the four units' failed state, runs logrotate once, restarts netconsole
+# and reads back `is-system-running`. Rule: .claude/rules/ro-window.md (the sites table).
 
 # --- the sibling libs (lazy-sourced; a caller that already sourced them keeps its own) ----------
 if ! command -v ro_root_logrotate_dropin_content >/dev/null 2>&1; then
@@ -169,7 +169,8 @@ cambox_ro_units_verdict() {
 # of it, the verified close included (the rt-kernel-plan finding, .claude/rules/ro-window.md).
 #   1. read (nothing written): the root mode (the ro-root canon's ro_root_mount_mode), and which of
 #      the three need a write -- the logrotate drop-in, the netconsole unit (only where issue 1311
-#      put one; a box without it gets a NOTE, never a new unit), the apt masks;
+#      put one; a box without it gets a NOTE, never a new unit), the apt masks; then stop the apt
+#      timers/services, so none fires inside the window (review round 2);
 #   2. the rw window, when something needs a write OR the root does not read `ro`: a cambox runs
 #      read-only, so a root found writable is the stuck state, and it is put back read-only through
 #      the verified close BEFORE anything starts (review round 1: with nothing to write the window
@@ -179,10 +180,11 @@ cambox_ro_units_verdict() {
 #      (`--no-reload`), then the ONE verified close. Any failure inside reaches the EXIT trap, which
 #      runs the same close; a root that does not read ro again exits 1 naming the writers, and
 #      nothing after it runs;
-#   3. after the close: daemon-reload, stop the masked apt units, reset-failed the units of the live
-#      finding, run logrotate once (it must succeed), restart netconsole (it must arm; if it cannot,
-#      the unit now retries, backing off from 30 s to 10 min), read back `is-system-running` (must
-#      be running).
+#   3. after the close, each step named on failure and the rest still run: daemon-reload,
+#      reset-failed the units of the live finding, run logrotate once (it must succeed), restart
+#      netconsole (it must arm; if it cannot, the unit now retries, backing off from 30 s to 10 min,
+#      and the box FAILS even though is-system-running then reads running), read back
+#      `is-system-running` (must be running).
 # Exit 0 only when every step held. The text is the same for every cambox (the box names itself).
 cambox_ro_units_apply_program() {
   local apt lr nc
@@ -208,8 +210,7 @@ _rou_box="$(hostname 2>/dev/null || echo this cambox)"
 _rou_sha() { if [ -e "$1" ]; then _rou_s="$(sha256sum <"$1")"; echo "${_rou_s%% *}"; else echo __ABSENT__; fi; }
 # Inside the window only: a temp file + rename, so a cut write never leaves half a unit file.
 _rou_write() {
-  mkdir -p "${1%/*}"
-  if printf '%s\n' "$2" >"$1.new" && mv -f "$1.new" "$1"; then
+  if mkdir -p "${1%/*}" && printf '%s\n' "$2" >"$1.new" && mv -f "$1.new" "$1"; then
     return 0
   fi
   rm -f "$1.new"
@@ -234,6 +235,15 @@ if [ "$_rou_nc_present" = 0 ]; then
 fi
 if [ "$_rou_mode" != ro ]; then
   echo "NOTE: the root of $_rou_box reads '$_rou_mode' before this program -- a cambox runs read-only; the verified close puts it back before anything is run"
+fi
+_rou_rc=0
+# The apt timers/services stop BEFORE the window: a timer still armed while the root is writable
+# could start its service inside it (the issue-1405 shape); they are masked inside, and a masked
+# unit that kept running would elapse into its masked service and fail. A stop on a stopped unit is
+# a no-op.
+if ! systemctl stop $_rou_apt; then
+  echo "FAIL: [issue 1394] could not stop the apt units on $_rou_box" >&2
+  _rou_rc=1
 fi
 # --- 2. the rw window, closed by the ONE verified close ---
 _rou_open=0
@@ -276,15 +286,19 @@ elif [ "$_rou_opened" = 1 ]; then
 else
   echo "OK: nothing to write on $_rou_box -- the root was not touched"
 fi
-# --- 3. after the verified close: load, clear, run, read back ---
-_rou_rc=0
-systemctl daemon-reload
-# A masked timer that is still running would elapse into its masked service and fail.
-systemctl stop $_rou_apt
+# --- 3. after the verified close: load, clear, run, read back (each failure named, the rest run) ---
+if ! systemctl daemon-reload; then
+  echo "FAIL: [issue 1394] systemctl daemon-reload failed on $_rou_box -- the new files may not be loaded" >&2
+  _rou_rc=1
+fi
 for _rou_u in logrotate.service $_rou_apt $_rou_nc_unit; do
   if systemctl is-failed --quiet "$_rou_u" 2>/dev/null; then
-    systemctl reset-failed "$_rou_u"
-    echo "  reset-failed $_rou_u"
+    if systemctl reset-failed "$_rou_u"; then
+      echo "  reset-failed $_rou_u"
+    else
+      echo "FAIL: [issue 1394] could not reset-failed $_rou_u on $_rou_box" >&2
+      _rou_rc=1
+    fi
   fi
 done
 if systemctl start logrotate.service; then

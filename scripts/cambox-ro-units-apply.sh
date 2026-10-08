@@ -11,11 +11,11 @@ set -euo pipefail
 #     written inside ONE rw window closed by the verified close (scripts/lib/ro-window.sh): nothing
 #     is started before the root reads read-only again, and a root that stays writable fails by
 #     name with its writers;
-#   - after the close: daemon-reload, stop the masked apt units, reset-failed, one logrotate run,
-#     the netconsole restart, and the `is-system-running` read-back.
+#   - the apt timers/services stopped before the window; after the close: daemon-reload,
+#     reset-failed, one logrotate run, the netconsole restart, and the `is-system-running` read-back.
 #
-# It is a root write on a cambox, so --apply first runs the rig guard and REFUSES (exit 1, no box
-# touched) while:
+# It is a root write on a cambox, so --apply runs the rig guard before EVERY box and REFUSES (exit 1,
+# that box and the rest untouched, the boxes already done summarised) while:
 #   - the rig lease (scripts/lib/rig-lease.sh, the E2E / soak holder) is held by a live holder;
 #   - the issue-281 rig heartbeat (scripts/lib/rig-heartbeat.sh, recording-e2e / rig-mode TEST) is
 #     fresh;
@@ -46,7 +46,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/cambox-ro-units.sh
 . "$HERE/lib/cambox-ro-units.sh"
 # shellcheck source=scripts/lib/rig-heartbeat.sh
-. "$HERE/lib/rig-heartbeat.sh"     # rig_heartbeat_active (issue 281); it sources rig-lease.sh
+. "$HERE/lib/rig-heartbeat.sh"     # rig_held_reason: the issue-281 heartbeat + the rig lease (rig-lease.sh)
 # shellcheck source=scripts/lib/stray-session-check.sh
 . "$HERE/lib/stray-session-check.sh"  # stray_session_check_assert -- the ONE shared rig-busy guard
 
@@ -143,28 +143,52 @@ command -v sshpass >/dev/null 2>&1 || {
   exit 2
 }
 
-# --- the rig guard: no cambox root write while the rig is driven or broadcasting ---
+# rig_refused BOX -> 0 and RIG_REFUSAL set when BOX must not be touched NOW: the shared rig-held read
+# (rig_held_reason: a fresh issue-281 heartbeat or a live rig lease) or the shared rig-busy guard
+# (stray_session_check_assert, run in a subshell so its own `exit 1` comes back here and the boxes
+# already done still get their summary). Read before EVERY box (review round 2): one box can take
+# minutes (the netconsole arm waits for dev1), and an E2E may take the rig in between.
+rig_refused() {
+  RIG_REFUSAL=""
+  if RIG_REFUSAL="$(rig_held_reason "$RIG_LEASE_STALE_SECS")"; then
+    return 0
+  fi
+  RIG_REFUSAL=""
+  if ! (stray_session_check_assert "$RIG_BUSY_HERE" "$STRIH_HOST" "$STREAM_HOST" "the issue-1394 read-only-root apply on $1"); then
+    RIG_REFUSAL="strih or stream records or streams (the rig-busy guard above)"
+    return 0
+  fi
+  return 1
+}
+
+# first_fail_line TEXT -> the first `FAIL: [issue 1394] ...` line of a box's output, prefix cut.
+first_fail_line() {
+  local line
+  while IFS= read -r line; do
+    case "$line" in
+      "FAIL: [issue 1394] "*) printf '%s\n' "${line#"FAIL: [issue 1394] "}"; return 0 ;;
+    esac
+  done <<<"${1:-}"
+  printf '%s\n' "(no FAIL line; see the output above)"
+}
+
 if [ "$FORCE_LIVE" = 1 ]; then
   echo "WARNING: --force-live -- SKIPPING the rig guard (lease, rig heartbeat, rig-busy) for the issue-1394 apply on: ${NAMES[*]}" >&2
-else
-  if rig_heartbeat_active; then
-    echo "ERROR: refused -- the issue-281 rig heartbeat at $(rig_heartbeat_path) is fresh: an E2E or rig-mode TEST run holds the rig. No box was touched; run --apply after it ends." >&2
-    exit 1
-  fi
-  if [ -d "$(rig_lease_dir)" ] && ! rig_lease_is_stale "$RIG_LEASE_STALE_SECS"; then
-    echo "ERROR: refused -- the rig lease is held: $(rig_lease_holder_summary). No box was touched; run --apply after it is released." >&2
-    exit 1
-  fi
-  stray_session_check_assert "$RIG_BUSY_HERE" "$STRIH_HOST" "$STREAM_HOST" "the issue-1394 read-only-root apply on ${NAMES[*]}"
 fi
 
 LOG="$(mktemp)"
 trap 'rm -f "$LOG"' EXIT
 FAILED=()
 NO_NETCONSOLE=()
+UNTOUCHED=()
 for _i in "${!NAMES[@]}"; do
   _name="${NAMES[$_i]}"
   _ip="${IPS[$_i]}"
+  if [ "$FORCE_LIVE" = 0 ] && rig_refused "$_name"; then
+    UNTOUCHED=("${NAMES[@]:_i}")
+    echo "ERROR: refused before $_name -- ${RIG_REFUSAL}. Not touched: ${UNTOUCHED[*]}; run --apply for them after it ends." >&2
+    break
+  fi
   echo "== $_name ($_ip): applying the issue-1394 read-only-root unit set =="
   _rc=0
   # ServerAlive: a dead connection ends this ssh within ~60 s instead of holding the fleet loop.
@@ -183,7 +207,11 @@ for _i in "${!NAMES[@]}"; do
   if ro_window_close_failed "$_out"; then
     FAILED+=("$_name (root-rw: $(ro_window_holders "$_out"); nothing was started)")
   else
-    FAILED+=("$_name (rc=$_rc)")
+    case "$_out" in
+      *"OK: the unit files are written"* | *"OK: nothing to write on"*)
+        FAILED+=("$_name (the unit files are in place; a check after the close failed: $(first_fail_line "$_out"))") ;;
+      *) FAILED+=("$_name (rc=$_rc; the unit set did not land: $(first_fail_line "$_out"))") ;;
+    esac
   fi
   echo "== $_name: FAILED (rc=$_rc) ==" >&2
 done
@@ -191,8 +219,9 @@ done
 if [ "${#NO_NETCONSOLE[@]}" -gt 0 ]; then
   echo "NOTE: no issue-1311 netconsole unit on: ${NO_NETCONSOLE[*]} -- re-run setup-device.sh there; verify-device (ak)/(ar) fail it until then" >&2
 fi
-if [ "${#FAILED[@]}" -gt 0 ]; then
-  echo "RESULT: the issue-1394 unit set did NOT land on: $(printf '%s; ' "${FAILED[@]}")" >&2
+if [ "${#FAILED[@]}" -gt 0 ] || [ "${#UNTOUCHED[@]}" -gt 0 ]; then
+  [ "${#FAILED[@]}" -eq 0 ] || echo "RESULT: not clean on: $(printf '%s; ' "${FAILED[@]}")" >&2
+  [ "${#UNTOUCHED[@]}" -eq 0 ] || echo "RESULT: refused by the rig guard, not touched: ${UNTOUCHED[*]}" >&2
   exit 1
 fi
 echo "RESULT: the issue-1394 unit set is in place on: ${NAMES[*]}"
