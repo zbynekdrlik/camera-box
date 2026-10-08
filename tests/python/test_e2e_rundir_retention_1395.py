@@ -301,6 +301,56 @@ def test_the_callers_ifs_changes_nothing(tmp_path):
     assert len(lines) == 1 and "removed 1" in lines[0], lines
 
 
+def test_the_callers_noglob_and_globignore_change_nothing(tmp_path):
+    parent = tmp_path / "p"
+    parent.mkdir()
+    current = _mkrun(parent, "recording-e2e-1", 0)
+    _mkrun(parent, "recording-e2e-2", 7200)
+    _mkrun(parent, "recording-e2e-3", 7300)
+    _run([parent, current, "0"], caller_setup="set -f")
+    assert _names(parent) == ["recording-e2e-1"]
+    _mkrun(parent, "recording-e2e-4", 7400)
+    # GLOBIGNORE patterns match the whole expanded path ($2 is the parent argument here).
+    _run([parent, current, "0"], caller_setup='GLOBIGNORE="$2/recording-e2e-4"')
+    assert _names(parent) == ["recording-e2e-1"]
+
+
+def test_the_current_dir_is_kept_when_named_through_a_symlink_alias(tmp_path):
+    """Only the same-inode check can keep it: the alias's basename is not the run dir's name."""
+    parent = tmp_path / "p"
+    parent.mkdir()
+    real = _mkrun(parent, "recording-e2e-500", 99_000)
+    _mkrun(parent, "recording-e2e-2", 7200)
+    alias = tmp_path / "current-run"
+    alias.symlink_to(real, target_is_directory=True)
+    _run([parent, alias, "0"])
+    assert _names(parent) == ["recording-e2e-500"]
+
+
+def test_a_dir_with_the_current_runs_name_is_kept_even_when_the_path_differs(tmp_path):
+    """Only the name check can keep it: the given current path does not exist (no inode to match)."""
+    parent = tmp_path / "p"
+    parent.mkdir()
+    _mkrun(parent, "recording-e2e-500", 99_000)
+    _mkrun(parent, "recording-e2e-2", 7200)
+    _run([parent, tmp_path / "elsewhere" / "recording-e2e-500", "0"])
+    assert _names(parent) == ["recording-e2e-500"]
+
+
+def test_the_wrapper_returns_0_whatever_the_body_does(tmp_path):
+    _run([tmp_path, tmp_path / "recording-e2e-1"], after_source="_e2e_rundir_retention_run() { return 3; }")
+
+
+def test_the_log_line_reports_the_size_freed(tmp_path):
+    parent = tmp_path / "p"
+    parent.mkdir()
+    current = _mkrun(parent, "recording-e2e-1", 0)
+    _mkrun(parent, "recording-e2e-2", 7200, payload=b"x" * (3 * 1024 * 1024))
+    lines, _ = _run([parent, current, "0"])
+    m = re.search(r"removed 1 \((\d+\.\d) MB freed\)", lines[0])
+    assert m and 2.9 <= float(m.group(1)) <= 3.3, lines
+
+
 def test_the_lib_is_source_only():
     text = _LIB.read_text()
     assert not re.search(r"^\s*set\s+-[a-zA-Z]*[eu]", text, re.M), \
