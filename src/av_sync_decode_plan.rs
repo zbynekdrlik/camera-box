@@ -236,6 +236,13 @@ mod tests {
         let mut ticked = head(n, &[]);
         ticked[7].0 = Some(4242);
         assert_eq!(painter_head_verdict(&ticked), PainterHead::FullDecode);
+        // ONE cam2 tick is enough even when every head frame also shows the clip
+        let mut ticked_next_to_the_clip = head(n, &[CLIP, CLIP]);
+        ticked_next_to_the_clip[7].0 = Some(4242);
+        assert_eq!(
+            painter_head_verdict(&ticked_next_to_the_clip),
+            PainterHead::FullDecode
+        );
     }
 
     #[test]

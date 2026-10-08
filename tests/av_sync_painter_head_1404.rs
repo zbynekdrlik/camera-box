@@ -110,13 +110,17 @@ fn every_real_rig_frame_alone_sends_the_painter_path_to_the_full_decode_1404() {
             PainterHead::FullDecode,
             "{what}"
         );
+        // each signal alone, even on a frame that also shows the measurement clip (the only kind
+        // of head the painter path stops on)
+        let mut burns_and_clip = runs.clone();
+        burns_and_clip.push(MEASUREMENT_CLIP_RUN_ID);
         assert_eq!(
-            painter_head_verdict(&[(None, runs.clone())]),
+            painter_head_verdict(&[(None, burns_and_clip)]),
             PainterHead::FullDecode,
             "the burns alone: {what}"
         );
         assert_eq!(
-            painter_head_verdict(&[(f.tick, vec![])]),
+            painter_head_verdict(&[(f.tick, vec![MEASUREMENT_CLIP_RUN_ID])]),
             PainterHead::FullDecode,
             "the tick alone: {what}"
         );
