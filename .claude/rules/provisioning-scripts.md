@@ -493,14 +493,23 @@ section above), and a box that reads `degraded` hides real failures.
 - **An already-provisioned box is brought up to date WITHOUT a setup-device re-run** by
   `scripts/cambox-ro-units-apply.sh --plan|--apply --box <name>` (or `--active` for
   `CAMERA_ACTIVE_SET`). The remote program writes inside ONE verified ro window
-  (`.claude/rules/ro-window.md`, the sites table), then daemon-reload, stop the masked apt units,
-  reset-failed, one logrotate run, the netconsole restart, and an `is-system-running` = running
-  read-back. A box without the issue-1311 unit gets a NOTE and no new unit (that box needs its
+  (`.claude/rules/ro-window.md`, the sites table), the apt units stopped before it; then
+  daemon-reload, reset-failed, one logrotate run, the netconsole restart, and an
+  `is-system-running` = running read-back. A box without the issue-1311 unit gets a NOTE and no new unit (that box needs its
   setup-device re-run); the CLI's RESULT names it.
-  - **It is a root write on a cambox, so `--apply` refuses (exit 1, no box touched)** while the rig
-    lease is held by a live holder, while the issue-281 rig heartbeat is fresh, and while strih or
-    stream records/streams (`stray_session_check_assert`, the shared rig-busy guard). `--force-live`
-    skips the guard loudly (supervisor-only). `--plan` runs no guard.
+  - **It is a root write on a cambox, so `--apply` runs the rig guard before EVERY box** and refuses
+    (exit 1) while the rig is held (`rig_held_reason` in `scripts/lib/rig-heartbeat.sh`: a fresh
+    issue-281 heartbeat or a live issue-830 lease) or strih/stream record or stream
+    (`stray_session_check_assert`, the shared rig-busy guard, run in a subshell so its `exit 1`
+    returns to the CLI). A refusal mid-run stops before that box, names every untouched box and
+    still summarises the boxes already done: one box can take minutes (the netconsole arm waits for
+    dev1), so a guard read once per run let an E2E start in between (review round 2, reproduced).
+    `--force-live` skips the guard loudly (supervisor-only). `--plan` runs no guard.
+  - **The RESULT tells two failures apart:** a box whose files landed but a check after the close
+    failed (the netconsole arm, a failed unit; named by its first `FAIL: [issue 1394]` line) and a
+    box where the unit set did not land. A netconsole that cannot arm FAILS the box although
+    `is-system-running` then reads running: a `Restart=on-failure` oneshot in auto-restart is
+    `activating`, not `failed`.
   - **A failed unit is fixed by the apply, never by a setup-device re-run**: setup-device never runs
     `reset-failed`, and a cambox is never rebooted remotely. The `(ar)` hints say so.
   - **Tests point every rig input into tmp_path** (`RIG_LEASE_DIR`, `CAMERA_BOX_RIG_HEARTBEAT`,
