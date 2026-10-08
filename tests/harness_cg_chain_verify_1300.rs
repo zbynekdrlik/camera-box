@@ -20,8 +20,9 @@
 //! in `cg_chain_shallow_window` and in the OPTIONAL fourth `cg_chain_verdict` argument. The Rust
 //! `evaluate` is not extended: its only consumer is the `genlock-jitter-report --verdict-source`
 //! maintenance verify, whose `jitter_audit` input parses neither `shallow_depth=` nor the canvas
-//! rate. So the summary and the verdict with an EMPTY fourth argument stay pinned to the Rust code
-//! here; the shallow rule is covered by tests/python/test_cg_chain_verify_shallow_1302.py.
+//! rate, and the SongPlayer acceptance runs the bash tool. So the summary and the verdict with an
+//! EMPTY fourth argument stay pinned to the Rust code here; the shallow rule is covered by
+//! tests/python/test_cg_chain_verify_shallow_1302.py.
 //!
 //! RED before the lib/script exist (sourcing fails / anchors absent); GREEN after.
 

@@ -280,6 +280,12 @@ def test_the_csv_row_helper_takes_the_appended_column(tmp_path):
     assert len(header.split(",")) == len(row.split(",")) and row.endswith(",0,0,-99,3"), out
 
 
+def test_help_prints_the_shallow_paragraph():
+    r = subprocess.run(["bash", str(_TOOL), "--help"], capture_output=True, text=True)
+    assert "SHALLOW-LATCHED INPUTS (issue 1302)" in r.stdout
+    assert "the token is graded exactly as before." in r.stdout
+
+
 # ---------------------------------------------------------------------------------------------
 # the rig-health fold still reads the verdict as the last token
 # ---------------------------------------------------------------------------------------------

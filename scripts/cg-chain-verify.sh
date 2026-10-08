@@ -39,6 +39,13 @@ set -euo pipefail
 # currently senderless). When that input has no `genlock-fifo audit` line in the window -- it is
 # missing, or it has received no frame since OBS start -- the hop prints a named ABSENT row and does
 # not fail the run (cg_chain_hop_absent_ok); a missing strih `cg` still FAILs.
+#
+# SHALLOW-LATCHED INPUTS (issue 1302): an input whose audit line carries `shallow_depth=` D > 0 (the
+# strih-lx `CG-obs` at a 3 ms pin, issue 1367) is held at D frames by design, so its head age reads
+# D x interval. Its skew term is the head age's EXCURSION from D x 1000 / <canvas fps> (the SKEWms
+# column + the CSV skew column; a `shallow:` line under the row names D and the raw max), and a
+# `shallow_latches=` delta (column dLTCH, CSV d_shallow_latches) FAILs as a lock event. A log without
+# the token is graded exactly as before.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/cg-chain-verify.sh
@@ -57,7 +64,7 @@ INTERVAL_S=300
 CSV_PATH=""
 REPORT_ONLY=0
 
-usage() { sed -n '2,41p' "${BASH_SOURCE[0]}"; }
+usage() { sed -n '2,48p' "${BASH_SOURCE[0]}"; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -121,8 +128,10 @@ _iterations() {
   }'
 }
 
-printf '%-7s %-14s %-4s %-5s %-7s %-6s %-5s %-5s %-6s %-5s %-9s %-12s %s\n' \
-  HOP SOURCE LOCK SAMP SKEWms dDROP dUND dREL dLATE dBRT ASRCppm AUDIO VERDICT
+# VERDICT stays the LAST column: rig-health-audit.py cg_chain_detail_from_output reads it as the
+# last token of a row (issue 1302 put the dLTCH column before it).
+printf '%-7s %-14s %-4s %-5s %-7s %-6s %-5s %-5s %-6s %-5s %-9s %-12s %-6s %s\n' \
+  HOP SOURCE LOCK SAMP SKEWms dDROP dUND dREL dLATE dBRT ASRCppm AUDIO dLTCH VERDICT
 
 overall_fail=0
 verified=0
@@ -133,6 +142,7 @@ fi
 run_one_window() {
   local hop log sources src summary verdict_out verdict ts asrc band
   local samples maxskew d_drop d_und d_rel d_late d_brt lck
+  local shallow sh_graded sh_term sh_depth sh_target sh_dlatch sh_fps rawskew dltchw
   for hop in $HOPS; do
     log="$(_read_hop "$hop")"
     if [ -z "$log" ]; then
@@ -160,7 +170,10 @@ run_one_window() {
         fi
         continue
       fi
-      verdict_out="$(cg_chain_verdict "$summary" "$SKEW_BOUND_MS" "$MIN_SAMPLES")"
+      # issue 1302: the shallow-latch facet (EMPTY on a log from before issue 1367 -> the verdict and
+      # every printed value stay exactly as before).
+      shallow="$(printf '%s\n' "$log" | cg_chain_shallow_window "$src")"
+      verdict_out="$(cg_chain_verdict "$summary" "$SKEW_BOUND_MS" "$MIN_SAMPLES" "$shallow")"
       verdict="$(printf '%s\n' "$verdict_out" | head -1)"
       asrc="$(printf '%s\n' "$log" | cg_chain_parse_asrc_ppm "$src")"
       band="$(cg_chain_asrc_in_band "$asrc" "$ASRC_FLOOR_PPM")"
@@ -170,6 +183,15 @@ run_one_window() {
       else
         samples=0; maxskew="-"; d_drop="-"; d_und="-"; d_rel="-"; d_late="-"; d_brt="-"; lck=0
       fi
+      sh_graded=0; sh_term=""; sh_depth=""; sh_target=""; sh_dlatch=""; sh_fps=""
+      if [ -n "$shallow" ]; then
+        IFS='|' read -r sh_graded sh_term sh_depth sh_target sh_dlatch sh_fps <<<"$shallow"
+      fi
+      # SKEWms (and the CSV skew column) carry the GRADED term: the excursion from the latched depth
+      # for a shallow-latched input, the absolute max skew otherwise.
+      rawskew="$maxskew"
+      [ "${sh_graded:-0}" -gt 0 ] && maxskew="$sh_term"
+      dltchw="${sh_dlatch:--}"
       # asrc out-of-band (a present reading beyond +/-floor, e.g. the -18 ppm port-collision
       # signature) folds into the verdict; UNKNOWN (no asrc line) never fails.
       if [ "$band" = "0" ]; then
@@ -191,8 +213,12 @@ run_one_window() {
       else
         aud_en=""; aud_dl=""; aud_po=""; audiow="n/a"
       fi
-      printf '%-7s %-14s %-4s %-5s %-7s %-6s %-5s %-5s %-6s %-5s %-9s %-12s %s\n' \
-        "$hop" "$src" "$lockw" "$samples" "$maxskew" "$d_drop" "$d_und" "$d_rel" "$d_late" "$d_brt" "$asrcw" "$audiow" "$verdict"
+      printf '%-7s %-14s %-4s %-5s %-7s %-6s %-5s %-5s %-6s %-5s %-9s %-12s %-6s %s\n' \
+        "$hop" "$src" "$lockw" "$samples" "$maxskew" "$d_drop" "$d_und" "$d_rel" "$d_late" "$d_brt" "$asrcw" "$audiow" "$dltchw" "$verdict"
+      if [ "${sh_graded:-0}" -gt 0 ]; then
+        printf '         shallow: latched depth %s frame(s) = %s ms @ %s fps; SKEWms is the head-age excursion from it (raw max |skew| %s ms)\n' \
+          "$sh_depth" "$sh_target" "$sh_fps" "$rawskew"
+      fi
       verified=$((verified + 1))
       if [ "$verdict" != "PASS" ]; then
         overall_fail=1
@@ -200,7 +226,7 @@ run_one_window() {
       fi
       if [ -n "$CSV_PATH" ]; then
         ts="$(_now_utc)"
-        cg_chain_csv_row "$ts" "$hop" "$src" "$verdict" "$maxskew" "$d_drop" "$d_und" "$d_rel" "$d_late" "$d_brt" "${asrc:-}" "${aud_en:-}" "${aud_dl:-}" "${aud_po:-}" >> "$CSV_PATH"
+        cg_chain_csv_row "$ts" "$hop" "$src" "$verdict" "$maxskew" "$d_drop" "$d_und" "$d_rel" "$d_late" "$d_brt" "${asrc:-}" "${aud_en:-}" "${aud_dl:-}" "${aud_po:-}" "${sh_dlatch:-}" >> "$CSV_PATH"
       fi
     done <<<"$sources"
   done
