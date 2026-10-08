@@ -38,12 +38,25 @@ Verdicts, thresholds, calibration and limits: `.claude/rules/program-audio-guard
 endpoint: restreamer on main (its PRs 384 and 385) and the camera-box guard's `DEFAULT_URL`. So:
 - the dev1 `--user` unit file is deleted from the repo;
 - the dev1 unit was disabled live (`systemctl --user disable --now program-audio-sampler.service`);
-- the dev1 rig-lease server answers 404 for `/program-audio.json`.
+- the dev1 rig-lease server answers 404 for `/program-audio.json` once it runs this code. Until its
+  restart it still serves the last file the dev1 sampler left, an UNKNOWN "sampler stopped"
+  (fail closed, nobody reads it).
 
-A dev1 that still has the old unit file installed can drop it, while the rig lease reads
-`held=false`:
-`rm ~/.config/systemd/user/program-audio-sampler.service; systemctl --user daemon-reload`.
-Nothing on dev1 reads it.
+Post-merge, on dev1 (supervisor). Restart the lease server only while the lease reads
+`held=false`; the restart is the only step that touches a running service:
+
+```bash
+if curl -sf http://127.0.0.1:8890/rig-lease.json \
+     | python3 -c 'import json, sys; sys.exit(0 if json.load(sys.stdin).get("held") is False else 1)'; then
+  systemctl --user restart rig-lease-server.service
+else
+  echo "rig lease held or unreadable -- lease server NOT restarted, retry later"
+fi
+rm -f "$XDG_RUNTIME_DIR/rig-lease-serve/program-audio.json"   # the dev1 sampler's last file
+rm -f ~/.config/systemd/user/program-audio-sampler.service && systemctl --user daemon-reload
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8890/program-audio.json   # 404
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8890/rig-lease.json       # 200
+```
 
 ## What the sampler does (issue 1404, designs 6030385284, 6036098516, 6037613222)
 

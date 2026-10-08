@@ -231,8 +231,9 @@ without a serve dir. A file another user owns is never served.
 - **The server stays stdlib-only.** The numpy analysis lives in the sampler, never here.
 - **`/program-audio.json` is no dev1 route any more (retired 8.10.2026, design 6054654255).** The
   program-audio sampler moved to strih-lx and serves its own `:8891/program-audio.json`
-  (`.claude/rules/program-audio-guard.md`, "The host"); every consumer reads that. The dev1 server
-  answers its plain 404 for the path even when an old payload sits in its serve dir
+  (`.claude/rules/program-audio-guard.md`, "The host"); every consumer reads that. Running this
+  code (a restart while `held=false`, `systemd/program-audio-sampler.README.md` post-merge step),
+  the dev1 server answers its plain 404 for the path even when an old payload sits in its serve dir
   (`test_the_dev1_server_no_longer_serves_program_audio`), and the dev1 sampler unit file is gone.
   The payload rules (ages per request, a chain-less MEASUREMENT = UNKNOWN) stay in
   `rig_serve_files.program_audio_response`, used by the sampler's endpoint.

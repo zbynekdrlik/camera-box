@@ -45,7 +45,8 @@ Two read-only endpoints:
   (`http://10.77.9.202:8891/program-audio.json`, "The host" below). Its serve dir is its own
   `$XDG_RUNTIME_DIR/program-audio-sampler` (override `$PROGRAM_AUDIO_SERVE_DIR`), never the lease
   server's. The dev1 copy was retired on 8.10.2026 (design 6054654255): the dev1 unit file is
-  deleted, and the dev1 server answers its plain 404 for `/program-audio.json`, so a stale file
+  deleted, and once the dev1 lease server runs this code (a restart while `held=false`, the
+  README's post-merge step) it answers its plain 404 for `/program-audio.json`, so a stale file
   left in its serve dir never reads as a live verdict.
 
 | Route | Writer | Contract |
@@ -572,8 +573,9 @@ shim + numpy next to restreamer's broadcast encoder).
 - **The dev1 copy is retired (8.10.2026, design 6054654255).** The consumers read
   `http://10.77.9.202:8891/program-audio.json`: restreamer on main (its PRs 384 and 385) and the
   camera-box guard's `DEFAULT_URL`. So the dev1 `--user` unit file is deleted, the dev1 lease server
-  answers its plain 404 for `/program-audio.json`, and the sampler has no dev1 default left. The dev1
-  unit was disabled live the same day. A rollback to dev1 is a revert of that commit, never a live
+  answers its plain 404 for `/program-audio.json` (after its restart on this code: the README's
+  post-merge step), and the sampler has no dev1 default left. The dev1 unit was disabled live the
+  same day. A rollback to dev1 is a revert of that commit, never a live
   need: the owner ruled the sampler off dev1. Pinned: `test_the_dev1_sampler_unit_is_gone`,
   `test_the_dev1_server_no_longer_serves_program_audio`, `test_the_default_serve_dir_is_the_samplers_own`.
 - **The unit** `systemd/program-audio-sampler.strih-lx.service` (a TEMPLATE) is installed as the
