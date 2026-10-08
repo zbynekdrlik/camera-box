@@ -168,6 +168,9 @@ ro_root_logrotate_dropin_content() {
 # never goes through these units. setup-device.sh STEP 15, build-image.sh (the overlay image), the
 # cambox live apply (scripts/lib/cambox-ro-units.sh) and verify-device (ar) all read this ONE list.
 # The handheld SBC does not use it yet (its own masks are bkshading_sbc_masked_units).
+# dpkg-db-backup (live 8.10.2026): its daily savelog into /var/backups fails on the read-only root
+# (exit 4) and left cam3/cam4/cam6/cam7 degraded after the apt masks, so it is masked here too.
 ro_root_masked_apt_units() {
-  printf '%s\n' apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service
+  printf '%s\n' apt-daily.timer apt-daily-upgrade.timer apt-daily.service apt-daily-upgrade.service \
+    dpkg-db-backup.timer dpkg-db-backup.service
 }
