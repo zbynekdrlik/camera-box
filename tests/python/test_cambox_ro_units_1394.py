@@ -1017,9 +1017,9 @@ def test_rig_held_reason_skips_the_callers_own_lease(tmp_path):
     (lease / "heartbeat").write_text("")
     env = {"RIG_LEASE_DIR": str(lease), "CAMERA_BOX_RIG_HEARTBEAT": str(tmp_path / "rig-active")}
     lib = LIB / "rig-heartbeat.sh"
-    r = _bash(f'set -euo pipefail\n. "{lib}"\nif rig_held_reason 5400 mine-1; then echo HELD; else echo FREE; fi\n'
-              f'if rig_held_reason 5400 other; then echo HELD; else echo FREE; fi\n'
-              f'if rig_held_reason; then echo HELD; else echo FREE; fi', env=env)
+    r = _bash(f'set -euo pipefail\n. "{lib}"\nif rig_held_reason 5400 mine-1 >/dev/null; then echo HELD; else echo FREE; fi\n'
+              f'if rig_held_reason 5400 other >/dev/null; then echo HELD; else echo FREE; fi\n'
+              f'if rig_held_reason >/dev/null; then echo HELD; else echo FREE; fi', env=env)
     assert r.returncode == 0, r.stderr
     assert r.stdout.split() == ["FREE", "HELD", "HELD"], r.stdout
 
