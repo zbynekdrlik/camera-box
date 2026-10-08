@@ -416,8 +416,9 @@ wrong PR with no review of it.
   so no bare `git push` can ever target `dev`.
 - **A lane deletes every scratch dir it created (downloaded bundles, stage copies, experiment
   trees) before its LANE-RETURN; the supervisor deletes a merged lane's leftovers at integration;
-  and ANY session (supervisor included) deletes a downloaded CI bundle or artifact as soon as the
-  deploy or measurement that needed it is verified, keeping at most the one in use** (issue 1395:
+  and ANY session (supervisor included) deletes every scratch dir it created, downloaded CI
+  bundles first, once the deploy or measurement that needed it is verified, keeping at most the
+  one in use** (issue 1395:
   9 copies of a 2.2 GB strih bundle piled up to 25 GB in one session scratchpad on dev1's one
   shared disk; the E2E run dirs are bounded by `scripts/lib/e2e-rundir-retention.sh`).
 - **A worker's OWN local `origin/dev` tracking ref can drift AHEAD mid-session too** (confirmed

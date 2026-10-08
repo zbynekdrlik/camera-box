@@ -51,7 +51,9 @@
 #     an unexpected expansion error stays inside it;
 #   * the caller's shell state never changes the outcome: the subshell turns pathname expansion
 #     back on, clears nocasematch/nocaseglob/failglob and GLOBIGNORE, and runs with the default IFS
-#     and LC_ALL=C (nothing of it leaks back to the caller).
+#     and LC_ALL=C (nothing of it leaks back to the caller). The one exception: a caller that made
+#     IFS or LC_ALL readonly ends the subshell at the reset, so nothing is pruned and no line is
+#     logged (the caller still continues with rc 0; recording-e2e.sh makes neither readonly).
 
 e2e_rundir_retention() {
   (_e2e_rundir_retention_run "$@") || true

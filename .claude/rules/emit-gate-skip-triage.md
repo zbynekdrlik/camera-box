@@ -36,8 +36,10 @@ starvation slots get a bounded last-frame REPEAT fill (issue 1167 v4, `dupe_deci
 
 ## The triage procedure (do this before ever "fixing" a #707 skip — it is usually benign)
 
-Two independent correlations, from an E2E run's own durable artifacts under
-`/tmp/recording-e2e-<id>/` (or downloaded from the green run's artifacts):
+Two independent correlations, from an E2E run's own artifacts under
+`/tmp/recording-e2e-<id>/` (dev1 keeps only the newest 9 run dirs since issue 1395 and the CI
+artifact carries no cambox burn log, so copy a run out of /tmp while it is there; see the
+`scripts/lib/e2e-rundir-retention.sh` header):
 
 1. **SOURCE side — the decisive one.** In the cambox burn log (`camN-cbox-burn-<id>.log`) each
    `#707 emit-1s: [..] cap-1s: [..]` status line (~every 5 s, 5 sliding 1-s buckets, oldest

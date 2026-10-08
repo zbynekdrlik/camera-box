@@ -342,13 +342,19 @@ def test_the_wrapper_returns_0_whatever_the_body_does(tmp_path):
 
 
 def test_the_log_line_reports_the_size_freed(tmp_path):
+    """du -sk reports KiB; 5000 KiB is 4.88 MiB, printed with one truncated decimal as 4.8."""
     parent = tmp_path / "p"
     parent.mkdir()
     current = _mkrun(parent, "recording-e2e-1", 0)
-    _mkrun(parent, "recording-e2e-2", 7200, payload=b"x" * (3 * 1024 * 1024))
-    lines, _ = _run([parent, current, "0"])
-    m = re.search(r"removed 1 \((\d+\.\d) MB freed\)", lines[0])
-    assert m and 2.9 <= float(m.group(1)) <= 3.3, lines
+    _mkrun(parent, "recording-e2e-2", 7200)
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    du_stub = stubs / "du"
+    du_stub.write_text('#!/bin/sh\nfor a in "$@"; do last="$a"; done\nprintf \'5000\\t%s\\n\' "$last"\n')
+    du_stub.chmod(0o755)
+    lines, _ = _run([parent, current, "0"], path_prefix=stubs)
+    assert len(lines) == 1 and "removed 1 (4.8 MB freed)" in lines[0], lines
+    assert _names(parent) == ["recording-e2e-1"]
 
 
 def test_the_lib_is_source_only():

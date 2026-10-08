@@ -442,7 +442,9 @@ per-patch means are logged (ANSI-coloured) as `colour-dump (localized per-patch 
 expected=... mean=... chroma=... hue=... frames=12` lines inside
 `/tmp/recording-e2e-<RUN_ID>/{strih,stream}-extract-<RUN_ID>.log` — one line per patch (0-12, order
 white/black/R/G/B/C/M/Y/g0/g64/g128/g192/g255, `PATCH_COLOURS`). To extract a timeseries across
-many past runs (strip the ANSI codes FIRST or `grep "patch=N "` silently matches nothing):
+past runs (strip the ANSI codes FIRST or `grep "patch=N "` silently matches nothing; dev1 keeps
+only the newest 9 run dirs since issue 1395 and the CI artifact carries no extract log, so a
+longer series needs runs copied out of /tmp, see the `scripts/lib/e2e-rundir-retention.sh` header):
 ```bash
 for f in $(grep -rl "colour-dump" /tmp/recording-e2e-*/strih-extract-*.log 2>/dev/null); do
   mtime=$(stat -c '%y' "$f" | cut -d. -f1)
