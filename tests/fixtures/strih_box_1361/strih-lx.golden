@@ -183,9 +183,9 @@ TARGET_IP="${STRIH_LX_TARGET_IP:-10.77.9.202}"
 log() { printf 'strih-nic-irq-affinity: %s\n' "$*"; }
 die() { printf 'strih-nic-irq-affinity: FATAL: %s\n' "$*" >&2; exit 1; }
 
-# (1) NIC iface -- STRIH_NIC_IFACE override wins; else resolve by DRIVER (the r8152 USB NIC), which
+# (1) NIC iface -- STRIH_NIC_IFACE override wins; else resolve by DRIVER (the atlantic USB NIC), which
 # works at boot BEFORE any address is assigned; else fall back to the address match. Exactly one
-# r8152 iface is expected -- more than one fails LOUD (set STRIH_NIC_IFACE to disambiguate).
+# atlantic iface is expected -- more than one fails LOUD (set STRIH_NIC_IFACE to disambiguate).
 iface="${STRIH_NIC_IFACE:-}"
 if [ -z "$iface" ]; then
   matches=""
@@ -196,15 +196,15 @@ if [ -z "$iface" ]; then
     _dl="$(readlink -f "${_net}/device/driver" 2>/dev/null || true)"
     _drv=""
     [ -n "$_dl" ] && _drv="$(basename "$_dl")"
-    [ "$_drv" = r8152 ] && matches="${matches:+$matches }$_ifc"
+    [ "$_drv" = atlantic ] && matches="${matches:+$matches }$_ifc"
   done
   case "$matches" in
-    *" "*) die "multiple r8152 NICs (${matches}) -- set STRIH_NIC_IFACE" ;;
+    *" "*) die "multiple atlantic NICs (${matches}) -- set STRIH_NIC_IFACE" ;;
     "")    iface="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$TARGET_IP" 'BEGIN { gsub(/\./, "\\.", ip) } $4 ~ ("^" ip "/") { print $2; exit }' || true)" ;;
     *)     iface="$matches" ;;
   esac
 fi
-[ -n "$iface" ] || die "could not resolve the NIC iface (no r8152, no ${TARGET_IP} address; set STRIH_NIC_IFACE)"
+[ -n "$iface" ] || die "could not resolve the NIC iface (no atlantic, no ${TARGET_IP} address; set STRIH_NIC_IFACE)"
 
 # (2) xhci host controller PCI function = walk the device symlink up to the usbN root.
 dev="$(readlink -f "${SYS_ROOT}/class/net/${iface}/device" 2>/dev/null || true)"

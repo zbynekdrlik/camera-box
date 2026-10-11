@@ -139,7 +139,9 @@ def test_the_stream_role_skips_the_strih_only_steps(boxes):
 def test_the_strih_role_runs_them(boxes):
     assert _steps(boxes, "strih-pp") == {"3-nvenc": "RUN", "6-hdmi": "RUN", "11b": "SKIP", "14": "RUN",
                                         "16": "RUN", "16c": "RUN", "16e": "SKIP", "4b": "RUN"}
-    assert set(_steps(boxes, "strih-lx").values()) == {"RUN"}
+    # issue 1411: strih-lx's rig NIC is PCIe (the 10 GbE Thunderbolt Aquantia), so only 11b skips.
+    assert _steps(boxes, "strih-lx") == {"3-nvenc": "RUN", "6-hdmi": "RUN", "11b": "SKIP", "14": "RUN",
+                                        "16": "RUN", "16c": "RUN", "16e": "RUN", "4b": "RUN"}
 
 
 # --- obs_box_role_apply: session apps + the venue's NDI sender list ------------------------------------

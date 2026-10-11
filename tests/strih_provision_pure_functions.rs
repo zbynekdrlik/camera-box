@@ -3379,12 +3379,19 @@ fn nic_iface_by_driver_resolves_r8152_and_fails_loud_on_multiple() {
 fn emitted_irq_script_resolves_iface_by_driver_without_the_address() {
     // With NO STRIH_NIC_IFACE and NO matching address in the fixture, the boot script must STILL
     // resolve the iface via the r8152 driver (the whole point of the boot-safe path) and pin cpu 15.
+    // issue 1411: strih-lx's own rig NIC is PCIe now (atlantic), so the script is rendered for a USB
+    // box -- the strih-lx facts with the r8152 driver -- the only kind of box that installs it.
     let dir = irq_fixture("enx6c1ff766154b");
     let root = dir.path().to_str().unwrap().to_string();
-    let body = "strih_nic_irq_affinity_script_text > \"$FX/affinity.sh\"; \
+    let boxes = manifest_dir().join("scripts/strih-boxes");
+    let boxes = boxes.to_str().unwrap();
+    let body = "mkdir -p \"$FX/boxes\"; \
+                sed 's/^STRIH_NIC_DRIVER=.*/STRIH_NIC_DRIVER=r8152/' \"$BOXES/strih-lx.env\" > \"$FX/boxes/strih-lx.env\"; \
+                export STRIH_BOXES_DIR=\"$FX/boxes\"; \
+                strih_nic_irq_affinity_script_text > \"$FX/affinity.sh\"; \
                 SYS_ROOT=\"$FX/sys\" PROC_INTERRUPTS=\"$FX/interrupts\" CPU_ATOM_FILE=\"$FX/cpu_atom\" \
                 IRQ_DIR=\"$FX/irq\" bash \"$FX/affinity.sh\"";
-    let (code, out, err) = run_sourced(&[("FX", root.as_str())], body);
+    let (code, out, err) = run_sourced(&[("FX", root.as_str()), ("BOXES", boxes)], body);
     assert_eq!(
         code, 0,
         "boot script must resolve by driver with no address; stderr={err} stdout={out}"
@@ -3555,8 +3562,9 @@ const IP_ADDR: &str = "1: lo    inet 127.0.0.1/8 scope host lo\n\
                        3: enx00e04c680001    inet 10.77.9.202/23 brd 10.77.9.255 scope global enx00e04c680001\n";
 
 #[test]
-fn rig_nic_prefers_the_override_then_the_one_r8152_then_the_static_ip() {
-    let one = fake_sysroot(&[("enx00e04c680001", "r8152"), ("enp3s0", "r8169")]);
+fn rig_nic_prefers_the_override_then_the_one_fact_driver_nic_then_the_static_ip() {
+    // issue 1411: strih-lx's rig NIC driver fact is the in-tree atlantic (the 10 GbE Thunderbolt NIC).
+    let one = fake_sysroot(&[("enx00e04c680001", "atlantic"), ("enp3s0", "r8169")]);
     let root = one.path().to_str().unwrap();
     let (c, out, err) = run_sourced(
         &[("R", root), ("A", IP_ADDR)],
@@ -3565,7 +3573,7 @@ fn rig_nic_prefers_the_override_then_the_one_r8152_then_the_static_ip() {
     assert_eq!(
         (c, out.as_str()),
         (0, "enx00e04c680001"),
-        "the ONE r8152 NIC wins; stderr={err}"
+        "the ONE atlantic NIC wins; stderr={err}"
     );
 
     let (c, out, _e) = run_sourced(
@@ -3578,7 +3586,7 @@ fn rig_nic_prefers_the_override_then_the_one_r8152_then_the_static_ip() {
         "STRIH_NIC_IFACE overrides everything"
     );
 
-    // no r8152 -> the interface carrying the static IP
+    // no atlantic -> the interface carrying the static IP
     let none = fake_sysroot(&[("enp3s0", "r8169"), ("enx00e04c680001", "cdc_ncm")]);
     let (c, out, _e) = run_sourced(
         &[("R", none.path().to_str().unwrap()), ("A", IP_ADDR)],
@@ -3590,8 +3598,11 @@ fn rig_nic_prefers_the_override_then_the_one_r8152_then_the_static_ip() {
         "falls back to the STATIC_IP interface"
     );
 
-    // two r8152 NICs -> ambiguous by driver -> the static-IP interface decides
-    let two = fake_sysroot(&[("enx00e04c680001", "r8152"), ("enx00e04c680002", "r8152")]);
+    // two atlantic NICs -> ambiguous by driver -> the static-IP interface decides
+    let two = fake_sysroot(&[
+        ("enx00e04c680001", "atlantic"),
+        ("enx00e04c680002", "atlantic"),
+    ]);
     let (c, out, _e) = run_sourced(
         &[("R", two.path().to_str().unwrap()), ("A", IP_ADDR)],
         "strih_lx_rig_nic \"$R\" \"$A\" 10.77.9.202",

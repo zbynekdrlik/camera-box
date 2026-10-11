@@ -151,10 +151,12 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_DANTESYNC_ROLE=server",
         "STRIH_DANTESYNC_UPSTREAM=",
         "STRIH_INTERCOM_CONFIG=intercom/intercom.strih-lx.toml",
-        "STRIH_NIC_DRIVER=r8152",
-        "STRIH_NIC_OOT_DRIVER=realtek-r8152-2.21.4",
-        "STRIH_NIC_MIN_USB_MBPS=10000",
-        "STRIH_NIC_MIN_LINK_MBPS=5000",
+        // issue 1411: the new notebook's rig NIC is the 10 GbE Thunderbolt Aquantia (in-tree atlantic,
+        // PCIe, no USB device), replacing the returned notebook's USB RTL8157 (r8152).
+        "STRIH_NIC_DRIVER=atlantic",
+        "STRIH_NIC_OOT_DRIVER=none",
+        "STRIH_NIC_MIN_USB_MBPS=none",
+        "STRIH_NIC_MIN_LINK_MBPS=10000",
         "STRIH_OBS_PROFILE=strih-lx",
         "STRIH_OBS_COLLECTION=strih-lx",
         "STRIH_NDI_RUNTIME_PEER=10.77.9.61",
@@ -212,7 +214,7 @@ fn several_todo_owner_values_are_each_named() {
         &d,
         "strih-lx",
         &[
-            ("STRIH_NIC_DRIVER=r8152", "STRIH_NIC_DRIVER=TODO_OWNER"),
+            ("STRIH_NIC_DRIVER=atlantic", "STRIH_NIC_DRIVER=TODO_OWNER"),
             ("STRIH_CAMERAS=1 2 3 4 5 6 7", "STRIH_CAMERAS=TODO_OWNER"),
             ("STRIH_ROLE=strih", "STRIH_ROLE=TODO_OWNER"),
         ],
@@ -231,7 +233,7 @@ fn a_single_todo_owner_value_is_refused_by_name() {
     fixture_box(
         &d,
         "strih-lx",
-        &[("STRIH_NIC_DRIVER=r8152", "STRIH_NIC_DRIVER=TODO_OWNER")],
+        &[("STRIH_NIC_DRIVER=atlantic", "STRIH_NIC_DRIVER=TODO_OWNER")],
     );
     let dir = d.path().to_string_lossy().into_owned();
     let (c, _o, err) = with_loader(&[("STRIH_BOXES_DIR", &dir)], "strih_box_load strih-lx");
@@ -256,7 +258,7 @@ fn malformed_fact_files_are_refused() {
         ),
         (
             "missing key",
-            vec![("STRIH_NIC_DRIVER=r8152\n", "")],
+            vec![("STRIH_NIC_DRIVER=atlantic\n", "")],
             "missing fact STRIH_NIC_DRIVER",
         ),
         (
@@ -373,7 +375,7 @@ fn malformed_fact_files_are_refused() {
         ),
         (
             "empty required fact",
-            vec![("STRIH_NIC_DRIVER=r8152", "STRIH_NIC_DRIVER=")],
+            vec![("STRIH_NIC_DRIVER=atlantic", "STRIH_NIC_DRIVER=")],
             "STRIH_NIC_DRIVER is empty",
         ),
         (
@@ -785,7 +787,7 @@ fn every_fact_dependent_output_follows_a_different_box() {
                 "STRIH_DANTESYNC_UPSTREAM=\n",
                 "STRIH_DANTESYNC_UPSTREAM=venue-ntp.lan\n",
             ),
-            ("STRIH_NIC_DRIVER=r8152", "STRIH_NIC_DRIVER=r8169"),
+            ("STRIH_NIC_DRIVER=atlantic", "STRIH_NIC_DRIVER=r8169"),
             ("STRIH_OBS_PROFILE=strih-lx", "STRIH_OBS_PROFILE=zz-profile"),
             (
                 "STRIH_OBS_COLLECTION=strih-lx",
@@ -821,7 +823,7 @@ fn every_fact_dependent_output_follows_a_different_box() {
         "10.77.9.202",
         "10.77.9.61",
         "10.77.9.205",
-        "r8152",
+        "atlantic",
         "STRIH-LX",
         "strih-lx",
         "RESOLUME-SNV",
