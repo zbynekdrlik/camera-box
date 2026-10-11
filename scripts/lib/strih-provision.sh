@@ -500,6 +500,11 @@ strih_intercom_audio_dropin() {
 # intercom-hub local-audio override (issue 1344) — installed by setup-strih step 12.
 # Run the hub as the operator so its pw-cat program-sink + talkback-capture children reach the
 # operator's PipeWire session. Do NOT edit by hand.
+[Unit]
+# The operator session must exist for /run/user/<uid>/pipewire-0 to be present. An ordering key
+# belongs in [Unit]: systemd ignores After= in [Service] (issue 1412, stream-pp 11.10.2026).
+After=user@${uid}.service
+
 [Service]
 DynamicUser=no
 User=${user}
@@ -507,8 +512,6 @@ Group=${user}
 SupplementaryGroups=audio pipewire render
 Environment=XDG_RUNTIME_DIR=/run/user/${uid}
 Environment=PIPEWIRE_RUNTIME_DIR=/run/user/${uid}
-# The operator session must exist for /run/user/<uid>/pipewire-0 to be present.
-After=user@${uid}.service
 # ProtectHome=read-only keeps /run/user/<uid> reachable (ProtectHome=tmpfs/yes would HIDE it and
 # break PipeWire); narrow the residual read-only \$HOME exposure by blanking the sensitive dirs
 # (\`-\` = tolerate absence). A DynamicUser gave no home at all, so this is the minimal downgrade
