@@ -185,6 +185,7 @@ read -r _ _cs_a <<<"$(_cs_sum)"
 sleep 1
 read -r _cs_n _cs_b <<<"$(_cs_sum)"
 echo "cstate_states=${_cs_n}"
+echo "cpuidle_driver=$(cat "$_cs_root/cpuidle/current_driver" 2>/dev/null | first)"
 echo "cstate_deep=${_cs_deep}"
 echo "cstate_deep_delta=$(case "${_cs_a}${_cs_b}" in ''|*[!0-9]*) ;; *) echo $((_cs_b - _cs_a)) ;; esac)"
 echo "ppd=$(systemctl is-enabled power-profiles-daemon.service 2>/dev/null | first)"
@@ -203,6 +204,7 @@ echo "obs_running=$(if ! command -v pgrep >/dev/null 2>&1; then :; elif [ -n "$_
 echo "obs_rtprio_limit=$(if [ -n "$_op" ]; then awk '/^Max realtime priority/{print $4; exit}' "/proc/${_op}/limits" 2>/dev/null; fi)"
 echo "dgpu=$(if lspci -nn 2>/dev/null | obs_box_has_discrete_nvidia; then echo 1; else echo 0; fi)"
 echo "prime=$(prime-select query 2>/dev/null | first)"
+echo "display_gpus=$(lspci -nn 2>/dev/null | grep -Eic '(vga compatible controller|3d controller|display controller)')"
 echo "igpu_unit=$(systemctl is-enabled "${BOX}-igpu-maxperf.service" 2>/dev/null | first)"
 echo "oomd=$(systemctl is-enabled systemd-oomd.service 2>/dev/null | first)"
 echo "offhours=$(fexists "/etc/systemd/system/apt-daily-upgrade.timer.d/${BOX}-offhours.conf")"
@@ -314,14 +316,16 @@ obs_box_baseline_verdict() {
     # cstate -- the PM QoS idle wake-up latency bound (issue 1357): obs-box-cpu-latency.service enabled +
     # active with the baseline bound configured, at least one cpuidle state readable, and no state whose
     # exit latency exceeds the bound entered during the gather's 1 s sample (the kernel honours the held
-    # request; a box with no deeper state trivially passes that part)
+    # request; a box with no deeper state trivially passes that part). Issue 1412: a box with NO cpuidle driver
+    # (current_driver none, no states: strih-pp with C-states off in the BIOS) enters no deep state at all
     local cs_delta cs_states cs_bound
     cs_delta="$(_obs_box_f cstate_deep_delta)"
     cs_states="$(_obs_box_f cstate_states)"
     cs_bound="$(_obs_box_f cstate_bound)"
     ok=0; [ "$(_obs_box_f cstate_unit)" = enabled ] && [ "$(_obs_box_f cstate_active)" = active ] \
         && [ "$cs_bound" = "$(obs_box_cpu_latency_bound_us)" ] \
-        && [[ "$cs_states" =~ ^[1-9][0-9]*$ ]] && [ "$cs_delta" = 0 ] && ok=1
+        && { { [[ "$cs_states" =~ ^[1-9][0-9]*$ ]] && [ "$cs_delta" = 0 ]; } \
+            || { [ "$cs_states" = 0 ] && [ "$(_obs_box_f cpuidle_driver)" = none ]; }; } && ok=1
     _obs_box_item cstate "$ok" "obs-box-cpu-latency.service=$(_obs_box_f cstate_unit)/$(_obs_box_f cstate_active) bound=${cs_bound:-unset} us (baseline $(obs_box_cpu_latency_bound_us) us) cpuidle-states=${cs_states:-unreadable} deeper-than-bound=[$(_obs_box_f cstate_deep)] entries-in-1s=${cs_delta:-unreadable}"
     # nosleep -- sleep.target masked + both logind drop-ins
     ok=0; [ "$(_obs_box_f sleep_target)" = masked ] && [ "$(_obs_box_f logind_nosleep)" = 1 ] && [ "$(_obs_box_f logind_powerkey)" = 1 ] && ok=1
@@ -354,8 +358,10 @@ obs_box_baseline_verdict() {
     _obs_box_item rtprio "$ok" "genlock rtprio grants=[$(_obs_box_f rtprio_grants)] OBS running=${orun:-unreadable} realtime limit=${rl:-unreadable}"
     # gpu -- a dGPU box renders NVIDIA-primary (PRIME); an iGPU-only box has nothing to select
     if [ "$(_obs_box_f dgpu)" = 1 ]; then
-        ok=0; [ "$(_obs_box_f prime)" = nvidia ] && ok=1
-        _obs_box_item gpu "$ok" "discrete NVIDIA present, prime-select=$(_obs_box_f prime)"
+        # issue 1412: with the NVIDIA as the ONLY display adapter (strih-pp, a desktop) there is no PRIME
+        # pair; prime-select nvidia answers "no integrated GPU detected" and the query stays on-demand.
+        ok=0; { [ "$(_obs_box_f prime)" = nvidia ] || [ "$(_obs_box_f display_gpus)" = 1 ]; } && ok=1
+        _obs_box_item gpu "$ok" "discrete NVIDIA present, prime-select=$(_obs_box_f prime) display-adapters=$(_obs_box_f display_gpus)"
     else
         ok=0; [ "$(_obs_box_f igpu_unit)" = enabled ] && ok=1
         _obs_box_item gpu "$ok" "no discrete NVIDIA GPU: the iGPU max-frequency pin unit=$(_obs_box_f igpu_unit)"
