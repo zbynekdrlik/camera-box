@@ -143,9 +143,44 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   11b (the xhci IRQ unit) runs only for a USB rig NIC (`STRIH_NIC_MIN_USB_MBPS != none`; a PCIe NIC
   has no xhci walk and the unit would fail every boot), step 16e only with
   `STRIH_PROGRAM_AUDIO_SAMPLER=on`. verify items 16 and 41 use the same gate. The gate is at install
-  time on purpose: the rendered IRQ script is in the strih-lx golden. Slice B adds the role rows here.
+  time on purpose: the rendered IRQ script is in the strih-lx golden. The stream role's rows follow below.
 - The three libs are sourced by `strih-provision.sh`, so setup-strih.sh stays under 1000 lines.
 - Tests: `tests/python/test_strih_pp_box_1412.py`, `intercom/hub/tests/deployed_matrix_pp_1412.rs`.
+
+## The stream role: stream-pp is a Linux stream OBS box (issue 1412 slice B)
+
+- **Two more facts:** `STRIH_PROGRAM_SENDER` (`none` on a strih; on a stream box the strih program
+  it receives, `STRIH-PP (2ME PGM)`) and `STRIH_VENUE` (`snv` | `pp`). A stream box may set
+  `STRIH_CAMERAS=none` and `STRIH_HDMI_OUTPUT_BACKEND=none`; a strih box may not.
+- **The step table** (`obs_box_step_applies`): the stream role skips 3-nvenc (step 3 runs the
+  stream encoder instead), 14, 16 and 16c; a box with HDMI backend `none` skips 6-hdmi, and its
+  kiosk autostart leaves HDMI to X. verify uses the same gates.
+- **`obs_box_role_apply`** (after the box load, before the source-guard, in BOTH scripts): a stream
+  box runs only `strih-browser-keeper.service` as a session app; a non-snv venue sets
+  `NDI_DISCOVERY_SENDER_HOSTS` to the STRIH_IP of that venue's fact files (C collation order), which
+  `ndi_discovery_fleet_hosts` lists instead of the SNV fleet, so step 4b / item 34 write and expect
+  `10.77.8.204,10.77.8.202` on both PP boxes. The PP OBS_FLEET rows are names reached over NAT from
+  dev1, so the fact IP is the on-box address the list needs. An snv box unsets an inherited value.
+- **Step 3 on a stream box** (`obs_box_stream_encoder_provision`): NVENC when an NVIDIA GPU is
+  present, else VAAPI (`mesa-va-drivers` + `vainfo`, the desktop user into `render`, H.264 High
+  encode checked with vainfo). `scripts/obs_box_stream_profile.py` writes the profile ONLY with OBS
+  stopped: Advanced output, 1080p30 NV12, CBR 19000, keyint 2, `service.json` `rtmp_custom` with the
+  server only (`OBS_BOX_STREAM_RTMP_SERVER`, default the local restreamer). A stream key already in
+  service.json is kept, a new one is never written. It reads utf-8-sig (a ported Windows profile has
+  a BOM) and parses every input before writing anything. verify item 10 grades the written encoder.
+- **Step 6 manifest** (`obs_box_seed_manifest_json`): one entry `NDI 2ME PGM` <- the program sender
+  in scene `PRO`, class `program` (genlock_fifo + ndi_sync 2, the latency pin NEVER written: it is
+  the operator's stream A/V knob), `program_audio_input` = `Zvuk z mixu` (pulse on
+  `strih-program.monitor`). A wrong-kind audio input is replaced in every scene it was in, its sync
+  offset kept.
+- **Step 7:** one NDI output, `MainOutputName=stream` (DistroAV announces `STREAM-PP (stream)`),
+  preview off. The strih printer text is byte-identical.
+- **verify item 9** grades `fohabl` when the hub has it (strih-lx), else every `program_ref`
+  participant (resolume-pp on the PP boxes).
+- **Open:** the strih-lx genlock deploy arm is not role-aware; a keeper-only box still installs the
+  session-app packages; stream-pp's AMD power envelope and its 1920x1200 panel (autostart `--auto`
+  fallback) are to be read on site.
+- Tests: `tests/python/test_obs_box_stream_role_1412.py`.
 
 ## The parallel-run contract (why the namespacing + the client-clock matter)
 
