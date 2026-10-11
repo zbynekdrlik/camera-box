@@ -216,6 +216,102 @@ def test_verify_strih_runs_the_executables_row_and_setup_lists_the_helper():
     assert "obs-plugins/obs-browser-page" in lib
 
 
+# --- bug 3: the stream role has no Janus room credential, yet the hub unit demanded it ---------------
+
+CRED_DROPIN = "20-no-janus-credential.conf"
+
+
+def test_the_base_hub_unit_still_loads_the_janus_credential():
+    """The strih role keeps the DynamicUser credential path (issue 1345); only the role drop-in resets it."""
+    unit = (REPO / "systemd" / "intercom-hub.service").read_text()
+    assert "LoadCredential=janus-room.secret:/etc/intercom-hub/janus-room.secret" in unit
+
+
+def test_a_box_without_janus_gets_the_credential_reset_dropin(tmp_path):
+    d = tmp_path / "intercom-hub.service.d"
+    r = _bash('strih_box_load stream-pp || exit 9\nstrih_intercom_hub_cred_dropin_apply "$1"', d)
+    assert r.returncode == 0, r.stderr
+    sec = _sections((d / CRED_DROPIN).read_text())
+    assert sec.get("Service") == ["LoadCredential="], sec
+    again = _bash('strih_box_load stream-pp || exit 9\nstrih_intercom_hub_cred_dropin_apply "$1"', d)
+    assert again.returncode == 0 and "unchanged" in again.stdout, again.stdout + again.stderr
+
+
+def test_a_janus_box_removes_a_leftover_credential_reset(tmp_path):
+    d = tmp_path / "intercom-hub.service.d"
+    d.mkdir()
+    (d / CRED_DROPIN).write_text("[Service]\nLoadCredential=\n")
+    r = _bash('strih_box_load strih-lx || exit 9\nstrih_intercom_hub_cred_dropin_apply "$1"', d)
+    assert r.returncode == 0, r.stderr
+    assert not (d / CRED_DROPIN).exists()
+
+
+def test_setup_step_13_applies_the_role_dropin_before_its_daemon_reload():
+    s = (REPO / "scripts" / "setup-strih.sh").read_text()
+    step13 = s.split('step 13 "', 1)[1].split('step 14 "', 1)[0]
+    i = step13.find("strih_intercom_hub_cred_dropin_apply /etc/systemd/system/intercom-hub.service.d")
+    assert i >= 0, "step 13 must apply the hub's credential drop-in for the box role"
+    assert i < step13.find("systemctl daemon-reload"), "the drop-in must land before the daemon-reload"
+
+
+def _show(active, sub, nrestarts, result="success"):
+    return "ActiveState=%s\nSubState=%s\nNRestarts=%s\nResult=%s" % (active, sub, nrestarts, result)
+
+
+def _verdict(s1, s2):
+    return _bash('strih_intercom_hub_loop_verdict "$1" "$2"', s1, s2)
+
+
+def test_the_loop_verdict_reads_a_crash_loop_a_failure_and_climbing_restarts():
+    loop = _verdict(_show("activating", "auto-restart", 425, "exit-code"),
+                    _show("activating", "auto-restart", 426, "exit-code"))
+    assert loop.returncode == 0 and "auto-restart" in loop.stdout and "425" in loop.stdout, loop.stdout
+    failed = _verdict(_show("failed", "failed", 5, "exit-code"), _show("failed", "failed", 5, "exit-code"))
+    assert failed.returncode == 0 and "failed" in failed.stdout
+    climbing = _verdict(_show("active", "running", 3), _show("active", "running", 4))
+    assert climbing.returncode == 0 and "3 -> 4" in climbing.stdout, climbing.stdout
+
+
+def test_the_loop_verdict_passes_a_steady_hub_and_an_enable_only_one():
+    assert _verdict(_show("active", "running", 0), _show("active", "running", 0)).returncode == 1
+    assert _verdict(_show("active", "running", 7), _show("active", "running", 7)).returncode == 1
+    assert _verdict(_show("inactive", "dead", 0), _show("inactive", "dead", 0)).returncode == 1
+    assert _verdict("", "").returncode == 1
+
+
+def test_the_crash_loop_probe_reads_systemctl_twice_across_its_window(tmp_path):
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    n = tmp_path / "n"
+    n.write_text("425")
+    (stub / "systemctl").write_text(
+        '#!/bin/bash\nc=$(cat "%s"); echo $((c + 1)) > "%s"\n'
+        'printf "ActiveState=activating\\nSubState=auto-restart\\nNRestarts=%%s\\nResult=exit-code\\n" "$c"\n'
+        % (n, n))
+    (stub / "systemctl").chmod(0o755)
+    r = _bash("strih_intercom_hub_crash_loop", env={"PATH": "%s:%s" % (stub, os.environ["PATH"]),
+                                                     "STRIH_HUB_LOOP_WINDOW_S": "0"})
+    assert r.returncode == 0 and "auto-restart" in r.stdout, r.stdout + r.stderr
+
+
+def test_verify_item_16_fails_a_crash_looping_hub_and_grades_the_role_dropin():
+    v = (REPO / "scripts" / "verify-strih.sh").read_text()
+    item = v.split("# 16) intercom hub unit", 1)[1].split("# 17)", 1)[0]
+    i = item.find("strih_intercom_hub_crash_loop")
+    assert i >= 0
+    assert "bad " in item[i:i + 300], "a crash-looping hub must be a FAIL, not a NOTE"
+    assert "strih_intercom_hub_cred_grade" in item
+
+
+def test_the_cred_grade_fails_a_janus_less_box_without_the_reset(tmp_path):
+    d = tmp_path / "intercom-hub.service.d"
+    body = ('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
+            'strih_box_load stream-pp || exit 9\nstrih_intercom_hub_cred_grade "$1"')
+    assert _bash(body, d).stdout.startswith("FAIL")
+    _bash('strih_box_load stream-pp || exit 9\nstrih_intercom_hub_cred_dropin_apply "$1"', d)
+    assert _bash(body, d).stdout.startswith("PASS")
+
+
 def test_the_prefix_install_never_uses_cp_a_into_the_prefix():
     body = LIB.read_text().split("strih_install_bundle_prefix() {", 1)[1].split("\n}\n", 1)[0]
     assert "cp -a" not in body
