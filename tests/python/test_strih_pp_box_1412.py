@@ -381,6 +381,62 @@ def test_the_hub_comes_from_a_main_run_with_the_token_never_in_argv(tmp_path):
     assert list(tmproot.iterdir()) == [], "the fetch's temp dir is removed after the install"
 
 
+def _fake_paged_github(tmp_path, dev_on_page_1=100):
+    """A curl for a busy repo: page 1 of the artifacts API holds DEV_ON_PAGE_1 dev artifacts only,
+    page 2 holds the newest main one, page 3 is empty. It answers by the `page=` query parameter
+    (page 1 when absent) and logs every API url it was asked for."""
+    import zipfile
+    for name in ("dev", "main"):
+        with zipfile.ZipFile(tmp_path / ("%s.zip" % name), "w") as z:
+            z.writestr("intercom-hub", "#!/bin/sh\necho %s\n" % name)
+    dev = {"expired": False, "archive_download_url": "https://dl/dev", "workflow_run": {"head_branch": "dev"}}
+    main = {"expired": False, "archive_download_url": "https://dl/main", "workflow_run": {"head_branch": "main"}}
+    (tmp_path / "page1.json").write_text(json.dumps({"total_count": dev_on_page_1 + 1, "artifacts": [dev] * dev_on_page_1}))
+    (tmp_path / "page2.json").write_text(json.dumps({"total_count": dev_on_page_1 + 1, "artifacts": [main]}))
+    (tmp_path / "page3.json").write_text(json.dumps({"total_count": dev_on_page_1 + 1, "artifacts": []}))
+    bindir = tmp_path / "ghbin"
+    bindir.mkdir()
+    (bindir / "curl").write_text(
+        "#!/bin/bash\nprintf 'ARGV %%s\\n' \"$*\" >> %(d)s/gh.log\n"
+        "for a in \"$@\"; do [ \"$a\" = @- ] && cat > /dev/null; done\nout=\"\"; url=\"\"\n"
+        "while [ $# -gt 0 ]; do case \"$1\" in -o) out=\"$2\"; shift 2;; -H) shift 2;; -*) shift;; *) url=\"$1\"; shift;; esac; done\n"
+        "case \"$url\" in *actions/artifacts*) p=1; case \"$url\" in *page=2*) p=2;; *page=3*) p=3;; esac; "
+        "[ \"$p\" -le 3 ] || p=3; cat %(d)s/page$p.json;; https://dl/dev) cp %(d)s/dev.zip \"$out\";; "
+        "https://dl/main) cp %(d)s/main.zip \"$out\";; *) exit 22;; esac\n" % {"d": tmp_path})
+    (bindir / "curl").chmod(0o755)
+    return bindir
+
+
+def test_the_hub_is_found_on_a_later_page_when_dev_artifacts_fill_the_first_1412(tmp_path):
+    """Live 11.10.2026 (new strih notebook): dev CI fills the first page of the artifacts API, so the
+    newest main hub artifact sits on page 2+. A fetch that reads one page found no main artifact and
+    left the box without a hub. A branch-filtered fetch must page on until it finds one."""
+    bindir = _fake_paged_github(tmp_path)
+    tmproot = tmp_path / "tmproot"
+    tmproot.mkdir()
+    dest = tmp_path / "bin" / "intercom-hub"
+    r = _bash('strih_intercom_hub_binary_install "%s"' % dest, sources=(CI_ART,), path_prefix=bindir,
+              env={"GH_TOKEN": "tok-SECRET-1412", "STRIH_CI_ARTIFACT_TMP": str(tmproot)})
+    assert r.returncode == 0, r.stderr
+    assert dest.exists(), "the main hub on page 2 must be found:\n" + r.stderr
+    assert dest.read_text() == "#!/bin/sh\necho main\n"
+    log = (tmp_path / "gh.log").read_text()
+    assert "tok-SECRET-1412" not in log, "the token never reaches curl's argv"
+    assert "page=2" in log
+
+
+def test_a_branch_fetch_with_no_match_on_any_page_fails_cleanly_1412(tmp_path):
+    bindir = _fake_paged_github(tmp_path)
+    (tmp_path / "page2.json").write_text(json.dumps({"artifacts": []}))
+    tmproot = tmp_path / "tmproot"
+    tmproot.mkdir()
+    r = _bash('strih_ci_artifact_fetch intercom-hub-linux-amd64 "" main', sources=(CI_ART,), path_prefix=bindir,
+              env={"GH_TOKEN": "t", "STRIH_CI_ARTIFACT_TMP": str(tmproot)})
+    assert r.returncode == 1 and "could not fetch" in r.stderr
+    assert list(tmproot.iterdir()) == [], "no temp dir left behind"
+    assert "page=3" not in (tmp_path / "gh.log").read_text(), "an empty page ends the walk"
+
+
 def test_bkshading_still_takes_the_newest_artifact_of_any_branch(tmp_path):
     bindir = _fake_github(tmp_path)
     r = _bash('d="$(strih_ci_artifact_fetch some-art "")" && cat "$d/intercom-hub" && strih_ci_artifact_cleanup "$d" ""',
