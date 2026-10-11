@@ -58,13 +58,21 @@ LINUX_INPUT_KINDS = frozenset({
     "pipewire-desktop-capture-source", "pipewire-window-capture-source", "pipewire-screen-capture-source",
 })
 
-# Filter kinds the Linux bundle provides: OBS's own obs-filters + DistroAV's NDI output filters.
+# Filter kinds the Linux bundle provides: OBS's own obs-filters + the vendored DistroAV's filters (the NDI
+# output filters, the premultiplied-alpha filter and the measurement QR burn, vendor/distroav/src).
 LINUX_FILTER_KINDS = frozenset({
+    "premultiplied_alpha_filter", "distroav_qr_burn_filter",
     "crop_filter", "scale_filter", "scroll_filter", "gpu_delay", "color_filter", "color_key_filter",
     "chroma_key_filter", "luma_key_filter", "mask_filter", "sharpness_filter", "clut_filter",
     "async_delay_filter", "gain_filter", "invert_polarity_filter", "noise_gate_filter",
     "noise_suppress_filter", "compressor_filter", "expander_filter", "upward_compressor_filter",
     "limiter_filter", "basic_eq_filter", "hdr_tonemap_filter", "ndi_filter", "ndi_audiofilter",
+})
+
+# Transition kinds the Linux bundle provides (obs-transitions).
+LINUX_TRANSITION_KINDS = frozenset({
+    "cut_transition", "fade_transition", "swipe_transition", "slide_transition", "obs_stinger_transition",
+    "fade_to_color_transition", "wipe_transition",
 })
 
 # Frontend modules that are Windows-only or belong to a plugin the Linux bundle does not ship.
@@ -81,7 +89,8 @@ GLOBAL_AUDIO_KEYS = ("DesktopAudioDevice1", "DesktopAudioDevice2", "AuxAudioDevi
 MUST_MAP_HOSTS = ("presenter.lan", "fohabl.lan")
 
 _WIN_PATH = re.compile(r"^[A-Za-z]:[\\/]")
-_WIN_PATH_IN_JSON = re.compile(r'"[A-Za-z]:(/|\\\\)')  # a Windows path as a JSON string value
+# a Windows drive path or a UNC path (\\\\server\\share) as a JSON string value
+_WIN_PATH_IN_JSON = re.compile(r'"([A-Za-z]:(/|\\\\)|\\\\\\\\)')
 
 PRESETS = {
     "stream-pp": {
@@ -91,6 +100,7 @@ PRESETS = {
         "source_renames": {"NDIAr 2ME PGM": "NDI 2ME PGM"},
         "sender_prefixes": {"OBS-PP": "STRIH-PP"},
         "sender_renames": {},
+        "foreign_senders": [r"-SNV \(", r"^OBS-PP \("],
         "drop_patterns": [r"^ytfast"],
         "drop_sources": [],
         "media_dir": "/srv/obs-media/stream-pp",
@@ -105,6 +115,7 @@ PRESETS = {
         "source_renames": {},
         "sender_prefixes": {"STRIH-LX": "STRIH-PP"},
         "sender_renames": {"RESOLUME-SNV (SP-program)": "RESOLUME-PP (SP-program)"},
+        "foreign_senders": [r"-SNV \(", r"^STRIH-LX \("],
         "drop_patterns": [r"^ytfast"],
         "drop_sources": [],
         "media_dir": "/srv/obs-media/strih-pp",
@@ -214,7 +225,8 @@ def _convert_kinds(coll, rep):
             s["settings"] = gdiplus_to_ft2(s.get("settings"))
             s["id"], s["versioned_id"] = "text_ft2_source", "text_ft2_source_v2"
             rep.append('CONVERT source "%s" text_gdiplus -> text_ft2_source (gradient, outline colour/size,'
-                       ' alignment and vertical text are not carried)' % s["name"])
+                       ' background colour/opacity, alignment, vertical text and the chat-log mode are not'
+                       ' carried)' % s["name"])
 
 
 def _rename_sources(coll, renames, rep):
@@ -249,6 +261,19 @@ def rename_sender(value, prefixes, renames):
         if value.startswith(old + " ("):
             return new + value[len(old):]
     return value
+
+
+def _warn_foreign_senders(coll, patterns, rep):
+    """A WARN line for every NDI name still matching a pattern of the venue this port leaves."""
+    for s in _all(coll):
+        st = s.get("settings") or {}
+        names = [("", st.get("ndi_source_name"))] if s.get("id") == "ndi_source" else []
+        names += [('filter "%s" on ' % f.get("name"), (f.get("settings") or {}).get("ndi_filter_ndiname"))
+                  for f in s.get("filters", []) or []]
+        for where, n in names:
+            if isinstance(n, str) and any(re.search(p, n) for p in patterns):
+                rep.append('WARN sender %s"%s" still names %s (no rename maps it: --rename-sender OLD=NEW)'
+                           % (where, s["name"], n))
 
 
 def _rename_senders(coll, prefixes, renames, rep):
@@ -343,15 +368,19 @@ def _walk_paths(obj, media_dir, prefixes, on_change):
 
 
 def _remap_paths(coll, media_dir, prefixes, rep):
-    leftover = []
+    leftover, targets = [], {}
     for s in _all(coll) + list(coll.get("transitions", []) or []):
         def note(old, new, name=s.get("name")):
             rep.append('PATH "%s": %s -> %s' % (name, ntpath.basename(old.replace("\\", "/")), new))
+            targets.setdefault(new, set()).add(old)
         _walk_paths(s.get("settings"), media_dir, prefixes, note)
         if _WIN_PATH_IN_JSON.search(json.dumps(s.get("settings"))):
             leftover.append(s.get("name"))
     for n in leftover:
-        rep.append('NOTE "%s" still names a Windows path (no --media-dir)' % n)
+        rep.append('NOTE "%s" still names a Windows path or a UNC path (not moved: --media-dir / --path-prefix)' % n)
+    for new, olds in sorted(targets.items()):
+        if len(olds) > 1:
+            rep.append("WARN %d different source paths land on %s: copy the right file there" % (len(olds), new))
 
 
 def _port_modules(coll, drop_patterns, rep):
@@ -394,7 +423,18 @@ def port(collection, options):
     _drop_names(coll, named | by_pattern,
                 rep, lambda s: "named by --drop-source" if s["name"] in named else "matches a drop pattern")
 
-    # 2. the program audio input, then the kind conversions, then the kinds Linux does not have.
+    # 2. the scene keep-set: every kept scene and everything it nests; the rest goes.
+    keep = o.get("keep_scenes")
+    if keep:
+        have = {s.get("name") for s in _all(coll)}
+        for k in keep:
+            if k not in have:
+                rep.append('NOTE keep scene "%s" absent from the collection (a seeder creates it)' % k)
+        reach = _reachable(coll, keep)
+        _drop_names(coll, {s["name"] for s in _all(coll) if s["name"] not in reach},
+                    rep, lambda s: "not used by a kept scene")
+
+    # 3. the program audio input, then the kind conversions, then the kinds Linux does not have.
     if o.get("program_audio_input"):
         _convert_program_audio(coll, o["program_audio_input"], rep)
     _convert_kinds(coll, rep)
@@ -406,17 +446,14 @@ def port(collection, options):
             del coll[key]
             rep.append('DROP global audio %s "%s" %s: kind not in the Linux bundle'
                        % (key, dev.get("name"), dev.get("id")))
-
-    # 3. the scene keep-set: every kept scene and everything it nests; the rest goes.
-    keep = o.get("keep_scenes")
-    if keep:
-        have = {s.get("name") for s in _all(coll)}
-        for k in keep:
-            if k not in have:
-                rep.append('NOTE keep scene "%s" absent from the collection (a seeder creates it)' % k)
-        reach = _reachable(coll, keep)
-        _drop_names(coll, {s["name"] for s in _all(coll) if s["name"] not in reach},
-                    rep, lambda s: "not used by a kept scene")
+    trans = []
+    for t in coll.get("transitions", []) or []:
+        if t.get("id") in LINUX_TRANSITION_KINDS | set(o.get("keep_kinds") or []):
+            trans.append(t)
+        else:
+            rep.append('DROP transition "%s" %s: kind not in the Linux bundle' % (t.get("name"), t.get("id")))
+    if "transitions" in coll:
+        coll["transitions"] = trans
     order = [e["name"] for e in coll.get("scene_order", [])]
     for k in ("current_scene", "current_program_scene"):
         if coll.get(k) not in order and order:
@@ -424,8 +461,8 @@ def port(collection, options):
             rep.append('NOTE %s "%s" -> "%s"' % (k, coll.get(k), pick))
             coll[k] = pick
 
-    # 4. filters of plugins the bundle lacks.
-    for s in _all(coll):
+    # 4. filters of plugins the bundle lacks (sources, groups and the global audio devices).
+    for s in _all(coll) + [coll[k] for k in GLOBAL_AUDIO_KEYS if isinstance(coll.get(k), dict)]:
         kept = []
         for f in s.get("filters", []) or []:
             if f.get("id") in keep_filters:
@@ -439,6 +476,7 @@ def port(collection, options):
     # 5. names, senders, URLs, paths, modules.
     _rename_sources(coll, o.get("source_renames") or {}, rep)
     _rename_senders(coll, o.get("sender_prefixes") or {}, o.get("sender_renames") or {}, rep)
+    _warn_foreign_senders(coll, o.get("foreign_senders") or [], rep)
     _map_urls(coll, o.get("url_hosts") or {}, rep)
     _remap_paths(coll, o.get("media_dir"), o.get("path_prefixes") or {}, rep)
     _port_modules(coll, patterns, rep)

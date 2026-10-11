@@ -214,6 +214,7 @@ def test_without_a_media_dir_a_windows_path_is_kept_and_named():
     assert any(ln.startswith("NOTE") and '"PRE graphic"' in ln and "Windows path" in ln for ln in rep)
     assert any(ln.startswith("NOTE") and '"BG"' in ln for ln in rep)
 
+
 def test_filters_of_a_plugin_the_linux_bundle_lacks_are_dropped():
     m = _mod()
     out, rep = m.port(stream_collection(), _stream_opts(m))
@@ -353,3 +354,118 @@ def test_no_real_collection_is_committed():
     for p in tracked:
         if p.endswith(".json") and ("strih-pp" in p or "stream-pp" in p or "streampp" in p):
             pytest.fail("a real collection must never be committed: %s" % p)
+
+
+# --- review round 1 (slice C) ------------------------------------------------------------------------------
+
+def _facts(box):
+    out = {}
+    for line in (REPO / "scripts" / "strih-boxes" / ("%s.env" % box)).read_text().splitlines():
+        if "=" in line and not line.lstrip().startswith("#"):
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.split("#", 1)[0].strip()
+    return out
+
+
+def test_the_presets_follow_the_box_fact_files():
+    m = _mod()
+    lx, spp, stp = _facts("strih-lx"), _facts("strih-pp"), _facts("stream-pp")
+    strih = m.preset_options("strih-pp")
+    assert strih["sender_prefixes"] == {lx["STRIH_NDI_PREFIX"]: spp["STRIH_NDI_PREFIX"]}
+    assert strih["sender_renames"] == {lx["STRIH_CG_SENDER"]: spp["STRIH_CG_SENDER"]}
+    assert strih["name"] == spp["STRIH_OBS_COLLECTION"]
+    stream = m.preset_options("stream-pp")
+    old_prefix, new_prefix = next(iter(stream["sender_prefixes"].items()))
+    assert "%s (2ME PGM)" % new_prefix == stp["STRIH_PROGRAM_SENDER"]
+    assert stream["name"] == stp["STRIH_OBS_COLLECTION"]
+    assert stream["media_dir"].endswith("/" + stp["STRIH_HOSTNAME"])
+
+
+def test_the_vendored_distroav_filters_survive_the_port():
+    m = _mod()
+    c = strih_collection()
+    cam = next(s for s in c["sources"] if s["name"] == "NDI cam1")
+    cam["filters"] = [_filter("burn", "distroav_qr_burn_filter"), _filter("pma", "premultiplied_alpha_filter")]
+    out, rep = m.port(c, _strih_opts(m))
+    assert [f["name"] for f in _by_name(out, "NDI cam1")["filters"]] == ["burn", "pma"]
+    assert not any("burn" in ln or "pma" in ln for ln in rep)
+
+
+def test_a_sender_of_the_venue_left_behind_is_named():
+    m = _mod()
+    c = strih_collection()
+    c["sources"].append(_src("old stream", "ndi_source", {"ndi_source_name": "STREAM-SNV (stream)"}))
+    c["sources"][0]["settings"]["items"].append({"name": "old stream", "source_uuid": "u-old stream", "id": 5})
+    out, rep = m.port(c, _strih_opts(m))
+    warn = [ln for ln in rep if ln.startswith("WARN sender")]
+    assert len(warn) == 1 and "STREAM-SNV (stream)" in warn[0] and '"old stream"' in warn[0]
+    assert not any(ln.startswith("WARN sender") for ln in m.port(strih_collection(), _strih_opts(m))[1])
+
+
+def test_transitions_of_a_missing_plugin_are_dropped():
+    m = _mod()
+    c = stream_collection()
+    c["transitions"] = [{"id": "fade_transition", "name": "Fade", "settings": {}},
+                        {"id": "move_transition", "name": "Move", "settings": {}},
+                        {"id": "obs_stinger_transition", "name": "Sting",
+                         "settings": {"path": "C:/Users/interkom/Videos/sting.webm"}}]
+    out, rep = m.port(c, _stream_opts(m))
+    assert [t["name"] for t in out["transitions"]] == ["Fade", "Sting"]
+    assert out["transitions"][1]["settings"]["path"] == "/srv/obs-media/stream-pp/Videos/sting.webm"
+    assert any(ln.startswith("DROP transition") and '"Move"' in ln for ln in rep)
+
+
+def test_a_converted_source_in_a_dropped_scene_is_only_dropped():
+    m = _mod()
+    out, rep = m.port(stream_collection(), _stream_opts(m))
+    assert not any(ln.startswith("CONVERT") and "ytfast_title" in ln for ln in rep)
+    assert not any(ln.startswith("CONVERT") and '"test"' in ln for ln in rep)
+
+
+def test_two_paths_landing_on_one_file_and_a_unc_path_are_named():
+    m = _mod()
+    c = stream_collection()
+    c["sources"][2]["settings"]["items"] += [{"name": "a", "source_uuid": "u-a", "id": 7},
+                                             {"name": "b", "source_uuid": "u-b", "id": 8},
+                                             {"name": "unc", "source_uuid": "u-unc", "id": 9}]
+    c["sources"] += [_src("a", "image_source", {"file": "C:/x/img/logo.png"}),
+                     _src("b", "image_source", {"file": "D:/y/img/logo.png"}),
+                     _src("unc", "image_source", {"file": "\\\\nas\\share\\logo.png"})]
+    out, rep = m.port(c, _stream_opts(m))
+    assert any(ln.startswith("WARN 2 different source paths") and "img/logo.png" in ln for ln in rep)
+    assert any(ln.startswith("NOTE") and '"unc"' in ln and "UNC" in ln for ln in rep)
+
+
+def test_a_group_and_its_members_are_kept_with_the_scene():
+    m = _mod()
+    c = stream_collection()
+    c["groups"] = [_src("lower", "group", {"items": [{"name": "BG", "source_uuid": "u-BG", "id": 1}]})]
+    c["sources"][2]["settings"]["items"].append({"name": "lower", "source_uuid": "u-lower", "id": 6})
+    c["groups"].append(_src("stale", "group", {"items": []}))
+    out, rep = m.port(c, _stream_opts(m))
+    assert [g["name"] for g in out["groups"]] == ["lower"]
+    assert any(ln.startswith("DROP") and '"stale"' in ln for ln in rep)
+
+
+def test_the_cli_report_file_and_the_output_mode(tmp_path):
+    src = tmp_path / "strih-lx.json"
+    src.write_text(json.dumps(strih_collection()))
+    dst, rpt = tmp_path / "strih-pp.json", tmp_path / "port.txt"
+    r = _cli("--preset", "strih-pp", "--presenter-host", "p.lan", "--fohabl-host", "f.lan", "--report", rpt,
+             src, dst)
+    assert r.returncode == 0, r.stderr
+    text = rpt.read_text()
+    assert text.strip() == r.stderr.strip() and "SUMMARY" in text
+    assert "hidden2" not in text and "hidden2" not in r.stderr
+    assert oct(dst.stat().st_mode & 0o777) == "0o600"
+    assert not list(tmp_path.glob("*.tmp-*")), "no temp file is left behind"
+
+
+def test_a_kept_global_audio_device_loses_a_missing_plugin_filter():
+    m = _mod()
+    c = strih_collection()
+    c["AuxAudioDevice1"] = _src("Mic", "pulse_input_capture", {"device_id": "default"},
+                                filters=[_filter("gain", "gain_filter"), _filter("vst", "vst_filter")])
+    out, rep = m.port(c, _strih_opts(m))
+    assert [f["name"] for f in out["AuxAudioDevice1"]["filters"]] == ["gain"]
+    assert any(ln.startswith("DROP filter") and '"vst"' in ln and '"Mic"' in ln for ln in rep)
