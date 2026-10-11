@@ -857,7 +857,7 @@ if WHY="$(obs_box_step_applies 11b)"; then   # issue 1412: a PCIe rig NIC has no
   IRQ_TARGET_IP="${STRIH_LX_TARGET_IP:-$(strih_lx_ip)}"
   IRQ_IFACE="${STRIH_NIC_IFACE:-}"
   if [ -z "$IRQ_IFACE" ]; then
-    # driver-first (the box's STRIH_NIC_DRIVER fact -- strih-lx: the r8152 USB NIC), then fall back to
+    # driver-first (the box's STRIH_NIC_DRIVER fact -- a USB rig NIC, e.g. r8152), then fall back to
     # the address match; MULTI -> NOTE + no iface.
     IRQ_DRV="$(strih_nic_iface_by_driver /sys "$(strih_lx_nic_driver)" 2>/dev/null || true)"
     case "$IRQ_DRV" in

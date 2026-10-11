@@ -1778,6 +1778,8 @@ strih_lx_rig_nic() {
 # on a hot box -- so the baked value keeps a re-run from ever lowering the provisioned wattage.
 # STRIH_LX_PL1_W overrides it outright once a thermal soak says otherwise; the envelope guard steps PL1
 # down to strih_lx_pl1_stepdown_watts on a hot TCPU.
+# The issue-1411 notebook is AMD (Ryzen 7 250): no intel-rapl-mmio zone and no x86_pkg_temp, so the read
+# is empty (this prints the 55 W floor), the envelope oneshot logs "no zone" and exits 0, and the guard holds.
 strih_lx_pl1_watts() {
   local fw_uw="${1-}" baked="${2-}" best=55 fw_w
   if [ -n "${STRIH_LX_PL1_W:-}" ]; then
