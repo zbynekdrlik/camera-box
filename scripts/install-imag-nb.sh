@@ -136,6 +136,21 @@ imag_kernel_meta_package() {
     fi
 }
 
+# imag_kernel_meta_version META_VERSIONS LL_VERSIONS -> the newest version of the kernel meta (META,
+# newest first, one per line as `apt-cache madison` lists them) that its lowlatency twin (LL) also has,
+# or nothing when they share none (the caller then installs the meta unpinned). Issue 1412: the chroot
+# installed linux-generic-hwe-26.04 7.0.0-30 while the archive had 7.0.0-38, and the lowlatency config
+# meta exists only at 7.0.0-38, so setup's step 11 failed on every fresh box. Always rc 0.
+imag_kernel_meta_version() {
+    local meta="${1:-}" ll="${2:-}" v
+    [ -n "$ll" ] || return 0
+    while IFS= read -r v; do
+        [ -n "$v" ] || continue
+        if grep -qxF -- "$v" <<<"$ll"; then printf '%s\n' "$v"; return 0; fi
+    done <<<"$meta"
+    return 0
+}
+
 # imag_apt_drop_cdrom_sources ETC_APT_DIR -> remove the live-ISO apt sources from a target's
 # /etc/apt so the chroot's apt can reach the archive. issue 1317: the 26.04 live layers ship
 # sources.list.d/cdrom.sources (deb822, URIs: file:///cdrom) and copy_rootfs copies it into the
@@ -399,7 +414,7 @@ configure_in_chroot() {
     # target's apt would abort on it. Serialize the pure drop-helper the SAME way (declare -f) and run
     # it on /etc/apt as the first apt-touching step, so the archive update below has a clean set.
     local kernel_meta_fn cdrom_fn
-    kernel_meta_fn="$(declare -f imag_kernel_meta_package)"
+    kernel_meta_fn="$(declare -f imag_kernel_meta_package imag_kernel_meta_version)"
     cdrom_fn="$(declare -f imag_apt_drop_cdrom_sources)"
     cat > "$MOUNT_ROOT/tmp/imag-chroot.sh" <<CHROOT
 set -euo pipefail
@@ -431,7 +446,14 @@ if ! ls /boot/vmlinuz-* >/dev/null 2>&1; then
     version_id="\$( . /etc/os-release; printf '%s' "\${VERSION_ID:-}" )"
     kernel_avail="\$(apt-cache pkgnames linux-generic 2>/dev/null || true)"
     kernel_meta="\$(imag_kernel_meta_package "\$version_id" "\$kernel_avail")" || exit 1
-    apt-get install -y "\$kernel_meta" >/dev/null || exit 1
+    meta_vers="\$(apt-cache madison "\$kernel_meta" 2>/dev/null | awk -F'|' '{gsub(/ /, "", \$2); print \$2}')"
+    ll_vers="\$(apt-cache madison "\${kernel_meta/generic/lowlatency}" 2>/dev/null | awk -F'|' '{gsub(/ /, "", \$2); print \$2}')"
+    kernel_ver="\$(imag_kernel_meta_version "\$meta_vers" "\$ll_vers")"
+    if [ -n "\$kernel_ver" ]; then
+        apt-get install -y "\$kernel_meta=\$kernel_ver" >/dev/null || exit 1
+    else
+        apt-get install -y "\$kernel_meta" >/dev/null || exit 1
+    fi
 fi
 ls /boot/vmlinuz-* >/dev/null 2>&1 || { echo "no kernel installed in the chroot" >&2; exit 1; }
 
