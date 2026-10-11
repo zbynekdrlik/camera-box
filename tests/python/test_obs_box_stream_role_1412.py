@@ -96,11 +96,12 @@ def test_stream_pp_loads_as_the_stream_role(boxes):
     assert r.stdout.strip() == "stream|STRIH-PP (2ME PGM)|pp|none|--ntp-server strih-pp.lan|[]"
 
 
-def test_stream_pp_refuses_naming_only_the_runtime_peer():
-    r = _bash("strih_box_load stream-pp", sources=(FACTS,))
-    assert r.returncode != 0
-    assert [ln for ln in r.stderr.splitlines() if "TODO_OWNER" in ln] == \
-        ["strih-box stream-pp: STRIH_NDI_RUNTIME_PEER is TODO_OWNER -- the owner has not decided it yet"]
+def test_stream_pp_loads_with_every_fact_answered():
+    """11.10.2026: the last open fact (the NDI runtime peer) is answered -- SNV cam5, the fleet runtime."""
+    r = _bash("strih_box_load stream-pp || exit 9\nstrih_lx_ndi_runtime_peer", sources=(FACTS,))
+    assert r.returncode == 0, r.stderr
+    assert "TODO_OWNER" not in r.stderr
+    assert r.stdout.strip() == "10.77.9.65"
 
 
 @pytest.mark.parametrize("box,old,new,word", [
