@@ -119,6 +119,8 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_ROLE",
     "STRIH_DANTE_GM",
     "STRIH_PROGRAM_AUDIO_SAMPLER",
+    "STRIH_PROGRAM_SENDER",
+    "STRIH_VENUE",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -163,6 +165,8 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_ROLE=strih",
         "STRIH_DANTE_GM=video-clock.lan",
         "STRIH_PROGRAM_AUDIO_SAMPLER=on",
+        "STRIH_PROGRAM_SENDER=none",
+        "STRIH_VENUE=snv",
         "LOADED=strih-lx",
     ] {
         assert!(

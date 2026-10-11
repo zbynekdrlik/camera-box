@@ -71,7 +71,9 @@ def _pp_filled(tmp_path, peer=PEER, extra=()):
 def test_the_new_keys_close_the_fact_list():
     r = _bash("strih_box_fact_keys")
     assert r.returncode == 0, r.stderr
-    assert tuple(r.stdout.split()[-3:]) == NEW_KEYS
+    keys = r.stdout.split()
+    i = keys.index("STRIH_HDMI_OUTPUT_BACKEND")
+    assert tuple(keys[i + 1:i + 4]) == NEW_KEYS
 
 
 def test_strih_lx_is_the_strih_role_on_the_snv_grandmaster_with_the_sampler():
@@ -97,6 +99,7 @@ EXPECTED_PP = {
     "STRIH_COMPANION_HOST": "10.77.8.205", "STRIH_CG_SENDER": "RESOLUME-PP (SP-program)",
     "STRIH_CAMERAS": "1 4 6 7", "STRIH_HDMI_OUTPUT_BACKEND": "vk-direct", "STRIH_ROLE": "strih",
     "STRIH_DANTE_GM": "10.77.8.110", "STRIH_PROGRAM_AUDIO_SAMPLER": "off",
+    "STRIH_PROGRAM_SENDER": "none", "STRIH_VENUE": "pp",
 }
 
 
