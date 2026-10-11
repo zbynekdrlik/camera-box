@@ -1865,10 +1865,13 @@ strih_openbox_autostart_text() {
   cat <<'AUTOSTART_EOF'
 sleep 1
 PANEL=$(xrandr | awk '/ connected/ && $1 !~ /^HDMI/ {print $1; exit}')
-# The notebook panel is the ONLY desktop screen, PINNED to 1920x1080@60 (a notebook panel's --auto can
-# pick 144/165 Hz) -- --auto only as the fallback when that mode is not offered.
+# The notebook panel is the ONLY desktop screen, PINNED to 60 Hz (a notebook panel's --auto can pick
+# 144/165 Hz): its own preferred mode first (stream-pp's panel is 1920x1200, a 1080 pin left black
+# bars, issue 1412), then 1920x1080@60, --auto only as the last fallback.
 if [ -n "$PANEL" ]; then
-  xrandr --output "$PANEL" --primary --mode 1920x1080 --rate 60 2>/dev/null \
+  PREF=$(xrandr | awk -v p="$PANEL" '$1 == p {f = 1; next} f && /^[^ ]/ {exit} f && /[+]/ {print $1; exit}')
+  { [ -n "$PREF" ] && xrandr --output "$PANEL" --primary --mode "$PREF" --rate 60 2>/dev/null; } \
+    || xrandr --output "$PANEL" --primary --mode 1920x1080 --rate 60 2>/dev/null \
     || xrandr --output "$PANEL" --primary --auto 2>/dev/null || true
 fi
 AUTOSTART_EOF
