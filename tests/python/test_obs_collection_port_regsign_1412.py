@@ -83,5 +83,8 @@ def test_two_spellings_of_the_program_input_in_one_collection_refuse():
     twin = json.loads(json.dumps(base._by_name(coll, "NDIAr 2ME PGM")))
     twin["name"], twin["uuid"] = REAL, "u-real"
     coll["sources"].append(twin)
+    # referenced from a kept scene, or the keep-set drops it before any rename runs
+    pro = base._by_name(coll, "PRO")["settings"]
+    pro["items"].append({"name": REAL, "source_uuid": "u-real", "visible": True, "id": 99})
     with pytest.raises(m.PortError, match="spelling"):
         m.port(coll, base._stream_opts(m))
