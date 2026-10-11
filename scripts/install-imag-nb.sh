@@ -37,7 +37,6 @@ IMAG_DNS=""
 IMAG_HOSTNAME="imag-nb"
 DESKTOP_USER="newlevel"
 DESKTOP_PW="newlevel"
-NM_CON_ID="imag-lan"
 MOUNT_ROOT="/mnt/imag-root"
 MOUNT_SRC="/mnt/imag-src"
 LAYER_MNT_BASE="/mnt/imag-layer"
@@ -94,6 +93,28 @@ imag_layer_chain() {
     if [ "$sb" = "enabled" ]; then
         echo "imag_layer_chain: Secure Boot on -- the signed shim + grub chain, not ${sbl##*/}" >&2
     fi
+}
+
+# imag_nm_con_id HOSTNAME -> the NetworkManager profile name: the hostname up to its first `-`, then
+# `-lan` (imag-nb -> imag-lan, stream-pp -> stream-lan, strih-pp -> strih-lan). Issue 1412: the old
+# fixed `imag-lan` showed up on every box this installer set up.
+imag_nm_con_id() {
+    local host="${1:-}"
+    [ -n "$host" ] || { echo "imag_nm_con_id: hostname required" >&2; return 2; }
+    printf '%s-lan\n' "${host%%-*}"
+}
+
+# imag_disable_cloud_init ROOT -> disable cloud-init on the installed system at ROOT. Issue 1412: the
+# live layers ship it; on stream-pp its cloud-init-network.service held every boot 4 min waiting for a
+# datasource, and its 50-cloud-init.yaml netplan added a second DHCP profile next to ours. A root
+# without cloud-init is left as it is.
+imag_disable_cloud_init() {
+    local root="${1:-}"
+    [ -n "$root" ] && [ -d "$root/etc" ] || { echo "imag_disable_cloud_init: target root required" >&2; return 2; }
+    if [ -d "$root/etc/cloud" ]; then
+        : > "$root/etc/cloud/cloud-init.disabled"
+    fi
+    rm -f "$root/etc/netplan/50-cloud-init.yaml"
 }
 
 # imag_kernel_meta_package VERSION_ID AVAILABLE -> the apt kernel meta-package to install in the
@@ -353,6 +374,9 @@ EOF
     [ -n "$IMAG_DNS" ] || IMAG_DNS="$IMAG_GW"
     [ -n "$IMAG_GW" ] || error "cannot determine the default gateway — pass --gateway"
 
+    imag_disable_cloud_init "$MOUNT_ROOT" || error "cannot disable cloud-init on the target"
+    local NM_CON_ID
+    NM_CON_ID="$(imag_nm_con_id "$IMAG_HOSTNAME")" || error "cannot derive the NetworkManager profile name"
     mkdir -p "$MOUNT_ROOT/etc/NetworkManager/system-connections"
     imag_nm_keyfile "$NM_CON_ID" "$IMAG_IP" "$IMAG_PREFIX" "$IMAG_GW" "$IMAG_DNS" \
         > "$MOUNT_ROOT/etc/NetworkManager/system-connections/${NM_CON_ID}.nmconnection"
