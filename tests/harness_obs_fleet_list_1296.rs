@@ -370,7 +370,7 @@ fn fleet_poll_now_gates_traveling_and_retired_boxes_only_1317() {
     );
     assert!(!poll_now("imag", &[]), "a retired box is never polled");
     assert!(
-        poll_now("strih-pp", &away),
+        poll_now("strih-zz", &away),
         "an unknown override name is polled as given"
     );
 }

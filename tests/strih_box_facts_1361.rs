@@ -116,6 +116,9 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_CG_SENDER",
     "STRIH_CAMERAS",
     "STRIH_HDMI_OUTPUT_BACKEND",
+    "STRIH_ROLE",
+    "STRIH_DANTE_GM",
+    "STRIH_PROGRAM_AUDIO_SAMPLER",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -157,6 +160,9 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_CG_SENDER=RESOLUME-SNV (SP-program)",
         "STRIH_CAMERAS=1 2 3 4 5 6 7",
         "STRIH_HDMI_OUTPUT_BACKEND=vk-direct",
+        "STRIH_ROLE=strih",
+        "STRIH_DANTE_GM=video-clock.lan",
+        "STRIH_PROGRAM_AUDIO_SAMPLER=on",
         "LOADED=strih-lx",
     ] {
         assert!(
@@ -174,18 +180,22 @@ fn accessors_lazily_load_the_default_box_strih_lx() {
     assert_eq!(out, "10.77.9.202\nstrih-lx", "got: {out}");
 }
 
+/// issue 1412: strih-pp carries every fact the 11.10.2026 recon proved; only the NDI runtime peer
+/// (a PP cambox whose PP address is not known yet) is still TODO_OWNER, and the refusal names it alone.
 #[test]
 fn todo_owner_template_is_refused_naming_every_missing_fact() {
     let (c, out, err) = with_loader(&[], "strih_box_load strih-pp && echo LOADED");
     assert_ne!(
         c, 0,
-        "strih-pp (TODO_OWNER template) must refuse; out={out}"
+        "strih-pp (one TODO_OWNER fact left) must refuse; out={out}"
     );
     assert!(!out.contains("LOADED"), "must not load: {out}");
     for k in FACT_KEYS {
-        assert!(
-            err.contains(&format!("{k} is TODO_OWNER")),
-            "the refusal must name {k}; stderr:\n{err}"
+        let named = err.contains(&format!("{k} is TODO_OWNER"));
+        assert_eq!(
+            named,
+            *k == "STRIH_NDI_RUNTIME_PEER",
+            "only STRIH_NDI_RUNTIME_PEER is still open ({k}); stderr:\n{err}"
         );
     }
 }
@@ -482,12 +492,10 @@ fn setup_and_verify_refuse_the_todo_owner_box() {
             !out.contains("SOURCED-OK"),
             "{script} continued past the refusal"
         );
-        for k in FACT_KEYS {
-            assert!(
-                err.contains(&format!("{k} is TODO_OWNER")),
-                "{script}: refusal must name {k}:\n{err}"
-            );
-        }
+        assert!(
+            err.contains("STRIH_NDI_RUNTIME_PEER is TODO_OWNER"),
+            "{script}: refusal must name the open fact:\n{err}"
+        );
         let (c2, _o, err2) = source_orchestrator(script, "--box strih-nowhere");
         assert_ne!(c2, 0, "{script}: unknown box must refuse");
         assert!(err2.contains("no fact file"), "{script}: {err2}");

@@ -164,11 +164,16 @@ def test_strih_lx_loads_the_new_facts():
     assert r.stdout.strip() == "%s|10000|5000" % SPEC
 
 
-def test_strih_pp_names_every_new_fact_as_todo_owner():
+def test_strih_pp_declares_its_pcie_nic_facts():
+    # issue 1412: strih-pp's rig NIC is the RTL8125 on PCIe (in-tree r8169, no USB device, 2.5 GbE);
+    # the facts are decided now (read off the box in the 11.10.2026 recon), never TODO_OWNER.
+    lines = (BOXES / "strih-pp.env").read_text().splitlines()
+    for want in ("STRIH_NIC_DRIVER=r8169", "STRIH_NIC_OOT_DRIVER=none", "STRIH_NIC_MIN_USB_MBPS=none",
+                 "STRIH_NIC_MIN_LINK_MBPS=2500"):
+        assert want in lines, want
     r = _bash("strih_box_load strih-pp", sources=(FACTS,))
-    assert r.returncode != 0
     for k in NEW_KEYS:
-        assert "%s is TODO_OWNER" % k in r.stderr, r.stderr
+        assert "%s is TODO_OWNER" % k not in r.stderr, r.stderr
 
 
 def _fixture(tmp_path, edits):

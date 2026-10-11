@@ -583,8 +583,8 @@ fn setup_and_verify_take_the_backend_from_the_box_fact() {
     let pp = read("scripts/strih-boxes/strih-pp.env");
     assert!(
         pp.lines()
-            .any(|l| l == "STRIH_HDMI_OUTPUT_BACKEND=TODO_OWNER"),
-        "the strih PP template carries the new fact undecided"
+            .any(|l| l == "STRIH_HDMI_OUTPUT_BACKEND=vk-direct"),
+        "strih PP's only GPU is the NVIDIA RTX 3060: vk-direct (issue 1412 recon)"
     );
     let s = provision_body();
     for token in [
