@@ -760,18 +760,32 @@ fn retention_stages_only_never_touches_dated_backups_1317() {
 }
 
 /// The generated on-box runner: it takes the token from the `ghtoken:` line (also when a NOPASSWD
-/// sudo left the password line unread), exports it with the bundle dir and IP, runs setup-strih.sh
-/// DETACHED and writes its rc. The root check is removed for the test only.
+/// sudo left the password line unread), exports it with the bundle dir, runs setup-strih.sh
+/// DETACHED and writes its rc.
+///
+/// Issue 1411: the detach is a SYSTEM transient unit (`systemd-run`), never `setsid nohup` -- a
+/// setsid child stays in the ssh session scope under user-1000.slice, and the step-11 desktop purge
+/// ends the last GUI session, so systemd stopped the whole user slice and killed setup-strih
+/// mid-apt (new strih notebook, 11.10.2026). A system unit inherits no environment, so the token
+/// and the CAM_PW / STRIH_NDI_PEER pass-through travel in a 0600 env file the child deletes, never
+/// in systemd-run's argv. `id` and `systemd-run` are stubbed on PATH (root, run the command).
 #[test]
 fn strih_lx_setup_runner_reads_the_token_from_stdin_and_writes_the_rc_1317() {
     for stdin in ["pw\nghtoken:tok42\n", "ghtoken:tok42\n"] {
         let t = tempfile::tempdir().unwrap();
         let s = t.path().join("stage");
+        let stub = t.path().join("stub");
         fs::create_dir_all(s.join("repo/scripts")).unwrap();
         fs::create_dir_all(s.join("bundle")).unwrap();
+        fs::create_dir_all(&stub).unwrap();
+        write_exec(&stub.join("id"), "#!/bin/bash\necho 0\n");
+        write_exec(
+            &stub.join("systemd-run"),
+            "#!/bin/bash\nprintf '%s\\n' \"$@\" > \"$STUB_DIR/systemd-run.args\"\nwhile [ \"${1#--}\" != \"$1\" ]; do shift; done\nsetsid nohup env -i PATH=\"$PATH\" \"$@\" </dev/null >/dev/null 2>&1 &\n",
+        );
         write_exec(
             &s.join("repo/scripts/setup-strih.sh"),
-            "#!/bin/bash\necho \"B=$STRIH_LX_BUNDLE_SRC ARGS=$* IP=${STRIH_LX_IP:-unset} T=$GH_TOKEN\"\nexit 6\n",
+            "#!/bin/bash\necho \"B=$STRIH_LX_BUNDLE_SRC ARGS=$* IP=${STRIH_LX_IP:-unset} T=$GH_TOKEN PW=${CAM_PW:-unset} PEER=${STRIH_NDI_PEER:-unset}\"\nexit 6\n",
         );
         let gen = Command::new("bash")
             .arg("-c")
@@ -781,17 +795,19 @@ fn strih_lx_setup_runner_reads_the_token_from_stdin_and_writes_the_rc_1317() {
             .output()
             .unwrap();
         assert!(gen.status.success());
-        let runner = String::from_utf8_lossy(&gen.stdout).replace(
-            "[ \"$(id -u)\" = 0 ] || { echo \"run-setup: must run as root\" >&2; exit 2; }",
-            "",
-        );
+        let runner = String::from_utf8_lossy(&gen.stdout).to_string();
         assert!(
-            !runner.contains("must run as root"),
-            "the root check line moved -- update this test:\n{runner}"
+            !runner.contains("setsid"),
+            "the runner must detach through a system unit, not setsid:\n{runner}"
         );
         write_exec(&s.join("repo/run-setup.sh"), &runner);
+        let path = format!("{}:{}", stub.display(), std::env::var("PATH").unwrap());
         let mut child = Command::new("bash")
             .arg(s.join("repo/run-setup.sh"))
+            .env("PATH", &path)
+            .env("STUB_DIR", &stub)
+            .env("CAM_PW", "campw7")
+            .env("STRIH_NDI_PEER", "10.77.9.65")
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .spawn()
@@ -819,12 +835,33 @@ fn strih_lx_setup_runner_reads_the_token_from_stdin_and_writes_the_rc_1317() {
             log.contains(&format!("B={}/bundle", s.display()))
                 && log.contains("ARGS=--box strih-lx ")
                 && log.contains("IP=unset")
-                && log.contains("T=tok42"),
+                && log.contains("T=tok42")
+                && log.contains("PW=campw7")
+                && log.contains("PEER=10.77.9.65"),
             "{stdin:?}: {log}"
         );
+        let args = fs::read_to_string(stub.join("systemd-run.args")).unwrap();
+        assert!(
+            args.lines().any(|l| l.starts_with("--unit="))
+                && args.lines().any(|l| l == "--collect"),
+            "a named, collected transient unit:\n{args}"
+        );
+        assert!(
+            !args.contains("tok42") && !args.contains("campw7"),
+            "no secret in systemd-run's argv:\n{args}"
+        );
+        let leftovers: Vec<_> = fs::read_dir(&s)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "the env file is gone: {leftovers:?}");
         // no token line at all -> refuse.
         let mut child = Command::new("bash")
             .arg(s.join("repo/run-setup.sh"))
+            .env("PATH", &path)
+            .env("STUB_DIR", &stub)
             .stdin(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
