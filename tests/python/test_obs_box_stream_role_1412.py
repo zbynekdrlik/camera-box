@@ -362,8 +362,8 @@ def test_the_stream_pp_matrix_satisfies_the_hub_load_rules():
     assert not [p for p in parts if p["role"] == "cambox" or p.get("out_stream")]
     o = next(p for p in parts if p["role"] == "program_out")
     assert o["adapter"] == "pipewire" and o["pipewire_target"] == "strih-program"
-    assert o["source_streams"] == ["pp-stream"]
-    assert {p["in_stream"] for p in parts if p["adapter"] == "vban"} == {"pp-stream"}
+    assert o["source_streams"] == ["stream"]
+    assert {p["in_stream"] for p in parts if p["adapter"] == "vban"} == {"stream"}
 
 
 # --- the setup / verify wiring ---------------------------------------------------------------------------

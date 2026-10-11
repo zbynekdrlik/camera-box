@@ -543,9 +543,9 @@ def test_the_pp_matrix_satisfies_the_hub_load_rules():
     assert len(outs) == 1
     o = outs[0]
     assert o["adapter"] == "pipewire" and o["pipewire_target"] == "strih-program" and "pipewire_source" not in o
-    assert o["source_streams"] == ["pp-strih"] and set(o["source_streams"]) <= vban_in
-    src = next(p for p in parts if p["name"] == "resolume-pp")
-    assert (src["role"], src["host"], src["in_channels"]) == ("program_ref", "resolume-pp.lan", 2)
+    assert o["source_streams"] == ["strih"] and set(o["source_streams"]) <= vban_in
+    src = next(p for p in parts if p["name"] == "lv1")
+    assert (src["role"], src["host"], src["in_channels"]) == ("program_ref", "lv1.lan", 2)
 
 
 # --- the setup / verify wiring ----------------------------------------------------------------------
