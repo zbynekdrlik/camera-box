@@ -3701,19 +3701,25 @@ fn openbox_autostart_takes_the_panels_preferred_mode_first_1412() {
         .lines()
         .find(|l| l.trim_start().starts_with("PREF="))
         .unwrap_or_else(|| panic!("the autostart reads the panel's preferred mode:\n{out}"));
-    let xrandr = "Screen 0: minimum 320 x 200, current 1920 x 1080, maximum 16384 x 16384\n\
-eDP connected primary 1920x1080+0+0 (normal left inverted right x axis y axis) 302mm x 189mm\n\
-   1920x1200     60.00 +\n\
-   1920x1080     60.00*\n\
-   1600x1200     60.00\n\
-HDMI-A-0 disconnected (normal left inverted right x axis y axis)\n\
-   1280x720      60.00 +\n";
+    // one xrandr line per element: a `\` line continuation would strip the mode lines' leading
+    // spaces, and those spaces are what tells a mode line from a connector line
+    let xrandr = [
+        "Screen 0: minimum 320 x 200, current 1920 x 1080, maximum 16384 x 16384",
+        "eDP connected primary 1920x1080+0+0 (normal left inverted right x axis y axis) 302mm x 189mm",
+        "   1920x1200     60.00 +",
+        "   1920x1080     60.00*",
+        "   1600x1200     60.00",
+        "HDMI-A-0 disconnected (normal left inverted right x axis y axis)",
+        "   1280x720      60.00 +",
+        "",
+    ]
+    .join("\n");
     let script =
         format!("xrandr() {{ printf '%s' \"$FIX\"; }}\nPANEL=eDP\n{pref}\nprintf '%s' \"$PREF\"\n");
     let o = Command::new("bash")
         .arg("-c")
         .arg(&script)
-        .env("FIX", xrandr)
+        .env("FIX", &xrandr)
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&o.stdout), "1920x1200", "{o:?}");
