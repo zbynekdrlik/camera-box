@@ -703,6 +703,7 @@ nic_hook=1
 cpu_perf_unit=enabled
 rc_local_eee=1
 rc_local_active=active
+cpufreq_policies=16
 governors=performance
 maxperf_active=active
 maxperf_udev=1
@@ -813,6 +814,42 @@ fn verdict_passes_a_fully_provisioned_box_with_one_row_per_item() {
         "one row per baseline item, in provisioning order"
     );
     assert!(rows.iter().all(|(_, st)| st == "OK"), "{rows:?}");
+}
+
+/// issue 1412 (strih-pp, Ryzen 7 5800X, BIOS CPPC off): the kernel binds no cpufreq driver, so there
+/// is no governor to pin and cpu-performance.service cannot run. The firmware runs the cores (4.0 GHz
+/// read live), so perf is OK without the unit and the governor rows; any other perf fact still counts.
+#[test]
+fn perf_is_ok_on_a_box_without_a_cpufreq_driver_1412() {
+    let no_cpufreq = GOOD_FACTS
+        .replace("cpufreq_policies=16", "cpufreq_policies=0")
+        .replace("cpu_perf_unit=enabled", "cpu_perf_unit=disabled")
+        .replace("governors=performance", "governors=");
+    let (_c, rows) = verdict(&no_cpufreq);
+    let perf = rows.iter().find(|(n, _)| n == "perf").unwrap();
+    assert_eq!(perf.1, "OK", "{rows:?}");
+    let (_c, rows) =
+        verdict(&no_cpufreq.replace("maxperf_active=active", "maxperf_active=inactive"));
+    let perf = rows.iter().find(|(n, _)| n == "perf").unwrap();
+    assert_eq!(perf.1, "FAIL", "the other perf facts still count: {rows:?}");
+    // a box that HAS cpufreq policies still needs the unit and the performance governor
+    let (_c, rows) = verdict(&GOOD_FACTS.replace("governors=performance", "governors="));
+    let perf = rows.iter().find(|(n, _)| n == "perf").unwrap();
+    assert_eq!(perf.1, "FAIL", "{rows:?}");
+    // the installer only enables the governor unit where a cpufreq driver exists
+    let lib = read(BASELINE);
+    let body = &lib[lib.find("obs_box_max_performance() {").unwrap()..];
+    let body = &body[..body.find("\n}\n").unwrap()];
+    let gate = body
+        .find("cpufreq/scaling_governor >/dev/null 2>&1; then")
+        .expect("a cpufreq presence gate");
+    let enable = body
+        .find("systemctl enable --now cpu-performance.service")
+        .unwrap();
+    assert!(
+        gate < enable,
+        "the unit is enabled only behind the cpufreq gate"
+    );
 }
 
 /// Every item FAILs when its own fact is broken -- and only that item.
