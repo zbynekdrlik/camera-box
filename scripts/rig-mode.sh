@@ -1734,10 +1734,20 @@ do_event() {
   cam_ssh "$(event_artifact_purge_cmds "$PAINTER_PIDFILE" "$AUDIO_MARKER_LOG")" 2>/dev/null || true
   echo
   echo "[obs] #257 toggle per-source genlock_burn OFF over WebSocket (no relaunch — the #246 guard):"
-  toggle_burn event
+  # issue 1410: the burn clear and the mapping enforce reach strih too, so an unreachable strih made
+  # them return non-zero and ended EVENT before the contract and the Discord confirmation. Same
+  # record-and-fold shape: the loops inside still clear every reachable box, the rc reaches the exit.
+  local _burn_rc=0 _ndimap_rc=0
+  toggle_burn event || _burn_rc=$?
+  if [ "$_burn_rc" -ne 0 ]; then
+    echo "WARNING issue 1410: genlock_burn OFF FAILED on at least one OBS box (rc=$_burn_rc, see the [box burn] lines above) — every reachable box was still cleared; continuing, EVENT mode will still exit non-zero." >&2
+  fi
   echo
   echo "[obs] #399 enforce the strih NDI-input→camera mapping (4 distinct — correct for broadcast too):"
-  enforce_strih_ndi_mapping
+  enforce_strih_ndi_mapping || _ndimap_rc=$?
+  if [ "$_ndimap_rc" -ne 0 ]; then
+    echo "WARNING issue 1410: strih NDI mapping enforce FAILED (rc=$_ndimap_rc, see the [strih ndi-map] lines above) — continuing, EVENT mode will still exit non-zero." >&2
+  fi
   echo
   print_genlock_relaunch_note event
   echo
@@ -1748,6 +1758,13 @@ do_event() {
   event_mode_assert
   camera_test_settings_restore_discord_note "${EVENT_ASSERT_DISCORD_MSG_PATH:-}"
   bkshading_relay_mode_discord_note "${EVENT_ASSERT_DISCORD_MSG_PATH:-}" "$_relay_rc"
+  # issue 1410: the owner reads this on the phone, so a failed OBS-box step goes on top of it (the run
+  # exits non-zero below) instead of a confirmation that reads clean. Plain Slovak, no commands.
+  local _obs_failed=""
+  [ "$_stray_rc" -eq 0 ] || _obs_failed="kontrola zabudnutých nahrávok"
+  [ "$_burn_rc" -eq 0 ] || _obs_failed="${_obs_failed:+$_obs_failed, }vypnutie meracích QR (burn)"
+  [ "$_ndimap_rc" -eq 0 ] || _obs_failed="${_obs_failed:+$_obs_failed, }nastavenie NDI kamier na strihu"
+  [ -z "$_obs_failed" ] || event_mode_discord_note_add "${EVENT_ASSERT_DISCORD_MSG_PATH:-}" "⚠️ Prepnutie do EVENT: na OBS boxoch sa nepodarilo: ${_obs_failed}. Strih alebo stream asi nebol dosiahnuteľný. Ostatné kroky prepnutia prebehli, výsledok kontroly je nižšie. Napíš Claudovi, nech to skontroluje." top
   echo "=================================================================================="
   echo
   # #724: send the Discord confirmation on BOTH outcomes (pass=confirmation, fail=warning naming
@@ -1757,19 +1774,26 @@ do_event() {
   rm -f "$EVENT_ASSERT_DISCORD_MSG_PATH" "$EVENT_ASSERT_RESULT_JSON" 2>/dev/null || true
   echo
   # #868: fold the recorded cam-side restore failure (and, issue 1407, the relay step's; issue 1410,
-  # the stray-recording guard's) into the final verdict — deferring them past the burn-clear must
-  # never SWALLOW them.
-  if [ "$EVENT_ASSERT_PASS" -eq 0 ] && [ "${_cam_restore_rc:-0}" -eq 0 ] && [ "${_relay_rc:-0}" -eq 0 ] && [ "${_stray_rc:-0}" -eq 0 ]; then
+  # the stray-recording guard's, the burn clear's and the mapping enforce's) into the final verdict —
+  # deferring them past the burn-clear must never SWALLOW them. Every failure gets its own RESULT line.
+  if [ "$EVENT_ASSERT_PASS" -eq 0 ] && [ "${_cam_restore_rc:-0}" -eq 0 ] && [ "${_relay_rc:-0}" -eq 0 ] && [ "${_stray_rc:-0}" -eq 0 ] && [ "${_burn_rc:-0}" -eq 0 ] && [ "${_ndimap_rc:-0}" -eq 0 ]; then
     echo "RESULT: EVENT mode — cam side PASS, burns OFF, #722 CONTRACT CONFIRMED clean for broadcast."
     exit 0
   fi
   if [ "${_stray_rc:-0}" -ne 0 ]; then
     echo "RESULT: EVENT mode — stray-recording guard FAILED (issue 1410, rc=${_stray_rc}). The painter stop and the burns were still handled, but an OBS box was not verified free of a stray recording — see the guard lines above." >&2
   fi
+  if [ "${_burn_rc:-0}" -ne 0 ]; then
+    echo "RESULT: EVENT mode — genlock_burn OFF FAILED (issue 1410, rc=${_burn_rc}). Every reachable OBS box was cleared, but at least one was not — see the [box burn] lines above." >&2
+  fi
+  if [ "${_ndimap_rc:-0}" -ne 0 ]; then
+    echo "RESULT: EVENT mode — strih NDI mapping enforce FAILED (issue 1410, rc=${_ndimap_rc}). The strih camera inputs were not verified distinct — see the [strih ndi-map] lines above." >&2
+  fi
   bkshading_relay_mode_result event "${_relay_rc:-0}"
   if [ "${_cam_restore_rc:-0}" -ne 0 ]; then
     echo "RESULT: EVENT mode — cam-side restore FAILED (#868, rc=${_cam_restore_rc}). Burns were still cleared, but the rig is NOT confirmed clean — see the cam-side failure above." >&2
-  elif [ "$EVENT_ASSERT_PASS" -ne 0 ]; then
+  fi
+  if [ "$EVENT_ASSERT_PASS" -ne 0 ]; then
     echo "RESULT: EVENT mode — #722 CONTRACT FAILED. The rig is NOT confirmed clean for broadcast — see the assert summary above." >&2
   fi
   exit 1
