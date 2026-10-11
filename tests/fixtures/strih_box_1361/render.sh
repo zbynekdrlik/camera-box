@@ -39,7 +39,7 @@ strih_lx_ndi_republishes
 section ndi-inputs
 strih_lx_ndi_inputs
 section seed-manifest
-strih_lx_seed_manifest_json
+if has obs_box_seed_manifest_json; then obs_box_seed_manifest_json; else strih_lx_seed_manifest_json; fi
 section profile-facts
 strih_lx_profile_facts
 section dantesync-unit

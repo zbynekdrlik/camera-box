@@ -52,6 +52,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STRIH_FACT_BOX="$(strih_box_cli_box "$@")" || { echo "usage: verify-strih.sh [--box <name>]" >&2; exit 1; }
 strih_box_load "$STRIH_FACT_BOX" \
   || { echo -e "${RED}FAIL: box '${STRIH_FACT_BOX}': scripts/strih-boxes/${STRIH_FACT_BOX}.env is missing, invalid or still has TODO_OWNER facts (listed above)${NC}" >&2; exit 1; }
+obs_box_role_apply || { echo "verify-strih: the role / venue facts of box ${STRIH_FACT_BOX} could not be applied (issue 1412)" >&2; exit 1; }
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live checks ----------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -235,7 +236,9 @@ if [ -n "$DRM_LOG" ] && strih_drm_vk_present_dead < "$DRM_LOG"; then
   DRM_VK_DEAD=1
 fi
 DRM_VERDICT="$(strih_drm_output_verdict "$DRM_HDMI" "$DRM_ARMED" "$DRM_VIEW_V" "$DRM_LIVE" "$DRM_MV_LIVE" "$DRM_BACKEND_V" "$DRM_BACKEND_FACT" "$DRM_VK_DEAD" || true)"
+[ "$DRM_BACKEND_FACT" != none ] || DRM_VERDICT=skip-no-output   # issue 1412: a stream box has no fixed HDMI output
 case "$DRM_VERDICT" in
+  skip-no-output)     note "HDMI output: not graded -- STRIH_HDMI_OUTPUT_BACKEND=none (this box has no fixed HDMI output)" ;;
   ok)                 ok   "HDMI output: ${DRM_ARMED} live (backend ${DRM_BACKEND_V}), view ${DRM_VIEW_V} (${DRM_CONF_V} + the newest OBS log)" ;;
   x-unreadable)       bad  "HDMI output: the box fact is vk-direct, which detects the HDMI monitor through X RandR, but xrandr on :0 answered nothing (Xorg down, or ${USER_HOME}/.Xauthority unreadable for $(id -un)) -- cannot grade the HDMI output" ;;
   skip-no-hdmi)       note "HDMI output: SKIP -- no HDMI monitor connected, the DRM-lease output stays dormant (attach one and re-run setup-strih.sh step 6)" ;;
@@ -412,7 +415,9 @@ else
 fi
 
 # 10) NVENC encoder available.
+if WHY="$(obs_box_step_applies 3-nvenc)"; then   # issue 1412: the stream role grades its own encoder
 { ffmpeg -hide_banner -encoders 2>/dev/null; cat "$LOG" 2>/dev/null; } | strih_lx_nvenc_available_ok && ok "NVENC encoder available" || bad "NVENC encoder not available"
+else obs_box_stream_encoder_grade "${USER_HOME}/.config/obs-studio/basic/profiles/$(strih_lx_obs_profile)"; fi
 
 # 12) single timesync authority (dantesync only).
 UNITS="$(systemctl list-units --type=service --state=active --no-legend 2>/dev/null | awk '{print $1}')"
@@ -541,6 +546,7 @@ fi
 #     companion-satellite.service (issue 1399; the unit itself is graded by item 39) + the seeded app
 #     config.json's remoteIp == the controller (strih_companion_verdict, fail-closed). FAIL loud on
 #     any missing part.
+if WHY="$(obs_box_step_applies 16)"; then   # issue 1412
 CS_INSTALLED=0; [ -x "$(strih_companion_satellite_bin)" ] && CS_INSTALLED=1
 CS_UDEV_OK=0; [ -f "$(strih_companion_satellite_udev_rule)" ] && CS_UDEV_OK=1
 CS_AUTOSTART="${USER_HOME}/.config/openbox/autostart"
@@ -577,6 +583,7 @@ else
   bad "(companion) Companion Satellite gate: ${CS_VERDICT} (bin=${CS_INSTALLED} udev=${CS_UDEV_OK} autostart=${CS_AUTOSTART_OK} host=${CS_HOST_OK} running=${CS_RUNNING} connected=${CS_CONNECTED}) -- re-run setup-strih.sh step 16"
 fi
 
+else note "(companion) not graded: ${WHY}"; fi
 # 20) OBS helper binaries beside /usr/bin/obs (issue 1317, live 20.9.2026): OBS resolves its helper
 #     processes -- obs-ffmpeg-mux (the recording muxer) + obs-nvenc-test (the NVENC probe) -- NEXT TO
 #     ITS OWN EXECUTABLE, so the prefix install must place them in /usr/bin. Missing = a broken record
@@ -658,11 +665,12 @@ command -v avahi-browse >/dev/null 2>&1 \
 #     FAIL loud.
 NDI_USER_INI="${USER_HOME}/.config/obs-studio/user.ini"
 NDI_INI_MISSING=""
-for _kv in 'MainOutputName=2ME PGM' 'PreviewOutputName=2ME PVW' 'MainOutputEnabled=true' 'PreviewOutputEnabled=true'; do
+mapfile -t NDI_KVS < <(obs_box_ndi_output_kvs)   # issue 1412: the role's set (strih: MainOutputName=2ME PGM / PreviewOutputName=2ME PVW)
+for _kv in "${NDI_KVS[@]}"; do
   grep -qF "$_kv" "$NDI_USER_INI" 2>/dev/null || NDI_INI_MISSING="${NDI_INI_MISSING} [${_kv}]"
 done
 if [ -z "$NDI_INI_MISSING" ]; then
-  ok "(ndi-outputs) user.ini [NDIPlugin] MainOutputName=2ME PGM / PreviewOutputName=2ME PVW + Enabled=true"
+  ok "(ndi-outputs) user.ini [NDIPlugin] ${NDI_KVS[*]}"
 else
   bad "(ndi-outputs) ${NDI_USER_INI} missing DistroAV output identity:${NDI_INI_MISSING} -- re-run setup-strih.sh step 7"
 fi
@@ -804,6 +812,7 @@ fi
 #     the :8770 listener OWNER must be the bkshading binary (the rule's "confirm the listener's owner"
 #     check via ss -tlnp) AND /api/version must answer (the SERVICE's route -- /api/state is the
 #     relay's / intercom hub's endpoint, :8770/api/state is 404), else the service is broken (FAIL loud).
+if WHY="$(obs_box_step_applies 16c)"; then   # issue 1412
 BKSH_PORT="${BKSHADING_SERVICE_PORT:-8770}"
 if [ -f /etc/systemd/system/bkshading-service.service ]; then
   BKSH_EN="$(systemctl is-enabled bkshading-service 2>/dev/null || echo unknown)"
@@ -825,6 +834,7 @@ else
   bad "(bkshading-service) unit /etc/systemd/system/bkshading-service.service not installed -- re-run setup-strih.sh step 16c (issue 1353)"
 fi
 
+else note "(bkshading-service) not graded: ${WHY}"; fi
 # 37)-40) issue 1399 session apps (scripts/lib/strih-session-apps.sh, sourced by strih-provision.sh): the
 #     browser-source keeper (unit + its last pass), the shading panel window (unit + "Shading" on :0),
 #     Companion Satellite (unit + the /opt binary as its main process) and its watch (timer + last pass).

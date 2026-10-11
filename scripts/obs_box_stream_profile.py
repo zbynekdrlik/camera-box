@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""issue 1412 slice B: the stream ROLE's OBS profile on a Linux OBS box (stream-pp).
+
+setup-strih.sh step 3 (stream role) runs it with OBS STOPPED (OBS rewrites its profile on exit). It
+writes into ~/.config/obs-studio/basic/profiles/<profile>/:
+
+  * basic.ini -- Advanced output, the stream encoder chosen by the GPU (an NVIDIA dGPU -> NVENC,
+    otherwise the VAAPI texture encoder: the stream-pp laptop has an AMD iGPU only), 1920x1080 base +
+    output at 30 fps, NV12 / 709 / partial, 48 kHz stereo. Every other key is kept (an upsert).
+  * streamEncoder.json -- the advanced-output stream encoder settings: CBR 19000 kb/s, a keyframe
+    every 2 s, H.264 High, no B-frames (the old Windows AMF profile of the box, issue 1412 recon).
+  * service.json -- `rtmp_custom` to the local restreamer. ONLY the server is written: the stream key
+    is the owner's and never written by us; an existing key is kept as it is.
+
+Pure helpers + a small CLI; tests/python/test_obs_box_stream_role_1412.py.
+"""
+import argparse
+import configparser
+import io
+import json
+import os
+import sys
+
+VAAPI_ENCODER = "ffmpeg_vaapi_tex"
+NVENC_ENCODER = "obs_nvenc_h264_tex"
+VAAPI_RENDER_NODE = "/dev/dri/renderD128"
+STREAM_BITRATE_KBPS = 19000
+STREAM_KEYINT_S = 2
+# FF_PROFILE_H264_HIGH, the int OBS's ffmpeg_vaapi encoder takes (scripts/imag_record_encoder.py).
+H264_HIGH_PROFILE = 100
+DEFAULT_RTMP_SERVER = "rtmp://127.0.0.1:1234/live"
+
+BASIC_INI = {
+    "Output": {"Mode": "Advanced"},
+    "Video": {
+        "BaseCX": "1920", "BaseCY": "1080", "OutputCX": "1920", "OutputCY": "1080",
+        "FPSType": "0", "FPSCommon": "30",
+        "ColorFormat": "NV12", "ColorSpace": "709", "ColorRange": "Partial",
+    },
+    "Audio": {"SampleRate": "48000", "ChannelSetup": "Stereo"},
+}
+
+
+def encoder_for(has_nvidia):
+    """The stream encoder for the box's GPU: NVENC on an NVIDIA dGPU, else the VAAPI texture encoder."""
+    return NVENC_ENCODER if has_nvidia else VAAPI_ENCODER
+
+
+def stream_encoder_settings(encoder):
+    """streamEncoder.json for ENCODER (CBR 19000, keyint 2 s, High, no B-frames)."""
+    if encoder == VAAPI_ENCODER:
+        return {"vaapi_device": VAAPI_RENDER_NODE, "rate_control": "CBR", "bitrate": STREAM_BITRATE_KBPS,
+                "keyint_sec": STREAM_KEYINT_S, "bf": 0, "profile": H264_HIGH_PROFILE}
+    if encoder == NVENC_ENCODER:
+        return {"rate_control": "CBR", "bitrate": STREAM_BITRATE_KBPS, "keyint_sec": STREAM_KEYINT_S,
+                "bf": 0, "profile": "high"}
+    raise ValueError("unknown stream encoder %r" % encoder)
+
+
+def basic_ini_text(existing_text, encoder, profile_name):
+    """Upsert the stream keys into a basic.ini text (None = no file yet); every other key is kept.
+    Raises ValueError on a file configparser cannot read (never clobber it)."""
+    cp = configparser.RawConfigParser(strict=False)
+    cp.optionxform = str
+    if existing_text:
+        try:
+            cp.read_string(existing_text)
+        except configparser.Error as e:
+            raise ValueError("basic.ini unreadable (%s) -- left untouched" % e)
+    sections = dict(BASIC_INI)
+    sections["General"] = {"Name": profile_name}
+    sections["AdvOut"] = {"Encoder": encoder}
+    for sec, kv in sections.items():
+        if not cp.has_section(sec):
+            cp.add_section(sec)
+        for k, v in kv.items():
+            cp.set(sec, k, v)
+    buf = io.StringIO()
+    cp.write(buf, space_around_delimiters=False)
+    return buf.getvalue()
+
+
+def service_json(existing, server):
+    """The service.json dict: `rtmp_custom` to SERVER. Only the server is written; an existing key and
+    every other setting are kept, and no key is ever added."""
+    d = dict(existing) if isinstance(existing, dict) else {}
+    settings = dict(d.get("settings") or {}) if isinstance(d.get("settings"), dict) else {}
+    if d.get("type") != "rtmp_custom":
+        # another service type carries its own server/key meaning: start a clean custom service, but
+        # keep a key the owner already pasted.
+        settings = {k: v for k, v in settings.items() if k == "key"}
+    d["type"] = "rtmp_custom"
+    settings["server"] = server
+    settings.setdefault("use_auth", False)
+    d["settings"] = settings
+    return d
+
+
+def _write(path, text, mode):
+    tmp = path + ".tmp-1412"
+    with open(tmp, "w") as fh:
+        fh.write(text)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+
+
+def apply(profile_dir, encoder, server, profile_name):
+    """Write the three files under PROFILE_DIR (created). Returns the lines to log."""
+    os.makedirs(profile_dir, exist_ok=True)
+    ini = os.path.join(profile_dir, "basic.ini")
+    old = open(ini).read() if os.path.exists(ini) else None
+    _write(ini, basic_ini_text(old, encoder, profile_name), 0o644)
+    _write(os.path.join(profile_dir, "streamEncoder.json"),
+           json.dumps(stream_encoder_settings(encoder), indent=4) + "\n", 0o644)
+    svc_path = os.path.join(profile_dir, "service.json")
+    existing = None
+    if os.path.exists(svc_path):
+        try:
+            existing = json.load(open(svc_path))
+        except ValueError:
+            raise ValueError("service.json unreadable -- left untouched")
+    svc = service_json(existing, server)
+    _write(svc_path, json.dumps(svc, indent=4) + "\n", 0o600)
+    return ["basic.ini: Advanced output, %s, 1920x1080 @ 30 fps NV12" % encoder,
+            "streamEncoder.json: CBR %d kb/s, keyint %d s, High" % (STREAM_BITRATE_KBPS, STREAM_KEYINT_S),
+            "service.json: rtmp_custom %s (stream key %s)" % (server, "kept" if svc["settings"].get("key") else "not set -- the owner pastes it")]
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--profile-dir", required=True)
+    ap.add_argument("--profile-name", required=True)
+    ap.add_argument("--has-nvidia", choices=("0", "1"), required=True)
+    ap.add_argument("--server", default=DEFAULT_RTMP_SERVER)
+    a = ap.parse_args(argv)
+    try:
+        lines = apply(a.profile_dir, encoder_for(a.has_nvidia == "1"), a.server, a.profile_name)
+    except (ValueError, OSError) as e:
+        sys.exit("FAIL issue 1412: %s" % e)
+    for ln in lines:
+        print("  " + ln)
+
+
+if __name__ == "__main__":
+    main()

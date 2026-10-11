@@ -80,6 +80,7 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 STRIH_FACT_BOX="$(strih_box_cli_box "$@")" || fail "usage: setup-strih.sh [--box <name>] [--yes]"
 strih_box_load "$STRIH_FACT_BOX" \
   || fail "box '${STRIH_FACT_BOX}': scripts/strih-boxes/${STRIH_FACT_BOX}.env is missing, invalid or still has TODO_OWNER facts (listed above) -- refusing to provision"
+obs_box_role_apply || fail "box '${STRIH_FACT_BOX}': its role / venue facts could not be applied (issue 1412, above)"
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the destructive flow ----
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -158,6 +159,7 @@ strih_dantesync_install "$DS_UNIT_TEXT" "$DS_ROLE" \
 # ---------------------------------------------------------------------------------------------
 REC_ENC="$(strih_lx_profile_facts | grep '^rec_encoder=' | cut -d= -f2)"
 step 3 "NVIDIA driver / NVENC pre-check (record encoder ${REC_ENC}; the driver + PRIME install is baseline step 11)"
+if WHY="$(obs_box_step_applies 3-nvenc)"; then   # issue 1412: the stream role encodes by GPU
 # issue 1357: the NVIDIA driver + PRIME nvidia-primary are a BASELINE item now (obs_box_nvidia_prime,
 # step 11, run in imag's order AFTER the boot safety net so the DKMS/grub change is guarded). On a box
 # that already has the driver this reports NVENC; on a fresh box it only warns -- step 11 installs the
@@ -166,6 +168,10 @@ if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
   echo "  nvidia-smi OK -- NVENC HEVC available for ${REC_ENC}"
 else
   warn "  nvidia-smi missing/failing -- step 11 (baseline) installs nvidia-driver-595-open + PRIME; NVENC for ${REC_ENC} after the next boot (verify-strih item 10 gates it)"
+fi
+
+else
+  echo "  ${WHY}"; obs_box_stream_encoder_provision "$OBS_CFG" "$DESKTOP_USER" "$(strih_lx_obs_profile)" || fail "issue 1412: the stream encoder/profile could not be provisioned (above)"
 fi
 
 # ---------------------------------------------------------------------------------------------
@@ -370,11 +376,13 @@ install -d -m 755 /opt/camera-box
 # canonical strih input names as EXPLICIT-name objects {sender,input,scene} + "mode":"update-only"
 # (heal the certified genlock class onto EXISTING inputs, never CreateScene/CreateInput -> no more
 # duplicate `NDI CAMn (usb)` receivers). The full DATA name-map is strih_lx_seed_manifest_json.
-strih_lx_seed_manifest_json > /opt/camera-box/strih-lx-seed.json
+obs_box_seed_manifest_json > /opt/camera-box/strih-lx-seed.json   # issue 1412: the stream role's manifest on a stream box
 echo "  wrote /opt/camera-box/strih-lx-seed.json (operator collection: update-only, explicit strih input names NDI camN / NDI 2ME PVW / NDI 2ME PGM (mv) / cg / CG-obs, floor-3 pins)"
 # issue 1346: the fixed HDMI output's config ~/.camera-box/drm-output.json (Program / built-in Multiview,
 # the box's backend fact) -- the whole step lives in scripts/lib/strih-drm-output.sh.
-strih_drm_output_provision "$USER_HOME" "$DESKTOP_USER" "$HERE" "$(strih_lx_hdmi_output_backend)"
+if WHY="$(obs_box_step_applies 6-hdmi)"; then
+  strih_drm_output_provision "$USER_HOME" "$DESKTOP_USER" "$HERE" "$(strih_lx_hdmi_output_backend)"
+else echo "  SKIP: ${WHY}"; fi
 if [ -n "${GH_TOKEN:-}" ]; then
   curl -fsSL -H "Authorization: token ${GH_TOKEN}" -H 'Accept: application/vnd.github.raw' \
     "https://api.github.com/repos/${GENLOCK_REPO}/contents/scripts/obs_phase2.py?ref=dev" \
@@ -458,9 +466,9 @@ fi
 # before any launch; OBS rewrites user.ini on exit). Idempotent RawConfigParser upsert via the ONE
 # source of truth strih_lx_ndi_output_ini_cmds (scripts/lib/strih-provision.sh).
 if command -v python3 >/dev/null 2>&1; then
-  if eval "$(strih_lx_ndi_output_ini_cmds "$USER_INI")"; then
+  if eval "$(strih_lx_ndi_output_ini_cmds "$USER_INI" "$(strih_box_role)")"; then
     chown "$DESKTOP_USER":"$DESKTOP_USER" "$USER_INI" 2>/dev/null || true
-    echo "  seeded [NDIPlugin] MainOutputName=2ME PGM / PreviewOutputName=2ME PVW + Enabled=true in ${USER_INI}"
+    echo "  seeded [NDIPlugin] $(obs_box_ndi_output_kvs | tr '\n' ' ')in ${USER_INI}"
   else
     warn "  could not seed [NDIPlugin] output names in ${USER_INI} (non-fatal; set them in OBS Tools > DistroAV Settings, or re-run)"
   fi
@@ -724,6 +732,7 @@ echo "  intercom-hub.service installed + enabled (NOT started here); /etc/interc
 
 # ---------------------------------------------------------------------------------------------
 step 14 "Janus audiobridge audio edge (issue 1345 M3a: apt install janus + jcfg + ENABLE-ONLY)"
+if WHY="$(obs_box_step_applies 14)"; then   # issue 1412: scripts/lib/obs-box-role.sh
 # The phones intercom leg (the VDO.Ninja replacement) runs over a Janus audiobridge room the hub
 # joins as a plain-RTP PCMU participant (issue 1345 M3a). Install Janus (apt), generate the 0600 room
 # secret if absent (NEVER printed), write the audiobridge room jcfg (the secret is injected via a bash
@@ -780,6 +789,8 @@ else
   warn "  /etc/janus absent and no janus binary -- install janus, then re-run this step to write the jcfg + enable"
 fi
 
+else echo "  SKIP: ${WHY}"; fi
+
 # ---------------------------------------------------------------------------------------------
 step 15 "Kiosk openbox autostart + root menu (issue 1357: OBS + Companion Satellite start in the Xorg openbox session)"
 # issue 1357: the lightdm autologin -> openbox kiosk (baseline step 11) runs ~/.config/openbox/autostart
@@ -804,6 +815,7 @@ echo "  ~/.config/openbox/autostart (display layout + kiosk preamble + strih-obs
 
 # ---------------------------------------------------------------------------------------------
 step 16 "Bitfocus Companion Satellite (Stream Deck surface agent) -- desktop build, run by companion-satellite.service"
+if WHY="$(obs_box_step_applies 16)"; then   # issue 1412: scripts/lib/obs-box-role.sh
 # issue 1317: the owner caught this missing live -- the notebook's locally-attached Stream Deck was
 # dead because Companion Satellite was never installed. Install the SATELLITE (NOT full Companion --
 # the venue runs the Companion CONTROLLER at 10.77.9.205, this box only exposes its local surface to
@@ -859,6 +871,8 @@ eval "$(strih_companion_satellite_rest_apply_cmd "$CS_HOST" "$CS_PORT")" || true
 # autostart (step 15) starts -- never started mid-provision, and no XDG ~/.config/autostart entry.
 echo "  Companion Satellite v${CS_VER} installed to /opt (run by companion-satellite.service for ${DESKTOP_USER}, NOT started now); controller ${CS_HOST}:${CS_PORT} seeded (config.json + host.conf)"
 
+else echo "  SKIP: ${WHY}"; fi
+
 # ---------------------------------------------------------------------------------------------
 # A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
 step "16b" "RustDesk remote desktop (owner request 22.9.2026) -- pinned .deb, permanent password from a 0600 file"
@@ -886,6 +900,7 @@ fi
 # ---------------------------------------------------------------------------------------------
 # A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
 step "16c" "bkshading shading-control service (issue 1353) -- CI artifact -> /opt/bkshading, seed config + unit, enable-only"
+if WHY="$(obs_box_step_applies 16c)"; then   # issue 1412: scripts/lib/obs-box-role.sh
 # issue 1353: the shading panel BACKEND (bkshading/service) ran only on the Windows strih PC; post-M4
 # the notebook is the strih, so it is provisioned here as a systemd unit fed the CI-built Linux
 # artifact. The panel web assets are EMBEDDED in the binary (bkshading/service/src/http.rs), so the
@@ -935,6 +950,8 @@ if [ -x /opt/bkshading/bkshading ]; then
 else
   warn "  bkshading-service.service installed + enabled but /opt/bkshading/bkshading is ABSENT -- install the CI ${BKSH_ART} binary before go-live"
 fi
+
+else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------
 # A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).

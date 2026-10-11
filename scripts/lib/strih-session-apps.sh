@@ -551,10 +551,15 @@ strih_session_apps_grade_rows() {
     fi
   done
 
-  strih_session_app_pass_row browser-keeper strih_browser_keeper.py "$STRIH_BROWSER_KEEPER_STATE_FILE" \
-    strih-browser-keeper.service "$repo" "$user"
+  # issue 1412: each extra row only for an entry the box runs (a stream box runs the keeper alone).
+  if _strih_session_apps_has strih-browser-keeper.service; then
+    strih_session_app_pass_row browser-keeper strih_browser_keeper.py "$STRIH_BROWSER_KEEPER_STATE_FILE" \
+      strih-browser-keeper.service "$repo" "$user"
+  fi
 
-  if ! command -v "$(strih_session_apps_wmctrl_bin)" >/dev/null 2>&1; then
+  if ! _strih_session_apps_has bkshading-panel-app.service; then
+    :
+  elif ! command -v "$(strih_session_apps_wmctrl_bin)" >/dev/null 2>&1; then
     printf 'FAIL|(shading-app-window) wmctrl missing -- re-run setup-strih.sh step 11 (the shared kiosk installs it)\n'
   else
     wm="$(strih_session_apps_wmctrl "$user" "$home")"
@@ -567,14 +572,32 @@ strih_session_apps_grade_rows() {
     fi
   fi
 
-  strih_session_app_pass_row satellite-watch strih_satellite_watch.py "$STRIH_SATELLITE_WATCH_STATE_FILE" \
-    strih-satellite-watch.service "$repo" "$user"
+  if _strih_session_apps_has strih-satellite-watch.timer; then
+    strih_session_app_pass_row satellite-watch strih_satellite_watch.py "$STRIH_SATELLITE_WATCH_STATE_FILE" \
+      strih-satellite-watch.service "$repo" "$user"
+  fi
   return 0
+}
+
+# _strih_session_apps_has UNIT -> 0 when UNIT is one of STRIH_SESSION_APP_UNITS (issue 1412: the stream
+# role narrows the list to the keeper).
+_strih_session_apps_has() {
+  local u
+  for u in "${STRIH_SESSION_APP_UNITS[@]}"; do
+    [ "$u" = "${1-}" ] && return 0
+  done
+  return 1
 }
 
 # strih_session_apps_row_count -> how many rows strih_session_apps_grade_rows prints (one per unit +
 # the keeper's last pass + the panel window + the Satellite watch's last pass).
-strih_session_apps_row_count() { printf '%s' "$(( ${#STRIH_SESSION_APP_UNITS[@]} + 3 ))"; }
+strih_session_apps_row_count() {
+  local n="${#STRIH_SESSION_APP_UNITS[@]}" u
+  for u in strih-browser-keeper.service bkshading-panel-app.service strih-satellite-watch.timer; do
+    _strih_session_apps_has "$u" && n=$((n + 1))
+  done
+  printf '%s' "$n"
+}
 
 # strih_session_apps_grade_report REPO USER_HOME DESKTOP_USER -> print the rows through the CALLER's ok /
 # bad functions (verify-strih). rc 1 unless the grader printed every row: a grader that stopped part way

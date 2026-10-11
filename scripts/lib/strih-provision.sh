@@ -99,7 +99,12 @@ strih_lx_camera_latency_ms() { printf '3'; }
 # UNQUOTED heredoc that interpolates ONLY ${ini}; the inner `<<'PYNDI'` python body carries no `$` /
 # backtick, so nothing else expands. `eval`-consumed as a standalone command (no `$(...)` embedding).
 strih_lx_ndi_output_ini_cmds() {
-  local ini="${1:?user.ini path required}"
+  local ini="${1:?user.ini path required}" role="${2:-strih}" kvs="" kv
+  # issue 1412: the key=value set is the role's (obs_box_ndi_output_kvs: the strih program + preview, or
+  # the stream's ONE output); the strih text is byte-identical to the issue-1352 printer.
+  while IFS= read -r kv; do
+    [ -n "$kv" ] && kvs="${kvs:+$kvs, }\"${kv}\""
+  done < <(obs_box_ndi_output_kvs "$role")
   cat <<EOF
 python3 - "${ini}" <<'PYNDI'
 import configparser, os, sys
@@ -114,7 +119,7 @@ if os.path.exists(path):
         sys.exit(3)
 if not cp.has_section("NDIPlugin"):
     cp.add_section("NDIPlugin")
-for kv in ("MainOutputName=2ME PGM", "PreviewOutputName=2ME PVW", "MainOutputEnabled=true", "PreviewOutputEnabled=true"):
+for kv in (${kvs}):
     k, v = kv.split("=", 1)
     cp.set("NDIPlugin", k, v)
 with open(path, "w") as fh:

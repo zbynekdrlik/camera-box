@@ -125,6 +125,12 @@ ndi_discovery_cambox_ips() {
 # Non-zero when the facet or a member is missing from OBS_FLEET -- the caller then writes nothing.
 ndi_discovery_fleet_hosts() {
   local roster pair
+  # issue 1412: a box of another venue (Poprad) lists its own venue's boxes, set by the provisioner
+  # (scripts/lib/obs-box-role.sh obs_box_role_apply) as NDI_DISCOVERY_SENDER_HOSTS, one host per line.
+  if [ -n "${NDI_DISCOVERY_SENDER_HOSTS:-}" ]; then
+    printf '%s\n' "$NDI_DISCOVERY_SENDER_HOSTS"
+    return 0
+  fi
   roster="$(obs_fleet_boxes "$NDI_DISCOVERY_FLEET_FACET")" || return 1
   for pair in $roster; do
     printf '%s\n' "${pair#*|}"

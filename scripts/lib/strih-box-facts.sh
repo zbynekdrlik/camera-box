@@ -37,7 +37,8 @@ strih_box_fact_keys() {
     STRIH_OBS_PROFILE STRIH_OBS_COLLECTION \
     STRIH_NDI_RUNTIME_PEER STRIH_COMPANION_HOST STRIH_CG_SENDER STRIH_CAMERAS \
     STRIH_HDMI_OUTPUT_BACKEND \
-    STRIH_ROLE STRIH_DANTE_GM STRIH_PROGRAM_AUDIO_SAMPLER
+    STRIH_ROLE STRIH_DANTE_GM STRIH_PROGRAM_AUDIO_SAMPLER \
+    STRIH_PROGRAM_SENDER STRIH_VENUE
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -183,9 +184,9 @@ strih_box_validate() {
   # issue 1346: how the fixed HDMI output leaves the X desktop -- `lease` (the issue-1152 X RandR lease,
   # an Intel-driven connector) or `vk-direct` (Vulkan direct display, an NVIDIA-driven connector whose X
   # driver refuses the lease). The same grammar the vendored C module + strih_scenes read.
-  case "${f[STRIH_HDMI_OUTPUT_BACKEND]}" in
-    lease | vk-direct) ;;
-    *) echo "strih-box ${name}: STRIH_HDMI_OUTPUT_BACKEND '${f[STRIH_HDMI_OUTPUT_BACKEND]}' must be lease or vk-direct" >&2; bad=1 ;;
+  case "${f[STRIH_HDMI_OUTPUT_BACKEND]}:${f[STRIH_ROLE]}" in
+    lease:* | vk-direct:* | none:stream) ;;
+    *) echo "strih-box ${name}: STRIH_HDMI_OUTPUT_BACKEND '${f[STRIH_HDMI_OUTPUT_BACKEND]}' must be lease or vk-direct (none only for the stream role)" >&2; bad=1 ;;
   esac
   # issue 1412: the box ROLE (strih = the cutter, stream = the stream OBS box), the PTP grandmaster the
   # dantesync config allows (setup-strih step 2 writes it into a FRESH box's /etc/dantesync/config.json)
@@ -200,7 +201,20 @@ strih_box_validate() {
     on | off) ;;
     *) echo "strih-box ${name}: STRIH_PROGRAM_AUDIO_SAMPLER '${f[STRIH_PROGRAM_AUDIO_SAMPLER]}' must be on or off" >&2; bad=1 ;;
   esac
-  if [[ ! "${f[STRIH_CAMERAS]}" =~ ^[1-9][0-9]*( [1-9][0-9]*)*$ ]]; then
+  # issue 1412 slice B: the NDI program a stream box receives (`none` on a strih), and the venue whose
+  # boxes list each other as NDI senders (snv = the obs-fleet ndi-sender facet; any other venue = the
+  # STRIH_IP of every fact file of that venue, scripts/lib/obs-box-role.sh).
+  case "${f[STRIH_ROLE]}:${f[STRIH_PROGRAM_SENDER]}" in
+    strih:none) ;;
+    stream:none | strih:*) echo "strih-box ${name}: STRIH_PROGRAM_SENDER '${f[STRIH_PROGRAM_SENDER]}' must be none for the strih role and an NDI source name for the stream role" >&2; bad=1 ;;
+    stream:*) [[ "${f[STRIH_PROGRAM_SENDER]}" =~ ^[A-Z0-9][A-Z0-9.-]*\ \([A-Za-z0-9\ ._-]+\)$ ]] \
+      || { echo "strih-box ${name}: STRIH_PROGRAM_SENDER '${f[STRIH_PROGRAM_SENDER]}' is not an NDI source name (HOST (name))" >&2; bad=1; } ;;
+  esac
+  [[ "${f[STRIH_VENUE]}" =~ ^[a-z][a-z0-9]*$ ]] \
+    || { echo "strih-box ${name}: STRIH_VENUE '${f[STRIH_VENUE]}' must be a lower-case venue name (snv, pp)" >&2; bad=1; }
+  if [ "${f[STRIH_ROLE]}" = stream ] && [ "${f[STRIH_CAMERAS]}" = none ]; then
+    :  # a stream box receives no camera
+  elif [[ ! "${f[STRIH_CAMERAS]}" =~ ^[1-9][0-9]*( [1-9][0-9]*)*$ ]]; then
     echo "strih-box ${name}: STRIH_CAMERAS '${f[STRIH_CAMERAS]}' must be space-separated camera numbers (1, 2, ... no leading zero)" >&2; bad=1
   elif [ "$(tr ' ' '\n' <<<"${f[STRIH_CAMERAS]}" | sort -u | wc -l)" -ne "$(wc -w <<<"${f[STRIH_CAMERAS]}")" ]; then
     echo "strih-box ${name}: STRIH_CAMERAS '${f[STRIH_CAMERAS]}' lists a camera twice" >&2; bad=1
@@ -366,6 +380,7 @@ strih_lx_ndi_prefix() { strih_box_fact STRIH_NDI_PREFIX; }
 strih_lx_cameras() {
   local c
   c="$(strih_box_fact STRIH_CAMERAS)" || return 1
+  [ "$c" != none ] || return 0  # issue 1412: a stream box receives no camera
   # shellcheck disable=SC2086  # word-split the validated space-separated number list on purpose
   printf '%s\n' $c
 }
@@ -389,6 +404,17 @@ strih_lx_dante_gm() {
     strih_box_fact STRIH_DANTE_GM
   fi
 }
+
+# strih_lx_program_sender -> the NDI program a stream box receives (fact STRIH_PROGRAM_SENDER), empty on
+# a strih (`none`).
+strih_lx_program_sender() {
+  local s
+  s="$(strih_box_fact STRIH_PROGRAM_SENDER)" || return 1
+  [ "$s" = none ] || printf '%s' "$s"
+}
+
+# strih_box_venue -> the box's venue (fact STRIH_VENUE: snv | pp ...).
+strih_box_venue() { strih_box_fact STRIH_VENUE; }
 
 # strih_lx_program_audio_sampler -> on | off: whether setup-strih step 16e installs (and verify-strih
 # item 41 grades) the YouTube-guard program-audio sampler (fact STRIH_PROGRAM_AUDIO_SAMPLER, issue 1412).

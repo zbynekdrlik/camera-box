@@ -1,24 +1,52 @@
 #!/usr/bin/env bash
-# airuleset:script-ok source-only lib (defines the per-box step gate, no top-level statements) -- the
-# scripts/lib/*.sh convention: sourcing runs in the CALLER's shell, so strict mode here would leak into
-# it. setup-strih.sh / verify-strih.sh set their own.
+# airuleset:script-ok source-only lib (defines the per-box step gate + the stream-role renderers, no
+# top-level statements besides constants) -- the scripts/lib/*.sh convention: sourcing runs in the
+# CALLER's shell, so strict mode here would leak into it. setup-strih.sh / verify-strih.sh set their own.
 #
 # scripts/lib/obs-box-role.sh -- issue 1412: which setup-strih steps / verify-strih items run on the
-# LOADED box. ONE provisioner serves every Linux OBS box (the unified-design ruling, umbrella issue
-# 1357), so a step that does not apply to a box is skipped by a box FACT here, never by a box name and
-# never by a copy of the script. setup-strih.sh and verify-strih.sh each carry one gate line per step:
+# LOADED box, and what the STREAM role writes instead of the strih one. ONE provisioner serves every
+# Linux OBS box (the unified-design ruling, umbrella issue 1357), so a step that does not apply to a
+# box is skipped by a box FACT here, never by a box name and never by a copy of the script.
+# setup-strih.sh and verify-strih.sh carry one gate line per step:
 #
 #   if WHY="$(obs_box_step_applies <step>)"; then <the step> else <a SKIP line naming WHY>; fi
 #
+# The role -> step table (STRIH_ROLE):
+#
+#   step    strih            stream
+#   3       NVENC precheck   the stream encoder by GPU (VAAPI without an NVIDIA dGPU) + the profile
+#   6       strih manifest   one genlocked `NDI 2ME PGM` <- STRIH_PROGRAM_SENDER (class "program"),
+#                            program_audio_input `Zvuk z mixu`; no HDMI output (backend none)
+#   7       2ME PGM + PVW    one NDI output `<prefix> (stream)`, no preview output
+#   14      Janus            skipped (no phones leg on a stream box)
+#   16      Satellite        skipped (no Stream Deck)
+#   16c     bkshading        skipped (no shading panel)
+#   16d     4 session apps   the browser-source keeper only
+#
+# Independent of the role: 11b only for a USB rig NIC, 16e only with STRIH_PROGRAM_AUDIO_SAMPLER=on, and
+# a venue other than snv lists its own boxes' STRIH_IP as the NDI senders (step 4b / verify item 34).
+#
 # The facts come from scripts/strih-boxes/<box>.env through scripts/lib/strih-box-facts.sh.
 
+# The stream role's names: the NDI program input (the SNV stream box's input name), the scene it lives
+# in (the ported collection's program scene), the program audio input of the ported PP collection, and
+# the bare DistroAV main output name (DistroAV prepends the hostname -> `STREAM-PP (stream)`).
+OBS_BOX_STREAM_INPUT="NDI 2ME PGM"
+OBS_BOX_STREAM_SCENE="PRO"
+OBS_BOX_STREAM_AUDIO_INPUT="Zvuk z mixu"
+OBS_BOX_STREAM_OUTPUT_NAME="stream"
+# The local restreamer the stream OBS sends to (the stream-pp laptop runs it; recon 11.10.2026).
+OBS_BOX_STREAM_RTMP_SERVER="${OBS_BOX_STREAM_RTMP_SERVER:-rtmp://127.0.0.1:1234/live}"
+
 # obs_box_step_applies STEP -> rc 0 when the loaded box runs STEP; rc 1 with the reason on stdout when
-# it skips it. A step with no rule here always runs.
+# it skips it. A step with no rule here always runs. A fact that cannot be read never skips a step.
 #   11b -- the NIC IRQ unit resolves the rig NIC's XHCI interrupt, so it exists only for a USB rig NIC
 #          (STRIH_NIC_MIN_USB_MBPS != none). On a PCIe NIC (strih-pp's RTL8125) the walk to a usbN root
 #          would fail the unit at every boot (gap G7).
 #   16e -- the YouTube-guard stream program-audio sampler (issue 1404) reads the SNV stream output, so
 #          only a box with STRIH_PROGRAM_AUDIO_SAMPLER=on runs it (gap G11).
+#   3-nvenc / 14 / 16 / 16c -- the strih role only (the table above).
+#   6-hdmi -- only a box with a fixed HDMI output (STRIH_HDMI_OUTPUT_BACKEND != none).
 obs_box_step_applies() {
   local step="${1:?step required}" v
   case "$step" in
@@ -34,6 +62,177 @@ obs_box_step_applies() {
         printf 'STRIH_PROGRAM_AUDIO_SAMPLER=%s -- this box runs no stream program-audio sampler' "$v"
         return 1
       fi ;;
+    3-nvenc | 14 | 16 | 16c)
+      v="$(strih_box_role)" || return 0
+      if [ "$v" = stream ]; then
+        case "$step" in
+          3-nvenc) printf 'the stream role encodes with the GPU it has (VAAPI without an NVIDIA dGPU), not the strih NVENC' ;;
+          14) printf 'the stream role runs no Janus phones leg' ;;
+          16) printf 'the stream role runs no Companion Satellite (no Stream Deck)' ;;
+          16c) printf 'the stream role runs no bkshading shading service' ;;
+        esac
+        return 1
+      fi ;;
+    6-hdmi)
+      v="$(strih_lx_hdmi_output_backend)" || return 0
+      if [ "$v" = none ]; then
+        printf 'STRIH_HDMI_OUTPUT_BACKEND=none -- this box has no fixed HDMI output'
+        return 1
+      fi ;;
   esac
+  return 0
+}
+
+# obs_box_venue_sender_ips VENUE -> the comma list of the STRIH_IP of every fact file whose
+# STRIH_VENUE is VENUE, in file-name order. A file the loader cannot parse is skipped. rc 1 when none.
+obs_box_venue_sender_ips() {
+  local venue="${1:?venue required}" f parsed v ip out="" LC_ALL=C   # C collation: one fixed file order
+  for f in "$(strih_box_dir)"/*.env; do
+    [ -f "$f" ] || continue
+    parsed="$(strih_box_parse_file "$f" 2>/dev/null)" || continue
+    v="$(sed -n 's/^STRIH_VENUE=//p' <<<"$parsed")"
+    ip="$(sed -n 's/^STRIH_IP=//p' <<<"$parsed")"
+    [ "$v" = "$venue" ] && _strih_box_ipv4 "$ip" || continue
+    out="${out:+$out,}$ip"
+  done
+  [ -n "$out" ] || { echo "obs-box-role: no fact file of venue '${venue}' carries an IPv4 STRIH_IP" >&2; return 1; }
+  printf '%s' "$out"
+}
+
+# obs_box_role_apply -> apply the loaded box's role + venue to the shell (setup-strih / verify-strih call
+# it once, right after the box loads, BEFORE their source-guard):
+#   * the stream role runs ONE session app, the browser-source keeper (STRIH_SESSION_APP_UNITS: step 16d,
+#     the kiosk autostart lines, verify items 37-40);
+#   * a venue other than snv lists its own boxes as the NDI senders (NDI_DISCOVERY_SENDER_HOSTS, read by
+#     scripts/lib/ndi-discovery.sh): never the SNV fleet's addresses on a PP box.
+# rc 1 + a stderr line on a fact that cannot be read.
+obs_box_role_apply() {
+  local role venue
+  role="$(strih_box_role)" || return 1
+  venue="$(strih_box_venue)" || return 1
+  if [ "$role" = stream ]; then
+    # shellcheck disable=SC2034  # read cross-file by scripts/lib/strih-session-apps.sh
+    STRIH_SESSION_APP_UNITS=(strih-browser-keeper.service)
+  fi
+  if [ "$venue" != snv ]; then
+    NDI_DISCOVERY_SENDER_HOSTS="$(obs_box_venue_sender_ips "$venue")" || return 1
+    NDI_DISCOVERY_SENDER_HOSTS="${NDI_DISCOVERY_SENDER_HOSTS//,/$'\n'}"
+  fi
+  return 0
+}
+
+# obs_box_stream_seed_manifest_json -> the stream role's /opt/camera-box/strih-lx-seed.json (the fixed
+# ROLE path strih_scenes.py reads on every Linux OBS box): update-only (the ported collection is
+# authoritative), ONE genlocked program input of class "program" (genlock_fifo + SOURCE_TIMECODE, the
+# latency pin never written: the stream A/V delay is the operator's knob), the NDI output
+# `<prefix> (stream)`, and the program audio input name of the ported collection.
+obs_box_stream_seed_manifest_json() {
+  local sender prefix
+  sender="$(strih_lx_program_sender)" || return 1
+  prefix="$(strih_lx_ndi_prefix)" || return 1
+  [ -n "$sender" ] || { echo "obs-box-role: STRIH_PROGRAM_SENDER is none -- not a stream box" >&2; return 1; }
+  printf '{\n  "mode": "update-only",\n  "inputs": [\n'
+  printf '    {"sender": "%s", "input": "%s", "scene": "%s", "class": "program"}\n' \
+    "$sender" "$OBS_BOX_STREAM_INPUT" "$OBS_BOX_STREAM_SCENE"
+  printf '  ],\n  "outputs": [\n    "%s (%s)"\n  ],\n' "$prefix" "$OBS_BOX_STREAM_OUTPUT_NAME"
+  printf '  "camera_latency_ms": %s,\n  "program_audio_input": "%s"\n}\n' \
+    "$(strih_lx_camera_latency_ms)" "$OBS_BOX_STREAM_AUDIO_INPUT"
+}
+
+# obs_box_seed_manifest_json -> the loaded box's seed manifest: the stream one, or the strih one.
+obs_box_seed_manifest_json() {
+  if [ "$(strih_box_role)" = stream ]; then
+    obs_box_stream_seed_manifest_json
+  else
+    strih_lx_seed_manifest_json
+  fi
+}
+
+# obs_box_ndi_output_kvs [ROLE] -> the DistroAV [NDIPlugin] user.ini key=value lines of ROLE (default
+# the loaded box's), one per line: the strih's program + preview outputs, or the stream's ONE output.
+obs_box_ndi_output_kvs() {
+  local role="${1:-}"
+  [ -n "$role" ] || role="$(strih_box_role 2>/dev/null || echo strih)"
+  if [ "$role" = stream ]; then
+    printf '%s\n' "MainOutputName=${OBS_BOX_STREAM_OUTPUT_NAME}" "MainOutputEnabled=true" "PreviewOutputEnabled=false"
+  else
+    printf '%s\n' "MainOutputName=2ME PGM" "PreviewOutputName=2ME PVW" "MainOutputEnabled=true" "PreviewOutputEnabled=true"
+  fi
+}
+
+# obs_box_has_nvidia -> 0 when lspci lists an NVIDIA display controller (the baseline's own test).
+obs_box_has_nvidia() {
+  local out
+  if ! declare -F obs_box_has_discrete_nvidia >/dev/null; then
+    # verify-strih does not source the baseline lib; it is source-only, so load it on first use.
+    # shellcheck source=scripts/lib/obs-box-baseline.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/obs-box-baseline.sh" || return 1
+  fi
+  out="$(lspci 2>/dev/null || true)"
+  obs_box_has_discrete_nvidia <<<"$out"
+}
+
+# obs_box_vaapi_h264_encode -> 0 when vainfo lists an H.264 encode entrypoint on the render node (the
+# output is read whole first: no early-closing pipe under the caller's pipefail).
+obs_box_vaapi_h264_encode() {
+  local vi
+  vi="$(vainfo --display drm --device /dev/dri/renderD128 2>/dev/null || true)"
+  grep -E 'VAProfileH264[A-Za-z]*[[:space:]]*:[[:space:]]*VAEntrypointEncSlice' >/dev/null <<<"$vi"
+}
+
+# obs_box_stream_encoder_provision OBS_CFG DESKTOP_USER PROFILE -> setup-strih step 3 for the stream
+# role: the encoder by GPU (NVENC on an NVIDIA dGPU -- the baseline's step 11 installs the driver --
+# else VAAPI: mesa-va-drivers + vainfo, the desktop user in group render), then the profile
+# (scripts/obs_box_stream_profile.py: basic.ini, streamEncoder.json, service.json server only). The
+# profile is written ONLY while OBS is stopped (OBS rewrites it on exit): a running OBS gets a WARNING
+# and the files are left alone. rc 1 + a stderr line on a failure.
+obs_box_stream_encoder_provision() {
+  local cfg="${1:?obs config dir required}" user="${2:?desktop user required}" profile="${3:?profile required}"
+  local nv=0 dir
+  if obs_box_has_nvidia; then
+    nv=1
+    echo "  NVIDIA dGPU present -- stream encoder NVENC (the driver is baseline step 11)"
+  else
+    echo "  no NVIDIA dGPU -- stream encoder VAAPI (${profile}): installing mesa-va-drivers + vainfo"
+    DEBIAN_FRONTEND=noninteractive apt-get install -y mesa-va-drivers vainfo \
+      || { echo "obs-box-role: apt-get install mesa-va-drivers vainfo failed" >&2; return 1; }
+    usermod -aG render "$user" || { echo "obs-box-role: usermod -aG render ${user} failed" >&2; return 1; }
+    if obs_box_vaapi_h264_encode; then
+      echo "  vainfo: H.264 encode available on /dev/dri/renderD128"
+    else
+      echo "  WARNING: vainfo lists no H.264 encode entrypoint on /dev/dri/renderD128 -- check the GPU driver before go-live" >&2
+    fi
+  fi
+  if pgrep -x obs >/dev/null 2>&1; then
+    echo "  WARNING: OBS is running -- the stream profile is NOT written (stop OBS and re-run this step)" >&2
+    return 0
+  fi
+  dir="${cfg%/}/basic/profiles/${profile}"
+  python3 "$(dirname "${BASH_SOURCE[0]}")/../obs_box_stream_profile.py" --profile-dir "$dir" \
+    --profile-name "$profile" --has-nvidia "$nv" --server "$OBS_BOX_STREAM_RTMP_SERVER" \
+    || { echo "obs-box-role: the stream profile write failed (above)" >&2; return 1; }
+  chown -R "$user:$user" "${cfg%/}/basic" 2>/dev/null || echo "  WARNING: could not chown ${cfg%/}/basic to ${user}" >&2
+  return 0
+}
+
+# obs_box_stream_encoder_grade PROFILE_DIR -> verify-strih item 10 for the stream role, through the
+# caller's ok / bad: the profile's [AdvOut] Encoder is the one the GPU calls for, its streamEncoder.json
+# exists, and (VAAPI) vainfo lists an H.264 encode entrypoint. Always rc 0.
+obs_box_stream_encoder_grade() {
+  local dir="${1:?profile dir required}" want=ffmpeg_vaapi_tex got
+  obs_box_has_nvidia && want=obs_nvenc_h264_tex
+  got="$(awk '/^\[AdvOut\]/{a=1;next} /^\[/{a=0} a && /^Encoder=/{sub(/^Encoder=/,""); print; exit}' "${dir}/basic.ini" 2>/dev/null || true)"
+  if [ "$got" = "$want" ] && [ -f "${dir}/streamEncoder.json" ]; then
+    ok "(stream-encoder) ${dir}: [AdvOut] Encoder=${got} + streamEncoder.json"
+  else
+    bad "(stream-encoder) ${dir}: [AdvOut] Encoder='${got}' (want ${want}), streamEncoder.json $([ -f "${dir}/streamEncoder.json" ] && echo present || echo missing) -- re-run setup-strih.sh step 3 with OBS stopped"
+  fi
+  if [ "$want" = ffmpeg_vaapi_tex ]; then
+    if obs_box_vaapi_h264_encode; then
+      ok "(stream-encoder) vainfo: H.264 encode on /dev/dri/renderD128"
+    else
+      bad "(stream-encoder) vainfo lists no H.264 encode entrypoint on /dev/dri/renderD128 (mesa-va-drivers? the render group?)"
+    fi
+  fi
   return 0
 }

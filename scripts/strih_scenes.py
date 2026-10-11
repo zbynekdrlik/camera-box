@@ -92,6 +92,49 @@ def certified_genlock_settings(latency):
     return {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "genlock_latency_ms_src": latency}
 
 
+def program_settings():
+    """issue 1412: the stream box's genlocked strih PROGRAM input (`NDI 2ME PGM`, manifest class
+    "program"): genlock_fifo + SOURCE_TIMECODE + full bandwidth like a camera, but WITHOUT
+    genlock_latency_ms_src -- the stream A/V delay is the operator's knob, the seeder never writes it.
+    Returned fresh each call."""
+    return {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2}
+
+
+# issue 1412: the classes a manifest object entry may name explicitly ("class"); an entry without one
+# is classified by its names (input_class_for).
+ENTRY_CLASSES = ("camera", "feedback", "program")
+
+
+def settings_for_class(cls, latency):
+    """issue 1412: the seed settings of an input CLASS."""
+    if cls == "feedback":
+        return feedback_settings()
+    if cls == "program":
+        return program_settings()
+    return certified_genlock_settings(latency)
+
+
+def entry_class(entry, sender, input_name):
+    """issue 1412: the class of ONE manifest entry -- an object's explicit "class" (one of
+    ENTRY_CLASSES) wins; otherwise the name rule (either name carrying the 2ME marker -> feedback)."""
+    if isinstance(entry, dict) and entry.get("class") in ENTRY_CLASSES:
+        return entry["class"]
+    if input_class_for(sender) == "feedback" or input_class_for(input_name) == "feedback":
+        return "feedback"
+    return "camera"
+
+
+def parse_program_audio_input(text):
+    """issue 1412: the OBS program-audio input NAME from the manifest's `program_audio_input` (the
+    ported stream collection names it `Zvuk z mixu`), else AUDIO_INPUT_NAME. Lenient, never raises."""
+    try:
+        d = json.loads(text)
+    except ValueError:
+        return AUDIO_INPUT_NAME
+    name = d.get("program_audio_input") if isinstance(d, dict) else None
+    return name if isinstance(name, str) and name else AUDIO_INPUT_NAME
+
+
 def feedback_settings():
     """issue 1317: the NON-genlock settings for a 2ME PGM/PVW feedback input, mirroring the Windows
     strih light.json (ndi_sync=1 SOURCE_TIMING, latency=1, ndi_bw_mode=0). genlock_fifo is EXPLICIT
@@ -126,11 +169,12 @@ def program_audio_input_settings():
     return {"device_id": AUDIO_MONITOR_DEVICE}
 
 
-def program_audio_input_kind_from_inputs(inputs):
-    """Pure: the OBS inputKind of the `ASIO zvuk` input from a GetInputList `inputs` list, or None
-    when it is absent. Used by --audio-input-kind + verify-strih's derived audio verdict."""
+def program_audio_input_kind_from_inputs(inputs, name=AUDIO_INPUT_NAME):
+    """Pure: the OBS inputKind of the program-audio input NAME (default `ASIO zvuk`) from a GetInputList
+    `inputs` list, or None when it is absent. Used by --audio-input-kind + verify-strih's derived audio
+    verdict."""
     for i in inputs or []:
-        if i.get("inputName") == AUDIO_INPUT_NAME:
+        if i.get("inputName") == name:
             return i.get("inputKind")
     return None
 
@@ -264,10 +308,8 @@ def seed_inputs(inputs, latency):
         if input_name in seen:
             continue
         seen.add(input_name)
-        cls = "camera"
-        if input_class_for(sender) == "feedback" or input_class_for(input_name) == "feedback":
-            cls = "feedback"
-        settings = feedback_settings() if cls == "feedback" else certified_genlock_settings(latency)
+        cls = entry_class(entry, sender, input_name)
+        settings = settings_for_class(cls, latency)
         plan.append({
             "scene": scene,
             "input": input_name,
@@ -365,7 +407,7 @@ def input_classes_summary(inputs):
     per-input label keeps the SENDER name (the bare-string report shape)."""
     seen = set()
     pairs = []
-    ncam = nfb = 0
+    ncam = nfb = nprog = 0
     for entry in inputs:
         fields = _entry_fields(entry)
         if fields is None:
@@ -374,14 +416,16 @@ def input_classes_summary(inputs):
         if input_name in seen:
             continue
         seen.add(input_name)
-        cls = "camera"
-        if input_class_for(sender) == "feedback" or input_class_for(input_name) == "feedback":
-            cls = "feedback"
+        cls = entry_class(entry, sender, input_name)
         pairs.append("%s=%s" % (sender, cls))
         if cls == "feedback":
             nfb += 1
+        elif cls == "program":
+            nprog += 1
         else:
             ncam += 1
+    if nprog:
+        return "%d camera, %d feedback, %d program (%s)" % (ncam, nfb, nprog, ", ".join(pairs))
     return "%d camera, %d feedback (%s)" % (ncam, nfb, ", ".join(pairs))
 
 
@@ -620,14 +664,14 @@ def _current_scene_name(obs):
     return scenes[0].get("sceneName") if scenes else None
 
 
-def seed_program_audio_input(obs):
+def seed_program_audio_input(obs, name=AUDIO_INPUT_NAME):
     """The ONE allowed create/replace (issue 1344): ensure the `ASIO zvuk` program-audio input exists
     as pulse_input_capture on strih-program-source (the OBS program capture). A missing input is
     CREATED; the un-creatable Windows asio_input_capture (or any other kind) is REMOVED + recreated;
     a correct pulse_input_capture is left alone. Returns a short status string for the log."""
     inputs = (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])
-    exists = any(i.get("inputName") == AUDIO_INPUT_NAME for i in inputs)
-    kind = program_audio_input_kind_from_inputs(inputs)
+    exists = any(i.get("inputName") == name for i in inputs)
+    kind = program_audio_input_kind_from_inputs(inputs, name)
     action = audio_input_action(exists, kind)
     if action == "ok":
         return "matched"
@@ -635,17 +679,17 @@ def seed_program_audio_input(obs):
     if scene is None:
         return "no-scene (deferred)"
     if action == "replace":
-        obs.req("RemoveInput", {"inputName": AUDIO_INPUT_NAME}, ignore_err=True)
+        obs.req("RemoveInput", {"inputName": name}, ignore_err=True)
     obs.req("CreateInput", {
         "sceneName": scene,
-        "inputName": AUDIO_INPUT_NAME,
+        "inputName": name,
         "inputKind": AUDIO_INPUT_KIND,
         "inputSettings": program_audio_input_settings(),
     }, ignore_err=True)
     return "created" if action == "create" else "replaced (was %s)" % (kind or "absent")
 
 
-def ensure_program_audio_in_every_scene(obs, plan):
+def ensure_program_audio_in_every_scene(obs, plan, name=AUDIO_INPUT_NAME):
     """issue 1344 item 3 (20.9.2026 live diagnosis): the `ASIO zvuk` program-audio input must be a
     scene item in EVERY declared operator scene, not just the one it happened to be created in --
     OBS only plays a scene item's audio while its OWNING scene is active, so seeding it into a single
@@ -660,16 +704,16 @@ def ensure_program_audio_in_every_scene(obs, plan):
     for scene in scenes:
         items = (obs.req("GetSceneItemList", {"sceneName": scene}, ignore_err=True) or {}).get(
             "sceneItems", [])
-        if any(i.get("sourceName") == AUDIO_INPUT_NAME for i in items):
+        if any(i.get("sourceName") == name for i in items):
             continue
         obs.req("CreateSceneItem", {
-            "sceneName": scene, "sourceName": AUDIO_INPUT_NAME,
+            "sceneName": scene, "sourceName": name,
         }, ignore_err=True)
         added += 1
     return added
 
 
-def bootstrap(obs, plan, studio=True, update_only=False):
+def bootstrap(obs, plan, studio=True, update_only=False, audio_name=AUDIO_INPUT_NAME):
     """Seed the collection from `plan` (seed_inputs output). Two modes:
 
     CREATE (default, the parallel/imag shape): idempotent CreateScene/CreateInput (ignore "already
@@ -735,15 +779,15 @@ def bootstrap(obs, plan, studio=True, update_only=False):
             result[inp] = "matched"
     # issue 1344: the ONE allowed create/replace — the `ASIO zvuk` program-audio input on the
     # strih-program-source loopback node (the OBS program capture that Failed to create on Linux).
-    audio_status = seed_program_audio_input(obs)
+    audio_status = seed_program_audio_input(obs, audio_name)
     # issue 1344 item 3: once the input exists, make sure it is a scene item in EVERY declared
     # scene (never only the one it happened to be created/matched in) -- skip when the input itself
     # could not be resolved (no scene existed at all: "no-scene (deferred)"), nothing to attach to.
     if not audio_status.startswith("no-scene"):
-        added = ensure_program_audio_in_every_scene(obs, plan)
+        added = ensure_program_audio_in_every_scene(obs, plan, audio_name)
         if added:
             audio_status += " (+%d scene items)" % added
-    result[AUDIO_INPUT_NAME] = audio_status
+    result[audio_name] = audio_status
     if studio:
         obs.req("SetStudioModeEnabled", {"studioModeEnabled": True}, ignore_err=True)
     return result
@@ -810,9 +854,14 @@ def main():
     # --audio-input-kind (issue 1344): read-only print of the `ASIO zvuk` input kind. Does NOT read
     # the seed manifest.
     if args.audio_input_kind:
+        # issue 1412: the input NAME follows the manifest's program_audio_input when it is readable.
+        try:
+            audio_name = parse_program_audio_input(_read_manifest(args.manifest))
+        except OSError:
+            audio_name = AUDIO_INPUT_NAME
         obs = Obs(args.host, args.port, args.password)
         inputs = (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])
-        print(program_audio_input_kind_from_inputs(inputs) or "absent")
+        print(program_audio_input_kind_from_inputs(inputs, audio_name) or "absent")
         return
 
     # --projector (issue 1346): persist the HDMI output view. Touches only drm-output.json -- never
@@ -838,7 +887,8 @@ def main():
     inputs, _outputs, latency = parse_seed_manifest(manifest_text)
     mode = parse_seed_mode(manifest_text)
     plan = seed_inputs(inputs, latency)
-    statuses = bootstrap(obs, plan, studio=True, update_only=(mode == "update-only"))
+    statuses = bootstrap(obs, plan, studio=True, update_only=(mode == "update-only"),
+                         audio_name=parse_program_audio_input(manifest_text))
     print("strih seed (%s): %d inputs, latency %d ms; ndi names: %s"
           % (mode, len(plan), latency,
              ", ".join("%s=%s" % (k, v) for k, v in sorted(statuses.items()))))
