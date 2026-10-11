@@ -1358,6 +1358,16 @@ do_test() {
   echo "[cam2 ${PAINTER_IP}] #725 post-launch re-check: does $resolved_marker_device STILL carry a live monitor?"
   verify_marker_device_monitor "$resolved_marker_device"
   echo
+  # issue 1008 reopen (11.10.2026): the cam side reaches its durable steady state HERE, before any
+  # OBS step. Every OBS chain check below may end the run (exit 1); placed after them, one black
+  # strih program (cam1 off) skipped this handoff, the 2 h transient painter expired and the QPSK
+  # marker stopped. A failed check still fails the run, but cam2 keeps painting.
+  echo "[cam2 ${PAINTER_IP}] #1008/#937 hand STEADY STATE to the PERMANENT supervised cam2-painter.service (durable -- Restart=always, survives crash + reboot -- NOT a disposable 2h nohup):"
+  cam_ssh "$(cam2_painter_steady_state_handoff_cmds "$PAINTER_PIDFILE" "$AUDIO_MARKER_LOG")"
+  echo
+  echo "[cam2 ${PAINTER_IP}] #1075 arm the transient cam2-painter dead-man as a standing 'never dark' net for the handed-off permanent painter (symmetric with EVENT mode's disarm; no-ops on every fire while the painter's own frame-probe is alive):"
+  cam_ssh "$(cam2_painter_deadman_arm_cmds)"
+  echo
   echo "[obs] #257 toggle per-source genlock_burn ON over WebSocket (no relaunch):"
   toggle_burn test
   echo
@@ -1384,12 +1394,6 @@ do_test() {
   echo
   echo "[obs] #985: PARK stream's PROGRAM on the development scene (never on a measurement-only scene):"
   park_stream_program_dev
-  echo
-  echo "[cam2 ${PAINTER_IP}] #1008/#937 hand STEADY STATE to the PERMANENT supervised cam2-painter.service (durable -- Restart=always, survives crash + reboot -- NOT a disposable 2h nohup):"
-  cam_ssh "$(cam2_painter_steady_state_handoff_cmds "$PAINTER_PIDFILE" "$AUDIO_MARKER_LOG")"
-  echo
-  echo "[cam2 ${PAINTER_IP}] #1075 arm the transient cam2-painter dead-man as a standing 'never dark' net for the handed-off permanent painter (symmetric with EVENT mode's disarm; no-ops on every fire while the painter's own frame-probe is alive):"
-  cam_ssh "$(cam2_painter_deadman_arm_cmds)"
   echo
   print_genlock_relaunch_note test
   echo
