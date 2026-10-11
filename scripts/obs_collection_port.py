@@ -12,7 +12,7 @@ Two uses, as presets (every preset value can be overridden on the command line):
   - keeps the scenes PRO / Development / PRE / POST and every scene and source they nest; drops the rest;
   - the program ASIO input `Zvuk z mixu` becomes `pulse_input_capture` on `strih-program-source`
     (the same binding `strih_scenes.py` seeds);
-  - `NDIAr 2ME PGM` <- `OBS-PP (2ME PGM)` becomes `NDI 2ME PGM` <- `STRIH-PP (2ME PGM)` (the input the
+  - `NDI® 2ME PGM` (also spelled `NDIAr` / `NDIÂ®` / `NDI(R)`) <- `OBS-PP (2ME PGM)` becomes `NDI 2ME PGM` <- `STRIH-PP (2ME PGM)` (the input the
     stream seed manifest declares);
   - drops the YouTube player (`ytfast*`) and every input / filter / module the Linux bundle does not
     have; `text_gdiplus` becomes the FreeType2 text source;
@@ -97,7 +97,9 @@ PRESETS = {
         "name": "stream-pp",
         "keep_scenes": ["PRO", "Development", "PRE", "POST"],
         "program_audio_input": "Zvuk z mixu",
-        "source_renames": {"NDIAr 2ME PGM": "NDI 2ME PGM"},
+        # The Windows collection spells it with a real U+00AE (the recon report printed it "NDIAr");
+        # source_name_spellings matches the other spellings of the same name too.
+        "source_renames": {"NDI\u00ae 2ME PGM": "NDI 2ME PGM"},
         "sender_prefixes": {"OBS-PP": "STRIH-PP"},
         "sender_renames": {},
         "foreign_senders": [r"-SNV \(", r"^OBS-PP \("],
@@ -229,13 +231,35 @@ def _convert_kinds(coll, rep):
                        ' carried)' % s["name"])
 
 
+# The spellings a ported collection may carry for a registered sign (U+00AE) in a source name: the
+# sign itself, its UTF-8 bytes read as Latin-1 ("\u00c2\u00ae"), the ASCII "(R)", and the "Ar" the
+# recon report of the Windows stream collection printed (issue 1412).
+REGISTERED_SIGN_SPELLINGS = ("\u00ae", "\u00c2\u00ae", "(R)", "Ar")
+
+
+def source_name_spellings(name):
+    """Pure: NAME first, then every other spelling of its registered signs (none when it has none)."""
+    out = [name]
+    if "\u00ae" in name:
+        for alt in REGISTERED_SIGN_SPELLINGS[1:]:
+            v = name.replace("\u00ae", alt)
+            if v not in out:
+                out.append(v)
+    return out
+
+
 def _rename_sources(coll, renames, rep):
     if not renames:
         return
     have = {s.get("name") for s in _all(coll)}
-    for old, new in renames.items():
-        if old not in have:
+    for key, new in renames.items():
+        found = [v for v in source_name_spellings(key) if v in have]
+        if not found:
             continue
+        if len(found) > 1:
+            raise PortError('cannot rename "%s": the collection holds more than one spelling of it (%s)'
+                            % (key, ", ".join('"%s"' % f for f in found)))
+        old = found[0]
         if new in have:
             raise PortError('cannot rename "%s" to "%s": a source of that name exists' % (old, new))
         for s in _all(coll):

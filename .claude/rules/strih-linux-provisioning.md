@@ -197,8 +197,9 @@ collection JSON ONCE, before the import, with OBS stopped; it never talks to OBS
 over an existing output file (an imported collection is never regenerated).
 
 - **Presets:** `stream-pp` (the Windows stream collection: keep PRO / Development / PRE / POST and what
-  they nest; `Zvuk z mixu` -> `pulse_input_capture` on `strih-program-source`; `NDIAr 2ME PGM` ->
-  `NDI 2ME PGM` <- `STRIH-PP (2ME PGM)`; ytfast dropped; Windows paths ->
+  they nest; `Zvuk z mixu` -> `pulse_input_capture` on `strih-program-source`; `NDI® 2ME PGM` ->
+  `NDI 2ME PGM` <- `STRIH-PP (2ME PGM)` (the real Windows name carries U+00AE; `source_name_spellings`
+  also matches `NDIAr` / `NDIÂ®` / `NDI(R)`, and two spellings in one collection refuse); ytfast dropped; Windows paths ->
   `/srv/obs-media/stream-pp/<folder>/<file>`) and `strih-pp` (the strih-lx collection: every scene;
   `STRIH-LX (...)` -> `STRIH-PP (...)`, the CG sender). Every value is overridable on the CLI.
 - **Kinds are an ALLOWLIST** of what the Linux strih bundle ships (`LINUX_INPUT_KINDS`,
