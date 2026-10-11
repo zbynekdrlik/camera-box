@@ -52,6 +52,11 @@ if ! declare -F obs_box_step_applies >/dev/null; then
   # shellcheck source=scripts/lib/obs-box-role.sh
   . "$(dirname "${BASH_SOURCE[0]}")/obs-box-role.sh"
 fi
+# issue 1412: step 4's prefix install never writes into a file a running OBS maps.
+if ! declare -F strih_bundle_tree_install >/dev/null; then
+  # shellcheck source=scripts/lib/strih-bundle-install.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-bundle-install.sh"
+fi
 
 # strih_lx_ndi_inputs -> the 10 NDI input names the strih role receives, one per line (issue 1317
 # spec; the 2ME feedback inputs are the task's explicit STRIH-SNV names). NOTE (issue 1352): the
@@ -835,8 +840,10 @@ strih_nvenc_grade() {
 
 # strih_install_bundle_prefix BUNDLE LIBDIR BINDIR SHAREDIR -> install the staged genlock bundle into
 # its /usr prefix so the dynamic loader finds it (the imag on-box program shape in
-# scripts/deploy-genlock-fleet.sh -- issue 1236 perms-normalize + ldconfig): copy
-# BUNDLE/lib/x86_64-linux-gnu/. -> LIBDIR (root:root, dirs 0755, files a+rX), EVERY file in
+# scripts/deploy-genlock-fleet.sh -- issue 1236 perms-normalize + ldconfig): tree-install
+# BUNDLE/lib/x86_64-linux-gnu/. -> LIBDIR (strih_bundle_tree_install, issue 1412: an unchanged file is
+# left alone, a changed one is renamed in, never rewritten in place under a running OBS; then
+# root:root, dirs 0755, files a+rX), EVERY file in
 # BUNDLE/bin/ -> BINDIR (0755 root -- obs AND its helper processes, issue 1317), BUNDLE/share/obs ->
 # SHAREDIR/obs, then `ldconfig`. Runs as root in setup-strih.sh step 4 AFTER the /opt staged copy
 # (which stays the marker home). Returns non-zero on a critical copy failure. NOTE: this ~30-line
@@ -849,7 +856,11 @@ strih_install_bundle_prefix() {
   [ -d "${bundle}/lib/x86_64-linux-gnu" ] || { printf 'strih_install_bundle_prefix: %s/lib/x86_64-linux-gnu missing\n' "$bundle" >&2; return 1; }
   [ -f "${bundle}/bin/obs" ] || { printf 'strih_install_bundle_prefix: %s/bin/obs missing\n' "$bundle" >&2; return 1; }
   mkdir -p "$libdir" || return 1
-  cp -a "${bundle}/lib/x86_64-linux-gnu/." "${libdir}/" || { printf 'strih_install_bundle_prefix: lib copy failed\n' >&2; return 1; }
+  # issue 1412: never an archive copy here -- it rewrites a library a running OBS maps on the same inode
+  # (stream-pp 11.10.2026: SIGSEGV + `Text file busy`). Unchanged files stay, changed ones are renamed in.
+  local written=0
+  strih_bundle_tree_install "${bundle}/lib/x86_64-linux-gnu" "$libdir" || { printf 'strih_install_bundle_prefix: lib copy failed\n' >&2; return 1; }
+  written=$((written + STRIH_BUNDLE_TREE_CHANGED))
   # normalize perms/ownership deterministically (issue 1236): reset LIBDIR root:root 0755, then chown
   # root:root + dirs 0755 / files a+rX over EVERY just-installed path (scope to the installed set).
   chown root:root "$libdir" 2>/dev/null || true
@@ -870,11 +881,15 @@ strih_install_bundle_prefix() {
   done < <(strih_bundle_bin_files "$bundle")
   if [ -d "${bundle}/share/obs" ]; then
     mkdir -p "${sharedir}/obs"
-    cp -a "${bundle}/share/obs/." "${sharedir}/obs/" || { printf 'strih_install_bundle_prefix: share/obs copy failed\n' >&2; return 1; }
+    strih_bundle_tree_install "${bundle}/share/obs" "${sharedir}/obs" || { printf 'strih_install_bundle_prefix: share/obs copy failed\n' >&2; return 1; }
+    written=$((written + STRIH_BUNDLE_TREE_CHANGED))
     chown -R root:root "${sharedir}/obs" 2>/dev/null || true
     chmod 0755 "${sharedir}/obs" 2>/dev/null || true
     find "${sharedir}/obs" -type d -exec chmod 0755 {} + 2>/dev/null || true
     find "${sharedir}/obs" -type f -exec chmod a+rX {} + 2>/dev/null || true
+  fi
+  if [ "$written" -gt 0 ] && pgrep -x obs >/dev/null 2>&1; then
+    printf '  WARNING: OBS is running on the bundle files it mapped before this install (%d lib/share files replaced) -- restart strih-obs.service to load the new build\n' "$written" >&2
   fi
   ldconfig
 }

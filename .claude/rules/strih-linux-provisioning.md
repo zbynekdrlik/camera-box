@@ -120,6 +120,26 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   read off the notebook on arrival (`readlink /sys/class/net/<if>/device/driver`), not asked; so are
   the three NIC facts of issue 1391 (`lsusb` for the adapter, the switch port for the link speed).
 
+## Step 4 never rewrites a file a running OBS maps (issue 1412, stream-pp 11.10.2026)
+
+`strih_install_bundle_prefix` used an archive copy (`cp -a`) into `/usr/lib/x86_64-linux-gnu`. cp
+rewrites an existing file on the SAME inode, so a hand re-run of setup-strih with OBS up changed the
+libraries the running OBS and its CEF children had mapped: every obs-browser-page dumped core, OBS
+died 139, and one run failed outright with `Text file busy` (an executing ELF cannot be written).
+- The lib and share trees go through `strih_bundle_tree_install` (`scripts/lib/strih-bundle-install.sh`):
+  an unchanged file or symlink (`cmp`) is not touched (same inode, same mtime); a changed or new one is
+  copied to `.<name>.cb-new.<pid>` beside it and renamed over the name (a NEW inode: the running
+  process keeps the one it mapped, an executing helper is replaced without ETXTBSY). A type clash (a
+  file where a directory goes) refuses. One summary line per tree.
+- `bin/*` keeps `install -m 0755`: GNU install unlinks the destination first (checked: a running ELF
+  is replaced, new inode).
+- When files were replaced while an `obs` process runs, step 4 prints a WARNING to restart
+  strih-obs.service: the running OBS still holds the old build, and a CEF helper it spawns next runs
+  the new one. The deploy arm stops OBS before setup-strih anyway.
+- Tests: `tests/python/test_strih_provision_gaps_1412.py` runs the real install as non-root (chown /
+  ldconfig stubbed, install without -o/-g): an open fd keeps the old bytes, an unchanged bundle writes
+  nothing, a running copy of `/bin/sleep` is replaced.
+
 ## strih-pp + the fresh-box gaps (issue 1412, the Poprad rework of 11.10.2026)
 
 - **Three more facts** (appended to the key list): `STRIH_ROLE` (`strih` | `stream`; the stream role
