@@ -3686,6 +3686,46 @@ fn baked_pl1_watts_reads_the_envelope_unit_environment() {
     }
 }
 
+/// issue 1412 (stream-pp, 11.10.2026): the notebook panel's native mode is 1920x1200, and the fixed
+/// 1920x1080 pin left black bars above and below. The kiosk takes the panel's PREFERRED mode at 60 Hz
+/// first, then 1920x1080@60, then --auto.
+#[test]
+fn openbox_autostart_takes_the_panels_preferred_mode_first_1412() {
+    let baseline = manifest_dir().join("scripts/lib/obs-box-baseline.sh");
+    let (c, out, err) = run_sourced(
+        &[("BL", baseline.to_str().unwrap())],
+        ". \"$BL\"; strih_openbox_autostart_text",
+    );
+    assert_eq!(c, 0, "stderr={err}");
+    let pref = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("PREF="))
+        .unwrap_or_else(|| panic!("the autostart reads the panel's preferred mode:\n{out}"));
+    let xrandr = "Screen 0: minimum 320 x 200, current 1920 x 1080, maximum 16384 x 16384\n\
+eDP connected primary 1920x1080+0+0 (normal left inverted right x axis y axis) 302mm x 189mm\n\
+   1920x1200     60.00 +\n\
+   1920x1080     60.00*\n\
+   1600x1200     60.00\n\
+HDMI-A-0 disconnected (normal left inverted right x axis y axis)\n\
+   1280x720      60.00 +\n";
+    let script =
+        format!("xrandr() {{ printf '%s' \"$FIX\"; }}\nPANEL=eDP\n{pref}\nprintf '%s' \"$PREF\"\n");
+    let o = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .env("FIX", xrandr)
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&o.stdout), "1920x1200", "{o:?}");
+    let first = out
+        .find("--primary --mode \"$PREF\" --rate 60")
+        .unwrap_or_else(|| panic!("the preferred mode at 60 Hz is tried:\n{out}"));
+    let pinned = out
+        .find("--primary --mode 1920x1080 --rate 60")
+        .expect("1920x1080@60 stays the fallback");
+    assert!(first < pinned, "the preferred mode comes first:\n{out}");
+}
+
 /// The guard's thermal step-down is strih's own value, never imag's 25 W iGPU clamp.
 #[test]
 fn pl1_stepdown_watts_is_strih_specific_with_an_override() {
