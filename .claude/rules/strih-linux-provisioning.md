@@ -182,6 +182,39 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   fallback) are to be read on site.
 - Tests: `tests/python/test_obs_box_stream_role_1412.py`.
 
+## Porting an operator collection to a Linux box: `scripts/obs_collection_port.py` (issue 1412 slice C)
+
+Nothing provisions the operator's scene collection (design gap G9). The port rewrites OBS's own
+collection JSON ONCE, before the import, with OBS stopped; it never talks to OBS and refuses to write
+over an existing output file (an imported collection is never regenerated).
+
+- **Presets:** `stream-pp` (the Windows stream collection: keep PRO / Development / PRE / POST and what
+  they nest; `Zvuk z mixu` -> `pulse_input_capture` on `strih-program-source`; `NDIAr 2ME PGM` ->
+  `NDI 2ME PGM` <- `STRIH-PP (2ME PGM)`; ytfast dropped; Windows paths ->
+  `/srv/obs-media/stream-pp/<folder>/<file>`) and `strih-pp` (the strih-lx collection: every scene;
+  `STRIH-LX (...)` -> `STRIH-PP (...)`, the CG sender). Every value is overridable on the CLI.
+- **Kinds are an ALLOWLIST** of what the Linux strih bundle ships (`LINUX_INPUT_KINDS`,
+  `LINUX_FILTER_KINDS`, unversioned OBS ids). Everything else is dropped with a `DROP` line;
+  `--keep-kind` extends the list. `text_gdiplus` becomes `text_ft2_source` (alpha = opacity x 255 / 100,
+  integer). The program-audio binding is pinned equal to `strih_scenes.py` by the pytest. Transitions
+  have their own allowlist (`LINUX_TRANSITION_KINDS`). The kind lists are a hand copy of the bundle:
+  when the bundle gains a plugin a collection uses, add its ids there.
+- **The presets are pinned to the box fact files** (`STRIH_NDI_PREFIX`, `STRIH_CG_SENDER`,
+  `STRIH_PROGRAM_SENDER`, `STRIH_OBS_COLLECTION`) by the pytest; change both together.
+- **A sender of the old venue left after the renames is a `WARN sender` line** (patterns
+  `foreign_senders`: `-SNV (`, the old box prefix); fix it with `--rename-sender OLD=NEW`. Two Windows
+  paths that land on one Linux file are a `WARN`; a UNC path is never moved, only named.
+- **SNV-only URL hosts must be mapped:** a browser URL naming `presenter.lan` or `fohabl.lan` refuses
+  unless `--presenter-host` / `--fohabl-host` / `--url-host OLD=NEW` maps it (map a host to itself to
+  keep it). The PP presenter address is open, so it is never guessed.
+- **The report never prints a secret:** a URL is printed as its host, a script by its file name; the
+  output is 0600. Never commit a real collection (stream keys, API keys); the pytest refuses a tracked
+  `*strih-pp*` / `*stream-pp*` JSON.
+- **Run (on the box, OBS stopped):** `python3 scripts/obs_collection_port.py --preset stream-pp
+  --presenter-host <host> <exported.json> ~/.config/obs-studio/basic/scenes/stream-pp.json`, read the
+  report, copy the files the `PATH` lines name, then start OBS (the launch seed heals the classes).
+- Tests: `tests/python/test_obs_collection_port_1412.py` (synthetic fixtures only).
+
 ## The parallel-run contract (why the namespacing + the client-clock matter)
 
 While both boxes run, TWO strih senders coexist on the NDI wire and must never collide:
