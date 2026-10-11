@@ -476,6 +476,16 @@ def _autostart(boxes, box):
     return r.stdout.split("=== openbox-autostart ===\n", 1)[1].split("\n=== ", 1)[0]
 
 
+def test_the_stream_box_autostart_starts_the_restreamer(boxes):
+    """11.10.2026 (restreamer agreement on issue 1412): the stream box runs the restreamer headless as
+    the --user unit restreamer.service, which its .deb ships; the kiosk has no tray and no XDG
+    autostart, so the openbox autostart starts it. A strih box never does."""
+    line = "systemctl --user start restreamer.service || true"
+    assert line in _autostart(boxes, "stream-pp").splitlines()
+    assert "restreamer" not in _autostart(boxes, "strih-pp")
+    assert "restreamer" not in _autostart(boxes, "strih-lx")
+
+
 def test_the_stream_box_autostart_keeps_hdmi_to_x(boxes):
     assert 'xrandr --output "$PROJ" --off' not in _autostart(boxes, "stream-pp")
     assert 'xrandr --output "$PROJ" --off' in _autostart(boxes, "strih-pp")
