@@ -816,6 +816,20 @@ strih_nvenc_log_verdict() {
   printf 'nvenc-unknown'; return 2
 }
 
+# strih_nvenc_grade VERDICT DGPU -> `<ok|bad|note>|<message>` for verify-strih item 20's live NVENC
+# read. VERDICT is strih_nvenc_log_verdict's word, DGPU 1 when the box has a discrete NVIDIA GPU
+# (obs_box_has_discrete_nvidia). Issue 1412 (stream-pp, AMD iGPU): OBS logs `NVENC not supported` by
+# design on a box with no NVIDIA GPU, so the missing-helper FAIL applies only where NVENC can exist.
+strih_nvenc_grade() {
+  local verdict="${1:-}" dgpu="${2:-}"
+  case "$verdict:$dgpu" in
+    nvenc-ok:*) printf "note|NVENC live: the newest OBS log carries '[obs-nvenc] NVENC version:'\n" ;;
+    nvenc-unsupported:1) printf "bad|the newest OBS log says 'NVENC not supported' with no version line -- obs-nvenc-test missing/broken (re-run setup-strih.sh step 4, then restart OBS)\n" ;;
+    nvenc-unsupported:*) printf "note|no discrete NVIDIA GPU: 'NVENC not supported' is expected (the box encodes on its iGPU)\n" ;;
+    *) printf "note|NVENC state unknown from the OBS log (OBS not running or no NVENC line yet)\n" ;;
+  esac
+}
+
 # strih_install_bundle_prefix BUNDLE LIBDIR BINDIR SHAREDIR -> install the staged genlock bundle into
 # its /usr prefix so the dynamic loader finds it (the imag on-box program shape in
 # scripts/deploy-genlock-fleet.sh -- issue 1236 perms-normalize + ldconfig): copy

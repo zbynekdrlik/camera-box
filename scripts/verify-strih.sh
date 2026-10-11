@@ -601,10 +601,11 @@ OBS_LOG_DIR="${USER_HOME}/.config/obs-studio/logs"
 NEWEST_OBS_LOG="$(ls -1t "${OBS_LOG_DIR}"/*.txt 2>/dev/null | head -1 || true)"
 if [ -n "$NEWEST_OBS_LOG" ] && [ -r "$NEWEST_OBS_LOG" ]; then
   NVENC_VERDICT="$(strih_nvenc_log_verdict < "$NEWEST_OBS_LOG" || true)"
-  case "$NVENC_VERDICT" in
-    nvenc-ok)          note "(obs-helpers) NVENC live: the newest OBS log carries '[obs-nvenc] NVENC version:'" ;;
-    nvenc-unsupported) bad  "(obs-helpers) the newest OBS log says 'NVENC not supported' with no version line -- obs-nvenc-test missing/broken (re-run setup-strih.sh step 4, then restart OBS)" ;;
-    *)                 note "(obs-helpers) NVENC state unknown from the OBS log (OBS not running or no NVENC line yet)" ;;
+  NVENC_DGPU=0; if lspci -nn 2>/dev/null | obs_box_has_discrete_nvidia; then NVENC_DGPU=1; fi
+  NVENC_GRADE="$(strih_nvenc_grade "$NVENC_VERDICT" "$NVENC_DGPU")"
+  case "${NVENC_GRADE%%|*}" in
+    bad) bad  "(obs-helpers) ${NVENC_GRADE#*|}" ;;
+    *)   note "(obs-helpers) ${NVENC_GRADE#*|}" ;;
   esac
 else
   note "(obs-helpers) no OBS log to read the live NVENC state (OBS not running -- report-only)"
