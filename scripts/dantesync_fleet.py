@@ -22,6 +22,12 @@ Three jobs, all PURE (no network):
    PowerShell-write incident). The verdict is OK / DRIFT / UNKNOWN (unreadable or not JSON), with a
    named diff line per difference. Report-only: nothing here writes a config anywhere.
 
+Roles (issue 1412): video | audio | ntp-master (the home venue, SNV) and the venue roles
+`video-<venue>` / `ntp-master-<venue>` (`video-pp`, `ntp-master-pp`). A venue role locks to its
+venue's grandmaster, read from that venue's NTP-master strih fact file (`venue_gm_host`, the twin of
+the bash dantesync_fleet_venue_gm_host); every role with a template in
+scripts/dantesync-canonical-config.json is valid here (ROLES).
+
 CLI:
   dantesync_fleet.py rows
   dantesync_fleet.py gm-host ROLE
@@ -47,9 +53,12 @@ FLEET_SH = _SCRIPTS / "lib" / "dantesync-fleet.sh"
 CAMERA_SET_SH = _SCRIPTS / "camera-set.sh"
 RIG_GM_SH = _SCRIPTS / "lib" / "rig-grandmaster.sh"
 TEMPLATES_JSON = _SCRIPTS / "dantesync-canonical-config.json"
+STRIH_BOXES_DIR = _SCRIPTS / "strih-boxes"
 CAMERA_MAX = 99
 
-ROLES = ("video", "audio", "ntp-master")
+# Every role that has a canonical template (the plain roles + the venue roles, issue 1412).
+ROLES = tuple(json.loads(TEMPLATES_JSON.read_text())["roles"])
+_VENUE = re.compile(r"(video|ntp-master)-([abcdefghijklmnopqrstuvwxyz0123456789]+)")
 OK, DRIFT, UNKNOWN = "OK", "DRIFT", "UNKNOWN"
 EXIT = {OK: 0, DRIFT: 20, UNKNOWN: 11}
 
@@ -111,6 +120,46 @@ def rows() -> list:
     return out
 
 
+def role_venue(role: str):
+    """The venue of a venue role (`video-<venue>` / `ntp-master-<venue>`), else None (the bash
+    dantesync_fleet_role_venue)."""
+    m = _VENUE.fullmatch(role or "")
+    return m.group(2) if m else None
+
+
+def _fact_file(path: Path) -> dict:
+    """KEY=VALUE lines of a strih box fact file, PARSED (comments and blank lines skipped)."""
+    out = {}
+    for line in path.read_text().splitlines():
+        if not line or line.startswith("#"):
+            continue
+        key, _, val = line.partition("=")
+        out[key] = val
+    return out
+
+
+def venue_gm_host(venue: str) -> str:
+    """The PTP grandmaster of VENUE: STRIH_DANTE_GM of the ONE strih fact file with
+    STRIH_VENUE=<venue> + STRIH_DANTESYNC_ROLE=server (the bash dantesync_fleet_venue_gm_host).
+    None, two, or one without STRIH_DANTE_GM raises ValueError naming the venue."""
+    boxes = Path(os.environ.get("DANTESYNC_FLEET_STRIH_BOXES_DIR") or STRIH_BOXES_DIR)
+    found = []
+    for f in sorted(boxes.glob("*.env")):
+        facts = _fact_file(f)
+        if facts.get("STRIH_VENUE") == venue and facts.get("STRIH_DANTESYNC_ROLE") == "server":
+            found.append((f.name, facts.get("STRIH_DANTE_GM", "")))
+    if not found:
+        raise ValueError(f"venue {venue!r} has no NTP-master strih fact file (STRIH_VENUE={venue} + "
+                         f"STRIH_DANTESYNC_ROLE=server) in {boxes}")
+    if len(found) > 1:
+        raise ValueError(f"venue {venue!r} has {len(found)} NTP-master strih fact files "
+                         f"({' '.join(n for n, _ in found)}) -- expected exactly one")
+    name, gm = found[0]
+    if not gm:
+        raise ValueError(f"venue {venue!r} NTP-master fact file {name} has no STRIH_DANTE_GM")
+    return gm
+
+
 def role_gm_host(role: str) -> str:
     """The grandmaster HOST a node of ROLE must lock to (the bash dantesync_fleet_role_gm_host)."""
     if role in ("video", "ntp-master"):
@@ -118,7 +167,11 @@ def role_gm_host(role: str) -> str:
             r'^RIG_GRANDMASTER_HOST_DEFAULT="([^"]+)"', RIG_GM_SH.read_text(), re.MULTILINE).group(1)
     if role == "audio":
         return _bash_default("DANTESYNC_AUDIO_GM_HOST", FLEET_SH)
-    raise ValueError(f"unknown role {role!r} (expected one of {', '.join(ROLES)})")
+    venue = role_venue(role)
+    if venue is not None:
+        return venue_gm_host(venue)
+    raise ValueError(f"unknown role {role!r} (expected video, audio, ntp-master, video-<venue> or "
+                     "ntp-master-<venue>)")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -445,17 +498,19 @@ def load_templates(path: Path = TEMPLATES_JSON) -> dict:
     return json.loads(Path(path).read_text())["roles"]
 
 
-def _resolve_tokens(value):
+def _resolve_tokens(value, role: str = "video"):
+    """`@video_gm` = the video grandmaster of ROLE's venue (video-clock.lan for a plain role, the
+    venue's grandmaster for a venue role, issue 1412); `@audio_gm` = the audio grandmaster."""
     if isinstance(value, str):
         if value == "@video_gm":
-            return role_gm_host("video")
+            return role_gm_host(role if role_venue(role) else "video")
         if value == "@audio_gm":
             return role_gm_host("audio")
         return value
     if isinstance(value, list):
-        return [_resolve_tokens(v) for v in value]
+        return [_resolve_tokens(v, role) for v in value]
     if isinstance(value, dict):
-        return {k: _resolve_tokens(v) for k, v in value.items()}
+        return {k: _resolve_tokens(v, role) for k, v in value.items()}
     return value
 
 
@@ -463,7 +518,7 @@ def template_for(role: str, templates: dict | None = None) -> dict:
     templates = load_templates() if templates is None else templates
     if role not in templates:
         raise ValueError(f"unknown role {role!r} (templates carry {', '.join(sorted(templates))})")
-    return _resolve_tokens(templates[role])
+    return _resolve_tokens(templates[role], role)
 
 
 def _is_rule(v) -> bool:

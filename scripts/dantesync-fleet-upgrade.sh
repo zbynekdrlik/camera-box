@@ -98,7 +98,7 @@ set -euo pipefail
 # Env: SSH_PASS (default: the rig's shared ssh password, never printed here; also the sudo password fed to sudo -S on non-root Linux nodes),
 #      DANTESYNC_GATE_BOUND_US (offset bound, passed to the gate),
 #      GATE_WAIT_TRIES/GATE_WAIT_SECS (post-restart settle poll for a SLAVE node's verification gate),
-#      NTP_MASTER (the master node name; default DANTESYNC_NTP_MASTER_NAME, else the fleet ntp-master role),
+#      NTP_MASTER (the master node name(s), space-separated; default DANTESYNC_NTP_MASTER_NAME, else every fleet ntp-master* role),
 #      MASTER_GATE_WAIT_TRIES/MASTER_GATE_WAIT_SECS (#1077: the LONGER bounded settle window the
 #      master node gets so verifying it right after its own restart waits out the fleet sawtooth).
 # Linux privilege (#1077): a root@ node runs the generated script directly; a non-root node
@@ -428,11 +428,11 @@ EOF
   fi
 }
 
-# dantesync_is_ntp_master NODE MASTER_NAME -> 0 iff NODE is the (non-empty) configured NTP master.
-# #1077: the master node is graded/settled differently at verify time (see verify_node) -- an empty
-# master name means NO node is the master (never a false match).
+# dantesync_is_ntp_master NODE MASTER_NAMES -> 0 iff NODE is one of the (space-separated) configured
+# NTP masters (issue 1412: one per venue). #1077: a master is graded/settled differently at verify
+# time (see verify_node) -- an empty list means NO node is the master (never a false match).
 dantesync_is_ntp_master() {
-  [ -n "$2" ] && [ "$1" = "$2" ]
+  [ -n "$1" ] && case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac
 }
 
 # --- traveling CG box (RESOLUME-SNV) support (issue 1297) -------------------------------------
@@ -452,17 +452,18 @@ dantesync_resolume_win_spec() {
 # dantesync_gate_env_for NAME -> the env assignment the per-node verification gate needs (stdout,
 # one `KEY=VALUE` word, or nothing). issue 1372: an AUDIO-role node (mbc, fohabl) locks to the
 # audio-VLAN grandmaster, so its dantesync-gate.sh run must compare gm_source_ip against THAT, never
-# the video grandmaster (which only stays harmless while DANTESYNC_GATE_GM_ENFORCE is off). A video
-# node or an unknown name prints nothing: the gate keeps its own default (video-clock.lan). An audio
-# node whose grandmaster does not resolve (only possible with a hostname override) fails LOUDLY
-# (stderr + rc 1) -- its verify must fail, never fall back to the video grandmaster.
+# the video grandmaster (which only stays harmless while DANTESYNC_GATE_GM_ENFORCE is off); issue
+# 1412: a venue-role node (video-pp, ntp-master-pp) the same against its venue's grandmaster. A
+# home-video node or an unknown name prints nothing: the gate keeps its own default (video-clock.lan).
+# A grandmaster that does not resolve fails LOUDLY (stderr + rc 1) -- the verify must fail, never
+# fall back to the video grandmaster.
 dantesync_gate_env_for() {
   local role gm
   role="$(dantesync_fleet_field "${1:-}" role 2>/dev/null || true)"
-  [ "$role" = "audio" ] || return 0
-  gm="$(dantesync_fleet_role_gm_ip audio 2>/dev/null || true)"
+  case "$role" in "" | video | ntp-master) return 0 ;; esac
+  gm="$(dantesync_fleet_role_gm_ip "$role" 2>/dev/null || true)"
   if [ -z "$gm" ]; then
-    echo "dantesync-fleet-upgrade: cannot resolve the audio grandmaster '$DANTESYNC_AUDIO_GM_HOST' for $1 -- refusing to verify it against the video grandmaster" >&2
+    echo "dantesync-fleet-upgrade: cannot resolve the $role grandmaster for $1 -- refusing to verify it against the video grandmaster" >&2
     return 1
   fi
   printf 'RIG_GRANDMASTER_IP=%s' "$gm"
@@ -474,26 +475,29 @@ dantesync_gate_env_for() {
 # simply SKIPS it while it is powered off/away, instead of failing the whole roll on an unreachable
 # node. Returns 1 (do NOT skip) for an always-home box, a home traveling box, OR an unknown name
 # (fail-safe: never silently skip a box we cannot classify -- it proceeds and fails loudly on its
-# own reachability check if it really is unreachable).
+# own reachability check if it really is unreachable). Issue 1412: a fleet `reach` node (the PP
+# boxes; the fleet gate wins over their obs-fleet row) is skipped while it is unreachable.
 dantesync_skip_away_traveling() {
   local name="${1:-}" check
+  if [ "$(dantesync_fleet_field "$name" homegate 2>/dev/null)" = reach ]; then
+    ! dantesync_fleet_present "$name"; return
+  fi
   check="$(obs_fleet_home_check "$name" 2>/dev/null || true)"
   [ "$check" = "traveling" ] || return 1
   obs_fleet_is_home "$name" && return 1
   return 0
 }
 
-# dantesync_upgrade_default_master GIVEN -> the master verified master-aware: GIVEN, else the fleet's
-# ntp-master role (strih-lx), else "strih". Issue 1372: "strih" without --fleet graded the date master
-# as a SLAVE and rolled a healthy swap back twice (29.9.2026).
+# dantesync_upgrade_default_master GIVEN -> the master(s) verified master-aware: GIVEN, else every
+# fleet NTP master (strih-lx + the venue masters, issue 1412: strih-pp), else "strih". Issue 1372:
+# "strih" without --fleet graded the date master as a SLAVE and rolled a healthy swap back twice.
 dantesync_upgrade_default_master() {
   local given="${1:-}" m
   if [ -n "$given" ]; then
     printf '%s' "$given"
     return 0
   fi
-  m="$(dantesync_fleet_names role=ntp-master 2>/dev/null || true)"
-  m="${m%% *}"
+  m="$(dantesync_fleet_master_names 2>/dev/null || true)"
   printf '%s' "${m:-strih}"
 }
 
@@ -856,7 +860,7 @@ add_node() {  # NAME KIND ADDR
   # issue 1297: a TRAVELING obs-fleet box (resolume) that is currently AWAY is SKIPPED from the
   # roll (never a failed node) -- a fleet roll may always list it; it joins only while home.
   if dantesync_skip_away_traveling "$1"; then
-    log "  $1 SKIPPED (traveling box away -- obs_fleet_is_home false; will roll when home)"
+    log "  $1 SKIPPED (traveling box away or unreachable -- not home this pass; will roll when home)"
     return 0
   fi
   # issue 1372: a node that needs its OWN ssh credential (fohabl) is never dialled without it.

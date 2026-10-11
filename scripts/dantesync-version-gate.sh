@@ -509,6 +509,16 @@ main() {
       dantesync_fleet_present "$fname" \
         || echo "  $fname SKIPPED (traveling box away -- obs_fleet_is_home false; it is gated when home)"
     done
+    # issue 1412: a `reach` node (the PP boxes) is read only while its ssh port answers. The --present
+    # spec above already probed it, so a node absent from both arms is the unreachable one (no 2nd probe).
+    named=" "
+    for fpair in "${linux_pairs[@]}" "${win_pairs[@]}"; do
+      named="${named}${fpair%%=*} "
+    done
+    for fname in $(dantesync_fleet_names homegate=reach); do
+      case "$named" in *" $fname "*) continue ;; esac
+      echo "  $fname SKIPPED (unreachable -- ssh :$DANTESYNC_FLEET_REACH_PORT did not answer; it is gated when reachable)"
+    done
   fi
 
   if [ "${#linux_pairs[@]}" -eq 0 ] && [ "${#local_names[@]}" -eq 0 ] && [ "${#win_pairs[@]}" -eq 0 ]; then

@@ -118,6 +118,10 @@ while IFS='|' read -r name addr os role homegate user _; do
     echo "node=$name role=$role verdict=SKIPPED (traveling box away -- obs_fleet_is_home false)"
     continue
   fi
+  if [ "$homegate" = "reach" ] && ! dantesync_fleet_present "$name"; then
+    echo "node=$name role=$role verdict=SKIPPED (unreachable -- reach port :$DANTESYNC_FLEET_REACH_PORT did not answer)"
+    continue
+  fi
   if [ "$homegate" = "local" ]; then
     target="local"
   else

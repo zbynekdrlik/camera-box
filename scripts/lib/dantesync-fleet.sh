@@ -32,11 +32,16 @@
 #   * addr     -- a literal IP/hostname, `obs:<obs-fleet name>` (resolved through obs_fleet_host at
 #                 read time), or `local` (dev1 itself, read without ssh).
 #   * os       -- linux | windows (which reader/config path applies).
-#   * role     -- video | audio | ntp-master: the canonical config template the drift check compares
-#                 against (scripts/dantesync-canonical-config.json) and the grandmaster the node must
-#                 lock to (dantesync_fleet_role_gm_host).
+#   * role     -- video | audio | ntp-master, or a VENUE role `video-<venue>` / `ntp-master-<venue>`
+#                 (issue 1412: `video-pp`, `ntp-master-pp`): the canonical config template the drift
+#                 check compares against (scripts/dantesync-canonical-config.json) and the grandmaster
+#                 the node must lock to (dantesync_fleet_role_gm_host). The plain roles are the home
+#                 venue (SNV, video-clock.lan); a venue role locks to ITS venue's grandmaster, read from
+#                 that venue's NTP-master strih fact file (dantesync_fleet_venue_gm_host).
 #   * homegate -- always (a fixed box) | obsfleet (obs_fleet_is_home decides: the traveling
-#                 resolume) | local (dev1). A `retired` obs-fleet box is dropped from the rows.
+#                 resolume) | reach (issue 1412: read only while the box answers on ssh :22 -- the
+#                 Poprad boxes, reachable from dev1 only while the companion-pp subnet route is up) |
+#                 local (dev1). A `retired` obs-fleet box is dropped from the rows.
 #   * user     -- the ssh login; `-` = the consumer's own default login.
 #   * credvar  -- the NAME of the env var holding this node's ssh password. Empty = the consumer's
 #                 default fleet password. The VALUE is never written in a committed file: it comes
@@ -67,13 +72,24 @@ fi
 #   mbc       -- the Master Broadcast Console (Ableton, the measurement-audio chain), audio VLAN.
 #   fohabl    -- the FOH Ableton PC that hosts the AIC128-D card, audio VLAN, ssh user `master` with
 #                its own password (DANTESYNC_FOHABL_SSH_PASS).
+#   strih-pp / stream-pp / resolume-pp -- issue 1412: the Poprad (PP) venue. strih-pp is the PP NTP
+#                master (scripts/strih-boxes/strih-pp.env: STRIH_DANTESYNC_ROLE=server), stream-pp and
+#                resolume-pp (Windows, no obs-fleet row) follow it; all three lock to the PP PTP
+#                grandmaster (role `*-pp`). dev1 reaches the PP LAN as 10.76.8.x through the
+#                companion-pp subnet router, so the rows dial NAMES (strih-pp/stream-pp through their
+#                obs-fleet rows), and their homegate is `reach`: an unreachable PP box is skipped,
+#                never a page or a failed gate. Owner (11.10.2026): "a tiez tam nie je dantesync tam
+#                nie je updatnuty cize potrebujes zaradit tento pc do updatovania".
 DANTESYNC_FLEET="${DANTESYNC_FLEET:-dev1|local|linux|video|local|-|
 strih-lx|obs:strih-lx|linux|ntp-master|obsfleet|-|
 stream|obs:stream|windows|video|obsfleet|-|
 resolume|obs:resolume|windows|video|obsfleet|-|
 imag|obs:imag|linux|video|obsfleet|-|
 mbc|10.77.7.232|windows|audio|always|-|
-fohabl|10.77.7.30|windows|audio|always|master|DANTESYNC_FOHABL_SSH_PASS}"
+fohabl|10.77.7.30|windows|audio|always|master|DANTESYNC_FOHABL_SSH_PASS
+strih-pp|obs:strih-pp|linux|ntp-master-pp|reach|-|
+stream-pp|obs:stream-pp|linux|video-pp|reach|-|
+resolume-pp|resolume-pp.lan|windows|video-pp|reach|-|}"
 
 # The audio-VLAN PTP grandmaster: an Audinate device, locked to the same clock as the video
 # grandmaster video-clock.lan (#1367 comment 5832526338). Since 25.9.2026 ~21:07 the leader is
@@ -83,6 +99,16 @@ fohabl|10.77.7.30|windows|audio|always|master|DANTESYNC_FOHABL_SSH_PASS}"
 # written; the canonical audio config's gm_allowlist and the clock watchdog's audio grading both read
 # it from this variable.
 DANTESYNC_AUDIO_GM_HOST="${DANTESYNC_AUDIO_GM_HOST:-10.77.7.104}"
+
+# The strih box fact files (scripts/strih-boxes/<box>.env, issue 1361) -- a venue role's grandmaster
+# is read from the ONE file whose STRIH_VENUE is that venue and whose STRIH_DANTESYNC_ROLE is `server`
+# (the venue's NTP master), field STRIH_DANTE_GM. Env-overridable for tests.
+DANTESYNC_FLEET_STRIH_BOXES_DIR="${DANTESYNC_FLEET_STRIH_BOXES_DIR:-${BASH_SOURCE[0]%/*}/../strih-boxes}"
+
+# The port the `reach` homegate probes: ssh, which every PP box answers (Linux and Windows alike)
+# whenever it is up and the PP link is up. A dead dantesync on a reachable box is then still read
+# (UNKNOWN / NO_DANTESYNC), never hidden behind the gate.
+DANTESYNC_FLEET_REACH_PORT="${DANTESYNC_FLEET_REACH_PORT:-22}"
 
 # The dev1-local file that carries per-node ssh passwords by NAME (KEY=VALUE lines, mode 0600, never
 # committed). Only keys that a fleet row names as its credvar are read from it.
@@ -212,15 +238,40 @@ dantesync_fleet_fixed_names() {
   printf '%s' "$out"
 }
 
+# dantesync_fleet_master_names -> the space-separated NAMES of every NTP master: role `ntp-master`
+# (the home venue, strih-lx) and every venue master `ntp-master-<venue>` (issue 1412: strih-pp).
+dantesync_fleet_master_names() {
+  local out="" name role
+  while IFS='|' read -r name _ _ role _; do
+    case "$role" in ntp-master | ntp-master-*) out="${out:+$out }$name" ;; esac
+  done < <(dantesync_fleet_rows 2>/dev/null || true)
+  printf '%s' "$out"
+}
+
 # dantesync_fleet_present <name> -> rc 0 iff NAME should be read this pass: a traveling obs-fleet box
-# only while obs_fleet_is_home (the #1296 gate; its I/O), every other node always. Unknown -> rc 1.
+# only while obs_fleet_is_home (the #1296 gate; its I/O), a `reach` node only while its address
+# resolves AND ssh (DANTESYNC_FLEET_REACH_PORT) answers (issue 1412; its I/O), every other node
+# always. Unknown -> rc 1. OBS_FLEET_HOME, the one traveling-box force list (test/ops seam), is
+# authoritative for a `reach` node too: named = present, otherwise away, no network touched.
 dantesync_fleet_present() {
-  local homegate
+  local homegate addr ip
   homegate="$(dantesync_fleet_field "${1:-}" homegate)" || return 1
-  if [ "$homegate" = "obsfleet" ]; then
-    obs_fleet_is_home "$1"
-    return
-  fi
+  case "$homegate" in
+    obsfleet)
+      obs_fleet_is_home "$1"
+      return
+      ;;
+    reach)
+      if [ -n "${OBS_FLEET_HOME:-}" ]; then
+        case " ${OBS_FLEET_HOME} " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+      fi
+      addr="$(dantesync_fleet_field "$1" addr)" || return 1
+      ip="$(obs_fleet_resolve_host "$addr")"
+      [ -n "$ip" ] || return 1
+      [ "$(obs_fleet_status_probe "$ip" "$DANTESYNC_FLEET_REACH_PORT")" = 1 ]
+      return
+      ;;
+  esac
   return 0
 }
 
@@ -286,34 +337,102 @@ dantesync_fleet_load_credentials() {
   return 0
 }
 
+# dantesync_fleet_role_venue <role> -> the VENUE of a venue role (`video-<venue>` /
+# `ntp-master-<venue>`, venue = lower-case ASCII letters and digits) on stdout, rc 0; rc 1 (no
+# output) for a plain role or anything else. The sets are spelled out: a bracket RANGE follows the
+# locale in bash (ci-testing-gotchas.md, issue 1302).
+dantesync_fleet_role_venue() {
+  local role="${1:-}" venue
+  case "$role" in
+    video-*) venue="${role#video-}" ;;
+    ntp-master-*) venue="${role#ntp-master-}" ;;
+    *) return 1 ;;
+  esac
+  [[ "$venue" =~ ^[abcdefghijklmnopqrstuvwxyz0123456789]+$ ]] || return 1
+  printf '%s' "$venue"
+}
+
+# dantesync_fleet_venue_gm_host <venue> -> the PTP grandmaster of VENUE: STRIH_DANTE_GM of the ONE
+# strih fact file (DANTESYNC_FLEET_STRIH_BOXES_DIR/*.env) with STRIH_VENUE=<venue> and
+# STRIH_DANTESYNC_ROLE=server -- the venue's NTP master, whose dantesync config allows exactly that
+# grandmaster. The files are PARSED (KEY=VALUE lines), never sourced. No such file, two of them, or
+# one without STRIH_DANTE_GM -> stderr naming the venue + rc 1, never a guessed grandmaster.
+dantesync_fleet_venue_gm_host() {
+  local venue="${1:-}" f line key val v r g found="" n=0 gm=""
+  for f in "$DANTESYNC_FLEET_STRIH_BOXES_DIR"/*.env; do
+    [ -f "$f" ] || continue
+    v="" r="" g=""
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in \#* | "") continue ;; esac
+      key="${line%%=*}"; val="${line#*=}"
+      case "$key" in
+        STRIH_VENUE) v="$val" ;;
+        STRIH_DANTESYNC_ROLE) r="$val" ;;
+        STRIH_DANTE_GM) g="$val" ;;
+      esac
+    done <"$f"
+    { [ "$v" = "$venue" ] && [ "$r" = server ]; } || continue
+    found="${found:+$found }${f##*/}"
+    n=$((n + 1))
+    gm="$g"
+  done
+  if [ "$n" -eq 0 ]; then
+    echo "dantesync-fleet: venue '$venue' has no NTP-master strih fact file (STRIH_VENUE=$venue + STRIH_DANTESYNC_ROLE=server) in $DANTESYNC_FLEET_STRIH_BOXES_DIR" >&2
+    return 1
+  fi
+  if [ "$n" -gt 1 ]; then
+    echo "dantesync-fleet: venue '$venue' has $n NTP-master strih fact files ($found) -- expected exactly one" >&2
+    return 1
+  fi
+  if [ -z "$gm" ]; then
+    echo "dantesync-fleet: venue '$venue' NTP-master fact file $found has no STRIH_DANTE_GM" >&2
+    return 1
+  fi
+  printf '%s\n' "$gm"
+}
+
 # dantesync_fleet_role_gm_host <role> -> the grandmaster HOST a node of ROLE must lock to: the video
 # roles use the rig grandmaster name (video-clock.lan, scripts/lib/rig-grandmaster.sh), the audio
-# role DANTESYNC_AUDIO_GM_HOST. Unknown role -> rc 1.
+# role DANTESYNC_AUDIO_GM_HOST, a venue role its venue's grandmaster (issue 1412). Unknown role ->
+# rc 1.
 dantesync_fleet_role_gm_host() {
+  local venue
   case "${1:-}" in
     video | ntp-master) rig_grandmaster_host ;;
     audio) printf '%s\n' "$DANTESYNC_AUDIO_GM_HOST" ;;
-    *) echo "dantesync-fleet: unknown role '${1:-}' (expected video, audio or ntp-master)" >&2; return 1 ;;
+    *)
+      if venue="$(dantesync_fleet_role_venue "${1:-}")"; then
+        dantesync_fleet_venue_gm_host "$venue"
+        return
+      fi
+      echo "dantesync-fleet: unknown role '${1:-}' (expected video, audio, ntp-master, video-<venue> or ntp-master-<venue>)" >&2
+      return 1
+      ;;
   esac
 }
 
 # dantesync_fleet_role_gm_ip <role> -> that grandmaster's IPv4 (stdout, rc 0), or rc 1 when it does
 # not resolve. The video roles go through rig_grandmaster_ip (its RIG_GRANDMASTER_IP override + loud
-# failure); an audio IPv4 literal is returned as is.
+# failure); an audio or venue grandmaster that is an IPv4 literal is returned as is, a name is
+# resolved. RIG_GRANDMASTER_IP never moves a venue grandmaster (it is the home rig's override).
 dantesync_fleet_role_gm_ip() {
-  local host
+  local host ip
   case "${1:-}" in
-    video | ntp-master) rig_grandmaster_ip ;;
-    audio)
-      host="$DANTESYNC_AUDIO_GM_HOST"
-      if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-        printf '%s\n' "$host"
-        return 0
+    video | ntp-master) rig_grandmaster_ip; return ;;
+    audio) host="$DANTESYNC_AUDIO_GM_HOST" ;;
+    *)
+      if ! dantesync_fleet_role_venue "${1:-}" >/dev/null; then
+        echo "dantesync-fleet: unknown role '${1:-}'" >&2
+        return 1
       fi
-      host="$(rig_grandmaster_resolve "$host")"
-      [ -n "$host" ] || { echo "dantesync-fleet: cannot resolve the audio grandmaster '$DANTESYNC_AUDIO_GM_HOST'" >&2; return 1; }
-      printf '%s\n' "$host"
+      host="$(dantesync_fleet_role_gm_host "$1")" || return 1
       ;;
-    *) echo "dantesync-fleet: unknown role '${1:-}'" >&2; return 1 ;;
   esac
+  if [[ "$host" =~ ^[0123456789]+\.[0123456789]+\.[0123456789]+\.[0123456789]+$ ]]; then
+    printf '%s\n' "$host"
+    return 0
+  fi
+  ip="$(rig_grandmaster_resolve "$host")"
+  [ -n "$ip" ] || { echo "dantesync-fleet: cannot resolve the $1 grandmaster '$host'" >&2; return 1; }
+  printf '%s\n' "$ip"
 }
