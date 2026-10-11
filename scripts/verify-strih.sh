@@ -597,6 +597,7 @@ if [ "$OBSH_VERDICT" = ok ]; then
 else
   bad "(obs-helpers) ${OBSH_VERDICT} beside /usr/bin/obs (mux=${CS_MUX_OK} nvenc-test=${CS_NVT_OK}) -- the prefix install must copy the WHOLE bundle bin/ (re-run setup-strih.sh step 4)"
 fi
+strih_bundle_exec_grade "$STRIH_LIBDIR" "$({ [ -f "$FLAGS_FILE" ] && strih_lx_browser_bundle_required "$(cat "$FLAGS_FILE")"; } && echo 1 || echo 0)"   # issue 1412
 OBS_LOG_DIR="${USER_HOME}/.config/obs-studio/logs"
 NEWEST_OBS_LOG="$(ls -1t "${OBS_LOG_DIR}"/*.txt 2>/dev/null | head -1 || true)"
 if [ -n "$NEWEST_OBS_LOG" ] && [ -r "$NEWEST_OBS_LOG" ]; then

@@ -871,6 +871,9 @@ strih_install_bundle_prefix() {
     chown root:root "$dst" 2>/dev/null || true
     if [ -d "$dst" ]; then chmod 0755 "$dst" 2>/dev/null || true; else chmod a+rX "$dst" 2>/dev/null || true; fi
   done < <(cd "${bundle}/lib/x86_64-linux-gnu" && find . -mindepth 1 -printf '%P\0')
+  # issue 1412: a+rX never ADDS an x bit, so a bundle unpacked without modes left obs-browser-page
+  # 0664 and CEF crash-looped OBS -- the bundle's executables are set 0755 by name.
+  strih_bundle_exec_fix "$libdir" || return 1
   # Install EVERY file in bin/ next to obs (obs + obs-ffmpeg-mux + obs-nvenc-test + any future
   # helper), root:root 0755 -- OBS resolves its helpers relative to its OWN executable (issue 1317).
   local binf base

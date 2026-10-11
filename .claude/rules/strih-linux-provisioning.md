@@ -136,9 +136,15 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
 - When files were replaced while an `obs` process runs, step 4 prints a WARNING to restart
   strih-obs.service: the running OBS still holds the old build, and a CEF helper it spawns next runs
   the new one. The deploy arm stops OBS before setup-strih anyway.
+- **The bundle's executables are set 0755 by name** (`strih_bundle_lib_executables`: today the CEF
+  helper `obs-plugins/obs-browser-page`; chrome-sandbox keeps its own 4755 step). An artifact unpacked
+  without unix modes (python `zipfile.extractall`) left it 0664, `chmod a+rX` never adds an x bit, and
+  CEF crash-looped OBS (exit 133). `gh run download` keeps the modes; a hand fetch may not. verify item
+  20 adds the `(bundle-exec)` row (`strih_bundle_exec_grade`): FAIL on a non-executable helper, and on
+  a missing one when the bundle is BROWSER-ON.
 - Tests: `tests/python/test_strih_provision_gaps_1412.py` runs the real install as non-root (chown /
   ldconfig stubbed, install without -o/-g): an open fd keeps the old bytes, an unchanged bundle writes
-  nothing, a running copy of `/bin/sleep` is replaced.
+  nothing, a running copy of `/bin/sleep` is replaced, a 0664 helper comes out 0755.
 
 ## strih-pp + the fresh-box gaps (issue 1412, the Poprad rework of 11.10.2026)
 
