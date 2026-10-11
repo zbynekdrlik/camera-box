@@ -19,6 +19,8 @@ import os
 import subprocess
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from ro_window_fakes_1407 import ROOT, log, make_box, starts  # noqa: E402
 
@@ -201,9 +203,11 @@ def test_test_failed_relay_close_still_runs_the_painter_steps_then_fails(tmp_pat
     proc, ran, boxes, _sent = _run(tmp_path, "test", failing=(SOURCE_IP,), enabled=True)
     out = proc.stdout + proc.stderr
     assert proc.returncode != 0, out
+    # issue 1008 reopen: the cam2 steady-state handoff + dead-man arm come right after the painter is
+    # verified, before any OBS step (a failing OBS check must never strand the 2 h transient painter)
     order = [_at(ran, s) for s in ("resolve_marker_device", "painter_launch_remote", "verify_marker_device_monitor",
-                                   "toggle_burn test", "enforce_strih_ndi_mapping",
                                    "cam2_painter_steady_state_handoff_cmds", "cam2_painter_deadman_arm_cmds",
+                                   "toggle_burn test", "enforce_strih_ndi_mapping",
                                    "print_genlock_relaunch_note test")]
     assert order == sorted(order), "\n".join(ran)
     # the healthy box was disabled inside its window and closed read-only
@@ -213,6 +217,27 @@ def test_test_failed_relay_close_still_runs_the_painter_steps_then_fails(tmp_pat
     assert f"cam1 ({SOURCE_IP})" in result[0] and WRITER in result[0], result[0]
     assert "WHOLE CHAIN verified" not in out, "a failed relay step must not end on the success verdict:\n" + out
 
+
+
+# issue 1008 reopen (11.10.2026): cam1 was off, strih's 'Cam 1' rendered black and the #901 optical
+# check exited BEFORE the handoff, so the 2 h transient painter expired and the QPSK marker stopped.
+# Every OBS-side step that can end the run comes after the cam2 handoff + dead-man arm.
+_OBS_STEPS_THAT_CAN_EXIT = ("toggle_burn", "enforce_strih_ndi_mapping", "set_imag_test_program",
+                            "verify_stream_program_dev", "resolve_and_burn_rendered_inputs",
+                            "verify_optical_qr_visible", "verify_mbc_dante_transport",
+                            "verify_measurement_audio_arrives", "park_stream_program_dev")
+
+
+@pytest.mark.parametrize("failing_step", _OBS_STEPS_THAT_CAN_EXIT)
+def test_test_a_failed_obs_chain_check_never_skips_the_cam2_painter_handoff_1008(tmp_path, failing_step):
+    extra = f'{failing_step}() {{ _stub_step {failing_step} "$@"; exit 1; }}'
+    proc, ran, _boxes, _sent = _run(tmp_path, "test", enabled=True, extra=extra)
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, out
+    assert "WHOLE CHAIN verified" not in out, out
+    handoff = _at(ran, "cam2_painter_steady_state_handoff_cmds")
+    assert _at(ran, "verify_marker_device_monitor") < handoff < _at(ran, "cam2_painter_deadman_arm_cmds"), "\n".join(ran)
+    assert _at(ran, "cam2_painter_deadman_arm_cmds") < _at(ran, failing_step), "\n".join(ran)
 
 def test_test_with_every_relay_box_healthy_passes(tmp_path):
     proc, _ran, _boxes, _sent = _run(tmp_path, "test", enabled=True)
