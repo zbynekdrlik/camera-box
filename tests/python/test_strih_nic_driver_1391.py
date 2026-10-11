@@ -1031,6 +1031,14 @@ def test_grade_fails_the_new_strih_lx_nic_below_10g(tmp_path, link):
     assert _states(rows)["(nic-link)"] == "FAIL", rows
 
 
+def test_a_slow_10g_link_names_the_10gbase_t_cable(tmp_path):
+    # issue 1411 review: the link FAIL named only "5GBASE-T needs Cat6", wrong advice for a 10 GbE box
+    rows = PcieSysfs(tmp_path, link="5000").grade()
+    link = [d for s, d in rows if d.startswith("(nic-link)")]
+    assert "Ethernet link 5000 Mb/s < 10000" in link[0], rows
+    assert "10GBASE-T needs Cat6a" in link[0], rows
+
+
 def test_grade_fails_the_new_strih_lx_profile_pinned_to_the_onboard_nic(tmp_path):
     rows = PcieSysfs(tmp_path, nm="u-1|strih-lan|enp2s0|10.77.9.202/23\n").grade()
     assert _states(rows)["(nic-nm)"] == "FAIL", rows
