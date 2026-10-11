@@ -810,6 +810,7 @@ case "$args" in
   "-g connection.id connection show "*) awk -F'|' -v u="${args##* }" '$1 == u { print $2 }' "$FAKE_NM" ;;
   "-g connection.interface-name connection show "*) awk -F'|' -v u="${args##* }" '$1 == u { print $3 }' "$FAKE_NM" ;;
   "-g ipv4.addresses connection show "*) awk -F'|' -v u="${args##* }" '$1 == u { print $4 }' "$FAKE_NM" ;;
+  "-g ethtool.ring-rx connection show "*) awk -F'|' -v u="${args##* }" '$1 == u { print $5 }' "$FAKE_NM" ;;
   *) echo "fake nmcli: $args" >&2; exit 2 ;;
 esac
 '''
@@ -1121,3 +1122,48 @@ def test_the_step_and_item_carry_no_box_identity_literal():
     for path in (SETUP, VERIFY):
         for line in _code_lines(path):
             assert "r8152" not in line, (path.name, line)
+
+
+# --- issue 1411: ethtool.ring-rx on the atlantic rig NIC is a link-flap loop ------------------------
+# Live 11.10.2026 on the new strih notebook: the NM profile carried ethtool.ring-rx 4096 (the RTL8157-era
+# operator note). On every link-up NetworkManager re-applied it, the atlantic driver reset the NIC on the
+# ring change and the 10 GbE link dropped one second later -- 2744 flaps in the first hours, the box off
+# 10.77.9.202. Removing the setting held the link at once.
+
+@pytest.mark.parametrize("drv,ring,fails", [
+    ("atlantic", "4096", True), ("atlantic", "", False), ("r8152", "4096", False), ("r8169", "2048", False)])
+def test_ring_verdict_fails_only_a_ring_override_on_atlantic_1411(drv, ring, fails):
+    r = _bash('strih_nic_nm_ring_verdict "$D" strih-lan "$R"', env={"D": drv, "R": ring})
+    if fails:
+        assert r.returncode == 1, r
+        assert r.stdout.startswith("FAIL|(nic-ring)"), r.stdout
+        assert "ethtool.ring-rx" in r.stdout and "strih-lan" in r.stdout, r.stdout
+    else:
+        assert r.returncode == 0 and r.stdout == "", r
+
+
+def test_grade_fails_a_ring_override_on_the_atlantic_profile_1411(tmp_path):
+    rows = PcieSysfs(tmp_path, nm="u-1|strih-lan|enp7s0|10.77.9.202/23|4096\n").grade()
+    assert _states(rows)["(nic-ring)"] == "FAIL", rows
+
+
+def test_grade_prints_no_ring_row_without_an_override_1411(tmp_path):
+    rows = PcieSysfs(tmp_path).grade()
+    assert "(nic-ring)" not in _states(rows), rows
+
+
+@pytest.mark.parametrize("drv,want,banned", [
+    ("r8152", "set ethtool.ring-rx 4096", "never"),
+    ("atlantic", "never set ethtool.ring-rx", "ring-rx 4096"),
+    ("r8169", "", "ring-rx")])
+def test_step1_ring_note_follows_the_nic_driver_1411(drv, want, banned):
+    r = _bash('strih_nic_ring_note "$D"', env={"D": drv})
+    assert r.returncode == 0, r
+    assert want in r.stdout and banned not in r.stdout, r.stdout
+
+
+def test_setup_step1_prints_the_driver_ring_note_1411():
+    text = SETUP.read_text()
+    assert 'strih_nic_ring_note "$(strih_lx_nic_driver)"' in text
+    assert "set ethtool.ring-rx 4096 --" not in text
+
