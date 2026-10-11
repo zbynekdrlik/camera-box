@@ -70,8 +70,11 @@ error() { echo -e "${RED}[ERROR]${NC} $1" >&2; exit 1; }
 
 # imag_layer_chain CASPER_DIR SECUREBOOT_STATE -> ordered squashfs layer paths, LOWEST FIRST.
 #
-# The install chain is minimal -> minimal.standard (+ the enhanced-secureboot delta on top when
-# Secure Boot is enabled). DELIBERATELY excluded: `*.live.squashfs` (the live session itself —
+# The install chain is minimal -> minimal.standard, whatever the Secure Boot state. DELIBERATELY
+# excluded: `minimal.standard.enhanced-secureboot.squashfs` (issue 1412: Ubuntu's TPM-backed FDE
+# variant, boot managed by snapd; its boot-managed-by-snapd package conflicts with grub-efi-amd64, so
+# the chroot GRUB install failed on stream-pp with Secure Boot on; Secure Boot is served by the
+# shim-signed + grub-efi-amd64-signed chain the chroot installs), `*.live.squashfs` (the live session itself —
 # casper + the `ubuntu` user; installing it is the classic "my install is just a live clone" bug),
 # every per-language delta (`minimal.de.squashfs`, `minimal.standard.fr.squashfs`, …) and the
 # `minimal.enhanced-secureboot.squashfs` branch (a delta on `minimal`, not on `minimal.standard`
@@ -88,10 +91,8 @@ imag_layer_chain() {
         [ -f "$f" ] || { echo "imag_layer_chain: required layer missing: $f" >&2; return 3; }
     done
     printf '%s\n%s\n' "$base" "$std"
-
     if [ "$sb" = "enabled" ]; then
-        [ -f "$sbl" ] || { echo "imag_layer_chain: Secure Boot is on but layer missing: $sbl" >&2; return 3; }
-        printf '%s\n' "$sbl"
+        echo "imag_layer_chain: Secure Boot on -- the signed shim + grub chain, not ${sbl##*/}" >&2
     fi
 }
 
