@@ -65,7 +65,7 @@ def test_the_fleet_carries_every_dantesync_node_including_the_audio_vlan(tmp_pat
     assert r.returncode == 0, r.stderr
     names = [ln.split("|")[0] for ln in r.stdout.split()]
     assert names == ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7", "dev1", "strih-lx",
-                     "stream", "resolume", "mbc", "fohabl"]
+                     "stream", "resolume", "mbc", "fohabl", "strih-pp", "stream-pp", "resolume-pp"]
     rows = {ln.split("|")[0]: ln for ln in r.stdout.split()}
     assert rows["mbc"] == "mbc|10.77.7.232|windows|audio|always|-|"
     assert rows["fohabl"] == "fohabl|10.77.7.30|windows|audio|always|master|DANTESYNC_FOHABL_SSH_PASS"
@@ -146,9 +146,10 @@ def test_version_gate_arms(tmp_path):
     r = _bash(tmp_path, 'echo "L=$(dantesync_fleet_spec linux op)"; echo "W=$(dantesync_fleet_spec win op)";'
                         ' echo "D=$(dantesync_fleet_spec local op)"')
     out = dict(ln.split("=", 1) for ln in r.stdout.splitlines())
-    assert out["L"].split() == [f"cam{n}=root@10.77.9.6{n}" for n in range(1, 8)] + ["strih-lx=op@10.77.9.202"]
+    assert out["L"].split() == [f"cam{n}=root@10.77.9.6{n}" for n in range(1, 8)] + [
+        "strih-lx=op@10.77.9.202", "strih-pp=op@strih-pp.lan", "stream-pp=op@stream-pp.lan"]
     assert out["W"].split() == ["stream=op@10.77.9.204", "resolume=op@resolume.lan",
-                                "mbc=op@10.77.7.232", "fohabl=master@10.77.7.30"]
+                                "mbc=op@10.77.7.232", "fohabl=master@10.77.7.30", "resolume-pp=op@resolume-pp.lan"]
     assert out["D"] == "dev1"
 
 

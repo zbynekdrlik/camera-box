@@ -197,7 +197,7 @@ def test_upgrade_names_the_fleet_ntp_master_without_the_fleet_flag(tmp_path):
     mode; an explicit NTP_MASTER / DANTESYNC_NTP_MASTER_NAME still wins."""
     r = _source_upgrade(tmp_path, 'echo "D=[$(dantesync_upgrade_default_master "")]";'
                                   ' echo "G=[$(dantesync_upgrade_default_master other)]"')
-    assert "D=[strih-lx]" in r.stdout, r.stdout + r.stderr
+    assert "D=[strih-lx strih-pp]" in r.stdout, r.stdout + r.stderr  # issue 1412: every venue master
     assert "G=[other]" in r.stdout, r.stdout + r.stderr
     src = _UPGRADE.read_text()
     assert 'NTP_MASTER="$(dantesync_upgrade_default_master "$_NTP_MASTER_GIVEN")"' in src

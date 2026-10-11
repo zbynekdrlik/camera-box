@@ -70,6 +70,7 @@ def _run_dry(tmp_path, by_ip, **env):
     e = {k: v for k, v in os.environ.items() if not k.startswith(("DANTE_CLOCK_", "DANTESYNC_", "OBS_FLEET"))}
     e.update({
         "DANTE_CLOCK_LOCAL_NODES": "", "DANTE_CLOCK_CAM_NODES": "", "DANTE_CLOCK_OBS_NODES": "",
+        "DANTE_CLOCK_REACH_NODES": "",  # issue 1412: the PP nodes' reach probe stays out of these runs
         "DANTE_CLOCK_FETCH_CMD": str(fetch), "DANTE_CLOCK_BOX_UP_CMD": str(boxup),
         "DANTE_CLOCK_MGMT_SSH_CMD": str(mgmt),
         "RIG_GRANDMASTER_IP": VIDEO_GM, "DANTE_CLOCK_CONFIRM_THRESHOLD": "1",
