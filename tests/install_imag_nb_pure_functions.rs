@@ -237,6 +237,36 @@ fn nm_keyfile_pins_the_static_address() {
     );
 }
 
+/// issue 1412: the chroot installed linux-generic-hwe-26.04 7.0.0-30 while the archive already had
+/// 7.0.0-38, and the lowlatency config meta exists ONLY at 7.0.0-38, so setup's step 11 failed on
+/// every fresh box (new strih notebook, stream-pp, strih-pp). The kernel meta version is the newest
+/// one its lowlatency twin also has.
+#[test]
+fn kernel_meta_version_is_the_newest_the_lowlatency_meta_also_has_1412() {
+    let cases = [
+        ("7.0.0-38.38\n7.0.0-30.30", "7.0.0-38.38", "7.0.0-38.38"),
+        (
+            "7.0.0-40.40\n7.0.0-38.38\n7.0.0-30.30",
+            "7.0.0-38.38\n7.0.0-30.30",
+            "7.0.0-38.38",
+        ),
+        ("7.0.0-30.30", "", ""),
+        ("7.0.0-30.30", "7.0.0-38.38", ""),
+    ];
+    for (meta, ll, want) in cases {
+        let (code, out, err) = run_sourced(&format!(
+            "imag_kernel_meta_version \"$(printf '{meta}')\" \"$(printf '{ll}')\""
+        ));
+        assert_eq!(code, 0, "{meta} / {ll}: {err}");
+        assert_eq!(out.trim(), want, "{meta} / {ll}");
+    }
+    let chroot = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        chroot.contains("imag_kernel_meta_version \"\\$meta_vers\" \"\\$ll_vers\""),
+        "the chroot must pick the kernel meta version through imag_kernel_meta_version"
+    );
+}
+
 /// issue 1412: the NetworkManager profile is named after the box (`<hostname up to the first ->-lan`),
 /// never the imag literal: stream-pp came up with an `imag-lan` profile and the owner asked why.
 #[test]
