@@ -1606,13 +1606,13 @@ Wants=network.target
 
 [Service]
 Type=simple
-# Sync to the cluster master strih (10.77.9.202), NOT the dantesync binary's default public NTP
-# pool (sk.pool.ntp.org / time.cloudflare.com) — every node must discipline its clock to the SAME
-# reference or the wall-clock genlock in src/ndi.rs silently diverges across cameras (#8). Use the
-# IP, not strih.lan: per CLAUDE.md/targets.md .lan DNS may not resolve on a freshly-provisioned
-# read-only-rootfs camera, and a failed resolve makes dantesync fall back to its public-pool
-# default and silently desync — the exact regression #8 guards against.
-ExecStart=/usr/local/bin/dantesync --ntp-server 10.77.9.202
+# Sync to the venue's strih by NAME (strih.lan: strih-lx in SNV, strih-pp in Poprad), NOT the
+# dantesync binary's default public NTP pool -- every node must discipline its clock to the SAME
+# reference or the wall-clock genlock in src/ndi.rs silently diverges across cameras (#8). Issue 1412:
+# the old literal SNV IP left every Poprad cambox with no NTP at all (cam7 ~150 s off strih-pp). The
+# CLI value is resolved on every query, so an unresolvable name is a counted NTP failure, never a
+# public-pool fallback, and it recovers once DNS answers.
+ExecStart=/usr/local/bin/dantesync --ntp-server strih.lan
 Restart=always
 RestartSec=5
 StandardOutput=journal

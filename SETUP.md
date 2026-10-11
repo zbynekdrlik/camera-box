@@ -121,13 +121,14 @@ NOT genlocked. So cluster clock sync is a hard prerequisite, not an optimization
 
 - **DanteSync** is the chosen mechanism (chosen over plain chrony/NTP because the broadcast rig
   needs sub-ms, PTP-grade alignment, and DanteSync already disciplines the Windows OBS boxes).
-- **Master / reference clock: strih = `10.77.9.202`** (the DanteTime master; NTP anchor + PTP
-  fine servo). The setup scripts use the **IP, not `strih.lan`**: per `CLAUDE.md`/`targets.md`,
-  `.lan` DNS may not resolve on a freshly-provisioned read-only-rootfs camera, and a failed
-  resolve makes dantesync fall back to its public-pool default and silently desync.
-- Every Linux camera runs `dantesync --ntp-server 10.77.9.202` as an enabled systemd service,
+- **Master / reference clock: the venue's strih, `strih.lan`** (the DanteTime master; NTP anchor
+  + PTP fine servo): strih-lx `10.77.9.202` in SNV, strih-pp `10.77.8.202` in Poprad. The setup
+  script uses the **name, not an IP** (issue 1412): the SNV literal left every Poprad camera with no
+  NTP at all. dantesync resolves its `--ntp-server` value on every query, so an unresolvable name is
+  a counted NTP failure (never a public-pool fallback) and recovers once DNS answers.
+- Every Linux camera runs `dantesync --ntp-server strih.lan` as an enabled systemd service,
   written by `scripts/setup-device.sh` so it survives the read-only rootfs
-  and a reboot. **The `--ntp-server 10.77.9.202` arg is essential** — a bare `dantesync` defaults
+  and a reboot. **The `--ntp-server` arg is essential** — a bare `dantesync` defaults
   to a *public* NTP pool (e.g. `time.cloudflare.com`), which would discipline the camera to a
   clock *different* from the rest of the cluster and break genlock. Do not hand-edit the unit; fix
   the setup script (Script Failure Policy).
