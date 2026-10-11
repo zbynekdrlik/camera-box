@@ -1764,7 +1764,7 @@ do_event() {
   [ "$_stray_rc" -eq 0 ] || _obs_failed="kontrola zabudnutých nahrávok"
   [ "$_burn_rc" -eq 0 ] || _obs_failed="${_obs_failed:+$_obs_failed, }vypnutie meracích QR (burn)"
   [ "$_ndimap_rc" -eq 0 ] || _obs_failed="${_obs_failed:+$_obs_failed, }nastavenie NDI kamier na strihu"
-  [ -z "$_obs_failed" ] || event_mode_discord_note_add "${EVENT_ASSERT_DISCORD_MSG_PATH:-}" "⚠️ Prepnutie do EVENT: na OBS boxoch sa nepodarilo: ${_obs_failed}. Strih alebo stream asi nebol dosiahnuteľný. Ostatné kroky prepnutia prebehli, výsledok kontroly je nižšie. Napíš Claudovi, nech to skontroluje." top
+  [ -z "$_obs_failed" ] || event_mode_discord_note_add "${EVENT_ASSERT_DISCORD_MSG_PATH:-}" "⚠️ Prepnutie do EVENT: na OBS boxoch sa nepodarilo: ${_obs_failed}. Niektorý OBS box (strih, stream alebo imag) asi nebol dosiahnuteľný. Ostatné kroky prepnutia prebehli, výsledok kontroly je nižšie. Napíš Claudovi, nech to skontroluje." top
   echo "=================================================================================="
   echo
   # #724: send the Discord confirmation on BOTH outcomes (pass=confirmation, fail=warning naming
