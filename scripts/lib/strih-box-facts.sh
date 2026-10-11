@@ -36,7 +36,8 @@ strih_box_fact_keys() {
     STRIH_NIC_OOT_DRIVER STRIH_NIC_MIN_USB_MBPS STRIH_NIC_MIN_LINK_MBPS \
     STRIH_OBS_PROFILE STRIH_OBS_COLLECTION \
     STRIH_NDI_RUNTIME_PEER STRIH_COMPANION_HOST STRIH_CG_SENDER STRIH_CAMERAS \
-    STRIH_HDMI_OUTPUT_BACKEND
+    STRIH_HDMI_OUTPUT_BACKEND \
+    STRIH_ROLE STRIH_DANTE_GM STRIH_PROGRAM_AUDIO_SAMPLER
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -185,6 +186,19 @@ strih_box_validate() {
   case "${f[STRIH_HDMI_OUTPUT_BACKEND]}" in
     lease | vk-direct) ;;
     *) echo "strih-box ${name}: STRIH_HDMI_OUTPUT_BACKEND '${f[STRIH_HDMI_OUTPUT_BACKEND]}' must be lease or vk-direct" >&2; bad=1 ;;
+  esac
+  # issue 1412: the box ROLE (strih = the cutter, stream = the stream OBS box), the PTP grandmaster the
+  # dantesync config allows (setup-strih step 2 writes it into a FRESH box's /etc/dantesync/config.json)
+  # and whether the box runs the YouTube-guard program-audio sampler (setup-strih step 16e / verify 41).
+  case "${f[STRIH_ROLE]}" in
+    strih | stream) ;;
+    *) echo "strih-box ${name}: STRIH_ROLE '${f[STRIH_ROLE]}' must be strih or stream" >&2; bad=1 ;;
+  esac
+  _strih_box_host "${f[STRIH_DANTE_GM]}" \
+    || { echo "strih-box ${name}: STRIH_DANTE_GM '${f[STRIH_DANTE_GM]}' is not a host name / address (the PTP grandmaster)" >&2; bad=1; }
+  case "${f[STRIH_PROGRAM_AUDIO_SAMPLER]}" in
+    on | off) ;;
+    *) echo "strih-box ${name}: STRIH_PROGRAM_AUDIO_SAMPLER '${f[STRIH_PROGRAM_AUDIO_SAMPLER]}' must be on or off" >&2; bad=1 ;;
   esac
   if [[ ! "${f[STRIH_CAMERAS]}" =~ ^[1-9][0-9]*( [1-9][0-9]*)*$ ]]; then
     echo "strih-box ${name}: STRIH_CAMERAS '${f[STRIH_CAMERAS]}' must be space-separated camera numbers (1, 2, ... no leading zero)" >&2; bad=1
@@ -362,6 +376,23 @@ strih_lx_cg_sender() {
   c="$(strih_box_fact STRIH_CG_SENDER)" || return 1
   [ "$c" = none ] || printf '%s' "$c"
 }
+
+# strih_box_role -> the box's role (fact STRIH_ROLE: strih | stream, issue 1412).
+strih_box_role() { strih_box_fact STRIH_ROLE; }
+
+# strih_lx_dante_gm -> the PTP grandmaster host the box's dantesync config allows (fact STRIH_DANTE_GM;
+# RIG_GRANDMASTER_IP overrides it for one run, the same override every rig grandmaster read honours).
+strih_lx_dante_gm() {
+  if [ -n "${RIG_GRANDMASTER_IP:-}" ]; then
+    printf '%s' "$RIG_GRANDMASTER_IP"
+  else
+    strih_box_fact STRIH_DANTE_GM
+  fi
+}
+
+# strih_lx_program_audio_sampler -> on | off: whether setup-strih step 16e installs (and verify-strih
+# item 41 grades) the YouTube-guard program-audio sampler (fact STRIH_PROGRAM_AUDIO_SAMPLER, issue 1412).
+strih_lx_program_audio_sampler() { strih_box_fact STRIH_PROGRAM_AUDIO_SAMPLER; }
 
 # strih_lx_hdmi_output_backend -> how the box's fixed HDMI output leaves the X desktop (fact
 # STRIH_HDMI_OUTPUT_BACKEND: lease | vk-direct), written into ~/.camera-box/drm-output.json (issue 1346).

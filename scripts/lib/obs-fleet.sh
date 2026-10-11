@@ -134,10 +134,17 @@
 # so its home-check is `retired` -- obs_fleet_is_home imag is FALSE and obs_fleet_boxes drops it
 # from genlock-lock (and any future facet) automatically. The row + its history are KEPT because the
 # IMAG role returns on a NEW notebook next year; re-provisioning re-flips this ONE word to `always`.
+# issue 1412: the two Poprad boxes, reinstalled as Linux OBS boxes on 11.10.2026 -- strih-pp (the PP
+# strih, scripts/strih-boxes/strih-pp.env) and stream-pp (the PP stream box). They dial their NAMES:
+# dev1 reaches the PP LAN as 10.76.8.x through the companion-pp subnet router while the boxes carry
+# 10.77.8.x, so an IP row would never match the box's own STRIH_IP. `traveling` (polled only while
+# their OBS-WS answers) and in NO facet yet: no dev1 watchdog polls or pages them until a facet adds them.
 OBS_FLEET="${OBS_FLEET:-strih-lx|10.77.9.202|linux-genlock|always
 stream|10.77.9.204|windows-genlock|always
 imag|10.77.9.182|linux-genlock|retired
-resolume|resolume.lan|windows-genlock|traveling}"
+resolume|resolume.lan|windows-genlock|traveling
+strih-pp|strih-pp.lan|linux-genlock|traveling
+stream-pp|stream-pp.lan|linux-genlock|traveling}"
 
 # _obs_fleet_entry <name> -> prints the whole `name|host|class|home-check` row for NAME on stdout and
 # returns 0; returns 1 (no output) for an unknown name. Word-exact on the leading `name|` so a

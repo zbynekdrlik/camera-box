@@ -832,54 +832,62 @@ strih_session_apps_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newl
 
 # 41) issue 1404 stream program-audio sampler (scripts/lib/strih-program-audio.sh): its files + E-core unit
 #     installed and enabled, its decoder shim current, its :8891 endpoint answering while it runs.
-strih_program_audio_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(program-audio) the grader did not print all of its rows"
+if WHY="$(obs_box_step_applies 16e)"; then   # issue 1412: only a box that runs the sampler grades it
+  strih_program_audio_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(program-audio) the grader did not print all of its rows"
+else
+  note "(program-audio) not graded: ${WHY}"
+fi
 
 # 16) NIC xhci IRQ affinity (issue 1317 item H): the USB-NIC's xhci interrupt must be pinned to a
 #     SINGLE E-core (>= the first cpu_atom cpu) so its NET_RX softirq never shares an OBS core, AND
 #     that IRQ's /proc/interrupts counter must be ADVANCING over a live 2-s window (NEVER a static
 #     file check -- a smp_affinity_list read alone is a lying gate). Read-only, drain-safe, fail loud.
-IRQ_TARGET_IP="${STRIH_LX_TARGET_IP:-$(strih_lx_ip)}"
-IRQ_IFACE="${STRIH_NIC_IFACE:-}"
-if [ -z "$IRQ_IFACE" ]; then
-  # driver-first (the box's STRIH_NIC_DRIVER fact -- strih-lx: the r8152 USB NIC), then fall back to
-  # the address match; MULTI -> NOTE + no iface.
-  IRQ_DRV="$(strih_nic_iface_by_driver /sys "$(strih_lx_nic_driver)" 2>/dev/null || true)"
-  case "$IRQ_DRV" in
-    MULTI:*) note "  multiple $(strih_lx_nic_driver) NICs (${IRQ_DRV#MULTI:}) -- set STRIH_NIC_IFACE"; IRQ_IFACE="" ;;
-    "")      IRQ_IFACE="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$IRQ_TARGET_IP" 'BEGIN { gsub(/\./, "\\.", ip) } $4 ~ ("^" ip "/") { print $2; exit }' || true)" ;;
-    *)       IRQ_IFACE="$IRQ_DRV" ;;
-  esac
-fi
-IRQ_PCIFN=""; [ -n "$IRQ_IFACE" ] && IRQ_PCIFN="$(strih_nic_xhci_pci_function /sys "$IRQ_IFACE" 2>/dev/null || true)"
-IRQ_NUMS="";  [ -n "$IRQ_PCIFN" ] && IRQ_NUMS="$(strih_nic_xhci_irqs /proc/interrupts "$IRQ_PCIFN" 2>/dev/null || true)"
-if [ -z "$IRQ_IFACE" ] || [ -z "$IRQ_PCIFN" ] || [ -z "$IRQ_NUMS" ]; then
-  bad "NIC xhci IRQ affinity: could not resolve the xhci IRQ (iface='${IRQ_IFACE}' pcifn='${IRQ_PCIFN}' irqs='${IRQ_NUMS}')"
-else
-  ATOM_FIRST="$(strih_cpulist_min "$(cat /sys/devices/cpu_atom/cpus 2>/dev/null || true)" 2>/dev/null || true)"
-  # On this hybrid box cpu_atom is a stable kernel file; if it is unreadable the verdict skips the
-  # E-core floor (>= first cpu_atom) and enforces only single-cpu placement -- surface that so a
-  # low-P-core pin can't read "ok" silently on a transient cpu_atom read failure.
-  [ -n "$ATOM_FIRST" ] || note "  cpu_atom unreadable -- E-core floor check skipped (single-cpu placement still enforced)"
-  irq_all_ok=1
-  for irqn in $IRQ_NUMS; do
-    AFF="$(cat "/proc/irq/${irqn}/smp_affinity_list" 2>/dev/null || true)"
-    VERD="$(strih_nic_irq_affinity_verdict "$AFF" "$ATOM_FIRST" 2>/dev/null || true)"
-    C1="$(strih_irq_total_count /proc/interrupts "$irqn" 2>/dev/null || true)"
-    sleep 2
-    C2="$(strih_irq_total_count /proc/interrupts "$irqn" 2>/dev/null || true)"
-    ADV=no; strih_counter_advanced "$C1" "$C2" && ADV=yes || true
-    if [ "$VERD" = ok ] && [ "$ADV" = yes ]; then
-      : # this IRQ passes both the single-E-core placement and the advancing-counter liveness
-    else
-      irq_all_ok=0
-      note "  IRQ ${irqn}: affinity='${AFF}' verdict=${VERD} advancing=${ADV} (want a single cpu >= ${ATOM_FIRST}, advancing)"
-    fi
-  done
-  if [ "$irq_all_ok" = 1 ]; then
-    ok "NIC xhci IRQ(s) [${IRQ_NUMS}] pinned to a single E-core (>= cpu ${ATOM_FIRST}) and advancing (iface ${IRQ_IFACE})"
-  else
-    bad "NIC xhci IRQ affinity FAILED (iface ${IRQ_IFACE}, irqs ${IRQ_NUMS}): each must be a single cpu >= first cpu_atom (${ATOM_FIRST}) AND advancing over 2 s"
+if WHY="$(obs_box_step_applies 11b)"; then   # issue 1412: a PCIe rig NIC has no xhci IRQ to grade
+  IRQ_TARGET_IP="${STRIH_LX_TARGET_IP:-$(strih_lx_ip)}"
+  IRQ_IFACE="${STRIH_NIC_IFACE:-}"
+  if [ -z "$IRQ_IFACE" ]; then
+    # driver-first (the box's STRIH_NIC_DRIVER fact -- strih-lx: the r8152 USB NIC), then fall back to
+    # the address match; MULTI -> NOTE + no iface.
+    IRQ_DRV="$(strih_nic_iface_by_driver /sys "$(strih_lx_nic_driver)" 2>/dev/null || true)"
+    case "$IRQ_DRV" in
+      MULTI:*) note "  multiple $(strih_lx_nic_driver) NICs (${IRQ_DRV#MULTI:}) -- set STRIH_NIC_IFACE"; IRQ_IFACE="" ;;
+      "")      IRQ_IFACE="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$IRQ_TARGET_IP" 'BEGIN { gsub(/\./, "\\.", ip) } $4 ~ ("^" ip "/") { print $2; exit }' || true)" ;;
+      *)       IRQ_IFACE="$IRQ_DRV" ;;
+    esac
   fi
+  IRQ_PCIFN=""; [ -n "$IRQ_IFACE" ] && IRQ_PCIFN="$(strih_nic_xhci_pci_function /sys "$IRQ_IFACE" 2>/dev/null || true)"
+  IRQ_NUMS="";  [ -n "$IRQ_PCIFN" ] && IRQ_NUMS="$(strih_nic_xhci_irqs /proc/interrupts "$IRQ_PCIFN" 2>/dev/null || true)"
+  if [ -z "$IRQ_IFACE" ] || [ -z "$IRQ_PCIFN" ] || [ -z "$IRQ_NUMS" ]; then
+    bad "NIC xhci IRQ affinity: could not resolve the xhci IRQ (iface='${IRQ_IFACE}' pcifn='${IRQ_PCIFN}' irqs='${IRQ_NUMS}')"
+  else
+    ATOM_FIRST="$(strih_cpulist_min "$(cat /sys/devices/cpu_atom/cpus 2>/dev/null || true)" 2>/dev/null || true)"
+    # On this hybrid box cpu_atom is a stable kernel file; if it is unreadable the verdict skips the
+    # E-core floor (>= first cpu_atom) and enforces only single-cpu placement -- surface that so a
+    # low-P-core pin can't read "ok" silently on a transient cpu_atom read failure.
+    [ -n "$ATOM_FIRST" ] || note "  cpu_atom unreadable -- E-core floor check skipped (single-cpu placement still enforced)"
+    irq_all_ok=1
+    for irqn in $IRQ_NUMS; do
+      AFF="$(cat "/proc/irq/${irqn}/smp_affinity_list" 2>/dev/null || true)"
+      VERD="$(strih_nic_irq_affinity_verdict "$AFF" "$ATOM_FIRST" 2>/dev/null || true)"
+      C1="$(strih_irq_total_count /proc/interrupts "$irqn" 2>/dev/null || true)"
+      sleep 2
+      C2="$(strih_irq_total_count /proc/interrupts "$irqn" 2>/dev/null || true)"
+      ADV=no; strih_counter_advanced "$C1" "$C2" && ADV=yes || true
+      if [ "$VERD" = ok ] && [ "$ADV" = yes ]; then
+        : # this IRQ passes both the single-E-core placement and the advancing-counter liveness
+      else
+        irq_all_ok=0
+        note "  IRQ ${irqn}: affinity='${AFF}' verdict=${VERD} advancing=${ADV} (want a single cpu >= ${ATOM_FIRST}, advancing)"
+      fi
+    done
+    if [ "$irq_all_ok" = 1 ]; then
+      ok "NIC xhci IRQ(s) [${IRQ_NUMS}] pinned to a single E-core (>= cpu ${ATOM_FIRST}) and advancing (iface ${IRQ_IFACE})"
+    else
+      bad "NIC xhci IRQ affinity FAILED (iface ${IRQ_IFACE}, irqs ${IRQ_NUMS}): each must be a single cpu >= first cpu_atom (${ATOM_FIRST}) AND advancing over 2 s"
+    fi
+  fi
+else
+  note "NIC xhci IRQ affinity not graded: ${WHY}"
 fi
 
 # 36) rig NIC driver version, USB Gen 2 link, 5G link, NM pinning vs the box facts (issue 1391, strih-nic-driver.sh).

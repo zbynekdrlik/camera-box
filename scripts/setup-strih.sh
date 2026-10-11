@@ -134,7 +134,8 @@ step 2 "DanteSync ${DS_ROLE} (single timesync authority; post-M4 the notebook is
 for svc in systemd-timesyncd chrony chronyd ntp ntpsec; do
   systemctl disable --now "$svc" 2>/dev/null || true
 done
-[ -x /usr/local/bin/dantesync ] || warn "  dantesync binary absent -- install it (see setup-imag.sh step 3 / dantesync-fleet-upgrade.md) before go-live"
+# issue 1412 (G5): a FRESH box gets the pinned binary + the role config (strih-lx keeps its own; never rewritten).
+dantesync_install "$DS_ROLE" "$(strih_lx_dante_gm)" || fail "dantesync binary/config install failed (above)"
 # role -> args: server = bare (NTP master), client = --ntp-server <upstream fact>.
 DS_ARGS="$(strih_lx_dantesync_args)" || fail "dantesync role '${DS_ROLE}' needs STRIH_DANTESYNC_UPSTREAM in the box facts"
 # Fail-closed self-check (the guard BEFORE install): the role+args must be a COHERENT invocation --
@@ -645,16 +646,21 @@ step "11b" "NIC xhci IRQ off the OBS cores (issue 1317 item H: NET_RX softirq mu
 # placement FROM FACTS (iface -> xhci -> IRQ -> last cpu_atom E-core) and writes smp_affinity_list --
 # never a hard-coded IRQ number, so it survives a different IRQ after a kernel/firmware/USB-port
 # change. ENABLE-ONLY: the supervisor applies it live; the unit re-applies it at every boot.
-install -d -m 755 /usr/local/bin
-strih_nic_irq_affinity_script_text > /usr/local/bin/strih-nic-irq-affinity.sh \
-  || fail "could not write /usr/local/bin/strih-nic-irq-affinity.sh"
-chmod 0755 /usr/local/bin/strih-nic-irq-affinity.sh
-[ -f "${HERE}/../systemd/strih-nic-irq-affinity.service" ] || fail "systemd/strih-nic-irq-affinity.service not found next to this script"
-install -m 0644 "${HERE}/../systemd/strih-nic-irq-affinity.service" /etc/systemd/system/strih-nic-irq-affinity.service
-systemctl daemon-reload 2>/dev/null || true
-systemctl enable strih-nic-irq-affinity.service 2>/dev/null \
-  || warn "  enable strih-nic-irq-affinity.service by hand (systemctl enable)"
-echo "  strih-nic-irq-affinity.service installed + enabled (applies at next boot / supervisor runs it live)"
+# issue 1412 (G7): only a USB rig NIC has an xhci IRQ to place (scripts/lib/obs-box-role.sh).
+if WHY="$(obs_box_step_applies 11b)"; then
+  install -d -m 755 /usr/local/bin
+  strih_nic_irq_affinity_script_text > /usr/local/bin/strih-nic-irq-affinity.sh \
+    || fail "could not write /usr/local/bin/strih-nic-irq-affinity.sh"
+  chmod 0755 /usr/local/bin/strih-nic-irq-affinity.sh
+  [ -f "${HERE}/../systemd/strih-nic-irq-affinity.service" ] || fail "systemd/strih-nic-irq-affinity.service not found next to this script"
+  install -m 0644 "${HERE}/../systemd/strih-nic-irq-affinity.service" /etc/systemd/system/strih-nic-irq-affinity.service
+  systemctl daemon-reload 2>/dev/null || true
+  systemctl enable strih-nic-irq-affinity.service 2>/dev/null \
+    || warn "  enable strih-nic-irq-affinity.service by hand (systemctl enable)"
+  echo "  strih-nic-irq-affinity.service installed + enabled (applies at next boot / supervisor runs it live)"
+else
+  echo "  SKIP: ${WHY}"; systemctl disable strih-nic-irq-affinity.service 2>/dev/null || true
+fi
 
 # ---------------------------------------------------------------------------------------------
 AUDIO_NAME="$(strih_lx_audio_input_name)"
@@ -712,11 +718,9 @@ install -Dm644 "${HERE}/../systemd/intercom-hub.service" /etc/systemd/system/int
 install -Dm644 "${HERE}/../$(strih_lx_intercom_config)" /etc/intercom-hub/intercom.toml
 systemctl daemon-reload
 systemctl enable intercom-hub 2>/dev/null || warn "  could not enable intercom-hub.service"
-if [ -x /usr/local/bin/intercom-hub ]; then
-  echo "  intercom-hub.service installed + enabled (NOT started -- M4 cut-over starts it); /etc/intercom-hub/intercom.toml in place; binary present"
-else
-  warn "  intercom-hub.service installed + enabled but /usr/local/bin/intercom-hub is ABSENT -- install the CI binary (intercom-hub-linux-amd64) before the M4 cut-over"
-fi
+# issue 1412 (G6): a fresh box gets the intercom-hub-linux-amd64 CI binary; an installed one is kept.
+strih_intercom_hub_binary_install /usr/local/bin/intercom-hub || fail "intercom-hub binary install failed (above)"
+echo "  intercom-hub.service installed + enabled (NOT started here); /etc/intercom-hub/intercom.toml in place"
 
 # ---------------------------------------------------------------------------------------------
 step 14 "Janus audiobridge audio edge (issue 1345 M3a: apt install janus + jcfg + ENABLE-ONLY)"
@@ -889,37 +893,10 @@ step "16c" "bkshading shading-control service (issue 1353) -- CI artifact -> /op
 # copy. ENABLE-ONLY: the SUPERVISOR deploys the running service; the Windows service stays the
 # fallback until the owner accepts it.
 BKSH_ART="$(strih_bkshading_artifact_name)"
-BKSH_SRC=""
-if [ -d "${STRIH_LX_BKSHADING_SRC:-}" ]; then
-  # Supervisor pre-staged the extracted artifact (the step-4 STRIH_LX_BUNDLE_SRC precedent).
-  BKSH_SRC="${STRIH_LX_BKSHADING_SRC%/}"
-  echo "  using pre-staged bkshading artifact from ${BKSH_SRC}"
-elif [ -n "${GH_TOKEN:-}" ]; then
-  # Fetch the CI artifact via the curl+GH_TOKEN pattern (the bundle-state step-9 precedent, extended
-  # to the GitHub artifacts API for the zip). A token WITHOUT actions:read -> empty URL -> the warn
-  # branch below (the supervisor then pre-stages via STRIH_LX_BKSHADING_SRC or places the binary).
-  BKSH_TMP="$(mktemp -d)"
-  BKSH_DL="$(curl -fsSL -H "Authorization: token ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' \
-    "https://api.github.com/repos/${STRIH_LX_GH_REPO:-zbynekdrlik/camera-box}/actions/artifacts?name=${BKSH_ART}&per_page=20" 2>/dev/null \
-    | python3 -c 'import json,sys
-try:
-    arts=[a for a in json.load(sys.stdin).get("artifacts", []) if not a.get("expired")]
-    print(arts[0]["archive_download_url"] if arts else "")
-except Exception:
-    print("")' || true)"
-  if [ -n "$BKSH_DL" ] && curl -fsSL -H "Authorization: token ${GH_TOKEN}" -L "$BKSH_DL" -o "${BKSH_TMP}/art.zip" 2>/dev/null; then
-    if python3 -c 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "${BKSH_TMP}/art.zip" "${BKSH_TMP}/x" 2>/dev/null; then
-      BKSH_SRC="${BKSH_TMP}/x"
-      echo "  fetched the ${BKSH_ART} CI artifact"
-    else
-      warn "  could not extract the ${BKSH_ART} artifact zip"
-    fi
-  else
-    warn "  could not fetch the ${BKSH_ART} CI artifact (GH_TOKEN lacks actions:read, or no successful run yet)"
-  fi
-else
-  warn "  GH_TOKEN unset and STRIH_LX_BKSHADING_SRC not a dir -- fetch the ${BKSH_ART} artifact and install /opt/bkshading/bkshading (+ web/) before enabling"
-fi
+# issue 1412: the ONE CI-artifact fetch (scripts/lib/strih-ci-artifact.sh): the pre-staged dir
+# STRIH_LX_BKSHADING_SRC (the step-4 STRIH_LX_BUNDLE_SRC precedent), else the GitHub artifact via GH_TOKEN.
+BKSH_SRC="$(strih_ci_artifact_fetch "$BKSH_ART" "${STRIH_LX_BKSHADING_SRC:-}")" \
+  || { BKSH_SRC=""; warn "  install /opt/bkshading/bkshading (+ web/) from the ${BKSH_ART} artifact before go-live"; }
 # Install the binary (+ web/ beside it) when a source resolved (robust to any nesting in the zip).
 if [ -n "$BKSH_SRC" ]; then
   BKSH_BIN="$(find "$BKSH_SRC" -type f -name bkshading 2>/dev/null | head -1 || true)"
@@ -936,8 +913,7 @@ if [ -n "$BKSH_SRC" ]; then
   fi
   echo "  installed bkshading service binary -> /opt/bkshading/bkshading (panel assets embedded; web/ copied beside it)"
 fi
-# Remove the artifact-fetch temp dir (only created in the GH_TOKEN branch).
-[ -n "${BKSH_TMP:-}" ] && rm -rf "$BKSH_TMP" 2>/dev/null || true
+strih_ci_artifact_cleanup "$BKSH_SRC"   # the fetch's temp dir only, never a pre-staged one
 # Seed the operator config ONLY IF absent (the projector.json / bkshading.example.toml precedent).
 install -d -m 0755 /etc/bkshading
 if [ ! -f /etc/bkshading/bkshading.toml ]; then
@@ -978,8 +954,12 @@ step "16e" "Stream program-audio sampler (issue 1404): numpy, the sampler files 
 # runs as the operator's program-audio-sampler.service on the E-cores at normal priority and serves
 # :8891/program-audio.json itself. rig-mode.sh test starts it, rig-mode.sh event stops it; never here.
 # The whole step lives in scripts/lib/strih-program-audio.sh (sourced by strih-provision.sh).
-strih_program_audio_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" \
-  || fail "issue 1404: the program-audio sampler (numpy, its files, the decoder shim, its unit) could not be provisioned (above)"
+if WHY="$(obs_box_step_applies 16e)"; then   # issue 1412 (G11): a box fact, never the box name
+  strih_program_audio_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" \
+    || fail "issue 1404: the program-audio sampler (numpy, its files, the decoder shim, its unit) could not be provisioned (above)"
+else
+  echo "  SKIP: ${WHY}"
+fi
 
 # ---------------------------------------------------------------------------------------------
 step 17 "Final verification (verify-strih.sh acceptance gate)"

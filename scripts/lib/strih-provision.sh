@@ -37,6 +37,21 @@ if ! declare -F strih_program_audio_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-program-audio.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-program-audio.sh"
 fi
+# issue 1412: a fresh box's dantesync binary + role config (setup-strih step 2) and the ONE CI-artifact
+# fetch (step 13's intercom-hub binary, step 16c's bkshading service).
+if ! declare -F dantesync_install >/dev/null; then
+  # shellcheck source=scripts/lib/dantesync-install.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/dantesync-install.sh"
+fi
+if ! declare -F strih_ci_artifact_fetch >/dev/null; then
+  # shellcheck source=scripts/lib/strih-ci-artifact.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-ci-artifact.sh"
+fi
+# issue 1412: the per-box step gate (setup-strih / verify-strih skip a step by a box fact).
+if ! declare -F obs_box_step_applies >/dev/null; then
+  # shellcheck source=scripts/lib/obs-box-role.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-box-role.sh"
+fi
 
 # strih_lx_ndi_inputs -> the 10 NDI input names the strih role receives, one per line (issue 1317
 # spec; the 2ME feedback inputs are the task's explicit STRIH-SNV names). NOTE (issue 1352): the
