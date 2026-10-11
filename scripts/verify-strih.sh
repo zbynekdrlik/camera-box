@@ -365,7 +365,7 @@ AUDIO_KIND="$(python3 "$SCN_BIN" --host "$WS_HOST" --audio-input-kind 2>/dev/nul
 if systemctl is-active intercom-hub >/dev/null 2>&1; then
   # hub active (M4+): grade the real program-feed rx off the hub /api/state.
   if curl -fsS --max-time 3 "http://${WS_HOST}:8790/api/state" 2>/dev/null \
-       | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if any(p.get("name")=="fohabl" and p.get("rx_packets",0)>0 for p in d.get("participants",[])) else 1)'; then
+       | python3 -c 'import sys,json; ps=json.load(sys.stdin).get("participants",[]); refs=[p for p in ps if p.get("name")=="fohabl"] or [p for p in ps if p.get("role")=="program_ref"]; sys.exit(0 if any(p.get("rx_packets",0)>0 for p in refs) else 1)'; then   # issue 1412: a PP box feeds from resolume-pp
     AUDIO_RX=1
   else
     AUDIO_RX=0
@@ -666,6 +666,7 @@ command -v avahi-browse >/dev/null 2>&1 \
 NDI_USER_INI="${USER_HOME}/.config/obs-studio/user.ini"
 NDI_INI_MISSING=""
 mapfile -t NDI_KVS < <(obs_box_ndi_output_kvs)   # issue 1412: the role's set (strih: MainOutputName=2ME PGM / PreviewOutputName=2ME PVW)
+[ "${#NDI_KVS[@]}" -gt 0 ] || NDI_INI_MISSING=" [obs_box_ndi_output_kvs printed nothing]"
 for _kv in "${NDI_KVS[@]}"; do
   grep -qF "$_kv" "$NDI_USER_INI" 2>/dev/null || NDI_INI_MISSING="${NDI_INI_MISSING} [${_kv}]"
 done

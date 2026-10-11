@@ -97,29 +97,43 @@ def service_json(existing, server):
 
 
 def _write(path, text, mode):
+    """Temp file created WITH its final mode (never briefly world-readable), then renamed."""
     tmp = path + ".tmp-1412"
-    with open(tmp, "w") as fh:
+    if os.path.exists(tmp):
+        os.unlink(tmp)
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    with os.fdopen(fd, "w") as fh:
         fh.write(text)
     os.chmod(tmp, mode)
     os.replace(tmp, path)
+
+
+def _read(path):
+    """A file OBS wrote, possibly with the UTF-8 BOM a Windows OBS writes; None when absent."""
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8-sig") as fh:
+        return fh.read()
 
 
 def apply(profile_dir, encoder, server, profile_name):
     """Write the three files under PROFILE_DIR (created). Returns the lines to log."""
     os.makedirs(profile_dir, exist_ok=True)
     ini = os.path.join(profile_dir, "basic.ini")
-    old = open(ini).read() if os.path.exists(ini) else None
-    _write(ini, basic_ini_text(old, encoder, profile_name), 0o644)
+    svc_path = os.path.join(profile_dir, "service.json")
+    # parse every input BEFORE writing anything: a bad file leaves the whole profile untouched.
+    ini_text = basic_ini_text(_read(ini), encoder, profile_name)
+    svc_text = _read(svc_path)
+    existing = None
+    if svc_text is not None:
+        try:
+            existing = json.loads(svc_text)
+        except ValueError:
+            raise ValueError("service.json unreadable -- the profile is left untouched")
+    svc = service_json(existing, server)
+    _write(ini, ini_text, 0o644)
     _write(os.path.join(profile_dir, "streamEncoder.json"),
            json.dumps(stream_encoder_settings(encoder), indent=4) + "\n", 0o644)
-    svc_path = os.path.join(profile_dir, "service.json")
-    existing = None
-    if os.path.exists(svc_path):
-        try:
-            existing = json.load(open(svc_path))
-        except ValueError:
-            raise ValueError("service.json unreadable -- left untouched")
-    svc = service_json(existing, server)
     _write(svc_path, json.dumps(svc, indent=4) + "\n", 0o600)
     return ["basic.ini: Advanced output, %s, 1920x1080 @ 30 fps NV12" % encoder,
             "streamEncoder.json: CBR %d kb/s, keyint %d s, High" % (STREAM_BITRATE_KBPS, STREAM_KEYINT_S),

@@ -1855,6 +1855,9 @@ if [ -n "$PANEL" ]; then
   xrandr --output "$PANEL" --primary --mode 1920x1080 --rate 60 2>/dev/null \
     || xrandr --output "$PANEL" --primary --auto 2>/dev/null || true
 fi
+AUTOSTART_EOF
+  # issue 1412: a box with no fixed HDMI output (the stream role, backend none) keeps HDMI to X.
+  ! obs_box_step_applies 6-hdmi >/dev/null || cat <<'AUTOSTART_EOF'
 # issue 1346 (owner 24.9.2026): the HDMI output is the in-OBS DRM-lease output (Program / Multiview),
 # NEVER the desktop -- every HDMI output stays OFF in X (the lease takes the idle connector).
 for PROJ in $(xrandr | awk '$1 ~ /^HDMI/ {print $1}'); do

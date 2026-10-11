@@ -1609,8 +1609,8 @@ fn companion_status_verdict_is_live_aware() {
 fn setup_strih_uses_the_operator_manifest_and_the_baseline_performance_items() {
     let s = read_script("scripts/setup-strih.sh");
     assert!(
-        s.contains("strih_lx_seed_manifest_json"),
-        "setup-strih step 6 must write the manifest via strih_lx_seed_manifest_json"
+        s.contains("obs_box_seed_manifest_json > /opt/camera-box/strih-lx-seed.json"),
+        "setup-strih step 6 must write the manifest via obs_box_seed_manifest_json (strih role = strih_lx_seed_manifest_json, issue 1412)"
     );
     assert!(
         s.contains("obs_box_max_performance \"$STRIH_NIC\" strih")

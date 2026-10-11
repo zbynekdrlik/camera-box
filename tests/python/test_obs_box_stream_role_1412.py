@@ -387,3 +387,111 @@ def test_verify_strih_gates_the_strih_only_items():
     assert "obs_box_stream_encoder_grade" in v
     assert "mapfile -t NDI_KVS < <(obs_box_ndi_output_kvs)" in v
     assert "skip-no-output" in v
+
+
+# --- review round 1 (slice B) ------------------------------------------------------------------------------
+
+def test_a_replace_keeps_the_audio_input_in_every_scene_and_its_sync_offset():
+    s = _scenes()
+
+    class FakeObs:
+        def __init__(self):
+            self.calls = []
+
+        def req(self, t, d=None, ignore_err=False):
+            self.calls.append((t, d))
+            if t == "GetInputList":
+                return {"inputs": [{"inputName": "Zvuk z mixu", "inputKind": "wasapi_input_capture"}]}
+            if t == "GetSceneList":
+                return {"currentProgramSceneName": "PRO",
+                        "scenes": [{"sceneName": "POST"}, {"sceneName": "PRO"}, {"sceneName": "PRE"}]}
+            if t == "GetSceneItemList":
+                held = d["sceneName"] in ("POST", "PRE")
+                return {"sceneItems": [{"sourceName": "Zvuk z mixu"}] if held else []}
+            if t == "GetInputAudioSyncOffset":
+                return {"inputAudioSyncOffset": 250}
+            return {}
+
+    obs = FakeObs()
+    res = s.seed_program_audio_input(obs, "Zvuk z mixu")
+    kinds = [t for t, _d in obs.calls]
+    assert kinds.index("GetSceneItemList") < kinds.index("RemoveInput") < kinds.index("CreateInput")
+    created = [d for t, d in obs.calls if t == "CreateInput"][0]
+    assert created["sceneName"] == "POST" and created["inputKind"] == "pulse_input_capture"
+    assert ("CreateSceneItem", {"sceneName": "PRE", "sourceName": "Zvuk z mixu"}) in obs.calls
+    assert ("SetInputAudioSyncOffset", {"inputName": "Zvuk z mixu", "inputAudioSyncOffset": 250}) in obs.calls
+    assert "kept in 2 scene(s)" in res
+
+
+def test_a_bom_profile_is_read_and_a_bad_service_json_leaves_every_file_untouched(tmp_path):
+    m = _profile_mod()
+    d = tmp_path / "prof"
+    d.mkdir()
+    (d / "basic.ini").write_bytes(b"\xef\xbb\xbf[General]\nName=old\n[Hotkeys]\nX=1\n")
+    (d / "service.json").write_bytes(b"\xef\xbb\xbf" + json.dumps(
+        {"type": "rtmp_custom", "settings": {"server": "rtmp://old", "key": "K"}}).encode())
+    m.apply(str(d), "ffmpeg_vaapi_tex", "rtmp://new", "stream-pp")
+    assert not (d / "basic.ini").read_bytes().startswith(b"\xef\xbb\xbf")
+    assert json.loads((d / "service.json").read_text())["settings"]["key"] == "K"
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / "basic.ini").write_text("[General]\nName=keep\n")
+    (bad / "service.json").write_text("{not json")
+    with pytest.raises(ValueError):
+        m.apply(str(bad), "ffmpeg_vaapi_tex", "rtmp://new", "stream-pp")
+    assert (bad / "basic.ini").read_text() == "[General]\nName=keep\n"
+    assert not (bad / "streamEncoder.json").exists()
+
+
+def test_service_json_is_never_written_world_readable(tmp_path):
+    m = _profile_mod()
+    d = tmp_path / "p"
+    old = os.umask(0)
+    try:
+        m.apply(str(d), "ffmpeg_vaapi_tex", "rtmp://x", "stream-pp")
+    finally:
+        os.umask(old)
+    assert oct((d / "service.json").stat().st_mode & 0o777) == "0o600"
+    src = (SCRIPTS / "obs_box_stream_profile.py").read_text()
+    assert "os.O_EXCL" in src and "os.open(tmp" in src
+
+
+def test_an_inherited_sender_list_never_reaches_an_snv_box(boxes):
+    r = _bash('strih_box_load strih-lx || exit 9\nobs_box_role_apply || exit 8\n'
+              'echo "SET=${NDI_DISCOVERY_SENDER_HOSTS+yes}"\necho "PINNED=$(ndi_discovery_sender_ips pinned)"',
+              env={"STRIH_BOXES_DIR": str(boxes), "NDI_DISCOVERY_SENDER_HOSTS": "10.77.8.204"},
+              sources=(FACTS, PROVISION, NDI))
+    assert r.returncode == 0, r.stderr
+    assert "SET=\n" in r.stdout and "PINNED=10.77.9.202,10.77.9.204" in r.stdout
+
+
+def _autostart(boxes, box):
+    r = subprocess.run(["bash", str(REPO / "tests/fixtures/strih_box_1361/render.sh"), str(REPO), box],
+                       capture_output=True, text=True, env=_env({"STRIH_BOXES_DIR": str(boxes)}),
+                       cwd=str(REPO), timeout=120)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.split("=== openbox-autostart ===\n", 1)[1].split("\n=== ", 1)[0]
+
+
+def test_the_stream_box_autostart_keeps_hdmi_to_x(boxes):
+    assert 'xrandr --output "$PROJ" --off' not in _autostart(boxes, "stream-pp")
+    assert 'xrandr --output "$PROJ" --off' in _autostart(boxes, "strih-pp")
+
+
+def _item9_check(state):
+    v = VERIFY.read_text()
+    line = next(ln for ln in v.splitlines() if 'p.get("role")=="program_ref"' in ln)
+    prog = line.split("python3 -c '", 1)[1].split("'", 1)[0]
+    return subprocess.run(["python3", "-c", prog], input=json.dumps(state), text=True,
+                          capture_output=True).returncode
+
+
+def test_verify_item_9_reads_the_program_ref_when_there_is_no_fohabl():
+    pp = {"participants": [{"name": "resolume-pp", "role": "program_ref", "rx_packets": 12},
+                           {"name": "strih-program", "role": "program_out", "rx_packets": 0}]}
+    assert _item9_check(pp) == 0
+    pp["participants"][0]["rx_packets"] = 0
+    assert _item9_check(pp) == 1
+    snv = {"participants": [{"name": "fohabl", "role": "program_ref", "rx_packets": 0},
+                            {"name": "lv1", "role": "program_ref", "rx_packets": 9}]}
+    assert _item9_check(snv) == 1, "strih-lx keeps grading fohabl exactly"

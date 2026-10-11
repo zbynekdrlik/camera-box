@@ -117,6 +117,8 @@ obs_box_role_apply() {
   if [ "$venue" != snv ]; then
     NDI_DISCOVERY_SENDER_HOSTS="$(obs_box_venue_sender_ips "$venue")" || return 1
     NDI_DISCOVERY_SENDER_HOSTS="${NDI_DISCOVERY_SENDER_HOSTS//,/$'\n'}"
+  else
+    unset NDI_DISCOVERY_SENDER_HOSTS   # an inherited value never replaces the SNV fleet list
   fi
   return 0
 }

@@ -158,7 +158,7 @@ strih_dantesync_install "$DS_UNIT_TEXT" "$DS_ROLE" \
 
 # ---------------------------------------------------------------------------------------------
 REC_ENC="$(strih_lx_profile_facts | grep '^rec_encoder=' | cut -d= -f2)"
-step 3 "NVIDIA driver / NVENC pre-check (record encoder ${REC_ENC}; the driver + PRIME install is baseline step 11)"
+step 3 "Encoder: NVIDIA driver / NVENC pre-check (record encoder ${REC_ENC}; the driver + PRIME install is baseline step 11) -- the stream role picks its encoder by GPU"
 if WHY="$(obs_box_step_applies 3-nvenc)"; then   # issue 1412: the stream role encodes by GPU
 # issue 1357: the NVIDIA driver + PRIME nvidia-primary are a BASELINE item now (obs_box_nvidia_prime,
 # step 11, run in imag's order AFTER the boot safety net so the DKMS/grub change is guarded). On a box

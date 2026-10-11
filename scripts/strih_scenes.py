@@ -678,15 +678,40 @@ def seed_program_audio_input(obs, name=AUDIO_INPUT_NAME):
     scene = _current_scene_name(obs)
     if scene is None:
         return "no-scene (deferred)"
+    keep_scenes, offset = [], None
     if action == "replace":
+        # issue 1412: a replace keeps the input's place in EVERY scene and its sync offset (a ported
+        # collection carries it in scenes the seed plan does not name).
+        keep_scenes = _scenes_holding(obs, name)
+        offset = (obs.req("GetInputAudioSyncOffset", {"inputName": name}, ignore_err=True) or {}).get(
+            "inputAudioSyncOffset")
         obs.req("RemoveInput", {"inputName": name}, ignore_err=True)
+    if keep_scenes:
+        scene = keep_scenes[0]
     obs.req("CreateInput", {
         "sceneName": scene,
         "inputName": name,
         "inputKind": AUDIO_INPUT_KIND,
         "inputSettings": program_audio_input_settings(),
     }, ignore_err=True)
-    return "created" if action == "create" else "replaced (was %s)" % (kind or "absent")
+    for other in keep_scenes[1:]:
+        obs.req("CreateSceneItem", {"sceneName": other, "sourceName": name}, ignore_err=True)
+    if isinstance(offset, int) and offset:
+        obs.req("SetInputAudioSyncOffset", {"inputName": name, "inputAudioSyncOffset": offset}, ignore_err=True)
+    if action == "create":
+        return "created"
+    return "replaced (was %s; kept in %d scene(s))" % (kind or "absent", len(keep_scenes))
+
+
+def _scenes_holding(obs, name):
+    """issue 1412: the scenes whose items include the source NAME, in the scene list's order."""
+    out = []
+    for sc in (obs.req("GetSceneList", ignore_err=True) or {}).get("scenes", []) or []:
+        sn = sc.get("sceneName")
+        items = (obs.req("GetSceneItemList", {"sceneName": sn}, ignore_err=True) or {}).get("sceneItems", [])
+        if any(i.get("sourceName") == name for i in items or []):
+            out.append(sn)
+    return out
 
 
 def ensure_program_audio_in_every_scene(obs, plan, name=AUDIO_INPUT_NAME):
