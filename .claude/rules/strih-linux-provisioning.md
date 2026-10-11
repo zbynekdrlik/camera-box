@@ -112,7 +112,10 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   seed manifest, dantesync unit, janus jcfgs, openbox autostart + menu, IRQ oneshot, intercom sha256,
   NDI peer, Companion conf/json); `strih-lx.golden` was captured from the PRE-1361 scripts run as
   `STRIH_LX_IP=10.77.9.202`. Any intentional change to one of those outputs must regenerate the golden
-  in the SAME commit and say why — a drift there is a behaviour change on the live strih.
+  in the SAME commit and say why — a drift there is a behaviour change on the live strih. A FACT
+  change (issue 1411's hardware swap) regenerates it from the new facts BEFORE the fact file changes:
+  `STRIH_BOXES_DIR=<scratch dir with the new strih-lx.env> bash render.sh <root> strih-lx > golden`,
+  committed in the test commit, so the RED is real.
 - **Owner questions for strih PP** = the `TODO_OWNER` lines in `strih-pp.env`. `STRIH_NIC_DRIVER` is
   read off the notebook on arrival (`readlink /sys/class/net/<if>/device/driver`), not asked; so are
   the three NIC facts of issue 1391 (`lsusb` for the adapter, the switch port for the link speed).
@@ -1052,7 +1055,8 @@ no upstream pipe to break). The lib's small-input test passed while the large-in
 any log-grading verdict needs a >64 KB fixture in its test, not just a one-line sample.
 ## NIC xhci IRQ placement — the NET_RX softirq off the OBS cores (issue 1317 item H, DONE)
 
-The strih-lx notebook's NIC is a **USB 2.5GbE adapter** (RTL8156B), so its interrupt is an
+(Since issue 1411 the strih-lx rig NIC is PCIe, so this unit is not installed there; it serves a USB
+rig NIC only, the G7 gate.) The returned strih-lx notebook's NIC was a **USB 2.5GbE adapter** (RTL8156B), so its interrupt is an
 **xhci host-controller** IRQ, not a native PCIe NIC IRQ. With `irqbalance` NOT installed the kernel
 parks that IRQ on ONE core; on the live box (issue 1354, 22.9.2026) IRQ 125 (`xhci_hcd`, PCI
 function `0000:00:14.0`, iface `enx6c1ff766154b` carrying 10.77.9.202) was serviced only by CPU 6,
@@ -1114,9 +1118,37 @@ never a silent wrong placement). `STRIH_NIC_IFACE` still overrides everything. U
 first live boot on strih-lx: re-confirm the oneshot resolved cleanly (the supervisor's live apply +
 `verify-strih.sh` item 16).
 
+## The replacement strih-lx notebook: AMD + a 10 GbE Thunderbolt NIC (issue 1411)
+
+The notebook below was returned on 11.10.2026. A new one keeps the name `strih-lx` and the IP
+10.77.9.202, so DNS, the fleet row and every consumer stay as they are. Hardware: AMD Ryzen 7 250
+(Radeon 780M iGPU) + NVIDIA RTX 5050 Mobile; the rig NIC is a Ubiquiti 10 GbE Thunderbolt adapter =
+Aquantia/Marvell on PCIe through Thunderbolt, in-tree `atlantic` (iface enp7s0); the onboard RTL8168
+(`r8169`, enp2s0) is not the rig NIC.
+
+- **Only the NIC facts changed:** `atlantic` / `none` / `none` / `10000`. Step 1b skips DKMS, step
+  11b and verify item 16 skip (the G7 gate reads `STRIH_NIC_MIN_USB_MBPS=none`, i.e. "not USB"), and
+  item 36 NOTEs the driver and USB rows and requires a 10000 link
+  (`test_grade_passes_the_new_strih_lx_pcie_10g_nic` over a fake PCIe sysfs).
+- **The vendored `realtek-r8152` path stays product code** for a USB box. Its tests run on a USB-box
+  fixture (`_usb_box_body()` in `tests/python/test_strih_nic_driver_1391.py`: strih-lx.env with the
+  RTL8157 facts), never on the real strih-lx facts.
+- **AMD needs no fact and no code** (checked over a fake AMD sysfs, validation 6108359608):
+  - no `cpu_atom`: the sampler unit has no `CPUAffinity=` line and the decode prefix is a plain `nice`;
+  - no `intel-rapl-mmio` zone: `strih_lx_pl1_watts` prints its 55 W floor, the envelope oneshot logs
+    "no zone" and exits 0, and with no `x86_pkg_temp` the guard holds. The baseline `power` row still
+    passes on enabled units, so on this box it means "units installed", not "PL1 pinned";
+  - the CPU isolation plan reads SMT pairs `N,N+8` and gives a valid list for 8C/16T.
+- **Live checks before the conversion reboot (main's box work, not code):**
+  - `boltctl list`: the Thunderbolt NIC must be authorized AND stored with policy `auto`. The kiosk
+    has no GNOME session to accept an enrollment prompt, so an unstored device leaves the box with no
+    enp7s0 after the reboot (setup step 11's NIC resolve and item 36 then fail loud);
+  - which GPU drives the HDMI port (vk-direct needs NVIDIA) and `prime-select nvidia` on an AMD-iGPU
+    + NVIDIA laptop.
+
 ## The rig NIC's out-of-tree driver via DKMS + verify item 36 (issue 1391)
 
-Since 29.9.2026 the strih-lx rig NIC is a Ubiquiti UACC-Adapter-RJ45-USBC-5GE = **Realtek RTL8157**
+Until 11.10.2026 (the returned notebook) the strih-lx rig NIC was a Ubiquiti UACC-Adapter-RJ45-USBC-5GE = **Realtek RTL8157**
 (USB `0bda:8157`) into a MikroTik S+RJ10 (5GBASE-T, issue 1242). The in-tree `r8152` of the 7.0 kernels
 has no `0bda:8157` id (checked with `modinfo r8152` on dev1 7.0.0-30: aliases stop at 8156, and it has
 no version field), so the Realtek out-of-tree driver is required. It was first copied by hand as a plain
@@ -1130,8 +1162,9 @@ module to `/lib/modules/<kernel>/updates/r8152.ko`, which the next kernel would 
   intercom/` (`scripts/lib/strih-lx-deploy.sh`), so setup-strih finds it on the box.
 - **Box facts** (loader-validated): `STRIH_NIC_OOT_DRIVER` = `<package>-<version>` of a driver vendored
   under `vendor/`, or `none`; `STRIH_NIC_MIN_USB_MBPS` = the lowest USB device speed (Mb/s, `none` for a
-  non-USB NIC); `STRIH_NIC_MIN_LINK_MBPS` = the lowest Ethernet link speed. strih-lx:
-  `realtek-r8152-2.21.4` / `10000` / `5000`; strih-pp: `TODO_OWNER`. The lib refuses a fact version
+  non-USB NIC); `STRIH_NIC_MIN_LINK_MBPS` = the lowest Ethernet link speed. The returned strih-lx
+  notebook: `realtek-r8152-2.21.4` / `10000` / `5000`; the issue-1411 notebook: `none` / `none` /
+  `10000`; strih-pp: `none` / `none` / `2500`. The lib refuses a fact version
   the tree does not vendor, and a `STRIH_NIC_DRIVER` that is not the vendored module.
 - **setup-strih step `1b`** (`strih_nic_driver_apply` in `scripts/lib/strih-nic-driver.sh`) runs the
   PURE planner `strih_nic_driver_plan` over `dkms status`, `modinfo -k <kernel> -F version r8152` and the
