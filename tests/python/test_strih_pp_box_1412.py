@@ -532,7 +532,12 @@ KNOWN_ROLES = {"cambox", "program_ref", "cutters", "phones", "speakers", "line34
 def test_the_pp_matrix_satisfies_the_hub_load_rules():
     m = tomllib.loads(PP_TOML.read_text())
     assert m["hub"]["sample_rate"] == 48000 and m["hub"]["block_frames"] > 0
-    assert "janus" not in m and "video" not in m and "point" not in m
+    assert "janus" not in m and "video" not in m
+    # The program mix is summed through the matrix points (source_streams only names the streams):
+    # lv1 ch1/ch2 -> program_out ch1/ch2 at unity, nothing else (11.10.2026: no points = silence).
+    assert sorted((pt["src"], pt["in_ch"], pt["dst"], pt["out_ch"], pt.get("gain_db", 0.0))
+                  for pt in m["point"]) == [("lv1", 1, "program_out", 1, 0.0),
+                                            ("lv1", 2, "program_out", 2, 0.0)]
     parts = m["participant"]
     assert len({p["name"] for p in parts}) == len(parts)
     assert all(p["role"] in KNOWN_ROLES and p["adapter"] in {"vban", "none", "janus", "pipewire"} for p in parts)
