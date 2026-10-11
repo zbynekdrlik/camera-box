@@ -462,7 +462,7 @@ strih_nic_speed_verdict() {
   local kind="${1-}" val="${2-}" min="${3-}" nic="${4-}" v label fix
   case "$kind" in
     usb) label="USB link"; fix=" -- ${STRIH_NIC_USB_FIX}" ;;
-    link) label="Ethernet link"; fix=" -- check the switch port, its module and the cable (5GBASE-T needs Cat6)" ;;
+    link) label="Ethernet link"; fix=" -- check the switch port, its module and the cable (10GBASE-T needs Cat6a, 5GBASE-T Cat6)" ;;
     *) printf 'FAIL|(nic) unknown speed kind %s\n' "$kind"; return 1 ;;
   esac
   v="${val//[[:space:]]/}"
