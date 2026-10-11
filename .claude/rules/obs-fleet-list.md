@@ -223,6 +223,15 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
   dantesync-clock all `reachable=1`. A strih swap (the Poprad strih-pp next) is again a table +
   facet-policy edit here.
 
+## The Poprad rows (issue 1412)
+
+`strih-pp|strih-pp.lan|linux-genlock|traveling` and `stream-pp|stream-pp.lan|linux-genlock|traveling`:
+NAME rows (dev1 reaches the PP LAN as 10.76.8.x through the companion-pp subnet router, the boxes
+carry 10.77.8.x, so an IP row could never equal `STRIH_IP`), in NO facet. They only make the class
+gate and `strih_platform` read the PP boxes as Linux; a watchdog starts polling one when a facet names
+it. `harness_obs_fleet_list_1296.rs` uses `strih-zz` as its "unknown override" name since strih-pp is
+a real row now.
+
 ## The last Windows-strih remnants — retired in issue 1317 part 4 (23.9.2026)
 
 Each routes on the ONE resolver above; the Windows branch is kept (a future Windows strih / the

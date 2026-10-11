@@ -117,6 +117,36 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   read off the notebook on arrival (`readlink /sys/class/net/<if>/device/driver`), not asked; so are
   the three NIC facts of issue 1391 (`lsusb` for the adapter, the switch port for the link speed).
 
+## strih-pp + the fresh-box gaps (issue 1412, the Poprad rework of 11.10.2026)
+
+- **Three more facts** (appended to the key list): `STRIH_ROLE` (`strih` | `stream`; the stream role
+  is issue 1412 slice B), `STRIH_DANTE_GM` (the PTP grandmaster a fresh box's dantesync config allows;
+  `RIG_GRANDMASTER_IP` overrides it) and `STRIH_PROGRAM_AUDIO_SAMPLER` (`on` | `off`, step 16e +
+  verify item 41). strih-lx = `strih` / `video-clock.lan` / `on`.
+- **strih-pp.env is decided** from the read-only recon (issue 1412 comment 6106146258) + the owner
+  rulings: 10.77.8.202, NTP master, RTL8125 PCIe (`r8169`, `none`, `none`, 2500), vk-direct (RTX 3060
+  only), cameras `1 4 6 7`, companion-pp 10.77.8.205, `RESOLUME-PP (SP-program)`, grandmaster
+  10.77.8.110, sampler `off`, the program-only `intercom/intercom.strih-pp.toml`. Only
+  `STRIH_NDI_RUNTIME_PEER` stays TODO_OWNER (the PP camboxes have no PP address yet); on site set it,
+  or run with `STRIH_NDI_PEER=<ip>` after filling the fact. Disable the onboard RTL8168 in the BIOS
+  (both NICs bind `r8169`), or pass `STRIH_NIC_IFACE`.
+- **G5 dantesync on a fresh box** (`scripts/lib/dantesync-install.sh`, step 2, before
+  `strih_dantesync_install`): the PINNED binary (`DANTESYNC_VERSION_PIN` read from
+  `dantesync-version-gate.sh`, `--version` checked before install) and the role config
+  (`server` = the canonical `ntp-master` shape with `ntp_server` 162.159.200.1, `client` = `video`),
+  each ONLY when absent. strih-lx keeps its binary and config, so its date master is untouched.
+- **G6 the hub binary** (`scripts/lib/strih-ci-artifact.sh`, step 13): `strih_ci_artifact_fetch`
+  is the ONE CI-artifact fetch (step 16c uses it too; `STRIH_LX_HUB_SRC` / `STRIH_LX_BKSHADING_SRC`
+  pre-staged dirs win); `strih_intercom_hub_binary_install` installs `intercom-hub-linux-amd64` only
+  when `/usr/local/bin/intercom-hub` is absent (the running hub is upgraded by its own deploy).
+- **G7 + G11, the per-box step gate** (`scripts/lib/obs-box-role.sh` `obs_box_step_applies`): step
+  11b (the xhci IRQ unit) runs only for a USB rig NIC (`STRIH_NIC_MIN_USB_MBPS != none`; a PCIe NIC
+  has no xhci walk and the unit would fail every boot), step 16e only with
+  `STRIH_PROGRAM_AUDIO_SAMPLER=on`. verify items 16 and 41 use the same gate. The gate is at install
+  time on purpose: the rendered IRQ script is in the strih-lx golden. Slice B adds the role rows here.
+- The three libs are sourced by `strih-provision.sh`, so setup-strih.sh stays under 1000 lines.
+- Tests: `tests/python/test_strih_pp_box_1412.py`, `intercom/hub/tests/deployed_matrix_pp_1412.rs`.
+
 ## The parallel-run contract (why the namespacing + the client-clock matter)
 
 While both boxes run, TWO strih senders coexist on the NDI wire and must never collide:
@@ -204,9 +234,10 @@ setup-strih writes, reloads or restarts dantesync.
   change means a restart of the date master.
 - **keep touches nothing.** `systemctl enable` reloads the whole manager, so it runs only when
   `systemctl is-enabled -q dantesync` says the unit is not enabled yet.
-- `binary_changed` is always 0: setup-strih never installs the binary and the box keeps no checksum
-  marker. A new binary arrives only through `dantesync-fleet-upgrade.sh`, which restarts the daemon
-  itself (the deliberate, canaried path, `.claude/rules/dantesync-fleet-upgrade.md`).
+- `binary_changed` is always 0: setup-strih installs the pinned binary only when NONE exists (a fresh
+  box, issue 1412 G5, before the unit is written) and never touches an existing one; the box keeps no
+  checksum marker. A new binary on a running box arrives only through `dantesync-fleet-upgrade.sh`,
+  which restarts the daemon itself (the deliberate, canaried path, `.claude/rules/dantesync-fleet-upgrade.md`).
 - The lock is an `flock` (dantesync `acquire_singleton_lock`), so a stale file never blocks a fresh
   daemon and removing it is only housekeeping. Removing the file while a process holds it (a dantesync
   outside the unit) would let a second instance lock a new inode. So it is removed on `start` only,

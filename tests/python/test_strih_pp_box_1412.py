@@ -231,17 +231,40 @@ def test_a_bad_role_or_grandmaster_renders_nothing(args):
     assert r.returncode != 0 and r.stdout == ""
 
 
-def _fake_curl(tmp_path, version):
-    """A curl that 'downloads' a dantesync reporting VERSION, logging every call."""
+def _fake_curl(tmp_path, version, sha_ok=True):
+    """A curl that 'downloads' a dantesync reporting VERSION and its release .sha256, logging every call."""
+    import hashlib
     bindir = tmp_path / "fakebin"
     bindir.mkdir()
     log = tmp_path / "curl.log"
+    body = '#!/bin/sh\necho "dantesync %s"\n' % version
+    sha = hashlib.sha256(body.encode()).hexdigest() if sha_ok else "0" * 64
+    (tmp_path / "payload").write_text(body)
     (bindir / "curl").write_text(
-        "#!/bin/bash\nprintf '%%s\\n' \"$*\" >> %s\nout=\"\"\n"
-        "while [ $# -gt 0 ]; do case \"$1\" in -o) out=\"$2\"; shift 2;; *) shift;; esac; done\n"
-        "printf '#!/bin/sh\\necho \"dantesync %s\"\\n' > \"$out\"\n" % (log, version))
+        "#!/bin/bash\nprintf '%%s\\n' \"$*\" >> %s\nout=\"\"; url=\"\"\n"
+        "while [ $# -gt 0 ]; do case \"$1\" in -o) out=\"$2\"; shift 2;; -*) shift;; *) url=\"$1\"; shift;; esac; done\n"
+        "case \"$url\" in *.sha256) printf '%s  dantesync-linux-amd64\\n' > \"$out\";; "
+        "*) cp %s \"$out\";; esac\n" % (log, sha, tmp_path / "payload"))
     (bindir / "curl").chmod(0o755)
     return bindir, log
+
+
+def test_a_download_whose_sha256_does_not_match_is_never_run_or_installed(tmp_path):
+    bindir, _log = _fake_curl(tmp_path, _gate_pin(), sha_ok=False)
+    b = tmp_path / "bin" / "dantesync"
+    r = _bash("dantesync_install_binary", sources=(DS_INSTALL,), path_prefix=bindir,
+              env={"DANTESYNC_INSTALL_BIN": str(b)})
+    assert r.returncode != 0
+    assert "SHA256 MISMATCH" in r.stderr
+    assert not b.exists()
+
+
+def test_the_install_path_defaults_to_the_restart_decisions_path(tmp_path):
+    b = tmp_path / "ds"
+    b.write_text("#!/bin/sh\necho dantesync 9.9.9\n")
+    b.chmod(0o755)
+    r = _bash("dantesync_install_binary", sources=(DS_INSTALL,), env={"STRIH_DANTESYNC_BIN": str(b)})
+    assert r.returncode == 0 and "kept" in r.stdout and str(b) in r.stdout
 
 
 def test_a_fresh_box_gets_the_pinned_binary_and_the_role_config(tmp_path):
@@ -313,6 +336,95 @@ def test_no_token_and_no_prestaged_dir_warns_and_installs_nothing(tmp_path):
     r = _bash('strih_intercom_hub_binary_install "%s"' % dest, sources=(CI_ART,))
     assert r.returncode == 0
     assert "ABSENT" in r.stderr and not dest.exists()
+
+
+def _fake_github(tmp_path, branch_of_newest="dev"):
+    """A curl that answers the GitHub artifacts API with two artifacts (newest on BRANCH_OF_NEWEST, the
+    older on main) and serves each zip; it records its argv and the header it read on stdin."""
+    import zipfile
+    for name in ("newest", "main"):
+        with zipfile.ZipFile(tmp_path / ("%s.zip" % name), "w") as z:
+            z.writestr("intercom-hub", "#!/bin/sh\necho %s\n" % name)
+    api = {"artifacts": [
+        {"expired": False, "archive_download_url": "https://dl/newest", "workflow_run": {"head_branch": branch_of_newest}},
+        {"expired": False, "archive_download_url": "https://dl/main", "workflow_run": {"head_branch": "main"}},
+    ]}
+    (tmp_path / "api.json").write_text(json.dumps(api))
+    bindir = tmp_path / "ghbin"
+    bindir.mkdir()
+    (bindir / "curl").write_text(
+        "#!/bin/bash\nprintf 'ARGV %%s\\n' \"$*\" >> %(d)s/gh.log\n"
+        "hdr=\"\"; for a in \"$@\"; do [ \"$a\" = @- ] && hdr=\"$(cat)\"; done\n"
+        "printf 'HDR %%s\\n' \"$hdr\" >> %(d)s/gh.log\nout=\"\"; url=\"\"\n"
+        "while [ $# -gt 0 ]; do case \"$1\" in -o) out=\"$2\"; shift 2;; -H) shift 2;; -*) shift;; *) url=\"$1\"; shift;; esac; done\n"
+        "case \"$url\" in *actions/artifacts*) cat %(d)s/api.json;; https://dl/newest) cp %(d)s/newest.zip \"$out\";; "
+        "https://dl/main) cp %(d)s/main.zip \"$out\";; *) exit 22;; esac\n" % {"d": tmp_path})
+    (bindir / "curl").chmod(0o755)
+    return bindir
+
+
+def test_the_hub_comes_from_a_main_run_with_the_token_never_in_argv(tmp_path):
+    bindir = _fake_github(tmp_path)
+    tmproot = tmp_path / "tmproot"
+    tmproot.mkdir()
+    dest = tmp_path / "bin" / "intercom-hub"
+    r = _bash('strih_intercom_hub_binary_install "%s"' % dest, sources=(CI_ART,), path_prefix=bindir,
+              env={"GH_TOKEN": "tok-SECRET-1412", "STRIH_CI_ARTIFACT_TMP": str(tmproot)})
+    assert r.returncode == 0, r.stderr
+    assert dest.read_text() == "#!/bin/sh\necho main\n", "the newest NON-main artifact must be skipped"
+    log = (tmp_path / "gh.log").read_text()
+    assert "tok-SECRET-1412" not in "".join(ln for ln in log.splitlines() if ln.startswith("ARGV"))
+    assert log.count("HDR Authorization: token tok-SECRET-1412") == 2
+    assert list(tmproot.iterdir()) == [], "the fetch's temp dir is removed after the install"
+
+
+def test_bkshading_still_takes_the_newest_artifact_of_any_branch(tmp_path):
+    bindir = _fake_github(tmp_path)
+    r = _bash('d="$(strih_ci_artifact_fetch some-art "")" && cat "$d/intercom-hub" && strih_ci_artifact_cleanup "$d" ""',
+              sources=(CI_ART,), path_prefix=bindir,
+              env={"GH_TOKEN": "t", "STRIH_CI_ARTIFACT_TMP": str(tmp_path)})
+    assert r.returncode == 0, r.stderr
+    assert "echo newest" in r.stdout
+
+
+def test_cleanup_never_removes_a_prestaged_dir_even_inside_an_old_fetch_leftover(tmp_path):
+    old = tmp_path / "strih-ci-artifact.keep"
+    pre = old / "x"
+    pre.mkdir(parents=True)
+    (pre / "intercom-hub").write_text("hub\n")
+    env = {"STRIH_CI_ARTIFACT_TMP": str(tmp_path)}
+    r = _bash('strih_ci_artifact_cleanup "%s" "%s"' % (pre, pre), sources=(CI_ART,), env=env)
+    assert r.returncode == 0 and pre.is_dir()
+    # a path outside the fetch's temp root, or not ending in /x, is never removed either
+    other = tmp_path / "elsewhere" / "strih-ci-artifact.zz" / "x"
+    other.mkdir(parents=True)
+    r = _bash('strih_ci_artifact_cleanup "%s"; strih_ci_artifact_cleanup "%s"' % (other, old), sources=(CI_ART,), env=env)
+    assert r.returncode == 0 and other.is_dir() and old.is_dir()
+
+
+def test_the_new_libs_run_clean_under_the_callers_errexit(tmp_path):
+    """setup-strih / verify-strih call these under set -euo pipefail: a skip, an absent artifact, a
+    kept binary and the cleanup must all return without aborting the caller."""
+    env = _pp_filled(tmp_path)
+    b = tmp_path / "ds"
+    b.write_text("#!/bin/sh\n")
+    b.chmod(0o755)
+    c = tmp_path / "cfg.json"
+    c.write_text("{}\n")
+    env.update({"DANTESYNC_INSTALL_BIN": str(b), "DANTESYNC_INSTALL_CONFIG": str(c)})
+    body = ("set -euo pipefail\n" + "".join('. "%s"\n' % x for x in (FACTS, PROVISION)) +
+            "strih_box_load strih-pp\n"
+            'if WHY="$(obs_box_step_applies 11b)"; then echo RAN; else echo "SKIP11b"; fi\n'
+            'if WHY="$(obs_box_step_applies 16e)"; then echo RAN; else echo "SKIP16e"; fi\n'
+            'dantesync_install server "$(strih_lx_dante_gm)"\n'
+            'strih_intercom_hub_binary_install "%s/hub"\n'
+            'strih_ci_artifact_cleanup "" ""\nstrih_ci_artifact_cleanup /nonexistent/x\n'
+            "echo END\n" % tmp_path)
+    full = {k: v for k, v in os.environ.items() if k not in LEAKY}
+    full.update(env)
+    r = subprocess.run(["bash", "-c", body], capture_output=True, text=True, env=full, cwd=str(REPO), timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.splitlines()[0:2] == ["SKIP11b", "SKIP16e"] and r.stdout.rstrip().endswith("END")
 
 
 def test_an_artifact_without_the_binary_fails(tmp_path):

@@ -897,6 +897,7 @@ BKSH_ART="$(strih_bkshading_artifact_name)"
 # STRIH_LX_BKSHADING_SRC (the step-4 STRIH_LX_BUNDLE_SRC precedent), else the GitHub artifact via GH_TOKEN.
 BKSH_SRC="$(strih_ci_artifact_fetch "$BKSH_ART" "${STRIH_LX_BKSHADING_SRC:-}")" \
   || { BKSH_SRC=""; warn "  install /opt/bkshading/bkshading (+ web/) from the ${BKSH_ART} artifact before go-live"; }
+[ -z "$BKSH_SRC" ] || echo "  ${BKSH_ART} artifact: ${BKSH_SRC}"
 # Install the binary (+ web/ beside it) when a source resolved (robust to any nesting in the zip).
 if [ -n "$BKSH_SRC" ]; then
   BKSH_BIN="$(find "$BKSH_SRC" -type f -name bkshading 2>/dev/null | head -1 || true)"
@@ -913,7 +914,7 @@ if [ -n "$BKSH_SRC" ]; then
   fi
   echo "  installed bkshading service binary -> /opt/bkshading/bkshading (panel assets embedded; web/ copied beside it)"
 fi
-strih_ci_artifact_cleanup "$BKSH_SRC"   # the fetch's temp dir only, never a pre-staged one
+strih_ci_artifact_cleanup "$BKSH_SRC" "${STRIH_LX_BKSHADING_SRC:-}"   # the fetch's temp dir only
 # Seed the operator config ONLY IF absent (the projector.json / bkshading.example.toml precedent).
 install -d -m 0755 /etc/bkshading
 if [ ! -f /etc/bkshading/bkshading.toml ]; then

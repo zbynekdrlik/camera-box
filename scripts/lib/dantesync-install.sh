@@ -21,7 +21,8 @@
 # role (ntp_server_mode off; the upstream is on the unit's --ntp-server command line). Both allow ONE
 # grandmaster (the box fact STRIH_DANTE_GM) and run clock_discipline=ptp_phase_lock.
 #
-# Path seams (tests): DANTESYNC_INSTALL_BIN, DANTESYNC_INSTALL_CONFIG, DANTESYNC_RELEASE_BASE,
+# Path seams (tests): DANTESYNC_INSTALL_BIN (default STRIH_DANTESYNC_BIN, the path
+# strih_dantesync_install's restart decision reads), DANTESYNC_INSTALL_CONFIG, DANTESYNC_RELEASE_BASE,
 # DANTESYNC_VERSION_PIN (overrides the gate's pin), DANTESYNC_NTP_UPSTREAM (the master's NTP upstream).
 
 # The internet NTP upstream a `server` (NTP-master) box dates the fleet from: the value strih-lx's own
@@ -76,31 +77,39 @@ dantesync_install_config_json() {
 
 # dantesync_install_binary -> install the pinned dantesync binary at DANTESYNC_INSTALL_BIN
 # (/usr/local/bin/dantesync) when NO binary is there; an existing one is kept whatever its version
-# (dantesync-fleet-upgrade.sh owns upgrades). Downloads to a temp file, checks `--version` reports the
-# pin, then `install -m 0755` (rename into place). rc 1 + a stderr line on any failure.
+# (dantesync-fleet-upgrade.sh owns upgrades). Downloads the binary + its release `.sha256` to a temp
+# dir, verifies the sha256 BEFORE anything runs it (the fleet upgrader's order), checks `--version`
+# reports the pin, then `install -m 0755` (rename into place). rc 1 + a stderr line on any failure.
 dantesync_install_binary() {
-  local bin="${DANTESYNC_INSTALL_BIN:-/usr/local/bin/dantesync}" pin url tmp got
+  local bin="${DANTESYNC_INSTALL_BIN:-${STRIH_DANTESYNC_BIN:-/usr/local/bin/dantesync}}" pin url tmp got want have
   if [ -x "$bin" ]; then
     echo "  dantesync binary present (${bin}) -- kept (upgrades go through dantesync-fleet-upgrade.sh)"
     return 0
   fi
   pin="$(dantesync_install_pinned_version)" || return 1
   url="$(dantesync_install_release_url "$pin")"
-  tmp="$(mktemp)" || { echo "dantesync-install: mktemp failed" >&2; return 1; }
-  if ! curl -fsSL "$url" -o "$tmp"; then
-    rm -f "$tmp"
-    echo "dantesync-install: download of the pinned dantesync v${pin} failed (${url})" >&2
+  tmp="$(mktemp -d)" || { echo "dantesync-install: mktemp failed" >&2; return 1; }
+  if ! curl -fsSL "$url" -o "${tmp}/dantesync" || ! curl -fsSL "${url}.sha256" -o "${tmp}/dantesync.sha256"; then
+    rm -rf "$tmp"
+    echo "dantesync-install: download of the pinned dantesync v${pin} or its .sha256 failed (${url})" >&2
     return 1
   fi
-  chmod 0755 "$tmp"
-  got="$("$tmp" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | tail -1 || true)"
+  want="$(awk 'NR==1{print $1}' "${tmp}/dantesync.sha256" 2>/dev/null || true)"
+  have="$(sha256sum "${tmp}/dantesync" 2>/dev/null | awk '{print $1}' || true)"
+  if [ -z "$want" ] || [ "$want" != "$have" ]; then
+    rm -rf "$tmp"
+    echo "dantesync-install: SHA256 MISMATCH for dantesync v${pin} (release '${want}', downloaded '${have}') -- refusing to run or install it" >&2
+    return 1
+  fi
+  chmod 0755 "${tmp}/dantesync"
+  got="$("${tmp}/dantesync" --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | tail -1 || true)"
   if [ "$got" != "$pin" ]; then
-    rm -f "$tmp"
+    rm -rf "$tmp"
     echo "dantesync-install: the downloaded binary reports version '${got}', not the pin ${pin} -- refusing to install it" >&2
     return 1
   fi
-  install -D -m 0755 "$tmp" "$bin" || { rm -f "$tmp"; echo "dantesync-install: could not install ${bin}" >&2; return 1; }
-  rm -f "$tmp"
+  install -D -m 0755 "${tmp}/dantesync" "$bin" || { rm -rf "$tmp"; echo "dantesync-install: could not install ${bin}" >&2; return 1; }
+  rm -rf "$tmp"
   echo "  installed dantesync v${pin} -> ${bin}"
 }
 

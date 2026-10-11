@@ -200,6 +200,27 @@ fn todo_owner_template_is_refused_naming_every_missing_fact() {
     }
 }
 
+/// issue 1412: with strih-pp decided, the "name EVERY open fact" contract keeps a fixture of its own.
+#[test]
+fn several_todo_owner_values_are_each_named() {
+    let d = TmpDir::new("todo3");
+    fixture_box(
+        &d,
+        "strih-lx",
+        &[
+            ("STRIH_NIC_DRIVER=r8152", "STRIH_NIC_DRIVER=TODO_OWNER"),
+            ("STRIH_CAMERAS=1 2 3 4 5 6 7", "STRIH_CAMERAS=TODO_OWNER"),
+            ("STRIH_ROLE=strih", "STRIH_ROLE=TODO_OWNER"),
+        ],
+    );
+    let dir = d.path().to_string_lossy().into_owned();
+    let (c, _o, err) = with_loader(&[("STRIH_BOXES_DIR", &dir)], "strih_box_load strih-lx");
+    assert_ne!(c, 0);
+    for k in ["STRIH_NIC_DRIVER", "STRIH_CAMERAS", "STRIH_ROLE"] {
+        assert!(err.contains(&format!("{k} is TODO_OWNER")), "{k}: {err}");
+    }
+}
+
 #[test]
 fn a_single_todo_owner_value_is_refused_by_name() {
     let d = TmpDir::new("todo1");
