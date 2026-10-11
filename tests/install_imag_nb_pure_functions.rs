@@ -98,31 +98,42 @@ fn layer_chain_without_secureboot_is_base_then_standard_only() {
     );
 }
 
-/// Secure Boot ON: the enhanced-secureboot delta is appended LAST (it is a delta on
-/// minimal.standard, so it must sit highest in the overlay stack).
+/// Secure Boot ON installs the SAME two layers as Secure Boot off (issue 1412). The
+/// enhanced-secureboot delta is Ubuntu's TPM-backed FDE variant: it ships `boot-managed-by-snapd`,
+/// which conflicts with grub-efi-amd64, so the chroot's GRUB install failed on stream-pp
+/// (11.10.2026, Secure Boot on). Secure Boot is served by shim-signed + grub-efi-amd64-signed.
 #[test]
-fn layer_chain_with_secureboot_appends_enhanced_layer_last() {
+fn layer_chain_with_secureboot_never_stacks_the_snapd_boot_layer_1412() {
     let d = tmpdir("sb-on");
     let casper = d.join("casper");
     fake_casper(&casper);
     let (code, out, err) = run_sourced(&format!("imag_layer_chain '{}' enabled", casper.display()));
     assert_eq!(code, 0, "layer chain should resolve. stderr: {err}");
     let lines: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
-    assert_eq!(lines.len(), 3, "expected 3 layers, got {lines:?}");
+    assert_eq!(lines.len(), 2, "expected the 2 base layers, got {lines:?}");
     assert!(
-        lines[2].ends_with("minimal.standard.enhanced-secureboot.squashfs"),
-        "enhanced-secureboot must be the TOP layer; got {lines:?}"
+        lines[0].ends_with("/minimal.squashfs") && lines[1].ends_with("/minimal.standard.squashfs"),
+        "minimal then minimal.standard; got {lines:?}"
+    );
+    assert!(
+        !out.contains("enhanced-secureboot"),
+        "the snapd-boot (TPM FDE) layer must never be installed: {out}"
     );
     assert!(
         !out.contains(".live."),
         "the .live layer must NEVER be installed: {out}"
     );
-    assert!(
-        !lines
-            .iter()
-            .any(|l| l.ends_with("minimal.enhanced-secureboot.squashfs")),
-        "the minimal-only secureboot variant is the wrong chain branch; got {lines:?}"
-    );
+}
+
+/// The chroot installs the signed boot chain that serves Secure Boot (issue 1412).
+#[test]
+fn chroot_installs_the_signed_shim_and_grub_for_secure_boot_1412() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let line = body
+        .lines()
+        .find(|l| l.contains("apt-get install") && l.contains("grub-efi-amd64-signed"))
+        .expect("the chroot boot-chain apt-get install line");
+    assert!(line.contains("shim-signed"), "{line}");
 }
 
 /// A casper dir missing the base layer is a broken/unknown ISO — fail LOUD rather than install a
