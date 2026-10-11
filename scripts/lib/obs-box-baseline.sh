@@ -384,9 +384,18 @@ systemctl disable --now power-profiles-daemon.service >/dev/null 2>&1 || true
 systemctl mask power-profiles-daemon.service >/dev/null 2>&1 \
     || fail "could not mask power-profiles-daemon.service -- it would reset the governor to powersave at boot"
 systemctl daemon-reload
+# issue 1412: a box whose kernel binds no cpufreq driver (strih-pp: Ryzen 7 5800X with CPPC off in the
+# BIOS, `amd_pstate: the _CPC object is not present`) has no governor to pin -- the firmware runs the
+# cores. The unit would fail every boot, and its failed `enable --now` ended step 11 silently.
+if ls /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor >/dev/null 2>&1; then
 systemctl enable --now cpu-performance.service >/dev/null 2>&1
 bash /etc/rc.local
 grep -q performance /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor || fail "governor not performance"
+else
+systemctl disable cpu-performance.service >/dev/null 2>&1 || true
+bash /etc/rc.local 2>/dev/null
+echo "  NOTE: no cpufreq driver bound (no scaling_governor) -- the firmware runs the cores, no governor to pin; enable CPPC in the BIOS for the OS to manage them"
+fi
 }
 
 # obs_box_boot_safety_net SERIES BOX -- the imag step 6 (#487) boot safety net: hold the INSTALLED

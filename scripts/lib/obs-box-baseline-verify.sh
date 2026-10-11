@@ -147,6 +147,7 @@ echo "nic_hook=$(if [ -x /etc/networkd-dispatcher/routable.d/optimize-nic ]; the
 echo "cpu_perf_unit=$(systemctl is-enabled cpu-performance.service 2>/dev/null | first)"
 echo "rc_local_eee=$(if [ -x /etc/rc.local ] && grep -qF 'ethtool --set-eee' /etc/rc.local 2>/dev/null; then echo 1; else echo 0; fi)"
 echo "rc_local_active=$(systemctl is-active rc-local.service 2>/dev/null | first)"
+echo "cpufreq_policies=$(ls /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | wc -l)"
 echo "governors=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//')"
 echo "maxperf_active=$(systemctl is-active "${BOX}-maxperf.service" 2>/dev/null | first)"
 echo "maxperf_udev=$(fexists "/etc/udev/rules.d/99-${BOX}-maxperf-pm.rules")"
@@ -300,11 +301,16 @@ obs_box_baseline_verdict() {
     # maxperf unit active + udev rule, power-profiles-daemon masked or absent (it resets the governor).
     # Whether rc-local.service ran it this boot is REPORTED (a release
     # without the rc-local generator never runs it; the networkd-dispatcher hook still covers EEE).
-    ok=0; [ "$(_obs_box_f cpu_perf_unit)" = enabled ] && obs_box_governor_ok "$(_obs_box_f governors)" \
+    # issue 1412: a box with NO cpufreq driver (cpufreq_policies=0, the firmware runs the cores) has no
+    # governor or governor unit to grade; an unreadable count stays strict.
+    local gov_ok=0
+    if [ "$(_obs_box_f cpufreq_policies)" = 0 ]; then gov_ok=1
+    elif [ "$(_obs_box_f cpu_perf_unit)" = enabled ] && obs_box_governor_ok "$(_obs_box_f governors)"; then gov_ok=1; fi
+    ok=0; [ "$gov_ok" = 1 ] \
         && [ "$(_obs_box_f rc_local_eee)" = 1 ] \
         && [ "$(_obs_box_f maxperf_active)" = active ] && [ "$(_obs_box_f maxperf_udev)" = 1 ] \
         && case "$(_obs_box_f ppd)" in masked|masked-runtime|not-found|'') true ;; *) false ;; esac && ok=1
-    _obs_box_item perf "$ok" "cpu-performance=$(_obs_box_f cpu_perf_unit) governors=[$(_obs_box_f governors)] rc.local-eee=$(_obs_box_f rc_local_eee) rc-local.service=$(_obs_box_f rc_local_active) maxperf=$(_obs_box_f maxperf_active) udev=$(_obs_box_f maxperf_udev) power-profiles-daemon=$(_obs_box_f ppd)"
+    _obs_box_item perf "$ok" "cpu-performance=$(_obs_box_f cpu_perf_unit) cpufreq-policies=$(_obs_box_f cpufreq_policies) governors=[$(_obs_box_f governors)] rc.local-eee=$(_obs_box_f rc_local_eee) rc-local.service=$(_obs_box_f rc_local_active) maxperf=$(_obs_box_f maxperf_active) udev=$(_obs_box_f maxperf_udev) power-profiles-daemon=$(_obs_box_f ppd)"
     # cstate -- the PM QoS idle wake-up latency bound (issue 1357): obs-box-cpu-latency.service enabled +
     # active with the baseline bound configured, at least one cpuidle state readable, and no state whose
     # exit latency exceeds the bound entered during the gather's 1 s sample (the kernel honours the held
