@@ -163,6 +163,59 @@ def test_symlinks_and_share_data_are_installed(tmp_path):
     assert not [p for p in pre.rglob("*") if ".cb-new." in p.name], "no temp sibling may be left behind"
 
 
+# --- bug 2: an artifact unzipped without modes left obs-browser-page 0664; CEF crash-looped OBS -------
+
+def test_a_mode_less_obs_browser_page_is_installed_executable(tmp_path):
+    env = _stubs(tmp_path)
+    r, pre = _prefix_install(tmp_path, _bundle(tmp_path / "b1", BASE, LINKS, {PAGE: 0o664}), env)
+    assert r.returncode == 0, r.stderr
+    mode = (pre / "lib" / "obs-plugins" / "obs-browser-page").stat().st_mode & 0o7777
+    assert mode == 0o755, oct(mode)
+
+
+def test_an_unchanged_but_non_executable_installed_helper_is_fixed(tmp_path):
+    """The live box after the bad unzip: the installed copy is byte-identical but 0664."""
+    env = _stubs(tmp_path)
+    b = _bundle(tmp_path / "b1", BASE, LINKS, {PAGE: 0o664})
+    pre = tmp_path / "usr"
+    page = pre / "lib" / "obs-plugins" / "obs-browser-page"
+    page.parent.mkdir(parents=True)
+    page.write_bytes(BASE[PAGE])
+    page.chmod(0o664)
+    r, pre = _prefix_install(tmp_path, b, env)
+    assert r.returncode == 0, r.stderr
+    assert page.stat().st_mode & 0o7777 == 0o755
+
+
+def _grade(libdir, browser):
+    return _bash('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nstrih_bundle_exec_grade "$1" "$2"',
+                 libdir, browser)
+
+
+def test_verify_fails_a_non_executable_obs_browser_page(tmp_path):
+    page = tmp_path / "obs-plugins" / "obs-browser-page"
+    page.parent.mkdir()
+    page.write_bytes(b"x")
+    page.chmod(0o664)
+    r = _grade(tmp_path, 1)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.startswith("FAIL") and "obs-browser-page" in r.stdout and "664" in r.stdout, r.stdout
+    page.chmod(0o755)
+    assert _grade(tmp_path, 1).stdout.startswith("PASS")
+
+
+def test_verify_fails_a_missing_helper_only_on_a_browser_bundle(tmp_path):
+    assert _grade(tmp_path, 1).stdout.startswith("FAIL")
+    assert _grade(tmp_path, 0).stdout.startswith("PASS")
+
+
+def test_verify_strih_runs_the_executables_row_and_setup_lists_the_helper():
+    v = (REPO / "scripts" / "verify-strih.sh").read_text()
+    assert 'strih_bundle_exec_grade "' in v
+    lib = (REPO / "scripts" / "lib" / "strih-bundle-install.sh").read_text()
+    assert "obs-plugins/obs-browser-page" in lib
+
+
 def test_the_prefix_install_never_uses_cp_a_into_the_prefix():
     body = LIB.read_text().split("strih_install_bundle_prefix() {", 1)[1].split("\n}\n", 1)[0]
     assert "cp -a" not in body
