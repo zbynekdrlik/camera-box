@@ -53,3 +53,116 @@ def test_no_unit_only_key_sits_in_the_service_section_of_the_dropin():
     unit_only = ("After=", "Before=", "Wants=", "Requires=", "BindsTo=", "PartOf=", "Description=")
     bad = [k for k in _sections(r.stdout).get("Service", []) if k.startswith(unit_only)]
     assert bad == [], bad
+
+
+# --- bug 1: step 4 must never rewrite a file a running OBS maps (cp -a truncates in place) ---------
+
+def _stubs(tmp_path):
+    """chown / ldconfig as logged no-ops, install without -o/-g (the test is not root)."""
+    d = tmp_path / "stubs"
+    d.mkdir(exist_ok=True)
+    log = tmp_path / "stub.log"
+    (d / "chown").write_text('#!/bin/bash\necho "chown $*" >> "%s"\nexit 0\n' % log)
+    (d / "ldconfig").write_text('#!/bin/bash\necho "ldconfig $*" >> "%s"\nexit 0\n' % log)
+    (d / "install").write_text(
+        '#!/bin/bash\nargs=()\nwhile [ $# -gt 0 ]; do\n  case "$1" in -o|-g) shift 2 ;; '
+        '*) args+=("$1"); shift ;; esac\ndone\nexec /usr/bin/install "${args[@]}"\n')
+    for f in d.iterdir():
+        f.chmod(0o755)
+    return {"PATH": "%s:%s" % (d, os.environ["PATH"])}
+
+
+def _bundle(root, files, links=None, modes=None):
+    """A staged bundle: {relpath: bytes} under ROOT, plus symlinks and explicit modes."""
+    for rel, data in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+        p.chmod((modes or {}).get(rel, 0o644))
+    for rel, target in (links or {}).items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.symlink_to(target)
+    return root
+
+
+def _prefix_install(tmp_path, bundle, env):
+    pre = tmp_path / "usr"
+    (pre / "bin").mkdir(parents=True, exist_ok=True)   # /usr/bin always exists on a box
+    return _bash('strih_install_bundle_prefix "$1" "$2/lib" "$2/bin" "$2/share"', bundle, pre, env=env), pre
+
+
+BASE = {
+    "lib/x86_64-linux-gnu/libobs.so.30": b"libobs v1",
+    "lib/x86_64-linux-gnu/obs-plugins/distroav.so": b"distroav v1",
+    "lib/x86_64-linux-gnu/obs-plugins/obs-browser-page": Path("/bin/sleep").read_bytes(),
+    "bin/obs": b"obs v1",
+    "bin/obs-ffmpeg-mux": b"mux v1",
+    "share/obs/libobs/default.effect": b"effect v1",
+}
+LINKS = {"lib/x86_64-linux-gnu/libobs.so": "libobs.so.30"}
+PAGE = "lib/x86_64-linux-gnu/obs-plugins/obs-browser-page"
+
+
+def test_a_changed_library_lands_on_a_new_inode_and_the_mapped_one_keeps_its_bytes(tmp_path):
+    env = _stubs(tmp_path)
+    r, pre = _prefix_install(tmp_path, _bundle(tmp_path / "b1", BASE, LINKS), env)
+    assert r.returncode == 0, r.stderr
+    lib = pre / "lib" / "libobs.so.30"
+    held = os.open(lib, os.O_RDONLY)   # a running OBS keeps the inode it mapped open
+    ino = lib.stat().st_ino
+    v2 = dict(BASE, **{"lib/x86_64-linux-gnu/libobs.so.30": b"libobs v2 -- a different build"})
+    r, pre = _prefix_install(tmp_path, _bundle(tmp_path / "b2", v2, LINKS), env)
+    assert r.returncode == 0, r.stderr
+    assert lib.read_bytes() == b"libobs v2 -- a different build"
+    assert lib.stat().st_ino != ino, "the new library must be a NEW inode (temp + rename), never cp -a in place"
+    os.lseek(held, 0, 0)
+    got = os.read(held, 100)
+    os.close(held)
+    assert got == b"libobs v1", "the running process's open copy was rewritten under it"
+
+
+def test_an_unchanged_bundle_writes_no_file(tmp_path):
+    env = _stubs(tmp_path)
+    b = _bundle(tmp_path / "b1", BASE, LINKS)
+    r, pre = _prefix_install(tmp_path, b, env)
+    assert r.returncode == 0, r.stderr
+    before = {p: (p.lstat().st_ino, p.lstat().st_mtime_ns) for p in (pre / "lib").rglob("*")}
+    r, pre = _prefix_install(tmp_path, b, env)
+    assert r.returncode == 0, r.stderr
+    after = {p: (p.lstat().st_ino, p.lstat().st_mtime_ns) for p in (pre / "lib").rglob("*")}
+    assert after == before
+    assert "unchanged" in r.stdout
+
+
+def test_a_helper_executing_from_the_prefix_does_not_fail_the_install(tmp_path):
+    """The live `Text file busy`: a CEF obs-browser-page runs while step 4 replaces it."""
+    env = _stubs(tmp_path)
+    r, pre = _prefix_install(tmp_path, _bundle(tmp_path / "b1", BASE, LINKS, {PAGE: 0o755}), env)
+    assert r.returncode == 0, r.stderr
+    page = pre / "lib" / "obs-plugins" / "obs-browser-page"
+    running = subprocess.Popen([str(page), "30"])   # an ELF: the kernel refuses writes to it (ETXTBSY)
+    try:
+        v2 = dict(BASE, **{PAGE: Path("/bin/true").read_bytes()})
+        r, pre = _prefix_install(tmp_path, _bundle(tmp_path / "b2", v2, LINKS, {PAGE: 0o755}), env)
+        assert r.returncode == 0, r.stderr
+        assert page.read_bytes() == Path("/bin/true").read_bytes()
+    finally:
+        running.kill()
+        running.wait()
+
+
+def test_symlinks_and_share_data_are_installed(tmp_path):
+    env = _stubs(tmp_path)
+    r, pre = _prefix_install(tmp_path, _bundle(tmp_path / "b1", BASE, LINKS), env)
+    assert r.returncode == 0, r.stderr
+    link = pre / "lib" / "libobs.so"
+    assert link.is_symlink() and os.readlink(link) == "libobs.so.30"
+    assert (pre / "share" / "obs" / "libobs" / "default.effect").read_bytes() == b"effect v1"
+    assert (pre / "bin" / "obs").read_bytes() == b"obs v1"
+    assert not [p for p in pre.rglob("*") if ".cb-new." in p.name], "no temp sibling may be left behind"
+
+
+def test_the_prefix_install_never_uses_cp_a_into_the_prefix():
+    body = LIB.read_text().split("strih_install_bundle_prefix() {", 1)[1].split("\n}\n", 1)[0]
+    assert "cp -a" not in body

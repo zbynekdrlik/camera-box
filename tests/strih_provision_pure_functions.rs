@@ -628,13 +628,15 @@ fn setup_strih_installs_runtime_packages_before_the_prefix_install_and_enable() 
 
 /// issue 1317: `strih_install_bundle_prefix` copies the bundle libs into LIBDIR BEFORE `ldconfig`
 /// (an ldconfig before the copy would not pick up the new libs) and installs the frontend to
-/// BINDIR/obs — the imag on-box program's install shape.
+/// BINDIR/obs — the imag on-box program's install shape. issue 1412: the copy is the tree install
+/// (an unchanged file untouched, a changed one through a temp sibling + rename), never a `cp -a`
+/// that rewrites a library a running OBS maps.
 #[test]
 fn install_bundle_prefix_copies_libs_before_ldconfig() {
     let lib = read_script("scripts/lib/strih-provision.sh");
     let cp = lib
-        .find("cp -a \"${bundle}/lib/x86_64-linux-gnu/.\"")
-        .expect("strih_install_bundle_prefix must cp -a the bundle libs into LIBDIR");
+        .find("strih_bundle_tree_install \"${bundle}/lib/x86_64-linux-gnu\" \"$libdir\"")
+        .expect("strih_install_bundle_prefix must tree-install the bundle libs into LIBDIR");
     let ldconfig = lib
         .find("\n  ldconfig")
         .expect("strih_install_bundle_prefix must run ldconfig");
