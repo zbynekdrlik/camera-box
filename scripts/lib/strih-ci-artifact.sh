@@ -29,16 +29,7 @@ strih_ci_artifact_fetch() {
   fi
   tmp="$(mktemp -d "$(_strih_ci_artifact_tmp_root)/strih-ci-artifact.XXXXXX")" \
     || { echo "  mktemp for the ${art} artifact failed" >&2; return 1; }
-  dl="$(_strih_ci_artifact_auth | curl -fsSL -H @- -H 'Accept: application/vnd.github+json' \
-    "${STRIH_CI_ARTIFACT_API:-https://api.github.com}/repos/${STRIH_LX_GH_REPO:-zbynekdrlik/camera-box}/actions/artifacts?name=${art}&per_page=50" 2>/dev/null \
-    | python3 -c 'import json,sys
-branch=sys.argv[1]
-try:
-    arts=[a for a in json.load(sys.stdin).get("artifacts", []) if not a.get("expired")
-          and (not branch or (a.get("workflow_run") or {}).get("head_branch") == branch)]
-    print(arts[0]["archive_download_url"] if arts else "")
-except Exception:
-    print("")' "$branch" || true)"
+  dl="$(_strih_ci_artifact_url "$art" "$branch")"
   if [ -z "$dl" ] || ! _strih_ci_artifact_auth | curl -fsSL -H @- -L "$dl" -o "${tmp}/art.zip" 2>/dev/null; then
     rm -rf "$tmp"
     echo "  could not fetch the ${art} CI artifact (GH_TOKEN lacks actions:read, or no successful run yet)" >&2
@@ -50,6 +41,40 @@ except Exception:
     return 1
   fi
   printf '%s' "${tmp}/x"
+}
+
+# _strih_ci_artifact_url ART BRANCH -> the archive_download_url of the newest unexpired ART artifact
+# (from a BRANCH run when BRANCH is set), or nothing. Without a branch the first page holds the newest
+# artifact. With one, issue 1412 (live 11.10.2026): dev CI fills whole pages of the artifacts API, so
+# the newest `main` hub sat on page 2+ and a one-page read found none. Walk the pages
+# (per_page=100, at most STRIH_CI_ARTIFACT_MAX_PAGES, default 10) until a match or an empty page.
+# The token goes to curl on stdin only. Always rc 0 (an empty answer is the caller's failure).
+_strih_ci_artifact_url() {
+  local art="$1" branch="$2" page=1 max="${STRIH_CI_ARTIFACT_MAX_PAGES:-10}" body pick
+  [ -n "$branch" ] || max=1
+  while [ "$page" -le "$max" ]; do
+    body="$(_strih_ci_artifact_auth | curl -fsSL -H @- -H 'Accept: application/vnd.github+json' \
+      "${STRIH_CI_ARTIFACT_API:-https://api.github.com}/repos/${STRIH_LX_GH_REPO:-zbynekdrlik/camera-box}/actions/artifacts?name=${art}&per_page=100&page=${page}" 2>/dev/null || true)"
+    pick="$(printf '%s' "$body" | python3 -c 'import json,sys
+branch=sys.argv[1]
+try:
+    all_arts=json.load(sys.stdin).get("artifacts", [])
+except Exception:
+    all_arts=[]
+if not all_arts:
+    print("END")
+else:
+    arts=[a for a in all_arts if not a.get("expired")
+          and (not branch or (a.get("workflow_run") or {}).get("head_branch") == branch)]
+    print(arts[0]["archive_download_url"] if arts else "")' "$branch" 2>/dev/null || true)"
+    case "$pick" in
+      END) return 0 ;;
+      '') ;;
+      *) printf '%s' "$pick"; return 0 ;;
+    esac
+    page=$((page + 1))
+  done
+  return 0
 }
 
 # _strih_ci_artifact_tmp_root -> the directory the fetch creates its temp dirs in.
