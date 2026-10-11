@@ -57,6 +57,11 @@ if ! declare -F strih_bundle_tree_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-bundle-install.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-bundle-install.sh"
 fi
+# issue 1412: the intercom-hub unit per role (step 13) + verify item 16's crash-loop grade.
+if ! declare -F strih_intercom_hub_cred_dropin_apply >/dev/null; then
+  # shellcheck source=scripts/lib/strih-intercom-hub-unit.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-intercom-hub-unit.sh"
+fi
 
 # strih_lx_ndi_inputs -> the 10 NDI input names the strih role receives, one per line (issue 1317
 # spec; the 2ME feedback inputs are the task's explicit STRIH-SNV names). NOTE (issue 1352): the

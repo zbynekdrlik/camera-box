@@ -724,6 +724,7 @@ install -Dm644 "${HERE}/../systemd/intercom-hub.service" /etc/systemd/system/int
 [ -f "${HERE}/../$(strih_lx_intercom_config)" ] \
   || fail "intercom routing file ${HERE}/../$(strih_lx_intercom_config) (fact STRIH_INTERCOM_CONFIG) not found -- stage the repo intercom/ dir next to scripts/"
 install -Dm644 "${HERE}/../$(strih_lx_intercom_config)" /etc/intercom-hub/intercom.toml
+strih_intercom_hub_cred_dropin_apply /etc/systemd/system/intercom-hub.service.d || fail "intercom-hub role drop-in (issue 1412) failed (above)"
 systemctl daemon-reload
 systemctl enable intercom-hub 2>/dev/null || warn "  could not enable intercom-hub.service"
 # issue 1412 (G6): a fresh box gets the intercom-hub-linux-amd64 CI binary; an installed one is kept.

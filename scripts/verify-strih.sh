@@ -494,11 +494,14 @@ fi
 
 # 16) intercom hub unit (issue 1345 M1): the strih-lx intercom hub is installed ENABLE-ONLY while the
 #     Windows VB-Matrix stays the live intercom (M4 is the cut-over). REPORT-ONLY: an installed +
-#     enabled but NOT active unit is the CORRECT parallel-run state, never a FAIL.
+#     enabled but NOT active unit is the CORRECT parallel-run state, never a FAIL; a crash loop is.
 if [ -f /etc/systemd/system/intercom-hub.service ]; then
   IH_EN="$(systemctl is-enabled intercom-hub 2>/dev/null || echo unknown)"
   IH_ACT="$(systemctl is-active intercom-hub 2>/dev/null || echo inactive)"
-  note "intercom-hub.service installed (enabled=${IH_EN}, active=${IH_ACT}); enable-only until the M4 cut-over (issue 1345) -- report-only, an inactive unit is correct while parallel"
+  # issue 1412: a crash-looping hub is a FAIL (stream-pp's 243/CREDENTIALS loop read as a NOTE).
+  if IH_LOOP="$(strih_intercom_hub_crash_loop)"; then bad "intercom-hub.service ${IH_LOOP} -- journalctl -u intercom-hub names the cause (issue 1412)"
+  else note "intercom-hub.service installed (enabled=${IH_EN}, active=${IH_ACT}); enable-only until the M4 cut-over (issue 1345) -- report-only, an inactive unit is correct while parallel"; fi
+  strih_intercom_hub_cred_grade /etc/systemd/system/intercom-hub.service.d   # issue 1412: the role drop-in
 else
   note "intercom-hub.service not installed -- run setup-strih.sh step 13 (issue 1345 M1); report-only"
 fi

@@ -211,6 +211,17 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
   preview off. The strih printer text is byte-identical.
 - **verify item 9** grades `fohabl` when the hub has it (strih-lx), else every `program_ref`
   participant (resolume-pp on the PP boxes).
+- **The hub runs without the Janus credential on a box that skips step 14** (stream-pp 11.10.2026:
+  the base unit's `LoadCredential=janus-room.secret:...` failed 243/CREDENTIALS, 425 restarts, the
+  program audio path dead). Step 13 calls `strih_intercom_hub_cred_dropin_apply`
+  (`scripts/lib/strih-intercom-hub-unit.sh`) before its daemon-reload: on such a box it writes
+  `intercom-hub.service.d/20-no-janus-credential.conf` = `[Service]` + an empty `LoadCredential=`
+  (resets the list; the live workaround's name and content), on a Janus box it removes a leftover.
+  The gate is `obs_box_step_applies 14`, the step that creates the secret, so the two never disagree.
+- **verify item 16 FAILs a crash-looping hub** (`strih_intercom_hub_crash_loop`: two `systemctl show`
+  samples 6 s apart -- longer than RestartSec=5 -- `failed`, `auto-restart` or a climbing NRestarts);
+  an installed-but-inactive hub stays a NOTE. Its `(intercom-hub)` row grades the role drop-in (a
+  Janus-less box without it FAILs; a Janus box must have the secret file and no reset).
 - **Open:** the strih-lx genlock deploy arm is not role-aware; a keeper-only box still installs the
   session-app packages; stream-pp's AMD power envelope and its 1920x1200 panel (autostart `--auto`
   fallback) are to be read on site.
