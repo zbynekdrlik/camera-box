@@ -220,11 +220,17 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
    is the unit's contract. Not stopped in 30 s = exit 4, nothing installed, best-effort start.
 6. **setup** — `sudo -k -S … bash <stage>/repo/run-setup.sh`, stdin = the sudo password line then
    `ghtoken:<token>`. The runner reads the token line (skipping a password line a NOPASSWD sudo left
-   unread), exports `GH_TOKEN STRIH_LX_BUNDLE_SRC=<stage>/bundle`, and re-execs itself `setsid nohup`
-   to run `setup-strih.sh --box strih-lx` DIRECTLY (the explicit fact-file box, issue 1361) and write
-   `<stage>/setup-strih.rc`; dev1 polls it
-   (default 45 min). An ssh drop cannot kill the install mid-apt; the token is never an argv or a
-   file. **OBS is never started over a still-running installer**: a launch whose ssh returned
+   unread), writes `GH_TOKEN STRIH_LX_BUNDLE_SRC=<stage>/bundle` (+ `CAM_PW` / `STRIH_NDI_PEER` when
+   set) into a 0600 `<stage>/.runner.env`, and re-execs itself as a SYSTEM transient unit
+   (`systemd-run --unit=strih-lx-setup-<epoch> --collect`) to run `setup-strih.sh --box strih-lx`
+   DIRECTLY (the explicit fact-file box, issue 1361) and write `<stage>/setup-strih.rc`; the child
+   sources the env file and deletes it at once; dev1 polls the rc
+   (default 45 min). An ssh drop cannot kill the install mid-apt; the token is never an argv.
+   **Never `setsid nohup` (issue 1411):** setsid leaves the child in the ssh session scope under
+   `user-1000.slice`; on a FRESH box step 11's desktop purge ends the last GUI session, systemd stops
+   the user slice and kills setup-strih mid-apt with no rc (new strih notebook, 11.10.2026 --
+   journal `session-N.scope: Killing process … (setup-strih.sh) with signal SIGTERM`). A killed
+   apt leaves dpkg half-configured: `dpkg --configure -a` before the re-run. **OBS is never started over a still-running installer**: a launch whose ssh returned
    non-zero while setup-strih.sh runs is THIS deploy's detached installer (the preflight saw none), so
    the deploy follows it through the rc poll (WARNING, not a failure — never the strih left dark); an
    rc timeout with the installer still running (or the box unreachable) is exit 4 "wait for
