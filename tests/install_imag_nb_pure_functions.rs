@@ -237,6 +237,62 @@ fn nm_keyfile_pins_the_static_address() {
     );
 }
 
+/// issue 1412: the NetworkManager profile is named after the box (`<hostname up to the first ->-lan`),
+/// never the imag literal: stream-pp came up with an `imag-lan` profile and the owner asked why.
+#[test]
+fn nm_profile_name_follows_the_hostname_1412() {
+    for (host, want) in [
+        ("stream-pp", "stream-lan"),
+        ("strih-pp", "strih-lan"),
+        ("strih-lx", "strih-lan"),
+        ("imag-nb", "imag-lan"),
+        ("imag", "imag-lan"),
+    ] {
+        let (code, out, err) = run_sourced(&format!("imag_nm_con_id {host}"));
+        assert_eq!(code, 0, "{host}: {err}");
+        assert_eq!(out.trim(), want, "{host}");
+    }
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        !body.contains("NM_CON_ID=\"imag-lan\""),
+        "the profile name must not be the imag literal"
+    );
+}
+
+/// issue 1412: the live layers ship cloud-init. On the installed stream-pp its
+/// cloud-init-network.service waited 4 min for a datasource on every boot (the owner saw a spinner),
+/// and its 50-cloud-init.yaml netplan added a second DHCP profile. The installed system disables it.
+#[test]
+fn installed_system_disables_cloud_init_1412() {
+    let d = tmpdir("cloudinit");
+    let root = d.join("root");
+    std::fs::create_dir_all(root.join("etc/cloud")).unwrap();
+    std::fs::create_dir_all(root.join("etc/netplan")).unwrap();
+    std::fs::write(root.join("etc/netplan/50-cloud-init.yaml"), "network: {}\n").unwrap();
+    std::fs::write(
+        root.join("etc/netplan/01-network-manager-all.yaml"),
+        "network: {}\n",
+    )
+    .unwrap();
+    let (code, _out, err) = run_sourced(&format!("imag_disable_cloud_init '{}'", root.display()));
+    assert_eq!(code, 0, "{err}");
+    assert!(root.join("etc/cloud/cloud-init.disabled").exists());
+    assert!(!root.join("etc/netplan/50-cloud-init.yaml").exists());
+    assert!(root
+        .join("etc/netplan/01-network-manager-all.yaml")
+        .exists());
+    // a root without cloud-init stays fine
+    let bare = d.join("bare");
+    std::fs::create_dir_all(bare.join("etc")).unwrap();
+    let (code, _out, err) = run_sourced(&format!("imag_disable_cloud_init '{}'", bare.display()));
+    assert_eq!(code, 0, "{err}");
+    let body = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        body.contains("imag_disable_cloud_init \"$MOUNT_ROOT\""),
+        "the install flow must call it on the target root"
+    );
+}
+
 /// issue 1317 (owner ROZHODNUTÉ 18.9.): the strih-lx notebook runs Ubuntu 26.04, so the chroot
 /// kernel meta can no longer be hardcoded to noble's `linux-generic-hwe-24.04` (that package does
 /// not exist on 26.04 — the install would fail or ship no kernel). The chroot step must DERIVE the
