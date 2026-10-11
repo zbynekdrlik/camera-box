@@ -312,6 +312,107 @@ def test_the_cred_grade_fails_a_janus_less_box_without_the_reset(tmp_path):
     assert _bash(body, d).stdout.startswith("PASS")
 
 
+# --- bug 6: setup-strih (root) created the desktop user's ~/.config levels root-owned ---------------
+# `install -d -o U -g U a/b/c` gives -o/-g to the LAST component only; every missing parent is created
+# root:root. Live 11.10.2026: ~/.config (strih-pp), ~/.config/systemd, ~/.config/wireplumber and
+# ~/.config/pipewire were root-owned, and Companion Satellite crash-looped 183 times on
+# `Failed to get 'userData' path` (it could not create ~/.config/companion-satellite).
+
+import getpass  # noqa: E402
+
+ME = getpass.getuser()
+
+
+def _id_stub(tmp_path, uid):
+    """`id -u USER` answers UID (a uid the test files do not have = every level reads foreign)."""
+    d = tmp_path / "idstub"
+    d.mkdir(exist_ok=True)
+    log = tmp_path / "chown.log"
+    (d / "id").write_text('#!/bin/bash\n[ "$1" = -u ] && { echo %s; exit 0; }\nexec /usr/bin/id "$@"\n' % uid)
+    (d / "chown").write_text('#!/bin/bash\necho "$*" >> "%s"\nexit 0\n' % log)
+    for f in d.iterdir():
+        f.chmod(0o755)
+    return {"PATH": "%s:%s" % (d, os.environ["PATH"])}, log
+
+
+def test_every_created_level_up_to_the_home_is_owned_by_the_user(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    env, log = _id_stub(tmp_path, os.getuid())
+    r = _bash('strih_user_home_dir "$1" "$2" "$1/.config/systemd/user"', home, ME, env=env)
+    assert r.returncode == 0, r.stderr
+    assert (home / ".config" / "systemd" / "user").is_dir()
+    chowned = log.read_text().splitlines()
+    assert chowned == ["%s: %s" % (ME, home / ".config"), "%s: %s" % (ME, home / ".config" / "systemd"),
+                       "%s: %s" % (ME, home / ".config" / "systemd" / "user")], chowned
+
+
+def test_an_existing_foreign_level_is_given_back_and_the_home_itself_is_never_touched(tmp_path):
+    home = tmp_path / "home"
+    (home / ".config" / "pipewire" / "keep").mkdir(parents=True)
+    env, log = _id_stub(tmp_path, 4242)   # every existing level reads as not the user's
+    r = _bash('strih_user_home_dir "$1" "$2" "$1/.config/pipewire/pipewire.conf.d"', home, ME, env=env)
+    assert r.returncode == 0, r.stderr
+    chowned = log.read_text().splitlines()
+    assert chowned == ["%s: %s" % (ME, home / ".config"), "%s: %s" % (ME, home / ".config" / "pipewire"),
+                       "%s: %s" % (ME, home / ".config" / "pipewire" / "pipewire.conf.d")], chowned
+    assert not any("-R" in c.split() for c in chowned), "never a recursive chown"
+
+
+def test_a_level_the_user_already_owns_is_not_chowned(tmp_path):
+    home = tmp_path / "home"
+    (home / ".config").mkdir(parents=True)
+    env, log = _id_stub(tmp_path, os.getuid())
+    r = _bash('strih_user_home_dir "$1" "$2" "$1/.config/openbox"', home, ME, env=env)
+    assert r.returncode == 0, r.stderr
+    assert log.read_text().splitlines() == ["%s: %s" % (ME, home / ".config" / "openbox")]
+
+
+def test_a_path_outside_the_home_or_through_a_symlink_refuses(tmp_path):
+    home = tmp_path / "home"
+    (home / ".config").mkdir(parents=True)
+    (tmp_path / "elsewhere").mkdir()
+    (home / ".config" / "link").symlink_to(tmp_path / "elsewhere")
+    env, log = _id_stub(tmp_path, os.getuid())
+    assert _bash('strih_user_home_dir "$1" "$2" /etc/x', home, ME, env=env).returncode != 0
+    assert _bash('strih_user_home_dir "$1" "$2" "$1/.config/link/sub"', home, ME, env=env).returncode != 0
+    assert not (tmp_path / "elsewhere" / "sub").exists()
+
+
+def test_setup_and_its_libs_create_no_nested_user_dir_with_a_bare_install_d():
+    """Every user-home directory goes through strih_user_home_dir, never install -d / mkdir -p."""
+    texts = {
+        "setup-strih.sh": (REPO / "scripts" / "setup-strih.sh").read_text(),
+        "strih-session-apps.sh": (REPO / "scripts" / "lib" / "strih-session-apps.sh").read_text(),
+        "strih-program-audio.sh": (REPO / "scripts" / "lib" / "strih-program-audio.sh").read_text(),
+    }
+    import re
+    bad = []
+    for name, t in texts.items():
+        for line in t.splitlines():
+            s = line.strip()
+            if s.startswith("#"):
+                continue
+            if re.search(r'\b(install -d|mkdir -p)\b', s) and re.search(
+                    r'USER_HOME\}/\.config|\$OBS_CFG|\$\{OBS_CFG\}|CS_APPCFG_DIR|"\$unitdir"', s):
+                bad.append("%s: %s" % (name, s))
+    assert bad == [], bad
+    assert texts["setup-strih.sh"].count('strih_user_home_dir "$USER_HOME" "$DESKTOP_USER"') >= 7
+
+
+def test_verify_fails_a_root_owned_entry_under_the_config_dir(tmp_path):
+    home = tmp_path / "home"
+    (home / ".config" / "wireplumber").mkdir(parents=True)
+    (home / ".config" / "wireplumber" / "x.conf").write_text("x")
+    body = 'ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nstrih_home_ownership_grade "$1" "$2"'
+    # the test cannot create a root-owned file; the grade takes the uid it calls foreign
+    r = _bash(body, home, os.getuid())
+    assert r.stdout.startswith("FAIL") and ".config/wireplumber" in r.stdout, r.stdout
+    assert _bash(body, home, 4242).stdout.startswith("PASS")
+    v = (REPO / "scripts" / "verify-strih.sh").read_text()
+    assert 'strih_home_ownership_grade "$USER_HOME"' in v
+
+
 def test_the_prefix_install_never_uses_cp_a_into_the_prefix():
     body = LIB.read_text().split("strih_install_bundle_prefix() {", 1)[1].split("\n}\n", 1)[0]
     assert "cp -a" not in body
