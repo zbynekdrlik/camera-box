@@ -1683,7 +1683,14 @@ do_event() {
   warn_imag_genlock_stale
   echo
   echo "[obs] #524 pre-event guard: stop any stray recording left running on strih/stream (frees disk before going live):"
-  stop_stray_recordings
+  # issue 1410 (the #868 pattern): a box the guard cannot reach (strih-lx powered off, 11.10.2026:
+  # "No route to host") returns non-zero, and under set -e that ended EVENT here, before the cam2
+  # painter stop and the burn clear. Record it, warn, run every step below, fold it into the exit.
+  local _stray_rc=0
+  stop_stray_recordings || _stray_rc=$?
+  if [ "$_stray_rc" -ne 0 ]; then
+    echo "WARNING issue 1410: stray-recording guard FAILED (rc=$_stray_rc) — an OBS box was unreachable or a stray recording could not be confirmed stopped (see the box lines above); continuing with the painter stop and the burn clear, EVENT mode will still exit non-zero." >&2
+  fi
   echo
   echo "[cam2 ${PAINTER_IP}] stop painter (via pidfile) -> remove CAMERA_BOX_NO_DISPLAY drop-in -> restart camera-box -> verify HDMI preview restored"
   # #868: the cam-side restore must NOT be able to strand a measurement burn ON. Under `set -e` a
@@ -1749,11 +1756,15 @@ do_event() {
   event_mode_discord_confirm_send "$(cat "$EVENT_ASSERT_DISCORD_MSG_PATH" 2>/dev/null || echo "$EVENT_ASSERT_SUMMARY")"
   rm -f "$EVENT_ASSERT_DISCORD_MSG_PATH" "$EVENT_ASSERT_RESULT_JSON" 2>/dev/null || true
   echo
-  # #868: fold the recorded cam-side restore failure (and, issue 1407, the relay step's) into the
-  # final verdict — deferring them past the burn-clear must never SWALLOW them.
-  if [ "$EVENT_ASSERT_PASS" -eq 0 ] && [ "${_cam_restore_rc:-0}" -eq 0 ] && [ "${_relay_rc:-0}" -eq 0 ]; then
+  # #868: fold the recorded cam-side restore failure (and, issue 1407, the relay step's; issue 1410,
+  # the stray-recording guard's) into the final verdict — deferring them past the burn-clear must
+  # never SWALLOW them.
+  if [ "$EVENT_ASSERT_PASS" -eq 0 ] && [ "${_cam_restore_rc:-0}" -eq 0 ] && [ "${_relay_rc:-0}" -eq 0 ] && [ "${_stray_rc:-0}" -eq 0 ]; then
     echo "RESULT: EVENT mode — cam side PASS, burns OFF, #722 CONTRACT CONFIRMED clean for broadcast."
     exit 0
+  fi
+  if [ "${_stray_rc:-0}" -ne 0 ]; then
+    echo "RESULT: EVENT mode — stray-recording guard FAILED (issue 1410, rc=${_stray_rc}). The painter stop and the burns were still handled, but an OBS box was not verified free of a stray recording — see the guard lines above." >&2
   fi
   bkshading_relay_mode_result event "${_relay_rc:-0}"
   if [ "${_cam_restore_rc:-0}" -ne 0 ]; then
