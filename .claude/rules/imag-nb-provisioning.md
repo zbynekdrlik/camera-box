@@ -76,9 +76,13 @@ comes back short). See `scripts/verify-imag.sh`'s own header comment for the ful
   `kernel_is_installed_in_the_chroot_not_expected_from_the_layers`.
 - Stack the layers read-only with one `mount -t overlay -o ro,lowerdir=top:…:bottom` and rsync the
   merged view, rather than sequential `unsquashfs` — overlayfs then resolves the whiteouts natively.
-- Skip the per-language deltas and note that `minimal.enhanced-secureboot.squashfs` is a delta on
-  `minimal`, while `minimal.standard.enhanced-secureboot.squashfs` is the one that belongs on top of
-  `minimal.standard` — picking the wrong branch is a silently broken chain.
+- Skip the per-language deltas AND both `*enhanced-secureboot*` layers, whatever the Secure Boot
+  state (issue 1412). They are Ubuntu's TPM-backed full-disk-encryption variant: the boot is managed
+  by snapd, and their `boot-managed-by-snapd` package conflicts with `grub-efi-amd64`. On stream-pp
+  (Secure Boot on, 26.04 stick, 11.10.2026) the chroot GRUB install died with `Cannot install
+  grub-efi-amd64 on system as boot is managed by snapd`. Secure Boot is served by the
+  `shim-signed` + `grub-efi-amd64-signed` + signed kernel chain the chroot installs; the shim NVRAM
+  entry boots it.
 - Reused cam-fleet boot lessons that apply here too: a NAMED NVRAM entry **plus** the removable
   `\EFI\BOOT\BOOTX64.EFI` fallback, `systemd-networkd-wait-online` masked, `ssh.service` (not
   `ssh.socket`, which is what noble enables by default), UUID-based fstab, blank machine-id.
