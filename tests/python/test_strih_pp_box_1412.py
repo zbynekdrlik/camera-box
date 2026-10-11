@@ -55,10 +55,10 @@ def _bash(body, env=None, sources=(FACTS,), path_prefix=None):
 
 
 def _pp_filled(tmp_path, peer=PEER, extra=()):
-    """strih-pp.env with the one open fact answered (the owner answers it on site)."""
+    """strih-pp.env with the NDI runtime peer set to PEER (answered 11.10.2026 as SNV cam5)."""
     body = (BOXES / "strih-pp.env").read_text()
-    assert body.count("STRIH_NDI_RUNTIME_PEER=TODO_OWNER\n") == 1
-    body = body.replace("STRIH_NDI_RUNTIME_PEER=TODO_OWNER\n", "STRIH_NDI_RUNTIME_PEER=%s\n" % peer)
+    assert body.count("STRIH_NDI_RUNTIME_PEER=10.77.9.65\n") == 1
+    body = body.replace("STRIH_NDI_RUNTIME_PEER=10.77.9.65\n", "STRIH_NDI_RUNTIME_PEER=%s\n" % peer)
     for old, new in extra:
         assert body.count(old) == 1, old
         body = body.replace(old, new)
@@ -83,11 +83,12 @@ def test_strih_lx_is_the_strih_role_on_the_snv_grandmaster_with_the_sampler():
     assert r.stdout.strip() == "strih|video-clock.lan|on"
 
 
-def test_strih_pp_refuses_naming_only_the_runtime_peer():
-    r = _bash("strih_box_load strih-pp && echo LOADED")
-    assert r.returncode != 0 and "LOADED" not in r.stdout
-    todo = [ln for ln in r.stderr.splitlines() if "TODO_OWNER" in ln]
-    assert todo == ["strih-box strih-pp: STRIH_NDI_RUNTIME_PEER is TODO_OWNER -- the owner has not decided it yet"], r.stderr
+def test_strih_pp_loads_with_every_fact_answered():
+    """11.10.2026: the last open fact (the NDI runtime peer) is answered -- SNV cam5, the fleet runtime."""
+    r = _bash("strih_box_load strih-pp || exit 9\nstrih_lx_ndi_runtime_peer")
+    assert r.returncode == 0, r.stderr
+    assert "TODO_OWNER" not in r.stderr
+    assert r.stdout.strip() == "10.77.9.65"
 
 
 EXPECTED_PP = {
@@ -147,11 +148,15 @@ def test_rig_grandmaster_ip_overrides_the_gm_fact():
     assert r.stdout == "10.9.9.9"
 
 
-def test_setup_and_verify_refuse_strih_pp_until_the_peer_is_answered():
+def test_setup_and_verify_refuse_a_box_with_an_open_fact(tmp_path):
+    body = (BOXES / "strih-pp.env").read_text().replace(
+        "STRIH_NDI_RUNTIME_PEER=10.77.9.65\n", "STRIH_NDI_RUNTIME_PEER=TODO_OWNER\n")
+    (tmp_path / "strih-pp.env").write_text(body)
+    env = {k: v for k, v in os.environ.items() if k not in LEAKY}
+    env["STRIH_BOXES_DIR"] = str(tmp_path)
     for script in (SETUP, VERIFY):
         r = subprocess.run(["bash", "-c", '. "%s" --box strih-pp\necho SOURCED' % script],
-                           capture_output=True, text=True, cwd=str(REPO), timeout=60,
-                           env={k: v for k, v in os.environ.items() if k not in LEAKY})
+                           capture_output=True, text=True, cwd=str(REPO), timeout=60, env=env)
         assert r.returncode != 0 and "SOURCED" not in r.stdout, script
         assert "STRIH_NDI_RUNTIME_PEER is TODO_OWNER" in r.stderr
 

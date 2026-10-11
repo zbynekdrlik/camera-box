@@ -186,24 +186,17 @@ fn accessors_lazily_load_the_default_box_strih_lx() {
     assert_eq!(out, "10.77.9.202\nstrih-lx", "got: {out}");
 }
 
-/// issue 1412: strih-pp carries every fact the 11.10.2026 recon proved; only the NDI runtime peer
-/// (a PP cambox whose PP address is not known yet) is still TODO_OWNER, and the refusal names it alone.
+/// issue 1412: strih-pp carries every fact; the last open one (the NDI runtime peer) is answered
+/// 11.10.2026 with SNV cam5, the fleet runtime source.
 #[test]
-fn todo_owner_template_is_refused_naming_every_missing_fact() {
-    let (c, out, err) = with_loader(&[], "strih_box_load strih-pp && echo LOADED");
-    assert_ne!(
-        c, 0,
-        "strih-pp (one TODO_OWNER fact left) must refuse; out={out}"
+fn strih_pp_loads_with_every_fact_answered() {
+    let (c, out, err) = with_loader(
+        &[],
+        "strih_box_load strih-pp || exit 9\nstrih_lx_ndi_runtime_peer",
     );
-    assert!(!out.contains("LOADED"), "must not load: {out}");
-    for k in FACT_KEYS {
-        let named = err.contains(&format!("{k} is TODO_OWNER"));
-        assert_eq!(
-            named,
-            *k == "STRIH_NDI_RUNTIME_PEER",
-            "only STRIH_NDI_RUNTIME_PEER is still open ({k}); stderr:\n{err}"
-        );
-    }
+    assert_eq!(c, 0, "strih-pp must load; stderr={err}");
+    assert!(!err.contains("TODO_OWNER"), "{err}");
+    assert_eq!(out.trim(), "10.77.9.65");
 }
 
 /// issue 1412: with strih-pp decided, the "name EVERY open fact" contract keeps a fixture of its own.
@@ -502,19 +495,30 @@ fn cli_parses_box_flag_default_strih_lx() {
 // ---------------------------------------------------------------------------------------------
 
 /// `. setup-strih.sh --box X` (the source-guard stops before the root-only flow).
-fn source_orchestrator(script: &str, args: &str) -> (i32, String, String) {
+fn source_orchestrator(script: &str, args: &str, env: &[(&str, &str)]) -> (i32, String, String) {
     let body = format!(
         ". \"{}\" {args}\necho SOURCED-OK",
         root().join(script).display()
     );
-    bash(&[], &body)
+    bash(env, &body)
 }
 
 #[test]
 fn setup_and_verify_refuse_the_todo_owner_box() {
+    let d = TmpDir::new("todo-orch");
+    fixture_box(
+        &d,
+        "strih-todo",
+        &[(
+            "STRIH_NDI_RUNTIME_PEER=10.77.9.61",
+            "STRIH_NDI_RUNTIME_PEER=TODO_OWNER",
+        )],
+    );
+    let dir = d.path().to_string_lossy().into_owned();
     for script in ["scripts/setup-strih.sh", "scripts/verify-strih.sh"] {
-        let (c, out, err) = source_orchestrator(script, "--box strih-pp");
-        assert_ne!(c, 0, "{script} --box strih-pp must refuse; out={out}");
+        let (c, out, err) =
+            source_orchestrator(script, "--box strih-todo", &[("STRIH_BOXES_DIR", &dir)]);
+        assert_ne!(c, 0, "{script} --box strih-todo must refuse; out={out}");
         assert!(
             !out.contains("SOURCED-OK"),
             "{script} continued past the refusal"
@@ -523,7 +527,7 @@ fn setup_and_verify_refuse_the_todo_owner_box() {
             err.contains("STRIH_NDI_RUNTIME_PEER is TODO_OWNER"),
             "{script}: refusal must name the open fact:\n{err}"
         );
-        let (c2, _o, err2) = source_orchestrator(script, "--box strih-nowhere");
+        let (c2, _o, err2) = source_orchestrator(script, "--box strih-nowhere", &[]);
         assert_ne!(c2, 0, "{script}: unknown box must refuse");
         assert!(err2.contains("no fact file"), "{script}: {err2}");
     }
@@ -532,7 +536,7 @@ fn setup_and_verify_refuse_the_todo_owner_box() {
 #[test]
 fn setup_and_verify_default_to_strih_lx() {
     for script in ["scripts/setup-strih.sh", "scripts/verify-strih.sh"] {
-        let (c, out, err) = source_orchestrator(script, "");
+        let (c, out, err) = source_orchestrator(script, "", &[]);
         assert_eq!(c, 0, "{script}: {err}");
         assert!(out.contains("SOURCED-OK"));
         let body = format!(
