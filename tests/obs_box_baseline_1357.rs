@@ -712,6 +712,7 @@ cstate_unit=enabled
 cstate_active=active
 cstate_bound=150
 cstate_states=64
+cpuidle_driver=acpi_idle
 cstate_deep=C3_ACPI:1048us
 cstate_deep_delta=0
 sleep_target=masked
@@ -728,6 +729,7 @@ obs_running=1
 obs_rtprio_limit=0
 dgpu=1
 prime=nvidia
+display_gpus=2
 igpu_unit=
 oomd=masked
 offhours=1
@@ -849,6 +851,47 @@ fn perf_is_ok_on_a_box_without_a_cpufreq_driver_1412() {
     assert!(
         gate < enable,
         "the unit is enabled only behind the cpufreq gate"
+    );
+}
+
+/// issue 1412 (strih-pp, Ryzen 7 5800X + RTX 3060, no iGPU, CPPC/C-states off in the BIOS): the
+/// kernel has no cpuidle driver (`current_driver` none, no cpuidle states), so no deep C-state can be
+/// entered and there is nothing for the latency bound to keep out; and with the NVIDIA the ONLY display
+/// adapter, `prime-select nvidia` answers "no integrated GPU detected" and the query stays on-demand.
+/// Both rows grade OK on that box, and stay strict everywhere else.
+#[test]
+fn cstate_and_gpu_rows_accept_a_box_without_cpuidle_or_igpu_1412() {
+    let row = |facts: &str, item: &str| -> String {
+        let (_c, rows) = verdict(facts);
+        rows.iter().find(|(n, _)| n == item).unwrap().1.clone()
+    };
+    let no_idle = GOOD_FACTS
+        .replace("cstate_states=64", "cstate_states=0")
+        .replace("cpuidle_driver=acpi_idle", "cpuidle_driver=none")
+        .replace("cstate_deep=C3_ACPI:1048us", "cstate_deep=");
+    assert_eq!(row(&no_idle, "cstate"), "OK");
+    assert_eq!(
+        row(
+            &no_idle.replace("cstate_active=active", "cstate_active=inactive"),
+            "cstate"
+        ),
+        "FAIL",
+        "the latency holder itself still counts"
+    );
+    // zero states with a cpuidle driver bound (or unreadable) stays a FAIL
+    let unreadable = GOOD_FACTS.replace("cstate_states=64", "cstate_states=0");
+    assert_eq!(row(&unreadable, "cstate"), "FAIL");
+    let only_nvidia = GOOD_FACTS
+        .replace("prime=nvidia", "prime=on-demand")
+        .replace("display_gpus=2", "display_gpus=1");
+    assert_eq!(row(&only_nvidia, "gpu"), "OK");
+    // a hybrid box (iGPU + NVIDIA) still needs NVIDIA-primary
+    assert_eq!(
+        row(
+            &GOOD_FACTS.replace("prime=nvidia", "prime=on-demand"),
+            "gpu"
+        ),
+        "FAIL"
     );
 }
 
