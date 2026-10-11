@@ -10,6 +10,8 @@ paths:
   - "scripts/rig-dev-handover-check.sh"
   - "tests/python/test_dantesync_fleet*_1372.py"
   - "tests/python/test_dantesync_clock_fleet_1372.py"
+  - "tests/python/test_dantesync_fleet_pp_1412.py"
+  - "scripts/strih-boxes/*.env"
   - "tests/python/test_clock_discipline_1372.py"
   - "tests/fixtures/dantesync_clock_discipline_1372.tsv"
 ---
@@ -30,16 +32,50 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
 - **The table `DANTESYNC_FLEET`** (env-overridable): `name|addr|os|role|homegate|user|credvar`.
   - `addr`: a literal, `obs:<name>` (resolved through `obs_fleet_host` — a `retired` obs-fleet box
     drops out, so imag returns with its obs-fleet flip), or `local` (dev1).
-  - `role`: `video` | `audio` | `ntp-master` — picks the canonical config template AND the
-    grandmaster the node must lock to (`dantesync_fleet_role_gm_host`).
+  - `role`: `video` | `audio` | `ntp-master` | a venue role `video-<venue>` / `ntp-master-<venue>`
+    (issue 1412) — picks the canonical config template AND the grandmaster the node must lock to
+    (`dantesync_fleet_role_gm_host`).
   - `homegate`: `always` | `obsfleet` (traveling resolume: read only while `obs_fleet_is_home`) |
-    `local`.
+    `reach` (issue 1412: read only while ssh :22 answers) | `local`.
   - `user`: `-` = the consumer's default login; fohabl is `master`.
   - `credvar`: the NAME of the env var holding the node's own ssh password (fohabl:
     `DANTESYNC_FOHABL_SSH_PASS`). NEVER a value in a committed file. The value comes from the env or
     the dev1-local `~/.config/camera-box/dantesync-fleet.env` (0600, `KEY=VALUE`, PARSED not sourced,
     only row-named keys read). A missing value = that node reads UNKNOWN / is skipped — never dialled
     with an empty or a foreign password.
+- **The Poprad (PP) venue rows (issue 1412).** `strih-pp|obs:strih-pp|linux|ntp-master-pp|reach|-|`
+  (the PP NTP master), `stream-pp|obs:stream-pp|linux|video-pp|reach|-|`,
+  `resolume-pp|resolume-pp.lan|windows|video-pp|reach|-|` (no obs-fleet row; it runs no managed
+  OBS). Owner (11.10.2026): "a tiez tam nie je dantesync tam nie je updatnuty cize potrebujes zaradit
+  tento pc do updatovania". dev1 reaches the PP LAN (10.77.8.0/23) as 10.76.8.x through the
+  companion-pp subnet router, so every PP row dials a NAME.
+  - **GM per venue.** A venue role `video-<venue>` / `ntp-master-<venue>` (venue = lower-case ASCII
+    letters + digits) locks to its venue's PTP grandmaster: `STRIH_DANTE_GM` of the ONE
+    `scripts/strih-boxes/*.env` with `STRIH_VENUE=<venue>` + `STRIH_DANTESYNC_ROLE=server` (PP:
+    strih-pp.env, 10.77.8.110), PARSED never sourced (`dantesync_fleet_venue_gm_host` /
+    `dantesync_fleet.venue_gm_host`). None, two, or one without the GM fails LOUD naming the venue.
+    Never a second literal, never moved by `RIG_GRANDMASTER_IP` (the home rig's override). The plain
+    roles stay the home venue (SNV, video-clock.lan). The canonical config has `video-pp` /
+    `ntp-master-pp` templates; `@video_gm` resolves to the role's venue grandmaster. A `video-pp`
+    client's `ntp_server` is `$optional` `strih-pp.lan` (the stream-pp fact upstream).
+  - **The `reach` homegate.** Present iff the address resolves AND ssh (`DANTESYNC_FLEET_REACH_PORT`,
+    22) answers. The PP boxes are reachable only while the PP link is up, and ssh (not OBS-WS) is the
+    box-up signal: a box with OBS off is still version-gated and rolled, and a dead dantesync on a
+    reachable box still reads UNKNOWN / NO_DANTESYNC. An unreachable reach node is SKIPPED by the
+    version gate (`SKIPPED (unreachable`), the upgrader (`dantesync_skip_away_traveling`; the fleet
+    gate wins over strih-pp's obs-fleet `traveling` row), the drift check and the watchdog
+    (`away (unreachable`): never a page, never a failed gate. `OBS_FLEET_HOME` (the one
+    traveling-box force list) is authoritative for a reach node too, so a test that pins it never
+    touches the network. A probe costs up to ~6 s per unreachable node (resolve 2 s + connect 4 s).
+  - **Every venue NTP master is master-aware in the upgrader** (`dantesync_fleet_master_names` =
+    every `ntp-master*` role; `NTP_MASTER` is a space-separated list), so strih-pp is never verified
+    against the slave bound (the 29.9.2026 rollback class), and a forced downgrade below 1.15.0
+    deletes its `date-offset.json` like strih-lx's.
+  - **Watchdog tests must empty `DANTE_CLOCK_REACH_NODES`** (or pin `OBS_FLEET_HOME`) when they pin
+    the roster: on dev1 the PP link is up, so a reach probe is live I/O there and absent on CI (the
+    live-rig gotcha, `ci-testing-gotchas.md`). Run the PP tests in `unshare -n` too.
+  - **Not in the list yet:** the PP camboxes (no PP address yet, owner 11.10.2026) and companion-pp
+    (dantesync 1.8.10, client 10.77.8.2 in the recon; not part of this decision).
 - **lv1 (10.77.7.100) is deliberately absent** (owner ROZHODNUTÉ 25.9.2026: an operational PC, on the
   network temporarily).
 - **The audio grandmaster** is `DANTESYNC_AUDIO_GM_HOST` (default 10.77.7.104 since the leader moved
@@ -66,9 +102,9 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
 
 | consumer | how it derives |
 |---|---|
-| `dantesync-version-gate.sh --fleet` | adds every node not named explicitly; `--present` skips an away traveling box (named `SKIPPED`); per-node credential by name (`_dv_ssh_pass` / `_dv_cred_missing`) |
-| `dantesync-fleet-upgrade.sh --fleet` | same set + credential; the fleet `ntp-master` node is the master-aware verify unless `NTP_MASTER` is given; an audio node is verified against the audio grandmaster (`dantesync_gate_env_for`); a node missing its credential is SKIPPED |
-| `dantesync-clock-alert-watchdog.sh` | `DANTE_CLOCK_{CAM,OBS,LOCAL}_NODES` defaults + the new `DANTE_CLOCK_FIXED_NODES` (mbc, fohabl; box-up = ssh :22, no mgmt axis); roster lines carry a 4th ROLE field, and an audio node is graded against the audio grandmaster |
+| `dantesync-version-gate.sh --fleet` | adds every node not named explicitly; `--present` skips an away traveling box and an unreachable `reach` node (named `SKIPPED`, issue 1412); per-node credential by name (`_dv_ssh_pass` / `_dv_cred_missing`) |
+| `dantesync-fleet-upgrade.sh --fleet` | same set + credential; every fleet `ntp-master*` node (strih-lx, strih-pp) is a master-aware verify unless `NTP_MASTER` is given; an audio or venue node is verified against its role's grandmaster (`dantesync_gate_env_for`); a node missing its credential, or an unreachable `reach` node, is SKIPPED |
+| `dantesync-clock-alert-watchdog.sh` | `DANTE_CLOCK_{CAM,OBS,LOCAL}_NODES` defaults + `DANTE_CLOCK_FIXED_NODES` (mbc, fohabl; box-up = ssh :22, no mgmt axis) + `DANTE_CLOCK_REACH_NODES` (issue 1412: the PP boxes, skipped while unreachable, otherwise like a fixed node); roster lines carry a 4th ROLE field, and an audio or venue node is graded against its role's grandmaster (each venue grandmaster resolved once per pass) |
 | `rig-dev-handover-check.sh` item 12 | `dantesync-version-gate.sh --fleet` |
 
 The E2E `[0/8]` version gate is NOT switched to `--fleet`: it gates the run's ACTIVE set, and a
@@ -101,7 +137,8 @@ pre-1.9.0 node).
 ## Tier-0
 
 `pytest tests/python/test_dantesync_fleet_1372.py tests/python/test_dantesync_fleet_consumers_1372.py
-tests/python/test_dantesync_clock_fleet_1372.py tests/python/test_clock_discipline_1372.py` (live-captured configs under
+tests/python/test_dantesync_clock_fleet_1372.py tests/python/test_clock_discipline_1372.py
+tests/python/test_dantesync_fleet_pp_1412.py` (live-captured configs under
 `tests/python/fixtures/dantesync_config_1372/`; PATH `sshpass`/`dantesync` stubs record which password
 each target was dialled with). A worktree worker drives bash through pytest subprocesses (the
 isolation guard refuses a bare `bash -c`).

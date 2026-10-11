@@ -66,6 +66,11 @@ production-critical watchdog class (umbrella **#1308**).
   page. Roster lines are `NAME|IP|HOMEGATE[|ROLE]`; an **audio** node is graded against the audio
   grandmaster (`DANTESYNC_AUDIO_GM_HOST`, 10.77.7.104 since 25.9.2026; earlier 10.77.7.106) with an audio remedy text, every other node
   against video-clock.lan. A 3-field `DANTE_CLOCK_NODES` override still parses (role = video).
+  **Issue 1412:** the Poprad boxes (strih-pp, stream-pp, resolume-pp) are the `reach` arm
+  (`DANTE_CLOCK_REACH_NODES`): skipped with an `away (unreachable` line while ssh :22 does not
+  answer (no fetch, no page), otherwise graded like a fixed node against their VENUE grandmaster
+  (role `video-pp` / `ntp-master-pp` → the PP GM from strih-pp.env, resolved once per pass), with a
+  `grandmaster miesta pp` remedy text. A test pinning the roster empties `DANTE_CLOCK_REACH_NODES`.
 - **dev1 is the `local` node — the control box watches its OWN clock (#1313, the former dev1 blind
   spot, now CLOSED).** dev1 is NOT a probed cam/obs node, yet it runs dantesync and its clock feeds
   every dev1-hosted gate (`clock-offset-painter-gate.sh`, the recording-verdict wall references, every

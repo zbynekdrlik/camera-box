@@ -289,6 +289,16 @@ def test_clock_obs_net_audiolag_genlock_items():
         "2026-09-25 [dantesync-clock-alert-watchdog] fohabl (10.77.7.30): reachable=1 verdict=NO_CLOCK "
         "reason=wrong_gm\n")
     assert _item("clock").decide({"clock": (audio_lost, 0)})["status"] == d.FORGOT
+    # issue 1412: the roster also carries the reach-gated PP boxes. An unreachable one logs an
+    # `away` line with no verdict (it contributes nothing); a reachable one folds in like any node.
+    pp_away = CLOCK_ALL_OK + (
+        "2026-10-11 [dantesync-clock-alert-watchdog] resolume-pp away (unreachable: ssh :22 did not "
+        "answer) -- reach-gated box, skipping this pass (no fetch, no page)\n")
+    assert _item("clock").decide({"clock": (pp_away, 0)})["status"] == d.OK
+    pp_lost = CLOCK_ALL_OK + (
+        "2026-10-11 [dantesync-clock-alert-watchdog] stream-pp (stream-pp.lan): reachable=1 verdict=NO_CLOCK "
+        "reason=wrong_gm\n")
+    assert _item("clock").decide({"clock": (pp_lost, 0)})["status"] == d.FORGOT
 
     assert _item("obs").decide({"obs": (OBS_ALL_HEALTHY, 0)})["status"] == d.OK
     assert _item("obs").decide({"obs": (OBS_ONE_WEDGED, 0)})["status"] == d.FORGOT
