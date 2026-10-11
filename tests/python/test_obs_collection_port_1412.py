@@ -177,7 +177,6 @@ def test_the_program_asio_input_becomes_pulse_on_the_program_source():
 
 def test_the_program_audio_device_matches_the_seeder():
     m = _mod()
-    pytest.importorskip("websocket")
     spec = importlib.util.spec_from_file_location("strih_scenes_1412c", REPO / "scripts" / "strih_scenes.py")
     s = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(s)
@@ -207,6 +206,13 @@ def test_images_point_to_the_media_dir_and_every_remap_is_reported():
     assert sum(1 for ln in rep if ln.startswith("PATH")) == 4
     assert "C:" not in json.dumps(out) and "H:/" not in json.dumps(out)
 
+
+def test_without_a_media_dir_a_windows_path_is_kept_and_named():
+    m = _mod()
+    out, rep = m.port(stream_collection(), _stream_opts(m, media_dir=None))
+    assert _by_name(out, "PRE graphic")["settings"]["file"].startswith("C:\\Users")
+    assert any(ln.startswith("NOTE") and '"PRE graphic"' in ln and "Windows path" in ln for ln in rep)
+    assert any(ln.startswith("NOTE") and '"BG"' in ln for ln in rep)
 
 def test_filters_of_a_plugin_the_linux_bundle_lacks_are_dropped():
     m = _mod()
