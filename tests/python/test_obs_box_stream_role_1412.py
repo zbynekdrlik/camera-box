@@ -476,6 +476,21 @@ def _autostart(boxes, box):
     return r.stdout.split("=== openbox-autostart ===\n", 1)[1].split("\n=== ", 1)[0]
 
 
+@pytest.mark.parametrize("verdict,dgpu,want", [
+    ("nvenc-ok", "1", "note"),
+    ("nvenc-unsupported", "1", "bad"),
+    ("nvenc-unsupported", "0", "note"),
+    ("nvenc-unknown", "1", "note"),
+    ("nvenc-unknown", "0", "note"),
+])
+def test_nvenc_unsupported_fails_only_on_a_box_with_an_nvidia_gpu(verdict, dgpu, want):
+    """11.10.2026 stream-pp (AMD Barcelo iGPU, no NVIDIA): OBS logs 'NVENC not supported' by design,
+    and verify-strih failed the box for it. The missing-helper FAIL only means something where NVENC
+    can exist, a box with a discrete NVIDIA GPU."""
+    r = _bash('strih_nvenc_grade "%s" "%s"' % (verdict, dgpu))
+    assert r.stdout.split("|", 1)[0] == want, (r.stdout, r.stderr)
+
+
 def test_the_stream_box_autostart_starts_the_restreamer(boxes):
     """11.10.2026 (restreamer agreement on issue 1412): the stream box runs the restreamer headless as
     the --user unit restreamer.service, which its .deb ships; the kiosk has no tray and no XDG
