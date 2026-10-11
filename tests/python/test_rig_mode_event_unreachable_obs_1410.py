@@ -85,6 +85,8 @@ def test_failed_burn_clear_alone_still_runs_the_mapping_the_contract_and_discord
     assert any("genlock_burn OFF FAILED (issue 1410, rc=1)" in ln for ln in results), proc.stderr
     assert not any("stray-recording guard" in ln for ln in results), proc.stderr
     assert sent.splitlines()[0].startswith("⚠️") and "QR" in sent.splitlines()[0], sent
+    # the burn clear also reaches an unacknowledged imag: the line must not blame only strih/stream
+    assert "imag" in sent.splitlines()[0], sent
 
 
 def test_failed_ndi_mapping_alone_still_runs_the_contract_and_discord(tmp_path):
