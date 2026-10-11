@@ -1261,8 +1261,15 @@ module to `/lib/modules/<kernel>/updates/r8152.ko`, which the next kernel would 
   ignored. `nmcli -g` is called once per property, so no value is split on a separator. A grader that
   prints no row is a FAIL.
 - **NM stays operator-recorded.** Step 1 never mutates NetworkManager over the ssh link it runs on:
-  the pinning and `ethtool.ring-rx 4096` are in its operator note, and item 36 grades the pinning.
-  `ring-rx` is recorded only, not graded (no evidence yet that it matters at Gen 2).
+  the pinning is in its operator note, and item 36 grades the pinning. The ring note follows the
+  driver (`strih_nic_ring_note`): `ethtool.ring-rx 4096` for the USB r8152 NIC (recorded only), and
+  NEVER a ring override on `atlantic` (issue 1411). On atlantic NetworkManager re-applies the ring on
+  every link-up, the driver resets the NIC on the ring change and the 10 GbE link drops a second later:
+  a flap loop (live 11.10.2026, 2744 flaps, strih off .202). Item 36 FAILs `(nic-ring)` when the rig
+  NIC's connection carries one (`strih_nic_nm_ring_verdict`). The tell in the logs: `atlantic: link
+  change old 0 new 10000` then `old 10000 new 0` within a second, every ~14 s, and NM `Activation:
+  starting connection` between them; `ethtool -s ... advertise` changes seem not to stick (each reset
+  undoes them). Remove it: `nmcli connection modify <name> ethtool.ring-rx ""` + `nmcli con up`.
 - **Tests** (`tests/python/test_strih_nic_driver_1391.py`, Tier-0 pytest): the vendored tree, the facts,
   the planner table over both `dkms status` shapes, the apply run through the path seams
   (`STRIH_NIC_DRV_KERNEL` / `_MODULES_ROOT` / `_SRC_ROOT` / `_UDEV_DIR` / `_BACKUP_DIR` / `_SYSROOT`) with a

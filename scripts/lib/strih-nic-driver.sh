@@ -563,6 +563,27 @@ strih_nic_nm_pin_verdict() {
   printf 'OK|(nic-nm) NetworkManager connection %s carrying %s is pinned to %s\n' "$pinned" "$ip" "$nic"
 }
 
+# strih_nic_nm_ring_verdict DRIVER NAME RING -> a `FAIL|(nic-ring)` row and rc 1 when the rig NIC is
+# `atlantic` and its NetworkManager connection NAME carries an ethtool.ring-rx override (RING non-empty);
+# otherwise nothing, rc 0. issue 1411: NetworkManager re-applies the ring on every link-up, the atlantic
+# driver resets the NIC on a ring change, and the 10 GbE link drops a second later -- a flap loop (live
+# 11.10.2026: 2744 flaps, the strih off its address). The ring stays recorded-only on other drivers.
+strih_nic_nm_ring_verdict() {
+  local drv="${1-}" name="${2-}" ring="${3-}"
+  [ "$drv" = atlantic ] && [ -n "$ring" ] || return 0
+  printf 'FAIL|(nic-ring) NetworkManager connection %s sets ethtool.ring-rx %s on the atlantic rig NIC -- a ring change resets the NIC and NM re-applies it on every link-up (a link-flap loop); remove it: nmcli connection modify %s ethtool.ring-rx ""\n' "$name" "$ring" "$name"
+  return 1
+}
+
+# strih_nic_ring_note DRIVER -> the ring-rx part of setup-strih step 1's operator note: " and set
+# ethtool.ring-rx 4096" for the USB r8152 NIC, a "never" for atlantic (issue 1411), nothing otherwise.
+strih_nic_ring_note() {
+  case "${1-}" in
+    r8152) printf ' and set ethtool.ring-rx 4096' ;;
+    atlantic) printf ' and never set ethtool.ring-rx on it (the atlantic driver resets the link on a ring change, a flap loop)' ;;
+  esac
+}
+
 # _strih_nic_nm_rows -> `UUID|NAME|INTERFACE_NAME|IPV4_ADDRESSES` per NetworkManager connection (read-only
 # nmcli, one property per call so no value is ever split on a separator); rc 1 when nmcli is absent.
 _strih_nic_nm_rows() {
@@ -582,7 +603,7 @@ _strih_nic_nm_rows() {
 # IP_ADDR_TEXT is `ip -o -4 addr show` output, the fallback of the rig-NIC resolver strih_lx_rig_nic
 # (scripts/lib/strih-provision.sh, which the caller sources). Read-only; always rc 0 (the rows are the verdict).
 strih_nic_grade_rows() {
-  local sysroot="${1:-/sys}" addrs="${2-}" spec nicdrv ip nic k minusb minlink usbf present n nmrows
+  local sysroot="${1:-/sys}" addrs="${2-}" spec nicdrv ip nic k minusb minlink usbf present n nmrows u ifn
   if ! spec="$(strih_lx_nic_oot_driver)" || ! nicdrv="$(strih_lx_nic_driver)" || ! ip="$(strih_lx_ip)" \
     || ! minusb="$(strih_lx_nic_min_usb_mbps)" || ! minlink="$(strih_lx_nic_min_link_mbps)"; then
     printf 'FAIL|(nic) the box facts are not readable\n'
@@ -618,6 +639,10 @@ strih_nic_grade_rows() {
   for n in "${sysroot}"/class/net/*; do [ -e "$n" ] && present="${present} ${n##*/}"; done
   if nmrows="$(_strih_nic_nm_rows)"; then
     strih_nic_nm_pin_verdict "$ip" "$nic" "$present" <<<"$nmrows" || true
+    while IFS='|' read -r u n ifn _; do
+      [ -n "$u" ] && [ "$ifn" = "$nic" ] || continue
+      strih_nic_nm_ring_verdict "$nicdrv" "$n" "$(nmcli -g ethtool.ring-rx connection show "$u" 2>/dev/null || true)" || true
+    done <<<"$nmrows"
   else
     printf 'FAIL|(nic-nm) nmcli is not installed -- the NetworkManager pinning cannot be read\n'
   fi
