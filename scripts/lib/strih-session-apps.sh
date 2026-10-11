@@ -49,6 +49,12 @@
 # (wmctrl), STRIH_SESSION_APPS_PROC (/proc), STRIH_SESSION_APPS_SATELLITE_BIN (the /opt Satellite
 # binary); `dpkg-query`, `apt-get`, `sudo`, `systemctl` and `id` are looked up on PATH.
 
+# issue 1412: the user unit dir is created with every level owned by the user (strih_user_home_dir).
+if ! declare -F strih_user_home_dir >/dev/null; then
+  # shellcheck source=scripts/lib/strih-user-home.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-user-home.sh"
+fi
+
 # The session apps, in start order (the kiosk autostart and the deploy start them in this order).
 STRIH_SESSION_APP_UNITS=(strih-browser-keeper.service bkshading-panel-app.service companion-satellite.service strih-satellite-watch.timer)
 STRIH_SESSION_APP_PACKAGES=(python3-gi gir1.2-webkit2-4.1 python3-websocket)
@@ -223,7 +229,7 @@ strih_session_apps_install() {
   echo "  packages present + importable: ${STRIH_SESSION_APP_PACKAGES[*]}"
 
   install -d -m 0755 "$bindir" || { echo "strih-session-apps: cannot create ${bindir}" >&2; return 1; }
-  install -d -m 0755 "$unitdir" || { echo "strih-session-apps: cannot create ${unitdir}" >&2; return 1; }
+  strih_user_home_dir "$home" "$user" "$unitdir" || { echo "strih-session-apps: cannot create ${unitdir}" >&2; return 1; }   # issue 1412: every level the user's
   changed=()
   unit_written=0
   for u in "${STRIH_SESSION_APP_UNITS[@]}"; do

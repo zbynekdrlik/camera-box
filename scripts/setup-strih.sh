@@ -365,7 +365,7 @@ step "4c" "Downstream Keyer OBS plugin $(obs_dsk_version) (pinned upstream .deb,
 step 5 "OBS profile facts (${BOX_NAME}: seeded from the Windows 'light' profile)"
 # issue 1317: create ~/.config/obs-studio owned by the DESKTOP user (this script runs under sudo, so a
 # bare `mkdir` roots it and the obs user cannot then create .sentinel -- `Permission denied`, hit live).
-install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$OBS_CFG"
+strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "$OBS_CFG" || fail "cannot create ${OBS_CFG} as ${DESKTOP_USER} (above)"
 strih_lx_profile_facts | tee "$GENLOCK_DIR/strih-lx-profile-facts.txt" | sed 's/^/  /'
 mkdir -p "$REC_DIR" && chown "$DESKTOP_USER":"$DESKTOP_USER" "$REC_DIR" 2>/dev/null || true
 
@@ -413,7 +413,7 @@ step 7 "OBS pre-seed: WebSocket :4455 no-auth + Studio Mode"
 # issue 1317: ensure ~/.config/obs-studio itself is owned by the DESKTOP user (an earlier root-seeded
 # run would otherwise leave it root-owned and block the obs user from creating .sentinel).
 chown "$DESKTOP_USER":"$DESKTOP_USER" "$OBS_CFG" 2>/dev/null || true
-install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$OBS_CFG/plugin_config/obs-websocket"
+strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "$OBS_CFG/plugin_config/obs-websocket" || fail "cannot create the obs-websocket config dir (above)"
 cat > "$OBS_CFG/plugin_config/obs-websocket/config.json" <<'WS'
 {"server_enabled":true,"server_port":4455,"auth_required":false}
 WS
@@ -497,7 +497,7 @@ fi
 # ---------------------------------------------------------------------------------------------
 step 8 "OBS supervision unit (strih-obs.service, Restart=on-failure) -- enable-only"
 [ -f "${HERE}/../systemd/strih-obs.service" ] || fail "systemd/strih-obs.service not found next to this script"
-install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "${USER_HOME}/.config/systemd/user"
+strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "${USER_HOME}/.config/systemd/user" || fail "cannot create ~/.config/systemd/user (above)"
 install -m 0644 "${HERE}/../systemd/strih-obs.service" "${USER_HOME}/.config/systemd/user/strih-obs.service"
 chown -R "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/systemd/user" 2>/dev/null || true
 # issue 1317: install the launcher pair the unit's ExecStart/ExecStop reference
@@ -515,7 +515,7 @@ install -m 0755 "${HERE}/strih-obs-stop.sh"  /usr/local/bin/strih-obs-stop.sh
 echo "  installed launcher pair -> /usr/local/bin/strih-obs-start.sh + strih-obs-stop.sh (mode 0755)"
 # issue 1361: the box's OBS profile/collection facts reach the launcher through a --user drop-in (the
 # launcher reads STRIH_OBS_PROFILE / STRIH_OBS_COLLECTION from its environment and installs verbatim).
-install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "${USER_HOME}/.config/systemd/user/strih-obs.service.d"
+strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "${USER_HOME}/.config/systemd/user/strih-obs.service.d" || fail "cannot create the strih-obs drop-in dir (above)"
 strih_obs_box_facts_dropin_text > "${USER_HOME}/.config/systemd/user/strih-obs.service.d/10-box-facts.conf" \
   || fail "could not write the strih-obs.service box-facts drop-in"
 chown -R "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/systemd/user/strih-obs.service.d" 2>/dev/null || true
@@ -685,7 +685,7 @@ else
   warn "  MiniFuse 4 not detected (arecord -l) -- plug it in before go-live (it is the operator talkback mic)"
 fi
 # (c) the operator-session PipeWire null sink OBS captures as strih-program.monitor.
-install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d"
+strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d" || fail "cannot create ~/.config/pipewire/pipewire.conf.d (above)"
 strih_pipewire_program_sink_conf > "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
 chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
 # (c2, issue 1344 follow-up) the loopback that republishes strih-program's monitor as a real
@@ -693,7 +693,7 @@ chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.co
 strih_pipewire_program_loopback_conf > "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf"
 chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf"
 # the WirePlumber rule pinning the MiniFuse to its pro-audio profile @48 kHz.
-install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplumber.conf.d"
+strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplumber.conf.d" || fail "cannot create ~/.config/wireplumber/wireplumber.conf.d (above)"
 strih_wireplumber_minifuse_rule > "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-strih-minifuse.conf"
 chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-strih-minifuse.conf"
 # issue 1345 (owner accepted 25.9.2026): the MiniFuse PLAYBACK period (1024 x 3, headroom 256 -- the
@@ -801,7 +801,7 @@ step 15 "Kiosk openbox autostart + root menu (issue 1357: OBS + Companion Satell
 # does not run XDG ~/.config/autostart, which is why the GNOME-era .desktop entries are removed below --
 # an XDG autostart that DID fire via systemd --user would double-launch). It carries the shared kiosk preamble (never-blank + OBS crash-
 # sentinel clear) the baseline verify grades. The root menu is the SAME printer imag uses.
-install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" -m 755 "${USER_HOME}/.config/openbox"
+strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "${USER_HOME}/.config/openbox" || fail "cannot create ~/.config/openbox (above)"
 strih_openbox_autostart_text > "${USER_HOME}/.config/openbox/autostart" \
   || fail "could not write ${USER_HOME}/.config/openbox/autostart"
 chmod +x "${USER_HOME}/.config/openbox/autostart"
@@ -844,7 +844,7 @@ strih_companion_satellite_config_text "$CS_HOST" > /etc/companion-satellite/host
 # than clobber: overlay ONLY the controller keys onto any existing config.json (this provisioning run
 # ENFORCES the intended controller, but must NOT drop the device id / app state the running Satellite
 # writes into the same file, nor another key an operator added). A missing/corrupt file starts from {}.
-install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" -m 755 "$CS_APPCFG_DIR"
+strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "$CS_APPCFG_DIR" || fail "cannot create ${CS_APPCFG_DIR} (above)"
 strih_companion_satellite_appconfig_json "$CS_HOST" "$CS_PORT" | python3 -c '
 import json, sys
 overlay = json.load(sys.stdin)

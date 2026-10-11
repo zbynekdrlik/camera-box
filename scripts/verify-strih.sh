@@ -414,6 +414,7 @@ else
   note "(audio-quantum) ${Q_DETAIL} -- report-only; restart the operator PipeWire session (or reboot) so the min-quantum drop-in applies"
 fi
 
+strih_home_ownership_grade "$USER_HOME"   # issue 1412: a root-owned ~/.config level crash-loops the desktop apps
 # 10) NVENC encoder available.
 if WHY="$(obs_box_step_applies 3-nvenc)"; then   # issue 1412: the stream role grades its own encoder
 { ffmpeg -hide_banner -encoders 2>/dev/null; cat "$LOG" 2>/dev/null; } | strih_lx_nvenc_available_ok && ok "NVENC encoder available" || bad "NVENC encoder not available"

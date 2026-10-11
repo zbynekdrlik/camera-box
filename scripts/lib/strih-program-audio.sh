@@ -217,7 +217,7 @@ strih_program_audio_install() {
   fi
 
   ecores="$(strih_program_audio_ecores "${STRIH_PROGRAM_AUDIO_SYSFS:-/sys}")"
-  install -d -m 0755 "$unitdir" || { echo "strih-program-audio: cannot create ${unitdir}" >&2; return 1; }
+  strih_user_home_dir "$home" "$user" "$unitdir" || { echo "strih-program-audio: cannot create ${unitdir}" >&2; return 1; }   # issue 1412: every level the user's
   tmp="$(mktemp)" || { echo "strih-program-audio: mktemp failed" >&2; return 1; }
   if ! strih_program_audio_unit_text "$repo" "$ecores" > "$tmp"; then
     rm -f "$tmp"

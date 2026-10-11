@@ -57,6 +57,11 @@ if ! declare -F strih_bundle_tree_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-bundle-install.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-bundle-install.sh"
 fi
+# issue 1412: every directory setup-strih creates in the desktop user's home is the user's.
+if ! declare -F strih_user_home_dir >/dev/null; then
+  # shellcheck source=scripts/lib/strih-user-home.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-user-home.sh"
+fi
 # issue 1412: the intercom-hub unit per role (step 13) + verify item 16's crash-loop grade.
 if ! declare -F strih_intercom_hub_cred_dropin_apply >/dev/null; then
   # shellcheck source=scripts/lib/strih-intercom-hub-unit.sh
