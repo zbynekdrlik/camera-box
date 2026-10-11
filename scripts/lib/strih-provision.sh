@@ -1871,4 +1871,9 @@ AUTOSTART_EOF
   printf '%s\n' 'systemctl --user start strih-obs.service || true' \
     'systemctl --user start strih-bundle-state-server.service || true'
   strih_session_apps_autostart_lines
+  # issue 1412 (restreamer agreement 11.10.2026): the stream box runs the restreamer headless as the
+  # --user unit its .deb ships; the kiosk has no tray and no XDG autostart, so start it here.
+  if [ "$(strih_box_role)" = stream ]; then
+    printf '%s\n' 'systemctl --user start restreamer.service || true'
+  fi
 }
