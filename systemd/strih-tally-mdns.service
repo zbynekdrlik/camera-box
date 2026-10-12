@@ -1,5 +1,6 @@
 # issue 1417: announce atemrpi.local -- the name the camera tally firmware (tally/esp/) hard-codes --
-# at this strih box's address (STRIH_IP, written to /etc/default/strih-tally by setup-strih step 16f).
+# at this strih box's address (the box fact STRIH_IP, written as STRIH_TALLY_IP to
+# /etc/default/strih-tally by setup-strih step 16f).
 # A name collision with another device makes avahi-publish exit (Restart retries); verify-strih item
 # 42 names the other device's address.
 [Unit]
@@ -11,6 +12,11 @@ Requires=avahi-daemon.service
 EnvironmentFile=/etc/default/strih-tally
 ExecStart=/usr/bin/avahi-publish -a -R atemrpi.local ${STRIH_TALLY_IP}
 Restart=always
+# hardening: the process reads its files and talks over the network / D-Bus only
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
 RestartSec=5
 
 [Install]

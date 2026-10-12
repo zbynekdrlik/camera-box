@@ -18,8 +18,8 @@
 #     hard-codes that name. The address comes from /etc/default/strih-tally (STRIH_TALLY_IP = the box
 #     fact STRIH_IP).
 #
-#   * strih_tally_install -- setup-strih step 16f (as root): the apt packages python3-websockets +
-#     avahi-utils only when missing, an import preflight of the websockets asyncio API, the two python
+#   * strih_tally_install -- setup-strih step 16f (as root): the apt packages python3-websockets (the
+#     service), python3-websocket (item 42's OBS read) + avahi-utils only when missing, an import preflight of the websockets asyncio API, the two python
 #     files into /usr/local/lib/camera-box, both units and the default file -- each written only when
 #     its bytes or mode differ (strih_session_apps_put) -- then a daemon-reload after a write, a
 #     try-restart of a unit whose files changed (a running one moves onto them, a stopped one is not
@@ -27,10 +27,12 @@
 #     production function with no TEST/EVENT dependency, so this step is NOT enable-only.
 #   * strih_tally_grade_rows / _report -- verify-strih item 42, 4 rows:
 #       (tally-units) both units enabled + active, the installed files equal to the checkout;
-#       (tally-port)  GET :9240/state answers with obs_connected=true;
-#       (tally-mdns)  atemrpi.local resolves to exactly ONE address, this box's STRIH_IP (another device
-#                     answering the name is named);
-#       (tally-obs)   the service's program scene equals the strih OBS's own (GetCurrentProgramScene).
+#       (tally-port)  GET :9240/state answers with obs_connected=true and at least one camera input
+#                     mapped by its NDI source name (none mapped = the lights can never light);
+#       (tally-mdns)  atemrpi.local resolves to this box's STRIH_IP and nothing else (avahi-resolve
+#                     returns one answer: another device answering the name shows as its address);
+#       (tally-obs)   the service's program SCENE equals the strih OBS's own (GetCurrentProgramScene);
+#                     the camera that scene lights is the service's own decision, pinned by its tests.
 #
 # Test seams (tests/python/test_strih_tally_install_1417.py): STRIH_TALLY_PREFIX
 # (/usr/local/lib/camera-box), STRIH_TALLY_UNIT_DIR (/etc/systemd/system), STRIH_TALLY_DEFAULT_FILE
@@ -50,7 +52,7 @@ STRIH_TALLY_UNIT="strih-tally.service"
 STRIH_TALLY_MDNS_UNIT="strih-tally-mdns.service"
 STRIH_TALLY_UNIT_TEMPLATE="strih-tally.service.in"
 STRIH_TALLY_FILES=(scripts/strih_tally.py scripts/strih_tally_decision.py)
-STRIH_TALLY_PACKAGES=(python3-websockets avahi-utils)
+STRIH_TALLY_PACKAGES=(python3-websockets python3-websocket avahi-utils)
 STRIH_TALLY_NAME="atemrpi.local"
 
 strih_tally_prefix() { printf '%s' "${STRIH_TALLY_PREFIX:-/usr/local/lib/camera-box}"; }
@@ -176,8 +178,9 @@ strih_tally_install() {
 
 # --- verify-strih item 42 -------------------------------------------------------------------------------
 
-# strih_tally_state_read URL -> two lines from GET URL: `<obs_connected> <pgm> <pvw> <tallies>` and the
-# program scene (empty when null); EMPTY when it does not answer a JSON object. Always rc 0.
+# strih_tally_state_read URL -> two lines from GET URL: `<obs_connected> <pgm> <pvw> <tallies>
+# <camera_inputs>` and the program scene (empty when null); EMPTY when it does not answer a JSON
+# object. Always rc 0.
 strih_tally_state_read() {
   local url="${1:?url required}"
   python3 -c 'import json, sys, urllib.request
@@ -189,8 +192,9 @@ except Exception:
 if not isinstance(j, dict):
     sys.exit(0)
 t = j.get("tallies")
+c = j.get("camera_inputs")
 print("true" if j.get("obs_connected") is True else "false", j.get("pgm"), j.get("pvw"),
-      len(t) if isinstance(t, list) else 0)
+      len(t) if isinstance(t, list) else 0, c if isinstance(c, int) and not isinstance(c, bool) else 0)
 print(str(j.get("program_scene") or "").replace("\n", " "))' "$url" 2>/dev/null || true
 }
 
@@ -230,7 +234,7 @@ ws.close()' ws://127.0.0.1:4455 2>/dev/null || true
 # (strih_tally_row_count of them). Always rc 0.
 strih_tally_grade_rows() {
   local repo="${1:?repo root required}" user="${2:?desktop user required}"
-  local prefix unitdir deffile rel st bad_files="" tmp u en act units_ok=1 states="" ip url state head scene
+  local prefix unitdir deffile rel st bad_files="" tmp u en act units_ok=1 states="" ip url state head scene text
   local obs_program addrs n i
   prefix="$(strih_tally_prefix)"
   unitdir="$(strih_tally_unit_dir)"
@@ -240,7 +244,8 @@ strih_tally_grade_rows() {
     [ "$st" = ok ] || bad_files="${bad_files} $(basename "$rel")=${st}"
   done
   tmp="$(mktemp)"
-  if strih_tally_unit_text "$repo" "$user" > "$tmp" 2>/dev/null; then
+  # the same text the install writes: one trailing newline (`$(...)` strips them, printf adds one)
+  if text="$(strih_tally_unit_text "$repo" "$user" 2>/dev/null)" && printf '%s\n' "$text" > "$tmp"; then
     st="$(strih_session_app_file_state "${unitdir}/${STRIH_TALLY_UNIT}" "$tmp")"
   else
     st=template-broken
@@ -278,9 +283,11 @@ strih_tally_grade_rows() {
     printf 'FAIL|(tally-port) %s does not answer -- is %s running? journalctl -u %s\n' "$url" "$STRIH_TALLY_UNIT" "$STRIH_TALLY_UNIT"
   else
     read -r -a i <<<"$head"
-    if [ "${i[0]:-false}" = true ]; then
-      printf 'OK|(tally-port) %s answers: pgm=%s pvw=%s, OBS connected, %s tally light(s) joined\n' \
-        "$url" "${i[1]:-?}" "${i[2]:-?}" "${i[3]:-0}"
+    if [ "${i[0]:-false}" = true ] && [ "${i[4]:-0}" != 0 ]; then
+      printf 'OK|(tally-port) %s answers: pgm=%s pvw=%s, OBS connected, %s camera input(s) mapped, %s tally light(s) joined\n' \
+        "$url" "${i[1]:-?}" "${i[2]:-?}" "${i[4]}" "${i[3]:-0}"
+    elif [ "${i[0]:-false}" = true ]; then
+      printf 'FAIL|(tally-port) %s answers but maps no camera input: no OBS ndi_source input receives a CAM<n> (...) source, so no tally can ever light -- check the strih OBS inputs\n' "$url"
     else
       printf 'FAIL|(tally-port) %s answers but obs_connected=false: the service cannot reach the strih OBS on :4455 (OBS down, or a WS password) -- journalctl -u %s\n' \
         "$url" "$STRIH_TALLY_UNIT"

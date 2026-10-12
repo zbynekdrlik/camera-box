@@ -12,18 +12,27 @@ verify-strih item 42 (scripts/lib/strih-tally.sh).
       - `TALLY-PGM <n>`          program camera n (0 = none); the firmware keeps the previous one;
       - `TALLY-TRS`              a transition is running;
       - `TALLY-LOCK 1|0`, `SET-LUMINANCE <50..255>` from another client (Companion).
-    Every text a client sends goes to every OTHER client, never back to the sender. A new client
-    gets the current TALLY-PVW + TALLY-PGM at once; every client gets them again every 10 s.
+    A protocol text a client sends goes to every OTHER client, never back to the sender; anything else
+    is dropped (logged once per client), and a frame over MAX_FRAME_BYTES closes its sender (the
+    firmware copies a whole frame into its small heap). A new client gets the current TALLY-PVW +
+    TALLY-PGM at once; every client gets them again every 10 s. The frames to one client never
+    interleave (one lock per connection).
   * An obs-websocket 5 CLIENT to ws://127.0.0.1:4455 (the strih OBS runs without WS auth). It reads
-    studio mode, the program + preview scene and the scene tree, and re-reads on every program /
-    preview / studio-mode / transition / scene-item / input event. The scene -> camera rule is the
-    pure scripts/strih_tally_decision.py. OBS unreachable for 10 s -> TALLY-PVW 0 + TALLY-PGM 0 once
-    (no stale on-air red).
+    studio mode, the program + preview scene and the scene tree; a program / preview / studio-mode
+    event re-reads those three, a scene-item / scene-list / input event the whole tree (events queued
+    meanwhile are handled in ONE re-read). The scene -> camera rule is the pure
+    scripts/strih_tally_decision.py.
+  * TRANSITIONS: SceneTransitionStarted sends TALLY-TRS, and TALLY-TRS follows every state change
+    while the transition runs (the firmware recolours on TALLY-PGM, so the TRS must come after it).
+    SceneTransitionEnded / SceneTransitionVideoEnded (or TRANSITION_MAX_S without either) sends the
+    full state again, which puts the lights back to red / green / gray.
+  * OBS GONE: retry every 2 s; once OBS has been unreachable (a hung OBS: unanswered WS keepalive
+    pings, ~10 s) for 10 s -> TALLY-PVW 0 + TALLY-PGM 0 ONCE (no stale on-air red).
   * `GET /state` on the same port (the websockets process_request hook: a plain HTTP request is
     answered, a WS upgrade proceeds) -> JSON {pgm, pvw, program_scene, preview_scene, studio_mode,
-    obs_connected, tallies}.
+    obs_connected, camera_inputs, tallies}.
 
-One log line per state change, tally JOIN/leave, OBS connect/disconnect and the gray fallback.
+One log line per state change, tally JOIN/leave, OBS connect/disconnect, transition and gray fallback.
 """
 import argparse
 import asyncio
@@ -46,15 +55,25 @@ EVENT_SUBSCRIPTIONS = 4 + 8 + 16 + 128 + 1024
 # Events after which the program / preview / studio mode are read again (a cheap read).
 LIGHT_EVENTS = frozenset({
     "CurrentProgramSceneChanged", "CurrentPreviewSceneChanged", "StudioModeStateChanged",
-    "SceneTransitionEnded",
 })
 # Events that can change which camera a scene holds: the whole scene tree is read again.
 TREE_EVENTS = frozenset({
     "SceneItemCreated", "SceneItemRemoved", "SceneItemEnableStateChanged", "SceneListChanged",
-    "InputSettingsChanged", "InputNameChanged",
+    "SceneNameChanged", "InputSettingsChanged", "InputNameChanged",
 })
+TRANSITION_START = "SceneTransitionStarted"
+TRANSITION_ENDS = frozenset({"SceneTransitionEnded", "SceneTransitionVideoEnded"})
+# A transition whose end event never came (an interrupted one) is ended after this long.
+TRANSITION_MAX_S = 15.0
+# The texts the relay passes on: the firmware's commands + JOIN.
+RELAY_COMMANDS = frozenset({"JOIN", "TALLY-PGM", "TALLY-PVW", "TALLY-TRS", "TALLY-LOCK", "SET-LUMINANCE"})
+# A WsTally frame is a short command line; the ESP8266 copies a whole frame into an Arduino String.
+MAX_FRAME_BYTES = 256
+JOIN_NAME_MAX = 64
 REQUEST_TIMEOUT_S = 10.0
 SEND_TIMEOUT_S = 2.0
+# WS keepalive to OBS: a hung OBS (TCP open, nothing answering) is dropped within ~10 s.
+OBS_PING_S = 5.0
 NDI_INPUT_KIND = "ndi_source"
 
 
@@ -103,14 +122,18 @@ class ObsSession:
                         f"{request_type} failed: code {status.get('code')} {status.get('comment', '')}".strip())
                 return d.get("responseData") or {}
 
-    async def next_event(self):
-        if self.events:
-            return self.events.popleft()
-        while True:
-            # no timeout: an idle OBS sends nothing; the WS keepalive pings detect a dead OBS
-            m = json.loads(await self.ws.recv())
-            if m.get("op") == 5:
-                return m.get("d") or {}
+    async def next_batch(self):
+        """The queued events, or wait for the next one; then every event already queued behind it."""
+        if not self.events:
+            while True:
+                # no timeout: an idle OBS sends nothing; the WS keepalive pings detect a dead OBS
+                m = json.loads(await self.ws.recv())
+                if m.get("op") == 5:
+                    self.events.append(m.get("d") or {})
+                    break
+        batch = list(self.events)
+        self.events.clear()
+        return batch
 
 
 def _scene_name(resp, key):
@@ -128,6 +151,11 @@ def _items(resp):
              "enabled": bool(it.get("sceneItemEnabled", True))} for it in resp.get("sceneItems", [])]
 
 
+def clean_name(raw):
+    """A JOIN hostname as logged and shown: printable characters only, at most JOIN_NAME_MAX."""
+    return "".join(ch for ch in raw if ch.isprintable()).strip()[:JOIN_NAME_MAX]
+
+
 class Tally:
     def __init__(self, obs_url, resend_s=10.0, obs_loss_s=10.0, retry_s=2.0):
         self.obs_url = obs_url
@@ -136,6 +164,8 @@ class Tally:
         self.retry_s = retry_s
         self.clients = set()
         self.joined = {}
+        self._locks = {}
+        self._ignored = set()
         self.program = None
         self.preview = None
         self.studio = False
@@ -145,6 +175,8 @@ class Tally:
         self.obs_connected = False
         self.last_obs_ok = time.monotonic()
         self.gray_sent = False
+        self.in_transition = False
+        self.transition_since = 0.0
         self._obs_ws = None
         self._tasks = []
         self._server = None
@@ -156,20 +188,26 @@ class Tally:
         addr = getattr(conn, "remote_address", None)
         return addr[0] if addr else "?"
 
+    def _forget(self, conn):
+        self.clients.discard(conn)
+        self._locks.pop(conn, None)
+        self._ignored.discard(conn)
+        return self.joined.pop(conn, None)
+
     async def _send_one(self, conn, texts):
-        try:
-            for text in texts:
-                await asyncio.wait_for(conn.send(text), SEND_TIMEOUT_S)
-        except Exception as exc:  # noqa: BLE001 -- one bad client never stops the others
-            if conn in self.clients:
-                self.clients.discard(conn)
-                LOG.warning("send to %s %s failed (%s): dropped", self._peer(conn),
-                            self.joined.get(conn, "(no JOIN)"), exc)
-                self.joined.pop(conn, None)
+        lock = self._locks.setdefault(conn, asyncio.Lock())
+        async with lock:   # one sender at a time per tally: a PVW + PGM pair never interleaves
             try:
-                await conn.close()
-            except Exception as close_exc:  # noqa: BLE001 -- the connection is already broken
-                LOG.debug("closing %s after a failed send: %s", self._peer(conn), close_exc)
+                for text in texts:
+                    await asyncio.wait_for(conn.send(text), SEND_TIMEOUT_S)
+            except Exception as exc:  # noqa: BLE001 -- one bad client never stops the others
+                if conn in self.clients:
+                    name = self._forget(conn)
+                    LOG.warning("send to %s %s failed (%s): dropped", self._peer(conn), name or "(no JOIN)", exc)
+                try:
+                    await conn.close()
+                except Exception as close_exc:  # noqa: BLE001 -- the connection is already broken
+                    LOG.debug("closing %s after a failed send: %s", self._peer(conn), close_exc)
 
     async def send_all(self, texts, exclude=None):
         if not texts:
@@ -178,26 +216,35 @@ class Tally:
         if targets:
             await asyncio.gather(*(self._send_one(c, texts) for c in targets))
 
+    def _state_texts(self):
+        texts = decision.full_messages(self.state or (0, 0))
+        return texts + ["TALLY-TRS"] if self.in_transition else texts
+
     async def handler(self, conn):
         peer = self._peer(conn)
         self.clients.add(conn)
-        await self._send_one(conn, decision.full_messages(self.state or (0, 0)))
+        await self._send_one(conn, self._state_texts())
         try:
             async for raw in conn:
                 if not isinstance(raw, str):
                     continue
                 text = raw.strip()
-                if not text:
+                command = text.split(" ", 1)[0]
+                if command not in RELAY_COMMANDS:
+                    if text and conn not in self._ignored:
+                        self._ignored.add(conn)
+                        LOG.info("client %s sent a non-tally text, not relayed (logged once): %.40r", peer, text)
                     continue
-                if text.startswith("JOIN "):
-                    self.joined[conn] = text[5:].strip()
-                    LOG.info("JOIN %s %s", self.joined[conn], peer)
+                if command == "JOIN":
+                    name = clean_name(text[5:])
+                    self.joined[conn] = name
+                    text = f"JOIN {name}"
+                    LOG.info("JOIN %s %s", name, peer)
                 await self.send_all([text], exclude=conn)
-        except Exception as exc:  # noqa: BLE001 -- a broken client is just gone
+        except Exception as exc:  # noqa: BLE001 -- a broken (or oversized-frame) client is just gone
             LOG.info("client %s read error: %s", peer, exc)
         finally:
-            name = self.joined.pop(conn, None)
-            self.clients.discard(conn)
+            name = self._forget(conn)
             LOG.info("LEAVE %s %s", name or "(no JOIN)", peer)
 
     def state_json(self):
@@ -209,6 +256,7 @@ class Tally:
             "preview_scene": self.preview,
             "studio_mode": self.studio,
             "obs_connected": self.obs_connected,
+            "camera_inputs": len(self.cameras),
             "tallies": sorted(f"{self._peer(c)} {n}" for c, n in self.joined.items()),
         }
 
@@ -243,9 +291,13 @@ class Tally:
             cam = decision.camera_of_ndi_name(settings.get("ndi_source_name"))
             if cam:
                 cameras[name] = cam
+        if len(cameras) != len(self.cameras):
+            LOG.info("%d camera input(s) mapped by their NDI source name", len(cameras))
         self.tree, self.cameras = tree, cameras
 
-    async def refresh(self, obs, tree):
+    async def refresh(self, obs, tree, full=False):
+        """Re-read OBS and send the change (TALLY-TRS after it during a transition); `full` sends the
+        whole state. Returns whether anything was sent."""
         studio = bool((await obs.request("GetStudioModeEnabled")).get("studioModeEnabled"))
         program = _scene_name(await obs.request("GetCurrentProgramScene"), "currentProgramSceneName")
         preview = None
@@ -259,43 +311,72 @@ class Tally:
         self.studio, self.program, self.preview = studio, program, preview
         new = decision.state_of(program, preview, studio, self.tree, self.cameras)
         old = self.state
-        out = decision.messages(old, new)
+        changed = decision.messages(old, new)
         self.state = new
         self.obs_connected = True
         self.last_obs_ok = time.monotonic()
         self.gray_sent = False
-        if out:
+        if changed:
             a = old or (0, 0)
             LOG.info("pgm %d->%d pvw %d->%d (program=%s preview=%s)", a[0], new[0], a[1], new[1], program, preview)
-            await self.send_all(out)
+        out = self._state_texts() if full else changed
+        if out and self.in_transition and not full:
+            out = out + ["TALLY-TRS"]
+        await self.send_all(out)
+        return bool(out)
+
+    async def _handle_batch(self, obs, batch):
+        pending = None   # None | "light" | "tree": one re-read for a run of state events
+
+        async def flush():
+            nonlocal pending
+            if pending:
+                await self.refresh(obs, tree=(pending == "tree"))
+                pending = None
+
+        for ev in batch:
+            kind = ev.get("eventType")
+            if kind == TRANSITION_START:
+                await flush()
+                self.in_transition = True
+                self.transition_since = time.monotonic()
+                LOG.info("transition started (%s)", (ev.get("eventData") or {}).get("transitionName"))
+                if not await self.refresh(obs, tree=False):
+                    await self.send_all(["TALLY-TRS"])
+            elif kind in TRANSITION_ENDS:
+                await flush()
+                if self.in_transition:
+                    self.in_transition = False
+                    LOG.info("transition ended (%s): full state resent", kind)
+                    await self.refresh(obs, tree=False, full=True)
+            elif kind in TREE_EVENTS:
+                pending = "tree"
+            elif kind in LIGHT_EVENTS and pending is None:
+                pending = "light"
+        await flush()
 
     async def obs_loop(self):
         failing = False
         while True:
             try:
-                async with connect(self.obs_url, max_size=None, open_timeout=REQUEST_TIMEOUT_S) as ws:
+                async with connect(self.obs_url, max_size=None, open_timeout=REQUEST_TIMEOUT_S,
+                                   ping_interval=OBS_PING_S, ping_timeout=OBS_PING_S) as ws:
                     self._obs_ws = ws
                     obs = ObsSession(ws)
                     await obs.identify()
+                    self.in_transition = False
                     await self.refresh(obs, tree=True)
                     LOG.info("OBS connected: %s (studio=%s program=%s preview=%s, %d camera input(s))",
                              self.obs_url, self.studio, self.program, self.preview, len(self.cameras))
                     failing = False
                     while True:
-                        ev = await obs.next_event()
-                        kind = ev.get("eventType")
-                        if kind == "SceneTransitionStarted":
-                            LOG.info("transition started (%s)", (ev.get("eventData") or {}).get("transitionName"))
-                            await self.send_all(["TALLY-TRS"])
-                        elif kind in TREE_EVENTS:
-                            await self.refresh(obs, tree=True)
-                        elif kind in LIGHT_EVENTS:
-                            await self.refresh(obs, tree=False)
+                        await self._handle_batch(obs, await obs.next_batch())
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001 -- OBS down / restarting: retry
                 was = self.obs_connected
                 self.obs_connected = False
+                self.in_transition = False
                 if was or not failing:
                     LOG.warning("OBS disconnected: %s: %s (retrying every %ss)", self.obs_url,
                                 exc or type(exc).__name__, self.retry_s)
@@ -310,12 +391,16 @@ class Tally:
         while True:
             await asyncio.sleep(self.resend_s)
             if self.state is not None:
-                await self.send_all(decision.full_messages(self.state))
+                await self.send_all(self._state_texts())
 
     async def fallback_loop(self):
         while True:
             await asyncio.sleep(min(1.0, self.obs_loss_s / 3))
             now = time.monotonic()
+            if self.in_transition and now - self.transition_since > TRANSITION_MAX_S:
+                self.in_transition = False
+                LOG.warning("no transition end event after %ss: full state resent", TRANSITION_MAX_S)
+                await self.send_all(self._state_texts())
             if self.obs_connected:
                 self.last_obs_ok = now
                 continue
@@ -328,7 +413,8 @@ class Tally:
     # --- lifecycle -------------------------------------------------------------------------------
 
     async def start_server(self, host, port):
-        self._server = await serve(self.handler, host, port, process_request=self.process_request)
+        self._server = await serve(self.handler, host, port, process_request=self.process_request,
+                                   max_size=MAX_FRAME_BYTES)
         self._tasks = [asyncio.create_task(c) for c in (self.obs_loop(), self.resend_loop(), self.fallback_loop())]
         return self._server
 

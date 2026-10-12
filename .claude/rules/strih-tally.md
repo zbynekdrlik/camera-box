@@ -58,36 +58,52 @@ optional argument separated by one space.
 
 ## The service (`strih_tally.py`)
 
-- **Relay:** every text a client sends goes to every OTHER client, never back to the sender, and the
-  server's own state is untouched by it (Companion can still send LUMINANCE / LOCK). A new client gets
-  the current PVW + PGM at once (0/0 before OBS was ever read); every client gets them again every
-  10 s, so a lost frame heals. A client whose send fails or takes over 2 s is dropped and logged.
+- **Relay:** a protocol text (JOIN, TALLY-*, SET-LUMINANCE) a client sends goes to every OTHER
+  client, never back to the sender, and the server's own state is untouched by it (Companion can
+  still send LUMINANCE / LOCK); any other text is dropped (logged once per client), and a frame over
+  256 bytes closes its sender (the ESP8266 copies a whole frame into its small heap). JOIN names are
+  cut to printable characters, 64 at most. A new client gets the current PVW + PGM at once (0/0
+  before OBS was ever read); every client gets them again every 10 s, so a lost frame heals. One
+  lock per connection keeps a PVW + PGM pair from interleaving with another send. A client whose send
+  fails or takes over 2 s is dropped and logged.
 - **OBS client** (`ws://127.0.0.1:4455`, no auth; a WS password makes it fail loud and retry):
   Identify with Scenes + Inputs + Transitions + SceneItems + Ui (1180). A program / preview / studio /
-  transition-ended event re-reads only those three (a cut must light quickly); a scene-item / scene-list
-  / input settings / input name event re-reads the whole tree (`GetSceneList`, `GetSceneItemList`,
+  event re-reads only those three (a cut must light quickly); a scene-item / scene-list / scene-name /
+  input settings / input name event re-reads the whole tree (`GetSceneList`, `GetSceneItemList`,
   `GetGroupSceneItemList`, `GetInputList`, `GetInputSettings` per `ndi_source`). Requests go one at a
-  time; events read meanwhile are queued and handled after. `SceneTransitionStarted` sends `TALLY-TRS`.
+  time; events read meanwhile are queued and handled after, as ONE re-read (a collection load sends
+  dozens).
+- **Transitions** (review round 1): `SceneTransitionStarted` sends `TALLY-TRS`, and while it runs
+  `TALLY-TRS` FOLLOWS every state change and every resend: the firmware recolours on `TALLY-PGM`, so a
+  TRS sent before the program change (OBS sends the start event first) would be undone at once.
+  `SceneTransitionEnded` / `SceneTransitionVideoEnded` (or 15 s without either: an interrupted
+  transition) sends the FULL state, which puts the lights back to red / green / gray. During a fade the
+  firmware lights pgm, pvw and the previous pgm red (its `trs`).
 - **OBS gone:** retry every 2 s (one log line per disconnect, not per retry); after 10 s without OBS
-  `TALLY-PVW 0` + `TALLY-PGM 0` ONCE (no stale on-air red). OBS back -> the new state as a diff.
+  `TALLY-PVW 0` + `TALLY-PGM 0` ONCE (no stale on-air red). A hung OBS (TCP open, nothing answering)
+  counts as gone once the WS keepalive (5 s ping, 5 s timeout) drops it, so ~20 s in all. OBS back ->
+  the new state as a diff.
 - **`GET /state`** on :9240 (websockets `process_request`; a WS upgrade proceeds):
-  `{pgm, pvw, program_scene, preview_scene, studio_mode, obs_connected, tallies}`, tallies =
-  `"<ip> <JOIN name>"`.
+  `{pgm, pvw, program_scene, preview_scene, studio_mode, obs_connected, camera_inputs, tallies}`,
+  camera_inputs = how many inputs map to a camera, tallies = `"<ip> <JOIN name>"`.
 - Logs: every state change (`pgm a->b pvw c->d (program=… preview=…)`), JOIN / LEAVE with the IP, OBS
   connect / disconnect, the gray fallback.
 
 ## Install + grade (strih role only; never stream-pp)
 
 - `obs_box_step_applies 16f` is in the strih-only case of `scripts/lib/obs-box-role.sh`.
-- **setup-strih step 16f** (`strih_tally_install`): apt `python3-websockets avahi-utils` only when
-  missing, an import preflight of `websockets.asyncio`, the two python files into
+- **setup-strih step 16f** (`strih_tally_install`): apt `python3-websockets python3-websocket
+  avahi-utils` only when missing, an import preflight of `websockets.asyncio`, the two python files into
   `/usr/local/lib/camera-box` (flat, 0644), both units into `/etc/systemd/system`, the default file;
-  each written only when it differs (`strih_session_apps_put`). Then daemon-reload after a write,
+  each written only when it differs (`strih_session_apps_put`). Both units are hardened
+  (`NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`); avahi-publish still runs
+  as root (a `DynamicUser` needs the avahi D-Bus policy checked live first). Then daemon-reload after a write,
   `try-restart` of a unit whose files changed (only a running one), `enable --now` of a unit not yet
   enabled, else `start`. NOT enable-only: tally is production function with no TEST/EVENT dependency.
 - **verify-strih item 42** (`strih_tally_grade_report`, 4 rows): `(tally-units)` enabled + active +
-  files match; `(tally-port)` /state answers with `obs_connected=true`; `(tally-mdns)` `atemrpi.local`
-  resolves to exactly ONE address, this box's STRIH_IP; `(tally-obs)` the service's program scene =
+  files match; `(tally-port)` /state answers with `obs_connected=true` and at least
+  one mapped camera input; `(tally-mdns)` `atemrpi.local` resolves to this box's STRIH_IP and nothing
+  else (avahi-resolve returns one answer, so another device shows as its address); `(tally-obs)` the service's program scene =
   OBS's own `GetCurrentProgramScene` (read twice on a mismatch, a cut can land between the reads).
 - **A second device answering `atemrpi.local` on the venue LAN breaks the tallies** (they may dial
   it): avahi-publish logs a collision and exits (Restart retries), and `(tally-mdns)` names the other
