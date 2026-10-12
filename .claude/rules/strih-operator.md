@@ -91,8 +91,11 @@ as frozen. The strih panel always has live Multiview tiles, so this has not happ
 - a crash loop FAILs on every role;
 - the stream role keeps the report-only note.
 
-Setup and verify agree on it: setup-strih step 13 STARTS a stopped hub on the strih role (the same
-`13-hub-live` gate, `systemctl is-active` first, never a restart of a running hub). The old enable-only
+Setup and verify agree on it: setup-strih STARTS a stopped hub on the strih role right after step 14
+(the same `13-hub-live` gate, `systemctl is-active` first, never a restart of a running hub). It runs
+there because the unit's `LoadCredential` needs the room secret step 14 writes: a start in step 13 on
+a fresh Janus box looped on 243/CREDENTIALS while `systemctl start` (a simple service) returned 0. So
+the start is confirmed by `strih_intercom_hub_crash_loop`, and a loop fails setup by name. The old enable-only
 rule was the parallel-run contract; `tests/intercom_hub_provisioning.rs` now pins the role split.
 
 **The X reads** go through ONE helper, `strih_kiosk_x_run EUID USER HOME SECONDS CMD...` in

@@ -238,8 +238,9 @@ died 139, and one run failed outright with `Text file busy` (an executing ELF ca
   The gate is `obs_box_step_applies 14`, the step that creates the secret, so the two never disagree.
 - **verify item 16 FAILs a crash-looping hub** (`strih_intercom_hub_crash_loop`: two `systemctl show`
   samples 6 s apart -- longer than RestartSec=5 -- `failed`, `auto-restart` or a climbing NRestarts);
-  since issue 1418 an inactive, disabled or missing hub FAILs on the strih role too (`13-hub-live`; step 13
-  starts a stopped hub there, never restarts a running one) and stays a NOTE on the stream role. Its
+  since issue 1418 an inactive, disabled or missing hub FAILs on the strih role too (`13-hub-live`; setup
+  starts a stopped hub there right after step 14, never restarts a running one) and stays a NOTE on the
+  stream role. Its
   `(intercom-hub)` row grades the role drop-in (a
   Janus-less box without it FAILs; a Janus box must have the secret file and no reset).
 - **Open:** the strih-lx genlock deploy arm is not role-aware; a keeper-only box still installs the
