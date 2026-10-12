@@ -337,7 +337,9 @@ jobs:
         # version dev1 runs (issue 1404: the YouTube-leg decoder's real-pixel tests and its
         # tick-cache key depend on the QR detector's behaviour, so CI tests the same detector).
         # Pillow + qrcode: test-only, generate REAL fixture QR codes to decode back.
-        run: pip install pytest websocket-client matplotlib opencv-python-headless==4.13.0.92 numpy Pillow qrcode pyyaml
+        # websockets: scripts/strih_tally.py (issue 1417, the camera tally relay + OBS client) and
+        # its end-to-end test; PINNED to the python3-websockets the Ubuntu 26.04 strih boxes run.
+        run: pip install pytest websocket-client matplotlib opencv-python-headless==4.13.0.92 numpy Pillow qrcode pyyaml websockets==15.0.1
 
       # ffmpeg: scripts/youtube_leg_verdict.py (issue 1404) decodes its real-session FLAC audio
       # fixtures and builds its synthetic test videos with ffmpeg. The SAME pinned, sha256-verified
