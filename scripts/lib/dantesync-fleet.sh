@@ -338,14 +338,14 @@ dantesync_fleet_venue_camera_rows() {
 
 # dantesync_fleet_away_venues -> the space-separated venues OTHER than the home venue whose strih
 # fact files list cameras (sorted, each once): today `pp`. A third venue joins with its fact file.
-# A STRIH_VENUE that is not a venue name (the row builder's own lower-case ASCII grammar,
-# dantesync_fleet_role_venue) is left out and named on stderr: its cameras get no row either, and
-# the callers word-split this list.
+# A STRIH_VENUE that is not a venue name (the row builder's grammar in _dantesync_fleet_camera_rows:
+# a lower-case ASCII letter, then letters and digits) is left out and named on stderr: its cameras
+# get no row either, and the callers word-split this list.
 dantesync_fleet_away_venues() {
   local out="" file venue
   while IFS='|' read -r file venue _ _; do
     [ -n "$venue" ] && [ "$venue" != "$DANTESYNC_FLEET_HOME_VENUE" ] || continue
-    if ! dantesync_fleet_role_venue "video-$venue" >/dev/null; then
+    if [[ ! "$venue" =~ ^[abcdefghijklmnopqrstuvwxyz][abcdefghijklmnopqrstuvwxyz0123456789]*$ ]]; then
       echo "dantesync-fleet: $file STRIH_VENUE '$venue' is not a venue name -- its cameras are left out" >&2
       continue
     fi

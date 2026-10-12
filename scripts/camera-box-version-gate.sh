@@ -561,11 +561,14 @@ frame_probe_pin_gate() {
 # ci.yml deploy-fleet job deploys to every venue). A drift or an unread camera SCREAMS on stderr.
 # An acked-offline camera (the gate's effective CAMBOX_OFFLINE_ACK) is EXCLUDED, never read. Each
 # read is bounded by
-# CAMERA_BOX_VERSION_GATE_VENUE_READ_TIMEOUT (default 20 s), so a hung away-venue box can never stall
+# CAMERA_BOX_VERSION_GATE_VENUE_READ_TIMEOUT (whole seconds > 0, else 20), so a hung away-venue box can never stall
 # the home E2E. Always returns 0: the gate's exit stays the --linux nodes' (the E2E measures the home
 # rig only).
 camera_box_other_venue_report() {
-  local pin="$1" venues venue rows rc name addr gate version vrc
+  local pin="$1" venues venue rows rc name addr gate version vrc bound
+  # GNU `timeout 0` means NO bound: anything but a positive whole number of seconds falls back to 20.
+  bound="${CAMERA_BOX_VERSION_GATE_VENUE_READ_TIMEOUT:-20}"
+  [[ "$bound" =~ ^[123456789][0123456789]*$ ]] || bound=20
   if ! command -v dantesync_fleet_away_venues >/dev/null 2>&1; then
     # shellcheck source=scripts/lib/dantesync-fleet.sh
     . "$HERE/lib/dantesync-fleet.sh"
@@ -593,7 +596,7 @@ camera_box_other_venue_report() {
         continue
       fi
       version="$(camera_box_version_from_version_output "$(read_camera_box_version_output "$name" "root@$addr" \
-        "${CAMERA_BOX_VERSION_GATE_VENUE_READ_TIMEOUT:-20}")")"
+        "$bound")")"
       vrc=0
       camera_box_venue_verdict "$name" "$version" "$pin" "$venue" || vrc=$?
       case "$vrc" in
