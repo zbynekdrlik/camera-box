@@ -74,7 +74,8 @@ optional argument separated by one space.
   time; events read meanwhile are queued and handled after, as ONE re-read (a collection load sends
   dozens).
 - **Transitions** (review round 1): `SceneTransitionStarted` sends `TALLY-TRS`, and while it runs
-  `TALLY-TRS` FOLLOWS every state change and every resend: the firmware recolours on `TALLY-PGM`, so a
+  `TALLY-TRS` FOLLOWS every state change, and the 10 s resend sends only `TALLY-PVW` + `TALLY-TRS`
+  (a resent `TALLY-PGM` would shift the stored program into `trs` again, review round 2): the firmware recolours on `TALLY-PGM`, so a
   TRS sent before the program change (OBS sends the start event first) would be undone at once.
   `SceneTransitionEnded` / `SceneTransitionVideoEnded` (or 15 s without either: an interrupted
   transition) sends the FULL state, which puts the lights back to red / green / gray. During a fade the

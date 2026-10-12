@@ -15,7 +15,8 @@ verify-strih item 42 (scripts/lib/strih-tally.sh).
     A protocol text a client sends goes to every OTHER client, never back to the sender; anything else
     is dropped (logged once per client), and a frame over MAX_FRAME_BYTES closes its sender (the
     firmware copies a whole frame into its small heap). A new client gets the current TALLY-PVW +
-    TALLY-PGM at once; every client gets them again every 10 s. The frames to one client never
+    TALLY-PGM at once; every client gets them again every 10 s (mid-fade only TALLY-PVW + TALLY-TRS,
+    never TALLY-PGM, which would shift the firmware's stored program). The frames to one client never
     interleave (one lock per connection).
   * An obs-websocket 5 CLIENT to ws://127.0.0.1:4455 (the strih OBS runs without WS auth). It reads
     studio mode, the program + preview scene and the scene tree; a program / preview / studio-mode
@@ -195,6 +196,8 @@ class Tally:
         return self.joined.pop(conn, None)
 
     async def _send_one(self, conn, texts):
+        if conn not in self.clients:   # dropped after a send_all built its target list
+            return
         lock = self._locks.setdefault(conn, asyncio.Lock())
         async with lock:   # one sender at a time per tally: a PVW + PGM pair never interleaves
             try:
@@ -217,8 +220,16 @@ class Tally:
             await asyncio.gather(*(self._send_one(c, texts) for c in targets))
 
     def _state_texts(self):
+        """The whole state for a NEW client (it has no stored program yet): + TALLY-TRS mid-fade."""
         texts = decision.full_messages(self.state or (0, 0))
         return texts + ["TALLY-TRS"] if self.in_transition else texts
+
+    def _resend_texts(self):
+        """The periodic resend. Mid-fade: TALLY-PVW + TALLY-TRS only -- the firmware shifts its stored
+        program into trs on EVERY TALLY-PGM, so resending it would drop the outgoing camera's red."""
+        if self.in_transition:
+            return [f"TALLY-PVW {(self.state or (0, 0))[1]}", "TALLY-TRS"]
+        return decision.full_messages(self.state or (0, 0))
 
     async def handler(self, conn):
         peer = self._peer(conn)
@@ -391,7 +402,7 @@ class Tally:
         while True:
             await asyncio.sleep(self.resend_s)
             if self.state is not None:
-                await self.send_all(self._state_texts())
+                await self.send_all(self._resend_texts())
 
     async def fallback_loop(self):
         while True:
