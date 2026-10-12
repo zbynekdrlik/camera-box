@@ -81,7 +81,7 @@ so a hung X server FAILs a row instead of hanging verify.
 | `(qt6-svg)` | the `qt6-svg-plugins` package installed with BOTH plugins (item 21 grades only the icon engine) |
 | `(operator-input)` | X lists a real keyboard AND a real pointer (never XTEST, never the ACPI buttons, `STRIH_OPERATOR_NOT_A_KEYBOARD`) |
 | `(panel-gpu)` | `xrandr --listproviders` on :0 (bounded 10 s): every provider after Provider 0 that lists `Sink Output` (the reverse-PRIME panel sink) must be named `modesetting`; any other name is a vendor DDX and FAILs naming the shared baseline's `/etc/X11/xorg.conf.d/20-igpu-sink-modesetting.conf`; NOTE with one provider; a failed or timed-out read = a hung X; a missing `xrandr` (rc 127) is named |
-| `(drm-hang)` | `journalctl -k -b 0 --no-pager` (bounded 30 s): a `blocked for more than` hung task whose trace within 25 lines (before the next `INFO: task`) shows `commit_work` or `drm_atomic_helper_wait_for_fences`, or a `[drm] *ERROR* ... flip_done timed out`, FAILs naming its first time stamp; an unreadable or empty log FAILs |
+| `(drm-hang)` | `journalctl -k -b 0 --no-pager` (bounded 30 s): a `blocked for more than` hung task whose trace within 25 lines (before the next `INFO: task`) has a `commit_work+0x` or `drm_atomic_helper_wait_for_fences+0x` frame, or a DRM `*ERROR*` commit timeout (`flip_done` / `hw_done` / `commit wait` timed out, amdgpu_dm `Waiting for fences timed out`, nvidia-drm `Flip event timeout`), FAILs naming its first time stamp; an unreadable or empty log FAILs, and so does one with no kernel line (`-- No entries --` when run outside root / adm / systemd-journal) |
 | `(operator-panel)` | two `ffmpeg -f x11grab -i :0.0 -frames:v 1 -f md5 -` frames 4 s apart differ while OBS runs (the 12.10 hang signature); NOTE while OBS is not running |
 
 **The 11/12.10.2026 X freeze (comments 6132168799, ROZHODNUTE 6132283178).** The panel's amdgpu
@@ -98,7 +98,9 @@ BIOS discrete-GPU mode is only a fallback if the modesetting sink hangs too.
 - `(drm-hang)` catches the next hang in the boot it starts, not at the event. Only a reboot clears a
   hung commit (the worker sits in D state).
 - Seams: `STRIH_OPERATOR_XRANDR` and `STRIH_OPERATOR_KLOG` read fixture files instead of the live
-  tools; the fixtures under `tests/python/fixtures/strih_operator_1418/` are the strih-snv texts.
+  tools; under `tests/python/fixtures/strih_operator_1418/` the provider list is the strih-snv text
+  verbatim and the commit-hang log is a reconstruction of the abridged trace in the comment (its
+  first line says which parts are verbatim).
 
 Known limit of `(operator-panel)`: a truly still screen (no meters, no clock, no live camera) reads
 as frozen. The strih panel always has live Multiview tiles, so this has not happened.

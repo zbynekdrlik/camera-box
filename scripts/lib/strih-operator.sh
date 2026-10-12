@@ -60,10 +60,12 @@
 #                        one provider; a read that fails is a hung X;
 #       (drm-hang)       this boot's kernel log (`journalctl -k -b 0`): a hung task (`blocked for more
 #                        than`) whose trace within STRIH_OPERATOR_KLOG_TRACE_LINES lines (before the next
-#                        `INFO: task`) shows `commit_work` or `drm_atomic_helper_wait_for_fences`, or a
-#                        `[drm] *ERROR* ... flip_done timed out`, FAILs naming its first time stamp (the
-#                        11.10 hang sat 18 h in the log before anyone saw the frozen panel); an
-#                        unreadable or empty log FAILs;
+#                        `INFO: task`) has a `commit_work+0x` or `drm_atomic_helper_wait_for_fences+0x`
+#                        frame, or a DRM `*ERROR*` commit timeout (`flip_done` / `hw_done` / `commit wait`
+#                        timed out, amdgpu_dm `Waiting for fences timed out`, nvidia-drm `Flip event
+#                        timeout`), FAILs naming its first time stamp (the 11.10 hang sat 18 h in the log
+#                        before anyone saw the frozen panel); an unreadable log, or one with no kernel
+#                        line (`-- No entries --` for a user outside adm/systemd-journal), FAILs;
 #       (operator-panel) two `ffmpeg -f x11grab` frames of :0 a few seconds apart differ while OBS
 #                        runs: the 12.10.2026 X hang kept OBS rendering while the panel froze; NOTE
 #                        while OBS is not running. A truly still picture (OBS paused on a still scene,
@@ -640,7 +642,7 @@ strih_operator_panel_gpu_verdict() {
   if [ "$count" = 0 ]; then
     printf 'FAIL|(panel-gpu) xrandr --listproviders on :0 listed no GPU provider -- X is down or does not answer clients (the 12.10.2026 hang)\n'
   elif [ -n "$bad" ]; then
-    printf 'FAIL|(panel-gpu) the reverse-PRIME panel sink %s runs on its vendor DDX, not modesetting, behind the X screen'"'"'s GPU %s: its panel commits wait on %s fences, and on the amdgpu DDX one never signalled (the strih-snv 11/12.10.2026 freeze) -- re-run setup-strih.sh step 11 (the shared baseline writes %s) and restart X\n' \
+    printf 'FAIL|(panel-gpu) the reverse-PRIME panel sink %s runs on its vendor DDX, not modesetting, behind the X screen'"'"'s GPU %s: its panel commits wait on %s fences, and on the amdgpu DDX one never signalled (the strih-snv 11/12.10.2026 freeze) -- re-run setup-strih.sh step 11 and restart X: the shared baseline writes %s, which moves an amdgpu sink to modesetting; a sink on another vendor DDX needs its own OutputClass (MatchDriver = its kernel driver) there\n' \
       "$bad" "${src:-Provider 0}" "${src:-Provider 0}" "$STRIH_OPERATOR_IGPU_SINK_CONF"
   elif [ "$count" = 1 ]; then
     printf 'NOTE|(panel-gpu) one GPU provider (%s), no PRIME -- not graded\n' "${src:-Provider 0}"
@@ -662,8 +664,8 @@ strih_operator_klog_read() {
 }
 
 # strih_operator_klog_drm_hang (stdin = a kernel log) -> `STAMP|task|DESC` for the first hung task whose
-# trace waits in a DRM commit, or `STAMP|flip|MESSAGE` for the first `[drm] *ERROR* ... flip_done timed
-# out`, whichever the log shows first; nothing when neither is there. STAMP is the short-format
+# trace waits in a DRM commit, or `STAMP|flip|MESSAGE` for the first DRM `*ERROR*` commit timeout (the
+# header's forms), whichever the log shows first; nothing when neither is there. STAMP is the short-format
 # `Mon DD HH:MM:SS` (else the line's first field, e.g. short-iso), empty when the line has no `kernel:`.
 strih_operator_klog_drm_hang() {
   LC_ALL=C awk -v win="$STRIH_OPERATOR_KLOG_TRACE_LINES" '
@@ -685,11 +687,13 @@ strih_operator_klog_drm_hang() {
       d = substr($0, index($0, "INFO: task ") + 11); sub(/\.[ \t]*$/, "", d)
       next
     }
-    /\[drm\] \*ERROR\*.*flip_done timed out/ { print stamp($0) "|flip|" message($0); exit }
+    /\[drm[^*]*\*ERROR\*.*((flip_done|hw_done|commit wait) timed out|Waiting for fences timed out|Flip event timeout)/ {
+      print stamp($0) "|flip|" message($0); exit
+    }
     pend {
       if ($0 ~ /INFO: task /) pend = 0
       else if (++n > win + 0) pend = 0
-      else if ($0 ~ /commit_work|drm_atomic_helper_wait_for_fences/) { print ts "|task|" d; exit }
+      else if ($0 ~ /[ \t](commit_work|drm_atomic_helper_wait_for_fences)\+0x/) { print ts "|task|" d; exit }
     }' || true
 }
 
@@ -699,6 +703,13 @@ strih_operator_drm_hang_verdict() {
   if [ "$rc" != 0 ] || [ -z "$text" ]; then
     printf 'FAIL|(drm-hang) this boot'"'"'s kernel log could not be read (journalctl -k -b 0 --no-pager: rc %s, %s) -- a hung display commit cannot be ruled out\n' \
       "$rc" "$([ -n "$text" ] && echo "partial output" || echo "no output")"
+    return 0
+  fi
+  # A boot's kernel log always holds kernel lines (`Linux version` at least). journalctl run by a user
+  # outside adm/systemd-journal exits 0 and prints only `-- No entries --`: that is a blind read.
+  if ! grep -q 'kernel:' <<<"$text"; then
+    printf 'FAIL|(drm-hang) this boot'"'"'s kernel log shows no kernel line (journalctl -k -b 0 printed: %s) -- run verify-strih as root (or a member of adm/systemd-journal); a hung display commit cannot be ruled out\n' \
+      "$(head -n 1 <<<"$text")"
     return 0
   fi
   hit="$(strih_operator_klog_drm_hang <<<"$text")"

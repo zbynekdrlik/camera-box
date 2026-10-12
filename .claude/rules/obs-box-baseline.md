@@ -163,7 +163,8 @@ OBS kept rendering. The returned Intel notebook had the same topology with the s
   (the system half is at its line budget). It takes effect at the next X start.
 - **Grader row `igpu-sink`** (right after `gpu`): on a dGPU box the file must be byte-identical to
   the renderer (gather key `igpu_sink_conf`, `declare -f` embeds both renderers); an iGPU-only box is
-  OK. Verify-strih's operator item 43 grades the EFFECT, the running sink provider's DDX
+  OK. A dGPU box provisioned before this item (strih-snv, strih-pp) FAILs the row until setup re-runs.
+  Verify-strih's operator item 43 grades the EFFECT, the running sink provider's DDX
   (`(panel-gpu)`, `strih-operator.md`), and names this file.
 - **Tests:** `tests/python/test_obs_box_igpu_sink_1418.py` runs the real install, the real
   `obs_box_nvidia_prime` with its host tools stubbed as functions, the real gather with the conf path
