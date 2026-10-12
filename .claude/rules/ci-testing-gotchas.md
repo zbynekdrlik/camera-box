@@ -1874,3 +1874,16 @@ that caller state (the `caller_setup` argument of `_run` in
 
 The locale half (a bracket range under en_US.UTF-8) is the issue-1302 entry above: spell the digit
 set out (`[0123456789]`) and pin it with a lint.
+
+## A "hung box" fixture must hang BEFORE it answers, and `timeout 0` is no bound (issue 1413)
+
+Two traps from bounding a remote read with `timeout` (the away-venue camera-box version read):
+- **A fake that prints the answer and THEN sleeps tests nothing.** The bounded read captures the
+  answer before the kill and reads OK, so the test passes for the wrong reason (the first cut of
+  `test_gate_other_venues_bounds_a_camera_whose_read_hangs` did exactly that). Sleep first, answer
+  after. Prove it on a copy of the pre-fix script: the test must take the full sleep and fail.
+- **GNU `timeout 0` means NO timeout.** An env override that reaches `timeout` must be clamped:
+  anything but a positive whole number falls back to the default (`[[ $v =~ ^[123456789][0123456789]*$ ]]`).
+  Pin it with a stub `timeout` first on PATH that logs its first argument.
+- `ssh -o ConnectTimeout=N` bounds only the connect and the banner, never the login or the remote
+  command: a box that answers :22 but has a dying stick or fork exhaustion hangs the read.
