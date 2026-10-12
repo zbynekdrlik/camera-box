@@ -367,6 +367,19 @@ n=$(cat "$FAKE_OP/grab-n" 2>/dev/null || echo 0)
 echo $((n + 1)) > "$FAKE_OP/grab-n"
 sed -n "$((n + 1))p" "$FAKE_OP/grabs" 2>/dev/null || true
 """
+# xrandr / journalctl: log the call, print the fixture text, exit with the scripted rc (default 0).
+_FAKE_TOOL = r"""#!/bin/bash
+echo "%s $* DISPLAY=${DISPLAY-}" >> "$FAKE_OP/calls"
+cat "$FAKE_OP/%s" 2>/dev/null || true
+exit "$(cat "$FAKE_OP/%s-rc" 2>/dev/null || echo 0)"
+"""
+FIX = Path(__file__).resolve().parent / "fixtures" / "strih_operator_1418"
+XR_SNV = (FIX / "xrandr-strih-snv-reverse-prime.txt").read_text()  # strih-snv 12.10.2026, ticket comment
+XR_ONE = (FIX / "xrandr-one-nvidia-provider.txt").read_text()
+XR_SINK_NO_OUTPUTS = (FIX / "xrandr-sink-without-outputs.txt").read_text()
+KLOG_SNV = (FIX / "klog-strih-snv-commit-hang.txt").read_text()  # the 11/12.10.2026 trace, comment 6132168799
+KLOG_CLEAN = (FIX / "klog-clean.txt").read_text()
+KLOG_EXT4 = (FIX / "klog-ext4-hung-task.txt").read_text()
 _FAKE_DPKG_OP = r"""#!/bin/bash
 grep -qxF "${@: -1}" "$FAKE_OP/installed" 2>/dev/null && printf 'install ok installed' || true
 """
@@ -398,6 +411,9 @@ class Op:
         self.bin.mkdir()
         _exec(self.bin / "dpkg-query", _FAKE_DPKG_OP)
         _exec(self.bin / "sudo", _FAKE_SUDO)
+        _exec(self.bin / "xrandr", _FAKE_TOOL % ("xrandr", "xrandr", "xrandr"))
+        _exec(self.bin / "journalctl", _FAKE_TOOL % ("journalctl", "klog", "klog"))
+        self.seams = True  # STRIH_OPERATOR_XRANDR / _KLOG point at the fixture files
         self.xinput = _exec(tmp_path / "fake-xinput", _FAKE_XINPUT)
         self.hci = _exec(tmp_path / "fake-hciconfig", _FAKE_CAT % "hci")
         self.studio = _exec(tmp_path / "fake-studio", _FAKE_CAT % "studio")
@@ -430,6 +446,8 @@ class Op:
             f.write_text("so")
         (self.st / "obs-up").write_text("")
         (self.st / "grabs").write_text("MD5=aaaa\nMD5=bbbb\n")
+        (self.st / "xrandr").write_text(XR_SINK_NO_OUTPUTS)
+        (self.st / "klog").write_text(KLOG_CLEAN)
 
     def deck(self, present):
         d = self.sys / "bus" / "usb" / "devices" / "3-1"
@@ -461,7 +479,8 @@ class Op:
             self.server = None
 
     def env(self):
-        return {"PATH": "%s:%s" % (self.bin, os.environ["PATH"]), "FAKE_OP": str(self.st),
+        seams = {"STRIH_OPERATOR_XRANDR": str(self.st / "xrandr"), "STRIH_OPERATOR_KLOG": str(self.st / "klog")}
+        return {**(seams if self.seams else {}), "PATH": "%s:%s" % (self.bin, os.environ["PATH"]), "FAKE_OP": str(self.st),
                 "STRIH_OPERATOR_EUID": self.euid, "STRIH_OPERATOR_XINPUT": str(self.xinput),
                 "STRIH_OPERATOR_HCICONFIG": str(self.hci), "STRIH_OPERATOR_SYSFS": str(self.sys),
                 "COMPANION_SATELLITE_REST_URL": self.rest, "STRIH_OPERATOR_STUDIO_CMD": str(self.studio),
@@ -494,14 +513,14 @@ def op(tmp_path):
 
 
 ITEMS = ["tap-to-click", "bluetooth", "stream-deck", "mv-click", "studio-mode", "ws-seed", "qt6-svg",
-         "operator-input", "operator-panel"]
+         "operator-input", "panel-gpu", "drm-hang", "operator-panel"]
 
 
 def test_a_healthy_operator_surface_passes_every_row(op):
     rows = op.rows()
     assert [d.split(")", 1)[0][1:] for _, d in rows] == ITEMS
-    assert [st for st, _ in rows] == ["OK"] * 9, rows
-    assert _bash("strih_operator_row_count").stdout == "9"
+    assert [st for st, _ in rows] == ["OK"] * 11, rows
+    assert _bash("strih_operator_row_count").stdout == "11"
 
 
 def test_tap_to_click_off_on_the_live_touchpad_fails_naming_it(op):
@@ -692,12 +711,99 @@ def test_the_panel_is_a_note_while_obs_is_down(op):
     assert op.row("operator-panel")[0] == "NOTE"
 
 
+def test_the_12_10_reverse_prime_panel_fails_naming_the_bios_cure(op):
+    """strih-snv 12.10.2026: NVIDIA renders, the AMD iGPU scans the panel out, a flip waited forever."""
+    (op.st / "xrandr").write_text(XR_SNV)
+    st, d = op.row("panel-gpu")
+    assert st == "FAIL" and "BIOS GPU working mode = discrete GPU" in d, d
+    assert "reverse-PRIME sink on AMD Radeon 780M Graphics @ pci:0000:64:00.0" in d and "NVIDIA-0" in d, d
+
+
+def test_one_gpu_provider_is_a_note(op):
+    (op.st / "xrandr").write_text(XR_ONE)
+    st, d = op.row("panel-gpu")
+    assert st == "NOTE" and "one GPU provider" in d and "NVIDIA-0" in d, d
+
+
+def test_a_sink_provider_without_outputs_is_not_a_failure(op):
+    st, d = op.row("panel-gpu")
+    assert st == "OK" and "NVIDIA-0" in d, d
+
+
+def test_a_provider_read_that_fails_names_the_hung_x(op):
+    (op.st / "xrandr").unlink()
+    st, d = op.row("panel-gpu")
+    assert st == "FAIL" and "does not answer clients" in d, d
+
+
+def test_the_provider_read_runs_xrandr_on_display_0_as_the_operator_bounded(op):
+    op.seams, op.euid = False, "0"
+    (op.st / "xrandr").write_text(XR_SNV)
+    assert op.row("panel-gpu")[0] == "FAIL"
+    assert ("sudo -u operator1 env DISPLAY=:0 XAUTHORITY=%s/.Xauthority timeout 10 xrandr --listproviders"
+            % op.home) in op.calls()
+
+
+@pytest.mark.parametrize("rc,word", [("124", "did not answer within 10 s"), ("127", "not installed"),
+                                     ("1", "does not answer clients")])
+def test_a_failed_xrandr_is_named(op, rc, word):
+    op.seams = False
+    (op.st / "xrandr-rc").write_text(rc)
+    st, d = op.row("panel-gpu")
+    assert st == "FAIL" and word in d, d
+
+
+def test_the_12_10_hung_display_commit_fails_naming_its_first_time(op):
+    (op.st / "klog").write_text(KLOG_SNV)
+    st, d = op.row("drm-hang")
+    assert st == "FAIL" and "Oct 11 22:19:14" in d and "kworker/u64:4:177186" in d, d
+    assert "Oct 12 16:42:16" not in d, d
+
+
+def test_a_flip_done_timeout_alone_fails(op):
+    keep = [ln for ln in KLOG_SNV.splitlines() if not ln.startswith("Oct 11 22:")]
+    (op.st / "klog").write_text("\n".join(keep) + "\n")
+    st, d = op.row("drm-hang")
+    assert st == "FAIL" and "Oct 12 16:42:16" in d and "flip_done timed out" in d, d
+
+
+def test_a_clean_kernel_log_is_ok(op):
+    st, d = op.row("drm-hang")
+    assert st == "OK" and "no hung display commit" in d, d
+
+
+def test_a_hung_task_outside_drm_is_not_this_row(op):
+    """A jbd2 hang is a disk fault, not the panel: OK here, even when a DRM word follows past its trace."""
+    noise = "".join("Oct 12 18:03:%02d strih-snv kernel: r8152 2-1:1.0 eth: noise %d\n" % (i, i) for i in range(30))
+    (op.st / "klog").write_text(KLOG_EXT4 + noise + "Oct 12 18:04:00 strih-snv kernel: Workqueue: commit_work\n")
+    assert op.row("drm-hang")[0] == "OK"
+
+
+def test_a_drm_hang_after_an_unrelated_hung_task_is_found(op):
+    (op.st / "klog").write_text(KLOG_EXT4 + KLOG_SNV)
+    st, d = op.row("drm-hang")
+    assert st == "FAIL" and "Oct 11 22:19:14" in d and "kworker/u64:4" in d and "jbd2" not in d, d
+
+
+def test_an_unreadable_kernel_log_fails(op):
+    (op.st / "klog").unlink()
+    st, d = op.row("drm-hang")
+    assert st == "FAIL" and "kernel log" in d, d
+
+
+def test_the_kernel_log_read_is_this_boots_journal(op):
+    op.seams = False
+    (op.st / "klog").write_text(KLOG_SNV)
+    assert op.row("drm-hang")[0] == "FAIL"
+    assert "journalctl -k -b 0 --no-pager" in op.calls()
+
+
 def test_the_report_prints_every_row_through_the_callers_functions(op):
     body = ('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
             'strih_operator_grade_report "$1" "$2" "$3"; echo "rc=$?"')
     r = _bash(body, env=op.env(), args=(str(REPO), str(op.home), "operator1"))
     assert r.returncode == 0, r.stderr
-    assert [ln.split()[0] for ln in r.stdout.splitlines()] == ["PASS"] * 9 + ["rc=0"]
+    assert [ln.split()[0] for ln in r.stdout.splitlines()] == ["PASS"] * 11 + ["rc=0"]
 
 
 # --- the wiring: setup-strih step 16g, verify-strih items 43 + 16 ---------------------------------------

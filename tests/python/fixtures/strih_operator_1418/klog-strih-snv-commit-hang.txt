@@ -1,0 +1,44 @@
+Oct 11 14:56:02 strih-snv kernel: Linux version 7.0.0-38-generic (buildd@lcy02-amd64-031) (x86_64-linux-gnu-gcc-14) #38-Ubuntu SMP PREEMPT_DYNAMIC
+Oct 11 14:56:02 strih-snv kernel: Command line: BOOT_IMAGE=/boot/vmlinuz-7.0.0-38-generic root=UUID=0b6e1f8c ro quiet splash preempt=full
+Oct 11 14:56:09 strih-snv kernel: nvidia: loading out-of-tree module taints kernel.
+Oct 11 14:56:10 strih-snv kernel: [drm] Initialized amdgpu 3.64.0 for 0000:64:00.0 on minor 1
+Oct 11 14:56:11 strih-snv kernel: [drm] [nvidia-drm] [GPU ID 0x00000100] Loading driver
+Oct 11 22:19:14 strih-snv kernel: INFO: task kworker/u64:4:177186 blocked for more than 122 seconds.
+Oct 11 22:19:14 strih-snv kernel:       Tainted: P           OE      7.0.0-38-generic #38-Ubuntu
+Oct 11 22:19:14 strih-snv kernel: "echo 0 > /proc/sys/kernel/hung_task_timeout_secs" disables this message.
+Oct 11 22:19:14 strih-snv kernel: task:kworker/u64:4   state:D stack:0     pid:177186 tgid:177186 ppid:2      flags:0x00004000
+Oct 11 22:19:14 strih-snv kernel: Workqueue: events_unbound commit_work
+Oct 11 22:19:14 strih-snv kernel: Call Trace:
+Oct 11 22:19:14 strih-snv kernel:  <TASK>
+Oct 11 22:19:14 strih-snv kernel:  __schedule+0x2f0/0x6e0
+Oct 11 22:19:14 strih-snv kernel:  schedule+0x27/0x80
+Oct 11 22:19:14 strih-snv kernel:  schedule_timeout+0x13c/0x150
+Oct 11 22:19:14 strih-snv kernel:  dma_fence_default_wait+0x1f4/0x2b0
+Oct 11 22:19:14 strih-snv kernel:  dma_fence_wait_timeout+0x113/0x140
+Oct 11 22:19:14 strih-snv kernel:  drm_atomic_helper_wait_for_fences+0x7c/0x110
+Oct 11 22:19:14 strih-snv kernel:  commit_tail+0x41/0x1a0
+Oct 11 22:19:14 strih-snv kernel:  commit_work+0x14/0x20
+Oct 11 22:19:14 strih-snv kernel:  process_one_work+0x18a/0x3a0
+Oct 11 22:19:14 strih-snv kernel:  worker_thread+0x2e1/0x400
+Oct 11 22:19:14 strih-snv kernel:  kthread+0x10e/0x220
+Oct 11 22:19:14 strih-snv kernel:  ret_from_fork+0x34/0x50
+Oct 11 22:19:14 strih-snv kernel:  ret_from_fork_asm+0x1a/0x30
+Oct 11 22:19:14 strih-snv kernel:  </TASK>
+Oct 11 22:37:40 strih-snv kernel: INFO: task kworker/u64:4:177186 blocked for more than 1228 seconds.
+Oct 11 22:37:40 strih-snv kernel:       Tainted: P           OE      7.0.0-38-generic #38-Ubuntu
+Oct 11 22:37:40 strih-snv kernel: "echo 0 > /proc/sys/kernel/hung_task_timeout_secs" disables this message.
+Oct 11 22:37:40 strih-snv kernel: task:kworker/u64:4   state:D stack:0     pid:177186 tgid:177186 ppid:2      flags:0x00004000
+Oct 11 22:37:40 strih-snv kernel: Workqueue: events_unbound commit_work
+Oct 11 22:37:40 strih-snv kernel: Call Trace:
+Oct 11 22:37:40 strih-snv kernel:  <TASK>
+Oct 11 22:37:40 strih-snv kernel:  __schedule+0x2f0/0x6e0
+Oct 11 22:37:40 strih-snv kernel:  schedule+0x27/0x80
+Oct 11 22:37:40 strih-snv kernel:  schedule_timeout+0x13c/0x150
+Oct 11 22:37:40 strih-snv kernel:  dma_fence_default_wait+0x1f4/0x2b0
+Oct 11 22:37:40 strih-snv kernel:  dma_fence_wait_timeout+0x113/0x140
+Oct 11 22:37:40 strih-snv kernel:  drm_atomic_helper_wait_for_fences+0x7c/0x110
+Oct 11 22:37:40 strih-snv kernel:  commit_tail+0x41/0x1a0
+Oct 11 22:37:40 strih-snv kernel:  commit_work+0x14/0x20
+Oct 11 22:37:40 strih-snv kernel:  </TASK>
+Oct 11 22:37:40 strih-snv kernel: Future hung task reports are suppressed, see sysctl kernel.hung_task_warnings
+Oct 12 16:42:16 strih-snv kernel: amdgpu 0000:64:00.0: [drm] *ERROR* [CRTC:364:crtc-0] hw_done or flip_done timed out

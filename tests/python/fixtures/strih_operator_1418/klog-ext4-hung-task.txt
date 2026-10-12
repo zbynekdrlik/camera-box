@@ -1,0 +1,18 @@
+Oct 12 18:02:44 strih-snv kernel: INFO: task jbd2/nvme0n1p2-8:412 blocked for more than 122 seconds.
+Oct 12 18:02:44 strih-snv kernel:       Tainted: P           OE      7.0.0-38-generic #38-Ubuntu
+Oct 12 18:02:44 strih-snv kernel: "echo 0 > /proc/sys/kernel/hung_task_timeout_secs" disables this message.
+Oct 12 18:02:44 strih-snv kernel: task:jbd2/nvme0n1p2-8 state:D stack:0     pid:412   tgid:412   ppid:2      flags:0x00004000
+Oct 12 18:02:44 strih-snv kernel: Call Trace:
+Oct 12 18:02:44 strih-snv kernel:  <TASK>
+Oct 12 18:02:44 strih-snv kernel:  __schedule+0x2f0/0x6e0
+Oct 12 18:02:44 strih-snv kernel:  schedule+0x27/0x80
+Oct 12 18:02:44 strih-snv kernel:  io_schedule+0x46/0x80
+Oct 12 18:02:44 strih-snv kernel:  bit_wait_io+0x11/0x80
+Oct 12 18:02:44 strih-snv kernel:  __wait_on_bit+0x48/0x150
+Oct 12 18:02:44 strih-snv kernel:  out_of_line_wait_on_bit+0x8c/0xb0
+Oct 12 18:02:44 strih-snv kernel:  jbd2_journal_commit_transaction+0x12a4/0x1990
+Oct 12 18:02:44 strih-snv kernel:  kjournald2+0xa9/0x280
+Oct 12 18:02:44 strih-snv kernel:  kthread+0x10e/0x220
+Oct 12 18:02:44 strih-snv kernel:  ret_from_fork+0x34/0x50
+Oct 12 18:02:44 strih-snv kernel:  ret_from_fork_asm+0x1a/0x30
+Oct 12 18:02:44 strih-snv kernel:  </TASK>
