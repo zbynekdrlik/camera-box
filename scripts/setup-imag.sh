@@ -314,6 +314,9 @@ if command -v nmcli >/dev/null 2>&1; then
 else
     fail "nmcli missing — desktop Ubuntu expected (netplan-only path not implemented)"
 fi
+# issue 1415: the rig time zone (Europe/Bratislava), the shared baseline item setup-strih runs in its
+# step 1 too; every OBS browser-source clock shows the box's local time. verify-imag (bb) grades it.
+obs_box_timezone
 
 # =============================================================================
 step 2 "Network performance tuning (#486): sysctl + EEE off, flow-control advertised on the NDI NIC"

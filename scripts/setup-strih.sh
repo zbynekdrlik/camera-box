@@ -104,6 +104,7 @@ step 1 "Static IP (NetworkManager) + hostname $(strih_lx_hostname)"
 command -v nmcli >/dev/null 2>&1 || fail "nmcli required (desktop Ubuntu NetworkManager)"
 echo "  (operator: assign ${STATIC_IP}/23 to the rig NIC via nmcli, pin the profile with connection.interface-name <rig NIC>$(strih_nic_ring_note "$(strih_lx_nic_driver)"), and take every other wired profile off the rig subnet: nmcli connection modify <name> connection.autoconnect no && nmcli connection down <name> -- recorded here as the target; verify-strih item 36 grades the pinning)"
 hostnamectl set-hostname "$(strih_lx_hostname)" 2>/dev/null || warn "  could not set hostname (non-fatal)"
+obs_box_timezone
 
 # ---------------------------------------------------------------------------------------------
 # issue 1391: the rig NIC's out-of-tree driver (the 5 GbE RTL8157 has no in-tree driver on the 7.0 kernels)

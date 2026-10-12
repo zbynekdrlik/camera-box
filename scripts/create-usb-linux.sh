@@ -73,6 +73,9 @@ SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 # shellcheck source=scripts/lib/ro-root.sh
 . "$SCRIPT_DIR/lib/ro-root.sh"  # ro_root_tmpfs_line (issue 1400) -- the SAME /var/cache tmpfs line
                                 # as setup-device.sh STEP 18 (the read-only-root canon)
+# shellcheck source=scripts/lib/rig-timezone.sh
+. "$SCRIPT_DIR/lib/rig-timezone.sh"  # rig_timezone_apply (issue 1415) -- the SAME rig time zone
+                                     # setup-device.sh STEP 1 writes, into the image root
 
 # Colors for output
 RED='\033[0;31m'
@@ -401,7 +404,8 @@ apt-get install -y \
     dhcpcd-base \
     nftables \
     cloud-guest-utils \
-    systemd-journal-remote
+    systemd-journal-remote \
+    tzdata
 
 # #362: bake the NDI/audio RUNTIME deps into the base image so a fresh clone can RUN camera-box
 # without hand-provisioning. The fresh CAM3 clone (#301 re-image) booted but camera-box crash-looped
@@ -688,6 +692,10 @@ SETUP_EOF
 
     # Clean up setup script
     rm -f "$MOUNT_ROOT/tmp/setup.sh" "$MOUNT_ROOT/tmp/install-grub-efi.sh" "$MOUNT_ROOT/tmp/grub-fast-boot.sh"
+
+    # issue 1415: the rig time zone into the image (the chroot installed tzdata above): the
+    # /etc/localtime symlink + /etc/timezone, written into the target root by the shared lib.
+    rig_timezone_apply "$MOUNT_ROOT" || error "issue 1415: could not set the rig time zone ${RIG_TIMEZONE} in the image"
 
     # #369: install auto-grow-root first-boot service into the rw-root image.
     # growpart (from cloud-guest-utils, installed above) expands root to fill the disk on first boot

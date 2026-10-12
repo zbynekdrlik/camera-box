@@ -11,6 +11,30 @@
 # envelope) lives in obs-box-baseline.sh;
 # see its header for the box-fact ARGUMENTS convention and the item order. The bodies keep
 # setup-imag.sh's column-0 layout so their heredocs stay byte-identical to what imag has always written.
+# issue 1415: this half also sets the rig time zone (obs_box_timezone), the operator's clocks.
+
+# The ONE rig time-zone declaration (scripts/lib/rig-timezone.sh, also used by setup-device.sh,
+# create-usb-linux.sh and verify-device.sh). The directory is a pure parameter expansion (no dirname),
+# like obs-box-baseline.sh's own source of this file.
+# shellcheck source=scripts/lib/rig-timezone.sh
+if [ "${BASH_SOURCE[0]%/*}" != "${BASH_SOURCE[0]}" ]; then . "${BASH_SOURCE[0]%/*}/rig-timezone.sh"; else . ./rig-timezone.sh; fi
+
+# obs_box_timezone [ROOT] -- issue 1415: the box runs the rig time zone (Europe/Bratislava), so every
+# browser source (Camera info, Interkom, Odpocet) shows local time. Writes the /etc/localtime symlink +
+# /etc/timezone through rig_timezone_apply (never timedatectl, whose read-back lies on a read-only root),
+# installing tzdata first when the zoneinfo file is missing. ROOT is for the tests; both setup scripts
+# call it bare, in step 1. Fails loud via the caller's fail().
+obs_box_timezone() {
+    local ROOT="${1:-}"
+    if [ ! -f "$(rig_timezone_zoneinfo "$ROOT")" ]; then
+        echo "  issue 1415: $(rig_timezone_zoneinfo "$ROOT") is missing -- installing tzdata"
+        obs_box_apt_update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y tzdata >/dev/null \
+            || fail "issue 1415: could not install tzdata -- no zoneinfo file for the rig time zone ${RIG_TIMEZONE}"
+    fi
+    rig_timezone_apply "$ROOT" \
+        || fail "issue 1415: could not set the rig time zone ${RIG_TIMEZONE} (/etc/localtime) -- the operator's clocks would run on UTC"
+}
 
 # obs_box_crash_popup_units -> the system units the crash-popup item masks, one per line: apport +
 # whoopsie (the imag #485 list) PLUS the Ubuntu 26.04 apport coredump hook TEMPLATE. apport writes the
