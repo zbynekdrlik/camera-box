@@ -87,6 +87,8 @@ Both OBS launchers run a websocket scene seeder (`strih-obs-start.sh` refuses to
 `obs_box_kiosk` step (a) installs it with the other kiosk packages, and the grader row `websocket`
 (after `kiosk`, before `brightness`) is OK only when the package is installed AND the system python3
 can `from websocket import create_connection`. setup-imag.sh's own step-11b install stays (a no-op).
+`xinput` rides the same package line (issue 1418): verify-strih item 43 reads the LIVE touchpad
+tapping value and the X input devices with it, and a missing tool is named there, never read as a hung X.
 
 ## The panel-brightness keys (kiosk facet, issue 1357)
 

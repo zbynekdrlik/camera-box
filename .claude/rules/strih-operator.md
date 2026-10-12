@@ -44,7 +44,8 @@ end (issue 1399), the hub start order, and the imag hand tweaks.
   here, so there is ONE [BasicWindow] seeder.
   - It never writes while OBS runs: OBS rewrites user.ini from memory on exit. A WARN names it, and
     item 43 FAILs until a run with OBS stopped (the genlock deploy stops OBS before setup-strih).
-  - It never clobbers an unparseable file.
+  - It never clobbers an unparseable file, refuses a symlinked user.ini (setup runs as root), and
+    replaces the file through a temp file + rename, keeping its mode.
   - `MultiviewMouseSwitch` defaults to true in OBS (`OBSApp.cpp`), so a `false` was written into the
     file. The 11.10 backup restore of user.ini is the likely source (unconfirmed).
 - **Every OTHER wired NetworkManager profile on the rig subnet:** `connection.autoconnect no`, then
@@ -58,6 +59,10 @@ end (issue 1399), the hub start order, and the imag hand tweaks.
   - Nothing is touched while the rig address is not on the rig NIC: the subnet is unknown then.
   - A non-wired connection on the subnet (WiFi) and an address no NetworkManager connection runs are
     named in a WARN, never changed.
+  - An INACTIVE DHCP wired profile has no address to place (the 11.10 onboard profile was one, it
+    landed on the rig subnet when a cable went in): it is named in a WARN, never changed blind; item 36
+    FAILs it once it comes up there.
+  - Every `nmcli` call inside the profile loop reads `</dev/null`, so none can eat the loop's rows.
   - Caveat: a setup run over an ssh session to the OTHER interface's address cuts its own session.
     The genlock deploy dials STRIH_IP.
 
@@ -67,10 +72,10 @@ so a hung X server FAILs a row instead of hanging verify.
 
 | Row | Grades |
 |---|---|
-| `(tap-to-click)` | the LIVE `libinput Tapping Enabled` = 1 on every touchpad (`xinput list-props`); a touchpad without the libinput property FAILs; NOTE with no touchpad |
-| `(bluetooth)` | `hciconfig hci0`: UP and a non-zero BD address. Graded because the kiosk keeps bluetooth (`STRIH_OPERATOR_KIOSK_BLUETOOTH`, test-pinned to the step-11 `obs_box_kiosk ... keep-bluetooth` call) |
+| `(tap-to-click)` | the LIVE `libinput Tapping Enabled` = 1 on every touchpad (`xinput list-props`); a touchpad without the libinput property FAILs, a device whose properties do not answer is named; NOTE with no touchpad; a missing `xinput` is named (the kiosk installs it), never read as a hung X |
+| `(bluetooth)` | `hciconfig hci0`: UP and a non-zero BD address. Graded on every role: setup-strih step 11 passes `keep-bluetooth` to the kiosk on every role (test-pinned) |
 | `(stream-deck)` | the deck on USB AND at least one Satellite surface, read through `scripts/strih_satellite_watch.py` (`STREAM_DECK_USB_IDS`, `deck_on_usb`, `fetch_json` + `surface_names` on `/api/surfaces`); NOTE with no deck plugged in; NOTE on the stream role (step-16 gate) |
-| `(mv-click)` | `[BasicWindow] MultiviewMouseSwitch` true (read the way libobs `config_get_bool` reads it) |
+| `(mv-click)` | `[BasicWindow] MultiviewMouseSwitch` true the way libobs `config_get_bool` reads it (`util/config-file.c`: `true` in any case, or a non-zero strtoull, base 16 after a leading `0x`; `on` / `yes` read FALSE); an absent key is OBS's built-in true but FAILs as "not seeded" |
 | `(studio-mode)` | `GetStudioModeEnabled` over the OBS websocket; NOTE while OBS is not running |
 | `(ws-seed)` | the step-7 obs-websocket config: `server_enabled` true, `server_port` 4455, `auth_required` false (pinned to the step-7 heredoc by a test) |
 | `(qt6-svg)` | the `qt6-svg-plugins` package installed with BOTH plugins (item 21 grades only the icon engine) |
@@ -85,6 +90,15 @@ as frozen. The strih panel always has live Multiview tiles, so this has not happ
 - inactive, disabled or not installed FAILs on the strih role (`obs_box_step_applies 13-hub-live`);
 - a crash loop FAILs on every role;
 - the stream role keeps the report-only note.
+
+Setup and verify agree on it: setup-strih step 13 STARTS a stopped hub on the strih role (the same
+`13-hub-live` gate, `systemctl is-active` first, never a restart of a running hub). The old enable-only
+rule was the parallel-run contract; `tests/intercom_hub_provisioning.rs` now pins the role split.
+
+**The X reads** go through ONE helper, `strih_kiosk_x_run EUID USER HOME SECONDS CMD...` in
+`scripts/lib/strih-session-apps.sh` (`sudo -u` the operator as root, `DISPLAY=:0`, their `.Xauthority`,
+`timeout`), shared with the session apps' window check. `strih-drm-output.sh` keeps its own xrandr
+reader because its tests source that lib alone.
 
 ## The tap-to-click finding (code only, the box was not read)
 
