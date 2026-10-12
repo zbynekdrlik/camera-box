@@ -51,6 +51,17 @@
 #                        grades the icon engine only);
 #       (operator-input) X lists a real keyboard and a real pointer (never the XTEST devices, never the
 #                        ACPI buttons every notebook lists as keyboards);
+#       (panel-gpu)      `xrandr --listproviders` on :0: a provider after Provider 0 (the X screen's GPU)
+#                        with `Sink Output` and outputs > 0 is a reverse-PRIME panel, whose every flip
+#                        waits on a Provider-0 fence (strih-snv 11/12.10.2026: one fence never signalled
+#                        and the panel froze for 18 h) -- FAIL naming the cure, BIOS GPU working mode =
+#                        discrete GPU; NOTE with one provider; a read that fails is a hung X;
+#       (drm-hang)       this boot's kernel log (`journalctl -k -b 0`): a hung task (`blocked for more
+#                        than`) whose trace within STRIH_OPERATOR_KLOG_TRACE_LINES lines (before the next
+#                        `INFO: task`) shows `commit_work` or `drm_atomic_helper_wait_for_fences`, or a
+#                        `[drm] *ERROR* ... flip_done timed out`, FAILs naming its first time stamp (the
+#                        11.10 hang sat 18 h in the log before anyone saw the frozen panel); an
+#                        unreadable or empty log FAILs;
 #       (operator-panel) two `ffmpeg -f x11grab` frames of :0 a few seconds apart differ while OBS
 #                        runs: the 12.10.2026 X hang kept OBS rendering while the panel froze; NOTE
 #                        while OBS is not running. A truly still picture (OBS paused on a still scene,
@@ -63,8 +74,10 @@
 # (hciconfig), STRIH_OPERATOR_STUDIO_CMD (default: a websocket-client read of STRIH_OPERATOR_OBS_WS_URL,
 # ws://127.0.0.1:4455), STRIH_OPERATOR_GRAB_CMD (default: ffmpeg x11grab, one md5 per frame),
 # STRIH_OPERATOR_GRAB_GAP_S (4), STRIH_OPERATOR_LIBDIR (/usr/lib/x86_64-linux-gnu), STRIH_OPERATOR_PYTHON
-# (python3), COMPANION_SATELLITE_REST_URL (strih-provision.sh); `dpkg-query` and `sudo` are looked up on
-# PATH; STRIH_NIC_IFACE overrides the rig NIC like everywhere else.
+# (python3), STRIH_OPERATOR_XRANDR (a file read instead of `xrandr --listproviders` on :0),
+# STRIH_OPERATOR_KLOG (a file read instead of `journalctl -k -b 0 --no-pager`),
+# COMPANION_SATELLITE_REST_URL (strih-provision.sh); `dpkg-query`, `sudo`, `xrandr` and `journalctl` are
+# looked up on PATH; STRIH_NIC_IFACE overrides the rig NIC like everywhere else.
 
 # The subnet rule + the rig-NIC verdict live in the NIC lib (verify item 36).
 if ! declare -F strih_nic_rig_subnet_others >/dev/null; then
@@ -82,6 +95,8 @@ STRIH_OPERATOR_QT_SVG_PACKAGE=qt6-svg-plugins
 # The ACPI / system "keyboards" X lists on every notebook (and a keyboard's media-key half): never the
 # operator's keyboard. Matched against the lower-cased device name.
 STRIH_OPERATOR_NOT_A_KEYBOARD='power button|sleep button|video bus|lid switch|hid events|hotkeys|extra buttons|pc speaker|consumer control|system control'
+# (drm-hang): how many lines after a hung-task line its trace may run (the 11.10 trace: 20 lines).
+STRIH_OPERATOR_KLOG_TRACE_LINES=25
 
 strih_operator_sysfs() { printf '%s' "${STRIH_OPERATOR_SYSFS:-/sys}"; }
 _strih_operator_nmcli() { "${STRIH_OPERATOR_NMCLI:-nmcli}" "$@"; }
@@ -565,11 +580,142 @@ strih_operator_panel_verdict() {
   fi
 }
 
+# strih_operator_xrandr_read USER HOME -> `xrandr --listproviders` of display :0 (bounded 10 s);
+# rc = the read's own rc (124 = timed out, 127 = no xrandr).
+strih_operator_xrandr_read() {
+  local user="$1" home="$2"
+  if [ -n "${STRIH_OPERATOR_XRANDR:-}" ]; then
+    cat -- "$STRIH_OPERATOR_XRANDR" 2>/dev/null
+    return
+  fi
+  _strih_operator_on_x "$user" "$home" 10 xrandr --listproviders 2>/dev/null
+}
+
+# strih_operator_xrandr_providers (stdin = `xrandr --listproviders`) -> `INDEX|SINK|OUTPUTS|NAME` per
+# provider: SINK 1 when its capabilities list `Sink Output`, OUTPUTS its `outputs:` count (empty when
+# the line has none).
+strih_operator_xrandr_providers() {
+  LC_ALL=C awk '
+    /^Provider [0123456789]+:/ {
+      n = $2; sub(/:$/, "", n)
+      sink = (index($0, "Sink Output") > 0) ? 1 : 0
+      out = ""
+      if (match($0, / outputs: [0123456789]+/)) out = substr($0, RSTART + 10, RLENGTH - 10)
+      name = ""; i = index($0, " name:")
+      if (i > 0) name = substr($0, i + 6)
+      print n "|" sink "|" out "|" name
+    }' || true
+}
+
+# strih_operator_panel_gpu_verdict XRANDR_TEXT READ_RC -> ONE row: no reverse-PRIME display sink.
+strih_operator_panel_gpu_verdict() {
+  local text="${1-}" rc="${2:-0}" rows count n sink out name src="" hit=""
+  case "$rc" in
+    0) ;;
+    124 | 137)
+      printf 'FAIL|(panel-gpu) xrandr --listproviders on :0 did not answer within 10 s -- the X server does not answer clients (the 12.10.2026 hang)\n'
+      return 0 ;;
+    127)
+      printf 'FAIL|(panel-gpu) not graded: xrandr is not installed (package x11-xserver-utils) -- the GPU providers of :0 cannot be read\n'
+      return 0 ;;
+    *)
+      printf 'FAIL|(panel-gpu) xrandr --listproviders on :0 failed (rc %s) -- X is down or does not answer clients (the 12.10.2026 hang)\n' "$rc"
+      return 0 ;;
+  esac
+  rows="$(strih_operator_xrandr_providers <<<"$text")"
+  count=0
+  while IFS='|' read -r n sink out name; do
+    [ -n "$n" ] || continue
+    count=$((count + 1))
+    if [ "$n" = 0 ]; then src="$name"; continue; fi
+    [ "$sink" = 1 ] || continue
+    # An unreadable outputs count is graded as outputs present (fail closed).
+    case "$out" in 0) continue ;; esac
+    [ -n "$hit" ] || hit="${name:-an unnamed provider}|${n}|${out:-?}"
+  done <<<"$rows"
+  if [ "$count" = 0 ]; then
+    printf 'FAIL|(panel-gpu) xrandr --listproviders on :0 listed no GPU provider -- X is down or does not answer clients (the 12.10.2026 hang)\n'
+  elif [ -n "$hit" ]; then
+    IFS='|' read -r name n out <<<"$hit"
+    printf 'FAIL|(panel-gpu) BIOS GPU working mode = discrete GPU: the panel is a reverse-PRIME sink on %s (Provider %s, %s outputs) behind the X screen'"'"'s GPU %s, so every panel flip waits on a %s fence (the 11/12.10.2026 freeze: one fence never signalled and the panel froze until a reboot) -- set the BIOS GPU working mode to the discrete GPU at the box\n' \
+      "$name" "$n" "$out" "${src:-Provider 0}" "${src:-Provider 0}"
+  elif [ "$count" = 1 ]; then
+    printf 'NOTE|(panel-gpu) one GPU provider (%s), no PRIME -- not graded\n' "${src:-Provider 0}"
+  else
+    printf 'OK|(panel-gpu) %s GPU providers, no reverse-PRIME sink with outputs: %s drives the X screen\n' "$count" "${src:-Provider 0}"
+  fi
+}
+
+# strih_operator_klog_read -> this boot's kernel log (`journalctl -k -b 0 --no-pager`, bounded 30 s);
+# rc = the read's own rc.
+strih_operator_klog_read() {
+  if [ -n "${STRIH_OPERATOR_KLOG:-}" ]; then
+    cat -- "$STRIH_OPERATOR_KLOG" 2>/dev/null
+    return
+  fi
+  timeout 30 journalctl -k -b 0 --no-pager 2>/dev/null
+}
+
+# strih_operator_klog_drm_hang (stdin = a kernel log) -> `STAMP|task|DESC` for the first hung task whose
+# trace waits in a DRM commit, or `STAMP|flip|MESSAGE` for the first `[drm] *ERROR* ... flip_done timed
+# out`, whichever the log shows first; nothing when neither is there. STAMP is the short-format
+# `Mon DD HH:MM:SS` (else the line's first field, e.g. short-iso), empty when the line has no `kernel:`.
+strih_operator_klog_drm_hang() {
+  LC_ALL=C awk -v win="$STRIH_OPERATOR_KLOG_TRACE_LINES" '
+    function stamp(l,   i, p, f) {
+      i = index(l, " kernel:")
+      if (i == 0) return ""
+      p = substr(l, 1, i - 1)
+      if (match(p, /^[ABCDEFGHIJKLMNOPQRSTUVWXYZ][abcdefghijklmnopqrstuvwxyz][abcdefghijklmnopqrstuvwxyz] +[0123456789]+ [0123456789][0123456789]:[0123456789][0123456789]:[0123456789][0123456789]/))
+        return substr(p, RSTART, RLENGTH)
+      split(p, f, " ")
+      return f[1]
+    }
+    function message(l,   i) {
+      i = index(l, " kernel: ")
+      return (i > 0) ? substr(l, i + 9) : l
+    }
+    /INFO: task .* blocked for more than/ {
+      pend = 1; n = 0; ts = stamp($0)
+      d = substr($0, index($0, "INFO: task ") + 11); sub(/\.[ \t]*$/, "", d)
+      next
+    }
+    /\[drm\] \*ERROR\*.*flip_done timed out/ { print stamp($0) "|flip|" message($0); exit }
+    pend {
+      if ($0 ~ /INFO: task /) pend = 0
+      else if (++n > win + 0) pend = 0
+      else if ($0 ~ /commit_work|drm_atomic_helper_wait_for_fences/) { print ts "|task|" d; exit }
+    }' || true
+}
+
+# strih_operator_drm_hang_verdict KLOG_TEXT READ_RC -> ONE row: no hung display commit in this boot.
+strih_operator_drm_hang_verdict() {
+  local text="${1-}" rc="${2:-0}" hit ts kind d
+  if [ "$rc" != 0 ] || [ -z "$text" ]; then
+    printf 'FAIL|(drm-hang) this boot'"'"'s kernel log could not be read (journalctl -k -b 0 --no-pager: rc %s, %s) -- a hung display commit cannot be ruled out\n' \
+      "$rc" "$([ -n "$text" ] && echo "partial output" || echo "no output")"
+    return 0
+  fi
+  hit="$(strih_operator_klog_drm_hang <<<"$text")"
+  if [ -z "$hit" ]; then
+    printf 'OK|(drm-hang) no hung display commit and no flip_done timeout in this boot'"'"'s kernel log\n'
+    return 0
+  fi
+  IFS='|' read -r ts kind d <<<"$hit"
+  ts="${ts:-an unknown time}"
+  if [ "$kind" = task ]; then
+    printf 'FAIL|(drm-hang) a display commit hung in this boot, first at %s: task %s, its trace waits in a DRM commit (commit_work / drm_atomic_helper_wait_for_fences) -- the panel freezes while OBS keeps rendering (the 11/12.10.2026 freeze); only a reboot clears it, and (panel-gpu) names the BIOS cure\n' "$ts" "$d"
+  else
+    printf 'FAIL|(drm-hang) a display flip timed out in this boot, first at %s: %s -- the panel freezes while OBS keeps rendering (the 11/12.10.2026 freeze); only a reboot clears it, and (panel-gpu) names the BIOS cure\n' "$ts" "$d"
+  fi
+}
+
 # strih_operator_grade_rows REPO USER_HOME DESKTOP_USER -> verify-strih rows `OK|` / `NOTE|` / `FAIL|text`
 # (strih_operator_row_count of them, in the header's order). Read-only; always rc 0.
 strih_operator_grade_rows() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
   local xl slaves bt bt_adapter=1 why deck dk_usb dk_surf dk_ids dk_names obs_up=0 gap d1 d2
+  local xr="" xr_rc=0 kl="" kl_rc=0
   xl="$(strih_operator_xinput "$user" "$home" list --short)"
   slaves="$(strih_operator_xinput_slaves <<<"$xl")"
   if ! command -v "$(strih_operator_xinput_tool)" >/dev/null 2>&1; then
@@ -605,6 +751,10 @@ strih_operator_grade_rows() {
   else
     strih_operator_input_verdict <<<"$slaves"
   fi
+  if xr="$(strih_operator_xrandr_read "$user" "$home")"; then xr_rc=0; else xr_rc=$?; fi
+  strih_operator_panel_gpu_verdict "$xr" "$xr_rc"
+  if kl="$(strih_operator_klog_read)"; then kl_rc=0; else kl_rc=$?; fi
+  strih_operator_drm_hang_verdict "$kl" "$kl_rc"
   if [ "$obs_up" = 0 ]; then
     printf 'NOTE|(operator-panel) not graded: OBS is not running\n'
     return 0
@@ -617,7 +767,7 @@ strih_operator_grade_rows() {
   return 0
 }
 
-strih_operator_row_count() { printf '9'; }
+strih_operator_row_count() { printf '11'; }
 
 # strih_operator_grade_report REPO USER_HOME DESKTOP_USER -> print the rows through the CALLER's ok / note
 # / bad functions (verify-strih). rc 1 unless the grader printed every row.
