@@ -604,3 +604,99 @@ def test_the_report_prints_every_row_through_the_callers_functions(op):
     r = _bash(body, env=op.env(), args=(str(REPO), str(op.home), "operator1"))
     assert r.returncode == 0, r.stderr
     assert [ln.split()[0] for ln in r.stdout.splitlines()] == ["PASS"] * 9 + ["rc=0"]
+
+
+# --- the wiring: setup-strih step 16g, verify-strih items 43 + 16 ---------------------------------------
+
+def _applies(box, step):
+    r = _bash('if WHY="$(obs_box_step_applies "$1")"; then echo RUN; else echo "SKIP $WHY"; fi', box=box,
+              args=(step,))
+    assert r.returncode == 0, r.stderr
+    return r.stdout.strip()
+
+
+def test_provision_sources_the_operator_lib():
+    assert '. "$(dirname "${BASH_SOURCE[0]}")/strih-operator.sh"' in PROVISION.read_text()
+
+
+def test_setup_runs_step_16g_once_after_the_tally_and_before_the_final_verify():
+    s = SETUP.read_text()
+    assert len(s.splitlines()) <= 1000
+    call = 'strih_operator_install "${OBS_CFG}/user.ini" "$DESKTOP_USER"'
+    assert s.count(call) == 1
+    assert s.index('step "16f"') < s.index('step "16g"') < s.index(call) < s.index("step 17 ")
+    # the [BasicWindow] seed moved into the lib: setup-strih keeps no copy of it
+    assert 'cp.set("BasicWindow"' not in s and "MultiviewMouseSwitch" not in s
+
+
+def test_setup_step_1_no_longer_asks_the_operator_to_take_the_second_profile_down():
+    s = SETUP.read_text()
+    step1 = s[s.index('step 1 "'):s.index('step "1b"')]
+    assert "nmcli connection modify <name> connection.autoconnect no" not in step1
+    assert "16g" in step1
+
+
+def test_the_step_7_websocket_seed_is_what_the_ws_seed_row_requires(tmp_path):
+    s = SETUP.read_text()
+    seed = s[s.index("<<'WS'\n") + len("<<'WS'\n"):s.index("\nWS\n")]
+    f = tmp_path / "config.json"
+    f.write_text(seed + "\n")
+    r = _bash('strih_operator_ws_seed_verdict "$1"', args=(str(f),))
+    assert r.stdout.startswith("OK|(ws-seed)"), r.stdout
+
+
+def test_verify_runs_item_43_once_after_the_tally_within_the_budget():
+    v = VERIFY.read_text()
+    assert len(v.splitlines()) <= 1000
+    call = 'strih_operator_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}"'
+    assert v.count(call) == 1
+    i = v.index(call)
+    assert v.index("strih_tally_grade_report") < i
+    # never between item 34 and 32: test_ndi_discovery_1342 runs that slice with only its own lib sourced
+    assert not (v.index("# 34) NDI discovery") < i < v.index("# 32) the shared OBS-box"))
+    assert "re-run setup-strih.sh step 16g" in v[v.index("SaveProjectors=true NOT pre-seeded"):][:200]
+
+
+def test_the_hub_is_graded_live_on_the_strih_role_only():
+    assert _applies("strih-lx", "13-hub-live") == "RUN"
+    assert _applies("strih-pp", "13-hub-live") == "RUN"
+    assert _applies("stream-pp", "13-hub-live").startswith("SKIP ")
+
+
+def _item16(tmp_path, box, enabled, active, installed=True):
+    v = VERIFY.read_text()
+    item = v[v.index("# 16) intercom hub unit"):v.index("# 17)")]
+    unit = tmp_path / "intercom-hub.service"
+    if installed:
+        unit.write_text("[Unit]\n")
+    item = item.replace("/etc/systemd/system/intercom-hub.service", str(unit))
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    _exec(stub / "systemctl",
+          '#!/bin/bash\ncase "$1" in\n  is-enabled) echo %s; [ %s = enabled ] ;;\n'
+          '  is-active) echo %s; [ %s = active ] ;;\nesac\n' % (enabled, enabled, active, active))
+    body = ('ok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; }\nnote() { echo "NOTE $1"; }\n'
+            'strih_intercom_hub_crash_loop() { return 1; }\nstrih_intercom_hub_cred_grade() { :; }\n' + item)
+    r = _bash(body, box=box, env={"PATH": "%s:%s" % (stub, os.environ["PATH"])})
+    assert r.returncode == 0, r.stderr
+    return r.stdout.strip()
+
+
+def test_item_16_fails_an_inactive_or_disabled_hub_on_the_strih_role(tmp_path):
+    out = _item16(tmp_path, "strih-lx", "disabled", "inactive")
+    assert out.startswith("FAIL") and "enabled=disabled" in out and "active=inactive" in out, out
+    v = VERIFY.read_text()
+    assert "M4" not in v[v.index("# 16) intercom hub unit"):v.index("# 17)")]
+
+
+def test_item_16_passes_an_enabled_active_hub(tmp_path):
+    assert _item16(tmp_path, "strih-lx", "enabled", "active").startswith("PASS")
+
+
+def test_item_16_only_reports_an_inactive_hub_on_the_stream_role(tmp_path):
+    assert _item16(tmp_path, "stream-pp", "enabled", "inactive").startswith("NOTE")
+
+
+def test_item_16_fails_a_missing_hub_on_the_strih_role(tmp_path):
+    out = _item16(tmp_path, "strih-lx", "enabled", "active", installed=False)
+    assert out.startswith("FAIL") and "not installed" in out, out
