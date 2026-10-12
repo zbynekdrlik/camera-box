@@ -315,6 +315,12 @@ obs_box_kiosk() {
 obs_box_apt_update
 DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm feh wmctrl btop xserver-xorg x11-xserver-utils python3-websocket xinput \
     || fail "#504: openbox+lightdm install failed — cannot convert the box to the kiosk WM"
+# issue 1418: on a fresh box that install brings xserver-xorg, whose `xserver-xorg-video-all |
+# xorg-driver-video` dependency pulls the amdgpu DDX back in AFTER the NVIDIA step removed it. Remove it
+# again here, on a discrete-NVIDIA box only (see obs_box_amdgpu_ddx_remove; a no-op when absent).
+if lspci -nn 2>/dev/null | obs_box_has_discrete_nvidia; then
+    obs_box_amdgpu_ddx_remove
+fi
 
 # (b) lightdm autologin → openbox. Idempotent full-file write of a fixed drop-in (always the same
 #     content). ${DESKTOP_USER} logs in headless and openbox launches the OBS kiosk (step 16
@@ -429,7 +435,33 @@ obs_box_amdgpu_ddx_packages() {
     printf '%s\n' "$(obs_box_amdgpu_ddx_package)" xserver-xorg-video-all
 }
 
-# obs_box_amdgpu_ddx_remove -- remove the installed obs_box_amdgpu_ddx_packages. A dry run first
+# obs_box_pkg_status PKG -> PKG's dpkg status (`install ok installed`, `deinstall ok config-files` ...),
+# or `absent` when dpkg knows no such package; prints nothing and returns 1 when dpkg-query itself
+# fails (a broken status file, no dpkg-query), so an unread state is never "not installed". The grader
+# embeds it via declare -f.
+obs_box_pkg_status() {
+    local out rc=0
+    out="$(LC_ALL=C dpkg-query -W -f='${Status}' "${1:?obs_box_pkg_status: PKG required}" 2>&1)" || rc=$?
+    if [ "$rc" = 0 ]; then
+        printf '%s' "$out"
+        return 0
+    fi
+    case "$out" in *"no packages found"*) printf 'absent'; return 0 ;; esac
+    return 1
+}
+
+# obs_box_pkg_status_absent STATUS -> rc 0 when the obs_box_pkg_status STATUS means "not on the box"
+# (absent, not-installed, only config files left); any unpacked state (installed, half-installed,
+# unpacked, ...) and an empty (unread) status return 1.
+obs_box_pkg_status_absent() {
+    case "${1-}" in
+        absent | *" not-installed" | *" config-files") return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# obs_box_amdgpu_ddx_remove -- remove the installed obs_box_amdgpu_ddx_packages. Called by the NVIDIA
+# step AND again by obs_box_kiosk after its Xorg install (which can pull the DDX back in). A dry run first
 # (`apt-get -s remove`): a removal that would take ANY other package (xserver-xorg, the session) is
 # refused, never done. Idempotent (nothing installed = nothing touched), fails loud via the caller's
 # fail(); the dpkg lock wait is the baseline's apt.conf.d timeout. Takes effect at the next X start.
@@ -437,8 +469,9 @@ obs_box_amdgpu_ddx_remove() {
     local p st sim r
     local -a installed=() extra=()
     while IFS= read -r p; do
-        st="$(dpkg-query -W -f='${Status}' "$p" 2>/dev/null || true)"
-        if [ "$st" = "install ok installed" ]; then installed+=("$p"); fi
+        st="$(obs_box_pkg_status "$p")" \
+            || fail "igpu-sink: dpkg-query cannot read ${p} -- cannot tell whether the amdgpu DDX is installed (dpkg -l ${p})"
+        if ! obs_box_pkg_status_absent "$st"; then installed+=("$p"); fi
     done < <(obs_box_amdgpu_ddx_packages)
     if [ "${#installed[@]}" = 0 ]; then
         echo "  igpu-sink: $(obs_box_amdgpu_ddx_package) not installed -- unchanged (the iGPU sink runs on modesetting)"

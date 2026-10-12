@@ -136,7 +136,7 @@ obs_box_baseline_gather_snippet() {
     printf 'BOX=%q\nU=%q\nUNIT=%q\n' "$box" "$user" "$unit"
     declare -f obs_box_has_discrete_nvidia obs_box_crash_popup_units obs_box_dejitter_user_units \
         obs_box_brightness_helper_text obs_box_backlight_udev_rule obs_box_brightness_keybinds_xml \
-        obs_box_cpu_latency_bound_us rig_timezone_read obs_box_amdgpu_ddx_package
+        obs_box_cpu_latency_bound_us rig_timezone_read obs_box_amdgpu_ddx_package obs_box_pkg_status
     cat <<'GATHER_EOF'
 set +e
 HOMEDIR="$(getent passwd "$U" 2>/dev/null | cut -d: -f6)"; [ -n "$HOMEDIR" ] || HOMEDIR="/home/$U"
@@ -209,7 +209,7 @@ echo "dgpu=$(if lspci -nn 2>/dev/null | obs_box_has_discrete_nvidia; then echo 1
 echo "prime=$(prime-select query 2>/dev/null | first)"
 echo "display_gpus=$(lspci -nn 2>/dev/null | grep -Eic '(vga compatible controller|3d controller|display controller)')"
 echo "igpu_unit=$(systemctl is-enabled "${BOX}-igpu-maxperf.service" 2>/dev/null | first)"
-echo "amdgpu_ddx=$(pkg "$(obs_box_amdgpu_ddx_package)")"
+echo "amdgpu_ddx=$(obs_box_pkg_status "$(obs_box_amdgpu_ddx_package)")"
 echo "oomd=$(systemctl is-enabled systemd-oomd.service 2>/dev/null | first)"
 echo "offhours=$(fexists "/etc/systemd/system/apt-daily-upgrade.timer.d/${BOX}-offhours.conf")"
 echo "process_priority=$(if grep -qx 'ProcessPriority=High' "${HOMEDIR}/.config/obs-studio/global.ini" 2>/dev/null; then echo 1; else echo 0; fi)"
@@ -379,10 +379,13 @@ obs_box_baseline_verdict() {
     # reverse-PRIME iGPU panel sink on amdgpu (it beats any OutputClass), and that sink froze the strih-snv
     # panel 11/12.10.2026; the Intel notebook ran the sink on modesetting and was stable.
     if [ "$(_obs_box_f dgpu)" = 1 ]; then
-        if [ "$(_obs_box_f amdgpu_ddx)" = "install ok installed" ]; then
-            _obs_box_item igpu-sink 0 "discrete NVIDIA box: $(obs_box_amdgpu_ddx_package) is installed -- its 10-amdgpu.conf puts the iGPU panel sink on the amdgpu DDX (the strih-snv freeze 11/12.10.2026), no OutputClass overrides it; the NVIDIA step removes it, then restart X"
+        v="$(_obs_box_f amdgpu_ddx)"
+        if [ -z "$v" ]; then
+            _obs_box_item igpu-sink 0 "discrete NVIDIA box: the $(obs_box_amdgpu_ddx_package) status is unread (dpkg-query failed) -- cannot tell whether the amdgpu DDX drives the iGPU panel sink"
+        elif obs_box_pkg_status_absent "$v"; then
+            _obs_box_item igpu-sink 1 "discrete NVIDIA box: $(obs_box_amdgpu_ddx_package) not installed (status=${v}) -- the iGPU panel sink runs on modesetting"
         else
-            _obs_box_item igpu-sink 1 "discrete NVIDIA box: $(obs_box_amdgpu_ddx_package) not installed (status=$(_obs_box_f amdgpu_ddx)) -- the iGPU panel sink runs on modesetting"
+            _obs_box_item igpu-sink 0 "discrete NVIDIA box: $(obs_box_amdgpu_ddx_package) is on the box (status=${v}) -- its 10-amdgpu.conf puts the iGPU panel sink on the amdgpu DDX (the strih-snv freeze 11/12.10.2026), no OutputClass overrides it; setup removes it, then restart X"
         fi
     else
         _obs_box_item igpu-sink 1 "no discrete NVIDIA GPU: no reverse-PRIME panel sink to pin"

@@ -165,21 +165,30 @@ owns that 10-amdgpu.conf). Xorg then logs `Failed to load module "amdgpu"` (harm
 `Provider 1: ... Sink Output, Source Offload ... name:modesetting`. The panel output is renamed
 (eDP-1-1 -> eDP-1-2); the kiosk autostart resolves the panel dynamically, so that is fine.
 
-- **Install:** `obs_box_nvidia_prime` calls `obs_box_igpu_sink_modesetting` right after
-  `prime-select nvidia`, inside the discrete-NVIDIA branch only (an iGPU-only box gets nothing). The
-  functions live in the kiosk half (the system half is at its line budget). It:
-  - removes the INSTALLED ones of `obs_box_amdgpu_ddx_packages` (`xserver-xorg-video-amdgpu`,
+- **Install, in TWO places** (the functions live in the kiosk half; the system half is at its line
+  budget):
+  - `obs_box_kiosk`'s package install (`apt-get install ... xserver-xorg ...`) is followed by
+    `obs_box_amdgpu_ddx_remove` on a discrete-NVIDIA box. On a fresh 26.04 box that install brings
+    xserver-xorg, whose `xserver-xorg-video-all | xorg-driver-video` dependency pulls the amdgpu DDX
+    back in AFTER the NVIDIA step (which runs first in both setup scripts) removed it. Without this a
+    fresh box needs a second setup run (re-review finding);
+  - `obs_box_nvidia_prime` calls `obs_box_igpu_sink_modesetting` right after `prime-select nvidia`,
+    inside the discrete-NVIDIA branch only (an iGPU-only box gets nothing). It:
+  - removes the ones of `obs_box_amdgpu_ddx_packages` that are on the box (`xserver-xorg-video-amdgpu`,
     `xserver-xorg-video-all`) through `obs_box_amdgpu_ddx_remove`: an `apt-get -s remove` dry run
     first, and a removal that would take ANY other package (xserver-xorg, lightdm) is REFUSED by name,
-    never done; nothing installed = nothing touched; an apt error fails loud. No list refresh is
-    needed; the dpkg lock wait is `obs_box_apt_lock_timeout`'s;
+    never done; nothing installed = nothing touched; an apt error fails loud, and so does a
+    `dpkg-query` that cannot answer (`obs_box_pkg_status`: a status, `absent`, or rc 1; any unpacked
+    state, half-installed included, counts as present). No list refresh is needed; the dpkg lock wait is
+    `obs_box_apt_lock_timeout`'s;
   - still writes `/etc/X11/xorg.conf.d/20-igpu-sink-modesetting.conf` (the OutputClass, belt and
     braces, its own comment says so) through `obs_box_write_if_changed` (0644 root:root). Never rely
     on it alone.
   - It takes effect at the next X start (which restarts OBS).
-- **Grader row `igpu-sink`** (right after `gpu`): on a dGPU box it FAILs while
-  `obs_box_amdgpu_ddx_package` reads `install ok installed` (gather key `amdgpu_ddx`, the dpkg
-  status; `declare -f` embeds the package name); removed / config-files / never installed is OK. An
+- **Grader row `igpu-sink`** (right after `gpu`): on a dGPU box it is OK only when
+  `obs_box_pkg_status` of `obs_box_amdgpu_ddx_package` reads `absent` / `... not-installed` /
+  `... config-files` (gather key `amdgpu_ddx`; `declare -f` embeds both functions). Any unpacked state
+  FAILs, and an empty (unread) status FAILs: never a pass. An
   iGPU-only box is OK whatever is installed (no reverse-PRIME sink). A dGPU box provisioned before this
   item with the DDX installed FAILs the row until setup re-runs. Verify-strih's operator item 43
   grades the EFFECT, the running sink provider's DDX name (`(panel-gpu)`, `strih-operator.md`).
@@ -190,7 +199,10 @@ owns that 10-amdgpu.conf). Xorg then logs `Failed to load module "amdgpu"` (harm
   and the broken-fact table.
 - **Live (supervisor):** strih-snv was fixed by hand on 12.10.2026 (packages removed, the OutputClass
   file left). The next setup-strih run there logs `not installed -- unchanged` and rewrites the
-  OutputClass file to the baseline text. On any other NVIDIA box, after setup + an X restart,
+  OutputClass file to the baseline text. Before the next deploy, read `apt-get -s remove
+  xserver-xorg-video-amdgpu xserver-xorg-video-all` (read-only) on imag-nb and strih-lx: a leftover
+  meta that depends on the meta (an old desktop package) makes the dry run refuse and stops setup at the
+  NVIDIA step by design. On any other NVIDIA box, after setup + an X restart,
   `xrandr --listproviders` must name the sink `modesetting`; then soak overnight and read `(drm-hang)`.
 
 ## The rig time zone (item `obs_box_timezone`, grader row `timezone`, issue 1415)
