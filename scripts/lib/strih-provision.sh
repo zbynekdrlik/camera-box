@@ -42,6 +42,11 @@ if ! declare -F strih_tally_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-tally.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-tally.sh"
 fi
+# issue 1418: the operator surface's own source-only lib (setup-strih step 16g, verify-strih item 43).
+if ! declare -F strih_operator_install >/dev/null; then
+  # shellcheck source=scripts/lib/strih-operator.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-operator.sh"
+fi
 # issue 1412: a fresh box's dantesync binary + role config (setup-strih step 2) and the ONE CI-artifact
 # fetch (step 13's intercom-hub binary, step 16c's bkshading service).
 if ! declare -F dantesync_install >/dev/null; then

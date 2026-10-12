@@ -102,7 +102,7 @@ echo -e "${GREEN}=== ${BOX_NAME} setup (issue 1317 / 1361): Linux strih cutter, 
 # ---------------------------------------------------------------------------------------------
 step 1 "Static IP (NetworkManager) + hostname $(strih_lx_hostname)"
 command -v nmcli >/dev/null 2>&1 || fail "nmcli required (desktop Ubuntu NetworkManager)"
-echo "  (operator: assign ${STATIC_IP}/23 to the rig NIC via nmcli, pin the profile with connection.interface-name <rig NIC>$(strih_nic_ring_note "$(strih_lx_nic_driver)"), and take every other wired profile off the rig subnet: nmcli connection modify <name> connection.autoconnect no && nmcli connection down <name> -- recorded here as the target; verify-strih item 36 grades the pinning)"
+echo "  (operator: assign ${STATIC_IP}/23 to the rig NIC via nmcli, pin the profile with connection.interface-name <rig NIC>$(strih_nic_ring_note "$(strih_lx_nic_driver)") -- recorded here as the target; step 16g sets connection.autoconnect no on every other wired profile on the rig subnet and brings it down; verify-strih item 36 grades the pinning)"
 hostnamectl set-hostname "$(strih_lx_hostname)" 2>/dev/null || warn "  could not set hostname (non-fatal)"
 obs_box_timezone
 
@@ -420,45 +420,8 @@ cat > "$OBS_CFG/plugin_config/obs-websocket/config.json" <<'WS'
 WS
 chown -R "$DESKTOP_USER":"$DESKTOP_USER" "$OBS_CFG/plugin_config" 2>/dev/null || true
 echo "  obs-websocket :4455 no-auth pre-seeded; Studio Mode is enforced by the scene seeder (step 6)"
-# issue 1346: pre-seed [BasicWindow] SaveProjectors=true + ProjectorAlwaysOnTop=false in the desktop
-# user's user.ini so OBS PERSISTS the operator's LAPTOP-screen projector (the Multiview on the eDP
-# panel) and re-opens it on every launch. The OBS default is SaveProjectors=false, so a hand-opened
-# projector would NEVER come back after strih-obs.service relaunches. (The HDMI output is NOT a
-# projector since 24.9.2026 -- it is the DRM lease, step 6.) Idempotent (RawConfigParser upsert; the
-# literal `SaveProjectors=true` is the verify-strih anchor), owned by the desktop user. NOTE: this is
-# the OPPOSITE of imag (#522 SaveProjectors=false + an openbox-autostart re-open hook) -- strih-lx
-# has no such boot hook, so it relies on OBS's own SaveProjectors restore.
-# ProjectorAlwaysOnTop=false: owner ruling 23.9.2026 -- the multiview must not stay on top of the
-# operator's other windows (the seed rewrote a hand-set OFF back to ON on every provisioning run).
+# The [BasicWindow] projector + Multiview-click keys are seeded by step 16g (scripts/lib/strih-operator.sh).
 USER_INI="${OBS_CFG}/user.ini"
-if command -v python3 >/dev/null 2>&1; then
-  python3 - "$USER_INI" <<'PY' || warn "  could not pre-seed SaveProjectors in ${USER_INI} (non-fatal; the OBS UI / strih_scenes.py --projector still work)"
-import configparser, os, sys
-path = sys.argv[1]
-# strict=False tolerates duplicate keys/sections OBS may write; RawConfigParser avoids % interpolation.
-cp = configparser.RawConfigParser(strict=False)
-cp.optionxform = str
-if os.path.exists(path):
-    try:
-        cp.read(path)
-    except Exception as e:
-        # NEVER clobber an existing user.ini we could not parse -- leave it untouched and let the
-        # caller's `|| warn` fire (a fresh-parser rewrite would DISCARD every other OBS setting).
-        sys.stderr.write("user.ini parse failed (%s) -- leaving it untouched\n" % e)
-        sys.exit(3)
-if not cp.has_section("BasicWindow"):
-    cp.add_section("BasicWindow")
-for kv in ("SaveProjectors=true", "ProjectorAlwaysOnTop=false"):
-    k, v = kv.split("=", 1)
-    cp.set("BasicWindow", k, v)
-with open(path, "w") as fh:
-    cp.write(fh, space_around_delimiters=False)
-PY
-  chown "$DESKTOP_USER":"$DESKTOP_USER" "$USER_INI" 2>/dev/null || true
-  echo "  pre-seeded [BasicWindow] SaveProjectors=true + ProjectorAlwaysOnTop=false in ${USER_INI}"
-else
-  warn "  python3 absent -- cannot pre-seed SaveProjectors in ${USER_INI} (set it in the OBS UI, or install python3 and re-run)"
-fi
 
 # issue 1352: seed DistroAV's [NDIPlugin] program/preview OUTPUT identity -- the BARE names
 # MainOutputName=2ME PGM / PreviewOutputName=2ME PVW + both Enabled=true. DistroAV PREPENDS the box
@@ -979,6 +942,10 @@ else echo "  SKIP: ${WHY}"; fi
 step "16f" "Camera tally (issue 1417): strih-tally relay + OBS client, atemrpi.local -- system units"
 if WHY="$(obs_box_step_applies 16f)"; then strih_tally_install "${HERE}/.." "$DESKTOP_USER" || fail "issue 1417: strih-tally could not be provisioned (above)"
 else echo "  SKIP: ${WHY}"; fi
+
+# ---------------------------------------------------------------------------------------------
+step "16g" "Operator surface (issue 1418): Multiview click + projector keys in user.ini, the second NIC off the rig subnet"
+strih_operator_install "${OBS_CFG}/user.ini" "$DESKTOP_USER" || fail "issue 1418: the operator surface could not be provisioned (above)"
 
 # ---------------------------------------------------------------------------------------------
 step 17 "Final verification (verify-strih.sh acceptance gate)"

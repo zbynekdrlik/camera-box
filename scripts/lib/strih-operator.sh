@@ -15,7 +15,8 @@
 #   * strih_operator_install -- setup-strih step 16g (as root), every role:
 #     - the OBS user.ini [BasicWindow] keys STRIH_OPERATOR_INI_KEYS: SaveProjectors=true +
 #       ProjectorAlwaysOnTop=false (issue 1346, moved here from step 7: the operator's laptop Multiview
-#       projector re-opens on every launch and never stays above the other windows) and
+#       projector re-opens on every launch and never stays above the other windows; the OBS default is
+#       SaveProjectors=false, and imag is the opposite: SaveProjectors=false + an autostart re-open hook) and
 #       MultiviewMouseSwitch=true (clicking a Multiview tile cuts to that scene; it read false on
 #       12.10.2026, most likely from the 11.10 user.ini backup restore). A RawConfigParser upsert that
 #       never clobbers an unparseable file, and NEVER while OBS runs: OBS rewrites user.ini from memory

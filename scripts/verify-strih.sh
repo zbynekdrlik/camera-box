@@ -258,7 +258,7 @@ esac
 if grep -qi '^SaveProjectors=true' "$(dirname "$OBS_LOG_DIR")/user.ini" 2>/dev/null; then
   ok "laptop projector persistence: SaveProjectors=true pre-seeded in user.ini"
 else
-  note "laptop projector persistence: SaveProjectors=true NOT pre-seeded in user.ini (re-run setup-strih.sh step 7)"
+  note "laptop projector persistence: SaveProjectors=true NOT pre-seeded in user.ini (re-run setup-strih.sh step 16g)"
 fi
 
 # 5) Certified latency pins vs scripts/latency-pins-baseline.json (strih-lx key) -- REPORT-ONLY.
@@ -493,19 +493,17 @@ else
   bad "bundle release parity FAILED: ${FLAGS_FILE} must carry 'TARGET-RELEASE: ubuntu-${BOX_VERSION_ID}' (box VERSION_ID=${BOX_VERSION_ID}); a bundle built for another release must never run here"
 fi
 
-# 16) intercom hub unit (issue 1345 M1): the strih-lx intercom hub is installed ENABLE-ONLY while the
-#     Windows VB-Matrix stays the live intercom (M4 is the cut-over). REPORT-ONLY: an installed +
-#     enabled but NOT active unit is the CORRECT parallel-run state, never a FAIL; a crash loop is.
+# 16) intercom hub unit (issue 1345): inactive/disabled FAILs on the strih role (issue 1418), a crash loop on every role (issue 1412).
 if [ -f /etc/systemd/system/intercom-hub.service ]; then
-  IH_EN="$(systemctl is-enabled intercom-hub 2>/dev/null || echo unknown)"
-  IH_ACT="$(systemctl is-active intercom-hub 2>/dev/null || echo inactive)"
-  # issue 1412: a crash-looping hub is a FAIL (stream-pp's 243/CREDENTIALS loop read as a NOTE).
+  IH_EN="$(systemctl is-enabled intercom-hub 2>/dev/null || true)"
+  IH_ACT="$(systemctl is-active intercom-hub 2>/dev/null || true)"
   if IH_LOOP="$(strih_intercom_hub_crash_loop)"; then bad "intercom-hub.service ${IH_LOOP} -- journalctl -u intercom-hub names the cause (issue 1412)"
-  else note "intercom-hub.service installed (enabled=${IH_EN}, active=${IH_ACT}); enable-only until the M4 cut-over (issue 1345) -- report-only, an inactive unit is correct while parallel"; fi
+  elif [ "${IH_EN}/${IH_ACT}" = enabled/active ]; then ok "intercom-hub.service enabled + active"
+  elif WHY="$(obs_box_step_applies 13-hub-live)"; then bad "intercom-hub.service enabled=${IH_EN:-unknown} active=${IH_ACT:-unknown} -- the interkom is down (issue 1418): systemctl enable --now intercom-hub; journalctl -u intercom-hub"
+  else note "intercom-hub.service installed (enabled=${IH_EN:-unknown}, active=${IH_ACT:-unknown}) -- ${WHY}"; fi
   strih_intercom_hub_cred_grade /etc/systemd/system/intercom-hub.service.d   # issue 1412: the role drop-in
-else
-  note "intercom-hub.service not installed -- run setup-strih.sh step 13 (issue 1345 M1); report-only"
-fi
+elif WHY="$(obs_box_step_applies 13-hub-live)"; then bad "intercom-hub.service not installed -- run setup-strih.sh step 13 (issue 1418: the interkom runs on it)"
+else note "intercom-hub.service not installed -- ${WHY}"; fi
 
 # 17) Janus audiobridge audio edge (issue 1345 M3a) -- REPORT-ONLY. Janus is installed ENABLE-ONLY
 #     while the phones leg is not yet cut over (the M4 cut-over starts it with the hub), so an
@@ -854,6 +852,8 @@ else note "(program-audio) not graded: ${WHY}"; fi
 # 42) issue 1417 camera tally (scripts/lib/strih-tally.sh): units, :9240 /state, atemrpi.local, OBS program.
 if WHY="$(obs_box_step_applies 16f)"; then strih_tally_grade_report "${HERE}/.." "${STRIH_LX_USER:-newlevel}" || bad "(tally) the grader did not print all of its rows"
 else note "(tally) not graded: ${WHY}"; fi
+# 43) issue 1418 operator surface (scripts/lib/strih-operator.sh, its header: the 9 rows): input, BT, deck, MV click, panel.
+strih_operator_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(operator) the grader did not print all of its rows"
 
 # 16) NIC xhci IRQ affinity (issue 1317 item H): the USB-NIC's xhci interrupt must be pinned to a
 #     SINGLE E-core (>= the first cpu_atom cpu) so its NET_RX softirq never shares an OBS core, AND
