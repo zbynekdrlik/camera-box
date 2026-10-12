@@ -678,11 +678,11 @@ echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-sour
 echo "  NOTE: restart OBS after the operator PipeWire/WirePlumber comes up (or re-login) -- OBS enumerates audio devices only at startup, so it must start AFTER strih-program-source exists"
 
 # ---------------------------------------------------------------------------------------------
-step 13 "Intercom hub unit + matrix (issue 1345 M1: ENABLE-ONLY, NEVER started while parallel)"
-# The strih-lx intercom hub replaces the Windows VB-Matrix's N-1 intercom for the VBAN camboxes.
-# Install the systemd unit + the generated routing TOML and ENABLE it, but NEVER start/restart it
-# here: sending VBAN to the real camboxes is the M4 cut-over (the Windows strih stays their live hub
-# until then). The deployable binary (intercom-hub-linux-amd64 from CI) is placed separately.
+step 13 "Intercom hub unit + matrix (issue 1345; issue 1418: started on the strih role when stopped, never restarted)"
+# The strih intercom hub IS the interkom (the N-1 mix for the VBAN camboxes + the phones) since the strih
+# notebook took over from the Windows VB-Matrix (20.9.2026). Install the unit + the routing TOML, enable
+# it, and on the strih role START it when it is not running (verify item 16 FAILs a stopped hub there).
+# A running hub is never restarted here. The binary (intercom-hub-linux-amd64 from CI) is placed below.
 install -Dm644 "${HERE}/../systemd/intercom-hub.service" /etc/systemd/system/intercom-hub.service
 # issue 1361: the routing file is the box fact STRIH_INTERCOM_CONFIG (repo-relative).
 [ -f "${HERE}/../$(strih_lx_intercom_config)" ] \
@@ -693,7 +693,15 @@ systemctl daemon-reload
 systemctl enable intercom-hub 2>/dev/null || warn "  could not enable intercom-hub.service"
 # issue 1412 (G6): a fresh box gets the intercom-hub-linux-amd64 CI binary; an installed one is kept.
 strih_intercom_hub_binary_install /usr/local/bin/intercom-hub || fail "intercom-hub binary install failed (above)"
-echo "  intercom-hub.service installed + enabled (NOT started here); /etc/intercom-hub/intercom.toml in place"
+if WHY="$(obs_box_step_applies 13-hub-live)"; then
+  if ! systemctl is-active --quiet intercom-hub; then
+    systemctl start intercom-hub || fail "intercom-hub.service would not start -- journalctl -u intercom-hub (issue 1418: the interkom runs on it)"
+    echo "  intercom-hub.service started (it was not running)"
+  fi
+else
+  echo "  intercom-hub.service not started here: ${WHY}"
+fi
+echo "  intercom-hub.service installed + enabled; /etc/intercom-hub/intercom.toml in place"
 
 # ---------------------------------------------------------------------------------------------
 step 14 "Janus audiobridge audio edge (issue 1345 M3a: apt install janus + jcfg + ENABLE-ONLY)"

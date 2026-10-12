@@ -310,7 +310,7 @@ obs_box_kiosk() {
 #     (strih-obs-start.sh refuses to start OBS without it, imag_scenes.py imports it); strih-lx had
 #     it only as a hand install. Graded by the `websocket` row of obs-box-baseline-verify.sh.
 obs_box_apt_update
-DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm feh wmctrl btop xserver-xorg x11-xserver-utils python3-websocket \
+DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm feh wmctrl btop xserver-xorg x11-xserver-utils python3-websocket xinput \
     || fail "#504: openbox+lightdm install failed — cannot convert the box to the kiosk WM"
 
 # (b) lightdm autologin → openbox. Idempotent full-file write of a fixed drop-in (always the same

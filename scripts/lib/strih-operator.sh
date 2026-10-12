@@ -36,14 +36,14 @@
 #                        tapping is off, as on 12.10.2026; a touchpad without the libinput property
 #                        FAILs; NOTE when the box has no touchpad;
 #       (bluetooth)      hci0 present, UP, non-zero BD address (`hciconfig hci0`; the 12.10.2026
-#                        rtl8852bu read DOWN 00:00:00:00:00:00). Graded because the kiosk keeps
-#                        bluetooth on these boxes (STRIH_OPERATOR_KIOSK_BLUETOOTH, pinned to the
-#                        setup-strih step 11 call by a test);
+#                        rtl8852bu read DOWN 00:00:00:00:00:00). Graded on every role: setup-strih
+#                        step 11 passes keep-bluetooth to the kiosk on every role (pinned by a test);
 #       (stream-deck)    the deck on USB and at least one Satellite surface, read through
 #                        scripts/strih_satellite_watch.py (its USB ids, its sysfs reader, its
 #                        /api/surfaces parser: the 30 s watch and verify read the deck one way); NOTE
 #                        when no deck is plugged in, and on a role without a Satellite (step 16 gate);
-#       (mv-click)       [BasicWindow] MultiviewMouseSwitch true in the operator's OBS user.ini;
+#       (mv-click)       [BasicWindow] MultiviewMouseSwitch true in the operator's OBS user.ini, read
+#                        the way libobs config_get_bool reads it; an absent key FAILs as not seeded;
 #       (studio-mode)    GetStudioModeEnabled over the OBS websocket (no auth on the strih OBS); NOTE
 #                        while OBS is not running;
 #       (ws-seed)        the obs-websocket config step 7 writes: enabled, :4455, auth_required false;
@@ -71,11 +71,13 @@ if ! declare -F strih_nic_rig_subnet_others >/dev/null; then
   # shellcheck source=scripts/lib/strih-nic-driver.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-nic-driver.sh"
 fi
+# The ONE "run on the kiosk display :0 as the operator" helper lives in the session-apps lib.
+if ! declare -F strih_kiosk_x_run >/dev/null; then
+  # shellcheck source=scripts/lib/strih-session-apps.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-session-apps.sh"
+fi
 
 STRIH_OPERATOR_INI_KEYS=(SaveProjectors=true ProjectorAlwaysOnTop=false MultiviewMouseSwitch=true)
-# What setup-strih step 11 passes obs_box_kiosk (pinned by a test): the kiosk keeps bluetooth, so the
-# Bluetooth row is graded.
-STRIH_OPERATOR_KIOSK_BLUETOOTH=keep-bluetooth
 STRIH_OPERATOR_QT_SVG_PACKAGE=qt6-svg-plugins
 # The ACPI / system "keyboards" X lists on every notebook (and a keyboard's media-key half): never the
 # operator's keyboard. Matched against the lower-cased device name.
@@ -117,8 +119,12 @@ strih_operator_user_ini_seed() {
     return 0
   fi
   if python3 - "$ini" "${STRIH_OPERATOR_INI_KEYS[@]}" <<'PY'
-import configparser, os, sys
+import configparser, os, sys, tempfile
 path = sys.argv[1]
+if os.path.islink(path):
+    # setup-strih runs as root: never write or chown through a link the desktop user could point anywhere.
+    sys.stderr.write("%s is a symlink -- refusing to write it\n" % path)
+    sys.exit(4)
 # strict=False tolerates duplicate keys/sections OBS may write; RawConfigParser avoids % interpolation.
 cp = configparser.RawConfigParser(strict=False)
 cp.optionxform = str
@@ -134,14 +140,24 @@ if not cp.has_section("BasicWindow"):
 for kv in sys.argv[2:]:
     k, v = kv.split("=", 1)
     cp.set("BasicWindow", k, v)
-with open(path, "w") as fh:
-    cp.write(fh, space_around_delimiters=False)
+# A temp file in the same directory renamed over the name: a reader never sees half a file, and the
+# rename replaces a link instead of writing through it (a symlink was refused above). The mode is kept.
+mode = os.stat(path).st_mode & 0o777 if os.path.exists(path) else 0o644
+fd, tmp = tempfile.mkstemp(prefix=".user.ini.", dir=os.path.dirname(os.path.abspath(path)))
+try:
+    with os.fdopen(fd, "w") as fh:
+        cp.write(fh, space_around_delimiters=False)
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
 PY
   then
-    chown "$user":"$user" "$ini" 2>/dev/null || true
+    chown -h "$user":"$user" "$ini" 2>/dev/null || true
     echo "  seeded [BasicWindow] ${STRIH_OPERATOR_INI_KEYS[*]} in ${ini}"
   else
-    echo "  WARN: could not seed [BasicWindow] ${STRIH_OPERATOR_INI_KEYS[*]} in ${ini} (left untouched, above) -- fix the file and re-run setup-strih.sh"
+    echo "  WARN: could not seed [BasicWindow] ${STRIH_OPERATOR_INI_KEYS[*]} in ${ini} (left untouched: unparseable, or a symlink, above) -- fix the file and re-run setup-strih.sh"
   fi
   return 0
 }
@@ -150,7 +166,7 @@ PY
 # header). rc 1 + a stderr line when nmcli cannot list or change a profile; rc 0 otherwise (a rig NIC or
 # rig address that cannot be read is a WARN: nothing is touched blind).
 strih_operator_nic_isolate() {
-  local ip addrs nic pfx others ifcs="" covered=" " rows u t dev ifn name ac a on_rig changed=0 ifc addr
+  local ip addrs nic pfx others ifcs="" covered=" " rows u t dev ifn name ac a on_rig touched=0 ifc addr
   ip="$(strih_lx_ip)" || return 1
   addrs="$(_strih_operator_ip_addrs)"
   if ! nic="$(strih_lx_rig_nic "$(strih_operator_sysfs)" "$addrs" "$ip" 2>/dev/null)"; then
@@ -181,25 +197,32 @@ strih_operator_nic_isolate() {
       fi
       continue
     fi
-    ifn="$(_strih_operator_nmcli -g connection.interface-name connection show "$u" 2>/dev/null || true)"
+    ifn="$(_strih_operator_nmcli -g connection.interface-name connection show "$u" </dev/null 2>/dev/null || true)"
     [ "$ifn" != "$nic" ] || continue
-    for a in $(_strih_operator_nmcli -g ipv4.addresses connection show "$u" 2>/dev/null | tr ',' ' ' || true); do
+    for a in $(_strih_operator_nmcli -g ipv4.addresses connection show "$u" </dev/null 2>/dev/null | tr ',' ' ' || true); do
       if strih_nic_on_subnet "$ip" "$pfx" "$a"; then on_rig=1; fi
     done
-    [ "$on_rig" = 1 ] || continue
-    name="$(_strih_operator_nmcli -g connection.id connection show "$u" 2>/dev/null || true)"
-    ac="$(_strih_operator_nmcli -g connection.autoconnect connection show "$u" 2>/dev/null || true)"
+    name="$(_strih_operator_nmcli -g connection.id connection show "$u" </dev/null 2>/dev/null || true)"
+    if [ "$on_rig" = 0 ]; then
+      # An inactive DHCP profile has no address to place: the 11.10.2026 onboard profile was one, and it
+      # landed on the rig subnet when a cable went in. Named, never changed blind.
+      if [ -z "$dev" ] && [ "$(_strih_operator_nmcli -g ipv4.method connection show "$u" </dev/null 2>/dev/null || true)" = auto ]; then
+        echo "  WARN: '${name}' (${u}) is an inactive DHCP wired profile -- its subnet is unknown until a cable goes in; if it lands on the rig subnet verify item 36 FAILs (nmcli connection modify <name> connection.autoconnect no keeps it down)"
+      fi
+      continue
+    fi
+    ac="$(_strih_operator_nmcli -g connection.autoconnect connection show "$u" </dev/null 2>/dev/null || true)"
     if [ "$ac" != no ]; then
-      _strih_operator_nmcli connection modify "$u" connection.autoconnect no || {
+      _strih_operator_nmcli connection modify "$u" connection.autoconnect no </dev/null || {
         echo "strih-operator: nmcli could not set connection.autoconnect no on '${name}' (${u})" >&2; return 1; }
       echo "  '${name}' (${u}): connection.autoconnect no -- it is on the rig subnet ${ip}/${pfx} next to the rig NIC ${nic}"
-      changed=1
+      touched=1
     fi
     if [ -n "$dev" ]; then
-      _strih_operator_nmcli connection down "$u" >/dev/null || {
+      _strih_operator_nmcli connection down "$u" </dev/null >/dev/null || {
         echo "strih-operator: nmcli could not bring '${name}' (${u}) down on ${dev}" >&2; return 1; }
       echo "  '${name}' (${u}): brought down on ${dev} (it carried the rig subnet next to ${nic})"
-      changed=1
+      touched=1
     fi
   done <<<"$rows"
   for ifc in $ifcs; do
@@ -207,7 +230,7 @@ strih_operator_nic_isolate() {
       echo "  WARN: ${ifc} carries an address on the rig subnet ${ip}/${pfx} but no NetworkManager connection runs on it -- take it down by hand (verify item 36 FAILs it)" ;;
     esac
   done
-  if [ "$changed" = 0 ]; then
+  if [ "$touched" = 0 ]; then
     echo "  no other wired profile on the rig subnet ${ip}/${pfx} next to ${nic} needed a change -- unchanged"
   fi
   return 0
@@ -223,23 +246,21 @@ strih_operator_install() {
 
 # --- verify-strih item 43 --------------------------------------------------------------------------
 
-# _strih_operator_on_x USER HOME SECONDS CMD... -> CMD on the kiosk display :0 with the operator's
-# Xauthority (as root through `sudo -u USER`, else inline), bounded by `timeout SECONDS`.
+# _strih_operator_on_x USER HOME SECONDS CMD... -> CMD on the kiosk display :0 as USER, bounded
+# (strih_kiosk_x_run, the session-apps lib).
 _strih_operator_on_x() {
   local user="$1" home="$2" t="$3"
   shift 3
-  if [ "${STRIH_OPERATOR_EUID:-$(id -u)}" = 0 ]; then
-    sudo -u "$user" env DISPLAY=:0 XAUTHORITY="${home}/.Xauthority" timeout "$t" "$@"
-  else
-    env DISPLAY=:0 XAUTHORITY="${home}/.Xauthority" timeout "$t" "$@"
-  fi
+  strih_kiosk_x_run "${STRIH_OPERATOR_EUID:-$(id -u)}" "$user" "$home" "$t" "$@"
 }
+
+strih_operator_xinput_tool() { printf '%s' "${STRIH_OPERATOR_XINPUT:-xinput}"; }
 
 # strih_operator_xinput USER HOME ARGS... -> `xinput ARGS...` on :0; nothing when X does not answer.
 strih_operator_xinput() {
   local user="$1" home="$2"
   shift 2
-  _strih_operator_on_x "$user" "$home" 10 "${STRIH_OPERATOR_XINPUT:-xinput}" "$@" 2>/dev/null || true
+  _strih_operator_on_x "$user" "$home" 10 "$(strih_operator_xinput_tool)" "$@" 2>/dev/null || true
 }
 
 # strih_operator_xinput_slaves (stdin = `xinput list --short`) -> `ID|pointer|NAME` / `ID|keyboard|NAME`
@@ -257,21 +278,23 @@ strih_operator_xinput_slaves() {
 }
 
 # strih_operator_tap_verdict (stdin = `NAME|VALUE` per pointer, VALUE = the live `libinput Tapping
-# Enabled` 0 / 1, or `none` without the property) -> ONE row.
+# Enabled` 0 / 1, `none` without the property, `unread` when `xinput list-props` did not answer) -> ONE row.
 strih_operator_tap_verdict() {
-  local name v on="" off="" nolib=""
+  local name v on="" off="" nolib="" unread=""
   while IFS='|' read -r name v; do
     [ -n "$name" ] || continue
     case "$v" in
       1) on="${on}${on:+, }${name}" ;;
       0) off="${off}${off:+, }${name}" ;;
+      unread) unread="${unread}${unread:+, }${name}" ;;
       *) case "${name,,}" in *touchpad*) nolib="${nolib}${nolib:+, }${name}" ;; esac ;;
     esac
   done
-  if [ -n "$off" ] || [ -n "$nolib" ]; then
-    printf 'FAIL|(tap-to-click)%s%s -- a tap does not click: re-run setup-strih.sh step 11 (30-touchpad-tap.conf) and restart the X session; live: xinput set-prop <device> "libinput Tapping Enabled" 1\n' \
+  if [ -n "$off" ] || [ -n "$nolib" ] || [ -n "$unread" ]; then
+    printf 'FAIL|(tap-to-click)%s%s%s -- a tap does not click: re-run setup-strih.sh step 11 (30-touchpad-tap.conf) and restart the X session; live: xinput set-prop <device> "libinput Tapping Enabled" 1\n' \
       "${off:+ tap-to-click OFF on ${off} (libinput Tapping Enabled=0)}" \
-      "${nolib:+ ${nolib} not driven by libinput (no Tapping property)}"
+      "${nolib:+ ${nolib} not driven by libinput (no Tapping property)}" \
+      "${unread:+ xinput list-props did not answer for ${unread} (X not answering?)}"
   elif [ -n "$on" ]; then
     printf 'OK|(tap-to-click) libinput Tapping Enabled=1 live on %s\n' "$on"
   else
@@ -286,6 +309,10 @@ _strih_operator_tap_lines() {
     [ "$kind" = pointer ] || continue
     case "${name,,}" in *xtest*) continue ;; esac
     props="$(strih_operator_xinput "$user" "$home" list-props "$id")"
+    if [ -z "$props" ]; then
+      printf '%s|unread\n' "$name"
+      continue
+    fi
     v="$(sed -n 's/^[[:space:]]*libinput Tapping Enabled ([0123456789]*):[[:space:]]*\([01]\)[[:space:]]*$/\1/p' <<<"$props")"
     v="${v%%$'\n'*}"
     printf '%s|%s\n' "$name" "${v:-none}"
@@ -381,32 +408,43 @@ strih_operator_deck_verdict() {
   esac
 }
 
-# strih_operator_mvclick_verdict USER_INI -> ONE row: [BasicWindow] MultiviewMouseSwitch is true (the
-# way libobs config_get_bool reads it: true / on / yes, or a non-zero number).
+# strih_operator_mvclick_verdict USER_INI -> ONE row: [BasicWindow] MultiviewMouseSwitch is true the way
+# libobs config_get_bool reads it (util/config-file.c: `true` in any case, or a non-zero strtoull of the
+# value -- base 16 after a leading 0x, else base 10; `on` / `yes` read FALSE). An absent key is OBS's
+# built-in true, but it FAILs as "not seeded": step 16g pins it, so a restored false can never hide.
 strih_operator_mvclick_verdict() {
   local ini="${1:?user.ini path required}" v
   v="$(python3 - "$ini" <<'PY' 2>/dev/null || true
-import configparser, sys
+import configparser, re, sys
 cp = configparser.RawConfigParser(strict=False)
 cp.optionxform = str
 try:
     if not cp.read(sys.argv[1]):
-        print("<missing file>")
+        print("missing|the file is missing")
         sys.exit(0)
 except Exception:
-    print("<unreadable file>")
+    print("unread|the file is unreadable")
     sys.exit(0)
-print(cp.get("BasicWindow", "MultiviewMouseSwitch", fallback="<absent>"))
+if not cp.has_option("BasicWindow", "MultiviewMouseSwitch"):
+    print("absent|the key is not seeded")
+    sys.exit(0)
+v = cp.get("BasicWindow", "MultiviewMouseSwitch")
+def obs_bool(s):
+    if s.lower() == "true":
+        return True
+    base = 10
+    if s.startswith("0x"):
+        base, s = 16, s[2:]
+    m = re.match(r"\s*[+-]?" + (r"(?:0[xX])?([0-9a-fA-F]*)" if base == 16 else r"([0-9]*)"), s)
+    digits = m.group(1) if m else ""
+    return bool(digits) and int(digits, base) != 0
+print("%s|MultiviewMouseSwitch=%s" % ("true" if obs_bool(v) else "false", v))
 PY
 )"
-  case "${v,,}" in
-    true | on | yes) ;;
-    *) if ! [[ "$v" =~ ^-?[0123456789]+$ ]] || [ "$((10#${v#-}))" = 0 ]; then
-         printf 'FAIL|(mv-click) [BasicWindow] MultiviewMouseSwitch=%s in %s -- clicking a Multiview tile does not cut; stop OBS and re-run setup-strih.sh step 16g (issue 1418)\n' "${v:-<unread>}" "$ini"
-         return 0
-       fi ;;
+  case "${v%%|*}" in
+    true) printf 'OK|(mv-click) [BasicWindow] %s in %s -- a Multiview click cuts\n' "${v#*|}" "$ini" ;;
+    *) printf 'FAIL|(mv-click) [BasicWindow] %s in %s -- MultiviewMouseSwitch not true or not seeded: clicking a Multiview tile may not cut; stop OBS and re-run setup-strih.sh step 16g (issue 1418)\n' "${v#*|}" "$ini" ;;
   esac
-  printf 'OK|(mv-click) [BasicWindow] MultiviewMouseSwitch=%s in %s -- a Multiview click cuts\n' "$v" "$ini"
 }
 
 # strih_operator_studio_read -> true | false | nothing: Studio Mode of the strih OBS over its websocket.
@@ -528,15 +566,15 @@ strih_operator_grade_rows() {
   local xl slaves bt why deck dk_usb dk_surf dk_ids dk_names obs_up=0 gap d1 d2
   xl="$(strih_operator_xinput "$user" "$home" list --short)"
   slaves="$(strih_operator_xinput_slaves <<<"$xl")"
-  if [ -z "$xl" ]; then
+  if ! command -v "$(strih_operator_xinput_tool)" >/dev/null 2>&1; then
+    printf 'FAIL|(tap-to-click) not graded: xinput is not installed -- re-run setup-strih.sh step 11 (the kiosk installs it)\n'
+  elif [ -z "$xl" ]; then
     printf 'FAIL|(tap-to-click) not graded: xinput on :0 answered nothing -- X is down or does not answer clients\n'
   else
     _strih_operator_tap_lines "$user" "$home" "$slaves" | strih_operator_tap_verdict
   fi
   bt="$(strih_operator_bt_read)"
-  if [ "$STRIH_OPERATOR_KIOSK_BLUETOOTH" != keep-bluetooth ]; then
-    printf 'NOTE|(bluetooth) not graded: the kiosk does not keep bluetooth on this box\n'
-  elif [ "$bt" = '<no-hciconfig>' ]; then
+  if [ "$bt" = '<no-hciconfig>' ]; then
     printf 'FAIL|(bluetooth) hciconfig is not installed (package bluez) -- the Bluetooth controller cannot be read\n'
   else
     strih_operator_bt_verdict "$bt"
@@ -553,7 +591,9 @@ strih_operator_grade_rows() {
   strih_operator_studio_verdict "$(strih_operator_studio_read)" "$obs_up"
   strih_operator_ws_seed_verdict "${home}/.config/obs-studio/plugin_config/obs-websocket/config.json"
   strih_operator_qtsvg_verdict "${STRIH_OPERATOR_LIBDIR:-/usr/lib/x86_64-linux-gnu}"
-  if [ -z "$xl" ]; then
+  if ! command -v "$(strih_operator_xinput_tool)" >/dev/null 2>&1; then
+    printf 'FAIL|(operator-input) not graded: xinput is not installed -- re-run setup-strih.sh step 11 (the kiosk installs it)\n'
+  elif [ -z "$xl" ]; then
     printf 'FAIL|(operator-input) xinput on :0 answered nothing -- X is down or does not answer clients (the 12.10.2026 hang)\n'
   else
     strih_operator_input_verdict <<<"$slaves"

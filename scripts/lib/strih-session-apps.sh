@@ -479,16 +479,26 @@ strih_shading_window_present() {
     END { exit found ? 0 : 1 }'
 }
 
+# strih_kiosk_x_run EUID USER USER_HOME SECONDS CMD... -> CMD on the kiosk display :0 with USER's
+# Xauthority (as root, EUID 0, through `sudo -u USER`; else inline), bounded by `timeout SECONDS`. The ONE
+# copy for the session apps' window check and the operator grader (issue 1418); strih-drm-output.sh keeps
+# its own xrandr reader because its tests source that lib alone.
+strih_kiosk_x_run() {
+  local euid="$1" user="$2" home="$3" t="$4"
+  shift 4
+  if [ "$euid" = 0 ]; then
+    sudo -u "$user" env DISPLAY=:0 XAUTHORITY="${home}/.Xauthority" timeout "$t" "$@"
+  else
+    env DISPLAY=:0 XAUTHORITY="${home}/.Xauthority" timeout "$t" "$@"
+  fi
+}
+
 # strih_session_apps_wmctrl USER USER_HOME -> `wmctrl -lx` of the kiosk display :0 with the operator's
 # Xauthority (as root through sudo -u, else inline), bounded; prints nothing when X does not answer.
 strih_session_apps_wmctrl() {
-  local user="${1:?user required}" home="${2:?user home required}" wm
-  wm="$(strih_session_apps_wmctrl_bin)"
-  if [ "${STRIH_SESSION_APPS_EUID:-$(id -u)}" = 0 ]; then
-    sudo -u "$user" env DISPLAY=:0 XAUTHORITY="${home}/.Xauthority" timeout 10 "$wm" -lx 2>/dev/null || true
-  else
-    env DISPLAY=:0 XAUTHORITY="${home}/.Xauthority" timeout 10 "$wm" -lx 2>/dev/null || true
-  fi
+  local user="${1:?user required}" home="${2:?user home required}"
+  strih_kiosk_x_run "${STRIH_SESSION_APPS_EUID:-$(id -u)}" "$user" "$home" 10 \
+    "$(strih_session_apps_wmctrl_bin)" -lx 2>/dev/null || true
 }
 
 # strih_session_apps_wmctrl_bin -> the window-list tool (STRIH_SESSION_APPS_WMCTRL is the test seam).
