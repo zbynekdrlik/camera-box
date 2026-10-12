@@ -20,6 +20,20 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// A path in its own `tempfile::tempdir()` (the dir itself or a file in it). The dir lives as long
+/// as this value and is removed when it drops, so no pid-named dir is left in /tmp (issue 1409).
+struct TempPath {
+    path: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl std::ops::Deref for TempPath {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -222,18 +236,15 @@ fn watchdog_help_exits_zero() {
 // 0/1/2). Both are overridable exactly so this test can drive the decision core with no ssh and no
 // Rust binary. A per-test STATE dir + a single BOX keep passes independent.
 
-fn temp_dir(tag: &str) -> PathBuf {
-    let mut d = std::env::temp_dir();
-    d.push(format!(
-        "cbox-mvfps-{tag}-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    std::fs::create_dir_all(&d).unwrap();
-    d
+fn temp_dir(tag: &str) -> TempPath {
+    let d = tempfile::Builder::new()
+        .prefix(&format!("cbox-mvfps-{tag}-"))
+        .tempdir()
+        .unwrap();
+    TempPath {
+        path: d.path().to_path_buf(),
+        _dir: d,
+    }
 }
 
 /// A fake gate that ignores stdin, prints $FAKE_GATE_OUT, exits $FAKE_GATE_EXIT.

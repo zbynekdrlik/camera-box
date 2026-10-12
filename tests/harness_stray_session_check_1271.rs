@@ -20,6 +20,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// A path in its own `tempfile::tempdir()` (the dir itself or a file in it). The dir lives as long
+/// as this value and is removed when it drops, so no pid-named dir is left in /tmp (issue 1409).
+struct TempPath {
+    path: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl std::ops::Deref for TempPath {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -217,11 +231,15 @@ elif "stream-detail" in args:
     fs::write(&p, fake).expect("write fake obs_phase2.py");
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("stray-check-1271-{}-{}", std::process::id(), name));
-    let _ = fs::remove_dir_all(&d);
-    fs::create_dir_all(&d).expect("mkdir scratch");
-    d
+fn scratch(name: &str) -> TempPath {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("stray-check-1271-{name}-"))
+        .tempdir()
+        .expect("mkdir scratch");
+    TempPath {
+        path: dir.path().to_path_buf(),
+        _dir: dir,
+    }
 }
 
 /// Source the lib under the caller's REAL `set -euo pipefail` (proves the bare-statement call is

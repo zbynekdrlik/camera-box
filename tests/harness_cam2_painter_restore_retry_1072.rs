@@ -20,6 +20,20 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// A path in its own `tempfile::tempdir()` (the dir itself or a file in it). The dir lives as long
+/// as this value and is removed when it drops, so no pid-named dir is left in /tmp (issue 1409).
+struct TempPath {
+    path: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl std::ops::Deref for TempPath {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -154,15 +168,15 @@ fn preflight_attempts_one_self_heal_start_before_the_abort_1072() {
 //     and the abort is fail-closed, without any live ssh/rig dependency (mirrors the #863
 //     run_against_fakes pattern). ---
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "optical-preflight-selfheal-1072-{}-{}",
-        std::process::id(),
-        name
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create scratch dir");
-    dir
+fn scratch(name: &str) -> TempPath {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("optical-preflight-selfheal-1072-{name}-"))
+        .tempdir()
+        .expect("create scratch dir");
+    TempPath {
+        path: dir.path().to_path_buf(),
+        _dir: dir,
+    }
 }
 
 fn write_fake_bin(dir: &Path, name: &str, script: &str) {

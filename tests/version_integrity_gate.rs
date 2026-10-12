@@ -21,6 +21,26 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
+/// A path in its own `tempfile::tempdir()` (the dir itself or a file in it). The dir lives as long
+/// as this value and is removed when it drops, so no pid-named dir is left in /tmp (issue 1409).
+struct TempPath {
+    path: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl std::ops::Deref for TempPath {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl AsRef<std::path::Path> for TempPath {
+    fn as_ref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -93,13 +113,12 @@ fn run_gate_env(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, Stri
     )
 }
 
-fn write_state(name: &str, json: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("vig-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{name}.json"));
+fn write_state(name: &str, json: &str) -> TempPath {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(format!("{name}.json"));
     let mut f = std::fs::File::create(&path).unwrap();
     f.write_all(json.as_bytes()).unwrap();
-    path
+    TempPath { path, _dir: dir }
 }
 
 /// A strih state JSON that MATCHES the pinned set in vendor/README.md (the known-good zero-loss
@@ -516,8 +535,8 @@ fn gate_uses_a_custom_readme_for_the_pinned_set() {
     // engine), but --readme overrides it. A README pinning a DIFFERENT obs version makes a
     // box-matching-the-real-README state DRIFT against the custom pin -> exit 20. This proves the
     // gate threads the pin source through to the engine rather than hard-coding versions.
-    let dir = std::env::temp_dir().join(format!("vig-readme-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
     std::fs::create_dir_all(dir.join("distroav")).unwrap();
     let readme = dir.join("README.md");
     std::fs::write(
@@ -548,7 +567,6 @@ fn gate_uses_a_custom_readme_for_the_pinned_set() {
         "--win-state",
         &format!("strih={}", s.display()),
     ]);
-    let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_file(&s);
     assert_eq!(
         code, 20,
@@ -1158,7 +1176,7 @@ fn with_manifest_facet(base: &str, obs_sha: &str, distroav_sha: &str, capability
 /// Write a minimal #120 BUNDLE_MANIFEST.json listing obs.dll + distroav.dll (the two genlock-bearing
 /// DLLs drift-guard's #122 by-basename component check reads). One-line files[] entries, exactly the
 /// shape genlock-manifest.sh emits + drift-guard's manifest_sha_for_component parses.
-fn write_manifest(name: &str, obs_sha: &str, distroav_sha: &str) -> PathBuf {
+fn write_manifest(name: &str, obs_sha: &str, distroav_sha: &str) -> TempPath {
     let json = format!(
         "{{\n  \"schema\": \"camera-box/genlock-bundle-manifest@1\",\n  \"build_sha\": \"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\",\n  \"files\": [\n    {{ \"path\": \"bin/64bit/obs.dll\", \"sha256\": \"{obs_sha}\", \"size\": 100 }},\n    {{ \"path\": \"obs-plugins/64bit/distroav.dll\", \"sha256\": \"{distroav_sha}\", \"size\": 200 }}\n  ]\n}}\n"
     );
@@ -1306,7 +1324,7 @@ fn gate_passes_when_deployed_bytes_match_the_manifest_770() {
 
 /// An obs.dll-ONLY manifest, the FAST (windows-genlock-fast.yml) layout: obs.dll at the stage root,
 /// no distroav. One files[] entry per line (drift-guard's parsers are line-based).
-fn write_fast_manifest_1346(name: &str, obs_sha: &str) -> PathBuf {
+fn write_fast_manifest_1346(name: &str, obs_sha: &str) -> TempPath {
     let json = format!(
         "{{\n  \"schema\": \"camera-box/genlock-bundle-manifest@1\",\n  \"build_sha\": \"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\",\n  \"files\": [\n    {{ \"path\": \"GENLOCK_BUILD_SHA.txt\", \"sha256\": \"4444444444444444444444444444444444444444444444444444444444444444\", \"size\": 42 }},\n    {{ \"path\": \"obs.dll\", \"sha256\": \"{obs_sha}\", \"size\": 100 }}\n  ]\n}}\n"
     );
@@ -1446,7 +1464,7 @@ const DISTROAV_SO_PATH_1082: &str = "lib/x86_64-linux-gnu/obs-plugins/distroav.s
 /// Write a minimal #120 linux BUNDLE_MANIFEST.json listing the two genlock-bearing .so files, one
 /// files[] entry per LINE (drift-guard's manifest parsers are line-based — a single-line JSON makes
 /// the greedy `.*` grab the wrong entry, see the version-integrity-gate playbook).
-fn write_linux_manifest(name: &str, libobs_sha: &str, distroav_sha: &str) -> PathBuf {
+fn write_linux_manifest(name: &str, libobs_sha: &str, distroav_sha: &str) -> TempPath {
     let json = format!(
         "{{\n  \"schema\": \"camera-box/genlock-bundle-manifest@1\",\n  \"build_sha\": \"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\",\n  \"files\": [\n    {{ \"path\": \"{LIBOBS_SO_PATH_1082}\", \"sha256\": \"{libobs_sha}\", \"size\": 100 }},\n    {{ \"path\": \"{DISTROAV_SO_PATH_1082}\", \"sha256\": \"{distroav_sha}\", \"size\": 200 }}\n  ]\n}}\n"
     );
@@ -1456,7 +1474,7 @@ fn write_linux_manifest(name: &str, libobs_sha: &str, distroav_sha: &str) -> Pat
 /// Build a clean, PASSING fleet (strih/stream pinned + obs-identity + a matching genlock_build_sha,
 /// imag's marker matching via --genlock-sha) so the ONLY signal a byte test can move is the imag .so
 /// facet. Returns (strih_state, stream_state) paths.
-fn clean_fleet_states_1082(sha: &str, tag: &str) -> (PathBuf, PathBuf) {
+fn clean_fleet_states_1082(sha: &str, tag: &str) -> (TempPath, TempPath) {
     // `tag` = caller-unique suffix: the _1082 tests all share one SHA const, run in PARALLEL
     // threads of ONE process (same pid dir), and each removes its state files at the end -- a
     // shared name lets test A's cleanup delete the file test B's gate subprocess is about to
@@ -1476,7 +1494,7 @@ fn clean_fleet_states_1082(sha: &str, tag: &str) -> (PathBuf, PathBuf) {
 /// imag manifest + gathered bytes (the imag analogue of with_sha / with_obs_identity_ok's enforced-key
 /// injection). Writes a clean linux manifest and returns (manifest_path, imag_bytes_csv) whose bytes
 /// match it -> imag_bytes_verdict OK. `tag` = caller-unique suffix (parallel tests share one pid dir).
-fn clean_imag_bytes_1100(tag: &str) -> (PathBuf, String) {
+fn clean_imag_bytes_1100(tag: &str) -> (TempPath, String) {
     const LIBOBS: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const DISTROAV: &str = "2222222222222222222222222222222222222222222222222222222222222222";
     let manifest = write_linux_manifest(&format!("imag_clean_1100_{tag}"), LIBOBS, DISTROAV);
@@ -2367,9 +2385,9 @@ fn gate_still_refuses_absent_imag_without_the_ack_flag_1164() {
 const SHA_1296: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
 
 /// The canonical GATE-PASS invocation (strih+stream pinned + imag clean), as owned arg strings.
-/// Returns the two strih/stream state paths (to clean up) + the full arg vector. The imag manifest
-/// temp file persists on disk for the subprocess (written by clean_imag_bytes_1100), not deleted.
-fn pinned_pass_args_1296(tag: &str) -> (PathBuf, PathBuf, Vec<String>) {
+/// Returns the strih/stream state paths, the imag manifest (written by clean_imag_bytes_1100) and
+/// the full arg vector. The caller holds the three paths while the gate runs.
+fn pinned_pass_args_1296(tag: &str) -> (TempPath, TempPath, TempPath, Vec<String>) {
     let s = write_state(
         &format!("strih_ro_{tag}"),
         &with_obs_identity_ok(&with_sha(STRIH_PINNED, SHA_1296), true),
@@ -2391,7 +2409,7 @@ fn pinned_pass_args_1296(tag: &str) -> (PathBuf, PathBuf, Vec<String>) {
         "--imag-bytes".to_string(),
         imag_b,
     ];
-    (s, t, args)
+    (s, t, imag_m, args)
 }
 
 #[test]
@@ -2399,7 +2417,7 @@ fn report_only_box_is_surfaced_but_never_blocks_a_passing_gate_1296() {
     // The passing fixture PLUS a report-only resolume whose genlock sha DELIBERATELY does NOT match
     // the fleet (a value that WOULD be DRIFT if it were a blocking --win-state box). The gate must
     // still GATE PASS (0): a report-only box is never drift-checked, never counted.
-    let (s, t, mut args) = pinned_pass_args_1296("surface");
+    let (s, t, _imag_m, mut args) = pinned_pass_args_1296("surface");
     let ro = write_state(
         "resolume_ro_surface",
         "{\"genlock_build_sha\":\"deadbeefresolumeNOTthefleetSHA\",\"obs_process_count\":\"1\",\"port4455_owner_version\":\"31.0.0\"}",
@@ -2430,7 +2448,7 @@ fn report_only_box_is_surfaced_but_never_blocks_a_passing_gate_1296() {
 #[test]
 fn report_only_box_with_unread_file_prints_unread_row_and_never_blocks_1296() {
     // A report-only box whose state file is missing: an "unread (report-only)" row, still exit 0.
-    let (s, t, mut args) = pinned_pass_args_1296("unread");
+    let (s, t, _imag_m, mut args) = pinned_pass_args_1296("unread");
     args.push("--win-state-report-only".to_string());
     args.push("resolume=/nonexistent/resolume-state-1296.json".to_string());
     let argrefs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();

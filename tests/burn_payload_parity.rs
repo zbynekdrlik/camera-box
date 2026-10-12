@@ -68,13 +68,11 @@ fn parity_triples() -> Vec<(u32, u32, i64)> {
 /// C++-produced wire strings, one per triple. PANICS (fails the test) if the header is
 /// missing or does not compile — that IS the RED state before the filter is built.
 fn cpp_encode(triples: &[(u32, u32, i64)]) -> Vec<String> {
-    // Unique dir PER CALL: tests run concurrently in one process, so a PID-only path
-    // races two writers on the same binary ("Text file busy"). A monotonic counter
-    // isolates each invocation.
-    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("burn_parity_{}_{}", std::process::id(), seq));
-    std::fs::create_dir_all(&dir).unwrap();
+    // Unique dir PER CALL: tests run concurrently in one process, so a shared path races two
+    // writers on the same binary ("Text file busy"). A fresh tempfile dir isolates each
+    // invocation and is removed when it drops (issue 1409).
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     let main_cpp = dir.join("parity_main.cpp");
     let bin = dir.join("parity_main");
 
@@ -197,8 +195,8 @@ fn cpp_boundary_math_matches_rust_next_wall_boundary_ns() {
     // documented port of the painter's PACING grid (the cadence it sleeps to, not the
     // stamp). This parity test guards that port's C++↔Rust bit-identity so the documented
     // relationship can't silently drift. Compile a tiny harness and compare.
-    let dir = std::env::temp_dir().join(format!("burn_boundary_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     let main_cpp = dir.join("boundary_main.cpp");
     let bin = dir.join("boundary_main");
     let clock_hpp = manifest().join(BURN_CLOCK_HPP);
@@ -277,8 +275,8 @@ fn cpp_rendered_burn_qr_decodes_back_through_rqrr() {
     // file; Rust loads it, converts to luma, decodes BOTH QRs, and asserts they equal the
     // C++-burned Payload::encode strings. This is what proves the burn is usable, not just
     // byte-identical on the wire.
-    let dir = std::env::temp_dir().join(format!("burn_render_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     let main_cpp = dir.join("render_main.cpp");
     let bin = dir.join("render_main");
     let out_bgra = dir.join("frame.bgra");
@@ -859,8 +857,8 @@ fn four_corner_layout_all_four_qrs_decode_in_one_frame() {
     // FOUR distinct payloads. On the old center-bottom-700 geometry the burns overwrote the
     // camera QRs and each other, so fewer than four decoded — this test is the regression
     // lock for the 4-corner placement.
-    let dir = std::env::temp_dir().join(format!("burn_4corner_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     let main_cpp = dir.join("fourc_main.cpp");
     let bin = dir.join("fourc_main");
     let out_bgra = dir.join("frame.bgra");
@@ -1027,8 +1025,8 @@ fn six_corner_layout_including_imag_and_cg_burn_decodes_in_one_frame_463_1301() 
     // recorded-file decoder reads back ALL SIX distinct payloads. If the new BottomCenterRight (cg)
     // placement collided with the stream corner, the cam1 center burn, or the camera QR, fewer than
     // six would decode — this is the regression lock for the 4-node-burn layout.
-    let dir = std::env::temp_dir().join(format!("burn_5corner_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     let main_cpp = dir.join("fivec_main.cpp");
     let bin = dir.join("fivec_main");
     let out_bgra = dir.join("frame.bgra");
@@ -1241,8 +1239,8 @@ fn burn_geom_corner_from_string_and_tiny_frame_clamp() {
     //   2. corner_placement does NOT underflow uint32 on a degenerate tiny frame
     //      (frame < margin + side): band_x/band_cy must clamp to in-frame, not wrap to a
     //      huge off-frame coordinate.
-    let dir = std::env::temp_dir().join(format!("burn_geom_{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     let main_cpp = dir.join("geom_main.cpp");
     let bin = dir.join("geom_main");
     let geom_hpp = manifest().join("vendor/distroav/src/burn-geom.hpp");

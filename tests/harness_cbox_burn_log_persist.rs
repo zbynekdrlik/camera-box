@@ -21,6 +21,20 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+/// A path in its own `tempfile::tempdir()` (the dir itself or a file in it). The dir lives as long
+/// as this value and is removed when it drops, so no pid-named dir is left in /tmp (issue 1409).
+struct TempPath {
+    path: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl std::ops::Deref for TempPath {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -87,15 +101,15 @@ fn dest_name_matches_the_cam1_sidecar_convention() {
     assert_eq!(n3, "cam3-cbox-burn-999.log");
 }
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "cbox-burn-persist-716-{}-{}",
-        std::process::id(),
-        name
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).expect("create scratch dir");
-    dir
+fn scratch(name: &str) -> TempPath {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("cbox-burn-persist-716-{name}-"))
+        .tempdir()
+        .expect("create scratch dir");
+    TempPath {
+        path: dir.path().to_path_buf(),
+        _dir: dir,
+    }
 }
 
 /// Install a fake `sshpass` on PATH that appends its argv (space-joined) as one line to

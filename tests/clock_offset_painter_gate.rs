@@ -21,6 +21,20 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// A path in its own `tempfile::tempdir()` (the dir itself or a file in it). The dir lives as long
+/// as this value and is removed when it drops, so no pid-named dir is left in /tmp (issue 1409).
+struct TempPath {
+    path: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl std::ops::Deref for TempPath {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -50,10 +64,9 @@ fn run_gate(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, String) 
 /// #595) with the given signed µs offset and return its path. A single-line journal's own
 /// timestamp IS the journal's newest line, so freshest_offset_us always reads it as fresh
 /// (age 0s) regardless of the configured freshness window.
-fn write_journal(name: &str, offset_us: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("painter-gate-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{name}.log"));
+fn write_journal(name: &str, offset_us: &str) -> TempPath {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(format!("{name}.log"));
     let mut f = std::fs::File::create(&path).unwrap();
     // The real DanteSync line shape the offset_us_from_journal / freshest_offset_us parsers are
     // proven against, ISO-stamped so the #595 freshness check can prove this line is current.
@@ -62,22 +75,21 @@ fn write_journal(name: &str, offset_us: &str) -> PathBuf {
         "2026-07-07T18:36:44+02:00 NODE dantesync[1]: [NTP] offset:{offset_us}us (threshold:520us, adaptive)"
     )
     .unwrap();
-    path
+    TempPath { path, _dir: dir }
 }
 
 /// Write a journald fixture that carries NO `[NTP] offset:` line (only a PTP drift line) — so the
 /// offset is UNREAD (UNKNOWN), the case the gate must fail closed on.
-fn write_journal_no_offset(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("painter-gate-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{name}.log"));
+fn write_journal_no_offset(name: &str) -> TempPath {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(format!("{name}.log"));
     let mut f = std::fs::File::create(&path).unwrap();
     writeln!(
         f,
         "2026-07-07T18:36:44+02:00 NODE dantesync[1]: [PTP] NANO  Drift: +10ns/s  Adj: +6ppm"
     )
     .unwrap();
-    path
+    TempPath { path, _dir: dir }
 }
 
 /// Write a MULTI-LINE ISO journal whose ONLY `[NTP] offset:` line is STALE (#550-class, #595): it
@@ -85,10 +97,9 @@ fn write_journal_no_offset(name: &str) -> PathBuf {
 /// 300s freshness window — even though the offset VALUE itself is in-bound. Proves staleness
 /// alone, not magnitude, must trip the gate: the age-blind `offset_us_from_journal` (tail -1)
 /// would still read this exact line as "the current offset" and pass it.
-fn write_journal_stale(name: &str, offset_us: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("painter-gate-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{name}.log"));
+fn write_journal_stale(name: &str, offset_us: &str) -> TempPath {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(format!("{name}.log"));
     let mut f = std::fs::File::create(&path).unwrap();
     writeln!(
         f,
@@ -97,7 +108,7 @@ fn write_journal_stale(name: &str, offset_us: &str) -> PathBuf {
 2026-07-07T18:36:46+02:00 NODE dantesync[1]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm"
     )
     .unwrap();
-    path
+    TempPath { path, _dir: dir }
 }
 
 fn env_pair<'a>(dev1: &'a Path, painter: &'a Path) -> [(&'a str, String); 2] {

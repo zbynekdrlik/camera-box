@@ -221,10 +221,10 @@ fn helper_lift_compiles_and_computes_the_null_safe_truth_table_1106() {
          }}\n"
     );
 
-    // Key the scratch dir on the pid so concurrent runs (worktree-fleet workers, nextest + a local
-    // run) never race on the binary.
-    let dir = std::env::temp_dir().join(format!("frontend_json_1106_{}", std::process::id()));
-    fs::create_dir_all(&dir).expect("create the scratch dir");
+    // A fresh tempfile dir per run, so concurrent runs (worktree-fleet workers, nextest + a local
+    // run) never race on the binary and nothing is left in /tmp (issue 1409).
+    let scratch = tempfile::tempdir().unwrap();
+    let dir = scratch.path();
     let cfile = dir.join("helper.cpp");
     let bin = dir.join("helper.bin");
     fs::write(&cfile, &harness).expect("write the harness");

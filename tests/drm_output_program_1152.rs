@@ -211,9 +211,11 @@ fn lift_helper(sig: &str) -> String {
 }
 
 fn compile_and_run(c_source: &str, tag: &str) -> String {
-    let dir =
-        std::env::temp_dir().join(format!("drm_output_m2_1152_{}_{}", tag, std::process::id()));
-    fs::create_dir_all(&dir).expect("create the scratch dir");
+    let scratch = tempfile::Builder::new()
+        .prefix(&format!("drm_output_m2_1152_{tag}_"))
+        .tempdir()
+        .unwrap();
+    let dir = scratch.path();
     let cfile = dir.join("harness.c");
     let bin = dir.join("harness.bin");
     fs::write(&cfile, c_source).expect("write the harness");

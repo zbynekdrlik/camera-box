@@ -49,6 +49,20 @@ use camera_box::probe::recording_partial::RecordingPartial;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// A path in its own `tempfile::tempdir()` (the dir itself or a file in it). The dir lives as long
+/// as this value and is removed when it drops, so no pid-named dir is left in /tmp (issue 1409).
+struct TempPath {
+    path: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl std::ops::Deref for TempPath {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
 /// A non-burn run_id for cam2's OPTICAL dual-QR payload — mirrors the `const CAM2: u32 = 7;`
 /// convention `src/bin/recording-verdict.rs`'s own in-process fixtures already use (any value
 /// outside the reserved node-burn ids works; `NODE_BURN_RUN_IDS` is what excludes burns from
@@ -56,10 +70,15 @@ use std::process::Command;
 const CAM2_RUN_ID: u32 = 7;
 const ONE_S_NS: i64 = 1_000_000_000;
 
-fn tempdir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("cb-703-merge-gate-{tag}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+fn tempdir(tag: &str) -> TempPath {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("cb-703-merge-gate-{tag}-"))
+        .tempdir()
+        .unwrap();
+    TempPath {
+        path: dir.path().to_path_buf(),
+        _dir: dir,
+    }
 }
 
 /// Build the `--switch-schedule` JSON: one `window_ns`-wide window per `labels` entry, back to

@@ -29,6 +29,20 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// A path in its own `tempfile::tempdir()` (the dir itself or a file in it). The dir lives as long
+/// as this value and is removed when it drops, so no pid-named dir is left in /tmp (issue 1409).
+struct TempPath {
+    path: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl std::ops::Deref for TempPath {
+    type Target = std::path::Path;
+    fn deref(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -717,17 +731,16 @@ fn run_script_env(args: &[&str], extra_env: &[(&str, &str)]) -> (i32, String, St
 /// with the given signed µs offset and return its path. A single-line journal's own timestamp IS
 /// the journal's newest line, so the freshness check always reads it as fresh (age 0s) regardless
 /// of the configured freshness window.
-fn write_journal_fresh(name: &str, offset_us: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("clock-offset-guard-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{name}.log"));
+fn write_journal_fresh(name: &str, offset_us: &str) -> TempPath {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(format!("{name}.log"));
     let mut f = std::fs::File::create(&path).unwrap();
     writeln!(
         f,
         "2026-07-08T18:36:44+02:00 NODE dantesync[1]: [NTP] offset:{offset_us}us (threshold:520us, adaptive)"
     )
     .unwrap();
-    path
+    TempPath { path, _dir: dir }
 }
 
 /// Write a MULTI-LINE ISO journal whose ONLY `[NTP] offset:` line is STALE (#550-class): it sits
@@ -735,10 +748,9 @@ fn write_journal_fresh(name: &str, offset_us: &str) -> PathBuf {
 /// freshness window — even though the offset VALUE itself is in-bound. Proves staleness alone,
 /// not magnitude, must trip the guard: the age-blind `offset_us_from_journal` (tail -1) would
 /// still read this exact line as "the current offset" and pass it.
-fn write_journal_stale(name: &str, offset_us: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("clock-offset-guard-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{name}.log"));
+fn write_journal_stale(name: &str, offset_us: &str) -> TempPath {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(format!("{name}.log"));
     let mut f = std::fs::File::create(&path).unwrap();
     writeln!(
         f,
@@ -747,7 +759,7 @@ fn write_journal_stale(name: &str, offset_us: &str) -> PathBuf {
 2026-07-08T18:36:46+02:00 NODE dantesync[1]: [PTP] NANO  Drift:   +253ns/s  Adj: +6.81ppm"
     )
     .unwrap();
-    path
+    TempPath { path, _dir: dir }
 }
 
 /// Run the CLI guard against a SINGLE `cam1` target whose journal is the given override file
@@ -799,10 +811,9 @@ fn cli_still_passes_on_a_fresh_in_bound_offset() {
 /// (2540us) exceeds the default 2000us stability bound. The three [NTP] offset lines are seconds
 /// apart and lead the newest [PTP] line, so all are fresh. Used to prove the CLI's --stability-us
 /// path fails a scattered node (#837).
-fn write_journal_scattered(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("clock-offset-guard-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(format!("{name}.log"));
+fn write_journal_scattered(name: &str) -> TempPath {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(format!("{name}.log"));
     let mut f = std::fs::File::create(&path).unwrap();
     f.write_all(
         b"2026-07-08T10:00:00+02:00 NODE dantesync[1]: [NTP] offset:+50us (threshold:520us, adaptive)\n\
@@ -811,7 +822,7 @@ fn write_journal_scattered(name: &str) -> PathBuf {
 2026-07-08T10:00:25+02:00 NODE dantesync[1]: [PTP] NANO  Drift:   +12ns/s  Adj: +6.10ppm\n",
     )
     .unwrap();
-    path
+    TempPath { path, _dir: dir }
 }
 
 #[test]

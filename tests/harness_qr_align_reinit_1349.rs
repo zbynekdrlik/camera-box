@@ -150,8 +150,8 @@ qr_align_reinit_loop strih "NDI cam1,NDI cam3"
 
 #[test]
 fn loop_converges_after_reiniting_the_laggard() {
-    let dir = std::env::temp_dir().join(format!("qr_reinit_conv_{}", std::process::id()));
-    let _ = fs::create_dir_all(&dir);
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
     let rlog = dir.join("restarts.txt");
     let cnt = dir.join("cnt.txt");
     let _ = fs::remove_file(&rlog);
@@ -179,8 +179,8 @@ fn loop_converges_after_reiniting_the_laggard() {
 
 #[test]
 fn loop_gives_up_after_max_rounds_and_still_returns_zero() {
-    let dir = std::env::temp_dir().join(format!("qr_reinit_giveup_{}", std::process::id()));
-    let _ = fs::create_dir_all(&dir);
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
     let rlog = dir.join("restarts.txt");
     let cnt = dir.join("cnt.txt");
     let _ = fs::remove_file(&rlog);
@@ -354,13 +354,14 @@ fn next_set_keeps_off_modal_when_set_changed() {
 }
 
 /// Small helper for the loop tests: a fresh temp dir with a restart-log path and a call-counter path.
-fn loop_dir(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("qr_reinit_{tag}_{}", std::process::id()));
-    let _ = fs::create_dir_all(&dir);
-    let rlog = dir.join("restarts.txt");
-    let cnt = dir.join("cnt.txt");
-    let _ = fs::remove_file(&rlog);
-    let _ = fs::remove_file(&cnt);
+/// The caller holds the returned `TempDir` for the test; dropping it removes the dir (issue 1409).
+fn loop_dir(tag: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
+    let dir = tempfile::Builder::new()
+        .prefix(&format!("qr_reinit_{tag}_"))
+        .tempdir()
+        .unwrap();
+    let rlog = dir.path().join("restarts.txt");
+    let cnt = dir.path().join("cnt.txt");
     (dir, rlog, cnt)
 }
 
