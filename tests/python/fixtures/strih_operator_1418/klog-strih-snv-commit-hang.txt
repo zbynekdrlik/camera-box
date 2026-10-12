@@ -1,3 +1,4 @@
+# Reconstructed from the abridged strih-snv `journalctl -b -1 -k` excerpt in issue comment 6132168799 (12.10.2026): the task, pid, workqueue, the four quoted frames and the flip_done line are verbatim; the other frames and the boot lines are representative.
 Oct 11 14:56:02 strih-snv kernel: Linux version 7.0.0-38-generic (buildd@lcy02-amd64-031) (x86_64-linux-gnu-gcc-14) #38-Ubuntu SMP PREEMPT_DYNAMIC
 Oct 11 14:56:02 strih-snv kernel: Command line: BOOT_IMAGE=/boot/vmlinuz-7.0.0-38-generic root=UUID=0b6e1f8c ro quiet splash preempt=full
 Oct 11 14:56:09 strih-snv kernel: nvidia: loading out-of-tree module taints kernel.

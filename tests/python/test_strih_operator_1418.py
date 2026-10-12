@@ -377,7 +377,8 @@ FIX = Path(__file__).resolve().parent / "fixtures" / "strih_operator_1418"
 XR_SNV = (FIX / "xrandr-strih-snv-reverse-prime.txt").read_text()  # strih-snv 12.10.2026, ticket comment
 XR_ONE = (FIX / "xrandr-one-nvidia-provider.txt").read_text()
 XR_MODESETTING_SINK = (FIX / "xrandr-modesetting-sink.txt").read_text()  # the Intel notebook's stable shape
-KLOG_SNV = (FIX / "klog-strih-snv-commit-hang.txt").read_text()  # the 11/12.10.2026 trace, comment 6132168799
+# Reconstructed (not verbatim) from the abridged strih-snv trace quoted in comment 6132168799.
+KLOG_SNV = (FIX / "klog-strih-snv-commit-hang.txt").read_text()
 KLOG_CLEAN = (FIX / "klog-clean.txt").read_text()
 KLOG_EXT4 = (FIX / "klog-ext4-hung-task.txt").read_text()
 _FAKE_DPKG_OP = r"""#!/bin/bash
@@ -797,6 +798,32 @@ def test_a_drm_hang_after_an_unrelated_hung_task_is_found(op):
     st, d = op.row("drm-hang")
     assert st == "FAIL" and "Oct 11 22:19:14" in d and "kworker/u64:4" in d and "jbd2" not in d, d
 
+
+@pytest.mark.parametrize("line", [
+    "[drm:amdgpu_dm_atomic_commit_tail [amdgpu]] *ERROR* Waiting for fences timed out!",
+    "[drm:nv_drm_atomic_commit [nvidia_drm]] *ERROR* [nvidia-drm] [GPU ID 0x00000100] Flip event timeout on head 0",
+    "[drm:drm_atomic_helper_wait_for_dependencies [drm_kms_helper]] *ERROR* [CRTC:62:pipe A] commit wait timed out",
+    "amdgpu 0000:64:00.0: [drm] *ERROR* [CRTC:364:crtc-0] flip_done timed out",
+])
+def test_every_drm_commit_timeout_form_fails(op, line):
+    (op.st / "klog").write_text(KLOG_CLEAN + "Oct 12 17:03:09 strih-snv kernel: %s\n" % line)
+    st, d = op.row("drm-hang")
+    assert st == "FAIL" and "Oct 12 17:03:09" in d, d
+
+
+def test_a_symbol_that_only_contains_commit_work_is_no_drm_frame(op):
+    kj = "Oct 12 18:02:44 strih-snv kernel:  kjournald2"
+    frame = "Oct 12 18:02:44 strih-snv kernel:  ext4_commit_work_done+0x10/0x20\n"
+    assert KLOG_EXT4.count(kj) == 1
+    (op.st / "klog").write_text(KLOG_EXT4.replace(kj, frame + kj))
+    assert op.row("drm-hang")[0] == "OK"
+
+
+def test_a_journal_with_no_kernel_line_is_unreadable_not_clean(op):
+    """journalctl as a user outside adm/systemd-journal exits 0 and prints only `-- No entries --`."""
+    (op.st / "klog").write_text("-- No entries --\n")
+    st, d = op.row("drm-hang")
+    assert st == "FAIL" and "kernel log" in d and "root" in d, d
 
 def test_an_unreadable_kernel_log_fails(op):
     (op.st / "klog").unlink()

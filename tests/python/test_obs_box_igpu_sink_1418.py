@@ -140,4 +140,6 @@ def test_an_incomplete_gather_fails_the_row():
 
 
 def test_the_operator_row_names_the_same_conf_path():
-    assert CONF in OPERATOR_LIB.read_text()
+    r = _bash(BASELINE, '. "$1"; [ "$STRIH_OPERATOR_IGPU_SINK_CONF" = "$(obs_box_igpu_sink_conf_path)" ]',
+              (str(OPERATOR_LIB),))
+    assert r.returncode == 0, r.stdout + r.stderr
