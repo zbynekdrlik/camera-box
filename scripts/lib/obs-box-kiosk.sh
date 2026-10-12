@@ -25,15 +25,21 @@ if [ "${BASH_SOURCE[0]%/*}" != "${BASH_SOURCE[0]}" ]; then . "${BASH_SOURCE[0]%/
 # installing tzdata first when the zoneinfo file is missing. ROOT is for the tests; both setup scripts
 # call it bare, in step 1. Fails loud via the caller's fail().
 obs_box_timezone() {
-    local ROOT="${1:-}"
+    local ROOT="${1:-}" before
     if [ ! -f "$(rig_timezone_zoneinfo "$ROOT")" ]; then
         echo "  issue 1415: $(rig_timezone_zoneinfo "$ROOT") is missing -- installing tzdata"
         obs_box_apt_update
         DEBIAN_FRONTEND=noninteractive apt-get install -y tzdata >/dev/null \
             || fail "issue 1415: could not install tzdata -- no zoneinfo file for the rig time zone ${RIG_TIMEZONE}"
     fi
+    before="$(rig_timezone_read "$ROOT")"
     rig_timezone_apply "$ROOT" \
         || fail "issue 1415: could not set the rig time zone ${RIG_TIMEZONE} (/etc/localtime) -- the operator's clocks would run on UTC"
+    # A running process keeps the zone it loaded: OBS (its browser-source clocks) and the :8899
+    # bundle-state server, whose log-age reads compare against OBS's log timestamps, must restart together.
+    if [ "$before" != "$RIG_TIMEZONE" ]; then
+        echo -e "  ${YELLOW}issue 1415: the zone changed from '${before}' -- reboot the box (or restart the OBS unit, the :8899 bundle-state server and the session apps together) so every running clock reads ${RIG_TIMEZONE}${NC}"
+    fi
 }
 
 # obs_box_crash_popup_units -> the system units the crash-popup item masks, one per line: apport +

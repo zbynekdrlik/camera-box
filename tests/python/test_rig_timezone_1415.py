@@ -107,6 +107,32 @@ def test_apply_is_idempotent_and_leaves_a_box_already_on_the_zone_alone(tmp_path
     assert os.lstat(root / "etc" / "localtime").st_ino == before
 
 
+def test_apply_swaps_the_link_by_rename_and_leaves_no_temp_file(tmp_path):
+    # review: a reader on a live box must never see a missing /etc/localtime (glibc reads it as UTC),
+    # so the link and /etc/timezone are built beside their names and renamed over them
+    root = _fake_root(tmp_path)
+    r = _lib('rig_timezone_apply "$1"', str(root))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert sorted(os.listdir(root / "etc")) == ["localtime", "timezone"]
+    code = _code(_read(LIB))
+    assert re.search(r'ln -sfn "\$target" "\$\{root\}/etc/localtime\.rig-new"', code)
+    assert re.search(r'mv -Tf "\$\{root\}/etc/localtime\.rig-new" "\$\{root\}/etc/localtime"', code)
+    assert not re.search(r'ln -sfn "\$target" "\$\{root\}/etc/localtime"', code), "never ln over the live name"
+
+
+def test_apply_fails_by_name_when_localtime_is_a_directory(tmp_path):
+    # review: `ln -sfn` into an existing DIRECTORY creates the link inside it; the swap must refuse
+    root = _fake_root(tmp_path, localtime=None)
+    (root / "etc" / "localtime").mkdir()
+    (root / "etc" / "localtime" / "keep").write_text("x")
+    r = _lib('rig_timezone_apply "$1"', str(root))
+    assert r.returncode != 0
+    assert "could not write" in r.stderr, r.stderr
+    assert (root / "etc" / "localtime").is_dir() and not os.path.islink(root / "etc" / "localtime")
+    assert sorted(os.listdir(root / "etc" / "localtime")) == ["keep"]
+    assert not (root / "etc" / "localtime.rig-new").exists()
+
+
 def test_apply_fails_loud_and_writes_nothing_without_the_zoneinfo_file(tmp_path):
     root = _fake_root(tmp_path, zones=())
     r = _lib('rig_timezone_apply "$1"', str(root))
@@ -253,6 +279,23 @@ def test_obs_box_timezone_writes_the_zone_through_the_lib(tmp_path):
     assert r.returncode == 0 and "rc=0" in r.stdout, r.stdout + r.stderr
     assert apt == "", apt
     assert os.readlink(root / "etc" / "localtime") == TARGET
+    # review: running OBS + the :8899 server keep the old zone, so a change says to restart them
+    assert "zone changed from 'Etc/UTC'" in r.stdout and "reboot" in r.stdout, r.stdout
+    r, _apt = _obs_box_timezone(root)
+    assert r.returncode == 0 and "zone changed" not in r.stdout, r.stdout
+
+
+def test_verify_strih_names_step1_for_a_failing_timezone_row():
+    text = _read(os.path.join(REPO, "scripts", "verify-strih.sh"))
+    loop = text[text.find("while IFS='|' read -r _bl_item _bl_state _bl_detail"):]
+    loop = loop[:loop.find("done < <(obs_box_baseline_verdict")]
+    script = ('bad() { echo "BAD $1"; }\nok() { echo "OK $1"; }\n'
+              + loop + 'done <<<"$1"\n')
+    r = _bash("set -euo pipefail\n" + script, "timezone|FAIL|x\nnet|FAIL|y\n")
+    assert r.returncode == 0, r.stdout + r.stderr
+    lines = r.stdout.splitlines()
+    assert "re-run setup-strih.sh step 1 " in lines[0], lines
+    assert "re-run setup-strih.sh step 11 " in lines[1], lines
 
 
 def test_obs_box_timezone_installs_tzdata_first_when_the_zoneinfo_file_is_missing(tmp_path):

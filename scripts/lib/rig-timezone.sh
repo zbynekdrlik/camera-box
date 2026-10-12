@@ -5,10 +5,15 @@
 #
 # scripts/lib/rig-timezone.sh -- issue 1415: the ONE declaration of the rig time zone.
 #
-# Every rig box runs local time, Europe/Bratislava (both venues are in Slovakia). Before this lib no
-# provisioning flow set a zone, so every freshly provisioned cambox, strih and stream box came up on
-# the image default Etc/UTC: the operator's browser-source clocks and countdowns ran 2 h behind (owner
-# 12.10.2026: "rovnaku chybu si mal vzdy").
+# Every cambox and Linux OBS box (strih, stream, imag) runs local time, Europe/Bratislava (both venues
+# are in Slovakia). Before this lib no provisioning flow set a zone, so every freshly provisioned
+# cambox, strih and stream box came up on the image default Etc/UTC: the operator's browser-source
+# clocks and countdowns ran 2 h behind (owner 12.10.2026: "rovnaku chybu si mal vzdy"). The handheld
+# SBC flow (bkshading-provision-sbc.sh) shows no operator clock and does not set it.
+#
+# A RUNNING process mostly keeps the zone it loaded (glibc's localtime_r, and so Python's time module,
+# read it once; OBS's CEF browser sources cache it), so a box whose zone changed needs its services
+# restarted or a reboot before every clock agrees. obs_box_timezone says so when it changed the zone.
 #
 # The writer writes the /etc/localtime symlink + /etc/timezone DIRECTLY, never `timedatectl
 # set-timezone`: on a read-only-root cambox, systemd-timedated keeps its own mount namespace from the
@@ -34,12 +39,13 @@
 RIG_TIMEZONE="${RIG_TIMEZONE:-Europe/Bratislava}"
 
 # _rig_timezone_name_ok ZONE -> rc 0 iff ZONE is a plain zoneinfo name: not empty, not absolute, no
-# `..` component, only the characters zoneinfo names use. The set is spelled out, never a bracket
-# range (a range follows the locale, the issue-1302 rule).
+# empty component, only the characters zoneinfo names use. `.` is not in the set, so a `..` component
+# can never pass. The set is spelled out, never a bracket range (a range follows the locale, the
+# issue-1302 rule).
 _rig_timezone_name_ok() {
     local z="${1-}"
     case "$z" in
-        ''|/*|*/|*//*|..|../*|*/../*|*/..) return 1 ;;
+        ''|/*|*/|*//*) return 1 ;;
         *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789/_+-]*) return 1 ;;
     esac
     return 0
@@ -72,10 +78,19 @@ rig_timezone_apply() {
         echo "  issue 1415: time zone already ${zone} (/etc/localtime -> ${target})"
         return 0
     fi
-    mkdir -p "${root}/etc" \
-        && ln -sfn "$target" "${root}/etc/localtime" \
-        && printf '%s\n' "$zone" > "${root}/etc/timezone" \
-        || { echo "rig_timezone_apply: could not write ${root}/etc/localtime or ${root}/etc/timezone (issue 1415)" >&2; return 1; }
+    # Each file is built beside its final name and renamed over it (tzdata's own localtime.dpkg-new
+    # shape): a reader on a live box never sees a missing /etc/localtime, which glibc reads as UTC.
+    # A directory where the link goes makes `mv -T` refuse, and the step fails by name.
+    rm -f "${root}/etc/localtime.rig-new" "${root}/etc/timezone.rig-new" 2>/dev/null
+    if ! { mkdir -p "${root}/etc" \
+        && ln -sfn "$target" "${root}/etc/localtime.rig-new" \
+        && mv -Tf "${root}/etc/localtime.rig-new" "${root}/etc/localtime" \
+        && printf '%s\n' "$zone" > "${root}/etc/timezone.rig-new" \
+        && mv -Tf "${root}/etc/timezone.rig-new" "${root}/etc/timezone"; }; then
+        rm -f "${root}/etc/localtime.rig-new" "${root}/etc/timezone.rig-new" 2>/dev/null
+        echo "rig_timezone_apply: could not write ${root}/etc/localtime or ${root}/etc/timezone (issue 1415)" >&2
+        return 1
+    fi
     link="$(readlink "${root}/etc/localtime" 2>/dev/null || true)"
     if [ "$link" != "$target" ]; then
         echo "rig_timezone_apply: ${root}/etc/localtime reads '${link}' after the write, want '${target}' (issue 1415)" >&2
