@@ -17,10 +17,17 @@
 # adding a node is one row here, and every consumer picks it up.
 #
 # THE NODE SET (dantesync_fleet_rows):
-#   * the camboxes -- every camera camera_resolve (scripts/camera-set.sh) knows, walked cam1, cam2,
-#     ... to the first unknown name (the ndi-discovery.sh walk; never a literal range, per
-#     .claude/rules/camera-active-set.md). All of them, not CAMERA_ACTIVE_SET: a camera retired from
-#     MEASUREMENT still runs dantesync and can still lose the clock.
+#   * the camboxes -- the cameras each VENUE has (issue 1413): every camera camera_resolve
+#     (scripts/camera-set.sh) knows, walked cam1, cam2, ... to the first unknown name (never a literal
+#     range, .claude/rules/camera-active-set.md), and each one that a strih fact file
+#     (scripts/strih-boxes/<box>.env, PARSED never sourced) lists in its STRIH_CAMERAS. A camera of
+#     the HOME venue (DANTESYNC_FLEET_HOME_VENUE, snv) is a plain `video` / `always` row; a camera of
+#     another venue (Poprad: cam1/4/6/7 since 11.10.2026) is a `video-<venue>` / `reach` row, locked
+#     to that venue's grandmaster and skipped while unreachable. The address comes from the venue's
+#     STRIH_CAMERA_DEV1_NET: `direct` = camera_resolve's address, `A.B.C` = that /24 + the camera's
+#     camera_resolve last octet (dev1 reaches the PP LAN as 10.76.x through companion-pp). Not
+#     CAMERA_ACTIVE_SET: a camera retired from MEASUREMENT still runs dantesync and can still lose the
+#     clock. A camera no venue lists is in no row; one listed by two venues fails loudly.
 #   * the DANTESYNC_FLEET table below: dev1, the OBS boxes (addresses from obs-fleet.sh, never a
 #     second literal), and the audio-VLAN PCs.
 #   lv1 (10.77.7.100) is deliberately ABSENT: the owner ruled it an operational PC that is on the
@@ -123,15 +130,88 @@ DANTESYNC_FLEET_CONFIG_WINDOWS='C:\ProgramData\DanteSync\config.json'
 # A bound on the camera_resolve walk (a guard against a runaway loop, not a roster).
 DANTESYNC_FLEET_CAMERA_MAX=99
 
-# _dantesync_fleet_camera_rows -> one row per camera camera_resolve knows. Runs in a SUBSHELL so the
-# caller's CAMERA_IP / CAMERA_NAME are never clobbered.
+# issue 1413: the HOME venue (its cameras are plain `video` / `always` rows, locked to the home rig's
+# grandmaster video-clock.lan). Every other venue's cameras get the venue role + the `reach` gate.
+DANTESYNC_FLEET_HOME_VENUE="${DANTESYNC_FLEET_HOME_VENUE:-snv}"
+
+# _dantesync_fleet_venue_cameras -> one `file|venue|dev1-net|cameras` line per strih fact file that
+# lists cameras (STRIH_CAMERAS other than none / empty). The files are PARSED (KEY=VALUE lines),
+# never sourced.
+_dantesync_fleet_venue_cameras() {
+  local f line key val v c net
+  # The version gate builds its specs under `set -f`; the fact-file glob must expand anyway.
+  # `local -` restores the caller's noglob setting when this function returns.
+  local -
+  set +f
+  for f in "$DANTESYNC_FLEET_STRIH_BOXES_DIR"/*.env; do
+    [ -f "$f" ] || continue
+    v="" c="" net=""
+    while IFS= read -r line || [ -n "$line" ]; do
+      case "$line" in \#* | "") continue ;; esac
+      key="${line%%=*}"; val="${line#*=}"
+      case "$key" in
+        STRIH_VENUE) v="$val" ;;
+        STRIH_CAMERAS) c="$val" ;;
+        STRIH_CAMERA_DEV1_NET) net="$val" ;;
+      esac
+    done <"$f"
+    case "$c" in "" | none) continue ;; esac
+    printf '%s|%s|%s|%s\n' "${f##*/}" "$v" "$net" "$c"
+  done
+}
+
+# _dantesync_fleet_camera_rows -> one row per camera a venue lists, in camera_resolve order (cam1,
+# cam2, ... to the first unknown name). A home-venue camera: `camN|<camera_resolve ip>|linux|video|
+# always|root|`; another venue's: `camN|<dev1 address>|linux|video-<venue>|reach|root|`. Runs in a
+# SUBSHELL so the caller's CAMERA_IP / CAMERA_NAME are never clobbered. A camera listed by two
+# venues, a venue name that is not lower-case letters + digits, or a dev1 network that is neither
+# `direct` nor an A.B.C prefix prints no row for that camera and fails (stderr + rc 1).
 _dantesync_fleet_camera_rows() {
   (
-    n=1
+    venues="$(_dantesync_fleet_venue_cameras)"
+    rc=0 n=1
     while [ "$n" -le "$DANTESYNC_FLEET_CAMERA_MAX" ] && camera_resolve "cam$n" 2>/dev/null; do
-      printf 'cam%s|%s|linux|video|always|root|\n' "$n" "$CAMERA_IP"
+      hit="" hvenue="" hnet=""
+      while IFS='|' read -r file venue net cams; do
+        [ -n "$file" ] || continue
+        case " $cams " in *" $n "*) ;; *) continue ;; esac
+        if [ -n "$hit" ]; then
+          echo "dantesync-fleet: cam$n is listed by two venue fact files ($hit and $file) -- a camera is in one venue" >&2
+          hit="DUP"
+          break
+        fi
+        hit="$file" hvenue="$venue" hnet="$net"
+      done <<<"$venues"
+      if [ "$hit" = DUP ]; then
+        rc=1
+      elif [ -n "$hit" ]; then
+        if [[ ! "$hvenue" =~ ^[abcdefghijklmnopqrstuvwxyz][abcdefghijklmnopqrstuvwxyz0123456789]*$ ]]; then
+          echo "dantesync-fleet: $hit lists cam$n but its STRIH_VENUE '$hvenue' is not a venue name" >&2
+          rc=1
+        else
+          case "$hnet" in
+            direct) addr="$CAMERA_IP" ;;
+            *)
+              if [[ "$hnet" =~ ^[0123456789]+\.[0123456789]+\.[0123456789]+$ ]]; then
+                addr="$hnet.${CAMERA_IP##*.}"
+              else
+                addr=""
+              fi
+              ;;
+          esac
+          if [ -z "$addr" ]; then
+            echo "dantesync-fleet: $hit lists cam$n but its STRIH_CAMERA_DEV1_NET '$hnet' is neither direct nor an A.B.C prefix" >&2
+            rc=1
+          elif [ "$hvenue" = "$DANTESYNC_FLEET_HOME_VENUE" ]; then
+            printf 'cam%s|%s|linux|video|always|root|\n' "$n" "$addr"
+          else
+            printf 'cam%s|%s|linux|video-%s|reach|root|\n' "$n" "$addr" "$hvenue"
+          fi
+        fi
+      fi
       n=$((n + 1))
     done
+    exit "$rc"
   )
 }
 
@@ -141,7 +221,7 @@ _dantesync_fleet_camera_rows() {
 # dropped; a malformed row or an unknown obs-fleet name fails loudly (stderr + rc 1).
 dantesync_fleet_rows() {
   local line name addr os role homegate user credvar pipes obsname check out rc=0
-  out="$(_dantesync_fleet_camera_rows)"
+  out="$(_dantesync_fleet_camera_rows)" || rc=1
   [ -n "$out" ] && printf '%s\n' "$out"
   while IFS= read -r line; do
     [ -n "${line//[[:space:]]/}" ] || continue
@@ -217,12 +297,15 @@ dantesync_fleet_names() {
   printf '%s' "$out"
 }
 
-# dantesync_fleet_camera_names -> the space-separated camera node names (the camera_resolve walk).
+# dantesync_fleet_camera_names -> the space-separated HOME-venue camera node names (issue 1413: the
+# `always` camera rows; the clock watchdog's CAM arm dials them at their camera_resolve address).
+# Another venue's cameras are `reach` rows and reach that watchdog through its REACH arm, never twice.
 dantesync_fleet_camera_names() {
-  local out="" name
-  while IFS='|' read -r name _; do
+  local out="" name homegate
+  while IFS='|' read -r name _ _ _ homegate _; do
+    [ "$homegate" = always ] || continue
     out="${out:+$out }$name"
-  done < <(_dantesync_fleet_camera_rows)
+  done < <(_dantesync_fleet_camera_rows 2>/dev/null || true)
   printf '%s' "$out"
 }
 
@@ -230,7 +313,7 @@ dantesync_fleet_camera_names() {
 # `homegate=always` row that is not a camera.
 dantesync_fleet_fixed_names() {
   local out="" name cams
-  cams=" $(dantesync_fleet_camera_names) "
+  cams=" $({ _dantesync_fleet_camera_rows 2>/dev/null || true; } | cut -d'|' -f1 | tr '\n' ' ') "
   for name in $(dantesync_fleet_names homegate=always); do
     case "$cams" in *" $name "*) continue ;; esac
     out="${out:+$out }$name"
@@ -359,6 +442,9 @@ dantesync_fleet_role_venue() {
 # one without STRIH_DANTE_GM -> stderr naming the venue + rc 1, never a guessed grandmaster.
 dantesync_fleet_venue_gm_host() {
   local venue="${1:-}" f line key val v r g found="" n=0 gm=""
+  # issue 1413: the fact-file glob must expand under a caller's `set -f` too (restored on return).
+  local -
+  set +f
   for f in "$DANTESYNC_FLEET_STRIH_BOXES_DIR"/*.env; do
     [ -f "$f" ] || continue
     v="" r="" g=""

@@ -60,8 +60,11 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   stays the run-time override), `STRIH_NIC_OOT_DRIVER` / `STRIH_NIC_MIN_USB_MBPS` /
   `STRIH_NIC_MIN_LINK_MBPS` (issue 1391, the section below), `STRIH_OBS_PROFILE` / `STRIH_OBS_COLLECTION`,
   `STRIH_NDI_RUNTIME_PEER`, `STRIH_COMPANION_HOST`, `STRIH_CG_SENDER` (`none` = no CG inputs),
-  `STRIH_CAMERAS` (space-separated numbers). **Run-time facts stay derived on the box** — PL1 watts,
-  the CPU plan, the NIC interface name.
+  `STRIH_CAMERAS` (space-separated numbers = the cameras the VENUE has, issue 1413: strih-lx `2 3 5`,
+  strih-pp `1 4 6 7`), `STRIH_CAMERA_DEV1_NET` (issue 1413: how dev1 dials the venue's camboxes for
+  the dantesync fleet's camera rows -- `direct`, a `A.B.C` /24 prefix (strih-pp `10.76.9`, through
+  companion-pp), or `none` exactly when `STRIH_CAMERAS` is `none`). **Run-time facts stay derived on
+  the box** — PL1 watts, the CPU plan, the NIC interface name.
 - **The file is PARSED, never sourced.** Only `KEY=value` / `#` / blank lines; the value is literal
   text and may not carry a shell metacharacter, quote or glob. Unknown / missing / duplicate keys
   refuse. A `TODO_OWNER` value refuses and EVERY such fact is named (the template `strih-pp.env`

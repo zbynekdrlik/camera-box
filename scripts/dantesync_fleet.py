@@ -6,7 +6,8 @@ Three jobs, all PURE (no network):
 1. The fleet list for python consumers. Python cannot source the bash lib, so this reads the SAME
    `DANTESYNC_FLEET` table (the env var when set, exactly like the bash `${DANTESYNC_FLEET:-...}`
    default, else the default block parsed out of the lib), walks the SAME camera_resolve arms in
-   scripts/camera-set.sh (cam1, cam2, ... to the first unknown name) and resolves `obs:<name>`
+   scripts/camera-set.sh (cam1, cam2, ... to the first unknown name), keeps each camera a venue's
+   strih fact file lists (issue 1413: STRIH_CAMERAS + STRIH_CAMERA_DEV1_NET) and resolves `obs:<name>`
    addresses through scripts/obs_fleet_table.py. `rows()` prints byte-identical lines to the bash
    `dantesync_fleet_rows` (pinned by tests/python/test_dantesync_fleet_1372.py).
 
@@ -83,16 +84,63 @@ def _bash_default(var: str, path: Path) -> str:
     return m.group(1)
 
 
+_LETTERS = "abcdefghijklmnopqrstuvwxyz"
+_DIGITS = "0123456789"
+_VENUE_NAME = re.compile(f"[{_LETTERS}][{_LETTERS}{_DIGITS}]*")
+_NET_PREFIX = re.compile(f"[{_DIGITS}]+\\.[{_DIGITS}]+\\.[{_DIGITS}]+")
+
+
+def _strih_boxes_dir() -> Path:
+    return Path(os.environ.get("DANTESYNC_FLEET_STRIH_BOXES_DIR") or STRIH_BOXES_DIR)
+
+
+def venue_cameras() -> list:
+    """(file, venue, dev1-net, [camera numbers]) per strih fact file that lists cameras (the bash
+    _dantesync_fleet_venue_cameras), in byte order of the file names."""
+    out = []
+    for f in sorted(_strih_boxes_dir().glob("*.env")):
+        facts = _fact_file(f)
+        cams = facts.get("STRIH_CAMERAS", "")
+        if cams in ("", "none"):
+            continue
+        out.append((f.name, facts.get("STRIH_VENUE", ""), facts.get("STRIH_CAMERA_DEV1_NET", ""), cams.split()))
+    return out
+
+
 def camera_rows() -> list:
-    """One row per camera camera_resolve knows, walked cam1, cam2, ... to the first unknown name."""
+    """One row per camera a venue lists, walked cam1, cam2, ... to the first unknown camera_resolve
+    name (the bash _dantesync_fleet_camera_rows): a home-venue camera is `video` / `always` at its
+    camera_resolve address, another venue's is `video-<venue>` / `reach` at its dev1 address. A camera
+    listed twice, a bad venue name or a bad dev1 network raises RuntimeError."""
     arms = dict(re.findall(r"^\s*(cam[0-9]+)\)\s*CAMERA_IP=([0-9.]+);", CAMERA_SET_SH.read_text(),
                            re.MULTILINE))
+    home = _bash_default("DANTESYNC_FLEET_HOME_VENUE", FLEET_SH)
+    venues = venue_cameras()
     rows = []
     for n in range(1, CAMERA_MAX + 1):
         ip = arms.get(f"cam{n}")
         if ip is None:
             break
-        rows.append(f"cam{n}|{ip}|linux|video|always|root|")
+        hits = [v for v in venues if str(n) in v[3]]
+        if len(hits) > 1:
+            raise RuntimeError(f"dantesync_fleet: cam{n} is listed by two venue fact files "
+                               f"({hits[0][0]} and {hits[1][0]})")
+        if not hits:
+            continue
+        name, venue, net, _ = hits[0]
+        if not _VENUE_NAME.fullmatch(venue):
+            raise RuntimeError(f"dantesync_fleet: {name} lists cam{n} but its STRIH_VENUE {venue!r} is not a venue name")
+        if net == "direct":
+            addr = ip
+        elif _NET_PREFIX.fullmatch(net):
+            addr = f"{net}.{ip.rsplit('.', 1)[1]}"
+        else:
+            raise RuntimeError(f"dantesync_fleet: {name} lists cam{n} but its STRIH_CAMERA_DEV1_NET {net!r} "
+                               "is neither direct nor an A.B.C prefix")
+        if venue == home:
+            rows.append(f"cam{n}|{addr}|linux|video|always|root|")
+        else:
+            rows.append(f"cam{n}|{addr}|linux|video-{venue}|reach|root|")
     return rows
 
 
@@ -142,7 +190,7 @@ def venue_gm_host(venue: str) -> str:
     """The PTP grandmaster of VENUE: STRIH_DANTE_GM of the ONE strih fact file with
     STRIH_VENUE=<venue> + STRIH_DANTESYNC_ROLE=server (the bash dantesync_fleet_venue_gm_host).
     None, two, or one without STRIH_DANTE_GM raises ValueError naming the venue."""
-    boxes = Path(os.environ.get("DANTESYNC_FLEET_STRIH_BOXES_DIR") or STRIH_BOXES_DIR)
+    boxes = _strih_boxes_dir()
     found = []
     for f in sorted(boxes.glob("*.env")):
         facts = _fact_file(f)

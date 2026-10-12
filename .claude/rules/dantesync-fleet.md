@@ -26,9 +26,28 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
 
 ## The list
 
-- **Cameras:** the camera_resolve walk (cam1, cam2, … to the first unknown name — the ndi-discovery
-  walk; never a literal range). ALL known cameras, not `CAMERA_ACTIVE_SET`: a camera retired from
-  measurement still runs dantesync.
+- **Cameras (issue 1413: per VENUE):** the camera_resolve walk (cam1, cam2, … to the first unknown
+  name; never a literal range), keeping each camera a strih fact file (`scripts/strih-boxes/*.env`,
+  PARSED) lists in its `STRIH_CAMERAS`. Not `CAMERA_ACTIVE_SET`: a camera retired from measurement
+  still runs dantesync.
+  - A camera of the HOME venue (`DANTESYNC_FLEET_HOME_VENUE`, `snv`; strih-lx.env `2 3 5`) is
+    `camN|<camera_resolve ip>|linux|video|always|root|`, the clock watchdog's CAM arm
+    (`dantesync_fleet_camera_names` = the `always` camera rows only).
+  - A camera of another venue (Poprad, strih-pp.env `1 4 6 7`) is
+    `camN|<dev1 address>|linux|video-pp|reach|root|`: locked to the PP grandmaster, skipped while
+    ssh :22 does not answer, and watched through the REACH arm (never twice).
+  - The address comes from the venue's `STRIH_CAMERA_DEV1_NET` fact: `direct` = camera_resolve's
+    address; `A.B.C` = that /24 + the camera's camera_resolve last octet (PP: `10.76.9`, cam7 =
+    10.76.9.67 through companion-pp); `none` on a box that lists no camera (stream-pp).
+  - A camera listed by two venue files, a bad venue name or a bad dev1 network prints no row for that
+    camera and fails loudly (bash rc 1, python RuntimeError). A camera no venue lists is in no row.
+  - **The glob must survive a caller's `set -f`:** the version gate builds its `--fleet` specs under
+    noglob, and the first cut of issue 1413 silently dropped every camera from the gated set. Both
+    fact-file readers run `local -; set +f` (bash restores the caller's option on return), pinned by
+    `test_the_camera_rows_survive_a_callers_noglob`.
+  - Moving a camera between venues is one edit in each of the two fact files (plus camera-set.sh's
+    `CAMERA_ACTIVE_SET` default when the home venue changes; `harness_camera_set.rs` pins it equal to
+    strih-lx.env's `STRIH_CAMERAS`).
 - **The table `DANTESYNC_FLEET`** (env-overridable): `name|addr|os|role|homegate|user|credvar`.
   - `addr`: a literal, `obs:<name>` (resolved through `obs_fleet_host` — a `retired` obs-fleet box
     drops out, so imag returns with its obs-fleet flip), or `local` (dev1).
@@ -74,8 +93,9 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
   - **Watchdog tests must empty `DANTE_CLOCK_REACH_NODES`** (or pin `OBS_FLEET_HOME`) when they pin
     the roster: on dev1 the PP link is up, so a reach probe is live I/O there and absent on CI (the
     live-rig gotcha, `ci-testing-gotchas.md`). Run the PP tests in `unshare -n` too.
-  - **Not in the list yet:** the PP camboxes (no PP address yet, owner 11.10.2026) and companion-pp
-    (dantesync 1.8.10, client 10.77.8.2 in the recon; not part of this decision).
+  - **The PP camboxes are in the list since issue 1413** (owner 12.10.2026: "chcem aby si sa staral
+    ... aj o dantesync upgrady v pp sieti"), as `reach` camera rows (above). **Not in the list yet:**
+    companion-pp (dantesync 1.8.10, client 10.77.8.2 in the recon; not part of this decision).
 - **lv1 (10.77.7.100) is deliberately absent** (owner ROZHODNUTÉ 25.9.2026: an operational PC, on the
   network temporarily).
 - **The audio grandmaster** is `DANTESYNC_AUDIO_GM_HOST` (default 10.77.7.104 since the leader moved
@@ -138,7 +158,7 @@ pre-1.9.0 node).
 
 `pytest tests/python/test_dantesync_fleet_1372.py tests/python/test_dantesync_fleet_consumers_1372.py
 tests/python/test_dantesync_clock_fleet_1372.py tests/python/test_clock_discipline_1372.py
-tests/python/test_dantesync_fleet_pp_1412.py` (live-captured configs under
+tests/python/test_dantesync_fleet_pp_1412.py tests/python/test_dantesync_fleet_pp_cams_1413.py` (live-captured configs under
 `tests/python/fixtures/dantesync_config_1372/`; PATH `sshpass`/`dantesync` stubs record which password
 each target was dialled with). A worktree worker drives bash through pytest subprocesses (the
 isolation guard refuses a bare `bash -c`).

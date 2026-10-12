@@ -91,7 +91,10 @@ esac
 # (issue 1372: dantesync_fleet_camera_names, the camera_resolve walk -- never a literal range) --
 # NOT CAMERA_ACTIVE_SET, which can exclude a camera retired from measurement that is still powered
 # and still running dantesync (so it can silently lose the clock too). Each name resolves to its IP
-# via camera-set.sh's camera_resolve (single source of truth, no second IP literal).
+# via camera-set.sh's camera_resolve (single source of truth, no second IP literal). issue 1413: only
+# the HOME venue's cameras (the strih-lx.env STRIH_CAMERAS list, `always` rows); a camera that moved to
+# Poprad is a `reach` row of the fleet and is watched once, through DANTE_CLOCK_REACH_NODES below, at
+# its dev1-reachable PP address against the PP grandmaster.
 DANTE_CLOCK_CAM_NODES="${DANTE_CLOCK_CAM_NODES-$(dantesync_fleet_camera_names)}"
 # The OBS-box dantesync nodes (space-separated NAMES); IPs + the resolume home-gate come from
 # obs-fleet.sh. imag(-nb) IS a dantesync node; resolume is the traveling CG box.

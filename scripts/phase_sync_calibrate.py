@@ -250,7 +250,7 @@ def compute_phase_sync_offsets(measured: dict, gate_bin: "str | None" = None) ->
 
 def active_ndi_sources() -> set:
     """#893 -- the 'NDI camN' strih source names for every camera currently in
-    CAMERA_ACTIVE_SET (env var, default "cam1 cam2 cam3 cam4 cam5 cam6 cam7" -- issue 1198
+    CAMERA_ACTIVE_SET (env var, default "cam2 cam3 cam5" -- issue 1413 (2026-10-12): the SNV rig shrank to cam2/cam3/cam5, cam1/cam4/cam6/cam7 moved to Poprad; the history before it: issue 1198
     (2026-08-27): cam1 + cam2 RESTORED, both healthy on a live journal check, owner refused the
     physical card swap; issue 1216 (2026-08-28): cam5/cam6/cam7 also restored, bigger splitter
     fitted; issue 1217 (same day): cam5 OUT again -- a DEAD_PORT leg on the new splitter (flat
@@ -269,7 +269,7 @@ def active_ndi_sources() -> set:
     retired camera could otherwise corrupt the whole formula's notion of "slowest", and
     --apply could write a pin to a camera that isn't even installed.
     """
-    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5 cam6 cam7")
+    raw = os.environ.get("CAMERA_ACTIVE_SET", "cam2 cam3 cam5")
     return {f"NDI {tok.strip()}" for tok in raw.replace(",", " ").split() if tok.strip()}
 
 

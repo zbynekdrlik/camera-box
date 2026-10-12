@@ -38,7 +38,7 @@ strih_box_fact_keys() {
     STRIH_NDI_RUNTIME_PEER STRIH_COMPANION_HOST STRIH_CG_SENDER STRIH_CAMERAS \
     STRIH_HDMI_OUTPUT_BACKEND \
     STRIH_ROLE STRIH_DANTE_GM STRIH_PROGRAM_AUDIO_SAMPLER \
-    STRIH_PROGRAM_SENDER STRIH_VENUE
+    STRIH_PROGRAM_SENDER STRIH_VENUE STRIH_CAMERA_DEV1_NET
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -219,6 +219,18 @@ strih_box_validate() {
   elif [ "$(tr ' ' '\n' <<<"${f[STRIH_CAMERAS]}" | sort -u | wc -l)" -ne "$(wc -w <<<"${f[STRIH_CAMERAS]}")" ]; then
     echo "strih-box ${name}: STRIH_CAMERAS '${f[STRIH_CAMERAS]}' lists a camera twice" >&2; bad=1
   fi
+  # issue 1413: how dev1 dials this venue's camboxes (the dantesync fleet's camera rows,
+  # scripts/lib/dantesync-fleet.sh): `direct` = camera_resolve's own address (dev1 sits on that LAN),
+  # `A.B.C` = the /24 dev1 reaches the venue's camera LAN through (the camera keeps camera_resolve's
+  # last octet), `none` = the box lists no camera. The octets are spelled out (a bracket RANGE follows
+  # the locale in bash, ci-testing-gotchas.md).
+  case "${f[STRIH_CAMERAS]}:${f[STRIH_CAMERA_DEV1_NET]}" in
+    none:none) ;;
+    none:* | *:none) echo "strih-box ${name}: STRIH_CAMERA_DEV1_NET '${f[STRIH_CAMERA_DEV1_NET]}' must be none exactly when STRIH_CAMERAS is none" >&2; bad=1 ;;
+    *:direct) ;;
+    *) _strih_box_ipv4 "${f[STRIH_CAMERA_DEV1_NET]}.0" && [[ "${f[STRIH_CAMERA_DEV1_NET]}" =~ ^[0123456789]+\.[0123456789]+\.[0123456789]+$ ]] \
+      || { echo "strih-box ${name}: STRIH_CAMERA_DEV1_NET '${f[STRIH_CAMERA_DEV1_NET]}' must be direct, none or the dev1-side /24 prefix A.B.C" >&2; bad=1; } ;;
+  esac
   [ "$bad" = 0 ]
 }
 
