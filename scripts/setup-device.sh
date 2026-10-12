@@ -121,6 +121,10 @@ fail() {
 . "$HERE/lib/grub-fast-boot.sh"  # grub_fast_boot_apply (#1394) -- the ONE declaration of the no-menu,
                                  # no-countdown GRUB settings STEP 10 applies; shared with
                                  # create-usb-linux.sh / build-image.sh and verify-device.sh (aq)
+# shellcheck source=scripts/lib/rig-timezone.sh
+. "$HERE/lib/rig-timezone.sh"  # rig_timezone_apply / rig_timezone_zoneinfo (issue 1415) -- the ONE rig
+                               # time zone STEP 1 writes; shared with create-usb-linux.sh, the OBS-box
+                               # baseline and verify-device.sh (as)
 
 # shellcheck source=scripts/dantesync-version-gate.sh
 . "$HERE/dantesync-version-gate.sh"  # DANTESYNC_VERSION_PIN (#1066, source-safe: its source-guard
@@ -618,6 +622,17 @@ echo "$DEVICE_NAME" > /etc/hostname
 hostnamectl set-hostname "$DEVICE_NAME"
 sed -i "s/127.0.1.1.*/127.0.1.1\t$DEVICE_NAME/" /etc/hosts
 echo "  Hostname set to: $DEVICE_NAME"
+# issue 1415: the rig time zone (Europe/Bratislava) -- the /etc/localtime symlink + /etc/timezone written
+# directly by the shared lib. Never timedatectl: on a read-only-root appliance systemd-timedated keeps its
+# own mount namespace, set-timezone fails "Read-only file system" even inside this rw window, and its
+# read-back then reports a zone /etc/localtime does not have (live 12.10.2026). verify-device.sh (as)
+# grades the link.
+if [ ! -f "$(rig_timezone_zoneinfo)" ]; then
+    echo "  $(rig_timezone_zoneinfo) missing -- installing tzdata"
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tzdata
+fi
+rig_timezone_apply || fail "issue 1415: could not set the rig time zone ${RIG_TIMEZONE} (/etc/localtime) -- see the line above"
 
 # =============================================================================
 # STEP 2: Configure static IP

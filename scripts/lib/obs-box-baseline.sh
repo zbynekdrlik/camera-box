@@ -26,6 +26,7 @@
 # The items, in the order both callers run them (imag's step numbers in brackets):
 #   obs_box_apt_lock_timeout [preamble, before any apt-get: the dpkg lock wait]
 #   obs_box_apt_update [every list refresh on both paths: the package-lists lock wait]
+#   obs_box_timezone [1, issue 1415: the rig time zone; in the kiosk half]
 #   obs_box_network_tuning [2]   obs_box_max_performance [4]   obs_box_never_sleep [5]
 #   obs_box_boot_safety_net [6]  obs_box_lowlatency_kernel [7] obs_box_cpu_affinity [8]
 #   obs_box_rtprio_off [8, after the affinity: removes a retired render-tick rtprio grant]

@@ -5,6 +5,8 @@ paths:
   - "scripts/verify-device.sh"
   - "scripts/build-image.sh"
   - "scripts/lib/grub-fast-boot.sh"
+  - "scripts/lib/rig-timezone.sh"
+  - "tests/python/test_rig_timezone_1415.py"
   - "scripts/lib/ro-root.sh"
   - "scripts/lib/cambox-ro-units.sh"
   - "scripts/cambox-ro-units-apply.sh"
@@ -163,8 +165,29 @@ block. A new check inserted anywhere between `(ao)` and `(q)` therefore breaks t
 is undefined in their harness, and a `warn` trips the assertion. Insert a new check earlier (the
 issue-1242 `(ap)` sits right after `(ae)`), and grep `tests/python` for `find("\n# (` slices before
 picking the spot. `(aq)` (#1394, GRUB fast boot) now sits after `(am)`, before `(ao)`. `(ar)` (#1394,
-the read-only-root unit set) sits after `(ak)`, before `(al)`; the next free letter is `(as)`. Also
-keep a new check out of `(aq)..(ao)`: `tests/python/test_grub_fast_boot_1394.py` executes that slice.
+the read-only-root unit set) sits after `(ak)`, before `(al)`. Also keep a new check out of
+`(aq)..(ao)`: `tests/python/test_grub_fast_boot_1394.py` executes that slice, and out of `(ar)..(al)`:
+`tests/python/test_cambox_ro_units_1394.py` executes that one. `(as)` (issue 1415, the rig time zone)
+therefore sits after `(ak)`, BEFORE `(ar)`; the next free letter is `(at)`.
+
+## Every cambox flow sets the rig time zone through ONE lib, never timedatectl (issue 1415)
+
+`scripts/lib/rig-timezone.sh` declares `RIG_TIMEZONE` (Europe/Bratislava). setup-device.sh STEP 1
+(inside the rw window `ensure_root_writable` opens before it; tzdata installed when the zoneinfo file
+is missing) and create-usb-linux.sh (tzdata in the chroot install, then `rig_timezone_apply
+"$MOUNT_ROOT"` host-side right after the chroot run) write the `/etc/localtime` symlink +
+`/etc/timezone`. verify-device `(as)` reads `readlink /etc/localtime` over ssh and FAILs any other zone.
+Never `timedatectl set-timezone` on a cambox: systemd-timedated keeps its own mount namespace from a
+read-only boot, so it fails with "Read-only file system" even inside a correct rw window, and
+`timedatectl show -p Timezone` then reports the new zone while the link still points at UTC (live
+12.10.2026). The OBS boxes get the same lib through the baseline item `obs_box_timezone`
+(`.claude/rules/obs-box-baseline.md`). build-image.sh (the ro-root+overlay image) does not set it: a
+box built from it is provisioned by setup-device.sh, whose STEP 1 does.
+- There is no in-place apply tool for a live cambox: every live cambox was put on the zone by hand on
+  12.10.2026 (supervisor, inside a verified rw window), and every future one gets it from setup-device
+  STEP 1. A live box `(as)` FAILs: write the link inside a window closed with `ro_window_close_cmds`
+  (`.claude/rules/ro-window.md`) or re-run setup-device.sh. A running process keeps the zone it
+  loaded until it restarts.
 
 ## Two-char check-letter scheme is now at (ac) (#899)
 

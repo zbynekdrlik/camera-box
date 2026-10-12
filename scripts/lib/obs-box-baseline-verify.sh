@@ -13,7 +13,8 @@
 #   obs_box_baseline_verdict        (stdin: the facts)        -> `item|OK|detail` / `item|FAIL|detail`
 #                                                                lines, rc 1 when any item FAILs
 #
-# Items (the obs-box-baseline.sh functions they grade): net (network tuning), perf (governor +
+# Items (the obs-box-baseline.sh functions they grade): timezone (the rig time zone from
+# scripts/lib/rig-timezone.sh, read off the /etc/localtime link, issue 1415), net (network tuning), perf (governor +
 # <BOX>-maxperf persistence), cstate (the PM QoS idle wake-up latency bound: the holder unit + no state
 # deeper than the bound entered over a 1 s sample), nosleep, boot (boot safety net), kernel (preempt=full low-latency),
 # affinity (AFFINITY-ONLY core reservation, no kernel isolcpus/nohz_full), rtprio (no retired
@@ -134,13 +135,14 @@ obs_box_baseline_gather_snippet() {
     printf 'BOX=%q\nU=%q\nUNIT=%q\n' "$box" "$user" "$unit"
     declare -f obs_box_has_discrete_nvidia obs_box_crash_popup_units obs_box_dejitter_user_units \
         obs_box_brightness_helper_text obs_box_backlight_udev_rule obs_box_brightness_keybinds_xml \
-        obs_box_cpu_latency_bound_us
+        obs_box_cpu_latency_bound_us rig_timezone_read
     cat <<'GATHER_EOF'
 set +e
 HOMEDIR="$(getent passwd "$U" 2>/dev/null | cut -d: -f6)"; [ -n "$HOMEDIR" ] || HOMEDIR="/home/$U"
 fexists() { if [ -e "$1" ]; then echo 1; else echo 0; fi; }
 first() { head -n1 2>/dev/null | tr -d '\r'; }
 pkg() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null; }
+echo "timezone=$(rig_timezone_read | first)"
 echo "sysctl_conf=$(fexists /etc/sysctl.d/99-network-performance.conf)"
 echo "rmem_max=$(sysctl -n net.core.rmem_max 2>/dev/null | first)"
 echo "nic_hook=$(if [ -x /etc/networkd-dispatcher/routable.d/optimize-nic ]; then echo 1; else echo 0; fi)"
@@ -290,12 +292,17 @@ obs_box_baseline_verdict() {
     }
     _obs_box_f() { _obs_box_fact "$1" "$facts"; }
     if [ "$(_obs_box_f gather_done)" != 1 ]; then
-        for v in net perf cstate nosleep boot kernel affinity rtprio gpu dejitter crash kiosk websocket brightness autostart power touchpad; do
+        for v in timezone net perf cstate nosleep boot kernel affinity rtprio gpu dejitter crash kiosk websocket brightness autostart power touchpad; do
             _obs_box_item "$v" 0 "unreadable (the baseline gather did not complete)"
         done
         return 1
     fi
-    local ok
+    local ok tz_verdict
+    # timezone -- issue 1415: the box runs the rig time zone, read off the /etc/localtime link (never
+    # timedatectl, whose read-back lies on a read-only root); graded by the ONE rig-timezone.sh verdict.
+    # Set by setup step 1 (obs_box_timezone).
+    ok=0; tz_verdict="$(rig_timezone_verdict "$(_obs_box_f timezone)")" && ok=1
+    _obs_box_item timezone "$ok" "/etc/localtime -> '$(_obs_box_f timezone)' (rig zone ${RIG_TIMEZONE}): ${tz_verdict} -- setup step 1 sets it (obs_box_timezone)"
     # net -- sysctl drop-in present AND live, EEE/flow-control dispatcher hook installed
     ok=0; [ "$(_obs_box_f sysctl_conf)" = 1 ] && [ "$(_obs_box_f rmem_max)" = 134217728 ] && [ "$(_obs_box_f nic_hook)" = 1 ] && ok=1
     _obs_box_item net "$ok" "sysctl_conf=$(_obs_box_f sysctl_conf) rmem_max=$(_obs_box_f rmem_max) nic_hook=$(_obs_box_f nic_hook)"

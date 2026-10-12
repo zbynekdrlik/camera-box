@@ -980,7 +980,7 @@ while IFS='|' read -r _bl_item _bl_state _bl_detail; do
   if [ "$_bl_state" = OK ]; then
     ok "(baseline:${_bl_item}) ${_bl_detail}"
   else
-    bad "(baseline:${_bl_item}) ${_bl_detail} -- re-run setup-strih.sh step 11 (the shared OBS-box baseline) and reboot"
+    bad "(baseline:${_bl_item}) ${_bl_detail} -- re-run setup-strih.sh step $([ "$_bl_item" = timezone ] && echo 1 || echo 11) (the shared OBS-box baseline) and reboot"
   fi
 done < <(obs_box_baseline_verdict <<<"$BASELINE_FACTS" || true)
 CRASH_DIR_V="${STRIH_CRASH_DIR:-/var/crash}"

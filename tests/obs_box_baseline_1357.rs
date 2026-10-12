@@ -98,7 +98,7 @@ fn the_baseline_libs_are_source_only() {
         "for f in obs_box_network_tuning obs_box_max_performance obs_box_never_sleep \
          obs_box_boot_safety_net obs_box_lowlatency_kernel obs_box_cpu_affinity obs_box_nvidia_prime \
          obs_box_dejitter obs_box_crash_popups_off obs_box_kiosk obs_box_power_envelope obs_box_touchpad \
-         obs_box_maxperf_persistence obs_box_cpu_latency obs_box_cpu_latency_bound_us \
+         obs_box_maxperf_persistence obs_box_cpu_latency obs_box_cpu_latency_bound_us obs_box_timezone \
          obs_box_openbox_menu_xml obs_box_openbox_autostart_preamble \
          obs_box_baseline_gather_snippet obs_box_baseline_verdict \
          obs_box_apt_lock_timeout_conf obs_box_apt_lock_timeout \
@@ -323,6 +323,8 @@ fn the_power_envelope_takes_a_per_box_stepdown() {
 #[test]
 fn setup_imag_runs_every_baseline_item_in_its_original_step() {
     for (step, call) in [
+        // issue 1415: the rig time zone, on the step that owns the box identity
+        (1, "obs_box_timezone"),
         (2, "obs_box_network_tuning \"$NIC\" imag"),
         (4, "obs_box_max_performance \"$NIC\" imag"),
         (5, "obs_box_never_sleep \"$DESKTOP_USER\" imag"),
@@ -697,7 +699,8 @@ fn the_kiosk_package_install_carries_python3_websocket_1361() {
 // the shared grader
 // ------------------------------------------------------------------------------------------------
 
-const GOOD_FACTS: &str = "sysctl_conf=1
+const GOOD_FACTS: &str = "timezone=Europe/Bratislava
+sysctl_conf=1
 rmem_max=134217728
 nic_hook=1
 cpu_perf_unit=enabled
@@ -763,7 +766,8 @@ touchpad=1
 gather_done=1
 ";
 
-const ITEMS: [&str; 17] = [
+const ITEMS: [&str; 18] = [
+    "timezone",
     "net",
     "perf",
     "cstate",
@@ -899,6 +903,9 @@ fn cstate_and_gpu_rows_accept_a_box_without_cpuidle_or_igpu_1412() {
 #[test]
 fn verdict_fails_each_item_on_its_own_broken_fact() {
     for (item, from, to) in [
+        // issue 1415: a box left on the image default, and one whose /etc/localtime is no symlink
+        ("timezone", "timezone=Europe/Bratislava", "timezone=Etc/UTC"),
+        ("timezone", "timezone=Europe/Bratislava", "timezone="),
         ("net", "rmem_max=134217728", "rmem_max=212992"),
         (
             "perf",
@@ -1546,6 +1553,8 @@ fn no_bare_apt_get_update_on_the_obs_box_provisioning_paths() {
         BASELINE,
         KIOSK,
         "scripts/lib/strih-box-facts.sh",
+        // issue 1415: the rig time zone (sourced by the kiosk half)
+        "scripts/lib/rig-timezone.sh",
         "scripts/lib/strih-provision.sh",
         "scripts/lib/strih-drm-output.sh",
         "scripts/lib/genlock-markers.sh",

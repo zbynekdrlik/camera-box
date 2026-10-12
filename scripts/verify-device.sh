@@ -205,6 +205,10 @@
 #        boot after the first takes: only the masked grub-common clears the flag) sets timeout 0 --
 #        graded by grub_fast_boot_cfg_verdict from the ONE lib scripts/lib/grub-fast-boot.sh that
 #        create-usb-linux.sh / setup-device.sh STEP 10 apply. An unreadable or empty grub.cfg FAILs.
+#   (as) the rig time zone (issue 1415) -- HARD FAIL: /etc/localtime is a symlink to the zoneinfo
+#        file of Europe/Bratislava (scripts/lib/rig-timezone.sh, the ONE declaration setup-device.sh
+#        STEP 1 + create-usb-linux.sh write). Read with readlink, never timedatectl (its read-back
+#        lies on the read-only root). Etc/UTC, a copied file or an unreadable link FAILs.
 #
 # Exit: 0 iff every check passes. Non-zero if ANY check FAILs or is UNREADABLE (test-strictness --
 # an unreachable/unreadable check is a FAIL, never a silent pass).
@@ -286,6 +290,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/grub-fast-boot.sh
 . "$HERE/lib/grub-fast-boot.sh"  # grub_fast_boot_cfg_verdict -- the (aq) no-menu, no-countdown GRUB check
                                  # (#1394; SAME lib create-usb-linux.sh / setup-device.sh STEP 10 apply)
+# shellcheck source=scripts/lib/rig-timezone.sh
+. "$HERE/lib/rig-timezone.sh"  # rig_timezone_gather_cmd / rig_timezone_verdict -- the (as) rig time-zone
+                               # check (issue 1415; SAME lib setup-device.sh STEP 1 writes the zone with)
 
 SSH_USER="${SSH_USER:-root}"
 CAM_PW="${CAM_PW:-newlevel}"
@@ -918,6 +925,8 @@ Checks:
   (aq) no GRUB menu and no countdown (#1394): the generated /boot/grub/grub.cfg hides the menu with
       timeout 0 AND its recordfail branch (every boot after the first) sets timeout 0 -- an unreadable
       or empty grub.cfg FAILs
+  (as) the rig time zone (issue 1415): /etc/localtime links to the Europe/Bratislava zoneinfo file,
+      read with readlink (never timedatectl) -- Etc/UTC, a copied file or an unreadable link FAILs
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      CAMERA_BOX_RIG_MODE (test|event for the (ao) relay enable-state; unset = read cam2's painter state),
@@ -1794,6 +1803,27 @@ elif [ "$REMOTELOG_VERDICT" != "ok" ]; then
   fail "off-box remote logging not provisioned: $(printf '%s' "$REMOTELOG_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')"
 else
   ok "off-box remote logging live: netconsole armed -> dev1:${REMOTE_LOG_NETCONSOLE_PORT} + systemd-journal-upload -> ${REMOTE_LOG_JOURNAL_URL} (the next #1309 stick death ships its kernel+journal off-box, #1311)"
+fi
+
+# (as) the rig time zone (issue 1415) -- HARD FAIL -------------------------------------------------
+# Every freshly provisioned box used to run the image default Etc/UTC. setup-device.sh STEP 1 and
+# create-usb-linux.sh now point /etc/localtime at the rig zone through scripts/lib/rig-timezone.sh;
+# this reads the link back over ssh (rig_timezone_gather_cmd, self-contained, never timedatectl,
+# whose read-back lies on the read-only root) and grades it with the SAME lib's rig_timezone_verdict.
+# Inserted after (ak), before (ar): outside the slices other tests EXECUTE ((ar)..(al), (aq)..(ao),
+# (ao)..(an), (an)..(q)) and before the .bak cruft check, which stays last.
+asrc=0
+TZ_BOX="$(ssh_box "$(rig_timezone_gather_cmd)")" || asrc=$?
+TZ_BOX="${TZ_BOX%%$'\n'*}"
+if [ "$asrc" -ne 0 ]; then
+  fail "could not read /etc/localtime over SSH (rc=$asrc) -- cannot certify the rig time zone ${RIG_TIMEZONE} (issue 1415)"
+else
+  TZ_AS_VERDICT="$(rig_timezone_verdict "$TZ_BOX")" || true
+  if [ "$TZ_AS_VERDICT" = "OK" ]; then
+    ok "time zone ${TZ_BOX}: /etc/localtime links to the rig zone -- local clocks on the box (issue 1415)"
+  else
+    fail "time zone: ${TZ_AS_VERDICT#FAIL: } -- re-run setup-device.sh (STEP 1 writes it)"
+  fi
 fi
 
 # (ar) read-only-root unit set (issue 1394) -- HARD FAIL -------------------------------------------
