@@ -136,9 +136,9 @@ def test_the_zone_override_is_the_one_knob(tmp_path):
 
 
 def test_read_follows_the_link_never_timedatectl(tmp_path):
-    for link, want in ((TARGET, ZONE), ("../usr/share/zoneinfo/Europe/Bratislava", ZONE),
-                       ("/usr/share/zoneinfo/Etc/UTC", "Etc/UTC"), ("/opt/odd", "/opt/odd")):
-        root = _fake_root(tmp_path / want.replace("/", "_"), localtime=link)
+    for i, (link, want) in enumerate(((TARGET, ZONE), ("../usr/share/zoneinfo/Europe/Bratislava", ZONE),
+                                      ("/usr/share/zoneinfo/Etc/UTC", "Etc/UTC"), ("/opt/odd", "/opt/odd"))):
+        root = _fake_root(tmp_path / f"case{i}", localtime=link)
         r = _lib('rig_timezone_read "$1"', str(root))
         assert r.returncode == 0 and r.stdout == want + "\n", (link, r.stdout, r.stderr)
     root = _fake_root(tmp_path / "copied", localtime=None)
@@ -193,8 +193,9 @@ def test_setup_device_sources_the_lib_and_applies_it_in_step1_inside_the_rw_wind
     assert re.search(r"(?m)^rig_timezone_apply \|\| fail ", code), code
     # the root is writable before STEP 1 (an in-place re-run on a read-only appliance)
     flow = _code(text)
-    assert 0 <= flow.find("\nensure_root_writable\n") < flow.find("rig_timezone_apply")
-    assert "timedatectl" not in _code(text)
+    # the call line, not the source line's trailing comment that names the function
+    assert 0 <= flow.find("\nensure_root_writable\n") < flow.find("\nrig_timezone_apply || fail ")
+    assert "set-timezone" not in _code(text)
 
 
 def test_setup_device_step1_installs_tzdata_when_the_zoneinfo_file_is_missing():
@@ -213,7 +214,7 @@ def test_create_usb_installs_tzdata_in_the_chroot_and_writes_the_zone_into_the_i
     assert re.search(r"(?m)^\s+tzdata\b", first_install), first_install
     code = _code(text)
     run = code.find('chroot "$MOUNT_ROOT" /tmp/setup.sh')
-    apply_line = [ln for ln in code.splitlines() if "rig_timezone_apply" in ln]
+    apply_line = [ln for ln in code.splitlines() if ln.strip().startswith("rig_timezone_apply")]
     assert len(apply_line) == 1 and '"$MOUNT_ROOT"' in apply_line[0] and "|| error" in apply_line[0]
     assert 0 <= run < code.find(apply_line[0])
     # run the line itself against a fake image root
@@ -281,7 +282,9 @@ def test_both_obs_box_setup_scripts_set_the_zone_in_step1():
     for path, nxt in ((SETUP_STRIH, '"1b"'), (SETUP_IMAG, '2 "')):
         code = _code(_step(_read(path), 1, nxt))
         assert re.search(r"(?m)^obs_box_timezone\s*$", code), (path, code)
-        assert "timedatectl" not in _code(_read(path)), path
+        # setup-imag keeps its legit `timedatectl set-ntp false` (dantesync owns the clock); only a
+        # zone write through timedatectl is banned
+        assert "set-timezone" not in _code(_read(path)), path
 
 
 def test_the_kiosk_half_sources_the_lib_and_never_uses_timedatectl():
