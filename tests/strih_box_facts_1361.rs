@@ -189,7 +189,8 @@ fn accessors_lazily_load_the_default_box_strih_lx() {
 }
 
 /// issue 1412: strih-pp carries every fact; the last open one (the NDI runtime peer) is answered
-/// 11.10.2026 with SNV cam5, the fleet runtime source.
+/// 11.10.2026. Since issue 1413 it is cam7 (10.77.9.67), a cambox on the Poprad network: SNV cam5
+/// is not reachable from the PP LAN.
 #[test]
 fn strih_pp_loads_with_every_fact_answered() {
     let (c, out, err) = with_loader(
@@ -198,7 +199,7 @@ fn strih_pp_loads_with_every_fact_answered() {
     );
     assert_eq!(c, 0, "strih-pp must load; stderr={err}");
     assert!(!err.contains("TODO_OWNER"), "{err}");
-    assert_eq!(out.trim(), "10.77.9.65");
+    assert_eq!(out.trim(), "10.77.9.67");
 }
 
 /// issue 1412: with strih-pp decided, the "name EVERY open fact" contract keeps a fixture of its own.
