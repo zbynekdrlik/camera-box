@@ -235,33 +235,37 @@ def _obs_box_timezone(root, apt_installs_zone=False):
     """Run the real obs_box_timezone ROOT with apt stubbed (a function outranks the binary)."""
     plant = ('mkdir -p "$ROOT_UNDER_TEST/usr/share/zoneinfo/Europe"; '
              ': > "$ROOT_UNDER_TEST/usr/share/zoneinfo/Europe/Bratislava"; ') if apt_installs_zone else ""
+    # The apt calls are logged to a FILE: the installer sends apt's own stdout to /dev/null.
     stub = ('fail() { echo "FAIL: $1" >&2; exit 1; }\nYELLOW=""; NC=""\n'
-            'obs_box_apt_update() { echo "APT-UPDATE"; }\n'
-            'apt-get() { echo "APT-GET $*"; ' + plant + '}\n')
-    return _bash(f'set -euo pipefail\n. "{VERIFY_LIB}"\n{stub}ROOT_UNDER_TEST="$1"\n'
-                 'obs_box_timezone "$1"\necho "rc=$?"', str(root))
+            'obs_box_apt_update() { echo "APT-UPDATE" >> "$APT_LOG"; }\n'
+            'apt-get() { echo "APT-GET $*" >> "$APT_LOG"; ' + plant + '}\n')
+    log = root.parent / "apt.log"
+    log.write_text("")
+    r = _bash(f'set -euo pipefail\n. "{VERIFY_LIB}"\n{stub}ROOT_UNDER_TEST="$1"; APT_LOG="$2"\n'
+              'obs_box_timezone "$1"\necho "rc=$?"', str(root), str(log))
+    return r, log.read_text()
 
 
 def test_obs_box_timezone_writes_the_zone_through_the_lib(tmp_path):
     root = _fake_root(tmp_path)
-    r = _obs_box_timezone(root)
+    r, apt = _obs_box_timezone(root)
     assert r.returncode == 0 and "rc=0" in r.stdout, r.stdout + r.stderr
-    assert "APT-GET" not in r.stdout
+    assert apt == "", apt
     assert os.readlink(root / "etc" / "localtime") == TARGET
 
 
 def test_obs_box_timezone_installs_tzdata_first_when_the_zoneinfo_file_is_missing(tmp_path):
     root = _fake_root(tmp_path, zones=())
-    r = _obs_box_timezone(root, apt_installs_zone=True)
+    r, apt = _obs_box_timezone(root, apt_installs_zone=True)
     assert r.returncode == 0, r.stdout + r.stderr
-    out = r.stdout
-    assert 0 <= out.find("APT-UPDATE") < out.find("APT-GET install -y tzdata"), out
+    assert 0 <= apt.find("APT-UPDATE") < apt.find("APT-GET install -y tzdata"), apt
+    assert "installing tzdata" in r.stdout
     assert os.readlink(root / "etc" / "localtime") == TARGET
 
 
 def test_obs_box_timezone_fails_loud_when_no_zoneinfo_can_be_installed(tmp_path):
     root = _fake_root(tmp_path, zones=())
-    r = _obs_box_timezone(root, apt_installs_zone=False)
+    r, _apt = _obs_box_timezone(root, apt_installs_zone=False)
     assert r.returncode == 1 and "FAIL: issue 1415" in r.stderr, r.stdout + r.stderr
     assert os.readlink(root / "etc" / "localtime") == "/usr/share/zoneinfo/Etc/UTC"
 
