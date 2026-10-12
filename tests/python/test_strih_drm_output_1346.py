@@ -182,10 +182,13 @@ def test_projector_window_seed_is_removed():
                               "DRM lease, a projector must never target it" % gone
 
 
-def test_setup_strih_preseeds_saveprojectors_before_the_obs_enable():
-    # The operator's LAPTOP projector keeps working and persisting (the design keeps it).
+def test_setup_strih_preseeds_saveprojectors_through_the_operator_lib():
+    # The operator's LAPTOP projector keeps working and persisting (the design keeps it). Issue 1418
+    # moved the [BasicWindow] seed into scripts/lib/strih-operator.sh (setup-strih step 16g), next to
+    # MultiviewMouseSwitch. The lib never writes while OBS runs, and setup-strih never starts OBS
+    # (enable-only), so the old "seeded before the OBS enable" order no longer carries meaning.
     s = (SCRIPTS / "setup-strih.sh").read_text()
-    save = s.find('for kv in ("SaveProjectors=true", "ProjectorAlwaysOnTop=false")')
-    enable = s.find("systemctl --user enable strih-obs.service")
-    assert save != -1 and enable != -1
-    assert save < enable
+    lib = (SCRIPTS / "lib" / "strih-operator.sh").read_text()
+    assert 'strih_operator_install "${OBS_CFG}/user.ini" "$DESKTOP_USER"' in s
+    assert "STRIH_OPERATOR_INI_KEYS=(SaveProjectors=true ProjectorAlwaysOnTop=false " in lib
+    assert "systemctl --user enable strih-obs.service" in s
