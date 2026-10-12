@@ -786,7 +786,7 @@ def test_item_16_fails_a_missing_hub_on_the_strih_role(tmp_path):
     assert out.startswith("FAIL") and "not installed" in out, out
 
 
-def _step13_start(tmp_path, box, active):
+def _step13_start(tmp_path, box, active, loop=False):
     s = SETUP.read_text()
     a = s.index('if WHY="$(obs_box_step_applies 13-hub-live)"')
     block = s[a:s.index("\nfi\n", a) + 4]
@@ -795,8 +795,12 @@ def _step13_start(tmp_path, box, active):
     log = tmp_path / "calls"
     _exec(stub / "systemctl", '#!/bin/bash\necho "systemctl $*" >> "%s"\n'
                               '[ "$1" = is-active ] && exit %d\nexit 0\n' % (log, 0 if active else 3))
-    body = 'fail() { echo "FAIL $*"; exit 1; }\nwarn() { echo "WARN $*"; }\n' + block
+    body = ('fail() { echo "FAIL $*"; exit 1; }\nwarn() { echo "WARN $*"; }\n'
+            'strih_intercom_hub_crash_loop() { %s; }\n' % ("echo auto-restart; return 0" if loop else "return 1")
+            + block)
     r = _bash(body, box=box, env={"PATH": "%s:%s" % (stub, os.environ["PATH"])})
+    if loop:
+        return r
     assert r.returncode == 0, r.stdout + r.stderr
     return log.read_text() if log.exists() else ""
 
@@ -814,6 +818,18 @@ def test_setup_step_13_never_touches_a_running_hub(tmp_path):
 
 def test_setup_step_13_leaves_the_stream_role_hub_alone(tmp_path):
     assert _step13_start(tmp_path, "stream-pp", active=False) == ""
+
+
+def test_setup_fails_a_hub_that_crash_loops_after_the_start(tmp_path):
+    """Type=simple: `systemctl start` returns 0 before an exec-time failure; the loop check catches it."""
+    r = _step13_start(tmp_path, "strih-lx", active=False, loop=True)
+    assert r.returncode == 1 and "FAIL" in r.stdout and "auto-restart" in r.stdout, r.stdout + r.stderr
+
+
+def test_the_hub_starts_only_after_step_14_wrote_its_room_secret():
+    """The unit's LoadCredential needs /etc/intercom-hub/janus-room.secret, which step 14 creates."""
+    s = SETUP.read_text()
+    assert s.index("step 14 ") < s.index("systemctl start intercom-hub") < s.index("step 15 ")
 
 
 def test_setup_step_13_has_no_stale_m4_wording():
