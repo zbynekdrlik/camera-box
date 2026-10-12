@@ -52,7 +52,10 @@ if out="$(camera_source_box 2>/dev/null)"; then printf 'OK\t%s' "$out"; else pri
 }
 
 #[test]
-fn camera_source_box_defaults_to_cam1_now_that_cam1_and_cam2_are_restored_1198() {
+fn camera_source_box_defaults_to_cam3_on_the_shrunk_snv_rig_1413() {
+    // issue 1413 (owner 12.10.2026): cam1/cam4/cam6/cam7 moved to Poprad, the SNV default is
+    // "cam2 cam3 cam5", so the derived source is cam3 (cam2 is the painter, skipped) -- the box
+    // whose bkshading relay carries the test camera's USB. The history below is kept.
     // issue 1198 (2026-08-27, owner ruling): both cam1's #1110 "hardware-defective" diagnosis and
     // cam2's #1170 "camera-under-test retired" diagnosis were built from EPISODES, not a permanent
     // card state -- the owner refused the physical card swap outright and a live journal check
@@ -71,9 +74,9 @@ fn camera_source_box_defaults_to_cam1_now_that_cam1_and_cam2_are_restored_1198()
         "#1134: camera_source_box must resolve a source for the default active set"
     );
     assert_eq!(
-        got, "cam1",
-        "issue 1198: the default source box must be cam1 again (the first strih-routable member \
-         of the current default CAMERA_ACTIVE_SET='cam1 cam2 cam3 cam4 cam5 cam6 cam7', issue 1216)"
+        got, "cam3",
+        "issue 1413: the default source box must be cam3 (the first strih-routable member of the \
+         current default CAMERA_ACTIVE_SET='cam2 cam3 cam5')"
     );
 }
 
@@ -221,17 +224,14 @@ fn recording_e2e_fleet_preflight_labels_the_source_with_camera_name() {
 // ack is REMOVED (owner ruling: both cards are healthy, the swap is off the table) ---------------
 
 #[test]
-fn camera_active_set_default_restores_cam1_and_cam2_1198() {
+fn camera_active_set_default_keeps_cam2_and_moves_cam1_to_poprad_1413() {
+    // issue 1198 restored cam1 + cam2; issue 1413 (12.10.2026) moved cam1 (with cam4/cam6/cam7)
+    // to Poprad, so the SNV default keeps cam2 and drops cam1.
     let s = read("scripts/camera-set.sh");
     assert!(
-        s.contains(
-            "CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}\""
-        ),
-        "issue 1198 (2026-08-27, owner ruling): the camera-set.sh default must include \
-         \"cam1 cam2 cam3\" -- both cards confirmed healthy on a live journal check, owner \
-         refused the physical swap. issue 1216 (2026-08-28): cam6/cam7 are also back in \
-         (cam5 briefly dropped back out the same day, issue 1217, then rejoined with cam4 on \
-         issue 1216's 2026-08-30 completion -- the full seven-camera fleet)."
+        s.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam2 cam3 cam5}\""),
+        "issue 1413: the camera-set.sh default must be the SNV rig's \"cam2 cam3 cam5\" -- \
+         cam1/cam4/cam6/cam7 moved to Poprad on 11.10.2026."
     );
 }
 
@@ -256,12 +256,13 @@ fn restoration_procedure_reverses_the_original_retirement_membership_plus_ack_11
     // AND its rig-fleet.txt ack line is gone, while its facts (case arm) stay fully resolvable.
     let cs = read("scripts/camera-set.sh");
     let rf = read("rig-fleet.txt");
+    // issue 1413: cam1 has since moved to Poprad -- out of the SNV default set, its facts still
+    // resolvable, and (a box outside the active set) no ack line is needed for it.
     assert!(
-        cs.contains(
-            "CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}\""
-        ) && cs.contains("cam1) CAMERA_IP=10.77.9.61"),
-        "issue 1198: cam1 must be back in the default active set AND still fully resolvable \
-         (its case arm intact) — the reversible-retirement doctrine completing its round trip."
+        cs.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam2 cam3 cam5}\"")
+            && cs.contains("cam1) CAMERA_IP=10.77.9.61"),
+        "issue 1413: cam1 must be out of the SNV default active set AND still fully resolvable \
+         (its case arm intact) -- membership-only, never a deleted fact."
     );
     assert!(
         !rf.contains("cam1:grabber-hw-defect-swap-pending-issue-1110"),
@@ -281,16 +282,14 @@ fn every_python_camera_active_set_default_mirror_matches_camera_set_sh_1134() {
     // (2026-08-27): cam1+cam2 restored. issue 1216 (2026-08-28): cam5/cam6/cam7 also restored;
     // issue 1217 (same day): cam5 dropped back out (DEAD_PORT splitter leg). issue 1216
     // completion (2026-08-30, owner directive "kamery od 1-7 bezia"): cam4 (#947) and cam5
-    // (DEAD_PORT) both rejoin -- the shared literal is now the full
-    // "cam1 cam2 cam3 cam4 cam5 cam6 cam7", no camera retired today.
+    // (DEAD_PORT) both rejoin. issue 1413 (2026-10-12): cam1/cam4/cam6/cam7 moved to Poprad --
+    // the shared literal is now the SNV rig's "cam2 cam3 cam5".
     let sh = read("scripts/camera-set.sh");
     assert!(
-        sh.contains(
-            "CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}\""
-        ),
-        "camera-set.sh must default CAMERA_ACTIVE_SET to \"cam1 cam2 cam3 cam4 cam5 cam6 cam7\""
+        sh.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam2 cam3 cam5}\""),
+        "camera-set.sh must default CAMERA_ACTIVE_SET to \"cam2 cam3 cam5\""
     );
-    let fallback = r#"os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5 cam6 cam7")"#;
+    let fallback = r#"os.environ.get("CAMERA_ACTIVE_SET", "cam2 cam3 cam5")"#;
     for py in [
         "scripts/set-ndi-mapping.py",
         "scripts/phase_sync_calibrate.py",
@@ -302,8 +301,8 @@ fn every_python_camera_active_set_default_mirror_matches_camera_set_sh_1134() {
             read(py).contains(fallback),
             "#1134/issue 1198/#1216/#1217: {py} must mirror camera-set.sh's CAMERA_ACTIVE_SET \
              default via the identical env-fallback os.environ.get(\"CAMERA_ACTIVE_SET\", \
-             \"cam1 cam2 cam3 cam4 cam5 cam6 cam7\") -- a diverged fallback silently re-selects a \
-             retired camera in a standalone run"
+             \"cam2 cam3 cam5\") -- a diverged fallback silently re-selects a camera that is not \
+             at the SNV rig in a standalone run"
         );
     }
 }

@@ -107,15 +107,18 @@ fn align_set_is_a_superset_including_cam4_and_cam1_cam2_derive_from_active_1198(
     // derivation to cam1. issue 1216 (2026-08-28) then removed cam2 from the derivation OUTRIGHT
     // (projection probe -- see the block comment below), so the align set is a superset of the
     // ALIGNABLE on-air cameras, deliberately excluding the probe.
+    // issue 1413 (2026-10-12): cam1/cam4/cam6/cam7 moved to Poprad. The align set is cam3 (the
+    // always-on-air base) + every strih-routable ACTIVE camera, so the SNV default is cam3 cam5,
+    // and the old unconditional cam4 is gone (nothing on-air stays outside the measured set).
     let default_align = resolved_align_set(None);
-    assert!(
-        align_has_word(&default_align, "cam3") && align_has_word(&default_align, "cam4"),
-        "#1003: the default align set must include cam3 (source) + cam4 (on-air, #947): got [{default_align}]"
+    assert_eq!(
+        default_align, "cam3 cam5",
+        "issue 1413: the default align set is cam3 + the strih-routable SNV cameras"
     );
-    assert!(
-        align_has_word(&default_align, "cam1"),
-        "issue 1198: cam1 must be IN the default align set (card restored healthy 2026-08-27): \
-         got [{default_align}]"
+    let with_cam1_cam4 = resolved_align_set(Some("cam1 cam2 cam3 cam4"));
+    assert_eq!(
+        with_cam1_cam4, "cam1 cam3 cam4",
+        "issue 1198 / issue 1413: cam1 and cam4 derive into the align set when active, in camera order"
     );
     // issue 1216/1152 rig-model correction (2026-08-28, run 33166543288 [4i/8align] evidence):
     // cam2 is the PROJECTION PROBE -- its grabber captures imag-nb's HDMI OUTPUT, so its view of
@@ -161,12 +164,17 @@ fn align_set_extends_to_cam5_cam6_cam7_when_active_1216_completion() {
     // CAMERA_ALIGN_SET trailing loop, exactly the RE-ENABLE procedure its own retirement comment
     // always promised. cam1/cam5/cam6/cam7 now ALL derive their align membership from
     // CAMERA_ACTIVE_SET -- none is hardcoded true.
+    // issue 1413: cam6/cam7 moved to Poprad -- only cam5 of the three is in the SNV default; the
+    // other two derive in once an override names them (the full-fleet check below).
     let default_align = resolved_align_set(None);
-    for cam in ["cam5", "cam6", "cam7"] {
+    assert!(
+        align_has_word(&default_align, "cam5"),
+        "issue 1216 completion: cam5 must be in the default CAMERA_ALIGN_SET: got [{default_align}]"
+    );
+    for cam in ["cam6", "cam7"] {
         assert!(
-            align_has_word(&default_align, cam),
-            "issue 1216 completion: {cam} must be in the default CAMERA_ALIGN_SET: \
-             got [{default_align}]"
+            !align_has_word(&default_align, cam),
+            "issue 1413: {cam} is in Poprad -- not in the SNV default align set: got [{default_align}]"
         );
     }
     // Shrinking CAMERA_ACTIVE_SET back to a set without them must drop cam5/cam6/cam7 from the
@@ -188,11 +196,15 @@ fn align_set_extends_to_cam5_cam6_cam7_when_active_1216_completion() {
         "issue 1216 completion: re-adding cam5 to CAMERA_ACTIVE_SET must re-align it (the align \
          loop derives cam5's membership again): got [{with_cam5_reactivated}]"
     );
-    // cam4 stays the on-air-but-unmeasured base regardless (issue 1003) -- unaffected by any of
-    // the cam5/cam6/cam7 changes.
+    // issue 1413: cam4 is no longer the unconditional on-air base (it moved to Poprad); it
+    // derives in only while active, like every other strih-routable camera.
     assert!(
-        align_has_word(&default_align, "cam4"),
-        "cam4 must remain in the align set (on-air, #947): got [{default_align}]"
+        !align_has_word(&default_align, "cam4"),
+        "issue 1413: cam4 is in Poprad -- not in the SNV default align set: got [{default_align}]"
+    );
+    assert_eq!(
+        with_cam5_reactivated, "cam1 cam3 cam4 cam5 cam6 cam7",
+        "the full seven-camera override aligns every strih-routable camera except the cam2 probe"
     );
 }
 

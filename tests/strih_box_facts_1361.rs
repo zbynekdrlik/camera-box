@@ -121,6 +121,7 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_PROGRAM_AUDIO_SAMPLER",
     "STRIH_PROGRAM_SENDER",
     "STRIH_VENUE",
+    "STRIH_CAMERA_DEV1_NET",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -159,16 +160,17 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_NIC_MIN_LINK_MBPS=10000",
         "STRIH_OBS_PROFILE=strih-lx",
         "STRIH_OBS_COLLECTION=strih-lx",
-        "STRIH_NDI_RUNTIME_PEER=10.77.9.61",
+        "STRIH_NDI_RUNTIME_PEER=10.77.9.65",
         "STRIH_COMPANION_HOST=10.77.9.205",
         "STRIH_CG_SENDER=RESOLUME-SNV (SP-program)",
-        "STRIH_CAMERAS=1 2 3 4 5 6 7",
+        "STRIH_CAMERAS=2 3 5",
         "STRIH_HDMI_OUTPUT_BACKEND=vk-direct",
         "STRIH_ROLE=strih",
         "STRIH_DANTE_GM=video-clock.lan",
         "STRIH_PROGRAM_AUDIO_SAMPLER=on",
         "STRIH_PROGRAM_SENDER=none",
         "STRIH_VENUE=snv",
+        "STRIH_CAMERA_DEV1_NET=direct",
         "LOADED=strih-lx",
     ] {
         assert!(
@@ -208,7 +210,7 @@ fn several_todo_owner_values_are_each_named() {
         "strih-lx",
         &[
             ("STRIH_NIC_DRIVER=atlantic", "STRIH_NIC_DRIVER=TODO_OWNER"),
-            ("STRIH_CAMERAS=1 2 3 4 5 6 7", "STRIH_CAMERAS=TODO_OWNER"),
+            ("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=TODO_OWNER"),
             ("STRIH_ROLE=strih", "STRIH_ROLE=TODO_OWNER"),
         ],
     );
@@ -338,7 +340,7 @@ fn malformed_fact_files_are_refused() {
         (
             "NDI runtime peer that is a flag, not a host",
             vec![(
-                "STRIH_NDI_RUNTIME_PEER=10.77.9.61",
+                "STRIH_NDI_RUNTIME_PEER=10.77.9.65",
                 "STRIH_NDI_RUNTIME_PEER=--x",
             )],
             "STRIH_NDI_RUNTIME_PEER",
@@ -353,18 +355,39 @@ fn malformed_fact_files_are_refused() {
         ),
         (
             "camera listed twice",
-            vec![("STRIH_CAMERAS=1 2 3 4 5 6 7", "STRIH_CAMERAS=1 2 2")],
+            vec![("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=1 2 2")],
             "STRIH_CAMERAS",
         ),
         (
             "camera number with a leading zero",
-            vec![("STRIH_CAMERAS=1 2 3 4 5 6 7", "STRIH_CAMERAS=01 2")],
+            vec![("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=01 2")],
             "STRIH_CAMERAS",
         ),
         (
             "cameras not numbers",
-            vec![("STRIH_CAMERAS=1 2 3 4 5 6 7", "STRIH_CAMERAS=1 two")],
+            vec![("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=1 two")],
             "STRIH_CAMERAS",
+        ),
+        (
+            "camera network that is neither direct, none nor an A.B.C prefix (issue 1413)",
+            vec![(
+                "STRIH_CAMERA_DEV1_NET=direct",
+                "STRIH_CAMERA_DEV1_NET=10.76",
+            )],
+            "STRIH_CAMERA_DEV1_NET",
+        ),
+        (
+            "camera network none on a box that lists cameras (issue 1413)",
+            vec![("STRIH_CAMERA_DEV1_NET=direct", "STRIH_CAMERA_DEV1_NET=none")],
+            "STRIH_CAMERA_DEV1_NET",
+        ),
+        (
+            "camera network prefix with an octet over 255 (issue 1413)",
+            vec![(
+                "STRIH_CAMERA_DEV1_NET=direct",
+                "STRIH_CAMERA_DEV1_NET=10.300.9",
+            )],
+            "STRIH_CAMERA_DEV1_NET",
         ),
         (
             "empty required fact",
@@ -510,7 +533,7 @@ fn setup_and_verify_refuse_the_todo_owner_box() {
         &d,
         "strih-todo",
         &[(
-            "STRIH_NDI_RUNTIME_PEER=10.77.9.61",
+            "STRIH_NDI_RUNTIME_PEER=10.77.9.65",
             "STRIH_NDI_RUNTIME_PEER=TODO_OWNER",
         )],
     );
@@ -646,7 +669,7 @@ fn seed_manifest_follows_the_camera_and_cg_facts() {
         &d,
         "strih-lx",
         &[
-            ("STRIH_CAMERAS=1 2 3 4 5 6 7", "STRIH_CAMERAS=2 5"),
+            ("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=2 5"),
             (
                 "STRIH_CG_SENDER=RESOLUME-SNV (SP-program)",
                 "STRIH_CG_SENDER=none",
@@ -798,7 +821,7 @@ fn every_fact_dependent_output_follows_a_different_box() {
                 "STRIH_OBS_COLLECTION=zz-collection",
             ),
             (
-                "STRIH_NDI_RUNTIME_PEER=10.77.9.61",
+                "STRIH_NDI_RUNTIME_PEER=10.77.9.65",
                 "STRIH_NDI_RUNTIME_PEER=10.0.0.61",
             ),
             (
@@ -809,7 +832,7 @@ fn every_fact_dependent_output_follows_a_different_box() {
                 "STRIH_CG_SENDER=RESOLUME-SNV (SP-program)",
                 "STRIH_CG_SENDER=none",
             ),
-            ("STRIH_CAMERAS=1 2 3 4 5 6 7", "STRIH_CAMERAS=1 3"),
+            ("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=1 3"),
         ],
     );
     let dir = d.path().to_string_lossy().into_owned();
@@ -825,7 +848,7 @@ fn every_fact_dependent_output_follows_a_different_box() {
     assert_eq!(c, 0, "render failed: {err}");
     for gone in [
         "10.77.9.202",
-        "10.77.9.61",
+        "10.77.9.65",
         "10.77.9.205",
         "atlantic",
         "STRIH-LX",

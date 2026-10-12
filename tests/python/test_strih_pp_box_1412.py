@@ -101,6 +101,8 @@ EXPECTED_PP = {
     "STRIH_CAMERAS": "1 4 6 7", "STRIH_HDMI_OUTPUT_BACKEND": "vk-direct", "STRIH_ROLE": "strih",
     "STRIH_DANTE_GM": "10.77.8.110", "STRIH_PROGRAM_AUDIO_SAMPLER": "off",
     "STRIH_PROGRAM_SENDER": "none", "STRIH_VENUE": "pp",
+    # issue 1413: dev1 dials the PP camboxes as 10.76.9.<octet> through companion-pp.
+    "STRIH_CAMERA_DEV1_NET": "10.76.9",
 }
 
 

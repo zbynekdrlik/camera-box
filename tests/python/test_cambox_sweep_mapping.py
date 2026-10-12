@@ -149,16 +149,9 @@ def test_default_active_set_is_exactly_the_full_seven_camera_fleet_1216():
     and cam5's clears the ~7 healthy-baseline bar (rough=7.8, vs the DEAD_PORT rough=0.1 that
     retired it) -- BOTH rejoin CAMERA_ACTIVE_SET, so today's declared active (measured) fleet is
     the FULL seven cameras, for the first time simultaneously."""
+    # issue 1413 (2026-10-12): cam1/cam4/cam6/cam7 moved to Poprad, the SNV default is cam2 cam3 cam5.
     canonical = _scene_to_camera_from_active_map()
-    assert set(canonical.values()) == {
-        "CAM1",
-        "CAM2",
-        "CAM3",
-        "CAM4",
-        "CAM5",
-        "CAM6",
-        "CAM7",
-    }, canonical
+    assert set(canonical.values()) == {"CAM2", "CAM3", "CAM5"}, canonical
 
 
 def test_reactivating_a_retired_camera_flows_through_both_sources_of_truth():

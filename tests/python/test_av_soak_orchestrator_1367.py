@@ -405,6 +405,9 @@ def test_the_default_slot_leaves_the_measured_strih_lx_decode_time(tmp_path):
     # defaults are a 20 min slot and 20 s camera segments, and the decode budget must cover a
     # 7-camera window at that speed (with margin), not the 210 s the first design assumed.
     env = {k: v for k, v in os.environ.items() if not k.startswith("AV_SOAK_")}
+    # issue 1413: the SNV default is three cameras now; the budget is still proven for a full
+    # seven-camera rig (the worst case the slot was sized for).
+    env["AV_SOAK_CAMS"] = "cam1 cam2 cam3 cam4 cam5 cam6 cam7"
     r = subprocess.run(["bash", SOAK, "--plan", "--hours", "1"], env=env,
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stdout + r.stderr

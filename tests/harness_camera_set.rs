@@ -220,14 +220,51 @@ fn camera_active_set_default_is_exactly_all_seven_cameras_1216() {
     // BOTH rejoin CAMERA_ACTIVE_SET. This is the FULL seven-camera fleet, for the first time
     // simultaneously. Membership-retired doctrine intact: every cam's facts stay resolvable below
     // regardless of membership. RE-RETIRE either again ONLY if a fresh episode reproduces.
+    // issue 1413 (owner 12.10.2026): cam1/cam4/cam6/cam7 moved to Poprad, so the SNV default is
+    // the three cameras still at SNV. The venue pin is camera_active_set_default_is_the_snv_venue_cameras_1413.
     let s = read("scripts/camera-set.sh");
     assert!(
-        s.contains(
-            "CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}\""
-        ),
-        "issue 1216 completion: CAMERA_ACTIVE_SET default must be exactly \
-         \"cam1 cam2 cam3 cam4 cam5 cam6 cam7\" -- the full seven-camera fleet is active again."
+        s.contains("CAMERA_ACTIVE_SET=\"${CAMERA_ACTIVE_SET:-cam2 cam3 cam5}\""),
+        "issue 1413: CAMERA_ACTIVE_SET default must be exactly \"cam2 cam3 cam5\" -- the SNV rig's \
+         cameras since cam1/cam4/cam6/cam7 moved to Poprad."
     );
+}
+
+/// issue 1413: the SNV measurement set and the SNV venue's camera list are ONE fact in two
+/// places -- camera-set.sh's CAMERA_ACTIVE_SET default and scripts/strih-boxes/strih-lx.env's
+/// STRIH_CAMERAS (which strih-lx's NDI inputs and the dantesync fleet's home camera rows read).
+/// They must never drift apart: a camera moved between venues is an edit of BOTH, in one change.
+#[test]
+fn camera_active_set_default_is_the_snv_venue_cameras_1413() {
+    let env = read("scripts/strih-boxes/strih-lx.env");
+    let cams: Vec<String> = env
+        .lines()
+        .find_map(|l| l.strip_prefix("STRIH_CAMERAS="))
+        .expect("strih-lx.env must carry STRIH_CAMERAS")
+        .split_whitespace()
+        .map(|n| format!("cam{n}"))
+        .collect();
+    assert_eq!(
+        active_excluding(None, ""),
+        cams.join(" "),
+        "issue 1413: the default CAMERA_ACTIVE_SET must equal the SNV venue's STRIH_CAMERAS"
+    );
+    assert_eq!(
+        cams.join(" "),
+        "cam2 cam3 cam5",
+        "issue 1413: SNV keeps cam2/cam3/cam5"
+    );
+    for gone in ["cam1", "cam4", "cam6", "cam7"] {
+        let (ok, _, _) = resolve(gone);
+        assert!(
+            ok,
+            "issue 1413: {gone} moved to Poprad but its facts stay resolvable (membership-only)"
+        );
+        assert!(
+            !is_active(gone, None),
+            "issue 1413: {gone} is in Poprad -- never in the SNV default set"
+        );
+    }
 }
 
 #[test]
@@ -314,11 +351,13 @@ fn camera_active_secondary_set_is_cam3_cam4_cam5_cam6_cam7_for_the_default_sourc
     // secondary set (everything else) is now cam3 + cam4 + cam5 + cam6 + cam7 -- the full fleet
     // minus the derived source (cam1) and the painter (cam2). The secondary set excludes the
     // DERIVED source (cam1) + cam2 unconditionally, never falling back to a literal.
+    // issue 1413: the default is cam2 cam3 cam5 -- the derived source is cam3, cam2 the
+    // painter, so the one secondary camera is cam5.
     assert_eq!(
         active_secondary_set(None),
-        "cam3 cam4 cam5 cam6 cam7",
-        "issue 1216 completion: with source=cam1 (derived) and cam2=painter, the default active \
-         set's secondary cameras are cam3/cam4/cam5/cam6/cam7"
+        "cam5",
+        "issue 1413: with source=cam3 (derived) and cam2=painter, the default active set's \
+         secondary camera is cam5"
     );
 }
 
@@ -371,36 +410,16 @@ camera_is_active "$NAME" && echo YES || echo NO
 fn camera_is_active_matches_whole_words_only() {
     // #827: a substring match would wrongly treat "cam1" as active just because "cam10" (a
     // hypothetical future name) appears in the set -- must be an exact word match.
+    // issue 1413 (2026-10-12): the SNV default is cam2 cam3 cam5; cam1/cam4/cam6/cam7 are in Poprad.
     assert!(is_active("cam3", None), "cam3 must be active by default");
-    assert!(
-        is_active("cam1", None),
-        "cam1 must be active by default again (issue 1198, 2026-08-27: restored, owner ruling + \
-         live health check both confirm the card is fine)"
-    );
-    assert!(
-        is_active("cam2", None),
-        "cam2 must be active by default again (issue 1198, 2026-08-27: restored)"
-    );
-    assert!(
-        is_active("cam4", None),
-        "cam4 must be active by default again (issue 1216 completion, 2026-08-30: owner directive \
-         'kamery od 1-7 bezia' after a physical cable reseat -- capture chroma reads colour again, \
-         rough=2.9)"
-    );
-    assert!(
-        is_active("cam5", None),
-        "cam5 must be active by default again (issue 1216 completion, 2026-08-30: its splitter \
-         leg now clears the ~7 healthy-baseline bar, rough=7.8, vs the DEAD_PORT rough=0.1 that \
-         retired it on issue 1217)"
-    );
-    assert!(
-        is_active("cam6", None),
-        "cam6 must be active by default again (issue 1216)"
-    );
-    assert!(
-        is_active("cam7", None),
-        "cam7 must be active by default again (issue 1216)"
-    );
+    assert!(is_active("cam2", None), "cam2 must be active by default");
+    assert!(is_active("cam5", None), "cam5 must be active by default");
+    for poprad in ["cam1", "cam4", "cam6", "cam7"] {
+        assert!(
+            !is_active(poprad, None),
+            "{poprad} moved to Poprad (issue 1413) -- not in the SNV default set"
+        );
+    }
     // Reversibility, both directions -- the fleet is fully active by default today, so the
     // shrink direction is what proves membership is still DERIVED, never hardcoded true.
     assert!(
@@ -578,11 +597,12 @@ fn camera_active_excluding_default_is_exactly_the_full_seven_camera_fleet_1216()
     // (2026-08-30, owner directive "kamery od 1-7 bezia"): cam4 (#947) and cam5 (DEAD_PORT) both
     // rejoin -- the derived list must reflect the full seven-camera fleet, regardless of what
     // (if anything) is passed as excluded.
+    // issue 1413: the SNV default is cam2 cam3 cam5 (cam1/cam4/cam6/cam7 moved to Poprad).
     assert_eq!(
         active_excluding(None, ""),
-        "cam1 cam2 cam3 cam4 cam5 cam6 cam7",
-        "issue 1216 completion: camera_active_excluding with no exclusion must return exactly \
-         the full active set (cam1..cam7, no camera retired today)"
+        "cam2 cam3 cam5",
+        "issue 1413: camera_active_excluding with no exclusion must return exactly the SNV \
+         default set"
     );
     // Reversibility, shrink direction: dropping either previously-retired camera back out via
     // an explicit override still works -- the derivation is never hardcoded true.
@@ -659,10 +679,10 @@ fn camera_active_ndi_sources_excluding_csv_default_is_the_full_seven_camera_flee
     // (2026-08-30, owner directive "kamery od 1-7 bezia"): cam4 (#947) and cam5 (DEAD_PORT) both
     // rejoin -- the derived CSV now carries the FULL seven-camera fleet.
     let csv = active_ndi_sources_excluding_csv(None, "");
+    // issue 1413: the SNV default is cam2 cam3 cam5.
     assert_eq!(
-        csv, "NDI cam1,NDI cam2,NDI cam3,NDI cam4,NDI cam5,NDI cam6,NDI cam7",
-        "issue 1216 completion: the derived NDI source CSV carries exactly the full active set \
-         (cam1..cam7) -- no camera is retired today"
+        csv, "NDI cam2,NDI cam3,NDI cam5",
+        "issue 1413: the derived NDI source CSV carries exactly the SNV default set"
     );
     // Reversibility, shrink direction -- the derivation still correctly excludes whatever is
     // NOT in an explicit override, never hardcoding any camera present.
@@ -758,28 +778,28 @@ printf 'SOURCE\t%s\n' "$(camera_source_box)"
             got.insert(k.to_string(), v.to_string());
         }
     }
+    // issue 1413 (2026-10-12): the SNV rig keeps cam2/cam3/cam5.
     assert_eq!(
         got.get("ACTIVE").map(String::as_str),
-        Some("cam1 cam2 cam3 cam4 cam5 cam6 cam7"),
-        "issue 1216 completion: CAMERA_ACTIVE_SET must be the full seven-camera fleet: {got:?}"
+        Some("cam2 cam3 cam5"),
+        "issue 1413: CAMERA_ACTIVE_SET must be the SNV cameras: {got:?}"
     );
     assert_eq!(
         got.get("ALIGN").map(String::as_str),
-        Some("cam1 cam3 cam4 cam5 cam6 cam7"),
-        "issue 1216 completion: CAMERA_ALIGN_SET must include cam1 (derived) + cam3/cam4 \
-         (always-on-air base) + cam5/cam6/cam7 (derived), excluding only cam2 the projection \
-         probe: {got:?}"
+        Some("cam3 cam5"),
+        "issue 1413: CAMERA_ALIGN_SET must be cam3 (always-on-air base) + the strih-routable \
+         active cameras, excluding cam2 the projection probe and no unconditional cam4: {got:?}"
     );
     assert_eq!(
         got.get("SECONDARY").map(String::as_str),
-        Some("cam3 cam4 cam5 cam6 cam7"),
-        "issue 1216 completion: camera_active_secondary_set (active minus the derived source \
-         cam1 minus painter cam2) must be cam3/cam4/cam5/cam6/cam7: {got:?}"
+        Some("cam5"),
+        "issue 1413: camera_active_secondary_set (active minus the derived source cam3 minus \
+         painter cam2) must be cam5: {got:?}"
     );
     assert_eq!(
         got.get("SOURCE").map(String::as_str),
-        Some("cam1"),
-        "camera_source_box must still resolve cam1 (first strih-routable member) for the \
-         default active set: {got:?}"
+        Some("cam3"),
+        "issue 1413: camera_source_box must resolve cam3 (the first strih-routable member): \
+         {got:?}"
     );
 }
