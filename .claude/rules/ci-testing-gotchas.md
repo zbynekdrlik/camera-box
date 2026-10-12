@@ -670,6 +670,22 @@ dev-dep) — a kernel-atomic O_EXCL random name that CANNOT collide, whose Drop 
 the trailing manual `remove_dir_all` race. Rule: never hand-roll a unique temp path from
 pid+timestamp in a test; use `tempfile::tempdir()`.
 
+**Guarded since issue 1409.** `tests/no_hand_rolled_tempdirs_1409.rs` (std-only) fails on any
+`tests/**/*.rs` whose code calls `process::id()` and names `temp_dir` or a literal `/tmp/`, unless
+the file is on its ALLOWLIST as `"<file>: <why it does not leak>"`; a stale entry fails too. 30
+leaking harnesses were converted; the shapes, for the next one:
+- A fixture writer or scratch helper returns a per-file `TempPath { path, _dir: TempDir }` with
+  `Deref<Target = Path>` (+ `AsRef<Path>` only when a caller passes `&x` to a generic fs fn), so
+  call sites stay unchanged. Keep the old name with `tempfile::Builder::new().prefix(..)`.
+- **Drop timing is the trap.** A helper that builds a `TempPath` and returns only a string derived
+  from it, or a `format!(.. x = helper(), ..)` / `cmd.env(k, &*helper())` whose result outlives the
+  statement, deletes the file before the bash under test reads it. Bind it for the whole test.
+- An inline site holds `let scratch = tempfile::tempdir().unwrap(); let dir = scratch.path();`;
+  a later `remove_dir_all(&dir)` on that `&Path` trips clippy `needless_borrows_for_generic_args`,
+  so drop it (the TempDir already removes the dir).
+- Verify locally with the stand-in rlib (the issue-1367 entry below; it needs `Builder` and
+  `NamedTempFile` too), run each file, then `clippy-driver -D warnings` on it.
+
 **A std-only lift-and-compile gate must not compile to a FIXED temp path either (issue 1367).** Six
 replay tests each compiled the same C harness to `<temp>/…/sequence.c/.bin`; under a parallel runner
 one test ran the binary while another rewrote it ("Text file busy", ETXTBSY). Measured: 9 of 10
