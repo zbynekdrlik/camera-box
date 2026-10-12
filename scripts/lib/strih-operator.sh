@@ -343,9 +343,15 @@ strih_operator_input_verdict() {
   fi
 }
 
-# strih_operator_bt_verdict HCICONFIG_TEXT -> ONE row: hci0 UP with a non-zero BD address.
+# strih_operator_bt_verdict HCICONFIG_TEXT [ADAPTER] -> ONE row: hci0 UP with a non-zero BD address.
+# ADAPTER (1/0, default 1) = the kernel registered a Bluetooth adapter (/sys/class/bluetooth/hci*).
+# A box with none (strih-pp: a desktop with a USB receiver mouse, 12.10.2026) has nothing to pair: NOTE.
 strih_operator_bt_verdict() {
-  local text="${1-}" addr bad=""
+  local text="${1-}" adapter="${2:-1}" addr bad=""
+  if [ -z "$text" ] && [ "$adapter" = 0 ]; then
+    printf 'NOTE|(bluetooth) no Bluetooth adapter on this box -- not graded; the operator needs a USB (receiver) mouse\n'
+    return 0
+  fi
   if [ -z "$text" ]; then
     printf 'FAIL|(bluetooth) no hci0 Bluetooth controller (hciconfig hci0 answered nothing) -- the operator'"'"'s Bluetooth mouse cannot pair\n'
     return 0
@@ -563,7 +569,7 @@ strih_operator_panel_verdict() {
 # (strih_operator_row_count of them, in the header's order). Read-only; always rc 0.
 strih_operator_grade_rows() {
   local repo="${1:?repo root required}" home="${2:?user home required}" user="${3:?desktop user required}"
-  local xl slaves bt why deck dk_usb dk_surf dk_ids dk_names obs_up=0 gap d1 d2
+  local xl slaves bt bt_adapter=1 why deck dk_usb dk_surf dk_ids dk_names obs_up=0 gap d1 d2
   xl="$(strih_operator_xinput "$user" "$home" list --short)"
   slaves="$(strih_operator_xinput_slaves <<<"$xl")"
   if ! command -v "$(strih_operator_xinput_tool)" >/dev/null 2>&1; then
@@ -577,7 +583,8 @@ strih_operator_grade_rows() {
   if [ "$bt" = '<no-hciconfig>' ]; then
     printf 'FAIL|(bluetooth) hciconfig is not installed (package bluez) -- the Bluetooth controller cannot be read\n'
   else
-    strih_operator_bt_verdict "$bt"
+    if compgen -G "$(strih_operator_sysfs)/class/bluetooth/hci*" >/dev/null; then bt_adapter=1; else bt_adapter=0; fi
+    strih_operator_bt_verdict "$bt" "$bt_adapter"
   fi
   if why="$(obs_box_step_applies 16)"; then
     deck="$(strih_operator_deck_read "$repo")"

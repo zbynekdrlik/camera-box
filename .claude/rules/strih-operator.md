@@ -73,7 +73,7 @@ so a hung X server FAILs a row instead of hanging verify.
 | Row | Grades |
 |---|---|
 | `(tap-to-click)` | the LIVE `libinput Tapping Enabled` = 1 on every touchpad (`xinput list-props`); a touchpad without the libinput property FAILs, a device whose properties do not answer is named; NOTE with no touchpad; a missing `xinput` is named (the kiosk installs it), never read as a hung X |
-| `(bluetooth)` | `hciconfig hci0`: UP and a non-zero BD address. Graded on every role: setup-strih step 11 passes `keep-bluetooth` to the kiosk on every role (test-pinned) |
+| `(bluetooth)` | `hciconfig hci0`: UP and a non-zero BD address. Graded on every role: setup-strih step 11 passes `keep-bluetooth` to the kiosk on every role (test-pinned). NOTE when the kernel registered no adapter at all (no `/sys/class/bluetooth/hci*`: strih-pp is a desktop with a USB receiver mouse) |
 | `(stream-deck)` | the deck on USB AND at least one Satellite surface, read through `scripts/strih_satellite_watch.py` (`STREAM_DECK_USB_IDS`, `deck_on_usb`, `fetch_json` + `surface_names` on `/api/surfaces`); NOTE with no deck plugged in; NOTE on the stream role (step-16 gate) |
 | `(mv-click)` | `[BasicWindow] MultiviewMouseSwitch` true the way libobs `config_get_bool` reads it (`util/config-file.c`: `true` in any case, or a non-zero strtoull, base 16 after a leading `0x`; `on` / `yes` read FALSE); an absent key is OBS's built-in true but FAILs as "not seeded" |
 | `(studio-mode)` | `GetStudioModeEnabled` over the OBS websocket; NOTE while OBS is not running |
