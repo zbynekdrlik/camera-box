@@ -215,7 +215,7 @@ def _gather(dpkg_answer):
     elif dpkg_answer is None:
         answer = "echo \"dpkg-query: no packages found matching $p\" >&2; return 1"
     else:
-        answer = "printf %%s '%s'" % dpkg_answer
+        answer = "printf %%s '%s'; return 0" % dpkg_answer
     fake = ('dpkg-query() { local p="${@: -1}"; if [ "$p" = %s ]; then %s; fi; '
             'echo "dpkg-query: no packages found matching $p" >&2; return 1; }\n' % (DDX, answer))
     out = subprocess.run(["bash", "-c", fake + snip.stdout], capture_output=True, text=True,
