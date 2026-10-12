@@ -77,7 +77,7 @@ OBS it sends `TALLY-PVW 0` + `TALLY-PGM 0` once (lights gray, no stale on-air re
   program/preview camera, read from the service's own `GET /state` (JSON: pgm, pvw, studio mode,
   OBS connected, connected tallies) served on the same :9240 port through the websockets
   `process_request` hook (a plain HTTP request is answered, a WS upgrade proceeds).
-- Firmware: `tally/esp/WsTally.ino` with the WiFi credentials moved to a gitignored `secrets.h`
+- Firmware: `tally/esp/WsTally/WsTally.ino` (Arduino needs the sketch folder name) with the WiFi credentials moved to a gitignored `secrets.h`
   (a committed `secrets.h.example`). No firmware behaviour change.
 
 ## Logging
