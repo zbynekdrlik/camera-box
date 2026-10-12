@@ -128,7 +128,7 @@ measure_boxes() {
     box_args+=(--box "${name}=${host}:${fps}")
   done
   VERDICT_LINES="$(python3 "$PROBE_PY" "${box_args[@]}" \
-    --window-s "$WINDOW_S" 2>>/dev/stderr)" || true
+    --window-s "$WINDOW_S")" || true
 }
 
 # parse_verdict_line <line> -> echoes "box|label|reasons"
