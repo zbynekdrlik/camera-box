@@ -23,19 +23,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
-/// A path in its own `tempfile::tempdir()` (the dir itself or a file in it). The dir lives as long
-/// as this value and is removed when it drops, so no pid-named dir is left in /tmp (issue 1409).
-struct TempPath {
-    path: PathBuf,
-    _dir: tempfile::TempDir,
-}
-
-impl std::ops::Deref for TempPath {
-    type Target = std::path::Path;
-    fn deref(&self) -> &std::path::Path {
-        &self.path
-    }
-}
+#[path = "support/temp_path.rs"]
+mod temp_path;
+use temp_path::TempPath;
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

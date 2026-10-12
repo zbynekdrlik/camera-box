@@ -49,19 +49,9 @@ use camera_box::probe::recording_partial::RecordingPartial;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// A path in its own `tempfile::tempdir()` (the dir itself or a file in it). The dir lives as long
-/// as this value and is removed when it drops, so no pid-named dir is left in /tmp (issue 1409).
-struct TempPath {
-    path: PathBuf,
-    _dir: tempfile::TempDir,
-}
-
-impl std::ops::Deref for TempPath {
-    type Target = std::path::Path;
-    fn deref(&self) -> &std::path::Path {
-        &self.path
-    }
-}
+#[path = "support/temp_path.rs"]
+mod temp_path;
+use temp_path::TempPath;
 
 /// A non-burn run_id for cam2's OPTICAL dual-QR payload — mirrors the `const CAM2: u32 = 7;`
 /// convention `src/bin/recording-verdict.rs`'s own in-process fixtures already use (any value
