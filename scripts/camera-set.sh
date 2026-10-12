@@ -377,9 +377,9 @@ camera_active_ndi_sources_csv() {
   printf '%s' "$out"
 }
 
-# camera_align_ndi_sources_csv -> prints (stdout) "NDI cam1,NDI cam2,NDI cam3,NDI cam4" -- the
-# comma-joined strih NDI-input list for CAMERA_ALIGN_SET (the on-air alignment superset, incl.
-# cam4). Used by the #1003 floor-3 per-run aligner (scripts/qr_align_pins.py --sources) so the
+# camera_align_ndi_sources_csv -> prints (stdout) "NDI cam3,NDI cam5" (the SNV default) -- the
+# comma-joined strih NDI-input list for CAMERA_ALIGN_SET (cam3 + every strih-routable active camera,
+# issue 1413). Used by the #1003 floor-3 per-run aligner (scripts/qr_align_pins.py --sources) so the
 # alignment set derives from CAMERA_ALIGN_SET, never a literal cam range. The 1:1 "NDI cam<N>"
 # convention matches camera_strih_route / set-ndi-mapping.py.
 camera_align_ndi_sources_csv() {
@@ -394,9 +394,10 @@ camera_align_ndi_sources_csv() {
 # (space-separated cam names) removed -- the offline-ack sibling of camera_align_ndi_sources_csv,
 # mirroring camera_active_ndi_sources_excluding_csv. The floor-3 aligner (#1003 review 🟡) passes
 # recording-e2e.sh's PREFLIGHT_EXCLUDED_CAMS here so an acked-OFFLINE on-air camera (a temporarily
-# wedged cam4) is NOT required to decode a painter QR -- otherwise one acked box would abort the
-# WHOLE run. cam4 is aligned when HEALTHY (it stays in CAMERA_ALIGN_SET); it is dropped only while
-# explicitly acked offline, exactly like the freeze-watch's active-set exclusion. Word-exact match.
+# wedged camera) is NOT required to decode a painter QR -- otherwise one acked box would abort the
+# WHOLE run. An on-air camera is aligned when HEALTHY (it stays in CAMERA_ALIGN_SET); it is dropped
+# only while explicitly acked offline, exactly like the freeze-watch's active-set exclusion.
+# Word-exact match.
 camera_align_ndi_sources_excluding_csv() {
   local excluded="${1:-}" cam out=""
   for cam in $CAMERA_ALIGN_SET; do

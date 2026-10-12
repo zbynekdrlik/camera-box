@@ -4438,7 +4438,7 @@ if [ "${ALL_CAMBOX:-0}" = "1" ] && [ "${QR_ALIGN:-1}" != "1" ] && ! measurement_
 fi
 
 # [4i/8align] #1003 floor-3 per-run camera alignment (owner rework 2026-08-20). The SIMULTANEOUS
-# painter-QR screenshot spread across every on-air strih camera (CAMERA_ALIGN_SET, INCLUDING cam4)
+# painter-QR screenshot spread across every on-air strih camera (CAMERA_ALIGN_SET, issue 1413: cam3 + the active)
 # is BOTH the alignment basis AND the owner's acceptance instrument ("ak spravím screenshot, musím
 # vidieť rovnaké monotonic a time v KAŽDOM QR"). This BLOCKING preflight measures the spread, applies
 # floor-3 pins (the slowest/max-transport camera -> pin 3, every other -> 3 + its relative delivery

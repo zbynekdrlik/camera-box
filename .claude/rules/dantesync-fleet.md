@@ -40,7 +40,14 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
     address; `A.B.C` = that /24 + the camera's camera_resolve last octet (PP: `10.76.9`, cam7 =
     10.76.9.67 through companion-pp); `none` on a box that lists no camera (stream-pp).
   - A camera listed by two venue files, a bad venue name or a bad dev1 network prints no row for that
-    camera and fails loudly (bash rc 1, python RuntimeError). A camera no venue lists is in no row.
+    camera: `dantesync_fleet_rows` prints the error and returns 1, python raises RuntimeError. The
+    consumers (`dantesync_fleet_spec` / `_field` / `_names`) read the rows `2>/dev/null || true`, so
+    there that camera is just absent; CI pins the committed fact files clean
+    (`test_every_camera_row_follows_its_venue` asserts rc 0). A camera no venue lists is in no row.
+  - **Not covered yet (a follow-up named on the lane return):** the camera-box BINARY on the PP
+    camboxes. The CI `deploy-fleet` job, `camera-box-version-gate.sh` and the frame-probe align all
+    derive from `CAMERA_ACTIVE_SET` (the SNV measurement set), so cam1/4/6/7 get no camera-box update
+    and no version read until a venue-aware deploy/read through the `reach` rows exists.
   - **The glob must survive a caller's `set -f`:** the version gate builds its `--fleet` specs under
     noglob, and the first cut of issue 1413 silently dropped every camera from the gated set. Both
     fact-file readers run `local -; set +f` (bash restores the caller's option on return), pinned by

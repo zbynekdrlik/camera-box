@@ -27,7 +27,10 @@
 #     STRIH_CAMERA_DEV1_NET: `direct` = camera_resolve's address, `A.B.C` = that /24 + the camera's
 #     camera_resolve last octet (dev1 reaches the PP LAN as 10.76.x through companion-pp). Not
 #     CAMERA_ACTIVE_SET: a camera retired from MEASUREMENT still runs dantesync and can still lose the
-#     clock. A camera no venue lists is in no row; one listed by two venues fails loudly.
+#     clock. A camera no venue lists is in no row. A camera listed by two venues (or with a bad dev1
+#     network) prints no row and an error, and `dantesync_fleet_rows` returns 1; the consumers
+#     (dantesync_fleet_spec / _field / _names) read the rows with `2>/dev/null || true`, so there it is
+#     simply absent -- CI pins the committed fact files clean (test_every_camera_row_follows_its_venue).
 #   * the DANTESYNC_FLEET table below: dev1, the OBS boxes (addresses from obs-fleet.sh, never a
 #     second literal), and the audio-VLAN PCs.
 #   lv1 (10.77.7.100) is deliberately ABSENT: the owner ruled it an operational PC that is on the
