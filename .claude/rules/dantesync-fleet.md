@@ -49,18 +49,26 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
     rc 1 + the named camera on a fact-file error) and `dantesync_fleet_away_venues` (every non-home
     venue that lists cameras, today `pp`). Never compute a dev1 camera address anywhere else.
     - `deploy-fleet.sh --venue <name>` deploys the venue's cameras at those addresses through the
-      unchanged per-box swap (issue 1407 sidecar + verified ro close). A `reach` camera that
-      `dantesync_fleet_present` says is away is SKIPPED by name (exit 0); a reachable one that fails
-      is FAILED (exit 1). It refuses `CAMERA_SET` (read BEFORE camera-set.sh fills its default) and
-      `--frame-probe` (the painter is the home rig's cam2); a fact-file error refuses the whole run
-      before any box is touched. The default (SNV) path is unchanged.
+      unchanged per-box swap (issue 1407 sidecar + verified ro close). An acked-offline camera (the
+      SAME acks as the home deploy: explicit `CAMBOX_OFFLINE_ACK`, else `rig-fleet.txt`) and a `reach`
+      camera that `dantesync_fleet_present` says is away are SKIPPED by name, never dialled (exit 0);
+      a reachable one that fails, including one that answers the probe but refuses ssh, is FAILED
+      (exit 1). It refuses the home venue (that set is `CAMERA_ACTIVE_SET` minus the acks),
+      `CAMERA_SET` (read BEFORE camera-set.sh fills its default) and `--frame-probe` (the painter is
+      the home rig's cam2); a fact-file error refuses the whole run before any box is touched. The
+      default (SNV) path is unchanged.
     - The ci.yml `deploy-fleet` job's second step loops over `dantesync_fleet_away_venues` (no venue
-      literal, so a third venue is a fact-file edit), runs under `if: ${{ !cancelled() }}` (a failed
-      SNV step does not stop it) and reds the job only when a REACHABLE camera failed.
+      literal, so a third venue is a fact-file edit; a malformed `STRIH_VENUE` is left out and named),
+      runs under `if: ${{ !cancelled() }}` (a failed SNV step does not stop it) and reds the job when
+      `deploy-fleet.sh --venue` exits non-zero, naming the venue and the exit code.
     - `camera-box-version-gate.sh --other-venues` prints report-only rows (OK / PIN-DRIFT / UNKNOWN
-      against main's pin, `SKIPPED (unreachable` when away) and never changes the exit; the E2E `[0/8]`
-      call passes it, so a PP camera on an old build is named in every E2E log. The frame-probe align
-      stays home-rig only.
+      against main's pin, READ under `--no-main-pin`, `EXCLUDED` when acked, `SKIPPED (unreachable`
+      when away) and never changes the exit; the E2E `[0/8]` call passes it, so a PP camera on an old
+      build is named in every E2E log. Each read is bounded by `timeout`
+      (`CAMERA_BOX_VERSION_GATE_VENUE_READ_TIMEOUT`, default 20 s): `ConnectTimeout` covers only the
+      connect, and a PP box that answers :22 but hangs (a dying stick, fork exhaustion) would
+      otherwise stall the home E2E while it holds the rig lease. Each away camera costs up to ~4 s
+      reach probe plus the read, serially. The frame-probe align stays home-rig only.
     - Tier-0: `tests/python/test_cambox_deploy_venues_1413.py` (the issue-1407 fake box behind a
       host-logging sshpass, `OBS_FLEET_HOME` deciding reach; run it under `unshare -n`).
   - **The glob must survive a caller's `set -f`:** the version gate builds its `--fleet` specs under
