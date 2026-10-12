@@ -33,8 +33,10 @@
 #   scripts/deploy-fleet.sh --binary ./dist/camera-box --venue pp   # issue 1413: ANOTHER venue's
 #                                                 # camboxes (its strih fact file's STRIH_CAMERAS) at
 #                                                 # their dev1 address; one that does not answer ssh
-#                                                 # :22 is SKIPPED by name, never a failure. Not with
-#                                                 # CAMERA_SET or --frame-probe (the painter is SNV cam2).
+#                                                 # :22 or is acked offline (rig-fleet.txt /
+#                                                 # CAMBOX_OFFLINE_ACK) is SKIPPED by name, never a
+#                                                 # failure. Not the home rig, not with CAMERA_SET or
+#                                                 # --frame-probe (the painter is the home rig's cam2).
 #
 # Env:
 #   SSH_PASS   camera root password (default: newlevel)
@@ -44,7 +46,8 @@
 #
 # Exit status: 0 only if EVERY camera in the set ends on the new version AND emits the genlock
 # report. Any version mismatch, missing genlock line, panic, or unreachable box => nonzero.
-# With --venue an unreachable camera is SKIPPED (named, exit 0); every other rule is the same.
+# With --venue an unreachable or acked-offline camera is SKIPPED (named, exit 0); every other rule
+# is the same.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -105,7 +108,7 @@ command -v sshpass >/dev/null 2>&1 || { err "sshpass is required (apt-get instal
 # camera is deployed only while it answers ssh :22 (dantesync_fleet_present). A fact-file error
 # refuses the whole run before any box is touched, so no camera is dropped silently.
 declare -A VENUE_ADDR=() VENUE_GATE=()
-declare -a SKIPPED=()
+declare -a SKIPPED=() ACKED=()
 if [ -n "$VENUE" ]; then
   if [ -n "$USER_CAMERA_SET" ]; then
     err "--venue $VENUE derives its set from the venue's strih fact file; unset CAMERA_SET [$USER_CAMERA_SET]"
@@ -117,6 +120,15 @@ if [ -n "$VENUE" ]; then
   fi
   # shellcheck source=scripts/lib/dantesync-fleet.sh
   . "$HERE/lib/dantesync-fleet.sh"
+  if [ "$VENUE" = "$DANTESYNC_FLEET_HOME_VENUE" ]; then
+    err "--venue $VENUE is the home rig: deploy it with the default path (CAMERA_ACTIVE_SET minus the offline acks)"
+    exit 2
+  fi
+  # The same offline acks the home-rig deploy honours (a staged / repaired box is never redeployed
+  # over): the explicit CAMBOX_OFFLINE_ACK wins, else rig-fleet.txt.
+  # shellcheck source=scripts/lib/cambox-offline-ack.sh
+  . "$HERE/lib/cambox-offline-ack.sh"
+  CAMBOX_OFFLINE_ACK="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$HERE/../rig-fleet.txt")"
   venue_rows="$(dantesync_fleet_venue_camera_rows "$VENUE")" || {
     err "venue '$VENUE': the strih fact files do not resolve cleanly (the line above names it) -- nothing deployed"
     exit 1
@@ -434,6 +446,10 @@ for cam in $SET; do
   PENDING_START=""
   if [ -n "$VENUE" ]; then
     ip="${VENUE_ADDR[$cam]}"
+    if cambox_offline_ack_is_acked "$cam"; then
+      warn "[$cam] venue $VENUE: acked offline ($(cambox_offline_ack_reason "$cam")) -- SKIPPED, not dialled"
+      ACKED+=("$cam"); continue
+    fi
     if [ "${VENUE_GATE[$cam]}" = reach ] && ! dantesync_fleet_present "$cam"; then
       warn "[$cam] venue $VENUE: $ip does not answer ssh :$DANTESYNC_FLEET_REACH_PORT -- SKIPPED (deployed when reachable)"
       SKIPPED+=("$cam"); continue
@@ -581,12 +597,13 @@ if [ -n "$VENUE" ]; then
   # issue 1413: an away camera is named, never a failure; a reachable one that failed is.
   deployed=""
   for cam in $SET; do
-    case " ${SKIPPED[*]} " in *" $cam "*) ;; *) deployed="${deployed:+$deployed }$cam" ;; esac
+    case " ${SKIPPED[*]} ${ACKED[*]} " in *" $cam "*) ;; *) deployed="${deployed:+$deployed }$cam" ;; esac
   done
   [ "${#SKIPPED[@]}" -eq 0 ] || log "VENUE $VENUE skipped (unreachable): ${SKIPPED[*]}"
+  [ "${#ACKED[@]}" -eq 0 ] || log "VENUE $VENUE skipped (acked offline): ${ACKED[*]}"
   if [ "${#FAILED[@]}" -eq 0 ]; then
     if [ -z "$deployed" ]; then
-      log "VENUE $VENUE: no camera of venue $VENUE was reachable -- nothing deployed"
+      log "VENUE $VENUE: no camera of venue $VENUE was reachable and un-acked -- nothing deployed"
     else
       log "VENUE $VENUE ALIGNED: [$deployed] on $NEW_VER and genlocking"
     fi

@@ -322,7 +322,9 @@ Options:
                     via \`/usr/local/bin/camera-box --version\` over SSH.
   --other-venues    (issue 1413) ALSO print report-only rows for every camera of ANOTHER venue (a
                     strih fact file other than the home rig's, e.g. Poprad), each read at its dev1
-                    address; one that does not answer ssh :22 is SKIPPED. Never changes the exit:
+                    address (bounded by CAMERA_BOX_VERSION_GATE_VENUE_READ_TIMEOUT, default 20 s);
+                    one that does not answer ssh :22 is SKIPPED, an acked-offline one EXCLUDED.
+                    Not with --frame-probe-only. Never changes the exit:
                     the gate's verdict stays the --linux nodes'. A drift names the redeploy
                     (scripts/deploy-fleet.sh --venue <venue>).
   --frame-probe-only  run ONLY the #1138 frame-probe (cam2 painter) sha-pin over the --linux nodes
@@ -346,15 +348,19 @@ EOF
 # deploy-fleet.sh). "" if unreachable/absent (UNKNOWN downstream, never guessed). Overridable
 # per-node for tests/offline via CAMERA_BOX_VERSION_GATE_VERSION_<NAME> (NAME uppercased, "-" -> "_")
 # — mirrors dantesync-version-gate.sh's DANTESYNC_VERSION_GATE_VERSION_<NAME> fixture seam.
+# BOUND_SECS (optional, issue 1413): bound the whole read with `timeout` (ConnectTimeout only covers
+# the connect + banner, not the login or the remote command); a timed-out read is "" (UNKNOWN).
 read_camera_box_version_output() {
-  local name="$1" target="${2:-}" var
+  local name="$1" target="${2:-}" bound="${3:-}" var
+  local -a lim=()
   var="CAMERA_BOX_VERSION_GATE_VERSION_$(printf '%s' "$name" | tr '[:lower:]-' '[:upper:]_')"
   if [ -n "${!var:-}" ]; then
     cat "${!var}" 2>/dev/null || true
     return 0
   fi
   [ -n "$target" ] || { printf ''; return 0; }
-  sshpass -p "${CAMERA_BOX_VERSION_GATE_SSH_PASS:-newlevel}" ssh \
+  [ -z "$bound" ] || lim=(timeout "$bound")
+  "${lim[@]}" sshpass -p "${CAMERA_BOX_VERSION_GATE_SSH_PASS:-newlevel}" ssh \
     -o StrictHostKeyChecking=no -o BatchMode=no \
     -o "ConnectTimeout=${CAMERA_BOX_VERSION_GATE_SSH_TIMEOUT:-8}" \
     "$target" \
@@ -553,7 +559,11 @@ frame_probe_pin_gate() {
 # STRIH_CAMERA_DEV1_NET is resolved). A `reach` camera that does not answer ssh :22
 # (dantesync_fleet_present) is SKIPPED; a read one is graded against PIN (main's release, which the
 # ci.yml deploy-fleet job deploys to every venue). A drift or an unread camera SCREAMS on stderr.
-# Always returns 0: the gate's exit stays the --linux nodes' (the E2E measures the home rig only).
+# An acked-offline camera (the gate's effective CAMBOX_OFFLINE_ACK) is EXCLUDED, never read. Each
+# read is bounded by
+# CAMERA_BOX_VERSION_GATE_VENUE_READ_TIMEOUT (default 20 s), so a hung away-venue box can never stall
+# the home E2E. Always returns 0: the gate's exit stays the --linux nodes' (the E2E measures the home
+# rig only).
 camera_box_other_venue_report() {
   local pin="$1" venues venue rows rc name addr gate version vrc
   if ! command -v dantesync_fleet_away_venues >/dev/null 2>&1; then
@@ -572,12 +582,18 @@ camera_box_other_venue_report() {
     [ "$rc" -eq 0 ] || echo "!! CAMERA-BOX VENUE REPORT: the venue $venue camera list is incomplete (a strih fact-file error, named above) -- report-only." >&2
     while IFS='|' read -r name addr gate; do
       [ -n "$name" ] || continue
+      if cambox_offline_ack_is_acked "$name"; then
+        printf '  %-14s %-16s EXCLUDED (acked offline: %s; venue %s, not read)\n' "$name" "-" \
+          "$(cambox_offline_ack_reason "$name")" "$venue"
+        continue
+      fi
       if [ "$gate" = reach ] && ! dantesync_fleet_present "$name"; then
         printf '  %-14s %-16s SKIPPED (unreachable -- %s did not answer ssh :%s; venue %s, read when reachable)\n' \
           "$name" "-" "$addr" "$DANTESYNC_FLEET_REACH_PORT" "$venue"
         continue
       fi
-      version="$(camera_box_version_from_version_output "$(read_camera_box_version_output "$name" "root@$addr")")"
+      version="$(camera_box_version_from_version_output "$(read_camera_box_version_output "$name" "root@$addr" \
+        "${CAMERA_BOX_VERSION_GATE_VENUE_READ_TIMEOUT:-20}")")"
       vrc=0
       camera_box_venue_verdict "$name" "$version" "$pin" "$venue" || vrc=$?
       case "$vrc" in
@@ -646,6 +662,13 @@ main() {
 
   # #1235: --frame-probe-hard hardens ONLY the --frame-probe-only pin (the full parity gate has its
   # OWN exit code); on the full invocation it would be a silent no-op, so reject the combination loud.
+  # issue 1413: --frame-probe-only exits before the camera-box rows, so --other-venues would be a
+  # silent no-op there; reject the combination loud.
+  if [ "$other_venues" = "1" ] && [ "$frame_probe_only" = "1" ]; then
+    echo "ERROR: --other-venues cannot be combined with --frame-probe-only (that mode reads no camera-box version)." >&2
+    usage >&2
+    exit 1
+  fi
   if [ "$frame_probe_hard" = "1" ] && [ "$frame_probe_only" != "1" ]; then
     echo "ERROR: --frame-probe-hard requires --frame-probe-only (it hardens the frame-probe sha-pin, not the camera-box parity gate)." >&2
     usage >&2

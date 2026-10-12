@@ -897,8 +897,10 @@ jobs:
           rc=0
           for v in $venues; do
             echo "Deploying camera-box $(dist/camera-box --version 2>/dev/null | awk '{print $NF}') to venue $v"
-            if ! scripts/deploy-fleet.sh --binary dist/camera-box --venue "$v"; then
-              echo "::error::camera-box deploy to venue $v failed on a REACHABLE cambox (the deploy-fleet lines above name it)"
+            v_rc=0
+            scripts/deploy-fleet.sh --binary dist/camera-box --venue "$v" || v_rc=$?
+            if [ "$v_rc" -ne 0 ]; then
+              echo "::error::deploy-fleet.sh --venue $v exited $v_rc (its lines above name the cause)"
               rc=1
             fi
           done
