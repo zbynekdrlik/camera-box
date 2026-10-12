@@ -56,18 +56,27 @@ fn lib_is_source_only_and_defines_the_pure_functions() {
 
 #[test]
 fn ndi_inputs_are_the_ten_role_inputs() {
+    // issue 1413: the inputs follow strih-lx.env's STRIH_CAMERAS (the SNV venue now has cam2/cam3/
+    // cam5; cam1/cam4/cam6/cam7 moved to Poprad) -- one per camera + the 2ME pair + the CG sender.
     let (code, out, _e) = run_sourced(&[], "strih_lx_ndi_inputs");
     assert_eq!(code, 0);
     let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
-    assert_eq!(lines.len(), 10, "exactly 10 NDI inputs, got: {out}");
+    assert_eq!(lines.len(), 6, "3 cameras + 2ME PGM/PVW + CG, got: {out}");
     for want in [
-        "CAM1 (usb)",
-        "CAM7 (usb)",
+        "CAM2 (usb)",
+        "CAM3 (usb)",
+        "CAM5 (usb)",
         "STRIH-SNV (2ME PGM)",
         "STRIH-SNV (2ME PVW)",
         "RESOLUME-SNV (SP-program)",
     ] {
         assert!(lines.contains(&want), "missing input {want} in: {out}");
+    }
+    for gone in ["CAM1 (usb)", "CAM4 (usb)", "CAM6 (usb)", "CAM7 (usb)"] {
+        assert!(
+            !lines.contains(&gone),
+            "{gone} is in Poprad (issue 1413): {out}"
+        );
     }
 }
 
@@ -1472,9 +1481,10 @@ fn seed_manifest_json_is_update_only_with_the_explicit_operator_names() {
         out.contains("\"mode\": \"update-only\""),
         "mode update-only: {out}"
     );
+    // issue 1413: the SNV cameras cam2/cam3/cam5 (strih-lx.env STRIH_CAMERAS).
     for name in [
-        "\"NDI cam1\"",
-        "\"NDI cam7\"",
+        "\"NDI cam2\"",
+        "\"NDI cam5\"",
         "\"NDI 2ME PVW\"",
         "\"NDI 2ME PGM (mv)\"",
         "\"cg\"",
@@ -1483,7 +1493,11 @@ fn seed_manifest_json_is_update_only_with_the_explicit_operator_names() {
         assert!(out.contains(name), "manifest must carry {name}: {out}");
     }
     // senders (the DATA name-map) + the unchanged namespaced outputs
-    assert!(out.contains("\"CAM1 (usb)\""), "sender name-map: {out}");
+    assert!(out.contains("\"CAM2 (usb)\""), "sender name-map: {out}");
+    assert!(
+        !out.contains("\"NDI cam1\""),
+        "cam1 is in Poprad (issue 1413): {out}"
+    );
     assert!(
         out.contains("STRIH-LX (2ME PGM)"),
         "outputs unchanged: {out}"
@@ -1524,7 +1538,7 @@ assert m.parse_seed_mode(text) == "update-only", "mode"
 by = {p["input"]: p for p in m.seed_inputs(inputs, latency)}
 assert by["NDI 2ME PVW"]["settings"]["genlock_fifo"] is False, "2ME PVW must be feedback"
 assert by["NDI 2ME PGM (mv)"]["settings"]["genlock_fifo"] is False, "2ME PGM must be feedback"
-assert by["NDI cam1"]["settings"]["genlock_fifo"] is True, "cam must be genlock"
+assert by["NDI cam2"]["settings"]["genlock_fifo"] is True, "cam must be genlock"
 assert by["cg"]["settings"]["genlock_fifo"] is True, "cg is a genlocked sender"
 print("OK")
 '"#,
