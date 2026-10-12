@@ -99,6 +99,29 @@ def test_the_seed_never_writes_while_obs_runs(tmp_path):
     assert "WARN" in r.stdout and "OBS is running" in r.stdout
 
 
+def test_the_seed_refuses_a_symlinked_user_ini(tmp_path):
+    """setup-strih runs as root: a user.ini symlinked elsewhere must never be written or chowned."""
+    target = tmp_path / "elsewhere.ini"
+    target.write_text("[X]\nk=v\n")
+    ini = tmp_path / "user.ini"
+    ini.symlink_to(target)
+    r = _seed(tmp_path, ini)
+    assert r.returncode == 0, r.stderr
+    assert target.read_text() == "[X]\nk=v\n" and ini.is_symlink()
+    assert "WARN" in r.stdout and "symlink" in r.stdout
+
+
+def test_the_seed_replaces_the_file_atomically_keeping_its_mode(tmp_path):
+    ini = tmp_path / "user.ini"
+    ini.write_text("[BasicWindow]\nMultiviewMouseSwitch=false\n")
+    ini.chmod(0o640)
+    before = ini.stat().st_ino
+    assert _seed(tmp_path, ini).returncode == 0
+    assert ini.stat().st_ino != before, "written to a temp file and renamed over the name"
+    assert oct(ini.stat().st_mode & 0o777) == oct(0o640)
+    assert not [p for p in tmp_path.iterdir() if p.name.startswith(".user.ini")], "no temp file left"
+
+
 def test_the_seed_never_clobbers_an_unparseable_user_ini(tmp_path):
     ini = tmp_path / "user.ini"
     ini.write_text("no section header here\n")
@@ -153,7 +176,7 @@ class Nm:
         self.nmcli = _exec(tmp_path / "fake-nmcli", _FAKE_NMCLI)
         self.addrs = tmp_path / "ipaddr"
 
-    def add(self, uuid, ctype, device="", name=None, ifname="", addresses="", autoconnect="yes"):
+    def add(self, uuid, ctype, device="", name=None, ifname="", addresses="", autoconnect="yes", method=None):
         d = self.root / "conn" / uuid
         d.mkdir()
         (d / "type").write_text(ctype)
@@ -162,6 +185,7 @@ class Nm:
         (d / "connection.interface-name").write_text(ifname)
         (d / "ipv4.addresses").write_text(addresses)
         (d / "connection.autoconnect").write_text(autoconnect)
+        (d / "ipv4.method").write_text(method or ("manual" if addresses else "auto"))
 
     def prop(self, uuid, name):
         return (self.root / "conn" / uuid / name).read_text()
@@ -203,6 +227,38 @@ def test_isolate_takes_the_onboard_profile_off_the_rig_subnet_and_leaves_the_rig
     assert not [c for c in calls if "u-rig" in c or "u-home" in c or "u-wifi" in c], calls
     assert nm.prop("u-onb", "connection.autoconnect") == "no"
     assert "Wired connection 1" in r.stdout and "enp2s0" in r.stdout
+
+
+def test_isolate_never_touches_the_rig_profile_bound_by_its_active_device_alone(tmp_path):
+    """A rig profile bound by MAC (no interface-name) is protected by its active device only."""
+    nm = Nm(tmp_path)
+    nm.add("u-rig", "802-3-ethernet", "enp7s0", "rig", "", "10.77.9.202/23")
+    nm.add("u-onb", "802-3-ethernet", "enp2s0", "Wired connection 1")
+    r = nm.run([LO, RIG, ONBOARD])
+    assert r.returncode == 0, r.stderr
+    assert not [c for c in nm.calls() if "u-rig" in c], nm.calls()
+    assert "nmcli connection down u-onb" in nm.calls()
+
+
+def test_isolate_never_touches_an_inactive_profile_pinned_to_the_rig_nic(tmp_path):
+    """A second profile pinned to the rig NIC (a spare, a backup) is the rig NIC's, never another's."""
+    nm = Nm(tmp_path)
+    nm.add("u-rig", "802-3-ethernet", "enp7s0", "rig", "enp7s0", "10.77.9.202/23")
+    nm.add("u-spare", "802-3-ethernet", "", "rig spare", "enp7s0", "10.77.9.202/23")
+    r = nm.run([LO, RIG])
+    assert r.returncode == 0, r.stderr
+    assert nm.calls() == []
+
+
+def test_isolate_names_an_inactive_dhcp_wired_profile_it_cannot_place(tmp_path):
+    """The 11.10.2026 profile was DHCP: inactive, its subnet is unknown until a cable goes in."""
+    nm = Nm(tmp_path)
+    nm.add("u-rig", "802-3-ethernet", "enp7s0", "rig", "enp7s0", "10.77.9.202/23")
+    nm.add("u-onb", "802-3-ethernet", "", "Wired connection 1")
+    r = nm.run([LO, RIG])
+    assert r.returncode == 0, r.stderr
+    assert nm.calls() == []
+    assert "WARN" in r.stdout and "Wired connection 1" in r.stdout and "DHCP" in r.stdout, r.stdout
 
 
 def test_isolate_is_idempotent(tmp_path):
@@ -497,9 +553,27 @@ def test_no_bluetooth_controller_fails(op):
 
 
 def test_bluetooth_is_graded_because_setup_strih_keeps_it():
-    """The BT row grades a box whose kiosk keeps bluetooth; setup-strih passes keep-bluetooth."""
+    """The BT row grades every box: setup-strih passes keep-bluetooth to the kiosk on every role."""
     assert 'obs_box_kiosk "$DESKTOP_USER" strih keep-bluetooth' in SETUP.read_text()
-    assert _bash('printf %s "$STRIH_OPERATOR_KIOSK_BLUETOOTH"').stdout == "keep-bluetooth"
+
+
+def test_a_missing_xinput_is_named_never_read_as_a_hung_x(op):
+    op.xinput.unlink()
+    for item in ("tap-to-click", "operator-input"):
+        st, d = op.row(item)
+        assert st == "FAIL" and "xinput is not installed" in d, d
+
+
+def test_the_kiosk_installs_xinput():
+    kiosk = (SCRIPTS / "lib" / "obs-box-kiosk.sh").read_text()
+    line = next(ln for ln in kiosk.splitlines() if "apt-get install -y openbox lightdm" in ln)
+    assert " xinput" in line.split("||")[0], line
+
+
+def test_a_touchpad_whose_properties_do_not_answer_is_named(op):
+    (op.st / "props-12").unlink()
+    st, d = op.row("tap-to-click")
+    assert st == "FAIL" and "did not answer" in d and "not driven by libinput" not in d, d
 
 
 def test_no_stream_deck_on_usb_is_a_note(op):
@@ -538,7 +612,17 @@ def test_multiview_click_off_or_absent_fails(op):
     st, d = op.row("mv-click")
     assert st == "FAIL" and "MultiviewMouseSwitch" in d, d
     ini.write_text("[BasicWindow]\nSaveProjectors=true\n")
-    assert op.row("mv-click")[0] == "FAIL"
+    st, d = op.row("mv-click")
+    assert st == "FAIL" and "not seeded" in d, d
+
+
+def test_multiview_click_is_read_the_way_libobs_config_get_bool_reads_it(op):
+    """libobs: astrcmpi(v, "true") == 0 || strtoull(v, 10, or 16 after 0x) != 0 (config-file.c)."""
+    ini = op.home / ".config" / "obs-studio" / "user.ini"
+    for value, want in (("TRUE", "OK"), ("1", "OK"), ("0x1", "OK"), ("12abc", "OK"), ("on", "FAIL"),
+                        ("yes", "FAIL"), ("0", "FAIL"), ("0x0", "FAIL"), ("", "FAIL")):
+        ini.write_text("[BasicWindow]\nMultiviewMouseSwitch=%s\n" % value)
+        assert op.row("mv-click")[0] == want, (value, op.row("mv-click"))
 
 
 def test_studio_mode_off_fails_and_obs_down_is_a_note(op):
@@ -700,3 +784,39 @@ def test_item_16_only_reports_an_inactive_hub_on_the_stream_role(tmp_path):
 def test_item_16_fails_a_missing_hub_on_the_strih_role(tmp_path):
     out = _item16(tmp_path, "strih-lx", "enabled", "active", installed=False)
     assert out.startswith("FAIL") and "not installed" in out, out
+
+
+def _step13_start(tmp_path, box, active):
+    s = SETUP.read_text()
+    a = s.index('if WHY="$(obs_box_step_applies 13-hub-live)"')
+    block = s[a:s.index("\nfi\n", a) + 4]
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    log = tmp_path / "calls"
+    _exec(stub / "systemctl", '#!/bin/bash\necho "systemctl $*" >> "%s"\n'
+                              '[ "$1" = is-active ] && exit %d\nexit 0\n' % (log, 0 if active else 3))
+    body = 'fail() { echo "FAIL $*"; exit 1; }\nwarn() { echo "WARN $*"; }\n' + block
+    r = _bash(body, box=box, env={"PATH": "%s:%s" % (stub, os.environ["PATH"])})
+    assert r.returncode == 0, r.stdout + r.stderr
+    return log.read_text() if log.exists() else ""
+
+
+def test_setup_step_13_starts_a_stopped_hub_on_the_strih_role(tmp_path):
+    calls = _step13_start(tmp_path, "strih-lx", active=False)
+    assert "systemctl start intercom-hub" in calls, calls
+    assert "restart" not in calls
+
+
+def test_setup_step_13_never_touches_a_running_hub(tmp_path):
+    calls = _step13_start(tmp_path, "strih-lx", active=True)
+    assert "systemctl start" not in calls and "restart" not in calls, calls
+
+
+def test_setup_step_13_leaves_the_stream_role_hub_alone(tmp_path):
+    assert _step13_start(tmp_path, "stream-pp", active=False) == ""
+
+
+def test_setup_step_13_has_no_stale_m4_wording():
+    s = SETUP.read_text()
+    step13 = s[s.index("step 13 "):s.index("step 14 ")]
+    assert "M4" not in step13 and "NEVER started" not in step13 and "NOT started here" not in step13
