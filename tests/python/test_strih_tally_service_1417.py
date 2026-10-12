@@ -8,6 +8,7 @@ import urllib.request
 import pytest
 from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve
+from websockets.exceptions import ConnectionClosed
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
 import strih_tally  # noqa: E402
@@ -19,6 +20,7 @@ class FakeObs:
         self.scenes = {f"Cam {n}": [(f"NDI cam{n}", "input")] for n in range(1, 8)}
         self.scenes["MULTIVIEW"] = [("NDI cam1", "input"), ("NDI cam2", "input")]
         self.inputs = {f"NDI cam{n}": f"CAM{n} (usb)" for n in range(1, 8)}
+        self.disabled = set()  # (scene, item name) pairs whose sceneItemEnabled is false
         self.conns = set()
 
     def answer(self, rt, data):
@@ -31,7 +33,8 @@ class FakeObs:
         if rt == "GetSceneList":
             return {"scenes": [{"sceneName": s} for s in self.scenes]}
         if rt == "GetSceneItemList":
-            return {"sceneItems": [{"sourceName": n, "isGroup": False, "sceneItemEnabled": True,
+            return {"sceneItems": [{"sourceName": n, "isGroup": False,
+                                    "sceneItemEnabled": (data["sceneName"], n) not in self.disabled,
                                     "sourceType": "OBS_SOURCE_TYPE_SCENE" if k == "scene" else "OBS_SOURCE_TYPE_INPUT"}
                                    for n, k in self.scenes.get(data["sceneName"], [])]}
         if rt == "GetInputList":
@@ -219,5 +222,133 @@ def test_state_endpoint():
             st = json.loads(body)
             assert st["pgm"] == 3 and st["pvw"] == 5 and st["obs_connected"] is True
             assert st["program_scene"] == "Cam 3" and any(x.endswith(" ESP-3") for x in st["tallies"])
+        await t.stop(); srv.close(); obs.close()
+    run(go())
+
+# --- review round 1 (issue 1417): transitions, OBS drops, gray once, remapping, relay limits -----------
+
+async def recv_for(ws, seconds):
+    """Everything the tally receives within `seconds` (a quiet period ends it, never an error)."""
+    got = []
+    async def _r():
+        while True:
+            got.append(await ws.recv())
+    try:
+        await asyncio.wait_for(_r(), seconds)
+    except asyncio.TimeoutError:
+        pass
+    return got
+
+
+def test_a_transition_keeps_both_cameras_red_then_restores_the_normal_colours():
+    """TALLY-TRS must follow the program change (the firmware recolours on TALLY-PGM), and the end of the
+    transition must send the full state again so the lights leave the TRS colours."""
+    async def go():
+        fake = FakeObs()
+        obs, t, srv, port = await start(fake)
+        async with connect(f"ws://127.0.0.1:{port}/") as tally:
+            await recv_until(tally, "TALLY-PGM 3")
+            await fake.event("SceneTransitionStarted", {"transitionName": "Fade"})
+            await recv_until(tally, "TALLY-TRS")
+            fake.program = "Cam 4"
+            await fake.event("CurrentProgramSceneChanged", {"sceneName": "Cam 4"})
+            got = await recv_until(tally, "TALLY-PGM 4")
+            got += await recv_for(tally, 0.5)
+            assert got[got.index("TALLY-PGM 4") + 1:] == ["TALLY-TRS"], got
+            await fake.event("SceneTransitionEnded", {"transitionName": "Fade"})
+            end = await recv_until(tally, "TALLY-PGM 4")
+            assert end[-2:] == ["TALLY-PVW 5", "TALLY-PGM 4"], end
+        await t.stop(); srv.close(); obs.close()
+    run(go())
+
+
+def test_a_short_obs_drop_keeps_the_state():
+    async def go():
+        fake = FakeObs()
+        obs, t, srv, port = await start(fake, obs_loss_s=1.5)
+        async with connect(f"ws://127.0.0.1:{port}/") as tally:
+            await recv_until(tally, "TALLY-PGM 3")
+            for ws in list(fake.conns):
+                await ws.close()
+            got = await recv_for(tally, 2.5)
+            assert "TALLY-PGM 0" not in got, got
+            assert t.state == (3, 5) and t.obs_connected
+        await t.stop(); srv.close(); obs.close()
+    run(go())
+
+
+def test_obs_loss_sends_gray_exactly_once():
+    async def go():
+        fake = FakeObs()
+        obs, t, srv, port = await start(fake, obs_loss_s=0.3, resend_s=30)
+        async with connect(f"ws://127.0.0.1:{port}/") as tally:
+            await recv_until(tally, "TALLY-PGM 3")
+            obs.close()
+            for ws in list(fake.conns):
+                await ws.close()
+            got = await recv_for(tally, 2.0)
+            assert got.count("TALLY-PGM 0") == 1 and got.count("TALLY-PVW 0") == 1, got
+        await t.stop(); srv.close()
+    run(go())
+
+
+def test_a_scene_item_event_remaps_the_camera():
+    async def go():
+        fake = FakeObs()
+        fake.program = "MULTIVIEW"
+        obs, t, srv, port = await start(fake)
+        async with connect(f"ws://127.0.0.1:{port}/") as tally:
+            await recv_until(tally, "TALLY-PGM 0")
+            fake.disabled.add(("MULTIVIEW", "NDI cam2"))
+            await fake.event("SceneItemEnableStateChanged", {"sceneName": "MULTIVIEW", "sceneItemEnabled": False})
+            await recv_until(tally, "TALLY-PGM 1")
+        await t.stop(); srv.close(); obs.close()
+    run(go())
+
+
+def test_the_relay_forwards_only_protocol_texts():
+    async def go():
+        fake = FakeObs()
+        obs, t, srv, port = await start(fake)
+        async with connect(f"ws://127.0.0.1:{port}/") as a, connect(f"ws://127.0.0.1:{port}/") as b:
+            await recv_until(a, "TALLY-PGM 3"); await recv_until(b, "TALLY-PGM 3")
+            await a.send("HELLO everyone")
+            await a.send("TALLY-LOCK 1")
+            got = await recv_until(b, "TALLY-LOCK 1")
+            assert "HELLO everyone" not in got, got
+        await t.stop(); srv.close(); obs.close()
+    run(go())
+
+
+def test_an_oversized_frame_closes_its_sender_and_reaches_nobody():
+    async def go():
+        fake = FakeObs()
+        obs, t, srv, port = await start(fake)
+        async with connect(f"ws://127.0.0.1:{port}/") as a, connect(f"ws://127.0.0.1:{port}/") as b:
+            await recv_until(a, "TALLY-PGM 3"); await recv_until(b, "TALLY-PGM 3")
+            await a.send("SET-LUMINANCE " + "9" * 4000)
+            got = await recv_for(b, 0.5)
+            assert not any(x.startswith("SET-LUMINANCE") for x in got), got
+            with pytest.raises(ConnectionClosed):
+                for _ in range(10):
+                    await asyncio.wait_for(a.recv(), 2)
+        await t.stop(); srv.close(); obs.close()
+    run(go())
+
+
+def test_state_reports_the_mapped_cameras_and_clean_join_names():
+    async def go():
+        fake = FakeObs()
+        obs, t, srv, port = await start(fake)
+        async with connect(f"ws://127.0.0.1:{port}/") as tally:
+            await tally.send("JOIN ESP-3\nforged line\x1b[31m")
+            await recv_until(tally, "TALLY-PGM 3")
+            await asyncio.sleep(0.2)
+            body = await asyncio.to_thread(lambda: urllib.request.urlopen(f"http://127.0.0.1:{port}/state", timeout=2).read())
+            st = json.loads(body)
+            assert st["camera_inputs"] == 7
+            assert len(st["tallies"]) == 1
+            name = st["tallies"][0]
+            assert "\n" not in name and "\x1b" not in name and "ESP-3" in name, name
         await t.stop(); srv.close(); obs.close()
     run(go())

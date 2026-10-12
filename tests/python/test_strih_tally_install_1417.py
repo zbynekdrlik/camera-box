@@ -103,7 +103,7 @@ class Box:
         self.tmp = tmp_path
         self.state = tmp_path / "state"
         self.state.mkdir()
-        (self.state / "installed").write_text("python3-websockets\navahi-utils\n")
+        (self.state / "installed").write_text("python3-websockets\npython3-websocket\navahi-utils\n")
         self.bin = tmp_path / "bin"
         self.bin.mkdir()
         _write_exec(self.bin / "dpkg-query", _FAKE_DPKG)
@@ -188,7 +188,8 @@ def box(tmp_path):
 def _healthy(box):
     assert box.install().returncode == 0
     box.serve_state({"pgm": 3, "pvw": 5, "program_scene": "Cam 3", "preview_scene": "Cam 5",
-                     "studio_mode": True, "obs_connected": True, "tallies": ["10.77.9.50 ESP-3"]})
+                     "studio_mode": True, "obs_connected": True, "camera_inputs": 7,
+                     "tallies": ["10.77.9.50 ESP-3"]})
     (box.state / "resolve").write_text("atemrpi.local\t10.77.9.202\n")
     (box.state / "obs-program").write_text("Cam 3\n")
 
@@ -200,6 +201,13 @@ def test_the_tally_unit_template_runs_the_installed_service_as_the_operator():
     assert t.count("User=@USER@") == 1
     assert "ExecStart=/usr/bin/python3 /usr/local/lib/camera-box/strih_tally.py --port 9240 --obs ws://127.0.0.1:4455" in t
     assert "Restart=always" in t and "WantedBy=multi-user.target" in t
+
+
+def test_both_units_are_hardened():
+    for unit in (UNIT_TPL, MDNS_UNIT):
+        t = unit.read_text()
+        for line in ("NoNewPrivileges=yes", "ProtectSystem=strict", "ProtectHome=yes", "PrivateTmp=yes"):
+            assert line + "\n" in t, (unit.name, line)
 
 
 def test_the_mdns_unit_announces_atemrpi_local_at_the_box_ip():
@@ -272,7 +280,7 @@ def test_missing_packages_are_installed_and_an_apt_failure_fails_the_step(box):
     r = box.install()
     assert r.returncode == 0, r.stderr
     assert any(c.startswith("apt-get install -y") and "python3-websockets" in c and "avahi-utils" in c
-               for c in box.calls())
+               and "python3-websocket " in c + " " for c in box.calls())
     (box.state / "installed").write_text("")
     (box.state / "apt-fails").write_text("")
     r = box.install()
@@ -393,3 +401,13 @@ def test_setup_and_verify_call_the_lib_once_within_the_line_budget():
     # never between item 34 and 32: test_ndi_discovery_1342 runs that slice with only its own lib sourced
     assert not (v.index("# 34) NDI discovery") < i < v.index("# 32) the shared OBS-box"))
     assert '. "$(dirname "${BASH_SOURCE[0]}")/strih-tally.sh"' in PROVISION.read_text()
+
+
+def test_a_service_with_no_mapped_camera_fails_the_port_row(box):
+    """A strih where no NDI input carries a CAM<n> source lights nothing; the grade must say so."""
+    _healthy(box)
+    box.close()
+    box.serve_state({"pgm": 0, "pvw": 0, "program_scene": "Cam 3", "preview_scene": "Cam 5",
+                     "studio_mode": True, "obs_connected": True, "camera_inputs": 0, "tallies": []})
+    row = box.rows()[1]
+    assert row[0] == "FAIL" and "(tally-port)" in row[1] and "no camera" in row[1], row
