@@ -394,8 +394,11 @@ reads into `scripts/lib/strih-obs-collection.sh` before adding items 37/38 (the 
 Item 41 (issue 1404, the stream program-audio sampler moved here from dev1) is such a lib grader:
 `scripts/lib/strih-program-audio.sh` (sourced by strih-provision.sh) holds setup-strih step 16e + the
 item's 3 rows; verify-strih gained 4 lines. Details: `.claude/rules/program-audio-guard.md` ("The host").
-**setup-strih.sh is exactly 1000 lines with step 16e:** the next step goes into a lib too (the
-step-16d/16e shape: one lettered `step` line + one lib call in setup-strih).
+**setup-strih.sh AND verify-strih.sh are both exactly 1000 lines** (issue 1415 added the one
+`obs_box_timezone` call to step 1 and folded the timezone fix hint into item 32's existing line).
+`test_verify_strih_stays_within_its_line_budget` (tests/python/test_strih_session_apps_1399.py)
+FAILs either file at 1001: the next step or item goes into a lib (the step-16d/16e shape: one
+lettered `step` line + one lib call in setup-strih), and an edit to an existing line must not add one.
 
 **Before the first strih-lx deploy of this change, read the master's command line** (read-only, on the
 box): `tr '\0' ' ' < /proc/$(systemctl show -p MainPID --value dantesync)/cmdline | sed 's/ *$//'` must

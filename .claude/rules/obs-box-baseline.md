@@ -3,6 +3,7 @@ paths:
   - "scripts/lib/obs-box-baseline.sh"
   - "scripts/lib/obs-box-kiosk.sh"
   - "scripts/lib/obs-box-baseline-verify.sh"
+  - "scripts/lib/rig-timezone.sh"
   - "scripts/setup-imag.sh"
   - "scripts/setup-strih.sh"
   - "scripts/verify-imag.sh"
@@ -140,6 +141,37 @@ Rules for the facet:
   deploy re-runs setup-strih every time.
 - **`obs_box_write_if_changed` details:** an exclusive `mktemp` sibling (never a predictable root
   temp inside a user-writable config dir); content, mode AND owner are all part of the unchanged check.
+
+## The rig time zone (item `obs_box_timezone`, grader row `timezone`, issue 1415)
+
+Every fresh box used to run the image default `Etc/UTC`, so the browser-source clocks (Camera info,
+Interkom, Odpocet) ran 2 h behind. The zone is ONE declaration, `RIG_TIMEZONE` in
+`scripts/lib/rig-timezone.sh` (Europe/Bratislava), shared with setup-device.sh / create-usb-linux.sh
+/ verify-device.sh `(as)`. Never retype it.
+
+- **Install:** `obs_box_timezone` (kiosk half, which sources the lib) runs in STEP 1 of BOTH setup
+  scripts (imag's static-IP step, strih's static-IP + hostname step), not in step 11. It installs
+  tzdata when the zoneinfo file is missing, then `rig_timezone_apply`.
+- **Never `timedatectl set-timezone`.** The writer writes the `/etc/localtime` symlink +
+  `/etc/timezone` itself, and every reader reads `readlink /etc/localtime`. On a read-only-root
+  cambox systemd-timedated keeps its own mount namespace, so set-timezone fails inside a correct rw
+  window and `timedatectl show -p Timezone` then reports a zone the link does not have (live
+  12.10.2026). `timedatectl set-ntp false` (setup-imag, dantesync owns the clock) is a different call
+  and stays.
+- **Grader row `timezone`** (FIRST, before `net`): the gather embeds `rig_timezone_read` by
+  `declare -f` and prints `timezone=<zone>`; the verdict is `rig_timezone_verdict`. A copied
+  `/etc/localtime` file (no link) reads empty and FAILs.
+- `RIG_TIMEZONE` is the one override for a box outside Slovakia.
+- **A zone change needs a restart of what runs.** glibc `localtime_r` (and so Python) and OBS's CEF
+  sources keep the zone they loaded. When `obs_box_timezone` changed the zone it prints a note: reboot,
+  or restart the OBS unit, the :8899 bundle-state server and the session apps TOGETHER. A restarted
+  OBS beside a UTC bundle-state server reads its own log ~2 h old (`obs_log_head_age_s`), which the
+  audio-mixer watchdog reads as STALE / a CLOCK page. The strih-lx genlock deploy restarts OBS only.
+- **The swap is atomic:** the link and `/etc/timezone` are built as `*.rig-new` beside their names and
+  `mv -Tf`'d over them, so a live reader never sees a missing `/etc/localtime` (glibc: UTC).
+- **Known side effect, accepted:** the `apt-daily-upgrade` off-hours drop-in (`OnCalendar=04:00`,
+  local time) now fires at 04:00 Bratislava = 02:00-02:30Z in summer, the strih-lx dantesync nightly
+  date-step window. 04:00 local is still off-hours; apt is not timing-sensitive.
 
 ## The CPU idle wake-up latency bound (item `obs_box_cpu_latency`, grader row `cstate`)
 
