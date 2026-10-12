@@ -174,17 +174,17 @@ owns that 10-amdgpu.conf). Xorg then logs `Failed to load module "amdgpu"` (harm
     fresh box needs a second setup run (re-review finding);
   - `obs_box_nvidia_prime` calls `obs_box_igpu_sink_modesetting` right after `prime-select nvidia`,
     inside the discrete-NVIDIA branch only (an iGPU-only box gets nothing). It:
-  - removes the ones of `obs_box_amdgpu_ddx_packages` that are on the box (`xserver-xorg-video-amdgpu`,
-    `xserver-xorg-video-all`) through `obs_box_amdgpu_ddx_remove`: an `apt-get -s remove` dry run
-    first, and a removal that would take ANY other package (xserver-xorg, lightdm) is REFUSED by name,
-    never done; nothing installed = nothing touched; an apt error fails loud, and so does a
-    `dpkg-query` that cannot answer (`obs_box_pkg_status`: a status, `absent`, or rc 1; any unpacked
-    state, half-installed included, counts as present). No list refresh is needed; the dpkg lock wait is
-    `obs_box_apt_lock_timeout`'s;
-  - still writes `/etc/X11/xorg.conf.d/20-igpu-sink-modesetting.conf` (the OutputClass, belt and
-    braces, its own comment says so) through `obs_box_write_if_changed` (0644 root:root). Never rely
-    on it alone.
-  - It takes effect at the next X start (which restarts OBS).
+    - removes the ones of `obs_box_amdgpu_ddx_packages` that are on the box (`xserver-xorg-video-amdgpu`,
+      `xserver-xorg-video-all`) through `obs_box_amdgpu_ddx_remove`: an `apt-get -s remove` dry run
+      first, and a removal that would take ANY other package (xserver-xorg, lightdm) is REFUSED by name,
+      never done; nothing installed = nothing touched; an apt error fails loud, and so does a
+      `dpkg-query` that cannot answer (`obs_box_pkg_status`: a status, `absent`, or rc 1; any unpacked
+      state, half-installed included, counts as present). No list refresh is needed; the dpkg lock wait is
+      `obs_box_apt_lock_timeout`'s;
+    - still writes `/etc/X11/xorg.conf.d/20-igpu-sink-modesetting.conf` (the OutputClass, belt and
+      braces, its own comment says so) through `obs_box_write_if_changed` (0644 root:root). Never rely
+      on it alone.
+  - Both take effect at the next X start (which restarts OBS).
 - **Grader row `igpu-sink`** (right after `gpu`): on a dGPU box it is OK only when
   `obs_box_pkg_status` of `obs_box_amdgpu_ddx_package` reads `absent` / `... not-installed` /
   `... config-files` (gather key `amdgpu_ddx`; `declare -f` embeds both functions). Any unpacked state
