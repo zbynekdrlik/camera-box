@@ -45,6 +45,14 @@ covers the provisioning scaffolding built during that preparation.
 > history. strih-obs-start.sh resolves `DISPLAY=:0` only; Companion Satellite runs as the session app
 > `companion-satellite.service` (issue 1399), which the openbox autostart starts. See `.claude/rules/obs-box-baseline.md` for the conversion runbook.
 
+## A live hand fix is not done until setup + verify carry it (issue 1418, owner ROZHODNUTE 12.10.2026)
+
+Every fix applied by hand to a strih / stream / imag notebook (xinput, nmcli, a user.ini edit, a
+package) lands in setup-strih / setup-imag or the shared obs-box baseline AND gets a verify row that
+FAILs without it, the SAME day. A box is production-ready only when `verify-strih.sh` passes with
+the operator items (item 43: input devices, tap-to-click, Bluetooth, Stream Deck, Multiview click,
+Studio Mode, a live panel) on the box with OBS running. Details: `.claude/rules/strih-operator.md`.
+
 ## Per-box FACT files — one script for every strih box (issue 1361)
 
 `setup-strih.sh` / `verify-strih.sh` take `--box <name>` (default `strih-lx`, so a bare run is
@@ -394,8 +402,10 @@ reads into `scripts/lib/strih-obs-collection.sh` before adding items 37/38 (the 
 Item 41 (issue 1404, the stream program-audio sampler moved here from dev1) is such a lib grader:
 `scripts/lib/strih-program-audio.sh` (sourced by strih-provision.sh) holds setup-strih step 16e + the
 item's 3 rows; verify-strih gained 4 lines. Details: `.claude/rules/program-audio-guard.md` ("The host").
-**setup-strih.sh AND verify-strih.sh are both exactly 1000 lines** (issue 1415 added the one
-`obs_box_timezone` call to step 1 and folded the timezone fix hint into item 32's existing line).
+**verify-strih.sh is exactly 1000 lines; setup-strih.sh is ~966** (issue 1415 added the one
+`obs_box_timezone` call to step 1 and folded the timezone fix hint into item 32's existing line;
+issue 1418 moved the step-7 [BasicWindow] upsert into `scripts/lib/strih-operator.sh` and paid for
+item 43's two lines by shortening item 16 in place).
 `test_verify_strih_stays_within_its_line_budget` (tests/python/test_strih_session_apps_1399.py)
 FAILs either file at 1001: the next step or item goes into a lib (the step-16d/16e shape: one
 lettered `step` line + one lib call in setup-strih), and an edit to an existing line must not add one.
