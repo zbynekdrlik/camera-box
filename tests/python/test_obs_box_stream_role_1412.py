@@ -98,11 +98,12 @@ def test_stream_pp_loads_as_the_stream_role(boxes):
 
 
 def test_stream_pp_loads_with_every_fact_answered():
-    """11.10.2026: the last open fact (the NDI runtime peer) is answered -- SNV cam5, the fleet runtime."""
+    """The NDI runtime peer is a PP cambox: cam7 (10.77.9.67 on the PP LAN, issue 1413). It was SNV
+    cam5 on 11.10.2026, before the PP camboxes had a PP address."""
     r = _bash("strih_box_load stream-pp || exit 9\nstrih_lx_ndi_runtime_peer", sources=(FACTS,))
     assert r.returncode == 0, r.stderr
     assert "TODO_OWNER" not in r.stderr
-    assert r.stdout.strip() == "10.77.9.65"
+    assert r.stdout.strip() == "10.77.9.67"
 
 
 @pytest.mark.parametrize("box,old,new,word", [
