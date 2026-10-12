@@ -467,27 +467,27 @@ obs_box_pkg_status_absent() {
 # fail(); the dpkg lock wait is the baseline's apt.conf.d timeout. Takes effect at the next X start.
 obs_box_amdgpu_ddx_remove() {
     local p st sim r
-    local -a installed=() extra=()
+    local -a ddx_present=() extra=()
     while IFS= read -r p; do
         st="$(obs_box_pkg_status "$p")" \
             || fail "igpu-sink: dpkg-query cannot read ${p} -- cannot tell whether the amdgpu DDX is installed (dpkg -l ${p})"
-        if ! obs_box_pkg_status_absent "$st"; then installed+=("$p"); fi
+        if ! obs_box_pkg_status_absent "$st"; then ddx_present+=("$p"); fi
     done < <(obs_box_amdgpu_ddx_packages)
-    if [ "${#installed[@]}" = 0 ]; then
+    if [ "${#ddx_present[@]}" = 0 ]; then
         echo "  igpu-sink: $(obs_box_amdgpu_ddx_package) not installed -- unchanged (the iGPU sink runs on modesetting)"
         return 0
     fi
-    sim="$(LC_ALL=C apt-get -s remove "${installed[@]}" 2>&1)" \
-        || fail "igpu-sink: apt-get -s remove ${installed[*]} failed: ${sim}"
+    sim="$(LC_ALL=C apt-get -s remove "${ddx_present[@]}" 2>&1)" \
+        || fail "igpu-sink: apt-get -s remove ${ddx_present[*]} failed: ${sim}"
     while IFS= read -r r; do
-        case " ${installed[*]} " in *" ${r} "*) ;; *) extra+=("$r") ;; esac
+        case " ${ddx_present[*]} " in *" ${r} "*) ;; *) extra+=("$r") ;; esac
     done < <(awk '$1 == "Remv" { print $2 }' <<<"$sim" || true)
     if [ "${#extra[@]}" != 0 ]; then
-        fail "igpu-sink: removing ${installed[*]} would also remove ${extra[*]} -- refused; remove the amdgpu DDX by hand without them (issue 1418)"
+        fail "igpu-sink: removing ${ddx_present[*]} would also remove ${extra[*]} -- refused; remove the amdgpu DDX by hand without them (issue 1418)"
     fi
-    DEBIAN_FRONTEND=noninteractive apt-get remove -y "${installed[@]}" >/dev/null \
-        || fail "igpu-sink: apt-get remove ${installed[*]} failed -- the iGPU panel sink keeps the amdgpu DDX that froze strih-snv"
-    echo "  igpu-sink: removed ${installed[*]} -- the iGPU panel sink runs on modesetting from the next X start"
+    DEBIAN_FRONTEND=noninteractive apt-get remove -y "${ddx_present[@]}" >/dev/null \
+        || fail "igpu-sink: apt-get remove ${ddx_present[*]} failed -- the iGPU panel sink keeps the amdgpu DDX that froze strih-snv"
+    echo "  igpu-sink: removed ${ddx_present[*]} -- the iGPU panel sink runs on modesetting from the next X start"
 }
 
 # obs_box_igpu_sink_conf_path -> where the belt-and-braces OutputClass file lives.

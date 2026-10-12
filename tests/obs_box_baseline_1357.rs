@@ -950,7 +950,11 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
         ("rtprio", "obs_running=1", "obs_running="),
         ("gpu", "prime=nvidia", "prime=on-demand"),
         // issue 1418: the amdgpu DDX installed on a discrete-NVIDIA box
-        ("igpu-sink", "amdgpu_ddx=deinstall ok config-files", "amdgpu_ddx=install ok installed"),
+        (
+            "igpu-sink",
+            "amdgpu_ddx=deinstall ok config-files",
+            "amdgpu_ddx=install ok installed",
+        ),
         ("dejitter", "oomd=masked", "oomd=enabled"),
         ("dejitter", "process_priority=1", "process_priority=0"),
         ("dejitter", "user_masked=9/9", "user_masked=7/9"),
