@@ -1,12 +1,18 @@
 """issue 1418: the iGPU panel sink of an NVIDIA-primary box runs on the Xorg `modesetting` DDX.
 
 strih-snv 11/12.10.2026: NVIDIA renders the X screen (PRIME nvidia-primary) and the AMD Radeon 780M
-iGPU scans the panel out as a reverse-PRIME sink. Xorg autoloaded xf86-video-amdgpu for that sink, and
-its panel commit (`commit_work`) blocked forever on an NVIDIA fence: the panel froze for 18 h. The
-Intel notebook before it had the same topology with the sink on `modesetting` and was stable
-(ROZHODNUTE 6132283178). So the shared baseline (scripts/lib/obs-box-baseline.sh, the NVIDIA/PRIME
-step) writes /etc/X11/xorg.conf.d/20-igpu-sink-modesetting.conf on every discrete-NVIDIA box, and the
-ONE baseline grader (scripts/lib/obs-box-baseline-verify.sh) grades it in its `igpu-sink` row.
+iGPU scans the panel out as a reverse-PRIME sink. Xorg loaded xf86-video-amdgpu for that sink, and its
+panel commit (`commit_work`) blocked forever on an NVIDIA fence: the panel froze for 18 h. The Intel
+notebook before it had the same topology with the sink on `modesetting` and was stable
+(ROZHODNUTE 6132283178).
+
+The live fix on strih-snv (12.10.2026 23:00): an /etc/X11/xorg.conf.d OutputClass `MatchDriver
+"amdgpu"` -> `Driver "modesetting"` does NOT win (tried as 20-, 05- and a same-named 10-amdgpu.conf
+shadow): Xorg applies the package's own /usr/share/X11/xorg.conf.d/10-amdgpu.conf first. Removing
+`xserver-xorg-video-amdgpu` (+ the `xserver-xorg-video-all` meta, its only reverse dependency) does:
+the sink reads `name:modesetting`. So the shared baseline's NVIDIA/PRIME step removes the two packages
+on a discrete-NVIDIA box (and still writes the OutputClass file, belt and braces), and the ONE baseline
+grader FAILs its `igpu-sink` row while the amdgpu DDX is installed on such a box.
 """
 
 import os
@@ -18,17 +24,40 @@ BASELINE = REPO / "scripts" / "lib" / "obs-box-baseline.sh"
 VERIFY_LIB = REPO / "scripts" / "lib" / "obs-box-baseline-verify.sh"
 OPERATOR_LIB = REPO / "scripts" / "lib" / "strih-operator.sh"
 CONF = "/etc/X11/xorg.conf.d/20-igpu-sink-modesetting.conf"
+DDX = "xserver-xorg-video-amdgpu"
+META = "xserver-xorg-video-all"
 SECTION = ['Section "OutputClass"', '    Identifier "igpu-sink-modesetting"', '    MatchDriver "amdgpu"',
            '    Driver "modesetting"', "EndSection"]
 ME = "%s:%s" % (subprocess.run(["id", "-un"], capture_output=True, text=True).stdout.strip(),
                 subprocess.run(["id", "-gn"], capture_output=True, text=True).stdout.strip())
 
+# dpkg-query / apt-get stand-ins as bash FUNCTIONS (they shadow the real tools, so a test never removes
+# a package): $INSTALLED lists the installed packages, $EXTRA_REMV what a simulated remove would take
+# besides them, $APT_FAIL=1 fails the real remove. Every call is logged to $LOG.
+FAKE_APT = r'''
+dpkg-query() {
+    echo "dpkg-query $*" >> "$LOG"
+    case " $INSTALLED " in *" ${@: -1} "*) printf 'install ok installed' ;; *) return 1 ;; esac
+}
+apt-get() {
+    echo "apt-get $*" >> "$LOG"
+    local a
+    if [ "$1" = -s ]; then
+        for a in "${@:3}" $EXTRA_REMV; do echo "Remv $a [1.0]"; done
+        return 0
+    fi
+    [ "${APT_FAIL:-0}" != 1 ] || { echo "E: dpkg was interrupted" >&2; return 100; }
+}
+'''
 
-def _bash(lib, body, args=()):
+
+def _bash(lib, body, args=(), env=None):
     """Run BODY under the callers' strict mode with LIB sourced and a caller-style fail()."""
     script = 'set -euo pipefail\nfail() { echo "FAIL: $1" >&2; exit 1; }\n. "$1"\nshift\n' + body
+    e = dict(os.environ)
+    e.update(env or {})
     return subprocess.run(["bash", "-c", script, "harness", str(lib), *args], capture_output=True,
-                          text=True, timeout=120)
+                          text=True, timeout=120, env=e)
 
 
 def _conf_text():
@@ -37,26 +66,73 @@ def _conf_text():
     return r.stdout
 
 
+def _remove(tmp_path, installed, extra="", apt_fail="0"):
+    log = tmp_path / "calls"
+    log.write_text("")
+    r = _bash(BASELINE, FAKE_APT + "obs_box_amdgpu_ddx_remove",
+              env={"LOG": str(log), "INSTALLED": installed, "EXTRA_REMV": extra, "APT_FAIL": apt_fail})
+    return r, log.read_text().splitlines()
+
+
+def test_the_amdgpu_ddx_packages_are_the_ddx_and_its_meta():
+    assert _bash(BASELINE, "obs_box_amdgpu_ddx_package").stdout == DDX
+    assert _bash(BASELINE, "obs_box_amdgpu_ddx_packages").stdout.split() == [DDX, META]
+
+
+def test_nothing_installed_removes_nothing(tmp_path):
+    r, calls = _remove(tmp_path, "")
+    assert r.returncode == 0, r.stderr
+    assert "unchanged" in r.stdout and not [c for c in calls if c.startswith("apt-get")], calls
+
+
+def test_the_installed_ddx_and_meta_are_removed_after_a_clean_simulation(tmp_path):
+    r, calls = _remove(tmp_path, "%s %s" % (DDX, META))
+    assert r.returncode == 0, r.stderr
+    sim = "apt-get -s remove %s %s" % (DDX, META)
+    real = "apt-get remove -y %s %s" % (DDX, META)
+    assert sim in calls and real in calls and calls.index(sim) < calls.index(real), calls
+    assert "removed" in r.stdout and DDX in r.stdout
+
+
+def test_only_the_installed_ones_are_named(tmp_path):
+    r, calls = _remove(tmp_path, DDX)
+    assert r.returncode == 0, r.stderr
+    assert "apt-get remove -y %s" % DDX in calls, calls
+
+
+def test_a_removal_that_would_take_more_packages_is_refused(tmp_path):
+    """Never remove xserver-xorg (and the session with it) to get rid of the DDX."""
+    r, calls = _remove(tmp_path, "%s %s" % (DDX, META), extra="xserver-xorg lightdm")
+    assert r.returncode != 0 and "xserver-xorg lightdm" in r.stderr, r.stdout + r.stderr
+    assert not [c for c in calls if c.startswith("apt-get remove")], calls
+
+
+def test_a_failed_removal_fails_loud(tmp_path):
+    r, _calls = _remove(tmp_path, DDX, apt_fail="1")
+    assert r.returncode != 0 and "FAIL" in r.stderr and DDX in r.stderr, r.stderr
+
+
 def test_the_conf_maps_an_amdgpu_sink_onto_modesetting():
     lines = _conf_text().splitlines()
     i = lines.index(SECTION[0])
     assert lines[i:i + len(SECTION)] == SECTION
     assert all(ln.startswith("#") for ln in lines[:i]), "only comment lines before the section"
-    assert "commit_work" in _conf_text() and "modesetting" in _conf_text()
+    assert "10-amdgpu.conf" in _conf_text(), "the file says it is belt and braces, never the fix"
     assert _bash(BASELINE, "obs_box_igpu_sink_conf_path").stdout == CONF
 
 
-def test_the_install_writes_the_conf_once_and_repairs_a_drift(tmp_path):
+def test_the_install_removes_the_ddx_and_writes_the_conf_once(tmp_path):
     dest = tmp_path / "xorg.conf.d" / "20-igpu-sink-modesetting.conf"
-    r = _bash(BASELINE, 'obs_box_igpu_sink_modesetting "$1" "$2"', (str(dest), ME))
+    log = tmp_path / "calls"
+    env = {"LOG": str(log), "INSTALLED": DDX, "EXTRA_REMV": "", "APT_FAIL": "0"}
+    r = _bash(BASELINE, FAKE_APT + 'obs_box_igpu_sink_modesetting "$1" "$2"', (str(dest), ME), env)
     assert r.returncode == 0, r.stderr
+    assert "apt-get remove -y %s" % DDX in log.read_text()
     assert "written" in r.stdout and dest.read_text() == _conf_text()
     assert oct(dest.stat().st_mode & 0o777) == "0o644"
-    r = _bash(BASELINE, 'obs_box_igpu_sink_modesetting "$1" "$2"', (str(dest), ME))
-    assert r.returncode == 0 and "unchanged" in r.stdout, r.stdout + r.stderr
-    dest.write_text(dest.read_text().replace('Driver "modesetting"', 'Driver "amdgpu"'))
-    r = _bash(BASELINE, 'obs_box_igpu_sink_modesetting "$1" "$2"', (str(dest), ME))
-    assert r.returncode == 0 and "written" in r.stdout and dest.read_text() == _conf_text()
+    env["INSTALLED"] = ""
+    r = _bash(BASELINE, FAKE_APT + 'obs_box_igpu_sink_modesetting "$1" "$2"', (str(dest), ME), env)
+    assert r.returncode == 0 and r.stdout.count("unchanged") == 2, r.stdout + r.stderr
 
 
 def test_the_nvidia_prime_step_installs_it_on_a_discrete_nvidia_box(tmp_path):
@@ -77,7 +153,7 @@ obs_box_nvidia_prime strih
     assert log.read_text().splitlines() == ["prime-select nvidia", "igpu-sink <defaults>"]
 
 
-def test_the_iGPU_only_branch_never_writes_the_conf():
+def test_the_iGPU_only_branch_never_runs_it():
     lib = BASELINE.read_text()
     body = lib[lib.index("\nobs_box_nvidia_prime() {"):]
     body = body[:body.index("\n}\n")]
@@ -87,26 +163,24 @@ def test_the_iGPU_only_branch_never_writes_the_conf():
     assert body.count("obs_box_igpu_sink_modesetting") == 1
 
 
-def _gather(tmp_path, conf_text):
-    """The real gather snippet with only the conf path moved into tmp_path; returns igpu_sink_conf."""
+def _gather(dpkg_answers):
+    """The real gather snippet, dpkg-query shadowed by a function; returns its amdgpu_ddx value."""
     snip = _bash(VERIFY_LIB, 'obs_box_baseline_gather_snippet strih "$1" strih-obs.service',
                  (os.environ.get("USER") or "nobody",))
     assert snip.returncode == 0, snip.stderr
-    assert snip.stdout.count(CONF) == 1
-    conf = tmp_path / "20-igpu-sink-modesetting.conf"
-    if conf_text is not None:
-        conf.write_text(conf_text)
-    out = subprocess.run(["bash", "-c", snip.stdout.replace(CONF, str(conf))], capture_output=True,
-                         text=True, timeout=120).stdout
-    vals = [ln.split("=", 1)[1] for ln in out.splitlines() if ln.startswith("igpu_sink_conf=")]
+    fake = ('dpkg-query() { [ "${@: -1}" = %s ] && printf %%s %s; return 0; }\n'
+            % (DDX, "'%s'" % dpkg_answers if dpkg_answers else "''"))
+    out = subprocess.run(["bash", "-c", fake + snip.stdout], capture_output=True, text=True,
+                         timeout=120).stdout
+    vals = [ln.split("=", 1)[1] for ln in out.splitlines() if ln.startswith("amdgpu_ddx=")]
     assert len(vals) == 1, out
     return vals[0]
 
 
-def test_the_gather_reads_the_installed_conf_against_the_renderer(tmp_path):
-    assert _gather(tmp_path, _conf_text()) == "1"
-    assert _gather(tmp_path, _conf_text().replace('Driver "modesetting"', 'Driver "amdgpu"')) == "0"
-    assert _gather(tmp_path, None) == "0"
+def test_the_gather_reads_the_ddx_package_status():
+    assert _gather("install ok installed") == "install ok installed"
+    assert _gather("deinstall ok config-files") == "deinstall ok config-files"
+    assert _gather("") == ""
 
 
 def _rows(facts):
@@ -121,25 +195,26 @@ def _sink(facts):
     return hits[0]
 
 
-def test_the_verdict_grades_the_conf_on_a_discrete_nvidia_box_right_after_gpu():
-    names = [n for n, _, _ in _rows("gather_done=1\ndgpu=1\nigpu_sink_conf=1\n")]
+def test_the_verdict_fails_the_installed_ddx_on_a_discrete_nvidia_box_right_after_gpu():
+    names = [n for n, _, _ in _rows("gather_done=1\ndgpu=1\namdgpu_ddx=\n")]
     assert names[names.index("gpu") + 1] == "igpu-sink"
-    assert _sink("gather_done=1\ndgpu=1\nigpu_sink_conf=1\n")[0] == "OK"
-    st, d = _sink("gather_done=1\ndgpu=1\nigpu_sink_conf=0\n")
-    assert st == "FAIL" and CONF in d and "modesetting" in d, d
-    assert _sink("gather_done=1\ndgpu=1\n")[0] == "FAIL", "an unread fact is never a pass"
+    st, d = _sink("gather_done=1\ndgpu=1\namdgpu_ddx=install ok installed\n")
+    assert st == "FAIL" and DDX in d and "10-amdgpu.conf" in d, d
+    for removed in ("", "deinstall ok config-files", "not-installed"):
+        st, d = _sink("gather_done=1\ndgpu=1\namdgpu_ddx=%s\n" % removed)
+        assert st == "OK" and "modesetting" in d, (removed, d)
 
 
-def test_an_igpu_only_box_needs_no_sink_conf():
-    st, d = _sink("gather_done=1\ndgpu=0\nigpu_sink_conf=0\n")
+def test_an_igpu_only_box_is_not_graded_on_the_ddx():
+    st, d = _sink("gather_done=1\ndgpu=0\namdgpu_ddx=install ok installed\n")
     assert st == "OK" and "no discrete NVIDIA" in d, d
 
 
 def test_an_incomplete_gather_fails_the_row():
-    assert _sink("dgpu=1\nigpu_sink_conf=1\n")[0] == "FAIL"
+    assert _sink("dgpu=1\namdgpu_ddx=\n")[0] == "FAIL"
 
 
-def test_the_operator_row_names_the_same_conf_path():
-    r = _bash(BASELINE, '. "$1"; [ "$STRIH_OPERATOR_IGPU_SINK_CONF" = "$(obs_box_igpu_sink_conf_path)" ]',
+def test_the_operator_row_names_the_same_package():
+    r = _bash(BASELINE, '. "$1"; [ "$STRIH_OPERATOR_AMDGPU_DDX_PKG" = "$(obs_box_amdgpu_ddx_package)" ]',
               (str(OPERATOR_LIB),))
     assert r.returncode == 0, r.stdout + r.stderr

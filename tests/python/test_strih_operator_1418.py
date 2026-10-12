@@ -712,13 +712,13 @@ def test_the_panel_is_a_note_while_obs_is_down(op):
     assert op.row("operator-panel")[0] == "NOTE"
 
 
-def test_the_12_10_amdgpu_ddx_panel_sink_fails_naming_the_baseline_conf(op):
+def test_the_12_10_amdgpu_ddx_panel_sink_fails_naming_the_ddx_package(op):
     """strih-snv 12.10.2026: the AMD iGPU sink ran on xf86-video-amdgpu (the Intel notebook before it ran
     modesetting and was stable), and its panel commit waited forever on an NVIDIA fence."""
     (op.st / "xrandr").write_text(XR_SNV)
     st, d = op.row("panel-gpu")
     assert st == "FAIL" and "AMD Radeon 780M Graphics @ pci:0000:64:00.0" in d and "NVIDIA-0" in d, d
-    assert "/etc/X11/xorg.conf.d/20-igpu-sink-modesetting.conf" in d and "modesetting" in d, d
+    assert "xserver-xorg-video-amdgpu" in d and "modesetting" in d, d
     assert "BIOS" not in d, d
 
 
