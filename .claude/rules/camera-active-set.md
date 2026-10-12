@@ -21,7 +21,9 @@ box is cam3; `CAMERA_ALIGN_SET` is cam3 + every strih-routable active camera (`c
 SNV `cam3 cam5`, the unconditional cam4 is gone); the five python mirrors + the
 `rig-dev-handover-check.sh` fallback carry `cam2 cam3 cam5`. The PP cameras keep every fact and are
 maintained through the dantesync fleet's PP `reach` rows (`.claude/rules/dantesync-fleet.md`), never
-through this SNV measurement set. Everything below is the history before it.
+through this SNV measurement set: dantesync, and the camera-box binary through
+`deploy-fleet.sh --venue <name>` + the ci.yml away-venue step + the version gate's report-only
+`--other-venues` rows. Everything below is the history before it.
 
 `CAMERA_ACTIVE_SET` (`scripts/camera-set.sh`, #827) is the ONE declared list of cameras physically
 installed and MEASURED TODAY (default `cam1 cam2 cam3 cam4 cam5 cam6 cam7` — the FULL seven-camera

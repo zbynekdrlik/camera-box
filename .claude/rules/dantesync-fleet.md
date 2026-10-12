@@ -44,10 +44,25 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
     consumers (`dantesync_fleet_spec` / `_field` / `_names`) read the rows `2>/dev/null || true`, so
     there that camera is just absent; CI pins the committed fact files clean
     (`test_every_camera_row_follows_its_venue` asserts rc 0). A camera no venue lists is in no row.
-  - **Not covered yet (a follow-up named on the lane return):** the camera-box BINARY on the PP
-    camboxes. The CI `deploy-fleet` job, `camera-box-version-gate.sh` and the frame-probe align all
-    derive from `CAMERA_ACTIVE_SET` (the SNV measurement set), so cam1/4/6/7 get no camera-box update
-    and no version read until a venue-aware deploy/read through the `reach` rows exists.
+  - **The camera-box BINARY rides the same rows (issue 1413, second part).** Two public filters over
+    `_dantesync_fleet_camera_rows`: `dantesync_fleet_venue_camera_rows <venue>` (`camN|addr|homegate`;
+    rc 1 + the named camera on a fact-file error) and `dantesync_fleet_away_venues` (every non-home
+    venue that lists cameras, today `pp`). Never compute a dev1 camera address anywhere else.
+    - `deploy-fleet.sh --venue <name>` deploys the venue's cameras at those addresses through the
+      unchanged per-box swap (issue 1407 sidecar + verified ro close). A `reach` camera that
+      `dantesync_fleet_present` says is away is SKIPPED by name (exit 0); a reachable one that fails
+      is FAILED (exit 1). It refuses `CAMERA_SET` (read BEFORE camera-set.sh fills its default) and
+      `--frame-probe` (the painter is the home rig's cam2); a fact-file error refuses the whole run
+      before any box is touched. The default (SNV) path is unchanged.
+    - The ci.yml `deploy-fleet` job's second step loops over `dantesync_fleet_away_venues` (no venue
+      literal, so a third venue is a fact-file edit), runs under `if: ${{ !cancelled() }}` (a failed
+      SNV step does not stop it) and reds the job only when a REACHABLE camera failed.
+    - `camera-box-version-gate.sh --other-venues` prints report-only rows (OK / PIN-DRIFT / UNKNOWN
+      against main's pin, `SKIPPED (unreachable` when away) and never changes the exit; the E2E `[0/8]`
+      call passes it, so a PP camera on an old build is named in every E2E log. The frame-probe align
+      stays home-rig only.
+    - Tier-0: `tests/python/test_cambox_deploy_venues_1413.py` (the issue-1407 fake box behind a
+      host-logging sshpass, `OBS_FLEET_HOME` deciding reach; run it under `unshare -n`).
   - **The glob must survive a caller's `set -f`:** the version gate builds its `--fleet` specs under
     noglob, and the first cut of issue 1413 silently dropped every camera from the gated set. Both
     fact-file readers run `local -; set +f` (bash restores the caller's option on return), pinned by
@@ -133,6 +148,8 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
 | `dantesync-fleet-upgrade.sh --fleet` | same set + credential; every fleet `ntp-master*` node (strih-lx, strih-pp) is a master-aware verify unless `NTP_MASTER` is given; an audio or venue node is verified against its role's grandmaster (`dantesync_gate_env_for`); a node missing its credential, or an unreachable `reach` node, is SKIPPED |
 | `dantesync-clock-alert-watchdog.sh` | `DANTE_CLOCK_{CAM,OBS,LOCAL}_NODES` defaults + `DANTE_CLOCK_FIXED_NODES` (mbc, fohabl; box-up = ssh :22, no mgmt axis) + `DANTE_CLOCK_REACH_NODES` (issue 1412: the PP boxes, skipped while unreachable, otherwise like a fixed node); roster lines carry a 4th ROLE field, and an audio or venue node is graded against its role's grandmaster (each venue grandmaster resolved once per pass) |
 | `rig-dev-handover-check.sh` item 12 | `dantesync-version-gate.sh --fleet` |
+| `deploy-fleet.sh --venue` + the ci.yml away-venue step (issue 1413) | `dantesync_fleet_venue_camera_rows` + `dantesync_fleet_away_venues`; reach = `dantesync_fleet_present` |
+| `camera-box-version-gate.sh --other-venues` (issue 1413, report-only) | same two filters + `dantesync_fleet_present` |
 
 The E2E `[0/8]` version gate is NOT switched to `--fleet`: it gates the run's ACTIVE set, and a
 powered-off FOH PC would refuse every E2E. It stays per-run (camera_active_excluding + imag ack).
