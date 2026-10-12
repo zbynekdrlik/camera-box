@@ -10,6 +10,14 @@
 # `--user` unit program-audio-sampler.service, pinned to the E-cores at normal priority, and serves its
 # own read-only endpoint http://<strih-lx>:8891/program-audio.json (scripts/program_audio_http.py).
 #
+# Moved here from setup-strih.sh / verify-strih.sh (issue 1417: both sit at their 1000-line budget):
+#   setup-strih step 16e: issue 1404 (ROZHODNUTE 6039368611): the YouTube channel guard's sampler moved
+#   off dev1 to this box. It runs as the operator's program-audio-sampler.service on the E-cores at
+#   normal priority and serves :8891/program-audio.json itself. rig-mode.sh test starts it, rig-mode.sh
+#   event stops it; never here. The whole step lives in this lib (sourced by strih-provision.sh).
+#   verify-strih item 41: its files + E-core unit installed and enabled, its decoder shim current, its
+#   :8891 endpoint answering while it runs.
+#
 #   * strih_program_audio_install -- setup-strih step 16e (as root):
 #     - the apt package python3-numpy (only when missing) + an `import numpy` preflight;
 #     - the sampler's files in the CHECKOUT layout under /usr/local/lib/camera-box (the python modules,

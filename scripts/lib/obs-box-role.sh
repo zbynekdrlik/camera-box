@@ -22,6 +22,7 @@
 #   16      Satellite        skipped (no Stream Deck)
 #   16c     bkshading        skipped (no shading panel)
 #   16d     4 session apps   the browser-source keeper only
+#   16f     tally            skipped
 #
 # Independent of the role: 11b only for a USB rig NIC, 16e only with STRIH_PROGRAM_AUDIO_SAMPLER=on, and
 # a venue other than snv lists its own boxes' STRIH_IP as the NDI senders (step 4b / verify item 34).
@@ -45,7 +46,7 @@ OBS_BOX_STREAM_RTMP_SERVER="${OBS_BOX_STREAM_RTMP_SERVER:-rtmp://127.0.0.1:1234/
 #          would fail the unit at every boot (gap G7).
 #   16e -- the YouTube-guard stream program-audio sampler (issue 1404) reads the SNV stream output, so
 #          only a box with STRIH_PROGRAM_AUDIO_SAMPLER=on runs it (gap G11).
-#   3-nvenc / 14 / 16 / 16c -- the strih role only (the table above).
+#   3-nvenc / 14 / 16 / 16c / 16f -- the strih role only (the table above; 16f = the camera tally, issue 1417).
 #   6-hdmi -- only a box with a fixed HDMI output (STRIH_HDMI_OUTPUT_BACKEND != none).
 obs_box_step_applies() {
   local step="${1:?step required}" v
@@ -62,7 +63,7 @@ obs_box_step_applies() {
         printf 'STRIH_PROGRAM_AUDIO_SAMPLER=%s -- this box runs no stream program-audio sampler' "$v"
         return 1
       fi ;;
-    3-nvenc | 14 | 16 | 16c)
+    3-nvenc | 14 | 16 | 16c | 16f)
       v="$(strih_box_role)" || return 0
       if [ "$v" = stream ]; then
         case "$step" in
@@ -70,6 +71,7 @@ obs_box_step_applies() {
           14) printf 'the stream role runs no Janus phones leg' ;;
           16) printf 'the stream role runs no Companion Satellite (no Stream Deck)' ;;
           16c) printf 'the stream role runs no bkshading shading service' ;;
+          16f) printf 'the stream role runs no camera tally (no camera operators on stream-pp)' ;;
         esac
         return 1
       fi ;;

@@ -970,16 +970,15 @@ strih_session_apps_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" \
 # ---------------------------------------------------------------------------------------------
 # A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
 step "16e" "Stream program-audio sampler (issue 1404): numpy, the sampler files + decoder shim, the E-core --user unit -- enable-only"
-# issue 1404 (ROZHODNUTE 6039368611): the YouTube channel guard's sampler moved off dev1 to this box. It
-# runs as the operator's program-audio-sampler.service on the E-cores at normal priority and serves
-# :8891/program-audio.json itself. rig-mode.sh test starts it, rig-mode.sh event stops it; never here.
-# The whole step lives in scripts/lib/strih-program-audio.sh (sourced by strih-provision.sh).
 if WHY="$(obs_box_step_applies 16e)"; then   # issue 1412 (G11): a box fact, never the box name
   strih_program_audio_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" \
     || fail "issue 1404: the program-audio sampler (numpy, its files, the decoder shim, its unit) could not be provisioned (above)"
-else
-  echo "  SKIP: ${WHY}"
-fi
+else echo "  SKIP: ${WHY}"; fi
+
+# ---------------------------------------------------------------------------------------------
+step "16f" "Camera tally (issue 1417): strih-tally relay + OBS client, atemrpi.local -- system units"
+if WHY="$(obs_box_step_applies 16f)"; then strih_tally_install "${HERE}/.." "$DESKTOP_USER" || fail "issue 1417: strih-tally could not be provisioned (above)"
+else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------
 step 17 "Final verification (verify-strih.sh acceptance gate)"

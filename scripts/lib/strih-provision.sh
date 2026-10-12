@@ -37,6 +37,11 @@ if ! declare -F strih_program_audio_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-program-audio.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-program-audio.sh"
 fi
+# issue 1417: the camera tally's own source-only lib (setup-strih step 16f, verify-strih item 42).
+if ! declare -F strih_tally_install >/dev/null; then
+  # shellcheck source=scripts/lib/strih-tally.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-tally.sh"
+fi
 # issue 1412: a fresh box's dantesync binary + role config (setup-strih step 2) and the ONE CI-artifact
 # fetch (step 13's intercom-hub binary, step 16c's bkshading service).
 if ! declare -F dantesync_install >/dev/null; then

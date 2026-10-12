@@ -847,13 +847,13 @@ else note "(bkshading-service) not graded: ${WHY}"; fi
 #     Companion Satellite (unit + the /opt binary as its main process) and its watch (timer + last pass).
 strih_session_apps_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(session-apps) the grader did not print all of its rows"
 
-# 41) issue 1404 stream program-audio sampler (scripts/lib/strih-program-audio.sh): its files + E-core unit
-#     installed and enabled, its decoder shim current, its :8891 endpoint answering while it runs.
+# 41) issue 1404 stream program-audio sampler (scripts/lib/strih-program-audio.sh, its header: the rows).
 if WHY="$(obs_box_step_applies 16e)"; then   # issue 1412: only a box that runs the sampler grades it
   strih_program_audio_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(program-audio) the grader did not print all of its rows"
-else
-  note "(program-audio) not graded: ${WHY}"
-fi
+else note "(program-audio) not graded: ${WHY}"; fi
+# 42) issue 1417 camera tally (scripts/lib/strih-tally.sh): units, :9240 /state, atemrpi.local, OBS program.
+if WHY="$(obs_box_step_applies 16f)"; then strih_tally_grade_report "${HERE}/.." "${STRIH_LX_USER:-newlevel}" || bad "(tally) the grader did not print all of its rows"
+else note "(tally) not graded: ${WHY}"; fi
 
 # 16) NIC xhci IRQ affinity (issue 1317 item H): the USB-NIC's xhci interrupt must be pinned to a
 #     SINGLE E-core (>= the first cpu_atom cpu) so its NET_RX softirq never shares an OBS core, AND
