@@ -398,7 +398,8 @@ def test_gate_other_venues_bounds_a_camera_whose_read_hangs(tmp_path):
     import time
     t0 = time.monotonic()
     r, _ = _gate(tmp_path, [*_SNV_ARGS, "--other-venues"], {"192.0.2.62": "1.7.0-dev.764",
-                                                            "10.76.9.67": "1.7.0-dev.764\"; sleep 60; echo \""},
+                                                            # the box hangs BEFORE it answers
+                                                            "10.76.9.67": "\"; sleep 60; echo \"camera-box 1.7.0-dev.764"},
                  home="cam7", extra_env={"CAMERA_BOX_VERSION_GATE_VENUE_READ_TIMEOUT": "2"})
     assert time.monotonic() - t0 < 30, "a hung PP read must never stall the home E2E"
     assert r.returncode == 0, r.stdout + r.stderr
