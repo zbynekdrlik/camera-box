@@ -119,6 +119,8 @@ import os, sys
 _a = sys.argv[3:]
 with open(os.path.join(os.environ["FAKE_STATE"], "hosts"), "a") as _f:
     _f.write((_a[-1].split(":", 1)[0] if _a[0] == "scp" else _a[-2]) + "\n")
+if os.environ.get("FAKE_SSH_DEAD"):  # the box answered the reach probe, then refuses ssh
+    sys.exit(255)
 '''
 
 
@@ -232,6 +234,41 @@ def test_deploy_default_path_still_dials_camera_resolve(tmp_path):
     assert "FLEET ALIGNED: all of [cam2]" in proc.stdout, proc.stdout
 
 
+def test_deploy_venue_skips_an_acked_offline_camera_without_dialling_it(tmp_path):
+    # a staged PP box (historical-build bisect, a repair) is acked offline exactly like an SNV box:
+    # the main-merge venue deploy must not overwrite it
+    proc, _, hosts = _venue_deploy(tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)), "--venue", "pp"],
+                                   home="cam7", extra_env={"CAMBOX_OFFLINE_ACK": "cam7:staged for a bisect"})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert hosts == [], hosts
+    assert "skipped (acked offline): cam7" in proc.stdout, proc.stdout
+    assert "staged for a bisect" in proc.stdout + proc.stderr
+
+
+def test_deploy_venue_refuses_the_home_venue(tmp_path):
+    proc, _, hosts = _venue_deploy(tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)), "--venue", "snv"],
+                                   home="cam7")
+    assert proc.returncode == 2 and hosts == [], proc.stdout + proc.stderr
+    assert "home rig" in proc.stderr, proc.stderr
+
+
+def test_deploy_venue_fails_a_camera_that_answers_the_probe_but_refuses_ssh(tmp_path):
+    proc, _, hosts = _venue_deploy(tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)), "--venue", "pp"],
+                                   home="cam7", FAKE_SSH_DEAD="1")
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 1, out
+    assert "cam7(unreachable)" in out, out
+    assert set(hosts) == {"root@10.76.9.67"}, hosts
+
+
+def test_away_venues_drop_a_malformed_venue_name_loudly(tmp_path):
+    boxes = _boxes_copy(tmp_path, {"strih-pp.env": [("STRIH_VENUE=pp", "STRIH_VENUE=P*P")]})
+    r = _bash(tmp_path, "dantesync_fleet_away_venues", DANTESYNC_FLEET_STRIH_BOXES_DIR=str(boxes))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == [], r.stdout
+    assert "P*P" in r.stderr and "not a venue name" in r.stderr, r.stderr
+
+
 # ---------------------------------------------------------------------------------------------
 # the ci.yml deploy-fleet job
 # ---------------------------------------------------------------------------------------------
@@ -257,11 +294,47 @@ def test_ci_deploy_job_also_deploys_every_away_venue_after_the_snv_step():
     assert "exit \"$rc\"" in step, "a reachable camera that fails must red the job"
 
 
+def _ci_step_run(tmp_path, fake_rc):
+    """Run the away-venue step's own `run:` text in a scratch tree: the real fleet lib + fact files,
+    a fake scripts/deploy-fleet.sh that logs its argv and exits FAKE_RC."""
+    import yaml
+    job = yaml.safe_load(_CI.read_text())["jobs"]["deploy-fleet"]["steps"]
+    run = next(st["run"] for st in job if "other venue" in (st.get("name") or ""))
+    tree = tmp_path / "tree"
+    (tree / "scripts").mkdir(parents=True)
+    for name in ("lib", "strih-boxes", "camera-set.sh"):
+        (tree / "scripts" / name).symlink_to(_ROOT / "scripts" / name)
+    fake = tree / "scripts" / "deploy-fleet.sh"
+    fake.write_text(f'#!/usr/bin/env bash\necho "$*" >> "{tmp_path}/argv.log"\nexit {fake_rc}\n')
+    fake.chmod(0o755)
+    (tree / "dist").mkdir()
+    (tree / "dist" / "camera-box").write_text("#!/bin/sh\necho camera-box 9.9.9-test\n")
+    script = tmp_path / "step.sh"
+    script.write_text(run)
+    r = subprocess.run(["bash", "-e", str(script)], cwd=tree, capture_output=True, text=True, env=_env())
+    argv = (tmp_path / "argv.log").read_text().splitlines() if (tmp_path / "argv.log").exists() else []
+    return r, argv
+
+
+def test_ci_step_deploys_each_away_venue_and_passes_when_they_pass(tmp_path):
+    r, argv = _ci_step_run(tmp_path, 0)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert argv == ["--binary dist/camera-box --venue pp"], argv
+
+
+def test_ci_step_reds_the_job_when_a_venue_deploy_fails_and_names_its_exit(tmp_path):
+    r, argv = _ci_step_run(tmp_path, 1)
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert argv == ["--binary dist/camera-box --venue pp"], argv
+    err = next(ln for ln in r.stdout.splitlines() if ln.startswith("::error::"))
+    assert "venue pp" in err and "exited 1" in err, err
+
+
 # ---------------------------------------------------------------------------------------------
 # camera-box-version-gate.sh --other-venues (report-only)
 # ---------------------------------------------------------------------------------------------
 
-def _gate(tmp_path, args, versions, home):
+def _gate(tmp_path, args, versions, home, extra_env=None):
     """VERSIONS: host -> camera-box version the stub sshpass answers (any other host: no answer)."""
     b = tmp_path / "gbin"
     b.mkdir()
@@ -275,6 +348,7 @@ def _gate(tmp_path, args, versions, home):
     fleet = tmp_path / "rig-fleet.txt"
     fleet.write_text("")
     env = _env(PATH=f"{b}:/usr/bin:/bin", OBS_FLEET_HOME=home)
+    env.update(extra_env or {})
     r = subprocess.run(["bash", str(_GATE), "--fleet-file", str(fleet), *args], capture_output=True, text=True,
                        env=env, timeout=120)
     dials = (tmp_path / "dials.log").read_text().split() if (tmp_path / "dials.log").exists() else []
@@ -318,6 +392,52 @@ def test_gate_without_other_venues_reads_no_other_venue(tmp_path):
                      home="cam7")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "venue pp" not in r.stdout and not any("10.76.9." in d for d in dials), r.stdout
+
+
+def test_gate_other_venues_bounds_a_camera_whose_read_hangs(tmp_path):
+    import time
+    t0 = time.monotonic()
+    r, _ = _gate(tmp_path, [*_SNV_ARGS, "--other-venues"], {"192.0.2.62": "1.7.0-dev.764",
+                                                            "10.76.9.67": "1.7.0-dev.764\"; sleep 60; echo \""},
+                 home="cam7", extra_env={"CAMERA_BOX_VERSION_GATE_VENUE_READ_TIMEOUT": "2"})
+    assert time.monotonic() - t0 < 30, "a hung PP read must never stall the home E2E"
+    assert r.returncode == 0, r.stdout + r.stderr
+    row = next(ln for ln in r.stdout.splitlines() if ln.strip().startswith("cam7"))
+    assert "UNKNOWN" in row and "report-only" in row, row
+
+
+def test_gate_other_venues_excludes_an_acked_camera_without_reading_it(tmp_path):
+    r, dials = _gate(tmp_path, [*_SNV_ARGS, "--other-venues"],
+                     {"192.0.2.62": "1.7.0-dev.764", "10.76.9.67": "1.7.0-dev.700"}, home="cam7",
+                     extra_env={"CAMBOX_OFFLINE_ACK": "cam7:staged"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    row = next(ln for ln in r.stdout.splitlines() if ln.strip().startswith("cam7"))
+    assert "EXCLUDED" in row and "staged" in row, row
+    assert "root@10.76.9.67" not in dials, dials
+
+
+def test_gate_other_venues_under_no_main_pin_names_the_version_read(tmp_path):
+    r, _ = _gate(tmp_path, ["--no-main-pin", "--linux", "cam2=root@192.0.2.62", "--other-venues"],
+                 {"192.0.2.62": "1.7.0-dev.764", "10.76.9.67": "1.7.0-dev.700"}, home="cam7")
+    assert r.returncode == 0, r.stdout + r.stderr
+    row = next(ln for ln in r.stdout.splitlines() if ln.strip().startswith("cam7"))
+    assert "READ" in row and "1.7.0-dev.700" in row and "report-only" in row, row
+
+
+def test_gate_other_venues_with_a_broken_fact_file_keeps_the_exit(tmp_path):
+    boxes = _boxes_copy(tmp_path, {"strih-lx.env": [("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=2 3 5 7")]})
+    r, _ = _gate(tmp_path, [*_SNV_ARGS, "--other-venues"], {"192.0.2.62": "1.7.0-dev.764"}, home="cam7",
+                 extra_env={"DANTESYNC_FLEET_STRIH_BOXES_DIR": str(boxes)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "camera list is incomplete" in r.stderr, r.stderr
+
+
+def test_gate_refuses_other_venues_with_frame_probe_only(tmp_path):
+    r, dials = _gate(tmp_path, ["--linux", "cam2=root@192.0.2.62", "--frame-probe-only", "--other-venues"],
+                     {}, home="cam7")
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "--other-venues" in r.stderr, r.stderr
+    assert dials == [], dials
 
 
 def test_e2e_version_gate_call_reports_the_other_venues():
