@@ -1249,6 +1249,7 @@ stray_session_check_assert "$HERE" "$STRIH" "$STREAM" "the camera-box + painter 
 cambox_parity_align_before_gate "$CAMBOX_VERSION_LINUX"
 "$HERE/camera-box-version-gate.sh" \
   --linux "$CAMBOX_VERSION_LINUX" \
+  --other-venues \
   --candidate-pin "$(sed -n 's/^version = "\(.*\)"$/\1/p' "$HERE/../Cargo.toml" | head -1)"
 
 # issue 1138: pre-gate auto-align of the cam2 STEADY-STATE painter (/usr/local/bin/frame-probe,

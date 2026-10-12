@@ -30,6 +30,11 @@
 #                                                 # (frame-probe) binary to cam2 with #1138 #892
 #                                                 # enable-state-preserving lifecycle (opt-in)
 #   CAMERA_SET="cam2" scripts/deploy-fleet.sh     # restrict to a subset (default: $CAMERA_ACTIVE_SET, camera-set.sh; today cam1-4, #827)
+#   scripts/deploy-fleet.sh --binary ./dist/camera-box --venue pp   # issue 1413: ANOTHER venue's
+#                                                 # camboxes (its strih fact file's STRIH_CAMERAS) at
+#                                                 # their dev1 address; one that does not answer ssh
+#                                                 # :22 is SKIPPED by name, never a failure. Not with
+#                                                 # CAMERA_SET or --frame-probe (the painter is SNV cam2).
 #
 # Env:
 #   SSH_PASS   camera root password (default: newlevel)
@@ -39,9 +44,13 @@
 #
 # Exit status: 0 only if EVERY camera in the set ends on the new version AND emits the genlock
 # report. Any version mismatch, missing genlock line, panic, or unreachable box => nonzero.
+# With --venue an unreachable camera is SKIPPED (named, exit 0); every other rule is the same.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# issue 1413: the operator's own CAMERA_SET, read before camera-set.sh fills in its default
+# (--venue derives its set from the venue's fact file and refuses an explicit one).
+USER_CAMERA_SET="${CAMERA_SET:-}"
 # shellcheck source=scripts/camera-set.sh
 . "$HERE/camera-set.sh"   # camera_resolve(), CAMERA_SET, GENLOCK_FPS
 # shellcheck source=scripts/lib/ndi-alive.sh
@@ -74,18 +83,52 @@ BINARY=""
 # deploy-fleet.sh run (no --frame-probe) is unchanged; the post-merge ci.yml deploy job downloads
 # the probe-tools-linux-amd64 artifact and passes its frame-probe here.
 FRAME_PROBE_BIN=""
+# issue 1413: --venue <name> = another venue's camboxes (see the usage above).
+VENUE=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --run)    RUN_ID="${2:?--run needs a run id}"; shift 2 ;;
     --binary) BINARY="${2:?--binary needs a path}"; shift 2 ;;
     --frame-probe) FRAME_PROBE_BIN="${2:?--frame-probe needs a path}"; shift 2 ;;
-    -h|--help) sed -n '2,36p' "$0"; exit 0 ;;
+    --venue)  VENUE="${2:?--venue needs a venue name}"; shift 2 ;;
+    -h|--help) sed -n '2,47p' "$0"; exit 0 ;;
     *) echo "deploy-fleet: unknown arg '$1'" >&2; exit 2 ;;
   esac
 done
 
 command -v sshpass >/dev/null 2>&1 || { err "sshpass is required (apt-get install sshpass)"; exit 1; }
+
+# --- issue 1413: --venue derives the set from the venue's strih fact file ------------------------
+# The cameras and their dev1 addresses come from the dantesync fleet's venue camera rows (the ONE
+# place the venue fact STRIH_CAMERA_DEV1_NET is resolved, scripts/lib/dantesync-fleet.sh); a `reach`
+# camera is deployed only while it answers ssh :22 (dantesync_fleet_present). A fact-file error
+# refuses the whole run before any box is touched, so no camera is dropped silently.
+declare -A VENUE_ADDR=() VENUE_GATE=()
+declare -a SKIPPED=()
+if [ -n "$VENUE" ]; then
+  if [ -n "$USER_CAMERA_SET" ]; then
+    err "--venue $VENUE derives its set from the venue's strih fact file; unset CAMERA_SET [$USER_CAMERA_SET]"
+    exit 2
+  fi
+  if [ -n "$FRAME_PROBE_BIN" ]; then
+    err "--venue never deploys the cam2 painter: the frame-probe swap stays with the home rig (drop --frame-probe)"
+    exit 2
+  fi
+  # shellcheck source=scripts/lib/dantesync-fleet.sh
+  . "$HERE/lib/dantesync-fleet.sh"
+  venue_rows="$(dantesync_fleet_venue_camera_rows "$VENUE")" || {
+    err "venue '$VENUE': the strih fact files do not resolve cleanly (the line above names it) -- nothing deployed"
+    exit 1
+  }
+  [ -n "$venue_rows" ] || { err "venue '$VENUE' lists no camera in any strih fact file (scripts/strih-boxes/*.env) -- nothing to deploy"; exit 1; }
+  SET=""
+  while IFS='|' read -r v_cam v_addr v_gate; do
+    VENUE_ADDR["$v_cam"]="$v_addr"
+    VENUE_GATE["$v_cam"]="$v_gate"
+    SET="${SET:+$SET }$v_cam"
+  done <<<"$venue_rows"
+fi
 
 # SSH_SESSION is empty on the normal path and `setsid -w` inside the EXIT trap: the trap's ro close
 # then runs in its own session, so a second Ctrl-C cannot reach it (sshpass forwards SIGINT to ssh).
@@ -389,10 +432,17 @@ echo ""
 declare -a FAILED=()
 for cam in $SET; do
   PENDING_START=""
-  if ! camera_resolve "$cam"; then
+  if [ -n "$VENUE" ]; then
+    ip="${VENUE_ADDR[$cam]}"
+    if [ "${VENUE_GATE[$cam]}" = reach ] && ! dantesync_fleet_present "$cam"; then
+      warn "[$cam] venue $VENUE: $ip does not answer ssh :$DANTESYNC_FLEET_REACH_PORT -- SKIPPED (deployed when reachable)"
+      SKIPPED+=("$cam"); continue
+    fi
+  elif ! camera_resolve "$cam"; then
     FAILED+=("$cam(invalid)"); continue
+  else
+    ip="$CAMERA_IP"
   fi
-  ip="$CAMERA_IP"
   echo "================================================================"
   echo ">> [$cam] $ip"
   echo "================================================================"
@@ -527,6 +577,24 @@ fi
 
 # --- Summary ------------------------------------------------------------------------------
 echo "================================================================"
+if [ -n "$VENUE" ]; then
+  # issue 1413: an away camera is named, never a failure; a reachable one that failed is.
+  deployed=""
+  for cam in $SET; do
+    case " ${SKIPPED[*]} " in *" $cam "*) ;; *) deployed="${deployed:+$deployed }$cam" ;; esac
+  done
+  [ "${#SKIPPED[@]}" -eq 0 ] || log "VENUE $VENUE skipped (unreachable): ${SKIPPED[*]}"
+  if [ "${#FAILED[@]}" -eq 0 ]; then
+    if [ -z "$deployed" ]; then
+      log "VENUE $VENUE: no camera of venue $VENUE was reachable -- nothing deployed"
+    else
+      log "VENUE $VENUE ALIGNED: [$deployed] on $NEW_VER and genlocking"
+    fi
+    exit 0
+  fi
+  err "VENUE $VENUE NOT FULLY ALIGNED — issues: ${FAILED[*]}"
+  exit 1
+fi
 if [ "${#FAILED[@]}" -eq 0 ]; then
   log "FLEET ALIGNED: all of [$SET] on $NEW_VER and genlocking"
   exit 0

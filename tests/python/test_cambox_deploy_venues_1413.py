@@ -169,6 +169,16 @@ def test_deploy_venue_skips_the_away_cameras_and_deploys_the_reachable_one_at_it
     assert "skipped (unreachable): cam1 cam4 cam6" in proc.stdout, proc.stdout
 
 
+def test_deploy_venue_with_every_camera_reachable_deploys_them_all(tmp_path):
+    proc, box, hosts = _venue_deploy(tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)), "--venue", "pp"],
+                                     home="cam1 cam4 cam6 cam7")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert sorted(set(hosts)) == [f"root@10.76.9.6{n}" for n in (1, 4, 6, 7)], hosts
+    assert "VENUE pp ALIGNED: [cam1 cam4 cam6 cam7]" in proc.stdout, proc.stdout
+    assert "skipped (unreachable)" not in proc.stdout, proc.stdout
+    assert starts_on_rw(log(box)) == [], "\n".join(log(box))
+
+
 def test_deploy_venue_fails_a_reachable_camera_whose_swap_fails(tmp_path):
     proc, box, _ = _venue_deploy(tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)), "--venue", "pp"],
                                  home="cam7", FAKE_SCP_PARTIAL="1")

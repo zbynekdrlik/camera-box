@@ -312,6 +312,42 @@ dantesync_fleet_camera_names() {
   printf '%s' "$out"
 }
 
+# dantesync_fleet_venue_camera_rows <venue> -> one `camN|<dev1 address>|<homegate>` line per camera
+# VENUE lists, in camera order (issue 1413: the camera-box deploy and version read of another
+# venue's camboxes). A FILTER over _dantesync_fleet_camera_rows, so the dev1 address (camera_resolve's,
+# or the venue's STRIH_CAMERA_DEV1_NET /24 + the camera's octet) is resolved in ONE place. The home
+# venue's cameras are `always`, another venue's `reach` (dantesync_fleet_present decides). An
+# unknown venue prints nothing (rc 0). A fact-file error (a camera listed twice, a bad venue name or
+# dev1 network) is printed on stderr and returns 1, the affected camera absent: a deploy must refuse
+# then, never drop a camera silently.
+dantesync_fleet_venue_camera_rows() {
+  local want="${1:-}" rows rc=0 name addr role homegate venue
+  rows="$(_dantesync_fleet_camera_rows)" || rc=1
+  while IFS='|' read -r name addr _ role homegate _; do
+    [ -n "$name" ] || continue
+    if [ "$role" = video ]; then
+      venue="$DANTESYNC_FLEET_HOME_VENUE"
+    else
+      venue="$(dantesync_fleet_role_venue "$role")" || continue
+    fi
+    [ "$venue" = "$want" ] || continue
+    printf '%s|%s|%s\n' "$name" "$addr" "$homegate"
+  done <<<"$rows"
+  return "$rc"
+}
+
+# dantesync_fleet_away_venues -> the space-separated venues OTHER than the home venue whose strih
+# fact files list cameras (sorted, each once): today `pp`. A third venue joins with its fact file.
+dantesync_fleet_away_venues() {
+  local out="" venue
+  while IFS='|' read -r _ venue _ _; do
+    [ -n "$venue" ] && [ "$venue" != "$DANTESYNC_FLEET_HOME_VENUE" ] || continue
+    case " $out " in *" $venue "*) continue ;; esac
+    out="${out:+$out }$venue"
+  done < <(_dantesync_fleet_venue_cameras | LC_ALL=C sort -t'|' -k2,2)
+  printf '%s' "$out"
+}
+
 # dantesync_fleet_fixed_names -> the always-home NON-camera nodes (the audio-VLAN PCs today): every
 # `homegate=always` row that is not a camera.
 dantesync_fleet_fixed_names() {

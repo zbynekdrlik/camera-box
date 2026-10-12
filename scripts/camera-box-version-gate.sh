@@ -265,6 +265,27 @@ camera_box_fleet_report_pinned() {
   return 0
 }
 
+# camera_box_venue_verdict NAME VERSION PIN VENUE -> ONE report-only row for a camera of ANOTHER
+# venue (issue 1413) and 0 OK / 20 PIN-DRIFT / 11 UNKNOWN. An empty PIN (--no-main-pin) grades
+# nothing: the row names the version read. The caller never folds the code into the gate's exit.
+camera_box_venue_verdict() {
+  local name="$1" version="$2" pin="$3" venue="$4"
+  if [ -z "$version" ]; then
+    printf '  %-14s %-16s UNKNOWN   (report-only, venue %s: camera-box version not read)\n' "$name" "-" "$venue"
+    return 11
+  fi
+  if [ -z "$pin" ]; then
+    printf '  %-14s %-16s READ      (report-only, venue %s: no main pin under --no-main-pin)\n' "$name" "$version" "$venue"
+    return 0
+  fi
+  if [ "$version" != "$pin" ]; then
+    printf '  %-14s %-16s PIN-DRIFT (report-only, venue %s: expected main %s)\n' "$name" "$version" "$venue" "$pin"
+    return 20
+  fi
+  printf '  %-14s %-16s OK        (report-only, venue %s)\n' "$name" "$version" "$venue"
+  return 0
+}
+
 # --- usage + SSH read (impure; not unit-tested) ----------------------------------------------
 
 usage() {
@@ -299,6 +320,11 @@ Options:
   --linux "N=U@IP ..."  one or more SSH-reachable cam boxes (space-separated "name=user@ip" pairs
                     in ONE argument, mirrors dantesync-version-gate.sh's --linux). Repeatable. Read
                     via \`/usr/local/bin/camera-box --version\` over SSH.
+  --other-venues    (issue 1413) ALSO print report-only rows for every camera of ANOTHER venue (a
+                    strih fact file other than the home rig's, e.g. Poprad), each read at its dev1
+                    address; one that does not answer ssh :22 is SKIPPED. Never changes the exit:
+                    the gate's verdict stays the --linux nodes'. A drift names the redeploy
+                    (scripts/deploy-fleet.sh --venue <venue>).
   --frame-probe-only  run ONLY the #1138 frame-probe (cam2 painter) sha-pin over the --linux nodes
                     (skip the camera-box parity read). Report-only (exit 0) unless --frame-probe-hard.
   --frame-probe-hard  (issue 1235) flip --frame-probe-only into a HARD, fail-closed gate: exit
@@ -522,6 +548,47 @@ frame_probe_pin_gate() {
   return "$worst"
 }
 
+# camera_box_other_venue_report PIN -> REPORT-ONLY (issue 1413): one row per camera of every venue
+# other than the home rig, from the dantesync fleet's venue camera rows (the ONE place a venue's
+# STRIH_CAMERA_DEV1_NET is resolved). A `reach` camera that does not answer ssh :22
+# (dantesync_fleet_present) is SKIPPED; a read one is graded against PIN (main's release, which the
+# ci.yml deploy-fleet job deploys to every venue). A drift or an unread camera SCREAMS on stderr.
+# Always returns 0: the gate's exit stays the --linux nodes' (the E2E measures the home rig only).
+camera_box_other_venue_report() {
+  local pin="$1" venues venue rows rc name addr gate version vrc
+  if ! command -v dantesync_fleet_away_venues >/dev/null 2>&1; then
+    # shellcheck source=scripts/lib/dantesync-fleet.sh
+    . "$HERE/lib/dantesync-fleet.sh"
+  fi
+  echo "-- camera-box on the other venues' camboxes (issue 1413, report-only: never changes this gate's exit) --"
+  venues="$(dantesync_fleet_away_venues)"
+  if [ -z "$venues" ]; then
+    echo "  (no other venue lists a camera)"
+    return 0
+  fi
+  for venue in $venues; do
+    rc=0
+    rows="$(dantesync_fleet_venue_camera_rows "$venue")" || rc=$?
+    [ "$rc" -eq 0 ] || echo "!! CAMERA-BOX VENUE REPORT: the venue $venue camera list is incomplete (a strih fact-file error, named above) -- report-only." >&2
+    while IFS='|' read -r name addr gate; do
+      [ -n "$name" ] || continue
+      if [ "$gate" = reach ] && ! dantesync_fleet_present "$name"; then
+        printf '  %-14s %-16s SKIPPED (unreachable -- %s did not answer ssh :%s; venue %s, read when reachable)\n' \
+          "$name" "-" "$addr" "$DANTESYNC_FLEET_REACH_PORT" "$venue"
+        continue
+      fi
+      version="$(camera_box_version_from_version_output "$(read_camera_box_version_output "$name" "root@$addr")")"
+      vrc=0
+      camera_box_venue_verdict "$name" "$version" "$pin" "$venue" || vrc=$?
+      case "$vrc" in
+        20) echo "!! CAMERA-BOX VENUE ALARM: $name (venue $venue, $addr) runs camera-box $version, not main's $pin -- redeploy it: scripts/deploy-fleet.sh --venue $venue (report-only, does NOT block this run)." >&2 ;;
+        11) echo "!! CAMERA-BOX VENUE ALARM: $name (venue $venue, $addr) answers ssh but its camera-box version was not read (report-only, does NOT block this run)." >&2 ;;
+      esac
+    done <<<"$rows"
+  done
+  return 0
+}
+
 # --- source-guard: when sourced (the unit tests), stop here -----------------------------------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0
@@ -544,6 +611,8 @@ main() {
   # #1235 --frame-probe-hard: flip the (otherwise report-only) --frame-probe-only mode into a HARD,
   # fail-closed gate that exits non-zero on a lagging/unverifiable painter (see frame_probe_pin_gate).
   local frame_probe_hard=0
+  # issue 1413: --other-venues adds the report-only rows of every other venue's camboxes.
+  local other_venues=0
   local -a linux_raw=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -555,6 +624,7 @@ main() {
       --frame-probe-expected-bin) shift; fp_expected_bin="${1:-}" ;;
       --frame-probe-only) frame_probe_only=1 ;;
       --frame-probe-hard) frame_probe_hard=1 ;;
+      --other-venues) other_venues=1 ;;
       --linux) shift; linux_raw+=("${1:-}") ;;
       -h | --help)
         usage
@@ -641,6 +711,7 @@ main() {
   if [ "$no_main_pin" = "1" ]; then
     echo "[camera-box-version-gate] PIN layer DISABLED (--no-main-pin) — relative cross-box parity only (#875)." >&2
     camera_box_fleet_report "${entries[@]}" || rc=$?
+    if [ "$other_venues" = "1" ]; then camera_box_other_venue_report ""; fi
     frame_probe_pin_report "$fp_expected" "${linux_pairs[@]}"
     exit "$rc"
   fi
@@ -667,6 +738,7 @@ main() {
       rc=0
     fi
   fi
+  if [ "$other_venues" = "1" ]; then camera_box_other_venue_report "$pin"; fi
   frame_probe_pin_report "$fp_expected" "${linux_pairs[@]}"
   exit "$rc"
 }

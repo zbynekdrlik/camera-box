@@ -877,6 +877,33 @@ jobs:
           echo "Active set: [$CAMERA_ACTIVE_SET]  ->  deploy set (minus acked): [$deploy_set]"
           CAMERA_SET="$deploy_set" scripts/deploy-fleet.sh --binary dist/camera-box --frame-probe dist-probe/frame-probe
 
+      # issue 1413: the camboxes of every OTHER venue (Poprad since 11.10.2026) get the same build.
+      # The venues and their cameras come from the strih fact files (scripts/strih-boxes/*.env), so a
+      # third venue is a fact-file edit. Each camera is dialled at its dev1 address (the venue's
+      # STRIH_CAMERA_DEV1_NET); one that does not answer ssh :22 is SKIPPED by name (exit 0), and a
+      # reachable one that fails its swap reds this job, like an SNV box. Runs even when the SNV step
+      # failed (separate hardware); a binary step, its failure is never tolerated.
+      - name: Deploy to every other venue's camboxes (unreachable skipped)
+        if: ${{ !cancelled() }}
+        run: |
+          set -euo pipefail
+          chmod +x dist/camera-box
+          # shellcheck source=scripts/lib/dantesync-fleet.sh
+          venues="$(. scripts/lib/dantesync-fleet.sh && dantesync_fleet_away_venues)"
+          if [ -z "$venues" ]; then
+            echo "no other venue lists a camera in scripts/strih-boxes/*.env -- nothing to deploy"
+            exit 0
+          fi
+          rc=0
+          for v in $venues; do
+            echo "Deploying camera-box $(dist/camera-box --version 2>/dev/null | awk '{print $NF}') to venue $v"
+            if ! scripts/deploy-fleet.sh --binary dist/camera-box --venue "$v"; then
+              echo "::error::camera-box deploy to venue $v failed on a REACHABLE cambox (the deploy-fleet lines above name it)"
+              rc=1
+            fi
+          done
+          exit "$rc"
+
   notify-on-failure:
     name: Notify on red
     # Fires only when a gate above goes RED — replaces silent-red eyeballing
