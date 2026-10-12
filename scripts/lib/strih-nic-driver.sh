@@ -575,6 +575,45 @@ strih_nic_nm_ring_verdict() {
   return 1
 }
 
+# _strih_nic_ip4_int A.B.C.D -> the address as one integer (rc 1 on a malformed address).
+_strih_nic_ip4_int() {
+  local a b c d
+  IFS=. read -r a b c d <<<"${1-}"
+  for v in "$a" "$b" "$c" "$d"; do [[ "$v" =~ ^[0123456789]{1,3}$ ]] && [ "$v" -le 255 ] || return 1; done
+  printf '%s' "$(( (a << 24) | (b << 16) | (c << 8) | d ))"
+}
+
+# strih_nic_single_homed_verdict NIC IP IP_ADDR_TEXT -> `OK|(nic-homed)` when only NIC carries an address
+# on the rig subnet (the prefix of IP on NIC in IP_ADDR_TEXT, `ip -o -4 addr show`), `FAIL|(nic-homed)`
+# + rc 1 naming every other interface that does, or when IP sits on no interface. Empty text: no row.
+# issue 1411: a second interface on the rig /23 (the onboard port's DHCP profile) won the routes, every
+# reply left from its address, and every dantesync follower lost PTP for ~22 h.
+strih_nic_single_homed_verdict() {
+  local nic="${1-}" ip="${2-}" text="${3-}" ifc addr pfx rig_pfx="" net mask want other="" line
+  [ -n "$text" ] || return 0
+  while IFS= read -r line; do
+    read -r _ ifc _ addr _ <<<"$line"
+    [ "$ifc" = "$nic" ] && [ "${addr%%/*}" = "$ip" ] && rig_pfx="${addr##*/}"
+  done <<<"$text"
+  if [ -z "$rig_pfx" ] || ! want="$(_strih_nic_ip4_int "$ip")"; then
+    printf 'FAIL|(nic-homed) the rig address %s is on no interface %s -- setup-strih step 1\n' "$ip" "${nic:-<unresolved>}"
+    return 1
+  fi
+  mask=$(( rig_pfx == 0 ? 0 : (0xFFFFFFFF << (32 - rig_pfx)) & 0xFFFFFFFF ))
+  while IFS= read -r line; do
+    read -r _ ifc _ addr _ <<<"$line"
+    [ -n "$ifc" ] && [ "$ifc" != "$nic" ] && [ "$ifc" != lo ] || continue
+    pfx="${addr%%/*}"
+    net="$(_strih_nic_ip4_int "$pfx")" || continue
+    [ $(( net & mask )) -eq $(( want & mask )) ] && other="${other}${other:+, }${ifc} ${pfx}"
+  done <<<"$text"
+  if [ -n "$other" ]; then
+    printf 'FAIL|(nic-homed) %s also on the rig subnet next to %s -- its routes win and the strih answers from it; take its profile down: nmcli connection modify <name> connection.autoconnect no && nmcli connection down <name>\n' "$other" "$nic"
+    return 1
+  fi
+  printf 'OK|(nic-homed) only %s carries the rig subnet (%s/%s)\n' "$nic" "$ip" "$rig_pfx"
+}
+
 # strih_nic_ring_note DRIVER -> the ring-rx part of setup-strih step 1's operator note: " and set
 # ethtool.ring-rx 4096" for the USB r8152 NIC, a "never" for atlantic (issue 1411), nothing otherwise.
 strih_nic_ring_note() {
@@ -646,6 +685,7 @@ strih_nic_grade_rows() {
   else
     printf 'FAIL|(nic-nm) nmcli is not installed -- the NetworkManager pinning cannot be read\n'
   fi
+  strih_nic_single_homed_verdict "$nic" "$ip" "$addrs" || true
   return 0
 }
 
