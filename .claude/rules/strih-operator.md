@@ -80,7 +80,7 @@ so a hung X server FAILs a row instead of hanging verify.
 | `(ws-seed)` | the step-7 obs-websocket config: `server_enabled` true, `server_port` 4455, `auth_required` false (pinned to the step-7 heredoc by a test) |
 | `(qt6-svg)` | the `qt6-svg-plugins` package installed with BOTH plugins (item 21 grades only the icon engine) |
 | `(operator-input)` | X lists a real keyboard AND a real pointer (never XTEST, never the ACPI buttons, `STRIH_OPERATOR_NOT_A_KEYBOARD`) |
-| `(panel-gpu)` | `xrandr --listproviders` on :0 (bounded 10 s): every provider after Provider 0 that lists `Sink Output` (the reverse-PRIME panel sink) must be named `modesetting`; any other name is a vendor DDX and FAILs naming the shared baseline's `/etc/X11/xorg.conf.d/20-igpu-sink-modesetting.conf`; NOTE with one provider; a failed or timed-out read = a hung X; a missing `xrandr` (rc 127) is named |
+| `(panel-gpu)` | `xrandr --listproviders` on :0 (bounded 10 s): every provider after Provider 0 that lists `Sink Output` (the reverse-PRIME panel sink) must be named `modesetting`; any other name is a vendor DDX and FAILs naming `xserver-xorg-video-amdgpu`, which the shared baseline removes (`STRIH_OPERATOR_AMDGPU_DDX_PKG`, pinned equal to `obs_box_amdgpu_ddx_package`); NOTE with one provider; a failed or timed-out read = a hung X; a missing `xrandr` (rc 127) is named |
 | `(drm-hang)` | `journalctl -k -b 0 --no-pager` (bounded 30 s): a `blocked for more than` hung task whose trace within 25 lines (before the next `INFO: task`) has a `commit_work+0x` or `drm_atomic_helper_wait_for_fences+0x` frame, or a DRM `*ERROR*` commit timeout (`flip_done` / `hw_done` / `commit wait` timed out, amdgpu_dm `Waiting for fences timed out`, nvidia-drm `Flip event timeout`), FAILs naming its first time stamp; an unreadable or empty log FAILs, and so does one with no kernel line (`-- No entries --` when run outside root / adm / systemd-journal) |
 | `(operator-panel)` | two `ffmpeg -f x11grab -i :0.0 -frames:v 1 -f md5 -` frames 4 s apart differ while OBS runs (the 12.10 hang signature); NOTE while OBS is not running |
 
@@ -89,10 +89,12 @@ so a hung X server FAILs a row instead of hanging verify.
 saw the frozen panel. strih-snv runs reverse PRIME: NVIDIA renders the X screen, the AMD Radeon 780M
 scans the panel out as a sink, so each panel flip waits on an NVIDIA fence. The returned Intel
 notebook had the SAME topology with the sink on the Xorg `modesetting` DDX and was stable; on
-strih-snv Xorg autoloaded `xf86-video-amdgpu` for the sink. The cure is therefore the shared baseline
-(`obs-box-baseline.md`, the `igpu-sink` item): the iGPU sink on modesetting on every NVIDIA box. The
-BIOS discrete-GPU mode is only a fallback if the modesetting sink hangs too.
-- `(panel-gpu)` reads the RUNNING provider name, so it FAILs until X restarts after the conf lands.
+strih-snv Xorg ran `xf86-video-amdgpu` for the sink. The cure is therefore the shared baseline
+(`obs-box-baseline.md`, the `igpu-sink` item): it REMOVES the amdgpu DDX package on every NVIDIA box,
+because its own `10-amdgpu.conf` beats any xorg.conf.d OutputClass override (tried live, a dead end).
+Applied by hand on strih-snv on 12.10.2026 23:00: the sink reads `name:modesetting` and the operator
+rows pass. The BIOS discrete-GPU mode is only a fallback if the modesetting sink hangs too.
+- `(panel-gpu)` reads the RUNNING provider name, so it FAILs until X restarts after the removal.
   The provider name is the DDX's: `modesetting` for the modesetting DDX, the vendor's own name
   (`AMD Radeon 780M Graphics @ pci:...`) for xf86-video-amdgpu.
 - `(drm-hang)` catches the next hang in the boot it starts, not at the event. Only a reboot clears a

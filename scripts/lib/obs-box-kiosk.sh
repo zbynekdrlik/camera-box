@@ -12,8 +12,9 @@
 # see its header for the box-fact ARGUMENTS convention and the item order. The bodies keep
 # setup-imag.sh's column-0 layout so their heredocs stay byte-identical to what imag has always written.
 # issue 1415: this half also sets the rig time zone (obs_box_timezone), the operator's clocks.
-# issue 1418: it also holds the iGPU panel-sink DDX pin (obs_box_igpu_sink_modesetting, an xorg.conf.d
-# OutputClass), which the system half's obs_box_nvidia_prime installs on a discrete-NVIDIA box.
+# issue 1418: it also holds the iGPU panel-sink item (obs_box_igpu_sink_modesetting: remove the amdgpu
+# Xorg DDX + an xorg.conf.d OutputClass), which the system half's obs_box_nvidia_prime runs on a
+# discrete-NVIDIA box.
 
 # The ONE rig time-zone declaration (scripts/lib/rig-timezone.sh, also used by setup-device.sh,
 # create-usb-linux.sh and verify-device.sh). The directory is a pure parameter expansion (no dirname),
@@ -406,25 +407,71 @@ obs_box_brightness_keys "$DESKTOP_USER"
 echo "  NOTE: the kiosk (lightdm+openbox) takes over the SESSION on the NEXT boot — this script does not reboot the box"
 }
 
-# obs_box_igpu_sink_conf_path -> where the iGPU-sink DDX pin lives (the grader reads the same path).
+# --- issue 1418: the iGPU panel sink of an NVIDIA-primary box runs on the Xorg modesetting DDX ----------
+# On a notebook NVIDIA renders the X screen (PRIME nvidia-primary) and the iGPU scans the panel out as a
+# reverse-PRIME sink. strih-snv (AMD Radeon 780M), 11/12.10.2026: Xorg loaded xf86-video-amdgpu for that
+# sink, the panel's commit_work blocked forever on an NVIDIA fence and the panel froze for 18 h while OBS
+# kept rendering. The Intel notebook before it ran the SAME topology with the sink on modesetting and was
+# stable. An /etc/X11/xorg.conf.d OutputClass `MatchDriver "amdgpu"` -> `Driver "modesetting"` does NOT
+# move it: tried live as 20-, 05- and a same-named 10-amdgpu.conf shadow, Xorg still applied the package's
+# own /usr/share/X11/xorg.conf.d/10-amdgpu.conf `Driver "amdgpu"` first. Removing the DDX package (which
+# owns that file) does: Xorg then logs `Failed to load module "amdgpu"` (harmless) and runs the sink on
+# modesetting with glamor. The OutputClass file is still written, belt and braces, never relied on.
+
+# obs_box_amdgpu_ddx_package -> the package of the amdgpu Xorg DDX (the grader reads the same name).
+obs_box_amdgpu_ddx_package() {
+    printf '%s' xserver-xorg-video-amdgpu
+}
+
+# obs_box_amdgpu_ddx_packages -> the DDX and the meta package that depends on it (its only reverse
+# dependency on strih-snv), one per line, in removal order.
+obs_box_amdgpu_ddx_packages() {
+    printf '%s\n' "$(obs_box_amdgpu_ddx_package)" xserver-xorg-video-all
+}
+
+# obs_box_amdgpu_ddx_remove -- remove the installed obs_box_amdgpu_ddx_packages. A dry run first
+# (`apt-get -s remove`): a removal that would take ANY other package (xserver-xorg, the session) is
+# refused, never done. Idempotent (nothing installed = nothing touched), fails loud via the caller's
+# fail(); the dpkg lock wait is the baseline's apt.conf.d timeout. Takes effect at the next X start.
+obs_box_amdgpu_ddx_remove() {
+    local p st sim r
+    local -a installed=() extra=()
+    while IFS= read -r p; do
+        st="$(dpkg-query -W -f='${Status}' "$p" 2>/dev/null || true)"
+        if [ "$st" = "install ok installed" ]; then installed+=("$p"); fi
+    done < <(obs_box_amdgpu_ddx_packages)
+    if [ "${#installed[@]}" = 0 ]; then
+        echo "  igpu-sink: $(obs_box_amdgpu_ddx_package) not installed -- unchanged (the iGPU sink runs on modesetting)"
+        return 0
+    fi
+    sim="$(LC_ALL=C apt-get -s remove "${installed[@]}" 2>&1)" \
+        || fail "igpu-sink: apt-get -s remove ${installed[*]} failed: ${sim}"
+    while IFS= read -r r; do
+        case " ${installed[*]} " in *" ${r} "*) ;; *) extra+=("$r") ;; esac
+    done < <(awk '$1 == "Remv" { print $2 }' <<<"$sim" || true)
+    if [ "${#extra[@]}" != 0 ]; then
+        fail "igpu-sink: removing ${installed[*]} would also remove ${extra[*]} -- refused; remove the amdgpu DDX by hand without them (issue 1418)"
+    fi
+    DEBIAN_FRONTEND=noninteractive apt-get remove -y "${installed[@]}" >/dev/null \
+        || fail "igpu-sink: apt-get remove ${installed[*]} failed -- the iGPU panel sink keeps the amdgpu DDX that froze strih-snv"
+    echo "  igpu-sink: removed ${installed[*]} -- the iGPU panel sink runs on modesetting from the next X start"
+}
+
+# obs_box_igpu_sink_conf_path -> where the belt-and-braces OutputClass file lives.
 obs_box_igpu_sink_conf_path() {
     printf '%s' /etc/X11/xorg.conf.d/20-igpu-sink-modesetting.conf
 }
 
-# obs_box_igpu_sink_modesetting_conf -> the xorg.conf.d text that puts the iGPU panel sink of an
-# NVIDIA-primary (reverse-PRIME) session on the Xorg modesetting DDX (issue 1418). On a notebook NVIDIA
-# renders the X screen and the iGPU scans the panel out. Xorg autoloads a vendor DDX for that sink when
-# one is installed: xf86-video-amdgpu for an AMD iGPU (strih-snv, Radeon 780M). There, 11/12.10.2026, the
-# panel's commit_work blocked forever on an NVIDIA fence and the panel froze for 18 h while OBS kept
-# rendering. The Intel notebook before it ran the SAME topology with the sink on modesetting and was
-# stable, so the baseline keeps that one configuration on every box (an Intel iGPU already gets
-# modesetting; this OutputClass only matches the amdgpu kernel driver).
+# obs_box_igpu_sink_modesetting_conf -> that OutputClass text (an Intel iGPU already gets modesetting;
+# the class only matches the amdgpu kernel driver).
 obs_box_igpu_sink_modesetting_conf() {
     cat <<'EOF'
 # camera-box shared OBS-box baseline (issue 1418): the iGPU panel sink of the NVIDIA-primary
 # (reverse-PRIME) session runs on the Xorg modesetting DDX, never xf86-video-amdgpu. strih-snv
 # 11/12.10.2026: on the amdgpu DDX the panel's commit_work blocked forever on an NVIDIA fence and the
-# panel froze; the Intel notebook before it ran modesetting and was stable.
+# panel froze; the Intel notebook before it ran modesetting and was stable. Belt and braces only: this
+# class loses to the xserver-xorg-video-amdgpu package's own 10-amdgpu.conf, so the baseline removes
+# that package.
 Section "OutputClass"
     Identifier "igpu-sink-modesetting"
     MatchDriver "amdgpu"
@@ -433,14 +480,15 @@ EndSection
 EOF
 }
 
-# obs_box_igpu_sink_modesetting [DEST [OWNER]] -- install obs_box_igpu_sink_modesetting_conf at DEST
-# (default obs_box_igpu_sink_conf_path, OWNER root:root, 0644) through obs_box_write_if_changed. Takes
-# effect at the next X start. Called by obs_box_nvidia_prime (the system half) on a discrete-NVIDIA box only; fails loud
-# via the caller's fail().
+# obs_box_igpu_sink_modesetting [DEST [OWNER]] -- the item: obs_box_amdgpu_ddx_remove, then the
+# OutputClass file at DEST (default obs_box_igpu_sink_conf_path, OWNER root:root, 0644) through
+# obs_box_write_if_changed. Called by obs_box_nvidia_prime (the system half) on a discrete-NVIDIA box
+# only; fails loud via the caller's fail().
 obs_box_igpu_sink_modesetting() {
     local dest="${1:-$(obs_box_igpu_sink_conf_path)}" owner="${2:-root:root}"
+    obs_box_amdgpu_ddx_remove
     mkdir -p "${dest%/*}" || fail "igpu-sink: could not create ${dest%/*}"
-    obs_box_igpu_sink_modesetting_conf | obs_box_write_if_changed "$dest" 0644 "$owner" "igpu-sink (modesetting DDX for the iGPU panel sink, issue 1418)"
+    obs_box_igpu_sink_modesetting_conf | obs_box_write_if_changed "$dest" 0644 "$owner" "igpu-sink (OutputClass, belt and braces, issue 1418)"
 }
 
 # obs_box_touchpad BOX -- the imag step 25 (#779) touchpad usability: tap-to-click + natural scroll +

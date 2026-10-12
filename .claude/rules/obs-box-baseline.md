@@ -147,32 +147,51 @@ Rules for the facet:
 ## The iGPU panel sink on the modesetting DDX (item `obs_box_igpu_sink_modesetting`, grader row `igpu-sink`, issue 1418)
 
 On an NVIDIA-primary notebook (PRIME nvidia-primary) NVIDIA renders the X screen and the iGPU scans
-the panel out as a reverse-PRIME SINK. Xorg autoloads a vendor DDX for that sink when one is
-installed: xf86-video-amdgpu for an AMD iGPU. On strih-snv (AMD Radeon 780M) the panel's
-`commit_work` blocked forever on an NVIDIA fence on 11/12.10.2026 and the panel froze for 18 h while
-OBS kept rendering. The returned Intel notebook had the same topology with the sink on the Xorg
-`modesetting` DDX and was stable (ROZHODNUTE 6132283178).
+the panel out as a reverse-PRIME SINK. On strih-snv (AMD Radeon 780M) Xorg ran that sink on
+xf86-video-amdgpu, and the panel's `commit_work` blocked forever on an NVIDIA fence on 11/12.10.2026:
+the panel froze for 18 h while OBS kept rendering. The returned Intel notebook had the same topology
+with the sink on the Xorg `modesetting` DDX and was stable (ROZHODNUTE 6132283178).
 
-- **The file:** `/etc/X11/xorg.conf.d/20-igpu-sink-modesetting.conf` (`obs_box_igpu_sink_conf_path`),
-  text `obs_box_igpu_sink_modesetting_conf`: an `OutputClass` with `MatchDriver "amdgpu"` and
-  `Driver "modesetting"`, behind a comment that names the freeze. An Intel iGPU already gets
-  modesetting, so the class only changes an AMD sink; the same file goes on every NVIDIA box.
+**DEAD END, do not retry: an xorg.conf.d OutputClass does not move the sink.** An
+`/etc/X11/xorg.conf.d` `OutputClass` with `MatchDriver "amdgpu"` + `Driver "modesetting"` was tried
+live on strih-snv (12.10.2026) as `20-`, as `05-`, and as a same-named `10-amdgpu.conf` shadow. Every
+time Xorg still applied the package's own `/usr/share/X11/xorg.conf.d/10-amdgpu.conf`
+(`OutputClass "AMDgpu"`, `Driver "amdgpu"`) first and loaded the amdgpu DDX.
+
+**What works: remove the DDX package.** `apt-get remove xserver-xorg-video-amdgpu
+xserver-xorg-video-all` (the meta package is the DDX's only reverse dependency, and the DDX package
+owns that 10-amdgpu.conf). Xorg then logs `Failed to load module "amdgpu"` (harmless) and
+`modeset(G0): glamor X acceleration enabled on AMD Radeon 780M`; `xrandr --listproviders` reads
+`Provider 1: ... Sink Output, Source Offload ... name:modesetting`. The panel output is renamed
+(eDP-1-1 -> eDP-1-2); the kiosk autostart resolves the panel dynamically, so that is fine.
+
 - **Install:** `obs_box_nvidia_prime` calls `obs_box_igpu_sink_modesetting` right after
-  `prime-select nvidia`, inside the discrete-NVIDIA branch only (an iGPU-only box gets nothing). It
-  writes through `obs_box_write_if_changed` (0644 root:root). The functions live in the kiosk half
-  (the system half is at its line budget). It takes effect at the next X start.
-- **Grader row `igpu-sink`** (right after `gpu`): on a dGPU box the file must be byte-identical to
-  the renderer (gather key `igpu_sink_conf`, `declare -f` embeds both renderers); an iGPU-only box is
-  OK. A dGPU box provisioned before this item (strih-snv, strih-pp) FAILs the row until setup re-runs.
-  Verify-strih's operator item 43 grades the EFFECT, the running sink provider's DDX
-  (`(panel-gpu)`, `strih-operator.md`), and names this file.
-- **Tests:** `tests/python/test_obs_box_igpu_sink_1418.py` runs the real install, the real
-  `obs_box_nvidia_prime` with its host tools stubbed as functions, the real gather with the conf path
-  moved into a temp dir, and the verdict; `tests/obs_box_baseline_1357.rs` carries the row in ITEMS
+  `prime-select nvidia`, inside the discrete-NVIDIA branch only (an iGPU-only box gets nothing). The
+  functions live in the kiosk half (the system half is at its line budget). It:
+  - removes the INSTALLED ones of `obs_box_amdgpu_ddx_packages` (`xserver-xorg-video-amdgpu`,
+    `xserver-xorg-video-all`) through `obs_box_amdgpu_ddx_remove`: an `apt-get -s remove` dry run
+    first, and a removal that would take ANY other package (xserver-xorg, lightdm) is REFUSED by name,
+    never done; nothing installed = nothing touched; an apt error fails loud. No list refresh is
+    needed; the dpkg lock wait is `obs_box_apt_lock_timeout`'s;
+  - still writes `/etc/X11/xorg.conf.d/20-igpu-sink-modesetting.conf` (the OutputClass, belt and
+    braces, its own comment says so) through `obs_box_write_if_changed` (0644 root:root). Never rely
+    on it alone.
+  - It takes effect at the next X start (which restarts OBS).
+- **Grader row `igpu-sink`** (right after `gpu`): on a dGPU box it FAILs while
+  `obs_box_amdgpu_ddx_package` reads `install ok installed` (gather key `amdgpu_ddx`, the dpkg
+  status; `declare -f` embeds the package name); removed / config-files / never installed is OK. An
+  iGPU-only box is OK whatever is installed (no reverse-PRIME sink). A dGPU box provisioned before this
+  item with the DDX installed FAILs the row until setup re-runs. Verify-strih's operator item 43
+  grades the EFFECT, the running sink provider's DDX name (`(panel-gpu)`, `strih-operator.md`).
+- **Tests:** `tests/python/test_obs_box_igpu_sink_1418.py` runs the real remover with `dpkg-query` /
+  `apt-get` shadowed by functions (none / both / one installed, an over-wide removal refused, an apt
+  failure), the real `obs_box_nvidia_prime` with its host tools stubbed, the real gather with
+  `dpkg-query` shadowed, and the verdict; `tests/obs_box_baseline_1357.rs` carries the row in ITEMS
   and the broken-fact table.
-- **Live (supervisor):** run setup-strih on strih-snv, restart X (it restarts OBS), then
-  `xrandr --listproviders` must name the sink `modesetting` and the Xorg log must load the
-  modesetting driver for the AMD device; soak overnight and read `(drm-hang)` in the morning.
+- **Live (supervisor):** strih-snv was fixed by hand on 12.10.2026 (packages removed, the OutputClass
+  file left). The next setup-strih run there logs `not installed -- unchanged` and rewrites the
+  OutputClass file to the baseline text. On any other NVIDIA box, after setup + an X restart,
+  `xrandr --listproviders` must name the sink `modesetting`; then soak overnight and read `(drm-hang)`.
 
 ## The rig time zone (item `obs_box_timezone`, grader row `timezone`, issue 1415)
 

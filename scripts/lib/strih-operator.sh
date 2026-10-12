@@ -56,7 +56,7 @@
 #                        `modesetting`, the Xorg DDX the stable Intel notebook ran it on. Any other name
 #                        is a vendor DDX: strih-snv's AMD 780M sink ran xf86-video-amdgpu and its panel
 #                        commit waited forever on an NVIDIA fence (11/12.10.2026, ROZHODNUTE 6132283178)
-#                        -- FAIL naming the shared baseline's 20-igpu-sink-modesetting.conf; NOTE with
+#                        -- FAIL naming the DDX package the shared baseline removes; NOTE with
 #                        one provider; a read that fails is a hung X;
 #       (drm-hang)       this boot's kernel log (`journalctl -k -b 0`): a hung task (`blocked for more
 #                        than`) whose trace within STRIH_OPERATOR_KLOG_TRACE_LINES lines (before the next
@@ -99,8 +99,9 @@ STRIH_OPERATOR_QT_SVG_PACKAGE=qt6-svg-plugins
 # The ACPI / system "keyboards" X lists on every notebook (and a keyboard's media-key half): never the
 # operator's keyboard. Matched against the lower-cased device name.
 STRIH_OPERATOR_NOT_A_KEYBOARD='power button|sleep button|video bus|lid switch|hid events|hotkeys|extra buttons|pc speaker|consumer control|system control'
-# (panel-gpu): the shared baseline's iGPU-sink DDX pin (obs_box_igpu_sink_conf_path, test-pinned equal).
-STRIH_OPERATOR_IGPU_SINK_CONF=/etc/X11/xorg.conf.d/20-igpu-sink-modesetting.conf
+# (panel-gpu): the amdgpu Xorg DDX package the shared baseline removes (obs_box_amdgpu_ddx_package,
+# test-pinned equal).
+STRIH_OPERATOR_AMDGPU_DDX_PKG=xserver-xorg-video-amdgpu
 # (drm-hang): how many lines after a hung-task line its trace may run (the 11.10 trace: 20 lines).
 STRIH_OPERATOR_KLOG_TRACE_LINES=25
 
@@ -614,7 +615,7 @@ strih_operator_xrandr_providers() {
 }
 
 # strih_operator_panel_gpu_verdict XRANDR_TEXT READ_RC -> ONE row: every reverse-PRIME display sink runs
-# on the modesetting DDX (the shared baseline's STRIH_OPERATOR_IGPU_SINK_CONF puts it there).
+# on the modesetting DDX (the shared baseline removes STRIH_OPERATOR_AMDGPU_DDX_PKG to put it there).
 strih_operator_panel_gpu_verdict() {
   local text="${1-}" rc="${2:-0}" rows count n sink out name src="" sinks="" bad=""
   case "$rc" in
@@ -642,8 +643,8 @@ strih_operator_panel_gpu_verdict() {
   if [ "$count" = 0 ]; then
     printf 'FAIL|(panel-gpu) xrandr --listproviders on :0 listed no GPU provider -- X is down or does not answer clients (the 12.10.2026 hang)\n'
   elif [ -n "$bad" ]; then
-    printf 'FAIL|(panel-gpu) the reverse-PRIME panel sink %s runs on its vendor DDX, not modesetting, behind the X screen'"'"'s GPU %s: its panel commits wait on %s fences, and on the amdgpu DDX one never signalled (the strih-snv 11/12.10.2026 freeze) -- re-run setup-strih.sh step 11 and restart X: the shared baseline writes %s, which moves an amdgpu sink to modesetting; a sink on another vendor DDX needs its own OutputClass (MatchDriver = its kernel driver) there\n' \
-      "$bad" "${src:-Provider 0}" "${src:-Provider 0}" "$STRIH_OPERATOR_IGPU_SINK_CONF"
+    printf 'FAIL|(panel-gpu) the reverse-PRIME panel sink %s runs on its vendor DDX, not modesetting, behind the X screen'"'"'s GPU %s: its panel commits wait on %s fences, and on the amdgpu DDX one never signalled (the strih-snv 11/12.10.2026 freeze) -- re-run setup-strih.sh step 11 and restart X: the shared baseline removes %s, whose own 10-amdgpu.conf beats any OutputClass override; a sink on another vendor DDX needs that DDX package removed the same way\n' \
+      "$bad" "${src:-Provider 0}" "${src:-Provider 0}" "$STRIH_OPERATOR_AMDGPU_DDX_PKG"
   elif [ "$count" = 1 ]; then
     printf 'NOTE|(panel-gpu) one GPU provider (%s), no PRIME -- not graded\n' "${src:-Provider 0}"
   elif [ -n "$sinks" ]; then
