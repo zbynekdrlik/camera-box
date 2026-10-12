@@ -331,8 +331,9 @@ $(dantesync_windows_wait_service_exit_ps)
     Copy-Item -Force \$tmp \$exe
     Start-Service dantesync
 } catch {
-    Copy-Item -Force \$bak \$exe -ErrorAction SilentlyContinue
-    Start-Service dantesync -ErrorAction SilentlyContinue
+    # A locked-exe IOException terminates despite -ErrorAction: never let it skip the start (12.10.2026).
+    try { Copy-Item -Force \$bak \$exe } catch { Write-Output ('SELF-HEAL: restore of the .bak failed: ' + \$_.Exception.Message) }
+    try { Start-Service dantesync } catch { Write-Output ('SELF-HEAL: Start-Service failed: ' + \$_.Exception.Message) }
     throw
 }
 EOF
