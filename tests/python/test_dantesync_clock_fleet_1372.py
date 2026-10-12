@@ -37,7 +37,9 @@ def _source_var(var, **env):
 
 
 def test_roster_defaults_come_from_the_dantesync_fleet():
-    assert _source_var("DANTE_CLOCK_CAM_NODES") == "cam1 cam2 cam3 cam4 cam5 cam6 cam7"
+    # issue 1413: the CAM arm is the HOME venue's cameras (strih-lx.env STRIH_CAMERAS); the Poprad
+    # cameras are `reach` rows, watched once through the REACH arm (test_dantesync_fleet_pp_cams_1413.py).
+    assert _source_var("DANTE_CLOCK_CAM_NODES") == "cam2 cam3 cam5"
     assert _source_var("DANTE_CLOCK_OBS_NODES") == "strih-lx stream resolume"
     assert _source_var("DANTE_CLOCK_FIXED_NODES") == "mbc fohabl"
     assert _source_var("DANTE_CLOCK_LOCAL_NODES") == "dev1"

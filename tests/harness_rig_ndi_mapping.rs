@@ -133,14 +133,14 @@ fn active_map_defaults_to_exactly_the_full_seven_camera_fleet_1216() {
     // cam2 RESTORED. issue 1216 (2026-08-28): cam5/cam6/cam7 RESTORED (bigger splitter fitted);
     // cam5 dropped back out the SAME day (issue 1217, a DEAD_PORT splitter leg). issue 1216
     // completion (2026-08-30, owner directive "kamery od 1-7 bezia" after a physical cable
-    // reseat): cam4 (#947) and cam5 (DEAD_PORT) both rejoin -- the resolved default is now the
-    // FULL seven-camera fleet.
+    // reseat): cam4 (#947) and cam5 (DEAD_PORT) both rejoin. issue 1413 (2026-10-12):
+    // cam1/cam4/cam6/cam7 moved to Poprad -- the resolved default is the SNV cam2/cam3/cam5.
     let (stdout, stderr) = run_py_check(
         r#"import os
 os.environ.pop("CAMERA_ACTIVE_SET", None)
 want = m.active_map()
 senders = sorted(s.split(" ", 1)[0] for _, s in want)
-assert senders == ["CAM1", "CAM2", "CAM3", "CAM4", "CAM5", "CAM6", "CAM7"], senders
+assert senders == ["CAM2", "CAM3", "CAM5"], senders
 assert m.parse_map_args(None) == want, "no --map -> active_map()"
 "#,
     );
@@ -196,16 +196,12 @@ fn default_active_set_env_var_matches_camera_set_sh_exactly() {
     let py = read("scripts/set-ndi-mapping.py");
     let sh = read("scripts/camera-set.sh");
     assert!(
-        py.contains(r#"os.environ.get("CAMERA_ACTIVE_SET", "cam1 cam2 cam3 cam4 cam5 cam6 cam7")"#),
-        "issue 1216 completion: set-ndi-mapping.py must read $CAMERA_ACTIVE_SET with the \
-         identical literal fallback camera-set.sh itself defaults to (cam4+cam5 rejoined \
-         2026-08-30)"
+        py.contains(r#"os.environ.get("CAMERA_ACTIVE_SET", "cam2 cam3 cam5")"#),
+        "issue 1413: set-ndi-mapping.py must read $CAMERA_ACTIVE_SET with the identical literal \
+         fallback camera-set.sh itself defaults to (the SNV rig's cam2/cam3/cam5)"
     );
     assert!(
-        sh.contains(
-            r#"CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}""#
-        ),
-        "issue 1216 completion: camera-set.sh must default CAMERA_ACTIVE_SET to the identical \
-         literal"
+        sh.contains(r#"CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam2 cam3 cam5}""#),
+        "issue 1413: camera-set.sh must default CAMERA_ACTIVE_SET to the identical literal"
     );
 }

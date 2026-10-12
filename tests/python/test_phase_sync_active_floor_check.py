@@ -45,16 +45,9 @@ class TestActiveCameraNames:
         # owner directive "kamery od 1-7 bezia" after a physical cable reseat): cam4 (#947) and
         # cam5 (DEAD_PORT) both rejoin -- default mirrors camera-set.sh's CAMERA_ACTIVE_SET =
         # "cam1 cam2 cam3 cam4 cam5 cam6 cam7", the full seven-camera fleet.
+        # issue 1413 (2026-10-12): cam1/cam4/cam6/cam7 moved to Poprad, the SNV default is cam2 cam3 cam5.
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
-        assert psafc.active_camera_names() == [
-            "cam1",
-            "cam2",
-            "cam3",
-            "cam4",
-            "cam5",
-            "cam6",
-            "cam7",
-        ]
+        assert psafc.active_camera_names() == ["cam2", "cam3", "cam5"]
 
     def test_env_override(self, monkeypatch):
         monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam5")

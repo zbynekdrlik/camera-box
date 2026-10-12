@@ -183,40 +183,22 @@
 # `rig-fleet.txt` ack lines (`cam4:on-air-but-outside-measured-set-2026-08-07` and
 # `cam5:healthy-box-dead-splitter-leg-2026-08-28`) -- nothing else. This is, for the first time,
 # the FULL seven-camera fleet active simultaneously.
-CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}"
+#
+# SNV rig SHRANK to cam2 + cam3 + cam5 (issue 1413, owner 12.10.2026, verbatim: "v snv rigu uz je
+# menej camboxov lebo sa ostatne preniesli do pp, cize rig uz bude mat mensi pocet camboxov"):
+# cam1/cam4/cam6/cam7 physically moved to Poprad (scripts/strih-boxes/strih-pp.env STRIH_CAMERAS),
+# so the SNV E2E, the CI auto-deploy and deploy-fleet no longer dial four cameras in another town.
+# This default is the SNV venue's camera list, `scripts/strih-boxes/strih-lx.env` STRIH_CAMERAS, as
+# cam names; tests/harness_camera_set.rs pins the two EQUAL, so a camera moved between venues is one
+# fact-file edit + this line. The source box derives to cam3 (the first strih-routable member), the
+# box whose bkshading relay carries the test camera's USB. The PP cameras keep every fact below
+# (camera_resolve / camera_strih_route); they are maintained through the dantesync fleet's PP rows
+# (scripts/lib/dantesync-fleet.sh), never through this SNV measurement set.
+CAMERA_ACTIVE_SET="${CAMERA_ACTIVE_SET:-cam2 cam3 cam5}"
 
-# CAMERA_ALIGN_SET — the on-air strih cameras that the #1003 floor-3 per-run aligner keeps phase-
-# aligned. It is a SUPERSET of the MEASURED set: cam4 stays here UNCONDITIONALLY (the explicit
-# `_align_out="cam3 cam4"` base below, untouched regardless of cam4's own CAMERA_ACTIVE_SET
-# membership — the owner's rework mandate, issue 1003, 2026-08-20; the offline-ack
-# "outside-measured-set" covers only E2E measurement, never production alignment), and cam3 is
-# always included as the explicit on-air base. cam1's membership DERIVES from CAMERA_ACTIVE_SET
-# (issue 1170 introduced the derivation for cam2; issue 1198, 2026-08-27, generalized it to cam1;
-# issue 1216, 2026-08-28, then removed cam2 from the derivation OUTRIGHT — see the probe-path
-# comment right above the derivation line). issue 1216 (2026-08-28) extended the SAME derivation
-# to cam5/cam6/cam7 — a trailing loop, each appended only when it is a word in
-# CAMERA_ACTIVE_SET, so the resolved order stays cam1..cam7. issue 1217 (same day) DROPPED cam5
-# out of that trailing loop (its leg was a DEAD_PORT at the time, delivering no real content) —
-# and cam4+cam5 RESTORED 2026-08-30 (issue 1216 completion) puts cam5 BACK into the trailing loop:
-# its leg now reads colour (see the CAMERA_ACTIVE_SET header comment above), so aligning it is
-# worthwhile again, exactly the RE-ENABLE procedure cam5's own retirement comment always promised
-# ("add cam5 back to CAMERA_ACTIVE_SET AND the CAMERA_ALIGN_SET loop below"). cam1/cam5/cam6/cam7
-# ALL derive from CAMERA_ACTIVE_SET now — none is hardcoded true; shrinking the active set drops
-# each of them from the align set again, one line, no other edit. With today's default (the full
-# seven-camera fleet active) the resolved set is "cam1 cam3 cam4 cam5 cam6 cam7" — every
-# alignable on-air camera (cam2 = the projection probe whose view is structurally behind the
-# splitter family, deliberately excluded below regardless of its own active-set membership).
-# Override to match the on-air reality if the fleet changes: CAMERA_ALIGN_SET="cam1 cam3 cam4".
-# The inline case matches are word-exact on the space-padded set (same #39-injection-safe posture
-# as camera_is_active — it never evals the value); cam3/cam4 are the explicit always-on-air base.
-# cam2 NEVER derives into the align set (issue 1216/1152 rig-model correction, 2026-08-28):
-# cam2 is the PROJECTION PROBE -- its grabber captures imag-nb's HDMI output, so its view of the
-# painter QR arrives through painter -> cam1 camera -> strih -> imag -> HDMI -> grabber,
-# structurally ~8 painter ids (~130 ms) behind the direct splitter family. The floor-3 MUTUAL
-# align cannot equalize it by design, and its bimodal decode (twice-rescaled optical image)
-# flips the measured spread, failing the stability criterion (run 33166543288 [4i/8align]).
-# Its CAMERA_ACTIVE_SET membership (E2E leg, burn 911009, probe role) is untouched.
-CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-$(_align_out="cam3 cam4"; case " $CAMERA_ACTIVE_SET " in *" cam1 "*) _align_out="cam1 $_align_out" ;; esac; for _align_cam in cam5 cam6 cam7; do case " $CAMERA_ACTIVE_SET " in *" $_align_cam "*) _align_out="$_align_out $_align_cam" ;; esac; done; printf '%s' "$_align_out")}"
+# CAMERA_ALIGN_SET (the on-air strih cameras the #1003 floor-3 per-run aligner keeps phase-aligned)
+# is resolved further down, right after camera_strih_route: since issue 1413 it is DERIVED from
+# CAMERA_ACTIVE_SET through that function (see camera_align_default), which must be defined first.
 
 # This file is meant to be SOURCED, not executed — it defines functions and a default, and
 # performs no side effects on its own. Direct execution prints the resolved default set.
@@ -395,9 +377,9 @@ camera_active_ndi_sources_csv() {
   printf '%s' "$out"
 }
 
-# camera_align_ndi_sources_csv -> prints (stdout) "NDI cam1,NDI cam2,NDI cam3,NDI cam4" -- the
-# comma-joined strih NDI-input list for CAMERA_ALIGN_SET (the on-air alignment superset, incl.
-# cam4). Used by the #1003 floor-3 per-run aligner (scripts/qr_align_pins.py --sources) so the
+# camera_align_ndi_sources_csv -> prints (stdout) "NDI cam3,NDI cam5" (the SNV default) -- the
+# comma-joined strih NDI-input list for CAMERA_ALIGN_SET (cam3 + every strih-routable active camera,
+# issue 1413). Used by the #1003 floor-3 per-run aligner (scripts/qr_align_pins.py --sources) so the
 # alignment set derives from CAMERA_ALIGN_SET, never a literal cam range. The 1:1 "NDI cam<N>"
 # convention matches camera_strih_route / set-ndi-mapping.py.
 camera_align_ndi_sources_csv() {
@@ -412,9 +394,10 @@ camera_align_ndi_sources_csv() {
 # (space-separated cam names) removed -- the offline-ack sibling of camera_align_ndi_sources_csv,
 # mirroring camera_active_ndi_sources_excluding_csv. The floor-3 aligner (#1003 review 🟡) passes
 # recording-e2e.sh's PREFLIGHT_EXCLUDED_CAMS here so an acked-OFFLINE on-air camera (a temporarily
-# wedged cam4) is NOT required to decode a painter QR -- otherwise one acked box would abort the
-# WHOLE run. cam4 is aligned when HEALTHY (it stays in CAMERA_ALIGN_SET); it is dropped only while
-# explicitly acked offline, exactly like the freeze-watch's active-set exclusion. Word-exact match.
+# wedged camera) is NOT required to decode a painter QR -- otherwise one acked box would abort the
+# WHOLE run. An on-air camera is aligned when HEALTHY (it stays in CAMERA_ALIGN_SET); it is dropped
+# only while explicitly acked offline, exactly like the freeze-watch's active-set exclusion.
+# Word-exact match.
 camera_align_ndi_sources_excluding_csv() {
   local excluded="${1:-}" cam out=""
   for cam in $CAMERA_ALIGN_SET; do
@@ -520,6 +503,33 @@ camera_strih_route() {
   esac
   return 0
 }
+
+# CAMERA_ALIGN_SET — the on-air strih cameras that the #1003 floor-3 per-run aligner keeps phase-
+# aligned (scripts/lib/qr-align.sh, camera_align_ndi_sources_csv). Since issue 1413 it is cam3 (the
+# explicit always-on-air base) plus every STRIH-ROUTABLE member of CAMERA_ACTIVE_SET, in camera order.
+# History: issue 1003 kept cam4 here UNCONDITIONALLY (on-air while retired from measurement); cam4 left
+# the SNV rig for Poprad on 11.10.2026 (issue 1413), so nothing on-air stays outside the measured set
+# and the unconditional cam4 is gone. cam1/cam5/cam6/cam7 used to derive one by one (issues 1170,
+# 1198, 1216, 1217); one derivation now covers every camera. cam2 NEVER derives into it (issue
+# 1216/1152): cam2 is the PROJECTION PROBE (its grabber captures imag-nb's HDMI output, structurally
+# ~8 painter ids behind the splitter family, so the floor-3 MUTUAL align cannot equalize it), and
+# camera_strih_route rejects it, so the derivation drops it by the same single authority that decides
+# the source box. The walk is camera_resolve (cam1, cam2, ... to the first unknown name, never a
+# literal range) in a SUBSHELL, so it never leaks CAMERA_IP / CAMERA_STRIH_* into the caller.
+# Override to match the on-air reality: CAMERA_ALIGN_SET="cam3 cam5".
+camera_align_default() {
+  (
+    out="" n=1
+    while [ "$n" -le 99 ] && camera_resolve "cam$n" 2>/dev/null; do
+      if [ "cam$n" = cam3 ] || { camera_is_active "cam$n" && camera_strih_route "cam$n" 2>/dev/null; }; then
+        out="${out:+$out }cam$n"
+      fi
+      n=$((n + 1))
+    done
+    printf '%s' "$out"
+  )
+}
+CAMERA_ALIGN_SET="${CAMERA_ALIGN_SET:-$(camera_align_default)}"
 
 # The default camera for back-compat: every orchestrator certified cam2 before #24, so the
 # unset default stays cam2 and existing CI/behaviour is unchanged.

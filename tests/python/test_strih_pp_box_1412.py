@@ -57,8 +57,8 @@ def _bash(body, env=None, sources=(FACTS,), path_prefix=None):
 def _pp_filled(tmp_path, peer=PEER, extra=()):
     """strih-pp.env with the NDI runtime peer set to PEER (answered 11.10.2026 as SNV cam5)."""
     body = (BOXES / "strih-pp.env").read_text()
-    assert body.count("STRIH_NDI_RUNTIME_PEER=10.77.9.65\n") == 1
-    body = body.replace("STRIH_NDI_RUNTIME_PEER=10.77.9.65\n", "STRIH_NDI_RUNTIME_PEER=%s\n" % peer)
+    assert body.count("STRIH_NDI_RUNTIME_PEER=10.77.9.67\n") == 1
+    body = body.replace("STRIH_NDI_RUNTIME_PEER=10.77.9.67\n", "STRIH_NDI_RUNTIME_PEER=%s\n" % peer)
     for old, new in extra:
         assert body.count(old) == 1, old
         body = body.replace(old, new)
@@ -84,11 +84,12 @@ def test_strih_lx_is_the_strih_role_on_the_snv_grandmaster_with_the_sampler():
 
 
 def test_strih_pp_loads_with_every_fact_answered():
-    """11.10.2026: the last open fact (the NDI runtime peer) is answered -- SNV cam5, the fleet runtime."""
+    """The NDI runtime peer is a PP cambox: cam7 (10.77.9.67 on the PP LAN, issue 1413). It was SNV
+    cam5 on 11.10.2026, before the PP camboxes had a PP address."""
     r = _bash("strih_box_load strih-pp || exit 9\nstrih_lx_ndi_runtime_peer")
     assert r.returncode == 0, r.stderr
     assert "TODO_OWNER" not in r.stderr
-    assert r.stdout.strip() == "10.77.9.65"
+    assert r.stdout.strip() == "10.77.9.67"
 
 
 EXPECTED_PP = {
@@ -101,6 +102,8 @@ EXPECTED_PP = {
     "STRIH_CAMERAS": "1 4 6 7", "STRIH_HDMI_OUTPUT_BACKEND": "vk-direct", "STRIH_ROLE": "strih",
     "STRIH_DANTE_GM": "10.77.8.110", "STRIH_PROGRAM_AUDIO_SAMPLER": "off",
     "STRIH_PROGRAM_SENDER": "none", "STRIH_VENUE": "pp",
+    # issue 1413: dev1 dials the PP camboxes as 10.76.9.<octet> through companion-pp.
+    "STRIH_CAMERA_DEV1_NET": "10.76.9",
 }
 
 
@@ -150,7 +153,7 @@ def test_rig_grandmaster_ip_overrides_the_gm_fact():
 
 def test_setup_and_verify_refuse_a_box_with_an_open_fact(tmp_path):
     body = (BOXES / "strih-pp.env").read_text().replace(
-        "STRIH_NDI_RUNTIME_PEER=10.77.9.65\n", "STRIH_NDI_RUNTIME_PEER=TODO_OWNER\n")
+        "STRIH_NDI_RUNTIME_PEER=10.77.9.67\n", "STRIH_NDI_RUNTIME_PEER=TODO_OWNER\n")
     (tmp_path / "strih-pp.env").write_text(body)
     env = {k: v for k, v in os.environ.items() if k not in LEAKY}
     env["STRIH_BOXES_DIR"] = str(tmp_path)

@@ -84,7 +84,8 @@ def _profile_mod():
 
 def test_the_program_sender_and_venue_close_the_fact_list():
     r = _bash("strih_box_fact_keys", sources=(FACTS,))
-    assert r.stdout.split()[-2:] == ["STRIH_PROGRAM_SENDER", "STRIH_VENUE"]
+    # issue 1413 appended the dev1-side camera network after them.
+    assert r.stdout.split()[-3:] == ["STRIH_PROGRAM_SENDER", "STRIH_VENUE", "STRIH_CAMERA_DEV1_NET"]
 
 
 def test_stream_pp_loads_as_the_stream_role(boxes):
@@ -97,18 +98,19 @@ def test_stream_pp_loads_as_the_stream_role(boxes):
 
 
 def test_stream_pp_loads_with_every_fact_answered():
-    """11.10.2026: the last open fact (the NDI runtime peer) is answered -- SNV cam5, the fleet runtime."""
+    """The NDI runtime peer is a PP cambox: cam7 (10.77.9.67 on the PP LAN, issue 1413). It was SNV
+    cam5 on 11.10.2026, before the PP camboxes had a PP address."""
     r = _bash("strih_box_load stream-pp || exit 9\nstrih_lx_ndi_runtime_peer", sources=(FACTS,))
     assert r.returncode == 0, r.stderr
     assert "TODO_OWNER" not in r.stderr
-    assert r.stdout.strip() == "10.77.9.65"
+    assert r.stdout.strip() == "10.77.9.67"
 
 
 @pytest.mark.parametrize("box,old,new,word", [
     ("strih-lx", "STRIH_PROGRAM_SENDER=none", "STRIH_PROGRAM_SENDER=STRIH-PP (2ME PGM)", "STRIH_PROGRAM_SENDER"),
     ("stream-pp", "STRIH_PROGRAM_SENDER=STRIH-PP (2ME PGM)", "STRIH_PROGRAM_SENDER=none", "STRIH_PROGRAM_SENDER"),
     ("stream-pp", "STRIH_PROGRAM_SENDER=STRIH-PP (2ME PGM)", "STRIH_PROGRAM_SENDER=strih-pp", "STRIH_PROGRAM_SENDER"),
-    ("strih-lx", "STRIH_CAMERAS=1 2 3 4 5 6 7", "STRIH_CAMERAS=none", "STRIH_CAMERAS"),
+    ("strih-lx", "STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=none", "STRIH_CAMERAS"),
     ("strih-lx", "STRIH_HDMI_OUTPUT_BACKEND=vk-direct", "STRIH_HDMI_OUTPUT_BACKEND=none", "STRIH_HDMI_OUTPUT_BACKEND"),
     ("strih-lx", "STRIH_VENUE=snv", "STRIH_VENUE=SNV", "STRIH_VENUE"),
 ])
@@ -210,7 +212,8 @@ def test_a_strih_manifest_is_unchanged_by_the_class_key(boxes):
     inputs, _o, latency = s.parse_seed_manifest(text)
     assert s.parse_program_audio_input(text) == "ASIO zvuk"
     classes = [p["settings"].get("genlock_fifo") for p in s.seed_inputs(inputs, latency)]
-    assert classes.count(False) == 2 and classes.count(True) == 9
+    # issue 1413: strih-lx receives cam2/cam3/cam5 + the two CG inputs (genlocked) and the 2ME pair.
+    assert classes.count(False) == 2 and classes.count(True) == 5
 
 
 def test_the_program_audio_input_name_reaches_the_seeder():

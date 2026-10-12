@@ -211,7 +211,7 @@ build_cam_linux_spec() {
   [ -e "$lib" ] || return 0
   # shellcheck source=scripts/camera-set.sh
   . "$lib" 2>/dev/null || return 0
-  for cam in ${CAMERA_ACTIVE_SET:-cam1 cam2 cam3 cam4 cam5 cam6 cam7}; do
+  for cam in ${CAMERA_ACTIVE_SET:-cam2 cam3 cam5}; do
     if camera_resolve "$cam" 2>/dev/null; then
       spec="$spec $cam=root@${CAMERA_IP}"
     fi

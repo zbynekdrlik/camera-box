@@ -251,7 +251,8 @@ def test_the_pp_nodes_are_never_fixed_or_obsfleet_nodes(tmp_path):
     out = dict(ln.split("=", 1) for ln in r.stdout.splitlines())
     assert out["F"] == "mbc fohabl"
     assert out["O"] == "strih-lx stream resolume"
-    assert out["R"] == "strih-pp stream-pp resolume-pp"
+    # issue 1413: the Poprad camboxes are `reach` rows too (test_dantesync_fleet_pp_cams_1413.py)
+    assert out["R"] == "cam1 cam4 cam6 cam7 strih-pp stream-pp resolume-pp"
     assert out["M"] == "strih-lx strih-pp"
 
 
@@ -298,7 +299,9 @@ def test_version_gate_fleet_reads_the_pp_boxes_while_they_are_reachable(tmp_path
     assert r.returncode == 0, r.stdout + r.stderr
     for name in ("strih-pp", "stream-pp", "resolume-pp"):
         assert f"  {name} " in r.stdout, (name, r.stdout)
-    assert "GATE PASS — 16 box(es)" in r.stdout
+    # issue 1413: 3 SNV cameras + dev1 + 5 SNV boxes + the 3 PP boxes; the PP cameras are away here
+    # (PP_HOME names only the PP boxes).
+    assert "GATE PASS — 12 box(es)" in r.stdout
     dials = (tmp_path / "dials.log").read_text().split()
     assert {"newlevel@strih-pp.lan", "newlevel@stream-pp.lan", "newlevel@resolume-pp.lan"} <= set(dials)
 
@@ -314,7 +317,7 @@ def test_version_gate_fleet_a_stale_pp_box_drifts(tmp_path):
 def test_version_gate_fleet_skips_unreachable_pp_boxes_and_still_passes(tmp_path):
     r = _gate(tmp_path, {h: _PIN for h in _HOSTS}, "strih-lx stream resolume")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "GATE PASS — 13 box(es)" in r.stdout
+    assert "GATE PASS — 9 box(es)" in r.stdout
     for name in ("strih-pp", "stream-pp", "resolume-pp"):
         assert f"  {name} SKIPPED (unreachable" in r.stdout, r.stdout
     assert "-pp.lan" not in (tmp_path / "dials.log").read_text()
@@ -328,7 +331,7 @@ def _source_upgrade(tmp_path, body, **env):
 
 def test_upgrade_verifies_a_pp_node_against_the_pp_grandmaster(tmp_path):
     r = _source_upgrade(tmp_path, 'echo "S=[$(dantesync_gate_env_for stream-pp)]"; echo "R=[$(dantesync_gate_env_for resolume-pp)]";'
-                                  ' echo "M=[$(dantesync_gate_env_for strih-pp)]"; echo "V=[$(dantesync_gate_env_for cam1)]";'
+                                  ' echo "M=[$(dantesync_gate_env_for strih-pp)]"; echo "V=[$(dantesync_gate_env_for cam3)]";'
                                   ' echo "A=[$(dantesync_gate_env_for mbc)]"')
     assert f"S=[RIG_GRANDMASTER_IP={PP_GM}]" in r.stdout, r.stdout + r.stderr
     assert f"R=[RIG_GRANDMASTER_IP={PP_GM}]" in r.stdout and f"M=[RIG_GRANDMASTER_IP={PP_GM}]" in r.stdout
@@ -398,12 +401,12 @@ def test_watchdog_reach_roster_default_is_the_pp_fleet():
     script = f'set -uo pipefail\n. "{_WATCHDOG}"\nprintf "%s" "$DANTE_CLOCK_REACH_NODES"\n'
     r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env=_env())
     assert r.returncode == 0, r.stderr
-    assert r.stdout == "strih-pp stream-pp resolume-pp"
+    assert r.stdout == "cam1 cam4 cam6 cam7 strih-pp stream-pp resolume-pp"  # issue 1413: + the PP camboxes
 
 
 def test_watchdog_grades_the_pp_nodes_against_the_pp_grandmaster(tmp_path):
     err = _watchdog(tmp_path, {"strih-pp.lan": PP_GM, "stream-pp.lan": PP_GM, "resolume-pp.lan": PP_GM}, PP_HOME)
-    assert "reach='strih-pp stream-pp resolume-pp'" in err, err
+    assert "reach='cam1 cam4 cam6 cam7 strih-pp stream-pp resolume-pp'" in err, err  # issue 1413
     for name in ("strih-pp", "stream-pp", "resolume-pp"):
         assert f"{name} ({name}.lan): reachable=1 verdict=OK" in err, err
     assert "WOULD alert" not in err, err

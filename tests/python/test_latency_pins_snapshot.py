@@ -106,8 +106,9 @@ class TestActiveCameraNumbers:
         # (2026-08-30, owner directive "kamery od 1-7 bezia" after a physical cable reseat):
         # cam4 (#947) and cam5 (DEAD_PORT) both rejoin -- default mirrors camera-set.sh's
         # CAMERA_ACTIVE_SET = "cam1 cam2 cam3 cam4 cam5 cam6 cam7", the full seven-camera fleet.
+        # issue 1413 (2026-10-12): cam1/cam4/cam6/cam7 moved to Poprad, the SNV default is cam2 cam3 cam5.
         monkeypatch.delenv("CAMERA_ACTIVE_SET", raising=False)
-        assert lps.active_camera_numbers() == (1, 2, 3, 4, 5, 6, 7)
+        assert lps.active_camera_numbers() == (2, 3, 5)
 
     def test_env_override_narrows_the_set(self, monkeypatch):
         monkeypatch.setenv("CAMERA_ACTIVE_SET", "cam1 cam3")
@@ -180,23 +181,12 @@ class TestSnapshotBoxPins:
 
         monkeypatch.setattr(lps, "read_pin", fake_read_pin)
         result = lps.snapshot_box_pins("10.77.9.182", "", "NDI CAM{n}", "MV CAM{n}")
-        assert len(result) == 7
-        assert set(result.keys()) == {
-            "cam1",
-            "cam2",
-            "cam3",
-            "cam4",
-            "cam5",
-            "cam6",
-            "cam7",
-        }
-        assert result["cam1"] == {"main_ms": 1, "mv_ms": 101}
+        # issue 1413 (2026-10-12): cam1/cam4/cam6/cam7 moved to Poprad, the SNV default is cam2 cam3 cam5.
+        assert len(result) == 3
+        assert set(result.keys()) == {"cam2", "cam3", "cam5"}
         assert result["cam2"] == {"main_ms": 2, "mv_ms": 102}
         assert result["cam3"] == {"main_ms": 3, "mv_ms": 103}
-        assert result["cam4"] == {"main_ms": 4, "mv_ms": 104}
         assert result["cam5"] == {"main_ms": 5, "mv_ms": 105}
-        assert result["cam6"] == {"main_ms": 6, "mv_ms": 106}
-        assert result["cam7"] == {"main_ms": 7, "mv_ms": 107}
 
     def test_camera_active_set_env_override_narrows_the_sweep(self, monkeypatch):
         # #893: CAMERA_ACTIVE_SET is the ONE source of truth for which cameras get swept --

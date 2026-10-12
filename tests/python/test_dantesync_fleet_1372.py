@@ -83,12 +83,17 @@ def test_lv1_is_excluded_per_the_owner():
 
 
 def test_cameras_come_from_the_camera_resolve_walk_not_a_literal_range(tmp_path):
-    """Every camera camera_resolve knows, and nothing else: the count follows camera-set.sh."""
+    """Every camera camera_resolve knows that a venue lists, and nothing else (issue 1413: the HOME
+    venue's cameras are the `always` rows, the strih-lx.env STRIH_CAMERAS list)."""
     import re
     arms = re.findall(r"^\s*(cam[0-9]+)\)\s*CAMERA_IP=", (_ROOT / "scripts" / "camera-set.sh").read_text(),
                       re.MULTILINE)
+    home = re.search(r"^STRIH_CAMERAS=(.+)$", (_ROOT / "scripts" / "strih-boxes" / "strih-lx.env").read_text(),
+                     re.MULTILINE).group(1).split()
     r = _bash(tmp_path, "dantesync_fleet_names homegate=always os=linux")
-    assert r.stdout.split() == arms
+    assert r.stdout.split() == [a for a in arms if a[3:] in home]
+    rows = _bash(tmp_path, "dantesync_fleet_rows").stdout.split()
+    assert [ln.split("|")[0] for ln in rows if ln.startswith("cam")] == arms  # every camera has a venue today
     assert "cam1 cam2 cam3" not in _LIB.read_text()  # no literal camera range in the lib
 
 
@@ -146,7 +151,9 @@ def test_version_gate_arms(tmp_path):
     r = _bash(tmp_path, 'echo "L=$(dantesync_fleet_spec linux op)"; echo "W=$(dantesync_fleet_spec win op)";'
                         ' echo "D=$(dantesync_fleet_spec local op)"')
     out = dict(ln.split("=", 1) for ln in r.stdout.splitlines())
-    assert out["L"].split() == [f"cam{n}=root@10.77.9.6{n}" for n in range(1, 8)] + [
+    # issue 1413: the SNV cameras at their rig address, the Poprad ones at the dev1-side 10.76.9.x
+    assert out["L"].split() == [f"cam{n}=root@{'10.77.9' if n in (2, 3, 5) else '10.76.9'}.6{n}"
+                                for n in range(1, 8)] + [
         "strih-lx=op@10.77.9.202", "strih-pp=op@strih-pp.lan", "stream-pp=op@stream-pp.lan"]
     assert out["W"].split() == ["stream=op@10.77.9.204", "resolume=op@resolume.lan",
                                 "mbc=op@10.77.7.232", "fohabl=master@10.77.7.30", "resolume-pp=op@resolume-pp.lan"]

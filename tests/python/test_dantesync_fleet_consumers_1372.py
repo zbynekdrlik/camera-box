@@ -81,13 +81,20 @@ def _all_on_pin(**over):
     return v
 
 
+# issue 1413: cam1/cam4/cam6/cam7 moved to Poprad -- `reach` rows, away unless OBS_FLEET_HOME names them.
+_PP_CAMS = ("cam1", "cam4", "cam6", "cam7")
+
+
 def test_gate_fleet_reads_every_node_including_the_audio_vlan(tmp_path):
     r, _ = _gate(tmp_path, _all_on_pin(), "--fleet")
     assert r.returncode == 0, r.stdout + r.stderr
     for name in _IPS:
+        if name in _PP_CAMS:
+            assert f"  {name} SKIPPED (unreachable" in r.stdout, (name, r.stdout)
+            continue
         assert f"  {name} " in r.stdout, (name, r.stdout)
     assert "  dev1 " in r.stdout
-    assert "GATE PASS — 13 box(es)" in r.stdout
+    assert "GATE PASS — 9 box(es)" in r.stdout
 
 
 def test_gate_fleet_fohabl_is_dialled_with_its_own_credential(tmp_path):
@@ -95,7 +102,7 @@ def test_gate_fleet_fohabl_is_dialled_with_its_own_credential(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     dials = dict(line.split(" ", 1) for line in log.splitlines())
     assert dials["master@10.77.7.30"] == "foh-secret"
-    assert dials["root@10.77.9.61"] == "fleet-default"
+    assert dials["root@10.77.9.62"] == "fleet-default"
     assert dials["newlevel@10.77.7.232"] == "fleet-default"
 
 
@@ -171,7 +178,7 @@ def test_upgrade_verify_grades_an_audio_node_against_the_audio_grandmaster(tmp_p
     """Review round 1: verify_node ran dantesync-gate.sh against the VIDEO grandmaster for mbc/fohabl
     too -- harmless only while GM enforcement is off. The gate env now carries the node's ROLE
     grandmaster for an audio node, and nothing for a video node (the gate keeps its own default)."""
-    r = _source_upgrade(tmp_path, 'echo "A=[$(dantesync_gate_env_for mbc)]"; echo "V=[$(dantesync_gate_env_for cam1)]";'
+    r = _source_upgrade(tmp_path, 'echo "A=[$(dantesync_gate_env_for mbc)]"; echo "V=[$(dantesync_gate_env_for cam3)]";'
                                   ' echo "U=[$(dantesync_gate_env_for nosuchbox)]"')
     assert "A=[RIG_GRANDMASTER_IP=10.77.7.104]" in r.stdout, r.stdout + r.stderr
     assert "V=[]" in r.stdout and "U=[]" in r.stdout
