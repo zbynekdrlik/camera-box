@@ -722,6 +722,8 @@ fi
 if lspci -nn | obs_box_has_discrete_nvidia; then
     command -v prime-select >/dev/null 2>&1 || fail "prime-select missing after nvidia-driver-595-open install"
     prime-select nvidia || fail "prime-select nvidia failed"
+    # issue 1418: the iGPU panel sink on the modesetting DDX (the kiosk half writes the xorg.conf.d pin).
+    obs_box_igpu_sink_modesetting
 fi
 # #295/#487: a DKMS driver install regenerates initramfs for the running kernel -- never trust
 # that blindly. Reuse the SAME safe_grub_regen helper the #482/#483 grub.d drops call above

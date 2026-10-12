@@ -51,11 +51,13 @@
 #                        grades the icon engine only);
 #       (operator-input) X lists a real keyboard and a real pointer (never the XTEST devices, never the
 #                        ACPI buttons every notebook lists as keyboards);
-#       (panel-gpu)      `xrandr --listproviders` on :0: a provider after Provider 0 (the X screen's GPU)
-#                        with `Sink Output` and outputs > 0 is a reverse-PRIME panel, whose every flip
-#                        waits on a Provider-0 fence (strih-snv 11/12.10.2026: one fence never signalled
-#                        and the panel froze for 18 h) -- FAIL naming the cure, BIOS GPU working mode =
-#                        discrete GPU; NOTE with one provider; a read that fails is a hung X;
+#       (panel-gpu)      `xrandr --listproviders` on :0: every provider after Provider 0 (the X screen's
+#                        GPU) that lists `Sink Output` (the reverse-PRIME panel sink) must be named
+#                        `modesetting`, the Xorg DDX the stable Intel notebook ran it on. Any other name
+#                        is a vendor DDX: strih-snv's AMD 780M sink ran xf86-video-amdgpu and its panel
+#                        commit waited forever on an NVIDIA fence (11/12.10.2026, ROZHODNUTE 6132283178)
+#                        -- FAIL naming the shared baseline's 20-igpu-sink-modesetting.conf; NOTE with
+#                        one provider; a read that fails is a hung X;
 #       (drm-hang)       this boot's kernel log (`journalctl -k -b 0`): a hung task (`blocked for more
 #                        than`) whose trace within STRIH_OPERATOR_KLOG_TRACE_LINES lines (before the next
 #                        `INFO: task`) shows `commit_work` or `drm_atomic_helper_wait_for_fences`, or a
@@ -95,6 +97,8 @@ STRIH_OPERATOR_QT_SVG_PACKAGE=qt6-svg-plugins
 # The ACPI / system "keyboards" X lists on every notebook (and a keyboard's media-key half): never the
 # operator's keyboard. Matched against the lower-cased device name.
 STRIH_OPERATOR_NOT_A_KEYBOARD='power button|sleep button|video bus|lid switch|hid events|hotkeys|extra buttons|pc speaker|consumer control|system control'
+# (panel-gpu): the shared baseline's iGPU-sink DDX pin (obs_box_igpu_sink_conf_path, test-pinned equal).
+STRIH_OPERATOR_IGPU_SINK_CONF=/etc/X11/xorg.conf.d/20-igpu-sink-modesetting.conf
 # (drm-hang): how many lines after a hung-task line its trace may run (the 11.10 trace: 20 lines).
 STRIH_OPERATOR_KLOG_TRACE_LINES=25
 
@@ -593,7 +597,7 @@ strih_operator_xrandr_read() {
 
 # strih_operator_xrandr_providers (stdin = `xrandr --listproviders`) -> `INDEX|SINK|OUTPUTS|NAME` per
 # provider: SINK 1 when its capabilities list `Sink Output`, OUTPUTS its `outputs:` count (empty when
-# the line has none).
+# the line has none), NAME the DDX's provider name (`modesetting`, or a vendor DDX's own name).
 strih_operator_xrandr_providers() {
   LC_ALL=C awk '
     /^Provider [0123456789]+:/ {
@@ -607,9 +611,10 @@ strih_operator_xrandr_providers() {
     }' || true
 }
 
-# strih_operator_panel_gpu_verdict XRANDR_TEXT READ_RC -> ONE row: no reverse-PRIME display sink.
+# strih_operator_panel_gpu_verdict XRANDR_TEXT READ_RC -> ONE row: every reverse-PRIME display sink runs
+# on the modesetting DDX (the shared baseline's STRIH_OPERATOR_IGPU_SINK_CONF puts it there).
 strih_operator_panel_gpu_verdict() {
-  local text="${1-}" rc="${2:-0}" rows count n sink out name src="" hit=""
+  local text="${1-}" rc="${2:-0}" rows count n sink out name src="" sinks="" bad=""
   case "$rc" in
     0) ;;
     124 | 137)
@@ -629,20 +634,20 @@ strih_operator_panel_gpu_verdict() {
     count=$((count + 1))
     if [ "$n" = 0 ]; then src="$name"; continue; fi
     [ "$sink" = 1 ] || continue
-    # An unreadable outputs count is graded as outputs present (fail closed).
-    case "$out" in 0) continue ;; esac
-    [ -n "$hit" ] || hit="${name:-an unnamed provider}|${n}|${out:-?}"
+    sinks="${sinks}${sinks:+, }${name:-an unnamed provider}"
+    [ "$name" = modesetting ] || bad="${bad}${bad:+; }${name:-an unnamed provider} (Provider ${n}, ${out:-?} outputs)"
   done <<<"$rows"
   if [ "$count" = 0 ]; then
     printf 'FAIL|(panel-gpu) xrandr --listproviders on :0 listed no GPU provider -- X is down or does not answer clients (the 12.10.2026 hang)\n'
-  elif [ -n "$hit" ]; then
-    IFS='|' read -r name n out <<<"$hit"
-    printf 'FAIL|(panel-gpu) BIOS GPU working mode = discrete GPU: the panel is a reverse-PRIME sink on %s (Provider %s, %s outputs) behind the X screen'"'"'s GPU %s, so every panel flip waits on a %s fence (the 11/12.10.2026 freeze: one fence never signalled and the panel froze until a reboot) -- set the BIOS GPU working mode to the discrete GPU at the box\n' \
-      "$name" "$n" "$out" "${src:-Provider 0}" "${src:-Provider 0}"
+  elif [ -n "$bad" ]; then
+    printf 'FAIL|(panel-gpu) the reverse-PRIME panel sink %s runs on its vendor DDX, not modesetting, behind the X screen'"'"'s GPU %s: its panel commits wait on %s fences, and on the amdgpu DDX one never signalled (the strih-snv 11/12.10.2026 freeze) -- re-run setup-strih.sh step 11 (the shared baseline writes %s) and restart X\n' \
+      "$bad" "${src:-Provider 0}" "${src:-Provider 0}" "$STRIH_OPERATOR_IGPU_SINK_CONF"
   elif [ "$count" = 1 ]; then
     printf 'NOTE|(panel-gpu) one GPU provider (%s), no PRIME -- not graded\n' "${src:-Provider 0}"
+  elif [ -n "$sinks" ]; then
+    printf 'OK|(panel-gpu) %s drives the X screen; the reverse-PRIME panel sink runs on the modesetting DDX\n' "${src:-Provider 0}"
   else
-    printf 'OK|(panel-gpu) %s GPU providers, no reverse-PRIME sink with outputs: %s drives the X screen\n' "$count" "${src:-Provider 0}"
+    printf 'OK|(panel-gpu) %s GPU providers, no reverse-PRIME display sink: %s drives the X screen\n' "$count" "${src:-Provider 0}"
   fi
 }
 
@@ -704,9 +709,9 @@ strih_operator_drm_hang_verdict() {
   IFS='|' read -r ts kind d <<<"$hit"
   ts="${ts:-an unknown time}"
   if [ "$kind" = task ]; then
-    printf 'FAIL|(drm-hang) a display commit hung in this boot, first at %s: task %s, its trace waits in a DRM commit (commit_work / drm_atomic_helper_wait_for_fences) -- the panel freezes while OBS keeps rendering (the 11/12.10.2026 freeze); only a reboot clears it, and (panel-gpu) names the BIOS cure\n' "$ts" "$d"
+    printf 'FAIL|(drm-hang) a display commit hung in this boot, first at %s: task %s, its trace waits in a DRM commit (commit_work / drm_atomic_helper_wait_for_fences) -- the panel freezes while OBS keeps rendering (the 11/12.10.2026 freeze); only a reboot clears it, and (panel-gpu) names the cure\n' "$ts" "$d"
   else
-    printf 'FAIL|(drm-hang) a display flip timed out in this boot, first at %s: %s -- the panel freezes while OBS keeps rendering (the 11/12.10.2026 freeze); only a reboot clears it, and (panel-gpu) names the BIOS cure\n' "$ts" "$d"
+    printf 'FAIL|(drm-hang) a display flip timed out in this boot, first at %s: %s -- the panel freezes while OBS keeps rendering (the 11/12.10.2026 freeze); only a reboot clears it, and (panel-gpu) names the cure\n' "$ts" "$d"
   fi
 }
 

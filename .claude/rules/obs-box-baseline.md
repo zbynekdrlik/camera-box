@@ -144,6 +144,35 @@ Rules for the facet:
 - **`obs_box_write_if_changed` details:** an exclusive `mktemp` sibling (never a predictable root
   temp inside a user-writable config dir); content, mode AND owner are all part of the unchanged check.
 
+## The iGPU panel sink on the modesetting DDX (item `obs_box_igpu_sink_modesetting`, grader row `igpu-sink`, issue 1418)
+
+On an NVIDIA-primary notebook (PRIME nvidia-primary) NVIDIA renders the X screen and the iGPU scans
+the panel out as a reverse-PRIME SINK. Xorg autoloads a vendor DDX for that sink when one is
+installed: xf86-video-amdgpu for an AMD iGPU. On strih-snv (AMD Radeon 780M) the panel's
+`commit_work` blocked forever on an NVIDIA fence on 11/12.10.2026 and the panel froze for 18 h while
+OBS kept rendering. The returned Intel notebook had the same topology with the sink on the Xorg
+`modesetting` DDX and was stable (ROZHODNUTE 6132283178).
+
+- **The file:** `/etc/X11/xorg.conf.d/20-igpu-sink-modesetting.conf` (`obs_box_igpu_sink_conf_path`),
+  text `obs_box_igpu_sink_modesetting_conf`: an `OutputClass` with `MatchDriver "amdgpu"` and
+  `Driver "modesetting"`, behind a comment that names the freeze. An Intel iGPU already gets
+  modesetting, so the class only changes an AMD sink; the same file goes on every NVIDIA box.
+- **Install:** `obs_box_nvidia_prime` calls `obs_box_igpu_sink_modesetting` right after
+  `prime-select nvidia`, inside the discrete-NVIDIA branch only (an iGPU-only box gets nothing). It
+  writes through `obs_box_write_if_changed` (0644 root:root). The functions live in the kiosk half
+  (the system half is at its line budget). It takes effect at the next X start.
+- **Grader row `igpu-sink`** (right after `gpu`): on a dGPU box the file must be byte-identical to
+  the renderer (gather key `igpu_sink_conf`, `declare -f` embeds both renderers); an iGPU-only box is
+  OK. Verify-strih's operator item 43 grades the EFFECT, the running sink provider's DDX
+  (`(panel-gpu)`, `strih-operator.md`), and names this file.
+- **Tests:** `tests/python/test_obs_box_igpu_sink_1418.py` runs the real install, the real
+  `obs_box_nvidia_prime` with its host tools stubbed as functions, the real gather with the conf path
+  moved into a temp dir, and the verdict; `tests/obs_box_baseline_1357.rs` carries the row in ITEMS
+  and the broken-fact table.
+- **Live (supervisor):** run setup-strih on strih-snv, restart X (it restarts OBS), then
+  `xrandr --listproviders` must name the sink `modesetting` and the Xorg log must load the
+  modesetting driver for the AMD device; soak overnight and read `(drm-hang)` in the morning.
+
 ## The rig time zone (item `obs_box_timezone`, grader row `timezone`, issue 1415)
 
 Every fresh box used to run the image default `Etc/UTC`, so the browser-source clocks (Camera info,

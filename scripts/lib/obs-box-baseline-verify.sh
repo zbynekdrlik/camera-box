@@ -19,7 +19,8 @@
 # deeper than the bound entered over a 1 s sample), nosleep, boot (boot safety net), kernel (preempt=full low-latency),
 # affinity (AFFINITY-ONLY core reservation, no kernel isolcpus/nohz_full), rtprio (no retired
 # render-tick rtprio grant, issue 1357), gpu (PRIME nvidia-primary on
-# a dGPU box, the iGPU max-frequency pin otherwise), dejitter (oomd + off-hours + OBS ProcessPriority=High
+# a dGPU box, the iGPU max-frequency pin otherwise), igpu-sink (a dGPU box's iGPU panel sink pinned to the
+# modesetting DDX, issue 1418), dejitter (oomd + off-hours + OBS ProcessPriority=High
 # + the user-unit masks), crash (no operator crash popup), kiosk (lightdm + openbox installed, autologin
 # -> openbox, no GNOME), websocket (python3-websocket for the OBS seeders), brightness (the kiosk
 # panel-brightness keys),
@@ -135,7 +136,7 @@ obs_box_baseline_gather_snippet() {
     printf 'BOX=%q\nU=%q\nUNIT=%q\n' "$box" "$user" "$unit"
     declare -f obs_box_has_discrete_nvidia obs_box_crash_popup_units obs_box_dejitter_user_units \
         obs_box_brightness_helper_text obs_box_backlight_udev_rule obs_box_brightness_keybinds_xml \
-        obs_box_cpu_latency_bound_us rig_timezone_read
+        obs_box_cpu_latency_bound_us rig_timezone_read obs_box_igpu_sink_conf_path obs_box_igpu_sink_modesetting_conf
     cat <<'GATHER_EOF'
 set +e
 HOMEDIR="$(getent passwd "$U" 2>/dev/null | cut -d: -f6)"; [ -n "$HOMEDIR" ] || HOMEDIR="/home/$U"
@@ -208,6 +209,7 @@ echo "dgpu=$(if lspci -nn 2>/dev/null | obs_box_has_discrete_nvidia; then echo 1
 echo "prime=$(prime-select query 2>/dev/null | first)"
 echo "display_gpus=$(lspci -nn 2>/dev/null | grep -Eic '(vga compatible controller|3d controller|display controller)')"
 echo "igpu_unit=$(systemctl is-enabled "${BOX}-igpu-maxperf.service" 2>/dev/null | first)"
+echo "igpu_sink_conf=$(if [ -n "$(obs_box_igpu_sink_modesetting_conf)" ] && cmp -s "$(obs_box_igpu_sink_conf_path)" <(obs_box_igpu_sink_modesetting_conf); then echo 1; else echo 0; fi)"
 echo "oomd=$(systemctl is-enabled systemd-oomd.service 2>/dev/null | first)"
 echo "offhours=$(fexists "/etc/systemd/system/apt-daily-upgrade.timer.d/${BOX}-offhours.conf")"
 echo "process_priority=$(if grep -qx 'ProcessPriority=High' "${HOMEDIR}/.config/obs-studio/global.ini" 2>/dev/null; then echo 1; else echo 0; fi)"
@@ -292,7 +294,7 @@ obs_box_baseline_verdict() {
     }
     _obs_box_f() { _obs_box_fact "$1" "$facts"; }
     if [ "$(_obs_box_f gather_done)" != 1 ]; then
-        for v in timezone net perf cstate nosleep boot kernel affinity rtprio gpu dejitter crash kiosk websocket brightness autostart power touchpad; do
+        for v in timezone net perf cstate nosleep boot kernel affinity rtprio gpu igpu-sink dejitter crash kiosk websocket brightness autostart power touchpad; do
             _obs_box_item "$v" 0 "unreadable (the baseline gather did not complete)"
         done
         return 1
@@ -372,6 +374,18 @@ obs_box_baseline_verdict() {
     else
         ok=0; [ "$(_obs_box_f igpu_unit)" = enabled ] && ok=1
         _obs_box_item gpu "$ok" "no discrete NVIDIA GPU: the iGPU max-frequency pin unit=$(_obs_box_f igpu_unit)"
+    fi
+    # igpu-sink -- issue 1418: a dGPU box's iGPU panel sink runs on the modesetting DDX (the amdgpu DDX
+    # sink froze the strih-snv panel 11/12.10.2026; the Intel notebook ran modesetting and was stable)
+    if [ "$(_obs_box_f dgpu)" = 1 ]; then
+        ok=0; [ "$(_obs_box_f igpu_sink_conf)" = 1 ] && ok=1
+        if [ "$ok" = 1 ]; then
+            _obs_box_item igpu-sink 1 "discrete NVIDIA box: $(obs_box_igpu_sink_conf_path) puts the iGPU panel sink on the modesetting DDX"
+        else
+            _obs_box_item igpu-sink 0 "discrete NVIDIA box: $(obs_box_igpu_sink_conf_path) missing or not the baseline text (igpu_sink_conf=$(_obs_box_f igpu_sink_conf)) -- the iGPU panel sink runs on its vendor DDX instead of modesetting (the amdgpu DDX froze the strih-snv panel 11/12.10.2026); takes effect at the next X start"
+        fi
+    else
+        _obs_box_item igpu-sink 1 "no discrete NVIDIA GPU: no reverse-PRIME panel sink to pin"
     fi
     # dejitter -- systemd-oomd masked, the apt-daily-upgrade off-hours pin, OBS ProcessPriority=High and
     # every obs_box_dejitter_user_units member masked for the desktop user

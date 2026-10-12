@@ -852,7 +852,7 @@ else note "(program-audio) not graded: ${WHY}"; fi
 # 42) issue 1417 camera tally (scripts/lib/strih-tally.sh): units, :9240 /state, atemrpi.local, OBS program.
 if WHY="$(obs_box_step_applies 16f)"; then strih_tally_grade_report "${HERE}/.." "${STRIH_LX_USER:-newlevel}" || bad "(tally) the grader did not print all of its rows"
 else note "(tally) not graded: ${WHY}"; fi
-# 43) issue 1418 operator surface (scripts/lib/strih-operator.sh, its header: the 9 rows): input, BT, deck, MV click, panel.
+# 43) issue 1418 operator surface (scripts/lib/strih-operator.sh, its header: the 11 rows): input, BT, deck, MV click, panel GPU sink, DRM hang, panel.
 strih_operator_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(operator) the grader did not print all of its rows"
 
 # 16) NIC xhci IRQ affinity (issue 1317 item H): the USB-NIC's xhci interrupt must be pinned to a

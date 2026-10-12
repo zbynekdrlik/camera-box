@@ -12,6 +12,8 @@
 # see its header for the box-fact ARGUMENTS convention and the item order. The bodies keep
 # setup-imag.sh's column-0 layout so their heredocs stay byte-identical to what imag has always written.
 # issue 1415: this half also sets the rig time zone (obs_box_timezone), the operator's clocks.
+# issue 1418: it also holds the iGPU panel-sink DDX pin (obs_box_igpu_sink_modesetting, an xorg.conf.d
+# OutputClass), which the system half's obs_box_nvidia_prime installs on a discrete-NVIDIA box.
 
 # The ONE rig time-zone declaration (scripts/lib/rig-timezone.sh, also used by setup-device.sh,
 # create-usb-linux.sh and verify-device.sh). The directory is a pure parameter expansion (no dirname),
@@ -402,6 +404,43 @@ obs_box_same_unit /etc/systemd/system/display-manager.service /lib/systemd/syste
 obs_box_brightness_keys "$DESKTOP_USER"
 
 echo "  NOTE: the kiosk (lightdm+openbox) takes over the SESSION on the NEXT boot — this script does not reboot the box"
+}
+
+# obs_box_igpu_sink_conf_path -> where the iGPU-sink DDX pin lives (the grader reads the same path).
+obs_box_igpu_sink_conf_path() {
+    printf '%s' /etc/X11/xorg.conf.d/20-igpu-sink-modesetting.conf
+}
+
+# obs_box_igpu_sink_modesetting_conf -> the xorg.conf.d text that puts the iGPU panel sink of an
+# NVIDIA-primary (reverse-PRIME) session on the Xorg modesetting DDX (issue 1418). On a notebook NVIDIA
+# renders the X screen and the iGPU scans the panel out. Xorg autoloads a vendor DDX for that sink when
+# one is installed: xf86-video-amdgpu for an AMD iGPU (strih-snv, Radeon 780M). There, 11/12.10.2026, the
+# panel's commit_work blocked forever on an NVIDIA fence and the panel froze for 18 h while OBS kept
+# rendering. The Intel notebook before it ran the SAME topology with the sink on modesetting and was
+# stable, so the baseline keeps that one configuration on every box (an Intel iGPU already gets
+# modesetting; this OutputClass only matches the amdgpu kernel driver).
+obs_box_igpu_sink_modesetting_conf() {
+    cat <<'EOF'
+# camera-box shared OBS-box baseline (issue 1418): the iGPU panel sink of the NVIDIA-primary
+# (reverse-PRIME) session runs on the Xorg modesetting DDX, never xf86-video-amdgpu. strih-snv
+# 11/12.10.2026: on the amdgpu DDX the panel's commit_work blocked forever on an NVIDIA fence and the
+# panel froze; the Intel notebook before it ran modesetting and was stable.
+Section "OutputClass"
+    Identifier "igpu-sink-modesetting"
+    MatchDriver "amdgpu"
+    Driver "modesetting"
+EndSection
+EOF
+}
+
+# obs_box_igpu_sink_modesetting [DEST [OWNER]] -- install obs_box_igpu_sink_modesetting_conf at DEST
+# (default obs_box_igpu_sink_conf_path, OWNER root:root, 0644) through obs_box_write_if_changed. Takes
+# effect at the next X start. Called by obs_box_nvidia_prime (the system half) on a discrete-NVIDIA box only; fails loud
+# via the caller's fail().
+obs_box_igpu_sink_modesetting() {
+    local dest="${1:-$(obs_box_igpu_sink_conf_path)}" owner="${2:-root:root}"
+    mkdir -p "${dest%/*}" || fail "igpu-sink: could not create ${dest%/*}"
+    obs_box_igpu_sink_modesetting_conf | obs_box_write_if_changed "$dest" 0644 "$owner" "igpu-sink (modesetting DDX for the iGPU panel sink, issue 1418)"
 }
 
 # obs_box_touchpad BOX -- the imag step 25 (#779) touchpad usability: tap-to-click + natural scroll +
