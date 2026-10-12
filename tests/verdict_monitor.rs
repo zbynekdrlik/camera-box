@@ -35,12 +35,6 @@ impl std::ops::Deref for TempPath {
     }
 }
 
-impl AsRef<std::path::Path> for TempPath {
-    fn as_ref(&self) -> &std::path::Path {
-        &self.path
-    }
-}
-
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -137,8 +131,6 @@ fn dead_process_without_marker_fails_loud_not_hang() {
         all.contains("died") && all.contains("exit marker"),
         "must print a clear silent-death diagnostic, got:\n{all}"
     );
-
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -180,8 +172,6 @@ fn stalled_process_with_no_output_progress_fails_loud() {
             "monitor must kill the stalled verdict (expected death-by-signal, got {status:?})"
         );
     }
-
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -215,8 +205,6 @@ fn clean_completion_returns_the_verdicts_own_exit_code() {
             all.contains("finished"),
             "reports clean finish:\n{stdout}{stderr}"
         );
-
-        std::fs::remove_dir_all(&dir).ok();
     }
 }
 
@@ -378,5 +366,4 @@ fn stall_kill_takes_down_the_child_decode_not_just_the_wrapper() {
     );
     wrapper.kill().ok();
     wrapper.wait().ok();
-    std::fs::remove_dir_all(&dir).ok();
 }

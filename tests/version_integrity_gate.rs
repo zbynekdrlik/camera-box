@@ -1475,10 +1475,10 @@ fn write_linux_manifest(name: &str, libobs_sha: &str, distroav_sha: &str) -> Tem
 /// imag's marker matching via --genlock-sha) so the ONLY signal a byte test can move is the imag .so
 /// facet. Returns (strih_state, stream_state) paths.
 fn clean_fleet_states_1082(sha: &str, tag: &str) -> (TempPath, TempPath) {
-    // `tag` = caller-unique suffix: the _1082 tests all share one SHA const, run in PARALLEL
-    // threads of ONE process (same pid dir), and each removes its state files at the end -- a
-    // shared name lets test A's cleanup delete the file test B's gate subprocess is about to
-    // read (observed as a strih UNKNOWN flake on the CI coverage job, 2026-08-18).
+    // `tag` = caller-unique suffix: the _1082 tests all share one SHA const and run in PARALLEL.
+    // Before issue 1409 they also shared one pid dir, where a shared name let test A's cleanup
+    // delete the file test B's gate subprocess was about to read (a strih UNKNOWN flake on the CI
+    // coverage job, 2026-08-18). Each state now has its own tempfile dir; the tag stays as a label.
     let s = write_state(
         &format!("strih_1082_{}_{}", &sha[..8], tag),
         &with_obs_identity_ok(&with_sha(STRIH_PINNED, sha), true),
@@ -1493,7 +1493,8 @@ fn clean_fleet_states_1082(sha: &str, tag: &str) -> (TempPath, TempPath) {
 /// #1100 — the imag .so byte facet is now ENFORCED, so a GATE-PASS fixture must ALSO carry a matching
 /// imag manifest + gathered bytes (the imag analogue of with_sha / with_obs_identity_ok's enforced-key
 /// injection). Writes a clean linux manifest and returns (manifest_path, imag_bytes_csv) whose bytes
-/// match it -> imag_bytes_verdict OK. `tag` = caller-unique suffix (parallel tests share one pid dir).
+/// match it -> imag_bytes_verdict OK. `tag` = caller-unique suffix (a label; each manifest has its
+/// own tempfile dir since issue 1409).
 fn clean_imag_bytes_1100(tag: &str) -> (TempPath, String) {
     const LIBOBS: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const DISTROAV: &str = "2222222222222222222222222222222222222222222222222222222222222222";

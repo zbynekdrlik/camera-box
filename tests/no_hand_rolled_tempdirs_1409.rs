@@ -54,13 +54,13 @@ const ALLOWLIST: &[&str] = &[
     "harness_imag_cmdline_isolation_preflight_1105.rs: the test removes its fake-ssh dir",
     "harness_manifest_autosource_1082.rs: every tmpdir() caller removes it",
     "harness_mgmt_liveness_1309.rs: the test removes its generated script",
-    "harness_mv_reverify_escalate_1093.rs: the dir and the stub files are removed",
     "harness_ps_encoded_fleet_1259.rs: the only tmp_dir() caller removes it",
     "harness_received_tap_byte_safety_1258.rs: every tmp_dir() caller removes it",
     "harness_received_tap_encoded_command_1258.rs: probe_raw_invocation() removes its dir",
     "harness_recording_verdict_on_imag.rs: the test removes its dir at the end",
     "harness_remote_env_quoting.rs: the injection marker file is removed after the test",
     "harness_rig_restore_watchdog.rs: every scratch() caller removes it",
+    "harness_tmp_burn_sweep_749.rs: the real /tmp stale-file sweep test removes its own file",
     "harness_transport_sampler_707.rs: the test removes its dir at the end",
     "harness_verdict_done_marker.rs: every scratch() caller removes it",
     "harness_verify_fleet.rs: both callers remove their dir",
@@ -117,16 +117,17 @@ fn test_sources() -> Vec<(String, String)> {
 }
 
 /// True when the source builds a pid-keyed path and also reaches the OS temp dir: a code line
-/// (not a `//` comment) calls `process::id()`, and some code line names `temp_dir`.
+/// (not a `//` comment) calls `process::id()`, and some code line names `temp_dir` or a literal
+/// `/tmp/` path.
 fn builds_pid_temp_path(src: &str) -> bool {
-    // Spelled in two pieces so this file never matches itself.
+    // Spelled in pieces so this file never matches itself.
     let pid = concat!("process", "::id()");
-    let tmp = concat!("temp", "_dir");
+    let tmp = [concat!("temp", "_dir"), concat!("/", "tmp/")];
     let code: Vec<&str> = src
         .lines()
         .filter(|l| !l.trim_start().starts_with("//"))
         .collect();
-    code.iter().any(|l| l.contains(pid)) && code.iter().any(|l| l.contains(tmp))
+    code.iter().any(|l| l.contains(pid)) && code.iter().any(|l| tmp.iter().any(|t| l.contains(t)))
 }
 
 #[test]
@@ -180,4 +181,6 @@ fn the_detector_sees_the_hand_rolled_shape_and_ignores_comments_1409() {
     assert!(!builds_pid_temp_path(&commented));
     let tag_only = format!("let tag = format!(\"t-{{}}\", std::{pid});");
     assert!(!builds_pid_temp_path(&tag_only));
+    let literal_tmp = format!("let p = PathBuf::from(format!(\"/tmp/x-{{}}\", std::{pid}));");
+    assert!(builds_pid_temp_path(&literal_tmp));
 }
