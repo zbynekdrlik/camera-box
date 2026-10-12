@@ -674,9 +674,11 @@ pid+timestamp in a test; use `tempfile::tempdir()`.
 `tests/**/*.rs` whose code calls `process::id()` and names `temp_dir` or a literal `/tmp/`, unless
 the file is on its ALLOWLIST as `"<file>: <why it does not leak>"`; a stale entry fails too. 30
 leaking harnesses were converted; the shapes, for the next one:
-- A fixture writer or scratch helper returns a per-file `TempPath { path, _dir: TempDir }` with
-  `Deref<Target = Path>` (+ `AsRef<Path>` only when a caller passes `&x` to a generic fs fn), so
-  call sites stay unchanged. Keep the old name with `tempfile::Builder::new().prefix(..)`.
+- A fixture writer or scratch helper returns the ONE shared `TempPath { path, _dir: TempDir }`
+  from `tests/support/temp_path.rs` (`Deref<Target = Path>` + `AsRef<Path>`, public fields), never a
+  per-file copy (issue 1416 folded 25 copies into it). Include it with
+  `#[path = "support/temp_path.rs"] mod temp_path; use temp_path::TempPath;`, so call sites stay
+  unchanged. Keep the old name with `tempfile::Builder::new().prefix(..)`.
 - **Drop timing is the trap.** A helper that builds a `TempPath` and returns only a string derived
   from it, or a `format!(.. x = helper(), ..)` / `cmd.env(k, &*helper())` whose result outlives the
   statement, deletes the file before the bash under test reads it. Bind it for the whole test.
