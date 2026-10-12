@@ -376,7 +376,7 @@ exit "$(cat "$FAKE_OP/%s-rc" 2>/dev/null || echo 0)"
 FIX = Path(__file__).resolve().parent / "fixtures" / "strih_operator_1418"
 XR_SNV = (FIX / "xrandr-strih-snv-reverse-prime.txt").read_text()  # strih-snv 12.10.2026, ticket comment
 XR_ONE = (FIX / "xrandr-one-nvidia-provider.txt").read_text()
-XR_SINK_NO_OUTPUTS = (FIX / "xrandr-sink-without-outputs.txt").read_text()
+XR_MODESETTING_SINK = (FIX / "xrandr-modesetting-sink.txt").read_text()  # the Intel notebook's stable shape
 KLOG_SNV = (FIX / "klog-strih-snv-commit-hang.txt").read_text()  # the 11/12.10.2026 trace, comment 6132168799
 KLOG_CLEAN = (FIX / "klog-clean.txt").read_text()
 KLOG_EXT4 = (FIX / "klog-ext4-hung-task.txt").read_text()
@@ -446,7 +446,7 @@ class Op:
             f.write_text("so")
         (self.st / "obs-up").write_text("")
         (self.st / "grabs").write_text("MD5=aaaa\nMD5=bbbb\n")
-        (self.st / "xrandr").write_text(XR_SINK_NO_OUTPUTS)
+        (self.st / "xrandr").write_text(XR_MODESETTING_SINK)
         (self.st / "klog").write_text(KLOG_CLEAN)
 
     def deck(self, present):
@@ -711,12 +711,25 @@ def test_the_panel_is_a_note_while_obs_is_down(op):
     assert op.row("operator-panel")[0] == "NOTE"
 
 
-def test_the_12_10_reverse_prime_panel_fails_naming_the_bios_cure(op):
-    """strih-snv 12.10.2026: NVIDIA renders, the AMD iGPU scans the panel out, a flip waited forever."""
+def test_the_12_10_amdgpu_ddx_panel_sink_fails_naming_the_baseline_conf(op):
+    """strih-snv 12.10.2026: the AMD iGPU sink ran on xf86-video-amdgpu (the Intel notebook before it ran
+    modesetting and was stable), and its panel commit waited forever on an NVIDIA fence."""
     (op.st / "xrandr").write_text(XR_SNV)
     st, d = op.row("panel-gpu")
-    assert st == "FAIL" and "BIOS GPU working mode = discrete GPU" in d, d
-    assert "reverse-PRIME sink on AMD Radeon 780M Graphics @ pci:0000:64:00.0" in d and "NVIDIA-0" in d, d
+    assert st == "FAIL" and "AMD Radeon 780M Graphics @ pci:0000:64:00.0" in d and "NVIDIA-0" in d, d
+    assert "/etc/X11/xorg.conf.d/20-igpu-sink-modesetting.conf" in d and "modesetting" in d, d
+    assert "BIOS" not in d, d
+
+
+def test_a_sink_on_any_other_ddx_fails_too(op):
+    (op.st / "xrandr").write_text(XR_MODESETTING_SINK.replace("name:modesetting", "name:Intel"))
+    st, d = op.row("panel-gpu")
+    assert st == "FAIL" and "Intel" in d, d
+
+
+def test_a_secondary_provider_that_is_no_sink_is_ok(op):
+    (op.st / "xrandr").write_text(XR_SNV.replace("Sink Output, ", ""))
+    assert op.row("panel-gpu")[0] == "OK"
 
 
 def test_one_gpu_provider_is_a_note(op):
@@ -725,9 +738,9 @@ def test_one_gpu_provider_is_a_note(op):
     assert st == "NOTE" and "one GPU provider" in d and "NVIDIA-0" in d, d
 
 
-def test_a_sink_provider_without_outputs_is_not_a_failure(op):
+def test_a_modesetting_panel_sink_is_ok(op):
     st, d = op.row("panel-gpu")
-    assert st == "OK" and "NVIDIA-0" in d, d
+    assert st == "OK" and "modesetting" in d and "NVIDIA-0" in d, d
 
 
 def test_a_provider_read_that_fails_names_the_hung_x(op):

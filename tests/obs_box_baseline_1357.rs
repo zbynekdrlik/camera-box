@@ -734,6 +734,7 @@ dgpu=1
 prime=nvidia
 display_gpus=2
 igpu_unit=
+igpu_sink_conf=1
 oomd=masked
 offhours=1
 process_priority=1
@@ -766,7 +767,7 @@ touchpad=1
 gather_done=1
 ";
 
-const ITEMS: [&str; 18] = [
+const ITEMS: [&str; 19] = [
     "timezone",
     "net",
     "perf",
@@ -777,6 +778,7 @@ const ITEMS: [&str; 18] = [
     "affinity",
     "rtprio",
     "gpu",
+    "igpu-sink",
     "dejitter",
     "crash",
     "kiosk",
@@ -947,6 +949,8 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
         ("rtprio", "obs_rtprio_limit=0", "obs_rtprio_limit="),
         ("rtprio", "obs_running=1", "obs_running="),
         ("gpu", "prime=nvidia", "prime=on-demand"),
+        // issue 1418: the iGPU panel sink conf (modesetting, never the amdgpu DDX)
+        ("igpu-sink", "igpu_sink_conf=1", "igpu_sink_conf=0"),
         ("dejitter", "oomd=masked", "oomd=enabled"),
         ("dejitter", "process_priority=1", "process_priority=0"),
         ("dejitter", "user_masked=9/9", "user_masked=7/9"),
