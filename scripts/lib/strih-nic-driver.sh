@@ -583,32 +583,60 @@ _strih_nic_ip4_int() {
   printf '%s' "$(( (a << 24) | (b << 16) | (c << 8) | d ))"
 }
 
+# strih_nic_rig_prefix NIC IP IP_ADDR_TEXT -> the prefix length IP carries on NIC in IP_ADDR_TEXT
+# (`ip -o -4 addr show`); rc 1 when IP sits on no NIC (or is not an address).
+strih_nic_rig_prefix() {
+  local nic="${1-}" ip="${2-}" text="${3-}" ifc addr line pfx=""
+  while IFS= read -r line; do
+    read -r _ ifc _ addr _ <<<"$line"
+    [ "$ifc" = "$nic" ] && [ "${addr%%/*}" = "$ip" ] && pfx="${addr##*/}"
+  done <<<"$text"
+  [[ "$pfx" =~ ^[0123456789]{1,2}$ ]] && [ "$pfx" -le 32 ] && _strih_nic_ip4_int "$ip" >/dev/null || return 1
+  printf '%s' "$pfx"
+}
+
+# strih_nic_on_subnet IP PREFIX ADDRESS -> rc 0 when ADDRESS (a `/len` suffix is ignored) is inside IP/PREFIX.
+strih_nic_on_subnet() {
+  local pfx="${2-}" want net mask
+  [[ "$pfx" =~ ^[0123456789]{1,2}$ ]] && [ "$pfx" -le 32 ] || return 1
+  want="$(_strih_nic_ip4_int "${1-}")" && net="$(_strih_nic_ip4_int "${3%%/*}")" || return 1
+  mask=$(( pfx == 0 ? 0 : (0xFFFFFFFF << (32 - pfx)) & 0xFFFFFFFF ))
+  [ $(( net & mask )) -eq $(( want & mask )) ]
+}
+
+# strih_nic_rig_subnet_others NIC IP IP_ADDR_TEXT -> one `IFACE ADDRESS` line per OTHER interface (never
+# NIC, never lo) carrying an address on the rig subnet (IP's prefix on NIC), in the text's order; rc 1
+# when IP sits on no NIC (the subnet is unknown). The ONE subnet rule of item 36's (nic-homed) row and
+# setup-strih step 16g, which takes those interfaces' profiles off the subnet (issue 1418).
+strih_nic_rig_subnet_others() {
+  local nic="${1-}" ip="${2-}" text="${3-}" pfx line ifc addr
+  pfx="$(strih_nic_rig_prefix "$nic" "$ip" "$text")" || return 1
+  while IFS= read -r line; do
+    read -r _ ifc _ addr _ <<<"$line"
+    [ -n "$ifc" ] && [ "$ifc" != "$nic" ] && [ "$ifc" != lo ] || continue
+    if strih_nic_on_subnet "$ip" "$pfx" "$addr"; then printf '%s %s\n' "$ifc" "${addr%%/*}"; fi
+  done <<<"$text"
+  return 0
+}
+
 # strih_nic_single_homed_verdict NIC IP IP_ADDR_TEXT -> `OK|(nic-homed)` when only NIC carries an address
 # on the rig subnet (the prefix of IP on NIC in IP_ADDR_TEXT, `ip -o -4 addr show`), `FAIL|(nic-homed)`
 # + rc 1 naming every other interface that does, or when IP sits on no interface. Empty text: no row.
 # issue 1411: a second interface on the rig /23 (the onboard port's DHCP profile) won the routes, every
 # reply left from its address, and every dantesync follower lost PTP for ~22 h.
 strih_nic_single_homed_verdict() {
-  local nic="${1-}" ip="${2-}" text="${3-}" ifc addr pfx rig_pfx="" net mask want other="" line
+  local nic="${1-}" ip="${2-}" text="${3-}" rig_pfx others other="" ifc addr
   [ -n "$text" ] || return 0
-  while IFS= read -r line; do
-    read -r _ ifc _ addr _ <<<"$line"
-    [ "$ifc" = "$nic" ] && [ "${addr%%/*}" = "$ip" ] && rig_pfx="${addr##*/}"
-  done <<<"$text"
-  if [ -z "$rig_pfx" ] || ! want="$(_strih_nic_ip4_int "$ip")"; then
+  if ! rig_pfx="$(strih_nic_rig_prefix "$nic" "$ip" "$text")"; then
     printf 'FAIL|(nic-homed) the rig address %s is on no interface %s -- setup-strih step 1\n' "$ip" "${nic:-<unresolved>}"
     return 1
   fi
-  mask=$(( rig_pfx == 0 ? 0 : (0xFFFFFFFF << (32 - rig_pfx)) & 0xFFFFFFFF ))
-  while IFS= read -r line; do
-    read -r _ ifc _ addr _ <<<"$line"
-    [ -n "$ifc" ] && [ "$ifc" != "$nic" ] && [ "$ifc" != lo ] || continue
-    pfx="${addr%%/*}"
-    net="$(_strih_nic_ip4_int "$pfx")" || continue
-    [ $(( net & mask )) -eq $(( want & mask )) ] && other="${other}${other:+, }${ifc} ${pfx}"
-  done <<<"$text"
+  others="$(strih_nic_rig_subnet_others "$nic" "$ip" "$text")"
+  while read -r ifc addr; do
+    if [ -n "$ifc" ]; then other="${other}${other:+, }${ifc} ${addr}"; fi
+  done <<<"$others"
   if [ -n "$other" ]; then
-    printf 'FAIL|(nic-homed) %s also on the rig subnet next to %s -- its routes win and the strih answers from it; take its profile down: nmcli connection modify <name> connection.autoconnect no && nmcli connection down <name>\n' "$other" "$nic"
+    printf 'FAIL|(nic-homed) %s also on the rig subnet next to %s -- its routes win and the strih answers from it; setup-strih.sh step 16g takes such a profile down (issue 1418), or by hand: nmcli connection modify <name> connection.autoconnect no && nmcli connection down <name>\n' "$other" "$nic"
     return 1
   fi
   printf 'OK|(nic-homed) only %s carries the rig subnet (%s/%s)\n' "$nic" "$ip" "$rig_pfx"
