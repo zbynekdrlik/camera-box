@@ -269,6 +269,16 @@ def test_away_venues_drop_a_malformed_venue_name_loudly(tmp_path):
     assert "P*P" in r.stderr and "not a venue name" in r.stderr, r.stderr
 
 
+def test_away_venues_use_the_row_builders_grammar_a_leading_digit_is_dropped(tmp_path):
+    # the row builder refuses a venue that starts with a digit; the away list must agree, or CI
+    # would loop over a venue whose cameras have no row
+    boxes = _boxes_copy(tmp_path, {"strih-pp.env": [("STRIH_VENUE=pp", "STRIH_VENUE=9pp")]})
+    r = _bash(tmp_path, "dantesync_fleet_away_venues", DANTESYNC_FLEET_STRIH_BOXES_DIR=str(boxes))
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.split() == [], r.stdout
+    assert "9pp" in r.stderr and "not a venue name" in r.stderr, r.stderr
+
+
 # ---------------------------------------------------------------------------------------------
 # the ci.yml deploy-fleet job
 # ---------------------------------------------------------------------------------------------
@@ -336,6 +346,7 @@ def test_ci_step_reds_the_job_when_a_venue_deploy_fails_and_names_its_exit(tmp_p
 
 def _gate(tmp_path, args, versions, home, extra_env=None):
     """VERSIONS: host -> camera-box version the stub sshpass answers (any other host: no answer)."""
+    tmp_path.mkdir(exist_ok=True)
     b = tmp_path / "gbin"
     b.mkdir()
     arms = "".join(f'    *@{host}) echo "camera-box {v}" ;;\n' for host, v in versions.items())
@@ -347,8 +358,10 @@ def _gate(tmp_path, args, versions, home, extra_env=None):
     (b / "sshpass").chmod((b / "sshpass").stat().st_mode | stat.S_IEXEC)
     fleet = tmp_path / "rig-fleet.txt"
     fleet.write_text("")
-    env = _env(PATH=f"{b}:/usr/bin:/bin", OBS_FLEET_HOME=home)
-    env.update(extra_env or {})
+    extra = dict(extra_env or {})
+    first = extra.pop("TIMEOUT_DIR", None)
+    env = _env(PATH=(f"{first}:" if first else "") + f"{b}:/usr/bin:/bin", OBS_FLEET_HOME=home)
+    env.update(extra)
     r = subprocess.run(["bash", str(_GATE), "--fleet-file", str(fleet), *args], capture_output=True, text=True,
                        env=env, timeout=120)
     dials = (tmp_path / "dials.log").read_text().split() if (tmp_path / "dials.log").exists() else []
@@ -405,6 +418,22 @@ def test_gate_other_venues_bounds_a_camera_whose_read_hangs(tmp_path):
     assert r.returncode == 0, r.stdout + r.stderr
     row = next(ln for ln in r.stdout.splitlines() if ln.strip().startswith("cam7"))
     assert "UNKNOWN" in row and "report-only" in row, row
+
+
+def test_gate_other_venues_read_bound_cannot_be_switched_off(tmp_path):
+    # GNU `timeout 0` means NO bound: a 0 / non-numeric override falls back to the 20 s default,
+    # so the read still ends (this fixture answers at once; the pinned point is the argv)
+    b = tmp_path / "tbin"
+    b.mkdir()
+    log = tmp_path / "timeout.log"
+    (b / "timeout").write_text(f'#!/usr/bin/env bash\necho "$1" >> "{log}"\nshift\nexec "$@"\n')
+    (b / "timeout").chmod(0o755)
+    for i, bad in enumerate(("0", "abc", "-5")):
+        r, _ = _gate(tmp_path / f"g{i}", [*_SNV_ARGS, "--other-venues"],
+                     {"192.0.2.62": "1.7.0-dev.764", "10.76.9.67": "1.7.0-dev.764"}, home="cam7",
+                     extra_env={"CAMERA_BOX_VERSION_GATE_VENUE_READ_TIMEOUT": bad, "TIMEOUT_DIR": str(b)})
+        assert r.returncode == 0, r.stdout + r.stderr
+    assert log.read_text().split() == ["20", "20", "20"], log.read_text()
 
 
 def test_gate_other_venues_excludes_an_acked_camera_without_reading_it(tmp_path):
