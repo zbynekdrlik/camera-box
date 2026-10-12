@@ -65,6 +65,13 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   the dantesync fleet's camera rows -- `direct`, a `A.B.C` /24 prefix (strih-pp `10.76.9`, through
   companion-pp), or `none` exactly when `STRIH_CAMERAS` is `none`). **Run-time facts stay derived on
   the box** — PL1 watts, the CPU plan, the NIC interface name.
+- **Changing strih-lx's `STRIH_CAMERAS` is a fact change with four test consumers** (issue 1413):
+  regenerate the 1361 golden from the new facts (`render.sh`), and update the default-box tests that
+  read the live list -- `tests/strih_provision_pure_functions.rs` (`strih_lx_ndi_inputs` count, the
+  seed manifest's `NDI camN`), `tests/python/test_obs_box_stream_role_1412.py` (the class counts) and
+  `harness_camera_set.rs`'s venue pin (camera-set.sh's `CAMERA_ACTIVE_SET` default must equal it).
+  `grep -rn 'NDI cam[0-9]\|CAM[0-9] (usb)' tests/` over files that source `strih-provision.sh` with
+  the default box finds them; the lane review caught the first one only after the GREEN commit.
 - **The file is PARSED, never sourced.** Only `KEY=value` / `#` / blank lines; the value is literal
   text and may not carry a shell metacharacter, quote or glob. Unknown / missing / duplicate keys
   refuse. A `TODO_OWNER` value refuses and EVERY such fact is named (the template `strih-pp.env`
