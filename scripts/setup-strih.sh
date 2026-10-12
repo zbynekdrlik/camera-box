@@ -681,8 +681,8 @@ echo "  NOTE: restart OBS after the operator PipeWire/WirePlumber comes up (or r
 step 13 "Intercom hub unit + matrix (issue 1345; issue 1418: started on the strih role when stopped, never restarted)"
 # The strih intercom hub IS the interkom (the N-1 mix for the VBAN camboxes + the phones) since the strih
 # notebook took over from the Windows VB-Matrix (20.9.2026). Install the unit + the routing TOML, enable
-# it, and on the strih role START it when it is not running (verify item 16 FAILs a stopped hub there).
-# A running hub is never restarted here. The binary (intercom-hub-linux-amd64 from CI) is placed below.
+# it; on the strih role it is STARTED once Janus is provisioned (verify item 16 FAILs a stopped hub there). A running
+# hub is never restarted here. The binary (intercom-hub-linux-amd64 from CI) is placed below.
 install -Dm644 "${HERE}/../systemd/intercom-hub.service" /etc/systemd/system/intercom-hub.service
 # issue 1361: the routing file is the box fact STRIH_INTERCOM_CONFIG (repo-relative).
 [ -f "${HERE}/../$(strih_lx_intercom_config)" ] \
@@ -693,14 +693,6 @@ systemctl daemon-reload
 systemctl enable intercom-hub 2>/dev/null || warn "  could not enable intercom-hub.service"
 # issue 1412 (G6): a fresh box gets the intercom-hub-linux-amd64 CI binary; an installed one is kept.
 strih_intercom_hub_binary_install /usr/local/bin/intercom-hub || fail "intercom-hub binary install failed (above)"
-if WHY="$(obs_box_step_applies 13-hub-live)"; then
-  if ! systemctl is-active --quiet intercom-hub; then
-    systemctl start intercom-hub || fail "intercom-hub.service would not start -- journalctl -u intercom-hub (issue 1418: the interkom runs on it)"
-    echo "  intercom-hub.service started (it was not running)"
-  fi
-else
-  echo "  intercom-hub.service not started here: ${WHY}"
-fi
 echo "  intercom-hub.service installed + enabled; /etc/intercom-hub/intercom.toml in place"
 
 # ---------------------------------------------------------------------------------------------
@@ -763,6 +755,19 @@ else
 fi
 
 else echo "  SKIP: ${WHY}"; fi
+
+# issue 1418: start a stopped hub on the strih role only now -- its LoadCredential needs the room secret
+# the Janus provisioning just wrote. `systemctl start` returns before that exec-time load, so the crash-loop probe
+# (verify item 16's) confirms it. A running hub is never restarted.
+if WHY="$(obs_box_step_applies 13-hub-live)"; then
+  if ! systemctl is-active --quiet intercom-hub; then
+    systemctl start intercom-hub || fail "intercom-hub.service would not start -- journalctl -u intercom-hub (issue 1418: the interkom runs on it)"
+    if IH_LOOP="$(strih_intercom_hub_crash_loop)"; then fail "intercom-hub.service ${IH_LOOP} after the start -- journalctl -u intercom-hub"; fi
+    echo "  intercom-hub.service started (it was not running)"
+  fi
+else
+  echo "  intercom-hub.service not started here: ${WHY}"
+fi
 
 # ---------------------------------------------------------------------------------------------
 step 15 "Kiosk openbox autostart + root menu (issue 1357: OBS + Companion Satellite start in the Xorg openbox session)"
