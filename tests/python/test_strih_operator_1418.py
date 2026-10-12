@@ -789,8 +789,12 @@ def test_a_clean_kernel_log_is_ok(op):
 def test_a_hung_task_outside_drm_is_not_this_row(op):
     """A jbd2 hang is a disk fault, not the panel: OK here, even when a DRM word follows past its trace."""
     noise = "".join("Oct 12 18:03:%02d strih-snv kernel: r8152 2-1:1.0 eth: noise %d\n" % (i, i) for i in range(30))
-    (op.st / "klog").write_text(KLOG_EXT4 + noise + "Oct 12 18:04:00 strih-snv kernel: Workqueue: commit_work\n")
+    frame = "Oct 12 18:04:00 strih-snv kernel:  commit_work+0x14/0x20\n"
+    (op.st / "klog").write_text(KLOG_EXT4 + noise + frame)
     assert op.row("drm-hang")[0] == "OK"
+    # the control: the same frame inside the jbd2 task's 25-line window IS read as its trace
+    (op.st / "klog").write_text(KLOG_EXT4 + frame)
+    assert op.row("drm-hang")[0] == "FAIL"
 
 
 def test_a_drm_hang_after_an_unrelated_hung_task_is_found(op):

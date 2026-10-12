@@ -19,9 +19,13 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
 REPO = Path(__file__).resolve().parent.parent.parent
 BASELINE = REPO / "scripts" / "lib" / "obs-box-baseline.sh"
 VERIFY_LIB = REPO / "scripts" / "lib" / "obs-box-baseline-verify.sh"
+KIOSK = REPO / "scripts" / "lib" / "obs-box-kiosk.sh"
+SETUPS = [REPO / "scripts" / "setup-strih.sh", REPO / "scripts" / "setup-imag.sh"]
 OPERATOR_LIB = REPO / "scripts" / "lib" / "strih-operator.sh"
 CONF = "/etc/X11/xorg.conf.d/20-igpu-sink-modesetting.conf"
 DDX = "xserver-xorg-video-amdgpu"
@@ -32,12 +36,17 @@ ME = "%s:%s" % (subprocess.run(["id", "-un"], capture_output=True, text=True).st
                 subprocess.run(["id", "-gn"], capture_output=True, text=True).stdout.strip())
 
 # dpkg-query / apt-get stand-ins as bash FUNCTIONS (they shadow the real tools, so a test never removes
-# a package): $INSTALLED lists the installed packages, $EXTRA_REMV what a simulated remove would take
-# besides them, $APT_FAIL=1 fails the real remove. Every call is logged to $LOG.
+# a package): $INSTALLED lists the installed packages (dpkg-query's real "no packages found" otherwise),
+# $DPKG_BROKEN=1 makes dpkg-query fail like a broken status file, $EXTRA_REMV what a simulated remove
+# would take besides them, $APT_FAIL=1 fails the real remove. Every call is logged to $LOG.
 FAKE_APT = r'''
 dpkg-query() {
     echo "dpkg-query $*" >> "$LOG"
-    case " $INSTALLED " in *" ${@: -1} "*) printf 'install ok installed' ;; *) return 1 ;; esac
+    if [ "${DPKG_BROKEN:-0}" = 1 ]; then echo "dpkg-query: error: parsing file '/var/lib/dpkg/status'" >&2; return 2; fi
+    case " $INSTALLED " in
+        *" ${@: -1} "*) printf 'install ok installed' ;;
+        *) echo "dpkg-query: no packages found matching ${@: -1}" >&2; return 1 ;;
+    esac
 }
 apt-get() {
     echo "apt-get $*" >> "$LOG"
@@ -66,11 +75,12 @@ def _conf_text():
     return r.stdout
 
 
-def _remove(tmp_path, installed, extra="", apt_fail="0"):
+def _remove(tmp_path, installed, extra="", apt_fail="0", broken="0"):
     log = tmp_path / "calls"
     log.write_text("")
     r = _bash(BASELINE, FAKE_APT + "obs_box_amdgpu_ddx_remove",
-              env={"LOG": str(log), "INSTALLED": installed, "EXTRA_REMV": extra, "APT_FAIL": apt_fail})
+              env={"LOG": str(log), "INSTALLED": installed, "EXTRA_REMV": extra, "APT_FAIL": apt_fail,
+                   "DPKG_BROKEN": broken})
     return r, log.read_text().splitlines()
 
 
@@ -110,6 +120,37 @@ def test_a_removal_that_would_take_more_packages_is_refused(tmp_path):
 def test_a_failed_removal_fails_loud(tmp_path):
     r, _calls = _remove(tmp_path, DDX, apt_fail="1")
     assert r.returncode != 0 and "FAIL" in r.stderr and DDX in r.stderr, r.stderr
+
+
+def test_a_dpkg_that_cannot_answer_fails_loud_never_reads_as_not_installed(tmp_path):
+    r, calls = _remove(tmp_path, DDX, broken="1")
+    assert r.returncode != 0 and "FAIL" in r.stderr and DDX in r.stderr, r.stdout + r.stderr
+    assert not [c for c in calls if c.startswith("apt-get")], calls
+
+
+@pytest.mark.parametrize("status,present", [
+    ("install ok installed", True), ("install ok half-installed", True), ("install ok unpacked", True),
+    ("absent", False), ("unknown ok not-installed", False), ("deinstall ok config-files", False),
+])
+def test_the_status_classifier_counts_every_unpacked_state_as_present(status, present):
+    r = _bash(BASELINE, 'obs_box_pkg_status_absent "$1"', (status,))
+    assert (r.returncode != 0) == present, (status, r.returncode)
+
+
+def test_the_kiosk_removes_the_ddx_again_after_its_xorg_install():
+    """A fresh 26.04 box gets xserver-xorg from the kiosk; its `video-all | xorg-driver-video` dependency
+    pulls the amdgpu DDX back in AFTER the NVIDIA step removed it, so the kiosk removes it again."""
+    k = KIOSK.read_text()
+    body = k[k.index("\nobs_box_kiosk() {"):]
+    body = body[:body.index("\n}\n")]
+    install = body.index("apt-get install -y openbox lightdm")
+    assert "xserver-xorg" in body[install:body.index("\n", install)]
+    call = body.index("    obs_box_amdgpu_ddx_remove")
+    gate = body.rindex("if lspci -nn 2>/dev/null | obs_box_has_discrete_nvidia; then", 0, call)
+    assert install < gate < call < body.index("\nfi\n", gate)
+    for setup in SETUPS:
+        t = setup.read_text()
+        assert t.index("obs_box_nvidia_prime ") < t.index("obs_box_kiosk "), setup
 
 
 def test_the_conf_maps_an_amdgpu_sink_onto_modesetting():
@@ -163,13 +204,20 @@ def test_the_iGPU_only_branch_never_runs_it():
     assert body.count("obs_box_igpu_sink_modesetting") == 1
 
 
-def _gather(dpkg_answers):
-    """The real gather snippet, dpkg-query shadowed by a function; returns its amdgpu_ddx value."""
+def _gather(dpkg_answer):
+    """The real gather snippet, dpkg-query shadowed by a function; returns its amdgpu_ddx value.
+    dpkg_answer: a status text, None = dpkg knows no such package, "BROKEN" = dpkg-query errors."""
     snip = _bash(VERIFY_LIB, 'obs_box_baseline_gather_snippet strih "$1" strih-obs.service',
                  (os.environ.get("USER") or "nobody",))
     assert snip.returncode == 0, snip.stderr
-    fake = ('dpkg-query() { [ "${@: -1}" = %s ] && printf %%s %s; return 0; }\n'
-            % (DDX, "'%s'" % dpkg_answers if dpkg_answers else "''"))
+    if dpkg_answer == "BROKEN":
+        answer = "echo 'dpkg-query: error: parsing file' >&2; return 2"
+    elif dpkg_answer is None:
+        answer = "echo \"dpkg-query: no packages found matching $p\" >&2; return 1"
+    else:
+        answer = "printf %%s '%s'" % dpkg_answer
+    fake = ('dpkg-query() { local p="${@: -1}"; if [ "$p" = %s ]; then %s; fi; '
+            'echo "dpkg-query: no packages found matching $p" >&2; return 1; }\n' % (DDX, answer))
     out = subprocess.run(["bash", "-c", fake + snip.stdout], capture_output=True, text=True,
                          timeout=120).stdout
     vals = [ln.split("=", 1)[1] for ln in out.splitlines() if ln.startswith("amdgpu_ddx=")]
@@ -180,7 +228,8 @@ def _gather(dpkg_answers):
 def test_the_gather_reads_the_ddx_package_status():
     assert _gather("install ok installed") == "install ok installed"
     assert _gather("deinstall ok config-files") == "deinstall ok config-files"
-    assert _gather("") == ""
+    assert _gather(None) == "absent"
+    assert _gather("BROKEN") == "", "a dpkg-query that errors is unread, never 'absent'"
 
 
 def _rows(facts):
@@ -200,9 +249,13 @@ def test_the_verdict_fails_the_installed_ddx_on_a_discrete_nvidia_box_right_afte
     assert names[names.index("gpu") + 1] == "igpu-sink"
     st, d = _sink("gather_done=1\ndgpu=1\namdgpu_ddx=install ok installed\n")
     assert st == "FAIL" and DDX in d and "10-amdgpu.conf" in d, d
-    for removed in ("", "deinstall ok config-files", "not-installed"):
+    for removed in ("absent", "deinstall ok config-files", "unknown ok not-installed"):
         st, d = _sink("gather_done=1\ndgpu=1\namdgpu_ddx=%s\n" % removed)
         assert st == "OK" and "modesetting" in d, (removed, d)
+    for present in ("install ok half-installed", "install ok unpacked"):
+        assert _sink("gather_done=1\ndgpu=1\namdgpu_ddx=%s\n" % present)[0] == "FAIL", present
+    st, d = _sink("gather_done=1\ndgpu=1\namdgpu_ddx=\n")
+    assert st == "FAIL" and "unread" in d, "an unread fact is never a pass: " + d
 
 
 def test_an_igpu_only_box_is_not_graded_on_the_ddx():
