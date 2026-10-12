@@ -263,16 +263,45 @@ def test_a_transition_keeps_both_cameras_red_then_restores_the_normal_colours():
 
 
 def test_a_short_obs_drop_keeps_the_state():
+    """OBS gone for 0.8 s (< obs_loss_s 1.5): several fallback ticks see it gone, none may go gray."""
     async def go():
         fake = FakeObs()
         obs, t, srv, port = await start(fake, obs_loss_s=1.5)
+        obs_port = obs.sockets[0].getsockname()[1]
         async with connect(f"ws://127.0.0.1:{port}/") as tally:
             await recv_until(tally, "TALLY-PGM 3")
+            obs.close()
             for ws in list(fake.conns):
                 await ws.close()
-            got = await recv_for(tally, 2.5)
+            got = await recv_for(tally, 0.8)
+            obs2 = await serve(fake.handler, "127.0.0.1", obs_port)
+            got += await recv_for(tally, 1.5)
             assert "TALLY-PGM 0" not in got, got
             assert t.state == (3, 5) and t.obs_connected
+            obs2.close()
+        await t.stop(); srv.close()
+    run(go())
+
+
+def test_a_resend_during_a_transition_never_resends_the_program():
+    """The firmware shifts its stored program into trs on EVERY TALLY-PGM: a mid-fade resend must send
+    only TALLY-PVW + TALLY-TRS, or the outgoing camera loses its red for the rest of the fade."""
+    async def go():
+        fake = FakeObs()
+        obs, t, srv, port = await start(fake, resend_s=0.3)
+        async with connect(f"ws://127.0.0.1:{port}/") as tally:
+            await recv_until(tally, "TALLY-PGM 3")
+            await fake.event("SceneTransitionStarted", {"transitionName": "Fade"})
+            fake.program = "Cam 4"
+            await fake.event("CurrentProgramSceneChanged", {"sceneName": "Cam 4"})
+            got = await recv_until(tally, "TALLY-PGM 4")
+            got += await recv_for(tally, 1.2)
+            mid = got[got.index("TALLY-PGM 4") + 1:]
+            assert not any(x.startswith("TALLY-PGM") for x in mid), mid
+            assert mid.count("TALLY-PVW 5") >= 2, mid
+            await fake.event("SceneTransitionEnded", {"transitionName": "Fade"})
+            end = await recv_until(tally, "TALLY-PGM 4")
+            assert end[-2:] == ["TALLY-PVW 5", "TALLY-PGM 4"], end
         await t.stop(); srv.close(); obs.close()
     run(go())
 
