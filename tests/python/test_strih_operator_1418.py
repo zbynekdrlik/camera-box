@@ -546,10 +546,20 @@ def test_the_12_10_dead_bluetooth_adapter_fails_naming_down_and_the_zero_address
     assert st == "FAIL" and "DOWN" in d and "00:00:00:00:00:00" in d, d
 
 
-def test_no_bluetooth_controller_fails(op):
+def test_an_adapter_that_hciconfig_cannot_read_fails(op):
+    """A Bluetooth adapter the kernel registered (/sys/class/bluetooth/hci0) that hciconfig cannot read FAILs."""
     (op.st / "hci").write_text("")
+    (op.sys / "class" / "bluetooth" / "hci0").mkdir(parents=True)
     st, d = op.row("bluetooth")
     assert st == "FAIL" and "hci0" in d, d
+
+
+def test_a_box_with_no_bluetooth_adapter_is_a_note_not_a_failure(op):
+    """strih-pp (12.10.2026) is a desktop with a USB receiver mouse and no Bluetooth adapter at all:
+    nothing to pair, so the row is a NOTE, never a FAIL."""
+    (op.st / "hci").write_text("")
+    st, d = op.row("bluetooth")
+    assert st == "NOTE" and "no Bluetooth adapter" in d, d
 
 
 def test_bluetooth_is_graded_because_setup_strih_keeps_it():
