@@ -376,6 +376,25 @@ fn an_output_whose_config_turns_audio_off_opens_no_audio_leg_at_all() {
 }
 
 #[test]
+fn a_single_object_config_names_an_audio_key_it_ignores() {
+    // issue 1424 review round 3: the single-object form always has its audio leg; a hand edit that
+    // puts "audio" there would otherwise do nothing with no line saying so
+    let o = file(OUTPUTS_C);
+    let auto = body_of(&o, "void obs_drm_output_maybe_autostart(void)", "autostart");
+    let flag = auto
+        .find("const bool single_audio_key = !array_form && json_is_object(root) && json_object_get(root, \"audio\") != NULL;")
+        .expect("the single-form audio key is read before the config is released");
+    let decref = auto.find("json_decref(root);").expect("the release");
+    let warn = auto
+        .find("\"audio\\\" in %s is ignored -- the single-object form always has its audio leg; use the \\\"outputs\\\" form\"")
+        .expect("one named WARNING for the ignored key");
+    assert!(
+        flag < decref && decref < warn,
+        "issue 1424 review: read the key while the config is held, warn once after"
+    );
+}
+
+#[test]
 fn the_autostart_is_all_or_none_and_one_output_never_stops_the_other() {
     let o = file(OUTPUTS_C);
     let auto = body_of(&o, "void obs_drm_output_maybe_autostart(void)", "autostart");
