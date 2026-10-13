@@ -33,6 +33,7 @@ paths:
   - "src/drm_output_audio_match.rs"
   - "tests/drm_output_audio_1424.rs"
   - "tests/drm_output_vk_program_mode_1424.rs"
+  - "tests/drm_output_vk_two_displays_1424.rs"
   - "scripts/lib/drm-output-audio.sh"
   - "tests/python/test_drm_output_audio_1424.py"
   - "vendor/obs-studio/libobs/obs-drm-output-outputs.c"
@@ -398,7 +399,12 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-snv = `vk-direct`).
   declared locally with RROutput as `unsigned long` (no libxrandr-dev). GL entry points are resolved
   at run time through `eglGetProcAddress` (OBS runs EGL/X11).
 - **The X precondition (STEP 0 finding):** `vkAcquireXlibDisplayEXT` returns `-13`
-  (VK_ERROR_INITIALIZATION_FAILED) while the output has an X CRTC. `strih-obs-start.sh` already runs
+  (VK_ERROR_INITIALIZATION_FAILED) while the output has an X CRTC. Two more -13 causes with NO X CRTC
+  (issue 1424, live strih-pp RTX 3060, bisected in the real core): another display of the SAME process
+  is bringing its presentation up (its first presents = the mode set on its head; an open 0 us after
+  the other display's open fails, 50 ms after succeeds, a separate X connection per display fails the
+  same way), and a display this process RELEASED while the shared VkInstance lives on for another
+  display (at any delay, any X connection; only a fresh instance acquires it again). `strih-obs-start.sh` already runs
   `xrandr --output <connector> --off` for any armed config, and the kiosk autostart keeps HDMI off.
   After `vkReleaseDisplayEXT` the output comes back to X DISABLED (no CRTC), never onto the desktop.
   OBS closes an X projector whose screen leaves X (`OBSProjector::ScreenRemoved`), and a saved
@@ -430,9 +436,15 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-snv = `vk-direct`).
 - **Bounded, and a replug is not the end:** the present loop's acquire/fence waits are 1 s and
   re-checked. `VK_ERROR_OUT_OF_DATE_KHR` / `VK_ERROR_SURFACE_LOST_KHR` (an HDMI or grabber replug)
   rebuild the swapchain (+ the display-plane surface when lost, or from the 2nd try on) with 10 tries
-  1 s apart, without any device wait: the replaced swapchain (+ surface) is RETIRED (handed over as
-  `oldSwapchain`, freed after 4 later signalled fences or at the teardown) and the per-image present
-  semaphores live across rebuilds, so a still-queued present never waits a destroyed object; the
+  1 s apart, without any device wait: a swapchain-only rebuild RETIRES the replaced swapchain (handed
+  over as `oldSwapchain`, freed after 4 later signalled fences or at the teardown) and the per-image
+  present semaphores live across rebuilds, so a still-queued present never waits a destroyed object.
+  **A surface rebuild never retires the surface** (issue 1424, live strih-pp: the old display-plane
+  surface destroyed 4 fences after its replacement presented ended the NEW presentation,
+  `vkQueuePresentKHR FAILED VkResult -13`): it drains the display's queue BOUNDED
+  (`drm_output_vk_drain_queue_bounded`, then resets the per-vblank fence the drain signalled), destroys
+  the old swapchain(s) + surface, THEN creates the new surface; a queue that never drains gives up by
+  name. The Program re-mode below goes through this path; the
   committed mode never changes during a rebuild, and a display
   that now offers a different size gives up by name (the shared images no longer fit — restart OBS).
   The teardown waits an outstanding copy bounded (5 x 1 s); a TIMEOUT LEAKS the Vulkan objects (and
@@ -620,8 +632,26 @@ picture hold or delay is ever added for A/V alignment (owner ruling 13.10.2026: 
   wedged would hang `obs_shutdown`); a timeout leaks that display and marks the device wedged (never
   destroyed); the device goes with the last display (`dev->refs`). The core
   reports presents through a callback (`drm_output_vk_shown_fn`), so the rig harness links without the
-  audio TU; `./vk-rig-harness HDMI-0 HDMI-1` proves both displays on one device, then closes display 0 while
-  display 1 keeps presenting (its count must advance) and re-opens display 0 beside it.
+  audio TU.
+- **The second display waits for the first to settle (issue 1424, live strih-pp):** OBS starts the
+  two outputs back to back, and NVIDIA refuses an acquire (-13) while another display of the process
+  brings its presentation up, so the second display never acquired, whichever connector was second.
+  `drm_output_vk_setup` raises `dev->acquiring`, waits (bounded, `DRM_OUTPUT_VK_SETTLE_WAIT_MS` 2 s,
+  5 ms steps) until every other presenting display has presented `DRM_OUTPUT_VK_SETTLE_PRESENTS` (3)
+  times on its CURRENT surface (`presents_since_surface`, reset by every new surface; the pure
+  `drm_output_vk_first_unsettled`, truth-tabled in `tests/drm_output_vk_two_displays_1424.rs`), then
+  acquires. A re-mode on another display defers to a later vblank while `dev->acquiring` is up; it
+  resets its settle count BEFORE re-checking the flag (both seq-cst), so an open and a re-mode can never
+  miss each other. Logs: `waited N ms for the other display to settle before acquiring '<c>'`, or the
+  WARNING `'<other>' is still bringing its presentation up after N ms -- acquiring '<c>' anyway`.
+- **Rig harness:** `./vk-rig-harness HDMI-0 HDMI-1=1920x1080@30000` (an argument may carry the Program
+  canvas mode in mHz, handed over like the OBS frame hook; the run fails unless that mode is on scanout,
+  `MODE output=... wanted=yes`) proves both displays on one device, then closes display 0 while display
+  1 keeps presenting (its count must advance at ITS OWN refresh, 29.97 Hz after the re-mode), then
+  closes display 1 too and re-opens BOTH on a fresh device. A re-open BESIDE a live display is refused
+  by NVIDIA (the released-display -13 above) -- a known limit OBS never hits: the outputs start once
+  at autostart and stop together at `obs_shutdown`. Live 13.10.2026 on strih-pp: both acquired (waited
+  75 ms), HDMI-0 2560x1440@59.951, HDMI-1 re-moded to 1920x1080@29.970 and presenting, rc=0.
 - **Audio + mode per output:** each leg reads its OWN output's view (`const volatile long *view`) and
   present clock, so the Multiview output's leg is muted while the Program output plays (verify grades
   a Multiview leg that gave up, e.g. a BenQ with no audio, as a NOTE); the Program
