@@ -38,7 +38,8 @@ strih_box_fact_keys() {
     STRIH_NDI_RUNTIME_PEER STRIH_COMPANION_HOST STRIH_CG_SENDER STRIH_CAMERAS \
     STRIH_HDMI_OUTPUT_BACKEND \
     STRIH_ROLE STRIH_DANTE_GM STRIH_PROGRAM_AUDIO_SAMPLER \
-    STRIH_PROGRAM_SENDER STRIH_VENUE STRIH_CAMERA_DEV1_NET
+    STRIH_PROGRAM_SENDER STRIH_VENUE STRIH_CAMERA_DEV1_NET \
+    STRIH_HTTPS_INTERKOM_HOSTS STRIH_HTTPS_SHADING_HOST
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -115,6 +116,14 @@ _strih_box_ipv4() {
   local ip="${1-}" o
   [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
   for o in ${ip//./ }; do [ "$((10#$o))" -le 255 ] || return 1; done
+}
+
+# _strih_box_https_name NAME -> 0 iff NAME is a lower-case DNS name of two or more labels (letters,
+# digits, inner `-`; a label never starts or ends with `-`). The character sets are spelled out: a
+# bracket RANGE follows the locale in bash (ci-testing-gotchas.md, issue 1302).
+_strih_box_https_name() {
+  local l='[abcdefghijklmnopqrstuvwxyz0123456789]' m='[abcdefghijklmnopqrstuvwxyz0123456789-]'
+  [[ "${1-}" =~ ^${l}(${m}*${l})?(\.${l}(${m}*${l})?)+$ ]]
 }
 
 # strih_box_validate NAME  (stdin: the parsed KEY=value lines) -> rc 0 iff the facts are complete and
@@ -231,6 +240,32 @@ strih_box_validate() {
     *) _strih_box_ipv4 "${f[STRIH_CAMERA_DEV1_NET]}.0" && [[ "${f[STRIH_CAMERA_DEV1_NET]}" =~ ^[0123456789]+\.[0123456789]+\.[0123456789]+$ ]] \
       || { echo "strih-box ${name}: STRIH_CAMERA_DEV1_NET '${f[STRIH_CAMERA_DEV1_NET]}' must be direct, none or the dev1-side /24 prefix A.B.C" >&2; bad=1; } ;;
   esac
+  # issue 1399: the TLS front end the box serves itself (setup-strih step 16i, verify-strih item 45):
+  # STRIH_HTTPS_INTERKOM_HOSTS = the cert's first name + its SANs, STRIH_HTTPS_SHADING_HOST = one name;
+  # `none` = no such site. The stream role serves no intercom / shading page, and a name is one site.
+  local n
+  local -a names
+  local -A https_seen=()
+  for k in STRIH_HTTPS_INTERKOM_HOSTS STRIH_HTTPS_SHADING_HOST; do
+    v="${f[$k]}"
+    [ "$v" = none ] && continue
+    if [ "${f[STRIH_ROLE]}" = stream ]; then
+      echo "strih-box ${name}: ${k} '${v}' must be none for the stream role (it serves no intercom / shading page)" >&2; bad=1; continue
+    fi
+    IFS=' ' read -r -a names <<<"$v"
+    if [ "$k" = STRIH_HTTPS_SHADING_HOST ] && [ "${#names[@]}" != 1 ]; then
+      echo "strih-box ${name}: ${k} '${v}' must be ONE DNS name or none" >&2; bad=1; continue
+    fi
+    for n in "${names[@]}"; do
+      if ! _strih_box_https_name "$n"; then
+        echo "strih-box ${name}: ${k} '${v}': '${n}' is not a lower-case DNS name (none, or space-separated names like interkom.newlevel.media)" >&2; bad=1
+      elif [ -n "${https_seen[$n]+set}" ]; then
+        echo "strih-box ${name}: ${k}: '${n}' is declared twice across STRIH_HTTPS_INTERKOM_HOSTS / STRIH_HTTPS_SHADING_HOST (one name, one site)" >&2; bad=1
+      else
+        https_seen[$n]=1
+      fi
+    done
+  done
   [ "$bad" = 0 ]
 }
 
@@ -447,6 +482,12 @@ strih_lx_program_sender() {
 
 # strih_box_venue -> the box's venue (fact STRIH_VENUE: snv | pp ...).
 strih_box_venue() { strih_box_fact STRIH_VENUE; }
+
+# strih_lx_https_interkom_hosts / strih_lx_https_shading_host -> the names of the TLS front end the box
+# serves itself (facts STRIH_HTTPS_INTERKOM_HOSTS = first name + SANs, STRIH_HTTPS_SHADING_HOST; `none`
+# = no such site; issue 1399, scripts/lib/strih-https.sh).
+strih_lx_https_interkom_hosts() { strih_box_fact STRIH_HTTPS_INTERKOM_HOSTS; }
+strih_lx_https_shading_host() { strih_box_fact STRIH_HTTPS_SHADING_HOST; }
 
 # strih_lx_program_audio_sampler -> on | off: whether setup-strih step 16e installs (and verify-strih
 # item 41 grades) the YouTube-guard program-audio sampler (fact STRIH_PROGRAM_AUDIO_SAMPLER, issue 1412).
