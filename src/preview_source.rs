@@ -150,42 +150,81 @@ mod tests {
         list.iter().map(|s| s.to_string()).collect()
     }
 
-    /// The live LAN of 23.9.2026 (dev1 `avahi-browse -rtp _ndi._tcp`): strih-lx's five OBS
-    /// outputs plus camera senders — no `STRIH-SNV (...)` any more.
-    fn live_lan_2026_09_23() -> Vec<String> {
+    /// The SNV LAN after the issue-1414 rename: strih-snv's five OBS outputs plus camera
+    /// senders (the 23.9.2026 `avahi-browse -rtp _ndi._tcp` read with the box renamed).
+    fn live_lan_strih_snv() -> Vec<String> {
         names(&[
             "CAM1 (usb)",
             "CAM3 (usb)",
-            "STRIH-LX (2ME PGM)",
-            "STRIH-LX (2ME PVW)",
-            "STRIH-LX (Grading)",
-            "STRIH-LX (interkom)",
-            "STRIH-LX (MULTIVIEW)",
+            "STRIH-SNV (2ME PGM)",
+            "STRIH-SNV (2ME PVW)",
+            "STRIH-SNV (Grading)",
+            "STRIH-SNV (interkom)",
+            "STRIH-SNV (MULTIVIEW)",
+            "STREAM-SNV (PGM)",
+        ])
+    }
+
+    /// The same LAN while the strih box still runs its pre-1414 hostname (the transition).
+    fn lan_before_the_strih_rename() -> Vec<String> {
+        names(&[
+            "CAM1 (usb)",
+            "STRIH-LX (2ME PGM)", // issue 1414 transition: the pre-rename hostname
+            "STRIH-LX (interkom)", // issue 1414 transition: the pre-rename hostname
             "STREAM-SNV (PGM)",
         ])
     }
 
     #[test]
-    fn default_preview_source_is_the_current_strih_lx_interkom_output() {
-        assert_eq!(DEFAULT_PREVIEW_SOURCE, "STRIH-LX (interkom)");
+    fn default_preview_source_is_the_strih_snv_interkom_output_1414() {
+        assert_eq!(DEFAULT_PREVIEW_SOURCE, "STRIH-SNV (interkom)");
         assert!(is_strih_interkom(DEFAULT_PREVIEW_SOURCE));
     }
 
     #[test]
     fn preferred_name_on_the_lan_is_used() {
         assert_eq!(
-            resolve_preview_source(&live_lan_2026_09_23(), "STRIH-LX (interkom)"),
-            PreviewResolution::Preferred("STRIH-LX (interkom)".to_string())
+            resolve_preview_source(&live_lan_strih_snv(), DEFAULT_PREVIEW_SOURCE),
+            PreviewResolution::Preferred("STRIH-SNV (interkom)".to_string())
+        );
+    }
+
+    #[test]
+    fn the_old_named_strih_is_still_picked_after_the_window_1414() {
+        // A new cambox binary during the roll, the strih box not yet renamed: the preferred
+        // STRIH-SNV name is absent, the ONE strih interkom output is the old-named one, and it is
+        // taken on the final pass of the find window, never mid-window.
+        let old = "STRIH-LX (interkom)"; // issue 1414 transition: the pre-rename hostname
+        let r = resolve_preview_source(&lan_before_the_strih_rename(), DEFAULT_PREVIEW_SOURCE);
+        assert_eq!(r, PreviewResolution::Fallback(old.to_string()));
+        assert_eq!(pick_preview_source(&r, false), None);
+        assert_eq!(pick_preview_source(&r, true), Some(old.to_string()));
+    }
+
+    #[test]
+    fn an_old_binary_finds_the_renamed_strih_after_the_window_1414() {
+        // An old cambox binary (preferred = the pre-rename name) on the renamed LAN: the ONE strih
+        // interkom output is STRIH-SNV, taken after the window, so no monitor goes dark.
+        let old_preferred = "STRIH-LX (interkom)"; // issue 1414 transition: an old binary
+        let r = resolve_preview_source(&live_lan_strih_snv(), old_preferred);
+        assert_eq!(
+            r,
+            PreviewResolution::Fallback("STRIH-SNV (interkom)".to_string())
+        );
+        assert_eq!(pick_preview_source(&r, false), None);
+        assert_eq!(
+            pick_preview_source(&r, true),
+            Some("STRIH-SNV (interkom)".to_string())
         );
     }
 
     #[test]
     fn the_reported_bug_old_preferred_name_falls_back_to_the_single_strih_interkom() {
-        // The exact fleet state of the ticket: the box asks for the dead Windows strih, the LAN
-        // only has strih-lx — the monitor must show STRIH-LX (interkom), not stay black.
+        // The issue-1362 fleet state: the box asks for a strih that is gone, the LAN has one
+        // other strih -- the monitor must show its interkom output, not stay black.
         assert_eq!(
-            resolve_preview_source(&live_lan_2026_09_23(), "STRIH-SNV (interkom)"),
-            PreviewResolution::Fallback("STRIH-LX (interkom)".to_string())
+            resolve_preview_source(&live_lan_strih_snv(), "STRIH-GONE (interkom)"),
+            PreviewResolution::Fallback("STRIH-SNV (interkom)".to_string())
         );
     }
 
@@ -202,7 +241,7 @@ mod tests {
     fn two_strih_interkom_outputs_without_the_preferred_one_are_ambiguous_and_sorted() {
         let lan = names(&["STRIH-SNV (interkom)", "CAM1 (usb)", "STRIH-PP (interkom)"]);
         assert_eq!(
-            resolve_preview_source(&lan, "STRIH-LX (interkom)"),
+            resolve_preview_source(&lan, "STRIH-GONE (interkom)"),
             PreviewResolution::Ambiguous(names(&["STRIH-PP (interkom)", "STRIH-SNV (interkom)"]))
         );
     }
@@ -211,21 +250,21 @@ mod tests {
     fn preferred_wins_over_other_strih_interkom_outputs() {
         let lan = names(&[
             "STRIH-PP (interkom)",
-            "STRIH-LX (interkom)",
             "STRIH-SNV (interkom)",
+            "STRIH-GONE (interkom)",
         ]);
         assert_eq!(
-            resolve_preview_source(&lan, "STRIH-LX (interkom)"),
-            PreviewResolution::Preferred("STRIH-LX (interkom)".to_string())
+            resolve_preview_source(&lan, DEFAULT_PREVIEW_SOURCE),
+            PreviewResolution::Preferred("STRIH-SNV (interkom)".to_string())
         );
     }
 
     #[test]
     fn a_duplicate_listing_of_one_source_is_not_ambiguity() {
-        let lan = names(&["STRIH-LX (interkom)", "STRIH-LX (interkom)"]);
+        let lan = names(&["STRIH-SNV (interkom)", "STRIH-SNV (interkom)"]);
         assert_eq!(
-            resolve_preview_source(&lan, "STRIH-SNV (interkom)"),
-            PreviewResolution::Fallback("STRIH-LX (interkom)".to_string())
+            resolve_preview_source(&lan, "STRIH-GONE (interkom)"),
+            PreviewResolution::Fallback("STRIH-SNV (interkom)".to_string())
         );
     }
 
@@ -235,7 +274,7 @@ mod tests {
             resolve_preview_source(&[], DEFAULT_PREVIEW_SOURCE),
             PreviewResolution::NotFound
         );
-        let lan = names(&["STRIH-LX (2ME PGM)", "STRIH-LX (MULTIVIEW)", "CAM1 (usb)"]);
+        let lan = names(&["STRIH-SNV (2ME PGM)", "STRIH-SNV (MULTIVIEW)", "CAM1 (usb)"]);
         assert_eq!(
             resolve_preview_source(&lan, DEFAULT_PREVIEW_SOURCE),
             PreviewResolution::NotFound
@@ -244,18 +283,18 @@ mod tests {
 
     #[test]
     fn strih_interkom_matching_is_exact_on_prefix_suffix_and_case() {
-        assert!(is_strih_interkom("STRIH-LX (interkom)"));
         assert!(is_strih_interkom("STRIH-SNV (interkom)"));
         assert!(is_strih_interkom("STRIH-PP (interkom)"));
+        assert!(is_strih_interkom("STRIH-GONE (interkom)"));
         // not a strih interkom output:
-        assert!(!is_strih_interkom("STRIH-LX (2ME PGM)"));
+        assert!(!is_strih_interkom("STRIH-SNV (2ME PGM)"));
         assert!(!is_strih_interkom("STREAM-SNV (interkom)"));
-        assert!(!is_strih_interkom("XSTRIH-LX (interkom)"));
-        assert!(!is_strih_interkom("strih-lx (interkom)"));
-        assert!(!is_strih_interkom("STRIH-LX (Interkom)"));
-        assert!(!is_strih_interkom("STRIH-LX (interkom) 2"));
+        assert!(!is_strih_interkom("XSTRIH-SNV (interkom)"));
+        assert!(!is_strih_interkom("strih-snv (interkom)"));
+        assert!(!is_strih_interkom("STRIH-SNV (Interkom)"));
+        assert!(!is_strih_interkom("STRIH-SNV (interkom) 2"));
         assert!(!is_strih_interkom("STRIH- (interkom)"));
-        assert!(!is_strih_interkom("STRIH-LX(interkom)"));
+        assert!(!is_strih_interkom("STRIH-SNV(interkom)"));
         assert!(!is_strih_interkom(""));
         // a parenthesised host part is not a strih box name:
         assert!(!is_strih_interkom("STRIH-A (x) (interkom)"));
@@ -264,7 +303,7 @@ mod tests {
 
     #[test]
     fn a_decision_is_logged_once_per_change_and_only_when_final() {
-        let preferred = PreviewResolution::Preferred("STRIH-LX (interkom)".to_string());
+        let preferred = PreviewResolution::Preferred("STRIH-SNV (interkom)".to_string());
         let fallback = PreviewResolution::Fallback("STRIH-PP (interkom)".to_string());
         let none = PreviewResolution::NotFound;
         // first pick is logged at INFO, a repeat of it (next reconnect) is not
@@ -304,14 +343,14 @@ mod tests {
 
     #[test]
     fn preferred_connects_immediately_even_mid_window() {
-        let r = PreviewResolution::Preferred("STRIH-LX (interkom)".to_string());
+        let r = PreviewResolution::Preferred("STRIH-SNV (interkom)".to_string());
         assert_eq!(
             pick_preview_source(&r, false),
-            Some("STRIH-LX (interkom)".to_string())
+            Some("STRIH-SNV (interkom)".to_string())
         );
         assert_eq!(
             pick_preview_source(&r, true),
-            Some("STRIH-LX (interkom)".to_string())
+            Some("STRIH-SNV (interkom)".to_string())
         );
     }
 
@@ -344,21 +383,21 @@ mod tests {
         let p = "STRIH-SNV (interkom)";
         assert_eq!(
             preview_log_line(
-                &PreviewResolution::Fallback("STRIH-LX (interkom)".to_string()),
+                &PreviewResolution::Fallback("STRIH-PP (interkom)".to_string()),
                 p
             ),
-            "NDI display: preview source resolved to 'STRIH-LX (interkom)' (#1362)"
+            "NDI display: preview source resolved to 'STRIH-PP (interkom)' (#1362)"
         );
         assert_eq!(
             preview_log_line(&PreviewResolution::Preferred(p.to_string()), p),
             "NDI display: preview source resolved to 'STRIH-SNV (interkom)' (#1362)"
         );
         let amb = preview_log_line(
-            &PreviewResolution::Ambiguous(names(&["STRIH-LX (interkom)", "STRIH-PP (interkom)"])),
+            &PreviewResolution::Ambiguous(names(&["STRIH-GONE (interkom)", "STRIH-PP (interkom)"])),
             p,
         );
         assert!(
-            amb.contains("'STRIH-LX (interkom)', 'STRIH-PP (interkom)'"),
+            amb.contains("'STRIH-GONE (interkom)', 'STRIH-PP (interkom)'"),
             "{amb}"
         );
         assert!(amb.contains("waiting for 'STRIH-SNV (interkom)'"), "{amb}");
