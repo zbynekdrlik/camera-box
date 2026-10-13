@@ -675,7 +675,8 @@ def test_a_successful_reissue_after_a_failed_one_reloads_nginx(tmp_path):
     assert "systemctl reload nginx" in calls[calls.index("nginx -t"):], calls
 
 
-def test_a_hand_copy_path_that_climbs_out_of_nginx_ssl_is_never_used(tmp_path):
+@pytest.mark.parametrize("climbs", ["both", "cert", "key"])
+def test_a_hand_copy_path_that_climbs_out_of_nginx_ssl_is_never_used(tmp_path, climbs):
     rig = Rig(tmp_path)
     rig.installed("nginx-light", "certbot", "python3-certbot-dns-cloudflare")
     (rig.nginx / "ssl").mkdir()
@@ -683,10 +684,15 @@ def test_a_hand_copy_path_that_climbs_out_of_nginx_ssl_is_never_used(tmp_path):
     out.mkdir()
     (out / "c.crt").write_text("x\n")
     (out / "c.key").write_text("x\n")
+    (rig.nginx / "ssl" / "c.crt").write_text("x\n")
+    (rig.nginx / "ssl" / "c.key").write_text("x\n")
     climb = rig.nginx / "ssl" / ".." / "outside"
+    inside = rig.nginx / "ssl"
+    cert_dir = climb if climbs in ("both", "cert") else inside
+    key_dir = climb if climbs in ("both", "key") else inside
     (rig.nginx / "sites-available" / "shading").write_text(
         "server {\n    server_name shading.newlevel.media;\n"
-        "    ssl_certificate %s/c.crt;\n    ssl_certificate_key %s/c.key;\n}\n" % (climb, climb))
+        "    ssl_certificate %s/c.crt;\n    ssl_certificate_key %s/c.key;\n}\n" % (cert_dir, key_dir))
     before = (rig.nginx / "sites-available" / "shading").read_text()
     r = _install(rig)
     assert r.returncode == 0, r.stdout + r.stderr
@@ -795,6 +801,8 @@ def test_a_served_cert_other_than_the_live_one_fails(tmp_path):
 
 
 def test_an_unreadable_live_dir_is_named_not_read_as_a_missing_cert(tmp_path):
+    if os.geteuid() == 0:
+        pytest.fail("needs a non-root user: root reads a 0000 directory")
     rig = Rig(tmp_path)
     _healthy(rig)
     live = rig.le / "live"

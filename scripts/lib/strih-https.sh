@@ -474,7 +474,7 @@ strih_https_grade_rows() {
   if [ -e "$live" ] && { [ ! -r "$live" ] || [ ! -x "$live" ]; }; then
     problems="${problems} ${live}-unreadable-as-$(id -un 2>/dev/null || echo ?)(run verify-strih.sh as root)"
   fi
-  tmp="$(mktemp -d)" || { printf 'FAIL|(https-nginx) mktemp failed\n'; tmp=""; }
+  tmp="$(mktemp -d)" || { problems="${problems} mktemp-failed"; tmp=""; }
   while IFS='|' read -r site first aliases up janus; do
     paths="$(strih_https_cert_paths "$site" "$first")"
     IFS='|' read -r cert key origin <<<"$paths"
