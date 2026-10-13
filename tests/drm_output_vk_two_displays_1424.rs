@@ -242,7 +242,7 @@ fn settle_vectors() -> Vec<SettleVector> {
         (vec![true, false], vec![500, 0], 1, -1),
         // order swapped (HDMI-1 first)
         (vec![false, true], vec![0, 0], 0, 1),
-        (vec![false, true], vec![3, 0], 0, -1),
+        (vec![false, true], vec![0, 3], 0, -1),
         // the display itself never blocks its own open (a re-open of slot 0 beside a live slot 1)
         (vec![true, true], vec![0, 900], 0, -1),
         (vec![true, true], vec![900, 0], 0, 1),
