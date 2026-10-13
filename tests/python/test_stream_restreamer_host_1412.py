@@ -117,3 +117,35 @@ def test_setup_and_verify_wire_step_16j():
     assert "obs_box_step_applies 16j-restreamer" in s and "obs_box_stream_restreamer_host_provision" in s
     assert "obs_box_stream_restreamer_host_grade" in v
     assert len(s.splitlines()) <= 1000 and len(v.splitlines()) <= 1000
+
+
+CHROME_OWN_SOURCES = """### THIS FILE IS AUTOMATICALLY CONFIGURED ###
+X-Repolib-Name: Google Chrome
+Types: deb
+URIs: https://dl.google.com/linux/chrome-stable/deb/
+Suites: stable
+Components: main
+Architectures: amd64
+Signed-By: /usr/share/keyrings/google-chrome.gpg
+"""
+
+
+def _chrome_took_over(b):
+    """Live stream-pp 13.10.2026: Chrome's postinst deleted our .list and wrote its own deb822 .sources
+    with its own keyring -- the repo Chrome itself keeps up to date."""
+    (b.root / "etc/apt/sources.list.d/google-chrome.list").unlink()
+    (b.root / "etc/apt/sources.list.d/google-chrome.sources").write_text(CHROME_OWN_SOURCES)
+    (b.root / "usr/share/keyrings").mkdir(parents=True)
+    (b.root / "usr/share/keyrings/google-chrome.gpg").write_text("CHROME-OWN-KEYRING")
+
+
+def test_chromes_own_repo_file_counts_after_the_install(tmp_path):
+    b = Box(tmp_path)
+    _bash("obs_box_stream_restreamer_host_provision", env=b.env())
+    _chrome_took_over(b)
+    assert [ln.split()[0] for ln in _grade(b)] == ["OK"]
+    b.log.unlink()
+    r = _bash("obs_box_stream_restreamer_host_provision", env=b.env())
+    assert r.returncode == 0, r.stderr
+    assert "curl" not in b.calls() and "apt-get" not in b.calls()
+    assert not (b.root / "etc/apt/sources.list.d/google-chrome.list").exists(), "never a second, duplicate source"
