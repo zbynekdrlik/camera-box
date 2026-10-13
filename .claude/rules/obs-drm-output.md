@@ -539,8 +539,13 @@ po ceste": no PipeWire, no OBS monitoring device, no mixer in between, never a p
 - **The resolver stays as the leg's watcher:** every 5 s it re-reads the ELDs (never on libobs's audio
   thread, which neither allocates nor opens devices: the hold's silence buffer is allocated at open);
   a PCM that no longer carries the connector's monitor (a replug or a re-mode moved the NVIDIA map)
-  is muted and named until it does again. The 60 s report line counts holds / trims / nudges / xruns
-  / `dropped_frames` (what a full ring refused).
+  is muted and named until it does again (verify reads that mute, and a `write to hw:` failure, as
+  no audio; the last outcome line wins). It never re-resolves to a NEW PCM: a moved map stays muted
+  until OBS restarts (follow-up). The 60 s report line counts holds / trims / nudges / xruns /
+  `dropped_frames` (what a full ring refused). **Read `nudges` on the first live run:** the 5 ms band
+  sees one raw `snd_pcm_delay` sample per block, so a nudge count near one per block means jitter, not
+  drift, and the band needs smoothing; a transient lost/again pair around the startup re-mode is
+  expected.
 - **Known limits:** a runtime audio reset (a profile switch) drops the mix callback without a line;
   the EDID comes only from X RandR (a connector X still lists `disconnected` after an earlier lease
   has none -> NO AUDIO, named); verify-imag has no audio row yet.
