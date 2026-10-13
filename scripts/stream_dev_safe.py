@@ -159,6 +159,24 @@ def dev_safe_verdict(scene_names, dev_items, video_muted, clip_settings, spec):
     return rows
 
 
+def _carries_sign(name):
+    """True when NAME carries the registered sign in any spelling a ported collection may hold
+    (REGISTERED_SIGN_SPELLINGS; the bare "Ar" only right after "NDI", where the recon read printed it)."""
+    return any(sign in name for sign in REGISTERED_SIGN_SPELLINGS[:3]) or name.startswith("NDIAr")
+
+
+def source_name_rows(input_names, scene_names):
+    """Owner 13.10.2026: the stream OBS source and scene names carry no registered sign (one spelling,
+    the same names as SNV). One FAIL row naming every offender, else one PASS row."""
+    bad = [n for n in list(input_names) + list(scene_names) if n and _carries_sign(n)]
+    if bad:
+        return [("FAIL", "(source-names) %s carry the registered sign -- rename them without it "
+                         "(owner 13.10.2026), e.g. over obs-websocket SetInputName / SetSceneName"
+                 % ", ".join("'%s'" % n for n in bad))]
+    return [("PASS", "(source-names) %d inputs + %d scenes, none carries the registered sign"
+             % (len(input_names), len(scene_names)))]
+
+
 def _fit_canvas(obs, scene, item_id):
     vs = obs.req("GetVideoSettings")
     obs.req("SetSceneItemTransform", {
@@ -220,7 +238,7 @@ def read_verdict(obs, spec):
              or {}).get("inputMuted")
     clip = (obs.req("GetInputSettings", {"inputName": spec["audio_input"]}, ignore_err=True)
             or {}).get("inputSettings")
-    return dev_safe_verdict(scenes, items, muted, clip, spec)
+    return dev_safe_verdict(scenes, items, muted, clip, spec) + source_name_rows(inputs, scenes)
 
 
 def main():
