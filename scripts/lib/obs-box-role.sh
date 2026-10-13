@@ -379,6 +379,28 @@ obs_box_google_chrome_list() {
   printf 'deb [arch=amd64 signed-by=/etc/apt/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main\n'
 }
 
+# obs_box_google_repo_ok -> 0 when a Google Chrome apt source is in place: our bootstrap list (signed-by
+# the pinned keyring) OR the deb822 google-chrome.sources the google-chrome-stable postinst writes with
+# its own keyring (live stream-pp 13.10.2026: it deletes the bootstrap list and keeps its own file up to
+# date). Prints which one.
+obs_box_google_repo_ok() {
+  local root d
+  root="$(obs_box_apt_root)"
+  d="${root}/etc/apt/sources.list.d"
+  if [ -s "${root}/etc/apt/keyrings/google-chrome.gpg" ] \
+    && [ "$(cat "${d}/google-chrome.list" 2>/dev/null)" = "$(obs_box_google_chrome_list)" ]; then
+    printf 'the bootstrap source (pinned key)'
+    return 0
+  fi
+  if grep -qx 'URIs: https://dl.google.com/linux/chrome[-a-z]*/deb/' "${d}/google-chrome.sources" 2>/dev/null \
+    && grep -q '^Signed-By: /' "${d}/google-chrome.sources" \
+    && [ -s "${root}$(sed -n 's/^Signed-By: //p' "${d}/google-chrome.sources" | head -1)" ]; then
+    printf "Chrome's own source (google-chrome.sources, signed)"
+    return 0
+  fi
+  return 1
+}
+
 # _obs_box_pkg_installed PKG -> 0 when dpkg reports PKG installed.
 _obs_box_pkg_installed() {
   [ "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null || true)" = "install ok installed" ]
@@ -387,13 +409,13 @@ _obs_box_pkg_installed() {
 # obs_box_stream_restreamer_host_provision -> setup-strih step 16j (stream role). rc 1 + a reason on a
 # refused key or a failed install; an installed host (both packages + the repo files) is left alone.
 obs_box_stream_restreamer_host_provision() {
-  local root key list missing="" p fprs armored
+  local root key list missing="" p fprs armored repo
   root="$(obs_box_apt_root)"
   key="${root}/etc/apt/keyrings/google-chrome.gpg"
   list="${root}/etc/apt/sources.list.d/google-chrome.list"
   for p in "${OBS_BOX_RESTREAMER_HOST_PACKAGES[@]}"; do _obs_box_pkg_installed "$p" || missing="${missing} ${p}"; done
-  if [ -z "$missing" ] && [ -s "$key" ] && [ "$(cat "$list" 2>/dev/null)" = "$(obs_box_google_chrome_list)" ]; then
-    echo "  restreamer host: google-chrome-stable + xvfb installed, the signed Google repo in place -- unchanged"
+  if [ -z "$missing" ] && repo="$(obs_box_google_repo_ok)"; then
+    echo "  restreamer host: google-chrome-stable + xvfb installed, ${repo} -- unchanged"
     return 0
   fi
   armored="$(curl -fsSL "$OBS_BOX_GOOGLE_KEY_URL")" \
@@ -423,16 +445,14 @@ obs_box_stream_restreamer_host_provision() {
 # packages installed, the signed repo files in place, google-chrome answers --version. Uses the caller's
 # ok/bad; always rc 0.
 obs_box_stream_restreamer_host_grade() {
-  local root key list missing="" p ver
-  root="$(obs_box_apt_root)"
-  key="${root}/etc/apt/keyrings/google-chrome.gpg"
-  list="${root}/etc/apt/sources.list.d/google-chrome.list"
+  local missing="" p ver repo=""
   for p in "${OBS_BOX_RESTREAMER_HOST_PACKAGES[@]}"; do _obs_box_pkg_installed "$p" || missing="${missing} ${p}"; done
   ver="$(timeout 10 google-chrome --version 2>/dev/null || true)"
-  if [ -z "$missing" ] && [ -s "$key" ] && [ "$(cat "$list" 2>/dev/null)" = "$(obs_box_google_chrome_list)" ] && [ -n "$ver" ]; then
-    ok "(restreamer-host) ${ver} + xvfb installed, the signed Google repo in place"
+  repo="$(obs_box_google_repo_ok || true)"
+  if [ -z "$missing" ] && [ -n "$repo" ] && [ -n "$ver" ]; then
+    ok "(restreamer-host) ${ver% } + xvfb installed, ${repo}"
   else
-    bad "(restreamer-host) missing:${missing:- none}; keyring $([ -s "$key" ] && echo ok || echo missing); repo list $([ "$(cat "$list" 2>/dev/null)" = "$(obs_box_google_chrome_list)" ] && echo ok || echo 'missing/differs'); google-chrome --version '${ver}' -- re-run setup-strih.sh step 16j"
+    bad "(restreamer-host) missing:${missing:- none}; Google apt source: ${repo:-none signed}; google-chrome --version '${ver% }' -- re-run setup-strih.sh step 16j"
   fi
   return 0
 }
