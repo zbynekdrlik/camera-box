@@ -115,7 +115,7 @@ _T95 = ((1, 12.706), (2, 4.303), (3, 3.182), (4, 2.776), (5, 2.571), (6, 2.447),
         (30, 2.042), (40, 2.021), (60, 2.000), (120, 1.980))
 _T95_INF = 1.960
 # The orchestrator writes its slot into every row (`slot_s`; 1200 s by default since ROZHODNUTÉ
-# 5861667625: the strih-lx decode needs ~8 min per window). This is only the FALLBACK for a CSV
+# 5861667625: the strih-snv decode needs ~8 min per window). This is only the FALLBACK for a CSV
 # without it: the stricter 10-min grid. The allowance absorbs the per-slot pre-record steps' start
 # jitter (never a missed slot, which is a 2-slot gap).
 DEFAULT_SLOT_S = 600

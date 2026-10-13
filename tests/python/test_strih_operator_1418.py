@@ -36,7 +36,7 @@ def _exec(path, text):
     return path
 
 
-def _bash(body, env=None, box="strih-lx", args=()):
+def _bash(body, env=None, box="strih-snv", args=()):
     """Run BODY under the callers' strict mode with the box loaded and the libs sourced."""
     script = ('set -euo pipefail\n. "$1"\nstrih_box_load "$2"\n. "$3"\n. "$4"\n. "$5"\nshift 5\n' + body)
     e = {k: v for k, v in os.environ.items() if k not in LEAKY}
@@ -488,13 +488,13 @@ class Op:
                 "STRIH_OPERATOR_GRAB_CMD": str(self.grab), "STRIH_OPERATOR_GRAB_GAP_S": "0",
                 "STRIH_OPERATOR_OBS_RUNNING_CMD": str(self.obs_up), "STRIH_OPERATOR_LIBDIR": str(self.libdir)}
 
-    def rows(self, box="strih-lx"):
+    def rows(self, box="strih-snv"):
         r = _bash('strih_operator_grade_rows "$1" "$2" "$3"', env=self.env(), box=box,
                   args=(str(REPO), str(self.home), "operator1"))
         assert r.returncode == 0, r.stderr
         return [tuple(ln.split("|", 1)) for ln in r.stdout.splitlines() if ln]
 
-    def row(self, item, box="strih-lx"):
+    def row(self, item, box="strih-snv"):
         rows = self.rows(box)
         hits = [(st, d) for st, d in rows if d.startswith("(%s)" % item)]
         assert len(hits) == 1, (item, rows)
@@ -902,7 +902,7 @@ def test_verify_runs_item_43_once_after_the_tally_within_the_budget():
 
 
 def test_the_hub_is_graded_live_on_the_strih_role_only():
-    assert _applies("strih-lx", "13-hub-live") == "RUN"
+    assert _applies("strih-snv", "13-hub-live") == "RUN"
     assert _applies("strih-pp", "13-hub-live") == "RUN"
     assert _applies("stream-pp", "13-hub-live").startswith("SKIP ")
 
@@ -927,14 +927,14 @@ def _item16(tmp_path, box, enabled, active, installed=True):
 
 
 def test_item_16_fails_an_inactive_or_disabled_hub_on_the_strih_role(tmp_path):
-    out = _item16(tmp_path, "strih-lx", "disabled", "inactive")
+    out = _item16(tmp_path, "strih-snv", "disabled", "inactive")
     assert out.startswith("FAIL") and "enabled=disabled" in out and "active=inactive" in out, out
     v = VERIFY.read_text()
     assert "M4" not in v[v.index("# 16) intercom hub unit"):v.index("# 17)")]
 
 
 def test_item_16_passes_an_enabled_active_hub(tmp_path):
-    assert _item16(tmp_path, "strih-lx", "enabled", "active").startswith("PASS")
+    assert _item16(tmp_path, "strih-snv", "enabled", "active").startswith("PASS")
 
 
 def test_item_16_only_reports_an_inactive_hub_on_the_stream_role(tmp_path):
@@ -942,7 +942,7 @@ def test_item_16_only_reports_an_inactive_hub_on_the_stream_role(tmp_path):
 
 
 def test_item_16_fails_a_missing_hub_on_the_strih_role(tmp_path):
-    out = _item16(tmp_path, "strih-lx", "enabled", "active", installed=False)
+    out = _item16(tmp_path, "strih-snv", "enabled", "active", installed=False)
     assert out.startswith("FAIL") and "not installed" in out, out
 
 
@@ -966,13 +966,13 @@ def _step13_start(tmp_path, box, active, loop=False):
 
 
 def test_setup_step_13_starts_a_stopped_hub_on_the_strih_role(tmp_path):
-    calls = _step13_start(tmp_path, "strih-lx", active=False)
+    calls = _step13_start(tmp_path, "strih-snv", active=False)
     assert "systemctl start intercom-hub" in calls, calls
     assert "restart" not in calls
 
 
 def test_setup_step_13_never_touches_a_running_hub(tmp_path):
-    calls = _step13_start(tmp_path, "strih-lx", active=True)
+    calls = _step13_start(tmp_path, "strih-snv", active=True)
     assert "systemctl start" not in calls and "restart" not in calls, calls
 
 
@@ -982,7 +982,7 @@ def test_setup_step_13_leaves_the_stream_role_hub_alone(tmp_path):
 
 def test_setup_fails_a_hub_that_crash_loops_after_the_start(tmp_path):
     """Type=simple: `systemctl start` returns 0 before an exec-time failure; the loop check catches it."""
-    r = _step13_start(tmp_path, "strih-lx", active=False, loop=True)
+    r = _step13_start(tmp_path, "strih-snv", active=False, loop=True)
     assert r.returncode == 1 and "FAIL" in r.stdout and "auto-restart" in r.stdout, r.stdout + r.stderr
 
 

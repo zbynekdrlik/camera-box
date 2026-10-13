@@ -392,7 +392,7 @@ def test_cli_unreadable_capture_exits_2(tmp_path, capsys):
 
 
 def test_dst_filter_keeps_only_streams_arriving_at_the_receiver(tmp_path, capsys):
-    """A capture on strih-lx also carries the hub's OWN outgoing streams (strih-lx -> camN); the
+    """A capture on strih-snv also carries the hub's OWN outgoing streams (strih-snv -> camN); the
     watchdog grades only what ARRIVES there (live capture 25.9.: 7 hub streams + fohabl-strih)."""
     t0 = 1_790_000_000_000_000_000
     inbound = stream_records(3000, name="fohabl-strih", src="10.77.7.30", t0_ns=t0)

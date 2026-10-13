@@ -29,11 +29,11 @@
 #
 # The list is GENERATED, never hand-typed (a hand-kept list is what went stale on the old Windows
 # strih, dead 10.77.8.5x addresses): every member of the obs-fleet `ndi-sender` facet
-# (scripts/lib/obs-fleet.sh: strih-lx, stream, resolume; `retired` rows excluded by obs_fleet_boxes).
+# (scripts/lib/obs-fleet.sh: strih-snv, stream, resolume; `retired` rows excluded by obs_fleet_boxes).
 # A fleet host that is a hostname (resolume.lan, a traveling DHCP box) is resolved to IPv4 at WRITE
 # time; unresolvable -> skipped with a log line, and its sources stay mDNS-only exactly as before.
 # The VERIFIERS require only the PINNED part (every IPv4 entry), so a traveling lease never makes a
-# verify flap, while a renumbered strih-lx / stream still FAILS until re-provisioned.
+# verify flap, while a renumbered strih-snv / stream still FAILS until re-provisioned.
 #
 # NEVER A CAMBOX (issue 1389). A finder with extra IPs opens a TCP discovery connection to each
 # listed sender's :5960 listener (an mDNS-only finder opens none -- proven live), and camera-box
@@ -48,7 +48,7 @@
 # would hold OUTBOUND discovery connections to the very boxes whose restarts trigger the abort.
 #
 # Config LOCATION: the Linux SDK reads `$HOME/.ndi/ndi-config.v1.json`, or
-# `$NDI_CONFIG_DIR/ndi-config.v1.json` when that env var is set. strih-lx's intercom-hub runs with
+# `$NDI_CONFIG_DIR/ndi-config.v1.json` when that env var is set. strih-snv's intercom-hub runs with
 # `ProtectHome=true`, so its config lives in the system dir /etc/ndi and an intercom-hub.service.d
 # drop-in points NDI_CONFIG_DIR at it. The camboxes used the same pair (/etc/ndi + a camera-box.service.d
 # drop-in) until issue 1389; the cambox writer below now removes both, so camera-box (root,
@@ -80,7 +80,7 @@ NDI_DISCOVERY_SYSTEM_DIR="${NDI_DISCOVERY_SYSTEM_DIR:-/etc/ndi}"
 # 1342); since issue 1389 the cambox writer removes it with the config. Overridable for tests.
 # shellcheck disable=SC2034  # consumed cross-file by setup-device.sh (removal) + verify-device.sh (an)
 NDI_DISCOVERY_CAMBOX_DROPIN="${NDI_DISCOVERY_CAMBOX_DROPIN:-/etc/systemd/system/camera-box.service.d/ndi-discovery.conf}"
-# The strih-lx intercom-hub drop-in (ProtectHome hides ~/.ndi from it). Overridable for tests.
+# The strih-snv intercom-hub drop-in (ProtectHome hides ~/.ndi from it). Overridable for tests.
 # shellcheck disable=SC2034  # consumed cross-file by setup-strih.sh (install) + verify-strih.sh (item 34)
 NDI_DISCOVERY_INTERCOM_DROPIN="${NDI_DISCOVERY_INTERCOM_DROPIN:-/etc/systemd/system/intercom-hub.service.d/ndi-discovery.conf}"
 # The obs-fleet facet whose members are the managed OBS-box NDI SENDERS.
@@ -223,7 +223,7 @@ _ndi_discovery_json_string() {
 # absent or null. With python3, any other non-null value (a hand-edited array, a number, true/false)
 # comes back as its compact JSON; the grep fallback reads strings only (the cambox plan counts the rest
 # itself, see its no-python3 branch).
-# With python3 (dev1, strih-lx, the camboxes, the tests) it reads that exact JSON path, so an unrelated
+# With python3 (dev1, strih-snv, the camboxes, the tests) it reads that exact JSON path, so an unrelated
 # `"KEY"` elsewhere in the file never stands in for it (issue 1389). Without python3 (a stripped-down
 # box), or when TEXT is not JSON, it falls back to the grep reader above. Never errors.
 _ndi_discovery_networks_key() {
@@ -310,7 +310,7 @@ ndi_discovery_list_common() {
 # PINNED list, FORBIDDEN to every cambox IP (ndi_discovery_cambox_ips). Facets:
 #   missing   -- TEXT empty (no config file on the box)
 #   JSON      -- TEXT is not valid JSON (checked only when python3 is available; verify-strih runs
-#                this on strih-lx, which has it)
+#                this on strih-snv, which has it)
 #   discovery -- a networks.discovery is set (it would silence this box's senders on mDNS)
 #   ips       -- networks.ips is empty, or a REQUIRED IP is absent from it (a renumber / new
 #                sender: re-provision).
@@ -483,7 +483,7 @@ ndi_discovery_block_section() {
 
 # --- the CAMBOX config: NO networks.ips at all (issue 1389, ROZHODNUTÉ 5879261962) ---------------
 # A cambox is an mDNS-only NDI receiver. camera-box's finder needs only the strih preview source
-# (`STRIH-LX (interkom)`), which mDNS finds in milliseconds, and any listed host would give the cambox
+# (`STRIH-SNV (interkom)`), which mDNS finds in milliseconds, and any listed host would give the cambox
 # an OUTBOUND discovery connection whose teardown at every strih / stream / resolume restart is the
 # same abort risk as the inbound one. So setup-device STEP 7 and `--cambox-apply` take the list OFF a
 # cambox (the plan/apply pair below), and verify-device (an) FAILs a cambox that still lists any IP

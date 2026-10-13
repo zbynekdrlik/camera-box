@@ -1,6 +1,6 @@
 [Unit]
 # Fires the issue-1372 inter-PC VBAN rate/loss check every 5 min (dev1-side). Each pass captures
-# ~60 s on strih-lx, so a slipping or packet-losing VBAN sender is confirmed within two passes
+# ~60 s on strih-snv, so a slipping or packet-losing VBAN sender is confirmed within two passes
 # (~10 min) and re-pinged while it persists. Ships DISABLED (supervisor enables on dev1).
 Description=Run the camera-box inter-PC VBAN rate/loss check every 5 min (issue 1372)
 Documentation=https://github.com/zbynekdrlik/camera-box

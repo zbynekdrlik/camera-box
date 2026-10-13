@@ -1,6 +1,6 @@
 """issue 1404 -- the program-audio sampler serves its OWN read-only HTTP endpoint (host-agnostic).
 
-The sampler runs on strih-lx and serves `/program-audio.json` itself, the only place the verdict is
+The sampler runs on strih-snv and serves `/program-audio.json` itself, the only place the verdict is
 served (the dev1 rig-lease server's :8890 route was retired, 8.10.2026):
   * GET/HEAD `/program-audio.json` -> the payload through `rig_serve_files.program_audio_response`
     (ages recomputed per request, a foreign-owned or unreadable file = UNKNOWN, a MEASUREMENT

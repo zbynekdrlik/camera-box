@@ -26,7 +26,7 @@ packet loss) into one number. This module separates them:
     are reported alongside.
 
 The capture's timestamps must come from a DISCIPLINED clock for the rate to mean "vs the Dante
-tick": strih-lx (Linux, adjtimex slews CLOCK_REALTIME and CLOCK_MONOTONIC) is the reference
+tick": strih-snv (Linux, adjtimex slews CLOCK_REALTIME and CLOCK_MONOTONIC) is the reference
 receiver the dev1 watchdog captures on. A capture needs snaplen >= 96 so the 28-byte VBAN header
 survives the link + IPv4 + UDP headers.
 
@@ -81,7 +81,7 @@ JUMP_FWD_SLACK_FRAMES = 64
 
 DEFAULT_PPM_BOUND = 20.0      # provisional -- calibrate from data once part A (the Windows OBS
                               # media clock) is live; before it Windows senders sit ~10-20 ppm off
-DEFAULT_LOSS_CEILING = 1e-4   # provisional; the fohabl VBAN OUT loss measured on 25.9. at strih-lx
+DEFAULT_LOSS_CEILING = 1e-4   # provisional; the fohabl VBAN OUT loss measured on 25.9. at strih-snv
                               # was 8.8e-4..1.05e-3 (a click source) -- ~10x over this ceiling
 DEFAULT_MIN_SPAN_S = 20.0     # a shorter stream cannot resolve a few ppm through the arrival jitter
 MIN_FRAMES = 50
@@ -550,7 +550,7 @@ def _late_trimmed_fit(points: list, fit: tuple) -> tuple:
 def analyze_capture(data: bytes, only_dst: tuple = ()) -> CaptureResult:
     """Parse a capture and measure every VBAN audio stream in it (ordered by stream key).
     `only_dst` (IPv4 strings) keeps only the streams ARRIVING at those addresses -- a capture on
-    strih-lx also sees the hub's own outgoing streams, which say nothing about a peer's clock."""
+    strih-snv also sees the hub's own outgoing streams, which say nothing about a peer's clock."""
     linktype, packets = iter_packets(data)
     groups: dict = {}
     truncated = 0

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """issue 1367 -- the PURE decision core of the RESTART MATRIX (scripts/av-restart-matrix.sh).
 
-Owner goal (24.9.2026, on the issue): after EVERY restart -- stream OBS, strih OBS (strih-lx), a
+Owner goal (24.9.2026, on the issue): after EVERY restart -- stream OBS, strih OBS (strih-snv), a
 cambox service, dantesync, a power cycle -- the picture-to-sound latency on the stream output is
 right by itself within a bounded settle time, and the cameras stay in sync with each other. The
 acceptance: "for each restart kind, the stream output meets the A/V and spread bounds within the

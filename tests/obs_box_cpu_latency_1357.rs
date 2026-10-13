@@ -1,6 +1,6 @@
 //! issue 1357: the CPU idle wake-up latency bound on every OBS box (the shared baseline).
 //!
-//! strih-lx's ACPI idle driver offers POLL / C1_ACPI 1 us / C2_ACPI 127 us / C3_ACPI 1048 us, and C3
+//! strih-snv's ACPI idle driver offers POLL / C1_ACPI 1 us / C2_ACPI 127 us / C3_ACPI 1048 us, and C3
 //! was entered ~106 M times on cpu0 (finding 5839598285): a ~1 ms wake-up lands on the genlock render
 //! tick, the audio thread and the NDI receive threads. The baseline item `obs_box_cpu_latency`
 //! (`scripts/lib/obs-box-baseline.sh`) installs `systemd/obs-box-cpu-latency.service`, whose holder
@@ -231,7 +231,7 @@ fn calls(t: &Path) -> Vec<String> {
         .collect()
 }
 
-/// A box that never had the holder (strih-lx and imag today): the installer runs to the end under
+/// A box that never had the holder (strih-snv and imag today): the installer runs to the end under
 /// `set -euo pipefail`, installs both files byte-identical to the repo (holder executable), enables
 /// the unit and RESTARTS it (the text changed), then checks it is active.
 #[test]
@@ -270,7 +270,7 @@ fn the_installer_completes_a_first_install_under_errexit() {
 }
 
 /// A re-run with the SAME installed text only starts the unit (a no-op when it is active) -- the
-/// strih-lx genlock deploy re-runs setup-strih every time and must not bounce the holder.
+/// strih-snv genlock deploy re-runs setup-strih every time and must not bounce the holder.
 #[test]
 fn the_installer_rerun_starts_without_a_restart() {
     let d = tempfile::tempdir().unwrap();

@@ -1,4 +1,4 @@
-"""Issue 1399 -- the strih-lx session apps: their provisioning, their verify items and the panel window.
+"""Issue 1399 -- the strih-snv session apps: their provisioning, their verify items and the panel window.
 
 WHY (owner, 4.10.2026): "toto je produkcny pocitac vsetko ma bezat vzdy a stale" + "na strih nb ma po
 starte bezat shading appka" + "nevie to byt pekna pwa appka lebo tam v prehliadacoch je ta hnusna horna
@@ -320,12 +320,12 @@ def test_process_state_table(cmdline, start, newest, want):
 
 
 @pytest.mark.parametrize("wm,present", [
-    ("0x01e00003  0 %s  strih-lx Shading\n" % CLASS, True),
-    ("0x01  0 obs.obs  strih-lx OBS 32.2.0 - Profile: x\n0x02a00003  0 %s  strih-lx Shading\n" % CLASS, True),
+    ("0x01e00003  0 %s  strih-snv Shading\n" % CLASS, True),
+    ("0x01  0 obs.obs  strih-snv OBS 32.2.0 - Profile: x\n0x02a00003  0 %s  strih-snv Shading\n" % CLASS, True),
     ("0x02a00003  0 %s  N/A Shading\n" % CLASS, True),
-    ("0x02a00003  0 %s  strih-lx Shading - extra\n" % CLASS, False),
-    ("0x02a00003  0 firefox.Firefox  strih-lx Shading\n", False),  # another app's window titled Shading
-    ("0x02a00003  0 strih-lx Shading\n", False),  # a `wmctrl -l` line (no class column)
+    ("0x02a00003  0 %s  strih-snv Shading - extra\n" % CLASS, False),
+    ("0x02a00003  0 firefox.Firefox  strih-snv Shading\n", False),  # another app's window titled Shading
+    ("0x02a00003  0 strih-snv Shading\n", False),  # a `wmctrl -l` line (no class column)
     ("", False),
 ])
 def test_window_present_parser(wm, present):
@@ -340,8 +340,8 @@ def test_window_class_is_the_class_the_panel_app_sets():
 
 
 def test_window_present_reads_a_large_list_without_sigpipe():
-    big = "".join("0x%08x  0 obs.obs  strih-lx Window %d\n" % (i, i) for i in range(20000))
-    r = subprocess.run(["bash", "-c", "set -euo pipefail; . '%s'; { printf '0x1  0 %s  strih-lx Shading\\n'; "
+    big = "".join("0x%08x  0 obs.obs  strih-snv Window %d\n" % (i, i) for i in range(20000))
+    r = subprocess.run(["bash", "-c", "set -euo pipefail; . '%s'; { printf '0x1  0 %s  strih-snv Shading\\n'; "
                         "cat; } | strih_shading_window_present \"$STRIH_PANEL_WM_CLASS\" Shading; echo OK"
                         % (LIB, CLASS)], input=big, capture_output=True, text=True, timeout=60)
     assert r.returncode == 0 and r.stdout.strip() == "OK", r.stderr
@@ -380,7 +380,7 @@ def test_grade_rows_catch_the_stopgap_process_and_its_window(tmp_path):
     home, bindir = F.installed_home(tmp_path, panel_cmd=["/usr/bin/python3", "/home/newlevel/.local/bin/bkshading-panel-app"])
     F.all_states(tmp_path / "run")
     rows = _grade(tmp_path, home, bindir, tmp_path / "run",
-                  wmctrl="0x01  0 bkshading-panel-app.py.Bkshading-panel-app.py  strih-lx Shading\n")
+                  wmctrl="0x01  0 bkshading-panel-app.py.Bkshading-panel-app.py  strih-snv Shading\n")
     assert F.row(rows, "shading-app").startswith("FAIL|(shading-app) bkshading-panel-app.service: process:wrong-program")
     assert F.row(rows, "shading-app-window").startswith("FAIL|(shading-app-window) no panel window")
 
@@ -419,7 +419,7 @@ def test_grade_rows_a_vanished_main_process_reads_unreadable_without_noise(tmp_p
 def test_grade_rows_catch_the_stopgap_unit(tmp_path):
     home, bindir = F.installed_home(tmp_path, unit_text="[Service]\nExecStart=%h/.local/bin/bkshading-panel-app\n")
     F.all_states(tmp_path / "run")
-    rows = _grade(tmp_path, home, bindir, tmp_path / "run", wmctrl="0x01  0 obs.obs  strih-lx OBS\n")
+    rows = _grade(tmp_path, home, bindir, tmp_path / "run", wmctrl="0x01  0 obs.obs  strih-snv OBS\n")
     panel = F.row(rows, "shading-app")
     assert panel.startswith("FAIL|(shading-app) bkshading-panel-app.service: unit-differs")
     assert "re-run setup-strih.sh step 16d" in panel

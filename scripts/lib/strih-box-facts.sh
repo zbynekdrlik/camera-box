@@ -19,7 +19,13 @@
 # here: setup-strih.sh derives them on the box.
 
 # The box a bare setup-strih.sh / verify-strih.sh (no --box) provisions -- today's production strih.
-STRIH_BOX_DEFAULT=strih-lx
+STRIH_BOX_DEFAULT=strih-snv
+
+# issue 1414: the transition aliases `--box OLD` accepts, as space-separated OLD=NEW pairs. The SNV
+# strih was named strih-lx until issue 1414 (box names carry the venue): a deploy or a hand run that
+# still says `--box strih-lx` (the pre-1414 name) loads strih-snv with ONE warning. The ONLY box-name
+# alias in the loader.
+STRIH_BOX_ALIASES="strih-lx=strih-snv"   # issue 1414 transition alias
 
 # The not-yet-decided marker a template fact carries until the owner answers it.
 STRIH_BOX_TODO=TODO_OWNER
@@ -234,17 +240,31 @@ strih_box_validate() {
   [ "$bad" = 0 ]
 }
 
+# strih_box_alias_of NAME -> print the box NAME is a transition alias of (STRIH_BOX_ALIASES), rc 0;
+# rc 1 (no output) when NAME is no alias. Pure.
+strih_box_alias_of() {
+  local want="${1-}" pair IFS=$' \t\n'
+  for pair in $STRIH_BOX_ALIASES; do
+    [ "${pair%%=*}" = "$want" ] && { printf '%s' "${pair#*=}"; return 0; }
+  done
+  return 1
+}
+
 # strih_box_load NAME -> load box NAME's facts into the STRIH_BOX_FACTS map (+ STRIH_BOX_LOADED=NAME),
 # rc 0; rc 1 with the reasons on stderr when the name, the file or a fact is invalid, when the fleet
 # list has a row for NAME whose host is an IP other than STRIH_IP, or when a per-run env knob
 # (STRIH_LX_IP / STRIH_LX_DANTESYNC_ROLE) contradicts the loaded fact. Nothing is loaded on failure.
 strih_box_load() {
-  local name="${1-}" file parsed line fleet_ip
+  local name="${1-}" file parsed line fleet_ip canon
   strih_box_unload
   STRIH_BOX_LOAD_FAILED="${name:-<empty>}"   # cleared only when this load succeeds (see strih_box_ensure_loaded)
   if [[ ! "$name" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
     echo "strih-box: box name '${name}' is invalid (lower-case letters, digits, '-'; never a path)" >&2
     return 1
+  fi
+  if canon="$(strih_box_alias_of "$name")"; then
+    echo "strih-box: '${name}' is the old name of box '${canon}' (issue 1414: box names carry the venue) -- loading ${canon}; use --box ${canon}" >&2
+    name="$canon"
   fi
   file="$(strih_box_dir)/${name}.env"
   if [ ! -f "$file" ]; then

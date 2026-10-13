@@ -388,7 +388,7 @@ Options:
                     loud SKIPPED line, counted OK, never UNKNOWN) and drops any \`imag\`-labelled
                     --genlock-sha entry from the cross-box parity (which then certifies strih+stream).
                     WITHOUT this flag an absent imag is still fail-closed UNKNOWN (the #1100 default).
-  --strih-linux  issue 1351 follow-up -- strih is the Linux notebook (strih-lx) after the M4
+  --strih-linux  issue 1351 follow-up -- strih is the Linux notebook (strih-snv) after the M4
                     cut-over, so it reports none of the Windows-only version-integrity facets (the
                     #826 OBS-identity set: obs_installs/startup_chain/port4455_identity/
                     obs_process_count, plus the Windows distroav_dll_paths scan + the Windows
@@ -428,7 +428,7 @@ main() {
   # (which then certifies the remaining fleet strih+stream). WITHOUT this flag the gate is
   # byte-identical to before -- an absent imag is still fail-closed UNKNOWN(11) (the #1100 contract).
   local imag_acked_offline=""
-  # issue 1351 follow-up -- --strih-linux: strih is the Linux notebook (strih-lx); skip its
+  # issue 1351 follow-up -- --strih-linux: strih is the Linux notebook (strih-snv); skip its
   # Windows-only facets (the #826 OBS-identity set + distroav_dll_paths + ndi_runtime) as a loud
   # SKIPPED (counted ok), keep the platform-agnostic byte/capability/parity facets. Mirrors the
   # --imag-acked-offline shape above. WITHOUT this flag strih is graded byte-identical to before.

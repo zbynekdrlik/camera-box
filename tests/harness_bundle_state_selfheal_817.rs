@@ -275,7 +275,7 @@ fn recording_e2e_wires_selfheal_and_drops_the_misleading_note_817() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// issue 1317: since M4 the strih at 10.77.9.202 is the Linux strih-lx, whose :8899 server is a
+// issue 1317: since M4 the strih at 10.77.9.202 is the Linux strih-snv, whose :8899 server is a
 // systemd --user unit. The E2E self-heal must send it the class-resolved Linux restart, never the
 // Windows schtasks line, and its DOWN hint must name the Linux recovery.
 // ---------------------------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 """issue 1410: an unreachable OBS box must never stop the EVENT switch half-way.
 
-On 11.10.2026 strih-lx (10.77.9.202) was powered off when the owner asked for EVENT mode. The
+On 11.10.2026 strih-snv (10.77.9.202) was powered off when the owner asked for EVENT mode. The
 stray-recording guard got `OSError: [Errno 113] No route to host`, and rig-mode.sh called it bare
 under `set -euo pipefail`, so EVENT ended there: the cam2 painter stop, the relay start, the
 program-audio stop, the burn clear, the EVENT contract and the Discord confirmation never ran. The

@@ -2,9 +2,10 @@
 //!
 //! Every cambox previews the strih box's `interkom` NDI output on its HDMI monitor (the #528
 //! fleet-wide default — no per-box config, no env knob). That source used to be one baked box
-//! name (`STRIH-SNV (interkom)`), and `NdiReceiver::connect` finds sources by name, so the strih
-//! hardware swap (Windows STRIH-SNV -> Linux STRIH-LX on 20.9.2026) turned every cameraman monitor
-//! black until a new binary shipped — and any future strih box (e.g. a `STRIH-PP`) would again.
+//! name, and `NdiReceiver::connect` finds sources by name, so the strih hardware swap (the Windows
+//! strih PC -> the Linux notebook on 20.9.2026) turned every cameraman monitor black until a new
+//! binary shipped — and any future strih box (e.g. a `STRIH-PP`) or rename would again. The
+//! issue-1414 rename (the Linux strih's NDI prefix to `STRIH-SNV`) relies on exactly this fallback.
 //!
 //! The preferred name is matched EXACTLY (an explicit `--display`/`[display]` value included —
 //! the old receiver matched a substring); a non-exact strih value still reaches the single
@@ -23,12 +24,13 @@
 //!   the preferred name) and report the candidates — never alternate between strih boxes;
 //! * nothing matching = keep retrying exactly as before.
 
-/// The preferred preview source every cambox asks for: the CURRENT strih box's interkom output
-/// (strih-lx since the M4 cut-over, 20.9.2026). Any other `STRIH-<box> (interkom)` is still found
-/// by the fallback in [`resolve_preview_source`], so this only has to name the usual strih.
-pub const DEFAULT_PREVIEW_SOURCE: &str = "STRIH-LX (interkom)";
+/// The preferred preview source every cambox asks for: the SNV strih box's interkom output
+/// (strih-snv, `<role>-<venue>` since issue 1414). Any other `STRIH-<box> (interkom)` is still found
+/// by the fallback in [`resolve_preview_source`] -- the Poprad strih, or the SNV strih while it
+/// still runs its pre-1414 hostname -- so this only has to name the usual strih.
+pub const DEFAULT_PREVIEW_SOURCE: &str = "STRIH-SNV (interkom)";
 
-/// NDI host prefix every strih box publishes under (`STRIH-SNV`, `STRIH-LX`, `STRIH-PP`, ...).
+/// NDI host prefix every strih box publishes under (`STRIH-SNV`, `STRIH-PP`, ...).
 pub const STRIH_HOST_PREFIX: &str = "STRIH-";
 
 /// NDI output suffix of the strih interkom/return output (the full NDI name is `HOST (output)`).

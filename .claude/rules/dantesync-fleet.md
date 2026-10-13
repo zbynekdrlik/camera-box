@@ -30,7 +30,7 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
   name; never a literal range), keeping each camera a strih fact file (`scripts/strih-boxes/*.env`,
   PARSED) lists in its `STRIH_CAMERAS`. Not `CAMERA_ACTIVE_SET`: a camera retired from measurement
   still runs dantesync.
-  - A camera of the HOME venue (`DANTESYNC_FLEET_HOME_VENUE`, `snv`; strih-lx.env `2 3 5`) is
+  - A camera of the HOME venue (`DANTESYNC_FLEET_HOME_VENUE`, `snv`; strih-snv.env `2 3 5`) is
     `camN|<camera_resolve ip>|linux|video|always|root|`, the clock watchdog's CAM arm
     (`dantesync_fleet_camera_names` = the `always` camera rows only).
   - A camera of another venue (Poprad, strih-pp.env `1 4 6 7`) is
@@ -77,7 +77,7 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
     `test_the_camera_rows_survive_a_callers_noglob`.
   - Moving a camera between venues is one edit in each of the two fact files (plus camera-set.sh's
     `CAMERA_ACTIVE_SET` default when the home venue changes; `harness_camera_set.rs` pins it equal to
-    strih-lx.env's `STRIH_CAMERAS`).
+    strih-snv.env's `STRIH_CAMERAS`).
 - **The table `DANTESYNC_FLEET`** (env-overridable): `name|addr|os|role|homegate|user|credvar`.
   - `addr`: a literal, `obs:<name>` (resolved through `obs_fleet_host` — a `retired` obs-fleet box
     drops out, so imag returns with its obs-fleet flip), or `local` (dev1).
@@ -119,7 +119,7 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
   - **Every venue NTP master is master-aware in the upgrader** (`dantesync_fleet_master_names` =
     every `ntp-master*` role; `NTP_MASTER` is a space-separated list), so strih-pp is never verified
     against the slave bound (the 29.9.2026 rollback class), and a forced downgrade below 1.15.0
-    deletes its `date-offset.json` like strih-lx's.
+    deletes its `date-offset.json` like strih-snv's.
   - **Watchdog tests must empty `DANTE_CLOCK_REACH_NODES`** (or pin `OBS_FLEET_HOME`) when they pin
     the roster: on dev1 the PP link is up, so a reach probe is live I/O there and absent on CI (the
     live-rig gotcha, `ci-testing-gotchas.md`). Run the PP tests in `unshare -n` too.
@@ -153,7 +153,7 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
 | consumer | how it derives |
 |---|---|
 | `dantesync-version-gate.sh --fleet` | adds every node not named explicitly; `--present` skips an away traveling box and an unreachable `reach` node (named `SKIPPED`, issue 1412); per-node credential by name (`_dv_ssh_pass` / `_dv_cred_missing`) |
-| `dantesync-fleet-upgrade.sh --fleet` | same set + credential; every fleet `ntp-master*` node (strih-lx, strih-pp) is a master-aware verify unless `NTP_MASTER` is given; an audio or venue node is verified against its role's grandmaster (`dantesync_gate_env_for`); a node missing its credential, or an unreachable `reach` node, is SKIPPED |
+| `dantesync-fleet-upgrade.sh --fleet` | same set + credential; every fleet `ntp-master*` node (strih-snv, strih-pp) is a master-aware verify unless `NTP_MASTER` is given; an audio or venue node is verified against its role's grandmaster (`dantesync_gate_env_for`); a node missing its credential, or an unreachable `reach` node, is SKIPPED |
 | `dantesync-clock-alert-watchdog.sh` | `DANTE_CLOCK_{CAM,OBS,LOCAL}_NODES` defaults + `DANTE_CLOCK_FIXED_NODES` (mbc, fohabl; box-up = ssh :22, no mgmt axis) + `DANTE_CLOCK_REACH_NODES` (issue 1412: the PP boxes, skipped while unreachable, otherwise like a fixed node); roster lines carry a 4th ROLE field, and an audio or venue node is graded against its role's grandmaster (each venue grandmaster resolved once per pass) |
 | `rig-dev-handover-check.sh` item 12 | `dantesync-version-gate.sh --fleet` |
 | `deploy-fleet.sh --venue` + the ci.yml away-venue step (issue 1413) | `dantesync_fleet_venue_camera_rows` + `dantesync_fleet_away_venues`; reach = `dantesync_fleet_present` |

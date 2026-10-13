@@ -2,7 +2,7 @@
 # /tmp/recording-e2e-386740541/verdict-386740541.json and
 # /tmp/recording-e2e-2059624745/verdict-2059624745.json on dev1 (all_cambox_continuity.segments[] +
 # all_cambox_continuity.tear.windows[].multi_path_suspect_fraction + presentation_cadence, and
-# frozen_leg.frozen[]). The CAM2 windows film the strih-lx vk-direct multiview.
+# frozen_leg.frozen[]). The CAM2 windows film the strih-snv vk-direct multiview.
 # Columns (window): run cambox start_ns end_ns frames undecodable copies gaps tolerance
 #                   multi_path_suspect_fraction paired_fraction beat_corrected_uniform_fraction
 # Columns (frozen): frozen run cambox since_ns copies

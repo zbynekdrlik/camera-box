@@ -157,16 +157,16 @@ def test_a_failed_temp_write_never_replaces_the_state_file(tmp_path):
     # every alerted_ recovery latch and confirm counter. A symlink to /dev/full reproduces the
     # failing write for any user, root included.
     state = tmp_path / "w.state"
-    state.write_text("alerted_strih-lx=1\nconfirm_strih-lx=2\n")
+    state.write_text("alerted_strih-snv=1\nconfirm_strih-snv=2\n")
     fakebin = tmp_path / "bin"
     _stub(fakebin, "mktemp", 't="${1%XXXXXX}full"; ln -sf /dev/full "$t"; printf "%s\\n" "$t"\n')
     r = _run(tmp_path, f'STATE_FILE="{state}"\nPATH="{fakebin}:$PATH"\n'
-             'write_state_field confirm_strih-lx 3\necho "rc=$?"\n')
+             'write_state_field confirm_strih-snv 3\necho "rc=$?"\n')
     assert r.stdout.strip() == "rc=0", "a failed state write must never end the watchdog's pass"
     assert state.is_file() and not state.is_symlink(), "the temp file was renamed over the state file"
-    assert state.read_text() == "alerted_strih-lx=1\nconfirm_strih-lx=2\n", "the old state must stay"
+    assert state.read_text() == "alerted_strih-snv=1\nconfirm_strih-snv=2\n", "the old state must stay"
     assert not list(tmp_path.glob("w.state.*")), "the failed temp file must be removed"
-    assert "state write failed" in r.stderr and "confirm_strih-lx" in r.stderr
+    assert "state write failed" in r.stderr and "confirm_strih-snv" in r.stderr
 
 
 def test_an_unreadable_state_file_is_never_rewritten_from_nothing(tmp_path):
@@ -230,11 +230,11 @@ def test_source_key_keeps_two_names_that_sanitize_alike_apart(tmp_path):
 
 def test_netreach_box_alerted_reads_the_network_reach_latch(tmp_path):
     nr = tmp_path / "nr.state"
-    nr.write_text("alerted_strih-lx=1\nalerted_stream=0\n")
+    nr.write_text("alerted_strih-snv=1\nalerted_stream=0\n")
     r = _run(tmp_path, f'NETREACH_STATE_FILE="{nr}"\n'
-             'for b in strih-lx stream resolume; do printf "%s=%s " "$b" "$(netreach_box_alerted "$b")"; done\n'
+             'for b in strih-snv stream resolume; do printf "%s=%s " "$b" "$(netreach_box_alerted "$b")"; done\n'
              f'NETREACH_STATE_FILE="{tmp_path}/none.state"\nprintf "absent=%s" "$(netreach_box_alerted stream)"\n')
-    assert r.stdout.split() == ["strih-lx=1", "stream=0", "resolume=0", "absent=0"]
+    assert r.stdout.split() == ["strih-snv=1", "stream=0", "resolume=0", "absent=0"]
 
 
 def test_no_watchdog_carries_the_lib_code_again(tmp_path):

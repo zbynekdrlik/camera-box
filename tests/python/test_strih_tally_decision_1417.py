@@ -32,7 +32,7 @@ TREE = {
 def test_camera_of_ndi_name():
     assert d.camera_of_ndi_name("CAM3 (usb)") == 3
     assert d.camera_of_ndi_name("CAM12 (usb)") == 12
-    assert d.camera_of_ndi_name("STRIH-LX (2ME PGM)") == 0
+    assert d.camera_of_ndi_name("STRIH-SNV (2ME PGM)") == 0
     assert d.camera_of_ndi_name("RESOLUME-SNV (SP-program)") == 0
     assert d.camera_of_ndi_name(None) == 0
     assert d.camera_of_ndi_name("cam3 (usb)") == 0

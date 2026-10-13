@@ -128,7 +128,7 @@ meets the A/V and spread bounds within the settle time, 3/3 repeats. The matrix 
 - The owner's "power cycle of any box" is not a kind: a remote cambox reboot is banned, so a power
   cycle is a physical step at the rig.
 - `dantesync` restarts only a CAMERA node (root ssh, the camera credential).
-  - strih-lx needs sudo.
+  - strih-snv needs sudo.
   - A Windows node needs `Restart-Service` over ssh plus the tray.
   - Both would be additive kinds later.
 

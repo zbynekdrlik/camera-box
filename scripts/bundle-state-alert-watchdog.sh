@@ -20,7 +20,7 @@
 # otherwise fully up classifies the box REACHABLE and never pages. THIS watchdog closes that gap: a
 # box that is UP (ping OR OBS-WS :4455) but whose `:8899/bundle-state.json` does NOT serve 200+JSON
 # is CONFIRMED across 2 passes, then (a) auto-restarted via `schtasks /run /tn BundleStateServer`
-# over ssh (a linux-genlock box such as strih-lx: the guarded `systemctl --user restart` of its unit,
+# over ssh (a linux-genlock box such as strih-snv: the guarded `systemctl --user restart` of its unit,
 # issue 1317) -- session-agnostic (a HIDDEN, headless supervisor task; never the `/it` form) per
 # .claude/rules/win-ssh-vs-mcp.md -- and (b) a throttled Discord alert fires. A box that is FULLY
 # unreachable (ping + :4455 + :8899 all down) is deferred to the #1001 watchdog (no double-page, no
@@ -63,7 +63,7 @@ esac
 
 # -- config (all env-overridable) ---------------------------------------------------------------
 # The OBS boxes to watch, as "name|ip" pairs (space-separated). Default DERIVED from the ONE
-# declared fleet list (scripts/lib/obs-fleet.sh, #1296): strih-lx (the production strih since the
+# declared fleet list (scripts/lib/obs-fleet.sh, #1296): strih-snv (the production strih since the
 # issue-1317 M4 cut-over -- a linux-genlock box, so its auto-restart is `systemctl --user`, see
 # box_fleet_class), stream AND resolume (RESOLUME-SNV,
 # a genlock cg-obs box). resolume is TRAVELING-SAFE here with no is-home gate — a fully-unreachable
@@ -111,15 +111,15 @@ log() { printf '%s [bundle-state-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:
 # -- per-box ssh creds (same convention as obs-session-watchdog.sh; targets.md "SSH: newlevel/newlevel")
 box_ssh_user() {
   case "$1" in
-    strih-lx) printf '%s' "${STRIH_USER:-newlevel}" ;;   # issue 1317: the production strih since M4
-    stream) printf '%s' "${STREAM_USER:-newlevel}" ;;
+    strih-snv) printf '%s' "${STRIH_USER:-newlevel}" ;;   # issue 1317: the production strih since M4
+    stream-snv) printf '%s' "${STREAM_USER:-newlevel}" ;;
     *) printf '%s' "${BUNDLE_STATE_SSH_USER:-newlevel}" ;;
   esac
 }
 box_ssh_pw() {
   case "$1" in
-    strih-lx) printf '%s' "${STRIH_PW:-newlevel}" ;;
-    stream) printf '%s' "${STREAM_PW:-newlevel}" ;;
+    strih-snv) printf '%s' "${STRIH_PW:-newlevel}" ;;
+    stream-snv) printf '%s' "${STREAM_PW:-newlevel}" ;;
     *) printf '%s' "${BUNDLE_STATE_SSH_PW:-newlevel}" ;;
   esac
 }
@@ -179,7 +179,7 @@ restart_bundle_state_task() {
 }
 
 # box_fleet_class <box> -> stdout: the box's obs-fleet class (issue 1317). The restart is PLATFORM-
-# resolved: a linux-genlock box (strih-lx, the production strih since M4) restarts its systemd
+# resolved: a linux-genlock box (strih-snv, the production strih since M4) restarts its systemd
 # --user unit; a windows-genlock box keeps `schtasks /run`. A box absent from OBS_FLEET (an explicit
 # BUNDLE_STATE_BOXES override naming an unlisted host) falls back to windows-genlock -- the pre-1317
 # behaviour, byte-compatible.

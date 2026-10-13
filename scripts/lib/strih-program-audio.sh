@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# airuleset:script-ok source-only lib (defines the strih-lx program-audio sampler constants, the
+# airuleset:script-ok source-only lib (defines the strih-snv program-audio sampler constants, the
 # setup-strih step 16e install and the verify-strih item 41 grader; no top-level statements besides
 # constants) -- the sibling scripts/lib/*.sh convention of NOT setting `set -euo pipefail` here:
 # sourcing runs in the CALLER's shell, so strict mode would leak into it. setup-strih.sh /
 # verify-strih.sh set their own. Every function checks its own return codes.
 #
 # scripts/lib/strih-program-audio.sh -- issue 1404 (ROZHODNUTÉ 6039368611): the stream program-audio
-# sampler (the YouTube channel guard) moved off dev1 to strih-lx. It runs there as the operator's
+# sampler (the YouTube channel guard) moved off dev1 to strih-snv. It runs there as the operator's
 # `--user` unit program-audio-sampler.service, pinned to the E-cores at normal priority, and serves its
-# own read-only endpoint http://<strih-lx>:8891/program-audio.json (scripts/program_audio_http.py).
+# own read-only endpoint http://<strih-snv>:8891/program-audio.json (scripts/program_audio_http.py).
 #
 # Moved here from setup-strih.sh / verify-strih.sh (issue 1417: both sit at their 1000-line budget):
 #   setup-strih step 16e: issue 1404 (ROZHODNUTE 6039368611): the YouTube channel guard's sampler moved
@@ -27,7 +27,7 @@
 #     - the decoder shim built AS THE OPERATOR with that build script into the default
 #       ~/.local/lib/camera-box/libqpsk-guard-shim.so, only when it is missing or was built from other
 #       sources (never loaded as root: the library lives in the operator's home);
-#     - the unit rendered from systemd/program-audio-sampler.strih-lx.service: CPUAffinity= = the box's
+#     - the unit rendered from systemd/program-audio-sampler.strih-snv.service: CPUAffinity= = the box's
 #       own /sys/devices/cpu_atom/cpus (the E-cores, read the way strih_lx_lowprio_prefix reads them;
 #       no affinity line on a non-hybrid box), written to ~/.config/systemd/user only when it differs;
 #     - `systemctl --user enable` + a daemon-reload when the unit file changed + a `try-restart` when
@@ -55,7 +55,7 @@ if ! declare -F strih_session_apps_put >/dev/null; then
 fi
 
 STRIH_PROGRAM_AUDIO_UNIT="program-audio-sampler.service"
-STRIH_PROGRAM_AUDIO_UNIT_TEMPLATE="program-audio-sampler.strih-lx.service"
+STRIH_PROGRAM_AUDIO_UNIT_TEMPLATE="program-audio-sampler.strih-snv.service"
 STRIH_PROGRAM_AUDIO_PACKAGES=(python3-numpy)
 # Everything the sampler imports + the decoder shim's sources and build script, in the checkout layout
 # (pinned against the sampler's real import closure by a test).
@@ -80,7 +80,7 @@ STRIH_PROGRAM_AUDIO_TEST_MARKER=.config/camera-box/program-audio-sampler.test-mo
 STRIH_PROGRAM_AUDIO_ENV_FILE=.config/camera-box/program-audio-sampler.env
 # The guard's own freshness window, -FUTURE_TOLERANCE_S <= age_s <= MAX_AGE_S: older is a sampler that
 # stopped writing (= program_audio_guard.py DEFAULT_MAX_AGE_S, its --max-age default); a little in the
-# future is a dantesync date step -- strih-lx is the date master -- (= its NEGATIVE_AGE_TOLERANCE_S).
+# future is a dantesync date step -- strih-snv is the date master -- (= its NEGATIVE_AGE_TOLERANCE_S).
 # Both pinned to the guard by a test.
 STRIH_PROGRAM_AUDIO_MAX_AGE_S=10
 STRIH_PROGRAM_AUDIO_FUTURE_TOLERANCE_S=1

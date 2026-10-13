@@ -60,9 +60,9 @@ check.
 ## Fleet roster + never-false-page
 
 Roster = the NEW `render-freeze` facet in `scripts/lib/obs-fleet.sh`
-(`obs_fleet_boxes render-freeze` = **strih stream resolume strih-lx**). resolume runs the cg-obs
+(`obs_fleet_boxes render-freeze` = **strih stream resolume strih-snv**). resolume runs the cg-obs
 PROGRAM render + receives, so it IS in scope. The **only** page condition is a
-SUCCESSFULLY-FETCHED positive reading, so a dark box (a not-yet-provisioned strih-lx, a traveling
+SUCCESSFULLY-FETCHED positive reading, so a dark box (a not-yet-provisioned strih-snv, a traveling
 resolume that is away, a `:8899` outage) → `box_reachable=0` → **SKIP** → deferred to #732/#1001, no
 page. This is why resolume (traveling) needs **no** `is_home` gate here, and why there is no
 reference-anchor / dev1-side-outage guard.
@@ -74,4 +74,4 @@ there is NO auto-action; recovery is machine-channel log-only (never a phone pin
 `.claude/rules/watchdog-notify-dedup.md` #1206). The units are committed but the SUPERVISOR installs
 + enables them (README supervisor procedure). Live read-only `--dry-run` seam:
 `scripts/render-freeze-alert-watchdog.sh --dry-run` (verified 16.9. against strih/stream/resolume =
-HEALTHY, strih-lx = SKIP).
+HEALTHY, strih-snv = SKIP).

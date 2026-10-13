@@ -6,7 +6,7 @@
 # caller's `set -euo pipefail` (no grep pipelines, stdin drained by a bash read loop).
 #
 # scripts/lib/strih-cef-keyring.sh -- issue 1359: the verify-strih REPORT-ONLY item that grades
-# whether the OBS CEF (obs-browser) on strih-lx runs with Chromium's `--password-store=basic`.
+# whether the OBS CEF (obs-browser) on strih-snv runs with Chromium's `--password-store=basic`.
 #
 # Why: GNOME auto-login does not unlock the login keyring. Without the switch, Chromium's os_crypt
 # inside the OBS CEF asks libsecret for its storage key at every login, the keyring is locked, and

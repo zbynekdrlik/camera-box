@@ -79,7 +79,7 @@ NDI feed plays frame-loss-free on strih/stream after a dantesync roll (#811). La
   `backward_regime_ticks` (#1009) IS the true frame-jump/duplicate signal. Gating holds/overruns
   would false-fail any non-60 source.
 - **The verdict is NOT shallow-aware (issue 1302).** A shallow-latched N==1 input (audit
-  `shallow_depth=` D > 0, the strih-lx `CG-obs` at a 3 ms pin) is held at D frames by design, so
+  `shallow_depth=` D > 0, the strih-snv `CG-obs` at a 3 ms pin) is held at D frames by design, so
   its absolute `max_abs_head_skew_ms` reads about D × interval and `evaluate` FAILs it. That rule
   lives only in `scripts/cg-chain-verify.sh` (`cg_chain_shallow_window`, `.claude/rules/cg-chain-verify.md`),
   because this parser reads neither `shallow_depth=` nor the canvas rate (the `(≈N frames @ F fps)`

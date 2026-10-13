@@ -8,14 +8,14 @@
 //!   after the receiver (`sender_offset`, positive = after). The monotonic clocks never step. Both
 //!   OBS boxes run the production render tick (the one-tick re-grid of `crate::genlock_wall_step`).
 //! - **Inputs:**
-//!   - the deep N==1 `NDI 2ME PGM` (strih-lx program → stream, pin 1026 ms): the production N==1
+//!   - the deep N==1 `NDI 2ME PGM` (strih-snv program → stream, pin 1026 ms): the production N==1
 //!     FIFO port (`crate::genlock_grid_bench::Fifo`) fed by a 30 fps OBS sender that floors its wall
 //!     at send (20.7 ± 1.8 ms after its tick, the #1355 measurement) + 1 ms of network;
-//!   - the shallow cg feed (resolume cg OBS → strih-lx, pin 3 ms): the same port, emits 0–30 ms
+//!   - the shallow cg feed (resolume cg OBS → strih-snv, pin 3 ms): the same port, emits 0–30 ms
 //!     after the sender's tick, 1–3 ms of network;
-//!   - an N>=2 60 → 30 camera (a cambox → strih-lx, pin 3 ms): the production grid release
+//!   - an N>=2 60 → 30 camera (a cambox → strih-snv, pin 3 ms): the production grid release
 //!     (`crate::genlock_n2_grid`), captures on the 60 fps per-second grid, 17–50 ms arrival lag
-//!     delivered in order (inside the 66.7 ms target, like the measured strih-lx distribution).
+//!     delivered in order (inside the 66.7 ms target, like the measured strih-snv distribution).
 //! - **Booking:** at the release, from the release's own bracketed wall read
 //!   (`crate::genlock_fifo_relabel::Booking`), then `RelabelState::apply` / `receive` exactly as
 //!   the C FIFO wires them. The anti-tautology runs book from the render tick's end-of-tick detector
@@ -134,9 +134,9 @@ impl Ticker {
 enum Input {
     /// The deep N==1 stream `NDI 2ME PGM`.
     Deep,
-    /// The shallow N==1 cg feed on strih-lx.
+    /// The shallow N==1 cg feed on strih-snv.
     Shallow,
-    /// An N>=2 60 → 30 cambox input on strih-lx.
+    /// An N>=2 60 → 30 cambox input on strih-snv.
     Camera,
 }
 
@@ -650,7 +650,7 @@ fn the_unquantized_step_cost_is_reported_1372() {
 
 /// A cambox that re-sampled its mono→real offset only every 100 frames (before ROZHODNUTÉ
 /// 6033853074) stamped its own step up to ~1.67 s late (60 fps). Report what such a lag costs a
-/// strih-lx camera input (pin 3 ms, one latency window ~67 ms) with the relabel, against today.
+/// strih-snv camera input (pin 3 ms, one latency window ~67 ms) with the relabel, against today.
 /// Measured (+1600 ms): lag 0 → 0 / 0, 400 → 4 / 4, 800 → 6 / 6, 1200 → 9 / 9, 1600 → 11 / 11
 /// (today one frame more each); a 2 s window gives 0 / 0 at every lag — Design-question 6032724613.
 /// The production cambox has no lag: the test below.
@@ -711,7 +711,7 @@ fn cambox_stamp_epochs(c: &Case) -> (u64, u64) {
 /// Issue 1372 (ROZHODNUTÉ 6033853074) — THE CAMBOX CLAIM: the production cambox
 /// (`genlock_stamp::StampOffset`, one bracketed clock read per captured frame, as `main.rs`)
 /// re-samples its mono→real offset in the frame its wall steps, so its stamps follow its own step
-/// within one frame wherever the step lands in its 100-frame cadence (stamp lag 0), and the strih-lx
+/// within one frame wherever the step lands in its 100-frame cadence (stamp lag 0), and the strih-snv
 /// N>=2 60 → 30 camera input reads 0 repeats / 0 skips across the quantized +1600 ms step with the
 /// sender stepping −30..+30 ms around the receiver — and across −1600 / +200 / −200 ms as well.
 /// Measured on the pre-change cadence-only offset (the RED commit's stub): stamp lag 0–99 frames;
@@ -758,7 +758,7 @@ fn a_production_cambox_follows_its_step_within_one_frame_and_costs_nothing_1372(
         assert_eq!(
             (cost.repeats, cost.skips, cost.backward),
             (0, 0, 0),
-            "issue 1372: {at}: the quantized step must cost a strih-lx camera input no frame: \
+            "issue 1372: {at}: the quantized step must cost a strih-snv camera input no frame: \
              {cost:?}"
         );
         assert_eq!(

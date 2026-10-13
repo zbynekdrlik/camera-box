@@ -22,7 +22,7 @@ paths:
 
 # Reading the strih OBS log — ONE platform-resolved reader (issue 1360)
 
-Since the M4 cut-over the strih role is the Linux notebook **strih-lx** (10.77.9.202): its OBS log
+Since the M4 cut-over the strih role is the Linux notebook **strih-snv** (10.77.9.202): its OBS log
 is the newest `~/.config/obs-studio/logs/*.txt` (the name carries SPACES — `2026-09-23 09-23-36.txt`),
 not `%APPDATA%\obs-studio\logs\*.txt`. Every helper that grew its own Windows-only PowerShell reader
 went silently blind there (READ_FAIL, "ssh flake/timeout", settle never quiet, the align without its
@@ -43,9 +43,9 @@ measured arrival floor). **Never add a new inline strih-log read — call `scrip
   audit's python twin (below).
 
 The platform comes from `strih-platform.sh` `strih_platform` (env `STRIH_PLATFORM` override, else an
-address the obs-fleet list maps to its `strih-lx` row → linux, else windows — issue 1317 part 4: the
+address the obs-fleet list maps to its `strih-snv` row → linux, else windows — issue 1317 part 4: the
 fleet list's alias-aware `obs_fleet_name_for_host` is the ONE authority, so `strih.lan` /
-`strih-lx.lan` also read linux; `.claude/rules/obs-fleet-list.md`; the python twin reads the same
+`strih-snv.lan` also read linux; `.claude/rules/obs-fleet-list.md`; the python twin reads the same
 table via `scripts/obs_fleet_table.py`). The Windows strings are the pre-existing ones, verbatim; the
 tail is the `gc (gci …).FullName -Tail N` form sent as `-EncodedCommand` (the issue-1258 cmd.exe rule).
 
@@ -74,10 +74,10 @@ it for a knob nobody sets.
 
 Live proof recipe (read-only, allowed while an E2E holds the rig lease — log reads never mutate):
 run each watchdog `--dry-run` with `*_STATE_DIR=<scratch>` (NEVER the real dev1 state dir) and the
-box pointed at strih-lx (`FROZEN_INPUT_RECEIVER='strih|10.77.9.202'`, `NDI_HALVING_RECEIVER=…`
+box pointed at strih-snv (`FROZEN_INPUT_RECEIVER='strih|10.77.9.202'`, `NDI_HALVING_RECEIVER=…`
 + `NDI_HALVING_RIGMODE_CMD=true`), twice — pass 1 is UNKNOWN by design (no prev sample), pass 2 must
-read OK / ADVANCING / HEALTHY. strih-lx carries NO `asrc: source … starved_blocks` lines (the ASIO
-sources live on stream), so asio-starve pointed at strih-lx is honestly UNKNOWN.
+read OK / ADVANCING / HEALTHY. strih-snv carries NO `asrc: source … starved_blocks` lines (the ASIO
+sources live on stream), so asio-starve pointed at strih-snv is honestly UNKNOWN.
 
 ## The python twin (`rig-health-audit.py`, the status-page feeder)
 
@@ -99,7 +99,7 @@ its own ssh with a REMOTE `grep` over the whole log and SKIP a Windows strih. It
 `strih_log_tail` of a RAW window (`GENLOCK_AUDIT_SNAPSHOT_READ_LINES`, default 3000) and filters
 LOCALLY: `tr -d '\r'` (a Windows PowerShell tail carries CRLF) → `LC_ALL=C grep -aF "genlock-fifo
 audit '"` → `tail -n GENLOCK_AUDIT_SNAPSHOT_TAIL` (400). No grep-capable reader op was added: a
-remote grep only saves bytes, and the raw window is sized from live data instead — strih-lx logs
+remote grep only saves bytes, and the raw window is sized from live data instead — strih-snv logs
 ~370 lines/min with the audit line ≈26 % of it (every input once per ~5 s), so 3000 lines ≈ 8 min
 carry every input many times, and `genlock_audit_snapshot.py` parses only the LAST line per input.
 If a future consumer needs lines sparser than that (a once-per-run event), size the window from a
@@ -115,7 +115,7 @@ The remaining `APPDATA\obs-studio` hits under `scripts/` are NOT strih log reade
 `bundle-state-server.py` with its own `--obs-log-dir`, and comments).
 
 The MV-fps pair's OWN Linux ssh carries the same `UserKnownHostsFile=/dev/null -o LogLevel=ERROR`
-options as this reader (a strih-lx read through them hits the same stale-key hazard).
+options as this reader (a strih-snv read through them hits the same stale-key hazard).
 
 ## Tier-0 test recipe
 

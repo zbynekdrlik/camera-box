@@ -25,7 +25,7 @@ arrival floor, where `budget = max(PHASE_PIN_HYSTERESIS_NS, GENLOCK_N2_JITTER_BU
 (5 ms grid hysteresis vs the 15 ms #1354 arrival-jitter budget). The budget IS the receive-side
 arrival-lateness tolerance: a late second frame of a 60→30 pair within the budget never costs a
 phase step. Before #1354 the budget was the 5 ms hysteresis alone — 5 ms of headroom right after a
-shed — and strih-lx's `#797 slow output_video` events (5–17 ms, ~30/min on every input even idle)
+shed — and strih-snv's `#797 slow output_video` events (5–17 ms, ~30/min on every input even idle)
 pushed whichever input sat near the mature deadline into a SINGLE-MATURE phase ladder (100–250 ms
 per-camera delivery lag until the depth-15 relock).
 

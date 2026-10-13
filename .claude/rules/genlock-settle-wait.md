@@ -66,7 +66,7 @@ fixture sequence via an idx counter file), `GENLOCK_SETTLE_NOW_CMD` (a fake cloc
 `GENLOCK_SETTLE_SLEEP_CMD` (`:` in tests). The pure functions
 (`genlock_settle_latest_counters` / `_pass_verdict` / `_all_settled`) are split from the ssh runner
 so they unit-test directly. Default reader = the shared platform-resolved `strih_log_tail`
-(`scripts/lib/strih-log-read.sh`, issue 1360 — plain ssh `tail` on the Linux strih-lx, the
+(`scripts/lib/strih-log-read.sh`, issue 1360 — plain ssh `tail` on the Linux strih-snv, the
 -EncodedCommand PowerShell `-Tail` on a Windows strih; see `.claude/rules/strih-log-read.md`). Local net (no cargo, #557): the bash replica sourcing the lib (RED before it exists,
 GREEN after) + `bash -n` + `shellcheck -S warning` + `cargo fmt --all --check` + the anchor sweep.
 

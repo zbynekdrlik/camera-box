@@ -7,7 +7,7 @@ lete" and "chcem aby si sa staral ... aj o dantesync upgrady v pp sieti a tiez o
 Each venue's strih fact file (scripts/strih-boxes/<box>.env) says which cameras the venue HAS
 (STRIH_CAMERAS) and how dev1 dials them (STRIH_CAMERA_DEV1_NET). scripts/lib/dantesync-fleet.sh
 derives its camera rows from that, so:
-  * an SNV camera (strih-lx.env: 2 3 5) is a plain `video` / `always` row at its camera_resolve
+  * an SNV camera (strih-snv.env: 2 3 5) is a plain `video` / `always` row at its camera_resolve
     address -- the clock watchdog's CAM arm;
   * a PP camera (strih-pp.env: 1 4 6 7) is a `video-pp` / `reach` row at 10.76.9.<octet> (dev1
     reaches the PP LAN through the companion-pp subnet router), locked to the PP grandmaster and
@@ -94,8 +94,8 @@ def _boxes_copy(tmp_path, edits):
 # ---------------------------------------------------------------------------------------------
 
 def test_the_venue_fact_files_split_the_fleet_snv_235_and_pp_1467():
-    assert _facts(_BOXES / "strih-lx.env")["STRIH_CAMERAS"].split() == ["2", "3", "5"]
-    assert _facts(_BOXES / "strih-lx.env")["STRIH_CAMERA_DEV1_NET"] == "direct"
+    assert _facts(_BOXES / "strih-snv.env")["STRIH_CAMERAS"].split() == ["2", "3", "5"]
+    assert _facts(_BOXES / "strih-snv.env")["STRIH_CAMERA_DEV1_NET"] == "direct"
     assert _facts(_BOXES / "strih-pp.env")["STRIH_CAMERAS"].split() == ["1", "4", "6", "7"]
     assert _facts(_BOXES / "strih-pp.env")["STRIH_CAMERA_DEV1_NET"] == "10.76.9"
     assert _facts(_BOXES / "stream-pp.env")["STRIH_CAMERA_DEV1_NET"] == "none"
@@ -137,7 +137,7 @@ def test_a_pp_camera_locks_to_the_pp_grandmaster(tmp_path, monkeypatch):
 
 
 def test_a_camera_moved_between_venues_is_one_edit_per_fact_file(tmp_path, monkeypatch):
-    d = _boxes_copy(tmp_path, {"strih-lx.env": [("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=2 3 5 7")],
+    d = _boxes_copy(tmp_path, {"strih-snv.env": [("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=2 3 5 7")],
                                "strih-pp.env": [("STRIH_CAMERAS=1 4 6 7", "STRIH_CAMERAS=1 4 6")]})
     r = _bash(tmp_path, "dantesync_fleet_rows", DANTESYNC_FLEET_STRIH_BOXES_DIR=str(d))
     assert r.returncode == 0, r.stderr
@@ -147,7 +147,7 @@ def test_a_camera_moved_between_venues_is_one_edit_per_fact_file(tmp_path, monke
 
 
 def test_a_camera_listed_by_two_venues_fails_loudly_in_both(tmp_path, monkeypatch):
-    d = _boxes_copy(tmp_path, {"strih-lx.env": [("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=2 3 5 7")]})
+    d = _boxes_copy(tmp_path, {"strih-snv.env": [("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=2 3 5 7")]})
     r = _bash(tmp_path, "dantesync_fleet_rows || echo RC=$?", DANTESYNC_FLEET_STRIH_BOXES_DIR=str(d))
     assert "RC=1" in r.stdout and "cam7 is listed by two venue fact files" in r.stderr, r.stderr
     assert "cam7|" not in r.stdout  # never a guessed row
@@ -215,7 +215,7 @@ def _gate(tmp_path, versions, home):
 
 
 def test_version_gate_reads_a_reachable_pp_camera_at_its_pp_address(tmp_path):
-    r = _gate(tmp_path, {h: _PIN for h in _HOSTS}, "strih-lx stream resolume cam7")
+    r = _gate(tmp_path, {h: _PIN for h in _HOSTS}, "strih-snv stream-snv resolume-snv cam7")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "  cam7 " in r.stdout and "  cam7 SKIPPED" not in r.stdout, r.stdout
     for name in ("cam1", "cam4", "cam6"):
@@ -231,13 +231,13 @@ def test_version_gate_reads_a_reachable_pp_camera_at_its_pp_address(tmp_path):
 def test_version_gate_drifts_on_a_stale_pp_camera(tmp_path):
     v = {h: _PIN for h in _HOSTS}
     v["10.76.9.67"] = "1.8.10"
-    r = _gate(tmp_path, v, "strih-lx stream resolume cam7")
+    r = _gate(tmp_path, v, "strih-snv stream-snv resolume-snv cam7")
     assert r.returncode == 20, r.stdout + r.stderr
     assert "cam7" in r.stdout and "1.8.10" in r.stdout
 
 
 def test_version_gate_never_fails_on_the_pp_cameras_while_they_are_away(tmp_path):
-    r = _gate(tmp_path, {h: _PIN for h in _HOSTS}, "strih-lx stream resolume")
+    r = _gate(tmp_path, {h: _PIN for h in _HOSTS}, "strih-snv stream-snv resolume-snv")
     assert r.returncode == 0, r.stdout + r.stderr
     for name in PP_CAMS:
         assert f"  {name} SKIPPED (unreachable" in r.stdout, r.stdout
@@ -253,7 +253,7 @@ def _source_upgrade(tmp_path, body, **env):
 def test_upgrade_verifies_a_pp_camera_against_the_pp_grandmaster_and_skips_it_while_away(tmp_path):
     r = _source_upgrade(tmp_path, 'echo "P=[$(dantesync_gate_env_for cam7)]"; echo "S=[$(dantesync_gate_env_for cam3)]";'
                                   ' for n in cam1 cam7 cam3; do dantesync_skip_away_traveling "$n" && echo "$n=skip" || echo "$n=roll"; done',
-                        OBS_FLEET_HOME="strih-lx stream resolume cam7")
+                        OBS_FLEET_HOME="strih-snv stream-snv resolume-snv cam7")
     assert f"P=[RIG_GRANDMASTER_IP={PP_GM}]" in r.stdout and "S=[]" in r.stdout, r.stdout + r.stderr
     assert "cam1=skip" in r.stdout and "cam7=roll" in r.stdout and "cam3=roll" in r.stdout
 

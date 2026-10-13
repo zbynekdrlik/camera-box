@@ -832,8 +832,8 @@ fn main_cli_explicit_override_flows_through_the_real_invocation() {
 }
 
 /// issue 1317 part 3: the Windows strih PC is RETIRED (M4 cut-over; its address is the Linux
-/// strih-lx, supervised by its strih-obs.service user unit). This Windows Task-Scheduler installer
-/// refuses `strih` by name and the Linux strih-lx as an unknown box -- it can never emit a Windows
+/// strih-snv, supervised by its strih-obs.service user unit). This Windows Task-Scheduler installer
+/// refuses `strih` by name and the Linux strih-snv as an unknown box -- it can never emit a Windows
 /// recovery script for the Linux strih.
 #[test]
 fn retired_windows_strih_and_linux_strih_lx_are_refused_1317() {
@@ -844,11 +844,11 @@ fn retired_windows_strih_and_linux_strih_lx_are_refused_1317() {
     );
     assert!(
         err.contains("RETIRED") && err.contains("strih-obs.service"),
-        "the refusal names the retirement + the strih-lx user unit: {err}"
+        "the refusal names the retirement + the strih-snv user unit: {err}"
     );
     assert!(!out.contains("win-strih"), "no Windows strih plan: {out}");
-    let (code, out, _err) = run_script(&["--box", "strih-lx"]);
-    assert_eq!(code, 2, "--box strih-lx (Linux) must exit 2. stdout={out}");
+    let (code, out, _err) = run_script(&["--box", "strih-snv"]);
+    assert_eq!(code, 2, "--box strih-snv (Linux) must exit 2. stdout={out}");
     // the builder no longer keys on the literal strih: an unknown / no-AHK name gets NO AHK machinery.
     let p = run_sourced(&format!("build_recovery_script strih '{OBS_DIR}' 30"));
     assert!(

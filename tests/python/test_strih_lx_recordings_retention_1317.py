@@ -1,6 +1,6 @@
-"""issue 1317 part 5 -- the Linux (strih-lx) recordings-retention executor.
+"""issue 1317 part 5 -- the Linux (strih-snv) recordings-retention executor.
 
-strih-lx (the Linux strih, fleet row ``strih-lx|10.77.9.202|linux-genlock``) records one E2E run per
+strih-snv (the Linux strih, fleet row ``strih-snv|10.77.9.202|linux-genlock``) records one E2E run per
 capture into ``/srv/_REC`` (its active OBS profile ``[AdvOut] RecFilePath``), and until this part NO
 retention ran there: ``scripts/strih-recordings-retention.sh`` refused every linux-genlock address
 (part 3) and its only executor was the Windows ``.ps1``.
@@ -218,8 +218,8 @@ def test_record_dir_is_read_from_the_active_obs_profile_advanced_mode():
         rec = os.path.join(t, "srv_REC")
         os.mkdir(rec)
         _mk(rec, "2026-01-01 10-00-00.mkv", 10, 400 * 86400, 1800000000)
-        cfg = _obs_cfg(t, "strih-lx",
-                       "[General]\nName=strih-lx\n\n[Output]\nMode=Advanced\n\n"
+        cfg = _obs_cfg(t, "strih-snv",
+                       "[General]\nName=strih-snv\n\n[Output]\nMode=Advanced\n\n"
                        "[SimpleOutput]\nFilePath=/wrong/simple\n\n"
                        "[AdvOut]\nRecType=Standard\nRecFilePath=%s\nFFFilePath=/wrong/ff\n" % rec)
         r = _run(["--local-sweep", "--obs-config-dir", cfg, "--keep-runs", "0", "--keep-days", "0"],
@@ -289,7 +289,7 @@ def _calls(log):
 def test_box_strih_lx_runs_the_bash_local_sweep_over_ssh():
     with tempfile.TemporaryDirectory() as tmp:
         env, log = _fake_sshpass(tmp)
-        r = _run(["--box", "strih-lx"], env=env)
+        r = _run(["--box", "strih-snv"], env=env)
         assert r.returncode == 0, r.stdout + r.stderr
         calls = _calls(log)
         assert "newlevel@10.77.9.202" in calls, calls
@@ -305,7 +305,7 @@ def test_box_strih_lx_runs_the_bash_local_sweep_over_ssh():
 def test_box_strih_lx_passes_policy_record_dir_and_execute_through():
     with tempfile.TemporaryDirectory() as tmp:
         env, log = _fake_sshpass(tmp)
-        r = _run(["--box", "strih-lx", "--record-dir", "/srv/_REC", "--keep-runs", "20",
+        r = _run(["--box", "strih-snv", "--record-dir", "/srv/_REC", "--keep-runs", "20",
                   "--keep-days", "3", "--execute"], env=env)
         assert r.returncode == 0, r.stdout + r.stderr
         calls = _calls(log)
@@ -317,7 +317,7 @@ def test_box_strih_lx_passes_policy_record_dir_and_execute_through():
 def test_box_stream_uses_the_windows_ps1_driver():
     with tempfile.TemporaryDirectory() as tmp:
         env, log = _fake_sshpass(tmp)
-        r = _run(["--box", "stream", "--record-dir", "C:\\Users\\newlevel\\Videos"], env=env)
+        r = _run(["--box", "stream-snv", "--record-dir", "C:\\Users\\newlevel\\Videos"], env=env)
         assert r.returncode == 0, r.stdout + r.stderr
         calls = _calls(log)
         assert "scp -O" in calls and "newlevel@10.77.9.204:" in calls, calls
@@ -329,7 +329,7 @@ def test_box_retired_strih_and_unknown_box_are_usage_errors():
     with tempfile.TemporaryDirectory() as tmp:
         env, log = _fake_sshpass(tmp)
         r = _run(["--box", "strih"], env=env)
-        assert r.returncode == 2 and "RETIRED" in r.stderr and "--box strih-lx" in r.stderr, r.stderr
+        assert r.returncode == 2 and "RETIRED" in r.stderr and "--box strih-snv" in r.stderr, r.stderr
         r = _run(["--box", "nosuchbox"], env=env)
         assert r.returncode == 2 and "not in the fleet list" in r.stderr, r.stderr
         assert _calls(log) == ""
@@ -340,7 +340,7 @@ def test_host_still_refuses_the_linux_strih_and_points_at_box():
         env, log = _fake_sshpass(tmp)
         r = _run(["--host", "10.77.9.202"], env=env)
         assert r.returncode == 2, r.stdout + r.stderr
-        assert "linux-genlock" in r.stderr and "--box strih-lx" in r.stderr, r.stderr
+        assert "linux-genlock" in r.stderr and "--box strih-snv" in r.stderr, r.stderr
         assert _calls(log) == ""
 
 
@@ -409,7 +409,7 @@ def test_box_strih_lx_end_to_end_through_the_real_bash_s_path():
         _mk(rec, "2026-01-01 10-00-00.mkv", 10, 30 * 86400, now)
         _mk(rec, "2026-01-02 10-00-00.mkv", 10, 1 * 86400, now)
         _mk(rec, "strih700105.mkv", 10, 900 * 86400, now)
-        r = _run(["--box", "strih-lx", "--record-dir", rec, "--keep-runs", "1", "--keep-days", "0"],
+        r = _run(["--box", "strih-snv", "--record-dir", rec, "--keep-runs", "1", "--keep-days", "0"],
                  env=env)
         assert r.returncode == 0, r.stdout + r.stderr
         calls = _calls(log)
@@ -417,7 +417,7 @@ def test_box_strih_lx_end_to_end_through_the_real_bash_s_path():
         assert "DRY-RUN" in r.stdout and rec in r.stdout, r.stdout
         assert re.search(r"DELETE .*2026-01-01 10-00-00\.mkv", r.stdout), r.stdout
         assert len(os.listdir(rec)) == 3
-        r = _run(["--box", "strih-lx", "--record-dir", rec, "--keep-runs", "1", "--keep-days", "0",
+        r = _run(["--box", "strih-snv", "--record-dir", rec, "--keep-runs", "1", "--keep-days", "0",
                   "--execute"], env=env)
         assert r.returncode == 0, r.stdout + r.stderr
         assert sorted(os.listdir(rec)) == ["2026-01-02 10-00-00.mkv", "strih700105.mkv"]
@@ -431,8 +431,8 @@ def test_box_strih_lx_forwards_obs_config_dir_and_user():
         rec = os.path.join(tmp, "rec")
         os.mkdir(rec)
         _mk(rec, "2026-01-01 10-00-00.mkv", 10, 30 * 86400, now)
-        cfg = _obs_cfg(tmp, "strih-lx", "[Output]\nMode=Advanced\n\n[AdvOut]\nRecFilePath=%s\n" % rec)
-        r = _run(["--box", "strih-lx", "--obs-config-dir", cfg, "--user", "opuser"], env=env)
+        cfg = _obs_cfg(tmp, "strih-snv", "[Output]\nMode=Advanced\n\n[AdvOut]\nRecFilePath=%s\n" % rec)
+        r = _run(["--box", "strih-snv", "--obs-config-dir", cfg, "--user", "opuser"], env=env)
         assert r.returncode == 0, r.stdout + r.stderr
         calls = _calls(log)
         assert "opuser@10.77.9.202" in calls and "--obs-config-dir" in calls, calls
@@ -442,7 +442,7 @@ def test_box_strih_lx_forwards_obs_config_dir_and_user():
 def test_linux_leg_ssh_is_hardened_and_bounded():
     with tempfile.TemporaryDirectory() as tmp:
         env, log = _fake_sshpass(tmp)
-        r = _run(["--box", "strih-lx"], env=env)
+        r = _run(["--box", "strih-snv"], env=env)
         assert r.returncode == 0, r.stdout + r.stderr
         calls = _calls(log)
         # 10.77.9.202 used to be the Windows strih: a stale known_hosts key must not block the leg.
@@ -455,7 +455,7 @@ def test_linux_leg_refuses_windows_only_flags():
     with tempfile.TemporaryDirectory() as tmp:
         env, log = _fake_sshpass(tmp)
         for args in (["--budget-gb", "10"], ["--remote-path", "C:\\x.ps1"]):
-            r = _run(["--box", "strih-lx"] + args, env=env)
+            r = _run(["--box", "strih-snv"] + args, env=env)
             assert r.returncode == 2, (args, r.stdout + r.stderr)
             assert "Windows" in r.stderr, r.stderr
         assert _calls(log) == ""
@@ -520,7 +520,7 @@ def test_zero_ssh_timeout_is_refused_it_would_disable_the_bound():
     with tempfile.TemporaryDirectory() as tmp:
         env, log = _fake_sshpass(tmp)
         env["RETENTION_SSH_TIMEOUT"] = "0"
-        r = _run(["--box", "strih-lx"], env=env)
+        r = _run(["--box", "strih-snv"], env=env)
         assert r.returncode == 2, r.stdout + r.stderr
         assert _calls(log) == ""
 
@@ -537,7 +537,7 @@ def test_flags_that_do_not_apply_to_a_mode_are_refused_never_ignored():
         r = _run(["--host", "10.77.9.204", "--plan-tsv"], env=env)
         assert r.returncode == 2, r.stdout + r.stderr
         # print-only view + delete is refused on dev1, before any ssh.
-        r = _run(["--box", "strih-lx", "--plan-tsv", "--execute"], env=env)
+        r = _run(["--box", "strih-snv", "--plan-tsv", "--execute"], env=env)
         assert r.returncode == 2, r.stdout + r.stderr
         assert _calls(log) == ""
 
@@ -553,7 +553,7 @@ def test_box_linux_plan_tsv_stdout_is_pure_tsv():
         os.mkdir(rec)
         _mk(rec, "2026-01-01 10-00-00.mkv", 10, 30 * 86400, now)
         _mk(rec, "2026-01-02 10-00-00.mkv", 10, 1 * 86400, now)
-        r = _run(["--box", "strih-lx", "--record-dir", rec, "--keep-runs", "1", "--keep-days", "0",
+        r = _run(["--box", "strih-snv", "--record-dir", rec, "--keep-runs", "1", "--keep-days", "0",
                   "--plan-tsv"], env=env)
         assert r.returncode == 0, r.stdout + r.stderr
         lines = r.stdout.splitlines()
@@ -561,4 +561,4 @@ def test_box_linux_plan_tsv_stdout_is_pure_tsv():
                              for ln in lines), r.stdout
         assert _plan_rows(r.stdout) == ([("newest-run", "2026-01-02 10-00-00.mkv")],
                                         ["2026-01-01 10-00-00.mkv"]), r.stdout
-        assert "[strih-lx] ssh" in r.stderr, r.stderr
+        assert "[strih-snv] ssh" in r.stderr, r.stderr

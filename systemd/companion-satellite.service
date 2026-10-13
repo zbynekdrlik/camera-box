@@ -5,9 +5,9 @@
 # login (owner 4.10.2026). The program is the Electron desktop build setup-strih.sh step 16 installs
 # (/opt/companion-satellite/companion-satellite, strih_companion_satellite_bin). Installed by step 16d
 # (scripts/lib/strih-session-apps.sh) under the SAME name the 4.10.2026 hand-made stopgap used, so it
-# replaces that unit; started at login by the kiosk autostart and after strih-obs by the strih-lx genlock
+# replaces that unit; started at login by the kiosk autostart and after strih-obs by the strih-snv genlock
 # deploy; watched by strih-satellite-watch.timer; graded by verify-strih.sh item 39.
-Description=strih-lx Companion Satellite -- the Stream Deck XL agent for the venue Companion (issue 1399)
+Description=strih-snv Companion Satellite -- the Stream Deck XL agent for the venue Companion (issue 1399)
 Documentation=https://github.com/zbynekdrlik/camera-box
 # Never give up: the deck must work whenever the operator session runs (owner 4.10.2026).
 StartLimitIntervalSec=0

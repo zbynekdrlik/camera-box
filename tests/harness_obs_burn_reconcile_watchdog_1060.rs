@@ -310,7 +310,7 @@ fn readme_documents_ships_disabled_and_supervisor_verify() {
 // ================================================================================================
 // issue 1317 (M4) -- the roster derives from the ONE fleet list (`burn-reconcile` facet), never a
 // literal Windows `strih`. The watch is OBS-WebSocket only (GetStats renderTotalFrames + the
-// obs_burn_filter sweeps), so the production Linux strih-lx keeps the coverage.
+// obs_burn_filter sweeps), so the production Linux strih-snv keeps the coverage.
 // ================================================================================================
 
 /// Source the watchdog (main is guarded), stub `process_box` to print the box it was handed, run
@@ -350,8 +350,8 @@ fn watchdog_roster_derives_from_the_burn_reconcile_fleet_facet_1317() {
     );
     assert_eq!(
         roster(&[]),
-        "BOX strih-lx 10.77.9.202\nBOX stream 10.77.9.204",
-        "the default pass reconciles the production strih-lx + stream"
+        "BOX strih-snv 10.77.9.202\nBOX stream-snv 10.77.9.204",
+        "the default pass reconciles the production strih-snv + stream-snv"
     );
 }
 
@@ -359,12 +359,12 @@ fn watchdog_roster_derives_from_the_burn_reconcile_fleet_facet_1317() {
 fn watchdog_roster_keeps_the_host_and_roster_env_overrides_1317() {
     assert_eq!(
         roster(&[("STRIH_HOST", "192.0.2.11"), ("STREAM_HOST", "192.0.2.12")]),
-        "BOX strih-lx 192.0.2.11\nBOX stream 192.0.2.12",
-        "STRIH_HOST keeps repointing the strih (now strih-lx), STREAM_HOST the stream box"
+        "BOX strih-snv 192.0.2.11\nBOX stream-snv 192.0.2.12",
+        "STRIH_HOST keeps repointing the strih (now strih-snv), STREAM_HOST the stream-snv box"
     );
     assert_eq!(
-        roster(&[("OBS_BURN_RECONCILE_BOXES", "stream|10.77.9.204")]),
-        "BOX stream 10.77.9.204",
+        roster(&[("OBS_BURN_RECONCILE_BOXES", "stream-snv|10.77.9.204")]),
+        "BOX stream-snv 10.77.9.204",
         "the roster override is authoritative"
     );
 }
@@ -375,11 +375,11 @@ fn watchdog_roster_skips_a_traveling_box_while_away_1317() {
         roster(&[
             (
                 "OBS_BURN_RECONCILE_BOXES",
-                "stream|10.77.9.204 resolume|resolume.lan"
+                "stream-snv|10.77.9.204 resolume-snv|resolume.lan"
             ),
             ("OBS_FLEET_HOME", "nobody"),
         ]),
-        "BOX stream 10.77.9.204",
+        "BOX stream-snv 10.77.9.204",
         "a traveling box that is away is never probed"
     );
 }

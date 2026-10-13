@@ -467,7 +467,7 @@ took 3 s — the decode on the small Tier-0 dev1 box was the cost). Now it follo
   anything but Cut).
 - **The strih/stream hops (issue 1302 slice 2):** items 2 + 3 above — the `--cg-chain-burns` flag
   (`cg_chain_extract_burn_flag`, spliced as `${CG_CHAIN_BURN_FLAG:+"$CG_CHAIN_BURN_FLAG"}` into all
-  three extract calls: strih-lx, Windows strih, stream — an empty flag adds NO argv word) and
+  three extract calls: strih-snv, Windows strih, stream — an empty flag adds NO argv word) and
   `cg_chain_merge_args_append` (which also feeds the on-box cg partial). `tests/harness_cg_chain_hops_1302.rs`
   pins both (std-only, runs with plain `rustc --test`); the verdict side is pinned by the
   `*_1302` tests in `recording-verdict.rs` (CI-only) and the `cg_chain_gate` unit tests (Tier-0 via

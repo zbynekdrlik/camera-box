@@ -2452,7 +2452,7 @@ fn report_only_box_with_unread_file_prints_unread_row_and_never_blocks_1296() {
 }
 
 // ── issue 1351 follow-up — `--strih-linux`: after the M4 cut-over strih is the Linux notebook
-// (strih-lx, 10.77.9.202) running OBS under systemd, not the Windows STRIH-SNV PC. It reports NONE
+// (strih-snv, 10.77.9.202) running OBS under systemd, not the Windows STRIH-SNV PC. It reports NONE
 // of the Windows-only version-integrity facets (the #826 OBS-identity set: obs_installs/
 // startup_chain/port4455_identity/obs_process_count, plus the Windows distroav_dll_paths path scan
 // and the Windows ndi_runtime facet) — every one of those mandatory/enforced facets reads UNKNOWN
@@ -2463,12 +2463,12 @@ fn report_only_box_with_unread_file_prints_unread_row_and_never_blocks_1296() {
 // genlock_capability, plus the separate cross-box genlock_build_sha parity), so strih's actual
 // deployed genlock build stays verified. Mirrors --imag-acked-offline's shape exactly.
 
-/// A strih-lx (Linux) state fixture: the platform-agnostic drift-guard keys a real strih-lx
+/// A strih-snv (Linux) state fixture: the platform-agnostic drift-guard keys a real strih-snv
 /// /bundle-state.json DOES serve (obs_version/distroav_version/output_fps/genlock_wall_clock/
 /// ndi_input_latency — all parsed from OBS's own log text, format-tolerant across OS) but WITHOUT
 /// the two genuinely Windows-only mandatory facets (ndi_runtime, distroav_dll_paths) and WITHOUT
 /// any #826 OBS-identity key (obs_installs/port4455_owner_*/obs_process_count/ahk_*) — exactly the
-/// shape the live E2E run 35531231925 proof showed a real strih-lx box omits.
+/// shape the live E2E run 35531231925 proof showed a real strih-snv box omits.
 const STRIH_LX_PLATFORM_AGNOSTIC: &str = "{\
 \"obs_version\":\"32.2.0\",\
 \"distroav_version\":\"6.2.1\",\
@@ -2562,7 +2562,7 @@ fn gate_passes_a_linux_strih_under_strih_linux_with_only_platform_agnostic_facet
     let _ = std::fs::remove_file(&manifest);
 }
 
-/// #1397: the REAL strih-lx key set carries NO obs/distroav `.dll` sha (the Linux box has no
+/// #1397: the REAL strih-snv key set carries NO obs/distroav `.dll` sha (the Linux box has no
 /// `.dll`; its `:8899` serves obs_version / distroav_version / genlock_build_sha) while the pinned
 /// manifest of a FULL-bundle deploy lists distroav.dll -- release E2E run 36741922783 refused a
 /// healthy rig on `distroav_dll_sha256 UNKNOWN`. Under `--strih-linux` BOTH Windows byte facets are

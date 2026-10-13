@@ -546,7 +546,7 @@ fn production_sized_never_deletable_takes_precedence_over_delete_eligibility() {
 
 // ---- issue 1317 part 5: ONE shared fixture table pins the Linux (bash) executor to plan() ---------
 //
-// strih-lx (Linux) records E2E runs to `/srv/_REC`, and its retention executor is a bash port of
+// strih-snv (Linux) records E2E runs to `/srv/_REC`, and its retention executor is a bash port of
 // this decision (`scripts/strih-recordings-retention.sh --local-sweep`). The parity is pinned on ONE
 // table, `tests/fixtures/recordings_retention_parity.tsv`, read by THIS test against the canonical
 // `plan()` AND by `tests/python/test_strih_lx_recordings_retention_1317.py` against the bash

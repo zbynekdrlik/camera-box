@@ -1,4 +1,4 @@
-"""issue 1317 -- unit tests for scripts/strih_scenes.py (the strih-lx OBS input/scene/Studio-Mode
+"""issue 1317 -- unit tests for scripts/strih_scenes.py (the strih-snv OBS input/scene/Studio-Mode
 seeder) + static anchors on the wiring in strih-obs-start.sh and setup-strih.sh.
 
 Tier-0 runnable (pytest on the pure helpers + script-text asserts; no cargo, no rig). The seeder
@@ -34,8 +34,8 @@ _TEN_INPUTS = [
     "STRIH-SNV (2ME PGM)", "STRIH-SNV (2ME PVW)", "RESOLUME-SNV (cg-obs)",
 ]
 _FIVE_OUTPUTS = [
-    "STRIH-LX (2ME PGM)", "STRIH-LX (2ME PVW)",
-    "STRIH-LX (interkom)", "STRIH-LX (MULTIVIEW)", "STRIH-LX (Grading)",
+    "STRIH-SNV (2ME PGM)", "STRIH-SNV (2ME PVW)",
+    "STRIH-SNV (interkom)", "STRIH-SNV (MULTIVIEW)", "STRIH-SNV (Grading)",
 ]
 _REAL_MANIFEST = json.dumps(
     {"inputs": _TEN_INPUTS, "outputs": _FIVE_OUTPUTS, "camera_latency_ms": 3}
@@ -246,9 +246,9 @@ def test_input_class_for_cameras_and_cg_obs_are_camera():
 def test_input_class_for_2me_feedback_is_feedback_regardless_of_prefix():
     assert _mod.input_class_for("STRIH-SNV (2ME PGM)") == "feedback"
     assert _mod.input_class_for("STRIH-SNV (2ME PVW)") == "feedback"
-    # the future STRIH-LX self-loop feedback (issue 1347) inherits the class by suffix, not prefix
-    assert _mod.input_class_for("STRIH-LX (2ME PGM)") == "feedback"
-    assert _mod.input_class_for("STRIH-LX (2ME PVW)") == "feedback"
+    # the future STRIH-SNV self-loop feedback (issue 1347) inherits the class by suffix, not prefix
+    assert _mod.input_class_for("STRIH-SNV (2ME PGM)") == "feedback"
+    assert _mod.input_class_for("STRIH-SNV (2ME PVW)") == "feedback"
 
 
 def test_input_settings_for_camera_class_is_the_certified_genlock_dict():
@@ -264,7 +264,7 @@ def test_input_settings_for_camera_class_is_the_certified_genlock_dict():
 
 
 def test_input_settings_for_feedback_class_is_non_genlock():
-    for name in _FEEDBACK_INPUTS + ["STRIH-LX (2ME PVW)"]:
+    for name in _FEEDBACK_INPUTS + ["STRIH-SNV (2ME PVW)"]:
         s = _mod.input_settings_for(name, 3)
         assert s["ndi_sync"] == 1                      # SOURCE_TIMING, mirroring the Windows light.json
         assert s["latency"] == 1                       # feedback latency is FIXED at 1
@@ -365,7 +365,7 @@ def test_bootstrap_emits_no_settings_update_for_a_matching_input():
     plan = _mod.seed_inputs(["CAM3 (usb)"], 3)  # a camera input
     inp = plan[0]["input"]
     # already correctly seeded to the camera class -> effective matches -> NO settings update emitted.
-    # The explicit settings are what a LIVE genlock receiver reads back (strih-lx 19.9.2026): the
+    # The explicit settings are what a LIVE genlock receiver reads back (strih-snv 19.9.2026): the
     # certified coercion normalises the stock `latency` mode to 0, and the 3 ms floor sits on
     # `genlock_latency_ms_src` (the build default, so it may even be ABSENT from the explicit set).
     existing = {inp: {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "latency": 0,
@@ -378,7 +378,7 @@ def test_bootstrap_emits_no_settings_update_for_a_matching_input():
 def test_bootstrap_is_a_pure_read_for_a_live_certified_camera_with_explicit_pin():
     plan = _mod.seed_inputs(["CAM1 (usb)"], 3)
     inp = plan[0]["input"]
-    # the exact live read-back of a healthy strih-lx camera input after a prior seed: latency mode
+    # the exact live read-back of a healthy strih-snv camera input after a prior seed: latency mode
     # coerced to 0, the ms pin explicit at the floor -> a pure read, no re-write, no name re-enforce
     existing = {inp: {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "latency": 0,
                       "genlock_latency_ms_src": 3, "ndi_source_name": "CAM1 (usb)"}}

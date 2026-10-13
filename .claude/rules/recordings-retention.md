@@ -12,9 +12,9 @@ paths:
 
 # E2E recordings retention — dry-run-first sweep (#1122)
 
-**strih-lx (Linux) has its own executor (issue 1317 part 5).** The Windows strih PC was RETIRED at
-the M4 cut-over; `10.77.9.202` is the Linux strih-lx, which records to **`/srv/_REC`** (its active OBS
-profile `strih-lx`, `[Output] Mode=Advanced` → `[AdvOut] RecFilePath`; read live 24.9.2026: 18
+**strih-snv (Linux) has its own executor (issue 1317 part 5).** The Windows strih PC was RETIRED at
+the M4 cut-over; `10.77.9.202` is the Linux strih-snv, which records to **`/srv/_REC`** (its active OBS
+profile `strih-snv`, `[Output] Mode=Advanced` → `[AdvOut] RecFilePath`; read live 24.9.2026: 18
 `.mkv`, 12.9 GB, all OBS-timestamp names, all below the 1 GiB floor, dir `newlevel:newlevel 775`,
 433 GB free). `strih-recordings-retention.sh` now carries THREE modes and still has **no default box**:
 
@@ -23,7 +23,7 @@ profile `strih-lx`, `[Output] Mode=Advanced` → `[AdvOut] RecFilePath`; read li
   `bash -s -- --local-sweep …` (no sudo; creds `LINUX_BOX_USER`/`LINUX_BOX_PW`, default newlevel);
   `windows-genlock` → the unchanged `.ps1` driver. `--box strih` → the RETIRED pointer.
 - `--host <win-ip>` — the Windows `.ps1` driver by address; a linux-genlock address is refused by
-  `obs_fleet_refuse_linux_target` with a `--box strih-lx` pointer.
+  `obs_fleet_refuse_linux_target` with a `--box strih-snv` pointer.
 - `--local-sweep` — the bash decision `rr_plan()` on the current machine. Record dir = `--record-dir`,
   else resolved from the active OBS profile (`user.ini` `[Basic] ProfileDir` → `basic.ini`:
   Advanced → `[AdvOut] RecFilePath` (`FFFilePath` when `RecType=FFmpeg`), Simple →
@@ -47,12 +47,12 @@ forwarded, the `.ps1`-only `--budget-gb` / `--remote-path` are refused for a Lin
 REFUSES a flag that does not apply to it (never silently ignores it): `--local-sweep` refuses `--user` /
 `--budget-gb` / `--remote-path`, the Windows driver refuses `--obs-config-dir` / `--plan-tsv`; a zero
 `RETENTION_SSH_TIMEOUT` is refused (GNU `timeout 0` disables the bound); `--plan-tsv --execute` is
-refused on dev1 before any ssh. The linux leg's dev1 banner goes to stderr, so `--box strih-lx
+refused on dev1 before any ssh. The linux leg's dev1 banner goes to stderr, so `--box strih-snv
 --plan-tsv` stdout is pure TSV (`OTHER`/`PROTECT`/`KEEP`/`DELETE` rows) for a supervisor script.
 
 Profile resolution reads `[Basic] ProfileDir` (user.ini, then global.ini) and only then the display
-name `Profile`. `scripts/strih-obs-start.sh` launches OBS with `--profile "${STRIH_OBS_PROFILE:-strih-lx}"`;
-observed live 24.9.2026 on the running strih-lx: `user.ini` `ProfileDir=strih-lx`, matching the launch
+name `Profile`. `scripts/strih-obs-start.sh` launches OBS with `--profile "${STRIH_OBS_PROFILE:-strih-snv}"`;
+observed live 24.9.2026 on the running strih-snv: `user.ini` `ProfileDir=strih-snv`, matching the launch
 profile. If an operator ever launches a different profile without OBS recording it in `user.ini`, pass
 `--record-dir` explicitly. The executor reads whole-second mtimes, so at the
 exact horizon a file can read up to 1 s older than the Rust `f64` view and same-second files order by
@@ -146,7 +146,7 @@ under `LC_ALL=C` (the table's fullwidth/Arabic-Indic digit names pin that no Uni
 a `.ps1`-style `\d` — ever leaks in; under glibc `[[:digit:]]` would also reject them, so they do not
 distinguish the explicit list from `[[:digit:]]`);
 the within-days rule `age < days*86400` on integer ages is `age < ceil(days*86400)` (computed in awk
-with `%.0f` — strih-lx's awk is **mawk**, whose `%d` clamps at 2^31-1); the newest-first sort is
+with `%.0f` — strih-snv's awk is **mawk**, whose `%d` clamps at 2^31-1); the newest-first sort is
 `LC_ALL=C sort -k1,1nr -k3` (bytewise name tie-break = Rust `String` order); the production floor
 pulls big files OUT of the newest-N pool before ranking; enumeration uses `dotglob` so a dotfile is
 listed (and protected). Mutation-checked: flipping `-ge`→`-gt`, `-lt`→`-le`, the tie-break direction,
@@ -162,16 +162,16 @@ the dedup-suffix space, or the newest-N bound each fails the parity test.
 - Defaults `KeepRuns=20 / KeepDays=3` on live strih → 691.3 GB down to **38.4 GB** (under budget),
   652.9 GB freed across 323 runs, all 54 non-recording/foreign files protected.
 
-## Runbook — strih-lx (Linux): DRY-RUN first, then the SUPERVISOR's reviewed --execute
+## Runbook — strih-snv (Linux): DRY-RUN first, then the SUPERVISOR's reviewed --execute
 
 ```bash
 # 1) DRY-RUN (read-only: ssh + bash -s, resolves /srv/_REC from the OBS profile, deletes nothing)
-scripts/strih-recordings-retention.sh --box strih-lx --keep-runs 20 --keep-days 3
+scripts/strih-recordings-retention.sh --box strih-snv --keep-runs 20 --keep-days 3
 
 # 2) Review the plan: DELETE must hold only OBS-timestamp runs below 1 GiB.
 
-# 3) SUPERVISOR ONLY -- the first real deletion on strih-lx:
-scripts/strih-recordings-retention.sh --box strih-lx --keep-runs 20 --keep-days 3 --execute
+# 3) SUPERVISOR ONLY -- the first real deletion on strih-snv:
+scripts/strih-recordings-retention.sh --box strih-snv --keep-runs 20 --keep-days 3 --execute
 ```
 
 Live 24.9.2026 at the defaults (20 runs / 3 days): 18 files, 12.90 GB, DELETE set EMPTY (18 < 20).
@@ -224,7 +224,7 @@ PATH for the `--box` legs).
   BREAKS parsing (the first live run failed with `Unexpected token ')'` where an `—` sat inside a
   `Write-Output` string). Keep every scp'd `.ps1` ASCII-only (`grep -nP '[^\x00-\x7F]'` before
   deploying). The sibling `.sh` is bash: an em-dash is harmless there even now that the linux leg
-  pipes it to strih-lx over `bash -s` (a UTF-8 box).
+  pipes it to strih-snv over `bash -s` (a UTF-8 box).
 - **Use `[0-9]`, never `\d`, in the `.ps1` allowlist regex.** .NET regex `\d` (without
   `RegexOptions.ECMAScript`, which `-cmatch`/`-cnotmatch` do not set) also matches Unicode decimal
   digits (fullwidth `２`, Arabic-Indic, Devanagari), so `\d` makes the on-box executor MORE

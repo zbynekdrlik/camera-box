@@ -57,7 +57,7 @@ NETCFG_DROP_THRESHOLD="${NETCFG_DROP_THRESHOLD:-1}"
 # live two-read rate probe on EVERY --check regardless of cumulative-counter growth -- so a starvation
 # episode on a suspect uplink always yields a fresh drop DELTA (the growth-gate below would otherwise
 # never sample a HEALTHY port whose dq1 is flat at 0). Default = strih's egress port. Since the M4
-# cut-over (20.9.2026) strih is the Linux notebook strih-lx on a USB 2.5 GbE adapter plugged into
+# cut-over (20.9.2026) strih is the Linux notebook strih-snv on a USB 2.5 GbE adapter plugged into
 # foh1_video_switch ether2 (issue 1242, live-verified 2026-09-23 via the bridge host table); the old
 # Windows strih PC's 10 G DAC port foh2_video sfp-sfpplus2 (issue 1110) has no link any more. A
 # designated port with no link reports `designated-down` (stale designation) -- re-point this default

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """issue 1404 -- the stream program-audio GUARD: may the stream program go to YouTube right now?
 
-Reads `http://10.77.9.202:8891/program-audio.json` (strih-lx since issue 1404 ROZHODNUTE 6039368611;
+Reads `http://10.77.9.202:8891/program-audio.json` (strih-snv since issue 1404 ROZHODNUTE 6039368611;
 the dev1 :8890 route was retired on 8.10.2026), written and served by the sampler itself
 (scripts/program_audio_sampler.py + scripts/program_audio_http.py, `age_s` recomputed per request),
 and answers with an exit code.

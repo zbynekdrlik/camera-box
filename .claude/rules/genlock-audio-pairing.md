@@ -330,7 +330,7 @@ for ~26 s and has no bench scenario yet (a follow-up candidate). The bench's rat
 drift by construction, so it ASSUMES drift is absorbed between placements (the real servo is
 proven by `src/asrc_bench.rs`). What it proves is that each placement lands on the live offset.
 
-**Live acceptance (supervisor).** Full-bundle deploy on resolume, strih-lx and stream. On resolume
+**Live acceptance (supervisor).** Full-bundle deploy on resolume, strih-snv and stream. On resolume
 the `sp-*_video` audit shows `audio_hold=timecode`, `audio_delay_ms` = the latched
 `shallow_depth × 33` (constant between restarts), `audio_pairing_offset_ms` within ±16 with
 `audio_health=0`, and `audio_slews=` / `audio_steps=` flat at 0 in steady state (`audio_withheld=`

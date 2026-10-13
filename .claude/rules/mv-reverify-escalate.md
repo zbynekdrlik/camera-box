@@ -41,10 +41,10 @@ heavy OBS restart ONLY for the receiver case — never a dead painter.
   painter-up proof and the `received=` delta are complementary, not redundant: the proof avoids a
   false OBS restart during a transient painter restart (HDMI drops → no recv → looks like a wedge).
 
-## strih-lx (the production strih since M4): `systemctl --user restart strih-obs.service` (issue 1317 part 4)
+## strih-snv (the production strih since M4): `systemctl --user restart strih-obs.service` (issue 1317 part 4)
 
 `mv_reverify_obs_restart_run` routes by `strih_platform "$ip"` (the fleet-backed resolver). On the
-Linux strih-lx it runs `mv_reverify_obs_restart_linux_cmd` over PLAIN ssh (never win_ssh_run /
+Linux strih-snv it runs `mv_reverify_obs_restart_linux_cmd` over PLAIN ssh (never win_ssh_run /
 PowerShell): prove the unit is installed (`systemctl --user list-unit-files strih-obs.service`) —
 absent → `MV_REVERIFY_NO_UNIT` + rc 2, OBS untouched (the Linux analogue of the no-AHK guard below) —
 then `reset-failed` (clears a start-limit latch) and a **BLOCKING** `restart` (the unit's launcher
@@ -57,7 +57,7 @@ finder heal-wait hit it (a burn-leak on the fresh OBS). The ssh bound is 45 s. A
 (`MV_REVERIFY_RESTART_FAILED`) OR **no positive `MV_REVERIFY_OBS_RESTART:` marker at all** (an
 ssh/auth/timeout failure) → rc 3 → the orchestrator fails loud and never counts it against the
 restart budget as performed. The orchestrator's messages name
-`strih-obs.service` on Linux and AutoHotkey64 on Windows. There is NO AHK on strih-lx — never port the
+`strih-obs.service` on Linux and AutoHotkey64 on Windows. There is NO AHK on strih-snv — never port the
 AHK guard/kill there. Tier-0: `tests/python/test_strih_windows_remnants_1317.py` runs the router with
 a fake `sshpass` on PATH (argv capture) for both platforms. The live restart itself stays
 UNVERIFIED at Tier-0 (never restart the rig's OBS from a lane).
@@ -230,7 +230,7 @@ on the box (no ssh, no cmd.exe — argv goes straight to powershell.exe); Task S
 `<Command>powershell</Command>` (a local scheduled task); `-File`-based invocations; and the doc
 comments. `mv_reverify_probe_raw`'s OWN inline encode was retired by issue 1360: it now reads through
 the shared platform-resolved `strih_log_tail` (`scripts/lib/strih-log-read.sh`, same `-EncodedCommand`
-payload byte-for-byte on a Windows strih, plain ssh `tail` on strih-lx — `.claude/rules/strih-log-read.md`).
+payload byte-for-byte on a Windows strih, plain ssh `tail` on strih-snv — `.claude/rules/strih-log-read.md`).
 
 **Tier-0 test the migrated sites the same fake-sshpass way** (`tests/harness_ps_encoded_fleet_1259.rs`):
 source the watchdog (its `[[ "${BASH_SOURCE[0]}" == "$0" ]] && main` guard means sourcing only defines

@@ -110,14 +110,14 @@ Plus the 1 µs pin tolerance (a whole-frame pin like 1000 ms must not count one 
 
 ## Live acceptance (supervisor)
 
-Full-bundle deploy on stream (and strih-lx, same vendored tree), then ≥ 6 strih OBS restarts with
+Full-bundle deploy on stream (and strih-snv, same vendored tree), then ≥ 6 strih OBS restarts with
 the pin unchanged. After each settle the stream `NDI 2ME PGM` audit `ts_head_skew_ms` must return
 to ONE value (≈ 31 frames at 987); `n1_grows=` / `converge_sheds=` may step by a few right after a
 restart and must stay flat in steady windows. Then the release E2E A/V gate.
 
 ## The SHALLOW per-lock depth (ROZHODNUTÉ 5827497952)
 
-**Why.** A shallow N==1 source (resolume `sp-*_video`, strih-lx `CG-obs`, pin 3 ms, base 1) is
+**Why.** A shallow N==1 source (resolume `sp-*_video`, strih-snv `CG-obs`, pin 3 ms, base 1) is
 never deep, so the pin rule above never acted and its depth FLOATED with arrival: live
 `sp-slow_video` stepped 66 / 100 / 133 ms between 5 s audits, and the audio (which follows the
 video delay, `genlock-audio-pairing.md`) was re-placed 72 times in 42 min — the songplayer gate's
@@ -185,7 +185,7 @@ What carries it (do not undo):
   latch stores NO depth (`shallow_depth=0`), the rule never holds or sheds that input, the #859
   drain stays on, no auto re-measure churns it until a real relock, and the report is
   `genlock-shallow-lock … wanted_frames=<D> capped=1` at LOG_WARNING + `shallow_capped=1`. A box
-  without the marker (every Windows box, strih-lx) reads false. The marker fails OPEN when absent,
+  without the marker (every Windows box, strih-snv) reads false. The marker fails OPEN when absent,
   so it is written in TWO places — `setup-imag.sh` step 13 and the fleet deploy's imag leg (step 5a,
   as the desktop user from `getent`, before the supervised restart that loads the new libobs) — and
   gated twice by `verify-imag.sh`: check (bc) FAILs an absent or unreadable marker before check
@@ -294,7 +294,7 @@ pre-rule floating conveyor, the anti-tautology) and `min_latency_box`. The deep 
 are unchanged. The probe `ReleaseCadence` mirror does NOT carry the shallow rule (a test-only
 reference with no scheduled-tick model); the authority + parity + grid-bench port are the proof.
 
-**Live acceptance (supervisor).** Full-bundle deploy on resolume + strih-lx + stream. On resolume
+**Live acceptance (supervisor).** Full-bundle deploy on resolume + strih-snv + stream. On resolume
 each `sp-*_video` logs one `genlock-shallow-lock` per OBS start (depth 2–3), then its audit
 `ts_head_skew_ms` stays on `depth × 33` apart from ≤ 1 s excursions, `shallow_latches=` stays flat
 between restarts, `audio_slews=` / `audio_steps=` stay 0. The songplayer gate (±40 ms, 0 dropouts)
@@ -327,13 +327,13 @@ What carries it (do not undo):
   already D old there.
 - **Relock gaps (≥ 1 s) keep the old path** (the window re-measures); deep, unlatched, capped and
   N>=2 sources are untouched.
-- **The duplicate guard.** A send-time-stamping sender (strih-lx, the #1355 residual) labels a slow
+- **The duplicate guard.** A send-time-stamping sender (strih-snv, the #1355 residual) labels a slow
   frame one slot late and the NEXT frame repeats the stamp: the head is on time. `next ≤ head`
-  (the second queued frame) → present. Without it the grid bench's shallow strih-lx case turned 55
+  (the second queued frame) → present. Without it the grid bench's shallow strih-snv case turned 55
   labels into 55 holds + 55 sheds.
 
 **Known limit (review round 1).** The guard only sees a duplicate that is ALREADY queued. When it
-has not arrived, the hold fires on the label (a repeat, then a shallow shed): 0 at the live strih-lx
+has not arrived, the hold fires on the label (a repeat, then a shallow shed): 0 at the live strih-snv
 jitter, 22 + 22 per 2 h at σ 4 ms (`a_late_label_without_its_queued_duplicate_costs_a_bounded_repeat_1367`
 pins ≤ 30 + 30, paired). The stamps alone cannot separate it from a real skip ("hold only when
 two frames short" brings the song-change bug straight back); a real fix needs per-frame arrival
@@ -353,7 +353,7 @@ wrapper return count 3, `tests/genlock_shallow_depth_wiring_1367.rs` + both pwsh
 **Live acceptance (supervisor).** After a SongPlayer song change / scene switch on resolume:
 `video_delay_ms` stays on `shallow_depth × 33` (no 67 against an audio 100), `audio_pairing_offset_ms`
 within ±16. `n1_grows=` rises once per real skipped stamp (`stamp_gap=`) with NO `converge_sheds=`
-partner; the two climbing TOGETHER on a shallow feed (strih-lx `CG-obs`, `sp-*`) is the late-label
+partner; the two climbing TOGETHER on a shallow feed (strih-snv `CG-obs`, `sp-*`) is the late-label
 residual above.
 
 ## The latch budgets the receive-time arrival lag (ROZHODNUTÉ 5842640404, re-baseline 5842656021)

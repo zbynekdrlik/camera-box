@@ -7,7 +7,7 @@ the OBS log — completely invisible to the operator on the console — yet #977
 a push. The real incident sat like this for **~3.5 hours** before the user found it manually. This
 watchdog polls each Windows genlock OBS box over `win_ssh_run` (issue 1317: the roster is the
 `scripts/lib/obs-fleet.sh` `obs-session` facet = stream 10.77.9.204 + resolume `resolume.lan`
-while home; a Linux box such as strih-lx is class-gated out and never gets the PowerShell probe)
+while home; a Linux box such as strih-snv is class-gated out and never gets the PowerShell probe)
 (`scripts/lib/win-ssh-exec.sh`, #703) on a **dev1 systemd --user timer**, reusing the SAME
 session-visibility probe #977/#978 use (`scripts/lib/obs-session-visibility.sh`) and the SAME
 `#391 obs_watchdog_confirm`/`obs_watchdog_alert_throttle` decision logic

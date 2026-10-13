@@ -48,7 +48,7 @@
 #   scripts/obs-self-heal-install.sh --box stream
 #   scripts/obs-self-heal-install.sh --box stream --obs-dir 'C:\Program Files\obs-studio' \
 #       --confirm-threshold 2 --min-interval-s 600 --stale-lock-s 900 --interval-min 2
-# The Windows STRIH PC is RETIRED (M4 cut-over 20.9.2026, issue 1317): the strih is strih-lx, a Linux
+# The Windows STRIH PC is RETIRED (M4 cut-over 20.9.2026, issue 1317): the strih is strih-snv, a Linux
 # box whose OBS is supervised by its strih-obs.service user unit (Restart=on-failure) -- this
 # Windows Task-Scheduler installer refuses it by name.
 #
@@ -545,13 +545,13 @@ main() {
 
   # Topology v2 (#459, EPIC #466, was 60 pre-#459): strih is now cut-to-stream only at 30fps --
   # the 60fps LED-wall IMAG role moved to the new imag-nb box (#458/#463).
-  # issue 1317 part 3: the Windows strih PC is RETIRED -- strih-lx (Linux) is supervised by its
+  # issue 1317 part 3: the Windows strih PC is RETIRED -- strih-snv (Linux) is supervised by its
   # strih-obs.service user unit (Restart=on-failure), never this Windows Task-Scheduler installer. The
   # box facts come from the ONE per-box table (scripts/lib/genlock-fleet-boxes.sh).
   local mcp box_ip target_fps
   case "$box" in
     stream) target_fps=30 ;;
-    strih) echo "ERROR: --box strih is the RETIRED Windows strih PC (issue 1317) -- strih-lx is a Linux box supervised by its strih-obs.service user unit, never this Windows Task-Scheduler installer" >&2; usage >&2; exit 2 ;;
+    strih) echo "ERROR: --box strih is the RETIRED Windows strih PC (issue 1317) -- strih-snv is a Linux box supervised by its strih-obs.service user unit, never this Windows Task-Scheduler installer" >&2; usage >&2; exit 2 ;;
     *) echo "ERROR: --box must be 'stream' (got '${box}')" >&2; usage >&2; exit 2 ;;
   esac
   mcp="$(fleet_box_mcp "$box")"; box_ip="$(fleet_box_ip "$box")"

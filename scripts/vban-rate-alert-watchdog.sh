@@ -10,7 +10,7 @@ set -uo pipefail
 #
 # scripts/vban-rate-alert-watchdog.sh -- issue 1372 part C: is the AUDIO travelling between PCs in
 # the Dante tick? A dev1-side watchdog that measures every VBAN stream ARRIVING at the disciplined
-# receiver (strih-lx) and pages when one runs off its nominal rate or loses packets.
+# receiver (strih-snv) and pages when one runs off its nominal rate or loses packets.
 #
 # WHY: owner (verbatim, 25.9.2026): "nie len obraz je genlocknuty ale z eaj zvuk ktory cestuje medzi
 # pocitacmi ci uz ide cez dante alebo vban ide s maximalnym genlockom". Nothing measured it: the FOH
@@ -19,13 +19,13 @@ set -uo pipefail
 # 5832526338). A VBAN sender that runs off the Dante tick slips one packet per few minutes in one
 # direction; a sender that drops packets clicks -- both invisible until someone listens.
 #
-# HOW (one pass): a ~60 s `tcpdump` on strih-lx (Linux: adjtimex slews CLOCK_REALTIME, so its capture
+# HOW (one pass): a ~60 s `tcpdump` on strih-snv (Linux: adjtimex slews CLOCK_REALTIME, so its capture
 # timestamps are on the dantesync-disciplined clock) filtered to the VBAN magic (`udp[8:4] =
 # 0x5642414e`, snaplen >= 96 so the 28-byte header survives), sudo fed on stdin exactly like the
-# other strih-lx tools; the pcap streams back over ssh to dev1 and the PURE scripts/vban_rate.py
-# grades every stream arriving at strih-lx by FRAME COUNTER (rate = least-squares slope of nuFrame x
+# other strih-snv tools; the pcap streams back over ssh to dev1 and the PURE scripts/vban_rate.py
+# grades every stream arriving at strih-snv by FRAME COUNTER (rate = least-squares slope of nuFrame x
 # samples-per-frame vs capture time; loss = counter holes) against nominal +-VBAN_RATE_PPM_BOUND and
-# the VBAN_RATE_LOSS_CEILING. The hub's own OUTGOING streams (strih-lx -> camN) are left out: they
+# the VBAN_RATE_LOSS_CEILING. The hub's own OUTGOING streams (strih-snv -> camN) are left out: they
 # say nothing about a peer's clock.
 #
 # REPORT-ONLY, SHIPS DISABLED: it gates nothing (no E2E step reads it). Its FAULT is on-air audio
@@ -36,7 +36,7 @@ set -uo pipefail
 # on the dantesync rate) is live -- a Dante-clocked sender still differs from the system-time rate by
 # dantesync's f_phase (the Dante-GM-vs-UTC term), so the bound must leave room for that.
 #
-# SKIP (no page): the capture failed while strih-lx is DOWN (the #1001 network-reach watchdog's
+# SKIP (no page): the capture failed while strih-snv is DOWN (the #1001 network-reach watchdog's
 # territory), no VBAN stream arrived, or a stream is too short to grade. A capture that keeps failing
 # while the box IS up (tcpdump missing, a wrong sudo password) would leave this watchdog blind, so
 # after VBAN_RATE_CAPTURE_FAIL_PASSES consecutive failures on a live box (ssh :22 answers) it pages
@@ -75,7 +75,7 @@ case "${1:-}" in
 esac
 
 # -- config (all env-overridable) ---------------------------------------------------------------
-BOX="${VBAN_RATE_BOX:-strih-lx}"                          # the disciplined receiver (obs-fleet name)
+BOX="${VBAN_RATE_BOX:-strih-snv}"                          # the disciplined receiver (obs-fleet name)
 HOST="${VBAN_RATE_HOST:-$(obs_fleet_host "$BOX" 2>/dev/null || true)}"
 SSH_USER="${VBAN_RATE_SSH_USER:-${STRIH_USER:-newlevel}}"
 SSH_PASS="${VBAN_RATE_SSH_PASS:-${STRIH_PW:-newlevel}}"
@@ -218,7 +218,7 @@ handle_stream() {
   fi
   write_state_field "alerted_${sk}" 1
   fire_alert "vban-rate-${sk}" \
-    "⚠️ VBAN ($REPO_SLUG): stream **$name** ($src -> $BOX) je mimo normy -- rýchlosť ${rate} ppm oproti nominálu (hranica ±${PPM_BOUND} ppm), strata ${lost} rámcov (${ratio}; strop ${LOSS_CEILING}). Dôvod: ${why}. Meranie počítadlom rámcov na strih-lx (disciplinované hodiny), REPORT-ONLY. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá."
+    "⚠️ VBAN ($REPO_SLUG): stream **$name** ($src -> $BOX) je mimo normy -- rýchlosť ${rate} ppm oproti nominálu (hranica ±${PPM_BOUND} ppm), strata ${lost} rámcov (${ratio}; strop ${LOSS_CEILING}). Dôvod: ${why}. Meranie počítadlom rámcov na strih-snv (disciplinované hodiny), REPORT-ONLY. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá."
 }
 
 require_tools() {

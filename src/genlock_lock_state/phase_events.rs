@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn first_sight_rebaselines_1302() {
-        // the live strih-lx offender of 7.10.2026: 567 lifetime relocks on CG-obs
+        // the live strih-snv offender of 7.10.2026: 567 lifetime relocks on CG-obs
         let now = PhaseEventSample::of(&ev(true, 567, 0, 0));
         assert_eq!(input_new_phase_events(None, now), 0);
     }

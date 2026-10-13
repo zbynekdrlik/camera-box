@@ -20,7 +20,7 @@ from the SAME #1222 bounded head+tail read — no second log scan):
   `RELOCK_STORM` on `bursts >= 1` **and** a fresh age.
 
 It polls the **`render-freeze` fleet facet** (`obs_fleet_boxes render-freeze` = **strih stream
-resolume strih-lx**) from a dev1 systemd `--user` timer with `curl` (the ops-SKILL-mandated method —
+resolume strih-snv**) from a dev1 systemd `--user` timer with `curl` (the ops-SKILL-mandated method —
 an MCP-side `Invoke-WebRequest` hangs even when the server logs a 200). Sibling of
 `audio-lag-alert-watchdog` (#1226) / `bundle-state-alert-watchdog` (#732).
 
@@ -61,7 +61,7 @@ The **only** page condition is a SUCCESSFULLY-FETCHED positive reading, so:
 - A box whose `:8899` is not fetchable this pass (box down, or `:8899` down) classifies **SKIP** —
   deferred to `bundle-state-alert-watchdog` (#732) / `network-reach-alert-watchdog` (#1001). This is
   why **resolume** (traveling) is safe in the roster with **no** `is_home` gate: a dark resolume just
-  SKIPs. (Confirmed live: **strih-lx** not yet provisioned → SKIP.)
+  SKIPs. (Confirmed live: **strih-snv** not yet provisioned → SKIP.)
 - A box that is up but has **no facet** yet (a stock OBS / a steady state with no relock line)
   classifies **UNKNOWN** — no reading to judge, no page.
 - Because a page requires a fetched positive reading, a **dev1-side path outage** makes every fetch

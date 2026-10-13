@@ -37,10 +37,10 @@ def _source_var(var, **env):
 
 
 def test_roster_defaults_come_from_the_dantesync_fleet():
-    # issue 1413: the CAM arm is the HOME venue's cameras (strih-lx.env STRIH_CAMERAS); the Poprad
+    # issue 1413: the CAM arm is the HOME venue's cameras (strih-snv.env STRIH_CAMERAS); the Poprad
     # cameras are `reach` rows, watched once through the REACH arm (test_dantesync_fleet_pp_cams_1413.py).
     assert _source_var("DANTE_CLOCK_CAM_NODES") == "cam2 cam3 cam5"
-    assert _source_var("DANTE_CLOCK_OBS_NODES") == "strih-lx stream resolume"
+    assert _source_var("DANTE_CLOCK_OBS_NODES") == "strih-snv stream-snv resolume-snv"
     assert _source_var("DANTE_CLOCK_FIXED_NODES") == "mbc fohabl"
     assert _source_var("DANTE_CLOCK_LOCAL_NODES") == "dev1"
 
@@ -103,8 +103,8 @@ def test_an_audio_node_on_the_wrong_grandmaster_pages_with_the_audio_remedy(tmp_
 
 def test_a_video_node_keeps_the_video_grandmaster(tmp_path):
     err = _run_dry(tmp_path, {"10.77.9.204": _status(AUDIO_GM)}, DANTE_CLOCK_FIXED_NODES="",
-                   DANTE_CLOCK_OBS_NODES="stream")
-    assert "stream (10.77.9.204): reachable=1 verdict=NO_CLOCK reason=wrong_gm" in err, err
+                   DANTE_CLOCK_OBS_NODES="stream-snv")
+    assert "stream-snv (10.77.9.204): reachable=1 verdict=NO_CLOCK reason=wrong_gm" in err, err
     assert "DNS video-clock.lan" in err
 
 

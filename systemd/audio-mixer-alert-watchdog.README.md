@@ -27,7 +27,7 @@ It reads two facet groups `bundle_state_gather` exposes on each box's `:8899/bun
   stated in `.claude/rules/audio-mixer-watchdog.md`.
   - **VBAN_LOSS** — any loss counter moved.
 
-Roster: the obs-fleet **`audio-mixer`** facet (`strih-lx stream resolume`). resolume travels, so it
+Roster: the obs-fleet **`audio-mixer`** facet (`strih-snv stream resolume`). resolume travels, so it
 is polled only while home (`obs_fleet_poll_now`); a box without VBAN outputs reads the VBAN arm
 UNKNOWN.
 
@@ -84,7 +84,7 @@ curl -s http://10.77.9.202:8899/bundle-state.json | python3 -m json.tool | grep 
 
 # 1. Dry-run against the LIVE rig (read-only; no page):
 scripts/audio-mixer-alert-watchdog.sh --dry-run
-#    Expect mixer=HEALTHY on every box, vban=HEALTHY on resolume (UNKNOWN on strih-lx / stream),
+#    Expect mixer=HEALTHY on every box, vban=HEALTHY on resolume (UNKNOWN on strih-snv / stream),
 #    and SKIP / "away" for a dark box.
 
 # 2. Install the units and enable the timer:

@@ -20,9 +20,9 @@ def _bash(script, env=None):
 def test_obs_fleet_audio_mixer_facet_is_every_obs_box_that_mixes_audio():
     r = _bash(f'. "{_SCRIPTS}/lib/obs-fleet.sh"; obs_fleet_facet_members audio-mixer')
     assert r.returncode == 0, r.stderr
-    assert r.stdout == "strih-lx stream resolume"
+    assert r.stdout == "strih-snv stream-snv resolume-snv"
     r = _bash(f'. "{_SCRIPTS}/lib/obs-fleet.sh"; obs_fleet_boxes audio-mixer')
-    assert r.stdout == "strih-lx|10.77.9.202 stream|10.77.9.204 resolume|resolume.lan"
+    assert r.stdout == "strih-snv|10.77.9.202 stream-snv|10.77.9.204 resolume-snv|resolume.lan"
 
 
 def test_obs_fleet_unknown_facet_message_names_audio_mixer():
@@ -44,12 +44,12 @@ def test_watchdog_skips_an_away_resolume_without_fetching(tmp_path):
     marker = tmp_path / "fetched"
     fetch.write_text(f"#!/usr/bin/env bash\ntouch '{marker}'\necho '{{}}'\n", encoding="utf-8")
     fetch.chmod(0o755)
-    # The OBS_FLEET_HOME force-list seam names only strih-lx, so resolume reads AWAY offline.
-    env = {"AUDIO_MIXER_FETCH_CMD": str(fetch), "AUDIO_MIXER_BOXES": "resolume|resolume.lan",
-           "AUDIO_MIXER_ALERT_STATE_FILE": str(tmp_path / "st"), "OBS_FLEET_HOME": "strih-lx"}
+    # The OBS_FLEET_HOME force-list seam names only strih-snv, so resolume reads AWAY offline.
+    env = {"AUDIO_MIXER_FETCH_CMD": str(fetch), "AUDIO_MIXER_BOXES": "resolume-snv|resolume.lan",
+           "AUDIO_MIXER_ALERT_STATE_FILE": str(tmp_path / "st"), "OBS_FLEET_HOME": "strih-snv"}
     r = _bash(f'bash "{_WATCHDOG}" --dry-run', env)
     assert r.returncode == 0, r.stderr
-    assert "resolume" in r.stderr and "away" in r.stderr
+    assert "resolume-snv" in r.stderr and "away" in r.stderr
     assert not marker.exists()
 
 
@@ -58,8 +58,8 @@ def test_watchdog_polls_a_home_resolume(tmp_path):
     marker = tmp_path / "fetched"
     fetch.write_text(f"#!/usr/bin/env bash\ntouch '{marker}'\necho '{{}}'\n", encoding="utf-8")
     fetch.chmod(0o755)
-    env = {"AUDIO_MIXER_FETCH_CMD": str(fetch), "AUDIO_MIXER_BOXES": "resolume|resolume.lan",
-           "AUDIO_MIXER_ALERT_STATE_FILE": str(tmp_path / "st"), "OBS_FLEET_HOME": "resolume"}
+    env = {"AUDIO_MIXER_FETCH_CMD": str(fetch), "AUDIO_MIXER_BOXES": "resolume-snv|resolume.lan",
+           "AUDIO_MIXER_ALERT_STATE_FILE": str(tmp_path / "st"), "OBS_FLEET_HOME": "resolume-snv"}
     r = _bash(f'bash "{_WATCHDOG}" --dry-run', env)
     assert r.returncode == 0, r.stderr
     assert marker.exists()

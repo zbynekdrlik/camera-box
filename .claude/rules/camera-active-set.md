@@ -15,7 +15,7 @@ paths:
 
 **CURRENT (issue 1413, owner 12.10.2026): the SNV rig SHRANK to `cam2 cam3 cam5`** — cam1/cam4/cam6/cam7
 moved to Poprad (`scripts/strih-boxes/strih-pp.env` `STRIH_CAMERAS=1 4 6 7`). The default is the SNV
-venue's `STRIH_CAMERAS` (strih-lx.env `2 3 5`) as cam names, pinned EQUAL by
+venue's `STRIH_CAMERAS` (strih-snv.env `2 3 5`) as cam names, pinned EQUAL by
 `harness_camera_set.rs::camera_active_set_default_is_the_snv_venue_cameras_1413`; the derived source
 box is cam3; `CAMERA_ALIGN_SET` is cam3 + every strih-routable active camera (`camera_align_default`,
 SNV `cam3 cam5`, the unconditional cam4 is gone); the five python mirrors + the

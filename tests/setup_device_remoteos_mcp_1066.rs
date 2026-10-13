@@ -69,7 +69,7 @@ fn setup_device_provisions_remoteos_mcp_step_17b_1066() {
 
 /// Since issue 1361 it installs through the ONE shared lib `scripts/lib/remoteos-mcp.sh` (the
 /// project's own source + constraints.txt into the `/opt/remoteos-mcp-venv` venv, the shape the
-/// production strih-lx box runs) — never the upstream system-pip `install-linux.sh` and never a bare
+/// production strih-snv box runs) — never the upstream system-pip `install-linux.sh` and never a bare
 /// pip of the agent in this script (the #555 discipline).
 #[test]
 fn setup_device_uses_canonical_remoteos_installer_not_inline_pip_1066() {

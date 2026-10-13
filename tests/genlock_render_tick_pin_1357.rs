@@ -11,7 +11,7 @@
 //! 2. DECISION TRACE: the startup + per-tick code against recording stubs of
 //!    `pthread_setaffinity_np` / `pthread_getaffinity_np` / `sched_setscheduler`, the sysfs paths
 //!    pointed at fixture files. It proves: no isolated core = no syscall at all + one "not pinned"
-//!    line (the strih-lx case, no `{10,11}` fallback); the pin is held only around the sleep; FIFO is
+//!    line (the strih-snv case, no `{10,11}` fallback); the pin is held only around the sleep; FIFO is
 //!    raised after the affinity narrows and dropped before it widens; a failure disarms the pin.
 //! 3. INHERITANCE on REAL threads: a thread created after the tick woke up has the process mask and
 //!    SCHED_OTHER; a control thread created inside the sleep window has the pin mask, which proves
@@ -216,7 +216,7 @@ fn join(v: &[usize]) -> String {
 // 1. PARITY — the pure decision.
 // ---------------------------------------------------------------------------------------------
 
-/// `(isolated, nohz_full)` vectors: the live strih-lx read, every "one side empty" shape, the
+/// `(isolated, nohz_full)` vectors: the live strih-snv read, every "one side empty" shape, the
 /// historic imag layout, intersections, and the malformed / out-of-range inputs the C parser
 /// tolerates without overflow.
 fn parity_vectors() -> Vec<(String, String)> {
@@ -473,7 +473,7 @@ fn syscalls(lines: &[String]) -> Vec<String> {
 
 #[test]
 fn no_isolated_core_means_no_pin_syscall_and_one_not_pinned_line() {
-    // The strih-lx state (27.9.2026), and each "one side empty" state. The old code pinned {10,11}.
+    // The strih-snv state (27.9.2026), and each "one side empty" state. The old code pinned {10,11}.
     for (iso, nohz) in [
         ("\n", "\n"),
         ("2-11\n", "\n"),
@@ -833,7 +833,7 @@ fn a_thread_created_after_the_tick_wakes_keeps_the_process_mask_and_sched_other(
         parse_cpulist(after),
         cpus,
         "issue 1357: a thread the render tick creates after it woke up must have the PROCESS mask \
-         (and SCHED_OTHER), never the pin — the strih-lx 10-11 leak:\n{out}"
+         (and SCHED_OTHER), never the pin — the strih-snv 10-11 leak:\n{out}"
     );
     assert_eq!(
         parse_cpulist(field(&out, "TICK-AFTER")),

@@ -26,7 +26,7 @@ paths:
   one burst and share one timing error, so each arrival cluster is ONE observation (a sandwich
   estimator). A per-packet stderr was ~2x too small on obs-vban bursts, and a true 0 ppm clock graded
   FAULT on 2/40 seeds. With ±20 ms burst jitter a 60 s capture resolves only ~14 ppm (1 σ), so such a
-  stream honestly grades UNCERTAIN; the live strih-lx streams jitter ~0.4-2.7 ms rms.
+  stream honestly grades UNCERTAIN; the live strih-snv streams jitter ~0.4-2.7 ms rms.
 - **Known limit:** a sender that restarts less than a second after the capture began, onto counters
   within ~50 ms worth of its head, can be merged under heavy jitter (its continuation is only
   ~50 ms late). A real restart from a running sender (a large counter) is always a jump. A sender
@@ -58,13 +58,13 @@ paths:
   EN10MB 1 (+802.1Q), raw IPv4; pcapng (pktmon `etl2pcap`, any `if_tsresol`). IPv4/UDP only;
   fragments skipped. **snaplen ≥ 96** or the 28-byte header is cut: every-header-cut =
   `CAPTURE_TRUNCATED`, a loud config error, never an empty OK.
-- `--dst IP` keeps only streams ARRIVING at the receiver (a strih-lx capture also sees the hub's own
-  strih-lx → camN streams, which say nothing about a peer's clock). `--json` / `--tsv` for tools.
+- `--dst IP` keeps only streams ARRIVING at the receiver (a strih-snv capture also sees the hub's own
+  strih-snv → camN streams, which say nothing about a peer's clock). `--json` / `--tsv` for tools.
 
 ## The watchdog (`scripts/vban-rate-alert-watchdog.sh`, dev1, SHIPS DISABLED)
 
-- One pass = a ~60 s `tcpdump -i any -s 96 -U -w - 'udp and udp[8:4] = 0x5642414e'` on strih-lx
-  over ssh, sudo fed on stdin (`sudo -S -p ''`), pcap streamed back to dev1. strih-lx is the
+- One pass = a ~60 s `tcpdump -i any -s 96 -U -w - 'udp and udp[8:4] = 0x5642414e'` on strih-snv
+  over ssh, sudo fed on stdin (`sudo -S -p ''`), pcap streamed back to dev1. strih-snv is the
   reference receiver because Linux adjtimex slews CLOCK_REALTIME → its capture clock is the
   dantesync-disciplined clock. `timeout` exit 124 = a complete capture.
 - Without the magic BPF a 15 s capture was 192 MB (NDI UDP); with it ~10 MB per 40 s.
@@ -78,7 +78,7 @@ paths:
   streams / SHORT = SKIP. REPORT-ONLY: no E2E step reads it (no clean single-line seam in
   recording-e2e.sh for a 60 s capture — kept as watchdog + CLI).
 - **Never silently blind (review round 1).** The remote sudo/tcpdump stderr is kept. A capture that
-  fails `VBAN_RATE_CAPTURE_FAIL_PASSES` (3) passes in a row while strih-lx answers ssh :22 (tcpdump
+  fails `VBAN_RATE_CAPTURE_FAIL_PASSES` (3) passes in a row while strih-snv answers ssh :22 (tcpdump
   missing, a wrong sudo password) pages once (`vban-rate-capture-<box>`); a failure with the box down
   is a SKIP. A stream not GRADED (OK/FAULT) for longer than `VBAN_RATE_STALE_S` (900 s) restarts its confirm count; the blind-capture page uses a STABLE key (a chronic config fault, one page per incident). The step limits use the arrival of the last ACCEPTED packet, so a late duplicate never shrinks
   them (a duplicate near the end of an outage cannot hide the outage's loss), and the lookahead treats
@@ -88,7 +88,7 @@ paths:
 
 ## Live baseline (25.9.2026, before part A)
 
-`fohabl-strih` (10.77.7.30, 96 kHz, 103 samples/frame) at strih-lx: +10.3 ppm by the plain fit,
+`fohabl-strih` (10.77.7.30, 96 kHz, 103 samples/frame) at strih-snv: +10.3 ppm by the plain fit,
 +7.7 ppm by the trimmed fit (its late tail was the bias), 39 lost / 40 s (1.05e-3) and 49 / 60 s
 (8.8e-4) — the FOH VBAN OUT loss. The hub's own outputs: −0.55 ppm, 0 loss.
 

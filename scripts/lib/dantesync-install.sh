@@ -6,14 +6,14 @@
 # scripts/lib/dantesync-install.sh -- issue 1412 (gap G5): put dantesync on a FRESH Linux OBS box.
 #
 # WHY: setup-strih.sh step 2 wrote the dantesync UNIT but never the binary nor /etc/dantesync/config.json
-# -- strih-lx got both by hand. A fresh box (strih-pp) therefore came up with no clock discipline:
+# -- strih-snv got both by hand. A fresh box (strih-pp) therefore came up with no clock discipline:
 # strih_dantesync_install takes its `absent` branch and never starts the daemon. Built from
 # setup-imag.sh step 3 (the binary download + the role config), with two deliberate differences:
 #   * the binary is the PINNED release (DANTESYNC_VERSION_PIN, read from scripts/dantesync-version-gate.sh,
 #     the ONE pin the fleet is graded against), never `releases/latest`;
 #   * nothing that already exists is touched. An installed binary is kept (a new one arrives only
 #     through dantesync-fleet-upgrade.sh, the canaried path -- .claude/rules/dantesync-fleet-upgrade.md)
-#     and an existing config is the box's own (strih-lx, the fleet DATE master, is never rewritten:
+#     and an existing config is the box's own (strih-snv, the fleet DATE master, is never rewritten:
 #     a config change on the master takes effect at its next restart, which steps the fleet date).
 #
 # The config is the role's canonical shape (scripts/dantesync-canonical-config.json): `server` = the
@@ -25,7 +25,7 @@
 # strih_dantesync_install's restart decision reads), DANTESYNC_INSTALL_CONFIG, DANTESYNC_RELEASE_BASE,
 # DANTESYNC_VERSION_PIN (overrides the gate's pin), DANTESYNC_NTP_UPSTREAM (the master's NTP upstream).
 
-# The internet NTP upstream a `server` (NTP-master) box dates the fleet from: the value strih-lx's own
+# The internet NTP upstream a `server` (NTP-master) box dates the fleet from: the value strih-snv's own
 # config carries (Cloudflare time). DANTESYNC_NTP_UPSTREAM overrides it.
 DANTESYNC_INSTALL_DEFAULT_NTP_UPSTREAM=162.159.200.1
 

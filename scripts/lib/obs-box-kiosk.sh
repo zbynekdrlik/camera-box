@@ -281,7 +281,7 @@ echo "  de-jitter: oomd/tracker/evolution/apport(+coredump hook)/whoopsie masked
 # desktop-bloat services disabled, gdm3 disabled for the next boot, the owner's explicit GNOME purge list.
 obs_box_kiosk() {
     local DESKTOP_USER="${1:?obs_box_kiosk: desktop user required}" BOX="${2:?obs_box_kiosk: BOX required}"
-    # Optional box fact: `keep-bluetooth` leaves bluetooth enabled (strih-lx is operated with a Bluetooth
+    # Optional box fact: `keep-bluetooth` leaves bluetooth enabled (strih-snv is operated with a Bluetooth
     # mouse); every other box gets the plain disable list below.
     local KEEP_BT="${3:-}"
 # imag-nb is a single-purpose OBS cutting appliance — it must boot straight into a bare,
@@ -306,11 +306,11 @@ obs_box_kiosk() {
 #     #791: btop rides along too — the generated openbox menu (step 16, #785) "Systémový monitor"
 #     item runs `x-terminal-emulator -e btop`; the live box has it hand-installed, so a fresh box
 #     without it would carry a menu item pointing at a missing binary.
-#     issue 1357: xserver-xorg + x11-xserver-utils (xrandr/xset) ride along -- Ubuntu 26.04 (strih-lx)
+#     issue 1357: xserver-xorg + x11-xserver-utils (xrandr/xset) ride along -- Ubuntu 26.04 (strih-snv)
 #     no longer installs the Xorg server with the Wayland-only GNOME desktop, and lightdm+openbox need
 #     it; on 24.04 (imag) both are already present, so the install is a no-op there.
 #     issue 1361: python3-websocket rides along -- both OBS launchers run a websocket seeder
-#     (strih-obs-start.sh refuses to start OBS without it, imag_scenes.py imports it); strih-lx had
+#     (strih-obs-start.sh refuses to start OBS without it, imag_scenes.py imports it); strih-snv had
 #     it only as a hand install. Graded by the `websocket` row of obs-box-baseline-verify.sh.
 obs_box_apt_update
 DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm feh wmctrl btop xserver-xorg x11-xserver-utils python3-websocket xinput \
@@ -555,9 +555,9 @@ echo "  #779: /etc/X11/xorg.conf.d/30-touchpad-tap.conf provisioned (tap-to-clic
 
 # --- issue 1357: panel-brightness keys (the kiosk brightness facet) -------------------------------
 # Openbox, the kiosk WM, has no brightness handler, so a notebook's Fn brightness keys did nothing (the
-# owner hit it on strih-lx during the 24.9.2026 production; imag had the same problem). A hand fix went
-# live on strih-lx (24.9.2026 16:58); this facet carries the SAME text to every kiosk box. The helper,
-# the udev rule and the keybind lines render the live strih-lx text byte-for-byte (read 25.9.2026).
+# owner hit it on strih-snv during the 24.9.2026 production; imag had the same problem). A hand fix went
+# live on strih-snv (24.9.2026 16:58); this facet carries the SAME text to every kiosk box. The helper,
+# the udev rule and the keybind lines render the live strih-snv text byte-for-byte (read 25.9.2026).
 # obs_box_kiosk runs obs_box_brightness_keys; the shared grader's `brightness` row grades it.
 
 # obs_box_brightness_helper_text -> /usr/local/bin/obs-box-brightness: steps the first sysfs backlight by
@@ -651,7 +651,7 @@ obs_box_brightness_keys() {
     obs_box_brightness_helper_text | obs_box_write_if_changed /usr/local/bin/obs-box-brightness 0755 root:root "brightness helper"
     if cmp -s /etc/udev/rules.d/90-obs-box-backlight.rules <(obs_box_backlight_udev_rule); then rule_new=0; fi
     obs_box_backlight_udev_rule | obs_box_write_if_changed /etc/udev/rules.d/90-obs-box-backlight.rules 0644 root:root "backlight udev rule"
-    # Reload + re-trigger only when the rule text changed: a re-run (every strih-lx genlock deploy runs
+    # Reload + re-trigger only when the rule text changed: a re-run (every strih-snv genlock deploy runs
     # setup-strih) leaves udev alone, and the rule applies at every boot anyway.
     if [ "$rule_new" = 1 ]; then
         if udevadm control --reload-rules && udevadm trigger --subsystem-match=backlight --action=add; then

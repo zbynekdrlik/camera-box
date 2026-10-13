@@ -2,7 +2,7 @@
 //!
 //! The VBAN codec (header parse/encode, `VbanCodec`/`VbanHeader`, the sample-rate index table and
 //! the port/size constants) moved into the standalone `intercom/vban` workspace crate so the
-//! strih-lx intercom hub (`intercom/hub`) and this appliance speak ONE byte-identical wire format.
+//! strih-snv intercom hub (`intercom/hub`) and this appliance speak ONE byte-identical wire format.
 //! This module is now a thin re-export, so `src/intercom.rs` (and every existing caller/test) keeps
 //! importing `crate::vban::{...}` UNCHANGED and the cambox contract stays byte-for-byte the same.
 //!

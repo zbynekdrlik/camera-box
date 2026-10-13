@@ -275,7 +275,7 @@ DORMANT unit instead: with the config gone the wrapper touches nothing and `proj
 to hard-failing on a missing HDMI monitor — which is correct for a genuinely unplugged projector
 and exactly why the restore must come first.
 
-## The VIEW — Program or the built-in Multiview (issue 1346, strih-lx, owner 24.9.2026)
+## The VIEW — Program or the built-in Multiview (issue 1346, strih-snv, owner 24.9.2026)
 
 The output scans out one of two views, chosen by `"view"` in the same config (`program` | `multiview`;
 absent = program, so imag is byte-for-byte unchanged in behaviour):
@@ -345,12 +345,12 @@ absent = program, so imag is byte-for-byte unchanged in behaviour):
   (`tests/fixtures/drm_output_view_parity.tsv`) shared with the Python mirror in
   `scripts/strih_scenes.py`.
 - **NVIDIA:** the LEASE path is Intel-only in practice. The NVIDIA X driver refuses the RandR lease
-  (live on strih-lx 25.9.2026, also with `non-desktop 1`), so an NVIDIA-driven connector uses the
+  (live on strih-snv 25.9.2026, also with `non-desktop 1`), so an NVIDIA-driven connector uses the
   vk-direct backend below, never this one.
 - **imag stays Program:** the Tools switch ships in the whole Linux bundle, and `program scanout
   LIVE` fires for either view, so the imag `drm_output` facet (`scripts/lib/imag-display-path.sh`)
   gathers `DRM_OUTPUT_VIEW` and grades `"view":"multiview"` as DRIFT (audience projection + cam2 tap).
-- **Live-verify items the first strih-lx run must read (review round 1):** (1) the laptop Multiview
+- **Live-verify items the first strih-snv run must read (review round 1):** (1) the laptop Multiview
   projector's `multiview-audit rendered_fps` next to the new `multiview-render` line — the HDMI
   Multiview renders in the frame hook BEFORE `render_displays()`, so it takes budget first; if the
   laptop projector sags under its floor, move the view render after `render_displays()` or share one
@@ -359,15 +359,15 @@ absent = program, so imag is byte-for-byte unchanged in behaviour):
   publish (libobs exposes only the GPU-side `gs_sync_wait`, so that is a graphics-vtable addition).
 - strih provisioning / verify: `.claude/rules/strih-linux-provisioning.md` (issue 1346 section).
 
-## The vk-direct backend — NVIDIA Vulkan direct display (issue 1346, strih-lx built-in HDMI)
+## The vk-direct backend — NVIDIA Vulkan direct display (issue 1346, strih-snv built-in HDMI)
 
-The owner ruled the strih-lx HDMI output must use the BUILT-IN port (NVIDIA RTX 5050, X output
+The owner ruled the strih-snv HDMI output must use the BUILT-IN port (NVIDIA RTX 5050, X output
 `HDMI-0`) and must be indestructible like imag's (never an X window, no mouse; rulings 5838578002 +
 5838662632). The NVIDIA X driver refuses the X RandR lease, so the module has a SECOND backend:
 `VK_EXT_acquire_xlib_display` + `VK_KHR_display`, the NVIDIA-supported way to take a display away
 from X (SteamVR/Monado direct mode). Selected by `"backend":"vk-direct"` in the SAME config file
 (absent / `"lease"` = the lease backend, so imag is byte-for-byte unchanged); on strih boxes it comes
-from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-lx = `vk-direct`).
+from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-snv = `vk-direct`).
 
 - **Structure:** `obs-drm-output.c` routes its public entry points (start/stop/active/the frame hook)
   and its mailbox seam (claim/publish/texture/mode size) to `drm_output_vk_direct_backend` (a
@@ -442,13 +442,13 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-lx = `vk-direct`).
   with staged headers — never on dev1) with its own EGL/GL 3.3 core context and publishes red, green,
   blue and 50 % grey phases, then a 2 s BURST that claims with no pause (claim FIRST, render only when
   claimed — like the OBS hook) and requires `gl_skips > 0`, a present loop still alive after a GL drain,
-  and a clean release. Live on strih-lx 25.9.2026: 716 phase publishes, 0 skipped; cam2 (which captures
+  and a clean release. Live on strih-snv 25.9.2026: 716 phase publishes, 0 skipped; cam2 (which captures
   HDMI-0) read `245/0/0`, `0/255/0`, `0/0/239`, `127/128/127` — channel order right, no gamma step;
   the burst published 121 frames in 2 s (the 60 Hz display rate) with 7835 skipped claims, released
   with VkResult 0 and exited. After ANY harness run check `pgrep -x vk-rig-harness` is empty (NOT `pgrep -f`, which matches the ssh `bash -c` that carries the name) — a hung
   harness holds HDMI-0 acquired. Re-run it on every new NVIDIA strih box (strih PP).
-- **Enable (supervisor runbook, after CI + a FULL Linux bundle deploy on strih-lx):** re-run
-  `setup-strih.sh --box strih-lx` step 6 with the HDMI monitor/grabber plugged (it writes or upserts
+- **Enable (supervisor runbook, after CI + a FULL Linux bundle deploy on strih-snv):** re-run
+  `setup-strih.sh --box strih-snv` step 6 with the HDMI monitor/grabber plugged (it writes or upserts
   `"backend":"vk-direct"` and installs `libvulkan1`) — or write the one line by hand as the desktop
   user — then `systemctl --user restart strih-obs.service`. Expect in the OBS log: `autostart ENABLED`
   → `backend=vk-direct` → `vk-direct display acquired` → `ACTIVE (vk-direct)` → `program bind ready`

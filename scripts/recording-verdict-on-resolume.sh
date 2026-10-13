@@ -15,7 +15,7 @@ set -euo pipefail
 #           same exe still running from an earlier run is stopped, and a stale partial of the same
 #           name is deleted.
 #   STEP 1  deploy recording-verdict.exe behind the issue-1118 sha256 VERSION GATE
-#           (scripts/lib/verdict-upload-gate.sh, shared with the imag + strih-lx extracts): an
+#           (scripts/lib/verdict-upload-gate.sh, shared with the imag + strih-snv extracts): an
 #           identical on-box binary is reused, a stale or absent one is replaced.
 #   STEP 2  run `recording-verdict.exe --extract-partial cg --cg <recording> --out <partial>` ON the
 #           box, at the issue-1260 BelowNormal PriorityClass (build_onbox_command, reused from

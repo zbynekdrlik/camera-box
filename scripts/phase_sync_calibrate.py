@@ -100,17 +100,17 @@ def enforce_jitter_floor_ms(new_ms) -> int:
 REMOTE_PROGRAMDATA_JSON_PATH = r"C:\ProgramData\camera-box\phase-sync-last.json"
 
 # issue 1317 part 4: the Linux destination of the SAME payload -- where default_last_json_path()
-# lands when this script runs ON a Linux OBS box (strih-lx, the production strih since the M4
+# lands when this script runs ON a Linux OBS box (strih-snv, the production strih since the M4
 # cut-over). A linux-genlock host gets this path, never the Windows ProgramData one.
 REMOTE_LINUX_JSON_PATH = "/home/newlevel/.camera-box/phase-sync-last.json"
 
 # Known rig hosts -> their MCP tool name (same mapping as av_sync_calibrate.py's _KNOWN_MCP_HOSTS).
 # Only used to make the printed push plan concrete/copy-pasteable; an unrecognized host still gets
 # a usable plan (destination + content), just without a resolved MCP tool name. 10.77.9.202 is the
-# Linux strih-lx (issue 1317 part 4); the push DESTINATION follows the host's fleet class
+# Linux strih-snv (issue 1317 part 4); the push DESTINATION follows the host's fleet class
 # (remote_dest_for_host below), so a strih at another address still gets the right path.
 _KNOWN_MCP_HOSTS = {
-    "10.77.9.202": "linux-strih-lx",
+    "10.77.9.202": "linux-strih-snv",
     "10.77.9.204": "win-stream-snv",
 }
 

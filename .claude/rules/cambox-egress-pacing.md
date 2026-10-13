@@ -10,7 +10,7 @@ paths:
 ## What and why
 
 All seven cameras hand their frame to NDI on the same genlock grid instant. About 7 x 300 KB then
-reach strih-lx at the 5 Gb/s line rate in ~3-4 ms, and its RTL8157 USB NIC answers with PAUSE
+reach strih-snv at the 5 Gb/s line rate in ~3-4 ms, and its RTL8157 USB NIC answers with PAUSE
 storms (issue 1242 finding 5902816575).
 
 - The owner approved staggered sending (5904641502). Delaying the frame hand-off failed live twice,

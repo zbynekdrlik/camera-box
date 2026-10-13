@@ -13,9 +13,9 @@ paths:
 
 The libobs graphics thread drives the genlock render tick (`video_sleep` -> `genlock_next_deadline`
 in `vendor/obs-studio/libobs/obs-video.c`). #484 pinned it onto imag's reserved cores under a LOW
-SCHED_FIFO priority. Issue 1357 found it harming strih-lx twice.
+SCHED_FIFO priority. Issue 1357 found it harming strih-snv twice.
 
-## What went wrong (live, strih-lx)
+## What went wrong (live, strih-snv)
 
 - 23.9.2026, with an rtprio grant: the pin put the tick on SCHED_FIFO prio 10, pinned to cores 10-11.
   28 NDI threads inherited FIFO and the pin, and the release E2E failed `[4i/8align]`.
@@ -146,7 +146,7 @@ Gotchas:
 
 ## Deploy + live check (supervisor)
 
-The header is part of libobs, so strih-lx needs the Linux genlock bundle. Two checks after the deploy:
+The header is part of libobs, so strih-snv needs the Linux genlock bundle. Two checks after the deploy:
 
 - The OBS log shows `render-tick thread not pinned: no isolated cores`.
 - `for t in /proc/$(pgrep -x obs)/task/*; do awk '/Cpus_allowed_list/{print $2}' $t/status; done | sort | uniq -c`

@@ -1,6 +1,6 @@
 """Issue 1372 part C -- the dev1 VBAN rate watchdog, driven end to end through its capture seam.
 
-scripts/vban-rate-alert-watchdog.sh captures ~60 s of VBAN on strih-lx (the dantesync-disciplined
+scripts/vban-rate-alert-watchdog.sh captures ~60 s of VBAN on strih-snv (the dantesync-disciplined
 receiver) and grades every stream ARRIVING there with scripts/vban_rate.py. These tests replace the
 ssh capture with a synthetic pcap (VBAN_RATE_CAPTURE_CMD) and run the REAL watchdog in --dry-run: a
 confirmed FAULT pages with a time-bucketed key (production-critical: on-air audio), a healthy stream
@@ -35,7 +35,7 @@ def _run(tmp_path, pcap_bytes=None, capture_rc=0, **env):
                     + (f'cp "{cap}" "$1"\n' if pcap_bytes is not None else "")
                     + f"exit {capture_rc}\n")
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
-    up = tmp_path / "boxup-default.sh"  # hermetic: never probe the real strih-lx :22
+    up = tmp_path / "boxup-default.sh"  # hermetic: never probe the real strih-snv :22
     up.write_text("#!/usr/bin/env bash\nprintf 1\n")
     up.chmod(up.stat().st_mode | stat.S_IEXEC)
     e = {k: v for k, v in os.environ.items() if not k.startswith(("VBAN_RATE_", "OBS_FLEET"))}
@@ -62,7 +62,7 @@ def _outbound():
 
 def test_a_lossy_inbound_stream_pages_with_a_bucketed_key(tmp_path):
     err = _run(tmp_path, b.pcap_bytes(276, _inbound(drop={100, 200, 300, 400, 500})))
-    assert "fohabl-strih (10.77.7.30 -> strih-lx)" in err and "verdict=FAULT" in err, err
+    assert "fohabl-strih (10.77.7.30 -> strih-snv)" in err and "verdict=FAULT" in err, err
     key = f"vban-rate-fohabl-strih-10_77_7_30-{_NOW // 600}"
     assert f"WOULD alert (dedup-key={key})" in err, err
     assert "strata 5 rámcov" in err
@@ -77,7 +77,7 @@ def test_an_off_rate_inbound_stream_pages(tmp_path):
 def test_a_healthy_stream_never_pages_and_outbound_hub_streams_are_not_graded(tmp_path):
     err = _run(tmp_path, b.pcap_bytes(276, sorted(_inbound(ppm=3.0) + _outbound())))
     assert "fohabl-strih" in err and "verdict=OK" in err, err
-    assert "cam1 (" not in err, err           # strih-lx -> cam1 is the hub's own output
+    assert "cam1 (" not in err, err           # strih-snv -> cam1 is the hub's own output
     assert "WOULD alert" not in err
 
 
@@ -94,7 +94,7 @@ def test_the_fault_is_confirmed_across_passes_before_paging(tmp_path):
 
 def test_a_failed_capture_is_skip_never_a_page(tmp_path):
     err = _run(tmp_path, None, capture_rc=255)
-    assert "capture on strih-lx failed or empty -- SKIP" in err
+    assert "capture on strih-snv failed or empty -- SKIP" in err
     assert "WOULD alert" not in err
 
 
@@ -140,7 +140,7 @@ def test_a_capture_that_keeps_failing_on_a_live_box_pages_once_confirmed(tmp_pat
     assert "WOULD alert" not in errs[0] and "WOULD alert" not in errs[1]
     # review round 2: a blind watchdog is a CHRONIC config fault -- ONE page per incident on a
     # STABLE key (the diagnostic class), never the production-critical time bucket
-    assert "WOULD alert (dedup-key=vban-rate-capture-strih-lx)" in errs[2], errs[2]
+    assert "WOULD alert (dedup-key=vban-rate-capture-strih-snv)" in errs[2], errs[2]
 
 
 def test_a_capture_failing_because_the_box_is_down_never_pages(tmp_path):

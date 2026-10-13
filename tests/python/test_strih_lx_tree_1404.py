@@ -1,6 +1,6 @@
-"""Issue 1404: the strih-lx genlock deploy stages every file setup-strih.sh provisions from.
+"""Issue 1404: the strih-snv genlock deploy stages every file setup-strih.sh provisions from.
 
-Live 8.10.2026 05:53Z: `deploy-genlock-fleet.sh --boxes strih-lx` failed at setup-strih step 16e,
+Live 8.10.2026 05:53Z: `deploy-genlock-fleet.sh --boxes strih-snv` failed at setup-strih step 16e,
 `vendor/av-sync-dock/src/camera-box-audio.hpp not found under /tmp/genlock-stage-<sha>/repo`. The
 deploy archived only scripts/ systemd/ intercom/ vendor/realtek-r8152, while step 16e installs the
 program-audio sampler from `STRIH_PROGRAM_AUDIO_FILES`, which names two vendored dock headers (the
@@ -14,7 +14,7 @@ import io
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-DEPLOY_LIB = ROOT / "scripts" / "lib" / "strih-lx-deploy.sh"
+DEPLOY_LIB = ROOT / "scripts" / "lib" / "strih-snv-deploy.sh"
 AUDIO_LIB = ROOT / "scripts" / "lib" / "strih-program-audio.sh"
 
 
@@ -43,7 +43,7 @@ def _covered(path: str, roots: list[str]) -> bool:
 def test_tree_paths_cover_every_program_audio_file_1404():
     roots = _tree_paths()
     missing = [f for f in _audio_files() if not _covered(f, roots)]
-    assert not missing, f"the strih-lx staged tree misses files setup-strih step 16e installs: {missing}"
+    assert not missing, f"the strih-snv staged tree misses files setup-strih step 16e installs: {missing}"
 
 
 def test_tree_paths_keep_the_existing_dirs_1404():
@@ -70,6 +70,6 @@ def test_tree_check_refuses_a_tree_without_the_sampler_files_1404(tmp_path):
         capture_output=True, check=True,
     ).stdout
     tarfile.open(fileobj=io.BytesIO(tar_bytes)).extractall(tree)
-    r = _bash(f". '{DEPLOY_LIB}' && strih_lx_tree_check '{tree}' strih-lx")
+    r = _bash(f". '{DEPLOY_LIB}' && strih_lx_tree_check '{tree}' strih-snv")
     assert r.returncode != 0, r.stdout
     assert "camera-box-audio.hpp" in r.stderr, r.stderr

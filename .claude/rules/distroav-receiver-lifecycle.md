@@ -335,7 +335,7 @@ on that box, listed FIRST, and the live `:5971` second.
 - The SDK's name resolver follows the same stale record, so the BY-NAME bind did not connect inside
   the 10 s `GENLOCK_RECONNECT_STALE_NS` window.
 - The stale-window rebind started the ladder again at a fresh finder, which picked `:5961` again.
-- Six cycles, ~55 s without frames, ended only when the stale mDNS record aged out. strih-lx
+- Six cycles, ~55 s without frames, ended only when the stale mDNS record aged out. strih-snv
   `CG-obs` ran the same ladder during the 01:52Z deploy.
 
 Reading the log: `#1096 connect BY-URL '<A>'` → `#1180 BY-URL identity MISMATCH ... maps to '<B>' ...
@@ -576,7 +576,7 @@ advances within 60 s with no WS heal and no OBS relaunch (the supervisor's post-
 The strih low-bandwidth mechanism (the `genlock_connect_on_show` program-path role that PARKED a
 hidden genlocked input in-thread, the `genlock-park` log line, the always-connected `MV` monitor
 twins and the frontend multiview cell target) was removed on owner order 28.9.2026 ("cize vycistis
-strih obs aby tam neboli tie low bandwith sceny"): the strih-lx uplink cause is fixed in hardware
+strih obs aby tam neboli tie low bandwith sceny"): the strih-snv uplink cause is fixed in hardware
 (5 GbE, then 10 GbE). Every genlocked source keeps the issue-764 KEEP_ACTIVE keep-alive, always
 connected. Do not reintroduce a per-source connect-on-show or park path as a bandwidth workaround;
 if it is ever needed again, the removed in-thread design is in git history (never the stock
@@ -589,7 +589,7 @@ rig-health-audit no longer skips a parked camera's cadence / arrivals-low) run f
 no longer SKIP a parked input, so a still-parking main would page -- or stop those timers across the
 gap. All of it before the first E2E / soak / restart-matrix run on this code (the E2E no longer
 holds connect-on-show):
-1. Read first (read-only WS on strih-lx): each `NDI camN` main's `genlock_connect_on_show`; every
+1. Read first (read-only WS on strih-snv): each `NDI camN` main's `genlock_connect_on_show`; every
    scene whose name starts `MV ` and its private `show_in_multiview` / `camera_box_multiview_target`
    (a retired twin keeps the key EMPTY), any leftover `__camera-box multiview refresh (issue 1242)`
    scratch scene; the `MV NDI camN` inputs; and EVERY scene's items that reference a twin scene or a
@@ -598,7 +598,7 @@ holds connect-on-show):
 2. Retire the launch path FIRST, so no OBS relaunch re-applies the roles: install this code's
    `strih_scenes.py` (setup-strih step 6) and `strih-obs-start.sh` (step 8) -- step 6 also removes a
    leftover `/usr/local/bin/strih_bandwidth_roles.py` -- then `rm -f
-   ~/.camera-box/connect-on-show-e2e-hold` on strih-lx and `rm -f
+   ~/.camera-box/connect-on-show-e2e-hold` on strih-snv and `rm -f
    ~/.camera-box/connect-on-show-hold.json` on dev1.
 3. Over WS: set `genlock_connect_on_show: false` on every `NDI camN` (the old DistroAV still parks
    until runbook step 6, the FULL-bundle deploy); in every scene that references a twin, add each original (`NDI camN` / `<scene>`)

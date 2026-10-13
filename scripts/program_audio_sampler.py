@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""issue 1404 -- the stream program-audio sampler (a long-running --user service on strih-lx).
+"""issue 1404 -- the stream program-audio sampler (a long-running --user service on strih-snv).
 
 Receives the stream program's audio from stream OBS's own NDI program output (the
 `genlock-ndi-output 'stream'` sender, NDI name `STREAM-SNV (stream)` at 10.77.9.204 -- read live
@@ -11,8 +11,8 @@ MEASUREMENT | FOREIGN | SILENT | UNKNOWN (scripts/program_audio.py) and atomical
 `scripts/program_audio_guard.py` and stop the YouTube broadcast on anything but MEASUREMENT/SILENT.
 
 The rules below were found and measured while the sampler ran on dev1 (until 8.10.2026), so their
-text says "dev1". It runs only on strih-lx now (the fleet's date master), where "dev1's arrival
-time" and "dev1's own wall-clock step" mean strih-lx's own.
+text says "dev1". It runs only on strih-snv now (the fleet's date master), where "dev1's arrival
+time" and "dev1's own wall-clock step" mean strih-snv's own.
 
 * FOREIGN LATCH: every payload carries `last_foreign_ts_utc`, the newest FOREIGN window, so a gate
   that polls every ~10 s still sees a FOREIGN window that fell between two of its polls.
@@ -63,7 +63,7 @@ time" and "dev1's own wall-clock step" mean strih-lx's own.
   stall, nothing lost: no zeros, the span kept, counted (`sender_stalls`). Otherwise the hole is the
   smallest offset over them: bridged or a restart, as before.
 
-Usage (systemd/program-audio-sampler.strih-lx.service, installed by setup-strih step 16e):
+Usage (systemd/program-audio-sampler.strih-snv.service, installed by setup-strih step 16e):
   program_audio_sampler.py [--source "STREAM-SNV (stream)"] [--serve-dir DIR] [--lib PATH]
                            [--marker-shim PATH] [--http-port 8891] [--http-bind 0.0.0.0]
 """
@@ -91,7 +91,7 @@ import rig_serve_files as rsf  # noqa: E402
 
 DEFAULT_SOURCE = "STREAM-SNV (stream)"
 SOURCE_ENV = "PROGRAM_AUDIO_SOURCE"
-# The sampler's own read-only endpoint (program_audio_http.py; host-agnostic, on strih-lx): port 0 =
+# The sampler's own read-only endpoint (program_audio_http.py; host-agnostic, on strih-snv): port 0 =
 # no endpoint. The serve dir is the sampler's own: $PROGRAM_AUDIO_SERVE_DIR, else
 # $XDG_RUNTIME_DIR/program-audio-sampler (tmpfs, created 0700). Never the dev1 lease server's serve
 # dir: that one served the verdict at http://dev1:8890 until the route was retired (8.10.2026).
@@ -771,7 +771,7 @@ def scheduling_state(cgroup_file: str = "/proc/self/cgroup",
 
 
 def scheduling_line(nice: int, cpus: str, weight: int | None) -> str:
-    """The one start line about where and how the sampler runs: its nice, its cpus (strih-lx pins the
+    """The one start line about where and how the sampler runs: its nice, its cpus (strih-snv pins the
     E-cores through the unit's CPUAffinity=) and its cgroup's cpu.weight. Both units run it at normal
     priority (no Nice=, no CPUWeight=); a positive nice is a WARNING: a deprioritised sampler stops
     calling the NDI capture under load, and the SDK drops audio after ~1.3 s (issue 1404 STEP 0)."""

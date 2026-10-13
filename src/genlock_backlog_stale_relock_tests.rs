@@ -50,7 +50,7 @@ fn picks(
 
 #[test]
 fn the_logged_cam6_burst_reads_stale_1367() {
-    // Live 25.9.2026 20:50:58 on strih-lx:
+    // Live 25.9.2026 20:50:58 on strih-snv:
     // genlock-relock 'NDI cam6': depth=17 due=17 erased=1 head_skew_ms=300
     //                            anchor_ns=283636965 sel_vs_newest_due=-15
     // A 60-into-30 camera has no N==1 governor depth, so the expected pick is the configured one.

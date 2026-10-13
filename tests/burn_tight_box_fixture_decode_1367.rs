@@ -4,7 +4,7 @@
 //! THE BUG: the camera slot models the capture burn at its 320 px request, but the writer renders
 //! a version-4 QR with whole 7 px modules: a 287 px burn at (816, 769) on 1080p. So the issue-1370
 //! slot crop (792, 728, 336 x 336) always holds a 24 px strip left of the burn and a 41 px strip
-//! above it. cam2 films the strih-lx HDMI multiview, those strips hold multiview QR content, and
+//! above it. cam2 films the strih-snv HDMI multiview, those strips hold multiview QR content, and
 //! rqrr's single grid pass over the crop reads nothing. On the release E2E (run 324220913) that
 //! happened on 7 frames, which the verdict counted as cam2 `BURN-UNREADABLE`, while the burn sits
 //! crisply in its own slot.

@@ -1,4 +1,4 @@
-//! issue 1346 -- strih-lx provisioning + acceptance for the DRM-lease HDMI output (owner
+//! issue 1346 -- strih-snv provisioning + acceptance for the DRM-lease HDMI output (owner
 //! ROZHODNUTE 24.9.2026, design comment 5810067589): the HDMI output is the issue-1152 in-OBS
 //! DRM-lease output with a Program / Multiview view, NEVER an OBS projector window and NEVER the
 //! desktop.
@@ -89,7 +89,7 @@ fn hdmi_connected_reads_the_kernel_connector_status() {
     let (c, _o, _e) = run(&format!("strih_drm_hdmi_connected '{dir}'"), None);
     assert_ne!(
         c, 0,
-        "eDP connected + HDMI disconnected -> NOT connected (today's strih-lx)"
+        "eDP connected + HDMI disconnected -> NOT connected (today's strih-snv)"
     );
 
     fs::write(d.join("card1-HDMI-A-1").join("status"), "connected\n").unwrap();
@@ -109,7 +109,7 @@ fn hdmi_connected_reads_the_kernel_connector_status() {
     let _ = fs::remove_dir_all(&empty);
 }
 
-/// main design 5840508308: on strih-lx the NVIDIA connector reads `card1-HDMI-A-1 disconnected`
+/// main design 5840508308: on strih-snv the NVIDIA connector reads `card1-HDMI-A-1 disconnected`
 /// in sysfs while X reports `HDMI-0 connected` (the NVIDIA X driver does not drive the KMS
 /// connector status). With the box fact `vk-direct` the detector reads the X RandR view instead --
 /// connected with a mode, and connected with NO mode/CRTC (how xrandr lists HDMI-0 while vk-direct
@@ -226,7 +226,7 @@ fn xrandr_query_reads_display_zero_and_never_aborts() {
 
 #[test]
 fn hdmi_output_name_comes_from_xrandr_not_the_kernel_name() {
-    // NVIDIA-primary strih-lx names its HDMI port "HDMI-0"; modesetting names HDMI-A-1 "HDMI-1".
+    // NVIDIA-primary strih-snv names its HDMI port "HDMI-0"; modesetting names HDMI-A-1 "HDMI-1".
     let q = "Screen 0: minimum 8 x 8, current 1920 x 1080\n\
              eDP-1-1 connected primary 1920x1080+0+0 (normal left inverted right x axis y axis) 344mm x 194mm\n\
              DP-0 disconnected (normal left inverted right x axis y axis)\n\
@@ -483,7 +483,7 @@ fn kiosk_autostart_never_extends_the_desktop_onto_hdmi() {
 // ----------------------------------------------------------------------------------------------
 // issue 1346 -- the NVIDIA Vulkan direct-display backend, selected by the box fact
 // STRIH_HDMI_OUTPUT_BACKEND (main design 5838663570; STEP 0 + the GPU interop proven live on
-// strih-lx, 5838745730 + 5839007372)
+// strih-snv, 5838745730 + 5839007372)
 // ----------------------------------------------------------------------------------------------
 
 #[test]
@@ -574,11 +574,11 @@ fn setup_and_verify_take_the_backend_from_the_box_fact() {
         ),
         "the fact has ONE accessor"
     );
-    let env = read("scripts/strih-boxes/strih-lx.env");
+    let env = read("scripts/strih-boxes/strih-snv.env");
     assert!(
         env.lines()
             .any(|l| l == "STRIH_HDMI_OUTPUT_BACKEND=vk-direct"),
-        "strih-lx's built-in HDMI is NVIDIA-driven: vk-direct (owner ruling 5838662632)"
+        "strih-snv's built-in HDMI is NVIDIA-driven: vk-direct (owner ruling 5838662632)"
     );
     let pp = read("scripts/strih-boxes/strih-pp.env");
     assert!(

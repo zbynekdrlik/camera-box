@@ -30,7 +30,7 @@ Live 26.9.2026 on the resolume cg OBS (build afd7cc184):
 - the `cg-obs` NDI output fell to 16-18.7 fps, and the render itself stayed clean at 30.0;
 - stopping `sync-test-output` restored 30.0 fps at once.
 
-The strih-lx receiver saw the loss as `stamp_dup` / `stamp_gap` pairs plus relocks, which looked
+The strih-snv receiver saw the loss as `stamp_dup` / `stamp_gap` pairs plus relocks, which looked
 like a genlock problem and was not one.
 
 ## The rule

@@ -30,7 +30,7 @@ set -euo pipefail
 # state persists. DETECTION ONLY -- the cure (find the leaking plugin / device, plan an OBS restart)
 # is an owner call; recovery is a machine-channel log line, never a phone ping.
 #
-# Roster = the obs-fleet `obs-handles` facet (strih-lx stream resolume); the traveling resolume is
+# Roster = the obs-fleet `obs-handles` facet (strih-snv stream resolume); the traveling resolume is
 # polled only while home (obs_fleet_poll_now).
 #
 # Usage:

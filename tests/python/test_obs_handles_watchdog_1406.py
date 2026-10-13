@@ -5,7 +5,7 @@ its fleet wiring (the obs-fleet `obs-handles` facet, the dev1 timer roster, the 
 Each pass is one real run of scripts/obs-handles-alert-watchdog.sh with the pass time pinned by
 `OBS_HANDLES_NOW_EPOCH` and the bundle-state body served by a fixture script, so the watchdog's
 own state file carries the reference sample and the confirm counter from pass to pass. Tier-0:
-bash + python3 subprocesses, no network (the fetch seam replaces curl; stream and strih-lx are
+bash + python3 subprocesses, no network (the fetch seam replaces curl; stream and strih-snv are
 `always` boxes, resolume's home check is pinned by `OBS_FLEET_HOME`).
 """
 from __future__ import annotations
@@ -37,7 +37,7 @@ def _body(handles, pid, start, limit="", run=""):
 class _Replay:
     """One box's sequence of watchdog passes over a scratch state file."""
 
-    def __init__(self, tmp_path, boxes="stream|10.77.9.204", extra_env=None, dry_run=True):
+    def __init__(self, tmp_path, boxes="stream-snv|10.77.9.204", extra_env=None, dry_run=True):
         self.tmp = tmp_path
         self.body = tmp_path / "body.json"
         self.fetched = tmp_path / "fetched"
@@ -53,7 +53,7 @@ class _Replay:
             "OBS_HANDLES_FETCH_CMD": str(fetch),
             "OBS_HANDLES_BOXES": boxes,
             "OBS_HANDLES_ALERT_STATE_FILE": str(tmp_path / "state"),
-            "OBS_FLEET_HOME": "strih-lx stream",
+            "OBS_FLEET_HOME": "strih-snv stream-snv",
         })
         self.env.pop("REPING_INTERVAL_S", None)
         self.env.update(extra_env or {})
@@ -85,7 +85,7 @@ def test_the_5_10_leak_from_a_fresh_obs_pages_after_three_growing_passes(tmp_pat
     for i in (1, 2):
         assert "verdict=GROWING" in logs[i] and "WOULD alert" not in logs[i], logs[i]
     assert "verdict=GROWING" in logs[3]
-    assert "[dry-run] WOULD alert (GROWING): stream" in logs[3]
+    assert "[dry-run] WOULD alert (GROWING): stream-snv" in logs[3]
     assert "rate=168744/h" in logs[3]
 
 
@@ -98,7 +98,7 @@ def test_the_5_10_census_snapshot_pages_on_the_ceiling(tmp_path):
     assert "verdict=CEILING" in first and "WOULD alert" not in first
     second = rp.run(t + _PASS_S, _body(leak["census_handles"] + per_pass, leak["pid"],
                                         leak["start"]))
-    assert "[dry-run] WOULD alert (CEILING): stream" in second
+    assert "[dry-run] WOULD alert (CEILING): stream-snv" in second
     assert "handles=4080836" in second
 
 
@@ -121,7 +121,7 @@ def test_the_restart_after_a_page_logs_a_recovery_on_the_machine_channel(tmp_pat
     assert "WOULD alert (CEILING)" in paged
     restarted = rp.run(t + 2 * _PASS_S, _body(5806, fix["pid"], fix["start"]))
     assert "verdict=BASELINE" in restarted
-    assert "RECOVERY: stream" in restarted
+    assert "RECOVERY: stream-snv" in restarted
     again = rp.run(t + 3 * _PASS_S, _body(5790, fix["pid"], fix["start"]))
     assert "verdict=HEALTHY" in again and "RECOVERY" not in again
 
@@ -148,14 +148,14 @@ def test_a_manual_run_during_a_ceiling_incident_does_not_advance_the_confirm(tmp
     held = rp.run(t + 60, _body(leak["census_handles"] + 2_800, leak["pid"], leak["start"]))
     assert "verdict=HOLD" in held and "WOULD alert" not in held
     paged = rp.run(t + _PASS_S, _body(leak["census_handles"] + 14_064, leak["pid"], leak["start"]))
-    assert "[dry-run] WOULD alert (CEILING): stream" in paged
+    assert "[dry-run] WOULD alert (CEILING): stream-snv" in paged
 
 
 def test_a_strih_lx_clock_step_keeps_the_leak_confirm(tmp_path):
-    # Review round 1: strih-lx steps its wall clock (the dantesync date master), which moves the
+    # Review round 1: strih-snv steps its wall clock (the dantesync date master), which moves the
     # btime-based start epoch by a second; the run token does not move, so a growing leak keeps its
     # confirm instead of re-baselining (and logging a false RECOVERY) at the step.
-    rp = _Replay(tmp_path, boxes="strih-lx|10.77.9.202")
+    rp = _Replay(tmp_path, boxes="strih-snv|10.77.9.202")
     run = "1b4e28ba-2fa1-11d2-883f-0016d3cca427:360000"
     logs = []
     for i in range(4):
@@ -165,7 +165,7 @@ def test_a_strih_lx_clock_step_keeps_the_leak_confirm(tmp_path):
     assert "verdict=BASELINE" in logs[0]
     assert all("verdict=GROWING" in log for log in logs[1:]), logs
     assert not any("RECOVERY" in log for log in logs)
-    assert "[dry-run] WOULD alert (GROWING): strih-lx" in logs[3]
+    assert "[dry-run] WOULD alert (GROWING): strih-snv" in logs[3]
 
 
 def test_unfetchable_is_skip_and_absent_facet_is_unknown(tmp_path):
@@ -177,21 +177,21 @@ def test_unfetchable_is_skip_and_absent_facet_is_unknown(tmp_path):
 
 
 def test_strih_lx_pages_near_its_own_open_files_limit(tmp_path):
-    rp = _Replay(tmp_path, boxes="strih-lx|10.77.9.202")
+    rp = _Replay(tmp_path, boxes="strih-snv|10.77.9.202")
     rp.run(1000, _body(850, "4242", "1791190000", limit="1024"))
     log = rp.run(1300, _body(851, "4242", "1791190000", limit="1024"))
-    assert "[dry-run] WOULD alert (CEILING): strih-lx" in log
+    assert "[dry-run] WOULD alert (CEILING): strih-snv" in log
     assert "ceiling=819" in log
 
 
 def test_resolume_is_polled_only_while_home(tmp_path):
     (tmp_path / "away").mkdir()
-    away = _Replay(tmp_path / "away", boxes="resolume|resolume.lan")
+    away = _Replay(tmp_path / "away", boxes="resolume-snv|resolume.lan")
     log = away.run(1000, _body(5000, "1", "2"))
     assert "away" in log and not away.fetched.exists()
     (tmp_path / "home").mkdir()
-    home = _Replay(tmp_path / "home", boxes="resolume|resolume.lan",
-                   extra_env={"OBS_FLEET_HOME": "resolume"})
+    home = _Replay(tmp_path / "home", boxes="resolume-snv|resolume.lan",
+                   extra_env={"OBS_FLEET_HOME": "resolume-snv"})
     log = home.run(1000, _body(5000, "1", "2"))
     assert home.fetched.read_text().split() == ["resolume.lan"]
     assert "verdict=BASELINE" in log
@@ -214,9 +214,9 @@ def test_a_real_pass_pings_with_a_time_bucketed_key(tmp_path):
     argv = calls[0]
     assert argv[0] == "notify"
     key = argv[argv.index("--dedup-key") + 1]
-    assert key == f"obs-handles-stream-{(t + _PASS_S) // 600}"
+    assert key == f"obs-handles-stream-snv-{(t + _PASS_S) // 600}"
     body = argv[argv.index("--body") + 1]
-    assert body.startswith("🚨") and "stream" in body and "4080836" in body
+    assert body.startswith("🚨") and "stream-snv" in body and "4080836" in body
 
 
 def test_the_fleet_facet_and_the_watchdog_roster():
@@ -225,8 +225,8 @@ def test_the_fleet_facet_and_the_watchdog_roster():
                        capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, r.stderr
     members, boxes = r.stdout.splitlines()
-    assert members == "strih-lx stream resolume"
-    assert boxes == "strih-lx|10.77.9.202 stream|10.77.9.204 resolume|resolume.lan"
+    assert members == "strih-snv stream-snv resolume-snv"
+    assert boxes == "strih-snv|10.77.9.202 stream-snv|10.77.9.204 resolume-snv|resolume.lan"
     r = subprocess.run(["bash", "-c", f'. "{_SCRIPTS}/lib/obs-fleet.sh"; '
                         "obs_fleet_facet_members nope"], capture_output=True, text=True)
     assert r.returncode != 0 and "obs-handles" in r.stderr

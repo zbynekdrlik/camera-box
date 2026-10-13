@@ -472,11 +472,11 @@ def test_the_sync_path_still_drives_the_existing_loop_tests(tmp_path):
 
 def test_the_unit_runs_the_sampler_at_normal_priority():
     """No Nice= (the old Nice=10 put the sampler behind every other process, and a --user unit cannot
-    lower it anyway) and no CPUWeight= (on strih-lx it would rank the sampler ahead of OBS in the same
+    lower it anyway) and no CPUWeight= (on strih-snv it would rank the sampler ahead of OBS in the same
     slice): normal priority (the dev1 unit was retired, issue 1404 8.10.2026)."""
     import re
 
-    s = (_ROOT / "systemd" / "program-audio-sampler.strih-lx.service").read_text(encoding="utf-8")
+    s = (_ROOT / "systemd" / "program-audio-sampler.strih-snv.service").read_text(encoding="utf-8")
     assert not re.search(r"^Nice=", s, re.M)
     assert not re.search(r"^CPUWeight=", s, re.M)
 

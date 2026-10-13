@@ -15,13 +15,13 @@ paths:
 ## Status: RETIRED 24.9.2026 — do not reintroduce a per-OS projector host
 
 Issue 1352 (22.9.2026) hosted every Linux OBS projector in a native CHILD of a plain host
-toplevel. On strih-lx, which then ran XWayland + NVIDIA PRIME render offload, a projector whose
+toplevel. On strih-snv, which then ran XWayland + NVIDIA PRIME render offload, a projector whose
 GL surface IS the X toplevel stalled the graphics thread ~0.5 s per present: program lag 93 %,
 MV 1.8 fps. `xdotool windowreparent` into a child fixed it (lag 0 %, MV 29.8 fps).
 
 Issue 1357 removed it. **Why:**
 
-- **The premise is gone.** On 23.9.2026 strih-lx moved to openbox on plain Xorg, with NVIDIA as
+- **The premise is gone.** On 23.9.2026 strih-snv moved to openbox on plain Xorg, with NVIDIA as
   the primary provider (`xrandr --listproviders`: `NVIDIA-0` Source Output, `modesetting` only
   Sink/Offload). There is no Xwayland process and no `__NV_PRIME_RENDER_OFFLOAD` in the OBS env.
   imag and a future strih PP use the same baseline (`obs-box-baseline.md`), and the Windows boxes
@@ -60,7 +60,7 @@ GL child cannot survive Qt's native-window recreation on a window-flags change, 
 workaround only ever existed for a display stack no box runs any more.
 
 Deploy: a frontend change ships as a FULL bundle (obs64), never fast-dll (`obs-titlebar-build-id.md`).
-Rig acceptance after the deploy, on strih-lx:
+Rig acceptance after the deploy, on strih-snv:
 
 - the multiview projector, windowed AND fullscreen, for 5 min: `program-render-audit lagged=0`
   and `multiview-audit rendered_fps >= 28`;
@@ -71,7 +71,7 @@ Rig acceptance after the deploy, on strih-lx:
 `OBSQTDisplay::resizeEvent` (the base of every preview AND projector window) no longer calls
 `obs_display_resize` itself. A window drag emits a resize per step; `obs_display_resize` only stores
 `next_cx/next_cy`, but the graphics thread then runs `gs_resize` (swap-chain reallocation) on its
-next render of that display, and the PROGRAM render shares that thread — dragging the strih-lx
+next render of that display, and the PROGRAM render shares that thread — dragging the strih-snv
 multiview projector measured `program-render-audit lagged=80/150`. Now `resizeEvent` restarts a
 150 ms single-shot `QTimer` and `ApplyDisplayResize()` applies the final pixel size once + emits
 `DisplayResized` (so the preview layout and the swap-chain size change together). The first resize

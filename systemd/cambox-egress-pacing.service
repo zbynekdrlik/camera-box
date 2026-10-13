@@ -1,7 +1,7 @@
 [Unit]
 # camera-box: pace this cambox's NDI egress at boot (issue 1242).
 # All seven cameras hand their frame to NDI on the same genlock grid instant, so their line-rate
-# bursts arrive at strih-lx together and its USB NIC answers with PAUSE storms. An fq root qdisc
+# bursts arrive at strih-snv together and its USB NIC answers with PAUSE storms. An fq root qdisc
 # with a per-flow maxrate spreads each camera's already-encoded frame over ~7 ms; fq keeps
 # dantesync's PTP/NTP and the intercom as their own flows, never queued behind a video frame.
 #

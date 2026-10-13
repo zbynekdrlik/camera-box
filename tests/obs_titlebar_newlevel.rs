@@ -84,7 +84,7 @@ fn titlebar_carries_newlevel_media_build_marker_and_sha() {
     );
 }
 
-/// Issue 1357: the Linux OBS boxes (strih-lx, imag) install the bundle into the `/usr`
+/// Issue 1357: the Linux OBS boxes (strih-snv, imag) install the bundle into the `/usr`
 /// prefix (`/usr/bin/obs`), so the two exe-relative Windows-layout candidates resolve to
 /// `/GENLOCK_BUILD_SHA.txt` / `/usr/bin/GENLOCK_BUILD_SHA.txt` — neither exists, and the
 /// title read `newlevel.media build unknown` on every Linux box. The deploy writes the

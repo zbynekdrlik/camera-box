@@ -1,8 +1,8 @@
 //! issue 1357: the panel-brightness keys on every OBS-box kiosk (the shared baseline).
 //!
 //! Openbox, the kiosk WM of the shared baseline, has no brightness handler, so the notebook Fn
-//! brightness keys did nothing (the owner hit it on strih-lx during the 24.9 production; imag had
-//! the same problem). The hand fix live on strih-lx (24.9.2026 16:58) is now a kiosk facet in
+//! brightness keys did nothing (the owner hit it on strih-snv during the 24.9 production; imag had
+//! the same problem). The hand fix live on strih-snv (24.9.2026 16:58) is now a kiosk facet in
 //! `scripts/lib/obs-box-kiosk.sh`:
 //!
 //! - the helper `/usr/local/bin/obs-box-brightness up|down` (sysfs backlight, 10 % step, 5 % floor);
@@ -10,7 +10,7 @@
 //! - the two `XF86MonBrightnessUp/Down` keybinds MERGED into the kiosk rc.xml (the user's rc.xml,
 //!   else the stock one) -- only the missing lines, never replacing operator content.
 //!
-//! The rendered helper + rule are the live strih-lx file text byte-for-byte (read 25.9.2026).
+//! The rendered helper + rule are the live strih-snv file text byte-for-byte (read 25.9.2026).
 //! The shared grader row (`baseline:brightness`) is pinned in `tests/obs_box_baseline_1357.rs`.
 //!
 //! Tier-0: pure bash sourcing + static anchors (CI runs these; no cargo compile locally).

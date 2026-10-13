@@ -13,7 +13,7 @@ watchdog kept from its last pass, and scripts/obs-handles-alert-watchdog.sh driv
 throttle and time-bucketed notify.
 
 The process identity is `<pid>@<run token>` when the box serves one (Linux: boot id + start ticks,
-which a wall-clock step never moves -- strih-lx steps its clock as the dantesync date master),
+which a wall-clock step never moves -- strih-snv steps its clock as the dantesync date master),
 else `<pid>@<start epoch>` (Windows: the create time is recorded once, so it never moves either).
 
 Verdicts (one per pass), decided in this order:
@@ -27,7 +27,7 @@ Verdicts (one per pass), decided in this order:
             passes): the older reference is kept, so a short interval never inflates the rate, and
             neither arm's confirm moves -- also over the ceiling.
   CEILING   handles >= the ceiling: DEFAULT_CEILING (500,000), or 80% of the box's own soft
-            open-files limit when that is lower (Linux strih-lx: its RLIMIT_NOFILE is the cap; a
+            open-files limit when that is lower (Linux strih-snv: its RLIMIT_NOFILE is the cap; a
             Windows box reports no limit). The reference still advances.
   GROWING   the count grew at >= the growth bound over this interval: GROWTH_PER_H, or half a
             reported soft limit per hour when that is lower.

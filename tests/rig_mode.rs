@@ -1059,13 +1059,13 @@ fn burn_action_maps_mode_to_add_or_remove() {
 fn genlock_relaunch_note_is_env_free_no_mode() {
     for mode in ["test", "event"] {
         let note = run_sourced(&format!("print_genlock_relaunch_note {mode}"));
-        // issue 1317 part 3: the strih is the Linux strih-lx (its supervised user unit), never the
+        // issue 1317 part 3: the strih is the Linux strih-snv (its supervised user unit), never the
         // retired Windows `--box strih` planner arm (which now refuses).
         assert!(
             note.contains("systemctl --user restart strih-obs.service")
                 && note.contains("--box stream")
                 && !note.contains("--box strih"),
-            "#257: the relaunch note must cover strih-lx AND stream. mode={mode} note=\n{note}"
+            "#257: the relaunch note must cover strih-snv AND stream. mode={mode} note=\n{note}"
         );
         // #257: env-free relaunch — NO --mode and NO OBS_GENLOCK_*/OBS_BURN_* env.
         assert!(
@@ -1289,7 +1289,7 @@ fn event_mode_cam_restore_failure_does_not_strand_the_burn_clear_868() {
 /// issue 1410 — an UNREACHABLE OBS box must never stop the EVENT switch at the stray-recording
 /// guard.
 ///
-/// On 11.10.2026 strih-lx (10.77.9.202) was powered off. `stop_stray_recordings` returned the
+/// On 11.10.2026 strih-snv (10.77.9.202) was powered off. `stop_stray_recordings` returned the
 /// failing `obs_phase2.py record --action guard` rc (`OSError: [Errno 113] No route to host`), and
 /// do_event called it BARE under `set -euo pipefail`, so the whole EVENT switch ended right there:
 /// the cam2 painter stop, the relay start, the program-audio stop, the burn clear and the EVENT

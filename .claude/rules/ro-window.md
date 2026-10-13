@@ -179,7 +179,7 @@ Three dev1-side pure parsers:
   - The master date-state block carries its own reopen + close, so a downgrade deletes after the
     good start in a second verified window. The "plain program + ONE delete block" invariant
     (test_dantesync_date_state_1372.py) holds, because the block itself carries the window calls.
-  - A node whose root is read-write (strih-lx, dev1) opens no window at all.
+  - A node whose root is read-write (strih-snv, dev1) opens no window at all.
   - **The self-heal says whether it restored anything.** It copies the `.bak` back inside its own
     window; when that copy fails it prints `SELF-HEAL FAILED ... restore by hand`, never
     "restored".
@@ -200,7 +200,7 @@ Three dev1-side pure parsers:
 **Why the cambox-only sites force the root back read-only (review round 1, a decision, not a
 gap).** deploy-fleet and the relay mode never read the root mode before they open the window; the
 dantesync programs, deploy-relay and the ndi apply do, because they also reach boxes whose root is
-read-write by design (strih-lx, dev1, an SBC before its first read-only reboot). deploy-fleet and
+read-write by design (strih-snv, dev1, an SBC before its first read-only reboot). deploy-fleet and
 the relay mode reach only camboxes, which run read-only (setup-device STEP 18), and they always
 remounted ro after the window.
 - A cambox found writable is the stuck state this ticket exists to surface. If a writer keeps it

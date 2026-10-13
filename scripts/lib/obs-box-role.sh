@@ -128,7 +128,7 @@ obs_box_role_apply() {
   return 0
 }
 
-# obs_box_stream_seed_manifest_json -> the stream role's /opt/camera-box/strih-lx-seed.json (the fixed
+# obs_box_stream_seed_manifest_json -> the stream role's /opt/camera-box/strih-seed.json (the fixed
 # ROLE path strih_scenes.py reads on every Linux OBS box): update-only (the ported collection is
 # authoritative), ONE genlocked program input of class "program" (genlock_fifo + SOURCE_TIMECODE, the
 # latency pin never written: the stream A/V delay is the operator's knob), the NDI output

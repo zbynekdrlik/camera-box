@@ -35,7 +35,7 @@
 #   scripts/launch-obs-genlock.sh --box stream --force   # force-kill a wedged obs64 first (obs-ops recovery)
 #   scripts/launch-obs-genlock.sh --box stream \
 #       --obs-dir 'C:\Program Files\obs-studio'          # override the OBS install dir
-# The Windows STRIH PC is RETIRED (M4 cut-over 20.9.2026, issue 1317): the strih is strih-lx, a Linux
+# The Windows STRIH PC is RETIRED (M4 cut-over 20.9.2026, issue 1317): the strih is strih-snv, a Linux
 # box launched by its strih-obs.service systemd user unit -- this Windows planner refuses it by name.
 # The per-box MCP/address/AHK facts come from the ONE shared table scripts/lib/genlock-fleet-boxes.sh.
 #
@@ -528,7 +528,7 @@ Usage:
 
   --box     stream (win-stream-snv, 10.77.9.204) or resolume (win-resolume, resolume.lan — the
             traveling cg OBS box, issue 1295) — selects the MCP. The Windows strih PC is RETIRED
-            (issue 1317): strih-lx is a Linux box launched by its strih-obs.service user unit.
+            (issue 1317): strih-snv is a Linux box launched by its strih-obs.service user unit.
   --force   force-kill a wedged obs64 first (documented obs-ops recovery; DEV rig).
   --obs-dir override the OBS install root (default 'C:\Program Files\obs-studio'; its bin\64bit is cwd).
 
@@ -561,12 +561,12 @@ main() {
   # (fleet_box_obs_profile) adds the `build <sha> - <label>: cg` title check on resolume (label localized).
   # resolume's host is the HOSTNAME resolume.lan, NEVER a pinned IP -- it DHCP-drifts and currently
   # collides with `bridge` at .201 (targets.md), so the emitted STEP-3/3b WS ops resolve it live via
-  # `--host resolume.lan`; confirm the box identity before trusting it. A Linux box (strih-lx) is
+  # `--host resolume.lan`; confirm the box identity before trusting it. A Linux box (strih-snv) is
   # refused: it has no win-* MCP and is launched by its strih-obs.service systemd user unit.
   local mcp box_ip ahk_mode title_profile=""
   case "$box" in
     strih)
-      echo "ERROR: --box strih is the RETIRED Windows strih PC (issue 1317) -- the strih is strih-lx, a Linux box launched by its strih-obs.service user unit, never this Windows planner" >&2
+      echo "ERROR: --box strih is the RETIRED Windows strih PC (issue 1317) -- the strih is strih-snv, a Linux box launched by its strih-obs.service user unit, never this Windows planner" >&2
       usage >&2; exit 2 ;;
   esac
   if ! mcp="$(fleet_box_mcp "$box")" || ! box_ip="$(fleet_box_ip "$box")"; then
@@ -585,7 +585,7 @@ main() {
   # the dev1-side WS ops confirm the resolved address is REALLY RESOLUME-SNV (getent + its cg OBS
   # profile / OBS-WS identity, rig-state-inspection.md §2) and substitute the confirmed live
   # address for `resolume.lan` if in doubt -- mirrors the deploy plan's STEP -1 identity-confirm.
-  if [ "$box" = "resolume" ]; then
+  if [ "$(obs_fleet_canonical_name "$box")" = "resolume-snv" ]; then
     cat <<'RESCAVEAT'
 # STEP -1 (resolume ONLY -- box IDENTITY confirm, issue 1295): resolume.lan is a TRAVELING DHCP box
 #         currently resolving to 10.77.9.201 = the SAME IP `bridge` lists (targets.md). The dev1-side

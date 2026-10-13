@@ -10,9 +10,9 @@ set -euo pipefail
 #
 # RELEASE-AGNOSTIC (issue 1317): supports BOTH a 24.04 (noble) and a 26.04 (resolute) live stick —
 # the casper layer chain is the same and the chroot kernel meta is DERIVED from the target's own
-# /etc/os-release VERSION_ID (linux-generic-hwe-<VERSION_ID>, the HWE line the imag/strih-lx role
+# /etc/os-release VERSION_ID (linux-generic-hwe-<VERSION_ID>, the HWE line the imag/strih-snv role
 # runs, else linux-generic) via `imag_kernel_meta_package`, never a hardcoded release literal. The
-# strih-lx notebook (owner 18.9.) uses a 26.04 stick with --hostname strih-lx --ip 10.77.9.203.
+# strih-snv notebook (owner 18.9.) uses a 26.04 stick with --hostname strih-snv --ip 10.77.9.203.
 #
 # WHY squashfs LAYERS and not a copy of the running live session: an Ubuntu live ISO stacks
 #   minimal.squashfs  ->  minimal.standard.squashfs  ->  minimal.standard.live.squashfs
@@ -437,10 +437,10 @@ apt-get install -y --no-install-recommends openssh-server network-manager grub-e
 # HWE line (the incumbent box on 6.17; on imag, setup-imag.sh's step-6 HWE holds + the
 # linux-lowlatency-hwe-<rel> install depend on exactly these packages, so a GA baseline aborts
 # provisioning) and it carries the 13th-gen CPU/iGPU/USB-NIC support #482 deliberately kept — the SAME
-# hardware class the strih-lx notebook (setup-strih.sh follow-on) is on. issue 1317: the release is
+# hardware class the strih-snv notebook (setup-strih.sh follow-on) is on. issue 1317: the release is
 # DERIVED from the target's own /etc/os-release VERSION_ID (linux-generic-hwe-<VERSION_ID> when
 # available on that release, else linux-generic) via imag_kernel_meta_package (serialized in above),
-# never a hardcoded noble literal — so the ONE installer serves both an imag (24.04) and a strih-lx
+# never a hardcoded noble literal — so the ONE installer serves both an imag (24.04) and a strih-snv
 # (26.04) stick.
 if ! ls /boot/vmlinuz-* >/dev/null 2>&1; then
     version_id="\$( . /etc/os-release; printf '%s' "\${VERSION_ID:-}" )"

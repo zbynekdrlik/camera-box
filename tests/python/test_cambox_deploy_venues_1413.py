@@ -100,7 +100,7 @@ def test_venue_camera_rows_of_an_unknown_venue_are_empty(tmp_path):
 
 
 def test_venue_camera_rows_fail_loudly_on_a_broken_fact_file(tmp_path):
-    boxes = _boxes_copy(tmp_path, {"strih-lx.env": [("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=2 3 5 7")]})
+    boxes = _boxes_copy(tmp_path, {"strih-snv.env": [("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=2 3 5 7")]})
     r = _bash(tmp_path, "rc=0; dantesync_fleet_venue_camera_rows pp || rc=$?; echo rc=$rc",
               DANTESYNC_FLEET_STRIH_BOXES_DIR=str(boxes))
     assert "rc=1" in r.stdout, r.stdout + r.stderr
@@ -192,7 +192,7 @@ def test_deploy_venue_fails_a_reachable_camera_whose_swap_fails(tmp_path):
 
 def test_deploy_venue_with_every_camera_away_dials_nothing_and_passes(tmp_path):
     proc, box, hosts = _venue_deploy(tmp_path, ["--binary", str(_camera_box_artifact(tmp_path)), "--venue", "pp"],
-                                     home="strih-lx")
+                                     home="strih-snv")
     out = proc.stdout + proc.stderr
     assert proc.returncode == 0, out
     assert hosts == [], hosts
@@ -219,7 +219,7 @@ def test_deploy_venue_refuses_an_unknown_venue_and_a_broken_fact_file(tmp_path):
     proc, _, hosts = _venue_deploy(_sub(tmp_path, "a"), ["--binary", art, "--venue", "nowhere"], home="cam7")
     assert proc.returncode == 1 and hosts == [], proc.stdout + proc.stderr
     assert "venue 'nowhere'" in proc.stderr
-    boxes = _boxes_copy(tmp_path, {"strih-lx.env": [("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=2 3 5 7")]})
+    boxes = _boxes_copy(tmp_path, {"strih-snv.env": [("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=2 3 5 7")]})
     proc, _, hosts = _venue_deploy(_sub(tmp_path, "b"), ["--binary", art, "--venue", "pp"], home="cam7",
                                    extra_env={"DANTESYNC_FLEET_STRIH_BOXES_DIR": str(boxes)})
     assert proc.returncode == 1 and hosts == [], proc.stdout + proc.stderr
@@ -455,7 +455,7 @@ def test_gate_other_venues_under_no_main_pin_names_the_version_read(tmp_path):
 
 
 def test_gate_other_venues_with_a_broken_fact_file_keeps_the_exit(tmp_path):
-    boxes = _boxes_copy(tmp_path, {"strih-lx.env": [("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=2 3 5 7")]})
+    boxes = _boxes_copy(tmp_path, {"strih-snv.env": [("STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=2 3 5 7")]})
     r, _ = _gate(tmp_path, [*_SNV_ARGS, "--other-venues"], {"192.0.2.62": "1.7.0-dev.764"}, home="cam7",
                  extra_env={"DANTESYNC_FLEET_STRIH_BOXES_DIR": str(boxes)})
     assert r.returncode == 0, r.stdout + r.stderr

@@ -390,7 +390,7 @@ fn nc_ssh_is_stdin_safe_for_while_read_loops() {
 
 // ------------------------------------------------------------------------------------------------
 // issue 1242 — the designated strih-uplink drop-sampler moved with the M4 cut-over (20.9.2026).
-// strih is now the Linux notebook strih-lx on a USB 2.5 GbE adapter plugged into foh1_video_switch
+// strih is now the Linux notebook strih-snv on a USB 2.5 GbE adapter plugged into foh1_video_switch
 // `ether2`; the old Windows strih's 10 G DAC port (`foh2_video sfp-sfpplus2`) has NO link any more,
 // so the #1110 designated probe kept printing "probe clean -- strih uplink" for a dead port while the
 // REAL strih egress (`foh1_video ether2`) was tail-dropping millions of packets. Two guards:
@@ -403,7 +403,7 @@ fn designated_default_is_the_strih_lx_uplink_1242() {
     let orch = std::fs::read_to_string(manifest_dir().join("scripts/netcfg-audit.sh")).unwrap();
     assert!(
         orch.contains(r#"NETCFG_DROP_PROBE_PORTS="${NETCFG_DROP_PROBE_PORTS:-foh1_video|ether2}""#),
-        "the designated drop-sampler default must name strih-lx's uplink foh1_video|ether2"
+        "the designated drop-sampler default must name strih-snv's uplink foh1_video|ether2"
     );
     assert!(
         !orch.contains(

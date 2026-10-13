@@ -102,7 +102,7 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # rolls to it with this pin (dantesync-fleet-upgrade.sh --target); until then the gate names every 1.11.1 node.
 # Bumped 2026-09-29: fleet rolled to v1.13.0 (dantesync PR 124, issue 112 -- a node that stops hearing
 # PTP re-joins the multicast on its own after 10 s instead of needing a service restart, and /status
-# reports NTP-only + is_locked=false while PTP is stale instead of a frozen LOCK; the strih-lx USB NIC
+# reports NTP-only + is_locked=false while PTP is stale instead of a frozen LOCK; the strih-snv USB NIC
 # replugs of 29.9 left the fleet date master on NTP until a restart stepped the whole fleet).
 # Bumped 2026-09-29: fleet rolled to v1.14.0 (dantesync PR 125 -- a grandmaster FREQUENCY step, e.g. a
 # Dante leader re-election (~25 ppm), is detected and fed forward into the phase-lock integrator: the
@@ -112,7 +112,7 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # persists its fleet date offset D in date-offset.json and restores it on a restart, and a follower
 # whose master goes silent HOLDS D (date_authority "holding") instead of falling back to its own NTP:
 # a master restart no longer steps the fleet date. Rolled 1.10.2026 02:05-02:25Z after the nightly step,
-# followers first then the strih-lx master; a verification restart of the master stepped no follower).
+# followers first then the strih-snv master; a verification restart of the master stepped no follower).
 # Bumped 2026-10-07: v1.16.0 (dantesync PR 128, a991f13 -- the daily-mode nightly date step is rounded
 # to a 200 ms quantum (`date_daily_step_quantum_ms`), a whole number of frames at 25/30/50/60 fps, so
 # the 02:00 UTC step no longer shifts any genlock grid's phase; camera-box issue 1372 part A).

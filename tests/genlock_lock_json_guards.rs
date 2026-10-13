@@ -306,7 +306,7 @@ fn genlock_lock_qpc_drift_is_the_step_only_1357() {
     // The removed RATE branch compared a 300 s windowed wall-vs-monotonic rate against ONE
     // instantaneous dantesync `f_ptp + f_phase` sample: on Linux the measured side is 0 by construction
     // (CLOCK_MONOTONIC is kernel-disciplined), on Windows it is the free QPC — so the same clock event
-    // gave different LOCK verdicts per box (28 false DEGRADED on strih-lx, 4 on stream, 24.9.2026).
+    // gave different LOCK verdicts per box (28 false DEGRADED on strih-snv, 4 on stream, 24.9.2026).
     // A subtree pull that brings the rate bound back re-opens that per-box divergence.
     let widget = squish(&vendor_file(STATUSBAR_CPP));
     assert!(

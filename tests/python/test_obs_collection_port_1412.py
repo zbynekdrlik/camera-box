@@ -4,7 +4,7 @@ The tool rewrites OBS's own collection JSON once, before the import (OBS stopped
   * stream-pp: the Windows stream collection -> the Linux stream box (keep PRO/Development/PRE/POST,
     the program ASIO input -> pulse on strih-program-source, the YouTube player and the Windows-only
     inputs/filters/modules dropped, text_gdiplus -> ft2, images under /srv/obs-media/stream-pp/);
-  * strih-pp: the strih-lx collection -> strih-pp (STRIH-LX -> STRIH-PP, the CG sender, the presenter
+  * strih-pp: the strih-snv collection -> strih-pp (STRIH-SNV -> STRIH-PP, the CG sender, the presenter
     and fohabl hosts of the browser URLs as parameters).
 
 Every fixture here is SYNTHETIC and small. A real collection is never committed (it carries stream keys
@@ -96,7 +96,7 @@ def stream_collection():
 
 
 def strih_collection():
-    """A small strih-lx shape: already Linux, SNV names and hosts."""
+    """A small strih-snv shape: already Linux, SNV names and hosts."""
     srcs = [
         _scene("Cam 1", ["NDI cam1"]),
         _scene("2ME PVW", ["NDI 2ME PVW"]),
@@ -104,7 +104,7 @@ def strih_collection():
         _scene("Interkom", ["interkom web", "ASIO zvuk"]),
         _scene("Grafika", ["lower third", "foh meter"]),
         _src("NDI cam1", "ndi_source", {"ndi_source_name": "CAM1 (usb)", "genlock_fifo": True}),
-        _src("NDI 2ME PVW", "ndi_source", {"ndi_source_name": "STRIH-LX (2ME PVW)", "ndi_sync": 1}),
+        _src("NDI 2ME PVW", "ndi_source", {"ndi_source_name": "STRIH-SNV (2ME PVW)", "ndi_sync": 1}),
         _src("cg", "ndi_source", {"ndi_source_name": "RESOLUME-SNV (SP-program)"}),
         _src("ASIO zvuk", "pulse_input_capture", {"device_id": "strih-program-source"}),
         _src("interkom web", "browser_source", {"url": "https://vdo.ninja/?room=snv&password=hidden2"},
@@ -114,7 +114,7 @@ def strih_collection():
         _src("foh meter", "browser_source", {"url": "http://fohabl.lan/meter"}),
     ]
     return {
-        "name": "strih-lx", "current_scene": "Cam 1", "current_program_scene": "2ME PVW",
+        "name": "strih-snv", "current_scene": "Cam 1", "current_program_scene": "2ME PVW",
         "scene_order": [{"name": s["name"]} for s in srcs if s["id"] == "scene"],
         "sources": srcs, "groups": [],
         "modules": {"scripts-tool": [{"path": "D:/_APPS/vban-output.lua", "settings": {}}],
@@ -275,7 +275,7 @@ def test_a_missing_program_audio_input_refuses():
         m.port(c, _stream_opts(m))
 
 
-# --- strih-lx -> strih-pp -------------------------------------------------------------------------------
+# --- strih-snv -> strih-pp -------------------------------------------------------------------------------
 
 def _strih_opts(m, **over):
     o = m.preset_options("strih-pp")
@@ -337,7 +337,7 @@ def test_the_cli_writes_once_and_prints_the_report(tmp_path):
 
 
 def test_the_cli_strih_preset_takes_both_hosts(tmp_path):
-    src = tmp_path / "strih-lx.json"
+    src = tmp_path / "strih-snv.json"
     src.write_text(json.dumps(strih_collection()))
     dst = tmp_path / "strih-pp.json"
     r = _cli("--preset", "strih-pp", "--presenter-host", "presenter-pp.lan", "--fohabl-host", "fohabl-pp.lan",
@@ -369,7 +369,7 @@ def _facts(box):
 
 def test_the_presets_follow_the_box_fact_files():
     m = _mod()
-    lx, spp, stp = _facts("strih-lx"), _facts("strih-pp"), _facts("stream-pp")
+    lx, spp, stp = _facts("strih-snv"), _facts("strih-pp"), _facts("stream-pp")
     strih = m.preset_options("strih-pp")
     assert strih["sender_prefixes"] == {lx["STRIH_NDI_PREFIX"]: spp["STRIH_NDI_PREFIX"]}
     assert strih["sender_renames"] == {lx["STRIH_CG_SENDER"]: spp["STRIH_CG_SENDER"]}
@@ -448,7 +448,7 @@ def test_a_group_and_its_members_are_kept_with_the_scene():
 
 
 def test_the_cli_report_file_and_the_output_mode(tmp_path):
-    src = tmp_path / "strih-lx.json"
+    src = tmp_path / "strih-snv.json"
     src.write_text(json.dumps(strih_collection()))
     dst, rpt = tmp_path / "strih-pp.json", tmp_path / "port.txt"
     r = _cli("--preset", "strih-pp", "--presenter-host", "p.lan", "--fohabl-host", "f.lan", "--report", rpt,

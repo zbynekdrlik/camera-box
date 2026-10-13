@@ -64,14 +64,14 @@ def test_the_fleet_carries_every_dantesync_node_including_the_audio_vlan(tmp_pat
     r = _bash(tmp_path, "dantesync_fleet_rows")
     assert r.returncode == 0, r.stderr
     names = [ln.split("|")[0] for ln in r.stdout.split()]
-    assert names == ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7", "dev1", "strih-lx",
-                     "stream", "resolume", "mbc", "fohabl", "strih-pp", "stream-pp", "resolume-pp"]
+    assert names == ["cam1", "cam2", "cam3", "cam4", "cam5", "cam6", "cam7", "dev1", "strih-snv",
+                     "stream-snv", "resolume-snv", "mbc", "fohabl", "strih-pp", "stream-pp", "resolume-pp"]
     rows = {ln.split("|")[0]: ln for ln in r.stdout.split()}
     assert rows["mbc"] == "mbc|10.77.7.232|windows|audio|always|-|"
     assert rows["fohabl"] == "fohabl|10.77.7.30|windows|audio|always|master|DANTESYNC_FOHABL_SSH_PASS"
-    # OBS-box addresses come from obs-fleet.sh (never a second literal); strih-lx is the NTP master
-    assert rows["strih-lx"] == "strih-lx|10.77.9.202|linux|ntp-master|obsfleet|-|"
-    assert rows["resolume"] == "resolume|resolume.lan|windows|video|obsfleet|-|"
+    # OBS-box addresses come from obs-fleet.sh (never a second literal); strih-snv is the NTP master
+    assert rows["strih-snv"] == "strih-snv|10.77.9.202|linux|ntp-master|obsfleet|-|"
+    assert rows["resolume-snv"] == "resolume-snv|resolume.lan|windows|video|obsfleet|-|"
     assert rows["dev1"] == "dev1|local|linux|video|local|-|"
 
 
@@ -84,11 +84,11 @@ def test_lv1_is_excluded_per_the_owner():
 
 def test_cameras_come_from_the_camera_resolve_walk_not_a_literal_range(tmp_path):
     """Every camera camera_resolve knows that a venue lists, and nothing else (issue 1413: the HOME
-    venue's cameras are the `always` rows, the strih-lx.env STRIH_CAMERAS list)."""
+    venue's cameras are the `always` rows, the strih-snv.env STRIH_CAMERAS list)."""
     import re
     arms = re.findall(r"^\s*(cam[0-9]+)\)\s*CAMERA_IP=", (_ROOT / "scripts" / "camera-set.sh").read_text(),
                       re.MULTILINE)
-    home = re.search(r"^STRIH_CAMERAS=(.+)$", (_ROOT / "scripts" / "strih-boxes" / "strih-lx.env").read_text(),
+    home = re.search(r"^STRIH_CAMERAS=(.+)$", (_ROOT / "scripts" / "strih-boxes" / "strih-snv.env").read_text(),
                      re.MULTILINE).group(1).split()
     r = _bash(tmp_path, "dantesync_fleet_names homegate=always os=linux")
     assert r.stdout.split() == [a for a in arms if a[3:] in home]
@@ -98,8 +98,8 @@ def test_cameras_come_from_the_camera_resolve_walk_not_a_literal_range(tmp_path)
 
 
 def test_a_retired_obs_box_drops_out_and_returns_with_its_home_check(tmp_path):
-    base = "strih-lx|10.77.9.202|linux-genlock|always\nstream|10.77.9.204|windows-genlock|always\n" \
-           "resolume|resolume.lan|windows-genlock|traveling\n"
+    base = "strih-snv|10.77.9.202|linux-genlock|always\nstream-snv|10.77.9.204|windows-genlock|always\n" \
+           "resolume-snv|resolume.lan|windows-genlock|traveling\n"
     retired = _bash(tmp_path, "dantesync_fleet_names", OBS_FLEET=base + "imag|10.77.9.182|linux-genlock|retired")
     back = _bash(tmp_path, "dantesync_fleet_names", OBS_FLEET=base + "imag|10.77.9.182|linux-genlock|always")
     assert "imag" not in retired.stdout.split()
@@ -132,10 +132,10 @@ def test_a_malformed_row_fails_loudly_in_both(tmp_path, monkeypatch):
 def test_an_obs_row_whose_host_lookup_fails_is_never_printed_empty(tmp_path):
     """Review round 1: a failing obs_fleet_host still printed the row with an EMPTY address."""
     r = _bash(tmp_path, 'obs_fleet_host() { return 1; }\ndantesync_fleet_rows || echo RC=$?',
-              DANTESYNC_FLEET="stream|obs:stream|windows|video|obsfleet|-|")
+              DANTESYNC_FLEET="stream-snv|obs:stream-snv|windows|video|obsfleet|-|")
     assert "RC=1" in r.stdout, r.stdout
-    assert "stream|" not in r.stdout
-    assert "no address for obs-fleet box 'stream'" in r.stderr
+    assert "stream-snv|" not in r.stdout
+    assert "no address for obs-fleet box 'stream-snv'" in r.stderr
 
 
 def test_an_unknown_obs_fleet_name_fails_loudly(tmp_path):
@@ -154,17 +154,17 @@ def test_version_gate_arms(tmp_path):
     # issue 1413: the SNV cameras at their rig address, the Poprad ones at the dev1-side 10.76.9.x
     assert out["L"].split() == [f"cam{n}=root@{'10.77.9' if n in (2, 3, 5) else '10.76.9'}.6{n}"
                                 for n in range(1, 8)] + [
-        "strih-lx=op@10.77.9.202", "strih-pp=op@strih-pp.lan", "stream-pp=op@stream-pp.lan"]
-    assert out["W"].split() == ["stream=op@10.77.9.204", "resolume=op@resolume.lan",
+        "strih-snv=op@10.77.9.202", "strih-pp=op@strih-pp.lan", "stream-pp=op@stream-pp.lan"]
+    assert out["W"].split() == ["stream-snv=op@10.77.9.204", "resolume-snv=op@resolume.lan",
                                 "mbc=op@10.77.7.232", "fohabl=master@10.77.7.30", "resolume-pp=op@resolume-pp.lan"]
     assert out["D"] == "dev1"
 
 
 def test_present_drops_an_away_traveling_box(tmp_path):
     # OBS_FLEET_HOME pins who is home (the obs-fleet test seam): resolume away
-    r = _bash(tmp_path, 'dantesync_fleet_spec win op --present', OBS_FLEET_HOME="strih-lx stream")
-    assert "resolume" not in r.stdout
-    assert "mbc=op@10.77.7.232" in r.stdout and "stream=op@10.77.9.204" in r.stdout
+    r = _bash(tmp_path, 'dantesync_fleet_spec win op --present', OBS_FLEET_HOME="strih-snv stream-snv")
+    assert "resolume-snv" not in r.stdout
+    assert "mbc=op@10.77.7.232" in r.stdout and "stream-snv=op@10.77.9.204" in r.stdout
 
 
 def test_credential_is_referenced_by_name_never_a_literal(tmp_path):
@@ -206,7 +206,7 @@ def test_role_grandmaster(tmp_path, monkeypatch):
 # config drift (the pure decision), on configs read LIVE on 25.9.2026
 # ---------------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("name,role", [("cam1", "video"), ("stream", "video"), ("strih-lx", "ntp-master")])
+@pytest.mark.parametrize("name,role", [("cam1", "video"), ("stream-snv", "video"), ("strih-snv", "ntp-master")])
 def test_the_live_video_configs_match_their_template(name, role, monkeypatch):
     _with_env(monkeypatch)
     assert df.drift((_FIX / f"{name}.json").read_bytes(), role) == (df.OK, [])
@@ -230,10 +230,10 @@ def test_live_fohabl_drift_names_the_missing_allowlist(monkeypatch):
 
 def test_a_byte_order_mark_is_drift_even_when_the_content_matches(monkeypatch):
     _with_env(monkeypatch)
-    raw = b"\xef\xbb\xbf" + (_FIX / "stream.json").read_bytes()
+    raw = b"\xef\xbb\xbf" + (_FIX / "stream-snv.json").read_bytes()
     verdict, diffs = df.drift(raw, "video")
     assert verdict == df.DRIFT and "byte-order mark" in diffs[0] and len(diffs) == 1
-    utf16 = (_FIX / "stream.json").read_text().encode("utf-16")
+    utf16 = (_FIX / "stream-snv.json").read_text().encode("utf-16")
     assert df.drift(utf16, "video")[0] == df.DRIFT
 
 
@@ -248,7 +248,7 @@ def test_unreadable_and_invalid_configs_are_unknown_never_ok(monkeypatch):
 def test_value_changes_extra_keys_and_rules(monkeypatch):
     import json
     _with_env(monkeypatch)
-    base = json.loads((_FIX / "stream.json").read_text())
+    base = json.loads((_FIX / "stream-snv.json").read_text())
     cfg = json.loads(json.dumps(base))
     cfg["system"]["clock_discipline"] = "legacy"
     cfg["system"]["gm_allowlist"] = ["10.77.9.184"]
@@ -267,7 +267,7 @@ def test_value_changes_extra_keys_and_rules(monkeypatch):
     cfg["ntp_server"] = "pool.ntp.org"
     assert df.drift(json.dumps(cfg).encode(), "video")[1] == ['ntp_server: "pool.ntp.org" (canonical "strih.lan")']
     # the NTP master must carry SOME upstream ntp_server
-    master = json.loads((_FIX / "strih-lx.json").read_text())
+    master = json.loads((_FIX / "strih-snv.json").read_text())
     del master["ntp_server"]
     assert df.drift(json.dumps(master).encode(), "ntp-master")[1] == ["ntp_server: missing (canonical: any value)"]
 
@@ -300,7 +300,7 @@ def _run_drift(tmp_path, stub, *args, **env):
     fleet_file = tmp_path / "rig-fleet.txt"
     if not fleet_file.exists():
         fleet_file.write_text("")
-    full = {"DANTESYNC_CONFIG_DRIFT_FETCH_CMD": str(stub), "OBS_FLEET_HOME": "strih-lx stream resolume",
+    full = {"DANTESYNC_CONFIG_DRIFT_FETCH_CMD": str(stub), "OBS_FLEET_HOME": "strih-snv stream-snv resolume-snv",
             "DANTESYNC_FLEET_CRED_FILE": str(tmp_path / "none.env")}
     full.update(env)
     return subprocess.run(["bash", str(_DRIFT_SH), "--fleet-file", str(fleet_file), *args],
@@ -308,39 +308,39 @@ def _run_drift(tmp_path, stub, *args, **env):
 
 
 def test_orchestrator_reports_the_live_audio_drift(tmp_path):
-    stub = _fetch_stub(tmp_path, {"mbc": "mbc.json", "fohabl": "fohabl.json", "stream": "stream.json",
-                                  "resolume": "stream.json", "strih-lx": "strih-lx.json"})
+    stub = _fetch_stub(tmp_path, {"mbc": "mbc.json", "fohabl": "fohabl.json", "stream-snv": "stream-snv.json",
+                                  "resolume-snv": "stream-snv.json", "strih-snv": "strih-snv.json"})
     r = _run_drift(tmp_path, stub)
     assert r.returncode == 20, r.stdout + r.stderr
     assert "node=mbc role=audio verdict=DRIFT" in r.stdout
     assert "system.gm_allowlist: missing" in r.stdout
     assert "DANTESYNC CONFIG DRIFT on: mbc fohabl" in r.stdout
-    for name in ("cam1", "cam7", "dev1", "strih-lx", "stream", "resolume"):
+    for name in ("cam1", "cam7", "dev1", "strih-snv", "stream-snv", "resolume-snv"):
         assert f"node={name} " in r.stdout and f"node={name} role=" in r.stdout
 
 
 def test_orchestrator_clean_fleet_exits_0(tmp_path):
-    stub = _fetch_stub(tmp_path, {"stream": "stream.json", "resolume": "stream.json", "strih-lx": "strih-lx.json",
+    stub = _fetch_stub(tmp_path, {"stream-snv": "stream-snv.json", "resolume-snv": "stream-snv.json", "strih-snv": "strih-snv.json",
                                   "mbc": "cam1.json", "fohabl": "cam1.json"})
-    r = _run_drift(tmp_path, stub, "--only", "cam1 stream strih-lx")
+    r = _run_drift(tmp_path, stub, "--only", "cam1 stream-snv strih-snv")
     assert r.returncode == 0, r.stdout + r.stderr
     assert "OK: every read dantesync node" in r.stdout
     assert "node=mbc" not in r.stdout
 
 
 def test_orchestrator_unread_node_is_unknown_not_clean(tmp_path):
-    stub = _fetch_stub(tmp_path, {"stream": "stream.json"}, fail=("stream",))
-    r = _run_drift(tmp_path, stub, "--only", "cam1 stream")
+    stub = _fetch_stub(tmp_path, {"stream-snv": "stream-snv.json"}, fail=("stream-snv",))
+    r = _run_drift(tmp_path, stub, "--only", "cam1 stream-snv")
     assert r.returncode == 11, r.stdout + r.stderr
-    assert "node=stream role=video verdict=UNKNOWN" in r.stdout
+    assert "node=stream-snv role=video verdict=UNKNOWN" in r.stdout
 
 
 def test_orchestrator_skips_an_away_traveling_box_and_excludes_an_acked_one(tmp_path):
-    stub = _fetch_stub(tmp_path, {"stream": "stream.json", "resolume": "mbc.json"})
+    stub = _fetch_stub(tmp_path, {"stream-snv": "stream-snv.json", "resolume-snv": "mbc.json"})
     (tmp_path / "rig-fleet.txt").write_text("cam3:battery swap\n")
-    r = _run_drift(tmp_path, stub, "--only", "cam3 stream resolume", OBS_FLEET_HOME="strih-lx stream")
+    r = _run_drift(tmp_path, stub, "--only", "cam3 stream-snv resolume-snv", OBS_FLEET_HOME="strih-snv stream-snv")
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "node=resolume role=video verdict=SKIPPED" in r.stdout
+    assert "node=resolume-snv role=video verdict=SKIPPED" in r.stdout
     assert "node=cam3 role=video verdict=EXCLUDED (acked offline: battery swap)" in r.stdout
 
 

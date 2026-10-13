@@ -76,7 +76,7 @@ fi
 
 # DANTESYNC_FLEET -- the non-camera dantesync nodes (env-overridable as a whole for tests/ops).
 #   dev1      -- the control box; it runs every dev1-side gate, so its clock is never exempt.
-#   strih-lx  -- the production strih and the fleet NTP master (ntp_server_mode on, upstream NTP).
+#   strih-snv  -- the production strih and the fleet NTP master (ntp_server_mode on, upstream NTP).
 #   stream / resolume / imag -- the other OBS boxes (imag is `retired` in obs-fleet.sh today, so it
 #                drops out automatically and returns with a one-word flip there).
 #   mbc       -- the Master Broadcast Console (Ableton, the measurement-audio chain), audio VLAN.
@@ -91,9 +91,9 @@ fi
 #                never a page or a failed gate. Owner (11.10.2026): "a tiez tam nie je dantesync tam
 #                nie je updatnuty cize potrebujes zaradit tento pc do updatovania".
 DANTESYNC_FLEET="${DANTESYNC_FLEET:-dev1|local|linux|video|local|-|
-strih-lx|obs:strih-lx|linux|ntp-master|obsfleet|-|
-stream|obs:stream|windows|video|obsfleet|-|
-resolume|obs:resolume|windows|video|obsfleet|-|
+strih-snv|obs:strih-snv|linux|ntp-master|obsfleet|-|
+stream-snv|obs:stream-snv|windows|video|obsfleet|-|
+resolume-snv|obs:resolume-snv|windows|video|obsfleet|-|
 imag|obs:imag|linux|video|obsfleet|-|
 mbc|10.77.7.232|windows|audio|always|-|
 fohabl|10.77.7.30|windows|audio|always|master|DANTESYNC_FOHABL_SSH_PASS
@@ -368,7 +368,7 @@ dantesync_fleet_fixed_names() {
 }
 
 # dantesync_fleet_master_names -> the space-separated NAMES of every NTP master: role `ntp-master`
-# (the home venue, strih-lx) and every venue master `ntp-master-<venue>` (issue 1412: strih-pp).
+# (the home venue, strih-snv) and every venue master `ntp-master-<venue>` (issue 1412: strih-pp).
 dantesync_fleet_master_names() {
   local out="" name role
   while IFS='|' read -r name _ _ role _; do

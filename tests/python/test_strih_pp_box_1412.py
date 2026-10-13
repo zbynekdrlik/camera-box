@@ -1,4 +1,4 @@
-"""issue 1412, slice A: the Poprad strih (strih-pp) as a strih-lx clone, plus the fresh-box gaps.
+"""issue 1412, slice A: the Poprad strih (strih-pp) as a strih-snv clone, plus the fresh-box gaps.
 
 Covers:
   * the facts: the new keys STRIH_ROLE / STRIH_DANTE_GM / STRIH_PROGRAM_AUDIO_SAMPLER, strih-pp's values
@@ -77,7 +77,7 @@ def test_the_new_keys_close_the_fact_list():
 
 
 def test_strih_lx_is_the_strih_role_on_the_snv_grandmaster_with_the_sampler():
-    r = _bash('strih_box_load strih-lx || exit 9\nprintf "%s|%s|%s\\n" "$(strih_box_role)" '
+    r = _bash('strih_box_load strih-snv || exit 9\nprintf "%s|%s|%s\\n" "$(strih_box_role)" '
               '"$(strih_lx_dante_gm)" "$(strih_lx_program_audio_sampler)"')
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "strih|video-clock.lan|on"
@@ -130,7 +130,7 @@ def test_strih_pp_seed_manifest_takes_cameras_1_4_6_7_and_the_pp_cg(tmp_path):
     assert ("STRIH-PP (2ME PGM)", "NDI 2ME PGM (mv)") in pairs
     assert ("RESOLUME-PP (SP-program)", "cg") in pairs
     assert m["outputs"][0] == "STRIH-PP (2ME PGM)"
-    assert "RESOLUME-SNV" not in r.stdout and "STRIH-LX" not in r.stdout
+    assert "RESOLUME-SNV" not in r.stdout and "STRIH-SNV" not in r.stdout
 
 
 @pytest.mark.parametrize("key,value", [
@@ -138,16 +138,16 @@ def test_strih_pp_seed_manifest_takes_cameras_1_4_6_7_and_the_pp_cg(tmp_path):
     ("STRIH_PROGRAM_AUDIO_SAMPLER", "yes"), ("STRIH_PROGRAM_AUDIO_SAMPLER", "ON"),
 ])
 def test_a_malformed_new_fact_refuses_by_name(tmp_path, key, value):
-    line = next(ln for ln in (BOXES / "strih-lx.env").read_text().splitlines() if ln.startswith(key + "="))
-    body = (BOXES / "strih-lx.env").read_text().replace(line, "%s=%s" % (key, value))
-    (tmp_path / "strih-lx.env").write_text(body)
-    r = _bash("strih_box_load strih-lx", env={"STRIH_BOXES_DIR": str(tmp_path)})
+    line = next(ln for ln in (BOXES / "strih-snv.env").read_text().splitlines() if ln.startswith(key + "="))
+    body = (BOXES / "strih-snv.env").read_text().replace(line, "%s=%s" % (key, value))
+    (tmp_path / "strih-snv.env").write_text(body)
+    r = _bash("strih_box_load strih-snv", env={"STRIH_BOXES_DIR": str(tmp_path)})
     assert r.returncode != 0
     assert key in r.stderr, r.stderr
 
 
 def test_rig_grandmaster_ip_overrides_the_gm_fact():
-    r = _bash("strih_box_load strih-lx || exit 9\nstrih_lx_dante_gm", env={"RIG_GRANDMASTER_IP": "10.9.9.9"})
+    r = _bash("strih_box_load strih-snv || exit 9\nstrih_lx_dante_gm", env={"RIG_GRANDMASTER_IP": "10.9.9.9"})
     assert r.stdout == "10.9.9.9"
 
 
@@ -513,7 +513,7 @@ def _applies(env, step):
 
 
 def test_strih_lx_skips_the_irq_unit_and_runs_the_sampler():
-    # issue 1411: the new strih-lx rig NIC is the 10 GbE Thunderbolt Aquantia (PCIe, not USB).
+    # issue 1411: the new strih-snv rig NIC is the 10 GbE Thunderbolt Aquantia (PCIe, not USB).
     assert _applies(("lx", None), "11b").startswith("SKIP the rig NIC is not a USB device")
     assert _applies(("lx", None), "16e") == "RUN"
     assert _applies(("lx", None), "16c") == "RUN"

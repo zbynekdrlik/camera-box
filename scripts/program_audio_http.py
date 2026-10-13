@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """issue 1404 -- the program-audio sampler's OWN read-only HTTP endpoint (host-agnostic).
 
-The sampler moved off dev1 to strih-lx (owner, 7.10.2026: dev1 is shared and loaded by other
+The sampler moved off dev1 to strih-snv (owner, 7.10.2026: dev1 is shared and loaded by other
 projects' CI; ROZHODNUTÉ 6039368611), and the process serves the file it writes itself. This is the
 only place the verdict is served: the dev1 rig-lease server's :8890 route was retired on 8.10.2026.
 

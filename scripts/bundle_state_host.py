@@ -605,9 +605,9 @@ def linux_obs_handles(proc_root="/proc", clk_tck=None):
     """The Linux `obs_handles*` facet: the open-fd count of the OBS process (comm `obs`, the
     strih-obs.service binary), its start epoch (btime + /proc/<pid>/stat start ticks, context), its
     RUN token `<boot id>:<start ticks>` and its soft open-files limit. The run token is the process
-    identity: btime moves whenever the wall clock is stepped (strih-lx is the dantesync date
+    identity: btime moves whenever the wall clock is stepped (strih-snv is the dantesync date
     master), the boot id and the start ticks never do -- the same OBS-run identity
-    scripts/strih_browser_keeper.py uses. The server runs as the same user as OBS (on strih-lx both
+    scripts/strih_browser_keeper.py uses. The server runs as the same user as OBS (on strih-snv both
     are --user units of the desktop user), so the fd directory is listable. {} when no OBS process
     is readable."""
     try:

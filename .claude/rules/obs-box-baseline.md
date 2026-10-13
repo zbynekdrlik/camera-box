@@ -19,7 +19,7 @@ paths:
 # The shared OBS-box appliance baseline (issue 1357 scope A)
 
 **Owner rulings (ticket comments 5793367455 + 5793384168):** the imag notebook's provisioning is
-the reference starting position. Every Linux OBS box (imag, strih-lx, a future replacement) is the
+the reference starting position. Every Linux OBS box (imag, strih-snv, a future replacement) is the
 SAME OBS-only appliance: lightdm autologin into **openbox on plain Xorg** (no GNOME Shell, no
 Wayland/XWayland), the low-latency kernel, the de-jitter masks, max-performance persistence, the
 power envelope. A difference between boxes is a defect, not a per-box feature.
@@ -61,7 +61,7 @@ power envelope. A difference between boxes is a defect, not a per-box feature.
   pin now serves only isolated nohz_full cores, which the `affinity` row forbids, so a gated grant
   could never fire. Full story: `genlock-render-tick-pin.md`.
 - **The dpkg lock wait is the FIRST action of every provisioning run.** `obs_box_apt_lock_timeout` writes `/etc/apt/apt.conf.d/90camera-box-lock-timeout` (`DPkg::Lock::Timeout "600";`) right after the root check in BOTH setup scripts, before any apt-get.
-  - It exists because a periodic apt run held the lock and failed the strih-lx deploy twice at step 4 (24.9.2026). apt-get's default lock wait is 0.
+  - It exists because a periodic apt run held the lock and failed the strih-snv deploy twice at step 4 (24.9.2026). apt-get's default lock wait is 0.
   - Ubuntu's `Version::2.0::Dpkg::Lock::Timeout` applies only to the `apt` front end, never to apt-get.
   - Never add a per-call `-o DPkg::Lock::Timeout`. A real apt failure must still fail loud after the wait, through a `|| fail` or the caller's `set -e`.
   - The file is written 0644 through a `.dpkg-tmp` sibling, a name apt ignores silently.
@@ -77,13 +77,13 @@ power envelope. A difference between boxes is a defect, not a per-box feature.
   that owns it, strih inside step 11 in imag's order) + a verdict row + its gather keys. The
   `gather_and_verdict_share_one_key_set` test fails if the two halves of the grader drift.
 - **Autostart CONTENT stays per box** (which supervised OBS unit, which projector layout): imag keeps
-  its test-pinned step-16 heredoc, strih-lx uses `strih_openbox_autostart_text`. Both MUST carry the
+  its test-pinned step-16 heredoc, strih-snv uses `strih_openbox_autostart_text`. Both MUST carry the
   preamble lines verbatim and `systemctl --user start <obs unit>` — that is what the verify grades.
 
 ## python3-websocket (kiosk package install, issue 1361)
 
 Both OBS launchers run a websocket scene seeder (`strih-obs-start.sh` refuses to start OBS without
-`python3-websocket`; `imag_scenes.py` imports it). It was only a hand install on strih-lx, so
+`python3-websocket`; `imag_scenes.py` imports it). It was only a hand install on strih-snv, so
 `obs_box_kiosk` step (a) installs it with the other kiosk packages, and the grader row `websocket`
 (after `kiosk`, before `brightness`) is OK only when the package is installed AND the system python3
 can `from websocket import create_connection`. setup-imag.sh's own step-11b install stays (a no-op).
@@ -93,7 +93,7 @@ tapping value and the X input devices with it, and a missing tool is named there
 ## The panel-brightness keys (kiosk facet, issue 1357)
 
 Openbox has no brightness handler, so a notebook's Fn brightness keys did nothing on the kiosk
-(strih-lx, 24.9.2026 production; imag the same). `obs_box_kiosk` step (f) runs
+(strih-snv, 24.9.2026 production; imag the same). `obs_box_kiosk` step (f) runs
 `obs_box_brightness_keys "$DESKTOP_USER"`, so BOTH setup scripts get it with no extra call site:
 
 - `/usr/local/bin/obs-box-brightness up|down` (root 0755): the first sysfs backlight, a tenth of
@@ -107,7 +107,7 @@ Openbox has no brightness handler, so a notebook's Fn brightness keys did nothin
 
 Rules for the facet:
 
-- **The helper and the rule text are the live strih-lx files byte-for-byte**
+- **The helper and the rule text are the live strih-snv files byte-for-byte**
   (`obs_box_brightness_helper_text`, `obs_box_backlight_udev_rule`, sha256 checked 25.9.2026).
   Change them only together with the box.
 - **rc.xml is MERGED, never replaced.** `obs_box_openbox_rc_with_brightness_keys` is a pure stdin
@@ -118,7 +118,7 @@ Rules for the facet:
     with NO output, and the install fails loud.
   - The source is the user's rc.xml when present, else the stock `/etc/xdg/openbox/rc.xml` (openbox
     reads the user file first). The merged text is written through `obs_box_write_if_changed`.
-  - Merging the strih-lx stock rc.xml reproduces its live rc.xml byte-for-byte (checked under mawk,
+  - Merging the strih-snv stock rc.xml reproduces its live rc.xml byte-for-byte (checked under mawk,
     Ubuntu's default awk).
   - This is additive, and the only exception to verify-imag's "never rewrite operator rc.xml"
     doctrine (issue 1095). Operator content and the Root right-click binding stay untouched, so that
@@ -139,7 +139,7 @@ Rules for the facet:
   only its three paths. A box provisioned before this facet FAILs the row until setup re-runs (imag
   included).
 - **Re-runs stay quiet.** `obs_box_brightness_keys` reloads and re-triggers udev only when the rule
-  text changed, and runs `usermod` only when the user is not yet in `video`. The strih-lx genlock
+  text changed, and runs `usermod` only when the user is not yet in `video`. The strih-snv genlock
   deploy re-runs setup-strih every time.
 - **`obs_box_write_if_changed` details:** an exclusive `mktemp` sibling (never a predictable root
   temp inside a user-writable config dir); content, mode AND owner are all part of the unchanged check.
@@ -200,7 +200,7 @@ owns that 10-amdgpu.conf). Xorg then logs `Failed to load module "amdgpu"` (harm
 - **Live (supervisor):** strih-snv was fixed by hand on 12.10.2026 (packages removed, the OutputClass
   file left). The next setup-strih run there logs `not installed -- unchanged` and rewrites the
   OutputClass file to the baseline text. Before the next deploy, read `apt-get -s remove
-  xserver-xorg-video-amdgpu xserver-xorg-video-all` (read-only) on imag-nb and strih-lx: a leftover
+  xserver-xorg-video-amdgpu xserver-xorg-video-all` (read-only) on imag-nb and strih-snv: a leftover
   meta that depends on the meta (an old desktop package) makes the dry run refuse and stops setup at the
   NVIDIA step by design. On any other NVIDIA box, after setup + an X restart,
   `xrandr --listproviders` must name the sink `modesetting`; then soak overnight and read `(drm-hang)`.
@@ -229,16 +229,16 @@ Interkom, Odpocet) ran 2 h behind. The zone is ONE declaration, `RIG_TIMEZONE` i
   sources keep the zone they loaded. When `obs_box_timezone` changed the zone it prints a note: reboot,
   or restart the OBS unit, the :8899 bundle-state server and the session apps TOGETHER. A restarted
   OBS beside a UTC bundle-state server reads its own log ~2 h old (`obs_log_head_age_s`), which the
-  audio-mixer watchdog reads as STALE / a CLOCK page. The strih-lx genlock deploy restarts OBS only.
+  audio-mixer watchdog reads as STALE / a CLOCK page. The strih-snv genlock deploy restarts OBS only.
 - **The swap is atomic:** the link and `/etc/timezone` are built as `*.rig-new` beside their names and
   `mv -Tf`'d over them, so a live reader never sees a missing `/etc/localtime` (glibc: UTC).
 - **Known side effect, accepted:** the `apt-daily-upgrade` off-hours drop-in (`OnCalendar=04:00`,
-  local time) now fires at 04:00 Bratislava = 02:00-02:30Z in summer, the strih-lx dantesync nightly
+  local time) now fires at 04:00 Bratislava = 02:00-02:30Z in summer, the strih-snv dantesync nightly
   date-step window. 04:00 local is still off-hours; apt is not timing-sensitive.
 
 ## The CPU idle wake-up latency bound (item `obs_box_cpu_latency`, grader row `cstate`)
 
-strih-lx runs the ACPI idle driver: POLL / C1_ACPI 1 us / C2_ACPI 127 us / C3_ACPI 1048 us, and C3
+strih-snv runs the ACPI idle driver: POLL / C1_ACPI 1 us / C2_ACPI 127 us / C3_ACPI 1048 us, and C3
 was entered ~106 M times on cpu0 (finding 5839598285). A ~1 ms wake-up can land on the genlock
 render tick, the audio thread and the NDI receive threads. The governor/EPP pins do not touch this.
 
@@ -322,9 +322,9 @@ graded), and lightdm + openbox installed.
 ## Per-box power facts
 
 - imag: PL1 `${IMAG_PL1_W:-45}`, guard step-down 25 W (the historic iGPU values).
-- strih-lx: PL1 = `strih_lx_pl1_watts <firmware µW>` = max(55 W spec base, the firmware's own
+- strih-snv: PL1 = `strih_lx_pl1_watts <firmware µW>` = max(55 W spec base, the firmware's own
   package-0 long_term constraint read at provisioning through the envelope's identity gather). The
-  issue-1357 review read **80 W** live on strih-lx (23.9.2026). The envelope reads and pins the
+  issue-1357 review read **80 W** live on strih-snv (23.9.2026). The envelope reads and pins the
   **MMIO** zone only (`intel-rapl-mmio:*`; the MSR zone is ALSO named `package-0` and can differ), so
   strih keeps whatever the MMIO package-0 long_term reads -- 80 W if that is where the review's number
   came from; the step-11 echo prints `firmware <uW>`, confirm it at the conversion. Pinning the 55 W
@@ -335,7 +335,7 @@ graded), and lightdm + openbox installed.
   `strih_lx_pl1_stepdown_watts` (45 W), passed as `obs_box_power_envelope`'s third argument.
   Overrides: `STRIH_LX_PL1_W`, `STRIH_LX_PL1_STEPDOWN_W`.
 
-## strih-lx conversion (supervisor runbook)
+## strih-snv conversion (supervisor runbook)
 
 1. Stop OBS (`strih-obs-stop.sh`), then run `setup-strih.sh` from a checkout (it copies the
    power-envelope tools from the repo). The kiosk item purges GNOME and switches the display manager
@@ -350,7 +350,7 @@ graded), and lightdm + openbox installed.
 3. Run `verify-strih.sh`: every `(baseline:*)` row must be PASS, including `rtprio`
    (setup-strih removed the leftover grant; the reviewer found it still present on the box).
 
-Live conversion results (strih-lx, 23.9.2026, first kiosk boot on 7.0.0-31 + `preempt=full`):
+Live conversion results (strih-snv, 23.9.2026, first kiosk boot on 7.0.0-31 + `preempt=full`):
 
 - Every `(baseline:*)` row and the then-separate item 33 (rtprio-off, now the baseline `rtprio` row) PASS; OBS on the RTX via NVIDIA-primary Xorg,
   program `avg_frame_ms` ~19-20 `lagged=0`, MV 30 fps.
@@ -358,7 +358,7 @@ Live conversion results (strih-lx, 23.9.2026, first kiosk boot on 7.0.0-31 + `pr
   first kiosk boot came up powersave. The max-performance item now stops + masks it and the perf row
   FAILs while it is enabled; `<BOX>-maxperf.sh` writes `platform_profile` itself.
 - The kiosk's service-disable list turned **bluetooth** off, which dropped the operator's Bluetooth
-  mouse. `obs_box_kiosk ... keep-bluetooth` is the strih-lx box fact (imag keeps the plain call). A
+  mouse. `obs_box_kiosk ... keep-bluetooth` is the strih-snv box fact (imag keeps the plain call). A
   paired + trusted mouse that stays `Connected: no` with the adapter powered is asleep / on another
   Easy-Switch channel -- a click reconnects it; nothing on the box side to fix.
 - The lowlatency config meta must be installed at the INSTALLED generic-hwe version (an unpinned

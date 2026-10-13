@@ -5,7 +5,7 @@
 //! Every cambox emits on the SAME 60 Hz genlock grid, and on the development rig every cambox
 //! captures the SAME camera through an HDMI splitter, so all of them hand their frame to the NDI
 //! SDK within ~1 ms of each other. Each frame is ~300–350 KB of SpeedHQ on the wire. The seven
-//! bursts cross the 10 G trunks together and converge on ONE 2.5 GbE egress port: the strih-lx
+//! bursts cross the 10 G trunks together and converge on ONE 2.5 GbE egress port: the strih-snv
 //! uplink `foh1_video ether2`. That burst overflows the switch egress queue and the switch
 //! tail-drops whole packet runs (`tx-drop-queue1` climbing, up to ~2500 packets per burst). A large
 //! run costs the affected receivers ~380 ms of video on 2–5 cameras at once. See the
@@ -64,7 +64,7 @@ pub const STAGGER_US: u64 = 1200;
 
 /// Whether the shipped build staggers at all. OFF since 24.9.2026 (issue 1242): the (N−1) × 1.2 ms
 /// offset left CAM7 only ~1 ms of slot when per-frame work spiked to ~15 ms (OVER BUDGET windows,
-/// a 112-relock burst on the strih-lx receiver), while the strih-lx switch-port drops did not
+/// a 112-relock burst on the strih-snv receiver), while the strih-snv switch-port drops did not
 /// measurably improve. The helpers stay (their arithmetic is still pinned) for a future smaller,
 /// work-sized offset; flip this only with that new design + a rig measurement.
 pub const STAGGER_ACTIVE: bool = false;
@@ -82,7 +82,7 @@ const _: () = assert!(MAX_OFFSET_SLOT_PERCENT > 0 && MAX_OFFSET_SLOT_PERCENT < 1
 pub const MAX_CAMERA_NUMBER: u32 = 99;
 
 /// Parse the camera number from a box hostname: `CAM7` / `cam7` / ` Cam3 ` → `Some(n)`.
-/// Anything else (`camera-box`, `CAM`, `CAM0`, `CAM1-lx`, `strih-lx`, empty) → `None`.
+/// Anything else (`camera-box`, `CAM`, `CAM0`, `CAM1-lx`, `strih-snv`, empty) → `None`.
 pub fn camera_number_from_hostname(hostname: &str) -> Option<u32> {
     let h = hostname.trim();
     if h.len() < 4 || !h.is_char_boundary(3) || !h[..3].eq_ignore_ascii_case("cam") {
@@ -363,7 +363,7 @@ mod tests {
             "CAM0",
             "camera-box",
             "CAM1-lx",
-            "strih-lx",
+            "strih-snv",
             "cam 1",
             "CAM-1",
             "CAM4294967295",
@@ -467,7 +467,7 @@ mod tests {
     #[test]
     fn the_stagger_is_off_in_production_1242() {
         // 24.9.2026: the 7.2 ms CAM7 offset did not fit the slot (per-frame work spikes to 15 ms
-        // -> OVER BUDGET -> a 112-relock burst on strih-lx), and the switch drops did not clearly
+        // -> OVER BUDGET -> a 112-relock burst on strih-snv), and the switch drops did not clearly
         // improve, so the shipped plan() hands every frame over at once again.
         let p = plan("CAM7", Some(60), 60, 1);
         assert_eq!(p.offset, Duration::ZERO);

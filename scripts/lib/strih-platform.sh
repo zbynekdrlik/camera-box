@@ -5,7 +5,7 @@
 #
 # scripts/lib/strih-platform.sh -- issue 1351: resolve the strih box's OBS PLATFORM
 # (windows | linux) after the M4 cut-over (strih role moved from the Windows STRIH-SNV PC to the
-# Linux notebook strih-lx, 10.77.9.202, running OBS under `strih-obs.service` on GNOME/Wayland),
+# Linux notebook strih-snv, 10.77.9.202, running OBS under `strih-obs.service` on GNOME/Wayland),
 # plus the Linux-side operator-session-visibility predicate that replaces the Windows-only
 # obs64/AHK CIM probe (scripts/lib/obs-session-visibility.sh, #977/#958) for a Linux strih.
 #
@@ -25,9 +25,9 @@ command -v obs_fleet_name_for_host >/dev/null 2>&1 \
 #      IGNORED and falls through to the host-based resolution below -- never abort a live run on
 #      a bad env value).
 #   2. HOST equal to STRIH_LX_HOST (when the operator sets it -- an explicit ops/test override for
-#      a strih-lx at another address) -> "linux".
+#      a strih-snv at another address) -> "linux".
 #   3. HOST addressing a fleet row whose CLASS is linux-genlock (issue 1317 part 4:
-#      `obs_fleet_class_for_host` -- 10.77.9.202, `strih-lx`, `STRIH-LX`, `strih-lx.lan`, and
+#      `obs_fleet_class_for_host` -- 10.77.9.202, `strih-snv`, `STRIH-SNV`, `strih-snv.lan`, and
 #      `strih.lan`, the retired Windows PC's own name that the rig DNS points at 10.77.9.202) ->
 #      "linux". The SAME alias-aware lookup the Windows-tool class gate uses, so the two resolvers
 #      cannot disagree; keyed on the row's CLASS, never a literal box name, so the next strih (a Linux
@@ -54,7 +54,7 @@ strih_platform() {
 }
 
 # ---- recording-e2e.sh [8/8] plan TEXT (issue 1317 part 4) -------------------------------------------
-# The [8/8a] strih decode runs over plain ssh/scp on strih-lx (recording-verdict-on-strih-lx.sh, which
+# The [8/8a] strih decode runs over plain ssh/scp on strih-snv (recording-verdict-on-strih-snv.sh, which
 # also pulls the partial + pixel proofs back itself); the Windows strih ran it via the win-strih MCP.
 # These print the platform-correct lines so the harness never tells an operator to run a win-strih
 # FileDownload / Remove-Item against the Linux box. Kept here (not inline) per the recording-e2e.sh
@@ -63,7 +63,7 @@ strih_platform() {
 # strih_access_label HOST -> how the strih box is reached in the [8/8a] banner.
 strih_access_label() {
   if [ "$(strih_platform "${1:-}")" = "linux" ]; then
-    printf 'strih-lx, plain ssh/scp'
+    printf 'strih-snv, plain ssh/scp'
   else
     printf 'win-strih'
   fi
@@ -80,16 +80,16 @@ strih_obs_restart_hint() {
   fi
 }
 
-# strih_lx_partial_pullback_note PARTIAL PIXELS -> the strih-lx [8/8a] pull-back lines (the Linux
+# strih_lx_partial_pullback_note PARTIAL PIXELS -> the strih-snv [8/8a] pull-back lines (the Linux
 # decode sibling already pulled both back over scp). The Windows win-strih FileDownload text stays
 # INLINE in recording-e2e.sh's else-branch: tests/harness_recording_e2e_paths.rs pins it there.
 strih_lx_partial_pullback_note() {
   printf '    pull back to dev1: %s  AND the #186 pixel-proof dir %s\n' "${1:-}" "${2:-}"
-  printf '      (strih-lx: already pulled back over scp by recording-verdict-on-strih-lx.sh;\n'
+  printf '      (strih-snv: already pulled back over scp by recording-verdict-on-strih-snv.sh;\n'
   printf '       the pixel-proof dir is absent on a clean run)\n'
 }
 
-# strih_lx_recording_cleanup_note INDENT HOST PATH [USER] -> the strih-lx #652 cleanup PLAN line: an
+# strih_lx_recording_cleanup_note INDENT HOST PATH [USER] -> the strih-snv #652 cleanup PLAN line: an
 # `rm -f --` of the EXACT StopRecord path over plain ssh (never a glob, never a directory sweep).
 # The line is pasted into a LOCAL shell and ssh then hands the joined command to the REMOTE shell, so
 # the path is quoted for BOTH parses (review round 1): single-quoted for the remote shell (an embedded
@@ -103,14 +103,14 @@ strih_lx_recording_cleanup_note() {
   dq="${dq//\"/\\\"}"
   dq="${dq//\$/\\\$}"
   dq="${dq//\`/\\\`}"
-  printf '%sstrih-lx ssh:         ssh %s@%s "%s"\n' "$indent" "$user" "$host" "$dq"
+  printf '%sstrih-snv ssh:         ssh %s@%s "%s"\n' "$indent" "$user" "$host" "$dq"
 }
 
 # strih_planner_holder_note HOST -> the first two lines of the per-box PLANNER hand-off note. On
-# strih-lx the [8/8a] decode already ran over ssh/scp, so only 8/8b is left for the win-* MCP holder.
+# strih-snv the [8/8a] decode already ran over ssh/scp, so only 8/8b is left for the win-* MCP holder.
 strih_planner_holder_note() {
   if [ "$(strih_platform "${1:-}")" = "linux" ]; then
-    printf '    The win-* MCP holder runs 8/8b on stream (strih-lx 8/8a and imag 8/8c ALREADY ran above --\n'
+    printf '    The win-* MCP holder runs 8/8b on stream (strih-snv 8/8a and imag 8/8c ALREADY ran above --\n'
     printf '    plain ssh/scp, no MCP needed), pulls the stream partial (+ its <partial>-pixels\n'
     return 0
   fi
@@ -120,20 +120,20 @@ strih_planner_holder_note() {
 
 # strih_platform_refuse_windows_only_mode HOST WHAT -> returns 0 (silent) when HOST's strih platform
 # is windows; returns 1 with a named error on stderr when it is linux. The ONE guard a Windows-only
-# strih code path (a win-* MCP / PowerShell plan with no strih-lx port yet) calls BEFORE doing
+# strih code path (a win-* MCP / PowerShell plan with no strih-snv port yet) calls BEFORE doing
 # anything, so the Linux strih is refused loudly instead of receiving a Windows plan (issue 1317
 # part 3). Pure (only strih_platform above), no network.
 strih_platform_refuse_windows_only_mode() {
   local host="${1:-}" what="${2:-this step}"
   [ "$(strih_platform "$host")" = "linux" ] || return 0
-  echo "ERROR: ${what} is Windows-strih-only (win-* MCP / PowerShell), but strih ${host} is the Linux strih-lx (strih_platform=linux) -- it has no strih-lx port yet (issue 1317); refusing instead of emitting a Windows plan" >&2
+  echo "ERROR: ${what} is Windows-strih-only (win-* MCP / PowerShell), but strih ${host} is the Linux strih-snv (strih_platform=linux) -- it has no strih-snv port yet (issue 1317); refusing instead of emitting a Windows plan" >&2
   return 1
 }
 
 # strih_zero_loss_restart_preflight HOST -> returns 0 unless the opt-in #109 restart-survival mode
 # (ZERO_LOSS_RESTART_GATE=1) is requested against a strih whose platform is linux, in which case it
 # refuses (rc 1, named stderr). That mode plans the WINDOWS per-box decode (win-* MCP paste steps)
-# and has no strih-lx port yet (issue 1317 part 3), so recording-e2e.sh calls this right after it
+# and has no strih-snv port yet (issue 1317 part 3), so recording-e2e.sh calls this right after it
 # resolves the strih -- BEFORE any rig mutation (the cambox burn deploys, the painter step) -- instead
 # of failing after the whole preflight and a 360 s capture. Pure (env + strih_platform), no network.
 strih_zero_loss_restart_preflight() {
@@ -168,7 +168,7 @@ strih_linux_visibility_message() {
   local probe_out="${1:-}" ws_ok="${2:-0}"
   probe_out="${probe_out//$'\r'/}"
   if [ -z "$probe_out" ]; then
-    printf 'no probe output (ssh/connectivity failure -- strih-lx unreachable, or the command did not run) -- issue 1351'
+    printf 'no probe output (ssh/connectivity failure -- strih-snv unreachable, or the command did not run) -- issue 1351'
     return 0
   fi
   local svc

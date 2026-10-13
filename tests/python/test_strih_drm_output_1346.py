@@ -1,4 +1,4 @@
-"""issue 1346 -- the strih-lx HDMI output is the issue-1152 in-OBS DRM-lease output with a Program /
+"""issue 1346 -- the strih-snv HDMI output is the issue-1152 in-OBS DRM-lease output with a Program /
 Multiview VIEW (owner ROZHODNUTE 24.9.2026, design comment 5810067589). It is never an OBS projector
 window and never the desktop. This file replaces the 19.9. projector-window tests: the
 seed_projector / strih-lx-projector.json path is removed.

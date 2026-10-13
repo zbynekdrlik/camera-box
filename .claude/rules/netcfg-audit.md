@@ -53,14 +53,14 @@ switches foh1_audio `10.77.9.2`, stage_av `10.77.9.3`, foh1_video `10.77.9.4`, f
   `NETCFG_DROP_THRESHOLD` (1/s) → `DROPPING` (the microburst-tail-drop signature — check shared-buffers
   / the uplink step-down). This is a LIVE rate, deliberately NOT a cumulative-counter baseline diff.
   **Designated always-probe set (#1110):** the `node|port` tokens in `NETCFG_DROP_PROBE_PORTS` (default
-  `foh1_video|ether2` — strih-lx's USB 2.5 GbE uplink egress since the M4 cut-over, issue 1242,
-  live-verified 2026-09-23 via `/interface bridge host print where mac-address=<strih-lx MAC>`; it
+  `foh1_video|ether2` — strih-snv's USB 2.5 GbE uplink egress since the M4 cut-over, issue 1242,
+  live-verified 2026-09-23 via `/interface bridge host print where mac-address=<strih-snv MAC>`; it
   was `foh2_video|sfp-sfpplus2`, the Windows strih PC's 10 G DAC, until 20.9.2026) are
   re-probed on EVERY `--check` regardless of cumulative growth, so a HEALTHY suspect uplink (dq1 flat
   at 0, which the growth-gate would otherwise never sample) still yields a fresh live delta — the next
   starvation episode is caught. `DROPPING` on a designated port pages exactly like any other; a CLEAN
   designated probe surfaces a report-only `sampled` line carrying the cumulative dq1 delta (the
-  sampler always leaves a trace; the strih-lx tail-drop comes in BURSTS every ~10–60 s, so one clean
+  sampler always leaves a trace; the strih-snv tail-drop comes in BURSTS every ~10–60 s, so one clean
   6 s window is NOT a clean uplink). A designated port with NO link (`running!=true`) is NOT probed —
   it reports `[report-only designated-down] … the designation is stale` (pure predicate
   `netcfg_designated_port_linked`), because a dead port's flat counter used to print "strih uplink
@@ -118,9 +118,9 @@ WITHOUT paging, so a mis-provisioned dev1 never spams).
 
 - **`_nc_ssh` carries `ssh -n` — NEVER remove it (#1110 hotfix, 2026-08-25):** `_nc_drop_rate_verdict` runs ssh INSIDE the `--check` drop-probe `while read` loop fed by a herestring; an ssh without `-n` consumes the loop's remaining stdin, so the loop silently dies after the FIRST probed port and later nodes (the designated strih-uplink included) are never probed. Live repro: bash -x showed exactly one probe call, then loop end. Pinned by `nc_ssh_is_stdin_safe_for_while_read_loops` in tests/harness_netcfg_audit_797.rs.
 
-## Finding (issue 1242, 23.9.2026): the strih-lx 2.5 G uplink tail-drops the genlocked camera burst
+## Finding (issue 1242, 23.9.2026): the strih-snv 2.5 G uplink tail-drops the genlocked camera burst
 
-`foh1_video ether2` → strih-lx (USB RTL8156, 2.5 Gb/s) carries all seven ~170 Mb/s NDI camera
+`foh1_video ether2` → strih-snv (USB RTL8156, 2.5 Gb/s) carries all seven ~170 Mb/s NDI camera
 streams. Genlock makes every sender emit its ~350 KB frame on the SAME 60 Hz boundary, so the frames
 arrive together over the 10 G trunks and overflow the CRS310 egress queue. Measured: dq1 3.79 M packets
 (5.5 GB) on that port, vs **0** lifetime drops on the old Windows strih's 10 G DAC port
@@ -129,7 +129,7 @@ NDI's reliable UDP: the affected receivers get no video for ~380 ms (`recv-timin
 2–5 inputs AT ONCE, `cap_max` 66–100 ms = the 100 ms SDK capture timeout). The genlock FIFO then
 underruns (burn-id repeats) and converge-sheds. These are the multi-frame residual windows (CAM7 11/11,
 CAM4 10/10). Smaller bursts (≤~650 pkts) cost no frames. The cure is uplink capacity (a faster NIC
-into a 10 G port), not a receiver/FIFO parameter. The strih-lx host itself drops nothing
+into a 10 G port), not a receiver/FIFO parameter. The strih-snv host itself drops nothing
 (UDP `RcvbufErrors`=0, softnet drops 0).
 
 **Sender-side mitigation (the chosen fix, issue 1242):** each cambox now hands its frame to the NDI
@@ -144,8 +144,8 @@ Discriminator recipe for the next "late-arrival burst on strih" question:
    (burn log `Streaming:` 300 sent) = transport. One input only, with low cap_max = that sender
    restarting/stalling.
 2. Sample `:put [/interface ethernet get ether2 tx-drop-queue1-packet]` (dq1, the counter the audit
-   uses) on 10.77.9.4 at ~1 Hz alongside the strih-lx OBS log. The shortfall second should hold the
+   uses) on 10.77.9.4 at ~1 Hz alongside the strih-snv OBS log. The shortfall second should hold the
    big drop burst. On 23.9. every ether2 drop was in queue1, so the total `tx-drop-packet` counter read
    the same.
-3. On strih-lx (read-only): `/proc/net/snmp` Udp `RcvbufErrors` and `/proc/net/softnet_stat` col 2.
+3. On strih-snv (read-only): `/proc/net/snmp` Udp `RcvbufErrors` and `/proc/net/softnet_stat` col 2.
    Nonzero would mean the receive side itself is too slow. Zero means the loss is upstream.

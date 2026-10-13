@@ -23,7 +23,7 @@ receiver clean, sender-wire capture proved 14-15ms burst pacing originates in th
 `camera-box.service` runs with `ProtectHome=yes`, so `/root/.ndi/` is invisible to it. Second,
 `"rudp":{"recv":false}` is not the SDK schema; the SDK wants `"rudp":{"recv":{"enable":false}}`.
 An `NDI_CONFIG_DIR` drop-in pointing libndi at `/etc/ndi` is how a SYSTEM service reads an NDI
-config (strih-lx's intercom-hub does). The camboxes carry none since issue 1389: they are mDNS-only
+config (strih-snv's intercom-hub does). The camboxes carry none since issue 1389: they are mDNS-only
 receivers, so their issue-1342 drop-in and config are removed. See `.claude/rules/ndi-discovery.md`.
 
 
@@ -1397,7 +1397,7 @@ bad segment from the verdict JSON, converted its epoch range to CEST, and found 
 **RETIRED 28.9.2026 (issue 1242, owner order "cize vycistis strih obs aby tam neboli tie low
 bandwith sceny"):** strih has no low-bandwidth twins any more. `strih_mv_scenes.py` lost its
 no-flag seed and the Multiview-scene rewire -- only `--reattach N` (the sender-bounce CLEAR-then-SET
-of `NDI camN`) and `--stats SECONDS` remain; a bare run is a usage error. The strih-lx bandwidth
+of `NDI camN`) and `--stats SECONDS` remain; a bare run is a usage error. The strih-snv bandwidth
 roles that re-used these twins (connect-on-show parking, `MV <scene>` twin scenes, the E2E twin
 hold) were removed in the same slice. The history below is kept for context only.
 

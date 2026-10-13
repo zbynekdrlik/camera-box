@@ -1202,14 +1202,14 @@ pattern already establishes, just applied for byte-budget reasons rather than an
 
 ## A new Linux-box-reached-over-plain-ssh sibling script: `recording-verdict-on-imag.sh` is the reusable TEMPLATE, including its issue-1118 sha256 upload gate — copy the WHOLE pattern, not just the shape
 
-Adding a NEW per-box script for a box reached over plain ssh/scp (imag-nb, strih-lx, any future
+Adding a NEW per-box script for a box reached over plain ssh/scp (imag-nb, strih-snv, any future
 Linux OBS box — as opposed to the win-* MCP-only Windows boxes) should start from
 `scripts/recording-verdict-on-imag.sh` as the template: its "always execute for real, never a
 plan-print mode" shape (ssh/scp to a plain Linux box is always allowed on this rig), its
 `--skip-if-exists` idempotency check, its `<partial>-pixels` pull-back convention — AND its
 **issue-1118 sha256 VERSION GATE** (`onimag_upload_decision`: force wins / absent uploads / unknown
 local sha fails safe to upload / differing sha re-uploads / identical sha skips). A first draft of
-`recording-verdict-on-strih-lx.sh` (issue 1351) copied everything EXCEPT the sha gate — a mere
+`recording-verdict-on-strih-snv.sh` (issue 1351) copied everything EXCEPT the sha gate — a mere
 `[ -x "$REMOTE_BIN" ]` presence check, which silently reuses a schema-drifted binary exactly the way
 imag-nb's pre-1118 bug did. A fresh-context review agent caught it on the FIRST pass; it would not
 have been caught by any local Tier-0 check (bash -n/shellcheck/fmt are all blind to "missing a
@@ -1258,7 +1258,7 @@ one call you wrapped (`--win-http "stream=$STREAM"`, `"$HERE/dantesync-version-g
 FULL bounded call (`timeout "${STRIH_LX_WS_TIMEOUT:-20}" python3 "$here/obs_phase2.py"`), not the
 bare `obs_phase2.py` literal that also appears in the lib's own doc comments (the #832 self-collision).
 
-The SSoT lib is `scripts/lib/strih-lx-preflight.sh` (`strih_lx_gate_prefix` / `strih_lx_preflight_timeout_banner`).
+The SSoT lib is `scripts/lib/strih-snv-preflight.sh` (`strih_lx_gate_prefix` / `strih_lx_preflight_timeout_banner`).
 Verify locally under Tier-0 with a `bash <file>` sourced-lib harness (the gm_enforce slice shape with
 a fake gate + a real `timeout 2` hang→124→banner path) + the python occurrence-count sweep — a
 worktree worker's `bash -c` is refused, but `bash <written-file>` runs (see the #1265/#1308 refinement).
@@ -1384,7 +1384,7 @@ It also catches the truth-table shape std-only vendored-C gates love: a row slic
 
 ## Pinning a PRINTED shell command: parse it with BASH, never python `shlex` (issue 1317 part 4)
 
-A test that pins a plan line an operator pastes (e.g. the strih-lx `ssh host "rm -f -- '<path>'"`
+A test that pins a plan line an operator pastes (e.g. the strih-snv `ssh host "rm -f -- '<path>'"`
 cleanup line) must prove it survives BOTH parses — the local paste AND ssh's remote shell (ssh joins
 its args into one string the remote shell re-parses, so a single-level `'…'` quote around a spaced
 OBS filename silently becomes two `rm` args, hidden by `-f`). Python `shlex.split` is NOT a bash

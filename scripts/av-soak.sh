@@ -38,7 +38,7 @@ set -euo pipefail
 #       (AV_SOAK_BROADCAST_READS x AV_SOAK_BROADCAST_RETRY_S); still unreadable at a slot start =
 #       a skipped row (nothing started), before the StopRecords = abort with the recordings kept
 #     - a tail of the painter's marker log (read-only ssh), pushed with the schedule to the stream
-#       box; the strih recording decoded IN PLACE on strih-lx (recording-verdict-on-strih-lx.sh),
+#       box; the strih recording decoded IN PLACE on strih-snv (recording-verdict-on-strih-snv.sh),
 #       the stream recording IN PLACE on the stream box (recording-verdict-on-stream.sh --execute),
 #       both bounded + in parallel; the dev1 merge (recording-verdict --merge-partials)
 #     - ONE CSV row (av_soak_decision.py row) + one timing.tsv line; the recordings are NOT deleted
@@ -54,7 +54,7 @@ set -euo pipefail
 #   --plan  (DEFAULT) print every step with the exact commands; touches NOTHING (no lease, no ssh,
 #           no OBS, no curl). Needs no credential and no binary.
 #   --run   the soak. Needs CAM_PW (cam2 root, read-only use), STREAM_USER + STREAM_PW and
-#           STRIH_USER + STRIH_PW (the stream box / strih-lx ssh, the same values recording-e2e.sh
+#           STRIH_USER + STRIH_PW (the stream box / strih-snv ssh, the same values recording-e2e.sh
 #           uses), PROBE_BIN_DIR with the CI-built Linux recording-verdict, WIN_VERDICT_EXE_LOCAL =
 #           the CI-built recording-verdict.exe.
 #   --report RUN_DIR  re-grade an existing (or still running) run's CSV and exit with its verdict.
@@ -66,7 +66,7 @@ set -euo pipefail
 #
 # OPTIONS (env equivalent in brackets):
 #   --hours H          [AV_SOAK_HOURS, 8]        run length; the last window starts at H
-#   --slot-secs S      [AV_SOAK_SLOT_SECS, 1200] one window per slot (>= 1 per 20 min; the strih-lx decode needs ~8 min)
+#   --slot-secs S      [AV_SOAK_SLOT_SECS, 1200] one window per slot (>= 1 per 20 min; the strih-snv decode needs ~8 min)
 #   --segment-secs S   [AV_SOAK_SEGMENT_SECS, 20] seconds each camera is on strih program per window
 #   --run-dir D        [AV_SOAK_RUN_DIR, ~/.camera-box/av-soak/<UTC stamp>]
 #   --probe-bin-dir D  [PROBE_BIN_DIR]           dir holding the Linux recording-verdict
@@ -172,8 +172,8 @@ case "$HOURS" in '' | *[!0-9.]* | *.*.*) die 3 "--hours must be a non-negative n
 DURATION_S="$(awk -v h="$HOURS" 'BEGIN { printf "%d", h * 3600 + 0.5 }')"
 
 OBS_DIR="${AV_SOAK_OBS_DIR:-$HERE}"
-STRIH_HOST="${STRIH_HOST:-$(obs_fleet_host strih-lx)}"
-STREAM_HOST="${STREAM_HOST:-$(obs_fleet_host stream)}"
+STRIH_HOST="${STRIH_HOST:-$(obs_fleet_host strih-snv)}"
+STREAM_HOST="${STREAM_HOST:-$(obs_fleet_host stream-snv)}"
 OBS_TIMEOUT_S="${AV_SOAK_OBS_TIMEOUT_S:-30}"
 BROADCAST_READS="${AV_SOAK_BROADCAST_READS:-3}"
 BROADCAST_RETRY_S="${AV_SOAK_BROADCAST_RETRY_S:-20}"
@@ -218,9 +218,9 @@ MERGE_TIMEOUT_S="${AV_SOAK_MERGE_TIMEOUT_S:-90}"
 OVERHEAD_S="${AV_SOAK_OVERHEAD_S:-90}"
 RECORDINGS_FREE_MIN_GB="${RECORDINGS_FREE_MIN_GB:-50}"
 BUNDLE_STATE_PORT="${WIN_BUNDLE_STATE_PORT:-8899}"
-STRIH_DECODE="${AV_SOAK_STRIH_DECODE:-$HERE/recording-verdict-on-strih-lx.sh}"
+STRIH_DECODE="${AV_SOAK_STRIH_DECODE:-$HERE/recording-verdict-on-strih-snv.sh}"
 STREAM_DECODE="${AV_SOAK_STREAM_DECODE:-$HERE/recording-verdict-on-stream.sh}"
-# relative to the strih-lx login home: the same dir recording-verdict-on-strih-lx.sh defaults to
+# relative to the strih-snv login home: the same dir recording-verdict-on-strih-snv.sh defaults to
 STRIH_LX_OUT_DIR="${AV_SOAK_STRIH_LX_OUT_DIR:-verdict-out}"
 OUT_DIR_WIN="${OUT_DIR_WIN:-C:\\camera-box\\verdict-out}"
 CAMBOX_OFFLINE_ACK="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "${RIG_FLEET_ACK_FILE:-$HERE/../rig-fleet.txt}")"
@@ -309,7 +309,7 @@ boxes: strih ${STRIH_HOST} ($(strih_platform "$STRIH_HOST")), stream ${STREAM_HO
 run dir: ${RUN_DIR}  (soak.csv, timing.tsv, report-latest.txt, report.txt/json, recordings.tsv, cleanup-plan.txt, pid, STOP)
 EOF
   if [ "$(strih_platform "$STRIH_HOST")" != linux ]; then
-    echo "NOTE: --run refuses a Windows strih (retired at M4); only the strih-lx in-place decode is supported."
+    echo "NOTE: --run refuses a Windows strih (retired at M4); only the strih-snv in-place decode is supported."
   fi
   echo
   echo "SETUP (once) -- reads first, nothing changes until step 6:"
@@ -415,7 +415,7 @@ fi
 
 # --- --run ----------------------------------------------------------------------------------------
 
-[ "$(strih_platform "$STRIH_HOST")" = linux ] || die 4 "strih ${STRIH_HOST} is not the Linux strih-lx; the soak only decodes strih in place on strih-lx"
+[ "$(strih_platform "$STRIH_HOST")" = linux ] || die 4 "strih ${STRIH_HOST} is not the Linux strih-snv; the soak only decodes strih in place on strih-snv"
 for _v in CAM_PW STREAM_USER STREAM_PW STRIH_USER STRIH_PW; do
   [ -n "${!_v:-}" ] || die 4 "$_v is not set (the same value recording-e2e.sh uses; see targets.md)"
 done
@@ -942,7 +942,7 @@ run_slot() {
   DECODES_RUNNING=0
   t_dec="$(date +%s)"
   if [ "$src" -eq 124 ]; then
-    log "slot $k: the strih decode hit its ${DECODE_TIMEOUT_S} s bound -- stopping recording-verdict on strih-lx"
+    log "slot $k: the strih decode hit its ${DECODE_TIMEOUT_S} s bound -- stopping recording-verdict on strih-snv"
     kill_remote_decode strih
   fi
   if [ "$trc" -eq 124 ]; then

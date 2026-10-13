@@ -1,8 +1,8 @@
-//! issue 1346 -- the strih-lx BUILT-IN HDMI (NVIDIA, X output HDMI-0) as a fixed, indestructible
+//! issue 1346 -- the strih-snv BUILT-IN HDMI (NVIDIA, X output HDMI-0) as a fixed, indestructible
 //! output like imag's: a second backend of the vendored DRM-output module, NVIDIA Vulkan direct
 //! display (`VK_EXT_acquire_xlib_display` + `VK_KHR_display`), selected by `"backend":"vk-direct"`
 //! in `~/.camera-box/drm-output.json` (owner rulings 5838578002 + 5838662632, main design
-//! 5838663570; STEP 0 + the GPU interop proven live on strih-lx, 5838745730 + 5839007372).
+//! 5838663570; STEP 0 + the GPU interop proven live on strih-snv, 5838745730 + 5839007372).
 //!
 //! Shape pinned here:
 //! - libobs: `enum obs_drm_output_backend` + a `backend` field in the config; the lease backend

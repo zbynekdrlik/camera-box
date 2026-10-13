@@ -107,12 +107,12 @@ def test_stream_pp_loads_with_every_fact_answered():
 
 
 @pytest.mark.parametrize("box,old,new,word", [
-    ("strih-lx", "STRIH_PROGRAM_SENDER=none", "STRIH_PROGRAM_SENDER=STRIH-PP (2ME PGM)", "STRIH_PROGRAM_SENDER"),
+    ("strih-snv", "STRIH_PROGRAM_SENDER=none", "STRIH_PROGRAM_SENDER=STRIH-PP (2ME PGM)", "STRIH_PROGRAM_SENDER"),
     ("stream-pp", "STRIH_PROGRAM_SENDER=STRIH-PP (2ME PGM)", "STRIH_PROGRAM_SENDER=none", "STRIH_PROGRAM_SENDER"),
     ("stream-pp", "STRIH_PROGRAM_SENDER=STRIH-PP (2ME PGM)", "STRIH_PROGRAM_SENDER=strih-pp", "STRIH_PROGRAM_SENDER"),
-    ("strih-lx", "STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=none", "STRIH_CAMERAS"),
-    ("strih-lx", "STRIH_HDMI_OUTPUT_BACKEND=vk-direct", "STRIH_HDMI_OUTPUT_BACKEND=none", "STRIH_HDMI_OUTPUT_BACKEND"),
-    ("strih-lx", "STRIH_VENUE=snv", "STRIH_VENUE=SNV", "STRIH_VENUE"),
+    ("strih-snv", "STRIH_CAMERAS=2 3 5", "STRIH_CAMERAS=none", "STRIH_CAMERAS"),
+    ("strih-snv", "STRIH_HDMI_OUTPUT_BACKEND=vk-direct", "STRIH_HDMI_OUTPUT_BACKEND=none", "STRIH_HDMI_OUTPUT_BACKEND"),
+    ("strih-snv", "STRIH_VENUE=snv", "STRIH_VENUE=SNV", "STRIH_VENUE"),
 ])
 def test_a_role_mismatched_fact_refuses_by_name(boxes, box, old, new, word):
     f = boxes / ("%s.env" % box)
@@ -142,8 +142,8 @@ def test_the_stream_role_skips_the_strih_only_steps(boxes):
 def test_the_strih_role_runs_them(boxes):
     assert _steps(boxes, "strih-pp") == {"3-nvenc": "RUN", "6-hdmi": "RUN", "11b": "SKIP", "14": "RUN",
                                         "16": "RUN", "16c": "RUN", "16e": "SKIP", "4b": "RUN"}
-    # issue 1411: strih-lx's rig NIC is PCIe (the 10 GbE Thunderbolt Aquantia), so only 11b skips.
-    assert _steps(boxes, "strih-lx") == {"3-nvenc": "RUN", "6-hdmi": "RUN", "11b": "SKIP", "14": "RUN",
+    # issue 1411: strih-snv's rig NIC is PCIe (the 10 GbE Thunderbolt Aquantia), so only 11b skips.
+    assert _steps(boxes, "strih-snv") == {"3-nvenc": "RUN", "6-hdmi": "RUN", "11b": "SKIP", "14": "RUN",
                                         "16": "RUN", "16c": "RUN", "16e": "RUN", "4b": "RUN"}
 
 
@@ -176,7 +176,7 @@ def test_strih_pp_keeps_every_session_app_and_lists_the_pp_boxes(boxes):
 
 
 def test_strih_lx_keeps_the_snv_fleet_list(boxes):
-    a = _applied(boxes, "strih-lx")
+    a = _applied(boxes, "strih-snv")
     assert a["ROWS"] == "7"
     assert a["PINNED"] == "10.77.9.202,10.77.9.204"
 
@@ -207,12 +207,12 @@ def test_the_stream_manifest_is_one_genlocked_program_input(boxes):
 
 def test_a_strih_manifest_is_unchanged_by_the_class_key(boxes):
     s = _scenes()
-    text = _manifest(boxes, "strih-lx")
+    text = _manifest(boxes, "strih-snv")
     assert '"class"' not in text and "program_audio_input" not in text
     inputs, _o, latency = s.parse_seed_manifest(text)
     assert s.parse_program_audio_input(text) == "ASIO zvuk"
     classes = [p["settings"].get("genlock_fifo") for p in s.seed_inputs(inputs, latency)]
-    # issue 1413: strih-lx receives cam2/cam3/cam5 + the two CG inputs (genlocked) and the 2ME pair.
+    # issue 1413: strih-snv receives cam2/cam3/cam5 + the two CG inputs (genlocked) and the 2ME pair.
     assert classes.count(False) == 2 and classes.count(True) == 5
 
 
@@ -385,7 +385,7 @@ def test_setup_strih_wires_the_stream_role_within_budget():
         g = s.index('if WHY="$(obs_box_step_applies %s)"; then' % gate)
         assert s.index(step) < g, gate
     assert 'obs_box_stream_encoder_provision "$OBS_CFG" "$DESKTOP_USER" "$(strih_lx_obs_profile)"' in s
-    assert "obs_box_seed_manifest_json > /opt/camera-box/strih-lx-seed.json" in s
+    assert "obs_box_seed_manifest_json > /opt/camera-box/strih-seed.json" in s
     assert 'strih_lx_ndi_output_ini_cmds "$USER_INI" "$(strih_box_role)"' in s
 
 
@@ -468,7 +468,7 @@ def test_service_json_is_never_written_world_readable(tmp_path):
 
 
 def test_an_inherited_sender_list_never_reaches_an_snv_box(boxes):
-    r = _bash('strih_box_load strih-lx || exit 9\nobs_box_role_apply || exit 8\n'
+    r = _bash('strih_box_load strih-snv || exit 9\nobs_box_role_apply || exit 8\n'
               'echo "SET=${NDI_DISCOVERY_SENDER_HOSTS+yes}"\necho "PINNED=$(ndi_discovery_sender_ips pinned)"',
               env={"STRIH_BOXES_DIR": str(boxes), "NDI_DISCOVERY_SENDER_HOSTS": "10.77.8.204"},
               sources=(FACTS, PROVISION, NDI))
@@ -506,7 +506,7 @@ def test_the_stream_box_autostart_starts_the_restreamer(boxes):
     line = "systemctl --user start restreamer.service || true"
     assert line in _autostart(boxes, "stream-pp").splitlines()
     assert "restreamer" not in _autostart(boxes, "strih-pp")
-    assert "restreamer" not in _autostart(boxes, "strih-lx")
+    assert "restreamer" not in _autostart(boxes, "strih-snv")
 
 
 def test_the_stream_box_autostart_keeps_hdmi_to_x(boxes):
@@ -530,4 +530,4 @@ def test_verify_item_9_reads_the_program_ref_when_there_is_no_fohabl():
     assert _item9_check(pp) == 1
     snv = {"participants": [{"name": "fohabl", "role": "program_ref", "rx_packets": 0},
                             {"name": "lv1", "role": "program_ref", "rx_packets": 9}]}
-    assert _item9_check(snv) == 1, "strih-lx keeps grading fohabl exactly"
+    assert _item9_check(snv) == 1, "strih-snv keeps grading fohabl exactly"

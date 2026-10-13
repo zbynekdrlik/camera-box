@@ -396,7 +396,7 @@ fn purge_dead_task_cmd_is_a_forced_idempotent_delete() {
 #[test]
 fn resolve_canary_default_covers_each_os_class_present() {
     // Linux (cam1 first) + Windows (strih first) -> one canary of each class.
-    let out = run_sourced("dantesync_resolve_canary 'cam1 cam2 imag-nb' 'strih stream' ''");
+    let out = run_sourced("dantesync_resolve_canary 'cam1 cam2 imag-nb' 'strih stream-snv' ''");
     assert_eq!(
         out.trim(),
         "cam1 strih",
@@ -413,7 +413,7 @@ fn resolve_canary_single_class_picks_first_member() {
         "#876: a Linux-only set defaults to exactly one canary (the first Linux node)"
     );
     assert_eq!(
-        run_sourced("dantesync_resolve_canary '' 'strih stream' ''").trim(),
+        run_sourced("dantesync_resolve_canary '' 'strih stream-snv' ''").trim(),
         "strih",
         "#876: a Windows-only set defaults to exactly one canary (the first Windows node)"
     );
@@ -421,10 +421,11 @@ fn resolve_canary_single_class_picks_first_member() {
 
 #[test]
 fn resolve_canary_honors_override_when_all_members_present() {
-    let out = run_sourced("dantesync_resolve_canary 'cam1 cam2' 'strih stream' 'cam2 stream'");
+    let out =
+        run_sourced("dantesync_resolve_canary 'cam1 cam2' 'strih stream-snv' 'cam2 stream-snv'");
     assert_eq!(
         out.trim(),
-        "cam2 stream",
+        "cam2 stream-snv",
         "#876: an explicit --canary override wins over the class-coverage default"
     );
 }
@@ -449,10 +450,10 @@ fn resolve_canary_rejects_override_member_not_in_set() {
 fn remaining_after_canary_excludes_canaries_preserves_order() {
     assert_eq!(
         run_sourced(
-            "dantesync_remaining_after_canary 'cam1 cam2 imag-nb strih stream' 'cam1 strih'"
+            "dantesync_remaining_after_canary 'cam1 cam2 imag-nb strih stream-snv' 'cam1 strih'"
         )
         .trim(),
-        "cam2 imag-nb stream",
+        "cam2 imag-nb stream-snv",
         "#876: remaining = full set minus the canary set, order preserved"
     );
 }
@@ -1153,7 +1154,7 @@ fn run_sourced_env(env: &[(&str, &str)], body: &str) -> String {
 #[test]
 fn resolume_win_spec_formats_name_user_at_resolved_ip() {
     let spec = run_sourced("dantesync_resolume_win_spec 10.77.9.201");
-    assert_eq!(spec, "resolume=newlevel@10.77.9.201", "got: {spec:?}");
+    assert_eq!(spec, "resolume-snv=newlevel@10.77.9.201", "got: {spec:?}");
 }
 
 #[test]
@@ -1162,7 +1163,7 @@ fn resolume_win_spec_honours_user_override() {
         &[("DANTESYNC_RESOLUME_USER", "operator")],
         "dantesync_resolume_win_spec 10.77.9.201",
     );
-    assert_eq!(spec, "resolume=operator@10.77.9.201", "got: {spec:?}");
+    assert_eq!(spec, "resolume-snv=operator@10.77.9.201", "got: {spec:?}");
 }
 
 #[test]
@@ -1176,8 +1177,8 @@ fn resolume_win_spec_empty_ip_is_empty_never_rolled() {
 fn skip_away_traveling_true_when_traveling_and_away() {
     // OBS_FLEET_HOME lists only strih/stream -> resolume (home-check=traveling) is AWAY -> SKIP.
     let out = run_sourced_env(
-        &[("OBS_FLEET_HOME", "strih stream")],
-        "rc=0\ndantesync_skip_away_traveling resolume || rc=$?\necho \"RC=$rc\"",
+        &[("OBS_FLEET_HOME", "strih stream-snv")],
+        "rc=0\ndantesync_skip_away_traveling resolume-snv || rc=$?\necho \"RC=$rc\"",
     );
     assert!(
         out.contains("RC=0"),
@@ -1189,8 +1190,8 @@ fn skip_away_traveling_true_when_traveling_and_away() {
 fn skip_away_traveling_false_when_traveling_but_home() {
     // resolume listed home -> NOT skipped (it joins the roll).
     let out = run_sourced_env(
-        &[("OBS_FLEET_HOME", "resolume")],
-        "rc=0\ndantesync_skip_away_traveling resolume || rc=$?\necho \"RC=$rc\"",
+        &[("OBS_FLEET_HOME", "resolume-snv")],
+        "rc=0\ndantesync_skip_away_traveling resolume-snv || rc=$?\necho \"RC=$rc\"",
     );
     assert!(
         out.contains("RC=1"),
@@ -1202,7 +1203,7 @@ fn skip_away_traveling_false_when_traveling_but_home() {
 fn skip_away_traveling_false_for_always_home_box() {
     // strih is home-check=always -> never skipped regardless of the OBS_FLEET_HOME list.
     let out = run_sourced_env(
-        &[("OBS_FLEET_HOME", "resolume")],
+        &[("OBS_FLEET_HOME", "resolume-snv")],
         "rc=0\ndantesync_skip_away_traveling strih || rc=$?\necho \"RC=$rc\"",
     );
     assert!(

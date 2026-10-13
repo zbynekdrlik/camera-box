@@ -206,7 +206,7 @@ pub fn slot_rect(slot: BurnSlot, frame_w: u32, frame_h: u32) -> Option<Rect> {
 /// known place, so a read of a slotted run_id counts only when its detected centre `(cx, cy)`
 /// (frame pixels) lies inside that run_id's own [`recovery_crop`] (its slot plus the pad). A read
 /// anywhere else is an optical ECHO: a camera that films a monitor showing OBS (cam2 on the
-/// strih-lx HDMI multiview, run 386740541) captures decodable copies of earlier burns, its own
+/// strih-snv HDMI multiview, run 386740541) captures decodable copies of earlier burns, its own
 /// among them.
 ///
 /// A run_id without a slot ([`slot_for_run_id`] = `None`: the optical dual-QR, the aux marks, the

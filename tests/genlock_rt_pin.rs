@@ -5,7 +5,7 @@
 //! `nohz_full` cores under a LOW SCHED_FIFO priority so its wakeups are not jittered by kernel
 //! housekeeping — the analogue of camera-box's `src/affinity.rs` (#289) capture-thread pin.
 //!
-//! Issue 1357 (live on strih-lx 23.9 and 27.9.2026): the pin fell back to a hardcoded `{10,11}` on a
+//! Issue 1357 (live on strih-snv 23.9 and 27.9.2026): the pin fell back to a hardcoded `{10,11}` on a
 //! box with no isolated core, and every thread the graphics thread created inherited that mask (and,
 //! with an rtprio grant, SCHED_FIFO) — the whole NDI receive path squeezed onto two cores. So now:
 //! the pin cores are the kernel's isolated cores that are ALSO nohz_full (none means no pin, and
@@ -133,7 +133,7 @@ fn render_tick_pin_is_warn_and_continue_never_aborts() {
 
 /// Issue 1357: the pin cores are DERIVED from BOTH `/sys/devices/system/cpu/isolated` and
 /// `/sys/devices/system/cpu/nohz_full`, and there is NO hardcoded fallback set. The old `{10,11}`
-/// fallback pinned strih-lx (no isolated core at all) onto two ordinary cores and leaked that mask
+/// fallback pinned strih-snv (no isolated core at all) onto two ordinary cores and leaked that mask
 /// to 40 threads.
 #[test]
 fn render_tick_cores_derive_from_isolated_and_nohz_full_with_no_fallback() {
@@ -160,7 +160,7 @@ fn render_tick_cores_derive_from_isolated_and_nohz_full_with_no_fallback() {
     assert!(
         !src.contains("pinned to the isolated nohz_full cores"),
         "{PIN_H}: the old unconditional \"pinned to the isolated nohz_full cores\" line lied \
-         on strih-lx and must be gone"
+         on strih-snv and must be gone"
     );
 }
 

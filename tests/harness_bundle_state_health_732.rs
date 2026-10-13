@@ -207,7 +207,7 @@ fn restart_cmd_never_uses_the_interactive_it_form() {
 // ---------------------------------------------------------------------------------------------
 // issue 1317 — bundle_state_restart_remote_cmd <class>: the restart is PLATFORM-resolved from the
 // fleet class. A Windows genlock box keeps the byte-identical `schtasks /run` line (the no-arg
-// default too — the E2E self-heal caller passes none); a Linux genlock box (strih-lx, the
+// default too — the E2E self-heal caller passes none); a Linux genlock box (strih-snv, the
 // production strih since M4) gets its systemd --user unit restarted, never a Windows schtasks.
 // ---------------------------------------------------------------------------------------------
 #[test]
@@ -279,7 +279,7 @@ fn restart_cmd_linux_fails_when_no_bundle_state_unit_is_loaded_1317() {
 #[test]
 fn restart_cmd_linux_restarts_when_the_unit_is_loaded_1317() {
     let (rc, out) = run_linux_restart(
-        "strih-bundle-state-server.service loaded active running strih-lx bundle-state",
+        "strih-bundle-state-server.service loaded active running strih-snv bundle-state",
     );
     assert_eq!(rc, 0, "a loaded unit must restart cleanly: {out}");
     assert!(

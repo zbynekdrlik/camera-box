@@ -456,7 +456,7 @@ jobs:
             target/release/bkshading
 
       # issue 1353: a SERVICE-dedicated deploy artifact (the service binary + the panel web assets)
-      # for provisioning the bkshading SERVICE on strih-lx (systemd/bkshading-service.service via
+      # for provisioning the bkshading SERVICE on strih-snv (systemd/bkshading-service.service via
       # setup-strih.sh step 16c). Separate from the relay's bkshading-linux-amd64 above, mirroring the
       # Windows bkshading-windows-amd64 / relay split. The artifact NAME is single-sourced in
       # scripts/lib/strih-provision.sh (strih_bkshading_artifact_name) — KEEP IN SYNC. The web assets
@@ -543,7 +543,7 @@ jobs:
 
   intercom-hub:
     name: intercom-hub (issue 1345)
-    # The strih-lx intercom hub + shared VBAN codec are SEPARATE workspace members
+    # The strih-snv intercom hub + shared VBAN codec are SEPARATE workspace members
     # (intercom/vban, intercom/hub). The appliance jobs above run cargo at the ROOT WITHOUT
     # --workspace, so they never build/test the hub (they DO compile intercom-vban as a path
     # dep, but its tests only run here); THIS job is the members' first clippy + test + build.

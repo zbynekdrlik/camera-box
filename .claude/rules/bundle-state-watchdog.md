@@ -41,7 +41,7 @@ session-agnostic op**:
 
 ## The restart is CLASS-resolved — a Linux box never gets `schtasks` (issue 1317)
 
-Since the M4 cut-over the production strih is the Linux **strih-lx** (obs-fleet class
+Since the M4 cut-over the production strih is the Linux **strih-snv** (obs-fleet class
 `linux-genlock`), whose `:8899` server is the systemd `--user` unit `strih-bundle-state-server.service`
 (imag's twin is `imag-bundle-state-server.service`). `bundle_state_restart_remote_cmd [class]`
 (`scripts/lib/bundle-state-health.sh`) resolves the remedy from the box's obs-fleet class, which the
@@ -54,7 +54,7 @@ watchdog reads via `box_fleet_class` → `obs_fleet_class`:
   `reset-failed` first so a unit that hit its start limit restarts. **The list-units guard is
   load-bearing: `systemctl --user restart '<pattern>'` exits 0 when the pattern matches NOTHING**
   (systemd 255, confirmed by the review), so without it an unloaded/disabled/renamed unit would be
-  logged "auto-restart issued OK". Verified read-only 23.9.2026: an ssh login to strih-lx reaches the
+  logged "auto-restart issued OK". Verified read-only 23.9.2026: an ssh login to strih-snv reaches the
   user manager (`XDG_RUNTIME_DIR=/run/user/1000`, `Linger=yes`) and the pattern lists exactly the one
   unit. Tested with a `systemctl` stand-in whose call log goes to a FILE — a stdout echo would itself
   feed the `grep -q` and hide the zero-match.

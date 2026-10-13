@@ -34,7 +34,7 @@
 # closed with the ONE verified ro close (scripts/lib/ro-window.sh: the root mode is READ, a root left
 # writable exits 1 naming the writers), and the dantesync (re)start runs only AFTER that close. A
 # later write (the self-heal's .bak copy, the date-state delete) reopens its own window and closes it
-# the same way. A node whose root is read-write (strih-lx, dev1) never opens a window at all.
+# the same way. A node whose root is read-write (strih-snv, dev1) never opens a window at all.
 
 # The ONE verified ro close (lazy-sourced: dantesync-fleet-upgrade.sh sources this lib).
 command -v ro_window_close_cmds >/dev/null 2>&1 \

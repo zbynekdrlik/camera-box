@@ -46,7 +46,7 @@ set -uo pipefail
 # NODE ROSTER (issue 1372: DERIVED from the ONE declared dantesync fleet, scripts/lib/dantesync-fleet.sh):
 # every camera camera_resolve knows (incl. those retired from CAMERA_ACTIVE_SET -- still powered,
 # still running dantesync), dev1 (the local node), the OBS boxes resolved via obs-fleet.sh's
-# obs_fleet_host (issue 1317: strih-lx is the production strih since M4; imag is retired), and the
+# obs_fleet_host (issue 1317: strih-snv is the production strih since M4; imag is retired), and the
 # audio-VLAN PCs mbc + fohabl (the `fixed` nodes). resolume is a TRAVELING CG box: paged only while
 # obs_fleet_is_home resolume holds (the #1296 condition); away -> skipped (never a false page against
 # a box that is simply not here). An OFF cam reads UNREACHABLE -> SKIP (deferred to the #1001
@@ -92,7 +92,7 @@ esac
 # NOT CAMERA_ACTIVE_SET, which can exclude a camera retired from measurement that is still powered
 # and still running dantesync (so it can silently lose the clock too). Each name resolves to its IP
 # via camera-set.sh's camera_resolve (single source of truth, no second IP literal). issue 1413: only
-# the HOME venue's cameras (the strih-lx.env STRIH_CAMERAS list, `always` rows); a camera that moved to
+# the HOME venue's cameras (the strih-snv.env STRIH_CAMERAS list, `always` rows); a camera that moved to
 # Poprad is a `reach` row of the fleet and is watched once, through DANTE_CLOCK_REACH_NODES below, at
 # its dev1-reachable PP address against the PP grandmaster.
 DANTE_CLOCK_CAM_NODES="${DANTE_CLOCK_CAM_NODES-$(dantesync_fleet_camera_names)}"
@@ -101,7 +101,7 @@ DANTE_CLOCK_CAM_NODES="${DANTE_CLOCK_CAM_NODES-$(dantesync_fleet_camera_names)}"
 # issue 1316: `imag` DROPPED from the default — imag-nb was returned to the owner (dark), so it is
 # no longer a dantesync node. (obs_fleet_is_home imag is also `retired`/false now, so even if named
 # it would SKIP; dropping it from the default removes the dead ssh/probe entirely.)
-# issue 1317 (M4 cut-over 20.9.2026): the production strih is `strih-lx` (the Linux notebook at
+# issue 1317 (M4 cut-over 20.9.2026): the production strih is `strih-snv` (the Linux notebook at
 # 10.77.9.202, the NTP master since M4); the Windows `strih` row is retired from obs-fleet.sh, so the
 # old `strih` name would resolve to nothing and silently drop the strih from clock paging.
 # issue 1372: derived from the dantesync fleet (its obsfleet-gated rows; a `retired` obs-fleet box
@@ -177,7 +177,7 @@ log() { printf '%s [dantesync-clock-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:
 
 # -- roster: NAME|IP|HOMEGATE[|ROLE] lines -------------------------------------------------------
 # HOMEGATE ∈ always (cams: probe unconditionally; an OFF box -> UNREACHABLE -> SKIP) |
-# obsfleet (obs_fleet_is_home decides -- always-true for strih-lx/stream, false for a retired box, the traveling gate for
+# obsfleet (obs_fleet_is_home decides -- always-true for strih-snv/stream, false for a retired box, the traveling gate for
 # resolume) | local (#1313: dev1 itself -- loopback :8898, NO ssh/TCP reach probe, box up by
 # definition so a dead :8898 is NO_DANTESYNC not SKIP) | fixed (issue 1372: an always-home
 # non-camera node -- mbc/fohabl; box-up = ssh :22, no ssh-banner management axis). ROLE (issue

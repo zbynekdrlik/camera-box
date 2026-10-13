@@ -81,10 +81,10 @@ lowest)**; else LOCKED (green).
     accrues; else `DRIFT` when the window is ready and `|drift| > 2 ms` per 10 min (3.3 ppm); else
     `OK`. Linux passes `NOT_APPLICABLE` (drift only).
   - Calibration: the undisciplined stream mixer drifted 67 ms / 83 min (≈ 8 ms per 10 min, green the
-    whole time); after the part-A deploy 0 ms over 47 min; strih-lx 0 for hours. Those numbers are
+    whole time); after the part-A deploy 0 ms over 47 min; strih-snv 0 for hours. Those numbers are
     the ms-resolution libobs term; the µs signal was measured only on dev1 (±1 µs). **Supervisor step
     after the full-bundle deploy:** read `media_clock.drift_us` from each box's `genlock-lock-json:`
-    line (bundle-state `genlock_lock.media_clock`) for ≥ 10 min — strih-lx, stream, resolume — and
+    line (bundle-state `genlock_lock.media_clock`) for ≥ 10 min — strih-snv, stream, resolume — and
     confirm it sits well inside ±2000 before relying on the DEGRADED term.
   - Known limit: `std::chrono::system_clock` is only as fine as the STL makes it. A coarse (15.6 ms)
     wall clock would give per-pair rates of 0 or ±15 ms/s and hide a real drift; no fleet box has one.
@@ -253,10 +253,10 @@ lowest)**; else LOCKED (green).
     accumulator grows ~13 ppm ≈ 47 ms/h BY DESIGN (stream 24.9.: 0 → 250 ms over 5.4 h). The old
     `> 100 ms` gate false-paged the fleet after ~2 h (#1299 Part 4).
   - **Linux** (`os_gettime_ns` = `CLOCK_MONOTONIC`, which the kernel frequency-disciplines together
-    with `CLOCK_REALTIME`): the accumulator stays 0 by construction (strih-lx 24.9.: 0 on every
+    with `CLOCK_REALTIME`): the accumulator stays 0 by construction (strih-snv 24.9.: 0 on every
     sample for 5.2 h).
   - The #1299 Part 4 RATE branch compared the 300 s windowed rate with ONE instantaneous dantesync
-    `f_ptp_ppm + f_phase_ppm` sample (-160..+171 ppm on the strih-lx NTP master). On Linux that
+    `f_ptp_ppm + f_phase_ppm` sample (-160..+171 ppm on the strih-snv NTP master). On Linux that
     re-reported a dantesync servo excursion (28 false DEGRADED samples, 24.9.); on Windows the
     instantaneous spikes tripped it against a steady 13-23 ppm rate (4 samples). #1357 removed it.
   - A rate is not a genlock hazard on any box: the render tick (`genlock_next_deadline`) re-derives

@@ -1,8 +1,8 @@
 """Issue 1372: setup-strih must never restart a running, unchanged dantesync.
 
-WHY: strih-lx is the fleet's dantesync DATE MASTER in daily mode. Its fleet line drifts ~0.7 s a day
+WHY: strih-snv is the fleet's dantesync DATE MASTER in daily mode. Its fleet line drifts ~0.7 s a day
 against NTP and is meant to be stepped only in the nightly 02:00Z window. setup-strih step 2 runs on
-every strih-lx genlock deploy, and it used to rewrite the unit, remove /var/run/dantesync.lock and
+every strih-snv genlock deploy, and it used to rewrite the unit, remove /var/run/dantesync.lock and
 `systemctl restart dantesync` unconditionally. On 29.9.2026 00:35Z that restart made the master
 re-derive the date at once, the followers joined, the whole rig took a 0.67 s date step and the cg OBS
 program audio stayed broken until a relaunch (finding 5881495922, design 5881503623 Approach 1).

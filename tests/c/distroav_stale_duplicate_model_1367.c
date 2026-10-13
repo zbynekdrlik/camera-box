@@ -286,7 +286,7 @@ int main(void)
 		    URL_B, 0, NULL, true } },
 		2,
 	};
-	/* The strih-lx shape: the new :5971 record is listed before the sender delivers on it (from 12 s);
+	/* The strih-snv shape: the new :5971 record is listed before the sender delivers on it (from 12 s);
 	 * cg-obs owns the old :5961 and advertises it. */
 	static const scenario_t still_starting = {
 		"still_starting",

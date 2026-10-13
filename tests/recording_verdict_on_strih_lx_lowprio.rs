@@ -1,5 +1,5 @@
-//! issue 1351 (item, 22.9.2026) — the in-place strih-lx recording decode (`[8/8a]`,
-//! `scripts/recording-verdict-on-strih-lx.sh`) must run at IDLE priority pinned to the Intel
+//! issue 1351 (item, 22.9.2026) — the in-place strih-snv recording decode (`[8/8a]`,
+//! `scripts/recording-verdict-on-strih-snv.sh`) must run at IDLE priority pinned to the Intel
 //! hybrid E-cores so it never starves the live OBS receivers (the post-run relock storms of issue
 //! 1354: cam1 +763, cam4 +799, cam5 +832, cam7 +782 relocks during the `[7/8]`+`[8/8a]` window,
 //! 0 during the recording). A multi-core QR/pixel sweep over a 1080p60 5-min recording at nice 0,
@@ -21,13 +21,13 @@ fn manifest_dir() -> PathBuf {
 }
 
 fn onstrihlx_script() -> PathBuf {
-    let s = manifest_dir().join("scripts/recording-verdict-on-strih-lx.sh");
+    let s = manifest_dir().join("scripts/recording-verdict-on-strih-snv.sh");
     assert!(s.exists(), "{} not found", s.display());
     s
 }
 
 fn script_text() -> String {
-    fs::read_to_string(onstrihlx_script()).expect("read recording-verdict-on-strih-lx.sh")
+    fs::read_to_string(onstrihlx_script()).expect("read recording-verdict-on-strih-snv.sh")
 }
 
 /// Source the launcher and call `strih_lx_lowprio_prefix <root>`. Returns trimmed stdout (the
@@ -69,7 +69,7 @@ fn fake_sysfs(cpus: Option<&str>) -> TempDir {
 
 #[test]
 fn hybrid_box_pins_the_e_cores_at_idle_priority() {
-    // strih-lx (measured live 22.9.2026): 16 CPUs, cpu_atom = 12-15 (E), cpu_core = 0-11 (P).
+    // strih-snv (measured live 22.9.2026): 16 CPUs, cpu_atom = 12-15 (E), cpu_core = 0-11 (P).
     let root = fake_sysfs(Some("12-15\n"));
     assert_eq!(
         lowprio_prefix(root.path().to_str().unwrap()),
@@ -155,7 +155,7 @@ fn step2_ssh_run_launches_onstrihlx_cmd_through_the_lowprio_prefix() {
 
 #[test]
 fn the_lowprio_snippet_is_single_quoted_so_dev1_never_expands_the_cat() {
-    // The `$(cat …)` and `$LP` inside the snippet must be evaluated by the strih-lx shell, not by
+    // The `$(cat …)` and `$LP` inside the snippet must be evaluated by the strih-snv shell, not by
     // dev1 — so the snippet is assigned with SINGLE quotes on the dev1 side.
     let s = script_text();
     assert!(

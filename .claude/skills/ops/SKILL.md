@@ -134,7 +134,7 @@ because it carried no dantesync — this brings it under the fleet clock-discipl
   adaptation are NOT gated; the frame-jump signal `backward_regime_ticks` IS). For the 24h
   acceptance (skew flat ±20 ms), sample a long OBS-log window and raise `--min-samples`. The
   supervisor owns the live deploy + the 24h run; this is a verify tool, not a hard E2E gate.
-  **Not for a shallow-latched input (issue 1302):** the strih-lx CG input (`CG-obs`, 3 ms pin) is
+  **Not for a shallow-latched input (issue 1302):** the strih-snv CG input (`CG-obs`, 3 ms pin) is
   held at a latched depth D (audit `shallow_depth=`), so its head age reads D × interval (100 ms at
   D=3). `--verdict-source` grades that ABSOLUTE head age and FAILs it by design. Verify the CG feed
   with `scripts/cg-chain-verify.sh` (`CG_CHAIN_STRIH_SRC=CG-obs`), which grades the excursion from D
@@ -844,7 +844,7 @@ when it closes; on 28.9.2026 an mDNS-only finder listed every cambox source in <
 `CAMn (usb)` is an mDNS question, never a reason to add a cambox IP. The part-1 Discovery Server was dropped because a configured SENDER
 stops mDNS; see `.claude/rules/ndi-discovery.md`. When diagnosing "camera missing from OBS dropdown", check WHICH case it is
 (boot-race/flap → re-announce should cure within ~2s; a stable cambox whose announce was lost → a
-`camera-box.service` restart re-registers it; a missing OBS-box source on strih-lx → check it has the
+`camera-box.service` restart re-registers it; a missing OBS-box source on strih-snv → check it has the
 generated `networks.ips` list, `verify-strih` item 34).
 
 **Rig verify (supervisor):** reboot a box, confirm it reappears in the OBS NDI dropdown within
@@ -1162,7 +1162,7 @@ its own CLAUDE.md, its own `.claude/skills/install` playbook, and its own versio
 use the agent's own installer (below). The ONE exception is PROVISIONING a Linux box: since issue
 1361 `setup-strih.sh` step 10, `setup-imag.sh` step 23 and `setup-device.sh` STEP 17b all call the
 shared `scripts/lib/remoteos-mcp.sh`, which pip-installs the project's own source (GitHub API tarball
-of ONE pinned commit, `remoteos_mcp_pinned_ref` = what strih-lx runs; bump it deliberately) with the
+of ONE pinned commit, `remoteos_mcp_pinned_ref` = what strih-snv runs; bump it deliberately) with the
 project's own `constraints.txt` into a venv at `/opt/remoteos-mcp-venv`, so a freshly hardware'd box
 comes up with a working MCP surface. The dependency pins stay the project's own.
 
@@ -1178,9 +1178,9 @@ comes up with a working MCP surface. The dependency pins stay the project's own.
   process serving the request — this is expected, not a failure; the upgrade completes
   server-side before the kill. Verify by simply calling `GetSystemInfo`/`Ping` again right after
   (fresh HTTP request, same host:port:auth_key) and `pip show remoteos-mcp`.
-- **Linux (strih-lx/imag-nb/cam1-4):** `systemd` unit `remoteos-mcp.service` running
+- **Linux (strih-snv/imag-nb/cam1-4):** `systemd` unit `remoteos-mcp.service` running
   `/opt/remoteos-mcp-venv/bin/python -m remoteos` with the key in the 0600
-  `/etc/remoteos-mcp/remoteos-mcp.env` (issue 1361; strih-lx ran this venv by hand first). Boxes
+  `/etc/remoteos-mcp/remoteos-mcp.env` (issue 1361; strih-snv ran this venv by hand first). Boxes
   provisioned earlier still carry the upstream installer's system-pip install + a key in ExecStart
   until their provisioner re-runs (it keeps the key). Upgrade = bump `remoteos_mcp_pinned_ref` (or
   `REMOTEOS_MCP_REF=<sha>` for one run) and re-run the box's provisioner step: the new commit changes

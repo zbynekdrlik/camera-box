@@ -3,21 +3,21 @@
 # scripts/lib/*.sh convention: strict mode belongs to the caller (setup-strih.sh / verify-strih.sh).
 #
 # scripts/lib/obs-downstream-keyer.sh -- issue 1361: the Downstream Keyer OBS frontend plugin
-# (exeldro/obs-downstream-keyer) the strih operator's collection uses. On strih-lx it was extracted
+# (exeldro/obs-downstream-keyer) the strih operator's collection uses. On strih-snv it was extracted
 # by hand from the upstream .deb (not dpkg-owned; the OBS log shows `[Downstream Keyer] loaded version
 # 0.4.4`). This lib installs the SAME file from the SAME pinned release asset, so a fresh
 # setup-strih.sh run reproduces it:
 #   * the .deb is pinned by URL + sha256 (the GitHub release digest), fail-loud on a mismatch;
 #   * it is EXTRACTED (`dpkg-deb -x`), never dpkg-installed: its `Depends: obs-studio` is never met by
 #     the genlock bundle OBS, which is installed from a tarball into the /usr prefix;
-#   * the extracted plugin must hash to the pinned .so sha256 (== the live strih-lx file, byte for
+#   * the extracted plugin must hash to the pinned .so sha256 (== the live strih-snv file, byte for
 #     byte), and only the plugin + its locale dir are installed into the /usr prefix OBS loads;
 #   * idempotent: a box whose installed plugin already has the pinned hash downloads nothing.
 #
 #   obs_dsk_install_cmds VERSION DEB_URL DEB_SHA SO_SHA LIBDIR SHAREDIR -> the emitted install block
 #   obs_dsk_verdict SO_SHA WANT_SHA LOCALE_PRESENT                      -> ok | FAIL: <reason>
 
-# obs_dsk_version -> the pinned plugin version (the one strih-lx loads, 25.9.2026).
+# obs_dsk_version -> the pinned plugin version (the one strih-snv loads, 25.9.2026).
 obs_dsk_version() { printf '0.4.4'; }
 
 # obs_dsk_deb_url -> the pinned upstream release asset.
@@ -28,7 +28,7 @@ obs_dsk_deb_url() {
 # obs_dsk_deb_sha256 -> the release asset's sha256 (its GitHub release digest).
 obs_dsk_deb_sha256() { printf 'ad585eec720c3cf690dd548b6cfc72ea5007b447954559c0861959ee60b0cf67'; }
 
-# obs_dsk_so_sha256 -> the sha256 of the plugin inside that .deb (== the live strih-lx file).
+# obs_dsk_so_sha256 -> the sha256 of the plugin inside that .deb (== the live strih-snv file).
 obs_dsk_so_sha256() { printf '9304d665e7fc96ea54faf7ee31ab5ce0462069de668bcb4be996054876508be5'; }
 
 # obs_dsk_so_path LIBDIR -> where OBS loads the plugin from (LIBDIR = /usr/lib/x86_64-linux-gnu).

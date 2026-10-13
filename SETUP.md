@@ -122,7 +122,7 @@ NOT genlocked. So cluster clock sync is a hard prerequisite, not an optimization
 - **DanteSync** is the chosen mechanism (chosen over plain chrony/NTP because the broadcast rig
   needs sub-ms, PTP-grade alignment, and DanteSync already disciplines the Windows OBS boxes).
 - **Master / reference clock: the venue's strih, `strih.lan`** (the DanteTime master; NTP anchor
-  + PTP fine servo): strih-lx `10.77.9.202` in SNV, strih-pp `10.77.8.202` in Poprad. The setup
+  + PTP fine servo): strih-snv `10.77.9.202` in SNV, strih-pp `10.77.8.202` in Poprad. The setup
   script uses the **name, not an IP** (issue 1412): the SNV literal left every Poprad camera with no
   NTP at all. dantesync resolves its `--ntp-server` value on every query, so an unresolvable name is
   a counted NTP failure (never a public-pool fallback) and recovers once DNS answers.

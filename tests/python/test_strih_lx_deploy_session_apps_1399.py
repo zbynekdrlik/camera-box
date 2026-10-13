@@ -1,11 +1,11 @@
-"""Issue 1399 -- the strih-lx deploy's start step starts the session apps after OBS (main ROZHODNUTE
+"""Issue 1399 -- the strih-snv deploy's start step starts the session apps after OBS (main ROZHODNUTE
 5978724027 point 2).
 
 setup-strih.sh installs strih-browser-keeper.service + bkshading-panel-app.service ENABLE-ONLY (it never
 starts anything on the production box), and the kiosk autostart starts them only at the next login. So
 before this, the first deploy that installed them left both stopped until the next login, and verify-strih
 items 37/38 (the deploy's own acceptance step) failed on them. The deploy's start step
-(`strih_lx_remote_start_cmd`, `scripts/lib/strih-lx-deploy.sh`) now starts them right after
+(`strih_lx_remote_start_cmd`, `scripts/lib/strih-snv-deploy.sh`) now starts them right after
 strih-obs.service, in the kiosk autostart's order.
 
 What this pins, by RUNNING the emitted remote command under bash with stub `systemctl`/`id`:
@@ -38,7 +38,7 @@ STAGE = "/tmp/genlock-stage-abc123"
 
 
 def _bash(body):
-    """Source deploy-genlock-fleet.sh (its source-guard stops before main; it sources the strih-lx deploy
+    """Source deploy-genlock-fleet.sh (its source-guard stops before main; it sources the strih-snv deploy
     lib) under the caller's set -euo pipefail, then run BODY."""
     script = 'set -euo pipefail\n. "%s"\n%s\n' % (FLEET, body)
     r = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60)
@@ -124,7 +124,7 @@ def test_running_it_starts_obs_then_every_app(tmp_path):
 def test_a_session_app_that_does_not_start_is_a_warning_not_a_failed_deploy(tmp_path):
     r, calls, _ = _run_start(tmp_path, apps_rc=5)
     assert r.returncode == 0, "the deploy's start rc is OBS's"
-    assert ("WARNING: [strih-lx start] the session apps (%s) did not start -- verify-strih items 37-40 name why"
+    assert ("WARNING: [strih-snv start] the session apps (%s) did not start -- verify-strih items 37-40 name why"
             % " ".join(UNITS)) in r.stderr
 
 

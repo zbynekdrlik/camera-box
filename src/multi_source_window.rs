@@ -5,7 +5,7 @@
 //!
 //! Every per-window test-pattern check in the all-cambox sweep (copies/gaps, the cadence gates,
 //! `frozen_leg`) assumes the window carries ONE painted feed: the cam2 dual-QR Vernier, sampled once
-//! per recorded frame. cam2 now films the strih-lx vk-direct MULTIVIEW (finding
+//! per recorded frame. cam2 now films the strih-snv vk-direct MULTIVIEW (finding
 //! 5843418156 on issue 1367): one captured frame holds 1-5 generations of the painted pattern
 //! (tiles ~248 / 413 / 546 ms old, incl. cam2's own recursion), and the multiview renders ~30 fps
 //! off the program grid. `RecordingFrame::tick` takes the highest id per frame, so a missed newest
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn the_real_cam2_multiview_fractions_are_multi_source_1367() {
         // Run 2059624745 (0.4255, 0.6028) and run 386740541 (0.4912, 0.5896): the four CAM2
-        // windows that film the strih-lx multiview.
+        // windows that film the strih-snv multiview.
         for f in [
             0.425531914893617,
             0.6028368794326241,

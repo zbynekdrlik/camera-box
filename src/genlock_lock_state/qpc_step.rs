@@ -12,7 +12,7 @@
 // gate either (#1357): on Linux `CLOCK_MONOTONIC` is kernel-disciplined together with `CLOCK_REALTIME`,
 // so the measured wall-vs-monotonic rate is 0 by construction, while on Windows it was the free crystal —
 // a rate check therefore meant a different thing on every box, and comparing a windowed rate with one
-// instantaneous dantesync `f_ptp + f_phase` sample false-DEGRADED both (28 samples on strih-lx, 4 on
+// instantaneous dantesync `f_ptp + f_phase` sample false-DEGRADED both (28 samples on strih-snv, 4 on
 // stream, 24.9.2026, none a step). A rate is also no genlock hazard: the render tick re-derives every
 // deadline from the wall clock and absorbs up to 2 ms per tick. The one clock hazard for genlock — the
 // same on every box — is a wall STEP: it moves every wall-keyed FIFO release / ts-align deadline by more
@@ -125,7 +125,7 @@ mod tests {
     // ---- #1299 Part 4 / #1357 scope C: the qpc_drift term is a wall STEP, one semantics per box ----
     //
     // Live fixtures from 24.9.2026 (issue 1357 validation): every `qpc_drift` DEGRADED on both boxes
-    // came from the removed RATE-vs-instantaneous-slew branch, none from a step. strih-lx (Linux,
+    // came from the removed RATE-vs-instantaneous-slew branch, none from a step. strih-snv (Linux,
     // `CLOCK_MONOTONIC` is kernel-disciplined): measured 0.0 on all 689 samples while dantesync's
     // `f_ptp + f_phase` swung -160..+171 ppm. stream (Windows, free QPC): measured 23.4 ppm while the
     // instantaneous `f_ptp + f_phase` read 109.8. Neither is a genlock hazard; a STEP is, on both.
@@ -184,7 +184,7 @@ mod tests {
 
     #[test]
     fn linux_disciplined_monotonic_window_never_degrades_1357() {
-        // strih-lx 24.9. 01:10:49: `CLOCK_MONOTONIC` shares the kernel frequency discipline, so the
+        // strih-snv 24.9. 01:10:49: `CLOCK_MONOTONIC` shares the kernel frequency discipline, so the
         // windowed wall-vs-monotonic delta is 0 by construction (dantesync reported -68.5 ppm, later
         // +170.9 — a servo excursion, not a wall-vs-monotonic hazard).
         let v = qpc_drift_beyond_bound(true, 0, 300_000, 0, GENLOCK_QPC_STEP_BOUND_MS);
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn windows_and_linux_windows_give_the_same_verdict_1357() {
         // stream 24.9. 05:09:00 (Windows): 7 ms accrued over a 299 s window = 23.4 ppm, no step.
-        // strih-lx the same minute (Linux): 0 ms accrued. ONE semantics: the same (no-step) verdict,
+        // strih-snv the same minute (Linux): 0 ms accrued. ONE semantics: the same (no-step) verdict,
         // and the same (step) verdict once either window carries a 40 ms wall step.
         let win = qpc_drift_beyond_bound(true, 7, 299_000, 1, GENLOCK_QPC_STEP_BOUND_MS);
         let lx = qpc_drift_beyond_bound(true, 0, 299_000, 0, GENLOCK_QPC_STEP_BOUND_MS);

@@ -101,7 +101,7 @@ picks by stamp; an exact-S relabel lands 0.59 slot off the grid).
 Before: a cambox stamped through a mono→real offset re-sampled only every 100 captured frames
 (`genlock_stamp::OFFSET_RESAMPLE_INTERVAL_FRAMES`), so its stamps switched epoch up to ~1.67 s after
 its own wall stepped (924 ms in the capture-phase bench). The receiver's one-latency window (~67 ms
-on a strih-lx camera input) closes long before: a lag of 400 / 800 / 1200 / 1600 ms costs
+on a strih-snv camera input) closes long before: a lag of 400 / 800 / 1200 / 1600 ms costs
 4 / 6 / 9 / 11 repeats + skips (`cambox_stale_offset_cost_is_reported_1372`, the `Cambox::Lagged`
 model, kept as the report).
 
@@ -112,7 +112,7 @@ against the cached offset is adopted in that frame, smaller ones wait for the ca
 read never counts. The receiver keeps its one-latency window. The bench models the production
 cambox (`Cambox::Production`: the real `StampOffset` fed one read per frame at its dequeue, 11 ms
 after the capture): `a_production_cambox_follows_its_step_within_one_frame_and_costs_nothing_1372`
-reads stamp lag 0 and 0 repeats / 0 skips / 0 late holds on the strih-lx N>=2 60->30 camera input
+reads stamp lag 0 and 0 repeats / 0 skips / 0 late holds on the strih-snv N>=2 60->30 camera input
 for +1600 / -1600 / +200 / -200 ms, sender -30..+30 ms, at cadence phases 0 / 25 / 50 / 75. On the
 pre-change cadence-only offset (the RED commit's stub) the same runs lag 0-99 frames and cost up to
 14 repeats + 14 skips at +1600 / +200 ms, 12 + 12 (6 late holds) at -200 ms and 96 + 96 (48 late
@@ -171,8 +171,8 @@ At the next 02:00 UTC step (quantized after the dantesync 1.16.0 roll): one
 `genlock-fifo-relabel:` booking line per box at the `genlock-regrid:` second; one per-source line per
 genlock input with `relabelled A of B` (A ≈ the queue depth, `arrivals=judged` on a receiver-first
 input); the audit `relabelled=` steps once; `late_holds` / `dropped_due` / `relocks` flat across the
-step on strih-lx and stream; the stream program recording shows 0 repeats / 0 skips at 02:00.
+step on strih-snv and stream; the stream program recording shows 0 repeats / 0 skips at 02:00.
 Camera inputs need the stamp-offset camera-box binary on the fleet too: each cambox journal shows
 one `#1372 stamp offset re-sampled on a wall step of +<S> ms` line at the step (S = the booked
-step), and the strih-lx `genlock-fifo audit 'NDI camN'` lines read `late_holds` / `stamp_gap` /
+step), and the strih-snv `genlock-fifo audit 'NDI camN'` lines read `late_holds` / `stamp_gap` /
 `relocks` flat across it.

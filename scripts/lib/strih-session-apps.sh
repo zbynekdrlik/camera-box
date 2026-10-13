@@ -7,7 +7,7 @@
 # is off.
 #
 # scripts/lib/strih-session-apps.sh -- issue 1399 (owner 4.10.2026: "toto je produkcny pocitac vsetko ma
-# bezat vzdy a stale"): the supervised --user units in the strih-lx operator session, beside
+# bezat vzdy a stale"): the supervised --user units in the strih-snv operator session, beside
 # strih-obs.service (design comment 5977447339, Approach 1; Companion Satellite + its watch joined by
 # design comment 5979157737):
 #
@@ -27,8 +27,8 @@
 # kiosk openbox autostart (strih_openbox_autostart_text calls strih_session_apps_autostart_lines):
 # openbox never reaches graphical-session.target, and a default.target unit would also start on a
 # user-manager start with no X session (an ssh login), where a window cannot open. ONE login start
-# path, the one OBS uses; the strih-lx genlock deploy also starts them after strih-obs, into the running
-# session (scripts/lib/strih-lx-deploy.sh strih_lx_remote_start_cmd).
+# path, the one OBS uses; the strih-snv genlock deploy also starts them after strih-obs, into the running
+# session (scripts/lib/strih-snv-deploy.sh strih_lx_remote_start_cmd).
 #
 #   * strih_session_apps_install -- setup-strih step 16d: the packages (python3-gi + WebKit2 4.1 +
 #     python3-websocket) and an import preflight, the repo programs into the bin dir, every unit file

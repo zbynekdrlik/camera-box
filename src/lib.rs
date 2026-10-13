@@ -48,7 +48,7 @@ pub mod vban;
 
 // #1345 M1b — the pure appliance-side intercom-target env override (`resolve_intercom_target`).
 // The dev cambox root fs is read-only, so `config.toml` can't be edited to repoint the VBAN
-// intercom at the Linux strih-lx hub; a `CAMERA_BOX_INTERCOM_TARGET` env override (carried by a
+// intercom at the Linux strih-snv hub; a `CAMERA_BOX_INTERCOM_TARGET` env override (carried by a
 // /run systemd drop-in) is the only seam. No I/O — the caller passes the raw env value in — so it
 // unit-tests Tier-0; cross-platform (un-gated) like `vban`.
 pub mod intercom_target;
@@ -427,7 +427,7 @@ pub mod genlock_grid;
 pub mod genlock_render_tick_pin;
 
 // #1355 part 2 — the grid-drift bench: the deep N==1 stream `NDI 2ME PGM` FIFO fed by the
-// strih-lx sender, simulated tick by tick with the production decision functions under the
+// strih-snv sender, simulated tick by tick with the production decision functions under the
 // measured rig statistics; reproduces the live 31/32 depth flip on the 1970 grid and proves the
 // per-second grid removes it. Crate-root + default features (Tier-0), no OBS.
 pub mod genlock_grid_bench;
@@ -441,7 +441,7 @@ pub mod genlock_grid_bench;
 pub mod genlock_n2_grid;
 
 // Issue 1367 slice D1 — the 60-into-30 two-clock bench of the grid-exact N>=2 conveyor: seven
-// cameras with the arrival lag measured on strih-lx 28.9.2026, random receiver restarts; every
+// cameras with the arrival lag measured on strih-snv 28.9.2026, random receiver restarts; every
 // camera presents the same frame on every restart. Test-only.
 #[cfg(test)]
 mod genlock_n2_grid_bench;
@@ -576,7 +576,7 @@ pub mod send_stall;
 
 // #1242 — per-camera NDI SEND stagger inside the genlock frame slot (pure decision): camera N hands
 // its frame to the NDI SDK (N-1) x STAGGER_US after its emit-gate decision so the seven per-tick
-// bursts no longer land on the strih-lx 2.5 GbE switch port at once. Camera number from the box's
+// bursts no longer land on the strih-snv 2.5 GbE switch port at once. Camera number from the box's
 // own OS hostname (CAM<N>), clamped inside the slot; the emit grid and the FLOOR-boundary timecode
 // are untouched. No probe deps, so it unit-tests Tier-0; `main.rs`'s capture loop applies it.
 pub mod send_stagger;
@@ -674,7 +674,7 @@ pub mod burn_tick_cache;
 // #1122 — PURE, dependency-free E2E recordings retention decision (keep newest-N runs UNION
 // younger-than-D-days; delete ONLY files matching the harness's OWN OBS-timestamp allowlist, never
 // a generic *.mkv sweep). The canonical spec that scripts/strih-recordings-retention.ps1 (Windows) and
-// the --local-sweep bash decision in scripts/strih-recordings-retention.sh (strih-lx) mirror.
+// the --local-sweep bash decision in scripts/strih-recordings-retention.sh (strih-snv) mirror.
 pub mod recordings_retention;
 // #789 (residual B / criterion 5) — standalone retention decision for the deploy/backup DIRECTORIES
 // the fleet deploy leaves behind (dated `<stamp>-789` box-backups + per-sha stage dirs); keep newest
@@ -701,7 +701,7 @@ pub mod optical_floor;
 // windows) folds into overall_pass. One-line disarmable (`gates_overall_pass()` → `false`).
 pub mod tear_detect;
 // issue 1367 — a cambox window whose captured content is MULTI-SOURCE (tear_detect's multi-path
-// fraction over MULTI_PATH_SUSPECT_CEILING, e.g. cam2 filming the strih-lx multiview) is judged by its
+// fraction over MULTI_PATH_SUSPECT_CEILING, e.g. cam2 filming the strih-snv multiview) is judged by its
 // node burn: its copies/gaps, cadence and frozen_leg checks fold report-only, the burn stays blocking.
 // Pure crate-root (Tier-0); consumed by recording-verdict's all-cambox sweep.
 pub mod multi_source_window;

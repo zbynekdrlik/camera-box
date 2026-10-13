@@ -1,4 +1,4 @@
-"""Issue 1399 -- the shared fakes of the strih-lx session-apps tests (scripts/lib/strih-session-apps.sh).
+"""Issue 1399 -- the shared fakes of the strih-snv session-apps tests (scripts/lib/strih-session-apps.sh).
 
 The install (setup-strih step 16d) and the grader (verify-strih items 37-40) run for real under the
 callers' `set -euo pipefail`, through their path seams, with fake `dpkg-query` / `apt-get` /
@@ -28,7 +28,7 @@ LEAKY = ("STRIH_SESSION_APPS_BIN_DIR", "STRIH_SESSION_APPS_RUNTIME_DIR", "STRIH_
 PIDS = {"strih-browser-keeper.service": 4242, "bkshading-panel-app.service": 4343,
         "companion-satellite.service": 4444, "strih-satellite-watch.service": 0}
 PANEL_CLASS = "bkshading-panel-app.Bkshading-panel-app"
-WIN = "0x01  0 %s  strih-lx Shading\n" % PANEL_CLASS
+WIN = "0x01  0 %s  strih-snv Shading\n" % PANEL_CLASS
 
 
 def bash(body, env=None, sources=(LIB,), path_prepend=None, stdin=""):

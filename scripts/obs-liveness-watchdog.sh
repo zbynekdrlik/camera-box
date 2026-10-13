@@ -5,7 +5,7 @@
 # ~168% CPU, Responding=False, 16.0% frames-missed-due-to-render-lag — and NOTHING detected it. The
 # user found it manually a day later. This watchdog is the Windows-OBS sibling of the #281/#350
 # rig-restore-watchdog: it runs on a **dev1 systemd --user timer**, polls the broadcast OBS boxes
-# (the obs-fleet `obs-liveness` facet: strih-lx 10.77.9.202 -- the Linux production strih since the
+# (the obs-fleet `obs-liveness` facet: strih-snv 10.77.9.202 -- the Linux production strih since the
 # issue-1317 M4 cut-over --, stream 10.77.9.204, resolume while home) over OBS WebSocket `GetStats` (always network-reachable,
 # no ssh/MCP needed), runs the strict `obs_watchdog::classify` verdict (via `obs-watchdog-gate`),
 # and — once a wedge is CONFIRMED across 2 consecutive passes — fires a Discord alert IMMEDIATELY.
@@ -21,7 +21,7 @@
 # NOT built here — it would be the first unattended-control mechanism on these boxes and interacts
 # with the existing AHK auto-respawn watcher on strih (see .claude/skills/obs-ops "AHK on strih");
 # that is a bigger, riskier, precedent-setting change filed separately for the user's decision.
-# issue 1317: the Windows-box reasoning above covers stream/resolume; the Linux strih-lx runs OBS as
+# issue 1317: the Windows-box reasoning above covers stream/resolume; the Linux strih-snv runs OBS as
 # a supervised systemd --user unit (strih-obs.service, Restart=on-failure), so its embedded recovery
 # is a plain-ssh `systemctl --user restart` (recovery_plan_for picks it by the box's fleet class).
 #
@@ -88,8 +88,8 @@ log() { printf '%s [obs-liveness-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')
 # measure_boxes -> sets $VERDICT_LINES to one "<VERDICT> <box>: <reasons>" line per box (the
 # obs-watchdog-gate stdout, one line per box regardless of exit code — see its own doc comment).
 # #1296: the box SET is DERIVED from the ONE declared fleet list (scripts/lib/obs-fleet.sh) —
-# obs_fleet_boxes obs-liveness = strih-lx, stream, resolume (issue 1317: strih-lx is the production
-# strih since M4). strih-lx/stream keep their own
+# obs_fleet_boxes obs-liveness = strih-snv, stream, resolume (issue 1317: strih-snv is the production
+# strih since M4). strih-snv/stream keep their own
 # STRIH_HOST/STREAM_HOST (+ per-box target fps) exactly as before; resolume (a genlock cg-obs box)
 # is added ONLY while obs_fleet_is_home resolume holds, so a traveling box that is away is never
 # polled and never produces a false wedge verdict (the #391 "no probe output = nothing to decide"
@@ -101,13 +101,13 @@ measure_boxes() {
     name="${pair%%|*}"
     host="${pair##*|}"
     case "$name" in
-      # issue 1317 (M4): the production strih is the Linux strih-lx (the Windows `strih` row is
+      # issue 1317 (M4): the production strih is the Linux strih-snv (the Windows `strih` row is
       # retired from the fleet list). It keeps the strih knobs: STRIH_HOST (default = its .202
       # address) + the 30 fps cut-to-stream target. GetStats over OBS-WS is platform-neutral.
-      strih-lx) host="$STRIH_HOST"; fps="$STRIH_TARGET_FPS" ;;
-      stream) host="$STREAM_HOST"; fps="$STREAM_TARGET_FPS" ;;
-      resolume)
-        obs_fleet_is_home resolume || continue   # away -> do not poll a traveling box
+      strih-snv) host="$STRIH_HOST"; fps="$STRIH_TARGET_FPS" ;;
+      stream-snv) host="$STREAM_HOST"; fps="$STREAM_TARGET_FPS" ;;
+      resolume-snv)
+        obs_fleet_is_home resolume-snv || continue   # away -> do not poll a traveling box
         fps="$RESOLUME_TARGET_FPS"
         # RESIDUAL (#1296 review): unlike network-reach (whose promotion AND page condition are BOTH
         # keyed on .201 liveness, so they cannot contradict), THIS is a PAGING watchdog whose
@@ -159,13 +159,13 @@ parse_verdict_line() {
 recovery_plan_for() {
   local box="$1" label="$2"
   # issue 1317: the recovery is CLASS-resolved from the fleet list, BEFORE any verdict-specific
-  # text (the #89 DXGI / PC-reboot guidance below is Windows-only). A linux-genlock box (strih-lx,
+  # text (the #89 DXGI / PC-reboot guidance below is Windows-only). A linux-genlock box (strih-snv,
   # the production strih since M4) runs OBS as a supervised systemd --user unit (`<role>-obs.service`,
   # e.g. strih-obs.service) reached over plain ssh -- the Windows launch program + win-* MCP Shell
   # below do not apply to it (launch-obs-genlock.sh refuses a Linux box name). The list-units check
   # comes first because `systemctl --user restart '<pattern>'` exits 0 when NOTHING matches.
   if [ "$(obs_fleet_class "$box" 2>/dev/null || true)" = "linux-genlock" ]; then
-    printf "ssh newlevel@%s \"systemctl --user list-units --all --no-legend --plain '*-obs.service' | grep -q . && systemctl --user restart '*-obs.service'\"   # Linux genlock box (%s verdict): restarts its supervised OBS unit (strih-obs.service on strih-lx); a non-zero exit = no OBS unit loaded; verify :4455 + renderAdvanced after" "$(obs_fleet_host "$box" 2>/dev/null || printf '%s' "$box")" "$label"
+    printf "ssh newlevel@%s \"systemctl --user list-units --all --no-legend --plain '*-obs.service' | grep -q . && systemctl --user restart '*-obs.service'\"   # Linux genlock box (%s verdict): restarts its supervised OBS unit (strih-obs.service on strih-snv); a non-zero exit = no OBS unit loaded; verify :4455 + renderAdvanced after" "$(obs_fleet_host "$box" 2>/dev/null || printf '%s' "$box")" "$label"
     return
   fi
   if [ "$label" = "GPU-DEVICE-REMOVED" ]; then

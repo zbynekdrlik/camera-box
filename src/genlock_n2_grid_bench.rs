@@ -1,10 +1,10 @@
 //! Issue 1367 slice D1 — the 60-into-30 TWO-CLOCK bench for the grid-exact N>=2 conveyor.
 //!
-//! Seven strih-lx cameras (60 fps, stamped on the per-second 60 fps grid in 100 ns units, the
+//! Seven strih-snv cameras (60 fps, stamped on the per-second 60 fps grid in 100 ns units, the
 //! camera sender clock) feed a 30 fps strih canvas whose render tick runs on the per-second 30 fps
 //! grid of the receiver clock, a few hundred µs late and read a few µs early (the scheduled-instant
 //! read of `genlock_n1_tick_wall_now`). Each camera's frames ARRIVE after a lag drawn from the
-//! arrival lag measured on strih-lx on 28.9.2026 ([`CAMERA_LAG_PPM`]), delivered in order (a late
+//! arrival lag measured on strih-snv on 28.9.2026 ([`CAMERA_LAG_PPM`]), delivered in order (a late
 //! frame holds the ones behind it, so a tail frame makes a burst). The receiver is RESTARTED at
 //! random instants: an empty FIFO, no lock, no confirmed multiple.
 //!
@@ -52,7 +52,7 @@ const S0: u64 = 1_790_640_000_000_000_000;
 /// The grid target sits four 60 fps slots before the tick at the production pin (66.7 ms).
 const TARGET_SLOTS_BACK: u64 = 4;
 
-/// The measured strih-lx arrival lag per camera (28.9.2026, `2026-09-28 1*.txt`, 30 793
+/// The measured strih-snv arrival lag per camera (28.9.2026, `2026-09-28 1*.txt`, 30 793
 /// `genlock-fifo audit` samples of the seven program inputs): the share, in ppm, of ticks whose
 /// NEWEST queued frame was k 60 fps slots old (`head_skew − (depth + erased − 1) × 16.7 ms`). Bin
 /// k (1..=7) = a lag in `((k − 1) × 16.7, k × 16.7]` ms; bin 8 = 116.7..250 ms (the stall

@@ -1562,7 +1562,7 @@ step 23 "RemoteOS MCP control-channel agent (#858): the venv install from the sh
 # The linux-imag-nb MCP surface (:8092) is served by the SEPARATE zbynekdrlik/remoteos-mcp project
 # (ops skill #555). issue 1361: every box installs it through the ONE shared lib (setup-strih step 10,
 # setup-device STEP 17b): the project's own source + constraints.txt into /opt/remoteos-mcp-venv (the
-# shape strih-lx runs), never the upstream install-linux.sh, which pip-installs into the system python.
+# shape strih-snv runs), never the upstream install-linux.sh, which pip-installs into the system python.
 #
 # Auth-key handling (security-boundary): the key is a full-shell-RCE bearer token bound to
 # 0.0.0.0:8092, so it NEVER lands in this repo or in the unit text. REMOTEOS_MCP_AUTH_KEY (the env-secret

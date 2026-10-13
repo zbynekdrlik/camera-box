@@ -1,7 +1,7 @@
 //! Issue 1367 -- the multi-source window decision against the REAL windows of release PR 1373's two
 //! E2E runs (`tests/fixtures/multi-source-1367/cam_windows.tsv`, copied from the dev1 verdict JSONs).
 //!
-//! - The four CAM2 windows that film the strih-lx multiview read multi-source, and their copies/gaps,
+//! - The four CAM2 windows that film the strih-snv multiview read multi-source, and their copies/gaps,
 //!   cadence and `frozen_leg` fold report-only, so they pass on their node burn.
 //! - Every other window stays single-source and byte-identical in behaviour; a CAM3-style
 //!   single-source window carrying copies/gaps still FAILS.

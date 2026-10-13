@@ -17,7 +17,7 @@ sets nice 19 + core-0 affinity). It is SECONDARY — it must NEVER degrade captu
 `ExecStart` (no `--display` flag, no `[display]` section). `CAMERA_BOX_NO_DISPLAY` is the ONE opt-out, used by the
 rig-mode TEST mode and `loopback-e2e.sh` to free `/dev/fb0` for the QR painter; capture + NDI emit keep running.
 "display output ≠ capture input." Since issue 1362 the SOURCE is resolved from the LAN: the preferred
-`STRIH-LX (interkom)` is taken on sight, else the one `STRIH-<box> (interkom)` after the find window. See
+`STRIH-SNV (interkom)` is taken on sight, else the one `STRIH-<box> (interkom)` after the find window. See
 `.claude/rules/cameraman-preview-source.md`.
 
 ## Phantom / latched framebuffer — the core gotcha (#135)

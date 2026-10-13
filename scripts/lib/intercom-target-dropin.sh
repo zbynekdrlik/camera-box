@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # scripts/lib/intercom-target-dropin.sh — #1345 M1b: SINGLE SOURCE OF TRUTH for the /run systemd
-# drop-in that repoints ONE dev cambox's VBAN intercom target at the Linux strih-lx hub. Extended
+# drop-in that repoints ONE dev cambox's VBAN intercom target at the Linux strih-snv hub. Extended
 # header below `set`.
 set -euo pipefail
 #

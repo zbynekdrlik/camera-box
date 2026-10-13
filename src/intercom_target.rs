@@ -1,7 +1,7 @@
 //! #1345 M1b — appliance-side intercom-target env override.
 //!
 //! The dev cambox root filesystem is READ-ONLY, so `/etc/camera-box/config.toml` cannot be edited to
-//! repoint the VBAN intercom at the new Linux strih-lx hub. camera-box therefore honours a
+//! repoint the VBAN intercom at the new Linux strih-snv hub. camera-box therefore honours a
 //! `CAMERA_BOX_INTERCOM_TARGET` env override (precedence env > CLI flag > config.toml), carried by a
 //! `/run` systemd drop-in written by `scripts/lib/intercom-target-dropin.sh` (tmpfs, so a reboot
 //! auto-reverts to the deployed Windows-strih target). Only the DEV cambox cam1 is repointed for the
@@ -42,11 +42,11 @@ mod tests {
 
     #[test]
     fn override_wins_and_trims_and_notes_both_hosts() {
-        let (target, note) = resolve_intercom_target(Some("  strih-lx.lan \n"), "strih.lan");
-        assert_eq!(target, "strih-lx.lan");
+        let (target, note) = resolve_intercom_target(Some("  strih-snv.lan \n"), "strih.lan");
+        assert_eq!(target, "strih-snv.lan");
         let note = note.expect("override note");
         assert!(note.contains(INTERCOM_TARGET_ENV));
-        assert!(note.contains("strih-lx.lan"));
+        assert!(note.contains("strih-snv.lan"));
         assert!(note.contains("strih.lan"));
     }
 
