@@ -162,7 +162,7 @@ def test_verdict_missing_or_disabled_clip_item_fails():
     only_video = [_item(SPEC["video_input"])]
     rows = sds.dev_safe_verdict([PROD, "Development"], only_video, True, None, SPEC)
     assert "FAIL" in _levels(rows)
-    disabled = [_item(SPEC["audio_input"], enabled=False), _item(SPEC["video_input"], 2, 1)]
+    disabled = [_item(SPEC["audio_input"], enabled=False), _item(SPEC["video_input"], item_id=2, index=1)]
     rows = sds.dev_safe_verdict([PROD, "Development"], disabled, True,
                                 {"local_file": SPEC["audio_file"]}, SPEC)
     assert "FAIL" in _levels(rows)
@@ -370,7 +370,7 @@ def test_apply_on_the_live_stream_pp_names_uses_the_live_video_input():
 
 def test_verdict_through_resolve_accepts_the_live_video_input():
     obs = FakeObs([PROD, SPEC["scene"]], [LIVE_VIDEO, SPEC["audio_input"]],
-                  {SPEC["scene"]: [_item(SPEC["audio_input"], index=0), _item(LIVE_VIDEO, 2, 1)]})
+                  {SPEC["scene"]: [_item(SPEC["audio_input"], index=0), _item(LIVE_VIDEO, item_id=2, index=1)]})
     real_req = obs.req
 
     def req(t, data=None, ignore_err=False):
