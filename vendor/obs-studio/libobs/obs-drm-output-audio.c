@@ -7,7 +7,8 @@
  *   - the resolver (one per open leg): reads the ELDs, re-reading for at most
  *     DRM_OUTPUT_AUDIO_RESOLVE_WINDOW_MS (the NVIDIA HDA driver publishes a connector's ELD only
  *     once a mode is driven on it), turns on the matched PCM's IEC958 switch, opens + configures
- *     hw:<card>,<device>, waits for libobs's audio output and connects the mix-0 callback, then ends;
+ *     hw:<card>,<device>, waits for libobs's audio output and connects the mix-0 callback, then stays
+ *     as the leg's watcher (re-checks every 5 s that the PCM still carries the connector's monitor);
  *   - libobs's audio thread: drm_output_audio_on_mix() places every block and writes it into the
  *     PCM (non-blocking: the audio thread never waits on the device);
  *   - the output's scanout thread + the graphics thread: the present clock notes.
@@ -176,11 +177,34 @@ static size_t drm_output_audio_read_elds(struct drm_output_audio_pcm *out, size_
 	return n;
 }
 
+/* How many "IEC958 Playback Switch" controls the card on `fd` has (0 on a read failure). */
+static size_t drm_output_audio_iec958_count(int fd)
+{
+	struct snd_ctl_elem_list list;
+	memset(&list, 0, sizeof(list));
+	if (ioctl(fd, SNDRV_CTL_IOCTL_ELEM_LIST, &list) < 0 || list.count == 0)
+		return 0;
+	struct snd_ctl_elem_id *ids = bzalloc(sizeof(*ids) * list.count);
+	list.space = list.count;
+	list.pids = ids;
+	size_t n = 0;
+	if (ioctl(fd, SNDRV_CTL_IOCTL_ELEM_LIST, &list) == 0) {
+		for (unsigned int i = 0; i < list.used; i++)
+			if (ids[i].iface == SNDRV_CTL_ELEM_IFACE_MIXER &&
+			    strcmp((const char *)ids[i].name, "IEC958 Playback Switch") == 0)
+				n++;
+	}
+	bfree(ids);
+	return n;
+}
+
 /* Turn on the "IEC958 Playback Switch" of PCM `device` on `card` (index = the PCM's rank among the
- * card's HDMI PCMs, drm_output_audio_iec958_index). No sound server unmutes it any more, so a switch
- * left off would make the leg write silence. Returns a short note for the open line. */
-static const char *drm_output_audio_iec958_on(int card, const struct drm_output_audio_pcm *pcms, size_t n,
-					      int device)
+ * card's HDMI PCMs, drm_output_audio_iec958_index) -- only when the card's switches are exactly its
+ * HDMI PCMs; an extra switch (an analog codec's S/PDIF on the same card) leaves it untouched and named.
+ * No sound server unmutes it any more, so a switch left off would make the leg write silence. Writes
+ * a short note for the open line into `note` (size `cap`). */
+static void drm_output_audio_iec958_on(int card, const struct drm_output_audio_pcm *pcms, size_t n, int device,
+				       char *note, size_t cap)
 {
 	int devices[DRM_OUTPUT_AUDIO_MAX_PCMS];
 	size_t nd = 0;
@@ -188,15 +212,21 @@ static const char *drm_output_audio_iec958_on(int card, const struct drm_output_
 		if (pcms[i].card == card)
 			devices[nd++] = pcms[i].device;
 	}
-	const int index = drm_output_audio_iec958_index(devices, nd, device);
-	if (index < 0)
-		return "IEC958 switch not found";
 	char path[64];
 	snprintf(path, sizeof(path), "/dev/snd/controlC%d", card);
 	const int fd = open(path, O_RDWR | O_CLOEXEC);
-	if (fd < 0)
-		return "IEC958 switch not writable";
-	const char *note = "IEC958 switch not found";
+	if (fd < 0) {
+		snprintf(note, cap, "IEC958 switch not writable");
+		return;
+	}
+	const size_t switches = drm_output_audio_iec958_count(fd);
+	const int index = drm_output_audio_iec958_index(devices, nd, device, switches);
+	if (index < 0) {
+		snprintf(note, cap, "IEC958 switch ambiguous (%zu switches, %zu HDMI PCMs) -- untouched", switches, nd);
+		close(fd);
+		return;
+	}
+	snprintf(note, cap, "IEC958 switch not found");
 	struct snd_ctl_elem_id id;
 	memset(&id, 0, sizeof(id));
 	id.iface = SNDRV_CTL_ELEM_IFACE_MIXER;
@@ -215,15 +245,15 @@ static const char *drm_output_audio_iec958_on(int card, const struct drm_output_
 				v->value.integer.value[c] = 1;
 			}
 			if (all_on)
-				note = "IEC958 switch on";
+				snprintf(note, cap, "IEC958 switch on");
 			else
-				note = ioctl(fd, SNDRV_CTL_IOCTL_ELEM_WRITE, v) == 0 ? "IEC958 switch was off -> on"
-										  : "IEC958 switch off, write FAILED";
+				snprintf(note, cap, "%s",
+					 ioctl(fd, SNDRV_CTL_IOCTL_ELEM_WRITE, v) == 0 ? "IEC958 switch was off -> on"
+										       : "IEC958 switch off, write FAILED");
 		}
 		bfree(v);
 	}
 	close(fd);
-	return note;
 }
 
 /* -------------------------------------------------------------------------------------------------
@@ -309,6 +339,11 @@ static bool drm_output_alsa_load(struct drm_output_alsa *al)
 #define DRM_OUTPUT_AUDIO_BUFFER_FRAMES 8192
 #define DRM_OUTPUT_AUDIO_FLOOR_BLOCKS 3
 #define DRM_OUTPUT_AUDIO_REPORT_NS 60000000000ULL
+/* The drift walk: outside +-5 ms of the floor one frame per block is repeated / dropped (inaudible). */
+#define DRM_OUTPUT_AUDIO_BAND_NS 5000000ULL
+/* How often the open PCM is re-checked against the connector's monitor (a replug or a re-mode can move
+ * the NVIDIA pin -> PCM map). */
+#define DRM_OUTPUT_AUDIO_CHECK_NS 5000000000ULL
 
 struct drm_output_audio {
 	char connector[64];
@@ -326,7 +361,7 @@ struct drm_output_audio {
 	int device;
 	unsigned int rate;
 	size_t frame_bytes;
-	const char *iec958;
+	char iec958[96];
 
 	/* audio thread only */
 	bool open_logged;
@@ -335,8 +370,12 @@ struct drm_output_audio {
 	uint64_t holds;
 	uint64_t trims;
 	uint64_t xruns;
+	uint64_t nudges;
+	uint64_t dropped_frames; /* frames the full ring refused (-EAGAIN / a short write) */
+	bool write_err_logged;
 	uint64_t last_report_ns;
-	uint8_t *silence;
+	volatile bool pcm_lost; /* the watcher's verdict (os_atomic): the PCM is no longer the connector's */
+	uint8_t *silence; /* preallocated at open: the audio thread never allocates */
 	size_t silence_frames;
 };
 
@@ -349,17 +388,40 @@ static void drm_output_audio_no_audio(const struct drm_output_audio *a, const ch
 		blog(LOG_WARNING, "drm-output audio: NO AUDIO on '%s' -- %s; never another device", a->connector, why);
 }
 
-/* Write `frames` frames, recovering one xrun (the ring drained: the next block re-places itself). */
+/* Write `frames` frames, recovering one xrun (the ring drained: the next block re-places itself). A full
+ * ring (-EAGAIN, a short write) drops what did not fit -- counted, the next placement trims back to the
+ * floor; any other error is named once. */
 static void drm_output_audio_write(struct drm_output_audio *a, const void *buf, size_t frames)
 {
-	const long w = a->alsa.writei(a->pcm, buf, (unsigned long)frames);
+	long w = a->alsa.writei(a->pcm, buf, (unsigned long)frames);
 	if (w == -EPIPE || w == -ESTRPIPE) {
 		a->xruns++;
 		if (a->alsa.recover(a->pcm, (int)w, 1) == 0)
-			(void)a->alsa.writei(a->pcm, buf, (unsigned long)frames);
+			w = a->alsa.writei(a->pcm, buf, (unsigned long)frames);
 	}
-	/* -EAGAIN: the ring is full -- the frames that did not fit are dropped; the next block's
-	 * placement trims the queue back to the floor */
+	if (w >= 0) {
+		if ((size_t)w < frames)
+			a->dropped_frames += frames - (size_t)w;
+	} else if (w == -EAGAIN) {
+		a->dropped_frames += frames;
+	} else if (!a->write_err_logged) {
+		a->write_err_logged = true;
+		blog(LOG_WARNING, "drm-output audio: '%s' write to hw:%d,%d failed (%s)", a->connector, a->card,
+		     a->device, a->alsa.strerror_fn((int)w));
+	}
+}
+
+/* The resolver thread (the leg's watcher), every DRM_OUTPUT_AUDIO_CHECK_NS: the open PCM still carries
+ * the connector's monitor (its ELD still picks the same card + device). Never on libobs's audio thread:
+ * it opens the control devices and allocates. */
+static bool drm_output_audio_pcm_still_matches(const struct drm_output_audio *a)
+{
+	struct drm_output_audio_pcm pcms[DRM_OUTPUT_AUDIO_MAX_PCMS];
+	memset(pcms, 0, sizeof(pcms));
+	size_t idx = 0;
+	const size_t n = drm_output_audio_read_elds(pcms, DRM_OUTPUT_AUDIO_MAX_PCMS);
+	return drm_output_audio_pick_pcm(&a->want, pcms, n, &idx) == DRM_OUTPUT_AUDIO_MATCH &&
+	       pcms[idx].card == a->card && pcms[idx].device == a->device;
 }
 
 /* One mix-0 block on libobs's audio thread: place it against the picture and write it. */
@@ -381,6 +443,9 @@ static void drm_output_audio_on_mix(void *param, size_t mix_idx, struct audio_da
 	if (!program)
 		return;
 
+	if (os_atomic_load_bool(&a->pcm_lost)) /* the watcher found the PCM no longer the connector's */
+		return;
+
 	const uint64_t rate = a->rate;
 	const uint64_t block_ns = (uint64_t)data->frames * 1000000000ULL / rate;
 	const uint64_t floor_ns = DRM_OUTPUT_AUDIO_FLOOR_BLOCKS * block_ns;
@@ -392,24 +457,27 @@ static void drm_output_audio_on_mix(void *param, size_t mix_idx, struct audio_da
 		queued = 0; /* a fresh or drained PCM: nothing queued */
 	const uint64_t pcm_ns = (uint64_t)queued * 1000000000ULL / rate;
 	const uint64_t now = os_gettime_ns();
-	const struct drm_output_audio_plan plan =
-		drm_output_audio_plan_block(data->timestamp, present_ns, now, pcm_ns, floor_ns, threshold_ns, block_ns);
+	const struct drm_output_audio_plan plan = drm_output_audio_plan_block(
+		data->timestamp, present_ns, now, pcm_ns, floor_ns, threshold_ns, block_ns, DRM_OUTPUT_AUDIO_BAND_NS);
 
 	if (plan.silence_ns > 0) {
-		const size_t frames = (size_t)(plan.silence_ns * rate / 1000000000ULL);
-		if (frames > a->silence_frames) {
-			bfree(a->silence);
-			a->silence = bzalloc(frames * a->frame_bytes);
-			a->silence_frames = frames;
-		}
+		size_t frames = (size_t)(plan.silence_ns * rate / 1000000000ULL);
+		if (frames > a->silence_frames)
+			frames = a->silence_frames; /* never more than the ring holds */
 		drm_output_audio_write(a, a->silence, frames);
 		a->holds++;
 	}
 	size_t skip = (size_t)(plan.drop_ns * rate / 1000000000ULL);
+	if (plan.nudge_frames < 0)
+		skip++; /* the drift walk: one frame dropped */
 	if (skip > data->frames)
 		skip = data->frames;
-	if (skip > 0)
+	if (plan.drop_ns > 0)
 		a->trims++;
+	if (plan.nudge_frames != 0)
+		a->nudges++;
+	if (plan.nudge_frames > 0)
+		drm_output_audio_write(a, data->data[0], 1); /* the drift walk: the first frame repeated */
 	if (skip < data->frames)
 		drm_output_audio_write(a, data->data[0] + skip * a->frame_bytes, data->frames - skip);
 
@@ -426,10 +494,11 @@ static void drm_output_audio_on_mix(void *param, size_t mix_idx, struct audio_da
 		a->last_report_ns = now;
 		blog(LOG_INFO,
 		     "drm-output audio: '%s' offset %.1f ms (audio behind the picture), present %.1f ms, pcm %.1f ms, "
-		     "blocks %llu holds %llu trims %llu xruns %llu",
+		     "blocks %llu holds %llu trims %llu nudges %llu xruns %llu dropped_frames %llu",
 		     a->connector, (double)plan.offset_ns / 1e6, (double)present_ns / 1e6, (double)pcm_ns / 1e6,
 		     (unsigned long long)a->blocks, (unsigned long long)a->holds, (unsigned long long)a->trims,
-		     (unsigned long long)a->xruns);
+		     (unsigned long long)a->nudges, (unsigned long long)a->xruns,
+		     (unsigned long long)a->dropped_frames);
 	}
 }
 
@@ -472,6 +541,9 @@ static const char *drm_output_audio_open_pcm(struct drm_output_audio *a, enum au
 	}
 	a->rate = rate;
 	a->frame_bytes = sf == DRM_OUTPUT_SND_PCM_FORMAT_S32_LE ? 8 : 4;
+	/* the hold's silence, sized to the ring once here: the audio thread never allocates */
+	a->silence_frames = (size_t)buffer;
+	a->silence = bzalloc(a->silence_frames * a->frame_bytes);
 	*fmt = sf == DRM_OUTPUT_SND_PCM_FORMAT_S32_LE ? AUDIO_FORMAT_32BIT : AUDIO_FORMAT_16BIT;
 	return NULL;
 }
@@ -511,7 +583,7 @@ static void *drm_output_audio_thread(void *param)
 	}
 	a->card = pcms[idx].card;
 	a->device = pcms[idx].device;
-	a->iec958 = drm_output_audio_iec958_on(a->card, pcms, n, a->device);
+	drm_output_audio_iec958_on(a->card, pcms, n, a->device, a->iec958, sizeof(a->iec958));
 
 	enum audio_format fmt = AUDIO_FORMAT_32BIT;
 	const char *why = drm_output_audio_open_pcm(a, &fmt);
@@ -532,6 +604,27 @@ static void *drm_output_audio_thread(void *param)
 	blog(LOG_INFO, "drm-output audio: '%s' matched hw:%d,%d (%u Hz, %s, %s) -- mix 0 connected%s", a->connector,
 	     a->card, a->device, a->rate, fmt == AUDIO_FORMAT_32BIT ? "S32_LE" : "S16_LE", a->iec958,
 	     a->view_program ? "" : " (muted while the view is multiview)");
+
+	/* the watcher: an HDMI replug or a re-mode can move the NVIDIA pin -> PCM map, and then hw:C,D is
+	 * another connector's -- muted (never written) and named until it is the connector's again */
+	while (!os_atomic_load_bool(&a->stop)) {
+		for (uint64_t t = 0; t < DRM_OUTPUT_AUDIO_CHECK_NS / 50000000ULL && !os_atomic_load_bool(&a->stop); t++)
+			os_sleep_ms(50);
+		if (os_atomic_load_bool(&a->stop))
+			break;
+		const bool lost = !drm_output_audio_pcm_still_matches(a);
+		if (lost == os_atomic_load_bool(&a->pcm_lost))
+			continue;
+		os_atomic_set_bool(&a->pcm_lost, lost);
+		if (lost)
+			blog(LOG_WARNING,
+			     "drm-output audio: '%s' hw:%d,%d no longer carries the connector's monitor (an HDMI replug or a "
+			     "re-mode moved the PCM map) -- muted",
+			     a->connector, a->card, a->device);
+		else
+			blog(LOG_INFO, "drm-output audio: '%s' hw:%d,%d carries the connector's monitor again", a->connector,
+			     a->card, a->device);
+	}
 done:
 	bfree(pcms);
 	return NULL;
@@ -547,7 +640,7 @@ struct drm_output_audio *drm_output_audio_open(const char *connector, const uint
 	a->clock = clock;
 	a->card = -1;
 	a->device = -1;
-	a->iec958 = "IEC958 switch untouched";
+	snprintf(a->iec958, sizeof(a->iec958), "IEC958 switch untouched");
 	(void)drm_output_edid_monitor_id(edid, edid_len, &a->want);
 	if (a->want.valid)
 		blog(LOG_INFO, "drm-output audio: '%s' EDID %02x%02x %02x%02x '%s' -- resolving its HDMI PCM", a->connector,
@@ -576,9 +669,12 @@ void drm_output_audio_close(struct drm_output_audio *a)
 	if (a->alsa.lib)
 		dlclose(a->alsa.lib);
 	if (connected)
-		blog(LOG_INFO, "drm-output audio: '%s' closed (blocks %llu holds %llu trims %llu xruns %llu)", a->connector,
-		     (unsigned long long)a->blocks, (unsigned long long)a->holds, (unsigned long long)a->trims,
-		     (unsigned long long)a->xruns);
+		blog(LOG_INFO,
+		     "drm-output audio: '%s' closed (blocks %llu holds %llu trims %llu nudges %llu xruns %llu dropped_frames "
+		     "%llu)",
+		     a->connector, (unsigned long long)a->blocks, (unsigned long long)a->holds,
+		     (unsigned long long)a->trims, (unsigned long long)a->nudges, (unsigned long long)a->xruns,
+		     (unsigned long long)a->dropped_frames);
 	bfree(a->silence);
 	bfree(a);
 }

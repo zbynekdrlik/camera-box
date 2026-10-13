@@ -45,6 +45,8 @@ pub struct AudioPlan {
     pub silence_ns: u64,
     pub drop_ns: u64,
     pub offset_ns: i64,
+    /// +1 = repeat one frame, -1 = drop one frame (the clock-drift walk), 0 = none.
+    pub nudge_frames: i32,
 }
 
 /// A monitor name: at most `n` bytes, ends at NUL or LF, trailing spaces dropped, non-printable
@@ -147,8 +149,10 @@ pub fn pick_pcm(want: &MonitorId, pcms: &[AudioPcm]) -> (i32, Option<usize>) {
 
 /// The card's "IEC958 Playback Switch" index of PCM `device`: its rank among the card's
 /// ELD-carrying PCM devices (the HDA driver creates one switch per HDMI/DP PCM, in PCM order);
-/// `None` when `device` is not one of them. Duplicates never count twice.
-pub fn iec958_index(devices: &[i32], device: i32) -> Option<i32> {
+/// `None` when `device` is not one of them, or when the card's switch count is not its HDMI PCM
+/// count (an analog codec's own S/PDIF switch: ambiguous, never a guess). Duplicates never count
+/// twice.
+pub fn iec958_index(devices: &[i32], device: i32, n_switches: usize) -> Option<i32> {
     let mut seen: Vec<i32> = Vec::with_capacity(devices.len());
     let mut rank = 0;
     let mut found = false;
@@ -163,7 +167,7 @@ pub fn iec958_index(devices: &[i32], device: i32) -> Option<i32> {
             rank += 1;
         }
     }
-    found.then_some(rank)
+    (found && seen.len() == n_switches).then_some(rank)
 }
 
 /// Whether a failed resolve is worth another read inside the bounded window (an ELD the HDA driver
@@ -185,8 +189,9 @@ pub fn reason(result: i32) -> &'static str {
 }
 
 /// Placing one mix block: hold silence when the audio is early (never sooner than `now + floor`),
-/// trim at most one block off the front when the buffer grew past the floor, and report the kept
-/// first sample's offset against its picture (+ = audio behind the picture).
+/// trim at most one block off the front when the buffer grew past the floor, inside the threshold
+/// walk a drift back one frame per block outside `band_ns`, and report the kept first sample's
+/// offset against its picture (+ = audio behind the picture).
 #[allow(clippy::too_many_arguments)]
 pub fn plan_block(
     block_ts_ns: u64,
@@ -196,6 +201,7 @@ pub fn plan_block(
     floor_ns: u64,
     threshold_ns: u64,
     block_ns: u64,
+    band_ns: u64,
 ) -> AudioPlan {
     let mut plan = AudioPlan::default();
     let want = block_ts_ns.wrapping_add(present_delay_ns) as i64;
@@ -209,6 +215,10 @@ pub fn plan_block(
     } else if hold.wrapping_neg() > thr {
         let blk = block_ns as i64;
         plan.drop_ns = hold.wrapping_neg().min(blk) as u64;
+    } else if band_ns != 0 && hold > band_ns as i64 {
+        plan.nudge_frames = 1;
+    } else if band_ns != 0 && hold.wrapping_neg() > band_ns as i64 {
+        plan.nudge_frames = -1;
     }
     plan.offset_ns = natural
         .wrapping_add(plan.silence_ns as i64)
@@ -284,16 +294,30 @@ mod tests {
     #[test]
     fn iec958_index_is_the_pcm_rank_on_its_card() {
         // strih-snv card0: HDMI PCMs 3/7/8/9 <-> switch indexes 0/1/2/3
-        assert_eq!(iec958_index(&[3, 7, 8, 9], 3), Some(0));
-        assert_eq!(iec958_index(&[9, 8, 7, 3], 8), Some(2));
-        assert_eq!(iec958_index(&[3, 7, 7], 7), Some(1));
-        assert_eq!(iec958_index(&[3, 7], 0), None);
+        assert_eq!(iec958_index(&[3, 7, 8, 9], 3, 4), Some(0));
+        assert_eq!(iec958_index(&[9, 8, 7, 3], 8, 4), Some(2));
+        assert_eq!(iec958_index(&[3, 7, 7], 7, 2), Some(1));
+        assert_eq!(iec958_index(&[3, 7], 0, 2), None);
+        assert_eq!(
+            iec958_index(&[3, 7, 8], 3, 4),
+            None,
+            "an extra S/PDIF switch: ambiguous"
+        );
     }
 
     #[test]
     fn plan_trims_at_most_one_block() {
         let ms = 1_000_000u64;
-        let p = plan_block(1000 * ms, 0, 1000 * ms, 500 * ms, 60 * ms, 42 * ms, 21 * ms);
+        let p = plan_block(
+            1000 * ms,
+            0,
+            1000 * ms,
+            500 * ms,
+            60 * ms,
+            42 * ms,
+            21 * ms,
+            5 * ms,
+        );
         assert_eq!(p.drop_ns, 21 * ms);
         assert_eq!(p.silence_ns, 0);
     }

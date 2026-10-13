@@ -147,23 +147,26 @@ static inline int drm_output_audio_pick_pcm(const struct drm_output_monitor_id *
 /* The HDA codec driver creates one "IEC958 Playback Switch" per HDMI/DP PCM, in PCM order, with
  * index 0, 1, 2, ... (strih-snv card0: PCMs 3/7/8/9 <-> switch indexes 0/1/2/3). So the switch of
  * PCM `device` is its rank among the card's ELD-carrying PCM devices; -1 when `device` is not one
- * of them. Duplicates in `devices` never count twice. */
-static inline int drm_output_audio_iec958_index(const int *devices, size_t n, int device)
+ * of them. Duplicates in `devices` never count twice. A card whose switch count differs from its HDMI
+ * PCM count (an analog codec's own S/PDIF switch on the same card) is ambiguous: -1, never a guess. */
+static inline int drm_output_audio_iec958_index(const int *devices, size_t n, int device, size_t n_switches)
 {
 	int rank = 0;
 	bool found = false;
+	size_t unique = 0;
 	for (size_t i = 0; i < n; i++) {
 		bool dup = false;
 		for (size_t j = 0; j < i; j++)
 			dup = dup || devices[j] == devices[i];
 		if (dup)
 			continue;
+		unique++;
 		if (devices[i] == device)
 			found = true;
 		else if (devices[i] < device)
 			rank++;
 	}
-	return found ? rank : -1;
+	return found && unique == n_switches ? rank : -1;
 }
 
 /* Whether a failed resolve is worth another read inside the bounded window: the NVIDIA HDA driver
@@ -198,20 +201,23 @@ static inline const char *drm_output_audio_reason(int result)
  * is (the wanted play time, never under the floor) - (the natural play time):
  *   hold >  threshold  -> write hold of silence first (the audio is early: wait for the picture)
  *   hold < -threshold  -> trim min(-hold, block) off the block's front (the buffer grew past the floor)
+ *   else, |hold| > band -> repeat (+1) or drop (-1) ONE frame: the two clocks (OBS's, the HDMI audio
+ *                          clock) drift by tens of ppm, walked back a frame per block, never a skip
  *   else               -> write it as it is.
  * offset = when the first KEPT sample plays - when its picture shows (+ = audio behind the picture). */
 struct drm_output_audio_plan {
 	uint64_t silence_ns;
 	uint64_t drop_ns;
 	int64_t offset_ns;
+	int32_t nudge_frames;
 };
 
 static inline struct drm_output_audio_plan drm_output_audio_plan_block(uint64_t block_ts_ns, uint64_t present_delay_ns,
 								       uint64_t now_ns, uint64_t stream_latency_ns,
 								       uint64_t floor_ns, uint64_t threshold_ns,
-								       uint64_t block_ns)
+								       uint64_t block_ns, uint64_t band_ns)
 {
-	struct drm_output_audio_plan plan = {0, 0, 0};
+	struct drm_output_audio_plan plan = {0, 0, 0, 0};
 	const int64_t want = (int64_t)(block_ts_ns + present_delay_ns);
 	const int64_t natural = (int64_t)(now_ns + stream_latency_ns);
 	const int64_t safe = (int64_t)(now_ns + floor_ns);
@@ -223,6 +229,10 @@ static inline struct drm_output_audio_plan drm_output_audio_plan_block(uint64_t 
 	} else if (-hold > thr) {
 		const int64_t blk = (int64_t)block_ns;
 		plan.drop_ns = (uint64_t)(-hold < blk ? -hold : blk);
+	} else if (band_ns != 0 && hold > (int64_t)band_ns) {
+		plan.nudge_frames = 1;
+	} else if (band_ns != 0 && -hold > (int64_t)band_ns) {
+		plan.nudge_frames = -1;
 	}
 	plan.offset_ns = natural + (int64_t)plan.silence_ns - want - (int64_t)plan.drop_ns;
 	return plan;

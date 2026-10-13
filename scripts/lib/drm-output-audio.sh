@@ -118,11 +118,14 @@ print(n)
 }
 
 # drm_output_audio_log_state (stdin = an OBS log) -> open | no-audio | none: the LAST audio-leg
-# outcome of that OBS session (`drm-output audio: pcm hw:` = the leg opened its PCM, `NO AUDIO` =
-# it gave up and named why). Reads all of stdin; always returns 0.
+# outcome of that OBS session (`drm-output audio: pcm hw:` = the first block placed, `drm-output
+# audio: '<conn>' matched hw:` = the resolver opened the PCM -- the only line while the view is the
+# Multiview, which places no block -- `NO AUDIO` = it gave up and named why). Reads all of stdin;
+# always returns 0.
 drm_output_audio_log_state() {
   LC_ALL=C awk '
     index($0, "drm-output audio: pcm hw:") { s = "open" }
+    index($0, "drm-output audio: \047") && index($0, " matched hw:") { s = "open" }
     index($0, "drm-output audio: NO AUDIO") { s = "no-audio" }
     END { print (s == "" ? "none" : s) }' || true
 }
@@ -131,6 +134,7 @@ drm_output_audio_log_state() {
 drm_output_audio_log_line() {
   LC_ALL=C awk '
     index($0, "drm-output audio: pcm hw:") || index($0, "drm-output audio: NO AUDIO") { l = $0 }
+    index($0, "drm-output audio: \047") && index($0, " matched hw:") { l = $0 }
     END { print l }' || true
 }
 

@@ -260,9 +260,35 @@ static bool drm_output_vk_acquire(unsigned long output)
  * rebuild after a lost surface) requires the mode to have the SAME size as the committed one -- the
  * shared images and the OBS intermediate are sized to it, and the graphics thread reads mode_* without
  * a lock -- so a rebuild never changes mode_* at all; a different size refuses by name. */
-static bool drm_output_vk_create_surface(bool rebuild)
+/* The display's modes as the picker reads them, and the pick for the wanted mode the graphics thread
+ * handed over (issue 1424; 0/0/0 = the issue-1346 rule). One enumeration for the surface setup and the
+ * re-mode. */
+struct drm_output_vk_mode_list {
+	VkExtent2D native;
+	uint32_t n;
+	VkDisplayModePropertiesKHR *modes;
+	uint32_t *w, *h, *r;
+	uint32_t want_w, want_h, want_mhz;
+	int best;
+};
+
+static void drm_output_vk_mode_list_free(struct drm_output_vk_mode_list *ml)
 {
-	VkExtent2D native = {0, 0};
+	free(ml->modes);
+	free(ml->w);
+	free(ml->h);
+	free(ml->r);
+	memset(ml, 0, sizeof(*ml));
+}
+
+/* false = no modes / no memory (named); true = ml filled, ml->best = the pick (-1 = none). */
+static bool drm_output_vk_mode_list_read(struct drm_output_vk_mode_list *ml)
+{
+	memset(ml, 0, sizeof(*ml));
+	ml->best = -1;
+	ml->want_w = (uint32_t)os_atomic_load_long(&g_drm_vk.want_w);
+	ml->want_h = (uint32_t)os_atomic_load_long(&g_drm_vk.want_h);
+	ml->want_mhz = (uint32_t)os_atomic_load_long(&g_drm_vk.want_mhz);
 	uint32_t nd = 0;
 	g_drm_vk.vk.vkGetPhysicalDeviceDisplayPropertiesKHR(g_drm_vk.pd, &nd, NULL);
 	VkDisplayPropertiesKHR *dprops = calloc(nd ? nd : 1, sizeof(*dprops));
@@ -271,7 +297,7 @@ static bool drm_output_vk_create_surface(bool rebuild)
 	g_drm_vk.vk.vkGetPhysicalDeviceDisplayPropertiesKHR(g_drm_vk.pd, &nd, dprops);
 	for (uint32_t i = 0; i < nd; i++)
 		if (dprops[i].display == g_drm_vk.display)
-			native = dprops[i].physicalResolution;
+			ml->native = dprops[i].physicalResolution;
 	free(dprops);
 
 	uint32_t nm = 0;
@@ -279,35 +305,45 @@ static bool drm_output_vk_create_surface(bool rebuild)
 		blog(LOG_WARNING, "drm-output: vk-direct: the display reports no modes");
 		return false;
 	}
-	VkDisplayModePropertiesKHR *modes = calloc(nm, sizeof(*modes));
-	uint32_t *mw = calloc(nm, sizeof(uint32_t));
-	uint32_t *mh = calloc(nm, sizeof(uint32_t));
-	uint32_t *mr = calloc(nm, sizeof(uint32_t));
+	ml->modes = calloc(nm, sizeof(*ml->modes));
+	ml->w = calloc(nm, sizeof(uint32_t));
+	ml->h = calloc(nm, sizeof(uint32_t));
+	ml->r = calloc(nm, sizeof(uint32_t));
+	if (!ml->modes || !ml->w || !ml->h || !ml->r ||
+	    g_drm_vk.vk.vkGetDisplayModePropertiesKHR(g_drm_vk.pd, g_drm_vk.display, &nm, ml->modes) != VK_SUCCESS) {
+		drm_output_vk_mode_list_free(ml);
+		return false;
+	}
+	ml->n = nm;
+	for (uint32_t i = 0; i < nm; i++) {
+		ml->w[i] = ml->modes[i].parameters.visibleRegion.width;
+		ml->h[i] = ml->modes[i].parameters.visibleRegion.height;
+		ml->r[i] = ml->modes[i].parameters.refreshRate;
+	}
+	ml->best = drm_output_vk_pick_mode(ml->w, ml->h, ml->r, (int)nm, ml->native.width, ml->native.height,
+					   ml->want_w, ml->want_h, ml->want_mhz);
+	return true;
+}
+
+static bool drm_output_vk_create_surface(bool rebuild)
+{
+	struct drm_output_vk_mode_list ml;
+	if (!drm_output_vk_mode_list_read(&ml))
+		return false;
+	const VkExtent2D native = ml.native;
+	const uint32_t nm = ml.n;
 	bool ok = false;
-	if (modes && mw && mh && mr && g_drm_vk.vk.vkGetDisplayModePropertiesKHR(g_drm_vk.pd, g_drm_vk.display, &nm, modes) == VK_SUCCESS) {
-		for (uint32_t i = 0; i < nm; i++) {
-			mw[i] = modes[i].parameters.visibleRegion.width;
-			mh[i] = modes[i].parameters.visibleRegion.height;
-			mr[i] = modes[i].parameters.refreshRate;
-		}
-		/* issue 1424: the Program view's canvas, handed over by the graphics thread (0 = today's rule) */
-		const uint32_t want_w = (uint32_t)os_atomic_load_long(&g_drm_vk.want_w);
-		const uint32_t want_h = (uint32_t)os_atomic_load_long(&g_drm_vk.want_h);
-		const uint32_t want_mhz = (uint32_t)os_atomic_load_long(&g_drm_vk.want_mhz);
-		int best = drm_output_vk_pick_mode(mw, mh, mr, (int)nm, native.width, native.height, want_w, want_h,
-						   want_mhz);
+	{
+		const int best = ml.best;
 		if (best >= 0) {
-			VkDisplayModePropertiesKHR mode = modes[best];
-			const uint32_t sel_w = mw[best], sel_h = mh[best], sel_hz = mr[best];
+			VkDisplayModePropertiesKHR mode = ml.modes[best];
+			const uint32_t sel_w = ml.w[best], sel_h = ml.h[best], sel_hz = ml.r[best];
 			if (rebuild && (sel_w != g_drm_vk.mode_w || sel_h != g_drm_vk.mode_h)) {
 				blog(LOG_WARNING,
 				     "drm-output: vk-direct: the display now offers %ux%u instead of %ux%u -- the shared images "
 				     "no longer fit (restart OBS)",
 				     sel_w, sel_h, g_drm_vk.mode_w, g_drm_vk.mode_h);
-				free(modes);
-				free(mw);
-				free(mh);
-				free(mr);
+				drm_output_vk_mode_list_free(&ml);
 				return false;
 			}
 
@@ -362,10 +398,7 @@ static bool drm_output_vk_create_surface(bool rebuild)
 			free(plp);
 		}
 	}
-	free(modes);
-	free(mw);
-	free(mh);
-	free(mr);
+	drm_output_vk_mode_list_free(&ml);
 	return ok;
 }
 
@@ -582,54 +615,24 @@ bool drm_output_vk_remode_if_needed(void)
 {
 	if (!os_atomic_set_bool(&g_drm_vk.remode, false))
 		return true;
-	const uint32_t want_w = (uint32_t)os_atomic_load_long(&g_drm_vk.want_w);
-	const uint32_t want_h = (uint32_t)os_atomic_load_long(&g_drm_vk.want_h);
-	const uint32_t want_mhz = (uint32_t)os_atomic_load_long(&g_drm_vk.want_mhz);
-	VkExtent2D native = {0, 0};
-	uint32_t nd = 0;
-	g_drm_vk.vk.vkGetPhysicalDeviceDisplayPropertiesKHR(g_drm_vk.pd, &nd, NULL);
-	VkDisplayPropertiesKHR *dprops = calloc(nd ? nd : 1, sizeof(*dprops));
-	uint32_t nm = 0;
-	if (g_drm_vk.vk.vkGetDisplayModePropertiesKHR(g_drm_vk.pd, g_drm_vk.display, &nm, NULL) != VK_SUCCESS)
-		nm = 0;
-	VkDisplayModePropertiesKHR *modes = calloc(nm ? nm : 1, sizeof(*modes));
-	uint32_t *mw = calloc(nm ? nm : 1, sizeof(uint32_t));
-	uint32_t *mh = calloc(nm ? nm : 1, sizeof(uint32_t));
-	uint32_t *mr = calloc(nm ? nm : 1, sizeof(uint32_t));
-	int best = -1;
-	if (dprops && modes && mw && mh && mr && nm > 0) {
-		g_drm_vk.vk.vkGetPhysicalDeviceDisplayPropertiesKHR(g_drm_vk.pd, &nd, dprops);
-		for (uint32_t i = 0; i < nd; i++)
-			if (dprops[i].display == g_drm_vk.display)
-				native = dprops[i].physicalResolution;
-		if (g_drm_vk.vk.vkGetDisplayModePropertiesKHR(g_drm_vk.pd, g_drm_vk.display, &nm, modes) == VK_SUCCESS) {
-			for (uint32_t i = 0; i < nm; i++) {
-				mw[i] = modes[i].parameters.visibleRegion.width;
-				mh[i] = modes[i].parameters.visibleRegion.height;
-				mr[i] = modes[i].parameters.refreshRate;
-			}
-			best = drm_output_vk_pick_mode(mw, mh, mr, (int)nm, native.width, native.height, want_w, want_h,
-						       want_mhz);
-		}
-	}
+	struct drm_output_vk_mode_list ml;
+	if (!drm_output_vk_mode_list_read(&ml))
+		return true; /* nothing to pick from right now: keep the committed mode */
+	const uint32_t want_w = ml.want_w, want_h = ml.want_h, want_mhz = ml.want_mhz;
 	bool rebuild = false;
 	uint32_t sel_w = 0, sel_h = 0, sel_hz = 0;
-	if (best >= 0) {
-		sel_w = mw[best];
-		sel_h = mh[best];
-		sel_hz = mr[best];
+	if (ml.best >= 0) {
+		sel_w = ml.w[ml.best];
+		sel_h = ml.h[ml.best];
+		sel_hz = ml.r[ml.best];
 		rebuild = sel_hz != g_drm_vk.refresh_mhz && sel_w == g_drm_vk.mode_w && sel_h == g_drm_vk.mode_h;
 		if (sel_w != g_drm_vk.mode_w || sel_h != g_drm_vk.mode_h)
 			blog(LOG_WARNING,
 			     "drm-output: vk-direct: the wanted mode %ux%u@%u.%03uHz needs a size change from %ux%u -- kept "
-			     "(restart OBS to open at it)",
+			     "(the output opens at the native size; a canvas-size open is not supported)",
 			     sel_w, sel_h, sel_hz / 1000u, sel_hz % 1000u, g_drm_vk.mode_w, g_drm_vk.mode_h);
 	}
-	free(dprops);
-	free(modes);
-	free(mw);
-	free(mh);
-	free(mr);
+	drm_output_vk_mode_list_free(&ml);
 	if (!rebuild)
 		return true;
 	if (want_mhz == 0) {
@@ -640,7 +643,8 @@ bool drm_output_vk_remode_if_needed(void)
 		blog(LOG_INFO, "drm-output: vk-direct: re-mode %ux%u@%u.%03uHz -> @%u.%03uHz (program view: exact canvas rate)",
 		     g_drm_vk.mode_w, g_drm_vk.mode_h, g_drm_vk.refresh_mhz / 1000u, g_drm_vk.refresh_mhz % 1000u,
 		     sel_hz / 1000u, sel_hz % 1000u);
-	} else if (sel_w == want_w && sel_h == want_h) {
+	} else if (sel_w == want_w && sel_h == want_h &&
+		   (sel_hz > want_mhz ? sel_hz - want_mhz : want_mhz - sel_hz) <= want_mhz / 500u) {
 		/* e.g. 29.970 for a 30.000 canvas: one frame is dropped (or repeated) every 1000 / |diff mHz| s */
 		const uint32_t diff = sel_hz > want_mhz ? sel_hz - want_mhz : want_mhz - sel_hz;
 		blog(LOG_INFO,
