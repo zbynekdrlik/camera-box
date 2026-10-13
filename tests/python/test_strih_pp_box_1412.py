@@ -540,7 +540,7 @@ def test_the_pp_matrix_satisfies_the_hub_load_rules():
     assert m["hub"]["sample_rate"] == 48000 and m["hub"]["block_frames"] > 0
     parts = m["participant"]
     assert len({p["name"] for p in parts}) == len(parts)
-    assert all(p["role"] in KNOWN_ROLES and p["adapter"] in {"vban", "none", "janus", "pipewire"} for p in parts)
+    assert all(p["role"] in KNOWN_ROLES and p["adapter"] in {"vban", "none", "janus", "pipewire", "alsa_hdmi"} for p in parts)
     # the program path is exactly what it was: lv1 ch1/ch2 -> program_out ch1/ch2 at unity
     assert sorted((pt["src"], pt["in_ch"], pt["out_ch"], pt.get("gain_db", 0.0))
                   for pt in m["point"] if pt["dst"] == "program_out") == [("lv1", 1, 1, 0.0), ("lv1", 2, 2, 0.0)]
@@ -630,3 +630,18 @@ def test_the_pp_cutters_hear_the_intercom_on_the_mg_xu_stereo_card_1412():
     # every talker still reaches both ears of the cutters
     for src in {pt["src"] for pt in m["point"] if pt["dst"] == "cutters"}:
         assert {pt["out_ch"] for pt in m["point"] if pt["src"] == src and pt["dst"] == "cutters"} == {1, 2}, src
+
+
+def test_the_pp_vestibule_hears_the_lv1_program_on_hdmi_1_1424():
+    # issue 1424 part 3 (owner 13.10.2026, "mozme to tak spravit"): the vestibule TV's audio comes
+    # straight from the hub on strih-pp HDMI-1 (the Blackmagic HDMI-to-SDI converter), the program only
+    m = tomllib.loads(PP_TOML.read_text())
+    ves = {p["name"]: p for p in m["participant"]}["vestibule"]
+    assert (ves["role"], ves["adapter"], ves["hdmi_connector"]) == ("program_monitor", "alsa_hdmi", "HDMI-1")
+    assert (ves["in_channels"], ves["out_channels"]) == (0, 2)
+    assert not any(k in ves for k in ("host", "pipewire_target", "pipewire_source", "out_stream"))
+    assert sorted((pt["src"], pt["in_ch"], pt["out_ch"], pt.get("gain_db", 0.0))
+                  for pt in m["point"] if pt["dst"] == "vestibule") == [("lv1", 1, 1, 0.0), ("lv1", 2, 2, 0.0)]
+    assert not [pt for pt in m["point"] if pt["src"] == "vestibule"], "an output only"
+    hdmi = [p for p in m["participant"] if p["adapter"] == "alsa_hdmi"]
+    assert len({p["hdmi_connector"] for p in hdmi}) == len(hdmi), "one participant per connector"

@@ -318,10 +318,10 @@ fi
 # enumerate senders. Ubuntu 26.04 does NOT install it with the avahi daemon, so without it those
 # gates read blind. Idempotent (apt no-op if present); warn not fail -- OBS runs without it, only the
 # discovery tooling is affected.
-if DEBIAN_FRONTEND=noninteractive apt-get install -y avahi-utils; then
-  echo "  avahi-utils installed (avahi-browse for NDI/mDNS discovery)"
+if DEBIAN_FRONTEND=noninteractive apt-get install -y avahi-utils alsa-utils; then
+  echo "  avahi-utils + alsa-utils installed (avahi-browse; aplay/amixer for the hub's HDMI leg, issue 1424)"
 else
-  warn "  avahi-utils install failed -- avahi-browse (NDI/mDNS discovery) will be absent; fix the box's apt sources and re-run"
+  warn "  avahi-utils/alsa-utils install failed -- avahi-browse (NDI discovery) and aplay (the hub's HDMI leg) may be absent; fix apt and re-run"
 fi
 # issue 1317 item H (ffprobe): the on-box recording-verdict E2E ([8/8a], recording-verdict-on-strih-snv.sh)
 # spawns `ffprobe`, which Ubuntu 26.04 ships in the `ffmpeg` package -- a TOOL dependency of the E2E

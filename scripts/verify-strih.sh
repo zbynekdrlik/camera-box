@@ -380,7 +380,7 @@ case "$AUDIO_VERDICT" in
   NOTE*) note "program audio: $AUDIO_VERDICT" ;;
   *)     bad  "program audio: $AUDIO_VERDICT" ;;
 esac
-# talkback capture (report-only): the MiniFuse 4 is the operator talkback mic (the hub reads it).
+strih_intercom_hub_hdmi_leg_grade "http://${WS_HOST}:8790/api/state"   # issue 1424: the hub's HDMI audio legs; then the MiniFuse talkback (report-only)
 if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then note "talkback: MiniFuse 4 present (operator mic)"; else note "talkback: MiniFuse 4 not detected (plug it in before go-live)"; fi
 
 # 9b) MiniFuse period + graph quantum (issue 1345, owner accepted 25.9.2026): both operator-session
