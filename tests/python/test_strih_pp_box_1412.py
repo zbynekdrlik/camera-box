@@ -614,3 +614,19 @@ def test_the_new_libs_are_source_only_and_sourced_by_strih_provision():
         head = lib.read_text().splitlines()[:3]
         assert any("airuleset:script-ok" in ln for ln in head)
         assert not any(ln.startswith("set -") for ln in lib.read_text().splitlines())
+
+
+def test_the_pp_cutters_hear_the_intercom_on_the_mg_xu_stereo_card_1412():
+    # owner 13.10.2026: "v strih-pp uz som zapol zvukovu kartu kde ma pripojene sluchatka strihac" -- the
+    # Yamaha MG-XU USB card (2 in / 2 out, PipeWire analog-stereo), not the SNV MiniFuse 4 (4 outs)
+    m = tomllib.loads(PP_TOML.read_text())
+    cut = {p["name"]: p for p in m["participant"]}["cutters"]
+    assert cut["adapter"] == "pipewire"
+    assert cut["pipewire_target"] == "alsa_output.usb-Yamaha_Corporation_MG-XU-00.analog-stereo"
+    assert cut["pipewire_source"] == "alsa_input.usb-Yamaha_Corporation_MG-XU-00.analog-stereo"
+    assert cut["pipewire_channel_map"] == "FL,FR"
+    assert (cut["in_channels"], cut["out_channels"]) == (2, 2)
+    assert not [pt for pt in m["point"] if pt["dst"] == "cutters" and pt["out_ch"] > 2]
+    # every talker still reaches both ears of the cutters
+    for src in {pt["src"] for pt in m["point"] if pt["dst"] == "cutters"}:
+        assert {pt["out_ch"] for pt in m["point"] if pt["src"] == src and pt["dst"] == "cutters"} == {1, 2}, src
