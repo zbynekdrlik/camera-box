@@ -965,6 +965,11 @@ step "16g" "Operator surface (issue 1418): Multiview click + projector keys in u
 strih_operator_install "${OBS_CFG}/user.ini" "$DESKTOP_USER" "${OBS_CFG}/basic/scenes/$(strih_lx_obs_collection).json" || fail "issue 1418: the operator surface could not be provisioned (above)"
 
 # ---------------------------------------------------------------------------------------------
+step "16h" "Kiosk panel (issue 1420): tint2 taskbar + tray + clock -- --user unit, enable-only"
+if WHY="$(obs_box_step_applies 16h-panel)"; then obs_box_panel_install "${HERE}/.." "$USER_HOME" "$DESKTOP_USER" || fail "issue 1420: the kiosk panel could not be provisioned (above)"
+else echo "  SKIP: ${WHY}"; fi
+
+# ---------------------------------------------------------------------------------------------
 step 17 "Final verification (verify-strih.sh acceptance gate)"
 if [ -x "${HERE}/verify-strih.sh" ]; then
   if strih_lx_reboot_pending "$(cat /proc/cmdline 2>/dev/null || true)"; then

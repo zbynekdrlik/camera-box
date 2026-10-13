@@ -1,0 +1,26 @@
+[Unit]
+# issue 1420 -- the kiosk panel of the Linux OBS boxes (owner 13.10.2026: "a nevieme mat pod linuxom
+# nejaku listu s tray ikonkami/appkami atd...?"): tint2 at the bottom of :0 with the running windows
+# (OBS, the Restreamer, the Shading panel), the system tray and a clock. Installed by setup-strih
+# step 16h (scripts/lib/obs-box-panel.sh) with its config ~/.config/tint2/tint2rc, started at login
+# by the kiosk openbox autostart, graded by verify-strih item 44.
+Description=OBS-box kiosk panel -- tint2 taskbar, tray and clock (issue 1420)
+Documentation=https://github.com/zbynekdrlik/camera-box
+# Never give up: the panel must be there whenever the operator session runs.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# The kiosk's plain Xorg session; Xlib reads ~/.Xauthority.
+Environment=DISPLAY=:0
+ExecStart=/usr/bin/tint2 -c %h/.config/tint2/tint2rc
+Restart=always
+RestartSec=3
+TimeoutStopSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=obs-box-panel
+
+[Install]
+# openbox never reaches graphical-session.target: the kiosk autostart STARTS this unit at every login.
+WantedBy=graphical-session.target

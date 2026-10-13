@@ -852,8 +852,8 @@ else note "(program-audio) not graded: ${WHY}"; fi
 # 42) issue 1417 camera tally (scripts/lib/strih-tally.sh): units, :9240 /state, atemrpi.local, OBS program.
 if WHY="$(obs_box_step_applies 16f)"; then strih_tally_grade_report "${HERE}/.." "${STRIH_LX_USER:-newlevel}" || bad "(tally) the grader did not print all of its rows"
 else note "(tally) not graded: ${WHY}"; fi
-# 43) issue 1418 operator surface (scripts/lib/strih-operator.sh, its header: the 11 rows): input, BT, deck, MV click, panel GPU sink, DRM hang, panel.
-strih_operator_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(operator) the grader did not print all of its rows"
+# 43) issue 1418 operator surface (scripts/lib/strih-operator.sh, its header: the 13 rows) + 44) issue 1420 kiosk panel (scripts/lib/obs-box-panel.sh).
+strih_operator_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(operator) the grader did not print all of its rows"; obs_box_panel_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(panel) the grader did not print all of its rows"
 
 # 16) NIC xhci IRQ affinity (issue 1317 item H): the USB-NIC's xhci interrupt must be pinned to a
 #     SINGLE E-core (>= the first cpu_atom cpu) so its NET_RX softirq never shares an OBS core, AND

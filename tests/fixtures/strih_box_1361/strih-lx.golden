@@ -112,12 +112,14 @@ for PROJ in $(xrandr | awk '$1 ~ /^HDMI/ {print $1}'); do
 done
 xset s off -dpms s noblank 2>/dev/null || true
 rm -rf "$HOME/.config/obs-studio/.sentinel"/* 2>/dev/null || true
+systemctl --user import-environment DISPLAY XAUTHORITY || true
 systemctl --user start strih-obs.service || true
 systemctl --user start strih-bundle-state-server.service || true
 systemctl --user start strih-browser-keeper.service || true
 systemctl --user start bkshading-panel-app.service || true
 systemctl --user start companion-satellite.service || true
 systemctl --user start strih-satellite-watch.timer || true
+systemctl --user start obs-box-panel.service || true
 === openbox-menu ===
 <?xml version="1.0" encoding="UTF-8"?>
 <openbox_menu xmlns="http://openbox.org/3.4/menu">

@@ -47,6 +47,11 @@ if ! declare -F strih_operator_install >/dev/null; then
   # shellcheck source=scripts/lib/strih-operator.sh
   . "$(dirname "${BASH_SOURCE[0]}")/strih-operator.sh"
 fi
+# issue 1420: the kiosk panel's own source-only lib (setup-strih step 16h, verify-strih item 44).
+if ! declare -F obs_box_panel_install >/dev/null; then
+  # shellcheck source=scripts/lib/obs-box-panel.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/obs-box-panel.sh"
+fi
 # issue 1412: a fresh box's dantesync binary + role config (setup-strih step 2) and the ONE CI-artifact
 # fetch (step 13's intercom-hub binary, step 16c's bkshading service).
 if ! declare -F dantesync_install >/dev/null; then
@@ -1932,6 +1937,8 @@ AUTOSTART_EOF
   printf '%s\n' 'systemctl --user start strih-obs.service || true' \
     'systemctl --user start strih-bundle-state-server.service || true'
   strih_session_apps_autostart_lines
+  # issue 1420: the kiosk panel (tint2), on every box the 16h-panel gate admits.
+  ! obs_box_step_applies 16h-panel >/dev/null || printf '%s\n' "systemctl --user start ${OBS_BOX_PANEL_UNIT} || true"
   # issue 1412 (restreamer agreement 11.10.2026): the stream box runs the restreamer headless as the
   # --user unit its .deb ships; the kiosk has no tray and no XDG autostart, so start it here.
   if [ "$(strih_box_role)" = stream ]; then
