@@ -414,6 +414,7 @@ class Op:
         _exec(self.bin / "sudo", _FAKE_SUDO)
         _exec(self.bin / "xrandr", _FAKE_TOOL % ("xrandr", "xrandr", "xrandr"))
         _exec(self.bin / "journalctl", _FAKE_TOOL % ("journalctl", "klog", "klog"))
+        _exec(self.bin / "wmctrl", _FAKE_CAT % "wmctrl")
         self.seams = True  # STRIH_OPERATOR_XRANDR / _KLOG point at the fixture files
         self.xinput = _exec(tmp_path / "fake-xinput", _FAKE_XINPUT)
         self.hci = _exec(tmp_path / "fake-hciconfig", _FAKE_CAT % "hci")
@@ -437,7 +438,10 @@ class Op:
         self.deck(True)
         self.serve([{"surfaceId": "streamdeck:CL123", "productName": "Stream Deck XL"}])
         (self.home / ".config" / "obs-studio" / "user.ini").write_text(
-            "[BasicWindow]\nSaveProjectors=true\nMultiviewMouseSwitch=true\n")
+            "[BasicWindow]\nSaveProjectors=true\nProjectorAlwaysOnTop=false\nMultiviewMouseSwitch=true\n"
+            "CloseExistingProjectors=true\nWarnBeforeStartingStream=false\nWarnBeforeStoppingStream=false\n"
+            "WarnBeforeStoppingRecord=false\n")
+        (self.st / "wmctrl").write_text("0x01a00071  0 obs.obs strih-lx Projector - Multiview\n")
         self.ws({"server_enabled": True, "server_port": 4455, "auth_required": False})
         (self.st / "studio").write_text("true\n")
         (self.st / "installed").write_text("qt6-svg-plugins\n")
@@ -513,15 +517,15 @@ def op(tmp_path):
     o.close()
 
 
-ITEMS = ["tap-to-click", "bluetooth", "stream-deck", "mv-click", "studio-mode", "ws-seed", "qt6-svg",
-         "operator-input", "panel-gpu", "drm-hang", "operator-panel"]
+ITEMS = ["tap-to-click", "bluetooth", "stream-deck", "mv-click", "operator-ini", "studio-mode", "ws-seed",
+         "qt6-svg", "operator-input", "panel-gpu", "drm-hang", "operator-panel", "mv-projector"]
 
 
 def test_a_healthy_operator_surface_passes_every_row(op):
     rows = op.rows()
     assert [d.split(")", 1)[0][1:] for _, d in rows] == ITEMS
-    assert [st for st, _ in rows] == ["OK"] * 11, rows
-    assert _bash("strih_operator_row_count").stdout == "11"
+    assert [st for st, _ in rows] == ["OK"] * 13, rows
+    assert _bash("strih_operator_row_count").stdout == "13"
 
 
 def test_tap_to_click_off_on_the_live_touchpad_fails_naming_it(op):

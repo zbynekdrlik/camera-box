@@ -630,5 +630,5 @@ def test_setup_step_3_writes_the_strih_profile_and_verify_grades_it():
     s = (SCRIPTS / "setup-strih.sh").read_text()
     v = (SCRIPTS / "verify-strih.sh").read_text()
     assert 'obs_box_strih_profile_provision "$OBS_CFG" "$DESKTOP_USER" "$(strih_lx_obs_profile)"' in s
-    assert "obs_box_profile_video_grade" in v
+    assert "obs_box_strih_profile_grade" in v
     assert len(v.splitlines()) <= 1000 and len(s.splitlines()) <= 1000
