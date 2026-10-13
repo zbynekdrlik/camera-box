@@ -125,6 +125,7 @@ if "-t" in sys.argv[1:] and os.path.exists(os.path.join(st, "nginx-t-fails")):
 _FAKE_CERTBOT = _py("""import os, sys
 st = os.environ["FAKE_STATE"]
 a = sys.argv[1:]
+sys.stdin.read()
 open(os.path.join(st, "calls"), "a").write("certbot " + " ".join(a) + "\\n")
 if os.path.exists(os.path.join(st, "certbot-fails")):
     sys.stderr.write("certbot: DNS API error\\n"); sys.exit(1)
@@ -156,6 +157,10 @@ if a[0] == "x509":
     if "BEGIN CERTIFICATE" not in text:
         sys.stderr.write("unable to load certificate\\n"); sys.exit(1)
     kv = dict(l.split("=", 1) for l in text.splitlines() if "=" in l)
+    if "-fingerprint" in a:
+        import hashlib
+        block = text[text.index("-----BEGIN CERTIFICATE-----"):text.index("-----END CERTIFICATE-----")]
+        print("sha256 Fingerprint=" + hashlib.sha256(block.encode()).hexdigest().upper())
     if "-ext" in a:
         print("X509v3 Subject Alternative Name: ")
         print("    " + ", ".join("DNS:" + n for n in kv.get("SAN", "").split(",") if n))
@@ -249,9 +254,11 @@ class Rig:
         (d / "privkey.pem").write_text("KEY\n")
         return d
 
-    def serve(self, host, sans, end="ok"):
+    def serve(self, host, sans, end="ok", serial=""):
+        extra = "SERIAL=%s\n" % serial if serial else ""
         (self.state / "served" / host).write_text(
-            "-----BEGIN CERTIFICATE-----\nSAN=%s\nEND=%s\n-----END CERTIFICATE-----\n" % (",".join(sans), end))
+            "-----BEGIN CERTIFICATE-----\nSAN=%s\nEND=%s\n%s-----END CERTIFICATE-----\n"
+            % (",".join(sans), end, extra))
 
     def http(self, host, path, code):
         (self.state / "http" / (host + "_" + path.lstrip("/").replace("/", "_"))).write_text(code)
@@ -647,6 +654,46 @@ def test_a_failing_certbot_warns_and_keeps_serving(tmp_path):
     assert (rig.nginx / "sites-available" / "interkom").exists()
 
 
+def test_a_successful_reissue_after_a_failed_one_reloads_nginx(tmp_path):
+    """Review finding: run 1's certbot fails, so the site already points at the live dir; run 2's
+    certbot succeeds with the site text unchanged -- nginx must still be tested and reloaded, or it
+    keeps serving the old certificate (a `certonly` fires no renewal deploy hook)."""
+    rig = Rig(tmp_path)
+    rig.installed("nginx-light", "certbot", "python3-certbot-dns-cloudflare")
+    rig.ini()
+    rig.live_cert(SNV_INTERKOM[0], SNV_INTERKOM[:1])
+    rig.live_cert(SNV_SHADING, [SNV_SHADING])
+    rig.flag("certbot-fails")
+    assert _install(rig).returncode == 0
+    (rig.state / "certbot-fails").unlink()
+    (rig.state / "calls").write_text("")
+    r = _install(rig)
+    assert r.returncode == 0, r.stdout + r.stderr
+    calls = rig.calls()
+    assert any(c.startswith("certbot") for c in calls), calls
+    assert "nginx -t" in calls, calls
+    assert "systemctl reload nginx" in calls[calls.index("nginx -t"):], calls
+
+
+def test_a_hand_copy_path_that_climbs_out_of_nginx_ssl_is_never_used(tmp_path):
+    rig = Rig(tmp_path)
+    rig.installed("nginx-light", "certbot", "python3-certbot-dns-cloudflare")
+    (rig.nginx / "ssl").mkdir()
+    out = rig.nginx / "outside"
+    out.mkdir()
+    (out / "c.crt").write_text("x\n")
+    (out / "c.key").write_text("x\n")
+    climb = rig.nginx / "ssl" / ".." / "outside"
+    (rig.nginx / "sites-available" / "shading").write_text(
+        "server {\n    server_name shading.newlevel.media;\n"
+        "    ssl_certificate %s/c.crt;\n    ssl_certificate_key %s/c.key;\n}\n" % (climb, climb))
+    before = (rig.nginx / "sites-available" / "shading").read_text()
+    r = _install(rig)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (rig.nginx / "sites-available" / "shading").read_text() == before
+    assert "no certificate for shading.newlevel.media" in r.stdout + r.stderr
+
+
 def test_a_box_that_declares_no_sites_installs_nothing(tmp_path):
     rig = Rig(tmp_path)
     d = _boxes_copy(tmp_path)
@@ -733,6 +780,31 @@ def test_each_row_fails_by_name(tmp_path, break_it, tag):
     bad = [t for st, t in rows if st == "FAIL"]
     assert len(bad) == 1, rows
     assert bad[0].startswith(tag), bad
+
+
+def test_a_served_cert_other_than_the_live_one_fails(tmp_path):
+    """Review finding: `from /etc/letsencrypt/live` is CHECKED (fingerprint of the served leaf vs the
+    live fullchain's first certificate), so an nginx still on an old certificate never reads OK."""
+    rig = Rig(tmp_path)
+    _healthy(rig)
+    rig.serve(SNV_SHADING, [SNV_SHADING], serial="old")
+    rows = _rows(rig)
+    bad = [t for st, t in rows if st == "FAIL"]
+    assert len(bad) == 1 and bad[0].startswith("(https-cert) shading"), rows
+    assert "reload nginx" in bad[0]
+
+
+def test_an_unreadable_live_dir_is_named_not_read_as_a_missing_cert(tmp_path):
+    rig = Rig(tmp_path)
+    _healthy(rig)
+    live = rig.le / "live"
+    live.chmod(0)
+    try:
+        rows = _rows(rig)
+    finally:
+        live.chmod(0o755)
+    nginx_row = [t for st, t in rows if t.startswith("(https-nginx)")]
+    assert nginx_row and "unreadable" in nginx_row[0] and "root" in nginx_row[0], rows
 
 
 def test_a_hand_copy_cert_is_a_note_until_migrated(tmp_path):
