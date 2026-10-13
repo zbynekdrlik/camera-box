@@ -1887,3 +1887,13 @@ Two traps from bounding a remote read with `timeout` (the away-venue camera-box 
   Pin it with a stub `timeout` first on PATH that logs its first argument.
 - `ssh -o ConnectTimeout=N` bounds only the connect and the banner, never the login or the remote
   command: a box that answers :22 but has a dying stick or fork exhaustion hangs the read.
+
+## A scratch-tree mutation run must COMPILE the test against the scratch tree: `env!("CARGO_MANIFEST_DIR")` is baked in (issue 1424)
+
+The std-only lift/anchor tests read their sources through `env!("CARGO_MANIFEST_DIR")`, which rustc
+expands at COMPILE time. A mutation driver that copies the sources to a scratch tree, mutates them and
+runs the ALREADY-built test binary with `CARGO_MANIFEST_DIR=<scratch>` in the runtime env still reads
+the REAL worktree, so every mutant "survives" (7 of 7 read as surviving on the first run). Build the
+test once with `CARGO_MANIFEST_DIR=<scratch>` set on rustc, then mutate the scratch files between runs
+(the files are read at run time). As always, print the real tree's result first and trust a kill only
+when that line passes.

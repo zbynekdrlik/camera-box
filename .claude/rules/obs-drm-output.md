@@ -476,7 +476,12 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-snv = `vk-direct`).
   HDMI-0) read `245/0/0`, `0/255/0`, `0/0/239`, `127/128/127` — channel order right, no gamma step;
   the burst published 121 frames in 2 s (the 60 Hz display rate) with 7835 skipped claims, released
   with VkResult 0 and exited. After ANY harness run check `pgrep -x vk-rig-harness` is empty (NOT `pgrep -f`, which matches the ssh `bash -c` that carries the name) — a hung
-  harness holds HDMI-0 acquired. Re-run it on every new NVIDIA strih box (strih PP).
+  harness holds HDMI-0 acquired. Re-run it on every new NVIDIA strih box (strih PP). The boxes carry no
+  dev headers: stage dev1's `/usr/include/{vulkan,vk_video,X11,xcb,EGL,GL,KHR}` as one tarball into a
+  box scratch dir, plus `libobs/util` and the vk files, and link the runtime sonames directly
+  (`-l:libX11.so.6 -l:libX11-xcb.so.1 -l:libxcb.so.1 -l:libxcb-randr.so.0 -l:libEGL.so.1`). Stop OBS only
+  for the run (`systemctl --user stop strih-obs.service`, an EXIT trap starts it again) and confirm
+  `multiview bind LIVE` afterwards.
 - **Enable (supervisor runbook, after CI + a FULL Linux bundle deploy on strih-snv):** re-run
   `setup-strih.sh --box strih-snv` step 6 with the HDMI monitor/grabber plugged (it writes or upserts
   `"backend":"vk-direct"` and installs `libvulkan1`) — or write the one line by hand as the desktop
