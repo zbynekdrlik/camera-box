@@ -60,8 +60,25 @@ fn body_of(src: &str, sig: &str) -> String {
 fn the_surface_picks_with_the_wanted_program_mode() {
     let c = squish(&file(VK_SETUP_C));
     assert!(
-        c.contains("drm_output_vk_pick_mode(mw, mh, mr, (int)nm, native.width, native.height, want_w, want_h, want_mhz)"),
-        "issue 1424: the surface's pick passes the wanted program mode"
+        c.contains("drm_output_vk_pick_mode(ml->w, ml->h, ml->r, (int)nm, ml->native.width, ml->native.height, ml->want_w, ml->want_h, ml->want_mhz)"),
+        "issue 1424: the ONE mode enumeration passes the wanted program mode to the pick"
+    );
+    // review B4: the surface setup and the re-mode share that enumeration, never a second copy
+    let raw = file(VK_SETUP_C);
+    for f in [
+        "static bool drm_output_vk_create_surface(bool rebuild)",
+        "bool drm_output_vk_remode_if_needed(void)",
+    ] {
+        assert!(
+            body_of(&raw, f).contains("drm_output_vk_mode_list_read(&ml)"),
+            "issue 1424: {f} reads the modes through the shared enumeration"
+        );
+    }
+    assert_eq!(
+        raw.matches("vkGetDisplayModePropertiesKHR(g_drm_vk.pd")
+            .count(),
+        2,
+        "one enumeration (count + fill)"
     );
     let h = squish(&file(VK_INTERNAL_H));
     for f in [
