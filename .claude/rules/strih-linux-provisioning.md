@@ -293,9 +293,13 @@ file, OBS profile + collection) and publishes `STRIH-SNV (2ME PGM)` / `(2ME PVW)
 checks every declared output carries the LOADED box's prefix (`strih_lx_output_name_ok`); the
 parallel-run guard against a second `STRIH-SNV (...)` sender is removed.
 
-- **The transition aliases** (until the live rename has run everywhere): the box-facts loader takes
-  `--box strih-lx` (the pre-1414 name) as strih-snv with ONE warning (`STRIH_BOX_ALIASES`), and
-  `obs_fleet_name_for_host` resolves the old names (`OBS_FLEET_ALIASES`, `.claude/rules/obs-fleet-list.md`).
+- **The transition aliases** (until the live rename has run everywhere): ONE table,
+  `OBS_FLEET_ALIASES` in obs-fleet.sh (`.claude/rules/obs-fleet-list.md`). The box-facts loader takes
+  `--box strih-lx` (the pre-1414 name) as strih-snv with ONE warning through it, and setup/verify-strih
+  then carry the LOADED name (`strih_box_loaded_name`). The strih genlock deploy goes on, with one
+  warning, for a box that still runs the pre-rename hostname (setup-strih step 1 renames it); any
+  other hostname still refuses. setup-strih removes the pre-rename role files
+  (`strih-lx-seed.json`, `strih-lx-profile-facts.txt`, issue 1414).
   The live rename is a supervisor runbook on issue 1414: hostname, OBS profile + collection
   (`obs_collection_port.py --preset strih-snv`), the stream OBS `NDI 2ME PGM` source name, the
   latency pins re-read, the NDI port-map baseline recaptured.

@@ -149,37 +149,57 @@ strih-pp|strih-pp.lan|linux-genlock|traveling
 stream-pp|stream-pp.lan|linux-genlock|traveling}"
 
 # OBS_FLEET_ALIASES -- issue 1414 (box names carry the venue): the names the SNV rows had before the
-# rename, as space-separated OLD=NEW pairs. obs_fleet_name_for_host (and its python twin
-# scripts/obs_fleet_table.py FLEET_ALIASES) maps an old name to the renamed row, so a caller or a
-# config that still says strih-lx / stream / resolume (the pre-1414 names) keeps addressing the same
-# box during the transition. The fact lookups (obs_fleet_host & co) take the NEW name only. The retired Windows
-# `strih` is NOT an alias: its name stays unknown (its old DNS name strih.lan resolves to the
+# rename, as space-separated OLD=NEW pairs. The ONE alias table of the repo (the python twin
+# scripts/obs_fleet_table.py FLEET_ALIASES is pinned equal; the strih box-facts loader reads this one):
+# every row lookup (_obs_fleet_entry, so obs_fleet_host & co), obs_fleet_canonical_name and
+# obs_fleet_name_for_host map an old name to the renamed row, so a caller, a config or a ROLE token
+# (`--box stream`) that still says strih-lx / stream / resolume (issue 1414) keeps addressing it. An
+# exact row always wins, and an alias whose renamed row is not in the table is no alias. The retired
+# Windows `strih` is NOT an alias: its name stays unknown (its old DNS name strih.lan resolves to the
 # strih-snv address, step 3 of the lookup).
 OBS_FLEET_ALIASES="strih-lx=strih-snv stream=stream-snv resolume=resolume-snv"   # issue 1414 transition aliases
 
 # _obs_fleet_alias_of <name> -> the renamed row NAME is a transition alias of (case-folded), rc 0;
-# rc 1 when NAME is no alias. Pure.
+# rc 1 when NAME is no alias or its renamed row is not in the table. Pure.
 _obs_fleet_alias_of() {
   local want="${1:-}" pair IFS=$' \t\n'   # a caller may run with IFS=',' (the deploy planner's CSV loop)
   [ -n "$want" ] || return 1
   for pair in $OBS_FLEET_ALIASES; do
-    [ "${pair%%=*}" = "${want,,}" ] && { printf '%s' "${pair#*=}"; return 0; }
+    [ "${pair%%=*}" = "${want,,}" ] || continue
+    _obs_fleet_row_exact "${pair#*=}" >/dev/null || return 1
+    printf '%s' "${pair#*=}"
+    return 0
   done
   return 1
 }
 
-# obs_fleet_canonical_name <name> -> the renamed row NAME is a transition alias of, else NAME as
-# given (stdout, always rc 0). For a CLI that takes a box name (the per-box genlock table, the deploy
-# planner): an old name keeps working while every fact lookup still takes the NEW name only. Pure.
+# obs_fleet_canonical_name <name> -> the fleet row NAME addresses (stdout, always rc 0): the name as
+# given when a row has it, else the renamed row of a transition alias, else the lower-cased name when
+# a row has that, else NAME as given. For a CLI that prints or compares a box name (the per-box
+# genlock table, the deploy planner, the retention drivers' --box). Pure.
 obs_fleet_canonical_name() {
-  _obs_fleet_alias_of "${1:-}" || printf '%s' "${1:-}"
+  local n="${1:-}" a
+  if _obs_fleet_row_exact "$n" >/dev/null; then printf '%s' "$n"; return 0; fi
+  if a="$(_obs_fleet_alias_of "$n")"; then printf '%s' "$a"; return 0; fi
+  if _obs_fleet_row_exact "${n,,}" >/dev/null; then printf '%s' "${n,,}"; return 0; fi
+  printf '%s' "$n"
 }
 
 # _obs_fleet_entry <name> -> prints the whole `name|host|class|home-check` row for NAME on stdout and
-# returns 0; returns 1 (no output) for an unknown name. Word-exact on the leading `name|` so a
-# hypothetical `stream2` can never match `stream`. The here-doc read consumes the WHOLE stream (no
-# early `break`/`exit`), so it is SIGPIPE-safe under a caller's `set -euo pipefail`.
+# returns 0; returns 1 (no output) for an unknown name. An exact row wins; else a transition alias
+# (issue 1414) addresses its renamed row, so every fact lookup takes an old name.
 _obs_fleet_entry() {
+  local alias
+  _obs_fleet_row_exact "${1:-}" && return 0
+  alias="$(_obs_fleet_alias_of "${1:-}")" || return 1
+  _obs_fleet_row_exact "$alias"
+}
+
+# _obs_fleet_row_exact <name> -> the row whose NAME is exactly <name>, rc 0; rc 1 (no output) else.
+# Word-exact on the leading `name|` so a hypothetical `stream2` can never match `stream`. The here-doc
+# read consumes the WHOLE stream (no early `break`/`exit`), so it is SIGPIPE-safe under a caller's
+# `set -euo pipefail`.
+_obs_fleet_row_exact() {
   local name="${1:-}" line found=""
   while IFS= read -r line; do
     [ -n "$line" ] || continue

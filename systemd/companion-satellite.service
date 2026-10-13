@@ -7,7 +7,7 @@
 # (scripts/lib/strih-session-apps.sh) under the SAME name the 4.10.2026 hand-made stopgap used, so it
 # replaces that unit; started at login by the kiosk autostart and after strih-obs by the strih-snv genlock
 # deploy; watched by strih-satellite-watch.timer; graded by verify-strih.sh item 39.
-Description=strih-snv Companion Satellite -- the Stream Deck XL agent for the venue Companion (issue 1399)
+Description=strih box Companion Satellite -- the Stream Deck XL agent for the venue Companion (issue 1399)
 Documentation=https://github.com/zbynekdrlik/camera-box
 # Never give up: the deck must work whenever the operator session runs (owner 4.10.2026).
 StartLimitIntervalSec=0

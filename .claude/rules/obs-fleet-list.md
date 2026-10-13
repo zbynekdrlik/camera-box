@@ -105,10 +105,13 @@ pp ci snv ... a tiez to slovo lx je zbytocne len sposobuje zmatok".
 - **ONE declared transition alias table** (issue 1414: `OBS_FLEET_ALIASES` = `strih-lx=strih-snv
   stream=stream-snv resolume=resolume-snv`; the python twin `obs_fleet_table.FLEET_ALIASES`, pinned equal): consulted
   by `obs_fleet_name_for_host` after the exact match (also as a DNS name's first label), and by
-  `obs_fleet_canonical_name`, which the per-box table (`scripts/lib/genlock-fleet-boxes.sh`), the
-  deploy planner and the retention drivers' `--box` run every box argument through. The fact lookups
-  (`obs_fleet_host` & co) take the NEW name only. The retired Windows `strih` is no alias.
-- **Role tokens are NOT fleet names and stay as they are:** `launch-obs-genlock.sh --box stream`,
+  `obs_fleet_canonical_name` (case-folded), and by `_obs_fleet_entry`, so every fact lookup
+  (`obs_fleet_host` & co) and every `--box` CLI takes an old name. An exact row always wins, and an
+  alias whose renamed row is not in the table is no alias (a test override keeps its own rows). The
+  box-facts loader reuses this table (`strih_box_alias_of`). The retired Windows `strih` is no alias.
+  The role tokens below resolve through it, so removing an alias means migrating them first.
+- **Role tokens are NOT fleet names and stay as they are:** a plan prints the role (`${box%%-*}`) to
+  the role tools (`latency_pins_verify.py`, `mark-imag-restart.sh`); `launch-obs-genlock.sh --box stream`,
   `obs-self-heal-install.sh --box stream` (its scheduled-task name `camera-box-obs-self-heal-stream`
   lives on the box), the `strih` / `stream` labels of the non-fleet watchdogs (frozen-input,
   ndi-halving, asio-starve, cadence, mv-fps), `obs_phase2.py --role`, the cg-chain hop names.

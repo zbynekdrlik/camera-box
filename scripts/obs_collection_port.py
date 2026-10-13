@@ -119,9 +119,9 @@ PRESETS = {
         "keep_scenes": None,
         "program_audio_input": "ASIO zvuk",
         "source_renames": {},
-        "sender_prefixes": {"STRIH-SNV": "STRIH-PP"},
+        "sender_prefixes": {"STRIH-SNV": "STRIH-PP", "STRIH-LX": "STRIH-PP"},  # issue 1414: + the pre-rename prefix
         "sender_renames": {"RESOLUME-SNV (SP-program)": "RESOLUME-PP (SP-program)"},
-        "foreign_senders": [r"-SNV \(", r"^STRIH-SNV \("],
+        "foreign_senders": [r"-SNV \(", r"^STRIH-SNV \(", r"^STRIH-LX \("],  # issue 1414: + the pre-rename prefix
         "drop_patterns": [r"^ytfast"],
         "drop_sources": [],
         "media_dir": "/srv/obs-media/strih-pp",

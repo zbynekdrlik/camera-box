@@ -6,7 +6,7 @@
 # server comes back after being unreachable -- never on a working page. scripts/strih_browser_keeper.py;
 # installed by setup-strih.sh step 16d (scripts/lib/strih-session-apps.sh), started at login by the
 # kiosk autostart and after strih-obs by the strih-snv genlock deploy, graded by verify-strih.sh item 37.
-Description=strih-snv browser-source keeper -- reload OBS browser sources when their page server answers (issue 1399)
+Description=OBS box browser-source keeper -- reload OBS browser sources when their page server answers (issue 1399)
 Documentation=https://github.com/zbynekdrlik/camera-box
 After=strih-obs.service
 # Never give up: the keeper must run whenever the operator session does (owner 4.10.2026).

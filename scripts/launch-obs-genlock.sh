@@ -575,8 +575,12 @@ main() {
   ahk_mode="$(fleet_box_ahk_mode "$box")"
   title_profile="$(fleet_box_obs_profile "$box")" || title_profile=""
 
-  local PROGRAM
+  local PROGRAM role
   PROGRAM="$(build_launch_program "$obs_dir" "$force" "$ahk_mode" "" "" "$title_profile")"
+  # issue 1414: the role tools below (latency_pins_verify.py, mark-imag-restart.sh) take a ROLE token
+  # (stream / resolume), never a fleet name -- the role is the fleet name before its venue.
+  role="$(obs_fleet_canonical_name "$box")"
+  role="${role%%-*}"
 
   echo "# ===== #257 genlock OBS (re)launch plan — box=${box} (${mcp}, ${box_ip}) ====="
   # resolume (issue 1295): the STEP-3/3b dev1-side WS ops below are keyed on the HOSTNAME
@@ -631,7 +635,7 @@ ${PROGRAM}
 #         committed agreed-pins baseline (scripts/latency-pins-baseline.json) — it NEVER overwrites
 #         (forcing would fight the operator). Run ON DEV1 (read-only WS, session-agnostic, per
 #         win-ssh-vs-mcp), NOT in the ${mcp} MCP Shell:
-#           python3 scripts/latency_pins_verify.py --box ${box} --host ${box_ip}
+#           python3 scripts/latency_pins_verify.py --box ${role} --host ${box_ip}
 #         exit 0 = every agreed pin on baseline; exit 1 = drift (LOUD, names box+input+got+want — an
 #         ADVISORY signal, NOT a launch abort); exit 2 = a WS read failure (fail-closed). If the
 #         drift is a legitimate re-tune, record it by updating the baseline in a PR; if it is an
@@ -641,7 +645,7 @@ ${PROGRAM}
 #         (or use scripts/rig-mode.sh test|event, which does it for both boxes).
 # STEP 5 (#674): once STEP 2 confirms the relaunch succeeded, mark it on imag-nb's own journald so
 #         a future imag judder report can be time-correlated against this restart:
-#         scripts/mark-imag-restart.sh --box ${box} --reason "<why you relaunched>"
+#         scripts/mark-imag-restart.sh --box ${role} --reason "<why you relaunched>"
 PLAN
 }
 

@@ -52,6 +52,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STRIH_FACT_BOX="$(strih_box_cli_box "$@")" || { echo "usage: verify-strih.sh [--box <name>]" >&2; exit 1; }
 strih_box_load "$STRIH_FACT_BOX" \
   || { echo -e "${RED}FAIL: box '${STRIH_FACT_BOX}': scripts/strih-boxes/${STRIH_FACT_BOX}.env is missing, invalid or still has TODO_OWNER facts (listed above)${NC}" >&2; exit 1; }
+STRIH_FACT_BOX="$(strih_box_loaded_name)"   # issue 1414: an old box name loaded its renamed box
 obs_box_role_apply || { echo "verify-strih: the role / venue facts of box ${STRIH_FACT_BOX} could not be applied (issue 1412)" >&2; exit 1; }
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live checks ----------

@@ -55,18 +55,28 @@ def fleet_rows() -> list[tuple[str, str, str, str]]:
     return rows
 
 
-def fleet_host(name: str) -> str | None:
-    for row in fleet_rows():
+def _fleet_row(name: str) -> tuple[str, str, str, str] | None:
+    """The row NAME addresses: an exact row wins, else a transition alias whose renamed row is in the
+    table (issue 1414, the bash `_obs_fleet_entry`)."""
+    rows = fleet_rows()
+    for row in rows:
         if row[0] == name:
-            return row[1]
+            return row
+    target = FLEET_ALIASES.get(name.lower())
+    for row in rows:
+        if target is not None and row[0] == target:
+            return row
     return None
+
+
+def fleet_host(name: str) -> str | None:
+    row = _fleet_row(name)
+    return row[1] if row else None
 
 
 def fleet_class(name: str) -> str | None:
-    for row in fleet_rows():
-        if row[0] == name:
-            return row[2]
-    return None
+    row = _fleet_row(name)
+    return row[2] if row else None
 
 
 def _resolve(host: str) -> str:
@@ -91,14 +101,15 @@ def fleet_name_for_host(host: str, resolve: Callable[[str], str] | None = None) 
             return name
     if _IPV4_RE.match(host):
         return None
-    if host.lower() in FLEET_ALIASES:
+    names = {r[0] for r in rows}
+    if FLEET_ALIASES.get(host.lower()) in names:
         return FLEET_ALIASES[host.lower()]
     if "." in host:
         short = host.split(".", 1)[0].lower()
         for name, _row_host, _cls, _check in rows:
             if name.lower() == short:
                 return name
-        if short in FLEET_ALIASES:
+        if FLEET_ALIASES.get(short) in names:
             return FLEET_ALIASES[short]
     ip = (resolve or _resolve)(host)
     if not ip:

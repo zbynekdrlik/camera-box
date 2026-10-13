@@ -21,12 +21,6 @@
 # The box a bare setup-strih.sh / verify-strih.sh (no --box) provisions -- today's production strih.
 STRIH_BOX_DEFAULT=strih-snv
 
-# issue 1414: the transition aliases `--box OLD` accepts, as space-separated OLD=NEW pairs. The SNV
-# strih was named strih-lx until issue 1414 (box names carry the venue): a deploy or a hand run that
-# still says `--box strih-lx` (the pre-1414 name) loads strih-snv with ONE warning. The ONLY box-name
-# alias in the loader.
-STRIH_BOX_ALIASES="strih-lx=strih-snv"   # issue 1414 transition alias
-
 # The not-yet-decided marker a template fact carries until the owner answers it.
 STRIH_BOX_TODO=TODO_OWNER
 
@@ -240,14 +234,20 @@ strih_box_validate() {
   [ "$bad" = 0 ]
 }
 
-# strih_box_alias_of NAME -> print the box NAME is a transition alias of (STRIH_BOX_ALIASES), rc 0;
-# rc 1 (no output) when NAME is no alias. Pure.
+# strih_box_alias_of NAME -> print the box NAME is an issue-1414 transition alias of, rc 0; rc 1 (no
+# output) when NAME is no alias. The SNV strih was named strih-lx until issue 1414 (box names carry the
+# venue): a deploy or a hand run that still says the old name loads the renamed box with ONE warning.
+# The ONE alias table is obs-fleet.sh's OBS_FLEET_ALIASES (sourced lazily from this lib's own dir);
+# an alias counts here only when its renamed box has a fact file.
 strih_box_alias_of() {
-  local want="${1-}" pair IFS=$' \t\n'
-  for pair in $STRIH_BOX_ALIASES; do
-    [ "${pair%%=*}" = "$want" ] && { printf '%s' "${pair#*=}"; return 0; }
-  done
-  return 1
+  local want="${1-}" canon
+  if ! declare -F _obs_fleet_alias_of >/dev/null; then
+    # shellcheck source=scripts/lib/obs-fleet.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/obs-fleet.sh" || return 1
+  fi
+  canon="$(_obs_fleet_alias_of "$want")" || return 1
+  [ -f "$(strih_box_dir)/${canon}.env" ] || return 1
+  printf '%s' "$canon"
 }
 
 # strih_box_load NAME -> load box NAME's facts into the STRIH_BOX_FACTS map (+ STRIH_BOX_LOADED=NAME),

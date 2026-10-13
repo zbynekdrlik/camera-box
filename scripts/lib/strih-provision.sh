@@ -219,15 +219,15 @@ strih_lx_obs_plugin_dirs() {
 # certified genlock class onto inputs that ALREADY exist and NEVER CreateScene/CreateInput; a missing
 # declared input is REPORTED.
 #   * sender = the NDI source the operator's input receives. The 7 cameras receive the fleet
-#     `CAMn (usb)` senders; the 2ME feedback pair receives strih-snv's OWN `STRIH-SNV (2ME PGM/PVW)`
-#     outputs -- the M4 self-loop (issue 1352; the dead-parallel-phase `STRIH-SNV (2ME PGM/PVW)`
-#     senders are gone now the Windows strih is retired); the cg pair
+#     `CAMn (usb)` senders; the 2ME feedback pair receives the box's OWN `<prefix> (2ME PGM/PVW)`
+#     outputs -- the M4 self-loop (issue 1352; since issue 1414 the SNV box's prefix is the
+#     `STRIH-SNV` the retired Windows strih once published); the cg pair
 #     receives the `RESOLUME-SNV (cg-obs)` genlocked sender. The 2ME-feedback source + the CG-pair
 #     senders are supervisor-confirmable DATA (the LANE-RETURN followup: re-read the live collection's
 #     input settings) -- a wrong sender is a MANIFEST edit, never a code change, and update-only never
 #     renames the operator's source, so a guessed sender is harmless (it only drives CLASS detection,
 #     which the input NAME already provides).
-#   * The 5 STRIH-SNV NDI OUTPUTS stay in `outputs` (issue 1347 owns the rename); the seeder never
+#   * The 5 NDI OUTPUTS stay in `outputs` (named by the box prefix, issue 1414); the seeder never
 #     touches outputs. Latency rides the manifest floor 3 (genlock_latency_ms_src).
 strih_lx_seed_manifest_json() {
   local lat p cg n

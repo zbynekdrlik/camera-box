@@ -461,6 +461,13 @@ strih_lx_apply() {
   out="$(_strih_lx_ssh "$(strih_lx_remote_identity_cmd)")"; rc=$?
   [ "$rc" = 0 ] || { _strih_lx_fail preflight "$rc" 4 "cannot reach ${STRIH_LX_PREP_HOST} over ssh -- nothing changed"; return; }
   out="$(printf '%s' "$out" | tr -d '[:space:]')"
+  # issue 1414: a box that still runs the pre-rename hostname of THIS box (the one transition alias,
+  # obs_fleet_canonical_name) IS this box -- setup-strih step 1 renames it from the fact file.
+  if [ "$out" != "$STRIH_LX_PREP_HOSTNAME" ] && [ -n "$out" ] \
+     && [ "$(obs_fleet_canonical_name "$out")" = "$STRIH_LX_PREP_HOSTNAME" ]; then
+    echo "WARNING: [strih-snv preflight] the box at ${STRIH_LX_PREP_HOST} still runs its pre-rename hostname '${out}' (issue 1414) -- deploying; setup-strih renames it to '${STRIH_LX_PREP_HOSTNAME}'" >&2
+    out="$STRIH_LX_PREP_HOSTNAME"
+  fi
   [ "$out" = "$STRIH_LX_PREP_HOSTNAME" ] || { _strih_lx_fail preflight 1 4 "the box at ${STRIH_LX_PREP_HOST} is '${out:-<none>}', not '${STRIH_LX_PREP_HOSTNAME}' (scripts/strih-boxes/strih-snv.env) -- refusing to provision it as strih-snv; nothing changed"; return; }
   # ... and never race a previous install (the sweep would delete the stage it is reading).
   out="$(_strih_lx_ssh "$(strih_lx_remote_installer_cmd)")"; rc=$?

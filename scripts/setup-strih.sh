@@ -80,6 +80,7 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 STRIH_FACT_BOX="$(strih_box_cli_box "$@")" || fail "usage: setup-strih.sh [--box <name>] [--yes]"
 strih_box_load "$STRIH_FACT_BOX" \
   || fail "box '${STRIH_FACT_BOX}': scripts/strih-boxes/${STRIH_FACT_BOX}.env is missing, invalid or still has TODO_OWNER facts (listed above) -- refusing to provision"
+STRIH_FACT_BOX="$(strih_box_loaded_name)"   # issue 1414: an old box name loaded its renamed box
 obs_box_role_apply || fail "box '${STRIH_FACT_BOX}': its role / venue facts could not be applied (issue 1412, above)"
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the destructive flow ----
@@ -368,6 +369,7 @@ step 5 "OBS profile facts (${BOX_NAME}: seeded from the Windows 'light' profile)
 # bare `mkdir` roots it and the obs user cannot then create .sentinel -- `Permission denied`, hit live).
 strih_user_home_dir "$USER_HOME" "$DESKTOP_USER" "$OBS_CFG" || fail "cannot create ${OBS_CFG} as ${DESKTOP_USER} (above)"
 strih_lx_profile_facts | tee "$GENLOCK_DIR/strih-profile-facts.txt" | sed 's/^/  /'
+rm -f "$GENLOCK_DIR/strih-lx-profile-facts.txt"   # issue 1414: the pre-rename name of the role file
 mkdir -p "$REC_DIR" && chown "$DESKTOP_USER":"$DESKTOP_USER" "$REC_DIR" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------------------------
@@ -378,6 +380,7 @@ install -d -m 755 /opt/camera-box
 # (heal the certified genlock class onto EXISTING inputs, never CreateScene/CreateInput -> no more
 # duplicate `NDI CAMn (usb)` receivers). The full DATA name-map is strih_lx_seed_manifest_json.
 obs_box_seed_manifest_json > /opt/camera-box/strih-seed.json   # issue 1412: the stream role's manifest on a stream box
+rm -f /opt/camera-box/strih-lx-seed.json   # issue 1414: the pre-rename name of the role file
 echo "  wrote /opt/camera-box/strih-seed.json (operator collection: update-only, explicit strih input names NDI camN / NDI 2ME PVW / NDI 2ME PGM (mv) / cg / CG-obs, floor-3 pins)"
 # issue 1346: the fixed HDMI output's config ~/.camera-box/drm-output.json (Program / built-in Multiview,
 # the box's backend fact) -- the whole step lives in scripts/lib/strih-drm-output.sh.
