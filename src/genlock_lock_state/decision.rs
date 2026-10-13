@@ -321,6 +321,49 @@ mod tests {
         assert_eq!(decide(&f), (LockState::Unlocked, LockReason::NoGenlock));
     }
 
+    // ---- issue 1422: a sender-only box (no inputs, a stamping output) is genlocked -----------
+
+    #[test]
+    fn sender_only_box_with_a_stamping_output_is_locked_1422() {
+        // resolume-pp live 13.10.2026: clock locked, `NDI Main Output` stamping, no NDI inputs
+        let mut f = healthy();
+        f.n_inputs = 0;
+        f.n_locked = 0;
+        assert_eq!(decide(&f), (LockState::Locked, LockReason::None));
+    }
+
+    #[test]
+    fn sender_only_box_still_degrades_on_a_clock_class_axis_1422() {
+        let mut f = healthy();
+        f.n_inputs = 0;
+        f.n_locked = 0;
+        f.clock_ntp_failed = true;
+        assert_eq!(decide(&f), (LockState::Degraded, LockReason::NtpFailed));
+        let mut g = healthy();
+        g.n_inputs = 0;
+        g.n_locked = 0;
+        g.media_clock = MediaClock::Drift;
+        assert_eq!(decide(&g), (LockState::Degraded, LockReason::MediaClock));
+    }
+
+    #[test]
+    fn sender_only_box_with_a_non_stamping_output_stays_unlocked_output_1422() {
+        let mut f = healthy();
+        f.n_inputs = 0;
+        f.n_locked = 0;
+        f.output_stamping = false;
+        assert_eq!(decide(&f), (LockState::Unlocked, LockReason::Output));
+    }
+
+    #[test]
+    fn sender_only_box_with_an_unlocked_clock_stays_unlocked_clock_1422() {
+        let mut f = healthy();
+        f.n_inputs = 0;
+        f.n_locked = 0;
+        f.clock_locked = false;
+        assert_eq!(decide(&f), (LockState::Unlocked, LockReason::Clock));
+    }
+
     #[test]
     fn some_input_unlocked_is_degraded_input() {
         let mut f = healthy();
