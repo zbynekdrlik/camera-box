@@ -1,6 +1,6 @@
 """issue 1414 (live strih-snv rename, 13.10.2026): setup-strih's hostname step must also rewrite the
-127.0.1.1 line of /etc/hosts (it still read `strih-lx-new`) and restart avahi-daemon, whose mDNS host
-name kept `strih-lx.local` until it was restarted by hand. Only on a real change; never on a box whose
+127.0.1.1 line of /etc/hosts (it still read the pre-rename name) and restart avahi-daemon, whose mDNS host
+name kept the old `<name>.local` until it was restarted by hand. Only on a real change; never on a box whose
 name is already right."""
 import os
 import subprocess
@@ -30,16 +30,16 @@ def _run(tmp_path, current, hosts_text):
 
 
 def test_a_rename_rewrites_the_hosts_line_and_restarts_avahi(tmp_path):
-    r, hosts, calls = _run(tmp_path, "strih-lx", "127.0.0.1\tlocalhost\n127.0.1.1\tstrih-lx-new\n::1 ip6-localhost\n")
+    r, hosts, calls = _run(tmp_path, "old-box", "127.0.0.1\tlocalhost\n127.0.1.1\told-box-new\n::1 ip6-localhost\n")
     assert r.returncode == 0, r.stderr
-    assert "127.0.1.1\tstrih-snv\n" in hosts and "strih-lx-new" not in hosts
+    assert "127.0.1.1\tstrih-snv\n" in hosts and "old-box-new" not in hosts
     assert "127.0.0.1\tlocalhost" in hosts and "::1 ip6-localhost" in hosts
     assert "hostnamectl set-hostname strih-snv" in calls
     assert "systemctl try-restart avahi-daemon" in calls
 
 
 def test_a_missing_hosts_line_is_added(tmp_path):
-    r, hosts, _ = _run(tmp_path, "strih-lx", "127.0.0.1\tlocalhost\n")
+    r, hosts, _ = _run(tmp_path, "old-box", "127.0.0.1\tlocalhost\n")
     assert r.returncode == 0, r.stderr
     assert hosts.endswith("127.0.1.1\tstrih-snv\n")
 
