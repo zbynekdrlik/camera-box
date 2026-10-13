@@ -61,6 +61,15 @@ void blog(int log_level, const char *format, ...)
 	va_end(ap);
 }
 
+/* libobs's monotonic clock, for the standalone build (the core stamps each present for its shown
+ * callback, issue 1424). */
+uint64_t os_gettime_ns(void)
+{
+	struct timespec t;
+	clock_gettime(CLOCK_MONOTONIC, &t);
+	return (uint64_t)t.tv_sec * 1000000000ULL + (uint64_t)t.tv_nsec;
+}
+
 static double now_s(void)
 {
 	struct timespec t;
@@ -141,15 +150,29 @@ int main(int argc, char **argv)
 	struct drm_output_vk_disp *disp[DRM_OUTPUT_VK_MAX_DISPLAYS] = {NULL};
 	uint32_t w[DRM_OUTPUT_VK_MAX_DISPLAYS] = {0}, h[DRM_OUTPUT_VK_MAX_DISPLAYS] = {0};
 	GLuint tex[DRM_OUTPUT_VK_MAX_DISPLAYS] = {0}, fbo[DRM_OUTPUT_VK_MAX_DISPLAYS] = {0};
+	/* issue 1424: an argument may carry the mode the OBS frame hook hands over for the Program view,
+	 * `HDMI-1=1920x1080@30000` (mHz): the output opens with the 1346 rule, then re-modes like in OBS. */
+	char names[DRM_OUTPUT_VK_MAX_DISPLAYS][64] = {{0}};
+	uint32_t want_w[DRM_OUTPUT_VK_MAX_DISPLAYS] = {0}, want_h[DRM_OUTPUT_VK_MAX_DISPLAYS] = {0},
+		 want_mhz[DRM_OUTPUT_VK_MAX_DISPLAYS] = {0};
 	int n_disp = 0;
 	for (int a = 1; a < argc && n_disp < DRM_OUTPUT_VK_MAX_DISPLAYS; a++) {
-		disp[n_disp] = drm_output_vk_open(n_disp, argv[a], 0x202020u, NULL, NULL);
+		snprintf(names[n_disp], sizeof(names[n_disp]), "%s", argv[a]);
+		char *eq = strchr(names[n_disp], '=');
+		if (eq) {
+			*eq = '\0';
+			if (sscanf(eq + 1, "%ux%u@%u", &want_w[n_disp], &want_h[n_disp], &want_mhz[n_disp]) != 3) {
+				fprintf(stderr, "FAIL: bad wanted mode '%s' (WxH@mHz)\n", eq + 1);
+				goto out;
+			}
+		}
+		disp[n_disp] = drm_output_vk_open(n_disp, names[n_disp], 0x202020u, NULL, NULL);
 		if (!disp[n_disp]) {
-			fprintf(stderr, "FAIL: drm_output_vk_open(%s)\n", argv[a]);
+			fprintf(stderr, "FAIL: drm_output_vk_open(%s)\n", names[n_disp]);
 			goto out;
 		}
 		drm_output_vk_mode_size(disp[n_disp], &w[n_disp], &h[n_disp]);
-		printf("PHASE solid t=%.3f output=%s mode=%ux%u\n", now_s(), argv[a], w[n_disp], h[n_disp]);
+		printf("PHASE solid t=%.3f output=%s mode=%ux%u\n", now_s(), names[n_disp], w[n_disp], h[n_disp]);
 		n_disp++;
 	}
 	if (n_disp == 0) {
@@ -164,6 +187,14 @@ int main(int argc, char **argv)
 	}
 	fflush(stdout);
 	sleep(2);
+	for (int i = 0; i < n_disp; i++) {
+		if (want_mhz[i] == 0)
+			continue;
+		drm_output_vk_want_mode(disp[i], want_w[i], want_h[i], want_mhz[i]);
+		printf("PHASE want-mode t=%.3f output=%s want=%ux%u@%u\n", now_s(), names[i], want_w[i], want_h[i],
+		       want_mhz[i]);
+	}
+	fflush(stdout);
 	for (int i = 0; i < n_disp; i++) {
 		if (!drm_output_vk_gl_bind(disp[i])) {
 			fprintf(stderr, "FAIL: drm_output_vk_gl_bind (display %d)\n", i);
@@ -249,7 +280,20 @@ int main(int argc, char **argv)
 	}
 	printf("PHASE end t=%.3f displays=%d published=%u skipped=%u burst=%u gl_skips=%llu\n", now_s(), n_disp,
 	       published, skipped, burst, skips);
-	rc = (published > 0 && burst > 0 && skips > 0 && alive) ? 0 : 1;
+	/* issue 1424: a wanted mode must be the one on scanout now, within the picker's 0.2 % (29.970 for a
+	 * 30.000 canvas), with the loop still presenting on it */
+	bool modes_ok = true;
+	for (int i = 0; i < n_disp; i++) {
+		const uint32_t hz = disp[i]->refresh_mhz;
+		const bool on_want = want_mhz[i] == 0 ||
+				     (disp[i]->mode_w == want_w[i] && disp[i]->mode_h == want_h[i] &&
+				      (hz > want_mhz[i] ? hz - want_mhz[i] : want_mhz[i] - hz) <= want_mhz[i] / 500u);
+		modes_ok = modes_ok && on_want;
+		printf("MODE output=%s scanout=%ux%u@%u.%03uHz presents=%llu wanted=%s\n", names[i], disp[i]->mode_w,
+		       disp[i]->mode_h, hz / 1000u, hz % 1000u, disp[i]->presents,
+		       want_mhz[i] == 0 ? "none" : (on_want ? "yes" : "NO"));
+	}
+	rc = (published > 0 && burst > 0 && skips > 0 && alive && modes_ok) ? 0 : 1;
 	printf("present loop(s) alive after the drain: %s\n", alive ? "yes" : "NO");
 
 	/* 4. issue 1424 review: the two outputs are independent -- close display 0 while display 1 keeps
@@ -273,7 +317,7 @@ int main(int argc, char **argv)
 		const unsigned long long after = disp[1]->presents;
 		pthread_mutex_unlock(&disp[1]->lock);
 		const bool one_alive = drm_output_vk_wants_frames(disp[1]) && after > before + 60u;
-		disp[0] = drm_output_vk_open(0, argv[1], 0x202020u, NULL, NULL);
+		disp[0] = drm_output_vk_open(0, names[0], 0x202020u, NULL, NULL);
 		const bool reopened = disp[0] && drm_output_vk_gl_bind(disp[0]) && drm_output_vk_wants_frames(disp[0]) &&
 				      drm_output_vk_wants_frames(disp[1]);
 		printf("PHASE independent t=%.3f display1_presents=%llu->%llu alive=%s reopened=%s\n", now_s(), before,
