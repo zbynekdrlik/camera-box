@@ -25,6 +25,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 static SCRATCH: AtomicUsize = AtomicUsize::new(0);
 
 const VK_SETUP_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk-setup.c";
+/// issue 1424 review: the re-mode + rebuild moved out of the setup TU (the 1000-line budget).
+const VK_REMODE_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk-remode.c";
 const VK_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk.c";
 const VK_INTERNAL_H: &str = "vendor/obs-studio/libobs/obs-drm-output-vk-internal.h";
 const VK_H: &str = "vendor/obs-studio/libobs/obs-drm-output-vk.h";
@@ -65,15 +67,28 @@ fn the_surface_picks_with_the_wanted_program_mode() {
     );
     // review B4: the surface setup and the re-mode share that enumeration, never a second copy
     let raw = file(VK_SETUP_C);
-    for f in [
-        "static bool drm_output_vk_create_surface(struct drm_output_vk_disp *d, bool rebuild)",
-        "bool drm_output_vk_remode_if_needed(struct drm_output_vk_disp *d)",
+    for (src, f) in [
+        (
+            &raw,
+            "bool drm_output_vk_create_surface(struct drm_output_vk_disp *d, bool rebuild)",
+        ),
+        (
+            &file(VK_REMODE_C),
+            "bool drm_output_vk_remode_if_needed(struct drm_output_vk_disp *d)",
+        ),
     ] {
         assert!(
-            body_of(&raw, f).contains("drm_output_vk_mode_list_read(d, &ml)"),
+            body_of(src, f).contains("drm_output_vk_mode_list_read(d, &ml)"),
             "issue 1424: {f} reads the modes through the shared enumeration"
         );
     }
+    assert_eq!(
+        file(VK_REMODE_C)
+            .matches("vkGetDisplayModePropertiesKHR(")
+            .count(),
+        0,
+        "the remode TU never enumerates the modes itself"
+    );
     assert_eq!(
         raw.matches("vkGetDisplayModePropertiesKHR(d->dev->pd")
             .count(),
@@ -142,7 +157,7 @@ fn the_present_thread_remodes_through_the_surface_rebuild_never_a_size_change() 
         remode < acquire,
         "issue 1424: a re-mode runs at the top of a vblank, before the acquire"
     );
-    let s = file(VK_SETUP_C);
+    let s = file(VK_REMODE_C);
     let r = squish(&body_of(
         &s,
         "bool drm_output_vk_remode_if_needed(struct drm_output_vk_disp *d)",

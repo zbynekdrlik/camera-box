@@ -31,6 +31,8 @@ static SCRATCH: AtomicUsize = AtomicUsize::new(0);
 const VK_SETUP_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk-setup.c";
 const VK_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk.c";
 const VK_INTERNAL_H: &str = "vendor/obs-studio/libobs/obs-drm-output-vk-internal.h";
+/// The settle wait, the re-mode and the rebuild (split out of the setup TU, the 1000-line budget).
+const VK_REMODE_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk-remode.c";
 const HARNESS_C: &str = "tests/c/drm_output_vk_rig_harness.c";
 
 fn file(rel: &str) -> String {
@@ -71,19 +73,30 @@ fn the_acquire_waits_for_every_other_presentation_to_settle() {
         &s,
         "bool drm_output_vk_setup(struct drm_output_vk_disp *d)",
     ));
+    let raise = pos(
+        &setup,
+        "os_atomic_set_bool(&dev->acquiring, true)",
+        "setup raises the acquire flag",
+    );
     let wait = pos(
         &setup,
         "drm_output_vk_wait_others_settled(d)",
         "setup waits for the other displays",
     );
     let acquire = pos(&setup, "drm_output_vk_acquire(d, output)", "setup acquires");
+    let lower = pos(
+        &setup,
+        "os_atomic_set_bool(&dev->acquiring, false)",
+        "setup lowers the acquire flag",
+    );
     assert!(
-        wait < acquire,
-        "issue 1424: the wait runs BEFORE the acquire (the -13 window is the other display's bring-up)"
+        raise < wait && wait < acquire && acquire < lower,
+        "issue 1424: raise the flag -> wait (the -13 window is the other display's bring-up) -> acquire \
+         -> lower the flag (no other display may start a mode set during the wait or the acquire)"
     );
     let w = squish(&body_of(
-        &s,
-        "static void drm_output_vk_wait_others_settled(struct drm_output_vk_disp *d)",
+        &file(VK_REMODE_C),
+        "void drm_output_vk_wait_others_settled(struct drm_output_vk_disp *d)",
     ));
     assert!(
         w.contains("drm_output_vk_first_unsettled("),
@@ -94,14 +107,12 @@ fn the_acquire_waits_for_every_other_presentation_to_settle() {
         "issue 1424: the wait is bounded"
     );
     assert!(
-        w.contains("presents_since_surface"),
-        "issue 1424: settled = presents on the CURRENT surface"
+        w.contains("presents_since_surface") && w.contains("drm_output_vk_settle_need("),
+        "issue 1424: settled = presents on the CURRENT surface, against the threshold its swapchain needs"
     );
-    // the acquire flag a re-mode on the other display defers on is raised for the acquire itself
     assert!(
-        setup.contains("os_atomic_set_bool(&dev->acquiring, true)")
-            && setup.contains("os_atomic_set_bool(&dev->acquiring, false)"),
-        "issue 1424: setup raises dev->acquiring around the acquire"
+        w.contains("os_atomic_load_bool(&o->want_frames)"),
+        "issue 1424 review: a display whose present loop died on its own (frame gate down) never blocks"
     );
 }
 
@@ -110,7 +121,7 @@ fn a_new_surface_restarts_the_settle_count_and_each_present_advances_it() {
     let s = file(VK_SETUP_C);
     let cs = squish(&body_of(
         &s,
-        "static bool drm_output_vk_create_surface(struct drm_output_vk_disp *d, bool rebuild)",
+        "bool drm_output_vk_create_surface(struct drm_output_vk_disp *d, bool rebuild)",
     ));
     assert!(
         cs.contains("os_atomic_set_long(&d->presents_since_surface, 0)"),
@@ -141,13 +152,17 @@ fn a_new_surface_restarts_the_settle_count_and_each_present_advances_it() {
         h.contains("volatile bool acquiring;"),
         "issue 1424: the device carries the acquire flag"
     );
+    assert!(
+        h.contains("volatile long settle_images;")
+            && s.contains("os_atomic_set_long(&d->settle_images, (long)n);"),
+        "issue 1424 review: the settle threshold follows the current swapchain's image count"
+    );
 }
 
 #[test]
 fn a_remode_waits_while_another_display_acquires() {
-    let s = file(VK_SETUP_C);
     let r = squish(&body_of(
-        &s,
+        &file(VK_REMODE_C),
         "bool drm_output_vk_remode_if_needed(struct drm_output_vk_disp *d)",
     ));
     let flag = pos(
@@ -164,6 +179,35 @@ fn a_remode_waits_while_another_display_acquires() {
         r.contains("os_atomic_set_bool(&d->remode, true)"),
         "issue 1424: a deferred re-mode stays pending for the next vblank"
     );
+    // the load-bearing pair: reset the settle count, THEN re-check the flag (seq-cst both), before the
+    // re-mode line and the rebuild -- an open and a re-mode can never miss each other
+    let tail = &r[read..];
+    let reset = pos(
+        tail,
+        "os_atomic_set_long(&d->presents_since_surface, 0);",
+        "the re-mode resets its settle count",
+    );
+    let recheck = reset
+        + pos(
+            &tail[reset..],
+            "os_atomic_load_bool(&d->dev->acquiring)",
+            "the re-mode re-checks the flag after the reset",
+        );
+    let line = pos(
+        tail,
+        "drm-output: vk-direct: re-mode %ux%u",
+        "the re-mode line",
+    );
+    let rebuild = pos(
+        tail,
+        "drm_output_vk_rebuild_presentation(d, true)",
+        "the rebuild",
+    );
+    assert!(
+        reset < recheck && recheck < line && line < rebuild,
+        "issue 1424: reset -> re-check the acquire flag -> log the re-mode -> rebuild (a deferred re-mode \
+         prints nothing)"
+    );
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -172,9 +216,8 @@ fn a_remode_waits_while_another_display_acquires() {
 
 #[test]
 fn a_surface_rebuild_destroys_the_old_presentation_before_the_new_surface() {
-    let s = file(VK_SETUP_C);
     let rb = squish(&body_of(
-        &s,
+        &file(VK_REMODE_C),
         "bool drm_output_vk_rebuild_presentation(struct drm_output_vk_disp *d, bool surface_lost)",
     ));
     assert!(
@@ -205,6 +248,23 @@ fn a_surface_rebuild_destroys_the_old_presentation_before_the_new_surface() {
         rb.contains("vkResetFences(d->dev->device, 1, &d->fence)"),
         "issue 1424: the drain signals the per-vblank fence; the next submit needs it unsignalled"
     );
+    // issue 1424 review: a drain that timed out leaves the empty submit's fence pending -- no retry may
+    // reset or re-submit it, the teardown waits it bounded first
+    assert!(
+        rb.contains("if (d->queue_wedged) return false;")
+            && rb.contains("d->queue_wedged = true; d->submit_outstanding = true;"),
+        "issue 1424 review: a timed-out drain wedges the display's rebuilds"
+    );
+    let v = squish(&file(VK_C));
+    assert!(
+        v.contains("while (os_atomic_load_bool(&d->running) && !d->queue_wedged && *rebuilds < DRM_OUTPUT_VK_REBUILD_TRIES)"),
+        "issue 1424 review: the rebuild retries stop on a wedged queue"
+    );
+    let h = file(VK_INTERNAL_H);
+    assert!(
+        !h.contains("retired_surface") && !file(VK_SETUP_C).contains("retired_surface"),
+        "issue 1424 review: the retired-surface state is gone (no surface is ever retired)"
+    );
 }
 
 #[test]
@@ -228,7 +288,8 @@ fn the_rig_harness_hands_over_a_wanted_mode_and_grades_it() {
 // Facet B -- the settle helper's truth table
 // ------------------------------------------------------------------------------------------------
 
-/// (presenting per slot, presents on the current surface per slot, self) -> first unsettled other.
+/// (presenting per slot, presents on the current surface per slot, self) -> first unsettled other;
+/// every slot needs 3 presents here (a 2-image swapchain), `settle_need_vectors` pins the threshold.
 type SettleVector = (Vec<bool>, Vec<u64>, i32, i32);
 
 fn settle_vectors() -> Vec<SettleVector> {
@@ -243,7 +304,7 @@ fn settle_vectors() -> Vec<SettleVector> {
         // order swapped (HDMI-1 first)
         (vec![false, true], vec![0, 0], 0, 1),
         (vec![false, true], vec![0, 3], 0, -1),
-        // the display itself never blocks its own open (a re-open of slot 0 beside a live slot 1)
+        // the display being opened never blocks itself (its own slot is skipped)
         (vec![true, true], vec![0, 900], 0, -1),
         (vec![true, true], vec![900, 0], 0, 1),
         // a display that is not presenting (closed, failed, halted) never blocks
@@ -254,10 +315,17 @@ fn settle_vectors() -> Vec<SettleVector> {
     ]
 }
 
+/// (swapchain images, presents needed): the (N+1)-th acquire of an N-image FIFO returns only after the
+/// first presented image left the screen; never below 3, also before any swapchain exists.
+fn settle_need_vectors() -> Vec<(i64, i32)> {
+    vec![(0, 3), (1, 3), (2, 3), (3, 4), (4, 5), (8, 9), (-1, 3)]
+}
+
 #[test]
 fn first_unsettled_names_the_other_display_still_bringing_its_presentation_up() {
-    let s = file(VK_SETUP_C);
+    let s = file(VK_REMODE_C);
     let helper = body_of(&s, "static int drm_output_vk_first_unsettled(");
+    let need_fn = body_of(&s, "static unsigned long long drm_output_vk_settle_need(");
     let h = file(VK_INTERNAL_H);
     let define = h
         .lines()
@@ -272,16 +340,28 @@ fn first_unsettled_names_the_other_display_still_bringing_its_presentation_up() 
     let mut c = String::from("#include <stdbool.h>\n#include <stdint.h>\n#include <stdio.h>\n");
     c.push_str(define);
     c.push('\n');
+    c.push_str(&need_fn);
     c.push_str(&helper);
     c.push_str("\nint main(void){\n");
     for (pres, since, me, _) in vs.iter() {
         let n = pres.len();
         let p: Vec<String> = pres.iter().map(|b| b.to_string()).collect();
         let q: Vec<String> = since.iter().map(|v| format!("{v}ULL")).collect();
+        let need: Vec<String> = pres
+            .iter()
+            .map(|_| "drm_output_vk_settle_need(2)".to_string())
+            .collect();
         c.push_str(&format!(
-            "  {{ const bool p[{n}] = {{{}}}; const unsigned long long s[{n}] = {{{}}};\n    printf(\"%d\\n\", drm_output_vk_first_unsettled(p, s, {n}, {me})); }}\n",
+            "  {{ const bool p[{n}] = {{{}}}; const unsigned long long s[{n}] = {{{}}}; const unsigned long long nd[{n}] = {{{}}};\n    printf(\"%d\\n\", drm_output_vk_first_unsettled(p, s, nd, {n}, {me})); }}\n",
             p.join(", "),
-            q.join(", ")
+            q.join(", "),
+            need.join(", ")
+        ));
+    }
+    // the threshold per swapchain image count (no swapchain yet = the floor)
+    for (images, _) in settle_need_vectors() {
+        c.push_str(&format!(
+            "  printf(\"%d\\n\", (int)drm_output_vk_settle_need({images}L));\n"
         ));
     }
     c.push_str("  return 0;\n}\n");
@@ -328,7 +408,23 @@ fn first_unsettled_names_the_other_display_still_bringing_its_presentation_up() 
         .lines()
         .map(|l| l.trim().parse().expect("int"))
         .collect();
-    assert_eq!(got.len(), vs.len(), "issue 1424: one answer per vector");
+    let nv = settle_need_vectors();
+    assert_eq!(
+        got.len(),
+        vs.len() + nv.len(),
+        "issue 1424: one answer per vector"
+    );
+    let need_diffs: Vec<String> = nv
+        .iter()
+        .zip(&got[vs.len()..])
+        .filter(|((_, want), g)| *g != want)
+        .map(|((images, want), g)| format!("  images={images} -> C {g}, expected {want}"))
+        .collect();
+    assert!(
+        need_diffs.is_empty(),
+        "issue 1424: the settle threshold diverges:\n{}",
+        need_diffs.join("\n")
+    );
     let diffs: Vec<String> = vs
         .iter()
         .zip(&got)

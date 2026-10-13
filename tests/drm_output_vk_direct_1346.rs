@@ -36,6 +36,8 @@ const VK_H: &str = "vendor/obs-studio/libobs/obs-drm-output-vk.h";
 const VK_INTERNAL_H: &str = "vendor/obs-studio/libobs/obs-drm-output-vk-internal.h";
 const VK_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk.c";
 const VK_SETUP_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk-setup.c";
+/// issue 1424 review: the re-mode + rebuild moved out of the setup TU (the 1000-line budget).
+const VK_REMODE_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk-remode.c";
 const LIBOBS_LINUX_CMAKE: &str = "vendor/obs-studio/libobs/cmake/os-linux.cmake";
 const LINUX_GENLOCK_YML: &str = ".github/workflows/linux-genlock.yml";
 const VERIFY_STRIH: &str = "scripts/verify-strih.sh";
@@ -121,13 +123,14 @@ fn header_declares_the_backend_enum_and_config_field() {
 
 #[test]
 fn the_new_tus_are_linux_only_and_built_by_libobs_with_vulkan_headers_only() {
-    for rel in [BACKEND_C, VK_C, VK_SETUP_C] {
+    for rel in [BACKEND_C, VK_C, VK_SETUP_C, VK_REMODE_C] {
         wholly_linux(rel);
     }
     let cmake = squish(&file(LIBOBS_LINUX_CMAKE));
     for token in [
         "obs-drm-output-backend.c",
         "obs-drm-output-vk-internal.h",
+        "obs-drm-output-vk-remode.c",
         "obs-drm-output-vk-setup.c",
         "obs-drm-output-vk.c",
         "obs-drm-output-vk.h",
@@ -886,8 +889,10 @@ fn a_lost_display_is_rebuilt_bounded_and_the_teardown_never_hangs() {
     );
     let setup = file(VK_SETUP_C);
     assert!(
-        setup.contains("bool drm_output_vk_rebuild_presentation(struct drm_output_vk_disp *d, bool surface_lost)"),
-        "issue 1346: the rebuild lives with the setup code"
+        file(VK_REMODE_C).contains(
+            "bool drm_output_vk_rebuild_presentation(struct drm_output_vk_disp *d, bool surface_lost)"
+        ),
+        "issue 1346: the rebuild lives with the presentation-change code (issue 1424: the remode TU)"
     );
     let destroy = body_of(
         &setup,
@@ -924,9 +929,9 @@ fn a_lost_display_is_rebuilt_bounded_and_the_teardown_never_hangs() {
         "issue 1346: the GL lookup also asks an already (privately) loaded libEGL"
     );
     let rebuild = body_of(
-        &setup,
+        &file(VK_REMODE_C),
         "bool drm_output_vk_rebuild_presentation(struct drm_output_vk_disp *d, bool surface_lost)",
-        VK_SETUP_C,
+        VK_REMODE_C,
     );
     assert!(
         !rebuild.contains("vkDeviceWaitIdle("),
@@ -961,7 +966,7 @@ fn a_lost_display_is_rebuilt_bounded_and_the_teardown_never_hangs() {
     );
     let swap_destroy = body_of(
         &setup,
-        "static void drm_output_vk_destroy_swapchain(struct drm_output_vk_disp *d)",
+        "void drm_output_vk_destroy_swapchain(struct drm_output_vk_disp *d)",
         VK_SETUP_C,
     );
     assert!(
@@ -975,7 +980,7 @@ fn a_lost_display_is_rebuilt_bounded_and_the_teardown_never_hangs() {
     );
     let surface = body_of(
         &setup,
-        "static bool drm_output_vk_create_surface(struct drm_output_vk_disp *d, bool rebuild)",
+        "bool drm_output_vk_create_surface(struct drm_output_vk_disp *d, bool rebuild)",
         VK_SETUP_C,
     );
     let refuse = surface
