@@ -195,6 +195,66 @@ def test_the_mv_projector_row_reads_the_live_window(op):
     assert st == "FAIL" and "Projector - Multiview" in d, d
 
 
+def _drm(op, view, enabled=True):
+    d = op.home / ".camera-box"
+    d.mkdir(exist_ok=True)
+    (d / "drm-output.json").write_text(json.dumps({"enabled": enabled, "connector": "HDMI-0", "view": view,
+                                                   "backend": "vk-direct"}))
+
+
+def test_the_mv_projector_row_accepts_the_multiview_on_the_hdmi_output(op):
+    # owner 13.10.2026 (strih-pp): the Multiview on the HDMI monitor AND as a window is a duplicate
+    _drm(op, "multiview")
+    (op.st / "wmctrl").write_text("0x01  0 obs.obs strih-pp OBS Studio 32.2.0\n")
+    st, d = op.row("mv-projector")
+    assert st == "OK" and "HDMI" in d, d
+
+
+def test_the_mv_projector_row_notes_a_duplicate_window_next_to_the_hdmi_multiview(op):
+    _drm(op, "multiview")
+    st, d = op.row("mv-projector")
+    assert st == "NOTE" and "duplicate" in d, d
+
+
+def test_the_mv_projector_row_still_needs_the_window_when_hdmi_shows_the_program(op):
+    _drm(op, "program")
+    (op.st / "wmctrl").write_text("0x01  0 obs.obs strih-pp OBS Studio 32.2.0\n")
+    st, d = op.row("mv-projector")
+    assert st == "FAIL", d
+    _drm(op, "multiview", enabled=False)
+    st, d = op.row("mv-projector")
+    assert st == "FAIL", d
+
+
+def _seed_skip(tmp_path, view):
+    coll = tmp_path / "c.json"
+    coll.write_text(json.dumps({"saved_projectors": []}))
+    drm = tmp_path / "drm-output.json"
+    drm.write_text(json.dumps({"enabled": True, "view": view}))
+    r = subprocess.run(["bash", "-c", 'set -euo pipefail\n. "$1"\nstrih_operator_obs_running() { return 1; }\n'
+                        'strih_operator_projector_seed "$2" "$(id -un)" "$3"', "h",
+                        str(REPO / "scripts" / "lib" / "strih-operator.sh"), str(coll), str(drm)],
+                       capture_output=True, text=True, timeout=60)
+    return r, json.loads(coll.read_text())["saved_projectors"]
+
+
+def test_setup_seeds_no_projector_window_when_hdmi_shows_the_multiview(tmp_path):
+    r, saved = _seed_skip(tmp_path, "multiview")
+    assert r.returncode == 0, r.stderr
+    assert saved == [] and "HDMI" in r.stdout
+
+
+def test_setup_still_seeds_the_projector_when_hdmi_shows_the_program(tmp_path):
+    r, saved = _seed_skip(tmp_path, "program")
+    assert r.returncode == 0, r.stderr
+    assert len(saved) == 1
+
+
+def test_setup_passes_the_drm_output_config_to_the_seed():
+    s = (REPO / "scripts" / "lib" / "strih-operator.sh").read_text()
+    assert '.camera-box/drm-output.json' in s
+
+
 def test_the_mv_projector_row_is_a_note_while_obs_is_down(op):
     (op.st / "obs-up").unlink()
     st, d = op.row("mv-projector")
