@@ -167,7 +167,9 @@ if a[0] == "x509":
 sys.exit(2)
 """)
 
-# curl: answers %{http_code} from $FAKE_STATE/http/<host><path with / -> _>; absent = 000.
+# curl: answers from $FAKE_STATE/http/<host>_<path with / -> _>, absent = no answer. `-D -` prints the
+# status line as received (how a 101 is read: curl keeps an upgraded connection open until --max-time),
+# `-w %{http_code}` the code (000 when nothing answered).
 _FAKE_CURL = _py("""import os, sys
 st = os.environ["FAKE_STATE"]
 a = sys.argv[1:]
@@ -177,7 +179,12 @@ rest = url[len("https://"):]
 host, _, path = rest.partition("/")
 key = host + "_" + path.replace("/", "_")
 p = os.path.join(st, "http", key)
-sys.stdout.write(open(p).read().strip() if os.path.exists(p) else "000")
+code = open(p).read().strip() if os.path.exists(p) else ""
+if "-D" in a and a[a.index("-D") + 1] == "-" and code:
+    sys.stdout.write("HTTP/1.1 %s X\r\nServer: fake\r\n\r\n" % code)
+if "-w" in a:
+    sys.stdout.write(code or "000")
+sys.exit(0 if code else 7)
 """)
 
 _FAKE_SS = _py("""import os, sys
@@ -409,6 +416,20 @@ def test_the_snv_interkom_render_lists_every_name_on_one_cert():
     # the header names the box, never dev1's LAN IP
     assert "10.77.9.200" not in text and "dev1 nginx" not in text
     assert "strih-snv" in text and "10.77.9.202" in text
+
+
+@pytest.mark.parametrize("box", ["strih-snv", "strih-pp"])
+def test_the_upstream_ports_are_the_services_own_binds(box):
+    """One source of truth: the hub port is the box's intercom matrix [http] bind, bkshading's is its
+    default_bind (bkshading/service/src/config.rs)."""
+    r = _bash('strih_box_load "$1" || exit 9\nstrih_lx_intercom_config', box, sources=(FACTS,))
+    matrix = (REPO / r.stdout.strip()).read_text()
+    hub = re.search(r'(?m)^bind = "0\.0\.0\.0:(\d+)"', matrix).group(1)
+    cfg = (REPO / "bkshading" / "service" / "src" / "config.rs").read_text()
+    bks = re.search(r'"0\.0\.0\.0:(\d+)"', cfg).group(1)
+    sites = {row[0]: row for row in _sites(box)}
+    assert sites["interkom"][3] == "http://127.0.0.1:%s" % hub
+    assert sites["shading"][3] == "http://127.0.0.1:%s" % bks
 
 
 def test_the_pp_render_follows_the_pp_box():
