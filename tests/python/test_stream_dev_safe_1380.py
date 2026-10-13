@@ -383,3 +383,38 @@ def test_verdict_through_resolve_accepts_the_live_video_input():
     obs.req = req
     rows = sds.read_verdict(obs, SPEC)
     assert "FAIL" not in [lvl for lvl, _ in rows], rows
+
+
+# ---- owner 13.10.2026: one spelling of the source names, never the registered sign ---------------
+
+@pytest.mark.parametrize("bad", ["NDI® 2ME PGM", "NDIÂ® odpocty", "NDI(R) 2ME PGM", "NDIAr 2ME PGM"])
+def test_source_names_fail_on_a_registered_sign_spelling(bad):
+    rows = sds.source_name_rows([bad, "Ucet", MIX], ["PRE", PROD])
+    assert [lvl for lvl, _ in rows] == ["FAIL"]
+    assert bad in rows[0][1]
+
+
+def test_source_names_fail_on_a_sign_in_a_scene_name():
+    rows = sds.source_name_rows(["NDI 2ME PGM"], ["PRO®"])
+    assert [lvl for lvl, _ in rows] == ["FAIL"]
+
+
+def test_source_names_pass_on_the_unified_names():
+    rows = sds.source_name_rows(["NDI odpocty", "NDI 2ME PGM", "Arena feed", MIX], ["PRE", PROD, "POST"])
+    assert [lvl for lvl, _ in rows] == ["PASS"]
+
+
+def test_read_verdict_carries_the_source_name_row():
+    items = {SPEC["scene"]: _clean_items()}
+    obs = FakeObs([PROD, SPEC["scene"]], [SPEC["video_input"], SPEC["audio_input"], "NDI® odpocty"], items)
+    real_req = obs.req
+
+    def req(t, data=None, ignore_err=False):
+        if t == "GetInputMute":
+            return {"inputMuted": True}
+        if t == "GetInputSettings":
+            return {"inputSettings": {"local_file": SPEC["audio_file"]}}
+        return real_req(t, data, ignore_err)
+    obs.req = req
+    rows = sds.read_verdict(obs, SPEC)
+    assert any(lvl == "FAIL" and "NDI® odpocty" in text for lvl, text in rows), rows
