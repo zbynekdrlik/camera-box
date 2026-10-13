@@ -359,6 +359,9 @@ IMAG_OFFLINE_ACK_REASON="$(cambox_offline_ack_reason "imag")"
 # not at decode time.
 # shellcheck source=scripts/lib/live-freeze-watch.sh
 . "$HERE/lib/live-freeze-watch.sh"
+# issue 1421: the stream program must carry the measurement signal alone (preflight + in-run watch).
+# shellcheck source=scripts/lib/e2e-program-audio.sh
+. "$HERE/lib/e2e-program-audio.sh"
 # #882/#1232: restart-and-settle for the [1/8] imag render-health sweep -- the leading windows
 # (right after a fresh OBS start) can measure a real, transient warm-up dip that is not a
 # regression; a settle-adaptive PHASE (bounded by a wall budget) absorbs however many leading
@@ -1800,6 +1803,8 @@ cambox_egress_pacing_e2e_report "$LEG_HEALTH_TARGETS" "$CAM_PW"
 echo "[0/8] optical head-end blur/shutter preflight — $CAMERA_NAME must not capture BLURRED (slow shutter/anti-flicker, #1141)"
 optical_preflight_assert "$CAM1_IP" root "$CAM_PW" "$CAMERA_NAME"
 
+echo "[0/8] stream program-audio preflight -- the stream program must carry the measurement signal ALONE, no music (issue 1421)"
+e2e_program_audio_preflight "$HERE" "$STREAM" || exit 1
 # cam1 v4l2 capture controls (#338/#312, range-aware since #744): apply the device's OWN
 # --list-ctrls default for saturation+contrast BEFORE the run. The old "sharp set" (saturation=0,
 # contrast=75) was meant to aid the optical dual-QR decode but HURT it (#312 run 312005:
@@ -4707,6 +4712,8 @@ else
   echo "    #887: could not resolve imag's HDMI-A-1 connector to a debugfs CRTC dir — skipping (report-only, never a run failure)"
 fi
 
+e2e_program_audio_watch_start "$HERE" "$OUTDIR"   # issue 1421: poll the program-audio guard while recording
+
 if [ "$ALL_CAMBOX" = "1" ]; then
   # #332: the all-cambox sweep now runs on the DEFAULT decode-on-stream path (VERDICT_ON_STREAM=1,
   # #193 — decode where the video lives, never pull the multi-GB recordings to dev1). The per-box
@@ -4780,6 +4787,7 @@ echo "[7/8] StopRecord + download strih + stream recordings to dev1 (NO grab #17
 # #758 item 3 — disarm the in-run freeze watch now that the recording window has ended (its own
 # verdict is read further below, at recording-verdict time, from the poison file this leaves behind).
 live_freeze_watch_stop "$FREEZE_WATCH_PID_FILE"
+e2e_program_audio_watch_stop "$HERE" "$STREAM" "$OUTDIR" || exit 1   # issue 1421: foreign audio in the window = an invalid run
 # #178: the StopRecord→verdict region is RESILIENT. run 172046073 completed the recording
 # + StopRecord, then a set -e abort (a non-zero $(StopRecord) capture / a transient ssh /
 # an absent optional recording hitting a `[ -f ] && ...` guard) jumped straight to the
