@@ -34,7 +34,7 @@ standartneho procesu".
 
 The audit of every known notebook fix against setup + verify is on the ticket (comment
 6126959724). Its open gaps: the X hang root cause, the rtl8852bu Bluetooth root cause, the TLS front
-end (issue 1399), the hub start order, and the imag hand tweaks.
+end (issue 1399, now setup-strih step 16i + verify item 45, `strih-https.md`), the hub start order, and the imag hand tweaks.
 
 ## The lib (`scripts/lib/strih-operator.sh`, sourced by strih-provision.sh)
 

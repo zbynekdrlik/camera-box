@@ -854,6 +854,8 @@ if WHY="$(obs_box_step_applies 16f)"; then strih_tally_grade_report "${HERE}/.."
 else note "(tally) not graded: ${WHY}"; fi
 # 43) issue 1418 operator surface (scripts/lib/strih-operator.sh, its header: the 13 rows) + 44) issue 1420 kiosk panel (scripts/lib/obs-box-panel.sh).
 strih_operator_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(operator) the grader did not print all of its rows"; obs_box_panel_grade_report "${HERE}/.." "$USER_HOME" "${STRIH_LX_USER:-newlevel}" || bad "(panel) the grader did not print all of its rows"
+# 45) issue 1399 HTTPS front end (scripts/lib/strih-https.sh, its header: nginx + each name's cert + the upstreams + renewal).
+if WHY="$(obs_box_step_applies 16i)"; then strih_https_grade_report || bad "(https) the grader did not print all of its rows"; else note "(https) not graded: ${WHY}"; fi
 
 # 16) NIC xhci IRQ affinity (issue 1317 item H): the USB-NIC's xhci interrupt must be pinned to a
 #     SINGLE E-core (>= the first cpu_atom cpu) so its NET_RX softirq never shares an OBS core, AND
@@ -989,9 +991,7 @@ if [ "$CRASH_REPORTS_V" != 0 ]; then
   note "(crash-popup) ${CRASH_REPORTS_V} stale crash report(s) in ${CRASH_DIR_V} -- update-notifier re-raises the popup for them at login; inspect (coredumpctl list) and clear them (supervisor data action)"
 fi
 
-# (item 33, the strih-only rtprio-off check, moved into the shared grader as the baseline `rtprio`
-#  row graded by item 32 above -- issue 1357.)
-
+# (item 33, the strih-only rtprio-off check, is the baseline `rtprio` row of item 32 now -- issue 1357.)
 echo ""
 if [ "$FAILS" -eq 0 ]; then
   echo -e "${GREEN}=== verify-strih.sh: ALL CLEAR ===${NC}"; exit 0

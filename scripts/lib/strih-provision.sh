@@ -52,6 +52,11 @@ if ! declare -F obs_box_panel_install >/dev/null; then
   # shellcheck source=scripts/lib/obs-box-panel.sh
   . "$(dirname "${BASH_SOURCE[0]}")/obs-box-panel.sh"
 fi
+# issue 1399: the box's own HTTPS front end (setup-strih step 16i, verify-strih item 45).
+if ! declare -F strih_https_install >/dev/null; then
+  # shellcheck source=scripts/lib/strih-https.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-https.sh"
+fi
 # issue 1412: a fresh box's dantesync binary + role config (setup-strih step 2) and the ONE CI-artifact
 # fetch (step 13's intercom-hub binary, step 16c's bkshading service).
 if ! declare -F dantesync_install >/dev/null; then
