@@ -308,10 +308,12 @@ strih_lx_dantesync_is_client_not_master() {
 #     strih_lx_dantesync_is_client_not_master (which fail-closes on empty/master).
 #   * any other/empty ROLE -> fail-closed.
 strih_lx_dantesync_role_ok() {
-  local role="${1:-}" args="${2-}"
+  # issue 1399: `dsargs`, never `args` -- shellcheck tracks a name across the sourced libs, and
+  # shading-https.sh's certbot builder uses `args` as an array (SC2178/SC2128 on CI's shellcheck).
+  local role="${1:-}" dsargs="${2-}"
   case "$role" in
-    server) [ -z "$args" ] && return 0 || return 1 ;;
-    client) strih_lx_dantesync_is_client_not_master "$args" ;;
+    server) [ -z "$dsargs" ] && return 0 || return 1 ;;
+    client) strih_lx_dantesync_is_client_not_master "$dsargs" ;;
     *) return 1 ;;
   esac
 }
