@@ -20,20 +20,45 @@
 #include <xcb/xcb.h>
 
 #include "util/base.h"
+#include "util/threading.h"
 #include "obs-drm-output-vk-internal.h"
 
 /* -------------------------------------------------------------------------------------------------
  * Pure decision helper (Tier-0, lift-compiled + truth-tabled by tests/drm_output_vk_direct_1346.rs).
  * ------------------------------------------------------------------------------------------------- */
 
-/* Pick the display mode to present: among the modes whose visible size equals the display's native
- * (physical) resolution — or among all modes when the native size is unknown (0) or no mode matches
- * it — the one whose refresh (mHz) is closest to 60 Hz; the first wins a tie. -1 when n <= 0. The
- * lease backend takes the connector's preferred mode; Vulkan exposes no "preferred" flag, so the
- * physical resolution stands in for it, and the rig's genlock cadence is 60 Hz. */
+/* Pick the display mode to present.
+ * camera-box issue 1424: for the PROGRAM view the caller passes the canvas as the wanted mode (want_w x
+ * want_h at want_mhz): a mode of exactly that size whose refresh is within 0.2 % of it wins, the
+ * closest first (30.000 over 29.970 for a 30 Hz canvas, 29.970 accepted when 30 is absent, never 25),
+ * so one render tick = one scanout (1080p30 = the HD-SDI 1.5G rate the vestibule SDI chain carries).
+ * No such mode, or no wanted mode (0 = the Multiview view), falls back to the issue-1346 rule: among the
+ * modes whose visible size equals the display's native (physical) resolution — or among all modes when
+ * the native size is unknown (0) or no mode matches it — the one whose refresh (mHz) is closest to
+ * 60 Hz; the first wins a tie. -1 when n <= 0. The lease backend takes the connector's preferred mode;
+ * Vulkan exposes no "preferred" flag, so the physical resolution stands in for it. */
 static int drm_output_vk_pick_mode(const uint32_t *w, const uint32_t *h, const uint32_t *refresh_mhz, int n,
-				   uint32_t native_w, uint32_t native_h)
+				   uint32_t native_w, uint32_t native_h, uint32_t want_w, uint32_t want_h,
+				   uint32_t want_mhz)
 {
+	if (want_w != 0 && want_h != 0 && want_mhz != 0) {
+		const uint32_t tol = want_mhz / 500u;
+		int pick = -1;
+		uint32_t pick_dist = 0;
+		for (int i = 0; i < n; i++) {
+			if (w[i] != want_w || h[i] != want_h)
+				continue;
+			uint32_t dist = refresh_mhz[i] > want_mhz ? refresh_mhz[i] - want_mhz : want_mhz - refresh_mhz[i];
+			if (dist > tol)
+				continue;
+			if (pick < 0 || dist < pick_dist) {
+				pick = i;
+				pick_dist = dist;
+			}
+		}
+		if (pick >= 0)
+			return pick;
+	}
 	bool any_native = false;
 	for (int i = 0; i < n; i++) {
 		if (native_w != 0 && native_h != 0 && w[i] == native_w && h[i] == native_h)
@@ -265,7 +290,12 @@ static bool drm_output_vk_create_surface(bool rebuild)
 			mh[i] = modes[i].parameters.visibleRegion.height;
 			mr[i] = modes[i].parameters.refreshRate;
 		}
-		int best = drm_output_vk_pick_mode(mw, mh, mr, (int)nm, native.width, native.height);
+		/* issue 1424: the Program view's canvas, handed over by the graphics thread (0 = today's rule) */
+		const uint32_t want_w = (uint32_t)os_atomic_load_long(&g_drm_vk.want_w);
+		const uint32_t want_h = (uint32_t)os_atomic_load_long(&g_drm_vk.want_h);
+		const uint32_t want_mhz = (uint32_t)os_atomic_load_long(&g_drm_vk.want_mhz);
+		int best = drm_output_vk_pick_mode(mw, mh, mr, (int)nm, native.width, native.height, want_w, want_h,
+						   want_mhz);
 		if (best >= 0) {
 			VkDisplayModePropertiesKHR mode = modes[best];
 			const uint32_t sel_w = mw[best], sel_h = mh[best], sel_hz = mr[best];
@@ -540,6 +570,83 @@ void drm_output_vk_free_retired(void)
 	g_drm_vk.retired_swapchain = VK_NULL_HANDLE;
 	g_drm_vk.retired_surface = VK_NULL_HANDLE;
 	g_drm_vk.retire_countdown = 0;
+}
+
+/* camera-box issue 1424 -- present thread, at the top of a vblank: when the graphics thread handed over a
+ * new wanted mode (the Program canvas, or none for the Multiview), pick again over the display's modes and
+ * rebuild the display-plane surface onto the new mode only when the pick changed and keeps the committed
+ * SIZE (the shared images and the OBS intermediate are sized to it; a size change waits for an OBS
+ * restart, named). A failed re-mode forgets the wanted mode and rebuilds today's mode once. false =
+ * neither came up (the present loop then exits, `present loop exited` names it). */
+bool drm_output_vk_remode_if_needed(void)
+{
+	if (!os_atomic_set_bool(&g_drm_vk.remode, false))
+		return true;
+	const uint32_t want_w = (uint32_t)os_atomic_load_long(&g_drm_vk.want_w);
+	const uint32_t want_h = (uint32_t)os_atomic_load_long(&g_drm_vk.want_h);
+	const uint32_t want_mhz = (uint32_t)os_atomic_load_long(&g_drm_vk.want_mhz);
+	VkExtent2D native = {0, 0};
+	uint32_t nd = 0;
+	g_drm_vk.vk.vkGetPhysicalDeviceDisplayPropertiesKHR(g_drm_vk.pd, &nd, NULL);
+	VkDisplayPropertiesKHR *dprops = calloc(nd ? nd : 1, sizeof(*dprops));
+	uint32_t nm = 0;
+	if (g_drm_vk.vk.vkGetDisplayModePropertiesKHR(g_drm_vk.pd, g_drm_vk.display, &nm, NULL) != VK_SUCCESS)
+		nm = 0;
+	VkDisplayModePropertiesKHR *modes = calloc(nm ? nm : 1, sizeof(*modes));
+	uint32_t *mw = calloc(nm ? nm : 1, sizeof(uint32_t));
+	uint32_t *mh = calloc(nm ? nm : 1, sizeof(uint32_t));
+	uint32_t *mr = calloc(nm ? nm : 1, sizeof(uint32_t));
+	int best = -1;
+	if (dprops && modes && mw && mh && mr && nm > 0) {
+		g_drm_vk.vk.vkGetPhysicalDeviceDisplayPropertiesKHR(g_drm_vk.pd, &nd, dprops);
+		for (uint32_t i = 0; i < nd; i++)
+			if (dprops[i].display == g_drm_vk.display)
+				native = dprops[i].physicalResolution;
+		if (g_drm_vk.vk.vkGetDisplayModePropertiesKHR(g_drm_vk.pd, g_drm_vk.display, &nm, modes) == VK_SUCCESS) {
+			for (uint32_t i = 0; i < nm; i++) {
+				mw[i] = modes[i].parameters.visibleRegion.width;
+				mh[i] = modes[i].parameters.visibleRegion.height;
+				mr[i] = modes[i].parameters.refreshRate;
+			}
+			best = drm_output_vk_pick_mode(mw, mh, mr, (int)nm, native.width, native.height, want_w, want_h,
+						       want_mhz);
+		}
+	}
+	bool rebuild = false;
+	uint32_t sel_w = 0, sel_h = 0, sel_hz = 0;
+	if (best >= 0) {
+		sel_w = mw[best];
+		sel_h = mh[best];
+		sel_hz = mr[best];
+		rebuild = sel_hz != g_drm_vk.refresh_mhz && sel_w == g_drm_vk.mode_w && sel_h == g_drm_vk.mode_h;
+		if (sel_w != g_drm_vk.mode_w || sel_h != g_drm_vk.mode_h)
+			blog(LOG_WARNING,
+			     "drm-output: vk-direct: the wanted mode %ux%u@%u.%03uHz needs a size change from %ux%u -- kept "
+			     "(restart OBS to open at it)",
+			     sel_w, sel_h, sel_hz / 1000u, sel_hz % 1000u, g_drm_vk.mode_w, g_drm_vk.mode_h);
+	}
+	free(dprops);
+	free(modes);
+	free(mw);
+	free(mh);
+	free(mr);
+	if (!rebuild)
+		return true;
+	blog(LOG_INFO, "drm-output: vk-direct: re-mode %ux%u@%u.%03uHz -> @%u.%03uHz (%s view)", g_drm_vk.mode_w,
+	     g_drm_vk.mode_h, g_drm_vk.refresh_mhz / 1000u, g_drm_vk.refresh_mhz % 1000u, sel_hz / 1000u,
+	     sel_hz % 1000u, want_mhz ? "program: the canvas rate" : "multiview: native ~60 Hz");
+	if (drm_output_vk_rebuild_presentation(true))
+		return true;
+	/* the wanted mode would not come up: forget it and rebuild today's mode once */
+	os_atomic_set_long(&g_drm_vk.want_w, 0);
+	os_atomic_set_long(&g_drm_vk.want_h, 0);
+	os_atomic_set_long(&g_drm_vk.want_mhz, 0);
+	blog(LOG_WARNING, "drm-output: vk-direct: the re-mode failed -- back to the native ~60 Hz mode");
+	if (drm_output_vk_rebuild_presentation(true))
+		return true;
+	blog(LOG_WARNING, "drm-output: vk-direct: the native mode did not come back after the failed re-mode on '%s'",
+	     g_drm_vk.output_name);
+	return false;
 }
 
 bool drm_output_vk_rebuild_presentation(bool surface_lost)

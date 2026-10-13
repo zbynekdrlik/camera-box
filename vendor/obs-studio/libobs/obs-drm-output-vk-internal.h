@@ -182,6 +182,12 @@ struct drm_output_vk_state {
 	uint32_t mode_w;
 	uint32_t mode_h;
 	uint32_t refresh_mhz;
+	/* camera-box issue 1424: the mode the graphics thread wants (the Program canvas; 0 = today's rule)
+	 * and the flag the present thread re-modes on (os_atomic, graphics -> present thread). */
+	volatile long want_w;
+	volatile long want_h;
+	volatile long want_mhz;
+	volatile bool remode;
 
 	struct drm_output_vk_shared shared[DRM_OUTPUT_VK_SHARED_IMAGES];
 	int front;   /* image last presented (re-copied when nothing new), -1 before the first */
@@ -217,6 +223,10 @@ void drm_output_vk_destroy_all(void);
  * replug. false = the display now offers a different mode size (the shared images no longer fit) or a
  * Vulkan call failed; the caller retries a bounded number of times, then gives up. */
 bool drm_output_vk_rebuild_presentation(bool surface_lost);
+
+/* camera-box issue 1424, obs-drm-output-vk-setup.c, present thread: re-mode onto the wanted mode when
+ * flagged and the pick changed (same size only). false = the surface rebuild failed. */
+bool drm_output_vk_remode_if_needed(void);
 
 /* obs-drm-output-vk-setup.c, present thread (after a signalled fence) or teardown: free a retired
  * swapchain + surface (safe when none). */

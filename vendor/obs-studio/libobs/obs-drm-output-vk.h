@@ -57,6 +57,10 @@ bool drm_output_vk_wants_frames(void);
 /* The presented mode's size (the swapchain extent). */
 void drm_output_vk_mode_size(uint32_t *w, uint32_t *h);
 
+/* camera-box issue 1424, graphics thread: hand over the wanted mode (the Program canvas WxH at mHz, or
+ * 0/0/0 for today's rule); the present thread re-modes when the pick changes (never the size). */
+void drm_output_vk_want_mode(uint32_t w, uint32_t h, uint32_t mhz);
+
 /* GL context current: import the shared images (GL_EXT_memory_object_fd) + their semaphores
  * (GL_EXT_semaphore_fd) into the current GL context. false = fail open (the display keeps the solid
  * pattern). Idempotent once it succeeded. */
