@@ -244,10 +244,13 @@ obs_box_stream_encoder_grade() {
   local dir="${1:?profile dir required}" want=ffmpeg_vaapi_tex got
   obs_box_has_nvidia && want=obs_nvenc_h264_tex
   got="$(awk '/^\[AdvOut\]/{a=1;next} /^\[/{a=0} a && /^Encoder=/{sub(/^Encoder=/,""); print; exit}' "${dir}/basic.ini" 2>/dev/null || true)"
-  if [ "$got" = "$want" ] && [ -f "${dir}/streamEncoder.json" ]; then
-    ok "(stream-encoder) ${dir}: [AdvOut] Encoder=${got} + streamEncoder.json"
+  # The 4K output rescale + CBR 19000 / keyint 2 (scripts/obs_box_stream_profile.py --grade).
+  local drift
+  drift="$(python3 "$(dirname "${BASH_SOURCE[0]}")/../obs_box_stream_profile.py" --grade "$dir" 2>&1 || true)"
+  if [ "$got" = "$want" ] && [ -z "$drift" ]; then
+    ok "(stream-encoder) ${dir}: [AdvOut] Encoder=${got}, rescale 3840x2160 lanczos + streamEncoder.json CBR 19000 keyint 2"
   else
-    bad "(stream-encoder) ${dir}: [AdvOut] Encoder='${got}' (want ${want}), streamEncoder.json $([ -f "${dir}/streamEncoder.json" ] && echo present || echo missing) -- re-run setup-strih.sh step 3 with OBS stopped"
+    bad "(stream-encoder) ${dir}: [AdvOut] Encoder='${got}' (want ${want}) ${drift} -- re-run setup-strih.sh step 3 with OBS stopped"
   fi
   if [ "$want" = ffmpeg_vaapi_tex ]; then
     if obs_box_vaapi_h264_encode; then
