@@ -66,16 +66,17 @@ end (issue 1399), the hub start order, and the imag hand tweaks.
   - Caveat: a setup run over an ssh session to the OTHER interface's address cuts its own session.
     The genlock deploy dials STRIH_IP.
 
-**verify-strih item 43** (`strih_operator_grade_report`, 11 rows, FAIL unless noted). Every X read runs
+**verify-strih item 43** (`strih_operator_grade_report`, 13 rows, FAIL unless noted). Every X read runs
 on `:0` as the operator with their Xauthority (as root through `sudo -u`) and is bounded by `timeout`,
 so a hung X server FAILs a row instead of hanging verify.
 
 | Row | Grades |
 |---|---|
 | `(tap-to-click)` | the LIVE `libinput Tapping Enabled` = 1 on every touchpad (`xinput list-props`); a touchpad without the libinput property FAILs, a device whose properties do not answer is named; NOTE with no touchpad; a missing `xinput` is named (the kiosk installs it), never read as a hung X |
-| `(bluetooth)` | `hciconfig hci0`: UP and a non-zero BD address. Graded on every role: setup-strih step 11 passes `keep-bluetooth` to the kiosk on every role (test-pinned). NOTE when the kernel registered no adapter at all (no `/sys/class/bluetooth/hci*`: strih-pp is a desktop with a USB receiver mouse) |
+| `(bluetooth)` | `hciconfig hci0`: UP and a non-zero BD address. Graded on the strih role only (setup-strih step 11 passes `keep-bluetooth` to the kiosk, test-pinned); a NOTE on the stream role (owner 13.10.2026: "na stream-pp netreba bluethooth ani na stream snv, iba na strih-snv treba"; stream-pp's hci0 is rfkill soft-blocked and stays so). NOTE when the kernel registered no adapter at all (no `/sys/class/bluetooth/hci*`: strih-pp is a desktop with a USB receiver mouse) |
 | `(stream-deck)` | the deck on USB AND at least one Satellite surface, read through `scripts/strih_satellite_watch.py` (`STREAM_DECK_USB_IDS`, `deck_on_usb`, `fetch_json` + `surface_names` on `/api/surfaces`); NOTE with no deck plugged in; NOTE on the stream role (step-16 gate) |
 | `(mv-click)` | `[BasicWindow] MultiviewMouseSwitch` true the way libobs `config_get_bool` reads it (`util/config-file.c`: `true` in any case, or a non-zero strtoull, base 16 after a leading `0x`; `on` / `yes` read FALSE); an absent key is OBS's built-in true but FAILs as "not seeded" |
+| `(operator-ini)` | every `STRIH_OPERATOR_INI_KEYS` key=value in `[BasicWindow]` (booleans case-insensitive): the three issue-1418 keys plus strih-snv's `CloseExistingProjectors=true` and `WarnBeforeStartingStream` / `WarnBeforeStoppingStream` / `WarnBeforeStoppingRecord` = false (issue 1419) |
 | `(studio-mode)` | `GetStudioModeEnabled` over the OBS websocket; NOTE while OBS is not running |
 | `(ws-seed)` | the step-7 obs-websocket config: `server_enabled` true, `server_port` 4455, `auth_required` false (pinned to the step-7 heredoc by a test) |
 | `(qt6-svg)` | the `qt6-svg-plugins` package installed with BOTH plugins (item 21 grades only the icon engine) |
@@ -83,6 +84,7 @@ so a hung X server FAILs a row instead of hanging verify.
 | `(panel-gpu)` | `xrandr --listproviders` on :0 (bounded 10 s): every provider after Provider 0 that lists `Sink Output` (the reverse-PRIME panel sink) must be named `modesetting`; any other name is a vendor DDX and FAILs naming `xserver-xorg-video-amdgpu`, which the shared baseline removes (`STRIH_OPERATOR_AMDGPU_DDX_PKG`, pinned equal to `obs_box_amdgpu_ddx_package`); NOTE with one provider; a failed or timed-out read = a hung X; a missing `xrandr` (rc 127) is named |
 | `(drm-hang)` | `journalctl -k -b 0 --no-pager` (bounded 30 s): a `blocked for more than` hung task whose trace within 25 lines (before the next `INFO: task`) has a `commit_work+0x` or `drm_atomic_helper_wait_for_fences+0x` frame, or a DRM `*ERROR*` commit timeout (`flip_done` / `hw_done` / `commit wait` timed out, amdgpu_dm `Waiting for fences timed out`, nvidia-drm `Flip event timeout`), FAILs naming its first time stamp; an unreadable or empty log FAILs, and so does one with no kernel line (`-- No entries --` when run outside root / adm / systemd-journal) |
 | `(operator-panel)` | two `ffmpeg -f x11grab -i :0.0 -frames:v 1 -f md5 -` frames 4 s apart differ while OBS runs (the 12.10 hang signature); NOTE while OBS is not running |
+| `(mv-projector)` | a `Projector - Multiview` window in `wmctrl -lx` on :0 while OBS runs (issue 1419: strih-pp's operator had no Multiview; step 16g's `strih_operator_projector_seed` runs `scripts/strih_projector_seed.py`, which seeds `{"monitor": 0, "type": 4}` into an EMPTY `saved_projectors` of the box's collection only, with OBS stopped); NOTE while OBS is not running |
 
 **The 11/12.10.2026 X freeze (comments 6132168799, ROZHODNUTE 6132283178).** The panel's amdgpu
 `commit_work` blocked in `drm_atomic_helper_wait_for_fences` from 11.10 22:17, 18 h before the owner
@@ -145,3 +147,16 @@ these fakes:
   command, a fake sysfs USB tree, and a real local HTTP server for `/api/surfaces`;
 - verify item 16's real text sliced from verify-strih, with a fake `systemctl`.
 Seams are listed in the lib header.
+
+## The full strih OBS setup from the repo (issue 1419, owner 13.10.2026)
+
+Owner verbatim: "ale ved tam malo byt cely obs setup skopirovany aky mame v strih snv". strih-snv's OBS
+setup was hand-made; the live diff (13.10.2026) found the collection and the plugin set already equal
+on strih-pp, and three gaps, now all seeded by setup-strih with OBS stopped and graded by verify:
+- the profile: `obs_box_stream_profile.py --strih` (step 3, strih role) writes `BASIC_INI` +
+  `STRIH_PROFILE` (record keys = `strih_lx_profile_facts`, test-pinned) + `recordEncoder.json` (NVENC
+  CBR 20000 p5); verify item 10's `(strih-profile)` row runs `--grade-strih`;
+- user.ini: the four keys above in `STRIH_OPERATOR_INI_KEYS`, graded by `(operator-ini)`;
+- the saved Multiview projector, graded live by `(mv-projector)`.
+Never copied: window geometry, the Panels cookie id, the rtmp service key, the stale Windows-era
+advanced-scene-switcher module data, and the transition duration (an operator choice).
