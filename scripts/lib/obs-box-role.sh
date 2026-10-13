@@ -37,6 +37,13 @@ OBS_BOX_STREAM_INPUT="NDI 2ME PGM"
 OBS_BOX_STREAM_SCENE="PRO"
 OBS_BOX_STREAM_AUDIO_INPUT="Zvuk z mixu"
 OBS_BOX_STREAM_OUTPUT_NAME="stream"
+# issue 1380 (ROZHODNUTE 13.10.2026): the stream role's YouTube-safe Development scene -- the program
+# video input (muted) over the measurement clip, never the production scene (it holds the live mixer).
+# The scene name equals STREAM_DEV_SCENE_DEFAULT (scripts/lib/stream-dev-scene.sh, pinned by a pytest).
+OBS_BOX_STREAM_DEV_SCENE="Development"
+OBS_BOX_STREAM_DEV_CLIP_INPUT="Merací klip"
+OBS_BOX_STREAM_DEV_CLIP="/opt/camera-box/measurement-clip-v1.mp4"
+OBS_BOX_STREAM_DEV_CLIP_FRAMES=3840   # gen_measurement_clip.py: 128 s x 30 fps
 # The local restreamer the stream OBS sends to (the stream-pp laptop runs it; recon 11.10.2026).
 OBS_BOX_STREAM_RTMP_SERVER="${OBS_BOX_STREAM_RTMP_SERVER:-rtmp://127.0.0.1:1234/live}"
 
@@ -76,6 +83,12 @@ obs_box_step_applies() {
           16f) printf 'the stream role runs no camera tally (no camera operators on stream-pp)' ;;
           13-hub-live) printf 'the stream role grades its hub report-only (issue 1418 FAILs an inactive hub on the strih role)' ;;
         esac
+        return 1
+      fi ;;
+    6-devclip)
+      v="$(strih_box_role)" || return 0
+      if [ "$v" != stream ]; then
+        printf 'the strih role has no YouTube-safe stream Development scene (issue 1380: stream role only)'
         return 1
       fi ;;
     6-hdmi)
@@ -142,8 +155,10 @@ obs_box_stream_seed_manifest_json() {
   printf '    {"sender": "%s", "input": "%s", "scene": "%s", "class": "program"}\n' \
     "$sender" "$OBS_BOX_STREAM_INPUT" "$OBS_BOX_STREAM_SCENE"
   printf '  ],\n  "outputs": [\n    "%s (%s)"\n  ],\n' "$prefix" "$OBS_BOX_STREAM_OUTPUT_NAME"
-  printf '  "camera_latency_ms": %s,\n  "program_audio_input": "%s"\n}\n' \
+  printf '  "camera_latency_ms": %s,\n  "program_audio_input": "%s",\n' \
     "$(strih_lx_camera_latency_ms)" "$OBS_BOX_STREAM_AUDIO_INPUT"
+  printf '  "dev_scene": {"scene": "%s", "video_input": "%s", "audio_input": "%s", "audio_file": "%s"}\n}\n' \
+    "$OBS_BOX_STREAM_DEV_SCENE" "$OBS_BOX_STREAM_INPUT" "$OBS_BOX_STREAM_DEV_CLIP_INPUT" "$OBS_BOX_STREAM_DEV_CLIP"
 }
 
 # obs_box_seed_manifest_json -> the loaded box's seed manifest: the stream one, or the strih one.
@@ -241,5 +256,64 @@ obs_box_stream_encoder_grade() {
       bad "(stream-encoder) vainfo lists no H.264 encode entrypoint on /dev/dri/renderD128 (mesa-va-drivers? the render group?)"
     fi
   fi
+  return 0
+}
+
+# obs_box_stream_dev_clip_ok [CLIP] -> 0 when the measurement clip holds exactly
+# OBS_BOX_STREAM_DEV_CLIP_FRAMES video frames (ffprobe count) and its marker log sits beside it.
+obs_box_stream_dev_clip_ok() {
+  local clip="${1:-$OBS_BOX_STREAM_DEV_CLIP}" n
+  [ -s "$clip" ] && [ -s "${clip}.markers.csv" ] || return 1
+  n="$(ffprobe -v error -select_streams v:0 -count_packets -show_entries stream=nb_read_packets \
+    -of csv=p=0 "$clip" 2>/dev/null || true)"
+  [ "$n" = "$OBS_BOX_STREAM_DEV_CLIP_FRAMES" ]
+}
+
+# obs_box_stream_dev_clip_provision SCRIPTS_DIR -> setup-strih step 6-devclip (stream role, issue 1380):
+# the measurement clip the safe Development scene plays, generated ON the box by
+# scripts/gen_measurement_clip.py (never copied from dev1). Installs python3-numpy when missing; an
+# existing clip with the right frame count and its marker log is kept. rc 1 + a reason on failure.
+obs_box_stream_dev_clip_provision() {
+  local here="${1:?scripts dir required}" clip="$OBS_BOX_STREAM_DEV_CLIP"
+  if obs_box_stream_dev_clip_ok "$clip"; then
+    echo "  measurement clip ${clip}: present (${OBS_BOX_STREAM_DEV_CLIP_FRAMES} frames + marker log), kept"
+    return 0
+  fi
+  if ! python3 -c 'import numpy' 2>/dev/null; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y python3-numpy >/dev/null \
+      || { echo "obs-box-role: apt-get install python3-numpy failed" >&2; return 1; }
+  fi
+  mkdir -p "$(dirname "$clip")"
+  echo "  generating the measurement clip ${clip} (gen_measurement_clip.py, a few minutes at nice 19)"
+  nice -n 19 python3 "${here}/gen_measurement_clip.py" --out "$clip" \
+    || { echo "obs-box-role: gen_measurement_clip.py failed" >&2; return 1; }
+  chmod 0644 "$clip" "${clip}.markers.csv"
+  obs_box_stream_dev_clip_ok "$clip" \
+    || { echo "obs-box-role: ${clip} does not hold ${OBS_BOX_STREAM_DEV_CLIP_FRAMES} frames + its marker log" >&2; return 1; }
+  echo "  measurement clip ${clip}: generated, sha256 $(sha256sum "$clip" | cut -d' ' -f1)"
+}
+
+# obs_box_stream_dev_grade SCRIPTS_DIR -> verify-strih's stream-role rows of issue 1380: the
+# measurement clip file and the YouTube-safe Development scene, read live over obs-websocket by
+# stream_dev_safe.py --verify. Uses the caller's ok/bad/note; always rc 0.
+obs_box_stream_dev_grade() {
+  local here="${1:?scripts dir required}" line level text
+  if obs_box_stream_dev_clip_ok; then
+    ok "(dev-clip) ${OBS_BOX_STREAM_DEV_CLIP}: ${OBS_BOX_STREAM_DEV_CLIP_FRAMES} frames + marker log"
+  else
+    bad "(dev-clip) ${OBS_BOX_STREAM_DEV_CLIP} missing or not ${OBS_BOX_STREAM_DEV_CLIP_FRAMES} frames + marker log -- re-run setup-strih.sh step 6"
+  fi
+  local out
+  out="$(timeout 20 python3 "${here}/stream_dev_safe.py" --verify 2>&1 || true)"
+  [ -n "$out" ] || { bad "(dev-scene) stream_dev_safe.py --verify printed nothing (OBS WebSocket down?)"; return 0; }
+  while IFS= read -r line; do
+    level="${line%% *}"; text="${line#* }"
+    case "$level" in
+      PASS) ok "$text" ;;
+      NOTE) note "$text" ;;
+      FAIL) bad "$text" ;;
+      *) bad "(dev-scene) unexpected verifier output: ${line}" ;;
+    esac
+  done <<<"$out"
   return 0
 }

@@ -918,6 +918,11 @@ def main():
           % (mode, len(plan), latency,
              ", ".join("%s=%s" % (k, v) for k, v in sorted(statuses.items()))))
     print("scene order: " + " | ".join(scene_order(inputs)))
+    # issue 1380: a stream-role manifest carries the YouTube-safe Development scene (stream_dev_safe.py).
+    if '"dev_scene"' in manifest_text:
+        import stream_dev_safe
+        spec = stream_dev_safe.parse_dev_scene(manifest_text)
+        print("dev-scene seed: %s" % (", ".join(stream_dev_safe.apply_dev_safe(obs, spec)) or "present (no change)"))
 
 
 if __name__ == "__main__":

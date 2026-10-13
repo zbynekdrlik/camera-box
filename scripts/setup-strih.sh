@@ -401,7 +401,10 @@ fi
 # ticket; the seeder never touches outputs.
 [ -f "${HERE}/strih_scenes.py" ] || fail "scripts/strih_scenes.py not found next to this script (the strih-obs-start.sh --bootstrap seed target)"
 install -m 0755 "${HERE}/strih_scenes.py" /usr/local/bin/strih_scenes.py
+install -m 0755 "${HERE}/stream_dev_safe.py" /usr/local/bin/stream_dev_safe.py   # issue 1380: the stream role's safe Development
 echo "  installed strih_scenes.py -> /usr/local/bin (input/scene/Studio-Mode seeder; strih-obs-start.sh runs --bootstrap on launch)"
+if WHY="$(obs_box_step_applies 6-devclip)"; then obs_box_stream_dev_clip_provision "$HERE" || fail "issue 1380: the measurement clip for the safe Development scene could not be provisioned (above)"
+else echo "  SKIP: ${WHY}"; fi
 # issue 1242 (28.9.2026, owner order): the strih bandwidth-roles module is retired -- strih_scenes.py
 # no longer imports it; remove a leftover install.
 if [ -e /usr/local/bin/strih_bandwidth_roles.py ]; then
