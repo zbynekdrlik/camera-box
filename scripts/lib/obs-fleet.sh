@@ -316,7 +316,7 @@ obs_fleet_status_probe() {
 # every Windows planner (deploy-genlock-fleet.sh, launch-obs-genlock.sh, obs-self-heal-install.sh,
 # via scripts/lib/genlock-fleet-boxes.sh) read.
 obs_fleet_has_ahk() {
-  case "${1:-}" in
+  case "$(obs_fleet_canonical_name "${1:-}")" in   # issue 1414: an old name reads the same fact
     resolume-snv) printf '1' ;;
     *) printf '0' ;;
   esac
@@ -431,12 +431,13 @@ obs_fleet_poll_now() {
 # in that list -- so a test (or a supervisor forcing a known state) never depends on live I/O. An
 # unknown name returns 1 (fail-closed: an untracked box is never treated as home).
 obs_fleet_is_home() {
-  local name="${1:-}" check host ip
+  local name="${1:-}" check host ip w IFS=$' \t\n'
   if [ -n "${OBS_FLEET_HOME:-}" ]; then
-    case " ${OBS_FLEET_HOME} " in
-      *" ${name} "*) return 0 ;;
-      *) return 1 ;;
-    esac
+    # issue 1414: a listed name and the asked name match through the transition aliases too.
+    for w in ${OBS_FLEET_HOME}; do
+      [ "$(obs_fleet_canonical_name "$w")" = "$(obs_fleet_canonical_name "$name")" ] && return 0
+    done
+    return 1
   fi
   check="$(obs_fleet_home_check "$name")" || return 1
   case "$check" in

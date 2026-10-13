@@ -302,7 +302,8 @@ parallel-run guard against a second `STRIH-SNV (...)` sender is removed.
   (`strih-lx-seed.json`, `strih-lx-profile-facts.txt`, issue 1414).
   The live rename is a supervisor runbook on issue 1414: hostname, OBS profile + collection
   (`obs_collection_port.py --preset strih-snv`), the stream OBS `NDI 2ME PGM` source name, the
-  latency pins re-read, the NDI port-map baseline recaptured.
+  latency pins re-read, the NDI port-map baseline recaptured, and on dev1 the MCP entry renamed
+  `linux-strih-lx` -> `linux-strih-snv` (the calibrate push plans name the new one, issue 1414).
 - **The clock role is now a PARAMETER, and post-M4 the notebook IS the fleet NTP master (updated
   #1317 remainder, 22.9.2026 — the parallel run ENDED with the M4 cut-over on 20.9.).** The old
   "dantesync CLIENT only, the Windows PC keeps the single NTP-master role" contract was true ONLY

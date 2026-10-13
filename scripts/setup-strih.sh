@@ -380,7 +380,6 @@ install -d -m 755 /opt/camera-box
 # (heal the certified genlock class onto EXISTING inputs, never CreateScene/CreateInput -> no more
 # duplicate `NDI CAMn (usb)` receivers). The full DATA name-map is strih_lx_seed_manifest_json.
 obs_box_seed_manifest_json > /opt/camera-box/strih-seed.json   # issue 1412: the stream role's manifest on a stream box
-rm -f /opt/camera-box/strih-lx-seed.json   # issue 1414: the pre-rename name of the role file
 echo "  wrote /opt/camera-box/strih-seed.json (operator collection: update-only, explicit strih input names NDI camN / NDI 2ME PVW / NDI 2ME PGM (mv) / cg / CG-obs, floor-3 pins)"
 # issue 1346: the fixed HDMI output's config ~/.camera-box/drm-output.json (Program / built-in Multiview,
 # the box's backend fact) -- the whole step lives in scripts/lib/strih-drm-output.sh.
@@ -404,6 +403,7 @@ fi
 # ticket; the seeder never touches outputs.
 [ -f "${HERE}/strih_scenes.py" ] || fail "scripts/strih_scenes.py not found next to this script (the strih-obs-start.sh --bootstrap seed target)"
 install -m 0755 "${HERE}/strih_scenes.py" /usr/local/bin/strih_scenes.py
+rm -f /opt/camera-box/strih-lx-seed.json   # issue 1414: the pre-rename seed, now the new seeder is in
 echo "  installed strih_scenes.py -> /usr/local/bin (input/scene/Studio-Mode seeder; strih-obs-start.sh runs --bootstrap on launch)"
 # issue 1242 (28.9.2026, owner order): the strih bandwidth-roles module is retired -- strih_scenes.py
 # no longer imports it; remove a leftover install.
