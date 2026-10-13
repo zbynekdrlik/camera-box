@@ -76,11 +76,7 @@ fn the_acquire_waits_for_every_other_presentation_to_settle() {
         "drm_output_vk_wait_others_settled(d)",
         "setup waits for the other displays",
     );
-    let acquire = pos(
-        &setup,
-        "drm_output_vk_acquire(d, output)",
-        "setup acquires",
-    );
+    let acquire = pos(&setup, "drm_output_vk_acquire(d, output)", "setup acquires");
     assert!(
         wait < acquire,
         "issue 1424: the wait runs BEFORE the acquire (the -13 window is the other display's bring-up)"
@@ -125,7 +121,11 @@ fn a_new_surface_restarts_the_settle_count_and_each_present_advances_it() {
         &v,
         "static void *drm_output_vk_present_thread(void *arg)",
     ));
-    let ok = pos(&loop_, "rebuilds = 0; d->presents++;", "a successful present");
+    let ok = pos(
+        &loop_,
+        "rebuilds = 0; d->presents++;",
+        "a successful present",
+    );
     let inc = pos(
         &loop_,
         "os_atomic_inc_long(&d->presents_since_surface)",
