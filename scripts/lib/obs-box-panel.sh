@@ -6,7 +6,8 @@
 # scripts/lib/obs-box-panel.sh -- issue 1420: the kiosk panel of the Linux OBS boxes. Owner 13.10.2026:
 # "a nevieme mat pod linuxom nejaku listu s tray ikonkami/appkami atd...?", then on the strih boxes
 # "Chcem to vidiet aj na strih a rozhodnut sa podla toho ako sa to bude spravat a vizerat" -- every
-# role gets it as a trial (gate `16h-panel` in scripts/lib/obs-box-role.sh).
+# role gets it, and after seeing it live: "1 mame mat jeden typ linux pracovnych zariadeni ako su
+# nasetupovane mas to doplnit do nasho skriptu!!" -- one Linux workstation type (gate `16h-panel`).
 #
 # The panel is tint2 (the distro package) at the bottom of :0: the running windows (a click switches,
 # beside Alt-Tab; a right click does nothing, so no window is closed from the panel), the XEmbed system

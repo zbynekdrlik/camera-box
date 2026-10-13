@@ -2,7 +2,7 @@
 
 Owner 13.10.2026: "a nevieme mat pod linuxom nejaku listu s tray ikonkami/appkami atd...?", then
 "Chcem to vidiet aj na strih a rozhodnut sa podla toho ako sa to bude spravat a vizerat" -- every role
-gets it as a trial. These tests pin the declared config, the install (write-if-changed, enable, never a
+gets it; after the live look: "1 mame mat jeden typ linux pracovnych zariadeni" (one Linux workstation type). These tests pin the declared config, the install (write-if-changed, enable, never a
 start), the autostart line, the four verify rows and the setup / verify wiring.
 """
 import os
@@ -44,7 +44,7 @@ def test_the_config_is_one_bottom_panel_with_taskbar_tray_and_clock_and_no_launc
 
 
 @pytest.mark.parametrize("box", ["stream-pp", "strih-pp", "strih-snv"])
-def test_every_role_gets_the_panel_as_a_trial(box):
+def test_every_role_gets_the_panel_one_linux_workstation_type(box):
     r = _bash('obs_box_step_applies 16h-panel && echo RUN', box=box)
     assert r.stdout.strip() == "RUN", r.stderr
 
