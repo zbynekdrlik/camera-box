@@ -186,16 +186,20 @@ _strih_https_file_declares() {
 }
 
 # _strih_https_ssl_pair FILE -> `cert|key` of FILE's first ssl_certificate / ssl_certificate_key lines
-# when BOTH are files under <nginx dir>/ssl/; nothing otherwise. Always rc 0.
+# when BOTH resolve (realpath -e: no `..`, no symlink out) to files under <nginx dir>/ssl/; nothing
+# otherwise. Always rc 0.
 _strih_https_ssl_pair() {
-  local file="$1" ssl cert key
+  local file="$1" ssl cert key rc rk
   [ -f "$file" ] || return 0
-  ssl="$(strih_https_nginx_dir)/ssl/"
+  ssl="$(realpath -e "$(strih_https_nginx_dir)/ssl" 2>/dev/null)" || return 0
   cert="$(sed -n 's/^[[:space:]]*ssl_certificate[[:space:]]\{1,\}\([^;[:space:]]*\);.*/\1/p;T;q' "$file" 2>/dev/null || true)"
   key="$(sed -n 's/^[[:space:]]*ssl_certificate_key[[:space:]]\{1,\}\([^;[:space:]]*\);.*/\1/p;T;q' "$file" 2>/dev/null || true)"
-  case "$cert" in "$ssl"*) ;; *) return 0 ;; esac
-  case "$key" in "$ssl"*) ;; *) return 0 ;; esac
-  [ -f "$cert" ] && [ -f "$key" ] && printf '%s|%s' "$cert" "$key"
+  [ -n "$cert" ] && [ -n "$key" ] || return 0
+  rc="$(realpath -e "$cert" 2>/dev/null)" || return 0
+  rk="$(realpath -e "$key" 2>/dev/null)" || return 0
+  case "$rc" in "$ssl"/*) ;; *) return 0 ;; esac
+  case "$rk" in "$ssl"/*) ;; *) return 0 ;; esac
+  [ -f "$rc" ] && [ -f "$rk" ] && printf '%s|%s' "$cert" "$key"
   return 0
 }
 
@@ -273,7 +277,7 @@ _strih_https_keep() {
 # call; a missing ini / certificate and a failing certbot are WARNs.
 strih_https_install() {
   local sites ini hook nginx avail enabled tmp site first aliases up janus want have action w text
-  local paths cert key origin dst link f h act en missing mode changed=0
+  local paths cert key origin dst link f h act en missing mode changed=0 reload=0
   local -a argv hosts
   sites="$(strih_https_sites)" || return 1
   if [ -z "$sites" ]; then
@@ -333,6 +337,9 @@ strih_https_install() {
       mapfile -t argv <<<"$text"
       echo "  certificate ${first}: ${action} (${want}) -- certbot DNS-01"
       if certbot "${argv[@]}" </dev/null; then
+        # a `certonly` fires no renewal deploy hook: nginx must load the new certificate itself, also
+        # when the site text is unchanged (it already names the live dir)
+        reload=1
         echo "  certificate ${first}: issued"
       else
         echo "  WARN: certbot could not ${action} the ${first} certificate -- the ${site} site keeps the certificate it has; verify-strih item 45 grades it" >&2
@@ -356,8 +363,8 @@ strih_https_install() {
       w=unchanged
     else
       _strih_https_keep "$tmp" "$dst" || { rm -rf "$tmp"; return 1; }
-      { rm -f "$dst" && install -m 0644 "${tmp}/${site}.new" "$dst"; } || {
-        _strih_https_restore "$tmp"; rm -rf "$tmp"; echo "strih-https: cannot write ${dst}" >&2; return 1; }
+      { install -m 0644 "${tmp}/${site}.new" "${dst}.new.$$" && mv -Tf "${dst}.new.$$" "$dst"; } || {
+        rm -f "${dst}.new.$$"; _strih_https_restore "$tmp"; rm -rf "$tmp"; echo "strih-https: cannot write ${dst}" >&2; return 1; }
       w=written; changed=1
     fi
     echo "  ${dst} ${w} (${origin} certificate ${cert})"
@@ -384,7 +391,7 @@ strih_https_install() {
 
   act="$(systemctl is-active nginx 2>/dev/null || true)"
   en="$(systemctl is-enabled nginx 2>/dev/null || true)"
-  if [ "$changed" = 1 ] || [ "$act" != active ]; then
+  if [ "$changed" = 1 ] || [ "$reload" = 1 ] || [ "$act" != active ]; then
     if ! nginx -t; then
       _strih_https_restore "$tmp"
       rm -rf "$tmp"
@@ -400,7 +407,7 @@ strih_https_install() {
     if [ "$en" != enabled ]; then
       systemctl enable nginx || { echo "strih-https: systemctl enable nginx failed" >&2; return 1; }
     fi
-    if [ "$changed" = 1 ]; then
+    if [ "$changed" = 1 ] || [ "$reload" = 1 ]; then
       systemctl reload nginx || { echo "strih-https: systemctl reload nginx failed" >&2; return 1; }
       echo "  reloaded nginx (nginx -t passed)"
     fi
@@ -448,7 +455,7 @@ strih_https_row_count() {
 # (strih_https_row_count of them). Always rc 0.
 strih_https_grade_rows() {
   local sites nginx avail enabled tmp site first aliases up janus paths cert key origin st act listen
-  local problems="" names_ok="" pem sans end name h1 h2 te ini hook stat_line owner
+  local problems="" names_ok="" pem sans end name h1 h2 te ini hook stat_line owner live fp_s fp_l
   local -a names
   sites="$(strih_https_sites 2>/dev/null)" || { printf 'FAIL|(https) the box facts are unreadable\n'; return 0; }
   if [ -z "$sites" ]; then
@@ -463,15 +470,19 @@ strih_https_grade_rows() {
   [ "$act" = active ] || problems="${problems} nginx=${act:-unreadable}"
   listen="$(ss -ltnH 'sport = :443' 2>/dev/null || true)"
   [ -n "$listen" ] || problems="${problems} :443-not-listening"
-  tmp="$(mktemp)"
+  live="$(strih_https_le_dir)/live"
+  if [ -e "$live" ] && { [ ! -r "$live" ] || [ ! -x "$live" ]; }; then
+    problems="${problems} ${live}-unreadable-as-$(id -un 2>/dev/null || echo ?)(run verify-strih.sh as root)"
+  fi
+  tmp="$(mktemp -d)" || { printf 'FAIL|(https-nginx) mktemp failed\n'; tmp=""; }
   while IFS='|' read -r site first aliases up janus; do
     paths="$(strih_https_cert_paths "$site" "$first")"
     IFS='|' read -r cert key origin <<<"$paths"
     if [ "$origin" = none ]; then
       problems="${problems} ${site}=no-certificate"
-    elif strih_https_site_text "$site" "$first" "$aliases" "$up" "$janus" "$cert" "$key" > "${tmp}.t" 2>/dev/null \
-      && printf '%s\n' "$(cat "${tmp}.t")" > "$tmp"; then
-      st="$(strih_session_app_file_state "${avail}/${site}" "$tmp")"
+    elif [ -n "$tmp" ] && strih_https_site_text "$site" "$first" "$aliases" "$up" "$janus" "$cert" "$key" > "${tmp}/t" 2>/dev/null \
+      && printf '%s\n' "$(cat "${tmp}/t")" > "${tmp}/site"; then
+      st="$(strih_session_app_file_state "${avail}/${site}" "${tmp}/site")"
       [ "$st" = ok ] || problems="${problems} ${site}-site=${st}"
     else
       problems="${problems} ${site}-site=render-failed"
@@ -480,7 +491,7 @@ strih_https_grade_rows() {
       || problems="${problems} ${site}-not-enabled"
     names_ok="${names_ok} ${site}"
   done <<<"$sites"
-  rm -f "$tmp" "${tmp}.t"
+  [ -z "$tmp" ] || rm -rf "$tmp"
   if [ -z "$problems" ]; then
     printf 'OK|(https-nginx) nginx active, :443 listening, the%s site(s) equal to their render and enabled\n' "$names_ok"
   else
@@ -505,7 +516,14 @@ strih_https_grade_rows() {
         printf 'FAIL|(https-cert) %s: the served certificate expires within %s days (notAfter %s) -- renewal is not working: journalctl -u certbot, the (https-renewal) row\n' \
           "$name" "$STRIH_HTTPS_MIN_DAYS" "${end:-?}"
       elif [ "$origin" = live ]; then
-        printf 'OK|(https-cert) %s: served, valid past %s days (notAfter %s), from %s\n' "$name" "$STRIH_HTTPS_MIN_DAYS" "${end:-?}" "$(dirname "$cert")"
+        fp_s="$( { openssl x509 -noout -fingerprint -sha256 <<<"$pem" 2>/dev/null || true; } | sed -n 's/.*Fingerprint=//p' || true)"
+        fp_l="$( { openssl x509 -noout -fingerprint -sha256 -in "$cert" 2>/dev/null || true; } | sed -n 's/.*Fingerprint=//p' || true)"
+        if [ -n "$fp_s" ] && [ "$fp_s" = "$fp_l" ]; then
+          printf 'OK|(https-cert) %s: served, valid past %s days (notAfter %s), the certificate in %s\n' "$name" "$STRIH_HTTPS_MIN_DAYS" "${end:-?}" "$(dirname "$cert")"
+        else
+          printf 'FAIL|(https-cert) %s: nginx serves a certificate other than the live one in %s (fingerprint %s vs %s) -- reload nginx (systemctl reload nginx) and re-run\n' \
+            "$name" "$(dirname "$cert")" "${fp_s:-none}" "${fp_l:-unreadable}"
+        fi
       elif [ "$origin" = hand ]; then
         printf 'NOTE|(https-cert) %s: served and valid (notAfter %s), but from the hand copy %s until migrated -- the supervisor places the DNS token, then setup-strih.sh step 16i issues it here (issue 1399)\n' \
           "$name" "${end:-?}" "$cert"
@@ -540,10 +558,13 @@ strih_https_grade_rows() {
   te="$(systemctl is-enabled certbot.timer 2>/dev/null | head -n 1 || true)"
   [ "$te" = enabled ] || problems="${problems} certbot.timer=${te:-unreadable}"
   hook="$(strih_https_hook_path)"
-  tmp="$(mktemp)"
-  strih_https_hook_text > "$tmp" 2>/dev/null || true
-  st="$(strih_session_app_file_state "$hook" "$tmp")"
-  rm -f "$tmp"
+  tmp="$(mktemp -d)"
+  if [ -n "$tmp" ] && strih_https_hook_text > "${tmp}/hook" 2>/dev/null; then
+    st="$(strih_session_app_file_state "$hook" "${tmp}/hook")"
+  else
+    st=render-failed
+  fi
+  [ -z "$tmp" ] || rm -rf "$tmp"
   if [ "$st" != ok ]; then
     problems="${problems} deploy-hook=${st}"
   elif [ ! -x "$hook" ]; then

@@ -51,7 +51,8 @@ for that. Their default output is byte-identical, pinned by the issue-808 tests 
 
 **setup-strih step 16i** (`strih_https_install`, strih role via `obs_box_step_applies 16i`):
 1. It installs `nginx-light certbot python3-certbot-dns-cloudflare` with `--no-upgrade`, only those
-   missing (an installed `nginx` satisfies nginx-light).
+   missing (an installed `nginx` satisfies nginx-light). nginx-light exists on 26.04: the 1.10.2026
+   hot fix installed it on strih-snv. On 24.04 it is a small wrapper over `nginx`.
 2. **The token is never handled.** setup never reads, prints or writes `/etc/letsencrypt/cloudflare.ini`.
    - A present ini gets mode 600, and as root owner root:root.
    - A missing ini is ONE `WARN` line naming the supervisor step. Issuing and renewing wait for it;
@@ -66,12 +67,18 @@ for that. Their default output is byte-identical, pinned by the issue-808 tests 
    - certbot gets `</dev/null` inside the site loop.
    - A failing certbot is a WARN, never a failed step. The site keeps the cert it has, every strih
      genlock deploy re-runs setup-strih, and item 45 grades the truth.
+   - **A successful certbot run always tests and reloads nginx**, also when the site text is
+     unchanged. A `certonly` fires no renewal deploy hook (those run on `certbot renew` only). A site
+     written by an earlier run whose certbot failed already names the live dir, so without the
+     reload nginx kept serving the old certificate (review finding).
 5. **The site's cert pair.** It is the live cert when one exists. Otherwise it is the HAND COPY: the
    `ssl_certificate` / `ssl_certificate_key` pair the installed site names (else an enabled site
-   declaring the first name), and only when both are files under `/etc/nginx/ssl/`. So a box keeps
-   serving during the move. With neither, the site is not written (WARN).
-6. **Write and reload.** Each site is written only on a difference. The old file and symlink are kept
-   aside, and `nginx -t` runs BEFORE any reload or start. If it fails, every changed file is restored
+   declaring the first name), and only when both RESOLVE (`realpath -e`: no `..`, no symlink out)
+   to files under `/etc/nginx/ssl/`. So a box keeps serving during the move. With neither, the site
+   is not written (WARN).
+6. **Write and reload.** Each site is written only on a difference, through a sibling temp + `mv -Tf`
+   (atomic; a temp in sites-available is never loaded). The old file and symlink are kept aside, and
+   `nginx -t` runs BEFORE any reload or start. If it fails, every changed file is restored
    and nothing is reloaded (rc 1). Then nginx is enabled and reloaded, or started, and
    `certbot.timer` is enabled.
 7. Another enabled site that declares one of the names (a hand site under another name, e.g. on
@@ -82,12 +89,15 @@ for that. Their default output is byte-identical, pinned by the issue-808 tests 
 | Row | Grades |
 |---|---|
 | `(https-nginx)` | nginx active, :443 listening (`ss -ltnH`), every declared site equal to its render (same cert-pair choice) and enabled |
-| `(https-cert) <name>` | one per declared name: the cert nginx serves for that SNI on 127.0.0.1:443 (`openssl s_client -servername`) covers the name (exact or a one-label wildcard), is valid for more than 14 days (`-checkend`), and is the `/etc/letsencrypt/live` one; a hand copy is a NOTE until migrated |
+| `(https-cert) <name>` | one per declared name: the cert nginx serves for that SNI on 127.0.0.1:443 (`openssl s_client -servername`) covers the name (exact or a one-label wildcard), is valid for more than 14 days (`-checkend`), and IS the `/etc/letsencrypt/live` one (its sha256 fingerprint = that of the live fullchain's first certificate; a mismatch = nginx was not reloaded); a hand copy is a NOTE until migrated |
 | `(https-upstream) interkom` | through nginx: the hub `/api/state` 200 and the `/janus` WebSocket upgrade 101 (read from curl's `-D -` status line: after a 101 curl holds the connection until `--max-time`) |
 | `(https-upstream) shading` | bkshading `/api/version` 200 |
 | `(https-renewal)` | `certbot.timer` enabled, the deploy hook equal to its render and executable, the ini present with mode 600 owner root (stat only) |
 
 A box that declares no site gets ONE NOTE. The stream role is not graded (a NOTE through the step gate).
+Run item 45 as root: certbot creates `/etc/letsencrypt/live` mode 0700. A non-root run names the
+unreadable dir in `(https-nginx)` rather than reading it as a missing certificate. The grader's
+scratch files live in a private `mktemp -d` (verify runs as root; never a guessable `/tmp` name).
 
 ## The supervisor live runbook
 
