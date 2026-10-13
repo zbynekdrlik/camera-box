@@ -851,7 +851,7 @@ def test_the_report_prints_every_row_through_the_callers_functions(op):
             'strih_operator_grade_report "$1" "$2" "$3"; echo "rc=$?"')
     r = _bash(body, env=op.env(), args=(str(REPO), str(op.home), "operator1"))
     assert r.returncode == 0, r.stderr
-    assert [ln.split()[0] for ln in r.stdout.splitlines()] == ["PASS"] * 11 + ["rc=0"]
+    assert [ln.split()[0] for ln in r.stdout.splitlines()] == ["PASS"] * 13 + ["rc=0"]
 
 
 # --- the wiring: setup-strih step 16g, verify-strih items 43 + 16 ---------------------------------------
