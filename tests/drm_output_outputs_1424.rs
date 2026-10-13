@@ -335,6 +335,47 @@ fn the_config_is_read_through_obs_s_utf8_reader_so_a_byte_order_mark_keeps_start
 }
 
 #[test]
+fn an_output_whose_config_turns_audio_off_opens_no_audio_leg_at_all() {
+    // issue 1424 part 3 (owner): strih-pp's HDMI-1 PCM is owned by the intercom hub (it writes the
+    // vestibule audio there), so the module must not read its EDID, resolve or open its PCM.
+    let o = file(OUTPUTS_C);
+    let start = body_of(
+        &o,
+        "static bool drm_output_inst_start_locked(struct drm_output_inst *inst)",
+        "inst start",
+    );
+    let gate = start
+        .find("if (inst->audio_enabled)\n\t\tedid_len = drm_output_audio_read_edid(")
+        .expect("the EDID read is gated on the output's audio flag");
+    let backend = start
+        .find("if (!inst->ops->start(inst))")
+        .expect("the backend start");
+    let off = start
+        .find("if (!inst->audio_enabled)\n\t\tblog(LOG_INFO, \"drm-output audio: '%s' off by config (owned elsewhere)\", inst->connector);\n\telse if (!inst->audio)")
+        .expect("an audio-off output logs ONE named line instead of opening its leg");
+    assert!(
+        gate < backend && backend < off,
+        "issue 1424 part 3: EDID (gated) -> backend -> the audio leg OR the off-by-config line"
+    );
+    assert_eq!(
+        o.matches("drm_output_audio_open(").count(),
+        1,
+        "issue 1424 part 3: the ONE audio open is the one behind the audio flag"
+    );
+    assert!(
+        o.contains("inst->audio_enabled = sp->audio;")
+            && o.contains("sp->audio = !audio || json_is_true(audio);")
+            && file(INTERNAL_H).contains("bool audio_enabled;"),
+        "issue 1424 part 3: the instance carries its config's audio flag"
+    );
+    assert_eq!(
+        o.matches("sp.audio = true;").count() + o.matches("sp->audio = true;").count(),
+        2,
+        "issue 1424 part 3: the single-object form and the public start keep the audio leg"
+    );
+}
+
+#[test]
 fn the_autostart_is_all_or_none_and_one_output_never_stops_the_other() {
     let o = file(OUTPUTS_C);
     let auto = body_of(&o, "void obs_drm_output_maybe_autostart(void)", "autostart");
@@ -634,8 +675,8 @@ fn c_config_grammar_matches_the_shared_parity_table() {
          \t\tprintf(\"%s\\t%zu\\t\", drm_output_cfg_verdict_name(v), bad);\n\
          \t\tif (v != DRM_OUTPUT_CFG_OK || n == 0)\n\t\t\tprintf(\"-\");\n\
          \t\tfor (size_t i = 0; v == DRM_OUTPUT_CFG_OK && i < n; i++)\n\
-         \t\t\tprintf(\"%s%s|%s|%s|%u\", i ? \";\" : \"\", specs[i].connector, view_names[specs[i].view],\n\
-         \t\t\t       backend_names[specs[i].backend], (unsigned)specs[i].argb);\n\
+         \t\t\tprintf(\"%s%s|%s|%s|%u%s\", i ? \";\" : \"\", specs[i].connector, view_names[specs[i].view],\n\
+         \t\t\t       backend_names[specs[i].backend], (unsigned)specs[i].argb, specs[i].audio ? \"\" : \"|noaudio\");\n\
          \t\tprintf(\"\\n\");\n\
          \t\tjson_decref(root);\n\
          \t}}\n\

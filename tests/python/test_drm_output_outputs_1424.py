@@ -65,7 +65,8 @@ def _rows():
 def _fmt(outputs):
     if not outputs:
         return "-"
-    return ";".join("%s|%s|%s|%d" % (o["connector"], o["view"], o["backend"], o["argb"]) for o in outputs)
+    return ";".join("%s|%s|%s|%d%s" % (o["connector"], o["view"], o["backend"], o["argb"],
+                                       "" if o["audio"] else "|noaudio") for o in outputs)
 
 
 # --- the grammar: ONE table with the C --------------------------------------------------------------
@@ -296,15 +297,16 @@ def _facts(tmp_path, box, old, new):
 def test_the_box_facts_list_the_outputs():
     r = _bash('for b in strih-pp strih-snv stream-pp; do ( strih_box_load "$b" && printf "%s=%s\\n" "$b" '
               '"$(strih_lx_hdmi_outputs)" ) || echo "$b FAILED"; done', libs=(_FACTS,))
-    assert "strih-pp=HDMI-0:multiview HDMI-1:program" in r.stdout, r.stdout + r.stderr
+    assert "strih-pp=HDMI-0:multiview HDMI-1:program:noaudio" in r.stdout, r.stdout + r.stderr
     assert "strih-snv=auto" in r.stdout
     assert "stream-pp=none" in r.stdout
 
 
 @pytest.mark.parametrize("value", ["HDMI-0", "HDMI-0:Program", "HDMI-0:program HDMI-0:multiview",
-                                   "A:program B:program C:program", "none", ""])
+                                   "A:program B:program C:program", "none", "", "HDMI-0:program:audio",
+                                   "HDMI-0:program:noaudio:x", "HDMI-0:noaudio", "HDMI-0:program:"])
 def test_the_fact_loader_refuses_a_bad_outputs_list(tmp_path, value):
-    env = _facts(tmp_path, "strih-pp", "STRIH_HDMI_OUTPUTS=HDMI-0:multiview HDMI-1:program",
+    env = _facts(tmp_path, "strih-pp", "STRIH_HDMI_OUTPUTS=HDMI-0:multiview HDMI-1:program:noaudio",
                  "STRIH_HDMI_OUTPUTS=%s" % value)
     r = _bash('strih_box_load strih-pp && echo LOADED', env=env, libs=(_FACTS,))
     assert "LOADED" not in r.stdout
@@ -315,6 +317,37 @@ def test_a_box_without_a_fixed_output_lists_none(tmp_path):
     env = _facts(tmp_path, "stream-pp", "STRIH_HDMI_OUTPUTS=none", "STRIH_HDMI_OUTPUTS=auto")
     r = _bash('strih_box_load stream-pp && echo LOADED', env=env, libs=(_FACTS,))
     assert "LOADED" not in r.stdout and "must be none exactly when" in r.stderr
+
+
+PP_FACT = "HDMI-0:multiview HDMI-1:program:noaudio"
+PP_FACT_ARRAY = PP_ARRAY.replace('"view":"program","backend":"vk-direct"}',
+                                 '"view":"program","backend":"vk-direct","audio":false}')
+
+
+def test_the_noaudio_fact_is_one_grammar_in_bash_and_python():
+    r = _bash('strih_box_hdmi_outputs_ok "$1" && echo OK', PP_FACT)
+    assert r.stdout == "OK\n"
+    assert _scn.drm_output_spec_of(PP_FACT) == [("HDMI-0", "multiview", True), ("HDMI-1", "program", False)]
+    for bad in ("HDMI-0:program:audio", "HDMI-0:program:noaudio:x", "HDMI-0:noaudio", "HDMI-0:program:"):
+        r = _bash('strih_box_hdmi_outputs_ok "$1" || echo BAD', bad)
+        assert r.stdout == "BAD\n", bad
+        with pytest.raises(ValueError):
+            _scn.drm_output_spec_of(bad)
+    r = _bash('for c in HDMI-0 HDMI-1 DP-1; do strih_drm_outputs_spec_audio "$1" "$c"; echo; done', PP_FACT)
+    assert r.stdout == "on\noff\non\n"
+
+
+def test_the_noaudio_fact_writes_audio_false_byte_identically_in_bash_and_python(tmp_path):
+    r = _bash('strih_drm_outputs_config_json "$1" vk-direct', PP_FACT)
+    assert r.stdout == PP_FACT_ARRAY + "\n", r.stdout
+    assert _scn.drm_output_instances(r.stdout)[1][1]["audio"] is False
+    p = tmp_path / "drm-output.json"
+    p.write_text(PP_LIVE + "\n")  # the live single-object strih-pp config migrates onto the fact
+    _scn.write_drm_outputs(PP_FACT, "vk-direct", str(p))
+    assert p.read_text() == PP_FACT_ARRAY + "\n"
+    p.write_text(PP_FACT_ARRAY + "\n")  # the fact decides the audio, never the old config
+    _scn.write_drm_outputs(PP_SPEC, "vk-direct", str(p))
+    assert p.read_text() == PP_ARRAY + "\n"
 
 
 def _fake_bin(tmp_path, xrandr_text):
@@ -471,6 +504,44 @@ def test_a_multiview_output_whose_monitor_has_no_audio_is_report_only(tmp_path):
     assert "NOTE HDMI audio HDMI-0: no audio leg" in r.stdout, r.stdout
     assert "FAIL HDMI audio HDMI-0" not in r.stdout
     assert any(ln.startswith("PASS HDMI audio HDMI-1:") for ln in r.stdout.splitlines()), r.stdout
+
+
+LOG_HUB = "\n".join(ln for ln in LOG_TWO.splitlines() if "pcm hw:0,7" not in ln) + (
+    "\ninfo: drm-output audio: 'HDMI-1' off by config (owned elsewhere)\n")
+
+
+def test_verify_grades_the_off_by_config_line_of_an_output_whose_pcm_the_hub_owns(tmp_path):
+    r = _verify_real(tmp_path, LOG_HUB, PP_FACT_ARRAY + "\n", spec=PP_FACT)
+    assert "PASS HDMI audio HDMI-1: off by config" in r.stdout, r.stdout
+    assert any(ln.startswith("PASS HDMI audio HDMI-0:") for ln in r.stdout.splitlines()), r.stdout
+    assert "FAIL" not in r.stdout, r.stdout
+
+
+def test_verify_fails_an_audio_off_output_whose_log_lacks_the_line_or_opened_the_pcm(tmp_path):
+    r = _verify_real(tmp_path, LOG_TWO, PP_FACT_ARRAY + "\n", spec=PP_FACT)
+    assert "FAIL HDMI audio HDMI-1: the config turns its audio off" in r.stdout, r.stdout
+    log = LOG_HUB + LOG_TWO.splitlines()[-1] + "\n"
+    r = _verify_real(tmp_path, log, PP_FACT_ARRAY + "\n", spec=PP_FACT)
+    assert "FAIL HDMI audio HDMI-1: the config turns its audio off" in r.stdout, r.stdout
+
+
+def test_verify_fails_a_config_whose_audio_flag_is_not_the_fact(tmp_path):
+    r = _verify_real(tmp_path, LOG_TWO, PP_ARRAY + "\n", spec=PP_FACT)
+    assert "FAIL HDMI audio HDMI-1: the config has audio on but the box fact STRIH_HDMI_OUTPUTS says off" in r.stdout
+    r = _verify_real(tmp_path, LOG_HUB, PP_FACT_ARRAY + "\n", spec=PP_SPEC)
+    assert "FAIL HDMI audio HDMI-1: the config has audio off but the box fact STRIH_HDMI_OUTPUTS says on" in r.stdout
+
+
+def test_the_single_output_grading_passes_the_view_so_a_multiview_monitor_without_audio_is_a_note():
+    # review round 2: strih-snv runs the single form with view multiview
+    v = _VERIFY.read_text()
+    line = [ln for ln in v.splitlines() if ln.lstrip().startswith("ok)") and "drm_output_audio_verify_report" in ln]
+    assert len(line) == 1 and '"$DRM_LOG" "" "" "$DRM_VIEW_V"' in line[0], line
+
+
+def test_setup_names_a_missing_grammar_module():
+    s = _SETUP.read_text()
+    assert ('[ -f "${HERE}/strih_scenes.py" ] && [ -f "${HERE}/drm_output_config.py" ] || fail' in s)
 
 
 def test_verify_fails_a_malformed_array_by_name(tmp_path):

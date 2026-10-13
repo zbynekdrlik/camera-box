@@ -4,7 +4,8 @@
 # tests/python/test_drm_output_outputs_1424.py).
 # Columns (TAB-separated): name, the config text (<empty> = an empty file), the verdict, the
 # offending "outputs" position the C names (- = not checked), the outputs on "ok"
-# (connector|view|backend|argb, ';'-separated; - = none).
+# (connector|view|backend|argb, plus |noaudio when the entry turns its audio leg off -- issue 1424
+# part 3; ';'-separated; - = none).
 single_imag	{"enabled":true,"connector":"HDMI-1","argb":2105376}	ok	-	HDMI-1|program|lease|2105376
 single_strih_snv	{"enabled":true,"connector":"HDMI-0","argb":2105376,"view":"multiview","backend":"vk-direct"}	ok	-	HDMI-0|multiview|vk-direct|2105376
 single_live_strih_pp	{"enabled":true,"connector":"HDMI-0","argb":2105376,"view":"multiview","backend":"vk-direct"}	ok	-	HDMI-0|multiview|vk-direct|2105376
@@ -38,6 +39,14 @@ strict_nan_in_an_array_entry	{"enabled":true,"outputs":[{"connector":"HDMI-0","v
 unreadable_array	[]	unreadable	-	-
 unreadable_empty	<empty>	unreadable	-	-
 strih_pp_two_outputs	{"enabled":true,"outputs":[{"connector":"HDMI-0","argb":2105376,"view":"multiview","backend":"vk-direct"},{"connector":"HDMI-1","argb":2105376,"view":"program","backend":"vk-direct"}]}	ok	-	HDMI-0|multiview|vk-direct|2105376;HDMI-1|program|vk-direct|2105376
+strih_pp_vestibule_audio_owned_by_the_hub	{"enabled":true,"outputs":[{"connector":"HDMI-0","argb":2105376,"view":"multiview","backend":"vk-direct"},{"connector":"HDMI-1","argb":2105376,"view":"program","backend":"vk-direct","audio":false}]}	ok	-	HDMI-0|multiview|vk-direct|2105376;HDMI-1|program|vk-direct|2105376|noaudio
+array_audio_true_is_the_default	{"enabled":true,"outputs":[{"connector":"HDMI-1","view":"program","audio":true}]}	ok	-	HDMI-1|program|lease|2105376
+array_audio_string_is_invalid	{"enabled":true,"outputs":[{"connector":"HDMI-0"},{"connector":"HDMI-1","audio":"false"}]}	audio-invalid	1	-
+array_audio_number_is_invalid	{"enabled":true,"outputs":[{"connector":"HDMI-1","audio":0}]}	audio-invalid	0	-
+array_audio_null_is_invalid	{"enabled":true,"outputs":[{"connector":"HDMI-1","audio":null}]}	audio-invalid	0	-
+array_audio_checked_after_backend	{"enabled":true,"outputs":[{"connector":"HDMI-1","backend":"vulkan","audio":1}]}	backend-unknown	0	-
+array_audio_checked_before_duplicate	{"enabled":true,"outputs":[{"connector":"HDMI-1"},{"connector":"HDMI-1","audio":"no"}]}	audio-invalid	1	-
+single_form_ignores_audio	{"enabled":true,"connector":"HDMI-0","view":"multiview","backend":"vk-direct","audio":false}	ok	-	HDMI-0|multiview|vk-direct|2105376
 array_one_output	{"enabled":true,"outputs":[{"connector":"HDMI-1"}]}	ok	-	HDMI-1|program|lease|2105376
 array_mixed_backends	{"enabled":true,"outputs":[{"connector":"HDMI-1","view":"program"},{"connector":"HDMI-0","view":"multiview","backend":"vk-direct","argb":0}]}	ok	-	HDMI-1|program|lease|2105376;HDMI-0|multiview|vk-direct|0
 array_nonstring_view_reads_program	{"enabled":true,"outputs":[{"connector":"HDMI-0","view":null},{"connector":"HDMI-1","view":2}]}	ok	-	HDMI-0|program|lease|2105376;HDMI-1|program|lease|2105376
