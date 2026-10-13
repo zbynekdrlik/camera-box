@@ -35,7 +35,8 @@ fn repo(rel: &str) -> PathBuf {
 
 fn file(rel: &str) -> String {
     let p = repo(rel);
-    fs::read_to_string(&p).unwrap_or_else(|e| panic!("issue 1424: cannot read {}: {e}", p.display()))
+    fs::read_to_string(&p)
+        .unwrap_or_else(|e| panic!("issue 1424: cannot read {}: {e}", p.display()))
 }
 
 fn squish(s: &str) -> String {
@@ -67,14 +68,27 @@ fn fixture(kind: &str, name: &str) -> Vec<u8> {
 #[test]
 fn audio_tu_is_linux_only_and_built_by_libobs_linux_cmake() {
     let c = file(AUDIO_C);
-    assert!(c.contains("#if defined(__linux__)"), "issue 1424: the audio TU must be Linux-only");
+    assert!(
+        c.contains("#if defined(__linux__)"),
+        "issue 1424: the audio TU must be Linux-only"
+    );
     let cm = file(LINUX_CMAKE);
-    for f in ["obs-drm-output-audio.c", "obs-drm-output-audio.h", "obs-drm-output-audio-match.h"] {
+    for f in [
+        "obs-drm-output-audio.c",
+        "obs-drm-output-audio.h",
+        "obs-drm-output-audio-match.h",
+    ] {
         assert!(cm.contains(f), "issue 1424: os-linux.cmake must build {f}");
     }
     // alsa-lib is dlopen'd at run time: no link dependency (the vk-direct Vulkan loader pattern)
-    assert!(!cm.contains("ALSA::ALSA"), "issue 1424: no link-time alsa-lib");
-    assert!(c.contains("dlopen(\"libasound.so.2\""), "issue 1424: alsa-lib is dlopen'd");
+    assert!(
+        !cm.contains("ALSA::ALSA"),
+        "issue 1424: no link-time alsa-lib"
+    );
+    assert!(
+        c.contains("dlopen(\"libasound.so.2\""),
+        "issue 1424: alsa-lib is dlopen'd"
+    );
     assert!(c.contains("dlsym("));
 }
 
@@ -82,12 +96,21 @@ fn audio_tu_is_linux_only_and_built_by_libobs_linux_cmake() {
 fn audio_writes_mix_0_straight_to_the_hw_pcm_never_pipewire_or_the_monitoring_device() {
     let c = file(AUDIO_C);
     let s = squish(&c);
-    assert!(s.contains("obs_add_raw_audio_callback(0,"), "issue 1424: the program mix = mix 0");
+    assert!(
+        s.contains("obs_add_raw_audio_callback(0,"),
+        "issue 1424: the program mix = mix 0"
+    );
     assert!(s.contains("obs_remove_raw_audio_callback(0,"));
     // the ALSA hw PCM of the matched (card, device), opened non-blocking, written in place
-    assert!(c.contains("\"hw:%d,%d\""), "issue 1424: the hw PCM, never a plug or a sound server");
+    assert!(
+        c.contains("\"hw:%d,%d\""),
+        "issue 1424: the hw PCM, never a plug or a sound server"
+    );
     assert!(c.contains("snd_pcm_writei") && c.contains("snd_pcm_delay"));
-    assert!(c.contains("SND_PCM_NONBLOCK"), "issue 1424: the audio thread never blocks on the PCM");
+    assert!(
+        c.contains("SND_PCM_NONBLOCK"),
+        "issue 1424: the audio thread never blocks on the PCM"
+    );
     // no layer in between, no fallback
     for banned in [
         "pulseaudio",
@@ -104,7 +127,10 @@ fn audio_writes_mix_0_straight_to_the_hw_pcm_never_pipewire_or_the_monitoring_de
             "issue 1424: no sound server, no monitoring device, no plug/mixer layer, no default device ({banned})"
         );
     }
-    assert!(!c.contains("drm-output.json"), "issue 1424: no per-box audio setting");
+    assert!(
+        !c.contains("drm-output.json"),
+        "issue 1424: no per-box audio setting"
+    );
 }
 
 #[test]
@@ -118,7 +144,10 @@ fn audio_matches_the_connector_edid_against_the_per_pcm_eld_control() {
     assert!(c.contains("SNDRV_CTL_IOCTL_ELEM_LIST") && c.contains("SNDRV_CTL_IOCTL_ELEM_READ"));
     assert!(c.contains("SNDRV_CTL_ELEM_IFACE_PCM"));
     assert!(c.contains("\"ELD\""));
-    assert!(!c.contains("/proc/asound"), "issue 1424: the /proc eld index is not a PCM number");
+    assert!(
+        !c.contains("/proc/asound"),
+        "issue 1424: the /proc eld index is not a PCM number"
+    );
     assert!(c.contains("drm_output_audio_pick_pcm("));
     // the matched PCM's IEC958 switch is turned on (no sound server unmutes it any more)
     assert!(c.contains("\"IEC958 Playback Switch\"") && c.contains("SNDRV_CTL_IOCTL_ELEM_WRITE"));
@@ -143,7 +172,9 @@ fn the_matcher_header_is_pure_std_only_c() {
         "drm_output_audio_plan_block(",
         "drm_output_present_ewma(",
     ] {
-        let at = h.find(f).unwrap_or_else(|| panic!("issue 1424: {f} missing"));
+        let at = h
+            .find(f)
+            .unwrap_or_else(|| panic!("issue 1424: {f} missing"));
         let line_start = h[..at].rfind('\n').map_or(0, |i| i + 1);
         let decl = &h[line_start..at];
         let prev = &h[..line_start];
@@ -164,7 +195,10 @@ fn audio_leg_is_a_per_output_instance() {
     let c = file(AUDIO_C);
     // the callback's state is its instance, never a file-static leg
     assert!(squish(&c).contains("obs_add_raw_audio_callback(0, &conv, drm_output_audio_on_mix, a)"));
-    assert!(!c.contains("static struct drm_output_audio g_"), "issue 1424: no global leg");
+    assert!(
+        !c.contains("static struct drm_output_audio g_"),
+        "issue 1424: no global leg"
+    );
 }
 
 #[test]
@@ -181,37 +215,74 @@ fn output_start_and_stop_drive_the_audio_leg() {
     // backend start succeeded (the mode is driven, so the connector's ELD can appear)
     let start = d.split("bool obs_drm_output_start(").nth(1).expect("start");
     let start = start.split("void obs_drm_output_stop(").next().unwrap();
-    let edid = start.find("drm_output_audio_read_edid(").expect("issue 1424: start reads the EDID");
-    let vk = start.find("drm_output_vk_direct_backend.start(cfg)").expect("vk start");
-    assert!(edid < vk, "issue 1424: the EDID is read before the vk-direct backend acquires the display");
+    let edid = start
+        .find("drm_output_audio_read_edid(")
+        .expect("issue 1424: start reads the EDID");
+    let vk = start
+        .find("drm_output_vk_direct_backend.start(cfg)")
+        .expect("vk start");
+    assert!(
+        edid < vk,
+        "issue 1424: the EDID is read before the vk-direct backend acquires the display"
+    );
     let lease = start.find("drm_output_acquire_lease(").expect("lease");
-    assert!(edid < lease, "issue 1424: the EDID is read before the lease");
+    assert!(
+        edid < lease,
+        "issue 1424: the EDID is read before the lease"
+    );
     assert!(
         start.matches("drm_output_audio_open(").count() >= 2,
         "issue 1424: both backends open the audio leg after their start succeeded"
     );
-    let stop = d.split("void obs_drm_output_stop(void)").nth(1).expect("stop");
+    let stop = d
+        .split("void obs_drm_output_stop(void)")
+        .nth(1)
+        .expect("stop");
     let stop = stop.split("bool obs_drm_output_active(").next().unwrap();
-    assert!(stop.contains("drm_output_audio_close("), "issue 1424: stop closes the leg");
+    assert!(
+        stop.contains("drm_output_audio_close("),
+        "issue 1424: stop closes the leg"
+    );
     let close = stop.find("drm_output_audio_close(").unwrap();
     let vkstop = stop.find("drm_output_vk_direct_backend.stop()").unwrap();
-    assert!(close < vkstop, "issue 1424: the audio closes before the picture goes");
+    assert!(
+        close < vkstop,
+        "issue 1424: the audio closes before the picture goes"
+    );
 }
 
 #[test]
 fn both_backends_measure_the_present_delay() {
     let d = squish(&file(DRM_C));
-    let publish = d.split("void drm_output_publish_render_buf(int idx)").nth(1).expect("publish");
-    let publish = publish.split("gs_texture_t *drm_output_render_buf_texture(").next().unwrap();
+    let publish = d
+        .split("void drm_output_publish_render_buf(int idx)")
+        .nth(1)
+        .expect("publish");
+    let publish = publish
+        .split("gs_texture_t *drm_output_render_buf_texture(")
+        .next()
+        .unwrap();
     assert!(
         publish.contains("drm_output_present_note_published(idx)"),
         "issue 1424: the ONE publish entry both backends use records the frame's render tick"
     );
-    let flip = d.split("static void *drm_output_flip_thread(").nth(1).expect("flip");
-    assert!(flip.contains("drm_output_present_note_shown(pnext"), "issue 1424: the lease flip event");
+    let flip = d
+        .split("static void *drm_output_flip_thread(")
+        .nth(1)
+        .expect("flip");
+    assert!(
+        flip.contains("drm_output_present_note_shown(pnext"),
+        "issue 1424: the lease flip event"
+    );
     let vk = squish(&file(VK_C));
-    let present = vk.split("static void *drm_output_vk_present_thread(").nth(1).expect("present");
-    assert!(present.contains("drm_output_present_note_shown(src"), "issue 1424: the vk-direct present");
+    let present = vk
+        .split("static void *drm_output_vk_present_thread(")
+        .nth(1)
+        .expect("present");
+    assert!(
+        present.contains("drm_output_present_note_shown(src"),
+        "issue 1424: the vk-direct present"
+    );
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -222,7 +293,13 @@ fn c_bytes(v: &[u8]) -> String {
     if v.is_empty() {
         return "{0}".to_string();
     }
-    format!("{{{}}}", v.iter().map(|b| format!("0x{b:02x}")).collect::<Vec<_>>().join(","))
+    format!(
+        "{{{}}}",
+        v.iter()
+            .map(|b| format!("0x{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
 }
 
 fn id_line(tag: &str, id: &m::MonitorId) -> String {
@@ -275,15 +352,31 @@ fn blobs() -> Vec<(&'static str, &'static str, Vec<u8>)> {
 }
 
 /// (card, device, eld blob name) sets for pick_pcm, and the EDID that is wanted.
-type PcmScenario = (&'static str, &'static str, &'static [(i32, i32, &'static str)]);
+type PcmScenario = (
+    &'static str,
+    &'static str,
+    &'static [(i32, i32, &'static str)],
+);
 
 fn pcm_scenarios() -> Vec<PcmScenario> {
     vec![
         // strih-pp today: the BenQ on HDMI-0 is on PCM 3, HDMI-1's ELD is not published yet
-        ("benq-today", "benq", &[(0, 3, "benq"), (0, 7, "empty"), (0, 8, "empty")]),
-        ("bmd-before-mode", "bmd", &[(0, 3, "benq"), (0, 7, "empty"), (0, 8, "empty")]),
+        (
+            "benq-today",
+            "benq",
+            &[(0, 3, "benq"), (0, 7, "empty"), (0, 8, "empty")],
+        ),
+        (
+            "bmd-before-mode",
+            "bmd",
+            &[(0, 3, "benq"), (0, 7, "empty"), (0, 8, "empty")],
+        ),
         // once a mode is driven on HDMI-1 its ELD appears
-        ("bmd-after-mode", "bmd", &[(0, 3, "benq"), (0, 7, "bmd"), (0, 8, "empty")]),
+        (
+            "bmd-after-mode",
+            "bmd",
+            &[(0, 3, "benq"), (0, 7, "bmd"), (0, 8, "empty")],
+        ),
         ("benq-both", "benq", &[(0, 3, "benq"), (0, 7, "bmd")]),
         ("no-monitor", "benq", &[(0, 3, "empty"), (1, 3, "short")]),
         ("no-edid", "badsum", &[(0, 3, "benq")]),
@@ -325,7 +418,15 @@ fn plan_vectors() -> Vec<PlanVector> {
     // a grown buffer, trimmed at most one block
     v.push((now - 85 * MS, 16 * MS, now, 300 * MS, 60 * MS, 42 * MS, blk));
     v.push((now - 85 * MS, 16 * MS, now, 102 * MS, 60 * MS, 42 * MS, blk));
-    v.push((now - 85 * MS, 16 * MS, now, 102 * MS + 1, 60 * MS, 42 * MS, blk));
+    v.push((
+        now - 85 * MS,
+        16 * MS,
+        now,
+        102 * MS + 1,
+        60 * MS,
+        42 * MS,
+        blk,
+    ));
     v
 }
 
@@ -343,16 +444,30 @@ const EWMA_VECTORS: &[(u64, u64)] = &[
 fn rust_lines() -> Vec<String> {
     let mut out = Vec::new();
     let bl = blobs();
-    let get = |kind: &str, name: &str| bl.iter().find(|b| b.0 == kind && b.1 == name).unwrap().2.clone();
+    let get = |kind: &str, name: &str| {
+        bl.iter()
+            .find(|b| b.0 == kind && b.1 == name)
+            .unwrap()
+            .2
+            .clone()
+    };
     for (kind, name, bytes) in &bl {
-        let id = if *kind == "edid" { m::edid_monitor_id(bytes) } else { m::eld_monitor_id(bytes) };
+        let id = if *kind == "edid" {
+            m::edid_monitor_id(bytes)
+        } else {
+            m::eld_monitor_id(bytes)
+        };
         out.push(id_line(&format!("{kind}:{name}"), &id));
     }
     for (tag, want, pcms) in pcm_scenarios() {
         let want_id = m::edid_monitor_id(&get("edid", want));
         let v: Vec<m::AudioPcm> = pcms
             .iter()
-            .map(|&(card, device, eld)| m::AudioPcm { card, device, id: m::eld_monitor_id(&get("eld", eld)) })
+            .map(|&(card, device, eld)| m::AudioPcm {
+                card,
+                device,
+                id: m::eld_monitor_id(&get("eld", eld)),
+            })
             .collect();
         let (r, idx) = m::pick_pcm(&want_id, &v);
         out.push(format!(
@@ -363,11 +478,17 @@ fn rust_lines() -> Vec<String> {
         ));
     }
     for (i, &(devices, device)) in IEC958_VECTORS.iter().enumerate() {
-        out.push(format!("iec:{i} {}", m::iec958_index(devices, device).unwrap_or(-1)));
+        out.push(format!(
+            "iec:{i} {}",
+            m::iec958_index(devices, device).unwrap_or(-1)
+        ));
     }
     for (i, &(ts, pd, now, lat, fl, thr, blk)) in plan_vectors().iter().enumerate() {
         let p = m::plan_block(ts, pd, now, lat, fl, thr, blk);
-        out.push(format!("plan:{i} silence={} drop={} offset={}", p.silence_ns, p.drop_ns, p.offset_ns));
+        out.push(format!(
+            "plan:{i} silence={} drop={} offset={}",
+            p.silence_ns, p.drop_ns, p.offset_ns
+        ));
     }
     for &(prev, s) in EWMA_VECTORS {
         out.push(format!("ewma:{prev}:{s} {}", m::present_ewma(prev, s)));
@@ -385,16 +506,33 @@ fn c_harness() -> String {
     );
     let bl = blobs();
     for (i, (kind, name, bytes)) in bl.iter().enumerate() {
-        src.push_str(&format!(" static const uint8_t b{i}[] = {};\n", c_bytes(bytes)));
-        let f = if *kind == "edid" { "drm_output_edid_monitor_id" } else { "drm_output_eld_monitor_id" };
-        src.push_str(&format!(" (void){f}(b{i}, {}, &id); id_line(\"{kind}:{name}\", &id);\n", bytes.len()));
+        src.push_str(&format!(
+            " static const uint8_t b{i}[] = {};\n",
+            c_bytes(bytes)
+        ));
+        let f = if *kind == "edid" {
+            "drm_output_edid_monitor_id"
+        } else {
+            "drm_output_eld_monitor_id"
+        };
+        src.push_str(&format!(
+            " (void){f}(b{i}, {}, &id); id_line(\"{kind}:{name}\", &id);\n",
+            bytes.len()
+        ));
     }
-    let blob_idx = |kind: &str, name: &str| bl.iter().position(|b| b.0 == kind && b.1 == name).unwrap();
+    let blob_idx =
+        |kind: &str, name: &str| bl.iter().position(|b| b.0 == kind && b.1 == name).unwrap();
     for (tag, want, pcms) in pcm_scenarios() {
         src.push_str(" {\n struct drm_output_monitor_id want;\n");
         let w = blob_idx("edid", want);
-        src.push_str(&format!(" (void)drm_output_edid_monitor_id(b{w}, {}, &want);\n", bl[w].2.len()));
-        src.push_str(&format!(" struct drm_output_audio_pcm p[{}];\n", pcms.len().max(1)));
+        src.push_str(&format!(
+            " (void)drm_output_edid_monitor_id(b{w}, {}, &want);\n",
+            bl[w].2.len()
+        ));
+        src.push_str(&format!(
+            " struct drm_output_audio_pcm p[{}];\n",
+            pcms.len().max(1)
+        ));
         for (j, &(card, device, eld)) in pcms.iter().enumerate() {
             let e = blob_idx("eld", eld);
             src.push_str(&format!(
@@ -439,13 +577,23 @@ fn compile_and_run(src: &str) -> String {
     fs::write(&c, src).expect("write harness");
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let out = Command::new(&cc)
-        .args(["-std=gnu11", "-Wall", "-Wextra", "-Wconversion", "-Wformat=2", "-Werror", "-I"])
+        .args([
+            "-std=gnu11",
+            "-Wall",
+            "-Wextra",
+            "-Wconversion",
+            "-Wformat=2",
+            "-Werror",
+            "-I",
+        ])
         .arg(repo("vendor/obs-studio/libobs"))
         .arg(&c)
         .arg("-o")
         .arg(&bin)
         .output()
-        .unwrap_or_else(|e| panic!("issue 1424: no C compiler ({cc}): {e} -- the parity gate cannot run"));
+        .unwrap_or_else(|e| {
+            panic!("issue 1424: no C compiler ({cc}): {e} -- the parity gate cannot run")
+        });
     assert!(
         out.status.success(),
         "issue 1424: the pure header must compile cleanly:\n{}",
@@ -462,7 +610,11 @@ fn c_header_and_rust_twin_agree_on_every_vector() {
     let c_out = compile_and_run(&c_harness());
     let c_lines: Vec<&str> = c_out.lines().collect();
     let r_lines = rust_lines();
-    assert_eq!(c_lines.len(), r_lines.len(), "issue 1424: line count differs");
+    assert_eq!(
+        c_lines.len(),
+        r_lines.len(),
+        "issue 1424: line count differs"
+    );
     for (c, r) in c_lines.iter().zip(r_lines.iter()) {
         assert_eq!(*c, r.as_str(), "issue 1424: C and Rust disagree");
     }
@@ -479,10 +631,21 @@ fn strih_pp_benq_on_hdmi0_resolves_to_hw_0_3() {
     assert_eq!(want.vendor, [0x09, 0xd1, 0x24, 0x80]);
     assert_eq!(want.name, "BenQ LCD");
     let eld = m::eld_monitor_id(&fixture("eld", "benq-card0-pcm3"));
-    assert_eq!(eld.vendor, want.vendor, "issue 1424: EDID bytes 8..11 == ELD bytes 16..19, no byte swap");
+    assert_eq!(
+        eld.vendor, want.vendor,
+        "issue 1424: EDID bytes 8..11 == ELD bytes 16..19, no byte swap"
+    );
     let pcms = vec![
-        m::AudioPcm { card: 0, device: 3, id: eld },
-        m::AudioPcm { card: 0, device: 7, id: m::eld_monitor_id(&[]) },
+        m::AudioPcm {
+            card: 0,
+            device: 3,
+            id: eld,
+        },
+        m::AudioPcm {
+            card: 0,
+            device: 7,
+            id: m::eld_monitor_id(&[]),
+        },
     ];
     assert_eq!(m::pick_pcm(&want, &pcms), (m::MATCH, Some(0)));
     // hw:0,3 = the PCM PipeWire called hdmi:0 on strih-pp (alsa.card 0, alsa.device 3); its IEC958
@@ -498,15 +661,38 @@ fn strih_pp_blackmagic_on_hdmi1_waits_for_its_eld() {
     assert_eq!(want.name, "Blackmagic");
     let benq = m::eld_monitor_id(&fixture("eld", "benq-card0-pcm3"));
     let before = vec![
-        m::AudioPcm { card: 0, device: 3, id: benq.clone() },
-        m::AudioPcm { card: 0, device: 7, id: m::eld_monitor_id(&[]) },
+        m::AudioPcm {
+            card: 0,
+            device: 3,
+            id: benq.clone(),
+        },
+        m::AudioPcm {
+            card: 0,
+            device: 7,
+            id: m::eld_monitor_id(&[]),
+        },
     ];
     let (r, idx) = m::pick_pcm(&want, &before);
-    assert_eq!((r, idx), (m::NO_MATCH, None), "issue 1424: the BenQ is never a fallback");
-    assert!(m::retryable(r), "issue 1424: an ELD not yet published is re-read in the window");
+    assert_eq!(
+        (r, idx),
+        (m::NO_MATCH, None),
+        "issue 1424: the BenQ is never a fallback"
+    );
+    assert!(
+        m::retryable(r),
+        "issue 1424: an ELD not yet published is re-read in the window"
+    );
     let after = vec![
-        m::AudioPcm { card: 0, device: 3, id: benq },
-        m::AudioPcm { card: 0, device: 7, id: m::eld_monitor_id(&fixture("eld", "blackmagic-card0-pcm7")) },
+        m::AudioPcm {
+            card: 0,
+            device: 3,
+            id: benq,
+        },
+        m::AudioPcm {
+            card: 0,
+            device: 7,
+            id: m::eld_monitor_id(&fixture("eld", "blackmagic-card0-pcm7")),
+        },
     ];
     assert_eq!(m::pick_pcm(&want, &after), (m::MATCH, Some(1)));
     assert_eq!(m::iec958_index(&[3, 7, 8, 9], 7), Some(1));
@@ -517,9 +703,21 @@ fn late_audio_plays_at_the_floor_and_reports_its_offset() {
     const MS: u64 = 1_000_000;
     let now = 1_000_000 * MS;
     // the mix arrives 85 ms after its timestamp, the picture showed 16 ms after it
-    let p = m::plan_block(now - 85 * MS, 16 * MS, now, 60 * MS, 60 * MS, 42 * MS, 21 * MS);
+    let p = m::plan_block(
+        now - 85 * MS,
+        16 * MS,
+        now,
+        60 * MS,
+        60 * MS,
+        42 * MS,
+        21 * MS,
+    );
     assert_eq!((p.silence_ns, p.drop_ns), (0, 0));
-    assert_eq!(p.offset_ns, (85 + 60 - 16) as i64 * MS as i64, "issue 1424: audio behind the picture");
+    assert_eq!(
+        p.offset_ns,
+        (85 + 60 - 16) as i64 * MS as i64,
+        "issue 1424: audio behind the picture"
+    );
     // early audio is held for the picture
     let p = m::plan_block(now, 150 * MS, now, 60 * MS, 60 * MS, 42 * MS, 21 * MS);
     assert_eq!(p.silence_ns, 90 * MS);

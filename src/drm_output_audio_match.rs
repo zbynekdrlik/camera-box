@@ -113,7 +113,8 @@ pub fn pick_pcm(want: &MonitorId, pcms: &[AudioPcm]) -> (i32, Option<usize>) {
     if !want.valid {
         return (NO_EDID, None);
     }
-    let (mut present, mut hits, mut hit, mut named, mut named_hit) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let (mut present, mut hits, mut hit, mut named, mut named_hit) =
+        (0usize, 0usize, 0usize, 0usize, 0usize);
     for (i, p) in pcms.iter().enumerate() {
         if !p.id.valid {
             continue;
@@ -255,11 +256,27 @@ mod tests {
 
     #[test]
     fn name_breaks_a_vendor_tie_but_never_matches_alone() {
-        let want = MonitorId { valid: true, vendor: [1, 2, 3, 4], name: "A".into() };
-        let a = AudioPcm { card: 0, device: 3, id: eld_monitor_id(&eld([1, 2, 3, 4], "A")) };
-        let b = AudioPcm { card: 0, device: 7, id: eld_monitor_id(&eld([1, 2, 3, 4], "B")) };
+        let want = MonitorId {
+            valid: true,
+            vendor: [1, 2, 3, 4],
+            name: "A".into(),
+        };
+        let a = AudioPcm {
+            card: 0,
+            device: 3,
+            id: eld_monitor_id(&eld([1, 2, 3, 4], "A")),
+        };
+        let b = AudioPcm {
+            card: 0,
+            device: 7,
+            id: eld_monitor_id(&eld([1, 2, 3, 4], "B")),
+        };
         assert_eq!(pick_pcm(&want, &[a.clone(), b]), (MATCH, Some(0)));
-        let other = AudioPcm { card: 0, device: 8, id: eld_monitor_id(&eld([9, 9, 9, 9], "A")) };
+        let other = AudioPcm {
+            card: 0,
+            device: 8,
+            id: eld_monitor_id(&eld([9, 9, 9, 9], "A")),
+        };
         assert_eq!(pick_pcm(&want, &[other]), (NO_MATCH, None));
         assert_eq!(pick_pcm(&want, &[a.clone(), a]), (AMBIGUOUS, None));
     }

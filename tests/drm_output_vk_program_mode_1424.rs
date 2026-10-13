@@ -28,7 +28,8 @@ const BACKEND_C: &str = "vendor/obs-studio/libobs/obs-drm-output-backend.c";
 
 fn file(rel: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
-    fs::read_to_string(&p).unwrap_or_else(|e| panic!("issue 1424: cannot read {}: {e}", p.display()))
+    fs::read_to_string(&p)
+        .unwrap_or_else(|e| panic!("issue 1424: cannot read {}: {e}", p.display()))
 }
 
 fn squish(s: &str) -> String {
@@ -37,7 +38,9 @@ fn squish(s: &str) -> String {
 
 /// The body of the function whose definition starts with `sig` (up to the first `\n}\n`).
 fn body_of(src: &str, sig: &str) -> String {
-    let start = src.find(sig).unwrap_or_else(|| panic!("issue 1424: `{sig}` not found"));
+    let start = src
+        .find(sig)
+        .unwrap_or_else(|| panic!("issue 1424: `{sig}` not found"));
     let end = src[start..]
         .find("\n}\n")
         .map(|i| start + i + 3)
@@ -57,7 +60,12 @@ fn the_surface_picks_with_the_wanted_program_mode() {
         "issue 1424: the surface's pick passes the wanted program mode"
     );
     let h = squish(&file(VK_INTERNAL_H));
-    for f in ["volatile long want_w;", "volatile long want_h;", "volatile long want_mhz;", "volatile bool remode;"] {
+    for f in [
+        "volatile long want_w;",
+        "volatile long want_h;",
+        "volatile long want_mhz;",
+        "volatile bool remode;",
+    ] {
         assert!(h.contains(f), "issue 1424: the vk state carries `{f}`");
     }
     // the hand-over is backend-facing (obs-drm-output-backend.c includes only the vk header)
@@ -70,26 +78,52 @@ fn the_surface_picks_with_the_wanted_program_mode() {
 fn the_graphics_thread_wants_the_canvas_only_for_the_program_view() {
     let b = file(BACKEND_C);
     let hook = squish(&body_of(&b, "static bool vkd_on_frame(void)"));
-    assert!(hook.contains("vkd_want_program_mode();"), "issue 1424: every tick hands the wanted mode over");
+    assert!(
+        hook.contains("vkd_want_program_mode();"),
+        "issue 1424: every tick hands the wanted mode over"
+    );
     let want = squish(&body_of(&b, "static void vkd_want_program_mode(void)"));
     assert!(want.contains("obs_drm_output_get_view() == OBS_DRM_OUTPUT_VIEW_PROGRAM"));
-    assert!(want.contains("obs_get_video_info(&ovi)"), "issue 1424: the canvas from the live video info");
-    assert!(want.contains("ovi.base_width") && want.contains("ovi.base_height"), "issue 1424: the CANVAS size");
+    assert!(
+        want.contains("obs_get_video_info(&ovi)"),
+        "issue 1424: the canvas from the live video info"
+    );
+    assert!(
+        want.contains("ovi.base_width") && want.contains("ovi.base_height"),
+        "issue 1424: the CANVAS size"
+    );
     assert!(want.contains("drm_output_vk_want_mode("));
 }
 
 #[test]
 fn the_present_thread_remodes_through_the_surface_rebuild_never_a_size_change() {
     let v = file(VK_C);
-    let loop_ = squish(&body_of(&v, "static void *drm_output_vk_present_thread(void *arg)"));
-    let remode = loop_.find("drm_output_vk_remode_if_needed()").expect("issue 1424: the loop re-modes");
+    let loop_ = squish(&body_of(
+        &v,
+        "static void *drm_output_vk_present_thread(void *arg)",
+    ));
+    let remode = loop_
+        .find("drm_output_vk_remode_if_needed()")
+        .expect("issue 1424: the loop re-modes");
     let acquire = loop_.find("vkAcquireNextImageKHR").expect("acquire");
-    assert!(remode < acquire, "issue 1424: a re-mode runs at the top of a vblank, before the acquire");
+    assert!(
+        remode < acquire,
+        "issue 1424: a re-mode runs at the top of a vblank, before the acquire"
+    );
     let s = file(VK_SETUP_C);
     let r = squish(&body_of(&s, "bool drm_output_vk_remode_if_needed(void)"));
-    assert!(r.contains("drm_output_vk_rebuild_presentation(true)"), "issue 1424: the existing surface rebuild");
-    assert!(r.contains("g_drm_vk.mode_w") && r.contains("g_drm_vk.mode_h"), "issue 1424: the size is checked");
-    assert!(r.contains("g_drm_vk.refresh_mhz"), "issue 1424: an unchanged pick rebuilds nothing");
+    assert!(
+        r.contains("drm_output_vk_rebuild_presentation(true)"),
+        "issue 1424: the existing surface rebuild"
+    );
+    assert!(
+        r.contains("g_drm_vk.mode_w") && r.contains("g_drm_vk.mode_h"),
+        "issue 1424: the size is checked"
+    );
+    assert!(
+        r.contains("g_drm_vk.refresh_mhz"),
+        "issue 1424: an unchanged pick rebuilds nothing"
+    );
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -103,24 +137,76 @@ const HD30: (u32, u32, u32) = (1920, 1080, 30000);
 const NONE: (u32, u32, u32) = (0, 0, 0);
 
 fn vectors() -> Vec<ModeVector> {
-    let snv = vec![(1920, 1080, 60000), (1920, 1080, 50000), (1920, 1080, 30000), (1920, 1080, 25000)];
+    let snv = vec![
+        (1920, 1080, 60000),
+        (1920, 1080, 50000),
+        (1920, 1080, 30000),
+        (1920, 1080, 25000),
+    ];
     vec![
         // the owner's case: 60/50/30/25 offered, the Program canvas 1080p30 -> 30 (never 25, never 60)
         (snv.clone(), (1920, 1080), HD30, 2),
         // the Multiview view keeps today's rule: native size, closest to 60
         (snv.clone(), (1920, 1080), NONE, 0),
         // a 29.97 canvas takes 29.97, a 30 canvas takes 30.000 when both are offered
-        (vec![(1920, 1080, 29970), (1920, 1080, 30000), (1920, 1080, 60000)], (1920, 1080), HD30, 1),
-        (vec![(1920, 1080, 30000), (1920, 1080, 29970)], (1920, 1080), (1920, 1080, 29970), 1),
+        (
+            vec![
+                (1920, 1080, 29970),
+                (1920, 1080, 30000),
+                (1920, 1080, 60000),
+            ],
+            (1920, 1080),
+            HD30,
+            1,
+        ),
+        (
+            vec![(1920, 1080, 30000), (1920, 1080, 29970)],
+            (1920, 1080),
+            (1920, 1080, 29970),
+            1,
+        ),
         // only 29.97 offered: accepted for a 30 canvas
-        (vec![(1920, 1080, 60000), (1920, 1080, 29970)], (1920, 1080), HD30, 1),
+        (
+            vec![(1920, 1080, 60000), (1920, 1080, 29970)],
+            (1920, 1080),
+            HD30,
+            1,
+        ),
         // no canvas-size mode at the canvas rate: today's rule
-        (vec![(1920, 1080, 60000), (1920, 1080, 25000), (3840, 2160, 30000)], (1920, 1080), HD30, 0),
-        (vec![(1920, 1080, 60000), (1920, 1080, 29900)], (1920, 1080), HD30, 0),
+        (
+            vec![
+                (1920, 1080, 60000),
+                (1920, 1080, 25000),
+                (3840, 2160, 30000),
+            ],
+            (1920, 1080),
+            HD30,
+            0,
+        ),
+        (
+            vec![(1920, 1080, 60000), (1920, 1080, 29900)],
+            (1920, 1080),
+            HD30,
+            0,
+        ),
         // a 30 Hz mode at another size never wins over the canvas size rule's fallback
-        (vec![(3840, 2160, 60000), (1920, 1080, 60000), (1280, 720, 30000)], (3840, 2160), HD30, 0),
+        (
+            vec![(3840, 2160, 60000), (1920, 1080, 60000), (1280, 720, 30000)],
+            (3840, 2160),
+            HD30,
+            0,
+        ),
         // the canvas size differs from native but is offered at the rate: the canvas mode
-        (vec![(3840, 2160, 60000), (1920, 1080, 60000), (1920, 1080, 30000)], (3840, 2160), HD30, 2),
+        (
+            vec![
+                (3840, 2160, 60000),
+                (1920, 1080, 60000),
+                (1920, 1080, 30000),
+            ],
+            (3840, 2160),
+            HD30,
+            2,
+        ),
         // a half-wanted mode (no rate) is no preference
         (snv.clone(), (1920, 1080), (1920, 1080, 0), 0),
         // the Blackmagic HDMI-1 EDID base block (13.10.2026) lists 1920x1080 at 60 Hz (148.5 MHz DTD)
@@ -164,12 +250,22 @@ fn pick_mode_prefers_the_program_canvas_at_its_rate() {
     fs::write(&src, &c).expect("write harness");
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let out = Command::new(&cc)
-        .args(["-std=gnu99", "-Wall", "-Wextra", "-Wformat=2", "-Wconversion", "-Werror", "-O1"])
+        .args([
+            "-std=gnu99",
+            "-Wall",
+            "-Wextra",
+            "-Wformat=2",
+            "-Wconversion",
+            "-Werror",
+            "-O1",
+        ])
         .arg(&src)
         .arg("-o")
         .arg(&bin)
         .output()
-        .unwrap_or_else(|e| panic!("issue 1424: cannot run `{cc}` ({e}); this gate must FAIL, never skip"));
+        .unwrap_or_else(|e| {
+            panic!("issue 1424: cannot run `{cc}` ({e}); this gate must FAIL, never skip")
+        });
     assert!(
         out.status.success(),
         "issue 1424: the lifted picker does not compile:\n{}\n---\n{c}",
@@ -186,7 +282,13 @@ fn pick_mode_prefers_the_program_canvas_at_its_rate() {
         .iter()
         .zip(&got)
         .filter(|((_, _, _, want), g)| *g != want)
-        .map(|((m, n, w, want), g)| format!("  modes={m:?} native={n:?} want={w:?} -> C {g}, expected {want}"))
+        .map(|((m, n, w, want), g)| {
+            format!("  modes={m:?} native={n:?} want={w:?} -> C {g}, expected {want}")
+        })
         .collect();
-    assert!(diffs.is_empty(), "issue 1424: drm_output_vk_pick_mode DIVERGED:\n{}", diffs.join("\n"));
+    assert!(
+        diffs.is_empty(),
+        "issue 1424: drm_output_vk_pick_mode DIVERGED:\n{}",
+        diffs.join("\n")
+    );
 }
