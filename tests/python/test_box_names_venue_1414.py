@@ -300,3 +300,75 @@ def test_no_strih_lx_literal_outside_the_alias_and_history_sites():
             if OLD.search(line) and "1414" not in line:
                 bad.append(f"{path}:{n}: {line.strip()[:140]}")
     assert bad == [], f"{len(bad)} strih-lx literal(s) left:\n" + "\n".join(bad[:80])
+
+
+# --- the live rename of the SNV strih's own OBS collection: obs_collection_port.py --preset strih-snv
+
+def _port_mod():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("obs_collection_port_1414", SCRIPTS / "obs_collection_port.py")
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def _pre_rename_collection():
+    """The pre-1414 strih collection shape: the self-loop inputs read STRIH-LX (...)."""
+    def src(name, sid, settings=None, filters=None):
+        return {"id": sid, "versioned_id": sid, "name": name, "uuid": "u-" + name,
+                "settings": settings or {}, "filters": filters or [], "volume": 1.0, "sync": 0,
+                "mixers": 255}
+
+    def scene(name, items):
+        return src(name, "scene", {"items": [{"name": n, "source_uuid": "u-" + n, "visible": True,
+                                              "id": i + 1} for i, n in enumerate(items)],
+                                   "id_counter": len(items)})
+
+    srcs = [
+        scene("Cam 2", ["NDI cam2"]),
+        scene("2ME PVW", ["NDI 2ME PVW"]),
+        scene("MV", ["NDI 2ME PGM (mv)"]),
+        scene("CG", ["cg"]),
+        scene("Interkom", ["interkom web", "ASIO zvuk"]),
+        src("NDI cam2", "ndi_source", {"ndi_source_name": "CAM2 (usb)", "genlock_fifo": True}),
+        src("NDI 2ME PVW", "ndi_source", {"ndi_source_name": "STRIH-LX (2ME PVW)", "ndi_sync": 1}),
+        src("NDI 2ME PGM (mv)", "ndi_source", {"ndi_source_name": "STRIH-LX (2ME PGM)", "ndi_sync": 1}),
+        src("cg", "ndi_source", {"ndi_source_name": "RESOLUME-SNV (SP-program)"}),
+        src("ASIO zvuk", "pulse_input_capture", {"device_id": "strih-program-source"}),
+        src("interkom web", "browser_source", {"url": "https://vdo.ninja/?room=snv"},
+            filters=[{"id": "shader_filter", "versioned_id": "shader_filter", "name": "glow",
+                      "settings": {}},
+                     {"id": "ndi_filter", "versioned_id": "ndi_filter", "name": "NDI out",
+                      "settings": {"ndi_filter_ndiname": "interkom"}}]),
+    ]
+    return {"name": "strih-lx", "current_scene": "Cam 2", "current_program_scene": "2ME PVW",  # issue 1414
+            "scene_order": [{"name": s["name"]} for s in srcs if s["id"] == "scene"],
+            "sources": srcs, "groups": [], "modules": {}, "transitions": [],
+            "current_transition": "Fade"}
+
+
+def test_the_strih_snv_preset_renames_the_self_loop_senders_only():
+    m = _port_mod()
+    coll = _pre_rename_collection()
+    out, rep = m.port(coll, m.preset_options("strih-snv"))
+    by = {s["name"]: s for s in out["sources"]}
+    assert by["NDI 2ME PVW"]["settings"]["ndi_source_name"] == "STRIH-SNV (2ME PVW)"
+    assert by["NDI 2ME PGM (mv)"]["settings"]["ndi_source_name"] == "STRIH-SNV (2ME PGM)"
+    assert by["cg"]["settings"]["ndi_source_name"] == "RESOLUME-SNV (SP-program)"
+    assert by["NDI cam2"]["settings"] == coll["sources"][5]["settings"]
+    assert out["name"] == "strih-snv"
+    # every scene and every input kept, the operator's filters kept (a rename drops nothing)
+    assert [e["name"] for e in out["scene_order"]] == [e["name"] for e in coll["scene_order"]]
+    assert sorted(by) == sorted(s["name"] for s in coll["sources"])
+    assert [f["name"] for f in by["interkom web"]["filters"]] == ["glow", "NDI out"]
+    assert not [ln for ln in rep if ln.startswith(("DROP", "WARN"))], rep
+    assert sum(1 for ln in rep if ln.startswith("SENDER")) == 2
+
+
+def test_the_strih_snv_preset_follows_the_fact_file():
+    m = _port_mod()
+    f = _facts((BOXES / "strih-snv.env").read_text())
+    o = m.preset_options("strih-snv")
+    assert list(o["sender_prefixes"].values()) == [f["STRIH_NDI_PREFIX"]]
+    assert o["name"] == f["STRIH_OBS_COLLECTION"]
+    assert o["program_audio_input"] is None
