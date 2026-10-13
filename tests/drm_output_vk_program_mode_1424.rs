@@ -23,6 +23,7 @@ use std::process::Command;
 const VK_SETUP_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk-setup.c";
 const VK_C: &str = "vendor/obs-studio/libobs/obs-drm-output-vk.c";
 const VK_INTERNAL_H: &str = "vendor/obs-studio/libobs/obs-drm-output-vk-internal.h";
+const VK_H: &str = "vendor/obs-studio/libobs/obs-drm-output-vk.h";
 const BACKEND_C: &str = "vendor/obs-studio/libobs/obs-drm-output-backend.c";
 
 fn file(rel: &str) -> String {
@@ -59,7 +60,9 @@ fn the_surface_picks_with_the_wanted_program_mode() {
     for f in ["volatile long want_w;", "volatile long want_h;", "volatile long want_mhz;", "volatile bool remode;"] {
         assert!(h.contains(f), "issue 1424: the vk state carries `{f}`");
     }
-    assert!(h.contains("void drm_output_vk_want_mode(uint32_t w, uint32_t h, uint32_t mhz);"));
+    // the hand-over is backend-facing (obs-drm-output-backend.c includes only the vk header)
+    let vk_h = squish(&file(VK_H));
+    assert!(vk_h.contains("void drm_output_vk_want_mode(uint32_t w, uint32_t h, uint32_t mhz);"));
     assert!(h.contains("bool drm_output_vk_remode_if_needed(void);"));
 }
 
