@@ -94,6 +94,10 @@ fi
 #                obs-fleet rows), and their homegate is `reach`: an unreachable PP box is skipped,
 #                never a page or a failed gate. Owner (11.10.2026): "a tiez tam nie je dantesync tam
 #                nie je updatnuty cize potrebujes zaradit tento pc do updatovania".
+# The /24 nets dev1 scans for a dantesync node OUTSIDE this table (scripts/dantesync_fleet_scan.py,
+# dantesync-version-gate.sh --fleet; owner 13.10.2026: the IEM PC sat outside it unseen). dev1's view:
+# the SNV rig LAN + the audio VLAN, the PP LAN as 10.76.x through companion-pp.
+DANTESYNC_FLEET_SCAN_NETS="${DANTESYNC_FLEET_SCAN_NETS:-10.77.9 10.77.8 10.77.7 10.76.9 10.76.8}"
 DANTESYNC_FLEET="${DANTESYNC_FLEET:-dev1|local|linux|video|local|-|
 strih-snv|obs:strih-snv|linux|ntp-master|obsfleet|-|
 stream-snv|obs:stream-snv|windows|video|obsfleet|-|

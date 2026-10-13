@@ -588,6 +588,36 @@ main() {
     33) echo "!! DANTESYNC-PIN-LAG ALARM: could not resolve the newest dantesync gh release to check pin lag (report-only)." >&2 ;;
   esac
 
+  # issue 1372 (owner 13.10.2026: the SNV IEM PC ran dantesync outside the fleet table, unseen) --
+  # REPORT-ONLY: every :8898 node of the declared rig nets whose address is not a fleet target.
+  if [ "$fleet" = 1 ]; then
+    echo
+    echo "-- dantesync nodes outside the fleet table (report-only, ALARM never blocks) --"
+    local -a known=() scan_cmd=()
+    local kpair khost kip uline uip uname
+    for kpair in "${linux_pairs[@]}" "${win_pairs[@]}"; do
+      khost="${kpair#*=}"
+      khost="${khost#*@}"
+      known+=("$khost")
+      for kip in $(getent ahostsv4 "$khost" 2>/dev/null | awk '{print $1}' | sort -u); do known+=("$kip"); done
+    done
+    for kip in $(hostname -I 2>/dev/null); do known+=("$kip"); done
+    if [ -n "${DANTESYNC_FLEET_SCAN_CMD:-}" ]; then
+      scan_cmd=("$DANTESYNC_FLEET_SCAN_CMD")
+    else
+      scan_cmd=(python3 "${HERE}/dantesync_fleet_scan.py")
+    fi
+    local uout found=0
+    uout="$(timeout 180 "${scan_cmd[@]}" --nets "$DANTESYNC_FLEET_SCAN_NETS" --known "${known[@]}" 2>/dev/null || true)"
+    while read -r uline uip uname; do
+      [ "$uline" = UNKNOWN ] || continue
+      found=1
+      printf '  %-15s %-28s OUTSIDE-FLEET  (dantesync answers :8898; add a row to scripts/lib/dantesync-fleet.sh)\n' "$uip" "$uname"
+      echo "!! DANTESYNC-FLEET ALARM: ${uip} (${uname}) runs dantesync but is NOT in the fleet table -- no roll, gate or watchdog reaches it (report-only, does NOT block this run)." >&2
+    done <<<"$uout"
+    [ "$found" = 1 ] || echo "  none           OK  (every dantesync node on ${DANTESYNC_FLEET_SCAN_NETS} is a fleet node)"
+  fi
+
   exit "$rc"
 }
 
