@@ -84,6 +84,32 @@ def basic_ini_text(existing_text, encoder, profile_name):
     return buf.getvalue()
 
 
+# issue 1419 (owner 13.10.2026: "cely obs setup ... aky mame v strih snv"): the strih role's profile
+# keys beyond BASIC_INI, read from strih-snv's hand-made profile (13.10.2026) -- its venue-neutral
+# record / output / video / audio keys. The record keys equal scripts/lib/strih-provision.sh
+# strih_lx_profile_facts (pinned by tests/python/test_strih_obs_parity_1419.py). Never copied: window
+# geometry, the Panels cookie id, the stream service + its key (the strih box does not stream).
+STRIH_PROFILE = {
+    "Output": {"Reconnect": "true", "RetryDelay": "2", "MaxRetries": "25",
+               "FilenameFormatting": "%CCYY-%MM-%DD %hh-%mm-%ss"},
+    "AdvOut": {"RecType": "Standard", "RecEncoder": "obs_nvenc_hevc_tex", "RecFilePath": "/srv/_REC",
+               "RecFormat2": "mkv", "RecSplitFileType": "Time", "RecSplitFileTime": "15", "RecTracks": "1"},
+    "Video": {"FPSInt": "30", "FPSNum": "30", "FPSDen": "1", "ScaleType": "bicubic"},
+    "Audio": {"MonitoringDeviceId": "default", "MonitoringDeviceName": "Default"},
+}
+# strih-snv's recordEncoder.json (the NVENC HEVC record encoder's settings), read 13.10.2026.
+STRIH_RECORD_ENCODER = {"rate_control": "CBR", "bitrate": 20000, "preset": "p5"}
+
+
+def _strih_sections(profile_name):
+    """BASIC_INI + STRIH_PROFILE merged per section, plus [General] Name."""
+    out = {sec: dict(kv) for sec, kv in BASIC_INI.items()}
+    for sec, kv in STRIH_PROFILE.items():
+        out.setdefault(sec, {}).update(kv)
+    out["General"] = {"Name": profile_name}
+    return out
+
+
 def strih_basic_ini_text(existing_text, profile_name):
     """The strih ROLE's profile keys (issue 1361, live strih-pp 13.10.2026: OBS ran the default profile
     `Untitled` with output 1280x720, so the NDI program was 720p): BASIC_INI's Output mode, Video and
@@ -96,9 +122,7 @@ def strih_basic_ini_text(existing_text, profile_name):
             cp.read_string(existing_text)
         except configparser.Error as e:
             raise ValueError("basic.ini unreadable (%s) -- left untouched" % e)
-    sections = dict(BASIC_INI)
-    sections["General"] = {"Name": profile_name}
-    for sec, kv in sections.items():
+    for sec, kv in _strih_sections(profile_name).items():
         if not cp.has_section(sec):
             cp.add_section(sec)
         for k, v in kv.items():
@@ -113,9 +137,46 @@ def apply_strih(profile_dir, profile_name):
     os.makedirs(profile_dir, exist_ok=True)
     path = os.path.join(profile_dir, "basic.ini")
     _write(path, strih_basic_ini_text(_read(path), profile_name), 0o644)
+    _write(os.path.join(profile_dir, "recordEncoder.json"), json.dumps(STRIH_RECORD_ENCODER, indent=4) + "\n",
+           0o644)
     v = BASIC_INI["Video"]
+    adv = STRIH_PROFILE["AdvOut"]
     return ["basic.ini: %s, Advanced output, %sx%s base + output @ %s fps %s"
-            % (profile_name, v["OutputCX"], v["OutputCY"], v["FPSCommon"], v["ColorFormat"])]
+            % (profile_name, v["OutputCX"], v["OutputCY"], v["FPSCommon"], v["ColorFormat"]),
+            "record: %s -> %s, %s split every %s min; recordEncoder.json CBR %d kb/s preset %s"
+            % (adv["RecEncoder"], adv["RecFilePath"], adv["RecFormat2"], adv["RecSplitFileTime"],
+               STRIH_RECORD_ENCODER["bitrate"], STRIH_RECORD_ENCODER["preset"])]
+
+
+def grade_strih(profile_dir):
+    """The strih profile's drift from every key apply_strih writes (General Name aside) and from
+    recordEncoder.json, one text per key; empty = no drift. Read-only."""
+    path = os.path.join(profile_dir, "basic.ini")
+    if not os.path.isfile(path):
+        return ["profile %s missing (OBS runs another profile)" % profile_dir]
+    cp = configparser.RawConfigParser(strict=False)
+    cp.optionxform = str
+    try:
+        cp.read(path)
+    except configparser.Error as e:
+        return ["basic.ini unreadable (%s)" % e]
+    out = []
+    for sec, kv in _strih_sections("").items():
+        if sec == "General":
+            continue
+        for k, want in kv.items():
+            got = cp.get(sec, k, fallback=None)
+            if got != want:
+                out.append("[%s] %s=%s (want %s)" % (sec, k, got, want))
+    try:
+        with open(os.path.join(profile_dir, "recordEncoder.json")) as fh:
+            enc = json.load(fh)
+    except (OSError, ValueError) as e:
+        return out + ["recordEncoder.json unreadable (%s)" % e]
+    for k, want in STRIH_RECORD_ENCODER.items():
+        if enc.get(k) != want:
+            out.append("recordEncoder.json %s=%s (want %s)" % (k, enc.get(k), want))
+    return out
 
 
 def grade_video(profile_dir):
@@ -224,6 +285,8 @@ def main(argv=None):
                     help="read-only: print the profile's drift (nothing printed = no drift)")
     ap.add_argument("--grade-video", metavar="PROFILE_DIR", default=None,
                     help="read-only: print the profile's [Video] drift (nothing printed = no drift)")
+    ap.add_argument("--grade-strih", metavar="PROFILE_DIR", default=None,
+                    help="read-only: the strih profile's drift, every key --strih writes (issue 1419)")
     ap.add_argument("--strih", action="store_true",
                     help="the strih role: write only the Output mode, Video and Audio keys (issue 1361)")
     ap.add_argument("--profile-dir")
@@ -233,6 +296,11 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.grade is not None:
         drift = grade_drift(a.grade)
+        if drift:
+            print(", ".join(drift))
+        return
+    if a.grade_strih is not None:
+        drift = grade_strih(a.grade_strih)
         if drift:
             print(", ".join(drift))
         return

@@ -323,8 +323,8 @@ obs_box_stream_dev_grade() {
 }
 
 # obs_box_strih_profile_provision OBS_CFG DESKTOP_USER PROFILE -> setup-strih step 3 on the strih role
-# (issue 1361): the profile's Output mode, Video (1920x1080 base + output, 30 fps, NV12/709/Partial)
-# and Audio keys, written only while OBS is stopped (OBS rewrites its profile on exit). The launcher
+# (issues 1361 + 1419): the profile's Output, Video (1920x1080 base + output, 30 fps, NV12/709/Partial),
+# Audio and record keys + recordEncoder.json (strih-snv's setup), written only while OBS is stopped (OBS rewrites its profile on exit). The launcher
 # passes --profile once the directory exists; live strih-pp ran the default `Untitled` (720p output).
 obs_box_strih_profile_provision() {
   local cfg="${1:?obs config dir required}" user="${2:?desktop user required}" profile="${3:?profile required}"
@@ -339,15 +339,17 @@ obs_box_strih_profile_provision() {
   return 0
 }
 
-# obs_box_profile_video_grade PROFILE_DIR -> verify-strih item 10's strih row (issue 1361): the box's
-# own profile exists with 1920x1080 base + output at 30 fps. Uses the caller's ok/bad; always rc 0.
-obs_box_profile_video_grade() {
+# obs_box_strih_profile_grade PROFILE_DIR -> verify-strih item 10's strih row (issues 1361 + 1419): the
+# box's own profile exists with every key setup step 3 writes -- 1920x1080 base + output @ 30 fps (the
+# NDI program follows the output size) and strih-snv's record / output keys + recordEncoder.json.
+# Uses the caller's ok/bad; always rc 0.
+obs_box_strih_profile_grade() {
   local dir="${1:?profile dir required}" drift
-  drift="$(python3 "$(dirname "${BASH_SOURCE[0]}")/../obs_box_stream_profile.py" --grade-video "$dir" 2>&1 || true)"
+  drift="$(python3 "$(dirname "${BASH_SOURCE[0]}")/../obs_box_stream_profile.py" --grade-strih "$dir" 2>&1 || true)"
   if [ -z "$drift" ]; then
-    ok "(profile-video) ${dir}: 1920x1080 base + output @ 30 fps"
+    ok "(strih-profile) ${dir}: 1920x1080 @ 30 fps, NVENC HEVC record to /srv/_REC (15-min mkv), the strih-snv output keys"
   else
-    bad "(profile-video) ${dir}: ${drift} -- re-run setup-strih.sh step 3 with OBS stopped (the NDI program follows the output size)"
+    bad "(strih-profile) ${dir}: ${drift} -- re-run setup-strih.sh step 3 with OBS stopped (issue 1419)"
   fi
   return 0
 }

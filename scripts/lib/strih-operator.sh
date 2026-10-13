@@ -96,7 +96,10 @@ if ! declare -F strih_kiosk_x_run >/dev/null; then
   . "$(dirname "${BASH_SOURCE[0]}")/strih-session-apps.sh"
 fi
 
-STRIH_OPERATOR_INI_KEYS=(SaveProjectors=true ProjectorAlwaysOnTop=false MultiviewMouseSwitch=true)
+# issue 1419: + strih-snv's four [BasicWindow] keys (owner 13.10.2026, the full strih-snv OBS setup).
+STRIH_OPERATOR_INI_KEYS=(SaveProjectors=true ProjectorAlwaysOnTop=false MultiviewMouseSwitch=true
+  CloseExistingProjectors=true WarnBeforeStartingStream=false WarnBeforeStoppingStream=false
+  WarnBeforeStoppingRecord=false)
 STRIH_OPERATOR_QT_SVG_PACKAGE=qt6-svg-plugins
 # The ACPI / system "keyboards" X lists on every notebook (and a keyboard's media-key half): never the
 # operator's keyboard. Matched against the lower-cased device name.
@@ -260,11 +263,30 @@ strih_operator_nic_isolate() {
   return 0
 }
 
-# strih_operator_install USER_INI DESKTOP_USER -> setup-strih step 16g: the user.ini seed (WARN-only)
-# and the rig-subnet isolation (rc 1 on an nmcli failure).
+# strih_operator_projector_seed COLLECTION DESKTOP_USER -> issue 1419: the fullscreen Multiview projector
+# seeded into an EMPTY saved_projectors list of the box's collection (scripts/strih_projector_seed.py,
+# operator-wins), only while OBS is stopped. WARN-only: a missing collection is named, never fatal.
+strih_operator_projector_seed() {
+  local coll="${1:?collection path required}" user="${2:?desktop user required}"
+  if strih_operator_obs_running; then
+    echo "  WARN: OBS is running -- it rewrites ${coll} on exit, so the Multiview projector was NOT seeded; stop strih-obs.service and re-run setup-strih.sh (issue 1419)"
+    return 0
+  fi
+  if python3 "$(dirname "${BASH_SOURCE[0]}")/../strih_projector_seed.py" --collection "$coll"; then
+    chown -h "$user":"$user" "$coll" 2>/dev/null || true
+  else
+    echo "  WARN: the Multiview projector could not be seeded into ${coll} (above) -- port the collection first (issue 1419)"
+  fi
+  return 0
+}
+
+# strih_operator_install USER_INI DESKTOP_USER [COLLECTION] -> setup-strih step 16g: the user.ini seed
+# (WARN-only), the Multiview projector seed when COLLECTION is given (WARN-only, issue 1419) and the
+# rig-subnet isolation (rc 1 on an nmcli failure).
 strih_operator_install() {
-  local ini="${1:?user.ini path required}" user="${2:?desktop user required}"
+  local ini="${1:?user.ini path required}" user="${2:?desktop user required}" coll="${3:-}"
   strih_operator_user_ini_seed "$ini" "$user"
+  if [ -n "$coll" ]; then strih_operator_projector_seed "$coll" "$user"; fi
   strih_operator_nic_isolate
 }
 
@@ -365,6 +387,36 @@ strih_operator_input_verdict() {
   else
     printf 'OK|(operator-input) X lists keyboard: %s; pointer: %s\n' "$kb" "$ptr"
   fi
+}
+
+# strih_operator_ini_verdict USER_INI -> ONE row (operator-ini, issue 1419): every STRIH_OPERATOR_INI_KEYS
+# key=value present in [BasicWindow] (booleans compared case-insensitively, the way OBS writes them).
+strih_operator_ini_verdict() {
+  local ini="${1:?user.ini path required}" v
+  v="$(python3 - "$ini" "${STRIH_OPERATOR_INI_KEYS[@]}" <<'PY' 2>/dev/null || true
+import configparser, sys
+cp = configparser.RawConfigParser(strict=False)
+cp.optionxform = str
+try:
+    if not cp.read(sys.argv[1]):
+        print("FAIL|the file is missing")
+        sys.exit(0)
+except Exception:
+    print("FAIL|the file is unreadable")
+    sys.exit(0)
+bad = []
+for kv in sys.argv[2:]:
+    k, want = kv.split("=", 1)
+    got = cp.get("BasicWindow", k, fallback=None)
+    if got is None or got.lower() != want.lower():
+        bad.append("%s=%s (want %s)" % (k, got, want))
+print(("FAIL|" + ", ".join(bad)) if bad else "OK|%d keys seeded" % (len(sys.argv) - 2))
+PY
+)"
+  case "${v%%|*}" in
+    OK) printf 'OK|(operator-ini) [BasicWindow] %s in %s\n' "${v#*|}" "$ini" ;;
+    *) printf 'FAIL|(operator-ini) [BasicWindow] %s in %s -- stop OBS and re-run setup-strih.sh step 16g (issue 1419)\n' "${v#*|}" "$ini" ;;
+  esac
 }
 
 # strih_operator_bt_verdict HCICONFIG_TEXT [ADAPTER] -> ONE row: hci0 UP with a non-zero BD address.
@@ -761,6 +813,7 @@ strih_operator_grade_rows() {
     printf 'NOTE|(stream-deck) not graded: %s\n' "$why"
   fi
   strih_operator_mvclick_verdict "${home}/.config/obs-studio/user.ini"
+  strih_operator_ini_verdict "${home}/.config/obs-studio/user.ini"
   if strih_operator_obs_running; then obs_up=1; fi
   strih_operator_studio_verdict "$(strih_operator_studio_read)" "$obs_up"
   strih_operator_ws_seed_verdict "${home}/.config/obs-studio/plugin_config/obs-websocket/config.json"
@@ -778,6 +831,7 @@ strih_operator_grade_rows() {
   strih_operator_drm_hang_verdict "$kl" "$kl_rc"
   if [ "$obs_up" = 0 ]; then
     printf 'NOTE|(operator-panel) not graded: OBS is not running\n'
+    printf 'NOTE|(mv-projector) not graded: OBS is not running\n'
     return 0
   fi
   gap="${STRIH_OPERATOR_GRAB_GAP_S:-4}"
@@ -785,10 +839,23 @@ strih_operator_grade_rows() {
   sleep "$gap"
   d2="$(strih_operator_grab "$user" "$home")"
   strih_operator_panel_verdict "$d1" "$d2" "$gap"
+  strih_operator_projector_verdict "$(_strih_operator_on_x "$user" "$home" 10 \
+    "${STRIH_OPERATOR_WMCTRL:-wmctrl}" -lx 2>/dev/null || true)"
   return 0
 }
 
-strih_operator_row_count() { printf '11'; }
+# strih_operator_projector_verdict WMCTRL_LX_TEXT -> ONE row (mv-projector, issue 1419): the operator's
+# Multiview projector window is open on :0 while OBS runs (strih-snv's saved fullscreen Multiview).
+strih_operator_projector_verdict() {
+  local text="${1-}"
+  if grep -q 'Projector - Multiview' <<<"$text"; then
+    printf 'OK|(mv-projector) the Multiview projector window is open on :0\n'
+  else
+    printf 'FAIL|(mv-projector) no "Projector - Multiview" window on :0 -- the operator has no Multiview; stop OBS and re-run setup-strih.sh step 16g (it seeds the saved projector, issue 1419)\n'
+  fi
+}
+
+strih_operator_row_count() { printf '13'; }
 
 # strih_operator_grade_report REPO USER_HOME DESKTOP_USER -> print the rows through the CALLER's ok / note
 # / bad functions (verify-strih). rc 1 unless the grader printed every row.

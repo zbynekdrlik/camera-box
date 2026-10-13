@@ -962,7 +962,7 @@ else echo "  SKIP: ${WHY}"; fi
 
 # ---------------------------------------------------------------------------------------------
 step "16g" "Operator surface (issue 1418): Multiview click + projector keys in user.ini, the second NIC off the rig subnet"
-strih_operator_install "${OBS_CFG}/user.ini" "$DESKTOP_USER" || fail "issue 1418: the operator surface could not be provisioned (above)"
+strih_operator_install "${OBS_CFG}/user.ini" "$DESKTOP_USER" "${OBS_CFG}/basic/scenes/$(strih_lx_obs_collection).json" || fail "issue 1418: the operator surface could not be provisioned (above)"
 
 # ---------------------------------------------------------------------------------------------
 step 17 "Final verification (verify-strih.sh acceptance gate)"
