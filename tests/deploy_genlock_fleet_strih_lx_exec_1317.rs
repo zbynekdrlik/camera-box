@@ -925,7 +925,7 @@ fn windows_programs_follow_the_verified_strih_and_strih_is_logged_at_once_1317()
         .unwrap_or_else(|| panic!("a strih-snv fleet-log line:\n{log}"));
     assert!(strih_line.contains(SHA), "{log}");
     assert!(
-        log.lines().any(|l| l.contains("\tstream\t")),
+        log.lines().any(|l| l.contains("\tstream-snv\t")),
         "the rest of the fleet is logged too:\n{log}"
     );
 
@@ -1098,6 +1098,23 @@ fn strih_lx_refuses_a_box_that_is_not_strih_lx_1317() {
     );
     for c in ["--local-sweep", "rsync ", "strih-obs-stop.sh"] {
         assert!(!r.calls.contains(c), "`{c}` must not run:\n{}", r.calls);
+    }
+}
+
+/// issue 1414: the box still running its pre-rename hostname IS this box -- the deploy goes on with
+/// one warning, and setup-strih step 1 renames it from the fact file. Only a NAME the transition
+/// alias maps to the fact hostname is accepted; any other name still refuses (above).
+#[test]
+fn strih_snv_deploys_a_box_that_still_runs_its_pre_rename_hostname_1414() {
+    let r = run_exec(&[("STUB_HOSTNAME", "strih-lx")]);
+    assert_eq!(r.code, 0, "err={}", r.err);
+    assert!(
+        r.err.contains("WARNING") && r.err.contains("strih-lx") && r.err.contains("1414"),
+        "{}",
+        r.err
+    );
+    for c in ["rsync ", "strih-obs-stop.sh", "run-setup.sh"] {
+        assert!(r.calls.contains(c), "`{c}` must run:\n{}", r.calls);
     }
 }
 

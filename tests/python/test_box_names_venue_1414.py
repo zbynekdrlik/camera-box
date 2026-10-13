@@ -372,3 +372,95 @@ def test_the_strih_snv_preset_follows_the_fact_file():
     assert list(o["sender_prefixes"].values()) == [f["STRIH_NDI_PREFIX"]]
     assert o["name"] == f["STRIH_OBS_COLLECTION"]
     assert o["program_audio_input"] is None
+
+
+# --- review round 1: one alias table, every lookup, every CLI ---------------------------------------
+
+@pytest.mark.parametrize("old,new,host", [
+    ("strih-lx", "strih-snv", "10.77.9.202"),
+    ("stream", "stream-snv", "10.77.9.204"),
+    ("resolume", "resolume-snv", "resolume.lan"),
+])
+def test_every_fleet_fact_lookup_takes_an_old_name(old, new, host):
+    """The alias resolves inside the ONE row lookup, so every fact reader and every `--box` CLI
+    (dantesync-maintenance-gate, win-baseline-check, the role tokens `--box stream`) addresses the
+    renamed row -- never a per-CLI canonicalization that one tool forgets."""
+    r = _fleet(f'obs_fleet_host {old}; echo " rc=$?"; obs_fleet_class {old}; echo; '
+               f'obs_fleet_canonical_name {old}')
+    lines = r.stdout.split("\n")
+    assert lines[0] == f"{host} rc=0", r.stdout + r.stderr
+    assert lines[1] == _fleet(f"obs_fleet_class {new}").stdout
+    assert lines[2] == new
+    import obs_fleet_table
+    assert obs_fleet_table.fleet_host(old) == host
+    assert obs_fleet_table.fleet_class(old) == obs_fleet_table.fleet_class(new)
+
+
+def test_an_exact_row_beats_an_alias():
+    """A table override that still carries an old-named row (a test fixture, a box config) keeps
+    addressing THAT row: the alias is only a fallback when no row has the name."""
+    r = _bash(f'. "{LIB}/obs-fleet.sh"; obs_fleet_host stream; echo; obs_fleet_canonical_name stream',
+              env={"OBS_FLEET": "stream|1.2.3.4|windows-genlock|always"})
+    assert r.stdout.split("\n")[:2] == ["1.2.3.4", "stream"], r.stdout + r.stderr
+
+
+def test_the_canonical_name_case_folds_and_needs_the_target_row():
+    r = _fleet('for n in STRIH-SNV STREAM Resolume-SNV nosuchbox; do '
+               'printf "%s|" "$(obs_fleet_canonical_name "$n")"; done')
+    assert r.stdout == "strih-snv|stream-snv|resolume-snv|nosuchbox|"
+    # an alias whose renamed row is not in the table is no alias
+    r = _bash(f'. "{LIB}/obs-fleet.sh"; obs_fleet_canonical_name stream; echo " rc=$?"',
+              env={"OBS_FLEET": "imag|imag|linux-genlock|always"})
+    assert r.stdout.rstrip("\n") == "stream rc=0"
+
+
+def test_the_box_facts_loader_takes_its_alias_from_the_fleet_table():
+    """One declared alias table: the box-facts loader reuses the fleet one, so `--box strih-lx`
+    and `obs_fleet_canonical_name strih-lx` can never disagree."""
+    facts = (LIB / "strih-box-facts.sh").read_text()
+    assert "STRIH_BOX_ALIASES" not in facts
+    assert "_obs_fleet_alias_of" in facts
+
+
+def test_the_deploy_planner_and_retention_drivers_take_the_old_names():
+    r = _bash(f'. "{SCRIPTS}/deploy-genlock-fleet.sh"; fleet_normalize_boxes strih-lx,stream,resolume,imag')
+    assert r.stdout.strip() == "strih-snv,stream-snv,imag,resolume-snv", r.stdout + r.stderr
+
+
+def test_setup_and_verify_strih_carry_the_loaded_box_name_after_an_alias():
+    """After `--box strih-lx` the scripts work on strih-snv: the banner names its real fact file,
+    the nested verify run gets the new name (no second alias warning)."""
+    for script in ("setup-strih.sh", "verify-strih.sh"):
+        text = (SCRIPTS / script).read_text()
+        assert 'STRIH_FACT_BOX="$(strih_box_loaded_name)"' in text, script
+
+
+def test_setup_strih_removes_the_pre_rename_role_files():
+    text = (SCRIPTS / "setup-strih.sh").read_text()
+    assert "rm -f /opt/camera-box/strih-lx-seed.json" in text
+    assert 'rm -f "$GENLOCK_DIR/strih-lx-profile-facts.txt"' in text
+
+
+@pytest.mark.parametrize("box,role", [("stream-snv", "stream"), ("stream", "stream"),
+                                      ("resolume-snv", "resolume")])
+def test_the_launch_plan_hands_role_tokens_to_the_role_tools(box, role):
+    """latency_pins_verify.py and mark-imag-restart.sh take a ROLE (strih|stream|imag|resolume),
+    never a fleet name: the plan for `--box stream-snv` must print `--box stream`."""
+    r = subprocess.run(["bash", str(SCRIPTS / "launch-obs-genlock.sh"), "--box", box],
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert f"latency_pins_verify.py --box {role} " in r.stdout
+    assert f"mark-imag-restart.sh --box {role} " in r.stdout
+    assert "--box stream-snv " not in r.stdout and "--box resolume-snv " not in r.stdout
+
+
+def test_the_strih_pp_preset_still_renames_a_pre_rename_self_loop():
+    """A strih collection exported before the live rename still carries STRIH-LX self-loops; the
+    Poprad port renames them too (issue 1414)."""
+    m = _port_mod()
+    out, rep = m.port(_pre_rename_collection(), m.preset_options("strih-pp")
+                      | {"url_hosts": {"presenter.lan": "presenter.lan"}})
+    by = {s["name"]: s for s in out["sources"]}
+    assert by["NDI 2ME PVW"]["settings"]["ndi_source_name"] == "STRIH-PP (2ME PVW)"
+    assert by["NDI 2ME PGM (mv)"]["settings"]["ndi_source_name"] == "STRIH-PP (2ME PGM)"
+    assert not [ln for ln in rep if ln.startswith("WARN sender") and "STRIH-" in ln], rep
