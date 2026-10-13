@@ -67,6 +67,10 @@ def test_the_gate_names_a_node_outside_the_fleet_and_never_fails_on_it(tmp_path)
     assert "DANTESYNC-FLEET ALARM" in r.stderr and "10.77.9.231" in r.stderr
     assert r.returncode == clean.returncode, "report-only: the unknown node never changes the gate result"
     assert "--known" in args and "10.77.9.202" in args  # the fleet targets are passed as known
+    # every fleet row is known, also one the gate SKIPPED this run (a `reach` node away, live 13.10.2026:
+    # resolume-pp read OUTSIDE-FLEET while it was skipped as unreachable)
+    for host in ("resolume-pp.lan", "strih-pp.lan", "iem-snv.lan", "companion-snv.lan"):
+        assert host in args.split(), host
 
 
 def test_the_gate_reports_none_when_every_node_is_in_the_fleet(tmp_path):
